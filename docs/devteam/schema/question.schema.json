@@ -45,7 +45,7 @@
     },
     "options": {
       "type": "array",
-      "tickets": {
+      "items": {
         "type": "string"
       }
     },
@@ -61,7 +61,7 @@
     },
     "blocks": {
       "type": "array",
-      "tickets": {
+      "items": {
         "type": "string"
       },
       "description": "ticket ids that cannot proceed until answered"

@@ -643,7 +643,7 @@ function cmdValidate() {
     if (n.kind && !TICKET_KINDS.includes(n.kind)) err(id, `kind must be one of ${TICKET_KINDS.join(', ')}`);
     if (n.size && !['S', 'M'].includes(n.size)) err(id, 'size must be S or M (D1: split anything larger)');
     if (n.risk && !['normal', 'high'].includes(n.risk)) err(id, 'risk must be normal or high');
-    for (const s of n.serves ?? []) if (!STORY_RE.test(s)) err(id, `serves "${s}" is not a story id like COL-S1`);
+    for (const s of n.serves ?? []) if (!STORY_RE.test(s)) err(id, `serves "${s}" is not a story id like SIGNIN-S1`);
     if (!Array.isArray(n.touches) || n.touches.length === 0) err(id, 'touches must list at least one path or glob');
     for (const g of n.touches ?? []) if (typeof g !== 'string' || !g.trim() || unbalancedBraces(g)) err(id, `touches entry "${g}" is empty or has unbalanced braces`);
     if (!Array.isArray(n.done_when) || n.done_when.length === 0) err(id, 'done_when must list at least one check (D5)');

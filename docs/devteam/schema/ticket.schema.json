@@ -14,19 +14,19 @@
     "kind": { "enum": ["contract", "build", "integration", "chore", "spike"] },
     "size": { "enum": ["S", "M"] },
     "risk": { "enum": ["normal", "high"] },
-    "serves": { "type": "array", "tickets": { "type": "string", "pattern": "^[A-Z][A-Z0-9]*-S[0-9]+$" }, "uniqueItems": true },
-    "depends_on": { "type": "array", "tickets": { "type": "string" }, "uniqueItems": true },
+    "serves": { "type": "array", "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9]*-S[0-9]+$" }, "uniqueItems": true },
+    "depends_on": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
     "contracts": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "provides": { "type": "array", "tickets": { "type": "string" } },
-        "consumes": { "type": "array", "tickets": { "type": "string" } }
+        "provides": { "type": "array", "items": { "type": "string" } },
+        "consumes": { "type": "array", "items": { "type": "string" } }
       }
     },
-    "touches": { "type": "array", "tickets": { "type": "string", "minLength": 1 }, "minItems": 1 },
-    "done_when": { "type": "array", "tickets": { "type": "string", "minLength": 10 }, "minItems": 1 },
-    "one_way_doors": { "type": "array", "tickets": { "type": "string" } },
+    "touches": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1 },
+    "done_when": { "type": "array", "items": { "type": "string", "minLength": 10 }, "minItems": 1 },
+    "one_way_doors": { "type": "array", "items": { "type": "string" } },
     "superseded_by": { "type": ["string", "null"] },
     "notes": { "type": "string" }
   }

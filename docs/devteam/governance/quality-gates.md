@@ -19,7 +19,7 @@ A ticket is done, and may receive the merge word, only when all of these hold at
 9. Every changed file is inside the ticket's `touches` or its own ticket folder.
 10. The PR body's `## One-way doors` section is `None.` or links the owner's answer; it cannot say `None.` if the ticket lists one-way doors.
 
-`devteam.mjs check-ticket <id>` checks 2, 3, 4, 6 (title), 9 and 10 automatically, reading committed files at the exact head; CI runs it as the required `merge-word` check (`ci.md` §3). Tickets 1 and 7 are checked by the final reviewer against `verification.md` and the spec; tickets 5 and 8 by CI's other gates.
+`devteam.mjs check-ticket <id>` checks 2, 3, 4, 6 (title), 9 and 10 automatically, reading committed files at the exact head; CI runs it as the required `merge-word` check (`ci.md` §3). Points 1 and 7 are checked by the final reviewer against `verification.md` and the spec; points 5 and 8 by CI's other gates.
 
 ## 2. Root gates (every project, day one)
 

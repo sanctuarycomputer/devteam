@@ -63,13 +63,13 @@ The baseline is reviewed like a design (`project/reviews/baseline/design-1.md`).
 
 ### 5.2 Account for work already in flight
 
-Open PRs, active branches and tracker tickets are work the graph doesn't know about. For each:
+Open PRs, active branches and issue-tracker entries are work the graph doesn't know about. For each:
 
 - **finish it outside devteam** if it is close to done: list it in the baseline's "In flight" table with the files it changes. Planning must not schedule a ticket whose `touches` overlap those files until it merges or is abandoned;
 - **adopt it** if it is early: once a feature plan covers it, write a ticket for it in that feature, rename or recreate the branch as `ticket/<id>`, and let it continue through the ticket lifecycle from whichever stage its files support. Until then, list it under In flight like finished-outside work. (Only `chore` and `spike` tickets may use the `chores` feature, so cleanup and investigation branches can be adopted there straight away.)
 - **close it** if it is stale: ask the owner first (one batched question).
 
-Tracker tickets (issues, tickets) are inputs to planning, not tickets. A planner reads them at P0 and P1.
+Issue-tracker entries (issues, external tickets) are inputs to planning, not devteam tickets. A planner reads them at P0 and P1.
 
 ### 5.3 Ratchet, don't rewrite
 
