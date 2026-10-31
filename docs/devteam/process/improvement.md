@@ -38,6 +38,14 @@ It also lists **findings**: blockers and inefficiencies with a suggested next st
 
 `devteam.mjs dashboard-data` writes all of this, plus ticket status, the critical path, open owner questions and messages awaiting a reply, to `run/dashboard.json`. The supervisor refreshes it every tick. `node docs/devteam/scripts/dashboard.mjs` serves a local page (http://127.0.0.1:4321) that shows it and lets the owner answer questions; it binds to localhost because anyone who can reach it can answer as the owner.
 
+The page also shows progress, computed from git so it needs no extra bookkeeping:
+
+- **Burn-up:** scope and done over time in points (S = 1, M = 2; scope grows when a ticket file is first committed, done when it merges), with a forecast finish date from the last two weeks' throughput and a best-to-worst range from recent weekly rates. Switch the view to one feature, story, release or wave.
+- **Board:** every ticket in a column by its computed stage (backlog, ready, planning, building, review, merged, released), with risk, live phase and the critical path marked.
+- **Widgets:** progress per feature, per wave and per story; each release's stories done (target releases come from the release map, §6 of each feature plan) and whether it is tagged or ready to tag; weekly throughput.
+
+A forecast is only as good as the plan. Scope that isn't in the graph yet isn't in the date, so plan ahead (`planning.md`) before reading the finish date as a promise.
+
 Write a short dated snapshot of the metrics to `project/improvement/metrics.md` at each retro so trends survive restarts.
 
 ## 3. Where improvements come from

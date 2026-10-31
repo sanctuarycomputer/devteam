@@ -1532,6 +1532,68 @@ function cmdMetrics() {
   process.stdout.write(`${lines.join('\n')}\n`);
 }
 
+// ---------- progress (burn-up, board, widgets) ----------
+
+// Expected release per story, from each feature plan's section 6 table: | <STORY> | <release> |
+function releaseMap(feature) {
+  const text = featurePlan(feature);
+  const sec = text?.match(/^##\s*6\.[^\n]*\n([\s\S]*?)(?=^##\s|(?![\s\S]))/m)?.[1] ?? '';
+  const out = {};
+  for (const row of sec.split('\n')) {
+    const cells = tableCells(row);
+    if (cells.length >= 2 && STORY_RE.test(cells[0]) && /^v\d/.test(cells[1])) out[cells[0]] = cells[1];
+  }
+  return out;
+}
+
+const firstAdded = (rel) => {
+  const out = git(['log', '--diff-filter=A', '--format=%cI', '--', rel]);
+  return out ? out.split('\n').filter(Boolean).pop() : null;
+};
+
+function collectProgress(tickets, status) {
+  const sub = new Map([...tickets].filter(([, t]) => isActive(t)));
+  const level = new Map();
+  if (!findCycle(sub)) {
+    const lvl = (id) => {
+      if (level.has(id)) return level.get(id);
+      const deps = (sub.get(id).depends_on ?? []).filter((d) => sub.has(d));
+      const v = deps.length ? 1 + Math.max(...deps.map(lvl)) : 0;
+      level.set(id, v);
+      return v;
+    };
+    for (const id of sub.keys()) lvl(id);
+  }
+  const byId = new Map(status.map((r) => [r.id, r]));
+  const features = [...new Set([...sub.values()].map((t) => t.feature))];
+  const storyRelease = Object.assign({}, ...features.map(releaseMap));
+  const stories = {};
+  for (const f of features.filter((x) => x !== CHORES_FEATURE)) {
+    const text = featurePlan(f) ?? '';
+    const sec = text.match(/^##\s*1\.[^\n]*\n([\s\S]*?)(?=^##\s|(?![\s\S]))/m)?.[1] ?? '';
+    for (const row of sec.split('\n')) {
+      const cells = tableCells(row);
+      if (STORY_RE.test(cells[0] ?? '')) stories[cells[0]] = { feature: f, text: cells[1] ?? '', release: storyRelease[cells[0]] ?? null };
+    }
+  }
+  const items = [...sub.values()].map((t) => {
+    const st = byId.get(t.id);
+    const sha = st?.merge_sha;
+    const mergedAt = sha ? git(['show', '-s', '--format=%cI', sha]) : null;
+    const releasedIn = sha ? (git(['tag', '--contains', sha, '--list', 'v*', '--sort=creatordate']) ?? '').split('\n').find((x) => x && !/-rc/.test(x)) ?? null : null;
+    const targets = [...new Set((t.serves ?? []).map((x) => storyRelease[x]).filter(Boolean))].sort();
+    return {
+      id: t.id, title: t.title, feature: t.feature, component: t.component, kind: t.kind, size: t.size, risk: t.risk,
+      weight: t.size === 'M' ? 2 : 1, serves: t.serves ?? [], depends_on: t.depends_on ?? [],
+      wave: level.has(t.id) ? level.get(t.id) + 1 : null,
+      added_at: (projectInRepo ? firstAdded(`${projectRel}/graph/${t.id}.json`) : null) ?? nowIso(),
+      merged_at: mergedAt, released_in: releasedIn, target_release: targets[0] ?? null,
+      stage: st?.stage ?? 'planned', phase: st?.phase ?? null, task: st?.task ?? null, heartbeat_minutes: st?.heartbeat_minutes ?? null,
+    };
+  });
+  return { now: nowIso(), features, stories, tickets: items };
+}
+
 // Everything the dashboard shows, in one file: run/dashboard.json (and stdout with --json).
 function cmdDashboardData() {
   const { tickets } = loadGraph();
@@ -1551,6 +1613,7 @@ function cmdDashboardData() {
       return msgs.filter((e) => !['info', 'ruling', 'answer'].includes(e.kind) && !replied.has(e.id));
     })(),
     metrics: collectMetrics(sinceFlag()),
+    progress: collectProgress(tickets, status),
   };
   writeJson(path.join(runDir, 'dashboard.json'), data);
   if (flags.json) process.stdout.write(`${JSON.stringify(data)}\n`);

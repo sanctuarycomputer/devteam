@@ -5,24 +5,26 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>devteam</title>
 <style>
-  :root { --bg:#fbfaf7; --fg:#1d1d1b; --muted:#6b6a65; --line:#e3e1da; --card:#fff; --hi:#b42318; --mid:#b54708; --lo:#475467; --ok:#067647; --bar:#1d1d1b; }
-  @media (prefers-color-scheme: dark) { :root { --bg:#141413; --fg:#ecebe6; --muted:#9a998f; --line:#2c2b28; --card:#1c1c1a; --hi:#f97066; --mid:#fdb022; --lo:#98a2b3; --ok:#47cd89; --bar:#ecebe6; } }
+  :root { color-scheme: light; --bg:#fbfaf7; --surface:#fcfcfb; --fg:#1d1d1b; --muted:#6b6a65; --line:#e3e1da; --card:#fff; --hi:#b42318; --mid:#b54708; --lo:#475467; --ok:#067647; --bar:#1d1d1b; --series-1:#2a78d6; --grid:#ecebe6; }
+  @media (prefers-color-scheme: dark) { :root { color-scheme: dark; --bg:#141413; --surface:#1a1a19; --fg:#ecebe6; --muted:#9a998f; --line:#2c2b28; --card:#1c1c1a; --hi:#f97066; --mid:#fdb022; --lo:#98a2b3; --ok:#47cd89; --bar:#ecebe6; --series-1:#3987e5; --grid:#262624; } }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, sans-serif; }
-  main { max-width: 1180px; margin: 0 auto; padding: 20px 16px 60px; }
+  main { max-width: 1240px; margin: 0 auto; padding: 20px 16px 60px; }
   header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline; margin-bottom: 18px; }
   h1 { font-size: 20px; margin: 0; }
-  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 26px 0 10px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 28px 0 10px; }
+  h3 { font-size: 13px; margin: 0 0 8px; }
   .muted { color: var(--muted); }
-  .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
+  .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
   .stat { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
   .stat b { display: block; font-size: 20px; }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; }
   .badge { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 99px; border: 1px solid var(--line); margin-right: 6px; }
-  .high { color: var(--hi); border-color: var(--hi); } .medium { color: var(--mid); border-color: var(--mid); } .low { color: var(--lo); border-color: var(--lo); }
+  .high { color: var(--hi); border-color: var(--hi); } .medium { color: var(--mid); border-color: var(--mid); } .low { color: var(--lo); border-color: var(--lo); } .good { color: var(--ok); border-color: var(--ok); }
   textarea { width: 100%; min-height: 54px; margin-top: 8px; padding: 8px; font: inherit; background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; }
   button { font: inherit; padding: 5px 12px; border-radius: 6px; border: 1px solid var(--fg); background: var(--fg); color: var(--bg); cursor: pointer; margin-top: 6px; }
   button.opt { background: transparent; color: var(--fg); border-color: var(--line); margin-right: 6px; }
+  select { font: inherit; padding: 5px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--card); color: var(--fg); max-width: 100%; }
   table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
   th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
   th { font-size: 12px; color: var(--muted); font-weight: 600; }
@@ -34,6 +36,30 @@
   .crit { font-weight: 700; }
   code { font-size: 12px; }
   .err { color: var(--hi); }
+  /* progress */
+  .filters { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-bottom: 10px; }
+  .progress-layout { display: grid; gap: 16px; align-items: start; grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr); }
+  @media (max-width: 860px) { .progress-layout { grid-template-columns: 1fr; } }
+  .chart { position: relative; }
+  .chart svg { width: 100%; height: auto; display: block; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  .legend i { display: inline-block; width: 18px; height: 0; border-top: 2px solid var(--muted); vertical-align: middle; margin-right: 6px; }
+  .legend i.done { border-top-color: var(--series-1); } .legend i.scope { border-top-style: dashed; } .legend i.fc { border-top-color: var(--series-1); border-top-style: dotted; }
+  .tip { position: absolute; pointer-events: none; background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; font-size: 12px; display: none; white-space: nowrap; box-shadow: 0 2px 8px rgba(0,0,0,.08); }
+  .meter { height: 8px; background: var(--grid); border-radius: 4px; overflow: hidden; }
+  .meter span { display: block; height: 100%; background: var(--series-1); border-radius: 4px; }
+  .row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px; margin: 8px 0; font-size: 13px; }
+  .row .meter { grid-column: 1 / -1; }
+  .throughput { display: flex; align-items: flex-end; gap: 4px; height: 60px; }
+  .throughput span { flex: 1; background: var(--series-1); border-radius: 3px 3px 0 0; min-height: 2px; position: relative; }
+  /* board */
+  .board { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(150px, 1fr); gap: 10px; overflow-x: auto; padding-bottom: 6px; }
+  .col { background: var(--grid); border-radius: 8px; padding: 8px; min-height: 80px; }
+  .col h3 { display: flex; justify-content: space-between; color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  .tcard { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 8px; margin-bottom: 8px; font-size: 12px; }
+  .tcard b { font-size: 12.5px; overflow-wrap: anywhere; }
+  .more { font-size: 12px; color: var(--muted); padding: 2px 4px; }
+  .tcard.blocked { border-color: var(--hi); }
 </style>
 </head>
 <body>
@@ -49,11 +75,33 @@
   <h2>Questions for you</h2>
   <div id="questions"></div>
 
+  <h2>Progress</h2>
+  <div class="filters">
+    <label>View <select id="view"></select></label>
+    <span class="muted" id="forecast"></span>
+  </div>
+  <div class="progress-layout">
+    <div>
+    <div class="card chart" id="burnup-card">
+      <div class="legend"><span><i class="done"></i>done</span><span><i class="scope"></i>scope</span><span><i class="fc"></i>forecast</span><span class="muted">points: S = 1, M = 2</span></div>
+      <div id="burnup"></div>
+      <div class="tip" id="tip"></div>
+    </div>
+    <div class="card"><h3>Stories</h3><div id="w-stories"></div></div>
+    </div>
+    <div>
+      <div class="card"><h3>Features</h3><div id="w-features"></div></div>
+      <div class="card"><h3>Releases</h3><div id="w-releases"></div></div>
+      <div class="card"><h3>Waves</h3><div id="w-waves"></div></div>
+      <div class="card"><h3>Throughput, points per week</h3><div class="throughput" id="w-throughput"></div><div class="muted" id="w-throughput-note" style="font-size:12px;margin-top:4px"></div></div>
+    </div>
+  </div>
+
+  <h2>Board</h2>
+  <div class="board" id="board"></div>
+
   <h2>Blockers and inefficiencies</h2>
   <div id="findings"></div>
-
-  <h2>Tickets</h2>
-  <div class="scroll"><table id="tickets"></table></div>
 
   <div class="two">
     <div><h2>Time by phase (hours)</h2><div class="bars card" id="phase-time"></div></div>
@@ -74,7 +122,14 @@
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const drafts = {};
+const DAY = 864e5;
 const dur = (s) => (s < 60 ? `${s}s` : `${(s / 60).toFixed(1)} min`);
+const fmtDate = (ms) => new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+const isDone = (t) => !!t.merged_at;
+const pct = (a, b) => (b ? Math.round((100 * a) / b) : 0);
+let DATA = null;
+let VIEW = 'all';
+try { VIEW = localStorage.getItem('devteam.view') || 'all'; } catch {}
 
 function bars(el, obj, fmt) {
   const entries = Object.entries(obj || {});
@@ -83,14 +138,179 @@ function bars(el, obj, fmt) {
   el.innerHTML = entries.map(([k, v]) => `<div><span>${esc(k)}</span><span class="b" style="width:${(100 * v) / max}%"></span><span>${fmt(v)}</span></div>`).join('');
 }
 
+// ---- views: overall, a feature, a story, a release, a wave ----
+function views(p) {
+  const v = [['all', 'Overall']];
+  for (const f of p.features) v.push([`feature:${f}`, `Feature: ${f}`]);
+  const rels = [...new Set(p.tickets.map((t) => t.target_release).filter(Boolean))].sort();
+  for (const r of rels) v.push([`release:${r}`, `Release: ${r}`]);
+  const waves = [...new Set(p.tickets.map((t) => t.wave).filter(Boolean))].sort((a, b) => a - b);
+  for (const w of waves) v.push([`wave:${w}`, `Wave ${w}`]);
+  for (const s of Object.keys(p.stories)) v.push([`story:${s}`, `Story: ${s}`]);
+  return v;
+}
+function filterTickets(p, view) {
+  const [kind, val] = view.split(/:(.*)/);
+  if (kind === 'feature') return p.tickets.filter((t) => t.feature === val);
+  if (kind === 'release') return p.tickets.filter((t) => t.target_release === val);
+  if (kind === 'wave') return p.tickets.filter((t) => String(t.wave) === val);
+  if (kind === 'story') return p.tickets.filter((t) => t.serves.includes(val));
+  return p.tickets;
+}
+
+// ---- forecast from recent throughput ----
+function forecast(items, now) {
+  const scope = items.reduce((a, t) => a + t.weight, 0);
+  const done = items.filter(isDone).reduce((a, t) => a + t.weight, 0);
+  const remaining = scope - done;
+  if (!scope) return { scope, done, remaining, eta: null };
+  if (!remaining) return { scope, done, remaining, eta: Math.max(...items.map((t) => Date.parse(t.merged_at))), finished: true };
+  const firstAdd = Math.min(...items.map((t) => Date.parse(t.added_at)));
+  const windowDays = Math.max(1, Math.min(14, (now - firstAdd) / DAY));
+  const recent = items.filter((t) => isDone(t) && now - Date.parse(t.merged_at) <= windowDays * DAY).reduce((a, t) => a + t.weight, 0);
+  const perDay = recent / windowDays;
+  // weekly rates over the last 4 weeks give a best/worst range
+  const weeks = [0, 1, 2, 3].map((w) => items.filter((t) => isDone(t) && now - Date.parse(t.merged_at) >= w * 7 * DAY && now - Date.parse(t.merged_at) < (w + 1) * 7 * DAY).reduce((a, t) => a + t.weight, 0)).filter((x) => x > 0);
+  if (!perDay) return { scope, done, remaining, eta: null };
+  const eta = now + (remaining / perDay) * DAY;
+  const best = weeks.length ? now + (remaining / (Math.max(...weeks) / 7)) * DAY : eta;
+  const worst = weeks.length ? now + (remaining / (Math.min(...weeks) / 7)) * DAY : eta;
+  return { scope, done, remaining, eta, best: Math.min(best, eta), worst: Math.max(worst, eta), perDay };
+}
+
+// ---- burn-up chart (hand-built SVG) ----
+function burnup(items, now) {
+  const el = $('burnup');
+  if (!items.length) { el.innerHTML = '<p class="muted">No tickets in this view.</p>'; return; }
+  const evs = [];
+  for (const t of items) {
+    evs.push([Date.parse(t.added_at), t.weight, 0]);
+    if (t.merged_at) evs.push([Date.parse(t.merged_at), 0, t.weight]);
+  }
+  evs.sort((a, b) => a[0] - b[0]);
+  const pts = [];
+  let s = 0, d = 0;
+  for (const [ts, ds, dd] of evs) { s += ds; d += dd; pts.push([ts, s, d]); }
+  pts.push([now, s, d]);
+  const fc = forecast(items, now);
+  const t0 = pts[0][0];
+  const end = Math.min(Math.max(now + DAY, fc.finished ? now : (fc.worst || fc.eta || now)), now + 365 * DAY);
+  const t1 = end + (end - t0) * 0.04;
+  const W = Math.round(Math.max(300, el.clientWidth || 640)), H = W < 500 ? 220 : 280, L = 34, R = 12, T = 12, B = 26;
+  const yMax = Math.max(1, s) * 1.1;
+  const x = (ts) => L + ((ts - t0) / Math.max(1, t1 - t0)) * (W - L - R);
+  const y = (v) => H - B - (v / yMax) * (H - T - B);
+  const step = (idx) => pts.map((p, i) => `${i ? `H${x(p[0]).toFixed(1)}V` : `M${x(p[0]).toFixed(1)},`}${y(p[idx]).toFixed(1)}`).join('');
+  const yTicks = [0, 0.25, 0.5, 0.75, 1].map((f) => Math.round(f * yMax * 0.95));
+  const xTicks = [0, 0.25, 0.5, 0.75, 1].map((f) => t0 + f * (t1 - t0));
+  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Burn-up chart: ${fc.done} of ${fc.scope} points done">`;
+  for (const v of [...new Set(yTicks)]) svg += `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" stroke="var(--grid)"/><text x="${L - 6}" y="${y(v) + 4}" text-anchor="end" font-size="10" fill="var(--muted)">${v}</text>`;
+  for (const [i, ts] of xTicks.entries()) svg += `<text x="${x(ts)}" y="${H - 8}" text-anchor="${i === 0 ? 'start' : i === xTicks.length - 1 ? 'end' : 'middle'}" font-size="10" fill="var(--muted)">${fmtDate(ts)}</text>`;
+  // done area + line, scope line
+  svg += `<path d="${step(2)}V${y(0)}H${x(pts[0][0])}Z" fill="var(--series-1)" opacity=".12"/>`;
+  svg += `<path d="${step(1)}" fill="none" stroke="var(--muted)" stroke-width="2" stroke-dasharray="5 4"/>`;
+  svg += `<path d="${step(2)}" fill="none" stroke="var(--series-1)" stroke-width="2"/>`;
+  // forecast: line to the expected date, band between best and worst
+  if (fc.eta && !fc.finished) {
+    svg += `<polygon points="${x(now)},${y(fc.done)} ${x(fc.best)},${y(fc.scope)} ${x(fc.worst)},${y(fc.scope)}" fill="var(--series-1)" opacity=".08"/>`;
+    svg += `<line x1="${x(now)}" y1="${y(fc.done)}" x2="${x(fc.eta)}" y2="${y(fc.scope)}" stroke="var(--series-1)" stroke-width="2" stroke-dasharray="2 4"/>`;
+    svg += `<circle cx="${x(fc.eta)}" cy="${y(fc.scope)}" r="4" fill="var(--series-1)" stroke="var(--surface)" stroke-width="2"/>`;
+    svg += `<text x="${Math.min(x(fc.eta), W - R - 4)}" y="${y(fc.scope) - 8}" text-anchor="end" font-size="11" fill="var(--fg)">${fmtDate(fc.eta)}</text>`;
+  }
+  svg += `<line x1="${x(now)}" x2="${x(now)}" y1="${T}" y2="${H - B}" stroke="var(--muted)" stroke-width="1"/>${fc.eta && !fc.finished && x(fc.eta) - x(now) < 70 ? '' : `<text x="${x(now) + 4}" y="${T + 10}" font-size="10" fill="var(--muted)">today</text>`}`;
+  svg += `<line id="xh" x1="0" x2="0" y1="${T}" y2="${H - B}" stroke="var(--fg)" stroke-width="1" opacity="0"/>`;
+  svg += `<rect id="hit" x="${L}" y="${T}" width="${W - L - R}" height="${H - T - B}" fill="transparent"/></svg>`;
+  el.innerHTML = svg;
+  const svgEl = el.querySelector('svg'), hit = el.querySelector('#hit'), xh = el.querySelector('#xh'), tip = $('tip');
+  hit.addEventListener('mousemove', (e) => {
+    const r = svgEl.getBoundingClientRect();
+    const vx = ((e.clientX - r.left) / r.width) * W;
+    const ts = t0 + ((vx - L) / (W - L - R)) * (t1 - t0);
+    let p = pts[0];
+    for (const q of pts) if (q[0] <= ts) p = q;
+    xh.setAttribute('x1', vx); xh.setAttribute('x2', vx); xh.setAttribute('opacity', '.3');
+    tip.style.display = 'block';
+    tip.innerHTML = ts > now ? `${fmtDate(ts)}<br><span class="muted">forecast</span>` : `<b>${fmtDate(ts)}</b><br>done ${p[2]} · scope ${p[1]}`;
+    const box = $('burnup-card').getBoundingClientRect();
+    tip.style.left = `${Math.min(e.clientX - box.left + 12, box.width - 140)}px`;
+    tip.style.top = `${e.clientY - box.top - 10}px`;
+  });
+  hit.addEventListener('mouseleave', () => { tip.style.display = 'none'; xh.setAttribute('opacity', '0'); });
+  const range = fc.best && fc.worst && fc.worst - fc.best > DAY ? ` (range ${fmtDate(fc.best)} – ${fmtDate(fc.worst)})` : '';
+  $('forecast').textContent = fc.finished ? `done: ${fc.done} of ${fc.scope} points` : fc.eta
+    ? `${fc.done} of ${fc.scope} points done · forecast finish ${fmtDate(fc.eta)}${range} at ${fc.perDay.toFixed(1)} points/day`
+    : `${fc.done} of ${fc.scope} points done · no throughput yet to forecast from`;
+}
+
+// ---- widgets ----
+function meterRow(label, done, total, note = '') {
+  return `<div class="row"><span>${label}</span><span class="muted">${note || `${done}/${total} · ${pct(done, total)}%`}</span><div class="meter"><span style="width:${pct(done, total)}%"></span></div></div>`;
+}
+function widgets(p, now) {
+  const pts = (ts) => ts.reduce((a, t) => a + t.weight, 0);
+  $('w-features').innerHTML = p.features.map((f) => { const ts = p.tickets.filter((t) => t.feature === f); return meterRow(esc(f), pts(ts.filter(isDone)), pts(ts)); }).join('') || '<span class="muted">none</span>';
+  const storyDone = (s) => { const ts = p.tickets.filter((t) => t.serves.includes(s)); return ts.length && ts.every(isDone); };
+  const rels = [...new Set([...Object.values(p.stories).map((s) => s.release), ...p.tickets.map((t) => t.target_release)].filter(Boolean))].sort();
+  $('w-releases').innerHTML = rels.map((r) => {
+    const stories = Object.entries(p.stories).filter(([, s]) => s.release === r).map(([id]) => id);
+    const shipped = p.tickets.some((t) => t.released_in === r);
+    const done = stories.filter(storyDone).length;
+    const state = shipped ? '<span class="badge good">tagged</span>' : stories.length && done === stories.length ? '<span class="badge medium">ready to tag</span>' : '';
+    return meterRow(`<code>${esc(r)}</code> ${state}`, done, stories.length, `${done}/${stories.length} stories`);
+  }).join('') || '<span class="muted">No release map yet (feature plan §6).</span>';
+  const waves = [...new Set(p.tickets.map((t) => t.wave).filter(Boolean))].sort((a, b) => a - b);
+  $('w-waves').innerHTML = waves.map((w) => { const ts = p.tickets.filter((t) => t.wave === w); return meterRow(`Wave ${w}`, ts.filter(isDone).length, ts.length); }).join('') || '<span class="muted">none</span>';
+  const storyEntries = Object.entries(p.stories);
+  $('w-stories').innerHTML = storyEntries.length ? `<div>${storyEntries.map(([id, s]) => {
+    const ts = p.tickets.filter((t) => t.serves.includes(id)); const d = ts.filter(isDone).length;
+    return meterRow(`${d === ts.length && ts.length ? '<span class="badge good">done</span>' : ''}<code>${esc(id)}</code> ${esc(s.text).slice(0, 80)}`, d, ts.length, `${d}/${ts.length} tickets${s.release ? ` · ${esc(s.release)}` : ''}`);
+  }).join('')}</div>` : '<span class="muted">No stories yet.</span>';
+  const weeks = [7, 6, 5, 4, 3, 2, 1, 0].map((w) => pts(p.tickets.filter((t) => isDone(t) && now - Date.parse(t.merged_at) >= w * 7 * DAY && now - Date.parse(t.merged_at) < (w + 1) * 7 * DAY)));
+  const wmax = Math.max(1, ...weeks);
+  $('w-throughput').innerHTML = weeks.map((v, i) => `<span title="${v} points, ${i === 7 ? 'this week' : `${7 - i} week(s) ago`}" style="height:${(100 * v) / wmax}%"></span>`).join('');
+  $('w-throughput-note').textContent = `last 8 weeks; this week ${weeks[7]} points`;
+}
+
+// ---- kanban board ----
+const COLUMNS = [['Backlog', ['planned']], ['Ready', ['ready']], ['Planning', ["spec'd", 'planned-in-detail']], ['Building', ['building']], ['Review', ['in-review']], ['Merged', ['merged']], ['Released', ['released']]];
+function board(items, crit) {
+  $('board').innerHTML = COLUMNS.map(([name, stages]) => {
+    let cards = items.filter((t) => stages.includes(t.stage)).sort((a, b) => (a.wave ?? 99) - (b.wave ?? 99));
+    const total = cards.length;
+    // finished columns show the most recent few; the rest are counted
+    if (['Merged', 'Released'].includes(name)) cards = cards.sort((a, b) => (b.merged_at || '').localeCompare(a.merged_at || '')).slice(0, 5);
+    return `<div class="col"><h3><span>${name}</span><span>${total}</span></h3>${cards.map((t) => `
+      <div class="tcard ${t.phase === 'blocked' ? 'blocked' : ''}">
+        <b>${crit.has(t.id) ? '★ ' : ''}${esc(t.id)}</b><div>${esc(t.title)}</div>
+        <div class="muted">${esc(t.component)} · ${t.size} · wave ${t.wave ?? '–'}${t.target_release ? ` · ${esc(t.target_release)}` : ''}</div>
+        <div>${t.risk === 'high' ? '<span class="badge medium">high risk</span>' : ''}${t.phase === 'blocked' ? '<span class="badge high">blocked</span>' : ''}${t.phase && !['blocked', 'done'].includes(t.phase) ? `<span class="badge low">${esc(t.phase)}${t.task ? ` ${esc(t.task)}` : ''}</span>` : ''}</div>
+      </div>`).join('')}${total > cards.length ? `<div class="more">+ ${total - cards.length} more</div>` : ''}</div>`;
+  }).join('');
+}
+
+function renderProgress() {
+  const p = DATA.progress, now = Date.parse(p.now);
+  const opts = views(p);
+  if (!opts.some(([k]) => k === VIEW)) VIEW = 'all';
+  $('view').innerHTML = opts.map(([k, label]) => `<option value="${esc(k)}" ${k === VIEW ? 'selected' : ''}>${esc(label)}</option>`).join('');
+  const items = filterTickets(p, VIEW);
+  burnup(items, now);
+  board(items, new Set(DATA.critical_path));
+  widgets(p, now);
+}
+
 function render(d) {
-  const m = d.metrics;
+  DATA = d;
+  const m = d.metrics, p = d.progress, now = Date.parse(p.now);
   $('title').textContent = d.project && !String(d.project).startsWith('<') ? `devteam · ${d.project}` : 'devteam';
   $('when').textContent = `updated ${new Date(d.generated_at).toLocaleTimeString()}`;
   const active = d.tickets.filter((t) => t.phase && !['done', 'parked'].includes(t.phase)).length;
+  const fcAll = forecast(p.tickets, now);
   const stats = [
+    ['done', `${pct(fcAll.done, fcAll.scope)}%`],
+    ['forecast finish', fcAll.finished ? 'done' : fcAll.eta ? fmtDate(fcAll.eta) : '–'],
     ['workers active', `${active}/${d.caps.max_active_tickets}`],
-    ['tickets merged', m.tickets_merged],
+    ['blocked', d.tickets.filter((t) => t.phase === 'blocked').length],
     ['median cycle', m.cycle_hours.median == null ? '–' : `${m.cycle_hours.median}h`],
     ['cost per ticket', m.cost.usd_per_merged_ticket == null ? '–' : `$${m.cost.usd_per_merged_ticket}`],
     ['spend', `$${m.cost.usd_total}`],
@@ -115,16 +335,11 @@ function render(d) {
       <button data-answer="${esc(q.id)}">Answer</button> <span class="err" id="e-${esc(q.id)}"></span>
     </div>`).join('') : '<p class="muted">Nothing needs you right now.</p>';
 
+  renderProgress();
+
   $('findings').innerHTML = m.findings.length ? m.findings.map((f) => `
     <div class="card"><span class="badge ${f.severity}">${f.severity}</span><b>${esc(f.kind)}</b> · <code>${esc(f.subject)}</code>
     <div class="muted">${esc(f.detail)}</div><div>→ ${esc(f.suggestion)}</div></div>`).join('') : '<p class="muted">None found.</p>';
-
-  const crit = new Set(d.critical_path);
-  $('tickets').innerHTML = '<tr><th>Ticket</th><th>Stage</th><th>Phase</th><th>Heartbeat</th><th>Cost</th></tr>' + d.tickets.map((t) => `
-    <tr><td class="${crit.has(t.id) ? 'crit' : ''}">${esc(t.id)}${crit.has(t.id) ? ' ★' : ''}</td><td>${esc(t.stage)}</td>
-    <td>${esc(t.phase || '')}${t.task ? ` <span class="muted">${esc(t.task)}</span>` : ''}</td>
-    <td>${t.heartbeat_minutes == null ? '' : `${t.heartbeat_minutes}m ago`}</td>
-    <td>${m.cost.by_ticket[t.id] == null ? '' : `$${m.cost.by_ticket[t.id]}`}</td></tr>`).join('');
 
   bars($('phase-time'), m.phase_hours, (v) => `${v}h`);
   bars($('phase-cost'), m.phase_usd, (v) => `$${v}`);
@@ -148,6 +363,12 @@ async function load() {
     render(d);
   } catch (e) { $('err').textContent = `could not load: ${e.message}`; }
 }
+
+$('view').addEventListener('change', (e) => {
+  VIEW = e.target.value;
+  try { localStorage.setItem('devteam.view', VIEW); } catch {}
+  if (DATA) renderProgress();
+});
 
 document.addEventListener('click', async (ev) => {
   const fill = ev.target.closest('[data-fill]');

@@ -32,6 +32,10 @@ The work, from largest to smallest:
 - **wave**: the tickets that can run in parallel once the previous wave merges. Computed from dependencies (`devteam.mjs waves`), not a timebox.
 - **graph**: the structure across all of it. Tickets and their dependencies, plus the live state of the fleet working them.
 
+## How it fits together
+
+Two loops. **Planning works backwards from goals:** the owner names an outcome, planning breaks it into features, stories and tickets until each ticket is one PR whose dependencies are known (`process/planning.md`). **Running works forwards in short cycles** (observe, orient, decide, act): sessions report state and the dashboard shows it; the supervisor reads it against the graph and past decisions; the supervisor or the owner decides; workers build. Each tick of the supervisor's loop is one cycle, and the improvement loop (`process/improvement.md`) tunes the cycle itself.
+
 ## Layout
 
 ```
@@ -89,7 +93,7 @@ git, tmux, Node 20+ (scripts use only built-ins), the GitHub CLI, one agent CLI 
 | `heartbeat`, `event`, `history`, `whoami` | worker, supervisor | live state, the event log, catching up on history |
 | `gate <name> -- <cmd>` | worker | run a gate and record its time, result and tests |
 | `metrics`, `dashboard-data` | supervisor | time and cost by phase, gate health, findings; data for the dashboard |
-| `node docs/devteam/scripts/dashboard.mjs` | owner | the dashboard: questions to answer, blockers, tickets, analytics |
+| `node docs/devteam/scripts/dashboard.mjs` | owner | the dashboard: questions to answer, burn-up and forecast, board, progress, blockers, analytics |
 | `notes <from> [<to>]`, `settings` | supervisor | story-grouped release notes; the project's settings |
 | `bash docs/devteam/scripts/make-worker.sh <id> [--resume]` | supervisor | worktree, tmux window and agent for a ticket (`--planner <feature>` for a planner) |
 | `bash docs/devteam/scripts/stop-hook.sh` | worker's agent | refuses to stop while the run state is stale |
