@@ -40,6 +40,7 @@ docs/devteam/
   governance/          the rules: what must be true (owner-tweakable)
   process/             the procedures: how work moves (owner-tweakable)
   templates/           skeletons agents fill instead of inventing structure
+  dashboard/           the owner's dashboard page, served by scripts/dashboard.mjs
   schema/              JSON schemas for tickets, questions, events
   scripts/             zero-dependency tools (Node 20+, bash)
   project/             THIS project's content; created at bootstrap, never touched by upstream sync
@@ -86,6 +87,9 @@ git, tmux, Node 20+ (scripts use only built-ins), the GitHub CLI, one agent CLI 
 | `ask`, `questions`, `sync-questions`, `recorded` | supervisor | questions to the owner |
 | `answer` | owner | answering the supervisor's questions |
 | `heartbeat`, `event`, `history`, `whoami` | worker, supervisor | live state, the event log, catching up on history |
+| `gate <name> -- <cmd>` | worker | run a gate and record its time, result and tests |
+| `metrics`, `dashboard-data` | supervisor | time and cost by phase, gate health, findings; data for the dashboard |
+| `node docs/devteam/scripts/dashboard.mjs` | owner | the dashboard: questions to answer, blockers, tickets, analytics |
 | `notes <from> [<to>]`, `settings` | supervisor | story-grouped release notes; the project's settings |
 | `bash docs/devteam/scripts/make-worker.sh <id> [--resume]` | supervisor | worktree, tmux window and agent for a ticket (`--planner <feature>` for a planner) |
 | `bash docs/devteam/scripts/stop-hook.sh` | worker's agent | refuses to stop while the run state is stale |

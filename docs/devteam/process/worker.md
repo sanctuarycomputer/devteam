@@ -37,13 +37,15 @@ Read, in this order, and nothing more until you need it:
 
 ## 4. Keep the run state current
 
-Update `$DEVTEAM_RUN/tickets/<your-id>.json` at every phase change and every task boundary, and at least every 15 minutes while working:
+Update `$DEVTEAM_RUN/tickets/<your-id>.json` at every phase change and every task boundary, and at least every 15 minutes while working. Include your cumulative spend whenever your agent CLI or a gateway can tell you; that is how time and cost per phase get measured (`improvement.md` §2):
 
 ```
 node docs/devteam/scripts/devteam.mjs heartbeat --phase build --task T3 --note "session expiry test red, implementing"
 ```
 
 This writes your ticket file and, on a phase change, appends a `ticket.phase` event. If your agent CLI or a gateway reports cost, pass `--usd`, `--in` and `--out` with `--cost-source`.
+
+**Run gates through the recorder,** so slow and flaky tests show up: `devteam.mjs gate test --junit reports/junit.xml -- pnpm test`. It passes the command's exit status through, so it can replace the bare command anywhere.
 
 You only write facts git cannot know. Never write merged, reviewed or released status; those are computed.
 

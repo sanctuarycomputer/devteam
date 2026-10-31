@@ -110,7 +110,7 @@ const SETTINGS_DEFAULTS = {
   merge_method: 'merge',
   components: {},
   shared_resources: [],
-  dashboard_command: null,
+  dashboard_command: 'node docs/devteam/scripts/dashboard.mjs',
   notify: null,
   worker_denied_commands: ['gh pr merge', 'git push origin main', 'git push origin HEAD:main'],
   upstream_repo: 'sanctuarycomputer/devteam',
@@ -119,6 +119,7 @@ const SETTINGS_DEFAULTS = {
   retro_every_days: 7,
   research_every_days: 7,
   improvement_budget_usd_per_week: null,
+  slow_gate_minutes: 10,
 };
 
 let settingsCache;
@@ -1148,6 +1149,14 @@ function cmdHeartbeat() {
     };
   }
   writeJson(p, next);
+  // A cost sample charges the spend since the last sample to the phase that was running then.
+  if (next.cost && (next.cost.usd !== prev.cost?.usd || next.cost.input_tokens !== prev.cost?.input_tokens)) {
+    appendEvent({
+      type: 'cost', actor: id, ticket: supervisor ? null : id, phase: supervisor ? 'supervisor' : (prev.phase ?? next.phase),
+      usd: next.cost.usd, input_tokens: next.cost.input_tokens, output_tokens: next.cost.output_tokens,
+      summary: `cumulative $${next.cost.usd} (${next.cost.source})`,
+    });
+  }
   if (!supervisor && next.phase !== prev.phase) {
     appendEvent({ type: 'ticket.phase', actor: id, ticket: id, sha: next.head_sha, summary: `${prev.phase ?? 'none'} -> ${next.phase}${next.note ? `: ${next.note}` : ''}` });
   }
@@ -1253,76 +1262,266 @@ const median = (xs) => {
 };
 const hours = (ms) => (ms === null ? null : +(ms / 3600000).toFixed(1));
 
-function cmdMetrics() {
-  const since = flagStr('since') ? Date.parse(flagStr('since')) : 0;
-  if (Number.isNaN(since)) die('--since must be a date, e.g. 2026-10-01');
+// ---------- gate runs (timing, pass/fail, tests) ----------
+
+const gatesLog = () => path.join(runDir, 'gates.jsonl');
+
+// Minimal JUnit XML reader: each <testcase> with its time and whether it failed.
+function readJunit(file) {
+  if (!file || !fs.existsSync(file)) return [];
+  const xml = fs.readFileSync(file, 'utf8');
+  const out = [];
+  const re = /<testcase\b([^>]*?)(\/>|>([\s\S]*?)<\/testcase>)/g;
+  for (const m of xml.matchAll(re)) {
+    const attr = (k) => m[1].match(new RegExp(`\\b${k}="([^"]*)"`))?.[1] ?? '';
+    const name = [attr('classname'), attr('name')].filter(Boolean).join(' › ');
+    out.push({ name, ms: Math.round(Number(attr('time') || 0) * 1000), failed: /<(failure|error)\b/.test(m[3] ?? '') });
+  }
+  return out;
+}
+
+function cmdGate() {
+  const dash = argv.indexOf('--');
+  const name = positional[0];
+  if (!name || dash === -1 || dash === argv.length - 1) die('usage: gate <name> [--junit <report.xml>] -- <command> [args…]');
+  const cmd = argv.slice(dash + 1);
+  const started = Date.now();
+  let ok = true;
+  try {
+    execFileSync(cmd[0], cmd.slice(1), { stdio: 'inherit' });
+  } catch {
+    ok = false;
+  }
+  const ms = Date.now() - started;
+  const tests = readJunit(flagStr('junit'));
+  const keep = [...tests.filter((t) => t.failed), ...tests.filter((t) => !t.failed).sort((a, b) => b.ms - a.ms).slice(0, 20)];
+  const sha = git(['rev-parse', 'HEAD']);
+  const rec = { ts: nowIso(), gate: name, ticket: currentTicketId(), sha, ok, ms, tests_total: tests.length, tests: keep };
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.appendFileSync(gatesLog(), `${JSON.stringify(rec)}\n`);
+  appendEvent({ type: 'gate.result', actor: currentActor(), ticket: rec.ticket, sha, gate: name, ok, ms, summary: `${name} ${ok ? 'passed' : 'failed'} in ${(ms / 1000).toFixed(1)}s` });
+  process.stderr.write(`devteam: gate ${name} ${ok ? 'passed' : 'FAILED'} in ${(ms / 1000).toFixed(1)}s\n`);
+  process.exit(ok ? 0 : 1);
+}
+
+function readGateRuns(since) {
+  if (!fs.existsSync(gatesLog())) return [];
+  return fs.readFileSync(gatesLog(), 'utf8').split('\n').filter(Boolean).flatMap((l) => {
+    try {
+      const r = JSON.parse(l);
+      return Date.parse(r.ts) >= since ? [r] : [];
+    } catch {
+      return [];
+    }
+  });
+}
+
+function gateStats(runs) {
+  const byGate = new Map();
+  for (const r of runs) (byGate.get(r.gate) ?? byGate.set(r.gate, []).get(r.gate)).push(r);
+  const gates = [];
+  const flakyGates = [];
+  for (const [g, rs] of byGate) {
+    const bySha = new Map();
+    for (const r of rs) (bySha.get(r.sha) ?? bySha.set(r.sha, []).get(r.sha)).push(r);
+    const flakyShas = [...bySha.entries()].filter(([, x]) => x.some((r) => r.ok) && x.some((r) => !r.ok)).map(([sha]) => sha);
+    if (flakyShas.length) flakyGates.push({ gate: g, commits: flakyShas.length });
+    gates.push({ gate: g, runs: rs.length, fail_rate: +(rs.filter((r) => !r.ok).length / rs.length).toFixed(2), median_seconds: +(median(rs.map((r) => r.ms)) / 1000).toFixed(1), max_seconds: +(Math.max(...rs.map((r) => r.ms)) / 1000).toFixed(1) });
+  }
+  // A test that failed in a run, at a commit where the same gate later passed, is flaky.
+  const flakyTests = new Map();
+  const testMs = new Map();
+  for (const r of runs) {
+    for (const t of r.tests ?? []) {
+      if (!t.failed) (testMs.get(t.name) ?? testMs.set(t.name, []).get(t.name)).push(t.ms);
+      if (t.failed && runs.some((o) => o !== r && o.gate === r.gate && o.sha === r.sha && o.ok && Date.parse(o.ts) >= Date.parse(r.ts))) {
+        flakyTests.set(t.name, (flakyTests.get(t.name) ?? 0) + 1);
+      }
+    }
+  }
+  return {
+    gates: gates.sort((a, b) => b.median_seconds - a.median_seconds),
+    flaky_gates: flakyGates,
+    flaky_tests: [...flakyTests.entries()].sort((a, b) => b[1] - a[1]).map(([name, times]) => ({ name, times })),
+    slowest_tests: [...testMs.entries()].map(([name, xs]) => ({ name, median_seconds: +(median(xs) / 1000).toFixed(1) })).sort((a, b) => b.median_seconds - a.median_seconds).slice(0, 10),
+  };
+}
+
+function collectMetrics(since) {
   const { tickets } = loadGraph();
+  const settings = loadSettings();
+  const now = Date.now();
   const events = readEvents().filter((e) => Date.parse(e.ts) >= since);
 
   // Cycle time: first worker.made for a ticket -> its merge commit's time.
   const started = new Map();
   for (const e of events) if (e.type === 'worker.made' && e.ticket && !started.has(e.ticket)) started.set(e.ticket, Date.parse(e.ts));
   const cycles = [];
-  let costSum = 0;
-  let costCount = 0;
   for (const id of tickets.keys()) {
     const sha = mergeShaFor(id);
     if (!sha) continue;
     const mergedAt = Date.parse(git(['show', '-s', '--format=%cI', sha]) ?? '');
     if (Number.isNaN(mergedAt) || mergedAt < since) continue;
     if (started.has(id)) cycles.push({ id, ms: mergedAt - started.get(id) });
-    const usd = readRunTicket(id)?.cost?.usd;
-    if (typeof usd === 'number') {
-      costSum += usd;
-      costCount++;
-    }
   }
   cycles.sort((a, b) => b.ms - a.ms);
 
-  // Time in each phase, from consecutive ticket.phase events ("<prev> -> <next>").
+  // Time in each phase, from consecutive ticket.phase events ("<prev> -> <next>"); the current
+  // phase of a live ticket counts up to now.
   const phaseMs = {};
+  const phaseNow = new Map(); // ticket -> { phase, sinceMs }
   const byTicket = new Map();
   for (const e of events) if (e.type === 'ticket.phase' && e.ticket) (byTicket.get(e.ticket) ?? byTicket.set(e.ticket, []).get(e.ticket)).push(e);
-  for (const evs of byTicket.values()) {
-    for (let i = 0; i < evs.length - 1; i++) {
+  for (const [id, evs] of byTicket) {
+    for (let i = 0; i < evs.length; i++) {
       const phase = evs[i].summary?.match(/-> ([a-z-]+)/)?.[1];
-      if (phase) phaseMs[phase] = (phaseMs[phase] ?? 0) + (Date.parse(evs[i + 1].ts) - Date.parse(evs[i].ts));
+      if (!phase) continue;
+      const endMs = i + 1 < evs.length ? Date.parse(evs[i + 1].ts) : (['done', 'parked'].includes(phase) ? Date.parse(evs[i].ts) : now);
+      phaseMs[phase] = (phaseMs[phase] ?? 0) + (endMs - Date.parse(evs[i].ts));
+      if (i === evs.length - 1) phaseNow.set(id, { phase, sinceMs: Date.parse(evs[i].ts) });
     }
   }
+
+  // Cost in each phase: each cost sample's increase over the previous sample for the same session.
+  const phaseUsd = {};
+  const ticketUsd = {};
+  const lastUsd = new Map();
+  for (const e of events.filter((x) => x.type === 'cost')) {
+    const key = e.ticket ?? e.actor;
+    const delta = Math.max(0, (e.usd ?? 0) - (lastUsd.get(key) ?? 0));
+    lastUsd.set(key, e.usd ?? 0);
+    phaseUsd[e.phase ?? 'unknown'] = (phaseUsd[e.phase ?? 'unknown'] ?? 0) + delta;
+    ticketUsd[key] = (ticketUsd[key] ?? 0) + delta;
+  }
+  const mergedIds = new Set(cycles.map((c) => c.id));
+  const mergedCosts = [...mergedIds].filter((id) => ticketUsd[id] !== undefined).map((id) => ticketUsd[id]);
 
   // Coordination: reply time for messages that expect one; owner question answer time.
   const msgs = events.filter((e) => e.type === 'message');
   const replies = new Map();
   for (const m of msgs) if (m.re && !replies.has(m.re)) replies.set(m.re, Date.parse(m.ts));
-  const expecting = msgs.filter((m) => m.kind !== 'info' && m.kind !== 'ruling' && m.kind !== 'answer');
+  const expecting = msgs.filter((m) => !['info', 'ruling', 'answer'].includes(m.kind));
+  const openMsgs = expecting.filter((m) => !replies.has(m.id));
   const msgWaits = expecting.filter((m) => replies.has(m.id)).map((m) => replies.get(m.id) - Date.parse(m.ts));
   const qs = readQuestions().filter((q) => Date.parse(q.asked_at) >= since);
   const qWaits = qs.filter((q) => q.answered_at).map((q) => Date.parse(q.answered_at) - Date.parse(q.asked_at));
   const openQs = qs.filter((q) => q.status === 'open');
 
-  const out = {
+  const reviews = reviewStats(tickets);
+  const gates = gateStats(readGateRuns(since));
+  const round = (o) => Object.fromEntries(Object.entries(o).sort((a, b) => b[1] - a[1]).map(([k, v]) => [k, +v.toFixed(2)]));
+
+  const m = {
     since: since ? new Date(since).toISOString() : null,
     tickets_merged: cycles.length,
-    cycle_hours: { median: hours(median(cycles.map((c) => c.ms))), slowest: cycles.slice(0, 3).map((c) => ({ id: c.id, hours: hours(c.ms) })) },
-    phase_hours_total: Object.fromEntries(Object.entries(phaseMs).sort((a, b) => b[1] - a[1]).map(([k, v]) => [k, hours(v)])),
-    reviews: reviewStats(tickets),
-    messages: { expecting_reply: expecting.length, still_open: expecting.filter((m) => !replies.has(m.id)).length, median_reply_minutes: msgWaits.length ? +(median(msgWaits) / 60000).toFixed(1) : null },
-    owner_questions: { asked: qs.length, open: openQs.length, median_answer_hours: hours(median(qWaits)), oldest_open_hours: openQs.length ? hours(Date.now() - Math.min(...openQs.map((q) => Date.parse(q.asked_at)))) : null },
-    cost: { usd_per_merged_ticket: costCount ? +(costSum / costCount).toFixed(2) : null, tickets_with_cost: costCount },
+    cycle_hours: { median: hours(median(cycles.map((c) => c.ms))), slowest: cycles.slice(0, 5).map((c) => ({ id: c.id, hours: hours(c.ms) })) },
+    phase_hours: Object.fromEntries(Object.entries(round(phaseMs)).map(([k, v]) => [k, hours(v)])),
+    phase_usd: round(phaseUsd),
+    cost: { usd_total: +Object.values(ticketUsd).reduce((a, b) => a + b, 0).toFixed(2), usd_per_merged_ticket: mergedCosts.length ? +(mergedCosts.reduce((a, b) => a + b, 0) / mergedCosts.length).toFixed(2) : null, by_ticket: round(ticketUsd) },
+    reviews,
+    gates,
+    messages: { expecting_reply: expecting.length, still_open: openMsgs.length, median_reply_minutes: msgWaits.length ? +(median(msgWaits) / 60000).toFixed(1) : null },
+    owner_questions: { asked: qs.length, open: openQs.length, median_answer_hours: hours(median(qWaits)), oldest_open_hours: openQs.length ? hours(now - Math.min(...openQs.map((q) => Date.parse(q.asked_at)))) : null },
     escaped_defects: events.filter((e) => e.type === 'defect.escaped').length,
   };
-  if (flags.json) return void process.stdout.write(`${JSON.stringify(out, null, 2)}\n`);
+
+  // Findings: inefficiencies and blockers, each with a suggested next step.
+  const f = [];
+  const add = (severity, kind, subject, detail, suggestion) => f.push({ severity, kind, subject, detail, suggestion });
+  for (const g of gates.flaky_gates) add('high', 'flaky-gate', g.gate, `failed then passed at the same commit ${g.commits} time(s)`, 'find the flaky tests (run with --junit) and fix or quarantine them; a flake costs a full re-run every time');
+  for (const t of gates.flaky_tests.slice(0, 10)) add('high', 'flaky-test', t.name, `failed then passed at the same commit ${t.times} time(s)`, 'make it deterministic (time, order, shared state, network) or quarantine it with a ticket to fix');
+  const slowGate = settings.slow_gate_minutes ?? 10;
+  for (const g of gates.gates.filter((x) => x.median_seconds >= slowGate * 60)) add('medium', 'slow-gate', g.gate, `median ${(g.median_seconds / 60).toFixed(1)} min over ${g.runs} run(s)`, 'run it in parallel shards, cache dependencies, or split fast checks from slow ones');
+  for (const t of gates.slowest_tests.slice(0, 5).filter((x) => x.median_seconds >= 10)) add('low', 'slow-test', t.name, `median ${t.median_seconds}s`, 'mock the slow dependency or move it to an integration suite');
+  const totalPhase = Object.values(phaseMs).reduce((a, b) => a + b, 0);
+  const [topPhase, topMs] = Object.entries(phaseMs).filter(([k]) => !['done', 'parked'].includes(k)).sort((a, b) => b[1] - a[1])[0] ?? [];
+  if (topPhase && totalPhase && topMs / totalPhase > 0.4) add('medium', 'phase-hotspot', topPhase, `${Math.round((100 * topMs) / totalPhase)}% of all ticket time`, 'look at why tickets sit here: waiting on reviews, slots, gates or answers');
+  const totalUsd = Object.values(phaseUsd).reduce((a, b) => a + b, 0);
+  const [costPhase, costUsd] = Object.entries(phaseUsd).sort((a, b) => b[1] - a[1])[0] ?? [];
+  if (costPhase && totalUsd && costUsd / totalUsd > 0.5) add('medium', 'cost-hotspot', costPhase, `${Math.round((100 * costUsd) / totalUsd)}% of spend ($${costUsd.toFixed(2)})`, 'check context size and model choice for this phase; route routine steps to a cheaper model');
+  for (const [id, p] of phaseNow) {
+    const h = (now - p.sinceMs) / 3600000;
+    if (p.phase === 'blocked' && h >= 1) add('high', 'blocked', id, `blocked for ${h.toFixed(1)}h`, 'answer its message, re-plan, or park it');
+    if (p.phase === 'awaiting-word' && h >= 1) add('medium', 'waiting-on-supervisor', id, `waiting for the merge word for ${h.toFixed(1)}h`, 'verify and merge, or say what is missing');
+  }
+  for (const id of tickets.keys()) {
+    const run = readRunTicket(id);
+    const age = run?.heartbeat_at ? (now - Date.parse(run.heartbeat_at)) / 60000 : null;
+    if (run && !['done', 'parked'].includes(run.phase) && age > (settings.stale_after_minutes ?? 30)) add('high', 'stale-worker', id, `no heartbeat for ${Math.round(age)} min (phase ${run.phase})`, 'check its pane; recover it (supervisor.md §11)');
+  }
+  for (const msg of openMsgs.filter((x) => now - Date.parse(x.ts) > 30 * 60000)) add('medium', 'unanswered-message', msg.id, `${msg.kind} from ${msg.actor}, ${Math.round((now - Date.parse(msg.ts)) / 60000)} min old`, `reply with --re ${msg.id}`);
+  for (const q of openQs.filter((x) => now - Date.parse(x.asked_at) > (settings.question_default_after_hours ?? 24) * 3600000)) add('high', 'owner-question-waiting', q.id, q.question.slice(0, 120), q.default ? 'apply its default' : 'remind the owner; it blocks work');
+  for (const [id, n] of Object.entries(reviewPasses(tickets)).filter(([, n]) => n >= 3)) add('medium', 'review-churn', id, `${n} final review passes`, 'the ticket may be too big or under-specified; consider re-planning it');
+  const ready = [...tickets.values()].filter((t) => isActive(t) && !mergeShaFor(t.id) && !activeWorker(t.id) && (t.depends_on ?? []).every((d) => mergeShaFor(d)));
+  const active = [...tickets.keys()].filter(activeWorker).length;
+  if (ready.length && active < settings.max_active_tickets) add('medium', 'idle-capacity', `${ready.length} ready`, `${active}/${settings.max_active_tickets} workers active`, `make workers for: ${ready.slice(0, 5).map((t) => t.id).join(', ')}`);
+  if (m.escaped_defects) add('high', 'escaped-defects', `${m.escaped_defects}`, 'defects found after merge', 'retro: which review or gate should have caught each one');
+  const order = { high: 0, medium: 1, low: 2 };
+  m.findings = f.sort((a, b) => order[a.severity] - order[b.severity]);
+  return m;
+}
+
+// Highest final-review pass number per ticket (from the branch before merge, main after).
+function reviewPasses(tickets) {
+  const out = {};
+  for (const id of tickets.keys()) {
+    const branch = ticketBranchRef(id);
+    const finals = ticketReviews(id, branch && !mergeShaFor(id) ? { ref: branch } : WORKTREE).filter((r) => r.stage === 'final');
+    if (finals.length) out[id] = Math.max(...finals.map((r) => r.pass));
+  }
+  return out;
+}
+
+function sinceFlag() {
+  const since = flagStr('since') ? Date.parse(flagStr('since')) : 0;
+  if (Number.isNaN(since)) die('--since must be a date, e.g. 2026-10-01');
+  return since;
+}
+
+function cmdMetrics() {
+  const m = collectMetrics(sinceFlag());
+  if (flags.json) return void process.stdout.write(`${JSON.stringify(m, null, 2)}\n`);
+  const kv = (o, unit = '') => Object.entries(o).map(([k, v]) => `${k} ${unit}${v}`).join(', ') || '-';
   const lines = [
-    `since: ${out.since ?? 'the beginning'}`,
-    `tickets merged: ${out.tickets_merged}; median cycle ${out.cycle_hours.median ?? '-'}h; slowest ${out.cycle_hours.slowest.map((c) => `${c.id} ${c.hours}h`).join(', ') || '-'}`,
-    `time by phase (h): ${Object.entries(out.phase_hours_total).map(([k, v]) => `${k} ${v}`).join(', ') || '-'}`,
-    `first-pass rejection: ${Object.entries(out.reviews.by_stage).map(([k, v]) => `${k} ${v.rejected}/${v.first_passes}`).join(', ') || '-'}; false positives ${out.reviews.false_positive_rate ?? '-'}`,
-    `messages: ${out.messages.still_open} of ${out.messages.expecting_reply} awaiting reply; median reply ${out.messages.median_reply_minutes ?? '-'} min`,
-    `owner questions: ${out.owner_questions.open} open of ${out.owner_questions.asked}; median answer ${out.owner_questions.median_answer_hours ?? '-'}h; oldest open ${out.owner_questions.oldest_open_hours ?? '-'}h`,
-    `cost per merged ticket: ${out.cost.usd_per_merged_ticket === null ? '- (no cost reported)' : `$${out.cost.usd_per_merged_ticket}`}`,
-    `escaped defects: ${out.escaped_defects}`,
+    `since: ${m.since ?? 'the beginning'}`,
+    `tickets merged: ${m.tickets_merged}; median cycle ${m.cycle_hours.median ?? '-'}h; slowest ${m.cycle_hours.slowest.map((c) => `${c.id} ${c.hours}h`).join(', ') || '-'}`,
+    `time by phase (h): ${kv(m.phase_hours)}`,
+    `cost by phase: ${kv(m.phase_usd, '$')}; total $${m.cost.usd_total}; per merged ticket ${m.cost.usd_per_merged_ticket === null ? '-' : `$${m.cost.usd_per_merged_ticket}`}`,
+    `gates (median): ${m.gates.gates.map((g) => `${g.gate} ${g.median_seconds}s (fail ${Math.round(g.fail_rate * 100)}%)`).join(', ') || '- (run gates through `devteam.mjs gate`)'}`,
+    `first-pass rejection: ${Object.entries(m.reviews.by_stage).map(([k, v]) => `${k} ${v.rejected}/${v.first_passes}`).join(', ') || '-'}; false positives ${m.reviews.false_positive_rate ?? '-'}`,
+    `messages: ${m.messages.still_open} of ${m.messages.expecting_reply} awaiting reply; median reply ${m.messages.median_reply_minutes ?? '-'} min`,
+    `owner questions: ${m.owner_questions.open} open of ${m.owner_questions.asked}; median answer ${m.owner_questions.median_answer_hours ?? '-'}h`,
+    `escaped defects: ${m.escaped_defects}`,
+    '',
+    m.findings.length ? 'findings:' : 'findings: none',
+    ...m.findings.map((x) => `  [${x.severity}] ${x.kind}: ${x.subject} (${x.detail}) -> ${x.suggestion}`),
   ];
   process.stdout.write(`${lines.join('\n')}\n`);
+}
+
+// Everything the dashboard shows, in one file: run/dashboard.json (and stdout with --json).
+function cmdDashboardData() {
+  const { tickets } = loadGraph();
+  const settings = loadSettings();
+  const status = deriveStatus(tickets);
+  const sub = new Map([...tickets].filter(([, t]) => isActive(t)));
+  const data = {
+    generated_at: nowIso(),
+    project: settings.project ?? null,
+    caps: { max_active_tickets: settings.max_active_tickets, max_active_per_component: settings.max_active_per_component },
+    tickets: status,
+    critical_path: findCycle(sub) ? [] : criticalPath(sub).path,
+    questions: rankQuestions(readQuestions().filter((q) => q.status === 'open'), tickets),
+    open_messages: (() => {
+      const msgs = readEvents().filter((e) => e.type === 'message');
+      const replied = new Set(msgs.map((e) => e.re).filter(Boolean));
+      return msgs.filter((e) => !['info', 'ruling', 'answer'].includes(e.kind) && !replied.has(e.id));
+    })(),
+    metrics: collectMetrics(sinceFlag()),
+  };
+  writeJson(path.join(runDir, 'dashboard.json'), data);
+  if (flags.json) process.stdout.write(`${JSON.stringify(data)}\n`);
+  else process.stdout.write(`wrote ${path.join(runDir, 'dashboard.json')}\n`);
 }
 
 const HELP = `devteam <command>   (put positional arguments before flags)
@@ -1354,8 +1553,10 @@ Run state and history
   event --type t [--ticket id] [--sha s] [--summary s] [--ref r]
   history [<id>] [--tail n]       events and answered questions, to catch up on history
 
-Improvement (process/improvement.md)
-  metrics [--since date] [--json] cycle time, phase time, review, coordination, cost and defect numbers
+Improvement and analytics (process/improvement.md)
+  gate <name> [--junit report.xml] -- <command…>   run a gate, recording time, pass/fail and test results
+  metrics [--since date] [--json] time and cost by phase, gates, reviews, coordination, findings
+  dashboard-data [--since date] [--json]   write run/dashboard.json for the dashboard
 
 Other
   notes <from-tag> [<to>]         story-grouped release notes
@@ -1384,6 +1585,8 @@ const COMMANDS = {
   history: cmdHistory,
   notes: cmdNotes,
   metrics: cmdMetrics,
+  gate: cmdGate,
+  'dashboard-data': cmdDashboardData,
   whoami: cmdWhoami,
   settings: cmdSettings,
 };

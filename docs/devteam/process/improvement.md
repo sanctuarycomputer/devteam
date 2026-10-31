@@ -14,19 +14,31 @@ The supervisor runs it on quiet ticks, within the time and spend limits in the s
 
 ## 2. Measure
 
-`devteam.mjs metrics [--since <date>] [--json]` reports, from git, the event log, review records and run state:
+Three sources feed the numbers, and each depends on sessions recording as they go:
+
+- **Phases and cost:** workers heartbeat at every phase change and report their cumulative spend (`devteam.mjs heartbeat --phase <p> --usd <total> --in <tokens> --out <tokens>`; `worker.md` §4). Each report charges the spend since the last one to the phase that was running.
+- **Gates:** every local gate run goes through `devteam.mjs gate <name> [--junit <report.xml>] -- <command>`, which records duration, pass or fail, the commit, and (with a JUnit report) each test's time and failures.
+- **Everything else:** git, review records, messages and owner questions.
+
+`devteam.mjs metrics [--since <date>] [--json]` turns them into:
 
 | Metric | What it tells you |
 |---|---|
 | cycle time per ticket (worker made → merged), median and slowest | where time goes |
-| time in each phase, from heartbeats | which stage is the bottleneck |
-| first-pass rejection rate per review stage, and passes per ticket | review strength and rework |
+| time and cost in each phase (spec, plan, build, verify, final-review, blocked, …) | which part of the loop is slow or expensive |
+| gate durations and fail rates; flaky gates and tests (failed, then passed at the same commit); slowest tests | what to speed up or stabilize |
+| first-pass rejection rate per review stage, review passes per ticket | review strength and rework |
 | how long messages wait for a reply, and owner questions for an answer | coordination drag |
-| cost per merged ticket, where reported | spend efficiency |
+| cost total, per ticket and per merged ticket | spend efficiency |
 | escaped defects (`defect.escaped` events) | quality, the number that must not rise |
-| idle workers, waves with spare width | unused capacity |
 
-Write a short dated snapshot to `project/improvement/metrics.md` at each retro so trends survive restarts.
+It also lists **findings**: blockers and inefficiencies with a suggested next step, highest severity first. Flaky gates and tests, slow gates and tests, the phase taking most of the time or money, blocked tickets, workers with stale heartbeats, merge requests waiting on the supervisor, unanswered messages, owner questions past their deadline, tickets churning through review, spare capacity while ready tickets wait, and escaped defects. Each finding is a candidate for a proposal (§4); the cheap, obvious ones (fix a flaky test, shard a slow suite) can go straight into a chore ticket.
+
+### The dashboard
+
+`devteam.mjs dashboard-data` writes all of this, plus ticket status, the critical path, open owner questions and messages awaiting a reply, to `run/dashboard.json`. The supervisor refreshes it every tick. `node docs/devteam/scripts/dashboard.mjs` serves a local page (http://127.0.0.1:4321) that shows it and lets the owner answer questions; it binds to localhost because anyone who can reach it can answer as the owner.
+
+Write a short dated snapshot of the metrics to `project/improvement/metrics.md` at each retro so trends survive restarts.
 
 ## 3. Where improvements come from
 

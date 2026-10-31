@@ -34,7 +34,8 @@ Run on a timer: about every 10 minutes when PRs are converging, 30 when quiet. A
 7. **Health:** any ticket whose heartbeat is older than `stale_after_minutes` in the settings (default 30) and whose pane shows no activity goes to recovery.
 8. **Improve:** on quiet ticks, run the improvement loop ([`improvement.md`](improvement.md)): retros, research and architecture spikes when they're due, upstream releases to check, trials to measure, roadmap or architecture recommendations to put to the owner, and general improvements to share upstream.
 9. **Notify** the owner only on a new blocking owner question or something they must act on now (`questions.md` §7).
-10. Write your own heartbeat: `devteam.mjs heartbeat --supervisor`.
+10. **Dashboard:** `devteam.mjs dashboard-data` to refresh `run/dashboard.json`, and act on any high-severity finding in it.
+11. Write your own heartbeat: `devteam.mjs heartbeat --supervisor` (with `--usd` if you can see your own spend).
 
 ## 4. Fixing drift
 

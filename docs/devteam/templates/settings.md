@@ -22,7 +22,7 @@ Scripts read this block. Keep it valid JSON.
     "<component>": { "path": "<dir>/", "stack": "<typescript|rails|python|go|rust|...>" }
   },
   "shared_resources": [],
-  "dashboard_command": null,
+  "dashboard_command": "node docs/devteam/scripts/dashboard.mjs",
   "notify": null,
   "worker_denied_commands": ["gh pr merge", "git push origin main", "git push origin HEAD:main"],
   "upstream_repo": "sanctuarycomputer/devteam",
@@ -30,7 +30,8 @@ Scripts read this block. Keep it valid JSON.
   "upstream_contributions": "ask",
   "retro_every_days": 7,
   "research_every_days": 7,
-  "improvement_budget_usd_per_week": null
+  "improvement_budget_usd_per_week": null,
+  "slow_gate_minutes": 10
 }
 ```
 

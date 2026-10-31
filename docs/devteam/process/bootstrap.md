@@ -41,7 +41,7 @@ Do not fix the whole codebase in this PR. If a gate fails on existing code, turn
 ## 4. Start
 
 1. Start the tmux session named in the settings with the supervisor in window 0: `tmux new-session -s devteam -n supervisor`, then launch the agent with the prompt in [`templates/supervisor-prompt.md`](../templates/supervisor-prompt.md).
-2. Start the dashboard if the project uses one (`settings.md` names its command).
+2. Start the dashboard: `node docs/devteam/scripts/dashboard.mjs` (or the `dashboard_command` in the settings), and give the owner the address.
 3. The supervisor reads [`supervisor.md`](supervisor.md) and, with no graph yet, begins [`planning.md`](planning.md) at P0 by asking the owner what to build.
 
 ## 5. Adopting into an existing codebase

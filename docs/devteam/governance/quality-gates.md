@@ -44,7 +44,7 @@ Each gate runs in one of two modes, recorded in the gate table in the settings: 
 
 ## 3. Default tools per stack
 
-Pick from this table; record the choice in the settings. Autofix runs before the check fails.
+Pick from this table; record the choice in the settings. Autofix runs before the check fails. Locally, run each gate through `devteam.mjs gate <name> -- <command>` (with `--junit` where the test runner can write a JUnit report), so its time and flakiness are measured (`process/improvement.md` §2).
 
 | Gate | TypeScript | Ruby/Rails | Python | Go | Rust |
 |---|---|---|---|---|---|

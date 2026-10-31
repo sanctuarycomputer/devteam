@@ -102,6 +102,39 @@
         "null"
       ],
       "description": "id of the message this one replies to"
+    },
+    "phase": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "cost samples: the phase the spend since the previous sample belongs to"
+    },
+    "usd": {
+      "type": "number",
+      "minimum": 0,
+      "description": "cost samples: cumulative spend for this session"
+    },
+    "input_tokens": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "output_tokens": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "gate": {
+      "type": "string",
+      "description": "gate.result: the gate's name"
+    },
+    "ok": {
+      "type": "boolean",
+      "description": "gate.result: passed or failed"
+    },
+    "ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "gate.result: duration"
     }
   }
 }
