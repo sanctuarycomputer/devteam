@@ -59,14 +59,14 @@ Planning designs changes against a picture of the system. For a new repo that pi
 - hotspots: the files most changed and most depended on, which will make footprints overlap;
 - tests and CI as they stand: what is covered, what is flaky, how long the suite takes.
 
-The baseline is reviewed like a design (`project/reviews/baseline/design-1.md`) and approved by the supervisor. Every later design's research (planning P1) starts from it and updates it in the same planning PR when it changes something the baseline describes.
+The baseline is reviewed like a design (`project/reviews/baseline/design-1.md`). During bootstrap there is no supervisor yet, so the bootstrapping agent approves it; the first supervisor re-reads it on startup and raises anything it disagrees with. Every later design's research (planning P1) starts from it and updates it in the same planning PR when it changes something the baseline describes.
 
 ### 5.2 Account for work already in flight
 
 Open PRs, active branches and tracker items are work the graph doesn't know about. For each:
 
 - **finish it outside devteam** if it is close to done: list it in the baseline's "In flight" table with the files it changes. Planning must not schedule a node whose `touches` overlap those files until it merges or is abandoned;
-- **adopt it** if it is early: write a graph node for it (in the column it belongs to, or `chores`), rename or recreate the branch as `node/<id>`, and let it continue through the item lifecycle from whichever stage its artefacts support;
+- **adopt it** if it is early: once a column plan covers it, write a graph node for it in that column, rename or recreate the branch as `node/<id>`, and let it continue through the item lifecycle from whichever stage its artefacts support. Until then, list it under In flight like finished-outside work. (Only `chore` and `spike` nodes may use the `chores` column, so cleanup and investigation branches can be adopted there straight away.)
 - **close it** if it is stale: ask the owner first (one batched question).
 
 Tracker items (issues, tickets) are inputs to planning, not nodes. A planner reads them at P0 and P1.

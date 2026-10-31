@@ -57,7 +57,7 @@ If the build reveals that the spec, plan, a contract or the node's `touches` is 
 1. Merge `origin/main` into the branch; resolve conflicts; re-run gates. Check that every answered question about your node is copied into the spec's or plan's Rulings section and marked with `devteam.mjs recorded`.
 2. Push. Open the PR (or mark it ready) with title `<node-id>: <title>` and the body from [`templates/pr-body.md`](../templates/pr-body.md).
 3. A fresh non-author runs the final review (`final-1.md`) over the whole branch. `risk: high` nodes get a second final review from a different session (`final-1b.md`).
-4. Fix, cold-confirm, until the latest final review says `APPROVE <head-sha>` at the current head.
+4. Fix, cold-confirm, until the latest final review in every lineage says `APPROVE` at a commit that holds at the current head (at its own commit, or at a later head whose only changes are newly added review records; `review.md` §1). Fill in dispositions on earlier records during the fix wave, before the confirming pass; once an approving verdict is committed, add only new record files after it (editing or deleting any record voids the approval).
 5. Commit and push everything, then run `devteam.mjs check-node <id> --title "<pr title>"`; it must pass at your pushed head. CI runs the same check as the required `merge-word` status.
 6. Ask the supervisor for the merge word, naming the exact head SHA (`devteam.mjs ask --kind merge-request --question "merge word for <id>"`; the script records your head).
 7. **Do not merge.** The supervisor verifies and merges itself (`supervisor.md` §6). Pushing anything after asking invalidates the request; ask again with the new head.

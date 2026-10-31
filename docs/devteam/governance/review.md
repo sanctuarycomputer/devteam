@@ -8,7 +8,7 @@ What counts as a review, how it is recorded, and how its quality is measured. Ad
 - **Adversarial.** The reviewer's job is to find the defect. Its default verdict is **not approved**; it approves only when it has looked and failed to find a Critical or Important issue.
 - **Against the rules, not taste.** Findings cite the governing text: a Law id from `code-style.md`, a line of the spec, a contract clause, a gate in `quality-gates.md`. A finding that cites nothing is a suggestion, and suggestions never block.
 - **Scoped.** The reviewer reads the diff and everything it cites, not the whole tree. Where a test cannot prove a property, the reviewer mutates the code in a scratch copy to check that a test fails.
-- **At an exact head.** A verdict names the commit it reviewed. It still holds at a later head only if every commit since then changes nothing but review records (committing the record itself moves the head). Any other later commit invalidates it.
+- **At an exact head.** A verdict names the commit it reviewed. Committing the record moves the head, so the verdict still holds at a later head **only if every commit since then just adds new review-record files**. Editing or deleting any review record, or changing any other file, invalidates it; so does merging `main` in. A dissenting record can't be quietly edited away: answer it with a new pass.
 
 ## 2. Stages that are reviewed
 

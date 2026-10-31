@@ -11,7 +11,7 @@ A node is done, and may receive the merge word, only when all of these hold at t
 1. Every done-when in the node file (`project/graph/<id>.json`) is met, and each is shown by a command or a test, not by a claim.
 2. `project/nodes/<id>/spec.md` and `plan.md` exist with `Status: approved`.
 3. `project/nodes/<id>/verification.md` exists and records each done-when with the command run and its result.
-4. A final review record exists with `Verdict: APPROVE <head-sha>` and no undispositioned Critical or Important finding (`review.md` §5). `risk: high` nodes have two, from different sessions.
+4. A final review record says `Verdict: APPROVE <sha>` at a commit that holds at the head (at its own commit, or at a later head whose only changes are newly added review records; `review.md` §1), and no Critical or Important finding is undispositioned (`review.md` §5). `risk: high` nodes have two, from different sessions.
 5. CI's required aggregate check is green at that head (a path-filtered skip counts as pass; a cancelled job counts as fail).
 6. The PR title is `<node-id>: <one line a user of the product could read>` and the branch is `node/<node-id>`.
 7. Any rulings received during the node are copied into the spec's or plan's Rulings section.

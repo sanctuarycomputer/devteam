@@ -7,4 +7,4 @@ This repository is built by a supervised fleet of agent sessions using devteam. 
 - asked to review: `docs/devteam/governance/review.md`
 - anything else: `docs/devteam/README.md`
 
-Project-specific answers live in `docs/devteam/project/binding.md`. Rules: stay inside your node's `touches`; stop and ask rather than invent; never merge without the supervisor's merge word for your exact head.
+Project-specific answers live in `docs/devteam/project/binding.md`. Rules: stay inside your node's `touches`; stop and ask rather than invent; workers never merge (ask the supervisor for the merge word with your exact head, and the supervisor merges).

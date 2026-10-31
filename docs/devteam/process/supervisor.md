@@ -63,7 +63,7 @@ You never merge on green alone and never on someone else's attestation. For each
 1. the PR is not a draft;
 2. the head SHA equals the one named, and is up to date with `main` (`mergeStateStatus` clean under strict; otherwise check ancestry yourself, `ci.md` §3);
 3. every CI check is green, including the required aggregate (a path-filtered skip is fine; a failure or cancellation is not);
-4. the final review record(s) say `APPROVE <that sha>`, written by the reviewer itself, not transcribed by the worker; two from different sessions for `risk: high`;
+4. the final review record(s) say `APPROVE` at a commit that holds at this head (at its own commit, or at a later head whose only changes are newly added review records; `review.md` §1), written by the reviewer itself, not transcribed by the worker; two from different sessions for `risk: high`;
 5. `devteam.mjs check-node <id>` passes at that head;
 6. any node-specific condition from a ruling (for example a rollback constraint) holds;
 7. the PR body's one-way-door section is `None.` or links the owner's answer.

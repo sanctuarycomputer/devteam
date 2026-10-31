@@ -337,7 +337,8 @@ let mainLogCache;
 function mainLog() {
   if (mainLogCache) return mainLogCache;
   const ref = mainRef();
-  const out = ref ? git(['log', ref, '--format=%H%x09%s']) : null;
+  // First-parent only: merge commits and squash commits are on it; a branch's own commits are not.
+  const out = ref ? git(['log', ref, '--first-parent', '--format=%H%x09%s']) : null;
   mainLogCache = (out ? out.split('\n') : []).filter(Boolean).map((l) => {
     const [sha, ...rest] = l.split('\t');
     return { sha, subject: rest.join('\t') };
@@ -693,6 +694,10 @@ function cmdValidate() {
 
     if (columnStatus(col) === 'approved') {
       const reviews = columnReviews(col);
+      for (const r of reviews) {
+        if (r.verdict && !r.reviewer) errors.push(`project/reviews/${col}/${r.file}: missing "- Reviewer:" line`);
+        if (r.verdict && !r.shaValid) errors.push(`project/reviews/${col}/${r.file}: verdict SHA must be the full 40-character commit SHA`);
+      }
       for (const stage of ['design', 'graph']) {
         const latest = latestPerLineage(reviews, stage);
         if (!latest.length) errors.push(`column "${col}" is approved but has no ${stage} review in project/reviews/${col}/ (planning.md P2, P5)`);
@@ -848,19 +853,26 @@ function checkNode(id, { sha: shaArg, title, body }) {
     if (r.verdict && !r.reviewer) fails.push(`${r.file}: missing "- Reviewer:" line; an unnamed review does not count`);
   }
   // A verdict made at commit V still holds at head H if V is an ancestor of H and the commits
-  // since V change nothing but this node's review records (committing the record moves the head).
+  // since V only ADD new review-record files (committing the record moves the head). Editing or
+  // deleting any record, or adding anything else, voids it: a dissent can't be quietly erased.
   const reviewsDir = projectInRepo ? `${projectRel}/nodes/${id}/reviews/` : null;
+  const recordName = /^[a-z]+-\d+[a-z]?\.md$/;
   const holdsAt = (v) => {
     if (!sha || !v || !/^[0-9a-f]{40}$/.test(v)) return false;
     if (v === sha) return true;
     if (!reviewsDir || git(['merge-base', '--is-ancestor', v, sha]) === null) return false;
-    const since = (git(['diff', '--name-only', v, sha]) ?? '').split('\n').filter(Boolean);
-    return since.every((f) => f.startsWith(reviewsDir));
+    // Check every commit, not the net diff: an add-then-delete would cancel out in a net diff.
+    if ((git(['rev-list', '--merges', `${v}..${sha}`]) ?? 'x').trim()) return false;
+    const since = (git(['log', '--no-renames', '--format=', '--name-status', `${v}..${sha}`]) ?? '').split('\n').filter(Boolean);
+    return since.every((l) => {
+      const [status, file] = l.split('\t');
+      return status === 'A' && file.startsWith(reviewsDir) && recordName.test(file.slice(reviewsDir.length));
+    });
   };
   const finalsAtHead = reviews.filter((r) => r.stage === 'final' && holdsAt(r.sha));
   const latest = latestPerLineage(finalsAtHead, 'final');
   if (!reviews.some((r) => r.stage === 'final')) fails.push('no final review record (reviews/final-<n>.md)');
-  else if (!latest.length) fails.push(`no final review holds at this head (${sha}): each must name a commit with nothing but review records after it`);
+  else if (!latest.length) fails.push(`no final review holds at this head (${sha}): a verdict holds only at its own commit, or at a later head whose only changes are newly added review records (review.md §1)`);
   for (const r of latest) if (r.verdict === 'CHANGES') fails.push(`${r.file}: latest final review at this head says CHANGES`);
   const approvers = new Set(latest.filter((r) => r.verdict === 'APPROVE' && r.reviewer && r.shaValid).map((r) => r.reviewer));
   const need = n.risk === 'high' ? 2 : 1;
@@ -871,6 +883,7 @@ function checkNode(id, { sha: shaArg, title, body }) {
 
   // Footprint: every changed file is inside touches or the node's own folder (worker.md §3).
   const base = mainRef() && sha ? git(['merge-base', mainRef(), sha]) : null;
+  if (commonDir && !base) fails.push(`cannot resolve main branch "${loadBinding().main_branch}" (or its merge base); footprint not checked`);
   if (base) {
     const changed = (git(['diff', '--name-only', base, sha]) ?? '').split('\n').filter(Boolean);
     const own = projectInRepo ? `${projectRel}/nodes/${id}/` : null;
@@ -984,7 +997,9 @@ function cmdAnswer() {
   if (!fs.existsSync(p)) die(`no question ${id}`);
   const q = readJson(p);
   if (q.status !== 'open') die(`${id} is already ${q.status}`);
-  const by = flagStr('by') ?? (currentActor() === 'supervisor' ? 'supervisor' : die('only the supervisor or the owner answers questions'));
+  const actor = currentActor();
+  if (actor !== 'supervisor') die('only the supervisor or the owner answers questions; run answer from the main checkout (--by is not verifiable, so workers and planners may not use it)');
+  const by = flagStr('by') ?? 'supervisor';
   if (!['supervisor', 'owner'].includes(by)) die('--by must be supervisor or owner');
   if (q.to === 'owner' && by !== 'owner' && !flags.defaulted) die(`${id} is addressed to the owner; only the owner answers it (or apply its default with --defaulted)`);
   if (flags.defaulted && !q.default) die(`${id} has no default to apply`);
