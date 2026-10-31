@@ -72,4 +72,4 @@ A PR that edits a workflow, branch rules, or a release key's usage is `risk: hig
 
 ## 8. Turning gates on
 
-The **gate table** in the settings maps each Law to the gate row in `quality-gates.md`, the CI step that runs it, and the ticket or chore that turned it on. A Law with no row there is Doctrine, not a gate. Bootstrap fills the day-one rows; each later commissioning is its own `chore-` PR.
+The **gate table** in the settings maps each Law to the gate row in `quality-gates.md`, the CI step that runs it, and the ticket or chore that turned it on. A Law with no row there is Doctrine, not a gate. Bootstrap fills the day-one rows; each gate turned on later is its own `chore-` PR.

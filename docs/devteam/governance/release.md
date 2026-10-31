@@ -12,7 +12,7 @@ Promotion is **by tag**, not by branch. Each ring gates the next. The default la
 |---|---|---|---|
 | **dev** | merge to `main` | artifacts built once, tagged with the commit SHA; deployed to the dev environment if the settings have one | `check` green on `main` |
 | **beta** | a `vX.Y.Z-rcN` tag | the **same artifacts** promoted (never rebuilt) to beta / canary users | soak: the beta soak window in the settings (default 24 h) with health checks clean |
-| **production** | a `vX.Y.Z` tag | the same artifacts promoted to everyone, in cohorts if the settings defines them | the owner can halt or roll back at any time |
+| **production** | a `vX.Y.Z` tag | the same artifacts promoted to everyone, in cohorts if the settings define them | the owner can halt or roll back at any time |
 
 ## 2. Trunk and tags, not branches
 
@@ -34,7 +34,7 @@ Promotion is **by tag**, not by branch. Each ring gates the next. The default la
 
 ## 5. Artifacts
 
-The settings keeps an **artifact inventory** table: what is built, where it is stored, how long it is kept, and what verifies it (digest, signature, boot-time check). Signing keys are named exactly once in workflow files; public halves are checked in and byte-compared by a gate.
+The settings keep an **artifact inventory** table: what is built, where it is stored, how long it is kept, and what verifies it (digest, signature, boot-time check). Signing keys are named exactly once in workflow files; public halves are checked in and byte-compared by a gate.
 
 ## 6. Changelog and tags
 
@@ -53,4 +53,4 @@ The settings keeps an **artifact inventory** table: what is built, where it is s
 
 ## 8. Operator checklist
 
-The settings links the project's release runbook: how to cut, cohort order, how to roll back. This doc never restates it.
+The settings link the project's release runbook: how to cut, cohort order, how to roll back. This doc never restates it.

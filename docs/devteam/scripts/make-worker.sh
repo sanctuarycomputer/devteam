@@ -3,7 +3,7 @@
 # the DEVTEAM_* environment, and the agent CLI from the settings.
 #
 #   make-worker.sh <ticket-id> [--resume]     worker for a ticket (resume uses resume_command from the settings)
-#   make-worker.sh --planner <feature>       planner on branch plan/<feature>
+#   make-worker.sh --planner <feature> [--resume]   planner on branch plan/<feature>
 #
 # Run from the main checkout. Requires git, tmux, node.
 set -euo pipefail
@@ -13,7 +13,8 @@ die() { echo "make-worker: $*" >&2; exit 1; }
 ROLE=worker
 RESUME=0
 if [[ "${1:-}" == "--planner" ]]; then
-  ROLE=planner; FEATURE="${2:-}"; [[ -n "$FEATURE" ]] || die "usage: make-worker.sh --planner <feature>"
+  ROLE=planner; FEATURE="${2:-}"; [[ -n "$FEATURE" ]] || die "usage: make-worker.sh --planner <feature> [--resume]"
+  [[ "${3:-}" == "--resume" ]] && RESUME=1
   NAME="plan-$FEATURE"; BRANCH="plan/$FEATURE"
 else
   TICKET="${1:-}"; [[ -n "$TICKET" ]] || die "usage: make-worker.sh <ticket-id> [--resume]"
@@ -68,7 +69,7 @@ else
 fi
 TARGET="$SESSION:$NAME"
 
-ENVLINE="export DEVTEAM_RUN='$RUN' DEVTEAM_SUPERVISOR='$SESSION:0' DEVTEAM_ROLE='$ROLE'"
+ENVLINE="export DEVTEAM_RUN='$RUN' DEVTEAM_SUPERVISOR='$SESSION:supervisor' DEVTEAM_ROLE='$ROLE'"
 [[ "$ROLE" == worker ]] && ENVLINE="$ENVLINE DEVTEAM_TICKET='$TICKET'"
 tmux send-keys -t "$TARGET" -l "$ENVLINE"; tmux send-keys -t "$TARGET" Enter
 tmux send-keys -t "$TARGET" -l "$AGENT \"\$(cat '$PROMPT_FILE')\""; tmux send-keys -t "$TARGET" Enter

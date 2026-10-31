@@ -10,7 +10,7 @@ node docs/devteam/scripts/devteam.mjs send api-07-session-tokens "Follow the con
 ```
 
 - **To:** `supervisor`, a ticket id (that ticket's worker), or a planner's window name (`plan-<feature>`).
-- The script types one line into the recipient's pane, like `[devteam design-change m-… from api-07-session-tokens] …`, and appends it to the event log (`run/events.jsonl`). It fails if the recipient's pane doesn't exist, so a message is never dropped silently.
+- The script types one line into the recipient's pane, like `[devteam design-change m-… from api-07-session-tokens] …`, and appends it to the event log (`run/events.jsonl`). It refuses if the recipient's window doesn't exist, or if no agent is running there (the pane is back at a shell prompt, where typed text would run as a command). Resume the recipient first (`make-worker.sh <id> --resume`).
 - **One line, at most 600 characters.** Lead with the point. Put detail in a file (the spec, a plan, a review record) and give its path.
 - **Reply with `--re <message-id>`** so the sender (and the supervisor's sweep) can tell what has been answered.
 
@@ -27,12 +27,12 @@ node docs/devteam/scripts/devteam.mjs send api-07-session-tokens "Follow the con
 | `answer` | supervisor → worker or planner, relaying an owner answer | none; record it (§4) |
 | `info` | anyone → anyone | none |
 
-Workers and planners address the supervisor. Two workers may message each other directly only for `info` (for example, a co-land; see `supervisor.md` §8). Decisions always come from the supervisor.
+Workers and planners address the supervisor. Only the supervisor sends `ruling` and `answer` (the script refuses anyone else). Two workers may message each other directly only for `info` (for example, a co-land; see `supervisor.md` §8). Decisions always come from the supervisor.
 
 ## 3. Receiving and catching up
 
 - A message arrives as typed input in your session. Agents that don't accept input while busy see it at their next prompt.
-- `devteam.mjs messages` lists messages sent to you; `messages --open` lists the ones that expect a reply and haven't had one. Run it after a restart, before anything else; scrollback is not the record.
+- `devteam.mjs messages` lists messages sent to you; `messages --open` lists the ones that expect a reply and haven't had one (rulings, answers and info expect none). Run it after a restart, before anything else; scrollback is not the record.
 - The supervisor runs `messages --open` on every tick as a backstop (`supervisor.md` §3).
 
 ## 4. Recording what was decided

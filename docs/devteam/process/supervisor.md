@@ -4,19 +4,19 @@ You are the supervisor: the one long-lived session that coordinates the fleet as
 
 ## 0. The shape in one paragraph
 
-The work is a graph of tickets, each one PR ([`planning.md`](planning.md)). You make one worker per ready ticket, each in its own git worktree and tmux window, up to the settings' caps. Workers run the ticket lifecycle and ask you questions through files. You answer, approve stages, grant shared resources, and give the merge word after verifying the PR yourself at its exact head. You run a timed loop that reconciles what the files say against what git, CI and the tmux panes show, fixes drift, and keeps work moving while the owner is away.
+The work is a graph of tickets, each one PR ([`planning.md`](planning.md)). You make one worker per ready ticket, each in its own git worktree and tmux window, up to the caps in the settings. Workers run the ticket lifecycle and message you ([`messages.md`](messages.md)). You answer, approve stages, grant shared resources, and give the merge word after verifying the PR yourself at its exact head. You run a timed loop that compares what the files say with what git, CI and the tmux panes show, fixes drift, and keeps work moving while the owner is away.
 
 ## 1. Starting up
 
 1. Read `project/settings.md` and `project/decisions.md`.
-2. Read the tail of `$DEVTEAM_RUN/events.jsonl` (`devteam.mjs history --tail 200`) every open owner question (`devteam.mjs questions`), and every message to you that hasn't been answered (`devteam.mjs messages --open`).
+2. Read the tail of `$DEVTEAM_RUN/events.jsonl` (`devteam.mjs history --tail 200`), every open owner question (`devteam.mjs questions`), and every message to you that hasn't been answered (`devteam.mjs messages --open`).
 3. Run `devteam.mjs status`. If there is no graph yet, or the owner has a new direction, run [`planning.md`](planning.md) (yourself or by making a planner with `make-worker.sh --planner <feature>`).
 4. Match windows to tickets: `tmux list-windows -t devteam` against `run/tickets/*.json`. Any ticket whose window is gone but whose phase is not `done` or `parked` goes to recovery (§11).
 5. Start the loop (§3).
 
 ## 2. Topology
 
-- **One tmux session** named in the settings (default `devteam`). Window 0 is you. One window per active ticket, named with the ticket id.
+- **One tmux session** named in the settings (default `devteam`). Your window is named `supervisor` (other sessions message you there). One window per active ticket, named with the ticket id.
 - **One worktree per ticket** at `.worktrees/<ticket-id>` on branch `ticket/<ticket-id>`, created from `origin/main`.
 - **Agent-agnostic launch.** `agent_command` in the settings starts a worker (for example `claude --dangerously-skip-permissions`, `codex`, `opencode`). `make-worker.sh` passes the bootstrap prompt as the final argument and sets `DEVTEAM_TICKET`, `DEVTEAM_RUN` and `DEVTEAM_SUPERVISOR`.
 - **Coordination is session-to-session messages** ([`messages.md`](messages.md)): `devteam.mjs send` types one line into the other session's pane and logs it. Questions are only for asking the owner ([`questions.md`](questions.md)). Type into a worker's pane by hand for **recovery only**.

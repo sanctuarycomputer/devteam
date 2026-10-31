@@ -21,7 +21,7 @@ Read, in this order, and nothing more until you need it:
 1. `docs/devteam/project/graph/<your-id>.json`: your scope, dependencies, `touches`, done-whens.
 2. `docs/devteam/project/tickets/<your-id>/` if it exists: you may be resuming. Your spec, plan, reviews and verification are the record of what has been done.
 3. `$DEVTEAM_RUN/tickets/<your-id>.json`: your last recorded phase and task.
-4. `node docs/devteam/scripts/devteam.mjs history <your-id>`: events, messages and owner answers about your ticket and its dependencies. Then `devteam.mjs messages --open` for anything sent to you that still needs action. **Read this before researching the codebase.** Someone may already have decided what you are about to investigate.
+4. `node docs/devteam/scripts/devteam.mjs history <your-id>`: events, messages and owner answers about your ticket and its dependencies. Then `devteam.mjs messages` for everything sent to you: make sure every `ruling` and `answer` is in your spec or plan. **Read this before researching the codebase.** Someone may already have decided what you are about to investigate.
 5. The feature plan and design your ticket belongs to, the sections your ticket cites.
 6. `docs/devteam/governance/code-style.md` and the settings, for the rules of your component's stack.
 

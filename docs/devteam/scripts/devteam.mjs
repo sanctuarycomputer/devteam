@@ -529,10 +529,12 @@ function tmux(args) {
   }
 }
 
+// The session:window of the pane running this command. TMUX_PANE pins it to our own pane;
+// without -t, tmux reports whichever window the client happens to have active.
 function tmuxHere() {
-  if (!process.env.TMUX) return null;
+  if (!process.env.TMUX || !process.env.TMUX_PANE) return null;
   try {
-    return execFileSync('tmux', ['display-message', '-p', '#S:#W'], { encoding: 'utf8' }).trim() || null;
+    return execFileSync('tmux', ['display-message', '-p', '-t', process.env.TMUX_PANE, '#S:#W'], { encoding: 'utf8' }).trim() || null;
   } catch {
     return null;
   }
@@ -559,7 +561,8 @@ function currentActor() {
   return 'supervisor';
 }
 
-const supervisorTarget = () => process.env.DEVTEAM_SUPERVISOR ?? `${loadSettings().tmux_session}:0`;
+// The supervisor's window is named 'supervisor' (bootstrap.md §4); index 0 is the fallback.
+const supervisorTarget = () => process.env.DEVTEAM_SUPERVISOR ?? `${loadSettings().tmux_session}:supervisor`;
 
 // ---------- derived status ----------
 
@@ -1001,7 +1004,7 @@ function cmdAnswer() {
   q.status = flags.defaulted ? 'defaulted' : 'answered';
   writeJson(p, q);
   appendEvent({ type: flags.defaulted ? 'question.defaulted' : 'question.answered', actor: flags.defaulted ? 'supervisor' : 'owner', ticket: q.ticket, summary: q.answer.slice(0, 280), ref: `run/questions/${id}.json` });
-  if (!flags.defaulted) nudge(supervisorTarget(), `[devteam answer ${id} from owner] ${q.answer.replace(/\s+/g, ' ').slice(0, 400)}`);
+  if (!flags.defaulted) safeNudge(supervisorTarget(), `[devteam answer ${id} from owner] ${q.answer.replace(/\s+/g, ' ').slice(0, 400)}`);
   process.stdout.write(`answered ${id}\n`);
 }
 
@@ -1013,7 +1016,7 @@ function cmdSyncQuestions() {
     const ref = `run/questions/${q.id}.json`;
     if (!['answered', 'defaulted'].includes(q.status) || logged.has(ref)) continue;
     appendEvent({ type: q.status === 'defaulted' ? 'question.defaulted' : 'question.answered', actor: 'owner', ticket: q.ticket, summary: (q.answer ?? '').slice(0, 280), ref });
-    nudge(supervisorTarget(), `[devteam answer ${q.id} from owner] ${(q.answer ?? '').replace(/\s+/g, ' ').slice(0, 400)}`);
+    safeNudge(supervisorTarget(), `[devteam answer ${q.id} from owner] ${(q.answer ?? '').replace(/\s+/g, ' ').slice(0, 400)}`);
     n++;
   }
   process.stdout.write(`synced ${n} answer(s)\n`);
@@ -1062,27 +1065,54 @@ function cmdQuestions() {
 function myAddress() {
   const actor = currentActor();
   if (actor !== 'planner') return actor;
-  return tmuxHere()?.split(':').pop() ?? 'planner';
+  const win = tmuxHere()?.split(':').pop();
+  if (win) return win;
+  const b = git(['rev-parse', '--abbrev-ref', 'HEAD']);
+  return b?.startsWith('plan/') ? `plan-${b.slice('plan/'.length)}` : 'planner';
 }
 
 function addressTarget(to) {
   return to === 'supervisor' ? supervisorTarget() : `${loadSettings().tmux_session}:${to}`;
 }
 
-// Exact match on the window name or index; tmux's own target lookup is too forgiving.
-function paneExists(target) {
+// Resolve a session:window target exactly (tmux's own lookup is too forgiving) and check that an
+// agent, not a bare shell, is running there. Typing a message into a shell would execute it.
+const SHELLS = new Set(['bash', 'zsh', 'sh', 'fish', 'dash', 'ksh', 'tcsh', 'csh', 'login']);
+function resolvePane(target) {
   const i = target.lastIndexOf(':');
   const [session, win] = i === -1 ? [target, '0'] : [target.slice(0, i), target.slice(i + 1)];
+  let out;
   try {
     // tmux rewrites tabs in format output, so separate with a space (window names here have none).
-    const out = execFileSync('tmux', ['list-windows', '-t', session, '-F', '#{window_index} #{window_name}'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-    return out.split('\n').some((l) => {
-      const sp = l.indexOf(' ');
-      return sp > 0 && (l.slice(0, sp) === win || l.slice(sp + 1) === win);
-    });
+    out = execFileSync('tmux', ['list-windows', '-t', session, '-F', '#{window_index} #{window_name}'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
   } catch {
+    return { problem: `no tmux session "${session}"` };
+  }
+  const rows = out.split('\n').filter(Boolean).map((l) => [l.slice(0, l.indexOf(' ')), l.slice(l.indexOf(' ') + 1)]);
+  let row = rows.find(([idx, name]) => name === win || idx === win);
+  if (!row && win === 'supervisor') row = rows.find(([idx]) => idx === '0');
+  if (!row) return { problem: `no tmux window "${win}" in session "${session}"; is that session running?` };
+  const exact = `${session}:${row[0]}`;
+  let info = '';
+  try {
+    info = execFileSync('tmux', ['display-message', '-p', '-t', exact, '#{pane_dead} #{pane_current_command}'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  } catch {
+    return { problem: `cannot inspect ${exact}` };
+  }
+  const [dead, cmd = ''] = info.split(' ');
+  if (dead === '1') return { problem: `the pane in ${exact} has exited` };
+  if (SHELLS.has(cmd.replace(/^-/, ''))) return { problem: `no agent is running in ${exact} (it is at a ${cmd} prompt); resume it first` };
+  return { target: exact };
+}
+
+// Type a notice into a pane only if an agent is running there; otherwise warn.
+function safeNudge(target, line) {
+  const { target: exact, problem } = resolvePane(target);
+  if (problem) {
+    warn(`not delivered to ${target}: ${problem}`);
     return false;
   }
+  return nudge(exact, line);
 }
 
 const MESSAGE_MAX = 600;
@@ -1095,10 +1125,13 @@ function cmdSend() {
   const kind = flagStr('kind') ?? 'info';
   if (!MESSAGE_KINDS.includes(kind)) die(`--kind must be one of ${MESSAGE_KINDS.join(', ')}`);
   const from = myAddress();
-  const target = addressTarget(to);
-  if (!paneExists(target)) die(`no tmux pane for "${to}" (${target}); is that session running?`);
+  // P8: decisions come only from the supervisor.
+  if (['ruling', 'answer'].includes(kind) && from !== 'supervisor') die(`only the supervisor sends ${kind} messages (messages.md §2)`);
+  const { target, problem } = resolvePane(addressTarget(to));
+  if (problem) die(`cannot message "${to}": ${problem}`);
   const sha = flagStr('sha') ?? (kind === 'merge-request' ? git(['rev-parse', 'HEAD']) : null);
   const re = flagStr('re') ?? null;
+  if (re && !readEvents().some((e) => e.type === 'message' && e.id === re)) warn(`--re ${re} matches no logged message`);
   const id = stampId('m', from);
   const line = `[devteam ${kind} ${id} from ${from}${re ? ` re ${re}` : ''}${sha ? ` @ ${sha}` : ''}] ${text}`;
   if (!nudge(target, line)) die(`could not type into ${target}`);
@@ -1112,7 +1145,7 @@ function cmdMessages() {
   const all = readEvents().filter((e) => e.type === 'message');
   const replied = new Set(all.map((e) => e.re).filter(Boolean));
   let mine = all.filter((e) => e.to === me);
-  if (flags.open) mine = mine.filter((e) => !replied.has(e.id) && e.kind !== 'info');
+  if (flags.open) mine = mine.filter((e) => !replied.has(e.id) && !['info', 'ruling', 'answer'].includes(e.kind));
   mine = mine.slice(-tail);
   if (flags.json) return void process.stdout.write(`${JSON.stringify(mine, null, 2)}\n`);
   if (!mine.length) return void process.stdout.write(flags.open ? 'no open messages\n' : 'no messages\n');

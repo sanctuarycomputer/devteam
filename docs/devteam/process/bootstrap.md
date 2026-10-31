@@ -30,7 +30,7 @@ Survey the repo first (languages, frameworks, components, existing CI, existing 
 - shared resources that need slots, if any;
 - how the owner wants to be notified.
 
-Record each answer in the settings with its date. (During bootstrap there is no supervisor yet, so you ask the owner directly, in the conversation or in one batch of question files with `--from supervisor`.)
+Record each answer in the settings with its date. (During bootstrap there is no supervisor yet, so you ask the owner directly, in the conversation or as a batch of `devteam.mjs ask` questions run from the main checkout. There is no supervisor pane yet, so answers simply land in the question files.)
 
 ## 3. Turn on the day-one gates
 
@@ -77,7 +77,7 @@ The code rules (`code-style.md`) apply in full to **new and changed code**. Exis
 
 - **Ratchet mode** for a gate: record the current violation count per component in the Known debt section of the settings. The gate fails if the count goes up, or if a file a PR changes has a violation in a line it changed. It never fails on untouched legacy code.
 - A worker that needs to change legacy code inside its `touches` brings the lines it changes up to the code rules and leaves the rest alone. A larger cleanup is its own ticket.
-- Each gate moves from ratchet to enforced when its chore ticket lands, and the gate table in the settings say so.
+- Each gate moves from ratchet to enforced when its chore ticket lands, and the gate table in the settings says so.
 - Structural Laws that legacy code violates widely (functional core, result values) apply at **module boundaries a ticket creates or changes**. The baseline says where the old structure is; designs say how new code wraps it.
 
 ### 5.4 Start narrow

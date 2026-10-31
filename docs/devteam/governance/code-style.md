@@ -4,7 +4,7 @@ A generic, portable engineering doctrine for building any system — frontend, b
 
 > **The lint/gate configuration is the source of truth; this document is its commentary.** Where the two disagree, the gate config is right and this doc is a bug. Every rule marked **Law** has an ID (e.g. `L-STRUCT-2`) used by the gate config and by the escape hatch (§16).
 
-A Law is enforced only once its gate is commissioned: it needs a row in [`quality-gates.md`](quality-gates.md) and a CI step in the binding's commissioning table. Until then it is reviewed as Doctrine.
+A Law is enforced only once its gate is commissioned: it needs a row in [`quality-gates.md`](quality-gates.md) and a CI step in the gate table in the project settings. Until then it is reviewed as Doctrine.
 
 ## 0. How to read this
 
@@ -49,7 +49,7 @@ Build the conventional way the framework wants (MVC, convention over configurati
 
 Default to the simplest; escalate only with a stated reason (an ADR for Tier A).
 
-- **Tier C (default) — CRUD + audit columns + soft-aware delete.** `created_at`/`updated_at`/`created_by`. **`L-DATA-1` no hard delete without an erasure reason**; the mechanism (`deleted_at` column vs a `deleted_records` table) is a **project settings** (blanket `deleted_at` is contested — it burdens every query and breaks unique indexes; Brandur, "Soft Deletion Probably Isn't Worth It", 2022). Most data is Tier C.
+- **Tier C (default) — CRUD + audit columns + soft-aware delete.** `created_at`/`updated_at`/`created_by`. **`L-DATA-1` no hard delete without an erasure reason**; the mechanism (`deleted_at` column vs a `deleted_records` table) is a **project setting** (blanket `deleted_at` is contested — it burdens every query and breaks unique indexes; Brandur, "Soft Deletion Probably Isn't Worth It", 2022). Most data is Tier C.
 - **Tier B — append-only log + current-state projection.** For data whose history matters. **Permissions/authorization default here** (an append-only audit table satisfies nearly every regulator).
 - **Tier A (exception, ADR-gated) — event sourcing + projections.** Reserved for **money and legally-disputed records only**; any other domain needs an ADR to justify it ("event sourcing is not a top-level architecture" — Greg Young).
 - **`L-DATA-2` forward-only, rollback-safe migrations** — a non-rollback-safe migration is flagged as a one-way door and minimized.
@@ -76,7 +76,7 @@ Default to the simplest; escalate only with a stated reason (an ADR for Tier A).
 ## 7. Idempotency
 
 - **`L-IDEM-1` external side effects and money carry an idempotency key** end-to-end (the IETF `Idempotency-Key` header; Stripe's model), with a dedup store making a repeat a no-op returning the first result.
-- **State transitions use a conditional write** (optimistic lock, `UPDATE … WHERE status = 'pending'`) — no key plumbing — unless the **project settings** lists a specific transition as critical.
+- **State transitions use a conditional write** (optimistic lock, `UPDATE … WHERE status = 'pending'`) — no key plumbing — unless the **project settings** list a specific transition as critical.
 - **`L-IDEM-2` event handlers are idempotent** (from §6 at-least-once).
 - **Retries (§8) are permitted only on idempotent calls.** An agent must not retry a non-idempotent POST.
 
