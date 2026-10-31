@@ -6,8 +6,8 @@
 //   project  docs/devteam/project in the current checkout (override: --project <dir> or DEVTEAM_PROJECT)
 //   run      docs/devteam/run in the MAIN checkout, shared by every worktree (override: DEVTEAM_RUN)
 //
-// Node folders (spec, plan, reviews, verification) live on each node's branch until it merges.
-// Commands that judge a node read those files from git (the branch tip, or an exact SHA), so the
+// Ticket folders (spec, plan, reviews, verification) live on each ticket's branch until it merges.
+// Commands that judge a ticket read those files from git (the branch tip, or an exact SHA), so the
 // supervisor sees the same thing from the main checkout that the worker sees in its worktree.
 
 import { execFileSync } from 'node:child_process';
@@ -72,17 +72,17 @@ const writeJson = (p, obj) => {
 
 // ---------- enums (mirror schema/*.schema.json) ----------
 
-const NODE_KINDS = ['contract', 'build', 'integration', 'chore', 'spike'];
+const TICKET_KINDS = ['contract', 'build', 'integration', 'chore', 'spike'];
 const PHASES = ['spawned', 'spec', 'plan', 'contract', 'build', 'verify', 'final-review', 'awaiting-word', 'merging', 'done', 'blocked', 'parked'];
 const QUESTION_KINDS = ['design-change', 'merge-request', 'review-request', 'slot-request', 'blocked', 'owner-decision', 'one-way-door', 'clarification'];
 const EVENT_TYPES = [
-  'node.spawned', 'node.phase', 'node.blocked', 'node.parked', 'node.merged', 'node.released',
+  'ticket.spawned', 'ticket.phase', 'ticket.blocked', 'ticket.parked', 'ticket.merged', 'ticket.released',
   'question.asked', 'question.answered', 'question.defaulted',
   'review.verdict', 'word.stage', 'word.merge', 'approve.spec', 'approve.plan', 'approve.design-change',
   'ruling', 'gate.result', 'slot.granted', 'slot.released',
   'replan', 'recovery', 'defect.escaped', 'cost',
 ];
-const CHORES_COLUMN = 'chores'; // reserved column for chore and spike nodes that belong to no column plan
+const CHORES_FEATURE = 'chores'; // reserved feature for chore and spike tickets that belong to no feature plan
 
 // ---------- locations ----------
 
@@ -101,7 +101,7 @@ const BINDING_DEFAULTS = {
   tmux_session: 'devteam',
   agent_command: 'claude --dangerously-skip-permissions',
   resume_command: 'claude --continue --dangerously-skip-permissions',
-  max_active_nodes: 5,
+  max_active_tickets: 5,
   max_active_per_component: 2,
   stale_after_minutes: 30,
   question_default_after_hours: 24,
@@ -155,52 +155,52 @@ const resolveCommit = (ref) => git(['rev-parse', '--verify', '--quiet', `${ref}^
 
 const ID_RE = /^[a-z][a-z0-9]*(-[a-z0-9]+)*-[0-9]{2,}-[a-z0-9]+(-[a-z0-9]+)*$/;
 const STORY_RE = /^[A-Z][A-Z0-9]*-S[0-9]+$/;
-const NODE_FIELDS = ['id', 'title', 'column', 'component', 'kind', 'size', 'risk', 'serves', 'depends_on', 'contracts', 'touches', 'done_when', 'one_way_doors', 'superseded_by', 'notes'];
+const TICKET_FIELDS = ['id', 'title', 'feature', 'component', 'kind', 'size', 'risk', 'serves', 'depends_on', 'contracts', 'touches', 'done_when', 'one_way_doors', 'superseded_by', 'notes'];
 
 function loadGraph() {
   const dir = path.join(projectDir, 'graph');
-  const nodes = new Map();
+  const tickets = new Map();
   const loadErrors = [];
-  if (!fs.existsSync(dir)) return { nodes, loadErrors };
+  if (!fs.existsSync(dir)) return { tickets, loadErrors };
   for (const f of fs.readdirSync(dir).filter((f) => f.endsWith('.json')).sort()) {
     try {
       const n = readJson(path.join(dir, f));
       n.__file = f;
-      nodes.set(n.id ?? f.replace(/\.json$/, ''), n);
+      tickets.set(n.id ?? f.replace(/\.json$/, ''), n);
     } catch (e) {
       loadErrors.push(`${f}: not valid JSON (${e.message})`);
     }
   }
-  return { nodes, loadErrors };
+  return { tickets, loadErrors };
 }
 
 const isActive = (n) => !n.superseded_by;
 
-function columnPlan(column) {
-  const p = path.join(projectDir, 'columns', `${column}.md`);
+function featurePlan(feature) {
+  const p = path.join(projectDir, 'features', `${feature}.md`);
   return fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : null;
 }
 
-function storiesForColumn(column) {
-  const text = columnPlan(column);
+function storiesForFeature(feature) {
+  const text = featurePlan(feature);
   if (text === null) return null;
   // Stories are defined in section 1 only; ids elsewhere are references.
   const sec = text.match(/^##\s*1\.[^\n]*\n([\s\S]*?)(?=^##\s|(?![\s\S]))/m);
   return new Set((sec ? sec[1] : '').match(/\b[A-Z][A-Z0-9]*-S[0-9]+\b/g) ?? []);
 }
 
-const columnStatus = (column) => columnPlan(column)?.match(/^-?\s*Status:\s*(\S+)/m)?.[1] ?? null;
+const featureStatus = (feature) => featurePlan(feature)?.match(/^-?\s*Status:\s*(\S+)/m)?.[1] ?? null;
 
-// Transitive dependency closure for every node.
-function closures(nodes) {
+// Transitive dependency closure for every ticket.
+function closures(tickets) {
   const memo = new Map();
   const visit = (id, stack = new Set()) => {
     if (memo.has(id)) return memo.get(id);
     if (stack.has(id)) return new Set(); // cycle; reported elsewhere
     stack.add(id);
     const out = new Set();
-    for (const d of nodes.get(id)?.depends_on ?? []) {
-      if (!nodes.has(d)) continue;
+    for (const d of tickets.get(id)?.depends_on ?? []) {
+      if (!tickets.has(d)) continue;
       out.add(d);
       for (const x of visit(d, stack)) out.add(x);
     }
@@ -208,18 +208,18 @@ function closures(nodes) {
     memo.set(id, out);
     return out;
   };
-  for (const id of nodes.keys()) visit(id);
+  for (const id of tickets.keys()) visit(id);
   return memo;
 }
 
-function findCycle(nodes) {
+function findCycle(tickets) {
   const state = new Map(); // 1 visiting, 2 done
   const stack = [];
   const dfs = (id) => {
     state.set(id, 1);
     stack.push(id);
-    for (const d of nodes.get(id)?.depends_on ?? []) {
-      if (!nodes.has(d)) continue;
+    for (const d of tickets.get(id)?.depends_on ?? []) {
+      if (!tickets.has(d)) continue;
       if (state.get(d) === 1) return [...stack.slice(stack.indexOf(d)), d];
       if (!state.has(d)) {
         const c = dfs(d);
@@ -230,7 +230,7 @@ function findCycle(nodes) {
     state.set(id, 2);
     return null;
   };
-  for (const id of nodes.keys()) {
+  for (const id of tickets.keys()) {
     if (!state.has(id)) {
       const c = dfs(id);
       if (c) return c;
@@ -355,13 +355,13 @@ function mergeParents() {
   return mergeParentsCache;
 }
 
-// The tip of a node's branch: the local branch (shared by every worktree) first, then origin's.
-function nodeBranchRef(id) {
-  for (const r of [`refs/heads/node/${id}`, `refs/remotes/origin/node/${id}`]) if (resolveCommit(r)) return r;
+// The tip of a ticket's branch: the local branch (shared by every worktree) first, then origin's.
+function ticketBranchRef(id) {
+  for (const r of [`refs/heads/ticket/${id}`, `refs/remotes/origin/ticket/${id}`]) if (resolveCommit(r)) return r;
   return null;
 }
 
-// The commit on main that landed a node: a merge commit from branch node/<id>, a squash
+// The commit on main that landed a ticket: a merge commit from branch ticket/<id>, a squash
 // commit titled "<id>: ...", or a merge whose second parent contains the branch tip and whose
 // first parent does not. (A branch merely created from main is an ancestor of main too, so
 // plain ancestry is not enough.)
@@ -370,13 +370,13 @@ function mergeShaFor(id) {
   if (mergeShaCache.has(id)) return mergeShaCache.get(id);
   const done = (v) => (mergeShaCache.set(id, v), v);
   const esc = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const fromBranch = new RegExp(`from \\S*node/${esc}$`);
+  const fromBranch = new RegExp(`from \\S*ticket/${esc}$`);
   for (const { sha, subject } of mainLog()) {
     if (fromBranch.test(subject) || subject.startsWith(`${id}:`)) return done(sha);
   }
   const ref = mainRef();
   if (!ref) return done(null);
-  for (const r of [`refs/heads/node/${id}`, `refs/remotes/origin/node/${id}`]) {
+  for (const r of [`refs/heads/ticket/${id}`, `refs/remotes/origin/ticket/${id}`]) {
     const tip = resolveCommit(r);
     if (!tip || git(['merge-base', '--is-ancestor', tip, ref]) === null) continue;
     for (const [sha, p1, p2] of mergeParents()) {
@@ -440,8 +440,8 @@ function reviewRecordsIn(src, relDir) {
     .map((f) => parseReview(f, srcRead(src, `${relDir}/${f}`) ?? ''));
 }
 
-const nodeReviews = (id, src) => reviewRecordsIn(src, `nodes/${id}/reviews`);
-const columnReviews = (column) => reviewRecordsIn(WORKTREE, `reviews/${column}`);
+const ticketReviews = (id, src) => reviewRecordsIn(src, `tickets/${id}/reviews`);
+const featureReviews = (feature) => reviewRecordsIn(WORKTREE, `reviews/${feature}`);
 
 // The latest record (highest pass) in each lineage (variant letter) for one stage.
 function latestPerLineage(records, stage) {
@@ -458,12 +458,12 @@ const disposed = (d) => /^(fixed|wrong|wont-fix\b|won't-fix\b)/i.test(d ?? '');
 
 // ---------- run state ----------
 
-const runNodePath = (id) => path.join(runDir, 'nodes', `${id}.json`);
-function readRunNode(id) {
+const runTicketPath = (id) => path.join(runDir, 'tickets', `${id}.json`);
+function readRunTicket(id) {
   try {
-    return fs.existsSync(runNodePath(id)) ? readJson(runNodePath(id)) : null;
+    return fs.existsSync(runTicketPath(id)) ? readJson(runTicketPath(id)) : null;
   } catch {
-    warn(`run/nodes/${id}.json is not valid JSON; ignoring`);
+    warn(`run/tickets/${id}.json is not valid JSON; ignoring`);
     return null;
   }
 }
@@ -471,7 +471,7 @@ function readRunNode(id) {
 function appendEvent(ev) {
   if (!EVENT_TYPES.includes(ev.type)) die(`unknown event type "${ev.type}" (schema/event.schema.json)`);
   fs.mkdirSync(runDir, { recursive: true });
-  const line = JSON.stringify({ ts: nowIso(), node: null, sha: null, summary: '', ref: null, ...ev });
+  const line = JSON.stringify({ ts: nowIso(), ticket: null, sha: null, summary: '', ref: null, ...ev });
   fs.appendFileSync(path.join(runDir, 'events.jsonl'), `${line}\n`); // one write of one line
 }
 
@@ -537,16 +537,16 @@ function nudge(target, message) {
   return tmux(['send-keys', '-t', target, '-l', message]) && tmux(['send-keys', '-t', target, 'Enter']);
 }
 
-function currentNodeId() {
-  if (process.env.DEVTEAM_NODE) return process.env.DEVTEAM_NODE;
+function currentTicketId() {
+  if (process.env.DEVTEAM_TICKET) return process.env.DEVTEAM_TICKET;
   const b = git(['rev-parse', '--abbrev-ref', 'HEAD']);
-  return b?.startsWith('node/') ? b.slice(5) : null;
+  return b?.startsWith('ticket/') ? b.slice('ticket/'.length) : null;
 }
 
-// Who is running this command: a node id, 'planner' or 'supervisor'.
+// Who is running this command: a ticket id, 'planner' or 'supervisor'.
 function currentActor() {
-  const node = currentNodeId();
-  if (node) return node;
+  const ticket = currentTicketId();
+  if (ticket) return ticket;
   if (process.env.DEVTEAM_ROLE === 'planner') return 'planner';
   const b = git(['rev-parse', '--abbrev-ref', 'HEAD']);
   if (b?.startsWith('plan/')) return 'planner';
@@ -557,18 +557,18 @@ const supervisorTarget = () => process.env.DEVTEAM_SUPERVISOR ?? `${loadBinding(
 
 // ---------- derived status ----------
 
-function deriveStatus(nodes) {
-  const merged = new Map([...nodes.keys()].map((id) => [id, mergeShaFor(id)]));
-  return [...nodes.values()].map((n) => {
+function deriveStatus(tickets) {
+  const merged = new Map([...tickets.keys()].map((id) => [id, mergeShaFor(id)]));
+  return [...tickets.values()].map((n) => {
     const id = n.id;
     const mergeSha = merged.get(id);
-    const run = readRunNode(id);
-    const branch = nodeBranchRef(id);
-    // Before merge, a node's files exist only on its branch; read them there.
+    const run = readRunTicket(id);
+    const branch = ticketBranchRef(id);
+    // Before merge, a ticket's files exist only on its branch; read them there.
     const src = branch && !mergeSha ? { ref: branch } : WORKTREE;
-    const spec = statusOf(srcRead(src, `nodes/${id}/spec.md`));
-    const plan = statusOf(srcRead(src, `nodes/${id}/plan.md`));
-    const reviews = nodeReviews(id, src);
+    const spec = statusOf(srcRead(src, `tickets/${id}/spec.md`));
+    const plan = statusOf(srcRead(src, `tickets/${id}/plan.md`));
+    const reviews = ticketReviews(id, src);
     const depsMerged = (n.depends_on ?? []).every((d) => merged.get(d));
     let stage = 'planned';
     if (n.superseded_by) stage = 'superseded';
@@ -581,7 +581,7 @@ function deriveStatus(nodes) {
     const heartbeatAge = run?.heartbeat_at ? Math.round((Date.now() - Date.parse(run.heartbeat_at)) / 60000) : null;
     return {
       id,
-      column: n.column,
+      feature: n.feature,
       component: n.component,
       kind: n.kind,
       risk: n.risk,
@@ -599,16 +599,16 @@ function deriveStatus(nodes) {
   });
 }
 
-function reviewStats(nodes) {
+function reviewStats(tickets) {
   const byStage = {};
   let findings = 0;
   let wrong = 0;
   const all = [];
-  for (const id of nodes.keys()) {
-    const branch = nodeBranchRef(id);
-    all.push(...nodeReviews(id, branch && !mergeShaFor(id) ? { ref: branch } : WORKTREE));
+  for (const id of tickets.keys()) {
+    const branch = ticketBranchRef(id);
+    all.push(...ticketReviews(id, branch && !mergeShaFor(id) ? { ref: branch } : WORKTREE));
   }
-  for (const col of new Set([...nodes.values()].map((n) => n.column))) all.push(...columnReviews(col));
+  for (const col of new Set([...tickets.values()].map((n) => n.feature))) all.push(...featureReviews(col));
   for (const r of all) {
     for (const f of r.findings) {
       findings++;
@@ -626,20 +626,20 @@ function reviewStats(nodes) {
 // ---------- commands ----------
 
 function cmdValidate() {
-  const { nodes, loadErrors } = loadGraph();
+  const { tickets, loadErrors } = loadGraph();
   const errors = [...loadErrors];
   const warnings = [];
   const err = (id, msg) => errors.push(`${id}: ${msg}`);
 
-  for (const [id, n] of nodes) {
-    for (const k of Object.keys(n)) if (k !== '__file' && !NODE_FIELDS.includes(k)) err(id, `unknown field "${k}"`);
-    for (const k of ['id', 'title', 'column', 'component', 'kind', 'size', 'risk', 'serves', 'depends_on', 'touches', 'done_when']) {
+  for (const [id, n] of tickets) {
+    for (const k of Object.keys(n)) if (k !== '__file' && !TICKET_FIELDS.includes(k)) err(id, `unknown field "${k}"`);
+    for (const k of ['id', 'title', 'feature', 'component', 'kind', 'size', 'risk', 'serves', 'depends_on', 'touches', 'done_when']) {
       if (n[k] === undefined) err(id, `missing required field "${k}"`);
     }
     if (`${n.id}.json` !== n.__file) err(id, `id does not match file name ${n.__file}`);
     if (n.id && !ID_RE.test(n.id)) err(id, 'id must be <component>-<NN>-<slug>');
     if (n.id && n.component && !n.id.startsWith(`${n.component}-`)) err(id, `id must start with its component "${n.component}-"`);
-    if (n.kind && !NODE_KINDS.includes(n.kind)) err(id, `kind must be one of ${NODE_KINDS.join(', ')}`);
+    if (n.kind && !TICKET_KINDS.includes(n.kind)) err(id, `kind must be one of ${TICKET_KINDS.join(', ')}`);
     if (n.size && !['S', 'M'].includes(n.size)) err(id, 'size must be S or M (D1: split anything larger)');
     if (n.risk && !['normal', 'high'].includes(n.risk)) err(id, 'risk must be normal or high');
     for (const s of n.serves ?? []) if (!STORY_RE.test(s)) err(id, `serves "${s}" is not a story id like COL-S1`);
@@ -649,67 +649,67 @@ function cmdValidate() {
     for (const d of n.done_when ?? []) if (typeof d !== 'string' || d.trim().length < 10) err(id, `done_when entry too vague: "${d}" (D5)`);
     for (const d of n.depends_on ?? []) {
       if (d === id) err(id, 'depends on itself');
-      else if (!nodes.has(d)) err(id, `depends_on "${d}" does not exist (D3)`);
-      else if (!isActive(nodes.get(d)) && isActive(n)) err(id, `depends_on "${d}" is superseded; depend on its replacement`);
+      else if (!tickets.has(d)) err(id, `depends_on "${d}" does not exist (D3)`);
+      else if (!isActive(tickets.get(d)) && isActive(n)) err(id, `depends_on "${d}" is superseded; depend on its replacement`);
     }
-    if (n.superseded_by && !nodes.has(n.superseded_by)) err(id, `superseded_by "${n.superseded_by}" does not exist`);
+    if (n.superseded_by && !tickets.has(n.superseded_by)) err(id, `superseded_by "${n.superseded_by}" does not exist`);
     if ((n.one_way_doors ?? []).length > 0 && n.risk !== 'high') err(id, 'lists a one-way door, so risk must be high (D8)');
-    if (n.column === CHORES_COLUMN && !['chore', 'spike'].includes(n.kind)) err(id, `only chore and spike nodes may use the reserved column "${CHORES_COLUMN}"`);
+    if (n.feature === CHORES_FEATURE && !['chore', 'spike'].includes(n.kind)) err(id, `only chore and spike tickets may use the reserved feature "${CHORES_FEATURE}"`);
     if (isActive(n) && ['chore', 'spike'].includes(n.kind) && (n.serves ?? []).length === 0 && !n.notes) {
-      err(id, `${n.kind} node serving no story must say why in notes (D6)`);
+      err(id, `${n.kind} ticket serving no story must say why in notes (D6)`);
     }
     if (isActive(n) && !['chore', 'spike'].includes(n.kind) && (n.serves ?? []).length === 0) err(id, 'must serve at least one story (D6)');
-    if (n.kind === 'contract' && !(n.contracts?.provides ?? []).length) err(id, 'contract node must list contracts.provides (D2)');
+    if (n.kind === 'contract' && !(n.contracts?.provides ?? []).length) err(id, 'contract ticket must list contracts.provides (D2)');
   }
 
-  const cycle = findCycle(nodes);
+  const cycle = findCycle(tickets);
   if (cycle) errors.push(`dependency cycle: ${cycle.join(' -> ')} (D3)`);
 
-  // Columns: stories defined and served (D6); approved plans carry approved design and graph reviews.
-  const columns = new Set([...nodes.values()].filter(isActive).map((n) => n.column).filter((c) => c && c !== CHORES_COLUMN));
-  for (const col of columns) {
-    const stories = storiesForColumn(col);
+  // Features: stories defined and served (D6); approved plans carry approved design and graph reviews.
+  const features = new Set([...tickets.values()].filter(isActive).map((n) => n.feature).filter((c) => c && c !== CHORES_FEATURE));
+  for (const col of features) {
+    const stories = storiesForFeature(col);
     if (!stories) {
-      errors.push(`column "${col}": project/columns/${col}.md not found (chore/spike nodes outside any column use "${CHORES_COLUMN}")`);
+      errors.push(`feature "${col}": project/features/${col}.md not found (chore/spike tickets outside any feature use "${CHORES_FEATURE}")`);
       continue;
     }
     const served = new Set();
-    for (const n of nodes.values()) {
-      if (!isActive(n) || n.column !== col) continue;
+    for (const n of tickets.values()) {
+      if (!isActive(n) || n.feature !== col) continue;
       for (const s of n.serves ?? []) {
         if (!stories.has(s)) err(n.id, `serves "${s}", which ${col}.md section 1 does not define`);
         served.add(s);
       }
     }
-    for (const s of stories) if (!served.has(s)) errors.push(`column "${col}": story ${s} is served by no node (D6)`);
+    for (const s of stories) if (!served.has(s)) errors.push(`feature "${col}": story ${s} is served by no ticket (D6)`);
 
-    // D7 (warning): a story served by more than one component should have an integration node.
+    // D7 (warning): a story served by more than one component should have an integration ticket.
     for (const s of stories) {
-      const servers = [...nodes.values()].filter((n) => isActive(n) && (n.serves ?? []).includes(s));
+      const servers = [...tickets.values()].filter((n) => isActive(n) && (n.serves ?? []).includes(s));
       const comps = new Set(servers.filter((n) => n.kind !== 'contract').map((n) => n.component));
       if (comps.size > 1 && !servers.some((n) => n.kind === 'integration')) {
-        warnings.push(`column "${col}": story ${s} spans ${[...comps].join(', ')} but has no integration node (D7)`);
+        warnings.push(`feature "${col}": story ${s} spans ${[...comps].join(', ')} but has no integration ticket (D7)`);
       }
     }
 
-    if (columnStatus(col) === 'approved') {
-      const reviews = columnReviews(col);
+    if (featureStatus(col) === 'approved') {
+      const reviews = featureReviews(col);
       for (const r of reviews) {
         if (r.verdict && !r.reviewer) errors.push(`project/reviews/${col}/${r.file}: missing "- Reviewer:" line`);
         if (r.verdict && !r.shaValid) errors.push(`project/reviews/${col}/${r.file}: verdict SHA must be the full 40-character commit SHA`);
       }
       for (const stage of ['design', 'graph']) {
         const latest = latestPerLineage(reviews, stage);
-        if (!latest.length) errors.push(`column "${col}" is approved but has no ${stage} review in project/reviews/${col}/ (planning.md P2, P5)`);
-        else if (latest.some((r) => r.verdict !== 'APPROVE')) errors.push(`column "${col}" is approved but its latest ${stage} review is not APPROVE`);
+        if (!latest.length) errors.push(`feature "${col}" is approved but has no ${stage} review in project/reviews/${col}/ (planning.md P2, P5)`);
+        else if (latest.some((r) => r.verdict !== 'APPROVE')) errors.push(`feature "${col}" is approved but its latest ${stage} review is not APPROVE`);
       }
     }
   }
 
-  // D4: nodes that can run concurrently must have disjoint footprints. Merged nodes are history.
+  // D4: tickets that can run concurrently must have disjoint footprints. Merged tickets are history.
   if (!cycle) {
-    const clos = closures(nodes);
-    const live = [...nodes.values()].filter((n) => isActive(n) && !mergeShaFor(n.id));
+    const clos = closures(tickets);
+    const live = [...tickets.values()].filter((n) => isActive(n) && !mergeShaFor(n.id));
     for (let i = 0; i < live.length; i++) {
       for (let j = i + 1; j < live.length; j++) {
         const a = live[i];
@@ -727,43 +727,43 @@ function cmdValidate() {
     }
   }
 
-  // Node folders must belong to a graph node.
-  const nd = path.join(projectDir, 'nodes');
+  // Ticket folders must belong to a ticket.
+  const nd = path.join(projectDir, 'tickets');
   if (fs.existsSync(nd)) {
     for (const f of fs.readdirSync(nd)) {
       if (f.startsWith('.')) continue;
-      if (!nodes.has(f)) errors.push(`project/nodes/${f}/ has no graph node`);
+      if (!tickets.has(f)) errors.push(`project/tickets/${f}/ has no ticket`);
     }
   }
 
   for (const w of warnings) process.stdout.write(`warning: ${w}\n`);
   for (const e of errors) process.stdout.write(`error: ${e}\n`);
-  process.stdout.write(`${nodes.size} node(s), ${errors.length} error(s), ${warnings.length} warning(s)\n`);
+  process.stdout.write(`${tickets.size} ticket(s), ${errors.length} error(s), ${warnings.length} warning(s)\n`);
   process.exit(errors.length ? 1 : 0);
 }
 
 function activeWorker(id) {
-  const r = readRunNode(id);
+  const r = readRunTicket(id);
   return !!r && !['done', 'parked'].includes(r.phase);
 }
 
 function cmdReady() {
-  const { nodes } = loadGraph();
-  const merged = new Map([...nodes.keys()].map((id) => [id, mergeShaFor(id)]));
+  const { tickets } = loadGraph();
+  const merged = new Map([...tickets.keys()].map((id) => [id, mergeShaFor(id)]));
   const rows = [];
-  for (const n of nodes.values()) {
+  for (const n of tickets.values()) {
     if (!isActive(n) || merged.get(n.id) || activeWorker(n.id)) continue;
     const depsMerged = (n.depends_on ?? []).every((d) => merged.get(d));
     if (depsMerged || flags['spec-ahead']) rows.push({ id: n.id, component: n.component, kind: n.kind, size: n.size, risk: n.risk, mode: depsMerged ? 'build' : 'spec-ahead' });
   }
   const b = loadBinding();
-  const active = [...nodes.keys()].filter(activeWorker);
+  const active = [...tickets.keys()].filter(activeWorker);
   const perComponent = {};
-  for (const id of active) perComponent[nodes.get(id).component] = (perComponent[nodes.get(id).component] ?? 0) + 1;
+  for (const id of active) perComponent[tickets.get(id).component] = (perComponent[tickets.get(id).component] ?? 0) + 1;
   if (flags.json) {
-    return void process.stdout.write(`${JSON.stringify({ ready: rows, active, active_per_component: perComponent, caps: { max_active_nodes: b.max_active_nodes, max_active_per_component: b.max_active_per_component } }, null, 2)}\n`);
+    return void process.stdout.write(`${JSON.stringify({ ready: rows, active, active_per_component: perComponent, caps: { max_active_tickets: b.max_active_tickets, max_active_per_component: b.max_active_per_component } }, null, 2)}\n`);
   }
-  process.stdout.write(`active workers: ${active.length}/${b.max_active_nodes}\n`);
+  process.stdout.write(`active workers: ${active.length}/${b.max_active_tickets}\n`);
   if (!rows.length) return void process.stdout.write('nothing ready\n');
   for (const r of rows) {
     const full = (perComponent[r.component] ?? 0) >= b.max_active_per_component ? '  (component at cap)' : '';
@@ -772,9 +772,9 @@ function cmdReady() {
 }
 
 function cmdWaves() {
-  const { nodes } = loadGraph();
-  const col = flagStr('column');
-  const sub = new Map([...nodes].filter(([, n]) => isActive(n) && (!col || n.column === col)));
+  const { tickets } = loadGraph();
+  const col = flagStr('feature');
+  const sub = new Map([...tickets].filter(([, n]) => isActive(n) && (!col || n.feature === col)));
   if (findCycle(sub)) die('graph has a cycle; run validate');
   const level = new Map();
   const lvl = (id) => {
@@ -791,14 +791,14 @@ function cmdWaves() {
   if (flags.json) return void process.stdout.write(`${JSON.stringify({ waves, critical_path: crit.path, critical_weight: crit.len }, null, 2)}\n`);
   waves.forEach((w, i) => process.stdout.write(`wave ${i + 1} (${w.length}): ${w.sort().join(', ')}\n`));
   process.stdout.write(`critical path (weight ${crit.len}, S=1 M=2): ${crit.path.join(' -> ')}\n`);
-  process.stdout.write(`${sub.size} node(s) in ${waves.length} wave(s); max parallel width ${Math.max(0, ...waves.map((w) => w.length))}\n`);
+  process.stdout.write(`${sub.size} ticket(s) in ${waves.length} wave(s); max parallel width ${Math.max(0, ...waves.map((w) => w.length))}\n`);
 }
 
 function cmdStatus() {
-  const { nodes } = loadGraph();
-  const rows = deriveStatus(nodes);
+  const { tickets } = loadGraph();
+  const rows = deriveStatus(tickets);
   if (flags.json) {
-    return void process.stdout.write(`${JSON.stringify({ generated_at: nowIso(), nodes: rows, reviews: reviewStats(nodes) }, null, 2)}\n`);
+    return void process.stdout.write(`${JSON.stringify({ generated_at: nowIso(), tickets: rows, reviews: reviewStats(tickets) }, null, 2)}\n`);
   }
   const stale = loadBinding().stale_after_minutes;
   for (const r of rows) {
@@ -806,7 +806,7 @@ function cmdStatus() {
     const live = r.phase ? `  [${r.phase}${r.task ? ` ${r.task}` : ''}, ${r.heartbeat_minutes}m${isStale ? ' STALE' : ''}]` : '';
     process.stdout.write(`${r.stage.padEnd(18)} ${r.id}${live}\n`);
   }
-  const s = reviewStats(nodes);
+  const s = reviewStats(tickets);
   for (const [stage, v] of Object.entries(s.by_stage)) process.stdout.write(`review ${stage}: first-pass rejection ${v.rejected}/${v.first_passes}\n`);
 }
 
@@ -820,13 +820,13 @@ function oneWayDoorsSection(body) {
   return { ok: false, why: 'the "## One-way doors" section must be "None." or link the owner\'s answer (a q-… id or a URL)' };
 }
 
-// Definition of done for a node at an exact head, reading committed files at that head.
-function checkNode(id, { sha: shaArg, title, body }) {
-  const { nodes } = loadGraph();
-  const n = nodes.get(id);
+// Definition of done for a ticket at an exact head, reading committed files at that head.
+function checkTicket(id, { sha: shaArg, title, body }) {
+  const { tickets } = loadGraph();
+  const n = tickets.get(id);
   const fails = [];
-  if (!n) return [`no graph node ${id}`];
-  if (n.superseded_by) fails.push(`node is superseded by ${n.superseded_by}`);
+  if (!n) return [`no ticket ${id}`];
+  if (n.superseded_by) fails.push(`ticket is superseded by ${n.superseded_by}`);
   let sha = null;
   let src = WORKTREE;
   if (commonDir) {
@@ -834,7 +834,7 @@ function checkNode(id, { sha: shaArg, title, body }) {
     if (!sha) return [`commit ${shaArg} not found locally (fetch it first)`];
     if (projectInRepo) src = { ref: sha };
   }
-  const read = (rel) => srcRead(src, `nodes/${id}/${rel}`);
+  const read = (rel) => srcRead(src, `tickets/${id}/${rel}`);
 
   if (statusOf(read('spec.md')) !== 'approved') fails.push('spec.md missing or not "Status: approved" (committed at this head)');
   if (statusOf(read('plan.md')) !== 'approved') fails.push('plan.md missing or not "Status: approved" (committed at this head)');
@@ -847,7 +847,7 @@ function checkNode(id, { sha: shaArg, title, body }) {
 
   // Reviews: every final lineage that reviewed this head must end in APPROVE; enough distinct
   // reviewers must have approved it; verdicts carry full SHAs and a named reviewer.
-  const reviews = nodeReviews(id, src);
+  const reviews = ticketReviews(id, src);
   for (const r of reviews) {
     if (r.verdict && !r.shaValid) fails.push(`${r.file}: verdict SHA must be the full 40-character commit SHA`);
     if (r.verdict && !r.reviewer) fails.push(`${r.file}: missing "- Reviewer:" line; an unnamed review does not count`);
@@ -855,7 +855,7 @@ function checkNode(id, { sha: shaArg, title, body }) {
   // A verdict made at commit V still holds at head H if V is an ancestor of H and the commits
   // since V only ADD new review-record files (committing the record moves the head). Editing or
   // deleting any record, or adding anything else, voids it: a dissent can't be quietly erased.
-  const reviewsDir = projectInRepo ? `${projectRel}/nodes/${id}/reviews/` : null;
+  const reviewsDir = projectInRepo ? `${projectRel}/tickets/${id}/reviews/` : null;
   const recordName = /^[a-z]+-\d+[a-z]?\.md$/;
   const holdsAt = (v) => {
     if (!sha || !v || !/^[0-9a-f]{40}$/.test(v)) return false;
@@ -881,12 +881,12 @@ function checkNode(id, { sha: shaArg, title, body }) {
     for (const f of r.findings) if (blocking(f.severity) && !disposed(f.disposition)) fails.push(`${r.file} ${f.id} (${f.severity}) has no disposition`);
   }
 
-  // Footprint: every changed file is inside touches or the node's own folder (worker.md §3).
+  // Footprint: every changed file is inside touches or the ticket's own folder (worker.md §3).
   const base = mainRef() && sha ? git(['merge-base', mainRef(), sha]) : null;
   if (commonDir && !base) fails.push(`cannot resolve main branch "${loadBinding().main_branch}" (or its merge base); footprint not checked`);
   if (base) {
     const changed = (git(['diff', '--name-only', base, sha]) ?? '').split('\n').filter(Boolean);
-    const own = projectInRepo ? `${projectRel}/nodes/${id}/` : null;
+    const own = projectInRepo ? `${projectRel}/tickets/${id}/` : null;
     const outside = changed.filter((f) => !(own && f.startsWith(own)) && !(n.touches ?? []).some((t) => pathMatches(t, f)));
     if (outside.length) fails.push(`changes files outside touches: ${outside.slice(0, 10).join(', ')}${outside.length > 10 ? ` (+${outside.length - 10} more)` : ''}`);
   }
@@ -895,7 +895,7 @@ function checkNode(id, { sha: shaArg, title, body }) {
   if (body !== undefined) {
     const owd = oneWayDoorsSection(body);
     if (!owd.ok) fails.push(owd.why);
-    else if (owd.none && (n.one_way_doors ?? []).length) fails.push('node lists one-way doors but the PR body says "None."; link the owner\'s answer');
+    else if (owd.none && (n.one_way_doors ?? []).length) fails.push('ticket lists one-way doors but the PR body says "None."; link the owner\'s answer');
   }
   return fails;
 }
@@ -915,10 +915,10 @@ function report(fails, okMsg) {
   process.stdout.write(`ok: ${okMsg}\n`);
 }
 
-function cmdCheckNode() {
-  const id = positional[0] ?? die('usage: check-node <node-id> [--sha <head>] [--title "<pr title>"] [--body-file <path>]');
+function cmdCheckTicket() {
+  const id = positional[0] ?? die('usage: check-ticket <ticket-id> [--sha <head>] [--title "<pr title>"] [--body-file <path>]');
   const sha = flagStr('sha');
-  report(checkNode(id, { sha, title: flagStr('title'), body: readBody() }), `${id} meets the definition of done at ${(resolveCommit(sha ?? 'HEAD') ?? '').slice(0, 12)}`);
+  report(checkTicket(id, { sha, title: flagStr('title'), body: readBody() }), `${id} meets the definition of done at ${(resolveCommit(sha ?? 'HEAD') ?? '').slice(0, 12)}`);
 }
 
 // The mechanical half of the merge word, run in CI as the required `merge-word` check (ci.md §3).
@@ -926,11 +926,11 @@ function cmdCheckPr() {
   const headRef = flagStr('head-ref') ?? die('check-pr needs --head-ref');
   const title = flagStr('title') ?? die('check-pr needs --title');
   const body = readBody() ?? die('check-pr needs --body-file');
-  if (headRef.startsWith('node/')) {
-    return report(checkNode(headRef.slice(5), { sha: flagStr('sha'), title, body }), `${headRef} passes the mechanical merge-word checks`);
+  if (headRef.startsWith('ticket/')) {
+    return report(checkTicket(headRef.slice('ticket/'.length), { sha: flagStr('sha'), title, body }), `${headRef} passes the mechanical merge-word checks`);
   }
   const fails = [];
-  if (!/^chore-[a-z0-9]+(-[a-z0-9]+)*: \S/.test(title)) fails.push('a PR that is not from a node/<id> branch must be titled "chore-<slug>: <summary>"');
+  if (!/^chore-[a-z0-9]+(-[a-z0-9]+)*: \S/.test(title)) fails.push('a PR that is not from a ticket/<id> branch must be titled "chore-<slug>: <summary>"');
   const owd = oneWayDoorsSection(body);
   if (!owd.ok) fails.push(owd.why);
   report(fails, `${headRef} passes the mechanical merge-word checks`);
@@ -960,7 +960,7 @@ function cmdAsk() {
     kind,
     to,
     from,
-    node: flagStr('node') ?? currentNodeId(),
+    ticket: flagStr('ticket') ?? currentTicketId(),
     session: tmuxHere(),
     asked_at: nowIso(),
     question: q,
@@ -977,12 +977,12 @@ function cmdAsk() {
     recorded_in: null,
   };
   writeJson(path.join(runDir, 'questions', `${id}.json`), question);
-  appendEvent({ type: 'question.asked', actor: from, node: question.node, summary: q.slice(0, 280), ref: `run/questions/${id}.json` });
+  appendEvent({ type: 'question.asked', actor: from, ticket: question.ticket, summary: q.slice(0, 280), ref: `run/questions/${id}.json` });
   if (to === 'supervisor') nudge(supervisorTarget(), `devteam: new question ${id}`);
   process.stdout.write(`${id}\n`);
 }
 
-// Where to nudge the asker: the tmux pane recorded at ask time, else the node's window.
+// Where to nudge the asker: the tmux pane recorded at ask time, else the ticket's window.
 function askerTarget(q) {
   if (q.session) return q.session;
   if (q.from === 'supervisor') return supervisorTarget();
@@ -1008,7 +1008,7 @@ function cmdAnswer() {
   q.answered_at = nowIso();
   q.status = flags.defaulted ? 'defaulted' : 'answered';
   writeJson(p, q);
-  appendEvent({ type: flags.defaulted ? 'question.defaulted' : 'question.answered', actor: by, node: q.node, summary: q.answer.slice(0, 280), ref: `run/questions/${id}.json` });
+  appendEvent({ type: flags.defaulted ? 'question.defaulted' : 'question.answered', actor: by, ticket: q.ticket, summary: q.answer.slice(0, 280), ref: `run/questions/${id}.json` });
   nudge(askerTarget(q), `devteam: ${id} answered`);
   process.stdout.write(`answered ${id}\n`);
 }
@@ -1020,7 +1020,7 @@ function cmdSyncQuestions() {
   for (const q of readQuestions()) {
     const ref = `run/questions/${q.id}.json`;
     if (!['answered', 'defaulted'].includes(q.status) || logged.has(ref)) continue;
-    appendEvent({ type: q.status === 'defaulted' ? 'question.defaulted' : 'question.answered', actor: q.answered_by ?? 'owner', node: q.node, summary: (q.answer ?? '').slice(0, 280), ref });
+    appendEvent({ type: q.status === 'defaulted' ? 'question.defaulted' : 'question.answered', actor: q.answered_by ?? 'owner', ticket: q.ticket, summary: (q.answer ?? '').slice(0, 280), ref });
     nudge(askerTarget(q), `devteam: ${q.id} answered`);
     n++;
   }
@@ -1039,8 +1039,8 @@ function cmdRecorded() {
   process.stdout.write(`recorded ${id} in ${where}\n`);
 }
 
-function rankQuestions(qs, nodes) {
-  const sub = new Map([...nodes].filter(([, n]) => isActive(n)));
+function rankQuestions(qs, tickets) {
+  const sub = new Map([...tickets].filter(([, n]) => isActive(n)));
   const crit = findCycle(sub) ? new Set() : new Set(criticalPath(sub).path);
   const score = (q) => {
     const ownerTier = q.to === 'owner' && ['one-way-door', 'owner-decision'].includes(q.kind) ? 1000 : 0;
@@ -1051,7 +1051,7 @@ function rankQuestions(qs, nodes) {
 }
 
 function cmdQuestions() {
-  const { nodes } = loadGraph();
+  const { tickets } = loadGraph();
   let qs = readQuestions();
   if (!flags.all) qs = qs.filter((q) => q.status === 'open');
   if (flagStr('to')) qs = qs.filter((q) => q.to === flagStr('to'));
@@ -1059,7 +1059,7 @@ function cmdQuestions() {
     const me = currentActor();
     qs = qs.filter((q) => q.from === me);
   }
-  qs = rankQuestions(qs, nodes);
+  qs = rankQuestions(qs, tickets);
   if (flags.json) return void process.stdout.write(`${JSON.stringify(qs, null, 2)}\n`);
   if (!qs.length) return void process.stdout.write('no questions\n');
   for (const q of qs) {
@@ -1071,11 +1071,11 @@ function cmdQuestions() {
 
 function cmdHeartbeat() {
   const supervisor = !!flags.supervisor;
-  const id = supervisor ? 'supervisor' : (currentNodeId() ?? die('heartbeat needs DEVTEAM_NODE or a node/<id> branch'));
+  const id = supervisor ? 'supervisor' : (currentTicketId() ?? die('heartbeat needs DEVTEAM_TICKET or a ticket/<id> branch'));
   const phase = flagStr('phase');
   if (phase !== undefined && !PHASES.includes(phase)) die(`--phase must be one of ${PHASES.join(', ')}`);
-  const p = supervisor ? path.join(runDir, 'supervisor.json') : runNodePath(id);
-  const prev = (supervisor ? (fs.existsSync(p) ? readJson(p) : null) : readRunNode(id)) ?? {};
+  const p = supervisor ? path.join(runDir, 'supervisor.json') : runTicketPath(id);
+  const prev = (supervisor ? (fs.existsSync(p) ? readJson(p) : null) : readRunTicket(id)) ?? {};
   const next = { ...prev, id, heartbeat_at: nowIso() };
   const session = tmuxHere() ?? prev.session;
   if (!supervisor) {
@@ -1100,7 +1100,7 @@ function cmdHeartbeat() {
   }
   writeJson(p, next);
   if (!supervisor && next.phase !== prev.phase) {
-    appendEvent({ type: 'node.phase', actor: id, node: id, sha: next.head_sha, summary: `${prev.phase ?? 'none'} -> ${next.phase}${next.note ? `: ${next.note}` : ''}` });
+    appendEvent({ type: 'ticket.phase', actor: id, ticket: id, sha: next.head_sha, summary: `${prev.phase ?? 'none'} -> ${next.phase}${next.note ? `: ${next.note}` : ''}` });
   }
   process.stdout.write(`heartbeat ${id}${supervisor ? '' : ` ${next.phase}`}\n`);
 }
@@ -1110,7 +1110,7 @@ function cmdEvent() {
   appendEvent({
     type,
     actor: flagStr('actor') ?? currentActor(),
-    node: flagStr('node') ?? currentNodeId(),
+    ticket: flagStr('ticket') ?? currentTicketId(),
     sha: flagStr('sha') ?? null,
     summary: (flagStr('summary') ?? '').slice(0, 280),
     ref: flagStr('ref') ?? null,
@@ -1124,24 +1124,24 @@ function cmdHistory() {
   let evs = readEvents();
   let scope = null;
   if (id) {
-    const { nodes } = loadGraph();
-    scope = new Set([id, ...(nodes.get(id)?.depends_on ?? [])]);
-    evs = evs.filter((e) => scope.has(e.node) || scope.has(e.actor));
+    const { tickets } = loadGraph();
+    scope = new Set([id, ...(tickets.get(id)?.depends_on ?? [])]);
+    evs = evs.filter((e) => scope.has(e.ticket) || scope.has(e.actor));
   }
-  for (const e of evs.slice(-tail)) process.stdout.write(`${e.ts} ${String(e.type).padEnd(18)} ${String(e.node ?? e.actor ?? '').padEnd(28)} ${e.summary ?? ''}\n`);
-  const qs = readQuestions().filter((q) => q.status !== 'open' && (!scope || scope.has(q.node) || scope.has(q.from)));
+  for (const e of evs.slice(-tail)) process.stdout.write(`${e.ts} ${String(e.type).padEnd(18)} ${String(e.ticket ?? e.actor ?? '').padEnd(28)} ${e.summary ?? ''}\n`);
+  const qs = readQuestions().filter((q) => q.status !== 'open' && (!scope || scope.has(q.ticket) || scope.has(q.from)));
   if (qs.length) process.stdout.write('\nanswered questions:\n');
   for (const q of qs.sort((a, b) => a.asked_at.localeCompare(b.asked_at)).slice(-tail)) {
-    process.stdout.write(`- ${q.id} (${q.node ?? q.from}): ${q.question}\n  → ${q.answer} [${q.answered_by}${q.recorded_in ? `, recorded in ${q.recorded_in}` : ', NOT YET RECORDED'}]\n`);
+    process.stdout.write(`- ${q.id} (${q.ticket ?? q.from}): ${q.question}\n  → ${q.answer} [${q.answered_by}${q.recorded_in ? `, recorded in ${q.recorded_in}` : ', NOT YET RECORDED'}]\n`);
   }
 }
 
 function cmdWhoami() {
-  const id = currentNodeId();
+  const id = currentTicketId();
   const b = loadBinding();
   process.stdout.write(
     [
-      `DEVTEAM_NODE=${id ?? ''}`,
+      `DEVTEAM_TICKET=${id ?? ''}`,
       `DEVTEAM_ROLE=${currentActor() === 'planner' ? 'planner' : id ? 'worker' : 'supervisor'}`,
       `DEVTEAM_RUN=${runDir}`,
       `DEVTEAM_SUPERVISOR=${supervisorTarget()}`,
@@ -1164,47 +1164,47 @@ function cmdNotes() {
   if (!from) die('usage: notes <from-tag> [<to-ref>]');
   const out = git(['log', `${from}..${to}`, '--format=%s']);
   if (out === null) die(`cannot read git log ${from}..${to}`);
-  const { nodes } = loadGraph();
+  const { tickets } = loadGraph();
   const landed = new Set();
   for (const s of out.split('\n')) {
-    const m = s.match(/from \S*node\/([a-z0-9-]+)$/) ?? s.match(/^([a-z][a-z0-9-]*-\d{2,}-[a-z0-9-]+):/);
-    if (m && nodes.has(m[1])) landed.add(m[1]);
+    const m = s.match(/from \S*ticket\/([a-z0-9-]+)$/) ?? s.match(/^([a-z][a-z0-9-]*-\d{2,}-[a-z0-9-]+):/);
+    if (m && tickets.has(m[1])) landed.add(m[1]);
   }
-  // A node counts as merged for these notes if it landed in this range or before it.
+  // A ticket counts as merged for these notes if it landed in this range or before it.
   const landedBy = (id) => {
     if (landed.has(id)) return true;
     const sha = mergeShaFor(id);
     return !!sha && git(['merge-base', '--is-ancestor', sha, to]) !== null;
   };
-  const merged = new Map([...nodes.keys()].map((id) => [id, landedBy(id)]));
+  const merged = new Map([...tickets.keys()].map((id) => [id, landedBy(id)]));
   const stories = new Map();
-  for (const id of landed) for (const s of nodes.get(id).serves ?? []) (stories.get(s) ?? stories.set(s, []).get(s)).push(id);
+  for (const id of landed) for (const s of tickets.get(id).serves ?? []) (stories.get(s) ?? stories.set(s, []).get(s)).push(id);
   const completed = [];
   const advanced = [];
   for (const [s, ids] of stories) {
-    const all = [...nodes.values()].filter((n) => isActive(n) && (n.serves ?? []).includes(s));
+    const all = [...tickets.values()].filter((n) => isActive(n) && (n.serves ?? []).includes(s));
     (all.every((n) => merged.get(n.id)) ? completed : advanced).push({ s, ids, total: all.length, done: all.filter((n) => merged.get(n.id)).length });
   }
-  const line = (x) => `- **${x.s}** (${x.done}/${x.total} nodes): ${x.ids.join(', ')}`;
+  const line = (x) => `- **${x.s}** (${x.done}/${x.total} tickets): ${x.ids.join(', ')}`;
   process.stdout.write(`## Stories completed\n\n${completed.map(line).join('\n') || '- none'}\n\n## Stories advanced\n\n${advanced.map(line).join('\n') || '- none'}\n`);
-  const chores = [...landed].filter((id) => !(nodes.get(id).serves ?? []).length);
-  if (chores.length) process.stdout.write(`\n## Other\n\n${chores.map((id) => `- ${id}: ${nodes.get(id).title}`).join('\n')}\n`);
+  const chores = [...landed].filter((id) => !(tickets.get(id).serves ?? []).length);
+  if (chores.length) process.stdout.write(`\n## Other\n\n${chores.map((id) => `- ${id}: ${tickets.get(id).title}`).join('\n')}\n`);
 }
 
 const HELP = `devteam <command>   (put positional arguments before flags)
 
 Graph and status
   validate                        check the graph against planning.md rules (CI gate)
-  ready [--spec-ahead] [--json]   nodes that can start now
-  waves [--column c] [--json]     parallel waves and the critical path
-  status [--json]                 derived stage of every node, live phase, review stats
+  ready [--spec-ahead] [--json]   tickets that can start now
+  waves [--feature c] [--json]     parallel waves and the critical path
+  status [--json]                 derived stage of every ticket, live phase, review stats
 
 Gates
-  check-node <id> [--sha s] [--title t] [--body-file f]   definition of done at an exact head
+  check-ticket <id> [--sha s] [--title t] [--body-file f]   definition of done at an exact head
   check-pr --head-ref r --title t --body-file f [--sha s]  mechanical merge-word check (CI)
 
 Questions
-  ask --question q [--kind k] [--node id] [--options a b] [--recommendation r]
+  ask --question q [--kind k] [--ticket id] [--options a b] [--recommendation r]
       [--default d] [--blocks ids] [--context c] [--to owner] [--head sha]
   answer <qid> "<text>" [--by owner|supervisor] [--defaulted]
   questions [--to x] [--mine] [--all] [--json]   ranked inbox
@@ -1213,7 +1213,7 @@ Questions
 
 Run state and history
   heartbeat [--phase p] [--task t] [--note n] [--usd x --in n --out n --cost-source s] [--supervisor]
-  event --type t [--node id] [--sha s] [--summary s] [--ref r]
+  event --type t [--ticket id] [--sha s] [--summary s] [--ref r]
   history [<id>] [--tail n]       events and answered questions, for orientation
 
 Other
@@ -1229,7 +1229,7 @@ const COMMANDS = {
   ready: cmdReady,
   waves: cmdWaves,
   status: cmdStatus,
-  'check-node': cmdCheckNode,
+  'check-ticket': cmdCheckTicket,
   'check-pr': cmdCheckPr,
   ask: cmdAsk,
   answer: cmdAnswer,

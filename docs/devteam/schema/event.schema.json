@@ -9,14 +9,14 @@
   "properties": {
     "ts": { "type": "string", "format": "date-time" },
     "type": { "enum": [
-      "node.spawned", "node.phase", "node.blocked", "node.parked", "node.merged", "node.released",
+      "ticket.spawned", "ticket.phase", "ticket.blocked", "ticket.parked", "ticket.merged", "ticket.released",
       "question.asked", "question.answered", "question.defaulted",
       "review.verdict", "word.stage", "word.merge", "approve.spec", "approve.plan", "approve.design-change",
       "ruling", "gate.result", "slot.granted", "slot.released",
       "replan", "recovery", "defect.escaped", "cost"
     ] },
-    "actor": { "type": "string", "description": "node id, 'supervisor', 'owner', 'planner' or 'ci'" },
-    "node": { "type": ["string", "null"] },
+    "actor": { "type": "string", "description": "ticket id, 'supervisor', 'owner', 'planner' or 'ci'" },
+    "ticket": { "type": ["string", "null"] },
     "sha": { "type": ["string", "null"] },
     "summary": { "type": "string", "maxLength": 280 },
     "ref": { "type": ["string", "null"], "description": "file path or URL with the detail" }

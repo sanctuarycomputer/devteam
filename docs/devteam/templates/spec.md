@@ -1,7 +1,7 @@
-# <node-id>: <title>
+# <ticket-id>: <title>
 
 Status: draft | approved
-Node: `project/graph/<node-id>.json`
+Ticket: `project/graph/<ticket-id>.json`
 Serves: <story ids>
 
 ## What this delivers
@@ -10,7 +10,7 @@ Serves: <story ids>
 
 ## Acceptance checks
 
-One per done-when in the node file, each with how it is checked.
+One per done-when in the ticket file, each with how it is checked.
 
 | Done-when | Check |
 |---|---|

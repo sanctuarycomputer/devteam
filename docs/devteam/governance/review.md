@@ -4,7 +4,7 @@ What counts as a review, how it is recorded, and how its quality is measured. Ad
 
 ## 1. What a review is
 
-- **Non-author.** The reviewer did not write the work. A fresh subagent dispatched by the author counts as non-author for **spec, plan and task** reviews on any node. **Final** reviews come from a fresh reviewer that has not seen the build: a fresh subagent is enough on a `normal` node; on a `risk: high` node (see `planning.md` §5) there are two, from two sessions other than the worker's, ideally on different models.
+- **Non-author.** The reviewer did not write the work. A fresh subagent dispatched by the author counts as non-author for **spec, plan and task** reviews on any ticket. **Final** reviews come from a fresh reviewer that has not seen the build: a fresh subagent is enough on a `normal` ticket; on a `risk: high` ticket (see `planning.md` §5) there are two, from two sessions other than the worker's, ideally on different models.
 - **Adversarial.** The reviewer's job is to find the defect. Its default verdict is **not approved**; it approves only when it has looked and failed to find a Critical or Important issue.
 - **Against the rules, not taste.** Findings cite the governing text: a Law id from `code-style.md`, a line of the spec, a contract clause, a gate in `quality-gates.md`. A finding that cites nothing is a suggestion, and suggestions never block.
 - **Scoped.** The reviewer reads the diff and everything it cites, not the whole tree. Where a test cannot prove a property, the reviewer mutates the code in a scratch copy to check that a test fails.
@@ -14,22 +14,22 @@ What counts as a review, how it is recorded, and how its quality is measured. Ad
 
 | Stage | What is reviewed | Passing verdict needed before |
 |---|---|---|
-| design | the system design doc | the column plan is written |
-| graph | the column plan + every node file | any node is spawned |
-| spec | the node spec | `approve spec` |
-| plan | the node plan | `approve plan` |
+| design | the system design doc | the feature plan is written |
+| graph | the feature plan + every ticket file | any ticket is spawned |
+| spec | the ticket spec | `approve spec` |
+| plan | the ticket plan | `approve plan` |
 | contract | a contract change, against the contract checklist | the supervisor's stage word |
 | task | each build task's diff | the next task starts |
-| final | the whole node branch at its final head | the merge word |
+| final | the whole ticket branch at its final head | the merge word |
 
 ## 3. Passes
 
 1. **Pass 1, adversarial.** Full review; produces findings.
 2. The author fixes.
 3. **Pass 2, cold confirm.** A reviewer who is neither the author nor the fixer re-checks the fixes, diff-only, and flips the verdict. A "changes needed" verdict plus an author note saying "fixed" is **not** an approval. A new Critical in pass 2 forces pass 3.
-4. **Cap.** If pass 3 still finds a Critical, stop and raise a question to the supervisor; the node probably needs re-planning.
+4. **Cap.** If pass 3 still finds a Critical, stop and raise a question to the supervisor; the ticket probably needs re-planning.
 
-**Two independent reviews** (from two different sessions) are required for `risk: high` nodes and for every one-way door (`constitution.md` §3).
+**Two independent reviews** (from two different sessions) are required for `risk: high` tickets and for every one-way door (`constitution.md` §3).
 
 ## 4. Severity
 
@@ -45,11 +45,11 @@ What counts as a review, how it is recorded, and how its quality is measured. Ad
 Every review is a file, written with [`templates/review-record.md`](../templates/review-record.md), at:
 
 ```
-docs/devteam/project/nodes/<node-id>/reviews/<stage>-<pass>[<lineage>].md   spec, plan, contract, task, final
-docs/devteam/project/reviews/<column>/<stage>-<pass>[<lineage>].md           design, graph
+docs/devteam/project/tickets/<ticket-id>/reviews/<stage>-<pass>[<lineage>].md   spec, plan, contract, task, final
+docs/devteam/project/reviews/<feature>/<stage>-<pass>[<lineage>].md           design, graph
 ```
 
-`<pass>` is 1, 2, 3 (`review.md` §3). `<lineage>` is empty for the first independent review and `b`, `c` for further independent ones (for example `final-1.md` and `final-1b.md` on a `risk: high` node). Node review records are committed on the node's branch; column review records on the planning branch.
+`<pass>` is 1, 2, 3 (`review.md` §3). `<lineage>` is empty for the first independent review and `b`, `c` for further independent ones (for example `final-1.md` and `final-1b.md` on a `risk: high` ticket). Ticket review records are committed on the ticket's branch; feature review records on the planning branch.
 
 The record must name its reviewer on a `- Reviewer:` line; an unnamed record does not count. Its last line is the verdict, with the **full 40-character SHA**, exactly one of:
 
@@ -60,7 +60,7 @@ Verdict: CHANGES <full-head-sha>
 
 Each finding is one row with an id, severity, the rule it cites, the location, and a **disposition** the author fills in: `fixed`, `wont-fix` (with reason, needs reviewer agreement), `disputed` (goes to the supervisor), or `wrong` (the reviewer agrees it was a false positive).
 
-`check-node` fails a PR when: no final review was made at its exact head; the **latest** final review in any lineage at that head says `CHANGES`; fewer named reviewers approved it than the node's risk requires; or any Critical or Important finding in any of the node's review records lacks a `fixed`, `wont-fix` or `wrong` disposition. `validate` fails an approved column plan whose latest design or graph review is missing or not `APPROVE`.
+`check-ticket` fails a PR when: no final review was made at its exact head; the **latest** final review in any lineage at that head says `CHANGES`; fewer named reviewers approved it than the ticket's risk requires; or any Critical or Important finding in any of the ticket's review records lacks a `fixed`, `wont-fix` or `wrong` disposition. `validate` fails an approved feature plan whose latest design or graph review is missing or not `APPROVE`.
 
 ## 6. Measuring review quality
 
@@ -68,6 +68,6 @@ Each finding is one row with an id, severity, the rule it cites, the location, a
 
 - **first-pass rejection rate** per stage. A healthy fleet rejects a meaningful share of first passes (observed: 20 to 30%). If it drifts toward zero, the reviewer prompt has gone soft; sharpen it.
 - **false-positive rate**: share of findings dispositioned `wrong`. If high, the reviewer is citing taste; tighten §1.
-- **escape rate**: defects found after merge that a review should have caught, logged by the supervisor as events of type `defect.escaped` with the node id.
+- **escape rate**: defects found after merge that a review should have caught, logged by the supervisor as events of type `defect.escaped` with the ticket id.
 
 The supervisor reviews these numbers weekly and proposes prompt or rule changes through `constitution.md` §4.

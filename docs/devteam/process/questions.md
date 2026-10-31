@@ -10,7 +10,7 @@ Create a question with the script so the id, timestamp and event line are right:
 
 ```
 node docs/devteam/scripts/devteam.mjs ask \
-  --kind design-change --node api-07-session-tokens \
+  --kind design-change --ticket api-07-session-tokens \
   --question "The spec says tokens expire in 24h but the contract says 12h. Which wins?" \
   --options "follow the contract (12h)" "amend the contract to 24h" \
   --recommendation "follow the contract; it is the published guarantee" \
@@ -44,14 +44,14 @@ node docs/devteam/scripts/devteam.mjs ask \
 - **Lead with the decision**, then context. The answerer should be able to answer from the first line in most cases.
 - **Give options and a recommendation.** Never ask an open-ended "what should I do?".
 - **Set `default`** only when the choice is reversible. If the question is unanswered after the binding's `question_default_after_hours` (24 if unset), the supervisor applies it with `devteam.mjs answer <qid> "<default>" --defaulted`, which sets `status: defaulted` and logs it. One-way doors never have a default.
-- **Fill `blocks`** with every node that cannot proceed. The inbox is ranked by it.
+- **Fill `blocks`** with every ticket that cannot proceed. The inbox is ranked by it.
 
 ## 5. Ranking
 
 `devteam.mjs questions` lists open questions in this order:
 
 1. `one-way-door` and `owner-decision` addressed to the owner;
-2. then by how much they block: number of nodes in `blocks`, weighted up when a blocked node is on the critical path;
+2. then by how much they block: number of tickets in `blocks`, weighted up when a blocked ticket is on the critical path;
 3. then oldest first.
 
 The dashboard shows the same order.
@@ -59,7 +59,7 @@ The dashboard shows the same order.
 ## 6. After the answer
 
 - `devteam.mjs answer` writes the answer fields, appends a `question.answered` event, and nudges the asker's tmux pane (`devteam: <id> answered`). The file holds the content; the nudge only says where to look.
-- **The asker records the ruling in a tracked file** in its next commit, then runs `devteam.mjs recorded <qid> <path>`. Node-scoped rulings go in the spec's or plan's Rulings section, before the node asks for the merge word. Cross-cutting ones the supervisor adds to `project/decisions.md` (through a `chore-` PR or the next planning PR).
+- **The asker records the ruling in a tracked file** in its next commit, then runs `devteam.mjs recorded <qid> <path>`. Ticket-scoped rulings go in the spec's or plan's Rulings section, before the ticket asks for the merge word. Cross-cutting ones the supervisor adds to `project/decisions.md` (through a `chore-` PR or the next planning PR).
 
 ## 7. Notifying the owner
 

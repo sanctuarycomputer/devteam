@@ -1,9 +1,9 @@
-# Plan: <node-id>
+# Plan: <ticket-id>
 
 Status: draft | approved
 Spec: `spec.md`
 
-Every file below must match the node's `touches`. A task that needs another file is a design-change question, not a plan edit.
+Every file below must match the ticket's `touches`. A task that needs another file is a design-change question, not a plan edit.
 
 ## Tasks
 

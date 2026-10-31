@@ -1,4 +1,4 @@
-# Verification: <node-id>
+# Verification: <ticket-id>
 
 At commit: <full sha>
 

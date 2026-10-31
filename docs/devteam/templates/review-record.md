@@ -1,4 +1,4 @@
-# Review: <node-id> / <stage> / pass <n>
+# Review: <ticket-id> / <stage> / pass <n>
 
 - Reviewer: <session or subagent identity; must not be the author or, for a confirm pass, the fixer>
 - Reviewed head: <full sha>

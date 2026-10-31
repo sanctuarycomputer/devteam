@@ -12,7 +12,7 @@ Scripts read this block. Keep it valid JSON.
   "tmux_session": "devteam",
   "agent_command": "claude --dangerously-skip-permissions",
   "resume_command": "claude --continue --dangerously-skip-permissions",
-  "max_active_nodes": 5,
+  "max_active_tickets": 5,
   "max_active_per_component": 2,
   "stale_after_minutes": 30,
   "question_default_after_hours": 24,
@@ -80,7 +80,7 @@ In addition to `constitution.md` §3:
 
 ## 8. Contract checklist
 
-What the supervisor checks on every contract stage (`item-lifecycle.md` §3):
+What the supervisor checks on every contract stage (`ticket-lifecycle.md` §3):
 
 - versioned; the version bumped by exactly one minor (or major for a breaking change);
 - every new field has a type, a default or an explicit "required", and a test fixture;
@@ -95,7 +95,7 @@ What the supervisor checks on every contract stage (`item-lifecycle.md` §3):
 
 ## 10. Known debt
 
-Gates in ratchet mode (`process/bootstrap.md` §5.3), their recorded violation counts per component, and the chore nodes that will bring them to green:
+Gates in ratchet mode (`process/bootstrap.md` §5.3), their recorded violation counts per component, and the chore tickets that will bring them to green:
 
 -
 

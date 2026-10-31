@@ -4,14 +4,14 @@
 # is shown to the agent (Claude Code Stop hook semantics; adapt for other agents).
 set -uo pipefail
 
-NODE="${DEVTEAM_NODE:-}"
-[[ -n "$NODE" ]] || exit 0   # not a devteam worker
+TICKET="${DEVTEAM_TICKET:-}"
+[[ -n "$TICKET" ]] || exit 0   # not a devteam worker
 RUN="${DEVTEAM_RUN:-}"
 [[ -n "$RUN" ]] || exit 0
-STATE="$RUN/nodes/$NODE.json"
+STATE="$RUN/tickets/$TICKET.json"
 
 if [[ ! -f "$STATE" ]]; then
-  echo "devteam: no run state for $NODE. Run: node docs/devteam/scripts/devteam.mjs heartbeat --phase <phase> --note \"...\"" >&2
+  echo "devteam: no run state for $TICKET. Run: node docs/devteam/scripts/devteam.mjs heartbeat --phase <phase> --note \"...\"" >&2
   exit 2
 fi
 

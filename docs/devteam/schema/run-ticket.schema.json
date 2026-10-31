@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "devteam/run-node.schema.json",
-  "title": "Live node state",
-  "description": "What only the worker knows about its node right now. Runtime file at docs/devteam/run/nodes/<id>.json, written only by that node's worker (and by the supervisor during recovery).",
+  "$id": "devteam/run-ticket.schema.json",
+  "title": "Live ticket state",
+  "description": "What only the worker knows about its ticket right now. Runtime file at docs/devteam/run/tickets/<id>.json, written only by that ticket's worker (and by the supervisor during recovery).",
   "type": "object",
   "required": ["id", "phase", "heartbeat_at"],
   "additionalProperties": false,

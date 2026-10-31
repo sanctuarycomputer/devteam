@@ -10,7 +10,7 @@ Engineering governance and process for building software with a supervised fleet
 |---|---|
 | Setting devteam up in a repo for the first time | [`process/bootstrap.md`](process/bootstrap.md) |
 | The **supervisor** (the one coordinating session) | [`process/supervisor.md`](process/supervisor.md) |
-| A **worker** spawned for one graph node | [`process/worker.md`](process/worker.md) |
+| A **worker** spawned for one ticket | [`process/worker.md`](process/worker.md) |
 | A **reviewer** asked to review a stage | [`governance/review.md`](governance/review.md) |
 | A **planner** turning an owner direction into a graph | [`process/planning.md`](process/planning.md) |
 | Folding in a new upstream devteam release (the supervisor checks on its loop) | [`process/upstream-sync.md`](process/upstream-sync.md) |
@@ -19,11 +19,18 @@ Engineering governance and process for building software with a supervised fleet
 
 - **owner**: the human accountable for the project. Owns one-way doors, product calls and releases to production.
 - **supervisor**: one long-lived session acting as technical PM/CTO. Plans, rules, gives the merge word, writes no production code.
-- **worker**: one session bound to one graph node, in its own git worktree and tmux window. Decides for itself whether to use subagents inside its node.
+- **worker**: one session bound to one ticket, in its own git worktree and tmux window. Decides for itself whether to use subagents inside its ticket.
 - **reviewer**: any session or subagent that did not author the work under review.
-- **column**: a feature area owned end to end. One design, one column plan, many nodes. The reserved column `chores` holds chore and spike nodes that belong to no plan.
-- **node**: one unit of the work graph. **One node is one reviewable PR.** Nodes have ids like `api-07-session-tokens`.
 - **binding**: a project-specific decision the doctrine leaves open (services, persistence tiers, release rings, agent command). Lives in `project/binding.md`.
+
+The work, from largest to smallest:
+
+- **feature**: a feature area owned end to end, such as "sign-in". One design, one feature plan, many tickets. The reserved feature `chores` holds chore and spike tickets that belong to no plan.
+- **story**: a user-facing outcome inside a feature, with acceptance criteria checked end to end. Ids like `SIGNIN-S1`. Tickets declare which stories they serve.
+- **ticket**: **one reviewable PR**, run by one worker. Ids like `api-07-session-tokens`.
+- **task**: one step in a ticket's plan, built test-first.
+- **wave**: the tickets that can run in parallel once the previous wave merges. Computed from dependencies (`devteam.mjs waves`), not a timebox.
+- **graph**: the structure across all of it. Tickets and their dependencies, plus the live state of the fleet working them.
 
 ## Layout
 
@@ -33,14 +40,15 @@ docs/devteam/
   governance/          the rules: what must be true (owner-tweakable)
   process/             the procedures: how work moves (owner-tweakable)
   templates/           skeletons agents fill instead of inventing structure
-  schema/              JSON schemas for graph nodes, questions, events
+  schema/              JSON schemas for tickets, questions, events
   scripts/             zero-dependency tools (Node 20+, bash)
   project/             THIS project's content; created at bootstrap, never touched by upstream sync
     binding.md         the project's answers to every open decision
-    designs/           <slug>.md system designs
-    columns/           <column>.md column plans
-    graph/             <node-id>.json, the work graph (tracked, compiled by planning)
-    nodes/<node-id>/   spec.md, plan.md, reviews/, verification.md for each node
+    designs/           <slug>.md system designs (and baseline.md when adopting an existing codebase)
+    features/          <feature>.md feature plans
+    graph/             <ticket-id>.json, the work graph (tracked, written by planning)
+    tickets/<id>/      spec.md, plan.md, reviews/, verification.md for each ticket
+    reviews/<feature>/ design and graph review records
     decisions.md       cross-cutting rulings, dated
     upstream-log.md    upstream releases considered and what was adopted, adapted or skipped
   run/                 live runtime state (gitignored): questions, heartbeats, events
@@ -60,7 +68,7 @@ docs/devteam/
 
 ## Requirements
 
-git, tmux, Node 20+ (scripts use only built-ins), the GitHub CLI, one agent CLI (Claude Code, Codex, OpenCode or similar), and a CI runner. Superpowers is recommended for the worker loop but not required; [`process/item-lifecycle.md`](process/item-lifecycle.md) spells out every step either way.
+git, tmux, Node 20+ (scripts use only built-ins), the GitHub CLI, one agent CLI (Claude Code, Codex, OpenCode or similar), and a CI runner. Superpowers is recommended for the worker loop but not required; [`process/ticket-lifecycle.md`](process/ticket-lifecycle.md) spells out every step either way.
 
 ## Scripts
 
@@ -69,10 +77,10 @@ git, tmux, Node 20+ (scripts use only built-ins), the GitHub CLI, one agent CLI 
 | Command | Who | What |
 |---|---|---|
 | `validate` | planner, CI | check the graph against the planning rules |
-| `waves`, `ready`, `status` | supervisor, planner | parallel waves and critical path; what can start; derived stage of every node |
-| `check-node <id>`, `check-pr` | worker, CI | definition of done and the mechanical merge-word check at an exact head |
+| `waves`, `ready`, `status` | supervisor, planner | parallel waves and critical path; what can start; derived stage of every ticket |
+| `check-ticket <id>`, `check-pr` | worker, CI | definition of done and the mechanical merge-word check at an exact head |
 | `ask`, `answer`, `questions`, `sync-questions`, `recorded` | everyone | the question inbox |
 | `heartbeat`, `event`, `history`, `whoami` | worker, supervisor | live state, the event log, orientation |
 | `notes <from> [<to>]`, `binding` | supervisor | story-grouped release notes; the project's settings |
-| `bash docs/devteam/scripts/spawn-node.sh <id> [--resume]` | supervisor | worktree, tmux window and agent for a node (`--planner <column>` for a planner) |
+| `bash docs/devteam/scripts/spawn-ticket.sh <id> [--resume]` | supervisor | worktree, tmux window and agent for a ticket (`--planner <feature>` for a planner) |
 | `bash docs/devteam/scripts/stop-hook.sh` | worker's agent | refuses to stop while the run state is stale |

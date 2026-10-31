@@ -10,7 +10,7 @@ How devteam gets materialized into a project repo, and how the first session get
    - `binding.md` from [`templates/binding.md`](../templates/binding.md)
    - `decisions.md` from [`templates/decisions.md`](../templates/decisions.md)
    - `upstream-log.md` from [`templates/upstream-log.md`](../templates/upstream-log.md), with a first row recording the release tag you copied (this is the base for `upstream-sync.md`)
-   - empty `designs/`, `columns/`, `graph/`, `nodes/`, `reviews/` folders (each with a `.gitkeep`)
+   - empty `designs/`, `features/`, `graph/`, `tickets/`, `reviews/` folders (each with a `.gitkeep`)
 4. Create or update the repo root `AGENTS.md` from [`templates/AGENTS.md`](../templates/AGENTS.md). If an `AGENTS.md` exists, append the devteam section rather than replacing it. If a `CLAUDE.md` exists and is not already a symlink, add a line to it pointing at `AGENTS.md`; otherwise create `CLAUDE.md` as a symlink to `AGENTS.md`.
 5. Add `.worktrees/` to the root `.gitignore`.
 6. Add the CI jobs from [`templates/github/devteam.yml`](../templates/github/devteam.yml) (adapt to the project's CI if it is not GitHub Actions), and list `devteam-validate` and `merge-word` as required checks in the intended branch rules (`ci.md` §3).
@@ -26,7 +26,7 @@ Survey the repo first (languages, frameworks, components, existing CI, existing 
 - persistence tier per domain (`code-style.md` §4) for any domain that already exists;
 - one-way doors specific to this project;
 - release rings, release actors, and whether `-rc` tags may be automated (`release.md` §3);
-- `agent_command` and `resume_command`; `max_active_nodes`;
+- `agent_command` and `resume_command`; `max_active_tickets`;
 - shared resources that need slots, if any;
 - how the owner wants to be notified.
 
@@ -36,7 +36,7 @@ Record each answer in the binding with its date. (During bootstrap there is no s
 
 For each component's stack, add the root gates from `quality-gates.md` §2 that are missing, using the tools in §3 of that file unless the binding chose others. Autofix first. List each in the binding's commissioning table with the CI step that runs it.
 
-Do not fix the whole codebase in this PR. If a gate fails on existing code, commission it in **ratchet** mode (§5.3) and add one node per component to bring it to green: a graph file with `"kind": "chore"`, `"column": "chores"` (the reserved column that needs no plan), empty `serves`, and `notes` saying which gate it clears. Record the debt in the binding's Known debt section. `validate` must pass on the bootstrap PR.
+Do not fix the whole codebase in this PR. If a gate fails on existing code, commission it in **ratchet** mode (§5.3) and add one ticket per component to bring it to green: a graph file with `"kind": "chore"`, `"feature": "chores"` (the reserved feature that needs no plan), empty `serves`, and `notes` saying which gate it clears. Record the debt in the binding's Known debt section. `validate` must pass on the bootstrap PR.
 
 ## 4. Start
 
@@ -46,7 +46,7 @@ Do not fix the whole codebase in this PR. If a gate fails on existing code, comm
 
 ## 5. Adopting into an existing codebase
 
-An established repo differs from a new one in four ways. Handle each before the first column is planned.
+An established repo differs from a new one in four ways. Handle each before the first feature is planned.
 
 ### 5.1 Write a baseline
 
@@ -63,26 +63,26 @@ The baseline is reviewed like a design (`project/reviews/baseline/design-1.md`).
 
 ### 5.2 Account for work already in flight
 
-Open PRs, active branches and tracker items are work the graph doesn't know about. For each:
+Open PRs, active branches and tracker tickets are work the graph doesn't know about. For each:
 
-- **finish it outside devteam** if it is close to done: list it in the baseline's "In flight" table with the files it changes. Planning must not schedule a node whose `touches` overlap those files until it merges or is abandoned;
-- **adopt it** if it is early: once a column plan covers it, write a graph node for it in that column, rename or recreate the branch as `node/<id>`, and let it continue through the item lifecycle from whichever stage its artefacts support. Until then, list it under In flight like finished-outside work. (Only `chore` and `spike` nodes may use the `chores` column, so cleanup and investigation branches can be adopted there straight away.)
+- **finish it outside devteam** if it is close to done: list it in the baseline's "In flight" table with the files it changes. Planning must not schedule a ticket whose `touches` overlap those files until it merges or is abandoned;
+- **adopt it** if it is early: once a feature plan covers it, write a ticket for it in that feature, rename or recreate the branch as `ticket/<id>`, and let it continue through the ticket lifecycle from whichever stage its artefacts support. Until then, list it under In flight like finished-outside work. (Only `chore` and `spike` tickets may use the `chores` feature, so cleanup and investigation branches can be adopted there straight away.)
 - **close it** if it is stale: ask the owner first (one batched question).
 
-Tracker items (issues, tickets) are inputs to planning, not nodes. A planner reads them at P0 and P1.
+Tracker tickets (issues, tickets) are inputs to planning, not tickets. A planner reads them at P0 and P1.
 
 ### 5.3 Ratchet, don't rewrite
 
 The code doctrine applies in full to **new and changed code**. Existing violations are recorded, not fixed on sight:
 
 - **Ratchet mode** for a gate: record the current violation count per component in the binding's Known debt section. The gate fails if the count goes up, or if a file a PR changes has a violation in a line it changed. It never fails on untouched legacy code.
-- A worker that needs to change legacy code inside its `touches` brings the lines it changes up to the doctrine and leaves the rest alone. A larger cleanup is its own node.
-- Each gate moves from ratchet to enforced when its chore node lands, and the binding's commissioning table says so.
-- Structural Laws that legacy code violates widely (functional core, result values) apply at **module boundaries a node creates or changes**. The baseline says where the old structure is; designs say how new code wraps it.
+- A worker that needs to change legacy code inside its `touches` brings the lines it changes up to the doctrine and leaves the rest alone. A larger cleanup is its own ticket.
+- Each gate moves from ratchet to enforced when its chore ticket lands, and the binding's commissioning table says so.
+- Structural Laws that legacy code violates widely (functional core, result values) apply at **module boundaries a ticket creates or changes**. The baseline says where the old structure is; designs say how new code wraps it.
 
 ### 5.4 Start narrow
 
-Old codebases have broad hotspots, so early footprints overlap and few nodes can run in parallel. Start with `max_active_nodes` at 2 or 3. Plan the first column with contract nodes that carve stable interfaces around the hotspots; those are what let later columns parallelize. Raise the cap when `devteam.mjs waves` shows real width.
+Old codebases have broad hotspots, so early footprints overlap and few tickets can run in parallel. Start with `max_active_tickets` at 2 or 3. Plan the first feature with contract tickets that carve stable interfaces around the hotspots; those are what let later features parallelize. Raise the cap when `devteam.mjs waves` shows real width.
 
 ### 5.5 Existing process docs
 

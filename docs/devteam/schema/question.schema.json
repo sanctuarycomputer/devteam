@@ -39,14 +39,14 @@
     },
     "from": {
       "type": "string",
-      "description": "node id, 'supervisor' or 'planner'"
+      "description": "ticket id, 'supervisor' or 'planner'"
     },
-    "node": {
+    "ticket": {
       "type": [
         "string",
         "null"
       ],
-      "description": "node the question is about, if any"
+      "description": "ticket the question is about, if any"
     },
     "session": {
       "type": [
@@ -69,7 +69,7 @@
     },
     "options": {
       "type": "array",
-      "items": {
+      "tickets": {
         "type": "string"
       }
     },
@@ -85,10 +85,10 @@
     },
     "blocks": {
       "type": "array",
-      "items": {
+      "tickets": {
         "type": "string"
       },
-      "description": "node ids that cannot proceed until answered"
+      "description": "ticket ids that cannot proceed until answered"
     },
     "head_sha": {
       "type": [

@@ -1,7 +1,7 @@
 # <Design title>
 
 Status: draft | in review | approved
-Column: <column-slug>
+Feature: <feature-slug>
 Read against: <commit sha>
 Research: <path to research notes>
 
@@ -20,7 +20,7 @@ Non-goals:
 
 ## 3. Contracts
 
-Every interface that crosses a component boundary. Each becomes a contract node.
+Every interface that crosses a component boundary. Each becomes a contract ticket.
 
 | Contract | Provider | Consumers | Shape (summary) | Version change |
 |---|---|---|---|---|
@@ -56,6 +56,6 @@ Each becomes an owner question before the graph is approved.
 
 ## 9. Risks and unknowns
 
-Each becomes a spike node or an owner question.
+Each becomes a spike ticket or an owner question.
 
 -

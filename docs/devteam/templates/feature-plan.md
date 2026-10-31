@@ -1,4 +1,4 @@
-# Column: <column-slug>
+# Feature: <feature-slug>
 
 ## 0. Header
 
@@ -12,19 +12,19 @@
 
 | Id | Story | Acceptance (checked end to end) |
 |---|---|---|
-| <COL>-S1 | When <trigger>, the <system> shall <response>. | |
+| <FEAT>-S1 | When <trigger>, the <system> shall <response>. | |
 
-## 2. Nodes
+## 2. Tickets
 
 Detail lives in `project/graph/<id>.json`. This table only lists them.
 
-| Node | Kind | Size | Risk | Serves |
+| Ticket | Kind | Size | Risk | Serves |
 |---|---|---|---|---|
 | | | | | |
 
 ## 3. Waves and critical path
 
-<paste `devteam.mjs waves --column <slug>` output>
+<paste `devteam.mjs waves --feature <slug>` output>
 
 ## 4. Gaps
 

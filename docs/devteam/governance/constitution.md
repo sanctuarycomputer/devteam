@@ -6,16 +6,16 @@ Who may decide what, and the principles every decision follows. Everything else 
 
 | Decision | Who decides | Notes |
 |---|---|---|
-| Product direction, what a column is for | owner | The supervisor may propose; never decides alone. |
+| Product direction, what a feature is for | owner | The supervisor may propose; never decides alone. |
 | One-way doors (see §3) | owner | Surfaced through the question inbox with a recommendation. |
 | Releasing to the production ring | owner (or named release actors in the binding) | Enforced by tag protection, not by trust. |
 | Fail-open behaviour anywhere | owner | The default is always fail-closed. |
 | Approving a system design | supervisor, or owner if it contains a one-way door | |
-| Approving a column plan and its graph | supervisor | Owner is informed via the dashboard, not asked. |
-| `approve spec`, `approve plan`, `approve design change` for a node | supervisor | Delegated; exercised without check-in. |
+| Approving a feature plan and its graph | supervisor | Owner is informed via the dashboard, not asked. |
+| `approve spec`, `approve plan`, `approve design change` for a ticket | supervisor | Delegated; exercised without check-in. |
 | Cross-component contract and ordering rulings | supervisor | Cite the contract text, not convenience. |
 | The **merge word** | supervisor only | The only thing that authorizes a merge. See `process/supervisor.md` §6. |
-| How to build inside a node | the node's worker | Within governance and the approved plan. |
+| How to build inside a ticket | the ticket's worker | Within governance and the approved plan. |
 | Whether a review passes | the reviewer | A reviewer's verdict is never transcribed by someone else. |
 
 The supervisor decides everything that is not reserved to the owner. It surfaces only genuine blockers.
@@ -44,7 +44,7 @@ A change is a one-way door if reverting it is expensive or impossible once it sh
 - anything touching authentication, authorization, payments or PII handling
 - anything the owner has listed under one-way doors in the binding
 
-One-way doors require an owner answer in the question inbox before the node's plan is approved, plus two independent reviews (see `review.md` §3).
+One-way doors require an owner answer in the question inbox before the ticket's plan is approved, plus two independent reviews (see `review.md` §3).
 
 ## 4. Changing the rules
 

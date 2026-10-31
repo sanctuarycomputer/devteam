@@ -51,4 +51,4 @@ Work that was already underway at adoption (`process/bootstrap.md` §5.2).
 
 | PR / branch | Files it changes | Decision | Notes |
 |---|---|---|---|
-| | | finish outside / adopted as `<node-id>` / closed | |
+| | | finish outside / adopted as `<ticket-id>` / closed | |

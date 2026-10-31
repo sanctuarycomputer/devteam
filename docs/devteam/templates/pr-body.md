@@ -1,6 +1,6 @@
-## Node
+## Ticket
 
-`docs/devteam/project/graph/<node-id>.json` · serves <story ids>
+`docs/devteam/project/graph/<ticket-id>.json` · serves <story ids>
 
 ## What changed
 
@@ -8,9 +8,9 @@
 
 ## Evidence
 
-- Spec: `docs/devteam/project/nodes/<node-id>/spec.md`
-- Verification: `docs/devteam/project/nodes/<node-id>/verification.md`
-- Final review: `docs/devteam/project/nodes/<node-id>/reviews/final-<n>.md`
+- Spec: `docs/devteam/project/tickets/<ticket-id>/spec.md`
+- Verification: `docs/devteam/project/tickets/<ticket-id>/verification.md`
+- Final review: `docs/devteam/project/tickets/<ticket-id>/reviews/final-<n>.md`
 
 ## One-way doors
 

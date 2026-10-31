@@ -1,6 +1,6 @@
 # devteam
 
-Governance and process for building software with a supervised fleet of AI-agent sessions: one supervisor acting as technical PM, one worker per node of a planned work graph, adversarial review at every stage, and a merge word that only the supervisor can give.
+Governance and process for building software with a supervised fleet of AI-agent sessions: one supervisor acting as technical PM, one worker per ticket of a planned work graph, adversarial review at every stage, and a merge word that only the supervisor can give.
 
 It is meant to be **materialized** into a project, not installed: copy it in, own it, edit it. Upgrades are folded in by an agent that reads each upstream change's rationale and decides what applies.
 

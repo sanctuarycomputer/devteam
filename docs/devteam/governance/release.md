@@ -40,15 +40,15 @@ The binding keeps an **artifact inventory** table: what is built, where it is st
 
 - **The changelog is the release record** on the forge (GitHub Releases or equivalent). No hand-maintained `CHANGELOG.md` in the product repo; it would duplicate the record.
 - The annotated tag's message is the notes header. The body is generated from merged PR titles since the previous tag, grouped by component label.
-- **The unit of the changelog is the PR title**, which is a Law: `<node-id>: <one line a user of the product could read>`. Commit messages stay free-form; conventional-commit prefixes are not used because the node id already carries scope.
-- Story-level notes: `devteam.mjs notes <from-tag> <to-tag>` groups merged nodes by the stories they serve (from the graph) into "stories completed" and "stories advanced" sections. Paste it into the release body.
+- **The unit of the changelog is the PR title**, which is a Law: `<ticket-id>: <one line a user of the product could read>`. Commit messages stay free-form; conventional-commit prefixes are not used because the ticket id already carries scope.
+- Story-level notes: `devteam.mjs notes <from-tag> <to-tag>` groups merged tickets by the stories they serve (from the graph) into "stories completed" and "stories advanced" sections. Paste it into the release body.
 - Versioning is `v<major>.<minor>.<patch>[-rcN]` (SemVer); `-rc` is the only pre-release form.
-- Releases are cut on **cadence, not scope**. Scope-gated releases recreate big batches. The column plan's release map says which release a story is *expected* in; the generated notes record where it *actually* landed.
+- Releases are cut on **cadence, not scope**. Scope-gated releases recreate big batches. The feature plan's release map says which release a story is *expected* in; the generated notes record where it *actually* landed.
 
 ## 7. What each ring proves
 
 - **dev:** unit, integration and end-to-end tests; the artifact build itself.
-- **beta:** each node's verification notes walked against the real environment; health checks; anything that cannot run in CI (real devices, real networks) runs here before stable.
+- **beta:** each ticket's verification notes walked against the real environment; health checks; anything that cannot run in CI (real devices, real networks) runs here before stable.
 - **production:** the beta soak plus health gates the cohort rollout.
 
 ## 8. Operator checklist

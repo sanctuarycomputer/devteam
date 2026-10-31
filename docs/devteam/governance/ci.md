@@ -12,7 +12,7 @@ This doc points at, never restates:
 ## 1. The pipeline
 
 ```
-node/<id> branch → PR CI (changes filter → per-component jobs → root job → `check` aggregate)
+ticket/<id> branch → PR CI (changes filter → per-component jobs → root job → `check` aggregate)
                  → non-author review records + supervisor merge word
                  → merge to main, refusing if the head moved
 main             → push CI (never cancelled) + build/publish
@@ -34,10 +34,10 @@ main             → push CI (never cancelled) + build/publish
 - pushes to `main` only through a PR; no force-push, no deletion, no bypass actor;
 - required check `check` with **strict = true** (the head must be up to date with base);
 - required checks **`devteam-validate`** and **`merge-word`**, rather than a GitHub approval. Fleets usually run under one shared identity, so GitHub's own review approvals cannot prove non-author independence. `merge-word` runs `devteam.mjs check-pr`, which mechanizes the checkable half of the merge word:
-  - for a `node/<id>` branch, `check-node` at the PR's exact head: approved spec and plan, verification rows for every done-when, the latest final review in every lineage saying `APPROVE` at a commit that holds at the head (at its own commit, or at a later head whose only changes are newly added review records; `review.md` §1), from enough named reviewers (two for `risk: high`), every Critical and Important finding dispositioned, and no changed file outside the node's `touches` (plus its own node folder);
+  - for a `ticket/<id>` branch, `check-ticket` at the PR's exact head: approved spec and plan, verification rows for every done-when, the latest final review in every lineage saying `APPROVE` at a commit that holds at the head (at its own commit, or at a later head whose only changes are newly added review records; `review.md` §1), from enough named reviewers (two for `risk: high`), every Critical and Important finding dispositioned, and no changed file outside the ticket's `touches` (plus its own ticket folder);
   - for any other branch, a title matching `^chore-<slug>: `;
-  - for both, a PR title `<node-id>: …` or `chore-<slug>: …`, and a `## One-way doors` section in the body that is `None.` or links the owner's answer (a question id or URL). A node that lists one-way doors cannot say `None.`;
-- one merge method, chosen in the binding (merge commit is the default, so node branches stay legible in history).
+  - for both, a PR title `<ticket-id>: …` or `chore-<slug>: …`, and a `## One-way doors` section in the body that is `None.` or links the owner's answer (a question id or URL). A ticket that lists one-way doors cannot say `None.`;
+- one merge method, chosen in the binding (merge commit is the default, so ticket branches stay legible in history).
 
 **What no check can prove under one identity** is that the supervisor actually gave the word. So the rule is structural: **only the supervisor merges.** Workers ask for the word; the supervisor verifies and merges itself (`supervisor.md` §6). Where the agent CLI supports permission rules, deny workers `gh pr merge` and any push to `main` (the binding's `worker_denied_commands`), so a confused worker cannot merge even by mistake.
 
@@ -51,7 +51,7 @@ If `strict` is off, GitHub reports a mergeable state even when the head is behin
 
 - **Push CI on `main` must complete.** It is the only check that catches a semantic conflict between two PRs that were each green against a stale base.
 - **Red-main rule:** a failed `main` push run blocks the next merge. Revert first, investigate second, within one hour.
-- The supervisor logs every merge (event `node.merged`) only after confirming the merge commit is on `main`.
+- The supervisor logs every merge (event `ticket.merged`) only after confirming the merge commit is on `main`.
 
 ## 5. Supply chain
 
@@ -72,4 +72,4 @@ A PR that edits a workflow, branch rules, or a release key's usage is `risk: hig
 
 ## 8. Commissioning
 
-The binding's **commissioning table** maps each Law to the gate row in `quality-gates.md`, the CI step that runs it, and the node or chore that commissioned it. A Law with no row there is Doctrine, not a gate. Bootstrap fills the day-one rows; each later commissioning is its own `chore-` PR.
+The binding's **commissioning table** maps each Law to the gate row in `quality-gates.md`, the CI step that runs it, and the ticket or chore that commissioned it. A Law with no row there is Doctrine, not a gate. Bootstrap fills the day-one rows; each later commissioning is its own `chore-` PR.
