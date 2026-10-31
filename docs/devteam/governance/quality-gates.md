@@ -1,0 +1,63 @@
+# Quality gates
+
+The definition of done for a node, and the catalogue of gates that enforce it. This is the file `code-style.md` and `ci.md` point to when they say "a gate".
+
+A rule is real only when it has a row here **and** a commissioned CI step listed in the binding's commissioning table. Until then it is doctrine, enforced by review.
+
+## 1. Definition of done (per node)
+
+A node is done, and may receive the merge word, only when all of these hold at the PR's exact head:
+
+1. Every done-when in the node file (`project/graph/<id>.json`) is met, and each is shown by a command or a test, not by a claim.
+2. `project/nodes/<id>/spec.md` and `plan.md` exist with `Status: approved`.
+3. `project/nodes/<id>/verification.md` exists and records each done-when with the command run and its result.
+4. A final review record exists with `Verdict: APPROVE <head-sha>` and no undispositioned Critical or Important finding (`review.md` §5). `risk: high` nodes have two, from different sessions.
+5. CI's required aggregate check is green at that head (a path-filtered skip counts as pass; a cancelled job counts as fail).
+6. The PR title is `<node-id>: <one line a user of the product could read>` and the branch is `node/<node-id>`.
+7. Any rulings received during the node are copied into the spec's or plan's Rulings section.
+8. No new bare lint suppression; every suppression is a `doctrine-exception(<rule-id>): <reason>` marker (`code-style.md` §16).
+
+`node docs/devteam/scripts/devteam.mjs check-node <id>` checks 1 to 4 and 6 mechanically and is run in CI on every `node/*` branch. Items 5, 7 and 8 are checked by CI and the reviewer.
+
+## 2. Root gates (every project, day one)
+
+| Gate | What fails it | Law |
+|---|---|---|
+| format | unformatted code (autofix first) | `L-ERG-2` |
+| lint | any lint error, incl. complexity at linter defaults | `L-ERG-1` |
+| typecheck | any type error (typed stacks) | `L-LOGIC-3`, `-5` |
+| test | any failing test; random order on | `L-TEST-1`, `-4` |
+| coverage | branch coverage under the binding's floor on `domain/**` | `L-TEST-3` |
+| touches-test | a PR changing source with no test change and no `no-test:<reason>` in its body | `L-TEST-3` |
+| dead-code | unused exports, files or dependencies | |
+| duplication | copy-paste over the binding's threshold | |
+| secrets | any secret detected | `L-SEC-8` |
+| lockfile | install not frozen, or a dependency younger than the cooldown | `L-SEC-6`, `-8` |
+| escape-hatch | a bare suppression comment | `L-ESC-1` |
+| devteam | `devteam.mjs validate` fails, or `check-node` fails on a `node/*` branch | |
+
+Add when the trigger fires: accessibility (`L-FE-1`) and lab performance (`L-FE-2`) once there is a UI; evals with thresholds once there is an AI feature (`L-SEC-5`).
+
+## 3. Default tools per stack
+
+Pick from this table; record the choice in the binding. Autofix runs before the check fails.
+
+| Gate | TypeScript | Ruby/Rails | Python | Go | Rust |
+|---|---|---|---|---|---|
+| format + lint | Biome (or ESLint + Prettier) | RuboCop | ruff | gofmt + golangci-lint | rustfmt + clippy |
+| typecheck | `tsc --noEmit` | (Doctrine; no gate) | pyright or mypy | compiler | compiler |
+| test | vitest (`sequence.shuffle`) | RSpec `--order random` | pytest + pytest-randomly | `go test -shuffle on` | cargo test / nextest |
+| coverage | vitest v8 | SimpleCov | coverage.py | `go test -cover` | cargo-llvm-cov |
+| dead code | knip | debride | vulture | deadcode / staticcheck | cargo-machete + `dead_code` lint |
+| duplication | jscpd | flay | jscpd | dupl | jscpd |
+| secrets | gitleaks | gitleaks | gitleaks | gitleaks | gitleaks |
+
+## 4. Comments and readability
+
+Machines check structure; reviewers check meaning. A reviewer raises a Minor finding when:
+
+- a non-obvious decision has no comment saying **why** (comments say why, names say what);
+- an exported function, type or module has no doc comment where the stack has a convention for one;
+- a name needs a comment to be understood (rename instead).
+
+A comment that restates the code is itself a Minor finding.

@@ -1,13 +1,21 @@
-# devteam — workflow doctrine
+# devteam
 
-Portable engineering and workflow doctrine for building software with a fleet of AI-agent sessions (and humans), across any stack. These guides are written to **remove choices** — so a builder rarely faces a hard judgment call — and are intended to be referenced from a project's root `AGENTS.md`/`CLAUDE.md`.
+Governance and process for building software with a supervised fleet of AI-agent sessions: one supervisor acting as technical PM, one worker per node of a planned work graph, adversarial review at every stage, and a merge word that only the supervisor can give.
 
-| Guide | What it governs |
-|---|---|
-| [`code-style.md`](./code-style.md) | Generic code & system doctrine — functional core / MVC, result-value error model, persistence tiers, PII, security, testing. Law (gate-enforced) vs Doctrine (review-enforced), rule IDs, an escape hatch, and a day-one-floor table. |
-| [`planning.md`](./planning.md) | Setting up and breaking down a **column** of features — entry criteria, chunking, landing numbered items, user stories, cadence releases, and derived stage-tracking. |
-| [`fleet-code-generation-protocol.md`](./fleet-code-generation-protocol.md) | How a PM/CTO session coordinates a fleet of builder sessions — roles, the SDD gates, adversarial reviews, the merge word, gate-slot discipline, and recovery. |
-| [`ci.md`](./ci.md) | Continuous integration — the pipeline, merge-safety configuration, `main`-after-merge rules, and changing CI itself. Ends at a green `main`. |
-| [`deployment.md`](./deployment.md) | Delivery & deployment — the promotion rings, tags-not-branches, the owner gate, rollback safety, artifacts, changelogs, and soak cycles. Begins at a green `main`. |
+It is meant to be **materialized** into a project, not installed: copy it in, own it, edit it. Upgrades are folded in by an agent that reads each upstream change's rationale and decides what applies.
 
-Each guide states its rules and **points at** the project's own enforcing config (linters, CI, branch protection) rather than restating it: where a guide and a config disagree, the config is the source of truth and the guide is a bug.
+Everything lives in [`docs/devteam/`](docs/devteam/README.md). Start there.
+
+## Use it in a project
+
+Point an agent at this repo and say:
+
+> Materialize devteam into this repo following `docs/devteam/process/bootstrap.md` from github.com/sanctuarycomputer/devteam.
+
+## Upgrade a project
+
+> Fold in the latest devteam release following `docs/devteam/process/upstream-sync.md`.
+
+## Contributing upstream
+
+Every change needs a `docs/devteam/CHANGELOG.md` entry with a **why**, and a bump to `docs/devteam/VERSION`. Run `node docs/devteam/scripts/devteam.mjs validate --project docs/devteam/examples/sample-project` before opening a PR.

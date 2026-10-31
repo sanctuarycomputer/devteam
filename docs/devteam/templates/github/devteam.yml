@@ -1,0 +1,39 @@
+# devteam gates. Copy to .github/workflows/devteam.yml and add `devteam` to the
+# required aggregate `check` job's needs.
+name: devteam
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 6 * * *"
+
+concurrency:
+  group: devteam-${{ github.ref }}
+  # Never cancel runs on main: a cancelled main run can hide a semantic conflict.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  devteam:
+    runs-on: ubuntu-latest
+    steps:
+      # Pin to a full SHA in your copy (ci.md §2).
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: validate graph and state
+        run: node docs/devteam/scripts/devteam.mjs validate
+      - name: definition of done for node branches
+        if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'node/')
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: node docs/devteam/scripts/devteam.mjs check-node "${HEAD_REF#node/}" --sha "$HEAD_SHA" --title "$PR_TITLE"

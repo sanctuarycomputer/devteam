@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "devteam/event.schema.json",
+  "title": "Event",
+  "description": "One line of docs/devteam/run/events.jsonl, the append-only history every session reads to orient. Append with a single write of one line.",
+  "type": "object",
+  "required": ["ts", "type", "actor"],
+  "additionalProperties": false,
+  "properties": {
+    "ts": { "type": "string", "format": "date-time" },
+    "type": { "enum": [
+      "node.spawned", "node.phase", "node.blocked", "node.parked", "node.merged", "node.released",
+      "question.asked", "question.answered", "question.defaulted",
+      "review.verdict", "word.stage", "word.merge", "approve.spec", "approve.plan", "approve.design-change",
+      "ruling", "gate.result", "slot.granted", "slot.released",
+      "replan", "recovery", "defect.escaped", "cost"
+    ] },
+    "actor": { "type": "string", "description": "node id, 'supervisor', 'owner', 'planner' or 'ci'" },
+    "node": { "type": ["string", "null"] },
+    "sha": { "type": ["string", "null"] },
+    "summary": { "type": "string", "maxLength": 280 },
+    "ref": { "type": ["string", "null"], "description": "file path or URL with the detail" }
+  }
+}

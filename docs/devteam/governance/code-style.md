@@ -4,14 +4,14 @@ A generic, portable engineering doctrine for building any system — frontend, b
 
 > **The lint/gate configuration is the source of truth; this document is its commentary.** Where the two disagree, the gate config is right and this doc is a bug. Every rule marked **Law** has an ID (e.g. `L-STRUCT-2`) used by the gate config and by the escape hatch (§16).
 
-Status: draft for review. No codebase changes on account of this file until it is approved and its gates are commissioned.
+A Law is enforced only once its gate is commissioned: it needs a row in [`quality-gates.md`](quality-gates.md) and a CI step in the binding's commissioning table. Until then it is reviewed as Doctrine.
 
 ## 0. How to read this
 
 - **Law** — must; stated so a linter/type-checker/CI gate enforces it. A rule that *can* be a gate *must* be a gate. Each carries an ID.
 - **Doctrine** — should; enforced by review judgment where a gate can't carry it.
 - **Binding** — the per-stack translation (Appendix B). **The binding is the resolved answer**: an agent follows its stack's binding and never has to resolve "doctrine vs framework convention" at runtime.
-- **Project binding** — the few per-project decisions: the persistence-tier assignment (§4), the "critical operation" list (§7), the retention windows and the PII-erasure mechanism (§11). This file states the *rule*; a project states its *assignments*.
+- **Project binding** — the few per-project decisions: the persistence-tier assignment (§4), the "critical operation" list (§7), the retention windows and the PII-erasure mechanism (§11). This file states the *rule*; a project states its *assignments* in `project/binding.md`.
 
 Precedence when rules appear to conflict: the user's explicit instruction → this doctrine *as resolved by the stack binding* → the framework's convention → the builder's judgment. Because the binding resolves framework-specific cases ahead of time (e.g. framework control-flow throws, §3), precedence is rarely exercised live.
 
@@ -122,7 +122,7 @@ Default to the simplest; escalate only with a stated reason (an ADR for Tier A).
 - **Doctrine — property-based tests and incremental mutation testing**, both scoped to `domain/**` only, so CI time stays bounded.
 - **AI features — evals with thresholds** (§10).
 
-(The fleet's "a fix wave gets a cold confirming re-review" rule is process, not code doctrine — it lives in the fleet protocol / PROCESS.md, not here.)
+(The "a fix wave gets a cold confirming re-review" rule is review policy, not code doctrine: see [`review.md`](review.md) §3.)
 
 ## 13. Frontend (where there is a UI)
 
@@ -174,7 +174,7 @@ To protect speed, a new system ships on the **floor**, not the full doctrine:
 
 ## Appendix A — Law (gate-enforced) vs Doctrine (review-enforced)
 
-Each Law → a commissioned lint/CI gate, autofix-first (§15) where possible. IDs match the body.
+Each Law → a commissioned lint/CI gate, autofix-first (§15) where possible, catalogued in [`quality-gates.md`](quality-gates.md). IDs match the body.
 
 - `L-STRUCT-1`..`4` core dir / skinny models (no non-relay callbacks) / one-concept-per-file named-exports / thin controllers (cyclo ≤3).
 - `L-LOGIC-1`..`5` immutable inputs / result values / typed errors (typed stacks) / parse-at-edge / exhaustive matches (typed stacks). *(Ruby: `L-LOGIC-3`,`5` are Doctrine; proxy = `L-TEST-2`.)*

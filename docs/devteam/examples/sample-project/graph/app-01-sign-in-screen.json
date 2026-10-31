@@ -1,0 +1,16 @@
+{
+  "id": "app-01-sign-in-screen",
+  "title": "Sign-in screen",
+  "column": "sign-in",
+  "component": "app",
+  "kind": "build",
+  "size": "M",
+  "risk": "high",
+  "serves": ["SIGNIN-S1"],
+  "depends_on": ["api-01-session-contract"],
+  "touches": ["app/src/screens/sign-in/**"],
+  "done_when": [
+    "app/src/screens/sign-in/sign-in.test.tsx passes against the session fake",
+    "axe-core reports zero violations on the sign-in screen"
+  ]
+}

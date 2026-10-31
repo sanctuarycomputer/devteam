@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "devteam/question.schema.json",
+  "title": "Question",
+  "description": "One question in the inbox. Runtime file at docs/devteam/run/questions/<id>.json (gitignored, kept on disk as history). Created by the asker; only the answerer writes answer fields afterwards. See process/questions.md.",
+  "type": "object",
+  "required": ["id", "kind", "to", "from", "asked_at", "question", "status"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string", "pattern": "^q-[0-9]{8}-[0-9]{6}-[a-z0-9-]+$" },
+    "kind": { "enum": ["design-change", "merge-request", "review-request", "slot-request", "blocked", "owner-decision", "one-way-door", "clarification"] },
+    "to": { "enum": ["supervisor", "owner"] },
+    "from": { "type": "string", "description": "node id, 'supervisor' or 'planner'" },
+    "node": { "type": ["string", "null"], "description": "node the question is about, if any" },
+    "asked_at": { "type": "string", "format": "date-time" },
+    "question": { "type": "string", "minLength": 10 },
+    "context": { "type": "string", "description": "what the answerer needs to know; links to files" },
+    "options": { "type": "array", "items": { "type": "string" } },
+    "recommendation": { "type": "string" },
+    "default": { "type": ["string", "null"], "description": "what happens if unanswered; only allowed when the choice is reversible" },
+    "blocks": { "type": "array", "items": { "type": "string" }, "description": "node ids that cannot proceed until answered" },
+    "head_sha": { "type": ["string", "null"], "description": "for merge-request: the exact head the word is requested for" },
+    "status": { "enum": ["open", "answered", "withdrawn", "defaulted"] },
+    "answer": { "type": ["string", "null"] },
+    "answered_by": { "type": ["string", "null"] },
+    "answered_at": { "type": ["string", "null"], "format": "date-time" },
+    "recorded_in": { "type": ["string", "null"], "description": "tracked file where the ruling was copied (spec Rulings, decisions.md)" }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "id": "api-01-session-contract",
+  "title": "Session token contract and fake",
+  "column": "sign-in",
+  "component": "api",
+  "kind": "contract",
+  "size": "S",
+  "risk": "high",
+  "serves": ["SIGNIN-S1", "SIGNIN-S2"],
+  "depends_on": [],
+  "contracts": { "provides": ["docs/contracts/session.md@1.0"], "consumes": [] },
+  "touches": ["docs/contracts/session.md", "api/src/contracts/session.ts", "app/src/fakes/session.ts"],
+  "done_when": [
+    "docs/contracts/session.md exists with Version: 1.0 and the token, expiry and error shapes",
+    "pnpm --filter api test contracts/session passes against the fake",
+    "pnpm --filter app typecheck passes importing app/src/fakes/session.ts"
+  ],
+  "one_way_doors": ["publishes the session token shape that clients will depend on"]
+}

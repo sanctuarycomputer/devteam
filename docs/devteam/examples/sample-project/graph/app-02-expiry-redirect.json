@@ -1,0 +1,13 @@
+{
+  "id": "app-02-expiry-redirect",
+  "title": "Return to sign-in when the session expires",
+  "column": "sign-in",
+  "component": "app",
+  "kind": "build",
+  "size": "S",
+  "risk": "normal",
+  "serves": ["SIGNIN-S2"],
+  "depends_on": ["api-01-session-contract"],
+  "touches": ["app/src/session/**"],
+  "done_when": ["app/src/session/expiry.test.ts passes: an expired fake token routes to /sign-in"]
+}
