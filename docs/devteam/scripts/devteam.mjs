@@ -112,6 +112,8 @@ const BINDING_DEFAULTS = {
   dashboard_command: null,
   notify: null,
   worker_denied_commands: ['gh pr merge', 'git push origin main', 'git push origin HEAD:main'],
+  upstream_repo: 'sanctuarycomputer/devteam',
+  upstream_check_hours: 24,
 };
 
 let bindingCache;

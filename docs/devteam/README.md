@@ -13,7 +13,7 @@ Engineering governance and process for building software with a supervised fleet
 | A **worker** spawned for one graph node | [`process/worker.md`](process/worker.md) |
 | A **reviewer** asked to review a stage | [`governance/review.md`](governance/review.md) |
 | A **planner** turning an owner direction into a graph | [`process/planning.md`](process/planning.md) |
-| Folding in a new upstream devteam release | [`process/upstream-sync.md`](process/upstream-sync.md) |
+| Folding in a new upstream devteam release (the supervisor checks on its loop) | [`process/upstream-sync.md`](process/upstream-sync.md) |
 
 ## Vocabulary
 
@@ -30,14 +30,11 @@ Engineering governance and process for building software with a supervised fleet
 ```
 docs/devteam/
   README.md            this file
-  VERSION              the upstream release this copy was materialized from
-  CHANGELOG.md         upstream changes, each with a "why" for agents folding it in
   governance/          the rules: what must be true (owner-tweakable)
   process/             the procedures: how work moves (owner-tweakable)
   templates/           skeletons agents fill instead of inventing structure
   schema/              JSON schemas for graph nodes, questions, events
   scripts/             zero-dependency tools (Node 20+, bash)
-  examples/            a worked binding from a real project
   project/             THIS project's content; created at bootstrap, never touched by upstream sync
     binding.md         the project's answers to every open decision
     designs/           <slug>.md system designs
@@ -45,7 +42,7 @@ docs/devteam/
     graph/             <node-id>.json, the work graph (tracked, compiled by planning)
     nodes/<node-id>/   spec.md, plan.md, reviews/, verification.md for each node
     decisions.md       cross-cutting rulings, dated
-    upstream-log.md    which upstream changes were adopted, adapted or skipped, and why
+    upstream-log.md    upstream releases considered and what was adopted, adapted or skipped
   run/                 live runtime state (gitignored): questions, heartbeats, events
 ```
 

@@ -4,12 +4,12 @@ How devteam gets materialized into a project repo, and how the first session get
 
 ## 1. Materialize
 
-1. Copy this upstream's `docs/devteam/` into the project at `docs/devteam/`, **except** `project/` and `run/`. Keep `VERSION` as it is; it records the upstream release you copied.
+1. Copy `docs/devteam/` from the latest upstream release (the newest `vX.Y.Z` tag with a GitHub Release, not `main`) into the project at `docs/devteam/`, **except** `project/` and `run/`.
 2. Make sure `docs/devteam/.gitignore` contains `run/`.
 3. Create `docs/devteam/project/` from the templates:
    - `binding.md` from [`templates/binding.md`](../templates/binding.md)
    - `decisions.md` from [`templates/decisions.md`](../templates/decisions.md)
-   - `upstream-log.md` from [`templates/upstream-log.md`](../templates/upstream-log.md), with a first line recording the materialized version
+   - `upstream-log.md` from [`templates/upstream-log.md`](../templates/upstream-log.md), with a first row recording the release tag you copied (this is the base for `upstream-sync.md`)
    - empty `designs/`, `columns/`, `graph/`, `nodes/`, `reviews/` folders (each with a `.gitkeep`)
 4. Create or update the repo root `AGENTS.md` from [`templates/AGENTS.md`](../templates/AGENTS.md). If an `AGENTS.md` exists, append the devteam section rather than replacing it. If a `CLAUDE.md` exists and is not already a symlink, add a line to it pointing at `AGENTS.md`; otherwise create `CLAUDE.md` as a symlink to `AGENTS.md`.
 5. Add `.worktrees/` to the root `.gitignore`.

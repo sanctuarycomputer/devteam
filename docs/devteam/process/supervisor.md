@@ -32,8 +32,9 @@ Run on a timer: about every 10 minutes when PRs are converging, 30 when quiet. A
 5. **Apply defaults** to owner questions older than the binding's `question_default_after_hours` that have a reversible default (`devteam.mjs answer <qid> "<the default>" --defaulted`).
 6. **Schedule** (§5).
 7. **Health:** any node whose heartbeat is older than the binding's `stale_after_minutes` (default 30) and whose pane shows no activity goes to recovery.
-8. **Notify** the owner only on a new blocking owner question or something they must act on now (`questions.md` §7).
-9. Write your own heartbeat: `devteam.mjs heartbeat --supervisor`.
+8. **Upstream:** at most once every `upstream_check_hours` (default 24), check for new devteam releases and ask the owner about them ([`upstream-sync.md`](upstream-sync.md) §2). When the owner has answered, fold them in (§3 of that doc).
+9. **Notify** the owner only on a new blocking owner question or something they must act on now (`questions.md` §7).
+10. Write your own heartbeat: `devteam.mjs heartbeat --supervisor`.
 
 ## 4. Reconciliation
 
