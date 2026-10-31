@@ -39,7 +39,7 @@ Every expected failure as a typed result value, and its test.
 
 ## Rulings
 
-Rulings received while building, copied from answered questions.
+Rulings and owner answers received while building, copied from messages (with their message id).
 
 | Date | Question | Ruling |
 |---|---|---|

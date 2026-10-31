@@ -74,13 +74,14 @@ const writeJson = (p, obj) => {
 
 const TICKET_KINDS = ['contract', 'build', 'integration', 'chore', 'spike'];
 const PHASES = ['starting', 'spec', 'plan', 'contract', 'build', 'verify', 'final-review', 'awaiting-word', 'merging', 'done', 'blocked', 'parked'];
-const QUESTION_KINDS = ['design-change', 'merge-request', 'review-request', 'slot-request', 'blocked', 'owner-decision', 'one-way-door', 'clarification'];
+const QUESTION_KINDS = ['owner-decision', 'one-way-door', 'clarification'];
+const MESSAGE_KINDS = ['design-change', 'merge-request', 'review-request', 'slot-request', 'blocked', 'ruling', 'answer', 'info'];
 const EVENT_TYPES = [
   'worker.made', 'ticket.phase', 'ticket.blocked', 'ticket.parked', 'ticket.merged', 'ticket.released',
   'question.asked', 'question.answered', 'question.defaulted',
   'review.verdict', 'word.stage', 'word.merge', 'approve.spec', 'approve.plan', 'approve.design-change',
   'ruling', 'gate.result', 'slot.granted', 'slot.released',
-  'replan', 'recovery', 'defect.escaped', 'cost',
+  'replan', 'recovery', 'defect.escaped', 'cost', 'message',
 ];
 const CHORES_FEATURE = 'chores'; // reserved feature for chore and spike tickets that belong to no feature plan
 
@@ -501,7 +502,7 @@ function readQuestions() {
     .flatMap((f) => {
       try {
         const q = readJson(path.join(dir, f));
-        const missing = ['id', 'kind', 'to', 'from', 'asked_at', 'question', 'status'].filter((k) => typeof q[k] !== 'string');
+        const missing = ['id', 'kind', 'asked_at', 'question', 'status'].filter((k) => typeof q[k] !== 'string');
         if (missing.length) {
           warn(`run/questions/${f} is missing ${missing.join(', ')}; skipped`);
           return [];
@@ -936,32 +937,30 @@ function cmdCheckPr() {
   report(fails, `${headRef} passes the automatic merge-word checks`);
 }
 
-function questionId(from) {
-  const d = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, '');
+function stampId(prefix, from) {
+  const d = new Date().toISOString().replace(/[-:.]/g, '').replace(/Z$/, ''); // YYYYMMDDTHHMMSSmmm
   const slug = String(from).toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-|-$/g, '') || 'anon';
-  return `q-${d.slice(0, 8)}-${d.slice(9, 15)}-${slug}`;
+  return `${prefix}-${d.slice(0, 8)}-${d.slice(9, 15)}${prefix === 'm' ? d.slice(15, 18) : ''}-${slug}`;
 }
 
+// ---------- questions to the owner (supervisor only) ----------
+
 function cmdAsk() {
-  const from = flagStr('from') ?? currentActor();
+  if (currentActor() !== 'supervisor') {
+    die('only the supervisor asks the owner. Workers and planners message the supervisor: devteam.mjs send supervisor "<text>" --kind <kind> (process/messages.md)');
+  }
   const q = flagStr('question') ?? die('ask needs --question');
-  const kind = flagStr('kind') ?? 'clarification';
+  const kind = flagStr('kind') ?? 'owner-decision';
   if (!QUESTION_KINDS.includes(kind)) die(`--kind must be one of ${QUESTION_KINDS.join(', ')}`);
-  const to = flagStr('to') ?? (from === 'supervisor' ? 'owner' : 'supervisor');
-  if (!['supervisor', 'owner'].includes(to)) die('--to must be supervisor or owner');
-  if (to === 'owner' && from !== 'supervisor') die('workers and planners ask the supervisor; the supervisor escalates to the owner (questions.md §2)');
   if (flags.default === true) die('--default needs a value');
   const def = flagStr('default') ?? null;
-  if (kind === 'one-way-door' && def) die('one-way doors never have a default (questions.md §4)');
-  let id = questionId(from);
-  for (let i = 2; fs.existsSync(path.join(runDir, 'questions', `${id}.json`)); i++) id = `${questionId(from)}-${i}`;
+  if (kind === 'one-way-door' && def) die('one-way doors never have a default (questions.md §3)');
+  let id = stampId('q', 'supervisor');
+  for (let i = 2; fs.existsSync(path.join(runDir, 'questions', `${id}.json`)); i++) id = `${stampId('q', 'supervisor')}-${i}`;
   const question = {
     id,
     kind,
-    to,
-    from,
-    ticket: flagStr('ticket') ?? currentTicketId(),
-    session: tmuxHere(),
+    ticket: flagStr('ticket') ?? null,
     asked_at: nowIso(),
     question: q,
     context: flagStr('context') ?? '',
@@ -969,7 +968,6 @@ function cmdAsk() {
     recommendation: flagStr('recommendation') ?? '',
     default: def,
     blocks: asList(flags.blocks),
-    head_sha: kind === 'merge-request' ? (flagStr('head') ?? git(['rev-parse', 'HEAD'])) : null,
     status: 'open',
     answer: null,
     answered_by: null,
@@ -977,51 +975,40 @@ function cmdAsk() {
     recorded_in: null,
   };
   writeJson(path.join(runDir, 'questions', `${id}.json`), question);
-  appendEvent({ type: 'question.asked', actor: from, ticket: question.ticket, summary: q.slice(0, 280), ref: `run/questions/${id}.json` });
-  if (to === 'supervisor') nudge(supervisorTarget(), `devteam: new question ${id}`);
+  appendEvent({ type: 'question.asked', actor: 'supervisor', ticket: question.ticket, summary: q.slice(0, 280), ref: `run/questions/${id}.json` });
   process.stdout.write(`${id}\n`);
 }
 
-// Where to nudge the asker: the tmux pane recorded at ask time, else the ticket's window.
-function askerTarget(q) {
-  if (q.session) return q.session;
-  if (q.from === 'supervisor') return supervisorTarget();
-  if (q.from === 'planner') return null;
-  return `${loadSettings().tmux_session}:${q.from}`;
-}
-
+// The owner answers from the main checkout (or a dashboard writes the file; see sync-questions).
+// The supervisor may only apply a question's default.
 function cmdAnswer() {
   const [id, ...rest] = positional;
-  if (!id || !rest.length) die('usage: answer <question-id> "<answer>" [--by owner|supervisor] [--defaulted]');
+  if (!id || (!rest.length && !flags.defaulted)) die('usage: answer <question-id> "<answer>"   (owner)  |  answer <question-id> --defaulted   (supervisor)');
+  if (currentActor() !== 'supervisor') die('questions are answered from the main checkout, not from a worker or planner session');
   const p = path.join(runDir, 'questions', `${id}.json`);
   if (!fs.existsSync(p)) die(`no question ${id}`);
   const q = readJson(p);
   if (q.status !== 'open') die(`${id} is already ${q.status}`);
-  const actor = currentActor();
-  if (actor !== 'supervisor') die('only the supervisor or the owner answers questions; run answer from the main checkout (--by is not verifiable, so workers and planners may not use it)');
-  const by = flagStr('by') ?? 'supervisor';
-  if (!['supervisor', 'owner'].includes(by)) die('--by must be supervisor or owner');
-  if (q.to === 'owner' && by !== 'owner' && !flags.defaulted) die(`${id} is addressed to the owner; only the owner answers it (or apply its default with --defaulted)`);
   if (flags.defaulted && !q.default) die(`${id} has no default to apply`);
-  q.answer = rest.join(' ');
-  q.answered_by = by;
+  q.answer = flags.defaulted ? q.default : rest.join(' ');
+  q.answered_by = flags.defaulted ? 'supervisor (default)' : 'owner';
   q.answered_at = nowIso();
   q.status = flags.defaulted ? 'defaulted' : 'answered';
   writeJson(p, q);
-  appendEvent({ type: flags.defaulted ? 'question.defaulted' : 'question.answered', actor: by, ticket: q.ticket, summary: q.answer.slice(0, 280), ref: `run/questions/${id}.json` });
-  nudge(askerTarget(q), `devteam: ${id} answered`);
+  appendEvent({ type: flags.defaulted ? 'question.defaulted' : 'question.answered', actor: flags.defaulted ? 'supervisor' : 'owner', ticket: q.ticket, summary: q.answer.slice(0, 280), ref: `run/questions/${id}.json` });
+  if (!flags.defaulted) nudge(supervisorTarget(), `[devteam answer ${id} from owner] ${q.answer.replace(/\s+/g, ' ').slice(0, 400)}`);
   process.stdout.write(`answered ${id}\n`);
 }
 
-// For answers written by hand or by a dashboard: log the missing event and nudge the asker.
+// For answers written by hand or by a dashboard: log the missing event and tell the supervisor.
 function cmdSyncQuestions() {
   const logged = new Set(readEvents().filter((e) => /^question\.(answered|defaulted)$/.test(e.type)).map((e) => e.ref));
   let n = 0;
   for (const q of readQuestions()) {
     const ref = `run/questions/${q.id}.json`;
     if (!['answered', 'defaulted'].includes(q.status) || logged.has(ref)) continue;
-    appendEvent({ type: q.status === 'defaulted' ? 'question.defaulted' : 'question.answered', actor: q.answered_by ?? 'owner', ticket: q.ticket, summary: (q.answer ?? '').slice(0, 280), ref });
-    nudge(askerTarget(q), `devteam: ${q.id} answered`);
+    appendEvent({ type: q.status === 'defaulted' ? 'question.defaulted' : 'question.answered', actor: 'owner', ticket: q.ticket, summary: (q.answer ?? '').slice(0, 280), ref });
+    nudge(supervisorTarget(), `[devteam answer ${q.id} from owner] ${(q.answer ?? '').replace(/\s+/g, ' ').slice(0, 400)}`);
     n++;
   }
   process.stdout.write(`synced ${n} answer(s)\n`);
@@ -1043,9 +1030,9 @@ function rankQuestions(qs, tickets) {
   const sub = new Map([...tickets].filter(([, n]) => isActive(n)));
   const crit = findCycle(sub) ? new Set() : new Set(criticalPath(sub).path);
   const score = (q) => {
-    const ownerTier = q.to === 'owner' && ['one-way-door', 'owner-decision'].includes(q.kind) ? 1000 : 0;
+    const tier = ['one-way-door', 'owner-decision'].includes(q.kind) ? 1000 : 0;
     const blocks = (q.blocks ?? []).reduce((s, id) => s + (crit.has(id) ? 3 : 1), 0);
-    return ownerTier + blocks * 10;
+    return tier + blocks * 10;
   };
   return [...qs].sort((a, b) => score(b) - score(a) || a.asked_at.localeCompare(b.asked_at));
 }
@@ -1054,19 +1041,77 @@ function cmdQuestions() {
   const { tickets } = loadGraph();
   let qs = readQuestions();
   if (!flags.all) qs = qs.filter((q) => q.status === 'open');
-  if (flagStr('to')) qs = qs.filter((q) => q.to === flagStr('to'));
-  if (flags.mine) {
-    const me = currentActor();
-    qs = qs.filter((q) => q.from === me);
-  }
   qs = rankQuestions(qs, tickets);
   if (flags.json) return void process.stdout.write(`${JSON.stringify(qs, null, 2)}\n`);
   if (!qs.length) return void process.stdout.write('no questions\n');
   for (const q of qs) {
-    process.stdout.write(`${q.id}  [${q.kind} → ${q.to}, ${q.status}]${q.blocks?.length ? ` blocks ${q.blocks.join(',')}` : ''}\n  ${q.question}\n`);
+    process.stdout.write(`${q.id}  [${q.kind}, ${q.status}]${q.blocks?.length ? ` blocks ${q.blocks.join(',')}` : ''}\n  ${q.question}\n`);
     if (q.recommendation) process.stdout.write(`  recommend: ${q.recommendation}\n`);
     if (q.answer) process.stdout.write(`  answer (${q.answered_by}): ${q.answer}\n`);
   }
+}
+
+// ---------- session-to-session messages ----------
+
+// The name other sessions use to reach me: 'supervisor', a ticket id, or a planner's window name.
+function myAddress() {
+  const actor = currentActor();
+  if (actor !== 'planner') return actor;
+  return tmuxHere()?.split(':').pop() ?? 'planner';
+}
+
+function addressTarget(to) {
+  return to === 'supervisor' ? supervisorTarget() : `${loadSettings().tmux_session}:${to}`;
+}
+
+// Exact match on the window name or index; tmux's own target lookup is too forgiving.
+function paneExists(target) {
+  const i = target.lastIndexOf(':');
+  const [session, win] = i === -1 ? [target, '0'] : [target.slice(0, i), target.slice(i + 1)];
+  try {
+    // tmux rewrites tabs in format output, so separate with a space (window names here have none).
+    const out = execFileSync('tmux', ['list-windows', '-t', session, '-F', '#{window_index} #{window_name}'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    return out.split('\n').some((l) => {
+      const sp = l.indexOf(' ');
+      return sp > 0 && (l.slice(0, sp) === win || l.slice(sp + 1) === win);
+    });
+  } catch {
+    return false;
+  }
+}
+
+const MESSAGE_MAX = 600;
+
+function cmdSend() {
+  const [to, ...rest] = positional;
+  const text = rest.join(' ').replace(/\s+/g, ' ').trim();
+  if (!to || !text) die('usage: send <supervisor|ticket-id|plan-<feature>> "<text>" [--kind k] [--re m-…] [--sha s] [--ticket id]');
+  if (text.length > MESSAGE_MAX) die(`messages are one line of at most ${MESSAGE_MAX} characters; put detail in a file and reference its path`);
+  const kind = flagStr('kind') ?? 'info';
+  if (!MESSAGE_KINDS.includes(kind)) die(`--kind must be one of ${MESSAGE_KINDS.join(', ')}`);
+  const from = myAddress();
+  const target = addressTarget(to);
+  if (!paneExists(target)) die(`no tmux pane for "${to}" (${target}); is that session running?`);
+  const sha = flagStr('sha') ?? (kind === 'merge-request' ? git(['rev-parse', 'HEAD']) : null);
+  const re = flagStr('re') ?? null;
+  const id = stampId('m', from);
+  const line = `[devteam ${kind} ${id} from ${from}${re ? ` re ${re}` : ''}${sha ? ` @ ${sha}` : ''}] ${text}`;
+  if (!nudge(target, line)) die(`could not type into ${target}`);
+  appendEvent({ type: 'message', actor: from, to, kind, id, re, ticket: flagStr('ticket') ?? currentTicketId() ?? (/^[a-z][a-z0-9-]*-\d{2,}-/.test(to) ? to : null), sha, summary: text.slice(0, 280) });
+  process.stdout.write(`${id}\n`);
+}
+
+function cmdMessages() {
+  const me = flagStr('to') ?? myAddress();
+  const tail = Number(flagStr('tail') ?? 50);
+  const all = readEvents().filter((e) => e.type === 'message');
+  const replied = new Set(all.map((e) => e.re).filter(Boolean));
+  let mine = all.filter((e) => e.to === me);
+  if (flags.open) mine = mine.filter((e) => !replied.has(e.id) && e.kind !== 'info');
+  mine = mine.slice(-tail);
+  if (flags.json) return void process.stdout.write(`${JSON.stringify(mine, null, 2)}\n`);
+  if (!mine.length) return void process.stdout.write(flags.open ? 'no open messages\n' : 'no messages\n');
+  for (const e of mine) process.stdout.write(`${e.ts} ${e.id} [${e.kind}] from ${e.actor}${e.re ? ` re ${e.re}` : ''}${e.sha ? ` @ ${e.sha.slice(0, 12)}` : ''}: ${e.summary}\n`);
 }
 
 function cmdHeartbeat() {
@@ -1126,13 +1171,16 @@ function cmdHistory() {
   if (id) {
     const { tickets } = loadGraph();
     scope = new Set([id, ...(tickets.get(id)?.depends_on ?? [])]);
-    evs = evs.filter((e) => scope.has(e.ticket) || scope.has(e.actor));
+    evs = evs.filter((e) => scope.has(e.ticket) || scope.has(e.actor) || scope.has(e.to));
   }
-  for (const e of evs.slice(-tail)) process.stdout.write(`${e.ts} ${String(e.type).padEnd(18)} ${String(e.ticket ?? e.actor ?? '').padEnd(28)} ${e.summary ?? ''}\n`);
-  const qs = readQuestions().filter((q) => q.status !== 'open' && (!scope || scope.has(q.ticket) || scope.has(q.from)));
+  for (const e of evs.slice(-tail)) {
+    const who = e.type === 'message' ? `${e.actor} -> ${e.to} [${e.kind}]` : String(e.ticket ?? e.actor ?? '');
+    process.stdout.write(`${e.ts} ${String(e.type).padEnd(18)} ${who.padEnd(28)} ${e.summary ?? ''}\n`);
+  }
+  const qs = readQuestions().filter((q) => q.status !== 'open' && (!scope || scope.has(q.ticket)));
   if (qs.length) process.stdout.write('\nanswered questions:\n');
   for (const q of qs.sort((a, b) => a.asked_at.localeCompare(b.asked_at)).slice(-tail)) {
-    process.stdout.write(`- ${q.id} (${q.ticket ?? q.from}): ${q.question}\n  → ${q.answer} [${q.answered_by}${q.recorded_in ? `, recorded in ${q.recorded_in}` : ', NOT YET RECORDED'}]\n`);
+    process.stdout.write(`- ${q.id}${q.ticket ? ` (${q.ticket})` : ''}: ${q.question}\n  → ${q.answer} [${q.answered_by}${q.recorded_in ? `, recorded in ${q.recorded_in}` : ', NOT YET RECORDED'}]\n`);
   }
 }
 
@@ -1203,13 +1251,17 @@ Gates
   check-ticket <id> [--sha s] [--title t] [--body-file f]   definition of done at an exact head
   check-pr --head-ref r --title t --body-file f [--sha s]  automatic merge-word check (CI)
 
-Questions
-  ask --question q [--kind k] [--ticket id] [--options a b] [--recommendation r]
-      [--default d] [--blocks ids] [--context c] [--to owner] [--head sha]
-  answer <qid> "<text>" [--by owner|supervisor] [--defaulted]
-  questions [--to x] [--mine] [--all] [--json]   ranked inbox
-  sync-questions                  log events for answers written by hand or a dashboard
-  recorded <qid> <path>           mark where an answered question's ruling was recorded
+Messages between sessions (process/messages.md)
+  send <to> "<text>" [--kind k] [--re m-…] [--sha s] [--ticket id]   to = supervisor, a ticket id, or plan-<feature>
+  messages [--open] [--to x] [--tail n] [--json]   messages to me (--open: not yet replied to)
+
+Questions to the owner (supervisor only; process/questions.md)
+  ask --question q [--kind owner-decision|one-way-door|clarification] [--ticket id] [--options a b]
+      [--recommendation r] [--default d] [--blocks ids] [--context c]
+  answer <qid> "<text>"           the owner answers   |   answer <qid> --defaulted   the supervisor applies a default
+  questions [--all] [--json]      ranked owner inbox
+  sync-questions                  log answers written by hand or a dashboard, and tell the supervisor
+  recorded <qid> <path>           mark where an answer was recorded
 
 Run state and history
   heartbeat [--phase p] [--task t] [--note n] [--usd x --in n --out n --cost-source s] [--supervisor]
@@ -1235,6 +1287,8 @@ const COMMANDS = {
   answer: cmdAnswer,
   questions: cmdQuestions,
   'sync-questions': cmdSyncQuestions,
+  send: cmdSend,
+  messages: cmdMessages,
   recorded: cmdRecorded,
   heartbeat: cmdHeartbeat,
   event: cmdEvent,

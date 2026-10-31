@@ -7,7 +7,7 @@ Who may decide what, and the principles every decision follows. Everything else 
 | Decision | Who decides | Notes |
 |---|---|---|
 | Product direction, what a feature is for | owner | The supervisor may propose; never decides alone. |
-| One-way doors (see §3) | owner | Surfaced through the question inbox with a recommendation. |
+| One-way doors (see §3) | owner | The supervisor asks the owner ([`questions.md`](../process/questions.md)) with a recommendation. |
 | Releasing to the production ring | owner (or named release actors in the settings) | Enforced by tag protection, not by trust. |
 | Allowing anything when a check fails | owner | The default is always to deny. |
 | Approving a system design | supervisor, or owner if it contains a one-way door | |
@@ -44,10 +44,10 @@ A change is a one-way door if reverting it is expensive or impossible once it sh
 - anything touching authentication, authorization, payments or PII handling
 - anything the owner has listed under one-way doors in the settings
 
-One-way doors require an owner answer in the question inbox before the ticket's plan is approved, plus two independent reviews (see `review.md` §3).
+One-way doors require an owner answer to a supervisor question before the ticket's plan is approved, plus two independent reviews (see `review.md` §3).
 
 ## 4. Changing the rules
 
 - **A ruling that changes a rule is an edit to that rule, in the same PR.** It is never only in a plan, a ledger or a chat.
-- Any file in `governance/` or `process/` may be edited by the owner, or by the supervisor with owner approval through the question inbox.
+- Any file in `governance/` or `process/` may be edited by the owner, or by the supervisor after asking the owner.
 - Every edit to `governance/` or `process/` is recorded as a dated line in `project/decisions.md` stating what changed and why, so an upstream sync can tell a deliberate local divergence from drift.

@@ -51,8 +51,10 @@ docs/devteam/
     reviews/<feature>/ design and graph review records
     decisions.md       cross-cutting rulings, dated
     upstream-log.md    upstream releases considered and what was adopted, adapted or skipped
-  run/                 live runtime state (gitignored): questions, heartbeats, events
+  run/                 live runtime state (gitignored): owner questions, heartbeats, the event log (incl. messages)
 ```
+
+**How sessions talk.** Workers, planners and the supervisor send each other one-line messages typed into each other's tmux panes ([`process/messages.md`](process/messages.md)). Only the supervisor talks to the owner, by asking questions ([`process/questions.md`](process/questions.md)).
 
 **Governance vs process.** Governance states what must be true (code rules, gates, what counts as a review, CI and release policy). Process states how work moves (planning, the supervisor loop, the worker loop, the question inbox). When a process step and a governance rule seem to conflict, governance wins and the process doc is a bug.
 
@@ -79,7 +81,9 @@ git, tmux, Node 20+ (scripts use only built-ins), the GitHub CLI, one agent CLI 
 | `validate` | planner, CI | check the graph against the planning rules |
 | `waves`, `ready`, `status` | supervisor, planner | parallel waves and critical path; what can start; computed stage of every ticket |
 | `check-ticket <id>`, `check-pr` | worker, CI | definition of done and the automatic merge-word check at an exact head |
-| `ask`, `answer`, `questions`, `sync-questions`, `recorded` | everyone | the question inbox |
+| `send`, `messages` | everyone | messages between sessions |
+| `ask`, `questions`, `sync-questions`, `recorded` | supervisor | questions to the owner |
+| `answer` | owner | answering the supervisor's questions |
 | `heartbeat`, `event`, `history`, `whoami` | worker, supervisor | live state, the event log, catching up on history |
 | `notes <from> [<to>]`, `settings` | supervisor | story-grouped release notes; the project's settings |
 | `bash docs/devteam/scripts/make-worker.sh <id> [--resume]` | supervisor | worktree, tmux window and agent for a ticket (`--planner <feature>` for a planner) |

@@ -8,7 +8,7 @@ Planning is run by the supervisor, or by a planner session the supervisor makes.
 
 | Stage | Input | Output | Exit criterion |
 |---|---|---|---|
-| P0 intake | owner direction | problem statement in the feature plan §0 | owner confirms the statement (one question) |
+| P0 intake | owner direction | problem statement in the feature plan §0 | owner confirms the statement (one owner question, asked by the supervisor) |
 | P1 research | problem statement, codebase | `project/designs/<slug>.research.md` | every open technical unknown is either answered or listed |
 | P2 design | research | `project/designs/<slug>.md` | `project/reviews/<feature>/design-<n>.md` APPROVE; owner answers on any one-way door |
 | P3 stories | design | feature plan §1 | every goal in the design maps to at least one story |
@@ -18,7 +18,7 @@ Planning is run by the supervisor, or by a planner session the supervisor makes.
 
 Each stage's output is committed on a `plan/<feature>` branch as it is produced, so a crashed planner resumes from files, not memory. The whole feature lands as one PR at P6.
 
-Questions go through the inbox ([`questions.md`](questions.md)) with a recommendation attached. A planner asks the supervisor, which answers or escalates owner-reserved questions (product intent, one-way doors) to the owner. Planning does not stall on a question that has a reversible default: it records the default, proceeds, and lets the owner overrule.
+A planner messages the supervisor ([`messages.md`](messages.md)) with a recommendation attached. The supervisor answers, or asks the owner ([`questions.md`](questions.md)) when the decision is the owner's (product intent, one-way doors). Planning does not stall on a question that has a reversible default: it records the default, proceeds, and lets the owner overrule.
 
 ## 2. P0 to P1: intake and research
 
@@ -112,7 +112,7 @@ The graph gets an adversarial review like code (`review.md`), using this checkli
 
 ## 8. Re-planning
 
-Triggers: a worker raises a design-change question the supervisor rules needs graph changes; a spike's answer changes the design; a contract changes; the owner changes direction.
+Triggers: a worker sends a design-change message the supervisor rules needs graph changes; a spike's answer changes the design; a contract changes; the owner changes direction.
 
 - Re-planning is a `chore-replan-<feature>-<n>` PR that edits the graph. It is reviewed like P5.
 - Ticket ids are never reused. A replaced ticket keeps its file with `superseded_by` set; `validate` ignores superseded tickets for scheduling.

@@ -1,66 +1,55 @@
 # Questions
 
-The inbox is how sessions get unblocked fast. Workers and planners ask the supervisor; the supervisor answers what it can and escalates the rest to the owner with a recommendation. The owner answers with `devteam.mjs answer <qid> "<answer>" --by owner`, from a dashboard, or by editing the file's answer fields (then the supervisor's next `sync-questions` logs it and nudges the asker). Every question ever asked stays on disk as history, so a new session can orient from what was already decided instead of re-researching.
+How the supervisor asks the owner. This is the only channel to the owner, and only the supervisor uses it. Sessions talk to each other with [`messages.md`](messages.md).
 
-## 1. The file
+Every question ever asked stays on disk as history, so a new session can catch up on what the owner already decided instead of asking again.
 
-One JSON file per question at `docs/devteam/run/questions/<id>.json`, following [`schema/question.schema.json`](../schema/question.schema.json). Ids look like `q-20261031-141502-api-07-session-tokens` (UTC date and time, then the asker).
+## 1. When to ask
 
-Create a question with the script so the id, timestamp and event line are right:
+Ask only about what is reserved to the owner (`constitution.md` §1): product direction, one-way doors, releases to production, anything that allows something when a check fails, anything the settings list as owner-only. Decide everything else yourself. A worker's `blocked` or `design-change` message is not automatically an owner question; answer it if it is within your authority.
+
+## 2. The file
+
+One JSON file per question at `docs/devteam/run/questions/<id>.json`, following [`schema/question.schema.json`](../schema/question.schema.json). Create it with the script, from the main checkout:
 
 ```
 node docs/devteam/scripts/devteam.mjs ask \
-  --kind design-change --ticket api-07-session-tokens \
-  --question "The spec says tokens expire in 24h but the contract says 12h. Which wins?" \
-  --options "follow the contract (12h)" "amend the contract to 24h" \
-  --recommendation "follow the contract; it is the published guarantee" \
-  --blocks api-07-session-tokens
+  --kind one-way-door --ticket api-01-session-contract \
+  --question "Publish the session token shape as contract 1.0? Clients will depend on it." \
+  --options "publish 1.0 now" "keep it internal for one more release" \
+  --recommendation "publish now; the shape was reviewed twice" \
+  --blocks api-01-session-contract app-01-sign-in-screen
 ```
 
-**One writer at a time.** The asker creates the file. After that only the answerer writes the answer fields (`answer`, `answered_by`, `answered_at`, `status`). The asker may set `status: withdrawn` while it is still open. Nobody else edits it.
+| Kind | Use for |
+|---|---|
+| `one-way-door` | anything in `constitution.md` §3; needs an explicit yes or no |
+| `owner-decision` | product or policy calls |
+| `clarification` | product intent you can't infer |
 
-## 2. Who asks whom
-
-- **Workers and planners always address the supervisor** (`to: supervisor`). They never message the owner directly; the script refuses it.
-- **The supervisor** answers everything within its authority (`constitution.md` §1). Anything reserved to the owner it re-asks as a new question with `to: owner`, its own recommendation, and the original question's id in `context`. It answers the worker's question with "escalated to <new id>".
-- **The owner** may answer any open question, including ones addressed to the supervisor. An owner answer always wins.
-
-## 3. Kinds
-
-| Kind | Asked by | Typical answer |
-|---|---|---|
-| `design-change` | worker | a ruling; maybe a re-plan |
-| `merge-request` | worker, with `head_sha` | the merge word, or what is missing |
-| `review-request` | worker | which session will review, or "use your own subagent" |
-| `slot-request` | worker | a gate slot grant (`supervisor.md` §7) |
-| `blocked` | worker | an unblock, or `park` |
-| `clarification` | anyone | an answer |
-| `owner-decision` | supervisor (escalating its own or a planner's or worker's question) | product or policy call |
-| `one-way-door` | supervisor (same) | explicit owner yes or no |
-
-## 4. Writing a good question
+## 3. Writing a good question
 
 - **One decision per question.** Two decisions are two questions.
-- **Lead with the decision**, then context. The answerer should be able to answer from the first line in most cases.
-- **Give options and a recommendation.** Never ask an open-ended "what should I do?".
-- **Set `default`** only when the choice is reversible. If the question is unanswered after `question_default_after_hours` in the settings (24 if unset), the supervisor applies it with `devteam.mjs answer <qid> "<default>" --defaulted`, which sets `status: defaulted` and logs it. One-way doors never have a default.
-- **Fill `blocks`** with every ticket that cannot proceed. The inbox is ranked by it.
+- **Lead with the decision**, then context. The owner should be able to answer from the first line.
+- **Give options and a recommendation.** Never an open-ended "what should I do?".
+- **Set `--default`** only when the choice is reversible. If it is still unanswered after `question_default_after_hours` in the settings (24 if unset), apply it with `devteam.mjs answer <qid> --defaulted`. One-way doors never have a default.
+- **Fill `--blocks`** with every ticket that can't proceed. The inbox is ranked by it.
+- **Set `--ticket`** when you are asking on a worker's behalf, so you know whom to relay the answer to.
 
-## 5. Ranking
+## 4. Ranking
 
-`devteam.mjs questions` lists open questions in this order:
+`devteam.mjs questions` lists open questions with one-way doors and owner decisions first, then by how many tickets they block (more if a blocked ticket is on the critical path), then oldest first. A dashboard shows the same order.
 
-1. `one-way-door` and `owner-decision` addressed to the owner;
-2. then by how much they block: number of tickets in `blocks`, weighted up when a blocked ticket is on the critical path;
-3. then oldest first.
+## 5. How the owner answers
 
-The dashboard shows the same order.
+- `devteam.mjs answer <qid> "<answer>"` from the main checkout, from a dashboard, or by editing the answer fields in the file.
+- The script types the answer into the supervisor's pane. For hand edits and dashboards, the supervisor's loop runs `devteam.mjs sync-questions`, which logs the answer and does the same.
 
 ## 6. After the answer
 
-- `devteam.mjs answer` writes the answer fields, appends a `question.answered` event, and nudges the asker's tmux pane (`devteam: <id> answered`). The file holds the content; the nudge only says where to look.
-- **The asker records the ruling in a tracked file** in its next commit, then runs `devteam.mjs recorded <qid> <path>`. Ticket-scoped rulings go in the spec's or plan's Rulings section, before the ticket asks for the merge word. Cross-cutting ones the supervisor adds to `project/decisions.md` (through a `chore-` PR or the next planning PR).
+1. Relay it to every worker or planner it affects: `devteam.mjs send <ticket-id> "<answer>" --kind answer`.
+2. Record where it landed with `devteam.mjs recorded <qid> <path>`: the worker's spec or plan Rulings section for ticket-scoped answers, `project/decisions.md` for cross-cutting ones.
 
 ## 7. Notifying the owner
 
-The supervisor sends the owner a push notification (by whatever channel the settings name) only when a new owner question appears that blocks work, or when something lands that the owner must act on now. One notification per state change, never one per sweep.
+Send a push notification (by whatever channel the settings name) only when a new question blocks work, or when something lands that the owner must act on now. One notification per state change, never one per sweep.

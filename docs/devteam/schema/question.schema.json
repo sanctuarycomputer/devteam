@@ -2,13 +2,11 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "devteam/question.schema.json",
   "title": "Question",
-  "description": "One question in the inbox. Runtime file at docs/devteam/run/questions/<id>.json (gitignored, kept on disk as history). Created by the asker; only the answerer writes answer fields afterwards. See process/questions.md.",
+  "description": "One question from the supervisor to the owner. Runtime file at docs/devteam/run/questions/<id>.json (gitignored, kept on disk as history). Only the supervisor creates questions; only the owner answers them (the supervisor may apply a default). Sessions talk to each other with messages, not questions. See process/questions.md.",
   "type": "object",
   "required": [
     "id",
     "kind",
-    "to",
-    "from",
     "asked_at",
     "question",
     "status"
@@ -21,39 +19,17 @@
     },
     "kind": {
       "enum": [
-        "design-change",
-        "merge-request",
-        "review-request",
-        "slot-request",
-        "blocked",
         "owner-decision",
         "one-way-door",
         "clarification"
       ]
-    },
-    "to": {
-      "enum": [
-        "supervisor",
-        "owner"
-      ]
-    },
-    "from": {
-      "type": "string",
-      "description": "ticket id, 'supervisor' or 'planner'"
     },
     "ticket": {
       "type": [
         "string",
         "null"
       ],
-      "description": "ticket the question is about, if any"
-    },
-    "session": {
-      "type": [
-        "string",
-        "null"
-      ],
-      "description": "tmux target of the asker at ask time, used to nudge it when answered"
+      "description": "ticket the question is on behalf of, if any; the supervisor relays the answer to its worker"
     },
     "asked_at": {
       "type": "string",
@@ -90,13 +66,6 @@
       },
       "description": "ticket ids that cannot proceed until answered"
     },
-    "head_sha": {
-      "type": [
-        "string",
-        "null"
-      ],
-      "description": "for merge-request: the exact head the word is requested for"
-    },
     "status": {
       "enum": [
         "open",
@@ -115,7 +84,8 @@
       "type": [
         "string",
         "null"
-      ]
+      ],
+      "description": "'owner', or 'supervisor (default)' when a reversible default was applied"
     },
     "answered_at": {
       "type": [

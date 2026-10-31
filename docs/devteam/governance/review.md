@@ -27,7 +27,7 @@ What counts as a review, how it is recorded, and how its quality is measured. Ad
 1. **Pass 1, adversarial.** Full review; produces findings.
 2. The author fixes.
 3. **Pass 2, cold confirm.** A reviewer who is neither the author nor the fixer re-checks the fixes, diff-only, and flips the verdict. A "changes needed" verdict plus an author note saying "fixed" is **not** an approval. A new Critical in pass 2 forces pass 3.
-4. **Cap.** If pass 3 still finds a Critical, stop and raise a question to the supervisor; the ticket probably needs re-planning.
+4. **Cap.** If pass 3 still finds a Critical, stop and message the supervisor (`blocked`); the ticket probably needs re-planning.
 
 **Two independent reviews** (from two different sessions) are required for `risk: high` tickets and for every one-way door (`constitution.md` §3).
 
