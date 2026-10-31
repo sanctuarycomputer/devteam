@@ -65,6 +65,14 @@ const server = http.createServer(async (req, res) => {
   }
   const action = req.method === 'POST' && req.url.startsWith('/api/') ? ACTIONS[req.url.slice('/api/'.length)] : null;
   if (action) {
+    // Only this page may act as the owner: no cross-site form posts, no other hosts (DNS rebinding).
+    const okHost = [`127.0.0.1:${port}`, `localhost:${port}`, `${host}:${port}`].includes(req.headers.host ?? '');
+    const site = req.headers['sec-fetch-site'];
+    const origin = req.headers.origin;
+    const sameOrigin = (!site || site === 'same-origin') && (!origin || origin === `http://${req.headers.host}`);
+    if (!okHost || !sameOrigin || !(req.headers['content-type'] ?? '').startsWith('application/json')) {
+      return send(res, 403, 'application/json', JSON.stringify({ error: 'refused: owner actions only from this dashboard page' }));
+    }
     let body = '';
     req.on('data', (c) => {
       body += c;
@@ -80,7 +88,7 @@ const server = http.createServer(async (req, res) => {
       const args = action(parsed);
       if (!args) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
       const r = await run(args);
-      return send(res, r.ok ? 200 : 400, 'application/json', JSON.stringify(r.ok ? { ok: true, out: r.stdout.trim() } : { error: r.stderr.trim().replace(/^devteam: /, '') }));
+      return send(res, r.ok ? 200 : 400, 'application/json', JSON.stringify(r.ok ? { ok: true, out: r.stdout.trim() } : { error: r.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') }));
     });
     return;
   }

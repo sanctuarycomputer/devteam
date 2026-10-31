@@ -42,7 +42,7 @@ Scales (severity, valence, confidence, priority) are numbers; labels are derived
 
 - `devteam.mjs orient` lists **recurring signals**: three or more observations (or corrections) on the same key, from at least two writers or on at least two days, that no knowledge entry or problem refers to yet.
 - For each one the supervisor decides: a **lesson** (`knowledge add --kind lesson --scope component:api --evidence <ids>`), a **problem** (`problem add`), or nothing (the signal is noise; say so with an observation). Positive signals become lessons to keep doing.
-- **Knowledge** starts as a candidate. The supervisor or the owner accepts it. Only accepted entries are used: `make-worker.sh` appends the accepted knowledge whose scope matches the ticket's component or feature (or the whole project) to the worker's prompt, and the supervisor reads `knowledge --for <class>` before deciding in a class. Retire entries that stop being true; mark them stale when unsure.
+- **Knowledge** starts as a candidate. The supervisor or the owner accepts it. What the owner writes or sets (a standing rule, an acceptance) the supervisor can't change; it asks. Only accepted entries are used: `make-worker.sh` appends the accepted knowledge whose scope matches the ticket's component or feature (or the whole project) to the worker's prompt, and the supervisor reads `knowledge --for <class>` before deciding in a class. Retire entries that stop being true; mark them stale when unsure.
 - **Problems** are things that are wrong or could go wrong, with a lifecycle. A risk that happens is the same problem with `realized` set. Link the goals it threatens. Work to fix a problem is a chore ticket that names it in its notes.
 
 ## 4. Act, and how corrections are used
@@ -51,7 +51,7 @@ The supervisor logs each decision as an act: `devteam.mjs act --class <c> [--sco
 
 The owner corrects an act from the dashboard (or `devteam.mjs correct <act-id> --reason "…"`); the supervisor records corrections it finds at a retro with `--retro`. A correction does six things:
 
-1. **Trust:** a correction of an act in a ladder class drops that class (and scope) to rung 1 and resets its clean count (`autonomy.md` §6).
+1. **Trust:** a correction of an act in a ladder class drops the whole class to rung 1 and resets its clean count (`autonomy.md` §6).
 2. **Repair:** the supervisor undoes a reversible act, or makes a fix ticket, and says which on the correction.
 3. **Learning:** corrections cluster in `orient` by class and scope; three of them make a lesson or a problem.
 4. **Context:** that lesson, once accepted, goes into the prompt of the next session working in that scope, so the correction changes behaviour, not just a number.
@@ -61,20 +61,22 @@ The owner corrects an act from the dashboard (or `devteam.mjs correct <act-id> -
 ## 5. Where it lives
 
 - **Live:** `run/log/<file>.jsonl` (gitignored, in the main checkout, shared by every worktree through `DEVTEAM_RUN`). Every line lands here the moment it is written, under a short lock, so concurrent writers never interleave.
-- **Durable:** `project/log/<file>.jsonl`, in git. The supervisor runs `devteam.mjs log-sync` once a day (and before merging a plan that names a newly approved goal). It copies the live files onto branch `chore-log` in its own worktree and opens the log-only PR, which it merges like any other once CI passes. Under strict branch protection, update that PR after the tick's ticket merges, then merge it last.
+- **Durable:** `project/log/<file>.jsonl`, in git. The supervisor runs `devteam.mjs log-sync` once a day (and before merging a plan that names a newly approved goal, since CI's `validate` reads only the durable log). It copies the live files onto branch `chore-log` in its own worktree and opens the log-only PR, which it merges like any other once CI passes. Under strict branch protection, update that PR after the tick's ticket merges, then merge it last.
 - **One file per writer:** `owner-YYYY-MM.jsonl`, `supervisor-YYYY-MM.jsonl`, `<ticket-id>.jsonl`, `plan-<feature>.jsonl`. Readers merge all files and sort by time. Per file, they read whichever copy extends the other.
-- **CI** (`check-pr`, in the `merge-word` job): only branch `chore-log` may change `project/log/`, only there, and only by appending. Every added line must be valid, written by the file's writer, allowed by the authority table below, in time order, and not dated after the commit. Any other PR that touches the log fails.
+- **CI** (`check-pr`, in the `merge-word` job): only branch `chore-log` may change `project/log/`, only there, and only by appending. Every added line must be valid, written by the file's writer, allowed by the authority table below, in time order, not dated after the commit, and, in a monthly file, dated in its month; a writer's new file can't start before the end of its older ones. Any other PR that touches the log fails.
+- **Order and ids:** each append takes the file's lock, catches the live file up with main's copy if main is ahead, and stamps a time just after the file's last line, so ids are unique and lines stay in order even if the clock steps back. A half-written last line (a crash) is dropped.
+- **Repair:** if a bad line ever reaches `project/log` (`validate` reports it as a warning; it never blocks other PRs), the owner removes it in a PR merged with an admin override, the one case where a log line is edited, and records why in `project/decisions.md`.
 
 ### Authority
 
 | Writer | May create | May change |
 |---|---|---|
 | owner | goal, correction, knowledge, observation, seen | question answers (answer, autonomy, standing rule), goal (any field, including status), knowledge, problem |
-| supervisor | question, observation, knowledge, problem, act, correction, goal (draft), phase (its own cost) | question status (withdrawn or defaulted) and recorded_in, knowledge, problem, goal fields while the goal is a draft |
+| supervisor | question, observation, knowledge, problem, act, correction, goal (draft), phase (its own cost) | question status (withdrawn or defaulted), reason and recorded_in; knowledge and problem fields; goal fields while the goal is a draft. Never a field the owner wrote. |
 | planner | observation | nothing |
 | worker | phase, observation | nothing |
 
-When two writers set the same field, the higher one wins whatever the timestamps say: owner, then supervisor, then planner, then worker. An owner's answer stands even if the supervisor applied the default later.
+When two writers set the same field, the higher one wins whatever the timestamps say: owner, then supervisor, then planner, then worker. The creator of an object holds its fields at the creator's rank, so the supervisor can't rewrite an owner's standing rule or goal. An owner's answer stands even if the supervisor applied the default later. Goal readings count only from the supervisor or the owner.
 
 ### What this protects and what it doesn't
 

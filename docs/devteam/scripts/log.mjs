@@ -8,6 +8,7 @@
 
 export const LOG_VERSION = 1;
 export const LINE_MAX = 4096;
+export const AT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 // Shared id pattern: <prefix>-<yyyymmdd>-<hhmmss>[mmm]-<writer>. The old question ids
 // (q-yyyymmdd-hhmmss-slug) match too, so links in old PR bodies keep working.
@@ -103,6 +104,7 @@ function checkFields(type, o, errs, isNew) {
       if (req('kind')) need('kind', QUESTION_KINDS.includes(o.kind), `must be one of ${QUESTION_KINDS.join(', ')}`);
       if (req('question')) need('question', isStr(o.question), 'must be a non-empty string');
       need('options', isOptStrArr(o.options), 'must be a list of strings');
+      need('scope', isOptStr(o.scope), 'must be a string');
       need('blocks', isOptStrArr(o.blocks), 'must be a list of ticket ids');
       need('evidence', isOptStrArr(o.evidence), 'must be a list of ids');
       need('default', isOptStr(o.default), 'must be a string or null');
@@ -195,7 +197,8 @@ export function checkLine(o, file) {
   if (o.v !== LOG_VERSION) errs.push(`v must be ${LOG_VERSION}`);
   if (!TYPES[o.type]) errs.push(`unknown type "${o.type}"`);
   if (!['new', 'set'].includes(o.op)) errs.push('op must be "new" or "set"');
-  if (!isStr(o.at) || Number.isNaN(Date.parse(o.at))) errs.push('at must be an ISO timestamp');
+  // Times are compared as strings everywhere, so only one exact shape is allowed.
+  if (!isStr(o.at) || !AT_RE.test(o.at) || Number.isNaN(Date.parse(o.at))) errs.push('at must be a UTC timestamp like 2026-10-31T14:15:02.123Z');
   if (!isStr(o.by)) errs.push('by is required');
   if (!isStr(o.id) || !ID_RE.test(o.id)) errs.push(`id "${o.id}" is not a log id`);
   if (errs.length) return errs;
@@ -208,7 +211,6 @@ export function checkLine(o, file) {
     if (o.type === 'goal' && o.status && o.status !== 'draft' && cls !== 'owner') errs.push('only the owner creates a goal past draft');
     if (o.type === 'knowledge' && o.status && o.status !== 'candidate' && !['owner', 'supervisor'].includes(cls)) errs.push('only the supervisor or owner accepts knowledge');
     if (o.type === 'phase' && cls === 'supervisor' && o.to !== 'supervisor') errs.push('the supervisor records its own cost as phase "supervisor"');
-    if (o.type === 'act' && cls === 'ticket' && o.actor !== o.by) errs.push('a worker logs only its own acts');
     checkFields(o.type, o, errs, true);
   } else {
     const allowed = AUTHORITY.set[o.type]?.[cls];
@@ -263,8 +265,14 @@ export function fold(allLines) {
       continue;
     }
     const { v, op, __file, __line, ...rest } = l;
-    objects.set(l.id, { ...rest, created_at: l.at, created_by: l.by, updates: [], __rank: {} });
+    // The creator's fields carry the creator's rank: the supervisor can't rewrite what the owner wrote.
+    const rank = RANK[writerClass(l.by)];
+    const ranks = Object.fromEntries(Object.keys(rest).map((k) => [k, rank]));
+    objects.set(l.id, { ...rest, created_at: l.at, created_by: l.by, updates: [], __rank: ranks });
   }
+  // When each goal first left draft (an owner line): supervisor edits from then on are ignored.
+  const leftDraft = new Map();
+  for (const l of lines) if (l.type === 'goal' && writerClass(l.by) === 'owner' && l.status && l.status !== 'draft' && !leftDraft.has(l.id)) leftDraft.set(l.id, l.at);
   for (const l of lines.filter((x) => x.op === 'set')) {
     const obj = objects.get(l.id);
     if (!obj) {
@@ -277,7 +285,7 @@ export function fold(allLines) {
     }
     const rank = RANK[writerClass(l.by)];
     // Rules that depend on the object's state, not just the writer.
-    if (obj.type === 'goal' && writerClass(l.by) === 'supervisor' && (obj.status ?? 'draft') !== 'draft') {
+    if (obj.type === 'goal' && writerClass(l.by) === 'supervisor' && ((obj.status ?? 'draft') !== 'draft' || (leftDraft.get(obj.id) && l.at >= leftDraft.get(obj.id)))) {
       ignored.push({ line: l, why: 'the supervisor edits a goal only while it is a draft' });
       continue;
     }
@@ -328,6 +336,7 @@ export function questionView(q) {
     id: q.id,
     kind: q.kind,
     class: q.class ?? null,
+    scope: q.scope ?? null,
     ticket: q.ticket ?? null,
     asked_at: q.created_at,
     question: q.question,

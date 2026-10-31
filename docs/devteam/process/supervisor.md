@@ -53,7 +53,7 @@ Run on a timer: about every 10 minutes when PRs are converging, 30 when quiet. A
 12. **Notify** the owner only on a new blocking owner question or something they must act on now (`questions.md` §8).
 13. **Dashboard:** `devteam.mjs dashboard-data` to refresh `run/dashboard.json`.
 14. Write your own heartbeat: `devteam.mjs heartbeat --supervisor` (with `--usd` if you can see your own spend).
-15. Once a day, after the tick's merges: `devteam.mjs log-sync`, then merge the log-only PR when CI passes (`log.md` §5).
+15. Once a day, after the tick's merges, and before merging a plan PR that names a newly approved goal: `devteam.mjs log-sync`, then merge the log-only PR when CI passes (`log.md` §5).
 
 ## 4. Fixing drift
 

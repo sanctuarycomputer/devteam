@@ -140,6 +140,9 @@
   <h3 style="margin-top:14px">Knowledge</h3>
   <div id="knowledge"></div>
 
+  <div id="defaulted"></div>
+  <div id="owner-cli"></div>
+
   <h2><span class="stage">Decide</span>trust ladder</h2>
   <div class="scroll"><table id="trust"></table></div>
   <p class="muted small">Rungs: 1 ask, 2 ask with a default, 3 act and report. A correction drops a class to 1. Evidence never moves a rung by itself; you do, when answering or through a trust question (governance/autonomy.md).</p>
@@ -351,6 +354,13 @@ function renderOoda(o) {
     </div>`;
   }).join('') : '<p class="muted">No goals yet. The supervisor drafts them from what you say (planning.md §0).</p>';
 
+  // Defaulted answers can still be overruled; terminal answers are worth a glance.
+  $('defaulted').innerHTML = o.defaulted.length ? `<h3 style="margin-top:14px">Decided by default (you can still overrule)</h3>` + o.defaulted.map((q) => `
+    <div class="card small"><b>${esc(q.question)}</b> → ${esc(q.answer)} <span class="muted">· ${when(q.answered_at)} · ${esc(q.id)}</span>
+      <div class="row-inline"><input type="text" data-overrule="${esc(q.id)}" placeholder="Your answer instead"><button class="ghost" data-overrule-send="${esc(q.id)}">Overrule</button><span class="err" id="e-${esc(q.id)}"></span></div></div>`).join('') : '';
+  $('owner-cli').innerHTML = o.owner_cli.length ? `<h3 style="margin-top:14px">Answers given from a terminal, not this page</h3><p class="muted small">Check these are yours: any session on this machine could type them.</p>` + o.owner_cli.map((q) => `
+    <div class="card small"><b>${esc(q.question)}</b> → ${esc(q.answer)}${q.autonomy ? ` · <span class="badge medium">next time: ${esc(q.autonomy.class)} rung ${q.autonomy.rung}</span>` : ''} <span class="muted">· ${when(q.at)}</span></div>`).join('') : '';
+
   // Observe
   $('observations').innerHTML = o.observations.length ? o.observations.slice(0, 12).map((x) => `
     <div class="card small"><span class="badge ${sevBadge(x.severity ?? 0)}">${esc(x.kind)}</span><code>${esc(x.subject)}</code> ${esc(x.detail)} <span class="muted">· ${esc(x.created_by)}, ${when(x.created_at)}${x.valence ? ` · valence ${x.valence > 0 ? '+' : ''}${x.valence}` : ''}</span></div>`).join('') : '<p class="muted">None yet.</p>';
@@ -373,8 +383,12 @@ function renderOoda(o) {
     <tr><td>${esc(t.class)}</td><td>${t.rung} · ${esc(t.rung_name)}</td><td>${t.ceiling}</td><td>${t.clean_acts.length}${t.clean_span_days ? ` over ${t.clean_span_days}d` : ''}</td><td>${t.agreement == null ? '–' : `${Math.round(t.agreement * 100)}%`}</td><td>${t.corrections}</td><td>${t.can_ask ? '<span class="badge good">evidence supports a step up</span>' : ''}</td></tr>`).join('');
 
   // Act
-  $('seen-note').textContent = o.seen_upto ? `last marked seen ${when(o.seen_upto)}` : 'nothing marked seen yet';
-  $('acts').innerHTML = o.acts.length ? o.acts.slice(0, 30).map((a) => `
+  const A = o.acts;
+  $('seen-note').textContent = `${A.unseen_total} not yet seen${A.unseen_total > A.unseen.length ? ` (showing the oldest ${A.unseen.length})` : ''}${o.seen_upto ? ` · last marked ${when(o.seen_upto)}` : ''}`;
+  $('seen').hidden = !A.unseen.length;
+  $('seen').dataset.upto = A.unseen.length ? A.unseen[A.unseen.length - 1].created_at : '';
+  const feed = [...A.unseen.slice().reverse(), ...A.seen];
+  $('acts').innerHTML = feed.length ? feed.map((a) => `
     <div class="card small ${a.correction ? 'corrected' : ''}">
       <div><span class="badge ${a.ladder ? 'medium' : 'low'}">${esc(a.class)}${a.scope ? ` · ${esc(a.scope)}` : ''}</span>${esc(a.what)}
         <div class="muted">${when(a.created_at)}${a.approved_by ? ` · approved by ${esc(a.approved_by)}` : a.rung ? ` · rung ${a.rung}` : ''}${a.reversible === false ? ' · irreversible' : ''}${a.seen ? ' · seen' : ''}</div>
@@ -419,7 +433,7 @@ function render(d) {
 
   // Keep anything half-typed or half-open across refreshes.
   document.querySelectorAll('textarea[data-q]').forEach((t) => { drafts[t.dataset.q] = t.value; });
-  const kept = [...document.querySelectorAll('input[data-rule], select[data-auto], input[data-reason]')].map((el) => [el.getAttribute('data-rule') ? `input[data-rule="${el.dataset.rule}"]` : el.dataset.auto ? `select[data-auto="${el.dataset.auto}"]` : `input[data-reason="${el.dataset.reason}"]`, el.value]);
+  const kept = [...document.querySelectorAll('input[data-rule], select[data-auto], input[data-reason], input[data-overrule]')].map((el) => [el.dataset.rule ? `input[data-rule="${el.dataset.rule}"]` : el.dataset.auto ? `select[data-auto="${el.dataset.auto}"]` : el.dataset.reason ? `input[data-reason="${el.dataset.reason}"]` : `input[data-overrule="${el.dataset.overrule}"]`, el.value]);
   const openForms = [...document.querySelectorAll('[data-correct-form]')].filter((f) => !f.hidden).map((f) => f.dataset.correctForm);
   const o = d.ooda;
   const reasonText = Object.fromEntries((o.reasons || []).map((r) => [r.id, r.means]));
@@ -517,13 +531,18 @@ document.addEventListener('click', async (ev) => {
     if (!form.hidden) form.querySelector('input').focus();
     return;
   }
+  const over = ev.target.closest('[data-overrule-send]');
+  if (over) {
+    const id = over.dataset.overruleSend;
+    return void post('answer', { id, answer: document.querySelector(`input[data-overrule="${id}"]`).value }, id);
+  }
   const send = ev.target.closest('[data-correct-send]');
   if (send) {
     const id = send.dataset.correctSend;
     const reason = document.querySelector(`input[data-reason="${id}"]`).value;
     return void post('correct', { id, reason }, id);
   }
-  if (ev.target.id === 'seen') return void post('seen', {});
+  if (ev.target.id === 'seen' && ev.target.dataset.upto) return void post('seen', { upto: ev.target.dataset.upto });
 });
 
 load();

@@ -16,7 +16,7 @@ How the supervisor earns the right to decide more on its own. The constitution (
 | 2 | ask with a default | asks with a default, and applies it when the deadline passes without an answer (`answer <qid> --defaulted`) |
 | 3 | act and report | decides, logs the act, and the owner sees it in the act feed |
 
-`devteam.mjs act --class <c>` refuses below rung 3 unless it cites an answered question (`--approved <qid>`); at rung 2 a defaulted answer counts as approval, at rung 1 it doesn't. A refused act writes nothing.
+`devteam.mjs act --class <c>` refuses below rung 3 unless it cites an answered question in the same class (`--approved <qid>`); each answer approves one act. At rung 2 a defaulted answer counts as approval, at rung 1 it doesn't. An act in an owner-only class always needs the owner's answer in that class. A refused act writes nothing.
 
 ## 3. The ladder
 
@@ -71,8 +71,8 @@ The supervisor never moves itself up. Clean acts and agreement are evidence for 
 
 ## 6. Moving down
 
-Any correction of an act in a ladder class drops that class (and scope, if the act had one) to rung 1, at once, and resets its clean count. The owner corrects from the act feed (`devteam.mjs correct <act-id>`); the supervisor records corrections it finds at a retro (`--retro`). A correction of the supervisor's own decisions (§1) doesn't change authority; it becomes evidence for knowledge (`process/log.md` §3).
+Any correction of an act in a ladder class drops the whole class to rung 1, whatever scope the act had, at once, and resets its clean count. The owner can raise it again, scope by scope, when answering. The owner corrects from the act feed (`devteam.mjs correct <act-id>`); the supervisor records corrections it finds at a retro (`--retro`). A correction of the supervisor's own decisions (§1) doesn't change authority; it becomes evidence for knowledge (`process/log.md` §3).
 
 ## 7. What this is and isn't
 
-The rung check is something the supervisor runs before acting and the act log records; it is not a wall an agent can't get around, because every session runs as the same user. The walls are where they always were: CI's merge-word check, required reviews, tag protection, `worker_denied_commands`. What the ladder adds is visibility: every owner line records whether it came from the dashboard or the command line, every rung change is on the dashboard, and the owner's answers never come from an agent session (owner commands refuse to run where `DEVTEAM_ROLE` is set).
+The rung check is something the supervisor runs before acting and the act log records; it is not a wall an agent can't get around, because every session runs as the same user. The walls are where they always were: CI's merge-word check, required reviews, tag protection, `worker_denied_commands`. What the ladder adds is visibility: every owner line records whether it came from the dashboard or the command line, every rung change is on the dashboard, and owner commands refuse to run where `DEVTEAM_ROLE` is set. An agent that unsets that variable could still type an owner answer, so the dashboard lists every answer given from a terminal, for the owner to check. The dashboard itself only accepts owner actions from its own page.

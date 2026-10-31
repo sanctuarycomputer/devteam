@@ -635,11 +635,6 @@ function ownerWriter() {
   return { by: 'owner', channel: process.env.DEVTEAM_CHANNEL === 'dashboard' ? 'dashboard' : 'cli' };
 }
 
-function stampLogId(prefix, by) {
-  const d = new Date().toISOString().replace(/[-:.]/g, '').replace(/Z$/, ''); // YYYYMMDDTHHMMSSmmm
-  return `${prefix}-${d.slice(0, 8)}-${d.slice(9, 18)}-${by}`;
-}
-
 function withLock(file, fn) {
   const lock = `${file}.lock`;
   const start = Date.now();
@@ -668,30 +663,68 @@ function withLock(file, fn) {
 
 // Append one object. Fills the envelope, validates it against the authority table, and refuses
 // anything invalid. Returns the line as written.
+// The durable copy of a log file: main's committed version or this checkout's, whichever extends
+// the other (a checkout that hasn't pulled yet is behind main).
+function durableText(file) {
+  const wt = path.join(durableLogDir(), file);
+  const local = fs.existsSync(wt) ? fs.readFileSync(wt, 'utf8') : null;
+  const ref = projectInRepo && mainRef() ? git(['show', `${mainRef()}:${projectRel}/log/${file}`]) : null;
+  const main = ref === null ? null : `${ref}\n`;
+  if (main === null) return local;
+  if (local === null || main.startsWith(local)) return main;
+  return local;
+}
+
+// Append one object. Fills the envelope, validates it against the authority table, and refuses
+// anything invalid. Under the lock: catch the live file up with the durable copy if that is ahead,
+// stamp a time later than the file's last line (so ids are unique and lines stay in order even if
+// the clock steps back), and write one line.
 function appendLog(fields, by = logWriter()) {
   const type = fields.type;
   if (!LOG.TYPES[type]) die(`unknown log type ${type}`);
-  const line = { v: LOG.LOG_VERSION, id: fields.id ?? stampLogId(LOG.TYPES[type], by), type, op: fields.op ?? 'new', at: new Date().toISOString(), by };
-  for (const [k, val] of Object.entries(fields)) if (!['id', 'type', 'op'].includes(k) && val !== undefined) line[k] = val;
   const file = logFileFor(by);
-  const errs = LOG.checkLine(line, file);
-  if (errs.length) die(`log line refused: ${errs.join('; ')}`);
-  if (Buffer.byteLength(JSON.stringify(line)) + 40 > LOG.LINE_MAX) die(`log line is over ${LOG.LINE_MAX} bytes; put detail in a file and reference its path`);
+  const build = (at) => {
+    const line = { v: LOG.LOG_VERSION, id: fields.id ?? `${LOG.TYPES[type]}-${at.slice(0, 10).replace(/-/g, '')}-${at.slice(11, 23).replace(/[:.]/g, '')}-${by}`, type, op: fields.op ?? 'new', at, by };
+    for (const [k, val] of Object.entries(fields)) if (!['id', 'type', 'op'].includes(k) && val !== undefined) line[k] = val;
+    // Validate what will actually be read back: NaN and undefined don't survive JSON.
+    const text = `${JSON.stringify(line)}\n`;
+    const parsed = JSON.parse(text);
+    const errs = LOG.checkLine(parsed, file);
+    if (errs.length) die(`log line refused: ${errs.join('; ')}`);
+    if (Buffer.byteLength(text) > LOG.LINE_MAX) die(`log line is over ${LOG.LINE_MAX} bytes; put detail in a file and reference its path`);
+    return { parsed, text };
+  };
+  build(new Date().toISOString()); // fail fast, before taking the lock
   fs.mkdirSync(liveLogDir(), { recursive: true });
   const live = path.join(liveLogDir(), file);
+  let out;
   withLock(live, () => {
-    // Stamp the time under the lock, so each file's lines are in time order (check-pr verifies it).
-    line.at = new Date().toISOString();
-    const text = `${JSON.stringify(line)}\n`;
-    // A fresh machine or a cleared run/: start the live file from the durable copy so it stays a superset.
-    if (!fs.existsSync(live)) {
-      const durable = path.join(durableLogDir(), file);
-      if (fs.existsSync(durable)) fs.copyFileSync(durable, live);
+    let cur = fs.existsSync(live) ? fs.readFileSync(live, 'utf8') : '';
+    const durable = durableText(file);
+    if (durable && durable.length > cur.length && durable.startsWith(cur)) {
+      fs.writeFileSync(live, durable);
+      cur = durable;
     }
-    fs.appendFileSync(live, text); // one write of one line
+    if (cur && !cur.endsWith('\n')) {
+      // A crash left half a line; drop it so the file stays valid.
+      warn(`run/log/${file} ended in a partial line; dropped it`);
+      cur = cur.slice(0, cur.lastIndexOf('\n') + 1);
+      fs.writeFileSync(live, cur);
+    }
+    let lastAt = '';
+    const tail = cur.trimEnd().split('\n').pop();
+    try {
+      lastAt = tail ? JSON.parse(tail).at ?? '' : '';
+    } catch {
+      lastAt = '';
+    }
+    let t = Date.now();
+    if (lastAt && Date.parse(lastAt) >= t) t = Date.parse(lastAt) + 1;
+    out = build(new Date(t).toISOString());
+    fs.appendFileSync(live, out.text); // one write of one line
   });
   logCache = null;
-  return line;
+  return out.parsed;
 }
 
 // Pick, per file, the copy that extends the other; if they diverged, take the durable lines plus
@@ -699,7 +732,7 @@ function appendLog(fields, by = logWriter()) {
 function logFileText(file) {
   const read = (p) => (fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : null);
   const live = read(path.join(liveLogDir(), file));
-  const durable = read(path.join(durableLogDir(), file));
+  const durable = durableText(file);
   if (live === null) return durable ?? '';
   if (durable === null || live.startsWith(durable)) return live;
   if (durable.startsWith(live)) return durable;
@@ -761,9 +794,9 @@ function rungFor(cls, scope = null) {
     const v = LOG.questionView(q);
     if (v.status === 'answered' && v.autonomy?.class === cls && (!v.autonomy.scope || v.autonomy.scope === scope)) events.push({ at: v.answered_at, rung: v.autonomy.rung });
   }
+  // A correction drops the whole class, whatever scope the act had.
   for (const c of logObjects('correction')) {
-    const act = logGet(c.act);
-    if (act?.class === cls && (!act.scope || act.scope === scope)) events.push({ at: c.created_at, rung: 1 });
+    if (logGet(c.act)?.class === cls) events.push({ at: c.created_at, rung: 1 });
   }
   let r = def.start;
   for (const e of events.sort((a, b) => a.at.localeCompare(b.at))) r = e.rung;
@@ -909,7 +942,9 @@ function cmdValidate() {
   }
 
   // The log: every line valid; settings may lower a trust ceiling, never raise it.
-  for (const e of readLog().errors) errors.push(`log ${e}`);
+  // check-pr gates what enters the durable log; a bad line already there is reported, not fatal,
+  // so it can't block every PR (repair: process/log.md §5).
+  for (const e of readLog().errors) warnings.push(`log ${e}`);
   const constitutional = (() => {
     const p2 = path.join(devteamDir, 'governance', 'autonomy.md');
     const m = fs.existsSync(p2) ? fs.readFileSync(p2, 'utf8').match(/```json devteam\s*\n([\s\S]*?)\n```/) : null;
@@ -1157,8 +1192,21 @@ function checkLogPr(headRef, shaArg) {
     }
     const { lines, errors } = LOG.parseLines(ap.added, name, (before ?? '').split('\n').filter(Boolean).length + 1);
     fails.push(...errors.map((e) => `added line in ${e}`));
-    let prevAt = (before ?? '').split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l).at; } catch { return ''; } }).pop() ?? '';
+    const lastAtOf = (text) => (text ?? '').split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l).at ?? ''; } catch { return ''; } }).pop() ?? '';
+    let prevAt = lastAtOf(before);
+    // A month file holds only that month's lines, and a writer's new file can't start before the end
+    // of its older ones: no backdating a line into a fresh file.
+    const monthOf = name.match(/^(?:owner|supervisor)-(\d{4}-\d{2})\.jsonl$/)?.[1] ?? null;
+    if (before === null) {
+      const writer = LOG.writerOfFile(name);
+      const siblings = (git(['ls-tree', '--name-only', `${base}:${logPrefix.slice(0, -1)}`]) ?? '').split('\n').filter((x) => x && x !== name && LOG.writerOfFile(x) === writer);
+      for (const sib of siblings) {
+        const at = lastAtOf(git(['show', `${base}:${logPrefix}${sib}`]));
+        if (at > prevAt) prevAt = at;
+      }
+    }
     for (const l of lines) {
+      if (monthOf && !l.at.startsWith(monthOf)) fails.push(`${f}:${l.__line}: at ${l.at} is not in ${monthOf}`);
       if (l.at < prevAt) fails.push(`${f}:${l.__line}: at ${l.at} is earlier than the line before it`);
       if (!Number.isNaN(committedAt) && Date.parse(l.at) > committedAt + 5 * 60000) fails.push(`${f}:${l.__line}: at ${l.at} is after the commit time`);
       prevAt = l.at;
@@ -1209,6 +1257,8 @@ function cmdAsk() {
   const known = auto.reasons.map((r) => r.id ?? r);
   for (const r of reasons) if (known.length && !known.includes(r)) warn(`reason "${r}" is not in governance/autonomy.md; add it there if it is a real new reason`);
   const blocks = asList(flags.blocks);
+  const { tickets } = loadGraph();
+  for (const b of blocks) if (!tickets.has(b)) die(`--blocks ${b}: no such ticket`);
   // Inbox hygiene: past the cap, only one-way doors and questions that block work get in.
   const cap = loadSettings().max_open_questions ?? 7;
   const open = readQuestions().filter((x) => x.status === 'open');
@@ -1229,6 +1279,7 @@ function cmdAsk() {
     type: 'question',
     kind,
     class: cls ?? undefined,
+    scope: flagStr('scope') ?? undefined,
     ticket: flagStr('ticket') ?? undefined,
     question: q,
     context: flagStr('context') ?? undefined,
@@ -1446,6 +1497,9 @@ function cmdHeartbeat() {
   }
   if (session) next.session = session;
   if (flags.note !== undefined) next.note = (flagStr('note') ?? '').slice(0, 280);
+  for (const k of ['usd', 'in', 'out']) {
+    if (flags[k] !== undefined && !(Number(flagStr(k)) >= 0)) die(`--${k} must be a number ≥ 0`);
+  }
   if (flags.usd !== undefined || flags.in !== undefined || flags.out !== undefined) {
     const src = flagStr('cost-source') ?? prev.cost?.source ?? 'agent-report';
     if (!['gateway', 'agent-report', 'estimate'].includes(src)) die('--cost-source must be gateway, agent-report or estimate');
@@ -1461,7 +1515,11 @@ function cmdHeartbeat() {
   // two phase lines is charged to the earlier line's phase. The supervisor logs its own cost as
   // phase "supervisor" whenever it reports a new total.
   const costFields = next.cost ? { usd: next.cost.usd, input_tokens: next.cost.input_tokens, output_tokens: next.cost.output_tokens } : {};
-  if (!supervisor && next.phase !== prev.phase) {
+  // Also record a same-phase line when spend has grown by $1 or more since the last line, so cost
+  // in a ticket's last phase isn't lost.
+  const lastLogged = logObjects('phase').filter((l) => l.created_by === id).sort((a, b) => a.created_at.localeCompare(b.created_at)).pop();
+  const costGrew = next.cost && next.cost.usd - (lastLogged?.usd ?? 0) >= 1;
+  if (!supervisor && (next.phase !== prev.phase || costGrew)) {
     appendLog({ type: 'phase', from: prev.phase ?? null, to: next.phase, sha: next.head_sha ?? undefined, task: next.task ?? undefined, note: next.note ?? undefined, ...costFields }, id);
   } else if (supervisor && next.cost && next.cost.usd !== prev.cost?.usd) {
     appendLog({ type: 'phase', from: 'supervisor', to: 'supervisor', ...costFields }, 'supervisor');
@@ -1771,7 +1829,9 @@ function collectMetrics(since) {
   for (const msg of openMsgs.filter((x) => now - Date.parse(x.ts) > 30 * 60000)) add('medium', 'unanswered-message', msg.id, `${msg.kind} from ${msg.actor}, ${Math.round((now - Date.parse(msg.ts)) / 60000)} min old`, `reply with --re ${msg.id}`);
   for (const q of openQs.filter((x) => now - Date.parse(x.asked_at) > (settings.question_default_after_hours ?? 24) * 3600000)) add('high', 'owner-question-waiting', q.id, q.question.slice(0, 120), q.default ? 'apply its default' : 'remind the owner; it blocks work');
   // Inbox health: if the owner answers fewer than half of what is asked, the decide step stalls.
-  const recentQs = readQuestions().filter((q) => now - Date.parse(q.asked_at) <= 14 * 864e5 && q.status !== 'withdrawn');
+  // Count questions that had time to be answered: resolved ones, or open ones past the default deadline.
+  const grace = (settings.question_default_after_hours ?? 24) * 3600000;
+  const recentQs = readQuestions().filter((q) => now - Date.parse(q.asked_at) <= 14 * 864e5 && q.status !== 'withdrawn' && (q.status !== 'open' || now - Date.parse(q.asked_at) > grace));
   const answeredRecent = recentQs.filter((q) => q.status === 'answered').length;
   m.owner_questions.answer_rate_14d = recentQs.length ? +(answeredRecent / recentQs.length).toFixed(2) : null;
   if (recentQs.length >= 4 && answeredRecent / recentQs.length < 0.5) add('high', 'inbox-stalled', 'owner questions', `${answeredRecent} of ${recentQs.length} answered in 14 days`, 'stop asking non-blocking questions; batch, withdraw stale ones, and open a problem until the rate recovers');
@@ -1899,7 +1959,17 @@ function collectOoda() {
     clusters: orientClusters(),
     knowledge: recent(logObjects('knowledge').filter((k) => k.status !== 'retired'), 60),
     problems: logObjects('problem').filter((p) => p.status !== 'resolved').sort((a, b) => b.severity - a.severity),
-    acts: recent(logObjects('act'), 60).map((a) => ({ ...a, correction: correctedBy.get(a.id) ?? null, seen: !!seenUpto && a.created_at <= seenUpto, ladder: !!auto.classes[a.class] })),
+    // Every unseen act (oldest first, up to 100), then the latest seen ones. "Mark all as seen" marks up
+    // to the newest act shown, so nothing the owner hasn't had in front of them counts as seen.
+    acts: (() => {
+      const all = logObjects('act').map((a) => ({ ...a, correction: correctedBy.get(a.id) ?? null, seen: !!seenUpto && a.created_at <= seenUpto, ladder: !!auto.classes[a.class] }));
+      const unseen = all.filter((a) => !a.seen).sort((a, b) => a.created_at.localeCompare(b.created_at)).slice(0, 100);
+      const seen = recent(all.filter((a) => a.seen), 20);
+      return { unseen, seen, unseen_total: all.filter((a) => !a.seen).length };
+    })(),
+    // Owner lines typed at a terminal, not the dashboard: worth a glance, since an agent could do that too.
+    owner_cli: logObjects('question').map(LOG.questionView).filter((q) => q.answered_by === 'owner' && q.channel === 'cli').sort((a, b) => b.answered_at.localeCompare(a.answered_at)).slice(0, 10).map((q) => ({ id: q.id, question: q.question, answer: q.answer, at: q.answered_at, autonomy: q.autonomy })),
+    defaulted: readQuestions().filter((q) => q.status === 'defaulted' && Date.now() - Date.parse(q.answered_at) < 14 * 864e5),
     seen_upto: seenUpto,
     trust: trustTable(),
     classes: Object.fromEntries(Object.entries(auto.classes).map(([k, v]) => [k, { ...v, rung: rungFor(k) }])),
@@ -1963,18 +2033,31 @@ function cmdLogSync() {
   fs.mkdirSync(dest, { recursive: true });
   let changed = 0;
   for (const f of files) {
-    const liveText = fs.readFileSync(path.join(live, f), 'utf8');
+    // Read under the writers' lock, and only whole lines.
+    let liveText = withLock(path.join(live, f), () => fs.readFileSync(path.join(live, f), 'utf8'));
+    liveText = liveText.slice(0, liveText.lastIndexOf('\n') + 1);
     const target = path.join(dest, f);
     const cur = fs.existsSync(target) ? fs.readFileSync(target, 'utf8') : '';
-    if (cur === liveText) continue;
+    if (cur === liveText || cur.startsWith(liveText)) continue;
+    let next = liveText;
     if (!liveText.startsWith(cur)) {
-      warn(`run/log/${f} does not extend project/log/${f} on ${main}; skipped (process/log.md §5)`);
-      continue;
+      // Diverged (another checkout wrote to the same file): keep main's lines, add the live ones it lacks.
+      const have = new Set(cur.split('\n'));
+      const extra = liveText.split('\n').filter((l) => l && !have.has(l));
+      if (!extra.length) continue;
+      warn(`run/log/${f} and ${main} diverged; adding ${extra.length} live line(s) after main's (check-pr will refuse them if they are out of time order; process/log.md §5)`);
+      next = cur + extra.map((l) => `${l}\n`).join('');
     }
-    fs.writeFileSync(target, liveText);
+    fs.writeFileSync(target, next);
     changed++;
   }
-  if (!changed) return void process.stdout.write('project/log is up to date\n');
+  if (!changed) {
+    const remote = resolveCommit(`origin/${LOG_BRANCH}`);
+    if (remote && git(['diff', '--quiet', base, remote, '--', path.join(projectRel, 'log')]) === null) {
+      warn(`branch ${LOG_BRANCH} has an older copy of lines that are now on ${main}; close its PR`);
+    }
+    return void process.stdout.write('project/log is up to date\n');
+  }
   if (flags['dry-run']) return void process.stdout.write(`${changed} file(s) would be synced\n`);
   run(['add', path.join(projectRel, 'log')]);
   const stamp = nowIso();
@@ -2044,7 +2127,7 @@ function cmdObserve() {
 const SEVERITY_RANK = { low: 1, medium: 2, high: 3 };
 function observeFindings(m) {
   const recent = new Map();
-  for (const o of logObjects('observation')) if (o.source_key) recent.set(o.source_key, Math.max(recent.get(o.source_key) ?? 0, Date.parse(o.created_at)));
+  for (const o of logObjects('observation')) if (o.source_key && o.created_by === 'supervisor' && o.detector === 'metrics') recent.set(o.source_key, Math.max(recent.get(o.source_key) ?? 0, Date.parse(o.created_at)));
   let n = 0;
   for (const f of m.findings) {
     const key = `metrics:${f.kind}:${f.subject}`;
@@ -2189,13 +2272,21 @@ function cmdAct() {
   const scope = flagStr('scope') ?? null;
   const approved = flagStr('approved') ?? null;
   let rung;
-  if (auto.classes[cls]) {
+  // An approval is one answered question in the same class, used for one act.
+  let approval = null;
+  if (approved) {
+    const q = logGet(approved);
+    approval = q?.type === 'question' ? LOG.questionView(q) : null;
+    if (!approval || !['answered', 'defaulted'].includes(approval.status)) die(`${approved} is not an answered question`);
+    if (approval.class !== cls) die(`${approved} was asked in class ${approval.class ?? '(none)'}, not ${cls}; it doesn't approve this`);
+    if (logObjects('act').some((a) => a.approved_by === approved)) die(`${approved} already approved an act; ask again for another`);
+  }
+  if ((auto.owner_only ?? []).includes(cls)) {
+    if (!approval || approval.status !== 'answered') die(`${cls} is the owner's (governance/autonomy.md §1); it needs an owner answer in that class (--approved <qid>)`);
+  } else if (auto.classes[cls]) {
     rung = rungFor(cls, scope);
-    if (approved) {
-      const q = logGet(approved);
-      const v = q?.type === 'question' ? LOG.questionView(q) : null;
-      if (!v || !['answered', 'defaulted'].includes(v.status)) die(`${approved} is not an answered question`);
-      if (v.status === 'defaulted' && rung < 2) die(`${cls} is on rung ${rung} (${RUNG_NAMES[rung]}); a defaulted answer is not approval at that rung`);
+    if (approval) {
+      if (approval.status === 'defaulted' && rung < 2) die(`${cls} is on rung ${rung} (${RUNG_NAMES[rung]}); a defaulted answer is not approval at that rung`);
     } else if (rung < 3) {
       // Refused: nothing is logged. Say what to ask instead.
       process.stderr.write(`devteam: ${cls}${scope ? ` (${scope})` : ''} is on rung ${rung} (${RUNG_NAMES[rung]}); ask first:\n  devteam.mjs ask --class ${cls} --question "<…>" --recommendation "<…>"${rung === 2 ? ' --default "<…>"' : ''} --reasons below-rung\nthen act with --approved <qid>.\n`);
@@ -2217,7 +2308,7 @@ function cmdCorrect() {
   if (act?.type !== 'act') die(`no act ${actId}`);
   const line = appendLog({ type: 'correction', act: actId, reason: flagStr('reason') ?? die('correct needs --reason'), severity: num('severity'), repair: flagStr('repair') ?? undefined }, by);
   const cls = act.class;
-  if (loadAutonomy().classes[cls]) process.stdout.write(`${cls}${act.scope ? ` (${act.scope})` : ''} drops to rung 1 (ask)\n`);
+  if (loadAutonomy().classes[cls]) process.stdout.write(`${cls} drops to rung 1 (ask)\n`);
   if (by === 'owner') safeNudge(supervisorTarget(), `[devteam correction ${line.id} from owner] on ${actId}; read it with: devteam.mjs log --id ${line.id}`);
   process.stdout.write(`${line.id}\n`);
 }
@@ -2265,7 +2356,8 @@ function featurePreconditions(feature) {
   return line.match(/\bg-\d{8}-\d{9}-[a-z0-9-]+#\d+\b/g) ?? [];
 }
 
-const goalReadings = (gid) => logObjects('observation').filter((o) => o.kind === 'reading' && o.subject === gid && o.measure).sort((a, b) => a.created_at.localeCompare(b.created_at));
+// Readings count only from the supervisor or the owner.
+const goalReadings = (gid) => logObjects('observation').filter((o) => o.kind === 'reading' && o.subject === gid && o.measure && ['supervisor', 'owner'].includes(o.created_by)).sort((a, b) => a.created_at.localeCompare(b.created_at));
 
 // Mechanical readiness. "definition" gates approval; "coverage" is what planning must close.
 function goalCheck(g) {
@@ -2356,6 +2448,7 @@ function cmdGoal() {
   if (sub === 'reading') {
     if (!id || logGet(id)?.type !== 'goal') die('usage: goal reading <g-id> --value n [--source s] [--detail d]');
     const by = flags.owner ? ownerWriter().by : logWriter();
+    if (!['supervisor', 'owner'].includes(by)) die('goal readings come from the supervisor or the owner; record what you see as an observation');
     const v = num('value');
     if (v === undefined || Number.isNaN(v)) die('goal reading needs --value <number>');
     appendLog({ type: 'observation', source: flagStr('source') ?? by, subject: id, kind: 'reading', detail: flagStr('detail') ?? `reading ${v}${logGet(id).measure?.unit ? ` ${logGet(id).measure.unit}` : ''}`, measure: { value: v, unit: logGet(id).measure?.unit }, refs: [id] }, by);
