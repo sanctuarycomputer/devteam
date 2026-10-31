@@ -13,7 +13,7 @@ Engineering governance and process for building software with a supervised fleet
 | A **worker** made for one ticket | [`process/worker.md`](process/worker.md) |
 | A **reviewer** asked to review a stage | [`governance/review.md`](governance/review.md) |
 | A **planner** turning an owner direction into a graph | [`process/planning.md`](process/planning.md) |
-| Folding in a new upstream devteam release (the supervisor checks on its loop) | [`process/upstream-sync.md`](process/upstream-sync.md) |
+| Improving the fleet, the roadmap and devteam itself (the supervisor, on its loop) | [`process/improvement.md`](process/improvement.md) |
 
 ## Vocabulary
 
@@ -50,6 +50,7 @@ docs/devteam/
     tickets/<id>/      spec.md, plan.md, reviews/, verification.md for each ticket
     reviews/<feature>/ design and graph review records
     decisions.md       cross-cutting rulings, dated
+    improvement/       metrics snapshots, research notes and improvement proposals
     upstream-log.md    upstream releases considered and what was adopted, adapted or skipped
   run/                 live runtime state (gitignored): owner questions, heartbeats, the event log (incl. messages)
 ```

@@ -9,8 +9,8 @@ How devteam gets materialized into a project repo, and how the first session get
 3. Create `docs/devteam/project/` from the templates:
    - `settings.md` from [`templates/settings.md`](../templates/settings.md)
    - `decisions.md` from [`templates/decisions.md`](../templates/decisions.md)
-   - `upstream-log.md` from [`templates/upstream-log.md`](../templates/upstream-log.md), with a first row recording the release tag you copied (this is the base for `upstream-sync.md`)
-   - empty `designs/`, `features/`, `graph/`, `tickets/`, `reviews/` folders (each with a `.gitkeep`)
+   - `upstream-log.md` from [`templates/upstream-log.md`](../templates/upstream-log.md), with a first row recording the release tag you copied (this is the base for upstream checks in `improvement.md` §3.4)
+   - empty `designs/`, `features/`, `graph/`, `tickets/`, `reviews/`, `improvement/proposals/`, `improvement/research/` folders (each with a `.gitkeep`)
 4. Create or update the repo root `AGENTS.md` from [`templates/AGENTS.md`](../templates/AGENTS.md). If an `AGENTS.md` exists, append the devteam section rather than replacing it. If a `CLAUDE.md` exists and is not already a symlink, add a line to it pointing at `AGENTS.md`; otherwise create `CLAUDE.md` as a symlink to `AGENTS.md`.
 5. Add `.worktrees/` to the root `.gitignore`.
 6. Add the CI jobs from [`templates/github/devteam.yml`](../templates/github/devteam.yml) (adapt to the project's CI if it is not GitHub Actions), and list `devteam-validate` and `merge-word` as required checks in the intended branch rules (`ci.md` §3).

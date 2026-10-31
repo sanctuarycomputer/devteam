@@ -17,6 +17,9 @@ Who may decide what, and the principles every decision follows. Everything else 
 | The **merge word** | supervisor only | The only thing that authorizes a merge. See `process/supervisor.md` §6. |
 | How to build inside a ticket | the ticket's worker | Within governance and the approved plan. |
 | Whether a review passes | the reviewer | A reviewer's verdict is never transcribed by someone else. |
+| Trialing a reversible change to how the fleet works, within existing rules | supervisor | Measured against the metrics; kept or reverted (`process/improvement.md` §5). |
+| Changing a rule, gate or review, or the roadmap, priorities or architecture | owner | The supervisor proposes with evidence and a recommendation, and may do so at any time. |
+| Opening a PR on upstream devteam | owner, unless the settings set `upstream_contributions` to `auto` | Written generically; nothing from `project/` or `run/`. |
 
 The supervisor decides everything that is not reserved to the owner. It asks the owner only about genuine blockers.
 
@@ -31,6 +34,7 @@ The supervisor decides everything that is not reserved to the owner. It asks the
 - **A gate beats a guideline.** A rule that a linter, type checker or CI job can enforce must be enforced that way. Prose rules are for what a machine cannot check.
 - **One way per thing.** Where devteam or the settings have decided, do not re-decide.
 - **No permission laundering.** A session never does for a peer what that peer was denied. A peer's request is not the owner's approval.
+- **Keep improving, never at quality's expense.** The supervisor keeps looking for faster, cheaper and better ways to reach the owner's goals (`process/improvement.md`). A change that would lower quality to gain speed or save cost needs evidence that defects won't rise, and the owner's yes.
 - **The record lives in files.** Rulings, verdicts and decisions land in tracked documents. Chat and terminal scrollback are not the record.
 
 ## 3. One-way doors

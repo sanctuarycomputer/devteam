@@ -40,7 +40,8 @@
         "recovery",
         "defect.escaped",
         "cost",
-        "message"
+        "message",
+        "improvement"
       ]
     },
     "actor": {

@@ -12,11 +12,11 @@ Point an agent at this repo and say:
 
 > Materialize devteam into this repo following `docs/devteam/process/bootstrap.md` from github.com/sanctuarycomputer/devteam.
 
-## Upgrade a project
+## How projects improve, and improve devteam
 
-A project's supervisor checks for new releases on its own loop and asks the owner which changes to take (`docs/devteam/process/upstream-sync.md`). To do it by hand:
+A project's supervisor runs a self-improvement loop (`docs/devteam/process/improvement.md`): it measures the fleet, runs retros, researches changing code-generation practice and the wider landscape, reassesses the architecture, and proposes roadmap changes to the owner. Part of that loop is checking devteam's releases and asking the owner which changes to take.
 
-> Check for new devteam releases and fold them in following `docs/devteam/process/upstream-sync.md`.
+The loop also runs the other way. When a project finds a general-purpose improvement to devteam itself, its supervisor opens a PR here (with the owner's OK by default), written generically, with the evidence.
 
 ## Contributing upstream
 

@@ -81,7 +81,7 @@ const EVENT_TYPES = [
   'question.asked', 'question.answered', 'question.defaulted',
   'review.verdict', 'word.stage', 'word.merge', 'approve.spec', 'approve.plan', 'approve.design-change',
   'ruling', 'gate.result', 'slot.granted', 'slot.released',
-  'replan', 'recovery', 'defect.escaped', 'cost', 'message',
+  'replan', 'recovery', 'defect.escaped', 'cost', 'message', 'improvement',
 ];
 const CHORES_FEATURE = 'chores'; // reserved feature for chore and spike tickets that belong to no feature plan
 
@@ -115,6 +115,10 @@ const SETTINGS_DEFAULTS = {
   worker_denied_commands: ['gh pr merge', 'git push origin main', 'git push origin HEAD:main'],
   upstream_repo: 'sanctuarycomputer/devteam',
   upstream_check_hours: 24,
+  upstream_contributions: 'ask',
+  retro_every_days: 7,
+  research_every_days: 7,
+  improvement_budget_usd_per_week: null,
 };
 
 let settingsCache;
@@ -1239,6 +1243,88 @@ function cmdNotes() {
   if (chores.length) process.stdout.write(`\n## Other\n\n${chores.map((id) => `- ${id}: ${tickets.get(id).title}`).join('\n')}\n`);
 }
 
+// ---------- metrics (process/improvement.md §2) ----------
+
+const median = (xs) => {
+  if (!xs.length) return null;
+  const a = [...xs].sort((x, y) => x - y);
+  const m = Math.floor(a.length / 2);
+  return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
+};
+const hours = (ms) => (ms === null ? null : +(ms / 3600000).toFixed(1));
+
+function cmdMetrics() {
+  const since = flagStr('since') ? Date.parse(flagStr('since')) : 0;
+  if (Number.isNaN(since)) die('--since must be a date, e.g. 2026-10-01');
+  const { tickets } = loadGraph();
+  const events = readEvents().filter((e) => Date.parse(e.ts) >= since);
+
+  // Cycle time: first worker.made for a ticket -> its merge commit's time.
+  const started = new Map();
+  for (const e of events) if (e.type === 'worker.made' && e.ticket && !started.has(e.ticket)) started.set(e.ticket, Date.parse(e.ts));
+  const cycles = [];
+  let costSum = 0;
+  let costCount = 0;
+  for (const id of tickets.keys()) {
+    const sha = mergeShaFor(id);
+    if (!sha) continue;
+    const mergedAt = Date.parse(git(['show', '-s', '--format=%cI', sha]) ?? '');
+    if (Number.isNaN(mergedAt) || mergedAt < since) continue;
+    if (started.has(id)) cycles.push({ id, ms: mergedAt - started.get(id) });
+    const usd = readRunTicket(id)?.cost?.usd;
+    if (typeof usd === 'number') {
+      costSum += usd;
+      costCount++;
+    }
+  }
+  cycles.sort((a, b) => b.ms - a.ms);
+
+  // Time in each phase, from consecutive ticket.phase events ("<prev> -> <next>").
+  const phaseMs = {};
+  const byTicket = new Map();
+  for (const e of events) if (e.type === 'ticket.phase' && e.ticket) (byTicket.get(e.ticket) ?? byTicket.set(e.ticket, []).get(e.ticket)).push(e);
+  for (const evs of byTicket.values()) {
+    for (let i = 0; i < evs.length - 1; i++) {
+      const phase = evs[i].summary?.match(/-> ([a-z-]+)/)?.[1];
+      if (phase) phaseMs[phase] = (phaseMs[phase] ?? 0) + (Date.parse(evs[i + 1].ts) - Date.parse(evs[i].ts));
+    }
+  }
+
+  // Coordination: reply time for messages that expect one; owner question answer time.
+  const msgs = events.filter((e) => e.type === 'message');
+  const replies = new Map();
+  for (const m of msgs) if (m.re && !replies.has(m.re)) replies.set(m.re, Date.parse(m.ts));
+  const expecting = msgs.filter((m) => m.kind !== 'info' && m.kind !== 'ruling' && m.kind !== 'answer');
+  const msgWaits = expecting.filter((m) => replies.has(m.id)).map((m) => replies.get(m.id) - Date.parse(m.ts));
+  const qs = readQuestions().filter((q) => Date.parse(q.asked_at) >= since);
+  const qWaits = qs.filter((q) => q.answered_at).map((q) => Date.parse(q.answered_at) - Date.parse(q.asked_at));
+  const openQs = qs.filter((q) => q.status === 'open');
+
+  const out = {
+    since: since ? new Date(since).toISOString() : null,
+    tickets_merged: cycles.length,
+    cycle_hours: { median: hours(median(cycles.map((c) => c.ms))), slowest: cycles.slice(0, 3).map((c) => ({ id: c.id, hours: hours(c.ms) })) },
+    phase_hours_total: Object.fromEntries(Object.entries(phaseMs).sort((a, b) => b[1] - a[1]).map(([k, v]) => [k, hours(v)])),
+    reviews: reviewStats(tickets),
+    messages: { expecting_reply: expecting.length, still_open: expecting.filter((m) => !replies.has(m.id)).length, median_reply_minutes: msgWaits.length ? +(median(msgWaits) / 60000).toFixed(1) : null },
+    owner_questions: { asked: qs.length, open: openQs.length, median_answer_hours: hours(median(qWaits)), oldest_open_hours: openQs.length ? hours(Date.now() - Math.min(...openQs.map((q) => Date.parse(q.asked_at)))) : null },
+    cost: { usd_per_merged_ticket: costCount ? +(costSum / costCount).toFixed(2) : null, tickets_with_cost: costCount },
+    escaped_defects: events.filter((e) => e.type === 'defect.escaped').length,
+  };
+  if (flags.json) return void process.stdout.write(`${JSON.stringify(out, null, 2)}\n`);
+  const lines = [
+    `since: ${out.since ?? 'the beginning'}`,
+    `tickets merged: ${out.tickets_merged}; median cycle ${out.cycle_hours.median ?? '-'}h; slowest ${out.cycle_hours.slowest.map((c) => `${c.id} ${c.hours}h`).join(', ') || '-'}`,
+    `time by phase (h): ${Object.entries(out.phase_hours_total).map(([k, v]) => `${k} ${v}`).join(', ') || '-'}`,
+    `first-pass rejection: ${Object.entries(out.reviews.by_stage).map(([k, v]) => `${k} ${v.rejected}/${v.first_passes}`).join(', ') || '-'}; false positives ${out.reviews.false_positive_rate ?? '-'}`,
+    `messages: ${out.messages.still_open} of ${out.messages.expecting_reply} awaiting reply; median reply ${out.messages.median_reply_minutes ?? '-'} min`,
+    `owner questions: ${out.owner_questions.open} open of ${out.owner_questions.asked}; median answer ${out.owner_questions.median_answer_hours ?? '-'}h; oldest open ${out.owner_questions.oldest_open_hours ?? '-'}h`,
+    `cost per merged ticket: ${out.cost.usd_per_merged_ticket === null ? '- (no cost reported)' : `$${out.cost.usd_per_merged_ticket}`}`,
+    `escaped defects: ${out.escaped_defects}`,
+  ];
+  process.stdout.write(`${lines.join('\n')}\n`);
+}
+
 const HELP = `devteam <command>   (put positional arguments before flags)
 
 Graph and status
@@ -1268,6 +1354,9 @@ Run state and history
   event --type t [--ticket id] [--sha s] [--summary s] [--ref r]
   history [<id>] [--tail n]       events and answered questions, to catch up on history
 
+Improvement (process/improvement.md)
+  metrics [--since date] [--json] cycle time, phase time, review, coordination, cost and defect numbers
+
 Other
   notes <from-tag> [<to>]         story-grouped release notes
   whoami                          derived DEVTEAM_* environment
@@ -1294,6 +1383,7 @@ const COMMANDS = {
   event: cmdEvent,
   history: cmdHistory,
   notes: cmdNotes,
+  metrics: cmdMetrics,
   whoami: cmdWhoami,
   settings: cmdSettings,
 };
