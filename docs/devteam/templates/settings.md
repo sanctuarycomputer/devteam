@@ -1,6 +1,6 @@
-# Project binding
+# Project settings
 
-This project's answers to every decision devteam leaves open. Doctrine states the rule; this file states the assignment. Each answer carries a date. Change an answer by editing it here, with a line in `decisions.md`.
+This project's answers to every decision devteam leaves open. devteam states the rule; this file states how it applies here. Each answer carries a date. Change an answer by editing it here, with a line in `decisions.md`.
 
 ## 1. Machine-readable settings
 
@@ -87,9 +87,9 @@ What the supervisor checks on every contract stage (`ticket-lifecycle.md` §3):
 - removal or narrowing is listed as a one-way door;
 - a fake or stub that consumers can build against ships in the same commit.
 
-## 9. Commissioning table (`ci.md` §8)
+## 9. Gate table (`ci.md` §8)
 
-| Law / gate | `quality-gates.md` row | CI step | Commissioned by | Mode |
+| Law / gate | `quality-gates.md` row | CI step | Turned on by | Mode |
 |---|---|---|---|---|
 | | | | | enforced / ratchet |
 

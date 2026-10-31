@@ -73,10 +73,10 @@ const writeJson = (p, obj) => {
 // ---------- enums (mirror schema/*.schema.json) ----------
 
 const TICKET_KINDS = ['contract', 'build', 'integration', 'chore', 'spike'];
-const PHASES = ['spawned', 'spec', 'plan', 'contract', 'build', 'verify', 'final-review', 'awaiting-word', 'merging', 'done', 'blocked', 'parked'];
+const PHASES = ['starting', 'spec', 'plan', 'contract', 'build', 'verify', 'final-review', 'awaiting-word', 'merging', 'done', 'blocked', 'parked'];
 const QUESTION_KINDS = ['design-change', 'merge-request', 'review-request', 'slot-request', 'blocked', 'owner-decision', 'one-way-door', 'clarification'];
 const EVENT_TYPES = [
-  'ticket.spawned', 'ticket.phase', 'ticket.blocked', 'ticket.parked', 'ticket.merged', 'ticket.released',
+  'worker.made', 'ticket.phase', 'ticket.blocked', 'ticket.parked', 'ticket.merged', 'ticket.released',
   'question.asked', 'question.answered', 'question.defaulted',
   'review.verdict', 'word.stage', 'word.merge', 'approve.spec', 'approve.plan', 'approve.design-change',
   'ruling', 'gate.result', 'slot.granted', 'slot.released',
@@ -95,9 +95,9 @@ const runDir = path.resolve(process.env.DEVTEAM_RUN ?? path.join(mainRoot, 'docs
 const projectRel = path.relative(repoRoot, projectDir).split(path.sep).join('/');
 const projectInRepo = !!commonDir && projectRel !== '' && !projectRel.startsWith('..') && !path.isAbsolute(projectRel);
 
-// ---------- binding ----------
+// ---------- settings ----------
 
-const BINDING_DEFAULTS = {
+const SETTINGS_DEFAULTS = {
   tmux_session: 'devteam',
   agent_command: 'claude --dangerously-skip-permissions',
   resume_command: 'claude --continue --dangerously-skip-permissions',
@@ -116,17 +116,17 @@ const BINDING_DEFAULTS = {
   upstream_check_hours: 24,
 };
 
-let bindingCache;
-function loadBinding() {
-  if (bindingCache) return bindingCache;
-  const p = path.join(projectDir, 'binding.md');
-  if (!fs.existsSync(p)) return (bindingCache = { ...BINDING_DEFAULTS });
+let settingsCache;
+function loadSettings() {
+  if (settingsCache) return settingsCache;
+  const p = path.join(projectDir, 'settings.md');
+  if (!fs.existsSync(p)) return (settingsCache = { ...SETTINGS_DEFAULTS });
   const m = fs.readFileSync(p, 'utf8').match(/```json devteam\s*\n([\s\S]*?)\n```/);
-  if (!m) return (bindingCache = { ...BINDING_DEFAULTS });
+  if (!m) return (settingsCache = { ...SETTINGS_DEFAULTS });
   try {
-    return (bindingCache = { ...BINDING_DEFAULTS, ...JSON.parse(m[1]) });
+    return (settingsCache = { ...SETTINGS_DEFAULTS, ...JSON.parse(m[1]) });
   } catch (e) {
-    die(`binding.md settings block is not valid JSON: ${e.message}`);
+    die(`settings.md settings block is not valid JSON: ${e.message}`);
   }
 }
 
@@ -326,7 +326,7 @@ function globsOverlap(a, b) {
 let mainRefCache;
 function mainRef() {
   if (mainRefCache !== undefined) return mainRefCache;
-  const b = loadBinding().main_branch;
+  const b = loadSettings().main_branch;
   for (const r of [`origin/${b}`, b]) {
     if (resolveCommit(r)) return (mainRefCache = r);
   }
@@ -443,8 +443,8 @@ function reviewRecordsIn(src, relDir) {
 const ticketReviews = (id, src) => reviewRecordsIn(src, `tickets/${id}/reviews`);
 const featureReviews = (feature) => reviewRecordsIn(WORKTREE, `reviews/${feature}`);
 
-// The latest record (highest pass) in each lineage (variant letter) for one stage.
-function latestPerLineage(records, stage) {
+// The latest record (highest pass) in each track (variant letter) for one stage.
+function latestPerTrack(records, stage) {
   const latest = new Map();
   for (const r of records.filter((x) => x.stage === stage)) {
     const prev = latest.get(r.variant);
@@ -553,7 +553,7 @@ function currentActor() {
   return 'supervisor';
 }
 
-const supervisorTarget = () => process.env.DEVTEAM_SUPERVISOR ?? `${loadBinding().tmux_session}:0`;
+const supervisorTarget = () => process.env.DEVTEAM_SUPERVISOR ?? `${loadSettings().tmux_session}:0`;
 
 // ---------- derived status ----------
 
@@ -699,7 +699,7 @@ function cmdValidate() {
         if (r.verdict && !r.shaValid) errors.push(`project/reviews/${col}/${r.file}: verdict SHA must be the full 40-character commit SHA`);
       }
       for (const stage of ['design', 'graph']) {
-        const latest = latestPerLineage(reviews, stage);
+        const latest = latestPerTrack(reviews, stage);
         if (!latest.length) errors.push(`feature "${col}" is approved but has no ${stage} review in project/reviews/${col}/ (planning.md P2, P5)`);
         else if (latest.some((r) => r.verdict !== 'APPROVE')) errors.push(`feature "${col}" is approved but its latest ${stage} review is not APPROVE`);
       }
@@ -754,9 +754,9 @@ function cmdReady() {
   for (const n of tickets.values()) {
     if (!isActive(n) || merged.get(n.id) || activeWorker(n.id)) continue;
     const depsMerged = (n.depends_on ?? []).every((d) => merged.get(d));
-    if (depsMerged || flags['spec-ahead']) rows.push({ id: n.id, component: n.component, kind: n.kind, size: n.size, risk: n.risk, mode: depsMerged ? 'build' : 'spec-ahead' });
+    if (depsMerged || flags['plan-ahead']) rows.push({ id: n.id, component: n.component, kind: n.kind, size: n.size, risk: n.risk, mode: depsMerged ? 'build' : 'plan-ahead' });
   }
-  const b = loadBinding();
+  const b = loadSettings();
   const active = [...tickets.keys()].filter(activeWorker);
   const perComponent = {};
   for (const id of active) perComponent[tickets.get(id).component] = (perComponent[tickets.get(id).component] ?? 0) + 1;
@@ -800,7 +800,7 @@ function cmdStatus() {
   if (flags.json) {
     return void process.stdout.write(`${JSON.stringify({ generated_at: nowIso(), tickets: rows, reviews: reviewStats(tickets) }, null, 2)}\n`);
   }
-  const stale = loadBinding().stale_after_minutes;
+  const stale = loadSettings().stale_after_minutes;
   for (const r of rows) {
     const isStale = r.heartbeat_minutes > stale && !['done', 'parked'].includes(r.phase);
     const live = r.phase ? `  [${r.phase}${r.task ? ` ${r.task}` : ''}, ${r.heartbeat_minutes}m${isStale ? ' STALE' : ''}]` : '';
@@ -845,7 +845,7 @@ function checkTicket(id, { sha: shaArg, title, body }) {
     if (rows < (n.done_when ?? []).length) fails.push(`verification.md has ${Math.max(rows, 0)} result row(s) for ${n.done_when.length} done-when(s)`);
   }
 
-  // Reviews: every final lineage that reviewed this head must end in APPROVE; enough distinct
+  // Reviews: every final track that reviewed this head must end in APPROVE; enough distinct
   // reviewers must have approved it; verdicts carry full SHAs and a named reviewer.
   const reviews = ticketReviews(id, src);
   for (const r of reviews) {
@@ -870,7 +870,7 @@ function checkTicket(id, { sha: shaArg, title, body }) {
     });
   };
   const finalsAtHead = reviews.filter((r) => r.stage === 'final' && holdsAt(r.sha));
-  const latest = latestPerLineage(finalsAtHead, 'final');
+  const latest = latestPerTrack(finalsAtHead, 'final');
   if (!reviews.some((r) => r.stage === 'final')) fails.push('no final review record (reviews/final-<n>.md)');
   else if (!latest.length) fails.push(`no final review holds at this head (${sha}): a verdict holds only at its own commit, or at a later head whose only changes are newly added review records (review.md §1)`);
   for (const r of latest) if (r.verdict === 'CHANGES') fails.push(`${r.file}: latest final review at this head says CHANGES`);
@@ -883,7 +883,7 @@ function checkTicket(id, { sha: shaArg, title, body }) {
 
   // Footprint: every changed file is inside touches or the ticket's own folder (worker.md §3).
   const base = mainRef() && sha ? git(['merge-base', mainRef(), sha]) : null;
-  if (commonDir && !base) fails.push(`cannot resolve main branch "${loadBinding().main_branch}" (or its merge base); footprint not checked`);
+  if (commonDir && !base) fails.push(`cannot resolve main branch "${loadSettings().main_branch}" (or its merge base); footprint not checked`);
   if (base) {
     const changed = (git(['diff', '--name-only', base, sha]) ?? '').split('\n').filter(Boolean);
     const own = projectInRepo ? `${projectRel}/tickets/${id}/` : null;
@@ -921,19 +921,19 @@ function cmdCheckTicket() {
   report(checkTicket(id, { sha, title: flagStr('title'), body: readBody() }), `${id} meets the definition of done at ${(resolveCommit(sha ?? 'HEAD') ?? '').slice(0, 12)}`);
 }
 
-// The mechanical half of the merge word, run in CI as the required `merge-word` check (ci.md §3).
+// The automatic half of the merge word, run in CI as the required `merge-word` check (ci.md §3).
 function cmdCheckPr() {
   const headRef = flagStr('head-ref') ?? die('check-pr needs --head-ref');
   const title = flagStr('title') ?? die('check-pr needs --title');
   const body = readBody() ?? die('check-pr needs --body-file');
   if (headRef.startsWith('ticket/')) {
-    return report(checkTicket(headRef.slice('ticket/'.length), { sha: flagStr('sha'), title, body }), `${headRef} passes the mechanical merge-word checks`);
+    return report(checkTicket(headRef.slice('ticket/'.length), { sha: flagStr('sha'), title, body }), `${headRef} passes the automatic merge-word checks`);
   }
   const fails = [];
   if (!/^chore-[a-z0-9]+(-[a-z0-9]+)*: \S/.test(title)) fails.push('a PR that is not from a ticket/<id> branch must be titled "chore-<slug>: <summary>"');
   const owd = oneWayDoorsSection(body);
   if (!owd.ok) fails.push(owd.why);
-  report(fails, `${headRef} passes the mechanical merge-word checks`);
+  report(fails, `${headRef} passes the automatic merge-word checks`);
 }
 
 function questionId(from) {
@@ -987,7 +987,7 @@ function askerTarget(q) {
   if (q.session) return q.session;
   if (q.from === 'supervisor') return supervisorTarget();
   if (q.from === 'planner') return null;
-  return `${loadBinding().tmux_session}:${q.from}`;
+  return `${loadSettings().tmux_session}:${q.from}`;
 }
 
 function cmdAnswer() {
@@ -1079,7 +1079,7 @@ function cmdHeartbeat() {
   const next = { ...prev, id, heartbeat_at: nowIso() };
   const session = tmuxHere() ?? prev.session;
   if (!supervisor) {
-    next.phase = phase ?? prev.phase ?? 'spawned';
+    next.phase = phase ?? prev.phase ?? 'starting';
     next.worktree = repoRoot;
     next.branch = git(['rev-parse', '--abbrev-ref', 'HEAD']) ?? prev.branch;
     next.head_sha = git(['rev-parse', 'HEAD']) ?? prev.head_sha ?? null;
@@ -1138,7 +1138,7 @@ function cmdHistory() {
 
 function cmdWhoami() {
   const id = currentTicketId();
-  const b = loadBinding();
+  const b = loadSettings();
   process.stdout.write(
     [
       `DEVTEAM_TICKET=${id ?? ''}`,
@@ -1150,8 +1150,8 @@ function cmdWhoami() {
   );
 }
 
-function cmdBinding() {
-  const b = loadBinding();
+function cmdSettings() {
+  const b = loadSettings();
   const key = flagStr('get');
   if (key) {
     const v = b[key];
@@ -1195,13 +1195,13 @@ const HELP = `devteam <command>   (put positional arguments before flags)
 
 Graph and status
   validate                        check the graph against planning.md rules (CI gate)
-  ready [--spec-ahead] [--json]   tickets that can start now
+  ready [--plan-ahead] [--json]   tickets that can start now
   waves [--feature c] [--json]     parallel waves and the critical path
-  status [--json]                 derived stage of every ticket, live phase, review stats
+  status [--json]                 computed stage of every ticket, live phase, review stats
 
 Gates
   check-ticket <id> [--sha s] [--title t] [--body-file f]   definition of done at an exact head
-  check-pr --head-ref r --title t --body-file f [--sha s]  mechanical merge-word check (CI)
+  check-pr --head-ref r --title t --body-file f [--sha s]  automatic merge-word check (CI)
 
 Questions
   ask --question q [--kind k] [--ticket id] [--options a b] [--recommendation r]
@@ -1214,12 +1214,12 @@ Questions
 Run state and history
   heartbeat [--phase p] [--task t] [--note n] [--usd x --in n --out n --cost-source s] [--supervisor]
   event --type t [--ticket id] [--sha s] [--summary s] [--ref r]
-  history [<id>] [--tail n]       events and answered questions, for orientation
+  history [<id>] [--tail n]       events and answered questions, to catch up on history
 
 Other
   notes <from-tag> [<to>]         story-grouped release notes
   whoami                          derived DEVTEAM_* environment
-  binding [--get key]             the project's machine-readable settings
+  settings [--get key]             the project's machine-readable settings
 
 Global: --project <dir> overrides docs/devteam/project.
 `;
@@ -1241,7 +1241,7 @@ const COMMANDS = {
   history: cmdHistory,
   notes: cmdNotes,
   whoami: cmdWhoami,
-  binding: cmdBinding,
+  settings: cmdSettings,
 };
 
 if (!command || command === 'help' || command === '--help') process.stdout.write(HELP);

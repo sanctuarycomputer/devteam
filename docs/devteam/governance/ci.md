@@ -25,21 +25,21 @@ main             → push CI (never cancelled) + build/publish
 - **Path-filtered per component** in a monorepo: each component's job runs only when its files, its build file, the CI config, or shared contracts change. Adding a component is one job, one filter, one `needs` entry, one line in `check`.
 - **Two devteam jobs always run** (template: [`../templates/github/devteam.yml`](../templates/github/devteam.yml)): `devteam-validate` runs `devteam.mjs validate`; `merge-word` runs `devteam.mjs check-pr` on every PR (§3).
 - **Concurrency:** a PR's in-flight run is cancelled by a new push; **a push to `main` is never cancelled** (`cancel-in-progress: ${{ github.event_name == 'pull_request' }}`).
-- **Migrations:** a PR that adds a migration must also update the binding's rollback-safety flag in the same diff (see `release.md` §4).
+- **Migrations:** a PR that adds a migration must also update the rollback-safety flag named in the settings in the same diff (see `release.md` §4).
 - **Pins:** runtime versions, package-manager versions and third-party action SHAs are pinned. Version drift between components is a defect.
 
 ## 3. Merge safety: two layers, both required
 
-**The mechanical layer (what GitHub must refuse):**
+**The automatic layer (what GitHub must refuse):**
 - pushes to `main` only through a PR; no force-push, no deletion, no bypass actor;
 - required check `check` with **strict = true** (the head must be up to date with base);
-- required checks **`devteam-validate`** and **`merge-word`**, rather than a GitHub approval. Fleets usually run under one shared identity, so GitHub's own review approvals cannot prove non-author independence. `merge-word` runs `devteam.mjs check-pr`, which mechanizes the checkable half of the merge word:
-  - for a `ticket/<id>` branch, `check-ticket` at the PR's exact head: approved spec and plan, verification rows for every done-when, the latest final review in every lineage saying `APPROVE` at a commit that holds at the head (at its own commit, or at a later head whose only changes are newly added review records; `review.md` §1), from enough named reviewers (two for `risk: high`), every Critical and Important finding dispositioned, and no changed file outside the ticket's `touches` (plus its own ticket folder);
+- required checks **`devteam-validate`** and **`merge-word`**, rather than a GitHub approval. Fleets usually run under one shared identity, so GitHub's own review approvals cannot prove non-author independence. `merge-word` runs `devteam.mjs check-pr`, which automates the half that a machine can check of the merge word:
+  - for a `ticket/<id>` branch, `check-ticket` at the PR's exact head: approved spec and plan, verification rows for every done-when, the latest final review in every track saying `APPROVE` at a commit that holds at the head (at its own commit, or at a later head whose only changes are newly added review records; `review.md` §1), from enough named reviewers (two for `risk: high`), every Critical and Important finding dispositioned, and no changed file outside the ticket's `touches` (plus its own ticket folder);
   - for any other branch, a title matching `^chore-<slug>: `;
   - for both, a PR title `<ticket-id>: …` or `chore-<slug>: …`, and a `## One-way doors` section in the body that is `None.` or links the owner's answer (a question id or URL). A ticket that lists one-way doors cannot say `None.`;
-- one merge method, chosen in the binding (merge commit is the default, so ticket branches stay legible in history).
+- one merge method, chosen in the settings (merge commit is the default, so ticket branches stay legible in history).
 
-**What no check can prove under one identity** is that the supervisor actually gave the word. So the rule is structural: **only the supervisor merges.** Workers ask for the word; the supervisor verifies and merges itself (`supervisor.md` §6). Where the agent CLI supports permission rules, deny workers `gh pr merge` and any push to `main` (the binding's `worker_denied_commands`), so a confused worker cannot merge even by mistake.
+**What no check can prove under one identity** is that the supervisor actually gave the word. So the rule is structural: **only the supervisor merges.** Workers ask for the word; the supervisor verifies and merges itself (`supervisor.md` §6). Where the agent CLI supports permission rules, deny workers `gh pr merge` and any push to `main` (`worker_denied_commands` in the settings), so a confused worker cannot merge even by mistake.
 
 Check the intended branch rules in as `.github/branch-rules.json` and run a scheduled workflow that diffs it against the live configuration, so drift becomes a red run rather than a surprise.
 
@@ -55,7 +55,7 @@ If `strict` is off, GitHub reports a mergeable state even when the head is behin
 
 ## 5. Supply chain
 
-- Automated dependency updates on a cadence, grouped; majors held for review; security advisories override.
+- Automated dependency updates on a schedule, grouped; majors held for review; security advisories override.
 - A **dependency cooldown** (`L-SEC-6`): a minimum release age per ecosystem (7 days default), advisories override.
 - SHA-pinned actions, plus a workflow linter (`zizmor` or equivalent).
 - Secret scanning and frozen-lockfile install are required gates.
@@ -70,6 +70,6 @@ If `strict` is off, GitHub reports a mergeable state even when the head is behin
 
 A PR that edits a workflow, branch rules, or a release key's usage is `risk: high`: two independent reviews, and the workflow linter must pass. Release secrets are referenced exactly once in workflow files.
 
-## 8. Commissioning
+## 8. Turning gates on
 
-The binding's **commissioning table** maps each Law to the gate row in `quality-gates.md`, the CI step that runs it, and the ticket or chore that commissioned it. A Law with no row there is Doctrine, not a gate. Bootstrap fills the day-one rows; each later commissioning is its own `chore-` PR.
+The **gate table** in the settings maps each Law to the gate row in `quality-gates.md`, the CI step that runs it, and the ticket or chore that turned it on. A Law with no row there is Doctrine, not a gate. Bootstrap fills the day-one rows; each later commissioning is its own `chore-` PR.

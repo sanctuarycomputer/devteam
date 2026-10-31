@@ -9,7 +9,7 @@
   "properties": {
     "ts": { "type": "string", "format": "date-time" },
     "type": { "enum": [
-      "ticket.spawned", "ticket.phase", "ticket.blocked", "ticket.parked", "ticket.merged", "ticket.released",
+      "worker.made", "ticket.phase", "ticket.blocked", "ticket.parked", "ticket.merged", "ticket.released",
       "question.asked", "question.answered", "question.defaulted",
       "review.verdict", "word.stage", "word.merge", "approve.spec", "approve.plan", "approve.design-change",
       "ruling", "gate.result", "slot.granted", "slot.released",

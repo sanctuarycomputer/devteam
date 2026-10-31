@@ -24,7 +24,7 @@ Changes land on `main` through PRs. A release is a `vX.Y.Z` tag on `main` with a
 
 - **What** changed, by file or area;
 - **Why**, the reason a project would want it (a change without a why gets skipped);
-- **Migration**, anything a project must do, such as a new binding field or a renamed flag. "None" if nothing.
+- **Migration**, anything a project must do, such as a new settings field or a renamed flag. "None" if nothing.
 
 ```
 gh release create vX.Y.Z --target main --title vX.Y.Z --notes-file notes.md

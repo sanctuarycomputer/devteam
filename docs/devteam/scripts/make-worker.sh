@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
-# Spawn a worker for one ticket: git worktree on ticket/<id>, a tmux window named <id>,
-# the DEVTEAM_* environment, and the agent CLI from the binding.
+# Make a worker for one ticket: git worktree on ticket/<id>, a tmux window named <id>,
+# the DEVTEAM_* environment, and the agent CLI from the settings.
 #
-#   spawn-ticket.sh <ticket-id> [--resume]     worker for a ticket (resume uses the binding's resume_command)
-#   spawn-ticket.sh --planner <feature>       planner on branch plan/<feature>
+#   make-worker.sh <ticket-id> [--resume]     worker for a ticket (resume uses resume_command from the settings)
+#   make-worker.sh --planner <feature>       planner on branch plan/<feature>
 #
 # Run from the main checkout. Requires git, tmux, node.
 set -euo pipefail
 
-die() { echo "spawn-ticket: $*" >&2; exit 1; }
+die() { echo "make-worker: $*" >&2; exit 1; }
 
 ROLE=worker
 RESUME=0
 if [[ "${1:-}" == "--planner" ]]; then
-  ROLE=planner; FEATURE="${2:-}"; [[ -n "$FEATURE" ]] || die "usage: spawn-ticket.sh --planner <feature>"
+  ROLE=planner; FEATURE="${2:-}"; [[ -n "$FEATURE" ]] || die "usage: make-worker.sh --planner <feature>"
   NAME="plan-$FEATURE"; BRANCH="plan/$FEATURE"
 else
-  TICKET="${1:-}"; [[ -n "$TICKET" ]] || die "usage: spawn-ticket.sh <ticket-id> [--resume]"
+  TICKET="${1:-}"; [[ -n "$TICKET" ]] || die "usage: make-worker.sh <ticket-id> [--resume]"
   [[ "${2:-}" == "--resume" ]] && RESUME=1
   NAME="$TICKET"; BRANCH="ticket/$TICKET"
 fi
@@ -31,10 +31,10 @@ cd "$MAIN_ROOT"
 DT="node docs/devteam/scripts/devteam.mjs"
 [[ "$ROLE" == planner ]] || [[ -f "docs/devteam/project/graph/$TICKET.json" ]] || die "no ticket $TICKET"
 
-SESSION="$($DT binding --get tmux_session)"
-MAIN="$($DT binding --get main_branch)"
-if [[ $RESUME == 1 ]]; then AGENT="$($DT binding --get resume_command)"; else AGENT="$($DT binding --get agent_command)"; fi
-[[ -n "$AGENT" ]] || die "binding has no agent_command"
+SESSION="$($DT settings --get tmux_session)"
+MAIN="$($DT settings --get main_branch)"
+if [[ $RESUME == 1 ]]; then AGENT="$($DT settings --get resume_command)"; else AGENT="$($DT settings --get agent_command)"; fi
+[[ -n "$AGENT" ]] || die "settings has no agent_command"
 
 RUN="$MAIN_ROOT/docs/devteam/run"
 WT="$MAIN_ROOT/.worktrees/$NAME"
@@ -74,11 +74,11 @@ tmux send-keys -t "$TARGET" -l "$ENVLINE"; tmux send-keys -t "$TARGET" Enter
 tmux send-keys -t "$TARGET" -l "$AGENT \"\$(cat '$PROMPT_FILE')\""; tmux send-keys -t "$TARGET" Enter
 
 if [[ "$ROLE" == worker ]]; then
-  # A fresh spawn records phase "spawned". A resume keeps the worker's last recorded phase,
+  # A fresh make records phase "starting". A resume keeps the worker's last recorded phase,
   # which the relaunched worker reads to re-orient (worker.md §2).
   if [[ $RESUME == 0 ]]; then
-    ( cd "$WT" && DEVTEAM_RUN="$RUN" DEVTEAM_TICKET="$TICKET" $DT heartbeat --phase spawned --note "spawned in $TARGET" >/dev/null )
+    ( cd "$WT" && DEVTEAM_RUN="$RUN" DEVTEAM_TICKET="$TICKET" $DT heartbeat --phase starting --note "started in $TARGET" >/dev/null )
   fi
-  ( cd "$WT" && DEVTEAM_RUN="$RUN" $DT event --type ticket.spawned --actor supervisor --ticket "$TICKET" --summary "worker in $TARGET, worktree .worktrees/$NAME$([[ $RESUME == 1 ]] && echo ' (resumed)')" >/dev/null )
+  ( cd "$WT" && DEVTEAM_RUN="$RUN" $DT event --type worker.made --actor supervisor --ticket "$TICKET" --summary "worker in $TARGET, worktree .worktrees/$NAME$([[ $RESUME == 1 ]] && echo ' (resumed)')" >/dev/null )
 fi
-echo "spawned $ROLE $NAME in $TARGET at $WT"
+echo "made $ROLE $NAME in $TARGET at $WT"

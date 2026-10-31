@@ -10,7 +10,7 @@ Engineering governance and process for building software with a supervised fleet
 |---|---|
 | Setting devteam up in a repo for the first time | [`process/bootstrap.md`](process/bootstrap.md) |
 | The **supervisor** (the one coordinating session) | [`process/supervisor.md`](process/supervisor.md) |
-| A **worker** spawned for one ticket | [`process/worker.md`](process/worker.md) |
+| A **worker** made for one ticket | [`process/worker.md`](process/worker.md) |
 | A **reviewer** asked to review a stage | [`governance/review.md`](governance/review.md) |
 | A **planner** turning an owner direction into a graph | [`process/planning.md`](process/planning.md) |
 | Folding in a new upstream devteam release (the supervisor checks on its loop) | [`process/upstream-sync.md`](process/upstream-sync.md) |
@@ -21,7 +21,7 @@ Engineering governance and process for building software with a supervised fleet
 - **supervisor**: one long-lived session acting as technical PM/CTO. Plans, rules, gives the merge word, writes no production code.
 - **worker**: one session bound to one ticket, in its own git worktree and tmux window. Decides for itself whether to use subagents inside its ticket.
 - **reviewer**: any session or subagent that did not author the work under review.
-- **binding**: a project-specific decision the doctrine leaves open (services, persistence tiers, release rings, agent command). Lives in `project/binding.md`.
+- **settings**: a project-specific answer to a question devteam leaves open (services, persistence tiers, release rings, agent command). Lives in `project/settings.md`.
 
 The work, from largest to smallest:
 
@@ -43,7 +43,7 @@ docs/devteam/
   schema/              JSON schemas for tickets, questions, events
   scripts/             zero-dependency tools (Node 20+, bash)
   project/             THIS project's content; created at bootstrap, never touched by upstream sync
-    binding.md         the project's answers to every open decision
+    settings.md         the project's answers to every open decision
     designs/           <slug>.md system designs (and baseline.md when adopting an existing codebase)
     features/          <feature>.md feature plans
     graph/             <ticket-id>.json, the work graph (tracked, written by planning)
@@ -54,13 +54,13 @@ docs/devteam/
   run/                 live runtime state (gitignored): questions, heartbeats, events
 ```
 
-**Governance vs process.** Governance states what must be true (code doctrine, gates, what counts as a review, CI and release policy). Process states how work moves (planning, the supervisor loop, the worker loop, the question inbox). When a process step and a governance rule seem to conflict, governance wins and the process doc is a bug.
+**Governance vs process.** Governance states what must be true (code rules, gates, what counts as a review, CI and release policy). Process states how work moves (planning, the supervisor loop, the worker loop, the question inbox). When a process step and a governance rule seem to conflict, governance wins and the process doc is a bug.
 
-## Precedence
+## Which rule wins
 
 1. The owner's explicit instruction.
 2. Enforcing configuration (lint, CI, branch protection). Where a doc and a config disagree, the config is the source of truth and the doc is a bug.
-3. `project/binding.md` (the project's resolved answers).
+3. `project/settings.md` (the project's resolved answers).
 4. `governance/`.
 5. `process/`.
 6. The framework's conventions.
@@ -77,10 +77,10 @@ git, tmux, Node 20+ (scripts use only built-ins), the GitHub CLI, one agent CLI 
 | Command | Who | What |
 |---|---|---|
 | `validate` | planner, CI | check the graph against the planning rules |
-| `waves`, `ready`, `status` | supervisor, planner | parallel waves and critical path; what can start; derived stage of every ticket |
-| `check-ticket <id>`, `check-pr` | worker, CI | definition of done and the mechanical merge-word check at an exact head |
+| `waves`, `ready`, `status` | supervisor, planner | parallel waves and critical path; what can start; computed stage of every ticket |
+| `check-ticket <id>`, `check-pr` | worker, CI | definition of done and the automatic merge-word check at an exact head |
 | `ask`, `answer`, `questions`, `sync-questions`, `recorded` | everyone | the question inbox |
-| `heartbeat`, `event`, `history`, `whoami` | worker, supervisor | live state, the event log, orientation |
-| `notes <from> [<to>]`, `binding` | supervisor | story-grouped release notes; the project's settings |
-| `bash docs/devteam/scripts/spawn-ticket.sh <id> [--resume]` | supervisor | worktree, tmux window and agent for a ticket (`--planner <feature>` for a planner) |
+| `heartbeat`, `event`, `history`, `whoami` | worker, supervisor | live state, the event log, catching up on history |
+| `notes <from> [<to>]`, `settings` | supervisor | story-grouped release notes; the project's settings |
+| `bash docs/devteam/scripts/make-worker.sh <id> [--resume]` | supervisor | worktree, tmux window and agent for a ticket (`--planner <feature>` for a planner) |
 | `bash docs/devteam/scripts/stop-hook.sh` | worker's agent | refuses to stop while the run state is stale |

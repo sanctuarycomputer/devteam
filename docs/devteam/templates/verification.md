@@ -8,7 +8,7 @@ At commit: <full sha>
 
 ## Deferred to beta
 
-Checks that cannot run in CI, with the binding's reason:
+Checks that cannot run in CI, and why:
 
 -
 

@@ -1,16 +1,16 @@
 # Upstream sync
 
-How a project keeps up with upstream devteam. The project owns its copy and has probably edited it, so folding in a release is a judgment, not a mechanical merge. The supervisor notices new releases on its own loop, asks the owner what to take through the question inbox, and lands the answer as a PR.
+How a project keeps up with upstream devteam. The project owns its copy and has probably edited it, so folding in a release is a judgment, not an automatic merge. The supervisor notices new releases on its own loop, asks the owner what to take through the question inbox, and lands the answer as a PR.
 
 ## 1. Where upstream lives
 
-- The binding's `upstream_repo` names the upstream repository (default `sanctuarycomputer/devteam`).
+- `upstream_repo` in the settings name the upstream repository (default `sanctuarycomputer/devteam`).
 - Upstream publishes **GitHub Releases** on tags `vX.Y.Z`. Each release's notes have three sections: **What** changed, **Why**, and **Migration** (what a project must do, if anything). The why is what a project judges against.
 - `project/upstream-log.md` records every upstream release this project has considered and what it decided. The newest release in the log is the project's **base**. Bootstrap writes the first row: the release it materialized from.
 
 ## 2. Checking for releases (supervisor loop)
 
-At most once every `upstream_check_hours` (binding; default 24), on a quiet tick:
+At most once every `upstream_check_hours` (settings; default 24), on a quiet tick:
 
 1. List releases newer than the base: `gh release list -R <upstream_repo>`.
 2. For each, oldest first, read its notes: `gh release view <tag> -R <upstream_repo>`.
@@ -30,7 +30,7 @@ Don't re-ask about a release that already has a question open or a row in the lo
    - **adapt** where the project edited the same region: keep the local intent, bring in the upstream improvement;
    - **skip** otherwise;
    - **removed upstream**: if the project relies on it, keep it locally and say so.
-4. Never touch `project/` or `run/`. If a change needs a binding field that doesn't exist, add it to `binding.md` with a placeholder and ask the owner to fill it.
+4. Never touch `project/` or `run/`. If a change needs a settings field that doesn't exist, add it to `settings.md` with a placeholder and ask the owner to fill it.
 5. Run `devteam.mjs validate`.
 6. Open one PR, `chore-devteam-sync-<tag>`, with the changes and one row per release in `project/upstream-log.md`: the tag, the outcome per change, and the question id. The PR is `risk: high` if it changes `governance/`: two independent reviews.
 

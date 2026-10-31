@@ -11,7 +11,7 @@ A Law is enforced only once its gate is commissioned: it needs a row in [`qualit
 - **Law** — must; stated so a linter/type-checker/CI gate enforces it. A rule that *can* be a gate *must* be a gate. Each carries an ID.
 - **Doctrine** — should; enforced by review judgment where a gate can't carry it.
 - **Binding** — the per-stack translation (Appendix B). **The binding is the resolved answer**: an agent follows its stack's binding and never has to resolve "doctrine vs framework convention" at runtime.
-- **Project binding** — the few per-project decisions: the persistence-tier assignment (§4), the "critical operation" list (§7), the retention windows and the PII-erasure mechanism (§11). This file states the *rule*; a project states its *assignments* in `project/binding.md`.
+- **Project settings** — the few per-project decisions: the persistence-tier assignment (§4), the "critical operation" list (§7), the retention windows and the PII-erasure mechanism (§11). This file states the *rule*; a project states its *assignments* in `project/settings.md`.
 
 Precedence when rules appear to conflict: the user's explicit instruction → this doctrine *as resolved by the stack binding* → the framework's convention → the builder's judgment. Because the binding resolves framework-specific cases ahead of time (e.g. framework control-flow throws, §3), precedence is rarely exercised live.
 
@@ -49,12 +49,12 @@ Build the conventional way the framework wants (MVC, convention over configurati
 
 Default to the simplest; escalate only with a stated reason (an ADR for Tier A).
 
-- **Tier C (default) — CRUD + audit columns + soft-aware delete.** `created_at`/`updated_at`/`created_by`. **`L-DATA-1` no hard delete without an erasure reason**; the mechanism (`deleted_at` column vs a `deleted_records` table) is a **project binding** (blanket `deleted_at` is contested — it burdens every query and breaks unique indexes; Brandur, "Soft Deletion Probably Isn't Worth It", 2022). Most data is Tier C.
+- **Tier C (default) — CRUD + audit columns + soft-aware delete.** `created_at`/`updated_at`/`created_by`. **`L-DATA-1` no hard delete without an erasure reason**; the mechanism (`deleted_at` column vs a `deleted_records` table) is a **project settings** (blanket `deleted_at` is contested — it burdens every query and breaks unique indexes; Brandur, "Soft Deletion Probably Isn't Worth It", 2022). Most data is Tier C.
 - **Tier B — append-only log + current-state projection.** For data whose history matters. **Permissions/authorization default here** (an append-only audit table satisfies nearly every regulator).
 - **Tier A (exception, ADR-gated) — event sourcing + projections.** Reserved for **money and legally-disputed records only**; any other domain needs an ADR to justify it ("event sourcing is not a top-level architecture" — Greg Young).
 - **`L-DATA-2` forward-only, rollback-safe migrations** — a non-rollback-safe migration is flagged as a one-way door and minimized.
 - **`L-DATA-3` event/row shapes are forever** — a shipped Tier A/B shape is never mutated; evolve by versioning + upcasting. (Shape is forever; *rows* live by the retention policy, §11 — no contradiction.)
-- **Project binding** — each domain's tier.
+- **Project settings** — each domain's tier.
 
 ## 5. State, consistency, time
 
@@ -76,7 +76,7 @@ Default to the simplest; escalate only with a stated reason (an ADR for Tier A).
 ## 7. Idempotency
 
 - **`L-IDEM-1` external side effects and money carry an idempotency key** end-to-end (the IETF `Idempotency-Key` header; Stripe's model), with a dedup store making a repeat a no-op returning the first result.
-- **State transitions use a conditional write** (optimistic lock, `UPDATE … WHERE status = 'pending'`) — no key plumbing — unless the **project binding** lists a specific transition as critical.
+- **State transitions use a conditional write** (optimistic lock, `UPDATE … WHERE status = 'pending'`) — no key plumbing — unless the **project settings** lists a specific transition as critical.
 - **`L-IDEM-2` event handlers are idempotent** (from §6 at-least-once).
 - **Retries (§8) are permitted only on idempotent calls.** An agent must not retry a non-idempotent POST.
 
@@ -109,9 +109,9 @@ Default to the simplest; escalate only with a stated reason (an ADR for Tier A).
 
 ## 11. PII & data lifecycle
 
-- **`L-PII-1` every PII field is annotated in a registry** (a single file naming each PII column/field; a gate checks completeness), **encrypted at rest, and erasable.** The erasure **mechanism is a project binding** — crypto-shredding (a per-subject key; destroying it erases the subject from every immutable log) or a vault+tokens. (Crypto-shred keeps framework auth idioms — Devise/NextAuth/`phx.gen.auth` — intact; a central vault is for regulated/multi-store PII, Appendix C.)
+- **`L-PII-1` every PII field is annotated in a registry** (a single file naming each PII column/field; a gate checks completeness), **encrypted at rest, and erasable.** The erasure **mechanism is a project settings** — crypto-shredding (a per-subject key; destroying it erases the subject from every immutable log) or a vault+tokens. (Crypto-shred keeps framework auth idioms — Devise/NextAuth/`phx.gen.auth` — intact; a central vault is for regulated/multi-store PII, Appendix C.)
 - **`L-PII-2` data minimization + purpose limitation** — collect the least PII needed; bind each datum to its purpose.
-- **`L-PII-3` retention/TTL** — immutable logs hold erasable-by-mechanism PII, so the log stays shape-immutable while PII is erased; the log itself carries a retention/compaction policy (**project binding** — the windows).
+- **`L-PII-3` retention/TTL** — immutable logs hold erasable-by-mechanism PII, so the log stays shape-immutable while PII is erased; the log itself carries a retention/compaction policy (**project settings** — the windows).
 
 ## 12. Testing
 
@@ -204,7 +204,7 @@ Doctrine (judgment; no gate): tier assignment, the critical-operation list, degr
 
 ## Appendix C — Filtered out / downgraded (impractical for standard end-user / SaaS / product / IoT; kept the pragmatic floor)
 
-- **Central PII vault + tokens** → crypto-shred or vault is a project binding; central vault only for *regulated / multi-store* PII.
+- **Central PII vault + tokens** → crypto-shred or vault is a project settings; central vault only for *regulated / multi-store* PII.
 - **mTLS between every service** → TLS-in-transit + short-lived creds; mTLS only where the threat model needs it.
 - **Full SLSA signed/attested/reproducible builds** → pin + lockfile + cooldown + vet + (CI-emitted) SBOM is the floor; attestation only for supply-chain targets / at scale.
 - **Hash-chained tamper-evident audit** → Tier-A / money / compliance only.

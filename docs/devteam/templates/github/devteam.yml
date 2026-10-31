@@ -32,7 +32,7 @@ jobs:
       - name: validate graph
         run: node docs/devteam/scripts/devteam.mjs validate
 
-  # The mechanical half of the merge word: reviews at the exact head, definition of done,
+  # The automatic half of the merge word: reviews at the exact head, definition of done,
   # footprint, PR title and the one-way-doors section. The supervisor's judgment is the other half.
   merge-word:
     if: github.event_name == 'pull_request'

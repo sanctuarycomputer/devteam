@@ -31,7 +31,7 @@ node docs/devteam/scripts/devteam.mjs ask \
 |---|---|---|
 | `design-change` | worker | a ruling; maybe a re-plan |
 | `merge-request` | worker, with `head_sha` | the merge word, or what is missing |
-| `review-request` | worker | which session will review, or "dispatch your own subagent" |
+| `review-request` | worker | which session will review, or "use your own subagent" |
 | `slot-request` | worker | a gate slot grant (`supervisor.md` §7) |
 | `blocked` | worker | an unblock, or `park` |
 | `clarification` | anyone | an answer |
@@ -43,7 +43,7 @@ node docs/devteam/scripts/devteam.mjs ask \
 - **One decision per question.** Two decisions are two questions.
 - **Lead with the decision**, then context. The answerer should be able to answer from the first line in most cases.
 - **Give options and a recommendation.** Never ask an open-ended "what should I do?".
-- **Set `default`** only when the choice is reversible. If the question is unanswered after the binding's `question_default_after_hours` (24 if unset), the supervisor applies it with `devteam.mjs answer <qid> "<default>" --defaulted`, which sets `status: defaulted` and logs it. One-way doors never have a default.
+- **Set `default`** only when the choice is reversible. If the question is unanswered after `question_default_after_hours` in the settings (24 if unset), the supervisor applies it with `devteam.mjs answer <qid> "<default>" --defaulted`, which sets `status: defaulted` and logs it. One-way doors never have a default.
 - **Fill `blocks`** with every ticket that cannot proceed. The inbox is ranked by it.
 
 ## 5. Ranking
@@ -63,4 +63,4 @@ The dashboard shows the same order.
 
 ## 7. Notifying the owner
 
-The supervisor sends the owner a push notification (by whatever channel the binding names) only when a new owner question appears that blocks work, or when something lands that the owner must act on now. One notification per state change, never one per sweep.
+The supervisor sends the owner a push notification (by whatever channel the settings name) only when a new owner question appears that blocks work, or when something lands that the owner must act on now. One notification per state change, never one per sweep.

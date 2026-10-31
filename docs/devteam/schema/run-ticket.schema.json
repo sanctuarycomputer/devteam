@@ -8,7 +8,7 @@
   "additionalProperties": false,
   "properties": {
     "id": { "type": "string" },
-    "phase": { "enum": ["spawned", "spec", "plan", "contract", "build", "verify", "final-review", "awaiting-word", "merging", "done", "blocked", "parked"] },
+    "phase": { "enum": ["starting", "spec", "plan", "contract", "build", "verify", "final-review", "awaiting-word", "merging", "done", "blocked", "parked"] },
     "task": { "type": ["string", "null"], "description": "current plan task, e.g. T3" },
     "session": { "type": "string", "description": "tmux target, e.g. devteam:api-07-session-tokens" },
     "worktree": { "type": "string" },

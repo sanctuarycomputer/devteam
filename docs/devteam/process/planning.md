@@ -2,7 +2,7 @@
 
 How an owner direction becomes a validated **work graph**: a set of ticket files, one per future PR, with explicit dependencies, contracts, file footprints and machine-checkable done-whens. The graph is what the supervisor schedules from and what every worker orients by. If the graph is wrong, everything downstream is wrong, so planning is reviewed as hard as code.
 
-Planning is run by the supervisor, or by a planner session the supervisor spawns. It sits above [`ticket-lifecycle.md`](ticket-lifecycle.md) (which runs one ticket) and feeds [`supervisor.md`](supervisor.md) (which runs many).
+Planning is run by the supervisor, or by a planner session the supervisor makes. It sits above [`ticket-lifecycle.md`](ticket-lifecycle.md) (which runs one ticket) and feeds [`supervisor.md`](supervisor.md) (which runs many).
 
 ## 1. The pipeline
 
@@ -86,9 +86,9 @@ These are normative. `validate` enforces the ones marked **(gate)**; the graph r
 - **D10 Vertical over horizontal.** Within a component, prefer a ticket that delivers a thin working slice over one that builds a whole layer nobody can exercise yet.
 - **D11 Short critical path.** After decomposition, run `devteam.mjs waves`. If the critical path is long relative to the number of tickets, look for dependencies that a contract ticket could break.
 
-### Spec-ahead
+### Plan-ahead
 
-A ticket may enter its spec and plan stages while its dependencies are unmerged; only its **build** stage waits for `depends_on`. The binding's concurrency caps (`max_active_tickets`, `max_active_per_component`) bound how many tickets are in any stage at once.
+A ticket may enter its spec and plan stages while its dependencies are unmerged; only its **build** stage waits for `depends_on`. The settings' concurrency caps (`max_active_tickets`, `max_active_per_component`) bound how many tickets are in any stage at once.
 
 ## 6. P5: graph review
 
@@ -118,11 +118,11 @@ Triggers: a worker raises a design-change question the supervisor rules needs gr
 - Ticket ids are never reused. A replaced ticket keeps its file with `superseded_by` set; `validate` ignores superseded tickets for scheduling.
 - A ticket already in flight that the re-plan affects gets a supervisor ruling, recorded in its spec.
 
-## 9. Stage tracking: derive it, don't record it
+## 9. Stage tracking: compute it, don't record it
 
 Every stage of every ticket is computed by `devteam.mjs status` from files, branches and tags. Nobody maintains a status field by hand. Before a ticket merges, its folder exists only on its branch, so `status` reads it from the branch tip (the local `ticket/<id>` branch, which every worktree shares, or `origin/ticket/<id>`).
 
-| Stage | Derived from |
+| Stage | Computed from |
 |---|---|
 | planned | ticket file exists on `main`, not superseded |
 | ready | every `depends_on` ticket is merged |

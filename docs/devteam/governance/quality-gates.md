@@ -2,7 +2,7 @@
 
 The definition of done for a ticket, and the catalogue of gates that enforce it. This is the file `code-style.md` and `ci.md` point to when they say "a gate".
 
-A rule is real only when it has a row here **and** a commissioned CI step listed in the binding's commissioning table. Until then it is doctrine, enforced by review.
+A rule is real only when it has a row here **and** a CI step that runs it listed in the gate table in the settings. Until then it is doctrine, enforced by review.
 
 ## 1. Definition of done (per ticket)
 
@@ -19,7 +19,7 @@ A ticket is done, and may receive the merge word, only when all of these hold at
 9. Every changed file is inside the ticket's `touches` or its own ticket folder.
 10. The PR body's `## One-way doors` section is `None.` or links the owner's answer; it cannot say `None.` if the ticket lists one-way doors.
 
-`devteam.mjs check-ticket <id>` checks 2, 3, 4, 6 (title), 9 and 10 mechanically, reading committed files at the exact head; CI runs it as the required `merge-word` check (`ci.md` §3). Tickets 1 and 7 are checked by the final reviewer against `verification.md` and the spec; tickets 5 and 8 by CI's other gates.
+`devteam.mjs check-ticket <id>` checks 2, 3, 4, 6 (title), 9 and 10 automatically, reading committed files at the exact head; CI runs it as the required `merge-word` check (`ci.md` §3). Tickets 1 and 7 are checked by the final reviewer against `verification.md` and the spec; tickets 5 and 8 by CI's other gates.
 
 ## 2. Root gates (every project, day one)
 
@@ -29,10 +29,10 @@ A ticket is done, and may receive the merge word, only when all of these hold at
 | lint | any lint error, incl. complexity at linter defaults | `L-ERG-1` |
 | typecheck | any type error (typed stacks) | `L-LOGIC-3`, `-5` |
 | test | any failing test; random order on | `L-TEST-1`, `-4` |
-| coverage | branch coverage under the binding's floor on `domain/**` | `L-TEST-3` |
+| coverage | branch coverage under the floor set in the settings on `domain/**` | `L-TEST-3` |
 | touches-test | a PR changing source with no test change and no `no-test:<reason>` in its body | `L-TEST-3` |
 | dead-code | unused exports, files or dependencies | |
-| duplication | copy-paste over the binding's threshold | |
+| duplication | copy-paste over the threshold set in the settings | |
 | secrets | any secret detected | `L-SEC-8` |
 | lockfile | install not frozen, or a dependency younger than the cooldown | `L-SEC-6`, `-8` |
 | escape-hatch | a bare suppression comment | `L-ESC-1` |
@@ -40,11 +40,11 @@ A ticket is done, and may receive the merge word, only when all of these hold at
 
 Add when the trigger fires: accessibility (`L-FE-1`) and lab performance (`L-FE-2`) once there is a UI; evals with thresholds once there is an AI feature (`L-SEC-5`).
 
-Each gate runs in one of two modes, recorded in the binding's commissioning table: **enforced** (any violation fails) or **ratchet** (fails only if the violation count rises or a changed line violates; for adopting existing code, `process/bootstrap.md` §5.3).
+Each gate runs in one of two modes, recorded in the gate table in the settings: **enforced** (any violation fails) or **ratchet** (fails only if the violation count rises or a changed line violates; for adopting existing code, `process/bootstrap.md` §5.3).
 
 ## 3. Default tools per stack
 
-Pick from this table; record the choice in the binding. Autofix runs before the check fails.
+Pick from this table; record the choice in the settings. Autofix runs before the check fails.
 
 | Gate | TypeScript | Ruby/Rails | Python | Go | Rust |
 |---|---|---|---|---|---|

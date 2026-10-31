@@ -25,7 +25,7 @@ Explicit or implied interfaces between components, and where each is defined.
 |---|---|---|---|
 | | | | |
 
-## 4. Distance from the code doctrine
+## 4. Distance from the code rules
 
 | Component | Laws met | Laws violated (how widely) | Gate mode |
 |---|---|---|---|
