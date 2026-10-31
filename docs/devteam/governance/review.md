@@ -68,6 +68,6 @@ Each finding is one row with an id, severity, the rule it cites, the location, a
 
 - **first-pass rejection rate** per stage. A healthy fleet rejects a meaningful share of first passes (observed: 20 to 30%). If it drifts toward zero, the reviewer prompt has gone soft; sharpen it.
 - **false-positive rate**: share of findings dispositioned `wrong`. If high, the reviewer is citing taste; tighten §1.
-- **escape rate**: defects found after merge that a review should have caught, logged by the supervisor as events of type `defect.escaped` with the ticket id.
+- **escape rate**: defects found after merge that a review should have caught, logged by the supervisor as observations with kind `escaped-defect` and the ticket as subject (`devteam.mjs observe --subject <ticket-id> --kind escaped-defect --severity <n> --valence -2 --detail "…"`).
 
 The supervisor reviews these numbers weekly and proposes prompt or rule changes through `constitution.md` §4.

@@ -60,6 +60,18 @@
   .tcard b { font-size: 12.5px; overflow-wrap: anywhere; }
   .more { font-size: 12px; color: var(--muted); padding: 2px 4px; }
   .tcard.blocked { border-color: var(--hi); }
+  /* loop */
+  h2 .stage { color: var(--fg); margin-right: 6px; }
+  .why { font-size: 12px; color: var(--muted); margin: 4px 0 8px; }
+  .row-inline { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; font-size: 13px; }
+  .row-inline input[type=text] { flex: 1; min-width: 180px; font: inherit; padding: 5px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
+  .feed .card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; align-items: start; }
+  .feed .card.corrected { border-color: var(--hi); }
+  .goal { display: grid; gap: 6px; }
+  .goal .gaps { font-size: 12px; color: var(--muted); margin: 0; padding-left: 18px; }
+  .small { font-size: 12px; }
+  [hidden] { display: none !important; }
+  button.ghost { background: transparent; color: var(--fg); border-color: var(--line); padding: 3px 10px; margin-top: 0; }
 </style>
 </head>
 <body>
@@ -72,7 +84,10 @@
 
   <div class="grid" id="stats"></div>
 
-  <h2>Questions for you</h2>
+  <h2><span class="stage">Goals</span>what the work is for</h2>
+  <div id="goals"></div>
+
+  <h2><span class="stage">Decide</span>questions for you</h2>
   <div id="questions"></div>
 
   <h2>Progress</h2>
@@ -100,8 +115,10 @@
   <h2>Board</h2>
   <div class="board" id="board"></div>
 
-  <h2>Blockers and inefficiencies</h2>
+  <h2><span class="stage">Observe</span>blockers and inefficiencies</h2>
   <div id="findings"></div>
+  <h3 style="margin-top:14px">Recent observations</h3>
+  <div id="observations"></div>
 
   <div class="two">
     <div><h2>Time by phase (hours)</h2><div class="bars card" id="phase-time"></div></div>
@@ -114,6 +131,22 @@
     <div><h2>Flaky tests</h2><div id="flaky"></div></div>
     <div><h2>Slowest tests</h2><div id="slow"></div></div>
   </div>
+
+  <h2><span class="stage">Orient</span>what keeps happening, and what we've learned</h2>
+  <div class="two">
+    <div><h3>Recurring signals</h3><div id="clusters"></div></div>
+    <div><h3>Problems and risks</h3><div id="problems"></div></div>
+  </div>
+  <h3 style="margin-top:14px">Knowledge</h3>
+  <div id="knowledge"></div>
+
+  <h2><span class="stage">Decide</span>trust ladder</h2>
+  <div class="scroll"><table id="trust"></table></div>
+  <p class="muted small">Rungs: 1 ask, 2 ask with a default, 3 act and report. A correction drops a class to 1. Evidence never moves a rung by itself; you do, when answering or through a trust question (governance/autonomy.md).</p>
+
+  <h2><span class="stage">Act</span>what the supervisor did</h2>
+  <div class="row-inline" style="margin:0 0 10px"><button class="ghost" id="seen">Mark all as seen</button><span class="muted small" id="seen-note"></span></div>
+  <div class="feed" id="acts"></div>
 
   <h2>Messages waiting for a reply</h2>
   <div id="messages"></div>
@@ -299,6 +332,70 @@ function renderProgress() {
   widgets(p, now);
 }
 
+const sevBadge = (n) => (n >= 3 ? 'high' : n === 2 ? 'medium' : 'low');
+const when = (iso) => new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+
+function renderOoda(o) {
+  // Goals
+  $('goals').innerHTML = o.goals.length ? o.goals.map((g) => {
+    const last = g.readings[g.readings.length - 1];
+    const gaps = [...g.check.definition.map((x) => `definition: ${x}`), ...g.check.coverage.map((x) => `planning: ${x}`)];
+    const canApprove = g.status === 'draft' && !g.check.definition.length;
+    return `<div class="card goal">
+      <div><span class="badge ${g.status === 'ready' ? 'good' : g.status === 'draft' ? 'medium' : 'low'}">${esc(g.status)}</span>${g.priority ? `<span class="badge">p${g.priority}</span>` : ''}<b>${esc(g.title)}</b> <span class="muted small">${esc(g.id)}</span></div>
+      ${g.outcome ? `<div class="muted">${esc(g.outcome)}</div>` : ''}
+      <div>${esc(g.measure?.description || 'no measure yet')}: <b>${last ? esc(last.value) : '?'}</b> → ${esc(g.measure?.target ?? '?')} ${esc(g.measure?.unit || '')} by ${esc(g.horizon || '?')}${g.track ? ` · <span class="badge ${g.track === 'on track' ? 'good' : 'high'}">${esc(g.track)}</span>` : ''}</div>
+      <div class="small muted">Features: ${g.check.features.length ? g.check.features.map(esc).join(', ') : 'none yet'}${g.non_goals?.length ? ` · Not: ${g.non_goals.map(esc).join('; ')}` : ''}</div>
+      ${gaps.length ? `<ul class="gaps">${gaps.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : '<div class="small" style="color:var(--ok)">No gaps.</div>'}
+      ${canApprove ? `<div><button data-goal="${esc(g.id)}">Approve this goal</button> <span class="err" id="e-${esc(g.id)}"></span></div>` : ''}
+    </div>`;
+  }).join('') : '<p class="muted">No goals yet. The supervisor drafts them from what you say (planning.md §0).</p>';
+
+  // Observe
+  $('observations').innerHTML = o.observations.length ? o.observations.slice(0, 12).map((x) => `
+    <div class="card small"><span class="badge ${sevBadge(x.severity ?? 0)}">${esc(x.kind)}</span><code>${esc(x.subject)}</code> ${esc(x.detail)} <span class="muted">· ${esc(x.created_by)}, ${when(x.created_at)}${x.valence ? ` · valence ${x.valence > 0 ? '+' : ''}${x.valence}` : ''}</span></div>`).join('') : '<p class="muted">None yet.</p>';
+
+  // Orient
+  $('clusters').innerHTML = o.clusters.length ? o.clusters.map((c) => `
+    <div class="card small"><b>${esc(c.key)}</b> ×${c.count} <span class="muted">valence ${c.valence}</span><div class="muted">${esc(c.latest)}</div><div>→ ${esc(c.suggest)}</div></div>`).join('') : '<p class="muted">Nothing recurring that isn\'t explained yet.</p>';
+  $('problems').innerHTML = o.problems.length ? o.problems.map((p) => `
+    <div class="card small"><span class="badge ${sevBadge(p.severity)}">sev ${p.severity}</span><span class="badge">${p.realized ? 'issue' : 'risk'}</span><b>${esc(p.title)}</b> <span class="muted">· ${esc(p.status)}${p.assigned_to ? `, ${esc(p.assigned_to)}` : ''}</span>${p.detail ? `<div class="muted">${esc(p.detail)}</div>` : ''}</div>`).join('') : '<p class="muted">None open.</p>';
+  const cand = o.knowledge.filter((k) => k.status === 'candidate');
+  const acc = o.knowledge.filter((k) => k.status === 'accepted');
+  $('knowledge').innerHTML = (cand.length ? `<p class="small"><b>${cand.length} candidate${cand.length > 1 ? 's' : ''} to review</b></p>` + cand.map((k) => `
+    <div class="card small"><span class="badge medium">${esc(k.kind)}</span><code>${esc(k.scope)}</code> ${esc(k.statement)} <span class="muted">${k.confidence != null ? `· ${Math.round(k.confidence * 100)}% sure ` : ''}· ${(k.evidence || []).length} evidence</span>
+      <div class="row-inline"><button class="ghost" data-know="${esc(k.id)}" data-status="accepted">Accept</button><button class="ghost" data-know="${esc(k.id)}" data-status="retired">Retire</button><span class="err" id="e-${esc(k.id)}"></span></div></div>`).join('') : '') +
+    (acc.length ? acc.map((k) => `<div class="card small"><span class="badge good">${esc(k.kind)}</span><code>${esc(k.scope)}</code> ${esc(k.statement)}${k.valence < 0 ? ' <span class="muted">(avoid)</span>' : ''}</div>`).join('') : '') ||
+    '<p class="muted">Nothing learned yet.</p>';
+
+  // Decide: trust ladder
+  $('trust').innerHTML = '<tr><th>Class</th><th>Rung</th><th>Ceiling</th><th>Clean acts</th><th>Agreement</th><th>Corrections</th><th></th></tr>' + o.trust.map((t) => `
+    <tr><td>${esc(t.class)}</td><td>${t.rung} · ${esc(t.rung_name)}</td><td>${t.ceiling}</td><td>${t.clean_acts.length}${t.clean_span_days ? ` over ${t.clean_span_days}d` : ''}</td><td>${t.agreement == null ? '–' : `${Math.round(t.agreement * 100)}%`}</td><td>${t.corrections}</td><td>${t.can_ask ? '<span class="badge good">evidence supports a step up</span>' : ''}</td></tr>`).join('');
+
+  // Act
+  $('seen-note').textContent = o.seen_upto ? `last marked seen ${when(o.seen_upto)}` : 'nothing marked seen yet';
+  $('acts').innerHTML = o.acts.length ? o.acts.slice(0, 30).map((a) => `
+    <div class="card small ${a.correction ? 'corrected' : ''}">
+      <div><span class="badge ${a.ladder ? 'medium' : 'low'}">${esc(a.class)}${a.scope ? ` · ${esc(a.scope)}` : ''}</span>${esc(a.what)}
+        <div class="muted">${when(a.created_at)}${a.approved_by ? ` · approved by ${esc(a.approved_by)}` : a.rung ? ` · rung ${a.rung}` : ''}${a.reversible === false ? ' · irreversible' : ''}${a.seen ? ' · seen' : ''}</div>
+        ${a.correction ? `<div class="err">Corrected: ${esc(a.correction.reason)}</div>` : ''}
+        <div class="row-inline" hidden data-correct-form="${esc(a.id)}"><input type="text" data-reason="${esc(a.id)}" placeholder="What was wrong?"><button class="ghost" data-correct-send="${esc(a.id)}">Send correction</button><span class="err" id="e-${esc(a.id)}"></span></div>
+      </div>
+      ${a.correction ? '' : `<button class="ghost" data-correct="${esc(a.id)}">Correct this</button>`}
+    </div>`).join('') : '<p class="muted">No acts logged yet.</p>';
+}
+
+async function post(action, body, errId) {
+  const r = await fetch(`/api/${action}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const out = await r.json();
+  if (!r.ok) {
+    if (errId && $(`e-${errId}`)) $(`e-${errId}`).textContent = out.error || 'failed';
+    return false;
+  }
+  load();
+  return true;
+}
+
 function render(d) {
   DATA = d;
   const m = d.metrics, p = d.progress, now = Date.parse(p.now);
@@ -315,26 +412,43 @@ function render(d) {
     ['cost per ticket', m.cost.usd_per_merged_ticket == null ? '–' : `$${m.cost.usd_per_merged_ticket}`],
     ['spend', `$${m.cost.usd_total}`],
     ['open questions', d.questions.length],
+    ['answer rate (14d)', m.owner_questions.answer_rate_14d == null ? '–' : `${Math.round(m.owner_questions.answer_rate_14d * 100)}%`],
     ['escaped defects', m.escaped_defects],
   ];
   $('stats').innerHTML = stats.map(([k, v]) => `<div class="stat"><span class="muted">${esc(k)}</span><b>${esc(v)}</b></div>`).join('');
 
-  // Questions: keep any half-typed answer across refreshes.
+  // Keep anything half-typed or half-open across refreshes.
   document.querySelectorAll('textarea[data-q]').forEach((t) => { drafts[t.dataset.q] = t.value; });
-  $('questions').innerHTML = d.questions.length ? d.questions.map((q) => `
+  const kept = [...document.querySelectorAll('input[data-rule], select[data-auto], input[data-reason]')].map((el) => [el.getAttribute('data-rule') ? `input[data-rule="${el.dataset.rule}"]` : el.dataset.auto ? `select[data-auto="${el.dataset.auto}"]` : `input[data-reason="${el.dataset.reason}"]`, el.value]);
+  const openForms = [...document.querySelectorAll('[data-correct-form]')].filter((f) => !f.hidden).map((f) => f.dataset.correctForm);
+  const o = d.ooda;
+  const reasonText = Object.fromEntries((o.reasons || []).map((r) => [r.id, r.means]));
+  const RUNGS = { 1: 'ask me', 2: 'ask with a default', 3: 'decide and tell me' };
+  $('questions').innerHTML = d.questions.length ? d.questions.map((q) => {
+    const cls = q.class && o.classes[q.class];
+    const why = q.why_asked?.reasons?.length ? `<div class="why">Why you: ${q.why_asked.reasons.map((r) => esc(reasonText[r] || r)).join('; ')}${cls ? ` · ${esc(q.class)} is on rung ${cls.rung} of ${cls.ceiling}` : q.class ? ` · ${esc(q.class)}` : ''}</div>` : '';
+    const next = cls ? `<label>Next time for ${esc(q.class)}: <select data-auto="${esc(q.id)}"><option value="">no change</option>${[1, 2, 3].filter((r) => r <= cls.ceiling).map((r) => `<option value="${r}">${RUNGS[r]}</option>`).join('')}</select></label>` : '';
+    return `
     <div class="card">
-      <span class="badge ${q.kind === 'one-way-door' ? 'high' : 'medium'}">${esc(q.kind)}</span>
+      <span class="badge ${q.kind === 'one-way-door' ? 'high' : q.kind === 'trust' ? 'good' : 'medium'}">${esc(q.kind)}</span>
       ${q.ticket ? `<code>${esc(q.ticket)}</code>` : ''} <span class="muted">${esc(q.id)}</span>
       <p><b>${esc(q.question)}</b></p>
+      ${why}
       ${q.context ? `<p class="muted">${esc(q.context)}</p>` : ''}
-      ${q.recommendation ? `<p>Recommendation: ${esc(q.recommendation)}</p>` : ''}
+      ${q.recommendation ? `<p>Recommendation${q.confidence != null ? ` (${Math.round(q.confidence * 100)}% sure)` : ''}: ${esc(q.recommendation)} <button class="opt" data-fill="${esc(q.id)}" data-val="${esc(q.recommendation)}" data-match="1">use this</button></p>` : ''}
+      ${q.evidence?.length ? `<p class="muted small">Evidence: ${q.evidence.map(esc).join(', ')}</p>` : ''}
       ${q.blocks?.length ? `<p class="muted">Blocks ${q.blocks.map(esc).join(', ')}</p>` : ''}
       ${q.default ? `<p class="muted">Default if unanswered: ${esc(q.default)}</p>` : ''}
-      ${(q.options || []).map((o) => `<button class="opt" data-fill="${esc(q.id)}" data-val="${esc(o)}">${esc(o)}</button>`).join('')}
+      ${(q.options || []).map((x) => `<button class="opt" data-fill="${esc(q.id)}" data-val="${esc(x)}">${esc(x)}</button>`).join('')}
       <textarea data-q="${esc(q.id)}" placeholder="Your answer">${esc(drafts[q.id] || '')}</textarea>
+      <div class="row-inline">${next}<input type="text" data-rule="${esc(q.id)}" placeholder="Make it a standing rule (optional)"></div>
       <button data-answer="${esc(q.id)}">Answer</button> <span class="err" id="e-${esc(q.id)}"></span>
-    </div>`).join('') : '<p class="muted">Nothing needs you right now.</p>';
+    </div>`;
+  }).join('') : '<p class="muted">Nothing needs you right now.</p>';
 
+  renderOoda(o);
+  for (const [sel, v] of kept) { const el = document.querySelector(sel); if (el) el.value = v; }
+  for (const id of openForms) { const f = document.querySelector(`[data-correct-form="${id}"]`); if (f) f.hidden = false; }
   renderProgress();
 
   $('findings').innerHTML = m.findings.length ? m.findings.map((f) => `
@@ -355,6 +469,8 @@ function render(d) {
 }
 
 async function load() {
+  // Don't redraw under someone who is typing or choosing.
+  if (DATA && document.activeElement && ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName) && document.activeElement.id !== 'view') return;
   try {
     const r = await fetch('/api/data');
     const d = await r.json();
@@ -370,20 +486,44 @@ $('view').addEventListener('change', (e) => {
   if (DATA) renderProgress();
 });
 
+const matchedAnswer = {};
 document.addEventListener('click', async (ev) => {
   const fill = ev.target.closest('[data-fill]');
-  if (fill) { document.querySelector(`textarea[data-q="${fill.dataset.fill}"]`).value = fill.dataset.val; return; }
+  if (fill) {
+    document.querySelector(`textarea[data-q="${fill.dataset.fill}"]`).value = fill.dataset.val;
+    matchedAnswer[fill.dataset.fill] = fill.dataset.match ? fill.dataset.val : null;
+    return;
+  }
   const btn = ev.target.closest('[data-answer]');
-  if (!btn) return;
-  const id = btn.dataset.answer;
-  const answer = document.querySelector(`textarea[data-q="${id}"]`).value;
-  btn.disabled = true;
-  const r = await fetch('/api/answer', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, answer }) });
-  const out = await r.json();
-  btn.disabled = false;
-  if (!r.ok) { $(`e-${id}`).textContent = out.error || 'failed'; return; }
-  delete drafts[id];
-  load();
+  if (btn) {
+    const id = btn.dataset.answer;
+    const answer = document.querySelector(`textarea[data-q="${id}"]`).value;
+    const auto = document.querySelector(`select[data-auto="${id}"]`)?.value;
+    const rule = document.querySelector(`input[data-rule="${id}"]`)?.value;
+    btn.disabled = true;
+    const ok = await post('answer', { id, answer, matched: matchedAnswer[id] === answer.trim() || undefined, autonomy: auto ? Number(auto) : undefined, rule: rule || undefined }, id);
+    btn.disabled = false;
+    if (ok) delete drafts[id];
+    return;
+  }
+  const goal = ev.target.closest('[data-goal]');
+  if (goal) return void post('goal-approve', { id: goal.dataset.goal }, goal.dataset.goal);
+  const know = ev.target.closest('[data-know]');
+  if (know) return void post('knowledge', { id: know.dataset.know, status: know.dataset.status }, know.dataset.know);
+  const corr = ev.target.closest('[data-correct]');
+  if (corr) {
+    const form = document.querySelector(`[data-correct-form="${corr.dataset.correct}"]`);
+    form.hidden = !form.hidden;
+    if (!form.hidden) form.querySelector('input').focus();
+    return;
+  }
+  const send = ev.target.closest('[data-correct-send]');
+  if (send) {
+    const id = send.dataset.correctSend;
+    const reason = document.querySelector(`input[data-reason="${id}"]`).value;
+    return void post('correct', { id, reason }, id);
+  }
+  if (ev.target.id === 'seen') return void post('seen', {});
 });
 
 load();

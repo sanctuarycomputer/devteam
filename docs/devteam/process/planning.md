@@ -4,11 +4,22 @@ How an owner direction becomes a validated **work graph**: a set of ticket files
 
 Planning is run by the supervisor, or by a planner session the supervisor makes. It sits above [`ticket-lifecycle.md`](ticket-lifecycle.md) (which runs one ticket) and feeds [`supervisor.md`](supervisor.md) (which runs many).
 
+## 0. Goals: where the chain starts
+
+Planning works backwards from a goal: what must be true for the outcome to happen, which features make those things true, which stories and tickets make the features. So the chain needs a goal at its root, and the goal has to be unambiguous before anything is planned from it.
+
+- **The owner states the goals.** The supervisor can draft one from what the owner says (`devteam.mjs goal add --title … --outcome …`), but it can't invent one, and only the owner approves it (`goal approve`, or the dashboard). Keep three to five goals active.
+- **A goal is ready** when it has: an outcome (what is true for users or the business), a measure with a numeric target, unit and direction, a horizon date, at least one non-goal, the preconditions that must hold for the outcome, a priority distinct from the other goals, and a baseline reading (`goal reading <id> --value n`). `devteam.mjs goal check` lists what's missing.
+- **The readiness interview.** While a goal has gaps, the supervisor asks one `goal-definition` question per goal listing every gap as a form, records the answers on the draft (`goal set`), and repeats until `goal check` is clean and no ambiguity remains in its judgment (undefined terms, two readings of the measure, conflicts with another goal). Then the owner approves it.
+- **Coverage.** Once a goal is ready, every feature plan names the goals it serves (`- Goals: g-…`) and the preconditions it makes true (`- Preconditions: g-…#1`). `goal check` lists any precondition with no feature; each becomes a feature to plan, a spike, or a question. `validate` fails an approved feature that names no ready goal.
+- **Readings.** The supervisor records a reading at each retro, from CI, metrics or releases where the measure allows. On track or behind is computed from the readings, the target and the horizon, never stored.
+- **Changing a goal** after approval is the owner's (class `goal-change`, owner-only in `autonomy.md`).
+
 ## 1. The pipeline
 
 | Stage | Input | Output | Exit criterion |
 |---|---|---|---|
-| P0 intake | owner direction | problem statement in the feature plan §0 | owner confirms the statement (one owner question, asked by the supervisor) |
+| P0 intake | owner direction and the ready goal(s) it serves (§0) | problem statement in the feature plan §0, with its `Goals:` and `Preconditions:` lines | owner confirms the statement (one owner question, asked by the supervisor) |
 | P1 research | problem statement, codebase | `project/designs/<slug>.research.md` | every open technical unknown is either answered or listed |
 | P2 design | research | `project/designs/<slug>.md` | `project/reviews/<feature>/design-<n>.md` APPROVE; owner answers on any one-way door |
 | P3 stories | design | feature plan §1 | every goal in the design maps to at least one story |
@@ -133,13 +144,13 @@ Every stage of every ticket is computed by `devteam.mjs status` from files, bran
 | merged | `ticket/<id>` is reachable from `main` (merge commit) |
 | released | `git tag --contains <merge-sha>` matches `v*` (not `-rc`) |
 
-Live facts that git cannot know (phase within a stage, heartbeat, cost) come from `run/` and are shown alongside, never stored in tracked files.
+Live facts that git cannot know (phase within a stage, heartbeat, cost) come from `run/` and the log, and are shown alongside, never stored in ticket or plan files.
 
 ## 10. The feature plan
 
 `project/features/<feature>.md`, from [`templates/feature-plan.md`](../templates/feature-plan.md). Sections:
 
-0. **Header**: status, the commit it was read against, the design it implements, owner answers it rests on.
+0. **Header**: status, the goals it serves and the goal preconditions it makes true (§0), the commit it was read against, the design it implements, owner answers it rests on.
 1. **Stories** (P3).
 2. **Tickets**: a table of ticket ids, kinds, sizes and stories served. The ticket files hold the detail.
 3. **Waves and critical path**: pasted output of `devteam.mjs waves`.

@@ -36,6 +36,7 @@ main             → push CI (never cancelled) + build/publish
 - required checks **`devteam-validate`** and **`merge-word`**, rather than a GitHub approval. Fleets usually run under one shared identity, so GitHub's own review approvals cannot prove non-author independence. `merge-word` runs `devteam.mjs check-pr`, which automates the half that a machine can check of the merge word:
   - for a `ticket/<id>` branch, `check-ticket` at the PR's exact head: approved spec and plan, verification rows for every done-when, the latest final review in every track saying `APPROVE` at a commit that holds at the head (at its own commit, or at a later head whose only changes are newly added review records; `review.md` §1), from enough named reviewers (two for `risk: high`), every Critical and Important finding dispositioned, and no changed file outside the ticket's `touches` (plus its own ticket folder);
   - for any other branch, a title matching `^chore-<slug>: `;
+  - for every PR, the log rule ([`../process/log.md`](../process/log.md) §5): only the `chore-log` branch may change `project/log/`, only that, and only by appending valid lines in time order whose writer matches the file and is allowed by the authority table;
   - for both, a PR title `<ticket-id>: …` or `chore-<slug>: …`, and a `## One-way doors` section in the body that is `None.` or links the owner's answer (a question id or URL). A ticket that lists one-way doors cannot say `None.`;
 - one merge method, chosen in the settings (merge commit is the default, so ticket branches stay legible in history).
 
@@ -51,7 +52,7 @@ If `strict` is off, GitHub reports a mergeable state even when the head is behin
 
 - **Push CI on `main` must complete.** It is the only check that catches a semantic conflict between two PRs that were each green against a stale base.
 - **Red-main rule:** a failed `main` push run blocks the next merge. Revert first, investigate second, within one hour.
-- The supervisor logs every merge (event `ticket.merged`) only after confirming the merge commit is on `main`.
+- The supervisor logs every merge as an act (`devteam.mjs act --class merge-word`) only after confirming the merge commit is on `main`.
 
 ## 5. Supply chain
 

@@ -1,9 +1,10 @@
 # <Improvement title>
 
-Status: proposed | trialing | kept | reverted
+A research note for a proposal. Save at `project/improvement/research/<date>-<slug>.md` and link it from the `proposal` question (`--note`) or the trial act. Decisions, trial starts and outcomes live in the log (`process/log.md`), not here.
+
 Source: retro | research | architecture | upstream
-Proposed: <date>
-Decided by: supervisor | owner (<question id>)
+Serves goal: <g-… id>
+Written: <date>
 
 ## Evidence
 

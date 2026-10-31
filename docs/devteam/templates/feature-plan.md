@@ -3,6 +3,8 @@
 ## 0. Header
 
 - Status: draft | in review | approved
+- Goals: <g-… ids of the ready goals this feature serves>
+- Preconditions: <g-…#n: the goal preconditions this feature makes true>
 - Read against: <commit sha>
 - Design: `project/designs/<slug>.md`
 - Problem statement: <two or three sentences; confirmed by the owner on <date>>

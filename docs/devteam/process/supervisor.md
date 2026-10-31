@@ -4,13 +4,13 @@ You are the supervisor: the one long-lived session that coordinates the fleet as
 
 ## 0. The shape in one paragraph
 
-The work is a graph of tickets, each one PR ([`planning.md`](planning.md)). You make one worker per ready ticket, each in its own git worktree and tmux window, up to the caps in the settings. Workers run the ticket lifecycle and message you ([`messages.md`](messages.md)). You answer, approve stages, grant shared resources, and give the merge word after verifying the PR yourself at its exact head. You run a timed loop that compares what the files say with what git, CI and the tmux panes show, fixes drift, and keeps work moving while the owner is away.
+The work is a graph of tickets, each one PR ([`planning.md`](planning.md)). You make one worker per ready ticket, each in its own git worktree and tmux window, up to the caps in the settings. Workers run the ticket lifecycle and message you ([`messages.md`](messages.md)). You answer, approve stages, grant shared resources, and give the merge word after verifying the PR yourself at its exact head. You run a timed loop that compares what the files say with what git, CI and the tmux panes show, fixes drift, and keeps work moving while the owner is away. The loop is observe, orient, decide, act, recorded in the log ([`log.md`](log.md)), aimed at the owner's goals.
 
 ## 1. Starting up
 
-1. Read `project/settings.md` and `project/decisions.md`.
-2. Read the tail of `$DEVTEAM_RUN/events.jsonl` (`devteam.mjs history --tail 200`), every open owner question (`devteam.mjs questions`), and every message to you that hasn't been answered (`devteam.mjs messages --open`).
-3. Run `devteam.mjs status`. If there is no graph yet, or the owner has a new direction, run [`planning.md`](planning.md) (yourself or by making a planner with `make-worker.sh --planner <feature>`).
+1. Read `project/settings.md` and `project/decisions.md`. Make sure your window has `DEVTEAM_ROLE=supervisor` set (`bootstrap.md` §4).
+2. Read the goals (`devteam.mjs goals`), accepted knowledge (`devteam.mjs knowledge --status accepted`), open problems (`devteam.mjs problem`), the trust ladder (`devteam.mjs trust`), every owner question (`devteam.mjs questions --all`), the tail of the event log (`devteam.mjs history --tail 200`), and every message to you that hasn't been answered (`devteam.mjs messages --open`).
+3. Run `devteam.mjs status`. If there are no ready goals, start at `planning.md` §0. If there is no graph yet, or the owner has a new direction, run [`planning.md`](planning.md) (yourself or by making a planner with `make-worker.sh --planner <feature>`).
 4. Match windows to tickets: `tmux list-windows -t devteam` against `run/tickets/*.json`. Any ticket whose window is gone but whose phase is not `done` or `parked` goes to recovery (§11).
 5. Start the loop (§3).
 
@@ -18,24 +18,42 @@ The work is a graph of tickets, each one PR ([`planning.md`](planning.md)). You 
 
 - **One tmux session** named in the settings (default `devteam`). Your window is named `supervisor` (other sessions message you there). One window per active ticket, named with the ticket id.
 - **One worktree per ticket** at `.worktrees/<ticket-id>` on branch `ticket/<ticket-id>`, created from `origin/main`.
-- **Agent-agnostic launch.** `agent_command` in the settings starts a worker (for example `claude --dangerously-skip-permissions`, `codex`, `opencode`). `make-worker.sh` passes the bootstrap prompt as the final argument and sets `DEVTEAM_TICKET`, `DEVTEAM_RUN` and `DEVTEAM_SUPERVISOR`.
+- **Agent-agnostic launch.** `agent_command` in the settings starts a worker (for example `claude --dangerously-skip-permissions`, `codex`, `opencode`). `make-worker.sh` passes the bootstrap prompt (plus the accepted knowledge that applies to the ticket) as the final argument and sets `DEVTEAM_TICKET`, `DEVTEAM_RUN`, `DEVTEAM_ROLE` and `DEVTEAM_SUPERVISOR`.
 - **Coordination is session-to-session messages** ([`messages.md`](messages.md)): `devteam.mjs send` types one line into the other session's pane and logs it. Questions are only for asking the owner ([`questions.md`](questions.md)). Type into a worker's pane by hand for **recovery only**.
 
 ## 3. The loop
 
-Run on a timer: about every 10 minutes when PRs are converging, 30 when quiet. A message from a worker interrupts it. Each tick:
+Run on a timer: about every 10 minutes when PRs are converging, 30 when quiet. A message from a worker interrupts it. Each tick runs the loop once:
+
+**Observe**
 
 1. **Sync:** `git fetch origin`. Note new merges on `main`.
 2. **Status:** `devteam.mjs status --json`. Compare computed stages with each ticket's run phase.
-3. **Fix drift** (§4).
-4. **Reply** to messages you haven't answered (`devteam.mjs messages --open`), merge requests and design changes on the critical path first. Run `devteam.mjs sync-questions` and relay any new owner answers to the workers they affect (`questions.md` §6).
-5. **Apply defaults** to owner questions older than `question_default_after_hours` in the settings that have a reversible default (`devteam.mjs answer <qid> --defaulted`), and relay them.
-6. **Schedule** (§5).
-7. **Health:** any ticket whose heartbeat is older than `stale_after_minutes` in the settings (default 30) and whose pane shows no activity goes to recovery.
-8. **Improve:** on quiet ticks, run the improvement loop ([`improvement.md`](improvement.md)): retros, research and architecture spikes when they're due, upstream releases to check, trials to measure, roadmap or architecture recommendations to put to the owner, and general improvements to share upstream.
-9. **Notify** the owner only on a new blocking owner question or something they must act on now (`questions.md` §7).
-10. **Dashboard:** `devteam.mjs dashboard-data` to refresh `run/dashboard.json`, and act on any high-severity finding in it.
-11. Write your own heartbeat: `devteam.mjs heartbeat --supervisor` (with `--usd` if you can see your own spend).
+3. **Metrics:** `devteam.mjs observe-metrics`, which records each new finding as an observation (once a day per finding).
+
+**Orient**
+
+4. **Fix drift** (§4).
+5. **Recurring signals:** `devteam.mjs orient`. Explain each one: a lesson, a problem, or noise (`log.md` §3). Triage open problems: assign, mitigate, or resolve.
+
+**Decide**
+
+6. **Reply** to messages you haven't answered (`devteam.mjs messages --open`), merge requests and design changes on the critical path first. Read new owner answers (`devteam.mjs questions --all`; an answer arrives in your pane as its id) and relay them to the workers they affect (`questions.md` §7).
+7. **Apply defaults** to questions past their deadline that have a reversible default (`devteam.mjs answer <qid> --defaulted`), and relay them. Withdraw questions that no longer matter.
+8. Before any decision in a ladder class, read `devteam.mjs knowledge --for <class>` and check your rung (`devteam.mjs trust`). Below rung 3, ask (`questions.md`).
+
+**Act**
+
+9. **Schedule** (§5), **merge** (§6), and log each decision as an act (`devteam.mjs act --class <c> -- "<what>"`).
+10. **Health:** any ticket whose heartbeat is older than `stale_after_minutes` in the settings (default 30) and whose pane shows no activity goes to recovery.
+
+**Improve and record**
+
+11. **Improve:** on quiet ticks, run the improvement loop ([`improvement.md`](improvement.md)): retros (with goal readings, outcomes, corrections you find, and trust questions where the evidence supports one), research and architecture spikes when they're due, upstream releases to check, trials to measure, roadmap or architecture proposals to put to the owner, and general improvements to share upstream.
+12. **Notify** the owner only on a new blocking owner question or something they must act on now (`questions.md` §8).
+13. **Dashboard:** `devteam.mjs dashboard-data` to refresh `run/dashboard.json`.
+14. Write your own heartbeat: `devteam.mjs heartbeat --supervisor` (with `--usd` if you can see your own spend).
+15. Once a day, after the tick's merges: `devteam.mjs log-sync`, then merge the log-only PR when CI passes (`log.md` §5).
 
 ## 4. Fixing drift
 
@@ -43,10 +61,10 @@ Files drift; git does not. On each tick fix these mismatches, logging a `recover
 
 | Observed | Means | Action |
 |---|---|---|
-| branch merged, run phase not `done` | worker finished but did not record it | set phase `done`; schedule cleanup |
+| branch merged, run phase not `done` | the worker's last phase ends at the merge anyway (metrics use the merge time) | schedule cleanup |
 | run phase `build`, a dependency unmerged | worker started early | tell the worker to return to spec/plan work |
 | PR head differs from `run.head_sha` | stale heartbeat | message the worker to heartbeat |
-| owner answer relayed, `recorded_in` empty after the ticket's next commit | answer not recorded | message the worker; set `recorded_in` once it lands |
+| owner answer relayed, `recorded_in` empty after the ticket's next commit | answer not recorded | message the worker; `devteam.mjs recorded <qid> <path>` once it lands |
 | ticket in graph, ready, no worker, under caps | idle capacity | schedule it (§5) |
 | superseded ticket with a live worker | re-plan not propagated | park the worker with a ruling |
 
@@ -69,7 +87,7 @@ You never merge on green alone and never on someone else's attestation. For each
 6. any ticket-specific condition from a ruling (for example a rollback constraint) holds;
 7. the PR body's one-way-door section is `None.` or links the owner's answer.
 
-Then give the word by acting on it: merge yourself, refusing a moved head (`gh pr merge <pr> --merge --match-head-commit <sha>`, using the merge method in the settings), reply `--kind ruling --re <message-id>` with `merged <sha>`, and log `word.merge`. Confirm the merge commit is on `main` before logging `ticket.merged`. If the worker pushed after asking, the request is void; verify the new head from the start.
+Then give the word by acting on it: merge yourself, refusing a moved head (`gh pr merge <pr> --merge --match-head-commit <sha>`, using the merge method in the settings), reply `--kind ruling --re <message-id>` with `merged <sha>`, and log it as an act (`devteam.mjs act --class merge-word --refs <ticket-id> -- "merged <ticket-id> at <sha>"`). If the worker pushed after asking, the request is void; verify the new head from the start.
 
 **Only you merge.** Under one shared identity no check can prove the word was given (`ci.md` §3), so the act of merging is the word.
 
@@ -93,18 +111,18 @@ If the settings declares shared resources (one build machine, a device lab, a te
 
 - Read the actual file, never a summary: the diff, the review record, the CI log at the SHA.
 - Rule from the contract text; deny by default; minimize one-way doors (`constitution.md` §2).
-- Every ruling is sent as a `ruling` message (`--re` the message it answers), which logs it. Rulings that cut across tickets go into `project/decisions.md`. Rulings that change a rule are edits to that rule.
+- Every ruling is sent as a `ruling` message (`--re` the message it answers), which logs it. Rulings that cut across tickets go into `project/decisions.md`. Rulings that change a rule are edits to that rule. Log a ruling that settles a contract or design question as an act (class `contract-ruling` or `approve-design-change`), so a wrong one can be corrected.
 
 ## 10. The record
 
-The durable record is tracked files (graph, ticket folders, decisions, feature plans) plus the event log in `run/`. Chat and scrollback are not the record. Anything you would need after a crash or a context reset must be in one of those. Keep the event log's `summary` short and put detail in the file `ref` points at.
+The durable record is tracked files (graph, ticket folders, decisions, feature plans) plus the log in `project/log/` ([`log.md`](log.md)), synced daily from `run/log/`. `run/events.jsonl` holds only liveness and session messages. Chat and scrollback are not the record. Anything you would need after a crash or a context reset must be in one of those. Keep lines short and put detail in a file you reference.
 
 ## 11. Recovery
 
 - **Stale or frozen worker:** capture the pane (`tmux capture-pane -p -t devteam:<id>`). If it shows a modal or a limit banner, clear it. If the agent process is gone, relaunch it with `make-worker.sh <id> --resume`, which runs `resume_command` in the settings in the same window and worktree and keeps the worker's last recorded phase; the worker re-orients from files (`worker.md` §2).
 - **Usage limits:** if the whole fleet hits a provider limit, set each session to continue at reset where the agent supports it. Switching to a separate account requires relaunching each session; a running session keeps its launch credential.
 - **Safe kill:** kill only a single known PID or a recorded process group (checked not to be 0, 1 or yourself). Never pattern-kill on a shared machine.
-- **After a full restart:** match tmux windows to `run/tickets/` again, re-read open questions and `messages --open`, and message every worker to re-read its files.
+- **After a full restart:** match tmux windows to `run/tickets/` again, re-read questions, knowledge and `messages --open`, and message every worker to re-read its files.
 - **Cleanup after merge:** `git worktree remove .worktrees/<id>`, kill the window, keep the run ticket file (it is history).
 
 ## 12. Known limitations

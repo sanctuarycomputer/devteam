@@ -59,6 +59,9 @@ if [[ "$ROLE" == planner ]]; then
 else
   sed "s/{{TICKET}}/$TICKET/g" docs/devteam/templates/worker-prompt.md > "$PROMPT_FILE"
 fi
+# What the project has learned that applies here (accepted knowledge only; process/log.md §3).
+KNOW="$($DT knowledge --for "${TICKET:-$FEATURE}" 2>/dev/null || true)"
+if [[ -n "$KNOW" ]]; then printf '\n\n%s\n' "$KNOW" >> "$PROMPT_FILE"; fi
 
 # tmux: session (supervisor is window 0 by convention), one window per ticket.
 tmux has-session -t "$SESSION" 2>/dev/null || tmux new-session -d -s "$SESSION" -n supervisor -c "$MAIN_ROOT"

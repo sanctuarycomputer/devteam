@@ -10,7 +10,7 @@ How devteam gets materialized into a project repo, and how the first session get
    - `settings.md` from [`templates/settings.md`](../templates/settings.md)
    - `decisions.md` from [`templates/decisions.md`](../templates/decisions.md)
    - `upstream-log.md` from [`templates/upstream-log.md`](../templates/upstream-log.md), with a first row recording the release tag you copied (this is the base for upstream checks in `improvement.md` §3.4)
-   - empty `designs/`, `features/`, `graph/`, `tickets/`, `reviews/`, `improvement/proposals/`, `improvement/research/` folders (each with a `.gitkeep`)
+   - empty `designs/`, `features/`, `graph/`, `tickets/`, `reviews/`, `log/`, `improvement/research/` folders (each with a `.gitkeep`)
 4. Create or update the repo root `AGENTS.md` from [`templates/AGENTS.md`](../templates/AGENTS.md). If an `AGENTS.md` exists, append the devteam section rather than replacing it. If a `CLAUDE.md` exists and is not already a symlink, add a line to it pointing at `AGENTS.md`; otherwise create `CLAUDE.md` as a symlink to `AGENTS.md`.
 5. Add `.worktrees/` to the root `.gitignore`.
 6. Add the CI jobs from [`templates/github/devteam.yml`](../templates/github/devteam.yml) (adapt to the project's CI if it is not GitHub Actions), and list `devteam-validate` and `merge-word` as required checks in the intended branch rules (`ci.md` §3).
@@ -30,7 +30,7 @@ Survey the repo first (languages, frameworks, components, existing CI, existing 
 - shared resources that need slots, if any;
 - how the owner wants to be notified.
 
-Record each answer in the settings with its date. (During bootstrap there is no supervisor yet, so you ask the owner directly, in the conversation or as a batch of `devteam.mjs ask` questions run from the main checkout. There is no supervisor pane yet, so answers simply land in the question files.)
+Record each answer in the settings with its date. (During bootstrap there is no supervisor yet, so you ask the owner directly, in the conversation or as a batch of `devteam.mjs ask` questions run from the main checkout. Set `DEVTEAM_ROLE=supervisor` when you run `ask`; the owner answers from their own terminal. There is no supervisor pane yet, so answers simply land in the log.)
 
 ## 3. Turn on the day-one gates
 
@@ -40,9 +40,9 @@ Do not fix the whole codebase in this PR. If a gate fails on existing code, turn
 
 ## 4. Start
 
-1. Start the tmux session named in the settings with the supervisor in window 0: `tmux new-session -s devteam -n supervisor`, then launch the agent with the prompt in [`templates/supervisor-prompt.md`](../templates/supervisor-prompt.md).
+1. Start the tmux session named in the settings with the supervisor in window 0: `tmux new-session -s devteam -n supervisor`, run `export DEVTEAM_ROLE=supervisor` in that window (so owner-only commands refuse to run there), then launch the agent with the prompt in [`templates/supervisor-prompt.md`](../templates/supervisor-prompt.md). The owner answers from their own terminal or the dashboard, never from this window.
 2. Start the dashboard: `node docs/devteam/scripts/dashboard.mjs` (or the `dashboard_command` in the settings), and give the owner the address.
-3. The supervisor reads [`supervisor.md`](supervisor.md) and, with no graph yet, begins [`planning.md`](planning.md) at P0 by asking the owner what to build.
+3. The supervisor reads [`supervisor.md`](supervisor.md) and, with no goals yet, begins [`planning.md`](planning.md) at §0: it asks the owner what the project is for, drafts the goals, and interviews the owner until each is ready. Planning features starts only from a ready goal.
 
 ## 5. Adopting into an existing codebase
 

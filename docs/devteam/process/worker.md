@@ -43,11 +43,13 @@ Update `$DEVTEAM_RUN/tickets/<your-id>.json` at every phase change and every tas
 node docs/devteam/scripts/devteam.mjs heartbeat --phase build --task T3 --note "session expiry test red, implementing"
 ```
 
-This writes your ticket file and, on a phase change, appends a `ticket.phase` event. If your agent CLI or a gateway reports cost, pass `--usd`, `--in` and `--out` with `--cost-source`.
+This writes your ticket file (liveness) and, on a phase change, a `phase` line in the log with your cumulative spend ([`log.md`](log.md)). Report spend at every phase change at least: spend between two phase lines is charged to the earlier phase. Pass `--usd`, `--in` and `--out` with `--cost-source` when your agent CLI or a gateway reports cost.
 
 **Run gates through the recorder,** so slow and flaky tests show up: `devteam.mjs gate test --junit reports/junit.xml -- pnpm test`. It passes the command's exit status through, so it can replace the bare command anywhere.
 
 You only write facts git cannot know. Never write merged, reviewed or released status; those are computed.
+
+**Record what's worth knowing beyond your ticket** as an observation: a slow or flaky test, a confusing contract, a tool that kept failing, something that went well and should be repeated. `devteam.mjs observe --subject <component|gate|ticket> --kind <slug> --detail "<one line>" [--valence -2..2]`. The supervisor turns recurring ones into lessons, which later workers get in their prompt. Your prompt already ends with the lessons that apply to your component and feature; follow them.
 
 ## 5. Talking to the supervisor
 
@@ -61,7 +63,7 @@ Use messages ([`messages.md`](messages.md)): `devteam.mjs send supervisor "<text
 
 When the supervisor tells you the merge landed:
 
-1. `devteam.mjs heartbeat --phase done`.
+1. `devteam.mjs heartbeat --phase done` if you are still running (the metrics end your last phase at the merge either way).
 2. Exit. The supervisor removes the worktree and closes the window.
 
 (Every ruling you received must already be in your spec or plan before you ask for the merge word; see `ticket-lifecycle.md` §7.)

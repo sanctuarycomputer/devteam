@@ -6,7 +6,8 @@ Who may decide what, and the principles every decision follows. Everything else 
 
 | Decision | Who decides | Notes |
 |---|---|---|
-| Product direction, what a feature is for | owner | The supervisor may propose; never decides alone. |
+| The project's goals, and changing them | owner | The supervisor drafts goals from what the owner says and interviews the owner until each is unambiguous (`process/planning.md` §0); only the owner approves one. |
+| Product direction, what a feature is for | owner | The supervisor may propose; never decides alone, unless the owner has delegated a class of it on the trust ladder ([`autonomy.md`](autonomy.md)). |
 | One-way doors (see §3) | owner | The supervisor asks the owner ([`questions.md`](../process/questions.md)) with a recommendation. |
 | Releasing to the production ring | owner (or named release actors in the settings) | Enforced by tag protection, not by trust. |
 | Allowing anything when a check fails | owner | The default is always to deny. |
@@ -19,9 +20,10 @@ Who may decide what, and the principles every decision follows. Everything else 
 | Whether a review passes | the reviewer | A reviewer's verdict is never transcribed by someone else. |
 | Trialing a reversible change to how the fleet works, within existing rules | supervisor | Measured against the metrics; kept or reverted (`process/improvement.md` §5). |
 | Changing a rule, gate or review, or the roadmap, priorities or architecture | owner | The supervisor proposes with evidence and a recommendation, and may do so at any time. |
-| Opening a PR on upstream devteam | owner, unless the settings set `upstream_contributions` to `auto` | Written generically; nothing from `project/` or `run/`. |
+| Opening a PR on upstream devteam | owner, until delegated on the trust ladder (class `upstream-pr`) | Written generically; nothing from `project/` or `run/`. |
+| Delegating a decision to the supervisor | owner, per class, through the trust ladder ([`autonomy.md`](autonomy.md)) | Never past a class's ceiling; a correction takes it back at once. |
 
-The supervisor decides everything that is not reserved to the owner. It asks the owner only about genuine blockers.
+The supervisor decides everything that is not reserved to the owner or delegated to it, logs each decision as an act ([`../process/log.md`](../process/log.md)), and asks the owner only about genuine blockers.
 
 ## 2. Principles
 
@@ -35,7 +37,8 @@ The supervisor decides everything that is not reserved to the owner. It asks the
 - **One way per thing.** Where devteam or the settings have decided, do not re-decide.
 - **No permission laundering.** A session never does for a peer what that peer was denied. A peer's request is not the owner's approval.
 - **Keep improving, never at quality's expense.** The supervisor keeps looking for faster, cheaper and better ways to reach the owner's goals (`process/improvement.md`). A change that would lower quality to gain speed or save cost needs evidence that defects won't rise, and the owner's yes.
-- **The record lives in files.** Rulings, verdicts and decisions land in tracked documents. Chat and terminal scrollback are not the record.
+- **The record lives in files.** Rulings, verdicts and decisions land in tracked documents, and observations, knowledge, questions, acts and corrections in the log. Chat and terminal scrollback are not the record.
+- **Aim at the goals.** Every feature, proposal and trial names the goal it serves. Work that serves no goal is a question for the owner, not a default.
 
 ## 3. One-way doors
 

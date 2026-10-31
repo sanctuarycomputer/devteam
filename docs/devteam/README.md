@@ -14,6 +14,8 @@ Engineering governance and process for building software with a supervised fleet
 | A **reviewer** asked to review a stage | [`governance/review.md`](governance/review.md) |
 | A **planner** turning an owner direction into a graph | [`process/planning.md`](process/planning.md) |
 | Improving the fleet, the roadmap and devteam itself (the supervisor, on its loop) | [`process/improvement.md`](process/improvement.md) |
+| Keeping the record: observations, knowledge, problems, acts (the supervisor, every tick) | [`process/log.md`](process/log.md) |
+| The **owner**, deciding what to delegate | [`governance/autonomy.md`](governance/autonomy.md) |
 
 ## Vocabulary
 
@@ -32,9 +34,27 @@ The work, from largest to smallest:
 - **wave**: the tickets that can run in parallel once the previous wave merges. Computed from dependencies (`devteam.mjs waves`), not a timebox.
 - **graph**: the structure across all of it. Tickets and their dependencies, plus the live state of the fleet working them.
 
+Above all of it sits the **goal**: an outcome the owner wants, with a measure, a target and a date. Features name the goals they serve.
+
+The loop's record ([`process/log.md`](process/log.md)):
+
+- **observation**: something noticed: a metric finding, a slow test, a goal reading, the outcome of a decision.
+- **knowledge**: what has been learned from recurring observations (a lesson, a fact, an owner preference), with a confidence and evidence. Accepted knowledge goes into the prompts of the sessions it applies to.
+- **problem**: something wrong (an issue) or that could go wrong (a risk), with a lifecycle.
+- **question**: the supervisor asking the owner, saying why it needed them.
+- **act**: a decision the supervisor made. **correction**: the owner (or a retro) saying an act was wrong.
+- **trust ladder**: which of the owner's decisions the supervisor may make alone, earned class by class ([`governance/autonomy.md`](governance/autonomy.md)).
+
 ## How it fits together
 
-Two loops. **Planning works backwards from goals:** the owner names an outcome, planning breaks it into features, stories and tickets until each ticket is one PR whose dependencies are known (`process/planning.md`). **Running works forwards in short cycles** (observe, orient, decide, act): sessions report state and the dashboard shows it; the supervisor reads it against the graph and past decisions; the supervisor or the owner decides; workers build. Each tick of the supervisor's loop is one cycle, and the improvement loop (`process/improvement.md`) tunes the cycle itself.
+Two loops. **Planning works backwards from goals:** the owner states the goals, the supervisor interviews the owner until each is unambiguous, and planning breaks each into the preconditions that must hold, the features that make them hold, and stories and tickets, until each ticket is one PR whose dependencies are known (`process/planning.md`). **Running works forwards in short cycles**, each tick of the supervisor's loop:
+
+- **observe**: metrics, findings, goal readings and what workers notice become observations;
+- **orient**: recurring observations become knowledge or problems; accepted knowledge shapes the next prompts;
+- **decide**: the supervisor decides what it may, and asks the owner the rest, saying why; the owner's answers can widen what it may decide next time;
+- **act**: workers build; the supervisor's decisions are logged as acts the owner can correct, and corrections take trust back and teach.
+
+The improvement loop (`process/improvement.md`) tunes the cycle itself. All of it is recorded in an append-only log, one file per writer, in git ([`process/log.md`](process/log.md)).
 
 ## Layout
 
@@ -45,7 +65,7 @@ docs/devteam/
   process/             the procedures: how work moves (owner-tweakable)
   templates/           skeletons agents fill instead of inventing structure
   dashboard/           the owner's dashboard page, served by scripts/dashboard.mjs
-  schema/              JSON schemas for tickets, questions, events
+  schema/              JSON schemas for tickets, run state, events and log lines
   scripts/             zero-dependency tools (Node 20+, bash)
   project/             THIS project's content; created at bootstrap, never touched by upstream sync
     settings.md         the project's answers to every open decision
@@ -55,9 +75,10 @@ docs/devteam/
     tickets/<id>/      spec.md, plan.md, reviews/, verification.md for each ticket
     reviews/<feature>/ design and graph review records
     decisions.md       cross-cutting rulings, dated
-    improvement/       metrics snapshots, research notes and improvement proposals
+    log/               the durable log: <writer>.jsonl, one JSON object per line (process/log.md)
+    improvement/       metrics snapshots and research notes
     upstream-log.md    upstream releases considered and what was adopted, adapted or skipped
-  run/                 live runtime state (gitignored): owner questions, heartbeats, the event log (incl. messages)
+  run/                 live runtime state (gitignored): heartbeats, session messages, and log/ (the live log, synced daily into project/log)
 ```
 
 **How sessions talk.** Workers, planners and the supervisor send each other one-line messages typed into each other's tmux panes ([`process/messages.md`](process/messages.md)). Only the supervisor talks to the owner, by asking questions ([`process/questions.md`](process/questions.md)).
@@ -88,12 +109,14 @@ git, tmux, Node 20+ (scripts use only built-ins), the GitHub CLI, one agent CLI 
 | `waves`, `ready`, `status` | supervisor, planner | parallel waves and critical path; what can start; computed stage of every ticket |
 | `check-ticket <id>`, `check-pr` | worker, CI | definition of done and the automatic merge-word check at an exact head |
 | `send`, `messages` | everyone | messages between sessions |
-| `ask`, `questions`, `sync-questions`, `recorded` | supervisor | questions to the owner |
-| `answer` | owner | answering the supervisor's questions |
+| `ask`, `questions`, `withdraw`, `recorded` | supervisor | questions to the owner |
+| `answer`, `correct`, `seen`, `goal approve` | owner | answering (and how to handle the next one), correcting an act, approving a goal; usually from the dashboard |
+| `goal`, `observe`, `orient`, `knowledge`, `problem`, `act`, `trust` | supervisor (workers: `observe`) | the loop: goals, observations, knowledge, problems, acts, the trust ladder |
+| `log`, `log-check`, `log-sync` | supervisor, CI | read and check the log; the daily log-only PR |
 | `heartbeat`, `event`, `history`, `whoami` | worker, supervisor | live state, the event log, catching up on history |
 | `gate <name> -- <cmd>` | worker | run a gate and record its time, result and tests |
 | `metrics`, `dashboard-data` | supervisor | time and cost by phase, gate health, findings; data for the dashboard |
-| `node docs/devteam/scripts/dashboard.mjs` | owner | the dashboard: questions to answer, burn-up and forecast, board, progress, blockers, analytics |
+| `node docs/devteam/scripts/dashboard.mjs` | owner | the dashboard: goals, questions to answer, burn-up and forecast, board, observations, knowledge and problems, the trust ladder, the act feed with corrections, analytics |
 | `notes <from> [<to>]`, `settings` | supervisor | story-grouped release notes; the project's settings |
 | `bash docs/devteam/scripts/make-worker.sh <id> [--resume]` | supervisor | worktree, tmux window and agent for a ticket (`--planner <feature>` for a planner) |
 | `bash docs/devteam/scripts/stop-hook.sh` | worker's agent | refuses to stop while the run state is stale |

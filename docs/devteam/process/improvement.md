@@ -1,6 +1,6 @@
 # Improvement
 
-The supervisor doesn't just run the fleet; it keeps making the fleet better. Faster cycles, cheaper runs, better code, a smarter architecture, a sharper roadmap. This doc is the loop that does it: measure, look for improvements in four places, propose, trial, keep what works, and share what's general with upstream devteam.
+The supervisor doesn't just run the fleet; it keeps making the fleet better. Faster cycles, cheaper runs, better code, a smarter architecture, a sharper roadmap, all aimed at the owner's goals. This doc is the loop that does it: measure, look for improvements in four places, propose, trial, keep what works, and share what's general with upstream devteam. Everything it records goes in the log ([`log.md`](log.md)).
 
 **The one rule:** never trade quality for speed. An improvement that weakens a gate, a review, or a code rule needs evidence that defects won't rise, and the owner's yes.
 
@@ -16,27 +16,27 @@ The supervisor runs it on quiet ticks, within the time and spend limits in the s
 
 Three sources feed the numbers, and each depends on sessions recording as they go:
 
-- **Phases and cost:** workers heartbeat at every phase change and report their cumulative spend (`devteam.mjs heartbeat --phase <p> --usd <total> --in <tokens> --out <tokens>`; `worker.md` §4). Each report charges the spend since the last one to the phase that was running.
+- **Phases and cost:** workers heartbeat at every phase change and report their cumulative spend (`devteam.mjs heartbeat --phase <p> --usd <total> --in <tokens> --out <tokens>`; `worker.md` §4). Each phase change is a `phase` line in the log; the spend between two of them is charged to the earlier phase.
 - **Gates:** every local gate run goes through `devteam.mjs gate <name> [--junit <report.xml>] -- <command>`, which records duration, pass or fail, the commit, and (with a JUnit report) each test's time and failures.
-- **Everything else:** git, review records, messages and owner questions.
+- **Everything else:** git, review records, messages, owner questions, observations and corrections in the log.
 
 `devteam.mjs metrics [--since <date>] [--json]` turns them into:
 
 | Metric | What it tells you |
 |---|---|
-| cycle time per ticket (worker made → merged), median and slowest | where time goes |
+| cycle time per ticket (first phase line → merged), median and slowest | where time goes |
 | time and cost in each phase (spec, plan, build, verify, final-review, blocked, …) | which part of the loop is slow or expensive |
 | gate durations and fail rates; flaky gates and tests (failed, then passed at the same commit); slowest tests | what to speed up or stabilize |
 | first-pass rejection rate per review stage, review passes per ticket | review strength and rework |
-| how long messages wait for a reply, and owner questions for an answer | coordination drag |
+| how long messages wait for a reply, and owner questions for an answer; the owner's answer rate over 14 days | coordination drag, and whether the decide step is stalling |
 | cost total, per ticket and per merged ticket | spend efficiency |
-| escaped defects (`defect.escaped` events) | quality, the number that must not rise |
+| escaped defects (observations with kind `escaped-defect`) | quality, the number that must not rise |
 
-It also lists **findings**: blockers and inefficiencies with a suggested next step, highest severity first. Flaky gates and tests, slow gates and tests, the phase taking most of the time or money, blocked tickets, workers with stale heartbeats, merge requests waiting on the supervisor, unanswered messages, owner questions past their deadline, tickets churning through review, spare capacity while ready tickets wait, and escaped defects. Each finding is a candidate for a proposal (§4); the cheap, obvious ones (fix a flaky test, shard a slow suite) can go straight into a chore ticket.
+It also lists **findings**: blockers and inefficiencies with a suggested next step, highest severity first. Flaky gates and tests, slow gates and tests, the phase taking most of the time or money, blocked tickets, workers with stale heartbeats, merge requests waiting on the supervisor, unanswered messages, owner questions past their deadline, tickets churning through review, spare capacity while ready tickets wait, and escaped defects. `devteam.mjs observe-metrics` records each finding as an observation, so recurring ones surface in `orient` (`log.md` §3). Each finding is a candidate for a proposal (§4); the cheap, obvious ones (fix a flaky test, shard a slow suite) can go straight into a chore ticket.
 
 ### The dashboard
 
-`devteam.mjs dashboard-data` writes all of this, plus ticket status, the critical path, open owner questions and messages awaiting a reply, to `run/dashboard.json`. The supervisor refreshes it every tick. `node docs/devteam/scripts/dashboard.mjs` serves a local page (http://127.0.0.1:4321) that shows it and lets the owner answer questions; it binds to localhost because anyone who can reach it can answer as the owner.
+`devteam.mjs dashboard-data` writes all of this, plus ticket status, the critical path, open owner questions, messages awaiting a reply and the state of the loop, to `run/dashboard.json`. The supervisor refreshes it every tick. `node docs/devteam/scripts/dashboard.mjs` serves a local page (http://127.0.0.1:4321) laid out by the loop: goals, the questions waiting for the owner (with why each needs them, and a choice of how to handle the next one), progress and the board, what was observed, what keeps recurring and what has been learned, the trust ladder, and the act feed with a button to correct any act. It binds to localhost because anyone who can reach it can act as the owner.
 
 The page also shows progress, computed from git so it needs no extra bookkeeping:
 
@@ -73,34 +73,37 @@ At most once every `upstream_check_hours` (default 24):
 
 ## 4. Propose
 
-Every idea becomes a proposal at `project/improvement/proposals/<date>-<slug>.md`, from [`templates/improvement-proposal.md`](../templates/improvement-proposal.md): the evidence, the change, the expected gain on each dimension (speed, quality, cost), the risk, how it will be measured, a trial plan and how to undo it.
+An idea that needs the owner is a **question of kind `proposal`** (`questions.md`), with the evidence ids attached (`--evidence`) and, when the reasoning is long, a research note written from [`templates/improvement-proposal.md`](../templates/improvement-proposal.md) at `project/improvement/research/<date>-<slug>.md` and linked with `--note`: the evidence, the change, the expected gain on each dimension (speed, quality, cost), the risk, how it will be measured, a trial plan and how to undo it.
+
+An idea within the supervisor's own authority is not a question; it is a trial, logged as an act (class `improvement-trial`).
 
 Who decides:
 
 | Kind of change | Decides |
 |---|---|
-| A reversible change to how the supervisor schedules, reviews or prompts, within existing rules | supervisor: trial it |
+| A reversible change to how the supervisor schedules, reviews or prompts, within existing rules | supervisor: trial it (an act) |
 | An edit to `governance/` or `process/`, or a new or changed gate | owner (`constitution.md` §4) |
 | Anything that loosens a gate, a review rule or a code rule | owner, with trial evidence that escaped defects didn't rise |
-| Roadmap, priorities, architecture, a new vendor or dependency | owner, as a recommendation with the research attached |
-| Opening a PR on upstream devteam | owner, unless `upstream_contributions` is `auto` (§6) |
+| Roadmap, priorities, architecture, a new vendor or dependency | owner, as a proposal with the research attached; priority changes may climb the trust ladder (`autonomy.md`) |
+| Opening a PR on upstream devteam | the `upstream-pr` class on the trust ladder: ask until the owner says otherwise (§6) |
 
-Roadmap and architecture suggestions don't wait for a retro. When research or metrics show a faster, better or cheaper path to the owner's goals, ask now, with the proposal linked.
+Roadmap and architecture suggestions don't wait for a retro. When research or metrics show a faster, better or cheaper path to the owner's goals, ask now. Always say which goal the change serves.
 
 ## 5. Trial, measure, keep or revert
 
-- Trial on a slice: one feature, one component, or the next N tickets. Record the start in the proposal and log an `improvement` event.
+- Trial on a slice: one feature, one component, or the next N tickets. Log the start as an act (`devteam.mjs act --class improvement-trial -- "<what, on which slice>"`), and note the before numbers in the research note if there is one.
 - Compare the same metrics before and during. Escaped defects and first-pass rejection rates must not get worse.
-- **Keep** it: land it where it belongs (settings, a prompt template, a process doc via an owner-approved PR), set the proposal's status to `kept`, and add a line to `project/decisions.md`.
-- **Revert** it: undo it, set the status to `reverted` with the numbers, and keep the file. A failed idea is still knowledge.
+- Record the result as an **outcome**: an observation with kind `outcome`, refs to the act (and the question, if the owner approved it), a valence, and the measured change (`devteam.mjs observe --subject <act-id> --kind outcome --refs <act-id> --valence 1 --value <n> --unit <u> --detail "…"`).
+- **Keep** it: land it where it belongs (settings, a prompt template, a process doc via an owner-approved PR) and add a line to `project/decisions.md`. If it taught something general, record it as a lesson.
+- **Revert** it: undo it, and record the outcome with its numbers anyway. A failed idea is still knowledge.
 
 ## 6. Sharing upstream
 
 When a kept improvement is to devteam itself (`governance/`, `process/`, `templates/`, `schema/`, `scripts/`) and would help other projects, contribute it:
 
 1. Write it generically. Remove anything project-specific: names, components, data, metrics that identify the project. Never include code or content from `project/` or `run/`.
-2. If `upstream_contributions` in the settings is `ask` (the default), ask the owner first, with the diff summary. If it is `auto`, go ahead and tell the owner afterwards.
-3. Open a PR on `upstream_repo` with a body in the release-note shape: **What**, **Why** (with the trial evidence, anonymized) and **Migration**. Record the PR link in the proposal.
+2. Check the `upstream-pr` class on the trust ladder (`devteam.mjs trust`). Below rung 3, ask the owner first (a `proposal` question with the diff summary). At rung 3, go ahead and log the act; the owner sees it in the act feed.
+3. Open a PR on `upstream_repo` with a body in the release-note shape: **What**, **Why** (with the trial evidence, anonymized) and **Migration**. Put the PR link in the act.
 
 ## 7. What the supervisor must not do
 

@@ -27,11 +27,12 @@ Scripts read this block. Keep it valid JSON.
   "worker_denied_commands": ["gh pr merge", "git push origin main", "git push origin HEAD:main"],
   "upstream_repo": "sanctuarycomputer/devteam",
   "upstream_check_hours": 24,
-  "upstream_contributions": "ask",
   "retro_every_days": 7,
   "research_every_days": 7,
   "improvement_budget_usd_per_week": null,
-  "slow_gate_minutes": 10
+  "slow_gate_minutes": 10,
+  "max_open_questions": 7,
+  "autonomy_ceilings": {}
 }
 ```
 

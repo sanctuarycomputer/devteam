@@ -1,0 +1,699 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "devteam/log.schema.json",
+  "title": "Log line",
+  "description": "One line of a log file: run/log/<writer>.jsonl (live) or project/log/<writer>.jsonl (durable). One JSON object per line, append-only. op new creates an object; op set changes fields on it. Which writer may create which type and set which field is the authority table in process/log.md \u00a75, enforced by scripts/log.mjs and by check-pr. Scales are numbers; sets that grow (decision classes, reasons, observation kinds) are not enums here.",
+  "type": "object",
+  "required": [
+    "v",
+    "id",
+    "type",
+    "op",
+    "at",
+    "by"
+  ],
+  "properties": {
+    "v": {
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z]-\\d{8}-\\d{6}(\\d{3})?-[a-z0-9]+(-[a-z0-9]+)*$"
+    },
+    "type": {
+      "enum": [
+        "goal",
+        "observation",
+        "phase",
+        "knowledge",
+        "problem",
+        "question",
+        "act",
+        "correction",
+        "seen"
+      ]
+    },
+    "op": {
+      "enum": [
+        "new",
+        "set"
+      ]
+    },
+    "at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "by": {
+      "type": "string",
+      "description": "owner, supervisor, a ticket id, or plan-<feature>; must match the file's writer"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "goal"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "outcome": {
+            "type": "string"
+          },
+          "measure": {
+            "type": "object",
+            "properties": {
+              "description": {
+                "type": "string"
+              },
+              "target": {
+                "type": "number"
+              },
+              "unit": {
+                "type": "string"
+              },
+              "direction": {
+                "enum": [
+                  "up",
+                  "down"
+                ]
+              }
+            }
+          },
+          "horizon": {
+            "type": "string"
+          },
+          "non_goals": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "constraints": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "preconditions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "priority": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 99
+          },
+          "status": {
+            "enum": [
+              "draft",
+              "ready",
+              "met",
+              "abandoned"
+            ]
+          },
+          "channel": {
+            "enum": [
+              "cli",
+              "dashboard"
+            ]
+          }
+        },
+        "if": {
+          "properties": {
+            "op": {
+              "const": "new"
+            }
+          }
+        },
+        "then": {
+          "required": [
+            "title"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "observation"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "source": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "detector": {
+            "type": "string"
+          },
+          "severity": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4
+          },
+          "valence": {
+            "type": "integer",
+            "minimum": -2,
+            "maximum": 2
+          },
+          "source_key": {
+            "type": "string"
+          },
+          "refs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "fix_hint": {
+            "type": "string"
+          },
+          "measure": {
+            "type": "object",
+            "required": [
+              "value"
+            ],
+            "properties": {
+              "value": {
+                "type": "number"
+              },
+              "unit": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "if": {
+          "properties": {
+            "op": {
+              "const": "new"
+            }
+          }
+        },
+        "then": {
+          "required": [
+            "subject",
+            "kind",
+            "detail"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "phase"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "from": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "to": {
+            "type": "string"
+          },
+          "usd": {
+            "type": "number",
+            "minimum": 0
+          },
+          "input_tokens": {
+            "type": "number",
+            "minimum": 0
+          },
+          "output_tokens": {
+            "type": "number",
+            "minimum": 0
+          },
+          "sha": {
+            "type": "string"
+          },
+          "task": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          }
+        },
+        "if": {
+          "properties": {
+            "op": {
+              "const": "new"
+            }
+          }
+        },
+        "then": {
+          "required": [
+            "to"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "knowledge"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "fact",
+              "lesson",
+              "preference",
+              "constraint",
+              "pointer"
+            ]
+          },
+          "statement": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string",
+            "pattern": "^(project|component:[a-z0-9-]+|feature:[a-z0-9-]+|class:[a-z0-9-]+)$"
+          },
+          "status": {
+            "enum": [
+              "candidate",
+              "accepted",
+              "stale",
+              "retired"
+            ]
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "valence": {
+            "type": "integer",
+            "minimum": -2,
+            "maximum": 2
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "if": {
+          "properties": {
+            "op": {
+              "const": "new"
+            }
+          }
+        },
+        "then": {
+          "required": [
+            "kind",
+            "statement",
+            "scope",
+            "status"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "problem"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "realized": {
+            "type": "boolean"
+          },
+          "severity": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4
+          },
+          "status": {
+            "enum": [
+              "open",
+              "owned",
+              "mitigating",
+              "resolved"
+            ]
+          },
+          "detail": {
+            "type": "string"
+          },
+          "threatens": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "assigned_to": {
+            "type": "string"
+          },
+          "refs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "if": {
+          "properties": {
+            "op": {
+              "const": "new"
+            }
+          }
+        },
+        "then": {
+          "required": [
+            "title",
+            "realized",
+            "severity",
+            "status"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "question"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "owner-decision",
+              "one-way-door",
+              "clarification",
+              "proposal",
+              "trust",
+              "goal-definition"
+            ]
+          },
+          "class": {
+            "type": "string"
+          },
+          "ticket": {
+            "type": "string"
+          },
+          "question": {
+            "type": "string"
+          },
+          "context": {
+            "type": "string"
+          },
+          "options": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "recommendation": {
+            "type": "string"
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "default": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "deadline": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "blocks": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "note": {
+            "type": "string"
+          },
+          "why_asked": {
+            "type": "object",
+            "properties": {
+              "rung": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 3
+              },
+              "ceiling": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 3
+              },
+              "reasons": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "status": {
+            "enum": [
+              "withdrawn",
+              "defaulted"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          },
+          "recorded_in": {
+            "type": "string"
+          },
+          "answer": {
+            "type": "string"
+          },
+          "matched": {
+            "type": "boolean"
+          },
+          "autonomy": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "required": [
+              "class",
+              "rung"
+            ],
+            "properties": {
+              "class": {
+                "type": "string"
+              },
+              "rung": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 3
+              },
+              "scope": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          "standing_rule": {
+            "type": "string"
+          },
+          "channel": {
+            "enum": [
+              "cli",
+              "dashboard"
+            ]
+          }
+        },
+        "if": {
+          "properties": {
+            "op": {
+              "const": "new"
+            }
+          }
+        },
+        "then": {
+          "required": [
+            "kind",
+            "question"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "act"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "class": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          },
+          "what": {
+            "type": "string"
+          },
+          "rung": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3
+          },
+          "refs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "reversible": {
+            "type": "boolean"
+          },
+          "approved_by": {
+            "type": "string"
+          }
+        },
+        "if": {
+          "properties": {
+            "op": {
+              "const": "new"
+            }
+          }
+        },
+        "then": {
+          "required": [
+            "class",
+            "what"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "correction"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "act": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "severity": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4
+          },
+          "repair": {
+            "enum": [
+              "undo",
+              "fix-ticket",
+              "none"
+            ]
+          }
+        },
+        "if": {
+          "properties": {
+            "op": {
+              "const": "new"
+            }
+          }
+        },
+        "then": {
+          "required": [
+            "act",
+            "reason"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "seen"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "upto": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "if": {
+          "properties": {
+            "op": {
+              "const": "new"
+            }
+          }
+        },
+        "then": {
+          "required": [
+            "upto"
+          ]
+        }
+      }
+    }
+  ]
+}
