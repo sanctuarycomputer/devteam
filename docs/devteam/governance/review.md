@@ -4,11 +4,11 @@ What counts as a review, how it is recorded, and how its quality is measured. Ad
 
 ## 1. What a review is
 
-- **Non-author.** The reviewer did not write the work. A fresh subagent dispatched by the author is acceptable for build tasks; anything marked `risk: high` in the graph (see `planning.md` §5) needs a reviewer from a **different session**, and ideally a different model.
+- **Non-author.** The reviewer did not write the work. A fresh subagent dispatched by the author counts as non-author for **spec, plan and task** reviews on any node. **Final** reviews come from a fresh reviewer that has not seen the build: a fresh subagent is enough on a `normal` node; on a `risk: high` node (see `planning.md` §5) there are two, from two sessions other than the worker's, ideally on different models.
 - **Adversarial.** The reviewer's job is to find the defect. Its default verdict is **not approved**; it approves only when it has looked and failed to find a Critical or Important issue.
 - **Against the rules, not taste.** Findings cite the governing text: a Law id from `code-style.md`, a line of the spec, a contract clause, a gate in `quality-gates.md`. A finding that cites nothing is a suggestion, and suggestions never block.
 - **Scoped.** The reviewer reads the diff and everything it cites, not the whole tree. Where a test cannot prove a property, the reviewer mutates the code in a scratch copy to check that a test fails.
-- **At an exact head.** A verdict applies to one commit SHA. Any later push invalidates it.
+- **At an exact head.** A verdict names the commit it reviewed. It still holds at a later head only if every commit since then changes nothing but review records (committing the record itself moves the head). Any other later commit invalidates it.
 
 ## 2. Stages that are reviewed
 
@@ -45,17 +45,22 @@ What counts as a review, how it is recorded, and how its quality is measured. Ad
 Every review is a file, written with [`templates/review-record.md`](../templates/review-record.md), at:
 
 ```
-docs/devteam/project/nodes/<node-id>/reviews/<stage>-<pass>.md
+docs/devteam/project/nodes/<node-id>/reviews/<stage>-<pass>[<lineage>].md   spec, plan, contract, task, final
+docs/devteam/project/reviews/<column>/<stage>-<pass>[<lineage>].md           design, graph
 ```
 
-Its last line is the verdict, exactly one of:
+`<pass>` is 1, 2, 3 (`review.md` §3). `<lineage>` is empty for the first independent review and `b`, `c` for further independent ones (for example `final-1.md` and `final-1b.md` on a `risk: high` node). Node review records are committed on the node's branch; column review records on the planning branch.
+
+The record must name its reviewer on a `- Reviewer:` line; an unnamed record does not count. Its last line is the verdict, with the **full 40-character SHA**, exactly one of:
 
 ```
 Verdict: APPROVE <full-head-sha>
 Verdict: CHANGES <full-head-sha>
 ```
 
-Each finding is one row with an id, severity, the rule it cites, the location, and a **disposition** the author fills in: `fixed`, `wont-fix` (with reason, needs reviewer agreement), `disputed` (goes to the supervisor), or `wrong` (the reviewer agrees it was a false positive). `check-node` fails a PR whose final review is missing, is not `APPROVE` at the PR head, or has an undispositioned Critical or Important finding.
+Each finding is one row with an id, severity, the rule it cites, the location, and a **disposition** the author fills in: `fixed`, `wont-fix` (with reason, needs reviewer agreement), `disputed` (goes to the supervisor), or `wrong` (the reviewer agrees it was a false positive).
+
+`check-node` fails a PR when: no final review was made at its exact head; the **latest** final review in any lineage at that head says `CHANGES`; fewer named reviewers approved it than the node's risk requires; or any Critical or Important finding in any of the node's review records lacks a `fixed`, `wont-fix` or `wrong` disposition. `validate` fails an approved column plan whose latest design or graph review is missing or not `APPROVE`.
 
 ## 6. Measuring review quality
 

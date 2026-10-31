@@ -23,7 +23,8 @@ A filled-in `project/binding.md` from the project devteam was first extracted fr
   },
   "shared_resources": ["build-machine", "device-lab"],
   "dashboard_command": null,
-  "notify": "push notification to the owner's phone"
+  "notify": "push notification to the owner's phone",
+  "worker_denied_commands": ["gh pr merge", "git push origin main"]
 }
 ```
 

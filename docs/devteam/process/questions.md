@@ -1,6 +1,6 @@
 # Questions
 
-The inbox is how sessions get unblocked fast. Workers ask the supervisor; the supervisor answers what it can and escalates the rest to the owner with a recommendation. The owner answers from the dashboard (or by editing the file). Every question ever asked stays on disk as history, so a new session can orient from what was already decided instead of re-researching.
+The inbox is how sessions get unblocked fast. Workers and planners ask the supervisor; the supervisor answers what it can and escalates the rest to the owner with a recommendation. The owner answers with `devteam.mjs answer <qid> "<answer>" --by owner`, from a dashboard, or by editing the file's answer fields (then the supervisor's next `sync-questions` logs it and nudges the asker). Every question ever asked stays on disk as history, so a new session can orient from what was already decided instead of re-researching.
 
 ## 1. The file
 
@@ -21,7 +21,7 @@ node docs/devteam/scripts/devteam.mjs ask \
 
 ## 2. Who asks whom
 
-- **Workers always address the supervisor** (`to: supervisor`). They never message the owner directly.
+- **Workers and planners always address the supervisor** (`to: supervisor`). They never message the owner directly; the script refuses it.
 - **The supervisor** answers everything within its authority (`constitution.md` §1). Anything reserved to the owner it re-asks as a new question with `to: owner`, its own recommendation, and the original question's id in `context`. It answers the worker's question with "escalated to <new id>".
 - **The owner** may answer any open question, including ones addressed to the supervisor. An owner answer always wins.
 
@@ -35,15 +35,15 @@ node docs/devteam/scripts/devteam.mjs ask \
 | `slot-request` | worker | a gate slot grant (`supervisor.md` §7) |
 | `blocked` | worker | an unblock, or `park` |
 | `clarification` | anyone | an answer |
-| `owner-decision` | supervisor, planner | product or policy call |
-| `one-way-door` | supervisor, planner | explicit owner yes or no |
+| `owner-decision` | supervisor (escalating its own or a planner's or worker's question) | product or policy call |
+| `one-way-door` | supervisor (same) | explicit owner yes or no |
 
 ## 4. Writing a good question
 
 - **One decision per question.** Two decisions are two questions.
 - **Lead with the decision**, then context. The answerer should be able to answer from the first line in most cases.
 - **Give options and a recommendation.** Never ask an open-ended "what should I do?".
-- **Set `default`** only when the choice is reversible. If the question is unanswered when the default's deadline arrives (the binding's `question_default_after`, 24 hours if unset), the supervisor applies it, sets `status: defaulted`, and logs it. One-way doors never have a default.
+- **Set `default`** only when the choice is reversible. If the question is unanswered after the binding's `question_default_after_hours` (24 if unset), the supervisor applies it with `devteam.mjs answer <qid> "<default>" --defaulted`, which sets `status: defaulted` and logs it. One-way doors never have a default.
 - **Fill `blocks`** with every node that cannot proceed. The inbox is ranked by it.
 
 ## 5. Ranking
@@ -58,9 +58,8 @@ The dashboard shows the same order.
 
 ## 6. After the answer
 
-- The answerer writes the answer fields and appends a `question.answered` event (the script does both: `devteam.mjs answer <id> "<text>"`).
-- The answerer nudges the asker's tmux window: `devteam: <id> answered`. The file holds the content; the nudge only says where to look.
-- **The asker records the ruling in a tracked file** in its next commit, and sets `recorded_in`: node-scoped rulings go in the spec's or plan's Rulings section; cross-cutting ones the supervisor adds to `project/decisions.md` (through a `chore-` PR or the next planning PR).
+- `devteam.mjs answer` writes the answer fields, appends a `question.answered` event, and nudges the asker's tmux pane (`devteam: <id> answered`). The file holds the content; the nudge only says where to look.
+- **The asker records the ruling in a tracked file** in its next commit, then runs `devteam.mjs recorded <qid> <path>`. Node-scoped rulings go in the spec's or plan's Rulings section, before the node asks for the merge word. Cross-cutting ones the supervisor adds to `project/decisions.md` (through a `chore-` PR or the next planning PR).
 
 ## 7. Notifying the owner
 

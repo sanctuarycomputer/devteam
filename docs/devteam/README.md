@@ -21,7 +21,7 @@ Engineering governance and process for building software with a supervised fleet
 - **supervisor**: one long-lived session acting as technical PM/CTO. Plans, rules, gives the merge word, writes no production code.
 - **worker**: one session bound to one graph node, in its own git worktree and tmux window. Decides for itself whether to use subagents inside its node.
 - **reviewer**: any session or subagent that did not author the work under review.
-- **column**: a feature area owned end to end (the owner may call it a pitch). One design, one column plan, many nodes.
+- **column**: a feature area owned end to end. One design, one column plan, many nodes. The reserved column `chores` holds chore and spike nodes that belong to no plan.
 - **node**: one unit of the work graph. **One node is one reviewable PR.** Nodes have ids like `api-07-session-tokens`.
 - **binding**: a project-specific decision the doctrine leaves open (services, persistence tiers, release rings, agent command). Lives in `project/binding.md`.
 
@@ -67,12 +67,15 @@ git, tmux, Node 20+ (scripts use only built-ins), the GitHub CLI, one agent CLI 
 
 ## Scripts
 
-```
-node docs/devteam/scripts/devteam.mjs validate        # graph + state consistency (CI gate)
-node docs/devteam/scripts/devteam.mjs ready           # nodes whose dependencies are met
-node docs/devteam/scripts/devteam.mjs waves           # parallel waves + critical path
-node docs/devteam/scripts/devteam.mjs status [--json] # derived stage of every node
-node docs/devteam/scripts/devteam.mjs check-node <id> # definition-of-done check for a node PR
-node docs/devteam/scripts/devteam.mjs questions       # open owner questions, ranked
-bash docs/devteam/scripts/spawn-node.sh <id>          # worktree + tmux window + worker for a node
-```
+`node docs/devteam/scripts/devteam.mjs help` lists every command. The ones each role uses most:
+
+| Command | Who | What |
+|---|---|---|
+| `validate` | planner, CI | check the graph against the planning rules |
+| `waves`, `ready`, `status` | supervisor, planner | parallel waves and critical path; what can start; derived stage of every node |
+| `check-node <id>`, `check-pr` | worker, CI | definition of done and the mechanical merge-word check at an exact head |
+| `ask`, `answer`, `questions`, `sync-questions`, `recorded` | everyone | the question inbox |
+| `heartbeat`, `event`, `history`, `whoami` | worker, supervisor | live state, the event log, orientation |
+| `notes <from> [<to>]`, `binding` | supervisor | story-grouped release notes; the project's settings |
+| `bash docs/devteam/scripts/spawn-node.sh <id> [--resume]` | supervisor | worktree, tmux window and agent for a node (`--planner <column>` for a planner) |
+| `bash docs/devteam/scripts/stop-hook.sh` | worker's agent | refuses to stop while the run state is stale |

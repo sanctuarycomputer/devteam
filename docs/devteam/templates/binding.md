@@ -23,7 +23,8 @@ Scripts read this block. Keep it valid JSON.
   },
   "shared_resources": [],
   "dashboard_command": null,
-  "notify": null
+  "notify": null,
+  "worker_denied_commands": ["gh pr merge", "git push origin main", "git push origin HEAD:main"]
 }
 ```
 
@@ -88,11 +89,11 @@ What the supervisor checks on every contract stage (`item-lifecycle.md` §3):
 
 | Law / gate | `quality-gates.md` row | CI step | Commissioned by | Mode |
 |---|---|---|---|---|
-| | | | | enforced / report-only |
+| | | | | enforced / ratchet |
 
 ## 10. Known debt
 
-Gates in report-only mode and the chore nodes that will bring them to green:
+Gates in ratchet mode (`process/bootstrap.md` §5.3), their recorded violation counts per component, and the chore nodes that will bring them to green:
 
 -
 

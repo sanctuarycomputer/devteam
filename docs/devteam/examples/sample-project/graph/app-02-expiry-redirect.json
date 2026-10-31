@@ -5,9 +5,17 @@
   "component": "app",
   "kind": "build",
   "size": "S",
-  "risk": "normal",
-  "serves": ["SIGNIN-S2"],
-  "depends_on": ["api-01-session-contract"],
-  "touches": ["app/src/session/**"],
-  "done_when": ["app/src/session/expiry.test.ts passes: an expired fake token routes to /sign-in"]
+  "risk": "high",
+  "serves": [
+    "SIGNIN-S2"
+  ],
+  "depends_on": [
+    "api-01-session-contract"
+  ],
+  "touches": [
+    "app/src/session/**"
+  ],
+  "done_when": [
+    "app/src/session/expiry.test.ts passes: an expired fake token routes to /sign-in"
+  ]
 }

@@ -74,7 +74,11 @@ tmux send-keys -t "$TARGET" -l "$ENVLINE"; tmux send-keys -t "$TARGET" Enter
 tmux send-keys -t "$TARGET" -l "$AGENT \"\$(cat '$PROMPT_FILE')\""; tmux send-keys -t "$TARGET" Enter
 
 if [[ "$ROLE" == worker ]]; then
-  ( cd "$WT" && DEVTEAM_RUN="$RUN" DEVTEAM_NODE="$NODE" $DT heartbeat --phase spawned --note "spawned in $TARGET" >/dev/null )
+  # A fresh spawn records phase "spawned". A resume keeps the worker's last recorded phase,
+  # which the relaunched worker reads to re-orient (worker.md §2).
+  if [[ $RESUME == 0 ]]; then
+    ( cd "$WT" && DEVTEAM_RUN="$RUN" DEVTEAM_NODE="$NODE" $DT heartbeat --phase spawned --note "spawned in $TARGET" >/dev/null )
+  fi
   ( cd "$WT" && DEVTEAM_RUN="$RUN" $DT event --type node.spawned --actor supervisor --node "$NODE" --summary "worker in $TARGET, worktree .worktrees/$NAME$([[ $RESUME == 1 ]] && echo ' (resumed)')" >/dev/null )
 fi
 echo "spawned $ROLE $NAME in $TARGET at $WT"

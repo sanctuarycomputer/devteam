@@ -10,20 +10,20 @@ Planning is run by the supervisor, or by a planner session the supervisor spawns
 |---|---|---|---|
 | P0 intake | owner direction | problem statement in the column plan §0 | owner confirms the statement (one question) |
 | P1 research | problem statement, codebase | `project/designs/<slug>.research.md` | every open technical unknown is either answered or listed |
-| P2 design | research | `project/designs/<slug>.md` | design review APPROVE (`review.md`); owner answers on any one-way door |
+| P2 design | research | `project/designs/<slug>.md` | `project/reviews/<column>/design-<n>.md` APPROVE; owner answers on any one-way door |
 | P3 stories | design | column plan §1 | every goal in the design maps to at least one story |
 | P4 decomposition | design + stories | `project/graph/<id>.json` files + column plan §2 to §4 | `devteam.mjs validate` passes |
-| P5 graph review | the graph | review record `graph-1.md` | review APPROVE |
+| P5 graph review | the graph | `project/reviews/<column>/graph-<n>.md` | review APPROVE |
 | P6 landing | approved graph | a merged `chore-plan-<column>` PR | supervisor approves; nodes become schedulable |
 
 Each stage's output is committed on a `plan/<column>` branch as it is produced, so a crashed planner resumes from files, not memory. The whole column lands as one PR at P6.
 
-Questions to the owner go through the inbox ([`questions.md`](questions.md)) with a recommendation attached. Planning does not stall on a question that has a reversible default: it records the default, proceeds, and lets the owner overrule.
+Questions go through the inbox ([`questions.md`](questions.md)) with a recommendation attached. A planner asks the supervisor, which answers or escalates owner-reserved questions (product intent, one-way doors) to the owner. Planning does not stall on a question that has a reversible default: it records the default, proceeds, and lets the owner overrule.
 
 ## 2. P0 to P1: intake and research
 
 - **Intake** turns the direction into: the problem in two or three sentences, who it is for, what success looks like in observable terms, explicit non-goals, and hard constraints (deadlines, budgets, platforms). If any of these is unknown, ask; don't infer product intent.
-- **Research** surveys the existing system before designing: what exists that this touches, what contracts are already in place, what prior decisions in `project/decisions.md` constrain it, and what external facts (library capabilities, API limits) the design depends on. Research cites file paths and links. It does not design.
+- **Research** starts from `project/designs/baseline.md` if the project has one (`bootstrap.md` §5.1) and surveys the existing system before designing: what exists that this touches, what contracts are already in place, what prior decisions in `project/decisions.md` constrain it, and what external facts (library capabilities, API limits) the design depends on. Research cites file paths and links. It does not design.
 
 ## 3. P2: the system design
 
@@ -57,7 +57,7 @@ Write one JSON file per node in `project/graph/`, following [`schema/node.schema
 |---|---|
 | `id` | `<component>-<NN>-<slug>`. `NN` is the next free number for that component. Numbers never move and are never reused. |
 | `title` | One line a user of the product could read. Becomes the PR title after the id. |
-| `column` | The column's slug. |
+| `column` | The column's slug. Chore and spike nodes that belong to no column plan use the reserved column `chores`, which needs no plan file. |
 | `component` | The component (service, package, app) the node changes. One node changes one component, except contract nodes. |
 | `kind` | `contract`, `build`, `integration`, `chore` or `spike`. |
 | `size` | `S` or `M` (limits in rule D1). |
@@ -95,6 +95,7 @@ A node may enter its spec and plan stages while its dependencies are unmerged; o
 The graph gets an adversarial review like code (`review.md`), using this checklist:
 
 - hidden dependencies: two nodes that will in fact need each other's code;
+- footprints that overlap work still in flight outside devteam (the baseline's In flight table);
 - footprints that are too broad (`src/**`) to make D4 meaningful;
 - nodes over size, or nodes so small their review costs more than their content;
 - missing contract nodes at a boundary;
@@ -105,7 +106,7 @@ The graph gets an adversarial review like code (`review.md`), using this checkli
 
 ## 7. P6: landing
 
-- The supervisor approves the graph after an APPROVE review and a green `validate`, and merges the `chore-plan-<column>` PR.
+- The supervisor sets the column plan to `Status: approved` after an APPROVE graph review and a green `validate`, and merges the `chore-plan-<column>` PR. (`validate` refuses an approved column plan without approved design and graph reviews.)
 - The root roadmap (if the project keeps one) gains one dated paragraph naming the column and its node count.
 - From this point, nodes whose dependencies are met appear in `devteam.mjs ready`.
 
@@ -119,7 +120,7 @@ Triggers: a worker raises a design-change question the supervisor rules needs gr
 
 ## 9. Stage tracking: derive it, don't record it
 
-Every stage of every node is computed by `devteam.mjs status` from files, branches, PRs and tags. Nobody maintains a status field by hand.
+Every stage of every node is computed by `devteam.mjs status` from files, branches and tags. Nobody maintains a status field by hand. Before a node merges, its folder exists only on its branch, so `status` reads it from the branch tip (the local `node/<id>` branch, which every worktree shares, or `origin/node/<id>`).
 
 | Stage | Derived from |
 |---|---|
@@ -127,7 +128,7 @@ Every stage of every node is computed by `devteam.mjs status` from files, branch
 | ready | every `depends_on` node is merged |
 | spec'd | `project/nodes/<id>/spec.md` with `Status: approved` |
 | planned-in-detail | `plan.md` with `Status: approved` |
-| building | branch `node/<id>` exists, not merged |
+| building | branch `node/<id>` exists, plan approved, every dependency merged |
 | in review | a review record for stage `final` exists |
 | merged | `node/<id>` is reachable from `main` (merge commit) |
 | released | `git tag --contains <merge-sha>` matches `v*` (not `-rc`) |

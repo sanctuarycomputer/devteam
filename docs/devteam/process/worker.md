@@ -29,8 +29,9 @@ Read, in this order, and nothing more until you need it:
 
 - **Stay inside `touches`.** If you need a file outside it, that is a `design-change` question, not a judgment call.
 - **Stop, don't invent.** Spec, plan or contract wrong? Ask (`item-lifecycle.md` §6).
-- **Never merge without the merge word** for your exact head.
-- **Never review your own work** for a stage verdict. You may dispatch a subagent to review a task; final reviews of `risk: high` nodes come from another session (ask with `review-request`).
+- **Never merge.** Ask for the merge word with your exact head; the supervisor verifies and merges (`item-lifecycle.md` §7). If your agent supports deny rules, `gh pr merge` and pushes to `main` are denied for you (binding `worker_denied_commands`).
+- **Never review your own work** for a stage verdict. A subagent you dispatch may review your spec, plan and tasks; final reviews follow `review.md` §1 (for `risk: high` nodes, ask for reviews from other sessions with `review-request`).
+- **Commit node artefacts as you go.** The supervisor reads your spec, plan, reviews and verification from your branch, not your working tree.
 - **Don't wait idle.** While blocked on a question, do any plan work the question doesn't touch. If nothing is left, set phase `blocked` and offer the supervisor review capacity with a `clarification` question.
 - **Subagents are your call.** Use them for parallel tasks, investigations or reviews inside your node. They share your `touches` limit and your branch.
 
@@ -54,10 +55,11 @@ You only write facts git cannot know. Never write merged, reviewed or released s
 
 ## 6. Finishing
 
-When the merge lands:
+When the supervisor tells you the merge landed:
 
 1. `devteam.mjs heartbeat --phase done`.
-2. Make sure every ruling you received is recorded in your spec or plan (`recorded_in` set on each question).
-3. Exit. The supervisor removes the worktree and closes the window.
+2. Exit. The supervisor removes the worktree and closes the window.
+
+(Every ruling you received must already be in your spec or plan, with `recorded_in` set, before you ask for the merge word; see `item-lifecycle.md` §7.)
 
 Your session must not exit with the run state stale. If your agent supports a stop hook, install [`scripts/stop-hook.sh`](../scripts/stop-hook.sh); it refuses to let the session end while your heartbeat is older than your last commit.

@@ -16,8 +16,10 @@ A node is done, and may receive the merge word, only when all of these hold at t
 6. The PR title is `<node-id>: <one line a user of the product could read>` and the branch is `node/<node-id>`.
 7. Any rulings received during the node are copied into the spec's or plan's Rulings section.
 8. No new bare lint suppression; every suppression is a `doctrine-exception(<rule-id>): <reason>` marker (`code-style.md` §16).
+9. Every changed file is inside the node's `touches` or its own node folder.
+10. The PR body's `## One-way doors` section is `None.` or links the owner's answer; it cannot say `None.` if the node lists one-way doors.
 
-`node docs/devteam/scripts/devteam.mjs check-node <id>` checks 1 to 4 and 6 mechanically and is run in CI on every `node/*` branch. Items 5, 7 and 8 are checked by CI and the reviewer.
+`devteam.mjs check-node <id>` checks 2, 3, 4, 6 (title), 9 and 10 mechanically, reading committed files at the exact head; CI runs it as the required `merge-word` check (`ci.md` §3). Items 1 and 7 are checked by the final reviewer against `verification.md` and the spec; items 5 and 8 by CI's other gates.
 
 ## 2. Root gates (every project, day one)
 
@@ -37,6 +39,8 @@ A node is done, and may receive the merge word, only when all of these hold at t
 | devteam | `devteam.mjs validate` fails, or `check-node` fails on a `node/*` branch | |
 
 Add when the trigger fires: accessibility (`L-FE-1`) and lab performance (`L-FE-2`) once there is a UI; evals with thresholds once there is an AI feature (`L-SEC-5`).
+
+Each gate runs in one of two modes, recorded in the binding's commissioning table: **enforced** (any violation fails) or **ratchet** (fails only if the violation count rises or a changed line violates; for adopting existing code, `process/bootstrap.md` §5.3).
 
 ## 3. Default tools per stack
 

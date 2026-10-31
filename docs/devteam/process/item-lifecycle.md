@@ -3,10 +3,10 @@
 How one node goes from a graph file to a merged PR. This is the canonical stage list; [`worker.md`](worker.md) covers how a worker session runs it, and [`supervisor.md`](supervisor.md) covers the approvals.
 
 ```
-spec → plan → [contract stage] → build, task by task → verification → final review → merge word → merge
+spec → plan → [contract stage] → build, task by task → verification → final review → merge word (supervisor merges)
 ```
 
-Every stage ends with an adversarial review by a non-author ([`../governance/review.md`](../governance/review.md)). Every artefact lives in `docs/devteam/project/nodes/<node-id>/` on the node's branch.
+Every stage ends with an adversarial review by a non-author ([`../governance/review.md`](../governance/review.md)). Every artefact lives in `docs/devteam/project/nodes/<node-id>/` on the node's branch. **Commit artefacts as you produce them:** the supervisor and CI read them from the branch (`devteam.mjs status` reads the branch tip; `check-node` reads the exact head), never from your working tree.
 
 ## 1. Spec
 
@@ -36,7 +36,7 @@ The build stage starts only when every `depends_on` node is merged. For each tas
 4. Commit. Update the run state (`worker.md` §4).
 5. A non-author reviews the task diff (`task-<n>.md`). Fix findings, cold-confirm, continue.
 
-The worker decides for itself whether to dispatch subagents for a task's implementation or review. A subagent dispatched by the worker counts as non-author for task reviews, not for the final review of a `risk: high` node.
+The worker decides for itself whether to dispatch subagents for a task's implementation or review. A subagent the worker dispatches counts as a non-author reviewer for **spec, plan and task** reviews on any node. Final reviews follow `review.md` §1: on a `risk: high` node, two final reviews from two different sessions.
 
 ## 5. Verification
 
@@ -54,13 +54,13 @@ If the build reveals that the spec, plan, a contract or the node's `touches` is 
 
 ## 7. Final review and the merge word
 
-1. Merge `origin/main` into the branch; resolve conflicts; re-run gates.
+1. Merge `origin/main` into the branch; resolve conflicts; re-run gates. Check that every answered question about your node is copied into the spec's or plan's Rulings section and marked with `devteam.mjs recorded`.
 2. Push. Open the PR (or mark it ready) with title `<node-id>: <title>` and the body from [`templates/pr-body.md`](../templates/pr-body.md).
 3. A fresh non-author runs the final review (`final-1.md`) over the whole branch. `risk: high` nodes get a second final review from a different session (`final-1b.md`).
 4. Fix, cold-confirm, until the latest final review says `APPROVE <head-sha>` at the current head.
-5. Run `devteam.mjs check-node <id>` locally; it must pass.
-6. Ask the supervisor for the merge word, naming the exact head SHA (question kind `merge-request`).
-7. On the word, merge refusing a moved head (`gh pr merge --merge --match-head-commit <sha>`). Pushing anything after asking invalidates the request.
+5. Commit and push everything, then run `devteam.mjs check-node <id> --title "<pr title>"`; it must pass at your pushed head. CI runs the same check as the required `merge-word` status.
+6. Ask the supervisor for the merge word, naming the exact head SHA (`devteam.mjs ask --kind merge-request --question "merge word for <id>"`; the script records your head).
+7. **Do not merge.** The supervisor verifies and merges itself (`supervisor.md` §6). Pushing anything after asking invalidates the request; ask again with the new head.
 
 ## 8. Using Superpowers
 
@@ -73,6 +73,6 @@ If Superpowers is installed, it maps onto these stages; devteam adds the rules o
 | build | `subagent-driven-development` or `executing-plans`, with `test-driven-development` | a review record per task; run-state updates |
 | debugging | `systematic-debugging` | design questions go to the inbox, not into code |
 | verification | `verification-before-completion` | `verification.md` with commands and results |
-| finish | `finishing-a-development-branch` | final review records, `check-node`, the merge word; never merge without it |
+| finish | `finishing-a-development-branch` | final review records, `check-node`, a merge request; the supervisor merges, never the worker |
 
 Where a Superpowers skill and this doc disagree, this doc wins (it is local governance).

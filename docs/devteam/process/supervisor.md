@@ -28,10 +28,10 @@ Run on a timer: about every 10 minutes when PRs are converging, 30 when quiet. A
 1. **Sync:** `git fetch origin`. Note new merges on `main`.
 2. **Status:** `devteam.mjs status --json`. Compare derived stages with each node's run phase.
 3. **Reconcile drift** (§4).
-4. **Answer** open questions addressed to you, highest-ranked first (`devteam.mjs questions --to supervisor`).
-5. **Apply defaults** to owner questions past their deadline that have a reversible default.
+4. **Answer** open questions addressed to you, highest-ranked first (`devteam.mjs questions --to supervisor`). Run `devteam.mjs sync-questions` first so answers the owner wrote by hand or from a dashboard are logged and their askers nudged.
+5. **Apply defaults** to owner questions older than the binding's `question_default_after_hours` that have a reversible default (`devteam.mjs answer <qid> "<the default>" --defaulted`).
 6. **Schedule** (§5).
-7. **Health:** any node whose heartbeat is older than the binding's `stale_after` (default 30 minutes) and whose pane shows no activity goes to recovery.
+7. **Health:** any node whose heartbeat is older than the binding's `stale_after_minutes` (default 30) and whose pane shows no activity goes to recovery.
 8. **Notify** the owner only on a new blocking owner question or something they must act on now (`questions.md` §7).
 9. Write your own heartbeat: `devteam.mjs heartbeat --supervisor`.
 
@@ -67,7 +67,9 @@ You never merge on green alone and never on someone else's attestation. For each
 6. any node-specific condition from a ruling (for example a rollback constraint) holds;
 7. the PR body's one-way-door section is `None.` or links the owner's answer.
 
-Then answer the question with `merge word for <sha>` and log `word.merge`. The worker merges with `--match-head-commit`. You confirm the merge commit is on `main` yourself before logging `node.merged`. If the worker pushed after asking, the word is void; verify the new head from the start.
+Then give the word by acting on it: merge yourself, refusing a moved head (`gh pr merge <pr> --merge --match-head-commit <sha>`, using the binding's merge method), answer the question with `merged <sha>`, and log `word.merge`. Confirm the merge commit is on `main` before logging `node.merged`. If the worker pushed after asking, the request is void; verify the new head from the start.
+
+**Only you merge.** Under one shared identity no check can prove the word was given (`ci.md` §3), so the act of merging is the word.
 
 ## 7. Shared resources (slots)
 
@@ -97,7 +99,7 @@ The durable record is tracked files (graph, node folders, decisions, column plan
 
 ## 11. Recovery
 
-- **Stale or frozen worker:** capture the pane (`tmux capture-pane -p -t devteam:<id>`). If it shows a modal or a limit banner, clear it. If the agent process is gone, relaunch it with the binding's `resume_command` in the same window and worktree; the worker re-orients from files (`worker.md` §2).
+- **Stale or frozen worker:** capture the pane (`tmux capture-pane -p -t devteam:<id>`). If it shows a modal or a limit banner, clear it. If the agent process is gone, relaunch it with `spawn-node.sh <id> --resume`, which runs the binding's `resume_command` in the same window and worktree and keeps the worker's last recorded phase; the worker re-orients from files (`worker.md` §2).
 - **Usage limits:** if the whole fleet hits a provider limit, set each session to continue at reset where the agent supports it. Switching to a separate account requires relaunching each session; a running session keeps its launch credential.
 - **Safe kill:** kill only a single known PID or a recorded process group (checked not to be 0, 1 or yourself). Never pattern-kill on a shared machine.
 - **After a full respawn:** re-resolve windows against `run/nodes/`, re-read open questions, and nudge every worker to re-orient.

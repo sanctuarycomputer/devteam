@@ -1,9 +1,10 @@
-# devteam gates. Copy to .github/workflows/devteam.yml and add `devteam` to the
-# required aggregate `check` job's needs.
+# devteam gates. Copy to .github/workflows/devteam.yml.
+# Branch protection: require the `devteam-validate` and `merge-word` checks (ci.md §3).
 name: devteam
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
   push:
     branches: [main]
   schedule:
@@ -18,22 +19,40 @@ permissions:
   contents: read
 
 jobs:
-  devteam:
+  devteam-validate:
     runs-on: ubuntu-latest
     steps:
-      # Pin to a full SHA in your copy (ci.md §2).
+      # Pin actions to full SHAs in your copy (ci.md §2).
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: validate graph and state
+      - name: validate graph
         run: node docs/devteam/scripts/devteam.mjs validate
-      - name: definition of done for node branches
-        if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'node/')
+
+  # The mechanical half of the merge word: reviews at the exact head, definition of done,
+  # footprint, PR title and the one-way-doors section. The supervisor's judgment is the other half.
+  merge-word:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: fetch base for footprint and merge detection
+        run: git fetch --no-tags origin "+refs/heads/${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
+      - name: check pull request
         env:
           HEAD_REF: ${{ github.head_ref }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_TITLE: ${{ github.event.pull_request.title }}
-        run: node docs/devteam/scripts/devteam.mjs check-node "${HEAD_REF#node/}" --sha "$HEAD_SHA" --title "$PR_TITLE"
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          printf '%s' "$PR_BODY" > "$RUNNER_TEMP/pr-body.md"
+          node docs/devteam/scripts/devteam.mjs check-pr --head-ref "$HEAD_REF" --sha "$HEAD_SHA" --title "$PR_TITLE" --body-file "$RUNNER_TEMP/pr-body.md"
