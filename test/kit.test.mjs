@@ -292,6 +292,9 @@ test('devteam kit', async (t) => {
     const shaL = git(['rev-parse', 'HEAD'], wt('chore-log'));
     assert.ok(fs.existsSync(must(['chore', 'start', 'devteam-sync-v0.2.1'], { role: 'sup' }).trim()), 'a sync chore is named by its tag (supervisor.md §9)');
     git(['worktree', 'remove', '--force', wt('chore-devteam-sync-v0.2.1')]);
+    for (const bad of ['../escape', 'x.lock', 'a..b', 'Upper']) assert.match(dt(['chore', 'start', bad], { role: 'sup' }).err, /chore slug/, `chore start refuses ${bad}`);
+    assert.match(dt(['chore', 'pr', '../escape', '--title', 't'], { role: 'sup' }).err, /chore slug/, 'chore pr checks the slug too');
+    assert.match(dt(['merge', '--chore', '../escape', '--dry-run'], { role: 'sup' }).err, /chore slug/, 'merge --chore checks the slug too');
     must(['check-pr', '--head-ref', 'chore-log', '--sha', shaL, '--title', 'chore-log: sync', '--body-file', body], { role: 'sup' });
     write(path.join(wt('chore-log'), 'docs/devteam/governance/constitution.md'), '# nothing\n');
     git(['commit', '-qam', 'kit edit'], wt('chore-log'));
