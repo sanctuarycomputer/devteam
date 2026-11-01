@@ -39,6 +39,7 @@ test('devteam kit', async (t) => {
     git(['init', '-q', '--bare', origin], tmp);
     fs.mkdirSync(repo);
     git(['init', '-q', '-b', 'main']);
+    write(path.join(repo, 'CLAUDE.md'), '# Project\n');
     git(['config', 'user.email', 't@t']);
     git(['config', 'user.name', 't']);
     git(['remote', 'add', 'origin', origin]);
@@ -47,6 +48,7 @@ test('devteam kit', async (t) => {
     for (const f of ['docs/devteam/project/settings.md', 'docs/devteam/project/designs/architecture.md', '.github/workflows/devteam.yml']) assert.ok(fs.existsSync(path.join(repo, f)), f);
     assert.match(fs.readFileSync(path.join(repo, '.gitignore'), 'utf8'), /docs\/devteam\/run\//);
     assert.match(fs.readFileSync(path.join(repo, 'AGENTS.md'), 'utf8'), /process\/supervisor\.md/, 'AGENTS.md routes agents to their doc');
+    assert.match(fs.readFileSync(path.join(repo, 'CLAUDE.md'), 'utf8'), /@AGENTS\.md/, 'CLAUDE.md imports AGENTS.md');
     git(['add', '-A']);
     git(['commit', '-qm', 'init']);
     git(['push', '-q', 'origin', 'main']);
@@ -174,19 +176,20 @@ test('devteam kit', async (t) => {
 
   await t.test('merge --dry-run runs the gates at the head as the supervisor', () => {
     const settings = path.join(repo, 'docs/devteam/project/settings.md');
-    fs.writeFileSync(settings, fs.readFileSync(settings, 'utf8').replace('"gates": {}', '"gates": { "test": "test -f billing/card.js && test -f config/master.key", "lint": { "cmd": "true" } }, "worktree_files": ["config/master.key"]'));
+    fs.writeFileSync(settings, fs.readFileSync(settings, 'utf8').replace('"gates": {}', '"gates": { "test": "test -f billing/card.js && test -f config/master.key && test -f .setup-ran", "lint": { "cmd": "true" }, "web": { "cmd": "false", "paths": ["web/**"] } }, "worktree_files": ["config/master.key"], "worktree_setup": "touch .setup-ran"'));
     write(path.join(repo, 'config/master.key'), 'secret\n');
     fs.appendFileSync(path.join(repo, '.gitignore'), 'config/master.key\n');
     must(['merge', 'bill-01-card', '--dry-run', '--title', 'bill-01-card: card capture', '--body-file', body], { role: 'sup' });
     const gates = json(must(['log', '--type', 'gate', '--by', 'supervisor', '--json']));
+    // web is skipped: the PR changes nothing under web/
     assert.deepEqual(gates.map((g) => g.gate).sort(), ['lint', 'test']);
     assert.ok(gates.every((g) => g.ok && g.sha === H2));
-    fs.writeFileSync(settings, fs.readFileSync(settings, 'utf8').replace('"test": "test -f billing/card.js && test -f config/master.key"', '"test": "false"'));
+    fs.writeFileSync(settings, fs.readFileSync(settings, 'utf8').replace('"test": "test -f billing/card.js && test -f config/master.key && test -f .setup-ran"', '"test": "false"'));
     const failed = dt(['merge', 'bill-01-card', '--dry-run', '--title', 'bill-01-card: card capture', '--body-file', body], { role: 'sup' });
     assert.notEqual(failed.status, 0);
     assert.match(failed.out, /gate test failed/);
     assert.ok(!fs.readdirSync(path.join(repo, '.worktrees')).some((d) => d.startsWith('tmp-')), 'no temp worktree left behind');
-    fs.writeFileSync(settings, fs.readFileSync(settings, 'utf8').replace('"test": "false"', '"test": "test -f billing/card.js && test -f config/master.key"'));
+    fs.writeFileSync(settings, fs.readFileSync(settings, 'utf8').replace('"test": "false"', '"test": "test -f billing/card.js && test -f config/master.key && test -f .setup-ran"'));
     must(['phase', 'supervisor', '--usd', '3.5'], { role: 'sup' });
   });
 

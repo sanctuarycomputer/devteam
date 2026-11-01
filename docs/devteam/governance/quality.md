@@ -21,7 +21,7 @@ Points 2, 3, 4, 6, 9 and 10 are mechanical. Points 1, 7 and 8 are the final revi
 
 ## 2. Gates
 
-A rule is real only when a gate runs it. The project's gates live in `project/settings.md` as `gates: { "<name>": "<command>" }` (or `{ "cmd": …, "junit": "<report path>" }`). `merge` runs every one at the PR head before merging; workers run them locally through `devteam.mjs gate <name> -- <command>`, which records time, result and (with `--junit`) each test, so slow and flaky tests show up in the metrics.
+A rule is real only when a gate runs it. The project's gates live in `project/settings.md` as `gates: { "<name>": "<command>" }` (or `{ "cmd": …, "junit": "<report path>", "paths": ["<glob>", …] }`; a gate with `paths` runs only on PRs that change a matching file, for a monorepo's per-app gates). `merge` runs every one at the PR head before merging; workers run them locally through `devteam.mjs gate <name> -- <command>`, which records time, result and (with `--junit`) each test, so slow and flaky tests show up in the metrics.
 
 Every project, day one:
 

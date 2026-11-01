@@ -132,6 +132,9 @@ const SETTINGS_DEFAULTS = {
   // Files a fresh worktree needs that git doesn't carry (gitignored secrets, local env), copied from
   // the main checkout into every worker, planner and gate worktree. Paths relative to the repo root.
   worktree_files: [],
+  // A shell command run in every new worker, planner and gate worktree after worktree_files are
+  // copied (install dependencies, link env files). Empty for none.
+  worktree_setup: '',
   worker_denied_commands: ['gh pr merge*', 'gh api*', 'git push*main*', 'git push*--force*', 'git push*-f *', 'git push*+*'],
   dashboard_port: 4321,
   upstream_repo: 'sanctuarycomputer/devteam',
@@ -1295,12 +1298,21 @@ function checkPr({ headRef, sha, title, body, forge = false }) {
   return fails;
 }
 // Copy settings.worktree_files from the main checkout into a new worktree.
+// Then run settings.worktree_setup there (with DEVTEAM_MAIN set to the main checkout).
 function seedWorktree(wt) {
-  for (const rel of loadSettings().worktree_files ?? []) {
+  const s = loadSettings();
+  for (const rel of s.worktree_files ?? []) {
     const from = path.join(mainRoot, rel);
     if (!fs.existsSync(from)) { warn(`worktree_files: ${rel} is not in the main checkout`); continue; }
     fs.mkdirSync(path.dirname(path.join(wt, rel)), { recursive: true });
     fs.copyFileSync(from, path.join(wt, rel));
+  }
+  if (s.worktree_setup) {
+    try {
+      execFileSync('sh', ['-c', s.worktree_setup], { cwd: wt, stdio: ['ignore', 'inherit', 'inherit'], env: { ...process.env, DEVTEAM_MAIN: mainRoot } });
+    } catch {
+      die(`worktree_setup failed in ${wt}`);
+    }
   }
 }
 // A throwaway checkout of one commit, removed when the process ends however it ends.
@@ -1360,9 +1372,16 @@ function cmdMerge() {
   const gates = Object.entries(loadSettings().gates ?? {});
   if (!gates.length && !flags['no-gates'] && !chore) fails.push('no gates in settings (gates: {name: command}); pass --no-gates to merge without running any');
   if (!fails.length && gates.length && !chore && !flags['no-gates']) {
+    // A gate with `paths` runs only when the PR changes a file matching one of them (a monorepo's
+    // per-app gates); a gate without runs on every PR.
+    const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
+    const changed = base ? changedFiles(base, sha) : null;
+    const applies = ([, spec]) => typeof spec === 'string' || !spec.paths || !changed || changed.some((f) => spec.paths.some((g) => pathMatches(g, f)));
+    const skipped = gates.filter((g) => !applies(g)).map(([n]) => n);
+    if (skipped.length) out(`gates not applicable to this PR: ${skipped.join(', ')}`);
     const wt = detachedWorktree(sha, `merge-${slug(branch)}`);
     try {
-      for (const [name, spec] of gates) {
+      for (const [name, spec] of gates.filter(applies)) {
         const cmd = typeof spec === 'string' ? spec : spec.cmd;
         const started = Date.now();
         let ok = true;
@@ -2682,6 +2701,9 @@ function cmdInit() {
   const agents = path.join(root, 'AGENTS.md');
   if (!fs.existsSync(agents)) { fs.writeFileSync(agents, `# Agents\n\n${AGENTS_SECTION}`); made.push('AGENTS.md'); }
   else if (!readText(agents).includes('docs/devteam/process/supervisor.md')) { fs.appendFileSync(agents, `\n${AGENTS_SECTION}`); made.push('AGENTS.md'); }
+  // Claude Code reads CLAUDE.md, not AGENTS.md: where a CLAUDE.md exists, it imports AGENTS.md.
+  const claude = path.join(root, 'CLAUDE.md');
+  if (fs.existsSync(claude) && !/@AGENTS\.md\b/.test(readText(claude))) { fs.appendFileSync(claude, `\n## devteam\n\n@AGENTS.md\n`); made.push('CLAUDE.md'); }
   if (flags.github) put(path.join(root, '.github', 'workflows', 'devteam.yml'), WORKFLOW_YML);
   out(made.length ? `created:\n${made.map((m) => `  ${m}`).join('\n')}` : 'nothing to create');
   out('next: fill settings (components, agent_command, gates, worktree_files), write designs/architecture.md from the code, then start the supervisor (the upstream README, Setup)');
