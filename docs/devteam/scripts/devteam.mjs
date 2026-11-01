@@ -649,6 +649,14 @@ const LOG_BRANCH = 'chore-log';
 
 // Mirror run/log into project/log on branch chore-log, in its own worktree, and open or update the
 // log-only PR. Run it every tick (it pushes); merge it daily with `merge --chore log`.
+function logPrOpen(wt, main) {
+  if (loadSettings().forge !== 'git') {
+    const open = sh('gh', ['pr', 'list', '--head', LOG_BRANCH, '--state', 'open', '--json', 'number', '--jq', 'length'], { cwd: wt });
+    if (open !== null) return Number(open) > 0;
+  }
+  // forge git (merge lands a --no-ff merge) or no gh: open means not yet on main
+  return git(['merge-base', '--is-ancestor', `origin/${LOG_BRANCH}`, resolveCommit(`origin/${main}`) ? `origin/${main}` : main], wt) === null;
+}
 function cmdLogSync() {
   supervisorOnly('log-sync');
   if (!commonDir || !projectInRepo) die('log-sync needs a git checkout with the project folder inside it');
@@ -657,6 +665,22 @@ function cmdLogSync() {
   const files = fs.existsSync(live) ? fs.readdirSync(live).filter((f) => f.endsWith('.jsonl') && !isPlanFile(f)).sort() : [];
   if (!files.length) return out('nothing in run/log to sync');
   const wt = choreWorktree('log', { reset: true });
+  // A sync whose PR is still open is extended, not rebuilt, so every push fast-forwards: forges
+  // that refuse non-fast-forward pushes (branch rulesets, protected branches) accept it. The
+  // extended branch takes main in by a merge (still a fast-forward for the branch), so its PR is
+  // never behind. Whether the PR is open comes from the forge: after a squash or rebase merge the
+  // branch is never an ancestor of main, and a stale origin/chore-log outlives a deleted branch.
+  const main = loadSettings().main_branch;
+  if (!flags['dry-run'] && git(['fetch', '--quiet', 'origin', `+refs/heads/${LOG_BRANCH}:refs/remotes/origin/${LOG_BRANCH}`], wt) === null) git(['update-ref', '-d', `refs/remotes/origin/${LOG_BRANCH}`], wt);
+  if (resolveCommit(`origin/${LOG_BRANCH}`) && logPrOpen(wt, main)) {
+    gitOrDie(['checkout', '--quiet', '-B', LOG_BRANCH, `origin/${LOG_BRANCH}`], wt);
+    const base = resolveCommit(`origin/${main}`) ? `origin/${main}` : main;
+    if (git(['merge', '--quiet', '--no-edit', '-m', `chore-log: merge ${main}`, base], wt) === null) {
+      git(['merge', '--abort'], wt);
+      gitOrDie(['checkout', '--quiet', '-B', LOG_BRANCH, base], wt);
+      warn(`${LOG_BRANCH} could not take in ${main}; rebuilt from ${main}, so this push needs the forge to allow replacing ${LOG_BRANCH}`);
+    }
+  }
   const dest = path.join(wt, projectRel, 'log');
   fs.mkdirSync(dest, { recursive: true });
   let changed = 0;
@@ -691,7 +715,7 @@ function cmdLogSync() {
   const stamp = nowIso();
   gitOrDie(['add', path.join(projectRel, 'log')], wt);
   gitOrDie(['commit', '--quiet', '-m', `chore-log: log through ${stamp}`], wt);
-  gitOrDie(['push', '--quiet', '--force', 'origin', `${LOG_BRANCH}:${LOG_BRANCH}`], wt);
+  gitOrDie(['push', '--quiet', 'origin', `${LOG_BRANCH}:${LOG_BRANCH}`], wt);
   const body = `Mirrors run/log into project/log. Append-only; \`devteam.mjs check-pr\` verifies every added line.${notable.length ? `\n\nChanges to plans, goals and questions by non-owners in this sync:\n${notable.slice(0, 40).map((n) => `- ${n}`).join('\n')}` : ''}`;
   const pr = openPr(wt, LOG_BRANCH, `chore-log: log through ${dateOnly(stamp)}`, body);
   out(`synced ${changed} file(s) to ${LOG_BRANCH}${pr ? `: ${pr}` : ''}`);

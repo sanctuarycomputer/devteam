@@ -329,6 +329,38 @@ test('devteam kit', async (t) => {
     assert.match(sync.err, /bill-01-card\.jsonl not synced/, 'the bad file stays behind, the rest sync');
     fs.writeFileSync(file, before);
     must(['log-sync'], { role: 'sup' });
+    // While its PR is open, the next sync extends chore-log, so a forge refusing force pushes accepts it.
+    const first = git(['rev-parse', 'HEAD'], wt('chore-log'));
+    git(['config', 'receive.denyNonFastForwards', 'true'], origin);
+    // main moves meanwhile; the extended branch takes it in, so its PR is never behind
+    git(['worktree', 'add', '-q', '--detach', wt('mover'), 'origin/main']);
+    write(path.join(wt('mover'), 'MOVED.md'), 'main moved\n');
+    git(['add', '-A'], wt('mover'));
+    git(['commit', '-qm', 'main moves'], wt('mover'));
+    git(['push', '-q', 'origin', 'HEAD:main'], wt('mover'));
+    git(['worktree', 'remove', '--force', wt('mover')]);
+    must(['observe', '--subject', 'bill-01-card', '--kind', 'note', '--detail', 'second sync'], { role: 'sup' });
+    must(['log-sync'], { role: 'sup' });
+    git(['fetch', '-q', 'origin']);
+    git(['merge-base', '--is-ancestor', first, 'origin/chore-log']);
+    git(['merge-base', '--is-ancestor', 'origin/main', 'origin/chore-log']);
+    assert.notEqual(git(['rev-parse', 'origin/chore-log']), first, 'the second sync landed on top of the first');
+    // squash-merged and deleted: the stale origin/chore-log is dropped and the next sync starts from main
+    git(['config', 'receive.denyNonFastForwards', 'false'], origin);
+    git(['worktree', 'add', '-q', '--detach', wt('squash'), 'origin/main']);
+    git(['merge', '--squash', '-q', 'origin/chore-log'], wt('squash'));
+    git(['commit', '-qm', 'chore-log: squashed'], wt('squash'));
+    git(['push', '-q', 'origin', 'HEAD:main'], wt('squash'));
+    git(['worktree', 'remove', '--force', wt('squash')]);
+    git(['push', '-q', 'origin', '--delete', 'chore-log']);
+    must(['observe', '--subject', 'bill-01-card', '--kind', 'note', '--detail', 'third sync'], { role: 'sup' });
+    must(['log-sync'], { role: 'sup' });
+    git(['fetch', '-q', 'origin']);
+    assert.equal(git(['rev-parse', 'origin/chore-log^']), git(['rev-parse', 'origin/main']), 'after a squash merge the next sync is one commit on main, not the old branch');
+    const addedLines = git(['diff', '--unified=0', 'origin/main', 'origin/chore-log']).split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++'));
+    assert.equal(addedLines.length, 1, 'and carries only the new line');
+    assert.match(addedLines[0], /third sync/);
+    git(['config', 'receive.denyNonFastForwards', 'false'], origin);
     const shaL = git(['rev-parse', 'HEAD'], wt('chore-log'));
     const syncWt = must(['chore', 'start', 'devteam-sync-v0.2.1'], { role: 'sup' }).trim();
     assert.ok(fs.existsSync(syncWt), 'a sync chore is named by its tag (supervisor.md §9)');
