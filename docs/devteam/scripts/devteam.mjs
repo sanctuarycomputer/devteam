@@ -1483,6 +1483,7 @@ function cmdAsk() {
   const kind = flagStr('kind') ?? 'owner-decision';
   const cls = flagStr('class') ?? null;
   const L = ladder();
+  if (kind === 'goal-definition' && cls) die('a goal-definition question has no --class: defining a goal is never delegated (reason goal-ambiguity)');
   const onLadder = cls && L.classes[cls];
   if (kind === 'trust' && !onLadder) die(`a trust question needs --class, one of: ${Object.keys(L.classes).join(', ')}`);
   const def = flagStr('default') ?? null;
@@ -1540,7 +1541,7 @@ function cmdAnswer() {
     autonomy = { class: v.class, rung, scope: flagStr('scope') ?? null };
   }
   appendLog({ type: 'question', op: 'set', id, answer, autonomy, standing_rule: flagStr('rule') }, by);
-  if (flagStr('rule')) appendLog({ type: 'knowledge', kind: 'preference', statement: flagStr('rule'), scope: flagStr('rule-scope') ?? (v.class ? `class:${v.class}` : 'project'), status: 'accepted', confidence: 1, evidence: [id] }, by);
+  if (flagStr('rule')) appendLog({ type: 'knowledge', kind: 'preference', statement: flagStr('rule'), scope: flagStr('rule-scope') ?? 'project', status: 'accepted', confidence: 1, evidence: [id] }, by);
   nudgeSupervisor(`[devteam answer ${id} from owner] read it with: devteam.mjs questions --id ${id}`);
   out(`answered ${id}`);
 }
