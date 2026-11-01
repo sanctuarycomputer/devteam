@@ -1312,7 +1312,7 @@ function checkPr({ headRef, sha, title, body, forge = false }) {
       git(['worktree', 'remove', '--force', wt], mainRoot);
     }
   } else {
-    if (!/^chore-[a-z0-9]+(-[a-z0-9]+)*: \S/.test(title ?? 'chore-x: y')) fails.push('a PR that is not from a ticket/ or plan/ branch is titled "chore-<slug>: <summary>"');
+    if (!/^chore-[a-z0-9]+([.-][a-z0-9]+)*: \S/.test(title ?? 'chore-x: y')) fails.push('a PR that is not from a ticket/ or plan/ branch is titled "chore-<slug>: <summary>"');
     const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
     const changed = base ? changedFiles(base, sha) : [];
     const logDir = `${projectRel}/log/`;
@@ -2000,7 +2000,7 @@ function cmdRoadmap() {
 // --- chore worktrees: supervisor-written files reach main through their own branch and PR ---
 
 function choreWorktree(slugName, { reset = false } = {}) {
-  if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(slugName)) die(`chore slug "${slugName}" must be lowercase words joined by hyphens`);
+  if (!/^[a-z0-9]+([.-][a-z0-9]+)*$/.test(slugName)) die(`chore slug "${slugName}" must be lowercase words joined by hyphens (dots allowed, as in devteam-sync-v1.2.0)`);
   if (!commonDir || !projectInRepo) die('chores need a git checkout with the project folder inside it');
   if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
   const wt = path.join(mainRoot, '.worktrees', `chore-${slugName}`);
