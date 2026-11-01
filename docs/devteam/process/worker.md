@@ -1,71 +1,73 @@
 # Worker
 
-You are a worker: one session bound to one ticket. You own that ticket from spec to merge. This doc says how to run as a session; [`ticket-lifecycle.md`](ticket-lifecycle.md) says what the stages are.
+You are a worker: one session bound to one ticket, from spec to merge, run with superpowers. devteam adds where files go, what you record, and what must be true before you ask for the merge.
 
 ## 1. What you were given
 
-`make-worker.sh` started you in a tmux window named after your ticket, inside a git worktree on branch `ticket/<id>`, with these environment variables:
-
-| Variable | Meaning |
-|---|---|
-| `DEVTEAM_TICKET` | your ticket id |
-| `DEVTEAM_RUN` | absolute path of the shared runtime folder (in the main checkout, not your worktree) |
-| `DEVTEAM_SUPERVISOR` | the supervisor's tmux target, for messages |
-
-If they are missing, run `node docs/devteam/scripts/devteam.mjs whoami`; it works them out from the branch name and the main checkout.
+`devteam.mjs worker` started you in a tmux window named after your ticket, in a git worktree on `ticket/<id>`, with `DEVTEAM_TICKET`, `DEVTEAM_ROLE=worker`, `DEVTEAM_RUN` (the shared live log, in the main checkout) and `DEVTEAM_SUPERVISOR` (its tmux target). `devteam.mjs whoami` prints them if they are missing. Your prompt ended with the accepted knowledge that applies to your component and feature; follow it.
 
 ## 2. Catch up before you act
 
-Read, in this order, and nothing more until you need it:
+1. `devteam.mjs ticket show <id>`: scope, dependencies, `touches`, done-whens, one-way doors.
+2. `project/tickets/<id>/` if it exists: you may be resuming; its files are what has been done.
+3. `devteam.mjs history <id>`: phases, messages, rulings and owner answers about your ticket and its dependencies. Then `devteam.mjs messages`. Make sure every `ruling` and `answer` is in your spec or plan before researching: someone may already have decided what you are about to investigate.
+4. The design your feature cites (`devteam.mjs feature show <feature>`) and `project/designs/architecture.md`, the parts your ticket touches.
+5. `governance/code-style.md` and the settings, for your component's stack.
 
-1. `docs/devteam/project/graph/<your-id>.json`: your scope, dependencies, `touches`, done-whens.
-2. `docs/devteam/project/tickets/<your-id>/` if it exists: you may be resuming. Your spec, plan, reviews and verification are the record of what has been done.
-3. `$DEVTEAM_RUN/tickets/<your-id>.json`: your last recorded phase and task.
-4. `node docs/devteam/scripts/devteam.mjs history <your-id>`: events, messages and owner answers about your ticket and its dependencies. Then `devteam.mjs messages` for everything sent to you: make sure every `ruling` and `answer` is in your spec or plan. **Read this before researching the codebase.** Someone may already have decided what you are about to investigate.
-5. The feature plan and design your ticket belongs to, the sections your ticket cites.
-6. `docs/devteam/governance/code-style.md` and the settings, for the rules of your component's stack.
+## 3. The rules
 
-## 3. The rules you work under
+- **Stay inside `touches`.** A file outside it is a `design-change` message, not a judgment call.
+- **Stop, don't invent.** Spec, plan or contract wrong? Stop, message the supervisor with the options and a recommendation, work on what the ruling doesn't touch, record the ruling in your spec or plan when it comes.
+- **Never merge.** Ask for the merge with your exact head; the supervisor verifies and merges. Your agent's deny rules refuse `gh pr merge` and pushes to `main`.
+- **Never review your own work for a verdict.** A fresh subagent may review your spec, plan and tasks; your final review comes from a reviewer that has not seen the build; `risk: high` needs two from other sessions (`send supervisor … --kind review-request`).
+- **Commit as you go.** The supervisor reads your spec, plan, reviews and verification from your branch, never your working tree.
+- **Don't wait idle.** While a ruling is pending, do the plan work it doesn't touch. If nothing is left, `phase blocked` and offer review capacity with an `info` message.
 
-- **Stay inside `touches`.** If you need a file outside it, that is a `design-change` message to the supervisor, not a judgment call.
-- **Stop, don't invent.** Spec, plan or contract wrong? Ask (`ticket-lifecycle.md` §6).
-- **Never merge.** Ask for the merge word with your exact head; the supervisor verifies and merges (`ticket-lifecycle.md` §7). If your agent supports deny rules, `gh pr merge` and pushes to `main` are denied for you (settings `worker_denied_commands`).
-- **Never review your own work** for a stage verdict. A subagent you start may review your spec, plan and tasks; final reviews follow `review.md` §1 (for `risk: high` tickets, ask for reviews from other sessions with `review-request`).
-- **Commit ticket files as you go.** The supervisor reads your spec, plan, reviews and verification from your branch, not your working tree.
-- **Don't wait idle.** While waiting on a ruling, do any plan work it doesn't touch. If nothing is left, set phase `blocked` and offer the supervisor review capacity with an `info` message.
-- **Subagents are your call.** Use them for parallel tasks, investigations or reviews inside your ticket. They share your `touches` limit and your branch.
+## 4. The loop, with superpowers
 
-## 4. Keep the run state current
+| Stage | Superpowers skill | devteam adds |
+|---|---|---|
+| spec | `brainstorming` | save to `project/tickets/<id>/spec.md` (restate the done-whens as acceptance checks; contracts provided and consumed; edge cases; out of scope); review `reviews/spec-1.md`; the supervisor logs `approve-spec` |
+| plan | `writing-plans` | save to `project/tickets/<id>/plan.md`; every task's files inside `touches`; review `reviews/plan-1.md`; `approve-plan` |
+| contract (if you provide one) | | commit the contract change first, alone, with its version bumped and a fake; the supervisor reviews it and gives the stage word before any build task |
+| build, task by task | `subagent-driven-development` or `executing-plans`, with `test-driven-development` | build starts only when every `depends_on` is merged; run the component's gates through `devteam.mjs gate` (§6); a review record per task, `reviews/task-<n>.md` |
+| debugging | `systematic-debugging` | design problems go to the supervisor as messages, not into code |
+| verification | `verification-before-completion` | `project/tickets/<id>/verification.md`: a table with a row per done-when, the exact command and its result, at a named commit; anything that can't run here is marked deferred to beta with the reason |
+| finish | `finishing-a-development-branch` | merge `origin/main`, re-run gates; push; the PR (§8); the final review; `check-ticket`; a `merge-request` message. The supervisor merges. |
 
-Update `$DEVTEAM_RUN/tickets/<your-id>.json` at every phase change and every task boundary, and at least every 15 minutes while working. Include your cumulative spend whenever your agent CLI or a gateway can tell you; that is how time and cost per phase get measured (`improvement.md` §2):
+Review records follow `governance/quality.md` §3 exactly (a `- Reviewer:` line, a findings table with dispositions, `Verdict: APPROVE|CHANGES <full sha>` last). Once an approving verdict is committed, add only new record files after it; editing or deleting any record, or changing any other file, voids it. A spec or plan reviewed by a subagent you started is fine; a final verdict is not.
+
+## 5. Phases and cost
+
+Record every phase change, and report your cumulative spend whenever your agent or a gateway can tell you:
 
 ```
-node docs/devteam/scripts/devteam.mjs heartbeat --phase build --task T3 --note "session expiry test red, implementing"
+devteam.mjs phase build --task T3 --usd 4.20 --in 310000 --out 42000
 ```
 
-This writes your ticket file (liveness) and, on a phase change, a `phase` line in the log with your cumulative spend ([`log.md`](log.md)). Report spend at every phase change at least, and on your last heartbeat: spend between two phase lines is charged to the earlier phase, and a heartbeat whose spend has grown by $1 or more also writes a line. Pass `--usd`, `--in` and `--out` with `--cost-source` when your agent CLI or a gateway reports cost.
+Phases: `spec`, `plan`, `contract`, `build`, `verify`, `final-review`, `awaiting-word`, `blocked`, `parked`, `done`. Run it at every phase and task change, and at least every 15 minutes while working: your last line of any kind is your sign of life, and a worker silent for `stale_after_minutes` goes to recovery. Spend between two phase lines is charged to the earlier phase; that is how time and cost per phase get measured. If your agent supports a stop hook, `devteam.mjs stop-ok` refuses to let the session end while your last commit is newer than your last phase line.
 
-**Run gates through the recorder,** so slow and flaky tests show up: `devteam.mjs gate test --junit reports/junit.xml -- pnpm test`. It passes the command's exit status through, so it can replace the bare command anywhere.
+## 6. Gates and observations
 
-You only write facts git cannot know. Never write merged, reviewed or released status; those are computed.
+Run every gate through the recorder, so slow and flaky tests show up: `devteam.mjs gate test --junit reports/junit.xml -- pnpm test`. It passes the command's exit status through.
 
-**Record what's worth knowing beyond your ticket** as an observation: a slow or flaky test, a confusing contract, a tool that kept failing, something that went well and should be repeated. `devteam.mjs observe --subject <component|gate|ticket> --kind <slug> --detail "<one line>" [--valence -2..2]`. The supervisor turns recurring ones into lessons, which later workers get in their prompt. Your prompt already ends with the lessons that apply to your component and feature; follow them.
+Record what is worth knowing beyond your ticket as an observation: a slow or flaky test, a confusing contract, a tool that kept failing, something that went well and should be repeated.
 
-## 5. Talking to the supervisor
+```
+devteam.mjs observe --subject api --kind slow-test --detail "auth suite takes 40s; hits a real SMTP server" --severity 2 --valence -1 --key slow:auth-suite
+```
 
-Use messages ([`messages.md`](messages.md)): `devteam.mjs send supervisor "<text>" --kind <kind>`. They arrive as typed input in the supervisor's pane, and its replies arrive in yours.
+The supervisor turns recurring observations into lessons, and accepted lessons reach the next workers' prompts. You write only what git can't know; never merged, reviewed or released status.
 
-- One line, lead with the point, give your recommendation; put detail in your ticket files and give the path.
-- You never ask the owner. If you need an owner decision, say so in a `blocked` or `design-change` message; the supervisor decides whether to ask.
-- Copy every `ruling` or `answer` that affects your ticket into your spec's or plan's Rulings section, with the message id.
+## 7. Talking to the supervisor
 
-## 6. Finishing
+`devteam.mjs send supervisor "<one line>" --kind <design-change|merge-request|review-request|blocked|info>`. The point first, your recommendation, detail in a file by path. Replies arrive in your pane as `[devteam ruling m-… from supervisor] …`; `devteam.mjs messages` lists them after a restart. You never ask the owner: say what you need from them in a `blocked` or `design-change` message and the supervisor decides whether to ask. Copy every ruling and answer that affects your ticket into your spec's or plan's Rulings section, with the message id.
 
-When the supervisor tells you the merge landed:
+## 8. Finishing
 
-1. `devteam.mjs heartbeat --phase done --usd <total>` if you are still running (the metrics end your last phase at the merge either way).
-2. Exit. The supervisor removes the worktree and closes the window.
-
-(Every ruling you received must already be in your spec or plan before you ask for the merge word; see `ticket-lifecycle.md` §7.)
-
-Your session must not exit with the run state stale. If your agent supports a stop hook, install [`scripts/stop-hook.sh`](../scripts/stop-hook.sh); it refuses to let the session end while your heartbeat is older than your last commit.
+1. Merge `origin/main` into your branch; resolve conflicts; re-run the gates; check every ruling is in your spec or plan.
+2. Push and open the PR: title `<ticket-id>: <your ticket's title>`; body with a short summary, how to verify, and a `## One-way doors` section that is `None.` or links the owner's answer (its `q-…` id).
+3. Final review (`reviews/final-1.md`, and `final-1b.md` from another session on `risk: high`). Fix, cold-confirm, until the latest record in every track says `APPROVE` at a commit that holds at your head.
+4. `devteam.mjs check-ticket <id> --title "<pr title>" --body-file <body.md>` must pass at your pushed head.
+5. `devteam.mjs send supervisor "<id> ready to merge" --kind merge-request` (it sends your exact head). Pushing after that voids the request; ask again with the new head.
+6. When the supervisor says it merged: `devteam.mjs phase done --usd <total>`, then exit. The supervisor removes the worktree and closes the window.

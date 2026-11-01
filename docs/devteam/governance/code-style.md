@@ -4,7 +4,7 @@ A generic, portable engineering doctrine for building any system — frontend, b
 
 > **The lint/gate configuration is the source of truth; this document is its commentary.** Where the two disagree, the gate config is right and this doc is a bug. Every rule marked **Law** has an ID (e.g. `L-STRUCT-2`) used by the gate config and by the escape hatch (§16).
 
-A Law is enforced only once its gate is commissioned: it needs a row in [`quality-gates.md`](quality-gates.md) and a CI step in the gate table in the project settings. Until then it is reviewed as Doctrine.
+A Law is enforced only once its gate is commissioned: it needs a row in [`quality.md`](quality.md) §2 and an entry in `settings.gates`. Until then it is reviewed as Doctrine.
 
 ## 0. How to read this
 
@@ -122,7 +122,7 @@ Default to the simplest; escalate only with a stated reason (an ADR for Tier A).
 - **Doctrine — property-based tests and incremental mutation testing**, both scoped to `domain/**` only, so CI time stays bounded.
 - **AI features — evals with thresholds** (§10).
 
-(The "a fix wave gets a cold confirming re-review" rule is review policy, not code doctrine: see [`review.md`](review.md) §3.)
+(The "a fix wave gets a cold confirming re-review" rule is review policy, not code doctrine: see [`quality.md`](quality.md) §3.)
 
 ## 13. Frontend (where there is a UI)
 
@@ -174,7 +174,7 @@ To protect speed, a new system ships on the **floor**, not the full doctrine:
 
 ## Appendix A — Law (gate-enforced) vs Doctrine (review-enforced)
 
-Each Law → a commissioned lint/CI gate, autofix-first (§15) where possible, catalogued in [`quality-gates.md`](quality-gates.md). IDs match the body.
+Each Law → a commissioned gate, autofix-first (§15) where possible, catalogued in [`quality.md`](quality.md) §2. IDs match the body.
 
 - `L-STRUCT-1`..`4` core dir / skinny models (no non-relay callbacks) / one-concept-per-file named-exports / thin controllers (cyclo ≤3).
 - `L-LOGIC-1`..`5` immutable inputs / result values / typed errors (typed stacks) / parse-at-edge / exhaustive matches (typed stacks). *(Ruby: `L-LOGIC-3`,`5` are Doctrine; proxy = `L-TEST-2`.)*

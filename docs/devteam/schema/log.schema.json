@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "devteam/log.schema.json",
-  "title": "Log line",
-  "description": "One line of a log file: run/log/<writer>.jsonl (live) or project/log/<writer>.jsonl (durable). One JSON object per line, append-only. op new creates an object; op set changes fields on it. Which writer may create which type and set which field is the authority table in process/log.md \u00a75, enforced by scripts/log.mjs and by check-pr. Scales are numbers; sets that grow (decision classes, reasons, observation kinds) are not enums here.",
+  "title": "devteam log line",
+  "description": "One line of the log (process/supervisor.md): planners write project/log/plan-<feature>.jsonl in their worktree (it lands with the plan PR); everyone else writes run/log/<writer>.jsonl live and the supervisor mirrors those into project/log with the chore-log PR. Every line is an envelope plus a body. The envelope is validated by this schema's top level; the body (everything but the envelope keys) by $defs.types[type]: x-required-new lists what a new line must carry, x-set-only what may only be set later. x-authority says which writer class may create which types and set which fields; x-id how ids are formed. scripts/devteam.mjs enforces all of it on write and in log-check. Three state rules live in the fold because a schema can't state them: a set applies only if no higher-ranked writer set that field; a question is defaulted only if it has a default; the supervisor edits a goal only while it is a draft.",
   "type": "object",
   "required": [
     "v",
@@ -18,19 +18,21 @@
     },
     "id": {
       "type": "string",
-      "pattern": "^[a-z]-\\d{8}-\\d{6}(\\d{3})?-[a-z0-9]+(-[a-z0-9]+)*$"
+      "minLength": 3
     },
     "type": {
       "enum": [
         "goal",
-        "observation",
+        "feature",
+        "ticket",
         "phase",
+        "gate",
+        "message",
+        "observation",
         "knowledge",
         "problem",
         "question",
-        "act",
-        "correction",
-        "seen"
+        "act"
       ]
     },
     "op": {
@@ -41,23 +43,18 @@
     },
     "at": {
       "type": "string",
-      "format": "date-time"
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
     },
     "by": {
       "type": "string",
       "description": "owner, supervisor, a ticket id, or plan-<feature>; must match the file's writer"
     }
   },
-  "allOf": [
-    {
-      "if": {
-        "properties": {
-          "type": {
-            "const": "goal"
-          }
-        }
-      },
-      "then": {
+  "$defs": {
+    "types": {
+      "goal": {
+        "description": "A broad outcome the owner wants. Readings are observations (kind reading, subject = the goal). Preconditions are referred to as <goal-id>#<n>.",
+        "type": "object",
         "properties": {
           "title": {
             "type": "string"
@@ -83,7 +80,8 @@
                   "down"
                 ]
               }
-            }
+            },
+            "additionalProperties": false
           },
           "horizon": {
             "type": "string"
@@ -126,29 +124,343 @@
             ]
           }
         },
-        "if": {
-          "properties": {
-            "op": {
-              "const": "new"
+        "additionalProperties": false,
+        "x-required-new": [
+          "title"
+        ]
+      },
+      "feature": {
+        "description": "A feature on the roadmap: the goals it serves, the goal preconditions it makes true, its stories and their target releases, and the design it implements. Its id is the feature slug. A feature is approved when its lines are on main (they land with the plan/<feature> PR). The reserved feature \"chores\" has no object.",
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "goals": {
+            "type": "array",
+            "items": {
+              "type": "string"
             }
+          },
+          "preconditions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "stories": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[A-Z][A-Z0-9]*-S[0-9]+$"
+                },
+                "text": {
+                  "type": "string"
+                },
+                "release": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "text"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "design": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
           }
         },
-        "then": {
-          "required": [
-            "title"
-          ]
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "type": {
-            "const": "observation"
-          }
-        }
+        "additionalProperties": false,
+        "x-required-new": [
+          "title",
+          "goals",
+          "stories"
+        ]
       },
-      "then": {
+      "ticket": {
+        "description": "One PR of work. Its id is <component>-<NN>-<slug>. A re-plan is a set (superseded_by, depends_on, touches \u2026).",
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "feature": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$"
+          },
+          "component": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$"
+          },
+          "kind": {
+            "enum": [
+              "contract",
+              "build",
+              "integration",
+              "chore",
+              "spike"
+            ]
+          },
+          "size": {
+            "enum": [
+              "S",
+              "M"
+            ]
+          },
+          "risk": {
+            "enum": [
+              "normal",
+              "high"
+            ]
+          },
+          "serves": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Z][A-Z0-9]*-S[0-9]+$"
+            }
+          },
+          "depends_on": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "contracts": {
+            "type": "object",
+            "properties": {
+              "provides": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "consumes": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "additionalProperties": false
+          },
+          "touches": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1
+          },
+          "done_when": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 10
+            },
+            "minItems": 1
+          },
+          "one_way_doors": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "superseded_by": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "notes": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "x-required-new": [
+          "title",
+          "feature",
+          "component",
+          "kind",
+          "size",
+          "risk",
+          "serves",
+          "depends_on",
+          "touches",
+          "done_when"
+        ]
+      },
+      "phase": {
+        "description": "A worker's phase change, or a liveness ping (from = to), with cumulative spend. A worker's last line of any type is its last sign of life.",
+        "type": "object",
+        "properties": {
+          "to": {
+            "enum": [
+              "starting",
+              "spec",
+              "plan",
+              "contract",
+              "build",
+              "verify",
+              "final-review",
+              "awaiting-word",
+              "merging",
+              "done",
+              "blocked",
+              "parked"
+            ]
+          },
+          "from": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "task": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 280
+          },
+          "sha": {
+            "type": "string"
+          },
+          "usd": {
+            "type": "number",
+            "minimum": 0
+          },
+          "input_tokens": {
+            "type": "number",
+            "minimum": 0
+          },
+          "output_tokens": {
+            "type": "number",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false,
+        "x-required-new": [
+          "to"
+        ]
+      },
+      "gate": {
+        "description": "One run of a gate (lint, test, \u2026): duration, result, commit, and the failed and slowest tests.",
+        "type": "object",
+        "properties": {
+          "gate": {
+            "type": "string"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "ms": {
+            "type": "number",
+            "minimum": 0
+          },
+          "sha": {
+            "type": "string"
+          },
+          "tests_total": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000000000
+          },
+          "tests": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "ms": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "failed": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "name",
+                "ms",
+                "failed"
+              ],
+              "additionalProperties": false
+            },
+            "maxItems": 40
+          }
+        },
+        "additionalProperties": false,
+        "x-required-new": [
+          "gate",
+          "ok",
+          "ms"
+        ]
+      },
+      "message": {
+        "description": "A one-line message typed into another session's pane. A reply names the message it answers in re.",
+        "type": "object",
+        "properties": {
+          "to": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "design-change",
+              "merge-request",
+              "review-request",
+              "blocked",
+              "ruling",
+              "answer",
+              "info"
+            ]
+          },
+          "text": {
+            "type": "string",
+            "maxLength": 600
+          },
+          "re": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sha": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ticket": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "x-required-new": [
+          "to",
+          "kind",
+          "text"
+        ]
+      },
+      "observation": {
+        "description": "Something noticed: a metrics finding, a slow test, a goal reading (kind reading), a trial's outcome (kind outcome), an escaped defect, a retro (kind retro, source_ref = its file). Deduped on source_key.",
+        "type": "object",
         "properties": {
           "source": {
             "type": "string"
@@ -178,6 +490,9 @@
           "source_key": {
             "type": "string"
           },
+          "source_ref": {
+            "type": "string"
+          },
           "refs": {
             "type": "array",
             "items": {
@@ -189,9 +504,6 @@
           },
           "measure": {
             "type": "object",
-            "required": [
-              "value"
-            ],
             "properties": {
               "value": {
                 "type": "number"
@@ -199,92 +511,23 @@
               "unit": {
                 "type": "string"
               }
-            }
-          },
-          "source_ref": {
-            "type": "string"
+            },
+            "required": [
+              "value"
+            ],
+            "additionalProperties": false
           }
         },
-        "if": {
-          "properties": {
-            "op": {
-              "const": "new"
-            }
-          }
-        },
-        "then": {
-          "required": [
-            "subject",
-            "kind",
-            "detail"
-          ]
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "type": {
-            "const": "phase"
-          }
-        }
+        "additionalProperties": false,
+        "x-required-new": [
+          "subject",
+          "kind",
+          "detail"
+        ]
       },
-      "then": {
-        "properties": {
-          "from": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "to": {
-            "type": "string"
-          },
-          "usd": {
-            "type": "number",
-            "minimum": 0
-          },
-          "input_tokens": {
-            "type": "number",
-            "minimum": 0
-          },
-          "output_tokens": {
-            "type": "number",
-            "minimum": 0
-          },
-          "sha": {
-            "type": "string"
-          },
-          "task": {
-            "type": "string"
-          },
-          "note": {
-            "type": "string"
-          }
-        },
-        "if": {
-          "properties": {
-            "op": {
-              "const": "new"
-            }
-          }
-        },
-        "then": {
-          "required": [
-            "to"
-          ]
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "type": {
-            "const": "knowledge"
-          }
-        }
-      },
-      "then": {
+      "knowledge": {
+        "description": "What the project has learned. Accepted entries whose scope matches go into the prompts of the sessions they apply to.",
+        "type": "object",
         "properties": {
           "kind": {
             "enum": [
@@ -327,32 +570,17 @@
             }
           }
         },
-        "if": {
-          "properties": {
-            "op": {
-              "const": "new"
-            }
-          }
-        },
-        "then": {
-          "required": [
-            "kind",
-            "statement",
-            "scope",
-            "status"
-          ]
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "type": {
-            "const": "problem"
-          }
-        }
+        "additionalProperties": false,
+        "x-required-new": [
+          "kind",
+          "statement",
+          "scope",
+          "status"
+        ]
       },
-      "then": {
+      "problem": {
+        "description": "Something wrong (realized) or that could go wrong (a risk), with a lifecycle.",
+        "type": "object",
         "properties": {
           "title": {
             "type": "string"
@@ -392,32 +620,17 @@
             }
           }
         },
-        "if": {
-          "properties": {
-            "op": {
-              "const": "new"
-            }
-          }
-        },
-        "then": {
-          "required": [
-            "title",
-            "realized",
-            "severity",
-            "status"
-          ]
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "type": {
-            "const": "question"
-          }
-        }
+        "additionalProperties": false,
+        "x-required-new": [
+          "title",
+          "realized",
+          "severity",
+          "status"
+        ]
       },
-      "then": {
+      "question": {
+        "description": "The supervisor asking the owner. why_asked says the class, its rung and ceiling, and the reasons. The owner's answer (a set) may carry an autonomy direction and a standing rule.",
+        "type": "object",
         "properties": {
           "kind": {
             "enum": [
@@ -430,6 +643,9 @@
             ]
           },
           "class": {
+            "type": "string"
+          },
+          "scope": {
             "type": "string"
           },
           "ticket": {
@@ -463,7 +679,7 @@
           },
           "deadline": {
             "type": "string",
-            "format": "date-time"
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
           },
           "blocks": {
             "type": "array",
@@ -499,7 +715,8 @@
                   "type": "string"
                 }
               }
-            }
+            },
+            "additionalProperties": false
           },
           "status": {
             "enum": [
@@ -524,10 +741,6 @@
               "object",
               "null"
             ],
-            "required": [
-              "class",
-              "rung"
-            ],
             "properties": {
               "class": {
                 "type": "string"
@@ -543,7 +756,12 @@
                   "null"
                 ]
               }
-            }
+            },
+            "required": [
+              "class",
+              "rung"
+            ],
+            "additionalProperties": false
           },
           "standing_rule": {
             "type": "string"
@@ -553,32 +771,21 @@
               "cli",
               "dashboard"
             ]
+          },
+          "re": {
+            "type": "string",
+            "description": "the worker message this question escalates"
           }
         },
-        "if": {
-          "properties": {
-            "op": {
-              "const": "new"
-            }
-          }
-        },
-        "then": {
-          "required": [
-            "kind",
-            "question"
-          ]
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "type": {
-            "const": "act"
-          }
-        }
+        "additionalProperties": false,
+        "x-required-new": [
+          "kind",
+          "question"
+        ]
       },
-      "then": {
+      "act": {
+        "description": "A decision the supervisor made (incl. approve-spec, approve-plan, merge-word). The owner, or the supervisor at a retro, sets corrected; the supervisor then sets repaired.",
+        "type": "object",
         "properties": {
           "actor": {
             "type": "string"
@@ -608,45 +815,25 @@
           },
           "approved_by": {
             "type": "string"
-          }
-        },
-        "if": {
-          "properties": {
-            "op": {
-              "const": "new"
-            }
-          }
-        },
-        "then": {
-          "required": [
-            "class",
-            "what"
-          ]
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "type": {
-            "const": "correction"
-          }
-        }
-      },
-      "then": {
-        "properties": {
-          "act": {
-            "type": "string"
           },
-          "reason": {
-            "type": "string"
+          "corrected": {
+            "type": "object",
+            "properties": {
+              "reason": {
+                "type": "string"
+              },
+              "severity": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "additionalProperties": false
           },
-          "severity": {
-            "type": "integer",
-            "minimum": 0,
-            "maximum": 4
-          },
-          "repair": {
+          "repaired": {
             "enum": [
               "undo",
               "fix-ticket",
@@ -654,49 +841,224 @@
             ]
           }
         },
-        "if": {
-          "properties": {
-            "op": {
-              "const": "new"
-            }
-          }
-        },
-        "then": {
-          "required": [
-            "act",
-            "reason"
-          ]
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "type": {
-            "const": "seen"
-          }
-        }
-      },
-      "then": {
-        "properties": {
-          "upto": {
-            "type": "string",
-            "format": "date-time"
-          }
-        },
-        "if": {
-          "properties": {
-            "op": {
-              "const": "new"
-            }
-          }
-        },
-        "then": {
-          "required": [
-            "upto"
-          ]
-        }
+        "additionalProperties": false,
+        "x-required-new": [
+          "class",
+          "what"
+        ],
+        "x-set-only": [
+          "corrected",
+          "repaired"
+        ]
       }
     }
-  ]
+  },
+  "x-id": {
+    "prefix": {
+      "goal": "g",
+      "phase": "h",
+      "gate": "r",
+      "message": "m",
+      "observation": "o",
+      "knowledge": "k",
+      "problem": "p",
+      "question": "q",
+      "act": "a"
+    },
+    "pattern": "^[a-z]-\\d{8}-\\d{9}-[a-z0-9]+(-[a-z0-9]+)*$",
+    "keyed": {
+      "ticket": "^[a-z][a-z0-9]*(-[a-z0-9]+)*-[0-9]{2,}-[a-z0-9]+(-[a-z0-9]+)*$",
+      "feature": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$"
+    }
+  },
+  "x-authority": {
+    "rank": {
+      "ticket": 0,
+      "planner": 1,
+      "supervisor": 2,
+      "owner": 3
+    },
+    "new": {
+      "owner": [
+        "goal",
+        "knowledge",
+        "observation"
+      ],
+      "supervisor": [
+        "goal",
+        "feature",
+        "ticket",
+        "question",
+        "observation",
+        "knowledge",
+        "problem",
+        "act",
+        "phase",
+        "message"
+      ],
+      "planner": [
+        "feature",
+        "ticket",
+        "observation",
+        "message"
+      ],
+      "ticket": [
+        "phase",
+        "gate",
+        "observation",
+        "message"
+      ]
+    },
+    "set": {
+      "goal": {
+        "supervisor": [
+          "title",
+          "outcome",
+          "measure",
+          "horizon",
+          "non_goals",
+          "constraints",
+          "preconditions",
+          "priority"
+        ],
+        "owner": [
+          "title",
+          "outcome",
+          "measure",
+          "horizon",
+          "non_goals",
+          "constraints",
+          "preconditions",
+          "priority",
+          "status",
+          "channel"
+        ]
+      },
+      "feature": {
+        "planner": [
+          "title",
+          "goals",
+          "preconditions",
+          "stories",
+          "design",
+          "notes"
+        ],
+        "supervisor": [
+          "title",
+          "goals",
+          "preconditions",
+          "stories",
+          "design",
+          "notes"
+        ],
+        "owner": [
+          "title",
+          "goals",
+          "preconditions",
+          "stories",
+          "design",
+          "notes"
+        ]
+      },
+      "ticket": {
+        "planner": [
+          "title",
+          "kind",
+          "size",
+          "risk",
+          "serves",
+          "depends_on",
+          "contracts",
+          "touches",
+          "done_when",
+          "one_way_doors",
+          "superseded_by",
+          "notes"
+        ],
+        "supervisor": [
+          "title",
+          "kind",
+          "size",
+          "risk",
+          "serves",
+          "depends_on",
+          "contracts",
+          "touches",
+          "done_when",
+          "one_way_doors",
+          "superseded_by",
+          "notes"
+        ],
+        "owner": [
+          "title",
+          "kind",
+          "size",
+          "risk",
+          "serves",
+          "depends_on",
+          "contracts",
+          "touches",
+          "done_when",
+          "one_way_doors",
+          "superseded_by",
+          "notes"
+        ]
+      },
+      "question": {
+        "supervisor": [
+          "status",
+          "reason",
+          "recorded_in"
+        ],
+        "owner": [
+          "answer",
+          "matched",
+          "autonomy",
+          "standing_rule",
+          "channel"
+        ]
+      },
+      "knowledge": {
+        "supervisor": [
+          "status",
+          "confidence",
+          "statement",
+          "scope"
+        ],
+        "owner": [
+          "status",
+          "confidence",
+          "statement",
+          "scope"
+        ]
+      },
+      "problem": {
+        "supervisor": [
+          "status",
+          "severity",
+          "realized",
+          "assigned_to",
+          "detail",
+          "threatens"
+        ],
+        "owner": [
+          "status",
+          "severity",
+          "realized",
+          "assigned_to",
+          "detail",
+          "threatens"
+        ]
+      },
+      "act": {
+        "supervisor": [
+          "corrected",
+          "repaired"
+        ],
+        "owner": [
+          "corrected"
+        ]
+      }
+    }
+  }
 }

@@ -1,23 +1,24 @@
 #!/usr/bin/env node
-// devteam: graph, state and gate tooling. Node 20+, built-ins only.
-// Usage: node docs/devteam/scripts/devteam.mjs <command> [args]. Run `help` for the list.
+// devteam: the one script. Node 20+, built-ins only.
+//   node docs/devteam/scripts/devteam.mjs <command> [args]      (`help` lists the commands)
 //
-// Paths:
-//   project  docs/devteam/project in the current checkout (override: --project <dir> or DEVTEAM_PROJECT)
-//   run      docs/devteam/run in the MAIN checkout, shared by every worktree (override: DEVTEAM_RUN)
+// Everything structured about a project is a line in the log (schema/log.schema.json), folded by
+// time. Everything prose is markdown. This file validates and folds the log, computes the graph,
+// status, metrics, roadmap and dashboard from it, runs the checks the supervisor merges on, makes
+// worker sessions, serves the dashboard, and gives every role its commands.
 //
-// Ticket folders (spec, plan, reviews, verification) live on each ticket's branch until it merges.
-// Commands that judge a ticket read those files from git (the branch tip, or an exact SHA), so the
-// supervisor sees the same thing from the main checkout that the worker sees in its worktree.
+// Sections: 1 helpers · 2 settings · 3 schema and log · 4 git facts · 5 graph · 6 reviews and the
+// definition of done · 7 trust · 8 decide and act · 9 goals, roadmap, retros · 10 metrics and the
+// dashboard · 11 sessions (workers, messages, phases, gates) · 12 init, help, dispatch.
 
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
-import * as LOG from './log.mjs';
+import { fileURLToPath } from 'node:url';
 
-// ---------- small helpers ----------
+// ===== 1. helpers =====
 
-// Exit quietly when piped into something that closes early (e.g. `| head`).
 process.stdout.on('error', (e) => {
   if (e.code === 'EPIPE') process.exit(0);
   throw e;
@@ -26,627 +27,364 @@ process.stdout.on('error', (e) => {
 const argv = process.argv.slice(2);
 const command = argv.shift();
 
-// Flags take every following non-flag token as their value(s), so put positionals before flags.
+// Flags take every following non-flag token as their value(s); put positionals before flags.
+// Everything after a bare `--` is left for commands that run another command (gate, act).
 function parseArgs(args) {
   const flags = {};
   const positional = [];
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i];
+  const dash = args.indexOf('--');
+  const own = dash === -1 ? args : args.slice(0, dash);
+  for (let i = 0; i < own.length; i++) {
+    const a = own[i];
     if (a.startsWith('--')) {
       const key = a.slice(2);
       const values = [];
-      while (i + 1 < args.length && !args[i + 1].startsWith('--')) values.push(args[++i]);
+      while (i + 1 < own.length && !own[i + 1].startsWith('--')) values.push(own[++i]);
       flags[key] = values.length === 0 ? true : values.length === 1 ? values[0] : values;
-    } else {
-      positional.push(a);
-    }
+    } else positional.push(a);
   }
-  return { flags, positional };
+  return { flags, positional, rest: dash === -1 ? null : args.slice(dash + 1) };
 }
 
-const { flags, positional } = parseArgs(argv);
+const { flags, positional, rest } = parseArgs(argv);
 const asList = (v) => (v === undefined || v === true ? [] : Array.isArray(v) ? v : [v]);
 const flagStr = (k) => (flags[k] === undefined || flags[k] === true ? undefined : Array.isArray(flags[k]) ? flags[k].join(' ') : String(flags[k]));
-
-function git(args) {
-  try {
-    return execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 }).replace(/\n$/, '');
-  } catch {
-    return null;
-  }
-}
+const flagNum = (k) => (flagStr(k) === undefined ? undefined : Number(flagStr(k)));
 
 function die(msg, code = 1) {
   process.stderr.write(`devteam: ${msg}\n`);
   process.exit(code);
 }
-
 const warn = (msg) => process.stderr.write(`devteam: warning: ${msg}\n`);
-const nowIso = () => new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+const out = (s) => process.stdout.write(`${s}\n`);
+const json = (x) => out(JSON.stringify(x, null, 2));
+const nowIso = () => new Date().toISOString();
+const dateOnly = (iso) => iso.slice(0, 10);
+const DAY = 864e5;
+
+function git(args, cwd) {
+  try {
+    return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 }).replace(/\n$/, '');
+  } catch {
+    return null;
+  }
+}
+function gitOrDie(args, cwd) {
+  try {
+    return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  } catch (e) {
+    die(`git ${args.join(' ')} failed: ${(e.stderr || e.message).toString().trim()}`);
+  }
+}
+function sh(cmd, args, opts = {}) {
+  try {
+    return execFileSync(cmd, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], ...opts }).trim();
+  } catch {
+    return null;
+  }
+}
+
 const readJson = (p) => JSON.parse(fs.readFileSync(p, 'utf8'));
-const writeJson = (p, obj) => {
+const readText = (p) => (fs.existsSync(p) && fs.statSync(p).isFile() ? fs.readFileSync(p, 'utf8') : null);
+function writeJson(p, obj) {
   fs.mkdirSync(path.dirname(p), { recursive: true });
   const tmp = `${p}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, `${JSON.stringify(obj, null, 2)}\n`);
-  fs.renameSync(tmp, p); // atomic replace so readers never see a half-written file
+  fs.renameSync(tmp, p);
+}
+const median = (xs) => {
+  if (!xs.length) return null;
+  const a = [...xs].sort((x, y) => x - y);
+  const m = Math.floor(a.length / 2);
+  return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
 };
+const hours = (ms) => (ms === null ? null : +(ms / 3600000).toFixed(1));
+const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'x';
 
-// ---------- enums (mirror schema/*.schema.json) ----------
+// ===== 2. locations and settings =====
 
-const TICKET_KINDS = ['contract', 'build', 'integration', 'chore', 'spike'];
-const PHASES = ['starting', 'spec', 'plan', 'contract', 'build', 'verify', 'final-review', 'awaiting-word', 'merging', 'done', 'blocked', 'parked'];
-const MESSAGE_KINDS = ['design-change', 'merge-request', 'review-request', 'slot-request', 'blocked', 'ruling', 'answer', 'info'];
-const EVENT_TYPES = ['worker.made', 'ticket.blocked', 'ticket.parked', 'gate.result', 'slot.granted', 'slot.released', 'replan', 'recovery', 'message'];
-const CHORES_FEATURE = 'chores'; // reserved feature for chore and spike tickets that belong to no feature plan
-
-// ---------- locations ----------
-
+const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = git(['rev-parse', '--show-toplevel']) ?? process.cwd();
+// The kit of the checkout you are in (a worktree has its own copy), whichever copy of this script ran.
+const devteamDir = fs.existsSync(path.join(repoRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs')) ? path.join(repoRoot, 'docs', 'devteam') : path.resolve(here, '..');
 const commonDir = git(['rev-parse', '--path-format=absolute', '--git-common-dir']);
 const mainRoot = commonDir ? path.dirname(commonDir) : repoRoot;
-const devteamDir = path.join(repoRoot, 'docs', 'devteam');
 const projectDir = path.resolve(flagStr('project') ?? process.env.DEVTEAM_PROJECT ?? path.join(devteamDir, 'project'));
 const runDir = path.resolve(process.env.DEVTEAM_RUN ?? path.join(mainRoot, 'docs', 'devteam', 'run'));
 const projectRel = path.relative(repoRoot, projectDir).split(path.sep).join('/');
 const projectInRepo = !!commonDir && projectRel !== '' && !projectRel.startsWith('..') && !path.isAbsolute(projectRel);
+const CHORES = 'chores';
 
-// ---------- settings ----------
-
+// Every setting has a default here; project/settings.md holds only what the project changes.
 const SETTINGS_DEFAULTS = {
+  project: null,
   tmux_session: 'devteam',
   agent_command: 'claude --dangerously-skip-permissions',
   resume_command: 'claude --continue --dangerously-skip-permissions',
+  main_branch: 'main',
+  merge_method: 'merge',
   max_active_tickets: 5,
   max_active_per_component: 2,
   stale_after_minutes: 30,
   question_default_after_hours: 24,
-  main_branch: 'main',
-  merge_method: 'merge',
+  max_open_questions: 7,
+  autonomy_ceilings: {},
   components: {},
   shared_resources: [],
-  dashboard_command: 'node docs/devteam/scripts/dashboard.mjs',
-  notify: null,
   worker_denied_commands: ['gh pr merge', 'git push origin main', 'git push origin HEAD:main'],
+  dashboard_port: 4321,
+  notify: null,
   upstream_repo: 'sanctuarycomputer/devteam',
+  upstream_base: null,
   upstream_check_hours: 24,
   retro_every_days: 7,
   research_every_days: 7,
   improvement_budget_usd_per_week: null,
   slow_gate_minutes: 10,
-  max_open_questions: 7,
-  autonomy_ceilings: {},
 };
-
 let settingsCache;
 function loadSettings() {
   if (settingsCache) return settingsCache;
-  const p = path.join(projectDir, 'settings.md');
-  if (!fs.existsSync(p)) return (settingsCache = { ...SETTINGS_DEFAULTS });
-  const m = fs.readFileSync(p, 'utf8').match(/```json devteam\s*\n([\s\S]*?)\n```/);
+  const m = readText(path.join(projectDir, 'settings.md'))?.match(/```json devteam\s*\n([\s\S]*?)\n```/);
   if (!m) return (settingsCache = { ...SETTINGS_DEFAULTS });
   try {
     return (settingsCache = { ...SETTINGS_DEFAULTS, ...JSON.parse(m[1]) });
   } catch (e) {
-    die(`settings.md settings block is not valid JSON: ${e.message}`);
+    die(`settings.md: the json devteam block is not valid JSON: ${e.message}`);
   }
 }
 
-// ---------- reading project files from a source (working tree or a git ref) ----------
-
-// A source is { ref } to read committed files at that ref, or { ref: null } for the working tree.
-function srcRead(src, rel) {
-  if (src.ref && projectInRepo) return git(['show', `${src.ref}:${projectRel}/${rel}`]);
-  const p = path.join(projectDir, rel);
-  return fs.existsSync(p) && fs.statSync(p).isFile() ? fs.readFileSync(p, 'utf8') : null;
-}
-
-function srcList(src, relDir) {
-  if (src.ref && projectInRepo) {
-    const out = git(['ls-tree', '--name-only', `${src.ref}:${projectRel}/${relDir}`]);
-    return out ? out.split('\n').filter(Boolean) : [];
-  }
-  const p = path.join(projectDir, relDir);
-  return fs.existsSync(p) ? fs.readdirSync(p) : [];
-}
-
-const WORKTREE = { ref: null };
-const resolveCommit = (ref) => git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
-
-// ---------- graph ----------
-
-const ID_RE = /^[a-z][a-z0-9]*(-[a-z0-9]+)*-[0-9]{2,}-[a-z0-9]+(-[a-z0-9]+)*$/;
-const STORY_RE = /^[A-Z][A-Z0-9]*-S[0-9]+$/;
-const TICKET_FIELDS = ['id', 'title', 'feature', 'component', 'kind', 'size', 'risk', 'serves', 'depends_on', 'contracts', 'touches', 'done_when', 'one_way_doors', 'superseded_by', 'notes'];
-
-function loadGraph() {
-  const dir = path.join(projectDir, 'graph');
-  const tickets = new Map();
-  const loadErrors = [];
-  if (!fs.existsSync(dir)) return { tickets, loadErrors };
-  for (const f of fs.readdirSync(dir).filter((f) => f.endsWith('.json')).sort()) {
+// The trust ladder and its tables live in governance/constitution.md, in a ```json devteam block.
+let ladderCache;
+function ladder() {
+  if (ladderCache) return ladderCache;
+  const m = readText(path.join(devteamDir, 'governance', 'constitution.md'))?.match(/```json devteam\s*\n([\s\S]*?)\n```/);
+  let a = { classes: {}, constitutional: [], owner_only: [], reasons: [], promotion: {} };
+  if (m) {
     try {
-      const n = readJson(path.join(dir, f));
-      n.__file = f;
-      tickets.set(n.id ?? f.replace(/\.json$/, ''), n);
+      a = { ...a, ...JSON.parse(m[1]) };
     } catch (e) {
-      loadErrors.push(`${f}: not valid JSON (${e.message})`);
+      die(`constitution.md: the json devteam block is not valid JSON: ${e.message}`);
     }
   }
-  return { tickets, loadErrors };
+  a.raw_ceilings = Object.fromEntries(Object.entries(a.classes).map(([k, v]) => [k, v.ceiling]));
+  for (const [c, v] of Object.entries(loadSettings().autonomy_ceilings ?? {})) {
+    if (a.classes[c] && typeof v === 'number' && v < a.classes[c].ceiling) a.classes[c] = { ...a.classes[c], ceiling: v };
+  }
+  a.promotion = { clean_acts: 10, min_days: 14, seen_age_days: 7, agreement: 0.9, agreement_window: 10, ...a.promotion };
+  return (ladderCache = a);
 }
+const RUNG = { 1: 'ask', 2: 'ask with a default', 3: 'act and report' };
 
-const isActive = (n) => !n.superseded_by;
+// ===== 3. the schema and the log =====
 
-function featurePlan(feature) {
-  const p = path.join(projectDir, 'features', `${feature}.md`);
-  return fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : null;
-}
+const SCHEMA = readJson(path.join(devteamDir, 'schema', 'log.schema.json'));
+const ENVELOPE = ['v', 'id', 'type', 'op', 'at', 'by'];
+const LINE_MAX = 4096;
+const TYPES = Object.keys(SCHEMA.$defs.types);
+const RANK = SCHEMA['x-authority'].rank;
 
-function storiesForFeature(feature) {
-  const text = featurePlan(feature);
-  if (text === null) return null;
-  // Stories are defined in section 1 only; ids elsewhere are references.
-  const sec = text.match(/^##\s*1\.[^\n]*\n([\s\S]*?)(?=^##\s|(?![\s\S]))/m);
-  return new Set((sec ? sec[1] : '').match(/\b[A-Z][A-Z0-9]*-S[0-9]+\b/g) ?? []);
-}
-
-const featureStatus = (feature) => featurePlan(feature)?.match(/^-?[ \t]*Status:[ \t]*(\S+)/m)?.[1] ?? null;
-
-// Transitive dependency closure for every ticket.
-function closures(tickets) {
-  const memo = new Map();
-  const visit = (id, stack = new Set()) => {
-    if (memo.has(id)) return memo.get(id);
-    if (stack.has(id)) return new Set(); // cycle; reported elsewhere
-    stack.add(id);
-    const out = new Set();
-    for (const d of tickets.get(id)?.depends_on ?? []) {
-      if (!tickets.has(d)) continue;
-      out.add(d);
-      for (const x of visit(d, stack)) out.add(x);
-    }
-    stack.delete(id);
-    memo.set(id, out);
-    return out;
-  };
-  for (const id of tickets.keys()) visit(id);
-  return memo;
-}
-
-function findCycle(tickets) {
-  const state = new Map(); // 1 visiting, 2 done
-  const stack = [];
-  const dfs = (id) => {
-    state.set(id, 1);
-    stack.push(id);
-    for (const d of tickets.get(id)?.depends_on ?? []) {
-      if (!tickets.has(d)) continue;
-      if (state.get(d) === 1) return [...stack.slice(stack.indexOf(d)), d];
-      if (!state.has(d)) {
-        const c = dfs(d);
-        if (c) return c;
-      }
-    }
-    stack.pop();
-    state.set(id, 2);
-    return null;
-  };
-  for (const id of tickets.keys()) {
-    if (!state.has(id)) {
-      const c = dfs(id);
-      if (c) return c;
+// A JSON Schema checker for the subset the log schema uses. Returns a list of problems.
+function schemaErrors(schema, value, where) {
+  const errs = [];
+  const typeOf = (v) => (v === null ? 'null' : Array.isArray(v) ? 'array' : Number.isInteger(v) ? 'integer' : typeof v);
+  if (schema.const !== undefined && value !== schema.const) errs.push(`${where} must be ${JSON.stringify(schema.const)}`);
+  if (schema.enum && !schema.enum.includes(value)) errs.push(`${where} must be one of ${schema.enum.join(', ')}`);
+  if (schema.type) {
+    const want = asList(schema.type);
+    const got = typeOf(value);
+    if (!want.includes(got) && !(got === 'integer' && want.includes('number'))) errs.push(`${where} must be ${want.join(' or ')}`);
+  }
+  if (typeof value === 'string') {
+    if (schema.pattern && !new RegExp(schema.pattern).test(value)) errs.push(`${where} "${value.slice(0, 40)}" does not match ${schema.pattern}`);
+    if (schema.minLength !== undefined && value.length < schema.minLength) errs.push(`${where} must be at least ${schema.minLength} characters`);
+    if (schema.maxLength !== undefined && value.length > schema.maxLength) errs.push(`${where} must be at most ${schema.maxLength} characters`);
+  }
+  if (typeof value === 'number') {
+    if (schema.minimum !== undefined && value < schema.minimum) errs.push(`${where} must be at least ${schema.minimum}`);
+    if (schema.maximum !== undefined && value > schema.maximum) errs.push(`${where} must be at most ${schema.maximum}`);
+  }
+  if (Array.isArray(value)) {
+    if (schema.minItems !== undefined && value.length < schema.minItems) errs.push(`${where} needs at least ${schema.minItems} item(s)`);
+    if (schema.maxItems !== undefined && value.length > schema.maxItems) errs.push(`${where} has more than ${schema.maxItems} items`);
+    if (schema.items) value.forEach((v, i) => errs.push(...schemaErrors(schema.items, v, `${where}[${i}]`)));
+  }
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    for (const k of schema.required ?? []) if (!(k in value)) errs.push(`${where}.${k} is required`);
+    for (const [k, v] of Object.entries(value)) {
+      const sub = schema.properties?.[k];
+      if (sub) errs.push(...schemaErrors(sub, v, `${where}.${k}`));
+      else if (schema.additionalProperties === false) errs.push(`${where}.${k} is not a field here`);
     }
   }
-  return null;
+  return errs;
 }
 
-// Longest path through the active subgraph, weighted S = 1, M = 2.
-function criticalPath(sub) {
-  const best = new Map();
-  const weight = (id) => (sub.get(id).size === 'M' ? 2 : 1);
-  const longest = (id) => {
-    if (best.has(id)) return best.get(id);
-    let top = { len: 0, path: [] };
-    for (const d of sub.get(id).depends_on ?? []) {
-      if (!sub.has(d)) continue;
-      const r = longest(d);
-      if (r.len > top.len) top = r;
+const writerOfFile = (name) => name.replace(/\.jsonl$/, '').replace(/^(owner|supervisor)-\d{4}-\d{2}$/, '$1');
+const writerClass = (by) => (by === 'owner' || by === 'supervisor' ? by : /^plan-[a-z0-9-]+$/.test(by) ? 'planner' : 'ticket');
+
+// Validate one parsed line: envelope, body against its type, id shape, and the authority table.
+function checkLine(o, file) {
+  if (!o || typeof o !== 'object' || Array.isArray(o)) return ['not a JSON object'];
+  const envelope = Object.fromEntries(ENVELOPE.filter((k) => k in o).map((k) => [k, o[k]]));
+  const errs = schemaErrors({ ...SCHEMA, $defs: undefined }, envelope, 'line').map((e) => e.replace(/^line\./, ''));
+  if (errs.length) return errs;
+  const t = SCHEMA.$defs.types[o.type];
+  const body = Object.fromEntries(Object.entries(o).filter(([k]) => !ENVELOPE.includes(k)));
+  errs.push(...schemaErrors(t, body, o.type));
+  if (file && writerOfFile(file) !== o.by) errs.push(`by "${o.by}" does not match the file's writer "${writerOfFile(file)}"`);
+  const cls = writerClass(o.by);
+  const auth = SCHEMA['x-authority'];
+  const ids = SCHEMA['x-id'];
+  if (o.op === 'new') {
+    if (ids.keyed[o.type]) {
+      if (!new RegExp(ids.keyed[o.type]).test(o.id)) errs.push(`a ${o.type} id must match ${ids.keyed[o.type]}`);
+    } else {
+      if (!new RegExp(ids.pattern).test(o.id) || !o.id.startsWith(`${ids.prefix[o.type]}-`)) errs.push(`a ${o.type} id looks like ${ids.prefix[o.type]}-<yyyymmdd>-<hhmmssmmm>-<writer>`);
+      if (!o.id.endsWith(`-${o.by}`)) errs.push(`a new id ends with its writer, "-${o.by}"`);
     }
-    const res = { len: top.len + weight(id), path: [...top.path, id] };
-    best.set(id, res);
-    return res;
-  };
-  let crit = { len: 0, path: [] };
-  for (const id of sub.keys()) {
-    const r = longest(id);
-    if (r.len > crit.len) crit = r;
+    for (const k of t['x-required-new'] ?? []) if (!(k in body)) errs.push(`${o.type}.${k} is required`);
+    for (const k of t['x-set-only'] ?? []) if (k in body) errs.push(`${o.type}.${k} is set later, not at creation`);
+    if (!auth.new[cls].includes(o.type)) errs.push(`${cls} may not create ${o.type} lines`);
+    if (o.type === 'goal' && o.status && o.status !== 'draft' && cls !== 'owner') errs.push('only the owner creates a goal past draft');
+    if (o.type === 'question' && o.kind === 'one-way-door' && o.default) errs.push('a one-way door never has a default');
+  } else {
+    const allowed = auth.set[o.type]?.[cls];
+    const fields = Object.keys(body);
+    if (!allowed) errs.push(`${cls} may not change ${o.type} lines`);
+    else if (!fields.length) errs.push('a set line changes at least one field');
+    else {
+      const bad = fields.filter((k) => !allowed.includes(k));
+      if (bad.length) errs.push(`${cls} may not set ${o.type}.${bad.join(', ')}`);
+    }
   }
-  return crit;
+  return errs;
 }
 
-const unbalancedBraces = (g) => (g.match(/\{/g) ?? []).length !== (g.match(/\}/g) ?? []).length;
-const escRe = (s) => s.replace(/[.+^$()|[\]\\]/g, '\\$&');
-
-function globToRegex(g) {
-  let re = '';
-  for (let i = 0; i < g.length; i++) {
-    const c = g[i];
-    if (c === '*' && g[i + 1] === '*') {
-      re += '.*';
-      i++;
-      if (g[i + 1] === '/') i++;
-    } else if (c === '*') re += '[^/]*';
-    else if (c === '?') re += '[^/]';
-    else if (c === '{') {
-      const end = g.indexOf('}', i);
-      if (end === -1) {
-        re += '\\{'; // unbalanced: treat literally (validate reports it)
-        continue;
-      }
-      re += `(${g.slice(i + 1, end).split(',').map(escRe).join('|')})`;
-      i = end;
-    } else re += escRe(c);
-  }
-  return new RegExp(`^${re}$`);
-}
-
-const hasWild = (g) => /[*?{[]/.test(g);
-const staticPrefix = (g) => {
-  const i = g.search(/[*?{[]/);
-  return i === -1 ? g : g.slice(0, i);
-};
-const trimSlash = (p) => p.replace(/\/+$/, '');
-
-// Does a file path fall under a touches entry? A wildcard-free entry matches itself and,
-// if it names a directory, everything beneath it.
-function pathMatches(entry, file) {
-  if (!hasWild(entry)) {
-    const e = trimSlash(entry);
-    return file === e || file.startsWith(`${e}/`);
-  }
-  return globToRegex(entry).test(file);
-}
-
-// Conservative overlap test between two touches entries: may report an overlap that isn't
-// real, never misses one.
-function globsOverlap(a, b) {
-  if (!hasWild(a) && !hasWild(b)) {
-    const x = trimSlash(a);
-    const y = trimSlash(b);
-    return x === y || x.startsWith(`${y}/`) || y.startsWith(`${x}/`);
-  }
-  if (!hasWild(a)) return pathMatches(b, trimSlash(a)) || staticPrefix(b).startsWith(`${trimSlash(a)}/`);
-  if (!hasWild(b)) return globsOverlap(b, a);
-  const pa = staticPrefix(a);
-  const pb = staticPrefix(b);
-  return pa.startsWith(pb) || pb.startsWith(pa);
-}
-
-// ---------- git-derived facts ----------
-
-let mainRefCache;
-function mainRef() {
-  if (mainRefCache !== undefined) return mainRefCache;
-  const b = loadSettings().main_branch;
-  for (const r of [`origin/${b}`, b]) {
-    if (resolveCommit(r)) return (mainRefCache = r);
-  }
-  return (mainRefCache = null);
-}
-
-let mainLogCache;
-function mainLog() {
-  if (mainLogCache) return mainLogCache;
-  const ref = mainRef();
-  // First-parent only: merge commits and squash commits are on it; a branch's own commits are not.
-  const out = ref ? git(['log', ref, '--first-parent', '--format=%H%x09%s']) : null;
-  mainLogCache = (out ? out.split('\n') : []).filter(Boolean).map((l) => {
-    const [sha, ...rest] = l.split('\t');
-    return { sha, subject: rest.join('\t') };
+// Parse a file's lines. Validation is on by default (log-check, merge); readers skip it for speed.
+function parseLines(text, file, { firstLine = 1, validate = true } = {}) {
+  const lines = [];
+  const errors = [];
+  (text ?? '').split('\n').forEach((raw, i) => {
+    if (!raw.trim()) return;
+    const n = i + firstLine;
+    if (raw.length > LINE_MAX) return void errors.push(`${file}:${n}: longer than ${LINE_MAX} bytes`);
+    let o;
+    try {
+      o = JSON.parse(raw);
+    } catch {
+      return void errors.push(`${file}:${n}: not valid JSON`);
+    }
+    const errs = validate ? checkLine(o, file) : (!o || typeof o !== 'object' || !TYPES.includes(o.type) || !o.id || !o.at || !o.by ? ['not a log line'] : []);
+    if (errs.length) errors.push(`${file}:${n}: ${errs.join('; ')}`);
+    else lines.push({ ...o, __file: file, __line: n });
   });
-  return mainLogCache;
+  return { lines, errors };
 }
 
-let mergeParentsCache;
-function mergeParents() {
-  if (mergeParentsCache) return mergeParentsCache;
-  const ref = mainRef();
-  const out = ref ? git(['log', ref, '--merges', '--first-parent', '-n', '500', '--format=%H %P']) : null;
-  mergeParentsCache = (out ? out.split('\n') : []).filter(Boolean).map((l) => l.split(' '));
-  return mergeParentsCache;
-}
-
-// The tip of a ticket's branch: the local branch (shared by every worktree) first, then origin's.
-function ticketBranchRef(id) {
-  for (const r of [`refs/heads/ticket/${id}`, `refs/remotes/origin/ticket/${id}`]) if (resolveCommit(r)) return r;
-  return null;
-}
-
-// The commit on main that landed a ticket: a merge commit from branch ticket/<id>, a squash
-// commit titled "<id>: ...", or a merge whose second parent contains the branch tip and whose
-// first parent does not. (A branch merely created from main is an ancestor of main too, so
-// plain ancestry is not enough.)
-const mergeShaCache = new Map();
-function mergeShaFor(id) {
-  if (mergeShaCache.has(id)) return mergeShaCache.get(id);
-  const done = (v) => (mergeShaCache.set(id, v), v);
-  const esc = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const fromBranch = new RegExp(`from \\S*ticket/${esc}$`);
-  for (const { sha, subject } of mainLog()) {
-    if (fromBranch.test(subject) || subject.startsWith(`${id}:`)) return done(sha);
-  }
-  const ref = mainRef();
-  if (!ref) return done(null);
-  for (const r of [`refs/heads/ticket/${id}`, `refs/remotes/origin/ticket/${id}`]) {
-    const tip = resolveCommit(r);
-    if (!tip || git(['merge-base', '--is-ancestor', tip, ref]) === null) continue;
-    for (const [sha, p1, p2] of mergeParents()) {
-      if (!p2) continue;
-      if (git(['merge-base', '--is-ancestor', tip, p2]) !== null && git(['merge-base', '--is-ancestor', tip, p1]) === null) return done(sha);
-    }
-  }
-  return done(null);
-}
-
-function isReleased(sha) {
-  const tags = git(['tag', '--contains', sha, '--list', 'v*']);
-  return !!tags && tags.split('\n').some((t) => t && !/-rc/.test(t));
-}
-
-// ---------- review records ----------
-
-const statusOf = (text) => text?.match(/^Status:[ \t]*(\S+)/m)?.[1] ?? null;
-
-function tableCells(row) {
-  return row.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
-}
-
-function parseReview(file, text) {
-  const m = file.match(/^([a-z]+)-(\d+)([a-z]?)\.md$/);
-  const verdict = [...text.matchAll(/^Verdict:[ \t]*(APPROVE|CHANGES)[ \t]+(\S+)[ \t]*$/gm)].pop();
-  const reviewerRaw = text.match(/^-[ \t]*Reviewer:[ \t]*(.*)$/m)?.[1]?.trim() ?? '';
-  const reviewer = reviewerRaw && !reviewerRaw.startsWith('<') ? reviewerRaw : null;
-  // Findings: any table row whose first cell is F<n>. The disposition is the cell under the
-  // "Disposition" header; a row too short to have one is undispositioned.
-  const findings = [];
-  let dispIdx = -1;
-  let sevIdx = 1;
-  for (const row of text.split('\n')) {
-    if (!row.trim().startsWith('|')) continue;
-    const cells = tableCells(row);
-    const lower = cells.map((c) => c.toLowerCase());
-    if (lower.includes('disposition')) {
-      dispIdx = lower.indexOf('disposition');
-      sevIdx = Math.max(lower.indexOf('severity'), 1);
+// Build current state from every line. A `new` creates an object (a repeated id is ignored); a
+// `set` changes fields, but a field keeps the rank of whoever last set it (the creator's rank at
+// creation), and a lower-ranked writer can't change it: the owner's answer beats a later default.
+// The three state rules a schema can't express are here too (see the schema's description).
+function fold(all) {
+  const lines = [...all].sort((a, b) => a.at.localeCompare(b.at) || a.__file.localeCompare(b.__file) || a.__line - b.__line);
+  const objects = new Map();
+  const ignored = [];
+  const leftDraft = new Map();
+  for (const l of lines) if (l.type === 'goal' && writerClass(l.by) === 'owner' && l.status && l.status !== 'draft' && !leftDraft.has(l.id)) leftDraft.set(l.id, l.at);
+  for (const l of lines) {
+    if (l.op !== 'new') continue;
+    if (objects.has(l.id)) {
+      ignored.push({ line: l, why: 'duplicate id' });
       continue;
     }
-    if (/^F\d+$/.test(cells[0] ?? '')) findings.push({ id: cells[0], severity: cells[sevIdx] ?? '', disposition: dispIdx >= 0 ? (cells[dispIdx] ?? '') : '' });
+    const { v, op, __file, __line, at, by, ...body } = l;
+    const rank = RANK[writerClass(by)];
+    objects.set(l.id, { ...body, created_at: at, created_by: by, updates: [], __rank: Object.fromEntries(Object.keys(body).map((k) => [k, rank])) });
   }
-  return {
-    file,
-    stage: m ? m[1] : file.replace(/\.md$/, ''),
-    pass: m ? Number(m[2]) : 0,
-    variant: m ? m[3] : '',
-    verdict: verdict ? verdict[1] : null,
-    sha: verdict ? verdict[2] : null,
-    shaValid: verdict ? /^[0-9a-f]{40}$/.test(verdict[2]) : false,
-    reviewer,
-    findings,
-  };
-}
-
-function reviewRecordsIn(src, relDir) {
-  return srcList(src, relDir)
-    .filter((f) => f.endsWith('.md'))
-    .map((f) => parseReview(f, srcRead(src, `${relDir}/${f}`) ?? ''));
-}
-
-const ticketReviews = (id, src) => reviewRecordsIn(src, `tickets/${id}/reviews`);
-const featureReviews = (feature) => reviewRecordsIn(WORKTREE, `reviews/${feature}`);
-
-// The latest record (highest pass) in each track (variant letter) for one stage.
-function latestPerTrack(records, stage) {
-  const latest = new Map();
-  for (const r of records.filter((x) => x.stage === stage)) {
-    const prev = latest.get(r.variant);
-    if (!prev || r.pass > prev.pass) latest.set(r.variant, r);
+  for (const l of lines) {
+    if (l.op !== 'set') continue;
+    const obj = objects.get(l.id);
+    if (!obj) {
+      ignored.push({ line: l, why: 'set on an unknown id' });
+      continue;
+    }
+    if (obj.type !== l.type) {
+      ignored.push({ line: l, why: `set says ${l.type} but ${l.id} is a ${obj.type}` });
+      continue;
+    }
+    const cls = writerClass(l.by);
+    if (obj.type === 'goal' && cls === 'supervisor' && ((obj.status ?? 'draft') !== 'draft' || (leftDraft.get(obj.id) && l.at >= leftDraft.get(obj.id)))) {
+      ignored.push({ line: l, why: 'the supervisor edits a goal only while it is a draft' });
+      continue;
+    }
+    if (obj.type === 'question' && l.status === 'defaulted' && !obj.default) {
+      ignored.push({ line: l, why: 'the question has no default' });
+      continue;
+    }
+    const rank = RANK[cls];
+    const changed = {};
+    for (const [k, val] of Object.entries(l)) {
+      if (ENVELOPE.includes(k) || k.startsWith('__')) continue;
+      if ((obj.__rank[k] ?? -1) > rank) continue;
+      obj[k] = val;
+      obj.__rank[k] = rank;
+      changed[k] = val;
+    }
+    if (Object.keys(changed).length) obj.updates.push({ at: l.at, by: l.by, ...changed });
+    else ignored.push({ line: l, why: 'overridden by a higher-ranked writer' });
   }
-  return [...latest.values()];
+  for (const o of objects.values()) delete o.__rank;
+  return { objects, ignored };
 }
 
-const blocking = (sev) => /^(critical|important)$/i.test(sev);
-const disposed = (d) => /^(fixed|wrong|wont-fix\b|won't-fix\b)/i.test(d ?? '');
+// --- where the log lives ---
+//
+// A planner writes project/log/plan-<feature>.jsonl in its own worktree; the lines land with the
+// plan PR, so a plan is reviewed before anyone can schedule from it. Everyone else writes
+// run/log/<writer>.jsonl the moment something happens (gitignored, shared by every worktree) and
+// the supervisor mirrors those files into project/log with the chore-log PR.
 
-// ---------- run state ----------
-
-const runTicketPath = (id) => path.join(runDir, 'tickets', `${id}.json`);
-function readRunTicket(id) {
-  try {
-    return fs.existsSync(runTicketPath(id)) ? readJson(runTicketPath(id)) : null;
-  } catch {
-    warn(`run/tickets/${id}.json is not valid JSON; ignoring`);
-    return null;
-  }
-}
-
-function appendEvent(ev) {
-  if (!EVENT_TYPES.includes(ev.type)) die(`unknown event type "${ev.type}" (schema/event.schema.json)`);
-  fs.mkdirSync(runDir, { recursive: true });
-  const line = JSON.stringify({ ts: nowIso(), ticket: null, sha: null, summary: '', ref: null, ...ev });
-  fs.appendFileSync(path.join(runDir, 'events.jsonl'), `${line}\n`); // one write of one line
-}
-
-function readEvents() {
-  const p = path.join(runDir, 'events.jsonl');
-  if (!fs.existsSync(p)) return [];
-  return fs
-    .readFileSync(p, 'utf8')
-    .split('\n')
-    .filter(Boolean)
-    .flatMap((l) => {
-      try {
-        return [JSON.parse(l)];
-      } catch {
-        return [];
-      }
-    });
-}
-
-// Owner questions live in the log; this is the folded view.
-const readQuestions = () => logObjects('question').map(LOG.questionView);
-
-function tmux(args) {
-  try {
-    execFileSync('tmux', args, { stdio: 'ignore' });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// The session:window of the pane running this command. TMUX_PANE pins it to our own pane;
-// without -t, tmux reports whichever window the client happens to have active.
-function tmuxHere() {
-  if (!process.env.TMUX || !process.env.TMUX_PANE) return null;
-  try {
-    return execFileSync('tmux', ['display-message', '-p', '-t', process.env.TMUX_PANE, '#S:#W'], { encoding: 'utf8' }).trim() || null;
-  } catch {
-    return null;
-  }
-}
-
-function nudge(target, message) {
-  if (!target) return false;
-  return tmux(['send-keys', '-t', target, '-l', message]) && tmux(['send-keys', '-t', target, 'Enter']);
-}
+const liveLogDir = () => path.join(runDir, 'log');
+const durableLogDir = () => path.join(projectDir, 'log');
+const logFileFor = (by) => (by === 'owner' || by === 'supervisor' ? `${by}-${nowIso().slice(0, 7)}.jsonl` : `${by}.jsonl`);
+const isPlanFile = (name) => name.startsWith('plan-');
 
 function currentTicketId() {
   if (process.env.DEVTEAM_TICKET) return process.env.DEVTEAM_TICKET;
   const b = git(['rev-parse', '--abbrev-ref', 'HEAD']);
   return b?.startsWith('ticket/') ? b.slice('ticket/'.length) : null;
 }
-
-// Who is running this command: a ticket id, 'planner' or 'supervisor'.
-function currentActor() {
-  const ticket = currentTicketId();
-  if (ticket) return ticket;
-  if (process.env.DEVTEAM_ROLE === 'planner') return 'planner';
+// Who this process writes the log as: a ticket id, plan-<feature>, or supervisor. Never the owner.
+function logWriter() {
+  const t = currentTicketId();
+  if (t) return t;
+  if (process.env.DEVTEAM_FEATURE) return `plan-${process.env.DEVTEAM_FEATURE}`;
   const b = git(['rev-parse', '--abbrev-ref', 'HEAD']);
-  if (b?.startsWith('plan/')) return 'planner';
+  if (b?.startsWith('plan/')) return `plan-${b.slice('plan/'.length)}`;
   return 'supervisor';
 }
-
-// The supervisor's window is named 'supervisor' (bootstrap.md §4); index 0 is the fallback.
-const supervisorTarget = () => process.env.DEVTEAM_SUPERVISOR ?? `${loadSettings().tmux_session}:supervisor`;
-
-// ---------- derived status ----------
-
-function deriveStatus(tickets) {
-  const merged = new Map([...tickets.keys()].map((id) => [id, mergeShaFor(id)]));
-  return [...tickets.values()].map((n) => {
-    const id = n.id;
-    const mergeSha = merged.get(id);
-    const run = readRunTicket(id);
-    const branch = ticketBranchRef(id);
-    // Before merge, a ticket's files exist only on its branch; read them there.
-    const src = branch && !mergeSha ? { ref: branch } : WORKTREE;
-    const spec = statusOf(srcRead(src, `tickets/${id}/spec.md`));
-    const plan = statusOf(srcRead(src, `tickets/${id}/plan.md`));
-    const reviews = ticketReviews(id, src);
-    const depsMerged = (n.depends_on ?? []).every((d) => merged.get(d));
-    let stage = 'planned';
-    if (n.superseded_by) stage = 'superseded';
-    else if (mergeSha) stage = isReleased(mergeSha) ? 'released' : 'merged';
-    else if (reviews.some((r) => r.stage === 'final')) stage = 'in-review';
-    else if (branch && plan === 'approved' && depsMerged) stage = 'building';
-    else if (plan === 'approved') stage = 'planned-in-detail';
-    else if (spec === 'approved') stage = "spec'd";
-    else if (depsMerged) stage = 'ready';
-    const heartbeatAge = run?.heartbeat_at ? Math.round((Date.now() - Date.parse(run.heartbeat_at)) / 60000) : null;
-    return {
-      id,
-      feature: n.feature,
-      component: n.component,
-      kind: n.kind,
-      risk: n.risk,
-      stage,
-      merge_sha: mergeSha,
-      branch,
-      depends_on: n.depends_on ?? [],
-      deps_merged: depsMerged,
-      phase: run?.phase ?? null,
-      task: run?.task ?? null,
-      heartbeat_minutes: heartbeatAge,
-      cost: run?.cost ?? null,
-      note: run?.note ?? null,
-    };
-  });
-}
-
-function reviewStats(tickets) {
-  const byStage = {};
-  let findings = 0;
-  let wrong = 0;
-  const all = [];
-  for (const id of tickets.keys()) {
-    const branch = ticketBranchRef(id);
-    all.push(...ticketReviews(id, branch && !mergeShaFor(id) ? { ref: branch } : WORKTREE));
-  }
-  for (const col of new Set([...tickets.values()].map((n) => n.feature))) all.push(...featureReviews(col));
-  for (const r of all) {
-    for (const f of r.findings) {
-      findings++;
-      if (/^wrong/i.test(f.disposition)) wrong++;
-    }
-    if (r.pass !== 1 || r.variant || !r.verdict) continue;
-    byStage[r.stage] ??= { first_passes: 0, rejected: 0 };
-    byStage[r.stage].first_passes++;
-    if (r.verdict === 'CHANGES') byStage[r.stage].rejected++;
-  }
-  for (const s of Object.values(byStage)) s.rejection_rate = s.first_passes ? +(s.rejected / s.first_passes).toFixed(2) : null;
-  return { by_stage: byStage, findings, false_positive_rate: findings ? +(wrong / findings).toFixed(2) : null };
-}
-
-// ---------- the log (process/log.md) ----------
-//
-// Live lines go to run/log/<file>.jsonl the moment they happen (gitignored, shared by every
-// worktree). The supervisor mirrors them into project/log/<file>.jsonl with a log-only PR
-// (log-sync), so they become durable history in git. Readers take, per file, whichever copy
-// extends the other.
-
-const liveLogDir = () => path.join(runDir, 'log');
-const durableLogDir = () => path.join(projectDir, 'log');
-const month = () => new Date().toISOString().slice(0, 7);
-const logFileFor = (by) => (by === 'owner' || by === 'supervisor' ? `${by}-${month()}.jsonl` : `${by}.jsonl`);
-
-// Who this process writes the log as. The owner is never inferred: owner commands call ownerWriter().
-function logWriter() {
-  const actor = currentActor();
-  if (actor !== 'planner') return actor;
-  const a = myAddress();
-  if (!/^plan-[a-z0-9-]+$/.test(a)) die('a planner logs as plan-<feature>; run from a plan/<feature> branch or its tmux window');
-  return a;
-}
-
-// Owner actions come from the owner's own terminal or the dashboard, never from an agent session.
-// This is a visibility measure, not a wall: every owner line records its channel.
+// Owner commands run from the owner's terminal or the dashboard, never an agent session. A
+// visibility measure, not a wall: every owner line records its channel.
 function ownerWriter() {
-  if (process.env.DEVTEAM_ROLE) die(`owner commands can't run from an agent session (DEVTEAM_ROLE=${process.env.DEVTEAM_ROLE}); the owner runs them from their own terminal or the dashboard`);
+  if (process.env.DEVTEAM_ROLE) die(`owner commands don't run in an agent session (DEVTEAM_ROLE=${process.env.DEVTEAM_ROLE})`);
   return { by: 'owner', channel: process.env.DEVTEAM_CHANNEL === 'dashboard' ? 'dashboard' : 'cli' };
 }
+const supervisorOnly = (what) => {
+  if (logWriter() !== 'supervisor' || ['worker', 'planner'].includes(process.env.DEVTEAM_ROLE)) die(`${what}: the supervisor does this`);
+};
 
 function withLock(file, fn) {
   const lock = `${file}.lock`;
   const start = Date.now();
   for (;;) {
     try {
-      fs.mkdirSync(lock);
+      fs.mkdirSync(lock, { recursive: false });
       break;
     } catch (e) {
       if (e.code !== 'EEXIST') throw e;
       const age = Date.now() - (fs.statSync(lock, { throwIfNoEntry: false })?.mtimeMs ?? Date.now());
       if (age > 10000) {
-        warn(`stealing a stale lock on ${path.basename(file)} (${Math.round(age / 1000)}s old)`);
         fs.rmSync(lock, { recursive: true, force: true });
         continue;
       }
@@ -661,82 +399,86 @@ function withLock(file, fn) {
   }
 }
 
-// Append one object. Fills the envelope, validates it against the authority table, and refuses
-// anything invalid. Returns the line as written.
-// The durable copy of a log file: main's committed version or this checkout's, whichever extends
-// the other (a checkout that hasn't pulled yet is behind main).
+let mainRefCache;
+function mainRef() {
+  if (mainRefCache !== undefined) return mainRefCache;
+  const b = loadSettings().main_branch;
+  for (const r of [`origin/${b}`, b]) if (resolveCommit(r)) return (mainRefCache = r);
+  return (mainRefCache = null);
+}
+const resolveCommit = (ref) => git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
+
+// The durable copy of a file: main's committed version or this checkout's, whichever extends the
+// other (this checkout may not have pulled yet, or may be a plan branch that is ahead).
 function durableText(file) {
-  const wt = path.join(durableLogDir(), file);
-  const local = fs.existsSync(wt) ? fs.readFileSync(wt, 'utf8') : null;
-  const ref = projectInRepo && mainRef() ? git(['show', `${mainRef()}:${projectRel}/log/${file}`]) : null;
-  const main = ref === null ? null : `${ref}\n`;
+  const local = readText(path.join(durableLogDir(), file));
+  const shown = projectInRepo && mainRef() ? git(['show', `${mainRef()}:${projectRel}/log/${file}`]) : null;
+  const main = shown === null ? null : `${shown}\n`;
   if (main === null) return local;
   if (local === null || main.startsWith(local)) return main;
   return local;
 }
 
-// Append one object. Fills the envelope, validates it against the authority table, and refuses
-// anything invalid. Under the lock: catch the live file up with the durable copy if that is ahead,
-// stamp a time later than the file's last line (so ids are unique and lines stay in order even if
-// the clock steps back), and write one line.
+// Append one object. Under the file's lock: catch a live file up with the durable copy if that is
+// ahead, drop a half-written last line, stamp a time after the file's last line (ids unique, lines
+// ordered even if the clock steps back), validate exactly what will be read back, write one line.
 function appendLog(fields, by = logWriter()) {
   const type = fields.type;
-  if (!LOG.TYPES[type]) die(`unknown log type ${type}`);
+  if (!TYPES.includes(type)) die(`unknown log type ${type}`);
   const file = logFileFor(by);
+  const prefix = SCHEMA['x-id'].prefix[type];
   const build = (at) => {
-    const line = { v: LOG.LOG_VERSION, id: fields.id ?? `${LOG.TYPES[type]}-${at.slice(0, 10).replace(/-/g, '')}-${at.slice(11, 23).replace(/[:.]/g, '')}-${by}`, type, op: fields.op ?? 'new', at, by };
+    const id = fields.id ?? `${prefix}-${at.slice(0, 10).replace(/-/g, '')}-${at.slice(11, 23).replace(/[:.]/g, '')}-${by}`;
+    const line = { v: 1, id, type, op: fields.op ?? 'new', at, by };
     for (const [k, val] of Object.entries(fields)) if (!['id', 'type', 'op'].includes(k) && val !== undefined) line[k] = val;
-    // Validate what will actually be read back: NaN and undefined don't survive JSON.
     const text = `${JSON.stringify(line)}\n`;
     const parsed = JSON.parse(text);
-    const errs = LOG.checkLine(parsed, file);
+    const errs = checkLine(parsed, file);
     if (errs.length) die(`log line refused: ${errs.join('; ')}`);
-    if (Buffer.byteLength(text) > LOG.LINE_MAX) die(`log line is over ${LOG.LINE_MAX} bytes; put detail in a file and reference its path`);
+    if (Buffer.byteLength(text) > LINE_MAX) die(`log line is over ${LINE_MAX} bytes; put detail in a file and reference its path`);
     return { parsed, text };
   };
-  build(new Date().toISOString()); // fail fast, before taking the lock
-  fs.mkdirSync(liveLogDir(), { recursive: true });
-  const live = path.join(liveLogDir(), file);
-  let out;
-  withLock(live, () => {
-    let cur = fs.existsSync(live) ? fs.readFileSync(live, 'utf8') : '';
-    const durable = durableText(file);
-    if (durable && durable.length > cur.length && durable.startsWith(cur)) {
-      fs.writeFileSync(live, durable);
-      cur = durable;
+  build(nowIso());
+  const planner = writerClass(by) === 'planner';
+  const dir = planner ? durableLogDir() : liveLogDir();
+  fs.mkdirSync(dir, { recursive: true });
+  const target = path.join(dir, file);
+  let result;
+  withLock(target, () => {
+    let cur = readText(target) ?? '';
+    if (!planner) {
+      const durable = durableText(file);
+      if (durable && durable.length > cur.length && durable.startsWith(cur)) {
+        fs.writeFileSync(target, durable);
+        cur = durable;
+      }
     }
     if (cur && !cur.endsWith('\n')) {
-      // A crash left half a line; drop it so the file stays valid.
-      warn(`run/log/${file} ended in a partial line; dropped it`);
       cur = cur.slice(0, cur.lastIndexOf('\n') + 1);
-      fs.writeFileSync(live, cur);
+      fs.writeFileSync(target, cur);
     }
     let lastAt = '';
-    const tail = cur.trimEnd().split('\n').pop();
     try {
+      const tail = cur.trimEnd().split('\n').pop();
       lastAt = tail ? JSON.parse(tail).at ?? '' : '';
     } catch {
       lastAt = '';
     }
     let t = Date.now();
     if (lastAt && Date.parse(lastAt) >= t) t = Date.parse(lastAt) + 1;
-    out = build(new Date(t).toISOString());
-    fs.appendFileSync(live, out.text); // one write of one line
+    result = build(new Date(t).toISOString());
+    fs.appendFileSync(target, result.text);
   });
   logCache = null;
-  return out.parsed;
+  return result.parsed;
 }
 
-// Pick, per file, the copy that extends the other; if they diverged, take the durable lines plus
-// any live lines it lacks, and warn.
 function logFileText(file) {
-  const read = (p) => (fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : null);
-  const live = read(path.join(liveLogDir(), file));
+  const live = isPlanFile(file) ? null : readText(path.join(liveLogDir(), file));
   const durable = durableText(file);
   if (live === null) return durable ?? '';
   if (durable === null || live.startsWith(durable)) return live;
   if (durable.startsWith(live)) return durable;
-  warn(`run/log/${file} and project/log/${file} have diverged; using the durable lines plus live lines it lacks`);
   const have = new Set(durable.split('\n'));
   return durable + live.split('\n').filter((l) => l && !have.has(l)).map((l) => `${l}\n`).join('');
 }
@@ -749,317 +491,638 @@ function readLog() {
   const lines = [];
   const errors = [];
   for (const f of [...names].sort()) {
-    const r = LOG.parseLines(logFileText(f), f);
+    const r = parseLines(logFileText(f), f, { validate: false });
     lines.push(...r.lines);
     errors.push(...r.errors);
   }
-  const { objects, ignored } = LOG.fold(lines);
-  logCache = { lines, objects, errors, ignored };
-  return logCache;
+  const { objects, ignored } = fold(lines);
+  return (logCache = { lines, objects, errors, ignored });
 }
-
 const logObjects = (type) => [...readLog().objects.values()].filter((o) => o.type === type);
 const logGet = (id) => readLog().objects.get(id) ?? null;
+const byTime = (a, b) => a.created_at.localeCompare(b.created_at);
 
-// ---------- autonomy (governance/autonomy.md) ----------
-
-let autonomyCache;
-function loadAutonomy() {
-  if (autonomyCache) return autonomyCache;
-  const p = path.join(devteamDir, 'governance', 'autonomy.md');
-  const m = fs.existsSync(p) ? fs.readFileSync(p, 'utf8').match(/```json devteam\s*\n([\s\S]*?)\n```/) : null;
-  let a = { classes: {}, constitutional: [], reasons: [], promotion: {} };
-  if (m) {
-    try {
-      a = { ...a, ...JSON.parse(m[1]) };
-    } catch (e) {
-      die(`governance/autonomy.md block is not valid JSON: ${e.message}`);
-    }
-  }
-  // Settings may lower a ceiling, never raise it (validate reports a raise).
-  const lower = loadSettings().autonomy_ceilings ?? {};
-  for (const [c, v] of Object.entries(lower)) if (a.classes[c] && typeof v === 'number' && v < a.classes[c].ceiling) a.classes[c] = { ...a.classes[c], ceiling: v };
-  return (autonomyCache = a);
-}
-
-const RUNG_NAMES = { 1: 'ask', 2: 'ask with a default', 3: 'act and report' };
-
-// The rung a ladder class is on for a scope: its starting rung, then, in time order, every owner
-// autonomy direction (raises or lowers) and every correction of an act in the class (drops to 1).
-function rungFor(cls, scope = null) {
-  const def = loadAutonomy().classes[cls];
-  if (!def) return null;
-  const events = [];
-  for (const q of logObjects('question')) {
-    const v = LOG.questionView(q);
-    if (v.status === 'answered' && v.autonomy?.class === cls && (!v.autonomy.scope || v.autonomy.scope === scope)) events.push({ at: v.answered_at, rung: v.autonomy.rung });
-  }
-  // A correction drops the whole class, whatever scope the act had.
-  for (const c of logObjects('correction')) {
-    if (logGet(c.act)?.class === cls) events.push({ at: c.created_at, rung: 1 });
-  }
-  let r = def.start;
-  for (const e of events.sort((a, b) => a.at.localeCompare(b.at))) r = e.rung;
-  return Math.min(r, def.ceiling);
-}
-
-// Evidence for a trust question: acts the owner has seen, at least N days old, not corrected,
-// since the class last dropped; and agreement on the last N owner-answered questions of the class.
-function trustEvidence(cls) {
-  const promo = { clean_acts: 10, min_days: 14, seen_age_days: 7, agreement: 0.9, agreement_window: 10, ...loadAutonomy().promotion };
-  const seenUpto = logObjects('seen').map((s) => s.upto).sort().pop() ?? null;
-  const corrected = new Set(logObjects('correction').map((c) => c.act));
-  const drops = logObjects('correction').filter((c) => logGet(c.act)?.class === cls).map((c) => c.created_at).sort();
-  const since = drops[drops.length - 1] ?? '';
-  const now = Date.now();
-  const acts = logObjects('act').filter((a) => a.class === cls && a.created_at > since);
-  const clean = acts.filter((a) => !corrected.has(a.id) && seenUpto && a.created_at <= seenUpto && now - Date.parse(a.created_at) >= promo.seen_age_days * 864e5);
-  const spanDays = clean.length ? (now - Date.parse(clean[0].created_at)) / 864e5 : 0;
-  const answered = logObjects('question').map(LOG.questionView).filter((q) => q.class === cls && q.status === 'answered' && q.answered_by === 'owner' && q.recommendation).sort((a, b) => a.answered_at.localeCompare(b.answered_at)).slice(-promo.agreement_window);
-  const agree = answered.filter((q) => q.matched).length;
+// Folded questions in the shape the inbox uses.
+function questionView(q) {
+  const ans = q.updates.filter((u) => u.answer !== undefined && writerClass(u.by) === 'owner').pop();
+  const st = q.updates.filter((u) => u.status !== undefined).pop();
+  let status = 'open';
+  let answer = null;
+  let answeredBy = null;
+  let answeredAt = null;
+  if (ans) [status, answer, answeredBy, answeredAt] = ['answered', ans.answer, 'owner', ans.at];
+  else if (st?.status === 'defaulted') [status, answer, answeredBy, answeredAt] = ['defaulted', q.default, 'supervisor (default)', st.at];
+  else if (st?.status === 'withdrawn') [status, answeredAt] = ['withdrawn', st.at];
+  const matched = ans ? (q.matched ?? (!!q.recommendation && ans.answer.trim().toLowerCase() === q.recommendation.trim().toLowerCase())) : null;
   return {
-    clean_acts: clean.map((a) => a.id),
-    clean_span_days: +spanDays.toFixed(1),
-    acts_since_drop: acts.length,
-    corrections: drops.length,
-    agreement: answered.length ? +(agree / answered.length).toFixed(2) : null,
-    agreement_questions: answered.map((q) => q.id),
-    meets_clean: clean.length >= promo.clean_acts && spanDays >= promo.min_days,
-    meets_agreement: answered.length >= promo.agreement_window && agree / answered.length >= promo.agreement,
+    id: q.id, kind: q.kind, class: q.class ?? null, scope: q.scope ?? null, ticket: q.ticket ?? null, re: q.re ?? null, asked_at: q.created_at,
+    question: q.question, context: q.context ?? '', options: q.options ?? [], recommendation: q.recommendation ?? '', confidence: q.confidence ?? null,
+    default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], evidence: q.evidence ?? [], note: q.note ?? null, why_asked: q.why_asked ?? null,
+    status, answer, answered_by: answeredBy, answered_at: answeredAt, matched,
+    autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans ? (q.channel ?? null) : null,
   };
 }
+const questions = () => logObjects('question').map(questionView);
 
-// ---------- commands ----------
+// The correction on an act, with who made it and when.
+const correctionOf = (a) => {
+  const u = a.updates.filter((x) => x.corrected !== undefined).pop();
+  return u ? { ...u.corrected, by: u.by, at: u.at, repaired: a.repaired ?? null } : null;
+};
 
-function cmdValidate() {
-  const { tickets, loadErrors } = loadGraph();
-  const errors = [...loadErrors];
-  const warnings = [];
-  const err = (id, msg) => errors.push(`${id}: ${msg}`);
-
-  for (const [id, n] of tickets) {
-    for (const k of Object.keys(n)) if (k !== '__file' && !TICKET_FIELDS.includes(k)) err(id, `unknown field "${k}"`);
-    for (const k of ['id', 'title', 'feature', 'component', 'kind', 'size', 'risk', 'serves', 'depends_on', 'touches', 'done_when']) {
-      if (n[k] === undefined) err(id, `missing required field "${k}"`);
+// --- the log rule for a PR: which log files it may touch, and only by appending valid lines ---
+// base..sha may change project/log/<X>.jsonl only if X is the branch's own planner file (plan/<f>)
+// or the branch is chore-log (any file but plan-*). Existing lines never change; new lines are
+// valid, in time order, in their month, and not in the future.
+function logRule(headRef, sha) {
+  if (!commonDir || !projectInRepo) return [];
+  const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
+  if (!base) return ['cannot resolve the merge base with main; log changes not checked'];
+  const prefix = `${projectRel}/log/`;
+  const changed = (git(['diff', '--name-only', '--no-renames', base, sha]) ?? '').split('\n').filter((f) => f.startsWith(prefix)).map((f) => f.slice(prefix.length));
+  const fails = [];
+  const branch = headRef.replace(/^refs\/heads\//, '');
+  const allowed = (name) => (branch === LOG_BRANCH ? !isPlanFile(name) : branch.startsWith('plan/') ? name === `plan-${branch.slice('plan/'.length)}.jsonl` : false);
+  for (const name of changed) {
+    if (name.includes('/') || !name.endsWith('.jsonl')) { fails.push(`project/log/${name}: the log holds only <writer>.jsonl files`); continue; }
+    if (!allowed(name)) { fails.push(`project/log/${name}: this PR may not change it (only chore-log, or a plan/<feature> PR for its own plan-<feature>.jsonl)`); continue; }
+    const before = git(['show', `${base}:${prefix}${name}`]);
+    const after = git(['show', `${sha}:${prefix}${name}`]);
+    if (after === null) { fails.push(`project/log/${name}: log files are never deleted`); continue; }
+    const prev = before === null ? '' : `${before}\n`;
+    const next = `${after}\n`;
+    if (!next.startsWith(prev)) { fails.push(`project/log/${name}: existing lines were changed or removed`); continue; }
+    const added = parseLines(next.slice(prev.length), name, { firstLine: prev.split('\n').filter(Boolean).length + 1 });
+    fails.push(...added.errors.map((e) => `added ${e}`));
+    const lastAt = (t) => t.split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l).at ?? ''; } catch { return ''; } }).pop() ?? '';
+    let prevAt = lastAt(prev);
+    const month = name.match(/^(?:owner|supervisor)-(\d{4}-\d{2})\.jsonl$/)?.[1];
+    if (before === null) {
+      const siblings = (git(['ls-tree', '--name-only', `${base}:${prefix.slice(0, -1)}`]) ?? '').split('\n').filter((x) => x && x !== name && writerOfFile(x) === writerOfFile(name));
+      for (const sib of siblings) prevAt = [prevAt, lastAt(`${git(['show', `${base}:${prefix}${sib}`]) ?? ''}\n`)].sort().pop();
     }
-    if (`${n.id}.json` !== n.__file) err(id, `id does not match file name ${n.__file}`);
-    if (n.id && !ID_RE.test(n.id)) err(id, 'id must be <component>-<NN>-<slug>');
-    if (n.id && n.component && !n.id.startsWith(`${n.component}-`)) err(id, `id must start with its component "${n.component}-"`);
-    if (n.kind && !TICKET_KINDS.includes(n.kind)) err(id, `kind must be one of ${TICKET_KINDS.join(', ')}`);
-    if (n.size && !['S', 'M'].includes(n.size)) err(id, 'size must be S or M (D1: split anything larger)');
-    if (n.risk && !['normal', 'high'].includes(n.risk)) err(id, 'risk must be normal or high');
-    for (const s of n.serves ?? []) if (!STORY_RE.test(s)) err(id, `serves "${s}" is not a story id like SIGNIN-S1`);
-    if (!Array.isArray(n.touches) || n.touches.length === 0) err(id, 'touches must list at least one path or glob');
-    for (const g of n.touches ?? []) if (typeof g !== 'string' || !g.trim() || unbalancedBraces(g)) err(id, `touches entry "${g}" is empty or has unbalanced braces`);
-    if (!Array.isArray(n.done_when) || n.done_when.length === 0) err(id, 'done_when must list at least one check (D5)');
-    for (const d of n.done_when ?? []) if (typeof d !== 'string' || d.trim().length < 10) err(id, `done_when entry too vague: "${d}" (D5)`);
-    for (const d of n.depends_on ?? []) {
-      if (d === id) err(id, 'depends on itself');
-      else if (!tickets.has(d)) err(id, `depends_on "${d}" does not exist (D3)`);
-      else if (!isActive(tickets.get(d)) && isActive(n)) err(id, `depends_on "${d}" is superseded; depend on its replacement`);
-    }
-    if (n.superseded_by && !tickets.has(n.superseded_by)) err(id, `superseded_by "${n.superseded_by}" does not exist`);
-    if ((n.one_way_doors ?? []).length > 0 && n.risk !== 'high') err(id, 'lists a one-way door, so risk must be high (D8)');
-    if (n.feature === CHORES_FEATURE && !['chore', 'spike'].includes(n.kind)) err(id, `only chore and spike tickets may use the reserved feature "${CHORES_FEATURE}"`);
-    if (isActive(n) && ['chore', 'spike'].includes(n.kind) && (n.serves ?? []).length === 0 && !n.notes) {
-      err(id, `${n.kind} ticket serving no story must say why in notes (D6)`);
-    }
-    if (isActive(n) && !['chore', 'spike'].includes(n.kind) && (n.serves ?? []).length === 0) err(id, 'must serve at least one story (D6)');
-    if (n.kind === 'contract' && !(n.contracts?.provides ?? []).length) err(id, 'contract ticket must list contracts.provides (D2)');
-  }
-
-  const cycle = findCycle(tickets);
-  if (cycle) errors.push(`dependency cycle: ${cycle.join(' -> ')} (D3)`);
-
-  // Features: stories defined and served (D6); approved plans carry approved design and graph reviews.
-  const features = new Set([...tickets.values()].filter(isActive).map((n) => n.feature).filter((c) => c && c !== CHORES_FEATURE));
-  for (const col of features) {
-    const stories = storiesForFeature(col);
-    if (!stories) {
-      errors.push(`feature "${col}": project/features/${col}.md not found (chore/spike tickets outside any feature use "${CHORES_FEATURE}")`);
-      continue;
-    }
-    const served = new Set();
-    for (const n of tickets.values()) {
-      if (!isActive(n) || n.feature !== col) continue;
-      for (const s of n.serves ?? []) {
-        if (!stories.has(s)) err(n.id, `serves "${s}", which ${col}.md section 1 does not define`);
-        served.add(s);
-      }
-    }
-    for (const s of stories) if (!served.has(s)) errors.push(`feature "${col}": story ${s} is served by no ticket (D6)`);
-
-    // D7 (warning): a story served by more than one component should have an integration ticket.
-    for (const s of stories) {
-      const servers = [...tickets.values()].filter((n) => isActive(n) && (n.serves ?? []).includes(s));
-      const comps = new Set(servers.filter((n) => n.kind !== 'contract').map((n) => n.component));
-      if (comps.size > 1 && !servers.some((n) => n.kind === 'integration')) {
-        warnings.push(`feature "${col}": story ${s} spans ${[...comps].join(', ')} but has no integration ticket (D7)`);
-      }
-    }
-
-    if (featureStatus(col) === 'approved') {
-      const reviews = featureReviews(col);
-      for (const r of reviews) {
-        if (r.verdict && !r.reviewer) errors.push(`project/reviews/${col}/${r.file}: missing "- Reviewer:" line`);
-        if (r.verdict && !r.shaValid) errors.push(`project/reviews/${col}/${r.file}: verdict SHA must be the full 40-character commit SHA`);
-      }
-      for (const stage of ['design', 'graph']) {
-        const latest = latestPerTrack(reviews, stage);
-        if (!latest.length) errors.push(`feature "${col}" is approved but has no ${stage} review in project/reviews/${col}/ (planning.md P2, P5)`);
-        else if (latest.some((r) => r.verdict !== 'APPROVE')) errors.push(`feature "${col}" is approved but its latest ${stage} review is not APPROVE`);
-      }
-      // Reverse chaining starts at a goal: an approved feature names the ready goals it serves.
-      const gids = featureGoals(col);
-      if (!gids.length) errors.push(`feature "${col}" is approved but names no goal (a "- Goals: g-…" line; planning.md §0)`);
-      for (const g of gids) {
-        const obj = logGet(g);
-        if (obj?.type !== 'goal') errors.push(`feature "${col}" names goal ${g}, which is not in the log (run log-sync if the owner approved it recently)`);
-        else if (!['ready', 'met'].includes(obj.status)) errors.push(`feature "${col}" names goal ${g}, which is ${obj.status ?? 'draft'}; the owner approves a goal before features are planned from it`);
-      }
+    const committedAt = Date.parse(git(['show', '-s', '--format=%cI', sha]) ?? '');
+    for (const l of added.lines) {
+      if (month && !l.at.startsWith(month)) fails.push(`project/log/${name}:${l.__line}: ${l.at} is not in ${month}`);
+      if (l.at < prevAt) fails.push(`project/log/${name}:${l.__line}: ${l.at} is earlier than the line before it`);
+      if (!Number.isNaN(committedAt) && Date.parse(l.at) > committedAt + 5 * 60000) fails.push(`project/log/${name}:${l.__line}: ${l.at} is after the commit time`);
+      prevAt = l.at;
     }
   }
-
-  // D4: tickets that can run concurrently must have disjoint footprints. Merged tickets are history.
-  if (!cycle) {
-    const clos = closures(tickets);
-    const live = [...tickets.values()].filter((n) => isActive(n) && !mergeShaFor(n.id));
-    for (let i = 0; i < live.length; i++) {
-      for (let j = i + 1; j < live.length; j++) {
-        const a = live[i];
-        const b = live[j];
-        if (clos.get(a.id)?.has(b.id) || clos.get(b.id)?.has(a.id)) continue;
-        outer: for (const ga of a.touches ?? []) {
-          for (const gb of b.touches ?? []) {
-            if (globsOverlap(ga, gb)) {
-              errors.push(`${a.id} and ${b.id} can run concurrently but both touch "${ga}" / "${gb}" (D4)`);
-              break outer;
-            }
-          }
-        }
-      }
-    }
-  }
-
-  // The log: every line valid; settings may lower a trust ceiling, never raise it.
-  // check-pr gates what enters the durable log; a bad line already there is reported, not fatal,
-  // so it can't block every PR (repair: process/log.md §5).
-  for (const e of readLog().errors) warnings.push(`log ${e}`);
-  const constitutional = (() => {
-    const p2 = path.join(devteamDir, 'governance', 'autonomy.md');
-    const m = fs.existsSync(p2) ? fs.readFileSync(p2, 'utf8').match(/```json devteam\s*\n([\s\S]*?)\n```/) : null;
-    try {
-      return m ? JSON.parse(m[1]).classes ?? {} : {};
-    } catch {
-      errors.push('governance/autonomy.md: the json devteam block is not valid JSON');
-      return {};
-    }
-  })();
-  for (const [c, v] of Object.entries(loadSettings().autonomy_ceilings ?? {})) {
-    if (!constitutional[c]) errors.push(`settings autonomy_ceilings: "${c}" is not a ladder class in governance/autonomy.md`);
-    else if (v > constitutional[c].ceiling) errors.push(`settings autonomy_ceilings: ${c} ${v} is above the ceiling of ${constitutional[c].ceiling} in governance/autonomy.md; a project may only lower it`);
-  }
-
-  // Ticket folders must belong to a ticket.
-  const nd = path.join(projectDir, 'tickets');
-  if (fs.existsSync(nd)) {
-    for (const f of fs.readdirSync(nd)) {
-      if (f.startsWith('.')) continue;
-      if (!tickets.has(f)) errors.push(`project/tickets/${f}/ has no ticket`);
-    }
-  }
-
-  for (const w of warnings) process.stdout.write(`warning: ${w}\n`);
-  for (const e of errors) process.stdout.write(`error: ${e}\n`);
-  process.stdout.write(`${tickets.size} ticket(s), ${errors.length} error(s), ${warnings.length} warning(s)\n`);
-  process.exit(errors.length ? 1 : 0);
+  return fails;
 }
 
-function activeWorker(id) {
-  const r = readRunTicket(id);
-  return !!r && !['done', 'parked'].includes(r.phase);
+const LOG_BRANCH = 'chore-log';
+
+// Mirror run/log into project/log on branch chore-log, in its own worktree, and open or update the
+// log-only PR. Run it every tick (it pushes); merge it daily with `merge --chore log`.
+function cmdLogSync() {
+  supervisorOnly('log-sync');
+  if (!commonDir || !projectInRepo) die('log-sync needs a git checkout with the project folder inside it');
+  if (repoRoot !== mainRoot) die(`run log-sync from the main checkout (${mainRoot})`);
+  const live = liveLogDir();
+  const files = fs.existsSync(live) ? fs.readdirSync(live).filter((f) => f.endsWith('.jsonl') && !isPlanFile(f)).sort() : [];
+  if (!files.length) return out('nothing in run/log to sync');
+  const wt = choreWorktree('log', { reset: true });
+  const dest = path.join(wt, projectRel, 'log');
+  fs.mkdirSync(dest, { recursive: true });
+  let changed = 0;
+  const notable = [];
+  for (const f of files) {
+    let liveText = withLock(path.join(live, f), () => fs.readFileSync(path.join(live, f), 'utf8'));
+    liveText = liveText.slice(0, liveText.lastIndexOf('\n') + 1);
+    const target = path.join(dest, f);
+    const cur = readText(target) ?? '';
+    if (cur === liveText || cur.startsWith(liveText)) continue;
+    let next = liveText;
+    if (!liveText.startsWith(cur)) {
+      const have = new Set(cur.split('\n'));
+      const extra = liveText.split('\n').filter((l) => l && !have.has(l));
+      if (!extra.length) continue;
+      warn(`run/log/${f} and main diverged; appending ${extra.length} live line(s) after main's`);
+      next = cur + extra.map((l) => `${l}\n`).join('');
+    }
+    for (const l of parseLines(next.slice(cur.length), f, { validate: false }).lines) {
+      if (l.op === 'set' && ['ticket', 'feature', 'goal', 'question'].includes(l.type) && l.by !== 'owner') notable.push(`${l.by} set ${l.type} ${l.id}: ${Object.keys(l).filter((k) => !ENVELOPE.includes(k) && !k.startsWith('__')).join(', ')}`);
+      if (l.op === 'new' && ['ticket', 'feature'].includes(l.type)) notable.push(`${l.by} added ${l.type} ${l.id}`);
+    }
+    fs.writeFileSync(target, next);
+    changed++;
+  }
+  if (!changed) return out('project/log is up to date');
+  if (flags['dry-run']) return out(`${changed} file(s) would be synced`);
+  const stamp = nowIso();
+  gitOrDie(['add', path.join(projectRel, 'log')], wt);
+  gitOrDie(['commit', '--quiet', '-m', `chore-log: log through ${stamp}`], wt);
+  gitOrDie(['push', '--quiet', '--force', 'origin', `${LOG_BRANCH}:${LOG_BRANCH}`], wt);
+  const body = `Mirrors run/log into project/log. Append-only; \`devteam.mjs check-pr\` verifies every added line.${notable.length ? `\n\nChanges to plans, goals and questions by non-owners in this sync:\n${notable.slice(0, 40).map((n) => `- ${n}`).join('\n')}` : ''}`;
+  const pr = openPr(wt, LOG_BRANCH, `chore-log: log through ${dateOnly(stamp)}`, body);
+  out(`synced ${changed} file(s) to ${LOG_BRANCH}${pr ? `: ${pr}` : ''}`);
 }
 
-function cmdReady() {
-  const { tickets } = loadGraph();
-  const merged = new Map([...tickets.keys()].map((id) => [id, mergeShaFor(id)]));
-  const rows = [];
-  for (const n of tickets.values()) {
-    if (!isActive(n) || merged.get(n.id) || activeWorker(n.id)) continue;
-    const depsMerged = (n.depends_on ?? []).every((d) => merged.get(d));
-    if (depsMerged || flags['plan-ahead']) rows.push({ id: n.id, component: n.component, kind: n.kind, size: n.size, risk: n.risk, mode: depsMerged ? 'build' : 'plan-ahead' });
+// Validate every line (live and durable) and list what the fold ignored.
+function cmdLogCheck() {
+  const names = new Set();
+  for (const d of [liveLogDir(), durableLogDir()]) if (fs.existsSync(d)) for (const f of fs.readdirSync(d)) if (f.endsWith('.jsonl')) names.add(f);
+  const fails = [];
+  let n = 0;
+  for (const f of [...names].sort()) {
+    const r = parseLines(logFileText(f), f);
+    fails.push(...r.errors);
+    n += r.lines.length;
   }
-  const b = loadSettings();
-  const active = [...tickets.keys()].filter(activeWorker);
-  const perComponent = {};
-  for (const id of active) perComponent[tickets.get(id).component] = (perComponent[tickets.get(id).component] ?? 0) + 1;
-  if (flags.json) {
-    return void process.stdout.write(`${JSON.stringify({ ready: rows, active, active_per_component: perComponent, caps: { max_active_tickets: b.max_active_tickets, max_active_per_component: b.max_active_per_component } }, null, 2)}\n`);
-  }
-  process.stdout.write(`active workers: ${active.length}/${b.max_active_tickets}\n`);
-  if (!rows.length) return void process.stdout.write('nothing ready\n');
-  for (const r of rows) {
-    const full = (perComponent[r.component] ?? 0) >= b.max_active_per_component ? '  (component at cap)' : '';
-    process.stdout.write(`${r.mode.padEnd(10)} ${r.id}  (${r.kind}, ${r.size}, ${r.risk})${full}\n`);
+  for (const i of readLog().ignored) out(`ignored: ${i.line.__file}:${i.line.__line} ${i.line.id}: ${i.why}`);
+  report(fails, `${n} log line(s)`);
+}
+
+function cmdLog() {
+  let objs = [...readLog().objects.values()];
+  if (flagStr('type')) objs = objs.filter((o) => o.type === flagStr('type'));
+  if (flagStr('by')) objs = objs.filter((o) => o.created_by === flagStr('by'));
+  if (flagStr('id')) objs = objs.filter((o) => o.id === flagStr('id'));
+  objs.sort(byTime);
+  objs = objs.slice(-Number(flagStr('tail') ?? 50));
+  if (flags.json) return json(objs);
+  for (const o of objs) {
+    const what = o.question ?? o.statement ?? o.title ?? o.what ?? o.detail ?? o.text ?? (o.type === 'phase' ? `${o.from ?? '-'} -> ${o.to}` : o.type === 'gate' ? `${o.gate} ${o.ok ? 'ok' : 'FAIL'} ${o.ms}ms` : '');
+    out(`${o.created_at} ${o.id} [${o.type}${o.kind ? ` ${o.kind}` : ''}${o.status ? ` ${o.status}` : ''}] ${String(what).slice(0, 160)}`);
   }
 }
 
-function cmdWaves() {
-  const { tickets } = loadGraph();
-  const col = flagStr('feature');
-  const sub = new Map([...tickets].filter(([, n]) => isActive(n) && (!col || n.feature === col)));
-  if (findCycle(sub)) die('graph has a cycle; run validate');
+function report(fails, okMsg) {
+  for (const f of fails) out(`fail: ${f}`);
+  if (fails.length) process.exit(1);
+  out(`ok: ${okMsg}`);
+}
+// ===== 4. facts from git =====
+
+let mainLogCache;
+function mainLog() {
+  if (mainLogCache) return mainLogCache;
+  const ref = mainRef();
+  // First-parent only: merge and squash commits are on it; a branch's own commits are not.
+  const o = ref ? git(['log', ref, '--first-parent', '--format=%H%x09%s']) : null;
+  return (mainLogCache = (o ? o.split('\n') : []).filter(Boolean).map((l) => {
+    const [sha, ...r] = l.split('\t');
+    return { sha, subject: r.join('\t') };
+  }));
+}
+let mergeParentsCache;
+function mergeParents() {
+  if (mergeParentsCache) return mergeParentsCache;
+  const ref = mainRef();
+  const o = ref ? git(['log', ref, '--merges', '--first-parent', '-n', '500', '--format=%H %P']) : null;
+  return (mergeParentsCache = (o ? o.split('\n') : []).filter(Boolean).map((l) => l.split(' ')));
+}
+function ticketBranchRef(id) {
+  for (const r of [`refs/heads/ticket/${id}`, `refs/remotes/origin/ticket/${id}`]) if (resolveCommit(r)) return r;
+  return null;
+}
+// The commit on main that landed a ticket: a merge from ticket/<id>, a squash titled "<id>: …", or
+// a merge whose second parent contains the branch tip and whose first parent does not.
+const mergeShaCache = new Map();
+function mergeShaFor(id) {
+  if (mergeShaCache.has(id)) return mergeShaCache.get(id);
+  const done = (v) => (mergeShaCache.set(id, v), v);
+  const esc = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const fromBranch = new RegExp(`from \\S*ticket/${esc}$`);
+  for (const { sha, subject } of mainLog()) if (fromBranch.test(subject) || subject.startsWith(`${id}:`)) return done(sha);
+  const ref = mainRef();
+  if (!ref) return done(null);
+  for (const r of [`refs/heads/ticket/${id}`, `refs/remotes/origin/ticket/${id}`]) {
+    const tip = resolveCommit(r);
+    if (!tip || git(['merge-base', '--is-ancestor', tip, ref]) === null) continue;
+    for (const [sha, p1, p2] of mergeParents()) {
+      if (p2 && git(['merge-base', '--is-ancestor', tip, p2]) !== null && git(['merge-base', '--is-ancestor', tip, p1]) === null) return done(sha);
+    }
+  }
+  return done(null);
+}
+const mergedAtCache = new Map();
+function mergedAt(id) {
+  if (!mergedAtCache.has(id)) {
+    const sha = mergeShaFor(id);
+    const t = sha ? Date.parse(git(['show', '-s', '--format=%cI', sha]) ?? '') : NaN;
+    mergedAtCache.set(id, Number.isNaN(t) ? null : t);
+  }
+  return mergedAtCache.get(id);
+}
+function releasedIn(sha) {
+  const tags = git(['tag', '--contains', sha, '--list', 'v*', '--sort=creatordate']);
+  return (tags ?? '').split('\n').find((t) => t && !/-rc/.test(t)) ?? null;
+}
+// Read a project file from a git ref (a ticket's branch, an exact head) or the working tree.
+function srcRead(src, rel) {
+  if (src.ref && projectInRepo) return git(['show', `${src.ref}:${projectRel}/${rel}`]);
+  return readText(path.join(projectDir, rel));
+}
+function srcList(src, relDir) {
+  if (src.ref && projectInRepo) return (git(['ls-tree', '--name-only', `${src.ref}:${projectRel}/${relDir}`]) ?? '').split('\n').filter(Boolean);
+  const p = path.join(projectDir, relDir);
+  return fs.existsSync(p) ? fs.readdirSync(p) : [];
+}
+const WORKTREE = { ref: null };
+// A project file from this checkout, or main's copy when this checkout lacks it.
+const projectFileText = (rel) => readText(path.join(projectDir, rel)) ?? (projectInRepo && mainRef() ? git(['show', `${mainRef()}:${projectRel}/${rel}`]) : null);
+
+// ===== 5. the graph (tickets and features, folded from the log) =====
+
+const tickets = () => new Map(logObjects('ticket').map((t) => [t.id, t]));
+const features = () => new Map(logObjects('feature').map((f) => [f.id, f]));
+const isActive = (t) => !t.superseded_by;
+const activeTickets = () => new Map([...tickets()].filter(([, t]) => isActive(t)));
+const weight = (t) => (t.size === 'M' ? 2 : 1);
+
+function closures(ts) {
+  const memo = new Map();
+  const visit = (id, stack = new Set()) => {
+    if (memo.has(id)) return memo.get(id);
+    if (stack.has(id)) return new Set();
+    stack.add(id);
+    const o = new Set();
+    for (const d of ts.get(id)?.depends_on ?? []) if (ts.has(d)) { o.add(d); for (const x of visit(d, stack)) o.add(x); }
+    stack.delete(id);
+    memo.set(id, o);
+    return o;
+  };
+  for (const id of ts.keys()) visit(id);
+  return memo;
+}
+function findCycle(ts) {
+  const state = new Map();
+  const stack = [];
+  const dfs = (id) => {
+    state.set(id, 1);
+    stack.push(id);
+    for (const d of ts.get(id)?.depends_on ?? []) {
+      if (!ts.has(d)) continue;
+      if (state.get(d) === 1) return [...stack.slice(stack.indexOf(d)), d];
+      if (!state.has(d)) { const c = dfs(d); if (c) return c; }
+    }
+    stack.pop();
+    state.set(id, 2);
+    return null;
+  };
+  for (const id of ts.keys()) if (!state.has(id)) { const c = dfs(id); if (c) return c; }
+  return null;
+}
+// Longest dependency chain, weighted S = 1, M = 2.
+function criticalPath(ts) {
+  const best = new Map();
+  const longest = (id) => {
+    if (best.has(id)) return best.get(id);
+    let top = { len: 0, path: [] };
+    for (const d of ts.get(id).depends_on ?? []) if (ts.has(d)) { const r = longest(d); if (r.len > top.len) top = r; }
+    const res = { len: top.len + weight(ts.get(id)), path: [...top.path, id] };
+    best.set(id, res);
+    return res;
+  };
+  let crit = { len: 0, path: [] };
+  for (const id of ts.keys()) { const r = longest(id); if (r.len > crit.len) crit = r; }
+  return crit;
+}
+// Dependency depth (0-based) of every ticket in a subgraph without cycles.
+function levels(ts) {
   const level = new Map();
   const lvl = (id) => {
     if (level.has(id)) return level.get(id);
-    const deps = (sub.get(id).depends_on ?? []).filter((d) => sub.has(d));
+    const deps = (ts.get(id).depends_on ?? []).filter((d) => ts.has(d));
     const v = deps.length ? 1 + Math.max(...deps.map(lvl)) : 0;
     level.set(id, v);
     return v;
   };
-  for (const id of sub.keys()) lvl(id);
+  for (const id of ts.keys()) lvl(id);
+  return level;
+}
+
+// touches entries: a plain path matches itself and everything beneath it; globs use * ** ? {a,b}.
+const escRe = (s) => s.replace(/[.+^$()|[\]\\]/g, '\\$&');
+const hasWild = (g) => /[*?{[]/.test(g);
+const unbalanced = (g) => (g.match(/\{/g) ?? []).length !== (g.match(/\}/g) ?? []).length;
+function globToRegex(g) {
+  let re = '';
+  for (let i = 0; i < g.length; i++) {
+    const c = g[i];
+    if (c === '*' && g[i + 1] === '*') { re += '.*'; i++; if (g[i + 1] === '/') i++; }
+    else if (c === '*') re += '[^/]*';
+    else if (c === '?') re += '[^/]';
+    else if (c === '{') {
+      const end = g.indexOf('}', i);
+      if (end === -1) { re += '\\{'; continue; }
+      re += `(${g.slice(i + 1, end).split(',').map(escRe).join('|')})`;
+      i = end;
+    } else re += escRe(c);
+  }
+  return new RegExp(`^${re}$`);
+}
+const trimSlash = (p) => p.replace(/\/+$/, '');
+const staticPrefix = (g) => { const i = g.search(/[*?{[]/); return i === -1 ? g : g.slice(0, i); };
+function pathMatches(entry, file) {
+  if (!hasWild(entry)) { const e = trimSlash(entry); return file === e || file.startsWith(`${e}/`); }
+  return globToRegex(entry).test(file);
+}
+// Conservative: may report an overlap that isn't real, never misses one.
+function globsOverlap(a, b) {
+  if (!hasWild(a) && !hasWild(b)) { const x = trimSlash(a), y = trimSlash(b); return x === y || x.startsWith(`${y}/`) || y.startsWith(`${x}/`); }
+  if (!hasWild(a)) return pathMatches(b, trimSlash(a)) || staticPrefix(b).startsWith(`${trimSlash(a)}/`);
+  if (!hasWild(b)) return globsOverlap(b, a);
+  const pa = staticPrefix(a), pb = staticPrefix(b);
+  return pa.startsWith(pb) || pb.startsWith(pa);
+}
+
+// Live state of a ticket's worker: its last phase line, and its last line of any kind.
+function workerState(id) {
+  const mine = readLog().lines.filter((l) => l.by === id);
+  if (!mine.length) return null;
+  const phases = mine.filter((l) => l.type === 'phase').sort((a, b) => a.at.localeCompare(b.at));
+  const last = phases[phases.length - 1];
+  const lastSeen = mine.map((l) => l.at).sort().pop();
+  const cost = [...phases].reverse().find((p) => typeof p.usd === 'number');
+  return {
+    phase: last?.to ?? null, task: last?.task ?? null, note: last?.note ?? null, head_sha: last?.sha ?? null,
+    started_at: phases[0]?.at ?? mine[0].at, last_seen: lastSeen,
+    minutes_silent: Math.round((Date.now() - Date.parse(lastSeen)) / 60000),
+    usd: cost?.usd ?? 0, input_tokens: cost?.input_tokens ?? 0, output_tokens: cost?.output_tokens ?? 0,
+  };
+}
+const activeWorker = (id) => { const w = workerState(id); return !!w && w.phase && !['done', 'parked'].includes(w.phase) && !mergeShaFor(id); };
+
+// The supervisor's approval of a ticket's spec or plan is an act that refers to the ticket.
+const approvalOf = (id, cls) => logObjects('act').filter((a) => a.class === cls && (a.refs ?? []).includes(id)).sort(byTime).pop() ?? null;
+
+// Computed stage of every ticket: git says merged and released; approval acts say spec'd and
+// planned; the branch's committed review records say in review; phase lines say what the worker
+// is doing right now.
+function deriveStatus() {
+  const ts = tickets();
+  return [...ts.values()].map((t) => {
+    const mergeSha = mergeShaFor(t.id);
+    const branch = ticketBranchRef(t.id);
+    const src = branch && !mergeSha ? { ref: branch } : WORKTREE;
+    const spec = approvalOf(t.id, 'approve-spec') ? 'approved' : null;
+    const plan = approvalOf(t.id, 'approve-plan') ? 'approved' : null;
+    const reviews = ticketReviews(t.id, src);
+    const depsMerged = (t.depends_on ?? []).every((d) => mergeShaFor(d));
+    let stage = 'planned';
+    if (t.superseded_by) stage = 'superseded';
+    else if (mergeSha) stage = releasedIn(mergeSha) ? 'released' : 'merged';
+    else if (reviews.some((r) => r.stage === 'final')) stage = 'in-review';
+    else if (branch && plan === 'approved' && depsMerged) stage = 'building';
+    else if (plan === 'approved') stage = 'planned-in-detail';
+    else if (spec === 'approved') stage = "spec'd";
+    else if (depsMerged) stage = 'ready';
+    const w = workerState(t.id);
+    return {
+      id: t.id, title: t.title, feature: t.feature, component: t.component, kind: t.kind, size: t.size, risk: t.risk, serves: t.serves ?? [], depends_on: t.depends_on ?? [],
+      stage, merge_sha: mergeSha, branch, deps_merged: depsMerged,
+      phase: w?.phase ?? null, task: w?.task ?? null, note: w?.note ?? null, minutes_silent: w?.minutes_silent ?? null, usd: w?.usd ?? null,
+    };
+  });
+}
+
+const onPlanBranch = () => (git(['rev-parse', '--abbrev-ref', 'HEAD']) ?? '').startsWith('plan/');
+
+function cmdValidate() {
+  const ts = tickets();
+  const fs_ = features();
+  const errors = [];
+  const warnings = [];
+  const err = (id, m) => errors.push(`${id}: ${m}`);
+  const STORY_RE = /^[A-Z][A-Z0-9]*-S[0-9]+$/;
+  for (const [id, t] of ts) {
+    if (!id.startsWith(`${t.component}-`)) err(id, `id must start with its component "${t.component}-"`);
+    for (const g of t.touches ?? []) if (unbalanced(g)) err(id, `touches entry "${g}" has unbalanced braces`);
+    for (const d of t.depends_on ?? []) {
+      if (d === id) err(id, 'depends on itself');
+      else if (!ts.has(d)) err(id, `depends_on "${d}" does not exist (D3)`);
+      else if (!isActive(ts.get(d)) && isActive(t)) err(id, `depends_on "${d}" is superseded; depend on its replacement`);
+    }
+    if (t.superseded_by && !ts.has(t.superseded_by)) err(id, `superseded_by "${t.superseded_by}" does not exist`);
+    if ((t.one_way_doors ?? []).length && t.risk !== 'high') err(id, 'lists a one-way door, so risk must be high (D8)');
+    if (t.feature === CHORES && !['chore', 'spike'].includes(t.kind)) err(id, `only chore and spike tickets may use the reserved feature "${CHORES}"`);
+    if (isActive(t) && ['chore', 'spike'].includes(t.kind) && !(t.serves ?? []).length && !t.notes) err(id, `${t.kind} ticket serving no story must say why in notes (D6)`);
+    if (isActive(t) && !['chore', 'spike'].includes(t.kind) && !(t.serves ?? []).length) err(id, 'must serve at least one story (D6)');
+    if (t.kind === 'contract' && !(t.contracts?.provides ?? []).length) err(id, 'contract ticket must list contracts.provides (D2)');
+    if (t.feature !== CHORES && !fs_.has(t.feature)) err(id, `feature "${t.feature}" is not in the log (devteam.mjs feature add)`);
+  }
+  const cycle = findCycle(ts);
+  if (cycle) errors.push(`dependency cycle: ${cycle.join(' -> ')} (D3)`);
+
+  // Features: every story defined is served and every story served is defined (D6); a story across
+  // components has an integration ticket (D7); an approved feature has reviews and ready goals.
+  for (const [fid, f] of fs_) {
+    const stories = new Set((f.stories ?? []).map((s) => s.id));
+    const mine = [...ts.values()].filter((t) => isActive(t) && t.feature === fid);
+    const served = new Set();
+    for (const t of mine) for (const s of t.serves ?? []) { if (!stories.has(s)) err(t.id, `serves "${s}", which feature ${fid} does not define`); served.add(s); }
+    for (const s of stories) if (!served.has(s)) errors.push(`feature ${fid}: story ${s} is served by no ticket (D6)`);
+    for (const s of stories) {
+      const servers = mine.filter((t) => (t.serves ?? []).includes(s));
+      const comps = new Set(servers.filter((t) => t.kind !== 'contract').map((t) => t.component));
+      if (comps.size > 1 && !servers.some((t) => t.kind === 'integration')) warnings.push(`feature ${fid}: story ${s} spans ${[...comps].join(', ')} but has no integration ticket (D7)`);
+    }
+    // A feature that has reached this checkout is landed (or being planned here): its design and
+    // graph reviews must say APPROVE. On a plan/<feature> branch that is a warning until review.
+    {
+      const sink = onPlanBranch() && !flags.strict ? warnings : errors;
+      const reviews = featureReviews(fid);
+      const designSlug = f.design ? path.basename(f.design, '.md') : null;
+      const designReviews = designSlug ? reviewRecordsIn(WORKTREE, `reviews/${designSlug}`) : [];
+      for (const r of [...reviews, ...designReviews]) {
+        if (r.verdict && !r.reviewer) errors.push(`feature ${fid}: review ${r.file} has no "- Reviewer:" line`);
+        if (r.verdict && !r.shaValid) errors.push(`feature ${fid}: review ${r.file} needs the full 40-character SHA`);
+      }
+      const lg = latestPerTrack(reviews, 'graph');
+      if (!lg.length) sink.push(`feature ${fid}: no graph review in project/reviews/${fid}/graph-<n>.md`);
+      else if (lg.some((r) => r.verdict !== 'APPROVE')) sink.push(`feature ${fid}: the latest graph review is not APPROVE`);
+      if (!f.design) errors.push(`feature ${fid} names no design (project/designs/<slug>.md)`);
+      else if (!projectFileText(f.design.replace(/^project\//, ''))) errors.push(`feature ${fid}: design ${f.design} does not exist`);
+      else {
+        const ld = latestPerTrack(designReviews, 'design');
+        if (!ld.length) sink.push(`feature ${fid}: design ${f.design} has no review in project/reviews/${designSlug}/design-<n>.md`);
+        else if (ld.some((r) => r.verdict !== 'APPROVE')) sink.push(`feature ${fid}: the latest design review is not APPROVE`);
+      }
+      if (!(f.goals ?? []).length) errors.push(`feature ${fid} names no goal`);
+      for (const g of f.goals ?? []) {
+        const o = logGet(g);
+        if (o?.type !== 'goal') errors.push(`feature ${fid} names goal ${g}, which is not in the log`);
+        else if (!['ready', 'met'].includes(o.status)) errors.push(`feature ${fid} names goal ${g}, which is ${o.status ?? 'draft'}; the owner approves a goal before features are planned from it`);
+      }
+    }
+  }
+
+  // D4: tickets that can run at the same time must have disjoint footprints. Merged ones are history.
+  if (!cycle) {
+    const clos = closures(ts);
+    const live = [...ts.values()].filter((t) => isActive(t) && !mergeShaFor(t.id));
+    for (let i = 0; i < live.length; i++) for (let j = i + 1; j < live.length; j++) {
+      const a = live[i], b = live[j];
+      if (clos.get(a.id)?.has(b.id) || clos.get(b.id)?.has(a.id)) continue;
+      outer: for (const ga of a.touches ?? []) for (const gb of b.touches ?? []) if (globsOverlap(ga, gb)) { errors.push(`${a.id} and ${b.id} can run concurrently but both touch "${ga}" / "${gb}" (D4)`); break outer; }
+    }
+  }
+
+  for (const e of readLog().errors) warnings.push(`log ${e}`);
+  for (const i of readLog().ignored) if (['ticket', 'feature'].includes(i.line.type) && i.why === 'duplicate id') errors.push(`${i.line.id}: a second ${i.line.type} line with this id (${i.line.__file}:${i.line.__line}) was ignored; use ${i.line.type} set`);
+  const raw = ladder().raw_ceilings;
+  for (const [c, v] of Object.entries(loadSettings().autonomy_ceilings ?? {})) {
+    if (raw[c] === undefined) errors.push(`settings autonomy_ceilings: "${c}" is not a ladder class in constitution.md`);
+    else if (v > raw[c]) errors.push(`settings autonomy_ceilings: ${c} ${v} is above the constitution's ceiling ${raw[c]}; a project may only lower it`);
+  }
+  const td = path.join(projectDir, 'tickets');
+  if (fs.existsSync(td)) for (const f of fs.readdirSync(td)) if (!f.startsWith('.') && !ts.has(f)) errors.push(`project/tickets/${f}/ has no ticket`);
+
+  for (const w of warnings) out(`warning: ${w}`);
+  for (const e of errors) out(`error: ${e}`);
+  out(`${ts.size} ticket(s), ${fs_.size} feature(s), ${errors.length} error(s), ${warnings.length} warning(s)`);
+  process.exit(errors.length ? 1 : 0);
+}
+
+function cmdReady() {
+  const ts = tickets();
+  const rows = [];
+  for (const t of ts.values()) {
+    if (!isActive(t) || mergeShaFor(t.id) || activeWorker(t.id)) continue;
+    const depsMerged = (t.depends_on ?? []).every((d) => mergeShaFor(d));
+    if (depsMerged || flags['plan-ahead']) rows.push({ id: t.id, component: t.component, kind: t.kind, size: t.size, risk: t.risk, mode: depsMerged ? 'build' : 'plan-ahead' });
+  }
+  const s = loadSettings();
+  const active = [...ts.keys()].filter(activeWorker);
+  const perComponent = {};
+  for (const id of active) perComponent[ts.get(id).component] = (perComponent[ts.get(id).component] ?? 0) + 1;
+  if (flags.json) return json({ ready: rows, active, active_per_component: perComponent, caps: { max_active_tickets: s.max_active_tickets, max_active_per_component: s.max_active_per_component } });
+  out(`active workers: ${active.length}/${s.max_active_tickets}`);
+  if (!rows.length) return out('nothing ready');
+  for (const r of rows) out(`${r.mode.padEnd(10)} ${r.id}  (${r.kind}, ${r.size}, ${r.risk})${(perComponent[r.component] ?? 0) >= s.max_active_per_component ? '  (component at cap)' : ''}`);
+}
+
+function cmdWaves() {
+  const f = flagStr('feature');
+  const sub = new Map([...activeTickets()].filter(([, t]) => !f || t.feature === f));
+  if (findCycle(sub)) die('the graph has a cycle; run validate');
+  const level = levels(sub);
   const crit = criticalPath(sub);
   const waves = [];
   for (const [id, l] of level) (waves[l] ??= []).push(id);
-  if (flags.json) return void process.stdout.write(`${JSON.stringify({ waves, critical_path: crit.path, critical_weight: crit.len }, null, 2)}\n`);
-  waves.forEach((w, i) => process.stdout.write(`wave ${i + 1} (${w.length}): ${w.sort().join(', ')}\n`));
-  process.stdout.write(`critical path (weight ${crit.len}, S=1 M=2): ${crit.path.join(' -> ')}\n`);
-  process.stdout.write(`${sub.size} ticket(s) in ${waves.length} wave(s); max parallel width ${Math.max(0, ...waves.map((w) => w.length))}\n`);
+  if (flags.json) return json({ waves, critical_path: crit.path, critical_weight: crit.len });
+  waves.forEach((w, i) => out(`wave ${i + 1} (${w.length}): ${w.sort().join(', ')}`));
+  out(`critical path (weight ${crit.len}, S=1 M=2): ${crit.path.join(' -> ')}`);
 }
 
 function cmdStatus() {
-  const { tickets } = loadGraph();
-  const rows = deriveStatus(tickets);
-  if (flags.json) {
-    return void process.stdout.write(`${JSON.stringify({ generated_at: nowIso(), tickets: rows, reviews: reviewStats(tickets) }, null, 2)}\n`);
-  }
+  const rows = deriveStatus();
+  if (flags.json) return json({ generated_at: nowIso(), tickets: rows, reviews: reviewStats() });
   const stale = loadSettings().stale_after_minutes;
   for (const r of rows) {
-    const isStale = r.heartbeat_minutes > stale && !['done', 'parked'].includes(r.phase);
-    const live = r.phase ? `  [${r.phase}${r.task ? ` ${r.task}` : ''}, ${r.heartbeat_minutes}m${isStale ? ' STALE' : ''}]` : '';
-    process.stdout.write(`${r.stage.padEnd(18)} ${r.id}${live}\n`);
+    const isStale = r.minutes_silent > stale && !['done', 'parked'].includes(r.phase) && !r.merge_sha;
+    out(`${r.stage.padEnd(18)} ${r.id}${r.phase ? `  [${r.phase}${r.task ? ` ${r.task}` : ''}, ${r.minutes_silent}m${isStale ? ' STALE' : ''}]` : ''}`);
   }
-  const s = reviewStats(tickets);
-  for (const [stage, v] of Object.entries(s.by_stage)) process.stdout.write(`review ${stage}: first-pass rejection ${v.rejected}/${v.first_passes}\n`);
+  for (const [stage, v] of Object.entries(reviewStats().by_stage)) out(`review ${stage}: first-pass rejection ${v.rejected}/${v.first_passes}`);
 }
 
-// The PR body's "## One-way doors" section must be "None." or reference an owner answer.
+// ticket add <id> --json '{…}' | --file f ; ticket set <id> --json '{…}' ; feature add/set likewise.
+function cmdTicket() { graphEdit('ticket', SCHEMA['x-id'].keyed.ticket); }
+function cmdFeature() { graphEdit('feature', SCHEMA['x-id'].keyed.feature); }
+function graphEdit(type, idRe) {
+  const [sub, id] = positional;
+  const by = logWriter();
+  if (!['add', 'set', 'show'].includes(sub) || !id) die(`usage: ${type} add <id> --json '{…}' | --file <path>   |   ${type} set <id> --json '{…}'   |   ${type} show <id>`);
+  if (sub === 'show') return json(logGet(id) ?? die(`no ${type} ${id}`));
+  if (!new RegExp(idRe).test(id)) die(`${type} id "${id}" must match ${idRe}`);
+  if (!['supervisor', 'planner'].includes(writerClass(by))) die(`${type}s are written by the supervisor or a planner (plan-<feature>)`);
+  let body;
+  try {
+    body = JSON.parse(flagStr('json') ?? (flagStr('file') ? fs.readFileSync(flagStr('file'), 'utf8') : die(`${type} ${sub} needs --json or --file`)));
+  } catch (e) {
+    die(`not valid JSON: ${e.message}`);
+  }
+  if (sub === 'add' && logGet(id)) die(`${id} exists; use ${type} set`);
+  if (sub === 'set' && logGet(id)?.type !== type) die(`no ${type} ${id}`);
+  const line = appendLog({ ...body, type, id, op: sub === 'add' ? 'new' : 'set' }, by);
+  out(`${sub === 'add' ? 'added' : 'updated'} ${line.id}`);
+}
+
+// ===== 6. review records and the definition of done =====
+
+const statusOf = (text) => text?.match(/^Status:[ \t]*(\S+)/m)?.[1] ?? null;
+const tableCells = (row) => row.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
+
+// A record is <stage>-<pass>[<track>].md with "- Reviewer: <name>" and a last line
+// "Verdict: APPROVE|CHANGES <full sha>"; findings are table rows F<n> with a Disposition column.
+function parseReview(file, text) {
+  const m = file.match(/^([a-z]+)-(\d+)([a-z]?)\.md$/);
+  const verdict = [...text.matchAll(/^Verdict:[ \t]*(APPROVE|CHANGES)[ \t]+(\S+)[ \t]*$/gm)].pop();
+  const reviewerRaw = text.match(/^-[ \t]*Reviewer:[ \t]*(.*)$/m)?.[1]?.trim() ?? '';
+  const findings = [];
+  let dispIdx = -1;
+  let sevIdx = 1;
+  for (const row of text.split('\n')) {
+    if (!row.trim().startsWith('|')) continue;
+    const cells = tableCells(row);
+    const lower = cells.map((c) => c.toLowerCase());
+    if (lower.includes('disposition')) { dispIdx = lower.indexOf('disposition'); sevIdx = Math.max(lower.indexOf('severity'), 1); continue; }
+    if (/^F\d+$/.test(cells[0] ?? '')) findings.push({ id: cells[0], severity: cells[sevIdx] ?? '', disposition: dispIdx >= 0 ? (cells[dispIdx] ?? '') : '' });
+  }
+  return {
+    file, stage: m ? m[1] : file.replace(/\.md$/, ''), pass: m ? Number(m[2]) : 0, variant: m ? m[3] : '',
+    verdict: verdict ? verdict[1] : null, sha: verdict ? verdict[2] : null, shaValid: verdict ? /^[0-9a-f]{40}$/.test(verdict[2]) : false,
+    reviewer: reviewerRaw && !reviewerRaw.startsWith('<') ? reviewerRaw : null, findings,
+  };
+}
+const reviewRecordsIn = (src, relDir) => srcList(src, relDir).filter((f) => f.endsWith('.md')).map((f) => parseReview(f, srcRead(src, `${relDir}/${f}`) ?? ''));
+const ticketReviews = (id, src) => reviewRecordsIn(src, `tickets/${id}/reviews`);
+const featureReviews = (feature) => reviewRecordsIn(WORKTREE, `reviews/${feature}`);
+function latestPerTrack(records, stage) {
+  const latest = new Map();
+  for (const r of records.filter((x) => x.stage === stage)) { const p = latest.get(r.variant); if (!p || r.pass > p.pass) latest.set(r.variant, r); }
+  return [...latest.values()];
+}
+const blocking = (sev) => /^(critical|important)$/i.test(sev);
+const disposed = (d) => /^(fixed|wrong|wont-fix\b|won't-fix\b)/i.test(d ?? '');
+
+function reviewStats() {
+  const byStage = {};
+  let findings = 0;
+  let wrong = 0;
+  const all = [];
+  for (const id of tickets().keys()) { const b = ticketBranchRef(id); all.push(...ticketReviews(id, b && !mergeShaFor(id) ? { ref: b } : WORKTREE)); }
+  for (const fid of features().keys()) all.push(...featureReviews(fid));
+  for (const r of all) {
+    for (const f of r.findings) { findings++; if (/^wrong/i.test(f.disposition)) wrong++; }
+    if (r.pass !== 1 || r.variant || !r.verdict) continue;
+    byStage[r.stage] ??= { first_passes: 0, rejected: 0 };
+    byStage[r.stage].first_passes++;
+    if (r.verdict === 'CHANGES') byStage[r.stage].rejected++;
+  }
+  for (const s of Object.values(byStage)) s.rejection_rate = s.first_passes ? +(s.rejected / s.first_passes).toFixed(2) : null;
+  return { by_stage: byStage, findings, false_positive_rate: findings ? +(wrong / findings).toFixed(2) : null };
+}
+function reviewPasses() {
+  const o = {};
+  for (const id of tickets().keys()) {
+    const b = ticketBranchRef(id);
+    const finals = ticketReviews(id, b && !mergeShaFor(id) ? { ref: b } : WORKTREE).filter((r) => r.stage === 'final');
+    if (finals.length) o[id] = Math.max(...finals.map((r) => r.pass));
+  }
+  return o;
+}
+
+// The PR body's "## One-way doors" section is "None." or links the owner's answer.
 function oneWayDoorsSection(body) {
   const m = body.match(/^##\s+One-way doors\s*\n([\s\S]*?)(?=^##\s|(?![\s\S]))/m);
   if (!m) return { ok: false, why: 'PR body has no "## One-way doors" section' };
   const text = m[1].replace(/<!--[\s\S]*?-->/g, '').trim();
   if (text === 'None.') return { ok: true, none: true };
-  if (LOG.ID_IN_TEXT_RE.test(text) || /https?:\/\/\S+/.test(text)) return { ok: true, none: false };
+  if (/\bq-\d{8}-\d{6,9}-[a-z0-9-]+\b|https?:\/\/\S+/.test(text)) return { ok: true, none: false };
   return { ok: false, why: 'the "## One-way doors" section must be "None." or link the owner\'s answer (a q-… id or a URL)' };
 }
 
-// Definition of done for a ticket at an exact head, reading committed files at that head.
+// Definition of done at an exact head, reading the files committed at that head.
 function checkTicket(id, { sha: shaArg, title, body }) {
-  const { tickets } = loadGraph();
-  const n = tickets.get(id);
+  const t = tickets().get(id);
+  if (!t) return [`no ticket ${id}`];
   const fails = [];
-  if (!n) return [`no ticket ${id}`];
-  if (n.superseded_by) fails.push(`ticket is superseded by ${n.superseded_by}`);
+  if (t.superseded_by) fails.push(`ticket is superseded by ${t.superseded_by}`);
   let sha = null;
   let src = WORKTREE;
   if (commonDir) {
@@ -1068,1168 +1131,453 @@ function checkTicket(id, { sha: shaArg, title, body }) {
     if (projectInRepo) src = { ref: sha };
   }
   const read = (rel) => srcRead(src, `tickets/${id}/${rel}`);
-
-  if (statusOf(read('spec.md')) !== 'approved') fails.push('spec.md missing or not "Status: approved" (committed at this head)');
-  if (statusOf(read('plan.md')) !== 'approved') fails.push('plan.md missing or not "Status: approved" (committed at this head)');
-  const ver = read('verification.md');
-  if (ver === null) fails.push('verification.md missing');
+  if (read('spec.md') === null) fails.push('spec.md missing at this head');
+  else if (!approvalOf(id, 'approve-spec')) fails.push('spec not approved (the supervisor logs act --class approve-spec --refs <id>)');
+  if (read('plan.md') === null) fails.push('plan.md missing at this head');
+  else if (!approvalOf(id, 'approve-plan')) fails.push('plan not approved (the supervisor logs act --class approve-plan --refs <id>)');
+  const verText = read('verification.md');
+  if (verText === null) fails.push('verification.md missing: a table with a row per done-when, the command run and its result');
   else {
-    const rows = ver.split('\n').filter((l) => /^\|/.test(l.trim()) && !/^\|\s*-/.test(l.trim())).length - 1;
-    if (rows < (n.done_when ?? []).length) fails.push(`verification.md has ${Math.max(rows, 0)} result row(s) for ${n.done_when.length} done-when(s)`);
+    const rows = verText.split('\n').filter((l) => /^\|/.test(l.trim()) && !/^\|\s*-/.test(l.trim())).length - 1;
+    if (rows < (t.done_when ?? []).length) fails.push(`verification has ${Math.max(rows, 0)} row(s) for ${t.done_when.length} done-when(s)`);
   }
-
-  // Reviews: every final track that reviewed this head must end in APPROVE; enough distinct
-  // reviewers must have approved it; verdicts carry full SHAs and a named reviewer.
   const reviews = ticketReviews(id, src);
   for (const r of reviews) {
-    if (r.verdict && !r.shaValid) fails.push(`${r.file}: verdict SHA must be the full 40-character commit SHA`);
-    if (r.verdict && !r.reviewer) fails.push(`${r.file}: missing "- Reviewer:" line; an unnamed review does not count`);
+    if (r.verdict && !r.shaValid) fails.push(`${r.file}: the verdict needs the full 40-character SHA`);
+    if (r.verdict && !r.reviewer) fails.push(`${r.file}: no "- Reviewer:" line; an unnamed review does not count`);
   }
-  // A verdict made at commit V still holds at head H if V is an ancestor of H and the commits
-  // since V only ADD new review-record files (committing the record moves the head). Editing or
-  // deleting any record, or adding anything else, voids it: a dissent can't be quietly erased.
+  // A verdict at commit V holds at head H only if every commit V..H just ADDS review-record files.
   const reviewsDir = projectInRepo ? `${projectRel}/tickets/${id}/reviews/` : null;
-  const recordName = /^[a-z]+-\d+[a-z]?\.md$/;
   const holdsAt = (v) => {
     if (!sha || !v || !/^[0-9a-f]{40}$/.test(v)) return false;
     if (v === sha) return true;
     if (!reviewsDir || git(['merge-base', '--is-ancestor', v, sha]) === null) return false;
-    // Check every commit, not the net diff: an add-then-delete would cancel out in a net diff.
     if ((git(['rev-list', '--merges', `${v}..${sha}`]) ?? 'x').trim()) return false;
-    const since = (git(['log', '--no-renames', '--format=', '--name-status', `${v}..${sha}`]) ?? '').split('\n').filter(Boolean);
-    return since.every((l) => {
-      const [status, file] = l.split('\t');
-      return status === 'A' && file.startsWith(reviewsDir) && recordName.test(file.slice(reviewsDir.length));
+    return (git(['log', '--no-renames', '--format=', '--name-status', `${v}..${sha}`]) ?? '').split('\n').filter(Boolean).every((l) => {
+      const [st, file] = l.split('\t');
+      return st === 'A' && file.startsWith(reviewsDir) && /^[a-z]+-\d+[a-z]?\.md$/.test(file.slice(reviewsDir.length));
     });
   };
-  const finalsAtHead = reviews.filter((r) => r.stage === 'final' && holdsAt(r.sha));
-  const latest = latestPerTrack(finalsAtHead, 'final');
+  const latest = latestPerTrack(reviews.filter((r) => r.stage === 'final' && holdsAt(r.sha)), 'final');
   if (!reviews.some((r) => r.stage === 'final')) fails.push('no final review record (reviews/final-<n>.md)');
-  else if (!latest.length) fails.push(`no final review holds at this head (${sha}): a verdict holds only at its own commit, or at a later head whose only changes are newly added review records (review.md §1)`);
-  for (const r of latest) if (r.verdict === 'CHANGES') fails.push(`${r.file}: latest final review at this head says CHANGES`);
+  else if (!latest.length) fails.push(`no final review holds at ${sha}: a verdict holds at its own commit, or at a later head whose only changes are newly added review records`);
+  for (const r of latest) if (r.verdict === 'CHANGES') fails.push(`${r.file}: the latest final review at this head says CHANGES`);
   const approvers = new Set(latest.filter((r) => r.verdict === 'APPROVE' && r.reviewer && r.shaValid).map((r) => r.reviewer));
-  const need = n.risk === 'high' ? 2 : 1;
+  const need = t.risk === 'high' ? 2 : 1;
   if (approvers.size < need) fails.push(`needs ${need} final APPROVE review(s) at this head from different named reviewers; found ${approvers.size}`);
-  for (const r of reviews) {
-    for (const f of r.findings) if (blocking(f.severity) && !disposed(f.disposition)) fails.push(`${r.file} ${f.id} (${f.severity}) has no disposition`);
-  }
-
-  // Footprint: every changed file is inside touches or the ticket's own folder (worker.md §3).
+  for (const r of reviews) for (const f of r.findings) if (blocking(f.severity) && !disposed(f.disposition)) fails.push(`${r.file} ${f.id} (${f.severity}) has no disposition`);
   const base = mainRef() && sha ? git(['merge-base', mainRef(), sha]) : null;
-  if (commonDir && !base) fails.push(`cannot resolve main branch "${loadSettings().main_branch}" (or its merge base); footprint not checked`);
+  if (commonDir && !base) fails.push(`cannot resolve main branch "${loadSettings().main_branch}"; footprint not checked`);
   if (base) {
     const changed = (git(['diff', '--name-only', base, sha]) ?? '').split('\n').filter(Boolean);
     const own = projectInRepo ? `${projectRel}/tickets/${id}/` : null;
-    const outside = changed.filter((f) => !(own && f.startsWith(own)) && !(n.touches ?? []).some((t) => pathMatches(t, f)));
+    const outside = changed.filter((f) => !(own && f.startsWith(own)) && !(t.touches ?? []).some((g) => pathMatches(g, f)));
     if (outside.length) fails.push(`changes files outside touches: ${outside.slice(0, 10).join(', ')}${outside.length > 10 ? ` (+${outside.length - 10} more)` : ''}`);
   }
-
   if (title !== undefined && !new RegExp(`^${id.replace(/-/g, '\\-')}: \\S`).test(title)) fails.push(`PR title must start with "${id}: "`);
   if (body !== undefined) {
     const owd = oneWayDoorsSection(body);
     if (!owd.ok) fails.push(owd.why);
-    else if (owd.none && (n.one_way_doors ?? []).length) fails.push('ticket lists one-way doors but the PR body says "None."; link the owner\'s answer');
+    else if (owd.none && (t.one_way_doors ?? []).length) fails.push('the ticket lists one-way doors but the PR body says "None."; link the owner\'s answer');
   }
   return fails;
 }
-
-const readBody = () => {
-  const f = flagStr('body-file');
-  if (f === undefined) return undefined;
-  if (!fs.existsSync(f)) die(`--body-file ${f} not found`);
-  return fs.readFileSync(f, 'utf8');
-};
-
-function report(fails, okMsg) {
-  if (fails.length) {
-    for (const f of fails) process.stdout.write(`fail: ${f}\n`);
-    process.exit(1);
-  }
-  process.stdout.write(`ok: ${okMsg}\n`);
-}
-
 function cmdCheckTicket() {
-  const id = positional[0] ?? die('usage: check-ticket <ticket-id> [--sha <head>] [--title "<pr title>"] [--body-file <path>]');
-  const sha = flagStr('sha');
-  report(checkTicket(id, { sha, title: flagStr('title'), body: readBody() }), `${id} meets the definition of done at ${(resolveCommit(sha ?? 'HEAD') ?? '').slice(0, 12)}`);
+  const id = positional[0] ?? die('usage: check-ticket <ticket-id> [--sha <head>] [--title "<pr title>"] [--body-file <path>] [--pr <n>]');
+  let title = flagStr('title');
+  let body = flagStr('body-file') ? fs.readFileSync(flagStr('body-file'), 'utf8') : undefined;
+  let sha = flagStr('sha');
+  if (flagStr('pr')) {
+    const pr = sh('gh', ['pr', 'view', flagStr('pr'), '--json', 'title,body,headRefOid']);
+    if (!pr) die('gh pr view failed');
+    const p = JSON.parse(pr);
+    title ??= p.title; body ??= p.body; sha ??= p.headRefOid;
+  }
+  report(checkTicket(id, { sha, title, body }), `${id} meets the definition of done at ${(resolveCommit(sha ?? 'HEAD') ?? '').slice(0, 12)}`);
 }
 
-// project/log/ changes only through the supervisor's log-only PR (branch chore-log), and only by
-// appending valid lines whose writer matches the file. Any other PR that touches it fails.
-const LOG_BRANCH = 'chore-log';
-function checkLogPr(headRef, shaArg) {
-  if (!commonDir || !projectInRepo) return [];
-  const sha = resolveCommit(shaArg ?? 'HEAD');
-  const base = sha && mainRef() ? git(['merge-base', mainRef(), sha]) : null;
-  if (!sha || !base) return ['cannot resolve the PR head or its merge base with main; log changes not checked'];
-  const logPrefix = `${projectRel}/log/`;
-  const changed = (git(['diff', '--name-only', '--no-renames', base, sha]) ?? '').split('\n').filter(Boolean);
-  const logFiles = changed.filter((f) => f.startsWith(logPrefix));
-  const fails = [];
-  if (headRef !== LOG_BRANCH) {
-    if (logFiles.length) fails.push(`only the log-only PR (branch ${LOG_BRANCH}, made by devteam.mjs log-sync) may change ${logPrefix}: ${logFiles.slice(0, 5).join(', ')}`);
-    return fails;
-  }
-  const other = changed.filter((f) => !f.startsWith(logPrefix));
-  if (other.length) fails.push(`the log-only PR may change nothing outside ${logPrefix}: ${other.slice(0, 5).join(', ')}`);
-  const committedAt = Date.parse(git(['show', '-s', '--format=%cI', sha]) ?? '');
-  for (const f of logFiles) {
-    const name = f.slice(logPrefix.length);
-    if (name.includes('/') || !name.endsWith('.jsonl')) {
-      fails.push(`${f}: the log holds only <writer>.jsonl files`);
-      continue;
+
+// What CI (optional) and `merge` both check for a PR, by branch kind. Gates are not run here.
+function checkPr({ headRef, sha, title, body }) {
+  const branch = headRef.replace(/^refs\/heads\//, '');
+  const fails = logRule(branch, sha);
+  if (branch.startsWith('ticket/')) return [...fails, ...checkTicket(branch.slice('ticket/'.length), { sha, title, body })];
+  if (branch.startsWith('plan/')) {
+    const feature = branch.slice('plan/'.length);
+    if (title !== undefined && !title.startsWith(`plan-${feature}: `)) fails.push(`PR title must start with "plan-${feature}: "`);
+    // validate --strict at the exact head, in a detached worktree of that head.
+    const wt = detachedWorktree(sha, `check-${feature}`);
+    try {
+      execFileSync(process.execPath, [path.join(wt, 'docs', 'devteam', 'scripts', 'devteam.mjs'), 'validate', '--strict'], { cwd: wt, stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (e) {
+      fails.push(`validate --strict fails at ${sha.slice(0, 12)}:\n${(e.stdout ?? '').toString().trim()}`);
+    } finally {
+      git(['worktree', 'remove', '--force', wt], mainRoot);
     }
-    const before = git(['show', `${base}:${f}`]);
-    const after = git(['show', `${sha}:${f}`]);
-    if (after === null) {
-      fails.push(`${f}: log files are never deleted`);
-      continue;
-    }
-    const ap = LOG.appendOnly(before === null ? null : `${before}\n`, `${after}\n`);
-    if (!ap.ok) {
-      fails.push(`${f}: ${ap.why}`);
-      continue;
-    }
-    const { lines, errors } = LOG.parseLines(ap.added, name, (before ?? '').split('\n').filter(Boolean).length + 1);
-    fails.push(...errors.map((e) => `added line in ${e}`));
-    const lastAtOf = (text) => (text ?? '').split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l).at ?? ''; } catch { return ''; } }).pop() ?? '';
-    let prevAt = lastAtOf(before);
-    // A month file holds only that month's lines, and a writer's new file can't start before the end
-    // of its older ones: no backdating a line into a fresh file.
-    const monthOf = name.match(/^(?:owner|supervisor)-(\d{4}-\d{2})\.jsonl$/)?.[1] ?? null;
-    if (before === null) {
-      const writer = LOG.writerOfFile(name);
-      const siblings = (git(['ls-tree', '--name-only', `${base}:${logPrefix.slice(0, -1)}`]) ?? '').split('\n').filter((x) => x && x !== name && LOG.writerOfFile(x) === writer);
-      for (const sib of siblings) {
-        const at = lastAtOf(git(['show', `${base}:${logPrefix}${sib}`]));
-        if (at > prevAt) prevAt = at;
-      }
-    }
-    for (const l of lines) {
-      if (monthOf && !l.at.startsWith(monthOf)) fails.push(`${f}:${l.__line}: at ${l.at} is not in ${monthOf}`);
-      if (l.at < prevAt) fails.push(`${f}:${l.__line}: at ${l.at} is earlier than the line before it`);
-      if (!Number.isNaN(committedAt) && Date.parse(l.at) > committedAt + 5 * 60000) fails.push(`${f}:${l.__line}: at ${l.at} is after the commit time`);
-      prevAt = l.at;
-    }
+  } else if (!/^chore-[a-z0-9]+(-[a-z0-9]+)*: \S/.test(title ?? 'chore-x: y')) fails.push('a PR that is not from a ticket/ or plan/ branch is titled "chore-<slug>: <summary>"');
+  if (body !== undefined && !branch.startsWith('ticket/')) {
+    const owd = oneWayDoorsSection(body);
+    if (!owd.ok) fails.push(owd.why);
   }
   return fails;
 }
-
-// The automatic half of the merge word, run in CI as the required `merge-word` check (ci.md §3).
+function detachedWorktree(sha, name) {
+  const wt = path.join(mainRoot, '.worktrees', `tmp-${name}-${process.pid}`);
+  gitOrDie(['worktree', 'add', '--quiet', '--detach', wt, sha], mainRoot);
+  return wt;
+}
 function cmdCheckPr() {
-  const headRef = flagStr('head-ref') ?? die('check-pr needs --head-ref');
-  const title = flagStr('title') ?? die('check-pr needs --title');
-  const body = readBody() ?? die('check-pr needs --body-file');
-  const logFails = checkLogPr(headRef, flagStr('sha'));
-  if (headRef.startsWith('ticket/')) {
-    return report([...logFails, ...checkTicket(headRef.slice('ticket/'.length), { sha: flagStr('sha'), title, body })], `${headRef} passes the automatic merge-word checks`);
-  }
-  const fails = [...logFails];
-  if (!/^chore-[a-z0-9]+(-[a-z0-9]+)*: \S/.test(title)) fails.push('a PR that is not from a ticket/<id> branch must be titled "chore-<slug>: <summary>"');
-  const owd = oneWayDoorsSection(body);
-  if (!owd.ok) fails.push(owd.why);
-  report(fails, `${headRef} passes the automatic merge-word checks`);
+  const headRef = flagStr('head-ref') ?? die('check-pr needs --head-ref (and --sha, --title, --body-file)');
+  const sha = resolveCommit(flagStr('sha') ?? 'HEAD') ?? die('cannot resolve the head');
+  const body = flagStr('body-file') ? fs.readFileSync(flagStr('body-file'), 'utf8') : undefined;
+  report(checkPr({ headRef, sha, title: flagStr('title'), body }), `${headRef} passes the checks at ${sha.slice(0, 12)}`);
 }
 
-function stampId(prefix, from) {
-  const d = new Date().toISOString().replace(/[-:.]/g, '').replace(/Z$/, ''); // YYYYMMDDTHHMMSSmmm
-  const slug = String(from).toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-|-$/g, '') || 'anon';
-  return `${prefix}-${d.slice(0, 8)}-${d.slice(9, 15)}${prefix === 'm' ? d.slice(15, 18) : ''}-${slug}`;
-}
-
-// ---------- questions to the owner (supervisor only; process/questions.md) ----------
-
-function cmdAsk() {
-  if (logWriter() !== 'supervisor') {
-    die('only the supervisor asks the owner. Workers and planners message the supervisor: devteam.mjs send supervisor "<text>" --kind <kind> (process/messages.md)');
+// The merge word, as a command: verify everything at the PR's exact head, run the project's gates
+// there, then merge refusing a moved head, then log the act. Only the supervisor runs it.
+function cmdMerge() {
+  supervisorOnly('merge');
+  const [id] = positional;
+  const plan = flagStr('plan');
+  const chore = flagStr('chore');
+  const branch = plan ? `plan/${plan}` : chore ? `chore-${chore}` : id ? `ticket/${id}` : die('usage: merge <ticket-id> | merge --plan <feature> | merge --chore <slug>   [--no-gates] [--dry-run]');
+  const prJson = sh('gh', ['pr', 'view', branch, '--json', 'number,headRefOid,title,body,isDraft,mergeStateStatus,url']) ?? die(`no open PR from ${branch} (gh pr view failed)`);
+  const pr = JSON.parse(prJson);
+  if (pr.isDraft) die(`${pr.url} is a draft`);
+  git(['fetch', '--quiet', 'origin', branch]);
+  const sha = pr.headRefOid;
+  if (!resolveCommit(sha)) die(`cannot find ${sha} locally after fetching ${branch}`);
+  const fails = checkPr({ headRef: branch, sha, title: pr.title, body: pr.body });
+  if (['BEHIND', 'DIRTY'].includes(pr.mergeStateStatus)) fails.push(`PR is ${pr.mergeStateStatus.toLowerCase()} relative to main; the author merges main and asks again`);
+  // Gates: the project's own commands, at the exact head, in a detached worktree.
+  const gates = Object.entries(loadSettings().gates ?? {});
+  if (!gates.length && !flags['no-gates'] && !chore) fails.push('no gates in settings (gates: {name: command}); pass --no-gates to merge without running any');
+  if (!fails.length && gates.length && !chore && !flags['no-gates']) {
+    const wt = detachedWorktree(sha, `merge-${slug(branch)}`);
+    try {
+      for (const [name, spec] of gates) {
+        const cmd = typeof spec === 'string' ? spec : spec.cmd;
+        const started = Date.now();
+        let ok = true;
+        try {
+          execFileSync('sh', ['-c', cmd], { cwd: wt, stdio: 'inherit' });
+        } catch {
+          ok = false;
+        }
+        const tests = typeof spec === 'object' && spec.junit ? readJunit(path.join(wt, spec.junit)) : [];
+        appendLog({ type: 'gate', gate: name, ok, ms: Date.now() - started, sha, tests_total: tests.length, tests: keepTests(tests) }, 'supervisor');
+        if (!ok) fails.push(`gate ${name} failed at ${sha.slice(0, 12)}`);
+      }
+    } finally {
+      git(['worktree', 'remove', '--force', wt], mainRoot);
+    }
   }
-  const q = flagStr('question') ?? die('ask needs --question');
-  const kind = flagStr('kind') ?? 'owner-decision';
-  if (!LOG.QUESTION_KINDS.includes(kind)) die(`--kind must be one of ${LOG.QUESTION_KINDS.join(', ')}`);
-  if (flags.default === true) die('--default needs a value');
-  const def = flagStr('default') ?? null;
-  if (kind === 'one-way-door' && def) die('one-way doors never have a default (questions.md §3)');
-  const cls = flagStr('class') ?? null;
-  const auto = loadAutonomy();
-  const onLadder = cls && auto.classes[cls];
-  if (kind === 'trust' && !onLadder) die(`a trust question needs --class, one of the ladder classes: ${Object.keys(auto.classes).join(', ')}`);
-  const reasons = asList(flags.reasons);
-  const known = auto.reasons.map((r) => r.id ?? r);
-  for (const r of reasons) if (known.length && !known.includes(r)) warn(`reason "${r}" is not in governance/autonomy.md; add it there if it is a real new reason`);
-  const blocks = asList(flags.blocks);
-  const { tickets } = loadGraph();
-  for (const b of blocks) if (!tickets.has(b)) die(`--blocks ${b}: no such ticket`);
-  // Inbox hygiene: past the cap, only one-way doors and questions that block work get in.
-  const cap = loadSettings().max_open_questions ?? 7;
-  const open = readQuestions().filter((x) => x.status === 'open');
-  if (open.length >= cap && kind !== 'one-way-door' && !blocks.length) die(`${open.length} questions are already open (max_open_questions ${cap}); hold this one until the owner catches up, or withdraw a stale one`);
-  let evidence = asList(flags.evidence);
-  let recommendation = flagStr('recommendation') ?? '';
-  if (kind === 'trust') {
-    if (open.some((x) => x.kind === 'trust' && x.class === cls)) die(`a trust question for ${cls} is already open`);
-    if (open.filter((x) => x.kind === 'trust').length >= 2) die('two trust questions are already open (governance/autonomy.md §5)');
+  if (fails.length) report(fails, '');
+  if (flags['dry-run']) return out(`ok: ${branch} at ${sha.slice(0, 12)} would merge`);
+  const method = `--${loadSettings().merge_method}`;
+  const merged = sh('gh', ['pr', 'merge', String(pr.number), method, '--match-head-commit', sha]);
+  if (merged === null) die(`gh pr merge refused (did the head move?); verify from the start`);
+  git(['fetch', '--quiet', 'origin', loadSettings().main_branch]);
+  mainLogCache = undefined;
+  mergeShaCache.clear();
+  const cls = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
+  const act = appendLog({ type: 'act', actor: 'supervisor', class: cls, what: `merged ${branch} at ${sha}`, refs: id ? [id] : plan ? [plan] : [], reversible: false }, 'supervisor');
+  out(`merged ${branch} at ${sha.slice(0, 12)} (${act.id})`);
+}
+// ===== 7. trust =====
+
+// The rung a ladder class is on: its start, then every owner direction and every correction of an
+// act in the class (a drop to 1), in time order, capped at the ceiling.
+function rungFor(cls, scope = null) {
+  const def = ladder().classes[cls];
+  if (!def) return null;
+  const events = [];
+  for (const q of questions()) if (q.status === 'answered' && q.autonomy?.class === cls && (!q.autonomy.scope || q.autonomy.scope === scope)) events.push({ at: q.answered_at, rung: q.autonomy.rung });
+  for (const a of logObjects('act')) { const c = correctionOf(a); if (c && a.class === cls) events.push({ at: c.at, rung: 1 }); }
+  let r = def.start;
+  for (const e of events.sort((a, b) => a.at.localeCompare(b.at))) r = e.rung;
+  return Math.min(r, def.ceiling);
+}
+// Evidence for a trust question: how often the owner went with the supervisor's recommendation on
+// the last N answered questions of the class (defaulted answers don't count), and acts in the
+// class since it last dropped, none corrected.
+function trustEvidence(cls) {
+  const promo = ladder().promotion;
+  const acts = logObjects('act').filter((a) => a.class === cls).sort(byTime);
+  const drops = acts.map(correctionOf).filter(Boolean).map((c) => c.at).sort();
+  const since = drops[drops.length - 1] ?? '';
+  const after = acts.filter((a) => a.created_at > since);
+  const answered = questions().filter((q) => q.class === cls && q.status === 'answered' && q.recommendation).sort((a, b) => a.answered_at.localeCompare(b.answered_at)).slice(-promo.agreement_window);
+  const agree = answered.filter((q) => q.matched).length;
+  return {
+    acts_since_drop: after.length, uncorrected_acts: after.filter((a) => !correctionOf(a)).map((a) => a.id), corrections: drops.length,
+    agreement: answered.length ? +(agree / answered.length).toFixed(2) : null, agreement_questions: answered.map((q) => q.id),
+    meets_agreement: answered.length >= promo.agreement_window && agree / answered.length >= promo.agreement,
+  };
+}
+function trustTable() {
+  return Object.entries(ladder().classes).map(([cls, def]) => {
     const ev = trustEvidence(cls);
-    const r = rungFor(cls);
-    if (r >= auto.classes[cls].ceiling) die(`${cls} is already at its ceiling (rung ${r})`);
-    evidence = [...new Set([...evidence, ...ev.clean_acts.slice(-10), ...ev.agreement_questions])];
-    if (!recommendation) recommendation = `move ${cls} to rung ${r + 1} (${RUNG_NAMES[r + 1]})`;
-  }
-  const confidence = flagStr('confidence') !== undefined ? Number(flagStr('confidence')) : undefined;
-  const line = appendLog({
-    type: 'question',
-    kind,
-    class: cls ?? undefined,
-    scope: flagStr('scope') ?? undefined,
-    ticket: flagStr('ticket') ?? undefined,
-    question: q,
-    context: flagStr('context') ?? undefined,
-    options: asList(flags.options),
-    recommendation: recommendation || undefined,
-    confidence,
-    default: def ?? undefined,
-    deadline: def ? new Date(Date.now() + (loadSettings().question_default_after_hours ?? 24) * 3600000).toISOString() : undefined,
-    blocks,
-    evidence,
-    note: flagStr('note') ?? undefined,
-    why_asked: { rung: onLadder ? rungFor(cls, flagStr('scope') ?? null) : undefined, ceiling: onLadder ? auto.classes[cls].ceiling : undefined, reasons },
-  }, 'supervisor');
-  process.stdout.write(`${line.id}\n`);
+    const rung = rungFor(cls);
+    return { class: cls, about: def.about, rung, rung_name: RUNG[rung], ceiling: def.ceiling, start: def.start, ...ev, can_ask: rung < def.ceiling && ev.meets_agreement };
+  });
 }
+function cmdTrust() {
+  const rows = trustTable();
+  if (flags.json) return json(rows);
+  for (const r of rows) out(`${r.class.padEnd(20)} rung ${r.rung} (${r.rung_name}) of ${r.ceiling}; agreement ${r.agreement ?? '-'} on ${r.agreement_questions.length}; acts since last drop ${r.acts_since_drop}; corrections ${r.corrections}${r.can_ask ? '  -> evidence supports a trust question' : ''}`);
+}
+
+// ===== 8. decide and act =====
 
 function openQuestion(id, okStatuses = ['open']) {
   const q = logGet(id);
   if (!q || q.type !== 'question') die(`no question ${id}`);
-  const v = LOG.questionView(q);
+  const v = questionView(q);
   if (!okStatuses.includes(v.status)) die(`${id} is already ${v.status}`);
   return v;
 }
 
-// The owner answers from their own terminal or the dashboard. The supervisor may only apply a
-// question's default (--defaulted) or withdraw it.
+function cmdAsk() {
+  supervisorOnly('ask');
+  const q = flagStr('question') ?? die('ask needs --question');
+  const kind = flagStr('kind') ?? 'owner-decision';
+  const cls = flagStr('class') ?? null;
+  const L = ladder();
+  const onLadder = cls && L.classes[cls];
+  if (kind === 'trust' && !onLadder) die(`a trust question needs --class, one of: ${Object.keys(L.classes).join(', ')}`);
+  const def = flagStr('default') ?? null;
+  const reasons = asList(flags.reasons);
+  const known = L.reasons.map((r) => r.id);
+  for (const r of reasons) if (known.length && !known.includes(r)) warn(`reason "${r}" is not in constitution.md's table`);
+  const blocks = asList(flags.blocks);
+  for (const b of blocks) if (!tickets().has(b)) die(`--blocks ${b}: no such ticket`);
+  const open = questions().filter((x) => x.status === 'open');
+  const cap = loadSettings().max_open_questions;
+  if (open.length >= cap && kind !== 'one-way-door' && !blocks.length) die(`${open.length} questions are open (max_open_questions ${cap}); hold this one, or withdraw a stale one`);
+  let evidence = asList(flags.evidence);
+  let recommendation = flagStr('recommendation') ?? '';
+  if (kind === 'trust') {
+    if (open.some((x) => x.kind === 'trust' && x.class === cls)) die(`a trust question for ${cls} is already open`);
+    if (open.filter((x) => x.kind === 'trust').length >= 2) die('two trust questions are already open');
+    const ev = trustEvidence(cls);
+    const r = rungFor(cls);
+    if (r >= L.classes[cls].ceiling) die(`${cls} is already at its ceiling (rung ${r})`);
+    evidence = [...new Set([...evidence, ...ev.agreement_questions, ...ev.uncorrected_acts.slice(-10)])];
+    if (!recommendation) recommendation = `move ${cls} to rung ${r + 1} (${RUNG[r + 1]})`;
+  }
+  const scope = flagStr('scope') ?? null;
+  const line = appendLog({
+    type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), question: q, context: flagStr('context'),
+    options: asList(flags.options), recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined,
+    deadline: def ? new Date(Date.now() + loadSettings().question_default_after_hours * 3600000).toISOString() : undefined,
+    blocks, evidence, note: flagStr('note'),
+    why_asked: { rung: onLadder ? rungFor(cls, scope) : undefined, ceiling: onLadder ? L.classes[cls].ceiling : undefined, reasons },
+  }, 'supervisor');
+  out(line.id);
+}
+
+// The owner answers (terminal or dashboard). The supervisor may only apply a default or withdraw.
 function cmdAnswer() {
-  const [id, ...rest] = positional;
-  if (!id || (!rest.length && !flags.defaulted)) die('usage: answer <qid> "<answer>" [--matched] [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)  |  answer <qid> --defaulted   (supervisor)');
+  const [id, ...restWords] = positional;
+  if (!id || (!restWords.length && !flags.defaulted)) die('usage: answer <qid> "<answer>" [--matched] [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>" [--rule-scope s]]   |   answer <qid> --defaulted   (supervisor)');
   if (flags.defaulted) {
-    if (logWriter() !== 'supervisor') die('only the supervisor applies defaults');
+    supervisorOnly('answer --defaulted');
     const v = openQuestion(id);
     if (!v.default) die(`${id} has no default to apply`);
     appendLog({ type: 'question', op: 'set', id, status: 'defaulted' }, 'supervisor');
-    return void process.stdout.write(`defaulted ${id}: ${v.default}\n`);
+    return out(`defaulted ${id}: ${v.default}`);
   }
   const { by, channel } = ownerWriter();
   const v = openQuestion(id, ['open', 'defaulted']);
-  const answer = rest.join(' ').trim();
+  const answer = restWords.join(' ').trim();
   let autonomy;
   if (flags.autonomy !== undefined) {
-    const def = loadAutonomy().classes[v.class];
+    const def = ladder().classes[v.class];
     if (!def) die(`${id} has no ladder class, so it carries no autonomy direction`);
-    const rung = Number(flagStr('autonomy'));
-    if (![1, 2, 3].includes(rung)) die('--autonomy must be 1 (ask), 2 (ask with a default) or 3 (act and report)');
-    if (rung > def.ceiling) die(`${v.class} has a ceiling of rung ${def.ceiling} (governance/autonomy.md)`);
+    const rung = flagNum('autonomy');
+    if (![1, 2, 3].includes(rung)) die('--autonomy is 1 (ask), 2 (ask with a default) or 3 (act and report)');
+    if (rung > def.ceiling) die(`${v.class} has a ceiling of rung ${def.ceiling} (constitution.md)`);
     autonomy = { class: v.class, rung, scope: flagStr('scope') ?? null };
   }
-  const matched = flags.matched ? true : undefined;
-  appendLog({ type: 'question', op: 'set', id, answer, matched, autonomy, standing_rule: flagStr('rule') ?? undefined, channel }, by);
-  if (flagStr('rule')) {
-    appendLog({ type: 'knowledge', kind: 'preference', statement: flagStr('rule'), scope: flagStr('rule-scope') ?? (v.class ? `class:${v.class}` : 'project'), status: 'accepted', confidence: 1, evidence: [id] }, by);
-  }
-  // The supervisor reads the answer from the log; only the id is typed into its pane.
-  safeNudge(supervisorTarget(), `[devteam answer ${id} from owner] read it with: devteam.mjs questions --id ${id}`);
-  process.stdout.write(`answered ${id}\n`);
+  appendLog({ type: 'question', op: 'set', id, answer, matched: flags.matched ? true : undefined, autonomy, standing_rule: flagStr('rule'), channel }, by);
+  if (flagStr('rule')) appendLog({ type: 'knowledge', kind: 'preference', statement: flagStr('rule'), scope: flagStr('rule-scope') ?? (v.class ? `class:${v.class}` : 'project'), status: 'accepted', confidence: 1, evidence: [id] }, by);
+  nudgeSupervisor(`[devteam answer ${id} from owner] read it with: devteam.mjs questions --id ${id}`);
+  out(`answered ${id}`);
 }
-
 function cmdWithdraw() {
   const [id] = positional;
   if (!id) die('usage: withdraw <qid> [--reason r]');
-  if (logWriter() !== 'supervisor') die('only the supervisor withdraws questions');
+  supervisorOnly('withdraw');
   openQuestion(id);
-  appendLog({ type: 'question', op: 'set', id, status: 'withdrawn', reason: flagStr('reason') ?? undefined }, 'supervisor');
-  process.stdout.write(`withdrew ${id}\n`);
+  appendLog({ type: 'question', op: 'set', id, status: 'withdrawn', reason: flagStr('reason') }, 'supervisor');
+  out(`withdrew ${id}`);
 }
-
-function cmdRecorded() {
-  const [id, where] = positional;
-  if (!id || !where) die('usage: recorded <question-id> <tracked-file-path>');
-  if (logWriter() !== 'supervisor') die('only the supervisor records where answers landed');
-  const v = openQuestion(id, ['answered', 'defaulted']);
-  appendLog({ type: 'question', op: 'set', id: v.id, recorded_in: where }, 'supervisor');
-  process.stdout.write(`recorded ${id} in ${where}\n`);
-}
-
-function rankQuestions(qs, tickets) {
-  const sub = new Map([...tickets].filter(([, n]) => isActive(n)));
+function rankQuestions(qs) {
+  const sub = activeTickets();
   const crit = findCycle(sub) ? new Set() : new Set(criticalPath(sub).path);
-  const score = (q) => {
-    const tier = ['one-way-door', 'owner-decision'].includes(q.kind) ? 1000 : 0;
-    const blocks = (q.blocks ?? []).reduce((s, id) => s + (crit.has(id) ? 3 : 1), 0);
-    return tier + blocks * 10;
-  };
+  const score = (q) => (['one-way-door', 'owner-decision'].includes(q.kind) ? 1000 : 0) + q.blocks.reduce((s, id) => s + (crit.has(id) ? 3 : 1), 0) * 10;
   return [...qs].sort((a, b) => score(b) - score(a) || a.asked_at.localeCompare(b.asked_at));
 }
-
 function cmdQuestions() {
-  const { tickets } = loadGraph();
-  let qs = readQuestions();
+  let qs = questions();
   if (flagStr('id')) qs = qs.filter((q) => q.id === flagStr('id'));
   else if (!flags.all) qs = qs.filter((q) => q.status === 'open');
-  qs = rankQuestions(qs, tickets);
-  if (flags.json) return void process.stdout.write(`${JSON.stringify(qs, null, 2)}\n`);
-  if (!qs.length) return void process.stdout.write('no questions\n');
+  qs = rankQuestions(qs);
+  if (flags.json) return json(qs);
+  if (!qs.length) return out('no questions');
   for (const q of qs) {
-    process.stdout.write(`${q.id}  [${q.kind}, ${q.status}]${q.blocks?.length ? ` blocks ${q.blocks.join(',')}` : ''}\n  ${q.question}\n`);
-    if (q.recommendation) process.stdout.write(`  recommend: ${q.recommendation}\n`);
-    if (q.why_asked?.reasons?.length) process.stdout.write(`  why asked: ${q.why_asked.reasons.join(', ')}${q.class ? ` (${q.class}, rung ${q.why_asked.rung ?? '-'} of ${q.why_asked.ceiling ?? '-'})` : ''}\n`);
-    if (q.answer) process.stdout.write(`  answer (${q.answered_by}): ${q.answer}\n`);
-    if (q.autonomy) process.stdout.write(`  next time: ${q.autonomy.class} at rung ${q.autonomy.rung} (${RUNG_NAMES[q.autonomy.rung]})${q.autonomy.scope ? ` for ${q.autonomy.scope}` : ''}\n`);
-    if (q.standing_rule) process.stdout.write(`  standing rule: ${q.standing_rule}\n`);
+    out(`${q.id}  [${q.kind}, ${q.status}]${q.blocks.length ? ` blocks ${q.blocks.join(',')}` : ''}\n  ${q.question}`);
+    if (q.recommendation) out(`  recommend: ${q.recommendation}`);
+    if (q.why_asked?.reasons?.length) out(`  why asked: ${q.why_asked.reasons.join(', ')}${q.class ? ` (${q.class}, rung ${q.why_asked.rung ?? '-'} of ${q.why_asked.ceiling ?? '-'})` : ''}`);
+    if (q.answer) out(`  answer (${q.answered_by}): ${q.answer}`);
+    if (q.autonomy) out(`  next time: ${q.autonomy.class} at rung ${q.autonomy.rung} (${RUNG[q.autonomy.rung]})${q.autonomy.scope ? ` for ${q.autonomy.scope}` : ''}`);
+    if (q.standing_rule) out(`  standing rule: ${q.standing_rule}`);
   }
 }
 
-// ---------- session-to-session messages ----------
-
-// The name other sessions use to reach me: 'supervisor', a ticket id, or a planner's window name.
-function myAddress() {
-  const actor = currentActor();
-  if (actor !== 'planner') return actor;
-  const win = tmuxHere()?.split(':').pop();
-  if (win) return win;
-  const b = git(['rev-parse', '--abbrev-ref', 'HEAD']);
-  return b?.startsWith('plan/') ? `plan-${b.slice('plan/'.length)}` : 'planner';
-}
-
-function addressTarget(to) {
-  return to === 'supervisor' ? supervisorTarget() : `${loadSettings().tmux_session}:${to}`;
-}
-
-// Resolve a session:window target exactly (tmux's own lookup is too forgiving) and check that an
-// agent, not a bare shell, is running there. Typing a message into a shell would execute it.
-const SHELLS = new Set(['bash', 'zsh', 'sh', 'fish', 'dash', 'ksh', 'tcsh', 'csh', 'login']);
-function resolvePane(target) {
-  const i = target.lastIndexOf(':');
-  const [session, win] = i === -1 ? [target, '0'] : [target.slice(0, i), target.slice(i + 1)];
-  let out;
-  try {
-    // tmux rewrites tabs in format output, so separate with a space (window names here have none).
-    out = execFileSync('tmux', ['list-windows', '-t', session, '-F', '#{window_index} #{window_name}'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-  } catch {
-    return { problem: `no tmux session "${session}"` };
+// An act: a decision the supervisor made. For a ladder class it checks the rung first and refuses
+// (writing nothing) when the supervisor may not act alone; an owner-only class needs an owner answer.
+function cmdAct() {
+  const what = rest ? rest.join(' ') : flagStr('what');
+  const cls = flagStr('class');
+  if (!cls || !what) die('usage: act --class <decision-class> [--scope s] [--approved <qid>] [--refs ids] [--irreversible] -- "<what you did>"');
+  supervisorOnly('act');
+  const L = ladder();
+  const scope = flagStr('scope') ?? null;
+  const approved = flagStr('approved') ?? null;
+  let approval = null;
+  if (approved) {
+    const q = logGet(approved);
+    approval = q?.type === 'question' ? questionView(q) : null;
+    if (!approval || !['answered', 'defaulted'].includes(approval.status)) die(`${approved} is not an answered question`);
+    if (approval.class !== cls) die(`${approved} was asked in class ${approval.class ?? '(none)'}, not ${cls}`);
+    if (logObjects('act').some((a) => a.approved_by === approved)) die(`${approved} already approved an act; ask again for another`);
   }
-  const rows = out.split('\n').filter(Boolean).map((l) => [l.slice(0, l.indexOf(' ')), l.slice(l.indexOf(' ') + 1)]);
-  let row = rows.find(([idx, name]) => name === win || idx === win);
-  if (!row && win === 'supervisor') row = rows.find(([idx]) => idx === '0');
-  if (!row) return { problem: `no tmux window "${win}" in session "${session}"; is that session running?` };
-  const exact = `${session}:${row[0]}`;
-  let info = '';
-  try {
-    info = execFileSync('tmux', ['display-message', '-p', '-t', exact, '#{pane_dead} #{pane_current_command}'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-  } catch {
-    return { problem: `cannot inspect ${exact}` };
-  }
-  const [dead, cmd = ''] = info.split(' ');
-  if (dead === '1') return { problem: `the pane in ${exact} has exited` };
-  if (SHELLS.has(cmd.replace(/^-/, ''))) return { problem: `no agent is running in ${exact} (it is at a ${cmd} prompt); resume it first` };
-  return { target: exact };
-}
-
-// Type a notice into a pane only if an agent is running there; otherwise warn.
-function safeNudge(target, line) {
-  const { target: exact, problem } = resolvePane(target);
-  if (problem) {
-    warn(`not delivered to ${target}: ${problem}`);
-    return false;
-  }
-  return nudge(exact, line);
-}
-
-const MESSAGE_MAX = 600;
-
-function cmdSend() {
-  const [to, ...rest] = positional;
-  const text = rest.join(' ').replace(/\s+/g, ' ').trim();
-  if (!to || !text) die('usage: send <supervisor|ticket-id|plan-<feature>> "<text>" [--kind k] [--re m-…] [--sha s] [--ticket id]');
-  if (text.length > MESSAGE_MAX) die(`messages are one line of at most ${MESSAGE_MAX} characters; put detail in a file and reference its path`);
-  const kind = flagStr('kind') ?? 'info';
-  if (!MESSAGE_KINDS.includes(kind)) die(`--kind must be one of ${MESSAGE_KINDS.join(', ')}`);
-  const from = myAddress();
-  // P8: decisions come only from the supervisor.
-  if (['ruling', 'answer'].includes(kind) && from !== 'supervisor') die(`only the supervisor sends ${kind} messages (messages.md §2)`);
-  const { target, problem } = resolvePane(addressTarget(to));
-  if (problem) die(`cannot message "${to}": ${problem}`);
-  const sha = flagStr('sha') ?? (kind === 'merge-request' ? git(['rev-parse', 'HEAD']) : null);
-  const re = flagStr('re') ?? null;
-  if (re && !readEvents().some((e) => e.type === 'message' && e.id === re)) warn(`--re ${re} matches no logged message`);
-  const id = stampId('m', from);
-  const line = `[devteam ${kind} ${id} from ${from}${re ? ` re ${re}` : ''}${sha ? ` @ ${sha}` : ''}] ${text}`;
-  if (!nudge(target, line)) die(`could not type into ${target}`);
-  appendEvent({ type: 'message', actor: from, to, kind, id, re, ticket: flagStr('ticket') ?? currentTicketId() ?? (/^[a-z][a-z0-9-]*-\d{2,}-/.test(to) ? to : null), sha, summary: text.slice(0, 280) });
-  process.stdout.write(`${id}\n`);
-}
-
-function cmdMessages() {
-  const me = flagStr('to') ?? myAddress();
-  const tail = Number(flagStr('tail') ?? 50);
-  const all = readEvents().filter((e) => e.type === 'message');
-  const replied = new Set(all.map((e) => e.re).filter(Boolean));
-  let mine = all.filter((e) => e.to === me);
-  if (flags.open) mine = mine.filter((e) => !replied.has(e.id) && !['info', 'ruling', 'answer'].includes(e.kind));
-  mine = mine.slice(-tail);
-  if (flags.json) return void process.stdout.write(`${JSON.stringify(mine, null, 2)}\n`);
-  if (!mine.length) return void process.stdout.write(flags.open ? 'no open messages\n' : 'no messages\n');
-  for (const e of mine) process.stdout.write(`${e.ts} ${e.id} [${e.kind}] from ${e.actor}${e.re ? ` re ${e.re}` : ''}${e.sha ? ` @ ${e.sha.slice(0, 12)}` : ''}: ${e.summary}\n`);
-}
-
-function cmdHeartbeat() {
-  const supervisor = !!flags.supervisor;
-  const id = supervisor ? 'supervisor' : (currentTicketId() ?? die('heartbeat needs DEVTEAM_TICKET or a ticket/<id> branch'));
-  const phase = flagStr('phase');
-  if (phase !== undefined && !PHASES.includes(phase)) die(`--phase must be one of ${PHASES.join(', ')}`);
-  const p = supervisor ? path.join(runDir, 'supervisor.json') : runTicketPath(id);
-  const prev = (supervisor ? (fs.existsSync(p) ? readJson(p) : null) : readRunTicket(id)) ?? {};
-  const next = { ...prev, id, heartbeat_at: nowIso() };
-  const session = tmuxHere() ?? prev.session;
-  if (!supervisor) {
-    next.phase = phase ?? prev.phase ?? 'starting';
-    next.worktree = repoRoot;
-    next.branch = git(['rev-parse', '--abbrev-ref', 'HEAD']) ?? prev.branch;
-    next.head_sha = git(['rev-parse', 'HEAD']) ?? prev.head_sha ?? null;
-    next.started_at = prev.started_at ?? nowIso();
-    if (flags.task !== undefined) next.task = flagStr('task') ?? null;
-  }
-  if (session) next.session = session;
-  if (flags.note !== undefined) next.note = (flagStr('note') ?? '').slice(0, 280);
-  for (const k of ['usd', 'in', 'out']) {
-    if (flags[k] !== undefined && !(Number(flagStr(k)) >= 0)) die(`--${k} must be a number ≥ 0`);
-  }
-  if (flags.usd !== undefined || flags.in !== undefined || flags.out !== undefined) {
-    const src = flagStr('cost-source') ?? prev.cost?.source ?? 'agent-report';
-    if (!['gateway', 'agent-report', 'estimate'].includes(src)) die('--cost-source must be gateway, agent-report or estimate');
-    next.cost = {
-      usd: flagStr('usd') !== undefined ? Number(flagStr('usd')) : (prev.cost?.usd ?? 0),
-      input_tokens: flagStr('in') !== undefined ? Number(flagStr('in')) : (prev.cost?.input_tokens ?? 0),
-      output_tokens: flagStr('out') !== undefined ? Number(flagStr('out')) : (prev.cost?.output_tokens ?? 0),
-      source: src,
-    };
-  }
-  writeJson(p, next);
-  // The durable record: one phase line per phase change, carrying cumulative cost. Spend between
-  // two phase lines is charged to the earlier line's phase. The supervisor logs its own cost as
-  // phase "supervisor" whenever it reports a new total.
-  const costFields = next.cost ? { usd: next.cost.usd, input_tokens: next.cost.input_tokens, output_tokens: next.cost.output_tokens } : {};
-  // Also record a same-phase line when spend has grown by $1 or more since the last line, so cost
-  // in a ticket's last phase isn't lost.
-  const lastLogged = logObjects('phase').filter((l) => l.created_by === id).sort((a, b) => a.created_at.localeCompare(b.created_at)).pop();
-  const costGrew = next.cost && next.cost.usd - (lastLogged?.usd ?? 0) >= 1;
-  if (!supervisor && (next.phase !== prev.phase || costGrew)) {
-    appendLog({ type: 'phase', from: prev.phase ?? null, to: next.phase, sha: next.head_sha ?? undefined, task: next.task ?? undefined, note: next.note ?? undefined, ...costFields }, id);
-  } else if (supervisor && next.cost && next.cost.usd !== prev.cost?.usd) {
-    appendLog({ type: 'phase', from: 'supervisor', to: 'supervisor', ...costFields }, 'supervisor');
-  }
-  process.stdout.write(`heartbeat ${id}${supervisor ? '' : ` ${next.phase}`}\n`);
-}
-
-function cmdEvent() {
-  const type = flagStr('type') ?? die('event needs --type (see schema/event.schema.json)');
-  appendEvent({
-    type,
-    actor: flagStr('actor') ?? currentActor(),
-    ticket: flagStr('ticket') ?? currentTicketId(),
-    sha: flagStr('sha') ?? null,
-    summary: (flagStr('summary') ?? '').slice(0, 280),
-    ref: flagStr('ref') ?? null,
-  });
-  process.stdout.write('ok\n');
-}
-
-function cmdHistory() {
-  const id = positional[0];
-  const tail = Number(flagStr('tail') ?? 100);
-  let evs = readEvents();
-  let scope = null;
-  if (id) {
-    const { tickets } = loadGraph();
-    scope = new Set([id, ...(tickets.get(id)?.depends_on ?? [])]);
-    evs = evs.filter((e) => scope.has(e.ticket) || scope.has(e.actor) || scope.has(e.to));
-  }
-  for (const e of evs.slice(-tail)) {
-    const who = e.type === 'message' ? `${e.actor} -> ${e.to} [${e.kind}]` : String(e.ticket ?? e.actor ?? '');
-    process.stdout.write(`${e.ts} ${String(e.type).padEnd(18)} ${who.padEnd(28)} ${e.summary ?? ''}\n`);
-  }
-  const qs = readQuestions().filter((q) => ['answered', 'defaulted'].includes(q.status) && (!scope || scope.has(q.ticket)));
-  if (qs.length) process.stdout.write('\nanswered questions:\n');
-  for (const q of qs.sort((a, b) => a.asked_at.localeCompare(b.asked_at)).slice(-tail)) {
-    process.stdout.write(`- ${q.id}${q.ticket ? ` (${q.ticket})` : ''}: ${q.question}\n  → ${q.answer} [${q.answered_by}${q.recorded_in ? `, recorded in ${q.recorded_in}` : ', NOT YET RECORDED'}]\n`);
-  }
-  const corrected = new Map(logObjects('correction').map((c) => [c.act, c]));
-  const acts = logObjects('act').filter((a) => !scope || (a.refs ?? []).some((r) => scope.has(r))).sort((a, b) => a.created_at.localeCompare(b.created_at)).slice(-tail);
-  if (acts.length) process.stdout.write('\nsupervisor acts:\n');
-  for (const a of acts) process.stdout.write(`- ${a.created_at} ${a.id} [${a.class}] ${a.what}${corrected.has(a.id) ? `\n  CORRECTED: ${corrected.get(a.id).reason}` : ''}\n`);
-}
-
-function cmdWhoami() {
-  const id = currentTicketId();
-  const b = loadSettings();
-  process.stdout.write(
-    [
-      `DEVTEAM_TICKET=${id ?? ''}`,
-      `DEVTEAM_ROLE=${currentActor() === 'planner' ? 'planner' : id ? 'worker' : 'supervisor'}`,
-      `DEVTEAM_RUN=${runDir}`,
-      `DEVTEAM_SUPERVISOR=${supervisorTarget()}`,
-      `# repo=${repoRoot} main_checkout=${mainRoot} project=${projectDir} tmux_session=${b.tmux_session}`,
-    ].join('\n') + '\n',
-  );
-}
-
-function cmdSettings() {
-  const b = loadSettings();
-  const key = flagStr('get');
-  if (key) {
-    const v = b[key];
-    process.stdout.write(`${v === null || v === undefined ? '' : typeof v === 'object' ? JSON.stringify(v) : v}\n`);
-  } else process.stdout.write(`${JSON.stringify(b, null, 2)}\n`);
-}
-
-function cmdNotes() {
-  const [from, to = 'HEAD'] = positional;
-  if (!from) die('usage: notes <from-tag> [<to-ref>]');
-  const out = git(['log', `${from}..${to}`, '--format=%s']);
-  if (out === null) die(`cannot read git log ${from}..${to}`);
-  const { tickets } = loadGraph();
-  const landed = new Set();
-  for (const s of out.split('\n')) {
-    const m = s.match(/from \S*ticket\/([a-z0-9-]+)$/) ?? s.match(/^([a-z][a-z0-9-]*-\d{2,}-[a-z0-9-]+):/);
-    if (m && tickets.has(m[1])) landed.add(m[1]);
-  }
-  // A ticket counts as merged for these notes if it landed in this range or before it.
-  const landedBy = (id) => {
-    if (landed.has(id)) return true;
-    const sha = mergeShaFor(id);
-    return !!sha && git(['merge-base', '--is-ancestor', sha, to]) !== null;
-  };
-  const merged = new Map([...tickets.keys()].map((id) => [id, landedBy(id)]));
-  const stories = new Map();
-  for (const id of landed) for (const s of tickets.get(id).serves ?? []) (stories.get(s) ?? stories.set(s, []).get(s)).push(id);
-  const completed = [];
-  const advanced = [];
-  for (const [s, ids] of stories) {
-    const all = [...tickets.values()].filter((n) => isActive(n) && (n.serves ?? []).includes(s));
-    (all.every((n) => merged.get(n.id)) ? completed : advanced).push({ s, ids, total: all.length, done: all.filter((n) => merged.get(n.id)).length });
-  }
-  const line = (x) => `- **${x.s}** (${x.done}/${x.total} tickets): ${x.ids.join(', ')}`;
-  process.stdout.write(`## Stories completed\n\n${completed.map(line).join('\n') || '- none'}\n\n## Stories advanced\n\n${advanced.map(line).join('\n') || '- none'}\n`);
-  const chores = [...landed].filter((id) => !(tickets.get(id).serves ?? []).length);
-  if (chores.length) process.stdout.write(`\n## Other\n\n${chores.map((id) => `- ${id}: ${tickets.get(id).title}`).join('\n')}\n`);
-}
-
-// ---------- metrics (process/improvement.md §2) ----------
-
-const median = (xs) => {
-  if (!xs.length) return null;
-  const a = [...xs].sort((x, y) => x - y);
-  const m = Math.floor(a.length / 2);
-  return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
-};
-const hours = (ms) => (ms === null ? null : +(ms / 3600000).toFixed(1));
-
-// ---------- gate runs (timing, pass/fail, tests) ----------
-
-const gatesLog = () => path.join(runDir, 'gates.jsonl');
-
-// Minimal JUnit XML reader: each <testcase> with its time and whether it failed.
-function readJunit(file) {
-  if (!file || !fs.existsSync(file)) return [];
-  const xml = fs.readFileSync(file, 'utf8');
-  const out = [];
-  const re = /<testcase\b([^>]*?)(\/>|>([\s\S]*?)<\/testcase>)/g;
-  for (const m of xml.matchAll(re)) {
-    const attr = (k) => m[1].match(new RegExp(`\\b${k}="([^"]*)"`))?.[1] ?? '';
-    const name = [attr('classname'), attr('name')].filter(Boolean).join(' › ');
-    out.push({ name, ms: Math.round(Number(attr('time') || 0) * 1000), failed: /<(failure|error)\b/.test(m[3] ?? '') });
-  }
-  return out;
-}
-
-function cmdGate() {
-  const dash = argv.indexOf('--');
-  const name = positional[0];
-  if (!name || dash === -1 || dash === argv.length - 1) die('usage: gate <name> [--junit <report.xml>] -- <command> [args…]');
-  const cmd = argv.slice(dash + 1);
-  const started = Date.now();
-  let ok = true;
-  try {
-    execFileSync(cmd[0], cmd.slice(1), { stdio: 'inherit' });
-  } catch {
-    ok = false;
-  }
-  const ms = Date.now() - started;
-  const tests = readJunit(flagStr('junit'));
-  const keep = [...tests.filter((t) => t.failed), ...tests.filter((t) => !t.failed).sort((a, b) => b.ms - a.ms).slice(0, 20)];
-  const sha = git(['rev-parse', 'HEAD']);
-  const rec = { ts: nowIso(), gate: name, ticket: currentTicketId(), sha, ok, ms, tests_total: tests.length, tests: keep };
-  fs.mkdirSync(runDir, { recursive: true });
-  fs.appendFileSync(gatesLog(), `${JSON.stringify(rec)}\n`);
-  appendEvent({ type: 'gate.result', actor: currentActor(), ticket: rec.ticket, sha, gate: name, ok, ms, summary: `${name} ${ok ? 'passed' : 'failed'} in ${(ms / 1000).toFixed(1)}s` });
-  process.stderr.write(`devteam: gate ${name} ${ok ? 'passed' : 'FAILED'} in ${(ms / 1000).toFixed(1)}s\n`);
-  process.exit(ok ? 0 : 1);
-}
-
-function readGateRuns(since) {
-  if (!fs.existsSync(gatesLog())) return [];
-  return fs.readFileSync(gatesLog(), 'utf8').split('\n').filter(Boolean).flatMap((l) => {
-    try {
-      const r = JSON.parse(l);
-      return Date.parse(r.ts) >= since ? [r] : [];
-    } catch {
-      return [];
+  let rung;
+  if ((L.owner_only ?? []).includes(cls)) {
+    if (!approval || approval.status !== 'answered') die(`${cls} is the owner's (constitution.md); it needs an owner answer in that class (--approved <qid>)`);
+  } else if (L.classes[cls]) {
+    rung = rungFor(cls, scope);
+    if (approval) {
+      if (approval.status === 'defaulted' && rung < 2) die(`${cls} is on rung ${rung} (${RUNG[rung]}); a defaulted answer is not approval there`);
+    } else if (rung < 3) {
+      process.stderr.write(`devteam: ${cls}${scope ? ` (${scope})` : ''} is on rung ${rung} (${RUNG[rung]}); ask first:\n  devteam.mjs ask --class ${cls} --question "…" --recommendation "…"${rung === 2 ? ' --default "…"' : ''} --reasons below-rung\nthen act with --approved <qid>.\n`);
+      process.exit(3);
     }
-  });
+  } else if (!(L.constitutional ?? []).includes(cls)) warn(`class "${cls}" is not in constitution.md (ladder, constitutional or owner-only)`);
+  const line = appendLog({ type: 'act', actor: 'supervisor', class: cls, scope: scope ?? undefined, what, rung, refs: asList(flags.refs), reversible: !flags.irreversible, approved_by: approved ?? undefined }, 'supervisor');
+  out(line.id);
+}
+function cmdCorrect() {
+  const [actId] = positional;
+  if (!actId) die('usage: correct <act-id> --reason r [--severity 0-4]   (owner; the supervisor at a retro adds --retro)');
+  const by = flags.retro ? (supervisorOnly('correct --retro'), 'supervisor') : ownerWriter().by;
+  const act = logGet(actId);
+  if (act?.type !== 'act') die(`no act ${actId}`);
+  if (correctionOf(act)) die(`${actId} is already corrected`);
+  appendLog({ type: 'act', op: 'set', id: actId, corrected: { reason: flagStr('reason') ?? die('correct needs --reason'), severity: flagNum('severity') } }, by);
+  if (ladder().classes[act.class]) out(`${act.class} drops to rung 1 (ask)`);
+  if (by === 'owner') nudgeSupervisor(`[devteam correction from owner] on ${actId}; read it with: devteam.mjs log --id ${actId}`);
+  out(`corrected ${actId}`);
+}
+// The supervisor records how it repaired a corrected act.
+function cmdRepair() {
+  const [actId] = positional;
+  const how = flagStr('how');
+  if (!actId || !['undo', 'fix-ticket', 'none'].includes(how)) die('usage: repair <act-id> --how undo|fix-ticket|none');
+  supervisorOnly('repair');
+  const act = logGet(actId);
+  if (act?.type !== 'act' || !correctionOf(act)) die(`${actId} is not a corrected act`);
+  appendLog({ type: 'act', op: 'set', id: actId, repaired: how }, 'supervisor');
+  out(`repaired ${actId}: ${how}`);
 }
 
-function gateStats(runs) {
-  const byGate = new Map();
-  for (const r of runs) (byGate.get(r.gate) ?? byGate.set(r.gate, []).get(r.gate)).push(r);
-  const gates = [];
-  const flakyGates = [];
-  for (const [g, rs] of byGate) {
-    const bySha = new Map();
-    for (const r of rs) (bySha.get(r.sha) ?? bySha.set(r.sha, []).get(r.sha)).push(r);
-    const flakyShas = [...bySha.entries()].filter(([, x]) => x.some((r) => r.ok) && x.some((r) => !r.ok)).map(([sha]) => sha);
-    if (flakyShas.length) flakyGates.push({ gate: g, commits: flakyShas.length });
-    gates.push({ gate: g, runs: rs.length, fail_rate: +(rs.filter((r) => !r.ok).length / rs.length).toFixed(2), median_seconds: +(median(rs.map((r) => r.ms)) / 1000).toFixed(1), max_seconds: +(Math.max(...rs.map((r) => r.ms)) / 1000).toFixed(1) });
-  }
-  // A test that failed in a run, at a commit where the same gate later passed, is flaky.
-  const flakyTests = new Map();
-  const testMs = new Map();
-  for (const r of runs) {
-    for (const t of r.tests ?? []) {
-      if (!t.failed) (testMs.get(t.name) ?? testMs.set(t.name, []).get(t.name)).push(t.ms);
-      if (t.failed && runs.some((o) => o !== r && o.gate === r.gate && o.sha === r.sha && o.ok && Date.parse(o.ts) >= Date.parse(r.ts))) {
-        flakyTests.set(t.name, (flakyTests.get(t.name) ?? 0) + 1);
-      }
-    }
-  }
-  return {
-    gates: gates.sort((a, b) => b.median_seconds - a.median_seconds),
-    flaky_gates: flakyGates,
-    flaky_tests: [...flakyTests.entries()].sort((a, b) => b[1] - a[1]).map(([name, times]) => ({ name, times })),
-    slowest_tests: [...testMs.entries()].map(([name, xs]) => ({ name, median_seconds: +(median(xs) / 1000).toFixed(1) })).sort((a, b) => b.median_seconds - a.median_seconds).slice(0, 10),
-  };
-}
-
-function collectMetrics(since) {
-  const { tickets } = loadGraph();
-  const settings = loadSettings();
-  const now = Date.now();
-  const events = readEvents().filter((e) => Date.parse(e.ts) >= since);
-
-  // Phase lines from the log, per ticket in time order (the durable record of phases and cost).
-  const mergedAtOf = new Map();
-  for (const id of tickets.keys()) {
-    const sha = mergeShaFor(id);
-    const t = sha ? Date.parse(git(['show', '-s', '--format=%cI', sha]) ?? '') : NaN;
-    if (!Number.isNaN(t)) mergedAtOf.set(id, t);
-  }
-  const phaseLines = new Map();
-  for (const l of logObjects('phase')) (phaseLines.get(l.created_by) ?? phaseLines.set(l.created_by, []).get(l.created_by)).push(l);
-  for (const ls of phaseLines.values()) ls.sort((a, b) => a.created_at.localeCompare(b.created_at));
-
-  // Cycle time: first phase line for a ticket -> its merge commit's time.
-  const cycles = [];
-  for (const [id, mergedAt] of mergedAtOf) {
-    if (mergedAt < since) continue;
-    const first = phaseLines.get(id)?.[0];
-    if (first && mergedAt > Date.parse(first.created_at)) cycles.push({ id, ms: mergedAt - Date.parse(first.created_at) });
-  }
-  cycles.sort((a, b) => b.ms - a.ms);
-
-  // Time in each phase: each phase lasts until the next phase line, or the merge (a merged
-  // ticket's worker may never log "done"), or now for a live ticket.
-  const phaseMs = {};
-  const phaseNow = new Map(); // ticket -> { phase, sinceMs }
-  const phaseUsd = {};
-  const ticketUsd = {};
-  for (const [who, ls] of phaseLines) {
-    let lastUsd = 0;
-    ls.forEach((l, i) => {
-      const at = Date.parse(l.created_at);
-      if (typeof l.usd === 'number') {
-        const delta = Math.max(0, l.usd - lastUsd);
-        const charged = who === 'supervisor' ? 'supervisor' : (ls[i - 1]?.to ?? l.from ?? 'starting');
-        if (at >= since) {
-          phaseUsd[charged] = (phaseUsd[charged] ?? 0) + delta;
-          ticketUsd[who] = (ticketUsd[who] ?? 0) + delta;
-        }
-        lastUsd = l.usd;
-      }
-      if (who === 'supervisor' || at < since) return;
-      const merged = mergedAtOf.get(who);
-      let endMs;
-      if (i + 1 < ls.length) endMs = Date.parse(ls[i + 1].created_at);
-      else if (merged) endMs = Math.max(at, merged);
-      else endMs = ['done', 'parked'].includes(l.to) ? at : now;
-      phaseMs[l.to] = (phaseMs[l.to] ?? 0) + (endMs - at);
-      if (i === ls.length - 1 && !merged) phaseNow.set(who, { phase: l.to, sinceMs: at });
-    });
-  }
-  const mergedIds = new Set(cycles.map((c) => c.id));
-  const mergedCosts = [...mergedIds].filter((id) => ticketUsd[id] !== undefined).map((id) => ticketUsd[id]);
-
-  // Coordination: reply time for messages that expect one; owner question answer time.
-  const msgs = events.filter((e) => e.type === 'message');
-  const replies = new Map();
-  for (const m of msgs) if (m.re && !replies.has(m.re)) replies.set(m.re, Date.parse(m.ts));
-  const expecting = msgs.filter((m) => !['info', 'ruling', 'answer'].includes(m.kind));
-  const openMsgs = expecting.filter((m) => !replies.has(m.id));
-  const msgWaits = expecting.filter((m) => replies.has(m.id)).map((m) => replies.get(m.id) - Date.parse(m.ts));
-  const qs = readQuestions().filter((q) => Date.parse(q.asked_at) >= since);
-  const qWaits = qs.filter((q) => q.answered_at).map((q) => Date.parse(q.answered_at) - Date.parse(q.asked_at));
-  const openQs = qs.filter((q) => q.status === 'open');
-
-  const reviews = reviewStats(tickets);
-  const gates = gateStats(readGateRuns(since));
-  const round = (o) => Object.fromEntries(Object.entries(o).sort((a, b) => b[1] - a[1]).map(([k, v]) => [k, +v.toFixed(2)]));
-
-  const m = {
-    since: since ? new Date(since).toISOString() : null,
-    tickets_merged: cycles.length,
-    cycle_hours: { median: hours(median(cycles.map((c) => c.ms))), slowest: cycles.slice(0, 5).map((c) => ({ id: c.id, hours: hours(c.ms) })) },
-    phase_hours: Object.fromEntries(Object.entries(round(phaseMs)).map(([k, v]) => [k, hours(v)])),
-    phase_usd: round(phaseUsd),
-    cost: { usd_total: +Object.values(ticketUsd).reduce((a, b) => a + b, 0).toFixed(2), usd_per_merged_ticket: mergedCosts.length ? +(mergedCosts.reduce((a, b) => a + b, 0) / mergedCosts.length).toFixed(2) : null, by_ticket: round(ticketUsd) },
-    reviews,
-    gates,
-    messages: { expecting_reply: expecting.length, still_open: openMsgs.length, median_reply_minutes: msgWaits.length ? +(median(msgWaits) / 60000).toFixed(1) : null },
-    owner_questions: { asked: qs.length, open: openQs.length, median_answer_hours: hours(median(qWaits)), oldest_open_hours: openQs.length ? hours(now - Math.min(...openQs.map((q) => Date.parse(q.asked_at)))) : null },
-    escaped_defects: logObjects('observation').filter((o) => o.kind === 'escaped-defect' && Date.parse(o.created_at) >= since).length,
-  };
-
-  // Findings: inefficiencies and blockers, each with a suggested next step.
-  const f = [];
-  const add = (severity, kind, subject, detail, suggestion) => f.push({ severity, kind, subject, detail, suggestion });
-  for (const g of gates.flaky_gates) add('high', 'flaky-gate', g.gate, `failed then passed at the same commit ${g.commits} time(s)`, 'find the flaky tests (run with --junit) and fix or quarantine them; a flake costs a full re-run every time');
-  for (const t of gates.flaky_tests.slice(0, 10)) add('high', 'flaky-test', t.name, `failed then passed at the same commit ${t.times} time(s)`, 'make it deterministic (time, order, shared state, network) or quarantine it with a ticket to fix');
-  const slowGate = settings.slow_gate_minutes ?? 10;
-  for (const g of gates.gates.filter((x) => x.median_seconds >= slowGate * 60)) add('medium', 'slow-gate', g.gate, `median ${(g.median_seconds / 60).toFixed(1)} min over ${g.runs} run(s)`, 'run it in parallel shards, cache dependencies, or split fast checks from slow ones');
-  for (const t of gates.slowest_tests.slice(0, 5).filter((x) => x.median_seconds >= 10)) add('low', 'slow-test', t.name, `median ${t.median_seconds}s`, 'mock the slow dependency or move it to an integration suite');
-  const totalPhase = Object.values(phaseMs).reduce((a, b) => a + b, 0);
-  const [topPhase, topMs] = Object.entries(phaseMs).filter(([k]) => !['done', 'parked'].includes(k)).sort((a, b) => b[1] - a[1])[0] ?? [];
-  if (topPhase && totalPhase && topMs / totalPhase > 0.4) add('medium', 'phase-hotspot', topPhase, `${Math.round((100 * topMs) / totalPhase)}% of all ticket time`, 'look at why tickets sit here: waiting on reviews, slots, gates or answers');
-  const totalUsd = Object.values(phaseUsd).reduce((a, b) => a + b, 0);
-  const [costPhase, costUsd] = Object.entries(phaseUsd).sort((a, b) => b[1] - a[1])[0] ?? [];
-  if (costPhase && totalUsd && costUsd / totalUsd > 0.5) add('medium', 'cost-hotspot', costPhase, `${Math.round((100 * costUsd) / totalUsd)}% of spend ($${costUsd.toFixed(2)})`, 'check context size and model choice for this phase; route routine steps to a cheaper model');
-  for (const [id, p] of phaseNow) {
-    const h = (now - p.sinceMs) / 3600000;
-    if (p.phase === 'blocked' && h >= 1) add('high', 'blocked', id, `blocked for ${h.toFixed(1)}h`, 'answer its message, re-plan, or park it');
-    if (p.phase === 'awaiting-word' && h >= 1) add('medium', 'waiting-on-supervisor', id, `waiting for the merge word for ${h.toFixed(1)}h`, 'verify and merge, or say what is missing');
-  }
-  for (const id of tickets.keys()) {
-    const run = readRunTicket(id);
-    const age = run?.heartbeat_at ? (now - Date.parse(run.heartbeat_at)) / 60000 : null;
-    if (run && !['done', 'parked'].includes(run.phase) && age > (settings.stale_after_minutes ?? 30)) add('high', 'stale-worker', id, `no heartbeat for ${Math.round(age)} min (phase ${run.phase})`, 'check its pane; recover it (supervisor.md §11)');
-  }
-  for (const msg of openMsgs.filter((x) => now - Date.parse(x.ts) > 30 * 60000)) add('medium', 'unanswered-message', msg.id, `${msg.kind} from ${msg.actor}, ${Math.round((now - Date.parse(msg.ts)) / 60000)} min old`, `reply with --re ${msg.id}`);
-  for (const q of openQs.filter((x) => now - Date.parse(x.asked_at) > (settings.question_default_after_hours ?? 24) * 3600000)) add('high', 'owner-question-waiting', q.id, q.question.slice(0, 120), q.default ? 'apply its default' : 'remind the owner; it blocks work');
-  // Inbox health: if the owner answers fewer than half of what is asked, the decide step stalls.
-  // Count questions that had time to be answered: resolved ones, or open ones past the default deadline.
-  const grace = (settings.question_default_after_hours ?? 24) * 3600000;
-  const recentQs = readQuestions().filter((q) => now - Date.parse(q.asked_at) <= 14 * 864e5 && q.status !== 'withdrawn' && (q.status !== 'open' || now - Date.parse(q.asked_at) > grace));
-  const answeredRecent = recentQs.filter((q) => q.status === 'answered').length;
-  m.owner_questions.answer_rate_14d = recentQs.length ? +(answeredRecent / recentQs.length).toFixed(2) : null;
-  if (recentQs.length >= 4 && answeredRecent / recentQs.length < 0.5) add('high', 'inbox-stalled', 'owner questions', `${answeredRecent} of ${recentQs.length} answered in 14 days`, 'stop asking non-blocking questions; batch, withdraw stale ones, and open a problem until the rate recovers');
-  for (const [id, n] of Object.entries(reviewPasses(tickets)).filter(([, n]) => n >= 3)) add('medium', 'review-churn', id, `${n} final review passes`, 'the ticket may be too big or under-specified; consider re-planning it');
-  const ready = [...tickets.values()].filter((t) => isActive(t) && !mergeShaFor(t.id) && !activeWorker(t.id) && (t.depends_on ?? []).every((d) => mergeShaFor(d)));
-  const active = [...tickets.keys()].filter(activeWorker).length;
-  if (ready.length && active < settings.max_active_tickets) add('medium', 'idle-capacity', `${ready.length} ready`, `${active}/${settings.max_active_tickets} workers active`, `make workers for: ${ready.slice(0, 5).map((t) => t.id).join(', ')}`);
-  if (m.escaped_defects) add('high', 'escaped-defects', `${m.escaped_defects}`, 'defects found after merge', 'retro: which review or gate should have caught each one');
-  const order = { high: 0, medium: 1, low: 2 };
-  m.findings = f.sort((a, b) => order[a.severity] - order[b.severity]);
-  return m;
-}
-
-// Highest final-review pass number per ticket (from the branch before merge, main after).
-function reviewPasses(tickets) {
-  const out = {};
-  for (const id of tickets.keys()) {
-    const branch = ticketBranchRef(id);
-    const finals = ticketReviews(id, branch && !mergeShaFor(id) ? { ref: branch } : WORKTREE).filter((r) => r.stage === 'final');
-    if (finals.length) out[id] = Math.max(...finals.map((r) => r.pass));
-  }
-  return out;
-}
-
-function sinceFlag() {
-  const since = flagStr('since') ? Date.parse(flagStr('since')) : 0;
-  if (Number.isNaN(since)) die('--since must be a date, e.g. 2026-10-01');
-  return since;
-}
-
-function cmdMetrics() {
-  const m = collectMetrics(sinceFlag());
-  if (flags.json) return void process.stdout.write(`${JSON.stringify(m, null, 2)}\n`);
-  const kv = (o, unit = '') => Object.entries(o).map(([k, v]) => `${k} ${unit}${v}`).join(', ') || '-';
-  const lines = [
-    `since: ${m.since ?? 'the beginning'}`,
-    `tickets merged: ${m.tickets_merged}; median cycle ${m.cycle_hours.median ?? '-'}h; slowest ${m.cycle_hours.slowest.map((c) => `${c.id} ${c.hours}h`).join(', ') || '-'}`,
-    `time by phase (h): ${kv(m.phase_hours)}`,
-    `cost by phase: ${kv(m.phase_usd, '$')}; total $${m.cost.usd_total}; per merged ticket ${m.cost.usd_per_merged_ticket === null ? '-' : `$${m.cost.usd_per_merged_ticket}`}`,
-    `gates (median): ${m.gates.gates.map((g) => `${g.gate} ${g.median_seconds}s (fail ${Math.round(g.fail_rate * 100)}%)`).join(', ') || '- (run gates through `devteam.mjs gate`)'}`,
-    `first-pass rejection: ${Object.entries(m.reviews.by_stage).map(([k, v]) => `${k} ${v.rejected}/${v.first_passes}`).join(', ') || '-'}; false positives ${m.reviews.false_positive_rate ?? '-'}`,
-    `messages: ${m.messages.still_open} of ${m.messages.expecting_reply} awaiting reply; median reply ${m.messages.median_reply_minutes ?? '-'} min`,
-    `owner questions: ${m.owner_questions.open} open of ${m.owner_questions.asked}; median answer ${m.owner_questions.median_answer_hours ?? '-'}h`,
-    `escaped defects: ${m.escaped_defects}`,
-    '',
-    m.findings.length ? 'findings:' : 'findings: none',
-    ...m.findings.map((x) => `  [${x.severity}] ${x.kind}: ${x.subject} (${x.detail}) -> ${x.suggestion}`),
-  ];
-  process.stdout.write(`${lines.join('\n')}\n`);
-}
-
-// ---------- progress (burn-up, board, widgets) ----------
-
-// Expected release per story, from each feature plan's section 6 table: | <STORY> | <release> |
-function releaseMap(feature) {
-  const text = featurePlan(feature);
-  const sec = text?.match(/^##\s*6\.[^\n]*\n([\s\S]*?)(?=^##\s|(?![\s\S]))/m)?.[1] ?? '';
-  const out = {};
-  for (const row of sec.split('\n')) {
-    const cells = tableCells(row);
-    if (cells.length >= 2 && STORY_RE.test(cells[0]) && /^v\d/.test(cells[1])) out[cells[0]] = cells[1];
-  }
-  return out;
-}
-
-const firstAdded = (rel) => {
-  const out = git(['log', '--diff-filter=A', '--format=%cI', '--', rel]);
-  return out ? out.split('\n').filter(Boolean).pop() : null;
-};
-
-function collectProgress(tickets, status) {
-  const sub = new Map([...tickets].filter(([, t]) => isActive(t)));
-  const level = new Map();
-  if (!findCycle(sub)) {
-    const lvl = (id) => {
-      if (level.has(id)) return level.get(id);
-      const deps = (sub.get(id).depends_on ?? []).filter((d) => sub.has(d));
-      const v = deps.length ? 1 + Math.max(...deps.map(lvl)) : 0;
-      level.set(id, v);
-      return v;
-    };
-    for (const id of sub.keys()) lvl(id);
-  }
-  const byId = new Map(status.map((r) => [r.id, r]));
-  const features = [...new Set([...sub.values()].map((t) => t.feature))];
-  const storyRelease = Object.assign({}, ...features.map(releaseMap));
-  const stories = {};
-  for (const f of features.filter((x) => x !== CHORES_FEATURE)) {
-    const text = featurePlan(f) ?? '';
-    const sec = text.match(/^##\s*1\.[^\n]*\n([\s\S]*?)(?=^##\s|(?![\s\S]))/m)?.[1] ?? '';
-    for (const row of sec.split('\n')) {
-      const cells = tableCells(row);
-      if (STORY_RE.test(cells[0] ?? '')) stories[cells[0]] = { feature: f, text: cells[1] ?? '', release: storyRelease[cells[0]] ?? null };
-    }
-  }
-  const items = [...sub.values()].map((t) => {
-    const st = byId.get(t.id);
-    const sha = st?.merge_sha;
-    const mergedAt = sha ? git(['show', '-s', '--format=%cI', sha]) : null;
-    const releasedIn = sha ? (git(['tag', '--contains', sha, '--list', 'v*', '--sort=creatordate']) ?? '').split('\n').find((x) => x && !/-rc/.test(x)) ?? null : null;
-    const targets = [...new Set((t.serves ?? []).map((x) => storyRelease[x]).filter(Boolean))].sort();
-    return {
-      id: t.id, title: t.title, feature: t.feature, component: t.component, kind: t.kind, size: t.size, risk: t.risk,
-      weight: t.size === 'M' ? 2 : 1, serves: t.serves ?? [], depends_on: t.depends_on ?? [],
-      wave: level.has(t.id) ? level.get(t.id) + 1 : null,
-      added_at: (projectInRepo ? firstAdded(`${projectRel}/graph/${t.id}.json`) : null) ?? nowIso(),
-      merged_at: mergedAt, released_in: releasedIn, target_release: targets[0] ?? null,
-      stage: st?.stage ?? 'planned', phase: st?.phase ?? null, task: st?.task ?? null, heartbeat_minutes: st?.heartbeat_minutes ?? null,
-    };
-  });
-  return { now: nowIso(), features, stories, tickets: items };
-}
-
-// The loop's state for the dashboard: goals, observations, knowledge, problems, acts, trust.
-function collectOoda() {
-  const log = readLog();
-  const corrections = logObjects('correction');
-  const correctedBy = new Map(corrections.map((c) => [c.act, c]));
-  const seenUpto = logObjects('seen').map((x) => x.upto).sort().pop() ?? null;
-  const recent = (xs, n) => xs.sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, n);
-  const auto = loadAutonomy();
-  return {
-    goals: logObjects('goal').map(goalView).sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99)),
-    observations: recent(logObjects('observation').filter((o) => !['reading', 'retro'].includes(o.kind)), 40),
-    retro: retroState(),
-    roadmap: collectRoadmap(),
-    clusters: orientClusters(),
-    knowledge: recent(logObjects('knowledge').filter((k) => k.status !== 'retired'), 60),
-    problems: logObjects('problem').filter((p) => p.status !== 'resolved').sort((a, b) => b.severity - a.severity),
-    // Every unseen act (oldest first, up to 100), then the latest seen ones. "Mark all as seen" marks up
-    // to the newest act shown, so nothing the owner hasn't had in front of them counts as seen.
-    acts: (() => {
-      const all = logObjects('act').map((a) => ({ ...a, correction: correctedBy.get(a.id) ?? null, seen: !!seenUpto && a.created_at <= seenUpto, ladder: !!auto.classes[a.class] }));
-      const unseen = all.filter((a) => !a.seen).sort((a, b) => a.created_at.localeCompare(b.created_at)).slice(0, 100);
-      const seen = recent(all.filter((a) => a.seen), 20);
-      return { unseen, seen, unseen_total: all.filter((a) => !a.seen).length };
-    })(),
-    // Owner lines typed at a terminal, not the dashboard: worth a glance, since an agent could do that too.
-    owner_cli: logObjects('question').map(LOG.questionView).filter((q) => q.answered_by === 'owner' && q.channel === 'cli').sort((a, b) => b.answered_at.localeCompare(a.answered_at)).slice(0, 10).map((q) => ({ id: q.id, question: q.question, answer: q.answer, at: q.answered_at, autonomy: q.autonomy })),
-    defaulted: readQuestions().filter((q) => q.status === 'defaulted' && Date.now() - Date.parse(q.answered_at) < 14 * 864e5),
-    seen_upto: seenUpto,
-    trust: trustTable(),
-    classes: Object.fromEntries(Object.entries(auto.classes).map(([k, v]) => [k, { ...v, rung: rungFor(k) }])),
-    reasons: auto.reasons,
-    log: { lines: log.lines.length, errors: log.errors.length, ignored: log.ignored.length },
-  };
-}
-
-// Everything the dashboard shows, in one file: run/dashboard.json (and stdout with --json).
-function cmdDashboardData() {
-  const { tickets } = loadGraph();
-  const settings = loadSettings();
-  const status = deriveStatus(tickets);
-  const sub = new Map([...tickets].filter(([, t]) => isActive(t)));
-  const data = {
-    generated_at: nowIso(),
-    project: settings.project ?? null,
-    caps: { max_active_tickets: settings.max_active_tickets, max_active_per_component: settings.max_active_per_component },
-    tickets: status,
-    critical_path: findCycle(sub) ? [] : criticalPath(sub).path,
-    questions: rankQuestions(readQuestions().filter((q) => q.status === 'open'), tickets),
-    open_messages: (() => {
-      const msgs = readEvents().filter((e) => e.type === 'message');
-      const replied = new Set(msgs.map((e) => e.re).filter(Boolean));
-      return msgs.filter((e) => !['info', 'ruling', 'answer'].includes(e.kind) && !replied.has(e.id));
-    })(),
-    metrics: collectMetrics(sinceFlag()),
-    progress: collectProgress(tickets, status),
-    ooda: collectOoda(),
-  };
-  writeJson(path.join(runDir, 'dashboard.json'), data);
-  if (flags.json) process.stdout.write(`${JSON.stringify(data)}\n`);
-  else process.stdout.write(`wrote ${path.join(runDir, 'dashboard.json')}\n`);
-}
-
-// ---------- log commands ----------
-
-// Mirror run/log into project/log on branch chore-log, in its own worktree, and open (or update)
-// the log-only PR. The supervisor merges it like any other PR once CI passes.
-function cmdLogSync() {
-  if (logWriter() !== 'supervisor') die('only the supervisor syncs the log');
-  if (!commonDir || !projectInRepo) die('log-sync needs a git checkout with the project folder inside it');
-  if (repoRoot !== mainRoot) die(`run log-sync from the main checkout (${mainRoot})`);
-  const main = loadSettings().main_branch;
-  const live = liveLogDir();
-  const files = fs.existsSync(live) ? fs.readdirSync(live).filter((f) => f.endsWith('.jsonl')).sort() : [];
-  if (!files.length) return void process.stdout.write('nothing in run/log to sync\n');
-  const wt = path.join(mainRoot, '.worktrees', 'devteam-log');
-  const run = (args, cwd = wt) => {
-    try {
-      return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-    } catch (e) {
-      die(`git ${args.join(' ')} failed: ${(e.stderr || e.message).toString().trim()}`);
-    }
-  };
-  if (!flags['dry-run']) git(['fetch', '--quiet', 'origin', main]);
-  const base = resolveCommit(`origin/${main}`) ? `origin/${main}` : main;
-  if (!fs.existsSync(wt)) run(['worktree', 'add', '--quiet', '-B', LOG_BRANCH, wt, base], mainRoot);
-  else run(['checkout', '--quiet', '-B', LOG_BRANCH, base]);
-  const dest = path.join(wt, projectRel, 'log');
-  fs.mkdirSync(dest, { recursive: true });
-  let changed = 0;
-  for (const f of files) {
-    // Read under the writers' lock, and only whole lines.
-    let liveText = withLock(path.join(live, f), () => fs.readFileSync(path.join(live, f), 'utf8'));
-    liveText = liveText.slice(0, liveText.lastIndexOf('\n') + 1);
-    const target = path.join(dest, f);
-    const cur = fs.existsSync(target) ? fs.readFileSync(target, 'utf8') : '';
-    if (cur === liveText || cur.startsWith(liveText)) continue;
-    let next = liveText;
-    if (!liveText.startsWith(cur)) {
-      // Diverged (another checkout wrote to the same file): keep main's lines, add the live ones it lacks.
-      const have = new Set(cur.split('\n'));
-      const extra = liveText.split('\n').filter((l) => l && !have.has(l));
-      if (!extra.length) continue;
-      warn(`run/log/${f} and ${main} diverged; adding ${extra.length} live line(s) after main's (check-pr will refuse them if they are out of time order; process/log.md §5)`);
-      next = cur + extra.map((l) => `${l}\n`).join('');
-    }
-    fs.writeFileSync(target, next);
-    changed++;
-  }
-  if (!changed) {
-    const remote = resolveCommit(`origin/${LOG_BRANCH}`);
-    if (remote && git(['diff', '--quiet', base, remote, '--', path.join(projectRel, 'log')]) === null) {
-      warn(`branch ${LOG_BRANCH} has an older copy of lines that are now on ${main}; close its PR`);
-    }
-    return void process.stdout.write('project/log is up to date\n');
-  }
-  if (flags['dry-run']) return void process.stdout.write(`${changed} file(s) would be synced\n`);
-  run(['add', path.join(projectRel, 'log')]);
-  const stamp = nowIso();
-  run(['commit', '--quiet', '-m', `chore-log: log through ${stamp}`]);
-  run(['push', '--quiet', '--force', 'origin', `${LOG_BRANCH}:${LOG_BRANCH}`]);
-  let pr = '';
-  try {
-    pr = execFileSync('gh', ['pr', 'list', '--head', LOG_BRANCH, '--state', 'open', '--json', 'url', '--jq', '.[0].url'], { cwd: wt, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-    if (!pr) {
-      const body = 'Mirrors run/log into project/log. Append-only; check-pr verifies every added line (process/log.md).\n\n## One-way doors\n\nNone.\n';
-      pr = execFileSync('gh', ['pr', 'create', '--head', LOG_BRANCH, '--base', main, '--title', `chore-log: log through ${stamp.slice(0, 10)}`, '--body', body], { cwd: wt, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-    }
-  } catch {
-    warn('gh is not available or failed; open the PR from branch chore-log by hand');
-  }
-  process.stdout.write(`synced ${changed} file(s) to ${LOG_BRANCH}${pr ? `: ${pr}` : ''}\n`);
-}
-
-// Validate every log file (live and durable) and report lines the fold ignored.
-function cmdLogCheck() {
-  const { errors, ignored, lines } = readLog();
-  for (const e of errors) process.stdout.write(`fail: ${e}\n`);
-  for (const i of ignored) process.stdout.write(`ignored: ${i.line.__file}:${i.line.__line} ${i.line.id}: ${i.why}\n`);
-  if (errors.length) process.exit(1);
-  process.stdout.write(`ok: ${lines.length} line(s)\n`);
-}
-
-function cmdLog() {
-  let objs = [...readLog().objects.values()];
-  if (flagStr('type')) objs = objs.filter((o) => o.type === flagStr('type'));
-  if (flagStr('by')) objs = objs.filter((o) => o.created_by === flagStr('by'));
-  if (flagStr('id')) objs = objs.filter((o) => o.id === flagStr('id'));
-  objs.sort((a, b) => a.created_at.localeCompare(b.created_at));
-  objs = objs.slice(-Number(flagStr('tail') ?? 50));
-  if (flags.json) return void process.stdout.write(`${JSON.stringify(objs, null, 2)}\n`);
-  for (const o of objs) {
-    const what = o.question ?? o.statement ?? o.title ?? o.what ?? o.detail ?? o.reason ?? (o.type === 'phase' ? `${o.from ?? 'none'} -> ${o.to}` : '');
-    process.stdout.write(`${o.created_at} ${o.id} [${o.type}${o.kind ? ` ${o.kind}` : ''}${o.status ? ` ${o.status}` : ''}] ${String(what).slice(0, 160)}\n`);
-  }
-}
-
-// ---------- observe and orient (process/log.md §2-3) ----------
-
-const num = (k) => (flagStr(k) === undefined ? undefined : Number(flagStr(k)));
+// --- observe and orient ---
 
 function cmdObserve() {
   const by = flags.owner ? ownerWriter().by : logWriter();
   const subject = flagStr('subject') ?? die('observe needs --subject (a ticket, component, feature, gate, goal, class or act id)');
   const line = appendLog({
-    type: 'observation',
-    source: flagStr('source') ?? (by === 'owner' ? 'owner' : by === 'supervisor' ? 'supervisor' : 'worker'),
-    subject,
-    kind: flagStr('kind') ?? die('observe needs --kind (a slug, e.g. flaky-test, outcome, reading)'),
-    detail: flagStr('detail') ?? die('observe needs --detail'),
-    detector: flagStr('detector') ?? undefined,
-    severity: num('severity'),
-    valence: num('valence'),
-    source_key: flagStr('key') ?? undefined,
-    refs: asList(flags.refs),
-    fix_hint: flagStr('fix') ?? undefined,
-    measure: flagStr('value') !== undefined ? { value: Number(flagStr('value')), unit: flagStr('unit') ?? undefined } : undefined,
+    type: 'observation', source: flagStr('source') ?? writerClass(by), subject, kind: flagStr('kind') ?? die('observe needs --kind (a slug)'),
+    detail: flagStr('detail') ?? die('observe needs --detail'), detector: flagStr('detector'), severity: flagNum('severity'), valence: flagNum('valence'),
+    source_key: flagStr('key'), refs: asList(flags.refs), fix_hint: flagStr('fix'),
+    measure: flagStr('value') !== undefined ? { value: Number(flagStr('value')), unit: flagStr('unit') } : undefined,
   }, by);
-  process.stdout.write(`${line.id}\n`);
+  out(line.id);
 }
-
-// Turn the metrics findings into observations, once per finding per day (deduped on source_key).
-const SEVERITY_RANK = { low: 1, medium: 2, high: 3 };
+const SEV = { low: 1, medium: 2, high: 3 };
+// Each metrics finding becomes an observation, once a day per finding (deduped on source_key).
 function observeFindings(m) {
   const recent = new Map();
   for (const o of logObjects('observation')) if (o.source_key && o.created_by === 'supervisor' && o.detector === 'metrics') recent.set(o.source_key, Math.max(recent.get(o.source_key) ?? 0, Date.parse(o.created_at)));
   let n = 0;
   for (const f of m.findings) {
     const key = `metrics:${f.kind}:${f.subject}`;
-    if (Date.now() - (recent.get(key) ?? 0) < 864e5) continue;
-    appendLog({ type: 'observation', source: 'metrics', subject: String(f.subject), kind: f.kind, detector: 'metrics', detail: f.detail, severity: SEVERITY_RANK[f.severity] ?? 1, valence: -1, source_key: key, fix_hint: f.suggestion }, 'supervisor');
+    if (Date.now() - (recent.get(key) ?? 0) < DAY) continue;
+    appendLog({ type: 'observation', source: 'metrics', subject: String(f.subject), kind: f.kind, detector: 'metrics', detail: f.detail, severity: SEV[f.severity] ?? 1, valence: -1, source_key: key, fix_hint: f.suggestion }, 'supervisor');
     n++;
   }
   return n;
 }
-
 function cmdObserveMetrics() {
-  if (logWriter() !== 'supervisor') die('the supervisor records metrics findings');
-  process.stdout.write(`recorded ${observeFindings(collectMetrics(sinceFlag()))} new observation(s)\n`);
+  supervisorOnly('observe-metrics');
+  out(`recorded ${observeFindings(collectMetrics(0))} new observation(s)`);
 }
-
-// Knowledge entries whose scope applies to a ticket (its component and feature) or a decision class.
+// Accepted knowledge whose scope applies to a ticket (component, feature), a feature, or a class.
 function knowledgeFor(target) {
-  const { tickets } = loadGraph();
-  const t = tickets.get(target);
+  const t = tickets().get(target);
   const scopes = new Set(['project']);
-  if (t) {
-    scopes.add(`component:${t.component}`);
-    scopes.add(`feature:${t.feature}`);
-  } else if (target && featurePlan(target) !== null) scopes.add(`feature:${target}`);
+  if (t) { scopes.add(`component:${t.component}`); scopes.add(`feature:${t.feature}`); }
+  else if (features().has(target)) scopes.add(`feature:${target}`);
   else if (target) scopes.add(`class:${target}`);
   return logObjects('knowledge').filter((k) => k.status === 'accepted' && scopes.has(k.scope));
 }
-
 function cmdKnowledge() {
   const [sub, id] = positional;
+  const by = () => (flags.owner ? ownerWriter().by : (supervisorOnly('knowledge'), 'supervisor'));
   if (sub === 'add') {
-    const by = flags.owner ? ownerWriter().by : logWriter();
-    if (!['supervisor', 'owner'].includes(by)) die('workers and planners record observations; the supervisor turns them into knowledge');
-    const line = appendLog({
-      type: 'knowledge',
-      kind: flagStr('kind') ?? die(`knowledge add needs --kind (${LOG.KNOWLEDGE_KINDS.join(', ')})`),
-      statement: flagStr('statement') ?? die('knowledge add needs --statement'),
-      scope: flagStr('scope') ?? 'project',
-      status: by === 'owner' ? 'accepted' : 'candidate',
-      confidence: num('confidence'),
-      valence: num('valence'),
-      evidence: asList(flags.evidence),
-    }, by);
-    return void process.stdout.write(`${line.id}\n`);
+    const w = by();
+    const line = appendLog({ type: 'knowledge', kind: flagStr('kind') ?? die('knowledge add needs --kind (fact, lesson, preference, constraint, pointer)'), statement: flagStr('statement') ?? die('knowledge add needs --statement'), scope: flagStr('scope') ?? 'project', status: w === 'owner' ? 'accepted' : 'candidate', confidence: flagNum('confidence'), valence: flagNum('valence'), evidence: asList(flags.evidence) }, w);
+    return out(line.id);
   }
   if (sub === 'set') {
-    if (!id) die('usage: knowledge set <k-id> [--status s] [--confidence c] [--statement s] [--scope s] [--owner]');
-    const by = flags.owner ? ownerWriter().by : logWriter();
-    if (logGet(id)?.type !== 'knowledge') die(`no knowledge ${id}`);
-    appendLog({ type: 'knowledge', op: 'set', id, status: flagStr('status'), confidence: num('confidence'), statement: flagStr('statement'), scope: flagStr('scope') }, by);
-    return void process.stdout.write(`updated ${id}\n`);
+    if (!id || logGet(id)?.type !== 'knowledge') die('usage: knowledge set <k-id> [--status s] [--confidence c] [--statement s] [--scope s] [--owner]');
+    appendLog({ type: 'knowledge', op: 'set', id, status: flagStr('status'), confidence: flagNum('confidence'), statement: flagStr('statement'), scope: flagStr('scope') }, by());
+    return out(`updated ${id}`);
   }
-  // List. --for <ticket|class> gives the accepted entries that apply, as markdown for a prompt.
   if (flagStr('for')) {
     const ks = knowledgeFor(flagStr('for'));
-    if (flags.json) return void process.stdout.write(`${JSON.stringify(ks, null, 2)}\n`);
-    if (!ks.length) return;
-    process.stdout.write(`What this project has learned that applies here (accepted knowledge; process/log.md):\n${ks.map((k) => `- [${k.kind}${k.valence < 0 ? ', avoid' : ''}] ${k.statement} (${k.id})`).join('\n')}\n`);
+    if (flags.json) return json(ks);
+    if (ks.length) out(`What this project has learned that applies here (accepted knowledge):\n${ks.map((k) => `- [${k.kind}${k.valence < 0 ? ', avoid' : ''}] ${k.statement} (${k.id})`).join('\n')}`);
     return;
   }
   let ks = logObjects('knowledge');
   if (flagStr('status')) ks = ks.filter((k) => k.status === flagStr('status'));
   if (flagStr('kind')) ks = ks.filter((k) => k.kind === flagStr('kind'));
-  if (flags.json) return void process.stdout.write(`${JSON.stringify(ks, null, 2)}\n`);
-  for (const k of ks) process.stdout.write(`${k.id} [${k.kind}, ${k.status}, ${k.scope}${k.confidence !== undefined ? `, conf ${k.confidence}` : ''}] ${k.statement}\n`);
+  if (flags.json) return json(ks);
+  for (const k of ks) out(`${k.id} [${k.kind}, ${k.status}, ${k.scope}${k.confidence !== undefined ? `, conf ${k.confidence}` : ''}] ${k.statement}`);
 }
-
 function cmdProblem() {
   const [sub, id] = positional;
-  const by = flags.owner ? ownerWriter().by : logWriter();
+  const by = () => (flags.owner ? ownerWriter().by : (supervisorOnly('problem'), 'supervisor'));
   if (sub === 'add') {
-    if (by !== 'supervisor') die('the supervisor opens problems; workers record observations and message it');
-    const line = appendLog({
-      type: 'problem',
-      title: flagStr('title') ?? die('problem add needs --title'),
-      severity: num('severity') ?? die('problem add needs --severity 0-4'),
-      realized: !flags.risk,
-      status: 'open',
-      detail: flagStr('detail') ?? undefined,
-      threatens: asList(flags.threatens),
-      assigned_to: flagStr('assign') ?? undefined,
-      refs: asList(flags.refs),
-    }, by);
-    return void process.stdout.write(`${line.id}\n`);
+    const line = appendLog({ type: 'problem', title: flagStr('title') ?? die('problem add needs --title'), severity: flagNum('severity') ?? die('problem add needs --severity 0-4'), realized: !flags.risk, status: 'open', detail: flagStr('detail'), threatens: asList(flags.threatens), assigned_to: flagStr('assign'), refs: asList(flags.refs) }, by());
+    return out(line.id);
   }
   if (sub === 'set') {
     if (!id || logGet(id)?.type !== 'problem') die('usage: problem set <p-id> [--status s] [--severity n] [--assign a] [--realized true|false] [--detail d]');
-    const realized = flagStr('realized') === undefined ? undefined : flagStr('realized') === 'true';
-    appendLog({ type: 'problem', op: 'set', id, status: flagStr('status'), severity: num('severity'), assigned_to: flagStr('assign'), realized, detail: flagStr('detail') }, by);
-    return void process.stdout.write(`updated ${id}\n`);
+    appendLog({ type: 'problem', op: 'set', id, status: flagStr('status'), severity: flagNum('severity'), assigned_to: flagStr('assign'), realized: flagStr('realized') === undefined ? undefined : flagStr('realized') === 'true', detail: flagStr('detail') }, by());
+    return out(`updated ${id}`);
   }
   let ps = logObjects('problem');
   if (!flags.all) ps = ps.filter((p) => p.status !== 'resolved');
   ps.sort((a, b) => b.severity - a.severity);
-  if (flags.json) return void process.stdout.write(`${JSON.stringify(ps, null, 2)}\n`);
-  for (const p of ps) process.stdout.write(`${p.id} [sev ${p.severity}, ${p.realized ? 'issue' : 'risk'}, ${p.status}${p.assigned_to ? `, ${p.assigned_to}` : ''}] ${p.title}\n`);
+  if (flags.json) return json(ps);
+  for (const p of ps) out(`${p.id} [sev ${p.severity}, ${p.realized ? 'issue' : 'risk'}, ${p.status}${p.assigned_to ? `, ${p.assigned_to}` : ''}] ${p.title}`);
 }
-
-// Recurring signals not yet explained by knowledge or a problem: three or more observations (or
-// corrections, or review findings) on the same key, across at least two tickets or days.
+// Recurring signals no knowledge or problem explains yet: three or more observations (or
+// corrections) on one key, from at least two writers or on at least two days.
 function orientClusters() {
   const linked = new Set();
   for (const o of [...logObjects('knowledge'), ...logObjects('problem')]) for (const r of [...(o.evidence ?? []), ...(o.refs ?? [])]) linked.add(r);
@@ -2239,245 +1587,121 @@ function orientClusters() {
     if (linked.has(o.id) || ['reading', 'retro', 'outcome'].includes(o.kind)) continue;
     add(o.source_key ?? `${o.kind}:${o.subject}`, { id: o.id, at: o.created_at, who: o.created_by, valence: o.valence ?? 0, detail: o.detail });
   }
-  for (const c of logObjects('correction')) {
-    if (linked.has(c.id)) continue;
-    const act = logGet(c.act);
-    add(`correction:${act?.class ?? 'unknown'}:${act?.scope ?? 'any'}`, { id: c.id, at: c.created_at, who: c.created_by, valence: -2, detail: c.reason });
+  for (const a of logObjects('act')) {
+    const c = correctionOf(a);
+    if (c && !linked.has(a.id)) add(`correction:${a.class}:${a.scope ?? 'any'}`, { id: a.id, at: c.at, who: c.by, valence: -2, detail: c.reason });
   }
-  const out = [];
+  const res = [];
   for (const [key, items] of groups) {
-    const spread = new Set(items.map((i) => i.who)).size >= 2 || new Set(items.map((i) => i.at.slice(0, 10))).size >= 2;
+    const spread = new Set(items.map((i) => i.who)).size >= 2 || new Set(items.map((i) => dateOnly(i.at))).size >= 2;
     if (items.length < 3 || !spread) continue;
     const v = items.reduce((s, i) => s + i.valence, 0) / items.length;
-    out.push({ key, count: items.length, valence: +v.toFixed(1), suggest: v < 0 ? 'lesson or problem' : 'lesson (keep doing this)', ids: items.map((i) => i.id), latest: items.map((i) => i.detail).pop() });
+    res.push({ key, count: items.length, valence: +v.toFixed(1), ids: items.map((i) => i.id), latest: items.map((i) => i.detail).pop() });
   }
-  return out.sort((a, b) => b.count - a.count);
+  return res.sort((a, b) => b.count - a.count);
 }
-
 function cmdOrient() {
   const cl = orientClusters();
-  if (flags.json) return void process.stdout.write(`${JSON.stringify(cl, null, 2)}\n`);
-  if (!cl.length) return void process.stdout.write('no recurring signals waiting to be explained\n');
-  for (const c of cl) process.stdout.write(`${c.key}  x${c.count}  valence ${c.valence}  -> ${c.suggest}\n  latest: ${c.latest}\n  evidence: ${c.ids.join(' ')}\n`);
+  if (flags.json) return json(cl);
+  if (!cl.length) return out('nothing recurring that is unexplained');
+  for (const c of cl) out(`${c.key}  x${c.count}  valence ${c.valence}\n  latest: ${c.latest}\n  evidence: ${c.ids.join(' ')}`);
 }
 
-// ---------- act and correct (process/log.md §4) ----------
+// ===== 9. goals, roadmap, retros, chore worktrees =====
 
-function cmdAct() {
-  const dash = argv.indexOf('--');
-  const what = dash === -1 ? flagStr('what') : argv.slice(dash + 1).join(' ');
-  const cls = flagStr('class');
-  if (!cls || !what) die('usage: act --class <decision-class> [--scope s] [--approved <qid>] [--refs ids] [--irreversible] -- "<what you did>"');
-  const by = logWriter();
-  if (by !== 'supervisor') die('the act log records the supervisor\'s decisions; workers record phases and observations');
-  const auto = loadAutonomy();
-  const scope = flagStr('scope') ?? null;
-  const approved = flagStr('approved') ?? null;
-  let rung;
-  // An approval is one answered question in the same class, used for one act.
-  let approval = null;
-  if (approved) {
-    const q = logGet(approved);
-    approval = q?.type === 'question' ? LOG.questionView(q) : null;
-    if (!approval || !['answered', 'defaulted'].includes(approval.status)) die(`${approved} is not an answered question`);
-    if (approval.class !== cls) die(`${approved} was asked in class ${approval.class ?? '(none)'}, not ${cls}; it doesn't approve this`);
-    if (logObjects('act').some((a) => a.approved_by === approved)) die(`${approved} already approved an act; ask again for another`);
-  }
-  if ((auto.owner_only ?? []).includes(cls)) {
-    if (!approval || approval.status !== 'answered') die(`${cls} is the owner's (governance/autonomy.md §1); it needs an owner answer in that class (--approved <qid>)`);
-  } else if (auto.classes[cls]) {
-    rung = rungFor(cls, scope);
-    if (approval) {
-      if (approval.status === 'defaulted' && rung < 2) die(`${cls} is on rung ${rung} (${RUNG_NAMES[rung]}); a defaulted answer is not approval at that rung`);
-    } else if (rung < 3) {
-      // Refused: nothing is logged. Say what to ask instead.
-      process.stderr.write(`devteam: ${cls}${scope ? ` (${scope})` : ''} is on rung ${rung} (${RUNG_NAMES[rung]}); ask first:\n  devteam.mjs ask --class ${cls} --question "<…>" --recommendation "<…>"${rung === 2 ? ' --default "<…>"' : ''} --reasons below-rung\nthen act with --approved <qid>.\n`);
-      process.exit(3);
-    }
-  } else if (!(auto.constitutional ?? []).includes(cls)) {
-    warn(`class "${cls}" is neither on the ladder nor in the constitutional list in governance/autonomy.md`);
-  }
-  const line = appendLog({ type: 'act', actor: by, class: cls, scope: scope ?? undefined, what, rung, refs: asList(flags.refs), reversible: !flags.irreversible, approved_by: approved ?? undefined }, by);
-  process.stdout.write(`${line.id}\n`);
-}
+const goalReadings = (gid) => logObjects('observation').filter((o) => o.kind === 'reading' && o.subject === gid && o.measure && ['supervisor', 'owner'].includes(o.created_by)).sort(byTime);
+const goalFeatures = (gid) => [...features().values()].filter((f) => (f.goals ?? []).includes(gid)).map((f) => f.id);
 
-function cmdCorrect() {
-  const [actId] = positional;
-  if (!actId) die('usage: correct <act-id> --reason r [--severity 0-4] [--repair undo|fix-ticket|none]   (owner; the supervisor adds --retro)');
-  const by = flags.retro ? logWriter() : ownerWriter().by;
-  if (flags.retro && by !== 'supervisor') die('only the supervisor records retro corrections');
-  const act = logGet(actId);
-  if (act?.type !== 'act') die(`no act ${actId}`);
-  const line = appendLog({ type: 'correction', act: actId, reason: flagStr('reason') ?? die('correct needs --reason'), severity: num('severity'), repair: flagStr('repair') ?? undefined }, by);
-  const cls = act.class;
-  if (loadAutonomy().classes[cls]) process.stdout.write(`${cls} drops to rung 1 (ask)\n`);
-  if (by === 'owner') safeNudge(supervisorTarget(), `[devteam correction ${line.id} from owner] on ${actId}; read it with: devteam.mjs log --id ${line.id}`);
-  process.stdout.write(`${line.id}\n`);
-}
-
-// The owner marks the act feed as read; acts up to this time count as seen (trust evidence).
-function cmdSeen() {
-  const { by } = ownerWriter();
-  const upto = flagStr('upto') ?? new Date().toISOString();
-  appendLog({ type: 'seen', upto }, by);
-  process.stdout.write(`seen up to ${upto}\n`);
-}
-
-function trustTable() {
-  const auto = loadAutonomy();
-  return Object.entries(auto.classes).map(([cls, def]) => {
-    const ev = trustEvidence(cls);
-    const rung = rungFor(cls);
-    return { class: cls, rung, rung_name: RUNG_NAMES[rung], ceiling: def.ceiling, start: def.start, ...ev, can_ask: rung < def.ceiling && (ev.meets_clean || ev.meets_agreement) };
-  });
-}
-
-function cmdTrust() {
-  const rows = trustTable();
-  if (flags.json) return void process.stdout.write(`${JSON.stringify(rows, null, 2)}\n`);
-  for (const r of rows) {
-    process.stdout.write(`${r.class.padEnd(20)} rung ${r.rung} (${r.rung_name}) of ${r.ceiling}; clean acts ${r.clean_acts.length} over ${r.clean_span_days}d; agreement ${r.agreement ?? '-'}; corrections ${r.corrections}${r.can_ask ? '  -> evidence supports a trust question' : ''}\n`);
-  }
-}
-
-// ---------- goals (process/planning.md §0) ----------
-
-const goalFeatures = (gid) => {
-  const dir = path.join(projectDir, 'features');
-  if (!fs.existsSync(dir)) return [];
-  return fs.readdirSync(dir).filter((f) => f.endsWith('.md')).map((f) => f.replace(/\.md$/, '')).filter((f) => featureGoals(f).includes(gid));
-};
-
-function featureGoals(feature) {
-  const line = featurePlan(feature)?.match(/^-?[ \t]*Goals:[ \t]*(.*)$/m)?.[1] ?? '';
-  return line.match(/\bg-\d{8}-\d{9}-[a-z0-9-]+\b/g) ?? [];
-}
-
-function featurePreconditions(feature) {
-  const line = featurePlan(feature)?.match(/^-?[ \t]*Preconditions:[ \t]*(.*)$/m)?.[1] ?? '';
-  return line.match(/\bg-\d{8}-\d{9}-[a-z0-9-]+#\d+\b/g) ?? [];
-}
-
-// Readings count only from the supervisor or the owner.
-const goalReadings = (gid) => logObjects('observation').filter((o) => o.kind === 'reading' && o.subject === gid && o.measure && ['supervisor', 'owner'].includes(o.created_by)).sort((a, b) => a.created_at.localeCompare(b.created_at));
-
-// Mechanical readiness. "definition" gates approval; "coverage" is what planning must close.
-// A project file from this checkout, or main's copy if this checkout doesn't have it yet.
-function projectFileText(rel) {
-  const p = path.join(projectDir, rel);
-  if (fs.existsSync(p)) return fs.readFileSync(p, 'utf8');
-  return projectInRepo && mainRef() ? git(['show', `${mainRef()}:${projectRel}/${rel}`]) : null;
-}
-const goalPlanText = (gid) => projectFileText(`goals/${gid}.md`);
-
+// Mechanical readiness. Definition gaps block approval; coverage gaps are what planning closes.
 function goalCheck(g) {
   const definition = [];
   const coverage = [];
   if (!g.outcome) definition.push('no outcome: what is true for users or the business when this is met');
   if (!g.measure?.description) definition.push('no measure: how we will know');
   if (typeof g.measure?.target !== 'number') definition.push('no numeric target');
-  if (!g.measure?.unit) definition.push('no unit for the target');
+  if (!g.measure?.unit) definition.push('no unit');
   if (!g.measure?.direction) definition.push('no direction (up or down)');
   if (!g.horizon || Number.isNaN(Date.parse(g.horizon))) definition.push('no horizon date');
-  if (!(g.non_goals ?? []).length) definition.push('no non-goals: what this explicitly does not include');
-  if (!(g.preconditions ?? []).length) definition.push('no preconditions: what must be true for the outcome to happen');
-  if (typeof g.priority !== 'number') definition.push('no priority rank');
-  const clash = logObjects('goal').filter((o) => o.id !== g.id && ['ready', 'draft'].includes(o.status ?? 'draft') && o.priority === g.priority && typeof g.priority === 'number');
-  if (clash.length) definition.push(`priority ${g.priority} is shared with ${clash.map((c) => c.id).join(', ')}; ties must be broken`);
+  if (!(g.non_goals ?? []).length) definition.push('no non-goals');
+  if (!(g.preconditions ?? []).length) definition.push('no preconditions: what must be true for the outcome');
+  if (typeof g.priority !== 'number') definition.push('no priority');
+  const clash = logObjects('goal').filter((o) => o.id !== g.id && ['ready', 'draft'].includes(o.status ?? 'draft') && typeof g.priority === 'number' && o.priority === g.priority);
+  if (clash.length) definition.push(`priority ${g.priority} is shared with ${clash.map((c) => c.id).join(', ')}`);
   if (!goalReadings(g.id).length) definition.push('no baseline reading (devteam.mjs goal reading <id> --value v)');
   const feats = goalFeatures(g.id);
-  const covered = new Set(feats.flatMap(featurePreconditions));
+  const covered = new Set(feats.flatMap((f) => features().get(f).preconditions ?? []));
   const unplanned = (g.preconditions ?? []).map((text, i) => ({ n: i + 1, text })).filter((p) => !covered.has(`${g.id}#${p.n}`));
-  if (!goalPlanText(g.id)) coverage.push(`no goal plan at project/goals/${g.id}.md (devteam.mjs goal plan ${g.id})`);
+  const designSlug = slug(g.title ?? g.id);
+  if (!projectFileText(`designs/${designSlug}.md`)) coverage.push(`no design at project/designs/${designSlug}.md`);
   if ((g.status ?? 'draft') === 'ready') {
-    if (!feats.length) coverage.push('no feature plan names this goal (- Goals: line)');
-    for (const p of unplanned) coverage.push(`precondition ${p.n} ("${p.text}") has no feature (- Preconditions: ${g.id}#${p.n})`);
+    if (!feats.length) coverage.push('no feature names this goal');
+    for (const p of unplanned) coverage.push(`precondition ${p.n} ("${p.text}") has no feature (${g.id}#${p.n})`);
   }
-  return { definition, coverage, features: feats, unplanned };
+  return { definition, coverage, features: feats, unplanned, design: `project/designs/${designSlug}.md` };
 }
-
 function goalView(g) {
   const readings = goalReadings(g.id);
-  const last = readings[readings.length - 1];
   const first = readings[0];
+  const last = readings[readings.length - 1];
   let track = null;
   if (readings.length >= 2 && typeof g.measure?.target === 'number' && g.horizon) {
     const start = Date.parse(first.created_at);
     const end = Date.parse(g.horizon);
     const frac = end > start ? Math.min(1, Math.max(0, (Date.now() - start) / (end - start))) : 1;
     const expected = first.measure.value + (g.measure.target - first.measure.value) * frac;
-    const better = g.measure.direction === 'down' ? last.measure.value <= expected : last.measure.value >= expected;
-    track = better ? 'on track' : 'behind';
+    track = (g.measure.direction === 'down' ? last.measure.value <= expected : last.measure.value >= expected) ? 'on track' : 'behind';
   }
   return { ...g, status: g.status ?? 'draft', readings: readings.map((r) => ({ at: r.created_at, value: r.measure.value, source: r.source })), track, check: goalCheck(g) };
 }
-
 function cmdGoal() {
   const [sub, id] = positional;
+  const writer = () => (flags.owner ? ownerWriter() : (supervisorOnly('goal'), { by: 'supervisor' }));
   const fields = () => ({
-    title: flagStr('title'),
-    outcome: flagStr('outcome'),
-    measure: flagStr('measure') || flagStr('target') || flagStr('unit') || flagStr('direction')
+    title: flagStr('title'), outcome: flagStr('outcome'),
+    measure: ['measure', 'target', 'unit', 'direction'].some((k) => flagStr(k) !== undefined)
       ? { ...(id ? logGet(id)?.measure : {}), ...(flagStr('measure') ? { description: flagStr('measure') } : {}), ...(flagStr('target') ? { target: Number(flagStr('target')) } : {}), ...(flagStr('unit') ? { unit: flagStr('unit') } : {}), ...(flagStr('direction') ? { direction: flagStr('direction') } : {}) }
       : undefined,
     horizon: flagStr('horizon'),
     non_goals: flags['non-goals'] !== undefined ? asList(flags['non-goals']) : undefined,
     constraints: flags.constraints !== undefined ? asList(flags.constraints) : undefined,
     preconditions: flags.preconditions !== undefined ? asList(flags.preconditions) : undefined,
-    priority: num('priority'),
+    priority: flagNum('priority'),
   });
-  const writer = () => (flags.owner ? ownerWriter() : { by: logWriter() });
   if (sub === 'add') {
     const { by, channel } = writer();
-    if (!['supervisor', 'owner'].includes(by)) die('goals come from the owner, drafted by the supervisor');
     const f = fields();
     if (!f.title) die('goal add needs --title');
-    const line = appendLog({ type: 'goal', status: 'draft', channel, ...f }, by);
-    return void process.stdout.write(`${line.id}\n`);
+    return out(appendLog({ type: 'goal', status: 'draft', channel, ...f }, by).id);
   }
   if (sub === 'set') {
     if (!id || logGet(id)?.type !== 'goal') die('usage: goal set <g-id> [--title …] [--outcome …] [--measure …] [--target n] [--unit u] [--direction up|down] [--horizon date] [--non-goals …] [--constraints …] [--preconditions …] [--priority n] [--owner]');
     const { by, channel } = writer();
     if (by === 'supervisor' && (logGet(id).status ?? 'draft') !== 'draft') die(`${id} is ${logGet(id).status}; only the owner changes it now (class goal-change)`);
     appendLog({ type: 'goal', op: 'set', id, ...fields(), ...(by === 'owner' ? { channel } : {}) }, by);
-    return void process.stdout.write(`updated ${id}\n`);
+    return out(`updated ${id}`);
   }
   if (sub === 'approve' || sub === 'status') {
     const { by, channel } = ownerWriter();
     const g = logGet(id);
     if (g?.type !== 'goal') die(`no goal ${id}`);
     const to = sub === 'approve' ? 'ready' : positional[2];
-    if (!LOG.GOAL_STATUS.includes(to)) die(`status must be one of ${LOG.GOAL_STATUS.join(', ')}`);
+    if (!['draft', 'ready', 'met', 'abandoned'].includes(to)) die('status is draft, ready, met or abandoned');
     if (to === 'ready') {
       const c = goalCheck(g);
       if (c.definition.length && !flags.force) die(`${id} is not fully defined:\n  - ${c.definition.join('\n  - ')}\n(--force to approve anyway)`);
     }
     appendLog({ type: 'goal', op: 'set', id, status: to, channel }, by);
-    return void process.stdout.write(`${id} is ${to}\n`);
+    return out(`${id} is ${to}`);
   }
+  if (sub === 'show') return json(goalView(logGet(id)?.type === 'goal' ? logGet(id) : die(`no goal ${id}`)));
   if (sub === 'reading') {
     if (!id || logGet(id)?.type !== 'goal') die('usage: goal reading <g-id> --value n [--source s] [--detail d]');
-    const by = flags.owner ? ownerWriter().by : logWriter();
-    if (!['supervisor', 'owner'].includes(by)) die('goal readings come from the supervisor or the owner; record what you see as an observation');
-    const v = num('value');
+    const by = flags.owner ? ownerWriter().by : (supervisorOnly('goal reading'), 'supervisor');
+    const v = flagNum('value');
     if (v === undefined || Number.isNaN(v)) die('goal reading needs --value <number>');
-    appendLog({ type: 'observation', source: flagStr('source') ?? by, subject: id, kind: 'reading', detail: flagStr('detail') ?? `reading ${v}${logGet(id).measure?.unit ? ` ${logGet(id).measure.unit}` : ''}`, measure: { value: v, unit: logGet(id).measure?.unit }, refs: [id] }, by);
-    return void process.stdout.write(`recorded ${v} for ${id}\n`);
-  }
-  if (sub === 'plan') {
-    const g = logGet(id);
-    if (g?.type !== 'goal') die('usage: goal plan <g-id>');
-    if (logWriter() !== 'supervisor') die('the supervisor writes goal plans');
-    const slug = `goal-${(g.title ?? 'goal').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'goal'}`;
-    const wt = choreWorktree(slug);
-    const file = path.join(wt, projectRel, 'goals', `${id}.md`);
-    if (fs.existsSync(file) && !flags.force) die(`${path.relative(mainRoot, file)} exists; edit it, or --force to redraft`);
-    const tpl = fs.readFileSync(path.join(devteamDir, 'templates', 'goal-plan.md'), 'utf8');
-    const rows = (g.preconditions ?? []).map((p, i) => `| ${i + 1} | ${p} | | | ${goalFeatures(id).filter((f) => featurePreconditions(f).includes(`${id}#${i + 1}`)).map((f) => `\`${f}\``).join(', ') || 'unplanned'} |`).join('\n');
-    const text = tpl.replace('<goal title>', g.title).replace('`<g-id>`', `\`${id}\``).replace('<date>', nowIso().slice(0, 10)).replace(/\| 1 \| \| \| \| `<feature>` or "unplanned" \|/, rows || '| 1 | | | | unplanned |').replace(/## 6\. Not doing\n\n[^\n]*/, `## 6. Not doing\n\n${(g.non_goals ?? []).map((n) => `- ${n}: <why>`).join('\n') || '<the goal has no non-goals yet>'}`);
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, text);
-    return void process.stdout.write(`drafted ${path.relative(mainRoot, file)}\nwrite the reasoning, then: devteam.mjs chore-pr ${slug} --title "goal plan: ${g.title}"\n`);
+    const unit = logGet(id).measure?.unit;
+    appendLog({ type: 'observation', source: flagStr('source') ?? by, subject: id, kind: 'reading', detail: flagStr('detail') ?? `reading ${v}${unit ? ` ${unit}` : ''}`, measure: { value: v, unit }, refs: [id] }, by);
+    return out(`recorded ${v} for ${id}`);
   }
   if (sub === 'check') {
     const gs = (id ? [logGet(id)] : logObjects('goal')).filter((g) => g?.type === 'goal' && !['met', 'abandoned'].includes(g.status));
@@ -2485,458 +1709,901 @@ function cmdGoal() {
     for (const g of gs) {
       const c = goalCheck(g);
       gaps += c.definition.length + c.coverage.length;
-      process.stdout.write(`${g.id} [${g.status ?? 'draft'}] ${g.title}\n`);
-      for (const d of c.definition) process.stdout.write(`  definition: ${d}\n`);
-      for (const d of c.coverage) process.stdout.write(`  coverage: ${d}\n`);
-      if (!c.definition.length && !c.coverage.length) process.stdout.write('  ok\n');
+      out(`${g.id} [${g.status ?? 'draft'}] ${g.title}`);
+      for (const d of c.definition) out(`  definition: ${d}`);
+      for (const d of c.coverage) out(`  coverage: ${d}`);
+      if (!c.definition.length && !c.coverage.length) out('  ok');
     }
     if (gaps && flags.strict) process.exit(1);
     return;
   }
-  // list
   const gs = logObjects('goal').map(goalView).sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99));
-  if (flags.json) return void process.stdout.write(`${JSON.stringify(gs, null, 2)}\n`);
-  if (!gs.length) return void process.stdout.write('no goals yet (planning.md §0: the owner states them first)\n');
+  if (flags.json) return json(gs);
+  if (!gs.length) return out('no goals (the owner states them; planning.md §1)');
   for (const g of gs) {
     const last = g.readings[g.readings.length - 1];
-    process.stdout.write(`${g.id} [${g.status}${g.priority ? `, p${g.priority}` : ''}] ${g.title}\n  ${g.measure?.description ?? '-'}: ${last ? last.value : '?'} -> ${g.measure?.target ?? '?'} ${g.measure?.unit ?? ''} by ${g.horizon ?? '?'}${g.track ? ` (${g.track})` : ''}; features: ${g.check.features.join(', ') || 'none'}\n`);
+    out(`${g.id} [${g.status}${g.priority ? `, p${g.priority}` : ''}] ${g.title}\n  ${g.measure?.description ?? '-'}: ${last ? last.value : '?'} -> ${g.measure?.target ?? '?'} ${g.measure?.unit ?? ''} by ${g.horizon ?? '?'}${g.track ? ` (${g.track})` : ''}; features: ${g.check.features.join(', ') || 'none'}`);
   }
 }
 
-// ---------- chore PRs from the supervisor (retros, goal plans, research notes) ----------
-
-// The supervisor's checkout is on main, which only takes PRs. A chore gets its own worktree on
-// branch chore-<slug>, from the latest main; chore-pr commits, pushes and opens the PR.
-function choreWorktree(slug) {
-  if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(slug)) die(`chore slug "${slug}" must be lowercase words joined by hyphens`);
-  if (!commonDir || !projectInRepo) die('chores need a git checkout with the project folder inside it');
-  if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
-  const wt = path.join(mainRoot, '.worktrees', `chore-${slug}`);
-  if (fs.existsSync(wt)) return wt;
-  const main = loadSettings().main_branch;
-  git(['fetch', '--quiet', 'origin', main]);
-  const base = resolveCommit(`origin/${main}`) ? `origin/${main}` : main;
-  try {
-    execFileSync('git', ['worktree', 'add', '--quiet', '-B', `chore-${slug}`, wt, base], { cwd: mainRoot, stdio: ['ignore', 'pipe', 'pipe'] });
-  } catch (e) {
-    die(`git worktree add failed: ${(e.stderr || e.message).toString().trim()}`);
-  }
-  return wt;
-}
-
-function cmdChorePr() {
-  const [slug] = positional;
-  const title = flagStr('title');
-  if (!slug || !title) die('usage: chore-pr <slug> --title "<summary>"   (commits everything in .worktrees/chore-<slug> and opens the PR)');
-  if (logWriter() !== 'supervisor') die('only the supervisor opens chore PRs');
-  const wt = path.join(mainRoot, '.worktrees', `chore-${slug}`);
-  if (!fs.existsSync(wt)) die(`no worktree .worktrees/chore-${slug}; start one with the command that drafts the file (retro, goal plan) or devteam.mjs chore-start ${slug}`);
-  const run = (args) => {
-    try {
-      return execFileSync('git', args, { cwd: wt, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-    } catch (e) {
-      die(`git ${args.join(' ')} failed: ${(e.stderr || e.message).toString().trim()}`);
-    }
-  };
-  run(['add', '-A']);
-  if (run(['status', '--porcelain'])) run(['commit', '--quiet', '-m', `chore-${slug}: ${title}`]);
-  run(['push', '--quiet', '--force', 'origin', `chore-${slug}:chore-${slug}`]);
-  let pr = '';
-  try {
-    pr = execFileSync('gh', ['pr', 'list', '--head', `chore-${slug}`, '--state', 'open', '--json', 'url', '--jq', '.[0].url'], { cwd: wt, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-    if (!pr) {
-      const body = `${flagStr('body') ?? title}\n\n## One-way doors\n\nNone.\n`;
-      pr = execFileSync('gh', ['pr', 'create', '--head', `chore-${slug}`, '--base', loadSettings().main_branch, '--title', `chore-${slug}: ${title}`, '--body', body], { cwd: wt, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-    }
-  } catch {
-    warn(`gh is not available or failed; open the PR from branch chore-${slug} by hand`);
-  }
-  process.stdout.write(`pushed chore-${slug}${pr ? `: ${pr}` : ''}\nmerge it once CI passes, then: git worktree remove .worktrees/chore-${slug}\n`);
-}
-
-function cmdChoreStart() {
-  const [slug] = positional;
-  if (!slug) die('usage: chore-start <slug>');
-  if (logWriter() !== 'supervisor') die('only the supervisor starts chore worktrees');
-  process.stdout.write(`${choreWorktree(slug)}\n`);
-}
-
-// ---------- retros (process/improvement.md §3.1) ----------
-
-const RETRO_DIR = 'improvement/retros';
-const lastRetro = () => logObjects('observation').filter((o) => o.kind === 'retro' && o.created_by === 'supervisor').sort((a, b) => a.created_at.localeCompare(b.created_at)).pop() ?? null;
-
-// Features whose every active ticket has merged, with the time the last one merged.
-function finishedFeatures() {
-  const { tickets } = loadGraph();
-  const byFeature = new Map();
-  for (const t of tickets.values()) if (isActive(t) && t.feature !== CHORES_FEATURE) (byFeature.get(t.feature) ?? byFeature.set(t.feature, []).get(t.feature)).push(t);
-  const out = [];
-  for (const [f, ts] of byFeature) {
-    const shas = ts.map((t) => mergeShaFor(t.id));
-    if (shas.some((x) => !x)) continue;
-    const at = shas.map((sha) => new Date(git(['show', '-s', '--format=%cI', sha]) ?? 0).toISOString()).sort().pop();
-    out.push({ feature: f, finished_at: at });
-  }
-  return out;
-}
-
-function retroDue() {
-  const last = lastRetro();
-  const every = loadSettings().retro_every_days ?? 7;
-  const lastAt = last ? Date.parse(last.created_at) : null;
-  const reasons = [];
-  let since = null;
-  if (!last) {
-    const firstPhase = logObjects('phase').map((p) => p.created_at).sort()[0];
-    if (firstPhase && Date.now() - Date.parse(firstPhase) >= every * 864e5) {
-      reasons.push(`no retro yet, and work started ${firstPhase.slice(0, 10)}`);
-      since = new Date(Date.parse(firstPhase) + every * 864e5).toISOString();
-    }
-  } else if (Date.now() - lastAt >= every * 864e5) {
-    reasons.push(`${every} days since the last retro (${last.created_at.slice(0, 10)})`);
-    since = new Date(lastAt + every * 864e5).toISOString();
-  }
-  for (const f of finishedFeatures()) {
-    if (!lastAt || Date.parse(f.finished_at) > lastAt) {
-      reasons.push(`feature ${f.feature} finished ${f.finished_at.slice(0, 10)}`);
-      if (!since || f.finished_at < since) since = f.finished_at;
-    }
-  }
-  return { due: reasons.length > 0, reasons, due_since: since, last: last ? { at: last.created_at, summary: last.detail, file: last.source_ref ?? null } : null };
-}
-
-const retroState = () => retroDue();
-
-// The headline numbers a retro keeps, so the next one can compare (gates and messages live in
-// gitignored files, so only this snapshot survives).
-function retroNumbers(m) {
-  return {
-    tickets_merged: m.tickets_merged,
-    median_cycle_hours: m.cycle_hours.median,
-    usd_total: m.cost.usd_total,
-    usd_per_merged_ticket: m.cost.usd_per_merged_ticket,
-    phase_hours: m.phase_hours,
-    phase_usd: m.phase_usd,
-    first_pass_rejection: Object.fromEntries(Object.entries(m.reviews.by_stage).map(([k, v]) => [k, v.rejection_rate])),
-    escaped_defects: m.escaped_defects,
-    owner_answer_rate_14d: m.owner_questions.answer_rate_14d ?? null,
-    median_answer_hours: m.owner_questions.median_answer_hours,
-    flaky_tests: m.gates.flaky_tests.length,
-    slowest_gate: m.gates.gates[0] ? `${m.gates.gates[0].gate} ${m.gates.gates[0].median_seconds}s` : null,
-  };
-}
-
-function previousRetroNumbers(last) {
-  const text = last?.source_ref ? projectFileText(last.source_ref.replace(/^project\//, '')) : null;
-  const m = text?.match(/```json devteam-retro\s*\n([\s\S]*?)\n```/);
-  try {
-    return m ? JSON.parse(m[1]) : null;
-  } catch {
-    return null;
-  }
-}
-
-function retroDraft() {
-  const last = lastRetro();
-  const since = last ? Date.parse(last.created_at) : 0;
-  const sinceIso = last ? last.created_at : null;
-  const after = (iso) => !sinceIso || Date.parse(iso) > Date.parse(sinceIso);
-  const m = collectMetrics(since);
-  const nums = retroNumbers(m);
-  const prev = previousRetroNumbers(last);
-  const { tickets } = loadGraph();
-  const fmt = (v) => (v === null || v === undefined ? '-' : typeof v === 'object' ? Object.entries(v).map(([k, x]) => `${k} ${x}`).join(', ') || '-' : String(v));
-  const rows = ['tickets_merged', 'median_cycle_hours', 'usd_total', 'usd_per_merged_ticket', 'escaped_defects', 'owner_answer_rate_14d', 'median_answer_hours', 'flaky_tests', 'slowest_gate', 'first_pass_rejection', 'phase_hours', 'phase_usd'];
-  const merged = [...tickets.keys()].filter((id) => {
-    const sha = mergeShaFor(id);
-    return sha && after(git(['show', '-s', '--format=%cI', sha]) ?? '');
-  });
-  const rejected = [];
-  for (const id of [...merged, ...[...tickets.keys()].filter((x) => !mergeShaFor(x) && ticketBranchRef(x))]) {
-    const branch = ticketBranchRef(id);
-    for (const r of ticketReviews(id, branch && !mergeShaFor(id) ? { ref: branch } : WORKTREE)) {
-      if (r.pass === 1 && !r.variant && r.verdict === 'CHANGES') rejected.push(`${id} ${r.stage} (${r.file})`);
-    }
-  }
-  const corrections = logObjects('correction').filter((c) => after(c.created_at));
-  const trials = logObjects('act').filter((a) => a.class === 'improvement-trial' && after(a.created_at));
-  const outcomes = logObjects('observation').filter((o) => o.kind === 'outcome');
-  const openTrials = logObjects('act').filter((a) => a.class === 'improvement-trial' && !outcomes.some((o) => (o.refs ?? []).includes(a.id)));
-  const problems = logObjects('problem');
-  const goals = logObjects('goal').filter((g) => !['met', 'abandoned'].includes(g.status));
-  const readingDue = goals.filter((g) => !goalReadings(g.id).some((r) => after(r.created_at)));
-  const trust = trustTable().filter((t) => t.can_ask).map((t) => t.class);
-  const today = nowIso().slice(0, 10);
-  const L = [];
-  L.push(`# Retro ${today}`, '', `Since: ${sinceIso ? sinceIso.slice(0, 16).replace('T', ' ') : 'the start'}`, '');
-  L.push('## Summary for the owner', '', '<Two lines: what went well, what changes. This becomes the retro line on the dashboard.>', '');
-  L.push('## Numbers', '', '| | Now | Previous retro |', '|---|---|---|');
-  for (const k of rows) L.push(`| ${k.replace(/_/g, ' ')} | ${fmt(nums[k])} | ${prev ? fmt(prev[k]) : '-'} |`);
-  L.push('', '```json devteam-retro', JSON.stringify(nums), '```', '');
-  L.push('## Since the last retro', '');
-  L.push(`- **Merged:** ${merged.length ? merged.join(', ') : 'none'}`);
-  L.push(`- **Slowest:** ${m.cycle_hours.slowest.map((c) => `${c.id} ${c.hours}h`).join(', ') || '-'}`);
-  L.push(`- **Rejected at first review:** ${rejected.length ? rejected.join('; ') : 'none'}`);
-  L.push(`- **Corrections:** ${corrections.length ? corrections.map((c) => `${c.id} on ${c.act} (${logGet(c.act)?.class ?? '?'}): ${c.reason}`).join('; ') : 'none'}`);
-  L.push(`- **Trials started:** ${trials.length ? trials.map((a) => `${a.id} ${a.what}`).join('; ') : 'none'}`);
-  L.push(`- **Trials still without an outcome:** ${openTrials.length ? openTrials.map((a) => `${a.id} ${a.what}`).join('; ') : 'none'}`);
-  L.push(`- **Problems:** ${problems.filter((p) => after(p.created_at)).length} opened, ${problems.filter((p) => p.status === 'resolved' && p.updates.some((u) => u.status === 'resolved' && after(u.at))).length} resolved, ${problems.filter((p) => p.status !== 'resolved').length} open`);
-  L.push(`- **Goal readings due:** ${readingDue.length ? readingDue.map((g) => `${g.id} (${g.title})`).join(', ') : 'none'}`);
-  L.push(`- **Recurring signals to explain:** ${orientClusters().map((c) => `${c.key} x${c.count}`).join(', ') || 'none'}`);
-  L.push(`- **Trust evidence supports asking about:** ${trust.join(', ') || 'nothing yet'}`);
-  L.push(`- **Findings now:** ${m.findings.slice(0, 8).map((f) => `[${f.severity}] ${f.kind} ${f.subject}`).join('; ') || 'none'}`);
-  L.push('', '## Why', '', '<For each slow ticket, rejected review and correction above: why it happened. Cite files and ids.>', '');
-  L.push('## What we will change', '', '<Each one: a trial (act), a chore ticket, a lesson or problem, or one proposal question for the owner covering everything that needs them. Or "nothing, because …".>', '');
-  L.push('## Roadmap', '', '```', roadmapText(collectRoadmap()), '```', '');
-  return L.join('\n');
-}
-
-function cmdRetro() {
-  const [sub, arg] = positional;
-  if (flags.due) {
-    const d = retroDue();
-    process.stdout.write(d.due ? `due: ${d.reasons.join('; ')}\n` : `not due${d.last ? ` (last ${d.last.at.slice(0, 10)})` : ''}\n`);
-    process.exit(d.due ? 0 : 1);
-  }
-  if (logWriter() !== 'supervisor') die('the supervisor runs retros');
-  if (sub === 'close') {
-    // Record that the retro happened: one observation carrying the summary and what it produced.
-    const date = arg ?? die('usage: retro close <YYYY-MM-DD> --summary "<two lines>" [--refs ids]');
-    const rel = `${RETRO_DIR}/${date}.md`;
-    const wt = path.join(mainRoot, '.worktrees', `chore-retro-${date}`);
-    if (!fs.existsSync(path.join(wt, projectRel, rel)) && !projectFileText(rel)) die(`no retro file for ${date}; draft it with devteam.mjs retro`);
-    const line = appendLog({ type: 'observation', source: 'supervisor', subject: 'project', kind: 'retro', detail: flagStr('summary') ?? die('retro close needs --summary'), source_ref: `project/${rel}`, refs: asList(flags.refs) }, 'supervisor');
-    return void process.stdout.write(`${line.id}\n`);
-  }
-  if (flags.print) return void process.stdout.write(`${retroDraft()}\n`);
-  const date = nowIso().slice(0, 10);
-  const wt = choreWorktree(`retro-${date}`);
-  const file = path.join(wt, projectRel, RETRO_DIR, `${date}.md`);
-  if (fs.existsSync(file) && !flags.force) die(`${path.relative(mainRoot, file)} exists; edit it, or --force to redraft`);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, `${retroDraft()}\n`);
-  process.stdout.write(`drafted ${path.relative(mainRoot, file)}\nwrite Summary, Why and What we will change, then:\n  devteam.mjs chore-pr retro-${date} --title "retro ${date}"\n  devteam.mjs retro close ${date} --summary "<two lines>" --refs <ids it produced>\n`);
-}
-
-// ---------- the roadmap (process/planning.md §0): computed, never written ----------
+// --- the roadmap: computed, never written ---
 
 function collectRoadmap() {
-  const { tickets } = loadGraph();
-  const status = deriveStatus(tickets);
-  const prog = collectProgress(tickets, status);
-  const now = Date.now();
+  const prog = collectProgress();
   const items = prog.tickets;
-  // Rate: points merged per day over the last 14 days (the same window as the burn-up).
-  const window = 14 * 864e5;
-  const recentPts = items.filter((t) => t.merged_at && now - Date.parse(t.merged_at) <= window).reduce((a, t) => a + t.weight, 0);
+  const now = Date.now();
+  const recentPts = items.filter((t) => t.merged_at && now - Date.parse(t.merged_at) <= 14 * DAY).reduce((a, t) => a + t.weight, 0);
   const rate = recentPts / 14;
   const m = collectMetrics(0);
   const cycleDays = m.cycle_hours.median ? m.cycle_hours.median / 24 : null;
-  const openQs = readQuestions().filter((q) => q.status === 'open');
+  const openQs = questions().filter((q) => q.status === 'open');
   const goals = logObjects('goal').filter((g) => !['met', 'abandoned'].includes(g.status)).sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99));
   const rankOf = new Map(goals.map((g, i) => [g.id, i]));
-  const featureView = (f) => {
-    const ts = items.filter((t) => t.feature === f);
+  const fs_ = features();
+  const views = [...new Set([...items.map((t) => t.feature), ...fs_.keys()])].map((fid) => {
+    const f = fs_.get(fid);
+    const ts = items.filter((t) => t.feature === fid);
     const left = ts.filter((t) => !t.merged_at);
-    // Remaining waves: the longest dependency chain among this feature's unmerged tickets.
     const sub = new Map(left.map((t) => [t.id, { ...t, depends_on: t.depends_on.filter((d) => left.some((x) => x.id === d)) }]));
-    let waves = 0;
-    if (sub.size && !findCycle(sub)) {
-      const memo = new Map();
-      const depth = (id) => memo.get(id) ?? (memo.set(id, 1 + Math.max(0, ...sub.get(id).depends_on.map(depth))), memo.get(id));
-      waves = Math.max(...[...sub.keys()].map(depth));
-    }
-    const storyIds = Object.entries(prog.stories).filter(([, s]) => s.feature === f).map(([id]) => id);
-    const storyDone = storyIds.filter((sid) => {
-      const st = ts.filter((t) => t.serves.includes(sid));
-      return st.length && st.every((t) => t.merged_at);
-    }).length;
+    const waves = sub.size && !findCycle(sub) ? Math.max(...levels(sub).values()) + 1 : 0;
+    const stories = f?.stories ?? [];
+    const storyDone = stories.filter((s) => { const st = ts.filter((t) => t.serves.includes(s.id)); return st.length && st.every((t) => t.merged_at); }).length;
     return {
-      feature: f,
-      status: featureStatus(f) ?? (f === CHORES_FEATURE ? 'chores' : 'no plan'),
-      goals: featureGoals(f),
-      points_total: ts.reduce((a, t) => a + t.weight, 0),
-      points_left: left.reduce((a, t) => a + t.weight, 0),
-      stories: { done: storyDone, total: storyIds.length },
-      waves_left: waves,
-      releases: [...new Set(ts.map((t) => t.target_release).filter(Boolean))].sort(),
+      feature: fid, title: f?.title ?? fid, status: f ? (ts.length && ts.every((t) => t.merged_at) ? 'done' : ts.some((t) => t.merged_at || t.phase) ? 'in progress' : 'planned') : fid === CHORES ? 'chores' : 'no feature line', goals: f?.goals ?? [],
+      points_total: ts.reduce((a, t) => a + t.weight, 0), points_left: left.reduce((a, t) => a + t.weight, 0),
+      stories: { done: storyDone, total: stories.length }, waves_left: waves,
+      releases: [...new Set(stories.map((s) => s.release).filter(Boolean))].sort(),
       blocked_by_questions: openQs.filter((q) => q.blocks.some((b) => ts.some((t) => t.id === b))).map((q) => q.id),
     };
-  };
-  const allFeatures = [...new Set([...items.map((t) => t.feature), ...(() => {
-    const dir = path.join(projectDir, 'features');
-    return fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith('.md')).map((f) => f.replace(/\.md$/, '')) : [];
-  })()])];
-  const views = allFeatures.map(featureView);
-  // Sequence: by best-ranked goal, then features with more of the critical path first, then size.
+  });
   const bestRank = (v) => Math.min(99, ...v.goals.map((g) => rankOf.get(g) ?? 99));
   const ordered = views.filter((v) => v.goals.some((g) => rankOf.has(g))).sort((a, b) => bestRank(a) - bestRank(b) || b.waves_left - a.waves_left || b.points_left - a.points_left);
   let cum = 0;
   for (const v of ordered) {
     cum += v.points_left;
-    if (!v.points_left) v.eta = null;
-    else if (!rate) v.eta = null;
-    else {
-      const days = Math.max(cum / rate, cycleDays ? v.waves_left * cycleDays : 0);
-      v.eta = new Date(now + days * 864e5).toISOString().slice(0, 10);
-    }
     v.done = v.points_total > 0 && v.points_left === 0;
+    v.eta = !v.points_left || !rate ? null : dateOnly(new Date(now + Math.max(cum / rate, cycleDays ? v.waves_left * cycleDays : 0) * DAY).toISOString());
   }
   const goalRows = goals.map((g) => {
     const c = goalCheck(g);
-    const feats = ordered.filter((v) => bestRank(v) === rankOf.get(g.id) || v.goals.includes(g.id));
+    const feats = ordered.filter((v) => v.goals.includes(g.id));
     const etas = feats.map((v) => v.eta).filter(Boolean).sort();
-    return {
-      id: g.id, title: g.title, priority: g.priority ?? null, status: g.status ?? 'draft',
-      unplanned: c.unplanned,
-      features: feats.map((v) => v.feature),
-      eta: c.unplanned.length || !feats.length ? null : (feats.every((v) => v.done) ? 'done' : etas.pop() ?? null),
-      has_plan: !!goalPlanText(g.id),
-    };
+    return { id: g.id, title: g.title, priority: g.priority ?? null, status: g.status ?? 'draft', unplanned: c.unplanned, features: feats.map((v) => v.feature), eta: c.unplanned.length || !feats.length ? null : feats.every((v) => v.done) ? 'done' : etas.pop() ?? null, has_design: !c.coverage.some((x) => x.startsWith('no design')) };
   });
   return {
-    generated_at: nowIso(),
-    rate_points_per_day: +rate.toFixed(2),
-    median_cycle_days: cycleDays === null ? null : +cycleDays.toFixed(1),
-    goals: goalRows,
-    features: Object.fromEntries(views.map((v) => [v.feature, v])),
-    unassigned: views.filter((v) => !v.goals.some((g) => rankOf.has(g))).map((v) => v.feature),
+    generated_at: nowIso(), rate_points_per_day: +rate.toFixed(2), median_cycle_days: cycleDays === null ? null : +cycleDays.toFixed(1),
+    goals: goalRows, features: Object.fromEntries(views.map((v) => [v.feature, v])), unassigned: views.filter((v) => !v.goals.some((g) => rankOf.has(g))).map((v) => v.feature),
     note: 'Estimates assume goal-priority order at the current rate; a feature finishes no sooner than its remaining waves times the median cycle time. Goals with unplanned preconditions have no date.',
   };
 }
-
+const weekOf = (d) => { if (!d) return 'no date'; const x = new Date(`${d}T00:00:00Z`); x.setUTCDate(x.getUTCDate() - ((x.getUTCDay() + 6) % 7)); return `week of ${dateOnly(x.toISOString())}`; };
 function roadmapText(r) {
-  const week = (d) => {
-    if (!d) return 'no date';
-    const x = new Date(`${d}T00:00:00Z`);
-    x.setUTCDate(x.getUTCDate() - ((x.getUTCDay() + 6) % 7)); // that week's Monday
-    return `week of ${x.toISOString().slice(0, 10)}`;
-  };
   const L = [`rate ${r.rate_points_per_day} points/day; median cycle ${r.median_cycle_days ?? '-'} days`];
   for (const g of r.goals) {
-    L.push('', `${g.priority ? `p${g.priority} ` : ''}${g.title} [${g.status}] -> ${g.eta === 'done' ? 'done' : week(g.eta)}${g.has_plan ? '' : ' (no goal plan)'}`);
+    L.push('', `${g.priority ? `p${g.priority} ` : ''}${g.title} [${g.status}] -> ${g.eta === 'done' ? 'done' : weekOf(g.eta)}${g.has_design ? '' : ' (no design)'}`);
     for (const u of g.unplanned) L.push(`  unplanned: precondition ${u.n}: ${u.text}`);
     for (const f of g.features) {
       const v = r.features[f];
-      L.push(`  ${v.feature} [${v.status}] ${v.points_total - v.points_left}/${v.points_total} pts, stories ${v.stories.done}/${v.stories.total}, ${v.waves_left} waves left${v.releases.length ? `, ${v.releases.join(' ')}` : ''} -> ${v.done ? 'done' : week(v.eta)}${v.blocked_by_questions.length ? `; waiting on ${v.blocked_by_questions.join(' ')}` : ''}`);
+      L.push(`  ${v.feature} [${v.status}] ${v.points_total - v.points_left}/${v.points_total} pts, stories ${v.stories.done}/${v.stories.total}, ${v.waves_left} waves left${v.releases.length ? `, ${v.releases.join(' ')}` : ''} -> ${v.done ? 'done' : weekOf(v.eta)}${v.blocked_by_questions.length ? `; waiting on ${v.blocked_by_questions.join(' ')}` : ''}`);
     }
   }
   if (r.unassigned.length) L.push('', `serving no goal: ${r.unassigned.join(', ')}`);
   return L.join('\n');
 }
-
 function cmdRoadmap() {
   const r = collectRoadmap();
-  if (flags.json) return void process.stdout.write(`${JSON.stringify(r, null, 2)}\n`);
-  process.stdout.write(`${roadmapText(r)}\n\n${r.note}\n`);
+  if (flags.json) return json(r);
+  out(`${roadmapText(r)}\n\n${r.note}`);
 }
 
-const HELP = `devteam <command>   (put positional arguments before flags)
+// --- chore worktrees: supervisor-written files reach main through their own branch and PR ---
 
-Graph and status
-  validate                        check the graph against planning.md rules (CI gate)
-  ready [--plan-ahead] [--json]   tickets that can start now
-  waves [--feature c] [--json]     parallel waves and the critical path
-  status [--json]                 computed stage of every ticket, live phase, review stats
+function choreWorktree(slugName, { reset = false } = {}) {
+  if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(slugName)) die(`chore slug "${slugName}" must be lowercase words joined by hyphens`);
+  if (!commonDir || !projectInRepo) die('chores need a git checkout with the project folder inside it');
+  if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
+  const wt = path.join(mainRoot, '.worktrees', `chore-${slugName}`);
+  const main = loadSettings().main_branch;
+  if (!flags['dry-run']) git(['fetch', '--quiet', 'origin', main]);
+  const base = resolveCommit(`origin/${main}`) ? `origin/${main}` : main;
+  if (!fs.existsSync(wt)) gitOrDie(['worktree', 'add', '--quiet', '-B', `chore-${slugName}`, wt, base], mainRoot);
+  else if (reset) gitOrDie(['checkout', '--quiet', '-B', `chore-${slugName}`, base], wt);
+  return wt;
+}
+function openPr(wt, branch, title, bodyText) {
+  const main = loadSettings().main_branch;
+  let pr = sh('gh', ['pr', 'list', '--head', branch, '--state', 'open', '--json', 'url', '--jq', '.[0].url'], { cwd: wt });
+  if (pr === null) { warn('gh is not available; open the PR by hand'); return ''; }
+  if (!pr) pr = sh('gh', ['pr', 'create', '--head', branch, '--base', main, '--title', title, '--body', `${bodyText}\n\n## One-way doors\n\nNone.\n`], { cwd: wt }) ?? '';
+  return pr;
+}
+function cmdChore() {
+  const [sub, slugName] = positional;
+  if (sub === 'start') { if (!slugName) die('usage: chore start <slug>'); supervisorOnly('chore'); return out(choreWorktree(slugName)); }
+  if (sub !== 'pr' || !slugName || !flagStr('title')) die('usage: chore start <slug>   |   chore pr <slug> --title "<summary>"');
+  supervisorOnly('chore');
+  const wt = path.join(mainRoot, '.worktrees', `chore-${slugName}`);
+  if (!fs.existsSync(wt)) die(`no worktree .worktrees/chore-${slugName}; devteam.mjs chore start ${slugName}`);
+  gitOrDie(['add', '-A'], wt);
+  if (gitOrDie(['status', '--porcelain'], wt)) gitOrDie(['commit', '--quiet', '-m', `chore-${slugName}: ${flagStr('title')}`], wt);
+  gitOrDie(['push', '--quiet', '--force', 'origin', `chore-${slugName}:chore-${slugName}`], wt);
+  const pr = openPr(wt, `chore-${slugName}`, `chore-${slugName}: ${flagStr('title')}`, flagStr('body') ?? flagStr('title'));
+  out(`pushed chore-${slugName}${pr ? `: ${pr}` : ''}\nmerge it once CI passes, then: git worktree remove .worktrees/chore-${slugName}`);
+}
 
-Gates
-  check-ticket <id> [--sha s] [--title t] [--body-file f]   definition of done at an exact head
-  check-pr --head-ref r --title t --body-file f [--sha s]  automatic merge-word check (CI)
+// --- retros ---
 
-Messages between sessions (process/messages.md)
-  send <to> "<text>" [--kind k] [--re m-…] [--sha s] [--ticket id]   to = supervisor, a ticket id, or plan-<feature>
-  messages [--open] [--to x] [--tail n] [--json]   messages to me (--open: not yet replied to)
+const lastRetro = () => logObjects('observation').filter((o) => o.kind === 'retro' && o.created_by === 'supervisor').sort(byTime).pop() ?? null;
+function finishedFeatures() {
+  const res = [];
+  for (const [fid, ts] of Object.entries(Object.groupBy([...activeTickets().values()].filter((t) => t.feature !== CHORES), (t) => t.feature))) {
+    const ats = ts.map((t) => mergedAt(t.id));
+    if (ats.some((x) => !x)) continue;
+    res.push({ feature: fid, finished_at: new Date(Math.max(...ats)).toISOString() });
+  }
+  return res;
+}
+function retroDue() {
+  const last = lastRetro();
+  const every = loadSettings().retro_every_days;
+  const lastAt = last ? Date.parse(last.created_at) : null;
+  const reasons = [];
+  let since = null;
+  if (!last) {
+    const first = logObjects('phase').map((p) => p.created_at).sort()[0];
+    if (first && Date.now() - Date.parse(first) >= every * DAY) { reasons.push(`no retro yet, and work started ${dateOnly(first)}`); since = new Date(Date.parse(first) + every * DAY).toISOString(); }
+  } else if (Date.now() - lastAt >= every * DAY) { reasons.push(`${every} days since the last retro (${dateOnly(last.created_at)})`); since = new Date(lastAt + every * DAY).toISOString(); }
+  for (const f of finishedFeatures()) if (!lastAt || Date.parse(f.finished_at) > lastAt) { reasons.push(`feature ${f.feature} finished ${dateOnly(f.finished_at)}`); if (!since || f.finished_at < since) since = f.finished_at; }
+  return { due: reasons.length > 0, reasons, due_since: since, last: last ? { at: last.created_at, summary: last.detail, file: last.source_ref ?? null } : null };
+}
+function retroNumbers(m) {
+  return {
+    tickets_merged: m.tickets_merged, median_cycle_hours: m.cycle_hours.median, usd_total: m.cost.usd_total, usd_per_merged_ticket: m.cost.usd_per_merged_ticket,
+    phase_hours: m.phase_hours, phase_usd: m.phase_usd, first_pass_rejection: Object.fromEntries(Object.entries(m.reviews.by_stage).map(([k, v]) => [k, v.rejection_rate])),
+    escaped_defects: m.escaped_defects, owner_answer_rate_14d: m.owner_questions.answer_rate_14d ?? null, median_answer_hours: m.owner_questions.median_answer_hours,
+    flaky_tests: m.gates.flaky_tests.length, slowest_gate: m.gates.gates[0] ? `${m.gates.gates[0].gate} ${m.gates.gates[0].median_seconds}s` : null,
+  };
+}
+function retroDraft() {
+  const last = lastRetro();
+  const sinceMs = last ? Date.parse(last.created_at) : 0;
+  const after = (iso) => Date.parse(iso) > sinceMs;
+  const m = collectMetrics(sinceMs);
+  const nums = retroNumbers(m);
+  const prevText = last?.source_ref ? projectFileText(last.source_ref.replace(/^project\//, '')) : null;
+  let prev = null;
+  try { prev = JSON.parse(prevText?.match(/```json devteam-retro\s*\n([\s\S]*?)\n```/)?.[1] ?? 'null'); } catch { prev = null; }
+  const fmt = (v) => (v === null || v === undefined ? '-' : typeof v === 'object' ? Object.entries(v).map(([k, x]) => `${k} ${x}`).join(', ') || '-' : String(v));
+  const ts = tickets();
+  const merged = [...ts.keys()].filter((id) => mergedAt(id) && mergedAt(id) > sinceMs);
+  const rejected = [];
+  for (const id of ts.keys()) { const b = ticketBranchRef(id); for (const r of ticketReviews(id, b && !mergeShaFor(id) ? { ref: b } : WORKTREE)) if (r.pass === 1 && !r.variant && r.verdict === 'CHANGES') rejected.push(`${id} ${r.stage}`); }
+  const acts = logObjects('act');
+  const corrections = acts.map((a) => ({ a, c: correctionOf(a) })).filter((x) => x.c && after(x.c.at));
+  const outcomes = logObjects('observation').filter((o) => o.kind === 'outcome');
+  const trials = acts.filter((a) => a.class === 'improvement-trial' && after(a.created_at));
+  const openTrials = acts.filter((a) => a.class === 'improvement-trial' && !outcomes.some((o) => (o.refs ?? []).includes(a.id)));
+  const problems = logObjects('problem');
+  const goals = logObjects('goal').filter((g) => !['met', 'abandoned'].includes(g.status));
+  const readingDue = goals.filter((g) => !goalReadings(g.id).some((r) => after(r.created_at)));
+  const today = dateOnly(nowIso());
+  const rows = ['tickets_merged', 'median_cycle_hours', 'usd_total', 'usd_per_merged_ticket', 'escaped_defects', 'owner_answer_rate_14d', 'median_answer_hours', 'flaky_tests', 'slowest_gate', 'first_pass_rejection', 'phase_hours', 'phase_usd'];
+  return [
+    `# Retro ${today}`, '', `Since: ${last ? last.created_at.slice(0, 16).replace('T', ' ') : 'the start'}`, '',
+    '## Summary for the owner', '', '<Two lines: what went well, what changes. This becomes the retro line on the dashboard.>', '',
+    '## Numbers', '', '| | Now | Previous retro |', '|---|---|---|',
+    ...rows.map((k) => `| ${k.replace(/_/g, ' ')} | ${fmt(nums[k])} | ${prev ? fmt(prev[k]) : '-'} |`),
+    '', '```json devteam-retro', JSON.stringify(nums), '```', '',
+    '## Since the last retro', '',
+    `- **Merged:** ${merged.join(', ') || 'none'}`,
+    `- **Slowest:** ${m.cycle_hours.slowest.map((c) => `${c.id} ${c.hours}h`).join(', ') || '-'}`,
+    `- **Rejected at first review:** ${rejected.join('; ') || 'none'}`,
+    `- **Corrections:** ${corrections.map(({ a, c }) => `${a.id} (${a.class}): ${c.reason}`).join('; ') || 'none'}`,
+    `- **Trials started:** ${trials.map((a) => `${a.id} ${a.what}`).join('; ') || 'none'}`,
+    `- **Trials without an outcome:** ${openTrials.map((a) => `${a.id} ${a.what}`).join('; ') || 'none'}`,
+    `- **Problems:** ${problems.filter((p) => after(p.created_at)).length} opened, ${problems.filter((p) => p.status === 'resolved' && p.updates.some((u) => u.status === 'resolved' && after(u.at))).length} resolved, ${problems.filter((p) => p.status !== 'resolved').length} open`,
+    `- **Goal readings due:** ${readingDue.map((g) => `${g.id} (${g.title})`).join(', ') || 'none'}`,
+    `- **Recurring, unexplained:** ${orientClusters().map((c) => `${c.key} x${c.count}`).join(', ') || 'none'}`,
+    `- **Trust evidence supports asking about:** ${trustTable().filter((t) => t.can_ask).map((t) => t.class).join(', ') || 'nothing yet'}`,
+    `- **Findings now:** ${m.findings.slice(0, 8).map((f) => `[${f.severity}] ${f.kind} ${f.subject}`).join('; ') || 'none'}`,
+    '', '## Why', '', '<For each slow ticket, rejected review and correction above: why. Cite files and ids.>', '',
+    '## What we will change', '', '<Each one: a trial (act), a chore ticket, a lesson or problem, or one proposal question for the owner covering everything that needs them. Or "nothing, because …".>', '',
+    '## Roadmap', '', '```', roadmapText(collectRoadmap()), '```', '',
+  ].join('\n');
+}
+function cmdRetro() {
+  const [sub, arg] = positional;
+  if (flags.due) {
+    const d = retroDue();
+    out(d.due ? `due: ${d.reasons.join('; ')}` : `not due${d.last ? ` (last ${dateOnly(d.last.at)})` : ''}`);
+    process.exit(d.due ? 0 : 1);
+  }
+  supervisorOnly('retro');
+  if (sub === 'close') {
+    const date = arg ?? die('usage: retro close <YYYY-MM-DD> --summary "<two lines>" [--refs ids]');
+    const rel = `retros/${date}.md`;
+    if (!projectFileText(rel) && !fs.existsSync(path.join(mainRoot, '.worktrees', `chore-retro-${date}`, projectRel, rel))) die(`no retro file for ${date}; draft it with devteam.mjs retro`);
+    return out(appendLog({ type: 'observation', source: 'supervisor', subject: 'project', kind: 'retro', detail: flagStr('summary') ?? die('retro close needs --summary'), source_ref: `project/${rel}`, refs: asList(flags.refs) }, 'supervisor').id);
+  }
+  if (flags.print) return out(retroDraft());
+  const date = dateOnly(nowIso());
+  const wt = choreWorktree(`retro-${date}`);
+  const file = path.join(wt, projectRel, 'retros', `${date}.md`);
+  if (fs.existsSync(file) && !flags.force) die(`${path.relative(mainRoot, file)} exists; edit it, or --force to redraft`);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, `${retroDraft()}\n`);
+  out(`drafted ${path.relative(mainRoot, file)}\nwrite Summary, Why and What we will change, then:\n  devteam.mjs chore pr retro-${date} --title "retro ${date}"\n  devteam.mjs retro close ${date} --summary "<two lines>" --refs <ids it produced>`);
+}
 
-Questions to the owner (supervisor asks; process/questions.md)
-  ask --question q [--kind k] [--class c] [--reasons r…] [--recommendation r] [--confidence 0-1]
-      [--default d] [--options a b] [--blocks ids] [--evidence ids] [--ticket id] [--context c] [--note path]
-      kinds: owner-decision one-way-door clarification proposal trust goal-definition
-  answer <qid> "<text>" [--matched] [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)
-  answer <qid> --defaulted        the supervisor applies a default
-  withdraw <qid> [--reason r]     the supervisor drops a question that no longer matters
-  questions [--all] [--id qid] [--json]   ranked owner inbox
-  recorded <qid> <path>           mark where an answer was recorded
+// ===== 10. metrics, progress, the dashboard =====
 
-The log: observe, orient, decide, act (process/log.md)
-  log [--type t] [--by w] [--id x] [--tail n] [--json]   folded objects
-  log-check                       validate every log line; list lines the fold ignored
-  log-sync [--dry-run]            supervisor: mirror run/log into project/log via the chore-log PR
+function readJunit(file) {
+  if (!file || !fs.existsSync(file)) return [];
+  const xml = fs.readFileSync(file, 'utf8');
+  const res = [];
+  for (const m of xml.matchAll(/<testcase\b([^>]*?)(\/>|>([\s\S]*?)<\/testcase>)/g)) {
+    const attr = (k) => m[1].match(new RegExp(`\\b${k}="([^"]*)"`))?.[1] ?? '';
+    res.push({ name: [attr('classname'), attr('name')].filter(Boolean).join(' › ').slice(0, 120), ms: Math.round(Number(attr('time') || 0) * 1000), failed: /<(failure|error)\b/.test(m[3] ?? '') });
+  }
+  return res;
+}
+// Failed tests plus the ten slowest: enough for flakiness and hotspots, small enough for one line.
+const keepTests = (tests) => [...tests.filter((t) => t.failed).slice(0, 30), ...tests.filter((t) => !t.failed).sort((a, b) => b.ms - a.ms).slice(0, 10)];
+
+function gateStats(runs) {
+  const byGate = new Map();
+  for (const r of runs) (byGate.get(r.gate) ?? byGate.set(r.gate, []).get(r.gate)).push(r);
+  const gates = [];
+  const flakyGates = [];
+  for (const [g, rs] of byGate) {
+    const bySha = new Map();
+    for (const r of rs) (bySha.get(r.sha) ?? bySha.set(r.sha, []).get(r.sha)).push(r);
+    const flaky = [...bySha.values()].filter((x) => x.some((r) => r.ok) && x.some((r) => !r.ok)).length;
+    if (flaky) flakyGates.push({ gate: g, commits: flaky });
+    gates.push({ gate: g, runs: rs.length, fail_rate: +(rs.filter((r) => !r.ok).length / rs.length).toFixed(2), median_seconds: +(median(rs.map((r) => r.ms)) / 1000).toFixed(1), max_seconds: +(Math.max(...rs.map((r) => r.ms)) / 1000).toFixed(1) });
+  }
+  const flakyTests = new Map();
+  const testMs = new Map();
+  for (const r of runs) for (const t of r.tests ?? []) {
+    if (!t.failed) (testMs.get(t.name) ?? testMs.set(t.name, []).get(t.name)).push(t.ms);
+    if (t.failed && runs.some((o) => o !== r && o.gate === r.gate && o.sha === r.sha && o.ok && o.created_at >= r.created_at)) flakyTests.set(t.name, (flakyTests.get(t.name) ?? 0) + 1);
+  }
+  return {
+    gates: gates.sort((a, b) => b.median_seconds - a.median_seconds), flaky_gates: flakyGates,
+    flaky_tests: [...flakyTests.entries()].sort((a, b) => b[1] - a[1]).map(([name, times]) => ({ name, times })),
+    slowest_tests: [...testMs.entries()].map(([name, xs]) => ({ name, median_seconds: +(median(xs) / 1000).toFixed(1) })).sort((a, b) => b.median_seconds - a.median_seconds).slice(0, 10),
+  };
+}
+
+function collectMetrics(since) {
+  const settings = loadSettings();
+  const now = Date.now();
+  const ts = tickets();
+  const phaseLines = new Map();
+  for (const l of logObjects('phase')) (phaseLines.get(l.created_by) ?? phaseLines.set(l.created_by, []).get(l.created_by)).push(l);
+  for (const ls of phaseLines.values()) ls.sort(byTime);
+
+  // Cycle time: a ticket's first phase line to its merge.
+  const cycles = [];
+  for (const id of ts.keys()) {
+    const m = mergedAt(id);
+    const first = phaseLines.get(id)?.[0];
+    if (m && m >= since && first && m > Date.parse(first.created_at)) cycles.push({ id, ms: m - Date.parse(first.created_at) });
+  }
+  cycles.sort((a, b) => b.ms - a.ms);
+
+  // Time and cost per phase. Each phase lasts until the next line, the merge, or now; spend between
+  // two lines is charged to the earlier line's phase.
+  const phaseMs = {};
+  const phaseNow = new Map();
+  const phaseUsd = {};
+  const ticketUsd = {};
+  for (const [who, ls] of phaseLines) {
+    let lastUsd = 0;
+    ls.forEach((l, i) => {
+      const at = Date.parse(l.created_at);
+      if (typeof l.usd === 'number') {
+        const delta = Math.max(0, l.usd - lastUsd);
+        const charged = who === 'supervisor' ? 'supervisor' : (ls[i - 1]?.to ?? l.from ?? 'starting');
+        if (at >= since) { phaseUsd[charged] = (phaseUsd[charged] ?? 0) + delta; ticketUsd[who] = (ticketUsd[who] ?? 0) + delta; }
+        lastUsd = l.usd;
+      }
+      if (who === 'supervisor' || at < since) return;
+      const merged = mergedAt(who);
+      const endMs = i + 1 < ls.length ? Date.parse(ls[i + 1].created_at) : merged ? Math.max(at, merged) : ['done', 'parked'].includes(l.to) ? at : now;
+      phaseMs[l.to] = (phaseMs[l.to] ?? 0) + (endMs - at);
+      if (i === ls.length - 1 && !merged) phaseNow.set(who, { phase: l.to, sinceMs: at });
+    });
+  }
+  const mergedCosts = cycles.map((c) => ticketUsd[c.id]).filter((x) => x !== undefined);
+
+  const msgs = logObjects('message').filter((m) => Date.parse(m.created_at) >= since).sort(byTime);
+  const replies = new Map();
+  for (const m of msgs) if (m.re && !replies.has(m.re)) replies.set(m.re, Date.parse(m.created_at));
+  const expecting = msgs.filter((m) => !['info', 'ruling', 'answer'].includes(m.kind));
+  const openMsgs = expecting.filter((m) => !replies.has(m.id));
+  const msgWaits = expecting.filter((m) => replies.has(m.id)).map((m) => replies.get(m.id) - Date.parse(m.created_at));
+  const qs = questions().filter((q) => Date.parse(q.asked_at) >= since);
+  const qWaits = qs.filter((q) => q.answered_at && q.status === 'answered').map((q) => Date.parse(q.answered_at) - Date.parse(q.asked_at));
+  const openQs = qs.filter((q) => q.status === 'open');
+  const grace = settings.question_default_after_hours * 3600000;
+  const recentQs = questions().filter((q) => now - Date.parse(q.asked_at) <= 14 * DAY && q.status !== 'withdrawn' && (q.status !== 'open' || now - Date.parse(q.asked_at) > grace));
+  const answeredRecent = recentQs.filter((q) => q.status === 'answered').length;
+
+  const reviews = reviewStats();
+  const gates = gateStats(logObjects('gate').filter((g) => Date.parse(g.created_at) >= since));
+  const round = (o) => Object.fromEntries(Object.entries(o).sort((a, b) => b[1] - a[1]).map(([k, v]) => [k, +v.toFixed(2)]));
+  const m = {
+    since: since ? new Date(since).toISOString() : null,
+    tickets_merged: cycles.length,
+    cycle_hours: { median: hours(median(cycles.map((c) => c.ms))), slowest: cycles.slice(0, 5).map((c) => ({ id: c.id, hours: hours(c.ms) })) },
+    phase_hours: Object.fromEntries(Object.entries(round(phaseMs)).map(([k, v]) => [k, hours(v)])),
+    phase_usd: round(phaseUsd),
+    cost: { usd_total: +Object.values(ticketUsd).reduce((a, b) => a + b, 0).toFixed(2), usd_per_merged_ticket: mergedCosts.length ? +(mergedCosts.reduce((a, b) => a + b, 0) / mergedCosts.length).toFixed(2) : null, by_ticket: round(ticketUsd) },
+    reviews, gates,
+    messages: { expecting_reply: expecting.length, still_open: openMsgs.length, median_reply_minutes: msgWaits.length ? +(median(msgWaits) / 60000).toFixed(1) : null },
+    owner_questions: { asked: qs.length, open: openQs.length, median_answer_hours: hours(median(qWaits)), oldest_open_hours: openQs.length ? hours(now - Math.min(...openQs.map((q) => Date.parse(q.asked_at)))) : null, answer_rate_14d: recentQs.length ? +(answeredRecent / recentQs.length).toFixed(2) : null },
+    escaped_defects: logObjects('observation').filter((o) => o.kind === 'escaped-defect' && Date.parse(o.created_at) >= since).length,
+  };
+
+  // Findings: blockers and inefficiencies, each with a next step.
+  const f = [];
+  const add = (severity, kind, subject, detail, suggestion) => f.push({ severity, kind, subject, detail, suggestion });
+  for (const g of gates.flaky_gates) add('high', 'flaky-gate', g.gate, `failed then passed at the same commit ${g.commits} time(s)`, 'find the flaky tests (run with --junit) and fix or quarantine them');
+  for (const t of gates.flaky_tests.slice(0, 10)) add('high', 'flaky-test', t.name, `failed then passed at the same commit ${t.times} time(s)`, 'make it deterministic (time, order, shared state, network) or quarantine it with a ticket');
+  for (const g of gates.gates.filter((x) => x.median_seconds >= settings.slow_gate_minutes * 60)) add('medium', 'slow-gate', g.gate, `median ${(g.median_seconds / 60).toFixed(1)} min over ${g.runs} run(s)`, 'shard it, cache dependencies, or split fast checks from slow ones');
+  for (const t of gates.slowest_tests.slice(0, 5).filter((x) => x.median_seconds >= 10)) add('low', 'slow-test', t.name, `median ${t.median_seconds}s`, 'mock the slow dependency or move it to an integration suite');
+  const totalPhase = Object.values(phaseMs).reduce((a, b) => a + b, 0);
+  const [topPhase, topMs] = Object.entries(phaseMs).filter(([k]) => !['done', 'parked'].includes(k)).sort((a, b) => b[1] - a[1])[0] ?? [];
+  if (topPhase && totalPhase && topMs / totalPhase > 0.4) add('medium', 'phase-hotspot', topPhase, `${Math.round((100 * topMs) / totalPhase)}% of all ticket time`, 'look at why tickets sit here: reviews, gates, answers');
+  const totalUsd = Object.values(phaseUsd).reduce((a, b) => a + b, 0);
+  const [costPhase, costUsd] = Object.entries(phaseUsd).sort((a, b) => b[1] - a[1])[0] ?? [];
+  if (costPhase && totalUsd && costUsd / totalUsd > 0.5) add('medium', 'cost-hotspot', costPhase, `${Math.round((100 * costUsd) / totalUsd)}% of spend ($${costUsd.toFixed(2)})`, 'check context size and model choice for this phase');
+  for (const [id, p] of phaseNow) {
+    const h = (now - p.sinceMs) / 3600000;
+    if (p.phase === 'blocked' && h >= 1) add('high', 'blocked', id, `blocked for ${h.toFixed(1)}h`, 'answer its message, re-plan, or park it');
+    if (p.phase === 'awaiting-word' && h >= 1) add('medium', 'waiting-on-supervisor', id, `waiting for the merge word for ${h.toFixed(1)}h`, 'run merge, or say what is missing');
+  }
+  for (const id of ts.keys()) {
+    const w = workerState(id);
+    if (w && w.phase && !['done', 'parked'].includes(w.phase) && !mergeShaFor(id) && w.minutes_silent > settings.stale_after_minutes) add('high', 'stale-worker', id, `silent for ${w.minutes_silent} min (phase ${w.phase})`, 'check its pane; resume it (supervisor.md, recovery)');
+  }
+  for (const msg of openMsgs.filter((x) => now - Date.parse(x.created_at) > 30 * 60000)) add('medium', 'unanswered-message', msg.id, `${msg.kind} from ${msg.created_by}, ${Math.round((now - Date.parse(msg.created_at)) / 60000)} min old`, `reply with --re ${msg.id}`);
+  for (const q of openQs.filter((x) => now - Date.parse(x.asked_at) > grace)) add('high', 'owner-question-waiting', q.id, q.question.slice(0, 120), q.default ? 'apply its default' : 'remind the owner; it blocks work');
+  if (recentQs.length >= 4 && answeredRecent / recentQs.length < 0.5) add('high', 'inbox-stalled', 'owner questions', `${answeredRecent} of ${recentQs.length} answered in 14 days`, 'stop asking non-blocking questions; batch, withdraw stale ones, open a problem');
+  for (const [id, n] of Object.entries(reviewPasses()).filter(([, n]) => n >= 3)) add('medium', 'review-churn', id, `${n} final review passes`, 'the ticket may be too big or under-specified; re-plan it');
+  const ready = [...ts.values()].filter((t) => isActive(t) && !mergeShaFor(t.id) && !activeWorker(t.id) && (t.depends_on ?? []).every((d) => mergeShaFor(d)));
+  const active = [...ts.keys()].filter(activeWorker).length;
+  if (ready.length && active < settings.max_active_tickets) add('medium', 'idle-capacity', `${ready.length} ready`, `${active}/${settings.max_active_tickets} workers active`, `make workers for: ${ready.slice(0, 5).map((t) => t.id).join(', ')}`);
+  if (m.escaped_defects) add('high', 'escaped-defects', `${m.escaped_defects}`, 'defects found after merge', 'retro: which review or gate should have caught each one');
+  const order = { high: 0, medium: 1, low: 2 };
+  m.findings = f.sort((a, b) => order[a.severity] - order[b.severity]);
+  return m;
+}
+function cmdMetrics() {
+  const since = flagStr('since') ? Date.parse(flagStr('since')) : 0;
+  if (Number.isNaN(since)) die('--since must be a date');
+  const m = collectMetrics(since);
+  if (flags.json) return json(m);
+  const kv = (o, unit = '') => Object.entries(o).map(([k, v]) => `${k} ${unit}${v}`).join(', ') || '-';
+  out([
+    `since: ${m.since ?? 'the beginning'}`,
+    `tickets merged: ${m.tickets_merged}; median cycle ${m.cycle_hours.median ?? '-'}h; slowest ${m.cycle_hours.slowest.map((c) => `${c.id} ${c.hours}h`).join(', ') || '-'}`,
+    `time by phase (h): ${kv(m.phase_hours)}`,
+    `cost by phase: ${kv(m.phase_usd, '$')}; total $${m.cost.usd_total}; per merged ticket ${m.cost.usd_per_merged_ticket === null ? '-' : `$${m.cost.usd_per_merged_ticket}`}`,
+    `gates (median): ${m.gates.gates.map((g) => `${g.gate} ${g.median_seconds}s (fail ${Math.round(g.fail_rate * 100)}%)`).join(', ') || '-'}`,
+    `first-pass rejection: ${Object.entries(m.reviews.by_stage).map(([k, v]) => `${k} ${v.rejected}/${v.first_passes}`).join(', ') || '-'}; false positives ${m.reviews.false_positive_rate ?? '-'}`,
+    `messages: ${m.messages.still_open} of ${m.messages.expecting_reply} awaiting reply; median reply ${m.messages.median_reply_minutes ?? '-'} min`,
+    `owner questions: ${m.owner_questions.open} open of ${m.owner_questions.asked}; median answer ${m.owner_questions.median_answer_hours ?? '-'}h; answer rate (14d) ${m.owner_questions.answer_rate_14d ?? '-'}`,
+    `escaped defects: ${m.escaped_defects}`,
+    '',
+    m.findings.length ? 'findings:' : 'findings: none',
+    ...m.findings.map((x) => `  [${x.severity}] ${x.kind}: ${x.subject} (${x.detail}) -> ${x.suggestion}`),
+  ].join('\n'));
+}
+
+// Per-ticket progress data for the burn-up, board and roadmap.
+function collectProgress() {
+  const sub = activeTickets();
+  const level = findCycle(sub) ? new Map() : levels(sub);
+  const status = new Map(deriveStatus().map((r) => [r.id, r]));
+  const fs_ = features();
+  const stories = {};
+  for (const [fid, f] of fs_) for (const s of f.stories ?? []) stories[s.id] = { feature: fid, text: s.text, release: s.release ?? null };
+  const items = [...sub.values()].map((t) => {
+    const st = status.get(t.id);
+    const sha = st?.merge_sha;
+    const targets = [...new Set((t.serves ?? []).map((x) => stories[x]?.release).filter(Boolean))].sort();
+    return {
+      id: t.id, title: t.title, feature: t.feature, component: t.component, kind: t.kind, size: t.size, risk: t.risk, weight: weight(t), serves: t.serves ?? [], depends_on: t.depends_on ?? [],
+      wave: level.has(t.id) ? level.get(t.id) + 1 : null, added_at: t.created_at,
+      merged_at: sha ? new Date(mergedAt(t.id)).toISOString() : null, released_in: sha ? releasedIn(sha) : null, target_release: targets[0] ?? null,
+      stage: st?.stage ?? 'planned', phase: st?.phase ?? null, task: st?.task ?? null, minutes_silent: st?.minutes_silent ?? null,
+    };
+  });
+  return { now: nowIso(), features: [...new Set(items.map((t) => t.feature))], stories, tickets: items };
+}
+
+function collectOoda() {
+  const log = readLog();
+  const L = ladder();
+  const recent = (xs, n) => xs.sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, n);
+  const acts = logObjects('act').map((a) => ({ ...a, correction: correctionOf(a), ladder: !!L.classes[a.class] }));
+  return {
+    goals: logObjects('goal').map(goalView).sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99)),
+    roadmap: collectRoadmap(),
+    retro: retroDue(),
+    observations: recent(logObjects('observation').filter((o) => !['reading', 'retro'].includes(o.kind)), 40),
+    clusters: orientClusters(),
+    knowledge: recent(logObjects('knowledge').filter((k) => k.status !== 'retired'), 60),
+    problems: logObjects('problem').filter((p) => p.status !== 'resolved').sort((a, b) => b.severity - a.severity),
+    acts: recent(acts, 60),
+    trust: trustTable(),
+    classes: Object.fromEntries(Object.entries(L.classes).map(([k, v]) => [k, { ...v, rung: rungFor(k) }])),
+    reasons: L.reasons,
+    owner_cli: questions().filter((q) => q.answered_by === 'owner' && q.channel === 'cli').sort((a, b) => b.answered_at.localeCompare(a.answered_at)).slice(0, 10).map((q) => ({ id: q.id, question: q.question, answer: q.answer, at: q.answered_at, autonomy: q.autonomy })),
+    defaulted: questions().filter((q) => q.status === 'defaulted' && Date.now() - Date.parse(q.answered_at) < 14 * DAY),
+    log: { lines: log.lines.length, errors: log.errors.length, ignored: log.ignored.length },
+  };
+}
+function dashboardData() {
+  const settings = loadSettings();
+  const sub = activeTickets();
+  const msgs = logObjects('message');
+  const replied = new Set(msgs.map((m) => m.re).filter(Boolean));
+  return {
+    generated_at: nowIso(), project: settings.project,
+    caps: { max_active_tickets: settings.max_active_tickets, max_active_per_component: settings.max_active_per_component },
+    tickets: deriveStatus(),
+    critical_path: findCycle(sub) ? [] : criticalPath(sub).path,
+    questions: rankQuestions(questions().filter((q) => q.status === 'open')),
+    open_messages: msgs.filter((m) => !['info', 'ruling', 'answer'].includes(m.kind) && !replied.has(m.id)).map((m) => ({ id: m.id, kind: m.kind, actor: m.created_by, to: m.to, summary: m.text })),
+    metrics: collectMetrics(0),
+    progress: collectProgress(),
+    ooda: collectOoda(),
+  };
+}
+const cmdDashboardData = () => out(JSON.stringify(dashboardData()));
+
+// The dashboard: one page, data computed on each request, owner actions only from that page.
+function cmdDashboard() {
+  const port = Number(flagStr('port') ?? loadSettings().dashboard_port);
+  const host = flagStr('host') ?? '127.0.0.1';
+  const page = path.join(devteamDir, 'dashboard', 'index.html');
+  const self = fileURLToPath(import.meta.url);
+  const ownerEnv = { ...process.env, DEVTEAM_CHANNEL: 'dashboard' };
+  delete ownerEnv.DEVTEAM_ROLE;
+  delete ownerEnv.DEVTEAM_TICKET;
+  delete ownerEnv.DEVTEAM_FEATURE;
+  const run = (args) => new Promise((resolve) => execFile(process.execPath, [self, ...args], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: ownerEnv }, (err, stdout, stderr) => resolve({ ok: !err, stdout, stderr })));
+  const ID = /^[a-z]-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
+  const text = (x, max = 4000) => typeof x === 'string' && x.trim() && x.length <= max;
+  const ACTIONS = {
+    answer: (b) => {
+      if (!ID.test(b.id ?? '') || !text(b.answer)) return null;
+      const args = ['answer', b.id, b.answer.trim()];
+      if (b.matched === true) args.push('--matched');
+      if ([1, 2, 3].includes(b.autonomy)) args.push('--autonomy', String(b.autonomy), ...(text(b.scope, 100) ? ['--scope', b.scope.trim()] : []));
+      if (text(b.rule, 600)) args.push('--rule', b.rule.trim());
+      return args;
+    },
+    correct: (b) => (ID.test(b.id ?? '') && text(b.reason, 600) ? ['correct', b.id, '--reason', b.reason.trim()] : null),
+    'goal-approve': (b) => (ID.test(b.id ?? '') ? ['goal', 'approve', b.id] : null),
+    knowledge: (b) => (ID.test(b.id ?? '') && ['accepted', 'retired', 'stale'].includes(b.status) ? ['knowledge', 'set', b.id, '--status', b.status, '--owner'] : null),
+  };
+  const send = (res, code, type, body) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store' }); res.end(body); };
+  const server = http.createServer(async (req, res) => {
+    if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) return send(res, 200, 'text/html; charset=utf-8', fs.readFileSync(page));
+    if (req.method === 'GET' && req.url.startsWith('/api/data')) {
+      const r = await run(['dashboard-data']);
+      return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 500, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
+    }
+    const action = req.method === 'POST' && req.url.startsWith('/api/') ? ACTIONS[req.url.slice(5)] : null;
+    if (!action) return send(res, 404, 'text/plain', 'not found');
+    const okHost = [`127.0.0.1:${port}`, `localhost:${port}`, `${host}:${port}`].includes(req.headers.host ?? '');
+    const site = req.headers['sec-fetch-site'];
+    const origin = req.headers.origin;
+    const sameOrigin = (!site || site === 'same-origin') && (!origin || origin === `http://${req.headers.host}`);
+    if (!okHost || !sameOrigin || !(req.headers['content-type'] ?? '').startsWith('application/json')) return send(res, 403, 'application/json', JSON.stringify({ error: 'owner actions only from this page' }));
+    let body = '';
+    req.on('data', (c) => { body += c; if (body.length > 20000) req.destroy(); });
+    req.on('end', async () => {
+      let parsed;
+      try { parsed = JSON.parse(body || '{}'); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'bad json' })); }
+      const args = action(parsed);
+      if (!args) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
+      const r = await run(args);
+      send(res, r.ok ? 200 : 400, 'application/json', JSON.stringify(r.ok ? { ok: true, out: r.stdout.trim() } : { error: r.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') }));
+    });
+  });
+  server.listen(port, host, () => out(`devteam dashboard on http://${host}:${port}`));
+}
+
+// ===== 11. sessions: workers, planners, messages, phases, gates =====
+
+const PROMPTS = {
+  supervisor: 'You are the supervisor for this repository. Read docs/devteam/README.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for.',
+  worker: 'You are the worker for ticket {{ID}}. Read docs/devteam/README.md, then docs/devteam/process/worker.md, and follow it from §1. Your ticket: node docs/devteam/scripts/devteam.mjs ticket show {{ID}}. Use superpowers for every step; devteam says where files go and what must be true before you ask for the merge.',
+  planner: 'You are planning feature {{ID}} on branch plan/{{ID}}, in this worktree. Read docs/devteam/README.md, then docs/devteam/process/planning.md, and run the pipeline from §2 for this feature. Your tickets and the feature line go to the log with devteam.mjs feature add / ticket add; commit everything as you go; message the supervisor (devteam.mjs send supervisor) when the graph review passes.',
+};
+function cmdPrompt() {
+  const role = positional[0];
+  if (!PROMPTS[role]) die('usage: prompt supervisor|worker <ticket-id>|planner <feature>');
+  const p = PROMPTS[role].replace(/\{\{ID\}\}/g, positional[1] ?? '');
+  const knowledge = role === 'supervisor' ? [] : knowledgeFor(positional[1]);
+  out(knowledge.length ? `${p}\n\nWhat this project has learned that applies here (accepted knowledge):\n${knowledge.map((k) => `- [${k.kind}${k.valence < 0 ? ', avoid' : ''}] ${k.statement} (${k.id})`).join('\n')}` : p);
+}
+
+const tmux = (args) => sh('tmux', args) !== null;
+// The session:window running this command. TMUX_PANE pins it to our own pane.
+const tmuxHere = () => (process.env.TMUX && process.env.TMUX_PANE ? sh('tmux', ['display-message', '-p', '-t', process.env.TMUX_PANE, '#S:#W']) : null);
+const supervisorTarget = () => process.env.DEVTEAM_SUPERVISOR ?? `${loadSettings().tmux_session}:supervisor`;
+const SHELLS = new Set(['bash', 'zsh', 'sh', 'fish', 'dash', 'ksh', 'tcsh', 'csh', 'login']);
+// Resolve a session:window exactly and check an agent, not a bare shell, is running there (typing
+// into a shell would execute the text).
+function resolvePane(target) {
+  const i = target.lastIndexOf(':');
+  const [session, win] = i === -1 ? [target, '0'] : [target.slice(0, i), target.slice(i + 1)];
+  const listed = sh('tmux', ['list-windows', '-t', session, '-F', '#{window_index} #{window_name}']);
+  if (listed === null) return { problem: `no tmux session "${session}"` };
+  const rows = listed.split('\n').filter(Boolean).map((l) => [l.slice(0, l.indexOf(' ')), l.slice(l.indexOf(' ') + 1)]);
+  let row = rows.find(([idx, name]) => name === win || idx === win);
+  if (!row && win === 'supervisor') row = rows.find(([idx]) => idx === '0');
+  if (!row) return { problem: `no tmux window "${win}" in session "${session}"` };
+  const exact = `${session}:${row[0]}`;
+  const info = sh('tmux', ['display-message', '-p', '-t', exact, '#{pane_dead} #{pane_current_command}']);
+  if (info === null) return { problem: `cannot inspect ${exact}` };
+  const [dead, cmd = ''] = info.split(' ');
+  if (dead === '1') return { problem: `the pane in ${exact} has exited` };
+  if (SHELLS.has(cmd.replace(/^-/, ''))) return { problem: `no agent is running in ${exact} (it is at a ${cmd} prompt); resume it first` };
+  return { target: exact };
+}
+const typeInto = (target, line) => tmux(['send-keys', '-t', target, '-l', line]) && tmux(['send-keys', '-t', target, 'Enter']);
+function nudgeSupervisor(line) {
+  const { target, problem } = resolvePane(supervisorTarget());
+  if (problem) return void warn(`not delivered to the supervisor: ${problem}`);
+  typeInto(target, line);
+}
+const myAddress = () => { const w = logWriter(); return w === 'supervisor' ? 'supervisor' : w; };
+
+function cmdSend() {
+  const [to, ...words] = positional;
+  const text = words.join(' ').replace(/\s+/g, ' ').trim();
+  if (!to || !text) die('usage: send <supervisor|ticket-id|plan-<feature>> "<text>" [--kind k] [--re m-…] [--sha s]');
+  const kind = flagStr('kind') ?? 'info';
+  const from = myAddress();
+  if (['ruling', 'answer'].includes(kind) && from !== 'supervisor') die(`only the supervisor sends ${kind} messages`);
+  const target = to === 'supervisor' ? supervisorTarget() : `${loadSettings().tmux_session}:${to}`;
+  const { target: exact, problem } = resolvePane(target);
+  const sha = flagStr('sha') ?? (kind === 'merge-request' ? git(['rev-parse', 'HEAD']) : null);
+  const re = flagStr('re') ?? null;
+  if (re && logGet(re)?.type !== 'message') warn(`--re ${re} matches no logged message`);
+  // The log is the record; the pane is delivery. A recipient whose pane is gone catches up with `messages`.
+  const line = appendLog({ type: 'message', to, kind, text, re, sha, ticket: flagStr('ticket') ?? currentTicketId() ?? (tickets().has(to) ? to : null) }, from);
+  if (problem || !typeInto(exact, `[devteam ${kind} ${line.id} from ${from}${re ? ` re ${re}` : ''}${sha ? ` @ ${sha}` : ''}] ${text}`)) warn(`${line.id} recorded but not delivered to "${to}": ${problem ?? `could not type into ${exact}`}; it shows in their \`messages\``);
+  out(line.id);
+}
+function cmdMessages() {
+  const me = flagStr('to') ?? myAddress();
+  const all = logObjects('message').sort(byTime);
+  const replied = new Set(all.map((m) => m.re).filter(Boolean));
+  let mine = all.filter((m) => m.to === me);
+  if (flags.open) mine = mine.filter((m) => !replied.has(m.id) && !['info', 'ruling', 'answer'].includes(m.kind));
+  mine = mine.slice(-Number(flagStr('tail') ?? 50));
+  if (flags.json) return json(mine);
+  if (!mine.length) return out(flags.open ? 'no open messages' : 'no messages');
+  for (const m of mine) out(`${m.created_at} ${m.id} [${m.kind}] from ${m.created_by}${m.re ? ` re ${m.re}` : ''}${m.sha ? ` @ ${m.sha.slice(0, 12)}` : ''}: ${m.text}`);
+}
+
+// phase <to> [--task t] [--note n] [--usd x --in n --out n]: a worker's phase change, or a liveness
+// ping (same phase). Writes a line only when something changed or the last one is older than 15 min.
+function cmdPhase() {
+  const to = positional[0];
+  const supervisor = to === 'supervisor';
+  const id = supervisor ? 'supervisor' : currentTicketId() ?? die('phase needs DEVTEAM_TICKET or a ticket/<id> branch');
+  if (!to) die('usage: phase <starting|spec|plan|contract|build|verify|final-review|awaiting-word|merging|done|blocked|parked> [--task t] [--note n] [--usd x --in n --out n]');
+  for (const k of ['usd', 'in', 'out']) if (flags[k] !== undefined && !(Number(flagStr(k)) >= 0)) die(`--${k} must be a number ≥ 0`);
+  const prev = logObjects('phase').filter((p) => p.created_by === id).sort(byTime).pop() ?? null;
+  const cost = flags.usd !== undefined || flags.in !== undefined || flags.out !== undefined
+    ? { usd: flagNum('usd') ?? prev?.usd ?? 0, input_tokens: flagNum('in') ?? prev?.input_tokens ?? 0, output_tokens: flagNum('out') ?? prev?.output_tokens ?? 0 }
+    : {};
+  if (supervisor) {
+    if (cost.usd === undefined) die('phase supervisor needs --usd (its cumulative spend)');
+    appendLog({ type: 'phase', from: 'supervisor', to: 'supervisor', ...cost }, 'supervisor');
+    return out('recorded supervisor cost');
+  }
+  const task = flagStr('task') ?? prev?.task;
+  const changed = !prev || prev.to !== to || prev.task !== task || (cost.usd !== undefined && cost.usd !== prev.usd) || flags.note !== undefined;
+  const stale = !prev || Date.now() - Date.parse(prev.created_at) > 15 * 60000;
+  if (!changed && !stale) return out(`phase ${to} (unchanged)`);
+  appendLog({ type: 'phase', from: prev?.to ?? null, to, task, note: flagStr('note')?.slice(0, 280), sha: git(['rev-parse', 'HEAD']) ?? undefined, ...cost }, id);
+  out(`phase ${to}${task ? ` ${task}` : ''}`);
+}
+
+// gate <name> [--junit report.xml] -- <command…>: run a gate and record its time, result and tests.
+function cmdGate() {
+  const name = positional[0];
+  if (!name || !rest?.length) die('usage: gate <name> [--junit <report.xml>] -- <command> [args…]');
+  const started = Date.now();
+  let ok = true;
+  try {
+    execFileSync(rest[0], rest.slice(1), { stdio: 'inherit' });
+  } catch {
+    ok = false;
+  }
+  const tests = readJunit(flagStr('junit'));
+  appendLog({ type: 'gate', gate: name, ok, ms: Date.now() - started, sha: git(['rev-parse', 'HEAD']) ?? undefined, tests_total: tests.length, tests: keepTests(tests) });
+  process.stderr.write(`devteam: gate ${name} ${ok ? 'passed' : 'FAILED'} in ${((Date.now() - started) / 1000).toFixed(1)}s\n`);
+  process.exit(ok ? 0 : 1);
+}
+
+// For an agent's stop hook: exit 2 while the worker's last commit is newer than its last phase line.
+function cmdStopOk() {
+  const id = currentTicketId();
+  if (!id) process.exit(0);
+  const last = logObjects('phase').filter((p) => p.created_by === id).sort(byTime).pop();
+  const commitAt = Date.parse(git(['log', '-1', '--format=%cI']) ?? '');
+  if (last && !['done', 'parked'].includes(last.to) && commitAt > Date.parse(last.created_at) + 60000) {
+    process.stderr.write(`devteam: your last commit is newer than your last phase line; run: devteam.mjs phase ${last.to} [--task …]\n`);
+    process.exit(2);
+  }
+  process.exit(0);
+}
+
+// worker <ticket-id> [--resume] | planner <feature> [--resume]: a git worktree, a tmux window, the
+// agent command from the settings, and the role's prompt (plus the knowledge that applies).
+function makeSession(role) {
+  supervisorOnly(role);
+  const id = positional[0] ?? die(`usage: ${role} <${role === 'worker' ? 'ticket-id' : 'feature'}> [--resume]`);
+  if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
+  if (!sh('tmux', ['-V'])) die('tmux not found');
+  const s = loadSettings();
+  const resume = !!flags.resume;
+  if (role === 'worker' && !tickets().has(id)) die(`no ticket ${id} (devteam.mjs ticket show ${id})`);
+  const name = role === 'worker' ? id : `plan-${id}`;
+  const branch = role === 'worker' ? `ticket/${id}` : `plan/${id}`;
+  const wt = path.join(mainRoot, '.worktrees', name);
+  fs.mkdirSync(path.join(runDir, 'prompts'), { recursive: true });
+  if (!fs.existsSync(wt)) {
+    git(['fetch', '--quiet', 'origin', s.main_branch]);
+    const base = resolveCommit(`origin/${s.main_branch}`) ? `origin/${s.main_branch}` : s.main_branch;
+    if (resolveCommit(`refs/heads/${branch}`)) gitOrDie(['worktree', 'add', '--quiet', wt, branch], mainRoot);
+    else gitOrDie(['worktree', 'add', '--quiet', '-b', branch, wt, base], mainRoot);
+  }
+  const promptFile = path.join(runDir, 'prompts', `${name}.txt`);
+  const knowledge = knowledgeFor(id);
+  fs.writeFileSync(promptFile, PROMPTS[role].replace(/\{\{ID\}\}/g, id) + (knowledge.length ? `\n\nWhat this project has learned that applies here (accepted knowledge):\n${knowledge.map((k) => `- [${k.kind}${k.valence < 0 ? ', avoid' : ''}] ${k.statement} (${k.id})`).join('\n')}` : '') + '\n');
+  if (!tmux(['has-session', '-t', s.tmux_session])) tmux(['new-session', '-d', '-s', s.tmux_session, '-n', 'supervisor', '-c', mainRoot]);
+  const windows = (sh('tmux', ['list-windows', '-t', s.tmux_session, '-F', '#W']) ?? '').split('\n');
+  if (windows.includes(name)) { if (!resume) die(`window ${s.tmux_session}:${name} exists (use --resume to relaunch in it)`); }
+  else tmux(['new-window', '-d', '-t', s.tmux_session, '-n', name, '-c', wt]);
+  const target = `${s.tmux_session}:${name}`;
+  const env = `export DEVTEAM_RUN='${runDir}' DEVTEAM_SUPERVISOR='${s.tmux_session}:supervisor' DEVTEAM_ROLE='${role}' ${role === 'worker' ? `DEVTEAM_TICKET='${id}'` : `DEVTEAM_FEATURE='${id}'`}`;
+  typeInto(target, env);
+  typeInto(target, `${resume ? s.resume_command : s.agent_command} "$(cat '${promptFile}')"`);
+  if (role === 'worker' && !resume) appendLog({ type: 'phase', from: null, to: 'starting', note: `started in ${target}` }, id);
+  appendLog({ type: 'act', actor: 'supervisor', class: 'worker-slots', what: `${resume ? 'resumed' : 'made'} ${role} ${name} in ${target}`, refs: role === 'worker' ? [id] : [], reversible: true }, 'supervisor');
+  out(`${resume ? 'resumed' : 'made'} ${role} ${name} in ${target} at ${wt}`);
+}
+
+function cmdWhoami() {
+  const id = currentTicketId();
+  const s = loadSettings();
+  out([`DEVTEAM_TICKET=${id ?? ''}`, `DEVTEAM_FEATURE=${process.env.DEVTEAM_FEATURE ?? ''}`, `DEVTEAM_ROLE=${process.env.DEVTEAM_ROLE ?? (id ? 'worker' : logWriter().startsWith('plan-') ? 'planner' : 'supervisor')}`, `DEVTEAM_RUN=${runDir}`, `DEVTEAM_SUPERVISOR=${supervisorTarget()}`, `# writer=${logWriter()} repo=${repoRoot} main_checkout=${mainRoot} project=${projectDir} tmux_session=${s.tmux_session}`].join('\n'));
+}
+function cmdSettings() {
+  const s = loadSettings();
+  const key = flagStr('get');
+  if (!key) return json(s);
+  const v = s[key];
+  out(v === null || v === undefined ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v));
+}
+
+// history [<ticket-id>]: what happened around a ticket (or everything), to catch up after a restart.
+function cmdHistory() {
+  const id = positional[0];
+  const scope = id ? new Set([id, ...(tickets().get(id)?.depends_on ?? [])]) : null;
+  const tail = Number(flagStr('tail') ?? 100);
+  const rows = [];
+  for (const o of readLog().objects.values()) {
+    const about = o.type === 'message' ? [o.created_by, o.to, o.ticket] : o.type === 'act' ? o.refs ?? [] : o.type === 'question' ? [o.ticket] : [o.created_by, o.subject];
+    if (scope && !about.some((x) => scope.has(x))) continue;
+    if (['phase', 'gate'].includes(o.type) && !scope) continue;
+    const what = o.question ? `${o.question} → ${questionView(o).answer ?? '(open)'}` : o.what ?? o.text ?? o.detail ?? o.statement ?? o.title ?? (o.type === 'phase' ? `${o.from ?? '-'} -> ${o.to}` : o.type === 'gate' ? `${o.gate} ${o.ok ? 'ok' : 'FAIL'}` : '');
+    rows.push({ at: o.created_at, line: `${o.created_at} ${o.type.padEnd(11)} ${o.created_by.padEnd(22)} ${String(what).slice(0, 140)}${o.type === 'act' && correctionOf(o) ? `  CORRECTED: ${correctionOf(o).reason}` : ''}` });
+  }
+  for (const r of rows.sort((a, b) => a.at.localeCompare(b.at)).slice(-tail)) out(r.line);
+}
+
+// Story-grouped release notes between two refs, from the fold.
+function cmdNotes() {
+  const [from, to = 'HEAD'] = positional;
+  if (!from) die('usage: notes <from-tag> [<to-ref>]');
+  const log = git(['log', `${from}..${to}`, '--format=%s']) ?? die(`cannot read git log ${from}..${to}`);
+  const ts = tickets();
+  const landed = new Set();
+  for (const s of log.split('\n')) { const m = s.match(/from \S*ticket\/([a-z0-9-]+)$/) ?? s.match(/^([a-z][a-z0-9-]*-\d{2,}-[a-z0-9-]+):/); if (m && ts.has(m[1])) landed.add(m[1]); }
+  const landedBy = (id) => landed.has(id) || (!!mergeShaFor(id) && git(['merge-base', '--is-ancestor', mergeShaFor(id), to]) !== null);
+  const stories = new Map();
+  for (const id of landed) for (const s of ts.get(id).serves ?? []) (stories.get(s) ?? stories.set(s, []).get(s)).push(id);
+  const completed = [];
+  const advanced = [];
+  for (const [s, ids] of stories) {
+    const all = [...ts.values()].filter((t) => isActive(t) && (t.serves ?? []).includes(s));
+    (all.every((t) => landedBy(t.id)) ? completed : advanced).push({ s, ids, total: all.length, done: all.filter((t) => landedBy(t.id)).length });
+  }
+  const line = (x) => `- **${x.s}** (${x.done}/${x.total} tickets): ${x.ids.join(', ')}`;
+  out(`## Stories completed\n\n${completed.map(line).join('\n') || '- none'}\n\n## Stories advanced\n\n${advanced.map(line).join('\n') || '- none'}`);
+  const chores = [...landed].filter((id) => !(ts.get(id).serves ?? []).length);
+  if (chores.length) out(`\n## Other\n\n${chores.map((id) => `- ${id}: ${ts.get(id).title}`).join('\n')}`);
+}
+
+// ===== 12. init, help, dispatch =====
+
+const ARCHITECTURE_MD = `# Architecture
+
+The whole system as planned now: the sum of every design so far. Written at bootstrap (from the code when adopting an existing codebase), then updated by every plan PR that changes something described here. Every design's research starts here. A feature's changes appear here when its plan lands; whether they have landed in code is computed from its tickets.
+
+## 1. Components
+
+| Component | Path | Stack | Owns | Talks to |
+|---|---|---|---|---|
+
+## 2. Contracts
+
+| Contract | Provider | Consumers | Defined in | Versioned? |
+|---|---|---|---|---|
+
+## 3. Persistence
+
+| Domain | Store | Tier (code-style.md §4) | Notes |
+|---|---|---|---|
+
+## 4. Dependencies and deployment
+
+| Dependency or vendor | Used for | One-way door? |
+|---|---|---|
+
+## 5. Distance from the code rules
+
+| Component | Laws met | Laws violated (how widely) | Gate mode |
+|---|---|---|---|
+
+## 6. Hotspots
+
+| Path | Why it is hot |
+|---|---|
+
+## 7. Tests and CI
+
+## 8. In flight at adoption
+
+| PR / branch | Files | Decision |
+|---|---|---|
+
+## 9. Changed by
+
+| Feature | Design | Date | What changed |
+|---|---|---|---|
+`;
+const WORKFLOW_YML = `# devteam: an optional required check. The supervisor's \`merge\` runs the same checks; this makes GitHub refuse a merge that skipped it.
+name: devteam
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+permissions:
+  contents: read
+jobs:
+  check-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0, ref: \${{ github.event.pull_request.head.sha }} }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: git fetch --no-tags origin "+refs/heads/\${{ github.base_ref }}:refs/remotes/origin/\${{ github.base_ref }}"
+      - env:
+          HEAD_REF: \${{ github.head_ref }}
+          HEAD_SHA: \${{ github.event.pull_request.head.sha }}
+          PR_TITLE: \${{ github.event.pull_request.title }}
+          PR_BODY: \${{ github.event.pull_request.body }}
+        run: |
+          printf '%s' "$PR_BODY" > "$RUNNER_TEMP/pr-body.md"
+          node docs/devteam/scripts/devteam.mjs check-pr --head-ref "$HEAD_REF" --sha "$HEAD_SHA" --title "$PR_TITLE" --body-file "$RUNNER_TEMP/pr-body.md"
+`;
+
+// init [--name project] [--upstream-base vX.Y.Z] [--github] [--agent claude]: the project folders,
+// settings, .gitignore entries, the AGENTS.md pointer; optionally the GitHub check and agent config.
+function cmdInit() {
+  const root = mainRoot;
+  const made = [];
+  const put = (p, text) => { if (!fs.existsSync(p)) { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, text); made.push(path.relative(root, p)); } };
+  const block = { project: flagStr('name') ?? path.basename(root), upstream_base: flagStr('upstream-base') ?? null, components: {}, gates: {} };
+  put(path.join(projectDir, 'settings.md'), `# Project settings\n\nOnly what this project changes; every setting has a default in scripts/devteam.mjs (\`devteam.mjs settings\` shows the result). Below the block, record project-specific answers to the decisions the governance docs leave open (components and stacks, persistence tiers, one-way doors, release tags, how to notify the owner), each with its date.\n\n\`\`\`json devteam\n${JSON.stringify(block, null, 2)}\n\`\`\`\n`);
+  put(path.join(projectDir, 'designs', 'architecture.md'), ARCHITECTURE_MD);
+  for (const d of ['log', 'retros', 'tickets', 'reviews']) put(path.join(projectDir, d, '.gitkeep'), '');
+  const gi = path.join(root, '.gitignore');
+  const giText = readText(gi) ?? '';
+  const want = [`${path.relative(root, runDir).split(path.sep).join('/')}/`, '.worktrees/'];
+  const add = want.filter((w) => !giText.split('\n').includes(w));
+  if (add.length) { fs.writeFileSync(gi, `${giText}${giText && !giText.endsWith('\n') ? '\n' : ''}${add.join('\n')}\n`); made.push('.gitignore'); }
+  const agents = path.join(root, 'AGENTS.md');
+  const pointer = '## devteam\n\nThis repository runs on devteam. Start at `docs/devteam/README.md`; it names the doc for your role. The log (`node docs/devteam/scripts/devteam.mjs log`) and the tracked files are the record.\n';
+  if (!fs.existsSync(agents)) { fs.writeFileSync(agents, `# Agents\n\n${pointer}`); made.push('AGENTS.md'); }
+  else if (!readText(agents).includes('docs/devteam/README.md')) { fs.appendFileSync(agents, `\n${pointer}`); made.push('AGENTS.md'); }
+  if (flags.github) put(path.join(root, '.github', 'workflows', 'devteam.yml'), WORKFLOW_YML);
+  if (flagStr('agent') === 'claude') {
+    const p = path.join(root, '.claude', 'settings.json');
+    const cfg = { permissions: { deny: SETTINGS_DEFAULTS.worker_denied_commands.map((c) => `Bash(${c}*)`) }, hooks: { Stop: [{ hooks: [{ type: 'command', command: 'node docs/devteam/scripts/devteam.mjs stop-ok' }] }] } };
+    if (!fs.existsSync(p)) put(p, `${JSON.stringify(cfg, null, 2)}\n`);
+    else out(`.claude/settings.json exists; add by hand:\n${JSON.stringify(cfg, null, 2)}`);
+  }
+  out(made.length ? `created:\n${made.map((m) => `  ${m}`).join('\n')}` : 'nothing to create');
+  out('next: fill settings (components, agent_command, gates), write designs/architecture.md from the code, then start the supervisor (README.md, Setup)');
+}
+
+const HELP = `devteam <command>   (positionals before flags; flags take the words after them)
+
+Setup and roles
+  init [--name n] [--upstream-base vX] [--github] [--agent claude]   project folders, settings, .gitignore, AGENTS.md pointer
+  prompt supervisor | worker <id> | planner <feature>    the prompt a session starts with
+  worker <ticket-id> [--resume] | planner <feature> [--resume]   supervisor: a worktree, a tmux window and an agent for a ticket or a feature plan
+  whoami | settings [--get key]
+
+The graph (planning.md)
+  feature add|set|show <slug> --json '{…}' | --file f    a feature: goals, preconditions, stories with releases, design
+  ticket add|set|show <id> --json '{…}' | --file f       a ticket: one PR of work
+  validate [--strict]            graph rules D1-D11, reviews, goals, log health
+  waves [--feature f] | ready [--plan-ahead] | status [--json] | roadmap [--json]
+
+Checks and merging (quality.md)
+  check-ticket <id> [--sha s] [--title t] [--body-file f] [--pr n]   definition of done at an exact head
+  check-pr --head-ref r --sha s [--title t] [--body-file f]           what CI runs (optional)
+  merge <ticket-id> | merge --plan <feature> | merge --chore <slug> [--no-gates] [--dry-run]   supervisor: verify, run gates at the head, merge, log the act
+
+Sessions (worker.md)
+  phase <to> [--task t] [--note n] [--usd x --in n --out n]   phase change or liveness ping; phase supervisor --usd x
+  gate <name> [--junit f] -- <cmd…>   run a gate and record it
+  send <to> "<text>" [--kind k] [--re m-…] [--sha s] | messages [--open] [--to x] [--json]
+  stop-ok                         for a stop hook: refuses while the last commit is newer than the last phase line
+
+Decide and act (supervisor.md, constitution.md)
+  ask --question q [--kind k] [--class c] [--reasons r…] [--recommendation r] [--confidence 0-1] [--default d] [--options a b] [--blocks ids] [--evidence ids] [--ticket id] [--re m-…] [--note path]
+  answer <qid> "<text>" [--matched] [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> --defaulted
+  withdraw <qid> [--reason r] | questions [--all] [--id q] [--json]
+  act --class c [--scope s] [--approved qid] [--refs ids] [--irreversible] -- "<what>"
+  correct <act-id> --reason r [--severity n]   (owner; --retro for the supervisor) | repair <act-id> --how undo|fix-ticket|none
+  trust [--json]                  the ladder: rung, ceiling, agreement, corrections per class
+
+Observe and orient
   observe --subject s --kind k --detail d [--severity 0-4] [--valence -2..2] [--key k] [--refs ids] [--fix f] [--value n --unit u]
-  observe-metrics                 supervisor: record metrics findings as observations (deduped daily)
-  orient [--json]                 recurring signals not yet explained by knowledge or a problem
-  knowledge [--status s] [--kind k] | knowledge --for <ticket|class> | knowledge add … | knowledge set <id> …
+  observe-metrics | orient [--json] | metrics [--since date] [--json]
+  knowledge [--status s] [--kind k] | knowledge --for <ticket|feature|class> | knowledge add|set …
   problem [--all] | problem add --title t --severity n [--risk] [--threatens g…] | problem set <id> …
-  act --class c [--scope s] [--approved qid] [--refs ids] [--irreversible] -- "<what>"   supervisor; refuses below rung 3 without approval
-  correct <act-id> --reason r [--severity n] [--repair undo|fix-ticket|none]   owner (supervisor: --retro)
-  seen [--upto time]              owner: mark the act feed read
-  trust [--json]                  the trust ladder: rung, ceiling, evidence per class (governance/autonomy.md)
-  goal [list|check|add|set|approve|status|reading|plan] …   goals, their readiness, and goal plans (process/planning.md §0)
-  roadmap [--json]                goals by priority with unplanned preconditions, features, waves, releases, estimated finish
-  retro [--due | --print | close <date> --summary s --refs ids]   draft a retro in a chore worktree; record it (process/improvement.md §3.1)
-  chore-start <slug> | chore-pr <slug> --title t   a supervisor chore in its own worktree, and its PR
 
-Run state and history
-  heartbeat [--phase p] [--task t] [--note n] [--usd x --in n --out n --cost-source s] [--supervisor]
-  event --type t [--ticket id] [--sha s] [--summary s] [--ref r]
-  history [<id>] [--tail n]       events and answered questions, to catch up on history
+Goals and retros
+  goal [list|check|show|add|set|approve|status|reading] …
+  retro [--due | --print | close <date> --summary s --refs ids]
+  chore start <slug> | chore pr <slug> --title t    a supervisor-written file (design, retro, architecture) and its PR
 
-Improvement and analytics (process/improvement.md)
-  gate <name> [--junit report.xml] -- <command…>   run a gate, recording time, pass/fail and test results
-  metrics [--since date] [--json] time and cost by phase, gates, reviews, coordination, findings
-  dashboard-data [--since date] [--json]   write run/dashboard.json for the dashboard
+The log
+  log [--type t] [--by w] [--id x] [--tail n] [--json] | log-check | log-sync [--dry-run] | history [<ticket-id>]
 
-Other
-  notes <from-tag> [<to>]         story-grouped release notes
-  whoami                          derived DEVTEAM_* environment
-  settings [--get key]             the project's machine-readable settings
-
-Global: --project <dir> overrides docs/devteam/project.
+Dashboard and releases
+  dashboard [--port p] [--host h] | dashboard-data | notes <from-tag> [<to>]
 `;
 
 const COMMANDS = {
-  validate: cmdValidate,
-  ready: cmdReady,
-  waves: cmdWaves,
-  status: cmdStatus,
-  'check-ticket': cmdCheckTicket,
-  'check-pr': cmdCheckPr,
-  ask: cmdAsk,
-  answer: cmdAnswer,
-  questions: cmdQuestions,
-  withdraw: cmdWithdraw,
-  log: cmdLog,
-  'log-check': cmdLogCheck,
-  'log-sync': cmdLogSync,
-  observe: cmdObserve,
-  'observe-metrics': cmdObserveMetrics,
-  orient: cmdOrient,
-  knowledge: cmdKnowledge,
-  problem: cmdProblem,
-  act: cmdAct,
-  correct: cmdCorrect,
-  seen: cmdSeen,
-  trust: cmdTrust,
-  goal: cmdGoal,
-  goals: cmdGoal,
-  retro: cmdRetro,
-  roadmap: cmdRoadmap,
-  'chore-pr': cmdChorePr,
-  'chore-start': cmdChoreStart,
-  send: cmdSend,
-  messages: cmdMessages,
-  recorded: cmdRecorded,
-  heartbeat: cmdHeartbeat,
-  event: cmdEvent,
-  history: cmdHistory,
-  notes: cmdNotes,
-  metrics: cmdMetrics,
-  gate: cmdGate,
-  'dashboard-data': cmdDashboardData,
-  whoami: cmdWhoami,
-  settings: cmdSettings,
+  init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), whoami: cmdWhoami, settings: cmdSettings,
+  feature: cmdFeature, ticket: cmdTicket, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, roadmap: cmdRoadmap,
+  'check-ticket': cmdCheckTicket, 'check-pr': cmdCheckPr, merge: cmdMerge,
+  phase: cmdPhase, gate: cmdGate, send: cmdSend, messages: cmdMessages, 'stop-ok': cmdStopOk,
+  ask: cmdAsk, answer: cmdAnswer, withdraw: cmdWithdraw, questions: cmdQuestions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
+  observe: cmdObserve, 'observe-metrics': cmdObserveMetrics, orient: cmdOrient, metrics: cmdMetrics, knowledge: cmdKnowledge, problem: cmdProblem,
+  goal: cmdGoal, goals: cmdGoal, retro: cmdRetro, chore: cmdChore,
+  log: cmdLog, 'log-check': cmdLogCheck, 'log-sync': cmdLogSync, history: cmdHistory,
+  dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes,
 };
-
-if (!command || command === 'help' || command === '--help') process.stdout.write(HELP);
+if (!command || command === 'help' || command === '--help') out(HELP);
 else if (!COMMANDS[command]) die(`unknown command "${command}"\n${HELP}`);
 else COMMANDS[command]();

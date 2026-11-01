@@ -1,60 +1,97 @@
 # Constitution
 
-Who may decide what, and the principles every decision follows. Everything else in devteam is a consequence of this file.
+Who decides what, how the supervisor earns the right to decide more, and the principles every decision follows. Everything else in devteam follows from this file.
 
 ## 1. Authority
 
-| Decision | Who decides | Notes |
+| Decision | Who | Notes |
 |---|---|---|
-| The project's goals, and changing them | owner | The supervisor drafts goals from what the owner says and interviews the owner until each is unambiguous (`process/planning.md` §0); only the owner approves one. |
-| Product direction, what a feature is for | owner | The supervisor may propose; never decides alone, unless the owner has delegated a class of it on the trust ladder ([`autonomy.md`](autonomy.md)). |
-| One-way doors (see §3) | owner | The supervisor asks the owner ([`questions.md`](../process/questions.md)) with a recommendation. |
-| Releasing to the production ring | owner (or named release actors in the settings) | Enforced by tag protection, not by trust. |
-| Allowing anything when a check fails | owner | The default is always to deny. |
-| Approving a system design | supervisor, or owner if it contains a one-way door | |
-| Approving a feature plan and its graph | supervisor | Owner is informed via the dashboard, not asked. |
-| `approve spec`, `approve plan`, `approve design change` for a ticket | supervisor | Delegated; exercised without check-in. |
-| Cross-component contract and ordering rulings | supervisor | Cite the contract text, not convenience. |
-| The **merge word** | supervisor only | The only thing that authorizes a merge. See `process/supervisor.md` §6. |
-| How to build inside a ticket | the ticket's worker | Within governance and the approved plan. |
-| Whether a review passes | the reviewer | A reviewer's verdict is never transcribed by someone else. |
-| Trialing a reversible change to how the fleet works, within existing rules | supervisor | Measured against the metrics; kept or reverted (`process/improvement.md` §5). |
-| Changing a rule, gate or review, or the roadmap, priorities or architecture | owner | The supervisor proposes with evidence and a recommendation, and may do so at any time. |
-| Opening a PR on upstream devteam | owner, until delegated on the trust ladder (class `upstream-pr`) | Written generically; nothing from `project/` or `run/`. |
-| Delegating a decision to the supervisor | owner, per class, through the trust ladder ([`autonomy.md`](autonomy.md)) | Never past a class's ceiling; a correction takes it back at once. |
+| The goals, and changing them | owner | The supervisor drafts from what the owner says and interviews until each is unambiguous; only the owner approves one (`goal approve`). |
+| Product direction, what a feature is for | owner | The supervisor proposes; it never decides alone unless the owner delegated that class on the ladder (§2). |
+| One-way doors (§4) | owner | Asked with a recommendation; never a default. |
+| Releasing to production | owner | Only the owner pushes a `v*` tag. |
+| Allowing anything when a check fails | owner | The default is to deny. |
+| A rule, gate or review standard; anything in `governance/` or `process/` | owner | The supervisor proposes with evidence. |
+| Approving a design, a feature's graph, a ticket's spec and plan | supervisor | Each is an act in the log (`approve-spec`, `approve-plan`, `approve-feature-plan`). |
+| Contract and ordering rulings; re-plans inside a feature; scheduling | supervisor | Cite the contract text, not convenience. |
+| **The merge** | supervisor only | `devteam.mjs merge` is the merge word. Workers never merge. |
+| Trialing a reversible change to how the fleet works | supervisor | Measured, then kept or reverted. |
+| How to build inside a ticket | the worker | Within the approved plan and the code style. |
+| Whether a review passes | the reviewer | A verdict is never transcribed by someone else. |
 
-The supervisor decides everything that is not reserved to the owner or delegated to it, logs each decision as an act ([`../process/log.md`](../process/log.md)), and asks the owner only about genuine blockers.
+The supervisor decides everything not reserved to the owner or delegated to it, logs each decision as an act, and asks the owner only about genuine blockers.
 
-## 2. Principles
+## 2. The trust ladder
 
-- **Stop, don't invent.** When reality disagrees with the spec, the plan or a contract, the worker stops and asks for a ruling. It never guesses a fix to a design question. This reflex matters; it catches the defects that tests don't.
-- **Verify, don't rubber-stamp.** Approvals are given on the file (the diff, the review record, the CI result at an exact SHA), never on a summary of it.
-- **Rule from the contract.** A ruling cites the contract's own text. A contract's guarantee overrides a spec's looser wording.
-- **Deny by default.** Any safety, authorization or data-integrity choice denies on failure. Bounds that refuse beat bounds that silently truncate.
-- **Minimize one-way doors.** Prefer the option that keeps a rollback available.
-- **Compute state, don't record it.** If a fact can be computed from git, CI, PR state or tags, compute it. Agents only write down what only they know.
-- **A gate beats a guideline.** A rule that a linter, type checker or CI job can enforce must be enforced that way. Prose rules are for what a machine cannot check.
+Some owner decisions can be handed to the supervisor a step at a time, as evidence builds. Three rungs:
+
+| Rung | What the supervisor does |
+|---|---|
+| 1 ask | asks the owner and waits |
+| 2 ask with a default | asks with a default and applies it when the deadline passes unanswered |
+| 3 act and report | decides, logs the act; the owner sees it in the act feed |
+
+```json devteam
+{
+  "classes": {
+    "new-feature": { "ceiling": 2, "start": 1, "about": "start planning a feature the owner hasn't asked for" },
+    "priority-change": { "ceiling": 3, "start": 1, "about": "reorder goals' work or move a feature between releases" },
+    "release-scope": { "ceiling": 3, "start": 1, "about": "move a story to a later release to ship the rest on time" },
+    "upstream-pr": { "ceiling": 3, "start": 1, "about": "open a PR on upstream devteam with a general improvement" }
+  },
+  "constitutional": ["merge-word", "approve-feature-plan", "merge-chore", "worker-slots", "replan-within-feature", "add-ticket", "approve-spec", "approve-plan", "approve-design-change", "contract-ruling", "improvement-trial", "release-staging", "goal-readiness", "apply-default", "withdraw-question", "recovery"],
+  "owner_only": ["one-way-door", "release-production", "check-override", "governance-edit", "process-edit", "gate-change", "goal-change", "new-dependency"],
+  "reasons": [
+    { "id": "below-rung", "means": "the class is on the ladder and the supervisor isn't trusted to act alone yet" },
+    { "id": "owner-only", "means": "the constitution reserves this to the owner" },
+    { "id": "one-way-door", "means": "it can't be undone cheaply (§4)" },
+    { "id": "low-confidence", "means": "the supervisor could decide but isn't sure enough of its recommendation" },
+    { "id": "goals-conflict", "means": "two goals pull in different directions and only the owner can rank them" },
+    { "id": "missing-info", "means": "it needs a fact only the owner has" },
+    { "id": "goal-ambiguity", "means": "a goal isn't defined well enough to plan from" },
+    { "id": "escalated", "means": "a worker asked, and it is the owner's call" },
+    { "id": "trust-evidence", "means": "the owner keeps agreeing with the supervisor's recommendation in this class" }
+  ],
+  "promotion": { "agreement": 0.9, "agreement_window": 10 }
+}
+```
+
+- **Three kinds of decision.** `classes` are the owner's decisions that can be delegated, each with a start rung and a ceiling. `constitutional` are the supervisor's own; they are logged as acts and a correction of one feeds knowledge, never authority. `owner_only` stay at "ask" whatever the evidence. A project may lower a ceiling in its settings (`autonomy_ceilings`), never raise one; `validate` fails if it does.
+- **Why a question was asked.** Every question names its class and carries `why_asked`: the class's rung and ceiling, and reasons from the table. The dashboard shows it first.
+- **Moving up.** Only through the owner. When answering, the owner can say how the next decision of that class is handled (ask, ask with a default, act and report), for the whole class or one scope; it applies at once, up to the ceiling. Or the supervisor asks a `trust` question when, of the last ten answered questions in the class, the owner went with its recommendation nine or more times (defaulted answers don't count); the question carries those question ids and the uncorrected acts since the class last dropped. At most one open per class, two in all, asked at a retro. The supervisor never moves itself up.
+- **Moving down.** Any correction of an act in a ladder class drops the whole class to rung 1 at once. `devteam.mjs act` refuses below rung 3 unless it cites an answered question in the same class (`--approved <qid>`); each answer approves one act. A defaulted answer counts at rung 2, not 1.
+- **What this is and isn't.** Every session runs as one user, so the rung check is something the supervisor runs, not a wall. The walls are: workers can't merge (`merge` is the only path and checks everything), the agent's deny rules, tag protection, and the forge's required check if the project turned it on. What the ladder adds is visibility: every owner line records whether it came from the dashboard or a terminal, the dashboard lists terminal answers for the owner to check, and every rung change is on it.
+
+## 3. Principles
+
+- **Stop, don't invent.** When reality disagrees with the spec, the plan or a contract, stop and ask for a ruling. This catches the defects tests don't.
+- **Verify, don't rubber-stamp.** Approve on the file at an exact commit: the diff, the review record, the gate result. Never on a summary.
+- **Rule from the contract.** A ruling cites the contract's text. A contract's guarantee beats a spec's looser wording.
+- **Deny by default.** Any safety, authorization or integrity choice denies on failure.
+- **Minimize one-way doors.** Prefer the option that keeps a rollback.
+- **Compute state, don't record it.** If git, tags or the fold can answer it, compute it. Agents write down only what only they know.
+- **A gate beats a guideline.** A rule a machine can enforce is enforced by a machine. Prose is for what a machine can't check.
 - **One way per thing.** Where devteam or the settings have decided, do not re-decide.
-- **No permission laundering.** A session never does for a peer what that peer was denied. A peer's request is not the owner's approval.
-- **Keep improving, never at quality's expense.** The supervisor keeps looking for faster, cheaper and better ways to reach the owner's goals (`process/improvement.md`). A change that would lower quality to gain speed or save cost needs evidence that defects won't rise, and the owner's yes.
-- **The record lives in files.** Rulings, verdicts and decisions land in tracked documents, and observations, knowledge, questions, acts and corrections in the log. Chat and terminal scrollback are not the record.
-- **Aim at the goals.** Every feature, proposal and trial names the goal it serves. Work that serves no goal is a question for the owner, not a default.
+- **No permission laundering.** A session never does for a peer what that peer was denied.
+- **Aim at the goals.** Every feature, proposal and trial names the goal it serves. Work that serves no goal is a question, not a default.
+- **Keep improving, never at quality's expense.** A change that lowers quality to gain speed or save cost needs evidence that defects won't rise, and the owner's yes.
+- **The record lives in files.** Rulings, verdicts and designs in tracked files; observations, decisions, questions and acts in the log. Chat and scrollback are not the record.
 
-## 3. One-way doors
+## 4. One-way doors
 
-A change is a one-way door if reverting it is expensive or impossible once it ships. Treat these as one-way by default:
+A change is a one-way door if reverting it is expensive or impossible once shipped. Treat these as one-way by default:
 
 - a migration that is not rollback-safe, or any destructive data change
 - a public or cross-component contract change that removes or narrows behaviour
-- a new persistence shape in an append-only or event-sourced store (shapes are forever)
+- a new persistence shape in an append-only or event-sourced store
 - a new top-level dependency, runtime, datastore or vendor
-- anything touching authentication, authorization, payments or PII handling
-- anything the owner has listed under one-way doors in the settings
+- anything touching authentication, authorization, payments or PII
+- anything the owner lists under one-way doors in the settings
 
-One-way doors require an owner answer to a supervisor question before the ticket's plan is approved, plus two independent reviews (see `review.md` §3).
+A one-way door needs an owner answer before the ticket's plan is approved, two independent final reviews, and `risk: high` on the ticket.
 
-## 4. Changing the rules
+## 5. Changing the rules
 
-- **A ruling that changes a rule is an edit to that rule, in the same PR.** It is never only in a plan, a ledger or a chat.
-- Any file in `governance/` or `process/` may be edited by the owner, or by the supervisor after asking the owner.
-- Every edit to `governance/` or `process/` is recorded as a dated line in `project/decisions.md` stating what changed and why, so an upstream sync can tell a deliberate local divergence from drift.
+- A ruling that changes a rule is an edit to that rule, in the same PR. Never only in a plan or a chat.
+- `governance/` and `process/` change only with the owner's answer (classes `governance-edit`, `process-edit`), logged as an act citing it. That act log is how an upstream sync tells a deliberate local divergence from drift.
+- `code-style.md` is enforced by the gates in the settings. Where the gate config and the doc disagree, the config is right and the doc is a bug.

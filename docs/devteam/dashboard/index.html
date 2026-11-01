@@ -149,7 +149,6 @@
   <div class="scroll"><table id="trust"></table></div>
 
   <h2>Acts</h2>
-  <div class="row-inline" style="margin:0 0 10px"><button class="ghost" id="seen">Mark seen</button><span class="muted small" id="seen-note"></span></div>
   <div class="feed" id="acts"></div>
 
   <h2>Unanswered messages</h2>
@@ -397,20 +396,16 @@ function renderOoda(o) {
     '<p class="muted">None.</p>';
 
   // Decide: trust ladder
-  $('trust').innerHTML = '<tr><th>Class</th><th>Rung</th><th>Ceiling</th><th>Clean acts</th><th>Agreement</th><th>Corrections</th><th></th></tr>' + o.trust.map((t) => `
-    <tr><td>${esc(t.class)}</td><td>${t.rung} · ${esc(t.rung_name)}</td><td>${t.ceiling}</td><td>${t.clean_acts.length}${t.clean_span_days ? ` over ${t.clean_span_days}d` : ''}</td><td>${t.agreement == null ? '–' : `${Math.round(t.agreement * 100)}%`}</td><td>${t.corrections}</td><td>${t.can_ask ? '<span class="badge good">evidence supports a step up</span>' : ''}</td></tr>`).join('');
+  $('trust').innerHTML = '<tr><th>Class</th><th>Rung</th><th>Ceiling</th><th>Agreement</th><th>Acts since drop</th><th>Corrections</th><th></th></tr>' + o.trust.map((t) => `
+    <tr><td>${esc(t.class)}<div class="muted small">${esc(t.about || '')}</div></td><td>${t.rung} · ${esc(t.rung_name)}</td><td>${t.ceiling}</td><td>${t.agreement == null ? '–' : `${Math.round(t.agreement * 100)}% of ${t.agreement_questions.length}`}</td><td>${t.acts_since_drop}</td><td>${t.corrections}</td><td>${t.can_ask ? '<span class="badge good">evidence supports a trust question</span>' : ''}</td></tr>`).join('');
 
   // Act
-  const A = o.acts;
-  $('seen-note').textContent = `unseen ${A.unseen_total}${A.unseen_total > A.unseen.length ? ` (oldest ${A.unseen.length} shown)` : ''}${o.seen_upto ? ` · seen to ${when(o.seen_upto)}` : ''}`;
-  $('seen').hidden = !A.unseen.length;
-  $('seen').dataset.upto = A.unseen.length ? A.unseen[A.unseen.length - 1].created_at : '';
-  const feed = [...A.unseen.slice().reverse(), ...A.seen];
+  const feed = o.acts;
   $('acts').innerHTML = feed.length ? feed.map((a) => `
     <div class="card small ${a.correction ? 'corrected' : ''}">
       <div><span class="badge ${a.ladder ? 'medium' : 'low'}">${esc(a.class)}${a.scope ? ` · ${esc(a.scope)}` : ''}</span>${esc(a.what)}
-        <div class="muted">${when(a.created_at)}${a.approved_by ? ` · approved by ${esc(a.approved_by)}` : a.rung ? ` · rung ${a.rung}` : ''}${a.reversible === false ? ' · irreversible' : ''}${a.seen ? ' · seen' : ''}</div>
-        ${a.correction ? `<div class="err">corrected: ${esc(a.correction.reason)}</div>` : ''}
+        <div class="muted">${when(a.created_at)}${a.approved_by ? ` · approved by ${esc(a.approved_by)}` : a.rung ? ` · rung ${a.rung}` : ''}${a.reversible === false ? ' · irreversible' : ''}</div>
+        ${a.correction ? `<div class="err">corrected (${esc(a.correction.by)}, severity ${a.correction.severity ?? '–'}): ${esc(a.correction.reason)}${a.correction.repaired ? ` · ${esc(a.correction.repaired)}` : ''}</div>` : ''}
         <div class="row-inline" hidden data-correct-form="${esc(a.id)}"><input type="text" data-reason="${esc(a.id)}" placeholder="Reason"><button class="ghost" data-correct-send="${esc(a.id)}">Send</button><span class="err" id="e-${esc(a.id)}"></span></div>
       </div>
       ${a.correction ? '' : `<button class="ghost" data-correct="${esc(a.id)}">Correct</button>`}
@@ -560,7 +555,6 @@ document.addEventListener('click', async (ev) => {
     const reason = document.querySelector(`input[data-reason="${id}"]`).value;
     return void post('correct', { id, reason }, id);
   }
-  if (ev.target.id === 'seen' && ev.target.dataset.upto) return void post('seen', { upto: ev.target.dataset.upto });
 });
 
 load();
