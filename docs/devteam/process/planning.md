@@ -1,0 +1,121 @@
+# Planning
+
+How a goal becomes a design, the design a roadmap, and the roadmap a graph of tickets the supervisor can schedule. Planning is reviewed as hard as code: if the graph is wrong, everything after it is wrong.
+
+```
+goal (owner) → design (per goal) → features, stories, releases (the roadmap) → tickets (the graph) → workers
+```
+
+The supervisor plans itself or makes a planner (`devteam.mjs planner <feature>`), a session in its own worktree on branch `plan/<feature>`. Everything a planner produces lands through one reviewed PR: the design, the architecture update, the review records, and `project/log/plan-<feature>.jsonl` holding the feature and its tickets. Nothing is schedulable until that PR merges.
+
+## 1. Goals
+
+The owner states the goals, in whatever words. The supervisor drafts them (`devteam.mjs goal add --title … --outcome …`) and only the owner approves one (`goal approve`, or the dashboard). Keep three to five active.
+
+A goal is **ready** when it has: an outcome (what is true for users or the business when it's met), a measure with a numeric target, unit and direction, a horizon date, at least one non-goal, the preconditions that must hold for the outcome, a priority distinct from the other goals, and a baseline reading (`goal reading <id> --value n`). `devteam.mjs goal check` lists what's missing.
+
+**The readiness interview.** While a goal has gaps, or any ambiguity in the supervisor's judgment (an undefined term, two readings of the measure, a conflict with another goal), the supervisor asks one `goal-definition` question per goal listing every gap as a form, records the answers (`goal set`), and repeats until `goal check` is clean. Then the owner approves. Changing an approved goal is the owner's (`goal-change`, owner-only).
+
+**Readings.** At each retro the supervisor records a reading from CI, metrics or releases where the measure allows. On track or behind is computed from the readings, the target and the horizon.
+
+## 2. The design
+
+One design per goal at `project/designs/<goal-slug>.md` (the slug `goal check` prints). Write it with superpowers' **brainstorming**, saving there instead of its default location. It must cover what brainstorming already asks for (intent and why; goals, non-goals, anti-goals; constraints; the approaches considered and the one chosen; what's decided and what's left to the builder) plus:
+
+- the reverse chain: for each precondition of the goal, why it must hold, what says it doesn't yet, and which feature will make it hold;
+- components and boundaries, and every contract that crosses one (each becomes a contract ticket);
+- data: new or changed persistence with its tier (`code-style.md` §4), migrations and rollback safety;
+- failure modes, security and PII;
+- one-way doors, each an owner question before any plan is approved;
+- risks and unknowns that survive, each a spike ticket or a question;
+- what changes in `project/designs/architecture.md`, applied to that file in the same PR, with a row in its Changed by table.
+
+The design is shaped by the constitution and the code style: it chooses the option that keeps a rollback, that makes a gate possible, that fits the doctrine's structure. Research starts from `architecture.md` and the accepted knowledge (`devteam.mjs knowledge --for <feature>`), and cites file paths. The design is reviewed (`project/reviews/<goal-slug>/design-1.md`, `quality.md` §3) before any feature is written from it.
+
+## 3. The roadmap: features, stories, releases
+
+A feature is one `feature` line in the log, written by the planner in its worktree:
+
+```
+devteam.mjs feature add sign-in --json '{
+  "title": "Sign-in",
+  "goals": ["g-20261101-093000123-supervisor"],
+  "preconditions": ["g-20261101-093000123-supervisor#1", "g-20261101-093000123-supervisor#3"],
+  "design": "project/designs/users-sign-in-securely.md",
+  "stories": [
+    { "id": "SIGNIN-S1", "text": "When a user submits valid credentials, the system signs them in.", "release": "v0.1.0" },
+    { "id": "SIGNIN-S2", "text": "When a user forgets their password, they can reset it by email.", "release": "v0.2.0" }
+  ]
+}'
+```
+
+- **Stories** are user-facing outcomes, each checked end to end by an integration ticket (D7). Ids are `<FEAT>-S<n>`.
+- **Releases** are the tag each story is expected in. The roadmap and the dashboard read them; the release notes record where a story landed.
+- **Preconditions** are `<goal-id>#<n>`, the goal's preconditions this feature makes true. `goal check` lists any precondition no feature covers; each becomes a feature, a spike or a question.
+- The reserved feature `chores` holds `chore` and `spike` tickets that belong to no plan and needs no feature line.
+
+`devteam.mjs roadmap` renders all of it: goals by priority, each with unplanned preconditions, its features (points done, stories done, waves left, releases, questions they wait on) and an estimated week, from goal-priority order at the current rate, never sooner than remaining waves times the median cycle time. It is computed; nobody maintains it.
+
+## 4. The graph: tickets
+
+One `ticket` line per future PR:
+
+```
+devteam.mjs ticket add api-07-session-tokens --json '{
+  "title": "Session tokens expire after 12 hours",
+  "feature": "sign-in", "component": "api", "kind": "build", "size": "S", "risk": "high",
+  "serves": ["SIGNIN-S1"], "depends_on": ["api-01-session-contract"],
+  "contracts": { "consumes": ["docs/contracts/session.md@1.0"] },
+  "touches": ["api/src/domain/session/**", "api/test/session/**"],
+  "done_when": ["session_expiry_test passes in CI", "a token older than 12h is refused with 401 (integration test)"],
+  "one_way_doors": [],
+  "notes": ""
+}'
+```
+
+| Field | Meaning |
+|---|---|
+| id | `<component>-<NN>-<slug>`; `NN` is the next free number for that component; numbers never move or get reused |
+| title | one line a user could read; it becomes the PR title after the id |
+| feature, component | the feature slug; the one component this ticket changes (contract tickets may span two) |
+| kind | `contract`, `build`, `integration`, `chore`, `spike` |
+| size | `S` (up to about 400 changed non-test lines) or `M` (about 1,000). There is no L. |
+| risk | `normal` or `high` |
+| serves, depends_on | story ids it advances; ticket ids that must be **merged** before its build starts |
+| contracts | `provides` and `consumes`, contract paths with versions |
+| touches | globs of the files it may change |
+| done_when | checks, each naming a test, a command and its output, or a measurable observation |
+| one_way_doors, superseded_by, notes | as named; `notes` says why a chore or spike serves no story |
+
+**Rules.** `validate` enforces the ones marked (gate); the graph reviewer checks the rest.
+
+- **D1 One ticket, one reviewable PR.** Split anything over M.
+- **D2 Contract first.** Every interface that crosses a component boundary, or that two parallel tickets both depend on, gets a `contract` ticket that lands the definition, its version and a fake. Consumers depend on the contract ticket, not the provider's build. This is what creates parallelism; apply it hard.
+- **D3 Real dependencies only.** `depends_on` means "cannot build until merged". (gate: every id exists, no cycles)
+- **D4 Disjoint footprints.** Tickets that can run at the same time have non-overlapping `touches`; otherwise add a real dependency, extract the shared part, or merge them. (gate)
+- **D5 Checkable done-whens.** "Works correctly" is not one. (gate: non-empty, each at least ten characters)
+- **D6 Full coverage.** Every story is served; every ticket serves a story, except chores and spikes, which say why in `notes`. (gate)
+- **D7 One integration ticket per story that spans components**, whose done-whens are the story's acceptance checked end to end, depending on every ticket that serves it.
+- **D8 Risk is assigned, not guessed.** `high` for auth, authorization, payments, PII, migrations, CI or release config, or any one-way door. (gate: one-way doors force high)
+- **D9 Spikes are timeboxed and produce a document** under `project/designs/`, not merged domain code.
+- **D10 Vertical over horizontal.** Prefer a thin working slice to a whole layer nobody can exercise.
+- **D11 Short critical path.** Run `devteam.mjs waves`; if the path is long relative to the ticket count, find a dependency a contract ticket could break.
+
+A ticket may spec and plan while its dependencies are unmerged (plan-ahead); only its build waits.
+
+## 5. Review and landing
+
+1. `devteam.mjs validate` passes in the planner's worktree (reviews still missing show as warnings).
+2. A non-author reviews the graph (`project/reviews/<feature>/graph-1.md`): hidden dependencies, footprints that overlap work in flight (the architecture doc's In flight table), footprints too broad for D4 to mean anything, tickets over size, missing contract tickets, done-whens that can't fail, stories with no integration ticket, risk under-assigned, one-way doors not yet answered, `architecture.md` not updated. The verdict names the commit that holds the ticket lines; any later commit that changes anything but review records voids it (`validate --strict` checks this).
+3. Commit everything and open the PR titled `plan-<feature>: <summary>`; message the supervisor (`devteam.mjs send supervisor "<feature> graph review passed" --kind review-request`).
+4. The supervisor reads the design and the graph, then `devteam.mjs merge --plan <feature>`, which checks `validate --strict` at the head, both reviews holding, and that the PR touches no log file but its own. The merge is the approval; the tickets appear in `devteam.mjs ready`.
+
+## 6. Re-planning
+
+When a design change, a failed spike or a correction changes the graph: the supervisor sets the affected tickets (`ticket set <id> --json '{"superseded_by": …}'`, new `depends_on`, `touches`) and adds replacements; each such command logs its act (`replan-within-feature`, `add-ticket`); a ticket already in flight gets a ruling recorded in its spec. Ids are never reused. A re-plan big enough to need review goes through a new `plan/<feature>-<n>` branch like a first plan. Once the supervisor has set a field on a ticket, planners can no longer change that field; later re-plans of it are the supervisor's.
+
+## 7. Bootstrap tickets and existing codebases
+
+Bootstrap writes the first tickets in the reserved `chores` feature: one per gate in `quality.md` §2 and Law in `code-style.md` the repo doesn't yet enforce, each saying in `notes` which gate it turns on. Gates that fail on existing code start in ratchet mode. These are the fleet's first work, before any feature.
+
+Adopting an existing codebase: write `architecture.md` from the code; list work already in flight in its table and keep new footprints off those files; start `max_active_tickets` at 2 or 3, since old hotspots make footprints overlap, and raise it when `waves` shows real width; plan the first feature with contract tickets that carve stable interfaces around the hotspots; where the repo has its own process docs, map each rule to the devteam doc that covers it, link where they agree, ask the owner where they conflict.
