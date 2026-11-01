@@ -1312,7 +1312,7 @@ function checkPr({ headRef, sha, title, body, forge = false }) {
       git(['worktree', 'remove', '--force', wt], mainRoot);
     }
   } else {
-    if (!/^chore-[a-z0-9]+(-[a-z0-9]+)*: \S/.test(title ?? 'chore-x: y')) fails.push('a PR that is not from a ticket/ or plan/ branch is titled "chore-<slug>: <summary>"');
+    if (!/^chore-[a-z0-9]+([.-][a-z0-9]+)*: \S/.test(title ?? 'chore-x: y')) fails.push('a PR that is not from a ticket/ or plan/ branch is titled "chore-<slug>: <summary>"');
     const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
     const changed = base ? changedFiles(base, sha) : [];
     const logDir = `${projectRel}/log/`;
@@ -1375,7 +1375,7 @@ function cmdMerge() {
   supervisorOnly('merge');
   const [id] = positional;
   const plan = flagStr('plan');
-  const chore = flagStr('chore');
+  const chore = flagStr('chore') !== undefined ? choreSlug(flagStr('chore')) : undefined;
   const dry = !!flags['dry-run'];
   const branch = plan ? `plan/${plan}` : chore ? `chore-${chore}` : id ? `ticket/${id}` : die('usage: merge <ticket-id> | merge --plan <feature> | merge --chore <slug>   [--approved <qid>] [--no-gates] [--dry-run [--title t] [--body-file f]]');
   const viaGit = loadSettings().forge === 'git';
@@ -1999,8 +1999,15 @@ function cmdRoadmap() {
 
 // --- chore worktrees: supervisor-written files reach main through their own branch and PR ---
 
+// A chore slug names a branch (chore-<slug>), a worktree and a PR file, so every command that takes
+// one checks it the same way: lowercase words joined by hyphens or dots (devteam-sync-v1.2.0), never
+// a path, and never ending in .lock (git refuses such branch names).
+function choreSlug(slugName) {
+  if (!/^[a-z0-9]+([.-][a-z0-9]+)*$/.test(slugName ?? '') || /\.lock$/.test(slugName)) die(`chore slug "${slugName}" must be lowercase words joined by hyphens (dots allowed, as in devteam-sync-v1.2.0; not ending in .lock)`);
+  return slugName;
+}
 function choreWorktree(slugName, { reset = false } = {}) {
-  if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(slugName)) die(`chore slug "${slugName}" must be lowercase words joined by hyphens`);
+  choreSlug(slugName);
   if (!commonDir || !projectInRepo) die('chores need a git checkout with the project folder inside it');
   if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
   const wt = path.join(mainRoot, '.worktrees', `chore-${slugName}`);
@@ -2030,6 +2037,7 @@ function cmdChore() {
   if (sub === 'start') { if (!slugName) die('usage: chore start <slug>'); supervisorOnly('chore'); return out(choreWorktree(slugName)); }
   if (sub !== 'pr' || !slugName || !flagStr('title')) die('usage: chore start <slug>   |   chore pr <slug> --title "<summary>"');
   supervisorOnly('chore');
+  choreSlug(slugName);
   const wt = path.join(mainRoot, '.worktrees', `chore-${slugName}`);
   if (!fs.existsSync(wt)) die(`no worktree .worktrees/chore-${slugName}; devteam.mjs chore start ${slugName}`);
   gitOrDie(['add', '-A'], wt);
