@@ -135,6 +135,21 @@ test('devteam kit', async (t) => {
     must(['ticket', 'set', 'bill-01-card', '--json', '{"held": null}'], { role: 'sup' });
     assert.match(must(['ready']), /bill-01-card/);
     must(['validate']);
+    // any finding can be set aside for a while, by the supervisor or the owner, and stays visible
+    const idle = json(must(['metrics', '--json'])).findings.find((f) => f.kind === 'idle-capacity');
+    assert.ok(idle, 'released, it is idle capacity again');
+    assert.notEqual(dt(['ack', 'idle-capacity', 'no such subject', '--reason', 'x'], { role: 'sup' }).status, 0, 'only a current finding');
+    assert.notEqual(dt(['ack', 'idle-capacity', idle.subject, '--reason', 'x', '--owner'], { role: 'sup' }).status, 0, '--owner refuses in an agent session');
+    must(['ack', 'idle-capacity', idle.subject, '--reason', 'starting it after the plan lands', '--owner']);
+    const m = json(must(['metrics', '--json']));
+    assert.ok(!m.findings.some((f) => f.kind === 'idle-capacity'), 'set aside');
+    assert.equal(m.acknowledged.find((f) => f.kind === 'idle-capacity').ack.by, 'owner', 'and still listed, with who and why');
+    // the owner can message a session as themselves
+    must(['send', 'supervisor', 'take the afternoon off', '--owner']);
+    const msg = json(must(['messages', '--to', 'supervisor', '--json'])).pop();
+    assert.equal(msg.created_by, 'owner');
+    assert.notEqual(dt(['send', 'supervisor', 'merge it', '--owner', '--kind', 'ruling']).status, 0, 'the owner sends info only');
+    assert.notEqual(dt(['send', 'supervisor', 'hi', '--owner'], { role: 'sup' }).status, 0, '--owner refuses in an agent session');
   });
 
   await t.test('worker: phases, gates, approvals, check-ticket at an exact head', () => {
@@ -315,7 +330,9 @@ test('devteam kit', async (t) => {
     fs.writeFileSync(file, before);
     must(['log-sync'], { role: 'sup' });
     const shaL = git(['rev-parse', 'HEAD'], wt('chore-log'));
-    assert.ok(fs.existsSync(must(['chore', 'start', 'devteam-sync-v0.2.1'], { role: 'sup' }).trim()), 'a sync chore is named by its tag (supervisor.md §9)');
+    const syncWt = must(['chore', 'start', 'devteam-sync-v0.2.1'], { role: 'sup' }).trim();
+    assert.ok(fs.existsSync(syncWt), 'a sync chore is named by its tag (supervisor.md §9)');
+    assert.ok(fs.existsSync(path.join(syncWt, 'config/master.key')) && fs.existsSync(path.join(syncWt, '.setup-ran')), 'chore start seeds worktree_files and runs worktree_setup, so gates run there');
     git(['worktree', 'remove', '--force', wt('chore-devteam-sync-v0.2.1')]);
     for (const bad of ['../escape', 'x.lock', 'a..b', 'Upper']) assert.match(dt(['chore', 'start', bad], { role: 'sup' }).err, /chore slug/, `chore start refuses ${bad}`);
     assert.match(dt(['chore', 'pr', '../escape', '--title', 't'], { role: 'sup' }).err, /chore slug/, 'chore pr checks the slug too');
@@ -350,6 +367,44 @@ test('devteam kit', async (t) => {
     must(['answer', Qg, 'yes']);
     must(['merge', '--chore', 'rules', '--dry-run', '--approved', Qg, '--title', 'chore-rules: tighten', '--body-file', body], { role: 'sup' });
     git(['worktree', 'remove', '--force', wt('chore-rules')]);
+  });
+
+  await t.test('a standing owner rule approves upstream syncs, only when the kit files are upstream\'s verbatim', () => {
+    // an upstream with a tagged release that changes one kit file
+    const up = path.join(tmp, 'upstream');
+    fs.mkdirSync(up);
+    git(['init', '-q', '-b', 'main'], up);
+    git(['config', 'user.email', 't@t'], up);
+    git(['config', 'user.name', 't'], up);
+    fs.cpSync(path.join(repo, 'docs/devteam'), path.join(up, 'docs/devteam'), { recursive: true, filter: (p) => !/[\\/](project|run)([\\/]|$)/.test(p.slice(path.join(repo, 'docs/devteam').length)) });
+    fs.appendFileSync(path.join(up, 'docs/devteam/governance/quality.md'), '\nUpstream rule.\n');
+    git(['add', '-A'], up);
+    git(['commit', '-qm', 'release'], up);
+    git(['tag', 'v0.3.0'], up);
+    const settings = path.join(repo, 'docs/devteam/project/settings.md');
+    fs.writeFileSync(settings, fs.readFileSync(settings, 'utf8').replace('"gates": {', `"upstream_repo": ${JSON.stringify(up)}, "gates": {`));
+    // the sync chore copies that file verbatim (the dashed slug older kits needed resolves to the tag)
+    git(['worktree', 'add', '-q', '-b', 'chore-devteam-sync-v0-3-0', wt('sync'), 'origin/main']);
+    fs.copyFileSync(path.join(up, 'docs/devteam/governance/quality.md'), path.join(wt('sync'), 'docs/devteam/governance/quality.md'));
+    git(['commit', '-qam', 'sync'], wt('sync'));
+    git(['push', '-q', 'origin', 'chore-devteam-sync-v0-3-0'], wt('sync'));
+    const args = ['merge', '--chore', 'devteam-sync-v0-3-0', '--dry-run', '--title', 'chore-devteam-sync-v0-3-0: adopt', '--body-file', body];
+    assert.match(dt(args, { role: 'sup' }).out, /outside project\//, 'no standing rule yet: the owner answers each sync');
+    // a rule the supervisor wrote and accepted itself doesn't count, only the owner's
+    const Ks = must(['knowledge', 'add', '--kind', 'preference', '--statement', 'adopt upstream', '--scope', 'chore:devteam-sync'], { role: 'sup' });
+    must(['knowledge', 'set', Ks, '--status', 'accepted'], { role: 'sup' });
+    assert.match(dt(args, { role: 'sup' }).out, /outside project\//, "the supervisor can't grant itself standing approval");
+    const Qs = must(['ask', '--question', 'Adopt upstream releases without asking each time?', '--class', 'process-edit', '--reasons', 'owner-only', '--recommendation', 'yes'], { role: 'sup' });
+    must(['answer', Qs, 'yes', '--rule', 'adopt upstream devteam releases as they ship', '--rule-scope', 'chore:devteam-sync']);
+    assert.match(must(args, { role: 'sup' }), /match upstream v0\.3\.0 exactly/);
+    // anything the supervisor wrote itself is not covered
+    fs.appendFileSync(path.join(wt('sync'), 'docs/devteam/process/worker.md'), '\nA local edit.\n');
+    git(['commit', '-qam', 'local'], wt('sync'));
+    git(['push', '-q', 'origin', 'chore-devteam-sync-v0-3-0'], wt('sync'));
+    const tampered = dt(args, { role: 'sup' });
+    assert.notEqual(tampered.status, 0);
+    assert.match(tampered.out + tampered.err, /these differ: .*worker\.md/);
+    git(['worktree', 'remove', '--force', wt('sync')]);
   });
 
   await t.test('computed views: metrics, roadmap, retro, dashboard data', () => {
