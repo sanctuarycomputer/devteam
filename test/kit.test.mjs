@@ -242,6 +242,31 @@ test('devteam kit', async (t) => {
     assert.equal(q.autonomy.rung, 2);
     assert.equal(q.standing_rule, 'flags first');
     assert.equal(q.why_asked.reasons[0], 'below-rung');
+    assert.equal(q.channel, 'cli', 'an answer records where the owner typed it');
+  });
+
+  await t.test('an answer the owner gave in the supervisor chat: the owner\'s, quoted, listed for checking, never trust evidence', () => {
+    const said = "you shouldn't need to ask me to submit those PRs";
+    const Qc = must(['ask', '--question', 'Open upstream PRs without asking?', '--class', 'upstream-pr', '--reasons', 'below-rung', '--recommendation', 'yes'], { role: 'sup' });
+    assert.notEqual(dt(['answer', Qc, 'yes', '--from-chat'], { role: 'sup' }).status, 0, "the owner's words are required");
+    assert.notEqual(dt(['answer', Qc, 'yes', '--from-chat', '--said', said], { role: 'worker' }).status, 0, 'only the supervisor records a chat answer');
+    assert.notEqual(dt(['answer', Qc, 'yes', '--from-chat', '--said', said]).status, 0, 'in their own terminal the owner answers directly');
+    assert.match(dt(['answer', Qc, 'yes', '--autonomy', '3', '--from-chat', '--said', said], { role: 'sup' }).err, /not raise/, 'the supervisor cannot raise its own rung from chat');
+    const Qd = must(['ask', '--question', 'Ship the schema migration?', '--kind', 'one-way-door', '--class', 'one-way-door', '--reasons', 'one-way-door', '--recommendation', 'yes'], { role: 'sup' });
+    assert.match(dt(['answer', Qd, 'yes', '--from-chat', '--said', 'sure'], { role: 'sup' }).err, /reserved to the owner/, 'a one-way door is never answered from chat');
+    must(['withdraw', Qd, '--reason', 'test'], { role: 'sup' });
+    must(['answer', Qc, 'yes', '--from-chat', '--said', said], { role: 'sup' });
+    const q = json(must(['questions', '--id', Qc, '--json']))[0];
+    assert.equal(q.answered_by, 'owner');
+    assert.equal(q.channel, 'chat');
+    assert.equal(q.said, said);
+    const tr = json(must(['trust', '--json'])).find((r) => r.class === 'upstream-pr');
+    assert.equal(tr.rung, 1, 'a chat answer leaves the rung where the owner put it');
+    assert.ok(!tr.agreement_questions.includes(Qc), 'a chat answer is not agreement evidence');
+    const listed = json(must(['dashboard-data'])).ooda.owner_cli.find((x) => x.id === Qc);
+    assert.equal(listed?.channel, 'chat', 'the dashboard lists it for the owner to check');
+    assert.equal(listed.said, said);
+    must(['act', '--class', 'upstream-pr', '--approved', Qc, '--', 'opened an upstream PR'], { role: 'sup' });
   });
 
   await t.test('observe, orient, knowledge reach the next prompt', () => {

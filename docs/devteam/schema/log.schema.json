@@ -52,9 +52,10 @@
     "channel": {
       "enum": [
         "cli",
-        "dashboard"
+        "dashboard",
+        "chat"
       ],
-      "description": "on owner lines only: where the owner typed it"
+      "description": "on owner lines only: where the owner typed it. chat: the owner said it in the supervisor's session and the supervisor recorded it (answers only, with the owner's words in said)"
     }
   },
   "$defs": {
@@ -737,6 +738,11 @@
           "answer": {
             "type": "string"
           },
+          "said": {
+            "type": "string",
+            "minLength": 1,
+            "description": "the owner's own words, verbatim, when the answer came through the supervisor's chat"
+          },
           "autonomy": {
             "type": [
               "object",
@@ -1005,6 +1011,7 @@
         ],
         "owner": [
           "answer",
+          "said",
           "autonomy",
           "standing_rule"
         ]

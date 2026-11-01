@@ -292,6 +292,7 @@ function checkLine(o, file) {
   const errs = schemaErrors({ ...SCHEMA, $defs: undefined }, envelope, 'line').map((e) => e.replace(/^line\./, ''));
   if (errs.length) return errs;
   if ((o.channel !== undefined) !== (o.by === 'owner')) errs.push('channel is on every owner line and no other');
+  if (o.channel === 'chat' && !(o.type === 'question' && o.op === 'set' && typeof o.answer === 'string' && typeof o.said === 'string')) errs.push('a chat line is an answer to a question, with the owner\'s words in said');
   const t = SCHEMA.$defs.types[o.type];
   const body = Object.fromEntries(Object.entries(o).filter(([k]) => !ENVELOPE.includes(k)));
   errs.push(...schemaErrors(t, body, o.type));
@@ -380,7 +381,7 @@ function fold(all) {
       obj.__rank[k] = rank;
       changed[k] = val;
     }
-    if (Object.keys(changed).length) obj.updates.push({ at: l.at, by: l.by, ...changed });
+    if (Object.keys(changed).length) obj.updates.push({ at: l.at, by: l.by, ...(l.channel ? { channel: l.channel } : {}), ...changed });
     else ignored.push({ line: l, why: 'overridden by a higher-ranked writer' });
   }
   for (const o of objects.values()) delete o.__rank;
@@ -499,7 +500,7 @@ function appendLog(fields, by = logWriter()) {
   const prefix = SCHEMA['x-id'].prefix[type];
   const build = (at) => {
     const id = fields.id ?? `${prefix}-${at.slice(0, 10).replace(/-/g, '')}-${at.slice(11, 23).replace(/[:.]/g, '')}-${by}`;
-    const line = { v: 1, id, type, op: fields.op ?? 'new', at, by, ...(by === 'owner' ? { channel: ownerChannel() } : {}) };
+    const line = { v: 1, id, type, op: fields.op ?? 'new', at, by, ...(by === 'owner' ? { channel: fields.channel ?? ownerChannel() } : {}) };
     for (const [k, val] of Object.entries(fields)) if (!ENVELOPE.includes(k) && val !== undefined) line[k] = val;
     const text = `${JSON.stringify(line)}\n`;
     const parsed = JSON.parse(text);
@@ -589,7 +590,7 @@ function questionView(q) {
     question: q.question, context: q.context ?? '', options: q.options ?? [], recommendation: q.recommendation ?? '', confidence: q.confidence ?? null,
     default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], evidence: q.evidence ?? [], note: q.note ?? null, why_asked: q.why_asked ?? null,
     status, answer, answered_by: answeredBy, answered_at: answeredAt, matched,
-    autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans?.channel ?? null,
+    autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans?.channel ?? null, said: ans?.said ?? null,
   };
 }
 const questions = () => logObjects('question').map(questionView);
@@ -1494,7 +1495,7 @@ function trustEvidence(cls) {
   const drops = acts.map(correctionOf).filter(Boolean).map((c) => c.at).sort();
   const since = drops[drops.length - 1] ?? '';
   const after = acts.filter((a) => a.created_at > since);
-  const answered = questions().filter((q) => q.class === cls && q.status === 'answered' && q.recommendation).sort((a, b) => a.answered_at.localeCompare(b.answered_at)).slice(-promo.agreement_window);
+  const answered = questions().filter((q) => q.class === cls && q.status === 'answered' && q.recommendation && q.channel !== 'chat').sort((a, b) => a.answered_at.localeCompare(b.answered_at)).slice(-promo.agreement_window);
   const agree = answered.filter((q) => q.matched).length;
   return {
     acts_since_drop: after.length, uncorrected_acts: after.filter((a) => !correctionOf(a)).map((a) => a.id), corrections: drops.length,
@@ -1567,7 +1568,7 @@ function cmdAsk() {
 // The owner answers (terminal or dashboard). The supervisor may only apply a default or withdraw.
 function cmdAnswer() {
   const [id, ...restWords] = positional;
-  if (!id || (!restWords.length && !flags.defaulted)) die('usage: answer <qid> "<answer>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>" [--rule-scope s]]   |   answer <qid> --defaulted   (supervisor)');
+  if (!id || (!restWords.length && !flags.defaulted)) die('usage: answer <qid> "<answer>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>" [--rule-scope s]]   |   answer <qid> "<answer>" --from-chat --said "<owner\'s words>" [--autonomy n]   |   answer <qid> --defaulted   (supervisor)');
   if (flags.defaulted) {
     supervisorOnly('answer --defaulted');
     const v = openQuestion(id);
@@ -1576,8 +1577,23 @@ function cmdAnswer() {
     appendLog({ type: 'act', class: 'apply-default', what: `applied the default to ${id}: ${v.default}`, refs: [id], reversible: true }, 'supervisor');
     return out(`defaulted ${id}: ${v.default}`);
   }
-  const { by } = ownerWriter();
+  // --from-chat: the owner said it in the supervisor's own session. The supervisor records it as the
+  // owner's answer with their words verbatim; the dashboard lists it for the owner to check, and it
+  // never counts as agreement evidence for the trust ladder. The supervisor is the party the ladder
+  // governs, so its say-so never decides what is reserved to the owner (one-way doors, trust, the
+  // owner_only classes) and never raises its own rung; it may only record a lower one.
+  const fromChat = !!flags['from-chat'];
+  if (fromChat) {
+    if (process.env.DEVTEAM_ROLE !== 'supervisor' || logWriter() !== 'supervisor') die('answer --from-chat: the supervisor records what the owner said in its session; in your own terminal, answer directly');
+    if (!flagStr('said')?.trim()) die('answer --from-chat needs --said "<the owner\'s words, verbatim>"');
+    if (flagStr('rule')) die('answer --from-chat takes no --rule: a standing rule binds the whole project, so the owner gives it from the dashboard or their terminal');
+  }
+  const { by } = fromChat ? { by: 'owner' } : ownerWriter();
   const v = openQuestion(id, ['open', 'defaulted']);
+  if (fromChat) {
+    const reserved = ['one-way-door', 'trust'].includes(v.kind) || (ladder().owner_only ?? []).includes(v.class) || (v.why_asked?.reasons ?? []).includes('one-way-door');
+    if (reserved) die(`answer --from-chat: ${id} is reserved to the owner (${v.kind}${v.class ? `, ${v.class}` : ''}); ask them to answer it from the dashboard or their terminal`);
+  }
   const answer = restWords.join(' ').trim();
   let autonomy;
   if (flags.autonomy !== undefined) {
@@ -1586,12 +1602,13 @@ function cmdAnswer() {
     const rung = flagNum('autonomy');
     if (![1, 2, 3].includes(rung)) die('--autonomy is 1 (ask), 2 (ask with a default) or 3 (act and report)');
     if (rung > def.ceiling) die(`${v.class} has a ceiling of rung ${def.ceiling} (constitution.md)`);
+    if (fromChat && rung > rungFor(v.class, flagStr('scope') ?? null)) die(`answer --from-chat can lower ${v.class}'s rung but not raise it (now ${rungFor(v.class, flagStr('scope') ?? null)}): the owner raises a rung from the dashboard or their terminal`);
     autonomy = { class: v.class, rung, scope: flagStr('scope') ?? null };
   }
-  appendLog({ type: 'question', op: 'set', id, answer, autonomy, standing_rule: flagStr('rule') }, by);
+  appendLog({ type: 'question', op: 'set', id, answer, autonomy, standing_rule: flagStr('rule'), ...(fromChat ? { channel: 'chat', said: flagStr('said').trim() } : {}) }, by);
   if (flagStr('rule')) appendLog({ type: 'knowledge', kind: 'preference', statement: flagStr('rule'), scope: flagStr('rule-scope') ?? 'project', status: 'accepted', confidence: 1, evidence: [id] }, by);
-  nudgeSupervisor(`[devteam answer ${id} from owner] read it with: devteam.mjs questions --id ${id}`);
-  out(`answered ${id}`);
+  if (!fromChat) nudgeSupervisor(`[devteam answer ${id} from owner] read it with: devteam.mjs questions --id ${id}`);
+  out(`answered ${id}${fromChat ? ' (from chat; listed on the dashboard for the owner to check)' : ''}`);
 }
 function cmdWithdraw() {
   const [id] = positional;
@@ -2359,7 +2376,7 @@ function collectOoda() {
     trust: trustTable(),
     classes: Object.fromEntries(Object.entries(L.classes).map(([k, v]) => [k, { ...v, rung: rungFor(k) }])),
     reasons: L.reasons,
-    owner_cli: questions().filter((q) => q.answered_by === 'owner' && q.channel === 'cli').sort((a, b) => b.answered_at.localeCompare(a.answered_at)).slice(0, 10).map((q) => ({ id: q.id, question: q.question, answer: q.answer, at: q.answered_at, autonomy: q.autonomy })),
+    owner_cli: questions().filter((q) => q.answered_by === 'owner' && ['cli', 'chat'].includes(q.channel)).sort((a, b) => b.answered_at.localeCompare(a.answered_at)).slice(0, 10).map((q) => ({ id: q.id, question: q.question, answer: q.answer, at: q.answered_at, autonomy: q.autonomy, channel: q.channel, said: q.said })),
     defaulted: questions().filter((q) => q.status === 'defaulted' && Date.now() - Date.parse(q.answered_at) < 14 * DAY),
     log: { lines: log.lines.length, errors: log.errors.length, ignored: log.ignored.length },
   };
@@ -2846,7 +2863,7 @@ Sessions (worker.md)
 
 Decide and act (supervisor.md, constitution.md)
   ask --question q [--kind k] [--class c] [--reasons r…] [--recommendation r] [--confidence 0-1] [--default d] [--options a b] [--blocks ids] [--evidence ids] [--ticket id] [--re m-…] [--note path]
-  answer <qid> "<text>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> --defaulted
+  answer <qid> "<text>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> "<text>" --from-chat --said "<owner's words>" | answer <qid> --defaulted   (supervisor)
   withdraw <qid> [--reason r] | questions [--all] [--id q] [--json]
   act --class c [--scope s] [--approved qid] [--refs ids] [--irreversible] -- "<what>"
   correct <act-id> --reason r [--severity n]   (owner; --retro for the supervisor) | repair <act-id> --how undo|fix-ticket|none
