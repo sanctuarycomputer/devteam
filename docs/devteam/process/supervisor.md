@@ -132,7 +132,7 @@ Due `retro_every_days` after the last one, or when a feature has fully merged si
 
 ## 11. Recovery
 
-- A silent or frozen worker: `tmux capture-pane -p -t <session>:<id>`. A modal or a limit banner: clear it. The agent process gone: `devteam.mjs worker <id> --resume`; the worker re-orients from its files and the log.
+- A silent or frozen worker: `tmux capture-pane -p -t <session>:<id>`. A modal or a limit banner: clear it. The metrics find these for you: a `blocked-prompt` finding (and a "waiting on a prompt" badge on the board, `WAITING ON A PROMPT` in `status`) names the ticket and the line its pane is stuck on, even while the phase is fresh. A permission prompt a worker should never see is a settings problem: fix `agent_command` or the deny rules so the next worker doesn't stop there. The agent process gone: `devteam.mjs worker <id> --resume`; the worker re-orients from its files and the log.
 - A provider limit across the fleet: set sessions to continue at reset where the agent supports it.
 - Kill only a known PID, never by pattern on a shared machine.
 - After your own restart: §1 again, then message every worker to re-read its files.

@@ -16,6 +16,11 @@ const wt = (name) => path.join(repo, '.worktrees', name);
 const DT = path.join(repo, 'docs', 'devteam', 'scripts', 'devteam.mjs');
 const ROLE = { sup: { DEVTEAM_ROLE: 'supervisor' }, planner: { DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: 'billing' }, planner2: { DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: 'other' }, worker: { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'bill-01-card' }, owner: {} };
 const line = (o) => `${JSON.stringify({ v: 1, ...o })}\n`;
+// tmux in this test talks to its own server, never the developer's (or a live fleet's) sessions.
+process.env.TMUX_TMPDIR = fs.mkdtempSync(path.join(os.tmpdir(), 'dt-tmux-'));
+delete process.env.TMUX;
+delete process.env.TMUX_PANE;
+const hasTmux = spawnSync('tmux', ['-V']).status === 0;
 
 function dt(args, { cwd = repo, role = 'owner' } = {}) {
   const env = { ...process.env, ...ROLE[role] };
@@ -160,6 +165,18 @@ test('devteam kit', async (t) => {
     must(['phase', 'build', '--task', 'T1', '--usd', '2'], w);
     assert.equal(json(must(['log', '--type', 'phase', '--by', 'bill-01-card', '--json'])).length, 2, 'an unchanged phase within 15 min is not written');
     assert.doesNotMatch(must(['ready']), /bill-01/, 'a ticket with an active worker is not ready');
+    // a worker frozen on a permission prompt looks busy in the log; its pane says otherwise
+    if (hasTmux) {
+      spawnSync('tmux', ['new-session', '-d', '-s', 'devteam', '-n', 'bill-01-card', 'sh -c \'printf "Bash command\\n  rm -rf build\\nDo you want to proceed?\\n> 1. Yes\\n  2. No\\n"; exec sleep 600\'']);
+      for (let i = 0; i < 20 && !/proceed/.test(spawnSync('tmux', ['capture-pane', '-p', '-t', 'devteam:bill-01-card'], { encoding: 'utf8' }).stdout ?? ''); i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+      const f = json(must(['metrics', '--json'])).findings.find((x) => x.kind === 'blocked-prompt');
+      assert.equal(f?.subject, 'bill-01-card', 'a blocked-prompt finding names the ticket');
+      assert.match(f.detail, /Do you want to proceed\?/);
+      assert.equal(json(must(['dashboard-data'])).progress.tickets.find((x) => x.id === 'bill-01-card').waiting.kind, 'prompt', 'the board can badge it');
+      assert.match(must(['status']), /bill-01-card.*WAITING ON A PROMPT/);
+      spawnSync('tmux', ['kill-server']);
+      assert.ok(!json(must(['metrics', '--json'])).findings.some((x) => x.kind === 'blocked-prompt'), 'no pane, no finding');
+    } else t.diagnostic('tmux not installed: blocked-prompt detection not exercised');
     assert.match(dt(['phase', 'awaiting-word'], w).err, /no open request/, 'waiting with nothing asked warns');
     must(['send', 'supervisor', 'spec and plan reviewed; approve please', '--kind', 'review-request'], w);
     assert.doesNotMatch(dt(['phase', 'awaiting-word', '--note', 'asked'], w).err, /no open request/);
