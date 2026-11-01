@@ -418,6 +418,38 @@ test('devteam kit', async (t) => {
     git(['worktree', 'remove', '--force', wt('chore-rules')]);
   });
 
+  await t.test('a PR of any kind that changes owner settings needs an answered question of that class', () => {
+    const setTo = (w, fn) => {
+      const f = path.join(w, 'docs/devteam/project/settings.md');
+      const txt = fs.readFileSync(f, 'utf8');
+      const m = txt.match(/```json devteam\s*\n([\s\S]*?)\n```/);
+      const j = JSON.parse(m[1]);
+      fn(j);
+      fs.writeFileSync(f, txt.replace(m[1], JSON.stringify(j, null, 2)));
+    };
+    // a chore that only changes the supervisor's own settings needs no answer
+    git(['worktree', 'add', '-q', '-b', 'chore-caps', wt('caps'), 'origin/main']);
+    setTo(wt('caps'), (j) => { j.max_active_tickets = 3; });
+    git(['commit', '-qam', 'caps'], wt('caps'));
+    git(['push', '-q', 'origin', 'chore-caps'], wt('caps'));
+    must(['merge', '--chore', 'caps', '--dry-run', '--title', 'chore-caps: fewer workers', '--body-file', body], { role: 'sup' });
+    // a gate change is the owner's, even in a chore (project/ files are otherwise the supervisor's)
+    setTo(wt('caps'), (j) => { j.gates = { ...(j.gates ?? {}), lint: 'true' }; j.upstream_repo = 'someone/fork'; });
+    git(['commit', '-qam', 'gates'], wt('caps'));
+    git(['push', '-q', 'origin', 'chore-caps'], wt('caps'));
+    const args = ['merge', '--chore', 'caps', '--dry-run', '--title', 'chore-caps: gates', '--body-file', body];
+    const r = dt(args, { role: 'sup' });
+    assert.notEqual(r.status, 0);
+    assert.match(r.out + r.err, /changes owner settings: gates \(gate-change\), upstream_repo \(governance-edit\)/);
+    const Qw = must(['ask', '--question', 'Fewer workers?', '--class', 'priority-change', '--reasons', 'below-rung', '--recommendation', 'yes'], { role: 'sup' });
+    must(['answer', Qw, 'yes']);
+    assert.match(dt([...args, '--approved', Qw], { role: 'sup' }).out, /needs an answered gate-change or governance-edit question/, 'an answer of another class does not cover it');
+    const Qgate = must(['ask', '--question', 'Add a lint gate and move upstream?', '--class', 'governance-edit', '--reasons', 'owner-only', '--recommendation', 'yes'], { role: 'sup' });
+    must(['answer', Qgate, 'yes']);
+    must([...args, '--approved', Qgate], { role: 'sup' });
+    git(['worktree', 'remove', '--force', wt('caps')]);
+  });
+
   await t.test('a standing owner rule approves upstream syncs, only when the kit files are upstream\'s verbatim', () => {
     // an upstream with a tagged release that changes one kit file
     const up = path.join(tmp, 'upstream');
