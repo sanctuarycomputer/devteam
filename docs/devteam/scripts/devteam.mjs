@@ -127,19 +127,15 @@ const SETTINGS_DEFAULTS = {
   max_active_per_component: 2,
   stale_after_minutes: 30,
   question_default_after_hours: 24,
-  max_open_questions: 7,
   autonomy_ceilings: {},
   components: {},
-  shared_resources: [],
-  worker_denied_commands: ['gh pr merge', 'git push origin main', 'git push origin HEAD:main'],
+  worker_denied_commands: ['gh pr merge*', 'gh api*', 'git push*main*', 'git push*--force*', 'git push*-f *', 'git push*+*'],
   dashboard_port: 4321,
-  notify: null,
   upstream_repo: 'sanctuarycomputer/devteam',
   upstream_base: null,
   upstream_check_hours: 24,
   retro_every_days: 7,
   research_every_days: 7,
-  improvement_budget_usd_per_week: null,
   slow_gate_minutes: 10,
 };
 let settingsCache;
@@ -171,7 +167,7 @@ function ladder() {
   for (const [c, v] of Object.entries(loadSettings().autonomy_ceilings ?? {})) {
     if (a.classes[c] && typeof v === 'number' && v < a.classes[c].ceiling) a.classes[c] = { ...a.classes[c], ceiling: v };
   }
-  a.promotion = { clean_acts: 10, min_days: 14, seen_age_days: 7, agreement: 0.9, agreement_window: 10, ...a.promotion };
+  a.promotion = { agreement: 0.9, agreement_window: 10, ...a.promotion };
   return (ladderCache = a);
 }
 const RUNG = { 1: 'ask', 2: 'ask with a default', 3: 'act and report' };
@@ -179,7 +175,7 @@ const RUNG = { 1: 'ask', 2: 'ask with a default', 3: 'act and report' };
 // ===== 3. the schema and the log =====
 
 const SCHEMA = readJson(path.join(devteamDir, 'schema', 'log.schema.json'));
-const ENVELOPE = ['v', 'id', 'type', 'op', 'at', 'by'];
+const ENVELOPE = ['v', 'id', 'type', 'op', 'at', 'by', 'channel'];
 const LINE_MAX = 4096;
 const TYPES = Object.keys(SCHEMA.$defs.types);
 const RANK = SCHEMA['x-authority'].rank;
@@ -220,48 +216,72 @@ function schemaErrors(schema, value, where) {
   return errs;
 }
 
-const writerOfFile = (name) => name.replace(/\.jsonl$/, '').replace(/^(owner|supervisor)-\d{4}-\d{2}$/, '$1');
+// The writer a log file belongs to, from its name alone: owner-<yyyy-mm>, supervisor-<yyyy-mm>,
+// plan-<feature>, or a ticket id. Anything else is nobody's file and its lines count for nothing.
+function writerOfFile(name) {
+  const base = name.replace(/\.jsonl$/, '');
+  const m = /^(owner|supervisor)-\d{4}-\d{2}$/.exec(base);
+  if (m) return m[1];
+  if (/^(owner|supervisor)(-|$)/.test(base)) return null;
+  return /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(base) ? base : null;
+}
 const writerClass = (by) => (by === 'owner' || by === 'supervisor' ? by : /^plan-[a-z0-9-]+$/.test(by) ? 'planner' : 'ticket');
+const planFeature = (by) => (writerClass(by) === 'planner' ? by.slice('plan-'.length) : null);
 
-// Validate one parsed line: envelope, body against its type, id shape, and the authority table.
+// The cheap checks every reader runs, so a line never grants more than its file's writer has: the
+// line says who wrote it and the file agrees; a new id names its writer; the authority table lets
+// this class create the type or set these fields; a planner stays inside its own feature.
+function integrity(o, file) {
+  if (file && writerOfFile(file) !== o.by) return `by "${o.by}" does not match the file's writer "${writerOfFile(file) ?? '(not a log file)'}"`;
+  const cls = writerClass(o.by);
+  const auth = SCHEMA['x-authority'];
+  const ids = SCHEMA['x-id'];
+  const body = Object.keys(o).filter((k) => !ENVELOPE.includes(k) && !k.startsWith('__'));
+  if (o.op === 'new') {
+    if (ids.keyed[o.type]) {
+      if (!new RegExp(ids.keyed[o.type]).test(o.id)) return `a ${o.type} id must match ${ids.keyed[o.type]}`;
+    } else {
+      if (!new RegExp(ids.pattern).test(o.id) || !o.id.startsWith(`${ids.prefix[o.type]}-`)) return `a ${o.type} id looks like ${ids.prefix[o.type]}-<yyyymmdd>-<hhmmssmmm>-<writer>`;
+      if (!o.id.endsWith(`-${o.by}`)) return `a new id ends with its writer, "-${o.by}"`;
+    }
+    if (!auth.new[cls].includes(o.type)) return `${cls} may not create ${o.type} lines`;
+    if (o.type === 'goal' && o.status && o.status !== 'draft' && cls !== 'owner') return 'only the owner creates a goal past draft';
+    const f = planFeature(o.by);
+    if (f && o.type === 'feature' && o.id !== f) return `${o.by} may only create the feature "${f}"`;
+    if (f && o.type === 'ticket' && o.feature !== f) return `${o.by} may only create tickets of the feature "${f}"`;
+    return null;
+  }
+  const allowed = auth.set[o.type]?.[cls];
+  if (!allowed) return `${cls} may not change ${o.type} lines`;
+  if (!body.length) return 'a set line changes at least one field';
+  const bad = body.filter((k) => !allowed.includes(k));
+  if (bad.length) return `${cls} may not set ${o.type}.${bad.join(', ')}`;
+  return null;
+}
+
+// Validate one parsed line in full: envelope, body against its type, required and set-only fields,
+// then the integrity checks above.
 function checkLine(o, file) {
   if (!o || typeof o !== 'object' || Array.isArray(o)) return ['not a JSON object'];
   const envelope = Object.fromEntries(ENVELOPE.filter((k) => k in o).map((k) => [k, o[k]]));
   const errs = schemaErrors({ ...SCHEMA, $defs: undefined }, envelope, 'line').map((e) => e.replace(/^line\./, ''));
   if (errs.length) return errs;
+  if ((o.channel !== undefined) !== (o.by === 'owner')) errs.push('channel is on every owner line and no other');
   const t = SCHEMA.$defs.types[o.type];
   const body = Object.fromEntries(Object.entries(o).filter(([k]) => !ENVELOPE.includes(k)));
   errs.push(...schemaErrors(t, body, o.type));
-  if (file && writerOfFile(file) !== o.by) errs.push(`by "${o.by}" does not match the file's writer "${writerOfFile(file)}"`);
-  const cls = writerClass(o.by);
-  const auth = SCHEMA['x-authority'];
-  const ids = SCHEMA['x-id'];
   if (o.op === 'new') {
-    if (ids.keyed[o.type]) {
-      if (!new RegExp(ids.keyed[o.type]).test(o.id)) errs.push(`a ${o.type} id must match ${ids.keyed[o.type]}`);
-    } else {
-      if (!new RegExp(ids.pattern).test(o.id) || !o.id.startsWith(`${ids.prefix[o.type]}-`)) errs.push(`a ${o.type} id looks like ${ids.prefix[o.type]}-<yyyymmdd>-<hhmmssmmm>-<writer>`);
-      if (!o.id.endsWith(`-${o.by}`)) errs.push(`a new id ends with its writer, "-${o.by}"`);
-    }
     for (const k of t['x-required-new'] ?? []) if (!(k in body)) errs.push(`${o.type}.${k} is required`);
     for (const k of t['x-set-only'] ?? []) if (k in body) errs.push(`${o.type}.${k} is set later, not at creation`);
-    if (!auth.new[cls].includes(o.type)) errs.push(`${cls} may not create ${o.type} lines`);
-    if (o.type === 'goal' && o.status && o.status !== 'draft' && cls !== 'owner') errs.push('only the owner creates a goal past draft');
     if (o.type === 'question' && o.kind === 'one-way-door' && o.default) errs.push('a one-way door never has a default');
-  } else {
-    const allowed = auth.set[o.type]?.[cls];
-    const fields = Object.keys(body);
-    if (!allowed) errs.push(`${cls} may not change ${o.type} lines`);
-    else if (!fields.length) errs.push('a set line changes at least one field');
-    else {
-      const bad = fields.filter((k) => !allowed.includes(k));
-      if (bad.length) errs.push(`${cls} may not set ${o.type}.${bad.join(', ')}`);
-    }
   }
+  const i = integrity(o, file);
+  if (i) errs.push(i);
   return errs;
 }
 
-// Parse a file's lines. Validation is on by default (log-check, merge); readers skip it for speed.
+// Parse a file's lines. Full validation is on by default (log-check, merge); readers skip the
+// schema walk for speed but never the integrity checks.
 function parseLines(text, file, { firstLine = 1, validate = true } = {}) {
   const lines = [];
   const errors = [];
@@ -275,7 +295,8 @@ function parseLines(text, file, { firstLine = 1, validate = true } = {}) {
     } catch {
       return void errors.push(`${file}:${n}: not valid JSON`);
     }
-    const errs = validate ? checkLine(o, file) : (!o || typeof o !== 'object' || !TYPES.includes(o.type) || !o.id || !o.at || !o.by ? ['not a log line'] : []);
+    const shape = !o || typeof o !== 'object' || Array.isArray(o) || !TYPES.includes(o.type) || !['new', 'set'].includes(o.op) || typeof o.id !== 'string' || typeof o.at !== 'string' || typeof o.by !== 'string';
+    const errs = shape ? ['not a log line'] : validate ? checkLine(o, file) : [integrity(o, file)].filter(Boolean);
     if (errs.length) errors.push(`${file}:${n}: ${errs.join('; ')}`);
     else lines.push({ ...o, __file: file, __line: n });
   });
@@ -290,8 +311,6 @@ function fold(all) {
   const lines = [...all].sort((a, b) => a.at.localeCompare(b.at) || a.__file.localeCompare(b.__file) || a.__line - b.__line);
   const objects = new Map();
   const ignored = [];
-  const leftDraft = new Map();
-  for (const l of lines) if (l.type === 'goal' && writerClass(l.by) === 'owner' && l.status && l.status !== 'draft' && !leftDraft.has(l.id)) leftDraft.set(l.id, l.at);
   for (const l of lines) {
     if (l.op !== 'new') continue;
     if (objects.has(l.id)) {
@@ -314,7 +333,12 @@ function fold(all) {
       continue;
     }
     const cls = writerClass(l.by);
-    if (obj.type === 'goal' && cls === 'supervisor' && ((obj.status ?? 'draft') !== 'draft' || (leftDraft.get(obj.id) && l.at >= leftDraft.get(obj.id)))) {
+    const f = planFeature(l.by);
+    if (f && (obj.type === 'feature' ? obj.id : obj.feature) !== f) {
+      ignored.push({ line: l, why: `${l.by} may only change the feature "${f}" and its tickets` });
+      continue;
+    }
+    if (obj.type === 'goal' && cls === 'supervisor' && (obj.status ?? 'draft') !== 'draft') {
       ignored.push({ line: l, why: 'the supervisor edits a goal only while it is a draft' });
       continue;
     }
@@ -365,14 +389,27 @@ function logWriter() {
   return 'supervisor';
 }
 // Owner commands run from the owner's terminal or the dashboard, never an agent session. A
-// visibility measure, not a wall: every owner line records its channel.
+// visibility measure, not a wall: appendLog stamps every owner line with its channel.
 function ownerWriter() {
   if (process.env.DEVTEAM_ROLE) die(`owner commands don't run in an agent session (DEVTEAM_ROLE=${process.env.DEVTEAM_ROLE})`);
-  return { by: 'owner', channel: process.env.DEVTEAM_CHANNEL === 'dashboard' ? 'dashboard' : 'cli' };
+  return { by: 'owner' };
 }
+const ownerChannel = () => (process.env.DEVTEAM_CHANNEL === 'dashboard' ? 'dashboard' : 'cli');
 const supervisorOnly = (what) => {
   if (logWriter() !== 'supervisor' || ['worker', 'planner'].includes(process.env.DEVTEAM_ROLE)) die(`${what}: the supervisor does this`);
+  rememberSupervisorPane();
 };
+// The supervisor is the owner's foreground agent session. When it runs inside tmux, its pane is
+// recorded so workers' messages and the owner's answers can be typed into it; otherwise they wait
+// in the log for its next tick.
+const supervisorPaneFile = () => path.join(runDir, 'supervisor-pane');
+function rememberSupervisorPane() {
+  const pane = process.env.TMUX_PANE;
+  if (!pane || !process.env.TMUX) return;
+  if (readText(supervisorPaneFile()) === pane) return;
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.writeFileSync(supervisorPaneFile(), pane);
+}
 
 function withLock(file, fn) {
   const lock = `${file}.lock`;
@@ -425,12 +462,17 @@ function durableText(file) {
 function appendLog(fields, by = logWriter()) {
   const type = fields.type;
   if (!TYPES.includes(type)) die(`unknown log type ${type}`);
+  const f = planFeature(by);
+  if (f && fields.op === 'set' && ['feature', 'ticket'].includes(type)) {
+    const cur = logGet(fields.id);
+    if (cur && (type === 'feature' ? cur.id : cur.feature) !== f) die(`${by} may only change the feature "${f}" and its tickets`);
+  }
   const file = logFileFor(by);
   const prefix = SCHEMA['x-id'].prefix[type];
   const build = (at) => {
     const id = fields.id ?? `${prefix}-${at.slice(0, 10).replace(/-/g, '')}-${at.slice(11, 23).replace(/[:.]/g, '')}-${by}`;
-    const line = { v: 1, id, type, op: fields.op ?? 'new', at, by };
-    for (const [k, val] of Object.entries(fields)) if (!['id', 'type', 'op'].includes(k) && val !== undefined) line[k] = val;
+    const line = { v: 1, id, type, op: fields.op ?? 'new', at, by, ...(by === 'owner' ? { channel: ownerChannel() } : {}) };
+    for (const [k, val] of Object.entries(fields)) if (!ENVELOPE.includes(k) && val !== undefined) line[k] = val;
     const text = `${JSON.stringify(line)}\n`;
     const parsed = JSON.parse(text);
     const errs = checkLine(parsed, file);
@@ -513,13 +555,13 @@ function questionView(q) {
   if (ans) [status, answer, answeredBy, answeredAt] = ['answered', ans.answer, 'owner', ans.at];
   else if (st?.status === 'defaulted') [status, answer, answeredBy, answeredAt] = ['defaulted', q.default, 'supervisor (default)', st.at];
   else if (st?.status === 'withdrawn') [status, answeredAt] = ['withdrawn', st.at];
-  const matched = ans ? (q.matched ?? (!!q.recommendation && ans.answer.trim().toLowerCase() === q.recommendation.trim().toLowerCase())) : null;
+  const matched = ans ? !!q.recommendation && ans.answer.trim().toLowerCase() === q.recommendation.trim().toLowerCase() : null;
   return {
     id: q.id, kind: q.kind, class: q.class ?? null, scope: q.scope ?? null, ticket: q.ticket ?? null, re: q.re ?? null, asked_at: q.created_at,
     question: q.question, context: q.context ?? '', options: q.options ?? [], recommendation: q.recommendation ?? '', confidence: q.confidence ?? null,
     default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], evidence: q.evidence ?? [], note: q.note ?? null, why_asked: q.why_asked ?? null,
     status, answer, answered_by: answeredBy, answered_at: answeredAt, matched,
-    autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans ? (q.channel ?? null) : null,
+    autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans?.channel ?? null,
   };
 }
 const questions = () => logObjects('question').map(questionView);
@@ -602,7 +644,11 @@ function cmdLogSync() {
       warn(`run/log/${f} and main diverged; appending ${extra.length} live line(s) after main's`);
       next = cur + extra.map((l) => `${l}\n`).join('');
     }
-    for (const l of parseLines(next.slice(cur.length), f, { validate: false }).lines) {
+    // A file with an invalid line stays behind (the fold already ignores the line; check-pr would
+    // refuse the whole sync); the rest still land.
+    const added = parseLines(next.slice(cur.length), f, { firstLine: cur.split('\n').filter(Boolean).length + 1 });
+    if (added.errors.length) { warn(`run/log/${f} not synced: ${added.errors[0]}${added.errors.length > 1 ? ` (+${added.errors.length - 1} more; devteam.mjs log-check)` : ''}`); continue; }
+    for (const l of added.lines) {
       if (l.op === 'set' && ['ticket', 'feature', 'goal', 'question'].includes(l.type) && l.by !== 'owner') notable.push(`${l.by} set ${l.type} ${l.id}: ${Object.keys(l).filter((k) => !ENVELOPE.includes(k) && !k.startsWith('__')).join(', ')}`);
       if (l.op === 'new' && ['ticket', 'feature'].includes(l.type)) notable.push(`${l.by} added ${l.type} ${l.id}`);
     }
@@ -932,15 +978,22 @@ function cmdValidate() {
         if (r.verdict && !r.reviewer) errors.push(`feature ${fid}: review ${r.file} has no "- Reviewer:" line`);
         if (r.verdict && !r.shaValid) errors.push(`feature ${fid}: review ${r.file} needs the full 40-character SHA`);
       }
+      // In strict mode (a plan PR) each verdict must also hold at this head: nothing but review
+      // records added since the commit it names (quality.md §3).
+      const landed = mainRef() && git(['rev-parse', '--verify', '--quiet', `${mainRef()}:${projectRel}/log/plan-${fid}.jsonl`]) !== null;
+      const head = flags.strict && commonDir && !landed ? resolveCommit('HEAD') : null;
+      const holds = (r) => !head || verdictHolds(r.sha, head, `${projectRel}/reviews/`);
       const lg = latestPerTrack(reviews, 'graph');
       if (!lg.length) sink.push(`feature ${fid}: no graph review in project/reviews/${fid}/graph-<n>.md`);
       else if (lg.some((r) => r.verdict !== 'APPROVE')) sink.push(`feature ${fid}: the latest graph review is not APPROVE`);
+      else for (const r of lg.filter((x) => !holds(x))) errors.push(`feature ${fid}: graph review ${r.file} is at ${(r.sha ?? '').slice(0, 12)}, which does not hold at HEAD (something other than review records changed since); review again`);
       if (!f.design) errors.push(`feature ${fid} names no design (project/designs/<slug>.md)`);
       else if (!projectFileText(f.design.replace(/^project\//, ''))) errors.push(`feature ${fid}: design ${f.design} does not exist`);
       else {
         const ld = latestPerTrack(designReviews, 'design');
         if (!ld.length) sink.push(`feature ${fid}: design ${f.design} has no review in project/reviews/${designSlug}/design-<n>.md`);
         else if (ld.some((r) => r.verdict !== 'APPROVE')) sink.push(`feature ${fid}: the latest design review is not APPROVE`);
+        else for (const r of ld.filter((x) => !holds(x))) errors.push(`feature ${fid}: design review ${r.file} is at ${(r.sha ?? '').slice(0, 12)}, which does not hold at HEAD; review again`);
       }
       if (!(f.goals ?? []).length) errors.push(`feature ${fid} names no goal`);
       for (const g of f.goals ?? []) {
@@ -1039,12 +1092,12 @@ function graphEdit(type, idRe) {
   if (sub === 'add' && logGet(id)) die(`${id} exists; use ${type} set`);
   if (sub === 'set' && logGet(id)?.type !== type) die(`no ${type} ${id}`);
   const line = appendLog({ ...body, type, id, op: sub === 'add' ? 'new' : 'set' }, by);
+  if (by === 'supervisor') appendLog({ type: 'act', class: sub === 'add' ? 'add-ticket' : 'replan-within-feature', what: `${sub === 'add' ? 'added' : 'changed'} ${type} ${id}${sub === 'set' ? ` (${Object.keys(body).join(', ')})` : ''}`, refs: [id], reversible: true }, 'supervisor');
   out(`${sub === 'add' ? 'added' : 'updated'} ${line.id}`);
 }
 
 // ===== 6. review records and the definition of done =====
 
-const statusOf = (text) => text?.match(/^Status:[ \t]*(\S+)/m)?.[1] ?? null;
 const tableCells = (row) => row.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
 
 // A record is <stage>-<pass>[<track>].md with "- Reviewer: <name>" and a last line
@@ -1117,8 +1170,23 @@ function oneWayDoorsSection(body) {
   return { ok: false, why: 'the "## One-way doors" section must be "None." or link the owner\'s answer (a q-… id or a URL)' };
 }
 
-// Definition of done at an exact head, reading the files committed at that head.
-function checkTicket(id, { sha: shaArg, title, body }) {
+// A verdict at commit V holds at head H only if V is an ancestor of H, nothing between is a merge,
+// and every commit V..H just ADDS review-record files under `dir`.
+function verdictHolds(v, head, dir) {
+  if (!head || !v || !/^[0-9a-f]{40}$/.test(v)) return false;
+  if (v === head) return true;
+  if (!dir || git(['merge-base', '--is-ancestor', v, head]) === null) return false;
+  if ((git(['rev-list', '--merges', `${v}..${head}`]) ?? 'x').trim()) return false;
+  return (git(['log', '--no-renames', '--format=', '--name-status', `${v}..${head}`]) ?? '').split('\n').filter(Boolean).every((l) => {
+    const [st, file] = l.split('\t');
+    return st === 'A' && file.startsWith(dir) && /^(?:[a-z0-9-]+\/)?[a-z]+-\d+[a-z]?\.md$/.test(file.slice(dir.length));
+  });
+}
+const changedFiles = (base, sha) => (git(['diff', '--name-only', '--no-renames', base, sha]) ?? '').split('\n').filter(Boolean);
+
+// Definition of done at an exact head, reading the files committed at that head. The forge's
+// check-pr passes approvals: false, because the supervisor's approval acts live in its log.
+function checkTicket(id, { sha: shaArg, title, body, approvals = true }) {
   const t = tickets().get(id);
   if (!t) return [`no ticket ${id}`];
   const fails = [];
@@ -1132,9 +1200,9 @@ function checkTicket(id, { sha: shaArg, title, body }) {
   }
   const read = (rel) => srcRead(src, `tickets/${id}/${rel}`);
   if (read('spec.md') === null) fails.push('spec.md missing at this head');
-  else if (!approvalOf(id, 'approve-spec')) fails.push('spec not approved (the supervisor logs act --class approve-spec --refs <id>)');
+  else if (approvals && !approvalOf(id, 'approve-spec')) fails.push('spec not approved (the supervisor logs act --class approve-spec --refs <id>)');
   if (read('plan.md') === null) fails.push('plan.md missing at this head');
-  else if (!approvalOf(id, 'approve-plan')) fails.push('plan not approved (the supervisor logs act --class approve-plan --refs <id>)');
+  else if (approvals && !approvalOf(id, 'approve-plan')) fails.push('plan not approved (the supervisor logs act --class approve-plan --refs <id>)');
   const verText = read('verification.md');
   if (verText === null) fails.push('verification.md missing: a table with a row per done-when, the command run and its result');
   else {
@@ -1146,30 +1214,24 @@ function checkTicket(id, { sha: shaArg, title, body }) {
     if (r.verdict && !r.shaValid) fails.push(`${r.file}: the verdict needs the full 40-character SHA`);
     if (r.verdict && !r.reviewer) fails.push(`${r.file}: no "- Reviewer:" line; an unnamed review does not count`);
   }
-  // A verdict at commit V holds at head H only if every commit V..H just ADDS review-record files.
+  // The latest record in every final track must say APPROVE at a commit that holds at this head.
   const reviewsDir = projectInRepo ? `${projectRel}/tickets/${id}/reviews/` : null;
-  const holdsAt = (v) => {
-    if (!sha || !v || !/^[0-9a-f]{40}$/.test(v)) return false;
-    if (v === sha) return true;
-    if (!reviewsDir || git(['merge-base', '--is-ancestor', v, sha]) === null) return false;
-    if ((git(['rev-list', '--merges', `${v}..${sha}`]) ?? 'x').trim()) return false;
-    return (git(['log', '--no-renames', '--format=', '--name-status', `${v}..${sha}`]) ?? '').split('\n').filter(Boolean).every((l) => {
-      const [st, file] = l.split('\t');
-      return st === 'A' && file.startsWith(reviewsDir) && /^[a-z]+-\d+[a-z]?\.md$/.test(file.slice(reviewsDir.length));
-    });
-  };
-  const latest = latestPerTrack(reviews.filter((r) => r.stage === 'final' && holdsAt(r.sha)), 'final');
-  if (!reviews.some((r) => r.stage === 'final')) fails.push('no final review record (reviews/final-<n>.md)');
-  else if (!latest.length) fails.push(`no final review holds at ${sha}: a verdict holds at its own commit, or at a later head whose only changes are newly added review records`);
-  for (const r of latest) if (r.verdict === 'CHANGES') fails.push(`${r.file}: the latest final review at this head says CHANGES`);
-  const approvers = new Set(latest.filter((r) => r.verdict === 'APPROVE' && r.reviewer && r.shaValid).map((r) => r.reviewer));
+  const holdsAt = (v) => (sha ? verdictHolds(v, sha, reviewsDir) : false);
+  const latest = latestPerTrack(reviews, 'final');
+  if (!latest.length) fails.push('no final review record (reviews/final-<n>.md)');
+  for (const r of latest) {
+    if (r.verdict === 'CHANGES') fails.push(`${r.file}: the latest final review in its track says CHANGES`);
+    else if (r.verdict !== 'APPROVE') fails.push(`${r.file}: no verdict line (Verdict: APPROVE|CHANGES <sha>)`);
+    else if (!holdsAt(r.sha)) fails.push(`${r.file}: its verdict is at ${(r.sha ?? '').slice(0, 12)}, which does not hold at ${sha?.slice(0, 12)}: a verdict holds at its own commit, or at a later head whose only changes are newly added review records`);
+  }
+  const approvers = new Set(latest.filter((r) => r.verdict === 'APPROVE' && holdsAt(r.sha) && r.reviewer).map((r) => r.reviewer));
   const need = t.risk === 'high' ? 2 : 1;
   if (approvers.size < need) fails.push(`needs ${need} final APPROVE review(s) at this head from different named reviewers; found ${approvers.size}`);
   for (const r of reviews) for (const f of r.findings) if (blocking(f.severity) && !disposed(f.disposition)) fails.push(`${r.file} ${f.id} (${f.severity}) has no disposition`);
   const base = mainRef() && sha ? git(['merge-base', mainRef(), sha]) : null;
   if (commonDir && !base) fails.push(`cannot resolve main branch "${loadSettings().main_branch}"; footprint not checked`);
   if (base) {
-    const changed = (git(['diff', '--name-only', base, sha]) ?? '').split('\n').filter(Boolean);
+    const changed = changedFiles(base, sha);
     const own = projectInRepo ? `${projectRel}/tickets/${id}/` : null;
     const outside = changed.filter((f) => !(own && f.startsWith(own)) && !(t.touches ?? []).some((g) => pathMatches(g, f)));
     if (outside.length) fails.push(`changes files outside touches: ${outside.slice(0, 10).join(', ')}${outside.length > 10 ? ` (+${outside.length - 10} more)` : ''}`);
@@ -1197,11 +1259,12 @@ function cmdCheckTicket() {
 }
 
 
-// What CI (optional) and `merge` both check for a PR, by branch kind. Gates are not run here.
-function checkPr({ headRef, sha, title, body }) {
+// What the forge's check (optional) and `merge` both check for a PR, by branch kind. Gates are not
+// run here. A chore PR may not touch the log (chore-log touches nothing else) or a ticket's folder.
+function checkPr({ headRef, sha, title, body, forge = false }) {
   const branch = headRef.replace(/^refs\/heads\//, '');
   const fails = logRule(branch, sha);
-  if (branch.startsWith('ticket/')) return [...fails, ...checkTicket(branch.slice('ticket/'.length), { sha, title, body })];
+  if (branch.startsWith('ticket/')) return [...fails, ...checkTicket(branch.slice('ticket/'.length), { sha, title, body, approvals: !forge })];
   if (branch.startsWith('plan/')) {
     const feature = branch.slice('plan/'.length);
     if (title !== undefined && !title.startsWith(`plan-${feature}: `)) fails.push(`PR title must start with "plan-${feature}: "`);
@@ -1214,41 +1277,72 @@ function checkPr({ headRef, sha, title, body }) {
     } finally {
       git(['worktree', 'remove', '--force', wt], mainRoot);
     }
-  } else if (!/^chore-[a-z0-9]+(-[a-z0-9]+)*: \S/.test(title ?? 'chore-x: y')) fails.push('a PR that is not from a ticket/ or plan/ branch is titled "chore-<slug>: <summary>"');
+  } else {
+    if (!/^chore-[a-z0-9]+(-[a-z0-9]+)*: \S/.test(title ?? 'chore-x: y')) fails.push('a PR that is not from a ticket/ or plan/ branch is titled "chore-<slug>: <summary>"');
+    const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
+    const changed = base ? changedFiles(base, sha) : [];
+    const logDir = `${projectRel}/log/`;
+    const stray = branch === LOG_BRANCH ? changed.filter((f) => !f.startsWith(logDir)) : changed.filter((f) => f.startsWith(logDir) || f.startsWith(`${projectRel}/tickets/`));
+    if (stray.length) fails.push(`${branch === LOG_BRANCH ? 'chore-log changes only project/log' : 'a chore PR never touches project/log or project/tickets'}: ${stray.slice(0, 8).join(', ')}${stray.length > 8 ? ` (+${stray.length - 8})` : ''}`);
+  }
   if (body !== undefined && !branch.startsWith('ticket/')) {
     const owd = oneWayDoorsSection(body);
     if (!owd.ok) fails.push(owd.why);
   }
   return fails;
 }
+// A throwaway checkout of one commit, removed when the process ends however it ends.
 function detachedWorktree(sha, name) {
   const wt = path.join(mainRoot, '.worktrees', `tmp-${name}-${process.pid}`);
   gitOrDie(['worktree', 'add', '--quiet', '--detach', wt, sha], mainRoot);
+  process.once('exit', () => { if (fs.existsSync(wt)) git(['worktree', 'remove', '--force', wt], mainRoot); });
   return wt;
 }
 function cmdCheckPr() {
   const headRef = flagStr('head-ref') ?? die('check-pr needs --head-ref (and --sha, --title, --body-file)');
   const sha = resolveCommit(flagStr('sha') ?? 'HEAD') ?? die('cannot resolve the head');
   const body = flagStr('body-file') ? fs.readFileSync(flagStr('body-file'), 'utf8') : undefined;
-  report(checkPr({ headRef, sha, title: flagStr('title'), body }), `${headRef} passes the checks at ${sha.slice(0, 12)}`);
+  report(checkPr({ headRef, sha, title: flagStr('title'), body, forge: true }), `${headRef} passes the checks at ${sha.slice(0, 12)} (gates and the supervisor's approval acts are merge's to check)`);
+}
+// An owner-answered question, for commands that need the owner's yes.
+function ownerAnswer(qid, what) {
+  const q = logGet(qid);
+  const v = q?.type === 'question' ? questionView(q) : null;
+  if (!v || v.status !== 'answered') die(`${what}: ${qid} is not a question the owner answered`);
+  return v;
 }
 
 // The merge word, as a command: verify everything at the PR's exact head, run the project's gates
 // there, then merge refusing a moved head, then log the act. Only the supervisor runs it.
+// --dry-run runs every check and gate and stops; without a PR it checks the branch's local head.
 function cmdMerge() {
   supervisorOnly('merge');
   const [id] = positional;
   const plan = flagStr('plan');
   const chore = flagStr('chore');
-  const branch = plan ? `plan/${plan}` : chore ? `chore-${chore}` : id ? `ticket/${id}` : die('usage: merge <ticket-id> | merge --plan <feature> | merge --chore <slug>   [--no-gates] [--dry-run]');
-  const prJson = sh('gh', ['pr', 'view', branch, '--json', 'number,headRefOid,title,body,isDraft,mergeStateStatus,url']) ?? die(`no open PR from ${branch} (gh pr view failed)`);
-  const pr = JSON.parse(prJson);
-  if (pr.isDraft) die(`${pr.url} is a draft`);
+  const dry = !!flags['dry-run'];
+  const branch = plan ? `plan/${plan}` : chore ? `chore-${chore}` : id ? `ticket/${id}` : die('usage: merge <ticket-id> | merge --plan <feature> | merge --chore <slug>   [--approved <qid>] [--no-gates] [--dry-run [--title t] [--body-file f]]');
+  const prJson = sh('gh', ['pr', 'view', branch, '--json', 'number,headRefOid,title,body,isDraft,mergeStateStatus,url']);
+  if (prJson === null && !dry) die(`no open PR from ${branch} (gh pr view failed)`);
   git(['fetch', '--quiet', 'origin', branch]);
+  const pr = prJson !== null ? JSON.parse(prJson) : { headRefOid: resolveCommit(`origin/${branch}`) ?? resolveCommit(branch) ?? die(`no branch ${branch}`), title: flagStr('title'), body: flagStr('body-file') ? fs.readFileSync(flagStr('body-file'), 'utf8') : undefined };
+  if (pr.isDraft) die(`${pr.url} is a draft`);
   const sha = pr.headRefOid;
   if (!resolveCommit(sha)) die(`cannot find ${sha} locally after fetching ${branch}`);
   const fails = checkPr({ headRef: branch, sha, title: pr.title, body: pr.body });
   if (['BEHIND', 'DIRTY'].includes(pr.mergeStateStatus)) fails.push(`PR is ${pr.mergeStateStatus.toLowerCase()} relative to main; the author merges main and asks again`);
+  // A chore PR that touches the kit, the agent config or the forge config carries an owner answer
+  // (classes governance-edit, process-edit, gate-change); project/ files are the supervisor's.
+  const approved = flagStr('approved') ?? null;
+  if (chore) {
+    const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
+    const kit = base ? changedFiles(base, sha).filter((f) => !f.startsWith(`${projectRel}/`)) : [];
+    if (kit.length && !approved) fails.push(`touches files outside project/ (${kit.slice(0, 6).join(', ')}${kit.length > 6 ? ', …' : ''}); the owner's answer is needed: merge --chore ${chore} --approved <qid>`);
+    if (approved) {
+      ownerAnswer(approved, 'merge --approved');
+      if (logObjects('act').some((a) => a.approved_by === approved)) fails.push(`${approved} already approved an act; ask again for this one`);
+    }
+  }
   // Gates: the project's own commands, at the exact head, in a detached worktree.
   const gates = Object.entries(loadSettings().gates ?? {});
   if (!gates.length && !flags['no-gates'] && !chore) fails.push('no gates in settings (gates: {name: command}); pass --no-gates to merge without running any');
@@ -1273,7 +1367,7 @@ function cmdMerge() {
     }
   }
   if (fails.length) report(fails, '');
-  if (flags['dry-run']) return out(`ok: ${branch} at ${sha.slice(0, 12)} would merge`);
+  if (dry) return out(`ok: ${branch} at ${sha.slice(0, 12)} would merge`);
   const method = `--${loadSettings().merge_method}`;
   const merged = sh('gh', ['pr', 'merge', String(pr.number), method, '--match-head-commit', sha]);
   if (merged === null) die(`gh pr merge refused (did the head move?); verify from the start`);
@@ -1281,7 +1375,7 @@ function cmdMerge() {
   mainLogCache = undefined;
   mergeShaCache.clear();
   const cls = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
-  const act = appendLog({ type: 'act', actor: 'supervisor', class: cls, what: `merged ${branch} at ${sha}`, refs: id ? [id] : plan ? [plan] : [], reversible: false }, 'supervisor');
+  const act = appendLog({ type: 'act', class: cls, what: `merged ${branch} at ${sha}`, refs: id ? [id] : plan ? [plan] : [], reversible: false, approved_by: approved ?? undefined }, 'supervisor');
   out(`merged ${branch} at ${sha.slice(0, 12)} (${act.id})`);
 }
 // ===== 7. trust =====
@@ -1353,8 +1447,6 @@ function cmdAsk() {
   const blocks = asList(flags.blocks);
   for (const b of blocks) if (!tickets().has(b)) die(`--blocks ${b}: no such ticket`);
   const open = questions().filter((x) => x.status === 'open');
-  const cap = loadSettings().max_open_questions;
-  if (open.length >= cap && kind !== 'one-way-door' && !blocks.length) die(`${open.length} questions are open (max_open_questions ${cap}); hold this one, or withdraw a stale one`);
   let evidence = asList(flags.evidence);
   let recommendation = flagStr('recommendation') ?? '';
   if (kind === 'trust') {
@@ -1363,6 +1455,7 @@ function cmdAsk() {
     const ev = trustEvidence(cls);
     const r = rungFor(cls);
     if (r >= L.classes[cls].ceiling) die(`${cls} is already at its ceiling (rung ${r})`);
+    if (!ev.meets_agreement) die(`${cls}: the owner agreed with the recommendation on ${ev.agreement_questions.length ? `${Math.round((ev.agreement ?? 0) * 100)}% of the last ${ev.agreement_questions.length}` : 'no'} answered questions; a trust question needs ${L.promotion.agreement * 100}% of the last ${L.promotion.agreement_window} (constitution.md §2)`);
     evidence = [...new Set([...evidence, ...ev.agreement_questions, ...ev.uncorrected_acts.slice(-10)])];
     if (!recommendation) recommendation = `move ${cls} to rung ${r + 1} (${RUNG[r + 1]})`;
   }
@@ -1380,15 +1473,16 @@ function cmdAsk() {
 // The owner answers (terminal or dashboard). The supervisor may only apply a default or withdraw.
 function cmdAnswer() {
   const [id, ...restWords] = positional;
-  if (!id || (!restWords.length && !flags.defaulted)) die('usage: answer <qid> "<answer>" [--matched] [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>" [--rule-scope s]]   |   answer <qid> --defaulted   (supervisor)');
+  if (!id || (!restWords.length && !flags.defaulted)) die('usage: answer <qid> "<answer>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>" [--rule-scope s]]   |   answer <qid> --defaulted   (supervisor)');
   if (flags.defaulted) {
     supervisorOnly('answer --defaulted');
     const v = openQuestion(id);
     if (!v.default) die(`${id} has no default to apply`);
     appendLog({ type: 'question', op: 'set', id, status: 'defaulted' }, 'supervisor');
+    appendLog({ type: 'act', class: 'apply-default', what: `applied the default to ${id}: ${v.default}`, refs: [id], reversible: true }, 'supervisor');
     return out(`defaulted ${id}: ${v.default}`);
   }
-  const { by, channel } = ownerWriter();
+  const { by } = ownerWriter();
   const v = openQuestion(id, ['open', 'defaulted']);
   const answer = restWords.join(' ').trim();
   let autonomy;
@@ -1400,7 +1494,7 @@ function cmdAnswer() {
     if (rung > def.ceiling) die(`${v.class} has a ceiling of rung ${def.ceiling} (constitution.md)`);
     autonomy = { class: v.class, rung, scope: flagStr('scope') ?? null };
   }
-  appendLog({ type: 'question', op: 'set', id, answer, matched: flags.matched ? true : undefined, autonomy, standing_rule: flagStr('rule'), channel }, by);
+  appendLog({ type: 'question', op: 'set', id, answer, autonomy, standing_rule: flagStr('rule') }, by);
   if (flagStr('rule')) appendLog({ type: 'knowledge', kind: 'preference', statement: flagStr('rule'), scope: flagStr('rule-scope') ?? (v.class ? `class:${v.class}` : 'project'), status: 'accepted', confidence: 1, evidence: [id] }, by);
   nudgeSupervisor(`[devteam answer ${id} from owner] read it with: devteam.mjs questions --id ${id}`);
   out(`answered ${id}`);
@@ -1411,6 +1505,7 @@ function cmdWithdraw() {
   supervisorOnly('withdraw');
   openQuestion(id);
   appendLog({ type: 'question', op: 'set', id, status: 'withdrawn', reason: flagStr('reason') }, 'supervisor');
+  appendLog({ type: 'act', class: 'withdraw-question', what: `withdrew ${id}${flagStr('reason') ? `: ${flagStr('reason')}` : ''}`, refs: [id], reversible: true }, 'supervisor');
   out(`withdrew ${id}`);
 }
 function rankQuestions(qs) {
@@ -1466,7 +1561,12 @@ function cmdAct() {
       process.exit(3);
     }
   } else if (!(L.constitutional ?? []).includes(cls)) warn(`class "${cls}" is not in constitution.md (ladder, constitutional or owner-only)`);
-  const line = appendLog({ type: 'act', actor: 'supervisor', class: cls, scope: scope ?? undefined, what, rung, refs: asList(flags.refs), reversible: !flags.irreversible, approved_by: approved ?? undefined }, 'supervisor');
+  if (cls === 'approve-plan') {
+    const t = tickets().get(asList(flags.refs)[0]);
+    if (!t) die('approve-plan names the ticket: --refs <ticket-id>');
+    if ((t.one_way_doors ?? []).length && !questions().some((q) => q.kind === 'one-way-door' && q.ticket === t.id && q.status === 'answered')) die(`${t.id} lists one-way doors; the owner answers a one-way-door question (--ticket ${t.id}) before its plan is approved (constitution.md §4)`);
+  }
+  const line = appendLog({ type: 'act', class: cls, scope: scope ?? undefined, what, rung, refs: asList(flags.refs), reversible: !flags.irreversible, approved_by: approved ?? undefined }, 'supervisor');
   out(line.id);
 }
 function cmdCorrect() {
@@ -1533,6 +1633,11 @@ function knowledgeFor(target) {
   else if (target) scopes.add(`class:${target}`);
   return logObjects('knowledge').filter((k) => k.status === 'accepted' && scopes.has(k.scope));
 }
+// The block a prompt ends with: what applies to this ticket or feature.
+const knowledgeBlock = (target) => {
+  const ks = knowledgeFor(target);
+  return ks.length ? `What this project has learned that applies here (accepted knowledge):\n${ks.map((k) => `- [${k.kind}${k.valence < 0 ? ', avoid' : ''}] ${k.statement} (${k.id})`).join('\n')}` : '';
+};
 function cmdKnowledge() {
   const [sub, id] = positional;
   const by = () => (flags.owner ? ownerWriter().by : (supervisorOnly('knowledge'), 'supervisor'));
@@ -1547,10 +1652,9 @@ function cmdKnowledge() {
     return out(`updated ${id}`);
   }
   if (flagStr('for')) {
-    const ks = knowledgeFor(flagStr('for'));
-    if (flags.json) return json(ks);
-    if (ks.length) out(`What this project has learned that applies here (accepted knowledge):\n${ks.map((k) => `- [${k.kind}${k.valence < 0 ? ', avoid' : ''}] ${k.statement} (${k.id})`).join('\n')}`);
-    return;
+    if (flags.json) return json(knowledgeFor(flagStr('for')));
+    const block = knowledgeBlock(flagStr('for'));
+    return block ? out(block) : undefined;
   }
   let ks = logObjects('knowledge');
   if (flagStr('status')) ks = ks.filter((k) => k.status === flagStr('status'));
@@ -1574,7 +1678,7 @@ function cmdProblem() {
   if (!flags.all) ps = ps.filter((p) => p.status !== 'resolved');
   ps.sort((a, b) => b.severity - a.severity);
   if (flags.json) return json(ps);
-  for (const p of ps) out(`${p.id} [sev ${p.severity}, ${p.realized ? 'issue' : 'risk'}, ${p.status}${p.assigned_to ? `, ${p.assigned_to}` : ''}] ${p.title}`);
+  for (const p of ps) out(`${p.id} [sev ${p.severity}, ${p.realized ? 'issue' : 'risk'}, ${p.status}${p.assigned_to ? `, ${p.assigned_to}` : ''}] ${p.title}${(p.threatens ?? []).length ? ` (threatens ${p.threatens.join(', ')})` : ''}`);
 }
 // Recurring signals no knowledge or problem explains yet: three or more observations (or
 // corrections) on one key, from at least two writers or on at least two days.
@@ -1632,8 +1736,8 @@ function goalCheck(g) {
   const covered = new Set(feats.flatMap((f) => features().get(f).preconditions ?? []));
   const unplanned = (g.preconditions ?? []).map((text, i) => ({ n: i + 1, text })).filter((p) => !covered.has(`${g.id}#${p.n}`));
   const designSlug = slug(g.title ?? g.id);
-  if (!projectFileText(`designs/${designSlug}.md`)) coverage.push(`no design at project/designs/${designSlug}.md`);
   if ((g.status ?? 'draft') === 'ready') {
+    if (!projectFileText(`designs/${designSlug}.md`)) coverage.push(`no design at project/designs/${designSlug}.md`);
     if (!feats.length) coverage.push('no feature names this goal');
     for (const p of unplanned) coverage.push(`precondition ${p.n} ("${p.text}") has no feature (${g.id}#${p.n})`);
   }
@@ -1663,25 +1767,24 @@ function cmdGoal() {
       : undefined,
     horizon: flagStr('horizon'),
     non_goals: flags['non-goals'] !== undefined ? asList(flags['non-goals']) : undefined,
-    constraints: flags.constraints !== undefined ? asList(flags.constraints) : undefined,
     preconditions: flags.preconditions !== undefined ? asList(flags.preconditions) : undefined,
     priority: flagNum('priority'),
   });
   if (sub === 'add') {
-    const { by, channel } = writer();
+    const { by } = writer();
     const f = fields();
     if (!f.title) die('goal add needs --title');
-    return out(appendLog({ type: 'goal', status: 'draft', channel, ...f }, by).id);
+    return out(appendLog({ type: 'goal', status: 'draft', ...f }, by).id);
   }
   if (sub === 'set') {
-    if (!id || logGet(id)?.type !== 'goal') die('usage: goal set <g-id> [--title …] [--outcome …] [--measure …] [--target n] [--unit u] [--direction up|down] [--horizon date] [--non-goals …] [--constraints …] [--preconditions …] [--priority n] [--owner]');
-    const { by, channel } = writer();
+    if (!id || logGet(id)?.type !== 'goal') die('usage: goal set <g-id> [--title …] [--outcome …] [--measure …] [--target n] [--unit u] [--direction up|down] [--horizon date] [--non-goals …] [--preconditions …] [--priority n] [--owner]');
+    const { by } = writer();
     if (by === 'supervisor' && (logGet(id).status ?? 'draft') !== 'draft') die(`${id} is ${logGet(id).status}; only the owner changes it now (class goal-change)`);
-    appendLog({ type: 'goal', op: 'set', id, ...fields(), ...(by === 'owner' ? { channel } : {}) }, by);
+    appendLog({ type: 'goal', op: 'set', id, ...fields() }, by);
     return out(`updated ${id}`);
   }
   if (sub === 'approve' || sub === 'status') {
-    const { by, channel } = ownerWriter();
+    const { by } = ownerWriter();
     const g = logGet(id);
     if (g?.type !== 'goal') die(`no goal ${id}`);
     const to = sub === 'approve' ? 'ready' : positional[2];
@@ -1690,7 +1793,7 @@ function cmdGoal() {
       const c = goalCheck(g);
       if (c.definition.length && !flags.force) die(`${id} is not fully defined:\n  - ${c.definition.join('\n  - ')}\n(--force to approve anyway)`);
     }
-    appendLog({ type: 'goal', op: 'set', id, status: to, channel }, by);
+    appendLog({ type: 'goal', op: 'set', id, status: to }, by);
     return out(`${id} is ${to}`);
   }
   if (sub === 'show') return json(goalView(logGet(id)?.type === 'goal' ? logGet(id) : die(`no goal ${id}`)));
@@ -1732,8 +1835,10 @@ function collectRoadmap() {
   const prog = collectProgress();
   const items = prog.tickets;
   const now = Date.now();
-  const recentPts = items.filter((t) => t.merged_at && now - Date.parse(t.merged_at) <= 14 * DAY).reduce((a, t) => a + t.weight, 0);
-  const rate = recentPts / 14;
+  const firstAdd = Math.min(now, ...items.map((t) => Date.parse(t.added_at)));
+  const windowDays = Math.max(1, Math.min(14, (now - firstAdd) / DAY));
+  const recentPts = items.filter((t) => t.merged_at && now - Date.parse(t.merged_at) <= windowDays * DAY).reduce((a, t) => a + t.weight, 0);
+  const rate = recentPts / windowDays;
   const m = collectMetrics(0);
   const cycleDays = m.cycle_hours.median ? m.cycle_hours.median / 24 : null;
   const openQs = questions().filter((q) => q.status === 'open');
@@ -1772,7 +1877,7 @@ function collectRoadmap() {
   });
   return {
     generated_at: nowIso(), rate_points_per_day: +rate.toFixed(2), median_cycle_days: cycleDays === null ? null : +cycleDays.toFixed(1),
-    goals: goalRows, features: Object.fromEntries(views.map((v) => [v.feature, v])), unassigned: views.filter((v) => !v.goals.some((g) => rankOf.has(g))).map((v) => v.feature),
+    goals: goalRows, features: Object.fromEntries(views.map((v) => [v.feature, v])), unassigned: views.filter((v) => v.feature !== CHORES && !v.goals.some((g) => logGet(g)?.type === 'goal')).map((v) => v.feature),
     note: 'Estimates assume goal-priority order at the current rate; a feature finishes no sooner than its remaining waves times the median cycle time. Goals with unplanned preconditions have no date.',
   };
 }
@@ -2070,7 +2175,7 @@ function collectMetrics(since) {
   }
   for (const msg of openMsgs.filter((x) => now - Date.parse(x.created_at) > 30 * 60000)) add('medium', 'unanswered-message', msg.id, `${msg.kind} from ${msg.created_by}, ${Math.round((now - Date.parse(msg.created_at)) / 60000)} min old`, `reply with --re ${msg.id}`);
   for (const q of openQs.filter((x) => now - Date.parse(x.asked_at) > grace)) add('high', 'owner-question-waiting', q.id, q.question.slice(0, 120), q.default ? 'apply its default' : 'remind the owner; it blocks work');
-  if (recentQs.length >= 4 && answeredRecent / recentQs.length < 0.5) add('high', 'inbox-stalled', 'owner questions', `${answeredRecent} of ${recentQs.length} answered in 14 days`, 'stop asking non-blocking questions; batch, withdraw stale ones, open a problem');
+  if (recentQs.length >= 4 && answeredRecent / recentQs.length < 0.5) add('high', 'inbox-stalled', 'owner questions', `${answeredRecent} of ${recentQs.length} answered in 14 days`, 'remind the owner what is blocked; give defaults where the class allows; withdraw what no longer matters');
   for (const [id, n] of Object.entries(reviewPasses()).filter(([, n]) => n >= 3)) add('medium', 'review-churn', id, `${n} final review passes`, 'the ticket may be too big or under-specified; re-plan it');
   const ready = [...ts.values()].filter((t) => isActive(t) && !mergeShaFor(t.id) && !activeWorker(t.id) && (t.depends_on ?? []).every((d) => mergeShaFor(d)));
   const active = [...ts.keys()].filter(activeWorker).length;
@@ -2118,7 +2223,7 @@ function collectProgress() {
       id: t.id, title: t.title, feature: t.feature, component: t.component, kind: t.kind, size: t.size, risk: t.risk, weight: weight(t), serves: t.serves ?? [], depends_on: t.depends_on ?? [],
       wave: level.has(t.id) ? level.get(t.id) + 1 : null, added_at: t.created_at,
       merged_at: sha ? new Date(mergedAt(t.id)).toISOString() : null, released_in: sha ? releasedIn(sha) : null, target_release: targets[0] ?? null,
-      stage: st?.stage ?? 'planned', phase: st?.phase ?? null, task: st?.task ?? null, minutes_silent: st?.minutes_silent ?? null,
+      stage: st?.stage ?? 'planned', phase: st?.phase ?? null, task: st?.task ?? null,
     };
   });
   return { now: nowIso(), features: [...new Set(items.map((t) => t.feature))], stories, tickets: items };
@@ -2153,7 +2258,7 @@ function dashboardData() {
   const replied = new Set(msgs.map((m) => m.re).filter(Boolean));
   return {
     generated_at: nowIso(), project: settings.project,
-    caps: { max_active_tickets: settings.max_active_tickets, max_active_per_component: settings.max_active_per_component },
+    caps: { max_active_tickets: settings.max_active_tickets },
     tickets: deriveStatus(),
     critical_path: findCycle(sub) ? [] : criticalPath(sub).path,
     questions: rankQuestions(questions().filter((q) => q.status === 'open')),
@@ -2182,7 +2287,6 @@ function cmdDashboard() {
     answer: (b) => {
       if (!ID.test(b.id ?? '') || !text(b.answer)) return null;
       const args = ['answer', b.id, b.answer.trim()];
-      if (b.matched === true) args.push('--matched');
       if ([1, 2, 3].includes(b.autonomy)) args.push('--autonomy', String(b.autonomy), ...(text(b.scope, 100) ? ['--scope', b.scope.trim()] : []));
       if (text(b.rule, 600)) args.push('--rule', b.rule.trim());
       return args;
@@ -2222,35 +2326,38 @@ function cmdDashboard() {
 // ===== 11. sessions: workers, planners, messages, phases, gates =====
 
 const PROMPTS = {
-  supervisor: 'You are the supervisor for this repository. Read docs/devteam/README.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for.',
-  worker: 'You are the worker for ticket {{ID}}. Read docs/devteam/README.md, then docs/devteam/process/worker.md, and follow it from §1. Your ticket: node docs/devteam/scripts/devteam.mjs ticket show {{ID}}. Use superpowers for every step; devteam says where files go and what must be true before you ask for the merge.',
-  planner: 'You are planning feature {{ID}} on branch plan/{{ID}}, in this worktree. Read docs/devteam/README.md, then docs/devteam/process/planning.md, and run the pipeline from §2 for this feature. Your tickets and the feature line go to the log with devteam.mjs feature add / ticket add; commit everything as you go; message the supervisor (devteam.mjs send supervisor) when the graph review passes.',
+  supervisor: 'You are the supervisor for this repository, running in the owner\'s terminal. Read the devteam section of AGENTS.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for.',
+  worker: 'You are the worker for ticket {{ID}}. Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md, and follow it from §1. Your ticket: node docs/devteam/scripts/devteam.mjs ticket show {{ID}}. Use superpowers for every step; devteam says where files go and what must be true before you ask for the merge.',
+  planner: 'You are planning feature {{ID}} on branch plan/{{ID}}, in this worktree. Read the devteam section of AGENTS.md, then docs/devteam/process/planning.md, and run the pipeline from §2 for this feature. Your tickets and the feature line go to the log with devteam.mjs feature add / ticket add; commit everything as you go; message the supervisor (devteam.mjs send supervisor) when the graph review passes.',
 };
 function cmdPrompt() {
   const role = positional[0];
   if (!PROMPTS[role]) die('usage: prompt supervisor|worker <ticket-id>|planner <feature>');
   const p = PROMPTS[role].replace(/\{\{ID\}\}/g, positional[1] ?? '');
-  const knowledge = role === 'supervisor' ? [] : knowledgeFor(positional[1]);
-  out(knowledge.length ? `${p}\n\nWhat this project has learned that applies here (accepted knowledge):\n${knowledge.map((k) => `- [${k.kind}${k.valence < 0 ? ', avoid' : ''}] ${k.statement} (${k.id})`).join('\n')}` : p);
+  const block = role === 'supervisor' ? '' : knowledgeBlock(positional[1]);
+  out(block ? `${p}\n\n${block}` : p);
 }
 
 const tmux = (args) => sh('tmux', args) !== null;
 // The session:window running this command. TMUX_PANE pins it to our own pane.
 const tmuxHere = () => (process.env.TMUX && process.env.TMUX_PANE ? sh('tmux', ['display-message', '-p', '-t', process.env.TMUX_PANE, '#S:#W']) : null);
-const supervisorTarget = () => process.env.DEVTEAM_SUPERVISOR ?? `${loadSettings().tmux_session}:supervisor`;
+const supervisorTarget = () => process.env.DEVTEAM_SUPERVISOR ?? readText(supervisorPaneFile())?.trim() ?? null;
 const SHELLS = new Set(['bash', 'zsh', 'sh', 'fish', 'dash', 'ksh', 'tcsh', 'csh', 'login']);
 // Resolve a session:window exactly and check an agent, not a bare shell, is running there (typing
 // into a shell would execute the text).
 function resolvePane(target) {
-  const i = target.lastIndexOf(':');
-  const [session, win] = i === -1 ? [target, '0'] : [target.slice(0, i), target.slice(i + 1)];
-  const listed = sh('tmux', ['list-windows', '-t', session, '-F', '#{window_index} #{window_name}']);
-  if (listed === null) return { problem: `no tmux session "${session}"` };
-  const rows = listed.split('\n').filter(Boolean).map((l) => [l.slice(0, l.indexOf(' ')), l.slice(l.indexOf(' ') + 1)]);
-  let row = rows.find(([idx, name]) => name === win || idx === win);
-  if (!row && win === 'supervisor') row = rows.find(([idx]) => idx === '0');
-  if (!row) return { problem: `no tmux window "${win}" in session "${session}"` };
-  const exact = `${session}:${row[0]}`;
+  if (!target) return { problem: 'the supervisor has not run inside tmux yet (no pane recorded); it reads messages on its tick' };
+  let exact = target;
+  if (!target.startsWith('%')) {
+    const i = target.lastIndexOf(':');
+    const [session, win] = i === -1 ? [target, '0'] : [target.slice(0, i), target.slice(i + 1)];
+    const listed = sh('tmux', ['list-windows', '-t', session, '-F', '#{window_index} #{window_name}']);
+    if (listed === null) return { problem: `no tmux session "${session}"` };
+    const rows = listed.split('\n').filter(Boolean).map((l) => [l.slice(0, l.indexOf(' ')), l.slice(l.indexOf(' ') + 1)]);
+    const row = rows.find(([idx, name]) => name === win || idx === win);
+    if (!row) return { problem: `no tmux window "${win}" in session "${session}"` };
+    exact = `${session}:${row[0]}`;
+  }
   const info = sh('tmux', ['display-message', '-p', '-t', exact, '#{pane_dead} #{pane_current_command}']);
   if (info === null) return { problem: `cannot inspect ${exact}` };
   const [dead, cmd = ''] = info.split(' ');
@@ -2314,7 +2421,7 @@ function cmdPhase() {
   }
   const task = flagStr('task') ?? prev?.task;
   const changed = !prev || prev.to !== to || prev.task !== task || (cost.usd !== undefined && cost.usd !== prev.usd) || flags.note !== undefined;
-  const stale = !prev || Date.now() - Date.parse(prev.created_at) > 15 * 60000;
+  const stale = !prev || Date.now() - Date.parse(prev.created_at) > Math.min(15, loadSettings().stale_after_minutes / 3) * 60000;
   if (!changed && !stale) return out(`phase ${to} (unchanged)`);
   appendLog({ type: 'phase', from: prev?.to ?? null, to, task, note: flagStr('note')?.slice(0, 280), sha: git(['rev-parse', 'HEAD']) ?? undefined, ...cost }, id);
   out(`phase ${to}${task ? ` ${task}` : ''}`);
@@ -2371,25 +2478,27 @@ function makeSession(role) {
     else gitOrDie(['worktree', 'add', '--quiet', '-b', branch, wt, base], mainRoot);
   }
   const promptFile = path.join(runDir, 'prompts', `${name}.txt`);
-  const knowledge = knowledgeFor(id);
-  fs.writeFileSync(promptFile, PROMPTS[role].replace(/\{\{ID\}\}/g, id) + (knowledge.length ? `\n\nWhat this project has learned that applies here (accepted knowledge):\n${knowledge.map((k) => `- [${k.kind}${k.valence < 0 ? ', avoid' : ''}] ${k.statement} (${k.id})`).join('\n')}` : '') + '\n');
-  if (!tmux(['has-session', '-t', s.tmux_session])) tmux(['new-session', '-d', '-s', s.tmux_session, '-n', 'supervisor', '-c', mainRoot]);
+  const block = knowledgeBlock(id);
+  fs.writeFileSync(promptFile, `${PROMPTS[role].replace(/\{\{ID\}\}/g, id)}${block ? `\n\n${block}` : ''}\n`);
+  // Workers live in detached tmux windows the owner can attach to; the supervisor is not one of them.
+  let fresh = false;
+  if (!tmux(['has-session', '-t', s.tmux_session])) { fresh = tmux(['new-session', '-d', '-s', s.tmux_session, '-n', name, '-c', wt]); if (!fresh) die('could not start tmux'); }
   const windows = (sh('tmux', ['list-windows', '-t', s.tmux_session, '-F', '#W']) ?? '').split('\n');
-  if (windows.includes(name)) { if (!resume) die(`window ${s.tmux_session}:${name} exists (use --resume to relaunch in it)`); }
-  else tmux(['new-window', '-d', '-t', s.tmux_session, '-n', name, '-c', wt]);
+  if (!fresh && windows.includes(name)) { if (!resume) die(`window ${s.tmux_session}:${name} exists (use --resume to relaunch in it)`); }
+  else if (!fresh) tmux(['new-window', '-d', '-t', s.tmux_session, '-n', name, '-c', wt]);
   const target = `${s.tmux_session}:${name}`;
-  const env = `export DEVTEAM_RUN='${runDir}' DEVTEAM_SUPERVISOR='${s.tmux_session}:supervisor' DEVTEAM_ROLE='${role}' ${role === 'worker' ? `DEVTEAM_TICKET='${id}'` : `DEVTEAM_FEATURE='${id}'`}`;
+  const env = `export DEVTEAM_RUN='${runDir}' DEVTEAM_ROLE='${role}' ${role === 'worker' ? `DEVTEAM_TICKET='${id}'` : `DEVTEAM_FEATURE='${id}'`}`;
   typeInto(target, env);
   typeInto(target, `${resume ? s.resume_command : s.agent_command} "$(cat '${promptFile}')"`);
   if (role === 'worker' && !resume) appendLog({ type: 'phase', from: null, to: 'starting', note: `started in ${target}` }, id);
-  appendLog({ type: 'act', actor: 'supervisor', class: 'worker-slots', what: `${resume ? 'resumed' : 'made'} ${role} ${name} in ${target}`, refs: role === 'worker' ? [id] : [], reversible: true }, 'supervisor');
+  appendLog({ type: 'act', class: 'worker-slots', what: `${resume ? 'resumed' : 'made'} ${role} ${name} in ${target}`, refs: role === 'worker' ? [id] : [], reversible: true }, 'supervisor');
   out(`${resume ? 'resumed' : 'made'} ${role} ${name} in ${target} at ${wt}`);
 }
 
 function cmdWhoami() {
   const id = currentTicketId();
   const s = loadSettings();
-  out([`DEVTEAM_TICKET=${id ?? ''}`, `DEVTEAM_FEATURE=${process.env.DEVTEAM_FEATURE ?? ''}`, `DEVTEAM_ROLE=${process.env.DEVTEAM_ROLE ?? (id ? 'worker' : logWriter().startsWith('plan-') ? 'planner' : 'supervisor')}`, `DEVTEAM_RUN=${runDir}`, `DEVTEAM_SUPERVISOR=${supervisorTarget()}`, `# writer=${logWriter()} repo=${repoRoot} main_checkout=${mainRoot} project=${projectDir} tmux_session=${s.tmux_session}`].join('\n'));
+  out([`DEVTEAM_TICKET=${id ?? ''}`, `DEVTEAM_FEATURE=${process.env.DEVTEAM_FEATURE ?? ''}`, `DEVTEAM_ROLE=${process.env.DEVTEAM_ROLE ?? (id ? 'worker' : logWriter().startsWith('plan-') ? 'planner' : 'supervisor')}`, `DEVTEAM_RUN=${runDir}`, `DEVTEAM_SUPERVISOR=${supervisorTarget() ?? ''}`, `# writer=${logWriter()} repo=${repoRoot} main_checkout=${mainRoot} project=${projectDir} tmux_session=${s.tmux_session}`].join('\n'));
 }
 function cmdSettings() {
   const s = loadSettings();
@@ -2514,6 +2623,26 @@ jobs:
 
 // init [--name project] [--upstream-base vX.Y.Z] [--github] [--agent claude]: the project folders,
 // settings, .gitignore entries, the AGENTS.md pointer; optionally the GitHub check and agent config.
+// The section init adds to the project's AGENTS.md: every agent reads this first, then its doc.
+const AGENTS_SECTION = `## devteam
+
+This repository runs on [devteam](https://github.com/sanctuarycomputer/devteam), materialized at \`docs/devteam/\` and owned here. Read the one doc for your role; do not read every doc up front.
+
+| You are | Read |
+|---|---|
+| the **supervisor** (the owner's foreground agent session; plans, schedules, rules, merges; writes no production code) | \`docs/devteam/process/supervisor.md\` |
+| a **worker** on one ticket, in its own worktree and tmux window, running superpowers | \`docs/devteam/process/worker.md\` |
+| a **planner** turning a goal into a design, a roadmap and a graph of tickets | \`docs/devteam/process/planning.md\` |
+| a **reviewer** (never the author; default verdict: not approved) | \`docs/devteam/governance/quality.md\` §3 |
+| the **owner**, deciding what to delegate | \`docs/devteam/governance/constitution.md\` §2 |
+
+The work, largest to smallest: **goal** (owner-approved outcome with a measure and a date) → **design** (\`project/designs/<goal>.md\`) → **feature** (stories, each with a target release) → **ticket** (one PR, one worker; a **wave** is the tickets that can run in parallel) → **task** (one step of a ticket's plan).
+
+The record is the log (\`node docs/devteam/scripts/devteam.mjs log | history | questions | status\`; one append-only JSON Lines log, typed by \`docs/devteam/schema/log.schema.json\`) and the tracked files under \`docs/devteam/project/\`. Chat and scrollback are not the record. \`node docs/devteam/scripts/devteam.mjs help\` lists the commands.
+
+Where rules conflict: the owner's explicit instruction, then enforcing configuration (lint, gates, branch protection), then \`project/settings.md\`, then \`governance/\`, then \`process/\`, then the framework's conventions and your judgment (\`constitution.md\` §6).
+`;
+
 function cmdInit() {
   const root = mainRoot;
   const made = [];
@@ -2528,24 +2657,24 @@ function cmdInit() {
   const add = want.filter((w) => !giText.split('\n').includes(w));
   if (add.length) { fs.writeFileSync(gi, `${giText}${giText && !giText.endsWith('\n') ? '\n' : ''}${add.join('\n')}\n`); made.push('.gitignore'); }
   const agents = path.join(root, 'AGENTS.md');
-  const pointer = '## devteam\n\nThis repository runs on devteam. Start at `docs/devteam/README.md`; it names the doc for your role. The log (`node docs/devteam/scripts/devteam.mjs log`) and the tracked files are the record.\n';
-  if (!fs.existsSync(agents)) { fs.writeFileSync(agents, `# Agents\n\n${pointer}`); made.push('AGENTS.md'); }
-  else if (!readText(agents).includes('docs/devteam/README.md')) { fs.appendFileSync(agents, `\n${pointer}`); made.push('AGENTS.md'); }
+  if (!fs.existsSync(agents)) { fs.writeFileSync(agents, `# Agents\n\n${AGENTS_SECTION}`); made.push('AGENTS.md'); }
+  else if (!readText(agents).includes('docs/devteam/process/supervisor.md')) { fs.appendFileSync(agents, `\n${AGENTS_SECTION}`); made.push('AGENTS.md'); }
   if (flags.github) put(path.join(root, '.github', 'workflows', 'devteam.yml'), WORKFLOW_YML);
   if (flagStr('agent') === 'claude') {
     const p = path.join(root, '.claude', 'settings.json');
-    const cfg = { permissions: { deny: SETTINGS_DEFAULTS.worker_denied_commands.map((c) => `Bash(${c}*)`) }, hooks: { Stop: [{ hooks: [{ type: 'command', command: 'node docs/devteam/scripts/devteam.mjs stop-ok' }] }] } };
+    // Patterns from the settings (worker_denied_commands); a convenience, not a wall: merge is the only merge path.
+    const cfg = { permissions: { deny: loadSettings().worker_denied_commands.map((c) => `Bash(${c})`) }, hooks: { Stop: [{ hooks: [{ type: 'command', command: 'node docs/devteam/scripts/devteam.mjs stop-ok' }] }] } };
     if (!fs.existsSync(p)) put(p, `${JSON.stringify(cfg, null, 2)}\n`);
     else out(`.claude/settings.json exists; add by hand:\n${JSON.stringify(cfg, null, 2)}`);
   }
   out(made.length ? `created:\n${made.map((m) => `  ${m}`).join('\n')}` : 'nothing to create');
-  out('next: fill settings (components, agent_command, gates), write designs/architecture.md from the code, then start the supervisor (README.md, Setup)');
+  out('next: fill settings (components, agent_command, gates), write designs/architecture.md from the code, then start the supervisor (the upstream README, Setup)');
 }
 
 const HELP = `devteam <command>   (positionals before flags; flags take the words after them)
 
 Setup and roles
-  init [--name n] [--upstream-base vX] [--github] [--agent claude]   project folders, settings, .gitignore, AGENTS.md pointer
+  init [--name n] [--upstream-base vX] [--github] [--agent claude]   project folders, settings, .gitignore, the devteam section of AGENTS.md
   prompt supervisor | worker <id> | planner <feature>    the prompt a session starts with
   worker <ticket-id> [--resume] | planner <feature> [--resume]   supervisor: a worktree, a tmux window and an agent for a ticket or a feature plan
   whoami | settings [--get key]
@@ -2558,8 +2687,8 @@ The graph (planning.md)
 
 Checks and merging (quality.md)
   check-ticket <id> [--sha s] [--title t] [--body-file f] [--pr n]   definition of done at an exact head
-  check-pr --head-ref r --sha s [--title t] [--body-file f]           what CI runs (optional)
-  merge <ticket-id> | merge --plan <feature> | merge --chore <slug> [--no-gates] [--dry-run]   supervisor: verify, run gates at the head, merge, log the act
+  check-pr --head-ref r --sha s [--title t] [--body-file f]           what the forge's required check runs (optional; no gates, no approval acts)
+  merge <ticket-id> | merge --plan <feature> | merge --chore <slug> [--approved qid] [--no-gates] [--dry-run]   supervisor: verify, run gates at the head, merge, log the act
 
 Sessions (worker.md)
   phase <to> [--task t] [--note n] [--usd x --in n --out n]   phase change or liveness ping; phase supervisor --usd x
@@ -2569,7 +2698,7 @@ Sessions (worker.md)
 
 Decide and act (supervisor.md, constitution.md)
   ask --question q [--kind k] [--class c] [--reasons r…] [--recommendation r] [--confidence 0-1] [--default d] [--options a b] [--blocks ids] [--evidence ids] [--ticket id] [--re m-…] [--note path]
-  answer <qid> "<text>" [--matched] [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> --defaulted
+  answer <qid> "<text>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> --defaulted
   withdraw <qid> [--reason r] | questions [--all] [--id q] [--json]
   act --class c [--scope s] [--approved qid] [--refs ids] [--irreversible] -- "<what>"
   correct <act-id> --reason r [--severity n]   (owner; --retro for the supervisor) | repair <act-id> --how undo|fix-ticket|none
@@ -2600,7 +2729,7 @@ const COMMANDS = {
   phase: cmdPhase, gate: cmdGate, send: cmdSend, messages: cmdMessages, 'stop-ok': cmdStopOk,
   ask: cmdAsk, answer: cmdAnswer, withdraw: cmdWithdraw, questions: cmdQuestions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
   observe: cmdObserve, 'observe-metrics': cmdObserveMetrics, orient: cmdOrient, metrics: cmdMetrics, knowledge: cmdKnowledge, problem: cmdProblem,
-  goal: cmdGoal, goals: cmdGoal, retro: cmdRetro, chore: cmdChore,
+  goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
   log: cmdLog, 'log-check': cmdLogCheck, 'log-sync': cmdLogSync, history: cmdHistory,
   dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes,
 };

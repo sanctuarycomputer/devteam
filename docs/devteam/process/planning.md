@@ -106,13 +106,13 @@ A ticket may spec and plan while its dependencies are unmerged (plan-ahead); onl
 ## 5. Review and landing
 
 1. `devteam.mjs validate` passes in the planner's worktree (reviews still missing show as warnings).
-2. A non-author reviews the graph (`project/reviews/<feature>/graph-1.md`): hidden dependencies, footprints that overlap work in flight (the architecture doc's In flight table), footprints too broad for D4 to mean anything, tickets over size, missing contract tickets, done-whens that can't fail, stories with no integration ticket, risk under-assigned, one-way doors not yet answered, `architecture.md` not updated. The verdict names the commit that holds the ticket lines; any later change to them voids it.
+2. A non-author reviews the graph (`project/reviews/<feature>/graph-1.md`): hidden dependencies, footprints that overlap work in flight (the architecture doc's In flight table), footprints too broad for D4 to mean anything, tickets over size, missing contract tickets, done-whens that can't fail, stories with no integration ticket, risk under-assigned, one-way doors not yet answered, `architecture.md` not updated. The verdict names the commit that holds the ticket lines; any later commit that changes anything but review records voids it (`validate --strict` checks this).
 3. Commit everything and open the PR titled `plan-<feature>: <summary>`; message the supervisor (`devteam.mjs send supervisor "<feature> graph review passed" --kind review-request`).
 4. The supervisor reads the design and the graph, then `devteam.mjs merge --plan <feature>`, which checks `validate --strict` at the head, both reviews holding, and that the PR touches no log file but its own. The merge is the approval; the tickets appear in `devteam.mjs ready`.
 
 ## 6. Re-planning
 
-When a design change, a failed spike or a correction changes the graph: the supervisor sets the affected tickets (`ticket set <id> --json '{"superseded_by": …}'`, new `depends_on`, `touches`) and adds replacements, logged as an act of class `replan-within-feature`; a ticket already in flight gets a ruling recorded in its spec. Ids are never reused. A re-plan big enough to need review goes through a new `plan/<feature>-<n>` branch like a first plan. Once the supervisor has set a field on a ticket, planners can no longer change that field; later re-plans of it are the supervisor's.
+When a design change, a failed spike or a correction changes the graph: the supervisor sets the affected tickets (`ticket set <id> --json '{"superseded_by": …}'`, new `depends_on`, `touches`) and adds replacements; each such command logs its act (`replan-within-feature`, `add-ticket`); a ticket already in flight gets a ruling recorded in its spec. Ids are never reused. A re-plan big enough to need review goes through a new `plan/<feature>-<n>` branch like a first plan. Once the supervisor has set a field on a ticket, planners can no longer change that field; later re-plans of it are the supervisor's.
 
 ## 7. Bootstrap tickets and existing codebases
 

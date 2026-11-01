@@ -4,156 +4,258 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>devteam</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
 <style>
-  :root { color-scheme: light; --bg:#fbfaf7; --surface:#fcfcfb; --fg:#1d1d1b; --muted:#6b6a65; --line:#e3e1da; --card:#fff; --hi:#b42318; --mid:#b54708; --lo:#475467; --ok:#067647; --bar:#1d1d1b; --series-1:#2a78d6; --grid:#ecebe6; }
-  @media (prefers-color-scheme: dark) { :root { color-scheme: dark; --bg:#141413; --surface:#1a1a19; --fg:#ecebe6; --muted:#9a998f; --line:#2c2b28; --card:#1c1c1a; --hi:#f97066; --mid:#fdb022; --lo:#98a2b3; --ok:#47cd89; --bar:#ecebe6; --series-1:#3987e5; --grid:#262624; } }
+  /* Geist tokens (vercel.com/geist), a Linear-style shell. Light and dark are separate scales. */
+  :root {
+    color-scheme: light;
+    --bg: #fafafa; --surface: #ffffff; --raised: #ffffff; --hover: #f2f2f2; --well: #f2f2f2;
+    --fg: #171717; --fg-2: #666666; --muted: #8f8f8f; --line: #ebebeb; --line-2: #dcdcdc;
+    --blue: #0070f3; --blue-fg: #0068d6; --red: #ee0000; --red-fg: #cb2a2f; --amber: #f5a623; --amber-fg: #a35200; --green: #45a557; --green-fg: #297a3a;
+    --series-1: #0070f3; --grid: #ebebeb; --shadow: 0 1px 2px rgba(0,0,0,.04);
+    --sans: 'Geist', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; --mono: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) { :root {
+    color-scheme: dark;
+    --bg: #000000; --surface: #0a0a0a; --raised: #111111; --hover: #1a1a1a; --well: #111111;
+    --fg: #ededed; --fg-2: #a1a1a1; --muted: #7d7d7d; --line: #1f1f1f; --line-2: #2e2e2e;
+    --blue: #52a8ff; --blue-fg: #52a8ff; --red: #ff6166; --red-fg: #ff6166; --amber: #ffb224; --amber-fg: #ffb224; --green: #3cd58c; --green-fg: #62c073;
+    --series-1: #52a8ff; --grid: #1f1f1f; --shadow: none;
+  } }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, sans-serif; }
-  main { max-width: 1240px; margin: 0 auto; padding: 20px 16px 60px; }
-  header { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline; margin-bottom: 18px; }
-  h1 { font-size: 20px; margin: 0; }
-  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 28px 0 10px; }
-  h3 { font-size: 13px; margin: 0 0 8px; }
-  .muted { color: var(--muted); }
-  .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
-  .stat { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
-  .stat b { display: block; font-size: 20px; }
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; }
-  .badge { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 99px; border: 1px solid var(--line); margin-right: 6px; }
-  .high { color: var(--hi); border-color: var(--hi); } .medium { color: var(--mid); border-color: var(--mid); } .low { color: var(--lo); border-color: var(--lo); } .good { color: var(--ok); border-color: var(--ok); }
-  textarea { width: 100%; min-height: 54px; margin-top: 8px; padding: 8px; font: inherit; background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; }
-  button { font: inherit; padding: 5px 12px; border-radius: 6px; border: 1px solid var(--fg); background: var(--fg); color: var(--bg); cursor: pointer; margin-top: 6px; }
-  button.opt { background: transparent; color: var(--fg); border-color: var(--line); margin-right: 6px; }
-  select { font: inherit; padding: 5px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--card); color: var(--fg); max-width: 100%; }
-  table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
-  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
-  th { font-size: 12px; color: var(--muted); font-weight: 600; }
-  tr:last-child td { border-bottom: 0; }
-  .scroll { overflow-x: auto; }
-  .bars div { display: grid; grid-template-columns: 120px 1fr 70px; gap: 8px; align-items: center; margin: 4px 0; }
-  .bars span.b { height: 10px; background: var(--bar); border-radius: 3px; min-width: 2px; }
+  html { -webkit-text-size-adjust: 100%; background: var(--bg); }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
+  a { color: inherit; text-decoration: none; }
+  code { font-family: var(--mono); font-size: 12px; }
+  .muted { color: var(--fg-2); }
+  .dim { color: var(--muted); }
+  .small { font-size: 12px; }
+  .err { color: var(--red-fg); font-size: 12px; }
+  .empty { color: var(--muted); font-size: 12px; margin: 0; }
+  [hidden] { display: none !important; }
+
+  /* shell */
+  .app { display: grid; grid-template-columns: 232px minmax(0, 1fr); min-height: 100vh; }
+  .side { position: sticky; top: 0; height: 100vh; overflow-y: auto; border-right: 1px solid var(--line); background: var(--surface); padding: 14px 10px; display: flex; flex-direction: column; gap: 2px; }
+  .brand { display: flex; align-items: center; gap: 8px; padding: 6px 8px 14px; }
+  .brand .dot { width: 8px; height: 8px; border-radius: 2px; background: var(--fg); flex: none; }
+  .brand b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .nav a { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 5px 8px; border-radius: 6px; color: var(--fg-2); }
+  .nav a:hover { background: var(--hover); color: var(--fg); }
+  .nav .count { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .nav .count.hot { color: var(--red-fg); }
+  .side .foot { margin-top: auto; padding: 12px 8px 4px; font-size: 11px; color: var(--muted); line-height: 1.6; }
+  main { max-width: 1120px; width: 100%; margin: 0 auto; padding: 24px 32px 80px; }
+  @media (max-width: 900px) {
+    .app { grid-template-columns: 1fr; }
+    .side { height: auto; flex-direction: row; align-items: center; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 8px 12px; gap: 4px; z-index: 5; }
+    .side .brand { padding: 0 8px 0 0; }
+    .side .nav { display: flex; gap: 2px; }
+    .side .foot { display: none; }
+    .nav a { white-space: nowrap; }
+    main { padding: 16px 16px 64px; }
+  }
+
+  /* sections */
+  section { margin-top: 36px; scroll-margin-top: 16px; }
+  section:first-of-type { margin-top: 0; }
+  h2 { font-size: 15px; font-weight: 600; margin: 0 0 12px; letter-spacing: -.01em; display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; }
+  h2 .sub { font-size: 12px; font-weight: 400; color: var(--muted); }
+  h3 { font-size: 12px; font-weight: 600; margin: 0 0 8px; color: var(--fg-2); }
+  .grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+  .stat { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; box-shadow: var(--shadow); }
+  .stat span { display: block; font-size: 12px; color: var(--fg-2); }
+  .stat b { display: block; font-size: 20px; font-weight: 600; letter-spacing: -.02em; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; margin-bottom: 8px; box-shadow: var(--shadow); }
+  .card.small { padding: 10px 12px; }
+  .card p { margin: 6px 0; }
   .two { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
-  .crit { font-weight: 700; }
-  code { font-size: 12px; }
-  .err { color: var(--hi); }
+
+  /* badges: a tint of the status colour; the word is always in the badge, never colour alone */
+  .badge { display: inline-flex; align-items: center; font-size: 11px; font-weight: 500; line-height: 18px; padding: 0 7px; border-radius: 999px; margin-right: 6px; vertical-align: middle; white-space: nowrap;
+    --c: var(--fg-2); color: var(--c); background: color-mix(in srgb, var(--c) 9%, transparent); border: 1px solid color-mix(in srgb, var(--c) 22%, transparent); }
+  .badge.high, .badge.critical, .badge.important { --c: var(--red-fg); } .badge.medium, .badge.minor { --c: var(--amber-fg); } .badge.low { --c: var(--blue-fg); } .badge.good { --c: var(--green-fg); }
+
+  /* controls */
+  button { font: inherit; font-size: 12px; font-weight: 500; height: 28px; padding: 0 10px; border-radius: 6px; border: 1px solid var(--fg); background: var(--fg); color: var(--bg); cursor: pointer; margin-top: 6px; transition: opacity .12s, background .12s; }
+  button:hover { opacity: .88; }
+  button:disabled { opacity: .5; cursor: default; }
+  button.ghost, button.opt { background: var(--surface); color: var(--fg); border: 1px solid var(--line-2); margin-top: 0; }
+  button.ghost:hover, button.opt:hover { background: var(--hover); opacity: 1; }
+  button.opt { margin: 6px 6px 0 0; }
+  textarea, input[type=text], select { font: inherit; font-size: 13px; color: var(--fg); background: var(--surface); border: 1px solid var(--line-2); border-radius: 6px; outline: none; }
+  textarea { width: 100%; min-height: 56px; margin-top: 8px; padding: 8px 10px; resize: vertical; }
+  input[type=text] { height: 28px; padding: 0 10px; }
+  select { height: 28px; padding: 0 8px; max-width: 100%; }
+  textarea:focus, input[type=text]:focus, select:focus { border-color: var(--blue); box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 18%, transparent); }
+  .row-inline { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; font-size: 12px; color: var(--fg-2); }
+  .row-inline input[type=text] { flex: 1; min-width: 180px; }
+  label { display: inline-flex; align-items: center; gap: 6px; }
+
+  /* tables */
+  .scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: 11px; color: var(--muted); font-weight: 500; letter-spacing: .02em; background: var(--well); }
+  tr:last-child td { border-bottom: 0; }
+  td { font-variant-numeric: tabular-nums; }
+
+  /* bars (hours and cost by phase) */
+  .bars { padding: 10px 14px; }
+  .bars div { display: grid; grid-template-columns: 96px 1fr 64px; gap: 10px; align-items: center; margin: 6px 0; font-size: 12px; }
+  .bars div span:last-child { text-align: right; color: var(--fg-2); font-variant-numeric: tabular-nums; }
+  .bars span.b { height: 6px; background: var(--series-1); border-radius: 3px; min-width: 2px; }
+
   /* progress */
-  .filters { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-bottom: 10px; }
-  .progress-layout { display: grid; gap: 16px; align-items: start; grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr); }
+  .filters { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-bottom: 10px; font-size: 12px; color: var(--fg-2); }
+  .progress-layout { display: grid; gap: 12px; align-items: start; grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr); }
   @media (max-width: 860px) { .progress-layout { grid-template-columns: 1fr; } }
   .chart { position: relative; }
   .chart svg { width: 100%; height: auto; display: block; }
-  .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: var(--fg-2); margin-bottom: 6px; }
   .legend i { display: inline-block; width: 18px; height: 0; border-top: 2px solid var(--muted); vertical-align: middle; margin-right: 6px; }
   .legend i.done { border-top-color: var(--series-1); } .legend i.scope { border-top-style: dashed; } .legend i.fc { border-top-color: var(--series-1); border-top-style: dotted; }
-  .tip { position: absolute; pointer-events: none; background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; font-size: 12px; display: none; white-space: nowrap; box-shadow: 0 2px 8px rgba(0,0,0,.08); }
-  .meter { height: 8px; background: var(--grid); border-radius: 4px; overflow: hidden; }
-  .meter span { display: block; height: 100%; background: var(--series-1); border-radius: 4px; }
-  .row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px; margin: 8px 0; font-size: 13px; }
+  .tip { position: absolute; pointer-events: none; background: var(--raised); border: 1px solid var(--line-2); border-radius: 6px; padding: 6px 8px; font-size: 12px; display: none; white-space: nowrap; box-shadow: 0 4px 16px rgba(0,0,0,.12); }
+  .meter { height: 6px; background: var(--well); border-radius: 3px; overflow: hidden; }
+  .meter span { display: block; height: 100%; background: var(--series-1); border-radius: 3px; }
+  .row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px; margin: 8px 0; font-size: 12px; }
+  .row .muted { font-variant-numeric: tabular-nums; }
   .row .meter { grid-column: 1 / -1; }
-  .throughput { display: flex; align-items: flex-end; gap: 4px; height: 60px; }
-  .throughput span { flex: 1; background: var(--series-1); border-radius: 3px 3px 0 0; min-height: 2px; position: relative; }
+  .throughput { display: flex; align-items: flex-end; gap: 4px; height: 56px; }
+  .throughput span { flex: 1; background: var(--series-1); border-radius: 3px 3px 0 0; min-height: 2px; }
+
   /* board */
-  .board { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(150px, 1fr); gap: 10px; overflow-x: auto; padding-bottom: 6px; }
-  .col { background: var(--grid); border-radius: 8px; padding: 8px; min-height: 80px; }
-  .col h3 { display: flex; justify-content: space-between; color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
-  .tcard { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 8px; margin-bottom: 8px; font-size: 12px; }
-  .tcard b { font-size: 12.5px; overflow-wrap: anywhere; }
+  .board { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(168px, 1fr); gap: 8px; overflow-x: auto; padding-bottom: 6px; }
+  .col { background: var(--well); border: 1px solid var(--line); border-radius: 8px; padding: 8px; min-height: 80px; }
+  .col h3 { display: flex; justify-content: space-between; align-items: center; margin: 2px 4px 8px; }
+  .col h3 span:last-child { color: var(--muted); font-weight: 500; }
+  .tcard { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; font-size: 12px; box-shadow: var(--shadow); }
+  .tcard b { font-family: var(--mono); font-weight: 500; font-size: 11.5px; overflow-wrap: anywhere; }
+  .tcard.blocked { border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
   .more { font-size: 12px; color: var(--muted); padding: 2px 4px; }
-  .tcard.blocked { border-color: var(--hi); }
+
   /* loop */
-  h2 .stage { color: var(--fg); margin-right: 6px; }
-  .why { font-size: 12px; color: var(--muted); margin: 4px 0 8px; }
-  .row-inline { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; font-size: 13px; }
-  .row-inline input[type=text] { flex: 1; min-width: 180px; font: inherit; padding: 5px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
+  .why { font-size: 12px; color: var(--fg-2); margin: 4px 0 8px; padding: 4px 10px; border-left: 2px solid var(--line-2); }
   .feed .card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; align-items: start; }
-  .feed .card.corrected { border-color: var(--hi); }
+  .feed .card.corrected { border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
   .goal { display: grid; gap: 6px; }
-  .goal .gaps { font-size: 12px; color: var(--muted); margin: 0; padding-left: 18px; }
-  .small { font-size: 12px; }
-  [hidden] { display: none !important; }
-  button.ghost { background: transparent; color: var(--fg); border-color: var(--line); padding: 3px 10px; margin-top: 0; }
+  .goal .gaps { font-size: 12px; color: var(--fg-2); margin: 0; padding-left: 18px; }
+  .qcard { border-left: 2px solid var(--amber); }
+  .qcard.door { border-left-color: var(--red); }
+  .qcard.trust { border-left-color: var(--green); }
+  .qid { font-family: var(--mono); font-size: 11px; color: var(--muted); }
 </style>
 </head>
 <body>
+<div class="app">
+<aside class="side">
+  <div class="brand"><span class="dot"></span><b id="title">devteam</b></div>
+  <nav class="nav">
+    <a href="#overview">Overview</a>
+    <a href="#goals">Goals <span class="count" id="n-goals"></span></a>
+    <a href="#inbox">Inbox <span class="count" id="n-questions"></span></a>
+    <a href="#progress">Progress <span class="count" id="n-progress"></span></a>
+    <a href="#board">Board <span class="count" id="n-active"></span></a>
+    <a href="#health">Health <span class="count" id="n-findings"></span></a>
+    <a href="#learning">Learning <span class="count" id="n-knowledge"></span></a>
+    <a href="#trust">Trust</a>
+    <a href="#acts">Acts <span class="count" id="n-acts"></span></a>
+    <a href="#messages">Messages <span class="count" id="n-messages"></span></a>
+  </nav>
+  <div class="foot"><span id="when"></span><br><span id="logline"></span><br><span class="err" id="err"></span></div>
+</aside>
 <main>
-  <header>
-    <h1 id="title">devteam</h1>
-    <span class="muted" id="when"></span>
-    <span class="muted" id="err"></span>
-  </header>
+  <section id="overview">
+    <div class="grid" id="stats"></div>
+  </section>
 
-  <div class="grid" id="stats"></div>
+  <section id="goals">
+    <h2>Goals <span class="sub" id="retro"></span></h2>
+    <div id="goals-list"></div>
+    <div id="unassigned" class="small dim"></div>
+  </section>
 
-  <h2>Goals</h2>
-  <div id="retro" class="small" style="margin-bottom:10px"></div>
-  <div id="goals"></div>
-  <div id="unassigned" class="small muted"></div>
+  <section id="inbox">
+    <h2>Inbox <span class="sub">questions that need the owner, most urgent first</span></h2>
+    <div id="questions"></div>
+  </section>
 
-  <h2>Questions</h2>
-  <div id="questions"></div>
-
-  <h2>Progress</h2>
-  <div class="filters">
-    <label>View <select id="view"></select></label>
-    <span class="muted" id="forecast"></span>
-  </div>
-  <div class="progress-layout">
-    <div>
-    <div class="card chart" id="burnup-card">
-      <div class="legend"><span><i class="done"></i>done</span><span><i class="scope"></i>scope</span><span><i class="fc"></i>forecast</span><span class="muted">points: S = 1, M = 2</span></div>
-      <div id="burnup"></div>
-      <div class="tip" id="tip"></div>
+  <section id="progress">
+    <h2>Progress</h2>
+    <div class="filters">
+      <label>View <select id="view"></select></label>
+      <span id="forecast"></span>
     </div>
-    <div class="card"><h3>Stories</h3><div id="w-stories"></div></div>
+    <div class="progress-layout">
+      <div>
+        <div class="card chart" id="burnup-card">
+          <div class="legend"><span><i class="done"></i>done</span><span><i class="scope"></i>scope</span><span><i class="fc"></i>forecast</span><span class="dim">points: S = 1, M = 2</span></div>
+          <div id="burnup"></div>
+          <div class="tip" id="tip"></div>
+        </div>
+        <div class="card"><h3>Stories</h3><div id="w-stories"></div></div>
+      </div>
+      <div>
+        <div class="card"><h3>Features</h3><div id="w-features"></div></div>
+        <div class="card"><h3>Releases</h3><div id="w-releases"></div></div>
+        <div class="card"><h3>Waves</h3><div id="w-waves"></div></div>
+        <div class="card"><h3>Points per week</h3><div class="throughput" id="w-throughput"></div><div class="dim small" id="w-throughput-note" style="margin-top:4px"></div></div>
+      </div>
     </div>
-    <div>
-      <div class="card"><h3>Features</h3><div id="w-features"></div></div>
-      <div class="card"><h3>Releases</h3><div id="w-releases"></div></div>
-      <div class="card"><h3>Waves</h3><div id="w-waves"></div></div>
-      <div class="card"><h3>Points per week</h3><div class="throughput" id="w-throughput"></div><div class="muted" id="w-throughput-note" style="font-size:12px;margin-top:4px"></div></div>
+  </section>
+
+  <section id="board">
+    <h2>Board</h2>
+    <div class="board" id="board-cols"></div>
+  </section>
+
+  <section id="health">
+    <h2>Health <span class="sub">findings, observations, time and cost by phase, gates</span></h2>
+    <div id="findings"></div>
+    <h3 style="margin-top:14px">Observations</h3>
+    <div id="observations"></div>
+    <div class="two" style="margin-top:14px">
+      <div><h3>Hours by phase</h3><div class="bars card" id="phase-time"></div></div>
+      <div><h3>USD by phase</h3><div class="bars card" id="phase-cost"></div></div>
     </div>
-  </div>
+    <h3 style="margin-top:14px">Gates</h3>
+    <div class="scroll"><table id="gates"></table></div>
+    <div class="two" style="margin-top:14px">
+      <div><h3>Flaky tests</h3><div id="flaky"></div></div>
+      <div><h3>Slowest tests</h3><div id="slow"></div></div>
+    </div>
+  </section>
 
-  <h2>Board</h2>
-  <div class="board" id="board"></div>
+  <section id="learning">
+    <h2>Learning <span class="sub">recurring signals, problems, knowledge</span></h2>
+    <div class="two">
+      <div><h3>Recurring</h3><div id="clusters"></div></div>
+      <div><h3>Problems</h3><div id="problems"></div></div>
+    </div>
+    <h3 style="margin-top:14px">Knowledge</h3>
+    <div id="knowledge"></div>
+    <div id="defaulted"></div>
+    <div id="owner-cli"></div>
+  </section>
 
-  <h2>Findings</h2>
-  <div id="findings"></div>
-  <h3 style="margin-top:14px">Observations</h3>
-  <div id="observations"></div>
+  <section id="trust">
+    <h2>Trust ladder <span class="sub">what the supervisor may decide alone, class by class</span></h2>
+    <div class="scroll"><table id="trust-table"></table></div>
+  </section>
 
-  <div class="two">
-    <div><h2>Hours by phase</h2><div class="bars card" id="phase-time"></div></div>
-    <div><h2>USD by phase</h2><div class="bars card" id="phase-cost"></div></div>
-  </div>
+  <section id="acts">
+    <h2>Acts <span class="sub">every decision the supervisor made; correct the wrong ones</span></h2>
+    <div class="feed" id="acts-feed"></div>
+  </section>
 
-  <h2>Gates</h2>
-  <div class="scroll"><table id="gates"></table></div>
-  <div class="two">
-    <div><h2>Flaky tests</h2><div id="flaky"></div></div>
-    <div><h2>Slowest tests</h2><div id="slow"></div></div>
-  </div>
-
-  <h2>Orient</h2>
-  <div class="two">
-    <div><h3>Recurring</h3><div id="clusters"></div></div>
-    <div><h3>Problems</h3><div id="problems"></div></div>
-  </div>
-  <h3 style="margin-top:14px">Knowledge</h3>
-  <div id="knowledge"></div>
-
-  <div id="defaulted"></div>
-  <div id="owner-cli"></div>
-
-  <h2>Trust ladder</h2>
-  <div class="scroll"><table id="trust"></table></div>
-
-  <h2>Acts</h2>
-  <div class="feed" id="acts"></div>
-
-  <h2>Unanswered messages</h2>
-  <div id="messages"></div>
+  <section id="messages">
+    <h2>Messages <span class="sub">awaiting a reply</span></h2>
+    <div id="messages-list"></div>
+  </section>
 </main>
+</div>
 <script>
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -217,7 +319,7 @@ function forecast(items, now) {
 // ---- burn-up chart (hand-built SVG) ----
 function burnup(items, now) {
   const el = $('burnup');
-  if (!items.length) { el.innerHTML = '<p class="muted">No tickets.</p>'; return; }
+  if (!items.length) { el.innerHTML = '<p class="empty">No tickets.</p>'; return; }
   const evs = [];
   for (const t of items) {
     evs.push([Date.parse(t.added_at), t.weight, 0]);
@@ -299,7 +401,7 @@ function widgets(p, now) {
   const storyEntries = Object.entries(p.stories);
   $('w-stories').innerHTML = storyEntries.length ? `<div>${storyEntries.map(([id, s]) => {
     const ts = p.tickets.filter((t) => t.serves.includes(id)); const d = ts.filter(isDone).length;
-    return meterRow(`${d === ts.length && ts.length ? '<span class="badge good">done</span>' : ''}<code>${esc(id)}</code> ${esc(s.text).slice(0, 80)}`, d, ts.length, `${d}/${ts.length} tickets${s.release ? ` · ${esc(s.release)}` : ''}`);
+    return meterRow(`${d === ts.length && ts.length ? '<span class="badge good">done</span>' : ''}<code>${esc(id)}</code> ${esc(String(s.text ?? '').slice(0, 80))}`, d, ts.length, `${d}/${ts.length} tickets${s.release ? ` · ${esc(s.release)}` : ''}`);
   }).join('')}</div>` : '<span class="muted">No stories yet.</span>';
   const weeks = [7, 6, 5, 4, 3, 2, 1, 0].map((w) => pts(p.tickets.filter((t) => isDone(t) && now - Date.parse(t.merged_at) >= w * 7 * DAY && now - Date.parse(t.merged_at) < (w + 1) * 7 * DAY)));
   const wmax = Math.max(1, ...weeks);
@@ -310,15 +412,15 @@ function widgets(p, now) {
 // ---- kanban board ----
 const COLUMNS = [['Backlog', ['planned']], ['Ready', ['ready']], ['Planning', ["spec'd", 'planned-in-detail']], ['Building', ['building']], ['Review', ['in-review']], ['Merged', ['merged']], ['Released', ['released']]];
 function board(items, crit) {
-  $('board').innerHTML = COLUMNS.map(([name, stages]) => {
+  $('board-cols').innerHTML = COLUMNS.map(([name, stages]) => {
     let cards = items.filter((t) => stages.includes(t.stage)).sort((a, b) => (a.wave ?? 99) - (b.wave ?? 99));
     const total = cards.length;
     // finished columns show the most recent few; the rest are counted
     if (['Merged', 'Released'].includes(name)) cards = cards.sort((a, b) => (b.merged_at || '').localeCompare(a.merged_at || '')).slice(0, 5);
     return `<div class="col"><h3><span>${name}</span><span>${total}</span></h3>${cards.map((t) => `
       <div class="tcard ${t.phase === 'blocked' ? 'blocked' : ''}">
-        <b>${crit.has(t.id) ? '★ ' : ''}${esc(t.id)}</b><div>${esc(t.title)}</div>
-        <div class="muted">${esc(t.component)} · ${t.size} · wave ${t.wave ?? '–'}${t.target_release ? ` · ${esc(t.target_release)}` : ''}</div>
+        <b>${crit.has(t.id) ? '★ ' : ''}${esc(t.id)}</b><div class="t">${esc(t.title)}</div>
+        <div class="muted">${esc(t.component)} · ${esc(t.size)} · wave ${esc(t.wave ?? '–')}${t.target_release ? ` · ${esc(t.target_release)}` : ''}</div>
         <div>${t.risk === 'high' ? '<span class="badge medium">high risk</span>' : ''}${t.phase === 'blocked' ? '<span class="badge high">blocked</span>' : ''}${t.phase && !['blocked', 'done'].includes(t.phase) ? `<span class="badge low">${esc(t.phase)}${t.task ? ` ${esc(t.task)}` : ''}</span>` : ''}</div>
       </div>`).join('')}${total > cards.length ? `<div class="more">+ ${total - cards.length} more</div>` : ''}</div>`;
   }).join('');
@@ -333,6 +435,8 @@ function renderProgress() {
   burnup(items, now);
   board(items, new Set(DATA.critical_path));
   widgets(p, now);
+  const all = forecast(p.tickets, now);
+  $('n-progress').textContent = all.scope ? `${pct(all.done, all.scope)}%` : '';
 }
 
 const sevBadge = (n) => (n >= 3 ? 'high' : n === 2 ? 'medium' : 'low');
@@ -343,7 +447,7 @@ function renderOoda(o) {
   const R = o.roadmap;
   const week = (d) => { if (!d) return 'no date'; const x = new Date(`${d}T00:00:00Z`); x.setUTCDate(x.getUTCDate() - ((x.getUTCDay() + 6) % 7)); return `week of ${x.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })}`; };
   const rt = o.retro;
-  $('retro').innerHTML = `<b>Retro</b> ${rt.last ? `${esc(rt.last.at.slice(0, 10))}: ${esc(rt.last.summary)}${rt.last.file ? ` <span class="muted">(${esc(rt.last.file)})</span>` : ''}` : '–'}${rt.due ? ` · <span class="badge medium">due ${esc((rt.due_since || '').slice(0, 10))}</span><span class="muted">${esc(rt.reasons.join('; '))}</span>` : ''}`;
+  $('retro').innerHTML = `retro ${rt.last ? `${esc(rt.last.at.slice(0, 10))}: ${esc(rt.last.summary)}${rt.last.file ? ` (${esc(rt.last.file)})` : ''}` : 'none yet'}${rt.due ? ` · <span class="badge medium">due ${esc((rt.due_since || '').slice(0, 10))}</span>${esc(rt.reasons.join('; '))}` : ''}`;
   $('unassigned').innerHTML = `${R.unassigned.length ? `No goal: ${R.unassigned.map(esc).join(', ')} · ` : ''}${R.rate_points_per_day} pts/day`;
   const roadmapOf = (gid) => {
     const r = R.goals.find((x) => x.id === gid);
@@ -356,7 +460,7 @@ function renderOoda(o) {
   };
 
   // Goals
-  $('goals').innerHTML = o.goals.length ? o.goals.map((g) => {
+  $('goals-list').innerHTML = o.goals.length ? o.goals.map((g) => {
     const last = g.readings[g.readings.length - 1];
     const gaps = [...g.check.definition.map((x) => `definition: ${x}`), ...g.check.coverage.filter((x) => !x.startsWith('precondition')).map((x) => `planning: ${x}`)];
     const canApprove = g.status === 'draft' && !g.check.definition.length;
@@ -369,7 +473,7 @@ function renderOoda(o) {
       ${roadmapOf(g.id)}
       ${canApprove ? `<div><button data-goal="${esc(g.id)}">Approve</button> <span class="err" id="e-${esc(g.id)}"></span></div>` : ''}
     </div>`;
-  }).join('') : '<p class="muted">None.</p>';
+  }).join('') : '<p class="empty">None.</p>';
 
   // Defaulted answers can still be overruled; terminal answers are worth a glance.
   $('defaulted').innerHTML = o.defaulted.length ? `<h3 style="margin-top:14px">Defaulted</h3>` + o.defaulted.map((q) => `
@@ -380,36 +484,36 @@ function renderOoda(o) {
 
   // Observe
   $('observations').innerHTML = o.observations.length ? o.observations.slice(0, 12).map((x) => `
-    <div class="card small"><span class="badge ${sevBadge(x.severity ?? 0)}">${esc(x.kind)}</span><code>${esc(x.subject)}</code> ${esc(x.detail)} <span class="muted">· ${esc(x.created_by)}, ${when(x.created_at)}${x.valence ? ` · valence ${x.valence > 0 ? '+' : ''}${x.valence}` : ''}</span></div>`).join('') : '<p class="muted">None yet.</p>';
+    <div class="card small"><span class="badge ${sevBadge(x.severity ?? 0)}">${esc(x.kind)}</span><code>${esc(x.subject)}</code> ${esc(x.detail)} <span class="muted">· ${esc(x.created_by)}, ${when(x.created_at)}${x.valence ? ` · valence ${x.valence > 0 ? '+' : ''}${esc(x.valence)}` : ''}</span></div>`).join('') : '<p class="empty">None yet.</p>';
 
   // Orient
   $('clusters').innerHTML = o.clusters.length ? o.clusters.map((c) => `
-    <div class="card small"><b>${esc(c.key)}</b> ×${c.count} <span class="muted">valence ${c.valence}</span><div class="muted">${esc(c.latest)}</div></div>`).join('') : '<p class="muted">None.</p>';
+    <div class="card small"><b>${esc(c.key)}</b> ×${esc(c.count)} <span class="muted">valence ${esc(c.valence)}</span><div class="muted">${esc(c.latest)}</div></div>`).join('') : '<p class="empty">None.</p>';
   $('problems').innerHTML = o.problems.length ? o.problems.map((p) => `
-    <div class="card small"><span class="badge ${sevBadge(p.severity)}">sev ${p.severity}</span><span class="badge">${p.realized ? 'issue' : 'risk'}</span><b>${esc(p.title)}</b> <span class="muted">· ${esc(p.status)}${p.assigned_to ? `, ${esc(p.assigned_to)}` : ''}</span>${p.detail ? `<div class="muted">${esc(p.detail)}</div>` : ''}</div>`).join('') : '<p class="muted">None open.</p>';
+    <div class="card small"><span class="badge ${sevBadge(p.severity)}">sev ${esc(p.severity)}</span><span class="badge">${p.realized ? 'issue' : 'risk'}</span><b>${esc(p.title)}</b> <span class="muted">· ${esc(p.status)}${p.assigned_to ? `, ${esc(p.assigned_to)}` : ''}${(p.threatens || []).length ? ` · threatens ${p.threatens.map(esc).join(', ')}` : ''}</span>${p.detail ? `<div class="muted">${esc(p.detail)}</div>` : ''}</div>`).join('') : '<p class="empty">None open.</p>';
   const cand = o.knowledge.filter((k) => k.status === 'candidate');
   const acc = o.knowledge.filter((k) => k.status === 'accepted');
   $('knowledge').innerHTML = (cand.length ? `<p class="small"><b>Candidates (${cand.length})</b></p>` + cand.map((k) => `
     <div class="card small"><span class="badge medium">${esc(k.kind)}</span><code>${esc(k.scope)}</code> ${esc(k.statement)} <span class="muted">${k.confidence != null ? `· ${Math.round(k.confidence * 100)}% sure ` : ''}· ${(k.evidence || []).length} evidence</span>
       <div class="row-inline"><button class="ghost" data-know="${esc(k.id)}" data-status="accepted">Accept</button><button class="ghost" data-know="${esc(k.id)}" data-status="retired">Retire</button><span class="err" id="e-${esc(k.id)}"></span></div></div>`).join('') : '') +
     (acc.length ? acc.map((k) => `<div class="card small"><span class="badge good">${esc(k.kind)}</span><code>${esc(k.scope)}</code> ${esc(k.statement)}${k.valence < 0 ? ' <span class="muted">(avoid)</span>' : ''}</div>`).join('') : '') ||
-    '<p class="muted">None.</p>';
+    '<p class="empty">None.</p>';
 
   // Decide: trust ladder
-  $('trust').innerHTML = '<tr><th>Class</th><th>Rung</th><th>Ceiling</th><th>Agreement</th><th>Acts since drop</th><th>Corrections</th><th></th></tr>' + o.trust.map((t) => `
-    <tr><td>${esc(t.class)}<div class="muted small">${esc(t.about || '')}</div></td><td>${t.rung} · ${esc(t.rung_name)}</td><td>${t.ceiling}</td><td>${t.agreement == null ? '–' : `${Math.round(t.agreement * 100)}% of ${t.agreement_questions.length}`}</td><td>${t.acts_since_drop}</td><td>${t.corrections}</td><td>${t.can_ask ? '<span class="badge good">evidence supports a trust question</span>' : ''}</td></tr>`).join('');
+  $('trust-table').innerHTML = '<tr><th>Class</th><th>Rung</th><th>Ceiling</th><th>Agreement</th><th>Acts since drop</th><th>Corrections</th><th></th></tr>' + o.trust.map((t) => `
+    <tr><td>${esc(t.class)}<div class="muted small">${esc(t.about || '')}</div></td><td>${esc(t.rung)} · ${esc(t.rung_name)}</td><td>${esc(t.ceiling)}</td><td>${t.agreement == null ? '–' : `${Math.round(t.agreement * 100)}% of ${esc(t.agreement_questions.length)}`}</td><td>${esc(t.acts_since_drop)}</td><td>${esc(t.corrections)}</td><td>${t.can_ask ? '<span class="badge good">evidence supports a trust question</span>' : ''}</td></tr>`).join('');
 
   // Act
   const feed = o.acts;
-  $('acts').innerHTML = feed.length ? feed.map((a) => `
+  $('acts-feed').innerHTML = feed.length ? feed.map((a) => `
     <div class="card small ${a.correction ? 'corrected' : ''}">
       <div><span class="badge ${a.ladder ? 'medium' : 'low'}">${esc(a.class)}${a.scope ? ` · ${esc(a.scope)}` : ''}</span>${esc(a.what)}
-        <div class="muted">${when(a.created_at)}${a.approved_by ? ` · approved by ${esc(a.approved_by)}` : a.rung ? ` · rung ${a.rung}` : ''}${a.reversible === false ? ' · irreversible' : ''}</div>
-        ${a.correction ? `<div class="err">corrected (${esc(a.correction.by)}, severity ${a.correction.severity ?? '–'}): ${esc(a.correction.reason)}${a.correction.repaired ? ` · ${esc(a.correction.repaired)}` : ''}</div>` : ''}
+        <div class="muted">${when(a.created_at)}${a.approved_by ? ` · approved by ${esc(a.approved_by)}` : a.rung ? ` · rung ${esc(a.rung)}` : ''}${a.reversible === false ? ' · irreversible' : ''}</div>
+        ${a.correction ? `<div class="err">corrected (${esc(a.correction.by)}, severity ${esc(a.correction.severity ?? '–')}): ${esc(a.correction.reason)}${a.correction.repaired ? ` · ${esc(a.correction.repaired)}` : ''}</div>` : ''}
         <div class="row-inline" hidden data-correct-form="${esc(a.id)}"><input type="text" data-reason="${esc(a.id)}" placeholder="Reason"><button class="ghost" data-correct-send="${esc(a.id)}">Send</button><span class="err" id="e-${esc(a.id)}"></span></div>
       </div>
       ${a.correction ? '' : `<button class="ghost" data-correct="${esc(a.id)}">Correct</button>`}
-    </div>`).join('') : '<p class="muted">None.</p>';
+    </div>`).join('') : '<p class="empty">None.</p>';
 }
 
 async function post(action, body, errId) {
@@ -426,9 +530,19 @@ async function post(action, body, errId) {
 function render(d) {
   DATA = d;
   const m = d.metrics, p = d.progress, now = Date.parse(p.now);
-  $('title').textContent = d.project && !String(d.project).startsWith('<') ? `devteam · ${d.project}` : 'devteam';
+  $('title').textContent = d.project && !String(d.project).startsWith('<') ? String(d.project) : 'devteam';
   $('when').textContent = `updated ${new Date(d.generated_at).toLocaleTimeString()}`;
+  const o = d.ooda;
+  $('logline').textContent = `log ${o.log.lines} lines${o.log.errors || o.log.ignored ? ` · ${o.log.errors} invalid · ${o.log.ignored} ignored` : ''}`;
   const active = d.tickets.filter((t) => t.phase && !['done', 'parked'].includes(t.phase)).length;
+  const count = (id, n, hot = false) => { const el = $(id); el.textContent = n || ''; el.classList.toggle('hot', hot && n > 0); };
+  count('n-goals', o.goals.length);
+  count('n-questions', d.questions.length, true);
+  count('n-active', active);
+  count('n-findings', m.findings.length, m.findings.some((f) => f.severity === 'high'));
+  count('n-knowledge', o.knowledge.filter((k) => k.status === 'candidate').length);
+  count('n-acts', o.acts.length);
+  count('n-messages', d.open_messages.length, true);
   const fcAll = forecast(p.tickets, now);
   const stats = [
     ['done', `${pct(fcAll.done, fcAll.scope)}%`],
@@ -442,13 +556,12 @@ function render(d) {
     ['answer rate (14d)', m.owner_questions.answer_rate_14d == null ? '–' : `${Math.round(m.owner_questions.answer_rate_14d * 100)}%`],
     ['escaped defects', m.escaped_defects],
   ];
-  $('stats').innerHTML = stats.map(([k, v]) => `<div class="stat"><span class="muted">${esc(k)}</span><b>${esc(v)}</b></div>`).join('');
+  $('stats').innerHTML = stats.map(([k, v]) => `<div class="stat"><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join('');
 
   // Keep anything half-typed or half-open across refreshes.
   document.querySelectorAll('textarea[data-q]').forEach((t) => { drafts[t.dataset.q] = t.value; });
   const kept = [...document.querySelectorAll('input[data-rule], select[data-auto], input[data-reason], input[data-overrule]')].map((el) => [el.dataset.rule ? `input[data-rule="${el.dataset.rule}"]` : el.dataset.auto ? `select[data-auto="${el.dataset.auto}"]` : el.dataset.reason ? `input[data-reason="${el.dataset.reason}"]` : `input[data-overrule="${el.dataset.overrule}"]`, el.value]);
   const openForms = [...document.querySelectorAll('[data-correct-form]')].filter((f) => !f.hidden).map((f) => f.dataset.correctForm);
-  const o = d.ooda;
   const reasonText = Object.fromEntries((o.reasons || []).map((r) => [r.id, r.means]));
   const RUNGS = { 1: '1 ask', 2: '2 ask with default', 3: '3 act and report' };
   $('questions').innerHTML = d.questions.length ? d.questions.map((q) => {
@@ -456,13 +569,13 @@ function render(d) {
     const why = q.why_asked?.reasons?.length ? `<div class="why">reasons: ${q.why_asked.reasons.map((r) => esc(reasonText[r] || r)).join('; ')}${cls ? ` · ${esc(q.class)} is on rung ${cls.rung} of ${cls.ceiling}` : q.class ? ` · ${esc(q.class)}` : ''}</div>` : '';
     const next = cls ? `<label>${esc(q.class)} rung: <select data-auto="${esc(q.id)}"><option value="">no change</option>${[1, 2, 3].filter((r) => r <= cls.ceiling).map((r) => `<option value="${r}">${RUNGS[r]}</option>`).join('')}</select></label>` : '';
     return `
-    <div class="card">
+    <div class="card qcard ${q.kind === 'one-way-door' ? 'door' : q.kind === 'trust' ? 'trust' : ''}">
       <span class="badge ${q.kind === 'one-way-door' ? 'high' : q.kind === 'trust' ? 'good' : 'medium'}">${esc(q.kind)}</span>
-      ${q.ticket ? `<code>${esc(q.ticket)}</code>` : ''} <span class="muted">${esc(q.id)}</span>
+      ${q.ticket ? `<code>${esc(q.ticket)}</code>` : ''} <span class="qid">${esc(q.id)}</span>
       <p><b>${esc(q.question)}</b></p>
       ${why}
       ${q.context ? `<p class="muted">${esc(q.context)}</p>` : ''}
-      ${q.recommendation ? `<p>Recommendation${q.confidence != null ? ` (${Math.round(q.confidence * 100)}%)` : ''}: ${esc(q.recommendation)} <button class="opt" data-fill="${esc(q.id)}" data-val="${esc(q.recommendation)}" data-match="1">use</button></p>` : ''}
+      ${q.recommendation ? `<p>Recommendation${q.confidence != null ? ` (${Math.round(q.confidence * 100)}%)` : ''}: ${esc(q.recommendation)} <button class="opt" data-fill="${esc(q.id)}" data-val="${esc(q.recommendation)}">use</button></p>` : ''}
       ${q.evidence?.length ? `<p class="muted small">Evidence: ${q.evidence.map(esc).join(', ')}</p>` : ''}
       ${q.blocks?.length ? `<p class="muted">Blocks ${q.blocks.map(esc).join(', ')}</p>` : ''}
       ${q.default ? `<p class="muted">Default: ${esc(q.default)}</p>` : ''}
@@ -471,7 +584,7 @@ function render(d) {
       <div class="row-inline">${next}<input type="text" data-rule="${esc(q.id)}" placeholder="Standing rule (optional)"></div>
       <button data-answer="${esc(q.id)}">Answer</button> <span class="err" id="e-${esc(q.id)}"></span>
     </div>`;
-  }).join('') : '<p class="muted">None.</p>';
+  }).join('') : '<p class="empty">None.</p>';
 
   renderOoda(o);
   for (const [sel, v] of kept) { const el = document.querySelector(sel); if (el) el.value = v; }
@@ -480,7 +593,7 @@ function render(d) {
 
   $('findings').innerHTML = m.findings.length ? m.findings.map((f) => `
     <div class="card"><span class="badge ${f.severity}">${f.severity}</span><b>${esc(f.kind)}</b> · <code>${esc(f.subject)}</code>
-    <div class="muted">${esc(f.detail)}</div><div>→ ${esc(f.suggestion)}</div></div>`).join('') : '<p class="muted">None.</p>';
+    <div class="muted">${esc(f.detail)}</div><div>→ ${esc(f.suggestion)}</div></div>`).join('') : '<p class="empty">None.</p>';
 
   bars($('phase-time'), m.phase_hours, (v) => `${v}h`);
   bars($('phase-cost'), m.phase_usd, (v) => `$${v}`);
@@ -488,11 +601,11 @@ function render(d) {
   $('gates').innerHTML = '<tr><th>Gate</th><th>Runs</th><th>Median</th><th>Slowest</th><th>Fail rate</th></tr>' + (m.gates.gates.length
     ? m.gates.gates.map((g) => `<tr><td>${esc(g.gate)}${m.gates.flaky_gates.some((f) => f.gate === g.gate) ? ' <span class="badge high">flaky</span>' : ''}</td><td>${g.runs}</td><td>${dur(g.median_seconds)}</td><td>${dur(g.max_seconds)}</td><td>${Math.round(g.fail_rate * 100)}%</td></tr>`).join('')
     : '<tr><td colspan="5" class="muted">None. Record runs with <code>devteam.mjs gate</code>.</td></tr>');
-  $('flaky').innerHTML = m.gates.flaky_tests.length ? m.gates.flaky_tests.map((t) => `<div class="card"><code>${esc(t.name)}</code> <span class="muted">${t.times}×</span></div>`).join('') : '<p class="muted">None.</p>';
+  $('flaky').innerHTML = m.gates.flaky_tests.length ? m.gates.flaky_tests.map((t) => `<div class="card"><code>${esc(t.name)}</code> <span class="muted">${t.times}×</span></div>`).join('') : '<p class="empty">None.</p>';
   $('slow').innerHTML = m.gates.slowest_tests.length ? m.gates.slowest_tests.map((t) => `<div class="card"><code>${esc(t.name)}</code> <span class="muted">${t.median_seconds}s</span></div>`).join('') : '<p class="muted">None. Pass <code>--junit</code> to <code>gate</code>.</p>';
 
-  $('messages').innerHTML = d.open_messages.length ? d.open_messages.map((x) => `
-    <div class="card"><span class="badge medium">${esc(x.kind)}</span>${esc(x.actor)} → ${esc(x.to)} <span class="muted">${esc(x.id)}</span><div>${esc(x.summary)}</div></div>`).join('') : '<p class="muted">None.</p>';
+  $('messages-list').innerHTML = d.open_messages.length ? d.open_messages.map((x) => `
+    <div class="card"><span class="badge medium">${esc(x.kind)}</span>${esc(x.actor)} → ${esc(x.to)} <span class="muted">${esc(x.id)}</span><div>${esc(x.summary)}</div></div>`).join('') : '<p class="empty">None.</p>';
 }
 
 async function load() {
@@ -513,12 +626,10 @@ $('view').addEventListener('change', (e) => {
   if (DATA) renderProgress();
 });
 
-const matchedAnswer = {};
 document.addEventListener('click', async (ev) => {
   const fill = ev.target.closest('[data-fill]');
   if (fill) {
     document.querySelector(`textarea[data-q="${fill.dataset.fill}"]`).value = fill.dataset.val;
-    matchedAnswer[fill.dataset.fill] = fill.dataset.match ? fill.dataset.val : null;
     return;
   }
   const btn = ev.target.closest('[data-answer]');
@@ -528,7 +639,7 @@ document.addEventListener('click', async (ev) => {
     const auto = document.querySelector(`select[data-auto="${id}"]`)?.value;
     const rule = document.querySelector(`input[data-rule="${id}"]`)?.value;
     btn.disabled = true;
-    const ok = await post('answer', { id, answer, matched: matchedAnswer[id] === answer.trim() || undefined, autonomy: auto ? Number(auto) : undefined, rule: rule || undefined }, id);
+    const ok = await post('answer', { id, answer, autonomy: auto ? Number(auto) : undefined, rule: rule || undefined }, id);
     btn.disabled = false;
     if (ok) delete drafts[id];
     return;

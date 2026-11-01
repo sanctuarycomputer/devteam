@@ -1,24 +1,59 @@
 # devteam
 
-A kit for running a supervised fleet of coding-agent sessions on one repo: one supervisor, one worker per ticket, superpowers as the working loop, adversarial review before every merge, and a loop that keeps improving the fleet itself. The owner states goals; the fleet turns them into a design, a roadmap, a graph of tickets, and merged code, and asks the owner only what the constitution reserves to them.
+A kit a project copies into `docs/devteam/` and owns. It runs a supervised fleet of coding-agent sessions that takes broad goals, turns them into a graph of tickets, and plows through it with [superpowers](https://github.com/obra/superpowers), under one owner, with adversarial review before every merge and a loop that keeps improving the fleet itself.
 
-It is **materialized** into a project, not installed: copy `docs/devteam/` in, own it, edit it. Upgrades are folded in by the project's supervisor, which reads each release's rationale and asks the owner what to take.
+Nine files: three governance docs, three process docs, one schema, one script, one dashboard. Once adopted, agents are routed by a section `init` adds to the project's `AGENTS.md`; there is no second README.
 
-Everything lives in [`docs/devteam/`](docs/devteam/README.md): ten files, one script, one schema, one log.
+```
+docs/devteam/
+  governance/constitution.md   who decides what, the trust ladder, principles, one-way doors, which rule wins
+  governance/quality.md        definition of done, gates, the review standard, merging, releases
+  governance/code-style.md     the code doctrine
+  process/planning.md          goal → design → roadmap → graph
+  process/supervisor.md        the tick as observe / orient / decide / act, questions, messages, the log, retros
+  process/worker.md            one ticket with superpowers
+  schema/log.schema.json       the eleven event types and who may write what
+  scripts/devteam.mjs          the one script (node, no dependencies)
+  dashboard/index.html         the owner's page
+  project/                     this project's content; upstream never touches it
+    settings.md                only what this project changes
+    designs/architecture.md    the whole system now, updated by every plan PR
+    designs/<goal>.md          one design per goal
+    log/<writer>.jsonl         the durable log
+    tickets/<id>/              spec.md, plan.md, verification.md, reviews/ (written by superpowers)
+    reviews/<feature>/, reviews/<design>/   graph and design review records
+    retros/<date>.md
+  run/                         gitignored: the live log, prompts
+```
 
-## Use it in a project
+## How it runs
 
-Point an agent at this repo and say:
+**Roles.** The **owner** is the human: goals, one-way doors, production, the rules. The **supervisor** is the owner's foreground agent session in the terminal: it plans or makes planners, makes workers, rules, merges, and writes no production code. A **worker** is one session for one ticket, in its own git worktree and tmux window, running superpowers. A **planner** turns one goal into a design, a feature and tickets on a `plan/<feature>` branch. A **reviewer** is any session or subagent that did not write the work; its default verdict is not approved.
 
-> Set up a devteam fleet in this repo from github.com/sanctuarycomputer/devteam, following the Setup section of its `docs/devteam/README.md`.
+**Two loops.** Goal → design → roadmap → graph → tickets: the supervisor interviews the owner until each goal is unambiguous, writes a design per goal, breaks it into features with stories and releases, then into a graph of tickets, each one PR. Observe, orient, decide, act: every supervisor tick, what sessions report becomes observations; recurring observations become knowledge and problems; the supervisor decides what it may and asks the owner everything else through the questions inbox, saying why; every decision is an act the owner can correct, and a correction takes trust back and becomes a lesson. Retros gather the corrections and learnings across tickets and features.
 
-It copies the kit from the newest release tag, runs `devteam.mjs init`, fills the settings and the architecture doc from the code, and opens chore tickets for every quality gate the repo doesn't yet enforce. The fleet's first work is its own quality floor.
+**One log.** Everything structured is a line in one append-only JSON Lines log, validated against `schema/log.schema.json` on write and folded by timestamp with authority rules (owner > supervisor > planner > worker). State is computed from the log plus git; nothing else is stored. One file per writer: planners write `project/log/plan-<feature>.jsonl` in their worktree, so a plan lands only through its reviewed PR; everyone else writes `run/log/<writer>.jsonl` live, and the supervisor mirrors those into `project/log/` with the `chore-log` PR.
 
-## How projects improve devteam
+## Setup
 
-A project's supervisor runs an OODA loop over its own fleet (`docs/devteam/process/supervisor.md`): it observes, promotes recurring observations to knowledge, runs retros, and proposes changes with evidence. When a project finds a general-purpose improvement to the kit itself, its supervisor opens a PR here (`upstream-pr` on the trust ladder), written generically, with nothing from `project/` or `run/` in it.
+"Use github.com/sanctuarycomputer/devteam to set up a fleet in this repo" means, for the agent doing it:
 
-## Contributing upstream
+1. Copy `docs/devteam/` from the newest release tag of this repo (not `main`), except `project/` and `run/`.
+2. `node docs/devteam/scripts/devteam.mjs init --upstream-base <tag> [--agent claude] [--github]`. It creates `project/`, the `.gitignore` entries and the devteam section of `AGENTS.md`; `--agent claude` writes the workers' deny rules and stop hook into `.claude/settings.json`; `--github` writes a one-job workflow that makes GitHub require `check-pr` on every PR (the supervisor's `merge` runs the same checks and the gates itself; this only makes the forge refuse a merge that skipped them).
+3. Fill `project/settings.md`: components and stacks, `agent_command`, and the `gates` map (name → command) the supervisor runs before every merge. Infer what you can from the repo; ask the owner the rest in one batch.
+4. Existing codebase: write `project/designs/architecture.md` from the code (components, contracts, persistence, dependencies, distance from the code rules, hotspots, tests, work in flight). New repo: leave the headings.
+5. **Raise the floor first.** For every gate in `quality.md` §2 and every Law in `code-style.md` the repo doesn't yet enforce (lint, format, types, tests in CI, coverage, dead code, duplication, secrets, lockfile), add a chore ticket: `devteam.mjs ticket add <component>-NN-<slug> --json '{…, "kind": "chore", "feature": "chores", "serves": [], "notes": "turns on <gate>"}'`. Gates that fail on existing code go on in **ratchet** mode (`quality.md` §2). The fleet's first work is its own quality floor.
+6. Commit the kit, settings and architecture doc as one `chore-devteam-bootstrap` PR, then `devteam.mjs log-sync` for the tickets.
+7. Start the supervisor: in the owner's terminal, in the main checkout, `export DEVTEAM_ROLE=supervisor` and start the agent (Claude Code or similar) with the prompt from `node docs/devteam/scripts/devteam.mjs prompt supervisor`. It runs in the foreground, not headless; inside tmux if the owner wants workers' messages typed into its pane as they happen. In another terminal, `node docs/devteam/scripts/devteam.mjs dashboard` and open the address.
+8. The supervisor asks the owner for goals and the loop begins.
+
+Requirements: git, tmux (for the workers), Node 20+, the GitHub CLI, one agent CLI (Claude Code, Codex, OpenCode or similar) with superpowers installed.
+
+## Upgrading a project
+
+`settings.upstream_base` records the release a project materialized from. On its improvement loop the project's supervisor lists newer releases, reads each release's What, Why and Migration, and asks the owner per release whether to adopt, adapt or skip each change (`process/supervisor.md` §9). Changes land as a `chore-devteam-sync-<tag>` PR that never touches `project/` or `run/`. Improvements a project makes to the kit that other projects would want come back here as PRs (`upstream-pr` on the trust ladder), written generically, with nothing from `project/` or `run/`.
+
+## Contributing
 
 Changes land on `main` through PRs. `node --test` (the kit test in `test/`) must pass. A release is a `vX.Y.Z` tag on `main` with a GitHub Release whose notes have three sections, because projects' supervisors read them to decide what to fold in:
 

@@ -14,7 +14,8 @@ const origin = path.join(tmp, 'origin.git');
 const repo = path.join(tmp, 'repo');
 const wt = (name) => path.join(repo, '.worktrees', name);
 const DT = path.join(repo, 'docs', 'devteam', 'scripts', 'devteam.mjs');
-const ROLE = { sup: { DEVTEAM_ROLE: 'supervisor' }, planner: { DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: 'billing' }, worker: { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'bill-01-card' }, owner: {} };
+const ROLE = { sup: { DEVTEAM_ROLE: 'supervisor' }, planner: { DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: 'billing' }, planner2: { DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: 'other' }, worker: { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'bill-01-card' }, owner: {} };
+const line = (o) => `${JSON.stringify({ v: 1, ...o })}\n`;
 
 function dt(args, { cwd = repo, role = 'owner' } = {}) {
   const env = { ...process.env, ...ROLE[role] };
@@ -45,6 +46,8 @@ test('devteam kit', async (t) => {
     must(['init', '--name', 'demo', '--upstream-base', 'v0.2.0', '--agent', 'claude', '--github']);
     for (const f of ['docs/devteam/project/settings.md', 'docs/devteam/project/designs/architecture.md', '.claude/settings.json', '.github/workflows/devteam.yml']) assert.ok(fs.existsSync(path.join(repo, f)), f);
     assert.match(fs.readFileSync(path.join(repo, '.gitignore'), 'utf8'), /docs\/devteam\/run\//);
+    assert.match(fs.readFileSync(path.join(repo, 'AGENTS.md'), 'utf8'), /process\/supervisor\.md/, 'AGENTS.md routes agents to their doc');
+    assert.match(fs.readFileSync(path.join(repo, '.claude/settings.json'), 'utf8'), /git push\*main\*/);
     git(['add', '-A']);
     git(['commit', '-qm', 'init']);
     git(['push', '-q', 'origin', 'main']);
@@ -85,6 +88,20 @@ test('devteam kit', async (t) => {
     must(['validate', '--strict'], { cwd: wt('plan-billing') });
     git(['push', '-q', 'origin', 'plan/billing'], wt('plan-billing'));
     must(['check-pr', '--head-ref', 'plan/billing', '--sha', SHA1, '--title', 'plan-billing: billing'], { role: 'sup' });
+    // a ticket changed after the graph review voids the verdict
+    must(['ticket', 'set', 'bill-01-card', '--json', '{"risk":"high"}'], { cwd: wt('plan-billing'), role: 'planner' });
+    git(['commit', '-qam', 'after review'], wt('plan-billing'));
+    const voided = dt(['validate', '--strict'], { cwd: wt('plan-billing') });
+    assert.notEqual(voided.status, 0);
+    assert.match(voided.out, /does not hold/);
+    git(['reset', '-q', '--hard', SHA1], wt('plan-billing'));
+    // a planner for another feature cannot touch this one
+    git(['worktree', 'add', '-q', '-b', 'plan/other', wt('plan-other'), 'plan/billing']);
+    assert.notEqual(dt(['ticket', 'set', 'bill-01-card', '--json', '{"risk":"high"}'], { cwd: wt('plan-other'), role: 'planner2' }).status, 0, 'refused on write');
+    fs.appendFileSync(path.join(wt('plan-other'), 'docs/devteam/project/log/plan-other.jsonl'), line({ id: 'bill-01-card', type: 'ticket', op: 'set', at: '2026-11-01T23:59:59.000Z', by: 'plan-other', risk: 'high' }));
+    assert.equal(json(must(['ticket', 'show', 'bill-01-card'], { cwd: wt('plan-other') })).risk, 'normal', 'ignored by the fold');
+    git(['worktree', 'remove', '--force', wt('plan-other')]);
+    git(['branch', '-D', 'plan/other']);
     // a plan PR that touches another writer's log file
     write(path.join(wt('plan-billing'), 'docs/devteam/project/log/supervisor-2026-11.jsonl'), '{"v":1,"id":"q-20261101-000000000-supervisor","type":"question","op":"new","at":"2026-11-01T00:00:00.000Z","by":"supervisor","kind":"owner-decision","question":"x"}\n');
     git(['add', '-A'], wt('plan-billing'));
@@ -134,12 +151,52 @@ test('devteam kit', async (t) => {
     git(['commit', '-qam', 'more'], wt('bill-01-card'));
     assert.notEqual(dt(['check-ticket', 'bill-01-card', '--sha', git(['rev-parse', 'HEAD'], wt('bill-01-card')), ...pr]).status, 0, 'a verdict does not hold past a code commit');
     git(['reset', '-q', '--hard', H2], wt('bill-01-card'));
+    // a dissent in another track that names a wrong commit still counts as a dissent
+    write(path.join(tdir, 'reviews/final-1b.md'), `- Reviewer: reviewer-c\n\nVerdict: CHANGES ${'0'.repeat(40)}\n`);
+    git(['add', '-A'], wt('bill-01-card'));
+    git(['commit', '-qm', 'dissent'], wt('bill-01-card'));
+    const dissent = dt(['check-ticket', 'bill-01-card', '--sha', git(['rev-parse', 'HEAD'], wt('bill-01-card')), ...pr]);
+    assert.notEqual(dissent.status, 0);
+    assert.match(dissent.out, /final-1b\.md.*CHANGES/);
+    git(['reset', '-q', '--hard', H2], wt('bill-01-card'));
+    // a rename out of the footprint is a change outside touches
+    git(['mv', 'AGENTS.md', 'billing/agents.md'], wt('bill-01-card'));
+    git(['commit', '-qm', 'move'], wt('bill-01-card'));
+    const h3 = git(['rev-parse', 'HEAD'], wt('bill-01-card'));
+    write(path.join(tdir, 'reviews/final-2.md'), review('reviewer-b', h3));
+    git(['add', '-A'], wt('bill-01-card'));
+    git(['commit', '-qm', 'review 2'], wt('bill-01-card'));
+    const moved = dt(['check-ticket', 'bill-01-card', '--sha', git(['rev-parse', 'HEAD'], wt('bill-01-card')), ...pr]);
+    assert.notEqual(moved.status, 0);
+    assert.match(moved.out, /outside touches: AGENTS\.md/);
+    git(['reset', '-q', '--hard', H2], wt('bill-01-card'));
+    git(['push', '-q', 'origin', 'ticket/bill-01-card'], wt('bill-01-card'));
+  });
+
+  await t.test('merge --dry-run runs the gates at the head as the supervisor', () => {
+    const settings = path.join(repo, 'docs/devteam/project/settings.md');
+    fs.writeFileSync(settings, fs.readFileSync(settings, 'utf8').replace('"gates": {}', '"gates": { "test": "test -f billing/card.js", "lint": { "cmd": "true" } }'));
+    must(['merge', 'bill-01-card', '--dry-run', '--title', 'bill-01-card: card capture', '--body-file', body], { role: 'sup' });
+    const gates = json(must(['log', '--type', 'gate', '--by', 'supervisor', '--json']));
+    assert.deepEqual(gates.map((g) => g.gate).sort(), ['lint', 'test']);
+    assert.ok(gates.every((g) => g.ok && g.sha === H2));
+    fs.writeFileSync(settings, fs.readFileSync(settings, 'utf8').replace('"test": "test -f billing/card.js"', '"test": "false"'));
+    const failed = dt(['merge', 'bill-01-card', '--dry-run', '--title', 'bill-01-card: card capture', '--body-file', body], { role: 'sup' });
+    assert.notEqual(failed.status, 0);
+    assert.match(failed.out, /gate test failed/);
+    assert.ok(!fs.readdirSync(path.join(repo, '.worktrees')).some((d) => d.startsWith('tmp-')), 'no temp worktree left behind');
+    fs.writeFileSync(settings, fs.readFileSync(settings, 'utf8').replace('"test": "false"', '"test": "test -f billing/card.js"'));
+    must(['phase', 'supervisor', '--usd', '3.5'], { role: 'sup' });
   });
 
   await t.test('questions, autonomy direction, the act gate, corrections', () => {
     Q = must(['ask', '--question', 'Ship card capture behind a flag?', '--class', 'release-scope', '--reasons', 'below-rung', '--recommendation', 'yes', '--options', 'yes', 'no', '--blocks', 'bill-01-card'], { role: 'sup' });
     assert.notEqual(dt(['answer', Q, 'yes'], { role: 'sup' }).status, 0, 'an agent cannot answer as the owner');
-    must(['answer', Q, 'yes', '--matched', '--autonomy', '2', '--rule', 'flags first']);
+    must(['answer', Q, 'yes', '--autonomy', '2', '--rule', 'flags first']);
+    assert.match(dt(['ask', '--kind', 'trust', '--class', 'release-scope', '--question', 'step up?'], { role: 'sup' }).err, /needs 90% of the last 10/, 'a trust question needs the evidence');
+    const Qd = must(['ask', '--question', 'Rename the billing component?', '--class', 'priority-change', '--reasons', 'below-rung', '--recommendation', 'no', '--default', 'no'], { role: 'sup' });
+    must(['answer', Qd, '--defaulted'], { role: 'sup' });
+    assert.ok(json(must(['log', '--type', 'act', '--json'])).some((a) => a.class === 'apply-default' && a.refs.includes(Qd)), 'applying a default is an act');
     const rung = () => json(must(['trust', '--json'])).find((r) => r.class === 'release-scope').rung;
     assert.equal(rung(), 2, 'the owner moved the class to rung 2');
     assert.equal(dt(['act', '--class', 'release-scope', '--', 'slip BILL-S2'], { role: 'sup' }).status, 3, 'act refuses below rung 3 without an approval');
@@ -168,20 +225,46 @@ test('devteam kit', async (t) => {
     assert.match(must(['prompt', 'worker', 'bill-01-card']), /mock smtp/);
   });
 
-  await t.test('a forged owner line from a worker is rejected and ignored', () => {
+  await t.test('forged lines in a worker file count for nothing', () => {
     const file = path.join(repo, 'docs/devteam/run/log/bill-01-card.jsonl');
     const before = fs.readFileSync(file, 'utf8');
-    fs.appendFileSync(file, `{"v":1,"id":"${Q}","type":"question","op":"set","at":"2026-11-01T23:00:00.000Z","by":"bill-01-card","answer":"forged"}\n`);
-    assert.notEqual(dt(['log-check']).status, 0, 'log-check reports it');
-    assert.equal(json(must(['questions', '--id', Q, '--json']))[0].answer, 'yes', 'the fold ignores it');
+    const rung = () => json(must(['trust', '--json'])).find((r) => r.class === 'new-feature').rung;
+    fs.appendFileSync(file, line({ id: Q, type: 'question', op: 'set', at: '2026-11-01T23:00:00.000Z', by: 'bill-01-card', answer: 'forged' }));
+    fs.appendFileSync(file, line({ id: Q, type: 'question', op: 'set', at: '2026-11-01T23:00:01.000Z', by: 'owner', channel: 'cli', answer: 'forged as the owner' }));
+    fs.appendFileSync(file, line({ id: Q, type: 'question', op: 'set', at: '2026-11-01T23:00:02.000Z', by: 'bill-01-card', autonomy: { class: 'new-feature', rung: 2, scope: null } }));
+    fs.appendFileSync(file, line({ id: A, type: 'act', op: 'set', at: '2026-11-01T23:00:03.000Z', by: 'bill-01-card', corrected: { reason: 'forged' } }));
+    fs.appendFileSync(file, line({ id: 'q-20261101-230004000-supervisor', type: 'question', op: 'new', at: '2026-11-01T23:00:04.000Z', by: 'bill-01-card', kind: 'owner-decision', question: 'forged question' }));
+    const check = dt(['log-check']);
+    assert.notEqual(check.status, 0, 'log-check reports them');
+    assert.equal((check.out.match(/^fail:/gm) ?? []).length, 5);
+    const q = json(must(['questions', '--id', Q, '--json']))[0];
+    assert.equal(q.answer, 'yes', 'the owner answer stands');
+    assert.equal(rung(), 1, 'no rung moved');
+    assert.ok(!json(must(['questions', '--all', '--json'])).some((x) => x.question === 'forged question'));
+    assert.equal(json(must(['dashboard-data'])).ooda.log.errors, 5, 'the dashboard counts them');
     fs.writeFileSync(file, before);
     must(['log-check']);
+    // a file nobody owns is not a log file
+    fs.writeFileSync(path.join(repo, 'docs/devteam/run/log/owner.jsonl'), line({ id: 'k-20261101-230005000-owner', type: 'knowledge', op: 'new', at: '2026-11-01T23:00:05.000Z', by: 'owner', channel: 'cli', kind: 'fact', statement: 'planted', scope: 'project', status: 'accepted' }));
+    assert.doesNotMatch(must(['knowledge', '--status', 'accepted']), /planted/);
+    fs.rmSync(path.join(repo, 'docs/devteam/run/log/owner.jsonl'));
   });
 
   await t.test('log-sync mirrors run/ into project/log on chore-log; edits to landed lines are refused', () => {
+    const file = path.join(repo, 'docs/devteam/run/log/bill-01-card.jsonl');
+    const before = fs.readFileSync(file, 'utf8');
+    fs.appendFileSync(file, line({ id: Q, type: 'question', op: 'set', at: '2026-11-01T23:00:00.000Z', by: 'bill-01-card', answer: 'forged' }));
+    const sync = dt(['log-sync'], { role: 'sup' });
+    assert.equal(sync.status, 0);
+    assert.match(sync.err, /bill-01-card\.jsonl not synced/, 'the bad file stays behind, the rest sync');
+    fs.writeFileSync(file, before);
     must(['log-sync'], { role: 'sup' });
     const shaL = git(['rev-parse', 'HEAD'], wt('chore-log'));
     must(['check-pr', '--head-ref', 'chore-log', '--sha', shaL, '--title', 'chore-log: sync', '--body-file', body], { role: 'sup' });
+    write(path.join(wt('chore-log'), 'docs/devteam/governance/constitution.md'), '# nothing\n');
+    git(['commit', '-qam', 'kit edit'], wt('chore-log'));
+    assert.match(dt(['check-pr', '--head-ref', 'chore-log', '--sha', git(['rev-parse', 'HEAD'], wt('chore-log')), '--title', 'chore-log: sync', '--body-file', body], { role: 'sup' }).out, /chore-log changes only project\/log/);
+    git(['reset', '-q', '--hard', shaL], wt('chore-log'));
     const owner = fs.readdirSync(path.join(wt('chore-log'), 'docs/devteam/project/log')).find((f) => f.startsWith('owner-'));
     const f = path.join(wt('chore-log'), 'docs/devteam/project/log', owner);
     fs.writeFileSync(f, fs.readFileSync(f, 'utf8').replace('"v":1', '"v":2'));
@@ -192,6 +275,21 @@ test('devteam kit', async (t) => {
     git(['push', '-q', 'origin', 'main']);
     fs.rmSync(path.join(repo, 'docs/devteam/run/log'), { recursive: true });
     assert.equal(json(must(['questions', '--id', Q, '--json']))[0].answer, 'yes', 'state survives losing run/');
+  });
+
+  await t.test('a chore PR that touches the kit needs an owner answer', () => {
+    git(['worktree', 'add', '-q', '-b', 'chore-rules', wt('chore-rules'), 'origin/main']);
+    const c = path.join(wt('chore-rules'), 'docs/devteam/governance/quality.md');
+    fs.appendFileSync(c, '\nAn extra rule.\n');
+    git(['commit', '-qam', 'chore-rules: tighten'], wt('chore-rules'));
+    git(['push', '-q', 'origin', 'chore-rules'], wt('chore-rules'));
+    const refused = dt(['merge', '--chore', 'rules', '--dry-run', '--title', 'chore-rules: tighten', '--body-file', body], { role: 'sup' });
+    assert.notEqual(refused.status, 0);
+    assert.match(refused.out, /outside project\//);
+    const Qg = must(['ask', '--question', 'Add the extra rule to quality.md?', '--class', 'governance-edit', '--reasons', 'owner-only', '--recommendation', 'yes'], { role: 'sup' });
+    must(['answer', Qg, 'yes']);
+    must(['merge', '--chore', 'rules', '--dry-run', '--approved', Qg, '--title', 'chore-rules: tighten', '--body-file', body], { role: 'sup' });
+    git(['worktree', 'remove', '--force', wt('chore-rules')]);
   });
 
   await t.test('computed views: metrics, roadmap, retro, dashboard data', () => {

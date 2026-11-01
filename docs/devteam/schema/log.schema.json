@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "devteam/log.schema.json",
   "title": "devteam log line",
-  "description": "One line of the log (process/supervisor.md): planners write project/log/plan-<feature>.jsonl in their worktree (it lands with the plan PR); everyone else writes run/log/<writer>.jsonl live and the supervisor mirrors those into project/log with the chore-log PR. Every line is an envelope plus a body. The envelope is validated by this schema's top level; the body (everything but the envelope keys) by $defs.types[type]: x-required-new lists what a new line must carry, x-set-only what may only be set later. x-authority says which writer class may create which types and set which fields; x-id how ids are formed. scripts/devteam.mjs enforces all of it on write and in log-check. Three state rules live in the fold because a schema can't state them: a set applies only if no higher-ranked writer set that field; a question is defaulted only if it has a default; the supervisor edits a goal only while it is a draft.",
+  "description": "One line of the log (process/supervisor.md): planners write project/log/plan-<feature>.jsonl in their worktree (it lands with the plan PR); everyone else writes run/log/<writer>.jsonl live and the supervisor mirrors those into project/log with the chore-log PR. Every line is an envelope plus a body. The envelope is validated by this schema's top level; the body (everything but the envelope keys) by $defs.types[type]: x-required-new lists what a new line must carry, x-set-only what may only be set later. x-authority says which writer class may create which types and set which fields; x-id how ids are formed. scripts/devteam.mjs enforces all of it on write and in log-check, and the cheap part (by matches the file, id names its writer, the authority table, a planner stays inside its own feature) on every read, so a line never grants more than its file's writer has. Three state rules live in the fold because a schema can't state them: a set applies only if no higher-ranked writer set that field; a question is defaulted only if it has a default; the supervisor edits a goal only while it is a draft.",
   "type": "object",
   "required": [
     "v",
@@ -47,7 +47,14 @@
     },
     "by": {
       "type": "string",
-      "description": "owner, supervisor, a ticket id, or plan-<feature>; must match the file's writer"
+      "description": "owner, supervisor, a ticket id, or plan-<feature>; must match the file's writer (owner-<yyyy-mm>, supervisor-<yyyy-mm>, <ticket-id>, plan-<feature>)"
+    },
+    "channel": {
+      "enum": [
+        "cli",
+        "dashboard"
+      ],
+      "description": "on owner lines only: where the owner typed it"
     }
   },
   "$defs": {
@@ -92,12 +99,6 @@
               "type": "string"
             }
           },
-          "constraints": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
           "preconditions": {
             "type": "array",
             "items": {
@@ -115,12 +116,6 @@
               "ready",
               "met",
               "abandoned"
-            ]
-          },
-          "channel": {
-            "enum": [
-              "cli",
-              "dashboard"
             ]
           }
         },
@@ -189,7 +184,7 @@
         ]
       },
       "ticket": {
-        "description": "One PR of work. Its id is <component>-<NN>-<slug>. A re-plan is a set (superseded_by, depends_on, touches \u2026).",
+        "description": "One PR of work. Its id is <component>-<NN>-<slug>. A re-plan is a set (superseded_by, depends_on, touches …).",
         "type": "object",
         "properties": {
           "title": {
@@ -302,7 +297,7 @@
         ]
       },
       "phase": {
-        "description": "A worker's phase change, or a liveness ping (from = to), with cumulative spend. A worker's last line of any type is its last sign of life.",
+        "description": "A worker's phase change, or a liveness ping (from = to), with cumulative spend. A worker's last line of any type is its last sign of life. The supervisor records its own spend with to: supervisor.",
         "type": "object",
         "properties": {
           "to": {
@@ -318,7 +313,8 @@
               "merging",
               "done",
               "blocked",
-              "parked"
+              "parked",
+              "supervisor"
             ]
           },
           "from": {
@@ -356,7 +352,7 @@
         ]
       },
       "gate": {
-        "description": "One run of a gate (lint, test, \u2026): duration, result, commit, and the failed and slowest tests.",
+        "description": "One run of a gate (lint, test, …): duration, result, commit, and the failed and slowest tests.",
         "type": "object",
         "properties": {
           "gate": {
@@ -629,7 +625,7 @@
         ]
       },
       "question": {
-        "description": "The supervisor asking the owner. why_asked says the class, its rung and ceiling, and the reasons. The owner's answer (a set) may carry an autonomy direction and a standing rule.",
+        "description": "The supervisor asking the owner. why_asked says the class, its rung and ceiling, and the reasons. The owner's answer (a set) may carry an autonomy direction and a standing rule; an answer equal to the recommendation counts as agreement.",
         "type": "object",
         "properties": {
           "kind": {
@@ -727,14 +723,8 @@
           "reason": {
             "type": "string"
           },
-          "recorded_in": {
-            "type": "string"
-          },
           "answer": {
             "type": "string"
-          },
-          "matched": {
-            "type": "boolean"
           },
           "autonomy": {
             "type": [
@@ -766,12 +756,6 @@
           "standing_rule": {
             "type": "string"
           },
-          "channel": {
-            "enum": [
-              "cli",
-              "dashboard"
-            ]
-          },
           "re": {
             "type": "string",
             "description": "the worker message this question escalates"
@@ -787,9 +771,6 @@
         "description": "A decision the supervisor made (incl. approve-spec, approve-plan, merge-word). The owner, or the supervisor at a retro, sets corrected; the supervisor then sets repaired.",
         "type": "object",
         "properties": {
-          "actor": {
-            "type": "string"
-          },
           "class": {
             "type": "string"
           },
@@ -882,7 +863,8 @@
       "owner": [
         "goal",
         "knowledge",
-        "observation"
+        "observation",
+        "problem"
       ],
       "supervisor": [
         "goal",
@@ -894,7 +876,8 @@
         "problem",
         "act",
         "phase",
-        "message"
+        "message",
+        "gate"
       ],
       "planner": [
         "feature",
@@ -917,7 +900,6 @@
           "measure",
           "horizon",
           "non_goals",
-          "constraints",
           "preconditions",
           "priority"
         ],
@@ -927,11 +909,9 @@
           "measure",
           "horizon",
           "non_goals",
-          "constraints",
           "preconditions",
           "priority",
-          "status",
-          "channel"
+          "status"
         ]
       },
       "feature": {
@@ -1007,15 +987,12 @@
       "question": {
         "supervisor": [
           "status",
-          "reason",
-          "recorded_in"
+          "reason"
         ],
         "owner": [
           "answer",
-          "matched",
           "autonomy",
-          "standing_rule",
-          "channel"
+          "standing_rule"
         ]
       },
       "knowledge": {

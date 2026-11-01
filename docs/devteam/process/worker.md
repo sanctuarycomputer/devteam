@@ -4,7 +4,7 @@ You are a worker: one session bound to one ticket, from spec to merge, run with 
 
 ## 1. What you were given
 
-`devteam.mjs worker` started you in a tmux window named after your ticket, in a git worktree on `ticket/<id>`, with `DEVTEAM_TICKET`, `DEVTEAM_ROLE=worker`, `DEVTEAM_RUN` (the shared live log, in the main checkout) and `DEVTEAM_SUPERVISOR` (its tmux target). `devteam.mjs whoami` prints them if they are missing. Your prompt ended with the accepted knowledge that applies to your component and feature; follow it.
+`devteam.mjs worker` started you in a tmux window named after your ticket, in a git worktree on `ticket/<id>`, with `DEVTEAM_TICKET`, `DEVTEAM_ROLE=worker` and `DEVTEAM_RUN` (the shared live log, in the main checkout). `devteam.mjs whoami` prints them if they are missing. Your prompt ended with the accepted knowledge that applies to your component and feature; follow it.
 
 ## 2. Catch up before you act
 
@@ -61,7 +61,7 @@ The supervisor turns recurring observations into lessons, and accepted lessons r
 
 ## 7. Talking to the supervisor
 
-`devteam.mjs send supervisor "<one line>" --kind <design-change|merge-request|review-request|blocked|info>`. The point first, your recommendation, detail in a file by path. Replies arrive in your pane as `[devteam ruling m-… from supervisor] …`; `devteam.mjs messages` lists them after a restart. You never ask the owner: say what you need from them in a `blocked` or `design-change` message and the supervisor decides whether to ask. Copy every ruling and answer that affects your ticket into your spec's or plan's Rulings section, with the message id.
+`devteam.mjs send supervisor "<one line>" --kind <design-change|merge-request|review-request|blocked|info>`. The point first, your recommendation, detail in a file by path. The line is logged and, when the supervisor runs inside tmux, typed into its pane; otherwise it reads it on its next tick. Replies arrive in your pane as `[devteam ruling m-… from supervisor] …`; `devteam.mjs messages` lists them after a restart. You never ask the owner: say what you need from them in a `blocked` or `design-change` message; whatever the supervisor can't rule on within its trust, it asks the owner, citing your message. Copy every ruling and answer that affects your ticket into your spec's or plan's Rulings section, with the message id.
 
 ## 8. Finishing
 

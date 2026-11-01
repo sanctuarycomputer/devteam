@@ -96,12 +96,14 @@ Only the supervisor merges, and only with `devteam.mjs merge`:
 ```
 merge <ticket-id>          a ticket PR: check-ticket at the exact head, the log rule, every gate in a clean worktree at that head, then gh pr merge --match-head-commit, then the act
 merge --plan <feature>     a plan PR: validate --strict at the head, design and graph reviews holding, the log rule
-merge --chore <slug>       a chore PR (log, retro, design, architecture): the log rule
+merge --chore <slug>       a chore PR (log, retro, design, architecture): the log rule; nothing under project/log (chore-log: nothing else) or project/tickets; anything outside project/ needs --approved <qid>, an owner answer
 ```
+
+`--dry-run` runs every check and gate and stops before the merge.
 
 The head must be up to date with `main`. A head that moves after the request is a new request. The supervisor still reads the diff: `merge` proves the shape, the supervisor judges the content.
 
-A worker never merges. Where the agent CLI supports deny rules, `init --agent claude` denies `gh pr merge` and pushes to `main` for workers (`worker_denied_commands` in the settings). A project that wants the forge itself to refuse can turn on `init --github`'s workflow as a required check; it runs `check-pr`, the same checks minus the gates.
+A worker never merges. Where the agent CLI supports deny rules, `init --agent claude` writes `worker_denied_commands` from the settings (by default `gh pr merge`, `gh api`, any push that names `main`, any forced push) into `.claude/settings.json`; a convenience, not a wall. A project that wants the forge itself to refuse can turn on `init --github`'s workflow as a required check; it runs `check-pr`, the same checks minus the gates and the supervisor's approval acts, which live in its log until the next `chore-log` lands.
 
 The log rule, checked on every PR: a PR may change `project/log/<X>.jsonl` only if it is the `plan/<feature>` PR and X is `plan-<feature>`, or it is `chore-log`; and only by appending lines that are valid, in time order, in their month, and not in the future.
 
