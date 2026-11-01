@@ -1640,6 +1640,8 @@ function cmdAct() {
       process.exit(3);
     }
   } else if (!(L.constitutional ?? []).includes(cls)) warn(`class "${cls}" is not in constitution.md (ladder, constitutional or owner-only)`);
+  // Classes that are about one ticket name it first in refs; checkTicket finds approvals by it.
+  if (['approve-spec', 'approve-plan'].includes(cls) && !tickets().has(asList(flags.refs)[0])) die(`${cls} names the ticket first: --refs <ticket-id> [other ids]`);
   if (cls === 'approve-plan') {
     const t = tickets().get(asList(flags.refs)[0]);
     if (!t) die('approve-plan names the ticket: --refs <ticket-id>');

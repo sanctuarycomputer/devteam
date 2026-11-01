@@ -144,6 +144,7 @@ test('devteam kit', async (t) => {
     must(['gate', 'tdd', '--', 'true'], w);
     fs.rmSync(path.join(wt('bill-01-card'), 'billing/wip.test.js'));
     assert.ok(!json(must(['metrics', '--json'])).gates.flaky_gates.some((g) => g.gate === 'tdd'), 'dirty runs are not flaky');
+    assert.notEqual(dt(['act', '--class', 'approve-spec', '--refs', 'm-20261101-000000000-bill-01-card', '--', 'spec ok'], { role: 'sup' }).status, 0, 'an approval names its ticket');
     must(['act', '--class', 'approve-spec', '--refs', 'bill-01-card', '--', 'spec ok'], { role: 'sup' });
     must(['act', '--class', 'approve-plan', '--refs', 'bill-01-card', '--', 'plan ok'], { role: 'sup' });
     const tdir = path.join(wt('bill-01-card'), 'docs/devteam/project/tickets/bill-01-card');
