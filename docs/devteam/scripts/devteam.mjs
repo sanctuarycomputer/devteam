@@ -131,6 +131,8 @@ const SETTINGS_DEFAULTS = {
   components: {},
   // Files a fresh worktree needs that git doesn't carry (gitignored secrets, local env), copied from
   // the main checkout into every worker, planner and gate worktree. Paths relative to the repo root.
+  // How a tagged release reaches production: 'tag' (deploys from the tag) or { branch: 'production' }.
+  release: 'tag',
   worktree_files: [],
   // A shell command run in every new worker, planner and gate worktree after worktree_files are
   // copied (install dependencies, link env files). Empty for none.
@@ -1299,6 +1301,9 @@ function checkPr({ headRef, sha, title, body, forge = false }) {
 }
 // Copy settings.worktree_files from the main checkout into a new worktree.
 // Then run settings.worktree_setup there (with DEVTEAM_MAIN set to the main checkout).
+// What every gate and worktree_setup command sees: the main checkout, and a gitignored cache dir
+// for build outputs and package caches shared across worktrees (quality.md §2).
+const gateEnv = () => { const cache = path.join(runDir, 'cache'); fs.mkdirSync(cache, { recursive: true }); return { ...process.env, DEVTEAM_MAIN: mainRoot, DEVTEAM_CACHE: cache }; };
 function seedWorktree(wt) {
   const s = loadSettings();
   for (const rel of s.worktree_files ?? []) {
@@ -1309,7 +1314,7 @@ function seedWorktree(wt) {
   }
   if (s.worktree_setup) {
     try {
-      execFileSync('sh', ['-c', s.worktree_setup], { cwd: wt, stdio: ['ignore', 'inherit', 'inherit'], env: { ...process.env, DEVTEAM_MAIN: mainRoot } });
+      execFileSync('sh', ['-c', s.worktree_setup], { cwd: wt, stdio: ['ignore', 'inherit', 'inherit'], env: gateEnv() });
     } catch {
       die(`worktree_setup failed in ${wt}`);
     }
@@ -1386,12 +1391,20 @@ function cmdMerge() {
         const started = Date.now();
         let ok = true;
         try {
-          execFileSync('sh', ['-c', cmd], { cwd: wt, stdio: 'inherit' });
+          execFileSync('sh', ['-c', cmd], { cwd: wt, stdio: 'inherit', env: gateEnv() });
         } catch {
           ok = false;
         }
         const tests = typeof spec === 'object' && spec.junit ? readJunit(path.join(wt, spec.junit)) : [];
         appendLog({ type: 'gate', gate: name, ok, ms: Date.now() - started, sha, tests_total: tests.length, tests: keepTests(tests) }, 'supervisor');
+        // A ratchet gate that fails here and also fails at the merge base is pre-existing debt, not
+        // this PR's: it passes with a warning (quality.md §2, modes).
+        if (!ok && spec.mode === 'ratchet' && base) {
+          const bwt = detachedWorktree(base, `base-${slug(branch)}`);
+          let baseOk = true;
+          try { execFileSync('sh', ['-c', cmd], { cwd: bwt, stdio: 'ignore', env: gateEnv() }); } catch { baseOk = false; } finally { git(['worktree', 'remove', '--force', bwt], mainRoot); }
+          if (!baseOk) { warn(`gate ${name} fails at the merge base ${base.slice(0, 12)} too: pre-existing, allowed by ratchet mode`); continue; }
+        }
         if (!ok) fails.push(`gate ${name} failed at ${sha.slice(0, 12)}`);
       }
     } finally {
@@ -2461,8 +2474,9 @@ function cmdPhase() {
 
 // gate <name> [--junit report.xml] -- <command…>: run a gate and record its time, result and tests.
 function cmdGate() {
+  if (flags.all) return gateAll();
   const name = positional[0];
-  if (!name || !rest?.length) die('usage: gate <name> [--junit <report.xml>] -- <command> [args…]');
+  if (!name || !rest?.length) die('usage: gate <name> [--junit <report.xml>] -- <command> [args…]   |   gate --all');
   const started = Date.now();
   let ok = true;
   try {
@@ -2474,6 +2488,26 @@ function cmdGate() {
   appendLog({ type: 'gate', gate: name, ok, ms: Date.now() - started, sha: git(['rev-parse', 'HEAD']) ?? undefined, tests_total: tests.length, tests: keepTests(tests) });
   process.stderr.write(`devteam: gate ${name} ${ok ? 'passed' : 'FAILED'} in ${((Date.now() - started) / 1000).toFixed(1)}s\n`);
   process.exit(ok ? 0 : 1);
+}
+
+// Run every gate in the settings here, as merge would, and print which pass. Run once at adoption
+// on main: a gate that fails there goes on in ratchet mode or gets a chore ticket (quality.md §2).
+function gateAll() {
+  const gates = Object.entries(loadSettings().gates ?? {});
+  if (!gates.length) die('no gates in settings');
+  const rows = [];
+  for (const [name, spec] of gates) {
+    const cmd = typeof spec === 'string' ? spec : spec.cmd;
+    const started = Date.now();
+    let ok = true;
+    try { execFileSync('sh', ['-c', cmd], { stdio: ['ignore', 'ignore', 'inherit'], env: gateEnv() }); } catch { ok = false; }
+    const ms = Date.now() - started;
+    appendLog({ type: 'gate', gate: name, ok, ms, sha: git(['rev-parse', 'HEAD']) ?? undefined, tests_total: 0, tests: [] });
+    rows.push({ name, ok, ms, mode: spec.mode ?? 'enforced' });
+    out(`${ok ? 'pass' : 'FAIL'}  ${name.padEnd(20)} ${(ms / 1000).toFixed(1)}s  ${spec.mode ?? 'enforced'}`);
+  }
+  const bad = rows.filter((r) => !r.ok && r.mode !== 'ratchet');
+  if (bad.length) { out(`\n${bad.length} enforced gate(s) fail here: fix the toolchain, set "mode": "ratchet", or open a chore ticket for each`); process.exit(1); }
 }
 
 // For an agent's stop hook: exit 2 while the worker's last commit is newer than its last phase line.
@@ -2689,7 +2723,8 @@ function cmdInit() {
   const root = mainRoot;
   const made = [];
   const put = (p, text) => { if (!fs.existsSync(p)) { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, text); made.push(path.relative(root, p)); } };
-  const block = { project: flagStr('name') ?? path.basename(root), upstream_base: flagStr('upstream-base') ?? null, components: {}, gates: {} };
+  const remoteHead = git(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'])?.replace(/^origin\//, '') ?? git(['rev-parse', '--abbrev-ref', 'HEAD']);
+  const block = { project: flagStr('name') ?? path.basename(root), upstream_base: flagStr('upstream-base') ?? null, ...(remoteHead && remoteHead !== 'main' && remoteHead !== 'HEAD' ? { main_branch: remoteHead } : {}), components: {}, gates: {} };
   put(path.join(projectDir, 'settings.md'), `# Project settings\n\nOnly what this project changes; every setting has a default in scripts/devteam.mjs (\`devteam.mjs settings\` shows the result). Below the block, record project-specific answers to the decisions the governance docs leave open (components and stacks, persistence tiers, one-way doors, release tags, how to notify the owner), each with its date.\n\n\`\`\`json devteam\n${JSON.stringify(block, null, 2)}\n\`\`\`\n`);
   put(path.join(projectDir, 'designs', 'architecture.md'), ARCHITECTURE_MD);
   for (const d of ['log', 'retros', 'tickets', 'reviews']) put(path.join(projectDir, d, '.gitkeep'), '');
@@ -2730,7 +2765,7 @@ Checks and merging (quality.md)
 
 Sessions (worker.md)
   phase <to> [--task t] [--note n] [--usd x --in n --out n]   phase change or liveness ping; phase supervisor --usd x
-  gate <name> [--junit f] -- <cmd…>   run a gate and record it
+  gate <name> [--junit f] -- <cmd…>   run a gate and record it   |   gate --all: every settings gate here
   send <to> "<text>" [--kind k] [--re m-…] [--sha s] | messages [--open] [--to x] [--json]
   stop-ok                         for a stop hook: refuses while the last commit is newer than the last phase line
 

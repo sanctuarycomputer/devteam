@@ -21,7 +21,7 @@ Points 2, 3, 4, 6, 9 and 10 are mechanical. Points 1, 7 and 8 are the final revi
 
 ## 2. Gates
 
-A rule is real only when a gate runs it. The project's gates live in `project/settings.md` as `gates: { "<name>": "<command>" }` (or `{ "cmd": …, "junit": "<report path>", "paths": ["<glob>", …] }`; a gate with `paths` runs only on PRs that change a matching file, for a monorepo's per-app gates). `merge` runs every one at the PR head before merging; workers run them locally through `devteam.mjs gate <name> -- <command>`, which records time, result and (with `--junit`) each test, so slow and flaky tests show up in the metrics.
+A rule is real only when a gate runs it. The project's gates live in `project/settings.md` as `gates: { "<name>": "<command>" }` (or `{ "cmd": …, "junit": "<report path>", "paths": ["<glob>", …] }`; a gate with `paths` runs only on PRs that change a matching file, for a monorepo's per-app gates). `merge` runs gates in a fresh worktree of the PR head with `DEVTEAM_MAIN` (the main checkout) and `DEVTEAM_CACHE` (a gitignored cache folder) set, so a compiled stack doesn't rebuild from scratch: `CARGO_TARGET_DIR=$DEVTEAM_CACHE/target cargo test`, `cmake -B $DEVTEAM_CACHE/build`, `mvn -Dmaven.repo.local=$DEVTEAM_CACHE/m2`, `bundle config set --local path $DEVTEAM_CACHE/bundle`. `devteam.mjs gate --all` runs every gate in the current checkout; at adoption, run it on `main` to see which gates already fail. `merge` runs every one at the PR head before merging; workers run them locally through `devteam.mjs gate <name> -- <command>`, which records time, result and (with `--junit`) each test, so slow and flaky tests show up in the metrics.
 
 Every project, day one:
 
@@ -43,7 +43,7 @@ Add accessibility and lab performance once there is a UI, evals with thresholds 
 
 Default tools: TypeScript Biome (or ESLint + Prettier), `tsc --noEmit`, vitest (`sequence.shuffle`), knip, jscpd; Ruby RuboCop, RSpec `--order random`, SimpleCov, debride, flay; Python ruff, pyright, pytest + pytest-randomly, coverage.py, vulture; Go gofmt + golangci-lint, `go test -shuffle on -cover`, staticcheck, dupl; Rust rustfmt + clippy, nextest, cargo-llvm-cov, cargo-machete. Secrets: gitleaks everywhere. Record the choice in the settings.
 
-**Modes.** A gate is **enforced** (any violation fails) or **ratchet** (fails only if the violation count rises, or a changed line violates). Adopting an existing codebase, turn each gate on in ratchet mode with its count recorded in the settings, open one chore ticket per component to bring it to green, and flip it to enforced when that lands. Workers bring the legacy lines they change up to the code rules and leave the rest.
+**Modes.** A gate is **enforced** (any violation fails) or **ratchet** (fails only if the violation count rises, or a changed line violates). A tool with its own baseline (`rubocop --auto-gen-config`, a brakeman ignore file, a coverage floor) ratchets itself. For a pass/fail command, `"mode": "ratchet"` in the gate makes `merge` rerun a failing gate at the merge base and let the PR through, with a warning, if it fails there too. Adopting an existing codebase, turn each gate on in ratchet mode with its count recorded in the settings, open one chore ticket per component to bring it to green, and flip it to enforced when that lands. Workers bring the legacy lines they change up to the code rules and leave the rest.
 
 **Comments and readability** are the reviewer's: a non-obvious decision with no comment saying why, a name that needs a comment, or a comment that restates the code is a Minor finding.
 
@@ -109,8 +109,12 @@ The log rule, checked on every PR: a PR may change `project/log/<X>.jsonl` only 
 
 ## 5. Releases
 
-- Promotion is by tag, not by branch: `vX.Y.Z-rcN` for candidates, `vX.Y.Z` for releases. Only the owner (and release actors named in the settings) pushes a `v*` tag; enforce it with tag protection.
-- No `staging` or `production` branch. Fix forward; roll back in one step to the previous tag. A migration that is not rollback-safe is a one-way door.
-- The changelog is the release record on the forge, not a file. `devteam.mjs notes <from-tag> [<to>]` groups merged tickets by the stories they served into "completed" and "advanced"; paste it into the release.
+Every release is a tag on `main` with a GitHub Release whose body is the changelog. The supervisor prepares it; shipping it to production is the owner's (class `release-production`).
+
+1. The supervisor drafts: `devteam.mjs notes <previous-tag>` groups the tickets merged since by the stories they served ("completed", "advanced", "other"); it adds what users will notice and any migration steps, and asks the owner a `release-production` question with the tag it proposes (`vX.Y.Z`, semver from what changed) and the notes.
+2. On the owner's yes: `git tag -a vX.Y.Z <sha> -m vX.Y.Z && git push origin vX.Y.Z`, then `gh release create vX.Y.Z --verify-tag --notes-file <notes>`, logged as an act with `--approved <qid>`. A candidate is `vX.Y.Z-rcN` with `--prerelease`.
+3. Promotion is whatever the project already does, recorded in the settings as `release`: `"tag"` (deploy from the tag; the default) or `{ "branch": "production" }` (force-push the tagged commit to that branch: `git push --force origin vX.Y.Z^{commit}:refs/heads/production`). Either way the tag and the release exist first, so every production state has a name and notes.
+4. Roll back by promoting the previous tag the same way. Fix forward otherwise. A migration that is not rollback-safe is a one-way door.
+5. If the project keeps a `CHANGELOG.md`, the release PR (a `chore-release-<tag>` PR merged before tagging) prepends the same notes to it.
 - The PR title is the unit of the changelog: `<ticket-id>: <one line a user could read>`.
 - Cut releases on a schedule, not by scope. A feature's release map says where a story is expected; the notes record where it landed.
