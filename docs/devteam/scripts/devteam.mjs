@@ -946,6 +946,9 @@ function deriveStatus() {
 
 const onPlanBranch = () => (git(['rev-parse', '--abbrev-ref', 'HEAD']) ?? '').startsWith('plan/');
 
+// Object.groupBy is Node 21+; the kit supports Node 20.
+const groupBy = (xs, key) => xs.reduce((acc, x) => { (acc[key(x)] ??= []).push(x); return acc; }, {});
+
 function cmdValidate() {
   const ts = tickets();
   const fs_ = features();
@@ -2029,7 +2032,7 @@ function cmdChore() {
 const lastRetro = () => logObjects('observation').filter((o) => o.kind === 'retro' && o.created_by === 'supervisor').sort(byTime).pop() ?? null;
 function finishedFeatures() {
   const res = [];
-  for (const [fid, ts] of Object.entries(Object.groupBy([...activeTickets().values()].filter((t) => t.feature !== CHORES), (t) => t.feature))) {
+  for (const [fid, ts] of Object.entries(groupBy([...activeTickets().values()].filter((t) => t.feature !== CHORES), (t) => t.feature))) {
     const ats = ts.map((t) => mergedAt(t.id));
     if (ats.some((x) => !x)) continue;
     res.push({ feature: fid, finished_at: new Date(Math.max(...ats)).toISOString() });
