@@ -522,8 +522,8 @@ function renderOoda(o) {
   $('defaulted').innerHTML = o.defaulted.length ? `<h3 style="margin-top:14px">Defaulted</h3>` + o.defaulted.map((q) => `
     <div class="card small"><b>${esc(q.question)}</b> → ${esc(q.answer)} <span class="muted">· ${when(q.answered_at)} · ${esc(q.id)}</span>
       <div class="row-inline"><input type="text" data-overrule="${esc(q.id)}" placeholder="Answer"><button class="ghost" data-overrule-send="${esc(q.id)}">Overrule</button><span class="err" id="e-${esc(q.id)}"></span></div></div>`).join('') : '';
-  $('owner-cli').innerHTML = o.owner_cli.length ? `<h3 style="margin-top:14px">Owner answers via CLI</h3>` + o.owner_cli.map((q) => `
-    <div class="card small"><b>${esc(q.question)}</b> → ${esc(q.answer)}${q.autonomy ? ` · <span class="badge medium">next time: ${esc(q.autonomy.class)} rung ${q.autonomy.rung}</span>` : ''} <span class="muted">· ${when(q.at)}</span></div>`).join('') : '';
+  $('owner-cli').innerHTML = o.owner_cli.length ? `<h3 style="margin-top:14px">Owner answers given outside the dashboard</h3>` + o.owner_cli.map((q) => `
+    <div class="card small"><b>${esc(q.question)}</b> → ${esc(q.answer)}${q.autonomy ? ` · <span class="badge medium">next time: ${esc(q.autonomy.class)} rung ${q.autonomy.rung}</span>` : ''} <span class="muted">· ${q.channel === 'chat' ? 'recorded by the supervisor from chat' : 'CLI'} · ${when(q.at)}</span>${q.said ? `<div class="muted">You said: “${esc(q.said)}”</div>` : ''}</div>`).join('') : '';
 
   // Observe
   $('observations').innerHTML = o.observations.length ? o.observations.slice(0, 12).map((x) => `
