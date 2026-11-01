@@ -138,6 +138,12 @@ test('devteam kit', async (t) => {
     assert.doesNotMatch(dt(['phase', 'awaiting-word', '--note', 'asked'], w).err, /no open request/);
     must(['gate', 'test', '--', 'true'], w);
     assert.notEqual(dt(['gate', 'lint', '--', 'false'], w).status, 0, 'gate passes the exit status through');
+    // a TDD red then green at the same HEAD with uncommitted work is not flakiness
+    write(path.join(wt('bill-01-card'), 'billing/wip.test.js'), 'red\n');
+    dt(['gate', 'tdd', '--', 'false'], w);
+    must(['gate', 'tdd', '--', 'true'], w);
+    fs.rmSync(path.join(wt('bill-01-card'), 'billing/wip.test.js'));
+    assert.ok(!json(must(['metrics', '--json'])).gates.flaky_gates.some((g) => g.gate === 'tdd'), 'dirty runs are not flaky');
     must(['act', '--class', 'approve-spec', '--refs', 'bill-01-card', '--', 'spec ok'], { role: 'sup' });
     must(['act', '--class', 'approve-plan', '--refs', 'bill-01-card', '--', 'plan ok'], { role: 'sup' });
     const tdir = path.join(wt('bill-01-card'), 'docs/devteam/project/tickets/bill-01-card');

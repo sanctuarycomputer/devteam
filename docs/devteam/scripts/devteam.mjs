@@ -1988,6 +1988,13 @@ function choreWorktree(slugName, { reset = false } = {}) {
 }
 function openPr(wt, branch, title, bodyText) {
   const main = loadSettings().main_branch;
+  if (loadSettings().forge === 'git') {
+    // No forge: the PR text waits in run/pr/ for merge to check.
+    const f = path.join(runDir, 'pr', `${branch}.md`);
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(f, `${bodyText}\n\n## One-way doors\n\nNone.\n`);
+    return `forge is git; land it with: merge --chore ${branch.replace(/^chore-/, '')} --title ${JSON.stringify(title)} --body-file ${path.relative(mainRoot, f)}`;
+  }
   let pr = sh('gh', ['pr', 'list', '--head', branch, '--state', 'open', '--json', 'url', '--jq', '.[0].url'], { cwd: wt });
   if (pr === null) { warn('gh is not available; open the PR by hand'); return ''; }
   if (!pr) pr = sh('gh', ['pr', 'create', '--head', branch, '--base', main, '--title', title, '--body', `${bodyText}\n\n## One-way doors\n\nNone.\n`], { cwd: wt }) ?? '';
@@ -2133,7 +2140,7 @@ function gateStats(runs) {
   const flakyGates = [];
   for (const [g, rs] of byGate) {
     const bySha = new Map();
-    for (const r of rs) (bySha.get(r.sha) ?? bySha.set(r.sha, []).get(r.sha)).push(r);
+    for (const r of rs.filter((x) => !x.dirty)) (bySha.get(r.sha) ?? bySha.set(r.sha, []).get(r.sha)).push(r);
     const flaky = [...bySha.values()].filter((x) => x.some((r) => r.ok) && x.some((r) => !r.ok)).length;
     if (flaky) flakyGates.push({ gate: g, commits: flaky });
     gates.push({ gate: g, runs: rs.length, fail_rate: +(rs.filter((r) => !r.ok).length / rs.length).toFixed(2), median_seconds: +(median(rs.map((r) => r.ms)) / 1000).toFixed(1), max_seconds: +(Math.max(...rs.map((r) => r.ms)) / 1000).toFixed(1) });
@@ -2142,7 +2149,7 @@ function gateStats(runs) {
   const testMs = new Map();
   for (const r of runs) for (const t of r.tests ?? []) {
     if (!t.failed) (testMs.get(t.name) ?? testMs.set(t.name, []).get(t.name)).push(t.ms);
-    if (t.failed && runs.some((o) => o !== r && o.gate === r.gate && o.sha === r.sha && o.ok && o.created_at >= r.created_at)) flakyTests.set(t.name, (flakyTests.get(t.name) ?? 0) + 1);
+    if (t.failed && !r.dirty && runs.some((o) => o !== r && !o.dirty && o.gate === r.gate && o.sha === r.sha && o.ok && o.created_at >= r.created_at)) flakyTests.set(t.name, (flakyTests.get(t.name) ?? 0) + 1);
   }
   return {
     gates: gates.sort((a, b) => b.median_seconds - a.median_seconds), flaky_gates: flakyGates,
@@ -2518,7 +2525,7 @@ function cmdGate() {
     ok = false;
   }
   const tests = readJunit(flagStr('junit'));
-  appendLog({ type: 'gate', gate: name, ok, ms: Date.now() - started, sha: git(['rev-parse', 'HEAD']) ?? undefined, tests_total: tests.length, tests: keepTests(tests) });
+  appendLog({ type: 'gate', gate: name, ok, ms: Date.now() - started, sha: git(['rev-parse', 'HEAD']) ?? undefined, dirty: git(['status', '--porcelain']) ? true : undefined, tests_total: tests.length, tests: keepTests(tests) });
   process.stderr.write(`devteam: gate ${name} ${ok ? 'passed' : 'FAILED'} in ${((Date.now() - started) / 1000).toFixed(1)}s\n`);
   process.exit(ok ? 0 : 1);
 }

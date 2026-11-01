@@ -368,6 +368,10 @@
           "sha": {
             "type": "string"
           },
+          "dirty": {
+            "description": "The run had uncommitted changes, so sha does not name what ran (a TDD red, then green). Not counted for flakiness.",
+            "type": "boolean"
+          },
           "tests_total": {
             "type": "integer",
             "minimum": 0,
