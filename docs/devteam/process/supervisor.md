@@ -53,12 +53,12 @@ Run it about every 10 minutes when PRs are converging, 30 when quiet. A worker's
 | phase `build`, a dependency unmerged | the worker started early | tell it to return to spec and plan work |
 | PR head differs from the last phase line's `sha` | stale liveness | message the worker to run `phase` |
 | owner answer relayed, not in the spec or plan after the next commit | answer not recorded | message the worker |
-| ticket ready, no worker, under caps | idle capacity | schedule it |
+| ticket ready, no worker, under caps | idle capacity | schedule it, or hold it with the reason |
 | superseded ticket with a live worker | re-plan not propagated | park it with a ruling |
 
 ## 5. Scheduling and merging
 
-- `devteam.mjs ready` lists tickets whose dependencies are merged and that have no worker; `--plan-ahead` adds those that can spec and plan now. Caps: `max_active_tickets` (your review capacity is the real limit) and `max_active_per_component`. Prefer the critical path, then contract tickets, then tickets that close a story.
+- `devteam.mjs ready` lists tickets whose dependencies are merged and that have no worker; `--plan-ahead` adds those that can spec and plan now. To keep a ready ticket unscheduled on purpose (it may duplicate other work, it waits on the owner), `ticket set <id> --json '{"held": "<why>"}'`; `ready` and the idle-capacity finding then leave it out, and `{"held": null}` releases it. Caps: `max_active_tickets` (your review capacity is the real limit) and `max_active_per_component`. Prefer the critical path, then contract tickets, then tickets that close a story.
 - `devteam.mjs worker <id>`; `worker <id> --resume` relaunches a crashed one in the same window and worktree with `resume_command`.
 - **Merging.** A `merge-request` message names the exact head. Read the diff, the final review record and `verification.md` yourself, then `devteam.mjs merge <id>`. It runs `check-ticket` at that head, the log rule, and every gate in the settings in a clean worktree at that head, merges with `--match-head-commit` (or, with `forge: "git"`, merges that sha and pushes), and logs the act. `--dry-run` does everything but the merge (and works on a branch with no PR yet). If anything fails it says what; reply to the worker with `--kind ruling --re <message-id>`. A head that moved after the request is a new request. You never merge any other way, and workers never merge.
 - **Chore PRs** (`merge --chore <slug>`: log, retros, designs, the architecture doc) may not touch `project/log` (except `chore-log`, which touches nothing else) or `project/tickets`. One that changes anything outside `project/` (the kit, `.claude/`, `.github/`) is a governance, process or gate change: it needs the owner's answer, `merge --chore <slug> --approved <qid>`.

@@ -34,10 +34,19 @@
   .small { font-size: 12px; }
   .err { color: var(--red-fg); font-size: 12px; }
   .empty { color: var(--muted); font-size: 12px; margin: 0; }
+  .empty code { font-size: 11px; }
+  .empty a { color: var(--fg-2); text-decoration: underline; text-underline-offset: 2px; }
+  .banner { border: 1px solid color-mix(in srgb, var(--red) 45%, var(--line)); background: color-mix(in srgb, var(--red) 7%, var(--surface)); border-radius: 8px; padding: 10px 14px; margin-bottom: 20px; font-size: 12px; }
+  .banner b { color: var(--red-fg); }
+  .banner pre { margin: 6px 0 0; max-height: 9em; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.5 var(--mono); color: var(--fg-2); }
+  .banner.stale { border-color: color-mix(in srgb, var(--amber) 45%, var(--line)); background: color-mix(in srgb, var(--amber) 7%, var(--surface)); }
+  .banner.stale b { color: var(--amber-fg); }
+  .loading { color: var(--muted); font-size: 12px; }
   [hidden] { display: none !important; }
 
   /* shell */
   .app { display: grid; grid-template-columns: 232px minmax(0, 1fr); min-height: 100vh; }
+  main.waiting > section { display: none; }
   .side { position: sticky; top: 0; height: 100vh; overflow-y: auto; border-right: 1px solid var(--line); background: var(--surface); padding: 14px 10px; display: flex; flex-direction: column; gap: 2px; }
   .brand { display: flex; align-items: center; gap: 8px; padding: 6px 8px 14px; }
   .brand .dot { width: 8px; height: 8px; border-radius: 2px; background: var(--fg); flex: none; }
@@ -49,7 +58,8 @@
   .side .foot { margin-top: auto; padding: 12px 8px 4px; font-size: 11px; color: var(--muted); line-height: 1.6; }
   main { max-width: 1120px; width: 100%; margin: 0 auto; padding: 24px 32px 80px; }
   @media (max-width: 900px) {
-    .app { grid-template-columns: 1fr; }
+    /* minmax(0, …): the board's columns must scroll inside it, not widen the page */
+    .app { grid-template-columns: minmax(0, 1fr); }
     .side { height: auto; flex-direction: row; align-items: center; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 8px 12px; gap: 4px; z-index: 5; }
     .side .brand { padding: 0 8px 0 0; }
     .side .nav { display: flex; gap: 2px; }
@@ -127,8 +137,11 @@
   .throughput span { flex: 1; background: var(--series-1); border-radius: 3px 3px 0 0; min-height: 2px; }
 
   /* board */
-  .board { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(168px, 1fr); gap: 8px; overflow-x: auto; padding-bottom: 6px; }
-  .col { background: var(--well); border: 1px solid var(--line); border-radius: 8px; padding: 8px; min-height: 80px; }
+  .board { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 6px; }
+  .col { flex: 1 0 168px; min-width: 0; background: var(--well); border: 1px solid var(--line); border-radius: 8px; padding: 8px; min-height: 80px; }
+  /* an empty column keeps its place in the flow but gives its width to the full ones */
+  .col.none { flex: 0 0 104px; }
+  .col.none h3 { color: var(--muted); }
   .col h3 { display: flex; justify-content: space-between; align-items: center; margin: 2px 4px 8px; }
   .col h3 span:last-child { color: var(--muted); font-weight: 500; }
   .tcard { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; font-size: 12px; box-shadow: var(--shadow); }
@@ -166,7 +179,9 @@
   </nav>
   <div class="foot"><span id="when"></span><br><span id="logline"></span><br><span class="err" id="err"></span></div>
 </aside>
-<main>
+<main class="waiting">
+  <div class="banner" id="banner" role="alert" hidden></div>
+  <p class="loading" id="loading">Loading…</p>
   <section id="overview">
     <div class="grid" id="stats"></div>
   </section>
@@ -191,7 +206,7 @@
     <div class="progress-layout">
       <div>
         <div class="card chart" id="burnup-card">
-          <div class="legend"><span><i class="done"></i>done</span><span><i class="scope"></i>scope</span><span><i class="fc"></i>forecast</span><span class="dim">points: S = 1, M = 2</span></div>
+          <div class="legend" id="legend"><span><i class="done"></i>done</span><span><i class="scope"></i>scope</span><span><i class="fc"></i>forecast</span><span class="dim">points: S = 1, M = 2</span></div>
           <div id="burnup"></div>
           <div class="tip" id="tip"></div>
         </div>
@@ -269,9 +284,12 @@ let DATA = null;
 let VIEW = 'all';
 try { VIEW = localStorage.getItem('devteam.view') || 'all'; } catch {}
 
-function bars(el, obj, fmt) {
-  const entries = Object.entries(obj || {});
-  if (!entries.length) { el.innerHTML = '<span class="muted">–</span>'; return; }
+// Every empty state says what would fill it, so an empty section reads as "nothing yet", not "broken".
+const empty = (html) => `<p class="empty">${html}</p>`;
+
+function bars(el, obj, fmt, none) {
+  const entries = Object.entries(obj || {}).filter(([, v]) => v > 0);
+  if (!entries.length) { el.innerHTML = empty(none); return; }
   const max = Math.max(...entries.map(([, v]) => v), 0.0001);
   el.innerHTML = entries.map(([k, v]) => `<div><span>${esc(k)}</span><span class="b" style="width:${(100 * v) / max}%"></span><span>${fmt(v)}</span></div>`).join('');
 }
@@ -319,7 +337,14 @@ function forecast(items, now) {
 // ---- burn-up chart (hand-built SVG) ----
 function burnup(items, now) {
   const el = $('burnup');
-  if (!items.length) { el.innerHTML = '<p class="empty">No tickets.</p>'; return; }
+  $('legend').hidden = !items.some(isDone);
+  if (!items.length) { el.innerHTML = empty('No tickets yet. The chart starts when the supervisor or a planner adds them.'); $('forecast').textContent = ''; return; }
+  const scopePts = items.reduce((a, t) => a + t.weight, 0);
+  if (!items.some(isDone)) {
+    el.innerHTML = empty(`Nothing merged yet: ${items.length} ticket${items.length > 1 ? 's' : ''}, ${scopePts} point${scopePts > 1 ? 's' : ''} of scope. The chart and the forecast start at the first merge.`);
+    $('forecast').textContent = `0/${scopePts} pts`;
+    return;
+  }
   const evs = [];
   for (const t of items) {
     evs.push([Date.parse(t.added_at), t.weight, 0]);
@@ -339,11 +364,15 @@ function burnup(items, now) {
   const x = (ts) => L + ((ts - t0) / Math.max(1, t1 - t0)) * (W - L - R);
   const y = (v) => H - B - (v / yMax) * (H - T - B);
   const step = (idx) => pts.map((p, i) => `${i ? `H${x(p[0]).toFixed(1)}V` : `M${x(p[0]).toFixed(1)},`}${y(p[idx]).toFixed(1)}`).join('');
-  const yTicks = [0, 0.25, 0.5, 0.75, 1].map((f) => Math.round(f * yMax * 0.95));
-  const xTicks = [0, 0.25, 0.5, 0.75, 1].map((f) => t0 + f * (t1 - t0));
+  // whole-number y steps (1, 2, 5, 10, …) and x labels that never repeat a date
+  const yStep = [1, 2, 5, 10, 20, 50, 100, 200, 500].find((st) => yMax / st <= 5) ?? Math.ceil(yMax / 5);
+  const yTicks = []; for (let v = 0; v <= yMax; v += yStep) yTicks.push(v);
+  const short = t1 - t0 < 2 * DAY;
+  const xFmt = (ts) => (short ? new Date(ts).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }) : fmtDate(ts));
+  const xTicks = [0, 0.25, 0.5, 0.75, 1].map((f) => t0 + f * (t1 - t0)).filter((ts, i, a) => i === 0 || xFmt(ts) !== xFmt(a[i - 1]));
   let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Burn-up chart: ${fc.done} of ${fc.scope} points done">`;
   for (const v of [...new Set(yTicks)]) svg += `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" stroke="var(--grid)"/><text x="${L - 6}" y="${y(v) + 4}" text-anchor="end" font-size="10" fill="var(--muted)">${v}</text>`;
-  for (const [i, ts] of xTicks.entries()) svg += `<text x="${x(ts)}" y="${H - 8}" text-anchor="${i === 0 ? 'start' : i === xTicks.length - 1 ? 'end' : 'middle'}" font-size="10" fill="var(--muted)">${fmtDate(ts)}</text>`;
+  for (const [i, ts] of xTicks.entries()) svg += `<text x="${x(ts)}" y="${H - 8}" text-anchor="${i === 0 ? 'start' : i === xTicks.length - 1 ? 'end' : 'middle'}" font-size="10" fill="var(--muted)">${xFmt(ts)}</text>`;
   // done area + line, scope line
   svg += `<path d="${step(2)}V${y(0)}H${x(pts[0][0])}Z" fill="var(--series-1)" opacity=".12"/>`;
   svg += `<path d="${step(1)}" fill="none" stroke="var(--muted)" stroke-width="2" stroke-dasharray="5 4"/>`;
@@ -386,7 +415,7 @@ function meterRow(label, done, total, note = '') {
 }
 function widgets(p, now) {
   const pts = (ts) => ts.reduce((a, t) => a + t.weight, 0);
-  $('w-features').innerHTML = p.features.map((f) => { const ts = p.tickets.filter((t) => t.feature === f); return meterRow(esc(f), pts(ts.filter(isDone)), pts(ts)); }).join('') || '<span class="muted">none</span>';
+  $('w-features').innerHTML = p.features.map((f) => { const ts = p.tickets.filter((t) => t.feature === f); return meterRow(esc(f), pts(ts.filter(isDone)), pts(ts)); }).join('') || empty('No features yet.');
   const storyDone = (s) => { const ts = p.tickets.filter((t) => t.serves.includes(s)); return ts.length && ts.every(isDone); };
   const rels = [...new Set([...Object.values(p.stories).map((s) => s.release), ...p.tickets.map((t) => t.target_release)].filter(Boolean))].sort();
   $('w-releases').innerHTML = rels.map((r) => {
@@ -395,33 +424,44 @@ function widgets(p, now) {
     const done = stories.filter(storyDone).length;
     const state = shipped ? '<span class="badge good">tagged</span>' : stories.length && done === stories.length ? '<span class="badge medium">ready to tag</span>' : '';
     return meterRow(`<code>${esc(r)}</code> ${state}`, done, stories.length, `${done}/${stories.length} stories`);
-  }).join('') || '<span class="muted">–</span>';
+  }).join('') || empty('No release targets yet. Each story in a feature names the release it ships in.');
   const waves = [...new Set(p.tickets.map((t) => t.wave).filter(Boolean))].sort((a, b) => a - b);
-  $('w-waves').innerHTML = waves.map((w) => { const ts = p.tickets.filter((t) => t.wave === w); return meterRow(`Wave ${w}`, ts.filter(isDone).length, ts.length); }).join('') || '<span class="muted">none</span>';
+  $('w-waves').innerHTML = waves.map((w) => { const ts = p.tickets.filter((t) => t.wave === w); return meterRow(`Wave ${w}`, ts.filter(isDone).length, ts.length); }).join('') || empty('No waves yet: they come from the ticket graph.');
   const storyEntries = Object.entries(p.stories);
   $('w-stories').innerHTML = storyEntries.length ? `<div>${storyEntries.map(([id, s]) => {
     const ts = p.tickets.filter((t) => t.serves.includes(id)); const d = ts.filter(isDone).length;
     return meterRow(`${d === ts.length && ts.length ? '<span class="badge good">done</span>' : ''}<code>${esc(id)}</code> ${esc(String(s.text ?? '').slice(0, 80))}`, d, ts.length, `${d}/${ts.length} tickets${s.release ? ` · ${esc(s.release)}` : ''}`);
-  }).join('')}</div>` : '<span class="muted">No stories yet.</span>';
+  }).join('')}</div>` : empty('No stories yet. A planner writes them into each feature; chores serve none.');
   const weeks = [7, 6, 5, 4, 3, 2, 1, 0].map((w) => pts(p.tickets.filter((t) => isDone(t) && now - Date.parse(t.merged_at) >= w * 7 * DAY && now - Date.parse(t.merged_at) < (w + 1) * 7 * DAY)));
   const wmax = Math.max(1, ...weeks);
   $('w-throughput').innerHTML = weeks.map((v, i) => `<span title="${v} points, ${i === 7 ? 'this week' : `${7 - i} week(s) ago`}" style="height:${(100 * v) / wmax}%"></span>`).join('');
-  $('w-throughput-note').textContent = `8 weeks · this week ${weeks[7]}`;
+  $('w-throughput-note').textContent = weeks.some((v) => v) ? `8 weeks · this week ${weeks[7]}` : 'Nothing merged in the last 8 weeks.';
 }
 
 // ---- kanban board ----
 const COLUMNS = [['Backlog', ['planned']], ['Ready', ['ready']], ['Planning', ["spec'd", 'planned-in-detail']], ['Building', ['building']], ['Review', ['in-review']], ['Merged', ['merged']], ['Released', ['released']]];
+// The stage moves on approvals and reviews; a worker already writing the spec or the code belongs
+// in that column, not in Ready, or "workers active" and the board disagree.
+// Waiting for a word or blocked says nothing about how far along it is: at least Planning, and the
+// stage (approvals, review records) moves it further.
+const PHASE_COLUMN = { starting: 'Planning', spec: 'Planning', plan: 'Planning', 'awaiting-word': 'Planning', blocked: 'Planning', contract: 'Building', build: 'Building', verify: 'Building', 'final-review': 'Review', merging: 'Review' };
+const RANK = Object.fromEntries(COLUMNS.map(([n], i) => [n, i]));
+function columnOf(t) {
+  const byStage = (COLUMNS.find(([, stages]) => stages.includes(t.stage)) ?? COLUMNS[0])[0];
+  const byPhase = PHASE_COLUMN[t.phase];
+  return byPhase && RANK[byPhase] > RANK[byStage] && RANK[byStage] < RANK.Merged ? byPhase : byStage;
+}
 function board(items, crit) {
-  $('board-cols').innerHTML = COLUMNS.map(([name, stages]) => {
-    let cards = items.filter((t) => stages.includes(t.stage)).sort((a, b) => (a.wave ?? 99) - (b.wave ?? 99));
+  $('board-cols').innerHTML = COLUMNS.map(([name]) => {
+    let cards = items.filter((t) => t.stage !== 'superseded' && columnOf(t) === name).sort((a, b) => (a.wave ?? 99) - (b.wave ?? 99));
     const total = cards.length;
     // finished columns show the most recent few; the rest are counted
     if (['Merged', 'Released'].includes(name)) cards = cards.sort((a, b) => (b.merged_at || '').localeCompare(a.merged_at || '')).slice(0, 5);
-    return `<div class="col"><h3><span>${name}</span><span>${total}</span></h3>${cards.map((t) => `
+    return `<div class="col${total ? '' : ' none'}"><h3><span>${name}</span><span>${total}</span></h3>${cards.map((t) => `
       <div class="tcard ${t.phase === 'blocked' ? 'blocked' : ''}">
         <b>${crit.has(t.id) ? '★ ' : ''}${esc(t.id)}</b><div class="t">${esc(t.title)}</div>
         <div class="muted">${esc(t.component)} · ${esc(t.size)} · wave ${esc(t.wave ?? '–')}${t.target_release ? ` · ${esc(t.target_release)}` : ''}</div>
-        <div>${t.risk === 'high' ? '<span class="badge medium">high risk</span>' : ''}${t.phase === 'blocked' ? '<span class="badge high">blocked</span>' : ''}${t.phase && !['blocked', 'done'].includes(t.phase) ? `<span class="badge low">${esc(t.phase)}${t.task ? ` ${esc(t.task)}` : ''}</span>` : ''}</div>
+        <div>${t.held ? `<span class="badge" title="${esc(t.held)}">held</span>` : ''}${t.risk === 'high' ? '<span class="badge medium">high risk</span>' : ''}${t.phase === 'blocked' ? '<span class="badge high">blocked</span>' : ''}${t.phase && !['blocked', 'done'].includes(t.phase) ? `<span class="badge low">${esc(t.phase)}${t.task ? ` ${esc(t.task)}` : ''}</span>` : ''}</div>
       </div>`).join('')}${total > cards.length ? `<div class="more">+ ${total - cards.length} more</div>` : ''}</div>`;
   }).join('');
 }
@@ -447,8 +487,8 @@ function renderOoda(o) {
   const R = o.roadmap;
   const week = (d) => { if (!d) return 'no date'; const x = new Date(`${d}T00:00:00Z`); x.setUTCDate(x.getUTCDate() - ((x.getUTCDay() + 6) % 7)); return `week of ${x.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })}`; };
   const rt = o.retro;
-  $('retro').innerHTML = `retro ${rt.last ? `${esc(rt.last.at.slice(0, 10))}: ${esc(rt.last.summary)}${rt.last.file ? ` (${esc(rt.last.file)})` : ''}` : 'none yet'}${rt.due ? ` · <span class="badge medium">due ${esc((rt.due_since || '').slice(0, 10))}</span>${esc(rt.reasons.join('; '))}` : ''}`;
-  $('unassigned').innerHTML = `${R.unassigned.length ? `No goal: ${R.unassigned.map(esc).join(', ')} · ` : ''}${R.rate_points_per_day} pts/day`;
+  $('retro').innerHTML = `${rt.last ? 'retro ' : ''}${rt.last ? `${esc(rt.last.at.slice(0, 10))}: ${esc(rt.last.summary)}${rt.last.file ? ` (${esc(rt.last.file)})` : ''}` : 'no retro yet'}${rt.due ? ` · <span class="badge medium">due ${esc((rt.due_since || '').slice(0, 10))}</span>${esc(rt.reasons.join('; '))}` : ''}`;
+  $('unassigned').innerHTML = o.goals.length || R.unassigned.length ? `${R.unassigned.length ? `No goal: ${R.unassigned.map(esc).join(', ')} · ` : ''}${R.rate_points_per_day} pts/day` : '';
   const roadmapOf = (gid) => {
     const r = R.goals.find((x) => x.id === gid);
     if (!r) return '';
@@ -473,7 +513,10 @@ function renderOoda(o) {
       ${roadmapOf(g.id)}
       ${canApprove ? `<div><button data-goal="${esc(g.id)}">Approve</button> <span class="err" id="e-${esc(g.id)}"></span></div>` : ''}
     </div>`;
-  }).join('') : '<p class="empty">None.</p>';
+  }).join('') : (() => {
+    const ask = (DATA.questions || []).find((q) => q.kind === 'goal-definition');
+    return empty(ask ? `No goals yet. The supervisor has asked for them: <a href="#q-${esc(ask.id)}">answer ${esc(ask.id)} in the Inbox</a>.` : 'No goals yet. The supervisor asks the owner for them first (<code>process/planning.md</code> §1).');
+  })();
 
   // Defaulted answers can still be overruled; terminal answers are worth a glance.
   $('defaulted').innerHTML = o.defaulted.length ? `<h3 style="margin-top:14px">Defaulted</h3>` + o.defaulted.map((q) => `
@@ -484,20 +527,20 @@ function renderOoda(o) {
 
   // Observe
   $('observations').innerHTML = o.observations.length ? o.observations.slice(0, 12).map((x) => `
-    <div class="card small"><span class="badge ${sevBadge(x.severity ?? 0)}">${esc(x.kind)}</span><code>${esc(x.subject)}</code> ${esc(x.detail)} <span class="muted">· ${esc(x.created_by)}, ${when(x.created_at)}${x.valence ? ` · valence ${x.valence > 0 ? '+' : ''}${esc(x.valence)}` : ''}</span></div>`).join('') : '<p class="empty">None yet.</p>';
+    <div class="card small"><span class="badge ${sevBadge(x.severity ?? 0)}">${esc(x.kind)}</span><code>${esc(x.subject)}</code> ${esc(x.detail)} <span class="muted">· ${esc(x.created_by)}, ${when(x.created_at)}${x.valence ? ` · valence ${x.valence > 0 ? '+' : ''}${esc(x.valence)}` : ''}</span></div>`).join('') : empty('None yet. What workers and the supervisor notice shows here.');
 
   // Orient
   $('clusters').innerHTML = o.clusters.length ? o.clusters.map((c) => `
-    <div class="card small"><b>${esc(c.key)}</b> ×${esc(c.count)} <span class="muted">valence ${esc(c.valence)}</span><div class="muted">${esc(c.latest)}</div></div>`).join('') : '<p class="empty">None.</p>';
+    <div class="card small"><b>${esc(c.key)}</b> ×${esc(c.count)} <span class="muted">valence ${esc(c.valence)}</span><div class="muted">${esc(c.latest)}</div></div>`).join('') : empty('None. An observation that keeps coming back shows here.');
   $('problems').innerHTML = o.problems.length ? o.problems.map((p) => `
-    <div class="card small"><span class="badge ${sevBadge(p.severity)}">sev ${esc(p.severity)}</span><span class="badge">${p.realized ? 'issue' : 'risk'}</span><b>${esc(p.title)}</b> <span class="muted">· ${esc(p.status)}${p.assigned_to ? `, ${esc(p.assigned_to)}` : ''}${(p.threatens || []).length ? ` · threatens ${p.threatens.map(esc).join(', ')}` : ''}</span>${p.detail ? `<div class="muted">${esc(p.detail)}</div>` : ''}</div>`).join('') : '<p class="empty">None open.</p>';
+    <div class="card small"><span class="badge ${sevBadge(p.severity)}">sev ${esc(p.severity)}</span><span class="badge">${p.realized ? 'issue' : 'risk'}</span><b>${esc(p.title)}</b> <span class="muted">· ${esc(p.status)}${p.assigned_to ? `, ${esc(p.assigned_to)}` : ''}${(p.threatens || []).length ? ` · threatens ${p.threatens.map(esc).join(', ')}` : ''}</span>${p.detail ? `<div class="muted">${esc(p.detail)}</div>` : ''}</div>`).join('') : empty('None open.');
   const cand = o.knowledge.filter((k) => k.status === 'candidate');
   const acc = o.knowledge.filter((k) => k.status === 'accepted');
   $('knowledge').innerHTML = (cand.length ? `<p class="small"><b>Candidates (${cand.length})</b></p>` + cand.map((k) => `
     <div class="card small"><span class="badge medium">${esc(k.kind)}</span><code>${esc(k.scope)}</code> ${esc(k.statement)} <span class="muted">${k.confidence != null ? `· ${Math.round(k.confidence * 100)}% sure ` : ''}· ${(k.evidence || []).length} evidence</span>
       <div class="row-inline"><button class="ghost" data-know="${esc(k.id)}" data-status="accepted">Accept</button><button class="ghost" data-know="${esc(k.id)}" data-status="retired">Retire</button><span class="err" id="e-${esc(k.id)}"></span></div></div>`).join('') : '') +
     (acc.length ? acc.map((k) => `<div class="card small"><span class="badge good">${esc(k.kind)}</span><code>${esc(k.scope)}</code> ${esc(k.statement)}${k.valence < 0 ? ' <span class="muted">(avoid)</span>' : ''}</div>`).join('') : '') ||
-    '<p class="empty">None.</p>';
+    empty('None yet. Recurring observations become candidates here for you to accept or retire.');
 
   // Decide: trust ladder
   $('trust-table').innerHTML = '<tr><th>Class</th><th>Rung</th><th>Ceiling</th><th>Agreement</th><th>Acts since drop</th><th>Corrections</th><th></th></tr>' + o.trust.map((t) => `
@@ -513,7 +556,7 @@ function renderOoda(o) {
         <div class="row-inline" hidden data-correct-form="${esc(a.id)}"><input type="text" data-reason="${esc(a.id)}" placeholder="Reason"><button class="ghost" data-correct-send="${esc(a.id)}">Send</button><span class="err" id="e-${esc(a.id)}"></span></div>
       </div>
       ${a.correction ? '' : `<button class="ghost" data-correct="${esc(a.id)}">Correct</button>`}
-    </div>`).join('') : '<p class="empty">None.</p>';
+    </div>`).join('') : empty('None yet. Every decision the supervisor makes alone shows here, for you to correct.');
 }
 
 async function post(action, body, errId) {
@@ -569,7 +612,7 @@ function render(d) {
     const why = q.why_asked?.reasons?.length ? `<div class="why">reasons: ${q.why_asked.reasons.map((r) => esc(reasonText[r] || r)).join('; ')}${cls ? ` · ${esc(q.class)} is on rung ${cls.rung} of ${cls.ceiling}` : q.class ? ` · ${esc(q.class)}` : ''}</div>` : '';
     const next = cls ? `<label>${esc(q.class)} rung: <select data-auto="${esc(q.id)}"><option value="">no change</option>${[1, 2, 3].filter((r) => r <= cls.ceiling).map((r) => `<option value="${r}">${RUNGS[r]}</option>`).join('')}</select></label>` : '';
     return `
-    <div class="card qcard ${q.kind === 'one-way-door' ? 'door' : q.kind === 'trust' ? 'trust' : ''}">
+    <div class="card qcard ${q.kind === 'one-way-door' ? 'door' : q.kind === 'trust' ? 'trust' : ''}" id="q-${esc(q.id)}">
       <span class="badge ${q.kind === 'one-way-door' ? 'high' : q.kind === 'trust' ? 'good' : 'medium'}">${esc(q.kind)}</span>
       ${q.ticket ? `<code>${esc(q.ticket)}</code>` : ''} <span class="qid">${esc(q.id)}</span>
       <p><b>${esc(q.question)}</b></p>
@@ -584,7 +627,7 @@ function render(d) {
       <div class="row-inline">${next}<input type="text" data-rule="${esc(q.id)}" placeholder="Standing rule (optional)"></div>
       <button data-answer="${esc(q.id)}">Answer</button> <span class="err" id="e-${esc(q.id)}"></span>
     </div>`;
-  }).join('') : '<p class="empty">None.</p>';
+  }).join('') : empty('Nothing needs you right now. Questions the supervisor cannot decide alone show here.');
 
   renderOoda(o);
   for (const [sel, v] of kept) { const el = document.querySelector(sel); if (el) el.value = v; }
@@ -593,31 +636,61 @@ function render(d) {
 
   $('findings').innerHTML = m.findings.length ? m.findings.map((f) => `
     <div class="card"><span class="badge ${f.severity}">${f.severity}</span><b>${esc(f.kind)}</b> · <code>${esc(f.subject)}</code>
-    <div class="muted">${esc(f.detail)}</div><div>→ ${esc(f.suggestion)}</div></div>`).join('') : '<p class="empty">None.</p>';
+    <div class="muted">${esc(f.detail)}</div><div>→ ${esc(f.suggestion)}</div></div>`).join('') : empty('None. Blockers and slow spots show here, each with a next step.');
 
-  bars($('phase-time'), m.phase_hours, (v) => `${v}h`);
-  bars($('phase-cost'), m.phase_usd, (v) => `$${v}`);
+  bars($('phase-time'), m.phase_hours, (v) => `${v}h`, 'No time yet. Workers write a phase line as they move through a ticket.');
+  bars($('phase-cost'), m.phase_usd, (v) => `$${v}`, 'No spend recorded yet. Workers report it with <code>phase … --usd</code>.');
 
   $('gates').innerHTML = '<tr><th>Gate</th><th>Runs</th><th>Median</th><th>Slowest</th><th>Fail rate</th></tr>' + (m.gates.gates.length
     ? m.gates.gates.map((g) => `<tr><td>${esc(g.gate)}${m.gates.flaky_gates.some((f) => f.gate === g.gate) ? ' <span class="badge high">flaky</span>' : ''}</td><td>${g.runs}</td><td>${dur(g.median_seconds)}</td><td>${dur(g.max_seconds)}</td><td>${Math.round(g.fail_rate * 100)}%</td></tr>`).join('')
     : '<tr><td colspan="5" class="muted">None. Record runs with <code>devteam.mjs gate</code>.</td></tr>');
-  $('flaky').innerHTML = m.gates.flaky_tests.length ? m.gates.flaky_tests.map((t) => `<div class="card"><code>${esc(t.name)}</code> <span class="muted">${t.times}×</span></div>`).join('') : '<p class="empty">None.</p>';
-  $('slow').innerHTML = m.gates.slowest_tests.length ? m.gates.slowest_tests.map((t) => `<div class="card"><code>${esc(t.name)}</code> <span class="muted">${t.median_seconds}s</span></div>`).join('') : '<p class="muted">None. Pass <code>--junit</code> to <code>gate</code>.</p>';
+  $('flaky').innerHTML = m.gates.flaky_tests.length ? m.gates.flaky_tests.map((t) => `<div class="card"><code>${esc(t.name)}</code> <span class="muted">${t.times}×</span></div>`).join('') : empty('None seen.');
+  $('slow').innerHTML = m.gates.slowest_tests.length ? m.gates.slowest_tests.map((t) => `<div class="card"><code>${esc(t.name)}</code> <span class="muted">${t.median_seconds}s</span></div>`).join('') : empty('None recorded. Pass <code>--junit</code> to <code>gate</code>.');
 
   $('messages-list').innerHTML = d.open_messages.length ? d.open_messages.map((x) => `
-    <div class="card"><span class="badge medium">${esc(x.kind)}</span>${esc(x.actor)} → ${esc(x.to)} <span class="muted">${esc(x.id)}</span><div>${esc(x.summary)}</div></div>`).join('') : '<p class="empty">None.</p>';
+    <div class="card"><span class="badge medium">${esc(x.kind)}</span>${esc(x.actor)} → ${esc(x.to)} <span class="muted">${esc(x.id)}</span><div>${esc(x.summary)}</div></div>`).join('') : empty('Nothing waiting for a reply.');
+}
+
+// A failed load is said at the top of the page, never only in the sidebar: before the first good
+// load there is nothing else to see, and after it the page would otherwise show old data as current.
+function showFailure(message) {
+  const b = $('banner');
+  $('loading').hidden = true;
+  const first = !DATA;
+  const fix = /needs Node 18|is not a function|SyntaxError|Unexpected token/.test(message)
+    ? 'The script may be running on a Node too old for it: the dashboard uses the Node it was started with, which is often the version the project pins (.tool-versions, .nvmrc). devteam needs Node 18+.'
+    : /Failed to fetch|NetworkError|Load failed/.test(message) ? 'The dashboard server is not answering. Restart it: <code>node docs/devteam/scripts/devteam.mjs dashboard</code>.' : '';
+  b.className = first ? 'banner' : 'banner stale';
+  b.innerHTML = first
+    ? `<b>Could not load the dashboard data.</b> Every section below needs it. ${fix}<pre>${esc(message)}</pre>`
+    : `<b>Showing data from ${esc(new Date(DATA.generated_at).toLocaleTimeString())}; refreshing failed.</b> ${fix}<pre>${esc(message)}</pre>`;
+  b.hidden = false;
 }
 
 async function load() {
   // Don't redraw under someone who is typing or choosing.
   if (DATA && document.activeElement && ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName) && document.activeElement.id !== 'view') return;
+  let d;
   try {
     const r = await fetch('/api/data');
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.error || r.status);
-    $('err').textContent = '';
-    render(d);
-  } catch (e) { $('err').textContent = `could not load: ${e.message}`; }
+    const body = await r.text();
+    try { d = JSON.parse(body); } catch { throw new Error(r.ok ? 'the server sent something that is not JSON' : `${r.status} ${body.slice(0, 400)}`); }
+    if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+  } catch (e) {
+    $('err').textContent = 'could not load (see the top of the page)';
+    return showFailure(e.message || String(e));
+  }
+  $('err').textContent = '';
+  $('banner').hidden = true;
+  $('loading').hidden = true;
+  document.querySelector('main').classList.remove('waiting');
+  try { render(d); } catch (e) {
+    $('err').textContent = 'could not draw (see the top of the page)';
+    const b = $('banner');
+    b.className = 'banner';
+    b.innerHTML = `<b>The data loaded but the page failed to draw it.</b> Some sections may be blank or out of date. Please report this upstream with the error below.<pre>${esc(e.stack || e.message || e)}</pre>`;
+    b.hidden = false;
+  }
 }
 
 $('view').addEventListener('change', (e) => {

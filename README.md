@@ -49,7 +49,7 @@ docs/devteam/
 9. Start the supervisor. It is the owner's foreground session in the main checkout, never a background, headless or tmux-detached one. **If an agent session did this setup, that session becomes the supervisor:** it reads the prompt from `node docs/devteam/scripts/devteam.mjs prompt supervisor` and follows it in place; it does not launch a second agent. If the owner did the setup by hand, they start the agent in their terminal with `DEVTEAM_ROLE=supervisor` in its environment (`DEVTEAM_ROLE=supervisor claude "$(node docs/devteam/scripts/devteam.mjs prompt supervisor)"`), inside tmux if they want workers' messages typed into its pane as they happen. Agent CLIs such as Claude Code don't keep shell state between commands, so an `export` inside the session doesn't stick: a session already running prefixes each devteam command with `DEVTEAM_ROLE=supervisor`. Run the dashboard where it outlives the session (a tmux window, or another terminal): `node docs/devteam/scripts/devteam.mjs dashboard`, and open the address.
 10. The supervisor asks the owner for goals and the loop begins.
 
-Requirements: git, tmux (for the workers), Node 20+, the GitHub CLI, one agent CLI (Claude Code, Codex, OpenCode or similar) with superpowers installed.
+Requirements: git, tmux (for the workers), Node 18+ (the project's own pinned Node is fine: asdf, nvm and the dashboard all run the script with it), the GitHub CLI, one agent CLI (Claude Code, Codex, OpenCode or similar) with superpowers installed.
 
 ## Upgrading a project
 
