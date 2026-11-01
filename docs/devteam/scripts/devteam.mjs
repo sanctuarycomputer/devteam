@@ -123,6 +123,10 @@ const SETTINGS_DEFAULTS = {
   resume_command: 'claude --continue --dangerously-skip-permissions',
   main_branch: 'main',
   merge_method: 'merge',
+  // Where PRs live: 'github' (gh pr view / gh pr merge --match-head-commit) or 'git' (no forge CLI:
+  // merge takes --title and --body-file, merges the exact head on main and pushes; a moved main
+  // makes the push fail, which is the same check).
+  forge: 'github',
   max_active_tickets: 5,
   max_active_per_component: 2,
   stale_after_minutes: 30,
@@ -1359,8 +1363,10 @@ function cmdMerge() {
   const chore = flagStr('chore');
   const dry = !!flags['dry-run'];
   const branch = plan ? `plan/${plan}` : chore ? `chore-${chore}` : id ? `ticket/${id}` : die('usage: merge <ticket-id> | merge --plan <feature> | merge --chore <slug>   [--approved <qid>] [--no-gates] [--dry-run [--title t] [--body-file f]]');
-  const prJson = sh('gh', ['pr', 'view', branch, '--json', 'number,headRefOid,title,body,isDraft,mergeStateStatus,url']);
-  if (prJson === null && !dry) die(`no open PR from ${branch} (gh pr view failed)`);
+  const viaGit = loadSettings().forge === 'git';
+  if (viaGit && !dry && !(flagStr('title') && flagStr('body-file'))) die('forge is git: merge needs --title and --body-file (the PR text, checked as a PR would be)');
+  const prJson = viaGit ? null : sh('gh', ['pr', 'view', branch, '--json', 'number,headRefOid,title,body,isDraft,mergeStateStatus,url']);
+  if (prJson === null && !dry && !viaGit) die(`no open PR from ${branch} (gh pr view failed; with no forge CLI set forge: "git")`);
   git(['fetch', '--quiet', 'origin', branch]);
   const pr = prJson !== null ? JSON.parse(prJson) : { headRefOid: resolveCommit(`origin/${branch}`) ?? resolveCommit(branch) ?? die(`no branch ${branch}`), title: flagStr('title'), body: flagStr('body-file') ? fs.readFileSync(flagStr('body-file'), 'utf8') : undefined };
   if (pr.isDraft) die(`${pr.url} is a draft`);
@@ -1420,10 +1426,22 @@ function cmdMerge() {
   }
   if (fails.length) report(fails, '');
   if (dry) return out(`ok: ${branch} at ${sha.slice(0, 12)} would merge`);
-  const method = `--${loadSettings().merge_method}`;
-  const merged = sh('gh', ['pr', 'merge', String(pr.number), method, '--match-head-commit', sha]);
-  if (merged === null) die(`gh pr merge refused (did the head move?); verify from the start`);
-  git(['fetch', '--quiet', 'origin', loadSettings().main_branch]);
+  const mainBranch = loadSettings().main_branch;
+  if (viaGit) {
+    // Merge the exact verified sha (never the branch name, which may have moved) onto origin's main.
+    git(['fetch', '--quiet', 'origin', mainBranch]);
+    const wt = detachedWorktree(`origin/${mainBranch}`, `land-${slug(branch)}`);
+    try {
+      gitOrDie(['merge', '--no-ff', '--quiet', '-m', `${pr.title}\n\n${(pr.body ?? '').trim()}\n\nMerged ${branch} at ${sha}`, sha], wt);
+      if (git(['push', '--quiet', 'origin', `HEAD:refs/heads/${mainBranch}`], wt) === null) die(`push to ${mainBranch} refused (did main move?); verify from the start`);
+    } finally {
+      git(['worktree', 'remove', '--force', wt], mainRoot);
+    }
+  } else {
+    const merged = sh('gh', ['pr', 'merge', String(pr.number), `--${loadSettings().merge_method}`, '--match-head-commit', sha]);
+    if (merged === null) die(`gh pr merge refused (did the head move?); verify from the start`);
+  }
+  git(['fetch', '--quiet', 'origin', mainBranch]);
   mainLogCache = undefined;
   mergeShaCache.clear();
   const cls = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';

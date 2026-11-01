@@ -312,4 +312,15 @@ test('devteam kit', async (t) => {
     assert.equal(d.progress.tickets.length, 1);
     assert.match(must(['history', 'bill-01-card']), /bill-01-card/);
   });
+
+  await t.test('forge git: merge lands the exact verified head on main without gh', () => {
+    const settings = path.join(repo, 'docs/devteam/project/settings.md');
+    fs.writeFileSync(settings, fs.readFileSync(settings, 'utf8').replace('"gates": {', '"forge": "git", "gates": {'));
+    assert.match(dt(['merge', 'bill-01-card'], { role: 'sup' }).err, /needs --title and --body-file/);
+    must(['merge', 'bill-01-card', '--title', 'bill-01-card: card capture', '--body-file', body], { role: 'sup' });
+    git(['fetch', '-q', 'origin', 'main']);
+    assert.equal(git(['rev-parse', 'origin/main^2']), H2, 'main merges the verified head');
+    assert.ok(json(must(['log', '--type', 'act', '--json'])).some((a) => a.class === 'merge-word' && a.refs.includes('bill-01-card')));
+    assert.match(must(['status']), /merged.*bill-01-card/);
+  });
 });
