@@ -594,7 +594,7 @@ function render(d) {
     ['blocked', d.tickets.filter((t) => t.phase === 'blocked').length],
     ['median cycle', m.cycle_hours.median == null ? '–' : `${m.cycle_hours.median}h`],
     ['cost per ticket', m.cost.usd_per_merged_ticket == null ? '–' : `$${m.cost.usd_per_merged_ticket}`],
-    ['spend', `$${m.cost.usd_total}`],
+    ['spend', !m.cost.usd_total && !Object.keys(m.phase_usd || {}).length ? 'not reported' : `$${m.cost.usd_total}`],
     ['open questions', d.questions.length],
     ['answer rate (14d)', m.owner_questions.answer_rate_14d == null ? '–' : `${Math.round(m.owner_questions.answer_rate_14d * 100)}%`],
     ['escaped defects', m.escaped_defects],
@@ -603,7 +603,7 @@ function render(d) {
 
   // Keep anything half-typed or half-open across refreshes.
   document.querySelectorAll('textarea[data-q]').forEach((t) => { drafts[t.dataset.q] = t.value; });
-  const kept = [...document.querySelectorAll('input[data-rule], select[data-auto], input[data-reason], input[data-overrule]')].map((el) => [el.dataset.rule ? `input[data-rule="${el.dataset.rule}"]` : el.dataset.auto ? `select[data-auto="${el.dataset.auto}"]` : el.dataset.reason ? `input[data-reason="${el.dataset.reason}"]` : `input[data-overrule="${el.dataset.overrule}"]`, el.value]);
+  const kept = [...document.querySelectorAll('input[data-rule], select[data-auto], input[data-reason], input[data-overrule], input[data-ack-reason]')].map((el) => [el.dataset.rule ? `input[data-rule="${el.dataset.rule}"]` : el.dataset.auto ? `select[data-auto="${el.dataset.auto}"]` : el.dataset.reason ? `input[data-reason="${el.dataset.reason}"]` : el.dataset.ackReason ? `input[data-ack-reason="${CSS.escape(el.dataset.ackReason)}"]` : `input[data-overrule="${el.dataset.overrule}"]`, el.value]);
   const openForms = [...document.querySelectorAll('[data-correct-form]')].filter((f) => !f.hidden).map((f) => f.dataset.correctForm);
   const reasonText = Object.fromEntries((o.reasons || []).map((r) => [r.id, r.means]));
   const RUNGS = { 1: '1 ask', 2: '2 ask with default', 3: '3 act and report' };
@@ -630,13 +630,16 @@ function render(d) {
   }).join('') : empty('Nothing needs you right now. Questions the supervisor cannot decide alone show here.');
 
   renderOoda(o);
-  for (const [sel, v] of kept) { const el = document.querySelector(sel); if (el) el.value = v; }
   for (const id of openForms) { const f = document.querySelector(`[data-correct-form="${id}"]`); if (f) f.hidden = false; }
   renderProgress();
 
-  $('findings').innerHTML = m.findings.length ? m.findings.map((f) => `
+  const fkey = (f) => `${f.kind} ${f.subject}`;
+  $('findings').innerHTML = (m.findings.length ? m.findings.map((f) => `
     <div class="card"><span class="badge ${f.severity}">${f.severity}</span><b>${esc(f.kind)}</b> · <code>${esc(f.subject)}</code>
-    <div class="muted">${esc(f.detail)}</div><div>→ ${esc(f.suggestion)}</div></div>`).join('') : empty('None. Blockers and slow spots show here, each with a next step.');
+    <div class="muted">${esc(f.detail)}</div><div>→ ${esc(f.suggestion)}</div>
+    <div class="row-inline"><input type="text" data-ack-reason="${esc(fkey(f))}" placeholder="Why it can wait"><button class="ghost" data-ack="${esc(fkey(f))}" data-kind="${esc(f.kind)}" data-subject="${esc(f.subject)}">Set aside</button><span class="err" id="e-${esc(fkey(f))}"></span></div></div>`).join('') : empty('None. Blockers and slow spots show here, each with a next step.')) +
+    ((m.acknowledged || []).length ? `<h3 style="margin-top:14px">Set aside</h3>` + m.acknowledged.map((f) => `
+    <div class="card small"><span class="badge">${esc(f.severity)}</span><b>${esc(f.kind)}</b> · <code>${esc(f.subject)}</code> <span class="muted">· ${esc(f.ack.by)}: ${esc(f.ack.reason)} · until ${when(f.ack.until)}</span></div>`).join('') : '');
 
   bars($('phase-time'), m.phase_hours, (v) => `${v}h`, 'No time yet. Workers write a phase line as they move through a ticket.');
   bars($('phase-cost'), m.phase_usd, (v) => `$${v}`, 'No spend recorded yet. Workers report it with <code>phase … --usd</code>.');
@@ -649,6 +652,8 @@ function render(d) {
 
   $('messages-list').innerHTML = d.open_messages.length ? d.open_messages.map((x) => `
     <div class="card"><span class="badge medium">${esc(x.kind)}</span>${esc(x.actor)} → ${esc(x.to)} <span class="muted">${esc(x.id)}</span><div>${esc(x.summary)}</div></div>`).join('') : empty('Nothing waiting for a reply.');
+  // last, so every section that holds an input is drawn before its half-typed value comes back
+  for (const [sel, v] of kept) { const el = document.querySelector(sel); if (el) el.value = v; }
 }
 
 // A failed load is said at the top of the page, never only in the sidebar: before the first good
@@ -732,6 +737,12 @@ document.addEventListener('click', async (ev) => {
   if (over) {
     const id = over.dataset.overruleSend;
     return void post('answer', { id, answer: document.querySelector(`input[data-overrule="${id}"]`).value }, id);
+  }
+  const ack = ev.target.closest('[data-ack]');
+  if (ack) {
+    const key = ack.dataset.ack;
+    const reason = document.querySelector(`input[data-ack-reason="${CSS.escape(key)}"]`).value;
+    return void post('ack', { kind: ack.dataset.kind, subject: ack.dataset.subject, reason }, key);
   }
   const send = ev.target.closest('[data-correct-send]');
   if (send) {

@@ -140,16 +140,18 @@ const SETTINGS_DEFAULTS = {
   max_active_tickets: 5,
   max_active_per_component: 2,
   stale_after_minutes: 30,
+  // How long `ack` sets a finding aside; it comes back sooner if its subject changes.
+  finding_ack_hours: 24,
   question_default_after_hours: 24,
   autonomy_ceilings: {},
   components: {},
-  // Files a fresh worktree needs that git doesn't carry (gitignored secrets, local env), copied from
-  // the main checkout into every worker, planner and gate worktree. Paths relative to the repo root.
   // How a tagged release reaches production: 'tag' (deploys from the tag) or { branch: 'production' }.
   release: 'tag',
+  // Files a fresh worktree needs that git doesn't carry (gitignored secrets, local env), copied from
+  // the main checkout into every worker, planner, gate and chore worktree. Paths relative to the repo root.
   worktree_files: [],
-  // A shell command run in every new worker, planner and gate worktree after worktree_files are
-  // copied (install dependencies, link env files). Empty for none.
+  // A shell command run in every new worker, planner and gate worktree, and a chore worktree from
+  // `chore start`, after worktree_files are copied (install dependencies, link env files). Empty for none.
   worktree_setup: '',
   worker_denied_commands: ['gh pr merge*', 'gh api*', 'git push*main*', 'git push*--force*', 'git push*-f *', 'git push*+*'],
   dashboard_port: 4321,
@@ -1331,7 +1333,7 @@ function checkPr({ headRef, sha, title, body, forge = false }) {
 // What every gate and worktree_setup command sees: the main checkout, and a gitignored cache dir
 // for build outputs and package caches shared across worktrees (quality.md §2).
 const gateEnv = () => { const cache = path.join(runDir, 'cache'); fs.mkdirSync(cache, { recursive: true }); return { ...process.env, DEVTEAM_MAIN: mainRoot, DEVTEAM_CACHE: cache }; };
-function seedWorktree(wt) {
+function seedWorktree(wt, { setup = true } = {}) {
   const s = loadSettings();
   for (const rel of s.worktree_files ?? []) {
     const from = path.join(mainRoot, rel);
@@ -1339,7 +1341,7 @@ function seedWorktree(wt) {
     fs.mkdirSync(path.dirname(path.join(wt, rel)), { recursive: true });
     fs.copyFileSync(from, path.join(wt, rel));
   }
-  if (s.worktree_setup) {
+  if (setup && s.worktree_setup) {
     try {
       execFileSync('sh', ['-c', s.worktree_setup], { cwd: wt, stdio: ['ignore', 'inherit', 'inherit'], env: gateEnv() });
     } catch {
@@ -1362,6 +1364,32 @@ function cmdCheckPr() {
   report(checkPr({ headRef, sha, title: flagStr('title'), body, forge: true }), `${headRef} passes the checks at ${sha.slice(0, 12)} (gates and the supervisor's approval acts are merge's to check)`);
 }
 // An owner-answered question, for commands that need the owner's yes.
+// A standing approval for upstream syncs: an accepted owner rule scoped chore:devteam-sync
+// (`answer <qid> "…" --rule "<rule>" --rule-scope chore:devteam-sync`) approves a
+// chore-devteam-sync-<tag> merge in place of a fresh answer, but only when every file the chore
+// changes outside project/ is inside the kit and byte-identical to that tag upstream. Anything the
+// supervisor wrote itself still needs the owner's answer.
+function upstreamSyncApproval(chore, sha, changed) {
+  const rule = logObjects('knowledge').filter((k) => k.created_by === 'owner' && k.scope === 'chore:devteam-sync' && k.status === 'accepted').sort(byTime).pop();
+  if (!rule) return {};
+  const s = loadSettings();
+  const src = /^[\w.-]+\/[\w.-]+$/.test(s.upstream_repo ?? '') ? `https://github.com/${s.upstream_repo}.git` : s.upstream_repo;
+  const raw = chore.slice('devteam-sync-'.length);
+  let tag = null;
+  for (const t of new Set([raw, raw.replace(/^(v\d+)-(\d+)-(\d+)/, '$1.$2.$3')])) {
+    if (git(['fetch', '--quiet', '--no-tags', src, `+refs/tags/${t}:refs/devteam-upstream/${t}`], mainRoot) !== null) { tag = t; break; }
+  }
+  if (!tag) return { problem: `standing approval for upstream syncs: no tag "${raw}" at ${s.upstream_repo}` };
+  const kitRel = path.relative(repoRoot, devteamDir).split(path.sep).join('/');
+  const blob = (ref, f) => git(['rev-parse', '--verify', '--quiet', `${ref}:${f}`], mainRoot);
+  const differ = [];
+  for (const f of changed) {
+    if (!f.startsWith(`${kitRel}/`)) { differ.push(`${f} (outside the kit)`); continue; }
+    if (blob(sha, f) !== blob(`refs/devteam-upstream/${tag}`, `docs/devteam/${f.slice(kitRel.length + 1)}`)) differ.push(f);
+  }
+  if (differ.length) return { problem: `standing approval covers only files copied verbatim from upstream ${tag}; these differ: ${differ.slice(0, 6).join(', ')}${differ.length > 6 ? ', …' : ''}. The owner's answer is needed: --approved <qid>` };
+  return { rule, tag };
+}
 function ownerAnswer(qid, what) {
   const q = logGet(qid);
   const v = q?.type === 'question' ? questionView(q) : null;
@@ -1400,11 +1428,16 @@ function cmdMerge() {
   if (['BEHIND', 'DIRTY'].includes(pr.mergeStateStatus)) fails.push(`PR is ${pr.mergeStateStatus.toLowerCase()} relative to main; the author merges main and asks again`);
   // A chore PR that touches the kit, the agent config or the forge config carries an owner answer
   // (classes governance-edit, process-edit, gate-change); project/ files are the supervisor's.
-  const approved = flagStr('approved') ?? null;
+  let approved = flagStr('approved') ?? null;
+  let standing = null;
   if (chore) {
     const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
     const kit = base ? changedFiles(base, sha).filter((f) => !f.startsWith(`${projectRel}/`)) : [];
-    if (kit.length && !approved) fails.push(`touches files outside project/ (${kit.slice(0, 6).join(', ')}${kit.length > 6 ? ', …' : ''}); the owner's answer is needed: merge --chore ${chore} --approved <qid>`);
+    if (kit.length && !approved && chore.startsWith('devteam-sync-')) {
+      const r = upstreamSyncApproval(chore, sha, kit);
+      if (r.rule) { standing = r; out(`kit files match upstream ${r.tag} exactly; approved by the owner's standing rule ${r.rule.id}`); } else if (r.problem) fails.push(r.problem);
+    }
+    if (kit.length && !approved && !standing) fails.push(`touches files outside project/ (${kit.slice(0, 6).join(', ')}${kit.length > 6 ? ', …' : ''}); the owner's answer is needed: merge --chore ${chore} --approved <qid>`);
     if (approved) {
       ownerAnswer(approved, 'merge --approved');
       if (logObjects('act').some((a) => a.approved_by === approved)) fails.push(`${approved} already approved an act; ask again for this one`);
@@ -1469,7 +1502,7 @@ function cmdMerge() {
   mainLogCache = undefined;
   mergeShaCache.clear();
   const cls = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
-  const act = appendLog({ type: 'act', class: cls, what: `merged ${branch} at ${sha}`, refs: id ? [id] : plan ? [plan] : [], reversible: false, approved_by: approved ?? undefined }, 'supervisor');
+  const act = appendLog({ type: 'act', class: cls, what: `merged ${branch} at ${sha}${standing ? ` (upstream ${standing.tag}, verbatim)` : ''}`, refs: id ? [id] : plan ? [plan] : [], reversible: false, approved_by: approved ?? standing?.rule.id ?? undefined }, 'supervisor');
   out(`merged ${branch} at ${sha.slice(0, 12)} (${act.id})`);
 }
 // ===== 7. trust =====
@@ -2023,7 +2056,10 @@ function choreSlug(slugName) {
   if (!/^[a-z0-9]+([.-][a-z0-9]+)*$/.test(slugName ?? '') || /\.lock$/.test(slugName)) die(`chore slug "${slugName}" must be lowercase words joined by hyphens (dots allowed, as in devteam-sync-v1.2.0; not ending in .lock)`);
   return slugName;
 }
-function choreWorktree(slugName, { reset = false } = {}) {
+// A new chore worktree gets settings.worktree_files (a gitignored key, an .env) so gates can run in
+// it; `chore start` also runs worktree_setup there. log-sync and retro only commit files, so they
+// skip the setup.
+function choreWorktree(slugName, { reset = false, setup = false } = {}) {
   choreSlug(slugName);
   if (!commonDir || !projectInRepo) die('chores need a git checkout with the project folder inside it');
   if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
@@ -2031,7 +2067,7 @@ function choreWorktree(slugName, { reset = false } = {}) {
   const main = loadSettings().main_branch;
   if (!flags['dry-run']) git(['fetch', '--quiet', 'origin', main]);
   const base = resolveCommit(`origin/${main}`) ? `origin/${main}` : main;
-  if (!fs.existsSync(wt)) gitOrDie(['worktree', 'add', '--quiet', '-B', `chore-${slugName}`, wt, base], mainRoot);
+  if (!fs.existsSync(wt)) { gitOrDie(['worktree', 'add', '--quiet', '-B', `chore-${slugName}`, wt, base], mainRoot); seedWorktree(wt, { setup }); }
   else if (reset) gitOrDie(['checkout', '--quiet', '-B', `chore-${slugName}`, base], wt);
   return wt;
 }
@@ -2051,7 +2087,7 @@ function openPr(wt, branch, title, bodyText) {
 }
 function cmdChore() {
   const [sub, slugName] = positional;
-  if (sub === 'start') { if (!slugName) die('usage: chore start <slug>'); supervisorOnly('chore'); return out(choreWorktree(slugName)); }
+  if (sub === 'start') { if (!slugName) die('usage: chore start <slug>'); supervisorOnly('chore'); return out(choreWorktree(slugName, { setup: true })); }
   if (sub !== 'pr' || !slugName || !flagStr('title')) die('usage: chore start <slug>   |   chore pr <slug> --title "<summary>"');
   supervisorOnly('chore');
   choreSlug(slugName);
@@ -2312,9 +2348,30 @@ function collectMetrics(since) {
   if (ready.length && active < settings.max_active_tickets) add('medium', 'idle-capacity', `${ready.length} ready`, `${active}/${settings.max_active_tickets} workers active`, `make workers for: ${ready.slice(0, 5).map((t) => t.id).join(', ')}`);
   if (m.escaped_defects) add('high', 'escaped-defects', `${m.escaped_defects}`, 'defects found after merge', 'retro: which review or gate should have caught each one');
   const order = { high: 0, medium: 1, low: 2 };
-  m.findings = f.sort((a, b) => order[a.severity] - order[b.severity]);
+  // A finding someone has looked at and set aside (`ack`) moves to acknowledged until the ack
+  // expires or its subject changes; it is never hidden.
+  const ackWindow = settings.finding_ack_hours * 3600000;
+  const acks = logObjects('observation').filter((o) => o.kind === 'finding-ack' && now - Date.parse(o.created_at) < ackWindow);
+  const ackOf = (x) => acks.filter((a) => a.subject === `${x.kind} ${x.subject}`).sort(byTime).pop();
+  const sorted = f.sort((a, b) => order[a.severity] - order[b.severity]);
+  m.findings = sorted.filter((x) => !ackOf(x));
+  m.acknowledged = sorted.filter(ackOf).map((x) => { const a = ackOf(x); return { ...x, ack: { by: a.created_by, at: a.created_at, reason: a.detail, until: new Date(Date.parse(a.created_at) + ackWindow).toISOString() } }; });
   return m;
 }
+// ack <finding-kind> <subject> --reason r [--owner]: set a metrics finding aside for
+// finding_ack_hours. The subject is the finding's, as metrics prints it.
+function cmdAck() {
+  const [kind, ...subj] = positional;
+  const subject = subj.join(' ').trim();
+  const reason = flagStr('reason');
+  if (!kind || !subject || !reason) die('usage: ack <finding-kind> <subject> --reason "<why it can wait>" [--owner]');
+  const live = collectMetrics(0).findings.find((x) => x.kind === kind && x.subject === subject);
+  if (!live) die(`no current finding ${kind} "${subject}" (devteam.mjs metrics lists them)`);
+  const by = flags.owner ? ownerWriter().by : (supervisorOnly('ack'), 'supervisor');
+  const line = appendLog({ type: 'observation', source: 'ack', kind: 'finding-ack', subject: `${kind} ${subject}`, detail: reason, refs: [] }, by);
+  out(`${line.id}: ${kind} ${subject} set aside for ${loadSettings().finding_ack_hours}h`);
+}
+
 function cmdMetrics() {
   const since = flagStr('since') ? Date.parse(flagStr('since')) : 0;
   if (Number.isNaN(since)) die('--since must be a date');
@@ -2368,7 +2425,7 @@ function collectOoda() {
     goals: logObjects('goal').map(goalView).sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99)),
     roadmap: collectRoadmap(),
     retro: retroDue(),
-    observations: recent(logObjects('observation').filter((o) => !['reading', 'retro'].includes(o.kind)), 40),
+    observations: recent(logObjects('observation').filter((o) => !['reading', 'retro', 'finding-ack'].includes(o.kind)), 40),
     clusters: orientClusters(),
     knowledge: recent(logObjects('knowledge').filter((k) => k.status !== 'retired'), 60),
     problems: logObjects('problem').filter((p) => p.status !== 'resolved').sort((a, b) => b.severity - a.severity),
@@ -2424,6 +2481,7 @@ function cmdDashboard() {
     correct: (b) => (ID.test(b.id ?? '') && text(b.reason, 600) ? ['correct', b.id, '--reason', b.reason.trim()] : null),
     'goal-approve': (b) => (ID.test(b.id ?? '') ? ['goal', 'approve', b.id] : null),
     knowledge: (b) => (ID.test(b.id ?? '') && ['accepted', 'retired', 'stale'].includes(b.status) ? ['knowledge', 'set', b.id, '--status', b.status, '--owner'] : null),
+    ack: (b) => (/^[a-z][a-z-]*$/.test(b.kind ?? '') && text(b.subject, 200) && text(b.reason, 600) ? ['ack', b.kind, b.subject, '--reason', b.reason.trim(), '--owner'] : null),
   };
   const send = (res, code, type, body) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store' }); res.end(body); };
   const server = http.createServer(async (req, res) => {
@@ -2508,7 +2566,9 @@ function cmdSend() {
   const text = words.join(' ').replace(/\s+/g, ' ').trim();
   if (!to || !text) die('usage: send <supervisor|ticket-id|plan-<feature>> "<text>" [--kind k] [--re m-…] [--sha s]');
   const kind = flagStr('kind') ?? 'info';
-  const from = myAddress();
+  // --owner: the owner, in their own terminal, telling a session something. Logged as the owner's.
+  const from = flags.owner ? ownerWriter().by : myAddress();
+  if (from === 'owner' && kind !== 'info') die('the owner sends info messages; answers go through answer <qid>, rulings come from the supervisor');
   if (['ruling', 'answer'].includes(kind) && from !== 'supervisor') die(`only the supervisor sends ${kind} messages`);
   const target = to === 'supervisor' ? supervisorTarget() : `${loadSettings().tmux_session}:${to}`;
   const { target: exact, problem } = resolvePane(target);
@@ -2516,7 +2576,7 @@ function cmdSend() {
   const re = flagStr('re') ?? null;
   if (re && logGet(re)?.type !== 'message') warn(`--re ${re} matches no logged message`);
   // The log is the record; the pane is delivery. A recipient whose pane is gone catches up with `messages`.
-  const line = appendLog({ type: 'message', to, kind, text, re, sha, ticket: flagStr('ticket') ?? currentTicketId() ?? (tickets().has(to) ? to : null) }, from);
+  const line = appendLog({ type: 'message', to, kind, text, re, sha, ticket: flagStr('ticket') ?? (from === 'owner' ? null : currentTicketId()) ?? (tickets().has(to) ? to : null) }, from);
   if (problem || !typeInto(exact, `[devteam ${kind} ${line.id} from ${from}${re ? ` re ${re}` : ''}${sha ? ` @ ${sha}` : ''}] ${text}`)) warn(`${line.id} recorded but not delivered to "${to}": ${problem ?? `could not type into ${exact}`}; it shows in their \`messages\``);
   out(line.id);
 }
@@ -2858,7 +2918,7 @@ Checks and merging (quality.md)
 Sessions (worker.md)
   phase <to> [--task t] [--note n] [--usd x --in n --out n]   phase change or liveness ping; phase supervisor --usd x
   gate <name> [--junit f] -- <cmd…>   run a gate and record it   |   gate --all: every settings gate here
-  send <to> "<text>" [--kind k] [--re m-…] [--sha s] | messages [--open] [--to x] [--json]
+  send <to> "<text>" [--kind k] [--re m-…] [--sha s] [--owner] | messages [--open] [--to x] [--json]
   stop-ok                         for a stop hook: refuses while the last commit is newer than the last phase line
 
 Decide and act (supervisor.md, constitution.md)
@@ -2872,6 +2932,7 @@ Decide and act (supervisor.md, constitution.md)
 Observe and orient
   observe --subject s --kind k --detail d [--severity 0-4] [--valence -2..2] [--key k] [--refs ids] [--fix f] [--value n --unit u]
   observe-metrics | orient [--json] | metrics [--since date] [--json]
+  ack <finding-kind> <subject> --reason r [--owner]   set a finding aside for finding_ack_hours
   knowledge [--status s] [--kind k] | knowledge --for <ticket|feature|class> | knowledge add|set …
   problem [--all] | problem add --title t --severity n [--risk] [--threatens g…] | problem set <id> …
 
@@ -2893,7 +2954,7 @@ const COMMANDS = {
   'check-ticket': cmdCheckTicket, 'check-pr': cmdCheckPr, merge: cmdMerge,
   phase: cmdPhase, gate: cmdGate, send: cmdSend, messages: cmdMessages, 'stop-ok': cmdStopOk,
   ask: cmdAsk, answer: cmdAnswer, withdraw: cmdWithdraw, questions: cmdQuestions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
-  observe: cmdObserve, 'observe-metrics': cmdObserveMetrics, orient: cmdOrient, metrics: cmdMetrics, knowledge: cmdKnowledge, problem: cmdProblem,
+  observe: cmdObserve, 'observe-metrics': cmdObserveMetrics, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, knowledge: cmdKnowledge, problem: cmdProblem,
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
   log: cmdLog, 'log-check': cmdLogCheck, 'log-sync': cmdLogSync, history: cmdHistory,
   dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes,
