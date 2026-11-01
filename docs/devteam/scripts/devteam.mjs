@@ -189,12 +189,29 @@ let settingsCache;
 function loadSettings() {
   if (settingsCache) return settingsCache;
   const m = readText(path.join(projectDir, 'settings.md'))?.match(/```json devteam\s*\n([\s\S]*?)\n```/);
-  if (!m) return (settingsCache = { ...SETTINGS_DEFAULTS });
-  try {
-    return (settingsCache = { ...SETTINGS_DEFAULTS, ...JSON.parse(m[1]) });
-  } catch (e) {
-    die(`settings.md: the json devteam block is not valid JSON: ${e.message}`);
+  if (!m) settingsCache = { ...SETTINGS_DEFAULTS };
+  else {
+    try {
+      settingsCache = { ...SETTINGS_DEFAULTS, ...JSON.parse(m[1]) };
+    } catch (e) {
+      die(`settings.md: the json devteam block is not valid JSON: ${e.message}`);
+    }
   }
+  // The owner's settings count only as they are on main: an edit in a checkout's working tree (or
+  // on a branch) takes effect once it lands through a PR that carried the owner's answer. Main is
+  // the remote's default branch, so a local main_branch edit can't move it. Before settings.md
+  // first lands on main (adoption), the working tree is all there is.
+  if (projectInRepo) {
+    const head = git(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
+    const ref = [head, `origin/${settingsCache.main_branch}`, settingsCache.main_branch].find((r) => r && git(['cat-file', '-e', `${r}:${projectRel}/settings.md`]) !== null);
+    const onMain = ref ? settingsAt(ref) : null;
+    if (onMain) {
+      const local = Object.keys(OWNER_SETTINGS).filter((k) => canonical(settingsCache[k]) !== canonical(onMain[k]));
+      for (const k of local) settingsCache[k] = onMain[k];
+      if (local.length && !process.env.DEVTEAM_QUIET_SETTINGS) { process.env.DEVTEAM_QUIET_SETTINGS = '1'; warn(`settings.md here changes ${local.join(', ')}; owner settings apply as they are on ${ref} until a PR with the owner's answer lands them`); }
+    }
+  }
+  return settingsCache;
 }
 
 // The trust ladder and its tables live in governance/constitution.md, in a ```json devteam block.
