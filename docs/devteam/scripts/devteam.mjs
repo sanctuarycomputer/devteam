@@ -129,6 +129,9 @@ const SETTINGS_DEFAULTS = {
   question_default_after_hours: 24,
   autonomy_ceilings: {},
   components: {},
+  // Files a fresh worktree needs that git doesn't carry (gitignored secrets, local env), copied from
+  // the main checkout into every worker, planner and gate worktree. Paths relative to the repo root.
+  worktree_files: [],
   worker_denied_commands: ['gh pr merge*', 'gh api*', 'git push*main*', 'git push*--force*', 'git push*-f *', 'git push*+*'],
   dashboard_port: 4321,
   upstream_repo: 'sanctuarycomputer/devteam',
@@ -1291,11 +1294,21 @@ function checkPr({ headRef, sha, title, body, forge = false }) {
   }
   return fails;
 }
+// Copy settings.worktree_files from the main checkout into a new worktree.
+function seedWorktree(wt) {
+  for (const rel of loadSettings().worktree_files ?? []) {
+    const from = path.join(mainRoot, rel);
+    if (!fs.existsSync(from)) { warn(`worktree_files: ${rel} is not in the main checkout`); continue; }
+    fs.mkdirSync(path.dirname(path.join(wt, rel)), { recursive: true });
+    fs.copyFileSync(from, path.join(wt, rel));
+  }
+}
 // A throwaway checkout of one commit, removed when the process ends however it ends.
 function detachedWorktree(sha, name) {
   const wt = path.join(mainRoot, '.worktrees', `tmp-${name}-${process.pid}`);
   gitOrDie(['worktree', 'add', '--quiet', '--detach', wt, sha], mainRoot);
   process.once('exit', () => { if (fs.existsSync(wt)) git(['worktree', 'remove', '--force', wt], mainRoot); });
+  seedWorktree(wt);
   return wt;
 }
 function cmdCheckPr() {
@@ -2477,6 +2490,7 @@ function makeSession(role) {
     if (resolveCommit(`refs/heads/${branch}`)) gitOrDie(['worktree', 'add', '--quiet', wt, branch], mainRoot);
     else gitOrDie(['worktree', 'add', '--quiet', '-b', branch, wt, base], mainRoot);
   }
+  seedWorktree(wt);
   const promptFile = path.join(runDir, 'prompts', `${name}.txt`);
   const block = knowledgeBlock(id);
   fs.writeFileSync(promptFile, `${PROMPTS[role].replace(/\{\{ID\}\}/g, id)}${block ? `\n\n${block}` : ''}\n`);
@@ -2489,7 +2503,16 @@ function makeSession(role) {
   const target = `${s.tmux_session}:${name}`;
   const env = `export DEVTEAM_RUN='${runDir}' DEVTEAM_ROLE='${role}' ${role === 'worker' ? `DEVTEAM_TICKET='${id}'` : `DEVTEAM_FEATURE='${id}'`}`;
   typeInto(target, env);
-  typeInto(target, `${resume ? s.resume_command : s.agent_command} "$(cat '${promptFile}')"`);
+  // Worker and planner policy travels with the launch, not the repo's agent config (which may be
+  // gitignored, and would bind the supervisor too): for Claude Code, a --settings file in run/.
+  let cmd = resume ? s.resume_command : s.agent_command;
+  if (/^claude(\s|$)/.test(cmd)) {
+    const policy = path.join(runDir, 'agent', `${role}-claude.json`);
+    fs.mkdirSync(path.dirname(policy), { recursive: true });
+    fs.writeFileSync(policy, `${JSON.stringify({ permissions: { deny: s.worker_denied_commands.map((c) => `Bash(${c})`) }, hooks: { Stop: [{ hooks: [{ type: 'command', command: `node '${path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs')}' stop-ok` }] }] } }, null, 2)}\n`);
+    cmd = cmd.replace(/^claude/, `claude --settings '${policy}'`);
+  }
+  typeInto(target, `${cmd} "$(cat '${promptFile}')"`);
   if (role === 'worker' && !resume) appendLog({ type: 'phase', from: null, to: 'starting', note: `started in ${target}` }, id);
   appendLog({ type: 'act', class: 'worker-slots', what: `${resume ? 'resumed' : 'made'} ${role} ${name} in ${target}`, refs: role === 'worker' ? [id] : [], reversible: true }, 'supervisor');
   out(`${resume ? 'resumed' : 'made'} ${role} ${name} in ${target} at ${wt}`);
@@ -2621,7 +2644,7 @@ jobs:
           node docs/devteam/scripts/devteam.mjs check-pr --head-ref "$HEAD_REF" --sha "$HEAD_SHA" --title "$PR_TITLE" --body-file "$RUNNER_TEMP/pr-body.md"
 `;
 
-// init [--name project] [--upstream-base vX.Y.Z] [--github] [--agent claude]: the project folders,
+// init [--name project] [--upstream-base vX.Y.Z] [--github]: the project folders,
 // settings, .gitignore entries, the AGENTS.md pointer; optionally the GitHub check and agent config.
 // The section init adds to the project's AGENTS.md: every agent reads this first, then its doc.
 const AGENTS_SECTION = `## devteam
@@ -2660,21 +2683,14 @@ function cmdInit() {
   if (!fs.existsSync(agents)) { fs.writeFileSync(agents, `# Agents\n\n${AGENTS_SECTION}`); made.push('AGENTS.md'); }
   else if (!readText(agents).includes('docs/devteam/process/supervisor.md')) { fs.appendFileSync(agents, `\n${AGENTS_SECTION}`); made.push('AGENTS.md'); }
   if (flags.github) put(path.join(root, '.github', 'workflows', 'devteam.yml'), WORKFLOW_YML);
-  if (flagStr('agent') === 'claude') {
-    const p = path.join(root, '.claude', 'settings.json');
-    // Patterns from the settings (worker_denied_commands); a convenience, not a wall: merge is the only merge path.
-    const cfg = { permissions: { deny: loadSettings().worker_denied_commands.map((c) => `Bash(${c})`) }, hooks: { Stop: [{ hooks: [{ type: 'command', command: 'node docs/devteam/scripts/devteam.mjs stop-ok' }] }] } };
-    if (!fs.existsSync(p)) put(p, `${JSON.stringify(cfg, null, 2)}\n`);
-    else out(`.claude/settings.json exists; add by hand:\n${JSON.stringify(cfg, null, 2)}`);
-  }
   out(made.length ? `created:\n${made.map((m) => `  ${m}`).join('\n')}` : 'nothing to create');
-  out('next: fill settings (components, agent_command, gates), write designs/architecture.md from the code, then start the supervisor (the upstream README, Setup)');
+  out('next: fill settings (components, agent_command, gates, worktree_files), write designs/architecture.md from the code, then start the supervisor (the upstream README, Setup)');
 }
 
 const HELP = `devteam <command>   (positionals before flags; flags take the words after them)
 
 Setup and roles
-  init [--name n] [--upstream-base vX] [--github] [--agent claude]   project folders, settings, .gitignore, the devteam section of AGENTS.md
+  init [--name n] [--upstream-base vX] [--github]   project folders, settings, .gitignore, the devteam section of AGENTS.md
   prompt supervisor | worker <id> | planner <feature>    the prompt a session starts with
   worker <ticket-id> [--resume] | planner <feature> [--resume]   supervisor: a worktree, a tmux window and an agent for a ticket or a feature plan
   whoami | settings [--get key]

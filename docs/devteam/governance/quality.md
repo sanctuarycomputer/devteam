@@ -103,7 +103,7 @@ merge --chore <slug>       a chore PR (log, retro, design, architecture): the lo
 
 The head must be up to date with `main`. A head that moves after the request is a new request. The supervisor still reads the diff: `merge` proves the shape, the supervisor judges the content.
 
-A worker never merges. Where the agent CLI supports deny rules, `init --agent claude` writes `worker_denied_commands` from the settings (by default `gh pr merge`, `gh api`, any push that names `main`, any forced push) into `.claude/settings.json`; a convenience, not a wall. A project that wants the forge itself to refuse can turn on `init --github`'s workflow as a required check; it runs `check-pr`, the same checks minus the gates and the supervisor's approval acts, which live in its log until the next `chore-log` lands.
+A worker never merges. Where the agent CLI supports it (Claude Code), `devteam.mjs worker` and `planner` launch the session with a settings file in `run/agent/` that denies `worker_denied_commands` (by default `gh pr merge`, `gh api`, any push that names `main`, any forced push) and installs the `stop-ok` hook. It binds only workers and planners, never the supervisor, and doesn't depend on the repo's own agent config; a convenience, not a wall. A project that wants the forge itself to refuse can turn on `init --github`'s workflow as a required check; it runs `check-pr`, the same checks minus the gates and the supervisor's approval acts, which live in its log until the next `chore-log` lands.
 
 The log rule, checked on every PR: a PR may change `project/log/<X>.jsonl` only if it is the `plan/<feature>` PR and X is `plan-<feature>`, or it is `chore-log`; and only by appending lines that are valid, in time order, in their month, and not in the future.
 
