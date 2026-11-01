@@ -84,12 +84,12 @@
 
   <div class="grid" id="stats"></div>
 
-  <h2><span class="stage">Goals</span>what the work is for, and the roadmap to it</h2>
+  <h2>Goals</h2>
   <div id="retro" class="small" style="margin-bottom:10px"></div>
   <div id="goals"></div>
   <div id="unassigned" class="small muted"></div>
 
-  <h2><span class="stage">Decide</span>questions for you</h2>
+  <h2>Questions</h2>
   <div id="questions"></div>
 
   <h2>Progress</h2>
@@ -110,21 +110,21 @@
       <div class="card"><h3>Features</h3><div id="w-features"></div></div>
       <div class="card"><h3>Releases</h3><div id="w-releases"></div></div>
       <div class="card"><h3>Waves</h3><div id="w-waves"></div></div>
-      <div class="card"><h3>Throughput, points per week</h3><div class="throughput" id="w-throughput"></div><div class="muted" id="w-throughput-note" style="font-size:12px;margin-top:4px"></div></div>
+      <div class="card"><h3>Points per week</h3><div class="throughput" id="w-throughput"></div><div class="muted" id="w-throughput-note" style="font-size:12px;margin-top:4px"></div></div>
     </div>
   </div>
 
   <h2>Board</h2>
   <div class="board" id="board"></div>
 
-  <h2><span class="stage">Observe</span>blockers and inefficiencies</h2>
+  <h2>Findings</h2>
   <div id="findings"></div>
-  <h3 style="margin-top:14px">Recent observations</h3>
+  <h3 style="margin-top:14px">Observations</h3>
   <div id="observations"></div>
 
   <div class="two">
-    <div><h2>Time by phase (hours)</h2><div class="bars card" id="phase-time"></div></div>
-    <div><h2>Cost by phase (USD)</h2><div class="bars card" id="phase-cost"></div></div>
+    <div><h2>Hours by phase</h2><div class="bars card" id="phase-time"></div></div>
+    <div><h2>USD by phase</h2><div class="bars card" id="phase-cost"></div></div>
   </div>
 
   <h2>Gates</h2>
@@ -134,10 +134,10 @@
     <div><h2>Slowest tests</h2><div id="slow"></div></div>
   </div>
 
-  <h2><span class="stage">Orient</span>what keeps happening, and what we've learned</h2>
+  <h2>Orient</h2>
   <div class="two">
-    <div><h3>Recurring signals</h3><div id="clusters"></div></div>
-    <div><h3>Problems and risks</h3><div id="problems"></div></div>
+    <div><h3>Recurring</h3><div id="clusters"></div></div>
+    <div><h3>Problems</h3><div id="problems"></div></div>
   </div>
   <h3 style="margin-top:14px">Knowledge</h3>
   <div id="knowledge"></div>
@@ -145,15 +145,14 @@
   <div id="defaulted"></div>
   <div id="owner-cli"></div>
 
-  <h2><span class="stage">Decide</span>trust ladder</h2>
+  <h2>Trust ladder</h2>
   <div class="scroll"><table id="trust"></table></div>
-  <p class="muted small">Rungs: 1 ask, 2 ask with a default, 3 act and report. A correction drops a class to 1. Evidence never moves a rung by itself; you do, when answering or through a trust question (governance/autonomy.md).</p>
 
-  <h2><span class="stage">Act</span>what the supervisor did</h2>
-  <div class="row-inline" style="margin:0 0 10px"><button class="ghost" id="seen">Mark all as seen</button><span class="muted small" id="seen-note"></span></div>
+  <h2>Acts</h2>
+  <div class="row-inline" style="margin:0 0 10px"><button class="ghost" id="seen">Mark seen</button><span class="muted small" id="seen-note"></span></div>
   <div class="feed" id="acts"></div>
 
-  <h2>Messages waiting for a reply</h2>
+  <h2>Unanswered messages</h2>
   <div id="messages"></div>
 </main>
 <script>
@@ -171,7 +170,7 @@ try { VIEW = localStorage.getItem('devteam.view') || 'all'; } catch {}
 
 function bars(el, obj, fmt) {
   const entries = Object.entries(obj || {});
-  if (!entries.length) { el.innerHTML = '<span class="muted">no data yet</span>'; return; }
+  if (!entries.length) { el.innerHTML = '<span class="muted">–</span>'; return; }
   const max = Math.max(...entries.map(([, v]) => v), 0.0001);
   el.innerHTML = entries.map(([k, v]) => `<div><span>${esc(k)}</span><span class="b" style="width:${(100 * v) / max}%"></span><span>${fmt(v)}</span></div>`).join('');
 }
@@ -219,7 +218,7 @@ function forecast(items, now) {
 // ---- burn-up chart (hand-built SVG) ----
 function burnup(items, now) {
   const el = $('burnup');
-  if (!items.length) { el.innerHTML = '<p class="muted">No tickets in this view.</p>'; return; }
+  if (!items.length) { el.innerHTML = '<p class="muted">No tickets.</p>'; return; }
   const evs = [];
   for (const t of items) {
     evs.push([Date.parse(t.added_at), t.weight, 0]);
@@ -276,8 +275,8 @@ function burnup(items, now) {
   hit.addEventListener('mouseleave', () => { tip.style.display = 'none'; xh.setAttribute('opacity', '0'); });
   const range = fc.best && fc.worst && fc.worst - fc.best > DAY ? ` (range ${fmtDate(fc.best)} – ${fmtDate(fc.worst)})` : '';
   $('forecast').textContent = fc.finished ? `done: ${fc.done} of ${fc.scope} points` : fc.eta
-    ? `${fc.done} of ${fc.scope} points done · forecast finish ${fmtDate(fc.eta)}${range} at ${fc.perDay.toFixed(1)} points/day`
-    : `${fc.done} of ${fc.scope} points done · no throughput yet to forecast from`;
+    ? `${fc.done}/${fc.scope} pts · ETA ${fmtDate(fc.eta)}${range} · ${fc.perDay.toFixed(1)} pts/day`
+    : `${fc.done}/${fc.scope} pts · ETA –`;
 }
 
 // ---- widgets ----
@@ -295,7 +294,7 @@ function widgets(p, now) {
     const done = stories.filter(storyDone).length;
     const state = shipped ? '<span class="badge good">tagged</span>' : stories.length && done === stories.length ? '<span class="badge medium">ready to tag</span>' : '';
     return meterRow(`<code>${esc(r)}</code> ${state}`, done, stories.length, `${done}/${stories.length} stories`);
-  }).join('') || '<span class="muted">No release map yet (feature plan §6).</span>';
+  }).join('') || '<span class="muted">–</span>';
   const waves = [...new Set(p.tickets.map((t) => t.wave).filter(Boolean))].sort((a, b) => a - b);
   $('w-waves').innerHTML = waves.map((w) => { const ts = p.tickets.filter((t) => t.wave === w); return meterRow(`Wave ${w}`, ts.filter(isDone).length, ts.length); }).join('') || '<span class="muted">none</span>';
   const storyEntries = Object.entries(p.stories);
@@ -306,7 +305,7 @@ function widgets(p, now) {
   const weeks = [7, 6, 5, 4, 3, 2, 1, 0].map((w) => pts(p.tickets.filter((t) => isDone(t) && now - Date.parse(t.merged_at) >= w * 7 * DAY && now - Date.parse(t.merged_at) < (w + 1) * 7 * DAY)));
   const wmax = Math.max(1, ...weeks);
   $('w-throughput').innerHTML = weeks.map((v, i) => `<span title="${v} points, ${i === 7 ? 'this week' : `${7 - i} week(s) ago`}" style="height:${(100 * v) / wmax}%"></span>`).join('');
-  $('w-throughput-note').textContent = `last 8 weeks; this week ${weeks[7]} points`;
+  $('w-throughput-note').textContent = `8 weeks · this week ${weeks[7]}`;
 }
 
 // ---- kanban board ----
@@ -345,13 +344,13 @@ function renderOoda(o) {
   const R = o.roadmap;
   const week = (d) => { if (!d) return 'no date'; const x = new Date(`${d}T00:00:00Z`); x.setUTCDate(x.getUTCDate() - ((x.getUTCDay() + 6) % 7)); return `week of ${x.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })}`; };
   const rt = o.retro;
-  $('retro').innerHTML = `<b>Retro:</b> ${rt.last ? `last ${esc(rt.last.at.slice(0, 10))}: ${esc(rt.last.summary)}${rt.last.file ? ` <span class="muted">(${esc(rt.last.file)})</span>` : ''}` : 'none yet'}${rt.due ? ` · <span class="badge medium">due since ${esc((rt.due_since || '').slice(0, 10))}</span><span class="muted">${esc(rt.reasons.join('; '))}</span>` : ''}`;
-  $('unassigned').innerHTML = `${R.unassigned.length ? `Work serving no goal: ${R.unassigned.map(esc).join(', ')}. ` : ''}Roadmap dates: ${esc(R.note)} Current rate ${R.rate_points_per_day} points/day.`;
+  $('retro').innerHTML = `<b>Retro</b> ${rt.last ? `${esc(rt.last.at.slice(0, 10))}: ${esc(rt.last.summary)}${rt.last.file ? ` <span class="muted">(${esc(rt.last.file)})</span>` : ''}` : '–'}${rt.due ? ` · <span class="badge medium">due ${esc((rt.due_since || '').slice(0, 10))}</span><span class="muted">${esc(rt.reasons.join('; '))}</span>` : ''}`;
+  $('unassigned').innerHTML = `${R.unassigned.length ? `No goal: ${R.unassigned.map(esc).join(', ')} · ` : ''}${R.rate_points_per_day} pts/day`;
   const roadmapOf = (gid) => {
     const r = R.goals.find((x) => x.id === gid);
     if (!r) return '';
     const feats = r.features.map((f) => R.features[f]);
-    return `<div class="small"><b>Roadmap</b> <span class="muted">→ ${r.eta === 'done' ? 'done' : r.eta ? esc(week(r.eta)) : 'no date yet'}</span>
+    return `<div class="small"><b>Roadmap</b> <span class="muted">→ ${r.eta === 'done' ? 'done' : r.eta ? esc(week(r.eta)) : 'ETA –'}</span>
       ${r.unplanned.map((u) => `<div>• <span class="badge medium">unplanned</span>precondition ${u.n}: ${esc(u.text)}</div>`).join('')}
       ${feats.map((v) => `<div>• <b>${esc(v.feature)}</b> <span class="muted">${esc(v.status)}</span> · ${v.points_total - v.points_left}/${v.points_total} pts · stories ${v.stories.done}/${v.stories.total} · ${v.waves_left} waves left${v.releases.length ? ` · ${v.releases.map(esc).join(' ')}` : ''} → ${v.done ? 'done' : esc(week(v.eta))}${v.blocked_by_questions.length ? ` <span class="badge high">waiting on ${v.blocked_by_questions.length} answer${v.blocked_by_questions.length > 1 ? 's' : ''}</span>` : ''}</div>`).join('')}
 </div>`;
@@ -365,19 +364,19 @@ function renderOoda(o) {
     return `<div class="card goal">
       <div><span class="badge ${g.status === 'ready' ? 'good' : g.status === 'draft' ? 'medium' : 'low'}">${esc(g.status)}</span>${g.priority ? `<span class="badge">p${g.priority}</span>` : ''}<b>${esc(g.title)}</b> <span class="muted small">${esc(g.id)}</span></div>
       ${g.outcome ? `<div class="muted">${esc(g.outcome)}</div>` : ''}
-      <div>${esc(g.measure?.description || 'no measure yet')}: <b>${last ? esc(last.value) : '?'}</b> → ${esc(g.measure?.target ?? '?')} ${esc(g.measure?.unit || '')} by ${esc(g.horizon || '?')}${g.track ? ` · <span class="badge ${g.track === 'on track' ? 'good' : 'high'}">${esc(g.track)}</span>` : ''}</div>
-      <div class="small muted">Features: ${g.check.features.length ? g.check.features.map(esc).join(', ') : 'none yet'}${g.non_goals?.length ? ` · Not: ${g.non_goals.map(esc).join('; ')}` : ''}</div>
-      ${gaps.length ? `<ul class="gaps">${gaps.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : '<div class="small" style="color:var(--ok)">No gaps.</div>'}
+      <div>${esc(g.measure?.description || 'measure –')}: <b>${last ? esc(last.value) : '?'}</b> → ${esc(g.measure?.target ?? '?')} ${esc(g.measure?.unit || '')} by ${esc(g.horizon || '?')}${g.track ? ` · <span class="badge ${g.track === 'on track' ? 'good' : 'high'}">${esc(g.track)}</span>` : ''}</div>
+      <div class="small muted">Features: ${g.check.features.length ? g.check.features.map(esc).join(', ') : '–'}${g.non_goals?.length ? ` · Non-goals: ${g.non_goals.map(esc).join('; ')}` : ''}</div>
+      ${gaps.length ? `<ul class="gaps">${gaps.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
       ${roadmapOf(g.id)}
-      ${canApprove ? `<div><button data-goal="${esc(g.id)}">Approve this goal</button> <span class="err" id="e-${esc(g.id)}"></span></div>` : ''}
+      ${canApprove ? `<div><button data-goal="${esc(g.id)}">Approve</button> <span class="err" id="e-${esc(g.id)}"></span></div>` : ''}
     </div>`;
-  }).join('') : '<p class="muted">No goals yet. The supervisor drafts them from what you say (planning.md §0).</p>';
+  }).join('') : '<p class="muted">None.</p>';
 
   // Defaulted answers can still be overruled; terminal answers are worth a glance.
-  $('defaulted').innerHTML = o.defaulted.length ? `<h3 style="margin-top:14px">Decided by default (you can still overrule)</h3>` + o.defaulted.map((q) => `
+  $('defaulted').innerHTML = o.defaulted.length ? `<h3 style="margin-top:14px">Defaulted</h3>` + o.defaulted.map((q) => `
     <div class="card small"><b>${esc(q.question)}</b> → ${esc(q.answer)} <span class="muted">· ${when(q.answered_at)} · ${esc(q.id)}</span>
-      <div class="row-inline"><input type="text" data-overrule="${esc(q.id)}" placeholder="Your answer instead"><button class="ghost" data-overrule-send="${esc(q.id)}">Overrule</button><span class="err" id="e-${esc(q.id)}"></span></div></div>`).join('') : '';
-  $('owner-cli').innerHTML = o.owner_cli.length ? `<h3 style="margin-top:14px">Answers given from a terminal, not this page</h3><p class="muted small">Check these are yours: any session on this machine could type them.</p>` + o.owner_cli.map((q) => `
+      <div class="row-inline"><input type="text" data-overrule="${esc(q.id)}" placeholder="Answer"><button class="ghost" data-overrule-send="${esc(q.id)}">Overrule</button><span class="err" id="e-${esc(q.id)}"></span></div></div>`).join('') : '';
+  $('owner-cli').innerHTML = o.owner_cli.length ? `<h3 style="margin-top:14px">Owner answers via CLI</h3>` + o.owner_cli.map((q) => `
     <div class="card small"><b>${esc(q.question)}</b> → ${esc(q.answer)}${q.autonomy ? ` · <span class="badge medium">next time: ${esc(q.autonomy.class)} rung ${q.autonomy.rung}</span>` : ''} <span class="muted">· ${when(q.at)}</span></div>`).join('') : '';
 
   // Observe
@@ -386,16 +385,16 @@ function renderOoda(o) {
 
   // Orient
   $('clusters').innerHTML = o.clusters.length ? o.clusters.map((c) => `
-    <div class="card small"><b>${esc(c.key)}</b> ×${c.count} <span class="muted">valence ${c.valence}</span><div class="muted">${esc(c.latest)}</div><div>→ ${esc(c.suggest)}</div></div>`).join('') : '<p class="muted">Nothing recurring that isn\'t explained yet.</p>';
+    <div class="card small"><b>${esc(c.key)}</b> ×${c.count} <span class="muted">valence ${c.valence}</span><div class="muted">${esc(c.latest)}</div></div>`).join('') : '<p class="muted">None.</p>';
   $('problems').innerHTML = o.problems.length ? o.problems.map((p) => `
     <div class="card small"><span class="badge ${sevBadge(p.severity)}">sev ${p.severity}</span><span class="badge">${p.realized ? 'issue' : 'risk'}</span><b>${esc(p.title)}</b> <span class="muted">· ${esc(p.status)}${p.assigned_to ? `, ${esc(p.assigned_to)}` : ''}</span>${p.detail ? `<div class="muted">${esc(p.detail)}</div>` : ''}</div>`).join('') : '<p class="muted">None open.</p>';
   const cand = o.knowledge.filter((k) => k.status === 'candidate');
   const acc = o.knowledge.filter((k) => k.status === 'accepted');
-  $('knowledge').innerHTML = (cand.length ? `<p class="small"><b>${cand.length} candidate${cand.length > 1 ? 's' : ''} to review</b></p>` + cand.map((k) => `
+  $('knowledge').innerHTML = (cand.length ? `<p class="small"><b>Candidates (${cand.length})</b></p>` + cand.map((k) => `
     <div class="card small"><span class="badge medium">${esc(k.kind)}</span><code>${esc(k.scope)}</code> ${esc(k.statement)} <span class="muted">${k.confidence != null ? `· ${Math.round(k.confidence * 100)}% sure ` : ''}· ${(k.evidence || []).length} evidence</span>
       <div class="row-inline"><button class="ghost" data-know="${esc(k.id)}" data-status="accepted">Accept</button><button class="ghost" data-know="${esc(k.id)}" data-status="retired">Retire</button><span class="err" id="e-${esc(k.id)}"></span></div></div>`).join('') : '') +
     (acc.length ? acc.map((k) => `<div class="card small"><span class="badge good">${esc(k.kind)}</span><code>${esc(k.scope)}</code> ${esc(k.statement)}${k.valence < 0 ? ' <span class="muted">(avoid)</span>' : ''}</div>`).join('') : '') ||
-    '<p class="muted">Nothing learned yet.</p>';
+    '<p class="muted">None.</p>';
 
   // Decide: trust ladder
   $('trust').innerHTML = '<tr><th>Class</th><th>Rung</th><th>Ceiling</th><th>Clean acts</th><th>Agreement</th><th>Corrections</th><th></th></tr>' + o.trust.map((t) => `
@@ -403,7 +402,7 @@ function renderOoda(o) {
 
   // Act
   const A = o.acts;
-  $('seen-note').textContent = `${A.unseen_total} not yet seen${A.unseen_total > A.unseen.length ? ` (showing the oldest ${A.unseen.length})` : ''}${o.seen_upto ? ` · last marked ${when(o.seen_upto)}` : ''}`;
+  $('seen-note').textContent = `unseen ${A.unseen_total}${A.unseen_total > A.unseen.length ? ` (oldest ${A.unseen.length} shown)` : ''}${o.seen_upto ? ` · seen to ${when(o.seen_upto)}` : ''}`;
   $('seen').hidden = !A.unseen.length;
   $('seen').dataset.upto = A.unseen.length ? A.unseen[A.unseen.length - 1].created_at : '';
   const feed = [...A.unseen.slice().reverse(), ...A.seen];
@@ -411,11 +410,11 @@ function renderOoda(o) {
     <div class="card small ${a.correction ? 'corrected' : ''}">
       <div><span class="badge ${a.ladder ? 'medium' : 'low'}">${esc(a.class)}${a.scope ? ` · ${esc(a.scope)}` : ''}</span>${esc(a.what)}
         <div class="muted">${when(a.created_at)}${a.approved_by ? ` · approved by ${esc(a.approved_by)}` : a.rung ? ` · rung ${a.rung}` : ''}${a.reversible === false ? ' · irreversible' : ''}${a.seen ? ' · seen' : ''}</div>
-        ${a.correction ? `<div class="err">Corrected: ${esc(a.correction.reason)}</div>` : ''}
-        <div class="row-inline" hidden data-correct-form="${esc(a.id)}"><input type="text" data-reason="${esc(a.id)}" placeholder="What was wrong?"><button class="ghost" data-correct-send="${esc(a.id)}">Send correction</button><span class="err" id="e-${esc(a.id)}"></span></div>
+        ${a.correction ? `<div class="err">corrected: ${esc(a.correction.reason)}</div>` : ''}
+        <div class="row-inline" hidden data-correct-form="${esc(a.id)}"><input type="text" data-reason="${esc(a.id)}" placeholder="Reason"><button class="ghost" data-correct-send="${esc(a.id)}">Send</button><span class="err" id="e-${esc(a.id)}"></span></div>
       </div>
-      ${a.correction ? '' : `<button class="ghost" data-correct="${esc(a.id)}">Correct this</button>`}
-    </div>`).join('') : '<p class="muted">No acts logged yet.</p>';
+      ${a.correction ? '' : `<button class="ghost" data-correct="${esc(a.id)}">Correct</button>`}
+    </div>`).join('') : '<p class="muted">None.</p>';
 }
 
 async function post(action, body, errId) {
@@ -456,11 +455,11 @@ function render(d) {
   const openForms = [...document.querySelectorAll('[data-correct-form]')].filter((f) => !f.hidden).map((f) => f.dataset.correctForm);
   const o = d.ooda;
   const reasonText = Object.fromEntries((o.reasons || []).map((r) => [r.id, r.means]));
-  const RUNGS = { 1: 'ask me', 2: 'ask with a default', 3: 'decide and tell me' };
+  const RUNGS = { 1: '1 ask', 2: '2 ask with default', 3: '3 act and report' };
   $('questions').innerHTML = d.questions.length ? d.questions.map((q) => {
     const cls = q.class && o.classes[q.class];
-    const why = q.why_asked?.reasons?.length ? `<div class="why">Why you: ${q.why_asked.reasons.map((r) => esc(reasonText[r] || r)).join('; ')}${cls ? ` · ${esc(q.class)} is on rung ${cls.rung} of ${cls.ceiling}` : q.class ? ` · ${esc(q.class)}` : ''}</div>` : '';
-    const next = cls ? `<label>Next time for ${esc(q.class)}: <select data-auto="${esc(q.id)}"><option value="">no change</option>${[1, 2, 3].filter((r) => r <= cls.ceiling).map((r) => `<option value="${r}">${RUNGS[r]}</option>`).join('')}</select></label>` : '';
+    const why = q.why_asked?.reasons?.length ? `<div class="why">reasons: ${q.why_asked.reasons.map((r) => esc(reasonText[r] || r)).join('; ')}${cls ? ` · ${esc(q.class)} is on rung ${cls.rung} of ${cls.ceiling}` : q.class ? ` · ${esc(q.class)}` : ''}</div>` : '';
+    const next = cls ? `<label>${esc(q.class)} rung: <select data-auto="${esc(q.id)}"><option value="">no change</option>${[1, 2, 3].filter((r) => r <= cls.ceiling).map((r) => `<option value="${r}">${RUNGS[r]}</option>`).join('')}</select></label>` : '';
     return `
     <div class="card">
       <span class="badge ${q.kind === 'one-way-door' ? 'high' : q.kind === 'trust' ? 'good' : 'medium'}">${esc(q.kind)}</span>
@@ -468,16 +467,16 @@ function render(d) {
       <p><b>${esc(q.question)}</b></p>
       ${why}
       ${q.context ? `<p class="muted">${esc(q.context)}</p>` : ''}
-      ${q.recommendation ? `<p>Recommendation${q.confidence != null ? ` (${Math.round(q.confidence * 100)}% sure)` : ''}: ${esc(q.recommendation)} <button class="opt" data-fill="${esc(q.id)}" data-val="${esc(q.recommendation)}" data-match="1">use this</button></p>` : ''}
+      ${q.recommendation ? `<p>Recommendation${q.confidence != null ? ` (${Math.round(q.confidence * 100)}%)` : ''}: ${esc(q.recommendation)} <button class="opt" data-fill="${esc(q.id)}" data-val="${esc(q.recommendation)}" data-match="1">use</button></p>` : ''}
       ${q.evidence?.length ? `<p class="muted small">Evidence: ${q.evidence.map(esc).join(', ')}</p>` : ''}
       ${q.blocks?.length ? `<p class="muted">Blocks ${q.blocks.map(esc).join(', ')}</p>` : ''}
-      ${q.default ? `<p class="muted">Default if unanswered: ${esc(q.default)}</p>` : ''}
+      ${q.default ? `<p class="muted">Default: ${esc(q.default)}</p>` : ''}
       ${(q.options || []).map((x) => `<button class="opt" data-fill="${esc(q.id)}" data-val="${esc(x)}">${esc(x)}</button>`).join('')}
-      <textarea data-q="${esc(q.id)}" placeholder="Your answer">${esc(drafts[q.id] || '')}</textarea>
-      <div class="row-inline">${next}<input type="text" data-rule="${esc(q.id)}" placeholder="Make it a standing rule (optional)"></div>
+      <textarea data-q="${esc(q.id)}" placeholder="Answer">${esc(drafts[q.id] || '')}</textarea>
+      <div class="row-inline">${next}<input type="text" data-rule="${esc(q.id)}" placeholder="Standing rule (optional)"></div>
       <button data-answer="${esc(q.id)}">Answer</button> <span class="err" id="e-${esc(q.id)}"></span>
     </div>`;
-  }).join('') : '<p class="muted">Nothing needs you right now.</p>';
+  }).join('') : '<p class="muted">None.</p>';
 
   renderOoda(o);
   for (const [sel, v] of kept) { const el = document.querySelector(sel); if (el) el.value = v; }
@@ -486,16 +485,16 @@ function render(d) {
 
   $('findings').innerHTML = m.findings.length ? m.findings.map((f) => `
     <div class="card"><span class="badge ${f.severity}">${f.severity}</span><b>${esc(f.kind)}</b> · <code>${esc(f.subject)}</code>
-    <div class="muted">${esc(f.detail)}</div><div>→ ${esc(f.suggestion)}</div></div>`).join('') : '<p class="muted">None found.</p>';
+    <div class="muted">${esc(f.detail)}</div><div>→ ${esc(f.suggestion)}</div></div>`).join('') : '<p class="muted">None.</p>';
 
   bars($('phase-time'), m.phase_hours, (v) => `${v}h`);
   bars($('phase-cost'), m.phase_usd, (v) => `$${v}`);
 
   $('gates').innerHTML = '<tr><th>Gate</th><th>Runs</th><th>Median</th><th>Slowest</th><th>Fail rate</th></tr>' + (m.gates.gates.length
     ? m.gates.gates.map((g) => `<tr><td>${esc(g.gate)}${m.gates.flaky_gates.some((f) => f.gate === g.gate) ? ' <span class="badge high">flaky</span>' : ''}</td><td>${g.runs}</td><td>${dur(g.median_seconds)}</td><td>${dur(g.max_seconds)}</td><td>${Math.round(g.fail_rate * 100)}%</td></tr>`).join('')
-    : '<tr><td colspan="5" class="muted">No gate runs recorded. Run gates through <code>devteam.mjs gate</code>.</td></tr>');
-  $('flaky').innerHTML = m.gates.flaky_tests.length ? m.gates.flaky_tests.map((t) => `<div class="card"><code>${esc(t.name)}</code> <span class="muted">${t.times}×</span></div>`).join('') : '<p class="muted">None seen.</p>';
-  $('slow').innerHTML = m.gates.slowest_tests.length ? m.gates.slowest_tests.map((t) => `<div class="card"><code>${esc(t.name)}</code> <span class="muted">${t.median_seconds}s</span></div>`).join('') : '<p class="muted">No test reports yet (pass --junit).</p>';
+    : '<tr><td colspan="5" class="muted">None. Record runs with <code>devteam.mjs gate</code>.</td></tr>');
+  $('flaky').innerHTML = m.gates.flaky_tests.length ? m.gates.flaky_tests.map((t) => `<div class="card"><code>${esc(t.name)}</code> <span class="muted">${t.times}×</span></div>`).join('') : '<p class="muted">None.</p>';
+  $('slow').innerHTML = m.gates.slowest_tests.length ? m.gates.slowest_tests.map((t) => `<div class="card"><code>${esc(t.name)}</code> <span class="muted">${t.median_seconds}s</span></div>`).join('') : '<p class="muted">None. Pass <code>--junit</code> to <code>gate</code>.</p>';
 
   $('messages').innerHTML = d.open_messages.length ? d.open_messages.map((x) => `
     <div class="card"><span class="badge medium">${esc(x.kind)}</span>${esc(x.actor)} → ${esc(x.to)} <span class="muted">${esc(x.id)}</span><div>${esc(x.summary)}</div></div>`).join('') : '<p class="muted">None.</p>';
