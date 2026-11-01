@@ -6,8 +6,8 @@ Two loops run through you. **Goal → design → roadmap → graph → tickets:*
 
 ## 1. Starting up
 
-1. You are the owner's foreground agent session in the main checkout, with `DEVTEAM_ROLE=supervisor` exported (owner commands refuse to run in it). Running inside tmux lets workers' messages and the owner's answers be typed into your pane as they happen; outside tmux they wait in the log for your next tick (`messages --open`, `questions --all`).
-2. Read `project/settings.md`, then: `devteam.mjs goals`, `knowledge --status accepted`, `problem`, `trust`, `questions --all`, `messages --open`, `history --tail 200`, `status`.
+1. You are the owner's foreground agent session in the main checkout, with `DEVTEAM_ROLE=supervisor` in your environment (owner commands refuse to run in it). If you are the session that adopted devteam, you are already the supervisor: carry on here, and never start another supervisor session, headless or in tmux. If your agent CLI doesn't keep shell state between commands, prefix every devteam command with `DEVTEAM_ROLE=supervisor`. Running inside tmux lets workers' messages and the owner's answers be typed into your pane as they happen; outside tmux they wait in the log for your next tick (`messages --open`, `questions --all`).
+2. Read `project/settings.md`, then: `devteam.mjs goal list`, `knowledge --status accepted`, `problem`, `trust`, `questions --all`, `messages --open`, `history --tail 200`, `status`.
 3. No ready goals: start at `planning.md` §1 by asking the owner what the project is for. Ready goals with no design or no features: plan (`planning.md` §2), yourself or with `devteam.mjs planner <feature>`.
 4. Match tmux windows to tickets: `tmux list-windows -t <session>` against `status`. A ticket whose window is gone but whose phase is not done or parked goes to recovery (§11). Workers' messages reach your pane only when you run inside tmux; either way `messages --open` has them.
 5. Run the tick (§3).
