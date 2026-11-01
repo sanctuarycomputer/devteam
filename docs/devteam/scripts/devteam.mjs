@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// devteam: the one script. Node 20+, built-ins only.
+// devteam: the one script. Node 18+, built-ins only.
 //   node docs/devteam/scripts/devteam.mjs <command> [args]      (`help` lists the commands)
 //
 // Everything structured about a project is a line in the log (schema/log.schema.json), folded by
@@ -18,6 +18,16 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // ===== 1. helpers =====
+
+// Projects pin their own Node (asdf, nvm), and the dashboard reruns this file with that Node, so
+// say plainly when it is too old instead of failing mid-command. Use nothing newer than Node 18.
+if (Number(process.versions.node.split('.')[0]) < 18) {
+  process.stderr.write(`devteam: needs Node 18 or newer; this is ${process.version} (check the project's .tool-versions, .nvmrc or .node-version)\n`);
+  process.exit(1);
+}
+
+// Object.groupBy is Node 21+.
+const groupBy = (xs, key) => { const o = {}; for (const x of xs) (o[key(x)] ??= []).push(x); return o; };
 
 process.stdout.on('error', (e) => {
   if (e.code === 'EPIPE') process.exit(0);
@@ -794,6 +804,8 @@ const projectFileText = (rel) => readText(path.join(projectDir, rel)) ?? (projec
 const tickets = () => new Map(logObjects('ticket').map((t) => [t.id, t]));
 const features = () => new Map(logObjects('feature').map((f) => [f.id, f]));
 const isActive = (t) => !t.superseded_by;
+// A held ticket is one the supervisor chose not to schedule yet (`ticket set <id> --json '{"held": "why"}'`; null releases it).
+const isHeld = (t) => typeof t.held === 'string' && t.held.trim() !== '';
 const activeTickets = () => new Map([...tickets()].filter(([, t]) => isActive(t)));
 const weight = (t) => (t.size === 'M' ? 2 : 1);
 
@@ -938,16 +950,13 @@ function deriveStatus() {
     const w = workerState(t.id);
     return {
       id: t.id, title: t.title, feature: t.feature, component: t.component, kind: t.kind, size: t.size, risk: t.risk, serves: t.serves ?? [], depends_on: t.depends_on ?? [],
-      stage, merge_sha: mergeSha, branch, deps_merged: depsMerged,
+      stage, merge_sha: mergeSha, branch, deps_merged: depsMerged, held: isHeld(t) ? t.held : null,
       phase: w?.phase ?? null, task: w?.task ?? null, note: w?.note ?? null, minutes_silent: w?.minutes_silent ?? null, usd: w?.usd ?? null,
     };
   });
 }
 
 const onPlanBranch = () => (git(['rev-parse', '--abbrev-ref', 'HEAD']) ?? '').startsWith('plan/');
-
-// Object.groupBy is Node 21+; the kit supports Node 20.
-const groupBy = (xs, key) => xs.reduce((acc, x) => { (acc[key(x)] ??= []).push(x); return acc; }, {});
 
 function cmdValidate() {
   const ts = tickets();
@@ -1055,17 +1064,20 @@ function cmdValidate() {
 function cmdReady() {
   const ts = tickets();
   const rows = [];
+  const held = [];
   for (const t of ts.values()) {
     if (!isActive(t) || mergeShaFor(t.id) || activeWorker(t.id)) continue;
     const depsMerged = (t.depends_on ?? []).every((d) => mergeShaFor(d));
+    if (isHeld(t)) { if (depsMerged || flags['plan-ahead']) held.push({ id: t.id, held: t.held }); continue; }
     if (depsMerged || flags['plan-ahead']) rows.push({ id: t.id, component: t.component, kind: t.kind, size: t.size, risk: t.risk, mode: depsMerged ? 'build' : 'plan-ahead' });
   }
   const s = loadSettings();
   const active = [...ts.keys()].filter(activeWorker);
   const perComponent = {};
   for (const id of active) perComponent[ts.get(id).component] = (perComponent[ts.get(id).component] ?? 0) + 1;
-  if (flags.json) return json({ ready: rows, active, active_per_component: perComponent, caps: { max_active_tickets: s.max_active_tickets, max_active_per_component: s.max_active_per_component } });
+  if (flags.json) return json({ ready: rows, held, active, active_per_component: perComponent, caps: { max_active_tickets: s.max_active_tickets, max_active_per_component: s.max_active_per_component } });
   out(`active workers: ${active.length}/${s.max_active_tickets}`);
+  for (const h of held) out(`held       ${h.id}  (${h.held})`);
   if (!rows.length) return out('nothing ready');
   for (const r of rows) out(`${r.mode.padEnd(10)} ${r.id}  (${r.kind}, ${r.size}, ${r.risk})${(perComponent[r.component] ?? 0) >= s.max_active_per_component ? '  (component at cap)' : ''}`);
 }
@@ -2249,12 +2261,14 @@ function collectMetrics(since) {
   for (const t of gates.flaky_tests.slice(0, 10)) add('high', 'flaky-test', t.name, `failed then passed at the same commit ${t.times} time(s)`, 'make it deterministic (time, order, shared state, network) or quarantine it with a ticket');
   for (const g of gates.gates.filter((x) => x.median_seconds >= settings.slow_gate_minutes * 60)) add('medium', 'slow-gate', g.gate, `median ${(g.median_seconds / 60).toFixed(1)} min over ${g.runs} run(s)`, 'shard it, cache dependencies, or split fast checks from slow ones');
   for (const t of gates.slowest_tests.slice(0, 5).filter((x) => x.median_seconds >= 10)) add('low', 'slow-test', t.name, `median ${t.median_seconds}s`, 'mock the slow dependency or move it to an integration suite');
+  // A share of almost nothing is noise: hotspots wait for a few hours of ticket time or a few dollars.
+  const HOTSPOT_MIN_MS = 4 * 3600000, HOTSPOT_MIN_USD = 5;
   const totalPhase = Object.values(phaseMs).reduce((a, b) => a + b, 0);
   const [topPhase, topMs] = Object.entries(phaseMs).filter(([k]) => !['done', 'parked'].includes(k)).sort((a, b) => b[1] - a[1])[0] ?? [];
-  if (phaseNow.size >= 2 && topPhase && totalPhase && topMs / totalPhase > 0.4) add('medium', 'phase-hotspot', topPhase, `${Math.round((100 * topMs) / totalPhase)}% of all ticket time`, 'look at why tickets sit here: reviews, gates, answers');
+  if (phaseNow.size >= 2 && topPhase && totalPhase >= HOTSPOT_MIN_MS && topMs / totalPhase > 0.4) add('medium', 'phase-hotspot', topPhase, `${Math.round((100 * topMs) / totalPhase)}% of all ticket time`, 'look at why tickets sit here: reviews, gates, answers');
   const totalUsd = Object.values(phaseUsd).reduce((a, b) => a + b, 0);
   const [costPhase, costUsd] = Object.entries(phaseUsd).sort((a, b) => b[1] - a[1])[0] ?? [];
-  if (phaseNow.size >= 2 && costPhase && totalUsd && costUsd / totalUsd > 0.5) add('medium', 'cost-hotspot', costPhase, `${Math.round((100 * costUsd) / totalUsd)}% of spend ($${costUsd.toFixed(2)})`, 'check context size and model choice for this phase');
+  if (phaseNow.size >= 2 && costPhase && totalUsd >= HOTSPOT_MIN_USD && costUsd / totalUsd > 0.5) add('medium', 'cost-hotspot', costPhase, `${Math.round((100 * costUsd) / totalUsd)}% of spend ($${costUsd.toFixed(2)})`, 'check context size and model choice for this phase');
   for (const [id, p] of phaseNow) {
     const h = (now - p.sinceMs) / 3600000;
     if (p.phase === 'blocked' && h >= 1) add('high', 'blocked', id, `blocked for ${h.toFixed(1)}h`, 'answer its message, re-plan, or park it');
@@ -2268,7 +2282,7 @@ function collectMetrics(since) {
   for (const q of openQs.filter((x) => now - Date.parse(x.asked_at) > grace)) add('high', 'owner-question-waiting', q.id, q.question.slice(0, 120), q.default ? 'apply its default' : 'remind the owner; it blocks work');
   if (recentQs.length >= 4 && answeredRecent / recentQs.length < 0.5) add('high', 'inbox-stalled', 'owner questions', `${answeredRecent} of ${recentQs.length} answered in 14 days`, 'remind the owner what is blocked; give defaults where the class allows; withdraw what no longer matters');
   for (const [id, n] of Object.entries(reviewPasses()).filter(([, n]) => n >= 3)) add('medium', 'review-churn', id, `${n} final review passes`, 'the ticket may be too big or under-specified; re-plan it');
-  const ready = [...ts.values()].filter((t) => isActive(t) && !mergeShaFor(t.id) && !activeWorker(t.id) && (t.depends_on ?? []).every((d) => mergeShaFor(d)));
+  const ready = [...ts.values()].filter((t) => isActive(t) && !isHeld(t) && !mergeShaFor(t.id) && !activeWorker(t.id) && (t.depends_on ?? []).every((d) => mergeShaFor(d)));
   const active = [...ts.keys()].filter(activeWorker).length;
   if (ready.length && active < settings.max_active_tickets) add('medium', 'idle-capacity', `${ready.length} ready`, `${active}/${settings.max_active_tickets} workers active`, `make workers for: ${ready.slice(0, 5).map((t) => t.id).join(', ')}`);
   if (m.escaped_defects) add('high', 'escaped-defects', `${m.escaped_defects}`, 'defects found after merge', 'retro: which review or gate should have caught each one');
@@ -2314,7 +2328,7 @@ function collectProgress() {
       id: t.id, title: t.title, feature: t.feature, component: t.component, kind: t.kind, size: t.size, risk: t.risk, weight: weight(t), serves: t.serves ?? [], depends_on: t.depends_on ?? [],
       wave: level.has(t.id) ? level.get(t.id) + 1 : null, added_at: t.created_at,
       merged_at: sha ? new Date(mergedAt(t.id)).toISOString() : null, released_in: sha ? releasedIn(sha) : null, target_release: targets[0] ?? null,
-      stage: st?.stage ?? 'planned', phase: st?.phase ?? null, task: st?.task ?? null,
+      stage: st?.stage ?? 'planned', phase: st?.phase ?? null, task: st?.task ?? null, held: isHeld(t) ? t.held : null,
     };
   });
   return { now: nowIso(), features: [...new Set(items.map((t) => t.feature))], stories, tickets: items };

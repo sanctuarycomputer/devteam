@@ -1,0 +1,19 @@
+name: test
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  kit:
+    # Projects run the kit on whatever Node they pin, so test every supported major.
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [18, 20, 22, 24]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: node --test

@@ -278,6 +278,13 @@
               "null"
             ]
           },
+          "held": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the supervisor is not scheduling this ticket yet; null releases it. A held ticket is left out of `ready` and the idle-capacity finding."
+          },
           "notes": {
             "type": "string"
           }
@@ -957,6 +964,7 @@
           "done_when",
           "one_way_doors",
           "superseded_by",
+          "held",
           "notes"
         ],
         "supervisor": [
@@ -971,6 +979,7 @@
           "done_when",
           "one_way_doors",
           "superseded_by",
+          "held",
           "notes"
         ],
         "owner": [
@@ -985,6 +994,7 @@
           "done_when",
           "one_way_doors",
           "superseded_by",
+          "held",
           "notes"
         ]
       },

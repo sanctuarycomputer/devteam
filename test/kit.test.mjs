@@ -125,6 +125,18 @@ test('devteam kit', async (t) => {
     assert.match(must(['ready']), /bill-01-card/);
   });
 
+  await t.test('a held ticket is left out of ready and idle capacity until released', () => {
+    must(['ticket', 'set', 'bill-01-card', '--json', '{"held": "may duplicate the existing CI"}'], { role: 'sup' });
+    const r = json(must(['ready', '--json']));
+    assert.deepEqual(r.ready.map((x) => x.id), [], 'held is not ready');
+    assert.deepEqual(r.held, [{ id: 'bill-01-card', held: 'may duplicate the existing CI' }]);
+    assert.ok(!json(must(['metrics', '--json'])).findings.some((f) => f.kind === 'idle-capacity'), 'no idle-capacity finding for a held ticket');
+    assert.equal(json(must(['dashboard-data'])).progress.tickets.find((x) => x.id === 'bill-01-card').held, 'may duplicate the existing CI');
+    must(['ticket', 'set', 'bill-01-card', '--json', '{"held": null}'], { role: 'sup' });
+    assert.match(must(['ready']), /bill-01-card/);
+    must(['validate']);
+  });
+
   await t.test('worker: phases, gates, approvals, check-ticket at an exact head', () => {
     git(['worktree', 'add', '-q', '-b', 'ticket/bill-01-card', wt('bill-01-card'), 'origin/main']);
     const w = { cwd: wt('bill-01-card'), role: 'worker' };
