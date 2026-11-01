@@ -162,16 +162,56 @@ const SETTINGS_DEFAULTS = {
   research_every_days: 7,
   slow_gate_minutes: 10,
 };
+// Settings that are the owner's to change (constitution.md, owner_only): a PR of any kind that
+// changes one merges only with --approved naming an answered question of that class. Gate
+// commands and what every gate checkout is seeded with decide what "passes"; the agent command
+// and deny rules decide what workers may do; upstream_repo is what a standing sync approval trusts.
+const OWNER_SETTINGS = {
+  gates: 'gate-change', worktree_setup: 'gate-change', worktree_files: 'gate-change',
+  autonomy_ceilings: 'governance-edit', agent_command: 'governance-edit', resume_command: 'governance-edit', worker_denied_commands: 'governance-edit',
+  forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', upstream_repo: 'governance-edit',
+  release: 'release-production',
+};
+const canonical = (v) => (Array.isArray(v) ? `[${v.map(canonical).join(',')}]` : v && typeof v === 'object' ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(',')}}` : JSON.stringify(v));
+function settingsAt(ref) {
+  const text = git(['show', `${ref}:${projectRel}/settings.md`]);
+  const m = text?.match(/```json devteam\s*\n([\s\S]*?)\n```/);
+  if (!m) return { ...SETTINGS_DEFAULTS };
+  try { return { ...SETTINGS_DEFAULTS, ...JSON.parse(m[1]) }; } catch { return null; }
+}
+// The owner's settings a commit changes against a base: [{ key, cls }], or null if unreadable.
+function ownerSettingsChanged(base, head) {
+  const a = settingsAt(base), b = settingsAt(head);
+  if (!a || !b) return null;
+  return Object.entries(OWNER_SETTINGS).filter(([k]) => canonical(a[k]) !== canonical(b[k])).map(([key, cls]) => ({ key, cls }));
+}
 let settingsCache;
 function loadSettings() {
   if (settingsCache) return settingsCache;
   const m = readText(path.join(projectDir, 'settings.md'))?.match(/```json devteam\s*\n([\s\S]*?)\n```/);
-  if (!m) return (settingsCache = { ...SETTINGS_DEFAULTS });
-  try {
-    return (settingsCache = { ...SETTINGS_DEFAULTS, ...JSON.parse(m[1]) });
-  } catch (e) {
-    die(`settings.md: the json devteam block is not valid JSON: ${e.message}`);
+  if (!m) settingsCache = { ...SETTINGS_DEFAULTS };
+  else {
+    try {
+      settingsCache = { ...SETTINGS_DEFAULTS, ...JSON.parse(m[1]) };
+    } catch (e) {
+      die(`settings.md: the json devteam block is not valid JSON: ${e.message}`);
+    }
   }
+  // The owner's settings count only as they are on main: an edit in a checkout's working tree (or
+  // on a branch) takes effect once it lands through a PR that carried the owner's answer. Main is
+  // the remote's default branch, so a local main_branch edit can't move it. Before settings.md
+  // first lands on main (adoption), the working tree is all there is.
+  if (projectInRepo) {
+    const head = git(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
+    const ref = [head, `origin/${settingsCache.main_branch}`, settingsCache.main_branch].find((r) => r && git(['cat-file', '-e', `${r}:${projectRel}/settings.md`]) !== null);
+    const onMain = ref ? settingsAt(ref) : null;
+    if (onMain) {
+      const local = Object.keys(OWNER_SETTINGS).filter((k) => canonical(settingsCache[k]) !== canonical(onMain[k]));
+      for (const k of local) settingsCache[k] = onMain[k];
+      if (local.length && !process.env.DEVTEAM_QUIET_SETTINGS) { process.env.DEVTEAM_QUIET_SETTINGS = '1'; warn(`settings.md here changes ${local.join(', ')}; owner settings apply as they are on ${ref} until a PR with the owner's answer lands them`); }
+    }
+  }
+  return settingsCache;
 }
 
 // The trust ladder and its tables live in governance/constitution.md, in a ```json devteam block.
@@ -1479,6 +1519,21 @@ function cmdMerge() {
   // (classes governance-edit, process-edit, gate-change); project/ files are the supervisor's.
   let approved = flagStr('approved') ?? null;
   let standing = null;
+  // Owner-only settings, on every kind of PR (a ticket, a plan or a chore).
+  {
+    const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
+    const changed = base ? ownerSettingsChanged(base, sha) : [];
+    if (changed === null) fails.push(`${projectRel}/settings.md: the json devteam block is not valid JSON at the head`);
+    else if (changed.length) {
+      const classes = [...new Set(changed.map((c) => c.cls))];
+      const what = changed.map((c) => `${c.key} (${c.cls})`).join(', ');
+      if (!approved) fails.push(`changes owner settings: ${what}; the owner's answer is needed: --approved <qid> of class ${classes.join(' or ')}`);
+      else {
+        const q = ownerAnswer(approved, 'merge --approved');
+        if (!classes.includes(q.class)) fails.push(`${approved} is a ${q.class ?? 'classless'} question; changing ${what} needs an answered ${classes.join(' or ')} question`);
+      }
+    }
+  }
   if (chore) {
     const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
     const kit = base ? changedFiles(base, sha).filter((f) => !f.startsWith(`${projectRel}/`)) : [];
@@ -1487,10 +1542,10 @@ function cmdMerge() {
       if (r.rule) { standing = r; out(`kit files match upstream ${r.tag} exactly; approved by the owner's standing rule ${r.rule.id}`); } else if (r.problem) fails.push(r.problem);
     }
     if (kit.length && !approved && !standing) fails.push(`touches files outside project/ (${kit.slice(0, 6).join(', ')}${kit.length > 6 ? ', …' : ''}); the owner's answer is needed: merge --chore ${chore} --approved <qid>`);
-    if (approved) {
-      ownerAnswer(approved, 'merge --approved');
-      if (logObjects('act').some((a) => a.approved_by === approved)) fails.push(`${approved} already approved an act; ask again for this one`);
-    }
+  }
+  if (approved) {
+    ownerAnswer(approved, 'merge --approved');
+    if (logObjects('act').some((a) => a.approved_by === approved)) fails.push(`${approved} already approved an act; ask again for this one`);
   }
   // Gates: the project's own commands, at the exact head, in a detached worktree.
   const gates = Object.entries(loadSettings().gates ?? {});

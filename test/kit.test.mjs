@@ -33,6 +33,13 @@ const git = (args, cwd = repo) => execFileSync('git', args, { cwd, encoding: 'ut
 const write = (file, text) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, text); };
 const review = (reviewer, sha) => `- Reviewer: ${reviewer}\n\n| Id | Severity | Rule | Where | Finding | Disposition |\n|---|---|---|---|---|---|\n\nVerdict: APPROVE ${sha}\n`;
 const json = (s) => JSON.parse(s);
+// Owner settings apply as they are on main, so a test that changes them lands the change there.
+const landSettings = (edit) => {
+  const f = path.join(repo, 'docs/devteam/project/settings.md');
+  fs.writeFileSync(f, edit(fs.readFileSync(f, 'utf8')));
+  git(['commit', '-qm', 'settings', '--', 'docs/devteam/project/settings.md']);
+  git(['push', '-q', 'origin', 'HEAD:main']);
+};
 const body = path.join(tmp, 'body.md');
 write(body, '## One-way doors\n\nNone.\n');
 
@@ -233,8 +240,7 @@ test('devteam kit', async (t) => {
   });
 
   await t.test('merge --dry-run runs the gates at the head as the supervisor', () => {
-    const settings = path.join(repo, 'docs/devteam/project/settings.md');
-    fs.writeFileSync(settings, fs.readFileSync(settings, 'utf8').replace('"gates": {}', '"gates": { "test": "test -f billing/card.js && test -f config/master.key && test -f .setup-ran", "lint": { "cmd": "true" }, "web": { "cmd": "false", "paths": ["web/**"] } }, "worktree_files": ["config/master.key"], "worktree_setup": "touch .setup-ran"'));
+    landSettings((txt) => txt.replace('"gates": {}', '"gates": { "test": "test -f billing/card.js && test -f config/master.key && test -f .setup-ran", "lint": { "cmd": "true" }, "web": { "cmd": "false", "paths": ["web/**"] } }, "worktree_files": ["config/master.key"], "worktree_setup": "touch .setup-ran"'));
     write(path.join(repo, 'config/master.key'), 'secret\n');
     fs.appendFileSync(path.join(repo, '.gitignore'), 'config/master.key\n');
     must(['merge', 'bill-01-card', '--dry-run', '--title', 'bill-01-card: card capture', '--body-file', body], { role: 'sup' });
@@ -242,12 +248,20 @@ test('devteam kit', async (t) => {
     // web is skipped: the PR changes nothing under web/
     assert.deepEqual(gates.map((g) => g.gate).sort(), ['lint', 'test']);
     assert.ok(gates.every((g) => g.ok && g.sha === H2));
-    fs.writeFileSync(settings, fs.readFileSync(settings, 'utf8').replace('"test": "test -f billing/card.js && test -f config/master.key && test -f .setup-ran"', '"test": "false"'));
+    // a gate edited in the main checkout but not landed doesn't count: owner settings apply as on main
+    const sf = path.join(repo, 'docs/devteam/project/settings.md');
+    const landed = fs.readFileSync(sf, 'utf8');
+    fs.writeFileSync(sf, landed.replace('"test": "test -f billing/card.js && test -f config/master.key && test -f .setup-ran"', '"test": "true"'));
+    const local = dt(['merge', 'bill-01-card', '--dry-run', '--title', 'bill-01-card: card capture', '--body-file', body], { role: 'sup' });
+    assert.equal(local.status, 0);
+    assert.match(local.err, /owner settings apply as they are on origin\/main/);
+    fs.writeFileSync(sf, landed);
+    landSettings((txt) => txt.replace('"test": "test -f billing/card.js && test -f config/master.key && test -f .setup-ran"', '"test": "false"'));
     const failed = dt(['merge', 'bill-01-card', '--dry-run', '--title', 'bill-01-card: card capture', '--body-file', body], { role: 'sup' });
     assert.notEqual(failed.status, 0);
     assert.match(failed.out, /gate test failed/);
     assert.ok(!fs.readdirSync(path.join(repo, '.worktrees')).some((d) => d.startsWith('tmp-')), 'no temp worktree left behind');
-    fs.writeFileSync(settings, fs.readFileSync(settings, 'utf8').replace('"test": "false"', '"test": "test -f billing/card.js && test -f config/master.key && test -f .setup-ran"'));
+    landSettings((txt) => txt.replace('"test": "false"', '"test": "test -f billing/card.js && test -f config/master.key && test -f .setup-ran"'));
     must(['phase', 'supervisor', '--usd', '3.5'], { role: 'sup' });
   });
 
@@ -418,6 +432,38 @@ test('devteam kit', async (t) => {
     git(['worktree', 'remove', '--force', wt('chore-rules')]);
   });
 
+  await t.test('a PR of any kind that changes owner settings needs an answered question of that class', () => {
+    const setTo = (w, fn) => {
+      const f = path.join(w, 'docs/devteam/project/settings.md');
+      const txt = fs.readFileSync(f, 'utf8');
+      const m = txt.match(/```json devteam\s*\n([\s\S]*?)\n```/);
+      const j = JSON.parse(m[1]);
+      fn(j);
+      fs.writeFileSync(f, txt.replace(m[1], JSON.stringify(j, null, 2)));
+    };
+    // a chore that only changes the supervisor's own settings needs no answer
+    git(['worktree', 'add', '-q', '-b', 'chore-caps', wt('caps'), 'origin/main']);
+    setTo(wt('caps'), (j) => { j.max_active_tickets = 3; });
+    git(['commit', '-qam', 'caps'], wt('caps'));
+    git(['push', '-q', 'origin', 'chore-caps'], wt('caps'));
+    must(['merge', '--chore', 'caps', '--dry-run', '--title', 'chore-caps: fewer workers', '--body-file', body], { role: 'sup' });
+    // a gate change is the owner's, even in a chore (project/ files are otherwise the supervisor's)
+    setTo(wt('caps'), (j) => { j.gates = { ...(j.gates ?? {}), lint: 'true' }; j.upstream_repo = 'someone/fork'; });
+    git(['commit', '-qam', 'gates'], wt('caps'));
+    git(['push', '-q', 'origin', 'chore-caps'], wt('caps'));
+    const args = ['merge', '--chore', 'caps', '--dry-run', '--title', 'chore-caps: gates', '--body-file', body];
+    const r = dt(args, { role: 'sup' });
+    assert.notEqual(r.status, 0);
+    assert.match(r.out + r.err, /changes owner settings: gates \(gate-change\), upstream_repo \(governance-edit\)/);
+    const Qw = must(['ask', '--question', 'Fewer workers?', '--class', 'priority-change', '--reasons', 'below-rung', '--recommendation', 'yes'], { role: 'sup' });
+    must(['answer', Qw, 'yes']);
+    assert.match(dt([...args, '--approved', Qw], { role: 'sup' }).out, /needs an answered gate-change or governance-edit question/, 'an answer of another class does not cover it');
+    const Qgate = must(['ask', '--question', 'Add a lint gate and move upstream?', '--class', 'governance-edit', '--reasons', 'owner-only', '--recommendation', 'yes'], { role: 'sup' });
+    must(['answer', Qgate, 'yes']);
+    must([...args, '--approved', Qgate], { role: 'sup' });
+    git(['worktree', 'remove', '--force', wt('caps')]);
+  });
+
   await t.test('a standing owner rule approves upstream syncs, only when the kit files are upstream\'s verbatim', () => {
     // an upstream with a tagged release that changes one kit file
     const up = path.join(tmp, 'upstream');
@@ -430,8 +476,7 @@ test('devteam kit', async (t) => {
     git(['add', '-A'], up);
     git(['commit', '-qm', 'release'], up);
     git(['tag', 'v0.3.0'], up);
-    const settings = path.join(repo, 'docs/devteam/project/settings.md');
-    fs.writeFileSync(settings, fs.readFileSync(settings, 'utf8').replace('"gates": {', `"upstream_repo": ${JSON.stringify(up)}, "gates": {`));
+    landSettings((txt) => txt.replace('"gates": {', `"upstream_repo": ${JSON.stringify(up)}, "gates": {`));
     // the sync chore copies that file verbatim (the dashed slug older kits needed resolves to the tag)
     git(['worktree', 'add', '-q', '-b', 'chore-devteam-sync-v0-3-0', wt('sync'), 'origin/main']);
     fs.copyFileSync(path.join(up, 'docs/devteam/governance/quality.md'), path.join(wt('sync'), 'docs/devteam/governance/quality.md'));
@@ -470,8 +515,7 @@ test('devteam kit', async (t) => {
   });
 
   await t.test('forge git: merge lands the exact verified head on main without gh', () => {
-    const settings = path.join(repo, 'docs/devteam/project/settings.md');
-    fs.writeFileSync(settings, fs.readFileSync(settings, 'utf8').replace('"gates": {', '"forge": "git", "gates": {'));
+    landSettings((txt) => txt.replace('"gates": {', '"forge": "git", "gates": {'));
     assert.match(dt(['merge', 'bill-01-card'], { role: 'sup' }).err, /needs the PR text/);
     write(path.join(repo, 'docs/devteam/run/pr/ticket/bill-01-card.md'), `# bill-01-card: card capture\n\n${fs.readFileSync(body, 'utf8')}`);
     must(['merge', 'bill-01-card'], { role: 'sup' });

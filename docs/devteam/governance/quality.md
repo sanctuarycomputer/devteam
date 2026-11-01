@@ -101,6 +101,8 @@ merge --chore <slug>       a chore PR (log, retro, design, architecture): the lo
 
 `--dry-run` runs every check and gate and stops before the merge.
 
+Any of the three that changes a setting the owner owns needs `--approved <qid>`, an answered question of that class: `gates`, `worktree_setup` and `worktree_files` (`gate-change`: they decide what a gate run sees); `autonomy_ceilings`, `agent_command`, `resume_command`, `worker_denied_commands`, `forge`, `main_branch`, `merge_method` and `upstream_repo` (`governance-edit`); `release` (`release-production`). The rest of `project/settings.md` (caps, timings, components) is the supervisor's.
+
 With no forge CLI (no `gh`, a self-hosted git remote), set `forge: "git"`. the PR is a file, `run/pr/<branch>.md` (a `# <title>` line, then the body; or `--title` and `--body-file`). `merge` checks it as it would a PR, merges the exact verified sha onto origin's main with `--no-ff`, and pushes. If main moved, the push fails, which is the same guard as `--match-head-commit`.
 
 The head must be up to date with `main`. A head that moves after the request is a new request. The supervisor still reads the diff: `merge` proves the shape, the supervisor judges the content.
