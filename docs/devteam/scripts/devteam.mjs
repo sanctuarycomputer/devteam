@@ -2496,6 +2496,13 @@ function cmdPhase() {
   if (!changed && !stale) return out(`phase ${to} (unchanged)`);
   appendLog({ type: 'phase', from: prev?.to ?? null, to, task, note: flagStr('note')?.slice(0, 280), sha: git(['rev-parse', 'HEAD']) ?? undefined, ...cost }, id);
   out(`phase ${to}${task ? ` ${task}` : ''}`);
+  // Waiting with nothing asked looks the same as waiting with a request answered: say so.
+  if (['awaiting-word', 'blocked'].includes(to)) {
+    const msgs = logObjects('message');
+    const replied = new Set(msgs.map((m) => m.re).filter(Boolean));
+    if (!msgs.some((m) => m.created_by === id && m.to === 'supervisor' && !replied.has(m.id) && !['info', 'ruling', 'answer'].includes(m.kind)))
+      warn(`${to} with no open request to the supervisor: send one (--kind review-request for approve-spec, approve-plan or the stage word; merge-request at the end; blocked), since info expects no reply`);
+  }
 }
 
 // gate <name> [--junit report.xml] -- <command…>: run a gate and record its time, result and tests.

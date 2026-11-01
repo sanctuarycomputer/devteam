@@ -133,6 +133,9 @@ test('devteam kit', async (t) => {
     must(['phase', 'build', '--task', 'T1', '--usd', '2'], w);
     assert.equal(json(must(['log', '--type', 'phase', '--by', 'bill-01-card', '--json'])).length, 2, 'an unchanged phase within 15 min is not written');
     assert.doesNotMatch(must(['ready']), /bill-01/, 'a ticket with an active worker is not ready');
+    assert.match(dt(['phase', 'awaiting-word'], w).err, /no open request/, 'waiting with nothing asked warns');
+    must(['send', 'supervisor', 'spec and plan reviewed; approve please', '--kind', 'review-request'], w);
+    assert.doesNotMatch(dt(['phase', 'awaiting-word', '--note', 'asked'], w).err, /no open request/);
     must(['gate', 'test', '--', 'true'], w);
     assert.notEqual(dt(['gate', 'lint', '--', 'false'], w).status, 0, 'gate passes the exit status through');
     must(['act', '--class', 'approve-spec', '--refs', 'bill-01-card', '--', 'spec ok'], { role: 'sup' });

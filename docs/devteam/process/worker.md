@@ -27,9 +27,9 @@ You are a worker: one session bound to one ticket, from spec to merge, run with 
 
 | Stage | Superpowers skill | devteam adds |
 |---|---|---|
-| spec | `brainstorming` | save to `project/tickets/<id>/spec.md` (restate the done-whens as acceptance checks; contracts provided and consumed; edge cases; out of scope); review `reviews/spec-1.md`; the supervisor logs `approve-spec` |
-| plan | `writing-plans` | save to `project/tickets/<id>/plan.md`; every task's files inside `touches`; review `reviews/plan-1.md`; `approve-plan` |
-| contract (if you provide one) | | commit the contract change first, alone, with its version bumped and a fake; the supervisor reviews it and gives the stage word before any build task |
+| spec | `brainstorming` | save to `project/tickets/<id>/spec.md` (restate the done-whens as acceptance checks; contracts provided and consumed; edge cases; out of scope); review `reviews/spec-1.md`; ask for `approve-spec` with a `review-request` message |
+| plan | `writing-plans` | save to `project/tickets/<id>/plan.md`; every task's files inside `touches`; review `reviews/plan-1.md`; ask for `approve-plan` the same way |
+| contract (if you provide one) | | commit the contract change first, alone, with its version bumped and a fake; ask for the stage word with a `review-request`; the supervisor reviews it and gives the word before any build task |
 | build, task by task | `subagent-driven-development` or `executing-plans`, with `test-driven-development` | build starts only when every `depends_on` is merged; run the component's gates through `devteam.mjs gate` (§6); a review record per task, `reviews/task-<n>.md` |
 | debugging | `systematic-debugging` | design problems go to the supervisor as messages, not into code |
 | verification | `verification-before-completion` | `project/tickets/<id>/verification.md`: a table with a row per done-when, the exact command and its result, at a named commit; anything that can't run here is marked deferred to beta with the reason |
@@ -61,7 +61,7 @@ The supervisor turns recurring observations into lessons, and accepted lessons r
 
 ## 7. Talking to the supervisor
 
-`devteam.mjs send supervisor "<one line>" --kind <design-change|merge-request|review-request|blocked|info>`. The point first, your recommendation, detail in a file by path. The line is logged and, when the supervisor runs inside tmux, typed into its pane; otherwise it reads it on its next tick. Replies arrive in your pane as `[devteam ruling m-… from supervisor] …`; `devteam.mjs messages` lists them after a restart. You never ask the owner: say what you need from them in a `blocked` or `design-change` message; whatever the supervisor can't rule on within its trust, it asks the owner, citing your message. Copy every ruling and answer that affects your ticket into your spec's or plan's Rulings section, with the message id.
+`devteam.mjs send supervisor "<one line>" --kind <design-change|merge-request|review-request|blocked|info>`. The point first, your recommendation, detail in a file by path. Every kind but `info` asks for a reply and stays open until it gets one; anything you are waiting on (an approval, the stage word, a merge) is a `review-request`, `merge-request` or `blocked`, never `info`. The line is logged and, when the supervisor runs inside tmux, typed into its pane; otherwise it reads it on its next tick. Replies arrive in your pane as `[devteam ruling m-… from supervisor] …`; `devteam.mjs messages` lists them after a restart. You never ask the owner: say what you need from them in a `blocked` or `design-change` message; whatever the supervisor can't rule on within its trust, it asks the owner, citing your message. Copy every ruling and answer that affects your ticket into your spec's or plan's Rulings section, with the message id.
 
 ## 8. Finishing
 
