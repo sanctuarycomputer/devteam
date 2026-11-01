@@ -134,4 +134,4 @@ Due `retro_every_days` after the last one, or when a feature has fully merged si
 - A provider limit across the fleet: set sessions to continue at reset where the agent supports it.
 - Kill only a known PID, never by pattern on a shared machine.
 - After your own restart: §1 again, then message every worker to re-read its files.
-- After a merge: `git worktree remove .worktrees/<id>`, close the window. The log keeps the history.
+- After a merge: once the worker has logged `phase done` (its final spend; on a later tick if it hasn't yet), `git worktree remove .worktrees/<id>` and close the window. Closing it first loses the ticket's cost. The log keeps the history.

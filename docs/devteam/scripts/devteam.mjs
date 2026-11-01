@@ -1085,7 +1085,7 @@ function cmdStatus() {
   if (flags.json) return json({ generated_at: nowIso(), tickets: rows, reviews: reviewStats() });
   const stale = loadSettings().stale_after_minutes;
   for (const r of rows) {
-    const waiting = ['awaiting-word', 'blocked'].includes(r.phase);
+    const waiting = ['awaiting-word', 'blocked'].includes(r.phase) && !r.merge_sha;
     const isStale = r.minutes_silent > stale && !waiting && !['done', 'parked'].includes(r.phase) && !r.merge_sha;
     out(`${r.stage.padEnd(18)} ${r.id}${r.phase ? `  [${r.phase}${r.task ? ` ${r.task}` : ''}, ${r.minutes_silent}m${isStale ? ' STALE' : waiting && r.minutes_silent > stale ? ' WAITING ON SUPERVISOR' : ''}]` : ''}`);
   }
