@@ -1364,7 +1364,15 @@ function cmdMerge() {
   const dry = !!flags['dry-run'];
   const branch = plan ? `plan/${plan}` : chore ? `chore-${chore}` : id ? `ticket/${id}` : die('usage: merge <ticket-id> | merge --plan <feature> | merge --chore <slug>   [--approved <qid>] [--no-gates] [--dry-run [--title t] [--body-file f]]');
   const viaGit = loadSettings().forge === 'git';
-  if (viaGit && !dry && !(flagStr('title') && flagStr('body-file'))) die('forge is git: merge needs --title and --body-file (the PR text, checked as a PR would be)');
+  if (viaGit && !flagStr('title') && !flagStr('body-file')) {
+    // The PR, with no forge: run/pr/<branch>.md, a '# <title>' line then the body (worker.md §8).
+    const f = path.join(runDir, 'pr', `${branch}.md`);
+    if (fs.existsSync(f)) {
+      const first = fs.readFileSync(f, 'utf8').split('\n')[0];
+      if (first.startsWith('# ')) { flags.title = first.slice(2).trim(); flags['body-file'] = f; }
+    }
+  }
+  if (viaGit && !dry && !(flagStr('title') && flagStr('body-file'))) die(`forge is git: merge needs the PR text, in ${path.relative(mainRoot, path.join(runDir, 'pr', `${branch}.md`))} ('# <title>' then the body) or as --title and --body-file`);
   const prJson = viaGit ? null : sh('gh', ['pr', 'view', branch, '--json', 'number,headRefOid,title,body,isDraft,mergeStateStatus,url']);
   if (prJson === null && !dry && !viaGit) die(`no open PR from ${branch} (gh pr view failed; with no forge CLI set forge: "git")`);
   git(['fetch', '--quiet', 'origin', branch]);
@@ -1992,8 +2000,8 @@ function openPr(wt, branch, title, bodyText) {
     // No forge: the PR text waits in run/pr/ for merge to check.
     const f = path.join(runDir, 'pr', `${branch}.md`);
     fs.mkdirSync(path.dirname(f), { recursive: true });
-    fs.writeFileSync(f, `${bodyText}\n\n## One-way doors\n\nNone.\n`);
-    return `forge is git; land it with: merge --chore ${branch.replace(/^chore-/, '')} --title ${JSON.stringify(title)} --body-file ${path.relative(mainRoot, f)}`;
+    fs.writeFileSync(f, `# ${title}\n\n${bodyText}\n\n## One-way doors\n\nNone.\n`);
+    return `forge is git; PR text in ${path.relative(mainRoot, f)}; land it with: merge --chore ${branch.replace(/^chore-/, '')}`;
   }
   let pr = sh('gh', ['pr', 'list', '--head', branch, '--state', 'open', '--json', 'url', '--jq', '.[0].url'], { cwd: wt });
   if (pr === null) { warn('gh is not available; open the PR by hand'); return ''; }

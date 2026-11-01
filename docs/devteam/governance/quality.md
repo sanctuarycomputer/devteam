@@ -101,7 +101,7 @@ merge --chore <slug>       a chore PR (log, retro, design, architecture): the lo
 
 `--dry-run` runs every check and gate and stops before the merge.
 
-With no forge CLI (no `gh`, a self-hosted git remote), set `forge: "git"`. `merge` then takes the PR text as `--title` and `--body-file`, checks it as it would a PR, merges the exact verified sha onto origin's main with `--no-ff`, and pushes. If main moved, the push fails, which is the same guard as `--match-head-commit`.
+With no forge CLI (no `gh`, a self-hosted git remote), set `forge: "git"`. the PR is a file, `run/pr/<branch>.md` (a `# <title>` line, then the body; or `--title` and `--body-file`). `merge` checks it as it would a PR, merges the exact verified sha onto origin's main with `--no-ff`, and pushes. If main moved, the push fails, which is the same guard as `--match-head-commit`.
 
 The head must be up to date with `main`. A head that moves after the request is a new request. The supervisor still reads the diff: `merge` proves the shape, the supervisor judges the content.
 

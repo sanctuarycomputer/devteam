@@ -66,7 +66,7 @@ The supervisor turns recurring observations into lessons, and accepted lessons r
 ## 8. Finishing
 
 1. Merge `origin/main` into your branch; resolve conflicts; re-run the gates; check every ruling is in your spec or plan.
-2. Push and open the PR: title `<ticket-id>: <your ticket's title>`; body with a short summary, how to verify, and a `## One-way doors` section that is `None.` or links the owner's answer (its `q-…` id).
+2. Push and open the PR: title `<ticket-id>: <your ticket's title>`; body with a short summary, how to verify, and a `## One-way doors` section that is `None.` or links the owner's answer (its `q-…` id). With `forge: "git"` (no forge CLI), the PR is the file `run/pr/ticket/<id>.md`: a `# <title>` line, then the body.
 3. Final review (`reviews/final-1.md`, and `final-1b.md` from another session on `risk: high`). Fix, cold-confirm, until the latest record in every track says `APPROVE` at a commit that holds at your head.
 4. `devteam.mjs check-ticket <id> --title "<pr title>" --body-file <body.md>` must pass at your pushed head.
 5. `devteam.mjs send supervisor "<id> ready to merge" --kind merge-request` (it sends your exact head). Pushing after that voids the request; ask again with the new head.
