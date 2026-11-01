@@ -1153,12 +1153,24 @@ function cmdValidate() {
   process.exit(errors.length ? 1 : 0);
 }
 
+// Why a ticket with no worker isn't waiting for one, or null if it is: the supervisor parked its
+// last worker (a ruling stopped it), or its branch already carries a final review (it waits for
+// the merge, not for a new worker).
+function notSchedulable(t) {
+  if (workerState(t.id)?.phase === 'parked') return 'parked';
+  const b = ticketBranchRef(t.id);
+  if (b && ticketReviews(t.id, { ref: b }).some((r) => r.stage === 'final')) return 'in review';
+  return null;
+}
 function cmdReady() {
   const ts = tickets();
   const rows = [];
   const held = [];
+  const waiting = [];
   for (const t of ts.values()) {
     if (!isActive(t) || mergeShaFor(t.id) || activeWorker(t.id)) continue;
+    const why = notSchedulable(t);
+    if (why) { waiting.push({ id: t.id, why }); continue; }
     const depsMerged = (t.depends_on ?? []).every((d) => mergeShaFor(d));
     if (isHeld(t)) { if (depsMerged || flags['plan-ahead']) held.push({ id: t.id, held: t.held }); continue; }
     if (depsMerged || flags['plan-ahead']) rows.push({ id: t.id, component: t.component, kind: t.kind, size: t.size, risk: t.risk, mode: depsMerged ? 'build' : 'plan-ahead' });
@@ -1167,9 +1179,10 @@ function cmdReady() {
   const active = [...ts.keys()].filter(activeWorker);
   const perComponent = {};
   for (const id of active) perComponent[ts.get(id).component] = (perComponent[ts.get(id).component] ?? 0) + 1;
-  if (flags.json) return json({ ready: rows, held, active, active_per_component: perComponent, caps: { max_active_tickets: s.max_active_tickets, max_active_per_component: s.max_active_per_component } });
+  if (flags.json) return json({ ready: rows, held, waiting, active, active_per_component: perComponent, caps: { max_active_tickets: s.max_active_tickets, max_active_per_component: s.max_active_per_component } });
   out(`active workers: ${active.length}/${s.max_active_tickets}`);
   for (const h of held) out(`held       ${h.id}  (${h.held})`);
+  for (const w of waiting) out(`${w.why.padEnd(10)} ${w.id}  (no new worker: ${w.why === 'parked' ? 'resume it with `worker <id> --resume` when its ruling allows' : 'merge or answer its review'})`);
   if (!rows.length) return out('nothing ready');
   for (const r of rows) out(`${r.mode.padEnd(10)} ${r.id}  (${r.kind}, ${r.size}, ${r.risk})${(perComponent[r.component] ?? 0) >= s.max_active_per_component ? '  (component at cap)' : ''}`);
 }
@@ -2449,7 +2462,7 @@ function collectMetrics(since) {
   for (const q of openQs.filter((x) => now - Date.parse(x.asked_at) > grace)) add('high', 'owner-question-waiting', q.id, q.question.slice(0, 120), q.default ? 'apply its default' : 'remind the owner; it blocks work');
   if (recentQs.length >= 4 && answeredRecent / recentQs.length < 0.5) add('high', 'inbox-stalled', 'owner questions', `${answeredRecent} of ${recentQs.length} answered in 14 days`, 'remind the owner what is blocked; give defaults where the class allows; withdraw what no longer matters');
   for (const [id, n] of Object.entries(reviewPasses()).filter(([, n]) => n >= 3)) add('medium', 'review-churn', id, `${n} final review passes`, 'the ticket may be too big or under-specified; re-plan it');
-  const ready = [...ts.values()].filter((t) => isActive(t) && !isHeld(t) && !mergeShaFor(t.id) && !activeWorker(t.id) && (t.depends_on ?? []).every((d) => mergeShaFor(d)));
+  const ready = [...ts.values()].filter((t) => isActive(t) && !isHeld(t) && !mergeShaFor(t.id) && !activeWorker(t.id) && (t.depends_on ?? []).every((d) => mergeShaFor(d)) && !notSchedulable(t));
   const active = [...ts.keys()].filter(activeWorker).length;
   if (ready.length && active < settings.max_active_tickets) add('medium', 'idle-capacity', `${ready.length} ready`, `${active}/${settings.max_active_tickets} workers active`, `make workers for: ${ready.slice(0, 5).map((t) => t.id).join(', ')}`);
   if (m.escaped_defects) add('high', 'escaped-defects', `${m.escaped_defects}`, 'defects found after merge', 'retro: which review or gate should have caught each one');
