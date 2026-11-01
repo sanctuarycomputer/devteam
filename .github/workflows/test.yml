@@ -16,4 +16,6 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ matrix.node }}
+      # the kit drives workers through tmux; the test checks pane detection on its own tmux server
+      - run: command -v tmux || (sudo apt-get update -q && sudo apt-get install -yq tmux)
       - run: node --test

@@ -458,10 +458,10 @@ function board(items, crit) {
     // finished columns show the most recent few; the rest are counted
     if (['Merged', 'Released'].includes(name)) cards = cards.sort((a, b) => (b.merged_at || '').localeCompare(a.merged_at || '')).slice(0, 5);
     return `<div class="col${total ? '' : ' none'}"><h3><span>${name}</span><span>${total}</span></h3>${cards.map((t) => `
-      <div class="tcard ${t.phase === 'blocked' ? 'blocked' : ''}">
+      <div class="tcard ${t.phase === 'blocked' || t.waiting ? 'blocked' : ''}">
         <b>${crit.has(t.id) ? '★ ' : ''}${esc(t.id)}</b><div class="t">${esc(t.title)}</div>
         <div class="muted">${esc(t.component)} · ${esc(t.size)} · wave ${esc(t.wave ?? '–')}${t.target_release ? ` · ${esc(t.target_release)}` : ''}</div>
-        <div>${t.held ? `<span class="badge" title="${esc(t.held)}">held</span>` : ''}${t.risk === 'high' ? '<span class="badge medium">high risk</span>' : ''}${t.phase === 'blocked' ? '<span class="badge high">blocked</span>' : ''}${t.phase && !['blocked', 'done'].includes(t.phase) ? `<span class="badge low">${esc(t.phase)}${t.task ? ` ${esc(t.task)}` : ''}</span>` : ''}</div>
+        <div>${t.waiting ? `<span class="badge high" title="${esc(t.waiting.line)}">${t.waiting.kind === 'limit' ? 'usage limit' : 'waiting on a prompt'}</span>` : ''}${t.held ? `<span class="badge" title="${esc(t.held)}">held</span>` : ''}${t.risk === 'high' ? '<span class="badge medium">high risk</span>' : ''}${t.phase === 'blocked' ? '<span class="badge high">blocked</span>' : ''}${t.phase && !['blocked', 'done'].includes(t.phase) ? `<span class="badge low">${esc(t.phase)}${t.task ? ` ${esc(t.task)}` : ''}</span>` : ''}</div>
       </div>`).join('')}${total > cards.length ? `<div class="more">+ ${total - cards.length} more</div>` : ''}</div>`;
   }).join('');
 }

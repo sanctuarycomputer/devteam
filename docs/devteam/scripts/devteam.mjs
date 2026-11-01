@@ -950,6 +950,30 @@ function workerState(id) {
 }
 const activeWorker = (id) => { const w = workerState(id); return !!w && w.phase && !['done', 'parked'].includes(w.phase) && !mergeShaFor(id); };
 
+// What a worker's pane is stuck on, if anything: a question the agent CLI put up (a permission or
+// trust prompt, a y/n) or a usage-limit banner. The log can't show these (the worker is frozen
+// mid-phase, so it isn't stale yet); the pane can. Only the bottom of the visible pane is read and
+// nothing is typed: clearing it is the supervisor's call (supervisor.md §11). Once per process.
+const PANE_WAITS = [
+  ['limit', /usage limit|rate limit|limit reached|limit will reset|resets? at \d/i],
+  ['prompt', /Do you want to (proceed|make this edit|create|allow|run)|Do you trust the files|\[y\/n\]|\(y\/n\)|Press Enter to continue|❯\s*1\.\s*Yes/i],
+];
+const paneWaits = new Map();
+function paneWaiting(id) {
+  if (paneWaits.has(id)) return paneWaits.get(id);
+  let found = null;
+  if (activeWorker(id)) {
+    const { target } = resolvePane(`${loadSettings().tmux_session}:${id}`);
+    const lines = target ? (sh('tmux', ['capture-pane', '-p', '-t', target]) ?? '').split('\n').map((l) => l.trim()).filter(Boolean).slice(-15) : [];
+    for (const [kind, re] of PANE_WAITS) {
+      const hit = lines.find((l) => re.test(l));
+      if (hit) { found = { kind, line: hit.slice(0, 200) }; break; }
+    }
+  }
+  paneWaits.set(id, found);
+  return found;
+}
+
 // The supervisor's approval of a ticket's spec or plan is an act that refers to the ticket.
 const approvalOf = (id, cls) => logObjects('act').filter((a) => a.class === cls && (a.refs ?? []).includes(id)).sort(byTime).pop() ?? null;
 
@@ -979,6 +1003,7 @@ function deriveStatus() {
       id: t.id, title: t.title, feature: t.feature, component: t.component, kind: t.kind, size: t.size, risk: t.risk, serves: t.serves ?? [], depends_on: t.depends_on ?? [],
       stage, merge_sha: mergeSha, branch, deps_merged: depsMerged, held: isHeld(t) ? t.held : null,
       phase: w?.phase ?? null, task: w?.task ?? null, note: w?.note ?? null, minutes_silent: w?.minutes_silent ?? null, usd: w?.usd ?? null,
+      waiting: paneWaiting(t.id),
     };
   });
 }
@@ -1129,7 +1154,7 @@ function cmdStatus() {
   for (const r of rows) {
     const waiting = ['awaiting-word', 'blocked'].includes(r.phase) && !r.merge_sha;
     const isStale = r.minutes_silent > stale && !waiting && !['done', 'parked'].includes(r.phase) && !r.merge_sha;
-    out(`${r.stage.padEnd(18)} ${r.id}${r.phase ? `  [${r.phase}${r.task ? ` ${r.task}` : ''}, ${r.minutes_silent}m${isStale ? ' STALE' : waiting && r.minutes_silent > stale ? ' WAITING ON SUPERVISOR' : ''}]` : ''}`);
+    out(`${r.stage.padEnd(18)} ${r.id}${r.phase ? `  [${r.phase}${r.task ? ` ${r.task}` : ''}, ${r.minutes_silent}m${r.waiting ? ` WAITING ON A ${r.waiting.kind === 'limit' ? 'USAGE LIMIT' : 'PROMPT'}: ${r.waiting.line}` : isStale ? ' STALE' : waiting && r.minutes_silent > stale ? ' WAITING ON SUPERVISOR' : ''}]` : ''}`);
   }
   for (const [stage, v] of Object.entries(reviewStats().by_stage)) out(`review ${stage}: first-pass rejection ${v.rejected}/${v.first_passes}`);
 }
@@ -2361,6 +2386,8 @@ function collectMetrics(since) {
   }
   for (const id of ts.keys()) {
     const w = workerState(id);
+    const wait = paneWaiting(id);
+    if (wait) add('high', 'blocked-prompt', id, wait.kind === 'limit' ? `a usage-limit banner in its pane: "${wait.line}"` : `waiting on a prompt in its pane: "${wait.line}"`, `look (tmux select-window -t ${settings.tmux_session}:${id}) and clear it (supervisor.md §11); a permission prompt a worker should never see means agent_command or its deny rules need a fix`);
     if (w && w.phase && !['done', 'parked', 'awaiting-word', 'blocked'].includes(w.phase) && !mergeShaFor(id) && w.minutes_silent > settings.stale_after_minutes) add('high', 'stale-worker', id, `silent for ${w.minutes_silent} min (phase ${w.phase})`, 'check its pane; resume it (supervisor.md, recovery)');
   }
   for (const msg of openMsgs.filter((x) => now - Date.parse(x.created_at) > 30 * 60000)) add('medium', 'unanswered-message', msg.id, `${msg.kind} from ${msg.created_by}, ${Math.round((now - Date.parse(msg.created_at)) / 60000)} min old`, `reply with --re ${msg.id}`);
@@ -2434,7 +2461,7 @@ function collectProgress() {
       id: t.id, title: t.title, feature: t.feature, component: t.component, kind: t.kind, size: t.size, risk: t.risk, weight: weight(t), serves: t.serves ?? [], depends_on: t.depends_on ?? [],
       wave: level.has(t.id) ? level.get(t.id) + 1 : null, added_at: t.created_at,
       merged_at: sha ? new Date(mergedAt(t.id)).toISOString() : null, released_in: sha ? releasedIn(sha) : null, target_release: targets[0] ?? null,
-      stage: st?.stage ?? 'planned', phase: st?.phase ?? null, task: st?.task ?? null, held: isHeld(t) ? t.held : null,
+      stage: st?.stage ?? 'planned', phase: st?.phase ?? null, task: st?.task ?? null, held: isHeld(t) ? t.held : null, waiting: st?.waiting ?? null,
     };
   });
   return { now: nowIso(), features: [...new Set(items.map((t) => t.feature))], stories, tickets: items };
