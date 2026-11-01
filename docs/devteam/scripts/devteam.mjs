@@ -1579,7 +1579,9 @@ function cmdAnswer() {
   }
   // --from-chat: the owner said it in the supervisor's own session. The supervisor records it as the
   // owner's answer with their words verbatim; the dashboard lists it for the owner to check, and it
-  // never counts as agreement evidence for the trust ladder.
+  // never counts as agreement evidence for the trust ladder. The supervisor is the party the ladder
+  // governs, so its say-so never decides what is reserved to the owner (one-way doors, trust, the
+  // owner_only classes) and never raises its own rung; it may only record a lower one.
   const fromChat = !!flags['from-chat'];
   if (fromChat) {
     if (process.env.DEVTEAM_ROLE !== 'supervisor' || logWriter() !== 'supervisor') die('answer --from-chat: the supervisor records what the owner said in its session; in your own terminal, answer directly');
@@ -1588,6 +1590,10 @@ function cmdAnswer() {
   }
   const { by } = fromChat ? { by: 'owner' } : ownerWriter();
   const v = openQuestion(id, ['open', 'defaulted']);
+  if (fromChat) {
+    const reserved = ['one-way-door', 'trust'].includes(v.kind) || (ladder().owner_only ?? []).includes(v.class) || (v.why_asked?.reasons ?? []).includes('one-way-door');
+    if (reserved) die(`answer --from-chat: ${id} is reserved to the owner (${v.kind}${v.class ? `, ${v.class}` : ''}); ask them to answer it from the dashboard or their terminal`);
+  }
   const answer = restWords.join(' ').trim();
   let autonomy;
   if (flags.autonomy !== undefined) {
@@ -1596,6 +1602,7 @@ function cmdAnswer() {
     const rung = flagNum('autonomy');
     if (![1, 2, 3].includes(rung)) die('--autonomy is 1 (ask), 2 (ask with a default) or 3 (act and report)');
     if (rung > def.ceiling) die(`${v.class} has a ceiling of rung ${def.ceiling} (constitution.md)`);
+    if (fromChat && rung > rungFor(v.class, flagStr('scope') ?? null)) die(`answer --from-chat can lower ${v.class}'s rung but not raise it (now ${rungFor(v.class, flagStr('scope') ?? null)}): the owner raises a rung from the dashboard or their terminal`);
     autonomy = { class: v.class, rung, scope: flagStr('scope') ?? null };
   }
   appendLog({ type: 'question', op: 'set', id, answer, autonomy, standing_rule: flagStr('rule'), ...(fromChat ? { channel: 'chat', said: flagStr('said').trim() } : {}) }, by);
