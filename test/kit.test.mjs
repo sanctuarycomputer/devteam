@@ -329,6 +329,15 @@ test('devteam kit', async (t) => {
     assert.match(sync.err, /bill-01-card\.jsonl not synced/, 'the bad file stays behind, the rest sync');
     fs.writeFileSync(file, before);
     must(['log-sync'], { role: 'sup' });
+    // While its PR is open, the next sync extends chore-log, so a forge refusing force pushes accepts it.
+    const first = git(['rev-parse', 'HEAD'], wt('chore-log'));
+    git(['config', 'receive.denyNonFastForwards', 'true'], origin);
+    must(['observe', '--subject', 'bill-01-card', '--kind', 'note', '--detail', 'second sync'], { role: 'sup' });
+    must(['log-sync'], { role: 'sup' });
+    git(['fetch', '-q', 'origin']);
+    git(['merge-base', '--is-ancestor', first, 'origin/chore-log']);
+    assert.notEqual(git(['rev-parse', 'origin/chore-log']), first, 'the second sync landed on top of the first');
+    git(['config', 'receive.denyNonFastForwards', 'false'], origin);
     const shaL = git(['rev-parse', 'HEAD'], wt('chore-log'));
     const syncWt = must(['chore', 'start', 'devteam-sync-v0.2.1'], { role: 'sup' }).trim();
     assert.ok(fs.existsSync(syncWt), 'a sync chore is named by its tag (supervisor.md §9)');

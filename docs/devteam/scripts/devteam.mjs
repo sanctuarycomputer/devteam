@@ -657,6 +657,11 @@ function cmdLogSync() {
   const files = fs.existsSync(live) ? fs.readdirSync(live).filter((f) => f.endsWith('.jsonl') && !isPlanFile(f)).sort() : [];
   if (!files.length) return out('nothing in run/log to sync');
   const wt = choreWorktree('log', { reset: true });
+  // A sync whose PR is still open is extended, not rebuilt, so every push fast-forwards: forges
+  // that refuse non-fast-forward pushes (branch rulesets, protected branches) accept it.
+  const main = loadSettings().main_branch;
+  if (!flags['dry-run']) git(['fetch', '--quiet', 'origin', LOG_BRANCH], wt);
+  if (resolveCommit(`origin/${LOG_BRANCH}`) && git(['merge-base', '--is-ancestor', `origin/${LOG_BRANCH}`, `origin/${main}`], wt) === null) gitOrDie(['checkout', '--quiet', '-B', LOG_BRANCH, `origin/${LOG_BRANCH}`], wt);
   const dest = path.join(wt, projectRel, 'log');
   fs.mkdirSync(dest, { recursive: true });
   let changed = 0;
@@ -691,7 +696,7 @@ function cmdLogSync() {
   const stamp = nowIso();
   gitOrDie(['add', path.join(projectRel, 'log')], wt);
   gitOrDie(['commit', '--quiet', '-m', `chore-log: log through ${stamp}`], wt);
-  gitOrDie(['push', '--quiet', '--force', 'origin', `${LOG_BRANCH}:${LOG_BRANCH}`], wt);
+  gitOrDie(['push', '--quiet', 'origin', `${LOG_BRANCH}:${LOG_BRANCH}`], wt);
   const body = `Mirrors run/log into project/log. Append-only; \`devteam.mjs check-pr\` verifies every added line.${notable.length ? `\n\nChanges to plans, goals and questions by non-owners in this sync:\n${notable.slice(0, 40).map((n) => `- ${n}`).join('\n')}` : ''}`;
   const pr = openPr(wt, LOG_BRANCH, `chore-log: log through ${dateOnly(stamp)}`, body);
   out(`synced ${changed} file(s) to ${LOG_BRANCH}${pr ? `: ${pr}` : ''}`);
