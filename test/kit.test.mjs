@@ -172,6 +172,14 @@ test('devteam kit', async (t) => {
     must(['phase', 'build', '--task', 'T1', '--usd', '2'], w);
     assert.equal(json(must(['log', '--type', 'phase', '--by', 'bill-01-card', '--json'])).length, 2, 'an unchanged phase within 15 min is not written');
     assert.doesNotMatch(must(['ready']), /bill-01/, 'a ticket with an active worker is not ready');
+    // a parked ticket waits on a ruling, not a new worker: not ready, not idle capacity
+    const w0 = { cwd: wt('bill-01-card'), role: 'worker' };
+    must(['phase', 'parked'], w0);
+    const rp = json(must(['ready', '--json']));
+    assert.ok(!rp.ready.some((x) => x.id === 'bill-01-card'));
+    assert.deepEqual(rp.waiting, [{ id: 'bill-01-card', why: 'parked' }]);
+    assert.ok(!json(must(['metrics', '--json'])).findings.some((f) => f.kind === 'idle-capacity'), 'no "make a worker" for a parked ticket');
+    must(['phase', 'build', '--task', 'T1'], w0);
     // a worker frozen on a permission prompt looks busy in the log; its pane says otherwise
     if (hasTmux) {
       spawnSync('tmux', ['new-session', '-d', '-s', 'devteam', '-n', 'bill-01-card', 'sh -c \'printf "Bash command\\n  rm -rf build\\nDo you want to proceed?\\n> 1. Yes\\n  2. No\\n"; exec sleep 600\'']);
