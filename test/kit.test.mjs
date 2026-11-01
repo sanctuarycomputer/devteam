@@ -72,7 +72,11 @@ test('devteam kit', async (t) => {
     must(['ticket', 'add', 'bill-01-card', '--json', JSON.stringify(ticket)], { cwd: wt('plan-billing'), role: 'planner' });
     assert.notEqual(dt(['ticket', 'add', 'bill-01-card', '--json', '{"title":"x"}'], { cwd: wt('plan-billing'), role: 'planner' }).status, 0, 'duplicate id refused');
     assert.ok(fs.existsSync(path.join(wt('plan-billing'), 'docs/devteam/project/log/plan-billing.jsonl')), 'planner file in the worktree');
-    assert.ok(!fs.readdirSync(path.join(repo, 'docs/devteam/run/log')).some((f) => f.startsWith('plan')), 'nothing planner-written in run/log');
+    assert.ok(!fs.readdirSync(path.join(repo, 'docs/devteam/run/log')).some((f) => f === 'plan-billing.jsonl'), 'the graph is not in run/log');
+    // the planner's messages are live, so the supervisor sees them before the plan lands
+    must(['send', 'supervisor', 'graph ready for review', '--kind', 'review-request'], { cwd: wt('plan-billing'), role: 'planner' });
+    assert.match(must(['messages', '--to', 'supervisor']), /graph ready for review/);
+    assert.ok(fs.readdirSync(path.join(repo, 'docs/devteam/run/log')).some((f) => /^plan-billing-\d{4}-\d{2}\.jsonl$/.test(f)));
     assert.doesNotMatch(must(['status']), /bill-01/, 'main does not see an unlanded plan');
     assert.notEqual(dt(['validate', '--strict'], { cwd: wt('plan-billing') }).status, 0, 'strict validate fails without reviews');
   });

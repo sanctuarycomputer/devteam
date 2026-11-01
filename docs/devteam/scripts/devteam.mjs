@@ -225,10 +225,12 @@ function schemaErrors(schema, value, where) {
 }
 
 // The writer a log file belongs to, from its name alone: owner-<yyyy-mm>, supervisor-<yyyy-mm>,
-// plan-<feature>, or a ticket id. Anything else is nobody's file and its lines count for nothing.
+// plan-<feature> (a planner's graph, landed by its plan PR), plan-<feature>-<yyyy-mm> (the same
+// planner's messages and observations, live), or a ticket id. Anything else counts for nothing.
+const MONTHLY = /^(owner|supervisor|plan-[a-z0-9]+(?:-[a-z0-9]+)*?)-\d{4}-\d{2}$/;
 function writerOfFile(name) {
   const base = name.replace(/\.jsonl$/, '');
-  const m = /^(owner|supervisor)-\d{4}-\d{2}$/.exec(base);
+  const m = MONTHLY.exec(base);
   if (m) return m[1];
   if (/^(owner|supervisor)(-|$)/.test(base)) return null;
   return /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(base) ? base : null;
@@ -253,6 +255,7 @@ function integrity(o, file) {
       if (!o.id.endsWith(`-${o.by}`)) return `a new id ends with its writer, "-${o.by}"`;
     }
     if (!auth.new[cls].includes(o.type)) return `${cls} may not create ${o.type} lines`;
+    if (cls === 'planner' && file && ['feature', 'ticket'].includes(o.type) && !isPlanFile(file)) return `a planner's ${o.type} lines belong in its plan file, ${o.by}.jsonl`;
     if (o.type === 'goal' && o.status && o.status !== 'draft' && cls !== 'owner') return 'only the owner creates a goal past draft';
     const f = planFeature(o.by);
     if (f && o.type === 'feature' && o.id !== f) return `${o.by} may only create the feature "${f}"`;
@@ -379,8 +382,11 @@ function fold(all) {
 
 const liveLogDir = () => path.join(runDir, 'log');
 const durableLogDir = () => path.join(projectDir, 'log');
-const logFileFor = (by) => (by === 'owner' || by === 'supervisor' ? `${by}-${nowIso().slice(0, 7)}.jsonl` : `${by}.jsonl`);
-const isPlanFile = (name) => name.startsWith('plan-');
+// A planner's graph (feature and ticket lines) goes in plan-<feature>.jsonl in its worktree and
+// lands with the plan PR; everything else it writes is live, like everyone else's.
+const GRAPH_TYPES = ['feature', 'ticket'];
+const logFileFor = (by, type) => (by === 'owner' || by === 'supervisor' || (writerClass(by) === 'planner' && !GRAPH_TYPES.includes(type)) ? `${by}-${nowIso().slice(0, 7)}.jsonl` : `${by}.jsonl`);
+const isPlanFile = (name) => name.startsWith('plan-') && !MONTHLY.test(name.replace(/\.jsonl$/, ''));
 
 function currentTicketId() {
   if (process.env.DEVTEAM_TICKET) return process.env.DEVTEAM_TICKET;
@@ -475,7 +481,7 @@ function appendLog(fields, by = logWriter()) {
     const cur = logGet(fields.id);
     if (cur && (type === 'feature' ? cur.id : cur.feature) !== f) die(`${by} may only change the feature "${f}" and its tickets`);
   }
-  const file = logFileFor(by);
+  const file = logFileFor(by, type);
   const prefix = SCHEMA['x-id'].prefix[type];
   const build = (at) => {
     const id = fields.id ?? `${prefix}-${at.slice(0, 10).replace(/-/g, '')}-${at.slice(11, 23).replace(/[:.]/g, '')}-${by}`;
@@ -489,7 +495,7 @@ function appendLog(fields, by = logWriter()) {
     return { parsed, text };
   };
   build(nowIso());
-  const planner = writerClass(by) === 'planner';
+  const planner = isPlanFile(file);
   const dir = planner ? durableLogDir() : liveLogDir();
   fs.mkdirSync(dir, { recursive: true });
   const target = path.join(dir, file);
@@ -606,7 +612,7 @@ function logRule(headRef, sha) {
     fails.push(...added.errors.map((e) => `added ${e}`));
     const lastAt = (t) => t.split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l).at ?? ''; } catch { return ''; } }).pop() ?? '';
     let prevAt = lastAt(prev);
-    const month = name.match(/^(?:owner|supervisor)-(\d{4}-\d{2})\.jsonl$/)?.[1];
+    const month = name.match(/-(\d{4}-\d{2})\.jsonl$/)?.[1] && MONTHLY.test(name.replace(/\.jsonl$/, '')) ? name.match(/-(\d{4}-\d{2})\.jsonl$/)[1] : undefined;
     if (before === null) {
       const siblings = (git(['ls-tree', '--name-only', `${base}:${prefix.slice(0, -1)}`]) ?? '').split('\n').filter((x) => x && x !== name && writerOfFile(x) === writerOfFile(name));
       for (const sib of siblings) prevAt = [prevAt, lastAt(`${git(['show', `${base}:${prefix}${sib}`]) ?? ''}\n`)].sort().pop();
