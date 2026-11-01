@@ -200,6 +200,9 @@
                 "type": "string"
               }
             }
+          },
+          "source_ref": {
+            "type": "string"
           }
         },
         "if": {

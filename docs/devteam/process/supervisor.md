@@ -49,11 +49,12 @@ Run on a timer: about every 10 minutes when PRs are converging, 30 when quiet. A
 
 **Improve and record**
 
-11. **Improve:** on quiet ticks, run the improvement loop ([`improvement.md`](improvement.md)): retros (with goal readings, outcomes, corrections you find, and trust questions where the evidence supports one), research and architecture spikes when they're due, upstream releases to check, trials to measure, roadmap or architecture proposals to put to the owner, and general improvements to share upstream.
-12. **Notify** the owner only on a new blocking owner question or something they must act on now (`questions.md` §8).
-13. **Dashboard:** `devteam.mjs dashboard-data` to refresh `run/dashboard.json`.
-14. Write your own heartbeat: `devteam.mjs heartbeat --supervisor` (with `--usd` if you can see your own spend).
-15. Once a day, after the tick's merges, and before merging a plan PR that names a newly approved goal: `devteam.mjs log-sync`, then merge the log-only PR when CI passes (`log.md` §5).
+11. **Retro:** if `devteam.mjs retro --due`, run `devteam.mjs retro` to draft it now (it's cheap), and finish it on the next quiet tick, or first thing if the draft is a day old (`improvement.md` §3.1).
+12. **Improve:** on quiet ticks, run the improvement loop ([`improvement.md`](improvement.md)): retros (with goal readings, outcomes, corrections you find, and trust questions where the evidence supports one), research and architecture spikes when they're due, upstream releases to check, trials to measure, roadmap or architecture proposals to put to the owner, and general improvements to share upstream.
+13. **Notify** the owner only on a new blocking owner question or something they must act on now (`questions.md` §8).
+14. **Dashboard:** `devteam.mjs dashboard-data` to refresh `run/dashboard.json`.
+15. Write your own heartbeat: `devteam.mjs heartbeat --supervisor` (with `--usd` if you can see your own spend).
+16. Once a day, after the tick's merges, and before merging a plan PR that names a newly approved goal: `devteam.mjs log-sync`, then merge the log-only PR when CI passes (`log.md` §5).
 
 ## 4. Fixing drift
 

@@ -11,7 +11,9 @@ Planning works backwards from a goal: what must be true for the outcome to happe
 - **The owner states the goals.** The supervisor can draft one from what the owner says (`devteam.mjs goal add --title … --outcome …`), but it can't invent one, and only the owner approves it (`goal approve`, or the dashboard). Keep three to five goals active.
 - **A goal is ready** when it has: an outcome (what is true for users or the business), a measure with a numeric target, unit and direction, a horizon date, at least one non-goal, the preconditions that must hold for the outcome, a priority distinct from the other goals, and a baseline reading (`goal reading <id> --value n`). `devteam.mjs goal check` lists what's missing.
 - **The readiness interview.** While a goal has gaps, the supervisor asks one `goal-definition` question per goal listing every gap as a form, records the answers on the draft (`goal set`), and repeats until `goal check` is clean and no ambiguity remains in its judgment (undefined terms, two readings of the measure, conflicts with another goal). Then the owner approves it.
+- **The goal plan.** Alongside the interview the supervisor writes `project/goals/<goal-id>.md` (`devteam.mjs goal plan <id>` drafts it from [`templates/goal-plan.md`](../templates/goal-plan.md) in a chore worktree; `chore-pr` opens the PR). It is the reverse chain in prose: for each precondition, why it must hold, what says it doesn't yet, and which features will make it hold; what the goal asks of the architecture; risks; the owner answers it rests on; what it deliberately leaves out and why. The goal's fields stay in the log and show on the dashboard; the plan holds only the reasoning, so nothing is copied twice. `goal check` lists a missing plan under coverage. The owner reads it when approving the goal.
 - **Coverage.** Once a goal is ready, every feature plan names the goals it serves (`- Goals: g-…`) and the preconditions it makes true (`- Preconditions: g-…#1`). `goal check` lists any precondition with no feature; each becomes a feature to plan, a spike, or a question. `validate` fails an approved feature that names no ready goal.
+- **The roadmap** is computed, never written: `devteam.mjs roadmap` (and the dashboard's Goals section) lists goals by priority, each with its unplanned preconditions and its features, their progress, remaining waves, target releases and an estimated finish week. The estimate assumes work is done in goal priority order at the current rate (points merged per day over the last 14 days): a feature finishes no sooner than its remaining points (and those of every feature ahead of it) at that rate, and no sooner than its remaining waves times the median ticket cycle time. A goal with unplanned preconditions gets no date at all, because the work isn't known yet.
 - **Readings.** The supervisor records a reading at each retro, from CI, metrics or releases where the measure allows. On track or behind is computed from the readings, the target and the horizon, never stored.
 - **Changing a goal** after approval is the owner's (class `goal-change`, owner-only in `autonomy.md`).
 
@@ -25,7 +27,7 @@ Planning works backwards from a goal: what must be true for the outcome to happe
 | P3 stories | design | feature plan §1 | every goal in the design maps to at least one story |
 | P4 decomposition | design + stories | `project/graph/<id>.json` files + feature plan §2 to §4 | `devteam.mjs validate` passes |
 | P5 graph review | the graph | `project/reviews/<feature>/graph-<n>.md` | review APPROVE |
-| P6 landing | approved graph | a merged `chore-plan-<feature>` PR | supervisor approves; tickets become schedulable |
+| P6 landing | approved graph | a merged `chore-plan-<feature>` PR, including the architecture doc update | supervisor approves; tickets become schedulable |
 
 Each stage's output is committed on a `plan/<feature>` branch as it is produced, so a crashed planner resumes from files, not memory. The whole feature lands as one PR at P6.
 
@@ -34,7 +36,7 @@ A planner messages the supervisor ([`messages.md`](messages.md)) with a recommen
 ## 2. P0 to P1: intake and research
 
 - **Intake** turns the direction into: the problem in two or three sentences, who it is for, what success looks like in observable terms, explicit non-goals, and hard constraints (deadlines, budgets, platforms). If any of these is unknown, ask; don't infer product intent.
-- **Research** starts from `project/designs/baseline.md` if the project has one (`bootstrap.md` §5.1) and surveys the existing system before designing: what exists that this touches, what contracts are already in place, what prior decisions in `project/decisions.md` constrain it, and what external facts (library capabilities, API limits) the design depends on. Research cites file paths and links. It does not design.
+- **Research** starts from `project/designs/architecture.md` (`bootstrap.md` §5.1) and the goal plans of the goals the feature serves (§0), and surveys the existing system before designing: what exists that this touches, what contracts are already in place, what prior decisions in `project/decisions.md` constrain it, and what external facts (library capabilities, API limits) the design depends on. Research cites file paths and links. It does not design.
 
 ## 3. P2: the system design
 
@@ -106,19 +108,20 @@ A ticket may enter its spec and plan stages while its dependencies are unmerged;
 The graph gets an adversarial review like code (`review.md`), using this checklist:
 
 - hidden dependencies: two tickets that will in fact need each other's code;
-- footprints that overlap work still in flight outside devteam (the baseline's In flight table);
+- footprints that overlap work still in flight outside devteam (the architecture doc's In flight table);
 - footprints that are too broad (`src/**`) to make D4 meaningful;
 - tickets over size, or tickets so small their review costs more than their content;
 - missing contract tickets at a boundary;
 - done-whens that cannot fail;
 - stories with no integration ticket;
 - risk under-assigned;
-- one-way doors not listed in the design or not yet answered by the owner.
+- one-way doors not listed in the design or not yet answered by the owner;
+- `project/designs/architecture.md` updated for everything the design changes in it, with a Changed by row.
 
 ## 7. P6: landing
 
 - The supervisor sets the feature plan to `Status: approved` after an APPROVE graph review and a green `validate`, and merges the `chore-plan-<feature>` PR. (`validate` refuses an approved feature plan without approved design and graph reviews.)
-- The root roadmap (if the project keeps one) gains one dated paragraph naming the feature and its ticket count.
+- The same PR carries the update to `project/designs/architecture.md`. The roadmap needs no edit: `devteam.mjs roadmap` picks the feature up from its `- Goals:` line and release map.
 - From this point, tickets whose dependencies are met appear in `devteam.mjs ready`.
 
 ## 8. Re-planning

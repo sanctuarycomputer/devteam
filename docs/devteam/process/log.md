@@ -30,7 +30,7 @@ One JSON object per line. Every line has an envelope: `v` (1), `id`, `type`, `op
 | `correction` | act, reason, severity, repair undo / fix-ticket / none | owner, or the supervisor at a retro |
 | `seen` | upto: the owner has read the act feed up to this time | owner |
 
-Scales (severity, valence, confidence, priority) are numbers; labels are derived for display. Sets that grow (decision classes, reasons, observation kinds) live in tables, not in the schema. An **outcome** is an observation with kind `outcome` and refs to what caused it. A **goal reading** is an observation with kind `reading`, the goal as subject and a measure.
+Scales (severity, valence, confidence, priority) are numbers; labels are derived for display. Sets that grow (decision classes, reasons, observation kinds) live in tables, not in the schema. An **outcome** is an observation with kind `outcome` and refs to what caused it. A **goal reading** is an observation with kind `reading`, the goal as subject and a measure. A **retro** is recorded as an observation with kind `retro`: its two-line summary, the path of the retro file, and refs to what it produced (`improvement.md` §3.1).
 
 ## 2. Observe
 

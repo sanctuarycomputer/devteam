@@ -84,8 +84,10 @@
 
   <div class="grid" id="stats"></div>
 
-  <h2><span class="stage">Goals</span>what the work is for</h2>
+  <h2><span class="stage">Goals</span>what the work is for, and the roadmap to it</h2>
+  <div id="retro" class="small" style="margin-bottom:10px"></div>
   <div id="goals"></div>
+  <div id="unassigned" class="small muted"></div>
 
   <h2><span class="stage">Decide</span>questions for you</h2>
   <div id="questions"></div>
@@ -339,10 +341,26 @@ const sevBadge = (n) => (n >= 3 ? 'high' : n === 2 ? 'medium' : 'low');
 const when = (iso) => new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 
 function renderOoda(o) {
+  // Retro and roadmap
+  const R = o.roadmap;
+  const week = (d) => { if (!d) return 'no date'; const x = new Date(`${d}T00:00:00Z`); x.setUTCDate(x.getUTCDate() - ((x.getUTCDay() + 6) % 7)); return `week of ${x.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })}`; };
+  const rt = o.retro;
+  $('retro').innerHTML = `<b>Retro:</b> ${rt.last ? `last ${esc(rt.last.at.slice(0, 10))}: ${esc(rt.last.summary)}${rt.last.file ? ` <span class="muted">(${esc(rt.last.file)})</span>` : ''}` : 'none yet'}${rt.due ? ` · <span class="badge medium">due since ${esc((rt.due_since || '').slice(0, 10))}</span><span class="muted">${esc(rt.reasons.join('; '))}</span>` : ''}`;
+  $('unassigned').innerHTML = `${R.unassigned.length ? `Work serving no goal: ${R.unassigned.map(esc).join(', ')}. ` : ''}Roadmap dates: ${esc(R.note)} Current rate ${R.rate_points_per_day} points/day.`;
+  const roadmapOf = (gid) => {
+    const r = R.goals.find((x) => x.id === gid);
+    if (!r) return '';
+    const feats = r.features.map((f) => R.features[f]);
+    return `<div class="small"><b>Roadmap</b> <span class="muted">→ ${r.eta === 'done' ? 'done' : r.eta ? esc(week(r.eta)) : 'no date yet'}</span>
+      ${r.unplanned.map((u) => `<div>• <span class="badge medium">unplanned</span>precondition ${u.n}: ${esc(u.text)}</div>`).join('')}
+      ${feats.map((v) => `<div>• <b>${esc(v.feature)}</b> <span class="muted">${esc(v.status)}</span> · ${v.points_total - v.points_left}/${v.points_total} pts · stories ${v.stories.done}/${v.stories.total} · ${v.waves_left} waves left${v.releases.length ? ` · ${v.releases.map(esc).join(' ')}` : ''} → ${v.done ? 'done' : esc(week(v.eta))}${v.blocked_by_questions.length ? ` <span class="badge high">waiting on ${v.blocked_by_questions.length} answer${v.blocked_by_questions.length > 1 ? 's' : ''}</span>` : ''}</div>`).join('')}
+</div>`;
+  };
+
   // Goals
   $('goals').innerHTML = o.goals.length ? o.goals.map((g) => {
     const last = g.readings[g.readings.length - 1];
-    const gaps = [...g.check.definition.map((x) => `definition: ${x}`), ...g.check.coverage.map((x) => `planning: ${x}`)];
+    const gaps = [...g.check.definition.map((x) => `definition: ${x}`), ...g.check.coverage.filter((x) => !x.startsWith('precondition')).map((x) => `planning: ${x}`)];
     const canApprove = g.status === 'draft' && !g.check.definition.length;
     return `<div class="card goal">
       <div><span class="badge ${g.status === 'ready' ? 'good' : g.status === 'draft' ? 'medium' : 'low'}">${esc(g.status)}</span>${g.priority ? `<span class="badge">p${g.priority}</span>` : ''}<b>${esc(g.title)}</b> <span class="muted small">${esc(g.id)}</span></div>
@@ -350,6 +368,7 @@ function renderOoda(o) {
       <div>${esc(g.measure?.description || 'no measure yet')}: <b>${last ? esc(last.value) : '?'}</b> → ${esc(g.measure?.target ?? '?')} ${esc(g.measure?.unit || '')} by ${esc(g.horizon || '?')}${g.track ? ` · <span class="badge ${g.track === 'on track' ? 'good' : 'high'}">${esc(g.track)}</span>` : ''}</div>
       <div class="small muted">Features: ${g.check.features.length ? g.check.features.map(esc).join(', ') : 'none yet'}${g.non_goals?.length ? ` · Not: ${g.non_goals.map(esc).join('; ')}` : ''}</div>
       ${gaps.length ? `<ul class="gaps">${gaps.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : '<div class="small" style="color:var(--ok)">No gaps.</div>'}
+      ${roadmapOf(g.id)}
       ${canApprove ? `<div><button data-goal="${esc(g.id)}">Approve this goal</button> <span class="err" id="e-${esc(g.id)}"></span></div>` : ''}
     </div>`;
   }).join('') : '<p class="muted">No goals yet. The supervisor drafts them from what you say (planning.md §0).</p>';

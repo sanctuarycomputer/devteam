@@ -46,13 +46,21 @@ The page also shows progress, computed from git so it needs no extra bookkeeping
 
 A forecast is only as good as the plan. Scope that isn't in the graph yet isn't in the date, so plan ahead (`planning.md`) before reading the finish date as a promise.
 
-Write a short dated snapshot of the metrics to `project/improvement/metrics.md` at each retro so trends survive restarts.
+Each retro file keeps a snapshot of the headline numbers (gate runs and message waits live in gitignored files, so the snapshot is how trends survive restarts and other machines), and the next retro compares against it.
 
 ## 3. Where improvements come from
 
-### 3.1 Retros (every `retro_every_days`, default 7, and at the end of each feature)
+### 3.1 Retros
 
-Read the metrics and the event log since the last retro. For each of the slowest tickets and each rejected review, ask why. Typical findings: a gate that's slow and could run in parallel, a ticket size that's consistently too big, a review prompt that finds nothing, a recurring design-change cause that better planning would catch, a component whose footprints keep colliding.
+**When.** A retro is due `retro_every_days` (7 if unset) after the last one, and whenever a feature has fully merged since the last one. `devteam.mjs retro --due` says whether one is due and why; the dashboard shows "due since <date>" under Goals. Nothing has to remember: the last retro is a line in the log.
+
+**How.**
+
+1. When one is due, `devteam.mjs retro` drafts `project/improvement/retros/<date>.md` (from the numbers and the log, in its own chore worktree, so main stays clean): the headline numbers against the previous retro's, what merged, the slowest tickets, every review rejected at first pass, corrections, trials started and trials still without an outcome, problems opened and resolved, goal readings due, recurring signals to explain, where trust evidence supports a step up, current findings, and the roadmap as it stands.
+2. On the next quiet tick (within 24 hours of the draft; after that it goes first), write the three sections only you can: **Why** (for each slow ticket, rejected review and correction), **What we will change** (each a trial act, a chore ticket, a lesson or problem, or "nothing, because …"; everything that needs the owner goes in one `proposal` question), and a two-line **Summary for the owner**. Do what the draft lists: record the goal readings, explain the recurring signals, record outcomes for finished trials.
+3. `devteam.mjs chore-pr retro-<date> --title "retro <date>"`, merge it when CI passes, then `devteam.mjs retro close <date> --summary "<the two lines>" --refs <ids it produced>`. That observation is how the next retro, the due date and the dashboard know it happened.
+
+Typical findings: a gate that's slow and could run in parallel, a ticket size that's consistently too big, a review prompt that finds nothing, a recurring design-change cause that better planning would catch, a component whose footprints keep colliding, a goal whose forecast keeps slipping.
 
 ### 3.2 Practice research (every `research_every_days`, default 7)
 
@@ -60,7 +68,7 @@ Code generation practice changes month to month: new models, agent features, rev
 
 ### 3.3 Architecture reassessment (at the end of each feature, or when metrics point at the code)
 
-Re-read the baseline and recent designs against the roadmap. Look for hotspots that keep serializing tickets, components that should be split or merged, contracts that churn, dependencies or vendors that newer options beat on speed, cost or reliability. Research the external landscape for each candidate. Output is a proposal, never a direct change.
+Re-read `project/designs/architecture.md` against the goal plans and the roadmap (`devteam.mjs roadmap`). Look for hotspots that keep serializing tickets, components that should be split or merged, contracts that churn, dependencies or vendors that newer options beat on speed, cost or reliability. Research the external landscape for each candidate. Output is a proposal, never a direct change.
 
 ### 3.4 Upstream devteam
 
@@ -73,7 +81,7 @@ At most once every `upstream_check_hours` (default 24):
 
 ## 4. Propose
 
-An idea that needs the owner is a **question of kind `proposal`** (`questions.md`), with the evidence ids attached (`--evidence`) and, when the reasoning is long, a research note written from [`templates/improvement-proposal.md`](../templates/improvement-proposal.md) at `project/improvement/research/<date>-<slug>.md` and linked with `--note`: the evidence, the change, the expected gain on each dimension (speed, quality, cost), the risk, how it will be measured, a trial plan and how to undo it.
+An idea that needs the owner is a **question of kind `proposal`** (`questions.md`), with the evidence ids attached (`--evidence`) and, when the reasoning is long, a research note written from [`templates/improvement-proposal.md`](../templates/improvement-proposal.md) at `project/improvement/research/<date>-<slug>.md` (in a chore worktree: `devteam.mjs chore-start research-<slug>`, then `chore-pr`) and linked with `--note`: the evidence, the change, the expected gain on each dimension (speed, quality, cost), the risk, how it will be measured, a trial plan and how to undo it.
 
 An idea within the supervisor's own authority is not a question; it is a trial, logged as an act (class `improvement-trial`).
 

@@ -1737,7 +1737,7 @@ function collectMetrics(since) {
   for (const [id, mergedAt] of mergedAtOf) {
     if (mergedAt < since) continue;
     const first = phaseLines.get(id)?.[0];
-    if (first) cycles.push({ id, ms: mergedAt - Date.parse(first.created_at) });
+    if (first && mergedAt > Date.parse(first.created_at)) cycles.push({ id, ms: mergedAt - Date.parse(first.created_at) });
   }
   cycles.sort((a, b) => b.ms - a.ms);
 
@@ -1955,7 +1955,9 @@ function collectOoda() {
   const auto = loadAutonomy();
   return {
     goals: logObjects('goal').map(goalView).sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99)),
-    observations: recent(logObjects('observation').filter((o) => o.kind !== 'reading'), 40),
+    observations: recent(logObjects('observation').filter((o) => !['reading', 'retro'].includes(o.kind)), 40),
+    retro: retroState(),
+    roadmap: collectRoadmap(),
     clusters: orientClusters(),
     knowledge: recent(logObjects('knowledge').filter((k) => k.status !== 'retired'), 60),
     problems: logObjects('problem').filter((p) => p.status !== 'resolved').sort((a, b) => b.severity - a.severity),
@@ -2234,7 +2236,7 @@ function orientClusters() {
   const groups = new Map();
   const add = (key, item) => (groups.get(key) ?? groups.set(key, []).get(key)).push(item);
   for (const o of logObjects('observation')) {
-    if (linked.has(o.id) || o.kind === 'reading') continue;
+    if (linked.has(o.id) || ['reading', 'retro', 'outcome'].includes(o.kind)) continue;
     add(o.source_key ?? `${o.kind}:${o.subject}`, { id: o.id, at: o.created_at, who: o.created_by, valence: o.valence ?? 0, detail: o.detail });
   }
   for (const c of logObjects('correction')) {
@@ -2360,6 +2362,14 @@ function featurePreconditions(feature) {
 const goalReadings = (gid) => logObjects('observation').filter((o) => o.kind === 'reading' && o.subject === gid && o.measure && ['supervisor', 'owner'].includes(o.created_by)).sort((a, b) => a.created_at.localeCompare(b.created_at));
 
 // Mechanical readiness. "definition" gates approval; "coverage" is what planning must close.
+// A project file from this checkout, or main's copy if this checkout doesn't have it yet.
+function projectFileText(rel) {
+  const p = path.join(projectDir, rel);
+  if (fs.existsSync(p)) return fs.readFileSync(p, 'utf8');
+  return projectInRepo && mainRef() ? git(['show', `${mainRef()}:${projectRel}/${rel}`]) : null;
+}
+const goalPlanText = (gid) => projectFileText(`goals/${gid}.md`);
+
 function goalCheck(g) {
   const definition = [];
   const coverage = [];
@@ -2376,14 +2386,14 @@ function goalCheck(g) {
   if (clash.length) definition.push(`priority ${g.priority} is shared with ${clash.map((c) => c.id).join(', ')}; ties must be broken`);
   if (!goalReadings(g.id).length) definition.push('no baseline reading (devteam.mjs goal reading <id> --value v)');
   const feats = goalFeatures(g.id);
+  const covered = new Set(feats.flatMap(featurePreconditions));
+  const unplanned = (g.preconditions ?? []).map((text, i) => ({ n: i + 1, text })).filter((p) => !covered.has(`${g.id}#${p.n}`));
+  if (!goalPlanText(g.id)) coverage.push(`no goal plan at project/goals/${g.id}.md (devteam.mjs goal plan ${g.id})`);
   if ((g.status ?? 'draft') === 'ready') {
     if (!feats.length) coverage.push('no feature plan names this goal (- Goals: line)');
-    const covered = new Set(feats.flatMap(featurePreconditions));
-    (g.preconditions ?? []).forEach((p, i) => {
-      if (!covered.has(`${g.id}#${i + 1}`)) coverage.push(`precondition ${i + 1} ("${p}") has no feature (- Preconditions: ${g.id}#${i + 1})`);
-    });
+    for (const p of unplanned) coverage.push(`precondition ${p.n} ("${p.text}") has no feature (- Preconditions: ${g.id}#${p.n})`);
   }
-  return { definition, coverage, features: feats };
+  return { definition, coverage, features: feats, unplanned };
 }
 
 function goalView(g) {
@@ -2454,6 +2464,21 @@ function cmdGoal() {
     appendLog({ type: 'observation', source: flagStr('source') ?? by, subject: id, kind: 'reading', detail: flagStr('detail') ?? `reading ${v}${logGet(id).measure?.unit ? ` ${logGet(id).measure.unit}` : ''}`, measure: { value: v, unit: logGet(id).measure?.unit }, refs: [id] }, by);
     return void process.stdout.write(`recorded ${v} for ${id}\n`);
   }
+  if (sub === 'plan') {
+    const g = logGet(id);
+    if (g?.type !== 'goal') die('usage: goal plan <g-id>');
+    if (logWriter() !== 'supervisor') die('the supervisor writes goal plans');
+    const slug = `goal-${(g.title ?? 'goal').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'goal'}`;
+    const wt = choreWorktree(slug);
+    const file = path.join(wt, projectRel, 'goals', `${id}.md`);
+    if (fs.existsSync(file) && !flags.force) die(`${path.relative(mainRoot, file)} exists; edit it, or --force to redraft`);
+    const tpl = fs.readFileSync(path.join(devteamDir, 'templates', 'goal-plan.md'), 'utf8');
+    const rows = (g.preconditions ?? []).map((p, i) => `| ${i + 1} | ${p} | | | ${goalFeatures(id).filter((f) => featurePreconditions(f).includes(`${id}#${i + 1}`)).map((f) => `\`${f}\``).join(', ') || 'unplanned'} |`).join('\n');
+    const text = tpl.replace('<goal title>', g.title).replace('`<g-id>`', `\`${id}\``).replace('<date>', nowIso().slice(0, 10)).replace(/\| 1 \| \| \| \| `<feature>` or "unplanned" \|/, rows || '| 1 | | | | unplanned |').replace(/## 6\. Not doing\n\n[^\n]*/, `## 6. Not doing\n\n${(g.non_goals ?? []).map((n) => `- ${n}: <why>`).join('\n') || '<the goal has no non-goals yet>'}`);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, text);
+    return void process.stdout.write(`drafted ${path.relative(mainRoot, file)}\nwrite the reasoning, then: devteam.mjs chore-pr ${slug} --title "goal plan: ${g.title}"\n`);
+  }
   if (sub === 'check') {
     const gs = (id ? [logGet(id)] : logObjects('goal')).filter((g) => g?.type === 'goal' && !['met', 'abandoned'].includes(g.status));
     let gaps = 0;
@@ -2476,6 +2501,335 @@ function cmdGoal() {
     const last = g.readings[g.readings.length - 1];
     process.stdout.write(`${g.id} [${g.status}${g.priority ? `, p${g.priority}` : ''}] ${g.title}\n  ${g.measure?.description ?? '-'}: ${last ? last.value : '?'} -> ${g.measure?.target ?? '?'} ${g.measure?.unit ?? ''} by ${g.horizon ?? '?'}${g.track ? ` (${g.track})` : ''}; features: ${g.check.features.join(', ') || 'none'}\n`);
   }
+}
+
+// ---------- chore PRs from the supervisor (retros, goal plans, research notes) ----------
+
+// The supervisor's checkout is on main, which only takes PRs. A chore gets its own worktree on
+// branch chore-<slug>, from the latest main; chore-pr commits, pushes and opens the PR.
+function choreWorktree(slug) {
+  if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(slug)) die(`chore slug "${slug}" must be lowercase words joined by hyphens`);
+  if (!commonDir || !projectInRepo) die('chores need a git checkout with the project folder inside it');
+  if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
+  const wt = path.join(mainRoot, '.worktrees', `chore-${slug}`);
+  if (fs.existsSync(wt)) return wt;
+  const main = loadSettings().main_branch;
+  git(['fetch', '--quiet', 'origin', main]);
+  const base = resolveCommit(`origin/${main}`) ? `origin/${main}` : main;
+  try {
+    execFileSync('git', ['worktree', 'add', '--quiet', '-B', `chore-${slug}`, wt, base], { cwd: mainRoot, stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (e) {
+    die(`git worktree add failed: ${(e.stderr || e.message).toString().trim()}`);
+  }
+  return wt;
+}
+
+function cmdChorePr() {
+  const [slug] = positional;
+  const title = flagStr('title');
+  if (!slug || !title) die('usage: chore-pr <slug> --title "<summary>"   (commits everything in .worktrees/chore-<slug> and opens the PR)');
+  if (logWriter() !== 'supervisor') die('only the supervisor opens chore PRs');
+  const wt = path.join(mainRoot, '.worktrees', `chore-${slug}`);
+  if (!fs.existsSync(wt)) die(`no worktree .worktrees/chore-${slug}; start one with the command that drafts the file (retro, goal plan) or devteam.mjs chore-start ${slug}`);
+  const run = (args) => {
+    try {
+      return execFileSync('git', args, { cwd: wt, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    } catch (e) {
+      die(`git ${args.join(' ')} failed: ${(e.stderr || e.message).toString().trim()}`);
+    }
+  };
+  run(['add', '-A']);
+  if (run(['status', '--porcelain'])) run(['commit', '--quiet', '-m', `chore-${slug}: ${title}`]);
+  run(['push', '--quiet', '--force', 'origin', `chore-${slug}:chore-${slug}`]);
+  let pr = '';
+  try {
+    pr = execFileSync('gh', ['pr', 'list', '--head', `chore-${slug}`, '--state', 'open', '--json', 'url', '--jq', '.[0].url'], { cwd: wt, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    if (!pr) {
+      const body = `${flagStr('body') ?? title}\n\n## One-way doors\n\nNone.\n`;
+      pr = execFileSync('gh', ['pr', 'create', '--head', `chore-${slug}`, '--base', loadSettings().main_branch, '--title', `chore-${slug}: ${title}`, '--body', body], { cwd: wt, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    }
+  } catch {
+    warn(`gh is not available or failed; open the PR from branch chore-${slug} by hand`);
+  }
+  process.stdout.write(`pushed chore-${slug}${pr ? `: ${pr}` : ''}\nmerge it once CI passes, then: git worktree remove .worktrees/chore-${slug}\n`);
+}
+
+function cmdChoreStart() {
+  const [slug] = positional;
+  if (!slug) die('usage: chore-start <slug>');
+  if (logWriter() !== 'supervisor') die('only the supervisor starts chore worktrees');
+  process.stdout.write(`${choreWorktree(slug)}\n`);
+}
+
+// ---------- retros (process/improvement.md §3.1) ----------
+
+const RETRO_DIR = 'improvement/retros';
+const lastRetro = () => logObjects('observation').filter((o) => o.kind === 'retro' && o.created_by === 'supervisor').sort((a, b) => a.created_at.localeCompare(b.created_at)).pop() ?? null;
+
+// Features whose every active ticket has merged, with the time the last one merged.
+function finishedFeatures() {
+  const { tickets } = loadGraph();
+  const byFeature = new Map();
+  for (const t of tickets.values()) if (isActive(t) && t.feature !== CHORES_FEATURE) (byFeature.get(t.feature) ?? byFeature.set(t.feature, []).get(t.feature)).push(t);
+  const out = [];
+  for (const [f, ts] of byFeature) {
+    const shas = ts.map((t) => mergeShaFor(t.id));
+    if (shas.some((x) => !x)) continue;
+    const at = shas.map((sha) => new Date(git(['show', '-s', '--format=%cI', sha]) ?? 0).toISOString()).sort().pop();
+    out.push({ feature: f, finished_at: at });
+  }
+  return out;
+}
+
+function retroDue() {
+  const last = lastRetro();
+  const every = loadSettings().retro_every_days ?? 7;
+  const lastAt = last ? Date.parse(last.created_at) : null;
+  const reasons = [];
+  let since = null;
+  if (!last) {
+    const firstPhase = logObjects('phase').map((p) => p.created_at).sort()[0];
+    if (firstPhase && Date.now() - Date.parse(firstPhase) >= every * 864e5) {
+      reasons.push(`no retro yet, and work started ${firstPhase.slice(0, 10)}`);
+      since = new Date(Date.parse(firstPhase) + every * 864e5).toISOString();
+    }
+  } else if (Date.now() - lastAt >= every * 864e5) {
+    reasons.push(`${every} days since the last retro (${last.created_at.slice(0, 10)})`);
+    since = new Date(lastAt + every * 864e5).toISOString();
+  }
+  for (const f of finishedFeatures()) {
+    if (!lastAt || Date.parse(f.finished_at) > lastAt) {
+      reasons.push(`feature ${f.feature} finished ${f.finished_at.slice(0, 10)}`);
+      if (!since || f.finished_at < since) since = f.finished_at;
+    }
+  }
+  return { due: reasons.length > 0, reasons, due_since: since, last: last ? { at: last.created_at, summary: last.detail, file: last.source_ref ?? null } : null };
+}
+
+const retroState = () => retroDue();
+
+// The headline numbers a retro keeps, so the next one can compare (gates and messages live in
+// gitignored files, so only this snapshot survives).
+function retroNumbers(m) {
+  return {
+    tickets_merged: m.tickets_merged,
+    median_cycle_hours: m.cycle_hours.median,
+    usd_total: m.cost.usd_total,
+    usd_per_merged_ticket: m.cost.usd_per_merged_ticket,
+    phase_hours: m.phase_hours,
+    phase_usd: m.phase_usd,
+    first_pass_rejection: Object.fromEntries(Object.entries(m.reviews.by_stage).map(([k, v]) => [k, v.rejection_rate])),
+    escaped_defects: m.escaped_defects,
+    owner_answer_rate_14d: m.owner_questions.answer_rate_14d ?? null,
+    median_answer_hours: m.owner_questions.median_answer_hours,
+    flaky_tests: m.gates.flaky_tests.length,
+    slowest_gate: m.gates.gates[0] ? `${m.gates.gates[0].gate} ${m.gates.gates[0].median_seconds}s` : null,
+  };
+}
+
+function previousRetroNumbers(last) {
+  const text = last?.source_ref ? projectFileText(last.source_ref.replace(/^project\//, '')) : null;
+  const m = text?.match(/```json devteam-retro\s*\n([\s\S]*?)\n```/);
+  try {
+    return m ? JSON.parse(m[1]) : null;
+  } catch {
+    return null;
+  }
+}
+
+function retroDraft() {
+  const last = lastRetro();
+  const since = last ? Date.parse(last.created_at) : 0;
+  const sinceIso = last ? last.created_at : null;
+  const after = (iso) => !sinceIso || Date.parse(iso) > Date.parse(sinceIso);
+  const m = collectMetrics(since);
+  const nums = retroNumbers(m);
+  const prev = previousRetroNumbers(last);
+  const { tickets } = loadGraph();
+  const fmt = (v) => (v === null || v === undefined ? '-' : typeof v === 'object' ? Object.entries(v).map(([k, x]) => `${k} ${x}`).join(', ') || '-' : String(v));
+  const rows = ['tickets_merged', 'median_cycle_hours', 'usd_total', 'usd_per_merged_ticket', 'escaped_defects', 'owner_answer_rate_14d', 'median_answer_hours', 'flaky_tests', 'slowest_gate', 'first_pass_rejection', 'phase_hours', 'phase_usd'];
+  const merged = [...tickets.keys()].filter((id) => {
+    const sha = mergeShaFor(id);
+    return sha && after(git(['show', '-s', '--format=%cI', sha]) ?? '');
+  });
+  const rejected = [];
+  for (const id of [...merged, ...[...tickets.keys()].filter((x) => !mergeShaFor(x) && ticketBranchRef(x))]) {
+    const branch = ticketBranchRef(id);
+    for (const r of ticketReviews(id, branch && !mergeShaFor(id) ? { ref: branch } : WORKTREE)) {
+      if (r.pass === 1 && !r.variant && r.verdict === 'CHANGES') rejected.push(`${id} ${r.stage} (${r.file})`);
+    }
+  }
+  const corrections = logObjects('correction').filter((c) => after(c.created_at));
+  const trials = logObjects('act').filter((a) => a.class === 'improvement-trial' && after(a.created_at));
+  const outcomes = logObjects('observation').filter((o) => o.kind === 'outcome');
+  const openTrials = logObjects('act').filter((a) => a.class === 'improvement-trial' && !outcomes.some((o) => (o.refs ?? []).includes(a.id)));
+  const problems = logObjects('problem');
+  const goals = logObjects('goal').filter((g) => !['met', 'abandoned'].includes(g.status));
+  const readingDue = goals.filter((g) => !goalReadings(g.id).some((r) => after(r.created_at)));
+  const trust = trustTable().filter((t) => t.can_ask).map((t) => t.class);
+  const today = nowIso().slice(0, 10);
+  const L = [];
+  L.push(`# Retro ${today}`, '', `Since: ${sinceIso ? sinceIso.slice(0, 16).replace('T', ' ') : 'the start'}`, '');
+  L.push('## Summary for the owner', '', '<Two lines: what went well, what changes. This becomes the retro line on the dashboard.>', '');
+  L.push('## Numbers', '', '| | Now | Previous retro |', '|---|---|---|');
+  for (const k of rows) L.push(`| ${k.replace(/_/g, ' ')} | ${fmt(nums[k])} | ${prev ? fmt(prev[k]) : '-'} |`);
+  L.push('', '```json devteam-retro', JSON.stringify(nums), '```', '');
+  L.push('## Since the last retro', '');
+  L.push(`- **Merged:** ${merged.length ? merged.join(', ') : 'none'}`);
+  L.push(`- **Slowest:** ${m.cycle_hours.slowest.map((c) => `${c.id} ${c.hours}h`).join(', ') || '-'}`);
+  L.push(`- **Rejected at first review:** ${rejected.length ? rejected.join('; ') : 'none'}`);
+  L.push(`- **Corrections:** ${corrections.length ? corrections.map((c) => `${c.id} on ${c.act} (${logGet(c.act)?.class ?? '?'}): ${c.reason}`).join('; ') : 'none'}`);
+  L.push(`- **Trials started:** ${trials.length ? trials.map((a) => `${a.id} ${a.what}`).join('; ') : 'none'}`);
+  L.push(`- **Trials still without an outcome:** ${openTrials.length ? openTrials.map((a) => `${a.id} ${a.what}`).join('; ') : 'none'}`);
+  L.push(`- **Problems:** ${problems.filter((p) => after(p.created_at)).length} opened, ${problems.filter((p) => p.status === 'resolved' && p.updates.some((u) => u.status === 'resolved' && after(u.at))).length} resolved, ${problems.filter((p) => p.status !== 'resolved').length} open`);
+  L.push(`- **Goal readings due:** ${readingDue.length ? readingDue.map((g) => `${g.id} (${g.title})`).join(', ') : 'none'}`);
+  L.push(`- **Recurring signals to explain:** ${orientClusters().map((c) => `${c.key} x${c.count}`).join(', ') || 'none'}`);
+  L.push(`- **Trust evidence supports asking about:** ${trust.join(', ') || 'nothing yet'}`);
+  L.push(`- **Findings now:** ${m.findings.slice(0, 8).map((f) => `[${f.severity}] ${f.kind} ${f.subject}`).join('; ') || 'none'}`);
+  L.push('', '## Why', '', '<For each slow ticket, rejected review and correction above: why it happened. Cite files and ids.>', '');
+  L.push('## What we will change', '', '<Each one: a trial (act), a chore ticket, a lesson or problem, or one proposal question for the owner covering everything that needs them. Or "nothing, because …".>', '');
+  L.push('## Roadmap', '', '```', roadmapText(collectRoadmap()), '```', '');
+  return L.join('\n');
+}
+
+function cmdRetro() {
+  const [sub, arg] = positional;
+  if (flags.due) {
+    const d = retroDue();
+    process.stdout.write(d.due ? `due: ${d.reasons.join('; ')}\n` : `not due${d.last ? ` (last ${d.last.at.slice(0, 10)})` : ''}\n`);
+    process.exit(d.due ? 0 : 1);
+  }
+  if (logWriter() !== 'supervisor') die('the supervisor runs retros');
+  if (sub === 'close') {
+    // Record that the retro happened: one observation carrying the summary and what it produced.
+    const date = arg ?? die('usage: retro close <YYYY-MM-DD> --summary "<two lines>" [--refs ids]');
+    const rel = `${RETRO_DIR}/${date}.md`;
+    const wt = path.join(mainRoot, '.worktrees', `chore-retro-${date}`);
+    if (!fs.existsSync(path.join(wt, projectRel, rel)) && !projectFileText(rel)) die(`no retro file for ${date}; draft it with devteam.mjs retro`);
+    const line = appendLog({ type: 'observation', source: 'supervisor', subject: 'project', kind: 'retro', detail: flagStr('summary') ?? die('retro close needs --summary'), source_ref: `project/${rel}`, refs: asList(flags.refs) }, 'supervisor');
+    return void process.stdout.write(`${line.id}\n`);
+  }
+  if (flags.print) return void process.stdout.write(`${retroDraft()}\n`);
+  const date = nowIso().slice(0, 10);
+  const wt = choreWorktree(`retro-${date}`);
+  const file = path.join(wt, projectRel, RETRO_DIR, `${date}.md`);
+  if (fs.existsSync(file) && !flags.force) die(`${path.relative(mainRoot, file)} exists; edit it, or --force to redraft`);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, `${retroDraft()}\n`);
+  process.stdout.write(`drafted ${path.relative(mainRoot, file)}\nwrite Summary, Why and What we will change, then:\n  devteam.mjs chore-pr retro-${date} --title "retro ${date}"\n  devteam.mjs retro close ${date} --summary "<two lines>" --refs <ids it produced>\n`);
+}
+
+// ---------- the roadmap (process/planning.md §0): computed, never written ----------
+
+function collectRoadmap() {
+  const { tickets } = loadGraph();
+  const status = deriveStatus(tickets);
+  const prog = collectProgress(tickets, status);
+  const now = Date.now();
+  const items = prog.tickets;
+  // Rate: points merged per day over the last 14 days (the same window as the burn-up).
+  const window = 14 * 864e5;
+  const recentPts = items.filter((t) => t.merged_at && now - Date.parse(t.merged_at) <= window).reduce((a, t) => a + t.weight, 0);
+  const rate = recentPts / 14;
+  const m = collectMetrics(0);
+  const cycleDays = m.cycle_hours.median ? m.cycle_hours.median / 24 : null;
+  const openQs = readQuestions().filter((q) => q.status === 'open');
+  const goals = logObjects('goal').filter((g) => !['met', 'abandoned'].includes(g.status)).sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99));
+  const rankOf = new Map(goals.map((g, i) => [g.id, i]));
+  const featureView = (f) => {
+    const ts = items.filter((t) => t.feature === f);
+    const left = ts.filter((t) => !t.merged_at);
+    // Remaining waves: the longest dependency chain among this feature's unmerged tickets.
+    const sub = new Map(left.map((t) => [t.id, { ...t, depends_on: t.depends_on.filter((d) => left.some((x) => x.id === d)) }]));
+    let waves = 0;
+    if (sub.size && !findCycle(sub)) {
+      const memo = new Map();
+      const depth = (id) => memo.get(id) ?? (memo.set(id, 1 + Math.max(0, ...sub.get(id).depends_on.map(depth))), memo.get(id));
+      waves = Math.max(...[...sub.keys()].map(depth));
+    }
+    const storyIds = Object.entries(prog.stories).filter(([, s]) => s.feature === f).map(([id]) => id);
+    const storyDone = storyIds.filter((sid) => {
+      const st = ts.filter((t) => t.serves.includes(sid));
+      return st.length && st.every((t) => t.merged_at);
+    }).length;
+    return {
+      feature: f,
+      status: featureStatus(f) ?? (f === CHORES_FEATURE ? 'chores' : 'no plan'),
+      goals: featureGoals(f),
+      points_total: ts.reduce((a, t) => a + t.weight, 0),
+      points_left: left.reduce((a, t) => a + t.weight, 0),
+      stories: { done: storyDone, total: storyIds.length },
+      waves_left: waves,
+      releases: [...new Set(ts.map((t) => t.target_release).filter(Boolean))].sort(),
+      blocked_by_questions: openQs.filter((q) => q.blocks.some((b) => ts.some((t) => t.id === b))).map((q) => q.id),
+    };
+  };
+  const allFeatures = [...new Set([...items.map((t) => t.feature), ...(() => {
+    const dir = path.join(projectDir, 'features');
+    return fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith('.md')).map((f) => f.replace(/\.md$/, '')) : [];
+  })()])];
+  const views = allFeatures.map(featureView);
+  // Sequence: by best-ranked goal, then features with more of the critical path first, then size.
+  const bestRank = (v) => Math.min(99, ...v.goals.map((g) => rankOf.get(g) ?? 99));
+  const ordered = views.filter((v) => v.goals.some((g) => rankOf.has(g))).sort((a, b) => bestRank(a) - bestRank(b) || b.waves_left - a.waves_left || b.points_left - a.points_left);
+  let cum = 0;
+  for (const v of ordered) {
+    cum += v.points_left;
+    if (!v.points_left) v.eta = null;
+    else if (!rate) v.eta = null;
+    else {
+      const days = Math.max(cum / rate, cycleDays ? v.waves_left * cycleDays : 0);
+      v.eta = new Date(now + days * 864e5).toISOString().slice(0, 10);
+    }
+    v.done = v.points_total > 0 && v.points_left === 0;
+  }
+  const goalRows = goals.map((g) => {
+    const c = goalCheck(g);
+    const feats = ordered.filter((v) => bestRank(v) === rankOf.get(g.id) || v.goals.includes(g.id));
+    const etas = feats.map((v) => v.eta).filter(Boolean).sort();
+    return {
+      id: g.id, title: g.title, priority: g.priority ?? null, status: g.status ?? 'draft',
+      unplanned: c.unplanned,
+      features: feats.map((v) => v.feature),
+      eta: c.unplanned.length || !feats.length ? null : (feats.every((v) => v.done) ? 'done' : etas.pop() ?? null),
+      has_plan: !!goalPlanText(g.id),
+    };
+  });
+  return {
+    generated_at: nowIso(),
+    rate_points_per_day: +rate.toFixed(2),
+    median_cycle_days: cycleDays === null ? null : +cycleDays.toFixed(1),
+    goals: goalRows,
+    features: Object.fromEntries(views.map((v) => [v.feature, v])),
+    unassigned: views.filter((v) => !v.goals.some((g) => rankOf.has(g))).map((v) => v.feature),
+    note: 'Estimates assume goal-priority order at the current rate; a feature finishes no sooner than its remaining waves times the median cycle time. Goals with unplanned preconditions have no date.',
+  };
+}
+
+function roadmapText(r) {
+  const week = (d) => {
+    if (!d) return 'no date';
+    const x = new Date(`${d}T00:00:00Z`);
+    x.setUTCDate(x.getUTCDate() - ((x.getUTCDay() + 6) % 7)); // that week's Monday
+    return `week of ${x.toISOString().slice(0, 10)}`;
+  };
+  const L = [`rate ${r.rate_points_per_day} points/day; median cycle ${r.median_cycle_days ?? '-'} days`];
+  for (const g of r.goals) {
+    L.push('', `${g.priority ? `p${g.priority} ` : ''}${g.title} [${g.status}] -> ${g.eta === 'done' ? 'done' : week(g.eta)}${g.has_plan ? '' : ' (no goal plan)'}`);
+    for (const u of g.unplanned) L.push(`  unplanned: precondition ${u.n}: ${u.text}`);
+    for (const f of g.features) {
+      const v = r.features[f];
+      L.push(`  ${v.feature} [${v.status}] ${v.points_total - v.points_left}/${v.points_total} pts, stories ${v.stories.done}/${v.stories.total}, ${v.waves_left} waves left${v.releases.length ? `, ${v.releases.join(' ')}` : ''} -> ${v.done ? 'done' : week(v.eta)}${v.blocked_by_questions.length ? `; waiting on ${v.blocked_by_questions.join(' ')}` : ''}`);
+    }
+  }
+  if (r.unassigned.length) L.push('', `serving no goal: ${r.unassigned.join(', ')}`);
+  return L.join('\n');
+}
+
+function cmdRoadmap() {
+  const r = collectRoadmap();
+  if (flags.json) return void process.stdout.write(`${JSON.stringify(r, null, 2)}\n`);
+  process.stdout.write(`${roadmapText(r)}\n\n${r.note}\n`);
 }
 
 const HELP = `devteam <command>   (put positional arguments before flags)
@@ -2517,7 +2871,10 @@ The log: observe, orient, decide, act (process/log.md)
   correct <act-id> --reason r [--severity n] [--repair undo|fix-ticket|none]   owner (supervisor: --retro)
   seen [--upto time]              owner: mark the act feed read
   trust [--json]                  the trust ladder: rung, ceiling, evidence per class (governance/autonomy.md)
-  goal [list|check|add|set|approve|status|reading] …   goals and their readiness (process/planning.md §0)
+  goal [list|check|add|set|approve|status|reading|plan] …   goals, their readiness, and goal plans (process/planning.md §0)
+  roadmap [--json]                goals by priority with unplanned preconditions, features, waves, releases, estimated finish
+  retro [--due | --print | close <date> --summary s --refs ids]   draft a retro in a chore worktree; record it (process/improvement.md §3.1)
+  chore-start <slug> | chore-pr <slug> --title t   a supervisor chore in its own worktree, and its PR
 
 Run state and history
   heartbeat [--phase p] [--task t] [--note n] [--usd x --in n --out n --cost-source s] [--supervisor]
@@ -2562,6 +2919,10 @@ const COMMANDS = {
   trust: cmdTrust,
   goal: cmdGoal,
   goals: cmdGoal,
+  retro: cmdRetro,
+  roadmap: cmdRoadmap,
+  'chore-pr': cmdChorePr,
+  'chore-start': cmdChoreStart,
   send: cmdSend,
   messages: cmdMessages,
   recorded: cmdRecorded,

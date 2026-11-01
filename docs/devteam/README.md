@@ -36,6 +36,12 @@ The work, from largest to smallest:
 
 Above all of it sits the **goal**: an outcome the owner wants, with a measure, a target and a date. Features name the goals they serve.
 
+Three kinds of plan, each answering one question:
+
+- **goal plan** (`project/goals/<id>.md`): why this goal, and the chain from its outcome back to the features that make it true.
+- **architecture** (`project/designs/architecture.md`): how the whole system works now; each feature's **design** (`project/designs/<slug>.md`) says how one feature will change it.
+- **roadmap**: what's next and roughly when. Computed from goal priorities, feature plans, release maps and throughput (`devteam.mjs roadmap`, and the dashboard), never written by hand.
+
 The loop's record ([`process/log.md`](process/log.md)):
 
 - **observation**: something noticed: a metric finding, a slow test, a goal reading, the outcome of a decision.
@@ -69,14 +75,15 @@ docs/devteam/
   scripts/             zero-dependency tools (Node 20+, bash)
   project/             THIS project's content; created at bootstrap, never touched by upstream sync
     settings.md         the project's answers to every open decision
-    designs/           <slug>.md system designs (and baseline.md when adopting an existing codebase)
+    designs/           architecture.md (the whole system now) and <slug>.md (one per feature)
+    goals/             <goal-id>.md: the reverse chain for each goal, in prose
     features/          <feature>.md feature plans
     graph/             <ticket-id>.json, the work graph (tracked, written by planning)
     tickets/<id>/      spec.md, plan.md, reviews/, verification.md for each ticket
     reviews/<feature>/ design and graph review records
     decisions.md       cross-cutting rulings, dated
     log/               the durable log: <writer>.jsonl, one JSON object per line (process/log.md)
-    improvement/       metrics snapshots and research notes
+    improvement/       retros/<date>.md (each with its numbers) and research/ notes
     upstream-log.md    upstream releases considered and what was adopted, adapted or skipped
   run/                 live runtime state (gitignored): heartbeats, session messages, and log/ (the live log, synced daily into project/log)
 ```
@@ -113,6 +120,7 @@ git, tmux, Node 20+ (scripts use only built-ins), the GitHub CLI, one agent CLI 
 | `answer`, `correct`, `seen`, `goal approve` | owner | answering (and how to handle the next one), correcting an act, approving a goal; usually from the dashboard |
 | `goal`, `observe`, `orient`, `knowledge`, `problem`, `act`, `trust` | supervisor (workers: `observe`) | the loop: goals, observations, knowledge, problems, acts, the trust ladder |
 | `log`, `log-check`, `log-sync` | supervisor, CI | read and check the log; the daily log-only PR |
+| `roadmap`, `retro`, `goal plan`, `chore-pr` | supervisor | the computed roadmap; drafting and recording retros; goal plans; PRs for supervisor-written files |
 | `heartbeat`, `event`, `history`, `whoami` | worker, supervisor | live state, the event log, catching up on history |
 | `gate <name> -- <cmd>` | worker | run a gate and record its time, result and tests |
 | `metrics`, `dashboard-data` | supervisor | time and cost by phase, gate health, findings; data for the dashboard |

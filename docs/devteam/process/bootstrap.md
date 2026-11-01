@@ -10,7 +10,8 @@ How devteam gets materialized into a project repo, and how the first session get
    - `settings.md` from [`templates/settings.md`](../templates/settings.md)
    - `decisions.md` from [`templates/decisions.md`](../templates/decisions.md)
    - `upstream-log.md` from [`templates/upstream-log.md`](../templates/upstream-log.md), with a first row recording the release tag you copied (this is the base for upstream checks in `improvement.md` §3.4)
-   - empty `designs/`, `features/`, `graph/`, `tickets/`, `reviews/`, `log/`, `improvement/research/` folders (each with a `.gitkeep`)
+   - `designs/architecture.md` from [`templates/architecture.md`](../templates/architecture.md) (for an existing codebase, filled in from the code: §5.1)
+   - empty `features/`, `graph/`, `tickets/`, `reviews/`, `log/`, `goals/`, `improvement/research/`, `improvement/retros/` folders (each with a `.gitkeep`)
 4. Create or update the repo root `AGENTS.md` from [`templates/AGENTS.md`](../templates/AGENTS.md). If an `AGENTS.md` exists, append the devteam section rather than replacing it. If a `CLAUDE.md` exists and is not already a symlink, add a line to it pointing at `AGENTS.md`; otherwise create `CLAUDE.md` as a symlink to `AGENTS.md`.
 5. Add `.worktrees/` to the root `.gitignore`.
 6. Add the CI jobs from [`templates/github/devteam.yml`](../templates/github/devteam.yml) (adapt to the project's CI if it is not GitHub Actions), and list `devteam-validate` and `merge-word` as required checks in the intended branch rules (`ci.md` §3).
@@ -48,9 +49,9 @@ Do not fix the whole codebase in this PR. If a gate fails on existing code, turn
 
 An established repo differs from a new one in four ways. Handle each before the first feature is planned.
 
-### 5.1 Write a baseline
+### 5.1 Write the architecture doc from the code
 
-Planning designs changes against a picture of the system. For a new repo that picture is empty; for an existing one, write it once, from [`templates/baseline.md`](../templates/baseline.md), to `project/designs/baseline.md`:
+Planning designs changes against a picture of the system: `project/designs/architecture.md`, from [`templates/architecture.md`](../templates/architecture.md). For a new repo it starts nearly empty (§1). For an existing one, write it from the code before the first feature is planned:
 
 - components, what each owns, and how they talk to each other;
 - the contracts that already exist, explicit or implied (APIs, schemas, events, shared tables), with where each is defined;
@@ -59,13 +60,13 @@ Planning designs changes against a picture of the system. For a new repo that pi
 - hotspots: the files most changed and most depended on, which will make footprints overlap;
 - tests and CI as they stand: what is covered, what is flaky, how long the suite takes.
 
-The baseline is reviewed like a design (`project/reviews/baseline/design-1.md`). During bootstrap there is no supervisor yet, so the bootstrapping agent approves it; the first supervisor re-reads it on startup and raises anything it disagrees with. Every later design's research (planning P1) starts from it and updates it in the same planning PR when it changes something the baseline describes.
+It is reviewed like a design (`project/reviews/architecture/design-1.md`). During bootstrap there is no supervisor yet, so the bootstrapping agent approves it; the first supervisor re-reads it on startup and raises anything it disagrees with. From then on it is the living picture of the system: every design's research (planning P1) starts from it, and every planning PR that changes something it describes updates it (planning P6). The version written at adoption stays in git history.
 
 ### 5.2 Account for work already in flight
 
 Open PRs, active branches and issue-tracker entries are work the graph doesn't know about. For each:
 
-- **finish it outside devteam** if it is close to done: list it in the baseline's "In flight" table with the files it changes. Planning must not schedule a ticket whose `touches` overlap those files until it merges or is abandoned;
+- **finish it outside devteam** if it is close to done: list it in the architecture doc's "In flight" table with the files it changes. Planning must not schedule a ticket whose `touches` overlap those files until it merges or is abandoned;
 - **adopt it** if it is early: once a feature plan covers it, write a ticket for it in that feature, rename or recreate the branch as `ticket/<id>`, and let it continue through the ticket lifecycle from whichever stage its files support. Until then, list it under In flight like finished-outside work. (Only `chore` and `spike` tickets may use the `chores` feature, so cleanup and investigation branches can be adopted there straight away.)
 - **close it** if it is stale: ask the owner first (one batched question).
 
@@ -78,7 +79,7 @@ The code rules (`code-style.md`) apply in full to **new and changed code**. Exis
 - **Ratchet mode** for a gate: record the current violation count per component in the Known debt section of the settings. The gate fails if the count goes up, or if a file a PR changes has a violation in a line it changed. It never fails on untouched legacy code.
 - A worker that needs to change legacy code inside its `touches` brings the lines it changes up to the code rules and leaves the rest alone. A larger cleanup is its own ticket.
 - Each gate moves from ratchet to enforced when its chore ticket lands, and the gate table in the settings says so.
-- Structural Laws that legacy code violates widely (functional core, result values) apply at **module boundaries a ticket creates or changes**. The baseline says where the old structure is; designs say how new code wraps it.
+- Structural Laws that legacy code violates widely (functional core, result values) apply at **module boundaries a ticket creates or changes**. The architecture doc says where the old structure is; designs say how new code wraps it.
 
 ### 5.4 Start narrow
 
