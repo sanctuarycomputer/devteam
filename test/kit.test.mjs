@@ -907,4 +907,27 @@ test('devteam kit', async (t) => {
     assert.ok(!json(must(['metrics', '--json'])).findings.some((f) => f.kind === 'review-churn' && f.subject === 'bill-01-card'));
     fs.rmSync(r3);
   });
+
+  await t.test('goal list flags take separate values or one JSON array of strings, and refuse anything else that looks like JSON', () => {
+    const sup = { role: 'sup' };
+    const Gj = must(['goal', 'add', '--title', 'Refunds', '--preconditions', '["refund API", "ledger entries"]', '--non-goals', '["chargebacks"]', '--plan-after', JSON.stringify([G]), '--reason', 'billing first'], sup);
+    let gv = json(must(['goal', 'show', Gj, '--json']));
+    assert.deepEqual(gv.preconditions, ['refund API', 'ledger entries'], 'a JSON array is the list, not one item');
+    assert.deepEqual(gv.non_goals, ['chargebacks']);
+    assert.deepEqual(gv.plan_after.map((p) => p.goal), [G]);
+    must(['goal', 'set', Gj, '--preconditions', 'refund API', 'ledger entries', 'emails sent', '--non-goals', 'chargebacks', 'disputes'], sup);
+    gv = json(must(['goal', 'show', Gj, '--json']));
+    assert.deepEqual(gv.preconditions, ['refund API', 'ledger entries', 'emails sent'], 'separate values still work');
+    assert.deepEqual(gv.non_goals, ['chargebacks', 'disputes']);
+    must(['goal', 'set', Gj, '--preconditions', 'refunds clear in a day'], sup);
+    assert.deepEqual(json(must(['goal', 'show', Gj, '--json'])).preconditions, ['refunds clear in a day'], 'one plain value is one item');
+    for (const [flag, bad] of [['--preconditions', '["a", "b"'], ['--preconditions', '[1, 2]'], ['--non-goals', '["a", {"b": 1}]'], ['--preconditions', '[not json]']]) {
+      const r = dt(['goal', 'set', Gj, flag, bad], sup);
+      assert.notEqual(r.status, 0, `${flag} ${bad} refused`);
+      assert.match(r.err, /looks like JSON but is not an array of strings/);
+    }
+    const Gk = must(['goal', 'add', '--title', 'Braces', '--preconditions', '{"a": 1}'], sup);
+    assert.deepEqual(json(must(['goal', 'show', Gk, '--json'])).preconditions, ['{"a": 1}'], 'only a value starting with [ is read as JSON');
+    assert.deepEqual(json(must(['goal', 'show', Gj, '--json'])).preconditions, ['refunds clear in a day'], 'a refused set changes nothing');
+  });
 });
