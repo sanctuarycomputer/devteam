@@ -8,6 +8,8 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/lucide-static@0.460.0/font/lucide.css">
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js" defer></script>
 <style>
   /* Geist tokens (vercel.com/geist), a Linear-style shell. Light and dark are separate scales. */
   :root {
@@ -276,6 +278,20 @@
   .tl li.q::before { background: var(--amber); } .tl li.act::before { background: var(--blue); } .tl li.msg::before { background: var(--green); } .tl li.gate.fail::before { background: var(--red); }
   .tl time { color: var(--muted); font-size: 11.5px; margin-right: 6px; }
   .viewer pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 12.5px/1.6 var(--mono); max-width: var(--measure); }
+  .viewbar { display: flex; align-items: center; gap: 10px; margin: 0 0 12px; font-size: 12px; color: var(--muted); }
+  .viewbar .grow { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .seg2 { display: inline-flex; border: 1px solid var(--line-2); border-radius: 7px; overflow: hidden; }
+  .seg2 button { margin: 0; height: 24px; border: 0; border-radius: 0; background: var(--surface); color: var(--fg-2); font-weight: 500; padding: 0 10px; }
+  .seg2 button[aria-pressed="true"] { background: var(--well); color: var(--fg); }
+  .md { max-width: var(--measure); font-size: 13.5px; line-height: 1.65; }
+  .md h1 { font-size: 19px; margin: 6px 0 12px; } .md h2 { font-size: 16px; margin: 22px 0 8px; display: block; } .md h3 { font-size: 14px; margin: 18px 0 6px; color: var(--fg); }
+  .md p, .md ul, .md ol { margin: 8px 0; } .md li { margin: 3px 0; }
+  .md code { background: var(--well); padding: 1px 4px; border-radius: 4px; }
+  .md pre { background: var(--well); padding: 10px 12px; border-radius: 8px; overflow-x: auto; }
+  .md pre code { background: none; padding: 0; }
+  .md table { font-size: 12.5px; margin: 10px 0; display: block; overflow-x: auto; }
+  .md blockquote { margin: 8px 0; padding: 2px 12px; border-left: 2px solid var(--line-2); color: var(--fg-2); }
+  .md a { color: var(--blue-fg); text-decoration: underline; }
   .viewer iframe { width: 100%; height: 70vh; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
   .viewer img { max-width: 100%; border: 1px solid var(--line); border-radius: 8px; }
   @media (max-width: 900px) { .drawer { padding: 16px; } .drawer dl { grid-template-columns: 1fr; } }
@@ -1015,7 +1031,17 @@ async function openFile(params) {
   if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext)) return showDrawer(`<h2 id="drawer-title">${esc(title)}</h2><div class="viewer"><img src="${esc(url)}" alt="${esc(title)}"></div>`);
   if (['html', 'pdf'].includes(ext)) return showDrawer(`<h2 id="drawer-title">${esc(title)}</h2><div class="viewer"><iframe sandbox src="${esc(url)}" title="${esc(title)}"></iframe></div><p class="meta"><a href="${esc(url)}" target="_blank" rel="noopener">Open in a new tab</a></p>`);
   showDrawer(`<h2 id="drawer-title">${esc(title)}</h2><p class="loading">Loading…</p>`);
-  try { const r = await fetch(url); const txt = await r.text(); if (!r.ok) throw new Error(txt); showDrawer(`<h2 id="drawer-title">${esc(title)}</h2><div class="muted small"><code>${esc(p)}</code>${params.get('ref') ? ` at <code>${esc(params.get('ref'))}</code>` : ''}</div><div class="viewer"><pre>${esc(txt)}</pre></div>`); }
+  try {
+    const r = await fetch(url); const txt = await r.text(); if (!r.ok) throw new Error(txt);
+    const where = `<code>${esc(p)}</code>${params.get('ref') ? ` at <code>${esc(params.get('ref'))}</code>` : ''}`;
+    // Markdown renders (sanitized: agents write these files) with a toggle back to the raw text.
+    const isMd = ['md', 'markdown'].includes(ext) && window.marked && window.DOMPurify;
+    const mode = (() => { try { return localStorage.getItem('devteam.mdview') || 'rendered'; } catch { return 'rendered'; } })();
+    const rendered = isMd ? DOMPurify.sanitize(marked.parse(txt, { gfm: true }), { FORBID_TAGS: ['style', 'form', 'input'], FORBID_ATTR: ['style'] }) : '';
+    showDrawer(`<h2 id="drawer-title">${esc(title)}</h2>
+      <div class="viewbar"><span class="grow">${where}</span>${isMd ? `<span class="seg2" role="group" aria-label="View"><button type="button" data-mdview="rendered" aria-pressed="${mode === 'rendered'}">Rendered</button><button type="button" data-mdview="raw" aria-pressed="${mode === 'raw'}">Raw</button></span>` : ''}</div>
+      <div class="viewer">${isMd ? `<div class="md" data-md="rendered" ${mode === 'raw' ? 'hidden' : ''}>${rendered}</div>` : ''}<pre data-md="raw" ${isMd && mode !== 'raw' ? 'hidden' : ''}>${esc(txt)}</pre></div>`);
+  }
   catch (e) { showDrawer(`<h2 id="drawer-title">${esc(title)}</h2><p class="err">${esc(e.message)}</p>`); }
 }
 function route() {
@@ -1183,6 +1209,14 @@ $('view').addEventListener('change', (e) => {
 });
 
 document.addEventListener('click', async (ev) => {
+  const mv = ev.target.closest('[data-mdview]');
+  if (mv) {
+    const v = mv.dataset.mdview;
+    try { localStorage.setItem('devteam.mdview', v); } catch {}
+    document.querySelectorAll('[data-mdview]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mdview === v)));
+    document.querySelectorAll('#drawer-body [data-md]').forEach((el) => { el.hidden = el.dataset.md !== v; });
+    return;
+  }
   const pl = ev.target.closest('[data-planner]');
   if (pl) { location.hash = `planner/${pl.dataset.planner}`; return; }
   const cp = ev.target.closest('[data-copy]');

@@ -590,6 +590,16 @@ test('devteam kit', async (t) => {
     must(['answer', Qs, 'yes', '--rule', 'adopt upstream devteam releases as they ship']);
     assert.equal(json(must(['knowledge', '--json'])).find((k) => k.statement === 'adopt upstream devteam releases as they ship').scope, 'chore:devteam-sync');
     assert.match(must(args, { role: 'sup' }), /match upstream v0\.3\.0 exactly/);
+    // a later release folded into the open sync PR is checked against the upstream_base the PR sets
+    fs.appendFileSync(path.join(up, 'docs/devteam/governance/quality.md'), '\nAnother upstream rule.\n');
+    git(['commit', '-qam', 'next release'], up);
+    git(['tag', 'v0.3.1'], up);
+    fs.copyFileSync(path.join(up, 'docs/devteam/governance/quality.md'), path.join(wt('sync'), 'docs/devteam/governance/quality.md'));
+    const sf = path.join(wt('sync'), 'docs/devteam/project/settings.md');
+    fs.writeFileSync(sf, fs.readFileSync(sf, 'utf8').replace('"gates": {', '"upstream_base": "v0.3.1", "gates": {'));
+    git(['commit', '-qam', 'fold in v0.3.1'], wt('sync'));
+    git(['push', '-q', 'origin', 'chore-devteam-sync-v0-3-0'], wt('sync'));
+    assert.match(must(args, { role: 'sup' }), /match upstream v0\.3\.1 exactly/, 'folded release checked against the PR\'s upstream_base');
     // anything the supervisor wrote itself is not covered
     fs.appendFileSync(path.join(wt('sync'), 'docs/devteam/process/worker.md'), '\nA local edit.\n');
     git(['commit', '-qam', 'local'], wt('sync'));

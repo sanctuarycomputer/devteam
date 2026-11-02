@@ -1531,7 +1531,12 @@ function upstreamSyncApproval(chore, sha, changed) {
   if (!rule) return {};
   const s = loadSettings();
   const src = /^[\w.-]+\/[\w.-]+$/.test(s.upstream_repo ?? '') ? `https://github.com/${s.upstream_repo}.git` : s.upstream_repo;
-  const raw = chore.slice('devteam-sync-'.length);
+  // The release the PR adopts: the upstream_base it sets in settings.md (so a sync PR that folded in
+  // a later release is checked against that one), else the tag in its slug. Either way the files
+  // are compared with that tag fetched from upstream_repo as it is on main.
+  const mb = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
+  const setBase = settingsAt(sha)?.upstream_base;
+  const raw = setBase && setBase !== (mb ? settingsAt(mb)?.upstream_base : null) ? setBase : chore.slice('devteam-sync-'.length);
   let tag = null;
   for (const t of new Set([raw, raw.replace(/^(v\d+)-(\d+)-(\d+)/, '$1.$2.$3')])) {
     if (git(['fetch', '--quiet', '--no-tags', src, `+refs/tags/${t}:refs/devteam-upstream/${t}`], mainRoot) !== null) { tag = t; break; }
