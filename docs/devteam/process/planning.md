@@ -106,7 +106,7 @@ devteam.mjs ticket add api-07-session-tokens --json '{
 
 | Field | Meaning |
 |---|---|
-| id | `<component>-<NN>-<slug>`; `NN` is the next free number for that component; numbers never move or get reused |
+| id | `<component>-<NN>-<slug>`; a planner takes `NN` in order from the block of numbers `planner <feature>` reserved for its feature (it is in the prompt; `prompt planner <feature>` shows it again), because planners run in parallel and can't see each other's numbers; ask the supervisor for another block rather than going past it. Without a planner, `NN` is the next free number. `validate` on the plan branch warns about a number outside the block, and `merge --plan` refuses an id already on main. Numbers never move or get reused |
 | title | one line a user could read; it becomes the PR title after the id |
 | feature, component | the feature slug; the one component this ticket changes (contract tickets may span two) |
 | kind | `contract`, `build`, `integration`, `chore`, `spike` |

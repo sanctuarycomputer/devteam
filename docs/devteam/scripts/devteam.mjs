@@ -1191,6 +1191,17 @@ function cmdValidate() {
     if (t.kind === 'contract' && !(t.contracts?.provides ?? []).length) err(id, 'contract ticket must list contracts.provides (D2)');
     if (t.feature !== CHORES && !fs_.has(t.feature)) err(id, `feature "${t.feature}" is not in the log (devteam.mjs feature add)`);
   }
+  // On a plan branch, the feature's tickets number from its reserved block (a planner made before
+  // blocks has none and is not checked).
+  {
+    const pf = onPlanBranch() ? (git(['rev-parse', '--abbrev-ref', 'HEAD']) ?? '').slice('plan/'.length) : null;
+    const b = pf ? idBlockFor(pf) : null;
+    if (b) for (const t of ts.values()) {
+      if (t.created_by !== `plan-${pf}`) continue;
+      const n = ticketNumber(t.id, t.component);
+      if (n === null || n < b.from || n > b.to) warnings.push(`${t.id}: its number is outside the block reserved for ${pf} (${padNN(b.from)}-${padNN(b.to)}); another planner may take it`);
+    }
+  }
   const cycle = findCycle(ts);
   if (cycle) errors.push(`dependency cycle: ${cycle.join(' -> ')} (D3)`);
 
@@ -1680,6 +1691,15 @@ function cmdMerge() {
   const sha = pr.headRefOid;
   if (!resolveCommit(sha)) die(`cannot find ${sha} locally after fetching ${branch}`);
   const fails = checkPr({ headRef: branch, sha, title: pr.title, body: pr.body });
+  // A plan's ticket ids are new: one already on main (another plan took the number) is refused
+  // outright; renumber on the branch.
+  if (plan) {
+    const by = `plan-${plan}`;
+    const onMain = tickets();
+    const text = git(['show', `${sha}:${projectRel}/log/${by}.jsonl`]) ?? '';
+    const dup = [...new Set(text.split('\n').filter(Boolean).map((t) => { try { return JSON.parse(t); } catch { return null; } }).filter((o) => o?.type === 'ticket' && o.op === 'new' && onMain.has(o.id) && onMain.get(o.id).created_by !== by).map((o) => o.id))];
+    if (dup.length) fails.push(`ticket id${dup.length > 1 ? 's' : ''} already on main: ${dup.join(', ')}; renumber them on ${branch} (from its reserved block) and ask again`);
+  }
   if (['BEHIND', 'DIRTY'].includes(pr.mergeStateStatus)) fails.push(`PR is ${pr.mergeStateStatus.toLowerCase()} relative to main; the author merges main and asks again`);
   // A chore PR that touches the kit, the agent config or the forge config carries an owner answer
   // (classes governance-edit, process-edit, gate-change); project/ files are the supervisor's.
@@ -3085,7 +3105,7 @@ const PROMPTS = {
 function cmdPrompt() {
   const role = positional[0];
   if (!PROMPTS[role]) die('usage: prompt supervisor|worker <ticket-id>|planner <feature>');
-  const p = PROMPTS[role].replace(/\{\{ID\}\}/g, positional[1] ?? '');
+  const p = role === 'planner' && positional[1] ? plannerPrompt(positional[1]) : PROMPTS[role].replace(/\{\{ID\}\}/g, positional[1] ?? '');
   const block = role === 'supervisor' ? '' : knowledgeBlock(positional[1]);
   out(block ? `${p}\n\n${block}` : p);
 }
@@ -3240,6 +3260,47 @@ function cmdStopOk() {
   process.exit(0);
 }
 
+// --- ticket number blocks ---
+//
+// Planners run in parallel, each on its own branch, so none can see the numbers the others take.
+// `planner <feature>` reserves a block of ticket numbers for the feature (an id_block on the act
+// that made it) above every number on main, in another planner's graph, and in every earlier block;
+// the planner numbers its tickets from it. Numbers are counted across components, so a block is
+// free whatever components the feature touches.
+const ID_BLOCK_DEFAULT = 20;
+// The NN of <component>-NN-<slug>, or null.
+function ticketNumber(id, component) {
+  const m = component && id.startsWith(`${component}-`) ? id.slice(component.length + 1).match(/^(\d{2,})-/) : id.match(/-(\d{2,})-/);
+  return m ? Number(m[1]) : null;
+}
+const padNN = (n) => String(n).padStart(2, '0');
+const idBlocks = () => logObjects('act').filter((a) => a.id_block).sort(byTime).map((a) => a.id_block);
+const idBlockFor = (feature) => idBlocks().filter((b) => b.feature === feature).pop() ?? null;
+// The ticket lines (op new) of every plan branch in flight, or of one: its worktree's plan file,
+// else the branch's.
+function inFlightPlanTickets(only = null) {
+  const branches = only ? [only] : (git(['for-each-ref', '--format=%(refname:short)', 'refs/heads/plan/']) ?? '').split('\n').filter(Boolean);
+  return branches.flatMap((b) => {
+    const by = `plan-${b.slice('plan/'.length)}`;
+    const text = readText(path.join(mainRoot, '.worktrees', by, projectRel, 'log', `${by}.jsonl`)) ?? git(['show', `${b}:${projectRel}/log/${by}.jsonl`]) ?? '';
+    return text.split('\n').filter(Boolean).map((t) => { try { return JSON.parse(t); } catch { return null; } }).filter((o) => o?.type === 'ticket' && o.op === 'new' && typeof o.id === 'string');
+  });
+}
+function reserveIdBlock(feature, size) {
+  const used = [
+    ...[...tickets().values()].map((t) => ticketNumber(t.id, t.component)),
+    ...inFlightPlanTickets().map((t) => ticketNumber(t.id, t.component)),
+    ...idBlocks().map((b) => b.to),
+  ].filter((n) => Number.isInteger(n));
+  const from = Math.max(0, ...used) + 1;
+  return { feature, from, to: from + size - 1 };
+}
+const idBlockText = (b) => `Your ticket numbers: ${padNN(b.from)} to ${padNN(b.to)}, reserved for this feature (other planners number in parallel). Number every ticket <component>-NN-<slug> with NN in that block, in order; if you need more, ask the supervisor for another block rather than going past it.`;
+const plannerPrompt = (feature) => {
+  const b = idBlockFor(feature);
+  return `${PROMPTS.planner.replace(/\{\{ID\}\}/g, feature)}${b ? ` ${idBlockText(b)}` : ''}`;
+};
+
 // worker <ticket-id> [--resume] | planner <feature> [--resume]: a git worktree, a tmux window, the
 // agent command from the settings, and the role's prompt (plus the knowledge that applies).
 function makeSession(role) {
@@ -3250,10 +3311,15 @@ function makeSession(role) {
   const s = loadSettings();
   const resume = !!flags.resume;
   if (role === 'worker' && !tickets().has(id)) die(`no ticket ${id} (devteam.mjs ticket show ${id})`);
+  const blockSize = flagNum('id-block') ?? ID_BLOCK_DEFAULT;
+  if (role === 'planner' && !(Number.isInteger(blockSize) && blockSize >= 1)) die('--id-block takes a whole number of ticket numbers to reserve (at least 1)');
   const name = role === 'worker' ? id : `plan-${id}`;
   const branch = role === 'worker' ? `ticket/${id}` : `plan/${id}`;
   const wt = path.join(mainRoot, '.worktrees', name);
   fs.mkdirSync(path.join(runDir, 'prompts'), { recursive: true });
+  // A planner gets a block of ticket numbers before it numbers anything; one that has a block keeps
+  // it, and one that numbered tickets before blocks existed gets none (nothing to check it against).
+  const block = role === 'planner' && !idBlockFor(id) && !inFlightPlanTickets(branch).length ? reserveIdBlock(id, blockSize) : null;
   if (!fs.existsSync(wt)) {
     git(['fetch', '--quiet', 'origin', s.main_branch]);
     const base = resolveCommit(`origin/${s.main_branch}`) ? `origin/${s.main_branch}` : s.main_branch;
@@ -3262,8 +3328,10 @@ function makeSession(role) {
   }
   seedWorktree(wt);
   const promptFile = path.join(runDir, 'prompts', `${name}.txt`);
-  const block = knowledgeBlock(id);
-  fs.writeFileSync(promptFile, `${PROMPTS[role].replace(/\{\{ID\}\}/g, id)}${block ? `\n\n${block}` : ''}\n`);
+  const knowledge = knowledgeBlock(id);
+  const held = block ?? (role === 'planner' ? idBlockFor(id) : null);
+  const text = `${PROMPTS[role].replace(/\{\{ID\}\}/g, id)}${held ? ` ${idBlockText(held)}` : ''}`;
+  fs.writeFileSync(promptFile, `${text}${knowledge ? `\n\n${knowledge}` : ''}\n`);
   // Workers live in detached tmux windows the owner can attach to; the supervisor is not one of them.
   let fresh = false;
   if (!tmux(['has-session', '-t', s.tmux_session])) { fresh = tmux(['new-session', '-d', '-s', s.tmux_session, '-n', name, '-c', wt]); if (!fresh) die('could not start tmux'); }
@@ -3284,8 +3352,8 @@ function makeSession(role) {
   }
   typeInto(target, `${cmd} "$(cat '${promptFile}')"`);
   if (role === 'worker' && !resume) appendLog({ type: 'phase', from: null, to: 'starting', note: `started in ${target}` }, id);
-  appendLog({ type: 'act', class: 'worker-slots', what: `${resume ? 'resumed' : 'made'} ${role} ${name} in ${target}`, refs: role === 'worker' ? [id] : [], reversible: true }, 'supervisor');
-  out(`${resume ? 'resumed' : 'made'} ${role} ${name} in ${target} at ${wt}`);
+  appendLog({ type: 'act', class: 'worker-slots', what: `${resume ? 'resumed' : 'made'} ${role} ${name} in ${target}${block ? `, ticket numbers ${padNN(block.from)}-${padNN(block.to)}` : ''}`, refs: role === 'worker' ? [id] : [], reversible: true, id_block: block ?? undefined }, 'supervisor');
+  out(`${resume ? 'resumed' : 'made'} ${role} ${name} in ${target} at ${wt}${block ? `; ticket numbers ${padNN(block.from)}-${padNN(block.to)} reserved` : ''}`);
 }
 
 function cmdWhoami() {
@@ -3466,7 +3534,7 @@ const HELP = `devteam <command>   (positionals before flags; flags take the word
 Setup and roles
   init [--name n] [--upstream-base vX] [--github]   project folders, settings, .gitignore, the devteam section of AGENTS.md
   prompt supervisor | worker <id> | planner <feature>    the prompt a session starts with
-  worker <ticket-id> [--resume] | planner <feature> [--resume]   supervisor: a worktree, a tmux window and an agent for a ticket or a feature plan
+  worker <ticket-id> [--resume] | planner <feature> [--resume] [--id-block <n>]   supervisor: a worktree, a tmux window and an agent for a ticket or a feature plan (a new planner reserves n ticket numbers, default 20)
   whoami | settings [--get key]
 
 The graph (planning.md)

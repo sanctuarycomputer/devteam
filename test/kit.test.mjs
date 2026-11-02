@@ -14,7 +14,7 @@ const origin = path.join(tmp, 'origin.git');
 const repo = path.join(tmp, 'repo');
 const wt = (name) => path.join(repo, '.worktrees', name);
 const DT = path.join(repo, 'docs', 'devteam', 'scripts', 'devteam.mjs');
-const ROLE = { sup: { DEVTEAM_ROLE: 'supervisor' }, planner: { DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: 'billing' }, planner2: { DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: 'other' }, worker: { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'bill-01-card' }, owner: {} };
+const ROLE = { sup: { DEVTEAM_ROLE: 'supervisor' }, planner: { DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: 'billing' }, planner2: { DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: 'other' }, alpha: { DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: 'alpha' }, legacy: { DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: 'legacy' }, worker: { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'bill-01-card' }, owner: {} };
 const line = (o) => `${JSON.stringify({ v: 1, ...o })}\n`;
 // tmux in this test talks to its own server, never the developer's (or a live fleet's) sessions.
 process.env.TMUX_TMPDIR = fs.mkdtempSync(path.join(os.tmpdir(), 'dt-tmux-'));
@@ -704,6 +704,51 @@ test('devteam kit', async (t) => {
       git(['worktree', 'remove', '--force', wt('plan-quiet')]);
       git(['branch', '-D', 'plan/quiet']);
     }
+  });
+
+  await t.test('parallel planners number tickets from disjoint reserved blocks; validate and merge --plan hold them to it', (tt) => {
+    if (!hasTmux) return tt.skip('no tmux');
+    // the planner's agent is a no-op here
+    landSettings((txt) => txt.replace('"gates": {', '"agent_command": "true", "resume_command": "true", "gates": {'));
+    // two planners started together: blocks above main's highest number (bill-01) and each other's
+    assert.match(must(['planner', 'alpha'], { role: 'sup' }), /ticket numbers 02-21 reserved/);
+    assert.match(must(['planner', 'beta', '--id-block', '5'], { role: 'sup' }), /ticket numbers 22-26 reserved/);
+    assert.match(dt(['planner', 'gamma', '--id-block', '0'], { role: 'sup' }).err, /--id-block takes a whole number/);
+    const blocks = () => json(must(['log', '--type', 'act', '--json'])).filter((a) => a.id_block).map((a) => a.id_block);
+    assert.deepEqual(blocks(), [{ feature: 'alpha', from: 2, to: 21 }, { feature: 'beta', from: 22, to: 26 }]);
+    // the block is in the planner's prompt, and a relaunch keeps it rather than reserving another
+    assert.match(fs.readFileSync(path.join(repo, 'docs/devteam/run/prompts/plan-alpha.txt'), 'utf8'), /Your ticket numbers: 02 to 21, reserved for this feature/);
+    assert.match(must(['prompt', 'planner', 'beta']), /Your ticket numbers: 22 to 26/);
+    assert.doesNotMatch(must(['prompt', 'planner', 'nobody']), /Your ticket numbers/);
+    must(['planner', 'alpha', '--resume'], { role: 'sup' });
+    assert.equal(blocks().length, 2);
+    // validate on the plan branch: a ticket outside the block is a warning, one inside is not
+    const aw = { cwd: wt('plan-alpha'), role: 'alpha' };
+    const tk = (title) => JSON.stringify({ title, feature: 'alpha', component: 'al', kind: 'build', size: 'S', risk: 'normal', serves: ['AL-S1'], depends_on: [], touches: [`al/${title}/**`], done_when: ['tests pass'] });
+    must(['feature', 'add', 'alpha', '--json', JSON.stringify({ title: 'Alpha', goals: [G], stories: [{ id: 'AL-S1', text: 'a', release: 'v0.2.0' }] })], aw);
+    must(['ticket', 'add', 'al-02-one', '--json', tk('one')], aw);
+    let v = dt(['validate'], { cwd: wt('plan-alpha') }).out;
+    assert.doesNotMatch(v, /outside the block/);
+    must(['ticket', 'add', 'al-30-far', '--json', tk('far')], aw);
+    v = dt(['validate', '--strict'], { cwd: wt('plan-alpha') }).out;
+    assert.match(v, /warning: al-30-far: its number is outside the block reserved for alpha \(02-21\)/);
+    assert.doesNotMatch(v, /al-02-one: its number is outside/);
+    // a planner made before blocks has none, so nothing to warn about
+    git(['worktree', 'add', '-q', '-b', 'plan/legacy', wt('plan-legacy'), 'origin/main']);
+    const lw = { cwd: wt('plan-legacy'), role: 'legacy' };
+    must(['feature', 'add', 'legacy', '--json', JSON.stringify({ title: 'Legacy', goals: [G], stories: [{ id: 'LG-S1', text: 'l', release: 'v0.2.0' }] })], lw);
+    must(['ticket', 'add', 'lg-90-old', '--json', tk('old').replace('"alpha"', '"legacy"').replace('AL-S1', 'LG-S1').replace('"al"', '"lg"')], lw);
+    assert.doesNotMatch(dt(['validate', '--strict'], { cwd: wt('plan-legacy') }).out, /outside the block/);
+    // a plan whose ticket id is already on main is refused outright at merge
+    const pb = path.join(wt('plan-beta'), 'docs/devteam/project/log/plan-beta.jsonl');
+    fs.appendFileSync(pb, line({ id: 'bill-01-card', type: 'ticket', op: 'new', at: '2026-11-02T00:00:00.000Z', by: 'plan-beta', title: 'card again', feature: 'beta', component: 'bill', kind: 'build', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: [], done_when: ['x'] }));
+    for (const w of ['plan-alpha', 'plan-beta']) { git(['add', '-A'], wt(w)); git(['commit', '-qm', 'plan'], wt(w)); }
+    const dup = dt(['merge', '--plan', 'beta', '--dry-run', '--title', 'plan-beta: beta', '--body-file', body], { role: 'sup' });
+    assert.notEqual(dup.status, 0);
+    assert.match(dup.out, /fail: ticket id already on main: bill-01-card; renumber/);
+    assert.doesNotMatch(dt(['merge', '--plan', 'alpha', '--dry-run', '--title', 'plan-alpha: alpha', '--body-file', body], { role: 'sup' }).out, /already on main/);
+    spawnSync('tmux', ['kill-server']);
+    for (const f of ['alpha', 'beta', 'legacy']) { git(['worktree', 'remove', '--force', wt(`plan-${f}`)]); git(['branch', '-D', `plan/${f}`]); }
   });
 
   await t.test('a fully defined goal nobody is planning is idle planning', () => {
