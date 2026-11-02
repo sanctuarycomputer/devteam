@@ -256,6 +256,15 @@ test('devteam kit', async (t) => {
         assert.match(staleF().suggestion, /worker bill-01-card --resume/);
       } finally { spawnSync('tmux', ['kill-session', '-t', 'devteam']); }
     }
+    // idle at its prompt with its own background shell still running: say so, and suggest the nudge
+    if (hasTmux) {
+      spawnSync('tmux', ['new-session', '-d', '-s', 'devteam', '-n', 'bill-01-card', 'sh -c \'printf "done 11:07 AM\\n> \\n  bypass permissions on \\302\\267 1 shell \\302\\267 to manage\\n"; exec sleep 600\'']);
+      try {
+        for (let i = 0; i < 20 && !/1 shell/.test(spawnSync('tmux', ['capture-pane', '-p', '-t', 'devteam:bill-01-card'], { encoding: 'utf8' }).stdout ?? ''); i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+        assert.match(staleF().detail, /idle at its prompt with a background shell still running/);
+        assert.match(staleF().suggestion, /send bill-01-card "check your background shell's result/);
+      } finally { spawnSync('tmux', ['kill-session', '-t', 'devteam']); }
+    }
     const Qb = must(['ask', '--question', 'Store card fingerprints?', '--blocks', 'bill-01-card', '--recommendation', 'no'], { role: 'sup' });
     assert.ok(!staleW(), 'a question blocking it means it waits on the owner');
     must(['withdraw', Qb, '--reason', 'test'], { role: 'sup' });
