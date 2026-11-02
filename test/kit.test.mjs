@@ -78,6 +78,10 @@ test('devteam kit', async (t) => {
     assert.match(dt(['goal', 'approve', G]).err, /no design up for approval/, 'a goal is approved on its design, not before');
     const design = [{ title: 'The approach', path: 'docs/devteam/project/designs/self-serve-billing.md', ref: 'plan/billing' }];
     assert.match(dt(['ask', '--kind', 'goal-approval', '--goal', G, '--question', 'Approve self-serve billing?'], { role: 'sup' }).err, /links the design/);
+    // the design's open decisions are asked one by one first; the approval waits for them
+    const D1 = must(['ask', '--kind', 'one-way-door', '--goal', G, '--question', 'Who may see card details?', '--recommendation', 'admins only'], { role: 'sup' });
+    assert.match(dt(['ask', '--kind', 'goal-approval', '--goal', G, '--question', 'Approve?', '--links', JSON.stringify(design)], { role: 'sup' }).err, /still has open questions about its design/);
+    must(['answer', D1, 'admins only']);
     const A1 = must(['ask', '--kind', 'goal-approval', '--goal', G, '--question', 'Approve self-serve billing, built as the design describes?', '--links', JSON.stringify(design)], { role: 'sup' });
     assert.match(dt(['answer', A1, 'Approve']).err, /goal decide/, 'answered only as a goal decision');
     assert.match(dt(['goal', 'decide', G, 'refine']).err, /needs --notes/);

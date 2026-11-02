@@ -1756,6 +1756,10 @@ function cmdAsk() {
     if (c.definition.length) die(`${g.id} is not fully defined yet (ask a goal-definition question first):\n  - ${c.definition.join('\n  - ')}`);
     if (!(jsonFlag('links') ?? []).length) die('a goal-approval question links the design the owner is approving (--links)');
     if (questions().some((q) => q.kind === 'goal-approval' && q.goal === g.id && q.status === 'open')) die(`a goal-approval question for ${g.id} is already open; withdraw it first`);
+    // The design's open decisions are the owner's to settle one by one, before the approval: an
+    // approval is a yes to an approach whose decisions are already made, never a bundle of them.
+    const unsettled = questions().filter((q) => q.kind !== 'goal-approval' && q.goal === g.id && q.status === 'open');
+    if (unsettled.length) die(`${g.id} still has open questions about its design (${unsettled.map((q) => q.id).join(', ')}); ask the approval once they're answered (planning.md §1)`);
     if (cls) die('a goal-approval question has no --class: approving a goal is never delegated');
   }
   if (kind === 'goal-definition' && cls) die('a goal-definition question has no --class: defining a goal is never delegated (reason goal-ambiguity)');

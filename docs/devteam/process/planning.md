@@ -18,7 +18,9 @@ A goal is **ready** when it has: an outcome (what is true for users or the busin
 
 **The readiness interview.** While a goal has gaps, or any ambiguity in the supervisor's judgment (an undefined term, two readings of the measure, a conflict with another goal), the supervisor asks one `goal-definition` question per goal listing every gap as a form, records the answers (`goal set`), and repeats until `goal check` is clean. Changing an approved goal is the owner's (`goal-change`, owner-only).
 
-**Approval, on the design.** Once the design is reviewed, ask: `ask --kind goal-approval --goal <g-id> --question "Approve <goal> built this way?" --context "<the approach in three sentences: what gets built, what's left out, what it costs>" --links '[{"title":"The design","path":"docs/devteam/project/designs/<slug>.md","ref":"plan/<feature>"}]'`. The owner answers on the dashboard (or `goal decide <g-id> approve|refine|let-go --notes "…"`):
+**Settle the design's decisions first.** Every decision the design leaves to the owner (scope, who may see or change what, what is out, any choice between approaches the owner should make) is its own inbox question, asked while designing, with `--goal <g-id>`, the design linked, `--choices` and a recommendation. A decision that touches authentication, authorization, payments, PII or anything else hard to undo is a `one-way-door` question. Record each answer in the design's **Owner decisions** section with its question id. Never bundle open decisions into the approval: `ask --kind goal-approval` refuses while any question with that `--goal` is still open.
+
+**Approval, on the design.** Once the design is reviewed and its decisions are settled, ask: `ask --kind goal-approval --goal <g-id> --question "Approve <goal> built this way?" --context "<the approach in three sentences: what gets built, what's left out, what it costs>" --links '[{"title":"The design","path":"docs/devteam/project/designs/<slug>.md","ref":"plan/<feature>"}]'`. The owner answers on the dashboard (or `goal decide <g-id> approve|refine|let-go --notes "…"`):
 - **Approve.** The goal is ready; plan its features and tickets from the design, taking the owner's notes into account.
 - **Refine.** The notes say what to change. Rework the design with them (record how each note was addressed in the design), have it reviewed again, and ask a new `goal-approval` question. The goal stays a draft until then.
 - **Let go.** The goal is abandoned; stop any planning for it and say what was dropped.
@@ -36,6 +38,7 @@ One design per goal at `project/designs/<goal-slug>.md` (the slug `goal check` p
 - data: new or changed persistence with its tier (`code-style.md` §4), migrations and rollback safety;
 - failure modes, security and PII;
 - one-way doors, each an owner question before any plan is approved;
+- **Owner decisions**: each decision the owner made for this design, with the question id that settled it (§1); none may be left open when approval is asked;
 - risks and unknowns that survive, each a spike ticket or a question;
 - what changes in `project/designs/architecture.md`, applied to that file in the same PR, with a row in its Changed by table.
 

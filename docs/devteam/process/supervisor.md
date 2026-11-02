@@ -95,7 +95,7 @@ devteam.mjs ask --kind one-way-door --class new-dependency --reasons owner-only 
 | `proposal` | an improvement, roadmap or architecture change (§9), with the evidence ids and a research note (`--note`) |
 | `trust` | moving a ladder class up a rung; the script attaches the evidence |
 | `goal-definition` | every gap that stops a goal being ready, in one question |
-| `goal-approval` | approving a fully defined goal on its reviewed design (`planning.md` §1): `--goal`, the design in `--links`; the owner approves, refines with notes, or lets it go |
+| `goal-approval` | approving a fully defined goal on its reviewed design (`planning.md` §1): `--goal`, the design in `--links`; the owner approves, refines with notes, or lets it go. Only after every decision the design leaves to the owner was asked as its own question (`--goal`) and answered; never bundle them into the approval |
 | `owner-action` | something only the owner can do, not decide (log in, set a secret, approve elsewhere): the steps, and what waits on it |
 
 Rules: one decision per question (a goal-definition question lists all of a goal's gaps as a form); lead with the decision; always a recommendation with your confidence; `--default` only when reversible, applied at the deadline; `--blocks` every ticket that waits; `--class` and `--reasons` always, so the owner sees why it needs them.
