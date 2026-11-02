@@ -1056,6 +1056,12 @@ test('devteam kit', async (t) => {
       assert.equal(r.status, 200, await r.clone().text());
       assert.equal(fs.readFileSync(path.join(repo, 'config/uni.key'), 'utf8'), uni, 'multibyte text arrives whole');
     } finally { srv.kill(); }
+    // the dashboard keeps its own record of starting and stopping in run/, which outlives its window
+    await new Promise((r) => (srv.exitCode !== null || srv.signalCode !== null ? r() : srv.once('exit', r)));
+    const dlog = fs.readFileSync(path.join(repo, 'docs/devteam/run/dashboard.log'), 'utf8');
+    assert.match(dlog, new RegExp(`started on http://127\\.0\\.0\\.1:${port}`));
+    assert.match(dlog, /stopped by SIGTERM/);
+    assert.doesNotMatch(dlog, /pässwörd/, 'never a request body');
     // no value anywhere devteam writes
     const logs = fs.readdirSync(path.join(repo, 'docs/devteam/run/log')).map((f) => fs.readFileSync(path.join(repo, 'docs/devteam/run/log', f), 'utf8')).join('');
     for (const form of [VALUE, JSON.stringify(VALUE).slice(1, -1), Buffer.from(VALUE).toString('base64'), 'MIIBszCCAVmgAwIBAgIUQ', 'tok-123456', 'pässwörd']) assert.ok(!logs.includes(form), `log holds ${form}`);
