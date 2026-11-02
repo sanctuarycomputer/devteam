@@ -12,6 +12,7 @@
 // dashboard · 11 sessions (workers, messages, phases, gates) · 12 init, help, dispatch.
 
 import { execFile, execFileSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -72,12 +73,22 @@ const nowIso = () => new Date().toISOString();
 const dateOnly = (iso) => iso.slice(0, 10);
 const DAY = 864e5;
 
+// A read-only command (dashboard-data, timeline) caches identical git reads for the rest of the
+// process: one refresh asked git the same questions hundreds of times. Commands that write never
+// turn this on, so they always read live.
+let gitReadCache = null;
+const GIT_READS = new Set(['rev-parse', 'show', 'ls-tree', 'tag', 'merge-base', 'cat-file', 'log', 'for-each-ref', 'symbolic-ref', 'diff', 'rev-list', 'status']);
 function git(args, cwd) {
+  const key = gitReadCache && GIT_READS.has(args[0]) ? `${cwd ?? ''}\0${args.join('\0')}` : null;
+  if (key && gitReadCache.has(key)) return gitReadCache.get(key);
+  let r;
   try {
-    return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 }).replace(/\n$/, '');
+    r = execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 }).replace(/\n$/, '');
   } catch {
-    return null;
+    r = null;
   }
+  if (key) gitReadCache.set(key, r);
+  return r;
 }
 function gitOrDie(args, cwd) {
   try {
@@ -139,9 +150,10 @@ const SETTINGS_DEFAULTS = {
   forge: 'github',
   max_active_tickets: 5,
   max_active_per_component: 2,
-  // Planners at once (plan/<feature> branches in flight). They design and plan; they don't count
-  // against max_active_tickets.
-  max_active_planners: 4,
+  // Planners at once (plan/<feature> branches in flight); null is no cap. Every goal that needs
+  // planning gets one unless its design waits on another goal's (goal set --plan-after). They don't
+  // count against max_active_tickets.
+  max_active_planners: null,
   stale_after_minutes: 30,
   // How long `ack` sets a finding aside; it comes back sooner if its subject changes.
   finding_ack_hours: 24,
@@ -383,6 +395,7 @@ function fold(all) {
   const lines = [...all].sort((a, b) => a.at.localeCompare(b.at) || a.__file.localeCompare(b.__file) || a.__line - b.__line);
   const objects = new Map();
   const ignored = [];
+  const goalApprovals = new Set();
   for (const l of lines) {
     if (l.op !== 'new') continue;
     if (objects.has(l.id)) {
@@ -411,8 +424,11 @@ function fold(all) {
       continue;
     }
     if (obj.type === 'goal' && cls === 'supervisor' && (obj.status ?? 'draft') !== 'draft') {
-      ignored.push({ line: l, why: 'the supervisor edits a goal only while it is a draft' });
-      continue;
+      const problem = !l.approved ? null : goalApprovals.has(l.approved) ? `${l.approved} already authorised a goal set` : goalChangeProblem(objects.get(l.approved), obj.id, l.approved, l);
+      if (!l.approved || problem) {
+        ignored.push({ line: l, why: l.approved ? `the supervisor edits a ${obj.status} goal only with an answered goal-change question: ${problem}` : 'the supervisor edits a goal only while it is a draft' });
+        continue;
+      }
     }
     if (obj.type === 'question' && l.status === 'defaulted' && !obj.default) {
       ignored.push({ line: l, why: 'the question has no default' });
@@ -429,6 +445,7 @@ function fold(all) {
     }
     if (Object.keys(changed).length) obj.updates.push({ at: l.at, by: l.by, ...(l.channel ? { channel: l.channel } : {}), ...changed });
     else ignored.push({ line: l, why: 'overridden by a higher-ranked writer' });
+    if (obj.type === 'goal' && changed.approved) goalApprovals.add(changed.approved);
   }
   for (const o of objects.values()) delete o.__rank;
   return { objects, ignored };
@@ -636,13 +653,32 @@ function questionView(q) {
   const matched = ans ? !!q.recommendation && [norm(ans.answer), norm(ans.answer.split(' — ')[0])].includes(norm(q.recommendation)) : null;
   return {
     id: q.id, kind: q.kind, class: q.class ?? null, scope: q.scope ?? null, ticket: q.ticket ?? null, re: q.re ?? null, asked_at: q.created_at,
-    question: q.question, context: q.context ?? '', options: q.options ?? [], choices: q.choices ?? [], links: q.links ?? [], goal: q.goal ?? null, rule_scope: q.rule_scope ?? null, recommendation: q.recommendation ?? '', confidence: q.confidence ?? null,
+    question: q.question, context: q.context ?? '', options: q.options ?? [], choices: q.choices ?? [], links: q.links ?? [], goal: q.goal ?? null, change: q.change ?? null, rule_scope: q.rule_scope ?? null, recommendation: q.recommendation ?? '', confidence: q.confidence ?? null,
     default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], evidence: q.evidence ?? [], note: q.note ?? null, why_asked: q.why_asked ?? null,
     status, answer, answered_by: answeredBy, answered_at: answeredAt, matched,
     autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans?.channel ?? null, said: ans?.said ?? null,
   };
 }
 const questions = () => logObjects('question').map(questionView);
+
+// Why question q does not authorise the supervisor to change goal goalId (null when it does): it
+// is a goal-change question about that goal, answered by the owner with its recommendation (an
+// answer other than the recommendation declines or alters the change, so the supervisor asks again).
+// The goal fields a goal-change question may propose, and that its answer then authorises exactly.
+const GOAL_CHANGE_FIELDS = ['title', 'outcome', 'measure', 'horizon', 'non_goals', 'preconditions', 'priority', 'milestones', 'plan_after'];
+const goalFieldsOf = (l) => Object.fromEntries(Object.entries(l).filter(([k]) => GOAL_CHANGE_FIELDS.includes(k)));
+function goalChangeProblem(q, goalId, qid, l = null) {
+  const v = q?.type === 'question' ? questionView(q) : null;
+  if (!v) return `${qid} is not a question`;
+  if (v.class !== 'goal-change') return `${v.id} was asked in class ${v.class ?? '(none)'}, not goal-change`;
+  if (v.goal !== goalId) return `${v.id} is about ${v.goal ?? 'no goal'}, not ${goalId} (ask with --goal ${goalId})`;
+  if (!v.change || !Object.keys(v.change).length) return `${v.id} carries no change (ask with --change '{…}'), so its answer authorises nothing specific`;
+  if (v.status !== 'answered') return `${v.id} is not answered by the owner (${v.status})`;
+  if (!v.matched) return `${v.id} was answered "${v.answer}", not its recommendation${v.recommendation ? ` ("${v.recommendation}")` : ''}; ask again for the change the owner wants`;
+  // the owner approved this change and no other: the set must be exactly it
+  if (l && canonical(goalFieldsOf(l)) !== canonical(v.change)) return `the set (${Object.keys(goalFieldsOf(l)).join(', ') || 'nothing'}) is not the change ${v.id} proposed`;
+  return null;
+}
 
 // The correction on an act, with who made it and when.
 const correctionOf = (a) => {
@@ -1015,8 +1051,42 @@ function paneWaitingIn(window) {
     const hit = lines.find((l) => re.test(l));
     if (hit) { found = { kind, line: hit.slice(0, 200) }; break; }
   }
+  // Only the supervisor acts on a pane (its own tick); the dashboard, status and the owner only look.
+  if (target && !found && process.env.DEVTEAM_ROLE === 'supervisor') resendLostEnter(`${loadSettings().tmux_session}:${window}`, target, lines);
   paneWaits.set(window, found);
   return found;
+}
+
+// A lost Enter: text the kit typed still sits unsubmitted in an idle agent's input (an agent that
+// compacts or redraws as the keys arrive can drop the Enter). typeInto records each delivery per
+// window; when the pane's bottom lines still end with that text's tail, nothing on them says the
+// agent is busy, no prompt is up (the caller checked) and the text is LOST_ENTER_SECONDS old, press
+// Enter once and log it. The text is never retyped; the record is claimed (deleted) before the key,
+// so a delivery gets at most one Enter however many passes or processes look.
+const LOST_ENTER_SECONDS = 30;
+const PANE_BUSY = /esc to (interrupt|cancel)|ctrl\+c to (interrupt|cancel)|press esc to stop/i;
+const sentFile = (key) => path.join(runDir, 'sent', `${encodeURIComponent(key)}.json`);
+// Agent-agnostic: no prompt glyphs. Whitespace (wrapping, padding) and box-drawing borders drop out.
+const squash = (t) => t.replace(/[\s\u2500-\u257f]+/g, '');
+function recordSent(target, text) {
+  const key = sh('tmux', ['display-message', '-p', '-t', target, '#S:#W']);
+  if (!key) return;
+  try { writeJson(sentFile(key), { text, at: nowIso() }); } catch {}
+}
+function resendLostEnter(key, target, lines) {
+  const file = sentFile(key);
+  let rec;
+  try { rec = readJson(file); } catch { return; }
+  const age = (Date.now() - Date.parse(rec.at)) / 1000;
+  const tail = squash(rec.text ?? '').slice(-40);
+  if (!tail || !(age >= LOST_ENTER_SECONDS)) return;
+  const bottom = lines.slice(-8);
+  const claim = () => { try { fs.unlinkSync(file); return true; } catch { return false; } };
+  if (!squash(bottom.join('')).includes(tail)) return void claim(); // submitted: nothing left to press
+  if (bottom.some((l) => PANE_BUSY.test(l))) return;
+  if (!claim() || !tmux(['send-keys', '-t', target, 'Enter'])) return;
+  const hash = crypto.createHash('sha1').update(rec.text).digest('hex').slice(0, 12);
+  appendLog({ type: 'observation', source: 'pane', kind: 'resent-enter', subject: key.slice(key.indexOf(':') + 1), detail: `pressed Enter once: text typed ${Math.round(age)}s ago was still unsubmitted in an idle pane ("${rec.text.slice(0, 60)}${rec.text.length > 60 ? '…' : ''}", sha1 ${hash})`, detector: 'pane', source_key: `resent-enter ${key} ${hash} ${rec.at}`, measure: { value: Math.round(age), unit: 's' } });
 }
 const paneWaiting = (id) => (activeWorker(id) ? paneWaitingIn(id) : null);
 
@@ -1765,6 +1835,18 @@ function jsonFlag(name) {
   if (v === undefined) return undefined;
   try { return JSON.parse(v); } catch (e) { return die(`--${name} is not valid JSON: ${e.message}`); }
 }
+// --change '{…}': the exact goal fields a goal-change question proposes; required for one about a goal.
+function goalChangeFlag(cls) {
+  const c = jsonFlag('change');
+  if (c === undefined) {
+    if (cls === 'goal-change' && flagStr('goal')) die('a goal-change question about a goal says the exact change: --change \'{"milestones": […]}\' (its answer authorises that and nothing else)');
+    return undefined;
+  }
+  if (cls !== 'goal-change' || !flagStr('goal')) die('--change belongs on a goal-change question with --goal');
+  const bad = Object.keys(c).filter((k) => !GOAL_CHANGE_FIELDS.includes(k));
+  if (!Object.keys(c).length || bad.length) die(`--change sets goal fields (${GOAL_CHANGE_FIELDS.join(', ')})${bad.length ? `; not ${bad.join(', ')}` : ''}`);
+  return c;
+}
 function cmdAsk() {
   supervisorOnly('ask');
   const q = flagStr('question') ?? die('ask needs --question');
@@ -1811,7 +1893,7 @@ function cmdAsk() {
   const scope = flagStr('scope') ?? null;
   const line = appendLog({
     type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), question: q, context: kind === 'goal-approval' ? [flagStr('context'), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal'))))].filter(Boolean).join('\n\n') : flagStr('context'),
-    rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), options: asList(flags.options), choices: jsonFlag('choices'), links: jsonFlag('links'), recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined,
+    rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: goalChangeFlag(cls), options: asList(flags.options), choices: jsonFlag('choices'), links: jsonFlag('links'), recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined,
     deadline: def ? new Date(Date.now() + loadSettings().question_default_after_hours * 3600000).toISOString() : undefined,
     blocks, evidence, note: flagStr('note'),
     why_asked: { rung: onLadder ? rungFor(cls, scope) : undefined, ceiling: onLadder ? L.classes[cls].ceiling : undefined, reasons },
@@ -2118,7 +2200,9 @@ function goalCheck(g) {
   if (typeof g.measure?.target !== 'number') definition.push('no numeric target');
   if (!g.measure?.unit) definition.push('no unit');
   if (!g.measure?.direction) definition.push('no direction (up or down)');
-  if (!g.horizon || Number.isNaN(Date.parse(g.horizon))) definition.push('no horizon date');
+  // A horizon is the owner's real deadline, when there is one; never required, never guessed. The
+  // forecast says when, from the measured rate (planning.md §1).
+  if (g.horizon && Number.isNaN(Date.parse(g.horizon))) definition.push(`horizon "${g.horizon}" is not a date`);
   if (!(g.non_goals ?? []).length) definition.push('no non-goals');
   if (!(g.preconditions ?? []).length) definition.push('no preconditions: what must be true for the outcome');
   if (typeof g.priority !== 'number') definition.push('no priority');
@@ -2166,7 +2250,7 @@ function milestoneGaps(g) {
       else seen.set(p, n);
     }
     if (!(Number.isInteger(m.tickets) && m.tickets > 0)) gaps.push(`milestone ${n} has no size (tickets: a rough count of PRs)`);
-    if (m.by !== undefined) {
+    if (m.by != null) {
       const t = Date.parse(m.by);
       if (Number.isNaN(t)) gaps.push(`milestone ${n}'s date "${m.by}" is not a date`);
       else {
@@ -2258,11 +2342,13 @@ function cmdGoal() {
     measure: ['measure', 'target', 'unit', 'direction'].some((k) => flagStr(k) !== undefined)
       ? { ...(id ? logGet(id)?.measure : {}), ...(flagStr('measure') ? { description: flagStr('measure') } : {}), ...(flagStr('target') ? { target: Number(flagStr('target')) } : {}), ...(flagStr('unit') ? { unit: flagStr('unit') } : {}), ...(flagStr('direction') ? { direction: flagStr('direction') } : {}) }
       : undefined,
-    horizon: flagStr('horizon'),
+    // `none` clears it: a horizon is the owner's real deadline or nothing (planning.md §1)
+    horizon: flagStr('horizon') === 'none' ? null : flagStr('horizon'),
     non_goals: flags['non-goals'] !== undefined ? asList(flags['non-goals']) : undefined,
     preconditions: flags.preconditions !== undefined ? asList(flags.preconditions) : undefined,
     priority: flagNum('priority'),
     milestones: jsonFlag('milestones'),
+    plan_after: flags['plan-after'] !== undefined ? asList(flags['plan-after']).map((goal) => ({ goal, reason: flagStr('reason') ?? die('--plan-after needs --reason: why this goal\'s design waits on that one') })) : undefined,
   });
   if (sub === 'add') {
     const { by } = writer();
@@ -2271,9 +2357,19 @@ function cmdGoal() {
     return out(appendLog({ type: 'goal', status: 'draft', ...f }, by).id);
   }
   if (sub === 'set') {
-    if (!id || logGet(id)?.type !== 'goal') die('usage: goal set <g-id> [--title …] [--outcome …] [--measure …] [--target n] [--unit u] [--direction up|down] [--horizon date] [--non-goals …] [--preconditions …] [--priority n] [--milestones \'[{"title","target","by","preconditions":[n],"tickets"}…]\'] [--owner]');
+    if (!id || logGet(id)?.type !== 'goal') die('usage: goal set <g-id> [--title …] [--outcome …] [--measure …] [--target n] [--unit u] [--direction up|down] [--horizon date] [--non-goals …] [--preconditions …] [--priority n] [--milestones \'[{"title","target","by","preconditions":[n],"tickets"}…]\'] [--plan-after <g-id>… --reason "…"] [--approved <qid>] [--owner]');
     const { by } = writer();
-    if (by === 'supervisor' && (logGet(id).status ?? 'draft') !== 'draft') die(`${id} is ${logGet(id).status}; only the owner changes it now (class goal-change)`);
+    const approved = flagStr('approved') ?? null;
+    if (approved && by !== 'supervisor') die('the owner changes a goal directly; --approved is the supervisor applying an owner answer');
+    if (by === 'supervisor' && (logGet(id).status ?? 'draft') !== 'draft' && !approved) die(`${id} is ${logGet(id).status}; only the owner changes it now (class goal-change): ask a goal-change question with --goal ${id}, then goal set ${id} --approved <qid>`);
+    if (approved) {
+      const problem = goalChangeProblem(logGet(approved), id, approved);
+      if (problem) die(`goal set --approved: ${problem}`);
+      if (logObjects('goal').some((g) => g.updates.some((u) => u.approved === approved)) || logObjects('act').some((a) => a.approved_by === approved)) die(`${approved} already authorised a change; ask again for another`);
+      // the answer authorises the change the question proposed, applied as is
+      if (Object.values(fields()).some((x) => x !== undefined)) die('goal set --approved applies the change its question proposed; pass no other fields');
+      return out(`updated ${id} (${appendLog({ type: 'goal', op: 'set', id, ...questionView(logGet(approved)).change, approved }, by).id})`);
+    }
     appendLog({ type: 'goal', op: 'set', id, ...fields() }, by);
     return out(`updated ${id}`);
   }
@@ -2747,13 +2843,17 @@ function collectMetrics(since) {
   {
     const ps = planners();
     const busy = new Set(ps.flatMap((p) => p.goals));
+    // a goal whose design waits on another goal's (plan_after) waits until that one is approved
+    // (a goal let go, or one that doesn't exist, holds nothing back)
+    const blockedBy = (g) => (g.plan_after ?? []).filter((d) => logGet(d.goal)?.type === 'goal' && (logGet(d.goal).status ?? 'draft') === 'draft');
     const waiting = logObjects('goal').filter((g) => {
-      if (busy.has(g.id) || ['met', 'abandoned'].includes(g.status)) return false;
+      if (busy.has(g.id) || ['met', 'abandoned'].includes(g.status) || blockedBy(g).length) return false;
       const c = goalCheck(g);
       if ((g.status ?? 'draft') === 'draft') return !c.definition.length && !questions().some((q) => q.goal === g.id && q.status === 'open');
       return g.status === 'ready' && c.coverage.some((x) => x.includes('has no feature') || x.startsWith('no feature names'));
     }).sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99));
-    if (waiting.length && ps.length < settings.max_active_planners) add('medium', 'idle-planning', `${waiting.length} goal${waiting.length > 1 ? 's' : ''}`, `${ps.length}/${settings.max_active_planners} planners active; nobody is planning ${waiting.map((g) => `"${g.title}"`).join(', ')}`, `make planners (or design yourself) for: ${waiting.slice(0, Math.max(1, settings.max_active_planners - ps.length)).map((g) => g.id).join(', ')}`);
+    const cap = settings.max_active_planners;
+    if (waiting.length && (cap == null || ps.length < cap)) add('medium', 'idle-planning', `${waiting.length} goal${waiting.length > 1 ? 's' : ''}`, `${ps.length}${cap == null ? '' : `/${cap}`} planner${ps.length === 1 ? '' : 's'} active; nobody is planning ${waiting.map((g) => `"${g.title}"`).join(', ')}`, `start a planner for each (goals plan in parallel), or record why one waits on another's design (goal set <id> --plan-after <g-id> --reason "…"): ${waiting.slice(0, cap == null ? waiting.length : Math.max(1, cap - ps.length)).map((g) => g.id).join(', ')}`);
   }
   if (ready.length && active < settings.max_active_tickets) add('medium', 'idle-capacity', `${ready.length} ready`, `${active}/${settings.max_active_tickets} workers active`, `make workers for: ${ready.slice(0, 5).map((t) => t.id).join(', ')}`);
   if (m.escaped_defects) add('high', 'escaped-defects', `${m.escaped_defects}`, 'defects found after merge', 'retro: which review or gate should have caught each one');
@@ -2875,12 +2975,13 @@ function dashboardData() {
     ooda: collectOoda(),
   };
 }
-const cmdDashboardData = () => out(JSON.stringify(dashboardData()));
+const cmdDashboardData = () => { gitReadCache = new Map(); out(JSON.stringify(dashboardData())); };
 
 // timeline <ticket-id> [--json]: the ticket, and every log line that bears on it (its own edits,
 // its worker's phases, gates and messages, questions it raised or that block it, acts and
 // observations that name it), oldest first; plus its review records and its files.
 function cmdTimeline() {
+  gitReadCache = new Map();
   const [id] = positional;
   const t = tickets().get(id) ?? die(`no ticket ${id}`);
   const touches = (l) => l.id === id || l.by === id || l.ticket === id || l.to === id || l.subject === id
@@ -3016,7 +3117,8 @@ function resolvePane(target) {
   if (SHELLS.has(cmd.replace(/^-/, ''))) return { problem: `no agent is running in ${exact} (it is at a ${cmd} prompt); resume it first` };
   return { target: exact };
 }
-const typeInto = (target, line) => tmux(['send-keys', '-t', target, '-l', line]) && tmux(['send-keys', '-t', target, 'Enter']);
+// Each delivery is recorded per window, so a lost Enter can be pressed later (resendLostEnter).
+const typeInto = (target, line) => { const ok = tmux(['send-keys', '-t', target, '-l', line]) && tmux(['send-keys', '-t', target, 'Enter']); if (ok) recordSent(target, line); return ok; };
 function nudgeSupervisor(line) {
   const { target, problem } = resolvePane(supervisorTarget());
   if (problem) return void warn(`not delivered to the supervisor: ${problem}`);
@@ -3402,6 +3504,7 @@ Observe and orient
 
 Goals and retros
   goal [list|check|show|forecast|add|set|decide|approve|status|reading] …
+  goal set <g-id> --approved <qid> …   supervisor: apply an answered goal-change question to a goal past draft (one set per answer)
   retro [--due | --print | close <date> --summary s --refs ids]
   chore start <slug> | chore pr <slug> --title t    a supervisor-written file (design, retro, architecture) and its PR
 

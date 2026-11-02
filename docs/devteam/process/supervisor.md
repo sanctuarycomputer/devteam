@@ -54,7 +54,7 @@ Run it about every 10 minutes when PRs are converging, 30 when quiet. A worker's
 | PR head differs from the last phase line's `sha` | stale liveness | message the worker to run `phase` |
 | owner answer relayed, not in the spec or plan after the next commit | answer not recorded | message the worker |
 | ticket ready, no worker, under caps | idle capacity | schedule it, or hold it with the reason |
-| goal fully defined (or its current milestone unplanned), no planner, under `max_active_planners` | idle planning | start a planner (or design it yourself); goals move in parallel, not one after another |
+| goal fully defined (or its current milestone unplanned), no planner, under `max_active_planners` (no cap by default) | idle planning | start a planner for it now: every goal plans in parallel. The one exception is a goal whose design depends on another goal's design; record it (`goal set <id> --plan-after <g-id> --reason "…"`, shown to the owner on the goal) and start it once that one is approved |
 | superseded ticket with a live worker | re-plan not propagated | park it with a ruling |
 
 ## 5. Scheduling and merging
@@ -147,7 +147,7 @@ Due `retro_every_days` after the last one, or when a feature has fully merged si
 ## 11. Recovery
 
 - Planners are watched like workers: the board's planner lane shows each `plan/<feature>` in flight with its last sign of life, and the metrics raise `blocked-prompt`, `stale-planner` (silent past `stale_after_minutes` while waiting on neither you nor an owner question for its goal) and `planner-gone` (its window closed before its plan landed; resume it or delete the branch).
-- A silent or frozen worker: `tmux capture-pane -p -t <session>:<id>`. A modal or a limit banner: clear it. The metrics find these for you: a `blocked-prompt` finding (and a "waiting on a prompt" badge on the board, `WAITING ON A PROMPT` in `status`) names the ticket and the line its pane is stuck on, even while the phase is fresh. A permission prompt a worker should never see is a settings problem: fix `agent_command` or the deny rules so the next worker doesn't stop there. The agent process gone: `devteam.mjs worker <id> --resume`; the worker re-orients from its files and the log.
+- A silent or frozen worker: `tmux capture-pane -p -t <session>:<id>`. A modal or a limit banner: clear it. The metrics find these for you: a `blocked-prompt` finding (and a "waiting on a prompt" badge on the board, `WAITING ON A PROMPT` in `status`) names the ticket and the line its pane is stuck on, even while the phase is fresh. A permission prompt a worker should never see is a settings problem: fix `agent_command` or the deny rules so the next worker doesn't stop there. A lost Enter (text the kit typed still sitting unsubmitted in an idle agent's input, at least 30s after delivery, with no prompt up) is pressed once by your own metrics pass (never by the dashboard or the owner's commands) and logged as a `resent-enter` observation; the text is never retyped. The agent process gone: `devteam.mjs worker <id> --resume`; the worker re-orients from its files and the log.
 - A provider limit across the fleet: set sessions to continue at reset where the agent supports it.
 - Kill only a known PID, never by pattern on a shared machine.
 - After your own restart: §1 again, then message every worker to re-read its files.

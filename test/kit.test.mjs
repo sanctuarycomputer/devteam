@@ -714,7 +714,124 @@ test('devteam kit', async (t) => {
     const Qd = must(['ask', '--question', 'Which checkout first?', '--goal', Gi, '--recommendation', 'cards'], { role: 'sup' });
     assert.ok(!(idle()?.suggestion ?? '').includes(Gi), 'design questions open: someone is designing it');
     must(['withdraw', Qd, '--reason', 'test'], { role: 'sup' });
+    // the one reason to hold it back: its design depends on another goal's, recorded with why
+    const Gp = must(['goal', 'add', '--title', 'Checkout prerequisites', '--priority', '8'], { role: 'sup' });
+    assert.doesNotMatch(must(['goal', 'check', Gp]), /horizon/, 'a date is the owner\'s to give, never a gap to fill');
+    assert.match(dt(['goal', 'set', Gi, '--plan-after', Gp], { role: 'sup' }).err, /needs --reason/);
+    must(['goal', 'set', Gi, '--plan-after', Gp, '--reason', 'the payment boundary is decided there'], { role: 'sup' });
+    assert.ok(!(idle()?.suggestion ?? '').includes(Gi), 'waiting on another goal\'s design, recorded');
+    must(['goal', 'status', Gp, 'abandoned']);
+    assert.match(idle()?.suggestion ?? '', new RegExp(Gi), 'the goal it waited on was let go: plan it now');
     must(['goal', 'status', Gi, 'abandoned']);
+  });
+
+  await t.test('a lost Enter is pressed once, never into a prompt, never retyped', (tt) => {
+    if (!hasTmux) return void tt.diagnostic('tmux not installed: lost-Enter recovery not exercised');
+    git(['branch', 'plan/enter', 'origin/main']);
+    const text = '[devteam info m-1 from supervisor] Owner approved the goal; plan the feature and tickets, then send the graph for review.';
+    const keys = path.join(tmp, 'keys.txt');
+    // A stand-in agent (not a shell): draws a screen, then logs every line of input it is sent.
+    const agent = path.join(tmp, 'agent.mjs');
+    write(agent, "import fs from 'node:fs';\nprocess.stdout.write(fs.readFileSync(process.argv[2], 'utf8'));\nprocess.stdin.on('data', (d) => fs.appendFileSync(process.argv[3], String(d)));\n");
+    const sent = path.join(repo, 'docs/devteam/run/sent', `${encodeURIComponent('devteam:plan-enter')}.json`);
+    const enters = () => (fs.existsSync(keys) ? fs.readFileSync(keys, 'utf8').split('\n').length - 1 : 0);
+    const resent = () => json(must(['log', '--type', 'observation', '--json'])).filter((o) => o.kind === 'resent-enter' && o.subject === 'plan-enter');
+    const run = (screen, agoSec) => {
+      spawnSync('tmux', ['kill-server']);
+      fs.rmSync(keys, { force: true });
+      const sf = path.join(tmp, 'screen.txt');
+      write(sf, screen);
+      write(sent, JSON.stringify({ text, at: new Date(Date.now() - agoSec * 1000).toISOString() }));
+      spawnSync('tmux', ['new-session', '-d', '-x', '80', '-y', '24', '-s', 'devteam', '-n', 'plan-enter', `${process.execPath} ${agent} ${sf} ${keys}`]);
+      for (let i = 0; i < 30 && !/approved|devteam|Done/.test(spawnSync('tmux', ['capture-pane', '-p', '-t', 'devteam:plan-enter'], { encoding: 'utf8' }).stdout ?? ''); i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+      must(['metrics', '--json'], { role: 'sup' });
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+    };
+    // the incident's pane: compacted while idle, the text unsubmitted in the input box (wrapped at 80 cols)
+    const stuck = `⏺ Compacted while idle, before the prompt cache expired\n${'─'.repeat(60)}\n❯ ${text}\n${'─'.repeat(60)}\n  ⏵⏵ bypass permissions on (shift+tab to cycle)`;
+    // a read by anyone but the supervisor (the dashboard, status, the owner) never presses a key
+    spawnSync('tmux', ['kill-server']);
+    fs.rmSync(keys, { force: true });
+    write(path.join(tmp, 'screen.txt'), stuck);
+    write(sent, JSON.stringify({ text, at: new Date(Date.now() - 3600 * 1000).toISOString() }));
+    spawnSync('tmux', ['new-session', '-d', '-x', '80', '-y', '24', '-s', 'devteam', '-n', 'plan-enter', `${process.execPath} ${agent} ${path.join(tmp, 'screen.txt')} ${keys}`]);
+    for (let i = 0; i < 30 && !/approved|devteam/.test(spawnSync('tmux', ['capture-pane', '-p', '-t', 'devteam:plan-enter'], { encoding: 'utf8' }).stdout ?? ''); i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+    must(['dashboard-data']);
+    must(['metrics', '--json']);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+    assert.equal(enters(), 0, 'the dashboard and the owner only look');
+    assert.ok(fs.existsSync(sent), 'the delivery is still waiting for the supervisor');
+    run(stuck, 3600);
+    assert.equal(enters(), 1, 'exactly one Enter');
+    assert.equal(resent().length, 1, 'and it is logged');
+    assert.match(resent()[0].detail, /sha1 [0-9a-f]{12}/);
+    assert.ok(!fs.existsSync(sent), 'the delivery is claimed');
+    must(['metrics', '--json'], { role: 'sup' });
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+    assert.equal(enters(), 1, 'a second pass presses nothing');
+    assert.equal(resent().length, 1);
+    run(`❯ ${text}\nDo you want to proceed?\n❯ 1. Yes\n  2. No`, 3600);
+    assert.equal(enters(), 0, 'never into a permission prompt');
+    run(`❯ ${text}\n\n⏺ Done.\n${'line\n'.repeat(12)}❯ \n  ⏵⏵ bypass permissions on`, 3600);
+    assert.equal(enters(), 0, 'submitted text: nothing to press');
+    assert.ok(!fs.existsSync(sent), 'and the record is dropped');
+    run(stuck, 5);
+    assert.equal(enters(), 0, 'sent seconds ago: a slow submit is not double-pressed');
+    run(`❯ ${text}\n✻ Thinking… (esc to interrupt)`, 3600);
+    assert.equal(enters(), 0, 'a busy agent is left alone');
+    assert.equal(resent().length, 1);
+    fs.rmSync(sent, { force: true });
+    must(['send', 'plan-enter', 'carry on'], { role: 'sup' });
+    assert.match(json(fs.readFileSync(sent, 'utf8')).text, /^\[devteam info m-\S+ from supervisor\] carry on$/, 'a delivery records the exact text typed');
+    spawnSync('tmux', ['kill-server']);
+    fs.rmSync(sent, { force: true });
+    git(['branch', '-D', 'plan/enter']);
+  });
+
+  await t.test('a ready goal changes through an answered goal-change question, by exactly the change it proposed', () => {
+    const nonGoals = () => json(must(['goal', 'show', G, '--json'])).non_goals;
+    const change = JSON.stringify({ non_goals: ['enterprise invoicing', 'refunds'] });
+    assert.equal(json(must(['goal', 'show', G, '--json'])).status, 'ready');
+    assert.match(dt(['goal', 'set', G, '--non-goals', 'x'], { role: 'sup' }).err, /only the owner changes it now \(class goal-change\)/, 'refused without --approved');
+    const ask = (extra) => must(['ask', '--kind', 'owner-decision', '--question', 'Add refunds to the non-goals?', '--recommendation', 'Set it', '--options', 'Set it', 'Leave it', ...extra], { role: 'sup' });
+    assert.match(dt(['ask', '--question', 'Change it?', '--class', 'goal-change', '--goal', G, '--recommendation', 'Set it'], { role: 'sup' }).err, /says the exact change/, 'a goal-change question names its change');
+    assert.match(dt(['ask', '--question', 'Change it?', '--class', 'goal-change', '--goal', G, '--change', '{"status":"met"}'], { role: 'sup' }).err, /not status/, 'only goal fields the supervisor may propose');
+    const Qwrong = ask(['--class', 'release-scope']);
+    must(['answer', Qwrong, 'Set it']);
+    assert.match(dt(['goal', 'set', G, '--approved', Qwrong], { role: 'sup' }).err, /class release-scope, not goal-change/, 'wrong class');
+    const Qother = ask(['--class', 'goal-change', '--goal', 'g-20990101-000000000-supervisor', '--change', change]);
+    must(['answer', Qother, 'Set it']);
+    assert.match(dt(['goal', 'set', G, '--approved', Qother], { role: 'sup' }).err, new RegExp(`is about g-20990101-000000000-supervisor, not ${G}`), 'wrong goal');
+    const Qopen = ask(['--class', 'goal-change', '--goal', G, '--change', change]);
+    assert.match(dt(['goal', 'set', G, '--approved', Qopen], { role: 'sup' }).err, /not answered by the owner/, 'unanswered');
+    must(['withdraw', Qopen, '--reason', 'test'], { role: 'sup' });
+    const Qno = ask(['--class', 'goal-change', '--goal', G, '--change', change]);
+    must(['answer', Qno, 'Leave it']);
+    assert.match(dt(['goal', 'set', G, '--approved', Qno], { role: 'sup' }).err, /not its recommendation/, 'a declining answer authorises nothing');
+    const Qok = ask(['--class', 'goal-change', '--goal', G, '--change', change]);
+    must(['answer', Qok, 'Set it — refunds can wait']);
+    assert.match(dt(['goal', 'set', G, '--approved', Qok, '--target', '10'], { role: 'sup' }).err, /pass no other fields/, 'the answer covers the proposed change, not another');
+    must(['goal', 'set', G, '--approved', Qok], { role: 'sup' });
+    assert.deepEqual(nonGoals(), ['enterprise invoicing', 'refunds']);
+    // a guessed date is cleared the same way: the change sets horizon to null
+    const Qdate = ask(['--class', 'goal-change', '--goal', G, '--change', JSON.stringify({ horizon: null })]);
+    must(['answer', Qdate, 'Set it']);
+    must(['goal', 'set', G, '--approved', Qdate], { role: 'sup' });
+    assert.equal(json(must(['goal', 'show', G, '--json'])).horizon, null, 'the horizon is cleared');
+    assert.doesNotMatch(must(['goal', 'check', G]), /horizon/);
+    assert.equal(json(must(['goal', 'show', G, '--json'])).updates.find((u) => u.approved === Qok)?.non_goals?.length, 2, 'the set records which answer authorised it');
+    assert.match(dt(['goal', 'set', G, '--approved', Qok], { role: 'sup' }).err, /already authorised a change/, 'one change per answer');
+    assert.match(dt(['goal', 'set', G, '--non-goals', 'x', '--owner', '--approved', Qok]).err, /--approved is the supervisor/, 'the owner sets directly');
+    // written straight into the log, a set that differs from the approved change is ignored by the fold
+    const Qok2 = ask(['--class', 'goal-change', '--goal', G, '--change', JSON.stringify({ priority: 2 })]);
+    must(['answer', Qok2, 'Set it']);
+    const dir = path.join(repo, 'docs/devteam/run/log');
+    const file = path.join(dir, fs.readdirSync(dir).find((f) => /^supervisor-\d{4}-\d{2}\.jsonl$/.test(f)));
+    const before = fs.readFileSync(file, 'utf8');
+    fs.appendFileSync(file, line({ id: G, type: 'goal', op: 'set', at: new Date().toISOString(), by: 'supervisor', measure: { description: 'easier', target: 1, unit: '%', direction: 'up' }, approved: Qok2 }));
+    assert.equal(json(must(['goal', 'show', G, '--json'])).measure.target, 80, 'a set other than the approved change changes nothing');
+    assert.match(dt(['log-check']).out, /is not the change/);
+    fs.writeFileSync(file, before);
   });
 
   await t.test('computed views: metrics, roadmap, retro, dashboard data', () => {
