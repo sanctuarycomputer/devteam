@@ -121,6 +121,7 @@ Default to the simplest; escalate only with a stated reason (an ADR for Tier A).
 - **Test-first → Doctrine** (a diff can't prove authorship order); the proxy gate is **`L-TEST-3` every PR touches a test file or carries `no-test:<reason>`**, plus branch-coverage thresholds on `domain/**`.
 - **`L-TEST-4` random test order + an empty quarantine list to release** (RSpec `--order random`, vitest `sequence.shuffle`, `go test -shuffle on`). "No flakes" is the policy; this is its gate.
 - **`L-TEST-5` prod-shaped seeds + crossed-order runs** — realistic seeds, varied order; catches ordering/query-planner flakes that isolated empty-DB tests and mutation testing miss (CI is often a different DB version than local — never rely on a local gate alone for DB behavior).
+- **`L-TEST-6` test state is per checkout.** Workers, merge gates and reviewers run suites at the same time in separate worktrees, so anything a suite shares (the test database, a port, a cache dir, a fixed temp path) is named from the checkout itself, not from an environment variable a process might not set: e.g. Rails `database: app_test_<%= Digest::SHA1.hexdigest(Rails.root.to_s)[0, 8] %>`, a port derived the same way. Gate: two concurrent runs of the suite in two worktrees both pass.
 - **Doctrine — property-based tests and incremental mutation testing**, both scoped to `domain/**` only, so CI time stays bounded.
 - **AI features — evals with thresholds** (§10).
 
@@ -189,7 +190,7 @@ Each Law → a commissioned gate, autofix-first (§15) where possible, catalogue
 - `L-OBS-1`..`3` wide events / trace id / PII-never-in-logs.
 - `L-SEC-1`..`8` zero-trust scope check / no-fail-open / central config+secrets / bounded+rate-limited input / model-output-untrusted / pin+lockfile+cooldown / vet-on-new-dep / gitleaks+frozen-lockfile.
 - `L-PII-1`..`3` PII registry complete + encrypted + erasable / minimization+purpose / retention policy present.
-- `L-TEST-1`..`5` per-change check / error-arm coverage / PR-touches-test-or-`no-test` + domain coverage / random order + empty quarantine / prod-shaped seeds.
+- `L-TEST-1`..`6` per-change check / error-arm coverage / PR-touches-test-or-`no-test` + domain coverage / random order + empty quarantine / prod-shaped seeds / test state per checkout.
 - `L-FE-1`,`2` axe-zero / Lighthouse lab budgets.
 - `L-ERG-1`..`3` linter-default metrics / autofix-first / toolchain pinned in `.tool-versions` (asdf).
 - `L-ESC-1` doctrine-exception is the only suppression; bare disables fail.
