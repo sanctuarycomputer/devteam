@@ -295,6 +295,8 @@
   .md table { font-size: 12.5px; margin: 10px 0; display: block; overflow-x: auto; }
   .md blockquote { margin: 8px 0; padding: 2px 12px; border-left: 2px solid var(--line-2); color: var(--fg-2); }
   .md a { color: var(--blue-fg); text-decoration: underline; }
+  .md figure.diagram { margin: 12px 0; padding: 12px; background: var(--well); border-radius: 8px; overflow-x: auto; }
+  .md figure.diagram svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
   .viewer iframe { width: 100%; height: 70vh; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
   .viewer img { max-width: 100%; border: 1px solid var(--line); border-radius: 8px; }
   @media (max-width: 900px) { .drawer { padding: 16px; } .drawer dl { grid-template-columns: 1fr; } }
@@ -1069,8 +1071,39 @@ async function openFile(params) {
     showDrawer(`<h2 id="drawer-title">${esc(title)}</h2>
       <div class="viewbar"><span class="grow">${where}</span>${isMd ? `<span class="seg2" role="group" aria-label="View"><button type="button" data-mdview="rendered" aria-pressed="${mode === 'rendered'}">Rendered</button><button type="button" data-mdview="raw" aria-pressed="${mode === 'raw'}">Raw</button></span>` : ''}</div>
       <div class="viewer">${isMd ? `<div class="md" data-md="rendered" ${mode === 'raw' ? 'hidden' : ''}>${rendered}</div>` : ''}<pre data-md="raw" ${isMd && mode !== 'raw' ? 'hidden' : ''}>${esc(txt)}</pre></div>`);
+    if (isMd) renderMermaid($('drawer-body').querySelector('.md'));
   }
   catch (e) { showDrawer(`<h2 id="drawer-title">${esc(title)}</h2><p class="err">${esc(e.message)}</p>`); }
+}
+// Mermaid fenced blocks in markdown render as diagrams. The library loads from the CDN only when a
+// document has one; offline, or on a diagram with an error, the source stays as a code block.
+let MERMAID = null;
+async function renderMermaid(root) {
+  const blocks = root ? [...root.querySelectorAll('pre > code.language-mermaid')] : [];
+  if (!blocks.length) return;
+  let mermaid;
+  try {
+    MERMAID ??= import('https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.esm.min.mjs').then((m) => m.default);
+    mermaid = await MERMAID;
+  } catch { MERMAID = null; return; }
+  const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+  // Agents write these documents: a diagram's own %%{init}%% directive could set themeCSS and restyle
+  // the owner's page (the SVG keeps its <style>). Directives are stripped and the theme keys locked.
+  mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: dark ? 'dark' : 'neutral', fontFamily: getComputedStyle(document.body).fontFamily, htmlLabels: false, flowchart: { htmlLabels: false },
+    secure: ['secure', 'securityLevel', 'startOnLoad', 'maxTextSize', 'theme', 'themeCSS', 'themeVariables', 'fontFamily', 'htmlLabels', 'flowchart', 'darkMode'] });
+  for (const [i, code] of blocks.entries()) {
+    const pre = code.parentElement;
+    try {
+      const src = code.textContent.replace(/%%\{[\s\S]*?\}%%/g, '').replace(/^\s*---\n[\s\S]*?\n---\s*\n/, '');
+      const { svg } = await mermaid.render(`mmd-${Date.now()}-${i}`, src);
+      const fig = document.createElement('figure');
+      fig.className = 'diagram';
+      fig.innerHTML = DOMPurify.sanitize(svg, { USE_PROFILES: { svg: true, svgFilters: true }, ADD_TAGS: ['style'] });
+      pre.replaceWith(fig);
+    } catch (e) {
+      pre.insertAdjacentHTML('beforebegin', `<p class="err">This diagram didn't render: ${esc(String(e?.message ?? e).split('\n')[0])}</p>`);
+    }
+  }
 }
 function route() {
   const h = decodeURIComponent(location.hash.slice(1));

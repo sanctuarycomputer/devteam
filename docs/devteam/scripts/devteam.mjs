@@ -12,6 +12,7 @@
 // dashboard · 11 sessions (workers, messages, phases, gates) · 12 init, help, dispatch.
 
 import { execFile, execFileSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -1050,8 +1051,42 @@ function paneWaitingIn(window) {
     const hit = lines.find((l) => re.test(l));
     if (hit) { found = { kind, line: hit.slice(0, 200) }; break; }
   }
+  // Only the supervisor acts on a pane (its own tick); the dashboard, status and the owner only look.
+  if (target && !found && process.env.DEVTEAM_ROLE === 'supervisor') resendLostEnter(`${loadSettings().tmux_session}:${window}`, target, lines);
   paneWaits.set(window, found);
   return found;
+}
+
+// A lost Enter: text the kit typed still sits unsubmitted in an idle agent's input (an agent that
+// compacts or redraws as the keys arrive can drop the Enter). typeInto records each delivery per
+// window; when the pane's bottom lines still end with that text's tail, nothing on them says the
+// agent is busy, no prompt is up (the caller checked) and the text is LOST_ENTER_SECONDS old, press
+// Enter once and log it. The text is never retyped; the record is claimed (deleted) before the key,
+// so a delivery gets at most one Enter however many passes or processes look.
+const LOST_ENTER_SECONDS = 30;
+const PANE_BUSY = /esc to (interrupt|cancel)|ctrl\+c to (interrupt|cancel)|press esc to stop/i;
+const sentFile = (key) => path.join(runDir, 'sent', `${encodeURIComponent(key)}.json`);
+// Agent-agnostic: no prompt glyphs. Whitespace (wrapping, padding) and box-drawing borders drop out.
+const squash = (t) => t.replace(/[\s\u2500-\u257f]+/g, '');
+function recordSent(target, text) {
+  const key = sh('tmux', ['display-message', '-p', '-t', target, '#S:#W']);
+  if (!key) return;
+  try { writeJson(sentFile(key), { text, at: nowIso() }); } catch {}
+}
+function resendLostEnter(key, target, lines) {
+  const file = sentFile(key);
+  let rec;
+  try { rec = readJson(file); } catch { return; }
+  const age = (Date.now() - Date.parse(rec.at)) / 1000;
+  const tail = squash(rec.text ?? '').slice(-40);
+  if (!tail || !(age >= LOST_ENTER_SECONDS)) return;
+  const bottom = lines.slice(-8);
+  const claim = () => { try { fs.unlinkSync(file); return true; } catch { return false; } };
+  if (!squash(bottom.join('')).includes(tail)) return void claim(); // submitted: nothing left to press
+  if (bottom.some((l) => PANE_BUSY.test(l))) return;
+  if (!claim() || !tmux(['send-keys', '-t', target, 'Enter'])) return;
+  const hash = crypto.createHash('sha1').update(rec.text).digest('hex').slice(0, 12);
+  appendLog({ type: 'observation', source: 'pane', kind: 'resent-enter', subject: key.slice(key.indexOf(':') + 1), detail: `pressed Enter once: text typed ${Math.round(age)}s ago was still unsubmitted in an idle pane ("${rec.text.slice(0, 60)}${rec.text.length > 60 ? '…' : ''}", sha1 ${hash})`, detector: 'pane', source_key: `resent-enter ${key} ${hash} ${rec.at}`, measure: { value: Math.round(age), unit: 's' } });
 }
 const paneWaiting = (id) => (activeWorker(id) ? paneWaitingIn(id) : null);
 
@@ -1206,6 +1241,9 @@ function cmdValidate() {
       if (!f.design) errors.push(`feature ${fid} names no design (project/designs/<slug>.md)`);
       else if (!projectFileText(f.design.replace(/^project\//, ''))) errors.push(`feature ${fid}: design ${f.design} does not exist`);
       else {
+        // A design being planned here opens with its TL;DR; landed designs are history.
+        const dt = landed ? null : tldrGap(projectFileText(f.design.replace(/^project\//, '')));
+        if (dt) sink.push(`feature ${fid}: design ${f.design} ${dt} (quality.md §6)`);
         const ld = latestPerTrack(designReviews, 'design');
         if (!ld.length) sink.push(`feature ${fid}: design ${f.design} has no review in project/reviews/${designSlug}/design-<n>.md`);
         else if (ld.some((r) => r.verdict !== 'APPROVE')) sink.push(`feature ${fid}: the latest design review is not APPROVE`);
@@ -2002,9 +2040,29 @@ function cmdAct() {
     const t = tickets().get(asList(flags.refs)[0]);
     if (!t) die('approve-plan names the ticket: --refs <ticket-id>');
     if ((t.one_way_doors ?? []).length && !questions().some((q) => q.kind === 'one-way-door' && q.ticket === t.id && q.status === 'answered')) die(`${t.id} lists one-way doors; the owner answers a one-way-door question (--ticket ${t.id}) before its plan is approved (constitution.md §4)`);
+    // The plan opens with its TL;DR, so a low-risk plan can be approved from it (quality.md §6).
+    const ref = [`ticket/${t.id}`, `origin/ticket/${t.id}`].find((r) => resolveCommit(r));
+    const plan = ref ? git(['show', `${ref}:${projectRel}/tickets/${t.id}/plan.md`]) : null;
+    if (plan === null) die(`no plan.md for ${t.id} on ticket/${t.id}; approve a plan once it is committed`);
+    const tldr = tldrGap(plan);
+    if (tldr) die(`${t.id}'s plan ${tldr}; send it back to the worker (quality.md §6)`);
   }
   const line = appendLog({ type: 'act', class: cls, scope: scope ?? undefined, what, rung, refs: asList(flags.refs), reversible: !flags.irreversible, approved_by: approved ?? undefined }, 'supervisor');
   out(line.id);
+}
+// A plan or design opens with '## TL;DR' and a few bullets: the approach, skimmable (quality.md §6).
+// Returns what is wrong, or null.
+function tldrGap(text) {
+  const lines = text.split('\n');
+  const at = lines.findIndex((l) => /^##\s+TL;?DR\b/i.test(l.trim()));
+  if (at < 0) return 'has no "## TL;DR" section';
+  if (lines.slice(0, at).some((l) => /^##\s/.test(l.trim()))) return 'has its TL;DR after another section; it comes first, under the title';
+  const body = [];
+  for (const l of lines.slice(at + 1)) { if (/^#{1,2}\s/.test(l.trim())) break; body.push(l); }
+  const bullets = body.filter((l) => /^\s{0,3}[-*+]\s+\S/.test(l)).length;
+  if (!bullets) return 'has a TL;DR with no bullets';
+  if (bullets > 7) return `has a TL;DR of ${bullets} bullets; seven at most, the rest belongs in the plan`;
+  return null;
 }
 function cmdCorrect() {
   const [actId] = positional;
@@ -3079,7 +3137,8 @@ function resolvePane(target) {
   if (SHELLS.has(cmd.replace(/^-/, ''))) return { problem: `no agent is running in ${exact} (it is at a ${cmd} prompt); resume it first` };
   return { target: exact };
 }
-const typeInto = (target, line) => tmux(['send-keys', '-t', target, '-l', line]) && tmux(['send-keys', '-t', target, 'Enter']);
+// Each delivery is recorded per window, so a lost Enter can be pressed later (resendLostEnter).
+const typeInto = (target, line) => { const ok = tmux(['send-keys', '-t', target, '-l', line]) && tmux(['send-keys', '-t', target, 'Enter']); if (ok) recordSent(target, line); return ok; };
 function nudgeSupervisor(line) {
   const { target, problem } = resolvePane(supervisorTarget());
   if (problem) return void warn(`not delivered to the supervisor: ${problem}`);
