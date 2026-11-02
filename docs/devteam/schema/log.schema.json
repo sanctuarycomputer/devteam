@@ -950,7 +950,7 @@
         ]
       },
       "act": {
-        "description": "A decision the supervisor made (incl. approve-spec, approve-plan, merge-word). The owner, or the supervisor at a retro, sets corrected; the supervisor then sets repaired.",
+        "description": "A decision the supervisor made (incl. approve-spec, approve-plan, merge-word, and worker-slots, whose planner acts carry the feature's id_block). The owner, or the supervisor at a retro, sets corrected; the supervisor then sets repaired.",
         "type": "object",
         "properties": {
           "class": {
@@ -1002,6 +1002,29 @@
               "fix-ticket",
               "none"
             ]
+          },
+          "id_block": {
+            "description": "On the act that made a planner: the ticket numbers (the NN of <component>-NN-<slug>, from..to inclusive) reserved for its feature, above every number on main, in a plan in flight, and in every earlier block. validate on plan/<feature> warns about a ticket of the feature outside it; merge --plan refuses an id already on main.",
+            "type": "object",
+            "properties": {
+              "feature": {
+                "type": "string"
+              },
+              "from": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "to": {
+                "type": "integer",
+                "minimum": 1
+              }
+            },
+            "required": [
+              "feature",
+              "from",
+              "to"
+            ],
+            "additionalProperties": false
           }
         },
         "additionalProperties": false,

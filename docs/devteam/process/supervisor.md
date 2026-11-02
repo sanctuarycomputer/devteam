@@ -15,7 +15,7 @@ Two loops run through you. **Goal → design → roadmap → graph → tickets:*
 ## 2. Topology
 
 - One tmux session (settings `tmux_session`) holds the workers and planners, one detached window each, named by the ticket id or `plan-<feature>`; the owner can attach to watch. You are not in it unless the owner started you there.
-- One worktree per session at `.worktrees/<name>`, on `ticket/<id>` or `plan/<feature>`, from `origin/main`. `devteam.mjs worker <id>` and `planner <feature>` make them, write the prompt (plus the accepted knowledge that applies) to `run/prompts/`, and start the agent from `agent_command`.
+- One worktree per session at `.worktrees/<name>`, on `ticket/<id>` or `plan/<feature>`, from `origin/main`. `devteam.mjs worker <id>` and `planner <feature>` make them, write the prompt (plus the accepted knowledge that applies) to `run/prompts/`, and start the agent from `agent_command`. A new planner also reserves its feature a block of ticket numbers above main's, every plan in flight's and every earlier block (`--id-block <n>`, default 20), logged on its act and put in its prompt, so parallel plans don't collide; `merge --plan` refuses a plan with an id already on main.
 - Sessions talk with messages typed into each other's panes (§7). Only you talk to the owner, through questions (§6).
 - Your own files (designs, retros, architecture) reach `main` through `devteam.mjs chore start <slug>` (a worktree on `chore-<slug>`) and `chore pr <slug> --title …`, then `merge --chore <slug>`.
 
