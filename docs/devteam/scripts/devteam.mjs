@@ -1079,6 +1079,11 @@ const PANE_WAITS = [
   ['prompt', /Do you want to (proceed|make this edit|create|allow|run)|Do you trust the files|\[y\/n\]|\(y\/n\)|Press Enter to continue|❯\s*1\.\s*Yes/i],
 ];
 const paneWaits = new Map();
+const paneTails = new Map();
+// An agent idle at its prompt while its own background shell still runs: after a compaction it can
+// lose the shell's result and wait for nothing. Only read, never acted on: the supervisor nudges.
+const PANE_SHELL = /\b\d+ (background )?shells? (still )?running\b|·\s*\d+ (background )?shells?\s*(·|$)/i;
+const idleWithShell = (window) => { const l = paneTails.get(window) ?? []; return l.some((x) => PANE_SHELL.test(x)) && !l.some((x) => PANE_BUSY.test(x)); };
 function paneWaitingIn(window) {
   if (paneWaits.has(window)) return paneWaits.get(window);
   let found = null;
@@ -1091,6 +1096,7 @@ function paneWaitingIn(window) {
   // Only the supervisor acts on a pane (its own tick); the dashboard, status and the owner only look.
   if (target && !found && process.env.DEVTEAM_ROLE === 'supervisor') resendLostEnter(`${loadSettings().tmux_session}:${window}`, target, lines);
   paneWaits.set(window, found);
+  paneTails.set(window, lines);
   return found;
 }
 
@@ -3224,7 +3230,7 @@ function collectMetrics(since) {
     // request to the supervisor still unanswered (the unanswered-message finding covers that)
     const waitingOnOwner = openQs.some((q) => (q.blocks ?? []).includes(id) || q.ticket === id);
     const waitingOnSupervisor = openMsgs.some((m) => m.created_by === id);
-    if (w && w.phase && !['done', 'parked', 'awaiting-word', 'blocked'].includes(w.phase) && !mergeShaFor(id) && !waitingOnOwner && !waitingOnSupervisor && w.minutes_silent > settings.stale_after_minutes) add('high', 'stale-worker', id, ...(windowGone(id) ? [`silent for ${w.minutes_silent} min (phase ${w.phase}) and its tmux window is gone`, `resume it: worker ${id} --resume (supervisor.md, recovery)`] : [`silent for ${w.minutes_silent} min (phase ${w.phase})`, 'check its pane; resume it (supervisor.md, recovery)']));
+    if (w && w.phase && !['done', 'parked', 'awaiting-word', 'blocked'].includes(w.phase) && !mergeShaFor(id) && !waitingOnOwner && !waitingOnSupervisor && w.minutes_silent > settings.stale_after_minutes) add('high', 'stale-worker', id, ...(windowGone(id) ? [`silent for ${w.minutes_silent} min (phase ${w.phase}) and its tmux window is gone`, `resume it: worker ${id} --resume (supervisor.md, recovery)`] : [...(idleWithShell(id) ? [`silent for ${w.minutes_silent} min (phase ${w.phase}), idle at its prompt with a background shell still running`, `nudge it: send ${id} "check your background shell's result and carry on" (an agent can lose the result across a compaction)`] : [`silent for ${w.minutes_silent} min (phase ${w.phase})`, 'check its pane; resume it (supervisor.md, recovery)'])]));
   }
   for (const p of planners()) {
     const who = `plan-${p.feature}`;
