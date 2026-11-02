@@ -3581,12 +3581,17 @@ function cmdSend() {
   out(line.id);
 }
 // A request is settled when the work it is about has landed: a ticket's once it merged, a
-// planner's once its plan file is on main. The merge is the answer even if nobody replied.
+// planner's once its plan file is on main, a ticket's review request once it was approved. The
+// merge or the approval is the answer even if nobody replied.
 function settledByLanding(m) {
   const by = m.created_by ?? m.by;
   if (!by) return false;
   const cls = writerClass(by);
-  if (cls === 'ticket') return !!mergeShaFor(by);
+  if (cls === 'ticket' && mergeShaFor(by)) return true;
+  // A review request is answered by the approval it asked for: an approve-spec or approve-plan act
+  // on the ticket logged after it, whether or not a reply cites the request.
+  if (cls === 'ticket' && m.kind === 'review-request') return logObjects('act').some((a) => ['approve-spec', 'approve-plan'].includes(a.class) && (a.refs ?? [])[0] === by && a.created_at > m.created_at);
+  if (cls === 'ticket') return false;
   if (cls === 'planner') return !!mainRef() && git(['cat-file', '-e', `${mainRef()}:${projectRel}/log/${by}.jsonl`]) !== null;
   return false;
 }

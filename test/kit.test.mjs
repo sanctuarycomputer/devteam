@@ -284,7 +284,10 @@ test('devteam kit', async (t) => {
     fs.rmSync(path.join(wt('bill-01-card'), 'billing/wip.test.js'));
     assert.ok(!json(must(['metrics', '--json'])).gates.flaky_gates.some((g) => g.gate === 'tdd'), 'dirty runs are not flaky');
     assert.notEqual(dt(['act', '--class', 'approve-spec', '--refs', 'm-20261101-000000000-bill-01-card', '--', 'spec ok'], { role: 'sup' }).status, 0, 'an approval names its ticket');
+    const openReview = () => json(must(['messages', '--to', 'supervisor', '--open', '--json'])).some((m) => m.created_by === 'bill-01-card' && m.kind === 'review-request');
+    assert.ok(openReview(), 'asked, not yet answered');
     must(['act', '--class', 'approve-spec', '--refs', 'bill-01-card', '--', 'spec ok'], { role: 'sup' });
+    assert.ok(!openReview(), 'the approval it asked for answers it, with no reply citing it');
     const tdir = path.join(wt('bill-01-card'), 'docs/devteam/project/tickets/bill-01-card');
     // approve-plan reads the committed plan, and the plan opens with its TL;DR
     assert.match(dt(['act', '--class', 'approve-plan', '--refs', 'bill-01-card', '--', 'plan ok'], { role: 'sup' }).err, /no plan\.md/);
