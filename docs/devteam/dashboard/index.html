@@ -149,7 +149,8 @@
   button.tcard .t b { font-family: var(--sans); font-size: 12.5px; font-weight: 600; }
   button.tcard .t b i { color: var(--amber-fg); font-size: 12px; }
   .drawer dd a, .drawer p a { color: var(--blue-fg); text-decoration: underline; text-underline-offset: 2px; }
-  button.tcard .badge { white-space: normal; height: auto; margin-top: 4px; }
+  button.tcard .pills { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+  button.tcard .pill { margin: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; }
   button.tcard.blocked { border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
   .tcard:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
   .col h3 { display: flex; justify-content: space-between; align-items: center; margin: 2px 4px 8px; }
@@ -169,6 +170,8 @@
   .qcard.door { border-left-color: var(--red); }
   .qcard.trust { border-left-color: var(--green); }
   .qid { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  .qcard.done { border-left-color: var(--green); opacity: .85; }
+  .answered-note { color: var(--green-fg); }
 
   /* reading width: a line of prose stays near 1.5 alphabets (both cases), about 78 characters */
   :root { --measure: 78ch; }
@@ -594,6 +597,18 @@ function columnOf(t) {
   const byPhase = PHASE_COLUMN[t.phase];
   return byPhase && RANK[byPhase] > RANK[byStage] && RANK[byStage] < RANK.Merged ? byPhase : byStage;
 }
+const PHASE_SHORT = { starting: 'Starting', spec: 'Spec', plan: 'Plan', contract: 'Contracts', build: 'Building', verify: 'Verifying', 'final-review': 'Final review', 'awaiting-word': 'Waiting', merging: 'Merging', parked: 'Parked' };
+// A card's pills, most important first: what stops it, then what to know, then what it's doing.
+// Each pill is a word or two and never wraps; the row wraps between pills.
+function ticketPills(t) {
+  const ps = [];
+  if (t.phase === 'blocked') ps.push(['Blocked', 'high']);
+  if (t.waiting) ps.push([t.waiting.kind === 'limit' ? 'Usage limit' : 'Stuck on a prompt', 'high', t.waiting.line]);
+  if (t.held) ps.push(['Held', '', t.held]);
+  if (t.risk === 'high') ps.push(['High risk', 'medium']);
+  if (t.phase && !['blocked', 'done'].includes(t.phase) && !['merged', 'released'].includes(t.stage)) ps.push([PHASE_SHORT[t.phase] || words(t.phase), 'low', `${PHASE_WORDS[t.phase] || t.phase}${t.task ? ` (${t.task})` : ''}`]);
+  return ps;
+}
 function board(items, crit) {
   $('planners').innerHTML = plannerCards(DATA.planners || []);
   $('board-cols').innerHTML = COLUMNS.map(([name]) => {
@@ -604,8 +619,8 @@ function board(items, crit) {
     return `<div class="col${total ? '' : ' none'}"><h3><span>${name}</span><span>${total}</span></h3>${cards.map((t) => `
       <button type="button" class="tcard ${t.phase === 'blocked' || t.waiting ? 'blocked' : ''}" data-ticket="${esc(t.id)}" aria-label="Open ${esc(t.title)}">
         <div class="t"><b>${crit.has(t.id) ? '<i class="icon-flag" title="on the critical path" aria-label="on the critical path"></i> ' : ''}${esc(t.title)}</b></div>
-        <div class="muted">${esc(t.component)} · ${esc(t.size)} · wave ${esc(t.wave ?? '–')}${t.target_release ? ` · ${esc(t.target_release)}` : ''}</div>
-        <div>${t.waiting ? `<span class="badge high" title="${esc(t.waiting.line)}">${t.waiting.kind === 'limit' ? 'usage limit' : 'waiting on a prompt'}</span>` : ''}${t.held ? `<span class="badge" title="${esc(t.held)}">held</span>` : ''}${t.risk === 'high' ? '<span class="badge medium">high risk</span>' : ''}${t.phase === 'blocked' ? '<span class="badge high">blocked</span>' : ''}${t.phase && !['blocked', 'done'].includes(t.phase) && !['merged', 'released'].includes(t.stage) ? `<span class="badge low">${esc(PHASE_WORDS[t.phase] || t.phase)}${t.task ? ` ${esc(t.task)}` : ''}</span>` : ''}</div>
+        <div class="muted">${esc(t.component)} · ${esc(t.size)}</div>
+        ${(() => { const ps = ticketPills(t); return ps.length ? `<div class="pills">${ps.map(([label, tone, tip]) => `<span class="badge pill ${tone}" title="${esc(tip || label)}">${esc(label)}</span>`).join('')}</div>` : ''; })()}
       </button>`).join('')}${total > cards.length ? `<div class="more">+ ${total - cards.length} more</div>` : ''}</div>`;
   }).join('');
 }
@@ -735,6 +750,7 @@ function questionCard(q, o, reasonText) {
       <h4>${linkify(q.question)}</h4>
       ${q.context ? `<p class="ctx">${linkify(q.context)}</p>` : ''}
       ${(q.links || []).length ? `<div class="links"><span class="muted small">Look at:</span>${q.links.map(linkOf).join('')}</div>` : ''}
+      ${q.change ? `<div class="meta">Approving sets on <a class="linkish" href="#goal/${encodeURIComponent(q.goal)}">${esc((DATA.ooda.goals.find((g) => g.id === q.goal) || {}).title || q.goal)}</a>:<ul>${Object.entries(q.change).map(([k, v]) => `<li><b>${esc(words(k))}</b>: ${Array.isArray(v) && v.length && typeof v[0] === 'object' ? `<ol>${v.map((m) => `<li>${esc(m.title || JSON.stringify(m))}${m.target != null ? ` → ${esc(m.target)}` : ''}</li>`).join('')}</ol>` : esc(typeof v === 'object' ? JSON.stringify(v) : v)}</li>`).join('')}</ul></div>` : ''}
       ${goalAsk ? (() => { const settled = (DATA.ooda.answered || []).filter((a) => a.goal === q.goal && a.kind !== 'goal-approval' && a.status === 'answered'); return settled.length ? `<div class="meta">Rests on your answers to: ${settled.map((a) => `${qlink(a.id, a.question)} (<b>${esc(a.answer)}</b>)`).join('; ')}</div>` : ''; })() : ''}
       ${list.length ? `<div class="choices" role="radiogroup" aria-label="Choices">${choiceHtml}</div>` : ''}
       <textarea data-q="${esc(q.id)}" placeholder="${esc(notePh)}">${esc(drafts[q.id] || '')}</textarea>
@@ -793,6 +809,8 @@ function goalState(g, R, openQs) {
   if (g.check.definition.length) return { key: 'defining', label: 'Being defined', tone: 'medium', step: 0, next: defQ ? `<b>Waiting on you:</b> ${qlink(defQ.id, 'answer the open questions')}.` : `Still open: ${esc(g.check.definition.slice(0, 3).join('; '))}${g.check.definition.length > 3 ? '…' : ''}.` };
   // only say "being designed" when someone is: a planner in flight for it, or design questions open
   const designing = planningFor(g).length || openQs.some((q) => q.goal === g.id);
+  const after = (g.plan_after || []).map((d) => ({ ...d, g: (DATA.ooda.goals || []).find((x) => x.id === d.goal) })).filter((d) => d.g && (d.g.status || 'draft') === 'draft');
+  if (!designing && after.length) return { key: 'designing', label: 'Waiting on another goal', tone: '', step: 1, next: after.map((d) => `Its design waits for <a class="linkish" href="#goal/${encodeURIComponent(d.goal)}">${esc(d.g?.title || d.goal)}</a>’s: ${esc(d.reason)}`).join('<br>') };
   if (!designing) return { key: 'designing', label: 'Waiting for a planner', tone: 'medium', step: 1, next: 'Fully defined, but nobody is designing it yet. The supervisor starts a planner when a slot is free (Health says when one is).' };
   return { key: 'designing', label: 'Approach being designed', tone: '', step: 1, next: 'Fully defined. The supervisor is writing and reviewing the design; you’ll approve it in the Inbox.' };
 }
@@ -1087,8 +1105,17 @@ async function post(action, body, errId) {
     if (errId && $(`e-${errId}`)) $(`e-${errId}`).textContent = out.error || 'failed';
     return false;
   }
-  await load({ force: true });
+  // The owner's action is saved; refresh in the background rather than holding the button until the
+  // whole page has reloaded.
+  load({ force: true });
   return true;
+}
+// Once an answer is saved the card says so at once; the next refresh removes it.
+const ANSWERED = new Map();
+function markAnswered(id, text) {
+  ANSWERED.set(id, text);
+  const card = document.getElementById(`q-${id}`);
+  if (card) { card.classList.add('done'); card.innerHTML = `<div class="answered-note"><i class="icon-circle-check" aria-hidden="true"></i> Answered: <b>${esc(text)}</b></div>`; }
 }
 
 function render(d) {
@@ -1138,6 +1165,8 @@ function render(d) {
       <p class="ctx">${esc(cap(who(k.created_by)))} proposes this as a ${esc(k.kind)}${k.confidence != null ? `, ${Math.round(k.confidence * 100)}% sure` : ''}, based on ${(k.evidence || []).length} thing${(k.evidence || []).length === 1 ? '' : 's'} it noticed. Accepted lessons go into the instructions of every agent they apply to.</p>
       <div class="row-inline"><button data-know="${esc(k.id)}" data-status="accepted">Keep it</button><button class="ghost" data-know="${esc(k.id)}" data-status="retired">Retire it</button><span class="err" id="e-${esc(k.id)}"></span></div>
     </div>`).join('');
+  for (const qid of [...ANSWERED.keys()]) if (!d.questions.some((q) => q.id === qid)) ANSWERED.delete(qid);
+  d = { ...d, questions: d.questions.filter((q) => !ANSWERED.has(q.id)) };
   $('questions').innerHTML = goalCards + (d.questions.length ? d.questions.map((q) => questionCard(q, o, reasonText)).join('') : cands.length ? '' : empty('Nothing needs you right now. Decisions and actions only you can take show here.'));
   $('answered-sum').textContent = `Answered (${o.answered.length})`;
   $('answered').innerHTML = o.answered.length ? o.answered.map(answeredCard).join('') : empty('Nothing answered yet.');
@@ -1184,7 +1213,14 @@ function showFailure(message) {
   b.hidden = false;
 }
 
+let loading = null;
 async function load({ force = false } = {}) {
+  // one refresh at a time; a forced one waits for the one in flight, then runs
+  if (loading) { if (!force) return; await loading.catch(() => {}); }
+  loading = loadNow({ force });
+  try { return await loading; } finally { loading = null; }
+}
+async function loadNow({ force = false } = {}) {
   // Don't redraw under someone who is typing or choosing (radio choices keep their pick anyway).
   const ae = document.activeElement;
   if (!force && DATA && ae && (['TEXTAREA', 'SELECT'].includes(ae.tagName) || (ae.tagName === 'INPUT' && ae.type !== 'radio')) && ae.id !== 'view') return;
@@ -1267,7 +1303,7 @@ document.addEventListener('click', async (ev) => {
         : await post('answer', { id, answer, autonomy: auto ? Number(auto) : undefined, rule: rule || undefined }, id);
     }
     catch (e2) { if (err) err.textContent = `Could not send: ${e2.message}`; }
-    if (ok) { delete drafts[id]; delete picks[id]; }
+    if (ok) { delete drafts[id]; delete picks[id]; markAnswered(id, goalId ? picked + (note ? ` — ${note}` : '') : answer); }
     else { btn.classList.remove('busy'); btn.disabled = false; btn.removeAttribute('aria-busy'); btn.textContent = label; }
     return;
   }
