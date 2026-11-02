@@ -1044,13 +1044,17 @@ function planners() {
     const msgs = lines.filter((l) => l.type === 'message');
     const replied = new Set(msgs.map((m) => m.re).filter(Boolean));
     const asking = msgs.filter((m) => m.by === by && !['info', 'ruling', 'answer'].includes(m.kind) && !replied.has(m.id));
+    // Before its feature line exists (while designing), a planner's goal is the one its questions
+    // name: a question whose links point at this plan branch.
+    const refQs = questions().filter((q) => (q.links ?? []).some((l) => l.ref === b || l.ref === `refs/heads/${b}`));
+    const goals = [...new Set([...(feat.goals ?? []), ...refQs.map((q) => q.goal).filter(Boolean)])];
     return {
-      feature, title: feat.title ?? feature, goals: feat.goals ?? [], tickets: graph.split('\n').filter((t) => t.includes('"type":"ticket"') && t.includes('"op":"new"')).length,
+      feature, title: feat.title ?? feature, goals, tickets: graph.split('\n').filter((t) => t.includes('"type":"ticket"') && t.includes('"op":"new"')).length,
       branch: b, window: !!target, problem: target ? null : problem, waiting: target ? paneWaitingIn(by) : null,
       last_seen: last, minutes_silent: last ? Math.round((Date.now() - Date.parse(last)) / 60000) : null,
       waiting_on_supervisor: asking.map((m) => ({ id: m.id, kind: m.kind, text: m.text })),
       // a planner whose design waits on the owner's answers is waiting, not stale
-      waiting_on_owner: (feat.goals ?? []).length ? questions().filter((q) => q.status === 'open' && (feat.goals ?? []).includes(q.goal)).map((q) => q.id) : [],
+      waiting_on_owner: [...new Set([...questions().filter((q) => q.status === 'open' && goals.includes(q.goal)), ...refQs.filter((q) => q.status === 'open')].map((q) => q.id))],
     };
   }).filter(Boolean);
 }
