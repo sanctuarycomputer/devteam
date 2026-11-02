@@ -831,7 +831,7 @@ function plannerCards(ps) {
   return ps.map((p) => `<button type="button" class="plcard${p.waiting || !p.window ? ' stuck' : ''}" data-planner="${esc(p.feature)}">
     <div><i class="icon-bot" aria-hidden="true"></i> <b>Planning ${esc(p.title)}</b></div>
     <div class="muted">${p.goals.length ? `for ${p.goals.map((gid) => esc((DATA.ooda.goals.find((g) => g.id === gid) || {}).title || gid)).join(', ')} · ` : ''}${p.tickets ? `${p.tickets} ticket${p.tickets > 1 ? 's' : ''} so far · ` : ''}${esc(ago(p.minutes_silent))}</div>
-    <div>${p.waiting ? `<span class="badge high">${p.waiting.kind === 'limit' ? 'usage limit' : 'waiting on a prompt'}</span>` : ''}${!p.window ? '<span class="badge medium">window gone</span>' : ''}${p.waiting_on_supervisor.length ? '<span class="badge low">waiting for the supervisor</span>' : ''}</div>
+    <div>${p.waiting ? `<span class="badge high">${p.waiting.kind === 'limit' ? 'usage limit' : 'waiting on a prompt'}</span>` : ''}${!p.window ? '<span class="badge medium">window gone</span>' : ''}${p.waiting_on_supervisor.length ? '<span class="badge low">waiting for the supervisor</span>' : ''}${(p.waiting_on_owner || []).length ? `<span class="badge medium">waiting for ${p.waiting_on_owner.length} answer${p.waiting_on_owner.length > 1 ? 's' : ''} from you</span>` : ''}</div>
   </button>`).join('');
 }
 
@@ -1006,6 +1006,7 @@ function openPlanner(feature) {
       <dt>Status</dt><dd>${esc(cap(ago(p.minutes_silent)))}${p.waiting ? ` · <span class="badge high">${p.waiting.kind === 'limit' ? 'usage limit' : 'waiting on a prompt'}</span> ${esc(p.waiting.line)}` : ''}${!p.window ? ` · <span class="badge medium">window gone</span> ${esc(p.problem || '')}` : ''}</dd>
       ${p.goals.length ? `<dt>For goal</dt><dd>${p.goals.map((gid) => `<a href="#goal/${encodeURIComponent(gid)}">${esc((DATA.ooda.goals.find((g) => g.id === gid) || {}).title || gid)}</a>`).join(', ')}</dd>` : ''}
       <dt>Tickets so far</dt><dd>${esc(p.tickets)}</dd>
+      ${(p.waiting_on_owner || []).length ? `<dt>Waiting on you</dt><dd><ul>${p.waiting_on_owner.map((id) => `<li>${qlink(id)}</li>`).join('')}</ul></dd>` : ''}
       ${p.waiting_on_supervisor.length ? `<dt>Asked the supervisor</dt><dd><ul>${p.waiting_on_supervisor.map((m) => `<li>${esc(MSG_WORDS[m.kind] || m.kind)}: ${linkify(m.text)}</li>`).join('')}</ul></dd>` : ''}
       <dt>Branch</dt><dd><code>${esc(p.branch)}</code></dd>
       <dt>Window</dt><dd><code>${esc(`plan-${p.feature}`)}</code></dd>
