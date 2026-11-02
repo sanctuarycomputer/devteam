@@ -383,6 +383,7 @@ function fold(all) {
   const lines = [...all].sort((a, b) => a.at.localeCompare(b.at) || a.__file.localeCompare(b.__file) || a.__line - b.__line);
   const objects = new Map();
   const ignored = [];
+  const goalApprovals = new Set();
   for (const l of lines) {
     if (l.op !== 'new') continue;
     if (objects.has(l.id)) {
@@ -411,8 +412,11 @@ function fold(all) {
       continue;
     }
     if (obj.type === 'goal' && cls === 'supervisor' && (obj.status ?? 'draft') !== 'draft') {
-      ignored.push({ line: l, why: 'the supervisor edits a goal only while it is a draft' });
-      continue;
+      const problem = !l.approved ? null : goalApprovals.has(l.approved) ? `${l.approved} already authorised a goal set` : goalChangeProblem(objects.get(l.approved), obj.id, l.approved);
+      if (!l.approved || problem) {
+        ignored.push({ line: l, why: l.approved ? `the supervisor edits a ${obj.status} goal only with an answered goal-change question: ${problem}` : 'the supervisor edits a goal only while it is a draft' });
+        continue;
+      }
     }
     if (obj.type === 'question' && l.status === 'defaulted' && !obj.default) {
       ignored.push({ line: l, why: 'the question has no default' });
@@ -429,6 +433,7 @@ function fold(all) {
     }
     if (Object.keys(changed).length) obj.updates.push({ at: l.at, by: l.by, ...(l.channel ? { channel: l.channel } : {}), ...changed });
     else ignored.push({ line: l, why: 'overridden by a higher-ranked writer' });
+    if (obj.type === 'goal' && changed.approved) goalApprovals.add(changed.approved);
   }
   for (const o of objects.values()) delete o.__rank;
   return { objects, ignored };
@@ -643,6 +648,19 @@ function questionView(q) {
   };
 }
 const questions = () => logObjects('question').map(questionView);
+
+// Why question q does not authorise the supervisor to change goal goalId (null when it does): it
+// is a goal-change question about that goal, answered by the owner with its recommendation (an
+// answer other than the recommendation declines or alters the change, so the supervisor asks again).
+function goalChangeProblem(q, goalId, qid) {
+  const v = q?.type === 'question' ? questionView(q) : null;
+  if (!v) return `${qid} is not a question`;
+  if (v.class !== 'goal-change') return `${v.id} was asked in class ${v.class ?? '(none)'}, not goal-change`;
+  if (v.goal !== goalId) return `${v.id} is about ${v.goal ?? 'no goal'}, not ${goalId} (ask with --goal ${goalId})`;
+  if (v.status !== 'answered') return `${v.id} is not answered by the owner (${v.status})`;
+  if (!v.matched) return `${v.id} was answered "${v.answer}", not its recommendation${v.recommendation ? ` ("${v.recommendation}")` : ''}; ask again for the change the owner wants`;
+  return null;
+}
 
 // The correction on an act, with who made it and when.
 const correctionOf = (a) => {
@@ -2248,10 +2266,17 @@ function cmdGoal() {
     return out(appendLog({ type: 'goal', status: 'draft', ...f }, by).id);
   }
   if (sub === 'set') {
-    if (!id || logGet(id)?.type !== 'goal') die('usage: goal set <g-id> [--title …] [--outcome …] [--measure …] [--target n] [--unit u] [--direction up|down] [--horizon date] [--non-goals …] [--preconditions …] [--priority n] [--milestones \'[{"title","target","by","preconditions":[n],"tickets"}…]\'] [--owner]');
+    if (!id || logGet(id)?.type !== 'goal') die('usage: goal set <g-id> [--title …] [--outcome …] [--measure …] [--target n] [--unit u] [--direction up|down] [--horizon date] [--non-goals …] [--preconditions …] [--priority n] [--milestones \'[{"title","target","by","preconditions":[n],"tickets"}…]\'] [--approved <qid>] [--owner]');
     const { by } = writer();
-    if (by === 'supervisor' && (logGet(id).status ?? 'draft') !== 'draft') die(`${id} is ${logGet(id).status}; only the owner changes it now (class goal-change)`);
-    appendLog({ type: 'goal', op: 'set', id, ...fields() }, by);
+    const approved = flagStr('approved') ?? null;
+    if (approved && by !== 'supervisor') die('the owner changes a goal directly; --approved is the supervisor applying an owner answer');
+    if (by === 'supervisor' && (logGet(id).status ?? 'draft') !== 'draft' && !approved) die(`${id} is ${logGet(id).status}; only the owner changes it now (class goal-change): ask a goal-change question with --goal ${id}, then goal set ${id} --approved <qid>`);
+    if (approved) {
+      const problem = goalChangeProblem(logGet(approved), id, approved);
+      if (problem) die(`goal set --approved: ${problem}`);
+      if (logObjects('goal').some((g) => g.updates.some((u) => u.approved === approved)) || logObjects('act').some((a) => a.approved_by === approved)) die(`${approved} already authorised a change; ask again for another`);
+    }
+    appendLog({ type: 'goal', op: 'set', id, ...fields(), approved: approved ?? undefined }, by);
     return out(`updated ${id}`);
   }
   // The owner's decision on a goal, made on its design: approve (ready; planning starts), refine
@@ -3379,6 +3404,7 @@ Observe and orient
 
 Goals and retros
   goal [list|check|show|forecast|add|set|decide|approve|status|reading] …
+  goal set <g-id> --approved <qid> …   supervisor: apply an answered goal-change question to a goal past draft (one set per answer)
   retro [--due | --print | close <date> --summary s --refs ids]
   chore start <slug> | chore pr <slug> --title t    a supervisor-written file (design, retro, architecture) and its PR
 

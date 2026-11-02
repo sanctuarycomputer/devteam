@@ -705,6 +705,41 @@ test('devteam kit', async (t) => {
     must(['goal', 'status', Gi, 'abandoned']);
   });
 
+  await t.test('a ready goal changes through an answered goal-change question', () => {
+    const set = (...extra) => dt(['goal', 'set', G, '--non-goals', 'enterprise invoicing', 'refunds', ...extra], { role: 'sup' });
+    const nonGoals = () => json(must(['goal', 'show', G, '--json'])).non_goals;
+    assert.equal(json(must(['goal', 'show', G, '--json'])).status, 'ready');
+    assert.match(set().err, /only the owner changes it now \(class goal-change\)/, 'refused without --approved');
+    const ask = (extra) => must(['ask', '--kind', 'owner-decision', '--question', 'Add refunds to the non-goals?', '--recommendation', 'Set it', '--options', 'Set it', 'Leave it', ...extra], { role: 'sup' });
+    const Qwrong = ask(['--class', 'release-scope']);
+    must(['answer', Qwrong, 'Set it']);
+    assert.match(set('--approved', Qwrong).err, /class release-scope, not goal-change/, 'wrong class');
+    const Qother = ask(['--class', 'goal-change', '--goal', 'g-20990101-000000000-supervisor']);
+    must(['answer', Qother, 'Set it']);
+    assert.match(set('--approved', Qother).err, new RegExp(`is about g-20990101-000000000-supervisor, not ${G}`), 'wrong goal');
+    const Qopen = ask(['--class', 'goal-change', '--goal', G]);
+    assert.match(set('--approved', Qopen).err, /not answered by the owner/, 'unanswered');
+    must(['withdraw', Qopen, '--reason', 'test'], { role: 'sup' });
+    const Qno = ask(['--class', 'goal-change', '--goal', G]);
+    must(['answer', Qno, 'Leave it']);
+    assert.match(set('--approved', Qno).err, /not its recommendation/, 'a declining answer authorises nothing');
+    const Qok = ask(['--class', 'goal-change', '--goal', G]);
+    must(['answer', Qok, 'Set it — refunds can wait']);
+    assert.equal(set('--approved', Qok).status, 0, 'an answered goal-change question for the goal authorises the set');
+    assert.deepEqual(nonGoals(), ['enterprise invoicing', 'refunds']);
+    assert.equal(json(must(['goal', 'show', G, '--json'])).approved, Qok, 'the set records which answer authorised it');
+    assert.match(dt(['goal', 'set', G, '--non-goals', 'enterprise invoicing', '--approved', Qok], { role: 'sup' }).err, /already authorised a change/, 'one change per answer');
+    assert.match(dt(['goal', 'set', G, '--non-goals', 'enterprise invoicing', '--owner', '--approved', Qok]).err, /--approved is the supervisor/, 'the owner sets directly');
+    // a reuse written straight into the log is ignored by the fold, like any supervisor edit of a ready goal
+    const dir = path.join(repo, 'docs/devteam/run/log');
+    const file = path.join(dir, fs.readdirSync(dir).find((f) => /^supervisor-\d{4}-\d{2}\.jsonl$/.test(f)));
+    const before = fs.readFileSync(file, 'utf8');
+    fs.appendFileSync(file, line({ id: G, type: 'goal', op: 'set', at: new Date().toISOString(), by: 'supervisor', non_goals: ['enterprise invoicing'], approved: Qok }));
+    assert.deepEqual(nonGoals(), ['enterprise invoicing', 'refunds'], 'a reused answer changes nothing');
+    assert.match(dt(['log-check']).out, new RegExp(`ignored: .*${G}: .*${Qok} already authorised a goal set`));
+    fs.writeFileSync(file, before);
+  });
+
   await t.test('computed views: metrics, roadmap, retro, dashboard data', () => {
     must(['metrics']);
     assert.match(must(['roadmap']), /Self-serve billing/);
