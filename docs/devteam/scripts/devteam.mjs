@@ -12,6 +12,7 @@
 // dashboard · 11 sessions (workers, messages, phases, gates) · 12 init, help, dispatch.
 
 import { execFile, execFileSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -1015,8 +1016,41 @@ function paneWaitingIn(window) {
     const hit = lines.find((l) => re.test(l));
     if (hit) { found = { kind, line: hit.slice(0, 200) }; break; }
   }
+  if (target && !found) resendLostEnter(`${loadSettings().tmux_session}:${window}`, target, lines);
   paneWaits.set(window, found);
   return found;
+}
+
+// A lost Enter: text the kit typed still sits unsubmitted in an idle agent's input (an agent that
+// compacts or redraws as the keys arrive can drop the Enter). typeInto records each delivery per
+// window; when the pane's bottom lines still end with that text's tail, nothing on them says the
+// agent is busy, no prompt is up (the caller checked) and the text is LOST_ENTER_SECONDS old, press
+// Enter once and log it. The text is never retyped; the record is claimed (deleted) before the key,
+// so a delivery gets at most one Enter however many passes or processes look.
+const LOST_ENTER_SECONDS = 30;
+const PANE_BUSY = /esc to (interrupt|cancel)|ctrl\+c to (interrupt|cancel)|press esc to stop/i;
+const sentFile = (key) => path.join(runDir, 'sent', `${encodeURIComponent(key)}.json`);
+// Agent-agnostic: no prompt glyphs. Whitespace (wrapping, padding) and box-drawing borders drop out.
+const squash = (t) => t.replace(/[\s\u2500-\u257f]+/g, '');
+function recordSent(target, text) {
+  const key = sh('tmux', ['display-message', '-p', '-t', target, '#S:#W']);
+  if (!key) return;
+  try { writeJson(sentFile(key), { text, at: nowIso() }); } catch {}
+}
+function resendLostEnter(key, target, lines) {
+  const file = sentFile(key);
+  let rec;
+  try { rec = readJson(file); } catch { return; }
+  const age = (Date.now() - Date.parse(rec.at)) / 1000;
+  const tail = squash(rec.text ?? '').slice(-40);
+  if (!tail || !(age >= LOST_ENTER_SECONDS)) return;
+  const bottom = lines.slice(-8);
+  const claim = () => { try { fs.unlinkSync(file); return true; } catch { return false; } };
+  if (!squash(bottom.join('')).includes(tail)) return void claim(); // submitted: nothing left to press
+  if (bottom.some((l) => PANE_BUSY.test(l))) return;
+  if (!claim() || !tmux(['send-keys', '-t', target, 'Enter'])) return;
+  const hash = crypto.createHash('sha1').update(rec.text).digest('hex').slice(0, 12);
+  appendLog({ type: 'observation', source: 'pane', kind: 'resent-enter', subject: key.slice(key.indexOf(':') + 1), detail: `pressed Enter once: text typed ${Math.round(age)}s ago was still unsubmitted in an idle pane ("${rec.text.slice(0, 60)}${rec.text.length > 60 ? '…' : ''}", sha1 ${hash})`, detector: 'pane', source_key: `resent-enter ${key} ${hash} ${rec.at}`, measure: { value: Math.round(age), unit: 's' } });
 }
 const paneWaiting = (id) => (activeWorker(id) ? paneWaitingIn(id) : null);
 
@@ -2993,7 +3027,8 @@ function resolvePane(target) {
   if (SHELLS.has(cmd.replace(/^-/, ''))) return { problem: `no agent is running in ${exact} (it is at a ${cmd} prompt); resume it first` };
   return { target: exact };
 }
-const typeInto = (target, line) => tmux(['send-keys', '-t', target, '-l', line]) && tmux(['send-keys', '-t', target, 'Enter']);
+// Each delivery is recorded per window, so a lost Enter can be pressed later (resendLostEnter).
+const typeInto = (target, line) => { const ok = tmux(['send-keys', '-t', target, '-l', line]) && tmux(['send-keys', '-t', target, 'Enter']); if (ok) recordSent(target, line); return ok; };
 function nudgeSupervisor(line) {
   const { target, problem } = resolvePane(supervisorTarget());
   if (problem) return void warn(`not delivered to the supervisor: ${problem}`);
