@@ -149,7 +149,8 @@
   button.tcard .t b { font-family: var(--sans); font-size: 12.5px; font-weight: 600; }
   button.tcard .t b i { color: var(--amber-fg); font-size: 12px; }
   .drawer dd a, .drawer p a { color: var(--blue-fg); text-decoration: underline; text-underline-offset: 2px; }
-  button.tcard .pill { margin-top: 6px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; vertical-align: top; }
+  button.tcard .pills { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+  button.tcard .pill { margin: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; }
   button.tcard.blocked { border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
   .tcard:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
   .col h3 { display: flex; justify-content: space-between; align-items: center; margin: 2px 4px 8px; }
@@ -595,12 +596,16 @@ function columnOf(t) {
   return byPhase && RANK[byPhase] > RANK[byStage] && RANK[byStage] < RANK.Merged ? byPhase : byStage;
 }
 const PHASE_SHORT = { starting: 'Starting', spec: 'Spec', plan: 'Plan', contract: 'Contracts', build: 'Building', verify: 'Verifying', 'final-review': 'Final review', 'awaiting-word': 'Waiting', merging: 'Merging', parked: 'Parked' };
-function ticketStatus(t) {
-  if (t.waiting) return [t.waiting.kind === 'limit' ? 'Usage limit' : 'Stuck on a prompt', 'high', t.waiting.line];
-  if (t.phase === 'blocked') return ['Blocked', 'high'];
-  if (t.held) return ['Held', '', t.held];
-  if (['merged', 'released'].includes(t.stage) || !t.phase || t.phase === 'done') return null;
-  return [PHASE_SHORT[t.phase] || words(t.phase), 'low', `${PHASE_WORDS[t.phase] || t.phase}${t.task ? ` (${t.task})` : ''}`];
+// A card's pills, most important first: what stops it, then what to know, then what it's doing.
+// Each pill is a word or two and never wraps; the row wraps between pills.
+function ticketPills(t) {
+  const ps = [];
+  if (t.phase === 'blocked') ps.push(['Blocked', 'high']);
+  if (t.waiting) ps.push([t.waiting.kind === 'limit' ? 'Usage limit' : 'Stuck on a prompt', 'high', t.waiting.line]);
+  if (t.held) ps.push(['Held', '', t.held]);
+  if (t.risk === 'high') ps.push(['High risk', 'medium']);
+  if (t.phase && !['blocked', 'done'].includes(t.phase) && !['merged', 'released'].includes(t.stage)) ps.push([PHASE_SHORT[t.phase] || words(t.phase), 'low', `${PHASE_WORDS[t.phase] || t.phase}${t.task ? ` (${t.task})` : ''}`]);
+  return ps;
 }
 function board(items, crit) {
   $('planners').innerHTML = plannerCards(DATA.planners || []);
@@ -612,8 +617,8 @@ function board(items, crit) {
     return `<div class="col${total ? '' : ' none'}"><h3><span>${name}</span><span>${total}</span></h3>${cards.map((t) => `
       <button type="button" class="tcard ${t.phase === 'blocked' || t.waiting ? 'blocked' : ''}" data-ticket="${esc(t.id)}" aria-label="Open ${esc(t.title)}">
         <div class="t"><b>${crit.has(t.id) ? '<i class="icon-flag" title="on the critical path" aria-label="on the critical path"></i> ' : ''}${esc(t.title)}</b></div>
-        <div class="muted">${esc(t.component)} · ${esc(t.size)}${t.risk === 'high' ? ' · high risk' : ''}</div>
-        ${(() => { const st = ticketStatus(t); return st ? `<div><span class="badge pill ${st[1]}" title="${esc(st[2] || st[0])}">${esc(st[0])}</span></div>` : ''; })()}
+        <div class="muted">${esc(t.component)} · ${esc(t.size)}</div>
+        ${(() => { const ps = ticketPills(t); return ps.length ? `<div class="pills">${ps.map(([label, tone, tip]) => `<span class="badge pill ${tone}" title="${esc(tip || label)}">${esc(label)}</span>`).join('')}</div>` : ''; })()}
       </button>`).join('')}${total > cards.length ? `<div class="more">+ ${total - cards.length} more</div>` : ''}</div>`;
   }).join('');
 }
