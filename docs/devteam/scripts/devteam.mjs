@@ -3228,6 +3228,10 @@ function collectMetrics(since) {
     if (waiting.length && (cap == null || ps.length < cap)) add('medium', 'idle-planning', `${waiting.length} goal${waiting.length > 1 ? 's' : ''}`, `${ps.length}${cap == null ? '' : `/${cap}`} planner${ps.length === 1 ? '' : 's'} active; nobody is planning ${waiting.map((g) => `"${g.title}"`).join(', ')}`, `start a planner for each (goals plan in parallel), or record why one waits on another's design (goal set <id> --plan-after <g-id> --reason "…"): ${waiting.slice(0, cap == null ? waiting.length : Math.max(1, cap - ps.length)).map((g) => g.id).join(', ')}`);
   }
   if (ready.length && active < settings.max_active_tickets) add('medium', 'idle-capacity', `${ready.length} ready`, `${active}/${settings.max_active_tickets} workers active`, `make workers for: ${ready.slice(0, 5).map((t) => t.id).join(', ')}`);
+  // A key that decrypts production, copied into every worktree, is readable by every agent
+  // (code-style.md §10): production decrypts its own file, or the default one when it has none.
+  const prodKey = fs.existsSync(path.join(mainRoot, 'config/credentials/production.yml.enc')) ? 'config/credentials/production.key' : fs.existsSync(path.join(mainRoot, 'config/credentials.yml.enc')) ? 'config/master.key' : null;
+  if (prodKey && (settings.worktree_files ?? []).includes(prodKey)) add('high', 'production-key-in-worktrees', prodKey, `settings.worktree_files copies ${prodKey}, which decrypts production's credentials, into every worker's worktree`, `the owner's change (settings, gate-change): give agents only development and test keys. ${prodKey === 'config/master.key' ? 'Move production secrets to config/credentials/production.yml.enc with its own production.key, kept only on the platform and in the owner\'s shell, then' : 'Then'} drop ${prodKey} from worktree_files (code-style.md §10)`);
   if (m.escaped_defects) add('high', 'escaped-defects', `${m.escaped_defects}`, 'defects found after merge', 'retro: which review or gate should have caught each one');
   const order = { high: 0, medium: 1, low: 2 };
   // A finding someone has looked at and set aside (`ack`) moves to acknowledged until the ack
