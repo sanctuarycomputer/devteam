@@ -901,6 +901,9 @@ test('devteam kit', async (t) => {
     assert.equal(git(['rev-parse', 'origin/main^2']), H2, 'main merges the verified head');
     assert.ok(json(must(['log', '--type', 'act', '--json'])).some((a) => a.class === 'merge-word' && a.refs.includes('bill-01-card')));
     assert.match(must(['status']), /merged.*bill-01-card/);
+    // its merge settles the worker's requests, replied to or not
+    assert.ok(!json(must(['messages', '--to', 'supervisor', '--open', '--json'])).some((m) => m.created_by === 'bill-01-card'), 'a merged ticket asks nothing');
+    assert.ok(!json(must(['dashboard-data'])).open_messages.some((m) => m.actor === 'bill-01-card'));
     // review churn is about tickets still in flight: a merged ticket with many passes raises nothing
     const r3 = path.join(repo, 'docs/devteam/project/tickets/bill-01-card/reviews/final-3.md');
     write(r3, review('reviewer-z', git(['rev-parse', 'HEAD'])));
