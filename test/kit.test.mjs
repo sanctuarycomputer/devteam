@@ -600,6 +600,16 @@ test('devteam kit', async (t) => {
     git(['worktree', 'remove', '--force', wt('sync')]);
   });
 
+  await t.test('a planner in flight is watched like a worker: listed, and flagged when its window is gone', () => {
+    git(['branch', 'plan/reports', 'origin/main']);
+    const p = json(must(['dashboard-data'])).planners.find((x) => x.feature === 'reports');
+    assert.ok(p, 'a plan branch not on main is a planner in flight');
+    assert.equal(p.window, false);
+    assert.ok(json(must(['metrics', '--json'])).findings.some((f) => f.kind === 'planner-gone' && f.subject === 'plan-reports'));
+    git(['branch', '-D', 'plan/reports']);
+    assert.ok(!json(must(['dashboard-data'])).planners.some((x) => x.feature === 'reports'));
+  });
+
   await t.test('computed views: metrics, roadmap, retro, dashboard data', () => {
     must(['metrics']);
     assert.match(must(['roadmap']), /Self-serve billing/);
