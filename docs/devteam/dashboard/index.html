@@ -170,6 +170,8 @@
   .qcard.door { border-left-color: var(--red); }
   .qcard.trust { border-left-color: var(--green); }
   .qid { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  .qcard.done { border-left-color: var(--green); opacity: .85; }
+  .answered-note { color: var(--green-fg); }
 
   /* reading width: a line of prose stays near 1.5 alphabets (both cases), about 78 characters */
   :root { --measure: 78ch; }
@@ -1102,8 +1104,17 @@ async function post(action, body, errId) {
     if (errId && $(`e-${errId}`)) $(`e-${errId}`).textContent = out.error || 'failed';
     return false;
   }
-  await load({ force: true });
+  // The owner's action is saved; refresh in the background rather than holding the button until the
+  // whole page has reloaded.
+  load({ force: true });
   return true;
+}
+// Once an answer is saved the card says so at once; the next refresh removes it.
+const ANSWERED = new Map();
+function markAnswered(id, text) {
+  ANSWERED.set(id, text);
+  const card = document.getElementById(`q-${id}`);
+  if (card) { card.classList.add('done'); card.innerHTML = `<div class="answered-note"><i class="icon-circle-check" aria-hidden="true"></i> Answered: <b>${esc(text)}</b></div>`; }
 }
 
 function render(d) {
@@ -1153,6 +1164,8 @@ function render(d) {
       <p class="ctx">${esc(cap(who(k.created_by)))} proposes this as a ${esc(k.kind)}${k.confidence != null ? `, ${Math.round(k.confidence * 100)}% sure` : ''}, based on ${(k.evidence || []).length} thing${(k.evidence || []).length === 1 ? '' : 's'} it noticed. Accepted lessons go into the instructions of every agent they apply to.</p>
       <div class="row-inline"><button data-know="${esc(k.id)}" data-status="accepted">Keep it</button><button class="ghost" data-know="${esc(k.id)}" data-status="retired">Retire it</button><span class="err" id="e-${esc(k.id)}"></span></div>
     </div>`).join('');
+  for (const qid of [...ANSWERED.keys()]) if (!d.questions.some((q) => q.id === qid)) ANSWERED.delete(qid);
+  d = { ...d, questions: d.questions.filter((q) => !ANSWERED.has(q.id)) };
   $('questions').innerHTML = goalCards + (d.questions.length ? d.questions.map((q) => questionCard(q, o, reasonText)).join('') : cands.length ? '' : empty('Nothing needs you right now. Decisions and actions only you can take show here.'));
   $('answered-sum').textContent = `Answered (${o.answered.length})`;
   $('answered').innerHTML = o.answered.length ? o.answered.map(answeredCard).join('') : empty('Nothing answered yet.');
@@ -1199,7 +1212,14 @@ function showFailure(message) {
   b.hidden = false;
 }
 
+let loading = null;
 async function load({ force = false } = {}) {
+  // one refresh at a time; a forced one waits for the one in flight, then runs
+  if (loading) { if (!force) return; await loading.catch(() => {}); }
+  loading = loadNow({ force });
+  try { return await loading; } finally { loading = null; }
+}
+async function loadNow({ force = false } = {}) {
   // Don't redraw under someone who is typing or choosing (radio choices keep their pick anyway).
   const ae = document.activeElement;
   if (!force && DATA && ae && (['TEXTAREA', 'SELECT'].includes(ae.tagName) || (ae.tagName === 'INPUT' && ae.type !== 'radio')) && ae.id !== 'view') return;
@@ -1282,7 +1302,7 @@ document.addEventListener('click', async (ev) => {
         : await post('answer', { id, answer, autonomy: auto ? Number(auto) : undefined, rule: rule || undefined }, id);
     }
     catch (e2) { if (err) err.textContent = `Could not send: ${e2.message}`; }
-    if (ok) { delete drafts[id]; delete picks[id]; }
+    if (ok) { delete drafts[id]; delete picks[id]; markAnswered(id, goalId ? picked + (note ? ` — ${note}` : '') : answer); }
     else { btn.classList.remove('busy'); btn.disabled = false; btn.removeAttribute('aria-busy'); btn.textContent = label; }
     return;
   }
