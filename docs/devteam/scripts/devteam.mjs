@@ -3422,9 +3422,21 @@ function cmdTimeline() {
 }
 
 // The dashboard: one page, data computed on each request, owner actions only from that page.
+// The dashboard's own record of why it stopped (run/dashboard.log): a window closes with its
+// process, taking the output with it. Starts, signals, server errors and crashes with their stack;
+// never a request body (secrets pass through it). Kept under ~1 MB by starting afresh.
+function dashboardLogger() {
+  const file = path.join(runDir, 'dashboard.log');
+  try { if (fs.statSync(file).size > 1024 * 1024) fs.renameSync(file, `${file}.1`); } catch {}
+  return (msg) => { try { fs.mkdirSync(runDir, { recursive: true }); fs.appendFileSync(file, `${nowIso()} [${process.pid}] ${msg}\n`); } catch {} };
+}
 function cmdDashboard() {
   const port = Number(flagStr('port') ?? loadSettings().dashboard_port);
   const host = flagStr('host') ?? '127.0.0.1';
+  const log = dashboardLogger();
+  process.on('uncaughtException', (e) => { log(`crashed: ${e?.stack ?? e}`); process.stderr.write(`devteam dashboard crashed: ${e?.stack ?? e}\n`); process.exit(1); });
+  process.on('unhandledRejection', (e) => { log(`crashed (unhandled rejection): ${e?.stack ?? e}`); process.stderr.write(`devteam dashboard crashed: ${e?.stack ?? e}\n`); process.exit(1); });
+  for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(sig, () => { log(`stopped by ${sig}`); process.exit(0); });
   const page = path.join(devteamDir, 'dashboard', 'index.html');
   const self = fileURLToPath(import.meta.url);
   const ownerEnv = { ...process.env, DEVTEAM_CHANNEL: 'dashboard' };
@@ -3521,7 +3533,8 @@ function cmdDashboard() {
       send(res, r.ok ? 200 : 400, 'application/json', JSON.stringify(r.ok ? { ok: true, out: r.stdout.trim() } : { error: r.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') }));
     });
   });
-  server.listen(port, host, () => out(`devteam dashboard on http://${host}:${port}`));
+  server.on('error', (e) => { log(`server error: ${e?.stack ?? e}`); process.stderr.write(`devteam dashboard: ${e.message}\n`); process.exit(1); });
+  server.listen(port, host, () => { log(`started on http://${host}:${port} (node ${process.version})`); out(`devteam dashboard on http://${host}:${port}`); });
 }
 
 // ===== 11. sessions: workers, planners, messages, phases, gates =====
