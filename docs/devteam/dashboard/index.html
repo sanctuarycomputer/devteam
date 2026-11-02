@@ -735,6 +735,7 @@ function questionCard(q, o, reasonText) {
       <h4>${linkify(q.question)}</h4>
       ${q.context ? `<p class="ctx">${linkify(q.context)}</p>` : ''}
       ${(q.links || []).length ? `<div class="links"><span class="muted small">Look at:</span>${q.links.map(linkOf).join('')}</div>` : ''}
+      ${goalAsk ? (() => { const settled = (DATA.ooda.answered || []).filter((a) => a.goal === q.goal && a.kind !== 'goal-approval' && a.status === 'answered'); return settled.length ? `<div class="meta">Rests on your answers to: ${settled.map((a) => `${qlink(a.id, a.question)} (<b>${esc(a.answer)}</b>)`).join('; ')}</div>` : ''; })() : ''}
       ${list.length ? `<div class="choices" role="radiogroup" aria-label="Choices">${choiceHtml}</div>` : ''}
       <textarea data-q="${esc(q.id)}" placeholder="${esc(notePh)}">${esc(drafts[q.id] || '')}</textarea>
       ${goalAsk || ['owner-action', 'goal-definition'].includes(q.kind) ? '' : `<label class="rulebox"><input type="checkbox" data-rulebox="${esc(q.id)}"> Keep this answer as a standing rule for ${esc(scopeWords(q.rule_scope))}</label>`}
