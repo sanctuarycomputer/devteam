@@ -71,11 +71,21 @@ A `--class` names a ladder, owner-only or constitutional class from `constitutio
 
 ```
 devteam.mjs ask --kind one-way-door --class new-dependency --reasons owner-only one-way-door \
-  --ticket api-01-session-contract --re m-20261101-… \
-  --question "Publish the session token shape as contract 1.0? Clients will depend on it." \
-  --options "publish 1.0 now" "keep it internal one more release" \
-  --recommendation "publish now; reviewed twice" --confidence 0.8 --blocks api-01-session-contract
+  --ticket api-01-session-contract --re m-20261101-… --blocks api-01-session-contract \
+  --question "Should other apps be allowed to rely on the login token's current format from now on?" \
+  --context "The mobile app wants to read the token directly. Once it does, changing the format means updating every app that reads it, so this is hard to undo." \
+  --choices '[{"label":"Publish the format now","detail":"Freeze today's format as version 1.0; changes later need a new version.","effect":"The mobile app can ship sign-in next week."},
+              {"label":"Keep it internal one more release","detail":"Only this service reads it until the next release, so we can still change it freely.","effect":"Mobile sign-in waits about two weeks."}]' \
+  --recommendation "Publish the format now" --confidence 0.8 \
+  --links '[{"title":"The spec","path":"docs/devteam/project/tickets/api-01-session-contract/spec.md","ref":"ticket/api-01-session-contract"}]'
 ```
+
+**Write for the owner reading it cold, on the dashboard.**
+- **The question.** One or two plain sentences: what is being decided, and why now. Use no ticket ids, class names or shorthand without saying what they mean. Put the background in `--context`, a short paragraph and not an essay.
+- **The choices**, in `--choices`. Each has a short `label`, a sentence of `detail` on what it means, and an `effect` saying what changes for the people who use the product, wherever there is one. Aim for complete but brief: no ambiguity, and nothing the owner has to read twice.
+- **The recommendation.** Name your recommended choice by its exact label in `--recommendation`, with `--confidence`. Don't restate it as another choice: the dashboard marks it in the list.
+- **Links.** Use `--links` only when the owner must look at something to answer: a spec to approve, a plan, a UI mock. Never link something as background reading. A link is a repo path, at a `ref` such as the ticket branch when it isn't on main yet, or a URL.
+- **Owner actions.** Anything only the owner can *do* (log in to a service, set a secret, approve something in another system, give an agent access) is an `owner-action` question. The question says what to do, `--context` gives the exact steps and what it unblocks, and the dashboard offers Done or "Can't right now". Ask it in the inbox even when you also say it in chat: the inbox is where the owner looks, and your pane is not.
 
 | Kind | For |
 |---|---|
@@ -85,6 +95,7 @@ devteam.mjs ask --kind one-way-door --class new-dependency --reasons owner-only 
 | `proposal` | an improvement, roadmap or architecture change (§9), with the evidence ids and a research note (`--note`) |
 | `trust` | moving a ladder class up a rung; the script attaches the evidence |
 | `goal-definition` | every gap that stops a goal being ready, in one question |
+| `owner-action` | something only the owner can do, not decide (log in, set a secret, approve elsewhere): the steps, and what waits on it |
 
 Rules: one decision per question (a goal-definition question lists all of a goal's gaps as a form); lead with the decision; always a recommendation with your confidence; `--default` only when reversible, applied at the deadline; `--blocks` every ticket that waits; `--class` and `--reasons` always, so the owner sees why it needs them.
 

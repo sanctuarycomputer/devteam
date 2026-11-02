@@ -317,10 +317,31 @@ test('devteam kit', async (t) => {
     const tr = json(must(['trust', '--json'])).find((r) => r.class === 'upstream-pr');
     assert.equal(tr.rung, 1, 'a chat answer leaves the rung where the owner put it');
     assert.ok(!tr.agreement_questions.includes(Qc), 'a chat answer is not agreement evidence');
-    const listed = json(must(['dashboard-data'])).ooda.owner_cli.find((x) => x.id === Qc);
+    const listed = json(must(["dashboard-data"])).ooda.answered.find((x) => x.id === Qc);
     assert.equal(listed?.channel, 'chat', 'the dashboard lists it for the owner to check');
     assert.equal(listed.said, said);
     must(['act', '--class', 'upstream-pr', '--approved', Qc, '--', 'opened an upstream PR'], { role: 'sup' });
+  });
+
+  await t.test('questions carry choices, links and owner actions; a ticket has a timeline', () => {
+    const choices = [{ label: 'Publish now', detail: 'Freeze the format as 1.0.', effect: 'Mobile sign-in ships next week.' }, { label: 'Wait a release', detail: 'Keep it internal.' }];
+    const links = [{ title: 'The spec', path: 'docs/devteam/project/tickets/bill-01-card/spec.md', ref: 'ticket/bill-01-card' }];
+    const Qc = must(['ask', '--question', 'Let other apps rely on the token format?', '--choices', JSON.stringify(choices), '--links', JSON.stringify(links), '--recommendation', 'Publish now', '--confidence', '0.8', '--ticket', 'bill-01-card'], { role: 'sup' });
+    const q = json(must(['questions', '--id', Qc, '--json']))[0];
+    assert.deepEqual(q.choices, choices);
+    assert.deepEqual(q.links, links);
+    assert.notEqual(dt(['ask', '--question', 'x', '--links', '[{"title":"bad","path":"../etc/passwd"}]'], { role: 'sup' }).status, 0, 'a link never leaves the repo');
+    must(['answer', Qc, 'Publish now — after the security review']);
+    assert.equal(json(must(['questions', '--id', Qc, '--json']))[0].matched, true, 'a choice with a note still agrees with the recommendation');
+    const Qa = must(['ask', '--kind', 'owner-action', '--question', 'Log in to Heroku in the main checkout', '--context', 'Run heroku login; the deploy check needs it.'], { role: 'sup' });
+    assert.equal(json(must(['questions', '--id', Qa, '--json']))[0].kind, 'owner-action');
+    must(['withdraw', Qa, '--reason', 'test'], { role: 'sup' });
+    const tl = json(must(['timeline', 'bill-01-card', '--json']));
+    assert.equal(tl.ticket.id, 'bill-01-card');
+    assert.ok(tl.lines.some((l) => l.type === 'question' && l.id === Qc), 'the question about it');
+    assert.ok(tl.lines.some((l) => l.type === 'question' && l.id === Qc && l.answer), 'and its answer, which names only the question');
+    assert.ok(tl.lines.some((l) => l.type === 'phase'), "its worker's phases");
+    assert.ok(tl.lines.some((l) => l.type === 'act'), 'acts that name it');
   });
 
   await t.test('observe, orient, knowledge reach the next prompt', () => {

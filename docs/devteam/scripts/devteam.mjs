@@ -626,10 +626,13 @@ function questionView(q) {
   if (ans) [status, answer, answeredBy, answeredAt] = ['answered', ans.answer, 'owner', ans.at];
   else if (st?.status === 'defaulted') [status, answer, answeredBy, answeredAt] = ['defaulted', q.default, 'supervisor (default)', st.at];
   else if (st?.status === 'withdrawn') [status, answeredAt] = ['withdrawn', st.at];
-  const matched = ans ? !!q.recommendation && ans.answer.trim().toLowerCase() === q.recommendation.trim().toLowerCase() : null;
+  // An answer agrees with the recommendation when it is that choice, with or without a note after
+  // " — " (the dashboard sends "<label> — <note>").
+  const norm = (x) => x.trim().toLowerCase();
+  const matched = ans ? !!q.recommendation && [norm(ans.answer), norm(ans.answer.split(' — ')[0])].includes(norm(q.recommendation)) : null;
   return {
     id: q.id, kind: q.kind, class: q.class ?? null, scope: q.scope ?? null, ticket: q.ticket ?? null, re: q.re ?? null, asked_at: q.created_at,
-    question: q.question, context: q.context ?? '', options: q.options ?? [], recommendation: q.recommendation ?? '', confidence: q.confidence ?? null,
+    question: q.question, context: q.context ?? '', options: q.options ?? [], choices: q.choices ?? [], links: q.links ?? [], recommendation: q.recommendation ?? '', confidence: q.confidence ?? null,
     default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], evidence: q.evidence ?? [], note: q.note ?? null, why_asked: q.why_asked ?? null,
     status, answer, answered_by: answeredBy, answered_at: answeredAt, matched,
     autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans?.channel ?? null, said: ans?.said ?? null,
@@ -1676,6 +1679,12 @@ function openQuestion(id, okStatuses = ['open']) {
   return v;
 }
 
+// A flag whose value is JSON (`--choices '[…]'`); undefined when absent.
+function jsonFlag(name) {
+  const v = flagStr(name);
+  if (v === undefined) return undefined;
+  try { return JSON.parse(v); } catch (e) { return die(`--${name} is not valid JSON: ${e.message}`); }
+}
 function cmdAsk() {
   supervisorOnly('ask');
   const q = flagStr('question') ?? die('ask needs --question');
@@ -1707,7 +1716,7 @@ function cmdAsk() {
   const scope = flagStr('scope') ?? null;
   const line = appendLog({
     type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), question: q, context: flagStr('context'),
-    options: asList(flags.options), recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined,
+    options: asList(flags.options), choices: jsonFlag('choices'), links: jsonFlag('links'), recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined,
     deadline: def ? new Date(Date.now() + loadSettings().question_default_after_hours * 3600000).toISOString() : undefined,
     blocks, evidence, note: flagStr('note'),
     why_asked: { rung: onLadder ? rungFor(cls, scope) : undefined, ceiling: onLadder ? L.classes[cls].ceiling : undefined, reasons },
@@ -1784,7 +1793,9 @@ function cmdQuestions() {
   if (!qs.length) return out('no questions');
   for (const q of qs) {
     out(`${q.id}  [${q.kind}, ${q.status}]${q.blocks.length ? ` blocks ${q.blocks.join(',')}` : ''}\n  ${q.question}`);
-    if (q.recommendation) out(`  recommend: ${q.recommendation}`);
+    for (const c of q.choices) out(`  - ${c.label}${c.label === q.recommendation ? ' (recommended)' : ''}${c.detail ? `: ${c.detail}` : ''}${c.effect ? ` For users: ${c.effect}` : ''}`);
+    for (const l of q.links) out(`  see: ${l.title} (${l.url ?? `${l.ref ? `${l.ref}:` : ''}${l.path}`})`);
+    if (q.recommendation) out(`  recommend: ${q.recommendation}${q.confidence != null ? ` (${Math.round(q.confidence * 100)}%)` : ''}`);
     if (q.why_asked?.reasons?.length) out(`  why asked: ${q.why_asked.reasons.join(', ')}${q.class ? ` (${q.class}, rung ${q.why_asked.rung ?? '-'} of ${q.why_asked.ceiling ?? '-'})` : ''}`);
     if (q.answer) out(`  answer (${q.answered_by}): ${q.answer}`);
     if (q.autonomy) out(`  next time: ${q.autonomy.class} at rung ${q.autonomy.rung} (${RUNG[q.autonomy.rung]})${q.autonomy.scope ? ` for ${q.autonomy.scope}` : ''}`);
@@ -2539,7 +2550,15 @@ function collectOoda() {
   const log = readLog();
   const L = ladder();
   const recent = (xs, n) => xs.sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, n);
-  const acts = logObjects('act').map((a) => ({ ...a, correction: correctionOf(a), ladder: !!L.classes[a.class] }));
+  // A ticket edit's act names the fields; attach the values it set, so the feed can say "put on
+  // hold" or "took off hold" as it happened, not as the ticket stands now.
+  const ticketSets = log.lines.filter((l) => l.type === 'ticket' && l.op === 'set');
+  const changeOf = (a) => {
+    if (a.class !== 'replan-within-feature') return undefined;
+    const l = ticketSets.filter((x) => (a.refs ?? []).includes(x.id) && x.at <= a.created_at).pop();
+    return l ? Object.fromEntries(Object.entries(l).filter(([k]) => !ENVELOPE.includes(k) && !k.startsWith('__'))) : undefined;
+  };
+  const acts = logObjects('act').map((a) => ({ ...a, correction: correctionOf(a), ladder: !!L.classes[a.class], change: changeOf(a) }));
   return {
     goals: logObjects('goal').map(goalView).sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99)),
     roadmap: collectRoadmap(),
@@ -2552,8 +2571,9 @@ function collectOoda() {
     trust: trustTable(),
     classes: Object.fromEntries(Object.entries(L.classes).map(([k, v]) => [k, { ...v, rung: rungFor(k) }])),
     reasons: L.reasons,
-    owner_cli: questions().filter((q) => q.answered_by === 'owner' && ['cli', 'chat'].includes(q.channel)).sort((a, b) => b.answered_at.localeCompare(a.answered_at)).slice(0, 10).map((q) => ({ id: q.id, question: q.question, answer: q.answer, at: q.answered_at, autonomy: q.autonomy, channel: q.channel, said: q.said })),
-    defaulted: questions().filter((q) => q.status === 'defaulted' && Date.now() - Date.parse(q.answered_at) < 14 * DAY),
+    // every settled question, newest first, wherever it was answered (dashboard, terminal, chat) or
+    // whether it was defaulted or withdrawn; defaulted ones can still be overruled
+    answered: questions().filter((q) => q.status !== 'open').sort((a, b) => b.answered_at.localeCompare(a.answered_at)).slice(0, 80),
     log: { lines: log.lines.length, errors: log.errors.length, ignored: log.ignored.length },
   };
 }
@@ -2575,6 +2595,29 @@ function dashboardData() {
   };
 }
 const cmdDashboardData = () => out(JSON.stringify(dashboardData()));
+
+// timeline <ticket-id> [--json]: the ticket, and every log line that bears on it (its own edits,
+// its worker's phases, gates and messages, questions it raised or that block it, acts and
+// observations that name it), oldest first; plus its review records and its files.
+function cmdTimeline() {
+  const [id] = positional;
+  const t = tickets().get(id) ?? die(`no ticket ${id}`);
+  const touches = (l) => l.id === id || l.by === id || l.ticket === id || l.to === id || l.subject === id
+    || (l.refs ?? []).includes(id) || (l.blocks ?? []).includes(id) || (l.serves ?? []).includes(id);
+  const lines = readLog().lines.filter(touches);
+  // a question answered later belongs here too: its answer lines name only the question
+  const qids = new Set(lines.filter((l) => l.type === 'question').map((l) => l.id));
+  const all = readLog().lines.filter((l) => touches(l) || (l.type === 'question' && qids.has(l.id))).sort((a, b) => a.at.localeCompare(b.at));
+  const st = deriveStatus().find((r) => r.id === id);
+  const branch = ticketBranchRef(id);
+  const ref = branch && !mergeShaFor(id) ? branch : mainRef();
+  const files = ['spec.md', 'plan.md', 'verification.md'].map((f) => `${projectRel}/tickets/${id}/${f}`).filter((f) => ref && git(['cat-file', '-e', `${ref}:${f}`]) !== null).map((f) => ({ title: path.basename(f, '.md'), path: f, ref }));
+  const reviews = ticketReviews(id, branch && !mergeShaFor(id) ? { ref: branch } : WORKTREE).map((r) => ({ file: r.file, stage: r.stage, pass: r.pass, verdict: r.verdict, reviewer: r.reviewer }));
+  const view = { ticket: { ...t, ...st }, files, reviews, lines: all.map((l) => Object.fromEntries(Object.entries(l).filter(([k]) => !k.startsWith('__')))) };
+  if (flags.json) return json(view);
+  out(`${id} [${st?.stage}${st?.phase ? `, ${st.phase}` : ''}] ${t.title}`);
+  for (const l of all) out(`${l.at} ${l.type.padEnd(11)} ${l.by.padEnd(14)} ${l.what ?? l.text ?? l.question ?? l.detail ?? l.answer ?? (l.type === 'phase' ? `${l.from ?? ''} -> ${l.to}` : l.op)}`);
+}
 
 // The dashboard: one page, data computed on each request, owner actions only from that page.
 function cmdDashboard() {
@@ -2608,6 +2651,26 @@ function cmdDashboard() {
     if (req.method === 'GET' && req.url.startsWith('/api/data')) {
       const r = await run(['dashboard-data']);
       return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 500, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
+    }
+    const u = new URL(req.url, 'http://x');
+    if (req.method === 'GET' && u.pathname === '/api/timeline') {
+      const id = u.searchParams.get('id') ?? '';
+      if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad ticket id' }));
+      const r = await run(['timeline', id, '--json']);
+      return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 404, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
+    }
+    // An artifact a question or ticket links to, read from git (committed content only, never a
+    // path outside the repo). HTML mocks are served sandboxed so they can't call the owner API.
+    if (req.method === 'GET' && u.pathname === '/api/file') {
+      const p = u.searchParams.get('path') ?? '';
+      const ref = u.searchParams.get('ref') || mainRef() || 'HEAD';
+      if (!/^(?!\/)(?!.*\.\.)[^\s]+$/.test(p) || !/^[A-Za-z0-9._\/-]+$/.test(ref)) return send(res, 400, 'text/plain', 'bad path or ref');
+      const body = await new Promise((resolve) => execFile('git', ['show', `${ref}:${p}`], { cwd: mainRoot, encoding: 'buffer', maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => resolve(err ? null : stdout)));
+      if (!body) return send(res, 404, 'text/plain', `not found: ${p} at ${ref}`);
+      const ext = path.extname(p).toLowerCase();
+      const type = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.pdf': 'application/pdf', '.html': 'text/html; charset=utf-8' }[ext] ?? 'text/plain; charset=utf-8';
+      res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store', 'content-security-policy': 'sandbox', 'x-content-type-options': 'nosniff' });
+      return res.end(body);
     }
     const action = req.method === 'POST' && req.url.startsWith('/api/') ? ACTIONS[req.url.slice(5)] : null;
     if (!action) return send(res, 404, 'text/plain', 'not found');
@@ -3041,7 +3104,7 @@ Sessions (worker.md)
   stop-ok                         for a stop hook: refuses while the last commit is newer than the last phase line
 
 Decide and act (supervisor.md, constitution.md)
-  ask --question q [--kind k] [--class c] [--reasons r…] [--recommendation r] [--confidence 0-1] [--default d] [--options a b] [--blocks ids] [--evidence ids] [--ticket id] [--re m-…] [--note path]
+  ask --question q [--kind k] [--class c] [--reasons r…] [--recommendation r] [--confidence 0-1] [--default d] [--choices '[{"label","detail","effect"}…]'] [--links '[{"title","path","ref"}|{"title","url"}…]'] [--blocks ids] [--evidence ids] [--ticket id] [--re m-…] [--note path]
   answer <qid> "<text>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> "<text>" --from-chat --said "<owner's words>" | answer <qid> --defaulted   (supervisor)
   withdraw <qid> [--reason r] | questions [--all] [--id q] [--json]
   act --class c [--scope s] [--approved qid] [--refs ids] [--irreversible] -- "<what>"
@@ -3052,6 +3115,7 @@ Observe and orient
   observe --subject s --kind k --detail d [--severity 0-4] [--valence -2..2] [--key k] [--refs ids] [--fix f] [--value n --unit u]
   observe-metrics | orient [--json] | metrics [--since date] [--json]
   ack <finding-kind> <subject> --reason r [--owner]   set a finding aside for finding_ack_hours
+  timeline <ticket-id> [--json]   the ticket and every log line, review and file that bears on it
   knowledge [--status s] [--kind k] | knowledge --for <ticket|feature|class> | knowledge add|set …
   problem [--all] | problem add --title t --severity n [--risk] [--threatens g…] | problem set <id> …
 
@@ -3073,7 +3137,7 @@ const COMMANDS = {
   'check-ticket': cmdCheckTicket, 'check-pr': cmdCheckPr, merge: cmdMerge,
   phase: cmdPhase, gate: cmdGate, send: cmdSend, messages: cmdMessages, 'stop-ok': cmdStopOk,
   ask: cmdAsk, answer: cmdAnswer, withdraw: cmdWithdraw, questions: cmdQuestions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
-  observe: cmdObserve, 'observe-metrics': cmdObserveMetrics, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, knowledge: cmdKnowledge, problem: cmdProblem,
+  observe: cmdObserve, 'observe-metrics': cmdObserveMetrics, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, knowledge: cmdKnowledge, problem: cmdProblem,
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
   log: cmdLog, 'log-check': cmdLogCheck, 'log-sync': cmdLogSync, history: cmdHistory,
   dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes,
