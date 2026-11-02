@@ -2789,7 +2789,7 @@ function collectMetrics(since) {
   const replies = new Map();
   for (const m of msgs) if (m.re && !replies.has(m.re)) replies.set(m.re, Date.parse(m.created_at));
   const expecting = msgs.filter((m) => !['info', 'ruling', 'answer'].includes(m.kind));
-  const openMsgs = expecting.filter((m) => !replies.has(m.id));
+  const openMsgs = expecting.filter((m) => !replies.has(m.id) && !settledByLanding(m));
   const msgWaits = expecting.filter((m) => replies.has(m.id)).map((m) => replies.get(m.id) - Date.parse(m.created_at));
   const qs = questions().filter((q) => Date.parse(q.asked_at) >= since);
   const qWaits = qs.filter((q) => q.answered_at && q.status === 'answered').map((q) => Date.parse(q.answered_at) - Date.parse(q.asked_at));
@@ -2988,7 +2988,7 @@ function dashboardData() {
     tickets: deriveStatus(),
     critical_path: findCycle(sub) ? [] : criticalPath(sub).path,
     questions: rankQuestions(questions().filter((q) => q.status === 'open')),
-    open_messages: msgs.filter((m) => !['info', 'ruling', 'answer'].includes(m.kind) && !replied.has(m.id)).map((m) => ({ id: m.id, kind: m.kind, actor: m.created_by, to: m.to, summary: m.text })),
+    open_messages: msgs.filter((m) => !['info', 'ruling', 'answer'].includes(m.kind) && !replied.has(m.id) && !settledByLanding(m)).map((m) => ({ id: m.id, kind: m.kind, actor: m.created_by, to: m.to, summary: m.text })),
     metrics: collectMetrics(0),
     progress: collectProgress(),
     planners: planners(),
@@ -3165,12 +3165,22 @@ function cmdSend() {
   if (problem || !typeInto(exact, `[devteam ${kind} ${line.id} from ${from}${re ? ` re ${re}` : ''}${sha ? ` @ ${sha}` : ''}] ${text}`)) warn(`${line.id} recorded but not delivered to "${to}": ${problem ?? `could not type into ${exact}`}; it shows in their \`messages\``);
   out(line.id);
 }
+// A request is settled when the work it is about has landed: a ticket's once it merged, a
+// planner's once its plan file is on main. The merge is the answer even if nobody replied.
+function settledByLanding(m) {
+  const by = m.created_by ?? m.by;
+  if (!by) return false;
+  const cls = writerClass(by);
+  if (cls === 'ticket') return !!mergeShaFor(by);
+  if (cls === 'planner') return !!mainRef() && git(['cat-file', '-e', `${mainRef()}:${projectRel}/log/${by}.jsonl`]) !== null;
+  return false;
+}
 function cmdMessages() {
   const me = flagStr('to') ?? myAddress();
   const all = logObjects('message').sort(byTime);
   const replied = new Set(all.map((m) => m.re).filter(Boolean));
   let mine = all.filter((m) => m.to === me);
-  if (flags.open) mine = mine.filter((m) => !replied.has(m.id) && !['info', 'ruling', 'answer'].includes(m.kind));
+  if (flags.open) mine = mine.filter((m) => !replied.has(m.id) && !['info', 'ruling', 'answer'].includes(m.kind) && !settledByLanding(m));
   mine = mine.slice(-Number(flagStr('tail') ?? 50));
   if (flags.json) return json(mine);
   if (!mine.length) return out(flags.open ? 'no open messages' : 'no messages');
