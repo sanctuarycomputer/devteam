@@ -233,6 +233,18 @@ test('devteam kit', async (t) => {
     assert.notEqual(dissent.status, 0);
     assert.match(dissent.out, /final-1b\.md.*CHANGES/);
     git(['reset', '-q', '--hard', H2], wt('bill-01-card'));
+    // an escaped pipe inside a cell does not shift the Disposition column
+    const piped = (disp) => `- Reviewer: reviewer-c\n\n| Id | Severity | Rule | Where | Finding | Disposition |\n|---|---|---|---|---|---|\n| F1 | Important | spec | a.rb:1 | \`find_each { \\|u\\| u }\` locks out | ${disp} |\n\nVerdict: APPROVE ${H2}\n`;
+    write(path.join(tdir, 'reviews/final-1b.md'), piped('fixed'));
+    git(['add', '-A'], wt('bill-01-card'));
+    git(['commit', '-qm', 'piped review'], wt('bill-01-card'));
+    must(['check-ticket', 'bill-01-card', '--sha', git(['rev-parse', 'HEAD'], wt('bill-01-card')), ...pr]);
+    write(path.join(tdir, 'reviews/final-1b.md'), piped(''));
+    git(['commit', '-qam', 'piped review, no disposition'], wt('bill-01-card'));
+    const undisposed = dt(['check-ticket', 'bill-01-card', '--sha', git(['rev-parse', 'HEAD'], wt('bill-01-card')), ...pr]);
+    assert.notEqual(undisposed.status, 0);
+    assert.match(undisposed.out, /final-1b\.md F1 \(Important\) has no disposition/);
+    git(['reset', '-q', '--hard', H2], wt('bill-01-card'));
     // a rename out of the footprint is a change outside touches
     git(['mv', 'AGENTS.md', 'billing/agents.md'], wt('bill-01-card'));
     git(['commit', '-qm', 'move'], wt('bill-01-card'));
