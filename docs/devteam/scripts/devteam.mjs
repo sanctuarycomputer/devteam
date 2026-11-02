@@ -668,7 +668,7 @@ function questionView(q) {
     id: q.id, kind: q.kind, class: q.class ?? null, scope: q.scope ?? null, ticket: q.ticket ?? null, re: q.re ?? null, asked_at: q.created_at,
     question: q.question, context: q.context ?? '', options: q.options ?? [], choices: q.choices ?? [], links: q.links ?? [], goal: q.goal ?? null, change: q.change ?? null, rule_scope: q.rule_scope ?? null, recommendation: q.recommendation ?? '', confidence: q.confidence ?? null,
     default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], evidence: q.evidence ?? [], note: q.note ?? null, why_asked: q.why_asked ?? null,
-    secrets: (q.secrets ?? []).map((x) => ({ ...x, to: sinkWords(x.sink), sink_type: SINK_RE.exec(x.sink ?? '')?.[1] ?? null })), secrets_posted: q.updates.filter((u) => u.secrets_posted !== undefined && writerClass(u.by) === 'owner').pop()?.secrets_posted ?? [],
+    secrets: (q.secrets ?? []).map((x) => ({ ...x, to: sinkWords(x.sink), sink_type: SINK_RE.exec(x.sink ?? '')?.[1] ?? null, warning: sinkWarning(x.sink) })), secrets_posted: q.updates.filter((u) => u.secrets_posted !== undefined && writerClass(u.by) === 'owner').pop()?.secrets_posted ?? [],
     status, answer, answered_by: answeredBy, answered_at: answeredAt, matched,
     autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans?.channel ?? null, said: ans?.said ?? null,
   };
@@ -2075,6 +2075,20 @@ function parseSink(sink, { soft = false } = {}) {
 function allowedCommand(argv) {
   const line = argv.join(' ');
   return (loadSettings().secret_commands ?? []).some((p) => typeof p === 'string' && p.trim() && (line === p.trim() || line.startsWith(`${p.trim()} `)));
+}
+// Rails credentials that production decrypts (its own file, or the default one when there is no
+// production file) should have their key only on the platform and in the owner's shell
+// (code-style.md §10). A key in the checkout is readable by every agent on this machine, so the
+// card says so before the owner posts a production secret behind it.
+function sinkWarning(sink) {
+  let k;
+  try { k = parseSink(sink, { soft: true }); } catch { return null; }
+  if (k.type !== 'rails-credentials') return null;
+  const prodFile = fs.existsSync(path.join(mainRoot, 'config/credentials/production.yml.enc'));
+  if (!(k.env === 'production' || (k.env === 'default' && !prodFile))) return null;
+  const keyFile = k.env === 'default' ? 'config/master.key' : 'config/credentials/production.key';
+  if (!fs.existsSync(path.join(mainRoot, keyFile))) return null;
+  return `${keyFile} is on disk in this checkout, and production decrypts these credentials: any agent on this machine can read the key, so it can read this secret. Keep a production key only on the platform and in your shell (code-style.md §10)${k.env === 'default' ? ', e.g. move production secrets to config/credentials/production.yml.enc with its own key' : ''}.`;
 }
 function sinkWords(sink) {
   let k;
