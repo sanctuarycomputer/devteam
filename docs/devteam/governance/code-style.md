@@ -145,6 +145,7 @@ The doctrine removes choices only to the extent it is **decisive** (one way per 
 
 - **`L-ERG-1` size/complexity = the linter's defaults** (RuboCop `Metrics/*`, ESLint `complexity: 10`/`max-lines: 300`, clippy `too_many_lines`, gocyclo 15). "Defaults" is the no-choice answer.
 - **Make it a gate, not a guideline.** Anything a linter/type-checker/CI can enforce, must be.
+- **`L-ERG-3` one toolchain, declared in `.tool-versions`.** asdf is the version manager. Every runtime and CLI the repo needs (`nodejs`, `ruby`, `python`, `postgres`, …) is pinned to an exact version in a root `.tool-versions`, so a builder, an agent's worktree and CI all run the same versions with no guessing. CI reads it (`asdf-vm/actions`, or a setup action's `*-version-file: .tool-versions`) instead of repeating versions; `.nvmrc`/`.ruby-version` only mirror it where a tool can't read it. Gate: CI fails when `.tool-versions` is missing, or a runtime the repo uses isn't in it.
 - **`L-ERG-2` autofix-first** — every gate that can autofix runs in `--fix` (Biome/oxlint, `ruff --fix`, `rubocop -a`, `clippy --fix`) before it fails, to save builder/agent tokens and time.
 - **One template per repetitive shape** — command/service object, event, projection, typed error — so the builder fills a skeleton, not invents structure.
 - **Self-documenting names; comment the *why*.** An ADR records a decision.
@@ -157,7 +158,7 @@ The doctrine removes choices only to the extent it is **decisive** (one way per 
 
 To protect speed, a new system ships on the **floor**, not the full doctrine:
 
-**Floor (every project, day one):** the framework skeleton · `domain/` with pure functions + result values · parse-at-the-edge (one schema lib per binding) · typed errors (typed stacks) · an outbox *table* · the lint gates of Appendix A.
+**Floor (every project, day one):** the framework skeleton · `domain/` with pure functions + result values · parse-at-the-edge (one schema lib per binding) · typed errors (typed stacks) · an outbox *table* · a `.tool-versions` (`L-ERG-3`) · the lint gates of Appendix A.
 
 **Turn on when its trigger fires:**
 
@@ -190,7 +191,7 @@ Each Law → a commissioned gate, autofix-first (§15) where possible, catalogue
 - `L-PII-1`..`3` PII registry complete + encrypted + erasable / minimization+purpose / retention policy present.
 - `L-TEST-1`..`5` per-change check / error-arm coverage / PR-touches-test-or-`no-test` + domain coverage / random order + empty quarantine / prod-shaped seeds.
 - `L-FE-1`,`2` axe-zero / Lighthouse lab budgets.
-- `L-ERG-1`,`2` linter-default metrics / autofix-first.
+- `L-ERG-1`..`3` linter-default metrics / autofix-first / toolchain pinned in `.tool-versions` (asdf).
 - `L-ESC-1` doctrine-exception is the only suppression; bare disables fail.
 
 Doctrine (judgment; no gate): tier assignment, the critical-operation list, degraded-mode design, retry budgets / circuit breakers / backpressure, threat-model depth, SLO targets, convention-over-configuration, modular-monolith-first, boring-tech budget, backup-restore drill, server/client-state split, property/mutation testing scope.
