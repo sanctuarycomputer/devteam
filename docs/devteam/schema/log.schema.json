@@ -798,6 +798,55 @@
               "additionalProperties": false
             }
           },
+          "secrets": {
+            "description": "Values an owner-action question asks the owner to post, each with where it goes. The value is piped from the owner's process straight to its sink and never written to the log (supervisor.md, owner actions).",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "pattern": "^[A-Z][A-Z0-9_]{0,63}$"
+                },
+                "kind": {
+                  "enum": [
+                    "string",
+                    "file"
+                  ]
+                },
+                "sink": {
+                  "type": "string",
+                  "pattern": "^(rails-credentials|sops|file|stdin):.+$"
+                }
+              },
+              "required": [
+                "name",
+                "kind",
+                "sink"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "secrets_posted": {
+            "description": "Which declared secrets the owner has posted, cumulative: the name and when. Never the value or its size.",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "at": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "at"
+              ],
+              "additionalProperties": false
+            }
+          },
           "links": {
             "type": "array",
             "description": "Artifacts the owner must look at to answer (a spec, a plan, a mock): a path in the repo at ref (default main), or a URL.",
@@ -952,6 +1001,9 @@
         "x-required-new": [
           "kind",
           "question"
+        ],
+        "x-set-only": [
+          "secrets_posted"
         ]
       },
       "act": {
@@ -1214,7 +1266,8 @@
           "answer",
           "said",
           "autonomy",
-          "standing_rule"
+          "standing_rule",
+          "secrets_posted"
         ]
       },
       "knowledge": {
