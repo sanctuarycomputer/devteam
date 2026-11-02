@@ -973,6 +973,14 @@ test('devteam kit', async (t) => {
         assert.ok(yml.includes('secret_key:'), 'the key is set');
         assert.match(git(['show', `chore-${slug}:config/secrets.enc.yaml`]), /\["api"\]\["token"\]: "tok-123456"/);
         assert.equal(json(must(['questions', '--id', Qe, '--json']))[0].answer, 'Posted 2 secrets');
+        // a production secret behind a key on disk is flagged on the card; a test one isn't
+        assert.equal(json(must(['questions', '--id', Qe, '--json']))[0].secrets[0].warning, null, 'test credentials: no warning');
+        const mk = path.join(repo, 'config/master.key');
+        if (!fs.existsSync(mk)) write(mk, 'k\n');
+        const Qp = must(['ask', '--kind', 'owner-action', '--question', 'Prod token', '--secrets', JSON.stringify([{ name: 'PROD_TOKEN', sink: 'rails-credentials:default:svc.token' }])], { role: 'sup' });
+        assert.match(json(must(['questions', '--id', Qp, '--json']))[0].secrets[0].warning, /config\/master\.key is on disk .* any agent on this machine can read the key/);
+        fs.renameSync(mk, `${mk}.away`);
+        try { assert.equal(json(must(['questions', '--id', Qp, '--json']))[0].secrets[0].warning, null, 'no key on disk, no warning'); } finally { fs.renameSync(`${mk}.away`, mk); }
         // the question approves its own secret chore, and a secrets question answered otherwise approves nothing
         const md = (approved) => dt(['merge', '--chore', slug, '--dry-run', '--approved', approved, '--title', `chore-${slug}: post secrets`, '--body-file', body], { role: 'sup' });
         const ok = md(Qe);
