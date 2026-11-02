@@ -694,13 +694,24 @@ test('devteam kit', async (t) => {
     }
   });
 
+  await t.test('a fully defined goal nobody is planning is idle planning', () => {
+    const Gi = must(['goal', 'add', '--title', 'Faster checkout', '--outcome', 'pay in under a minute', '--measure', 'median checkout', '--target', '60', '--unit', 's', '--direction', 'down', '--horizon', '2027-06-30', '--non-goals', 'mobile', '--preconditions', 'one-page form', '--priority', '7'], { role: 'sup' });
+    must(['goal', 'reading', Gi, '--value', '180'], { role: 'sup' });
+    const idle = () => json(must(['metrics', '--json'])).findings.find((f) => f.kind === 'idle-planning');
+    assert.match(idle()?.suggestion ?? '', new RegExp(Gi), 'nobody is designing it');
+    const Qd = must(['ask', '--question', 'Which checkout first?', '--goal', Gi, '--recommendation', 'cards'], { role: 'sup' });
+    assert.ok(!(idle()?.suggestion ?? '').includes(Gi), 'design questions open: someone is designing it');
+    must(['withdraw', Qd, '--reason', 'test'], { role: 'sup' });
+    must(['goal', 'status', Gi, 'abandoned']);
+  });
+
   await t.test('computed views: metrics, roadmap, retro, dashboard data', () => {
     must(['metrics']);
     assert.match(must(['roadmap']), /Self-serve billing/);
     assert.match(must(['retro', '--print'], { role: 'sup' }), /## Numbers/);
     const d = json(must(['dashboard-data']));
     assert.equal(d.tickets.length, 1);
-    assert.equal(d.ooda.goals.length, 1);
+    assert.equal(d.ooda.goals.filter((g) => g.status !== 'abandoned').length, 1);
     assert.ok(d.ooda.trust.some((r) => r.class === 'release-scope' && r.rung === 1 && r.corrections === 1));
     assert.ok(d.ooda.acts.some((a) => a.id === A && a.correction?.reason === 'too early' && a.correction.repaired === 'fix-ticket'));
     assert.equal(d.progress.tickets.length, 1);

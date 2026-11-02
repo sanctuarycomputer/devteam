@@ -54,6 +54,7 @@ Run it about every 10 minutes when PRs are converging, 30 when quiet. A worker's
 | PR head differs from the last phase line's `sha` | stale liveness | message the worker to run `phase` |
 | owner answer relayed, not in the spec or plan after the next commit | answer not recorded | message the worker |
 | ticket ready, no worker, under caps | idle capacity | schedule it, or hold it with the reason |
+| goal fully defined (or its current milestone unplanned), no planner, under `max_active_planners` | idle planning | start a planner (or design it yourself); goals move in parallel, not one after another |
 | superseded ticket with a live worker | re-plan not propagated | park it with a ruling |
 
 ## 5. Scheduling and merging
