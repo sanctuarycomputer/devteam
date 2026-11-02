@@ -647,7 +647,8 @@
               "clarification",
               "proposal",
               "trust",
-              "goal-definition"
+              "goal-definition",
+              "owner-action"
             ]
           },
           "class": {
@@ -669,6 +670,61 @@
             "type": "array",
             "items": {
               "type": "string"
+            }
+          },
+          "choices": {
+            "type": "array",
+            "description": "The possible answers, recommended one included (name it in recommendation by its label): a short label, what it means, and what it changes for the product's users.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "label": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 120
+                },
+                "detail": {
+                  "type": "string",
+                  "maxLength": 600
+                },
+                "effect": {
+                  "type": "string",
+                  "maxLength": 400
+                }
+              },
+              "required": [
+                "label"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "links": {
+            "type": "array",
+            "description": "Artifacts the owner must look at to answer (a spec, a plan, a mock): a path in the repo at ref (default main), or a URL.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "title": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "path": {
+                  "type": "string",
+                  "pattern": "^(?!/)(?!.*\\.\\.)[^\\s]+$"
+                },
+                "ref": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9._/-]+$"
+                },
+                "url": {
+                  "type": "string",
+                  "pattern": "^https?://"
+                }
+              },
+              "required": [
+                "title"
+              ],
+              "additionalProperties": false
             }
           },
           "recommendation": {
