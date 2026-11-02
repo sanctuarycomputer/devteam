@@ -738,7 +738,13 @@ test('devteam kit', async (t) => {
     assert.match(dt(['goal', 'set', G, '--approved', Qok, '--target', '10'], { role: 'sup' }).err, /pass no other fields/, 'the answer covers the proposed change, not another');
     must(['goal', 'set', G, '--approved', Qok], { role: 'sup' });
     assert.deepEqual(nonGoals(), ['enterprise invoicing', 'refunds']);
-    assert.equal(json(must(['goal', 'show', G, '--json'])).approved, Qok, 'the set records which answer authorised it');
+    // a guessed date is cleared the same way: the change sets horizon to null
+    const Qdate = ask(['--class', 'goal-change', '--goal', G, '--change', JSON.stringify({ horizon: null })]);
+    must(['answer', Qdate, 'Set it']);
+    must(['goal', 'set', G, '--approved', Qdate], { role: 'sup' });
+    assert.equal(json(must(['goal', 'show', G, '--json'])).horizon, null, 'the horizon is cleared');
+    assert.doesNotMatch(must(['goal', 'check', G]), /horizon/);
+    assert.equal(json(must(['goal', 'show', G, '--json'])).updates.find((u) => u.approved === Qok)?.non_goals?.length, 2, 'the set records which answer authorised it');
     assert.match(dt(['goal', 'set', G, '--approved', Qok], { role: 'sup' }).err, /already authorised a change/, 'one change per answer');
     assert.match(dt(['goal', 'set', G, '--non-goals', 'x', '--owner', '--approved', Qok]).err, /--approved is the supervisor/, 'the owner sets directly');
     // written straight into the log, a set that differs from the approved change is ignored by the fold

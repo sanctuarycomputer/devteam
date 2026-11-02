@@ -2192,7 +2192,7 @@ function milestoneGaps(g) {
       else seen.set(p, n);
     }
     if (!(Number.isInteger(m.tickets) && m.tickets > 0)) gaps.push(`milestone ${n} has no size (tickets: a rough count of PRs)`);
-    if (m.by !== undefined) {
+    if (m.by != null) {
       const t = Date.parse(m.by);
       if (Number.isNaN(t)) gaps.push(`milestone ${n}'s date "${m.by}" is not a date`);
       else {
@@ -2284,7 +2284,8 @@ function cmdGoal() {
     measure: ['measure', 'target', 'unit', 'direction'].some((k) => flagStr(k) !== undefined)
       ? { ...(id ? logGet(id)?.measure : {}), ...(flagStr('measure') ? { description: flagStr('measure') } : {}), ...(flagStr('target') ? { target: Number(flagStr('target')) } : {}), ...(flagStr('unit') ? { unit: flagStr('unit') } : {}), ...(flagStr('direction') ? { direction: flagStr('direction') } : {}) }
       : undefined,
-    horizon: flagStr('horizon'),
+    // `none` clears it: a horizon is the owner's real deadline or nothing (planning.md §1)
+    horizon: flagStr('horizon') === 'none' ? null : flagStr('horizon'),
     non_goals: flags['non-goals'] !== undefined ? asList(flags['non-goals']) : undefined,
     preconditions: flags.preconditions !== undefined ? asList(flags.preconditions) : undefined,
     priority: flagNum('priority'),

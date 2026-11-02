@@ -92,7 +92,10 @@
             "additionalProperties": false
           },
           "horizon": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "non_goals": {
             "type": "array",
@@ -124,7 +127,10 @@
                   "type": "number"
                 },
                 "by": {
-                  "type": "string"
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "preconditions": {
                   "type": "array",
