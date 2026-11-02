@@ -3210,6 +3210,12 @@ function collectMetrics(since) {
     if (p.phase === 'blocked' && h >= 1) add('high', 'blocked', id, `blocked for ${h.toFixed(1)}h`, 'answer its message, re-plan, or park it');
     if (p.phase === 'awaiting-word' && h >= 1) add('medium', 'waiting-on-supervisor', id, `waiting for the stage or merge word for ${h.toFixed(1)}h`, 'answer its review-request: give the word, run merge, or say what is missing');
   }
+  // The tmux session's window names, once (null when tmux or the session isn't there: unknown).
+  let windowNames;
+  const windowGone = (name) => {
+    if (windowNames === undefined) { const l = sh('tmux', ['list-windows', '-t', settings.tmux_session, '-F', '#W']); windowNames = l === null ? null : new Set(l.split('\n').filter(Boolean)); }
+    return windowNames !== null && !windowNames.has(name);
+  };
   for (const id of ts.keys()) {
     const w = workerState(id);
     const wait = paneWaiting(id);
@@ -3218,7 +3224,7 @@ function collectMetrics(since) {
     // request to the supervisor still unanswered (the unanswered-message finding covers that)
     const waitingOnOwner = openQs.some((q) => (q.blocks ?? []).includes(id) || q.ticket === id);
     const waitingOnSupervisor = openMsgs.some((m) => m.created_by === id);
-    if (w && w.phase && !['done', 'parked', 'awaiting-word', 'blocked'].includes(w.phase) && !mergeShaFor(id) && !waitingOnOwner && !waitingOnSupervisor && w.minutes_silent > settings.stale_after_minutes) add('high', 'stale-worker', id, `silent for ${w.minutes_silent} min (phase ${w.phase})`, 'check its pane; resume it (supervisor.md, recovery)');
+    if (w && w.phase && !['done', 'parked', 'awaiting-word', 'blocked'].includes(w.phase) && !mergeShaFor(id) && !waitingOnOwner && !waitingOnSupervisor && w.minutes_silent > settings.stale_after_minutes) add('high', 'stale-worker', id, ...(windowGone(id) ? [`silent for ${w.minutes_silent} min (phase ${w.phase}) and its tmux window is gone`, `resume it: worker ${id} --resume (supervisor.md, recovery)`] : [`silent for ${w.minutes_silent} min (phase ${w.phase})`, 'check its pane; resume it (supervisor.md, recovery)']));
   }
   for (const p of planners()) {
     const who = `plan-${p.feature}`;
