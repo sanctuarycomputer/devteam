@@ -85,6 +85,8 @@ project/reviews/<design-slug>/design-<pass>[<track>].md       design (on the pla
 Verdict: APPROVE 3f2a9c1e0d7b4a6f8c2e1d0b9a8f7e6d5c4b3a2e
 ```
 
+A plan review for a ticket whose one-way door the owner answered at goal level (a `one-way-door` question asked with `--goal`, not `--ticket`) checks that the plan does nothing the answer didn't cover and, if so, says it on its own line: `- Goal-level door: <qid> covers this plan`. `act --class approve-plan --approved <qid>` refuses unless the latest approving plan review has that line for that qid; a plan that goes further needs its own `one-way-door` question for the ticket.
+
 `check-ticket` fails when no final review was made at the head, the latest final review in any track says `CHANGES`, fewer named reviewers approved than the risk needs, or any Critical or Important finding lacks a disposition. `validate` fails a landed feature whose latest graph or design review is missing or not `APPROVE`.
 
 **Measuring reviews.** `metrics` reports first-pass rejection per stage (a healthy fleet rejects 20 to 30% of first passes; near zero means the reviewer prompt went soft), the share of findings dispositioned `wrong` (high means taste, tighten the rules), and escaped defects (defects found after merge, logged as observations of kind `escaped-defect`). The supervisor proposes prompt or rule changes from these at retros.

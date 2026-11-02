@@ -867,6 +867,18 @@ test('devteam kit', async (t) => {
     assert.equal(json(must(['goal', 'show', G, '--json'])).updates.find((u) => u.approved === Qok)?.non_goals?.length, 2, 'the set records which answer authorised it');
     assert.match(dt(['goal', 'set', G, '--approved', Qok], { role: 'sup' }).err, /already authorised a change/, 'one change per answer');
     assert.match(dt(['goal', 'set', G, '--non-goals', 'x', '--owner', '--approved', Qok]).err, /--approved is the supervisor/, 'the owner sets directly');
+    // an answer given before questions recorded their change is carried forward, not re-asked: the
+    // supervisor states the change, and it's logged as a carry-answer act the owner can correct
+    const dir0 = path.join(repo, 'docs/devteam/run/log');
+    const sup0 = path.join(dir0, fs.readdirSync(dir0).find((f) => /^supervisor-\d{4}-\d{2}\.jsonl$/.test(f)));
+    const Qold = 'q-20261101-000000001-supervisor';
+    fs.appendFileSync(sup0, line({ id: Qold, type: 'question', op: 'new', at: '2026-11-01T00:00:00.001Z', by: 'supervisor', kind: 'owner-decision', class: 'goal-change', goal: G, question: 'Give the goal one milestone?', recommendation: 'Set it', blocks: [], evidence: [], why_asked: { reasons: [] } }));
+    must(['answer', Qold, 'Set it']);
+    assert.match(dt(['goal', 'set', G, '--approved', Qold], { role: 'sup' }).err, /carry the owner's (earlier )?answer forward with/);
+    must(['goal', 'set', G, '--approved', Qold, '--change', JSON.stringify({ priority: 3 })], { role: 'sup' });
+    assert.equal(json(must(['goal', 'show', G, '--json'])).priority, 3, 'carried forward, not re-asked');
+    assert.ok(json(must(['log', '--type', 'act', '--json'])).some((a) => a.class === 'carry-answer' && a.refs.includes(Qold)), 'and logged for the owner to see and correct');
+    assert.match(dt(['goal', 'set', G, '--approved', Qok, '--change', JSON.stringify({ priority: 9 })], { role: 'sup' }).err, /already authorised|proposed its change/, 'a question that recorded its change applies only that');
     // written straight into the log, a set that differs from the approved change is ignored by the fold
     const Qok2 = ask(['--class', 'goal-change', '--goal', G, '--change', JSON.stringify({ priority: 2 })]);
     must(['answer', Qok2, 'Set it']);
@@ -901,6 +913,9 @@ test('devteam kit', async (t) => {
     assert.equal(git(['rev-parse', 'origin/main^2']), H2, 'main merges the verified head');
     assert.ok(json(must(['log', '--type', 'act', '--json'])).some((a) => a.class === 'merge-word' && a.refs.includes('bill-01-card')));
     assert.match(must(['status']), /merged.*bill-01-card/);
+    // its merge settles the worker's requests, replied to or not
+    assert.ok(!json(must(['messages', '--to', 'supervisor', '--open', '--json'])).some((m) => m.created_by === 'bill-01-card'), 'a merged ticket asks nothing');
+    assert.ok(!json(must(['dashboard-data'])).open_messages.some((m) => m.actor === 'bill-01-card'));
     // review churn is about tickets still in flight: a merged ticket with many passes raises nothing
     const r3 = path.join(repo, 'docs/devteam/project/tickets/bill-01-card/reviews/final-3.md');
     write(r3, review('reviewer-z', git(['rev-parse', 'HEAD'])));
@@ -929,5 +944,55 @@ test('devteam kit', async (t) => {
     const Gk = must(['goal', 'add', '--title', 'Braces', '--preconditions', '{"a": 1}'], sup);
     assert.deepEqual(json(must(['goal', 'show', Gk, '--json'])).preconditions, ['{"a": 1}'], 'only a value starting with [ is read as JSON');
     assert.deepEqual(json(must(['goal', 'show', Gj, '--json'])).preconditions, ['refunds clear in a day'], 'a refused set changes nothing');
+  });
+
+  await t.test('approve-plan accepts a one-way door the owner answered for the ticket\'s goal, cited, when the plan review says it covers the plan', () => {
+    const sup = { role: 'sup' };
+    const tk = { title: 'card vault', feature: 'billing', component: 'bill', kind: 'build', size: 'S', risk: 'high', serves: ['BILL-S1'], depends_on: [], touches: ['billing/vault/**'], done_when: ['vault test passes in CI'], one_way_doors: ['who may see card details'] };
+    must(['ticket', 'add', 'bill-02-vault', '--json', JSON.stringify(tk)], sup);
+    // the door answered while designing the goal (goals test); another goal's door; an unanswered one
+    const D1 = json(must(['questions', '--json', '--all'])).find((q) => q.kind === 'one-way-door' && q.goal === G && q.status === 'answered')?.id;
+    assert.ok(D1, 'the goal-level door from the design');
+    const G2 = must(['goal', 'add', '--title', 'Invoices', '--outcome', 'finance exports invoices', '--measure', 'invoices exported', '--target', '10', '--unit', 'n', '--direction', 'up', '--horizon', '2027-06-30', '--non-goals', 'tax', '--preconditions', 'invoice model', '--priority', '8'], sup);
+    const Dx = must(['ask', '--kind', 'one-way-door', '--goal', G2, '--question', 'Who may see invoices?', '--recommendation', 'finance only'], sup);
+    must(['answer', Dx, 'finance only']);
+    const Dopen = must(['ask', '--kind', 'one-way-door', '--goal', G, '--question', 'Keep card fingerprints?', '--recommendation', 'no'], sup);
+    git(['worktree', 'add', '-q', '-b', 'ticket/bill-02-vault', wt('bill-02-vault'), 'HEAD']);
+    const tdir = path.join(wt('bill-02-vault'), 'docs/devteam/project/tickets/bill-02-vault');
+    const commit = (msg) => { git(['add', '-A'], wt('bill-02-vault')); git(['commit', '-qm', msg], wt('bill-02-vault')); return git(['rev-parse', 'HEAD'], wt('bill-02-vault')); };
+    write(path.join(tdir, 'plan.md'), '# plan\n\n## TL;DR\n\n- store cards with the processor; admins see the last four\n\n## Tasks\n\n- T1 vault\n');
+    const p1 = commit('bill-02-vault: plan');
+    write(path.join(tdir, 'reviews/plan-1.md'), review('reviewer-a', p1));
+    commit('bill-02-vault: plan review');
+    const ap = (...extra) => dt(['act', '--class', 'approve-plan', '--refs', 'bill-02-vault', ...extra, '--', 'plan ok'], sup);
+    assert.match(ap().err, /lists one-way doors; .*--approved <qid>/, 'not without citing the goal-level answer');
+    assert.match(ap('--approved', Dx).err, new RegExp(`answered a one-way door for goal ${G2}, .*serves ${G}; an answer for another goal never covers this plan`));
+    assert.match(ap('--approved', Dopen).err, /is not an answered question/, 'an unanswered door counts for nothing');
+    assert.match(ap('--approved', D1).err, new RegExp(`must say "- Goal-level door: ${D1} covers this plan"`), 'the plan review says the plan stays inside the answer');
+    // the statement must be in the latest approving review, for this qid
+    write(path.join(tdir, 'reviews/plan-1.md'), review('reviewer-a', p1).replace('\n\n|', `\n- Goal-level door: ${Dx} covers this plan\n\n|`));
+    commit('review names another door');
+    assert.match(ap('--approved', D1).err, /must say "- Goal-level door:/);
+    write(path.join(tdir, 'reviews/plan-1.md'), review('reviewer-a', p1).replace('\n\n|', `\n- Goal-level door: ${D1} covers this plan\n\n|`));
+    commit('review covers the door');
+    write(path.join(tdir, 'reviews/plan-2.md'), `- Reviewer: reviewer-c\n- Goal-level door: ${D1} covers this plan\n\nVerdict: CHANGES ${p1}\n`);
+    commit('a later pass rejects');
+    assert.match(ap('--approved', D1).err, /must say "- Goal-level door:/, 'a later CHANGES pass is the latest');
+    write(path.join(tdir, 'reviews/plan-2.md'), `- Reviewer: reviewer-c\n- Goal-level door: ${D1} covers this plan.\n\nVerdict: APPROVE ${p1}\n`);
+    commit('a later pass approves');
+    const act = must(['act', '--class', 'approve-plan', '--refs', 'bill-02-vault', '--approved', D1, '--', 'plan ok'], sup);
+    assert.equal(json(must(['log', '--type', 'act', '--json'])).find((a) => a.id === act).approved_by, D1, 'the act names the goal-level answer it used');
+    // a goal-level answer is cited only for a ticket with a door; the ticket-level path is unchanged
+    assert.match(dt(['act', '--class', 'approve-plan', '--refs', 'bill-01-card', '--approved', D1, '--', 'plan ok'], sup).err, /lists no one-way doors/);
+    must(['ticket', 'set', 'bill-02-vault', '--json', JSON.stringify({ one_way_doors: ['who may see card details', 'keep fingerprints'] })], sup);
+    const Dt = must(['ask', '--kind', 'one-way-door', '--ticket', 'bill-02-vault', '--question', 'Keep card fingerprints for this vault?', '--recommendation', 'no'], sup);
+    fs.rmSync(path.join(tdir, 'reviews'), { recursive: true });
+    commit('no reviews');
+    assert.match(ap().err, /lists one-way doors/, 'an open ticket-level door is not an answer');
+    must(['answer', Dt, 'no']);
+    must(['act', '--class', 'approve-plan', '--refs', 'bill-02-vault', '--', 'plan ok'], sup);
+    // a defaulted answer never counts: a one-way door never has a default, so it can't be defaulted
+    assert.match(dt(['ask', '--kind', 'one-way-door', '--goal', G, '--question', 'x?', '--default', 'yes'], sup).err, /never has a default/);
+    git(['worktree', 'remove', '--force', wt('bill-02-vault')]);
   });
 });

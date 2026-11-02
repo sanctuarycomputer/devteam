@@ -698,6 +698,7 @@ function actView(a) {
       return { head };
     }
     case 'approve-feature-plan': return { head: `Approved the plan for feature ${esc((a.refs || [])[0] || '')}` };
+    case 'carry-answer': { const q = (a.refs || []).find((r) => r.startsWith('q-')); const g = (a.refs || []).find((r) => r.startsWith('g-')); const goal = (DATA.ooda.goals || []).find((x) => x.id === g); return { head: `Carried your earlier answer forward${q ? ` (${qlink(q)})` : ''}${goal ? ` to <a class="linkish" href="#goal/${encodeURIComponent(g)}">${esc(goal.title)}</a>` : ''}`, detail: linkify(String(a.what).replace(/^applied your earlier answer to \S+ /, '')) }; }
     case 'withdraw-question': { const m = String(a.what).match(/withdrew (q-\S+?):?\s+(.*)$/); return { head: `Withdrew a question: ${m ? qlink(m[1]) : linkify(a.what)}`, detail: m ? linkify(m[2]) : '' }; }
     case 'apply-default': { const id = (a.refs || [])[0]; return { head: `Went with the default for ${id ? qlink(id) : 'a question'}, unanswered in time`, detail: strip(/^applied the default to \S+:\s*/) }; }
     case 'upstream-pr': return { head: 'Proposed an improvement to devteam itself', detail: linkify(a.what) };

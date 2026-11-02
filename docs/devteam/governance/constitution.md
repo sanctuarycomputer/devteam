@@ -41,7 +41,7 @@ Some owner decisions can be handed to the supervisor a step at a time, as eviden
     "release-production": { "ceiling": 3, "start": 1, "about": "ship a tagged release to production, with every gate passing at the tagged commit" },
     "production-migration": { "ceiling": 3, "start": 1, "about": "run a rollback-safe migration against production data" }
   },
-  "constitutional": ["merge-word", "approve-feature-plan", "merge-chore", "worker-slots", "replan-within-feature", "add-ticket", "approve-spec", "approve-plan", "approve-design-change", "contract-ruling", "improvement-trial", "release-staging", "goal-readiness", "apply-default", "withdraw-question", "recovery"],
+  "constitutional": ["merge-word", "approve-feature-plan", "merge-chore", "worker-slots", "replan-within-feature", "add-ticket", "approve-spec", "approve-plan", "approve-design-change", "contract-ruling", "improvement-trial", "release-staging", "goal-readiness", "apply-default", "withdraw-question", "recovery", "carry-answer"],
   "owner_only": ["one-way-door", "check-override", "governance-edit", "process-edit", "gate-change", "goal-change", "new-dependency"],
   "reasons": [
     { "id": "below-rung", "means": "the class is on the ladder and the supervisor isn't trusted to act alone yet" },
@@ -90,7 +90,9 @@ A change is a one-way door if reverting it is expensive or impossible once shipp
 - anything touching authentication, authorization, payments or PII
 - anything the owner lists under one-way doors in the settings
 
-A one-way door needs an owner answer before the ticket's plan is approved (`act --class approve-plan` refuses without one), two independent final reviews, and `risk: high` on the ticket.
+An additive change is not a one-way door: a new field, a new optional type or value, a new endpoint or tool beside the old ones, nothing existing removed or narrowed. Decide it yourself and log the act; don't ask the owner to confirm it. When the owner has already answered a one-way door for a goal, that answer covers the tickets that implement it (cite it); never ask the same decision again (`process/supervisor.md` §6).
+
+A one-way door needs an owner answer before the ticket's plan is approved (`act --class approve-plan` refuses without one), two independent final reviews, and `risk: high` on the ticket. The answer is a `one-way-door` question asked for the ticket (`--ticket`), or one the owner already answered for a goal the ticket's feature serves (`--goal`, asked while designing): the supervisor cites that one with `act --class approve-plan --approved <qid>`, and the latest approving plan review must say the plan stays inside what the answer covered (`quality.md` §3). An answer for another goal never counts.
 
 ## 5. Changing the rules
 

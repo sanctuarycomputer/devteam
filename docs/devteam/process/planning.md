@@ -53,7 +53,7 @@ Designs come at two levels.
 - components and boundaries, and every contract that crosses one (each becomes a contract ticket);
 - data: new or changed persistence with its tier (`code-style.md` §4), migrations and rollback safety;
 - failure modes, security and PII;
-- one-way doors, each an owner question before any plan is approved;
+- one-way doors, each an owner question before any plan is approved (one answered here, with `--goal`, can approve a ticket's plan when its plan review says the plan stays inside it; constitution.md §4);
 - **Owner decisions**: each decision the owner made for this design, with the question id that settled it (§1); none may be left open when approval is asked;
 - risks and unknowns that survive, each a spike ticket or a question;
 - the milestones, in order, each with its target, the preconditions it makes true, its date if any and a size in tickets (recorded on the goal, §1);

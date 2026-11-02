@@ -682,11 +682,15 @@ function goalChangeProblem(q, goalId, qid, l = null) {
   if (!v) return `${qid} is not a question`;
   if (v.class !== 'goal-change') return `${v.id} was asked in class ${v.class ?? '(none)'}, not goal-change`;
   if (v.goal !== goalId) return `${v.id} is about ${v.goal ?? 'no goal'}, not ${goalId} (ask with --goal ${goalId})`;
-  if (!v.change || !Object.keys(v.change).length) return `${v.id} carries no change (ask with --change '{…}'), so its answer authorises nothing specific`;
+  // A question asked before the exact-change rule (ask has required --change on these since) is
+  // an earlier answer: the supervisor carries it forward with the change it says the owner chose,
+  // logged as a carry-answer act the owner can correct, rather than asking the same thing again.
+  const legacy = !v.change || !Object.keys(v.change).length;
+  if (legacy && !(l && l.carried)) return `${v.id} carries no change; carry the owner's earlier answer forward with goal set --approved ${v.id} --change '{…}'`;
   if (v.status !== 'answered') return `${v.id} is not answered by the owner (${v.status})`;
   if (!v.matched) return `${v.id} was answered "${v.answer}", not its recommendation${v.recommendation ? ` ("${v.recommendation}")` : ''}; ask again for the change the owner wants`;
   // the owner approved this change and no other: the set must be exactly it
-  if (l && canonical(goalFieldsOf(l)) !== canonical(v.change)) return `the set (${Object.keys(goalFieldsOf(l)).join(', ') || 'nothing'}) is not the change ${v.id} proposed`;
+  if (l && !legacy && canonical(goalFieldsOf(l)) !== canonical(v.change)) return `the set (${Object.keys(goalFieldsOf(l)).join(', ') || 'nothing'}) is not the change ${v.id} proposed`;
   return null;
 }
 
@@ -1399,6 +1403,8 @@ function parseReview(file, text) {
   const m = file.match(/^([a-z]+)-(\d+)([a-z]?)\.md$/);
   const verdict = [...text.matchAll(/^Verdict:[ \t]*(APPROVE|CHANGES)[ \t]+(\S+)[ \t]*$/gm)].pop();
   const reviewerRaw = text.match(/^-[ \t]*Reviewer:[ \t]*(.*)$/m)?.[1]?.trim() ?? '';
+  // A plan review that relies on a goal-level one-way-door answer says so: "- Goal-level door: <qid> covers this plan".
+  const doors = [...text.matchAll(/^-[ \t]*Goal-level door:[ \t]*(q-\S+)[ \t]+covers this plan\.?[ \t]*$/gm)].map((d) => d[1]);
   const findings = [];
   let dispIdx = -1;
   let sevIdx = 1;
@@ -1412,7 +1418,7 @@ function parseReview(file, text) {
   return {
     file, stage: m ? m[1] : file.replace(/\.md$/, ''), pass: m ? Number(m[2]) : 0, variant: m ? m[3] : '',
     verdict: verdict ? verdict[1] : null, sha: verdict ? verdict[2] : null, shaValid: verdict ? /^[0-9a-f]{40}$/.test(verdict[2]) : false,
-    reviewer: reviewerRaw && !reviewerRaw.startsWith('<') ? reviewerRaw : null, findings,
+    reviewer: reviewerRaw && !reviewerRaw.startsWith('<') ? reviewerRaw : null, findings, doors,
   };
 }
 const reviewRecordsIn = (src, relDir) => srcList(src, relDir).filter((f) => f.endsWith('.md')).map((f) => parseReview(f, srcRead(src, `${relDir}/${f}`) ?? ''));
@@ -2029,6 +2035,11 @@ function cmdAct() {
     const q = logGet(approved);
     approval = q?.type === 'question' ? questionView(q) : null;
     if (!approval || !['answered', 'defaulted'].includes(approval.status)) die(`${approved} is not an answered question`);
+  }
+  // approve-plan may cite the owner's answer to a one-way door asked at goal level (constitution.md §4);
+  // it is checked below, against the ticket's goals and its plan review, not as an approve-plan answer.
+  const doorCited = cls === 'approve-plan' && approval?.kind === 'one-way-door';
+  if (approval && !doorCited) {
     if (approval.class !== cls) die(`${approved} was asked in class ${approval.class ?? '(none)'}, not ${cls}`);
     if (logObjects('act').some((a) => a.approved_by === approved)) die(`${approved} already approved an act; ask again for another`);
   }
@@ -2049,13 +2060,29 @@ function cmdAct() {
   if (cls === 'approve-plan') {
     const t = tickets().get(asList(flags.refs)[0]);
     if (!t) die('approve-plan names the ticket: --refs <ticket-id>');
-    if ((t.one_way_doors ?? []).length && !questions().some((q) => q.kind === 'one-way-door' && q.ticket === t.id && q.status === 'answered')) die(`${t.id} lists one-way doors; the owner answers a one-way-door question (--ticket ${t.id}) before its plan is approved (constitution.md §4)`);
+    const doors = t.one_way_doors ?? [];
+    let goalDoor = null;
+    if (doorCited) {
+      if (!doors.length) die(`${t.id} lists no one-way doors; ${approved} has nothing to cover`);
+      if (approval.status !== 'answered') die(`${approved} was not answered by the owner; a one-way door needs the owner's answer, never a default`);
+      if (approval.ticket !== t.id) {
+        const goals = features().get(t.feature)?.goals ?? [];
+        if (!approval.goal) die(`${approved} is a one-way-door question for neither ${t.id} nor a goal`);
+        if (!goals.includes(approval.goal)) die(`${approved} answered a one-way door for goal ${approval.goal}, but ${t.id}'s feature ${t.feature} serves ${goals.join(', ') || 'no goal'}; an answer for another goal never covers this plan`);
+        goalDoor = approved;
+      }
+    } else if (doors.length && !questions().some((q) => q.kind === 'one-way-door' && q.ticket === t.id && q.status === 'answered')) die(`${t.id} lists one-way doors; the owner answers a one-way-door question (--ticket ${t.id}) before its plan is approved, or you cite the owner's answer to the goal's one-way-door question (--approved <qid>) and the plan review says it covers the plan (constitution.md §4)`);
     // The plan opens with its TL;DR, so a low-risk plan can be approved from it (quality.md §6).
     const ref = [`ticket/${t.id}`, `origin/ticket/${t.id}`].find((r) => resolveCommit(r));
     const plan = ref ? git(['show', `${ref}:${projectRel}/tickets/${t.id}/plan.md`]) : null;
     if (plan === null) die(`no plan.md for ${t.id} on ticket/${t.id}; approve a plan once it is committed`);
     const tldr = tldrGap(plan);
     if (tldr) die(`${t.id}'s plan ${tldr}; send it back to the worker (quality.md §6)`);
+    // A goal-level answer covers the plan only when its reviewer says the plan stays inside it.
+    if (goalDoor) {
+      const latest = latestPerTrack(ticketReviews(t.id, { ref }), 'plan').filter((r) => r.verdict === 'APPROVE');
+      if (!latest.some((r) => r.doors.includes(goalDoor))) die(`${goalDoor} is a goal-level answer; the latest approving plan review (reviews/plan-<n>.md on ticket/${t.id}) must say "- Goal-level door: ${goalDoor} covers this plan" (quality.md §3)`);
+    }
   }
   const line = appendLog({ type: 'act', class: cls, scope: scope ?? undefined, what, rung, refs: asList(flags.refs), reversible: !flags.irreversible, approved_by: approved ?? undefined }, 'supervisor');
   out(line.id);
@@ -2393,12 +2420,24 @@ function cmdGoal() {
     if (approved && by !== 'supervisor') die('the owner changes a goal directly; --approved is the supervisor applying an owner answer');
     if (by === 'supervisor' && (logGet(id).status ?? 'draft') !== 'draft' && !approved) die(`${id} is ${logGet(id).status}; only the owner changes it now (class goal-change): ask a goal-change question with --goal ${id}, then goal set ${id} --approved <qid>`);
     if (approved) {
-      const problem = goalChangeProblem(logGet(approved), id, approved);
+      // an earlier answer carried forward with --change is checked as such (its question recorded no change)
+      const problem = goalChangeProblem(logGet(approved), id, approved, logGet(approved)?.type === 'question' && !questionView(logGet(approved)).change && flagStr('change') !== undefined ? { carried: true } : null);
       if (problem) die(`goal set --approved: ${problem}`);
       if (logObjects('goal').some((g) => g.updates.some((u) => u.approved === approved)) || logObjects('act').some((a) => a.approved_by === approved)) die(`${approved} already authorised a change; ask again for another`);
       // the answer authorises the change the question proposed, applied as is
       if (Object.values(fields()).some((x) => x !== undefined)) die('goal set --approved applies the change its question proposed; pass no other fields');
-      return out(`updated ${id} (${appendLog({ type: 'goal', op: 'set', id, ...questionView(logGet(approved)).change, approved }, by).id})`);
+      const qv = questionView(logGet(approved));
+      if (qv.change) {
+        if (flagStr('change') !== undefined) die(`${approved} proposed its change; --change is only for carrying forward an earlier answer that didn't record one`);
+        return out(`updated ${id} (${appendLog({ type: 'goal', op: 'set', id, ...qv.change, approved }, by).id})`);
+      }
+      // carrying forward an answer given before changes were recorded on the question
+      const carried = jsonFlag('change') ?? die(`${approved} was asked before changes were recorded on goal-change questions: carry the owner's answer forward with --change '{…}', the change they chose ("${qv.answer}")`);
+      const bad = Object.keys(carried).filter((k) => !GOAL_CHANGE_FIELDS.includes(k));
+      if (!Object.keys(carried).length || bad.length) die(`--change sets goal fields (${GOAL_CHANGE_FIELDS.join(', ')})${bad.length ? `; not ${bad.join(', ')}` : ''}`);
+      const line = appendLog({ type: 'goal', op: 'set', id, ...carried, approved, carried: true }, by);
+      appendLog({ type: 'act', class: 'carry-answer', what: `applied your earlier answer to ${approved} ("${qv.answer}") to ${id}: set ${Object.keys(carried).join(', ')}`, refs: [id, approved], reversible: true }, 'supervisor');
+      return out(`updated ${id} (${line.id}), carrying ${approved} forward`);
     }
     appendLog({ type: 'goal', op: 'set', id, ...fields() }, by);
     return out(`updated ${id}`);
@@ -2799,7 +2838,7 @@ function collectMetrics(since) {
   const replies = new Map();
   for (const m of msgs) if (m.re && !replies.has(m.re)) replies.set(m.re, Date.parse(m.created_at));
   const expecting = msgs.filter((m) => !['info', 'ruling', 'answer'].includes(m.kind));
-  const openMsgs = expecting.filter((m) => !replies.has(m.id));
+  const openMsgs = expecting.filter((m) => !replies.has(m.id) && !settledByLanding(m));
   const msgWaits = expecting.filter((m) => replies.has(m.id)).map((m) => replies.get(m.id) - Date.parse(m.created_at));
   const qs = questions().filter((q) => Date.parse(q.asked_at) >= since);
   const qWaits = qs.filter((q) => q.answered_at && q.status === 'answered').map((q) => Date.parse(q.answered_at) - Date.parse(q.asked_at));
@@ -2998,7 +3037,7 @@ function dashboardData() {
     tickets: deriveStatus(),
     critical_path: findCycle(sub) ? [] : criticalPath(sub).path,
     questions: rankQuestions(questions().filter((q) => q.status === 'open')),
-    open_messages: msgs.filter((m) => !['info', 'ruling', 'answer'].includes(m.kind) && !replied.has(m.id)).map((m) => ({ id: m.id, kind: m.kind, actor: m.created_by, to: m.to, summary: m.text })),
+    open_messages: msgs.filter((m) => !['info', 'ruling', 'answer'].includes(m.kind) && !replied.has(m.id) && !settledByLanding(m)).map((m) => ({ id: m.id, kind: m.kind, actor: m.created_by, to: m.to, summary: m.text })),
     metrics: collectMetrics(0),
     progress: collectProgress(),
     planners: planners(),
@@ -3175,12 +3214,22 @@ function cmdSend() {
   if (problem || !typeInto(exact, `[devteam ${kind} ${line.id} from ${from}${re ? ` re ${re}` : ''}${sha ? ` @ ${sha}` : ''}] ${text}`)) warn(`${line.id} recorded but not delivered to "${to}": ${problem ?? `could not type into ${exact}`}; it shows in their \`messages\``);
   out(line.id);
 }
+// A request is settled when the work it is about has landed: a ticket's once it merged, a
+// planner's once its plan file is on main. The merge is the answer even if nobody replied.
+function settledByLanding(m) {
+  const by = m.created_by ?? m.by;
+  if (!by) return false;
+  const cls = writerClass(by);
+  if (cls === 'ticket') return !!mergeShaFor(by);
+  if (cls === 'planner') return !!mainRef() && git(['cat-file', '-e', `${mainRef()}:${projectRel}/log/${by}.jsonl`]) !== null;
+  return false;
+}
 function cmdMessages() {
   const me = flagStr('to') ?? myAddress();
   const all = logObjects('message').sort(byTime);
   const replied = new Set(all.map((m) => m.re).filter(Boolean));
   let mine = all.filter((m) => m.to === me);
-  if (flags.open) mine = mine.filter((m) => !replied.has(m.id) && !['info', 'ruling', 'answer'].includes(m.kind));
+  if (flags.open) mine = mine.filter((m) => !replied.has(m.id) && !['info', 'ruling', 'answer'].includes(m.kind) && !settledByLanding(m));
   mine = mine.slice(-Number(flagStr('tail') ?? 50));
   if (flags.json) return json(mine);
   if (!mine.length) return out(flags.open ? 'no open messages' : 'no messages');
