@@ -10,17 +10,26 @@ The supervisor plans itself or makes a planner (`devteam.mjs planner <feature>`)
 
 ## 1. Goals
 
-The owner states the goals, in whatever words. The supervisor drafts them (`devteam.mjs goal add --title … --outcome …`) and only the owner approves one (`goal approve`, or the dashboard). Keep three to five active.
+The owner states the goals, in whatever words. The supervisor drafts them (`devteam.mjs goal add --title … --outcome …`), interviews until each is fully defined, has its design written and reviewed (§2), and then asks the owner to approve the goal **on its design**. Only the owner decides. Keep three to five active.
+
+A goal moves through: **defining** (gaps, `goal-definition` questions) → **designing** (fully defined; the design is written and reviewed) → **awaiting approval** (a `goal-approval` question in the inbox, the design linked) → **ready** (approved; features and tickets are planned from the design) → **met**, or **abandoned** if the owner lets it go.
 
 A goal is **ready** when it has: an outcome (what is true for users or the business when it's met), a measure with a numeric target, unit and direction, a horizon date, at least one non-goal, the preconditions that must hold for the outcome, a priority distinct from the other goals, and a baseline reading (`goal reading <id> --value n`). `devteam.mjs goal check` lists what's missing.
 
-**The readiness interview.** While a goal has gaps, or any ambiguity in the supervisor's judgment (an undefined term, two readings of the measure, a conflict with another goal), the supervisor asks one `goal-definition` question per goal listing every gap as a form, records the answers (`goal set`), and repeats until `goal check` is clean. Then the owner approves. Changing an approved goal is the owner's (`goal-change`, owner-only).
+**The readiness interview.** While a goal has gaps, or any ambiguity in the supervisor's judgment (an undefined term, two readings of the measure, a conflict with another goal), the supervisor asks one `goal-definition` question per goal listing every gap as a form, records the answers (`goal set`), and repeats until `goal check` is clean. Changing an approved goal is the owner's (`goal-change`, owner-only).
+
+**Approval, on the design.** Once the design is reviewed, ask: `ask --kind goal-approval --goal <g-id> --question "Approve <goal> built this way?" --context "<the approach in three sentences: what gets built, what's left out, what it costs>" --links '[{"title":"The design","path":"docs/devteam/project/designs/<slug>.md","ref":"plan/<feature>"}]'`. The owner answers on the dashboard (or `goal decide <g-id> approve|refine|let-go --notes "…"`):
+- **Approve.** The goal is ready; plan its features and tickets from the design, taking the owner's notes into account.
+- **Refine.** The notes say what to change. Rework the design with them (record how each note was addressed in the design), have it reviewed again, and ask a new `goal-approval` question. The goal stays a draft until then.
+- **Let go.** The goal is abandoned; stop any planning for it and say what was dropped.
+
+`goal approve` without a `goal-approval` question refuses: a goal is approved on its approach, not before one exists.
 
 **Readings.** At each retro the supervisor records a reading from CI, metrics or releases where the measure allows. On track or behind is computed from the readings, the target and the horizon.
 
 ## 2. The design
 
-One design per goal at `project/designs/<goal-slug>.md` (the slug `goal check` prints). Write it with superpowers' **brainstorming**, saving there instead of its default location. It must cover what brainstorming already asks for (intent and why; goals, non-goals, anti-goals; constraints; the approaches considered and the one chosen; what's decided and what's left to the builder) plus:
+One design per goal at `project/designs/<goal-slug>.md` (the slug `goal check` prints), written once the goal is fully defined and before the owner approves it; until the plan PR lands, link it from its plan branch. Write it with superpowers' **brainstorming**, saving there instead of its default location. It must cover what brainstorming already asks for (intent and why; goals, non-goals, anti-goals; constraints; the approaches considered and the one chosen; what's decided and what's left to the builder) plus:
 
 - the reverse chain: for each precondition of the goal, why it must hold, what says it doesn't yet, and which feature will make it hold;
 - components and boundaries, and every contract that crosses one (each becomes a contract ticket);

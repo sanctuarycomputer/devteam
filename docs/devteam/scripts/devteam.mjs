@@ -632,7 +632,7 @@ function questionView(q) {
   const matched = ans ? !!q.recommendation && [norm(ans.answer), norm(ans.answer.split(' — ')[0])].includes(norm(q.recommendation)) : null;
   return {
     id: q.id, kind: q.kind, class: q.class ?? null, scope: q.scope ?? null, ticket: q.ticket ?? null, re: q.re ?? null, asked_at: q.created_at,
-    question: q.question, context: q.context ?? '', options: q.options ?? [], choices: q.choices ?? [], links: q.links ?? [], rule_scope: q.rule_scope ?? null, recommendation: q.recommendation ?? '', confidence: q.confidence ?? null,
+    question: q.question, context: q.context ?? '', options: q.options ?? [], choices: q.choices ?? [], links: q.links ?? [], goal: q.goal ?? null, rule_scope: q.rule_scope ?? null, recommendation: q.recommendation ?? '', confidence: q.confidence ?? null,
     default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], evidence: q.evidence ?? [], note: q.note ?? null, why_asked: q.why_asked ?? null,
     status, answer, answered_by: answeredBy, answered_at: answeredAt, matched,
     autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans?.channel ?? null, said: ans?.said ?? null,
@@ -1691,6 +1691,16 @@ function cmdAsk() {
   const kind = flagStr('kind') ?? 'owner-decision';
   const cls = flagStr('class') ?? null;
   const L = ladder();
+  if (kind === 'goal-approval') {
+    const g = logGet(flagStr('goal') ?? '');
+    if (g?.type !== 'goal') die('a goal-approval question needs --goal <g-id>');
+    if ((g.status ?? 'draft') !== 'draft') die(`${g.id} is ${g.status}; only a draft goal is up for approval`);
+    const c = goalCheck(g);
+    if (c.definition.length) die(`${g.id} is not fully defined yet (ask a goal-definition question first):\n  - ${c.definition.join('\n  - ')}`);
+    if (!(jsonFlag('links') ?? []).length) die('a goal-approval question links the design the owner is approving (--links)');
+    if (questions().some((q) => q.kind === 'goal-approval' && q.goal === g.id && q.status === 'open')) die(`a goal-approval question for ${g.id} is already open; withdraw it first`);
+    if (cls) die('a goal-approval question has no --class: approving a goal is never delegated');
+  }
   if (kind === 'goal-definition' && cls) die('a goal-definition question has no --class: defining a goal is never delegated (reason goal-ambiguity)');
   const onLadder = cls && L.classes[cls];
   if (kind === 'trust' && !onLadder) die(`a trust question needs --class, one of: ${Object.keys(L.classes).join(', ')}`);
@@ -1716,7 +1726,7 @@ function cmdAsk() {
   const scope = flagStr('scope') ?? null;
   const line = appendLog({
     type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), question: q, context: flagStr('context'),
-    rule_scope: flagStr('rule-scope'), options: asList(flags.options), choices: jsonFlag('choices'), links: jsonFlag('links'), recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined,
+    rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), options: asList(flags.options), choices: jsonFlag('choices'), links: jsonFlag('links'), recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined,
     deadline: def ? new Date(Date.now() + loadSettings().question_default_after_hours * 3600000).toISOString() : undefined,
     blocks, evidence, note: flagStr('note'),
     why_asked: { rung: onLadder ? rungFor(cls, scope) : undefined, ceiling: onLadder ? L.classes[cls].ceiling : undefined, reasons },
@@ -1749,6 +1759,7 @@ function cmdAnswer() {
   }
   const { by } = fromChat ? { by: 'owner' } : ownerWriter();
   const v = openQuestion(id, ['open', 'defaulted']);
+  if (v.kind === 'goal-approval') die(`${id} approves a goal on its design: the owner answers it with goal decide ${v.goal} approve|refine|let-go [--notes "…"] (or on the dashboard)`);
   if (fromChat) {
     const reserved = ['one-way-door', 'trust'].includes(v.kind) || (ladder().owner_only ?? []).includes(v.class) || (v.why_asked?.reasons ?? []).includes('one-way-door');
     if (reserved) die(`answer --from-chat: ${id} is reserved to the owner (${v.kind}${v.class ? `, ${v.class}` : ''}); ask them to answer it from the dashboard or their terminal`);
@@ -1784,7 +1795,7 @@ function cmdWithdraw() {
 function rankQuestions(qs) {
   const sub = activeTickets();
   const crit = findCycle(sub) ? new Set() : new Set(criticalPath(sub).path);
-  const score = (q) => (['one-way-door', 'owner-decision'].includes(q.kind) ? 1000 : 0) + q.blocks.reduce((s, id) => s + (crit.has(id) ? 3 : 1), 0) * 10;
+  const score = (q) => (['one-way-door', 'owner-decision', 'goal-approval', 'owner-action'].includes(q.kind) ? 1000 : 0) + q.blocks.reduce((s, id) => s + (crit.has(id) ? 3 : 1), 0) * 10;
   return [...qs].sort((a, b) => score(b) - score(a) || a.asked_at.localeCompare(b.asked_at));
 }
 function cmdQuestions() {
@@ -2060,16 +2071,37 @@ function cmdGoal() {
     appendLog({ type: 'goal', op: 'set', id, ...fields() }, by);
     return out(`updated ${id}`);
   }
-  if (sub === 'approve' || sub === 'status') {
+  // The owner's decision on a goal, made on its design: approve (ready; planning starts), refine
+  // (notes the planner must take into account; the supervisor reworks the design and asks again),
+  // or let go (abandoned). It answers the open goal-approval question for the goal.
+  if (sub === 'approve' || sub === 'decide') {
     const { by } = ownerWriter();
     const g = logGet(id);
     if (g?.type !== 'goal') die(`no goal ${id}`);
-    const to = sub === 'approve' ? 'ready' : positional[2];
-    if (!['draft', 'ready', 'met', 'abandoned'].includes(to)) die('status is draft, ready, met or abandoned');
-    if (to === 'ready') {
+    const verdict = sub === 'approve' ? 'approve' : positional[2];
+    if (!['approve', 'refine', 'let-go'].includes(verdict)) die('usage: goal decide <g-id> approve|refine|let-go [--notes "…"] [--question q-…]');
+    const notes = flagStr('notes')?.trim() || undefined;
+    if (verdict === 'refine' && !notes) die('refine needs --notes: what the planner should change');
+    const ask = flagStr('question') ? questions().find((q) => q.id === flagStr('question')) : questions().find((q) => q.kind === 'goal-approval' && q.goal === id && q.status === 'open');
+    if (flagStr('question') && (!ask || ask.kind !== 'goal-approval' || ask.goal !== id)) die(`${flagStr('question')} is not a goal-approval question for ${id}`);
+    if (verdict === 'approve') {
       const c = goalCheck(g);
       if (c.definition.length && !flags.force) die(`${id} is not fully defined:\n  - ${c.definition.join('\n  - ')}\n(--force to approve anyway)`);
+      if (!ask && !flags.force) die(`${id} has no design up for approval: the supervisor writes and reviews the design first, then asks (ask --kind goal-approval --goal ${id}); --force to approve without one`);
     }
+    const status = { approve: 'ready', refine: undefined, 'let-go': 'abandoned' }[verdict];
+    appendLog({ type: 'goal', op: 'set', id, status, decision: { verdict, notes, question: ask?.id } }, by);
+    if (ask?.status === 'open') appendLog({ type: 'question', op: 'set', id: ask.id, answer: `${{ approve: 'Approve', refine: 'Refine', 'let-go': 'Let go' }[verdict]}${notes ? ` — ${notes}` : ''}` }, by);
+    nudgeSupervisor(`[devteam goal ${verdict} ${id} from owner] read it with: devteam.mjs goal show ${id}`);
+    return out(`${id}: ${verdict}${status ? ` (${status})` : ''}`);
+  }
+  if (sub === 'status') {
+    const { by } = ownerWriter();
+    const g = logGet(id);
+    if (g?.type !== 'goal') die(`no goal ${id}`);
+    const to = positional[2];
+    if (!['draft', 'ready', 'met', 'abandoned'].includes(to)) die('status is draft, ready, met or abandoned');
+    if (to === 'ready') die(`a goal becomes ready through its design: goal decide ${id} approve`);
     appendLog({ type: 'goal', op: 'set', id, status: to }, by);
     return out(`${id} is ${to}`);
   }
@@ -2644,7 +2676,7 @@ function cmdDashboard() {
       return args;
     },
     correct: (b) => (ID.test(b.id ?? '') && text(b.reason, 600) ? ['correct', b.id, '--reason', b.reason.trim()] : null),
-    'goal-approve': (b) => (ID.test(b.id ?? '') ? ['goal', 'approve', b.id] : null),
+    'goal-decide': (b) => (ID.test(b.id ?? '') && ['approve', 'refine', 'let-go'].includes(b.verdict) && (b.notes === undefined || text(b.notes, 4000)) ? ['goal', 'decide', b.id, b.verdict, ...(b.notes ? ['--notes', b.notes.trim()] : [])] : null),
     knowledge: (b) => (ID.test(b.id ?? '') && ['accepted', 'retired', 'stale'].includes(b.status) ? ['knowledge', 'set', b.id, '--status', b.status, '--owner'] : null),
     ack: (b) => (/^[a-z][a-z-]*$/.test(b.kind ?? '') && text(b.subject, 200) && text(b.reason, 600) ? ['ack', b.kind, b.subject, '--reason', b.reason.trim(), '--owner'] : null),
   };
@@ -3107,7 +3139,7 @@ Sessions (worker.md)
   stop-ok                         for a stop hook: refuses while the last commit is newer than the last phase line
 
 Decide and act (supervisor.md, constitution.md)
-  ask --question q [--kind k] [--class c] [--reasons r…] [--recommendation r] [--confidence 0-1] [--default d] [--choices '[{"label","detail","effect"}…]'] [--rule-scope s] [--links '[{"title","path","ref"}|{"title","url"}…]'] [--blocks ids] [--evidence ids] [--ticket id] [--re m-…] [--note path]
+  ask --question q [--kind k] [--class c] [--reasons r…] [--recommendation r] [--confidence 0-1] [--default d] [--choices '[{"label","detail","effect"}…]'] [--rule-scope s] [--goal g-… (goal-approval)] [--links '[{"title","path","ref"}|{"title","url"}…]'] [--blocks ids] [--evidence ids] [--ticket id] [--re m-…] [--note path]
   answer <qid> "<text>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> "<text>" --from-chat --said "<owner's words>" | answer <qid> --defaulted   (supervisor)
   withdraw <qid> [--reason r] | questions [--all] [--id q] [--json]
   act --class c [--scope s] [--approved qid] [--refs ids] [--irreversible] -- "<what>"

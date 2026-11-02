@@ -71,8 +71,23 @@ test('devteam kit', async (t) => {
     assert.match(G, /^g-\d{8}-\d{9}-supervisor$/);
     must(['goal', 'reading', G, '--value', '5'], { role: 'sup' });
     assert.notEqual(dt(['goal', 'approve', G], { role: 'sup' }).status, 0, 'supervisor cannot approve a goal');
-    must(['goal', 'approve', G]);
-    assert.equal(json(must(['goal', 'show', G, '--json'])).status, 'ready');
+    assert.match(dt(['goal', 'approve', G]).err, /no design up for approval/, 'a goal is approved on its design, not before');
+    const design = [{ title: 'The approach', path: 'docs/devteam/project/designs/self-serve-billing.md', ref: 'plan/billing' }];
+    assert.match(dt(['ask', '--kind', 'goal-approval', '--goal', G, '--question', 'Approve self-serve billing?'], { role: 'sup' }).err, /links the design/);
+    const A1 = must(['ask', '--kind', 'goal-approval', '--goal', G, '--question', 'Approve self-serve billing, built as the design describes?', '--links', JSON.stringify(design)], { role: 'sup' });
+    assert.match(dt(['answer', A1, 'Approve']).err, /goal decide/, 'answered only as a goal decision');
+    assert.match(dt(['goal', 'decide', G, 'refine']).err, /needs --notes/);
+    must(['goal', 'decide', G, 'refine', '--notes', 'start with cards only; no invoices']);
+    let gv = json(must(['goal', 'show', G, '--json']));
+    assert.equal(gv.status, 'draft');
+    assert.deepEqual(gv.decision, { verdict: 'refine', notes: 'start with cards only; no invoices', question: A1 });
+    assert.equal(json(must(['questions', '--id', A1, '--json']))[0].answer, 'Refine — start with cards only; no invoices');
+    const A2 = must(['ask', '--kind', 'goal-approval', '--goal', G, '--question', 'Approve the reworked billing design?', '--links', JSON.stringify(design)], { role: 'sup' });
+    must(['goal', 'decide', G, 'approve', '--notes', 'ship cards first']);
+    gv = json(must(['goal', 'show', G, '--json']));
+    assert.equal(gv.status, 'ready');
+    assert.equal(gv.decision.question, A2);
+    assert.equal(json(must(['questions', '--id', A2, '--json']))[0].status, 'answered');
   });
 
   await t.test('planner writes feature and tickets into its own log file in its worktree', () => {

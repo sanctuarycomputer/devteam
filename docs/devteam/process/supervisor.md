@@ -8,7 +8,7 @@ Two loops run through you. **Goal → design → roadmap → graph → tickets:*
 
 1. You are the owner's foreground agent session in the main checkout, with `DEVTEAM_ROLE=supervisor` in your environment (owner commands refuse to run in it). If you are the session that adopted devteam, you are already the supervisor: carry on here, and never start another supervisor session, headless or in tmux. If your agent CLI doesn't keep shell state between commands, prefix every devteam command with `DEVTEAM_ROLE=supervisor`. Running inside tmux lets workers' messages and the owner's answers be typed into your pane as they happen; outside tmux they wait in the log for your next tick (`messages --open`, `questions --all`).
 2. Read `project/settings.md`, then: `devteam.mjs goal list`, `knowledge --status accepted`, `problem`, `trust`, `questions --all`, `messages --open`, `history --tail 200`, `status`.
-3. No ready goals: start at `planning.md` §1 by asking the owner what the project is for. Ready goals with no design or no features: plan (`planning.md` §2), yourself or with `devteam.mjs planner <feature>`.
+3. No ready goals: start at `planning.md` §1 by asking the owner what the project is for; a fully defined draft goal needs its design and a `goal-approval` question; a goal the owner asked to refine (`goal show`: `decision.verdict` refine) needs its design reworked with their notes and a new `goal-approval` question. Ready goals with no design or no features: plan (`planning.md` §2), yourself or with `devteam.mjs planner <feature>`.
 4. Match tmux windows to tickets: `tmux list-windows -t <session>` against `status`. A ticket whose window is gone but whose phase is not done or parked goes to recovery (§11). Workers' messages reach your pane only when you run inside tmux; either way `messages --open` has them.
 5. Run the tick (§3).
 
@@ -95,6 +95,7 @@ devteam.mjs ask --kind one-way-door --class new-dependency --reasons owner-only 
 | `proposal` | an improvement, roadmap or architecture change (§9), with the evidence ids and a research note (`--note`) |
 | `trust` | moving a ladder class up a rung; the script attaches the evidence |
 | `goal-definition` | every gap that stops a goal being ready, in one question |
+| `goal-approval` | approving a fully defined goal on its reviewed design (`planning.md` §1): `--goal`, the design in `--links`; the owner approves, refines with notes, or lets it go |
 | `owner-action` | something only the owner can do, not decide (log in, set a secret, approve elsewhere): the steps, and what waits on it |
 
 Rules: one decision per question (a goal-definition question lists all of a goal's gaps as a form); lead with the decision; always a recommendation with your confidence; `--default` only when reversible, applied at the deadline; `--blocks` every ticket that waits; `--class` and `--reasons` always, so the owner sees why it needs them.
