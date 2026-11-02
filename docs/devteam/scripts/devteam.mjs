@@ -2165,12 +2165,14 @@ function currentMilestone(g) {
 // The forecast the owner approves a goal against: per milestone, the work left (planned tickets'
 // points, or the design's estimate where nothing is planned yet), the waves that takes at the
 // current worker slots, and a date where the fleet has a measured rate (planning.md §1).
+let roadmapMemo = null;
 function goalForecast(g, r = null) {
   const ms = g.milestones ?? [];
   if (!ms.length) return null;
   const all = [...tickets().values()].filter(isActive);
   const avgW = all.length ? all.reduce((a, t) => a + weight(t), 0) / all.length : 1;
-  r ??= collectRoadmap();
+  // one roadmap per process: every goal's view asks for its forecast, and the roadmap reads git
+  r ??= (roadmapMemo ??= collectRoadmap());
   const slots = Math.max(1, loadSettings().max_active_tickets ?? 1);
   const cur = currentMilestone(g);
   const fs_ = features();
@@ -2266,7 +2268,6 @@ function cmdGoal() {
       const c = goalCheck(g);
       if (c.definition.length && !flags.force) die(`${id} is not fully defined:\n  - ${c.definition.join('\n  - ')}\n(--force to approve anyway)`);
       if (!ask && !flags.force) die(`${id} has no design up for approval: the supervisor writes and reviews the design first, then asks (ask --kind goal-approval --goal ${id}); --force to approve without one`);
-      if (c.approval.length && !flags.force) die(`${id} has no milestones from its design yet:\n  - ${c.approval.join('\n  - ')}\n(--force to approve anyway)`);
     }
     const status = { approve: 'ready', refine: undefined, 'let-go': 'abandoned' }[verdict];
     appendLog({ type: 'goal', op: 'set', id, status, decision: { verdict, notes, question: ask?.id } }, by);

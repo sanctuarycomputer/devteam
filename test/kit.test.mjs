@@ -101,7 +101,13 @@ test('devteam kit', async (t) => {
     assert.deepEqual(gv.decision, { verdict: 'refine', notes: 'start with cards only; no invoices', question: A1 });
     assert.equal(json(must(['questions', '--id', A1, '--json']))[0].answer, 'Refine — start with cards only; no invoices');
     const A2 = must(['ask', '--kind', 'goal-approval', '--goal', G, '--question', 'Approve the reworked billing design?', '--links', JSON.stringify(design)], { role: 'sup' });
+    // the gate is at asking: an approval already in the owner's inbox stays answerable even if the
+    // goal's milestones are incomplete (an approval asked before milestones were required)
+    const msBefore = json(must(['goal', 'show', G, '--json'])).milestones;
+    must(['goal', 'set', G, '--milestones', '[]'], { role: 'sup' });
+    assert.match(must(['goal', 'check', G]), /no milestones/);
     must(['goal', 'decide', G, 'approve', '--notes', 'ship cards first']);
+    must(['goal', 'set', G, '--milestones', JSON.stringify(msBefore), '--owner']);
     gv = json(must(['goal', 'show', G, '--json']));
     assert.equal(gv.status, 'ready');
     assert.equal(gv.decision.question, A2);
