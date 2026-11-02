@@ -9,7 +9,7 @@ Who decides what, how the supervisor earns the right to decide more, and the pri
 | The goals, and changing them | owner | The supervisor drafts from what the owner says and interviews until each is unambiguous; only the owner approves one, on its reviewed design (`goal decide`: approve, refine with notes, or let go; `planning.md` §1). |
 | Product direction, what a feature is for | owner | The supervisor proposes; it never decides alone unless the owner delegated that class on the ladder (§2). |
 | One-way doors (§4) | owner | Asked with a recommendation; never a default. |
-| Releasing to production | owner | Only the owner pushes a `v*` tag. |
+| Releasing to production | owner, delegable | On the ladder (§2) as `release-production`, and rollback-safe migrations as `production-migration`: the supervisor asks first, then asks with a default, then releases and reports, as far as the owner moves it. A migration that can't be rolled back stays a one-way door (§4). |
 | Allowing anything when a check fails | owner | The default is to deny. |
 | A rule, gate or review standard; anything in `governance/` or `process/` | owner | The supervisor proposes with evidence. |
 | Approving a design, a feature's graph, a ticket's spec and plan | supervisor | Each is an act in the log (`approve-spec`, `approve-plan`, `approve-feature-plan`). |
@@ -37,10 +37,12 @@ Some owner decisions can be handed to the supervisor a step at a time, as eviden
     "new-feature": { "ceiling": 2, "start": 1, "about": "start planning a feature the owner hasn't asked for" },
     "priority-change": { "ceiling": 3, "start": 1, "about": "reorder goals' work or move a feature between releases" },
     "release-scope": { "ceiling": 3, "start": 1, "about": "move a story to a later release to ship the rest on time" },
-    "upstream-pr": { "ceiling": 3, "start": 1, "about": "open a PR on upstream devteam with a general improvement" }
+    "upstream-pr": { "ceiling": 3, "start": 1, "about": "open a PR on upstream devteam with a general improvement" },
+    "release-production": { "ceiling": 3, "start": 1, "about": "ship a tagged release to production, with every gate passing at the tagged commit" },
+    "production-migration": { "ceiling": 3, "start": 1, "about": "run a rollback-safe migration against production data" }
   },
   "constitutional": ["merge-word", "approve-feature-plan", "merge-chore", "worker-slots", "replan-within-feature", "add-ticket", "approve-spec", "approve-plan", "approve-design-change", "contract-ruling", "improvement-trial", "release-staging", "goal-readiness", "apply-default", "withdraw-question", "recovery"],
-  "owner_only": ["one-way-door", "release-production", "check-override", "governance-edit", "process-edit", "gate-change", "goal-change", "new-dependency"],
+  "owner_only": ["one-way-door", "check-override", "governance-edit", "process-edit", "gate-change", "goal-change", "new-dependency"],
   "reasons": [
     { "id": "below-rung", "means": "the class is on the ladder and the supervisor isn't trusted to act alone yet" },
     { "id": "owner-only", "means": "the constitution reserves this to the owner" },
@@ -60,7 +62,7 @@ Some owner decisions can be handed to the supervisor a step at a time, as eviden
 - **Why a question was asked.** Every question names its class and carries `why_asked`: the class's rung and ceiling, and reasons from the table. The dashboard shows it first.
 - **Moving up.** Only through the owner. When answering, the owner can say how the next decision of that class is handled (ask, ask with a default, act and report), for the whole class or one scope; it applies at once, up to the ceiling. Or the supervisor asks a `trust` question when, of the last ten answered questions in the class, the owner went with its recommendation nine or more times (an answer equal to the recommendation; defaulted answers don't count); `ask --kind trust` refuses without that evidence, and the question carries those question ids and the uncorrected acts since the class last dropped. At most one open per class, two in all, asked at a retro. The supervisor never moves itself up.
 - **Moving down.** Any correction of an act in a ladder class drops the whole class to rung 1 at once. `devteam.mjs act` refuses below rung 3 unless it cites an answered question in the same class (`--approved <qid>`); each answer approves one act. A defaulted answer counts at rung 2, not 1.
-- **What this is and isn't.** Every session runs as one user, so the rung check is something the supervisor runs, not a wall. The walls are: workers can't merge (`merge` is the only path and checks everything), the log counts a line only in its own writer's file and only within that writer's authority, the agent's deny rules, tag protection, and the forge's required check if the project turned it on. What the ladder adds is visibility: every owner line carries the channel it came from (dashboard or terminal), the dashboard lists terminal answers for the owner to check, and every rung change is on it.
+- **What this is and isn't.** Every session runs as one user, so the rung check is something the supervisor runs, not a wall. The walls are: workers can't merge (`merge` is the only path and checks everything), the log counts a line only in its own writer's file and only within that writer's authority, the agent's deny rules, tag protection (a project that wants the supervisor to release at rung 3 lets its session push `v*` tags), and the forge's required check if the project turned it on. What the ladder adds is visibility: every owner line carries the channel it came from (dashboard or terminal), the dashboard lists terminal answers for the owner to check, and every rung change is on it.
 
 ## 3. Principles
 

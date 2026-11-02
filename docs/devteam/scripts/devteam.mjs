@@ -165,12 +165,13 @@ const SETTINGS_DEFAULTS = {
 // Settings that are the owner's to change (constitution.md, owner_only): a PR of any kind that
 // changes one merges only with --approved naming an answered question of that class. Gate
 // commands and what every gate checkout is seeded with decide what "passes"; the agent command
-// and deny rules decide what workers may do; upstream_repo is what a standing sync approval trusts.
+// and deny rules decide what workers may do; upstream_repo is what a standing sync approval trusts;
+// release is how a tag reaches production.
 const OWNER_SETTINGS = {
   gates: 'gate-change', worktree_setup: 'gate-change', worktree_files: 'gate-change',
   autonomy_ceilings: 'governance-edit', agent_command: 'governance-edit', resume_command: 'governance-edit', worker_denied_commands: 'governance-edit',
   forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', upstream_repo: 'governance-edit',
-  release: 'release-production',
+  release: 'governance-edit',
 };
 const canonical = (v) => (Array.isArray(v) ? `[${v.map(canonical).join(',')}]` : v && typeof v === 'object' ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(',')}}` : JSON.stringify(v));
 function settingsAt(ref) {
@@ -1313,17 +1314,32 @@ function oneWayDoorsSection(body) {
   return { ok: false, why: 'the "## One-way doors" section must be "None." or link the owner\'s answer (a q-… id or a URL)' };
 }
 
-// A verdict at commit V holds at head H only if V is an ancestor of H, nothing between is a merge,
-// and every commit V..H just ADDS review-record files under `dir`.
+// A verdict at commit V holds at head H only if V is an ancestor of H, every non-merge commit V..H
+// just ADDS review-record files under `dir`, and any merge between only brought main in: each merge's
+// other parents are on main, and the branch's own change against main (three-dot, review records
+// aside) is byte-identical at H to what was reviewed at V. A conflict fix that touched the work
+// changes that diff, so it voids the verdict; a clean merge of main does not.
 function verdictHolds(v, head, dir) {
   if (!head || !v || !/^[0-9a-f]{40}$/.test(v)) return false;
   if (v === head) return true;
   if (!dir || git(['merge-base', '--is-ancestor', v, head]) === null) return false;
-  if ((git(['rev-list', '--merges', `${v}..${head}`]) ?? 'x').trim()) return false;
-  return (git(['log', '--no-renames', '--format=', '--name-status', `${v}..${head}`]) ?? '').split('\n').filter(Boolean).every((l) => {
+  const main = mainRef();
+  // the branch's own commits since V: what a merge brought in from main is main's, not the branch's
+  const onlyRecords = (git(['log', '--no-merges', '--no-renames', '--format=', '--name-status', `${v}..${head}`, ...(main ? [`^${main}`] : [])]) ?? 'x').split('\n').filter(Boolean).every((l) => {
     const [st, file] = l.split('\t');
-    return st === 'A' && file.startsWith(dir) && /^(?:[a-z0-9-]+\/)?[a-z]+-\d+[a-z]?\.md$/.test(file.slice(dir.length));
+    return st === 'A' && file?.startsWith(dir) && /^(?:[a-z0-9-]+\/)?[a-z]+-\d+[a-z]?\.md$/.test(file.slice(dir.length));
   });
+  if (!onlyRecords) return false;
+  const merges = (git(['rev-list', '--merges', `${v}..${head}`]) ?? 'x').split('\n').filter(Boolean);
+  if (!merges.length) return true;
+  if (!main) return false;
+  for (const m of merges) {
+    const others = (git(['rev-list', '--parents', '-n', '1', m]) ?? '').split(' ').slice(2);
+    if (!others.length || others.some((p) => git(['merge-base', '--is-ancestor', p, main]) === null)) return false;
+  }
+  const own = (x) => git(['diff', '--binary', `${main}...${x}`, '--', '.', `:(exclude)${dir.replace(/\/$/, '')}`]);
+  const a = own(v), b = own(head);
+  return a !== null && a === b;
 }
 const changedFiles = (base, sha) => (git(['diff', '--name-only', '--no-renames', base, sha]) ?? '').split('\n').filter(Boolean);
 
