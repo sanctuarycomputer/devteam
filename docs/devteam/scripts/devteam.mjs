@@ -59,6 +59,16 @@ function parseArgs(args) {
 
 const { flags, positional, rest } = parseArgs(argv);
 const asList = (v) => (v === undefined || v === true ? [] : Array.isArray(v) ? v : [v]);
+// A list flag: separate values, or one JSON array of strings. A single value that starts with "["
+// but is not one is refused rather than stored as one item.
+const listFlag = (k) => {
+  const v = flags[k];
+  if (typeof v !== 'string' || !v.trim().startsWith('[')) return asList(v);
+  let parsed;
+  try { parsed = JSON.parse(v); } catch { parsed = null; }
+  if (!Array.isArray(parsed) || !parsed.every((x) => typeof x === 'string')) die(`--${k}: "${v}" looks like JSON but is not an array of strings; pass a JSON array of strings ('["a","b"]') or separate values ("a" "b")`);
+  return parsed;
+};
 const flagStr = (k) => (flags[k] === undefined || flags[k] === true ? undefined : Array.isArray(flags[k]) ? flags[k].join(' ') : String(flags[k]));
 const flagNum = (k) => (flagStr(k) === undefined ? undefined : Number(flagStr(k)));
 
@@ -2391,11 +2401,11 @@ function cmdGoal() {
       : undefined,
     // `none` clears it: a horizon is the owner's real deadline or nothing (planning.md §1)
     horizon: flagStr('horizon') === 'none' ? null : flagStr('horizon'),
-    non_goals: flags['non-goals'] !== undefined ? asList(flags['non-goals']) : undefined,
-    preconditions: flags.preconditions !== undefined ? asList(flags.preconditions) : undefined,
+    non_goals: flags['non-goals'] !== undefined ? listFlag('non-goals') : undefined,
+    preconditions: flags.preconditions !== undefined ? listFlag('preconditions') : undefined,
     priority: flagNum('priority'),
     milestones: jsonFlag('milestones'),
-    plan_after: flags['plan-after'] !== undefined ? asList(flags['plan-after']).map((goal) => ({ goal, reason: flagStr('reason') ?? die('--plan-after needs --reason: why this goal\'s design waits on that one') })) : undefined,
+    plan_after: flags['plan-after'] !== undefined ? listFlag('plan-after').map((goal) => ({ goal, reason: flagStr('reason') ?? die('--plan-after needs --reason: why this goal\'s design waits on that one') })) : undefined,
   });
   if (sub === 'add') {
     const { by } = writer();
@@ -2404,7 +2414,7 @@ function cmdGoal() {
     return out(appendLog({ type: 'goal', status: 'draft', ...f }, by).id);
   }
   if (sub === 'set') {
-    if (!id || logGet(id)?.type !== 'goal') die('usage: goal set <g-id> [--title …] [--outcome …] [--measure …] [--target n] [--unit u] [--direction up|down] [--horizon date] [--non-goals …] [--preconditions …] [--priority n] [--milestones \'[{"title","target","by","preconditions":[n],"tickets"}…]\'] [--plan-after <g-id>… --reason "…"] [--approved <qid>] [--owner]');
+    if (!id || logGet(id)?.type !== 'goal') die('usage: goal set <g-id> [--title …] [--outcome …] [--measure …] [--target n] [--unit u] [--direction up|down] [--horizon date] [--non-goals a b | \'["a","b"]\'] [--preconditions a b | \'["a","b"]\'] [--priority n] [--milestones \'[{"title","target","by","preconditions":[n],"tickets"}…]\'] [--plan-after <g-id>… --reason "…"] [--approved <qid>] [--owner]');
     const { by } = writer();
     const approved = flagStr('approved') ?? null;
     if (approved && by !== 'supervisor') die('the owner changes a goal directly; --approved is the supervisor applying an owner answer');
