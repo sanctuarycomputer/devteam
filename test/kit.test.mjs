@@ -45,7 +45,11 @@ write(body, '## One-way doors\n\nNone.\n');
 
 test('devteam kit', async (t) => {
   let G, Q, A, SHA1, H2;
-  t.after(() => { if (!process.env.DEVTEAM_TEST_KEEP) fs.rmSync(tmp, { recursive: true, force: true }); else console.log(`fixture kept at ${tmp}`); });
+  t.after(() => {
+    spawnSync('tmux', ['kill-server']);
+    fs.rmSync(process.env.TMUX_TMPDIR, { recursive: true, force: true });
+    if (!process.env.DEVTEAM_TEST_KEEP) fs.rmSync(tmp, { recursive: true, force: true }); else console.log(`fixture kept at ${tmp}`);
+  });
 
   await t.test('init materializes project/, settings, agent config', () => {
     git(['init', '-q', '--bare', origin], tmp);
@@ -260,6 +264,23 @@ test('devteam kit', async (t) => {
     assert.notEqual(undisposed.status, 0);
     assert.match(undisposed.out, /final-1b\.md F1 \(Important\) has no disposition/);
     git(['reset', '-q', '--hard', H2], wt('bill-01-card'));
+    // a clean merge of main keeps the verdict: the ticket's own change is byte-identical to the reviewed one
+    git(['worktree', 'add', '-q', '--detach', wt('main-moves'), 'origin/main']);
+    write(path.join(wt('main-moves'), 'OTHER.md'), 'someone else\'s work\n');
+    git(['add', '-A'], wt('main-moves'));
+    git(['commit', '-qm', 'other work lands on main'], wt('main-moves'));
+    git(['push', '-q', 'origin', 'HEAD:main'], wt('main-moves'));
+    git(['worktree', 'remove', '--force', wt('main-moves')]);
+    git(['fetch', '-q', 'origin']);
+    git(['merge', '-q', '--ff-only', 'origin/main']);
+    git(['fetch', '-q', 'origin'], wt('bill-01-card'));
+    git(['merge', '-q', '--no-edit', 'origin/main'], wt('bill-01-card'));
+    must(['check-ticket', 'bill-01-card', '--sha', git(['rev-parse', 'HEAD'], wt('bill-01-card')), ...pr]);
+    // a merge that also changes the work (as a conflict fix might) voids it
+    fs.appendFileSync(path.join(wt('bill-01-card'), 'billing/card.js'), 'resolved differently\n');
+    git(['commit', '-q', '--amend', '-a', '--no-edit'], wt('bill-01-card'));
+    assert.match(dt(['check-ticket', 'bill-01-card', '--sha', git(['rev-parse', 'HEAD'], wt('bill-01-card')), ...pr]).out, /does not hold|not at this head|review again|no final review/i, 'a merge that changes the work needs a new review');
+    git(['reset', '-q', '--hard', H2], wt('bill-01-card'));
     // a rename out of the footprint is a change outside touches
     git(['mv', 'AGENTS.md', 'billing/agents.md'], wt('bill-01-card'));
     git(['commit', '-qm', 'move'], wt('bill-01-card'));
@@ -317,7 +338,13 @@ test('devteam kit', async (t) => {
     assert.equal(rung(), 1, 'a correction drops the class to rung 1');
     must(['repair', A, '--how', 'fix-ticket'], { role: 'sup' });
     assert.notEqual(dt(['correct', A, '--reason', 'again']).status, 0, 'one correction per act');
-    assert.notEqual(dt(['act', '--class', 'release-production', '--', 'tag v1'], { role: 'sup' }).status, 0, 'owner-only classes refuse');
+    assert.notEqual(dt(['act', '--class', 'gate-change', '--', 'drop a gate'], { role: 'sup' }).status, 0, 'owner-only classes refuse');
+    // production releases are on the ladder: asked at rung 1, released and reported once the owner moves it to 3
+    assert.equal(dt(['act', '--class', 'release-production', '--', 'tag v1'], { role: 'sup' }).status, 3, 'rung 1: ask first');
+    const Qr = must(['ask', '--class', 'release-production', '--reasons', 'below-rung', '--question', 'Ship v1 to production?', '--recommendation', 'yes'], { role: 'sup' });
+    must(['answer', Qr, 'yes', '--autonomy', '3']);
+    must(['act', '--class', 'release-production', '--approved', Qr, '--', 'released v1'], { role: 'sup' });
+    must(['act', '--class', 'release-production', '--', 'released v1.0.1, gates green at the tag'], { role: 'sup' });
     const q = json(must(['questions', '--id', Q, '--json']))[0];
     assert.equal(q.answer, 'yes');
     assert.equal(q.autonomy.rung, 2);

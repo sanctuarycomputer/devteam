@@ -101,7 +101,7 @@ merge --chore <slug>       a chore PR (log, retro, design, architecture): the lo
 
 `--dry-run` runs every check and gate and stops before the merge.
 
-Any of the three that changes a setting the owner owns needs `--approved <qid>`, an answered question of that class: `gates`, `worktree_setup` and `worktree_files` (`gate-change`: they decide what a gate run sees); `autonomy_ceilings`, `agent_command`, `resume_command`, `worker_denied_commands`, `forge`, `main_branch`, `merge_method` and `upstream_repo` (`governance-edit`); `release` (`release-production`). The rest of `project/settings.md` (caps, timings, components) is the supervisor's.
+Any of the three that changes a setting the owner owns needs `--approved <qid>`, an answered question of that class: `gates`, `worktree_setup` and `worktree_files` (`gate-change`: they decide what a gate run sees); `autonomy_ceilings`, `agent_command`, `resume_command`, `worker_denied_commands`, `forge`, `main_branch`, `merge_method`, `upstream_repo` and `release` (`governance-edit`). The rest of `project/settings.md` (caps, timings, components) is the supervisor's.
 
 With no forge CLI (no `gh`, a self-hosted git remote), set `forge: "git"`. the PR is a file, `run/pr/<branch>.md` (a `# <title>` line, then the body; or `--title` and `--body-file`). `merge` checks it as it would a PR, merges the exact verified sha onto origin's main with `--no-ff`, and pushes. If main moved, the push fails, which is the same guard as `--match-head-commit`.
 
@@ -113,10 +113,10 @@ The log rule, checked on every PR: a PR may change `project/log/<X>.jsonl` only 
 
 ## 5. Releases
 
-Every release is a tag on `main` with a GitHub Release whose body is the changelog. The supervisor prepares it; shipping it to production is the owner's (class `release-production`).
+Every release is a tag on `main` with a GitHub Release whose body is the changelog. The supervisor prepares it; shipping it to production is a ladder class (`release-production`, constitution §2): at rung 1 the supervisor asks, at rung 2 it asks with a default, at rung 3 it releases and reports. At any rung it releases only when every gate passes at the tagged commit.
 
-1. The supervisor drafts: `devteam.mjs notes <previous-tag>` groups the tickets merged since by the stories they served ("completed", "advanced", "other"); it adds what users will notice and any migration steps, and asks the owner a `release-production` question with the tag it proposes (`vX.Y.Z`, semver from what changed) and the notes.
-2. On the owner's yes: `git tag -a vX.Y.Z <sha> -m vX.Y.Z && git push origin vX.Y.Z`, then `gh release create vX.Y.Z --verify-tag --notes-file <notes>`, logged as an act with `--approved <qid>`. A candidate is `vX.Y.Z-rcN` with `--prerelease`.
+1. The supervisor drafts: `devteam.mjs notes <previous-tag>` groups the tickets merged since by the stories they served ("completed", "advanced", "other"); it adds what users will notice and any migration steps. Below rung 3 it asks a `release-production` question with the tag it proposes (`vX.Y.Z`, semver from what changed) and the notes.
+2. On the owner's yes, or on its own at rung 3: `git tag -a vX.Y.Z <sha> -m vX.Y.Z && git push origin vX.Y.Z`, then `gh release create vX.Y.Z --verify-tag --notes-file <notes>`, logged as an act of class `release-production` (with `--approved <qid>` when it asked). A rollback-safe production migration is the same, class `production-migration`. A candidate is `vX.Y.Z-rcN` with `--prerelease`.
 3. Promotion is whatever the project already does, recorded in the settings as `release`: `"tag"` (deploy from the tag; the default) or `{ "branch": "production" }` (push the tagged commit to that branch: `git push origin vX.Y.Z^{commit}:refs/heads/production`; a release always fast-forwards it, so this works where the forge refuses force pushes). Either way the tag and the release exist first, so every production state has a name and notes.
 4. Roll back by promoting the previous tag the same way (on a `branch` release this needs `--force`; where the forge refuses force pushes, release a revert as a new tag instead). Fix forward otherwise. A migration that is not rollback-safe is a one-way door.
 5. If the project keeps a `CHANGELOG.md`, the release PR (a `chore-release-<tag>` PR merged before tagging) prepends the same notes to it.
