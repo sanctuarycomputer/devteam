@@ -1389,6 +1389,8 @@ function parseReview(file, text) {
   const m = file.match(/^([a-z]+)-(\d+)([a-z]?)\.md$/);
   const verdict = [...text.matchAll(/^Verdict:[ \t]*(APPROVE|CHANGES)[ \t]+(\S+)[ \t]*$/gm)].pop();
   const reviewerRaw = text.match(/^-[ \t]*Reviewer:[ \t]*(.*)$/m)?.[1]?.trim() ?? '';
+  // A plan review that relies on a goal-level one-way-door answer says so: "- Goal-level door: <qid> covers this plan".
+  const doors = [...text.matchAll(/^-[ \t]*Goal-level door:[ \t]*(q-\S+)[ \t]+covers this plan\.?[ \t]*$/gm)].map((d) => d[1]);
   const findings = [];
   let dispIdx = -1;
   let sevIdx = 1;
@@ -1402,7 +1404,7 @@ function parseReview(file, text) {
   return {
     file, stage: m ? m[1] : file.replace(/\.md$/, ''), pass: m ? Number(m[2]) : 0, variant: m ? m[3] : '',
     verdict: verdict ? verdict[1] : null, sha: verdict ? verdict[2] : null, shaValid: verdict ? /^[0-9a-f]{40}$/.test(verdict[2]) : false,
-    reviewer: reviewerRaw && !reviewerRaw.startsWith('<') ? reviewerRaw : null, findings,
+    reviewer: reviewerRaw && !reviewerRaw.startsWith('<') ? reviewerRaw : null, findings, doors,
   };
 }
 const reviewRecordsIn = (src, relDir) => srcList(src, relDir).filter((f) => f.endsWith('.md')).map((f) => parseReview(f, srcRead(src, `${relDir}/${f}`) ?? ''));
@@ -2019,6 +2021,11 @@ function cmdAct() {
     const q = logGet(approved);
     approval = q?.type === 'question' ? questionView(q) : null;
     if (!approval || !['answered', 'defaulted'].includes(approval.status)) die(`${approved} is not an answered question`);
+  }
+  // approve-plan may cite the owner's answer to a one-way door asked at goal level (constitution.md §4);
+  // it is checked below, against the ticket's goals and its plan review, not as an approve-plan answer.
+  const doorCited = cls === 'approve-plan' && approval?.kind === 'one-way-door';
+  if (approval && !doorCited) {
     if (approval.class !== cls) die(`${approved} was asked in class ${approval.class ?? '(none)'}, not ${cls}`);
     if (logObjects('act').some((a) => a.approved_by === approved)) die(`${approved} already approved an act; ask again for another`);
   }
@@ -2039,13 +2046,29 @@ function cmdAct() {
   if (cls === 'approve-plan') {
     const t = tickets().get(asList(flags.refs)[0]);
     if (!t) die('approve-plan names the ticket: --refs <ticket-id>');
-    if ((t.one_way_doors ?? []).length && !questions().some((q) => q.kind === 'one-way-door' && q.ticket === t.id && q.status === 'answered')) die(`${t.id} lists one-way doors; the owner answers a one-way-door question (--ticket ${t.id}) before its plan is approved (constitution.md §4)`);
+    const doors = t.one_way_doors ?? [];
+    let goalDoor = null;
+    if (doorCited) {
+      if (!doors.length) die(`${t.id} lists no one-way doors; ${approved} has nothing to cover`);
+      if (approval.status !== 'answered') die(`${approved} was not answered by the owner; a one-way door needs the owner's answer, never a default`);
+      if (approval.ticket !== t.id) {
+        const goals = features().get(t.feature)?.goals ?? [];
+        if (!approval.goal) die(`${approved} is a one-way-door question for neither ${t.id} nor a goal`);
+        if (!goals.includes(approval.goal)) die(`${approved} answered a one-way door for goal ${approval.goal}, but ${t.id}'s feature ${t.feature} serves ${goals.join(', ') || 'no goal'}; an answer for another goal never covers this plan`);
+        goalDoor = approved;
+      }
+    } else if (doors.length && !questions().some((q) => q.kind === 'one-way-door' && q.ticket === t.id && q.status === 'answered')) die(`${t.id} lists one-way doors; the owner answers a one-way-door question (--ticket ${t.id}) before its plan is approved, or you cite the owner's answer to the goal's one-way-door question (--approved <qid>) and the plan review says it covers the plan (constitution.md §4)`);
     // The plan opens with its TL;DR, so a low-risk plan can be approved from it (quality.md §6).
     const ref = [`ticket/${t.id}`, `origin/ticket/${t.id}`].find((r) => resolveCommit(r));
     const plan = ref ? git(['show', `${ref}:${projectRel}/tickets/${t.id}/plan.md`]) : null;
     if (plan === null) die(`no plan.md for ${t.id} on ticket/${t.id}; approve a plan once it is committed`);
     const tldr = tldrGap(plan);
     if (tldr) die(`${t.id}'s plan ${tldr}; send it back to the worker (quality.md §6)`);
+    // A goal-level answer covers the plan only when its reviewer says the plan stays inside it.
+    if (goalDoor) {
+      const latest = latestPerTrack(ticketReviews(t.id, { ref }), 'plan').filter((r) => r.verdict === 'APPROVE');
+      if (!latest.some((r) => r.doors.includes(goalDoor))) die(`${goalDoor} is a goal-level answer; the latest approving plan review (reviews/plan-<n>.md on ticket/${t.id}) must say "- Goal-level door: ${goalDoor} covers this plan" (quality.md §3)`);
+    }
   }
   const line = appendLog({ type: 'act', class: cls, scope: scope ?? undefined, what, rung, refs: asList(flags.refs), reversible: !flags.irreversible, approved_by: approved ?? undefined }, 'supervisor');
   out(line.id);

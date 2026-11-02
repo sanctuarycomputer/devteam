@@ -90,7 +90,7 @@ A change is a one-way door if reverting it is expensive or impossible once shipp
 - anything touching authentication, authorization, payments or PII
 - anything the owner lists under one-way doors in the settings
 
-A one-way door needs an owner answer before the ticket's plan is approved (`act --class approve-plan` refuses without one), two independent final reviews, and `risk: high` on the ticket.
+A one-way door needs an owner answer before the ticket's plan is approved (`act --class approve-plan` refuses without one), two independent final reviews, and `risk: high` on the ticket. The answer is a `one-way-door` question asked for the ticket (`--ticket`), or one the owner already answered for a goal the ticket's feature serves (`--goal`, asked while designing): the supervisor cites that one with `act --class approve-plan --approved <qid>`, and the latest approving plan review must say the plan stays inside what the answer covered (`quality.md` §3). An answer for another goal never counts.
 
 ## 5. Changing the rules
 
