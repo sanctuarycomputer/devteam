@@ -713,6 +713,46 @@ test('devteam kit', async (t) => {
     must(['goal', 'status', Gi, 'abandoned']);
   });
 
+  await t.test('a ready goal changes through an answered goal-change question, by exactly the change it proposed', () => {
+    const nonGoals = () => json(must(['goal', 'show', G, '--json'])).non_goals;
+    const change = JSON.stringify({ non_goals: ['enterprise invoicing', 'refunds'] });
+    assert.equal(json(must(['goal', 'show', G, '--json'])).status, 'ready');
+    assert.match(dt(['goal', 'set', G, '--non-goals', 'x'], { role: 'sup' }).err, /only the owner changes it now \(class goal-change\)/, 'refused without --approved');
+    const ask = (extra) => must(['ask', '--kind', 'owner-decision', '--question', 'Add refunds to the non-goals?', '--recommendation', 'Set it', '--options', 'Set it', 'Leave it', ...extra], { role: 'sup' });
+    assert.match(dt(['ask', '--question', 'Change it?', '--class', 'goal-change', '--goal', G, '--recommendation', 'Set it'], { role: 'sup' }).err, /says the exact change/, 'a goal-change question names its change');
+    assert.match(dt(['ask', '--question', 'Change it?', '--class', 'goal-change', '--goal', G, '--change', '{"status":"met"}'], { role: 'sup' }).err, /not status/, 'only goal fields the supervisor may propose');
+    const Qwrong = ask(['--class', 'release-scope']);
+    must(['answer', Qwrong, 'Set it']);
+    assert.match(dt(['goal', 'set', G, '--approved', Qwrong], { role: 'sup' }).err, /class release-scope, not goal-change/, 'wrong class');
+    const Qother = ask(['--class', 'goal-change', '--goal', 'g-20990101-000000000-supervisor', '--change', change]);
+    must(['answer', Qother, 'Set it']);
+    assert.match(dt(['goal', 'set', G, '--approved', Qother], { role: 'sup' }).err, new RegExp(`is about g-20990101-000000000-supervisor, not ${G}`), 'wrong goal');
+    const Qopen = ask(['--class', 'goal-change', '--goal', G, '--change', change]);
+    assert.match(dt(['goal', 'set', G, '--approved', Qopen], { role: 'sup' }).err, /not answered by the owner/, 'unanswered');
+    must(['withdraw', Qopen, '--reason', 'test'], { role: 'sup' });
+    const Qno = ask(['--class', 'goal-change', '--goal', G, '--change', change]);
+    must(['answer', Qno, 'Leave it']);
+    assert.match(dt(['goal', 'set', G, '--approved', Qno], { role: 'sup' }).err, /not its recommendation/, 'a declining answer authorises nothing');
+    const Qok = ask(['--class', 'goal-change', '--goal', G, '--change', change]);
+    must(['answer', Qok, 'Set it — refunds can wait']);
+    assert.match(dt(['goal', 'set', G, '--approved', Qok, '--target', '10'], { role: 'sup' }).err, /pass no other fields/, 'the answer covers the proposed change, not another');
+    must(['goal', 'set', G, '--approved', Qok], { role: 'sup' });
+    assert.deepEqual(nonGoals(), ['enterprise invoicing', 'refunds']);
+    assert.equal(json(must(['goal', 'show', G, '--json'])).approved, Qok, 'the set records which answer authorised it');
+    assert.match(dt(['goal', 'set', G, '--approved', Qok], { role: 'sup' }).err, /already authorised a change/, 'one change per answer');
+    assert.match(dt(['goal', 'set', G, '--non-goals', 'x', '--owner', '--approved', Qok]).err, /--approved is the supervisor/, 'the owner sets directly');
+    // written straight into the log, a set that differs from the approved change is ignored by the fold
+    const Qok2 = ask(['--class', 'goal-change', '--goal', G, '--change', JSON.stringify({ priority: 2 })]);
+    must(['answer', Qok2, 'Set it']);
+    const dir = path.join(repo, 'docs/devteam/run/log');
+    const file = path.join(dir, fs.readdirSync(dir).find((f) => /^supervisor-\d{4}-\d{2}\.jsonl$/.test(f)));
+    const before = fs.readFileSync(file, 'utf8');
+    fs.appendFileSync(file, line({ id: G, type: 'goal', op: 'set', at: new Date().toISOString(), by: 'supervisor', measure: { description: 'easier', target: 1, unit: '%', direction: 'up' }, approved: Qok2 }));
+    assert.equal(json(must(['goal', 'show', G, '--json'])).measure.target, 80, 'a set other than the approved change changes nothing');
+    assert.match(dt(['log-check']).out, /is not the change/);
+    fs.writeFileSync(file, before);
+  });
+
   await t.test('computed views: metrics, roadmap, retro, dashboard data', () => {
     must(['metrics']);
     assert.match(must(['roadmap']), /Self-serve billing/);

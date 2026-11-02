@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "devteam/log.schema.json",
   "title": "devteam log line",
-  "description": "One line of the log (process/supervisor.md): planners write project/log/plan-<feature>.jsonl in their worktree (it lands with the plan PR); everyone else writes run/log/<writer>.jsonl live and the supervisor mirrors those into project/log with the chore-log PR. Every line is an envelope plus a body. The envelope is validated by this schema's top level; the body (everything but the envelope keys) by $defs.types[type]: x-required-new lists what a new line must carry, x-set-only what may only be set later. x-authority says which writer class may create which types and set which fields; x-id how ids are formed. scripts/devteam.mjs enforces all of it on write and in log-check, and the cheap part (by matches the file, id names its writer, the authority table, a planner stays inside its own feature) on every read, so a line never grants more than its file's writer has. Three state rules live in the fold because a schema can't state them: a set applies only if no higher-ranked writer set that field; a question is defaulted only if it has a default; the supervisor edits a goal only while it is a draft.",
+  "description": "One line of the log (process/supervisor.md): planners write project/log/plan-<feature>.jsonl in their worktree (it lands with the plan PR); everyone else writes run/log/<writer>.jsonl live and the supervisor mirrors those into project/log with the chore-log PR. Every line is an envelope plus a body. The envelope is validated by this schema's top level; the body (everything but the envelope keys) by $defs.types[type]: x-required-new lists what a new line must carry, x-set-only what may only be set later. x-authority says which writer class may create which types and set which fields; x-id how ids are formed. scripts/devteam.mjs enforces all of it on write and in log-check, and the cheap part (by matches the file, id names its writer, the authority table, a planner stays inside its own feature) on every read, so a line never grants more than its file's writer has. Three state rules live in the fold because a schema can't state them: a set applies only if no higher-ranked writer set that field; a question is defaulted only if it has a default; the supervisor edits a goal only while it is a draft, or with approved naming an owner-answered goal-change question for that goal not used before.",
   "type": "object",
   "required": [
     "v",
@@ -199,11 +199,18 @@
               ],
               "additionalProperties": false
             }
+          },
+          "approved": {
+            "type": "string",
+            "description": "on a supervisor's set of a goal past draft: the goal-change question (its id) the owner answered with the recommendation. The set must be exactly the change that question proposed; each answer authorises one set."
           }
         },
         "additionalProperties": false,
         "x-required-new": [
           "title"
+        ],
+        "x-set-only": [
+          "approved"
         ]
       },
       "feature": {
@@ -924,6 +931,10 @@
           "re": {
             "type": "string",
             "description": "the worker message this question escalates"
+          },
+          "change": {
+            "type": "object",
+            "description": "On a goal-change question about a goal: the exact goal fields it proposes. The owner's answer with the recommendation authorises this change and no other (goal set --approved applies it as is)."
           }
         },
         "additionalProperties": false,
@@ -1069,7 +1080,8 @@
           "preconditions",
           "priority",
           "milestones",
-          "plan_after"
+          "plan_after",
+          "approved"
         ],
         "owner": [
           "title",
