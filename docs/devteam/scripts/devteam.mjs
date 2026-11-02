@@ -139,6 +139,9 @@ const SETTINGS_DEFAULTS = {
   forge: 'github',
   max_active_tickets: 5,
   max_active_per_component: 2,
+  // Planners at once (plan/<feature> branches in flight). They design and plan; they don't count
+  // against max_active_tickets.
+  max_active_planners: 4,
   stale_after_minutes: 30,
   // How long `ack` sets a finding aside; it comes back sooner if its subject changes.
   finding_ack_hours: 24,
@@ -2715,6 +2718,20 @@ function collectMetrics(since) {
   for (const [id, n] of Object.entries(reviewPasses()).filter(([id2, n]) => n >= 3 && !mergeShaFor(id2))) add('medium', 'review-churn', id, `${n} final review passes`, 'the ticket may be too big or under-specified; re-plan it');
   const ready = [...ts.values()].filter((t) => isActive(t) && !isHeld(t) && !mergeShaFor(t.id) && !activeWorker(t.id) && (t.depends_on ?? []).every((d) => mergeShaFor(d)) && !notSchedulable(t));
   const active = [...ts.keys()].filter(activeWorker).length;
+  // Goals that need planning with nobody planning them: a fully defined draft goal with no design up
+  // for approval, or a ready goal whose current milestone has unplanned preconditions, and no
+  // planner in flight for it while planner slots are free.
+  {
+    const ps = planners();
+    const busy = new Set(ps.flatMap((p) => p.goals));
+    const waiting = logObjects('goal').filter((g) => {
+      if (busy.has(g.id) || ['met', 'abandoned'].includes(g.status)) return false;
+      const c = goalCheck(g);
+      if ((g.status ?? 'draft') === 'draft') return !c.definition.length && !questions().some((q) => q.goal === g.id && q.status === 'open');
+      return g.status === 'ready' && c.coverage.some((x) => x.includes('has no feature') || x.startsWith('no feature names'));
+    }).sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99));
+    if (waiting.length && ps.length < settings.max_active_planners) add('medium', 'idle-planning', `${waiting.length} goal${waiting.length > 1 ? 's' : ''}`, `${ps.length}/${settings.max_active_planners} planners active; nobody is planning ${waiting.map((g) => `"${g.title}"`).join(', ')}`, `make planners (or design yourself) for: ${waiting.slice(0, Math.max(1, settings.max_active_planners - ps.length)).map((g) => g.id).join(', ')}`);
+  }
   if (ready.length && active < settings.max_active_tickets) add('medium', 'idle-capacity', `${ready.length} ready`, `${active}/${settings.max_active_tickets} workers active`, `make workers for: ${ready.slice(0, 5).map((t) => t.id).join(', ')}`);
   if (m.escaped_defects) add('high', 'escaped-defects', `${m.escaped_defects}`, 'defects found after merge', 'retro: which review or gate should have caught each one');
   const order = { high: 0, medium: 1, low: 2 };

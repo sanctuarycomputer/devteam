@@ -791,6 +791,9 @@ function goalState(g, R, openQs) {
   if (ask) return { key: 'awaiting', label: 'Waiting for your approval', tone: 'medium', step: 2, ask, next: `<b>Waiting on you:</b> ${qlink(ask.id, 'review the design and decide')}.` };
   if (g.decision?.verdict === 'refine') return { key: 'refining', label: 'Being reworked', tone: 'medium', step: 1, next: `The design is being reworked with your notes: “${esc(g.decision.notes || '')}”` };
   if (g.check.definition.length) return { key: 'defining', label: 'Being defined', tone: 'medium', step: 0, next: defQ ? `<b>Waiting on you:</b> ${qlink(defQ.id, 'answer the open questions')}.` : `Still open: ${esc(g.check.definition.slice(0, 3).join('; '))}${g.check.definition.length > 3 ? '…' : ''}.` };
+  // only say "being designed" when someone is: a planner in flight for it, or design questions open
+  const designing = planningFor(g).length || openQs.some((q) => q.goal === g.id);
+  if (!designing) return { key: 'designing', label: 'Waiting for a planner', tone: 'medium', step: 1, next: 'Fully defined, but nobody is designing it yet. The supervisor starts a planner when a slot is free (Health says when one is).' };
   return { key: 'designing', label: 'Approach being designed', tone: '', step: 1, next: 'Fully defined. The supervisor is writing and reviewing the design; you’ll approve it in the Inbox.' };
 }
 function measureBar(g) {
