@@ -72,12 +72,22 @@ const nowIso = () => new Date().toISOString();
 const dateOnly = (iso) => iso.slice(0, 10);
 const DAY = 864e5;
 
+// A read-only command (dashboard-data, timeline) caches identical git reads for the rest of the
+// process: one refresh asked git the same questions hundreds of times. Commands that write never
+// turn this on, so they always read live.
+let gitReadCache = null;
+const GIT_READS = new Set(['rev-parse', 'show', 'ls-tree', 'tag', 'merge-base', 'cat-file', 'log', 'for-each-ref', 'symbolic-ref', 'diff', 'rev-list', 'status']);
 function git(args, cwd) {
+  const key = gitReadCache && GIT_READS.has(args[0]) ? `${cwd ?? ''}\0${args.join('\0')}` : null;
+  if (key && gitReadCache.has(key)) return gitReadCache.get(key);
+  let r;
   try {
-    return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 }).replace(/\n$/, '');
+    r = execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 }).replace(/\n$/, '');
   } catch {
-    return null;
+    r = null;
   }
+  if (key) gitReadCache.set(key, r);
+  return r;
 }
 function gitOrDie(args, cwd) {
   try {
@@ -2860,12 +2870,13 @@ function dashboardData() {
     ooda: collectOoda(),
   };
 }
-const cmdDashboardData = () => out(JSON.stringify(dashboardData()));
+const cmdDashboardData = () => { gitReadCache = new Map(); out(JSON.stringify(dashboardData())); };
 
 // timeline <ticket-id> [--json]: the ticket, and every log line that bears on it (its own edits,
 // its worker's phases, gates and messages, questions it raised or that block it, acts and
 // observations that name it), oldest first; plus its review records and its files.
 function cmdTimeline() {
+  gitReadCache = new Map();
   const [id] = positional;
   const t = tickets().get(id) ?? die(`no ticket ${id}`);
   const touches = (l) => l.id === id || l.by === id || l.ticket === id || l.to === id || l.subject === id
