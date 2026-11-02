@@ -55,7 +55,7 @@ Adversarial review is the main defect filter between an agent's first pass and `
 - **Adversarial.** The job is to find the defect. Default verdict: not approved. Approve only after looking and failing to find a Critical or Important issue.
 - **Against the rules, not taste.** A finding cites a Law id, a spec line, a contract clause or a gate. A finding that cites nothing is a suggestion and never blocks.
 - **Scoped.** Read the diff and what it cites. Where a test can't prove a property, mutate the code in a scratch copy and check a test fails.
-- **At an exact head.** A verdict names the commit it reviewed. It still holds at a later head only if every commit since just adds new review-record files. Editing or deleting a record, or changing anything else, voids it; a dissent can't be edited away.
+- **At an exact head.** A verdict names the commit it reviewed. It still holds at a later head only if every commit since just adds new review-record files. Editing or deleting a record, or changing anything else, voids it; a dissent can't be edited away. A final reviewer reads and runs that commit in `devteam.mjs review-worktree <ticket> <sha> [--name <suffix>]`, a detached tree under `.worktrees/` seeded like a worker's, and removes it afterwards with `review-worktree --remove <path>`.
 
 **Stages:** design (before the feature is planned), graph (before any ticket starts), spec, plan, contract (before the stage word), task (before the next task), final (before the merge). **Passes:** 1 adversarial, the author fixes, 2 a cold confirm by someone who is neither author nor fixer, diff-only; a new Critical in pass 2 forces pass 3; a Critical in pass 3 stops the ticket and goes to the supervisor as `blocked`.
 

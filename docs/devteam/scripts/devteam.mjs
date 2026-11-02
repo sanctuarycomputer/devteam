@@ -1673,6 +1673,36 @@ function detachedWorktree(sha, name) {
   seedWorktree(wt);
   return wt;
 }
+// review-worktree <ticket> <sha> [--name <suffix>] | review-worktree --remove <path>: a final
+// reviewer's checkout of exactly the commit it reviews, under .worktrees/ and seeded like a worker's
+// (worktree_files, worktree_setup), so gates and the app run there. Local only, like chore start: it
+// changes no branch and nothing anyone else reads, so it logs nothing.
+const REVIEW_SUFFIX = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+function cmdReviewWorktree() {
+  if (!commonDir) die('review-worktree needs a git checkout');
+  const root = path.join(mainRoot, '.worktrees');
+  if (flags.remove !== undefined) {
+    const target = flagStr('remove') ?? die('usage: review-worktree --remove <path>');
+    const abs = path.resolve(target);
+    const real = (p) => { try { return fs.realpathSync(p); } catch { return null; } };
+    const at = real(abs);
+    const listed = (git(['worktree', 'list', '--porcelain'], mainRoot) ?? '').split('\n').filter((l) => l.startsWith('worktree ')).map((l) => real(l.slice(9)));
+    if (!at || path.dirname(at) !== real(root) || !path.basename(at).startsWith('review-') || !listed.includes(at)) die(`${target} is not a review worktree under ${root} (review-worktree removes only what it made)`);
+    gitOrDie(['worktree', 'remove', '--force', at], mainRoot);
+    return out(`removed ${at}`);
+  }
+  const [id, ref] = positional;
+  if (!id || !ref) die('usage: review-worktree <ticket-id> <sha> [--name <suffix>]   |   review-worktree --remove <path>');
+  if (!tickets().has(id)) die(`no ticket ${id} (devteam.mjs ticket show ${id})`);
+  const sha = resolveCommit(ref) ?? die(`${ref} is not a commit here (git fetch first?)`);
+  const suffix = flagStr('name');
+  if (flags.name !== undefined && !REVIEW_SUFFIX.test(suffix ?? '')) die(`--name "${suffix ?? ''}" must be lowercase words joined by hyphens`);
+  const wt = path.join(root, `review-${id}-${sha.slice(0, 12)}${suffix ? `-${suffix}` : ''}`);
+  if (fs.existsSync(wt)) die(`${wt} exists; give this reviewer its own --name, or remove it: devteam.mjs review-worktree --remove ${wt}`);
+  gitOrDie(['worktree', 'add', '--quiet', '--detach', wt, sha], mainRoot);
+  seedWorktree(wt);
+  out(wt);
+}
 function cmdCheckPr() {
   const headRef = flagStr('head-ref') ?? die('check-pr needs --head-ref (and --sha, --title, --body-file)');
   const sha = resolveCommit(flagStr('sha') ?? 'HEAD') ?? die('cannot resolve the head');
@@ -4004,6 +4034,7 @@ Checks and merging (quality.md)
   check-ticket <id> [--sha s] [--title t] [--body-file f] [--pr n]   definition of done at an exact head
   check-pr --head-ref r --sha s [--title t] [--body-file f]           what the forge's required check runs (optional; no gates, no approval acts)
   merge <ticket-id> | merge --plan <feature> | merge --chore <slug> [--approved qid] [--no-gates] [--dry-run]   supervisor: verify, run gates at the head, merge, log the act
+  review-worktree <ticket-id> <sha> [--name suffix] | review-worktree --remove <path>   a final reviewer's detached worktree at exactly that sha, seeded like a worker's
 
 Sessions (worker.md)
   phase <to> [--task t] [--note n] [--usd x --in n --out n]   phase change or liveness ping; phase supervisor --usd x
@@ -4044,7 +4075,7 @@ Dashboard and releases
 const COMMANDS = {
   init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), whoami: cmdWhoami, settings: cmdSettings,
   feature: cmdFeature, ticket: cmdTicket, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, roadmap: cmdRoadmap,
-  'check-ticket': cmdCheckTicket, 'check-pr': cmdCheckPr, merge: cmdMerge,
+  'check-ticket': cmdCheckTicket, 'check-pr': cmdCheckPr, merge: cmdMerge, 'review-worktree': cmdReviewWorktree,
   phase: cmdPhase, gate: cmdGate, send: cmdSend, messages: cmdMessages, 'stop-ok': cmdStopOk,
   ask: cmdAsk, answer: cmdAnswer, secret: cmdSecret, withdraw: cmdWithdraw, questions: cmdQuestions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
   observe: cmdObserve, 'observe-metrics': cmdObserveMetrics, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, knowledge: cmdKnowledge, problem: cmdProblem,
