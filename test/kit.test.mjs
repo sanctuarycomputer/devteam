@@ -1214,5 +1214,15 @@ test('devteam kit', async (t) => {
     assert.doesNotMatch(v('bill-03-a'), /not bill-03-a's to fix/, 'a ticket in the overlap still fails');
     must(['ticket', 'set', 'bill-04-b', '--json', JSON.stringify({ depends_on: ['bill-03-a'] })], sup);
     assert.doesNotMatch(v(), D4);
+    // blocked for 2h: the supervisor's to unblock, unless it waits on the owner's answer to a question
+    const at = new Date(Date.now() - 2 * 3600000);
+    const stamp = at.toISOString().replace(/[-:T]/g, '').replace('.', '').slice(0, 17);
+    fs.appendFileSync(path.join(repo, 'docs/devteam/run/log/bill-03-a.jsonl'), line({ id: `h-${stamp.slice(0, 8)}-${stamp.slice(8)}-bill-03-a`, type: 'phase', op: 'new', at: at.toISOString(), by: 'bill-03-a', to: 'blocked' }));
+    const kinds = () => json(must(['metrics', '--json'])).findings.filter((f) => f.subject === 'bill-03-a').map((f) => f.kind);
+    assert.ok(kinds().includes('blocked'), 'blocked for 2h on nobody in particular');
+    const Qo = must(['ask', '--ticket', 'bill-03-a', '--question', 'Which shared module name?', '--recommendation', 'billing-shared'], sup);
+    assert.deepEqual(kinds().filter((k) => k.startsWith('blocked')), ['blocked-on-owner'], "waiting on the owner's answer: say which question, don't tell the supervisor to act");
+    assert.match(json(must(['metrics', '--json'])).findings.find((f) => f.kind === 'blocked-on-owner').detail, new RegExp(Qo));
+    must(['withdraw', Qo, '--reason', 'test'], sup);
   });
 });

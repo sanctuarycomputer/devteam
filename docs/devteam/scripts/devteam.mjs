@@ -3248,7 +3248,11 @@ function collectMetrics(since) {
   if (phaseNow.size >= 2 && costPhase && totalUsd >= HOTSPOT_MIN_USD && costUsd / totalUsd > 0.5) add('medium', 'cost-hotspot', costPhase, `${Math.round((100 * costUsd) / totalUsd)}% of spend ($${costUsd.toFixed(2)})`, 'check context size and model choice for this phase');
   for (const [id, p] of phaseNow) {
     const h = (now - p.sinceMs) / 3600000;
-    if (p.phase === 'blocked' && h >= 1) add('high', 'blocked', id, `blocked for ${h.toFixed(1)}h`, 'answer its message, re-plan, or park it');
+    // Blocked on an open owner question (asked for it, or naming it in blocks): the next move is the
+    // owner's, already in their inbox, so say which question rather than tell the supervisor to act.
+    const ownerQs = p.phase === 'blocked' ? openQs.filter((q) => q.ticket === id || (q.blocks ?? []).includes(id)) : [];
+    if (p.phase === 'blocked' && h >= 1 && ownerQs.length) add('medium', 'blocked-on-owner', id, `blocked for ${h.toFixed(1)}h on the owner's answer to ${ownerQs.map((q) => q.id).join(', ')}`, 'nothing for the supervisor until it is answered; remind the owner what it blocks if it sits');
+    else if (p.phase === 'blocked' && h >= 1) add('high', 'blocked', id, `blocked for ${h.toFixed(1)}h`, 'answer its message, re-plan, or park it');
     if (p.phase === 'awaiting-word' && h >= 1) add('medium', 'waiting-on-supervisor', id, `waiting for the stage or merge word for ${h.toFixed(1)}h`, 'answer its review-request: give the word, run merge, or say what is missing');
   }
   // The tmux session's window names, once (null when tmux or the session isn't there: unknown).
