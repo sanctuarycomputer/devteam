@@ -377,7 +377,7 @@
   </section>
 
   <section id="health">
-    <h2>Health <span class="sub">what needs attention, time and cost by phase, gates</span></h2>
+    <h2>Health <span class="sub">what the supervisor is watching and working on; anything it needs from you comes to your Inbox</span></h2>
     <div id="findings"></div>
     <div class="two" style="margin-top:14px">
       <div><h3>Hours by phase</h3><div class="bars card" id="phase-time"></div></div>
@@ -1090,7 +1090,7 @@ function render(d) {
 
   // Keep anything half-typed or half-open across refreshes.
   document.querySelectorAll('textarea[data-q]').forEach((t) => { drafts[t.dataset.q] = t.value; });
-  const kept = [...document.querySelectorAll('input[data-reason], input[data-overrule], input[data-ack-reason]')].map((el) => [el.dataset.reason ? `input[data-reason="${el.dataset.reason}"]` : el.dataset.ackReason ? `input[data-ack-reason="${CSS.escape(el.dataset.ackReason)}"]` : `input[data-overrule="${el.dataset.overrule}"]`, el.value]);
+  const kept = [...document.querySelectorAll('input[data-reason], input[data-overrule]')].map((el) => [el.dataset.reason ? `input[data-reason="${el.dataset.reason}"]` : `input[data-overrule="${el.dataset.overrule}"]`, el.value]);
   const keptChecks = [...document.querySelectorAll('input[data-rulebox]:checked, input[data-auto]:checked')].map((el) => el.dataset.rulebox ? `input[data-rulebox="${el.dataset.rulebox}"]` : `input[data-auto="${el.dataset.auto}"][value="${el.value}"]`);
   const openForms = [...document.querySelectorAll('[data-correct-form]')].filter((f) => !f.hidden).map((f) => f.dataset.correctForm);
   const reasonText = Object.fromEntries((o.reasons || []).map((r) => [r.id, r.means]));
@@ -1112,11 +1112,10 @@ function render(d) {
 
   const fkey = (f) => `${f.kind} ${f.subject}`;
   $('findings').innerHTML = (m.findings.length ? m.findings.map((f) => `
-    <div class="card"><span class="badge ${f.severity}">${f.severity}</span><b>${esc(f.kind)}</b> · <code>${esc(f.subject)}</code>
-    <div class="muted">${esc(f.detail)}</div><div>→ ${esc(f.suggestion)}</div>
-    <div class="row-inline"><input type="text" data-ack-reason="${esc(fkey(f))}" placeholder="Why it can wait"><button class="ghost" data-ack="${esc(fkey(f))}" data-kind="${esc(f.kind)}" data-subject="${esc(f.subject)}">Set aside</button><span class="err" id="e-${esc(fkey(f))}"></span></div></div>`).join('') : empty('None. Blockers and slow spots show here, each with a next step.')) +
+    <div class="card">${cardHead(f.severity === 'high' ? 'triangle-alert' : 'activity', `<span class="badge ${f.severity}">${esc(f.severity)}</span>${esc(words(f.kind))}`, { extra: subjectLink(f.subject) })}
+    <div>${linkify(f.detail)}</div><div class="muted">Next step for the supervisor: ${linkify(f.suggestion)}</div></div>`).join('') : empty('None. Blockers and slow spots show here, each with the supervisor’s next step.')) +
     ((m.acknowledged || []).length ? `<h3 style="margin-top:14px">Set aside</h3>` + m.acknowledged.map((f) => `
-    <div class="card small"><span class="badge">${esc(f.severity)}</span><b>${esc(f.kind)}</b> · <code>${esc(f.subject)}</code> <span class="muted">· ${esc(f.ack.by)}: ${esc(f.ack.reason)} · until ${when(f.ack.until)}</span></div>`).join('') : '');
+    <div class="card small"><b>${esc(words(f.kind))}</b> ${subjectLink(f.subject)} <span class="muted">· set aside by ${esc(who(f.ack.by))}: ${esc(f.ack.reason)} · until ${when(f.ack.until)}</span></div>`).join('') : '');
 
   bars($('phase-time'), m.phase_hours, (v) => `${v}h`, 'No time yet. Workers write a phase line as they move through a ticket.');
   bars($('phase-cost'), m.phase_usd, (v) => `$${v}`, 'No spend recorded yet. Workers report it with <code>phase … --usd</code>.');
@@ -1241,12 +1240,6 @@ document.addEventListener('click', async (ev) => {
   if (over) {
     const id = over.dataset.overruleSend;
     return void post('answer', { id, answer: document.querySelector(`input[data-overrule="${id}"]`).value }, id);
-  }
-  const ack = ev.target.closest('[data-ack]');
-  if (ack) {
-    const key = ack.dataset.ack;
-    const reason = document.querySelector(`input[data-ack-reason="${CSS.escape(key)}"]`).value;
-    return void post('ack', { kind: ack.dataset.kind, subject: ack.dataset.subject, reason }, key);
   }
   const send = ev.target.closest('[data-correct-send]');
   if (send) {
