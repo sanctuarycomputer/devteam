@@ -1080,6 +1080,10 @@ const PANE_WAITS = [
 ];
 const paneWaits = new Map();
 const paneTails = new Map();
+// Why a window has no agent to talk to: its pane exited, or it is back at a shell prompt (the
+// agent quit). Null when it has one, or when tmux, the session or the window isn't there.
+const paneGone = new Map();
+const agentExited = (window) => paneGone.get(window) ?? null;
 // An agent idle at its prompt while its own background shell still runs: after a compaction it can
 // lose the shell's result and wait for nothing. Only read, never acted on: the supervisor nudges.
 const PANE_SHELL = /\b\d+ (background )?shells? (still )?running\b|·\s*\d+ (background )?shells?\s*(·|$)/i;
@@ -1087,7 +1091,8 @@ const idleWithShell = (window) => { const l = paneTails.get(window) ?? []; retur
 function paneWaitingIn(window) {
   if (paneWaits.has(window)) return paneWaits.get(window);
   let found = null;
-  const { target } = resolvePane(`${loadSettings().tmux_session}:${window}`);
+  const { target, problem } = resolvePane(`${loadSettings().tmux_session}:${window}`);
+  paneGone.set(window, problem && /no agent is running|has exited/.test(problem) ? problem : null);
   const lines = target ? (sh('tmux', ['capture-pane', '-p', '-t', target]) ?? '').split('\n').map((l) => l.trim()).filter(Boolean).slice(-15) : [];
   for (const [kind, re] of PANE_WAITS) {
     const hit = lines.find((l) => re.test(l));
@@ -3230,11 +3235,14 @@ function collectMetrics(since) {
     // request to the supervisor still unanswered (the unanswered-message finding covers that)
     const waitingOnOwner = openQs.some((q) => (q.blocks ?? []).includes(id) || q.ticket === id);
     const waitingOnSupervisor = openMsgs.some((m) => m.created_by === id);
-    if (w && w.phase && !['done', 'parked', 'awaiting-word', 'blocked'].includes(w.phase) && !mergeShaFor(id) && !waitingOnOwner && !waitingOnSupervisor && w.minutes_silent > settings.stale_after_minutes) add('high', 'stale-worker', id, ...(windowGone(id) ? [`silent for ${w.minutes_silent} min (phase ${w.phase}) and its tmux window is gone`, `resume it: worker ${id} --resume (supervisor.md, recovery)`] : [...(idleWithShell(id) ? [`silent for ${w.minutes_silent} min (phase ${w.phase}), idle at its prompt with a background shell still running`, `nudge it: send ${id} "check your background shell's result and carry on" (an agent can lose the result across a compaction)`] : [`silent for ${w.minutes_silent} min (phase ${w.phase})`, 'check its pane; resume it (supervisor.md, recovery)'])]));
+    const exited = w && w.phase && !['done', 'parked'].includes(w.phase) && !mergeShaFor(id) ? agentExited(id) : null;
+    if (exited) add('high', 'agent-exited', id, exited.replace(/; resume it first$/, ''), `resume it: worker ${id} --resume (supervisor.md, recovery)`);
+    else if (w && w.phase && !['done', 'parked', 'awaiting-word', 'blocked'].includes(w.phase) && !mergeShaFor(id) && !waitingOnOwner && !waitingOnSupervisor && w.minutes_silent > settings.stale_after_minutes) add('high', 'stale-worker', id, ...(windowGone(id) ? [`silent for ${w.minutes_silent} min (phase ${w.phase}) and its tmux window is gone`, `resume it: worker ${id} --resume (supervisor.md, recovery)`] : [...(idleWithShell(id) ? [`silent for ${w.minutes_silent} min (phase ${w.phase}), idle at its prompt with a background shell still running`, `nudge it: send ${id} "check your background shell's result and carry on" (an agent can lose the result across a compaction)`] : [`silent for ${w.minutes_silent} min (phase ${w.phase})`, 'check its pane; resume it (supervisor.md, recovery)'])]));
   }
   for (const p of planners()) {
     const who = `plan-${p.feature}`;
     if (p.waiting) add('high', 'blocked-prompt', who, p.waiting.kind === 'limit' ? `a usage-limit banner in its pane: "${p.waiting.line}"` : `waiting on a prompt in its pane: "${p.waiting.line}"`, `look (tmux select-window -t ${settings.tmux_session}:${who}) and clear it (supervisor.md §11)`);
+    else if (/no agent is running|has exited/.test(p.problem ?? '')) add('high', 'agent-exited', who, p.problem.replace(/; resume it first$/, ''), `resume it: planner ${p.feature} --resume (supervisor.md §11)`);
     else if (!p.window) add('medium', 'planner-gone', who, `plan/${p.feature} isn't on main and its window is gone (${p.problem})`, `resume it (planner ${p.feature} --resume) or, if the plan was dropped, delete the branch`);
     else if (!p.waiting_on_supervisor.length && !p.waiting_on_owner.length && p.minutes_silent > settings.stale_after_minutes) add('high', 'stale-planner', who, `no sign of life for ${p.minutes_silent} min`, 'check its pane; message it or resume it (supervisor.md §11)');
   }

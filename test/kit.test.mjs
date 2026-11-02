@@ -265,6 +265,18 @@ test('devteam kit', async (t) => {
         assert.match(staleF().suggestion, /send bill-01-card "check your background shell's result/);
       } finally { spawnSync('tmux', ['kill-session', '-t', 'devteam']); }
     }
+    // the agent quit and left its window at a shell prompt: agent-exited, with the resume, not stale
+    if (hasTmux) {
+      spawnSync('tmux', ['new-session', '-d', '-s', 'devteam', '-n', 'bill-01-card', 'sh']);
+      try {
+        const fs_ = json(must(['metrics', '--json'])).findings;
+        const ex = fs_.find((f) => f.kind === 'agent-exited' && f.subject === 'bill-01-card');
+        assert.ok(ex, 'a window back at a shell prompt is an exited agent');
+        assert.match(ex.detail, /no agent is running .*at a \w+ prompt/);
+        assert.match(ex.suggestion, /worker bill-01-card --resume/);
+        assert.ok(!fs_.some((f) => f.kind === 'stale-worker' && f.subject === 'bill-01-card'), 'one finding, not two');
+      } finally { spawnSync('tmux', ['kill-session', '-t', 'devteam']); }
+    }
     const Qb = must(['ask', '--question', 'Store card fingerprints?', '--blocks', 'bill-01-card', '--recommendation', 'no'], { role: 'sup' });
     assert.ok(!staleW(), 'a question blocking it means it waits on the owner');
     must(['withdraw', Qb, '--reason', 'test'], { role: 'sup' });
