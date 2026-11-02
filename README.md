@@ -9,7 +9,7 @@ docs/devteam/
   governance/constitution.md   who decides what, the trust ladder, principles, one-way doors, which rule wins
   governance/quality.md        definition of done, gates, the review standard, merging, releases
   governance/code-style.md     the code doctrine
-  process/planning.md          goal → design → roadmap → graph
+  process/planning.md          goal → design → milestones → roadmap → graph
   process/supervisor.md        the tick as observe / orient / decide / act, questions, messages, the log, retros
   process/worker.md            one ticket with superpowers
   schema/log.schema.json       the eleven event types and who may write what
@@ -18,7 +18,7 @@ docs/devteam/
   project/                     this project's content; upstream never touches it
     settings.md                only what this project changes
     designs/architecture.md    the whole system now, updated by every plan PR
-    designs/<goal>.md          one design per goal
+    designs/<goal>.md          one design per goal, the spine; a feature's own design when it's planned
     log/<writer>.jsonl         the durable log
     tickets/<id>/              spec.md, plan.md, verification.md, reviews/ (written by superpowers)
     reviews/<feature>/, reviews/<design>/   graph and design review records
@@ -30,7 +30,7 @@ docs/devteam/
 
 **Roles.** The **owner** is the human: goals, one-way doors, production, the rules. The **supervisor** is the owner's foreground agent session in the terminal: it plans or makes planners, makes workers, rules, merges, and writes no production code. A **worker** is one session for one ticket, in its own git worktree and tmux window, running superpowers. A **planner** turns one goal into a design, a feature and tickets on a `plan/<feature>` branch. A **reviewer** is any session or subagent that did not write the work; its default verdict is not approved.
 
-**Two loops.** Goal → design → roadmap → graph → tickets: the supervisor interviews the owner until each goal is unambiguous, writes a design per goal, breaks it into features with stories and releases, then into a graph of tickets, each one PR. Observe, orient, decide, act: every supervisor tick, what sessions report becomes observations; recurring observations become knowledge and problems; the supervisor decides what it may and asks the owner everything else through the questions inbox, saying why; every decision is an act the owner can correct, and a correction takes trust back and becomes a lesson. Retros gather the corrections and learnings across tickets and features.
+**Two loops.** Goal → design → roadmap → graph → tickets: the supervisor interviews the owner until each goal is unambiguous, writes a design per goal (the spine that keeps many loops coherent), orders it into milestones, plans one milestone at a time into features with stories and releases, then into a graph of tickets, each one PR. Goals are meant to be large; the forecast says what one costs, and nothing splits it. Observe, orient, decide, act: every supervisor tick, what sessions report becomes observations; recurring observations become knowledge and problems; the supervisor decides what it may and asks the owner everything else through the questions inbox, saying why; every decision is an act the owner can correct, and a correction takes trust back and becomes a lesson. Retros gather the corrections and learnings across tickets and features.
 
 **One log.** Everything structured is a line in one append-only JSON Lines log, validated against `schema/log.schema.json` on write and folded by timestamp with authority rules (owner > supervisor > planner > worker). State is computed from the log plus git; nothing else is stored. One file per writer: planners write `project/log/plan-<feature>.jsonl` in their worktree, so a plan lands only through its reviewed PR; everyone else writes `run/log/<writer>.jsonl` live, and the supervisor mirrors those into `project/log/` with the `chore-log` PR.
 

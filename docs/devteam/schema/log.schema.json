@@ -111,6 +111,42 @@
             "minimum": 1,
             "maximum": 99
           },
+          "milestones": {
+            "description": "The goal's outcome in order, each a usable slice with a target on the goal's measure, the preconditions it makes true (1-based), an optional date and a rough size in tickets. Written from the design; the last target is the goal's. Referred to as <goal-id>@<n>.",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "title": {
+                  "type": "string"
+                },
+                "target": {
+                  "type": "number"
+                },
+                "by": {
+                  "type": "string"
+                },
+                "preconditions": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                },
+                "tickets": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              },
+              "required": [
+                "title",
+                "target",
+                "preconditions",
+                "tickets"
+              ],
+              "additionalProperties": false
+            }
+          },
           "status": {
             "enum": [
               "draft",
@@ -1009,7 +1045,8 @@
           "horizon",
           "non_goals",
           "preconditions",
-          "priority"
+          "priority",
+          "milestones"
         ],
         "owner": [
           "title",
@@ -1019,6 +1056,7 @@
           "non_goals",
           "preconditions",
           "priority",
+          "milestones",
           "status",
           "decision"
         ]

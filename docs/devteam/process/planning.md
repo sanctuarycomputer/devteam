@@ -3,8 +3,10 @@
 How a goal becomes a design, the design a roadmap, and the roadmap a graph of tickets the supervisor can schedule. Planning is reviewed as hard as code: if the graph is wrong, everything after it is wrong.
 
 ```
-goal (owner) → design (per goal) → features, stories, releases (the roadmap) → tickets (the graph) → workers
+goal (owner) → design, the spine (per goal) → milestones → features, each with stories and releases (the roadmap) → tickets (the graph) → workers
 ```
+
+A feature is what other teams call an epic: stories, many PRs, one reviewed plan. There is no separate epic level.
 
 The supervisor plans itself or makes a planner (`devteam.mjs planner <feature>`), a session in its own worktree on branch `plan/<feature>`. Everything a planner produces lands through one reviewed PR: the design, the architecture update, the review records, and `project/log/plan-<feature>.jsonl` holding the feature and its tickets. Nothing is schedulable until that PR merges.
 
@@ -12,16 +14,24 @@ The supervisor plans itself or makes a planner (`devteam.mjs planner <feature>`)
 
 The owner states the goals, in whatever words. The supervisor drafts them (`devteam.mjs goal add --title … --outcome …`), interviews until each is fully defined, has its design written and reviewed (§2), and then asks the owner to approve the goal **on its design**. Only the owner decides. Keep three to five active.
 
-A goal moves through: **defining** (gaps, `goal-definition` questions) → **designing** (fully defined; the design is written and reviewed) → **awaiting approval** (a `goal-approval` question in the inbox, the design linked) → **ready** (approved; features and tickets are planned from the design) → **met**, or **abandoned** if the owner lets it go.
+**Goals are meant to be ambitious.** A goal is the unit the fleet stays aligned on across many loops and PRs: weeks or months of work, many features, many workers. Never split a goal to make it fit one loop; a goal one loop could meet is a ticket or a feature. What keeps a large goal workable is its spine (§2), its milestones, and planning one milestone at a time.
 
-A goal is **ready** when it has: an outcome (what is true for users or the business when it's met), a measure with a numeric target, unit and direction, a horizon date, at least one non-goal, the preconditions that must hold for the outcome, a priority distinct from the other goals, and a baseline reading (`goal reading <id> --value n`). `devteam.mjs goal check` lists what's missing.
+A goal moves through: **defining** (gaps, `goal-definition` questions) → **designing** (fully defined; the spine is written and reviewed and its milestones are on the goal) → **awaiting approval** (a `goal-approval` question in the inbox, the design linked) → **ready** (approved; the current milestone's features and tickets are planned from the design) → **met**, or **abandoned** if the owner lets it go.
+
+A goal is **fully defined** when it has: an outcome (what is true for users or the business when it's met), a measure with a numeric target, unit and direction, a horizon date, at least one non-goal, the preconditions that must hold for the outcome, a priority distinct from the other goals, and a baseline reading (`goal reading <id> --value n`). `devteam.mjs goal check` lists what's missing.
+
+**Milestones.** The design orders the outcome into milestones, and the supervisor records them on the goal (`goal set <id> --milestones '[…]'`) before asking for approval. Each milestone is a usable slice, not a layer: a `title`, a `target` on the goal's measure (moving toward the goal's target; the last one is the goal's target), the `preconditions` it makes true (each precondition in exactly one milestone), an optional `by` date within the horizon, and `tickets`, a rough count of the PRs it takes. A goal one feature can meet has one milestone. `goal check` lists milestone gaps; `ask --kind goal-approval` and `goal decide … approve` refuse while there are any. Milestones are referred to as `<goal-id>@<n>`.
+
+**Planning rolls a milestone at a time.** The current milestone is the first one the latest reading hasn't reached. Only its preconditions need features before work starts; a later milestone's are planned once it becomes current, with what the earlier ones taught (accepted knowledge, the retro, the measured rate). `goal check` lists them as later, not as gaps; `validate` warns when a feature serves only a later milestone, which is right only when the current milestone's critical path needs it. When a milestone is met, take a reading, re-read the spine against what was built (anything that drifted is a design change or an owner question), and plan the next milestone's features.
+
+**The forecast.** `devteam.mjs goal forecast <id>` computes, per milestone, the work left (points of planned tickets, or the milestone's `tickets` estimate where nothing is planned), the waves to reach it at the current worker slots, and an ETA where the fleet has a measured rate, flagging a milestone past its date and a goal past its horizon. A goal-approval question carries it in its context automatically. When the forecast misses the horizon, the approval says so and recommends one of: move the horizon, add worker slots, cut scope into non-goals, or reorder the milestones. Splitting the goal is not one of them. `goal show` and the roadmap carry the forecast; on track or behind is measured against the line through each dated milestone, so a slip shows at the first milestone, not at the horizon.
 
 **The readiness interview.** While a goal has gaps, or any ambiguity in the supervisor's judgment (an undefined term, two readings of the measure, a conflict with another goal), the supervisor asks one `goal-definition` question per goal listing every gap as a form, records the answers (`goal set`), and repeats until `goal check` is clean. Changing an approved goal is the owner's (`goal-change`, owner-only).
 
 **Settle the design's decisions first.** Every decision the design leaves to the owner (scope, who may see or change what, what is out, any choice between approaches the owner should make) is its own inbox question, asked while designing, with `--goal <g-id>`, the design linked, `--choices` and a recommendation. A decision that touches authentication, authorization, payments, PII or anything else hard to undo is a `one-way-door` question. Record each answer in the design's **Owner decisions** section with its question id. Never bundle open decisions into the approval: `ask --kind goal-approval` refuses while any question with that `--goal` is still open.
 
-**Approval, on the design.** Once the design is reviewed and its decisions are settled, ask: `ask --kind goal-approval --goal <g-id> --question "Approve <goal> built this way?" --context "<the approach in three sentences: what gets built, what's left out, what it costs>" --links '[{"title":"The design","path":"docs/devteam/project/designs/<slug>.md","ref":"plan/<feature>"}]'`. The owner answers on the dashboard (or `goal decide <g-id> approve|refine|let-go --notes "…"`):
-- **Approve.** The goal is ready; plan its features and tickets from the design, taking the owner's notes into account.
+**Approval, on the design.** Once the design is reviewed and its decisions are settled, ask: `ask --kind goal-approval --goal <g-id> --question "Approve <goal> built this way?" --context "<the approach in three sentences: what gets built, what's left out, the milestones>" --links '[{"title":"The design","path":"docs/devteam/project/designs/<slug>.md","ref":"plan/<feature>"}]'`. The owner answers on the dashboard (or `goal decide <g-id> approve|refine|let-go --notes "…"`):
+- **Approve.** The goal is ready; plan the current milestone's features and tickets from the design, taking the owner's notes into account.
 - **Refine.** The notes say what to change. Rework the design with them (record how each note was addressed in the design), have it reviewed again, and ask a new `goal-approval` question. The goal stays a draft until then.
 - **Let go.** The goal is abandoned; stop any planning for it and say what was dropped.
 
@@ -31,7 +41,9 @@ A goal is **ready** when it has: an outcome (what is true for users or the busin
 
 ## 2. The design
 
-One design per goal at `project/designs/<goal-slug>.md` (the slug `goal check` prints), written once the goal is fully defined and before the owner approves it; until the plan PR lands, link it from its plan branch. Write it with superpowers' **brainstorming**, saving there instead of its default location. It must cover what brainstorming already asks for (intent and why; goals, non-goals, anti-goals; constraints; the approaches considered and the one chosen; what's decided and what's left to the builder) plus:
+Designs come at two levels.
+
+**The goal's design is the spine.** One per goal at `project/designs/<goal-slug>.md` (the slug `goal check` prints), written once the goal is fully defined and before the owner approves it; until the plan PR lands, link it from its plan branch. It is what keeps PR 40 and PR 400 of one goal coherent: the boundaries, the contracts, the data, the one-way doors and the milestones are decided here once, and every feature builds inside them. It stays at that level; the detail of a feature is written when that feature is planned. Write it with superpowers' **brainstorming**, saving there instead of its default location. It must cover what brainstorming already asks for (intent and why; goals, non-goals, anti-goals; constraints; the approaches considered and the one chosen; what's decided and what's left to the builder) plus:
 
 - the reverse chain: for each precondition of the goal, why it must hold, what says it doesn't yet, and which feature will make it hold;
 - components and boundaries, and every contract that crosses one (each becomes a contract ticket);
@@ -40,7 +52,10 @@ One design per goal at `project/designs/<goal-slug>.md` (the slug `goal check` p
 - one-way doors, each an owner question before any plan is approved;
 - **Owner decisions**: each decision the owner made for this design, with the question id that settled it (§1); none may be left open when approval is asked;
 - risks and unknowns that survive, each a spike ticket or a question;
+- the milestones, in order, each with its target, the preconditions it makes true, its date if any and a size in tickets (recorded on the goal, §1);
 - what changes in `project/designs/architecture.md`, applied to that file in the same PR, with a row in its Changed by table.
+
+**A feature's design** is written when the feature is planned, at `project/designs/<feature>.md`, named in the feature's `design` field, and reviewed like any design. It links the spine by path (`validate` checks the citation) and works inside it: a feature design that needs to change a boundary, a contract or a decision the spine made is a design change (`approve-design-change`), or an owner question for a one-way door, never a quiet divergence. A feature small enough to need nothing beyond the spine may name the spine as its design.
 
 The design is shaped by the constitution and the code style: it chooses the option that keeps a rollback, that makes a gate possible, that fits the doctrine's structure. Research starts from `architecture.md` and the accepted knowledge (`devteam.mjs knowledge --for <feature>`), and cites file paths. The design is reviewed (`project/reviews/<goal-slug>/design-1.md`, `quality.md` §3) before any feature is written from it.
 
@@ -118,7 +133,7 @@ A ticket may spec and plan while its dependencies are unmerged (plan-ahead); onl
 ## 5. Review and landing
 
 1. `devteam.mjs validate` passes in the planner's worktree (reviews still missing show as warnings).
-2. A non-author reviews the graph (`project/reviews/<feature>/graph-1.md`): hidden dependencies, footprints that overlap work in flight (the architecture doc's In flight table), footprints too broad for D4 to mean anything, tickets over size, missing contract tickets, done-whens that can't fail, stories with no integration ticket, risk under-assigned, one-way doors not yet answered, `architecture.md` not updated. The verdict names the commit that holds the ticket lines; any later commit that changes anything but review records voids it (`validate --strict` checks this).
+2. A non-author reviews the graph (`project/reviews/<feature>/graph-1.md`): consistency with the goal's spine (its boundaries, contracts, data and decisions) and with the milestone the feature serves, hidden dependencies, footprints that overlap work in flight (the architecture doc's In flight table), footprints too broad for D4 to mean anything, tickets over size, missing contract tickets, done-whens that can't fail, stories with no integration ticket, risk under-assigned, one-way doors not yet answered, `architecture.md` not updated. The verdict names the commit that holds the ticket lines; any later commit that changes anything but review records voids it (`validate --strict` checks this).
 3. Commit everything and open the PR titled `plan-<feature>: <summary>`; message the supervisor (`devteam.mjs send supervisor "<feature> graph review passed" --kind review-request`).
 4. The supervisor reads the design and the graph, then `devteam.mjs merge --plan <feature>`, which checks `validate --strict` at the head, both reviews holding, and that the PR touches no log file but its own. The merge is the approval; the tickets appear in `devteam.mjs ready`.
 
