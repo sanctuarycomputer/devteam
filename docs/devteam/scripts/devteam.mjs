@@ -548,7 +548,26 @@ function mainRef() {
   for (const r of [`origin/${b}`, b]) if (resolveCommit(r)) return (mainRefCache = r);
   return (mainRefCache = null);
 }
-const resolveCommit = (ref) => git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
+// In a read-only command, full ref names resolve from one for-each-ref listing (a dashboard
+// refresh asked git about each ticket branch separately: ~90 processes). Anything else, and every
+// command that writes, asks git directly.
+let refCommits = null;
+function resolveCommit(ref) {
+  if (gitReadCache && ref.startsWith('refs/')) {
+    if (!refCommits || refCommits.cache !== gitReadCache) {
+      const map = new Map();
+      for (const line of (git(['for-each-ref', '--format=%(refname)%00%(objecttype)%00%(objectname)%00%(*objecttype)%00%(*objectname)']) ?? '').split('\n')) {
+        const [name, type, sha, ptype, psha] = line.split('\0');
+        if (name) map.set(name, type === 'commit' ? sha : ptype === 'commit' ? psha : undefined);
+      }
+      refCommits = { cache: gitReadCache, map };
+    }
+    if (!refCommits.map.has(ref)) return null;
+    const sha = refCommits.map.get(ref);
+    if (sha !== undefined) return sha;
+  }
+  return git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
+}
 
 // The durable copy of a file: main's committed version or this checkout's, whichever extends the
 // other (this checkout may not have pulled yet, or may be a plan branch that is ahead).
