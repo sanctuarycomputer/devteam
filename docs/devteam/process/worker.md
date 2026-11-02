@@ -29,7 +29,7 @@ You are a worker: one session bound to one ticket, from spec to merge, run with 
 | Stage | Superpowers skill | devteam adds |
 |---|---|---|
 | spec | `brainstorming` | save to `project/tickets/<id>/spec.md` (restate the done-whens as acceptance checks; contracts provided and consumed; edge cases; out of scope); review `reviews/spec-1.md`; ask for `approve-spec` with a `review-request` message |
-| plan | `writing-plans` | save to `project/tickets/<id>/plan.md`; every task's files inside `touches`; review `reviews/plan-1.md`; ask for `approve-plan` the same way |
+| plan | `writing-plans` | save to `project/tickets/<id>/plan.md`, opening with a `## TL;DR` of at most seven bullets (`quality.md` §6); every task's files inside `touches`; review `reviews/plan-1.md`; ask for `approve-plan` the same way |
 | contract (if you provide one) | | commit the contract change first, alone, with its version bumped and a fake; ask for the stage word with a `review-request`; the supervisor reviews it and gives the word before any build task |
 | build, task by task | `subagent-driven-development` or `executing-plans`, with `test-driven-development` | build starts only when every `depends_on` is merged; run the component's gates through `devteam.mjs gate` (§6); a review record per task, `reviews/task-<n>.md` |
 | debugging | `systematic-debugging` | design problems go to the supervisor as messages, not into code |
