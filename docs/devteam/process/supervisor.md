@@ -37,7 +37,7 @@ Run it about every 10 minutes when PRs are converging, 30 when quiet. A worker's
 7. Before a decision in a ladder class, read `knowledge --for <class>` and `trust`. Below rung 3, ask (§6). A worker's question that is the owner's call becomes a question with `--re <message-id>` and reason `escalated`.
 
 **Act**
-8. Schedule (§5). Merge (`merge <id>`, §5). Log every decision: `act --class <c> [--refs ids] -- "<what>"`; approvals of specs and plans are acts (`approve-spec --refs <id>`, `approve-plan --refs <id>`; the latter refuses while a one-way door on the ticket is unanswered); so are rulings (`contract-ruling`, `approve-design-change`), goal readiness, recoveries and trials. `merge`, `ticket add`/`set`, `answer --defaulted` and `withdraw` log their own acts.
+8. Schedule (§5). Merge (`merge <id>`, §5). Log every decision: `act --class <c> [--refs ids] -- "<what>"`; approvals of specs and plans are acts (`approve-spec --refs <id>`, `approve-plan --refs <id>`; the latter refuses while a one-way door on the ticket is unanswered, or while the committed plan has no TL;DR). On a `risk: normal` ticket, approve a plan from its TL;DR and its plan review (the verdict holds, its findings are dispositioned) unless one of them gives you a reason to read on; on `risk: high`, or a ticket with a one-way door or a contract, read the whole plan; so are rulings (`contract-ruling`, `approve-design-change`), goal readiness, recoveries and trials. `merge`, `ticket add`/`set`, `answer --defaulted` and `withdraw` log their own acts.
 9. Health: a ticket silent for `stale_after_minutes` whose pane shows nothing goes to recovery.
 
 **Improve and record**

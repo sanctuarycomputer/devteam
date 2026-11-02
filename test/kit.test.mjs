@@ -116,9 +116,11 @@ test('devteam kit', async (t) => {
 
   await t.test('planner writes feature and tickets into its own log file in its worktree', () => {
     git(['worktree', 'add', '-q', '-b', 'plan/billing', wt('plan-billing'), 'origin/main']);
-    write(path.join(wt('plan-billing'), 'docs/devteam/project/designs/self-serve-billing.md'), '# Design: billing\n');
+    write(path.join(wt('plan-billing'), 'docs/devteam/project/designs/self-serve-billing.md'), '# Design: billing\n\n## Goals\n\nadmins pay alone\n');
     const feature = { title: 'Billing', goals: [G], preconditions: [`${G}#1`], design: 'project/designs/self-serve-billing.md', stories: [{ id: 'BILL-S1', text: 'admin adds a card', release: 'v0.2.0' }] };
     must(['feature', 'add', 'billing', '--json', JSON.stringify(feature)], { cwd: wt('plan-billing'), role: 'planner' });
+    assert.match(dt(['validate'], { cwd: wt('plan-billing') }).out, /has no "## TL;DR" section/, 'a design being planned opens with its TL;DR');
+    write(path.join(wt('plan-billing'), 'docs/devteam/project/designs/self-serve-billing.md'), '# Design: billing\n\n## TL;DR\n\n- cards first, stored by the processor\n\n## Goals\n\nadmins pay alone\n');
     const ticket = { title: 'card capture', feature: 'billing', component: 'bill', kind: 'build', size: 'S', risk: 'normal', serves: ['BILL-S1'], depends_on: [], touches: ['billing/**'], done_when: ['card test passes in CI'] };
     must(['ticket', 'add', 'bill-01-card', '--json', JSON.stringify(ticket)], { cwd: wt('plan-billing'), role: 'planner' });
     assert.notEqual(dt(['ticket', 'add', 'bill-01-card', '--json', '{"title":"x"}'], { cwd: wt('plan-billing'), role: 'planner' }).status, 0, 'duplicate id refused');
@@ -274,10 +276,20 @@ test('devteam kit', async (t) => {
     assert.ok(!json(must(['metrics', '--json'])).gates.flaky_gates.some((g) => g.gate === 'tdd'), 'dirty runs are not flaky');
     assert.notEqual(dt(['act', '--class', 'approve-spec', '--refs', 'm-20261101-000000000-bill-01-card', '--', 'spec ok'], { role: 'sup' }).status, 0, 'an approval names its ticket');
     must(['act', '--class', 'approve-spec', '--refs', 'bill-01-card', '--', 'spec ok'], { role: 'sup' });
-    must(['act', '--class', 'approve-plan', '--refs', 'bill-01-card', '--', 'plan ok'], { role: 'sup' });
     const tdir = path.join(wt('bill-01-card'), 'docs/devteam/project/tickets/bill-01-card');
+    // approve-plan reads the committed plan, and the plan opens with its TL;DR
+    assert.match(dt(['act', '--class', 'approve-plan', '--refs', 'bill-01-card', '--', 'plan ok'], { role: 'sup' }).err, /no plan\.md/);
     write(path.join(tdir, 'spec.md'), '# spec\n');
-    write(path.join(tdir, 'plan.md'), '# plan\n');
+    write(path.join(tdir, 'plan.md'), '# plan\n\n## Tasks\n\n- T1 card capture\n');
+    git(['add', '-A'], wt('bill-01-card'));
+    git(['commit', '-qm', 'bill-01-card: spec and plan'], wt('bill-01-card'));
+    assert.match(dt(['act', '--class', 'approve-plan', '--refs', 'bill-01-card', '--', 'plan ok'], { role: 'sup' }).err, /no "## TL;DR" section/);
+    write(path.join(tdir, 'plan.md'), `# plan\n\n## TL;DR\n\n${Array.from({ length: 8 }, (_, i) => `- point ${i + 1}`).join('\n')}\n\n## Tasks\n\n- T1 card capture\n`);
+    git(['commit', '-qam', 'bill-01-card: tldr'], wt('bill-01-card'));
+    assert.match(dt(['act', '--class', 'approve-plan', '--refs', 'bill-01-card', '--', 'plan ok'], { role: 'sup' }).err, /8 bullets; seven at most/);
+    write(path.join(tdir, 'plan.md'), '# plan\n\n## TL;DR\n\n- capture a card in billing/card.js\n- one test first, then the code\n\n```mermaid\nflowchart LR\n  a --> b\n```\n\n## Tasks\n\n- T1 card capture\n');
+    git(['commit', '-qam', 'bill-01-card: tldr'], wt('bill-01-card'));
+    must(['act', '--class', 'approve-plan', '--refs', 'bill-01-card', '--', 'plan ok'], { role: 'sup' });
     write(path.join(tdir, 'verification.md'), '| Done-when | Command | Result |\n|---|---|---|\n| card test | npm t | pass |\n');
     write(path.join(wt('bill-01-card'), 'billing/card.js'), 'code\n');
     git(['add', '-A'], wt('bill-01-card'));

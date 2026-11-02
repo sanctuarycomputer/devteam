@@ -1230,6 +1230,9 @@ function cmdValidate() {
       if (!f.design) errors.push(`feature ${fid} names no design (project/designs/<slug>.md)`);
       else if (!projectFileText(f.design.replace(/^project\//, ''))) errors.push(`feature ${fid}: design ${f.design} does not exist`);
       else {
+        // A design being planned here opens with its TL;DR; landed designs are history.
+        const dt = landed ? null : tldrGap(projectFileText(f.design.replace(/^project\//, '')));
+        if (dt) sink.push(`feature ${fid}: design ${f.design} ${dt} (quality.md §6)`);
         const ld = latestPerTrack(designReviews, 'design');
         if (!ld.length) sink.push(`feature ${fid}: design ${f.design} has no review in project/reviews/${designSlug}/design-<n>.md`);
         else if (ld.some((r) => r.verdict !== 'APPROVE')) sink.push(`feature ${fid}: the latest design review is not APPROVE`);
@@ -2017,9 +2020,29 @@ function cmdAct() {
     const t = tickets().get(asList(flags.refs)[0]);
     if (!t) die('approve-plan names the ticket: --refs <ticket-id>');
     if ((t.one_way_doors ?? []).length && !questions().some((q) => q.kind === 'one-way-door' && q.ticket === t.id && q.status === 'answered')) die(`${t.id} lists one-way doors; the owner answers a one-way-door question (--ticket ${t.id}) before its plan is approved (constitution.md §4)`);
+    // The plan opens with its TL;DR, so a low-risk plan can be approved from it (quality.md §6).
+    const ref = [`ticket/${t.id}`, `origin/ticket/${t.id}`].find((r) => resolveCommit(r));
+    const plan = ref ? git(['show', `${ref}:${projectRel}/tickets/${t.id}/plan.md`]) : null;
+    if (plan === null) die(`no plan.md for ${t.id} on ticket/${t.id}; approve a plan once it is committed`);
+    const tldr = tldrGap(plan);
+    if (tldr) die(`${t.id}'s plan ${tldr}; send it back to the worker (quality.md §6)`);
   }
   const line = appendLog({ type: 'act', class: cls, scope: scope ?? undefined, what, rung, refs: asList(flags.refs), reversible: !flags.irreversible, approved_by: approved ?? undefined }, 'supervisor');
   out(line.id);
+}
+// A plan or design opens with '## TL;DR' and a few bullets: the approach, skimmable (quality.md §6).
+// Returns what is wrong, or null.
+function tldrGap(text) {
+  const lines = text.split('\n');
+  const at = lines.findIndex((l) => /^##\s+TL;?DR\b/i.test(l.trim()));
+  if (at < 0) return 'has no "## TL;DR" section';
+  if (lines.slice(0, at).some((l) => /^##\s/.test(l.trim()))) return 'has its TL;DR after another section; it comes first, under the title';
+  const body = [];
+  for (const l of lines.slice(at + 1)) { if (/^#{1,2}\s/.test(l.trim())) break; body.push(l); }
+  const bullets = body.filter((l) => /^\s{0,3}[-*+]\s+\S/.test(l)).length;
+  if (!bullets) return 'has a TL;DR with no bullets';
+  if (bullets > 7) return `has a TL;DR of ${bullets} bullets; seven at most, the rest belongs in the plan`;
+  return null;
 }
 function cmdCorrect() {
   const [actId] = positional;
