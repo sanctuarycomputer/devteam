@@ -7,6 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/lucide-static@0.460.0/font/lucide.css">
 <style>
   /* Geist tokens (vercel.com/geist), a Linear-style shell. Light and dark are separate scales. */
   :root {
@@ -143,6 +144,9 @@
   .col.none h3 { color: var(--muted); }
   button.tcard { cursor: pointer; text-align: left; width: 100%; height: auto; margin: 0 0 6px; font: inherit; font-size: 12px; font-weight: 400; color: var(--fg); background: var(--surface); border: 1px solid var(--line); display: block; white-space: normal; transition: none; }
   button.tcard:hover { border-color: var(--line-2); background: var(--hover); opacity: 1; }
+  button.tcard .t b { font-family: var(--sans); font-size: 12.5px; font-weight: 600; }
+  button.tcard .t b i { color: var(--amber-fg); font-size: 12px; }
+  .drawer dd a, .drawer p a { color: var(--blue-fg); text-decoration: underline; text-underline-offset: 2px; }
   button.tcard .badge { white-space: normal; height: auto; margin-top: 4px; }
   button.tcard.blocked { border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
   .tcard:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
@@ -221,6 +225,36 @@
   .rulebox { display: flex; gap: 8px; font-size: 12.5px; color: var(--fg-2); margin: 6px 0 0; align-items: flex-start; }
   .rulebox input { margin-top: 3px; }
 
+  /* icons, title bars, menus */
+  [class^="icon-"], [class*=" icon-"] { line-height: 1; vertical-align: -2px; }
+  .nav .nl { display: inline-flex; align-items: center; gap: 8px; }
+  .nav .nl i { font-size: 15px; color: var(--muted); width: 16px; text-align: center; }
+  .nav a:hover .nl i { color: var(--fg-2); }
+  .card-head { display: flex; align-items: center; gap: 8px; margin: -14px -16px 10px; padding: 9px 12px 9px 16px; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--fg-2); }
+  .card.small .card-head { margin: -10px -12px 8px; padding: 7px 10px 7px 12px; }
+  .card-head i { font-size: 14px; }
+  .card-head .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .card-head .badge { margin-right: 0; }
+  .icon-btn { margin: 0; height: 26px; width: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center; font-size: 15px; }
+  details.menu { position: relative; }
+  details.menu > summary { list-style: none; cursor: pointer; margin: 0; width: 26px; height: 22px; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center; color: var(--muted); }
+  details.menu > summary::-webkit-details-marker { display: none; }
+  details.menu > summary:hover { background: var(--hover); color: var(--fg); }
+  details.menu[open] > .pop { position: absolute; right: 0; top: 26px; z-index: 6; min-width: 240px; background: var(--raised); border: 1px solid var(--line-2); border-radius: 8px; padding: 8px 10px; box-shadow: 0 8px 24px rgba(0,0,0,.18); font-size: 12px; color: var(--fg-2); }
+  .pop .kv { display: grid; grid-template-columns: 70px minmax(0, 1fr); gap: 4px 8px; align-items: center; }
+  .pop code { overflow-wrap: anywhere; color: var(--fg); }
+  .pop button { height: 22px; font-size: 11px; margin: 6px 0 0; }
+  .card h4 a.title-link { color: inherit; }
+  .card h4 a.title-link:hover { text-decoration: underline; text-underline-offset: 3px; }
+
+  /* planners lane */
+  #planners { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; margin-bottom: 10px; }
+  #planners:empty { display: none; }
+  .plcard { cursor: pointer; text-align: left; height: auto; margin: 0; padding: 10px 12px; border-radius: 8px; border: 1px dashed var(--line-2); background: var(--surface); color: var(--fg); font-weight: 400; font-size: 12px; display: block; white-space: normal; }
+  .plcard:hover { background: var(--hover); opacity: 1; }
+  .plcard.stuck { border-style: solid; border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
+  .plcard b { font-size: 12.5px; }
+
   /* acts in plain words */
   .act-head { font-weight: 500; }
   .act-detail { color: var(--fg-2); font-size: 12.5px; margin-top: 2px; }
@@ -228,8 +262,10 @@
   /* drawer: a ticket, a question or an artifact */
   .scrim { position: fixed; inset: 0; background: rgba(0,0,0,.35); z-index: 20; }
   .drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(720px, 100vw); background: var(--surface); border-left: 1px solid var(--line); z-index: 21; overflow-y: auto; padding: 20px 24px 60px; box-shadow: -8px 0 32px rgba(0,0,0,.18); }
-  .drawer .close { position: sticky; top: 0; float: right; margin: 0; }
-  .drawer h2 { margin-top: 4px; padding-right: 60px; }
+  .drawer { padding-top: 0; }
+  .drawer-bar { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 12px; margin: 0 -24px 14px; padding: 14px 20px 12px 24px; background: var(--surface); border-bottom: 1px solid var(--line); }
+  .drawer-bar h2 { flex: 1; margin: 0; font-size: 15px; line-height: 1.4; }
+  @media (max-width: 900px) { .drawer-bar { margin: 0 -16px 12px; padding: 12px 12px 10px 16px; } }
   .drawer dl { display: grid; grid-template-columns: 130px minmax(0, 1fr); gap: 6px 12px; font-size: 12.5px; margin: 10px 0 16px; }
   .drawer dt { color: var(--muted); }
   .drawer dd { margin: 0; }
@@ -250,13 +286,13 @@
 <aside class="side">
   <div class="brand"><span class="dot"></span><b id="title">devteam</b></div>
   <nav class="nav">
-    <a href="#overview">Overview</a>
-    <a href="#goals">Goals <span class="count" id="n-goals"></span></a>
-    <a href="#inbox">Inbox <span class="count" id="n-questions"></span></a>
-    <a href="#progress">Progress <span class="count" id="n-progress"></span></a>
-    <a href="#board">Board <span class="count" id="n-active"></span></a>
-    <a href="#loop">Loop <span class="count" id="n-knowledge"></span></a>
-    <a href="#health">Health <span class="count" id="n-findings"></span></a>
+    <a href="#overview"><span class="nl"><i class="icon-layout-dashboard" aria-hidden="true"></i>Overview</span></a>
+    <a href="#goals"><span class="nl"><i class="icon-target" aria-hidden="true"></i>Goals</span> <span class="count" id="n-goals"></span></a>
+    <a href="#inbox"><span class="nl"><i class="icon-inbox" aria-hidden="true"></i>Inbox</span> <span class="count" id="n-questions"></span></a>
+    <a href="#progress"><span class="nl"><i class="icon-chart-line" aria-hidden="true"></i>Progress</span> <span class="count" id="n-progress"></span></a>
+    <a href="#board"><span class="nl"><i class="icon-kanban" aria-hidden="true"></i>Board</span> <span class="count" id="n-active"></span></a>
+    <a href="#loop"><span class="nl"><i class="icon-repeat" aria-hidden="true"></i>Loop</span> <span class="count" id="n-knowledge"></span></a>
+    <a href="#health"><span class="nl"><i class="icon-heart-pulse" aria-hidden="true"></i>Health</span> <span class="count" id="n-findings"></span></a>
   </nav>
   <div class="foot"><span id="when"></span><br><span id="logline"></span><br><span class="err" id="err"></span></div>
 </aside>
@@ -304,7 +340,8 @@
   </section>
 
   <section id="board">
-    <h2>Board</h2>
+    <h2>Board <span class="sub">tickets by stage; planners turning goals into tickets above</span></h2>
+    <div id="planners"></div>
     <div class="board" id="board-cols"></div>
   </section>
 
@@ -340,7 +377,7 @@
   </section>
 
   <section id="health">
-    <h2>Health <span class="sub">what needs attention, time and cost by phase, gates</span></h2>
+    <h2>Health <span class="sub">what the supervisor is watching and working on; anything it needs from you comes to your Inbox</span></h2>
     <div id="findings"></div>
     <div class="two" style="margin-top:14px">
       <div><h3>Hours by phase</h3><div class="bars card" id="phase-time"></div></div>
@@ -357,8 +394,8 @@
 </main>
 </div>
 <div class="scrim" id="scrim" hidden></div>
-<aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" hidden>
-  <button class="ghost close" id="drawer-close" aria-label="Close">Close</button>
+<aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-bar-title" hidden>
+  <div class="drawer-bar"><h2 id="drawer-bar-title"></h2><button class="ghost icon-btn" id="drawer-close" aria-label="Close"><i class="icon-x" aria-hidden="true"></i></button></div>
   <div id="drawer-body"></div>
 </aside>
 <script>
@@ -542,6 +579,7 @@ function columnOf(t) {
   return byPhase && RANK[byPhase] > RANK[byStage] && RANK[byStage] < RANK.Merged ? byPhase : byStage;
 }
 function board(items, crit) {
+  $('planners').innerHTML = plannerCards(DATA.planners || []);
   $('board-cols').innerHTML = COLUMNS.map(([name]) => {
     let cards = items.filter((t) => t.stage !== 'superseded' && columnOf(t) === name).sort((a, b) => (a.wave ?? 99) - (b.wave ?? 99));
     const total = cards.length;
@@ -549,7 +587,7 @@ function board(items, crit) {
     if (['Merged', 'Released'].includes(name)) cards = cards.sort((a, b) => (b.merged_at || '').localeCompare(a.merged_at || '')).slice(0, 5);
     return `<div class="col${total ? '' : ' none'}"><h3><span>${name}</span><span>${total}</span></h3>${cards.map((t) => `
       <button type="button" class="tcard ${t.phase === 'blocked' || t.waiting ? 'blocked' : ''}" data-ticket="${esc(t.id)}" aria-label="Open ${esc(t.title)}">
-        <b>${crit.has(t.id) ? '★ ' : ''}${esc(t.id)}</b><div class="t">${esc(t.title)}</div>
+        <div class="t"><b>${crit.has(t.id) ? '<i class="icon-flag" title="on the critical path" aria-label="on the critical path"></i> ' : ''}${esc(t.title)}</b></div>
         <div class="muted">${esc(t.component)} · ${esc(t.size)} · wave ${esc(t.wave ?? '–')}${t.target_release ? ` · ${esc(t.target_release)}` : ''}</div>
         <div>${t.waiting ? `<span class="badge high" title="${esc(t.waiting.line)}">${t.waiting.kind === 'limit' ? 'usage limit' : 'waiting on a prompt'}</span>` : ''}${t.held ? `<span class="badge" title="${esc(t.held)}">held</span>` : ''}${t.risk === 'high' ? '<span class="badge medium">high risk</span>' : ''}${t.phase === 'blocked' ? '<span class="badge high">blocked</span>' : ''}${t.phase && !['blocked', 'done'].includes(t.phase) && !['merged', 'released'].includes(t.stage) ? `<span class="badge low">${esc(PHASE_WORDS[t.phase] || t.phase)}${t.task ? ` ${esc(t.task)}` : ''}</span>` : ''}</div>
       </button>`).join('')}${total > cards.length ? `<div class="more">+ ${total - cards.length} more</div>` : ''}</div>`;
@@ -677,19 +715,25 @@ function questionCard(q, o, reasonText) {
   const notePh = goalAsk ? 'Notes for the planner: taken into account whatever you choose (needed to refine)' : list.length ? 'Add a note (optional), or your own answer' : 'Your answer';
   return `
     <div class="card qcard ${kindCls}" id="q-${esc(q.id)}">
-      <span class="badge ${q.kind === 'one-way-door' ? 'high' : q.kind === 'trust' ? 'good' : q.kind === 'owner-action' ? 'low' : 'medium'}">${esc(KIND_WORDS[q.kind] || words(q.kind))}</span>${(q.blocks || []).length ? `<span class="small muted">holds up ${q.blocks.map(tlink).join(', ')}</span>` : q.ticket ? `<span class="small muted">about ${tlink(q.ticket)}</span>` : ''}
+      ${cardHead(KIND_ICON[q.kind] || 'circle-help', `<span class="badge ${q.kind === 'one-way-door' ? 'high' : q.kind === 'trust' ? 'good' : q.kind === 'owner-action' ? 'low' : 'medium'}">${esc(KIND_WORDS[q.kind] || words(q.kind))}</span>`, { extra: (q.blocks || []).length ? `holds up ${q.blocks.map(tlink).join(', ')}` : q.ticket ? `about ${tlink(q.ticket)}` : '', id: q.id, rows: [['Asked', esc(when(q.asked_at))], ...(q.class ? [['Kind', esc(q.class)]] : [])] })}
       <h4>${linkify(q.question)}</h4>
       ${q.context ? `<p class="ctx">${linkify(q.context)}</p>` : ''}
       ${(q.links || []).length ? `<div class="links"><span class="muted small">Look at:</span>${q.links.map(linkOf).join('')}</div>` : ''}
       ${list.length ? `<div class="choices" role="radiogroup" aria-label="Choices">${choiceHtml}</div>` : ''}
       <textarea data-q="${esc(q.id)}" placeholder="${esc(notePh)}">${esc(drafts[q.id] || '')}</textarea>
-      ${goalAsk || ['owner-action', 'goal-definition'].includes(q.kind) ? '' : `<label class="rulebox"><input type="checkbox" data-rulebox="${esc(q.id)}"> Also keep this note as a standing rule, applied to ${esc(scopeWords(q.rule_scope))} from now on</label>`}
+      ${goalAsk || ['owner-action', 'goal-definition'].includes(q.kind) ? '' : `<label class="rulebox"><input type="checkbox" data-rulebox="${esc(q.id)}"> Keep this answer as a standing rule for ${esc(scopeWords(q.rule_scope))}</label>`}
       ${next}
       ${q.default ? `<p class="meta">If you don’t answer${q.deadline ? ` by ${when(q.deadline)}` : ''}, the supervisor goes with: <b>${esc(q.default)}</b></p>` : ''}
       <div class="row-inline"><button data-answer="${esc(q.id)}" ${goalAsk ? `data-goal-ask="${esc(q.goal)}"` : ''}>${q.kind === 'owner-action' || goalAsk ? 'Send' : 'Answer'}</button><span class="err" id="e-${esc(q.id)}"></span></div>
-      <div class="meta">${why} Asked ${when(q.asked_at)} · <span class="qid">${esc(q.id)}</span></div>
+      ${why ? `<div class="meta">${why}</div>` : ''}
     </div>`;
 }
+// A card's title bar: an icon and a label on the left, ids and timestamps tucked in a ⋯ menu.
+function cardHead(icon, label, { extra = '', id = null, rows = [] } = {}) {
+  const menu = id || rows.length ? `<details class="menu"><summary aria-label="Details"><i class="icon-ellipsis" aria-hidden="true"></i></summary><div class="pop"><div class="kv">${id ? `<span>ID</span><code>${esc(id)}</code>` : ''}${rows.map(([k, v]) => `<span>${esc(k)}</span><span>${v}</span>`).join('')}</div>${id ? `<button class="ghost" data-copy="${esc(id)}">Copy ID</button>` : ''}</div></details>` : '';
+  return `<div class="card-head"><i class="icon-${icon}" aria-hidden="true"></i>${label}<span class="grow">${extra}</span>${menu}</div>`;
+}
+const KIND_ICON = { 'owner-decision': 'scale', 'one-way-door': 'triangle-alert', clarification: 'circle-help', proposal: 'lightbulb', trust: 'users', 'goal-definition': 'target', 'goal-approval': 'flag', 'owner-action': 'zap' };
 const fileHref = (l) => `#file?${new URLSearchParams({ path: l.path, ...(l.ref ? { ref: l.ref } : {}), title: l.title || l.path })}`;
 const linkOf = (l) => (l.url ? `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.title)}</a>` : `<a href="${esc(fileHref(l))}">${esc(l.title)}</a>`);
 function answeredCard(q) {
@@ -754,15 +798,24 @@ function goalCard(g, R, openQs, week) {
   const design = s.ask?.links?.[0] ?? (['ready', 'met'].includes(g.status) && g.check.design ? { title: 'The design', path: `docs/devteam/${g.check.design}` } : null);
   const steps = s.key === 'let-go' ? '' : `<ol class="steps" aria-label="Progress">${GOAL_STEPS.map((x, i) => `<li class="${i < s.step ? 'done' : i === s.step ? 'now' : ''}">${x}</li>`).join('')}</ol>`;
   return `<div class="card goal goal-${s.key}">
-    <div class="goal-top"><span class="badge ${s.tone}">${esc(s.label)}</span>${g.priority ? `<span class="muted small">priority ${esc(g.priority)}</span>` : ''}</div>
-    <h4>${esc(g.title)}</h4>
+    ${cardHead('target', `<span class="badge ${s.tone}">${esc(s.label)}</span>`, { extra: g.priority ? `priority ${esc(g.priority)}` : '', id: g.id, rows: [['Opened', esc(when(g.created_at))]] })}
+    <h4><a class="title-link" href="#goal/${encodeURIComponent(g.id)}">${esc(g.title)}</a></h4>
     ${g.outcome ? `<p class="ctx">${esc(g.outcome)}</p>` : ''}
     ${steps}
     ${measureBar(g)}
     ${workBar(g, R, week)}
     ${s.next ? `<p class="goal-next">${s.next}</p>` : ''}
-    <div class="meta">${design ? `<a href="${esc(fileHref({ ...design, title: design.title || 'The design' }))}">Read the design</a> · ` : ''}${g.non_goals?.length ? `Not in scope: ${esc(g.non_goals.join('; '))}` : ''}</div>
+    <div class="meta"><a href="#goal/${encodeURIComponent(g.id)}">Open</a>${design ? ` · <a href="${esc(fileHref({ ...design, title: design.title || 'The design' }))}">Read the design</a>` : ''}${planningFor(g).length ? ` · ${planningFor(g).map((p) => `<a href="#planner/${encodeURIComponent(p.feature)}">planner on ${esc(p.title)}</a>${p.waiting ? ' <span class="badge high">stuck on a prompt</span>' : ''}`).join(', ')}` : ''}</div>
   </div>`;
+}
+const planningFor = (g) => (DATA?.planners || []).filter((p) => p.goals.includes(g.id));
+const ago = (m) => (m == null ? 'no activity yet' : m < 1 ? 'active just now' : m < 60 ? `active ${m} min ago` : `active ${Math.round(m / 60)} h ago`);
+function plannerCards(ps) {
+  return ps.map((p) => `<button type="button" class="plcard${p.waiting || !p.window ? ' stuck' : ''}" data-planner="${esc(p.feature)}">
+    <div><i class="icon-bot" aria-hidden="true"></i> <b>Planning ${esc(p.title)}</b></div>
+    <div class="muted">${p.goals.length ? `for ${p.goals.map((gid) => esc((DATA.ooda.goals.find((g) => g.id === gid) || {}).title || gid)).join(', ')} · ` : ''}${p.tickets ? `${p.tickets} ticket${p.tickets > 1 ? 's' : ''} so far · ` : ''}${esc(ago(p.minutes_silent))}</div>
+    <div>${p.waiting ? `<span class="badge high">${p.waiting.kind === 'limit' ? 'usage limit' : 'waiting on a prompt'}</span>` : ''}${!p.window ? '<span class="badge medium">window gone</span>' : ''}${p.waiting_on_supervisor.length ? '<span class="badge low">waiting for the supervisor</span>' : ''}</div>
+  </button>`).join('');
 }
 
 function renderOoda(o) {
@@ -803,11 +856,9 @@ function renderOoda(o) {
     <div class="card small"><span class="badge ${sevBadge(p.severity)}">sev ${esc(p.severity)}</span><span class="badge">${p.realized ? 'issue' : 'risk'}</span><b>${esc(p.title)}</b> <span class="muted">· ${esc(p.status)}${p.assigned_to ? `, ${esc(p.assigned_to)}` : ''}${(p.threatens || []).length ? ` · threatens ${p.threatens.map(esc).join(', ')}` : ''}</span>${p.detail ? `<div class="muted">${esc(p.detail)}</div>` : ''}</div>`).join('') : empty('None open.');
   const cand = o.knowledge.filter((k) => k.status === 'candidate');
   const acc = o.knowledge.filter((k) => k.status === 'accepted');
-  $('knowledge').innerHTML = (cand.length ? `<p class="small"><b>Candidates (${cand.length})</b></p>` + cand.map((k) => `
-    <div class="card small"><span class="badge medium">${esc(k.kind)}</span>${linkify(k.statement)} <span class="muted">· applies to ${esc(scopeWords(k.scope))}${k.confidence != null ? ` · ${Math.round(k.confidence * 100)}% sure` : ''} · based on ${(k.evidence || []).length} item(s)</span>
-      <div class="row-inline"><button class="ghost" data-know="${esc(k.id)}" data-status="accepted">Accept</button><button class="ghost" data-know="${esc(k.id)}" data-status="retired">Retire</button><span class="err" id="e-${esc(k.id)}"></span></div></div>`).join('') : '') +
+  $('knowledge').innerHTML = (cand.length ? `<p class="small">${cand.length} proposed lesson${cand.length > 1 ? 's are' : ' is'} waiting for you in the <a class="linkish" href="#inbox">Inbox</a>.</p>` : '') +
     (acc.length ? acc.map((k) => `<div class="card small"><span class="badge good">${esc(k.kind)}</span>${linkify(k.statement)}${k.valence < 0 ? ' <span class="muted">(avoid)</span>' : ''} <span class="muted">· applies to ${esc(scopeWords(k.scope))}${k.created_by === 'owner' ? ' · from you' : ''}</span></div>`).join('') : '') ||
-    empty('None yet. Recurring observations become candidates here for you to accept or retire.');
+    empty('None yet. Things noticed more than once become proposed lessons, which you keep or retire in the Inbox.');
 
   // Decide: trust ladder
   $('trust-table').innerHTML = '<tr><th>Kind of decision</th><th>Now</th><th>At most</th><th>Agreed with you</th><th>Corrected</th></tr>' + o.trust.map((t) => `
@@ -833,6 +884,9 @@ let lastFocus = null;
 function showDrawer(html) {
   if ($('drawer').hidden) lastFocus = document.activeElement;
   $('drawer-body').innerHTML = html;
+  const h = $('drawer-body').querySelector('h2#drawer-title');
+  $('drawer-bar-title').innerHTML = h ? h.innerHTML : '';
+  if (h) h.remove();
   $('drawer').hidden = false; $('scrim').hidden = false;
   document.body.style.overflow = 'hidden';
   $('drawer-close').focus();
@@ -841,7 +895,7 @@ function closeDrawer() {
   DRAWER = { kind: null, id: null };
   $('drawer').hidden = true; $('scrim').hidden = true;
   document.body.style.overflow = '';
-  if (/^#(ticket|q|file)/.test(location.hash)) history.replaceState(null, '', location.pathname + location.search);
+  if (/^#(ticket|q|file|goal|planner)/.test(location.hash)) history.replaceState(null, '', location.pathname + location.search);
   lastFocus?.focus?.();
 }
 const STAGE_WORDS = { planned: 'waiting on other tickets', ready: 'ready to start', "spec'd": 'spec approved', 'planned-in-detail': 'plan approved', building: 'being built', 'in-review': 'in review', merged: 'merged', released: 'released', superseded: 'replaced by another ticket' };
@@ -895,6 +949,52 @@ async function openTicket(id, { quiet = false } = {}) {
     ${items.length ? `<ol class="tl">${items.map(([l, [c, h]]) => `<li class="${c}"><time>${when(l.at)}</time>${h}</li>`).join('')}</ol>` : empty('Nothing logged yet.')}`;
   showDrawer(html);
 }
+function openGoal(id) {
+  const g = (DATA.ooda.goals || []).find((x) => x.id === id);
+  if (!g) return showDrawer(`<h2 id="drawer-title">No goal ${esc(id)}</h2>`);
+  DRAWER = { kind: 'goal', id };
+  const R = DATA.ooda.roadmap;
+  const s = goalState(g, R, DATA.questions || []);
+  const r = R.goals.find((x) => x.id === id);
+  const feats = (r?.features || []).map((f) => R.features[f]).filter(Boolean);
+  const week = (d) => (d ? `week of ${new Date(`${d}T00:00:00Z`).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })}` : 'no date');
+  const asks = [...(DATA.questions || []), ...(DATA.ooda.answered || [])].filter((q) => q.goal === id || (q.kind === 'goal-definition' && q.question.toLowerCase().includes(String(g.title).toLowerCase().split(':')[0])));
+  const design = s.ask?.links?.[0] ?? (['ready', 'met'].includes(g.status) && g.check.design ? { title: 'The design', path: `docs/devteam/${g.check.design}` } : null);
+  const decisions = (g.updates || []).filter((u) => u.decision).map((u) => u.decision);
+  showDrawer(`<h2 id="drawer-title">${esc(g.title)}</h2>
+    <p><span class="badge ${s.tone}">${esc(s.label)}</span></p>
+    ${g.outcome ? `<p class="ctx measure">${esc(g.outcome)}</p>` : ''}
+    ${measureBar(g)}${workBar(g, R, week)}
+    ${s.next ? `<p class="goal-next measure">${s.next}</p>` : ''}
+    <dl>
+      ${design ? `<dt>Design</dt><dd><a href="${esc(fileHref({ ...design, title: design.title || 'The design' }))}">${esc(design.title || 'The design')}</a></dd>` : ''}
+      ${g.horizon ? `<dt>By</dt><dd>${esc(new Date(Date.parse(g.horizon)).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' }))}</dd>` : ''}
+      ${g.priority ? `<dt>Priority</dt><dd>${esc(g.priority)}</dd>` : ''}
+      ${(g.preconditions || []).length ? `<dt>Must be true first</dt><dd><ul>${g.preconditions.map((x, i) => `<li>${esc(x)}${(r?.unplanned || []).some((u) => u.n === i + 1) && g.status === 'ready' ? ' <span class="badge medium">no plan yet</span>' : ''}</li>`).join('')}</ul></dd>` : ''}
+      ${(g.non_goals || []).length ? `<dt>Not in scope</dt><dd><ul>${g.non_goals.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></dd>` : ''}
+      ${feats.length ? `<dt>Features</dt><dd><ul>${feats.map((v) => `<li>${esc(v.title || v.feature)}: ${v.points_total - v.points_left} of ${v.points_total} points${v.done ? ', done' : ''}</li>`).join('')}</ul></dd>` : ''}
+      ${planningFor(g).length ? `<dt>Planners</dt><dd>${planningFor(g).map((p) => `<a href="#planner/${encodeURIComponent(p.feature)}">${esc(p.title)}</a> (${esc(ago(p.minutes_silent))})`).join(', ')}</dd>` : ''}
+      ${(g.readings || []).length ? `<dt>Readings</dt><dd><ul>${g.readings.map((x) => `<li>${esc(x.value)} ${esc(g.measure?.unit || '')} · ${esc(when(x.at))}</li>`).join('')}</ul></dd>` : ''}
+      ${decisions.length ? `<dt>Your decisions</dt><dd><ul>${decisions.map((d) => `<li><b>${esc(words(d.verdict))}</b>${d.notes ? `: ${esc(d.notes)}` : ''}</li>`).join('')}</ul></dd>` : ''}
+      ${asks.length ? `<dt>Questions</dt><dd><ul>${asks.map((q) => `<li>${qlink(q.id, q.question)}${q.status === 'open' ? ' <span class="badge medium">open</span>' : ''}</li>`).join('')}</ul></dd>` : ''}
+      <dt>ID</dt><dd><code>${esc(g.id)}</code></dd>
+    </dl>`);
+}
+function openPlanner(feature) {
+  const p = (DATA.planners || []).find((x) => x.feature === feature);
+  if (!p) return showDrawer(`<h2 id="drawer-title">No planner for ${esc(feature)}</h2><p class="muted">Its plan may have landed already.</p>`);
+  DRAWER = { kind: 'planner', id: feature };
+  showDrawer(`<h2 id="drawer-title">Planning ${esc(p.title)}</h2>
+    <dl>
+      <dt>Status</dt><dd>${esc(cap(ago(p.minutes_silent)))}${p.waiting ? ` · <span class="badge high">${p.waiting.kind === 'limit' ? 'usage limit' : 'waiting on a prompt'}</span> ${esc(p.waiting.line)}` : ''}${!p.window ? ` · <span class="badge medium">window gone</span> ${esc(p.problem || '')}` : ''}</dd>
+      ${p.goals.length ? `<dt>For goal</dt><dd>${p.goals.map((gid) => `<a href="#goal/${encodeURIComponent(gid)}">${esc((DATA.ooda.goals.find((g) => g.id === gid) || {}).title || gid)}</a>`).join(', ')}</dd>` : ''}
+      <dt>Tickets so far</dt><dd>${esc(p.tickets)}</dd>
+      ${p.waiting_on_supervisor.length ? `<dt>Asked the supervisor</dt><dd><ul>${p.waiting_on_supervisor.map((m) => `<li>${esc(MSG_WORDS[m.kind] || m.kind)}: ${linkify(m.text)}</li>`).join('')}</ul></dd>` : ''}
+      <dt>Branch</dt><dd><code>${esc(p.branch)}</code></dd>
+      <dt>Window</dt><dd><code>${esc(`plan-${p.feature}`)}</code></dd>
+    </dl>
+    <p class="meta">Its plan lands as one reviewed PR; until then its tickets aren't on the board.</p>`);
+}
 function openQuestion(id) {
   const q = allQuestions().find((x) => x.id === id);
   if (!q) return showDrawer(`<p class="err">No question ${esc(id)}.</p>`);
@@ -922,6 +1022,8 @@ function route() {
   const h = decodeURIComponent(location.hash.slice(1));
   if (h.startsWith('ticket/')) return void openTicket(h.slice(7));
   if (h.startsWith('q/')) return void openQuestion(h.slice(2));
+  if (h.startsWith('goal/')) return void openGoal(h.slice(5));
+  if (h.startsWith('planner/')) return void openPlanner(h.slice(8));
   if (h.startsWith('file?')) return void openFile(new URLSearchParams(location.hash.slice(6)));
   if (!$('drawer').hidden) { $('drawer').hidden = true; $('scrim').hidden = true; document.body.style.overflow = ''; DRAWER = { kind: null, id: null }; }
 }
@@ -963,7 +1065,7 @@ function render(d) {
   const active = d.tickets.filter((t) => t.phase && !['done', 'parked'].includes(t.phase)).length;
   const count = (id, n, hot = false) => { const el = $(id); el.textContent = n || ''; el.classList.toggle('hot', hot && n > 0); };
   count('n-goals', o.goals.length);
-  count('n-questions', d.questions.length, true);
+  count('n-questions', d.questions.length + o.knowledge.filter((k) => k.status === 'candidate').length, true);
   count('n-active', active);
   count('n-findings', m.findings.length, m.findings.some((f) => f.severity === 'high'));
   count('n-knowledge', o.knowledge.filter((k) => k.status === 'candidate').length);
@@ -988,12 +1090,19 @@ function render(d) {
 
   // Keep anything half-typed or half-open across refreshes.
   document.querySelectorAll('textarea[data-q]').forEach((t) => { drafts[t.dataset.q] = t.value; });
-  const kept = [...document.querySelectorAll('input[data-reason], input[data-overrule], input[data-ack-reason]')].map((el) => [el.dataset.reason ? `input[data-reason="${el.dataset.reason}"]` : el.dataset.ackReason ? `input[data-ack-reason="${CSS.escape(el.dataset.ackReason)}"]` : `input[data-overrule="${el.dataset.overrule}"]`, el.value]);
+  const kept = [...document.querySelectorAll('input[data-reason], input[data-overrule]')].map((el) => [el.dataset.reason ? `input[data-reason="${el.dataset.reason}"]` : `input[data-overrule="${el.dataset.overrule}"]`, el.value]);
   const keptChecks = [...document.querySelectorAll('input[data-rulebox]:checked, input[data-auto]:checked')].map((el) => el.dataset.rulebox ? `input[data-rulebox="${el.dataset.rulebox}"]` : `input[data-auto="${el.dataset.auto}"][value="${el.value}"]`);
   const openForms = [...document.querySelectorAll('[data-correct-form]')].filter((f) => !f.hidden).map((f) => f.dataset.correctForm);
   const reasonText = Object.fromEntries((o.reasons || []).map((r) => [r.id, r.means]));
-  const goalCards = '';
-  $('questions').innerHTML = goalCards + (d.questions.length ? d.questions.map((q) => questionCard(q, o, reasonText)).join('') : empty('Nothing needs you right now. Decisions and actions only you can take show here.'));
+  const cands = o.knowledge.filter((k) => k.status === 'candidate');
+  const goalCards = cands.map((k) => `
+    <div class="card qcard trust">
+      ${cardHead('lightbulb', '<span class="badge good">Lesson to keep?</span>', { extra: `applies to ${esc(scopeWords(k.scope))}`, id: k.id, rows: [['Proposed', esc(when(k.created_at))], ['By', esc(who(k.created_by))]] })}
+      <h4>${linkify(k.statement)}</h4>
+      <p class="ctx">${esc(cap(who(k.created_by)))} proposes this as a ${esc(k.kind)}${k.confidence != null ? `, ${Math.round(k.confidence * 100)}% sure` : ''}, based on ${(k.evidence || []).length} thing${(k.evidence || []).length === 1 ? '' : 's'} it noticed. Accepted lessons go into the instructions of every agent they apply to.</p>
+      <div class="row-inline"><button data-know="${esc(k.id)}" data-status="accepted">Keep it</button><button class="ghost" data-know="${esc(k.id)}" data-status="retired">Retire it</button><span class="err" id="e-${esc(k.id)}"></span></div>
+    </div>`).join('');
+  $('questions').innerHTML = goalCards + (d.questions.length ? d.questions.map((q) => questionCard(q, o, reasonText)).join('') : cands.length ? '' : empty('Nothing needs you right now. Decisions and actions only you can take show here.'));
   $('answered-sum').textContent = `Answered (${o.answered.length})`;
   $('answered').innerHTML = o.answered.length ? o.answered.map(answeredCard).join('') : empty('Nothing answered yet.');
 
@@ -1003,11 +1112,10 @@ function render(d) {
 
   const fkey = (f) => `${f.kind} ${f.subject}`;
   $('findings').innerHTML = (m.findings.length ? m.findings.map((f) => `
-    <div class="card"><span class="badge ${f.severity}">${f.severity}</span><b>${esc(f.kind)}</b> · <code>${esc(f.subject)}</code>
-    <div class="muted">${esc(f.detail)}</div><div>→ ${esc(f.suggestion)}</div>
-    <div class="row-inline"><input type="text" data-ack-reason="${esc(fkey(f))}" placeholder="Why it can wait"><button class="ghost" data-ack="${esc(fkey(f))}" data-kind="${esc(f.kind)}" data-subject="${esc(f.subject)}">Set aside</button><span class="err" id="e-${esc(fkey(f))}"></span></div></div>`).join('') : empty('None. Blockers and slow spots show here, each with a next step.')) +
+    <div class="card">${cardHead(f.severity === 'high' ? 'triangle-alert' : 'activity', `<span class="badge ${f.severity}">${esc(f.severity)}</span>${esc(words(f.kind))}`, { extra: subjectLink(f.subject) })}
+    <div>${linkify(f.detail)}</div><div class="muted">Next step for the supervisor: ${linkify(f.suggestion)}</div></div>`).join('') : empty('None. Blockers and slow spots show here, each with the supervisor’s next step.')) +
     ((m.acknowledged || []).length ? `<h3 style="margin-top:14px">Set aside</h3>` + m.acknowledged.map((f) => `
-    <div class="card small"><span class="badge">${esc(f.severity)}</span><b>${esc(f.kind)}</b> · <code>${esc(f.subject)}</code> <span class="muted">· ${esc(f.ack.by)}: ${esc(f.ack.reason)} · until ${when(f.ack.until)}</span></div>`).join('') : '');
+    <div class="card small"><b>${esc(words(f.kind))}</b> ${subjectLink(f.subject)} <span class="muted">· set aside by ${esc(who(f.ack.by))}: ${esc(f.ack.reason)} · until ${when(f.ack.until)}</span></div>`).join('') : '');
 
   bars($('phase-time'), m.phase_hours, (v) => `${v}h`, 'No time yet. Workers write a phase line as they move through a ticket.');
   bars($('phase-cost'), m.phase_usd, (v) => `$${v}`, 'No spend recorded yet. Workers report it with <code>phase … --usd</code>.');
@@ -1075,6 +1183,10 @@ $('view').addEventListener('change', (e) => {
 });
 
 document.addEventListener('click', async (ev) => {
+  const pl = ev.target.closest('[data-planner]');
+  if (pl) { location.hash = `planner/${pl.dataset.planner}`; return; }
+  const cp = ev.target.closest('[data-copy]');
+  if (cp) { try { await navigator.clipboard.writeText(cp.dataset.copy); cp.textContent = 'Copied'; } catch { cp.textContent = 'Select and copy'; } return; }
   const tcard = ev.target.closest('[data-ticket]');
   if (tcard) { location.hash = `ticket/${tcard.dataset.ticket}`; return; }
   const pick = ev.target.closest('input[data-pick]');
@@ -1098,8 +1210,10 @@ document.addEventListener('click', async (ev) => {
     if (goalId && picked === 'Refine' && !note) { if (err) err.textContent = 'Say in the notes what should change.'; return; }
     const auto = document.querySelector(`input[data-auto="${id}"]:checked`)?.value;
     const asRule = document.querySelector(`input[data-rulebox="${id}"]`)?.checked;
-    if (asRule && !note) { if (err) err.textContent = 'Write the rule in the note to keep it as a standing rule.'; return; }
-    const rule = asRule ? note : undefined;
+    if (asRule && !note && !picked) { if (err) err.textContent = 'Pick an answer or write the rule in the note to keep it as a standing rule.'; return; }
+    // the note is the rule's wording; without one, the chosen answer is the standing answer to questions like this
+    const qText = DATA.questions.find((x) => x.id === id)?.question || '';
+    const rule = asRule ? (note || `${picked}: the standing answer to questions like “${qText}”`) : undefined;
     btn.classList.add('busy'); btn.disabled = true; btn.setAttribute('aria-busy', 'true');
     const label = btn.textContent; btn.dataset.label = label; btn.textContent = 'Posting…';
     let ok = false;
@@ -1126,12 +1240,6 @@ document.addEventListener('click', async (ev) => {
   if (over) {
     const id = over.dataset.overruleSend;
     return void post('answer', { id, answer: document.querySelector(`input[data-overrule="${id}"]`).value }, id);
-  }
-  const ack = ev.target.closest('[data-ack]');
-  if (ack) {
-    const key = ack.dataset.ack;
-    const reason = document.querySelector(`input[data-ack-reason="${CSS.escape(key)}"]`).value;
-    return void post('ack', { kind: ack.dataset.kind, subject: ack.dataset.subject, reason }, key);
   }
   const send = ev.target.closest('[data-correct-send]');
   if (send) {

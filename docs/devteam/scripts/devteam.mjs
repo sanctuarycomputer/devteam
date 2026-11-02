@@ -1003,19 +1003,54 @@ const PANE_WAITS = [
   ['prompt', /Do you want to (proceed|make this edit|create|allow|run)|Do you trust the files|\[y\/n\]|\(y\/n\)|Press Enter to continue|❯\s*1\.\s*Yes/i],
 ];
 const paneWaits = new Map();
-function paneWaiting(id) {
-  if (paneWaits.has(id)) return paneWaits.get(id);
+function paneWaitingIn(window) {
+  if (paneWaits.has(window)) return paneWaits.get(window);
   let found = null;
-  if (activeWorker(id)) {
-    const { target } = resolvePane(`${loadSettings().tmux_session}:${id}`);
-    const lines = target ? (sh('tmux', ['capture-pane', '-p', '-t', target]) ?? '').split('\n').map((l) => l.trim()).filter(Boolean).slice(-15) : [];
-    for (const [kind, re] of PANE_WAITS) {
-      const hit = lines.find((l) => re.test(l));
-      if (hit) { found = { kind, line: hit.slice(0, 200) }; break; }
-    }
+  const { target } = resolvePane(`${loadSettings().tmux_session}:${window}`);
+  const lines = target ? (sh('tmux', ['capture-pane', '-p', '-t', target]) ?? '').split('\n').map((l) => l.trim()).filter(Boolean).slice(-15) : [];
+  for (const [kind, re] of PANE_WAITS) {
+    const hit = lines.find((l) => re.test(l));
+    if (hit) { found = { kind, line: hit.slice(0, 200) }; break; }
   }
-  paneWaits.set(id, found);
+  paneWaits.set(window, found);
   return found;
+}
+const paneWaiting = (id) => (activeWorker(id) ? paneWaitingIn(id) : null);
+
+// Planners in flight: a plan/<feature> branch whose plan file hasn't landed on main. They write no phase lines, so their
+// last sign of life is the newest of: a live log line (messages, observations), a commit on the
+// branch, their plan file, an uncommitted edit in their worktree. Their pane says if they're stuck.
+function planners() {
+  const s = loadSettings();
+  const main = mainRef();
+  const lines = readLog().lines;
+  const branches = (git(['for-each-ref', '--format=%(refname:short)', 'refs/heads/plan/']) ?? '').split('\n').filter(Boolean);
+  return branches.map((b) => {
+    const feature = b.slice('plan/'.length);
+    const by = `plan-${feature}`;
+    // landed once its plan file is on main (a fresh planner's branch sits at main's tip, uncommitted)
+    if (main && git(['cat-file', '-e', `${main}:${projectRel}/log/${by}.jsonl`]) !== null) return null;
+    const wt = path.join(mainRoot, '.worktrees', by);
+    const planFile = path.join(wt, projectRel, 'log', `${by}.jsonl`);
+    const graph = readText(planFile) ?? git(['show', `${b}:${projectRel}/log/${by}.jsonl`]) ?? '';
+    const fl = graph.split('\n').filter(Boolean).map((t) => { try { return JSON.parse(t); } catch { return null; } }).filter((o) => o?.type === 'feature');
+    const feat = fl.reduce((a, o) => ({ ...a, ...o }), {});
+    const stamps = [...lines.filter((l) => l.by === by).map((l) => l.at), git(['log', '-1', '--format=%cI', b])];
+    for (const p of [planFile, ...(fs.existsSync(wt) ? (git(['status', '--porcelain'], wt) ?? '').split('\n').filter(Boolean).map((l) => path.join(wt, l.slice(3).replace(/^"|"$/g, ''))) : [])]) {
+      try { stamps.push(fs.statSync(p).mtime.toISOString()); } catch {}
+    }
+    const last = stamps.filter(Boolean).map((x) => new Date(x).toISOString()).sort().pop() ?? null;
+    const { target, problem } = resolvePane(`${s.tmux_session}:${by}`);
+    const msgs = lines.filter((l) => l.type === 'message');
+    const replied = new Set(msgs.map((m) => m.re).filter(Boolean));
+    const asking = msgs.filter((m) => m.by === by && !['info', 'ruling', 'answer'].includes(m.kind) && !replied.has(m.id));
+    return {
+      feature, title: feat.title ?? feature, goals: feat.goals ?? [], tickets: graph.split('\n').filter((t) => t.includes('"type":"ticket"') && t.includes('"op":"new"')).length,
+      branch: b, window: !!target, problem: target ? null : problem, waiting: target ? paneWaitingIn(by) : null,
+      last_seen: last, minutes_silent: last ? Math.round((Date.now() - Date.parse(last)) / 60000) : null,
+      waiting_on_supervisor: asking.map((m) => ({ id: m.id, kind: m.kind, text: m.text })),
+    };
+  }).filter(Boolean);
 }
 
 // The supervisor's approval of a ticket's spec or plan is an act that refers to the ticket.
@@ -2521,6 +2556,12 @@ function collectMetrics(since) {
     if (wait) add('high', 'blocked-prompt', id, wait.kind === 'limit' ? `a usage-limit banner in its pane: "${wait.line}"` : `waiting on a prompt in its pane: "${wait.line}"`, `look (tmux select-window -t ${settings.tmux_session}:${id}) and clear it (supervisor.md §11); a permission prompt a worker should never see means agent_command or its deny rules need a fix`);
     if (w && w.phase && !['done', 'parked', 'awaiting-word', 'blocked'].includes(w.phase) && !mergeShaFor(id) && w.minutes_silent > settings.stale_after_minutes) add('high', 'stale-worker', id, `silent for ${w.minutes_silent} min (phase ${w.phase})`, 'check its pane; resume it (supervisor.md, recovery)');
   }
+  for (const p of planners()) {
+    const who = `plan-${p.feature}`;
+    if (p.waiting) add('high', 'blocked-prompt', who, p.waiting.kind === 'limit' ? `a usage-limit banner in its pane: "${p.waiting.line}"` : `waiting on a prompt in its pane: "${p.waiting.line}"`, `look (tmux select-window -t ${settings.tmux_session}:${who}) and clear it (supervisor.md §11)`);
+    else if (!p.window) add('medium', 'planner-gone', who, `plan/${p.feature} isn't on main and its window is gone (${p.problem})`, `resume it (planner ${p.feature} --resume) or, if the plan was dropped, delete the branch`);
+    else if (!p.waiting_on_supervisor.length && p.minutes_silent > settings.stale_after_minutes) add('high', 'stale-planner', who, `no sign of life for ${p.minutes_silent} min`, 'check its pane; message it or resume it (supervisor.md §11)');
+  }
   for (const msg of openMsgs.filter((x) => now - Date.parse(x.created_at) > 30 * 60000)) add('medium', 'unanswered-message', msg.id, `${msg.kind} from ${msg.created_by}, ${Math.round((now - Date.parse(msg.created_at)) / 60000)} min old`, `reply with --re ${msg.id}`);
   for (const q of openQs.filter((x) => now - Date.parse(x.asked_at) > grace)) add('high', 'owner-question-waiting', q.id, q.question.slice(0, 120), q.default ? 'apply its default' : 'remind the owner; it blocks work');
   if (recentQs.length >= 4 && answeredRecent / recentQs.length < 0.5) add('high', 'inbox-stalled', 'owner questions', `${answeredRecent} of ${recentQs.length} answered in 14 days`, 'remind the owner what is blocked; give defaults where the class allows; withdraw what no longer matters');
@@ -2644,6 +2685,7 @@ function dashboardData() {
     open_messages: msgs.filter((m) => !['info', 'ruling', 'answer'].includes(m.kind) && !replied.has(m.id)).map((m) => ({ id: m.id, kind: m.kind, actor: m.created_by, to: m.to, summary: m.text })),
     metrics: collectMetrics(0),
     progress: collectProgress(),
+    planners: planners(),
     ooda: collectOoda(),
   };
 }

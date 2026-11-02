@@ -29,7 +29,7 @@ Run it about every 10 minutes when PRs are converging, 30 when quiet. A worker's
 
 **Orient**
 3. Fix drift (§4).
-4. `devteam.mjs orient`: every recurring signal (three or more observations or corrections on one key) gets explained: a lesson (`knowledge add --kind lesson --scope … --evidence …`), a problem (`problem add`), or noise (say so in an observation). Accept knowledge that holds (`knowledge set <id> --status accepted`); it goes into the next prompts in that scope. Triage open problems: assign, mitigate, resolve.
+4. `devteam.mjs orient`: every recurring signal (three or more observations or corrections on one key) gets explained: a lesson (`knowledge add --kind lesson --scope … --evidence …`), a problem (`problem add`), or noise (say so in an observation). A candidate lesson waits in the owner's inbox to keep or retire; accept one yourself (`knowledge set <id> --status accepted`) only when the evidence is plain, and the owner can still retire it. Accepted knowledge goes into the next prompts in that scope. Triage open problems: assign, mitigate, resolve.
 
 **Decide**
 5. Reply to messages (`messages --open`), merge requests and design changes on the critical path first (§7). Read new owner answers (`questions --all`; an answer arrives in your pane as its id) and relay them to the workers they affect.
@@ -145,6 +145,7 @@ Due `retro_every_days` after the last one, or when a feature has fully merged si
 
 ## 11. Recovery
 
+- Planners are watched like workers: the board's planner lane shows each `plan/<feature>` in flight with its last sign of life, and the metrics raise `blocked-prompt`, `stale-planner` (silent past `stale_after_minutes` with nothing asked of you) and `planner-gone` (its window closed before its plan landed; resume it or delete the branch).
 - A silent or frozen worker: `tmux capture-pane -p -t <session>:<id>`. A modal or a limit banner: clear it. The metrics find these for you: a `blocked-prompt` finding (and a "waiting on a prompt" badge on the board, `WAITING ON A PROMPT` in `status`) names the ticket and the line its pane is stuck on, even while the phase is fresh. A permission prompt a worker should never see is a settings problem: fix `agent_command` or the deny rules so the next worker doesn't stop there. The agent process gone: `devteam.mjs worker <id> --resume`; the worker re-orients from its files and the log.
 - A provider limit across the fleet: set sessions to continue at reset where the agent supports it.
 - Kill only a known PID, never by pattern on a shared machine.
