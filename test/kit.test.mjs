@@ -702,6 +702,14 @@ test('devteam kit', async (t) => {
     const Qd = must(['ask', '--question', 'Which checkout first?', '--goal', Gi, '--recommendation', 'cards'], { role: 'sup' });
     assert.ok(!(idle()?.suggestion ?? '').includes(Gi), 'design questions open: someone is designing it');
     must(['withdraw', Qd, '--reason', 'test'], { role: 'sup' });
+    // the one reason to hold it back: its design depends on another goal's, recorded with why
+    const Gp = must(['goal', 'add', '--title', 'Checkout prerequisites', '--priority', '8'], { role: 'sup' });
+    assert.doesNotMatch(must(['goal', 'check', Gp]), /horizon/, 'a date is the owner\'s to give, never a gap to fill');
+    assert.match(dt(['goal', 'set', Gi, '--plan-after', Gp], { role: 'sup' }).err, /needs --reason/);
+    must(['goal', 'set', Gi, '--plan-after', Gp, '--reason', 'the payment boundary is decided there'], { role: 'sup' });
+    assert.ok(!(idle()?.suggestion ?? '').includes(Gi), 'waiting on another goal\'s design, recorded');
+    must(['goal', 'status', Gp, 'abandoned']);
+    assert.match(idle()?.suggestion ?? '', new RegExp(Gi), 'the goal it waited on was let go: plan it now');
     must(['goal', 'status', Gi, 'abandoned']);
   });
 
