@@ -394,6 +394,7 @@ function fold(all) {
   const lines = [...all].sort((a, b) => a.at.localeCompare(b.at) || a.__file.localeCompare(b.__file) || a.__line - b.__line);
   const objects = new Map();
   const ignored = [];
+  const goalApprovals = new Set();
   for (const l of lines) {
     if (l.op !== 'new') continue;
     if (objects.has(l.id)) {
@@ -422,8 +423,11 @@ function fold(all) {
       continue;
     }
     if (obj.type === 'goal' && cls === 'supervisor' && (obj.status ?? 'draft') !== 'draft') {
-      ignored.push({ line: l, why: 'the supervisor edits a goal only while it is a draft' });
-      continue;
+      const problem = !l.approved ? null : goalApprovals.has(l.approved) ? `${l.approved} already authorised a goal set` : goalChangeProblem(objects.get(l.approved), obj.id, l.approved, l);
+      if (!l.approved || problem) {
+        ignored.push({ line: l, why: l.approved ? `the supervisor edits a ${obj.status} goal only with an answered goal-change question: ${problem}` : 'the supervisor edits a goal only while it is a draft' });
+        continue;
+      }
     }
     if (obj.type === 'question' && l.status === 'defaulted' && !obj.default) {
       ignored.push({ line: l, why: 'the question has no default' });
@@ -440,6 +444,7 @@ function fold(all) {
     }
     if (Object.keys(changed).length) obj.updates.push({ at: l.at, by: l.by, ...(l.channel ? { channel: l.channel } : {}), ...changed });
     else ignored.push({ line: l, why: 'overridden by a higher-ranked writer' });
+    if (obj.type === 'goal' && changed.approved) goalApprovals.add(changed.approved);
   }
   for (const o of objects.values()) delete o.__rank;
   return { objects, ignored };
@@ -647,13 +652,32 @@ function questionView(q) {
   const matched = ans ? !!q.recommendation && [norm(ans.answer), norm(ans.answer.split(' — ')[0])].includes(norm(q.recommendation)) : null;
   return {
     id: q.id, kind: q.kind, class: q.class ?? null, scope: q.scope ?? null, ticket: q.ticket ?? null, re: q.re ?? null, asked_at: q.created_at,
-    question: q.question, context: q.context ?? '', options: q.options ?? [], choices: q.choices ?? [], links: q.links ?? [], goal: q.goal ?? null, rule_scope: q.rule_scope ?? null, recommendation: q.recommendation ?? '', confidence: q.confidence ?? null,
+    question: q.question, context: q.context ?? '', options: q.options ?? [], choices: q.choices ?? [], links: q.links ?? [], goal: q.goal ?? null, change: q.change ?? null, rule_scope: q.rule_scope ?? null, recommendation: q.recommendation ?? '', confidence: q.confidence ?? null,
     default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], evidence: q.evidence ?? [], note: q.note ?? null, why_asked: q.why_asked ?? null,
     status, answer, answered_by: answeredBy, answered_at: answeredAt, matched,
     autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans?.channel ?? null, said: ans?.said ?? null,
   };
 }
 const questions = () => logObjects('question').map(questionView);
+
+// Why question q does not authorise the supervisor to change goal goalId (null when it does): it
+// is a goal-change question about that goal, answered by the owner with its recommendation (an
+// answer other than the recommendation declines or alters the change, so the supervisor asks again).
+// The goal fields a goal-change question may propose, and that its answer then authorises exactly.
+const GOAL_CHANGE_FIELDS = ['title', 'outcome', 'measure', 'horizon', 'non_goals', 'preconditions', 'priority', 'milestones', 'plan_after'];
+const goalFieldsOf = (l) => Object.fromEntries(Object.entries(l).filter(([k]) => GOAL_CHANGE_FIELDS.includes(k)));
+function goalChangeProblem(q, goalId, qid, l = null) {
+  const v = q?.type === 'question' ? questionView(q) : null;
+  if (!v) return `${qid} is not a question`;
+  if (v.class !== 'goal-change') return `${v.id} was asked in class ${v.class ?? '(none)'}, not goal-change`;
+  if (v.goal !== goalId) return `${v.id} is about ${v.goal ?? 'no goal'}, not ${goalId} (ask with --goal ${goalId})`;
+  if (!v.change || !Object.keys(v.change).length) return `${v.id} carries no change (ask with --change '{…}'), so its answer authorises nothing specific`;
+  if (v.status !== 'answered') return `${v.id} is not answered by the owner (${v.status})`;
+  if (!v.matched) return `${v.id} was answered "${v.answer}", not its recommendation${v.recommendation ? ` ("${v.recommendation}")` : ''}; ask again for the change the owner wants`;
+  // the owner approved this change and no other: the set must be exactly it
+  if (l && canonical(goalFieldsOf(l)) !== canonical(v.change)) return `the set (${Object.keys(goalFieldsOf(l)).join(', ') || 'nothing'}) is not the change ${v.id} proposed`;
+  return null;
+}
 
 // The correction on an act, with who made it and when.
 const correctionOf = (a) => {
@@ -1773,6 +1797,18 @@ function jsonFlag(name) {
   if (v === undefined) return undefined;
   try { return JSON.parse(v); } catch (e) { return die(`--${name} is not valid JSON: ${e.message}`); }
 }
+// --change '{…}': the exact goal fields a goal-change question proposes; required for one about a goal.
+function goalChangeFlag(cls) {
+  const c = jsonFlag('change');
+  if (c === undefined) {
+    if (cls === 'goal-change' && flagStr('goal')) die('a goal-change question about a goal says the exact change: --change \'{"milestones": […]}\' (its answer authorises that and nothing else)');
+    return undefined;
+  }
+  if (cls !== 'goal-change' || !flagStr('goal')) die('--change belongs on a goal-change question with --goal');
+  const bad = Object.keys(c).filter((k) => !GOAL_CHANGE_FIELDS.includes(k));
+  if (!Object.keys(c).length || bad.length) die(`--change sets goal fields (${GOAL_CHANGE_FIELDS.join(', ')})${bad.length ? `; not ${bad.join(', ')}` : ''}`);
+  return c;
+}
 function cmdAsk() {
   supervisorOnly('ask');
   const q = flagStr('question') ?? die('ask needs --question');
@@ -1819,7 +1855,7 @@ function cmdAsk() {
   const scope = flagStr('scope') ?? null;
   const line = appendLog({
     type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), question: q, context: kind === 'goal-approval' ? [flagStr('context'), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal'))))].filter(Boolean).join('\n\n') : flagStr('context'),
-    rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), options: asList(flags.options), choices: jsonFlag('choices'), links: jsonFlag('links'), recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined,
+    rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: goalChangeFlag(cls), options: asList(flags.options), choices: jsonFlag('choices'), links: jsonFlag('links'), recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined,
     deadline: def ? new Date(Date.now() + loadSettings().question_default_after_hours * 3600000).toISOString() : undefined,
     blocks, evidence, note: flagStr('note'),
     why_asked: { rung: onLadder ? rungFor(cls, scope) : undefined, ceiling: onLadder ? L.classes[cls].ceiling : undefined, reasons },
@@ -2156,7 +2192,7 @@ function milestoneGaps(g) {
       else seen.set(p, n);
     }
     if (!(Number.isInteger(m.tickets) && m.tickets > 0)) gaps.push(`milestone ${n} has no size (tickets: a rough count of PRs)`);
-    if (m.by !== undefined) {
+    if (m.by != null) {
       const t = Date.parse(m.by);
       if (Number.isNaN(t)) gaps.push(`milestone ${n}'s date "${m.by}" is not a date`);
       else {
@@ -2248,7 +2284,8 @@ function cmdGoal() {
     measure: ['measure', 'target', 'unit', 'direction'].some((k) => flagStr(k) !== undefined)
       ? { ...(id ? logGet(id)?.measure : {}), ...(flagStr('measure') ? { description: flagStr('measure') } : {}), ...(flagStr('target') ? { target: Number(flagStr('target')) } : {}), ...(flagStr('unit') ? { unit: flagStr('unit') } : {}), ...(flagStr('direction') ? { direction: flagStr('direction') } : {}) }
       : undefined,
-    horizon: flagStr('horizon'),
+    // `none` clears it: a horizon is the owner's real deadline or nothing (planning.md §1)
+    horizon: flagStr('horizon') === 'none' ? null : flagStr('horizon'),
     non_goals: flags['non-goals'] !== undefined ? asList(flags['non-goals']) : undefined,
     preconditions: flags.preconditions !== undefined ? asList(flags.preconditions) : undefined,
     priority: flagNum('priority'),
@@ -2262,9 +2299,19 @@ function cmdGoal() {
     return out(appendLog({ type: 'goal', status: 'draft', ...f }, by).id);
   }
   if (sub === 'set') {
-    if (!id || logGet(id)?.type !== 'goal') die('usage: goal set <g-id> [--title …] [--outcome …] [--measure …] [--target n] [--unit u] [--direction up|down] [--horizon date] [--non-goals …] [--preconditions …] [--priority n] [--milestones \'[{"title","target","by","preconditions":[n],"tickets"}…]\'] [--plan-after <g-id>… --reason "…"] [--owner]');
+    if (!id || logGet(id)?.type !== 'goal') die('usage: goal set <g-id> [--title …] [--outcome …] [--measure …] [--target n] [--unit u] [--direction up|down] [--horizon date] [--non-goals …] [--preconditions …] [--priority n] [--milestones \'[{"title","target","by","preconditions":[n],"tickets"}…]\'] [--plan-after <g-id>… --reason "…"] [--approved <qid>] [--owner]');
     const { by } = writer();
-    if (by === 'supervisor' && (logGet(id).status ?? 'draft') !== 'draft') die(`${id} is ${logGet(id).status}; only the owner changes it now (class goal-change)`);
+    const approved = flagStr('approved') ?? null;
+    if (approved && by !== 'supervisor') die('the owner changes a goal directly; --approved is the supervisor applying an owner answer');
+    if (by === 'supervisor' && (logGet(id).status ?? 'draft') !== 'draft' && !approved) die(`${id} is ${logGet(id).status}; only the owner changes it now (class goal-change): ask a goal-change question with --goal ${id}, then goal set ${id} --approved <qid>`);
+    if (approved) {
+      const problem = goalChangeProblem(logGet(approved), id, approved);
+      if (problem) die(`goal set --approved: ${problem}`);
+      if (logObjects('goal').some((g) => g.updates.some((u) => u.approved === approved)) || logObjects('act').some((a) => a.approved_by === approved)) die(`${approved} already authorised a change; ask again for another`);
+      // the answer authorises the change the question proposed, applied as is
+      if (Object.values(fields()).some((x) => x !== undefined)) die('goal set --approved applies the change its question proposed; pass no other fields');
+      return out(`updated ${id} (${appendLog({ type: 'goal', op: 'set', id, ...questionView(logGet(approved)).change, approved }, by).id})`);
+    }
     appendLog({ type: 'goal', op: 'set', id, ...fields() }, by);
     return out(`updated ${id}`);
   }
@@ -3398,6 +3445,7 @@ Observe and orient
 
 Goals and retros
   goal [list|check|show|forecast|add|set|decide|approve|status|reading] …
+  goal set <g-id> --approved <qid> …   supervisor: apply an answered goal-change question to a goal past draft (one set per answer)
   retro [--due | --print | close <date> --summary s --refs ids]
   chore start <slug> | chore pr <slug> --title t    a supervisor-written file (design, retro, architecture) and its PR
 
