@@ -247,6 +247,15 @@ test('devteam kit', async (t) => {
     fs.writeFileSync(sfile, sbefore.replace('"gates": {', '"stale_after_minutes": -1, "gates": {'));
     const staleW = () => json(must(['metrics', '--json'])).findings.some((f) => f.kind === 'stale-worker' && f.subject === 'bill-01-card');
     assert.ok(staleW(), 'silent past the threshold and waiting on nobody: stale');
+    const staleF = () => json(must(['metrics', '--json'])).findings.find((f) => f.kind === 'stale-worker' && f.subject === 'bill-01-card');
+    assert.doesNotMatch(staleF().detail, /window is gone/, 'no tmux session: nothing claimed about the window');
+    if (hasTmux) {
+      spawnSync('tmux', ['new-session', '-d', '-s', 'devteam', '-n', 'someone-else', 'sleep 600']);
+      try {
+        assert.match(staleF().detail, /its tmux window is gone/);
+        assert.match(staleF().suggestion, /worker bill-01-card --resume/);
+      } finally { spawnSync('tmux', ['kill-session', '-t', 'devteam']); }
+    }
     const Qb = must(['ask', '--question', 'Store card fingerprints?', '--blocks', 'bill-01-card', '--recommendation', 'no'], { role: 'sup' });
     assert.ok(!staleW(), 'a question blocking it means it waits on the owner');
     must(['withdraw', Qb, '--reason', 'test'], { role: 'sup' });
