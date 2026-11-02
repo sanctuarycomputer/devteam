@@ -209,6 +209,10 @@
           "approved": {
             "type": "string",
             "description": "on a supervisor's set of a goal past draft: the goal-change question (its id) the owner answered with the recommendation. The set must be exactly the change that question proposed; each answer authorises one set."
+          },
+          "carried": {
+            "type": "boolean",
+            "description": "On a supervisor's set with approved: the answer was given before goal-change questions recorded their change, and the supervisor carries it forward (a carry-answer act the owner can correct)."
           }
         },
         "additionalProperties": false,
@@ -216,7 +220,8 @@
           "title"
         ],
         "x-set-only": [
-          "approved"
+          "approved",
+          "carried"
         ]
       },
       "feature": {
@@ -1110,7 +1115,8 @@
           "priority",
           "milestones",
           "plan_after",
-          "approved"
+          "approved",
+          "carried"
         ],
         "owner": [
           "title",
