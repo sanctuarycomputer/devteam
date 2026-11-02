@@ -381,6 +381,16 @@ test('devteam kit', async (t) => {
     assert.ok(!fs.readdirSync(path.join(repo, '.worktrees')).some((d) => d.startsWith('tmp-')), 'no temp worktree left behind');
     landSettings((txt) => txt.replace('"test": "false"', '"test": "test -f billing/card.js && test -f config/master.key && test -f .setup-ran"'));
     must(['phase', 'supervisor', '--usd', '3.5'], { role: 'sup' });
+    // worktree_files copies master.key; once it decrypts production (default credentials, no
+    // production file), Health says so; a production file of its own makes it a dev/test key
+    const kinds = () => json(must(['metrics', '--json'])).findings.map((x) => `${x.kind} ${x.subject}`);
+    assert.ok(!kinds().some((k) => k.startsWith('production-key-in-worktrees')), 'no credentials, no finding');
+    write(path.join(repo, 'config/credentials.yml.enc'), 'enc\n');
+    assert.ok(kinds().includes('production-key-in-worktrees config/master.key'));
+    write(path.join(repo, 'config/credentials/production.yml.enc'), 'enc\n');
+    assert.ok(!kinds().some((k) => k.startsWith('production-key-in-worktrees')), 'production has its own key now');
+    fs.rmSync(path.join(repo, 'config/credentials.yml.enc'));
+    fs.rmSync(path.join(repo, 'config/credentials'), { recursive: true });
   });
 
   await t.test('questions, autonomy direction, the act gate, corrections', () => {
