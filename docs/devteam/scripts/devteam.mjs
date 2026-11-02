@@ -1340,6 +1340,13 @@ function cmdValidate() {
   }
   const td = path.join(projectDir, 'tickets');
   if (fs.existsSync(td)) for (const f of fs.readdirSync(td)) if (!f.startsWith('.') && !ts.has(f)) errors.push(`project/tickets/${f}/ has no ticket`);
+  // Checking one ticket, another ticket's own errors (D3 and the rest, written "<id>: …") come
+  // from the live graph, not this branch: e.g. a dependency on a plan that reached main after the
+  // branch did. They warn; the supervisor's own validate still fails on them.
+  if (scope) for (let i = errors.length - 1; i >= 0; i--) {
+    const owner = /^([a-z0-9-]+): /.exec(errors[i])?.[1];
+    if (owner && owner !== scope && ts.has(owner)) warnings.push(`${errors.splice(i, 1)[0]}; not ${scope}'s to fix`);
+  }
 
   for (const w of warnings) out(`warning: ${w}`);
   for (const e of errors) out(`error: ${e}`);
@@ -1697,7 +1704,10 @@ function cmdReviewWorktree() {
   const sha = resolveCommit(ref) ?? die(`${ref} is not a commit here (git fetch first?)`);
   const suffix = flagStr('name');
   if (flags.name !== undefined && !REVIEW_SUFFIX.test(suffix ?? '')) die(`--name "${suffix ?? ''}" must be lowercase words joined by hyphens`);
-  const wt = path.join(root, `review-${id}-${sha.slice(0, 12)}${suffix ? `-${suffix}` : ''}`);
+  // Short enough to name things after (a database identifier is 63 bytes in Postgres): the ticket's
+  // component and number, not its slug, and 8 hex of the sha.
+  const short = /^(.+?-\d+)(-|$)/.exec(id)?.[1] ?? id;
+  const wt = path.join(root, `review-${short}-${sha.slice(0, 8)}${suffix ? `-${suffix}` : ''}`);
   if (fs.existsSync(wt)) die(`${wt} exists; give this reviewer its own --name, or remove it: devteam.mjs review-worktree --remove ${wt}`);
   gitOrDie(['worktree', 'add', '--quiet', '--detach', wt, sha], mainRoot);
   seedWorktree(wt);

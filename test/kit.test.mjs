@@ -428,13 +428,13 @@ test('devteam kit', async (t) => {
 
   await t.test('review-worktree: a reviewer\'s detached, seeded tree at exactly a sha, and its removal', () => {
     const reviewWt = must(['review-worktree', 'bill-01-card', H2]);
-    assert.equal(fs.realpathSync(reviewWt), fs.realpathSync(wt(`review-bill-01-card-${H2.slice(0, 12)}`)), 'named for the ticket and the short sha, under .worktrees/');
+    assert.equal(fs.realpathSync(reviewWt), fs.realpathSync(wt(`review-bill-01-${H2.slice(0, 8)}`)), 'named for the ticket\'s component and number and 8 hex of the sha, under .worktrees/');
     assert.equal(git(['rev-parse', 'HEAD'], reviewWt), H2, 'at exactly that sha');
     assert.match(git(['status', '--porcelain=v2', '--branch'], reviewWt), /# branch\.head \(detached\)/, 'detached, on no branch');
     assert.equal(fs.readFileSync(path.join(reviewWt, 'config/master.key'), 'utf8'), 'secret\n', 'worktree_files copied, as for a worker');
     assert.ok(fs.existsSync(path.join(reviewWt, '.setup-ran')), 'worktree_setup ran, as for a worker');
     const second = must(['review-worktree', 'bill-01-card', H2, '--name', 'b']);
-    assert.equal(path.basename(second), `review-bill-01-card-${H2.slice(0, 12)}-b`, 'a second reviewer of one sha gets its own tree');
+    assert.equal(path.basename(second), `review-bill-01-${H2.slice(0, 8)}-b`, 'a second reviewer of one sha gets its own tree');
     assert.match(dt(['review-worktree', 'bill-01-card', H2]).err, /exists/, 'an existing path is refused');
     assert.match(dt(['review-worktree', 'no-such-ticket', H2]).err, /no ticket no-such-ticket/, 'an unknown ticket is refused');
     assert.match(dt(['review-worktree', 'bill-01-card', 'deadbeef']).err, /is not a commit/, 'a sha that resolves to no commit is refused');
@@ -1214,6 +1214,12 @@ test('devteam kit', async (t) => {
     assert.doesNotMatch(v('bill-03-a'), /not bill-03-a's to fix/, 'a ticket in the overlap still fails');
     must(['ticket', 'set', 'bill-04-b', '--json', JSON.stringify({ depends_on: ['bill-03-a'] })], sup);
     assert.doesNotMatch(v(), D4);
+    // another ticket's own error (D3: a dependency the branch can't see) only warns under a gate
+    must(['ticket', 'set', 'bill-04-b', '--json', JSON.stringify({ depends_on: ['bill-03-a', 'bill-99-later'] })], sup);
+    assert.match(v(), /bill-04-b: depends_on "bill-99-later" does not exist \(D3\)$/m, 'unscoped: an error');
+    assert.match(v('bill-02-vault'), /warning: bill-04-b: depends_on "bill-99-later" .*not bill-02-vault's to fix/);
+    assert.doesNotMatch(v('bill-04-b'), /not bill-04-b's to fix/, "the ticket's own error still fails its gate");
+    must(['ticket', 'set', 'bill-04-b', '--json', JSON.stringify({ depends_on: ['bill-03-a'] })], sup);
     // blocked for 2h: the supervisor's to unblock, unless it waits on the owner's answer to a question
     const at = new Date(Date.now() - 2 * 3600000);
     const stamp = at.toISOString().replace(/[-:T]/g, '').replace('.', '').slice(0, 17);
