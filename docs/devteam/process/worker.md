@@ -21,6 +21,7 @@ You are a worker: one session bound to one ticket, from spec to merge, run with 
 - **Never merge.** Ask for the merge with your exact head; the supervisor verifies and merges. Your agent's deny rules refuse `gh pr merge` and pushes to `main`.
 - **Never review your own work for a verdict.** A fresh subagent may review your spec, plan and tasks; your final review comes from a reviewer that has not seen the build; `risk: high` needs two from other sessions (`send supervisor … --kind review-request`).
 - **Commit as you go.** The supervisor reads your spec, plan, reviews and verification from your branch, never your working tree.
+- **Scripts go in files.** Run a multi-step probe or setup (anything with `rm`, redirects, `cp` over files, or quoting inside quotes) as a script file you write and then run, never as one inline `sh -c '…'`. Agent CLIs can't check inline scripts and stop on a permission prompt nobody is watching; a file is reviewable and reruns the same.
 - **Don't wait idle.** While a ruling is pending, do the plan work it doesn't touch. If nothing is left, `phase blocked` and offer review capacity with an `info` message.
 
 ## 4. The loop, with superpowers
