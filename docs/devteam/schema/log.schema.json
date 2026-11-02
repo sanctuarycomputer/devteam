@@ -177,6 +177,28 @@
               "verdict"
             ],
             "additionalProperties": false
+          },
+          "plan_after": {
+            "type": "array",
+            "description": "Goals whose design this goal's design waits on, each with why. The only reason to leave a goal that needs planning without a planner; it lapses once that goal is approved. Empty to plan in parallel.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "goal": {
+                  "type": "string",
+                  "pattern": "^g-"
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "goal",
+                "reason"
+              ],
+              "additionalProperties": false
+            }
           }
         },
         "additionalProperties": false,
@@ -1046,7 +1068,8 @@
           "non_goals",
           "preconditions",
           "priority",
-          "milestones"
+          "milestones",
+          "plan_after"
         ],
         "owner": [
           "title",
@@ -1058,7 +1081,8 @@
           "priority",
           "milestones",
           "status",
-          "decision"
+          "decision",
+          "plan_after"
         ]
       },
       "feature": {

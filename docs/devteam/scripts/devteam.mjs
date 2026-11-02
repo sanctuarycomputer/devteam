@@ -139,9 +139,10 @@ const SETTINGS_DEFAULTS = {
   forge: 'github',
   max_active_tickets: 5,
   max_active_per_component: 2,
-  // Planners at once (plan/<feature> branches in flight). They design and plan; they don't count
-  // against max_active_tickets.
-  max_active_planners: 4,
+  // Planners at once (plan/<feature> branches in flight); null is no cap. Every goal that needs
+  // planning gets one unless its design waits on another goal's (goal set --plan-after). They don't
+  // count against max_active_tickets.
+  max_active_planners: null,
   stale_after_minutes: 30,
   // How long `ack` sets a finding aside; it comes back sooner if its subject changes.
   finding_ack_hours: 24,
@@ -2095,7 +2096,9 @@ function goalCheck(g) {
   if (typeof g.measure?.target !== 'number') definition.push('no numeric target');
   if (!g.measure?.unit) definition.push('no unit');
   if (!g.measure?.direction) definition.push('no direction (up or down)');
-  if (!g.horizon || Number.isNaN(Date.parse(g.horizon))) definition.push('no horizon date');
+  // A horizon is the owner's real deadline, when there is one; never required, never guessed. The
+  // forecast says when, from the measured rate (planning.md §1).
+  if (g.horizon && Number.isNaN(Date.parse(g.horizon))) definition.push(`horizon "${g.horizon}" is not a date`);
   if (!(g.non_goals ?? []).length) definition.push('no non-goals');
   if (!(g.preconditions ?? []).length) definition.push('no preconditions: what must be true for the outcome');
   if (typeof g.priority !== 'number') definition.push('no priority');
@@ -2240,6 +2243,7 @@ function cmdGoal() {
     preconditions: flags.preconditions !== undefined ? asList(flags.preconditions) : undefined,
     priority: flagNum('priority'),
     milestones: jsonFlag('milestones'),
+    plan_after: flags['plan-after'] !== undefined ? asList(flags['plan-after']).map((goal) => ({ goal, reason: flagStr('reason') ?? die('--plan-after needs --reason: why this goal\'s design waits on that one') })) : undefined,
   });
   if (sub === 'add') {
     const { by } = writer();
@@ -2248,7 +2252,7 @@ function cmdGoal() {
     return out(appendLog({ type: 'goal', status: 'draft', ...f }, by).id);
   }
   if (sub === 'set') {
-    if (!id || logGet(id)?.type !== 'goal') die('usage: goal set <g-id> [--title …] [--outcome …] [--measure …] [--target n] [--unit u] [--direction up|down] [--horizon date] [--non-goals …] [--preconditions …] [--priority n] [--milestones \'[{"title","target","by","preconditions":[n],"tickets"}…]\'] [--owner]');
+    if (!id || logGet(id)?.type !== 'goal') die('usage: goal set <g-id> [--title …] [--outcome …] [--measure …] [--target n] [--unit u] [--direction up|down] [--horizon date] [--non-goals …] [--preconditions …] [--priority n] [--milestones \'[{"title","target","by","preconditions":[n],"tickets"}…]\'] [--plan-after <g-id>… --reason "…"] [--owner]');
     const { by } = writer();
     if (by === 'supervisor' && (logGet(id).status ?? 'draft') !== 'draft') die(`${id} is ${logGet(id).status}; only the owner changes it now (class goal-change)`);
     appendLog({ type: 'goal', op: 'set', id, ...fields() }, by);
@@ -2724,13 +2728,17 @@ function collectMetrics(since) {
   {
     const ps = planners();
     const busy = new Set(ps.flatMap((p) => p.goals));
+    // a goal whose design waits on another goal's (plan_after) waits until that one is approved
+    // (a goal let go, or one that doesn't exist, holds nothing back)
+    const blockedBy = (g) => (g.plan_after ?? []).filter((d) => logGet(d.goal)?.type === 'goal' && (logGet(d.goal).status ?? 'draft') === 'draft');
     const waiting = logObjects('goal').filter((g) => {
-      if (busy.has(g.id) || ['met', 'abandoned'].includes(g.status)) return false;
+      if (busy.has(g.id) || ['met', 'abandoned'].includes(g.status) || blockedBy(g).length) return false;
       const c = goalCheck(g);
       if ((g.status ?? 'draft') === 'draft') return !c.definition.length && !questions().some((q) => q.goal === g.id && q.status === 'open');
       return g.status === 'ready' && c.coverage.some((x) => x.includes('has no feature') || x.startsWith('no feature names'));
     }).sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99));
-    if (waiting.length && ps.length < settings.max_active_planners) add('medium', 'idle-planning', `${waiting.length} goal${waiting.length > 1 ? 's' : ''}`, `${ps.length}/${settings.max_active_planners} planners active; nobody is planning ${waiting.map((g) => `"${g.title}"`).join(', ')}`, `make planners (or design yourself) for: ${waiting.slice(0, Math.max(1, settings.max_active_planners - ps.length)).map((g) => g.id).join(', ')}`);
+    const cap = settings.max_active_planners;
+    if (waiting.length && (cap == null || ps.length < cap)) add('medium', 'idle-planning', `${waiting.length} goal${waiting.length > 1 ? 's' : ''}`, `${ps.length}${cap == null ? '' : `/${cap}`} planner${ps.length === 1 ? '' : 's'} active; nobody is planning ${waiting.map((g) => `"${g.title}"`).join(', ')}`, `start a planner for each (goals plan in parallel), or record why one waits on another's design (goal set <id> --plan-after <g-id> --reason "…"): ${waiting.slice(0, cap == null ? waiting.length : Math.max(1, cap - ps.length)).map((g) => g.id).join(', ')}`);
   }
   if (ready.length && active < settings.max_active_tickets) add('medium', 'idle-capacity', `${ready.length} ready`, `${active}/${settings.max_active_tickets} workers active`, `make workers for: ${ready.slice(0, 5).map((t) => t.id).join(', ')}`);
   if (m.escaped_defects) add('high', 'escaped-defects', `${m.escaped_defects}`, 'defects found after merge', 'retro: which review or gate should have caught each one');

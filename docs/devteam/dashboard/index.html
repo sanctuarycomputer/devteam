@@ -149,7 +149,7 @@
   button.tcard .t b { font-family: var(--sans); font-size: 12.5px; font-weight: 600; }
   button.tcard .t b i { color: var(--amber-fg); font-size: 12px; }
   .drawer dd a, .drawer p a { color: var(--blue-fg); text-decoration: underline; text-underline-offset: 2px; }
-  button.tcard .badge { white-space: normal; height: auto; margin-top: 4px; }
+  button.tcard .pill { margin-top: 6px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; vertical-align: top; }
   button.tcard.blocked { border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
   .tcard:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
   .col h3 { display: flex; justify-content: space-between; align-items: center; margin: 2px 4px 8px; }
@@ -594,6 +594,14 @@ function columnOf(t) {
   const byPhase = PHASE_COLUMN[t.phase];
   return byPhase && RANK[byPhase] > RANK[byStage] && RANK[byStage] < RANK.Merged ? byPhase : byStage;
 }
+const PHASE_SHORT = { starting: 'Starting', spec: 'Spec', plan: 'Plan', contract: 'Contracts', build: 'Building', verify: 'Verifying', 'final-review': 'Final review', 'awaiting-word': 'Waiting', merging: 'Merging', parked: 'Parked' };
+function ticketStatus(t) {
+  if (t.waiting) return [t.waiting.kind === 'limit' ? 'Usage limit' : 'Stuck on a prompt', 'high', t.waiting.line];
+  if (t.phase === 'blocked') return ['Blocked', 'high'];
+  if (t.held) return ['Held', '', t.held];
+  if (['merged', 'released'].includes(t.stage) || !t.phase || t.phase === 'done') return null;
+  return [PHASE_SHORT[t.phase] || words(t.phase), 'low', `${PHASE_WORDS[t.phase] || t.phase}${t.task ? ` (${t.task})` : ''}`];
+}
 function board(items, crit) {
   $('planners').innerHTML = plannerCards(DATA.planners || []);
   $('board-cols').innerHTML = COLUMNS.map(([name]) => {
@@ -604,8 +612,8 @@ function board(items, crit) {
     return `<div class="col${total ? '' : ' none'}"><h3><span>${name}</span><span>${total}</span></h3>${cards.map((t) => `
       <button type="button" class="tcard ${t.phase === 'blocked' || t.waiting ? 'blocked' : ''}" data-ticket="${esc(t.id)}" aria-label="Open ${esc(t.title)}">
         <div class="t"><b>${crit.has(t.id) ? '<i class="icon-flag" title="on the critical path" aria-label="on the critical path"></i> ' : ''}${esc(t.title)}</b></div>
-        <div class="muted">${esc(t.component)} · ${esc(t.size)} · wave ${esc(t.wave ?? '–')}${t.target_release ? ` · ${esc(t.target_release)}` : ''}</div>
-        <div>${t.waiting ? `<span class="badge high" title="${esc(t.waiting.line)}">${t.waiting.kind === 'limit' ? 'usage limit' : 'waiting on a prompt'}</span>` : ''}${t.held ? `<span class="badge" title="${esc(t.held)}">held</span>` : ''}${t.risk === 'high' ? '<span class="badge medium">high risk</span>' : ''}${t.phase === 'blocked' ? '<span class="badge high">blocked</span>' : ''}${t.phase && !['blocked', 'done'].includes(t.phase) && !['merged', 'released'].includes(t.stage) ? `<span class="badge low">${esc(PHASE_WORDS[t.phase] || t.phase)}${t.task ? ` ${esc(t.task)}` : ''}</span>` : ''}</div>
+        <div class="muted">${esc(t.component)} · ${esc(t.size)}${t.risk === 'high' ? ' · high risk' : ''}</div>
+        ${(() => { const st = ticketStatus(t); return st ? `<div><span class="badge pill ${st[1]}" title="${esc(st[2] || st[0])}">${esc(st[0])}</span></div>` : ''; })()}
       </button>`).join('')}${total > cards.length ? `<div class="more">+ ${total - cards.length} more</div>` : ''}</div>`;
   }).join('');
 }
@@ -793,6 +801,8 @@ function goalState(g, R, openQs) {
   if (g.check.definition.length) return { key: 'defining', label: 'Being defined', tone: 'medium', step: 0, next: defQ ? `<b>Waiting on you:</b> ${qlink(defQ.id, 'answer the open questions')}.` : `Still open: ${esc(g.check.definition.slice(0, 3).join('; '))}${g.check.definition.length > 3 ? '…' : ''}.` };
   // only say "being designed" when someone is: a planner in flight for it, or design questions open
   const designing = planningFor(g).length || openQs.some((q) => q.goal === g.id);
+  const after = (g.plan_after || []).map((d) => ({ ...d, g: (DATA.ooda.goals || []).find((x) => x.id === d.goal) })).filter((d) => d.g && (d.g.status || 'draft') === 'draft');
+  if (!designing && after.length) return { key: 'designing', label: 'Waiting on another goal', tone: '', step: 1, next: after.map((d) => `Its design waits for <a class="linkish" href="#goal/${encodeURIComponent(d.goal)}">${esc(d.g?.title || d.goal)}</a>’s: ${esc(d.reason)}`).join('<br>') };
   if (!designing) return { key: 'designing', label: 'Waiting for a planner', tone: 'medium', step: 1, next: 'Fully defined, but nobody is designing it yet. The supervisor starts a planner when a slot is free (Health says when one is).' };
   return { key: 'designing', label: 'Approach being designed', tone: '', step: 1, next: 'Fully defined. The supervisor is writing and reviewing the design; you’ll approve it in the Inbox.' };
 }

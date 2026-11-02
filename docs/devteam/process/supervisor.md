@@ -54,7 +54,7 @@ Run it about every 10 minutes when PRs are converging, 30 when quiet. A worker's
 | PR head differs from the last phase line's `sha` | stale liveness | message the worker to run `phase` |
 | owner answer relayed, not in the spec or plan after the next commit | answer not recorded | message the worker |
 | ticket ready, no worker, under caps | idle capacity | schedule it, or hold it with the reason |
-| goal fully defined (or its current milestone unplanned), no planner, under `max_active_planners` | idle planning | start a planner (or design it yourself); goals move in parallel, not one after another |
+| goal fully defined (or its current milestone unplanned), no planner, under `max_active_planners` (no cap by default) | idle planning | start a planner for it now: every goal plans in parallel. The one exception is a goal whose design depends on another goal's design; record it (`goal set <id> --plan-after <g-id> --reason "…"`, shown to the owner on the goal) and start it once that one is approved |
 | superseded ticket with a live worker | re-plan not propagated | park it with a ruling |
 
 ## 5. Scheduling and merging
