@@ -713,6 +713,69 @@ test('devteam kit', async (t) => {
     must(['goal', 'status', Gi, 'abandoned']);
   });
 
+  await t.test('a lost Enter is pressed once, never into a prompt, never retyped', (tt) => {
+    if (!hasTmux) return void tt.diagnostic('tmux not installed: lost-Enter recovery not exercised');
+    git(['branch', 'plan/enter', 'origin/main']);
+    const text = '[devteam info m-1 from supervisor] Owner approved the goal; plan the feature and tickets, then send the graph for review.';
+    const keys = path.join(tmp, 'keys.txt');
+    // A stand-in agent (not a shell): draws a screen, then logs every line of input it is sent.
+    const agent = path.join(tmp, 'agent.mjs');
+    write(agent, "import fs from 'node:fs';\nprocess.stdout.write(fs.readFileSync(process.argv[2], 'utf8'));\nprocess.stdin.on('data', (d) => fs.appendFileSync(process.argv[3], String(d)));\n");
+    const sent = path.join(repo, 'docs/devteam/run/sent', `${encodeURIComponent('devteam:plan-enter')}.json`);
+    const enters = () => (fs.existsSync(keys) ? fs.readFileSync(keys, 'utf8').split('\n').length - 1 : 0);
+    const resent = () => json(must(['log', '--type', 'observation', '--json'])).filter((o) => o.kind === 'resent-enter' && o.subject === 'plan-enter');
+    const run = (screen, agoSec) => {
+      spawnSync('tmux', ['kill-server']);
+      fs.rmSync(keys, { force: true });
+      const sf = path.join(tmp, 'screen.txt');
+      write(sf, screen);
+      write(sent, JSON.stringify({ text, at: new Date(Date.now() - agoSec * 1000).toISOString() }));
+      spawnSync('tmux', ['new-session', '-d', '-x', '80', '-y', '24', '-s', 'devteam', '-n', 'plan-enter', `${process.execPath} ${agent} ${sf} ${keys}`]);
+      for (let i = 0; i < 30 && !/approved|devteam|Done/.test(spawnSync('tmux', ['capture-pane', '-p', '-t', 'devteam:plan-enter'], { encoding: 'utf8' }).stdout ?? ''); i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+      must(['metrics', '--json'], { role: 'sup' });
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+    };
+    // the incident's pane: compacted while idle, the text unsubmitted in the input box (wrapped at 80 cols)
+    const stuck = `⏺ Compacted while idle, before the prompt cache expired\n${'─'.repeat(60)}\n❯ ${text}\n${'─'.repeat(60)}\n  ⏵⏵ bypass permissions on (shift+tab to cycle)`;
+    // a read by anyone but the supervisor (the dashboard, status, the owner) never presses a key
+    spawnSync('tmux', ['kill-server']);
+    fs.rmSync(keys, { force: true });
+    write(path.join(tmp, 'screen.txt'), stuck);
+    write(sent, JSON.stringify({ text, at: new Date(Date.now() - 3600 * 1000).toISOString() }));
+    spawnSync('tmux', ['new-session', '-d', '-x', '80', '-y', '24', '-s', 'devteam', '-n', 'plan-enter', `${process.execPath} ${agent} ${path.join(tmp, 'screen.txt')} ${keys}`]);
+    for (let i = 0; i < 30 && !/approved|devteam/.test(spawnSync('tmux', ['capture-pane', '-p', '-t', 'devteam:plan-enter'], { encoding: 'utf8' }).stdout ?? ''); i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+    must(['dashboard-data']);
+    must(['metrics', '--json']);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+    assert.equal(enters(), 0, 'the dashboard and the owner only look');
+    assert.ok(fs.existsSync(sent), 'the delivery is still waiting for the supervisor');
+    run(stuck, 3600);
+    assert.equal(enters(), 1, 'exactly one Enter');
+    assert.equal(resent().length, 1, 'and it is logged');
+    assert.match(resent()[0].detail, /sha1 [0-9a-f]{12}/);
+    assert.ok(!fs.existsSync(sent), 'the delivery is claimed');
+    must(['metrics', '--json'], { role: 'sup' });
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+    assert.equal(enters(), 1, 'a second pass presses nothing');
+    assert.equal(resent().length, 1);
+    run(`❯ ${text}\nDo you want to proceed?\n❯ 1. Yes\n  2. No`, 3600);
+    assert.equal(enters(), 0, 'never into a permission prompt');
+    run(`❯ ${text}\n\n⏺ Done.\n${'line\n'.repeat(12)}❯ \n  ⏵⏵ bypass permissions on`, 3600);
+    assert.equal(enters(), 0, 'submitted text: nothing to press');
+    assert.ok(!fs.existsSync(sent), 'and the record is dropped');
+    run(stuck, 5);
+    assert.equal(enters(), 0, 'sent seconds ago: a slow submit is not double-pressed');
+    run(`❯ ${text}\n✻ Thinking… (esc to interrupt)`, 3600);
+    assert.equal(enters(), 0, 'a busy agent is left alone');
+    assert.equal(resent().length, 1);
+    fs.rmSync(sent, { force: true });
+    must(['send', 'plan-enter', 'carry on'], { role: 'sup' });
+    assert.match(json(fs.readFileSync(sent, 'utf8')).text, /^\[devteam info m-\S+ from supervisor\] carry on$/, 'a delivery records the exact text typed');
+    spawnSync('tmux', ['kill-server']);
+    fs.rmSync(sent, { force: true });
+    git(['branch', '-D', 'plan/enter']);
+  });
+
   await t.test('a ready goal changes through an answered goal-change question, by exactly the change it proposed', () => {
     const nonGoals = () => json(must(['goal', 'show', G, '--json'])).non_goals;
     const change = JSON.stringify({ non_goals: ['enterprise invoicing', 'refunds'] });
