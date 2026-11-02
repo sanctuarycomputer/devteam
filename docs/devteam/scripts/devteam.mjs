@@ -1307,13 +1307,16 @@ function cmdValidate() {
   }
 
   // D4: tickets that can run at the same time must have disjoint footprints. Merged ones are history.
+  // Checking one ticket (its merge gate, or in its worktree), an overlap between two other tickets
+  // is a warning: it comes from the live graph, not this branch, and the supervisor resolves it.
+  const scope = process.env.DEVTEAM_GATE_TICKET || currentTicketId();
   if (!cycle) {
     const clos = closures(ts);
     const live = [...ts.values()].filter((t) => isActive(t) && !mergeShaFor(t.id));
     for (let i = 0; i < live.length; i++) for (let j = i + 1; j < live.length; j++) {
       const a = live[i], b = live[j];
       if (clos.get(a.id)?.has(b.id) || clos.get(b.id)?.has(a.id)) continue;
-      outer: for (const ga of a.touches ?? []) for (const gb of b.touches ?? []) if (globsOverlap(ga, gb)) { errors.push(`${a.id} and ${b.id} can run concurrently but both touch "${ga}" / "${gb}" (D4)`); break outer; }
+      outer: for (const ga of a.touches ?? []) for (const gb of b.touches ?? []) if (globsOverlap(ga, gb)) { const m = `${a.id} and ${b.id} can run concurrently but both touch "${ga}" / "${gb}" (D4)`; if (scope && a.id !== scope && b.id !== scope) warnings.push(`${m}; not ${scope}'s to fix`); else errors.push(m); break outer; }
     }
   }
 
@@ -1632,7 +1635,9 @@ function checkPr({ headRef, sha, title, body, forge = false }) {
 // Then run settings.worktree_setup there (with DEVTEAM_MAIN set to the main checkout).
 // What every gate and worktree_setup command sees: the main checkout, and a gitignored cache dir
 // for build outputs and package caches shared across worktrees (quality.md §2).
-const gateEnv = () => { const cache = path.join(runDir, 'cache'); fs.mkdirSync(cache, { recursive: true }); return { ...process.env, DEVTEAM_MAIN: mainRoot, DEVTEAM_CACHE: cache }; };
+// A gate run for a ticket's merge knows which ticket it checks (DEVTEAM_GATE_TICKET), so validate
+// can fail it only for what is its own (D4 below).
+const gateEnv = (ticket) => { const cache = path.join(runDir, 'cache'); fs.mkdirSync(cache, { recursive: true }); return { ...process.env, DEVTEAM_MAIN: mainRoot, DEVTEAM_CACHE: cache, ...(ticket ? { DEVTEAM_GATE_TICKET: ticket } : {}) }; };
 function seedWorktree(wt, { setup = true } = {}) {
   const s = loadSettings();
   for (const rel of s.worktree_files ?? []) {
@@ -1792,7 +1797,7 @@ function cmdMerge() {
         const started = Date.now();
         let ok = true;
         try {
-          execFileSync('sh', ['-c', cmd], { cwd: wt, stdio: 'inherit', env: gateEnv() });
+          execFileSync('sh', ['-c', cmd], { cwd: wt, stdio: 'inherit', env: gateEnv(!plan && !chore ? id : null) });
         } catch {
           ok = false;
         }
@@ -1803,7 +1808,7 @@ function cmdMerge() {
         if (!ok && spec.mode === 'ratchet' && base) {
           const bwt = detachedWorktree(base, `base-${slug(branch)}`);
           let baseOk = true;
-          try { execFileSync('sh', ['-c', cmd], { cwd: bwt, stdio: 'ignore', env: gateEnv() }); } catch { baseOk = false; } finally { git(['worktree', 'remove', '--force', bwt], mainRoot); }
+          try { execFileSync('sh', ['-c', cmd], { cwd: bwt, stdio: 'ignore', env: gateEnv(!plan && !chore ? id : null) }); } catch { baseOk = false; } finally { git(['worktree', 'remove', '--force', bwt], mainRoot); }
           if (!baseOk) { warn(`gate ${name} fails at the merge base ${base.slice(0, 12)} too: pre-existing, allowed by ratchet mode`); continue; }
         }
         if (!ok) fails.push(`gate ${name} failed at ${sha.slice(0, 12)}`);

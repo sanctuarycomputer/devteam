@@ -123,7 +123,7 @@ devteam.mjs ticket add api-07-session-tokens --json '{
 - **D1 One ticket, one reviewable PR.** Split anything over M.
 - **D2 Contract first.** Every interface that crosses a component boundary, or that two parallel tickets both depend on, gets a `contract` ticket that lands the definition, its version and a fake. Consumers depend on the contract ticket, not the provider's build. This is what creates parallelism; apply it hard.
 - **D3 Real dependencies only.** `depends_on` means "cannot build until merged". (gate: every id exists, no cycles)
-- **D4 Disjoint footprints.** Tickets that can run at the same time have non-overlapping `touches`; otherwise add a real dependency, extract the shared part, or merge them. (gate)
+- **D4 Disjoint footprints.** Tickets that can run at the same time have non-overlapping `touches`; otherwise add a real dependency, extract the shared part, or merge them. (gate) A ticket's merge gate fails only for overlaps involving that ticket; an overlap between two other tickets comes from the live graph, not the branch, so there it's a warning, and the supervisor fixes it in the graph.
 - **D5 Checkable done-whens.** "Works correctly" is not one. (gate: non-empty, each at least ten characters)
 - **D6 Full coverage.** Every story is served; every ticket serves a story, except chores and spikes, which say why in `notes`. (gate)
 - **D7 One integration ticket per story that spans components**, whose done-whens are the story's acceptance checked end to end, depending on every ticket that serves it.

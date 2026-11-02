@@ -1133,4 +1133,19 @@ test('devteam kit', async (t) => {
     assert.match(dt(['ask', '--kind', 'one-way-door', '--goal', G, '--question', 'x?', '--default', 'yes'], sup).err, /never has a default/);
     git(['worktree', 'remove', '--force', wt('bill-02-vault')]);
   });
+
+  await t.test('a ticket\'s merge gate fails validate only for overlaps that are its own (D4)', () => {
+    const sup = { role: 'sup' };
+    const tk = (title) => JSON.stringify({ title, feature: 'billing', component: 'bill', kind: 'build', size: 'S', risk: 'normal', serves: ['BILL-S1'], depends_on: [], touches: ['billing/shared/**'], done_when: ['tests pass in CI'] });
+    must(['ticket', 'add', 'bill-03-a', '--json', tk('a')], sup);
+    must(['ticket', 'add', 'bill-04-b', '--json', tk('b')], sup);
+    const v = (ticket) => { if (ticket) process.env.DEVTEAM_GATE_TICKET = ticket; try { const r = dt(['validate'], sup); return r.out + r.err; } finally { delete process.env.DEVTEAM_GATE_TICKET; } };
+    const D4 = /bill-03-a and bill-04-b can run concurrently/;
+    assert.match(v(), D4);
+    assert.doesNotMatch(v().split('\n').filter((l) => D4.test(l)).join(), /not .*'s to fix/, 'unscoped, the supervisor sees an error');
+    assert.match(v('bill-02-vault'), /warning: bill-03-a and bill-04-b .* not bill-02-vault's to fix/, "another ticket's gate only warns");
+    assert.doesNotMatch(v('bill-03-a'), /not bill-03-a's to fix/, 'a ticket in the overlap still fails');
+    must(['ticket', 'set', 'bill-04-b', '--json', JSON.stringify({ depends_on: ['bill-03-a'] })], sup);
+    assert.doesNotMatch(v(), D4);
+  });
 });
