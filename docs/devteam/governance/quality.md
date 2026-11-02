@@ -1,6 +1,6 @@
 # Quality
 
-What must be true before code merges: the definition of done, the gates, the review standard, how a merge happens, and how releases are cut. `code-style.md` says what good code is; this file says how it is checked.
+What must be true before code merges: the definition of done, the gates, the review standard, how a merge happens, how releases are cut, and the shape of the documents the work leaves behind. `code-style.md` says what good code is; this file says how it is checked.
 
 ## 1. Definition of done
 
@@ -85,6 +85,8 @@ project/reviews/<design-slug>/design-<pass>[<track>].md       design (on the pla
 Verdict: APPROVE 3f2a9c1e0d7b4a6f8c2e1d0b9a8f7e6d5c4b3a2e
 ```
 
+A plan review for a ticket whose one-way door the owner answered at goal level (a `one-way-door` question asked with `--goal`, not `--ticket`) checks that the plan does nothing the answer didn't cover and, if so, says it on its own line: `- Goal-level door: <qid> covers this plan`. `act --class approve-plan --approved <qid>` refuses unless the latest approving plan review has that line for that qid; a plan that goes further needs its own `one-way-door` question for the ticket.
+
 `check-ticket` fails when no final review was made at the head, the latest final review in any track says `CHANGES`, fewer named reviewers approved than the risk needs, or any Critical or Important finding lacks a disposition. `validate` fails a landed feature whose latest graph or design review is missing or not `APPROVE`.
 
 **Measuring reviews.** `metrics` reports first-pass rejection per stage (a healthy fleet rejects 20 to 30% of first passes; near zero means the reviewer prompt went soft), the share of findings dispositioned `wrong` (high means taste, tighten the rules), and escaped defects (defects found after merge, logged as observations of kind `escaped-defect`). The supervisor proposes prompt or rule changes from these at retros.
@@ -122,3 +124,12 @@ Every release is a tag on `main` with a GitHub Release whose body is the changel
 5. If the project keeps a `CHANGELOG.md`, the release PR (a `chore-release-<tag>` PR merged before tagging) prepends the same notes to it.
 - The PR title is the unit of the changelog: `<ticket-id>: <one line a user could read>`.
 - Cut releases on a schedule, not by scope. A feature's release map says where a story is expected; the notes record where it landed.
+
+## 6. Documents
+
+Every document the kit asks for is markdown: designs, `architecture.md`, specs, plans, contracts, verification, retros, review records.
+
+**A TL;DR first.** A plan (`project/tickets/<id>/plan.md`) and a design (`project/designs/*.md`) open with `## TL;DR` right under the title: at most seven bullets that say the approach in plain words. What changes and where, in what order, how it is tested, what could go wrong. Someone who reads only the TL;DR knows what will be built and can spot a wrong approach. It never depends on a diagram or a later section. `act --class approve-plan` refuses a plan without one, and `validate` flags a design being planned without one. The plan and design reviewers check that the TL;DR matches the document; a TL;DR that says something the plan doesn't do is an Important finding.
+
+**Diagrams as Mermaid.** Any of these documents may draw with a fenced `` ```mermaid `` block: a component boundary, a sequence across a contract, a state machine, the order tickets land in. The dashboard's side panel renders them (with a Raw toggle back to the source), and so does GitHub. Use one where a picture is clearer than a paragraph; keep the prose true without it, since a diagram that fails to parse shows as its source.
+

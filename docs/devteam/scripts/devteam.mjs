@@ -60,6 +60,16 @@ function parseArgs(args) {
 
 const { flags, positional, rest } = parseArgs(argv);
 const asList = (v) => (v === undefined || v === true ? [] : Array.isArray(v) ? v : [v]);
+// A list flag: separate values, or one JSON array of strings. A single value that starts with "["
+// but is not one is refused rather than stored as one item.
+const listFlag = (k) => {
+  const v = flags[k];
+  if (typeof v !== 'string' || !v.trim().startsWith('[')) return asList(v);
+  let parsed;
+  try { parsed = JSON.parse(v); } catch { parsed = null; }
+  if (!Array.isArray(parsed) || !parsed.every((x) => typeof x === 'string')) die(`--${k}: "${v}" looks like JSON but is not an array of strings; pass a JSON array of strings ('["a","b"]') or separate values ("a" "b")`);
+  return parsed;
+};
 const flagStr = (k) => (flags[k] === undefined || flags[k] === true ? undefined : Array.isArray(flags[k]) ? flags[k].join(' ') : String(flags[k]));
 const flagNum = (k) => (flagStr(k) === undefined ? undefined : Number(flagStr(k)));
 
@@ -676,11 +686,15 @@ function goalChangeProblem(q, goalId, qid, l = null) {
   if (!v) return `${qid} is not a question`;
   if (v.class !== 'goal-change') return `${v.id} was asked in class ${v.class ?? '(none)'}, not goal-change`;
   if (v.goal !== goalId) return `${v.id} is about ${v.goal ?? 'no goal'}, not ${goalId} (ask with --goal ${goalId})`;
-  if (!v.change || !Object.keys(v.change).length) return `${v.id} carries no change (ask with --change '{…}'), so its answer authorises nothing specific`;
+  // A question asked before the exact-change rule (ask has required --change on these since) is
+  // an earlier answer: the supervisor carries it forward with the change it says the owner chose,
+  // logged as a carry-answer act the owner can correct, rather than asking the same thing again.
+  const legacy = !v.change || !Object.keys(v.change).length;
+  if (legacy && !(l && l.carried)) return `${v.id} carries no change; carry the owner's earlier answer forward with goal set --approved ${v.id} --change '{…}'`;
   if (v.status !== 'answered') return `${v.id} is not answered by the owner (${v.status})`;
   if (!v.matched) return `${v.id} was answered "${v.answer}", not its recommendation${v.recommendation ? ` ("${v.recommendation}")` : ''}; ask again for the change the owner wants`;
   // the owner approved this change and no other: the set must be exactly it
-  if (l && canonical(goalFieldsOf(l)) !== canonical(v.change)) return `the set (${Object.keys(goalFieldsOf(l)).join(', ') || 'nothing'}) is not the change ${v.id} proposed`;
+  if (l && !legacy && canonical(goalFieldsOf(l)) !== canonical(v.change)) return `the set (${Object.keys(goalFieldsOf(l)).join(', ') || 'nothing'}) is not the change ${v.id} proposed`;
   return null;
 }
 
@@ -1055,8 +1069,42 @@ function paneWaitingIn(window) {
     const hit = lines.find((l) => re.test(l));
     if (hit) { found = { kind, line: hit.slice(0, 200) }; break; }
   }
+  // Only the supervisor acts on a pane (its own tick); the dashboard, status and the owner only look.
+  if (target && !found && process.env.DEVTEAM_ROLE === 'supervisor') resendLostEnter(`${loadSettings().tmux_session}:${window}`, target, lines);
   paneWaits.set(window, found);
   return found;
+}
+
+// A lost Enter: text the kit typed still sits unsubmitted in an idle agent's input (an agent that
+// compacts or redraws as the keys arrive can drop the Enter). typeInto records each delivery per
+// window; when the pane's bottom lines still end with that text's tail, nothing on them says the
+// agent is busy, no prompt is up (the caller checked) and the text is LOST_ENTER_SECONDS old, press
+// Enter once and log it. The text is never retyped; the record is claimed (deleted) before the key,
+// so a delivery gets at most one Enter however many passes or processes look.
+const LOST_ENTER_SECONDS = 30;
+const PANE_BUSY = /esc to (interrupt|cancel)|ctrl\+c to (interrupt|cancel)|press esc to stop/i;
+const sentFile = (key) => path.join(runDir, 'sent', `${encodeURIComponent(key)}.json`);
+// Agent-agnostic: no prompt glyphs. Whitespace (wrapping, padding) and box-drawing borders drop out.
+const squash = (t) => t.replace(/[\s\u2500-\u257f]+/g, '');
+function recordSent(target, text) {
+  const key = sh('tmux', ['display-message', '-p', '-t', target, '#S:#W']);
+  if (!key) return;
+  try { writeJson(sentFile(key), { text, at: nowIso() }); } catch {}
+}
+function resendLostEnter(key, target, lines) {
+  const file = sentFile(key);
+  let rec;
+  try { rec = readJson(file); } catch { return; }
+  const age = (Date.now() - Date.parse(rec.at)) / 1000;
+  const tail = squash(rec.text ?? '').slice(-40);
+  if (!tail || !(age >= LOST_ENTER_SECONDS)) return;
+  const bottom = lines.slice(-8);
+  const claim = () => { try { fs.unlinkSync(file); return true; } catch { return false; } };
+  if (!squash(bottom.join('')).includes(tail)) return void claim(); // submitted: nothing left to press
+  if (bottom.some((l) => PANE_BUSY.test(l))) return;
+  if (!claim() || !tmux(['send-keys', '-t', target, 'Enter'])) return;
+  const hash = crypto.createHash('sha1').update(rec.text).digest('hex').slice(0, 12);
+  appendLog({ type: 'observation', source: 'pane', kind: 'resent-enter', subject: key.slice(key.indexOf(':') + 1), detail: `pressed Enter once: text typed ${Math.round(age)}s ago was still unsubmitted in an idle pane ("${rec.text.slice(0, 60)}${rec.text.length > 60 ? '…' : ''}", sha1 ${hash})`, detector: 'pane', source_key: `resent-enter ${key} ${hash} ${rec.at}`, measure: { value: Math.round(age), unit: 's' } });
 }
 const paneWaiting = (id) => (activeWorker(id) ? paneWaitingIn(id) : null);
 
@@ -1161,6 +1209,17 @@ function cmdValidate() {
     if (t.kind === 'contract' && !(t.contracts?.provides ?? []).length) err(id, 'contract ticket must list contracts.provides (D2)');
     if (t.feature !== CHORES && !fs_.has(t.feature)) err(id, `feature "${t.feature}" is not in the log (devteam.mjs feature add)`);
   }
+  // On a plan branch, the feature's tickets number from its reserved block (a planner made before
+  // blocks has none and is not checked).
+  {
+    const pf = onPlanBranch() ? (git(['rev-parse', '--abbrev-ref', 'HEAD']) ?? '').slice('plan/'.length) : null;
+    const b = pf ? idBlockFor(pf) : null;
+    if (b) for (const t of ts.values()) {
+      if (t.created_by !== `plan-${pf}`) continue;
+      const n = ticketNumber(t.id, t.component);
+      if (n === null || n < b.from || n > b.to) warnings.push(`${t.id}: its number is outside the block reserved for ${pf} (${padNN(b.from)}-${padNN(b.to)}); another planner may take it`);
+    }
+  }
   const cycle = findCycle(ts);
   if (cycle) errors.push(`dependency cycle: ${cycle.join(' -> ')} (D3)`);
 
@@ -1200,6 +1259,9 @@ function cmdValidate() {
       if (!f.design) errors.push(`feature ${fid} names no design (project/designs/<slug>.md)`);
       else if (!projectFileText(f.design.replace(/^project\//, ''))) errors.push(`feature ${fid}: design ${f.design} does not exist`);
       else {
+        // A design being planned here opens with its TL;DR; landed designs are history.
+        const dt = landed ? null : tldrGap(projectFileText(f.design.replace(/^project\//, '')));
+        if (dt) sink.push(`feature ${fid}: design ${f.design} ${dt} (quality.md §6)`);
         const ld = latestPerTrack(designReviews, 'design');
         if (!ld.length) sink.push(`feature ${fid}: design ${f.design} has no review in project/reviews/${designSlug}/design-<n>.md`);
         else if (ld.some((r) => r.verdict !== 'APPROVE')) sink.push(`feature ${fid}: the latest design review is not APPROVE`);
@@ -1345,6 +1407,8 @@ function parseReview(file, text) {
   const m = file.match(/^([a-z]+)-(\d+)([a-z]?)\.md$/);
   const verdict = [...text.matchAll(/^Verdict:[ \t]*(APPROVE|CHANGES)[ \t]+(\S+)[ \t]*$/gm)].pop();
   const reviewerRaw = text.match(/^-[ \t]*Reviewer:[ \t]*(.*)$/m)?.[1]?.trim() ?? '';
+  // A plan review that relies on a goal-level one-way-door answer says so: "- Goal-level door: <qid> covers this plan".
+  const doors = [...text.matchAll(/^-[ \t]*Goal-level door:[ \t]*(q-\S+)[ \t]+covers this plan\.?[ \t]*$/gm)].map((d) => d[1]);
   const findings = [];
   let dispIdx = -1;
   let sevIdx = 1;
@@ -1358,7 +1422,7 @@ function parseReview(file, text) {
   return {
     file, stage: m ? m[1] : file.replace(/\.md$/, ''), pass: m ? Number(m[2]) : 0, variant: m ? m[3] : '',
     verdict: verdict ? verdict[1] : null, sha: verdict ? verdict[2] : null, shaValid: verdict ? /^[0-9a-f]{40}$/.test(verdict[2]) : false,
-    reviewer: reviewerRaw && !reviewerRaw.startsWith('<') ? reviewerRaw : null, findings,
+    reviewer: reviewerRaw && !reviewerRaw.startsWith('<') ? reviewerRaw : null, findings, doors,
   };
 }
 const reviewRecordsIn = (src, relDir) => srcList(src, relDir).filter((f) => f.endsWith('.md')).map((f) => parseReview(f, srcRead(src, `${relDir}/${f}`) ?? ''));
@@ -1647,6 +1711,15 @@ function cmdMerge() {
   const sha = pr.headRefOid;
   if (!resolveCommit(sha)) die(`cannot find ${sha} locally after fetching ${branch}`);
   const fails = checkPr({ headRef: branch, sha, title: pr.title, body: pr.body });
+  // A plan's ticket ids are new: one already on main (another plan took the number) is refused
+  // outright; renumber on the branch.
+  if (plan) {
+    const by = `plan-${plan}`;
+    const onMain = tickets();
+    const text = git(['show', `${sha}:${projectRel}/log/${by}.jsonl`]) ?? '';
+    const dup = [...new Set(text.split('\n').filter(Boolean).map((t) => { try { return JSON.parse(t); } catch { return null; } }).filter((o) => o?.type === 'ticket' && o.op === 'new' && onMain.has(o.id) && onMain.get(o.id).created_by !== by).map((o) => o.id))];
+    if (dup.length) fails.push(`ticket id${dup.length > 1 ? 's' : ''} already on main: ${dup.join(', ')}; renumber them on ${branch} (from its reserved block) and ask again`);
+  }
   if (['BEHIND', 'DIRTY'].includes(pr.mergeStateStatus)) fails.push(`PR is ${pr.mergeStateStatus.toLowerCase()} relative to main; the author merges main and asks again`);
   // A chore PR that touches the kit, the agent config or the forge config carries an owner answer
   // (classes governance-edit, process-edit, gate-change); project/ files are the supervisor's.
@@ -2251,6 +2324,11 @@ function cmdAct() {
     const q = logGet(approved);
     approval = q?.type === 'question' ? questionView(q) : null;
     if (!approval || !['answered', 'defaulted'].includes(approval.status)) die(`${approved} is not an answered question`);
+  }
+  // approve-plan may cite the owner's answer to a one-way door asked at goal level (constitution.md §4);
+  // it is checked below, against the ticket's goals and its plan review, not as an approve-plan answer.
+  const doorCited = cls === 'approve-plan' && approval?.kind === 'one-way-door';
+  if (approval && !doorCited) {
     if (approval.class !== cls) die(`${approved} was asked in class ${approval.class ?? '(none)'}, not ${cls}`);
     if (logObjects('act').some((a) => a.approved_by === approved)) die(`${approved} already approved an act; ask again for another`);
   }
@@ -2271,10 +2349,46 @@ function cmdAct() {
   if (cls === 'approve-plan') {
     const t = tickets().get(asList(flags.refs)[0]);
     if (!t) die('approve-plan names the ticket: --refs <ticket-id>');
-    if ((t.one_way_doors ?? []).length && !questions().some((q) => q.kind === 'one-way-door' && q.ticket === t.id && q.status === 'answered')) die(`${t.id} lists one-way doors; the owner answers a one-way-door question (--ticket ${t.id}) before its plan is approved (constitution.md §4)`);
+    const doors = t.one_way_doors ?? [];
+    let goalDoor = null;
+    if (doorCited) {
+      if (!doors.length) die(`${t.id} lists no one-way doors; ${approved} has nothing to cover`);
+      if (approval.status !== 'answered') die(`${approved} was not answered by the owner; a one-way door needs the owner's answer, never a default`);
+      if (approval.ticket !== t.id) {
+        const goals = features().get(t.feature)?.goals ?? [];
+        if (!approval.goal) die(`${approved} is a one-way-door question for neither ${t.id} nor a goal`);
+        if (!goals.includes(approval.goal)) die(`${approved} answered a one-way door for goal ${approval.goal}, but ${t.id}'s feature ${t.feature} serves ${goals.join(', ') || 'no goal'}; an answer for another goal never covers this plan`);
+        goalDoor = approved;
+      }
+    } else if (doors.length && !questions().some((q) => q.kind === 'one-way-door' && q.ticket === t.id && q.status === 'answered')) die(`${t.id} lists one-way doors; the owner answers a one-way-door question (--ticket ${t.id}) before its plan is approved, or you cite the owner's answer to the goal's one-way-door question (--approved <qid>) and the plan review says it covers the plan (constitution.md §4)`);
+    // The plan opens with its TL;DR, so a low-risk plan can be approved from it (quality.md §6).
+    const ref = [`ticket/${t.id}`, `origin/ticket/${t.id}`].find((r) => resolveCommit(r));
+    const plan = ref ? git(['show', `${ref}:${projectRel}/tickets/${t.id}/plan.md`]) : null;
+    if (plan === null) die(`no plan.md for ${t.id} on ticket/${t.id}; approve a plan once it is committed`);
+    const tldr = tldrGap(plan);
+    if (tldr) die(`${t.id}'s plan ${tldr}; send it back to the worker (quality.md §6)`);
+    // A goal-level answer covers the plan only when its reviewer says the plan stays inside it.
+    if (goalDoor) {
+      const latest = latestPerTrack(ticketReviews(t.id, { ref }), 'plan').filter((r) => r.verdict === 'APPROVE');
+      if (!latest.some((r) => r.doors.includes(goalDoor))) die(`${goalDoor} is a goal-level answer; the latest approving plan review (reviews/plan-<n>.md on ticket/${t.id}) must say "- Goal-level door: ${goalDoor} covers this plan" (quality.md §3)`);
+    }
   }
   const line = appendLog({ type: 'act', class: cls, scope: scope ?? undefined, what, rung, refs: asList(flags.refs), reversible: !flags.irreversible, approved_by: approved ?? undefined }, 'supervisor');
   out(line.id);
+}
+// A plan or design opens with '## TL;DR' and a few bullets: the approach, skimmable (quality.md §6).
+// Returns what is wrong, or null.
+function tldrGap(text) {
+  const lines = text.split('\n');
+  const at = lines.findIndex((l) => /^##\s+TL;?DR\b/i.test(l.trim()));
+  if (at < 0) return 'has no "## TL;DR" section';
+  if (lines.slice(0, at).some((l) => /^##\s/.test(l.trim()))) return 'has its TL;DR after another section; it comes first, under the title';
+  const body = [];
+  for (const l of lines.slice(at + 1)) { if (/^#{1,2}\s/.test(l.trim())) break; body.push(l); }
+  const bullets = body.filter((l) => /^\s{0,3}[-*+]\s+\S/.test(l)).length;
+  if (!bullets) return 'has a TL;DR with no bullets';
+  if (bullets > 7) return `has a TL;DR of ${bullets} bullets; seven at most, the rest belongs in the plan`;
+  return null;
 }
 function cmdCorrect() {
   const [actId] = positional;
@@ -2576,11 +2690,11 @@ function cmdGoal() {
       : undefined,
     // `none` clears it: a horizon is the owner's real deadline or nothing (planning.md §1)
     horizon: flagStr('horizon') === 'none' ? null : flagStr('horizon'),
-    non_goals: flags['non-goals'] !== undefined ? asList(flags['non-goals']) : undefined,
-    preconditions: flags.preconditions !== undefined ? asList(flags.preconditions) : undefined,
+    non_goals: flags['non-goals'] !== undefined ? listFlag('non-goals') : undefined,
+    preconditions: flags.preconditions !== undefined ? listFlag('preconditions') : undefined,
     priority: flagNum('priority'),
     milestones: jsonFlag('milestones'),
-    plan_after: flags['plan-after'] !== undefined ? asList(flags['plan-after']).map((goal) => ({ goal, reason: flagStr('reason') ?? die('--plan-after needs --reason: why this goal\'s design waits on that one') })) : undefined,
+    plan_after: flags['plan-after'] !== undefined ? listFlag('plan-after').map((goal) => ({ goal, reason: flagStr('reason') ?? die('--plan-after needs --reason: why this goal\'s design waits on that one') })) : undefined,
   });
   if (sub === 'add') {
     const { by } = writer();
@@ -2589,18 +2703,30 @@ function cmdGoal() {
     return out(appendLog({ type: 'goal', status: 'draft', ...f }, by).id);
   }
   if (sub === 'set') {
-    if (!id || logGet(id)?.type !== 'goal') die('usage: goal set <g-id> [--title …] [--outcome …] [--measure …] [--target n] [--unit u] [--direction up|down] [--horizon date] [--non-goals …] [--preconditions …] [--priority n] [--milestones \'[{"title","target","by","preconditions":[n],"tickets"}…]\'] [--plan-after <g-id>… --reason "…"] [--approved <qid>] [--owner]');
+    if (!id || logGet(id)?.type !== 'goal') die('usage: goal set <g-id> [--title …] [--outcome …] [--measure …] [--target n] [--unit u] [--direction up|down] [--horizon date] [--non-goals a b | \'["a","b"]\'] [--preconditions a b | \'["a","b"]\'] [--priority n] [--milestones \'[{"title","target","by","preconditions":[n],"tickets"}…]\'] [--plan-after <g-id>… --reason "…"] [--approved <qid>] [--owner]');
     const { by } = writer();
     const approved = flagStr('approved') ?? null;
     if (approved && by !== 'supervisor') die('the owner changes a goal directly; --approved is the supervisor applying an owner answer');
     if (by === 'supervisor' && (logGet(id).status ?? 'draft') !== 'draft' && !approved) die(`${id} is ${logGet(id).status}; only the owner changes it now (class goal-change): ask a goal-change question with --goal ${id}, then goal set ${id} --approved <qid>`);
     if (approved) {
-      const problem = goalChangeProblem(logGet(approved), id, approved);
+      // an earlier answer carried forward with --change is checked as such (its question recorded no change)
+      const problem = goalChangeProblem(logGet(approved), id, approved, logGet(approved)?.type === 'question' && !questionView(logGet(approved)).change && flagStr('change') !== undefined ? { carried: true } : null);
       if (problem) die(`goal set --approved: ${problem}`);
       if (logObjects('goal').some((g) => g.updates.some((u) => u.approved === approved)) || logObjects('act').some((a) => a.approved_by === approved)) die(`${approved} already authorised a change; ask again for another`);
       // the answer authorises the change the question proposed, applied as is
       if (Object.values(fields()).some((x) => x !== undefined)) die('goal set --approved applies the change its question proposed; pass no other fields');
-      return out(`updated ${id} (${appendLog({ type: 'goal', op: 'set', id, ...questionView(logGet(approved)).change, approved }, by).id})`);
+      const qv = questionView(logGet(approved));
+      if (qv.change) {
+        if (flagStr('change') !== undefined) die(`${approved} proposed its change; --change is only for carrying forward an earlier answer that didn't record one`);
+        return out(`updated ${id} (${appendLog({ type: 'goal', op: 'set', id, ...qv.change, approved }, by).id})`);
+      }
+      // carrying forward an answer given before changes were recorded on the question
+      const carried = jsonFlag('change') ?? die(`${approved} was asked before changes were recorded on goal-change questions: carry the owner's answer forward with --change '{…}', the change they chose ("${qv.answer}")`);
+      const bad = Object.keys(carried).filter((k) => !GOAL_CHANGE_FIELDS.includes(k));
+      if (!Object.keys(carried).length || bad.length) die(`--change sets goal fields (${GOAL_CHANGE_FIELDS.join(', ')})${bad.length ? `; not ${bad.join(', ')}` : ''}`);
+      const line = appendLog({ type: 'goal', op: 'set', id, ...carried, approved, carried: true }, by);
+      appendLog({ type: 'act', class: 'carry-answer', what: `applied your earlier answer to ${approved} ("${qv.answer}") to ${id}: set ${Object.keys(carried).join(', ')}`, refs: [id, approved], reversible: true }, 'supervisor');
+      return out(`updated ${id} (${line.id}), carrying ${approved} forward`);
     }
     appendLog({ type: 'goal', op: 'set', id, ...fields() }, by);
     return out(`updated ${id}`);
@@ -3001,7 +3127,7 @@ function collectMetrics(since) {
   const replies = new Map();
   for (const m of msgs) if (m.re && !replies.has(m.re)) replies.set(m.re, Date.parse(m.created_at));
   const expecting = msgs.filter((m) => !['info', 'ruling', 'answer'].includes(m.kind));
-  const openMsgs = expecting.filter((m) => !replies.has(m.id));
+  const openMsgs = expecting.filter((m) => !replies.has(m.id) && !settledByLanding(m));
   const msgWaits = expecting.filter((m) => replies.has(m.id)).map((m) => replies.get(m.id) - Date.parse(m.created_at));
   const qs = questions().filter((q) => Date.parse(q.asked_at) >= since);
   const qWaits = qs.filter((q) => q.answered_at && q.status === 'answered').map((q) => Date.parse(q.answered_at) - Date.parse(q.asked_at));
@@ -3200,7 +3326,7 @@ function dashboardData() {
     tickets: deriveStatus(),
     critical_path: findCycle(sub) ? [] : criticalPath(sub).path,
     questions: rankQuestions(questions().filter((q) => q.status === 'open')),
-    open_messages: msgs.filter((m) => !['info', 'ruling', 'answer'].includes(m.kind) && !replied.has(m.id)).map((m) => ({ id: m.id, kind: m.kind, actor: m.created_by, to: m.to, summary: m.text })),
+    open_messages: msgs.filter((m) => !['info', 'ruling', 'answer'].includes(m.kind) && !replied.has(m.id) && !settledByLanding(m)).map((m) => ({ id: m.id, kind: m.kind, actor: m.created_by, to: m.to, summary: m.text })),
     metrics: collectMetrics(0),
     progress: collectProgress(),
     planners: planners(),
@@ -3346,7 +3472,7 @@ const PROMPTS = {
 function cmdPrompt() {
   const role = positional[0];
   if (!PROMPTS[role]) die('usage: prompt supervisor|worker <ticket-id>|planner <feature>');
-  const p = PROMPTS[role].replace(/\{\{ID\}\}/g, positional[1] ?? '');
+  const p = role === 'planner' && positional[1] ? plannerPrompt(positional[1]) : PROMPTS[role].replace(/\{\{ID\}\}/g, positional[1] ?? '');
   const block = role === 'supervisor' ? '' : knowledgeBlock(positional[1]);
   out(block ? `${p}\n\n${block}` : p);
 }
@@ -3378,7 +3504,8 @@ function resolvePane(target) {
   if (SHELLS.has(cmd.replace(/^-/, ''))) return { problem: `no agent is running in ${exact} (it is at a ${cmd} prompt); resume it first` };
   return { target: exact };
 }
-const typeInto = (target, line) => tmux(['send-keys', '-t', target, '-l', line]) && tmux(['send-keys', '-t', target, 'Enter']);
+// Each delivery is recorded per window, so a lost Enter can be pressed later (resendLostEnter).
+const typeInto = (target, line) => { const ok = tmux(['send-keys', '-t', target, '-l', line]) && tmux(['send-keys', '-t', target, 'Enter']); if (ok) recordSent(target, line); return ok; };
 function nudgeSupervisor(line) {
   const { target, problem } = resolvePane(supervisorTarget());
   if (problem) return void warn(`not delivered to the supervisor: ${problem}`);
@@ -3405,12 +3532,22 @@ function cmdSend() {
   if (problem || !typeInto(exact, `[devteam ${kind} ${line.id} from ${from}${re ? ` re ${re}` : ''}${sha ? ` @ ${sha}` : ''}] ${text}`)) warn(`${line.id} recorded but not delivered to "${to}": ${problem ?? `could not type into ${exact}`}; it shows in their \`messages\``);
   out(line.id);
 }
+// A request is settled when the work it is about has landed: a ticket's once it merged, a
+// planner's once its plan file is on main. The merge is the answer even if nobody replied.
+function settledByLanding(m) {
+  const by = m.created_by ?? m.by;
+  if (!by) return false;
+  const cls = writerClass(by);
+  if (cls === 'ticket') return !!mergeShaFor(by);
+  if (cls === 'planner') return !!mainRef() && git(['cat-file', '-e', `${mainRef()}:${projectRel}/log/${by}.jsonl`]) !== null;
+  return false;
+}
 function cmdMessages() {
   const me = flagStr('to') ?? myAddress();
   const all = logObjects('message').sort(byTime);
   const replied = new Set(all.map((m) => m.re).filter(Boolean));
   let mine = all.filter((m) => m.to === me);
-  if (flags.open) mine = mine.filter((m) => !replied.has(m.id) && !['info', 'ruling', 'answer'].includes(m.kind));
+  if (flags.open) mine = mine.filter((m) => !replied.has(m.id) && !['info', 'ruling', 'answer'].includes(m.kind) && !settledByLanding(m));
   mine = mine.slice(-Number(flagStr('tail') ?? 50));
   if (flags.json) return json(mine);
   if (!mine.length) return out(flags.open ? 'no open messages' : 'no messages');
@@ -3500,6 +3637,47 @@ function cmdStopOk() {
   process.exit(0);
 }
 
+// --- ticket number blocks ---
+//
+// Planners run in parallel, each on its own branch, so none can see the numbers the others take.
+// `planner <feature>` reserves a block of ticket numbers for the feature (an id_block on the act
+// that made it) above every number on main, in another planner's graph, and in every earlier block;
+// the planner numbers its tickets from it. Numbers are counted across components, so a block is
+// free whatever components the feature touches.
+const ID_BLOCK_DEFAULT = 20;
+// The NN of <component>-NN-<slug>, or null.
+function ticketNumber(id, component) {
+  const m = component && id.startsWith(`${component}-`) ? id.slice(component.length + 1).match(/^(\d{2,})-/) : id.match(/-(\d{2,})-/);
+  return m ? Number(m[1]) : null;
+}
+const padNN = (n) => String(n).padStart(2, '0');
+const idBlocks = () => logObjects('act').filter((a) => a.id_block).sort(byTime).map((a) => a.id_block);
+const idBlockFor = (feature) => idBlocks().filter((b) => b.feature === feature).pop() ?? null;
+// The ticket lines (op new) of every plan branch in flight, or of one: its worktree's plan file,
+// else the branch's.
+function inFlightPlanTickets(only = null) {
+  const branches = only ? [only] : (git(['for-each-ref', '--format=%(refname:short)', 'refs/heads/plan/']) ?? '').split('\n').filter(Boolean);
+  return branches.flatMap((b) => {
+    const by = `plan-${b.slice('plan/'.length)}`;
+    const text = readText(path.join(mainRoot, '.worktrees', by, projectRel, 'log', `${by}.jsonl`)) ?? git(['show', `${b}:${projectRel}/log/${by}.jsonl`]) ?? '';
+    return text.split('\n').filter(Boolean).map((t) => { try { return JSON.parse(t); } catch { return null; } }).filter((o) => o?.type === 'ticket' && o.op === 'new' && typeof o.id === 'string');
+  });
+}
+function reserveIdBlock(feature, size) {
+  const used = [
+    ...[...tickets().values()].map((t) => ticketNumber(t.id, t.component)),
+    ...inFlightPlanTickets().map((t) => ticketNumber(t.id, t.component)),
+    ...idBlocks().map((b) => b.to),
+  ].filter((n) => Number.isInteger(n));
+  const from = Math.max(0, ...used) + 1;
+  return { feature, from, to: from + size - 1 };
+}
+const idBlockText = (b) => `Your ticket numbers: ${padNN(b.from)} to ${padNN(b.to)}, reserved for this feature (other planners number in parallel). Number every ticket <component>-NN-<slug> with NN in that block, in order; if you need more, ask the supervisor for another block rather than going past it.`;
+const plannerPrompt = (feature) => {
+  const b = idBlockFor(feature);
+  return `${PROMPTS.planner.replace(/\{\{ID\}\}/g, feature)}${b ? ` ${idBlockText(b)}` : ''}`;
+};
+
 // worker <ticket-id> [--resume] | planner <feature> [--resume]: a git worktree, a tmux window, the
 // agent command from the settings, and the role's prompt (plus the knowledge that applies).
 function makeSession(role) {
@@ -3510,10 +3688,15 @@ function makeSession(role) {
   const s = loadSettings();
   const resume = !!flags.resume;
   if (role === 'worker' && !tickets().has(id)) die(`no ticket ${id} (devteam.mjs ticket show ${id})`);
+  const blockSize = flagNum('id-block') ?? ID_BLOCK_DEFAULT;
+  if (role === 'planner' && !(Number.isInteger(blockSize) && blockSize >= 1)) die('--id-block takes a whole number of ticket numbers to reserve (at least 1)');
   const name = role === 'worker' ? id : `plan-${id}`;
   const branch = role === 'worker' ? `ticket/${id}` : `plan/${id}`;
   const wt = path.join(mainRoot, '.worktrees', name);
   fs.mkdirSync(path.join(runDir, 'prompts'), { recursive: true });
+  // A planner gets a block of ticket numbers before it numbers anything; one that has a block keeps
+  // it, and one that numbered tickets before blocks existed gets none (nothing to check it against).
+  const block = role === 'planner' && !idBlockFor(id) && !inFlightPlanTickets(branch).length ? reserveIdBlock(id, blockSize) : null;
   if (!fs.existsSync(wt)) {
     git(['fetch', '--quiet', 'origin', s.main_branch]);
     const base = resolveCommit(`origin/${s.main_branch}`) ? `origin/${s.main_branch}` : s.main_branch;
@@ -3522,8 +3705,10 @@ function makeSession(role) {
   }
   seedWorktree(wt);
   const promptFile = path.join(runDir, 'prompts', `${name}.txt`);
-  const block = knowledgeBlock(id);
-  fs.writeFileSync(promptFile, `${PROMPTS[role].replace(/\{\{ID\}\}/g, id)}${block ? `\n\n${block}` : ''}\n`);
+  const knowledge = knowledgeBlock(id);
+  const held = block ?? (role === 'planner' ? idBlockFor(id) : null);
+  const text = `${PROMPTS[role].replace(/\{\{ID\}\}/g, id)}${held ? ` ${idBlockText(held)}` : ''}`;
+  fs.writeFileSync(promptFile, `${text}${knowledge ? `\n\n${knowledge}` : ''}\n`);
   // Workers live in detached tmux windows the owner can attach to; the supervisor is not one of them.
   let fresh = false;
   if (!tmux(['has-session', '-t', s.tmux_session])) { fresh = tmux(['new-session', '-d', '-s', s.tmux_session, '-n', name, '-c', wt]); if (!fresh) die('could not start tmux'); }
@@ -3544,8 +3729,8 @@ function makeSession(role) {
   }
   typeInto(target, `${cmd} "$(cat '${promptFile}')"`);
   if (role === 'worker' && !resume) appendLog({ type: 'phase', from: null, to: 'starting', note: `started in ${target}` }, id);
-  appendLog({ type: 'act', class: 'worker-slots', what: `${resume ? 'resumed' : 'made'} ${role} ${name} in ${target}`, refs: role === 'worker' ? [id] : [], reversible: true }, 'supervisor');
-  out(`${resume ? 'resumed' : 'made'} ${role} ${name} in ${target} at ${wt}`);
+  appendLog({ type: 'act', class: 'worker-slots', what: `${resume ? 'resumed' : 'made'} ${role} ${name} in ${target}${block ? `, ticket numbers ${padNN(block.from)}-${padNN(block.to)}` : ''}`, refs: role === 'worker' ? [id] : [], reversible: true, id_block: block ?? undefined }, 'supervisor');
+  out(`${resume ? 'resumed' : 'made'} ${role} ${name} in ${target} at ${wt}${block ? `; ticket numbers ${padNN(block.from)}-${padNN(block.to)} reserved` : ''}`);
 }
 
 function cmdWhoami() {
@@ -3726,7 +3911,7 @@ const HELP = `devteam <command>   (positionals before flags; flags take the word
 Setup and roles
   init [--name n] [--upstream-base vX] [--github]   project folders, settings, .gitignore, the devteam section of AGENTS.md
   prompt supervisor | worker <id> | planner <feature>    the prompt a session starts with
-  worker <ticket-id> [--resume] | planner <feature> [--resume]   supervisor: a worktree, a tmux window and an agent for a ticket or a feature plan
+  worker <ticket-id> [--resume] | planner <feature> [--resume] [--id-block <n>]   supervisor: a worktree, a tmux window and an agent for a ticket or a feature plan (a new planner reserves n ticket numbers, default 20)
   whoami | settings [--get key]
 
 The graph (planning.md)

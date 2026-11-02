@@ -47,13 +47,13 @@ A goal is **fully defined** when it has: an outcome (what is true for users or t
 
 Designs come at two levels.
 
-**The goal's design is the spine.** One per goal at `project/designs/<goal-slug>.md` (the slug `goal check` prints), written once the goal is fully defined and before the owner approves it; until the plan PR lands, link it from its plan branch. It is what keeps PR 40 and PR 400 of one goal coherent: the boundaries, the contracts, the data, the one-way doors and the milestones are decided here once, and every feature builds inside them. It stays at that level; the detail of a feature is written when that feature is planned. Write it with superpowers' **brainstorming**, saving there instead of its default location. It must cover what brainstorming already asks for (intent and why; goals, non-goals, anti-goals; constraints; the approaches considered and the one chosen; what's decided and what's left to the builder) plus:
+**The goal's design is the spine.** One per goal at `project/designs/<goal-slug>.md` (the slug `goal check` prints), written once the goal is fully defined and before the owner approves it; until the plan PR lands, link it from its plan branch. It is what keeps PR 40 and PR 400 of one goal coherent: the boundaries, the contracts, the data, the one-way doors and the milestones are decided here once, and every feature builds inside them. It stays at that level; the detail of a feature is written when that feature is planned. Write it with superpowers' **brainstorming**, saving there instead of its default location, opening with a `## TL;DR` (`quality.md` §6); boundaries, contracts and sequences are clearest as Mermaid diagrams. It must cover what brainstorming already asks for (intent and why; goals, non-goals, anti-goals; constraints; the approaches considered and the one chosen; what's decided and what's left to the builder) plus:
 
 - the reverse chain: for each precondition of the goal, why it must hold, what says it doesn't yet, and which feature will make it hold;
 - components and boundaries, and every contract that crosses one (each becomes a contract ticket);
 - data: new or changed persistence with its tier (`code-style.md` §4), migrations and rollback safety;
 - failure modes, security and PII;
-- one-way doors, each an owner question before any plan is approved;
+- one-way doors, each an owner question before any plan is approved (one answered here, with `--goal`, can approve a ticket's plan when its plan review says the plan stays inside it; constitution.md §4);
 - **Owner decisions**: each decision the owner made for this design, with the question id that settled it (§1); none may be left open when approval is asked;
 - risks and unknowns that survive, each a spike ticket or a question;
 - the milestones, in order, each with its target, the preconditions it makes true, its date if any and a size in tickets (recorded on the goal, §1);
@@ -106,7 +106,7 @@ devteam.mjs ticket add api-07-session-tokens --json '{
 
 | Field | Meaning |
 |---|---|
-| id | `<component>-<NN>-<slug>`; `NN` is the next free number for that component; numbers never move or get reused |
+| id | `<component>-<NN>-<slug>`; a planner takes `NN` in order from the block of numbers `planner <feature>` reserved for its feature (it is in the prompt; `prompt planner <feature>` shows it again), because planners run in parallel and can't see each other's numbers; ask the supervisor for another block rather than going past it. Without a planner, `NN` is the next free number. `validate` on the plan branch warns about a number outside the block, and `merge --plan` refuses an id already on main. Numbers never move or get reused |
 | title | one line a user could read; it becomes the PR title after the id |
 | feature, component | the feature slug; the one component this ticket changes (contract tickets may span two) |
 | kind | `contract`, `build`, `integration`, `chore`, `spike` |

@@ -14,7 +14,7 @@ const origin = path.join(tmp, 'origin.git');
 const repo = path.join(tmp, 'repo');
 const wt = (name) => path.join(repo, '.worktrees', name);
 const DT = path.join(repo, 'docs', 'devteam', 'scripts', 'devteam.mjs');
-const ROLE = { sup: { DEVTEAM_ROLE: 'supervisor' }, planner: { DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: 'billing' }, planner2: { DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: 'other' }, worker: { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'bill-01-card' }, owner: {} };
+const ROLE = { sup: { DEVTEAM_ROLE: 'supervisor' }, planner: { DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: 'billing' }, planner2: { DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: 'other' }, alpha: { DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: 'alpha' }, legacy: { DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: 'legacy' }, worker: { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'bill-01-card' }, owner: {} };
 const line = (o) => `${JSON.stringify({ v: 1, ...o })}\n`;
 // tmux in this test talks to its own server, never the developer's (or a live fleet's) sessions.
 process.env.TMUX_TMPDIR = fs.mkdtempSync(path.join(os.tmpdir(), 'dt-tmux-'));
@@ -116,9 +116,11 @@ test('devteam kit', async (t) => {
 
   await t.test('planner writes feature and tickets into its own log file in its worktree', () => {
     git(['worktree', 'add', '-q', '-b', 'plan/billing', wt('plan-billing'), 'origin/main']);
-    write(path.join(wt('plan-billing'), 'docs/devteam/project/designs/self-serve-billing.md'), '# Design: billing\n');
+    write(path.join(wt('plan-billing'), 'docs/devteam/project/designs/self-serve-billing.md'), '# Design: billing\n\n## Goals\n\nadmins pay alone\n');
     const feature = { title: 'Billing', goals: [G], preconditions: [`${G}#1`], design: 'project/designs/self-serve-billing.md', stories: [{ id: 'BILL-S1', text: 'admin adds a card', release: 'v0.2.0' }] };
     must(['feature', 'add', 'billing', '--json', JSON.stringify(feature)], { cwd: wt('plan-billing'), role: 'planner' });
+    assert.match(dt(['validate'], { cwd: wt('plan-billing') }).out, /has no "## TL;DR" section/, 'a design being planned opens with its TL;DR');
+    write(path.join(wt('plan-billing'), 'docs/devteam/project/designs/self-serve-billing.md'), '# Design: billing\n\n## TL;DR\n\n- cards first, stored by the processor\n\n## Goals\n\nadmins pay alone\n');
     const ticket = { title: 'card capture', feature: 'billing', component: 'bill', kind: 'build', size: 'S', risk: 'normal', serves: ['BILL-S1'], depends_on: [], touches: ['billing/**'], done_when: ['card test passes in CI'] };
     must(['ticket', 'add', 'bill-01-card', '--json', JSON.stringify(ticket)], { cwd: wt('plan-billing'), role: 'planner' });
     assert.notEqual(dt(['ticket', 'add', 'bill-01-card', '--json', '{"title":"x"}'], { cwd: wt('plan-billing'), role: 'planner' }).status, 0, 'duplicate id refused');
@@ -274,10 +276,20 @@ test('devteam kit', async (t) => {
     assert.ok(!json(must(['metrics', '--json'])).gates.flaky_gates.some((g) => g.gate === 'tdd'), 'dirty runs are not flaky');
     assert.notEqual(dt(['act', '--class', 'approve-spec', '--refs', 'm-20261101-000000000-bill-01-card', '--', 'spec ok'], { role: 'sup' }).status, 0, 'an approval names its ticket');
     must(['act', '--class', 'approve-spec', '--refs', 'bill-01-card', '--', 'spec ok'], { role: 'sup' });
-    must(['act', '--class', 'approve-plan', '--refs', 'bill-01-card', '--', 'plan ok'], { role: 'sup' });
     const tdir = path.join(wt('bill-01-card'), 'docs/devteam/project/tickets/bill-01-card');
+    // approve-plan reads the committed plan, and the plan opens with its TL;DR
+    assert.match(dt(['act', '--class', 'approve-plan', '--refs', 'bill-01-card', '--', 'plan ok'], { role: 'sup' }).err, /no plan\.md/);
     write(path.join(tdir, 'spec.md'), '# spec\n');
-    write(path.join(tdir, 'plan.md'), '# plan\n');
+    write(path.join(tdir, 'plan.md'), '# plan\n\n## Tasks\n\n- T1 card capture\n');
+    git(['add', '-A'], wt('bill-01-card'));
+    git(['commit', '-qm', 'bill-01-card: spec and plan'], wt('bill-01-card'));
+    assert.match(dt(['act', '--class', 'approve-plan', '--refs', 'bill-01-card', '--', 'plan ok'], { role: 'sup' }).err, /no "## TL;DR" section/);
+    write(path.join(tdir, 'plan.md'), `# plan\n\n## TL;DR\n\n${Array.from({ length: 8 }, (_, i) => `- point ${i + 1}`).join('\n')}\n\n## Tasks\n\n- T1 card capture\n`);
+    git(['commit', '-qam', 'bill-01-card: tldr'], wt('bill-01-card'));
+    assert.match(dt(['act', '--class', 'approve-plan', '--refs', 'bill-01-card', '--', 'plan ok'], { role: 'sup' }).err, /8 bullets; seven at most/);
+    write(path.join(tdir, 'plan.md'), '# plan\n\n## TL;DR\n\n- capture a card in billing/card.js\n- one test first, then the code\n\n```mermaid\nflowchart LR\n  a --> b\n```\n\n## Tasks\n\n- T1 card capture\n');
+    git(['commit', '-qam', 'bill-01-card: tldr'], wt('bill-01-card'));
+    must(['act', '--class', 'approve-plan', '--refs', 'bill-01-card', '--', 'plan ok'], { role: 'sup' });
     write(path.join(tdir, 'verification.md'), '| Done-when | Command | Result |\n|---|---|---|\n| card test | npm t | pass |\n');
     write(path.join(wt('bill-01-card'), 'billing/card.js'), 'code\n');
     git(['add', '-A'], wt('bill-01-card'));
@@ -694,6 +706,51 @@ test('devteam kit', async (t) => {
     }
   });
 
+  await t.test('parallel planners number tickets from disjoint reserved blocks; validate and merge --plan hold them to it', (tt) => {
+    if (!hasTmux) return tt.skip('no tmux');
+    // the planner's agent is a no-op here
+    landSettings((txt) => txt.replace('"gates": {', '"agent_command": "true", "resume_command": "true", "gates": {'));
+    // two planners started together: blocks above main's highest number (bill-01) and each other's
+    assert.match(must(['planner', 'alpha'], { role: 'sup' }), /ticket numbers 02-21 reserved/);
+    assert.match(must(['planner', 'beta', '--id-block', '5'], { role: 'sup' }), /ticket numbers 22-26 reserved/);
+    assert.match(dt(['planner', 'gamma', '--id-block', '0'], { role: 'sup' }).err, /--id-block takes a whole number/);
+    const blocks = () => json(must(['log', '--type', 'act', '--json'])).filter((a) => a.id_block).map((a) => a.id_block);
+    assert.deepEqual(blocks(), [{ feature: 'alpha', from: 2, to: 21 }, { feature: 'beta', from: 22, to: 26 }]);
+    // the block is in the planner's prompt, and a relaunch keeps it rather than reserving another
+    assert.match(fs.readFileSync(path.join(repo, 'docs/devteam/run/prompts/plan-alpha.txt'), 'utf8'), /Your ticket numbers: 02 to 21, reserved for this feature/);
+    assert.match(must(['prompt', 'planner', 'beta']), /Your ticket numbers: 22 to 26/);
+    assert.doesNotMatch(must(['prompt', 'planner', 'nobody']), /Your ticket numbers/);
+    must(['planner', 'alpha', '--resume'], { role: 'sup' });
+    assert.equal(blocks().length, 2);
+    // validate on the plan branch: a ticket outside the block is a warning, one inside is not
+    const aw = { cwd: wt('plan-alpha'), role: 'alpha' };
+    const tk = (title) => JSON.stringify({ title, feature: 'alpha', component: 'al', kind: 'build', size: 'S', risk: 'normal', serves: ['AL-S1'], depends_on: [], touches: [`al/${title}/**`], done_when: ['tests pass'] });
+    must(['feature', 'add', 'alpha', '--json', JSON.stringify({ title: 'Alpha', goals: [G], stories: [{ id: 'AL-S1', text: 'a', release: 'v0.2.0' }] })], aw);
+    must(['ticket', 'add', 'al-02-one', '--json', tk('one')], aw);
+    let v = dt(['validate'], { cwd: wt('plan-alpha') }).out;
+    assert.doesNotMatch(v, /outside the block/);
+    must(['ticket', 'add', 'al-30-far', '--json', tk('far')], aw);
+    v = dt(['validate', '--strict'], { cwd: wt('plan-alpha') }).out;
+    assert.match(v, /warning: al-30-far: its number is outside the block reserved for alpha \(02-21\)/);
+    assert.doesNotMatch(v, /al-02-one: its number is outside/);
+    // a planner made before blocks has none, so nothing to warn about
+    git(['worktree', 'add', '-q', '-b', 'plan/legacy', wt('plan-legacy'), 'origin/main']);
+    const lw = { cwd: wt('plan-legacy'), role: 'legacy' };
+    must(['feature', 'add', 'legacy', '--json', JSON.stringify({ title: 'Legacy', goals: [G], stories: [{ id: 'LG-S1', text: 'l', release: 'v0.2.0' }] })], lw);
+    must(['ticket', 'add', 'lg-90-old', '--json', tk('old').replace('"alpha"', '"legacy"').replace('AL-S1', 'LG-S1').replace('"al"', '"lg"')], lw);
+    assert.doesNotMatch(dt(['validate', '--strict'], { cwd: wt('plan-legacy') }).out, /outside the block/);
+    // a plan whose ticket id is already on main is refused outright at merge
+    const pb = path.join(wt('plan-beta'), 'docs/devteam/project/log/plan-beta.jsonl');
+    fs.appendFileSync(pb, line({ id: 'bill-01-card', type: 'ticket', op: 'new', at: '2026-11-02T00:00:00.000Z', by: 'plan-beta', title: 'card again', feature: 'beta', component: 'bill', kind: 'build', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: [], done_when: ['x'] }));
+    for (const w of ['plan-alpha', 'plan-beta']) { git(['add', '-A'], wt(w)); git(['commit', '-qm', 'plan'], wt(w)); }
+    const dup = dt(['merge', '--plan', 'beta', '--dry-run', '--title', 'plan-beta: beta', '--body-file', body], { role: 'sup' });
+    assert.notEqual(dup.status, 0);
+    assert.match(dup.out, /fail: ticket id already on main: bill-01-card; renumber/);
+    assert.doesNotMatch(dt(['merge', '--plan', 'alpha', '--dry-run', '--title', 'plan-alpha: alpha', '--body-file', body], { role: 'sup' }).out, /already on main/);
+    spawnSync('tmux', ['kill-server']);
+    for (const f of ['alpha', 'beta', 'legacy']) { git(['worktree', 'remove', '--force', wt(`plan-${f}`)]); git(['branch', '-D', `plan/${f}`]); }
+  });
+
   await t.test('a fully defined goal nobody is planning is idle planning', () => {
     const Gi = must(['goal', 'add', '--title', 'Faster checkout', '--outcome', 'pay in under a minute', '--measure', 'median checkout', '--target', '60', '--unit', 's', '--direction', 'down', '--horizon', '2027-06-30', '--non-goals', 'mobile', '--preconditions', 'one-page form', '--priority', '7'], { role: 'sup' });
     must(['goal', 'reading', Gi, '--value', '180'], { role: 'sup' });
@@ -711,6 +768,69 @@ test('devteam kit', async (t) => {
     must(['goal', 'status', Gp, 'abandoned']);
     assert.match(idle()?.suggestion ?? '', new RegExp(Gi), 'the goal it waited on was let go: plan it now');
     must(['goal', 'status', Gi, 'abandoned']);
+  });
+
+  await t.test('a lost Enter is pressed once, never into a prompt, never retyped', (tt) => {
+    if (!hasTmux) return void tt.diagnostic('tmux not installed: lost-Enter recovery not exercised');
+    git(['branch', 'plan/enter', 'origin/main']);
+    const text = '[devteam info m-1 from supervisor] Owner approved the goal; plan the feature and tickets, then send the graph for review.';
+    const keys = path.join(tmp, 'keys.txt');
+    // A stand-in agent (not a shell): draws a screen, then logs every line of input it is sent.
+    const agent = path.join(tmp, 'agent.mjs');
+    write(agent, "import fs from 'node:fs';\nprocess.stdout.write(fs.readFileSync(process.argv[2], 'utf8'));\nprocess.stdin.on('data', (d) => fs.appendFileSync(process.argv[3], String(d)));\n");
+    const sent = path.join(repo, 'docs/devteam/run/sent', `${encodeURIComponent('devteam:plan-enter')}.json`);
+    const enters = () => (fs.existsSync(keys) ? fs.readFileSync(keys, 'utf8').split('\n').length - 1 : 0);
+    const resent = () => json(must(['log', '--type', 'observation', '--json'])).filter((o) => o.kind === 'resent-enter' && o.subject === 'plan-enter');
+    const run = (screen, agoSec) => {
+      spawnSync('tmux', ['kill-server']);
+      fs.rmSync(keys, { force: true });
+      const sf = path.join(tmp, 'screen.txt');
+      write(sf, screen);
+      write(sent, JSON.stringify({ text, at: new Date(Date.now() - agoSec * 1000).toISOString() }));
+      spawnSync('tmux', ['new-session', '-d', '-x', '80', '-y', '24', '-s', 'devteam', '-n', 'plan-enter', `${process.execPath} ${agent} ${sf} ${keys}`]);
+      for (let i = 0; i < 30 && !/approved|devteam|Done/.test(spawnSync('tmux', ['capture-pane', '-p', '-t', 'devteam:plan-enter'], { encoding: 'utf8' }).stdout ?? ''); i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+      must(['metrics', '--json'], { role: 'sup' });
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+    };
+    // the incident's pane: compacted while idle, the text unsubmitted in the input box (wrapped at 80 cols)
+    const stuck = `⏺ Compacted while idle, before the prompt cache expired\n${'─'.repeat(60)}\n❯ ${text}\n${'─'.repeat(60)}\n  ⏵⏵ bypass permissions on (shift+tab to cycle)`;
+    // a read by anyone but the supervisor (the dashboard, status, the owner) never presses a key
+    spawnSync('tmux', ['kill-server']);
+    fs.rmSync(keys, { force: true });
+    write(path.join(tmp, 'screen.txt'), stuck);
+    write(sent, JSON.stringify({ text, at: new Date(Date.now() - 3600 * 1000).toISOString() }));
+    spawnSync('tmux', ['new-session', '-d', '-x', '80', '-y', '24', '-s', 'devteam', '-n', 'plan-enter', `${process.execPath} ${agent} ${path.join(tmp, 'screen.txt')} ${keys}`]);
+    for (let i = 0; i < 30 && !/approved|devteam/.test(spawnSync('tmux', ['capture-pane', '-p', '-t', 'devteam:plan-enter'], { encoding: 'utf8' }).stdout ?? ''); i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+    must(['dashboard-data']);
+    must(['metrics', '--json']);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+    assert.equal(enters(), 0, 'the dashboard and the owner only look');
+    assert.ok(fs.existsSync(sent), 'the delivery is still waiting for the supervisor');
+    run(stuck, 3600);
+    assert.equal(enters(), 1, 'exactly one Enter');
+    assert.equal(resent().length, 1, 'and it is logged');
+    assert.match(resent()[0].detail, /sha1 [0-9a-f]{12}/);
+    assert.ok(!fs.existsSync(sent), 'the delivery is claimed');
+    must(['metrics', '--json'], { role: 'sup' });
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+    assert.equal(enters(), 1, 'a second pass presses nothing');
+    assert.equal(resent().length, 1);
+    run(`❯ ${text}\nDo you want to proceed?\n❯ 1. Yes\n  2. No`, 3600);
+    assert.equal(enters(), 0, 'never into a permission prompt');
+    run(`❯ ${text}\n\n⏺ Done.\n${'line\n'.repeat(12)}❯ \n  ⏵⏵ bypass permissions on`, 3600);
+    assert.equal(enters(), 0, 'submitted text: nothing to press');
+    assert.ok(!fs.existsSync(sent), 'and the record is dropped');
+    run(stuck, 5);
+    assert.equal(enters(), 0, 'sent seconds ago: a slow submit is not double-pressed');
+    run(`❯ ${text}\n✻ Thinking… (esc to interrupt)`, 3600);
+    assert.equal(enters(), 0, 'a busy agent is left alone');
+    assert.equal(resent().length, 1);
+    fs.rmSync(sent, { force: true });
+    must(['send', 'plan-enter', 'carry on'], { role: 'sup' });
+    assert.match(json(fs.readFileSync(sent, 'utf8')).text, /^\[devteam info m-\S+ from supervisor\] carry on$/, 'a delivery records the exact text typed');
+    spawnSync('tmux', ['kill-server']);
+    fs.rmSync(sent, { force: true });
+    git(['branch', '-D', 'plan/enter']);
   });
 
   await t.test('a ready goal changes through an answered goal-change question, by exactly the change it proposed', () => {
@@ -747,6 +867,18 @@ test('devteam kit', async (t) => {
     assert.equal(json(must(['goal', 'show', G, '--json'])).updates.find((u) => u.approved === Qok)?.non_goals?.length, 2, 'the set records which answer authorised it');
     assert.match(dt(['goal', 'set', G, '--approved', Qok], { role: 'sup' }).err, /already authorised a change/, 'one change per answer');
     assert.match(dt(['goal', 'set', G, '--non-goals', 'x', '--owner', '--approved', Qok]).err, /--approved is the supervisor/, 'the owner sets directly');
+    // an answer given before questions recorded their change is carried forward, not re-asked: the
+    // supervisor states the change, and it's logged as a carry-answer act the owner can correct
+    const dir0 = path.join(repo, 'docs/devteam/run/log');
+    const sup0 = path.join(dir0, fs.readdirSync(dir0).find((f) => /^supervisor-\d{4}-\d{2}\.jsonl$/.test(f)));
+    const Qold = 'q-20261101-000000001-supervisor';
+    fs.appendFileSync(sup0, line({ id: Qold, type: 'question', op: 'new', at: '2026-11-01T00:00:00.001Z', by: 'supervisor', kind: 'owner-decision', class: 'goal-change', goal: G, question: 'Give the goal one milestone?', recommendation: 'Set it', blocks: [], evidence: [], why_asked: { reasons: [] } }));
+    must(['answer', Qold, 'Set it']);
+    assert.match(dt(['goal', 'set', G, '--approved', Qold], { role: 'sup' }).err, /carry the owner's (earlier )?answer forward with/);
+    must(['goal', 'set', G, '--approved', Qold, '--change', JSON.stringify({ priority: 3 })], { role: 'sup' });
+    assert.equal(json(must(['goal', 'show', G, '--json'])).priority, 3, 'carried forward, not re-asked');
+    assert.ok(json(must(['log', '--type', 'act', '--json'])).some((a) => a.class === 'carry-answer' && a.refs.includes(Qold)), 'and logged for the owner to see and correct');
+    assert.match(dt(['goal', 'set', G, '--approved', Qok, '--change', JSON.stringify({ priority: 9 })], { role: 'sup' }).err, /already authorised|proposed its change/, 'a question that recorded its change applies only that');
     // written straight into the log, a set that differs from the approved change is ignored by the fold
     const Qok2 = ask(['--class', 'goal-change', '--goal', G, '--change', JSON.stringify({ priority: 2 })]);
     must(['answer', Qok2, 'Set it']);
@@ -759,7 +891,7 @@ test('devteam kit', async (t) => {
     fs.writeFileSync(file, before);
   });
 
-  await t.test('secrets: the owner posts straight to a sink; the log never holds a value', async () => {
+  await t.test('secrets: the owner posts straight to a sink; the log never holds a value', async (t) => {
     const VALUE = 'sk_test_51Hq"zz\\9-not-in-the-log';
     const CERT = '-----BEGIN CERTIFICATE-----\nMIIBszCCAVmgAwIBAgIUQ\n-----END CERTIFICATE-----\n';
     const outside = path.join(tmp, 'uploaded.txt');
@@ -805,46 +937,53 @@ test('devteam kit', async (t) => {
     assert.match(failed.err, /bad key: \[secret:UPLOAD\] \/ \[secret:UPLOAD\]/);
     assert.match(failed.err, /README\.md is not gitignored/);
     assert.doesNotMatch(failed.err + failed.out, /sk_test_51Hq/);
-    // encrypted stores: a fake sops and a fake bin/rails stand in for the real tools
-    const bin = path.join(tmp, 'fakebin');
-    write(path.join(bin, 'sops'), `#!/bin/sh\n[ "$1" = set ] && [ "$2" = --value-stdin ] || { echo "flag provided but not defined: $2" >&2; exit 1; }\nnode -e 'const fs=require("fs");const v=JSON.parse(fs.readFileSync(0,"utf8"));fs.appendFileSync(process.argv[1], process.argv[2]+": "+JSON.stringify(v)+"\\n")' "$3" "$4"\n`);
-    fs.chmodSync(path.join(bin, 'sops'), 0o755);
-    write(path.join(repo, 'bin/rails'), `#!/bin/sh\n# fake credentials:edit: plaintext stands in for the encrypted file\nf=config/credentials/$3.yml.enc; t=$(mktemp); cp "$f" "$t"\n[ -n "$FAKE_RAILS_SKIP" ] || $EDITOR "$t"\ncp "$t" "$f"; rm -f "$t"; echo "File encrypted and saved."\n`);
-    fs.chmodSync(path.join(repo, 'bin/rails'), 0o755);
-    write(path.join(repo, 'config/credentials/test.yml.enc'), '# a comment\nexpires: 2026-01-01\nstripe:\n  publishable: pk_test\n');
-    write(path.join(repo, 'config/credentials/test.key'), 'testkey\n');
-    write(path.join(repo, 'config/secrets.enc.yaml'), 'existing: 1\n');
-    git(['add', 'bin/rails', 'config/credentials/test.yml.enc', 'config/secrets.enc.yaml']);
-    git(['commit', '-qm', 'stores']);
-    git(['push', '-q', 'origin', 'main']);
-    const PATH0 = process.env.PATH;
-    process.env.PATH = `${bin}${path.delimiter}${PATH0}`;
-    try {
-      const Qe = must(['ask', '--kind', 'owner-action', '--question', 'Stripe secret for tests', '--secrets', JSON.stringify([{ name: 'RAILS_STRIPE', sink: 'rails-credentials:test:stripe.secret_key' }, { name: 'SOPS_TOKEN', sink: 'sops:config/secrets.enc.yaml:api.token' }])], { role: 'sup' });
-      // Rails ignoring the editor is not taken for success
-      process.env.FAKE_RAILS_SKIP = '1';
-      assert.match(dt(['secret', 'post', Qe, '--json'], { input: JSON.stringify({ RAILS_STRIPE: VALUE }) }).err, /editor did not finish/);
-      delete process.env.FAKE_RAILS_SKIP;
-      assert.match(must(['secret', 'post', Qe, '--json'], { input: JSON.stringify({ RAILS_STRIPE: VALUE, SOPS_TOKEN: 'tok-123456' }) }), /Land it: chore pr secret-\d+-\d+ --title/);
-      const slug = `secret-${Qe.split('-').slice(1, 3).join('-')}`;
-      const committed = git(['show', '--name-only', '--format=', `chore-${slug}`]).split('\n').filter(Boolean).sort();
-      assert.deepEqual(committed, ['config/credentials/test.yml.enc', 'config/secrets.enc.yaml'], 'only the stores are committed, never the copied key');
-      const yml = git(['show', `chore-${slug}:config/credentials/test.yml.enc`]);
-      assert.match(yml, /expires: 2026-01-01/, 'a date survives the YAML round trip');
-      assert.match(yml, /publishable: pk_test/);
-      assert.ok(yml.includes('secret_key:'), 'the key is set');
-      assert.match(git(['show', `chore-${slug}:config/secrets.enc.yaml`]), /\["api"\]\["token"\]: "tok-123456"/);
-      assert.equal(json(must(['questions', '--id', Qe, '--json']))[0].answer, 'Posted 2 secrets');
-      // the question approves its own secret chore, and a secrets question answered otherwise approves nothing
-      const md = (approved) => dt(['merge', '--chore', slug, '--dry-run', '--approved', approved, '--title', `chore-${slug}: post secrets`, '--body-file', body], { role: 'sup' });
-      const ok = md(Qe);
-      assert.doesNotMatch(ok.out + ok.err, /approves only its own chore-secret PR/);
-      const Qc = must(['ask', '--kind', 'owner-action', '--question', 'Another', '--secrets', JSON.stringify([{ name: 'X', sink: 'file:config/x.key' }])], { role: 'sup' });
-      must(['answer', Qc, 'Can’t right now']);
-      assert.match(md(Qc).out, /approves only its own chore-secret PR/);
-    } finally {
-      process.env.PATH = PATH0;
-      delete process.env.FAKE_RAILS_SKIP;
+    // encrypted stores: a fake sops and a fake bin/rails stand in for the real tools. The Rails
+    // editor is `ruby`, so this needs one that runs in the fixture (an asdf shim with no
+    // .tool-versions there refuses): skipped, and said so, without one.
+    const rubyOk = spawnSync('ruby', ['-e', '0'], { cwd: repo }).status === 0;
+    if (!rubyOk) t.diagnostic('skipped the rails-credentials and sops sinks: no runnable ruby here (set ASDF_RUBY_VERSION, or install one)');
+    if (rubyOk) {
+      // encrypted stores: a fake sops and a fake bin/rails stand in for the real tools
+      const bin = path.join(tmp, 'fakebin');
+      write(path.join(bin, 'sops'), `#!/bin/sh\n[ "$1" = set ] && [ "$2" = --value-stdin ] || { echo "flag provided but not defined: $2" >&2; exit 1; }\nnode -e 'const fs=require("fs");const v=JSON.parse(fs.readFileSync(0,"utf8"));fs.appendFileSync(process.argv[1], process.argv[2]+": "+JSON.stringify(v)+"\\n")' "$3" "$4"\n`);
+      fs.chmodSync(path.join(bin, 'sops'), 0o755);
+      write(path.join(repo, 'bin/rails'), `#!/bin/sh\n# fake credentials:edit: plaintext stands in for the encrypted file\nf=config/credentials/$3.yml.enc; t=$(mktemp); cp "$f" "$t"\n[ -n "$FAKE_RAILS_SKIP" ] || $EDITOR "$t"\ncp "$t" "$f"; rm -f "$t"; echo "File encrypted and saved."\n`);
+      fs.chmodSync(path.join(repo, 'bin/rails'), 0o755);
+      write(path.join(repo, 'config/credentials/test.yml.enc'), '# a comment\nexpires: 2026-01-01\nstripe:\n  publishable: pk_test\n');
+      write(path.join(repo, 'config/credentials/test.key'), 'testkey\n');
+      write(path.join(repo, 'config/secrets.enc.yaml'), 'existing: 1\n');
+      git(['add', 'bin/rails', 'config/credentials/test.yml.enc', 'config/secrets.enc.yaml']);
+      git(['commit', '-qm', 'stores']);
+      git(['push', '-q', 'origin', 'main']);
+      const PATH0 = process.env.PATH;
+      process.env.PATH = `${bin}${path.delimiter}${PATH0}`;
+      try {
+        const Qe = must(['ask', '--kind', 'owner-action', '--question', 'Stripe secret for tests', '--secrets', JSON.stringify([{ name: 'RAILS_STRIPE', sink: 'rails-credentials:test:stripe.secret_key' }, { name: 'SOPS_TOKEN', sink: 'sops:config/secrets.enc.yaml:api.token' }])], { role: 'sup' });
+        // Rails ignoring the editor is not taken for success
+        process.env.FAKE_RAILS_SKIP = '1';
+        assert.match(dt(['secret', 'post', Qe, '--json'], { input: JSON.stringify({ RAILS_STRIPE: VALUE }) }).err, /editor did not finish/);
+        delete process.env.FAKE_RAILS_SKIP;
+        assert.match(must(['secret', 'post', Qe, '--json'], { input: JSON.stringify({ RAILS_STRIPE: VALUE, SOPS_TOKEN: 'tok-123456' }) }), /Land it: chore pr secret-\d+-\d+ --title/);
+        const slug = `secret-${Qe.split('-').slice(1, 3).join('-')}`;
+        const committed = git(['show', '--name-only', '--format=', `chore-${slug}`]).split('\n').filter(Boolean).sort();
+        assert.deepEqual(committed, ['config/credentials/test.yml.enc', 'config/secrets.enc.yaml'], 'only the stores are committed, never the copied key');
+        const yml = git(['show', `chore-${slug}:config/credentials/test.yml.enc`]);
+        assert.match(yml, /expires: 2026-01-01/, 'a date survives the YAML round trip');
+        assert.match(yml, /publishable: pk_test/);
+        assert.ok(yml.includes('secret_key:'), 'the key is set');
+        assert.match(git(['show', `chore-${slug}:config/secrets.enc.yaml`]), /\["api"\]\["token"\]: "tok-123456"/);
+        assert.equal(json(must(['questions', '--id', Qe, '--json']))[0].answer, 'Posted 2 secrets');
+        // the question approves its own secret chore, and a secrets question answered otherwise approves nothing
+        const md = (approved) => dt(['merge', '--chore', slug, '--dry-run', '--approved', approved, '--title', `chore-${slug}: post secrets`, '--body-file', body], { role: 'sup' });
+        const ok = md(Qe);
+        assert.doesNotMatch(ok.out + ok.err, /approves only its own chore-secret PR/);
+        const Qc = must(['ask', '--kind', 'owner-action', '--question', 'Another', '--secrets', JSON.stringify([{ name: 'X', sink: 'file:config/x.key' }])], { role: 'sup' });
+        must(['answer', Qc, 'Can’t right now']);
+        assert.match(md(Qc).out, /approves only its own chore-secret PR/);
+      } finally {
+        process.env.PATH = PATH0;
+        delete process.env.FAKE_RAILS_SKIP;
+      }
     }
     // a sink the kit can't read doesn't take the views down with it
     const supFile = fs.readdirSync(path.join(repo, 'docs/devteam/run/log')).find((f) => f.startsWith('supervisor-'));
@@ -894,10 +1033,86 @@ test('devteam kit', async (t) => {
     assert.equal(git(['rev-parse', 'origin/main^2']), H2, 'main merges the verified head');
     assert.ok(json(must(['log', '--type', 'act', '--json'])).some((a) => a.class === 'merge-word' && a.refs.includes('bill-01-card')));
     assert.match(must(['status']), /merged.*bill-01-card/);
+    // its merge settles the worker's requests, replied to or not
+    assert.ok(!json(must(['messages', '--to', 'supervisor', '--open', '--json'])).some((m) => m.created_by === 'bill-01-card'), 'a merged ticket asks nothing');
+    assert.ok(!json(must(['dashboard-data'])).open_messages.some((m) => m.actor === 'bill-01-card'));
     // review churn is about tickets still in flight: a merged ticket with many passes raises nothing
     const r3 = path.join(repo, 'docs/devteam/project/tickets/bill-01-card/reviews/final-3.md');
     write(r3, review('reviewer-z', git(['rev-parse', 'HEAD'])));
     assert.ok(!json(must(['metrics', '--json'])).findings.some((f) => f.kind === 'review-churn' && f.subject === 'bill-01-card'));
     fs.rmSync(r3);
+  });
+
+  await t.test('goal list flags take separate values or one JSON array of strings, and refuse anything else that looks like JSON', () => {
+    const sup = { role: 'sup' };
+    const Gj = must(['goal', 'add', '--title', 'Refunds', '--preconditions', '["refund API", "ledger entries"]', '--non-goals', '["chargebacks"]', '--plan-after', JSON.stringify([G]), '--reason', 'billing first'], sup);
+    let gv = json(must(['goal', 'show', Gj, '--json']));
+    assert.deepEqual(gv.preconditions, ['refund API', 'ledger entries'], 'a JSON array is the list, not one item');
+    assert.deepEqual(gv.non_goals, ['chargebacks']);
+    assert.deepEqual(gv.plan_after.map((p) => p.goal), [G]);
+    must(['goal', 'set', Gj, '--preconditions', 'refund API', 'ledger entries', 'emails sent', '--non-goals', 'chargebacks', 'disputes'], sup);
+    gv = json(must(['goal', 'show', Gj, '--json']));
+    assert.deepEqual(gv.preconditions, ['refund API', 'ledger entries', 'emails sent'], 'separate values still work');
+    assert.deepEqual(gv.non_goals, ['chargebacks', 'disputes']);
+    must(['goal', 'set', Gj, '--preconditions', 'refunds clear in a day'], sup);
+    assert.deepEqual(json(must(['goal', 'show', Gj, '--json'])).preconditions, ['refunds clear in a day'], 'one plain value is one item');
+    for (const [flag, bad] of [['--preconditions', '["a", "b"'], ['--preconditions', '[1, 2]'], ['--non-goals', '["a", {"b": 1}]'], ['--preconditions', '[not json]']]) {
+      const r = dt(['goal', 'set', Gj, flag, bad], sup);
+      assert.notEqual(r.status, 0, `${flag} ${bad} refused`);
+      assert.match(r.err, /looks like JSON but is not an array of strings/);
+    }
+    const Gk = must(['goal', 'add', '--title', 'Braces', '--preconditions', '{"a": 1}'], sup);
+    assert.deepEqual(json(must(['goal', 'show', Gk, '--json'])).preconditions, ['{"a": 1}'], 'only a value starting with [ is read as JSON');
+    assert.deepEqual(json(must(['goal', 'show', Gj, '--json'])).preconditions, ['refunds clear in a day'], 'a refused set changes nothing');
+  });
+
+  await t.test('approve-plan accepts a one-way door the owner answered for the ticket\'s goal, cited, when the plan review says it covers the plan', () => {
+    const sup = { role: 'sup' };
+    const tk = { title: 'card vault', feature: 'billing', component: 'bill', kind: 'build', size: 'S', risk: 'high', serves: ['BILL-S1'], depends_on: [], touches: ['billing/vault/**'], done_when: ['vault test passes in CI'], one_way_doors: ['who may see card details'] };
+    must(['ticket', 'add', 'bill-02-vault', '--json', JSON.stringify(tk)], sup);
+    // the door answered while designing the goal (goals test); another goal's door; an unanswered one
+    const D1 = json(must(['questions', '--json', '--all'])).find((q) => q.kind === 'one-way-door' && q.goal === G && q.status === 'answered')?.id;
+    assert.ok(D1, 'the goal-level door from the design');
+    const G2 = must(['goal', 'add', '--title', 'Invoices', '--outcome', 'finance exports invoices', '--measure', 'invoices exported', '--target', '10', '--unit', 'n', '--direction', 'up', '--horizon', '2027-06-30', '--non-goals', 'tax', '--preconditions', 'invoice model', '--priority', '8'], sup);
+    const Dx = must(['ask', '--kind', 'one-way-door', '--goal', G2, '--question', 'Who may see invoices?', '--recommendation', 'finance only'], sup);
+    must(['answer', Dx, 'finance only']);
+    const Dopen = must(['ask', '--kind', 'one-way-door', '--goal', G, '--question', 'Keep card fingerprints?', '--recommendation', 'no'], sup);
+    git(['worktree', 'add', '-q', '-b', 'ticket/bill-02-vault', wt('bill-02-vault'), 'HEAD']);
+    const tdir = path.join(wt('bill-02-vault'), 'docs/devteam/project/tickets/bill-02-vault');
+    const commit = (msg) => { git(['add', '-A'], wt('bill-02-vault')); git(['commit', '-qm', msg], wt('bill-02-vault')); return git(['rev-parse', 'HEAD'], wt('bill-02-vault')); };
+    write(path.join(tdir, 'plan.md'), '# plan\n\n## TL;DR\n\n- store cards with the processor; admins see the last four\n\n## Tasks\n\n- T1 vault\n');
+    const p1 = commit('bill-02-vault: plan');
+    write(path.join(tdir, 'reviews/plan-1.md'), review('reviewer-a', p1));
+    commit('bill-02-vault: plan review');
+    const ap = (...extra) => dt(['act', '--class', 'approve-plan', '--refs', 'bill-02-vault', ...extra, '--', 'plan ok'], sup);
+    assert.match(ap().err, /lists one-way doors; .*--approved <qid>/, 'not without citing the goal-level answer');
+    assert.match(ap('--approved', Dx).err, new RegExp(`answered a one-way door for goal ${G2}, .*serves ${G}; an answer for another goal never covers this plan`));
+    assert.match(ap('--approved', Dopen).err, /is not an answered question/, 'an unanswered door counts for nothing');
+    assert.match(ap('--approved', D1).err, new RegExp(`must say "- Goal-level door: ${D1} covers this plan"`), 'the plan review says the plan stays inside the answer');
+    // the statement must be in the latest approving review, for this qid
+    write(path.join(tdir, 'reviews/plan-1.md'), review('reviewer-a', p1).replace('\n\n|', `\n- Goal-level door: ${Dx} covers this plan\n\n|`));
+    commit('review names another door');
+    assert.match(ap('--approved', D1).err, /must say "- Goal-level door:/);
+    write(path.join(tdir, 'reviews/plan-1.md'), review('reviewer-a', p1).replace('\n\n|', `\n- Goal-level door: ${D1} covers this plan\n\n|`));
+    commit('review covers the door');
+    write(path.join(tdir, 'reviews/plan-2.md'), `- Reviewer: reviewer-c\n- Goal-level door: ${D1} covers this plan\n\nVerdict: CHANGES ${p1}\n`);
+    commit('a later pass rejects');
+    assert.match(ap('--approved', D1).err, /must say "- Goal-level door:/, 'a later CHANGES pass is the latest');
+    write(path.join(tdir, 'reviews/plan-2.md'), `- Reviewer: reviewer-c\n- Goal-level door: ${D1} covers this plan.\n\nVerdict: APPROVE ${p1}\n`);
+    commit('a later pass approves');
+    const act = must(['act', '--class', 'approve-plan', '--refs', 'bill-02-vault', '--approved', D1, '--', 'plan ok'], sup);
+    assert.equal(json(must(['log', '--type', 'act', '--json'])).find((a) => a.id === act).approved_by, D1, 'the act names the goal-level answer it used');
+    // a goal-level answer is cited only for a ticket with a door; the ticket-level path is unchanged
+    assert.match(dt(['act', '--class', 'approve-plan', '--refs', 'bill-01-card', '--approved', D1, '--', 'plan ok'], sup).err, /lists no one-way doors/);
+    must(['ticket', 'set', 'bill-02-vault', '--json', JSON.stringify({ one_way_doors: ['who may see card details', 'keep fingerprints'] })], sup);
+    const Dt = must(['ask', '--kind', 'one-way-door', '--ticket', 'bill-02-vault', '--question', 'Keep card fingerprints for this vault?', '--recommendation', 'no'], sup);
+    fs.rmSync(path.join(tdir, 'reviews'), { recursive: true });
+    commit('no reviews');
+    assert.match(ap().err, /lists one-way doors/, 'an open ticket-level door is not an answer');
+    must(['answer', Dt, 'no']);
+    must(['act', '--class', 'approve-plan', '--refs', 'bill-02-vault', '--', 'plan ok'], sup);
+    // a defaulted answer never counts: a one-way door never has a default, so it can't be defaulted
+    assert.match(dt(['ask', '--kind', 'one-way-door', '--goal', G, '--question', 'x?', '--default', 'yes'], sup).err, /never has a default/);
+    git(['worktree', 'remove', '--force', wt('bill-02-vault')]);
   });
 });
