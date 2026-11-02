@@ -867,6 +867,18 @@ test('devteam kit', async (t) => {
     assert.equal(json(must(['goal', 'show', G, '--json'])).updates.find((u) => u.approved === Qok)?.non_goals?.length, 2, 'the set records which answer authorised it');
     assert.match(dt(['goal', 'set', G, '--approved', Qok], { role: 'sup' }).err, /already authorised a change/, 'one change per answer');
     assert.match(dt(['goal', 'set', G, '--non-goals', 'x', '--owner', '--approved', Qok]).err, /--approved is the supervisor/, 'the owner sets directly');
+    // an answer given before questions recorded their change is carried forward, not re-asked: the
+    // supervisor states the change, and it's logged as a carry-answer act the owner can correct
+    const dir0 = path.join(repo, 'docs/devteam/run/log');
+    const sup0 = path.join(dir0, fs.readdirSync(dir0).find((f) => /^supervisor-\d{4}-\d{2}\.jsonl$/.test(f)));
+    const Qold = 'q-20261101-000000001-supervisor';
+    fs.appendFileSync(sup0, line({ id: Qold, type: 'question', op: 'new', at: '2026-11-01T00:00:00.001Z', by: 'supervisor', kind: 'owner-decision', class: 'goal-change', goal: G, question: 'Give the goal one milestone?', recommendation: 'Set it', blocks: [], evidence: [], why_asked: { reasons: [] } }));
+    must(['answer', Qold, 'Set it']);
+    assert.match(dt(['goal', 'set', G, '--approved', Qold], { role: 'sup' }).err, /carry the owner's (earlier )?answer forward with/);
+    must(['goal', 'set', G, '--approved', Qold, '--change', JSON.stringify({ priority: 3 })], { role: 'sup' });
+    assert.equal(json(must(['goal', 'show', G, '--json'])).priority, 3, 'carried forward, not re-asked');
+    assert.ok(json(must(['log', '--type', 'act', '--json'])).some((a) => a.class === 'carry-answer' && a.refs.includes(Qold)), 'and logged for the owner to see and correct');
+    assert.match(dt(['goal', 'set', G, '--approved', Qok, '--change', JSON.stringify({ priority: 9 })], { role: 'sup' }).err, /already authorised|proposed its change/, 'a question that recorded its change applies only that');
     // written straight into the log, a set that differs from the approved change is ignored by the fold
     const Qok2 = ask(['--class', 'goal-change', '--goal', G, '--change', JSON.stringify({ priority: 2 })]);
     must(['answer', Qok2, 'Set it']);

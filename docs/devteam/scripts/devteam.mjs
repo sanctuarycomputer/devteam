@@ -672,11 +672,15 @@ function goalChangeProblem(q, goalId, qid, l = null) {
   if (!v) return `${qid} is not a question`;
   if (v.class !== 'goal-change') return `${v.id} was asked in class ${v.class ?? '(none)'}, not goal-change`;
   if (v.goal !== goalId) return `${v.id} is about ${v.goal ?? 'no goal'}, not ${goalId} (ask with --goal ${goalId})`;
-  if (!v.change || !Object.keys(v.change).length) return `${v.id} carries no change (ask with --change '{…}'), so its answer authorises nothing specific`;
+  // A question asked before the exact-change rule (ask has required --change on these since) is
+  // an earlier answer: the supervisor carries it forward with the change it says the owner chose,
+  // logged as a carry-answer act the owner can correct, rather than asking the same thing again.
+  const legacy = !v.change || !Object.keys(v.change).length;
+  if (legacy && !(l && l.carried)) return `${v.id} carries no change; carry the owner's earlier answer forward with goal set --approved ${v.id} --change '{…}'`;
   if (v.status !== 'answered') return `${v.id} is not answered by the owner (${v.status})`;
   if (!v.matched) return `${v.id} was answered "${v.answer}", not its recommendation${v.recommendation ? ` ("${v.recommendation}")` : ''}; ask again for the change the owner wants`;
   // the owner approved this change and no other: the set must be exactly it
-  if (l && canonical(goalFieldsOf(l)) !== canonical(v.change)) return `the set (${Object.keys(goalFieldsOf(l)).join(', ') || 'nothing'}) is not the change ${v.id} proposed`;
+  if (l && !legacy && canonical(goalFieldsOf(l)) !== canonical(v.change)) return `the set (${Object.keys(goalFieldsOf(l)).join(', ') || 'nothing'}) is not the change ${v.id} proposed`;
   return null;
 }
 
@@ -2383,12 +2387,24 @@ function cmdGoal() {
     if (approved && by !== 'supervisor') die('the owner changes a goal directly; --approved is the supervisor applying an owner answer');
     if (by === 'supervisor' && (logGet(id).status ?? 'draft') !== 'draft' && !approved) die(`${id} is ${logGet(id).status}; only the owner changes it now (class goal-change): ask a goal-change question with --goal ${id}, then goal set ${id} --approved <qid>`);
     if (approved) {
-      const problem = goalChangeProblem(logGet(approved), id, approved);
+      // an earlier answer carried forward with --change is checked as such (its question recorded no change)
+      const problem = goalChangeProblem(logGet(approved), id, approved, logGet(approved)?.type === 'question' && !questionView(logGet(approved)).change && flagStr('change') !== undefined ? { carried: true } : null);
       if (problem) die(`goal set --approved: ${problem}`);
       if (logObjects('goal').some((g) => g.updates.some((u) => u.approved === approved)) || logObjects('act').some((a) => a.approved_by === approved)) die(`${approved} already authorised a change; ask again for another`);
       // the answer authorises the change the question proposed, applied as is
       if (Object.values(fields()).some((x) => x !== undefined)) die('goal set --approved applies the change its question proposed; pass no other fields');
-      return out(`updated ${id} (${appendLog({ type: 'goal', op: 'set', id, ...questionView(logGet(approved)).change, approved }, by).id})`);
+      const qv = questionView(logGet(approved));
+      if (qv.change) {
+        if (flagStr('change') !== undefined) die(`${approved} proposed its change; --change is only for carrying forward an earlier answer that didn't record one`);
+        return out(`updated ${id} (${appendLog({ type: 'goal', op: 'set', id, ...qv.change, approved }, by).id})`);
+      }
+      // carrying forward an answer given before changes were recorded on the question
+      const carried = jsonFlag('change') ?? die(`${approved} was asked before changes were recorded on goal-change questions: carry the owner's answer forward with --change '{…}', the change they chose ("${qv.answer}")`);
+      const bad = Object.keys(carried).filter((k) => !GOAL_CHANGE_FIELDS.includes(k));
+      if (!Object.keys(carried).length || bad.length) die(`--change sets goal fields (${GOAL_CHANGE_FIELDS.join(', ')})${bad.length ? `; not ${bad.join(', ')}` : ''}`);
+      const line = appendLog({ type: 'goal', op: 'set', id, ...carried, approved, carried: true }, by);
+      appendLog({ type: 'act', class: 'carry-answer', what: `applied your earlier answer to ${approved} ("${qv.answer}") to ${id}: set ${Object.keys(carried).join(', ')}`, refs: [id, approved], reversible: true }, 'supervisor');
+      return out(`updated ${id} (${line.id}), carrying ${approved} forward`);
     }
     appendLog({ type: 'goal', op: 'set', id, ...fields() }, by);
     return out(`updated ${id}`);
