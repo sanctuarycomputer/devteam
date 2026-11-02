@@ -620,8 +620,29 @@ test('devteam kit', async (t) => {
     assert.ok(p, 'a plan branch not on main is a planner in flight');
     assert.equal(p.window, false);
     assert.ok(json(must(['metrics', '--json'])).findings.some((f) => f.kind === 'planner-gone' && f.subject === 'plan-reports'));
+    assert.deepEqual(p.waiting_on_owner, [], 'no goal, so nothing to wait on from the owner');
     git(['branch', '-D', 'plan/reports']);
     assert.ok(!json(must(['dashboard-data'])).planners.some((x) => x.feature === 'reports'));
+    // a planner silent for hours while its goal waits on the owner's answers is waiting, not stale
+    if (hasTmux) {
+      git(['worktree', 'add', '-q', '-b', 'plan/quiet', wt('plan-quiet'), 'origin/main']);
+      write(path.join(wt('plan-quiet'), 'docs/devteam/project/log/plan-quiet.jsonl'), line({ id: 'quiet', type: 'feature', op: 'new', at: '2026-01-01T00:00:00.000Z', by: 'plan-quiet', title: 'Quiet', goals: [G], stories: [] }));
+      git(['add', '-A'], wt('plan-quiet'));
+      const old = new Date(Date.now() - 2 * 3600000).toISOString();
+      execFileSync('git', ['commit', '-qm', 'plan'], { cwd: wt('plan-quiet'), env: { ...process.env, GIT_AUTHOR_DATE: old, GIT_COMMITTER_DATE: old } });
+      const past = new Date(Date.now() - 2 * 3600000);
+      fs.utimesSync(path.join(wt('plan-quiet'), 'docs/devteam/project/log/plan-quiet.jsonl'), past, past);
+      spawnSync('tmux', ['new-session', '-d', '-s', 'devteam', '-n', 'plan-quiet', 'sleep 600']);
+      const Qq = must(['ask', '--question', 'Which reports first?', '--goal', G, '--recommendation', 'monthly'], { role: 'sup' });
+      const stale = () => json(must(['metrics', '--json'])).findings.some((f) => f.kind === 'stale-planner' && f.subject === 'plan-quiet');
+      assert.ok(!stale(), 'waiting on the owner is not stale');
+      assert.deepEqual(json(must(['dashboard-data'])).planners.find((x) => x.feature === 'quiet').waiting_on_owner, [Qq]);
+      must(['answer', Qq, 'monthly']);
+      assert.ok(stale(), 'once answered, a silent planner is stale');
+      spawnSync('tmux', ['kill-server']);
+      git(['worktree', 'remove', '--force', wt('plan-quiet')]);
+      git(['branch', '-D', 'plan/quiet']);
+    }
   });
 
   await t.test('computed views: metrics, roadmap, retro, dashboard data', () => {
