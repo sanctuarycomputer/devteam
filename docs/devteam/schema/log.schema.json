@@ -727,6 +727,11 @@
               "additionalProperties": false
             }
           },
+          "rule_scope": {
+            "type": "string",
+            "pattern": "^(project|component:[a-z0-9-]+|feature:[a-z0-9-]+|class:[a-z0-9-]+|chore:[a-z0-9-]+)$",
+            "description": "Where a standing rule given with the answer applies, unless the owner names another scope (chore:devteam-sync for an upstream sync approval)."
+          },
           "recommendation": {
             "type": "string"
           },

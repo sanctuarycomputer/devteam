@@ -517,8 +517,24 @@ test('devteam kit', async (t) => {
     const Ks = must(['knowledge', 'add', '--kind', 'preference', '--statement', 'adopt upstream', '--scope', 'chore:devteam-sync'], { role: 'sup' });
     must(['knowledge', 'set', Ks, '--status', 'accepted'], { role: 'sup' });
     assert.match(dt(args, { role: 'sup' }).out, /outside project\//, "the supervisor can't grant itself standing approval");
-    const Qs = must(['ask', '--question', 'Adopt upstream releases without asking each time?', '--class', 'process-edit', '--reasons', 'owner-only', '--recommendation', 'yes'], { role: 'sup' });
-    must(['answer', Qs, 'yes', '--rule', 'adopt upstream devteam releases as they ship', '--rule-scope', 'chore:devteam-sync']);
+    // a rule given on an unscoped question applies to the project, not to syncs; the supervisor can't
+    // re-scope the owner's rule, the owner can
+    const Qp = must(['ask', '--question', 'Adopt this release?', '--class', 'process-edit', '--reasons', 'owner-only', '--recommendation', 'yes'], { role: 'sup' });
+    must(['answer', Qp, 'yes', '--rule', 'auto-adopt future releases']);
+    const Kp = json(must(['knowledge', '--json'])).find((k) => k.statement === 'auto-adopt future releases');
+    assert.equal(Kp.scope, 'project');
+    assert.match(dt(args, { role: 'sup' }).out, /outside project\//, 'a project-wide rule is not a sync approval');
+    must(['knowledge', 'set', Kp.id, '--scope', 'chore:devteam-sync'], { role: 'sup' });
+    assert.match(dt(args, { role: 'sup' }).out, /outside project\//, "the supervisor can't re-scope the owner's rule");
+    must(['knowledge', 'set', Kp.id, '--scope', 'chore:devteam-sync', '--owner']);
+    assert.match(must(args, { role: 'sup' }), /match upstream v0\.3\.0 exactly/, 'the owner can');
+    must(['knowledge', 'set', Kp.id, '--status', 'retired', '--owner']);
+    assert.match(dt(args, { role: 'sup' }).out, /outside project\//, 'retired, it approves nothing');
+    // the sync question names the scope, so a rule from the dashboard (no scope of its own) lands there
+    const Qs = must(['ask', '--question', 'Adopt upstream releases without asking each time?', '--class', 'process-edit', '--reasons', 'owner-only', '--recommendation', 'yes', '--rule-scope', 'chore:devteam-sync'], { role: 'sup' });
+    assert.equal(json(must(['questions', '--id', Qs, '--json']))[0].rule_scope, 'chore:devteam-sync');
+    must(['answer', Qs, 'yes', '--rule', 'adopt upstream devteam releases as they ship']);
+    assert.equal(json(must(['knowledge', '--json'])).find((k) => k.statement === 'adopt upstream devteam releases as they ship').scope, 'chore:devteam-sync');
     assert.match(must(args, { role: 'sup' }), /match upstream v0\.3\.0 exactly/);
     // anything the supervisor wrote itself is not covered
     fs.appendFileSync(path.join(wt('sync'), 'docs/devteam/process/worker.md'), '\nA local edit.\n');

@@ -656,7 +656,7 @@ function questionCard(q, o, reasonText) {
       ${list.length ? `<div class="choices" role="radiogroup" aria-label="Choices">${choiceHtml}</div>` : ''}
       <textarea data-q="${esc(q.id)}" placeholder="${list.length ? 'Add a note (optional), or your own answer' : 'Your answer'}">${esc(drafts[q.id] || '')}</textarea>
       ${q.default ? `<p class="meta">If you don’t answer${q.deadline ? ` by ${when(q.deadline)}` : ''}, the supervisor goes with: <b>${esc(q.default)}</b></p>` : ''}
-      ${next || q.kind !== 'owner-action' ? `<details><summary>More options</summary><div class="row-inline">${next}</div><div class="row-inline"><input type="text" data-rule="${esc(q.id)}" placeholder="A standing rule for questions like this (optional)"></div></details>` : ''}
+      ${next || q.kind !== 'owner-action' ? `<details><summary>More options</summary><div class="row-inline">${next}</div><div class="row-inline"><input type="text" data-rule="${esc(q.id)}" placeholder="A standing rule for questions like this (optional)"></div><p class="meta">A rule you give here applies to ${esc(scopeWords(q.rule_scope))}.</p></details>` : ''}
       <div class="row-inline"><button data-answer="${esc(q.id)}">${q.kind === 'owner-action' ? 'Send' : 'Answer'}</button><span class="err" id="e-${esc(q.id)}"></span></div>
       <div class="meta">${why} Asked ${when(q.asked_at)} · <span class="qid">${esc(q.id)}</span></div>
     </div>`;
