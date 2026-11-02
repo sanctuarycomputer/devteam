@@ -426,6 +426,34 @@ test('devteam kit', async (t) => {
     fs.rmSync(path.join(repo, 'config/credentials'), { recursive: true });
   });
 
+  await t.test('review-worktree: a reviewer\'s detached, seeded tree at exactly a sha, and its removal', () => {
+    const reviewWt = must(['review-worktree', 'bill-01-card', H2]);
+    assert.equal(fs.realpathSync(reviewWt), fs.realpathSync(wt(`review-bill-01-card-${H2.slice(0, 12)}`)), 'named for the ticket and the short sha, under .worktrees/');
+    assert.equal(git(['rev-parse', 'HEAD'], reviewWt), H2, 'at exactly that sha');
+    assert.match(git(['status', '--porcelain=v2', '--branch'], reviewWt), /# branch\.head \(detached\)/, 'detached, on no branch');
+    assert.equal(fs.readFileSync(path.join(reviewWt, 'config/master.key'), 'utf8'), 'secret\n', 'worktree_files copied, as for a worker');
+    assert.ok(fs.existsSync(path.join(reviewWt, '.setup-ran')), 'worktree_setup ran, as for a worker');
+    const second = must(['review-worktree', 'bill-01-card', H2, '--name', 'b']);
+    assert.equal(path.basename(second), `review-bill-01-card-${H2.slice(0, 12)}-b`, 'a second reviewer of one sha gets its own tree');
+    assert.match(dt(['review-worktree', 'bill-01-card', H2]).err, /exists/, 'an existing path is refused');
+    assert.match(dt(['review-worktree', 'no-such-ticket', H2]).err, /no ticket no-such-ticket/, 'an unknown ticket is refused');
+    assert.match(dt(['review-worktree', 'bill-01-card', 'deadbeef']).err, /is not a commit/, 'a sha that resolves to no commit is refused');
+    assert.match(dt(['review-worktree', 'bill-01-card', `${H2}^{tree}`]).err, /is not a commit/, 'a tree is not a commit');
+    assert.match(dt(['review-worktree', 'bill-01-card', H2, '--name', '../x']).err, /--name/, 'the suffix is never a path');
+    for (const bad of [wt('bill-01-card'), repo, path.join(tmp, 'review-elsewhere'), wt('review-not-a-worktree')]) {
+      if (bad.endsWith('review-not-a-worktree')) fs.mkdirSync(bad, { recursive: true });
+      const r = dt(['review-worktree', '--remove', bad]);
+      assert.notEqual(r.status, 0, `--remove refuses ${bad}`);
+      assert.match(r.err, /is not a review worktree/);
+    }
+    assert.ok(fs.existsSync(wt('bill-01-card')), "a worker's tree is left alone");
+    fs.rmSync(wt('review-not-a-worktree'), { recursive: true });
+    must(['review-worktree', '--remove', reviewWt]);
+    must(['review-worktree', '--remove', path.relative(fs.realpathSync(repo), fs.realpathSync(second))]); // a relative path, from the main checkout
+    assert.ok(!fs.existsSync(reviewWt) && !fs.existsSync(second), '--remove removes them');
+    assert.doesNotMatch(git(['worktree', 'list']), /review-/, 'and git forgets them');
+  });
+
   await t.test('questions, autonomy direction, the act gate, corrections', () => {
     Q = must(['ask', '--question', 'Ship card capture behind a flag?', '--class', 'release-scope', '--reasons', 'below-rung', '--recommendation', 'yes', '--options', 'yes', 'no', '--blocks', 'bill-01-card'], { role: 'sup' });
     assert.notEqual(dt(['answer', Q, 'yes'], { role: 'sup' }).status, 0, 'an agent cannot answer as the owner');
