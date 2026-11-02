@@ -202,6 +202,25 @@
   .tabs .n { color: var(--muted); font-weight: 400; margin-left: 4px; }
   .loop-intro { color: var(--fg-2); max-width: var(--measure); margin: 0 0 12px; }
 
+  /* goals */
+  .goal h4 { font-size: 15px; font-weight: 600; margin: 6px 0 2px; }
+  .goal-top { display: flex; gap: 8px; align-items: center; }
+  .steps { display: flex; gap: 0; list-style: none; padding: 0; margin: 10px 0 6px; font-size: 11.5px; color: var(--muted); }
+  .steps li { flex: 1; padding-top: 8px; border-top: 3px solid var(--line-2); margin-right: 3px; }
+  .steps li.done { border-top-color: var(--series-1); color: var(--fg-2); }
+  .steps li.now { border-top-color: var(--amber); color: var(--fg); font-weight: 500; }
+  .gm { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 2px 12px; align-items: center; margin: 8px 0; font-size: 12.5px; }
+  .gm .gm-l { color: var(--fg-2); }
+  .gm .gm-n { grid-column: 2; color: var(--fg-2); }
+  .goal-next { margin: 8px 0 4px; }
+  .goal .meta a, .qcard .meta a { color: var(--blue-fg); text-decoration: underline; text-underline-offset: 2px; }
+  .goal-let-go, .goal-met { opacity: .75; }
+  fieldset.next { border: 0; padding: 0; margin: 10px 0 0; }
+  fieldset.next legend { font-size: 12px; color: var(--fg-2); padding: 0; margin-bottom: 4px; }
+  .seg { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; margin: 0 14px 4px 0; }
+  .rulebox { display: flex; gap: 8px; font-size: 12.5px; color: var(--fg-2); margin: 6px 0 0; align-items: flex-start; }
+  .rulebox input { margin-top: 3px; }
+
   /* acts in plain words */
   .act-head { font-weight: 500; }
   .act-detail { color: var(--fg-2); font-size: 12.5px; margin-top: 2px; }
@@ -627,6 +646,11 @@ function actView(a) {
 const norm = (x) => String(x ?? '').trim().toLowerCase();
 function choicesOf(q) {
   let list = (q.choices || []).length ? q.choices.map((c) => ({ ...c })) : (q.options || []).map((label) => ({ label }));
+  if (q.kind === 'goal-approval') list = [
+    { label: 'Approve', detail: 'The goal is approved, built the way the design describes.', then: 'Planning starts: the supervisor breaks it into features and tickets, taking your notes into account.' },
+    { label: 'Refine', detail: 'Something in the approach should change. Say what in the notes.', then: 'The design is reworked with your notes and comes back here for approval.' },
+    { label: 'Let go', detail: 'Drop this goal.', then: 'Nothing is planned or built for it; any planning stops.' },
+  ];
   if (q.kind === 'owner-action' && !list.length) list = [{ label: 'Done', detail: 'I did it; carry on.' }, { label: 'Can’t right now', detail: 'Say why in the note, and what would help.' }];
   const rec = q.recommendation;
   if (rec && !list.some((c) => norm(c.label) === norm(rec))) list.unshift({ label: rec });
@@ -642,11 +666,15 @@ function questionCard(q, o, reasonText) {
   const choiceHtml = list.map((c) => `
       <label class="choice${c.rec ? ' rec' : ''}${picks[q.id] === c.label ? ' picked' : ''}">
         <input type="radio" name="${esc(name)}" value="${esc(c.label)}" data-pick="${esc(q.id)}" ${picks[q.id] === c.label ? 'checked' : ''}>
-        <span><b>${esc(c.label)}</b>${c.rec ? `<span class="tag">Recommended${sure}</span>` : ''}${c.detail ? `<div class="d">${linkify(c.detail)}</div>` : ''}${c.effect ? `<div class="e">${linkify(c.effect)}</div>` : ''}</span>
-      </label>`).join('') + (list.length && q.kind !== 'owner-action' ? `
+        <span><b>${esc(c.label)}</b>${c.rec ? `<span class="tag">Recommended${sure}</span>` : ''}${c.detail ? `<div class="d">${linkify(c.detail)}</div>` : ''}${c.effect ? `<div class="e">${linkify(c.effect)}</div>` : ''}${c.then ? `<div class="d">${esc(c.then)}</div>` : ''}</span>
+      </label>`).join('') + (list.length && !['owner-action', 'goal-approval'].includes(q.kind) ? `
       <label class="choice${picks[q.id] === '__other' ? ' picked' : ''}"><input type="radio" name="${esc(name)}" value="__other" data-pick="${esc(q.id)}" ${picks[q.id] === '__other' ? 'checked' : ''}><span><b>Something else</b><div class="d">Write your own answer in the box below.</div></span></label>` : '');
   const why = q.why_asked?.reasons?.length ? `Why you: ${q.why_asked.reasons.map((r) => esc(reasonText[r] || r)).join('; ')}.` : '';
-  const next = cls ? `<label>Next time, for ${esc(cls.about || words(q.class))}: <select data-auto="${esc(q.id)}"><option value="">keep as it is (${esc(RUNG_WORDS[cls.rung])})</option>${[1, 2, 3].filter((r) => r <= cls.ceiling && r !== cls.rung).map((r) => `<option value="${r}">${RUNG_WORDS[r]}</option>`).join('')}</select></label>` : '';
+  // Next time: only for a kind of decision on the trust ladder; the current rung is marked, nothing
+  // changes unless the owner picks another. The supervisor never infers this from the note.
+  const next = cls ? `<fieldset class="next"><legend>Next time, for decisions like this (${esc(cls.about || words(q.class))}), the supervisor…</legend>${[1, 2, 3].filter((r) => r <= cls.ceiling).map((r) => `<label class="seg"><input type="radio" name="auto-${esc(q.id)}" value="${r === cls.rung ? '' : r}" data-auto="${esc(q.id)}" ${r === cls.rung ? 'checked' : ''}>${esc(RUNG_WORDS[r])}${r === cls.rung ? ' <span class="muted">(now)</span>' : ''}</label>`).join('')}</fieldset>` : '';
+  const goalAsk = q.kind === 'goal-approval';
+  const notePh = goalAsk ? 'Notes for the planner: taken into account whatever you choose (needed to refine)' : list.length ? 'Add a note (optional), or your own answer' : 'Your answer';
   return `
     <div class="card qcard ${kindCls}" id="q-${esc(q.id)}">
       <span class="badge ${q.kind === 'one-way-door' ? 'high' : q.kind === 'trust' ? 'good' : q.kind === 'owner-action' ? 'low' : 'medium'}">${esc(KIND_WORDS[q.kind] || words(q.kind))}</span>${(q.blocks || []).length ? `<span class="small muted">holds up ${q.blocks.map(tlink).join(', ')}</span>` : q.ticket ? `<span class="small muted">about ${tlink(q.ticket)}</span>` : ''}
@@ -654,10 +682,11 @@ function questionCard(q, o, reasonText) {
       ${q.context ? `<p class="ctx">${linkify(q.context)}</p>` : ''}
       ${(q.links || []).length ? `<div class="links"><span class="muted small">Look at:</span>${q.links.map(linkOf).join('')}</div>` : ''}
       ${list.length ? `<div class="choices" role="radiogroup" aria-label="Choices">${choiceHtml}</div>` : ''}
-      <textarea data-q="${esc(q.id)}" placeholder="${list.length ? 'Add a note (optional), or your own answer' : 'Your answer'}">${esc(drafts[q.id] || '')}</textarea>
+      <textarea data-q="${esc(q.id)}" placeholder="${esc(notePh)}">${esc(drafts[q.id] || '')}</textarea>
+      ${goalAsk || ['owner-action', 'goal-definition'].includes(q.kind) ? '' : `<label class="rulebox"><input type="checkbox" data-rulebox="${esc(q.id)}"> Also keep this note as a standing rule, applied to ${esc(scopeWords(q.rule_scope))} from now on</label>`}
+      ${next}
       ${q.default ? `<p class="meta">If you don’t answer${q.deadline ? ` by ${when(q.deadline)}` : ''}, the supervisor goes with: <b>${esc(q.default)}</b></p>` : ''}
-      ${next || q.kind !== 'owner-action' ? `<details><summary>More options</summary><div class="row-inline">${next}</div><div class="row-inline"><input type="text" data-rule="${esc(q.id)}" placeholder="A standing rule for questions like this (optional)"></div><p class="meta">A rule you give here applies to ${esc(scopeWords(q.rule_scope))}.</p></details>` : ''}
-      <div class="row-inline"><button data-answer="${esc(q.id)}">${q.kind === 'owner-action' ? 'Send' : 'Answer'}</button><span class="err" id="e-${esc(q.id)}"></span></div>
+      <div class="row-inline"><button data-answer="${esc(q.id)}" ${goalAsk ? `data-goal-ask="${esc(q.goal)}"` : ''}>${q.kind === 'owner-action' || goalAsk ? 'Send' : 'Answer'}</button><span class="err" id="e-${esc(q.id)}"></span></div>
       <div class="meta">${why} Asked ${when(q.asked_at)} · <span class="qid">${esc(q.id)}</span></div>
     </div>`;
 }
@@ -673,6 +702,66 @@ function answeredCard(q) {
     ${q.standing_rule ? `<div class="muted">Standing rule: ${esc(q.standing_rule)}</div>` : ''}
     <div class="meta">${esc(how)}${q.answered_at ? ` · ${when(q.answered_at)}` : ''}</div>
     ${q.status === 'defaulted' ? `<div class="row-inline"><input type="text" data-overrule="${esc(q.id)}" placeholder="Your answer instead"><button class="ghost" data-overrule-send="${esc(q.id)}">Overrule</button><span class="err" id="e-${esc(q.id)}"></span></div>` : ''}
+  </div>`;
+}
+
+
+const GOAL_STEPS = ['Defined', 'Designed', 'Approved', 'Built', 'Met'];
+function goalState(g, R, openQs) {
+  const ask = openQs.find((q) => q.kind === 'goal-approval' && q.goal === g.id);
+  const defQ = openQs.find((q) => q.kind === 'goal-definition');
+  if (g.status === 'met') return { key: 'met', label: 'Met', tone: 'good', step: 5, next: 'The measure reached its target.' };
+  if (g.status === 'abandoned') return { key: 'let-go', label: 'Let go', tone: '', step: 0, next: g.decision?.notes ? `You let it go: ${esc(g.decision.notes)}` : 'You let it go.' };
+  if (g.status === 'ready') {
+    const r = R.goals.find((x) => x.id === g.id);
+    const feats = (r?.features || []).map((f) => R.features[f]).filter(Boolean);
+    if (!feats.length) return { key: 'planning', label: 'Planning the work', tone: 'low', step: 3, next: 'Approved. The supervisor is turning the design into features and tickets.' };
+    const left = feats.reduce((a, v) => a + v.points_left, 0);
+    const unplanned = r?.unplanned || [];
+    if (!left && unplanned.length) return { key: 'planning', label: 'Planning the rest', tone: 'low', step: 3, next: `What was planned is built. Still without a plan: ${esc(unplanned.map((u) => u.text).join('; '))}.` };
+    if (!left) return { key: 'measuring', label: g.track === 'behind' ? 'Built, measure behind' : 'Built, measuring', tone: g.track === 'behind' ? 'high' : 'good', step: 4, next: 'Everything planned is built; the measure decides when it is met.' };
+    const waiting = feats.reduce((a, v) => a + v.blocked_by_questions.length, 0);
+    return { key: 'building', label: g.track === 'behind' ? 'Being built, behind' : 'Being built', tone: g.track === 'behind' ? 'high' : 'low', step: 3, next: waiting ? `<b>Waiting on ${waiting} answer${waiting > 1 ? 's' : ''} from you</b> in the Inbox.` : '' };
+  }
+  if (ask) return { key: 'awaiting', label: 'Waiting for your approval', tone: 'medium', step: 2, ask, next: `<b>Waiting on you:</b> ${qlink(ask.id, 'review the design and decide')}.` };
+  if (g.decision?.verdict === 'refine') return { key: 'refining', label: 'Being reworked', tone: 'medium', step: 1, next: `The design is being reworked with your notes: “${esc(g.decision.notes || '')}”` };
+  if (g.check.definition.length) return { key: 'defining', label: 'Being defined', tone: 'medium', step: 0, next: defQ ? `<b>Waiting on you:</b> ${qlink(defQ.id, 'answer the open questions')}.` : `Still open: ${esc(g.check.definition.slice(0, 3).join('; '))}${g.check.definition.length > 3 ? '…' : ''}.` };
+  return { key: 'designing', label: 'Approach being designed', tone: '', step: 1, next: 'Fully defined. The supervisor is writing and reviewing the design; you’ll approve it in the Inbox.' };
+}
+function measureBar(g) {
+  const m = g.measure || {};
+  const rs = g.readings || [];
+  if (typeof m.target !== 'number') return '';
+  const base = rs.length ? rs[0].value : null, now = rs.length ? rs[rs.length - 1].value : null;
+  const span = base == null ? 0 : m.target - base;
+  const frac = base == null || !span ? 0 : Math.max(0, Math.min(1, (now - base) / span));
+  const unit = m.unit ? ` ${esc(m.unit)}` : '';
+  return `<div class="gm"><div class="gm-l">${esc(cap(m.description || 'Measure'))}</div>
+    <div class="meter" role="img" aria-label="${Math.round(frac * 100)}% of the way from ${esc(base ?? '?')} to ${esc(m.target)}"><span style="width:${Math.round(frac * 100)}%"></span></div>
+    <div class="gm-n">${base == null ? 'no reading yet' : `${esc(now)}${unit} now, from ${esc(base)}`} → <b>${esc(m.target)}${unit}</b>${g.horizon ? ` by ${esc(new Date(Date.parse(g.horizon)).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' }))}` : ''}${g.track ? ` · <span class="badge ${g.track === 'on track' ? 'good' : 'high'}">${esc(g.track)}</span>` : ''}</div></div>`;
+}
+function workBar(g, R, week) {
+  const r = R.goals.find((x) => x.id === g.id);
+  const feats = (r?.features || []).map((f) => R.features[f]).filter(Boolean);
+  if (!feats.length) return '';
+  const total = feats.reduce((a, v) => a + v.points_total, 0), left = feats.reduce((a, v) => a + v.points_left, 0);
+  const st = feats.reduce((a, v) => [a[0] + v.stories.done, a[1] + v.stories.total], [0, 0]);
+  return `<div class="gm"><div class="gm-l">Work</div><div class="meter"><span style="width:${pct(total - left, total)}%"></span></div>
+    <div class="gm-n">${total - left} of ${total} points · ${st[0]} of ${st[1]} stories · ${feats.length} feature${feats.length > 1 ? 's' : ''}${r?.eta ? ` · ${r.eta === 'done' ? 'done' : `expected ${esc(week(r.eta))}`}` : ''}</div></div>`;
+}
+function goalCard(g, R, openQs, week) {
+  const s = goalState(g, R, openQs);
+  const design = s.ask?.links?.[0] ?? (['ready', 'met'].includes(g.status) && g.check.design ? { title: 'The design', path: `docs/devteam/${g.check.design}` } : null);
+  const steps = s.key === 'let-go' ? '' : `<ol class="steps" aria-label="Progress">${GOAL_STEPS.map((x, i) => `<li class="${i < s.step ? 'done' : i === s.step ? 'now' : ''}">${x}</li>`).join('')}</ol>`;
+  return `<div class="card goal goal-${s.key}">
+    <div class="goal-top"><span class="badge ${s.tone}">${esc(s.label)}</span>${g.priority ? `<span class="muted small">priority ${esc(g.priority)}</span>` : ''}</div>
+    <h4>${esc(g.title)}</h4>
+    ${g.outcome ? `<p class="ctx">${esc(g.outcome)}</p>` : ''}
+    ${steps}
+    ${measureBar(g)}
+    ${workBar(g, R, week)}
+    ${s.next ? `<p class="goal-next">${s.next}</p>` : ''}
+    <div class="meta">${design ? `<a href="${esc(fileHref({ ...design, title: design.title || 'The design' }))}">Read the design</a> · ` : ''}${g.non_goals?.length ? `Not in scope: ${esc(g.non_goals.join('; '))}` : ''}</div>
   </div>`;
 }
 
@@ -693,21 +782,11 @@ function renderOoda(o) {
 </div>`;
   };
 
-  // Goals
-  $('goals-list').innerHTML = o.goals.length ? o.goals.map((g) => {
-    const last = g.readings[g.readings.length - 1];
-    const gaps = [...g.check.definition.map((x) => `definition: ${x}`), ...g.check.coverage.filter((x) => !x.startsWith('precondition')).map((x) => `planning: ${x}`)];
-    const canApprove = g.status === 'draft' && !g.check.definition.length;
-    return `<div class="card goal">
-      <div><span class="badge ${g.status === 'ready' ? 'good' : g.status === 'draft' ? 'medium' : 'low'}">${esc(g.status)}</span>${g.priority ? `<span class="badge">p${g.priority}</span>` : ''}<b>${esc(g.title)}</b> <span class="muted small">${esc(g.id)}</span></div>
-      ${g.outcome ? `<div class="muted">${esc(g.outcome)}</div>` : ''}
-      <div>${esc(g.measure?.description || 'measure –')}: <b>${last ? esc(last.value) : '?'}</b> → ${esc(g.measure?.target ?? '?')} ${esc(g.measure?.unit || '')} by ${esc(g.horizon || '?')}${g.track ? ` · <span class="badge ${g.track === 'on track' ? 'good' : 'high'}">${esc(g.track)}</span>` : ''}</div>
-      <div class="small muted">Features: ${g.check.features.length ? g.check.features.map(esc).join(', ') : '–'}${g.non_goals?.length ? ` · Non-goals: ${g.non_goals.map(esc).join('; ')}` : ''}</div>
-      ${gaps.length ? `<ul class="gaps">${gaps.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
-      ${roadmapOf(g.id)}
-      ${canApprove ? `<div><button data-goal="${esc(g.id)}">Approve</button> <span class="err" id="e-${esc(g.id)}"></span></div>` : ''}
-    </div>`;
-  }).join('') : (() => {
+  // Goals: where each stands, how the work and the measure are trending, what it waits on
+  const openQs = DATA.questions || [];
+  const live = o.goals.filter((g) => !['met', 'abandoned'].includes(g.status));
+  const doneGoals = o.goals.filter((g) => ['met', 'abandoned'].includes(g.status));
+  $('goals-list').innerHTML = o.goals.length ? live.map((g) => goalCard(g, R, openQs, week)).join('') + (doneGoals.length ? `<details><summary>Met and let go (${doneGoals.length})</summary>${doneGoals.map((g) => goalCard(g, R, openQs, week)).join('')}</details>` : '') : (() => {
     const ask = (DATA.questions || []).find((q) => q.kind === 'goal-definition');
     return empty(ask ? `No goals yet. The supervisor has asked for them: <a class="linkish" href="#q/${encodeURIComponent(ask.id)}">answer it in the Inbox</a>.` : 'No goals yet. The supervisor asks the owner for them first (<code>process/planning.md</code> §1).');
   })();
@@ -884,7 +963,7 @@ function render(d) {
   const active = d.tickets.filter((t) => t.phase && !['done', 'parked'].includes(t.phase)).length;
   const count = (id, n, hot = false) => { const el = $(id); el.textContent = n || ''; el.classList.toggle('hot', hot && n > 0); };
   count('n-goals', o.goals.length);
-  count('n-questions', d.questions.length + o.goals.filter((g) => g.status === 'draft' && !g.check.definition.length).length, true);
+  count('n-questions', d.questions.length, true);
   count('n-active', active);
   count('n-findings', m.findings.length, m.findings.some((f) => f.severity === 'high'));
   count('n-knowledge', o.knowledge.filter((k) => k.status === 'candidate').length);
@@ -909,18 +988,12 @@ function render(d) {
 
   // Keep anything half-typed or half-open across refreshes.
   document.querySelectorAll('textarea[data-q]').forEach((t) => { drafts[t.dataset.q] = t.value; });
-  const kept = [...document.querySelectorAll('input[data-rule], select[data-auto], input[data-reason], input[data-overrule], input[data-ack-reason]')].map((el) => [el.dataset.rule ? `input[data-rule="${el.dataset.rule}"]` : el.dataset.auto ? `select[data-auto="${el.dataset.auto}"]` : el.dataset.reason ? `input[data-reason="${el.dataset.reason}"]` : el.dataset.ackReason ? `input[data-ack-reason="${CSS.escape(el.dataset.ackReason)}"]` : `input[data-overrule="${el.dataset.overrule}"]`, el.value]);
+  const kept = [...document.querySelectorAll('input[data-reason], input[data-overrule], input[data-ack-reason]')].map((el) => [el.dataset.reason ? `input[data-reason="${el.dataset.reason}"]` : el.dataset.ackReason ? `input[data-ack-reason="${CSS.escape(el.dataset.ackReason)}"]` : `input[data-overrule="${el.dataset.overrule}"]`, el.value]);
+  const keptChecks = [...document.querySelectorAll('input[data-rulebox]:checked, input[data-auto]:checked')].map((el) => el.dataset.rulebox ? `input[data-rulebox="${el.dataset.rulebox}"]` : `input[data-auto="${el.dataset.auto}"][value="${el.value}"]`);
   const openForms = [...document.querySelectorAll('[data-correct-form]')].filter((f) => !f.hidden).map((f) => f.dataset.correctForm);
   const reasonText = Object.fromEntries((o.reasons || []).map((r) => [r.id, r.means]));
-  const approvable = o.goals.filter((g) => g.status === 'draft' && !g.check.definition.length);
-  const goalCards = approvable.map((g) => `
-    <div class="card qcard trust"><span class="badge good">Approve a goal</span>
-      <h4>${esc(g.title)}</h4>
-      ${g.outcome ? `<p class="ctx">${esc(g.outcome)}</p>` : ''}
-      <p class="ctx">Measured by ${esc(g.measure?.description || '–')}: ${esc(g.measure?.target ?? '?')} ${esc(g.measure?.unit || '')} by ${esc(g.horizon || '?')}.${g.non_goals?.length ? ` Not in scope: ${esc(g.non_goals.join('; '))}.` : ''}</p>
-      <p class="meta">Approving lets the supervisor plan work for it. To change it first, tell the supervisor what to change.</p>
-      <div class="row-inline"><button data-goal="${esc(g.id)}">Approve goal</button><span class="err" id="e-${esc(g.id)}"></span></div></div>`).join('');
-  $('questions').innerHTML = goalCards + (d.questions.length ? d.questions.map((q) => questionCard(q, o, reasonText)).join('') : approvable.length ? '' : empty('Nothing needs you right now. Decisions and actions only you can take show here.'));
+  const goalCards = '';
+  $('questions').innerHTML = goalCards + (d.questions.length ? d.questions.map((q) => questionCard(q, o, reasonText)).join('') : empty('Nothing needs you right now. Decisions and actions only you can take show here.'));
   $('answered-sum').textContent = `Answered (${o.answered.length})`;
   $('answered').innerHTML = o.answered.length ? o.answered.map(answeredCard).join('') : empty('Nothing answered yet.');
 
@@ -948,6 +1021,7 @@ function render(d) {
   if (DRAWER.kind === 'ticket') openTicket(DRAWER.id, { quiet: true });
   // last, so every section that holds an input is drawn before its half-typed value comes back
   for (const [sel, v] of kept) { const el = document.querySelector(sel); if (el) el.value = v; }
+  for (const sel of keptChecks) { const el = document.querySelector(sel); if (el) el.checked = true; }
 }
 
 // A failed load is said at the top of the page, never only in the sidebar: before the first good
@@ -1019,19 +1093,26 @@ document.addEventListener('click', async (ev) => {
     const err = $(`e-${id}`);
     if (!answer) { if (err) err.textContent = 'Pick a choice or write an answer.'; return; }
     if (err) err.textContent = '';
-    const auto = document.querySelector(`select[data-auto="${id}"]`)?.value;
-    const rule = document.querySelector(`input[data-rule="${id}"]`)?.value;
+    const goalId = btn.dataset.goalAsk;
+    if (goalId && !picked) { if (err) err.textContent = 'Choose Approve, Refine or Let go.'; return; }
+    if (goalId && picked === 'Refine' && !note) { if (err) err.textContent = 'Say in the notes what should change.'; return; }
+    const auto = document.querySelector(`input[data-auto="${id}"]:checked`)?.value;
+    const asRule = document.querySelector(`input[data-rulebox="${id}"]`)?.checked;
+    if (asRule && !note) { if (err) err.textContent = 'Write the rule in the note to keep it as a standing rule.'; return; }
+    const rule = asRule ? note : undefined;
     btn.classList.add('busy'); btn.disabled = true; btn.setAttribute('aria-busy', 'true');
     const label = btn.textContent; btn.dataset.label = label; btn.textContent = 'Posting…';
     let ok = false;
-    try { ok = await post('answer', { id, answer, autonomy: auto ? Number(auto) : undefined, rule: rule || undefined }, id); }
+    try {
+      ok = goalId
+        ? await post('goal-decide', { id: goalId, verdict: { Approve: 'approve', Refine: 'refine', 'Let go': 'let-go' }[picked], notes: note || undefined }, id)
+        : await post('answer', { id, answer, autonomy: auto ? Number(auto) : undefined, rule: rule || undefined }, id);
+    }
     catch (e2) { if (err) err.textContent = `Could not send: ${e2.message}`; }
     if (ok) { delete drafts[id]; delete picks[id]; }
     else { btn.classList.remove('busy'); btn.disabled = false; btn.removeAttribute('aria-busy'); btn.textContent = label; }
     return;
   }
-  const goal = ev.target.closest('[data-goal]');
-  if (goal) return void post('goal-approve', { id: goal.dataset.goal }, goal.dataset.goal);
   const know = ev.target.closest('[data-know]');
   if (know) return void post('knowledge', { id: know.dataset.know, status: know.dataset.status }, know.dataset.know);
   const corr = ev.target.closest('[data-correct]');

@@ -6,7 +6,7 @@ Who decides what, how the supervisor earns the right to decide more, and the pri
 
 | Decision | Who | Notes |
 |---|---|---|
-| The goals, and changing them | owner | The supervisor drafts from what the owner says and interviews until each is unambiguous; only the owner approves one (`goal approve`). |
+| The goals, and changing them | owner | The supervisor drafts from what the owner says and interviews until each is unambiguous; only the owner approves one, on its reviewed design (`goal decide`: approve, refine with notes, or let go; `planning.md` §1). |
 | Product direction, what a feature is for | owner | The supervisor proposes; it never decides alone unless the owner delegated that class on the ladder (§2). |
 | One-way doors (§4) | owner | Asked with a recommendation; never a default. |
 | Releasing to production | owner | Only the owner pushes a `v*` tag. |

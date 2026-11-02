@@ -118,6 +118,29 @@
               "met",
               "abandoned"
             ]
+          },
+          "decision": {
+            "type": "object",
+            "description": "The owner's latest decision on the goal's design: approve (ready), refine (notes the planner takes into account before asking again), let-go (abandoned).",
+            "properties": {
+              "verdict": {
+                "enum": [
+                  "approve",
+                  "refine",
+                  "let-go"
+                ]
+              },
+              "notes": {
+                "type": "string"
+              },
+              "question": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "verdict"
+            ],
+            "additionalProperties": false
           }
         },
         "additionalProperties": false,
@@ -648,7 +671,8 @@
               "proposal",
               "trust",
               "goal-definition",
-              "owner-action"
+              "owner-action",
+              "goal-approval"
             ]
           },
           "class": {
@@ -731,6 +755,11 @@
             "type": "string",
             "pattern": "^(project|component:[a-z0-9-]+|feature:[a-z0-9-]+|class:[a-z0-9-]+|chore:[a-z0-9-]+)$",
             "description": "Where a standing rule given with the answer applies, unless the owner names another scope (chore:devteam-sync for an upstream sync approval)."
+          },
+          "goal": {
+            "type": "string",
+            "pattern": "^g-",
+            "description": "The goal a goal-approval question asks the owner to approve, on its linked design."
           },
           "recommendation": {
             "type": "string"
@@ -990,7 +1019,8 @@
           "non_goals",
           "preconditions",
           "priority",
-          "status"
+          "status",
+          "decision"
         ]
       },
       "feature": {
