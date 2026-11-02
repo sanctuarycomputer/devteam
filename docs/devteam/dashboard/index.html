@@ -1087,11 +1087,15 @@ async function renderMermaid(root) {
     mermaid = await MERMAID;
   } catch { MERMAID = null; return; }
   const dark = matchMedia('(prefers-color-scheme: dark)').matches;
-  mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: dark ? 'dark' : 'neutral', fontFamily: getComputedStyle(document.body).fontFamily, htmlLabels: false, flowchart: { htmlLabels: false } });
+  // Agents write these documents: a diagram's own %%{init}%% directive could set themeCSS and restyle
+  // the owner's page (the SVG keeps its <style>). Directives are stripped and the theme keys locked.
+  mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: dark ? 'dark' : 'neutral', fontFamily: getComputedStyle(document.body).fontFamily, htmlLabels: false, flowchart: { htmlLabels: false },
+    secure: ['secure', 'securityLevel', 'startOnLoad', 'maxTextSize', 'theme', 'themeCSS', 'themeVariables', 'fontFamily', 'htmlLabels', 'flowchart', 'darkMode'] });
   for (const [i, code] of blocks.entries()) {
     const pre = code.parentElement;
     try {
-      const { svg } = await mermaid.render(`mmd-${Date.now()}-${i}`, code.textContent);
+      const src = code.textContent.replace(/%%\{[\s\S]*?\}%%/g, '').replace(/^\s*---\n[\s\S]*?\n---\s*\n/, '');
+      const { svg } = await mermaid.render(`mmd-${Date.now()}-${i}`, src);
       const fig = document.createElement('figure');
       fig.className = 'diagram';
       fig.innerHTML = DOMPurify.sanitize(svg, { USE_PROFILES: { svg: true, svgFilters: true }, ADD_TAGS: ['style'] });
