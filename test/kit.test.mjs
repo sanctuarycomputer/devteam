@@ -82,7 +82,17 @@ test('devteam kit', async (t) => {
     const D1 = must(['ask', '--kind', 'one-way-door', '--goal', G, '--question', 'Who may see card details?', '--recommendation', 'admins only'], { role: 'sup' });
     assert.match(dt(['ask', '--kind', 'goal-approval', '--goal', G, '--question', 'Approve?', '--links', JSON.stringify(design)], { role: 'sup' }).err, /still has open questions about its design/);
     must(['answer', D1, 'admins only']);
+    // the design gives the goal its milestones before the owner sees it; the forecast rides along
+    assert.match(dt(['ask', '--kind', 'goal-approval', '--goal', G, '--question', 'Approve?', '--links', JSON.stringify(design)], { role: 'sup' }).err, /no milestones/);
+    must(['goal', 'set', G, '--milestones', JSON.stringify([{ title: 'Cards', target: 90, preconditions: [1], tickets: 4 }, { title: 'Prices', target: 80, preconditions: [1, 2], tickets: 6 }])], { role: 'sup' });
+    const bad = must(['goal', 'check', G]);
+    assert.match(bad, /milestone 2's target 80 does not move the measure up from 90/);
+    assert.match(bad, /precondition 1 is in milestones 1 and 2/);
+    must(['goal', 'set', G, '--milestones', JSON.stringify([{ title: 'Cards on file', target: 40, by: '2027-01-31', preconditions: [1], tickets: 4 }, { title: 'Self-serve prices', target: 80, preconditions: [2], tickets: 6 }])], { role: 'sup' });
+    assert.doesNotMatch(must(['goal', 'check', G]), /^  milestones:/m);
+    assert.match(must(['goal', 'forecast', G]), /1\. Cards on file: 40 % by 2027-01-31; about 4 tickets, unplanned; 1 waves to here at 5 slots[\s\S]*no measured rate yet/);
     const A1 = must(['ask', '--kind', 'goal-approval', '--goal', G, '--question', 'Approve self-serve billing, built as the design describes?', '--links', JSON.stringify(design)], { role: 'sup' });
+    assert.match(json(must(['questions', '--id', A1, '--json']))[0].context, /Forecast \(computed\)/, 'the approval carries the forecast');
     assert.match(dt(['answer', A1, 'Approve']).err, /goal decide/, 'answered only as a goal decision');
     assert.match(dt(['goal', 'decide', G, 'refine']).err, /needs --notes/);
     must(['goal', 'decide', G, 'refine', '--notes', 'start with cards only; no invoices']);
@@ -91,7 +101,13 @@ test('devteam kit', async (t) => {
     assert.deepEqual(gv.decision, { verdict: 'refine', notes: 'start with cards only; no invoices', question: A1 });
     assert.equal(json(must(['questions', '--id', A1, '--json']))[0].answer, 'Refine — start with cards only; no invoices');
     const A2 = must(['ask', '--kind', 'goal-approval', '--goal', G, '--question', 'Approve the reworked billing design?', '--links', JSON.stringify(design)], { role: 'sup' });
+    // the gate is at asking: an approval already in the owner's inbox stays answerable even if the
+    // goal's milestones are incomplete (an approval asked before milestones were required)
+    const msBefore = json(must(['goal', 'show', G, '--json'])).milestones;
+    must(['goal', 'set', G, '--milestones', '[]'], { role: 'sup' });
+    assert.match(must(['goal', 'check', G]), /no milestones/);
     must(['goal', 'decide', G, 'approve', '--notes', 'ship cards first']);
+    must(['goal', 'set', G, '--milestones', JSON.stringify(msBefore), '--owner']);
     gv = json(must(['goal', 'show', G, '--json']));
     assert.equal(gv.status, 'ready');
     assert.equal(gv.decision.question, A2);
@@ -114,6 +130,19 @@ test('devteam kit', async (t) => {
     assert.ok(fs.readdirSync(path.join(repo, 'docs/devteam/run/log')).some((f) => /^plan-billing-\d{4}-\d{2}\.jsonl$/.test(f)));
     assert.doesNotMatch(must(['status']), /bill-01/, 'main does not see an unlanded plan');
     assert.notEqual(dt(['validate', '--strict'], { cwd: wt('plan-billing') }).status, 0, 'strict validate fails without reviews');
+    // a feature's own design builds on the goal's design and cites it
+    const pw = { cwd: wt('plan-billing'), role: 'planner' };
+    write(path.join(wt('plan-billing'), 'docs/devteam/project/designs/billing-cards.md'), '# Cards\n');
+    must(['feature', 'set', 'billing', '--json', '{"design":"project/designs/billing-cards.md"}'], pw);
+    assert.match(dt(['validate'], { cwd: wt('plan-billing') }).out, /does not cite its goal's design \(designs\/self-serve-billing\.md\)/);
+    write(path.join(wt('plan-billing'), 'docs/devteam/project/designs/billing-cards.md'), '# Cards\n\nBuilds on the goal design: designs/self-serve-billing.md.\n');
+    assert.doesNotMatch(dt(['validate'], { cwd: wt('plan-billing') }).out, /does not cite/);
+    must(['feature', 'set', 'billing', '--json', '{"design":"project/designs/self-serve-billing.md"}'], pw);
+    // planning a later milestone while an earlier one is current is a warning
+    must(['feature', 'set', 'billing', '--json', JSON.stringify({ preconditions: [`${G}#2`] })], pw);
+    assert.match(dt(['validate'], { cwd: wt('plan-billing') }).out, /serves only milestone 2 .* milestone 1 is current/);
+    must(['feature', 'set', 'billing', '--json', JSON.stringify({ preconditions: [`${G}#1`] })], pw);
+    fs.rmSync(path.join(wt('plan-billing'), 'docs/devteam/project/designs/billing-cards.md'));
   });
 
   await t.test('plan PR: reviews make it valid, check-pr accepts it, tampering is caught', () => {
@@ -158,6 +187,13 @@ test('devteam kit', async (t) => {
     assert.match(must(['status']), /ready.*bill-01-card/);
     must(['validate']);
     assert.match(must(['ready']), /bill-01-card/);
+    // milestone 1 is planned; milestone 2's precondition waits for it rather than counting as a gap
+    const gc = must(['goal', 'check', G]);
+    assert.doesNotMatch(gc, /precondition 2 .* has no feature/);
+    assert.match(gc, /later milestones: precondition 2 are planned once milestone 1 is met/);
+    const rm = must(['roadmap']);
+    assert.match(rm, /milestone 1 \[current\] Cards on file/);
+    assert.match(rm, /milestone 2 \[later\] Self-serve prices .*about 6 tickets, unplanned/);
   });
 
   await t.test('a held ticket is left out of ready and idle capacity until released', () => {

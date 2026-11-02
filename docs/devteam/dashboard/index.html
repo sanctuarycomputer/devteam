@@ -780,9 +780,13 @@ function goalState(g, R, openQs) {
     const left = feats.reduce((a, v) => a + v.points_left, 0);
     const unplanned = r?.unplanned || [];
     if (!left && unplanned.length) return { key: 'planning', label: 'Planning the rest', tone: 'low', step: 3, next: `What was planned is built. Still without a plan: ${esc(unplanned.map((u) => u.text).join('; '))}.` };
+    const ms = r?.milestones || [];
+    const cur = ms.find((m) => m.status === 'current');
+    const after = ms.filter((m) => m.status === 'later').length;
+    if (!left && cur && after) return { key: 'measuring', label: g.track === 'behind' ? `Milestone ${cur.n} built, behind` : `Milestone ${cur.n} built, measuring`, tone: g.track === 'behind' ? 'high' : 'good', step: 3, next: `${esc(cur.title)} is built; once the measure reaches ${esc(cur.target)}${esc(g.measure?.unit ? ` ${g.measure.unit}` : '')}, the next milestone is planned (${after} to go).` };
     if (!left) return { key: 'measuring', label: g.track === 'behind' ? 'Built, measure behind' : 'Built, measuring', tone: g.track === 'behind' ? 'high' : 'good', step: 4, next: 'Everything planned is built; the measure decides when it is met.' };
     const waiting = feats.reduce((a, v) => a + v.blocked_by_questions.length, 0);
-    return { key: 'building', label: g.track === 'behind' ? 'Being built, behind' : 'Being built', tone: g.track === 'behind' ? 'high' : 'low', step: 3, next: waiting ? `<b>Waiting on ${waiting} answer${waiting > 1 ? 's' : ''} from you</b> in the Inbox.` : '' };
+    return { key: 'building', label: `${cur && ms.length > 1 ? `Milestone ${cur.n} of ${ms.length}: ` : ''}${g.track === 'behind' ? 'being built, behind' : 'being built'}`.replace(/^b/, 'B'), tone: g.track === 'behind' ? 'high' : 'low', step: 3, next: waiting ? `<b>Waiting on ${waiting} answer${waiting > 1 ? 's' : ''} from you</b> in the Inbox.` : '' };
   }
   if (ask) return { key: 'awaiting', label: 'Waiting for your approval', tone: 'medium', step: 2, ask, next: `<b>Waiting on you:</b> ${qlink(ask.id, 'review the design and decide')}.` };
   if (g.decision?.verdict === 'refine') return { key: 'refining', label: 'Being reworked', tone: 'medium', step: 1, next: `The design is being reworked with your notes: “${esc(g.decision.notes || '')}”` };
@@ -987,6 +991,7 @@ function openGoal(id) {
       ${design ? `<dt>Design</dt><dd><a href="${esc(fileHref({ ...design, title: design.title || 'The design' }))}">${esc(design.title || 'The design')}</a></dd>` : ''}
       ${g.horizon ? `<dt>By</dt><dd>${esc(new Date(Date.parse(g.horizon)).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' }))}</dd>` : ''}
       ${g.priority ? `<dt>Priority</dt><dd>${esc(g.priority)}</dd>` : ''}
+      ${(g.forecast?.milestones || []).length ? `<dt>Milestones</dt><dd><ol>${g.forecast.milestones.map((m) => `<li>${esc(m.title)}: ${esc(m.target)}${esc(g.measure?.unit ? ` ${g.measure.unit}` : '')}${m.by ? ` by ${esc(m.by)}` : ''} <span class="badge ${m.status === 'met' ? 'good' : m.late ? 'high' : m.status === 'current' ? 'low' : 'medium'}">${esc(m.status === 'met' ? 'met' : m.late ? 'late' : m.status)}</span><br><span class="muted">${m.status === 'met' ? 'reached' : `${m.features.length ? `${esc(m.points_left)} points left` : `about ${esc(m.estimate_tickets)} tickets, not planned yet`}${m.eta ? ` · ETA ${esc(m.eta)}` : ''}`}</span></li>`).join('')}</ol>${g.forecast.past_horizon ? '<span class="badge high">forecast after the horizon</span>' : ''}${g.forecast.rate_points_per_day > 0 ? '' : '<div class="muted">No measured rate yet: sizes only, dates once tickets merge.</div>'}</dd>` : ''}
       ${(g.preconditions || []).length ? `<dt>Must be true first</dt><dd><ul>${g.preconditions.map((x, i) => `<li>${esc(x)}${(r?.unplanned || []).some((u) => u.n === i + 1) && g.status === 'ready' ? ' <span class="badge medium">no plan yet</span>' : ''}</li>`).join('')}</ul></dd>` : ''}
       ${(g.non_goals || []).length ? `<dt>Not in scope</dt><dd><ul>${g.non_goals.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></dd>` : ''}
       ${feats.length ? `<dt>Features</dt><dd><ul>${feats.map((v) => `<li>${esc(v.title || v.feature)}: ${v.points_total - v.points_left} of ${v.points_total} points${v.done ? ', done' : ''}</li>`).join('')}</ul></dd>` : ''}

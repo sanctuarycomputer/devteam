@@ -1167,6 +1167,17 @@ function cmdValidate() {
         const o = logGet(g);
         if (o?.type !== 'goal') errors.push(`feature ${fid} names goal ${g}, which is not in the log`);
         else if (!['ready', 'met'].includes(o.status)) errors.push(`feature ${fid} names goal ${g}, which is ${o.status ?? 'draft'}; the owner approves a goal before features are planned from it`);
+        else {
+          // A feature's own design builds on its goal's design, the spine, and says so (planning.md §2).
+          const spine = `designs/${slug(o.title ?? o.id)}.md`;
+          const own = f.design?.replace(/^project\//, '');
+          if (own && own !== spine && projectFileText(own) && !projectFileText(own).includes(spine)) errors.push(`feature ${fid}: its design ${f.design} does not cite its goal's design (${spine}); a feature design builds on the spine and links it`);
+          // Planning rolls a milestone at a time: a feature only for later milestones is planning ahead.
+          const cur = (o.milestones ?? []).length ? currentMilestone(o) : null;
+          const mine = (f.preconditions ?? []).filter((p) => p.startsWith(`${g}#`)).map((p) => Number(p.split('#')[1]));
+          const at = (n) => o.milestones.findIndex((m) => m.preconditions.includes(n)) + 1;
+          if (cur && mine.length && mine.every((n) => at(n) > cur.n)) warnings.push(`feature ${fid} serves only milestone ${Math.min(...mine.map(at))} of ${g}, but milestone ${cur.n} is current; plan it once milestone ${cur.n} is met unless it is on the current milestone's critical path`);
+        }
       }
     }
   }
@@ -1766,6 +1777,7 @@ function cmdAsk() {
     // approval is a yes to an approach whose decisions are already made, never a bundle of them.
     const unsettled = questions().filter((q) => q.kind !== 'goal-approval' && q.goal === g.id && q.status === 'open');
     if (unsettled.length) die(`${g.id} still has open questions about its design (${unsettled.map((q) => q.id).join(', ')}); ask the approval once they're answered (planning.md §1)`);
+    if (c.approval.length) die(`${g.id}'s design has not given it milestones yet (planning.md §1):\n  - ${c.approval.join('\n  - ')}`);
     if (cls) die('a goal-approval question has no --class: approving a goal is never delegated');
   }
   if (kind === 'goal-definition' && cls) die('a goal-definition question has no --class: defining a goal is never delegated (reason goal-ambiguity)');
@@ -1792,7 +1804,7 @@ function cmdAsk() {
   }
   const scope = flagStr('scope') ?? null;
   const line = appendLog({
-    type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), question: q, context: flagStr('context'),
+    type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), question: q, context: kind === 'goal-approval' ? [flagStr('context'), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal'))))].filter(Boolean).join('\n\n') : flagStr('context'),
     rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), options: asList(flags.options), choices: jsonFlag('choices'), links: jsonFlag('links'), recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined,
     deadline: def ? new Date(Date.now() + loadSettings().question_default_after_hours * 3600000).toISOString() : undefined,
     blocks, evidence, note: flagStr('note'),
@@ -2087,16 +2099,108 @@ function goalCheck(g) {
   const clash = logObjects('goal').filter((o) => o.id !== g.id && ['ready', 'draft'].includes(o.status ?? 'draft') && typeof g.priority === 'number' && o.priority === g.priority);
   if (clash.length) definition.push(`priority ${g.priority} is shared with ${clash.map((c) => c.id).join(', ')}`);
   if (!goalReadings(g.id).length) definition.push('no baseline reading (devteam.mjs goal reading <id> --value v)');
+  const approval = milestoneGaps(g);
   const feats = goalFeatures(g.id);
   const covered = new Set(feats.flatMap((f) => features().get(f).preconditions ?? []));
   const unplanned = (g.preconditions ?? []).map((text, i) => ({ n: i + 1, text })).filter((p) => !covered.has(`${g.id}#${p.n}`));
+  // Planning rolls a milestone at a time: only the current milestone's preconditions need features;
+  // a later milestone's wait for it (planning.md §1).
+  const cur = approval.length ? null : currentMilestone(g);
+  const later = cur ? new Set(g.milestones.slice(cur.n).flatMap((m) => m.preconditions)) : new Set();
   const designSlug = slug(g.title ?? g.id);
   if ((g.status ?? 'draft') === 'ready') {
     if (!projectFileText(`designs/${designSlug}.md`)) coverage.push(`no design at project/designs/${designSlug}.md`);
     if (!feats.length) coverage.push('no feature names this goal');
-    for (const p of unplanned) coverage.push(`precondition ${p.n} ("${p.text}") has no feature (${g.id}#${p.n})`);
+    for (const p of unplanned.filter((x) => !later.has(x.n))) coverage.push(`precondition ${p.n} ("${p.text}") has no feature (${g.id}#${p.n})${cur ? `; it is in milestone ${cur.n}, the current one` : ''}`);
   }
-  return { definition, coverage, features: feats, unplanned, design: `project/designs/${designSlug}.md` };
+  return { definition, approval, coverage, features: feats, unplanned, later: [...later].sort((a, b) => a - b), current_milestone: cur?.n ?? null, design: `project/designs/${designSlug}.md` };
+}
+
+// What the design must give the goal before the owner approves it: its milestones (planning.md §1).
+function milestoneGaps(g) {
+  const ms = g.milestones ?? [];
+  const pre = g.preconditions ?? [];
+  if (!ms.length) return ['no milestones: the outcome in order, each a usable slice with a target on the measure, its preconditions and a size in tickets (goal set --milestones; one is fine for a goal one loop can meet)'];
+  const gaps = [];
+  const seen = new Map();
+  const base = goalReadings(g.id)[0]?.measure.value;
+  const up = g.measure?.direction !== 'down';
+  let prevT = base;
+  let prevBy = null;
+  ms.forEach((m, i) => {
+    const n = i + 1;
+    if (!m.title) gaps.push(`milestone ${n} has no title`);
+    if (typeof m.target !== 'number') gaps.push(`milestone ${n} has no numeric target`);
+    else if (typeof prevT === 'number' && (up ? m.target <= prevT : m.target >= prevT)) gaps.push(`milestone ${n}'s target ${m.target} does not move the measure ${up ? 'up' : 'down'} from ${prevT}`);
+    if (typeof m.target === 'number') prevT = m.target;
+    if (!(m.preconditions ?? []).length) gaps.push(`milestone ${n} makes no precondition true`);
+    for (const p of m.preconditions ?? []) {
+      if (!Number.isInteger(p) || p < 1 || p > pre.length) gaps.push(`milestone ${n} names precondition ${p}, which the goal does not have`);
+      else if (seen.has(p)) gaps.push(`precondition ${p} is in milestones ${seen.get(p)} and ${n}; each belongs to one`);
+      else seen.set(p, n);
+    }
+    if (!(Number.isInteger(m.tickets) && m.tickets > 0)) gaps.push(`milestone ${n} has no size (tickets: a rough count of PRs)`);
+    if (m.by !== undefined) {
+      const t = Date.parse(m.by);
+      if (Number.isNaN(t)) gaps.push(`milestone ${n}'s date "${m.by}" is not a date`);
+      else {
+        if (prevBy !== null && t < prevBy) gaps.push(`milestone ${n} is due before milestone ${n - 1}`);
+        if (g.horizon && t > Date.parse(g.horizon)) gaps.push(`milestone ${n} is due after the horizon`);
+        prevBy = t;
+      }
+    }
+  });
+  pre.forEach((_, i) => { if (!seen.has(i + 1)) gaps.push(`precondition ${i + 1} is in no milestone`); });
+  if (typeof g.measure?.target === 'number' && ms[ms.length - 1].target !== g.measure.target) gaps.push(`the last milestone's target (${ms[ms.length - 1].target}) is not the goal's (${g.measure.target})`);
+  return gaps;
+}
+const reached = (g, target, value) => (g.measure?.direction === 'down' ? value <= target : value >= target);
+// The first milestone the latest reading has not reached; null once all are.
+function currentMilestone(g) {
+  const last = goalReadings(g.id).pop()?.measure.value;
+  const i = (g.milestones ?? []).findIndex((m) => typeof last !== 'number' || !reached(g, m.target, last));
+  return i < 0 ? null : { n: i + 1, ...g.milestones[i] };
+}
+
+// The forecast the owner approves a goal against: per milestone, the work left (planned tickets'
+// points, or the design's estimate where nothing is planned yet), the waves that takes at the
+// current worker slots, and a date where the fleet has a measured rate (planning.md §1).
+let roadmapMemo = null;
+function goalForecast(g, r = null) {
+  const ms = g.milestones ?? [];
+  if (!ms.length) return null;
+  const all = [...tickets().values()].filter(isActive);
+  const avgW = all.length ? all.reduce((a, t) => a + weight(t), 0) / all.length : 1;
+  // one roadmap per process: every goal's view asks for its forecast, and the roadmap reads git
+  r ??= (roadmapMemo ??= collectRoadmap());
+  const slots = Math.max(1, loadSettings().max_active_tickets ?? 1);
+  const cur = currentMilestone(g);
+  const fs_ = features();
+  let cumPts = 0;
+  let cumWaves = 0;
+  const rows = ms.map((m, i) => {
+    const n = i + 1;
+    const keys = new Set(m.preconditions.map((p) => `${g.id}#${p}`));
+    const feats = [...fs_.values()].filter((f) => (f.goals ?? []).includes(g.id) && (f.preconditions ?? []).some((p) => keys.has(p))).map((f) => f.id);
+    const planned = feats.reduce((a, f) => a + (r.features[f]?.points_left ?? 0), 0);
+    const plannedTotal = feats.reduce((a, f) => a + (r.features[f]?.points_total ?? 0), 0);
+    const status = !cur || n < cur.n ? 'met' : n === cur.n ? 'current' : 'later';
+    const left = status === 'met' ? 0 : feats.length ? planned : Math.round(m.tickets * avgW);
+    cumPts += left;
+    cumWaves += status === 'met' ? 0 : feats.length ? Math.max(0, ...feats.map((f) => r.features[f]?.waves_left ?? 0)) : Math.ceil(m.tickets / slots);
+    const eta = r.rate_points_per_day > 0 ? dateOnly(new Date(Date.now() + Math.max(cumPts / r.rate_points_per_day, r.median_cycle_days ? cumWaves * r.median_cycle_days : 0) * DAY).toISOString()) : null;
+    const late = Boolean(m.by && eta && eta > dateOnly(new Date(Date.parse(m.by)).toISOString()));
+    return { n, title: m.title, target: m.target, by: m.by ?? null, status, features: feats, estimate_tickets: m.tickets, planned_points: plannedTotal, points_left: left, waves_to_here: cumWaves, eta: status === 'met' ? 'met' : eta, late };
+  });
+  const lastEta = rows[rows.length - 1].eta;
+  const pastHorizon = Boolean(g.horizon && lastEta && lastEta !== 'met' && lastEta > dateOnly(new Date(Date.parse(g.horizon)).toISOString()));
+  return { milestones: rows, slots, rate_points_per_day: r.rate_points_per_day, median_cycle_days: r.median_cycle_days, eta: lastEta, past_horizon: pastHorizon };
+}
+function forecastText(g, f) {
+  if (!f) return '';
+  const L = f.milestones.map((m) => `${m.n}. ${m.title}: ${m.target}${g.measure?.unit ? ` ${g.measure.unit}` : ''}${m.by ? ` by ${m.by}` : ''}; ${m.status === 'met' ? 'met' : `${m.features.length ? `${m.points_left} points left in ${m.features.join(', ')}` : `about ${m.estimate_tickets} tickets, unplanned`}; ${m.waves_to_here} waves to here at ${f.slots} slots${m.eta ? `; ETA ${m.eta}${m.late ? ' (after its date)' : ''}` : ''}`}`);
+  const tail = f.rate_points_per_day > 0 ? `ETA ${f.eta}${f.past_horizon ? `, after the horizon ${g.horizon}` : ''}` : 'no measured rate yet, so no dates: sizes and waves only';
+  return `Forecast (computed):\n${L.join('\n')}\n${tail}.`;
 }
 function goalView(g) {
   const readings = goalReadings(g.id);
@@ -2104,13 +2208,21 @@ function goalView(g) {
   const last = readings[readings.length - 1];
   let track = null;
   if (readings.length >= 2 && typeof g.measure?.target === 'number' && g.horizon) {
-    const start = Date.parse(first.created_at);
-    const end = Date.parse(g.horizon);
-    const frac = end > start ? Math.min(1, Math.max(0, (Date.now() - start) / (end - start))) : 1;
-    const expected = first.measure.value + (g.measure.target - first.measure.value) * frac;
-    track = (g.measure.direction === 'down' ? last.measure.value <= expected : last.measure.value >= expected) ? 'on track' : 'behind';
+    // Expected value now, on the line from the baseline through each dated milestone to the horizon.
+    const pts = [[Date.parse(first.created_at), first.measure.value], ...(g.milestones ?? []).filter((m) => m.by && !Number.isNaN(Date.parse(m.by)) && typeof m.target === 'number').map((m) => [Date.parse(m.by), m.target]), [Date.parse(g.horizon), g.measure.target]].sort((a, b) => a[0] - b[0]);
+    const now = Date.now();
+    let expected = pts[pts.length - 1][1];
+    for (let i = 1; i < pts.length; i++) {
+      if (now <= pts[i][0]) {
+        const [t0, v0] = pts[i - 1];
+        const [t1, v1] = pts[i];
+        expected = t1 > t0 ? v0 + (v1 - v0) * Math.max(0, (now - t0) / (t1 - t0)) : v1;
+        break;
+      }
+    }
+    track = reached(g, expected, last.measure.value) ? 'on track' : 'behind';
   }
-  return { ...g, status: g.status ?? 'draft', readings: readings.map((r) => ({ at: r.created_at, value: r.measure.value, source: r.source })), track, check: goalCheck(g) };
+  return { ...g, status: g.status ?? 'draft', readings: readings.map((r) => ({ at: r.created_at, value: r.measure.value, source: r.source })), track, check: goalCheck(g), forecast: goalForecast(g) };
 }
 function cmdGoal() {
   const [sub, id] = positional;
@@ -2124,6 +2236,7 @@ function cmdGoal() {
     non_goals: flags['non-goals'] !== undefined ? asList(flags['non-goals']) : undefined,
     preconditions: flags.preconditions !== undefined ? asList(flags.preconditions) : undefined,
     priority: flagNum('priority'),
+    milestones: jsonFlag('milestones'),
   });
   if (sub === 'add') {
     const { by } = writer();
@@ -2132,7 +2245,7 @@ function cmdGoal() {
     return out(appendLog({ type: 'goal', status: 'draft', ...f }, by).id);
   }
   if (sub === 'set') {
-    if (!id || logGet(id)?.type !== 'goal') die('usage: goal set <g-id> [--title …] [--outcome …] [--measure …] [--target n] [--unit u] [--direction up|down] [--horizon date] [--non-goals …] [--preconditions …] [--priority n] [--owner]');
+    if (!id || logGet(id)?.type !== 'goal') die('usage: goal set <g-id> [--title …] [--outcome …] [--measure …] [--target n] [--unit u] [--direction up|down] [--horizon date] [--non-goals …] [--preconditions …] [--priority n] [--milestones \'[{"title","target","by","preconditions":[n],"tickets"}…]\'] [--owner]');
     const { by } = writer();
     if (by === 'supervisor' && (logGet(id).status ?? 'draft') !== 'draft') die(`${id} is ${logGet(id).status}; only the owner changes it now (class goal-change)`);
     appendLog({ type: 'goal', op: 'set', id, ...fields() }, by);
@@ -2172,6 +2285,12 @@ function cmdGoal() {
     appendLog({ type: 'goal', op: 'set', id, status: to }, by);
     return out(`${id} is ${to}`);
   }
+  if (sub === 'forecast') {
+    const g = logGet(id)?.type === 'goal' ? logGet(id) : die('usage: goal forecast <g-id>');
+    const f = goalForecast(g);
+    if (flags.json) return json(f);
+    return out(f ? forecastText(g, f) : `${id} has no milestones yet`);
+  }
   if (sub === 'show') return json(goalView(logGet(id)?.type === 'goal' ? logGet(id) : die(`no goal ${id}`)));
   if (sub === 'reading') {
     if (!id || logGet(id)?.type !== 'goal') die('usage: goal reading <g-id> --value n [--source s] [--detail d]');
@@ -2187,11 +2306,14 @@ function cmdGoal() {
     let gaps = 0;
     for (const g of gs) {
       const c = goalCheck(g);
-      gaps += c.definition.length + c.coverage.length;
+      const approvalGaps = (g.status ?? 'draft') === 'draft' || c.approval.length ? c.approval : [];
+      gaps += c.definition.length + approvalGaps.length + c.coverage.length;
       out(`${g.id} [${g.status ?? 'draft'}] ${g.title}`);
       for (const d of c.definition) out(`  definition: ${d}`);
+      for (const d of approvalGaps) out(`  milestones: ${d}`);
       for (const d of c.coverage) out(`  coverage: ${d}`);
-      if (!c.definition.length && !c.coverage.length) out('  ok');
+      if (c.later.length) out(`  later milestones: precondition ${c.later.join(', ')} are planned once milestone ${c.current_milestone} is met`);
+      if (!c.definition.length && !approvalGaps.length && !c.coverage.length) out('  ok');
     }
     if (gaps && flags.strict) process.exit(1);
     return;
@@ -2245,23 +2367,28 @@ function collectRoadmap() {
     v.done = v.points_total > 0 && v.points_left === 0;
     v.eta = !v.points_left || !rate ? null : dateOnly(new Date(now + Math.max(cum / rate, cycleDays ? v.waves_left * cycleDays : 0) * DAY).toISOString());
   }
+  const base = { features: Object.fromEntries(views.map((v) => [v.feature, v])), rate_points_per_day: rate, median_cycle_days: cycleDays };
   const goalRows = goals.map((g) => {
     const c = goalCheck(g);
     const feats = ordered.filter((v) => v.goals.includes(g.id));
     const etas = feats.map((v) => v.eta).filter(Boolean).sort();
-    return { id: g.id, title: g.title, priority: g.priority ?? null, status: g.status ?? 'draft', unplanned: c.unplanned, features: feats.map((v) => v.feature), eta: c.unplanned.length || !feats.length ? null : feats.every((v) => v.done) ? 'done' : etas.pop() ?? null, has_design: !c.coverage.some((x) => x.startsWith('no design')) };
+    // With milestones, the goal's date is the forecast's: later milestones count by their estimate.
+    const fc = goalForecast(g, base);
+    const eta = fc ? (fc.milestones.every((m) => m.status === 'met') ? 'done' : fc.eta) : c.unplanned.length || !feats.length ? null : feats.every((v) => v.done) ? 'done' : etas.pop() ?? null;
+    return { id: g.id, title: g.title, priority: g.priority ?? null, status: g.status ?? 'draft', unplanned: c.unplanned.filter((u) => !c.later.includes(u.n)), later: c.later, current_milestone: c.current_milestone, milestones: fc?.milestones ?? [], past_horizon: fc?.past_horizon ?? false, features: feats.map((v) => v.feature), eta, has_design: !c.coverage.some((x) => x.startsWith('no design')) };
   });
   return {
     generated_at: nowIso(), rate_points_per_day: +rate.toFixed(2), median_cycle_days: cycleDays === null ? null : +cycleDays.toFixed(1),
     goals: goalRows, features: Object.fromEntries(views.map((v) => [v.feature, v])), unassigned: views.filter((v) => v.feature !== CHORES && !v.goals.some((g) => logGet(g)?.type === 'goal')).map((v) => v.feature),
-    note: 'Estimates assume goal-priority order at the current rate; a feature finishes no sooner than its remaining waves times the median cycle time. Goals with unplanned preconditions have no date.',
+    note: 'Estimates assume goal-priority order at the current rate; a feature finishes no sooner than its remaining waves times the median cycle time. A goal with milestones is dated by its forecast (unplanned milestones by their size); one without, and with unplanned preconditions, has no date.',
   };
 }
 const weekOf = (d) => { if (!d) return 'no date'; const x = new Date(`${d}T00:00:00Z`); x.setUTCDate(x.getUTCDate() - ((x.getUTCDay() + 6) % 7)); return `week of ${dateOnly(x.toISOString())}`; };
 function roadmapText(r) {
   const L = [`rate ${r.rate_points_per_day} points/day; median cycle ${r.median_cycle_days ?? '-'} days`];
   for (const g of r.goals) {
-    L.push('', `${g.priority ? `p${g.priority} ` : ''}${g.title} [${g.status}] -> ${g.eta === 'done' ? 'done' : weekOf(g.eta)}${g.has_design ? '' : ' (no design)'}`);
+    L.push('', `${g.priority ? `p${g.priority} ` : ''}${g.title} [${g.status}] -> ${g.eta === 'done' ? 'done' : weekOf(g.eta)}${g.past_horizon ? ' (after its horizon)' : ''}${g.has_design ? '' : ' (no design)'}`);
+    for (const m of g.milestones) L.push(`  milestone ${m.n} [${m.status}] ${m.title} -> ${m.eta === 'met' ? 'met' : weekOf(m.eta)}${m.features.length ? '' : ` (about ${m.estimate_tickets} tickets, unplanned)`}${m.late ? ' (after its date)' : ''}`);
     for (const u of g.unplanned) L.push(`  unplanned: precondition ${u.n}: ${u.text}`);
     for (const f of g.features) {
       const v = r.features[f];
@@ -3234,7 +3361,7 @@ Observe and orient
   problem [--all] | problem add --title t --severity n [--risk] [--threatens g…] | problem set <id> …
 
 Goals and retros
-  goal [list|check|show|add|set|approve|status|reading] …
+  goal [list|check|show|forecast|add|set|decide|approve|status|reading] …
   retro [--due | --print | close <date> --summary s --refs ids]
   chore start <slug> | chore pr <slug> --title t    a supervisor-written file (design, retro, architecture) and its PR
 
