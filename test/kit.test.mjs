@@ -2,7 +2,7 @@
 // trust, corrections, forgery, log-sync, and the computed views. Run: node --test  (DEVTEAM_TEST_KEEP=1 keeps the fixture)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -759,7 +759,7 @@ test('devteam kit', async (t) => {
     fs.writeFileSync(file, before);
   });
 
-  await t.test('secrets: the owner posts straight to a sink; the log never holds a value', () => {
+  await t.test('secrets: the owner posts straight to a sink; the log never holds a value', async () => {
     const VALUE = 'sk_test_51Hq"zz\\9-not-in-the-log';
     const CERT = '-----BEGIN CERTIFICATE-----\nMIIBszCCAVmgAwIBAgIUQ\n-----END CERTIFICATE-----\n';
     const outside = path.join(tmp, 'uploaded.txt');
@@ -767,32 +767,36 @@ test('devteam kit', async (t) => {
     write(sinkScript, `import fs from 'node:fs'; fs.writeFileSync(${JSON.stringify(outside)}, fs.readFileSync(0));\n`);
     const echoScript = path.join(tmp, 'echo.mjs');
     write(echoScript, `import fs from 'node:fs'; const v = fs.readFileSync(0, 'utf8'); console.error('bad key: ' + v + ' / ' + Buffer.from(v).toString('base64')); process.exit(1);\n`);
-    fs.appendFileSync(path.join(repo, '.gitignore'), 'config/*.key\n');
-    const slots = [
-      { name: 'STRIPE_TEST_KEY', sink: `stdin:${process.execPath} ${sinkScript}` },
-      { name: 'APNS_CERT', kind: 'file', sink: 'file:config/apns.key' },
-    ];
-    // only an owner-action question declares secrets, with known sinks and names
+    const stdinSink = `stdin:${process.execPath} ${sinkScript}`;
+    // stdin sinks run as the owner, so only commands the owner listed
+    assert.match(dt(['ask', '--kind', 'owner-action', '--question', 'Key?', '--secrets', JSON.stringify([{ name: 'K', sink: stdinSink }])], { role: 'sup' }).err, /not in settings\.secret_commands/);
+    landSettings((txt) => txt.replace('"gates": {', `"secret_commands": [${JSON.stringify(`${process.execPath} ${sinkScript}`)}, ${JSON.stringify(`${process.execPath} ${echoScript}`)}], "gates": {`));
+    fs.appendFileSync(path.join(repo, '.gitignore'), 'config/*.key\nconfig/credentials/*.key\n');
+    git(['commit', '-qam', 'ignore keys']);
+    const slots = [{ name: 'STRIPE_TEST_KEY', sink: stdinSink }, { name: 'APNS_CERT', kind: 'file', sink: 'file:config/apns.key' }];
+    // only an owner-action question declares secrets, with known sinks and names, and no default
     assert.match(dt(['ask', '--question', 'Key?', '--secrets', JSON.stringify(slots)], { role: 'sup' }).err, /owner-action/);
-    assert.match(dt(['ask', '--kind', 'owner-action', '--question', 'Key?', '--secrets', JSON.stringify([{ name: 'k', sink: 'stdin:x' }])], { role: 'sup' }).err, /UPPER_SNAKE_CASE/);
+    assert.match(dt(['ask', '--kind', 'owner-action', '--question', 'Key?', '--secrets', JSON.stringify([{ name: 'k', sink: stdinSink }])], { role: 'sup' }).err, /UPPER_SNAKE_CASE/);
     assert.match(dt(['ask', '--kind', 'owner-action', '--question', 'Key?', '--secrets', JSON.stringify([{ name: 'K', sink: 'ftp:x' }])], { role: 'sup' }).err, /sink "ftp:x"/);
     assert.match(dt(['ask', '--kind', 'owner-action', '--question', 'Key?', '--secrets', JSON.stringify([{ name: 'K', sink: 'file:docs/devteam/run/k' }])], { role: 'sup' }).err, /not under devteam's run/);
+    assert.match(dt(['ask', '--kind', 'owner-action', '--question', 'Key?', '--secrets', JSON.stringify([{ name: 'K', sink: 'sops:-x:a' }])], { role: 'sup' }).err, /no segment starting with -/);
+    assert.match(dt(['ask', '--kind', 'owner-action', '--question', 'Key?', '--secrets', '["K"]'], { role: 'sup' }).err, /array of objects/);
+    assert.match(dt(['ask', '--kind', 'owner-action', '--question', 'Key?', '--default', 'skip', '--secrets', JSON.stringify(slots)], { role: 'sup' }).err, /no --default/);
     const Qs = must(['ask', '--kind', 'owner-action', '--question', 'Post the Stripe test key and the APNs cert', '--secrets', JSON.stringify(slots)], { role: 'sup' });
-    // agents can't post
     assert.match(dt(['secret', 'post', Qs, '--json'], { role: 'sup', input: '{}' }).err, /owner commands don't run in an agent session/);
     // the first slot alone: posted, the question stays open
     assert.match(must(['secret', 'post', Qs, '--json'], { input: JSON.stringify({ STRIPE_TEST_KEY: VALUE }) }), /posted STRIPE_TEST_KEY/);
     assert.equal(fs.readFileSync(outside, 'utf8'), VALUE, 'the sink got the value on stdin');
     let q = json(must(['questions', '--id', Qs, '--json']))[0];
     assert.equal(q.status, 'open');
-    assert.deepEqual(q.secrets_posted.map((p) => [p.name, p.bytes]), [['STRIPE_TEST_KEY', Buffer.byteLength(VALUE)]]);
+    assert.deepEqual(q.secrets_posted.map((p) => p.name), ['STRIPE_TEST_KEY']);
     // the file slot, then the question is answered
     must(['secret', 'post', Qs, '--json'], { input: JSON.stringify({ APNS_CERT: { b64: Buffer.from(CERT).toString('base64') } }) });
     assert.equal(fs.readFileSync(path.join(repo, 'config/apns.key'), 'utf8'), CERT);
     assert.equal(fs.statSync(path.join(repo, 'config/apns.key')).mode & 0o777, 0o600);
     q = json(must(['questions', '--id', Qs, '--json']))[0];
     assert.equal(q.status, 'answered');
-    assert.match(q.answer, /STRIPE_TEST_KEY .*APNS_CERT/);
+    assert.equal(q.answer, 'Posted 2 secrets');
     assert.match(dt(['secret', 'post', Qs, '--json'], { input: '{}' }).err, /already answered/);
     // a failing sink's output is shown redacted, raw and encoded
     const Qf = must(['ask', '--kind', 'owner-action', '--question', 'Upload it', '--secrets', JSON.stringify([{ name: 'UPLOAD', sink: `stdin:${process.execPath} ${echoScript}` }, { name: 'NOT_IGNORED', sink: 'file:README.md' }])], { role: 'sup' });
@@ -801,15 +805,71 @@ test('devteam kit', async (t) => {
     assert.match(failed.err, /bad key: \[secret:UPLOAD\] \/ \[secret:UPLOAD\]/);
     assert.match(failed.err, /README\.md is not gitignored/);
     assert.doesNotMatch(failed.err + failed.out, /sk_test_51Hq/);
-    // a Rails sink never makes new credentials: no file, no key, refused
-    const Qr = must(['ask', '--kind', 'owner-action', '--question', 'Rails key', '--secrets', JSON.stringify([{ name: 'RK', sink: 'rails-credentials:production:stripe.secret_key' }])], { role: 'sup' });
-    assert.match(dt(['secret', 'post', Qr, '--json'], { input: JSON.stringify({ RK: VALUE }) }).err, /config\/credentials\/production\.yml\.enc does not exist/);
+    // encrypted stores: a fake sops and a fake bin/rails stand in for the real tools
+    const bin = path.join(tmp, 'fakebin');
+    write(path.join(bin, 'sops'), `#!/bin/sh\n[ "$1" = set ] && [ "$2" = --value-stdin ] || { echo "flag provided but not defined: $2" >&2; exit 1; }\nnode -e 'const fs=require("fs");const v=JSON.parse(fs.readFileSync(0,"utf8"));fs.appendFileSync(process.argv[1], process.argv[2]+": "+JSON.stringify(v)+"\\n")' "$3" "$4"\n`);
+    fs.chmodSync(path.join(bin, 'sops'), 0o755);
+    write(path.join(repo, 'bin/rails'), `#!/bin/sh\n# fake credentials:edit: plaintext stands in for the encrypted file\nf=config/credentials/$3.yml.enc; t=$(mktemp); cp "$f" "$t"\n[ -n "$FAKE_RAILS_SKIP" ] || $EDITOR "$t"\ncp "$t" "$f"; rm -f "$t"; echo "File encrypted and saved."\n`);
+    fs.chmodSync(path.join(repo, 'bin/rails'), 0o755);
+    write(path.join(repo, 'config/credentials/test.yml.enc'), '# a comment\nexpires: 2026-01-01\nstripe:\n  publishable: pk_test\n');
+    write(path.join(repo, 'config/credentials/test.key'), 'testkey\n');
+    write(path.join(repo, 'config/secrets.enc.yaml'), 'existing: 1\n');
+    git(['add', 'bin/rails', 'config/credentials/test.yml.enc', 'config/secrets.enc.yaml']);
+    git(['commit', '-qm', 'stores']);
+    git(['push', '-q', 'origin', 'main']);
+    const PATH0 = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${PATH0}`;
+    try {
+      const Qe = must(['ask', '--kind', 'owner-action', '--question', 'Stripe secret for tests', '--secrets', JSON.stringify([{ name: 'RAILS_STRIPE', sink: 'rails-credentials:test:stripe.secret_key' }, { name: 'SOPS_TOKEN', sink: 'sops:config/secrets.enc.yaml:api.token' }])], { role: 'sup' });
+      // Rails ignoring the editor is not taken for success
+      process.env.FAKE_RAILS_SKIP = '1';
+      assert.match(dt(['secret', 'post', Qe, '--json'], { input: JSON.stringify({ RAILS_STRIPE: VALUE }) }).err, /editor did not finish/);
+      delete process.env.FAKE_RAILS_SKIP;
+      assert.match(must(['secret', 'post', Qe, '--json'], { input: JSON.stringify({ RAILS_STRIPE: VALUE, SOPS_TOKEN: 'tok-123456' }) }), /Land it: chore pr secret-\d+-\d+ --title/);
+      const slug = `secret-${Qe.split('-').slice(1, 3).join('-')}`;
+      const committed = git(['show', '--name-only', '--format=', `chore-${slug}`]).split('\n').filter(Boolean).sort();
+      assert.deepEqual(committed, ['config/credentials/test.yml.enc', 'config/secrets.enc.yaml'], 'only the stores are committed, never the copied key');
+      const yml = git(['show', `chore-${slug}:config/credentials/test.yml.enc`]);
+      assert.match(yml, /expires: 2026-01-01/, 'a date survives the YAML round trip');
+      assert.match(yml, /publishable: pk_test/);
+      assert.ok(yml.includes('secret_key:'), 'the key is set');
+      assert.match(git(['show', `chore-${slug}:config/secrets.enc.yaml`]), /\["api"\]\["token"\]: "tok-123456"/);
+      assert.equal(json(must(['questions', '--id', Qe, '--json']))[0].answer, 'Posted 2 secrets');
+      // the question approves its own secret chore, and a secrets question answered otherwise approves nothing
+      const md = (approved) => dt(['merge', '--chore', slug, '--dry-run', '--approved', approved, '--title', `chore-${slug}: post secrets`, '--body-file', body], { role: 'sup' });
+      const ok = md(Qe);
+      assert.doesNotMatch(ok.out + ok.err, /approves only its own chore-secret PR/);
+      const Qc = must(['ask', '--kind', 'owner-action', '--question', 'Another', '--secrets', JSON.stringify([{ name: 'X', sink: 'file:config/x.key' }])], { role: 'sup' });
+      must(['answer', Qc, 'Can’t right now']);
+      assert.match(md(Qc).out, /approves only its own chore-secret PR/);
+    } finally {
+      process.env.PATH = PATH0;
+      delete process.env.FAKE_RAILS_SKIP;
+    }
+    // a sink the kit can't read doesn't take the views down with it
+    const supFile = fs.readdirSync(path.join(repo, 'docs/devteam/run/log')).find((f) => f.startsWith('supervisor-'));
+    fs.appendFileSync(path.join(repo, 'docs/devteam/run/log', supFile), `${JSON.stringify({ v: 1, id: 'q-20991231-235959000-supervisor', type: 'question', op: 'new', at: '2099-12-31T23:59:59.000Z', by: 'supervisor', kind: 'owner-action', question: 'odd', secrets: [{ name: 'ODD', kind: 'string', sink: 'sops:nocolon' }] })}\n`);
+    assert.match(must(['questions', '--id', 'q-20991231-235959000-supervisor', '--json']), /an unreadable sink/);
+    must(['dashboard-data']);
+    // the dashboard: browser headers required, a dead child doesn't kill the server, bytes decode whole
+    const port = 4400 + Math.floor(Math.random() * 500);
+    const srv = spawn(process.execPath, [DT, 'dashboard', '--port', String(port)], { cwd: repo, env: { ...process.env, DEVTEAM_ROLE: '' }, stdio: 'ignore' });
+    try {
+      for (let i = 0; i < 50; i++) { try { await fetch(`http://127.0.0.1:${port}/`); break; } catch { await new Promise((r) => setTimeout(r, 100)); } }
+      const browser = { 'content-type': 'application/json', 'sec-fetch-site': 'same-origin', origin: `http://127.0.0.1:${port}` };
+      const postSecret = (b, headers = browser) => fetch(`http://127.0.0.1:${port}/api/secret`, { method: 'POST', headers, body: JSON.stringify(b) });
+      assert.equal((await postSecret({ id: Qs, values: {} }, { 'content-type': 'application/json' })).status, 403, 'a request without browser headers is refused');
+      for (let i = 0; i < 3; i++) assert.equal((await postSecret({ id: 'q-20200101-000000000-supervisor', values: { A: 'x'.repeat(3 * 1024 * 1024) } })).status, 400);
+      const Qd = must(['ask', '--kind', 'owner-action', '--question', 'Dashboard', '--secrets', JSON.stringify([{ name: 'UNI', sink: 'file:config/uni.key' }])], { role: 'sup' });
+      const uni = `pässwörd-é-${'ä'.repeat(70000)}`;
+      const r = await postSecret({ id: Qd, values: { UNI: uni } });
+      assert.equal(r.status, 200, await r.clone().text());
+      assert.equal(fs.readFileSync(path.join(repo, 'config/uni.key'), 'utf8'), uni, 'multibyte text arrives whole');
+    } finally { srv.kill(); }
     // no value anywhere devteam writes
     const logs = fs.readdirSync(path.join(repo, 'docs/devteam/run/log')).map((f) => fs.readFileSync(path.join(repo, 'docs/devteam/run/log', f), 'utf8')).join('');
-    for (const form of [VALUE, JSON.stringify(VALUE).slice(1, -1), Buffer.from(VALUE).toString('base64'), 'MIIBszCCAVmgAwIBAgIUQ']) assert.ok(!logs.includes(form), `log holds ${form}`);
-    assert.ok(!fs.existsSync(path.join(repo, 'docs/devteam/run/secrets')));
-    fs.rmSync(path.join(repo, 'config/apns.key'));
-    git(['checkout', '--', '.gitignore']);
+    for (const form of [VALUE, JSON.stringify(VALUE).slice(1, -1), Buffer.from(VALUE).toString('base64'), 'MIIBszCCAVmgAwIBAgIUQ', 'tok-123456', 'pässwörd']) assert.ok(!logs.includes(form), `log holds ${form}`);
+    for (const f of ['config/apns.key', 'config/uni.key', 'config/credentials/test.key']) fs.rmSync(path.join(repo, f), { force: true });
   });
 
   await t.test('computed views: metrics, roadmap, retro, dashboard data', () => {

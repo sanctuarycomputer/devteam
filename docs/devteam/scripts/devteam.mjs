@@ -163,6 +163,8 @@ const SETTINGS_DEFAULTS = {
   components: {},
   // How a tagged release reaches production: 'tag' (deploys from the tag) or { branch: 'production' }.
   release: 'tag',
+  // Commands a stdin: secret sink may run (prefixes, e.g. "gh secret set"); they run as the owner.
+  secret_commands: [],
   // Files a fresh worktree needs that git doesn't carry (gitignored secrets, local env), copied from
   // the main checkout into every worker, planner, gate and chore worktree. Paths relative to the repo root.
   worktree_files: [],
@@ -187,7 +189,7 @@ const OWNER_SETTINGS = {
   gates: 'gate-change', worktree_setup: 'gate-change', worktree_files: 'gate-change',
   autonomy_ceilings: 'governance-edit', agent_command: 'governance-edit', resume_command: 'governance-edit', worker_denied_commands: 'governance-edit',
   forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', upstream_repo: 'governance-edit',
-  release: 'governance-edit',
+  release: 'governance-edit', secret_commands: 'governance-edit',
 };
 const canonical = (v) => (Array.isArray(v) ? `[${v.map(canonical).join(',')}]` : v && typeof v === 'object' ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(',')}}` : JSON.stringify(v));
 function settingsAt(ref) {
@@ -656,7 +658,7 @@ function questionView(q) {
     id: q.id, kind: q.kind, class: q.class ?? null, scope: q.scope ?? null, ticket: q.ticket ?? null, re: q.re ?? null, asked_at: q.created_at,
     question: q.question, context: q.context ?? '', options: q.options ?? [], choices: q.choices ?? [], links: q.links ?? [], goal: q.goal ?? null, change: q.change ?? null, rule_scope: q.rule_scope ?? null, recommendation: q.recommendation ?? '', confidence: q.confidence ?? null,
     default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], evidence: q.evidence ?? [], note: q.note ?? null, why_asked: q.why_asked ?? null,
-    secrets: (q.secrets ?? []).map((x) => ({ ...x, to: sinkWords(x.sink) })), secrets_posted: q.secrets_posted ?? [],
+    secrets: (q.secrets ?? []).map((x) => ({ ...x, to: sinkWords(x.sink), sink_type: SINK_RE.exec(x.sink ?? '')?.[1] ?? null })), secrets_posted: q.updates.filter((u) => u.secrets_posted !== undefined && writerClass(u.by) === 'owner').pop()?.secrets_posted ?? [],
     status, answer, answered_by: answeredBy, answered_at: answeredAt, matched,
     autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans?.channel ?? null, said: ans?.said ?? null,
   };
@@ -1675,7 +1677,9 @@ function cmdMerge() {
     if (kit.length && !approved && !standing) fails.push(`touches files outside project/ (${kit.slice(0, 6).join(', ')}${kit.length > 6 ? ', …' : ''}); the owner's answer is needed: merge --chore ${chore} --approved <qid>`);
   }
   if (approved) {
-    ownerAnswer(approved, 'merge --approved');
+    const av = ownerAnswer(approved, 'merge --approved');
+    // A secrets question approves landing only the stores it posted, and only once posted.
+    if (av.secrets.length && (!chore?.startsWith('secret-') || !av.answer?.startsWith('Posted'))) fails.push(`${approved} asked for secrets; it approves only its own chore-secret PR, once the owner posted them (its answer: ${av.answer})`);
     if (logObjects('act').some((a) => a.approved_by === approved)) fails.push(`${approved} already approved an act; ask again for this one`);
   }
   // Gates: the project's own commands, at the exact head, in a detached worktree.
@@ -1859,7 +1863,9 @@ function cmdAsk() {
   const secrets = jsonFlag('secrets');
   if (secrets !== undefined) {
     if (kind !== 'owner-action') die('--secrets belongs on an owner-action question: the owner posts values, the supervisor never holds them');
-    if (!Array.isArray(secrets) || !secrets.length) die('--secrets is a JSON array: [{"name":"STRIPE_TEST_KEY","sink":"rails-credentials:test:stripe.secret_key"}, …]');
+    if (!Array.isArray(secrets) || !secrets.length || secrets.some((x) => !x || typeof x !== 'object' || Array.isArray(x))) die('--secrets is a JSON array of objects: [{"name":"STRIPE_TEST_KEY","sink":"rails-credentials:test:stripe.secret_key"}, …]');
+    if (secrets.length > MAX_SECRETS) die(`at most ${MAX_SECRETS} secrets per question`);
+    if (flags.default !== undefined) die('a question asking for secrets has no --default: only the owner can post them');
     const names = new Set();
     for (const x of secrets) {
       x.kind ??= 'string';
@@ -1867,7 +1873,8 @@ function cmdAsk() {
       if (names.has(x.name)) die(`secret ${x.name} is listed twice`);
       names.add(x.name);
       if (!['string', 'file'].includes(x.kind)) die(`secret ${x.name}: kind is string or file`);
-      parseSink(x.sink);
+      const k = parseSink(x.sink);
+      if (k.type === 'stdin' && !allowedCommand(k.argv)) die(`secret ${x.name}: \`${k.argv.join(' ')}\` is not in settings.secret_commands, the commands the owner lets a secret be piped to`);
     }
   }
   const line = appendLog({
@@ -1941,42 +1948,66 @@ function cmdWithdraw() {
 // ===== secrets: the owner posts a value straight to where it goes =====
 //
 // An owner-action question may declare secrets, each with a sink. The owner's own process (their
-// terminal, or the dashboard's child) pipes the value into the sink; it is never written to the log,
-// to run/, or anywhere an agent reads, and the supervisor never holds it. The log records only that
-// a name was posted to a sink, its size and when. Sinks:
+// terminal, or the dashboard's child, fed on stdin) pipes the value into the sink; it is never
+// written to the log, to run/, or to argv, and the log records only that a name was posted and when.
+// Sinks:
 //   rails-credentials:<env|default>:<dotted.key>   bin/rails credentials:edit, in a chore worktree
 //   sops:<repo file>:<dotted.key>                  sops set --value-stdin, in a chore worktree
-//   file:<repo path>                               a gitignored file in the main checkout (a decryption key)
-//   stdin:<command> <args…>                        a command that reads the value on stdin (gh secret set X)
+//   file:<repo path>                               a gitignored file in the main checkout (a key file)
+//   stdin:<command> <args…>                        a command the owner allowed (settings
+//                                                  secret_commands) that reads the value on stdin
 // Encrypted-store changes are committed to chore-secret-<n>; the supervisor lands them with
 // merge --chore secret-<n> --approved <qid>. This guards against accidents (a value in the log, git,
-// chat, a PR or an agent's context); it is not a sandbox against a hostile process of the same user.
-function parseSink(sink) {
-  const m = /^(rails-credentials|sops|file|stdin):(.+)$/.exec(sink ?? '');
-  if (!m) die(`sink "${sink}" is one of rails-credentials:<env>:<key.path>, sops:<file>:<key.path>, file:<gitignored path>, stdin:<command> <args…>`);
+// chat, a PR or an agent's context). It is not a sandbox: the Rails and SOPS sinks run the repo's
+// own code and tools with the value, and a key on disk lets any local process decrypt the store.
+const SINK_RE = /^(rails-credentials|sops|file|stdin):(.+)$/;
+const insideDir = (child, parent) => child === parent || child.startsWith(parent.endsWith(path.sep) ? parent : `${parent}${path.sep}`);
+// The real path of p, resolving symlinks through the deepest part of it that exists.
+function realish(p) {
+  let cur = path.resolve(p);
+  const tail = [];
+  while (!fs.existsSync(cur)) { tail.unshift(path.basename(cur)); const up = path.dirname(cur); if (up === cur) break; cur = up; }
+  return path.join(fs.realpathSync(cur), ...tail);
+}
+function parseSink(sink, { soft = false } = {}) {
+  const fail = (msg) => { if (soft) throw new Error(msg); die(msg); };
+  const m = SINK_RE.exec(sink ?? '');
+  if (!m) fail(`sink "${sink}" is one of rails-credentials:<env>:<key.path>, sops:<file>:<key.path>, file:<gitignored path>, stdin:<command> <args…>`);
   const [, type, rest] = m;
-  const keyPath = (k) => { if (!/^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*$/.test(k ?? '')) die(`sink "${sink}": the key path is dotted words (stripe.secret_key)`); return k.split('.'); };
-  const repoPath = (p) => { if (!p || path.isAbsolute(p) || p.split(/[\\/]/).includes('..') || /\s/.test(p)) die(`sink "${sink}": a path inside the repo, relative, no ..`); if (path.resolve(mainRoot, p).startsWith(`${runDir}${path.sep}`) || path.resolve(mainRoot, p) === runDir) die(`sink "${sink}": not under devteam's run/, which agents read`); return p; };
+  const keyPath = (k) => { if (!/^[A-Za-z0-9_][A-Za-z0-9_-]*(\.[A-Za-z0-9_][A-Za-z0-9_-]*)*$/.test(k ?? '')) fail(`sink "${sink}": the key path is dotted words (stripe.secret_key)`); return k.split('.'); };
+  const repoPath = (p) => {
+    if (!p || path.isAbsolute(p) || /\s/.test(p) || p.split(/[\\/]/).some((seg) => seg === '..' || seg.startsWith('-'))) fail(`sink "${sink}": a path inside the repo, relative, no .. and no segment starting with -`);
+    const real = realish(path.join(mainRoot, p));
+    if (!insideDir(real, realish(mainRoot))) fail(`sink "${sink}": resolves outside the repo`);
+    if (insideDir(real, realish(runDir))) fail(`sink "${sink}": not under devteam's run/, which agents read`);
+    return p;
+  };
   if (type === 'rails-credentials') {
     const i = rest.indexOf(':');
     const env = i < 0 ? '' : rest.slice(0, i);
-    if (!/^[a-z][a-z0-9_]*$/.test(env)) die(`sink "${sink}": rails-credentials:<env|default>:<key.path>`);
+    if (!/^[a-z][a-z0-9_]*$/.test(env)) fail(`sink "${sink}": rails-credentials:<env|default>:<key.path>`);
     return { type, env, keys: keyPath(rest.slice(i + 1)), commits: true };
   }
   if (type === 'sops') {
     const i = rest.lastIndexOf(':');
-    if (i < 0) die(`sink "${sink}": sops:<file>:<key.path>`);
+    if (i < 0) fail(`sink "${sink}": sops:<file>:<key.path>`);
     return { type, file: repoPath(rest.slice(0, i)), keys: keyPath(rest.slice(i + 1)), commits: true };
   }
   if (type === 'file') return { type, file: repoPath(rest) };
   const argv = rest.trim().split(/\s+/);
-  if (!argv[0]) die(`sink "${sink}": stdin:<command> <args…>`);
+  if (!argv[0]) fail(`sink "${sink}": stdin:<command> <args…> (arguments can't contain spaces)`);
   return { type, argv };
 }
-const sinkWords = (sink) => {
-  const k = parseSink(sink);
-  return k.type === 'rails-credentials' ? `Rails credentials (${k.env}) → ${k.keys.join('.')}` : k.type === 'sops' ? `${k.file} (SOPS) → ${k.keys.join('.')}` : k.type === 'file' ? `the file ${k.file} (gitignored, this machine only)` : `the command \`${k.argv.join(' ')}\` on its stdin`;
-};
+// A stdin sink runs as the owner, so it must start with a command the owner allowed in settings.
+function allowedCommand(argv) {
+  const line = argv.join(' ');
+  return (loadSettings().secret_commands ?? []).some((p) => typeof p === 'string' && p.trim() && (line === p.trim() || line.startsWith(`${p.trim()} `)));
+}
+function sinkWords(sink) {
+  let k;
+  try { k = parseSink(sink, { soft: true }); } catch { return `an unreadable sink (${sink})`; }
+  return k.type === 'rails-credentials' ? `Rails credentials (${k.env}) → ${k.keys.join('.')}` : k.type === 'sops' ? `${k.file} (SOPS) → ${k.keys.join('.')}` : k.type === 'file' ? `the file ${k.file} (gitignored, this machine only)` : `this command, on its stdin: ${k.argv.join(' ')}`;
+}
 // Every form a value might take in a tool's output, longest first, so none survives in what we print.
 function redactor(values) {
   const forms = [];
@@ -1993,9 +2024,13 @@ function withScratch(fn) {
   fs.chmodSync(dir, 0o700);
   try { return fn(dir); } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 }
+// The editor credentials:edit runs: sets one key, keeps the rest (comments are not kept: YAML is
+// re-dumped), and leaves a marker so a failure Rails ignores is not taken for success.
 const RAILS_EDITOR = `require "yaml"
+require "date"
 path = ARGV.last
-data = YAML.load_file(path) || {}
+text = File.read(path)
+data = if text.strip.empty? then {} elsif YAML.respond_to?(:unsafe_load) then YAML.unsafe_load(text) else YAML.load(text) end
 data = {} unless data.is_a?(Hash)
 keys = ENV.fetch("DEVTEAM_SECRET_KEYPATH").split(".")
 value = File.binread(ENV.fetch("DEVTEAM_SECRET_FILE")).force_encoding("UTF-8")
@@ -2004,21 +2039,28 @@ h = data
 keys[0..-2].each { |k| h[k] = {} unless h[k].is_a?(Hash); h = h[k] }
 h[keys.last] = value
 File.write(path, YAML.dump(data))
+File.write(ENV.fetch("DEVTEAM_SECRET_DONE"), "ok")
 `;
+const isUtf8 = (buf) => { try { new TextDecoder('utf-8', { fatal: true }).decode(buf); return true; } catch { return false; } };
+const ownerProcessEnv = () => { const e = { ...process.env }; for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE']) delete e[k]; return e; };
+// Returns { ok, out, files }: files are the tracked paths a commit sink changed.
 function runSink(k, value, kind, cwd, redact) {
   const run = (cmd, args, opts) => {
     const r = spawnSync(cmd, args, { cwd, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, ...opts });
     if (r.error) return { ok: false, out: redact(r.error.message) };
     return { ok: r.status === 0, out: redact(`${r.stdout ?? ''}${r.stderr ?? ''}`.trim()) };
   };
-  if (k.type === 'stdin') return run(k.argv[0], k.argv.slice(1), { input: value, env: ownerProcessEnv() });
+  const changed = (rel) => (git(['status', '--porcelain', '--', rel], cwd) ?? '').trim() !== '';
+  if (k.type === 'stdin') {
+    if (!allowedCommand(k.argv)) return { ok: false, out: `\`${k.argv.join(' ')}\` is not in settings.secret_commands` };
+    return run(k.argv[0], k.argv.slice(1), { input: value, env: ownerProcessEnv() });
+  }
   if (k.type === 'file') {
+    if (git(['check-ignore', '-q', '--', k.file], cwd) === null) return { ok: false, out: `${k.file} is not gitignored; a file sink only writes ignored files` };
     const target = path.join(cwd, k.file);
-    if (git(['check-ignore', '-q', k.file], cwd) === null) return { ok: false, out: `${k.file} is not gitignored; a file sink only writes ignored files` };
-    const dir = path.dirname(target);
-    fs.mkdirSync(dir, { recursive: true });
-    if (!fs.realpathSync(dir).startsWith(fs.realpathSync(cwd))) return { ok: false, out: `${k.file} resolves outside the repo` };
-    const tmp = path.join(dir, `.${path.basename(target)}.devteam-${process.pid}`);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    if (!insideDir(fs.realpathSync(path.dirname(target)), fs.realpathSync(cwd))) return { ok: false, out: `${k.file} resolves outside the repo` };
+    const tmp = path.join(path.dirname(target), `.${path.basename(target)}.devteam-${process.pid}`);
     try {
       fs.writeFileSync(tmp, value, { flag: 'wx', mode: 0o600 });
       fs.renameSync(tmp, target);
@@ -2029,7 +2071,10 @@ function runSink(k, value, kind, cwd, redact) {
   if (k.type === 'sops') {
     if (!fs.existsSync(path.join(cwd, k.file))) return { ok: false, out: `${k.file} does not exist on main; create it with sops first` };
     const text = value.toString('utf8');
-    return run('sops', ['set', '--value-stdin', k.file, k.keys.map((x) => `[${JSON.stringify(x)}]`).join('')], { input: JSON.stringify(kind === 'string' ? text.replace(/\r?\n$/, '') : text), env: ownerProcessEnv() });
+    const r = run('sops', ['set', '--value-stdin', k.file, k.keys.map((x) => `[${JSON.stringify(x)}]`).join('')], { input: JSON.stringify(kind === 'string' ? text.replace(/\r?\n$/, '') : text), env: ownerProcessEnv() });
+    if (r.ok && !changed(k.file)) return { ok: false, out: `sops exited 0 but ${k.file} did not change${r.out ? `: ${r.out}` : ''}` };
+    if (!r.ok && /value-stdin/.test(r.out)) r.out += ' (this sops is too old for set --value-stdin; update it)';
+    return { ...r, files: [k.file] };
   }
   // rails-credentials: credentials:edit with an editor that sets one key. Without the environment's
   // key Rails would generate a new key and new credentials, so refuse instead.
@@ -2037,61 +2082,81 @@ function runSink(k, value, kind, cwd, redact) {
   const keyFile = k.env === 'default' ? 'config/master.key' : `config/credentials/${k.env}.key`;
   if (!fs.existsSync(path.join(cwd, enc))) return { ok: false, out: `${enc} does not exist; create the ${k.env} credentials first` };
   if (!fs.existsSync(path.join(cwd, keyFile)) && !process.env.RAILS_MASTER_KEY) {
-    if (fs.existsSync(path.join(mainRoot, keyFile))) fs.copyFileSync(path.join(mainRoot, keyFile), path.join(cwd, keyFile));
-    else return { ok: false, out: `no ${keyFile} here or in the main checkout, and no RAILS_MASTER_KEY: put the key in place first (a file: sink can post it)` };
+    if (!fs.existsSync(path.join(mainRoot, keyFile))) return { ok: false, out: `no ${keyFile} and no RAILS_MASTER_KEY in your environment: for production, set RAILS_MASTER_KEY in the shell that runs this rather than keeping the key on disk` };
+    if (git(['check-ignore', '-q', '--', keyFile], cwd) === null) return { ok: false, out: `${keyFile} is not gitignored here; refusing to copy a key into a worktree that commits` };
+    fs.copyFileSync(path.join(mainRoot, keyFile), path.join(cwd, keyFile));
   }
   return withScratch((dir) => {
     const vf = path.join(dir, 'value');
     const ed = path.join(dir, 'edit.rb');
+    const done = path.join(dir, 'done');
     fs.writeFileSync(vf, value, { flag: 'wx', mode: 0o600 });
     fs.writeFileSync(ed, RAILS_EDITOR, { flag: 'wx', mode: 0o600 });
     const args = ['credentials:edit', ...(k.env === 'default' ? [] : ['--environment', k.env])];
-    return run(fs.existsSync(path.join(cwd, 'bin/rails')) ? 'bin/rails' : 'rails', args, { env: { ...ownerProcessEnv(), EDITOR: `ruby ${ed}`, VISUAL: `ruby ${ed}`, DEVTEAM_SECRET_FILE: vf, DEVTEAM_SECRET_KEYPATH: k.keys.join('.'), DEVTEAM_SECRET_KIND: kind } });
+    const r = run(fs.existsSync(path.join(cwd, 'bin/rails')) ? 'bin/rails' : 'rails', args, { env: { ...ownerProcessEnv(), EDITOR: `ruby ${ed}`, VISUAL: `ruby ${ed}`, DEVTEAM_SECRET_FILE: vf, DEVTEAM_SECRET_KEYPATH: k.keys.join('.'), DEVTEAM_SECRET_KIND: kind, DEVTEAM_SECRET_DONE: done } });
+    if (r.ok && !fs.existsSync(done)) return { ok: false, out: `the credentials editor did not finish, so nothing was set${r.out ? `: ${r.out}` : ''}` };
+    if (r.ok && !changed(enc)) return { ok: false, out: `${enc} did not change` };
+    return { ...r, files: [enc] };
   });
 }
-const isUtf8 = (buf) => { try { new TextDecoder('utf-8', { fatal: true }).decode(buf); return true; } catch { return false; } };
-const ownerProcessEnv = () => { const e = { ...process.env }; for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE']) delete e[k]; return e; };
-// Read one line from the terminal without echoing it.
+// Read one line from the terminal without echoing it: from /dev/tty, with the terminal's own state
+// saved and restored whatever happens (Ctrl-C included, which arrives here as a byte).
 function readHidden(prompt) {
-  if (!process.stdin.isTTY) die('secret post: no terminal to read from; pipe JSON with --json, or use the dashboard');
-  process.stderr.write(prompt);
-  spawnSync('stty', ['-echo'], { stdio: 'inherit' });
+  let fd;
+  try { fd = fs.openSync('/dev/tty', 'r+'); } catch { die('secret post: no terminal to read from; pipe JSON with --json, or use the dashboard'); }
+  const stty = (...a) => spawnSync('stty', a, { stdio: [fd, 'pipe', 'pipe'], encoding: 'utf8' });
+  const saved = stty('-g').stdout?.trim();
+  const restore = () => { if (saved) stty(saved); else stty('echo', 'icanon', 'isig'); };
+  process.once('exit', restore);
+  fs.writeSync(fd, prompt);
+  stty('-echo', '-icanon', '-isig', 'min', '1', 'time', '0');
+  const bytes = [];
   try {
     const buf = Buffer.alloc(1);
-    const bytes = [];
     for (;;) {
-      let n = 0;
-      try { n = fs.readSync(0, buf, 0, 1, null); } catch (e) { if (e.code === 'EAGAIN') continue; throw e; }
-      if (!n || buf[0] === 10 || buf[0] === 13) break;
-      bytes.push(buf[0]);
+      if (!fs.readSync(fd, buf, 0, 1, null)) break;
+      const c = buf[0];
+      if (c === 3) { restore(); fs.writeSync(fd, '\n'); die('cancelled'); }
+      if (c === 4 || c === 10 || c === 13) break;
+      if (c === 127 || c === 8) { bytes.pop(); continue; }
+      bytes.push(c);
     }
     return Buffer.from(bytes);
   } finally {
-    spawnSync('stty', ['echo'], { stdio: 'inherit' });
-    process.stderr.write('\n');
+    restore();
+    fs.writeSync(fd, '\n');
+    fs.closeSync(fd);
+    bytes.fill(0);
   }
 }
+const MAX_SECRETS = 20;
 function cmdSecret() {
   const [sub, id] = positional;
-  if (sub === 'sinks') return out('rails-credentials:<env|default>:<key.path>   sops:<file>:<key.path>   file:<gitignored path>   stdin:<command> <args…>');
+  if (sub === 'sinks') return out('rails-credentials:<env|default>:<key.path>   sops:<file>:<key.path>   file:<gitignored path>   stdin:<command> <args…> (allowed in settings.secret_commands)');
   if (sub !== 'post' || !id) die('usage: secret post <qid> [--file NAME=path …] [--json]   (owner: post a question\'s secrets; --json reads {"NAME": "value" | {"b64": "…"}} on stdin)');
   const { by } = ownerWriter();
+  // Drain stdin first, so a writer feeding it never blocks on a process that refused early.
+  let body = null;
+  if (flags.json) {
+    const raw = fs.readFileSync(0);
+    try { body = JSON.parse(raw.toString('utf8')); } catch { body = undefined; }
+    raw.fill(0);
+    if (body === undefined || typeof body !== 'object' || !body) die('secret post --json: stdin is a JSON object');
+  }
   const v = openQuestion(id);
   const declared = v.secrets ?? [];
   if (!declared.length) die(`${id} asks for no secrets`);
   const posted = [...(v.secrets_posted ?? [])];
   const todo = declared.filter((x) => !posted.some((p) => p.name === x.name));
   if (!todo.length) die(`${id}: every secret is already posted`);
-  // Values: JSON on stdin (the dashboard), --file NAME=path, or typed at a hidden prompt.
   const values = new Map();
-  if (flags.json) {
-    let body;
-    try { body = JSON.parse(fs.readFileSync(0, 'utf8')); } catch { die('secret post --json: stdin is not JSON'); }
+  if (body) {
     for (const x of todo) {
-      const val = body?.[x.name];
+      const val = body[x.name];
       if (val === undefined || val === '') continue;
       values.set(x.name, typeof val === 'string' ? Buffer.from(val, 'utf8') : typeof val?.b64 === 'string' ? Buffer.from(val.b64, 'base64') : die(`${x.name}: a string or {"b64": "…"}`));
     }
+    body = null;
   } else {
     for (const spec of asList(flags.file)) {
       const i = spec.indexOf('=');
@@ -2101,41 +2166,48 @@ function cmdSecret() {
     }
     for (const x of todo) if (!values.has(x.name)) {
       if (x.kind === 'file') { warn(`${x.name} is a file: pass --file ${x.name}=<path>`); continue; }
-      const val = readHidden(`${x.name} (goes to ${sinkWords(x.sink)}; input hidden, Enter to skip): `);
+      const val = readHidden(`${x.name} goes to ${sinkWords(x.sink)}.\nPaste it (hidden; Enter to skip): `);
       if (val.length) values.set(x.name, val);
     }
   }
   if (!values.size) die('nothing to post');
   const redact = redactor(values);
   const sinks = todo.filter((x) => values.has(x.name)).map((x) => ({ ...x, k: parseSink(x.sink) }));
-  // Encrypted stores change in one chore worktree per question, committed together.
+  // Encrypted stores change in one chore worktree per question, committed together; it starts clean.
   const slug = `secret-${id.split('-').slice(1, 3).join('-')}`;
-  const wt = sinks.some((x) => x.k.commits) ? choreWorktree(slug, { setup: true }) : null;
+  let wt = null;
+  if (sinks.some((x) => x.k.commits)) {
+    wt = choreWorktree(slug, { setup: true });
+    git(['checkout', '--quiet', '--', '.'], wt);
+    git(['clean', '-fdq'], wt);
+  }
   const failures = [];
   const done = [];
+  const files = new Set();
   try {
     for (const x of sinks) {
       const r = runSink(x.k, values.get(x.name), x.kind, x.k.commits ? wt : mainRoot, redact);
-      if (r.ok) done.push({ name: x.name, sink: x.sink, bytes: values.get(x.name).length, at: nowIso() });
+      if (r.ok) { done.push({ name: x.name, at: nowIso() }); for (const f of r.files ?? []) files.add(f); }
       else failures.push(`${x.name} → ${sinkWords(x.sink)}: ${r.out || 'failed'}`);
     }
   } finally {
     for (const buf of values.values()) buf.fill(0);
   }
   let landing = '';
-  if (wt && done.some((d) => parseSink(d.sink).commits)) {
-    git(['add', '-A'], wt);
-    if (git(['diff', '--cached', '--quiet'], wt) === null) {
-      gitOrDie(['commit', '--quiet', '-m', `chore-${slug}: ${done.filter((d) => parseSink(d.sink).commits).map((d) => `${d.name} → ${d.sink}`).join(', ')}\n\nPosted by the owner for ${id}; values are encrypted, never in the log.`], wt);
-      landing = ` Land it: chore pr ${slug}, then merge --chore ${slug} --approved ${id}.`;
-    }
+  if (wt && files.size) {
+    // Exactly the stores the sinks changed; anything else the run left behind is discarded.
+    gitOrDie(['add', '--', ...files], wt);
+    gitOrDie(['commit', '--quiet', '-m', `chore-${slug}: post secrets for ${id}\n\nEncrypted values posted by the owner; never in the log.`], wt);
+    git(['checkout', '--quiet', '--', '.'], wt);
+    git(['clean', '-fdq'], wt);
+    landing = ` Land it: chore pr ${slug} --title "post secrets for ${id}", then merge --chore ${slug} --approved ${id}.`;
   }
   if (done.length) {
     const all = [...posted, ...done];
     const complete = declared.every((x) => all.some((p) => p.name === x.name));
-    appendLog({ type: 'question', op: 'set', id, secrets_posted: all, ...(complete ? { answer: `Posted: ${all.map((p) => `${p.name} → ${p.sink}`).join('; ')}` } : {}) }, by);
+    appendLog({ type: 'question', op: 'set', id, secrets_posted: all, ...(complete ? { answer: `Posted ${all.length} secret${all.length > 1 ? 's' : ''}` } : {}) }, by);
     nudgeSupervisor(`[devteam secrets ${complete ? 'posted' : 'partly posted'} for ${id} from owner] ${done.map((d) => d.name).join(', ')}.${landing}`);
-    out(`posted ${done.map((d) => `${d.name} → ${sinkWords(d.sink)}`).join('; ')}${complete ? `; ${id} is answered` : ''}${landing}`);
+    out(`posted ${done.map((d) => d.name).join(', ')}${complete ? `; ${id} is answered` : ''}${landing}`);
   }
   if (failures.length) die(`not posted:\n  - ${failures.join('\n  - ')}`);
 }
@@ -3224,8 +3296,12 @@ function cmdDashboard() {
     const sameOrigin = isSecret ? site === 'same-origin' && origin === `http://${req.headers.host}` : (!site || site === 'same-origin') && (!origin || origin === `http://${req.headers.host}`);
     if (!okHost || !sameOrigin || !(req.headers['content-type'] ?? '').startsWith('application/json')) return send(res, 403, 'application/json', JSON.stringify({ error: 'owner actions only from this page' }));
     const cap = isSecret ? 4 * 1024 * 1024 : 20000;
+    // Bytes first, decoded once: a multibyte character split across chunks stays whole.
+    const chunks = [];
+    let size = 0;
     let body = '';
-    req.on('data', (c) => { body += c; if (body.length > cap) { body = ''; req.destroy(); } });
+    req.on('data', (c) => { size += c.length; if (size > cap) { chunks.length = 0; req.destroy(); return; } chunks.push(c); });
+    req.on('end', () => { const buf = Buffer.concat(chunks); body = buf.toString('utf8'); buf.fill(0); chunks.length = 0; });
     if (isSecret) {
       // The values go to a child on stdin, never in argv or the server's own output; the child pipes
       // each to its sink (secret post --json) and logs only names.
@@ -3237,9 +3313,13 @@ function cmdDashboard() {
         const child = spawn(process.execPath, [self, 'secret', 'post', parsed.id, '--json'], { cwd: mainRoot, env: ownerEnv, stdio: ['pipe', 'pipe', 'pipe'] });
         let so = '';
         let se = '';
+        let replied = false;
+        const reply = (code, payload) => { if (!replied) { replied = true; send(res, code, 'application/json', JSON.stringify(payload)); } };
+        child.stdin.on('error', () => {});
+        child.on('error', (e) => reply(500, { error: e.message }));
         child.stdout.on('data', (c) => { so += c; });
         child.stderr.on('data', (c) => { se += c; });
-        child.on('close', (code) => send(res, code === 0 ? 200 : 400, 'application/json', JSON.stringify(code === 0 ? { ok: true, out: so.trim() } : { error: se.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') || 'failed', out: so.trim() })));
+        child.on('close', (code) => reply(code === 0 ? 200 : 400, code === 0 ? { ok: true, out: so.trim() } : { error: se.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') || 'failed', out: so.trim() }));
         child.stdin.end(JSON.stringify(parsed.values));
         parsed = null;
       });

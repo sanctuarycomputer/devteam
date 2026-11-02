@@ -810,7 +810,8 @@
                   ]
                 },
                 "sink": {
-                  "type": "string"
+                  "type": "string",
+                  "pattern": "^(rails-credentials|sops|file|stdin):.+$"
                 }
               },
               "required": [
@@ -822,7 +823,7 @@
             }
           },
           "secrets_posted": {
-            "description": "Which declared secrets the owner has posted, cumulative: the name, its sink, the size and when. Never the value.",
+            "description": "Which declared secrets the owner has posted, cumulative: the name and when. Never the value or its size.",
             "type": "array",
             "items": {
               "type": "object",
@@ -830,21 +831,12 @@
                 "name": {
                   "type": "string"
                 },
-                "sink": {
-                  "type": "string"
-                },
-                "bytes": {
-                  "type": "integer",
-                  "minimum": 0
-                },
                 "at": {
                   "type": "string"
                 }
               },
               "required": [
                 "name",
-                "sink",
-                "bytes",
                 "at"
               ],
               "additionalProperties": false
@@ -1004,6 +996,9 @@
         "x-required-new": [
           "kind",
           "question"
+        ],
+        "x-set-only": [
+          "secrets_posted"
         ]
       },
       "act": {

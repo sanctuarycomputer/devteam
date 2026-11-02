@@ -297,7 +297,8 @@
   .md a { color: var(--blue-fg); text-decoration: underline; }
   .secrets { display: grid; gap: 10px; margin: 10px 0; }
   .secret { display: grid; gap: 4px; }
-  .secret input[type=password] { font: 13px var(--mono); }
+  .secret textarea.masked { font: 13px var(--mono); -webkit-text-security: disc; text-security: disc; min-height: 0; resize: vertical; }
+  .sink-cmd pre { background: var(--well); padding: 6px 8px; border-radius: 6px; font: 12px var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 0 0; }
   .viewer iframe { width: 100%; height: 70vh; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
   .viewer img { max-width: 100%; border: 1px solid var(--line); border-radius: 8px; }
   @media (max-width: 900px) { .drawer { padding: 16px; } .drawer dl { grid-template-columns: 1fr; } }
@@ -737,17 +738,18 @@ function secretsForm(q) {
   return `<div class="secrets">${q.secrets.map((x) => {
     const p = posted.get(x.name);
     const key = `${q.id}:${x.name}`;
-    return `<label class="secret"><span class="sname"><code>${esc(x.name)}</code> <span class="muted small">goes to ${esc(x.to || x.sink)}</span></span>${p ? `<span class="badge good">posted · ${esc(p.bytes)} bytes</span>` : x.kind === 'file' ? `<input type="file" data-secret="${esc(key)}">` : `<input type="password" autocomplete="off" spellcheck="false" data-secret="${esc(key)}" placeholder="Paste the value">`}</label>`;
-  }).join('')}<p class="meta">Nothing you post here is saved by devteam or shown to an agent: it goes from this page to the place named, and the log records only the name and size.</p></div>`;
+    const where = x.sink_type === 'stdin' ? `<div class="sink-cmd">Runs as you, with the value on its input:<pre>${esc(x.sink.slice('stdin:'.length))}</pre></div>` : `<span class="muted small">goes to ${esc(x.to || x.sink)}</span>`;
+    return `<div class="secret"><span class="sname"><code>${esc(x.name)}</code> ${x.sink_type === 'stdin' ? '' : where}</span>${x.sink_type === 'stdin' ? where : ''}${p ? '<span class="badge good">posted</span>' : x.kind === 'file' ? `<input type="file" data-secret="${esc(key)}" aria-label="${esc(x.name)}">` : `<textarea class="masked" rows="2" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" data-1p-ignore data-lpignore="true" data-form-type="other" data-secret="${esc(key)}" aria-label="${esc(x.name)}" placeholder="Paste the value (several lines are fine)"></textarea>`}</div>`;
+  }).join('')}<p class="meta">devteam doesn’t save what you post or show it to an agent: it goes from this page through your own process to the place named, and the log records only the name. Check where each one goes before you post.</p></div>`;
 }
 function keepSecretDrafts() {
-  document.querySelectorAll('input[data-secret]').forEach((el) => {
+  document.querySelectorAll('[data-secret]').forEach((el) => {
     const v = el.type === 'file' ? el.files?.[0] : el.value;
     if (v) SECRET_DRAFTS.set(el.dataset.secret, v); else SECRET_DRAFTS.delete(el.dataset.secret);
   });
 }
 function restoreSecretDrafts() {
-  document.querySelectorAll('input[data-secret]').forEach((el) => {
+  document.querySelectorAll('[data-secret]').forEach((el) => {
     const v = SECRET_DRAFTS.get(el.dataset.secret);
     if (!v) return;
     if (el.type === 'file') { try { const t = new DataTransfer(); t.items.add(v); el.files = t.files; } catch {} }
@@ -1311,7 +1313,7 @@ document.addEventListener('click', async (ev) => {
   if (ps) {
     const id = ps.dataset.postSecrets;
     const err = $(`e-${id}`);
-    const inputs = [...document.querySelectorAll(`#q-${CSS.escape(id)} input[data-secret]`)];
+    const inputs = [...document.querySelectorAll(`#q-${CSS.escape(id)} [data-secret]`)];
     const values = {};
     for (const el of inputs) {
       const name = el.dataset.secret.slice(id.length + 1);
