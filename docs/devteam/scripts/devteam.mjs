@@ -11,7 +11,9 @@
 // definition of done · 7 trust · 8 decide and act · 9 goals, roadmap, retros · 10 metrics and the
 // dashboard · 11 sessions (workers, messages, phases, gates) · 12 init, help, dispatch.
 
-import { execFile, execFileSync } from 'node:child_process';
+import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
+import os from 'node:os';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -654,6 +656,7 @@ function questionView(q) {
     id: q.id, kind: q.kind, class: q.class ?? null, scope: q.scope ?? null, ticket: q.ticket ?? null, re: q.re ?? null, asked_at: q.created_at,
     question: q.question, context: q.context ?? '', options: q.options ?? [], choices: q.choices ?? [], links: q.links ?? [], goal: q.goal ?? null, change: q.change ?? null, rule_scope: q.rule_scope ?? null, recommendation: q.recommendation ?? '', confidence: q.confidence ?? null,
     default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], evidence: q.evidence ?? [], note: q.note ?? null, why_asked: q.why_asked ?? null,
+    secrets: (q.secrets ?? []).map((x) => ({ ...x, to: sinkWords(x.sink) })), secrets_posted: q.secrets_posted ?? [],
     status, answer, answered_by: answeredBy, answered_at: answeredAt, matched,
     autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans?.channel ?? null, said: ans?.said ?? null,
   };
@@ -1853,11 +1856,25 @@ function cmdAsk() {
     if (!recommendation) recommendation = `move ${cls} to rung ${r + 1} (${RUNG[r + 1]})`;
   }
   const scope = flagStr('scope') ?? null;
+  const secrets = jsonFlag('secrets');
+  if (secrets !== undefined) {
+    if (kind !== 'owner-action') die('--secrets belongs on an owner-action question: the owner posts values, the supervisor never holds them');
+    if (!Array.isArray(secrets) || !secrets.length) die('--secrets is a JSON array: [{"name":"STRIPE_TEST_KEY","sink":"rails-credentials:test:stripe.secret_key"}, …]');
+    const names = new Set();
+    for (const x of secrets) {
+      x.kind ??= 'string';
+      if (!/^[A-Z][A-Z0-9_]{0,63}$/.test(x.name ?? '')) die(`secret name "${x.name}" must be UPPER_SNAKE_CASE`);
+      if (names.has(x.name)) die(`secret ${x.name} is listed twice`);
+      names.add(x.name);
+      if (!['string', 'file'].includes(x.kind)) die(`secret ${x.name}: kind is string or file`);
+      parseSink(x.sink);
+    }
+  }
   const line = appendLog({
     type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), question: q, context: kind === 'goal-approval' ? [flagStr('context'), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal'))))].filter(Boolean).join('\n\n') : flagStr('context'),
     rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: goalChangeFlag(cls), options: asList(flags.options), choices: jsonFlag('choices'), links: jsonFlag('links'), recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined,
     deadline: def ? new Date(Date.now() + loadSettings().question_default_after_hours * 3600000).toISOString() : undefined,
-    blocks, evidence, note: flagStr('note'),
+    blocks, evidence, note: flagStr('note'), secrets,
     why_asked: { rung: onLadder ? rungFor(cls, scope) : undefined, ceiling: onLadder ? L.classes[cls].ceiling : undefined, reasons },
   }, 'supervisor');
   out(line.id);
@@ -1920,6 +1937,207 @@ function cmdWithdraw() {
   appendLog({ type: 'question', op: 'set', id, status: 'withdrawn', reason: flagStr('reason') }, 'supervisor');
   appendLog({ type: 'act', class: 'withdraw-question', what: `withdrew ${id}${flagStr('reason') ? `: ${flagStr('reason')}` : ''}`, refs: [id], reversible: true }, 'supervisor');
   out(`withdrew ${id}`);
+}
+// ===== secrets: the owner posts a value straight to where it goes =====
+//
+// An owner-action question may declare secrets, each with a sink. The owner's own process (their
+// terminal, or the dashboard's child) pipes the value into the sink; it is never written to the log,
+// to run/, or anywhere an agent reads, and the supervisor never holds it. The log records only that
+// a name was posted to a sink, its size and when. Sinks:
+//   rails-credentials:<env|default>:<dotted.key>   bin/rails credentials:edit, in a chore worktree
+//   sops:<repo file>:<dotted.key>                  sops set --value-stdin, in a chore worktree
+//   file:<repo path>                               a gitignored file in the main checkout (a decryption key)
+//   stdin:<command> <args…>                        a command that reads the value on stdin (gh secret set X)
+// Encrypted-store changes are committed to chore-secret-<n>; the supervisor lands them with
+// merge --chore secret-<n> --approved <qid>. This guards against accidents (a value in the log, git,
+// chat, a PR or an agent's context); it is not a sandbox against a hostile process of the same user.
+function parseSink(sink) {
+  const m = /^(rails-credentials|sops|file|stdin):(.+)$/.exec(sink ?? '');
+  if (!m) die(`sink "${sink}" is one of rails-credentials:<env>:<key.path>, sops:<file>:<key.path>, file:<gitignored path>, stdin:<command> <args…>`);
+  const [, type, rest] = m;
+  const keyPath = (k) => { if (!/^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*$/.test(k ?? '')) die(`sink "${sink}": the key path is dotted words (stripe.secret_key)`); return k.split('.'); };
+  const repoPath = (p) => { if (!p || path.isAbsolute(p) || p.split(/[\\/]/).includes('..') || /\s/.test(p)) die(`sink "${sink}": a path inside the repo, relative, no ..`); if (path.resolve(mainRoot, p).startsWith(`${runDir}${path.sep}`) || path.resolve(mainRoot, p) === runDir) die(`sink "${sink}": not under devteam's run/, which agents read`); return p; };
+  if (type === 'rails-credentials') {
+    const i = rest.indexOf(':');
+    const env = i < 0 ? '' : rest.slice(0, i);
+    if (!/^[a-z][a-z0-9_]*$/.test(env)) die(`sink "${sink}": rails-credentials:<env|default>:<key.path>`);
+    return { type, env, keys: keyPath(rest.slice(i + 1)), commits: true };
+  }
+  if (type === 'sops') {
+    const i = rest.lastIndexOf(':');
+    if (i < 0) die(`sink "${sink}": sops:<file>:<key.path>`);
+    return { type, file: repoPath(rest.slice(0, i)), keys: keyPath(rest.slice(i + 1)), commits: true };
+  }
+  if (type === 'file') return { type, file: repoPath(rest) };
+  const argv = rest.trim().split(/\s+/);
+  if (!argv[0]) die(`sink "${sink}": stdin:<command> <args…>`);
+  return { type, argv };
+}
+const sinkWords = (sink) => {
+  const k = parseSink(sink);
+  return k.type === 'rails-credentials' ? `Rails credentials (${k.env}) → ${k.keys.join('.')}` : k.type === 'sops' ? `${k.file} (SOPS) → ${k.keys.join('.')}` : k.type === 'file' ? `the file ${k.file} (gitignored, this machine only)` : `the command \`${k.argv.join(' ')}\` on its stdin`;
+};
+// Every form a value might take in a tool's output, longest first, so none survives in what we print.
+function redactor(values) {
+  const forms = [];
+  for (const [name, buf] of values) {
+    const raw = buf.toString('utf8');
+    for (const f of [raw, raw.trim(), JSON.stringify(raw).slice(1, -1), buf.toString('base64'), encodeURIComponent(raw)]) if (f && f.length >= 4) forms.push([f, name]);
+  }
+  forms.sort((a, b) => b[0].length - a[0].length);
+  return (text) => forms.reduce((t, [f, name]) => t.split(f).join(`[secret:${name}]`), String(text ?? ''));
+}
+// A private scratch folder (0700) for one post, removed whatever happens.
+function withScratch(fn) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-secret-'));
+  fs.chmodSync(dir, 0o700);
+  try { return fn(dir); } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+const RAILS_EDITOR = `require "yaml"
+path = ARGV.last
+data = YAML.load_file(path) || {}
+data = {} unless data.is_a?(Hash)
+keys = ENV.fetch("DEVTEAM_SECRET_KEYPATH").split(".")
+value = File.binread(ENV.fetch("DEVTEAM_SECRET_FILE")).force_encoding("UTF-8")
+value = value.chomp if ENV["DEVTEAM_SECRET_KIND"] == "string"
+h = data
+keys[0..-2].each { |k| h[k] = {} unless h[k].is_a?(Hash); h = h[k] }
+h[keys.last] = value
+File.write(path, YAML.dump(data))
+`;
+function runSink(k, value, kind, cwd, redact) {
+  const run = (cmd, args, opts) => {
+    const r = spawnSync(cmd, args, { cwd, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, ...opts });
+    if (r.error) return { ok: false, out: redact(r.error.message) };
+    return { ok: r.status === 0, out: redact(`${r.stdout ?? ''}${r.stderr ?? ''}`.trim()) };
+  };
+  if (k.type === 'stdin') return run(k.argv[0], k.argv.slice(1), { input: value, env: ownerProcessEnv() });
+  if (k.type === 'file') {
+    const target = path.join(cwd, k.file);
+    if (git(['check-ignore', '-q', k.file], cwd) === null) return { ok: false, out: `${k.file} is not gitignored; a file sink only writes ignored files` };
+    const dir = path.dirname(target);
+    fs.mkdirSync(dir, { recursive: true });
+    if (!fs.realpathSync(dir).startsWith(fs.realpathSync(cwd))) return { ok: false, out: `${k.file} resolves outside the repo` };
+    const tmp = path.join(dir, `.${path.basename(target)}.devteam-${process.pid}`);
+    try {
+      fs.writeFileSync(tmp, value, { flag: 'wx', mode: 0o600 });
+      fs.renameSync(tmp, target);
+    } catch (e) { fs.rmSync(tmp, { force: true }); return { ok: false, out: e.message }; }
+    return { ok: true, out: `wrote ${k.file}` };
+  }
+  if (kind === 'file' && !isUtf8(value)) return { ok: false, out: `${k.type} stores text; this file is binary (base64 it first, or use a file: sink)` };
+  if (k.type === 'sops') {
+    if (!fs.existsSync(path.join(cwd, k.file))) return { ok: false, out: `${k.file} does not exist on main; create it with sops first` };
+    const text = value.toString('utf8');
+    return run('sops', ['set', '--value-stdin', k.file, k.keys.map((x) => `[${JSON.stringify(x)}]`).join('')], { input: JSON.stringify(kind === 'string' ? text.replace(/\r?\n$/, '') : text), env: ownerProcessEnv() });
+  }
+  // rails-credentials: credentials:edit with an editor that sets one key. Without the environment's
+  // key Rails would generate a new key and new credentials, so refuse instead.
+  const enc = k.env === 'default' ? 'config/credentials.yml.enc' : `config/credentials/${k.env}.yml.enc`;
+  const keyFile = k.env === 'default' ? 'config/master.key' : `config/credentials/${k.env}.key`;
+  if (!fs.existsSync(path.join(cwd, enc))) return { ok: false, out: `${enc} does not exist; create the ${k.env} credentials first` };
+  if (!fs.existsSync(path.join(cwd, keyFile)) && !process.env.RAILS_MASTER_KEY) {
+    if (fs.existsSync(path.join(mainRoot, keyFile))) fs.copyFileSync(path.join(mainRoot, keyFile), path.join(cwd, keyFile));
+    else return { ok: false, out: `no ${keyFile} here or in the main checkout, and no RAILS_MASTER_KEY: put the key in place first (a file: sink can post it)` };
+  }
+  return withScratch((dir) => {
+    const vf = path.join(dir, 'value');
+    const ed = path.join(dir, 'edit.rb');
+    fs.writeFileSync(vf, value, { flag: 'wx', mode: 0o600 });
+    fs.writeFileSync(ed, RAILS_EDITOR, { flag: 'wx', mode: 0o600 });
+    const args = ['credentials:edit', ...(k.env === 'default' ? [] : ['--environment', k.env])];
+    return run(fs.existsSync(path.join(cwd, 'bin/rails')) ? 'bin/rails' : 'rails', args, { env: { ...ownerProcessEnv(), EDITOR: `ruby ${ed}`, VISUAL: `ruby ${ed}`, DEVTEAM_SECRET_FILE: vf, DEVTEAM_SECRET_KEYPATH: k.keys.join('.'), DEVTEAM_SECRET_KIND: kind } });
+  });
+}
+const isUtf8 = (buf) => { try { new TextDecoder('utf-8', { fatal: true }).decode(buf); return true; } catch { return false; } };
+const ownerProcessEnv = () => { const e = { ...process.env }; for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE']) delete e[k]; return e; };
+// Read one line from the terminal without echoing it.
+function readHidden(prompt) {
+  if (!process.stdin.isTTY) die('secret post: no terminal to read from; pipe JSON with --json, or use the dashboard');
+  process.stderr.write(prompt);
+  spawnSync('stty', ['-echo'], { stdio: 'inherit' });
+  try {
+    const buf = Buffer.alloc(1);
+    const bytes = [];
+    for (;;) {
+      let n = 0;
+      try { n = fs.readSync(0, buf, 0, 1, null); } catch (e) { if (e.code === 'EAGAIN') continue; throw e; }
+      if (!n || buf[0] === 10 || buf[0] === 13) break;
+      bytes.push(buf[0]);
+    }
+    return Buffer.from(bytes);
+  } finally {
+    spawnSync('stty', ['echo'], { stdio: 'inherit' });
+    process.stderr.write('\n');
+  }
+}
+function cmdSecret() {
+  const [sub, id] = positional;
+  if (sub === 'sinks') return out('rails-credentials:<env|default>:<key.path>   sops:<file>:<key.path>   file:<gitignored path>   stdin:<command> <args…>');
+  if (sub !== 'post' || !id) die('usage: secret post <qid> [--file NAME=path …] [--json]   (owner: post a question\'s secrets; --json reads {"NAME": "value" | {"b64": "…"}} on stdin)');
+  const { by } = ownerWriter();
+  const v = openQuestion(id);
+  const declared = v.secrets ?? [];
+  if (!declared.length) die(`${id} asks for no secrets`);
+  const posted = [...(v.secrets_posted ?? [])];
+  const todo = declared.filter((x) => !posted.some((p) => p.name === x.name));
+  if (!todo.length) die(`${id}: every secret is already posted`);
+  // Values: JSON on stdin (the dashboard), --file NAME=path, or typed at a hidden prompt.
+  const values = new Map();
+  if (flags.json) {
+    let body;
+    try { body = JSON.parse(fs.readFileSync(0, 'utf8')); } catch { die('secret post --json: stdin is not JSON'); }
+    for (const x of todo) {
+      const val = body?.[x.name];
+      if (val === undefined || val === '') continue;
+      values.set(x.name, typeof val === 'string' ? Buffer.from(val, 'utf8') : typeof val?.b64 === 'string' ? Buffer.from(val.b64, 'base64') : die(`${x.name}: a string or {"b64": "…"}`));
+    }
+  } else {
+    for (const spec of asList(flags.file)) {
+      const i = spec.indexOf('=');
+      const name = spec.slice(0, i);
+      if (i < 1 || !todo.some((x) => x.name === name)) die(`--file ${spec}: NAME=path, for a secret ${id} still needs`);
+      values.set(name, fs.readFileSync(spec.slice(i + 1)));
+    }
+    for (const x of todo) if (!values.has(x.name)) {
+      if (x.kind === 'file') { warn(`${x.name} is a file: pass --file ${x.name}=<path>`); continue; }
+      const val = readHidden(`${x.name} (goes to ${sinkWords(x.sink)}; input hidden, Enter to skip): `);
+      if (val.length) values.set(x.name, val);
+    }
+  }
+  if (!values.size) die('nothing to post');
+  const redact = redactor(values);
+  const sinks = todo.filter((x) => values.has(x.name)).map((x) => ({ ...x, k: parseSink(x.sink) }));
+  // Encrypted stores change in one chore worktree per question, committed together.
+  const slug = `secret-${id.split('-').slice(1, 3).join('-')}`;
+  const wt = sinks.some((x) => x.k.commits) ? choreWorktree(slug, { setup: true }) : null;
+  const failures = [];
+  const done = [];
+  try {
+    for (const x of sinks) {
+      const r = runSink(x.k, values.get(x.name), x.kind, x.k.commits ? wt : mainRoot, redact);
+      if (r.ok) done.push({ name: x.name, sink: x.sink, bytes: values.get(x.name).length, at: nowIso() });
+      else failures.push(`${x.name} → ${sinkWords(x.sink)}: ${r.out || 'failed'}`);
+    }
+  } finally {
+    for (const buf of values.values()) buf.fill(0);
+  }
+  let landing = '';
+  if (wt && done.some((d) => parseSink(d.sink).commits)) {
+    git(['add', '-A'], wt);
+    if (git(['diff', '--cached', '--quiet'], wt) === null) {
+      gitOrDie(['commit', '--quiet', '-m', `chore-${slug}: ${done.filter((d) => parseSink(d.sink).commits).map((d) => `${d.name} → ${d.sink}`).join(', ')}\n\nPosted by the owner for ${id}; values are encrypted, never in the log.`], wt);
+      landing = ` Land it: chore pr ${slug}, then merge --chore ${slug} --approved ${id}.`;
+    }
+  }
+  if (done.length) {
+    const all = [...posted, ...done];
+    const complete = declared.every((x) => all.some((p) => p.name === x.name));
+    appendLog({ type: 'question', op: 'set', id, secrets_posted: all, ...(complete ? { answer: `Posted: ${all.map((p) => `${p.name} → ${p.sink}`).join('; ')}` } : {}) }, by);
+    nudgeSupervisor(`[devteam secrets ${complete ? 'posted' : 'partly posted'} for ${id} from owner] ${done.map((d) => d.name).join(', ')}.${landing}`);
+    out(`posted ${done.map((d) => `${d.name} → ${sinkWords(d.sink)}`).join('; ')}${complete ? `; ${id} is answered` : ''}${landing}`);
+  }
+  if (failures.length) die(`not posted:\n  - ${failures.join('\n  - ')}`);
 }
 function rankQuestions(qs) {
   const sub = activeTickets();
@@ -2996,15 +3214,36 @@ function cmdDashboard() {
       res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store', 'content-security-policy': 'sandbox', 'x-content-type-options': 'nosniff' });
       return res.end(body);
     }
+    const isSecret = req.method === 'POST' && req.url === '/api/secret';
     const action = req.method === 'POST' && req.url.startsWith('/api/') ? ACTIONS[req.url.slice(5)] : null;
-    if (!action) return send(res, 404, 'text/plain', 'not found');
+    if (!action && !isSecret) return send(res, 404, 'text/plain', 'not found');
     const okHost = [`127.0.0.1:${port}`, `localhost:${port}`, `${host}:${port}`].includes(req.headers.host ?? '');
     const site = req.headers['sec-fetch-site'];
     const origin = req.headers.origin;
-    const sameOrigin = (!site || site === 'same-origin') && (!origin || origin === `http://${req.headers.host}`);
+    // A browser always sends both on a fetch POST; a secret is accepted only with both present.
+    const sameOrigin = isSecret ? site === 'same-origin' && origin === `http://${req.headers.host}` : (!site || site === 'same-origin') && (!origin || origin === `http://${req.headers.host}`);
     if (!okHost || !sameOrigin || !(req.headers['content-type'] ?? '').startsWith('application/json')) return send(res, 403, 'application/json', JSON.stringify({ error: 'owner actions only from this page' }));
+    const cap = isSecret ? 4 * 1024 * 1024 : 20000;
     let body = '';
-    req.on('data', (c) => { body += c; if (body.length > 20000) req.destroy(); });
+    req.on('data', (c) => { body += c; if (body.length > cap) { body = ''; req.destroy(); } });
+    if (isSecret) {
+      // The values go to a child on stdin, never in argv or the server's own output; the child pipes
+      // each to its sink (secret post --json) and logs only names.
+      return req.on('end', () => {
+        let parsed;
+        try { parsed = JSON.parse(body || '{}'); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'bad json' })); }
+        body = '';
+        if (!ID.test(parsed.id ?? '') || typeof parsed.values !== 'object' || !parsed.values) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
+        const child = spawn(process.execPath, [self, 'secret', 'post', parsed.id, '--json'], { cwd: mainRoot, env: ownerEnv, stdio: ['pipe', 'pipe', 'pipe'] });
+        let so = '';
+        let se = '';
+        child.stdout.on('data', (c) => { so += c; });
+        child.stderr.on('data', (c) => { se += c; });
+        child.on('close', (code) => send(res, code === 0 ? 200 : 400, 'application/json', JSON.stringify(code === 0 ? { ok: true, out: so.trim() } : { error: se.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') || 'failed', out: so.trim() })));
+        child.stdin.end(JSON.stringify(parsed.values));
+        parsed = null;
+      });
+    }
     req.on('end', async () => {
       let parsed;
       try { parsed = JSON.parse(body || '{}'); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'bad json' })); }
@@ -3428,7 +3667,8 @@ Sessions (worker.md)
   stop-ok                         for a stop hook: refuses while the last commit is newer than the last phase line
 
 Decide and act (supervisor.md, constitution.md)
-  ask --question q [--kind k] [--class c] [--reasons r…] [--recommendation r] [--confidence 0-1] [--default d] [--choices '[{"label","detail","effect"}…]'] [--rule-scope s] [--goal g-… (goal-approval)] [--links '[{"title","path","ref"}|{"title","url"}…]'] [--blocks ids] [--evidence ids] [--ticket id] [--re m-…] [--note path]
+  ask --question q [--kind k] [--class c] [--reasons r…] [--recommendation r] [--confidence 0-1] [--default d] [--choices '[{"label","detail","effect"}…]'] [--rule-scope s] [--goal g-… (goal-approval)] [--links '[{"title","path","ref"}|{"title","url"}…]'] [--blocks ids] [--evidence ids] [--ticket id] [--re m-…] [--note path] [--secrets '[{"name","kind":"string|file","sink"}…]' (owner-action)]
+  secret post <qid> [--file NAME=path] [--json]                          owner: post a question's secrets straight to their sinks; never logged (secret sinks lists them)
   answer <qid> "<text>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> "<text>" --from-chat --said "<owner's words>" | answer <qid> --defaulted   (supervisor)
   withdraw <qid> [--reason r] | questions [--all] [--id q] [--json]
   act --class c [--scope s] [--approved qid] [--refs ids] [--irreversible] -- "<what>"
@@ -3461,7 +3701,7 @@ const COMMANDS = {
   feature: cmdFeature, ticket: cmdTicket, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, roadmap: cmdRoadmap,
   'check-ticket': cmdCheckTicket, 'check-pr': cmdCheckPr, merge: cmdMerge,
   phase: cmdPhase, gate: cmdGate, send: cmdSend, messages: cmdMessages, 'stop-ok': cmdStopOk,
-  ask: cmdAsk, answer: cmdAnswer, withdraw: cmdWithdraw, questions: cmdQuestions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
+  ask: cmdAsk, answer: cmdAnswer, secret: cmdSecret, withdraw: cmdWithdraw, questions: cmdQuestions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
   observe: cmdObserve, 'observe-metrics': cmdObserveMetrics, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, knowledge: cmdKnowledge, problem: cmdProblem,
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
   log: cmdLog, 'log-check': cmdLogCheck, 'log-sync': cmdLogSync, history: cmdHistory,

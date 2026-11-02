@@ -295,6 +295,9 @@
   .md table { font-size: 12.5px; margin: 10px 0; display: block; overflow-x: auto; }
   .md blockquote { margin: 8px 0; padding: 2px 12px; border-left: 2px solid var(--line-2); color: var(--fg-2); }
   .md a { color: var(--blue-fg); text-decoration: underline; }
+  .secrets { display: grid; gap: 10px; margin: 10px 0; }
+  .secret { display: grid; gap: 4px; }
+  .secret input[type=password] { font: 13px var(--mono); }
   .viewer iframe { width: 100%; height: 70vh; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
   .viewer img { max-width: 100%; border: 1px solid var(--line); border-radius: 8px; }
   @media (max-width: 900px) { .drawer { padding: 16px; } .drawer dl { grid-template-columns: 1fr; } }
@@ -720,12 +723,38 @@ function choicesOf(q) {
     { label: 'Refine', detail: 'Something in the approach should change. Say what in the notes.', then: 'The design is reworked with your notes and comes back here for approval.' },
     { label: 'Let go', detail: 'Drop this goal.', then: 'Nothing is planned or built for it; any planning stops.' },
   ];
-  if (q.kind === 'owner-action' && !list.length) list = [{ label: 'Done', detail: 'I did it; carry on.' }, { label: 'Can’t right now', detail: 'Say why in the note, and what would help.' }];
+  if (q.kind === 'owner-action' && !list.length && !(q.secrets || []).length) list = [{ label: 'Done', detail: 'I did it; carry on.' }, { label: 'Can’t right now', detail: 'Say why in the note, and what would help.' }];
   const rec = q.recommendation;
   if (rec && !list.some((c) => norm(c.label) === norm(rec))) list.unshift({ label: rec });
   return list.map((c) => ({ ...c, rec: !!rec && norm(c.label) === norm(rec) }));
 }
 const picks = {};
+// Secrets typed or chosen but not yet posted live only in memory, never in storage, and survive a
+// refresh. Each goes straight from the browser to the owner's process and on to its sink.
+const SECRET_DRAFTS = new Map();
+function secretsForm(q) {
+  const posted = new Map((q.secrets_posted || []).map((p) => [p.name, p]));
+  return `<div class="secrets">${q.secrets.map((x) => {
+    const p = posted.get(x.name);
+    const key = `${q.id}:${x.name}`;
+    return `<label class="secret"><span class="sname"><code>${esc(x.name)}</code> <span class="muted small">goes to ${esc(x.to || x.sink)}</span></span>${p ? `<span class="badge good">posted · ${esc(p.bytes)} bytes</span>` : x.kind === 'file' ? `<input type="file" data-secret="${esc(key)}">` : `<input type="password" autocomplete="off" spellcheck="false" data-secret="${esc(key)}" placeholder="Paste the value">`}</label>`;
+  }).join('')}<p class="meta">Nothing you post here is saved by devteam or shown to an agent: it goes from this page to the place named, and the log records only the name and size.</p></div>`;
+}
+function keepSecretDrafts() {
+  document.querySelectorAll('input[data-secret]').forEach((el) => {
+    const v = el.type === 'file' ? el.files?.[0] : el.value;
+    if (v) SECRET_DRAFTS.set(el.dataset.secret, v); else SECRET_DRAFTS.delete(el.dataset.secret);
+  });
+}
+function restoreSecretDrafts() {
+  document.querySelectorAll('input[data-secret]').forEach((el) => {
+    const v = SECRET_DRAFTS.get(el.dataset.secret);
+    if (!v) return;
+    if (el.type === 'file') { try { const t = new DataTransfer(); t.items.add(v); el.files = t.files; } catch {} }
+    else el.value = v;
+  });
+}
+const toB64 = async (file) => { const bytes = new Uint8Array(await file.arrayBuffer()); let bin = ''; for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000)); return btoa(bin); };
 function questionCard(q, o, reasonText) {
   const cls = q.class && o.classes[q.class];
   const kindCls = q.kind === 'one-way-door' ? 'door' : q.kind === 'trust' ? 'trust' : '';
@@ -752,12 +781,12 @@ function questionCard(q, o, reasonText) {
       ${(q.links || []).length ? `<div class="links"><span class="muted small">Look at:</span>${q.links.map(linkOf).join('')}</div>` : ''}
       ${q.change ? `<div class="meta">Approving sets on <a class="linkish" href="#goal/${encodeURIComponent(q.goal)}">${esc((DATA.ooda.goals.find((g) => g.id === q.goal) || {}).title || q.goal)}</a>:<ul>${Object.entries(q.change).map(([k, v]) => `<li><b>${esc(words(k))}</b>: ${Array.isArray(v) && v.length && typeof v[0] === 'object' ? `<ol>${v.map((m) => `<li>${esc(m.title || JSON.stringify(m))}${m.target != null ? ` → ${esc(m.target)}` : ''}</li>`).join('')}</ol>` : esc(typeof v === 'object' ? JSON.stringify(v) : v)}</li>`).join('')}</ul></div>` : ''}
       ${goalAsk ? (() => { const settled = (DATA.ooda.answered || []).filter((a) => a.goal === q.goal && a.kind !== 'goal-approval' && a.status === 'answered'); return settled.length ? `<div class="meta">Rests on your answers to: ${settled.map((a) => `${qlink(a.id, a.question)} (<b>${esc(a.answer)}</b>)`).join('; ')}</div>` : ''; })() : ''}
-      ${list.length ? `<div class="choices" role="radiogroup" aria-label="Choices">${choiceHtml}</div>` : ''}
-      <textarea data-q="${esc(q.id)}" placeholder="${esc(notePh)}">${esc(drafts[q.id] || '')}</textarea>
+      ${(q.secrets || []).length ? secretsForm(q) : `${list.length ? `<div class="choices" role="radiogroup" aria-label="Choices">${choiceHtml}</div>` : ''}
+      <textarea data-q="${esc(q.id)}" placeholder="${esc(notePh)}">${esc(drafts[q.id] || '')}</textarea>`}
       ${goalAsk || ['owner-action', 'goal-definition'].includes(q.kind) ? '' : `<label class="rulebox"><input type="checkbox" data-rulebox="${esc(q.id)}"> Keep this answer as a standing rule for ${esc(scopeWords(q.rule_scope))}</label>`}
       ${next}
       ${q.default ? `<p class="meta">If you don’t answer${q.deadline ? ` by ${when(q.deadline)}` : ''}, the supervisor goes with: <b>${esc(q.default)}</b></p>` : ''}
-      <div class="row-inline"><button data-answer="${esc(q.id)}" ${goalAsk ? `data-goal-ask="${esc(q.goal)}"` : ''}>${q.kind === 'owner-action' || goalAsk ? 'Send' : 'Answer'}</button><span class="err" id="e-${esc(q.id)}"></span></div>
+      <div class="row-inline">${(q.secrets || []).length ? `<button data-post-secrets="${esc(q.id)}">Post</button><button class="ghost" data-cant="${esc(q.id)}">Can’t right now</button>` : `<button data-answer="${esc(q.id)}" ${goalAsk ? `data-goal-ask="${esc(q.goal)}"` : ''}>${q.kind === 'owner-action' || goalAsk ? 'Send' : 'Answer'}</button>`}<span class="err" id="e-${esc(q.id)}"></span></div>
       ${why ? `<div class="meta">${why}</div>` : ''}
     </div>`;
 }
@@ -1153,6 +1182,7 @@ function render(d) {
 
   // Keep anything half-typed or half-open across refreshes.
   document.querySelectorAll('textarea[data-q]').forEach((t) => { drafts[t.dataset.q] = t.value; });
+  keepSecretDrafts();
   const kept = [...document.querySelectorAll('input[data-reason], input[data-overrule]')].map((el) => [el.dataset.reason ? `input[data-reason="${el.dataset.reason}"]` : `input[data-overrule="${el.dataset.overrule}"]`, el.value]);
   const keptChecks = [...document.querySelectorAll('input[data-rulebox]:checked, input[data-auto]:checked')].map((el) => el.dataset.rulebox ? `input[data-rulebox="${el.dataset.rulebox}"]` : `input[data-auto="${el.dataset.auto}"][value="${el.value}"]`);
   const openForms = [...document.querySelectorAll('[data-correct-form]')].filter((f) => !f.hidden).map((f) => f.dataset.correctForm);
@@ -1195,6 +1225,7 @@ function render(d) {
   // last, so every section that holds an input is drawn before its half-typed value comes back
   for (const [sel, v] of kept) { const el = document.querySelector(sel); if (el) el.value = v; }
   for (const sel of keptChecks) { const el = document.querySelector(sel); if (el) el.checked = true; }
+  restoreSecretDrafts();
 }
 
 // A failed load is said at the top of the page, never only in the sidebar: before the first good
@@ -1274,6 +1305,39 @@ document.addEventListener('click', async (ev) => {
     picks[pick.dataset.pick] = pick.value;
     pick.closest('.choices').querySelectorAll('.choice').forEach((c) => c.classList.toggle('picked', c.contains(pick)));
     if (pick.value === '__other') document.querySelector(`textarea[data-q="${pick.dataset.pick}"]`)?.focus();
+    return;
+  }
+  const ps = ev.target.closest('[data-post-secrets]');
+  if (ps) {
+    const id = ps.dataset.postSecrets;
+    const err = $(`e-${id}`);
+    const inputs = [...document.querySelectorAll(`#q-${CSS.escape(id)} input[data-secret]`)];
+    const values = {};
+    for (const el of inputs) {
+      const name = el.dataset.secret.slice(id.length + 1);
+      if (el.type === 'file') { const f = el.files?.[0]; if (f) values[name] = { b64: await toB64(f) }; }
+      else if (el.value) values[name] = el.value;
+    }
+    if (!Object.keys(values).length) { if (err) err.textContent = 'Paste a value or choose a file first.'; return; }
+    if (err) err.textContent = '';
+    ps.disabled = true; ps.textContent = 'Posting…';
+    let r, out;
+    try {
+      r = await fetch('/api/secret', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, values }) });
+      out = await r.json();
+    } catch (e2) { out = { error: `Could not send: ${e2.message}` }; }
+    for (const k of Object.keys(values)) { SECRET_DRAFTS.delete(`${id}:${k}`); delete values[k]; }
+    inputs.forEach((el) => { el.value = ''; });
+    if (r?.ok) { if (/is answered/.test(out.out || '')) markAnswered(id, 'Posted'); load({ force: true }); }
+    else { ps.disabled = false; ps.textContent = 'Post'; if (err) err.textContent = out.error || 'failed'; load({ force: true }); }
+    return;
+  }
+  const cant = ev.target.closest('[data-cant]');
+  if (cant) {
+    const id = cant.dataset.cant;
+    cant.disabled = true;
+    if (await post('answer', { id, answer: 'Can’t right now' }, id)) { [...SECRET_DRAFTS.keys()].filter((k) => k.startsWith(`${id}:`)).forEach((k) => SECRET_DRAFTS.delete(k)); markAnswered(id, 'Can’t right now'); }
+    else cant.disabled = false;
     return;
   }
   const btn = ev.target.closest('[data-answer]');

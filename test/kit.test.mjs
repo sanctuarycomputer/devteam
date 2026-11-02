@@ -22,10 +22,10 @@ delete process.env.TMUX;
 delete process.env.TMUX_PANE;
 const hasTmux = spawnSync('tmux', ['-V']).status === 0;
 
-function dt(args, { cwd = repo, role = 'owner' } = {}) {
+function dt(args, { cwd = repo, role = 'owner', input } = {}) {
   const env = { ...process.env, ...ROLE[role] };
   for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE']) if (!(k in ROLE[role])) delete env[k];
-  const r = spawnSync(process.execPath, [DT, ...args], { cwd, env, encoding: 'utf8' });
+  const r = spawnSync(process.execPath, [DT, ...args], { cwd, env, encoding: 'utf8', input });
   return { status: r.status, out: r.stdout.trim(), err: r.stderr.trim() };
 }
 const must = (args, opts) => { const r = dt(args, opts); assert.equal(r.status, 0, `${args.join(' ')}: ${r.err || r.out}`); return r.out; };
@@ -757,6 +757,59 @@ test('devteam kit', async (t) => {
     assert.equal(json(must(['goal', 'show', G, '--json'])).measure.target, 80, 'a set other than the approved change changes nothing');
     assert.match(dt(['log-check']).out, /is not the change/);
     fs.writeFileSync(file, before);
+  });
+
+  await t.test('secrets: the owner posts straight to a sink; the log never holds a value', () => {
+    const VALUE = 'sk_test_51Hq"zz\\9-not-in-the-log';
+    const CERT = '-----BEGIN CERTIFICATE-----\nMIIBszCCAVmgAwIBAgIUQ\n-----END CERTIFICATE-----\n';
+    const outside = path.join(tmp, 'uploaded.txt');
+    const sinkScript = path.join(tmp, 'sink.mjs');
+    write(sinkScript, `import fs from 'node:fs'; fs.writeFileSync(${JSON.stringify(outside)}, fs.readFileSync(0));\n`);
+    const echoScript = path.join(tmp, 'echo.mjs');
+    write(echoScript, `import fs from 'node:fs'; const v = fs.readFileSync(0, 'utf8'); console.error('bad key: ' + v + ' / ' + Buffer.from(v).toString('base64')); process.exit(1);\n`);
+    fs.appendFileSync(path.join(repo, '.gitignore'), 'config/*.key\n');
+    const slots = [
+      { name: 'STRIPE_TEST_KEY', sink: `stdin:${process.execPath} ${sinkScript}` },
+      { name: 'APNS_CERT', kind: 'file', sink: 'file:config/apns.key' },
+    ];
+    // only an owner-action question declares secrets, with known sinks and names
+    assert.match(dt(['ask', '--question', 'Key?', '--secrets', JSON.stringify(slots)], { role: 'sup' }).err, /owner-action/);
+    assert.match(dt(['ask', '--kind', 'owner-action', '--question', 'Key?', '--secrets', JSON.stringify([{ name: 'k', sink: 'stdin:x' }])], { role: 'sup' }).err, /UPPER_SNAKE_CASE/);
+    assert.match(dt(['ask', '--kind', 'owner-action', '--question', 'Key?', '--secrets', JSON.stringify([{ name: 'K', sink: 'ftp:x' }])], { role: 'sup' }).err, /sink "ftp:x"/);
+    assert.match(dt(['ask', '--kind', 'owner-action', '--question', 'Key?', '--secrets', JSON.stringify([{ name: 'K', sink: 'file:docs/devteam/run/k' }])], { role: 'sup' }).err, /not under devteam's run/);
+    const Qs = must(['ask', '--kind', 'owner-action', '--question', 'Post the Stripe test key and the APNs cert', '--secrets', JSON.stringify(slots)], { role: 'sup' });
+    // agents can't post
+    assert.match(dt(['secret', 'post', Qs, '--json'], { role: 'sup', input: '{}' }).err, /owner commands don't run in an agent session/);
+    // the first slot alone: posted, the question stays open
+    assert.match(must(['secret', 'post', Qs, '--json'], { input: JSON.stringify({ STRIPE_TEST_KEY: VALUE }) }), /posted STRIPE_TEST_KEY/);
+    assert.equal(fs.readFileSync(outside, 'utf8'), VALUE, 'the sink got the value on stdin');
+    let q = json(must(['questions', '--id', Qs, '--json']))[0];
+    assert.equal(q.status, 'open');
+    assert.deepEqual(q.secrets_posted.map((p) => [p.name, p.bytes]), [['STRIPE_TEST_KEY', Buffer.byteLength(VALUE)]]);
+    // the file slot, then the question is answered
+    must(['secret', 'post', Qs, '--json'], { input: JSON.stringify({ APNS_CERT: { b64: Buffer.from(CERT).toString('base64') } }) });
+    assert.equal(fs.readFileSync(path.join(repo, 'config/apns.key'), 'utf8'), CERT);
+    assert.equal(fs.statSync(path.join(repo, 'config/apns.key')).mode & 0o777, 0o600);
+    q = json(must(['questions', '--id', Qs, '--json']))[0];
+    assert.equal(q.status, 'answered');
+    assert.match(q.answer, /STRIPE_TEST_KEY .*APNS_CERT/);
+    assert.match(dt(['secret', 'post', Qs, '--json'], { input: '{}' }).err, /already answered/);
+    // a failing sink's output is shown redacted, raw and encoded
+    const Qf = must(['ask', '--kind', 'owner-action', '--question', 'Upload it', '--secrets', JSON.stringify([{ name: 'UPLOAD', sink: `stdin:${process.execPath} ${echoScript}` }, { name: 'NOT_IGNORED', sink: 'file:README.md' }])], { role: 'sup' });
+    const failed = dt(['secret', 'post', Qf, '--json'], { input: JSON.stringify({ UPLOAD: VALUE, NOT_IGNORED: 'x' }) });
+    assert.notEqual(failed.status, 0);
+    assert.match(failed.err, /bad key: \[secret:UPLOAD\] \/ \[secret:UPLOAD\]/);
+    assert.match(failed.err, /README\.md is not gitignored/);
+    assert.doesNotMatch(failed.err + failed.out, /sk_test_51Hq/);
+    // a Rails sink never makes new credentials: no file, no key, refused
+    const Qr = must(['ask', '--kind', 'owner-action', '--question', 'Rails key', '--secrets', JSON.stringify([{ name: 'RK', sink: 'rails-credentials:production:stripe.secret_key' }])], { role: 'sup' });
+    assert.match(dt(['secret', 'post', Qr, '--json'], { input: JSON.stringify({ RK: VALUE }) }).err, /config\/credentials\/production\.yml\.enc does not exist/);
+    // no value anywhere devteam writes
+    const logs = fs.readdirSync(path.join(repo, 'docs/devteam/run/log')).map((f) => fs.readFileSync(path.join(repo, 'docs/devteam/run/log', f), 'utf8')).join('');
+    for (const form of [VALUE, JSON.stringify(VALUE).slice(1, -1), Buffer.from(VALUE).toString('base64'), 'MIIBszCCAVmgAwIBAgIUQ']) assert.ok(!logs.includes(form), `log holds ${form}`);
+    assert.ok(!fs.existsSync(path.join(repo, 'docs/devteam/run/secrets')));
+    fs.rmSync(path.join(repo, 'config/apns.key'));
+    git(['checkout', '--', '.gitignore']);
   });
 
   await t.test('computed views: metrics, roadmap, retro, dashboard data', () => {
