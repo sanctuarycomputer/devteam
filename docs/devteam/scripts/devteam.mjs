@@ -1240,7 +1240,8 @@ function graphEdit(type, idRe) {
 
 // ===== 6. review records and the definition of done =====
 
-const tableCells = (row) => row.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
+// A cell may hold an escaped pipe (\|), as GitHub tables allow; only an unescaped | separates cells.
+const tableCells = (row) => row.trim().replace(/^\|/, '').replace(/(?<!\\)\|$/, '').split(/(?<!\\)\|/).map((c) => c.trim().replace(/\\\|/g, '|'));
 
 // A record is <stage>-<pass>[<track>].md with "- Reviewer: <name>" and a last line
 // "Verdict: APPROVE|CHANGES <full sha>"; findings are table rows F<n> with a Disposition column.
