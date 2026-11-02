@@ -203,6 +203,16 @@ test('devteam kit', async (t) => {
     assert.deepEqual(rp.waiting, [{ id: 'bill-01-card', why: 'parked' }]);
     assert.ok(!json(must(['metrics', '--json'])).findings.some((f) => f.kind === 'idle-capacity'), 'no "make a worker" for a parked ticket');
     must(['phase', 'build', '--task', 'T1'], w0);
+    // a worker waiting on the owner's answer to a question that blocks it is waiting, not stale
+    const sfile = path.join(repo, 'docs/devteam/project/settings.md');
+    const sbefore = fs.readFileSync(sfile, 'utf8');
+    fs.writeFileSync(sfile, sbefore.replace('"gates": {', '"stale_after_minutes": -1, "gates": {'));
+    const staleW = () => json(must(['metrics', '--json'])).findings.some((f) => f.kind === 'stale-worker' && f.subject === 'bill-01-card');
+    assert.ok(staleW(), 'silent past the threshold and waiting on nobody: stale');
+    const Qb = must(['ask', '--question', 'Store card fingerprints?', '--blocks', 'bill-01-card', '--recommendation', 'no'], { role: 'sup' });
+    assert.ok(!staleW(), 'a question blocking it means it waits on the owner');
+    must(['withdraw', Qb, '--reason', 'test'], { role: 'sup' });
+    fs.writeFileSync(sfile, sbefore);
     // a worker frozen on a permission prompt looks busy in the log; its pane says otherwise
     if (hasTmux) {
       spawnSync('tmux', ['new-session', '-d', '-s', 'devteam', '-n', 'bill-01-card', 'sh -c \'printf "Bash command\\n  rm -rf build\\nDo you want to proceed?\\n> 1. Yes\\n  2. No\\n"; exec sleep 600\'']);
