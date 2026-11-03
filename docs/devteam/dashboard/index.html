@@ -1014,7 +1014,8 @@ const isPlainObj = (x) => !!x && typeof x === 'object' && !Array.isArray(x);
 const emptyVal = (x) => x === null || x === undefined || x === '' || (Array.isArray(x) ? !x.length : typeof x === 'object' && !Object.keys(x).length);
 // the owner's process compares values with proposals in this form: sorted keys, no whitespace
 const canonical = (v) => (Array.isArray(v) ? `[${v.map(canonical).join(',')}]` : v && typeof v === 'object' ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(',')}}` : JSON.stringify(v));
-const pinsVerified = (info) => !!info && info.reachable && (info.files || []).length > 0 && info.files.every((f) => f.status === 'verified');
+// verified at the pinned commit, or on main once a squash merge landed the files and deleted the branch
+const pinsVerified = (info) => !!info && (info.reachable || info.landed) && (info.files || []).length > 0 && info.files.every((f) => f.status === 'verified');
 const PIN_WORDS = { page: 'page', data: 'data', result_schema: 'schema' };
 
 function reviewCard(q, o, reasonText) {
