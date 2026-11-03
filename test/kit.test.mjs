@@ -2026,3 +2026,144 @@ test('devteam kit', async (t) => {
     git(['branch', '-q', '-D', 'chore-after']);
   });
 });
+
+// Moving the fleet: its own throwaway repo, an old machine and a fresh clone standing in for the new one.
+test('drain: the fleet stops cleanly, and a clone elsewhere picks it up', () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-drain-'));
+  const org = path.join(base, 'origin.git');
+  const old = path.join(base, 'old');
+  const neu = path.join(base, 'new');
+  const home = path.join(base, 'home');
+  const tmuxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dt-tmux-'));
+  const ID = 'ch-01-tidy';
+  const env = (role) => {
+    const e = { ...process.env, CLAUDE_CONFIG_DIR: path.join(home, 'claude'), CODEX_HOME: path.join(home, 'codex'), TMUX_TMPDIR: tmuxDir };
+    for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'TMUX', 'TMUX_PANE']) delete e[k];
+    return { ...e, ...role };
+  };
+  const run = (cwd, args, role = {}) => { const r = spawnSync(process.execPath, [path.join(cwd, 'docs/devteam/scripts/devteam.mjs'), ...args], { cwd, env: env(role), encoding: 'utf8' }); return { status: r.status, out: r.stdout.trim(), err: r.stderr.trim() }; };
+  const ok = (cwd, args, role) => { const r = run(cwd, args, role); assert.equal(r.status, 0, `${args.join(' ')}: ${r.err || r.out}`); return r.out; };
+  const g = (args, cwd) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const WRK = { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: ID };
+  try {
+    g(['init', '-q', '--bare', org], base);
+    fs.mkdirSync(old);
+    g(['init', '-q', '-b', 'main'], old);
+    for (const [k, v] of [['user.email', 't@t'], ['user.name', 't']]) g(['config', k, v], old);
+    g(['remote', 'add', 'origin', org], old);
+    fs.cpSync(kit, path.join(old, 'docs', 'devteam'), { recursive: true, filter: (p) => !/[\\/](project|run)([\\/]|$)/.test(p.slice(kit.length)) });
+    ok(old, ['init', '--name', 'moving']);
+    const sf = path.join(old, 'docs/devteam/project/settings.md');
+    fs.writeFileSync(sf, fs.readFileSync(sf, 'utf8').replace('"gates": {}', '"gates": {}, "forge": "git", "worktree_files": ["config/dev.key"], "agent_command": "true", "resume_command": "true"'));
+    write(path.join(old, 'config/dev.key'), 'not a real key\n');
+    write(path.join(old, '.gitignore'), `${fs.readFileSync(path.join(old, '.gitignore'), 'utf8')}config/dev.key\n`);
+    g(['add', '-A'], old);
+    g(['commit', '-qm', 'init'], old);
+    g(['push', '-q', 'origin', 'main'], old);
+    ok(old, ['ticket', 'add', ID, '--json', JSON.stringify({ title: 'tidy up', feature: 'chores', component: 'ch', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['tidy/**'], done_when: ['the tidy check passes'], notes: 'turns on tidy' })], SUP);
+
+    // a planner logs one phase of its own: parked, when drained
+    const pw = path.join(old, '.worktrees', 'plan-beta');
+    g(['worktree', 'add', '-q', '-b', 'plan/beta', pw, 'origin/main'], old);
+    assert.match(run(pw, ['phase', 'build'], { DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: 'beta' }).err, /a planner logs only phase parked/);
+    ok(pw, ['phase', 'parked', '--note', 'drained'], { DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: 'beta' });
+    assert.equal(json(ok(old, ['dashboard-data'])).planners.find((p) => p.feature === 'beta').parked, true);
+    g(['worktree', 'remove', '--force', pw], old);
+    g(['branch', '-q', '-D', 'plan/beta'], old);
+
+    // a worker mid-build, with work committed but not pushed, and an edit not committed
+    const ww = path.join(old, '.worktrees', ID);
+    g(['worktree', 'add', '-q', '-b', `ticket/${ID}`, ww, 'origin/main'], old);
+    ok(ww, ['phase', 'build', '--task', 'T1'], WRK);
+    write(path.join(ww, 'tidy/a.txt'), 'a\n');
+    g(['add', '-A'], ww);
+    g(['commit', '-qm', 'T1'], ww);
+    write(path.join(ww, 'tidy/b.txt'), 'b, not yet committed\n');
+
+    // drain is the supervisor's; it logs its act, messages the worker, and blocks new sessions
+    assert.match(run(ww, ['drain', '--reason', 'new laptop'], WRK).err, /drain: the supervisor does this/);
+    const drained = ok(old, ['drain', '--reason', 'new laptop'], SUP);
+    assert.match(drained, new RegExp(`drained \\(a-\\d{8}-\\d{9}-supervisor\\): told ${ID} to push`));
+    const act = json(ok(old, ['log', '--type', 'act', '--json'])).find((a) => a.class === 'drain');
+    assert.match(act.what, /^drained the fleet on \S+: new laptop$/);
+    assert.deepEqual(act.refs, [ID]);
+    const msg = json(ok(old, ['messages', '--to', ID, '--json'])).pop();
+    assert.match(msg.text, new RegExp(`push ticket/${ID}; write docs/devteam/project/tickets/${ID}/handoff\\.md .*phase parked --note "drained"`));
+    assert.match(run(old, ['worker', ID], SUP).err, /the fleet is draining .*run undrain first.*--force/);
+    assert.match(run(old, ['planner', 'gamma'], SUP).err, /the fleet is draining/);
+    const findings = json(ok(old, ['metrics', '--json'])).findings;
+    assert.ok(!findings.some((f) => ['idle-capacity', 'idle-planning'].includes(f.kind)), 'nothing new is suggested while draining');
+    assert.match(ok(old, ['prompt', 'supervisor']), /^The fleet is drained .*This is the machine it was drained on/);
+
+    // not ready: unpushed, uncommitted, not parked, no handoff, log not landed
+    let st = json(ok(old, ['drain', '--status', '--json'], SUP));
+    assert.equal(st.ready, false);
+    const s0 = st.sessions.find((x) => x.name === ID);
+    assert.deepEqual([s0.parked, s0.pushed, s0.clean, s0.handoff], [false, false, false, false]);
+    assert.ok(st.blockers.some((b) => /live log is not on main/.test(b)));
+    assert.ok(st.checklist.some((c) => /config\/dev\.key/.test(c) && /secure channel/.test(c)), 'the checklist lists worktree_files');
+    assert.ok(st.checklist.some((c) => /undrain/.test(c)) && st.checklist.some((c) => /dashboard/.test(c)));
+    assert.match(ok(old, ['drain', '--status'], SUP), /ready to move: no\n\nnew-machine checklist:/);
+
+    // the worker does what the drain message says; a handoff without the push is still not ready
+    g(['add', '-A'], ww);
+    g(['commit', '-qm', 'WIP: drain'], ww);
+    write(path.join(ww, `docs/devteam/project/tickets/${ID}/handoff.md`), '# Handoff\n\nDone: T1. Next: write tidy/c.txt (T2). Open: none. Uncommitted: none.\n');
+    g(['add', '-A'], ww);
+    g(['commit', '-qm', 'handoff'], ww);
+    ok(ww, ['phase', 'parked', '--note', 'drained'], WRK);
+    st = json(ok(old, ['drain', '--status', '--json'], SUP));
+    assert.deepEqual(st.sessions.map((x) => [x.parked, x.pushed, x.clean, x.handoff]), [[true, false, true, false]]);
+    g(['push', '-q', '-u', 'origin', `ticket/${ID}`], ww);
+    st = json(ok(old, ['drain', '--status', '--json'], SUP));
+    assert.deepEqual(st.sessions.map((x) => [x.parked, x.pushed, x.clean, x.handoff]), [[true, true, true, true]]);
+    assert.equal(st.ready, false, 'the log has not landed yet');
+    // the log lands (as merge --chore log would put it on main)
+    const live = path.join(old, 'docs/devteam/run/log');
+    for (const f of fs.readdirSync(live).filter((x) => x.endsWith('.jsonl'))) fs.copyFileSync(path.join(live, f), path.join(old, 'docs/devteam/project/log', f));
+    g(['add', '-A', 'docs/devteam/project/log'], old);
+    g(['commit', '-qm', 'chore-log: log through now'], old);
+    g(['push', '-q', 'origin', 'main'], old);
+    st = json(ok(old, ['drain', '--status', '--json'], SUP));
+    assert.deepEqual(st.blockers, []);
+    assert.equal(st.ready, true);
+    assert.match(ok(old, ['drain', '--status'], SUP), /ready to move: yes/);
+
+    // the new machine: a clone with no run/, no worktrees, no harness sessions
+    g(['clone', '-q', org, neu], base);
+    for (const [k, v] of [['user.email', 't@t'], ['user.name', 't']]) g(['config', k, v], neu);
+    assert.ok(!fs.existsSync(path.join(neu, 'docs/devteam/run/log')));
+    assert.match(ok(neu, ['prompt', 'supervisor']), /^The fleet is drained .*This looks like the machine it moved to\. Before anything else: \(1\) DEVTEAM_ROLE=supervisor node docs\/devteam\/scripts\/devteam\.mjs undrain/, 'the standard prompt sees the drain, and that this is a fresh clone');
+    const up = ok(neu, ['undrain'], SUP);
+    assert.match(up, /run\/log was empty: rebuilt \d+ file\(s\)/);
+    assert.match(up, new RegExp(`undrained \\(a-[^)]+\\)[\\s\\S]*devteam\\.mjs worker ${ID} +parked; its handoff note goes into its prompt`));
+    assert.ok(fs.readdirSync(path.join(neu, 'docs/devteam/run/log')).some((f) => /^supervisor-/.test(f)));
+    assert.equal(json(ok(neu, ['drain', '--status', '--json', '--no-fetch'], SUP)).draining, null, 'the drain is lifted');
+    assert.doesNotMatch(ok(neu, ['prompt', 'supervisor']), /The fleet is drained/);
+    assert.ok(json(ok(neu, ['log', '--type', 'act', '--json'])).some((a) => a.class === 'undrain' && a.refs[0] === act.id));
+
+    // the restarted worker's prompt carries the handoff until it logs its first phase
+    const wp = ok(neu, ['prompt', 'worker', ID]);
+    assert.match(wp, /## Handoff from a drained session[\s\S]*Done: T1\. Next: write tidy\/c\.txt \(T2\)/);
+    assert.match(wp, new RegExp(`on ticket/${ID}, committed`));
+    const nw = path.join(neu, '.worktrees', ID);
+    if (hasTmux) {
+      // --resume where the harness has no session (no worktree here yet): a fresh start, said plainly,
+      // on the pushed branch, with the handoff in the prompt
+      const rs = spawnSync(process.execPath, [path.join(neu, 'docs/devteam/scripts/devteam.mjs'), 'worker', ID, '--resume'], { cwd: neu, env: env(SUP), encoding: 'utf8' });
+      spawnSync('tmux', ['kill-server'], { env: env({}) });
+      assert.equal(rs.status, 0, rs.stderr);
+      assert.match(rs.stderr, /no worker session to resume for ch-01-tidy: its worktree was just made here.*starting it fresh with agent_command and its handoff note/);
+      assert.equal(g(['rev-parse', 'HEAD'], nw), g(['rev-parse', `origin/ticket/${ID}`], neu), 'the worktree continues the pushed branch, not main');
+      assert.match(fs.readFileSync(path.join(neu, `docs/devteam/run/prompts/${ID}.txt`), 'utf8'), /## Handoff from a drained session/);
+      assert.match(ok(neu, ['prompt', 'worker', ID]), /## Handoff from a drained session/, 'the launch\'s own "starting" line keeps the note current');
+    } else g(['worktree', 'add', '-q', '--track', '-b', `ticket/${ID}`, nw, `origin/ticket/${ID}`], neu);
+    ok(nw, ['phase', 'build', '--task', 'T2'], WRK);
+    assert.doesNotMatch(ok(neu, ['prompt', 'worker', ID]), /Handoff from a drained session/, 'after its first phase line the note is history');
+    assert.ok(fs.existsSync(path.join(nw, `docs/devteam/project/tickets/${ID}/handoff.md`)), 'the note stays in the ticket folder');
+  } finally {
+    fs.rmSync(tmuxDir, { recursive: true, force: true });
+    if (!process.env.DEVTEAM_TEST_KEEP) fs.rmSync(base, { recursive: true, force: true }); else console.log(`drain fixture kept at ${base}`);
+  }
+});

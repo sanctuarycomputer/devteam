@@ -10,6 +10,8 @@ A feature is what other teams call an epic: stories, many PRs, one reviewed plan
 
 The supervisor plans itself or makes a planner (`devteam.mjs planner <feature>`), a session in its own worktree on branch `plan/<feature>`. Everything a planner produces lands through one reviewed PR: the design, the architecture update, the review records, and `project/log/plan-<feature>.jsonl` holding the feature and its tickets. Nothing is schedulable until that PR merges.
 
+When the supervisor drains the fleet (`supervisor.md` §12), a planner does what `worker.md` §9 says, with its handoff note at `project/plans/<feature>/handoff.md` on `plan/<feature>`; `phase parked` is the one phase a planner logs.
+
 ## 1. Goals
 
 The owner states the goals, in whatever words. The supervisor drafts them (`devteam.mjs goal add --title … --outcome …`), interviews until each is fully defined, has its design written and reviewed (§2), and then asks the owner to approve the goal **on its design**. Only the owner decides. Keep three to five active.
