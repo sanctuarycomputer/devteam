@@ -1109,6 +1109,27 @@ test('devteam kit', async (t) => {
     assert.match(must(['history', 'bill-01-card']), /bill-01-card/);
   });
 
+  await t.test("merge waits for the forge's checks at the head: pending is not passed, failing fails", () => {
+    const bin = path.join(tmp, 'fakegh');
+    const prFile = path.join(tmp, 'fakegh-pr.json');
+    write(path.join(bin, 'gh'), `#!/bin/sh\n[ "$1 $2" = "pr view" ] && exec cat "${prFile}"\nexit 1\n`);
+    fs.chmodSync(path.join(bin, 'gh'), 0o755);
+    const pr = (checks) => fs.writeFileSync(prFile, JSON.stringify({ number: 7, headRefOid: H2, title: 'bill-01-card: card capture', body: fs.readFileSync(body, 'utf8'), isDraft: false, mergeStateStatus: 'UNSTABLE', url: 'https://example.test/pr/7', statusCheckRollup: checks }));
+    const PATH0 = process.env.PATH;
+    process.env.PATH = `${bin}${path.delimiter}${PATH0}`;
+    try {
+      const dry = () => { const r = dt(['merge', 'bill-01-card', '--dry-run', '--no-gates'], { role: 'sup' }); return r.out + r.err; };
+      pr([{ __typename: 'StatusContext', context: 'continuous-integration/heroku', state: 'PENDING' }, { __typename: 'CheckRun', name: 'lint', status: 'COMPLETED', conclusion: 'SUCCESS' }]);
+      assert.match(dry(), /checks are still running at .*: continuous-integration\/heroku; wait for them/, 'a pending status is not passed, required or not');
+      pr([{ __typename: 'CheckRun', name: 'test', status: 'IN_PROGRESS', conclusion: null }]);
+      assert.match(dry(), /still running .*: test/);
+      pr([{ __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'FAILURE' }, { __typename: 'StatusContext', context: 'deploy', state: 'ERROR' }]);
+      assert.match(dry(), /checks failed at .*: test \(failure\), deploy \(error\)/);
+      pr([{ __typename: 'CheckRun', name: 'test', status: 'COMPLETED', conclusion: 'SUCCESS' }, { __typename: 'CheckRun', name: 'optional', status: 'COMPLETED', conclusion: 'SKIPPED' }, { __typename: 'StatusContext', context: 'continuous-integration/heroku', state: 'SUCCESS' }]);
+      assert.doesNotMatch(dry(), /forge's checks/, 'all passed: nothing to wait for');
+    } finally { process.env.PATH = PATH0; }
+  });
+
   await t.test('forge git: merge lands the exact verified head on main without gh', () => {
     landSettings((txt) => txt.replace('"gates": {', '"forge": "git", "gates": {'));
     assert.match(dt(['merge', 'bill-01-card'], { role: 'sup' }).err, /needs the PR text/);
