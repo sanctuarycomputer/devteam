@@ -636,6 +636,8 @@ test('devteam kit', async (t) => {
     must(['observe', '--subject', 'bill', '--kind', 'slow-test', '--key', 'slow:x', '--detail', 'sup', '--valence', '-1'], { role: 'sup' });
     assert.equal(json(must(['orient', '--json'])).length, 1, 'repeated keys cluster');
     const ids = json(must(['log', '--type', 'observation', '--json'])).map((o) => o.id);
+    assert.match(dt(['knowledge', 'add', '--kind', 'lesson', '--statement', 'mock smtp', '--scope', 'component:bill'], { role: 'sup' }).err, /a lesson names what it rests on/);
+    assert.match(dt(['knowledge', 'add', '--kind', 'lesson', '--statement', 'mock smtp', '--evidence', 'o-20200101-000000000-nobody'], { role: 'sup' }).err, /no such log entry/);
     const K = must(['knowledge', 'add', '--kind', 'lesson', '--statement', 'mock smtp', '--scope', 'component:bill', '--evidence', ...ids], { role: 'sup' });
     must(['knowledge', 'set', K, '--status', 'accepted'], { role: 'sup' });
     assert.match(must(['knowledge', '--for', 'bill-01-card']), /mock smtp/);

@@ -2221,6 +2221,7 @@ function cmdAsk() {
   for (const r of reasons) if (known.length && !known.includes(r)) warn(`reason "${r}" is not in constitution.md's table`);
   const blocks = asList(flags.blocks);
   for (const b of blocks) if (!tickets().has(b)) die(`--blocks ${b}: no such ticket`);
+  if (!flagStr('goal') && !flagStr('ticket') && !blocks.length && !['trust', 'proposal'].includes(kind)) warn('this question names no --goal, --ticket or --blocks: when it serves a goal, add --goal <g-id> so the goal shows it');
   // A question that asks about several acts names them up front; the owner's card lists them, and
   // the answer approves each once and nothing else (constitution.md §3, one answer, one act).
   const approves = [...new Set(asList(flags.approves).flatMap((x) => String(x).split(',')).map((x) => x.trim()).filter(Boolean))];
@@ -3302,7 +3303,14 @@ function cmdKnowledge() {
   const by = () => (flags.owner ? ownerWriter().by : (supervisorOnly('knowledge'), 'supervisor'));
   if (sub === 'add') {
     const w = by();
-    const line = appendLog({ type: 'knowledge', kind: flagStr('kind') ?? die('knowledge add needs --kind (fact, lesson, preference, constraint, pointer)'), statement: flagStr('statement') ?? die('knowledge add needs --statement'), scope: flagStr('scope') ?? 'project', status: w === 'owner' ? 'accepted' : 'candidate', confidence: flagNum('confidence'), valence: flagNum('valence'), evidence: asList(flags.evidence) }, w);
+    // An agent's lesson is proposed from what it saw: the log entries it rests on (observations,
+    // acts, questions, messages, problems) go with it, so the owner can check them before keeping it.
+    const evidence = asList(flags.evidence).flatMap((x) => String(x).split(',')).map((x) => x.trim()).filter(Boolean);
+    if (w !== 'owner' && flagStr('kind') === 'lesson') {
+      if (!evidence.length) die('a lesson names what it rests on: --evidence <log ids> (the observations, acts, questions or messages that show it)');
+      for (const e of evidence) if (!logGet(e)) die(`--evidence ${e}: no such log entry`);
+    }
+    const line = appendLog({ type: 'knowledge', kind: flagStr('kind') ?? die('knowledge add needs --kind (fact, lesson, preference, constraint, pointer)'), statement: flagStr('statement') ?? die('knowledge add needs --statement'), scope: flagStr('scope') ?? 'project', status: w === 'owner' ? 'accepted' : 'candidate', confidence: flagNum('confidence'), valence: flagNum('valence'), evidence }, w);
     return out(line.id);
   }
   if (sub === 'set') {

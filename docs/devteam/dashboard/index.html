@@ -1685,7 +1685,9 @@ function openGoal(id) {
   const r = R.goals.find((x) => x.id === id);
   const feats = (r?.features || []).map((f) => R.features[f]).filter(Boolean);
   const week = (d) => (d ? `week of ${new Date(`${d}T00:00:00Z`).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })}` : 'no date');
-  const asks = [...(DATA.questions || []), ...(DATA.ooda.answered || [])].filter((q) => q.goal === id || (q.kind === 'goal-definition' && q.question.toLowerCase().includes(String(g.title).toLowerCase().split(':')[0])));
+  // the goal's questions: asked for it, or about (or holding up) a ticket in one of its features
+  const goalTickets = new Set((DATA.progress?.tickets || []).filter((t) => feats.some((f) => f.feature === t.feature)).map((t) => t.id));
+  const asks = [...(DATA.questions || []), ...(DATA.ooda.answered || [])].filter((q) => q.goal === id || goalTickets.has(q.ticket) || (q.blocks || []).some((b) => goalTickets.has(b)) || (q.kind === 'goal-definition' && q.question.toLowerCase().includes(String(g.title).toLowerCase().split(':')[0])));
   const design = s.ask?.links?.[0] ?? (['ready', 'met'].includes(g.status) && g.check.design ? { title: 'The design', path: `docs/devteam/${g.check.design}` } : null);
   const decisions = (g.updates || []).filter((u) => u.decision).map((u) => u.decision);
   showDrawer(`<h2 id="drawer-title">${esc(g.title)}</h2>
@@ -2044,7 +2046,7 @@ function render(d) {
     <div class="card qcard trust">
       ${cardHead('lightbulb', '<span class="badge good">Lesson to keep?</span>', { extra: `applies to ${esc(scopeWords(k.scope))}`, id: k.id, rows: [['Proposed', esc(when(k.created_at))], ['By', esc(who(k.created_by))]] })}
       <h4>${linkify(k.statement)}</h4>
-      <p class="ctx">${esc(cap(who(k.created_by)))} proposes this as a ${esc(k.kind)}${k.confidence != null ? `, ${Math.round(k.confidence * 100)}% sure` : ''}, based on ${(k.evidence || []).length} thing${(k.evidence || []).length === 1 ? '' : 's'} it noticed. Accepted lessons go into the instructions of every agent they apply to.</p>
+      <p class="ctx">${esc(cap(who(k.created_by)))} proposes this as a ${esc(k.kind)}${k.confidence != null ? `, ${Math.round(k.confidence * 100)}% sure` : ''}, ${(k.evidence || []).length ? `based on ${k.evidence.map((e) => linkify(e)).join(', ')}` : 'with no evidence recorded'}. Accepted lessons go into the instructions of every agent they apply to.</p>
       <div class="row-inline"><button data-know="${esc(k.id)}" data-status="accepted">Keep it</button><button class="ghost" data-know="${esc(k.id)}" data-status="retired">Retire it</button><span class="err" id="e-${esc(k.id)}"></span></div>
     </div>`).join('');
   for (const qid of [...ANSWERED.keys()]) if (!d.questions.some((q) => q.id === qid)) ANSWERED.delete(qid);
