@@ -2557,7 +2557,8 @@ function observeFindings(m) {
 }
 function cmdObserveMetrics() {
   supervisorOnly('observe-metrics');
-  out(`recorded ${observeFindings(collectMetrics(0))} new observation(s)`);
+  const s = observeSpend();
+  out(`recorded ${s} spend line(s) and ${observeFindings(collectMetrics(0))} new observation(s)`);
 }
 // Accepted knowledge whose scope applies to a ticket (component, feature), a feature, or a class.
 function knowledgeFor(target) {
@@ -3352,13 +3353,64 @@ function measuredSpend() {
     for (const r of rs) {
       const usd = recordUsd(r);
       if (usd === null) unpriced.set(r[1] ?? 'unknown', (unpriced.get(r[1] ?? 'unknown') ?? 0) + r[2] + r[3] + r[4] + r[5] + r[6]);
-      recs.push({ ...sp, at: r[0], model: r[1], input: r[2], output: r[3], cache_read: r[4], cache_write: r[5] + r[6], usd: usd ?? 0 });
+      recs.push({ ...sp, at: r[0], model: r[1], input: r[2], output: r[3], cache_read: r[4], cache_write: r[5] + r[6], usd: usd ?? 0, priced: usd !== null });
     }
   }
   return (spendMemo = { recs, unpriced: Object.fromEntries(unpriced) });
 }
+// The phase a response is charged to: a worker's phase at that moment; a planner's planning, a
+// reviewer's review, the supervisor's its own.
+function phaseAtFor(role, who, at, phaseLines) {
+  if (role !== 'worker') return { supervisor: 'supervisor', planner: 'planning', reviewer: 'review' }[role] ?? role;
+  let phase = 'starting';
+  for (const l of phaseLines.get(who) ?? []) { if (Date.parse(l.created_at) <= at) phase = l.to; else break; }
+  return phase;
+}
+const phaseLinesMap = () => { const m = new Map(); for (const l of logObjects('phase')) (m.get(l.created_by) ?? m.set(l.created_by, []).get(l.created_by)).push(l); for (const ls of m.values()) ls.sort(byTime); return m; };
+// Spend, as items { who, role, phase, at, usd, tokens…, by_model }: the log's spend lines (durable),
+// then whatever the harness logs show since each agent's last line (not yet observed).
+let spendItemsMemo = null;
+function spendItems() {
+  if (spendItemsMemo) return spendItemsMemo;
+  const phaseLines = phaseLinesMap();
+  const items = [];
+  const through = new Map();
+  for (const l of logObjects('spend')) {
+    const at = Date.parse(l.through);
+    through.set(l.who, Math.max(through.get(l.who) ?? 0, at));
+    items.push({ who: l.who, role: l.role, phase: l.phase, at, usd: l.usd ?? 0, input: l.input_tokens ?? 0, output: l.output_tokens ?? 0, cache_read: l.cache_read_tokens ?? 0, cache_write: l.cache_write_tokens ?? 0, by_model: l.by_model ?? {}, logged: true });
+  }
+  for (const r of measuredSpend().recs) {
+    if (r.at <= (through.get(r.who) ?? -Infinity)) continue;
+    items.push({ who: r.who, role: r.role, phase: phaseAtFor(r.role, r.who, r.at, phaseLines), at: r.at, usd: r.usd, input: r.input, output: r.output, cache_read: r.cache_read, cache_write: r.cache_write, by_model: { [r.model ?? 'unknown']: { usd: r.usd, output_tokens: r.output, ...(r.priced === false ? { unpriced_tokens: r.input + r.output + r.cache_read + r.cache_write } : {}) } }, logged: false });
+  }
+  return (spendItemsMemo = items);
+}
+// observe-spend (each tick, with observe-metrics): turn the not-yet-observed tail into spend lines,
+// one per agent and phase, so the log holds spend after the harness logs are cleaned up.
+function observeSpend() {
+  const groups = new Map();
+  for (const it of spendItems().filter((x) => !x.logged)) {
+    const k = `${it.who}\0${it.phase}`;
+    const g = groups.get(k) ?? { who: it.who, role: it.role, phase: it.phase, at: 0, usd: 0, input: 0, output: 0, cache_read: 0, cache_write: 0, by_model: {} };
+    g.at = Math.max(g.at, it.at);
+    for (const f of ['usd', 'input', 'output', 'cache_read', 'cache_write']) g[f] += it[f];
+    for (const [mdl, v] of Object.entries(it.by_model)) { const b = (g.by_model[mdl] ??= { usd: 0, output_tokens: 0 }); b.usd += v.usd; b.output_tokens += v.output_tokens; if (v.unpriced_tokens) b.unpriced_tokens = (b.unpriced_tokens ?? 0) + v.unpriced_tokens; }
+    groups.set(k, g);
+  }
+  // one agent's lines share one `through` (its latest response), so the next tick resumes after all of them
+  const latest = new Map();
+  for (const g of groups.values()) latest.set(g.who, Math.max(latest.get(g.who) ?? 0, g.at));
+  for (const g of groups.values()) appendLog({ type: 'spend', who: g.who, role: g.role, phase: g.phase, through: new Date(latest.get(g.who)).toISOString(), usd: +g.usd.toFixed(4), input_tokens: g.input, output_tokens: g.output, cache_read_tokens: g.cache_read, cache_write_tokens: g.cache_write, by_model: Object.fromEntries(Object.entries(g.by_model).map(([k, v]) => [k, { ...v, usd: +v.usd.toFixed(4) }])) }, 'supervisor');
+  spendItemsMemo = null; spendWhoMemo = null; logCache = null;
+  return groups.size;
+}
+function cmdObserveSpend() {
+  supervisorOnly('observe-spend');
+  out(`recorded ${observeSpend()} spend line(s)`);
+}
 let spendWhoMemo = null;
-const spendByWho = () => { if (spendWhoMemo) return spendWhoMemo; const m = new Map(); for (const r of measuredSpend().recs) { const x = m.get(r.who) ?? { usd: 0, input_tokens: 0, output_tokens: 0 }; x.usd += r.usd; x.input_tokens += r.input + r.cache_read + r.cache_write; x.output_tokens += r.output; m.set(r.who, x); } return (spendWhoMemo = m); };
+const spendByWho = () => { if (spendWhoMemo) return spendWhoMemo; const m = new Map(); for (const r of spendItems()) { const x = m.get(r.who) ?? { usd: 0, input_tokens: 0, output_tokens: 0 }; x.usd += r.usd; x.input_tokens += r.input + r.cache_read + r.cache_write; x.output_tokens += r.output; m.set(r.who, x); } return (spendWhoMemo = m); };
 
 function collectMetrics(since) {
   const settings = loadSettings();
@@ -3403,25 +3455,33 @@ function collectMetrics(since) {
   // Measured usage, where a harness logged it, replaces what agents reported: each response is
   // charged to the phase its ticket was in at that moment (a planner's to planning, a reviewer's
   // to review, the main checkout's to the supervisor).
-  const spend = measuredSpend();
-  const costSource = spend.recs.length ? 'measured' : 'reported';
+  const items = spendItems();
+  const costSource = items.length ? 'measured' : 'reported';
   const tokens = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
   const byModel = {};
-  if (spend.recs.length) {
+  const unpricedModels = {};
+  if (items.length) {
     for (const k of Object.keys(phaseUsd)) delete phaseUsd[k];
     for (const k of Object.keys(ticketUsd)) delete ticketUsd[k];
-    for (const r of spend.recs) {
+    for (const r of items) {
       if (r.at < since) continue;
-      const ls = phaseLines.get(r.who) ?? [];
-      let phase = r.role === 'supervisor' ? 'supervisor' : r.role === 'planner' ? 'planning' : r.role === 'reviewer' ? 'review' : 'starting';
-      if (r.role === 'worker') for (const l of ls) { if (Date.parse(l.created_at) <= r.at) phase = l.to; else break; }
-      phaseUsd[phase] = (phaseUsd[phase] ?? 0) + r.usd;
+      phaseUsd[r.phase] = (phaseUsd[r.phase] ?? 0) + r.usd;
       if (r.role === 'worker' || r.role === 'reviewer') ticketUsd[r.who] = (ticketUsd[r.who] ?? 0) + r.usd;
       for (const k of Object.keys(tokens)) tokens[k] += r[k];
-      const bm = (byModel[r.model ?? 'unknown'] ??= { usd: 0, output_tokens: 0 });
-      bm.usd += r.usd; bm.output_tokens += r.output;
+      for (const [mdl, v] of Object.entries(r.by_model)) {
+        const bm = (byModel[mdl] ??= { usd: 0, output_tokens: 0 });
+        bm.usd += v.usd; bm.output_tokens += v.output_tokens;
+        if (v.unpriced_tokens) unpricedModels[mdl] = (unpricedModels[mdl] ?? 0) + v.unpriced_tokens;
+      }
     }
   }
+  // Cost per merged point (S = 1, M = 2), all time and for the last two weeks: what a spend trial moves.
+  const POINTS = { S: 1, M: 2 };
+  const perPoint = (from, to) => {
+    const done = cycles.filter((c) => { const m = mergedAt(c.id); return m >= from && m < to && ticketUsd[c.id] !== undefined; });
+    const pts = done.reduce((a, c) => a + (POINTS[ts.get(c.id)?.size] ?? 1), 0);
+    return pts ? { usd_per_point: +(done.reduce((a, c) => a + ticketUsd[c.id], 0) / pts).toFixed(2), points: pts, tickets: done.length } : null;
+  };
   const mergedCosts = cycles.map((c) => ticketUsd[c.id]).filter((x) => x !== undefined);
 
   const msgs = logObjects('message').filter((m) => Date.parse(m.created_at) >= since).sort(byTime);
@@ -3446,7 +3506,7 @@ function collectMetrics(since) {
     cycle_hours: { median: hours(median(cycles.map((c) => c.ms))), slowest: cycles.slice(0, 5).map((c) => ({ id: c.id, hours: hours(c.ms) })) },
     phase_hours: Object.fromEntries(Object.entries(round(phaseMs)).map(([k, v]) => [k, hours(v)])),
     phase_usd: round(phaseUsd),
-    cost: { source: costSource, usd_all: +Object.values(phaseUsd).reduce((a, b) => a + b, 0).toFixed(2), tokens, by_model: Object.fromEntries(Object.entries(byModel).map(([k, v]) => [k, { usd: +v.usd.toFixed(2), output_tokens: v.output_tokens }])), unpriced_models: spend.unpriced, usd_total: +Object.values(ticketUsd).reduce((a, b) => a + b, 0).toFixed(2), usd_per_merged_ticket: mergedCosts.length ? +(mergedCosts.reduce((a, b) => a + b, 0) / mergedCosts.length).toFixed(2) : null, by_ticket: round(ticketUsd) },
+    cost: { source: costSource, usd_all: +Object.values(phaseUsd).reduce((a, b) => a + b, 0).toFixed(2), tokens, by_model: Object.fromEntries(Object.entries(byModel).map(([k, v]) => [k, { usd: +v.usd.toFixed(2), output_tokens: v.output_tokens }])), unpriced_models: unpricedModels, per_point: perPoint(0, now + 1), per_point_this_week: perPoint(now - 7 * DAY, now + 1), per_point_last_week: perPoint(now - 14 * DAY, now - 7 * DAY), usd_total: +Object.values(ticketUsd).reduce((a, b) => a + b, 0).toFixed(2), usd_per_merged_ticket: mergedCosts.length ? +(mergedCosts.reduce((a, b) => a + b, 0) / mergedCosts.length).toFixed(2) : null, by_ticket: round(ticketUsd) },
     reviews, gates,
     messages: { expecting_reply: expecting.length, still_open: openMsgs.length, median_reply_minutes: msgWaits.length ? +(median(msgWaits) / 60000).toFixed(1) : null },
     owner_questions: { asked: qs.length, open: openQs.length, median_answer_hours: hours(median(qWaits)), oldest_open_hours: openQs.length ? hours(now - Math.min(...openQs.map((q) => Date.parse(q.asked_at)))) : null, answer_rate_14d: recentQs.length ? +(answeredRecent / recentQs.length).toFixed(2) : null },
@@ -3532,6 +3592,24 @@ function collectMetrics(since) {
   // (code-style.md §10): production decrypts its own file, or the default one when it has none.
   const prodKey = fs.existsSync(path.join(mainRoot, 'config/credentials/production.yml.enc')) ? 'config/credentials/production.key' : fs.existsSync(path.join(mainRoot, 'config/credentials.yml.enc')) ? 'config/master.key' : null;
   if (prodKey && (settings.worktree_files ?? []).includes(prodKey)) add('high', 'production-key-in-worktrees', prodKey, `settings.worktree_files copies ${prodKey}, which decrypts production's credentials, into every worker's worktree`, `the owner's change (settings, gate-change): give agents only development and test keys. ${prodKey === 'config/master.key' ? 'Move production secrets to config/credentials/production.yml.enc with its own production.key, kept only on the platform and in the owner\'s shell, then' : 'Then'} drop ${prodKey} from worktree_files (code-style.md §10)`);
+  // Spend, for the improvement loop (supervisor.md §9): what costs more than it should.
+  if (m.cost.source === 'measured') {
+    const pp = (id) => (m.cost.by_ticket[id] ?? 0) / ({ S: 1, M: 2 }[ts.get(id)?.size] ?? 1);
+    const merged = [...ts.keys()].filter((id) => mergedAt(id) && m.cost.by_ticket[id] !== undefined).map(pp).sort((a, b) => a - b);
+    if (merged.length >= 5) {
+      const med = merged[Math.floor(merged.length / 2)];
+      for (const id of ts.keys()) {
+        const recent = !mergedAt(id) || now - mergedAt(id) < 7 * DAY;
+        if (recent && m.cost.by_ticket[id] >= 5 && pp(id) > 2 * med) add('medium', 'costly-ticket', id, `$${m.cost.by_ticket[id].toFixed(2)}, ${(pp(id) / med).toFixed(1)}× the median merged ticket per point ($${med.toFixed(2)})`, 'find where it went (phase_usd, review churn, restarts losing the cache) and try a lever on the next tickets like it (supervisor.md §9)');
+      }
+    }
+    const recentItems = spendItems().filter((x) => x.at >= now - 7 * DAY);
+    const inSide = recentItems.reduce((a, x) => a + x.input + x.cache_read + x.cache_write, 0);
+    const reads = recentItems.reduce((a, x) => a + x.cache_read, 0);
+    if (inSide > 5e6 && reads / inSide < 0.6) add('medium', 'low-cache-hit', 'prompt cache', `${Math.round((100 * reads) / inSide)}% of input tokens were cache reads this week`, 'agents are re-reading context they could keep: fewer restarts, resume instead of re-launch, stable prompt prefixes (supervisor.md §9)');
+    const tw = m.cost.per_point_this_week, lw = m.cost.per_point_last_week;
+    if (tw && lw && tw.tickets >= 3 && lw.tickets >= 3 && tw.usd_per_point > 1.5 * lw.usd_per_point) add('medium', 'cost-per-point-rising', 'spend', `$${tw.usd_per_point} per merged point this week, $${lw.usd_per_point} last week`, 'find what changed (model, ticket mix, review rounds) and trial a fix (supervisor.md §9)');
+  }
   const unpriced = Object.entries(m.cost.unpriced_models ?? {});
   if (unpriced.length) add('low', 'unpriced-model', unpriced.map(([k]) => k).join(', '), `${unpriced.map(([k, n]) => `${k}: ${(n / 1e6).toFixed(1)}M tokens`).join('; ')} with no price, so spend undercounts`, 'the owner adds them to settings.model_prices ($ per million tokens: input, output, cache_read, cache_write)');
   if (m.escaped_defects) add('high', 'escaped-defects', `${m.escaped_defects}`, 'defects found after merge', 'retro: which review or gate should have caught each one');
@@ -4284,7 +4362,7 @@ Decide and act (supervisor.md, constitution.md)
 
 Observe and orient
   observe --subject s --kind k --detail d [--severity 0-4] [--valence -2..2] [--key k] [--refs ids] [--fix f] [--value n --unit u]
-  observe-metrics | orient [--json] | metrics [--since date] [--json]
+  observe-metrics | observe-spend | orient [--json] | metrics [--since date] [--json]   (observe-metrics records spend lines too)
   ack <finding-kind> <subject> --reason r [--owner]   set a finding aside for finding_ack_hours
   timeline <ticket-id> [--json]   the ticket and every log line, review and file that bears on it
   knowledge [--status s] [--kind k] | knowledge --for <ticket|feature|class> | knowledge add|set …
@@ -4309,7 +4387,7 @@ const COMMANDS = {
   'check-ticket': cmdCheckTicket, 'check-pr': cmdCheckPr, merge: cmdMerge, 'review-worktree': cmdReviewWorktree,
   phase: cmdPhase, gate: cmdGate, send: cmdSend, messages: cmdMessages, 'stop-ok': cmdStopOk,
   ask: cmdAsk, answer: cmdAnswer, secret: cmdSecret, withdraw: cmdWithdraw, questions: cmdQuestions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
-  observe: cmdObserve, 'observe-metrics': cmdObserveMetrics, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, knowledge: cmdKnowledge, problem: cmdProblem,
+  observe: cmdObserve, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, knowledge: cmdKnowledge, problem: cmdProblem,
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
   log: cmdLog, 'log-check': cmdLogCheck, 'log-sync': cmdLogSync, history: cmdHistory,
   dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes,

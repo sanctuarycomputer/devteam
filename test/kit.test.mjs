@@ -1295,6 +1295,19 @@ test('devteam kit', async (t) => {
       assert.equal(json(must(['dashboard-data'])).tickets.find((x) => x.id === 'bill-03-a').usd, 0.224);
       assert.ok(fs.existsSync(path.join(repo, 'docs/devteam/run/cache/usage.json')), 'parsed files are cached');
       assert.equal(json(must(['metrics', '--json'])).cost.by_model['claude-opus-5-5'].usd, 0.22, 'the same from the cache');
+      // observe: the supervisor's tick records spend lines; again records nothing new
+      assert.match(must(['observe-metrics'], { role: 'sup' }), /recorded 2 spend line\(s\)/, 'one per agent and phase: bill-03-a (blocked), and the supervisor (its subagent and the codex session in the main checkout)');
+      assert.match(must(['observe-spend'], { role: 'sup' }), /recorded 0 spend line/);
+      const lines = json(must(['log', '--type', 'spend', '--json']));
+      assert.ok(lines.every((l) => l.created_by === 'supervisor' && l.through), 'written by the supervisor, each with how far it counted');
+      assert.equal(lines.find((l) => l.who === 'bill-03-a').phase, 'blocked');
+      assert.match(dt(['observe-spend'], { role: 'planner' }).err, /the supervisor does this/, 'a worker or planner never writes spend');
+      // durable: with the harness logs gone, spend is the log's
+      fs.rmSync(home, { recursive: true, force: true });
+      const m2 = json(must(['metrics', '--json']));
+      assert.equal(m2.cost.by_ticket['bill-03-a'], 0.22, 'spend survives the harness cleaning up its logs');
+      assert.equal(m2.cost.by_model['claude-sonnet-5-5'].usd, 4);
+      assert.deepEqual(Object.keys(m2.cost.unpriced_models), ['gpt-x'], 'unpriced tokens are kept on the line too');
     } finally {
       for (const [k, v] of [['CLAUDE_CONFIG_DIR', env0.c], ['CODEX_HOME', env0.x]]) if (v === undefined) delete process.env[k]; else process.env[k] = v;
     }

@@ -32,7 +32,8 @@
         "knowledge",
         "problem",
         "question",
-        "act"
+        "act",
+        "spend"
       ]
     },
     "op": {
@@ -1093,6 +1094,77 @@
           "corrected",
           "repaired"
         ]
+      },
+      "spend": {
+        "description": "What agents spent, observed from their harnesses' session logs by the supervisor's tick: one line per agent and phase, covering its responses up to `through` since its previous spend line. The log keeps spend durable after the harness's own logs are gone.",
+        "type": "object",
+        "properties": {
+          "who": {
+            "type": "string",
+            "description": "the ticket, planner (plan-<feature>) or supervisor"
+          },
+          "role": {
+            "enum": [
+              "worker",
+              "reviewer",
+              "planner",
+              "supervisor"
+            ]
+          },
+          "phase": {
+            "type": "string"
+          },
+          "through": {
+            "type": "string",
+            "description": "ISO time of the latest response counted"
+          },
+          "usd": {
+            "type": "number",
+            "minimum": 0
+          },
+          "input_tokens": {
+            "type": "number",
+            "minimum": 0
+          },
+          "output_tokens": {
+            "type": "number",
+            "minimum": 0
+          },
+          "cache_read_tokens": {
+            "type": "number",
+            "minimum": 0
+          },
+          "cache_write_tokens": {
+            "type": "number",
+            "minimum": 0
+          },
+          "by_model": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "usd": {
+                  "type": "number"
+                },
+                "output_tokens": {
+                  "type": "number"
+                },
+                "unpriced_tokens": {
+                  "type": "number"
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false,
+        "x-required-new": [
+          "who",
+          "role",
+          "phase",
+          "through",
+          "usd"
+        ]
       }
     }
   },
@@ -1106,7 +1178,8 @@
       "knowledge": "k",
       "problem": "p",
       "question": "q",
-      "act": "a"
+      "act": "a",
+      "spend": "s"
     },
     "pattern": "^[a-z]-\\d{8}-\\d{9}-[a-z0-9]+(-[a-z0-9]+)*$",
     "keyed": {
@@ -1140,7 +1213,8 @@
         "act",
         "phase",
         "message",
-        "gate"
+        "gate",
+        "spend"
       ],
       "planner": [
         "feature",
