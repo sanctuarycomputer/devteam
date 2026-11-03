@@ -44,6 +44,8 @@
   .empty code { font-size: 11px; }
   .empty a { color: var(--fg-2); text-decoration: underline; text-underline-offset: 2px; }
   .banner { border: 1px solid color-mix(in srgb, var(--red) 45%, var(--line)); background: color-mix(in srgb, var(--red) 7%, var(--surface)); border-radius: 8px; padding: 10px 14px; margin-bottom: 20px; font-size: 12px; }
+  .banner.updated { border-color: color-mix(in srgb, var(--blue-fg, var(--fg-2)) 45%, var(--line)); background: color-mix(in srgb, var(--blue-fg, var(--fg-2)) 7%, var(--surface)); }
+  .banner.updated button { margin: 0 0 0 8px; }
   .banner b { color: var(--red-fg); }
   .banner pre { margin: 6px 0 0; max-height: 9em; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.5 var(--mono); color: var(--fg-2); }
   .banner.stale { border-color: color-mix(in srgb, var(--amber) 45%, var(--line)); background: color-mix(in srgb, var(--amber) 7%, var(--surface)); }
@@ -375,6 +377,7 @@
 </aside>
 <main class="waiting">
   <div class="banner" id="banner" role="alert" hidden></div>
+  <div class="banner updated" id="updated" role="status" hidden>The dashboard was updated since this tab opened, so some of what you see may be out of date. <button id="reload-page">Reload</button></div>
   <p class="loading" id="loading">Loading…</p>
   <section id="overview">
     <div class="grid" id="stats"></div>
@@ -498,6 +501,8 @@ const fmtDate = (ms) => new Date(ms).toLocaleDateString(undefined, { month: 'sho
 const isDone = (t) => !!t.merged_at;
 const pct = (a, b) => (b ? Math.round((100 * a) / b) : 0);
 let DATA = null;
+// The dashboard page this tab loaded, by the server's own fingerprint of it (x-devteam-page).
+let PAGE_VERSION = null;
 let VIEW = 'all';
 try { VIEW = localStorage.getItem('devteam.view') || 'all'; } catch {}
 let LEFT_ONLY = false;
@@ -2092,6 +2097,8 @@ async function loadNow({ force = false } = {}) {
   let d;
   try {
     const r = await fetch('/api/data');
+    const pv = r.headers.get('x-devteam-page');
+    if (pv) { if (!PAGE_VERSION) PAGE_VERSION = pv; else if (pv !== PAGE_VERSION) $('updated').hidden = false; }
     const body = await r.text();
     try { d = JSON.parse(body); } catch { throw new Error(r.ok ? 'the server sent something that is not JSON' : `${r.status} ${body.slice(0, 400)}`); }
     if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
@@ -2154,6 +2161,7 @@ document.addEventListener('click', (e) => {
   setView(a.dataset.view, a.dataset.left === undefined ? undefined : a.dataset.left === '1');
 });
 $('left-only').addEventListener('change', (e) => setView(VIEW, e.target.checked));
+$('reload-page').addEventListener('click', () => location.reload());
 $('view').addEventListener('change', (e) => {
   VIEW = e.target.value;
   try { localStorage.setItem('devteam.view', VIEW); } catch {}

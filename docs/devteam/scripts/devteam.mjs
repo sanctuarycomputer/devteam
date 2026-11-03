@@ -4546,7 +4546,13 @@ function cmdDashboard() {
     }
     if (req.method === 'GET' && req.url.startsWith('/api/data')) {
       const r = await run(['dashboard-data']);
-      return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 500, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
+      if (!r.ok) return send(res, 500, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
+      // The page in use says which version of itself it is: an open tab keeps the code it loaded,
+      // so after a kit update it compares this with the first one it saw and offers a reload.
+      let version = '';
+      try { version = sha256(fs.readFileSync(page)).slice(0, 16); } catch {}
+      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-devteam-page': version });
+      return res.end(r.stdout);
     }
     const u = new URL(req.url, 'http://x');
     if (req.method === 'GET' && u.pathname === '/api/timeline') {
