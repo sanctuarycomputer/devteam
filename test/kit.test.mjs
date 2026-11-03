@@ -2047,7 +2047,7 @@ test('drain: the fleet stops cleanly, and a clone elsewhere picks it up', () => 
   const SUP = { DEVTEAM_ROLE: 'supervisor' };
   const WRK = { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: ID };
   try {
-    g(['init', '-q', '--bare', org], base);
+    g(['init', '-q', '--bare', '-b', 'main', org], base); // the clone checks out origin's HEAD; CI's git defaults to master
     fs.mkdirSync(old);
     g(['init', '-q', '-b', 'main'], old);
     for (const [k, v] of [['user.email', 't@t'], ['user.name', 't']]) g(['config', k, v], old);
