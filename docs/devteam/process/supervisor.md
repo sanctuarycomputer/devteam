@@ -21,7 +21,7 @@ Two loops run through you. **Goal → design → roadmap → graph → tickets:*
 
 ## 3. The tick
 
-Run it about every 10 minutes when PRs are converging, 30 when quiet. A worker's message interrupts it. Each tick is one pass of the loop:
+Run it about every 10 minutes when PRs are converging, 30 when quiet. Between ticks, wait with `devteam.mjs wait [--minutes n]` (in the background where your harness can be woken by a finished command): it returns when a worker messages you, the owner does anything (an answer, a goal decision, an ack), a new high finding appears, or the tick is due (`tick_minutes`, default 15), and says which. Don't write your own watch loop: one that wakes only on messages and answers misses a worker that stopped silently on an API error, since a stopped worker sends nothing. A high finding already open when `wait` starts returns at once: act on it, or `ack` it with a reason. Each tick is one pass of the loop:
 
 **Observe**
 1. `git fetch origin`; `devteam.mjs status --json`; note new merges.

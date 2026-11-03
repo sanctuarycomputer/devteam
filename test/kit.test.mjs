@@ -1394,7 +1394,7 @@ test('devteam kit', async (t) => {
     git(['worktree', 'remove', '--force', wt('bill-02-vault')]);
   });
 
-  await t.test('a ticket\'s merge gate fails validate only for overlaps that are its own (D4)', () => {
+  await t.test('a ticket\'s merge gate fails validate only for overlaps that are its own (D4)', async () => {
     const sup = { role: 'sup' };
     const tk = (title) => JSON.stringify({ title, feature: 'billing', component: 'bill', kind: 'build', size: 'S', risk: 'normal', serves: ['BILL-S1'], depends_on: [], touches: ['billing/shared/**'], done_when: ['tests pass in CI'] });
     must(['ticket', 'add', 'bill-03-a', '--json', tk('a')], sup);
@@ -1420,6 +1420,25 @@ test('devteam kit', async (t) => {
     const kinds = () => json(must(['metrics', '--json'])).findings.filter((f) => f.subject === 'bill-03-a').map((f) => f.kind);
     assert.ok(kinds().includes('blocked'), 'blocked for 2h on nobody in particular');
     assert.match(json(must(['metrics', '--json'])).findings.find((f) => f.subject === 'bill-03-a' && f.kind === 'blocked').suggestion, /a question put only in your chat never reaches the Inbox/, 'and if it waits on the owner, the question was never asked');
+    // wait: an open high finding returns at once; set aside, the wait runs to the tick or the next event
+    assert.match(dt(['wait'], { role: 'worker' }).err, /wait: the supervisor does this/);
+    assert.match(must(['wait', '--minutes', '0.05'], sup), /^high findings are open[\s\S]*blocked bill-03-a: blocked for/);
+    for (const f of json(must(['metrics', '--json'])).findings.filter((x) => x.severity === 'high')) must(['ack', f.kind, f.subject, '--reason', 'testing wait'], sup);
+    assert.match(must(['wait', '--minutes', '0.05'], sup), /^nothing new in 0\.05 min: the tick is due/);
+    {
+      const env = { ...process.env, DEVTEAM_ROLE: 'supervisor' };
+      delete env.DEVTEAM_TICKET; delete env.DEVTEAM_FEATURE;
+      const child = spawn(process.execPath, [DT, 'wait', '--minutes', '0.5'], { cwd: repo, env });
+      let got = '';
+      child.stdout.on('data', (b) => { got += b; });
+      const done = new Promise((r) => child.on('close', r));
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500);
+      const sent = spawnSync(process.execPath, [DT, 'send', 'supervisor', 'need a ruling on the shared module name', '--kind', 'blocked'], { cwd: repo, encoding: 'utf8', env: { ...env, DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'bill-03-a' } });
+      assert.equal(sent.status, 0, sent.stderr);
+      const Mw = sent.stdout.trim();
+      await done;
+      assert.match(got, new RegExp(`^something needs you:\\n  message ${Mw} \\[blocked\\] from bill-03-a`), 'a worker\'s message wakes it');
+    }
     const Qo = must(['ask', '--ticket', 'bill-03-a', '--question', 'Which shared module name?', '--recommendation', 'billing-shared'], sup);
     assert.deepEqual(kinds().filter((k) => k.startsWith('blocked')), ['blocked-on-owner'], "waiting on the owner's answer: say which question, don't tell the supervisor to act");
     assert.match(json(must(['metrics', '--json'])).findings.find((f) => f.kind === 'blocked-on-owner').detail, new RegExp(Qo));
