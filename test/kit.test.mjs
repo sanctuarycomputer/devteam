@@ -3,6 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -1381,5 +1382,201 @@ test('devteam kit', async (t) => {
     } finally {
       for (const [k, v] of [['CLAUDE_CONFIG_DIR', env0.c], ['CODEX_HOME', env0.x]]) if (v === undefined) delete process.env[k]; else process.env[k] = v;
     }
+  });
+
+  await t.test('review questions: a page pinned by hash, answered only by the owner\'s validated result', () => {
+    const sha = (b) => crypto.createHash('sha256').update(b).digest('hex');
+    const PAGE = '<!doctype html><html><head><meta charset="utf-8"><title>Match items to groups</title>\n<link rel="stylesheet" href="devteam-ui.css"><script src="devteam-ui.js"></script>\n<style>.chips { display: flex } .dot { background: url(data:image/gif;base64,R0lGOD) } .logo { background: url("/api/file?path=docs/x.png") }</style></head>\n<body><main id="view"></main>\n<script>\ndevteam.ready(({ data, draft, result, readonly }) => {\n  ui.grid({ data, draft, result, readonly, fields: [{ key: \'items\', label: \'Items\', type: \'multiselect\', options: \'items\' }, { key: \'note\', label: \'Note to the agent\', type: \'text\' }] });\n});\n</script></body></html>\n';
+    // many-to-many: item b is proposed on two groups; group g3 has no proposal
+    const DATA = JSON.stringify({ v: 1, title: 'Match items to groups', options: { items: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }, { id: 'c', label: 'C' }] }, rows: [{ id: 'g1', title: 'One', proposal: { items: ['a', 'b'] } }, { id: 'g2', title: 'Two', proposal: { items: ['b'] } }, { id: 'g3', title: 'Three' }] }, null, 2);
+    const SCHEMA = JSON.stringify({ type: 'object', required: ['v', 'question', 'review_sha256', 'rows'], properties: { rows: { type: 'array', items: { type: 'object', required: ['id', 'decided'], properties: { id: { type: 'string' }, decided: { type: 'boolean' }, values: { type: 'object', properties: { items: { type: 'array', items: { enum: ['a', 'b', 'c'] } } } } } } } } });
+    // review check: the static rules, with line numbers
+    const cdir = path.join(tmp, 'review-check');
+    const page = (name, text) => { write(path.join(cdir, name), text); return path.join(cdir, name); };
+    const good = page('page.html', PAGE);
+    const dataFile = page('data.json', DATA);
+    const schemaFile = page('result.schema.json', SCHEMA);
+    assert.match(must(['review', 'check', good, '--data', dataFile, '--result-schema', schemaFile]), /^ok: .*\(3 rows, 2 with a proposal\)/m, 'the example page passes');
+    const bad = (text, re, msg) => { const r = dt(['review', 'check', page('bad.html', text)]); assert.equal(r.status, 1, msg); assert.match(r.out, re, msg); };
+    const doc = (body) => `<!doctype html><html><head><meta charset="utf-8"></head>\n<body>\n${body}\n</body></html>\n`;
+    bad(doc('<script src="https://cdn.example.com/lib.js"></script>'), /^error: .*bad\.html:3: src "https:\/\/cdn\.example\.com\/lib\.js" leaves the page/m, 'an external script');
+    bad(doc('<form><input name="x"></form>'), /bad\.html:3: <form> is not allowed/, 'a form');
+    bad(doc('<meta http-equiv="Content-Security-Policy" content="default-src *">'), /http-equiv="Content-Security-Policy"> is not allowed/, 'a CSP meta');
+    bad(doc('<style>.x { background: url(https://img.example.com/a.png) }</style>'), /url\( "https:\/\/img\.example\.com\/a\.png" leaves the page/, 'a non-relative url( in CSS');
+    bad(doc('<img src="../../api/answer">'), /leaves the page/, 'a relative path that climbs out of the page folder');
+    bad('<html><body>no doctype</body></html>', /not a complete HTML document/, 'a fragment');
+    bad(doc(`<p>${'x'.repeat(5 * 1024 * 1024)}</p>`), /at most 4194304 \(4 MB\)/, 'a 5 MB page');
+    const r0 = dt(['review', 'check', good, '--data', page('broken.json', '{"rows": [')]);
+    assert.equal(r0.status, 1);
+    assert.match(r0.out, /broken\.json: not valid JSON/, 'invalid data JSON');
+    assert.match(dt(['review', 'check', good, '--data', page('dup.json', JSON.stringify({ rows: [{ id: 'g1' }, { id: 'g1' }] }))]).out, /id "g1" is repeated/);
+    assert.match(dt(['review', 'check', good, '--result-schema', page('s.json', JSON.stringify({ type: 'object', oneOf: [] }))]).out, /schema\.oneOf: not a keyword the kit checks/, 'a schema keyword the checker would ignore');
+    const warned = dt(['review', 'check', page('warn.html', doc('<label>Password</label><input type="password" name="password">\n<script>fetch("data.json")</script>'))]);
+    assert.equal(warned.status, 0, 'warnings alone pass');
+    assert.match(warned.out, /^warning: .*warn\.html:4: fetch\(: the page has no network/m);
+    assert.match(warned.out, /warn\.html:3: a password field looks like a field for a secret; ask for secrets with --secrets/);
+
+    // the page, its data and its schema are committed on the branch whose PR asks
+    const rw = wt('review-demo');
+    git(['worktree', 'add', '-q', '-b', 'review-demo', rw, 'origin/main']);
+    const rel = 'docs/devteam/project/questions/match';
+    write(path.join(rw, rel, 'page.html'), PAGE);
+    write(path.join(rw, rel, 'data.json'), DATA);
+    write(path.join(rw, rel, 'result.schema.json'), SCHEMA);
+    write(path.join(rw, rel, 'plain.html'), PAGE.replace("ui.grid", "ui.form"));
+    write(path.join(rw, rel, 'bad.html'), doc('<form></form>'));
+    git(['add', '-A'], rw);
+    git(['commit', '-qm', 'review page'], rw);
+    const commit = git(['rev-parse', 'HEAD'], rw);
+    const base = ['ask', '--kind', 'review', '--question', 'Which items belong to each group?', '--context', 'Three groups; I proposed what I could match.', '--ref', 'review-demo', '--page', `${rel}/page.html`, '--data', `${rel}/data.json`];
+    const ask = (...extra) => dt([...base, ...extra], { role: 'sup' });
+    assert.match(ask('--default', 'keep').err, /takes no --default: a review is never defaulted/);
+    assert.match(ask('--secrets', '[{"name":"K","sink":"file:k"}]').err, /never carries a secret/);
+    assert.match(ask('--choices', '[{"label":"x"}]').err, /choices are its page/);
+    assert.match(dt(['ask', '--kind', 'review', '--question', 'x', '--ref', 'no-such-branch', '--page', `${rel}/page.html`], { role: 'sup' }).err, /--ref no-such-branch does not resolve/);
+    assert.match(dt(['ask', '--kind', 'review', '--question', 'x', '--ref', 'review-demo', '--page', '../etc/passwd'], { role: 'sup' }).err, /without "\.\."/, 'a page never leaves the repo');
+    assert.match(dt(['ask', '--kind', 'review', '--question', 'x', '--ref', 'review-demo', '--page', `${rel}/nope.html`], { role: 'sup' }).err, /not a file at review-demo/);
+    assert.match(dt(['ask', '--kind', 'review', '--question', 'x', '--ref', 'review-demo', '--page', `${rel}/bad.html`], { role: 'sup' }).err, /does not pass its checks[\s\S]*<form> is not allowed/);
+    assert.match(dt(['ask', '--question', 'x', '--page', `${rel}/page.html`], { role: 'sup' }).err, /--page belongs on a review question/);
+    assert.match(dt([...base], { role: 'worker' }).err, /the supervisor does this/, 'a worker never asks');
+    const Q1 = must([...base, '--result-schema', `${rel}/result.schema.json`], { role: 'sup' });
+    const supLog = fs.readdirSync(path.join(repo, 'docs/devteam/run/log')).filter((f) => f.startsWith('supervisor-')).map((f) => fs.readFileSync(path.join(repo, 'docs/devteam/run/log', f), 'utf8')).join('');
+    const askLine = supLog.split('\n').find((l) => l.includes(`"id":"${Q1}"`));
+    assert.ok(Buffer.byteLength(askLine) < 1024, `the question line is small (${Buffer.byteLength(askLine)} bytes)`);
+    const rv = JSON.parse(askLine).review;
+    assert.equal(rv.commit, commit, 'pinned to the commit the ref named');
+    assert.equal(rv.page.sha256, sha(PAGE));
+    assert.equal(rv.data.sha256, sha(DATA));
+    assert.equal(rv.result_schema.sha256, sha(SCHEMA));
+    assert.deepEqual([rv.data.rows, rv.data.proposals, rv.allow_partial, rv.title], [3, 2, false, 'Match items to groups']);
+    const view = (id) => json(must(['questions', '--id', id, '--json']))[0];
+    let q = view(Q1);
+    assert.deepEqual([q.kind, q.status, q.result_status, q.result, q.allow_partial], ['review', 'open', 'verified', null, false]);
+
+    // the owner answers with a result; their process checks it against the pinned files
+    const res = (id, rows, extra = {}) => JSON.stringify({ v: 1, question: id, review_sha256: sha(PAGE), data_sha256: sha(DATA), rows, ...extra });
+    const answer = (id, body, role = 'owner') => dt(['answer', id, '--review-result', '-'], { role, input: body });
+    const ok = [{ id: 'g1', decided: true, values: { items: ['a', 'b'] } }, { id: 'g2', decided: true, values: { items: ['b', 'c'] }, kept: true, note: 'c belongs here too' }, { id: 'g3', decided: true, values: { items: [] } }];
+    assert.match(answer(Q1, res(Q1, ok), 'sup').err, /owner commands don't run in an agent session/, 'an agent never answers a review');
+    assert.match(dt(['answer', Q1, 'looks good']).err, /is a review: answer it with its result/, 'never in free text');
+    assert.match(dt(['answer', Q1, 'looks good', '--from-chat', '--said', 'looks good'], { role: 'sup' }).err, /answer --from-chat: .* is a review/, 'never from chat');
+    assert.match(answer(Q1, res(Q1, ok, { review_sha256: sha('another page') })).err, /names page .*, not the page asked/);
+    assert.match(answer(Q1, res(Q1, ok, { data_sha256: sha('other data') })).err, /names data .*, not the data asked/);
+    assert.match(answer(Q1, res('q-20260101-000000000-supervisor', ok)).err, /is for q-20260101-000000000-supervisor, not/);
+    assert.match(answer(Q1, res(Q1, [...ok, { id: 'g9', decided: true, values: {} }])).err, /"g9" is not a row of/);
+    assert.match(answer(Q1, res(Q1, [...ok, ok[0]])).err, /"g1" is answered twice/);
+    assert.match(answer(Q1, res(Q1, [ok[0], ok[1], { id: 'g3', decided: false }])).err, /\(g3\) is undecided; .* was asked without --allow-partial/);
+    assert.match(answer(Q1, res(Q1, ok.slice(0, 2))).err, /1 row\(s\) of .* are not in the result \(g3\)/, 'a row left out is undecided too');
+    assert.match(answer(Q1, res(Q1, [ok[0], { id: 'g2', decided: true, values: { items: ['z'] } }, ok[2]])).err, /does not satisfy .*result\.schema\.json[\s\S]*result\.rows\[1\]\.values\.items\[0\] must be one of a, b, c/);
+    assert.match(answer(Q1, res(Q1, ok, { pad: 'x'.repeat(5 * 1024 * 1024) })).err, /at most 4194304 \(4 MB\)/);
+    assert.match(answer(Q1, '{"v": 1,').err, /not valid JSON/);
+    assert.equal(view(Q1).status, 'open', 'nothing refused was recorded');
+    must(['answer', Q1, '--review-result', '-'], { input: res(Q1, ok) });
+    q = view(Q1);
+    assert.equal(q.status, 'answered');
+    assert.equal(q.channel, 'cli');
+    assert.equal(q.answer, 'Reviewed 3 rows: 1 kept, 1 changed, 1 set to none, 0 undecided');
+    assert.deepEqual({ ...q.result, sha256: undefined, bytes: undefined }, { sha256: undefined, bytes: undefined, rows: 3, decided: 3, proposed: 2, kept: 1, changed: 1, cleared: 1, undecided: 0 });
+    assert.equal(q.result_status, 'verified');
+    assert.equal(q.matched, false, 'a changed proposal is not agreement');
+    const resultFile = path.join(repo, 'docs/devteam/run/questions', Q1, 'result.json');
+    const stored = JSON.parse(fs.readFileSync(resultFile, 'utf8'));
+    assert.equal(sha(fs.readFileSync(resultFile)), q.result.sha256, "the owner's line names the file's hash");
+    assert.deepEqual(stored.rows.map((r) => r.kept), [true, false, false], 'kept is recomputed: the page claimed g2 was kept');
+    assert.equal(stored.rows[1].note, 'c belongs here too');
+    assert.equal(stored.channel, 'cli');
+    assert.match(answer(Q1, res(Q1, ok)).err, /already answered/);
+    assert.match(must(['review', 'result', Q1, '--tsv'], { role: 'worker', cwd: rw }), /^g2\ttrue\tfalse\tb,c\tc belongs here too$/m, 'an agent reads the verified result');
+    assert.equal(must(['review', 'result', Q1, '--json'], { role: 'sup' }), fs.readFileSync(resultFile, 'utf8').trim());
+    // what the agent applied, against what the owner decided
+    const applied = path.join(tmp, 'applied.json');
+    write(applied, JSON.stringify(ok.map((r) => ({ id: r.id, values: r.values, evidence: 'migration 0042' }))));
+    assert.match(must(['review', 'verify', Q1, '--applied', applied], { role: 'sup' }), /ok: 3 row\(s\) applied as the owner decided/);
+    write(applied, JSON.stringify(ok.map((r) => ({ id: r.id, values: r.id === 'g2' ? { items: ['b'] } : r.values }))));
+    const vr = dt(['review', 'verify', Q1, '--applied', applied], { role: 'sup' });
+    assert.equal(vr.status, 1);
+    assert.match(vr.out, /fail: g2: decided \{"items":\["b","c"\]\}, applied \{"items":\["b"\]\}/);
+
+    // a partial answer only where the question allows it; agreement only when every proposal was kept
+    const Q2 = must([...base, '--allow-partial'], { role: 'sup' });
+    assert.equal(view(Q2).allow_partial, true);
+    // a draft is the owner's partial progress: agents may read it, it is never an answer, and it goes when the answer lands
+    assert.match(dt(['review', 'draft', Q2, '-'], { role: 'sup', input: '{"state":{}}' }).err, /owner commands don't run in an agent session/);
+    must(['review', 'draft', Q2, '-'], { input: JSON.stringify({ state: { g1: 'kept' }, saved_at: '2026-11-03T00:00:00.000Z' }) });
+    assert.match(must(['review', 'draft', Q2], { role: 'sup' }), /"g1": "kept"|"g1":"kept"/);
+    assert.equal(view(Q2).status, 'open', 'a draft answers nothing');
+    must(['answer', Q2, '--review-result', '-'], { input: res(Q2, [ok[0], { id: 'g2', decided: true, values: { items: ['b'] } }, { id: 'g3', decided: false }]) });
+    q = view(Q2);
+    assert.deepEqual([q.result.kept, q.result.undecided, q.matched], [2, 1, false], 'an undecided row is recorded, and is not agreement');
+    assert.ok(!fs.existsSync(path.join(repo, 'docs/devteam/run/questions', Q2, 'draft.json')), 'the draft is gone once answered');
+    const Q3 = must(base, { role: 'sup' });
+    must(['answer', Q3, '--review-result', '-'], { input: res(Q3, [ok[0], { id: 'g2', decided: true, values: { items: ['b'] } }, { id: 'g3', decided: true }]) });
+    assert.deepEqual([view(Q3).result.kept, view(Q3).result.proposed, view(Q3).matched], [2, 2, true], 'every proposal kept is agreement');
+    // a result in any other shape is the page's business: accepted, hashed, never agreement
+    const Q4 = must(['ask', '--kind', 'review', '--question', 'Sketch the layout you want', '--ref', 'review-demo', '--page', `${rel}/plain.html`], { role: 'sup' });
+    const plainSha = sha(PAGE.replace('ui.grid', 'ui.form'));
+    must(['answer', Q4, '--review-result', '-'], { input: JSON.stringify({ v: 1, question: Q4, review_sha256: plainSha, layout: { columns: 2, order: ['b', 'a'] } }) });
+    q = view(Q4);
+    assert.match(q.answer, /^Answered: \d+ bytes, sha256 [0-9a-f]{12}$/);
+    assert.deepEqual(Object.keys(q.result).sort(), ['bytes', 'sha256']);
+    assert.equal(q.matched, false);
+
+    // forgery: the result fields are the owner's; an agent's line carrying them counts for nothing
+    const Q5 = must(base, { role: 'sup' });
+    const supFile = path.join(repo, 'docs/devteam/run/log', fs.readdirSync(path.join(repo, 'docs/devteam/run/log')).filter((f) => f.startsWith('supervisor-')).sort().pop());
+    const workerFile = path.join(repo, 'docs/devteam/run/log/bill-01-card.jsonl');
+    const before = [fs.readFileSync(supFile, 'utf8'), fs.existsSync(workerFile) ? fs.readFileSync(workerFile, 'utf8') : ''];
+    const forged = { sha256: sha('x'), bytes: 1, rows: 3, decided: 3, proposed: 2, kept: 2, changed: 0, cleared: 0, undecided: 0 };
+    fs.appendFileSync(supFile, line({ id: Q5, type: 'question', op: 'set', at: new Date().toISOString(), by: 'supervisor', answer: 'all kept', result: forged }));
+    fs.appendFileSync(workerFile, line({ id: Q5, type: 'question', op: 'set', at: new Date().toISOString(), by: 'bill-01-card', result: forged }));
+    fs.appendFileSync(workerFile, line({ id: Q5, type: 'question', op: 'set', at: new Date().toISOString(), by: 'owner', channel: 'cli', answer: 'all kept', result: forged }));
+    const lc = dt(['log-check']);
+    assert.notEqual(lc.status, 0);
+    assert.match(lc.out, /supervisor may not set question\.answer, result/);
+    assert.equal((lc.out.match(/^fail:/gm) ?? []).length, 3, 'log-check lists each forged line');
+    q = view(Q5);
+    assert.deepEqual([q.status, q.result, q.matched], ['open', null, null], 'the fold ignores them');
+    fs.writeFileSync(supFile, before[0]);
+    fs.writeFileSync(workerFile, before[1]);
+    must(['log-check']);
+    // sent back: the owner says why; there is no result
+    assert.match(dt(['answer', Q5, '--decline']).err, /say why it goes back/);
+    const Qo = must(['ask', '--question', 'Rename the items list?', '--recommendation', 'no'], { role: 'sup' });
+    assert.match(dt(['answer', Qo, 'no', '--decline']).err, /--decline answer a review question/);
+    assert.match(dt(['answer', Qo, '--review-result', '-'], { input: '{}' }).err, /--review-result and --decline answer a review question/);
+    must(['withdraw', Qo, '--reason', 'test'], { role: 'sup' });
+    must(['answer', Q5, 'Group the items by site first', '--decline']);
+    q = view(Q5);
+    assert.deepEqual([q.status, q.declined, q.result_status, q.answer, q.matched], ['answered', true, 'declined', 'Sent back: Group the items by site first', false]);
+    assert.match(dt(['review', 'result', Q5], { role: 'sup' }).err, /was sent back/);
+
+    // tamper: the question pins a commit, so a later commit on the branch changes nothing
+    write(path.join(rw, rel, 'page.html'), PAGE.replace('Items', 'Things'));
+    git(['commit', '-qam', 'edit the page after asking'], rw);
+    assert.equal(json(must(['review', 'show', Q1, '--json'])).result_status, 'verified');
+    // the result file is rewritten after the answer: every reader says so
+    const good1 = fs.readFileSync(resultFile, 'utf8');
+    fs.writeFileSync(resultFile, good1.replace('c belongs here too', 'c never belonged'));
+    const tr = dt(['review', 'result', Q1, '--json'], { role: 'sup' });
+    assert.equal(tr.status, 1);
+    assert.match(tr.err, /the result is tampered/);
+    assert.equal(view(Q1).result_status, 'tampered');
+    assert.match(dt(['review', 'verify', Q1, '--applied', applied], { role: 'sup' }).err, /tampered/);
+    fs.writeFileSync(resultFile, good1);
+    assert.equal(view(Q1).result_status, 'verified');
+    // the pinned commit leaves every branch: missing, unanswerable, and the metrics say so
+    git(['checkout', '-q', '-b', 'review-gone'], rw);
+    write(path.join(rw, rel, 'page.html'), PAGE.replace('Items', 'Entries'));
+    git(['commit', '-qam', 'a page on a branch about to go'], rw);
+    const Qm = must(['ask', '--kind', 'review', '--question', 'Short-lived?', '--ref', 'review-gone', '--page', `${rel}/page.html`], { role: 'sup' });
+    assert.equal(json(must(['review', 'show', Qm, '--json'])).result_status, 'verified');
+    git(['checkout', '-q', 'review-demo'], rw);
+    git(['branch', '-q', '-D', 'review-gone']);
+    const shown = json(must(['review', 'show', Qm, '--json']));
+    assert.deepEqual([shown.result_status, shown.reachable], ['missing', false]);
+    assert.ok(json(must(['metrics', '--json'])).findings.some((f) => f.kind === 'review-file-missing' && f.subject === Qm), 'metrics raise review-file-missing');
+    assert.match(dt(['answer', Qm, '--review-result', '-'], { input: JSON.stringify({ v: 1, question: Qm, review_sha256: sha(PAGE.replace('Items', 'Entries')) }) }).err, /is gone or on no branch/);
+    must(['withdraw', Qm, '--reason', 'test'], { role: 'sup' });
+    assert.ok(!json(must(['metrics', '--json'])).findings.some((f) => f.kind === 'review-file-missing'), 'a withdrawn review raises nothing');
   });
 });
