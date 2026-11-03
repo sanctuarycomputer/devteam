@@ -1226,6 +1226,9 @@ test('devteam kit', async (t) => {
     try {
       for (let i = 0; i < 50; i++) { try { await fetch(`http://127.0.0.1:${port}/`); break; } catch { await new Promise((r) => setTimeout(r, 100)); } }
       const browser = { 'content-type': 'application/json', 'sec-fetch-site': 'same-origin', origin: `http://127.0.0.1:${port}` };
+      // the data names the page version, so an open tab can tell it was updated underneath it
+      const dataRes = await fetch(`http://127.0.0.1:${port}/api/data`);
+      assert.match(dataRes.headers.get('x-devteam-page') ?? '', /^[0-9a-f]{16}$/);
       const postSecret = (b, headers = browser) => fetch(`http://127.0.0.1:${port}/api/secret`, { method: 'POST', headers, body: JSON.stringify(b) });
       assert.equal((await postSecret({ id: Qs, values: {} }, { 'content-type': 'application/json' })).status, 403, 'a request without browser headers is refused');
       for (let i = 0; i < 3; i++) assert.equal((await postSecret({ id: 'q-20200101-000000000-supervisor', values: { A: 'x'.repeat(3 * 1024 * 1024) } })).status, 400);
