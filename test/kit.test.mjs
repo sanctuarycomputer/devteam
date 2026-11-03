@@ -51,7 +51,7 @@ test('devteam kit', async (t) => {
     if (!process.env.DEVTEAM_TEST_KEEP) fs.rmSync(tmp, { recursive: true, force: true }); else console.log(`fixture kept at ${tmp}`);
   });
 
-  await t.test('init materializes project/, settings, agent config', () => {
+  await t.test('init materializes project/, settings, agent config', (t) => {
     git(['init', '-q', '--bare', origin], tmp);
     fs.mkdirSync(repo);
     git(['init', '-q', '-b', 'main']);
@@ -62,6 +62,12 @@ test('devteam kit', async (t) => {
     fs.cpSync(kit, path.join(repo, 'docs', 'devteam'), { recursive: true, filter: (p) => !/[\\/](project|run)([\\/]|$)/.test(p.slice(kit.length)) });
     must(['init', '--name', 'demo', '--upstream-base', 'v0.2.0', '--github']);
     for (const f of ['docs/devteam/project/settings.md', 'docs/devteam/project/designs/architecture.md', '.github/workflows/devteam.yml']) assert.ok(fs.existsSync(path.join(repo, f)), f);
+    // the workflow is valid YAML: an expression inside a { … } flow mapping breaks it, and GitHub then runs no job at all
+    const wf = path.join(repo, '.github/workflows/devteam.yml');
+    assert.doesNotMatch(fs.readFileSync(wf, 'utf8'), /\{[^}\n]*\$\{\{/, 'no ${{ }} inside a flow mapping');
+    const ry = spawnSync('ruby', ['-ryaml', '-e', 'w = YAML.load_file(ARGV[0]); exit(w["jobs"]["check-pr"]["steps"].size >= 3 ? 0 : 2)', wf], { encoding: 'utf8' });
+    if (ry.error || /No version is set|command not found/.test(ry.stderr ?? '')) t.diagnostic('no runnable ruby: the workflow YAML was checked by pattern only');
+    else assert.equal(ry.status, 0, `the workflow parses as YAML: ${ry.stderr}`);
     assert.match(fs.readFileSync(path.join(repo, '.gitignore'), 'utf8'), /docs\/devteam\/run\//);
     assert.match(fs.readFileSync(path.join(repo, 'AGENTS.md'), 'utf8'), /process\/supervisor\.md/, 'AGENTS.md routes agents to their doc');
     assert.match(fs.readFileSync(path.join(repo, 'CLAUDE.md'), 'utf8'), /@AGENTS\.md/, 'CLAUDE.md imports AGENTS.md');
