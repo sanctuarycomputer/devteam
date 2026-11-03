@@ -3806,7 +3806,10 @@ function retroDue() {
     if (first && Date.now() - Date.parse(first) >= every * DAY) { reasons.push(`no retro yet, and work started ${dateOnly(first)}`); since = new Date(Date.parse(first) + every * DAY).toISOString(); }
   } else if (Date.now() - lastAt >= every * DAY) { reasons.push(`${every} days since the last retro (${dateOnly(last.created_at)})`); since = new Date(lastAt + every * DAY).toISOString(); }
   for (const f of finishedFeatures()) if (!lastAt || Date.parse(f.finished_at) > lastAt) { reasons.push(`feature ${f.feature} finished ${dateOnly(f.finished_at)}`); if (!since || f.finished_at < since) since = f.finished_at; }
-  return { due: reasons.length > 0, reasons, due_since: since, last: last ? { at: last.created_at, summary: last.detail, file: last.source_ref ?? null } : null };
+  // every closed retro, newest first: its id is the closing observation's, its write-up the file
+  const all = logObjects('observation').filter((o) => o.kind === 'retro' && o.created_by === 'supervisor').sort(byTime).reverse()
+    .map((o) => ({ id: o.id, at: o.created_at, summary: o.detail, file: o.source_ref ?? null, refs: o.refs ?? [] }));
+  return { due: reasons.length > 0, reasons, due_since: since, last: last ? { id: last.id, at: last.created_at, summary: last.detail, file: last.source_ref ?? null } : null, all };
 }
 function retroNumbers(m) {
   return {
