@@ -1878,15 +1878,19 @@ function cmdMerge() {
           ok = false;
         }
         const tests = typeof spec === 'object' && spec.junit ? readJunit(path.join(wt, spec.junit)) : [];
-        appendLog({ type: 'gate', gate: name, ok, ms: Date.now() - started, sha, tests_total: tests.length, tests: keepTests(tests) }, 'supervisor');
+        const ms = Date.now() - started;
         // A ratchet gate that fails here and also fails at the merge base is pre-existing debt, not
-        // this PR's: it passes with a warning (quality.md §2, modes).
+        // this PR's: it passes with a warning (quality.md §2, modes), and its line says so, so the
+        // gate's fail rate counts only failures that were the PR's.
+        let preexisting = false;
         if (!ok && spec.mode === 'ratchet' && base) {
           const bwt = detachedWorktree(base, `base-${slug(branch)}`);
           let baseOk = true;
           try { execFileSync('sh', ['-c', cmd], { cwd: bwt, stdio: 'ignore', env: gateEnv(!plan && !chore ? id : null) }); } catch { baseOk = false; } finally { git(['worktree', 'remove', '--force', bwt], mainRoot); }
-          if (!baseOk) { warn(`gate ${name} fails at the merge base ${base.slice(0, 12)} too: pre-existing, allowed by ratchet mode`); continue; }
+          preexisting = !baseOk;
         }
+        appendLog({ type: 'gate', gate: name, ok, ms, sha, tests_total: tests.length, tests: keepTests(tests), preexisting: preexisting || undefined }, 'supervisor');
+        if (preexisting) { warn(`gate ${name} fails at the merge base ${base.slice(0, 12)} too: pre-existing, allowed by ratchet mode`); continue; }
         if (!ok) fails.push(`gate ${name} failed at ${sha.slice(0, 12)}`);
       }
     } finally {
@@ -3183,7 +3187,7 @@ function gateStats(runs) {
     for (const r of rs.filter((x) => !x.dirty)) (bySha.get(r.sha) ?? bySha.set(r.sha, []).get(r.sha)).push(r);
     const flaky = [...bySha.values()].filter((x) => x.some((r) => r.ok) && x.some((r) => !r.ok)).length;
     if (flaky) flakyGates.push({ gate: g, commits: flaky });
-    gates.push({ gate: g, runs: rs.length, fail_rate: +(rs.filter((r) => !r.ok).length / rs.length).toFixed(2), median_seconds: +(median(rs.map((r) => r.ms)) / 1000).toFixed(1), max_seconds: +(Math.max(...rs.map((r) => r.ms)) / 1000).toFixed(1) });
+    gates.push({ gate: g, runs: rs.length, fail_rate: +(rs.filter((r) => !r.ok && !r.preexisting).length / rs.length).toFixed(2), preexisting_fails: rs.filter((r) => r.preexisting).length, median_seconds: +(median(rs.map((r) => r.ms)) / 1000).toFixed(1), max_seconds: +(Math.max(...rs.map((r) => r.ms)) / 1000).toFixed(1) });
   }
   const flakyTests = new Map();
   const testMs = new Map();
