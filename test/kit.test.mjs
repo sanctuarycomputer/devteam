@@ -664,6 +664,31 @@ test('devteam kit', async (t) => {
     assert.match(dt(['chore', 'pr', '../escape', '--title', 't'], { role: 'sup' }).err, /chore slug/, 'chore pr checks the slug too');
     assert.match(dt(['merge', '--chore', '../escape', '--dry-run'], { role: 'sup' }).err, /chore slug/, 'merge --chore checks the slug too');
     must(['check-pr', '--head-ref', 'chore-log', '--sha', shaL, '--title', 'chore-log: sync', '--body-file', body], { role: 'sup' });
+    // a planner's monthly file is its own stream: lines older than its plan file's (landed later by
+    // the plan PR) are in order
+    const stamp = (ms) => { const d = new Date(Date.now() - ms); return { at: d.toISOString(), id: d.toISOString().replace(/[-:T]/g, '').replace('.', '').slice(0, 17) }; };
+    const older = stamp(2 * 3600000), newer = stamp(3600000);
+    const msgLine = (s, by) => line({ id: `m-${s.id.slice(0, 8)}-${s.id.slice(8)}-${by}`, type: 'message', op: 'new', at: s.at, by, to: 'supervisor', kind: 'info', text: 'x' });
+    const onMainZ = (fn, msg) => {
+      git(['worktree', 'add', '-q', '--detach', wt('zeta-main'), 'origin/main']);
+      fn(wt('zeta-main'));
+      git(['add', '-A'], wt('zeta-main'));
+      git(['commit', '-qm', msg], wt('zeta-main'));
+      git(['push', '-q', 'origin', 'HEAD:main'], wt('zeta-main'));
+      git(['worktree', 'remove', '--force', wt('zeta-main')]);
+    };
+    onMainZ((w) => write(path.join(w, 'docs/devteam/project/log/plan-zeta.jsonl'), msgLine(newer, 'plan-zeta')), 'plan-zeta lands');
+    git(['fetch', '-q', 'origin'], wt('chore-log'));
+    git(['merge', '-q', '--no-edit', 'origin/main'], wt('chore-log'));
+    const zetaMonthly = `docs/devteam/project/log/plan-zeta-${older.at.slice(0, 7)}.jsonl`;
+    write(path.join(wt('chore-log'), zetaMonthly), msgLine(older, 'plan-zeta'));
+    git(['add', zetaMonthly], wt('chore-log'));
+    git(['commit', '-qm', 'sync the planner monthly file'], wt('chore-log'));
+    must(['check-pr', '--head-ref', 'chore-log', '--sha', git(['rev-parse', 'HEAD'], wt('chore-log')), '--title', 'chore-log: sync', '--body-file', body], { role: 'sup' });
+    git(['reset', '-q', '--hard', shaL], wt('chore-log'));
+    onMainZ((w) => fs.rmSync(path.join(w, 'docs/devteam/project/log/plan-zeta.jsonl')), 'test cleanup: plan-zeta');
+    git(['fetch', '-q', 'origin']);
+    git(['merge', '-q', '--ff-only', 'origin/main']);
     write(path.join(wt('chore-log'), 'docs/devteam/governance/constitution.md'), '# nothing\n');
     git(['commit', '-qam', 'kit edit'], wt('chore-log'));
     assert.match(dt(['check-pr', '--head-ref', 'chore-log', '--sha', git(['rev-parse', 'HEAD'], wt('chore-log')), '--title', 'chore-log: sync', '--body-file', body], { role: 'sup' }).out, /chore-log changes only project\/log/);
