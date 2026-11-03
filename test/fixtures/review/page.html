@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Match items to groups</title>
+<link rel="stylesheet" href="devteam-ui.css">
+<script src="devteam-ui.js"></script>
+<style>
+  #intro { max-width: 78ch; margin-bottom: 10px; }
+</style>
+</head>
+<body>
+<div id="intro"></div>
+<nav id="tabs"></nav>
+<main id="view"></main>
+<script>
+// A generic example review page: a grid of rows, each with a many-to-many list of options, and a
+// second view of the same answer by option. Everything it shows comes from data.json in init.
+devteam.ready(async ({ data, draft, result, readonly }) => {
+  if (data.intro) document.getElementById('intro').innerHTML = await devteam.markdown(data.intro);
+  const grid = ui.grid({
+    data, draft, result, readonly, mount: false,
+    unit: { one: 'group', many: 'groups' },
+    columns: [{ key: 'owner', label: 'Owner' }, { key: 'year', label: 'Year' }],
+    fields: [
+      { key: 'items', label: 'Items', type: 'multiselect', options: 'items', help: 'Search by name, year or area. An item may belong to several groups.' },
+      { key: 'note', label: 'Note to the agent', type: 'text', max: 300 },
+    ],
+    order: 'confidence-low-first',
+    bulk: [{ label: 'Keep every high-confidence proposal', where: { confidence: ['high'] }, do: 'keep' }],
+  });
+  // the same answer by item: which groups each item is on
+  const byItem = ui.table({ columns: [{ key: 'label', label: 'Item' }, { key: 'area', label: 'Area' }, { key: 'groups', label: 'On groups' }] });
+  const redraw = () => byItem.update(data.options.items.map((o) => ({
+    label: o.label, area: o.group,
+    groups: data.rows.filter((r) => (grid.valuesOf(r.id).items || []).includes(o.id)).map((r) => r.title).join(', ') || 'none',
+  })));
+  grid.onChange(redraw);
+  redraw();
+  ui.tabs(document.getElementById('tabs'), [['By group', grid.el], ['By item', byItem.el]], document.getElementById('view'));
+});
+</script>
+</body>
+</html>

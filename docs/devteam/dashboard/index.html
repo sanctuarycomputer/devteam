@@ -11,7 +11,10 @@
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js" defer></script>
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js" defer></script>
 <style>
-  /* Geist tokens (vercel.com/geist), a Linear-style shell. Light and dark are separate scales. */
+  /* Geist tokens (vercel.com/geist), a Linear-style shell. Light and dark are separate scales.
+     Review pages get the same tokens: devteam-ui.css repeats this block verbatim (the kit's test
+     checks it), so a page an agent draws looks like the dashboard. */
+  /* devteam-ui tokens start */
   :root {
     color-scheme: light;
     --bg: #fafafa; --surface: #ffffff; --raised: #ffffff; --hover: #f2f2f2; --well: #f2f2f2;
@@ -27,6 +30,7 @@
     --blue: #52a8ff; --blue-fg: #52a8ff; --red: #ff6166; --red-fg: #ff6166; --amber: #ffb224; --amber-fg: #ffb224; --green: #3cd58c; --green-fg: #62c073;
     --series-1: #52a8ff; --grid: #1f1f1f; --shadow: none;
   } }
+  /* devteam-ui tokens end */
   * { box-sizing: border-box; }
   html { -webkit-text-size-adjust: 100%; background: var(--bg); }
   body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
@@ -307,6 +311,51 @@
   .viewer iframe { width: 100%; height: 70vh; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
   .viewer img { max-width: 100%; border: 1px solid var(--line); border-radius: 8px; }
   @media (max-width: 900px) { .drawer { padding: 16px; } .drawer dl { grid-template-columns: 1fr; } }
+
+  /* review questions: three bands, the middle one the agent's (sandboxed) page */
+  .qcard.review { border-left-color: var(--blue); }
+  main.reviewing { max-width: 1280px; }
+  main.reviewing > section:not(#review-view) { display: none !important; }
+  #review-view { margin-top: 0; }
+  .rv-back { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--fg-2); margin: 0 0 10px; }
+  .rv-back:hover { color: var(--fg); }
+  .rv-head { max-width: none; }
+  .rv-title { font-size: 12px; color: var(--fg-2); margin-top: 6px; }
+  .rv-pins code { font-size: 11px; }
+  .rv-preview-banner { display: inline-block; font-size: 11px; font-weight: 600; letter-spacing: .04em; color: var(--amber-fg); border: 1px solid color-mix(in srgb, var(--amber) 45%, var(--line)); background: color-mix(in srgb, var(--amber) 9%, var(--surface)); border-radius: 6px; padding: 2px 8px; margin-bottom: 6px; }
+  .rv-frame-label { display: flex; gap: 8px; align-items: center; font-size: 11.5px; color: var(--muted); margin: 14px 0 4px; }
+  .rv-frame { display: block; width: 100%; height: 480px; min-height: 320px; border: 2px dashed var(--line-2); border-radius: 8px; background: var(--bg); }
+  .rv-panel { position: sticky; bottom: 0; z-index: 4; margin-top: 12px; background: var(--surface); border: 1px solid var(--line-2); border-radius: 10px 10px 0 0; box-shadow: 0 -8px 28px rgba(0,0,0,.10); padding: 12px 16px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 300px); gap: 10px 18px; max-height: 46vh; }
+  .rv-panel h3 { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; margin: 0 0 6px; color: var(--fg); }
+  .rv-panel h3 .dim { font-weight: 400; }
+  #rv-preview { overflow: auto; min-width: 0; }
+  #rv-actions { display: flex; flex-direction: column; gap: 6px; align-items: stretch; }
+  #rv-actions button { margin: 0; }
+  #rv-actions textarea { margin: 0; }
+  #rv-actions fieldset.next { margin: 0; }
+  .rv-why { font-size: 12px; color: var(--fg-2); }
+  .rv-counts { font-size: 12px; color: var(--fg-2); margin: 2px 0 8px; font-variant-numeric: tabular-nums; }
+  .rv-counts b { color: var(--fg); }
+  .rv-table { font-size: 12px; }
+  .rv-table td, .rv-table th { padding: 5px 10px; }
+  .rv-table .arrow { color: var(--muted); padding: 0 4px; }
+  .rv-st { font-size: 11px; font-weight: 500; white-space: nowrap; }
+  .rv-st.kept { color: var(--green-fg); } .rv-st.changed { color: var(--amber-fg); } .rv-st.none { color: var(--blue-fg); } .rv-st.undecided { color: var(--muted); }
+  .rv-note { color: var(--fg-2); font-size: 11.5px; }
+  .rv-raw { background: var(--well); border-radius: 6px; padding: 8px 10px; font: 11.5px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 30vh; overflow: auto; margin: 6px 0 0; }
+  .jtree { font: 12px/1.6 var(--mono); }
+  .jtree details { margin: 0 0 0 14px; }
+  .jtree > details { margin-left: 0; }
+  .jtree summary { margin: 0; color: var(--fg); font-size: 12px; }
+  .jtree .jl { margin-left: 14px; overflow-wrap: anywhere; }
+  .jtree .jk { color: var(--fg-2); }
+  .jtree .jv.string { color: var(--green-fg); } .jtree .jv.number, .jtree .jv.boolean { color: var(--blue-fg); }
+  .rv-link { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; margin: 10px 0 0; }
+  .rv-link code { overflow-wrap: anywhere; }
+  .rv-link a.go { display: inline-flex; align-items: center; height: 26px; padding: 0 10px; border-radius: 6px; background: var(--fg); color: var(--bg); font-size: 12px; font-weight: 500; }
+  .rv-link button { margin: 0; height: 26px; }
+  /* on a phone the panel follows the page instead of covering it */
+  @media (max-width: 900px) { .rv-panel { position: static; grid-template-columns: minmax(0, 1fr); max-height: none; } #rv-preview { overflow: visible; } }
 </style>
 </head>
 <body>
@@ -419,6 +468,17 @@
     <h3 style="margin-top:14px">Checks before merge <span class="sub">the automated checks every change must pass (settings <code>gates</code>)</span></h3>
     <div id="gates"></div>
     <div class="two" style="margin-top:14px" id="test-lists"></div>
+  </section>
+
+  <section id="review-view" hidden>
+    <a class="rv-back" href="#inbox"><i class="icon-arrow-left" aria-hidden="true"></i>Back to the Inbox</a>
+    <div id="rv-head"></div>
+    <div id="rv-link" class="banner stale rv-link" role="alert" hidden></div>
+    <div id="rv-frame-wrap"></div>
+    <div class="rv-panel" id="rv-panel" hidden>
+      <div id="rv-preview" aria-live="polite"></div>
+      <div id="rv-actions"></div>
+    </div>
   </section>
 
 </main>
@@ -683,7 +743,7 @@ const cap = (x) => { const t = String(x ?? ''); return t.charAt(0).toUpperCase()
 const words = (x) => cap(String(x ?? '').replace(/[-_]+/g, ' '));
 const PHASE_WORDS = { starting: 'starting', spec: 'writing the spec', plan: 'planning', contract: 'agreeing contracts', build: 'building', verify: 'verifying', 'final-review': 'final review', 'awaiting-word': 'waiting for the go-ahead', merging: 'merging', blocked: 'blocked', parked: 'parked', done: 'done' };
 const RUNG_WORDS = { 1: 'asks you first', 2: 'asks, with a default', 3: 'decides, then tells you' };
-const KIND_WORDS = { 'owner-decision': 'Decision', 'one-way-door': 'Hard to undo', clarification: 'Clarification', proposal: 'Proposal', trust: 'More trust?', 'goal-definition': 'Defining a goal', 'owner-action': 'Needs you to do something' };
+const KIND_WORDS = { 'owner-decision': 'Decision', 'one-way-door': 'Hard to undo', clarification: 'Clarification', proposal: 'Proposal', trust: 'More trust?', 'goal-definition': 'Defining a goal', 'owner-action': 'Needs you to do something', review: 'Review' };
 const CHANNEL_WORDS = { dashboard: 'on the dashboard', cli: 'in your terminal', chat: 'to the supervisor in chat' };
 const ticketMap = () => new Map((DATA?.tickets || []).map((t) => [t.id, t]));
 const allQuestions = () => [...(DATA?.questions || []), ...(DATA?.ooda?.answered || [])];
@@ -809,7 +869,11 @@ function restoreSecretDrafts() {
   });
 }
 const toB64 = async (file) => { const bytes = new Uint8Array(await file.arrayBuffer()); let bin = ''; for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000)); return btoa(bin); };
+// Next time: only for a kind of decision on the trust ladder; the current rung is marked, nothing
+// changes unless the owner picks another. The supervisor never infers this from the note.
+const nextTime = (q, cls, attr = 'data-auto') => (cls ? `<fieldset class="next"><legend>Next time, for decisions like this (${esc(cls.about || words(q.class))}), the supervisor…</legend>${[1, 2, 3].filter((r) => r <= cls.ceiling).map((r) => `<label class="seg"><input type="radio" name="${attr === 'data-auto' ? '' : 'rv-'}auto-${esc(q.id)}" value="${r === cls.rung ? '' : r}" ${attr}="${esc(q.id)}" ${r === cls.rung ? 'checked' : ''}>${esc(RUNG_WORDS[r])}${r === cls.rung ? ' <span class="muted">(now)</span>' : ''}</label>`).join('')}</fieldset>` : '');
 function questionCard(q, o, reasonText) {
+  if (q.kind === 'review') return reviewCard(q, o, reasonText);
   const cls = q.class && o.classes[q.class];
   const kindCls = q.kind === 'one-way-door' ? 'door' : q.kind === 'trust' ? 'trust' : '';
   const list = choicesOf(q);
@@ -822,9 +886,7 @@ function questionCard(q, o, reasonText) {
       </label>`).join('') + (list.length && !['owner-action', 'goal-approval'].includes(q.kind) ? `
       <label class="choice${picks[q.id] === '__other' ? ' picked' : ''}"><input type="radio" name="${esc(name)}" value="__other" data-pick="${esc(q.id)}" ${picks[q.id] === '__other' ? 'checked' : ''}><span><b>Something else</b><div class="d">Write your own answer in the box below.</div></span></label>` : '');
   const why = q.why_asked?.reasons?.length ? `Why you: ${q.why_asked.reasons.map((r) => esc(reasonText[r] || r)).join('; ')}.` : '';
-  // Next time: only for a kind of decision on the trust ladder; the current rung is marked, nothing
-  // changes unless the owner picks another. The supervisor never infers this from the note.
-  const next = cls ? `<fieldset class="next"><legend>Next time, for decisions like this (${esc(cls.about || words(q.class))}), the supervisor…</legend>${[1, 2, 3].filter((r) => r <= cls.ceiling).map((r) => `<label class="seg"><input type="radio" name="auto-${esc(q.id)}" value="${r === cls.rung ? '' : r}" data-auto="${esc(q.id)}" ${r === cls.rung ? 'checked' : ''}>${esc(RUNG_WORDS[r])}${r === cls.rung ? ' <span class="muted">(now)</span>' : ''}</label>`).join('')}</fieldset>` : '';
+  const next = nextTime(q, cls);
   const goalAsk = q.kind === 'goal-approval';
   const notePh = goalAsk ? 'Notes for the planner: taken into account whatever you choose (needed to refine)' : list.length ? 'Add a note (optional), or your own answer' : 'Your answer';
   return `
@@ -849,7 +911,7 @@ function cardHead(icon, label, { extra = '', id = null, rows = [] } = {}) {
   const menu = id || rows.length ? `<details class="menu"><summary aria-label="Details"><i class="icon-ellipsis" aria-hidden="true"></i></summary><div class="pop"><div class="kv">${id ? `<span>ID</span><code>${esc(id)}</code>` : ''}${rows.map(([k, v]) => `<span>${esc(k)}</span><span>${v}</span>`).join('')}</div>${id ? `<button class="ghost" data-copy="${esc(id)}">Copy ID</button>` : ''}</div></details>` : '';
   return `<div class="card-head"><i class="icon-${icon}" aria-hidden="true"></i>${label}<span class="grow">${extra}</span>${menu}</div>`;
 }
-const KIND_ICON = { 'owner-decision': 'scale', 'one-way-door': 'triangle-alert', clarification: 'circle-help', proposal: 'lightbulb', trust: 'users', 'goal-definition': 'target', 'goal-approval': 'flag', 'owner-action': 'zap' };
+const KIND_ICON = { 'owner-decision': 'scale', 'one-way-door': 'triangle-alert', clarification: 'circle-help', proposal: 'lightbulb', trust: 'users', 'goal-definition': 'target', 'goal-approval': 'flag', 'owner-action': 'zap', review: 'list-checks' };
 const fileHref = (l) => `#file?${new URLSearchParams({ path: l.path, ...(l.ref ? { ref: l.ref } : {}), title: l.title || l.path })}`;
 const linkOf = (l) => (l.url ? `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.title)}</a>` : `<a href="${esc(fileHref(l))}">${esc(l.title)}</a>`);
 function answeredCard(q) {
@@ -860,11 +922,508 @@ function answeredCard(q) {
     ${q.said ? `<div class="muted">You said: “${esc(q.said)}”</div>` : ''}
     ${q.autonomy ? `<div class="muted">From then on, for ${esc(words(q.autonomy.class))}: the supervisor ${esc(RUNG_WORDS[q.autonomy.rung])}.</div>` : ''}
     ${q.standing_rule ? `<div class="muted">Standing rule: ${esc(q.standing_rule)}</div>` : ''}
+    ${q.kind === 'review' ? `<div class="meta"><a class="linkish" href="#review/${encodeURIComponent(q.id)}">See the review as you answered it</a>${q.result_status && !['verified', 'declined'].includes(q.result_status) ? ` <span class="badge high">${esc(q.result_status)}</span>` : ''}</div>` : ''}
     <div class="meta">${esc(how)}${q.answered_at ? ` · ${when(q.answered_at)}` : ''}</div>
     ${q.status === 'defaulted' ? `<div class="row-inline"><input type="text" data-overrule="${esc(q.id)}" placeholder="Your answer instead"><button class="ghost" data-overrule-send="${esc(q.id)}">Overrule</button><span class="err" id="e-${esc(q.id)}"></span></div>` : ''}
   </div>`;
 }
 
+// ---- review questions: the agent's page in a sandboxed frame; the answer in the dashboard's own panel ----
+// The page may only propose a result. The panel below it shows that exact result, drawn by this
+// code and not the page's, and posts those same bytes when the owner clicks Answer.
+/* review-bridge start */
+// Every message from a review frame passes here first. It is accepted only from that frame's own
+// window, with the opaque origin a sandboxed frame has ("null"), as one of the known types, within
+// the size caps; what comes back holds only the fields its type allows. Anything else is dropped,
+// with the reason. The kit's test loads this block by itself.
+const BRIDGE_MAX = 4 * 1024 * 1024;
+const BRIDGE_MD_MAX = 64 * 1024;
+function bridgeAccept(ev, frameWindow) {
+  if (!ev || !frameWindow || ev.source !== frameWindow) return { drop: 'source' };
+  if (ev.origin !== 'null') return { drop: 'origin' };
+  const d = ev.data;
+  const isPlain = (x) => Object.prototype.toString.call(x) === '[object Object]';
+  if (!isPlain(d)) return { drop: 'shape' };
+  let size;
+  try { size = JSON.stringify(d).length; } catch { return { drop: 'shape' }; }
+  if (size > BRIDGE_MAX) return { drop: 'size' };
+  const num = (x) => typeof x === 'number' && Number.isFinite(x);
+  switch (d.type) {
+    case 'ready': return { type: 'ready' };
+    case 'progress': return num(d.done) && num(d.total) && d.done >= 0 && d.done <= d.total && d.total <= 1e6 ? { type: 'progress', done: Math.floor(d.done), total: Math.floor(d.total) } : { drop: 'fields' };
+    case 'draft': return d.state === undefined ? { drop: 'fields' } : { type: 'draft', state: d.state };
+    case 'propose': return isPlain(d.result) ? { type: 'propose', result: d.result } : { drop: 'fields' };
+    case 'markdown':
+      if (!(num(d.id) || (typeof d.id === 'string' && d.id.length <= 100)) || typeof d.text !== 'string') return { drop: 'fields' };
+      return d.text.length > BRIDGE_MD_MAX ? { drop: 'size' } : { type: 'markdown', id: d.id, text: d.text };
+    case 'open':
+      // a web page (https only), or a committed file in the repo
+      if (typeof d.href === 'string') return d.href.length <= 2048 && /^https:\/\/[^\s/?#@]+(?:[/?#][^\s]*)?$/i.test(d.href) ? { type: 'open', href: d.href } : { drop: 'href' };
+      if (typeof d.path === 'string') return d.path.length <= 512 && /^(?![/\\])(?!.*\.\.)[^\s]+$/.test(d.path) && (d.ref === undefined || (typeof d.ref === 'string' && /^[A-Za-z0-9._/-]{1,200}$/.test(d.ref))) ? { type: 'open', path: d.path, ref: d.ref } : { drop: 'path' };
+      return { drop: 'fields' };
+    case 'resize': return num(d.height) ? { type: 'resize', height: Math.max(0, Math.min(d.height, 100000)) } : { drop: 'fields' };
+    default: return { drop: 'type' };
+  }
+}
+// SHA-256 (FIPS 180-4) for when the page isn't a secure context (a dashboard on another host
+// over plain http has no crypto.subtle); the same bytes, the same hash as the owner's process.
+function sha256Js(bytes) {
+  const K = [], H = [];
+  for (let n = 2, c = 0; c < 64; n++) {
+    let prime = true;
+    for (let d = 2; d * d <= n; d++) if (n % d === 0) { prime = false; break; }
+    if (!prime) continue;
+    if (c < 8) H.push((Math.sqrt(n) % 1) * 2 ** 32 >>> 0);
+    K.push((Math.cbrt(n) % 1) * 2 ** 32 >>> 0);
+    c++;
+  }
+  const len = bytes.length;
+  const words = new Uint32Array((((len + 8) >> 6) + 1) * 16);
+  for (let i = 0; i < len; i++) words[i >> 2] |= bytes[i] << (24 - (i % 4) * 8);
+  words[len >> 2] |= 0x80 << (24 - (len % 4) * 8);
+  words[words.length - 1] = len * 8;
+  words[words.length - 2] = Math.floor(len / 0x20000000);
+  const w = new Uint32Array(64);
+  const rot = (x, n) => (x >>> n) | (x << (32 - n));
+  for (let j = 0; j < words.length; j += 16) {
+    let [a, b, c, d, e, f, g, hh] = H;
+    for (let i = 0; i < 64; i++) {
+      if (i < 16) w[i] = words[j + i];
+      else w[i] = (rot(w[i - 2], 17) ^ rot(w[i - 2], 19) ^ (w[i - 2] >>> 10)) + w[i - 7] + (rot(w[i - 15], 7) ^ rot(w[i - 15], 18) ^ (w[i - 15] >>> 3)) + w[i - 16];
+      const t1 = (hh + (rot(e, 6) ^ rot(e, 11) ^ rot(e, 25)) + ((e & f) ^ (~e & g)) + K[i] + w[i]) >>> 0;
+      const t2 = ((rot(a, 2) ^ rot(a, 13) ^ rot(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) >>> 0;
+      [hh, g, f, e, d, c, b, a] = [g, f, e, (d + t1) >>> 0, c, b, a, (t1 + t2) >>> 0];
+    }
+    [a, b, c, d, e, f, g, hh].forEach((x, i) => { H[i] = (H[i] + x) >>> 0; });
+  }
+  return H.map((x) => x.toString(16).padStart(8, '0')).join('');
+}
+/* review-bridge end */
+const sha256Hex = async (bytes) => {
+  if (!window.crypto?.subtle) return sha256Js(bytes);
+  const d = await crypto.subtle.digest('SHA-256', bytes);
+  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, '0')).join('');
+};
+const RV_MAX = 4 * 1024 * 1024;
+// Drafts in this browser are keyed on the page's hash, so a page asked again never inherits one.
+const rvKey = (qid, sha) => `devteam.review.${qid}.${String(sha ?? '').slice(0, 12)}`;
+const lsGet = (k) => { try { return JSON.parse(localStorage.getItem(k) || 'null'); } catch { return null; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch { return false; } };
+const lsDel = (k) => { try { localStorage.removeItem(k); } catch {} };
+const isPlainObj = (x) => !!x && typeof x === 'object' && !Array.isArray(x);
+const emptyVal = (x) => x === null || x === undefined || x === '' || (Array.isArray(x) ? !x.length : typeof x === 'object' && !Object.keys(x).length);
+// the owner's process compares values with proposals in this form: sorted keys, no whitespace
+const canonical = (v) => (Array.isArray(v) ? `[${v.map(canonical).join(',')}]` : v && typeof v === 'object' ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(',')}}` : JSON.stringify(v));
+const pinsVerified = (info) => !!info && info.reachable && (info.files || []).length > 0 && info.files.every((f) => f.status === 'verified');
+const PIN_WORDS = { page: 'page', data: 'data', result_schema: 'schema' };
+
+function reviewCard(q, o, reasonText) {
+  const rv = q.review || {};
+  const cls = q.class && o.classes[q.class];
+  const local = lsGet(rvKey(q.id, rv.page?.sha256));
+  const pr = local?.progress;
+  const ok = q.result_status === 'verified';
+  const why = q.why_asked?.reasons?.length ? `Why you: ${q.why_asked.reasons.map((r) => esc(reasonText[r] || r)).join('; ')}.` : '';
+  const declineOpen = !!drafts[q.id];
+  return `
+    <div class="card qcard review" id="q-${esc(q.id)}">
+      ${cardHead(KIND_ICON.review, '<span class="badge low">Review</span>', { extra: (q.blocks || []).length ? `holds up ${q.blocks.map(tlink).join(', ')}` : q.ticket ? `about ${tlink(q.ticket)}` : '', id: q.id, rows: [['Asked', esc(when(q.asked_at))], ...(q.class ? [['Kind', esc(q.class)]] : [])] })}
+      <h4>${linkify(q.question)}</h4>
+      ${q.context ? `<p class="ctx">${linkify(q.context)}</p>` : ''}
+      <div class="meta rv-pins">${rv.data ? `${esc(rv.data.rows)} rows${rv.data.proposals ? `, ${esc(rv.data.proposals)} with a proposal` : ''} · ` : ''}page <code>${esc(String(rv.page?.sha256 ?? '').slice(0, 12))}</code> ${ok ? '<span class="badge good">verified</span>' : `<span class="badge high">${esc(q.result_status || 'missing')}</span>`}${rv.allow_partial ? ' · partial answers allowed' : ''}${pr && pr.total ? ` · <span class="badge ${pr.done >= pr.total ? 'good' : 'medium'}">${esc(pr.done)} of ${esc(pr.total)} decided</span>` : ''}</div>
+      ${ok ? '' : '<p class="err">The page or data changed since the supervisor asked, so it can’t be answered. Send it back, or tell the supervisor to ask again.</p>'}
+      ${(q.links || []).length ? `<div class="links"><span class="muted small">Look at:</span>${q.links.map(linkOf).join('')}</div>` : ''}
+      ${nextTime(q, cls)}
+      <div class="row-inline"><button data-open-review="${esc(q.id)}" ${ok ? '' : 'disabled'}>Open the review</button><button class="ghost" data-decline-open="${esc(q.id)}">Send it back</button><span class="err" id="e-${esc(q.id)}"></span></div>
+      <div data-decline-form="${esc(q.id)}" ${declineOpen ? '' : 'hidden'}><textarea data-q="${esc(q.id)}" placeholder="What should change? The supervisor redraws the page and asks again.">${esc(drafts[q.id] || '')}</textarea><div class="row-inline"><button class="ghost" data-decline="${esc(q.id)}">Send it back</button></div></div>
+      ${why ? `<div class="meta">${why}</div>` : ''}
+    </div>`;
+}
+
+// A JSON value as a tree: an object or a list folds; a list says how many items it has.
+function jsonTree(v, key, depth = 0) {
+  const k = key === undefined ? '' : `<span class="jk">${esc(key)}</span>: `;
+  if (v === null || typeof v !== 'object') return `<div class="jl">${k}<span class="jv ${typeof v}">${esc(JSON.stringify(v))}</span></div>`;
+  const arr = Array.isArray(v);
+  const entries = arr ? v.map((x, i) => [i, x]) : Object.entries(v);
+  if (!entries.length) return `<div class="jl">${k}<span class="jv">${arr ? '[]' : '{}'}</span></div>`;
+  const sum = arr ? `${entries.length} item${entries.length === 1 ? '' : 's'}` : `{ ${entries.slice(0, 6).map(([x]) => esc(x)).join(', ')}${entries.length > 6 ? ', …' : ''} }`;
+  if (depth > 40) return `<div class="jl">${k}<span class="dim">${sum} (nested too deep to show; see the raw JSON)</span></div>`;
+  const cap = 300;
+  return `<details ${depth < 1 ? 'open' : ''}><summary>${k}<span class="dim">${sum}</span></summary>${entries.slice(0, cap).map(([kk, x]) => jsonTree(x, kk, depth + 1)).join('')}${entries.length > cap ? `<div class="jl dim">… ${entries.length - cap} more (see the raw JSON)</div>` : ''}</details>`;
+}
+// The state of one row, by the rule the owner's process applies.
+function rowState(dataRow, r) {
+  if (!r || r.decided !== true) return 'undecided';
+  const values = isPlainObj(r.values) ? r.values : {};
+  if (isPlainObj(dataRow.proposal) && canonical(values) === canonical(dataRow.proposal)) return 'kept';
+  return Object.values(values).every(emptyVal) ? 'none' : 'changed';
+}
+function optionLabeler(data) {
+  const maps = Object.fromEntries(Object.entries(isPlainObj(data?.options) ? data.options : {}).map(([k, list]) => [k, new Map((Array.isArray(list) ? list : []).map((o) => (isPlainObj(o) ? [String(o.id), o.label ?? String(o.id)] : [String(o), String(o)])))]));
+  const one = (key, x) => (maps[key]?.get(String(x)) ?? (typeof x === 'object' ? JSON.stringify(x) : String(x)));
+  return (key, v) => (Array.isArray(v) ? (v.length ? v.map((x) => one(key, x)).join(', ') : 'none') : emptyVal(v) ? 'none' : one(key, v));
+}
+// The trusted preview: the standard shape (data rows with proposals, result rows) as a table of
+// what changes, changed rows first; anything else as a JSON tree.
+function resultPreview(result, data) {
+  const META = ['v', 'question', 'review_sha256', 'data_sha256', 'answered_at', 'channel', 'summary'];
+  const rest = Object.fromEntries(Object.entries(result).filter(([k]) => !META.includes(k) && k !== 'rows'));
+  if (!(Array.isArray(data?.rows) && Array.isArray(result.rows))) return `<div class="jtree">${jsonTree(Object.fromEntries(Object.entries(result).filter(([k]) => !['v', 'question', 'review_sha256', 'data_sha256'].includes(k))))}</div>`;
+  const label = optionLabeler(data);
+  const got = new Map(result.rows.filter(isPlainObj).map((r) => [r.id, r]));
+  const ORDER = { changed: 0, none: 1, undecided: 2, kept: 3 };
+  const rows = data.rows.map((d) => ({ d, r: got.get(d.id), state: rowState(d, got.get(d.id)) })).sort((a, b) => ORDER[a.state] - ORDER[b.state]);
+  const n = (s) => rows.filter((x) => x.state === s).length;
+  const strange = result.rows.filter((r) => !isPlainObj(r) || !data.rows.some((d) => d.id === r.id));
+  const show = (key, v) => esc(label(key, v));
+  const valuesCell = ({ d, r, state }) => {
+    if (state === 'undecided') return '<span class="dim">not decided</span>';
+    const values = isPlainObj(r.values) ? r.values : {};
+    const prop = isPlainObj(d.proposal) ? d.proposal : {};
+    const keys = [...new Set([...Object.keys(prop), ...Object.keys(values)])];
+    return keys.map((k) => {
+      const now = values[k], was = prop[k];
+      const lead = keys.length > 1 ? `<span class="dim">${esc(k)}:</span> ` : '';
+      return state === 'kept' || canonical(now ?? null) === canonical(was ?? null) ? `<div>${lead}${show(k, now)}</div>` : `<div>${lead}<span class="dim">${k in prop ? show(k, was) : 'none'}</span><span class="arrow">→</span><b>${show(k, now)}</b></div>`;
+    }).join('') + (r.note ? `<div class="rv-note">Note: ${esc(r.note)}</div>` : '');
+  };
+  const tr = (x) => `<tr><td><code>${esc(x.d.id)}</code></td><td>${esc(x.d.title ?? '')}</td><td>${valuesCell(x)}</td><td><span class="rv-st ${x.state}">${x.state}</span></td></tr>`;
+  const head = '<tr><th>Id</th><th>Title</th><th>Proposal → answer</th><th>State</th></tr>';
+  const first = rows.slice(0, 20), more = rows.slice(20);
+  return `<div class="rv-counts"><b>${n('kept')}</b> kept · <b>${n('changed')}</b> changed · <b>${n('none')}</b> none · <b>${n('undecided')}</b> undecided</div>
+    ${strange.length ? `<p class="err">${strange.length} row${strange.length === 1 ? '' : 's'} in the result ${strange.length === 1 ? 'is' : 'are'} not in the data: ${strange.slice(0, 5).map((r) => `<code>${esc(isPlainObj(r) ? r.id : JSON.stringify(r))}</code>`).join(', ')}</p>` : ''}
+    <div class="scroll"><table class="rv-table">${head}${first.map(tr).join('')}</table></div>
+    ${more.length ? `<details><summary>${more.length} more row${more.length === 1 ? '' : 's'}</summary><div class="scroll"><table class="rv-table">${head}${more.map(tr).join('')}</table></div></details>` : ''}
+    ${Object.keys(rest).length ? `<h3 style="margin-top:10px">Also in the result</h3><div class="jtree">${jsonTree(rest)}</div>` : ''}`;
+}
+// Why Answer is off, if it is: the checks the owner's process runs, so the button says so first.
+function proposalProblems(p, info) {
+  const r = p.obj, rv = info.review, out = [];
+  if (p.bytes > RV_MAX) out.push(`The result is ${p.bytes} bytes; at most 4 MB.`);
+  if (r.v !== 1) out.push('The result does not say "v": 1.');
+  if (r.question !== info.id) out.push('The result names another question.');
+  if (r.review_sha256 !== rv.page.sha256) out.push('The result does not name this page’s hash.');
+  if (rv.data ? r.data_sha256 !== rv.data.sha256 : r.data_sha256 !== undefined) out.push('The result does not name this data’s hash.');
+  if (Array.isArray(info.data?.rows) && r.rows !== undefined) {
+    if (!Array.isArray(r.rows)) return [...out, 'Its rows are not a list.'];
+    const known = new Set(info.data.rows.map((x) => x.id));
+    const seen = new Set();
+    let undecided = 0;
+    for (const x of r.rows) {
+      if (!isPlainObj(x) || !known.has(x.id)) { out.push('A row in the result is not in the data.'); break; }
+      if (seen.has(x.id)) { out.push(`Row ${x.id} is answered twice.`); break; }
+      if (typeof x.decided !== 'boolean') { out.push(`Row ${x.id} says neither decided nor undecided.`); break; }
+      seen.add(x.id);
+      if (!x.decided) undecided++;
+    }
+    undecided += info.data.rows.filter((x) => !seen.has(x.id)).length;
+    if (undecided && !rv.allow_partial) out.push(`${undecided} row${undecided === 1 ? ' is' : 's are'} still undecided, and this review needs every row decided.`);
+  }
+  return out;
+}
+
+let RV = null; // the review on screen
+const reviewInfo = () => RV?.info;
+const tellFrame = (msg) => { try { RV?.frame?.contentWindow?.postMessage(msg, '*'); } catch {} };
+const isDark = () => matchMedia('(prefers-color-scheme: dark)').matches;
+async function openReview(raw) {
+  const preview = raw.startsWith('review-preview');
+  const params = preview ? new URLSearchParams(raw.includes('?') ? raw.slice(raw.indexOf('?') + 1) : '') : null;
+  const qid = preview ? null : decodeURIComponent(raw.slice('review/'.length));
+  const key = preview ? `preview?${params}` : `q:${qid}`;
+  if (RV && RV.key === key) return;
+  closeReview();
+  if (!$('drawer').hidden) { $('drawer').hidden = true; $('scrim').hidden = true; document.body.style.overflow = ''; DRAWER = { kind: null, id: null }; }
+  const me = RV = { key, qid, preview, info: null, frame: null, proposal: null, progress: null, dropped: 0, saveTimer: null, pending: null, saved: null, seq: 0, readonly: false };
+  document.querySelector('main').classList.add('reviewing');
+  $('review-view').hidden = false;
+  $('rv-head').innerHTML = '<p class="loading">Loading the review…</p>';
+  $('rv-frame-wrap').innerHTML = '';
+  $('rv-panel').hidden = true;
+  $('rv-link').hidden = true;
+  window.scrollTo(0, 0);
+  if (preview) {
+    const path = params.get('path') || '', ref = params.get('ref') || '', dataPath = params.get('data') || '';
+    let data = null, note = '';
+    if (dataPath) {
+      try {
+        const r = await fetch(`/api/file?${new URLSearchParams({ path: dataPath, ...(ref ? { ref } : {}) })}`);
+        const t = await r.text();
+        if (!r.ok) throw new Error(t);
+        data = JSON.parse(t);
+      } catch (e) { note = `The data didn’t load: ${e.message}`; }
+    }
+    if (RV !== me) return;
+    me.info = { preview: true, path, ref, dataPath, data };
+    renderReviewHead(note);
+    if (path) mountFrame(`/review/preview/?${new URLSearchParams({ path, ...(ref ? { ref } : {}) })}`, path);
+    renderReviewActions();
+    renderReviewPreview();
+    return;
+  }
+  let info;
+  try {
+    const r = await fetch(`/api/review?id=${encodeURIComponent(qid)}`);
+    info = await r.json();
+    if (!r.ok) throw new Error(info.error || `HTTP ${r.status}`);
+  } catch (e) {
+    if (RV === me) $('rv-head').innerHTML = `<div class="card"><p class="err">${esc(e.message)}</p></div>`;
+    return;
+  }
+  if (RV !== me) return;
+  me.info = info;
+  me.readonly = info.status !== 'open';
+  renderReviewHead();
+  if (pinsVerified(info)) mountFrame(`/review/${encodeURIComponent(qid)}/`, info.review.title || info.question);
+  renderReviewActions();
+  renderReviewPreview();
+}
+function closeReview() {
+  if (!RV) return false;
+  if (RV.pending) pushDraft(RV);
+  RV = null;
+  document.querySelector('main').classList.remove('reviewing');
+  $('review-view').hidden = true;
+  $('rv-frame-wrap').innerHTML = '';
+  $('rv-panel').hidden = true;
+  $('rv-link').hidden = true;
+  return true;
+}
+function mountFrame(src, title) {
+  const f = document.createElement('iframe');
+  // allow-scripts and nothing else: no same-origin, forms, popups, modals, downloads or top navigation
+  f.setAttribute('sandbox', 'allow-scripts');
+  f.className = 'rv-frame';
+  f.title = `The agent’s page: ${title}`;
+  f.src = src;
+  RV.frame = f;
+  const label = document.createElement('div');
+  label.className = 'rv-frame-label';
+  label.innerHTML = '<i class="icon-shield" aria-hidden="true"></i><span>The agent’s page. It runs sandboxed, with no network and no access to this dashboard; it can only propose an answer, which shows in the panel below.</span>';
+  $('rv-frame-wrap').replaceChildren(label, f);
+}
+function renderReviewHead(note = '') {
+  const info = RV.info;
+  if (RV.preview) {
+    $('rv-head').innerHTML = `<div class="card rv-head"><span class="rv-preview-banner">PREVIEW, not asked</span>
+      <h4>${esc(info.path || 'No page given')}</h4>
+      <p class="meta"><code>${esc(info.path)}</code>${info.ref ? ` at <code>${esc(info.ref)}</code>` : ' on main'}${info.dataPath ? ` · data <code>${esc(info.dataPath)}</code>${info.data ? '' : ' (not loaded)'}` : ' · no data (add &amp;data=&lt;path&gt;)'}</p>
+      <p class="ctx">This is how the owner will see the page. Nothing here is a question yet, so nothing can be answered or saved.</p>
+      ${note ? `<p class="err">${esc(note)}</p>` : ''}${info.path ? '' : '<p class="err">Open it as #review-preview?path=&lt;repo path&gt;&amp;ref=&lt;branch&gt;&amp;data=&lt;repo path&gt;.</p>'}</div>`;
+    return;
+  }
+  const rv = info.review;
+  const ok = pinsVerified(info);
+  const pins = info.files.map((f) => `${PIN_WORDS[f.role] || f.role} <code>${esc(f.sha256.slice(0, 12))}</code>`).join(' · ');
+  const state = info.declined ? '<span class="badge medium">sent back</span>' : info.status === 'answered' ? '<span class="badge good">answered</span>' : info.status !== 'open' ? `<span class="badge">${esc(info.status)}</span>` : '';
+  $('rv-head').innerHTML = `<div class="card qcard review rv-head">
+    ${cardHead(KIND_ICON.review, `<span class="badge low">Review</span>${state}`, { extra: (info.blocks || []).length ? `holds up ${info.blocks.map(tlink).join(', ')}` : info.ticket ? `about ${tlink(info.ticket)}` : '', id: info.id, rows: [['Asked', esc(when(info.asked_at))], ['Pinned at', `<code>${esc(String(rv.commit).slice(0, 12))}</code> (${esc(rv.ref)})`]] })}
+    ${rv.title && rv.title !== info.question ? `<div class="rv-title">${esc(rv.title)}</div>` : ''}
+    <h4>${linkify(info.question)}</h4>
+    ${info.context ? `<p class="ctx">${linkify(info.context)}</p>` : ''}
+    ${(info.links || []).length ? `<div class="links"><span class="muted small">Look at:</span>${info.links.map(linkOf).join('')}</div>` : ''}
+    <div class="meta rv-pins">Asked by ${esc(who(info.asked_by))} · ${esc(when(info.asked_at))}${rv.data ? ` · ${esc(rv.data.rows)} rows` : ''} · ${pins} ${ok ? '<span class="badge good">verified</span>' : `<span class="badge high">${esc(info.result_status)}</span>`}${rv.allow_partial ? ' · partial answers allowed' : ''} <span id="rv-progress"></span></div>
+    ${ok ? (info.status === 'open' ? '<p class="meta"><b>Check the answer panel, not the page, before you answer.</b> The page is the agent’s; the panel is the dashboard’s, and shows exactly what will be recorded.</p>' : '') : '<div class="banner"><b>The page or data changed since the supervisor asked.</b> Nothing can be answered here. Tell the supervisor to ask again.</div>'}
+  </div>`;
+  showProgress();
+}
+function showProgress() {
+  const el = $('rv-progress');
+  const p = RV?.progress;
+  if (el) el.innerHTML = p && p.total ? `· <span class="badge ${p.done >= p.total ? 'good' : 'medium'}">${esc(p.done)} of ${esc(p.total)} decided</span>` : '';
+}
+// The panel's right side, drawn once per view: autosave status, Answer, Send it back.
+function renderReviewActions() {
+  const info = RV.info;
+  $('rv-panel').hidden = false;
+  if (!RV.preview && RV.readonly) { $('rv-actions').innerHTML = answeredActions(info); return; }
+  const cls = !RV.preview && info.class && DATA?.ooda?.classes?.[info.class];
+  $('rv-actions').innerHTML = `
+    <span class="small dim" id="rv-saved">${RV.preview ? 'Preview: nothing is saved.' : 'Your progress saves as you go, in this browser and on disk.'}</span>
+    ${cls ? nextTime({ id: info.id, class: info.class }, cls, 'data-rv-auto') : ''}
+    <button data-rv-answer disabled>Answer</button>
+    <span class="rv-why" id="rv-why"></span>
+    <button class="ghost" data-rv-decline-open ${RV.preview ? 'disabled' : ''}>Send it back</button>
+    <div id="rv-decline-form" hidden><textarea id="rv-decline-note" placeholder="What should change? The supervisor redraws the page and asks again."></textarea><button class="ghost" data-rv-decline style="margin-top:6px">Send it back with this note</button></div>
+    <span class="err" id="e-rv"></span>`;
+  updateAnswerButton();
+}
+function answeredActions(info) {
+  const how = info.declined ? 'You sent it back' : info.status === 'answered' ? `You answered ${CHANNEL_WORDS[info.channel] || ''}` : info.status === 'withdrawn' ? 'The supervisor withdrew it' : words(info.status);
+  const res = info.result;
+  return `<div class="small"><b>${esc(how)}</b>${info.answered_at ? ` · ${esc(when(info.answered_at))}` : ''}</div>
+    ${info.answer ? `<div>${esc(info.answer)}</div>` : ''}
+    ${res ? `<div class="small muted">Recorded result: ${esc(res.bytes)} bytes, sha256 <code>${esc(res.sha256.slice(0, 12))}</code> ${info.result_status === 'verified' ? '<span class="badge good">verified</span>' : `<span class="badge high">${esc(info.result_status)}</span>`}</div>` : ''}
+    ${res && info.result_status === 'verified' && Array.isArray(info.result_doc?.rows) ? `<a class="linkish small" href="/api/review?${new URLSearchParams({ id: info.id, format: 'tsv' })}" target="_blank" rel="noopener">The result as TSV</a>` : ''}
+    <p class="meta">The page above is read-only: it shows the answer as recorded.</p>`;
+}
+function updateAnswerButton() {
+  const btn = document.querySelector('[data-rv-answer]');
+  if (!btn || !RV) return;
+  const info = RV.info;
+  let why = '';
+  if (RV.preview) why = 'Preview: there is no question to answer.';
+  else if (!pinsVerified(info)) why = 'The page changed since it was asked.';
+  else if (!RV.proposal) why = 'The page has not proposed an answer yet.';
+  else why = proposalProblems(RV.proposal, info)[0] || '';
+  btn.disabled = !!why;
+  $('rv-why').textContent = why;
+}
+// The panel's left side: the proposal (or the recorded result), drawn here, never by the page.
+function renderReviewPreview() {
+  const info = RV.info;
+  const el = $('rv-preview');
+  const raw = (text, bytes, sha, what) => `<p class="meta">${what}: <b>${Number(bytes).toLocaleString()}</b> bytes, sha256 <code>${esc(sha.slice(0, 12))}</code>. <a class="linkish" data-rv-raw>${RV.rawOpen ? 'Hide' : 'Show'} raw JSON</a></p><pre class="rv-raw" ${RV.rawOpen ? '' : 'hidden'}>${esc(text)}</pre>`;
+  if (!RV.preview && RV.readonly) {
+    const doc = info.result_doc;
+    el.innerHTML = doc ? `<h3>Your answer, as recorded <span class="dim">drawn by the dashboard from the stored result</span></h3>${resultPreview(doc, info.data)}${raw(JSON.stringify(doc, null, 2), info.result.bytes, info.result.sha256, 'The stored result')}` : `<h3>${info.declined ? 'Sent back, with no result' : 'No result recorded'}</h3>`;
+    return;
+  }
+  const p = RV.proposal;
+  el.innerHTML = `<h3>What you’re answering <span class="dim">drawn by the dashboard from the page’s proposal, not by the page</span></h3>
+    ${p ? resultPreview(p.obj, info.data) + raw(p.text, p.bytes, p.sha256, RV.preview ? 'What the page proposes (in a real question, what the agent would receive)' : 'This is exactly what the agent will receive') : '<p class="empty">Nothing proposed yet. Work through the page above; its answer shows here.</p>'}
+    ${RV.dropped ? `<p class="meta">${RV.dropped} message${RV.dropped === 1 ? '' : 's'} from the page ${RV.dropped === 1 ? 'was' : 'were'} refused.</p>` : ''}`;
+}
+async function setProposal(result) {
+  const me = RV;
+  const seq = ++me.seq;
+  const text = JSON.stringify(result);
+  const bytes = new TextEncoder().encode(text);
+  const sha = await sha256Hex(bytes);
+  if (RV !== me || seq !== me.seq) return;
+  // a copy made from the very text that was hashed: the object posted is the object shown
+  me.proposal = { obj: JSON.parse(text), text, bytes: bytes.length, sha256: sha };
+  renderReviewPreview();
+  updateAnswerButton();
+}
+function showSaved() {
+  const el = $('rv-saved');
+  const s = RV?.saved;
+  if (!el || !s) return;
+  const t = new Date(s.at).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+  el.textContent = `Saved ${t} · ${s.local ? 'this browser' : 'not in this browser'}${s.server === 'ok' ? ' + on disk' : s.server === 'pending' ? ', on disk shortly' : `; not on disk: ${s.server}`}`;
+}
+function saveDraft(state) {
+  const me = RV;
+  const savedAt = new Date().toISOString();
+  const local = lsSet(rvKey(me.qid, me.info.review.page.sha256), { state, saved_at: savedAt, progress: me.progress });
+  me.saved = { at: savedAt, local, server: 'pending' };
+  me.pending = { state, saved_at: savedAt };
+  clearTimeout(me.saveTimer);
+  me.saveTimer = setTimeout(() => pushDraft(me), 2000);
+  showSaved();
+}
+async function pushDraft(me) {
+  const d = me.pending;
+  clearTimeout(me.saveTimer);
+  me.saveTimer = null;
+  me.pending = null;
+  if (!d) return;
+  try {
+    const r = await fetch('/api/review-draft', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: me.qid, ...d }), keepalive: JSON.stringify(d).length < 60000 });
+    const out = await r.json();
+    if (me.saved) me.saved.server = r.ok ? 'ok' : out.error || 'failed';
+  } catch (e) { if (me.saved) me.saved.server = e.message; }
+  if (RV === me) showSaved();
+}
+// A web link from the page opens only from the owner's own click on the dashboard's bar, the first
+// time per site per question; after that, at once (the owner's click in the page lets it open).
+const sitesKey = () => `devteam.review.${RV?.qid ?? 'preview'}.sites`;
+function openFromReview(m) {
+  if (m.href) {
+    let u;
+    try { u = new URL(m.href); } catch { return; }
+    const bar = $('rv-link');
+    const known = new Set(lsGet(sitesKey()) || []).has(u.host);
+    if (known) window.open(u.href, '_blank', 'noopener,noreferrer');
+    bar.innerHTML = known
+      ? `<span>Opened <code>${esc(u.href)}</code> in a new tab.</span><a href="${esc(u.href)}" target="_blank" rel="noopener noreferrer">Open it again</a><button class="ghost" data-rv-link-close>Close</button>`
+      : `<span>The page wants to open a link on <b>${esc(u.host)}</b>: <code>${esc(u.href)}</code></span><a class="go" href="${esc(u.href)}" target="_blank" rel="noopener noreferrer" data-rv-link-ok="${esc(u.host)}">Open it</a><button class="ghost" data-rv-link-close>Don’t open</button><span class="small dim">Opening it lets this question’s page open ${esc(u.host)} links without asking.</span>`;
+    bar.hidden = false;
+    return;
+  }
+  // a committed file opens in the file view, over the review, at the pinned commit by default
+  const ref = m.ref || (RV.preview ? RV.info.ref : RV.info.review.commit);
+  openFile(new URLSearchParams({ path: m.path, ...(ref ? { ref } : {}), title: m.path }));
+}
+function onBridge(m) {
+  const info = reviewInfo();
+  if (!info) return;
+  const live = !RV.preview && !RV.readonly;
+  if (m.type === 'ready') {
+    let draft = null;
+    if (live) {
+      const local = lsGet(rvKey(RV.qid, info.review.page.sha256));
+      const pick = [local, info.draft].filter((x) => x && x.state !== undefined && x.state !== null).sort((a, b) => String(b.saved_at || '').localeCompare(String(a.saved_at || '')))[0];
+      draft = pick ? pick.state : null;
+    }
+    const question = RV.preview ? { id: null, preview: true } : { id: info.id, question: info.question, context: info.context, title: info.review.title ?? null, review_sha256: info.review.page.sha256, data_sha256: info.review.data?.sha256 ?? null, allow_partial: !!info.review.allow_partial };
+    return tellFrame({ type: 'init', question, data: info.data ?? null, draft, result: !RV.preview && RV.readonly ? info.result_doc ?? null : null, readonly: !RV.preview && RV.readonly, preview: RV.preview, theme: { dark: isDark() } });
+  }
+  if (m.type === 'progress') {
+    RV.progress = { done: m.done, total: m.total };
+    showProgress();
+    if (live) { const k = rvKey(RV.qid, info.review.page.sha256); lsSet(k, { ...(lsGet(k) || {}), progress: RV.progress }); }
+    return;
+  }
+  if (m.type === 'draft') return void (live && saveDraft(m.state));
+  if (m.type === 'propose') return void (!RV.readonly && setProposal(m.result));
+  if (m.type === 'markdown') {
+    const html = window.marked && window.DOMPurify ? DOMPurify.sanitize(marked.parse(m.text, { gfm: true }), { FORBID_TAGS: ['style', 'form', 'input'], FORBID_ATTR: ['style'] }) : `<p>${esc(m.text)}</p>`;
+    return tellFrame({ type: 'markdown-result', id: m.id, html });
+  }
+  if (m.type === 'open') return openFromReview(m);
+  if (m.type === 'resize') {
+    const max = Math.max(320, innerHeight - 140);
+    RV.frame.style.height = `${Math.round(Math.min(Math.max(m.height + 4, 320), max))}px`;
+  }
+}
+window.addEventListener('message', (ev) => {
+  if (!RV?.frame) return;
+  const m = bridgeAccept(ev, RV.frame.contentWindow);
+  if (m.drop) {
+    RV.dropped++;
+    if (RV.dropped === 1 || RV.dropped % 20 === 0) renderReviewPreview();
+    return;
+  }
+  onBridge(m);
+});
+matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', () => tellFrame({ type: 'theme', dark: isDark() }));
+window.addEventListener('pagehide', () => { if (RV?.pending) pushDraft(RV); });
+async function reviewAnswer(btn) {
+  const me = RV;
+  const p = me?.proposal;
+  if (!p || me.preview) return;
+  const err = $('e-rv');
+  err.textContent = '';
+  const auto = document.querySelector('#rv-actions input[data-rv-auto]:checked')?.value;
+  btn.classList.add('busy'); btn.disabled = true;
+  let r, out;
+  try {
+    r = await fetch('/api/review-answer', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: me.qid, result: p.obj, sha256: p.sha256, autonomy: auto ? Number(auto) : undefined }) });
+    out = await r.json();
+  } catch (e) { out = { error: `Could not send: ${e.message}` }; }
+  if (!r?.ok) { btn.classList.remove('busy'); btn.disabled = false; err.textContent = out.error || 'failed'; return; }
+  clearTimeout(me.saveTimer);
+  me.pending = null;
+  lsDel(rvKey(me.qid, me.info.review.page.sha256));
+  markAnswered(me.qid, String(out.out || '').replace(/^answered \S+: /, '') || 'Answered');
+  load({ force: true });
+  // the record: the same page, read-only, with the result as stored
+  if (RV === me) { RV = null; openReview(location.hash.slice(1)); }
+}
+async function reviewDecline(id, note, errId, btn) {
+  if (!note) { const e = $(`e-${errId}`); if (e) e.textContent = 'Say what should change, so the supervisor can redraw it.'; return; }
+  const auto = document.querySelector(errId === 'rv' ? '#rv-actions input[data-rv-auto]:checked' : `input[data-auto="${CSS.escape(id)}"]:checked`)?.value;
+  if (btn) { btn.classList.add('busy'); btn.disabled = true; }
+  const ok = await post('answer', { id, answer: note, decline: true, autonomy: auto ? Number(auto) : undefined }, errId).catch((e) => { const el = $(`e-${errId}`); if (el) el.textContent = `Could not send: ${e.message}`; return false; });
+  if (btn) { btn.classList.remove('busy'); btn.disabled = false; }
+  if (!ok) return;
+  delete drafts[id];
+  markAnswered(id, `Sent back: ${note}`);
+  if (RV && RV.qid === id) { const me = RV; clearTimeout(me.saveTimer); me.pending = null; RV = null; openReview(location.hash.slice(1)); }
+}
 
 const GOAL_STEPS = ['Defined', 'Designed', 'Approved', 'Built', 'Met'];
 function goalState(g, R, openQs) {
@@ -1352,7 +1911,12 @@ async function renderMermaid(root) {
   }
 }
 function route() {
-  const h = decodeURIComponent(location.hash.slice(1));
+  const raw = location.hash.slice(1);
+  if (raw.startsWith('review/') || raw.startsWith('review-preview')) return void openReview(raw);
+  // back from a review to a section: the section was hidden when the browser looked for it
+  // (and the Inbox cards redraw, so a card's progress pill is the one the review just reported)
+  if (closeReview()) { if (DATA) render(DATA); if (/^[a-z]+$/.test(raw)) document.getElementById(raw)?.scrollIntoView(); }
+  const h = decodeURIComponent(raw);
   if (h.startsWith('ticket/')) return void openTicket(h.slice(7));
   if (h.startsWith('q/')) return void openQuestion(h.slice(2));
   if (h.startsWith('goal/')) return void openGoal(h.slice(5));
@@ -1642,6 +2206,37 @@ document.addEventListener('click', async (ev) => {
     else { ps.disabled = false; ps.textContent = 'Post'; if (err) err.textContent = out.error || 'failed'; load({ force: true }); }
     return;
   }
+  const orv = ev.target.closest('[data-open-review]');
+  if (orv) { location.hash = `review/${orv.dataset.openReview}`; return; }
+  const dopen = ev.target.closest('[data-decline-open]');
+  if (dopen) {
+    const f = document.querySelector(`[data-decline-form="${CSS.escape(dopen.dataset.declineOpen)}"]`);
+    if (f) { f.hidden = !f.hidden; if (!f.hidden) f.querySelector('textarea')?.focus(); }
+    return;
+  }
+  const dsend = ev.target.closest('[data-decline]');
+  if (dsend) {
+    const id = dsend.dataset.decline;
+    return void reviewDecline(id, document.querySelector(`textarea[data-q="${CSS.escape(id)}"]`)?.value.trim() ?? '', id, dsend);
+  }
+  if (ev.target.closest('[data-rv-raw]')) {
+    const pre = ev.target.closest('p')?.nextElementSibling;
+    if (pre?.classList.contains('rv-raw')) { pre.hidden = !pre.hidden; ev.target.textContent = pre.hidden ? 'Show raw JSON' : 'Hide raw JSON'; if (RV) RV.rawOpen = !pre.hidden; }
+    return;
+  }
+  const lok = ev.target.closest('[data-rv-link-ok]');
+  if (lok) { lsSet(sitesKey(), [...new Set([...(lsGet(sitesKey()) || []), lok.dataset.rvLinkOk])]); $('rv-link').hidden = true; return; }
+  if (ev.target.closest('[data-rv-link-close]')) { $('rv-link').hidden = true; return; }
+  const rva = ev.target.closest('[data-rv-answer]');
+  if (rva) return void reviewAnswer(rva);
+  if (ev.target.closest('[data-rv-decline-open]')) {
+    const f = $('rv-decline-form');
+    f.hidden = !f.hidden;
+    if (!f.hidden) $('rv-decline-note').focus();
+    return;
+  }
+  const rvd = ev.target.closest('[data-rv-decline]');
+  if (rvd && RV?.qid) return void reviewDecline(RV.qid, $('rv-decline-note').value.trim(), 'rv', rvd);
   const cant = ev.target.closest('[data-cant]');
   if (cant) {
     const id = cant.dataset.cant;
