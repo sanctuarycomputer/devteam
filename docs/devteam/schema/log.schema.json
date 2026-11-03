@@ -753,7 +753,8 @@
               "trust",
               "goal-definition",
               "owner-action",
-              "goal-approval"
+              "goal-approval",
+              "review"
             ]
           },
           "class": {
@@ -1000,6 +1001,162 @@
           "change": {
             "type": "object",
             "description": "On a goal-change question about a goal: the exact goal fields it proposes. The owner's answer with the recommendation authorises this change and no other (goal set --approved applies it as is)."
+          },
+          "review": {
+            "description": "A review question's pinned files (process/supervisor.md): the agent's page, its optional data and the result's optional schema, read at one commit, each with its sha256 and size; data counts its rows and the rows with a proposal. The owner's process re-hashes them before it accepts a result. A review is answered with its result (answer --review-result) or sent back (answer --decline), never with free text, a default or from chat.",
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string",
+                "maxLength": 200
+              },
+              "commit": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
+              },
+              "ref": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9._/-]+$"
+              },
+              "page": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "pattern": "^(?!/)(?!.*\\.\\.)[^\\s]+$"
+                  },
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "bytes": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "path",
+                  "sha256",
+                  "bytes"
+                ],
+                "additionalProperties": false
+              },
+              "data": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "pattern": "^(?!/)(?!.*\\.\\.)[^\\s]+$"
+                  },
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "bytes": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "rows": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "proposals": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "path",
+                  "sha256",
+                  "bytes"
+                ],
+                "additionalProperties": false
+              },
+              "result_schema": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "pattern": "^(?!/)(?!.*\\.\\.)[^\\s]+$"
+                  },
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  },
+                  "bytes": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "path",
+                  "sha256",
+                  "bytes"
+                ],
+                "additionalProperties": false
+              },
+              "allow_partial": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "commit",
+              "ref",
+              "page",
+              "allow_partial"
+            ],
+            "additionalProperties": false
+          },
+          "result": {
+            "description": "On the owner's answer to a review: the sha256 and size of run/questions/<qid>/result.json as the owner's process wrote it and, for a result in the standard rows shape, the counts it recomputed: proposed is the rows whose data has a proposal; kept the decided rows whose values equal it (never taken from the page); cleared the other decided rows with every value empty; changed the rest.",
+            "type": "object",
+            "properties": {
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "bytes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "rows": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "decided": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "proposed": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "kept": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "changed": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "cleared": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "undecided": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "sha256",
+              "bytes"
+            ],
+            "additionalProperties": false
+          },
+          "declined": {
+            "const": true,
+            "description": "On the owner's answer to a review: sent back without a result; the answer says why."
           }
         },
         "additionalProperties": false,
@@ -1008,7 +1165,9 @@
           "question"
         ],
         "x-set-only": [
-          "secrets_posted"
+          "secrets_posted",
+          "result",
+          "declined"
         ]
       },
       "act": {
@@ -1345,7 +1504,9 @@
           "said",
           "autonomy",
           "standing_rule",
-          "secrets_posted"
+          "secrets_posted",
+          "result",
+          "declined"
         ]
       },
       "knowledge": {

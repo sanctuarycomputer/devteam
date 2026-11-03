@@ -96,6 +96,8 @@ devteam.mjs ask --kind one-way-door --class new-dependency --reasons owner-only 
 
   Workers get secrets only from the encrypted store (`code-style.md` §10). What this guards against is accidents: a value in the log, git, chat, a PR or an agent's context. It is not a sandbox. The Rails and SOPS sinks run the repo's own code and tools with the value, and any key on disk lets a local process decrypt the store, so a production store is posted with its key only in the owner's shell (`RAILS_MASTER_KEY`, the age key) and never with the key in the checkout.
 
+  A review page never asks for a secret either: its result is data every agent reads, so `review check` warns on a field that looks like one, and a review question takes no `--secrets`.
+
 | Kind | For |
 |---|---|
 | `one-way-door` | constitution §4; an explicit yes or no, never a default |
@@ -106,6 +108,7 @@ devteam.mjs ask --kind one-way-door --class new-dependency --reasons owner-only 
 | `goal-definition` | every gap that stops a goal being ready, in one question |
 | `goal-approval` | approving a fully defined goal on its reviewed design (`planning.md` §1): `--goal`, the design in `--links`; the goal's milestones set, so the computed forecast rides in the context; when it misses the horizon, recommend moving the horizon, adding slots, cutting scope or reordering milestones, never splitting the goal; the owner approves, refines with notes, or lets it go. Only after every decision the design leaves to the owner was asked as its own question (`--goal`) and answered; never bundle them into the approval |
 | `owner-action` | something only the owner can do, not decide (log in, approve elsewhere, post a secret with `--secrets`): the steps, and what waits on it |
+| `review` | many rows the owner decides one by one (matches, mappings, links between two lists, any number to any number) on a page an agent draws: a self-contained `page.html`, with optional `data.json` (rows, options, a `proposal` per row) and `result.schema.json`, committed in the PR that needs the answer (a worker's under `project/tickets/<id>/questions/<slug>/`, yours under `project/questions/<slug>/` in a chore worktree). `review check` it until clean, then `ask --kind review --page <path> --ref <branch> [--data <path>] [--result-schema <path>] [--allow-partial]`, which pins all three to that commit and their sha256s; no `--default`, `--choices`, `--recommendation` or `--secrets`. The owner answers with a result their own process validates and hashes, or sends it back with a reason; never in free text or from chat. Read it with `review result <qid> --json` (it exits 1 unless every hash verifies), apply it, and check what you applied with `review verify <qid> --applied <file>`. A draft the owner saved (`review draft <qid>`) is partial progress, never an answer. It counts as agreement only when the owner kept every proposal and decided every row |
 
 Rules: one decision per question (a goal-definition question lists all of a goal's gaps as a form); lead with the decision; always a recommendation with your confidence; `--default` only when reversible, applied at the deadline; `--blocks` every ticket that waits; `--class` and `--reasons` always, so the owner sees why it needs them.
 

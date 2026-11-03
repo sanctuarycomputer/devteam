@@ -691,7 +691,18 @@ function questionView(q) {
   // An answer agrees with the recommendation when it is that choice, with or without a note after
   // " — " (the dashboard sends "<label> — <note>").
   const norm = (x) => x.trim().toLowerCase();
-  const matched = ans ? !!q.recommendation && [norm(ans.answer), norm(ans.answer.split(' — ')[0])].includes(norm(q.recommendation)) : null;
+  let matched = ans ? !!q.recommendation && [norm(ans.answer), norm(ans.answer.split(' — ')[0])].includes(norm(q.recommendation)) : null;
+  // A review's recommendation is its proposals: it agrees only when the owner kept every one of
+  // them, decided every row, and the result still verifies. Only the owner's lines count here.
+  let review = null;
+  if (q.kind === 'review' && q.review) {
+    const own = q.updates.filter((u) => writerClass(u.by) === 'owner');
+    const result = own.filter((u) => u.result !== undefined).pop()?.result ?? null;
+    const declined = own.some((u) => u.declined === true);
+    const resultStatus = reviewStatus(q, ans ? result : null, ans ? declined : false);
+    review = { review: q.review, result: ans ? result : null, declined: ans ? declined : false, allow_partial: !!q.review.allow_partial, result_status: resultStatus };
+    if (ans) matched = !review.declined && resultStatus === 'verified' && (result?.proposed ?? 0) > 0 && result.kept === result.proposed && result.undecided === 0;
+  }
   return {
     id: q.id, kind: q.kind, class: q.class ?? null, scope: q.scope ?? null, ticket: q.ticket ?? null, re: q.re ?? null, asked_at: q.created_at,
     question: q.question, context: q.context ?? '', options: q.options ?? [], choices: q.choices ?? [], links: q.links ?? [], goal: q.goal ?? null, change: q.change ?? null, rule_scope: q.rule_scope ?? null, recommendation: q.recommendation ?? '', confidence: q.confidence ?? null,
@@ -699,6 +710,7 @@ function questionView(q) {
     secrets: (q.secrets ?? []).map((x) => ({ ...x, to: sinkWords(x.sink), sink_type: SINK_RE.exec(x.sink ?? '')?.[1] ?? null, warning: sinkWarning(x.sink) })), secrets_posted: q.updates.filter((u) => u.secrets_posted !== undefined && writerClass(u.by) === 'owner').pop()?.secrets_posted ?? [],
     status, answer, answered_by: answeredBy, answered_at: answeredAt, matched,
     autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans?.channel ?? null, said: ans?.said ?? null,
+    review: review?.review ?? null, result: review?.result ?? null, declined: review ? review.declined : null, allow_partial: review ? review.allow_partial : null, result_status: review?.result_status ?? null,
   };
 }
 const questions = () => logObjects('question').map(questionView);
@@ -1804,7 +1816,14 @@ function ownerAnswer(qid, what) {
   const q = logGet(qid);
   const v = q?.type === 'question' ? questionView(q) : null;
   if (!v || v.status !== 'answered') die(`${what}: ${qid} is not a question the owner answered`);
+  reviewApproves(v, what);
   return v;
+}
+// A review approves something only through a result the owner gave that still verifies.
+function reviewApproves(v, what) {
+  if (v?.kind !== 'review') return;
+  if (v.declined) die(`${what}: ${v.id} is a review the owner sent back; it approves nothing`);
+  if (v.result_status !== 'verified') die(`${what}: ${v.id} is a review whose result is ${v.result_status}; it approves nothing until it verifies (review show ${v.id})`);
 }
 
 // The merge word, as a command: verify everything at the PR's exact head, run the project's gates
@@ -1992,7 +2011,7 @@ function trustEvidence(cls) {
   const drops = acts.map(correctionOf).filter(Boolean).map((c) => c.at).sort();
   const since = drops[drops.length - 1] ?? '';
   const after = acts.filter((a) => a.created_at > since);
-  const answered = questions().filter((q) => q.class === cls && q.status === 'answered' && q.recommendation && q.channel !== 'chat').sort((a, b) => a.answered_at.localeCompare(b.answered_at)).slice(-promo.agreement_window);
+  const answered = questions().filter((q) => q.class === cls && q.status === 'answered' && (q.recommendation || (q.kind === 'review' && (q.review?.data?.proposals ?? 0) > 0)) && q.channel !== 'chat').sort((a, b) => a.answered_at.localeCompare(b.answered_at)).slice(-promo.agreement_window);
   const agree = answered.filter((q) => q.matched).length;
   return {
     acts_since_drop: after.length, uncorrected_acts: after.filter((a) => !correctionOf(a)).map((a) => a.id), corrections: drops.length,
@@ -2063,6 +2082,14 @@ function cmdAsk() {
     if (cls) die('a goal-approval question has no --class: approving a goal is never delegated');
   }
   if (kind === 'goal-definition' && cls) die('a goal-definition question has no --class: defining a goal is never delegated (reason goal-ambiguity)');
+  // A review is answered with its result or sent back: never defaulted, never a secret, and its
+  // choices and recommendation are the page and the data's proposals.
+  let review;
+  if (kind === 'review') {
+    const why = { default: 'a review is never defaulted; the owner answers it or sends it back', secrets: 'a review never carries a secret; ask for secrets with --secrets on an owner-action question', choices: "a review's choices are its page", options: "a review's choices are its page", recommendation: "a review's recommendation is the proposals in its data" };
+    for (const [k, w] of Object.entries(why)) if (flags[k] !== undefined) die(`ask --kind review takes no --${k}: ${w}`);
+    review = pinReview();
+  } else for (const k of ['page', 'ref', 'data', 'result-schema', 'allow-partial']) if (flags[k] !== undefined) die(`--${k} belongs on a review question (--kind review)`);
   const onLadder = cls && L.classes[cls];
   if (kind === 'trust' && !onLadder) die(`a trust question needs --class, one of: ${Object.keys(L.classes).join(', ')}`);
   const def = flagStr('default') ?? null;
@@ -2106,7 +2133,7 @@ function cmdAsk() {
     type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), question: q, context: kind === 'goal-approval' ? [flagStr('context'), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal'))))].filter(Boolean).join('\n\n') : flagStr('context'),
     rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: goalChangeFlag(cls), options: asList(flags.options), choices: jsonFlag('choices'), links: jsonFlag('links'), recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined,
     deadline: def ? new Date(Date.now() + loadSettings().question_default_after_hours * 3600000).toISOString() : undefined,
-    blocks, evidence, note: flagStr('note'), secrets,
+    blocks, evidence, note: flagStr('note'), secrets, review,
     why_asked: { rung: onLadder ? rungFor(cls, scope) : undefined, ceiling: onLadder ? L.classes[cls].ceiling : undefined, reasons },
   }, 'supervisor');
   out(line.id);
@@ -2115,7 +2142,10 @@ function cmdAsk() {
 // The owner answers (terminal or dashboard). The supervisor may only apply a default or withdraw.
 function cmdAnswer() {
   const [id, ...restWords] = positional;
-  if (!id || (!restWords.length && !flags.defaulted)) die('usage: answer <qid> "<answer>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>" [--rule-scope s]]   |   answer <qid> "<answer>" --from-chat --said "<owner\'s words>" [--autonomy n]   |   answer <qid> --defaulted   (supervisor)');
+  const reviewResult = flagStr('review-result');
+  const decline = !!flags.decline;
+  if (flags['review-result'] === true) die('answer <qid> --review-result <file|->: the result file, or - for stdin');
+  if (!id || (!restWords.length && !flags.defaulted && !reviewResult && !decline)) die('usage: answer <qid> "<answer>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>" [--rule-scope s]]   |   answer <qid> --review-result <file|->   |   answer <qid> "<why>" --decline   |   answer <qid> "<answer>" --from-chat --said "<owner\'s words>" [--autonomy n]   |   answer <qid> --defaulted   (supervisor)');
   if (flags.defaulted) {
     supervisorOnly('answer --defaulted');
     const v = openQuestion(id);
@@ -2138,6 +2168,18 @@ function cmdAnswer() {
   const { by } = fromChat ? { by: 'owner' } : ownerWriter();
   const v = openQuestion(id, ['open', 'defaulted']);
   if (v.kind === 'goal-approval') die(`${id} approves a goal on its design: the owner answers it with goal decide ${v.goal} approve|refine|let-go [--notes "…"] (or on the dashboard)`);
+  // A review is answered by the owner's own process with its result, or sent back with a reason;
+  // never in free text, never from chat (a chat can't carry rows, and the supervisor must not
+  // compose the owner's answer to its own proposals).
+  if (v.kind === 'review' || reviewResult || decline) {
+    if (v.kind !== 'review') die(`--review-result and --decline answer a review question; ${id} is ${v.kind}`);
+    if (fromChat) die(`answer --from-chat: ${id} is a review; the owner answers it from their own process (answer ${id} --review-result <file> in their terminal)`);
+    if (v.status !== 'open') die(`${id} is already ${v.status}`);
+    if (reviewResult && decline) die('a review is answered with --review-result or sent back with --decline, not both');
+    if (!reviewResult && !decline) die(`${id} is a review: answer it with its result (answer ${id} --review-result <file|->) or send it back (answer ${id} "<why>" --decline)`);
+    if (reviewResult && restWords.length) die('answer --review-result takes no text: the result is the answer');
+    if (decline && !restWords.join(' ').trim()) die(`answer ${id} "<why>" --decline: say why it goes back`);
+  }
   if (fromChat) {
     const reserved = ['one-way-door', 'trust'].includes(v.kind) || (ladder().owner_only ?? []).includes(v.class) || (v.why_asked?.reasons ?? []).includes('one-way-door');
     if (reserved) die(`answer --from-chat: ${id} is reserved to the owner (${v.kind}${v.class ? `, ${v.class}` : ''}); ask them to answer it from the dashboard or their terminal`);
@@ -2153,13 +2195,15 @@ function cmdAnswer() {
     if (fromChat && rung > rungFor(v.class, flagStr('scope') ?? null)) die(`answer --from-chat can lower ${v.class}'s rung but not raise it (now ${rungFor(v.class, flagStr('scope') ?? null)}): the owner raises a rung from the dashboard or their terminal`);
     autonomy = { class: v.class, rung, scope: flagStr('scope') ?? null };
   }
-  appendLog({ type: 'question', op: 'set', id, answer, autonomy, standing_rule: flagStr('rule'), ...(fromChat ? { channel: 'chat', said: flagStr('said').trim() } : {}) }, by);
+  const reviewFields = reviewResult ? acceptReviewResult(v, reviewResult) : decline ? { answer: `Sent back: ${answer}`, declined: true } : {};
+  appendLog({ type: 'question', op: 'set', id, answer, autonomy, standing_rule: flagStr('rule'), ...reviewFields, ...(fromChat ? { channel: 'chat', said: flagStr('said').trim() } : {}) }, by);
+  if (v.kind === 'review') fs.rmSync(reviewDraftFile(id), { force: true });
   // A standing rule applies where the owner says (--rule-scope), else where the question says its
   // rule would apply (ask --rule-scope; the dashboard shows it next to the rule field), else the
   // whole project.
   if (flagStr('rule')) appendLog({ type: 'knowledge', kind: 'preference', statement: flagStr('rule'), scope: flagStr('rule-scope') ?? v.rule_scope ?? 'project', status: 'accepted', confidence: 1, evidence: [id] }, by);
   if (!fromChat) nudgeSupervisor(`[devteam answer ${id} from owner] read it with: devteam.mjs questions --id ${id}`);
-  out(`answered ${id}${fromChat ? ' (from chat; listed on the dashboard for the owner to check)' : ''}`);
+  out(`${decline ? 'sent back' : 'answered'} ${id}${fromChat ? ' (from chat; listed on the dashboard for the owner to check)' : reviewFields.result ? `: ${reviewFields.answer} (result sha256 ${reviewFields.result.sha256.slice(0, 12)})` : ''}`);
 }
 function cmdWithdraw() {
   const [id] = positional;
@@ -2170,6 +2214,430 @@ function cmdWithdraw() {
   appendLog({ type: 'act', class: 'withdraw-question', what: `withdrew ${id}${flagStr('reason') ? `: ${flagStr('reason')}` : ''}`, refs: [id], reversible: true }, 'supervisor');
   out(`withdrew ${id}`);
 }
+
+// ===== review questions: an agent-drawn page the owner answers with a result =====
+//
+// When the owner must decide many rows (matches, mappings, links between two lists), the agent
+// draws the page: a self-contained HTML document, with optional data (rows, options, proposals)
+// and an optional JSON schema for the result, committed in the PR it is working on. `ask --kind
+// review` pins all three to one commit and their sha256s. The owner's own process accepts a result
+// only while those bytes still hash to the question line, validates it, recomputes what was kept,
+// writes run/questions/<qid>/result.json and logs the answer with that file's sha256. `result` and
+// `declined` are owner-only fields, so no agent line can supply them. The static checks here
+// catch mistakes early; they are not what keeps a page off the network (a page is only ever shown
+// in a sandboxed frame whose policy allows no network).
+
+const REVIEW_MAX = 4 * 1024 * 1024;
+const REVIEW_ROWS_MAX = 5000;
+const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
+const REPO_PATH = new RegExp(SCHEMA.$defs.types.question.properties.links.items.properties.path.pattern);
+const reviewDir = (qid) => {
+  if (!/^[a-z0-9-]+$/.test(qid)) die(`${qid} is not a question id`);
+  return path.join(runDir, 'questions', qid);
+};
+const reviewResultFile = (qid) => path.join(reviewDir(qid), 'result.json');
+const reviewDraftFile = (qid) => path.join(reviewDir(qid), 'draft.json');
+
+// A blob's exact bytes at a commit (git() decodes and trims; a hash needs the bytes).
+function gitBlob(commit, p) {
+  try {
+    return execFileSync('git', ['cat-file', 'blob', `${commit}:${p}`], { stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+  } catch {
+    return null;
+  }
+}
+// A commit no branch or tag contains is lost at the next prune, with the page the owner answered on.
+const reachMemo = new Map();
+function commitReachable(commit) {
+  if (!reachMemo.has(commit)) reachMemo.set(commit, !!git(['for-each-ref', '--count=1', '--format=%(refname)', '--contains', commit]));
+  return reachMemo.get(commit);
+}
+
+// The JSON schema keywords schemaErrors checks; anything else in a result schema would be ignored
+// silently, so review check refuses it.
+const SCHEMA_CHECKED = ['type', 'enum', 'const', 'pattern', 'minLength', 'maxLength', 'minimum', 'maximum', 'minItems', 'maxItems', 'items', 'properties', 'required', 'additionalProperties'];
+const SCHEMA_NOTES = ['description', 'title', '$schema', '$id', '$comment', 'examples', 'default'];
+function schemaSubsetErrors(s, where) {
+  if (!s || typeof s !== 'object' || Array.isArray(s)) return [`${where} is not a schema object`];
+  const errs = [];
+  for (const k of Object.keys(s)) if (!SCHEMA_CHECKED.includes(k) && !SCHEMA_NOTES.includes(k)) errs.push(`${where}.${k}: not a keyword the kit checks (${SCHEMA_CHECKED.join(', ')})`);
+  for (const t of asList(s.type)) if (!['object', 'array', 'string', 'number', 'integer', 'boolean', 'null'].includes(t)) errs.push(`${where}.type: "${t}" is not a JSON type`);
+  if (s.pattern !== undefined) {
+    if (typeof s.pattern !== 'string') errs.push(`${where}.pattern is a string`);
+    else try { new RegExp(s.pattern); } catch (e) { errs.push(`${where}.pattern: ${e.message}`); }
+  }
+  for (const k of ['minLength', 'maxLength', 'minimum', 'maximum', 'minItems', 'maxItems']) if (s[k] !== undefined && typeof s[k] !== 'number') errs.push(`${where}.${k} is a number`);
+  if (s.enum !== undefined && !Array.isArray(s.enum)) errs.push(`${where}.enum is an array`);
+  if (s.required !== undefined && !(Array.isArray(s.required) && s.required.every((x) => typeof x === 'string'))) errs.push(`${where}.required is an array of names`);
+  if (s.additionalProperties !== undefined && typeof s.additionalProperties !== 'boolean') errs.push(`${where}.additionalProperties is true or false (a schema there is not checked)`);
+  if (s.items !== undefined) errs.push(...schemaSubsetErrors(s.items, `${where}.items`));
+  if (s.properties !== undefined) {
+    if (!s.properties || typeof s.properties !== 'object' || Array.isArray(s.properties)) errs.push(`${where}.properties is an object of schemas`);
+    else for (const [k, v] of Object.entries(s.properties)) errs.push(...schemaSubsetErrors(v, `${where}.properties.${k}`));
+  }
+  return errs;
+}
+
+// A review's data: an object; rows (if any) with unique string ids and object proposals; options
+// (if any) as lists with unique ids. How rows relate to options is the page's business: a value
+// may name any number of options and an option may sit on any number of rows.
+function reviewDataCheck(data) {
+  const errs = [];
+  let rows = 0, proposals = 0;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return { errs: ['is not a JSON object'], rows, proposals };
+  if (data.rows !== undefined) {
+    if (!Array.isArray(data.rows)) errs.push('rows is not an array');
+    else {
+      rows = data.rows.length;
+      if (rows > REVIEW_ROWS_MAX) errs.push(`has ${rows} rows; at most ${REVIEW_ROWS_MAX}`);
+      const seen = new Set();
+      data.rows.forEach((r, i) => {
+        if (!r || typeof r !== 'object' || Array.isArray(r)) return void errs.push(`rows[${i}] is not an object`);
+        if (typeof r.id !== 'string' || !r.id) errs.push(`rows[${i}] has no string id`);
+        else if (seen.has(r.id)) errs.push(`rows[${i}]: id "${r.id}" is repeated`);
+        else seen.add(r.id);
+        if (r.proposal === undefined) return;
+        if (!r.proposal || typeof r.proposal !== 'object' || Array.isArray(r.proposal)) errs.push(`rows[${i}].proposal is an object of values, like a result row's values`);
+        else proposals++;
+      });
+    }
+  }
+  if (data.options !== undefined) {
+    if (!data.options || typeof data.options !== 'object' || Array.isArray(data.options)) errs.push('options is an object of option lists');
+    else for (const [k, list] of Object.entries(data.options)) {
+      if (!Array.isArray(list)) { errs.push(`options.${k} is not an array`); continue; }
+      if (list.length > REVIEW_ROWS_MAX) errs.push(`options.${k} has ${list.length} options; at most ${REVIEW_ROWS_MAX}`);
+      const seen = new Set();
+      list.forEach((o, i) => {
+        const oid = o && typeof o === 'object' ? o.id : o;
+        if (typeof oid !== 'string' && typeof oid !== 'number') errs.push(`options.${k}[${i}] has no id`);
+        else if (seen.has(oid)) errs.push(`options.${k}[${i}]: id "${oid}" is repeated`);
+        else seen.add(oid);
+      });
+    }
+  }
+  return { errs, rows, proposals };
+}
+
+// Where a page may load from or point at: relative paths inside its own folder, data: and blob:
+// URLs, and committed files through /api/file. Anything else would be refused by the dashboard's
+// CSP anyway; this says so before the owner sees a broken page.
+function reviewTargetOk(raw) {
+  const v = raw.replace(/[\u0000- \u007f]/g, '');
+  if (v === '' || v.startsWith('#') || /^(data|blob):/i.test(v)) return true;
+  if (/^\/api\/file\?/.test(v)) return !v.includes('..');
+  if (/^[a-z][a-z0-9+.-]*:/i.test(v) || v.startsWith('/') || v.startsWith('\\')) return false;
+  return !v.split(/[?#]/)[0].split(/[\\/]/).includes('..');
+}
+// The static checks on a review page and its files: { errors, warnings } as "file:line: text",
+// plus the data's counts. `files` is { page: { name, buf }, data?, schema? }.
+function reviewChecks(files) {
+  const errors = [], warnings = [];
+  let rows = 0, proposals = 0, schema = null, data = null;
+  const big = (f) => f.buf.length > REVIEW_MAX && errors.push(`${f.name}: ${f.buf.length} bytes; at most ${REVIEW_MAX} (4 MB)`);
+  const { page } = files;
+  if (!big(page)) {
+    const text = page.buf.toString('utf8');
+    const nl = [];
+    for (let i = text.indexOf('\n'); i !== -1; i = text.indexOf('\n', i + 1)) nl.push(i);
+    const lineOf = (at) => { let lo = 0, hi = nl.length; while (lo < hi) { const m = (lo + hi) >> 1; if (nl[m] < at) lo = m + 1; else hi = m; } return lo + 1; };
+    const at = (i) => `${page.name}:${lineOf(i)}`;
+    const each = (re, fn) => { for (const m of text.matchAll(re)) fn(m); };
+    if (!/^﻿?\s*<!doctype\s+html\s*>/i.test(text)) errors.push(`${page.name}:1: not a complete HTML document (start it with <!doctype html>)`);
+    const htmls = [...text.matchAll(/<html[\s>]/gi)];
+    if (htmls.length !== 1) errors.push(`${htmls.length > 1 ? at(htmls[1].index) : `${page.name}:1`}: a page is one <html> document (found ${htmls.length})`);
+    const target = (m, what, value) => { if (!reviewTargetOk(value)) errors.push(`${at(m.index)}: ${what} "${value.slice(0, 80)}" leaves the page; use a path beside the page, a data: or blob: URL, or /api/file?… for a committed file`); };
+    each(/\s(src|href|action|formaction|poster|background|xlink:href)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/gi, (m) => target(m, m[1], m[2] ?? m[3] ?? m[4]));
+    each(/\ssrcset\s*=\s*(?:"([^"]*)"|'([^']*)')/gi, (m) => { for (const part of (m[1] ?? m[2]).split(',')) target(m, 'srcset', part.trim().split(/\s+/)[0] ?? ''); });
+    each(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s]*))\s*\)/gi, (m) => target(m, 'url(', m[1] ?? m[2] ?? m[3]));
+    each(/@import\s+(?:url\(\s*)?(?:"([^"]*)"|'([^']*)'|([^\s;)]+))/gi, (m) => target(m, '@import', m[1] ?? m[2] ?? m[3]));
+    each(/<\s*(form|iframe|frame|frameset|object|embed|base)\b/gi, (m) => errors.push(`${at(m.index)}: <${m[1].toLowerCase()}> is not allowed in a review page${m[1].toLowerCase() === 'form' ? ' (the answer goes through devteam.propose, and the owner submits it outside the page)' : ''}`));
+    each(/<meta\b[^>]*http-equiv\s*=\s*["']?\s*(refresh|content-security-policy)/gi, (m) => errors.push(`${at(m.index)}: <meta http-equiv="${m[1]}"> is not allowed (the dashboard's header is the page's policy)`));
+    const WARN = [
+      [/\bfetch\s*\(|\bXMLHttpRequest\b|\bWebSocket\b|\bEventSource\b|\bsendBeacon\b/g, 'the page has no network; pass what it needs in data.json'],
+      [/\b(localStorage|sessionStorage|indexedDB)\b/g, 'the page has no storage; devteam.draft saves progress'],
+      [/\bdocument\.cookie\b/g, 'the page has no cookies'],
+      [/\bwindow\.top\b|\bwindow\.parent\b|\bparent\.postMessage\b/g, 'talk to the dashboard only through devteam.*'],
+    ];
+    for (const [re, why] of WARN) each(re, (m) => warnings.push(`${at(m.index)}: ${m[0].trim()}: ${why}`));
+    const secretish = (s) => /(?<![a-z])(key|secret|token|password|passwd|passphrase)s?(?![a-z])/i.test(s) || /[a-z](Key|Secret|Token|Password)(?![a-z])/.test(s);
+    // one warning per line is enough to point at the field
+    const secretWhy = 'looks like a field for a secret; ask for secrets with --secrets on an owner-action question, never in a page';
+    const secretLines = new Set();
+    const secretWarn = (i, what) => { const w = at(i); if (!secretLines.has(w)) { secretLines.add(w); warnings.push(`${w}: ${what} ${secretWhy}`); } };
+    each(/\stype\s*=\s*["']?password\b/gi, (m) => secretWarn(m.index, 'a password field'));
+    each(/\b(name|id|placeholder|aria-label|label|key|title)\s*[:=]\s*(["'`])([^"'`\n]{1,120})\2/gi, (m) => { if (secretish(m[3])) secretWarn(m.index, `${m[1]} "${m[3]}"`); });
+    each(/<label\b[^>]*>([^<]{1,120})</gi, (m) => { if (secretish(m[1])) secretWarn(m.index, `label "${m[1].trim()}"`); });
+  }
+  const parse = (f) => { try { return JSON.parse(f.buf.toString('utf8')); } catch (e) { errors.push(`${f.name}: not valid JSON: ${e.message}`); return undefined; } };
+  if (files.data && !big(files.data)) {
+    data = parse(files.data);
+    if (data !== undefined) {
+      const c = reviewDataCheck(data);
+      errors.push(...c.errs.map((e) => `${files.data.name}: ${e}`));
+      ({ rows, proposals } = c);
+    }
+  }
+  if (files.schema && !big(files.schema)) {
+    schema = parse(files.schema);
+    if (schema !== undefined) errors.push(...schemaSubsetErrors(schema, 'schema').map((e) => `${files.schema.name}: ${e}`));
+  }
+  return { errors, warnings, rows, proposals, data, schema };
+}
+
+// ask --kind review: read each file at the commit --ref names, check it, pin its bytes.
+function pinReview() {
+  const ref = flagStr('ref') ?? die('a review question pins its files to a commit: --ref <branch|sha>');
+  if (!/^[A-Za-z0-9._/-]+$/.test(ref)) die(`--ref ${ref} is not a branch or commit name`);
+  const commit = resolveCommit(ref) ?? die(`--ref ${ref} does not resolve to a commit`);
+  if (!commitReachable(commit)) die(`${commit.slice(0, 12)} is on no branch or tag; commit the page on the branch whose PR carries it`);
+  const read = (flag) => {
+    const p = flagStr(flag);
+    if (p === undefined) return null;
+    if (!REPO_PATH.test(p)) die(`--${flag} ${p}: a path inside the repo, relative, without ".."`);
+    if (git(['cat-file', '-t', `${commit}:${p}`]) !== 'blob') die(`--${flag} ${p} is not a file at ${ref} (${commit.slice(0, 12)}); commit it first`);
+    const size = Number(git(['cat-file', '-s', `${commit}:${p}`]));
+    if (size > REVIEW_MAX) die(`--${flag} ${p} is ${size} bytes; at most ${REVIEW_MAX} (4 MB)`);
+    return { name: p, buf: gitBlob(commit, p) ?? die(`cannot read ${p} at ${commit.slice(0, 12)}`) };
+  };
+  if (flagStr('page') === undefined) die('a review question needs --page <repo path to its page.html>');
+  const files = { page: read('page'), data: read('data'), schema: read('result-schema') };
+  const c = reviewChecks(files);
+  for (const w of c.warnings) warn(w);
+  if (c.errors.length) die(`the review page does not pass its checks (devteam.mjs review check):\n  - ${c.errors.join('\n  - ')}`);
+  const pin = (f) => (f ? { path: f.name, sha256: sha256(f.buf), bytes: f.buf.length } : undefined);
+  const titleOf = typeof c.data?.title === 'string' ? c.data.title : files.page.buf.toString('utf8').match(/<title[^>]*>([^<]*)<\/title>/i)?.[1];
+  return {
+    title: titleOf?.trim() ? titleOf.trim().slice(0, 200) : undefined, commit, ref,
+    page: pin(files.page), data: files.data ? { ...pin(files.data), rows: c.rows, proposals: c.proposals } : undefined,
+    result_schema: pin(files.schema), allow_partial: !!flags['allow-partial'],
+  };
+}
+
+// Whether a review's pinned files still are what the owner was shown: each one's status
+// (verified, tampered: the bytes at the commit don't hash to the line, missing: unreadable or on
+// no branch or tag), and the worst of them.
+const pinMemo = new Map();
+function reviewPins(rv) {
+  // readers skip the schema walk, so a hand-made line without a page or commit pins nothing
+  if (!/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(rv?.commit ?? '') || !rv.page?.path || !rv.page?.sha256) return { status: 'missing', reachable: false, files: [] };
+  const reachable = commitReachable(rv.commit);
+  const files = [['page', rv.page], ['data', rv.data], ['result_schema', rv.result_schema]].filter(([, f]) => f).map(([role, f]) => {
+    const key = `${rv.commit}:${f.path}:${f.sha256}`;
+    if (!pinMemo.has(key)) { const buf = gitBlob(rv.commit, f.path); pinMemo.set(key, buf === null ? 'missing' : sha256(buf) === f.sha256 ? 'verified' : 'tampered'); }
+    return { role, path: f.path, sha256: f.sha256, bytes: f.bytes, status: reachable ? pinMemo.get(key) : 'missing' };
+  });
+  const status = files.some((f) => f.status === 'missing') ? 'missing' : files.some((f) => f.status === 'tampered') ? 'tampered' : 'verified';
+  return { status, reachable, files };
+}
+// A review's status as the inbox shows it: declined, or the pinned files' status, and once
+// answered the result file's too (missing, or tampered when it no longer hashes to the owner's line).
+function reviewStatus(q, result, declined) {
+  if (declined) return 'declined';
+  const pins = reviewPins(q.review);
+  if (pins.status !== 'verified' || !result) return pins.status;
+  let buf;
+  try { buf = fs.readFileSync(reviewResultFile(q.id)); } catch { return 'missing'; }
+  return sha256(buf) === result.sha256 ? 'verified' : 'tampered';
+}
+
+function readJsonInput(src, what) {
+  let buf;
+  if (src === '-') {
+    try { buf = fs.readFileSync(0); } catch (e) { die(`${what}: cannot read stdin: ${e.message}`); }
+  } else {
+    const st = fs.statSync(src, { throwIfNoEntry: false });
+    if (!st?.isFile()) die(`${what}: no file ${src}`);
+    if (st.size > REVIEW_MAX) die(`${what}: ${src} is ${st.size} bytes; at most ${REVIEW_MAX} (4 MB)`);
+    buf = fs.readFileSync(src);
+  }
+  if (buf.length > REVIEW_MAX) die(`${what} is ${buf.length} bytes; at most ${REVIEW_MAX} (4 MB)`);
+  try { return { value: JSON.parse(buf.toString('utf8')), buf }; } catch (e) { return die(`${what} is not valid JSON: ${e.message}`); }
+}
+const emptyValue = (x) => x === null || x === undefined || x === '' || (Array.isArray(x) ? !x.length : typeof x === 'object' && !Object.keys(x).length);
+const isObj = (x) => !!x && typeof x === 'object' && !Array.isArray(x);
+
+// The owner's process accepts a review result: the pinned files still hash to the question line,
+// the result names them, satisfies the question's schema and, in the standard shape (data rows and
+// result rows), answers only known rows, each once, leaving rows undecided only when the question
+// allows it. kept and the counts are recomputed here, never taken from the page. Returns the
+// fields of the owner's answer line, after writing run/questions/<qid>/result.json.
+function acceptReviewResult(v, src) {
+  const rv = v.review;
+  const pins = reviewPins(rv);
+  if (pins.status === 'missing') die(`${v.id}: the page's commit ${rv.commit.slice(0, 12)} (${rv.ref}) is gone or on no branch, so nothing can be answered on it; tell the supervisor to ask again`);
+  if (pins.status === 'tampered') die(`${v.id}: ${pins.files.filter((f) => f.status === 'tampered').map((f) => f.path).join(', ')} no longer hash to the question; the page the owner saw is not the page on record. Ask again`);
+  const { value: result } = readJsonInput(src, 'the review result');
+  if (!isObj(result)) die('the review result is a JSON object');
+  if (result.v !== 1) die('the review result says "v": 1');
+  if (result.question !== v.id) die(`the review result is for ${result.question ?? 'no question'}, not ${v.id}`);
+  if (result.review_sha256 !== rv.page.sha256) die(`the review result names page ${String(result.review_sha256 ?? 'none').slice(0, 12)}, not the page asked (${rv.page.sha256.slice(0, 12)})`);
+  if (rv.data ? result.data_sha256 !== rv.data.sha256 : result.data_sha256 !== undefined) die(`the review result names data ${String(result.data_sha256 ?? 'none').slice(0, 12)}, not the data asked (${rv.data ? rv.data.sha256.slice(0, 12) : 'none'})`);
+  if (rv.result_schema) {
+    const schema = JSON.parse(gitBlob(rv.commit, rv.result_schema.path).toString('utf8'));
+    const errs = schemaErrors(schema, result, 'result');
+    if (errs.length) die(`the review result does not satisfy ${rv.result_schema.path}:\n  - ${errs.slice(0, 20).join('\n  - ')}${errs.length > 20 ? `\n  (+${errs.length - 20} more)` : ''}`);
+  }
+  const data = rv.data ? JSON.parse(gitBlob(rv.commit, rv.data.path).toString('utf8')) : null;
+  const stored = { ...result };
+  for (const k of ['answered_at', 'channel', 'summary']) delete stored[k];
+  let summary = null;
+  if (Array.isArray(data?.rows) && result.rows !== undefined) {
+    if (!Array.isArray(result.rows)) die('result.rows is an array of { "id", "decided", "values" }');
+    const byId = new Map(data.rows.map((r) => [r.id, r]));
+    const seen = new Set();
+    const c = { rows: data.rows.length, decided: 0, proposed: data.rows.filter((r) => isObj(r.proposal)).length, kept: 0, changed: 0, cleared: 0, undecided: 0 };
+    const notPartial = `asked without --allow-partial, so every row is decided`;
+    stored.rows = result.rows.map((r, i) => {
+      if (!isObj(r)) die(`result.rows[${i}] is not an object`);
+      if (!byId.has(r.id)) die(`result.rows[${i}]: "${r.id}" is not a row of ${rv.data.path}`);
+      if (seen.has(r.id)) die(`result.rows[${i}]: "${r.id}" is answered twice`);
+      seen.add(r.id);
+      if (typeof r.decided !== 'boolean') die(`result.rows[${i}] (${r.id}): decided is true or false`);
+      const { kept: _claimed, ...row } = r;
+      if (!r.decided) {
+        if (!rv.allow_partial) die(`result.rows[${i}] (${r.id}) is undecided; ${v.id} was ${notPartial}`);
+        c.undecided++;
+        return row;
+      }
+      if (r.values !== undefined && !isObj(r.values)) die(`result.rows[${i}] (${r.id}): values is an object`);
+      const values = r.values ?? {};
+      const proposal = byId.get(r.id).proposal;
+      const kept = isObj(proposal) && canonical(values) === canonical(proposal);
+      c.decided++;
+      if (kept) c.kept++;
+      else if (Object.values(values).every(emptyValue)) c.cleared++;
+      else c.changed++;
+      return { ...row, kept };
+    });
+    const left = data.rows.filter((r) => !seen.has(r.id));
+    if (left.length && !rv.allow_partial) die(`${left.length} row(s) of ${rv.data.path} are not in the result (${left.slice(0, 5).map((r) => r.id).join(', ')}${left.length > 5 ? ', …' : ''}); ${v.id} was ${notPartial}`);
+    c.undecided += left.length;
+    summary = c;
+    stored.summary = c;
+  }
+  stored.answered_at = nowIso();
+  stored.channel = ownerChannel();
+  const text = `${JSON.stringify(stored, null, 2)}\n`;
+  const file = reviewResultFile(v.id);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, text);
+  fs.renameSync(tmp, file);
+  const hash = sha256(Buffer.from(text));
+  const bytes = Buffer.byteLength(text);
+  const answer = summary
+    ? `Reviewed ${summary.rows} row${summary.rows === 1 ? '' : 's'}: ${summary.kept} kept, ${summary.changed} changed, ${summary.cleared} set to none, ${summary.undecided} undecided`
+    : `Answered: ${bytes} bytes, sha256 ${hash.slice(0, 12)}`;
+  return { answer, result: { sha256: hash, bytes, ...(summary ?? {}) } };
+}
+
+function reviewQuestion(id) {
+  const q = logGet(id ?? '');
+  if (q?.type !== 'question' || q.kind !== 'review' || !q.review) die(`${id ?? '(no id)'} is not a review question`);
+  return { q, v: questionView(q) };
+}
+// The owner's stored result, after its hashes verify; dies (exit 1) otherwise.
+function verifiedResult(v) {
+  if (v.declined) die(`${v.id} was sent back: ${v.answer}`);
+  if (v.status !== 'answered' || !v.result) die(`${v.id} has no result (${v.status})`);
+  if (v.result_status !== 'verified') die(`${v.id}: the result is ${v.result_status}${v.result_status === 'tampered' ? ` (${reviewResultFile(v.id)} no longer hashes to the owner's answer, sha256 ${v.result.sha256.slice(0, 12)})` : v.result_status === 'missing' ? ' (the result file or the pinned page is gone)' : ''}`);
+  const text = fs.readFileSync(reviewResultFile(v.id), 'utf8');
+  return { text, result: JSON.parse(text) };
+}
+const tsvCell = (x) => (x === undefined || x === null ? '' : Array.isArray(x) && x.every((y) => typeof y !== 'object') ? x.join(',') : typeof x === 'object' ? JSON.stringify(x) : String(x)).replace(/[\t\n\r]/g, ' ');
+
+function cmdReview() {
+  const [sub, id, file] = positional;
+  if (sub === 'check') {
+    if (!id) die('usage: review check <page.html> [--data d.json] [--result-schema s.json] [--json]');
+    const local = (p) => {
+      if (p === undefined) return null;
+      const st = fs.statSync(p, { throwIfNoEntry: false });
+      if (!st?.isFile()) die(`no file ${p}`);
+      return { name: p, buf: fs.readFileSync(p) };
+    };
+    const c = reviewChecks({ page: local(id), data: local(flagStr('data')), schema: local(flagStr('result-schema')) });
+    if (flags.json) { json({ ok: !c.errors.length, errors: c.errors, warnings: c.warnings, rows: c.rows, proposals: c.proposals }); if (c.errors.length) process.exit(1); return; }
+    for (const w of c.warnings) out(`warning: ${w}`);
+    for (const e of c.errors) out(`error: ${e}`);
+    if (c.errors.length) process.exit(1);
+    return out(`ok: ${id}${flagStr('data') ? `, ${flagStr('data')} (${c.rows} rows, ${c.proposals} with a proposal)` : ''}${flagStr('result-schema') ? `, ${flagStr('result-schema')}` : ''}${c.warnings.length ? ` (${c.warnings.length} warning${c.warnings.length > 1 ? 's' : ''})` : ''}`);
+  }
+  if (sub === 'show') {
+    const { q, v } = reviewQuestion(id);
+    const pins = reviewPins(q.review);
+    const df = reviewDraftFile(v.id);
+    const st = fs.statSync(df, { throwIfNoEntry: false });
+    const draft = st ? { path: df, bytes: st.size, saved_at: st.mtime.toISOString() } : null;
+    if (flags.json) return json({ id: v.id, status: v.status, result_status: v.result_status, review: v.review, files: pins.files, reachable: pins.reachable, result: v.result, declined: v.declined, answer: v.answer, result_file: v.result ? reviewResultFile(v.id) : null, draft });
+    out(`${v.id}  [review, ${v.status}]  ${v.result_status}\n  ${v.question}`);
+    out(`  pinned at ${String(q.review.commit).slice(0, 12)} (${q.review.ref})${pins.reachable ? '' : ', which no branch or tag contains any more'}`);
+    for (const f of pins.files) out(`  ${f.role.padEnd(13)} ${f.path}  ${f.sha256.slice(0, 12)}  ${f.bytes} bytes  ${f.status}${f.role === 'data' ? `  (${q.review.data.rows} rows, ${q.review.data.proposals} with a proposal)` : ''}`);
+    out(`  partial answers ${q.review.allow_partial ? 'allowed' : 'not allowed'}`);
+    if (v.answer) out(`  answer: ${v.answer}`);
+    if (v.result) out(`  result: ${reviewResultFile(v.id)}  sha256 ${v.result.sha256.slice(0, 12)}  ${v.result_status}`);
+    if (draft) out(`  draft saved ${draft.saved_at} (${draft.bytes} bytes; a draft is not an answer)`);
+    return;
+  }
+  if (sub === 'result') {
+    const { v } = reviewQuestion(id);
+    const { text, result } = verifiedResult(v);
+    if (flags.json) return process.stdout.write(text);
+    if (flags.tsv) {
+      if (!Array.isArray(result.rows)) die(`${v.id}'s result is not in the rows shape; read it with --json`);
+      const keys = [...new Set(result.rows.flatMap((r) => Object.keys(r.values ?? {})))];
+      out(['id', 'decided', 'kept', ...keys, 'note'].join('\t'));
+      for (const r of result.rows) out([r.id, r.decided, r.kept ?? '', ...keys.map((k) => r.values?.[k]), r.note].map(tsvCell).join('\t'));
+      return;
+    }
+    out(`${v.id}: ${v.answer}`);
+    out(`  ${reviewResultFile(v.id)}  sha256 ${v.result.sha256.slice(0, 12)}  verified`);
+    for (const r of result.rows ?? []) out(`  ${r.id}  ${!r.decided ? 'undecided' : r.kept ? 'kept' : Object.values(r.values ?? {}).every(emptyValue) ? 'none' : 'changed'}  ${r.decided ? JSON.stringify(r.values ?? {}) : ''}${r.note ? `  note: ${r.note}` : ''}`);
+    return;
+  }
+  if (sub === 'draft') {
+    const { v } = reviewQuestion(id);
+    const df = reviewDraftFile(v.id);
+    if (file === undefined) {
+      const t = readText(df);
+      if (t === null) die(`no draft for ${v.id}`);
+      warn('a draft is partial progress, never an answer');
+      return process.stdout.write(t.endsWith('\n') ? t : `${t}\n`);
+    }
+    ownerWriter();
+    if (v.status !== 'open') die(`${v.id} is ${v.status}; a draft is for an open review`);
+    const { buf } = readJsonInput(file, 'the draft');
+    fs.mkdirSync(path.dirname(df), { recursive: true });
+    const tmp = `${df}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, buf);
+    fs.renameSync(tmp, df);
+    return out(`saved a draft for ${v.id} (partial progress, not an answer)`);
+  }
+  if (sub === 'verify') {
+    const { v } = reviewQuestion(id);
+    const appliedFile = flagStr('applied') ?? die('usage: review verify <qid> --applied <file>   (rows as [{ "id", "values", "evidence" }, …])');
+    const { result } = verifiedResult(v);
+    if (!Array.isArray(result.rows)) die(`${v.id}'s result is not in the rows shape; there are no rows to verify`);
+    const { value } = readJsonInput(appliedFile, 'the applied file');
+    const applied = Array.isArray(value) ? value : value?.rows;
+    if (!Array.isArray(applied) || !applied.every(isObj)) die('the applied file is an array of { "id", "values", "evidence" } (or { "rows": […] })');
+    const fails = [];
+    const byId = new Map();
+    for (const a of applied) { if (byId.has(a.id)) fails.push(`${a.id}: applied twice`); byId.set(a.id, a); }
+    const decided = result.rows.filter((r) => r.decided);
+    for (const r of decided) {
+      const a = byId.get(r.id);
+      if (!a) fails.push(`${r.id}: decided ${JSON.stringify(r.values ?? {})}, not applied`);
+      else if (canonical(a.values ?? {}) !== canonical(r.values ?? {})) fails.push(`${r.id}: decided ${JSON.stringify(r.values ?? {})}, applied ${JSON.stringify(a.values ?? {})}`);
+    }
+    const ok = new Set(decided.map((r) => r.id));
+    for (const a of applied) if (!ok.has(a.id)) fails.push(`${a.id}: applied, but the owner did not decide it`);
+    return report(fails, `${decided.length} row(s) applied as the owner decided them (${v.id}, result sha256 ${v.result.sha256.slice(0, 12)})`);
+  }
+  die('usage: review check <page.html> [--data d] [--result-schema s] | review show <qid> [--json] | review result <qid> [--json|--tsv] | review verify <qid> --applied <file> | review draft <qid> [<file|->]');
+}
+
 // ===== secrets: the owner posts a value straight to where it goes =====
 //
 // An owner-action question may declare secrets, each with a sink. The owner's own process (their
@@ -2467,6 +2935,7 @@ function cmdQuestions() {
     out(`${q.id}  [${q.kind}, ${q.status}]${q.blocks.length ? ` blocks ${q.blocks.join(',')}` : ''}\n  ${q.question}`);
     for (const c of q.choices) out(`  - ${c.label}${c.label === q.recommendation ? ' (recommended)' : ''}${c.detail ? `: ${c.detail}` : ''}${c.effect ? ` For users: ${c.effect}` : ''}`);
     for (const l of q.links) out(`  see: ${l.title} (${l.url ?? `${l.ref ? `${l.ref}:` : ''}${l.path}`})`);
+    if (q.review) out(`  review: ${q.review.page?.path} at ${String(q.review.commit).slice(0, 12)} (${q.review.ref})${q.review.data ? `, ${q.review.data.rows} rows` : ''}; ${q.result_status} (devteam.mjs review show ${q.id})`);
     if (q.recommendation) out(`  recommend: ${q.recommendation}${q.confidence != null ? ` (${Math.round(q.confidence * 100)}%)` : ''}`);
     if (q.why_asked?.reasons?.length) out(`  why asked: ${q.why_asked.reasons.join(', ')}${q.class ? ` (${q.class}, rung ${q.why_asked.rung ?? '-'} of ${q.why_asked.ceiling ?? '-'})` : ''}`);
     if (q.answer) out(`  answer (${q.answered_by}): ${q.answer}`);
@@ -2490,6 +2959,7 @@ function cmdAct() {
     const q = logGet(approved);
     approval = q?.type === 'question' ? questionView(q) : null;
     if (!approval || !['answered', 'defaulted'].includes(approval.status)) die(`${approved} is not an answered question`);
+    reviewApproves(approval, 'act --approved');
   }
   // approve-plan may cite the owner's answer to a one-way door asked at goal level (constitution.md §4);
   // it is checked below, against the ticket's goals and its plan review, not as an approve-plan answer.
@@ -3643,6 +4113,9 @@ function collectMetrics(since) {
     else if (!p.waiting_on_supervisor.length && !p.waiting_on_owner.length && p.minutes_silent > settings.stale_after_minutes) add('high', 'stale-planner', who, `no sign of life for ${p.minutes_silent} min`, 'check its pane; message it or resume it (supervisor.md §11)');
   }
   for (const msg of openMsgs.filter((x) => now - Date.parse(x.created_at) > 30 * 60000)) add('medium', 'unanswered-message', msg.id, `${msg.kind} from ${msg.created_by}, ${Math.round((now - Date.parse(msg.created_at)) / 60000)} min old`, `reply with --re ${msg.id}`);
+  // A review's page lives on the branch that asked it; once no branch or tag holds that commit, the
+  // page the owner answers (or answered) on is lost at the next prune.
+  for (const q of questions().filter((x) => x.kind === 'review' && x.review && ['open', 'answered'].includes(x.status) && reviewPins(x.review).status === 'missing')) add('high', 'review-file-missing', q.id, `its page is pinned to ${String(q.review.commit).slice(0, 12)} (asked on ${q.review.ref}), which no branch or tag holds any more, or which can't be read`, q.status === 'open' ? 'withdraw it and ask again on a page committed to a live branch' : `restore the branch before the commit is pruned (git branch ${q.review.ref} ${q.review.commit}), so the page the owner answered on stays on record`);
   for (const q of openQs.filter((x) => now - Date.parse(x.asked_at) > grace)) add('high', 'owner-question-waiting', q.id, q.question.slice(0, 120), q.default ? 'apply its default' : 'remind the owner; it blocks work');
   if (recentQs.length >= 4 && answeredRecent / recentQs.length < 0.5) add('high', 'inbox-stalled', 'owner questions', `${answeredRecent} of ${recentQs.length} answered in 14 days`, 'remind the owner what is blocked; give defaults where the class allows; withdraw what no longer matters');
   // churn is a signal to re-plan a ticket still in flight; a merged ticket's passes are retro material
@@ -4438,6 +4911,14 @@ Sessions (worker.md)
 Decide and act (supervisor.md, constitution.md)
   ask --question q [--kind k] [--class c] [--reasons r…] [--recommendation r] [--confidence 0-1] [--default d] [--choices '[{"label","detail","effect"}…]'] [--rule-scope s] [--goal g-… (goal-approval)] [--links '[{"title","path","ref"}|{"title","url"}…]'] [--blocks ids] [--evidence ids] [--ticket id] [--re m-…] [--note path] [--secrets '[{"name","kind":"string|file","sink"}…]' (owner-action)]
   secret post <qid> [--file NAME=path] [--json]                          owner: post a question's secrets straight to their sinks; never logged (secret sinks lists them)
+  ask --kind review --page <repo path> --ref <branch|sha> [--data <repo path>] [--result-schema <repo path>] [--allow-partial] --question q [--context c] [--class c] [--reasons r…] [--ticket id] [--blocks ids] [--re m-…]
+                                  supervisor: an agent-drawn page for rows the owner decides; pins page, data and result schema to a commit and their sha256s
+  review check <page.html> [--data d.json] [--result-schema s.json] [--json]   anyone: the static checks ask runs, with line numbers
+  review show <qid> [--json]      the pinned files and the result's status: verified, missing, tampered or declined
+  review result <qid> [--json|--tsv]   the owner's result, once every hash verifies (exit 1 otherwise)
+  review verify <qid> --applied <file>   rows applied ([{ "id", "values", "evidence" }]) vs rows the owner decided; exit 1 on any difference
+  review draft <qid> [<file|->]   owner: save partial progress; without a file, print it (a draft is never an answer)
+  answer <qid> --review-result <file|-> | answer <qid> "<why>" --decline   (owner) a review: validate and hash its result, or send it back
   answer <qid> "<text>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> "<text>" --from-chat --said "<owner's words>" | answer <qid> --defaulted   (supervisor)
   withdraw <qid> [--reason r] | questions [--all] [--id q] [--json]
   act --class c [--scope s] [--approved qid] [--refs ids] [--irreversible] -- "<what>"
@@ -4470,7 +4951,7 @@ const COMMANDS = {
   feature: cmdFeature, ticket: cmdTicket, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, roadmap: cmdRoadmap,
   'check-ticket': cmdCheckTicket, 'check-pr': cmdCheckPr, merge: cmdMerge, 'review-worktree': cmdReviewWorktree,
   phase: cmdPhase, gate: cmdGate, send: cmdSend, messages: cmdMessages, 'stop-ok': cmdStopOk,
-  ask: cmdAsk, answer: cmdAnswer, secret: cmdSecret, withdraw: cmdWithdraw, questions: cmdQuestions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
+  ask: cmdAsk, answer: cmdAnswer, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, questions: cmdQuestions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
   observe: cmdObserve, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, knowledge: cmdKnowledge, problem: cmdProblem,
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
   log: cmdLog, 'log-check': cmdLogCheck, 'log-sync': cmdLogSync, history: cmdHistory,
