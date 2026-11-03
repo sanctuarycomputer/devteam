@@ -697,6 +697,45 @@ test('devteam kit', async (t) => {
     git(['worktree', 'remove', '--force', wt('caps')]);
   });
 
+  await t.test("a ratchet ceiling may move within the owner's wiggle without an answer", () => {
+    const setTo = (w, fn) => {
+      const f = path.join(w, 'docs/devteam/project/settings.md');
+      const txt = fs.readFileSync(f, 'utf8');
+      const m = txt.match(/```json devteam\s*\n([\s\S]*?)\n```/);
+      const j = JSON.parse(m[1]);
+      fn(j);
+      fs.writeFileSync(f, txt.replace(m[1], JSON.stringify(j, null, 2)));
+    };
+    landSettings((txt) => txt.replace('"gates": {', '"ratchet_wiggle": 5, "gates": { "dead": { "cmd": "true", "ceiling": 190, "approved": 195 },'));
+    const tryCeiling = (slug, fn) => {
+      git(['worktree', 'add', '-q', '-B', `chore-${slug}`, wt(slug), 'origin/main']);
+      setTo(wt(slug), fn);
+      git(['commit', '-qam', slug], wt(slug));
+      git(['push', '-q', '-f', 'origin', `chore-${slug}`], wt(slug));
+      const r = dt(['merge', '--chore', slug, '--dry-run', '--title', `chore-${slug}: ceiling`, '--body-file', body], { role: 'sup' });
+      git(['worktree', 'remove', '--force', wt(slug)]);
+      return r;
+    };
+    assert.doesNotMatch(tryCeiling('wig-up', (j) => { j.gates.dead.ceiling = 200; }).out, /changes owner settings/, "up to approved + wiggle: the supervisor's");
+    assert.match(tryCeiling('wig-over', (j) => { j.gates.dead.ceiling = 201; }).out, /changes owner settings: gates/, 'past it: the owner answers');
+    assert.doesNotMatch(tryCeiling('wig-down', (j) => { j.gates.dead.ceiling = 150; }).out, /changes owner settings/, 'lowering is always fine');
+    assert.match(tryCeiling('wig-approved', (j) => { j.gates.dead.approved = 260; j.gates.dead.ceiling = 262; }).out, /changes owner settings: gates/, "the approved value is the owner's");
+    assert.match(tryCeiling('wig-self', (j) => { j.ratchet_wiggle = 100; j.gates.dead.ceiling = 290; }).out, /changes owner settings: .*ratchet_wiggle/, "a PR can't widen its own allowance");
+    assert.match(tryCeiling('wig-cmd', (j) => { j.gates.dead.cmd = 'false'; j.gates.dead.ceiling = 191; }).out, /changes owner settings: gates/, 'any other gate change is the owner\'s');
+    // an answer one act recorded for this chore can approve the merge that lands it; a second use can't
+    const Qc = must(['ask', '--question', 'Raise the dead-code ceiling to 230?', '--class', 'gate-change', '--reasons', 'owner-only', '--recommendation', 'yes'], { role: 'sup' });
+    must(['answer', Qc, 'yes']);
+    must(['act', '--class', 'gate-change', '--approved', Qc, '--refs', 'chore-wig-big', '--', 'dead-code ceiling to 230'], { role: 'sup' });
+    git(['worktree', 'add', '-q', '-B', 'chore-wig-big', wt('wig-big'), 'origin/main']);
+    setTo(wt('wig-big'), (j) => { j.gates.dead.ceiling = 230; j.gates.dead.approved = 230; });
+    git(['commit', '-qam', 'big'], wt('wig-big'));
+    git(['push', '-q', '-f', 'origin', 'chore-wig-big'], wt('wig-big'));
+    const big = ['merge', '--chore', 'wig-big', '--dry-run', '--approved', Qc, '--title', 'chore-wig-big: ceiling', '--body-file', body];
+    assert.doesNotMatch(dt(big, { role: 'sup' }).out, /already approved an act/, 'the merge lands what the act recorded');
+    assert.match(dt(['act', '--class', 'gate-change', '--approved', Qc, '--refs', 'chore-wig-big', '--', 'again'], { role: 'sup' }).err, /already approved an act/, 'a second act on one answer is still refused');
+    git(['worktree', 'remove', '--force', wt('wig-big')]);
+  });
+
   await t.test("the owner's CI-fix rule approves a workflow-only chore that keeps every job", () => {
     const wf = '.github/workflows/devteam.yml';
     assert.ok(git(['show', `origin/main:${wf}`]), 'init --github put the workflow on main');
