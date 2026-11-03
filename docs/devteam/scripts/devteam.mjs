@@ -1541,8 +1541,9 @@ function oneWayDoorsSection(body) {
 // A verdict at commit V holds at head H only if V is an ancestor of H, every non-merge commit V..H
 // just ADDS review-record files under `dir`, and any merge between only brought main in: each merge's
 // other parents are on main, and the branch's own change against main (three-dot, review records
-// aside) is byte-identical at H to what was reviewed at V. A conflict fix that touched the work
-// changes that diff, so it voids the verdict; a clean merge of main does not.
+// aside) is byte-identical at H to what was reviewed at V, or, where main touched the same files,
+// each merge is exactly git's own merge of its parents. A conflict fix that touched the work
+// changes both, so it voids the verdict; a clean merge of main does not.
 function verdictHolds(v, head, dir) {
   if (!head || !v || !/^[0-9a-f]{40}$/.test(v)) return false;
   if (v === head) return true;
@@ -1561,9 +1562,20 @@ function verdictHolds(v, head, dir) {
     const others = (git(['rev-list', '--parents', '-n', '1', m]) ?? '').split(' ').slice(2);
     if (!others.length || others.some((p) => git(['merge-base', '--is-ancestor', p, main]) === null)) return false;
   }
-  const own = (x) => git(['diff', '--binary', `${main}...${x}`, '--', '.', `:(exclude)${dir.replace(/\/$/, '')}`]);
+  const records = `:(exclude)${dir.replace(/\/$/, '')}`;
+  const own = (x) => git(['diff', '--binary', `${main}...${x}`, '--', '.', records]);
   const a = own(v), b = own(head);
-  return a !== null && a === b;
+  if (a !== null && a === b) return true;
+  // When main also changed a file the work touches, that diff's text moves (blob ids, line
+  // numbers, context) though the work didn't. Then each merge must be exactly what git makes of
+  // its parents on its own: redo it and compare trees, records aside. A conflict, a resolution or
+  // any hand edit in the merge differs from that, so it voids the verdict.
+  return merges.every((m) => {
+    const parents = (git(['rev-list', '--parents', '-n', '1', m]) ?? '').split(' ').slice(1);
+    if (parents.length !== 2) return false;
+    const tree = git(['merge-tree', '--write-tree', '--no-messages', parents[0], parents[1]])?.split('\n')[0];
+    return !!tree && /^[0-9a-f]{40}$/.test(tree) && git(['diff', '--quiet', tree, `${m}^{tree}`, '--', '.', records]) !== null;
+  });
 }
 const changedFiles = (base, sha) => (git(['diff', '--name-only', '--no-renames', base, sha]) ?? '').split('\n').filter(Boolean);
 
