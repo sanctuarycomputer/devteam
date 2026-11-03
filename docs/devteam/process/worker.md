@@ -37,7 +37,7 @@ You are a worker: one session bound to one ticket, from spec to merge, run with 
 | verification | `verification-before-completion` | `project/tickets/<id>/verification.md`: a table with a row per done-when, the exact command and its result, at a named commit; anything that can't run here is marked deferred to beta with the reason |
 | finish | `finishing-a-development-branch` | merge `origin/main`, re-run gates; push; the PR (§8); the final review; `check-ticket`; a `merge-request` message. The supervisor merges. |
 
-Review records follow `governance/quality.md` §3 exactly (a `- Reviewer:` line, a findings table with dispositions, `Verdict: APPROVE|CHANGES <full sha>` last). Once an approving verdict is committed, add only new record files after it; editing or deleting any record, or changing any other file, voids it. A spec or plan reviewed by a subagent you started is fine; a final verdict is not.
+Review records follow `governance/quality.md` §3 exactly (a `- Reviewer:` line, a findings table with dispositions, `Verdict: APPROVE|CHANGES <full sha>` last). Once an approving verdict is committed, add only new record files after it, or fill in an earlier one (an empty Disposition cell, a missing `- Reviewer:` line); any other edit to a record, deleting one, or changing any other file, voids it. A spec or plan reviewed by a subagent you started is fine; a final verdict is not.
 
 ## 5. Phases and cost
 

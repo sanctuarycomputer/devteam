@@ -1599,15 +1599,46 @@ function oneWayDoorsSection(body) {
 // aside) is byte-identical at H to what was reviewed at V, or, where main touched the same files,
 // each merge is exactly git's own merge of its parents. A conflict fix that touched the work
 // changes both, so it voids the verdict; a clean merge of main does not.
+// A record edit that only fills in what the record lacked: a "- Reviewer:" line where there was
+// none, and Disposition cells that were empty. Verdicts, findings and dispositions already given
+// can't change this way, so a dissent still can't be edited away.
+function fillInOnly(before, after) {
+  if (before === null || after === null) return false;
+  // blank lines carry nothing in a record, so they're left out of the comparison
+  const a = before.split('\n').filter((l) => l.trim()), b = after.split('\n').filter((l) => l.trim());
+  const REVIEWER = /^-[ \t]*Reviewer:[ \t]*\S/;
+  if (b.length === a.length + 1 && !a.some((l) => REVIEWER.test(l))) {
+    const i = b.findIndex((l, k) => l !== a[k]);
+    if (i < 0 || !REVIEWER.test(b[i])) return false;
+    b.splice(i, 1);
+  }
+  if (b.length !== a.length) return false;
+  let disp = -1;
+  for (let k = 0; k < a.length; k++) {
+    if (a[k].trim().startsWith('|')) { const lower = tableCells(a[k]).map((c) => c.toLowerCase()); if (lower.includes('disposition')) disp = lower.indexOf('disposition'); }
+    if (a[k] === b[k]) continue;
+    if (disp < 0 || !a[k].trim().startsWith('|') || !b[k].trim().startsWith('|')) return false;
+    const x = tableCells(a[k]), y = tableCells(b[k]);
+    if (x.length !== y.length || x.some((c, j) => j !== disp && c !== y[j]) || x[disp] !== '' || !y[disp]) return false;
+  }
+  return true;
+}
 function verdictHolds(v, head, dir) {
   if (!head || !v || !/^[0-9a-f]{40}$/.test(v)) return false;
   if (v === head) return true;
   if (!dir || git(['merge-base', '--is-ancestor', v, head]) === null) return false;
   const main = mainRef();
-  // the branch's own commits since V: what a merge brought in from main is main's, not the branch's
-  const onlyRecords = (git(['log', '--no-merges', '--no-renames', '--format=', '--name-status', `${v}..${head}`, ...(main ? [`^${main}`] : [])]) ?? 'x').split('\n').filter(Boolean).every((l) => {
+  // the branch's own commits since V: what a merge brought in from main is main's, not the branch's.
+  // Each adds a review record, or fills one in mechanically (fillInOnly): an empty Disposition cell
+  // filled, a missing "- Reviewer:" line added. Nothing else in a record may change.
+  let commit = null;
+  const isRecord = (file) => file?.startsWith(dir) && /^(?:[a-z0-9-]+\/)?[a-z]+-\d+[a-z]?\.md$/.test(file.slice(dir.length));
+  const onlyRecords = (git(['log', '--no-merges', '--no-renames', '--format=@%H', '--name-status', `${v}..${head}`, ...(main ? [`^${main}`] : [])]) ?? 'x').split('\n').filter(Boolean).every((l) => {
+    if (l.startsWith('@')) { commit = l.slice(1); return true; }
     const [st, file] = l.split('\t');
-    return st === 'A' && file?.startsWith(dir) && /^(?:[a-z0-9-]+\/)?[a-z]+-\d+[a-z]?\.md$/.test(file.slice(dir.length));
+    if (!isRecord(file)) return false;
+    if (st === 'A') return true;
+    return st === 'M' && !!commit && fillInOnly(git(['show', `${commit}^:${file}`]), git(['show', `${commit}:${file}`]));
   });
   if (!onlyRecords) return false;
   const merges = (git(['rev-list', '--merges', `${v}..${head}`]) ?? 'x').split('\n').filter(Boolean);
@@ -1660,9 +1691,12 @@ function checkTicket(id, { sha: shaArg, title, body, approvals = true }) {
     if (rows < (t.done_when ?? []).length) fails.push(`verification has ${Math.max(rows, 0)} row(s) for ${t.done_when.length} done-when(s)`);
   }
   const reviews = ticketReviews(id, src);
+  // An unnamed record counts for nothing; it fails the ticket only while it is the latest in its
+  // track (a later, named pass in the same track supersedes it).
+  const superseded = (r) => reviews.some((o) => o !== r && o.stage === r.stage && o.variant === r.variant && o.pass > r.pass);
   for (const r of reviews) {
     if (r.verdict && !r.shaValid) fails.push(`${r.file}: the verdict needs the full 40-character SHA`);
-    if (r.verdict && !r.reviewer) fails.push(`${r.file}: no "- Reviewer:" line; an unnamed review does not count`);
+    if (r.verdict && !r.reviewer && !superseded(r)) fails.push(`${r.file}: no "- Reviewer:" line; an unnamed review does not count`);
   }
   // The latest record in every final track must say APPROVE at a commit that holds at this head.
   const reviewsDir = projectInRepo ? `${projectRel}/tickets/${id}/reviews/` : null;
