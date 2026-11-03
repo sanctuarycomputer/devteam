@@ -3171,7 +3171,9 @@ function readJunit(file) {
 // Failed tests plus the ten slowest: enough for flakiness and hotspots, small enough for one line.
 const keepTests = (tests) => [...tests.filter((t) => t.failed).slice(0, 30), ...tests.filter((t) => !t.failed).sort((a, b) => b.ms - a.ms).slice(0, 10)];
 
+const GATE_NAME = /^[a-z0-9][a-z0-9-]{0,39}$/;
 function gateStats(runs) {
+  runs = runs.filter((r) => GATE_NAME.test(r.gate ?? ''));
   const byGate = new Map();
   for (const r of runs) (byGate.get(r.gate) ?? byGate.set(r.gate, []).get(r.gate)).push(r);
   const gates = [];
@@ -3747,6 +3749,7 @@ function dashboardData() {
   return {
     generated_at: nowIso(), project: settings.project,
     caps: { max_active_tickets: settings.max_active_tickets },
+    gates_configured: Object.keys(settings.gates ?? {}),
     tickets: deriveStatus(),
     critical_path: findCycle(sub) ? [] : criticalPath(sub).path,
     questions: rankQuestions(questions().filter((q) => q.status === 'open')),
@@ -4033,6 +4036,9 @@ function cmdGate() {
   if (flags.all) return gateAll();
   const name = positional[0];
   if (!name || !rest?.length) die('usage: gate <name> [--junit <report.xml>] -- <command> [args…]   |   gate --all');
+  // A gate's name is a short word (test, lint, model-size): a stray shell expansion once recorded
+  // node's help text as hundreds of "gates".
+  if (!GATE_NAME.test(name)) die(`gate name "${name.slice(0, 60)}" must be a short lowercase word or words joined by hyphens (test, lint, model-size)`);
   const started = Date.now();
   let ok = true;
   try {

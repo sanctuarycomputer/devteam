@@ -303,6 +303,8 @@ test('devteam kit', async (t) => {
     must(['send', 'supervisor', 'spec and plan reviewed; approve please', '--kind', 'review-request'], w);
     assert.doesNotMatch(dt(['phase', 'awaiting-word', '--note', 'asked'], w).err, /no open request/);
     must(['gate', 'test', '--', 'true'], w);
+    assert.match(dt(['gate', 'v18.20.4', '--', 'true'], w).err, /must be a short lowercase word/, "a stray expansion can't record a junk gate");
+    assert.match(dt(['gate', 'Usage: node [options]', '--', 'true'], w).err, /must be a short lowercase word/);
     assert.notEqual(dt(['gate', 'lint', '--', 'false'], w).status, 0, 'gate passes the exit status through');
     // a TDD red then green at the same HEAD with uncommitted work is not flakiness
     write(path.join(wt('bill-01-card'), 'billing/wip.test.js'), 'red\n');
