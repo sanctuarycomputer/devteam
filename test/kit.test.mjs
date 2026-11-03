@@ -309,6 +309,18 @@ test('devteam kit', async (t) => {
       assert.match(must(['status']), /bill-01-card.*WAITING ON A PROMPT/);
       spawnSync('tmux', ['kill-server']);
       assert.ok(!json(must(['metrics', '--json'])).findings.some((x) => x.kind === 'blocked-prompt'), 'no pane, no finding');
+      // a usage-limit banner, but not source code the pane shows that mentions a rate limit
+      const limitPane = (text) => {
+        spawnSync('tmux', ['new-session', '-d', '-s', 'devteam', '-n', 'bill-01-card', `sh -c 'printf "${text}"; exec sleep 600'`]);
+        for (let i = 0; i < 20 && !/limit/.test(spawnSync('tmux', ['capture-pane', '-p', '-t', 'devteam:bill-01-card'], { encoding: 'utf8' }).stdout ?? ''); i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+        const hit = json(must(['metrics', '--json'])).findings.find((x) => x.kind === 'blocked-prompt');
+        spawnSync('tmux', ['kill-server']);
+        return hit;
+      };
+      assert.ok(!limitPane('  43  # Request-path client: a rate limit never sleeps a web worker.\\n  44  def call\\n'), 'a numbered source line is not a banner');
+      assert.ok(!limitPane('Retries back off when the API returns a rate limit error.\\n'), 'prose about rate limits is not a banner');
+      assert.match(limitPane('5-hour limit reached - resets 3pm\\n')?.detail ?? '', /usage-limit banner/, 'a limit banner is');
+      assert.match(limitPane('You have hit your usage limit. Try again later.\\n')?.detail ?? '', /usage-limit banner/, 'another harness\'s wording too');
     } else t.diagnostic('tmux not installed: blocked-prompt detection not exercised');
     assert.match(dt(['phase', 'awaiting-word'], w).err, /no open request/, 'waiting with nothing asked warns');
     must(['send', 'supervisor', 'spec and plan reviewed; approve please', '--kind', 'review-request'], w);
