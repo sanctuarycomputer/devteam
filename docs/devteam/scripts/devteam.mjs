@@ -177,9 +177,6 @@ const SETTINGS_DEFAULTS = {
   secret_commands: [],
   // The forge's checks merge doesn't wait for (names, e.g. a broken optional one); owner-only.
   ignored_checks: [],
-  // How far the supervisor may raise a gate's numeric `ceiling` above its owner-approved value
-  // (the gate's `approved`, else main's ceiling) without asking; lowering is always fine. Owner's.
-  ratchet_wiggle: 0,
   // Spend is measured from the agent harnesses' own session logs (built in: claude-code, codex);
   // usage_command adds any other harness (it prints usage records, see spend in the script); and
   // model_prices ($ per million tokens: input, output, cache_read, cache_write) prices models the
@@ -211,7 +208,7 @@ const OWNER_SETTINGS = {
   gates: 'gate-change', worktree_setup: 'gate-change', worktree_files: 'gate-change',
   autonomy_ceilings: 'governance-edit', agent_command: 'governance-edit', resume_command: 'governance-edit', worker_denied_commands: 'governance-edit',
   forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', upstream_repo: 'governance-edit',
-  release: 'governance-edit', secret_commands: 'governance-edit', ignored_checks: 'gate-change', ratchet_wiggle: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit',
+  release: 'governance-edit', secret_commands: 'governance-edit', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit',
 };
 const canonical = (v) => (Array.isArray(v) ? `[${v.map(canonical).join(',')}]` : v && typeof v === 'object' ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(',')}}` : JSON.stringify(v));
 function settingsAt(ref) {
@@ -224,24 +221,7 @@ function settingsAt(ref) {
 function ownerSettingsChanged(base, head) {
   const a = settingsAt(base), b = settingsAt(head);
   if (!a || !b) return null;
-  return Object.entries(OWNER_SETTINGS).filter(([k]) => canonical(a[k]) !== canonical(b[k]) && !(k === 'gates' && ceilingWiggleOnly(a, b))).map(([key, cls]) => ({ key, cls }));
-}
-// A gates change that only moves numeric `ceiling`s, each down, or up to the owner's wiggle
-// (settings ratchet_wiggle, read from the base so a PR can't widen its own allowance) above the
-// gate's `approved` value, else main's ceiling, is the supervisor's: the owner's standing allowance.
-function ceilingWiggleOnly(a, b) {
-  const ga = a.gates ?? {}, gb = b.gates ?? {};
-  const wiggle = typeof a.ratchet_wiggle === 'number' ? a.ratchet_wiggle : 0;
-  const strip = (o) => { const c = { ...o }; delete c.ceiling; return c; };
-  const keys = new Set([...Object.keys(ga), ...Object.keys(gb)]);
-  for (const k of keys) {
-    const x = ga[k], y = gb[k];
-    if (canonical(x) === canonical(y)) continue;
-    if (!x || !y || typeof x !== 'object' || typeof y !== 'object' || typeof x.ceiling !== 'number' || typeof y.ceiling !== 'number') return false;
-    if (canonical(strip(x)) !== canonical(strip(y))) return false;
-    if (y.ceiling > (typeof x.approved === 'number' ? x.approved : x.ceiling) + wiggle) return false;
-  }
-  return true;
+  return Object.entries(OWNER_SETTINGS).filter(([k]) => canonical(a[k]) !== canonical(b[k])).map(([key, cls]) => ({ key, cls }));
 }
 let settingsCache;
 function loadSettings() {
