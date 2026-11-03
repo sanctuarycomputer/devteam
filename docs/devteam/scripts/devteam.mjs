@@ -2594,12 +2594,28 @@ function reviewPins(rv) {
 const pinnedBlob = (pins, role) => { const f = pins.files.find((x) => x.role === role); return f?.status === 'verified' ? gitBlob(f.at, f.path) : null; };
 // A review's status as the inbox shows it: declined, or the pinned files' status, and once
 // answered the result file's too (missing, or tampered when it no longer hashes to the owner's line).
+// The owner's result bytes: this machine's run/questions copy, else the permanent copy committed
+// in the PR that asked (on main once it landed, or on the asking branch): a clone elsewhere (a moved
+// fleet) shows and verifies the same answer.
+const resultBytesMemo = new Map();
+function reviewResultBytes(q) {
+  try { return fs.readFileSync(reviewResultFile(q.id)); } catch {}
+  if (resultBytesMemo.has(q.id)) return resultBytesMemo.get(q.id);
+  let found = null;
+  const ticket = q.review?.ref?.startsWith('ticket/') ? q.review.ref.slice('ticket/'.length) : null;
+  for (const r of [mainRef(), q.review?.ref && `refs/remotes/origin/${q.review.ref}`].filter((x) => x && resolveCommit(x))) {
+    for (const rel of [reviewResultRel(q.id, ticket), reviewResultRel(q.id, null)]) { found = gitBlob(r, rel); if (found) break; }
+    if (found) break;
+  }
+  resultBytesMemo.set(q.id, found);
+  return found;
+}
 function reviewStatus(q, result, declined) {
   if (declined) return 'declined';
   const pins = reviewPins(q.review);
   if (pins.status !== 'verified' || !result) return pins.status;
-  let buf;
-  try { buf = fs.readFileSync(reviewResultFile(q.id)); } catch { return 'missing'; }
+  const buf = reviewResultBytes(q);
+  if (!buf) return 'missing';
   return sha256(buf) === result.sha256 ? 'verified' : 'tampered';
 }
 
@@ -2704,7 +2720,7 @@ function verifiedResult(v) {
   if (v.declined) die(`${v.id} was sent back: ${v.answer}`);
   if (v.status !== 'answered' || !v.result) die(`${v.id} has no result (${v.status})`);
   if (v.result_status !== 'verified') die(`${v.id}: the result is ${v.result_status}${v.result_status === 'tampered' ? ` (${reviewResultFile(v.id)} no longer hashes to the owner's answer, sha256 ${v.result.sha256.slice(0, 12)})` : v.result_status === 'missing' ? ' (the result file or the pinned page is gone)' : ''}`);
-  const text = fs.readFileSync(reviewResultFile(v.id), 'utf8');
+  const text = reviewResultBytes(logGet(v.id)).toString('utf8');
   return { text, result: JSON.parse(text) };
 }
 const tsvCell = (x) => (x === undefined || x === null ? '' : Array.isArray(x) && x.every((y) => typeof y !== 'object') ? x.join(',') : typeof x === 'object' ? JSON.stringify(x) : String(x)).replace(/[\t\n\r]/g, ' ');
@@ -2745,7 +2761,7 @@ function cmdReview() {
         asked_at: v.asked_at, asked_by: q.created_by, answered_at: v.answered_at, channel: v.channel,
         data: dataPin?.status === 'verified' ? parsed(pinnedBlob(pins, 'data')) : null,
         draft: draft && draftDoc ? { saved_at: typeof draftDoc.saved_at === 'string' ? draftDoc.saved_at : draft.saved_at, bytes: draft.bytes, state: draftDoc.state ?? null } : null,
-        result_doc: v.result && v.result_status === 'verified' ? parsed(fs.readFileSync(reviewResultFile(v.id))) : null,
+        result_doc: v.result && v.result_status === 'verified' ? parsed(reviewResultBytes(logGet(v.id))) : null,
       });
     }
     if (flags.json) return json(shown);
@@ -2769,8 +2785,8 @@ function cmdReview() {
       if (branch && branch !== 'HEAD' && q.review.ref && !/^[0-9a-f]{40}$/.test(q.review.ref) && branch !== q.review.ref) warn(`${v.id} was asked on ${q.review.ref}, and this worktree is on ${branch}; its result belongs in the PR that asked it`);
       const rel = reviewResultRel(v.id, currentTicketId());
       const dest = path.join(repoRoot, ...rel.split('/'));
-      const buf = fs.readFileSync(reviewResultFile(v.id));
-      if (sha256(buf) !== v.result.sha256) die(`${v.id}: the result is tampered (${reviewResultFile(v.id)} no longer hashes to the owner's answer)`);
+      const buf = reviewResultBytes(q);
+      if (!buf || sha256(buf) !== v.result.sha256) die(`${v.id}: the result is tampered (${reviewResultFile(v.id)} no longer hashes to the owner's answer)`);
       const had = fs.existsSync(dest) ? fs.readFileSync(dest) : null;
       if (had && sha256(had) === v.result.sha256) return out(`${rel} is already the owner's result (sha256 ${v.result.sha256.slice(0, 12)})\n  git add ${rel}`);
       if (had) warn(`${rel} was not the owner's result; replaced it with the owner's`);
@@ -5137,6 +5153,45 @@ function fleetSessions(d = draining()) {
   return [...names].sort().map(sessionOf).filter((s) => (s.role === 'worker' ? tickets().has(s.id) && !mergeShaFor(s.id) : inFlight.has(s.name)));
 }
 
+// The supervisor's own handoff: its context doesn't move either, so it writes one too, and it lands
+// on main like any project file (chore drain-handoff), so the next supervisor reads it from git.
+const SUPERVISOR_HANDOFF = 'handoffs/supervisor.md';
+const supervisorHandoffOnMain = () => {
+  const main = mainRef();
+  if (!main || !projectInRepo) return null;
+  const rel = `${projectRel}/${SUPERVISOR_HANDOFF}`;
+  const text = git(['show', `${main}:${rel}`]);
+  return text === null ? null : { text, at: git(['log', '-1', '--format=%cI', main, '--', rel]), rel };
+};
+// What run/ holds that the kit made and rebuilds (or that is this machine's alone by nature); anything
+// else in it was put there by hand and doesn't move.
+const RUN_KNOWN = new Set(['log', 'prompts', 'questions', 'sent', 'cache', 'agent', 'pr', 'supervisor-pane', 'dashboard.log', 'supervisor-prompt.txt', '.DS_Store']);
+// An agent harness's own memory for this project, outside the repo (Claude Code keeps it per
+// checkout folder). It doesn't move; what the next session needs goes into knowledge or a handoff.
+function harnessMemoryFiles() {
+  const root = path.join(process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), '.claude'), 'projects');
+  const slug = realOrSelf(mainRoot).replace(/[^a-zA-Z0-9]/g, '-');
+  const outFiles = [];
+  let dirs = [];
+  try { dirs = fs.readdirSync(root).filter((d) => d === slug || d.startsWith(`${slug}--worktrees-`)); } catch { return []; }
+  for (const d of dirs) {
+    const mem = path.join(root, d, 'memory');
+    let names = [];
+    try { names = fs.readdirSync(mem).filter((f) => f.endsWith('.md')); } catch { continue; }
+    for (const f of names) { try { outFiles.push({ path: path.join(mem, f), mtime: fs.statSync(path.join(mem, f)).mtimeMs }); } catch {} }
+  }
+  return outFiles;
+}
+// One fingerprint of everything the log says, the same on any machine that holds the same log: the
+// drained machine prints it when ready, the new one after undrain. The log's own landing act and
+// the undrain itself are the two lines only one side has, so neither counts.
+function parityPrint() {
+  logCache = null;
+  const lines = readLog().lines.filter((l) => !(l.type === 'act' && (l.class === 'undrain' || (l.class === 'merge-chore' && /^merged chore-log at /.test(l.what ?? '')))));
+  const ids = lines.map((l) => `${l.id}\t${JSON.stringify(l)}`).sort();
+  return { hash: sha256(Buffer.from(ids.join('\n'))).slice(0, 16), lines: ids.length };
+}
+
 function cmdDrain() {
   if (flags.status) return drainStatus();
   supervisorOnly('drain');
@@ -5148,7 +5203,8 @@ function cmdDrain() {
   else out(`already draining since ${cur.created_at} (${cur.id}); messaging the sessions not yet parked again`);
   for (const s of sessions) sendLine({ to: s.name, kind: 'ruling', text: drainMessage(s, drainReason(act)), from: 'supervisor', ticket: s.role === 'worker' ? s.id : null });
   out(`${cur ? 'still draining' : `drained (${act.id})`}: ${sessions.length ? `told ${sessions.map((s) => s.name).join(', ')} to push, write a handoff and park` : 'no worker or planner to tell'}; no worker or planner starts until undrain`);
-  out('next: drain --status until it says "ready to move" (it lists what is left, and the new machine\'s checklist)');
+  out(`next: once every session is parked, write your own handoff, ${projectRel}/${SUPERVISOR_HANDOFF} (what you were in the middle of, what you are waiting on, what you told the owner you would do, and anything from your agent's own memory the next supervisor needs: owner rules belong in knowledge), and land it: chore start drain-handoff, then chore pr drain-handoff and merge --chore drain-handoff`);
+  out('then: drain --status until it says "ready to move" (it lists what is left, and the new machine\'s checklist)');
 }
 
 // Everything the move needs, checked, then the new machine's checklist. Writes nothing.
@@ -5228,7 +5284,35 @@ function drainStatus() {
   for (const u of uncommitted) blockers.push(`the owner's review result ${u.id} is only in run/questions: in ${u.ref}'s worktree, review result ${u.id} --commit, then commit and push it`);
   const qdir = path.join(runDir, 'questions');
   const drafts = (fs.existsSync(qdir) ? fs.readdirSync(qdir) : []).filter((qid) => fs.existsSync(path.join(qdir, qid, 'draft.json')) && logGet(qid)?.type === 'question' && questionView(logGet(qid)).status === 'open');
-  for (const qid of drafts) warnings.push(`the owner's saved draft of review ${qid} stays on this machine (run/questions): finish it here before the move, or redo it there`);
+  for (const qid of drafts) blockers.push(`the owner's saved draft of review ${qid} is only in run/questions: ask the owner to answer it (or send it back) before the move`);
+
+  // The supervisor's handoff, on main, written since the drain; and nothing the agents keep outside
+  // the repo changed after it (what the next supervisor needs from it is folded into the handoff).
+  const sh0 = supervisorHandoffOnMain();
+  const handoffOk = !!sh0 && !!d && Date.parse(sh0.at) >= Date.parse(d.created_at) - 60000;
+  if (d && !handoffOk) blockers.push(`${sh0 ? `${projectRel}/${SUPERVISOR_HANDOFF} on ${s.main_branch} is older than the drain` : `no ${projectRel}/${SUPERVISOR_HANDOFF} on ${s.main_branch}`}: write the supervisor's handoff and land it (chore start drain-handoff, chore pr drain-handoff, merge --chore drain-handoff)`);
+  const memory = harnessMemoryFiles();
+  const newer = handoffOk ? memory.filter((m) => m.mtime > Date.parse(sh0.at)) : [];
+  if (newer.length) blockers.push(`agent memory outside the repo changed after the supervisor's handoff landed (${newer.map((m) => path.basename(m.path)).join(', ')}): fold what the next session needs into knowledge or the handoff, and land it again`);
+
+  // Nothing else of value only here: files put in run/ by hand, and worktrees with work not on the remote.
+  const loose = (fs.existsSync(runDir) ? fs.readdirSync(runDir) : []).filter((f) => !RUN_KNOWN.has(f) && !f.endsWith('.lock'));
+  if (loose.length) blockers.push(`files in run/ the kit didn't make, which don't move: ${loose.join(', ')}: move what matters into ${projectRel}/ (a chore) and delete the rest`);
+  const wtRoot = path.join(mainRoot, '.worktrees');
+  const strays = [];
+  for (const n of fs.existsSync(wtRoot) ? fs.readdirSync(wtRoot) : []) {
+    const at = path.join(wtRoot, n);
+    if (sessions.some((x) => x.name === n) || !fs.statSync(at).isDirectory()) continue;
+    if (!fs.existsSync(path.join(at, '.git'))) { strays.push(`${n} (not a git worktree)`); continue; }
+    const dirty = (git(['status', '--porcelain'], at) ?? '').split('\n').filter(Boolean).length;
+    const unpushed = Number(git(['rev-list', '--count', 'HEAD', '--not', '--remotes'], at) ?? 0);
+    if (dirty || unpushed) strays.push(`${n} (${[dirty && `${dirty} uncommitted`, unpushed && `${unpushed} commit(s) on no remote`].filter(Boolean).join(', ')})`);
+  }
+  if (strays.length) blockers.push(`worktrees holding work that isn't on the remote: ${strays.join('; ')}: push or land it, or remove the worktree`);
+  const unpushedBranches = (git(['for-each-ref', '--format=%(refname:short)', 'refs/heads']) ?? '').split('\n').filter(Boolean)
+    .filter((b) => Number(git(['rev-list', '--count', b, '--not', '--remotes']) ?? 0) > 0 && git(['cherry', mainRef() ?? 'HEAD', b])?.split('\n').some((l) => l.startsWith('+')));
+  if (unpushedBranches.length) warnings.push(`local branches with commits on no remote (squash-merged ones show here too): ${unpushedBranches.join(', ')}: push any that still matter`);
+  if ((git(['stash', 'list']) ?? '').trim()) warnings.push('git stash has entries; they stay here: commit what matters to a branch and push it');
 
   // What moves on its own (open PRs with the forge, owner questions with the log), listed so nothing surprises.
   const openQs = questions().filter((q) => q.status === 'open').map((q) => ({ id: q.id, question: q.question }));
@@ -5246,9 +5330,10 @@ function drainStatus() {
     if (texts.length) warnings.push(`forge is git: the PR text for ${texts.join(', ')} is only in run/pr here; copy run/pr/ to the new machine`);
   }
 
-  const checklist = moveChecklist(s);
+  const checklist = moveChecklist(s, memory);
   const ready = !blockers.length;
-  const r = { draining: d ? { id: d.id, at: d.created_at, host: drainHost(d), reason: drainReason(d) } : null, sessions, log: { landed: !unlanded.length, unlanded, left_behind: leftBehind }, spend: { unobserved: spendOthers, supervisor_usd: supUsd }, reviews: { uncommitted, drafts }, open_prs: prs ?? [], open_questions: openQs, blockers, warnings, ready, checklist };
+  const parity = ready ? parityPrint() : null;
+  const r = { parity, supervisor_handoff: sh0 ? { at: sh0.at, current: handoffOk } : null, draining: d ? { id: d.id, at: d.created_at, host: drainHost(d), reason: drainReason(d) } : null, sessions, log: { landed: !unlanded.length, unlanded, left_behind: leftBehind }, spend: { unobserved: spendOthers, supervisor_usd: supUsd }, reviews: { uncommitted, drafts }, open_prs: prs ?? [], open_questions: openQs, blockers, warnings, ready, checklist };
   if (flags.json) return json(r);
   out(d ? `draining since ${d.created_at} (${d.id}${drainHost(d) ? `, on ${drainHost(d)}` : ''}): ${drainReason(d)}` : 'not draining');
   out(`\nsessions:${sessions.length ? '' : ' none'}`);
@@ -5261,12 +5346,13 @@ function drainStatus() {
   if (blockers.length) { out('\nleft to do:'); for (const b of blockers) out(`  - ${b}`); }
   if (warnings.length) { out('\nwarnings:'); for (const w of warnings) out(`  - ${w}`); }
   out(`\nready to move: ${ready ? 'yes' : 'no'}`);
+  if (parity) out(`parity: ${parity.hash} (${parity.lines} log entries). undrain on the new machine prints its own; they match when the move is 1:1. Stop now: anything you log from here on stays on this machine.`);
   out('\nnew-machine checklist:');
   checklist.forEach((c, i) => out(`  ${i + 1}. ${c}`));
 }
 
 // The new machine's steps, from the settings and the log: what git doesn't carry.
-function moveChecklist(s) {
+function moveChecklist(s, memory = []) {
   const url = git(['remote', 'get-url', 'origin']) ?? '<the repo>';
   const pins = ['.tool-versions', '.nvmrc', '.node-version'].filter((f) => fs.existsSync(path.join(mainRoot, f)));
   const agent = (s.agent_command ?? '').trim().split(/\s+/)[0] || 'the agent CLI';
@@ -5289,8 +5375,10 @@ function moveChecklist(s) {
     ...(keys.size ? [`copy the keys the secret sinks need, the same way: ${[...keys.values()].join('; ')}`] : []),
     ...(commands.size ? [`log in to the commands that take posted secrets: ${[...commands].join(', ')}`] : []),
     ...(s.forge === 'git' ? ['copy run/pr/ from the old checkout (forge git keeps the PR text there)'] : []),
+    ...(memory.length ? [`your agent's own memory for this project (${memory.length} file(s) under ${path.dirname(path.dirname(memory[0].path))}) isn't in the repo; the supervisor folded what the next session needs into knowledge and its handoff, so nothing to copy`] : []),
     `start the supervisor inside tmux exactly as the README's step 9 does: DEVTEAM_ROLE=supervisor ${agent} "$(node docs/devteam/scripts/devteam.mjs prompt supervisor)"; its prompt sees the drain`,
     'the supervisor runs undrain (it rebuilds run/log from the landed log) and restarts each drained session with the command it prints',
+    'in the browser you use there: turn on "Notify me of new Inbox items" again (a browser setting)',
     `restart the dashboard where it outlives the session: tmux new-window -d -t ${s.tmux_session} -n dashboard 'node docs/devteam/scripts/devteam.mjs dashboard' (or another terminal), then open http://127.0.0.1:${s.dashboard_port}`,
   ];
 }
@@ -5314,6 +5402,7 @@ function cmdUndrain() {
   }
   const d = draining();
   if (!d) die('the fleet is not drained (no drain act without a later undrain in the log). If it was drained on another machine, land its log there first: log-sync, then merge --chore log');
+  const parity = parityPrint();
   const act = appendLog({ type: 'act', class: 'undrain', what: `undrained the fleet on ${os.hostname()} (drained by ${d.id}${drainHost(d) ? ` on ${drainHost(d)}` : ''})`, refs: [d.id], reversible: true }, 'supervisor');
   out(`undrained (${act.id}); workers and planners can start again`);
   const windows = new Set((sh('tmux', ['list-windows', '-t', loadSettings().tmux_session, '-F', '#W']) ?? '').split('\n').filter(Boolean));
@@ -5324,6 +5413,10 @@ function cmdUndrain() {
   });
   out(rows.length ? `restart the drained sessions, as the supervisor:\n${rows.join('\n')}` : 'no drained session to restart');
   out('then make sure the dashboard is running (supervisor.md §11)');
+  out(`parity: ${parity.hash} (${parity.lines} log entries): the drained machine's drain --status printed the same when the move is 1:1`);
+  const sh0 = supervisorHandoffOnMain();
+  if (sh0 && Date.parse(sh0.at) >= Date.parse(d.created_at) - 60000) out(`\n## Handoff from the drained supervisor (${sh0.rel}, ${sh0.at})\n\n${sh0.text.trimEnd()}\n\nRead it before anything else; it stays in the repo as the record.`);
+  else out(`\nno supervisor handoff from this drain on main (${projectRel}/${SUPERVISOR_HANDOFF})`);
 }
 
 // The supervisor's prompt while the fleet is drained: what to do first.
