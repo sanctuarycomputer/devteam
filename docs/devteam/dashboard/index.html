@@ -343,7 +343,8 @@
   <section id="progress">
     <h2>Progress</h2>
     <div class="filters">
-      <label>View <select id="view"></select></label>
+      <label>Show <select id="view"></select></label>
+      <label class="small"><input type="checkbox" id="left-only"> Only what's left</label>
       <span id="forecast"></span>
     </div>
     <div class="progress-layout">
@@ -365,7 +366,7 @@
   </section>
 
   <section id="board">
-    <h2>Board <span class="sub">tickets by stage; planners turning goals into tickets above</span></h2>
+    <h2>Board <span class="sub">tickets by stage; planners turning goals into tickets above</span> <span class="sub" id="board-scope"></span></h2>
     <div id="planners"></div>
     <div class="board" id="board-cols"></div>
   </section>
@@ -435,6 +436,14 @@ const pct = (a, b) => (b ? Math.round((100 * a) / b) : 0);
 let DATA = null;
 let VIEW = 'all';
 try { VIEW = localStorage.getItem('devteam.view') || 'all'; } catch {}
+let LEFT_ONLY = false;
+try { LEFT_ONLY = localStorage.getItem('devteam.left') === '1'; } catch {}
+const setView = (view, left) => {
+  VIEW = view;
+  if (left !== undefined) LEFT_ONLY = left;
+  try { localStorage.setItem('devteam.view', VIEW); localStorage.setItem('devteam.left', LEFT_ONLY ? '1' : '0'); } catch {}
+  if (DATA) renderProgress();
+};
 
 // Every empty state says what would fill it, so an empty section reads as "nothing yet", not "broken".
 const empty = (html) => `<p class="empty">${html}</p>`;
@@ -446,19 +455,32 @@ function bars(el, obj, fmt, none) {
   el.innerHTML = entries.map(([k, v]) => `<div><span>${esc(k)}</span><span class="b" style="width:${(100 * v) / max}%"></span><span>${fmt(v)}</span></div>`).join('');
 }
 
-// ---- views: overall, a feature, a story, a release, a wave ----
+// ---- views: overall, a goal, a milestone, a feature, a release, a wave, a story ----
+// Each is [value, label, group]; the board and the burn-up both follow the one chosen.
 function views(p) {
-  const v = [['all', 'Overall']];
-  for (const f of p.features) v.push([`feature:${f}`, `Feature: ${f}`]);
+  const v = [['all', 'Everything', '']];
+  for (const g of (DATA.ooda.goals || []).filter((x) => !['abandoned'].includes(x.status))) {
+    v.push([`goal:${g.id}`, g.title, 'Goals']);
+    for (const m of milestonesOf(g)) v.push([`milestone:${g.id}:${m.n}`, `${g.title} · ${m.n}. ${m.title}`, 'Milestones']);
+  }
+  for (const f of p.features) v.push([`feature:${f}`, featureTitle(f), 'Features']);
   const rels = [...new Set(p.tickets.map((t) => t.target_release).filter(Boolean))].sort();
-  for (const r of rels) v.push([`release:${r}`, `Release: ${r}`]);
+  for (const r of rels) v.push([`release:${r}`, r, 'Releases']);
   const waves = [...new Set(p.tickets.map((t) => t.wave).filter(Boolean))].sort((a, b) => a - b);
-  for (const w of waves) v.push([`wave:${w}`, `Wave ${w}`]);
-  for (const s of Object.keys(p.stories)) v.push([`story:${s}`, `Story: ${s}`]);
+  for (const w of waves) v.push([`wave:${w}`, `Wave ${w}`, 'Waves']);
+  for (const [s, st] of Object.entries(p.stories)) v.push([`story:${s}`, `${s} ${String(st.text ?? '').slice(0, 60)}`, 'Stories']);
   return v;
 }
+const viewLabel = (view) => { const v = views(DATA.progress).find(([k]) => k === view); return v ? (v[2] ? `${v[2].replace(/s$/, '')}: ${v[1]}` : v[1]) : view; };
+function goalFeatures(gid) {
+  const R = DATA.ooda.roadmap;
+  return new Set([...(R.goals.find((x) => x.id === gid)?.features || []), ...Object.values(R.features).filter((f) => (f.goals || []).includes(gid)).map((f) => f.feature)]);
+}
+const milestoneFeatures = (gid, n) => new Set(milestonesOf(goalOf(gid)).find((m) => m.n === Number(n))?.features || []);
 function filterTickets(p, view) {
   const [kind, val] = view.split(/:(.*)/);
+  if (kind === 'goal') { const fs = goalFeatures(val); return p.tickets.filter((t) => fs.has(t.feature)); }
+  if (kind === 'milestone') { const i = val.lastIndexOf(':'); const fs = milestoneFeatures(val.slice(0, i), val.slice(i + 1)); return p.tickets.filter((t) => fs.has(t.feature)); }
   if (kind === 'feature') return p.tickets.filter((t) => t.feature === val);
   if (kind === 'release') return p.tickets.filter((t) => t.target_release === val);
   if (kind === 'wave') return p.tickets.filter((t) => String(t.wave) === val);
@@ -567,7 +589,7 @@ function meterRow(label, done, total, note = '') {
 }
 function widgets(p, now) {
   const pts = (ts) => ts.reduce((a, t) => a + t.weight, 0);
-  $('w-features').innerHTML = p.features.map((f) => { const ts = p.tickets.filter((t) => t.feature === f); return meterRow(esc(f), pts(ts.filter(isDone)), pts(ts)); }).join('') || empty('No features yet.');
+  $('w-features').innerHTML = p.features.map((f) => { const ts = p.tickets.filter((t) => t.feature === f); return meterRow(flink(f), pts(ts.filter(isDone)), pts(ts)); }).join('') || empty('No features yet.');
   const storyDone = (s) => { const ts = p.tickets.filter((t) => t.serves.includes(s)); return ts.length && ts.every(isDone); };
   const rels = [...new Set([...Object.values(p.stories).map((s) => s.release), ...p.tickets.map((t) => t.target_release)].filter(Boolean))].sort();
   $('w-releases').innerHTML = rels.map((r) => {
@@ -575,14 +597,14 @@ function widgets(p, now) {
     const shipped = p.tickets.some((t) => t.released_in === r);
     const done = stories.filter(storyDone).length;
     const state = shipped ? '<span class="badge good">tagged</span>' : stories.length && done === stories.length ? '<span class="badge medium">ready to tag</span>' : '';
-    return meterRow(`<code>${esc(r)}</code> ${state}`, done, stories.length, `${done}/${stories.length} stories`);
+    return meterRow(`${rlink(r)} ${state}`, done, stories.length, `${done}/${stories.length} stories`);
   }).join('') || empty('No release targets yet. Each story in a feature names the release it ships in.');
   const waves = [...new Set(p.tickets.map((t) => t.wave).filter(Boolean))].sort((a, b) => a - b);
-  $('w-waves').innerHTML = waves.map((w) => { const ts = p.tickets.filter((t) => t.wave === w); return meterRow(`Wave ${w}`, ts.filter(isDone).length, ts.length); }).join('') || empty('No waves yet: they come from the ticket graph.');
+  $('w-waves').innerHTML = waves.map((w) => { const ts = p.tickets.filter((t) => t.wave === w); return meterRow(wlink(w), ts.filter(isDone).length, ts.length); }).join('') || empty('No waves yet: they come from the ticket graph.');
   const storyEntries = Object.entries(p.stories);
   $('w-stories').innerHTML = storyEntries.length ? `<div>${storyEntries.map(([id, s]) => {
     const ts = p.tickets.filter((t) => t.serves.includes(id)); const d = ts.filter(isDone).length;
-    return meterRow(`${d === ts.length && ts.length ? '<span class="badge good">done</span>' : ''}<code>${esc(id)}</code> ${esc(String(s.text ?? '').slice(0, 80))}`, d, ts.length, `${d}/${ts.length} tickets${s.release ? ` · ${esc(s.release)}` : ''}`);
+    return meterRow(`${d === ts.length && ts.length ? '<span class="badge good">done</span>' : ''}${slink(id)} ${esc(String(s.text ?? '').slice(0, 80))}`, d, ts.length, `${d}/${ts.length} tickets${s.release ? ` · ${esc(s.release)}` : ''}`);
   }).join('')}</div>` : empty('No stories yet. A planner writes them into each feature; chores serve none.');
   const weeks = [7, 6, 5, 4, 3, 2, 1, 0].map((w) => pts(p.tickets.filter((t) => isDone(t) && now - Date.parse(t.merged_at) >= w * 7 * DAY && now - Date.parse(t.merged_at) < (w + 1) * 7 * DAY)));
   const wmax = Math.max(1, ...weeks);
@@ -635,10 +657,14 @@ function renderProgress() {
   const p = DATA.progress, now = Date.parse(p.now);
   const opts = views(p);
   if (!opts.some(([k]) => k === VIEW)) VIEW = 'all';
-  $('view').innerHTML = opts.map(([k, label]) => `<option value="${esc(k)}" ${k === VIEW ? 'selected' : ''}>${esc(label)}</option>`).join('');
+  const opt = ([k, label]) => `<option value="${esc(k)}" ${k === VIEW ? 'selected' : ''}>${esc(label)}</option>`;
+  const groups = [...new Set(opts.map((o) => o[2]))];
+  $('view').innerHTML = groups.map((g) => (g ? `<optgroup label="${esc(g)}">${opts.filter((o) => o[2] === g).map(opt).join('')}</optgroup>` : opts.filter((o) => !o[2]).map(opt).join(''))).join('');
   const items = filterTickets(p, VIEW);
   burnup(items, now);
-  board(items, new Set(DATA.critical_path));
+  $('left-only').checked = LEFT_ONLY;
+  board(LEFT_ONLY ? items.filter((t) => !isDone(t)) : items, new Set(DATA.critical_path));
+  $('board-scope').innerHTML = VIEW === 'all' && !LEFT_ONLY ? '' : `showing ${esc(LEFT_ONLY ? "what's left of " : '')}${esc(VIEW === 'all' ? 'everything' : viewLabel(VIEW))} · <a class="linkish" href="#board" data-view="all" data-left="0">show all</a>`;
   widgets(p, now);
   const all = forecast(p.tickets, now);
   $('n-progress').textContent = all.scope ? `${pct(all.done, all.scope)}%` : '';
@@ -660,7 +686,24 @@ const allQuestions = () => [...(DATA?.questions || []), ...(DATA?.ooda?.answered
 const who = (w) => (w === 'owner' ? 'you' : w === 'supervisor' ? 'the supervisor' : ticketMap().has(w) ? `the agent on ${ticketMap().get(w).title}` : w?.startsWith('plan-') ? `the planner for ${w.slice(5)}` : w || '');
 const tlink = (id) => { const t = ticketMap().get(id); return t ? `<a class="linkish" href="#ticket/${encodeURIComponent(id)}">${esc(t.title)}</a>` : `<code>${esc(id)}</code>`; };
 const qlink = (id, text) => { const q = allQuestions().find((x) => x.id === id); return `<a class="linkish" href="#q/${encodeURIComponent(id)}">${esc(text || (q ? q.question.slice(0, 90) + (q.question.length > 90 ? '…' : '') : 'a question'))}</a>`; };
-const subjectLink = (subj) => (ticketMap().has(subj) ? tlink(subj) : subj ? `<code>${esc(subj)}</code>` : '');
+const featureTitle = (f) => DATA?.ooda?.roadmap?.features?.[f]?.title || f;
+const flink = (f) => `<a class="linkish" href="#feature/${encodeURIComponent(f)}">${esc(featureTitle(f))}</a>`;
+const slink = (sid) => `<a class="linkish" href="#story/${encodeURIComponent(sid)}"><code>${esc(sid)}</code></a>`;
+const rlink = (r) => `<a class="linkish" href="#release/${encodeURIComponent(r)}"><code>${esc(r)}</code></a>`;
+const wlink = (w) => `<a class="linkish" href="#wave/${encodeURIComponent(w)}">Wave ${esc(w)}</a>`;
+const goalOf = (gid) => (DATA?.ooda?.goals || []).find((g) => g.id === gid);
+const milestonesOf = (g) => g?.forecast?.milestones || [];
+const glink = (gid) => { const g = goalOf(gid); return g ? `<a class="linkish" href="#goal/${encodeURIComponent(gid)}">${esc(g.title)}</a>` : `<code>${esc(gid)}</code>`; };
+const mlink = (gid, n, title) => `<a class="linkish" href="#milestone/${encodeURIComponent(`${gid}:${n}`)}">${esc(title ?? milestonesOf(goalOf(gid)).find((m) => m.n === Number(n))?.title ?? `milestone ${n}`)}</a>`;
+const boardLink = (view) => `<a class="linkish" href="#board" data-view="${esc(view)}" data-left="1"><i class="icon-filter" aria-hidden="true"></i> What's left of it on the board</a> · <a class="linkish" href="#progress" data-view="${esc(view)}" data-left="0">its burn-up</a>`;
+// An id in text links to its panel: goals, lessons, acts, problems, messages (threads), observations.
+function idLink(k, id) {
+  const href = { g: 'goal', k: 'lesson', a: 'act', p: 'problem', m: 'thread' }[k];
+  if (!href) return `<code>${esc(id.slice(0, 22))}…</code>`;
+  if (k === 'g' && goalOf(id)) return glink(id);
+  return `<a class="linkish" href="#${href}/${encodeURIComponent(id)}"><code>${esc(id.slice(0, 22))}…</code></a>`;
+}
+const subjectLink = (subj) => (ticketMap().has(subj) ? tlink(subj) : /^[a-z]-\d{8}-\d{9}-/.test(subj ?? '') || /^plan-/.test(subj ?? '') ? linkify(subj) : subj ? `<code>${esc(subj)}</code>` : '');
 const scopeWords = (sc) => (!sc || sc === 'project' ? 'the whole project' : sc.replace(/^component:/, 'component ').replace(/^feature:/, 'feature ').replace(/^class:/, 'decisions of kind ').replace(/^chore:devteam-sync/, 'devteam upgrades').replace(/^chore:/, 'chore '));
 const approvedBy = (id) => (id?.startsWith('q-') ? `with your answer to ${qlink(id)}` : id?.startsWith('k-') ? 'under a standing rule you gave' : `approved by ${esc(id)}`);
 // Escape, then turn ticket ids and question ids into links and full commit hashes into short ones.
@@ -669,6 +712,8 @@ function linkify(text) {
   const ids = [...ticketMap().keys()].sort((a, b) => b.length - a.length);
   if (ids.length) h = h.replace(new RegExp(`\\b(${ids.map((x) => x.replace(/[-]/g, '\\-')).join('|')})\\b`, 'g'), (m) => tlink(m));
   h = h.replace(/\bq-\d{8}-\d{9}-[a-z0-9-]+/g, (m) => qlink(m));
+  h = h.replace(/\b([gkapmo])-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*/g, (m, k) => idLink(k, m));
+  h = h.replace(/\bplan-([a-z0-9]+(?:-[a-z0-9]+)*)\b/g, (m, f) => ((DATA?.planners || []).some((x) => x.feature === f) ? `<a class="linkish" href="#planner/${encodeURIComponent(f)}">${m}</a>` : m));
   h = h.replace(/\b([0-9a-f]{12})[0-9a-f]{28}\b/g, '<code>$1</code>');
   h = h.replace(/\b(sanctuarycomputer\/devteam)#(\d+)/g, '<a class="linkish" href="https://github.com/$1/pull/$2" target="_blank" rel="noopener">devteam #$2</a>');
   return h;
@@ -929,11 +974,11 @@ function renderOoda(o) {
   $('clusters').innerHTML = o.clusters.length ? o.clusters.map((c) => `
     <div class="card small"><b>${esc(words(c.key.split(':')[0]))}</b> ${subjectLink(c.key.split(':').slice(1).join(':'))} <span class="muted">· seen ${esc(c.count)} times</span><div>${linkify(c.latest)}</div></div>`).join('') : empty('None. Something noticed more than once shows here.');
   $('problems').innerHTML = o.problems.length ? o.problems.map((p) => `
-    <div class="card small"><span class="badge ${sevBadge(p.severity)}">sev ${esc(p.severity)}</span><span class="badge">${p.realized ? 'issue' : 'risk'}</span><b>${esc(p.title)}</b> <span class="muted">· ${esc(p.status)}${p.assigned_to ? `, ${esc(p.assigned_to)}` : ''}${(p.threatens || []).length ? ` · threatens ${p.threatens.map(esc).join(', ')}` : ''}</span>${p.detail ? `<div class="muted">${esc(p.detail)}</div>` : ''}</div>`).join('') : empty('None open.');
+    <div class="card small"><span class="badge ${sevBadge(p.severity)}">sev ${esc(p.severity)}</span><span class="badge">${p.realized ? 'issue' : 'risk'}</span><a class="linkish" href="#problem/${encodeURIComponent(p.id)}"><b>${esc(p.title)}</b></a> <span class="muted">· ${esc(p.status)}${p.assigned_to ? `, ${esc(p.assigned_to)}` : ''}${(p.threatens || []).length ? ` · threatens ${p.threatens.map(esc).join(', ')}` : ''}</span>${p.detail ? `<div class="muted">${esc(p.detail)}</div>` : ''}</div>`).join('') : empty('None open.');
   const cand = o.knowledge.filter((k) => k.status === 'candidate');
   const acc = o.knowledge.filter((k) => k.status === 'accepted');
   $('knowledge').innerHTML = (cand.length ? `<p class="small">${cand.length} proposed lesson${cand.length > 1 ? 's are' : ' is'} waiting for you in the <a class="linkish" href="#inbox">Inbox</a>.</p>` : '') +
-    (acc.length ? acc.map((k) => `<div class="card small"><span class="badge good">${esc(k.kind)}</span>${linkify(k.statement)}${k.valence < 0 ? ' <span class="muted">(avoid)</span>' : ''} <span class="muted">· applies to ${esc(scopeWords(k.scope))}${k.created_by === 'owner' ? ' · from you' : ''}</span></div>`).join('') : '') ||
+    (acc.length ? acc.map((k) => `<div class="card small"><a class="linkish" href="#lesson/${encodeURIComponent(k.id)}"><span class="badge good">${esc(k.kind)}</span></a>${linkify(k.statement)}${k.valence < 0 ? ' <span class="muted">(avoid)</span>' : ''} <span class="muted">· applies to ${esc(scopeWords(k.scope))}${k.created_by === 'owner' ? ' · from you' : ''}</span></div>`).join('') : '') ||
     empty('None yet. Things noticed more than once become proposed lessons, which you keep or retire in the Inbox.');
 
   // Decide: trust ladder
@@ -945,7 +990,7 @@ function renderOoda(o) {
   $('acts-feed').innerHTML = feed.length ? feed.map((a) => { const v = actView(a); return `
     <div class="card small ${a.correction ? 'corrected' : ''}">
       <div><div class="act-head">${v.head}</div>${v.detail ? `<div class="act-detail">${v.detail}</div>` : ''}
-        <div class="meta">${when(a.created_at)}${a.approved_by ? ` · ${approvedBy(a.approved_by)}` : ' · on its own'}${a.reversible === false ? ' · can’t be undone' : ''}</div>
+        <div class="meta"><a class="linkish" href="#act/${encodeURIComponent(a.id)}">${when(a.created_at)}</a>${a.approved_by ? ` · ${approvedBy(a.approved_by)}` : ' · on its own'}${a.reversible === false ? ' · can’t be undone' : ''}</div>
         ${a.correction ? `<div class="err">Corrected by ${esc(who(a.correction.by))}: ${esc(a.correction.reason)}${a.correction.repaired ? ` · ${esc(a.correction.repaired)}` : ''}</div>` : ''}
         <div class="row-inline" hidden data-correct-form="${esc(a.id)}"><input type="text" data-reason="${esc(a.id)}" placeholder="Reason"><button class="ghost" data-correct-send="${esc(a.id)}">Send</button><span class="err" id="e-${esc(a.id)}"></span></div>
       </div>
@@ -1002,6 +1047,7 @@ async function openTicket(id, { quiet = false } = {}) {
   try { const r = await fetch(`/api/timeline?id=${encodeURIComponent(id)}`); v = await r.json(); if (!r.ok) throw new Error(v.error || r.status); }
   catch (e) { if (!quiet) showDrawer(`<p class="err">Could not load ${esc(id)}: ${esc(e.message)}</p>`); return; }
   if (DRAWER.kind !== 'ticket' || DRAWER.id !== id) return;
+  const pt = (DATA.progress?.tickets || []).find((x) => x.id === id);
   const t = v.ticket;
   const items = v.lines.map((l) => [l, lineView(l)]).filter(([, x]) => x);
   const html = `
@@ -1010,7 +1056,8 @@ async function openTicket(id, { quiet = false } = {}) {
     <dl>
       <dt>Status</dt><dd>${esc(cap(STAGE_WORDS[t.stage] || t.stage))}${t.phase && !['merged', 'released'].includes(t.stage) ? ` · agent ${esc(PHASE_WORDS[t.phase] || t.phase)}` : ''}${t.waiting ? ` · <span class="badge high">${t.waiting.kind === 'limit' ? 'usage limit' : 'waiting on a prompt'}</span> ${esc(t.waiting.line)}` : ''}</dd>
       ${t.held ? `<dt>On hold</dt><dd>${esc(t.held)}</dd>` : ''}
-      <dt>Part of</dt><dd>${esc(t.feature === 'chores' ? 'chores (upkeep, not a feature)' : t.feature)} · ${esc(t.component)}</dd>
+      <dt>Part of</dt><dd>${t.feature === 'chores' ? 'chores (upkeep, not a feature)' : flink(t.feature)} · ${esc(t.component)}${pt?.wave ? ` · ${wlink(pt.wave)}` : ''}${pt?.target_release ? ` · ships in ${rlink(pt.target_release)}` : ''}</dd>
+      ${(pt?.serves || []).length ? `<dt>Serves</dt><dd>${pt.serves.map((x) => `${slink(x)} ${esc(String(DATA.progress.stories[x]?.text ?? '').slice(0, 90))}`).join('<br>')}</dd>` : ''}
       <dt>Size, risk</dt><dd>${t.size === 'M' ? 'medium' : 'small'}, ${t.risk === 'high' ? 'high risk (two reviewers)' : 'normal risk'}</dd>
       ${(t.depends_on || []).length ? `<dt>Waits on</dt><dd>${t.depends_on.map(tlink).join(', ')}</dd>` : ''}
       <dt>Done when</dt><dd><ul>${(t.done_when || []).map((x) => `<li>${linkify(x)}</li>`).join('')}</ul></dd>
@@ -1042,20 +1089,171 @@ function openGoal(id) {
     ${g.outcome ? `<p class="ctx measure">${esc(g.outcome)}</p>` : ''}
     ${measureBar(g)}${workBar(g, R, week)}
     ${s.next ? `<p class="goal-next measure">${s.next}</p>` : ''}
+    ${feats.length ? `<p>${boardLink(`goal:${g.id}`)}</p>` : ''}
     <dl>
       ${design ? `<dt>Design</dt><dd><a href="${esc(fileHref({ ...design, title: design.title || 'The design' }))}">${esc(design.title || 'The design')}</a></dd>` : ''}
       ${g.horizon ? `<dt>By</dt><dd>${esc(new Date(Date.parse(g.horizon)).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' }))}</dd>` : ''}
       ${g.priority ? `<dt>Priority</dt><dd>${esc(g.priority)}</dd>` : ''}
-      ${(g.forecast?.milestones || []).length ? `<dt>Milestones</dt><dd><ol>${g.forecast.milestones.map((m) => `<li>${esc(m.title)}: ${esc(m.target)}${esc(g.measure?.unit ? ` ${g.measure.unit}` : '')}${m.by ? ` by ${esc(m.by)}` : ''} <span class="badge ${m.status === 'met' ? 'good' : m.late ? 'high' : m.status === 'current' ? 'low' : 'medium'}">${esc(m.status === 'met' ? 'met' : m.late ? 'late' : m.status)}</span><br><span class="muted">${m.status === 'met' ? 'reached' : `${m.features.length ? `${esc(m.points_left)} points left` : `about ${esc(m.estimate_tickets)} tickets, not planned yet`}${m.eta ? ` · ETA ${esc(m.eta)}` : ''}`}</span></li>`).join('')}</ol>${g.forecast.past_horizon ? '<span class="badge high">forecast after the horizon</span>' : ''}${g.forecast.rate_points_per_day > 0 ? '' : '<div class="muted">No measured rate yet: sizes only, dates once tickets merge.</div>'}</dd>` : ''}
+      ${(g.forecast?.milestones || []).length ? `<dt>Milestones</dt><dd><ol>${g.forecast.milestones.map((m) => `<li>${mlink(g.id, m.n, m.title)}: ${esc(m.target)}${esc(g.measure?.unit ? ` ${g.measure.unit}` : '')}${m.by ? ` by ${esc(m.by)}` : ''} <span class="badge ${m.status === 'met' ? 'good' : m.late ? 'high' : m.status === 'current' ? 'low' : 'medium'}">${esc(m.status === 'met' ? 'met' : m.late ? 'late' : m.status)}</span><br><span class="muted">${m.status === 'met' ? 'reached' : `${m.features.length ? `${esc(m.points_left)} points left` : `about ${esc(m.estimate_tickets)} tickets, not planned yet`}${m.eta ? ` · ETA ${esc(m.eta)}` : ''}`}</span></li>`).join('')}</ol>${g.forecast.past_horizon ? '<span class="badge high">forecast after the horizon</span>' : ''}${g.forecast.rate_points_per_day > 0 ? '' : '<div class="muted">No measured rate yet: sizes only, dates once tickets merge.</div>'}</dd>` : ''}
       ${(g.preconditions || []).length ? `<dt>Must be true first</dt><dd><ul>${g.preconditions.map((x, i) => `<li>${esc(x)}${(r?.unplanned || []).some((u) => u.n === i + 1) && g.status === 'ready' ? ' <span class="badge medium">no plan yet</span>' : ''}</li>`).join('')}</ul></dd>` : ''}
       ${(g.non_goals || []).length ? `<dt>Not in scope</dt><dd><ul>${g.non_goals.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></dd>` : ''}
-      ${feats.length ? `<dt>Features</dt><dd><ul>${feats.map((v) => `<li>${esc(v.title || v.feature)}: ${v.points_total - v.points_left} of ${v.points_total} points${v.done ? ', done' : ''}</li>`).join('')}</ul></dd>` : ''}
+      ${feats.length ? `<dt>Features</dt><dd><ul>${feats.map((v) => `<li>${flink(v.feature)}: ${v.points_total - v.points_left} of ${v.points_total} points${v.done ? ', done' : ''}</li>`).join('')}</ul></dd>` : ''}
       ${planningFor(g).length ? `<dt>Planners</dt><dd>${planningFor(g).map((p) => `<a href="#planner/${encodeURIComponent(p.feature)}">${esc(p.title)}</a> (${esc(ago(p.minutes_silent))})`).join(', ')}</dd>` : ''}
       ${(g.readings || []).length ? `<dt>Readings</dt><dd><ul>${g.readings.map((x) => `<li>${esc(x.value)} ${esc(g.measure?.unit || '')} · ${esc(when(x.at))}</li>`).join('')}</ul></dd>` : ''}
       ${decisions.length ? `<dt>Your decisions</dt><dd><ul>${decisions.map((d) => `<li><b>${esc(words(d.verdict))}</b>${d.notes ? `: ${esc(d.notes)}` : ''}</li>`).join('')}</ul></dd>` : ''}
       ${asks.length ? `<dt>Questions</dt><dd><ul>${asks.map((q) => `<li>${qlink(q.id, q.question)}${q.status === 'open' ? ' <span class="badge medium">open</span>' : ''}</li>`).join('')}</ul></dd>` : ''}
       <dt>ID</dt><dd><code>${esc(g.id)}</code></dd>
     </dl>`);
+}
+// ---- panels for the rest: sets of tickets (feature, story, release, wave, milestone) and log
+// objects (act, lesson, problem, message thread). A set shows its progress, its forecast and its
+// tickets by column, with a link that filters the board and the burn-up to it.
+function openTicketSet({ kind, id, title, sub, rows, items, view }) {
+  DRAWER = { kind, id };
+  const now = Date.parse(DATA.progress.now);
+  const fc = forecast(items, now);
+  const live = items.filter((t) => t.stage !== 'superseded');
+  const left = live.filter((t) => !isDone(t));
+  const cols = COLUMNS.map(([name]) => [name, live.filter((t) => columnOf(t) === name)]).filter(([, ts]) => ts.length);
+  const eta = fc.finished ? 'all merged' : fc.eta ? `ETA ${fmtDate(fc.eta)} at the recent ${fc.perDay.toFixed(1)} points a day` : fc.scope ? 'no forecast yet (nothing merged recently)' : 'no tickets yet';
+  showDrawer(`<h2 id="drawer-title">${title}</h2>
+    ${sub ? `<p class="ctx measure">${sub}</p>` : ''}
+    ${meterRow(`${fc.done} of ${fc.scope} points done`, fc.done, fc.scope)}
+    <p class="small muted">${esc(eta)} · ${left.length} of ${live.length} ticket${live.length === 1 ? '' : 's'} left</p>
+    ${live.length ? `<p>${boardLink(view)}</p>` : ''}
+    <dl>
+      ${rows.filter(Boolean).join('')}
+      <dt>Tickets</dt><dd>${cols.length ? cols.map(([n, ts]) => `<div class="small muted">${esc(n)}</div><ul>${ts.map((t) => `<li>${tlink(t.id)}</li>`).join('')}</ul>`).join('') : 'None yet.'}</dd>
+      <dt>ID</dt><dd><code>${esc(id)}</code></dd>
+    </dl>`);
+}
+const row = (dt, dd) => (dd ? `<dt>${dt}</dt><dd>${dd}</dd>` : '');
+const uniq = (xs) => [...new Set(xs.filter((x) => x !== undefined && x !== null && x !== ''))];
+function openFeature(f) {
+  const p = DATA.progress, R = DATA.ooda.roadmap, rf = R.features[f];
+  if (!rf && !p.features.includes(f)) return showDrawer(`<h2 id="drawer-title">No feature ${esc(f)}</h2>`);
+  const items = p.tickets.filter((t) => t.feature === f);
+  const stories = Object.entries(p.stories).filter(([, s]) => s.feature === f).map(([id]) => id);
+  const ms = (DATA.ooda.goals || []).flatMap((g) => milestonesOf(g).filter((m) => (m.features || []).includes(f)).map((m) => mlink(g.id, m.n, m.title)));
+  openTicketSet({ kind: 'feature', id: f, title: esc(featureTitle(f)), sub: f === 'chores' ? 'Upkeep: tickets that serve no story.' : '', items, view: `feature:${f}`, rows: [
+    row('Status', esc(rf?.status ?? '')),
+    row('For goal', (rf?.goals || []).map(glink).join(', ')),
+    row('Milestones', ms.join('<br>')),
+    row('Stories', stories.map((x) => `${slink(x)} ${esc(String(p.stories[x].text ?? '').slice(0, 90))}`).join('<br>')),
+    row('Releases', uniq([...(rf?.releases || []), ...items.map((t) => t.target_release)]).sort().map(rlink).join(', ')),
+    row('Waves', uniq(items.filter((t) => !isDone(t)).map((t) => t.wave)).sort((a, b) => a - b).map(wlink).join(', ')),
+    row('Planner', (DATA.planners || []).some((x) => x.feature === f) ? `<a class="linkish" href="#planner/${encodeURIComponent(f)}">planning now</a>` : ''),
+  ] });
+}
+function openStory(sid) {
+  const p = DATA.progress, st = p.stories[sid];
+  if (!st) return showDrawer(`<h2 id="drawer-title">No story ${esc(sid)}</h2>`);
+  openTicketSet({ kind: 'story', id: sid, title: `Story <code>${esc(sid)}</code>`, sub: esc(st.text ?? ''), items: p.tickets.filter((t) => t.serves.includes(sid)), view: `story:${sid}`, rows: [
+    row('Feature', st.feature ? flink(st.feature) : ''),
+    row('Ships in', st.release ? rlink(st.release) : ''),
+  ] });
+}
+function openRelease(r) {
+  const p = DATA.progress;
+  const items = p.tickets.filter((t) => t.target_release === r);
+  const stories = Object.entries(p.stories).filter(([, s]) => s.release === r).map(([id]) => id);
+  const tagged = p.tickets.some((t) => t.released_in === r);
+  openTicketSet({ kind: 'release', id: r, title: `Release <code>${esc(r)}</code>`, sub: tagged ? 'Tagged.' : stories.length && stories.every((s) => { const ts = p.tickets.filter((t) => t.serves.includes(s)); return ts.length && ts.every(isDone); }) ? 'Every story is done: ready to tag.' : '', items, view: `release:${r}`, rows: [
+    row('Stories', stories.map((x) => `${slink(x)} ${esc(String(p.stories[x].text ?? '').slice(0, 90))}`).join('<br>')),
+    row('Features', uniq([...items.map((t) => t.feature), ...stories.map((x) => p.stories[x].feature)]).map(flink).join(', ')),
+  ] });
+}
+function openWave(w) {
+  const p = DATA.progress;
+  const items = p.tickets.filter((t) => String(t.wave) === String(w));
+  openTicketSet({ kind: 'wave', id: String(w), title: `Wave ${esc(w)}`, sub: 'Tickets that can run at the same time once the waves before them have merged.', items, view: `wave:${w}`, rows: [
+    row('Features', uniq(items.map((t) => t.feature)).map(flink).join(', ')),
+  ] });
+}
+function openMilestone(key) {
+  const i = key.lastIndexOf(':');
+  const gid = key.slice(0, i), n = Number(key.slice(i + 1));
+  const g = goalOf(gid), m = milestonesOf(g).find((x) => x.n === n);
+  if (!m) return showDrawer(`<h2 id="drawer-title">No milestone ${esc(key)}</h2>`);
+  const fs = new Set(m.features || []);
+  openTicketSet({ kind: 'milestone', id: key, title: `${esc(m.title)}`, sub: `Milestone ${n} of ${glink(gid)}`, items: DATA.progress.tickets.filter((t) => fs.has(t.feature)), view: `milestone:${key}`, rows: [
+    row('Status', esc(m.status ?? '')),
+    row('Target', `${esc(m.target)}${g.measure?.unit ? ` ${esc(g.measure.unit)}` : ''}`),
+    row('By', m.by ? esc(fmtDate(Date.parse(m.by))) : 'no date (only you set one)'),
+    row('Forecast', m.eta ? `${esc(fmtDate(Date.parse(m.eta)))}${m.late ? ' <span class="badge high">late</span>' : ''}` : ''),
+    row('Features', [...fs].map(flink).join(', ')),
+  ] });
+}
+function openAct(id) {
+  const a = (DATA.ooda.acts || []).find((x) => x.id === id);
+  if (!a) return showDrawer(`<h2 id="drawer-title">No act ${esc(id)}</h2><p class="muted">Only recent acts are on the dashboard.</p>`);
+  DRAWER = { kind: 'act', id };
+  const v = actView(a);
+  showDrawer(`<h2 id="drawer-title">${v.head}</h2>
+    ${v.detail ? `<p class="ctx measure">${v.detail}</p>` : ''}
+    <dl>
+      ${row('What', linkify(a.what))}
+      ${row('Kind', esc(words(a.class)))}
+      ${row('When', esc(when(a.created_at)))}
+      ${row('Approved', a.approved_by ? approvedBy(a.approved_by) : 'on its own (within its trust)')}
+      ${row('Undo', a.reversible === false ? 'can’t be undone' : 'reversible')}
+      ${row('About', (a.refs || []).map((r) => linkify(r)).join(', '))}
+      ${a.correction ? row('Corrected', `${esc(who(a.correction.by))}: ${esc(a.correction.reason)}${a.correction.repaired ? ` · ${esc(a.correction.repaired)}` : ''}`) : ''}
+      <dt>ID</dt><dd><code>${esc(a.id)}</code></dd>
+    </dl>
+    ${a.correction ? '' : '<p class="small muted">To correct it, use Correct on it in Loop → Act.</p>'}`);
+}
+function openLesson(id) {
+  const k = (DATA.ooda.knowledge || []).find((x) => x.id === id);
+  if (!k) return showDrawer(`<h2 id="drawer-title">No lesson ${esc(id)}</h2>`);
+  DRAWER = { kind: 'lesson', id };
+  showDrawer(`<h2 id="drawer-title">${esc(cap(k.kind))}</h2>
+    <p class="ctx measure">${linkify(k.statement)}</p>
+    ${k.status === 'candidate' ? '<p><a class="linkish" href="#inbox">Keep or retire it in the Inbox</a></p>' : ''}
+    <dl>
+      ${row('Status', esc(k.status))}
+      ${row('Applies to', esc(scopeWords(k.scope)))}
+      ${row('Avoid', k.valence < 0 ? 'yes: this is something not to do' : '')}
+      ${row('Confidence', k.confidence != null ? esc(`${Math.round(k.confidence * 100)}%`) : '')}
+      ${row('From', (k.refs || k.evidence || []).map((r) => linkify(r)).join(', '))}
+      ${row('Recorded', esc(when(k.created_at)))}
+      <dt>ID</dt><dd><code>${esc(k.id)}</code></dd>
+    </dl>`);
+}
+function openProblem(id) {
+  const p = (DATA.ooda.problems || []).find((x) => x.id === id);
+  if (!p) return showDrawer(`<h2 id="drawer-title">No problem ${esc(id)}</h2><p class="muted">It may be closed.</p>`);
+  DRAWER = { kind: 'problem', id };
+  showDrawer(`<h2 id="drawer-title">${esc(p.title)}</h2>
+    <p><span class="badge ${sevBadge(p.severity)}">sev ${esc(p.severity)}</span><span class="badge">${p.realized ? 'issue' : 'risk'}</span></p>
+    <dl>
+      ${row('Status', esc(p.status))}
+      ${row('Threatens', (p.threatens || []).map(glink).join(', '))}
+      ${row('Assigned', p.assigned_to ? linkify(p.assigned_to) : '')}
+      ${row('Detail', p.detail ? linkify(p.detail) : '')}
+      ${row('About', (p.refs || []).map((r) => linkify(r)).join(', '))}
+      <dt>ID</dt><dd><code>${esc(p.id)}</code></dd>
+    </dl>`);
+}
+async function openThread(mid) {
+  DRAWER = { kind: 'thread', id: mid };
+  const by = mid.replace(/^m-\d{8}-\d{9}-/, '');
+  const open = (DATA.open_messages || []).find((m) => m.id === mid);
+  const ticket = ticketMap().has(by) ? by : ticketMap().has(open?.to) ? open.to : null;
+  if (!ticket) return showDrawer(`<h2 id="drawer-title">Message</h2>${open ? `<p class="ctx measure">${linkify(open.summary)}</p>` : ''}<p class="muted">From ${esc(who(by))}. Its thread is on the ticket's timeline.</p><dl><dt>ID</dt><dd><code>${esc(mid)}</code></dd></dl>`);
+  showDrawer(`<h2 id="drawer-title">Message</h2><p class="muted">Loading the thread…</p>`);
+  let v;
+  try { const r = await fetch(`/api/timeline?id=${encodeURIComponent(ticket)}`); v = await r.json(); if (!r.ok) throw new Error(v.error || r.status); } catch (e) { return showDrawer(`<h2 id="drawer-title">Message</h2><p class="err">Could not load the thread: ${esc(e.message || e)}</p>`); }
+  if (DRAWER.id !== mid) return;
+  const msgs = (v.lines || []).filter((l) => l.type === 'message');
+  const byId = new Map(msgs.map((m) => [m.id, m]));
+  let root = byId.get(mid);
+  while (root?.re && byId.has(root.re)) root = byId.get(root.re);
+  const inThread = (m) => { let x = m; while (x) { if (x.id === root?.id) return true; x = x.re ? byId.get(x.re) : null; } return false; };
+  const thread = root ? msgs.filter(inThread).sort((a, b) => a.at.localeCompare(b.at)) : [];
+  showDrawer(`<h2 id="drawer-title">Thread on ${tlink(ticket)}</h2>
+    ${thread.length ? thread.map((m) => `<div class="card small ${m.id === mid ? 'qcard' : ''}"><div class="meta">${esc(who(m.by))} → ${esc(who(m.to))} · ${esc(words(m.kind || 'message'))} · ${esc(when(m.at))}</div><div>${linkify(m.text)}</div></div>`).join('') : `<p class="muted">Not on ${esc(ticket)}'s timeline.</p>`}
+    <dl><dt>ID</dt><dd><code>${esc(mid)}</code></dd></dl>`);
 }
 function openPlanner(feature) {
   const p = (DATA.planners || []).find((x) => x.feature === feature);
@@ -1143,6 +1341,9 @@ function route() {
   if (h.startsWith('q/')) return void openQuestion(h.slice(2));
   if (h.startsWith('goal/')) return void openGoal(h.slice(5));
   if (h.startsWith('planner/')) return void openPlanner(h.slice(8));
+  const PEEKS = { feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, lesson: openLesson, problem: openProblem, thread: openThread };
+  const [kind, ...rest] = h.split('/');
+  if (PEEKS[kind] && rest.length) return void PEEKS[kind](rest.join('/'));
   if (h.startsWith('file?')) return void openFile(new URLSearchParams(location.hash.slice(6)));
   if (!$('drawer').hidden) { $('drawer').hidden = true; $('scrim').hidden = true; document.body.style.overflow = ''; DRAWER = { kind: null, id: null }; }
 }
@@ -1350,6 +1551,12 @@ function inboxNotify(d) {
   } catch {}
 }
 
+document.addEventListener('click', (e) => {
+  const a = e.target.closest('[data-view]');
+  if (!a) return;
+  setView(a.dataset.view, a.dataset.left === undefined ? undefined : a.dataset.left === '1');
+});
+$('left-only').addEventListener('change', (e) => setView(VIEW, e.target.checked));
 $('view').addEventListener('change', (e) => {
   VIEW = e.target.value;
   try { localStorage.setItem('devteam.view', VIEW); } catch {}
