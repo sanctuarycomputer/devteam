@@ -316,8 +316,25 @@
 
   /* review questions: three bands, the middle one the agent's (sandboxed) page */
   .qcard.review { border-left-color: var(--blue); }
-  main.reviewing { max-width: 1280px; }
-  main.reviewing > section:not(#review-view) { display: none !important; }
+  /* the review opens as a wide side panel over the page: a slim header, the agent's page filling
+     the height, and a compact answer bar whose row list scrolls inside it */
+  #review-view:not([hidden]) { position: fixed; top: 0; right: 0; bottom: 0; width: min(1600px, 96vw); z-index: 21; background: var(--surface); border-left: 1px solid var(--line); box-shadow: -16px 0 48px rgba(0,0,0,.28); display: flex; flex-direction: column; gap: 6px; padding: 10px 16px 0; overflow: hidden; }
+  @media (max-width: 900px) { #review-view:not([hidden]) { width: 100vw; padding: 8px 10px 0; } }
+  .rv-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .rv-top h4 { flex: 1; min-width: 0; margin: 0; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .rv-top .icon-btn { flex: none; margin: 0; }
+  .rv-sub { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; font-size: 11.5px; color: var(--muted); }
+  .rv-sub details { font-size: 12px; color: var(--fg-2); }
+  .rv-sub details[open] { flex-basis: 100%; }
+  .rv-sub details > div { padding: 6px 0 2px; max-height: 22vh; overflow: auto; }
+  #rv-frame-wrap { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+  #rv-frame-wrap .rv-frame { flex: 1 1 auto; height: auto; min-height: 200px; }
+  #rv-frame-wrap .rv-frame-label { margin: 0 0 4px; }
+  #review-view .rv-panel { position: static; flex: none; margin: 0 -16px; border-radius: 0; border-width: 1px 0 0; box-shadow: none; max-height: 48vh; grid-template-columns: minmax(0, 1fr) minmax(220px, 280px); padding: 10px 16px 12px; }
+  #review-view #rv-preview { max-height: calc(48vh - 24px); overflow: auto; }
+  @media (max-width: 900px) { #review-view .rv-panel { grid-template-columns: minmax(0, 1fr); overflow: auto; max-height: 45vh; } #review-view #rv-preview { max-height: none; overflow: visible; } }
+  .rv-rows > summary { cursor: pointer; list-style: none; }
+  .rv-rows > summary::-webkit-details-marker { display: none; }
   #review-view { margin-top: 0; }
   .rv-back { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--fg-2); margin: 0 0 10px; }
   .rv-back:hover { color: var(--fg); }
@@ -326,7 +343,7 @@
   .rv-pins code { font-size: 11px; }
   .rv-preview-banner { display: inline-block; font-size: 11px; font-weight: 600; letter-spacing: .04em; color: var(--amber-fg); border: 1px solid color-mix(in srgb, var(--amber) 45%, var(--line)); background: color-mix(in srgb, var(--amber) 9%, var(--surface)); border-radius: 6px; padding: 2px 8px; margin-bottom: 6px; }
   .rv-frame-label { display: flex; gap: 8px; align-items: center; font-size: 11.5px; color: var(--muted); margin: 14px 0 4px; }
-  .rv-frame { display: block; width: 100%; height: 480px; min-height: 320px; border: 2px dashed var(--line-2); border-radius: 8px; background: var(--bg); }
+  .rv-frame { display: block; width: 100%; height: 480px; min-height: 200px; border: 2px dashed var(--line-2); border-radius: 8px; background: var(--bg); }
   .rv-panel { position: sticky; bottom: 0; z-index: 4; margin-top: 12px; background: var(--surface); border: 1px solid var(--line-2); border-radius: 10px 10px 0 0; box-shadow: 0 -8px 28px rgba(0,0,0,.10); padding: 12px 16px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 300px); gap: 10px 18px; max-height: 46vh; }
   .rv-panel h3 { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; margin: 0 0 6px; color: var(--fg); }
   .rv-panel h3 .dim { font-weight: 400; }
@@ -474,7 +491,6 @@
   </section>
 
   <section id="review-view" hidden>
-    <a class="rv-back" href="#inbox"><i class="icon-arrow-left" aria-hidden="true"></i>Back to the Inbox</a>
     <div id="rv-head"></div>
     <div id="rv-link" class="banner stale rv-link" role="alert" hidden></div>
     <div id="rv-frame-wrap"></div>
@@ -1072,7 +1088,7 @@ function optionLabeler(data) {
 }
 // The trusted preview: the standard shape (data rows with proposals, result rows) as a table of
 // what changes, changed rows first; anything else as a JSON tree.
-function resultPreview(result, data) {
+function resultPreview(result, data, fold = false) {
   const META = ['v', 'question', 'review_sha256', 'data_sha256', 'answered_at', 'channel', 'summary'];
   const rest = Object.fromEntries(Object.entries(result).filter(([k]) => !META.includes(k) && k !== 'rows'));
   if (!(Array.isArray(data?.rows) && Array.isArray(result.rows))) return `<div class="jtree">${jsonTree(Object.fromEntries(Object.entries(result).filter(([k]) => !['v', 'question', 'review_sha256', 'data_sha256'].includes(k))))}</div>`;
@@ -1097,10 +1113,12 @@ function resultPreview(result, data) {
   const tr = (x) => `<tr><td><code>${esc(x.d.id)}</code></td><td>${esc(x.d.title ?? '')}</td><td>${valuesCell(x)}</td><td><span class="rv-st ${x.state}">${x.state}</span></td></tr>`;
   const head = '<tr><th>Id</th><th>Title</th><th>Proposal → answer</th><th>State</th></tr>';
   const first = rows.slice(0, 20), more = rows.slice(20);
-  return `<div class="rv-counts"><b>${n('kept')}</b> kept · <b>${n('changed')}</b> changed · <b>${n('none')}</b> none · <b>${n('undecided')}</b> undecided</div>
+  const counts = `<b>${n('kept')}</b> kept · <b>${n('changed')}</b> changed · <b>${n('none')}</b> none · <b>${n('undecided')}</b> undecided`;
+  const table = `<div class="scroll"><table class="rv-table">${head}${first.map(tr).join('')}</table></div>
+    ${more.length ? `<details><summary>${more.length} more row${more.length === 1 ? '' : 's'}</summary><div class="scroll"><table class="rv-table">${head}${more.map(tr).join('')}</table></div></details>` : ''}`;
+  // folded (the review panel's answer bar): the counts are the summary and the rows open on demand
+  return `${fold ? `<details class="rv-rows" data-rv-rows ${RV?.rowsOpen ? 'open' : ''}><summary class="rv-counts">${counts} · <span class="linkish">${RV?.rowsOpen ? 'hide' : 'show'} every row</span></summary>${table}</details>` : `<div class="rv-counts">${counts}</div>${table}`}
     ${strange.length ? `<p class="err">${strange.length} row${strange.length === 1 ? '' : 's'} in the result ${strange.length === 1 ? 'is' : 'are'} not in the data: ${strange.slice(0, 5).map((r) => `<code>${esc(isPlainObj(r) ? r.id : JSON.stringify(r))}</code>`).join(', ')}</p>` : ''}
-    <div class="scroll"><table class="rv-table">${head}${first.map(tr).join('')}</table></div>
-    ${more.length ? `<details><summary>${more.length} more row${more.length === 1 ? '' : 's'}</summary><div class="scroll"><table class="rv-table">${head}${more.map(tr).join('')}</table></div></details>` : ''}
     ${Object.keys(rest).length ? `<h3 style="margin-top:10px">Also in the result</h3><div class="jtree">${jsonTree(rest)}</div>` : ''}`;
 }
 // Why Answer is off, if it is: the checks the owner's process runs, so the button says so first.
@@ -1144,11 +1162,12 @@ async function openReview(raw) {
   const me = RV = { key, qid, preview, info: null, frame: null, proposal: null, progress: null, dropped: 0, saveTimer: null, pending: null, saved: null, seq: 0, readonly: false };
   document.querySelector('main').classList.add('reviewing');
   $('review-view').hidden = false;
+  $('scrim').hidden = false;
+  document.body.style.overflow = 'hidden';
   $('rv-head').innerHTML = '<p class="loading">Loading the review…</p>';
   $('rv-frame-wrap').innerHTML = '';
   $('rv-panel').hidden = true;
   $('rv-link').hidden = true;
-  window.scrollTo(0, 0);
   if (preview) {
     const path = params.get('path') || '', ref = params.get('ref') || '', dataPath = params.get('data') || '';
     let data = null, note = '';
@@ -1191,6 +1210,8 @@ function closeReview() {
   RV = null;
   document.querySelector('main').classList.remove('reviewing');
   $('review-view').hidden = true;
+  $('scrim').hidden = true;
+  document.body.style.overflow = '';
   $('rv-frame-wrap').innerHTML = '';
   $('rv-panel').hidden = true;
   $('rv-link').hidden = true;
@@ -1206,38 +1227,40 @@ function mountFrame(src, title) {
   RV.frame = f;
   const label = document.createElement('div');
   label.className = 'rv-frame-label';
-  label.innerHTML = '<i class="icon-shield" aria-hidden="true"></i><span>The agent’s page. It runs sandboxed, with no network and no access to this dashboard; it can only propose an answer, which shows in the panel below.</span>';
+  label.innerHTML = '<i class="icon-shield" aria-hidden="true"></i><span>The agent’s page: sandboxed, no network, no access to this dashboard. It can only propose; check the bar below before you answer.</span>';
   $('rv-frame-wrap').replaceChildren(label, f);
 }
+const RV_CLOSE = '<button class="ghost icon-btn" data-rv-close aria-label="Close the review"><i class="icon-x" aria-hidden="true"></i></button>';
 function renderReviewHead(note = '') {
   const info = RV.info;
+  const CLOSE = RV_CLOSE;
   if (RV.preview) {
-    $('rv-head').innerHTML = `<div class="card rv-head"><span class="rv-preview-banner">PREVIEW, not asked</span>
-      <h4>${esc(info.path || 'No page given')}</h4>
-      <p class="meta"><code>${esc(info.path)}</code>${info.ref ? ` at <code>${esc(info.ref)}</code>` : ' on main'}${info.dataPath ? ` · data <code>${esc(info.dataPath)}</code>${info.data ? '' : ' (not loaded)'}` : ' · no data (add &amp;data=&lt;path&gt;)'}</p>
-      <p class="ctx">This is how the owner will see the page. Nothing here is a question yet, so nothing can be answered or saved.</p>
-      ${note ? `<p class="err">${esc(note)}</p>` : ''}${info.path ? '' : '<p class="err">Open it as #review-preview?path=&lt;repo path&gt;&amp;ref=&lt;branch&gt;&amp;data=&lt;repo path&gt;.</p>'}</div>`;
+    $('rv-head').innerHTML = `<div class="rv-top"><span class="rv-preview-banner">PREVIEW, not asked</span><h4>${esc(info.path || 'No page given')}</h4><button class="ghost icon-btn" data-rv-close aria-label="Close the review"><i class="icon-x" aria-hidden="true"></i></button></div>
+      <div class="rv-sub"><span><code>${esc(info.path)}</code>${info.ref ? ` at <code>${esc(info.ref)}</code>` : ' on main'}${info.dataPath ? ` · data <code>${esc(info.dataPath)}</code>${info.data ? '' : ' (not loaded)'}` : ' · no data (add &amp;data=&lt;path&gt;)'}</span>
+      <span>This is how the owner will see the page. Nothing here is a question yet, so nothing can be answered or saved.</span></div>
+      ${note ? `<p class="err">${esc(note)}</p>` : ''}${info.path ? '' : '<p class="err">Open it as #review-preview?path=&lt;repo path&gt;&amp;ref=&lt;branch&gt;&amp;data=&lt;repo path&gt;.</p>'}`;
     return;
   }
   const rv = info.review;
   const ok = pinsVerified(info);
   const pins = info.files.map((f) => `${PIN_WORDS[f.role] || f.role} <code>${esc(f.sha256.slice(0, 12))}</code>`).join(' · ');
   const state = info.declined ? '<span class="badge medium">sent back</span>' : info.status === 'answered' ? '<span class="badge good">answered</span>' : info.status !== 'open' ? `<span class="badge">${esc(info.status)}</span>` : '';
-  $('rv-head').innerHTML = `<div class="card qcard review rv-head">
-    ${cardHead(KIND_ICON.review, `<span class="badge low">Review</span>${state}`, { extra: (info.blocks || []).length ? `holds up ${info.blocks.map(tlink).join(', ')}` : info.ticket ? `about ${tlink(info.ticket)}` : '', id: info.id, rows: [['Asked', esc(when(info.asked_at))], ['Pinned at', `<code>${esc(String(rv.commit).slice(0, 12))}</code> (${esc(rv.ref)})`]] })}
-    ${rv.title && rv.title !== info.question ? `<div class="rv-title">${esc(rv.title)}</div>` : ''}
-    <h4>${linkify(info.question)}</h4>
-    ${info.context ? `<p class="ctx">${linkify(info.context)}</p>` : ''}
-    ${(info.links || []).length ? `<div class="links"><span class="muted small">Look at:</span>${info.links.map(linkOf).join('')}</div>` : ''}
-    <div class="meta rv-pins">Asked by ${esc(who(info.asked_by))} · ${esc(when(info.asked_at))}${rv.data ? ` · ${esc(rv.data.rows)} rows` : ''} · ${pins} ${ok ? '<span class="badge good">verified</span>' : `<span class="badge high">${esc(info.result_status)}</span>`}${rv.allow_partial ? ' · partial answers allowed' : ''} <span id="rv-progress"></span></div>
-    ${ok ? (info.status === 'open' ? '<p class="meta"><b>Check the answer panel, not the page, before you answer.</b> The page is the agent’s; the panel is the dashboard’s, and shows exactly what will be recorded.</p>' : '') : '<div class="banner"><b>The page or data changed since the supervisor asked.</b> Nothing can be answered here. Tell the supervisor to ask again.</div>'}
-  </div>`;
+  // one line for the question, one for the facts; the rest folds away so the agent's page gets the height
+  const more = [rv.title && rv.title !== info.question ? `<div class="rv-title">${esc(rv.title)}</div>` : '',
+    `<div>${linkify(info.question)}</div>`,
+    info.context ? `<p class="ctx">${linkify(info.context)}</p>` : '',
+    (info.links || []).length ? `<div class="links"><span class="muted small">Look at:</span>${info.links.map(linkOf).join('')}</div>` : '',
+    `<div class="meta rv-pins">Asked by ${esc(who(info.asked_by))} · ${esc(when(info.asked_at))} · ${pins} · pinned at <code>${esc(String(rv.commit).slice(0, 12))}</code> (${esc(rv.ref)})${rv.allow_partial ? ' · partial answers allowed' : ''}</div>`].join('');
+  $('rv-head').innerHTML = `<div class="rv-top"><i class="icon-${KIND_ICON.review}" aria-hidden="true"></i><span class="badge low">Review</span>${state}<h4 title="${esc(info.question)}">${esc(rv.title || info.question)}</h4>${CLOSE}</div>
+    <div class="rv-sub">${(info.blocks || []).length ? `<span>holds up ${info.blocks.map(tlink).join(', ')}</span>` : info.ticket ? `<span>about ${tlink(info.ticket)}</span>` : ''}${rv.data ? `<span>${esc(rv.data.rows)} rows</span>` : ''}${ok ? '<span class="badge good">verified</span>' : `<span class="badge high">${esc(info.result_status)}</span>`}<span id="rv-progress"></span>
+      <details><summary>The question in full</summary><div>${more}</div></details></div>
+    ${ok ? '' : '<div class="banner"><b>The page or data changed since the supervisor asked.</b> Nothing can be answered here. Tell the supervisor to ask again.</div>'}`;
   showProgress();
 }
 function showProgress() {
   const el = $('rv-progress');
   const p = RV?.progress;
-  if (el) el.innerHTML = p && p.total ? `· <span class="badge ${p.done >= p.total ? 'good' : 'medium'}">${esc(p.done)} of ${esc(p.total)} decided</span>` : '';
+  if (el) el.innerHTML = p && p.total ? `<span class="badge ${p.done >= p.total ? 'good' : 'medium'}">${esc(p.done)} of ${esc(p.total)} decided</span>` : '';
 }
 // The panel's right side, drawn once per view: autosave status, Answer, Send it back.
 function renderReviewActions() {
@@ -1283,12 +1306,12 @@ function renderReviewPreview() {
   const raw = (text, bytes, sha, what) => `<p class="meta">${what}: <b>${Number(bytes).toLocaleString()}</b> bytes, sha256 <code>${esc(sha.slice(0, 12))}</code>. <a class="linkish" data-rv-raw>${RV.rawOpen ? 'Hide' : 'Show'} raw JSON</a></p><pre class="rv-raw" ${RV.rawOpen ? '' : 'hidden'}>${esc(text)}</pre>`;
   if (!RV.preview && RV.readonly) {
     const doc = info.result_doc;
-    el.innerHTML = doc ? `<h3>Your answer, as recorded <span class="dim">drawn by the dashboard from the stored result</span></h3>${resultPreview(doc, info.data)}${raw(JSON.stringify(doc, null, 2), info.result.bytes, info.result.sha256, 'The stored result')}` : `<h3>${info.declined ? 'Sent back, with no result' : 'No result recorded'}</h3>`;
+    el.innerHTML = doc ? `<h3>Your answer, as recorded <span class="dim">drawn by the dashboard from the stored result</span></h3>${resultPreview(doc, info.data, true)}${raw(JSON.stringify(doc, null, 2), info.result.bytes, info.result.sha256, 'The stored result')}` : `<h3>${info.declined ? 'Sent back, with no result' : 'No result recorded'}</h3>`;
     return;
   }
   const p = RV.proposal;
-  el.innerHTML = `<h3>What you’re answering <span class="dim">drawn by the dashboard from the page’s proposal, not by the page</span></h3>
-    ${p ? resultPreview(p.obj, info.data) + raw(p.text, p.bytes, p.sha256, RV.preview ? 'What the page proposes (in a real question, what the agent would receive)' : 'This is exactly what the agent will receive') : '<p class="empty">Nothing proposed yet. Work through the page above; its answer shows here.</p>'}
+  el.innerHTML = `<h3>What you’re answering <span class="dim">drawn by the dashboard, not the page</span></h3>
+    ${p ? resultPreview(p.obj, info.data, true) + raw(p.text, p.bytes, p.sha256, RV.preview ? 'What the page proposes (in a real question, what the agent would receive)' : 'This is exactly what the agent will receive') : '<p class="empty">Nothing proposed yet. Work through the page above; its answer shows here.</p>'}
     ${RV.dropped ? `<p class="meta">${RV.dropped} message${RV.dropped === 1 ? '' : 's'} from the page ${RV.dropped === 1 ? 'was' : 'were'} refused.</p>` : ''}`;
 }
 async function setProposal(result) {
@@ -1380,10 +1403,7 @@ function onBridge(m) {
     return tellFrame({ type: 'markdown-result', id: m.id, html });
   }
   if (m.type === 'open') return openFromReview(m);
-  if (m.type === 'resize') {
-    const max = Math.max(320, innerHeight - 140);
-    RV.frame.style.height = `${Math.round(Math.min(Math.max(m.height + 4, 320), max))}px`;
-  }
+  // resize: the frame fills the panel's height, so a page's reported height needs no action
 }
 window.addEventListener('message', (ev) => {
   if (!RV?.frame) return;
@@ -1916,9 +1936,11 @@ async function renderMermaid(root) {
     }
   }
 }
+let ROUTED = false;
 function route() {
   const raw = location.hash.slice(1);
-  if (raw.startsWith('review/') || raw.startsWith('review-preview')) return void openReview(raw);
+  if (raw.startsWith('review/') || raw.startsWith('review-preview')) { if (!RV) RV_FROM = ROUTED ? raw : null; ROUTED = true; return void openReview(raw); }
+  ROUTED = true; RV_FROM = null;
   // back from a review to a section: the section was hidden when the browser looked for it
   // (and the Inbox cards redraw, so a card's progress pill is the one the review just reported)
   if (closeReview()) { if (DATA) render(DATA); if (/^[a-z]+$/.test(raw)) document.getElementById(raw)?.scrollIntoView(); }
@@ -1935,8 +1957,12 @@ function route() {
 }
 window.addEventListener('hashchange', () => { if (DATA) route(); });
 $('drawer-close').addEventListener('click', closeDrawer);
-$('scrim').addEventListener('click', closeDrawer);
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('drawer').hidden) closeDrawer(); });
+$('scrim').addEventListener('click', () => (RV ? leaveReview() : closeDrawer()));
+document.addEventListener('keydown', (e) => { if (e.key !== 'Escape') return; if (RV) leaveReview(); else if (!$('drawer').hidden) closeDrawer(); });
+document.addEventListener('click', (e) => { if (e.target.closest('[data-rv-close]')) leaveReview(); });
+// a review opened from the dashboard closes back to it; one opened from a link goes to the Inbox
+let RV_FROM = null;
+function leaveReview() { if (RV_FROM !== null) history.back(); else location.hash = '#inbox'; }
 
 // ---- loop tabs ----
 let TAB = 'observe';
@@ -2227,6 +2253,11 @@ document.addEventListener('click', async (ev) => {
   if (dsend) {
     const id = dsend.dataset.decline;
     return void reviewDecline(id, document.querySelector(`textarea[data-q="${CSS.escape(id)}"]`)?.value.trim() ?? '', id, dsend);
+  }
+  if (ev.target.closest('[data-rv-rows] > summary')) {
+    ev.preventDefault();
+    RV.rowsOpen = !RV.rowsOpen;
+    return void renderReviewPreview();
   }
   if (ev.target.closest('[data-rv-raw]')) {
     const pre = ev.target.closest('p')?.nextElementSibling;
