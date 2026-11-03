@@ -175,6 +175,8 @@ const SETTINGS_DEFAULTS = {
   release: 'tag',
   // Commands a stdin: secret sink may run (prefixes, e.g. "gh secret set"); they run as the owner.
   secret_commands: [],
+  // The forge's checks merge doesn't wait for (names, e.g. a broken optional one); owner-only.
+  ignored_checks: [],
   // Files a fresh worktree needs that git doesn't carry (gitignored secrets, local env), copied from
   // the main checkout into every worker, planner, gate and chore worktree. Paths relative to the repo root.
   worktree_files: [],
@@ -199,7 +201,7 @@ const OWNER_SETTINGS = {
   gates: 'gate-change', worktree_setup: 'gate-change', worktree_files: 'gate-change',
   autonomy_ceilings: 'governance-edit', agent_command: 'governance-edit', resume_command: 'governance-edit', worker_denied_commands: 'governance-edit',
   forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', upstream_repo: 'governance-edit',
-  release: 'governance-edit', secret_commands: 'governance-edit',
+  release: 'governance-edit', secret_commands: 'governance-edit', ignored_checks: 'gate-change',
 };
 const canonical = (v) => (Array.isArray(v) ? `[${v.map(canonical).join(',')}]` : v && typeof v === 'object' ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(',')}}` : JSON.stringify(v));
 function settingsAt(ref) {
@@ -1778,7 +1780,7 @@ function cmdMerge() {
     }
   }
   if (viaGit && !dry && !(flagStr('title') && flagStr('body-file'))) die(`forge is git: merge needs the PR text, in ${path.relative(mainRoot, path.join(runDir, 'pr', `${branch}.md`))} ('# <title>' then the body) or as --title and --body-file`);
-  const prJson = viaGit ? null : sh('gh', ['pr', 'view', branch, '--json', 'number,headRefOid,title,body,isDraft,mergeStateStatus,url']);
+  const prJson = viaGit ? null : sh('gh', ['pr', 'view', branch, '--json', 'number,headRefOid,title,body,isDraft,mergeStateStatus,url,statusCheckRollup']);
   if (prJson === null && !dry && !viaGit) die(`no open PR from ${branch} (gh pr view failed; with no forge CLI set forge: "git")`);
   git(['fetch', '--quiet', 'origin', branch]);
   const pr = prJson !== null ? JSON.parse(prJson) : { headRefOid: resolveCommit(`origin/${branch}`) ?? resolveCommit(branch) ?? die(`no branch ${branch}`), title: flagStr('title'), body: flagStr('body-file') ? fs.readFileSync(flagStr('body-file'), 'utf8') : undefined };
@@ -1796,6 +1798,22 @@ function cmdMerge() {
     if (dup.length) fails.push(`ticket id${dup.length > 1 ? 's' : ''} already on main: ${dup.join(', ')}; renumber them on ${branch} (from its reserved block) and ask again`);
   }
   if (['BEHIND', 'DIRTY'].includes(pr.mergeStateStatus)) fails.push(`PR is ${pr.mergeStateStatus.toLowerCase()} relative to main; the author merges main and asks again`);
+  // The forge's own checks at this head (CI, a deploy pipeline): pending is not passed and failing
+  // fails, whether or not branch protection marks them required. The owner can name checks to
+  // skip (settings ignored_checks, gate-change).
+  {
+    const ignored = new Set(loadSettings().ignored_checks ?? []);
+    const pending = [], failing = [];
+    for (const c of pr.statusCheckRollup ?? []) {
+      const name = c.name ?? c.context ?? '?';
+      if (ignored.has(name)) continue;
+      const state = c.__typename === 'StatusContext' || c.state ? String(c.state ?? '').toUpperCase() : (c.status === 'COMPLETED' ? String(c.conclusion ?? '').toUpperCase() : 'PENDING');
+      if (['PENDING', 'EXPECTED', 'QUEUED', 'IN_PROGRESS', 'WAITING', 'REQUESTED', ''].includes(state)) pending.push(name);
+      else if (!['SUCCESS', 'NEUTRAL', 'SKIPPED'].includes(state)) failing.push(`${name} (${state.toLowerCase()})`);
+    }
+    if (pending.length) fails.push(`the forge's checks are still running at ${sha.slice(0, 12)}: ${pending.join(', ')}; wait for them, then merge`);
+    if (failing.length) fails.push(`the forge's checks failed at ${sha.slice(0, 12)}: ${failing.join(', ')}`);
+  }
   // A chore PR that touches the kit, the agent config or the forge config carries an owner answer
   // (classes governance-edit, process-edit, gate-change); project/ files are the supervisor's.
   let approved = flagStr('approved') ?? null;
