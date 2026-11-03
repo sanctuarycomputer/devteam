@@ -1408,6 +1408,17 @@ test('devteam kit', async (t) => {
     assert.deepEqual(kinds().filter((k) => k.startsWith('blocked')), ['blocked-on-owner'], "waiting on the owner's answer: say which question, don't tell the supervisor to act");
     assert.match(json(must(['metrics', '--json'])).findings.find((f) => f.kind === 'blocked-on-owner').detail, new RegExp(Qo));
     must(['withdraw', Qo, '--reason', 'test'], sup);
+    // awaiting the word, with an owner question blocking it: waiting on the owner, not the supervisor
+    const at2 = new Date(Date.now() - 2 * 3600000 + 1000);
+    const stamp2 = at2.toISOString().replace(/[-:T]/g, '').replace('.', '').slice(0, 17);
+    fs.appendFileSync(path.join(repo, 'docs/devteam/run/log/bill-03-a.jsonl'), line({ id: `h-${stamp2.slice(0, 8)}-${stamp2.slice(8)}-bill-03-a`, type: 'phase', op: 'new', at: at2.toISOString(), by: 'bill-03-a', to: 'awaiting-word' }));
+    assert.ok(kinds().includes('waiting-on-supervisor'), 'awaiting the word with nothing else in the way');
+    const Qw2 = must(['ask', '--question', 'Ship it?', '--blocks', 'bill-03-a', '--recommendation', 'yes'], sup);
+    assert.ok(!kinds().includes('waiting-on-supervisor') && kinds().includes('blocked-on-owner'), "an owner question blocking it moves the wait to the owner");
+    must(['withdraw', Qw2, '--reason', 'test'], sup);
+    const at3 = new Date(Date.now() - 2 * 3600000 + 2000);
+    const stamp3 = at3.toISOString().replace(/[-:T]/g, '').replace('.', '').slice(0, 17);
+    fs.appendFileSync(path.join(repo, 'docs/devteam/run/log/bill-03-a.jsonl'), line({ id: `h-${stamp3.slice(0, 8)}-${stamp3.slice(8)}-bill-03-a`, type: 'phase', op: 'new', at: at3.toISOString(), by: 'bill-03-a', to: 'blocked' }));
   });
 
   await t.test("spend is measured from the harnesses' own session logs, attributed and priced", () => {
