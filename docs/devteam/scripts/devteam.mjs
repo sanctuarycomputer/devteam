@@ -772,7 +772,10 @@ function logRule(headRef, sha) {
     let prevAt = lastAt(prev);
     const month = name.match(/-(\d{4}-\d{2})\.jsonl$/)?.[1] && MONTHLY.test(name.replace(/\.jsonl$/, '')) ? name.match(/-(\d{4}-\d{2})\.jsonl$/)[1] : undefined;
     if (before === null) {
-      const siblings = (git(['ls-tree', '--name-only', `${base}:${prefix.slice(0, -1)}`]) ?? '').split('\n').filter((x) => x && x !== name && writerOfFile(x) === writerOfFile(name));
+      // Siblings are the same writer's earlier files of the same stream: a planner writes its plan
+      // file (graph lines, landed by its plan PR) and its monthly files (the rest, by log-sync) at
+      // the same time, so one is never ordered after the other.
+      const siblings = (git(['ls-tree', '--name-only', `${base}:${prefix.slice(0, -1)}`]) ?? '').split('\n').filter((x) => x && x !== name && writerOfFile(x) === writerOfFile(name) && isPlanFile(x) === isPlanFile(name));
       for (const sib of siblings) prevAt = [prevAt, lastAt(`${git(['show', `${base}:${prefix}${sib}`]) ?? ''}\n`)].sort().pop();
     }
     const committedAt = Date.parse(git(['show', '-s', '--format=%cI', sha]) ?? '');
