@@ -222,6 +222,7 @@
   .steps li.now { --seg: var(--amber); color: var(--fg); font-weight: 500; }
   .steps li.now:not([style*="--fill"]) { --fill: 100%; }
   .steps li.part { --seg: var(--series-1); }
+  .gate-row { padding: 3px 0; }
   .steps .step-sub { display: block; margin-top: 2px; font-weight: 400; color: var(--muted); font-size: 11px; line-height: 1.35; }
   .goal-next { margin: 8px 0 4px; }
   .goal .meta a, .qcard .meta a { color: var(--blue-fg); text-decoration: underline; text-underline-offset: 2px; }
@@ -415,12 +416,9 @@
       <div><h3>USD by model</h3><div class="bars card" id="model-cost"></div></div>
       <div><h3>Tokens</h3><div class="card small" id="token-note"></div></div>
     </div>
-    <h3 style="margin-top:14px">Gates</h3>
-    <div class="scroll"><table id="gates"></table></div>
-    <div class="two" style="margin-top:14px">
-      <div><h3>Flaky tests</h3><div id="flaky"></div></div>
-      <div><h3>Slowest tests</h3><div id="slow"></div></div>
-    </div>
+    <h3 style="margin-top:14px">Checks before merge <span class="sub">the automated checks every change must pass (settings <code>gates</code>)</span></h3>
+    <div id="gates"></div>
+    <div class="two" style="margin-top:14px" id="test-lists"></div>
   </section>
 
 </main>
@@ -1476,11 +1474,21 @@ function render(d) {
     ? `Measured from the agents' own session logs. Input ${M(tk.input)} · output ${M(tk.output)} · cache reads ${M(tk.cache_read)} · cache writes ${M(tk.cache_write)}.${Object.keys(m.cost.unpriced_models || {}).length ? ` <span class="err">Unpriced: ${esc(Object.keys(m.cost.unpriced_models).join(', '))}.</span>` : ''}`
     : 'Nothing measured: spend shows only what agents reported.';
 
-  $('gates').innerHTML = '<tr><th>Gate</th><th>Runs</th><th>Median</th><th>Slowest</th><th>Fail rate</th></tr>' + (m.gates.gates.length
-    ? m.gates.gates.map((g) => `<tr><td>${esc(g.gate)}${m.gates.flaky_gates.some((f) => f.gate === g.gate) ? ' <span class="badge high">flaky</span>' : ''}</td><td>${g.runs}</td><td>${dur(g.median_seconds)}</td><td>${dur(g.max_seconds)}</td><td>${Math.round(g.fail_rate * 100)}%</td></tr>`).join('')
-    : '<tr><td colspan="5" class="muted">None. Record runs with <code>devteam.mjs gate</code>.</td></tr>');
-  $('flaky').innerHTML = m.gates.flaky_tests.length ? m.gates.flaky_tests.map((t) => `<div class="card"><code>${esc(t.name)}</code> <span class="muted">${t.times}×</span></div>`).join('') : empty('None seen.');
-  $('slow').innerHTML = m.gates.slowest_tests.length ? m.gates.slowest_tests.map((t) => `<div class="card"><code>${esc(t.name)}</code> <span class="muted">${t.median_seconds}s</span></div>`).join('') : empty('None recorded. Pass <code>--junit</code> to <code>gate</code>.');
+  // The configured checks, one plain line each, trouble first; one-off checks a worker ran by hand
+  // are counted, not listed.
+  const configured = new Set(DATA.gates_configured || []);
+  const flakyG = new Set(m.gates.flaky_gates.map((f) => f.gate));
+  const gl = m.gates.gates.filter((g) => !configured.size || configured.has(g.gate));
+  const adhoc = m.gates.gates.filter((g) => configured.size && !configured.has(g.gate));
+  const trouble = (g) => (flakyG.has(g.gate) ? 2 : 0) + (g.fail_rate >= 0.2 ? 1 : 0);
+  gl.sort((a, b) => trouble(b) - trouble(a) || b.runs - a.runs);
+  $('gates').innerHTML = gl.length
+    ? `<div class="card small">${gl.map((g) => `<div class="gate-row"><code>${esc(g.gate)}</code> <span class="muted">${g.runs} run${g.runs === 1 ? '' : 's'} · usually ${dur(g.median_seconds)} · fails ${Math.round(g.fail_rate * 100)}% of the time</span>${flakyG.has(g.gate) ? ' <span class="badge high">flaky</span>' : ''}${g.fail_rate >= 0.2 ? ' <span class="badge medium">often fails</span>' : ''}</div>`).join('')}${adhoc.length ? `<div class="muted" style="margin-top:6px">and ${adhoc.length} one-off check${adhoc.length === 1 ? '' : 's'} workers ran by hand (${adhoc.slice(0, 4).map((g) => esc(g.gate)).join(', ')}${adhoc.length > 4 ? ', …' : ''})</div>` : ''}</div>`
+    : empty('No checks have run yet.');
+  $('test-lists').innerHTML = [
+    m.gates.flaky_tests.length ? `<div><h3>Flaky tests</h3>${m.gates.flaky_tests.map((t) => `<div class="card"><code>${esc(t.name)}</code> <span class="muted">${t.times}×</span></div>`).join('')}</div>` : '',
+    m.gates.slowest_tests.length ? `<div><h3>Slowest tests</h3>${m.gates.slowest_tests.map((t) => `<div class="card"><code>${esc(t.name)}</code> <span class="muted">${t.median_seconds}s</span></div>`).join('')}</div>` : '',
+  ].join('');
 
   if (DRAWER.kind === 'ticket') openTicket(DRAWER.id, { quiet: true });
   // last, so every section that holds an input is drawn before its half-typed value comes back
