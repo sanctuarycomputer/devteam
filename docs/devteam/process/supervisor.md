@@ -44,7 +44,7 @@ Run it about every 10 minutes when PRs are converging, 30 when quiet. A worker's
 10. `devteam.mjs retro --due`: if due, draft it now (§10) and finish it on the next quiet tick, or first thing once the draft is a day old. On quiet ticks run the improvement loop (§9).
 11. Notify the owner only on a new blocking question or something they must act on now.
 12. `devteam.mjs log-sync` (pushes the chore-log branch; merge it with `merge --chore log` once a day, after the tick's merges, and before merging a plan that names a newly approved goal).
-13. `devteam.mjs phase supervisor --usd <your cumulative spend>` when you can see it.
+13. Spend is measured from every agent's session log (settings `usage_sources`: `claude-code` and `codex` are built in; `usage_command` adds any other harness; `model_prices` prices a model the kit doesn't know). An `unpriced-model` finding means spend undercounts until the owner adds a price.
 
 ## 4. Fixing drift
 

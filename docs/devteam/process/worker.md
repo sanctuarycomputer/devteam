@@ -41,11 +41,13 @@ Review records follow `governance/quality.md` §3 exactly (a `- Reviewer:` line,
 
 ## 5. Phases and cost
 
-Record every phase change, and report your cumulative spend whenever your agent or a gateway can tell you:
+Record every phase change:
 
 ```
-devteam.mjs phase build --task T3 --usd 4.20 --in 310000 --out 42000
+devteam.mjs phase build --task T3
 ```
+
+Spend is measured for you from your agent's own session log (the kit reads its token usage and charges it to your ticket and phase), so you don't report it. `--usd`, `--in` and `--out` remain only for a harness the kit can't read.
 
 Phases: `spec`, `plan`, `contract`, `build`, `verify`, `final-review`, `awaiting-word`, `blocked`, `parked`, `done`. Run it at every phase and task change, and at least every 15 minutes while working: your last line of any kind is your sign of life, and a worker silent for `stale_after_minutes` goes to recovery. Spend between two phase lines is charged to the earlier phase; that is how time and cost per phase get measured. If your agent supports a stop hook, `devteam.mjs stop-ok` refuses to let the session end while your last commit is newer than your last phase line.
 
@@ -72,4 +74,4 @@ The supervisor turns recurring observations into lessons, and accepted lessons r
 3. Final review (`reviews/final-1.md`, and `final-1b.md` from another session on `risk: high`). Fix, cold-confirm, until the latest record in every track says `APPROVE` at a commit that holds at your head.
 4. `devteam.mjs check-ticket <id> --title "<pr title>" --body-file <body.md>` must pass at your pushed head.
 5. `devteam.mjs send supervisor "<id> ready to merge" --kind merge-request` (it sends your exact head). Pushing after that voids the request; ask again with the new head.
-6. When the supervisor says it merged: `devteam.mjs phase done --usd <total>`, then exit. The supervisor removes the worktree and closes the window.
+6. When the supervisor says it merged: `devteam.mjs phase done`, then exit. The supervisor removes the worktree and closes the window.
