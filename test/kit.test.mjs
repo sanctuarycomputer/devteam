@@ -424,6 +424,28 @@ test('devteam kit', async (t) => {
     git(['commit', '-q', '--amend', '-a', '--no-edit'], wt('bill-01-card'));
     assert.match(dt(['check-ticket', 'bill-01-card', '--sha', git(['rev-parse', 'HEAD'], wt('bill-01-card')), ...pr]).out, /does not hold/, 'a hand edit inside the merge voids it');
     git(['reset', '-q', '--hard', H2], wt('bill-01-card'));
+    // filling in a record later (an empty disposition cell, a missing Reviewer line) keeps the verdicts
+    // after it; any other edit to the record still voids them
+    const changes = (reviewer, sha, disp) => `${reviewer ? `- Reviewer: ${reviewer}\n\n` : ''}| Id | Severity | Rule | Where | Finding | Disposition |\n|---|---|---|---|---|---|\n| F1 | Important | spec | billing/card.js:1 | handles no error | ${disp} |\n\nVerdict: CHANGES ${sha}\n`;
+    const head = () => git(['rev-parse', 'HEAD'], wt('bill-01-card'));
+    const commitAll = (msg) => { git(['add', '-A'], wt('bill-01-card')); git(['commit', '-qm', msg], wt('bill-01-card')); };
+    write(path.join(tdir, 'reviews/final-2.md'), changes(null, H2, ''));
+    commitAll('an unnamed review asks for changes');
+    fs.appendFileSync(path.join(wt('bill-01-card'), 'billing/card.js'), 'error handled\n');
+    commitAll('fix');
+    const fixed = head();
+    write(path.join(tdir, 'reviews/final-3.md'), review('reviewer-b', fixed));
+    commitAll('review 3');
+    const r3 = dt(['check-ticket', 'bill-01-card', '--sha', head(), ...pr]);
+    assert.doesNotMatch(r3.out, /final-2\.md: no "- Reviewer:" line/, 'an unnamed record a later pass superseded does not fail the ticket');
+    assert.match(r3.out, /final-2\.md F1 \(Important\) has no disposition/);
+    write(path.join(tdir, 'reviews/final-2.md'), changes('reviewer-a', H2, 'fixed'));
+    commitAll('fill in final-2: its reviewer and the disposition');
+    must(['check-ticket', 'bill-01-card', '--sha', head(), ...pr]);
+    write(path.join(tdir, 'reviews/final-2.md'), changes('reviewer-a', H2, 'fixed').replace('handles no error', 'fine really'));
+    commitAll('rewrite a finding');
+    assert.match(dt(['check-ticket', 'bill-01-card', '--sha', head(), ...pr]).out, /final-3\.md: its verdict is at .* does not hold/, 'editing a finding voids the verdicts after it');
+    git(['reset', '-q', '--hard', H2], wt('bill-01-card'));
     // a rename out of the footprint is a change outside touches
     git(['mv', 'AGENTS.md', 'billing/agents.md'], wt('bill-01-card'));
     git(['commit', '-qm', 'move'], wt('bill-01-card'));
