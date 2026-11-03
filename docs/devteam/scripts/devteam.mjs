@@ -1252,6 +1252,7 @@ function planners() {
     return {
       feature, title: feat.title ?? feature, goals, tickets: graph.split('\n').filter((t) => t.includes('"type":"ticket"') && t.includes('"op":"new"')).length,
       branch: b, window: !!target, problem: target ? null : problem, waiting: target ? paneWaitingIn(by) : null,
+      parked: lines.filter((l) => l.by === by && l.type === 'phase').sort((x, y) => x.at.localeCompare(y.at)).pop()?.to === 'parked',
       last_seen: last, minutes_silent: last ? Math.round((Date.now() - Date.parse(last)) / 60000) : null,
       waiting_on_supervisor: asking.map((m) => ({ id: m.id, kind: m.kind, text: m.text })),
       // a planner whose design waits on the owner's answers is waiting, not stale
@@ -1640,6 +1641,8 @@ function verdictHolds(v, head, dir) {
   const onlyRecords = (git(['log', '--no-merges', '--no-renames', '--format=@%H', '--name-status', `${v}..${head}`, ...(main ? [`^${main}`] : [])]) ?? 'x').split('\n').filter(Boolean).every((l) => {
     if (l.startsWith('@')) { commit = l.slice(1); return true; }
     const [st, file] = l.split('\t');
+    // a drained session's handoff note is prose about the session, not the work (supervisor.md, Moving the fleet)
+    if (isHandoffFile(file)) return st === 'A' || st === 'M';
     if (!isRecord(file)) return false;
     if (st === 'A') return true;
     return st === 'M' && !!commit && fillInOnly(git(['show', `${commit}^:${file}`]), git(['show', `${commit}:${file}`]));
@@ -4135,7 +4138,8 @@ function collectMetrics(since) {
   const now = Date.now();
   const ts = tickets();
   const phaseLines = new Map();
-  for (const l of logObjects('phase')) (phaseLines.get(l.created_by) ?? phaseLines.set(l.created_by, []).get(l.created_by)).push(l);
+  // a planner's phase lines (parked, starting: a drain) are not ticket time
+  for (const l of logObjects('phase')) if (writerClass(l.created_by) !== 'planner') (phaseLines.get(l.created_by) ?? phaseLines.set(l.created_by, []).get(l.created_by)).push(l);
   for (const ls of phaseLines.values()) ls.sort(byTime);
 
   // Cycle time: a ticket's first phase line to its merge.
@@ -4277,6 +4281,8 @@ function collectMetrics(since) {
   }
   for (const p of planners()) {
     const who = `plan-${p.feature}`;
+    // a planner parked by a drain stopped on purpose: not gone, exited or stale
+    if (p.parked) continue;
     if (p.waiting) add('high', 'blocked-prompt', who, p.waiting.kind === 'limit' ? `a usage-limit banner in its pane: "${p.waiting.line}"` : `waiting on a prompt in its pane: "${p.waiting.line}"`, `look (tmux select-window -t ${settings.tmux_session}:${who}) and clear it (supervisor.md §11)`);
     else if (/no agent is running|has exited/.test(p.problem ?? '')) add('high', 'agent-exited', who, p.problem.replace(/; resume it first$/, ''), `resume it: planner ${p.feature} --resume (supervisor.md §11)`);
     else if (!p.window) add('medium', 'planner-gone', who, `plan/${p.feature} isn't on main and its window is gone (${p.problem})`, `resume it (planner ${p.feature} --resume) or, if the plan was dropped, delete the branch`);
@@ -4304,6 +4310,7 @@ function collectMetrics(since) {
   if (recentQs.length >= 4 && answeredRecent / recentQs.length < 0.5) add('high', 'inbox-stalled', 'owner questions', `${answeredRecent} of ${recentQs.length} answered in 14 days`, 'remind the owner what is blocked; give defaults where the class allows; withdraw what no longer matters');
   // churn is a signal to re-plan a ticket still in flight; a merged ticket's passes are retro material
   for (const [id, n] of Object.entries(reviewPasses()).filter(([id2, n]) => n >= 3 && !mergeShaFor(id2))) add('medium', 'review-churn', id, `${n} final review passes`, 'the ticket may be too big or under-specified; re-plan it');
+  const drained = !!draining();
   const ready = [...ts.values()].filter((t) => isActive(t) && !isHeld(t) && !mergeShaFor(t.id) && !activeWorker(t.id) && (t.depends_on ?? []).every((d) => mergeShaFor(d)) && !notSchedulable(t));
   const active = [...ts.keys()].filter(activeWorker).length;
   // Goals that need planning with nobody planning them: a fully defined draft goal with no design up
@@ -4322,9 +4329,10 @@ function collectMetrics(since) {
       return g.status === 'ready' && c.coverage.some((x) => x.includes('has no feature') || x.startsWith('no feature names'));
     }).sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99));
     const cap = settings.max_active_planners;
-    if (waiting.length && (cap == null || ps.length < cap)) add('medium', 'idle-planning', `${waiting.length} goal${waiting.length > 1 ? 's' : ''}`, `${ps.length}${cap == null ? '' : `/${cap}`} planner${ps.length === 1 ? '' : 's'} active; nobody is planning ${waiting.map((g) => `"${g.title}"`).join(', ')}`, `start a planner for each (goals plan in parallel), or record why one waits on another's design (goal set <id> --plan-after <g-id> --reason "…"): ${waiting.slice(0, cap == null ? waiting.length : Math.max(1, cap - ps.length)).map((g) => g.id).join(', ')}`);
+    // while the fleet drains for a move, nothing new starts: no idle planning, no idle capacity
+    if (!drained && waiting.length && (cap == null || ps.length < cap)) add('medium', 'idle-planning', `${waiting.length} goal${waiting.length > 1 ? 's' : ''}`, `${ps.length}${cap == null ? '' : `/${cap}`} planner${ps.length === 1 ? '' : 's'} active; nobody is planning ${waiting.map((g) => `"${g.title}"`).join(', ')}`, `start a planner for each (goals plan in parallel), or record why one waits on another's design (goal set <id> --plan-after <g-id> --reason "…"): ${waiting.slice(0, cap == null ? waiting.length : Math.max(1, cap - ps.length)).map((g) => g.id).join(', ')}`);
   }
-  if (ready.length && active < settings.max_active_tickets) add('medium', 'idle-capacity', `${ready.length} ready`, `${active}/${settings.max_active_tickets} workers active`, `make workers for: ${ready.slice(0, 5).map((t) => t.id).join(', ')}`);
+  if (!drained && ready.length && active < settings.max_active_tickets) add('medium', 'idle-capacity', `${ready.length} ready`, `${active}/${settings.max_active_tickets} workers active`, `make workers for: ${ready.slice(0, 5).map((t) => t.id).join(', ')}`);
   // A key that decrypts production, copied into every worktree, is readable by every agent
   // (code-style.md §10): production decrypts its own file, or the default one when it has none.
   const prodKey = fs.existsSync(path.join(mainRoot, 'config/credentials/production.yml.enc')) ? 'config/credentials/production.key' : fs.existsSync(path.join(mainRoot, 'config/credentials.yml.enc')) ? 'config/master.key' : null;
@@ -4726,8 +4734,10 @@ function cmdPrompt() {
   const role = positional[0];
   if (!PROMPTS[role]) die('usage: prompt supervisor|worker <ticket-id>|planner <feature>');
   const p = role === 'planner' && positional[1] ? plannerPrompt(positional[1]) : PROMPTS[role].replace(/\{\{ID\}\}/g, positional[1] ?? '');
-  const block = role === 'supervisor' ? '' : knowledgeBlock(positional[1]);
-  out(block ? `${p}\n\n${block}` : p);
+  if (role === 'supervisor') { const d = drainedPreface(); return out(d ? `${d}\n\n${p}` : p); }
+  const handoff = positional[1] ? handoffBlock(role === 'worker' ? positional[1] : `plan-${positional[1]}`) : null;
+  const block = knowledgeBlock(positional[1]);
+  out([p, handoff, block].filter(Boolean).join('\n\n'));
 }
 
 const tmux = (args) => sh('tmux', args) !== null;
@@ -4775,15 +4785,19 @@ function cmdSend() {
   const from = flags.owner ? ownerWriter().by : myAddress();
   if (from === 'owner' && kind !== 'info') die('the owner sends info messages; answers go through answer <qid>, rulings come from the supervisor');
   if (['ruling', 'answer'].includes(kind) && from !== 'supervisor') die(`only the supervisor sends ${kind} messages`);
-  const target = to === 'supervisor' ? supervisorTarget() : `${loadSettings().tmux_session}:${to}`;
-  const { target: exact, problem } = resolvePane(target);
   const sha = flagStr('sha') ?? (kind === 'merge-request' ? git(['rev-parse', 'HEAD']) : null);
   const re = flagStr('re') ?? null;
   if (re && logGet(re)?.type !== 'message') warn(`--re ${re} matches no logged message`);
-  // The log is the record; the pane is delivery. A recipient whose pane is gone catches up with `messages`.
-  const line = appendLog({ type: 'message', to, kind, text, re, sha, ticket: flagStr('ticket') ?? (from === 'owner' ? null : currentTicketId()) ?? (tickets().has(to) ? to : null) }, from);
+  out(sendLine({ to, kind, text, re, sha, from, ticket: flagStr('ticket') ?? (from === 'owner' ? null : currentTicketId()) }).id);
+}
+// Log one message and type it into the recipient's pane. The log is the record; the pane is
+// delivery. A recipient whose pane is gone catches up with `messages`.
+function sendLine({ to, kind, text, re = null, sha = null, from, ticket = null }) {
+  const target = to === 'supervisor' ? supervisorTarget() : `${loadSettings().tmux_session}:${to}`;
+  const { target: exact, problem } = resolvePane(target);
+  const line = appendLog({ type: 'message', to, kind, text, re, sha, ticket: ticket ?? (tickets().has(to) ? to : null) }, from);
   if (problem || !typeInto(exact, `[devteam ${kind} ${line.id} from ${from}${re ? ` re ${re}` : ''}${sha ? ` @ ${sha}` : ''}] ${text}`)) warn(`${line.id} recorded but not delivered to "${to}": ${problem ?? `could not type into ${exact}`}; it shows in their \`messages\``);
-  out(line.id);
+  return line;
 }
 // A request is settled when the work it is about has landed: a ticket's once it merged, a
 // planner's once its plan file is on main, a ticket's review request once it was approved. The
@@ -4817,7 +4831,10 @@ function cmdMessages() {
 function cmdPhase() {
   const to = positional[0];
   const supervisor = to === 'supervisor';
-  const id = supervisor ? 'supervisor' : currentTicketId() ?? die('phase needs DEVTEAM_TICKET or a ticket/<id> branch');
+  // A planner logs one phase of its own: parked, when it stops for a drain (supervisor.md, Moving the fleet).
+  const planner = !supervisor && !currentTicketId() && writerClass(logWriter()) === 'planner' ? logWriter() : null;
+  if (planner && to !== 'parked') die(`a planner logs only phase parked (when drained); its sign of life is its messages, commits and plan file`);
+  const id = supervisor ? 'supervisor' : planner ?? currentTicketId() ?? die('phase needs DEVTEAM_TICKET or a ticket/<id> branch');
   if (!to) die('usage: phase <starting|spec|plan|contract|build|verify|final-review|awaiting-word|merging|done|blocked|parked> [--task t] [--note n] [--usd x --in n --out n]');
   for (const k of ['usd', 'in', 'out']) if (flags[k] !== undefined && !(Number(flagStr(k)) >= 0)) die(`--${k} must be a number ≥ 0`);
   const prev = logObjects('phase').filter((p) => p.created_by === id).sort(byTime).pop() ?? null;
@@ -4943,11 +4960,14 @@ const plannerPrompt = (feature) => {
 // agent command from the settings, and the role's prompt (plus the knowledge that applies).
 function makeSession(role) {
   supervisorOnly(role);
-  const id = positional[0] ?? die(`usage: ${role} <${role === 'worker' ? 'ticket-id' : 'feature'}> [--resume]`);
+  const id = positional[0] ?? die(`usage: ${role} <${role === 'worker' ? 'ticket-id' : 'feature'}> [--resume] [--force]`);
   if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
+  // While the fleet drains for a move, no session starts here; --force does, and its act says so.
+  const drain = draining();
+  if (drain && !flags.force) die(`the fleet is draining (${drain.id}, ${drain.created_at}): no new sessions start. On the machine it moves to, run undrain first (supervisor.md, Moving the fleet); to start this one anyway, add --force (it is logged)`);
   if (!sh('tmux', ['-V'])) die('tmux not found');
   const s = loadSettings();
-  const resume = !!flags.resume;
+  let resume = !!flags.resume;
   if (role === 'worker' && !tickets().has(id)) die(`no ticket ${id} (devteam.mjs ticket show ${id})`);
   const blockSize = flagNum('id-block') ?? ID_BLOCK_DEFAULT;
   if (role === 'planner' && !(Number.isInteger(blockSize) && blockSize >= 1)) die('--id-block takes a whole number of ticket numbers to reserve (at least 1)');
@@ -4958,23 +4978,36 @@ function makeSession(role) {
   // A planner gets a block of ticket numbers before it numbers anything; one that has a block keeps
   // it, and one that numbered tickets before blocks existed gets none (nothing to check it against).
   const block = role === 'planner' && !idBlockFor(id) && !inFlightPlanTickets(branch).length ? reserveIdBlock(id, blockSize) : null;
+  let madeWorktree = false;
   if (!fs.existsSync(wt)) {
     git(['fetch', '--quiet', 'origin', s.main_branch]);
+    // a branch pushed from another machine (a moved fleet) continues from origin, never from main
+    git(['fetch', '--quiet', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
     const base = resolveCommit(`origin/${s.main_branch}`) ? `origin/${s.main_branch}` : s.main_branch;
     if (resolveCommit(`refs/heads/${branch}`)) gitOrDie(['worktree', 'add', '--quiet', wt, branch], mainRoot);
+    else if (resolveCommit(`refs/remotes/origin/${branch}`)) gitOrDie(['worktree', 'add', '--quiet', '--track', '-b', branch, wt, `origin/${branch}`], mainRoot);
     else gitOrDie(['worktree', 'add', '--quiet', '-b', branch, wt, base], mainRoot);
+    madeWorktree = true;
+  }
+  // A harness keeps its sessions by directory on its own machine: a worktree made just now has no
+  // session to continue (a new machine, or the worktree was removed), so start fresh, with the
+  // handoff note if there is one, and say so.
+  if (resume && madeWorktree) {
+    warn(`no ${role} session to resume for ${name}: its worktree was just made here, so the agent has no earlier session in it (a new machine, or the worktree was removed); starting it fresh with agent_command${handoffFor(name) ? ' and its handoff note' : ''} instead`);
+    resume = false;
   }
   seedWorktree(wt);
   const promptFile = path.join(runDir, 'prompts', `${name}.txt`);
   const knowledge = knowledgeBlock(id);
   const held = block ?? (role === 'planner' ? idBlockFor(id) : null);
   const text = `${PROMPTS[role].replace(/\{\{ID\}\}/g, id)}${held ? ` ${idBlockText(held)}` : ''}`;
-  fs.writeFileSync(promptFile, `${text}${knowledge ? `\n\n${knowledge}` : ''}\n`);
+  const handoff = handoffBlock(name);
+  fs.writeFileSync(promptFile, `${text}${handoff ? `\n\n${handoff}` : ''}${knowledge ? `\n\n${knowledge}` : ''}\n`);
   // Workers live in detached tmux windows the owner can attach to; the supervisor is not one of them.
   let fresh = false;
   if (!tmux(['has-session', '-t', s.tmux_session])) { fresh = tmux(['new-session', '-d', '-s', s.tmux_session, '-n', name, '-c', wt]); if (!fresh) die('could not start tmux'); }
   const windows = (sh('tmux', ['list-windows', '-t', s.tmux_session, '-F', '#W']) ?? '').split('\n');
-  if (!fresh && windows.includes(name)) { if (!resume) die(`window ${s.tmux_session}:${name} exists (use --resume to relaunch in it)`); }
+  if (!fresh && windows.includes(name)) { if (!flags.resume) die(`window ${s.tmux_session}:${name} exists (use --resume to relaunch in it)`); }
   else if (!fresh) tmux(['new-window', '-d', '-t', s.tmux_session, '-n', name, '-c', wt]);
   const target = `${s.tmux_session}:${name}`;
   const env = `export DEVTEAM_RUN='${runDir}' DEVTEAM_ROLE='${role}' ${role === 'worker' ? `DEVTEAM_TICKET='${id}'` : `DEVTEAM_FEATURE='${id}'`}`;
@@ -4990,8 +5023,277 @@ function makeSession(role) {
   }
   typeInto(target, `${cmd} "$(cat '${promptFile}')"`);
   if (role === 'worker' && !resume) appendLog({ type: 'phase', from: null, to: 'starting', note: `started in ${target}` }, id);
-  appendLog({ type: 'act', class: 'worker-slots', what: `${resume ? 'resumed' : 'made'} ${role} ${name} in ${target}${block ? `, ticket numbers ${padNN(block.from)}-${padNN(block.to)}` : ''}`, refs: role === 'worker' ? [id] : [], reversible: true, id_block: block ?? undefined }, 'supervisor');
+  // a planner parked by a drain is running again
+  if (role === 'planner' && lastPhaseOf(name)?.to === 'parked') appendLog({ type: 'phase', from: 'parked', to: 'starting', note: `started in ${target}` }, name);
+  appendLog({ type: 'act', class: 'worker-slots', what: `${resume ? 'resumed' : 'made'} ${role} ${name} in ${target}${block ? `, ticket numbers ${padNN(block.from)}-${padNN(block.to)}` : ''}${drain ? ` while the fleet is draining (${drain.id}), with --force` : ''}`, refs: role === 'worker' ? [id] : [], reversible: true, id_block: block ?? undefined }, 'supervisor');
   out(`${resume ? 'resumed' : 'made'} ${role} ${name} in ${target} at ${wt}${block ? `; ticket numbers ${padNN(block.from)}-${padNN(block.to)} reserved` : ''}`);
+}
+
+// --- moving the fleet: drain, drain --status, undrain (supervisor.md, Moving the fleet) ---
+//
+// What git doesn't carry stays on this machine: run/ (the live log, review results and drafts,
+// forge-git PR text, caches), each session's worktree and its harness session, worktree_files and
+// secret keys, and the tools. A drain stops every worker and planner with its work pushed and a
+// handoff note on its branch, and records itself in the log, so that once the log lands, a clone
+// anywhere knows the fleet is drained and what to restart. Neither grants anything: drain and
+// undrain are operational acts, logged so the owner sees them.
+const drainActs = () => logObjects('act').filter((a) => a.class === 'drain' || a.class === 'undrain').sort(byTime);
+// The drain in force: the latest drain act with no undrain after it.
+const draining = () => { const l = drainActs().pop(); return l?.class === 'drain' ? l : null; };
+const latestDrain = () => drainActs().filter((a) => a.class === 'drain').pop() ?? null;
+const DRAIN_WHAT = /^drained the fleet on (\S+?): ([\s\S]*)$/;
+const drainHost = (a) => DRAIN_WHAT.exec(a?.what ?? '')?.[1] ?? null;
+const drainReason = (a) => DRAIN_WHAT.exec(a?.what ?? '')?.[2] ?? a?.what ?? '';
+const lastPhaseOf = (who) => logObjects('phase').filter((p) => p.created_by === who).sort(byTime).pop() ?? null;
+// A session by its writer name: a ticket id, or plan-<feature>.
+function sessionOf(name) {
+  const planner = writerClass(name) === 'planner';
+  const id = planner ? name.slice('plan-'.length) : name;
+  return { name, role: planner ? 'planner' : 'worker', id, branch: planner ? `plan/${id}` : `ticket/${id}`, wt: path.join(mainRoot, '.worktrees', name), handoff: `${projectRel}/${planner ? `plans/${id}` : `tickets/${id}`}/handoff.md` };
+}
+const isHandoffFile = (file) => !!file && new RegExp(`^${reReserved(projectRel)}/(tickets|plans)/[^/]+/handoff\\.md$`).test(file);
+// The handoff note a session gets in its prompt, only while it is current: the session was parked
+// by the latest drain and has logged no phase of its own since (a "starting" line is the launch's).
+// After its first real phase line the note is history: it stays in its folder, never prompted again,
+// until a later drain overwrites it.
+function handoffFor(name) {
+  const d = latestDrain();
+  if (!d) return null;
+  // A planner logs no phases while it works, so any line of its own (a message, an observation) ends it.
+  const planner = writerClass(name) === 'planner';
+  const since = readLog().lines.filter((l) => l.by === name && l.at > d.created_at && (planner || l.type === 'phase'));
+  const launch = (l) => l.type === 'phase' && ['parked', 'starting'].includes(l.to);
+  if (!since.some((l) => l.type === 'phase' && l.to === 'parked') || since.some((l) => !launch(l))) return null;
+  const s = sessionOf(name);
+  const local = readText(path.join(s.wt, s.handoff));
+  if (local !== null) return { ...s, text: local, where: `${s.handoff} in its worktree`, drain: d };
+  for (const r of [`refs/heads/${s.branch}`, `refs/remotes/origin/${s.branch}`]) {
+    if (!resolveCommit(r)) continue;
+    const text = git(['show', `${r}:${s.handoff}`]);
+    if (text !== null) return { ...s, text, where: `${s.handoff} on ${s.branch}, committed ${git(['log', '-1', '--format=%cI', r, '--', s.handoff]) ?? '?'}`, drain: d };
+  }
+  return null;
+}
+const HANDOFF_MAX = 12000;
+function handoffBlock(name) {
+  const h = handoffFor(name);
+  if (!h) return null;
+  const body = h.text.length > HANDOFF_MAX ? `${h.text.slice(0, HANDOFF_MAX)}\n\n(cut at ${HANDOFF_MAX} characters; read the whole file)` : h.text;
+  return `## Handoff from a drained session\n\nThe fleet was drained (${h.drain.id}, ${h.drain.created_at}${drainHost(h.drain) ? ` on ${drainHost(h.drain)}` : ''}) and this session starts without the earlier one's context. Before anything else in ${h.role === 'worker' ? 'worker.md §2' : 'planning.md'}, read this note, left by the session that stopped (${h.where}); then check it against your branch, your files and the log. Keep the file: it is part of the record and lands with your PR. Between the lines below is the note itself, as that session wrote it.\n\n-----\n${body.trimEnd()}\n-----`;
+}
+// What a stopping session must do: the same message for every worker and planner.
+function drainMessage(s, reason) {
+  return `Drain: the fleet is stopping${reason ? ` (${reason.slice(0, 120)})` : ''} to move to another machine. Now: commit all work in progress (a WIP commit is fine) and push ${s.branch}; write ${s.handoff} with what is done, the exact next step, open questions and anything you could not commit; commit and push it; then devteam.mjs phase parked --note "drained", and stop (worker.md §9).`;
+}
+// The sessions a drain is about: everyone it messaged, and anyone running now, less what landed.
+function fleetSessions(d = draining()) {
+  const names = new Set(d?.refs ?? []);
+  for (const t of tickets().keys()) if (activeWorker(t)) names.add(t);
+  const inFlight = new Set(planners().map((p) => `plan-${p.feature}`));
+  for (const n of inFlight) names.add(n);
+  return [...names].sort().map(sessionOf).filter((s) => (s.role === 'worker' ? tickets().has(s.id) && !mergeShaFor(s.id) : inFlight.has(s.name)));
+}
+
+function cmdDrain() {
+  if (flags.status) return drainStatus();
+  supervisorOnly('drain');
+  const reason = flagStr('reason') ?? 'moving the fleet to another machine';
+  const cur = draining();
+  const sessions = fleetSessions(cur).filter((s) => !cur || lastPhaseOf(s.name)?.to !== 'parked');
+  let act = cur;
+  if (!cur) act = appendLog({ type: 'act', class: 'drain', what: `drained the fleet on ${os.hostname()}: ${reason}`, refs: sessions.map((s) => s.name), reversible: true }, 'supervisor');
+  else out(`already draining since ${cur.created_at} (${cur.id}); messaging the sessions not yet parked again`);
+  for (const s of sessions) sendLine({ to: s.name, kind: 'ruling', text: drainMessage(s, drainReason(act)), from: 'supervisor', ticket: s.role === 'worker' ? s.id : null });
+  out(`${cur ? 'still draining' : `drained (${act.id})`}: ${sessions.length ? `told ${sessions.map((s) => s.name).join(', ')} to push, write a handoff and park` : 'no worker or planner to tell'}; no worker or planner starts until undrain`);
+  out('next: drain --status until it says "ready to move" (it lists what is left, and the new machine\'s checklist)');
+}
+
+// Everything the move needs, checked, then the new machine's checklist. Writes nothing.
+function drainStatus() {
+  const s = loadSettings();
+  const d = draining();
+  if (!flags['no-fetch'] && commonDir) git(['fetch', '--quiet', 'origin']);
+  mainRefCache = undefined;
+  const main = mainRef();
+  const blockers = [];
+  const warnings = [];
+  if (!d) blockers.push('the fleet is not drained: run drain first');
+
+  const sessions = fleetSessions(d).map((x) => {
+    const phase = lastPhaseOf(x.name);
+    const local = resolveCommit(`refs/heads/${x.branch}`);
+    const remote = resolveCommit(`refs/remotes/origin/${x.branch}`);
+    const dirty = fs.existsSync(x.wt) ? (git(['status', '--porcelain'], x.wt) ?? '').split('\n').filter(Boolean) : [];
+    const handoffAt = remote && git(['cat-file', '-e', `${remote}:${x.handoff}`]) !== null ? git(['log', '-1', '--format=%cI', remote, '--', x.handoff]) : null;
+    const r = {
+      name: x.name, role: x.role, branch: x.branch,
+      parked: phase?.to === 'parked', phase: phase?.to ?? null,
+      pushed: !!remote && (!local || local === remote), local, remote,
+      clean: !dirty.length, uncommitted: dirty.slice(0, 20),
+      handoff: !!handoffAt && (!d || Date.parse(handoffAt) >= Date.parse(d.created_at) - 60000), handoff_path: x.handoff, handoff_at: handoffAt,
+    };
+    r.problems = [
+      !r.parked && `not parked (phase ${r.phase ?? 'none'})`,
+      !remote ? `${x.branch} is not on origin: push it` : !r.pushed && `${x.branch} here (${local.slice(0, 12)}) is not what origin has (${remote.slice(0, 12)}): push it`,
+      !r.clean && `${dirty.length} uncommitted change(s) in its worktree`,
+      !r.handoff && (handoffAt ? 'its handoff note on origin is older than the drain' : `no ${x.handoff} on origin/${x.branch}`),
+    ].filter(Boolean);
+    for (const p of r.problems) blockers.push(`${x.name}: ${p}`);
+    return r;
+  });
+
+  // The live log has landed when every live file is on main as it is here. The one line that can't
+  // land first is the act of merging the log itself (merge --chore log logs it after the merge):
+  // git keeps that merge, so the line may stay behind.
+  const live = liveLogDir();
+  const files = fs.existsSync(live) ? fs.readdirSync(live).filter((f) => f.endsWith('.jsonl') && !isPlanFile(f)).sort() : [];
+  const unlanded = [];
+  let leftBehind = 0;
+  const logMerge = (l) => { try { const o = JSON.parse(l); return o.type === 'act' && o.class === 'merge-chore' && /^merged chore-log at /.test(o.what ?? ''); } catch { return false; } };
+  for (const f of files) {
+    let text = readText(path.join(live, f)) ?? '';
+    text = text.slice(0, text.lastIndexOf('\n') + 1);
+    if (!text) continue;
+    const shown = main && projectInRepo ? git(['show', `${main}:${projectRel}/log/${f}`]) : null;
+    const landed = shown === null ? '' : `${shown}\n`;
+    if (landed.startsWith(text)) continue;
+    const have = new Set(landed.split('\n'));
+    const extra = text.split('\n').filter((l) => l && !have.has(l));
+    if (writerOfFile(f) === 'supervisor' && extra.every(logMerge)) { leftBehind += extra.length; continue; }
+    unlanded.push({ file: f, lines: extra.length });
+  }
+  if (unlanded.length) blockers.push(`the live log is not on ${s.main_branch} yet (${unlanded.map((u) => `${u.file}: ${u.lines} line(s)`).join(', ')}): run log-sync, then merge --chore log`);
+
+  // Spend is read from each harness's session logs on this machine: observe it before the log
+  // lands. The supervisor's own session spends while it checks; what it spends after its last
+  // observe-spend stays behind, so that is a warning, not a blocker.
+  const pending = new Map();
+  for (const it of spendItems().filter((x) => !x.logged)) pending.set(it.who, (pending.get(it.who) ?? 0) + it.usd);
+  const spendOthers = [...pending].filter(([who]) => who !== 'supervisor').map(([who, usd]) => ({ who, usd: +usd.toFixed(2) }));
+  if (spendOthers.length) blockers.push(`spend not yet in the log for ${spendOthers.map((x) => x.who).join(', ')}: run observe-spend, then log-sync and merge --chore log`);
+  const supUsd = +(pending.get('supervisor') ?? 0).toFixed(2);
+  if (supUsd) warnings.push(`the supervisor's own spend since its last observe-spend ($${supUsd}) stays in this machine's harness logs unless you observe-spend and land the log once more`);
+
+  // The owner's review results live in run/questions until review result --commit puts them in their PR.
+  const uncommitted = [];
+  for (const q of questions().filter((x) => x.kind === 'review' && x.review && x.status === 'answered' && !x.declined && x.result?.sha256)) {
+    const ticket = q.review.ref?.startsWith('ticket/') ? q.review.ref.slice('ticket/'.length) : null;
+    const rels = [reviewResultRel(q.id, ticket), reviewResultRel(q.id, null)];
+    const refs = [main, `refs/remotes/origin/${q.review.ref}`].filter((r) => r && resolveCommit(r));
+    if (!refs.some((r) => rels.some((rel) => git(['cat-file', '-e', `${r}:${rel}`]) !== null))) uncommitted.push({ id: q.id, ref: q.review.ref, path: rels[0] });
+  }
+  for (const u of uncommitted) blockers.push(`the owner's review result ${u.id} is only in run/questions: in ${u.ref}'s worktree, review result ${u.id} --commit, then commit and push it`);
+  const qdir = path.join(runDir, 'questions');
+  const drafts = (fs.existsSync(qdir) ? fs.readdirSync(qdir) : []).filter((qid) => fs.existsSync(path.join(qdir, qid, 'draft.json')) && logGet(qid)?.type === 'question' && questionView(logGet(qid)).status === 'open');
+  for (const qid of drafts) warnings.push(`the owner's saved draft of review ${qid} stays on this machine (run/questions): finish it here before the move, or redo it there`);
+
+  // What moves on its own (open PRs with the forge, owner questions with the log), listed so nothing surprises.
+  const openQs = questions().filter((q) => q.status === 'open').map((q) => ({ id: q.id, question: q.question }));
+  let prs = null;
+  if (s.forge !== 'git') {
+    const raw = sh('gh', ['pr', 'list', '--state', 'open', '--json', 'number,title,headRefName,url']);
+    try { prs = raw === null ? null : JSON.parse(raw); } catch { prs = null; }
+    if (prs === null) warnings.push('gh could not list the open PRs');
+  } else {
+    const dir = path.join(runDir, 'pr');
+    const texts = [];
+    const walk = (at) => { for (const e of fs.existsSync(at) ? fs.readdirSync(at, { withFileTypes: true }) : []) { const p = path.join(at, e.name); if (e.isDirectory()) walk(p); else if (e.name.endsWith('.md')) texts.push(path.relative(dir, p).replace(/\.md$/, '')); } };
+    walk(dir);
+    prs = texts.map((b) => ({ headRefName: b, title: (readText(path.join(dir, `${b}.md`)) ?? '').split('\n')[0].replace(/^# /, '') }));
+    if (texts.length) warnings.push(`forge is git: the PR text for ${texts.join(', ')} is only in run/pr here; copy run/pr/ to the new machine`);
+  }
+
+  const checklist = moveChecklist(s);
+  const ready = !blockers.length;
+  const r = { draining: d ? { id: d.id, at: d.created_at, host: drainHost(d), reason: drainReason(d) } : null, sessions, log: { landed: !unlanded.length, unlanded, left_behind: leftBehind }, spend: { unobserved: spendOthers, supervisor_usd: supUsd }, reviews: { uncommitted, drafts }, open_prs: prs ?? [], open_questions: openQs, blockers, warnings, ready, checklist };
+  if (flags.json) return json(r);
+  out(d ? `draining since ${d.created_at} (${d.id}${drainHost(d) ? `, on ${drainHost(d)}` : ''}): ${drainReason(d)}` : 'not draining');
+  out(`\nsessions:${sessions.length ? '' : ' none'}`);
+  for (const x of sessions) out(`  ${x.name.padEnd(28)} ${x.parked ? 'parked' : `NOT PARKED (${x.phase ?? '-'})`}  ${x.pushed ? 'pushed' : 'NOT PUSHED'}  ${x.clean ? 'clean' : 'UNCOMMITTED'}  ${x.handoff ? 'handoff' : 'NO HANDOFF'}`);
+  out(`\nlog: ${unlanded.length ? `not landed (${unlanded.map((u) => u.file).join(', ')}): run log-sync, then merge --chore log` : `on ${s.main_branch}`}${leftBehind ? " (the log's own merge act stays behind; git keeps the merge)" : ''}`);
+  out(`spend: ${spendOthers.length ? `not yet observed for ${spendOthers.map((x) => `${x.who} $${x.usd}`).join(', ')}` : 'observed up to now'}${supUsd ? `; the supervisor's own $${supUsd} since its last observe-spend` : ''}`);
+  out(`review results: ${uncommitted.length ? uncommitted.map((u) => `${u.id} not committed to ${u.ref}`).join('; ') : 'all in their PRs'}${drafts.length ? `; drafts that won't move: ${drafts.join(', ')}` : ''}`);
+  out(`open PRs (they stay on the forge): ${prs?.length ? prs.map((p) => `${p.number ? `#${p.number} ` : ''}${p.headRefName}`).join(', ') : prs === null ? 'unknown' : 'none'}`);
+  out(`open owner questions (they move with the log): ${openQs.length ? openQs.map((q) => `${q.id} "${q.question.slice(0, 60)}"`).join('; ') : 'none'}`);
+  if (blockers.length) { out('\nleft to do:'); for (const b of blockers) out(`  - ${b}`); }
+  if (warnings.length) { out('\nwarnings:'); for (const w of warnings) out(`  - ${w}`); }
+  out(`\nready to move: ${ready ? 'yes' : 'no'}`);
+  out('\nnew-machine checklist:');
+  checklist.forEach((c, i) => out(`  ${i + 1}. ${c}`));
+}
+
+// The new machine's steps, from the settings and the log: what git doesn't carry.
+function moveChecklist(s) {
+  const url = git(['remote', 'get-url', 'origin']) ?? '<the repo>';
+  const pins = ['.tool-versions', '.nvmrc', '.node-version'].filter((f) => fs.existsSync(path.join(mainRoot, f)));
+  const agent = (s.agent_command ?? '').trim().split(/\s+/)[0] || 'the agent CLI';
+  const keys = new Map();
+  const commands = new Set();
+  for (const q of questions()) for (const x of q.secrets ?? []) {
+    let k;
+    try { k = parseSink(x.sink, { soft: true }); } catch { continue; }
+    if (k.type === 'file') keys.set(k.file, `${k.file} (where ${x.name} was posted)`);
+    else if (k.type === 'rails-credentials') { const f = k.env === 'default' ? 'config/master.key' : `config/credentials/${k.env}.key`; if (fs.existsSync(path.join(mainRoot, f))) keys.set(f, `${f} (decrypts the ${k.env} Rails credentials)`); }
+    else if (k.type === 'sops') keys.set(`sops:${k.file}`, `the SOPS key (age or PGP) that decrypts ${k.file}`);
+    else if (k.type === 'stdin') commands.add(k.argv.slice(0, 2).join(' '));
+  }
+  const files = (s.worktree_files ?? []).filter((f) => !keys.has(f));
+  return [
+    `clone the repo: git clone ${url}, and cd into it`,
+    pins.length ? `install the pinned tools from ${pins.join(', ')} (asdf: asdf install)` : 'install Node 18 or newer',
+    `install git, tmux${s.forge === 'git' ? '' : ', the GitHub CLI'} and ${agent} with superpowers; log in to ${agent}${s.forge === 'git' ? '' : ' and gh (gh auth login)'}`,
+    ...(files.length ? [`copy these gitignored files from the old checkout over a secure channel (never git, chat or the log): ${files.join(', ')}`] : []),
+    ...(keys.size ? [`copy the keys the secret sinks need, the same way: ${[...keys.values()].join('; ')}`] : []),
+    ...(commands.size ? [`log in to the commands that take posted secrets: ${[...commands].join(', ')}`] : []),
+    ...(s.forge === 'git' ? ['copy run/pr/ from the old checkout (forge git keeps the PR text there)'] : []),
+    `start the supervisor inside tmux exactly as the README's step 9 does: DEVTEAM_ROLE=supervisor ${agent} "$(node docs/devteam/scripts/devteam.mjs prompt supervisor)"; its prompt sees the drain`,
+    'the supervisor runs undrain (it rebuilds run/log from the landed log) and restarts each drained session with the command it prints',
+    `restart the dashboard where it outlives the session: tmux new-window -d -t ${s.tmux_session} -n dashboard 'node docs/devteam/scripts/devteam.mjs dashboard' (or another terminal), then open http://127.0.0.1:${s.dashboard_port}`,
+  ];
+}
+
+// undrain: on any machine, after cloning. Rebuild run/log from the landed log if it is empty,
+// record the undrain, and say how to restart each drained session.
+function cmdUndrain() {
+  supervisorOnly('undrain');
+  if (!commonDir || !projectInRepo) die('undrain needs a git checkout with the project folder inside it');
+  if (repoRoot !== mainRoot) die(`run undrain from the main checkout (${mainRoot})`);
+  git(['fetch', '--quiet', 'origin']);
+  mainRefCache = undefined;
+  const live = liveLogDir();
+  if (!(fs.existsSync(live) && fs.readdirSync(live).some((f) => f.endsWith('.jsonl')))) {
+    const main = mainRef() ?? die('no main branch to rebuild run/log from');
+    const files = (git(['ls-tree', '--name-only', `${main}:${projectRel}/log`]) ?? '').split('\n').filter((f) => f.endsWith('.jsonl') && !isPlanFile(f));
+    fs.mkdirSync(live, { recursive: true });
+    for (const f of files) fs.writeFileSync(path.join(live, f), `${git(['show', `${main}:${projectRel}/log/${f}`])}\n`);
+    logCache = null;
+    out(`run/log was empty: rebuilt ${files.length} file(s) from ${projectRel}/log on ${main}`);
+  }
+  const d = draining();
+  if (!d) die('the fleet is not drained (no drain act without a later undrain in the log). If it was drained on another machine, land its log there first: log-sync, then merge --chore log');
+  const act = appendLog({ type: 'act', class: 'undrain', what: `undrained the fleet on ${os.hostname()} (drained by ${d.id}${drainHost(d) ? ` on ${drainHost(d)}` : ''})`, refs: [d.id], reversible: true }, 'supervisor');
+  out(`undrained (${act.id}); workers and planners can start again`);
+  const windows = new Set((sh('tmux', ['list-windows', '-t', loadSettings().tmux_session, '-F', '#W']) ?? '').split('\n').filter(Boolean));
+  const rows = fleetSessions(d).filter((x) => (d.refs ?? []).includes(x.name)).map((x) => {
+    const cmd = `${x.role} ${x.id}${windows.has(x.name) && fs.existsSync(x.wt) ? ' --resume' : ''}`;
+    const ph = lastPhaseOf(x.name)?.to;
+    return `  devteam.mjs ${cmd.padEnd(36)} ${ph === 'parked' ? 'parked' : `phase ${ph ?? '-'}`}; ${handoffFor(x.name) ? 'its handoff note goes into its prompt' : 'no current handoff note'}`;
+  });
+  out(rows.length ? `restart the drained sessions, as the supervisor:\n${rows.join('\n')}` : 'no drained session to restart');
+  out('then make sure the dashboard is running (supervisor.md §11)');
+}
+
+// The supervisor's prompt while the fleet is drained: what to do first.
+function drainedPreface() {
+  const d = draining();
+  if (!d) return null;
+  // A checkout with no live log is a fresh clone; hostnames repeat (a default laptop name), so a
+  // matching one counts only where run/log is still there.
+  const liveHere = fs.existsSync(liveLogDir()) && fs.readdirSync(liveLogDir()).some((f) => f.endsWith('.jsonl'));
+  const here = liveHere && (!drainHost(d) || drainHost(d) === os.hostname());
+  return `The fleet is drained (${d.id}, ${d.created_at}${drainHost(d) ? `, on ${drainHost(d)}` : ''}: ${drainReason(d)}). ${here
+    ? 'This is the machine it was drained on. If the move is under way, carry on with it (supervisor.md, Moving the fleet): node docs/devteam/scripts/devteam.mjs drain --status until it says "ready to move", landing the log with log-sync and merge --chore log; start nothing. Run undrain here only if the owner says to resume on this machine.'
+    : 'This looks like the machine it moved to. Before anything else: (1) DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs undrain (it rebuilds run/log from the landed log, records the undrain, and prints the restart command for each drained session); (2) run each of those commands; (3) make sure the dashboard is running (supervisor.md §11) and tell the owner its address; then carry on from supervisor.md §1.'}`;
 }
 
 function cmdWhoami() {
@@ -5175,8 +5477,13 @@ const HELP = `devteam <command>   (positionals before flags; flags take the word
 Setup and roles
   init [--name n] [--upstream-base vX] [--github]   project folders, settings, .gitignore, the devteam section of AGENTS.md
   prompt supervisor | worker <id> | planner <feature>    the prompt a session starts with
-  worker <ticket-id> [--resume] | planner <feature> [--resume] [--id-block <n>]   supervisor: a worktree, a tmux window and an agent for a ticket or a feature plan (a new planner reserves n ticket numbers, default 20)
+  worker <ticket-id> [--resume] [--force] | planner <feature> [--resume] [--force] [--id-block <n>]   supervisor: a worktree, a tmux window and an agent for a ticket or a feature plan (a new planner reserves n ticket numbers, default 20); refused while the fleet drains unless --force (logged); --resume where no session exists starts fresh with the handoff note
   whoami | settings [--get key]
+
+Moving the fleet (supervisor.md, Moving the fleet)
+  drain [--reason r]                 supervisor: log a drain act, tell every worker and planner to push, write a handoff and park; no session starts until undrain
+  drain --status [--json] [--no-fetch]   per session parked, pushed, clean, handoff on origin; the log landed, spend observed, review results committed; ready to move yes/no, and the new machine's checklist
+  undrain                            supervisor, on any machine after cloning: rebuild an empty run/log from the landed log, log an undrain act, print each drained session's restart command
 
 The graph (planning.md)
   feature add|set|show <slug> --json '{…}' | --file f    a feature: goals, preconditions, stories with releases, design
@@ -5243,6 +5550,7 @@ const COMMANDS = {
   observe: cmdObserve, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, knowledge: cmdKnowledge, problem: cmdProblem,
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
   log: cmdLog, 'log-check': cmdLogCheck, 'log-sync': cmdLogSync, history: cmdHistory,
+  drain: cmdDrain, undrain: cmdUndrain,
   dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes,
 };
 if (!command || command === 'help' || command === '--help') out(HELP);

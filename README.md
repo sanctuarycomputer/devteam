@@ -54,6 +54,38 @@ docs/devteam/
 
 Requirements: git, tmux (for the workers), Node 18+ (the project's own pinned Node is fine: asdf, nvm and the dashboard all run the script with it), the GitHub CLI, one agent CLI (Claude Code, Codex, OpenCode or similar) with superpowers installed.
 
+### Moving the fleet to another machine
+
+The fleet stops cleanly and picks up elsewhere: every session pushes its work and leaves a handoff note on its branch, the log lands on main, and the new machine starts from a clone (`process/supervisor.md` §12).
+
+**On the old machine**, tell the supervisor to drain (for example: "Drain the fleet; I'm moving it to my new laptop"). It runs:
+
+```
+DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs drain --reason "moving to a new laptop"
+DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs drain --status    # until "ready to move: yes"
+DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs log-sync          # then land the log:
+DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs merge --chore log
+```
+
+`drain --status` ends with the new machine's checklist, generated from the settings: which `worktree_files` and secret keys to copy, which logins, which tools.
+
+**On the new machine**, in this order:
+
+```
+git clone <repo-url> && cd <repo>
+asdf install                                  # the versions in .tool-versions, if the repo pins them
+gh auth login                                 # and log in to the agent CLI (claude: run it once, /login), with superpowers
+# copy each worktree_files entry and secret key from the checklist over a secure channel (never git or chat)
+tmux new -s supervisor
+DEVTEAM_ROLE=supervisor claude "$(node docs/devteam/scripts/devteam.mjs prompt supervisor)"
+```
+
+That is step 9's start, unchanged: the supervisor's prompt sees the drain and opens with what to do, so it runs `undrain` (which rebuilds `run/log` from the landed log, records the undrain and prints each drained session's restart command), restarts the drained workers and planners (each gets its handoff note in its prompt), and then the dashboard is restarted where it outlives the session:
+
+```
+tmux new-window -d -n dashboard 'node docs/devteam/scripts/devteam.mjs dashboard'
+```
+
 ## Upgrading a project
 
 `settings.upstream_base` records the release a project materialized from. On its improvement loop the project's supervisor lists newer releases, reads each release's What, Why and Migration, and asks the owner per release whether to adopt, adapt or skip each change (`process/supervisor.md` §9). Changes land as a `chore-devteam-sync-<tag>` PR that never touches `project/` or `run/`. Improvements a project makes to the kit that other projects would want come back here as PRs (`upstream-pr` on the trust ladder), written generically, with nothing from `project/` or `run/`.

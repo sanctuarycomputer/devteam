@@ -405,7 +405,7 @@
         ]
       },
       "phase": {
-        "description": "A worker's phase change, or a liveness ping (from = to), with cumulative spend. A worker's last line of any type is its last sign of life. The supervisor records its own spend with to: supervisor.",
+        "description": "A worker's phase change, or a liveness ping (from = to), with cumulative spend. A worker's last line of any type is its last sign of life. The supervisor records its own spend with to: supervisor. A planner logs only parked (when drained) and starting (written for it when it is started again).",
         "type": "object",
         "properties": {
           "to": {
@@ -1383,7 +1383,8 @@
         "feature",
         "ticket",
         "observation",
-        "message"
+        "message",
+        "phase"
       ],
       "ticket": [
         "phase",
