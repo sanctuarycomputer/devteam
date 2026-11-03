@@ -1152,9 +1152,14 @@ const activeWorker = (id) => { const w = workerState(id); return !!w && w.phase 
 // mid-phase, so it isn't stale yet); the pane can. Only the bottom of the visible pane is read and
 // nothing is typed: clearing it is the supervisor's call (supervisor.md §11). Once per process.
 const PANE_WAITS = [
-  ['limit', /usage limit|rate limit|limit reached|limit will reset|resets? at \d/i],
+  // a banner says the limit was reached or when it resets; "rate limit" on its own is too common in
+  // code and prose the pane may be showing (see PANE_CODE)
+  ['limit', /\b(usage|rate|session|weekly|daily|hourly|\d+-hour) limit (reached|hit|exceeded)\b|\bhit (your|the) (usage |rate )?limit\b|\blimit (will )?resets?\b|\bresets? (at|in) \d|^approaching (your )?usage limit/i],
   ['prompt', /Do you want to (proceed|make this edit|create|allow|run)|Do you trust the files|\[y\/n\]|\(y\/n\)|Press Enter to continue|❯\s*1\.\s*Yes/i],
 ];
+// A pane line that is content the agent is showing, not the agent's own UI: numbered source or diff
+// lines, comments, and quoted output. A banner or prompt never looks like these.
+const PANE_CODE = /^(\d+\s|[+-]\s|#|\/\/|\/\*|\*\s|--\s|<!--|>\s|[│|]\s*\d+\s)/;
 const paneWaits = new Map();
 const paneTails = new Map();
 // Why a window has no agent to talk to: its pane exited, or it is back at a shell prompt (the
@@ -1175,8 +1180,11 @@ function paneWaitingIn(window) {
   const { target, problem } = resolvePane(`${loadSettings().tmux_session}:${window}`);
   paneGone.set(window, problem && /no agent is running|has exited/.test(problem) ? problem : null);
   const lines = target ? (sh('tmux', ['capture-pane', '-p', '-t', target]) ?? '').split('\n').map((l) => l.trim()).filter(Boolean).slice(-15) : [];
+  // a busy agent is working, not stopped at a limit; what it shows (code, diffs) is never its banner
+  const busy = lines.some((l) => PANE_BUSY.test(l));
   for (const [kind, re] of PANE_WAITS) {
-    const hit = lines.find((l) => re.test(l));
+    if (kind === 'limit' && busy) continue;
+    const hit = lines.find((l) => !PANE_CODE.test(l) && re.test(l));
     if (hit) { found = { kind, line: hit.slice(0, 200) }; break; }
   }
   // Only the supervisor acts on a pane (its own tick); the dashboard, status and the owner only look.
