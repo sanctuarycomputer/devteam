@@ -509,6 +509,10 @@
               "additionalProperties": false
             },
             "maxItems": 40
+          },
+          "preexisting": {
+            "type": "boolean",
+            "description": "A ratchet gate that failed here and at the merge base too: pre-existing debt, allowed; not counted in the gate's fail rate."
           }
         },
         "additionalProperties": false,

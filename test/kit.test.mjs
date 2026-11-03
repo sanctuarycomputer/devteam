@@ -1140,11 +1140,17 @@ test('devteam kit', async (t) => {
 
   await t.test('forge git: merge lands the exact verified head on main without gh', () => {
     landSettings((txt) => txt.replace('"gates": {', '"forge": "git", "gates": {'));
+    // a ratchet gate failing on main too: pre-existing debt, allowed, and not this PR's failure
+    landSettings((txt) => txt.replace('"gates": {', '"gates": { "debt": { "cmd": "false", "mode": "ratchet" },'));
     assert.match(dt(['merge', 'bill-01-card'], { role: 'sup' }).err, /needs the PR text/);
     write(path.join(repo, 'docs/devteam/run/pr/ticket/bill-01-card.md'), `# bill-01-card: card capture\n\n${fs.readFileSync(body, 'utf8')}`);
     must(['merge', 'bill-01-card'], { role: 'sup' });
     git(['fetch', '-q', 'origin', 'main']);
     assert.equal(git(['rev-parse', 'origin/main^2']), H2, 'main merges the verified head');
+    const debt = json(must(['log', '--type', 'gate', '--json'])).filter((g) => g.gate === 'debt');
+    assert.ok(debt.length && debt.every((g) => !g.ok && g.preexisting), 'the failure is recorded as pre-existing');
+    const dg = json(must(['metrics', '--json'])).gates.gates.find((g) => g.gate === 'debt');
+    assert.deepEqual([dg.fail_rate, dg.preexisting_fails], [0, debt.length], "and not counted in the gate's fail rate");
     assert.ok(json(must(['log', '--type', 'act', '--json'])).some((a) => a.class === 'merge-word' && a.refs.includes('bill-01-card')));
     assert.match(must(['status']), /merged.*bill-01-card/);
     // its merge settles the worker's requests, replied to or not
