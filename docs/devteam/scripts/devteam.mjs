@@ -168,6 +168,7 @@ const SETTINGS_DEFAULTS = {
   stale_after_minutes: 30,
   // How long `ack` sets a finding aside; it comes back sooner if its subject changes.
   finding_ack_hours: 24,
+  tick_minutes: 15,
   question_default_after_hours: 24,
   autonomy_ceilings: {},
   components: {},
@@ -5319,6 +5320,40 @@ function drainedPreface() {
     : 'This looks like the machine it moved to. Before anything else: (1) DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs undrain (it rebuilds run/log from the landed log, records the undrain, and prints the restart command for each drained session); (2) run each of those commands; (3) make sure the dashboard is running (supervisor.md §11) and tell the owner its address; then carry on from supervisor.md §1.'}`;
 }
 
+// wait [--minutes n]: block between ticks until something needs the supervisor, then say what.
+// It wakes on a new open message to the supervisor, any new line from the owner (an answer, a goal
+// decision, an ack, a message), a new high finding (a worker that stopped on an API error sends no
+// message), or the tick coming due. A high finding already open when it starts returns at once:
+// act on it, or ack it (supervisor.md §3). Harness-agnostic: a blocking command, run in the
+// background where the harness can be woken by a finished command.
+function cmdWait() {
+  supervisorOnly('wait');
+  const minutes = Number(flagStr('minutes') ?? loadSettings().tick_minutes ?? 15);
+  if (!(minutes > 0 && minutes <= 240)) die('--minutes takes 1 to 240');
+  const self = fileURLToPath(import.meta.url);
+  const sub = (args) => { const r = spawnSync(process.execPath, [self, ...args], { cwd: mainRoot, env: process.env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }); try { return r.status === 0 ? JSON.parse(r.stdout) : null; } catch { return null; } };
+  const snap = () => {
+    logCache = null;
+    const owner = readLog().lines.filter((l) => l.by === 'owner').map((l) => l.id);
+    const msgs = (sub(['messages', '--open', '--to', 'supervisor', '--json']) ?? []).map((m) => `${m.id} [${m.kind}] from ${m.created_by}: ${String(m.text).slice(0, 160)}`);
+    const high = (sub(['metrics', '--json'])?.findings ?? []).filter((f) => f.severity === 'high').map((f) => `${f.kind} ${f.subject}: ${f.detail}`);
+    return { owner, msgs, high };
+  };
+  const base = snap();
+  const report = (why, lines) => { out(why); for (const l of lines) out(`  ${l}`); out('then: the tick (supervisor.md §3), and wait again'); };
+  if (base.high.length) return report('high findings are open; act on each, or ack it with a reason (ack <kind> <subject> --reason "…"):', base.high);
+  const until = Date.now() + minutes * 60000;
+  const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  while (Date.now() < until) {
+    sleep(Math.min(Math.max(2000, (minutes * 60000) / 10), 45000, Math.max(0, until - Date.now())));
+    const now = snap();
+    const fresh = (k) => now[k].filter((x) => !base[k].includes(x));
+    const lines = [...fresh('msgs').map((x) => `message ${x}`), ...(fresh('owner').length ? [`${fresh('owner').length} new line(s) from the owner: ${fresh('owner').slice(-5).join(', ')} (questions --all, history --tail 20)`] : []), ...fresh('high').map((x) => `finding ${x}`)];
+    if (lines.length) return report('something needs you:', lines);
+  }
+  report(`nothing new in ${minutes} min: the tick is due`, []);
+}
+
 function cmdWhoami() {
   const id = currentTicketId();
   const s = loadSettings();
@@ -5545,6 +5580,7 @@ Decide and act (supervisor.md, constitution.md)
 
 Observe and orient
   observe --subject s --kind k --detail d [--severity 0-4] [--valence -2..2] [--key k] [--refs ids] [--fix f] [--value n --unit u]
+  wait [--minutes n]   supervisor, between ticks: blocks until a new message to you, a new owner line, a new high finding, or the tick is due (tick_minutes, default 15); an open high finding returns at once until acted on or acked
   observe-metrics | observe-spend | orient [--json] | metrics [--since date] [--json]   (observe-metrics records spend lines too)
   ack <finding-kind> <subject> --reason r [--owner]   set a finding aside for finding_ack_hours
   timeline <ticket-id> [--json]   the ticket and every log line, review and file that bears on it
@@ -5573,7 +5609,7 @@ const COMMANDS = {
   observe: cmdObserve, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, knowledge: cmdKnowledge, problem: cmdProblem,
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
   log: cmdLog, 'log-check': cmdLogCheck, 'log-sync': cmdLogSync, history: cmdHistory,
-  drain: cmdDrain, undrain: cmdUndrain,
+  drain: cmdDrain, undrain: cmdUndrain, wait: cmdWait,
   dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes,
 };
 if (!command || command === 'help' || command === '--help') out(HELP);
