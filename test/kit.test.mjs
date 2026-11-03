@@ -1252,4 +1252,45 @@ test('devteam kit', async (t) => {
     assert.match(json(must(['metrics', '--json'])).findings.find((f) => f.kind === 'blocked-on-owner').detail, new RegExp(Qo));
     must(['withdraw', Qo, '--reason', 'test'], sup);
   });
+
+  await t.test("spend is measured from the harnesses' own session logs, attributed and priced", () => {
+    const home = path.join(tmp, 'harness-home');
+    const slug = fs.realpathSync(repo).replace(/[^a-zA-Z0-9]/g, '-');
+    const now = new Date().toISOString();
+    // Claude Code: a worker's transcript in its worktree's folder; the same message on two lines counts once
+    const msg = (id, model, u) => JSON.stringify({ type: 'assistant', timestamp: now, cwd: '/somewhere/else', message: { id, model, usage: u } });
+    const u1 = { input_tokens: 1000, output_tokens: 1000, cache_read_input_tokens: 1000000, cache_creation_input_tokens: 0 };
+    write(path.join(home, 'claude/projects', `${slug}--worktrees-bill-03-a`, 's1.jsonl'), [msg('m1', 'claude-opus-5-5', u1), msg('m1', 'claude-opus-5-5', u1), JSON.stringify({ type: 'user', message: { content: 'no usage here' } })].join('\n') + '\n');
+    // a subagent of the supervisor, in the main checkout's folder; 1h cache writes cost 2x input
+    write(path.join(home, 'claude/projects', slug, 's2', 'subagents', 'a.jsonl'), msg('m2', 'claude-sonnet-5-5', { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 1000000, cache_creation: { ephemeral_1h_input_tokens: 1000000 } }) + '\n');
+    // another project's folder is never read
+    write(path.join(home, 'claude/projects', `${slug}-other`, 's.jsonl'), msg('m3', 'claude-opus-5-5', { input_tokens: 9e9, output_tokens: 0 }) + '\n');
+    // Codex: a session in the main checkout, a model the kit can't price; totals are cumulative
+    const ev = (o) => JSON.stringify({ timestamp: now, ...o });
+    write(path.join(home, 'codex/sessions/2026/11/02/rollout-1.jsonl'), [
+      ev({ type: 'session_meta', payload: { cwd: repo } }), ev({ type: 'turn_context', payload: { model: 'gpt-x' } }),
+      ev({ type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 500, cached_input_tokens: 100, output_tokens: 50 } } } }),
+      ev({ type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 800, cached_input_tokens: 100, output_tokens: 70 } } } }),
+    ].join('\n') + '\n');
+    const env0 = { c: process.env.CLAUDE_CONFIG_DIR, x: process.env.CODEX_HOME };
+    process.env.CLAUDE_CONFIG_DIR = path.join(home, 'claude');
+    process.env.CODEX_HOME = path.join(home, 'codex');
+    try {
+      const m = json(must(['metrics', '--json']));
+      assert.equal(m.cost.source, 'measured');
+      assert.equal(m.cost.by_model['claude-opus-5-5'].usd, 0.22, '1k in at $4 + 1k out at $20 + 1M cache reads at $0.20, counted once');
+      assert.equal(m.cost.by_model['claude-sonnet-5-5'].usd, 4, '1M one-hour cache writes at 2x $2');
+      assert.equal(m.cost.by_ticket['bill-03-a'], 0.22, "charged to the ticket whose worktree it ran in");
+      assert.equal(m.phase_usd.blocked, 0.22, 'and to the phase the ticket was in then');
+      assert.equal(m.phase_usd.supervisor, 4, "the main checkout's sessions are the supervisor's");
+      assert.equal(m.cost.tokens.output, 1000 + 70);
+      assert.deepEqual(Object.keys(m.cost.unpriced_models), ['gpt-x']);
+      assert.ok(m.findings.some((f) => f.kind === 'unpriced-model' && /gpt-x/.test(f.subject)), 'tokens with no price are said, not dropped');
+      assert.equal(json(must(['dashboard-data'])).tickets.find((x) => x.id === 'bill-03-a').usd, 0.224);
+      assert.ok(fs.existsSync(path.join(repo, 'docs/devteam/run/cache/usage.json')), 'parsed files are cached');
+      assert.equal(json(must(['metrics', '--json'])).cost.by_model['claude-opus-5-5'].usd, 0.22, 'the same from the cache');
+    } finally {
+      for (const [k, v] of [['CLAUDE_CONFIG_DIR', env0.c], ['CODEX_HOME', env0.x]]) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  });
 });

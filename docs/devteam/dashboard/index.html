@@ -409,6 +409,10 @@
       <div><h3>Hours by phase</h3><div class="bars card" id="phase-time"></div></div>
       <div><h3>USD by phase</h3><div class="bars card" id="phase-cost"></div></div>
     </div>
+    <div class="two" style="margin-top:14px">
+      <div><h3>USD by model</h3><div class="bars card" id="model-cost"></div></div>
+      <div><h3>Tokens</h3><div class="card small" id="token-note"></div></div>
+    </div>
     <h3 style="margin-top:14px">Gates</h3>
     <div class="scroll"><table id="gates"></table></div>
     <div class="two" style="margin-top:14px">
@@ -1058,6 +1062,7 @@ async function openTicket(id, { quiet = false } = {}) {
       ${t.held ? `<dt>On hold</dt><dd>${esc(t.held)}</dd>` : ''}
       <dt>Part of</dt><dd>${t.feature === 'chores' ? 'chores (upkeep, not a feature)' : flink(t.feature)} · ${esc(t.component)}${pt?.wave ? ` · ${wlink(pt.wave)}` : ''}${pt?.target_release ? ` · ships in ${rlink(pt.target_release)}` : ''}</dd>
       ${(pt?.serves || []).length ? `<dt>Serves</dt><dd>${pt.serves.map((x) => `${slink(x)} ${esc(String(DATA.progress.stories[x]?.text ?? '').slice(0, 90))}`).join('<br>')}</dd>` : ''}
+      ${ticketMap().get(id)?.usd ? `<dt>Spent</dt><dd>$${esc(ticketMap().get(id).usd.toFixed(2))} so far (its worker and reviewers)</dd>` : ''}
       <dt>Size, risk</dt><dd>${t.size === 'M' ? 'medium' : 'small'}, ${t.risk === 'high' ? 'high risk (two reviewers)' : 'normal risk'}</dd>
       ${(t.depends_on || []).length ? `<dt>Waits on</dt><dd>${t.depends_on.map(tlink).join(', ')}</dd>` : ''}
       <dt>Done when</dt><dd><ul>${(t.done_when || []).map((x) => `<li>${linkify(x)}</li>`).join('')}</ul></dd>
@@ -1119,7 +1124,7 @@ function openTicketSet({ kind, id, title, sub, rows, items, view }) {
   showDrawer(`<h2 id="drawer-title">${title}</h2>
     ${sub ? `<p class="ctx measure">${sub}</p>` : ''}
     ${meterRow(`${fc.done} of ${fc.scope} points done`, fc.done, fc.scope)}
-    <p class="small muted">${esc(eta)} · ${left.length} of ${live.length} ticket${live.length === 1 ? '' : 's'} left</p>
+    <p class="small muted">${esc(eta)} · ${left.length} of ${live.length} ticket${live.length === 1 ? '' : 's'} left${(() => { const usd = live.reduce((a, t) => a + (ticketMap().get(t.id)?.usd || 0), 0); return usd ? ` · $${usd.toFixed(2)} spent` : ''; })()}</p>
     ${live.length ? `<p>${boardLink(view)}</p>` : ''}
     <dl>
       ${rows.filter(Boolean).join('')}
@@ -1410,7 +1415,7 @@ function render(d) {
     ['blocked', d.tickets.filter((t) => t.phase === 'blocked').length],
     ['median cycle', m.cycle_hours.median == null ? '–' : `${m.cycle_hours.median}h`],
     ['cost per ticket', m.cost.usd_per_merged_ticket == null ? '–' : `$${m.cost.usd_per_merged_ticket}`],
-    ['spend', !m.cost.usd_total && !Object.keys(m.phase_usd || {}).length ? 'not reported' : `$${m.cost.usd_total}`],
+    ['spend', !m.cost.usd_all && !m.cost.usd_total ? 'none recorded' : `$${Math.round(m.cost.usd_all ?? m.cost.usd_total)}`],
     ['open questions', d.questions.length],
     ['answer rate (14d)', m.owner_questions.answer_rate_14d == null ? '–' : `${Math.round(m.owner_questions.answer_rate_14d * 100)}%`],
     ['escaped defects', m.escaped_defects],
@@ -1450,7 +1455,13 @@ function render(d) {
     <div class="card small"><b>${esc(words(f.kind))}</b> ${subjectLink(f.subject)} <span class="muted">· set aside by ${esc(who(f.ack.by))}: ${esc(f.ack.reason)} · until ${when(f.ack.until)}</span></div>`).join('') : '');
 
   bars($('phase-time'), m.phase_hours, (v) => `${v}h`, 'No time yet. Workers write a phase line as they move through a ticket.');
-  bars($('phase-cost'), m.phase_usd, (v) => `$${v}`, 'No spend recorded yet. Workers report it with <code>phase … --usd</code>.');
+  bars($('phase-cost'), m.phase_usd, (v) => `$${v}`, 'No spend recorded yet: no agent harness logs were found for this project (settings usage_sources, usage_command).');
+  bars($('model-cost'), Object.fromEntries(Object.entries(m.cost.by_model || {}).map(([k, v]) => [k, v.usd])), (v) => `$${v}`, 'No spend recorded yet.');
+  const tk = m.cost.tokens || {};
+  const M = (n) => `${((n || 0) / 1e6).toFixed(1)}M`;
+  $('token-note').innerHTML = m.cost.source === 'measured'
+    ? `Measured from the agents' own session logs. Input ${M(tk.input)} · output ${M(tk.output)} · cache reads ${M(tk.cache_read)} · cache writes ${M(tk.cache_write)}.${Object.keys(m.cost.unpriced_models || {}).length ? ` <span class="err">Unpriced: ${esc(Object.keys(m.cost.unpriced_models).join(', '))}.</span>` : ''}`
+    : 'Nothing measured: spend shows only what agents reported.';
 
   $('gates').innerHTML = '<tr><th>Gate</th><th>Runs</th><th>Median</th><th>Slowest</th><th>Fail rate</th></tr>' + (m.gates.gates.length
     ? m.gates.gates.map((g) => `<tr><td>${esc(g.gate)}${m.gates.flaky_gates.some((f) => f.gate === g.gate) ? ' <span class="badge high">flaky</span>' : ''}</td><td>${g.runs}</td><td>${dur(g.median_seconds)}</td><td>${dur(g.max_seconds)}</td><td>${Math.round(g.fail_rate * 100)}%</td></tr>`).join('')

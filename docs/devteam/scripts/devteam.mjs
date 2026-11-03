@@ -177,6 +177,13 @@ const SETTINGS_DEFAULTS = {
   secret_commands: [],
   // The forge's checks merge doesn't wait for (names, e.g. a broken optional one); owner-only.
   ignored_checks: [],
+  // Spend is measured from the agent harnesses' own session logs (built in: claude-code, codex);
+  // usage_command adds any other harness (it prints usage records, see spend in the script); and
+  // model_prices ($ per million tokens: input, output, cache_read, cache_write) prices models the
+  // kit has no price for, or overrides one (a discount, a gateway). All three are the owner's.
+  usage_sources: ['claude-code', 'codex'],
+  usage_command: null,
+  model_prices: {},
   // Files a fresh worktree needs that git doesn't carry (gitignored secrets, local env), copied from
   // the main checkout into every worker, planner, gate and chore worktree. Paths relative to the repo root.
   worktree_files: [],
@@ -201,7 +208,7 @@ const OWNER_SETTINGS = {
   gates: 'gate-change', worktree_setup: 'gate-change', worktree_files: 'gate-change',
   autonomy_ceilings: 'governance-edit', agent_command: 'governance-edit', resume_command: 'governance-edit', worker_denied_commands: 'governance-edit',
   forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', upstream_repo: 'governance-edit',
-  release: 'governance-edit', secret_commands: 'governance-edit', ignored_checks: 'gate-change',
+  release: 'governance-edit', secret_commands: 'governance-edit', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit',
 };
 const canonical = (v) => (Array.isArray(v) ? `[${v.map(canonical).join(',')}]` : v && typeof v === 'object' ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(',')}}` : JSON.stringify(v));
 function settingsAt(ref) {
@@ -1067,7 +1074,7 @@ function workerState(id) {
     phase: last?.to ?? null, task: last?.task ?? null, note: last?.note ?? null, head_sha: last?.sha ?? null,
     started_at: phases[0]?.at ?? mine[0].at, last_seen: lastSeen,
     minutes_silent: Math.round((Date.now() - Date.parse(lastSeen)) / 60000),
-    usd: cost?.usd ?? 0, input_tokens: cost?.input_tokens ?? 0, output_tokens: cost?.output_tokens ?? 0,
+    ...(spendByWho().get(id) ?? { usd: cost?.usd ?? 0, input_tokens: cost?.input_tokens ?? 0, output_tokens: cost?.output_tokens ?? 0 }),
   };
 }
 const activeWorker = (id) => { const w = workerState(id); return !!w && w.phase && !['done', 'parked'].includes(w.phase) && !mergeShaFor(id); };
@@ -3188,6 +3195,171 @@ function gateStats(runs) {
   };
 }
 
+// ===== spend: measured from the agent harnesses' own session logs =====
+// A session can't see its own cost, so asking agents to report it recorded nothing. Every harness
+// already logs token usage per response, with the directory it ran in: the kit reads those logs
+// (usage numbers and model names only, never content), attributes each response to the ticket,
+// planner, reviewer or supervisor whose checkout it ran in, and prices it.
+// $ per million tokens: [input, output, cache-read multiple of input]. Cache writes cost 1.25x input
+// (5-minute) or 2x (1-hour). Claude list prices; settings.model_prices overrides or adds models.
+const MODEL_PRICES = {
+  'claude-fable-5-1': [10, 50, 0.025], 'claude-mythos-5-1': [10, 50, 0.025], 'claude-fable-5': [10, 50, 0.1], 'claude-mythos-5': [10, 50, 0.1],
+  'claude-opus-5-5': [4, 20, 0.05], 'claude-opus-5': [5, 25, 0.1], 'claude-opus-4-8': [5, 25, 0.1], 'claude-opus-4-7': [5, 25, 0.1], 'claude-opus-4-6': [5, 25, 0.1],
+  'claude-sonnet-5-5': [2, 10, 0.1], 'claude-sonnet-5': [2, 10, 0.1], 'claude-sonnet-4-6': [3, 15, 0.1],
+  'claude-haiku-5-5': [0.1, 0.5, 0.1, { over: 100000, input: 0.5, output: 2.5 }], 'claude-haiku-4-5': [1, 5, 0.1],
+};
+const modelKey = (m) => String(m ?? '').toLowerCase().replace(/\[.*$/, '').replace(/^(anthropic\.|us\.anthropic\.)/, '').replace(/[-@]\d{8}$/, '');
+function priceFor(model) {
+  const k = modelKey(model);
+  const own = loadSettings().model_prices?.[k] ?? loadSettings().model_prices?.[model];
+  if (own && typeof own.input === 'number' && typeof own.output === 'number') return { input: own.input, output: own.output, read: own.cache_read ?? own.input * 0.1, write: own.cache_write ?? own.input * 1.25, write1h: own.cache_write_1h ?? own.input * 2 };
+  const known = MODEL_PRICES[k] ?? MODEL_PRICES[Object.keys(MODEL_PRICES).filter((x) => k.startsWith(x)).sort((a, b) => b.length - a.length)[0]];
+  if (!known) return null;
+  const [input, output, rf, tier] = known;
+  return { input, output, read: input * rf, write: input * 1.25, write1h: input * 2, tier: tier && { over: tier.over, input: tier.input, output: tier.output, read: tier.input * rf, write: tier.input * 1.25, write1h: tier.input * 2 } };
+}
+// One record: [atMs, model, input, output, cacheRead, cacheWrite5m, cacheWrite1h, usd|null].
+function recordUsd(r) {
+  if (typeof r[7] === 'number') return r[7];
+  let p = priceFor(r[1]);
+  if (!p) return null;
+  if (p.tier && r[2] + r[4] + r[5] + r[6] > p.tier.over) p = p.tier;
+  return (r[2] * p.input + r[3] * p.output + r[4] * p.read + r[5] * p.write + r[6] * p.write1h) / 1e6;
+}
+const realOrSelf = (p) => { try { return fs.realpathSync(p); } catch { return p; } };
+// Whose work ran in a directory: a ticket's worktree, a planner's, a reviewer's (charged to its
+// ticket), and the main checkout or a chore's (the supervisor's).
+function spenderFor(cwd, ts) {
+  const main = realOrSelf(mainRoot);
+  const at = realOrSelf(cwd ?? '');
+  if (at === main) return { who: 'supervisor', role: 'supervisor' };
+  const wtRoot = path.join(main, '.worktrees') + path.sep;
+  if (!at.startsWith(wtRoot)) return at.startsWith(main + path.sep) ? { who: 'supervisor', role: 'supervisor' } : null;
+  const name = at.slice(wtRoot.length).split(path.sep)[0];
+  if (ts.has(name)) return { who: name, role: 'worker' };
+  if (name.startsWith('plan-')) return { who: name, role: 'planner' };
+  const rv = /^review-(.+?-\d+)-[0-9a-f]{8}/.exec(name);
+  if (rv) { const t = [...ts.keys()].find((id) => id === rv[1] || id.startsWith(`${rv[1]}-`)); return t ? { who: t, role: 'reviewer' } : null; }
+  const old = /^review-(.+)-[0-9a-f]{12}/.exec(name);
+  if (old && ts.has(old[1])) return { who: old[1], role: 'reviewer' };
+  return { who: 'supervisor', role: 'supervisor' };
+}
+// Each source returns Map<cwd, records>. Parsed files are cached in run/cache by size and mtime.
+function usageCache() {
+  const file = path.join(runDir, 'cache', 'usage.json');
+  let data = {};
+  try { data = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
+  return { data, save: () => { try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(data)); } catch {} } };
+}
+function cachedParse(cache, f, parse) {
+  let st;
+  try { st = fs.statSync(f); } catch { return null; }
+  const hit = cache.data[f];
+  if (hit && hit.size === st.size && hit.mtime === st.mtimeMs) return hit;
+  let v;
+  try { v = parse(fs.readFileSync(f, 'utf8')); } catch { v = { byCwd: {} }; }
+  return (cache.data[f] = { size: st.size, mtime: st.mtimeMs, ...v });
+}
+const walkJsonl = (dir, out = []) => { let es = []; try { es = fs.readdirSync(dir, { withFileTypes: true }); } catch { return out; } for (const e of es) { const p = path.join(dir, e.name); if (e.isDirectory()) walkJsonl(p, out); else if (e.name.endsWith('.jsonl')) out.push(p); } return out; };
+const USAGE_SOURCES = {
+  // Claude Code: ~/.claude/projects/<the directory, slugged>/<session>.jsonl and its subagents;
+  // a response's usage repeats on each line of that message, so it counts once per message id.
+  'claude-code': (cache) => {
+    const root = path.join(process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), '.claude'), 'projects');
+    const slug = realOrSelf(mainRoot).replace(/[^a-zA-Z0-9]/g, '-');
+    let dirs = [];
+    try { dirs = fs.readdirSync(root).filter((d) => d === slug || d.startsWith(`${slug}--worktrees-`)); } catch { return []; }
+    // The folder is the checkout the session started in (a later cd doesn't move it).
+    return dirs.flatMap((d) => walkJsonl(path.join(root, d)).map((f) => cachedParse(cache, f, (text) => {
+      const byCwd = {};
+      const cwdOf = d === slug ? mainRoot : path.join(mainRoot, '.worktrees', d.slice(`${slug}--worktrees-`.length));
+      const seen = new Set();
+      for (const line of text.split('\n')) {
+        if (!line.includes('"usage"')) continue;
+        let o;
+        try { o = JSON.parse(line); } catch { continue; }
+        const m = o.message, u = m?.usage;
+        if (!u || o.type !== 'assistant' || m.model === '<synthetic>') continue;
+        const key = m.id ?? o.requestId ?? o.uuid;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const w1h = u.cache_creation?.ephemeral_1h_input_tokens ?? 0;
+        const w = u.cache_creation_input_tokens ?? 0;
+        (byCwd[cwdOf] ??= []).push([Date.parse(o.timestamp), m.model, u.input_tokens ?? 0, u.output_tokens ?? 0, u.cache_read_input_tokens ?? 0, Math.max(0, w - w1h), w1h, null]);
+      }
+      return { byCwd };
+    })).filter(Boolean));
+  },
+  // Codex: ~/.codex/sessions/**/rollout-*.jsonl: the session's cwd up front, turn_context lines
+  // name the model, token_count events carry running totals (cached input is part of input).
+  codex: (cache) => {
+    const root = path.join(process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex'), 'sessions');
+    const main = realOrSelf(mainRoot);
+    return walkJsonl(root).map((f) => cachedParse(cache, f, (text) => {
+      const lines = text.split('\n');
+      let cwd = null;
+      try { cwd = JSON.parse(lines[0]).payload?.cwd ?? null; } catch {}
+      if (!cwd || !(realOrSelf(cwd) === main || realOrSelf(cwd).startsWith(main + path.sep))) return { byCwd: {} };
+      const recs = [];
+      let model = null, prev = null;
+      for (const line of lines) {
+        if (!line.includes('turn_context') && !line.includes('token_count')) continue;
+        let o;
+        try { o = JSON.parse(line); } catch { continue; }
+        if (o.type === 'turn_context') { model = o.payload?.model ?? model; continue; }
+        const t = o.payload?.type === 'token_count' ? o.payload.info?.total_token_usage : null;
+        if (!t) continue;
+        const d = (k) => Math.max(0, (t[k] ?? 0) - (prev?.[k] ?? 0));
+        const cached = d('cached_input_tokens');
+        if (d('input_tokens') || d('output_tokens')) recs.push([Date.parse(o.timestamp), model, Math.max(0, d('input_tokens') - cached), d('output_tokens'), cached, d('cache_write_input_tokens'), 0, null]);
+        prev = t;
+      }
+      return { byCwd: { [cwd]: recs } };
+    })).filter(Boolean);
+  },
+};
+// usage_command (any other harness: OpenCode, a gateway's export…): runs from the main checkout and
+// prints one JSON object per line: {"at", "cwd", "model", "input_tokens", "output_tokens",
+// "cache_read_tokens", "cache_write_tokens", "usd" (optional, used as given)}.
+function commandUsage(cmd) {
+  const out = sh('sh', ['-c', cmd], { cwd: mainRoot }) ?? '';
+  const byCwd = {};
+  for (const line of out.split('\n')) {
+    let o;
+    try { o = JSON.parse(line); } catch { continue; }
+    if (!o || typeof o !== 'object' || !o.cwd) continue;
+    (byCwd[o.cwd] ??= []).push([Date.parse(o.at), o.model ?? null, o.input_tokens ?? 0, o.output_tokens ?? 0, o.cache_read_tokens ?? 0, o.cache_write_tokens ?? 0, 0, typeof o.usd === 'number' ? o.usd : null]);
+  }
+  return [{ byCwd }];
+}
+let spendMemo = null;
+// Every response's usage, attributed: [{ who, role, at, model, tokens…, usd }], plus what couldn't
+// be priced. Memoised per process; parsed files are cached on disk between processes.
+function measuredSpend() {
+  if (spendMemo) return spendMemo;
+  const s = loadSettings();
+  const ts = tickets();
+  const cache = usageCache();
+  const parsed = [];
+  for (const src of s.usage_sources ?? []) if (USAGE_SOURCES[src]) parsed.push(...USAGE_SOURCES[src](cache));
+  cache.save();
+  if (s.usage_command) parsed.push(...commandUsage(s.usage_command));
+  const recs = [];
+  const unpriced = new Map();
+  for (const p of parsed) for (const [cwd, rs] of Object.entries(p.byCwd ?? {})) {
+    const sp = spenderFor(cwd, ts);
+    if (!sp) continue;
+    for (const r of rs) {
+      const usd = recordUsd(r);
+      if (usd === null) unpriced.set(r[1] ?? 'unknown', (unpriced.get(r[1] ?? 'unknown') ?? 0) + r[2] + r[3] + r[4] + r[5] + r[6]);
+      recs.push({ ...sp, at: r[0], model: r[1], input: r[2], output: r[3], cache_read: r[4], cache_write: r[5] + r[6], usd: usd ?? 0 });
+    }
+  }
+  return (spendMemo = { recs, unpriced: Object.fromEntries(unpriced) });
+}
+let spendWhoMemo = null;
+const spendByWho = () => { if (spendWhoMemo) return spendWhoMemo; const m = new Map(); for (const r of measuredSpend().recs) { const x = m.get(r.who) ?? { usd: 0, input_tokens: 0, output_tokens: 0 }; x.usd += r.usd; x.input_tokens += r.input + r.cache_read + r.cache_write; x.output_tokens += r.output; m.set(r.who, x); } return (spendWhoMemo = m); };
+
 function collectMetrics(since) {
   const settings = loadSettings();
   const now = Date.now();
@@ -3228,6 +3400,28 @@ function collectMetrics(since) {
       if (i === ls.length - 1 && !merged) phaseNow.set(who, { phase: l.to, sinceMs: at });
     });
   }
+  // Measured usage, where a harness logged it, replaces what agents reported: each response is
+  // charged to the phase its ticket was in at that moment (a planner's to planning, a reviewer's
+  // to review, the main checkout's to the supervisor).
+  const spend = measuredSpend();
+  const costSource = spend.recs.length ? 'measured' : 'reported';
+  const tokens = { input: 0, output: 0, cache_read: 0, cache_write: 0 };
+  const byModel = {};
+  if (spend.recs.length) {
+    for (const k of Object.keys(phaseUsd)) delete phaseUsd[k];
+    for (const k of Object.keys(ticketUsd)) delete ticketUsd[k];
+    for (const r of spend.recs) {
+      if (r.at < since) continue;
+      const ls = phaseLines.get(r.who) ?? [];
+      let phase = r.role === 'supervisor' ? 'supervisor' : r.role === 'planner' ? 'planning' : r.role === 'reviewer' ? 'review' : 'starting';
+      if (r.role === 'worker') for (const l of ls) { if (Date.parse(l.created_at) <= r.at) phase = l.to; else break; }
+      phaseUsd[phase] = (phaseUsd[phase] ?? 0) + r.usd;
+      if (r.role === 'worker' || r.role === 'reviewer') ticketUsd[r.who] = (ticketUsd[r.who] ?? 0) + r.usd;
+      for (const k of Object.keys(tokens)) tokens[k] += r[k];
+      const bm = (byModel[r.model ?? 'unknown'] ??= { usd: 0, output_tokens: 0 });
+      bm.usd += r.usd; bm.output_tokens += r.output;
+    }
+  }
   const mergedCosts = cycles.map((c) => ticketUsd[c.id]).filter((x) => x !== undefined);
 
   const msgs = logObjects('message').filter((m) => Date.parse(m.created_at) >= since).sort(byTime);
@@ -3252,7 +3446,7 @@ function collectMetrics(since) {
     cycle_hours: { median: hours(median(cycles.map((c) => c.ms))), slowest: cycles.slice(0, 5).map((c) => ({ id: c.id, hours: hours(c.ms) })) },
     phase_hours: Object.fromEntries(Object.entries(round(phaseMs)).map(([k, v]) => [k, hours(v)])),
     phase_usd: round(phaseUsd),
-    cost: { usd_total: +Object.values(ticketUsd).reduce((a, b) => a + b, 0).toFixed(2), usd_per_merged_ticket: mergedCosts.length ? +(mergedCosts.reduce((a, b) => a + b, 0) / mergedCosts.length).toFixed(2) : null, by_ticket: round(ticketUsd) },
+    cost: { source: costSource, usd_all: +Object.values(phaseUsd).reduce((a, b) => a + b, 0).toFixed(2), tokens, by_model: Object.fromEntries(Object.entries(byModel).map(([k, v]) => [k, { usd: +v.usd.toFixed(2), output_tokens: v.output_tokens }])), unpriced_models: spend.unpriced, usd_total: +Object.values(ticketUsd).reduce((a, b) => a + b, 0).toFixed(2), usd_per_merged_ticket: mergedCosts.length ? +(mergedCosts.reduce((a, b) => a + b, 0) / mergedCosts.length).toFixed(2) : null, by_ticket: round(ticketUsd) },
     reviews, gates,
     messages: { expecting_reply: expecting.length, still_open: openMsgs.length, median_reply_minutes: msgWaits.length ? +(median(msgWaits) / 60000).toFixed(1) : null },
     owner_questions: { asked: qs.length, open: openQs.length, median_answer_hours: hours(median(qWaits)), oldest_open_hours: openQs.length ? hours(now - Math.min(...openQs.map((q) => Date.parse(q.asked_at)))) : null, answer_rate_14d: recentQs.length ? +(answeredRecent / recentQs.length).toFixed(2) : null },
@@ -3338,6 +3532,8 @@ function collectMetrics(since) {
   // (code-style.md §10): production decrypts its own file, or the default one when it has none.
   const prodKey = fs.existsSync(path.join(mainRoot, 'config/credentials/production.yml.enc')) ? 'config/credentials/production.key' : fs.existsSync(path.join(mainRoot, 'config/credentials.yml.enc')) ? 'config/master.key' : null;
   if (prodKey && (settings.worktree_files ?? []).includes(prodKey)) add('high', 'production-key-in-worktrees', prodKey, `settings.worktree_files copies ${prodKey}, which decrypts production's credentials, into every worker's worktree`, `the owner's change (settings, gate-change): give agents only development and test keys. ${prodKey === 'config/master.key' ? 'Move production secrets to config/credentials/production.yml.enc with its own production.key, kept only on the platform and in the owner\'s shell, then' : 'Then'} drop ${prodKey} from worktree_files (code-style.md §10)`);
+  const unpriced = Object.entries(m.cost.unpriced_models ?? {});
+  if (unpriced.length) add('low', 'unpriced-model', unpriced.map(([k]) => k).join(', '), `${unpriced.map(([k, n]) => `${k}: ${(n / 1e6).toFixed(1)}M tokens`).join('; ')} with no price, so spend undercounts`, 'the owner adds them to settings.model_prices ($ per million tokens: input, output, cache_read, cache_write)');
   if (m.escaped_defects) add('high', 'escaped-defects', `${m.escaped_defects}`, 'defects found after merge', 'retro: which review or gate should have caught each one');
   const order = { high: 0, medium: 1, low: 2 };
   // A finding someone has looked at and set aside (`ack`) moves to acknowledged until the ack
