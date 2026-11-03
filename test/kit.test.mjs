@@ -697,6 +697,33 @@ test('devteam kit', async (t) => {
     git(['worktree', 'remove', '--force', wt('caps')]);
   });
 
+  await t.test("the owner's CI-fix rule approves a workflow-only chore that keeps every job", () => {
+    const wf = '.github/workflows/devteam.yml';
+    assert.ok(git(['show', `origin/main:${wf}`]), 'init --github put the workflow on main');
+    const branch = (slug, edit) => {
+      git(['worktree', 'add', '-q', '-B', `chore-${slug}`, wt(slug), 'origin/main']);
+      edit(wt(slug));
+      git(['add', '-A'], wt(slug));
+      git(['commit', '-qm', slug], wt(slug));
+      git(['push', '-q', '-f', 'origin', `chore-${slug}`], wt(slug));
+      return ['merge', '--chore', slug, '--dry-run', '--title', `chore-${slug}: fix CI`, '--body-file', body];
+    };
+    const fix = branch('ci-fix-node', (w) => fs.writeFileSync(path.join(w, wf), fs.readFileSync(path.join(w, wf), 'utf8').replace('node-version: 22', 'node-version: 24')));
+    assert.match(dt(fix, { role: 'sup' }).out, /outside project\//, 'no rule yet: the owner answers');
+    const Q = must(['ask', '--question', 'Fix the broken CI file?', '--class', 'gate-change', '--reasons', 'owner-only', '--recommendation', 'yes', '--rule-scope', 'chore:ci-fix'], { role: 'sup' });
+    must(['answer', Q, 'yes', '--rule', 'You may fix broken CI files without me.']);
+    assert.match(must(fix, { role: 'sup' }), /changes only workflow files and keeps every job; approved by the owner's standing rule/);
+    const drop = branch('ci-fix-drop', (w) => fs.writeFileSync(path.join(w, wf), fs.readFileSync(path.join(w, wf), 'utf8').replace(/\n {2}check-pr:[\s\S]*$/, '\n  other:\n    runs-on: ubuntu-latest\n    steps:\n      - run: true\n')));
+    assert.match(dt(drop, { role: 'sup' }).out, /doesn't cover removing jobs \(\.github\/workflows\/devteam\.yml: check-pr\)/, "a fix can't drop a check");
+    const gut = branch('ci-fix-gut', (w) => fs.writeFileSync(path.join(w, wf), fs.readFileSync(path.join(w, wf), 'utf8').replace(/node docs\/devteam\/scripts\/devteam\.mjs check-pr[^\n]*/, 'true')));
+    assert.match(dt(gut, { role: 'sup' }).out, /doesn't cover removing devteam's own check/, 'nor keep the job but empty it');
+    const more = branch('ci-fix-more', (w) => { fs.writeFileSync(path.join(w, wf), fs.readFileSync(path.join(w, wf), 'utf8') + '\n'); fs.appendFileSync(path.join(w, 'README.md'), 'x\n'); });
+    assert.match(dt(more, { role: 'sup' }).out, /covers only \.github\/workflows\/\*\.yml; this also changes README\.md/);
+    const other = branch('tidy-workflow', (w) => fs.writeFileSync(path.join(w, wf), fs.readFileSync(path.join(w, wf), 'utf8') + '\n'));
+    assert.match(dt(other, { role: 'sup' }).out, /outside project\//, 'only a ci-fix chore');
+    for (const sl of ['ci-fix-node', 'ci-fix-drop', 'ci-fix-gut', 'ci-fix-more', 'tidy-workflow']) git(['worktree', 'remove', '--force', wt(sl)]);
+  });
+
   await t.test('a standing owner rule approves upstream syncs, only when the kit files are upstream\'s verbatim', () => {
     // an upstream with a tagged release that changes one kit file
     const up = path.join(tmp, 'upstream');

@@ -1764,6 +1764,42 @@ function upstreamSyncApproval(chore, sha, changed) {
   if (differ.length) return { problem: `standing approval covers only files copied verbatim from upstream ${tag}; these differ: ${differ.slice(0, 6).join(', ')}${differ.length > 6 ? ', …' : ''}. The owner's answer is needed: --approved <qid>` };
   return { rule, tag };
 }
+// A standing approval for CI fixes: an accepted owner rule scoped chore:ci-fix (or
+// chore:devteam-workflow, as Stacks' owner first gave it) lets the supervisor merge a ci-fix-* chore
+// without asking, when it changes only workflow files, deletes none, and keeps every job each had
+// on main, so a "fix" can't drop a check. Its CI must still pass (merge waits for the forge's checks).
+const CI_RULE_SCOPES = ['chore:ci-fix', 'chore:devteam-workflow'];
+const workflowJobs = (text) => {
+  const lines = String(text ?? '').split('\n');
+  const i = lines.findIndex((l) => /^jobs:\s*(#.*)?$/.test(l));
+  if (i < 0) return [];
+  const jobs = [];
+  let indent = null;
+  for (const l of lines.slice(i + 1)) {
+    if (/^\S/.test(l)) break;
+    const m = /^(\s+)([A-Za-z0-9_-]+):\s*(#.*)?$/.exec(l);
+    if (!m) continue;
+    indent ??= m[1].length;
+    if (m[1].length === indent) jobs.push(m[2]);
+  }
+  return jobs;
+};
+function ciFixApproval(chore, sha, base, changed) {
+  if (!/^(ci-fix|devteam-workflow)/.test(chore)) return {};
+  const rule = logObjects('knowledge').filter((k) => k.created_by === 'owner' && CI_RULE_SCOPES.includes(k.scope) && k.status === 'accepted').sort(byTime).pop();
+  if (!rule) return {};
+  const off = changed.filter((f) => !/^\.github\/workflows\/[^/]+\.ya?ml$/.test(f));
+  if (off.length) return { problem: `the owner's CI-fix rule covers only .github/workflows/*.yml; this also changes ${off.slice(0, 6).join(', ')}. The owner's answer is needed: merge --chore ${chore} --approved <qid>` };
+  for (const f of changed) {
+    const after = git(['show', `${sha}:${f}`]);
+    if (after === null) return { problem: `the owner's CI-fix rule doesn't cover deleting ${f}` };
+    const before = git(['show', `${base}:${f}`]);
+    const lost = workflowJobs(before).filter((j) => !workflowJobs(after).includes(j));
+    if (lost.length) return { problem: `the owner's CI-fix rule doesn't cover removing jobs (${f}: ${lost.join(', ')})` };
+    if (/devteam\.mjs check-pr/.test(before ?? '') && !/devteam\.mjs check-pr/.test(after)) return { problem: `the owner's CI-fix rule doesn't cover removing devteam's own check (check-pr) from ${f}` };
+  }
+  return { rule, what: 'CI fix' };
+}
 function ownerAnswer(qid, what) {
   const q = logGet(qid);
   const v = q?.type === 'question' ? questionView(q) : null;
@@ -1851,6 +1887,10 @@ function cmdMerge() {
       const r = upstreamSyncApproval(chore, sha, kit);
       if (r.rule) { standing = r; out(`kit files match upstream ${r.tag} exactly; approved by the owner's standing rule ${r.rule.id}`); } else if (r.problem) fails.push(r.problem);
     }
+    if (kit.length && !approved && !standing && base) {
+      const r = ciFixApproval(chore, sha, base, kit);
+      if (r.rule) { standing = r; out(`changes only workflow files and keeps every job; approved by the owner's standing rule ${r.rule.id} ("${r.rule.statement}")`); } else if (r.problem) fails.push(r.problem);
+    }
     if (kit.length && !approved && !standing) fails.push(`touches files outside project/ (${kit.slice(0, 6).join(', ')}${kit.length > 6 ? ', …' : ''}); the owner's answer is needed: merge --chore ${chore} --approved <qid>`);
   }
   if (approved) {
@@ -1922,7 +1962,7 @@ function cmdMerge() {
   mainLogCache = undefined;
   mergeShaCache.clear();
   const cls = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
-  const act = appendLog({ type: 'act', class: cls, what: `merged ${branch} at ${sha}${standing ? ` (upstream ${standing.tag}, verbatim)` : ''}`, refs: id ? [id] : plan ? [plan] : [], reversible: false, approved_by: approved ?? standing?.rule.id ?? undefined }, 'supervisor');
+  const act = appendLog({ type: 'act', class: cls, what: `merged ${branch} at ${sha}${standing?.tag ? ` (upstream ${standing.tag}, verbatim)` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [], reversible: false, approved_by: approved ?? standing?.rule.id ?? undefined }, 'supervisor');
   out(`merged ${branch} at ${sha.slice(0, 12)} (${act.id})`);
 }
 // ===== 7. trust =====
