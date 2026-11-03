@@ -1532,12 +1532,16 @@ function parseReview(file, text) {
   const findings = [];
   let dispIdx = -1;
   let sevIdx = 1;
+  let width = 0;
   for (const row of text.split('\n')) {
     if (!row.trim().startsWith('|')) continue;
     const cells = tableCells(row);
     const lower = cells.map((c) => c.toLowerCase());
-    if (lower.includes('disposition')) { dispIdx = lower.indexOf('disposition'); sevIdx = Math.max(lower.indexOf('severity'), 1); continue; }
-    if (/^F\d+$/.test(cells[0] ?? '')) findings.push({ id: cells[0], severity: cells[sevIdx] ?? '', disposition: dispIdx >= 0 ? (cells[dispIdx] ?? '') : '' });
+    if (lower.includes('disposition')) { dispIdx = lower.indexOf('disposition'); sevIdx = Math.max(lower.indexOf('severity'), 1); width = cells.length; continue; }
+    // A row wider than its header (a stray empty cell before the disposition) still has its
+    // disposition: the first non-empty cell from the Disposition column on.
+    const disposition = dispIdx < 0 ? '' : cells.length > width ? (cells.slice(dispIdx).find((c) => c) ?? '') : (cells[dispIdx] ?? '');
+    if (/^F\d+$/.test(cells[0] ?? '')) findings.push({ id: cells[0], severity: cells[sevIdx] ?? '', disposition });
   }
   return {
     file, stage: m ? m[1] : file.replace(/\.md$/, ''), pass: m ? Number(m[2]) : 0, variant: m ? m[3] : '',

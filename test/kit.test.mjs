@@ -442,6 +442,12 @@ test('devteam kit', async (t) => {
     write(path.join(tdir, 'reviews/final-2.md'), changes('reviewer-a', H2, 'fixed'));
     commitAll('fill in final-2: its reviewer and the disposition');
     must(['check-ticket', 'bill-01-card', '--sha', head(), ...pr]);
+    // a row with a stray empty cell before its disposition still has that disposition
+    const wide = git(['rev-parse', 'HEAD'], wt('bill-01-card'));
+    write(path.join(tdir, 'reviews/final-2.md'), changes('reviewer-a', H2, 'fixed').replace('| fixed |', '|  | fixed |'));
+    commitAll('a wider row');
+    assert.doesNotMatch(dt(['check-ticket', 'bill-01-card', '--sha', head(), ...pr]).out, /F1 \(Important\) has no disposition/, 'the disposition is read past the stray empty cell');
+    git(['reset', '-q', '--hard', wide], wt('bill-01-card'));
     write(path.join(tdir, 'reviews/final-2.md'), changes('reviewer-a', H2, 'fixed').replace('handles no error', 'fine really'));
     commitAll('rewrite a finding');
     assert.match(dt(['check-ticket', 'bill-01-card', '--sha', head(), ...pr]).out, /final-3\.md: its verdict is at .* does not hold/, 'editing a finding voids the verdicts after it');
