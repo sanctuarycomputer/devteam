@@ -1096,6 +1096,10 @@ const agentExited = (window) => paneGone.get(window) ?? null;
 // An agent idle at its prompt while its own background shell still runs: after a compaction it can
 // lose the shell's result and wait for nothing. Only read, never acted on: the supervisor nudges.
 const PANE_SHELL = /\b\d+ (background )?shells? (still )?running\b|·\s*\d+ (background )?shells?\s*(·|$)/i;
+// An agent whose last turn ended on an API or network error (a DNS or connection drop, an
+// overloaded API): it stops and waits; a nudge resumes it. Harness-agnostic wording.
+const PANE_API_ERROR = /\bAPI Error\b|Can't reach the API|\bENOTFOUND\b|\bECONNRESET\b|\bETIMEDOUT\b|overloaded_error|\bstream (error|disconnected)\b|\b(429|5\d\d) (Too Many Requests|Internal Server Error|Bad Gateway|Service Unavailable)\b/i;
+const idleOnApiError = (window) => { const l = paneTails.get(window) ?? []; const last = l.slice(-8); return last.some((x) => PANE_API_ERROR.test(x)) && !l.some((x) => PANE_BUSY.test(x)); };
 const idleWithShell = (window) => { const l = paneTails.get(window) ?? []; return l.some((x) => PANE_SHELL.test(x)) && !l.some((x) => PANE_BUSY.test(x)); };
 function paneWaitingIn(window) {
   if (paneWaits.has(window)) return paneWaits.get(window);
@@ -3585,7 +3589,7 @@ function collectMetrics(since) {
     const waitingOnSupervisor = openMsgs.some((m) => m.created_by === id);
     const exited = w && w.phase && !['done', 'parked'].includes(w.phase) && !mergeShaFor(id) ? agentExited(id) : null;
     if (exited) add('high', 'agent-exited', id, exited.replace(/; resume it first$/, ''), `resume it: worker ${id} --resume (supervisor.md, recovery)`);
-    else if (w && w.phase && !['done', 'parked', 'awaiting-word', 'blocked'].includes(w.phase) && !mergeShaFor(id) && !waitingOnOwner && !waitingOnSupervisor && w.minutes_silent > settings.stale_after_minutes) add('high', 'stale-worker', id, ...(windowGone(id) ? [`silent for ${w.minutes_silent} min (phase ${w.phase}) and its tmux window is gone`, `resume it: worker ${id} --resume (supervisor.md, recovery)`] : [...(idleWithShell(id) ? [`silent for ${w.minutes_silent} min (phase ${w.phase}), idle at its prompt with a background shell still running`, `nudge it: send ${id} "check your background shell's result and carry on" (an agent can lose the result across a compaction)`] : [`silent for ${w.minutes_silent} min (phase ${w.phase})`, 'check its pane; resume it (supervisor.md, recovery)'])]));
+    else if (w && w.phase && !['done', 'parked', 'awaiting-word', 'blocked'].includes(w.phase) && !mergeShaFor(id) && !waitingOnOwner && !waitingOnSupervisor && w.minutes_silent > settings.stale_after_minutes) add('high', 'stale-worker', id, ...(windowGone(id) ? [`silent for ${w.minutes_silent} min (phase ${w.phase}) and its tmux window is gone`, `resume it: worker ${id} --resume (supervisor.md, recovery)`] : [...(idleOnApiError(id) ? [`silent for ${w.minutes_silent} min (phase ${w.phase}), stopped on an API or network error`, `nudge it: send ${id} "the network dropped; carry on from where you were"`] : idleWithShell(id) ? [`silent for ${w.minutes_silent} min (phase ${w.phase}), idle at its prompt with a background shell still running`, `nudge it: send ${id} "check your background shell's result and carry on" (an agent can lose the result across a compaction)`] : [`silent for ${w.minutes_silent} min (phase ${w.phase})`, 'check its pane; resume it (supervisor.md, recovery)'])]));
   }
   for (const p of planners()) {
     const who = `plan-${p.feature}`;

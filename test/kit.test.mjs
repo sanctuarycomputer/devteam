@@ -271,6 +271,15 @@ test('devteam kit', async (t) => {
         assert.match(staleF().suggestion, /send bill-01-card "check your background shell's result/);
       } finally { spawnSync('tmux', ['kill-session', '-t', 'devteam']); }
     }
+    // stopped on an API or network error: say so, and suggest the nudge
+    if (hasTmux) {
+      spawnSync('tmux', ['new-session', '-d', '-s', 'devteam', '-n', 'bill-01-card', 'sh -c \'printf "API Error: Cannot reach the API server - check your internet or DNS (ENOTFOUND)\\ndone 9:19 PM\\n> \\n"; exec sleep 600\'']);
+      try {
+        for (let i = 0; i < 20 && !/ENOTFOUND/.test(spawnSync('tmux', ['capture-pane', '-p', '-t', 'devteam:bill-01-card'], { encoding: 'utf8' }).stdout ?? ''); i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+        assert.match(staleF().detail, /stopped on an API or network error/);
+        assert.match(staleF().suggestion, /send bill-01-card "the network dropped/);
+      } finally { spawnSync('tmux', ['kill-session', '-t', 'devteam']); }
+    }
     // the agent quit and left its window at a shell prompt: agent-exited, with the resume, not stale
     if (hasTmux) {
       spawnSync('tmux', ['new-session', '-d', '-s', 'devteam', '-n', 'bill-01-card', 'sh']);
