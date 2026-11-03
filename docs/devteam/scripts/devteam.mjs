@@ -3231,6 +3231,9 @@ const realOrSelf = (p) => { try { return fs.realpathSync(p); } catch { return p;
 // Whose work ran in a directory: a ticket's worktree, a planner's, a reviewer's (charged to its
 // ticket), and the main checkout or a chore's (the supervisor's).
 function spenderFor(cwd, ts) {
+  // a subagent the supervisor ran for one ticket (a reviewer): "ticket:<id>:<phase>"
+  const sub = /^ticket:(.+):([a-z-]+)$/.exec(cwd ?? '');
+  if (sub) return ts.has(sub[1]) ? { who: sub[1], role: 'reviewer', phase: sub[2] } : { who: 'supervisor', role: 'supervisor' };
   const main = realOrSelf(mainRoot);
   const at = realOrSelf(cwd ?? '');
   if (at === main) return { who: 'supervisor', role: 'supervisor' };
@@ -3252,14 +3255,15 @@ function usageCache() {
   try { data = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
   return { data, save: () => { try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(data)); } catch {} } };
 }
+const USAGE_PARSE_V = 2;
 function cachedParse(cache, f, parse) {
   let st;
   try { st = fs.statSync(f); } catch { return null; }
   const hit = cache.data[f];
-  if (hit && hit.size === st.size && hit.mtime === st.mtimeMs) return hit;
+  if (hit && hit.size === st.size && hit.mtime === st.mtimeMs && hit.v === USAGE_PARSE_V) return hit;
   let v;
   try { v = parse(fs.readFileSync(f, 'utf8')); } catch { v = { byCwd: {} }; }
-  return (cache.data[f] = { size: st.size, mtime: st.mtimeMs, ...v });
+  return (cache.data[f] = { size: st.size, mtime: st.mtimeMs, v: USAGE_PARSE_V, ...v });
 }
 const walkJsonl = (dir, out = []) => { let es = []; try { es = fs.readdirSync(dir, { withFileTypes: true }); } catch { return out; } for (const e of es) { const p = path.join(dir, e.name); if (e.isDirectory()) walkJsonl(p, out); else if (e.name.endsWith('.jsonl')) out.push(p); } return out; };
 const USAGE_SOURCES = {
@@ -3270,10 +3274,20 @@ const USAGE_SOURCES = {
     const slug = realOrSelf(mainRoot).replace(/[^a-zA-Z0-9]/g, '-');
     let dirs = [];
     try { dirs = fs.readdirSync(root).filter((d) => d === slug || d.startsWith(`${slug}--worktrees-`)); } catch { return []; }
-    // The folder is the checkout the session started in (a later cd doesn't move it).
+    // The folder is the checkout the session started in (a later cd doesn't move it). A subagent
+    // of the main checkout's session that was given one ticket's work (a reviewer: its task names
+    // the ticket) is charged to that ticket, in the phase its task names.
+    const ids = [...tickets().keys()];
     return dirs.flatMap((d) => walkJsonl(path.join(root, d)).map((f) => cachedParse(cache, f, (text) => {
       const byCwd = {};
-      const cwdOf = d === slug ? mainRoot : path.join(mainRoot, '.worktrees', d.slice(`${slug}--worktrees-`.length));
+      let cwdOf = d === slug ? mainRoot : path.join(mainRoot, '.worktrees', d.slice(`${slug}--worktrees-`.length));
+      if (d === slug && f.includes(`${path.sep}subagents${path.sep}`)) {
+        const task = subagentTask(text);
+        const named = ids.filter((id) => new RegExp(`(^|[^a-z0-9-])${id.replace(/[-]/g, '\\-')}(?![a-z0-9-])`).test(task));
+        const viaTree = /\.worktrees\/review-([a-z0-9]+-\d+)-/.exec(task)?.[1];
+        const tid = named.length === 1 ? named[0] : viaTree ? ids.find((id) => id.startsWith(`${viaTree}-`)) : null;
+        if (tid) cwdOf = `ticket:${tid}:${/final/i.test(task) ? 'final-review' : /\bplan\b/i.test(task) ? 'plan' : /\bspec\b/i.test(task) ? 'spec' : 'review'}`;
+      }
       const seen = new Set();
       for (const line of text.split('\n')) {
         if (!line.includes('"usage"')) continue;
@@ -3319,6 +3333,18 @@ const USAGE_SOURCES = {
     })).filter(Boolean);
   },
 };
+// A subagent transcript's task: the text of its first user message.
+function subagentTask(text) {
+  for (const line of text.split('\n')) {
+    if (!line.includes('"user"')) continue;
+    let o;
+    try { o = JSON.parse(line); } catch { continue; }
+    if (o.type !== 'user') continue;
+    const c = o.message?.content;
+    return typeof c === 'string' ? c : Array.isArray(c) ? c.map((x) => x?.text ?? '').join(' ') : '';
+  }
+  return '';
+}
 // usage_command (any other harness: OpenCode, a gateway's export…): runs from the main checkout and
 // prints one JSON object per line: {"at", "cwd", "model", "input_tokens", "output_tokens",
 // "cache_read_tokens", "cache_write_tokens", "usd" (optional, used as given)}.
@@ -3382,7 +3408,7 @@ function spendItems() {
   }
   for (const r of measuredSpend().recs) {
     if (r.at <= (through.get(r.who) ?? -Infinity)) continue;
-    items.push({ who: r.who, role: r.role, phase: phaseAtFor(r.role, r.who, r.at, phaseLines), at: r.at, usd: r.usd, input: r.input, output: r.output, cache_read: r.cache_read, cache_write: r.cache_write, by_model: { [r.model ?? 'unknown']: { usd: r.usd, output_tokens: r.output, ...(r.priced === false ? { unpriced_tokens: r.input + r.output + r.cache_read + r.cache_write } : {}) } }, logged: false });
+    items.push({ who: r.who, role: r.role, phase: r.phase ?? phaseAtFor(r.role, r.who, r.at, phaseLines), at: r.at, usd: r.usd, input: r.input, output: r.output, cache_read: r.cache_read, cache_write: r.cache_write, by_model: { [r.model ?? 'unknown']: { usd: r.usd, output_tokens: r.output, ...(r.priced === false ? { unpriced_tokens: r.input + r.output + r.cache_read + r.cache_write } : {}) } }, logged: false });
   }
   return (spendItemsMemo = items);
 }

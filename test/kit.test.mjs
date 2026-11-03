@@ -1269,6 +1269,8 @@ test('devteam kit', async (t) => {
     write(path.join(home, 'claude/projects', `${slug}--worktrees-bill-03-a`, 's1.jsonl'), [msg('m1', 'claude-opus-5-5', u1), msg('m1', 'claude-opus-5-5', u1), JSON.stringify({ type: 'user', message: { content: 'no usage here' } })].join('\n') + '\n');
     // a subagent of the supervisor, in the main checkout's folder; 1h cache writes cost 2x input
     write(path.join(home, 'claude/projects', slug, 's2', 'subagents', 'a.jsonl'), msg('m2', 'claude-sonnet-5-5', { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 1000000, cache_creation: { ephemeral_1h_input_tokens: 1000000 } }) + '\n');
+    // a reviewer the supervisor ran as its own subagent: its task names the ticket, so the ticket pays (final review)
+    write(path.join(home, 'claude/projects', slug, 's3', 'subagents', 'r.jsonl'), [JSON.stringify({ type: 'user', message: { content: 'You are final reviewer A for bill-03-a. Your default verdict is not approved.' } }), msg('m4', 'claude-opus-5-5', { input_tokens: 0, output_tokens: 1000 })].join('\n') + '\n');
     // another project's folder is never read
     write(path.join(home, 'claude/projects', `${slug}-other`, 's.jsonl'), msg('m3', 'claude-opus-5-5', { input_tokens: 9e9, output_tokens: 0 }) + '\n');
     // Codex: a session in the main checkout, a model the kit can't price; totals are cumulative
@@ -1284,28 +1286,29 @@ test('devteam kit', async (t) => {
     try {
       const m = json(must(['metrics', '--json']));
       assert.equal(m.cost.source, 'measured');
-      assert.equal(m.cost.by_model['claude-opus-5-5'].usd, 0.22, '1k in at $4 + 1k out at $20 + 1M cache reads at $0.20, counted once');
+      assert.equal(m.cost.by_model['claude-opus-5-5'].usd, 0.24, '1k in at $4 + 1k out at $20 + 1M cache reads at $0.20, counted once; plus the reviewer subagent');
       assert.equal(m.cost.by_model['claude-sonnet-5-5'].usd, 4, '1M one-hour cache writes at 2x $2');
-      assert.equal(m.cost.by_ticket['bill-03-a'], 0.22, "charged to the ticket whose worktree it ran in");
+      assert.equal(m.cost.by_ticket['bill-03-a'], 0.24, "charged to the ticket whose worktree it ran in, plus its reviewer subagent's $0.02");
       assert.equal(m.phase_usd.blocked, 0.22, 'and to the phase the ticket was in then');
+      assert.equal(m.phase_usd['final-review'], 0.02, "the reviewer's to final review, not the supervisor");
       assert.equal(m.phase_usd.supervisor, 4, "the main checkout's sessions are the supervisor's");
-      assert.equal(m.cost.tokens.output, 1000 + 70);
+      assert.equal(m.cost.tokens.output, 1000 + 1000 + 70);
       assert.deepEqual(Object.keys(m.cost.unpriced_models), ['gpt-x']);
       assert.ok(m.findings.some((f) => f.kind === 'unpriced-model' && /gpt-x/.test(f.subject)), 'tokens with no price are said, not dropped');
-      assert.equal(json(must(['dashboard-data'])).tickets.find((x) => x.id === 'bill-03-a').usd, 0.224);
+      assert.equal(json(must(['dashboard-data'])).tickets.find((x) => x.id === 'bill-03-a').usd, 0.244);
       assert.ok(fs.existsSync(path.join(repo, 'docs/devteam/run/cache/usage.json')), 'parsed files are cached');
-      assert.equal(json(must(['metrics', '--json'])).cost.by_model['claude-opus-5-5'].usd, 0.22, 'the same from the cache');
+      assert.equal(json(must(['metrics', '--json'])).cost.by_model['claude-opus-5-5'].usd, 0.24, 'the same from the cache');
       // observe: the supervisor's tick records spend lines; again records nothing new
-      assert.match(must(['observe-metrics'], { role: 'sup' }), /recorded 2 spend line\(s\)/, 'one per agent and phase: bill-03-a (blocked), and the supervisor (its subagent and the codex session in the main checkout)');
+      assert.match(must(['observe-metrics'], { role: 'sup' }), /recorded 3 spend line\(s\)/, 'one per agent and phase: bill-03-a (blocked, and final-review from its reviewer), and the supervisor (its subagent and the codex session in the main checkout)');
       assert.match(must(['observe-spend'], { role: 'sup' }), /recorded 0 spend line/);
       const lines = json(must(['log', '--type', 'spend', '--json']));
       assert.ok(lines.every((l) => l.created_by === 'supervisor' && l.through), 'written by the supervisor, each with how far it counted');
-      assert.equal(lines.find((l) => l.who === 'bill-03-a').phase, 'blocked');
+      assert.deepEqual(lines.filter((l) => l.who === 'bill-03-a').map((l) => l.phase).sort(), ['blocked', 'final-review']);
       assert.match(dt(['observe-spend'], { role: 'planner' }).err, /the supervisor does this/, 'a worker or planner never writes spend');
       // durable: with the harness logs gone, spend is the log's
       fs.rmSync(home, { recursive: true, force: true });
       const m2 = json(must(['metrics', '--json']));
-      assert.equal(m2.cost.by_ticket['bill-03-a'], 0.22, 'spend survives the harness cleaning up its logs');
+      assert.equal(m2.cost.by_ticket['bill-03-a'], 0.24, 'spend survives the harness cleaning up its logs');
       assert.equal(m2.cost.by_model['claude-sonnet-5-5'].usd, 4);
       assert.deepEqual(Object.keys(m2.cost.unpriced_models), ['gpt-x'], 'unpriced tokens are kept on the line too');
     } finally {
