@@ -62,10 +62,14 @@ The fleet stops cleanly and picks up elsewhere: every session pushes its work an
 
 ```
 DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs drain --reason "moving to a new laptop"
-DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs drain --status    # until "ready to move: yes"
-DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs log-sync          # then land the log:
+# once every session is parked: its own handoff, project/handoffs/supervisor.md, landed as chore drain-handoff
+DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs drain --status    # what's left; repeat until "ready to move: yes"
+DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs observe-spend     # then land the log:
+DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs log-sync
 DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs merge --chore log
 ```
+
+Anything needed for 1:1 parity is checked in and portable; only secrets travel by hand. So `drain --status` also blocks on files left in `run/`, worktrees with unpushed work, the owner's unfinished review drafts, and agent memory outside the repo that isn't folded into knowledge or the supervisor's handoff. When it's ready it prints a parity fingerprint of the log; `undrain` on the new machine prints its own, and they match.
 
 `drain --status` ends with the new machine's checklist, generated from the settings: which `worktree_files` and secret keys to copy, which logins, which tools.
 

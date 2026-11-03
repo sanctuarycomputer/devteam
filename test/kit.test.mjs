@@ -1995,6 +1995,14 @@ test('devteam kit', async (t) => {
     assert.equal(sha(fs.readFileSync(dest)), ownerSha, "the copy is the owner's bytes");
     assert.match(must(['review', 'result', Qp, '--commit'], { role: 'sup', cwd: cw }), /is already the owner's result/);
     commitAll(cw, "the owner's result");
+    // a clone elsewhere (a moved fleet) has no run/questions: the committed copy shows and verifies the same answer
+    git(['push', '-q', 'origin', 'chore-perm'], cw);
+    const keep = fs.readFileSync(runFile);
+    fs.rmSync(runFile);
+    assert.equal(json(must(['questions', '--id', Qp, '--json']))[0].result_status, 'verified', 'the permanent copy verifies without run/questions');
+    fs.writeFileSync(runFile, keep);
+    git(['push', '-q', 'origin', '--delete', 'chore-perm'], cw);
+    git(['update-ref', '-d', 'refs/remotes/origin/chore-perm']);
     must(['check-pr', '--head-ref', 'chore-perm', '--sha', git(['rev-parse', 'HEAD'], cw), '--title', 'chore-perm: review pages', '--body-file', body], { role: 'sup', cwd: cw });
     // one byte changed: refused, with both hashes
     const landedText = fs.readFileSync(dest, 'utf8');
@@ -2181,10 +2189,42 @@ test('drain: the fleet stops cleanly, and a clone elsewhere picks it up', () => 
     g(['add', '-A', 'docs/devteam/project/log'], old);
     g(['commit', '-qm', 'chore-log: log through now'], old);
     g(['push', '-q', 'origin', 'main'], old);
+    // everything else that is only here blocks: no supervisor handoff, a loose run/ file, a worktree with unpushed work
+    st = json(ok(old, ['drain', '--status', '--json'], SUP));
+    assert.ok(st.blockers.some((b) => /no docs\/devteam\/project\/handoffs\/supervisor\.md on main/.test(b)), 'the supervisor writes a handoff too');
+    write(path.join(old, 'docs/devteam/run/research-notes.md'), 'notes\n');
+    const cw = path.join(old, '.worktrees', 'chore-notes');
+    g(['worktree', 'add', '-q', '-b', 'chore-notes', cw, 'origin/main'], old);
+    write(path.join(cw, 'notes.txt'), 'x\n');
+    g(['add', '-A'], cw);
+    g(['commit', '-qm', 'notes'], cw);
+    st = json(ok(old, ['drain', '--status', '--json'], SUP));
+    assert.ok(st.blockers.some((b) => /files in run\/ the kit didn't make, which don't move: research-notes\.md/.test(b)));
+    assert.ok(st.blockers.some((b) => /worktrees holding work that isn't on the remote: chore-notes \(1 commit\(s\) on no remote\)/.test(b)));
+    fs.rmSync(path.join(old, 'docs/devteam/run/research-notes.md'));
+    g(['worktree', 'remove', '--force', cw], old);
+    g(['branch', '-q', '-D', 'chore-notes'], old);
+    // the supervisor's handoff lands on main (as chore drain-handoff would put it there)
+    write(path.join(old, 'docs/devteam/project/handoffs/supervisor.md'), '# Supervisor handoff\n\nWaiting on: nothing. Next: restart ch-01-tidy.\n');
+    g(['add', '-A', 'docs/devteam/project/handoffs'], old);
+    g(['commit', '-qm', 'chore-drain-handoff'], old);
+    g(['push', '-q', 'origin', 'main'], old);
+    // agent memory outside the repo that changed after the handoff blocks; folded in before it, it doesn't
+    const mem = path.join(home, 'claude', 'projects', fs.realpathSync(old).replace(/[^a-zA-Z0-9]/g, '-'), 'memory');
+    write(path.join(mem, 'rule.md'), 'the owner said X\n');
+    const later = new Date(Date.now() + 120000);
+    fs.utimesSync(path.join(mem, 'rule.md'), later, later);
+    st = json(ok(old, ['drain', '--status', '--json'], SUP));
+    assert.ok(st.blockers.some((b) => /agent memory outside the repo changed after the supervisor's handoff landed \(rule\.md\)/.test(b)));
+    const earlier = new Date(Date.now() - 3600000);
+    fs.utimesSync(path.join(mem, 'rule.md'), earlier, earlier);
     st = json(ok(old, ['drain', '--status', '--json'], SUP));
     assert.deepEqual(st.blockers, []);
     assert.equal(st.ready, true);
-    assert.match(ok(old, ['drain', '--status'], SUP), /ready to move: yes/);
+    assert.ok(st.checklist.some((c) => /Notify me of new Inbox items/.test(c)));
+    const oldStatus = ok(old, ['drain', '--status'], SUP);
+    assert.match(oldStatus, /ready to move: yes\nparity: [0-9a-f]{16} \(\d+ log entries\)/);
+    const oldParity = /parity: ([0-9a-f]{16})/.exec(oldStatus)[1];
 
     // the new machine: a clone with no run/, no worktrees, no harness sessions
     g(['clone', '-q', org, neu], base);
@@ -2193,6 +2233,8 @@ test('drain: the fleet stops cleanly, and a clone elsewhere picks it up', () => 
     assert.match(ok(neu, ['prompt', 'supervisor']), /^The fleet is drained .*This looks like the machine it moved to\. Before anything else: \(1\) DEVTEAM_ROLE=supervisor node docs\/devteam\/scripts\/devteam\.mjs undrain/, 'the standard prompt sees the drain, and that this is a fresh clone');
     const up = ok(neu, ['undrain'], SUP);
     assert.match(up, /run\/log was empty: rebuilt \d+ file\(s\)/);
+    assert.equal(/parity: ([0-9a-f]{16})/.exec(up)?.[1], oldParity, 'the new machine holds exactly the log the old one did');
+    assert.match(up, /## Handoff from the drained supervisor[\s\S]*Next: restart ch-01-tidy\./);
     assert.match(up, new RegExp(`undrained \\(a-[^)]+\\)[\\s\\S]*devteam\\.mjs worker ${ID} +parked; its handoff note goes into its prompt`));
     assert.ok(fs.readdirSync(path.join(neu, 'docs/devteam/run/log')).some((f) => /^supervisor-/.test(f)));
     assert.equal(json(ok(neu, ['drain', '--status', '--json', '--no-fetch'], SUP)).draining, null, 'the drain is lifted');
