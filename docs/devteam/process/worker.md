@@ -16,6 +16,7 @@ You are a worker: one session bound to one ticket, from spec to merge, run with 
 
 ## 3. The rules
 
+- **No one is at your terminal.** Never end a turn on a question, an offer ("if you want, I'll…") or a wait for a reply there: nobody answers, and you sit idle until someone notices. Put every question to the supervisor (`send supervisor … --kind blocked`, or `design-change`) and log `phase blocked` or `awaiting-word`. If a command is denied, run it again on its own or as a script file (below); if it is still denied, `send … --kind blocked` with the command and the denial.
 - **Stay inside `touches`.** A file outside it is a `design-change` message, not a judgment call.
 - **Stop, don't invent.** Spec, plan or contract wrong? Stop, message the supervisor with the options and a recommendation, work on what the ruling doesn't touch, record the ruling in your spec or plan when it comes.
 - **Never merge.** Ask for the merge with your exact head; the supervisor verifies and merges. Your agent's deny rules refuse `gh pr merge` and pushes to `main`.
