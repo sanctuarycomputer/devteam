@@ -916,6 +916,15 @@
               "type": "string"
             }
           },
+          "approves": {
+            "description": "The acts this question approves, named when asked (ask --approves): ticket ids, chore-<slug> or plan-<feature>. The answer approves each once and nothing else.",
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 10,
+            "items": {
+              "type": "string"
+            }
+          },
           "evidence": {
             "type": "array",
             "items": {

@@ -548,6 +548,18 @@ test('devteam kit', async (t) => {
     must(['repair', A, '--how', 'fix-ticket'], { role: 'sup' });
     assert.notEqual(dt(['correct', A, '--reason', 'again']).status, 0, 'one correction per act');
     assert.notEqual(dt(['act', '--class', 'gate-change', '--', 'drop a gate'], { role: 'sup' }).status, 0, 'owner-only classes refuse');
+    // one answer, several acts, only when the question named them when it was asked
+    assert.match(dt(['ask', '--question', 'x', '--class', 'gate-change', '--approves', 'bill-01-card'], { role: 'sup' }).err, /two or more acts/);
+    assert.match(dt(['ask', '--question', 'x', '--class', 'gate-change', '--approves', 'bill-01-card,nope nope'], { role: 'sup' }).err, /--approves nope nope: name a ticket id/);
+    assert.match(dt(['ask', '--kind', 'owner-action', '--question', 'x', '--approves', 'bill-01-card,chore-y'], { role: 'sup' }).err, /--approves belongs on an owner-decision/);
+    const Qp = must(['ask', '--question', 'Exclude generated files from dead-code, and raise bill-01-card\'s ceiling?', '--class', 'gate-change', '--recommendation', 'yes to both', '--approves', 'chore-dead-code-generated,bill-01-card'], { role: 'sup' });
+    assert.deepEqual(json(must(['questions', '--id', Qp, '--json']))[0].approves, ['chore-dead-code-generated', 'bill-01-card']);
+    must(['answer', Qp, 'yes to both']);
+    assert.match(dt(['act', '--class', 'gate-change', '--approved', Qp, '--', 'which?'], { role: 'sup' }).err, /approves chore-dead-code-generated, bill-01-card; name the one/);
+    must(['act', '--class', 'gate-change', '--approved', Qp, '--refs', 'chore-dead-code-generated', '--', 'excluded generated files'], { role: 'sup' });
+    assert.match(dt(['act', '--class', 'gate-change', '--approved', Qp, '--refs', 'chore-dead-code-generated', '--', 'again'], { role: 'sup' }).err, /already approved an act for chore-dead-code-generated/, 'each part once');
+    must(['act', '--class', 'gate-change', '--approved', Qp, '--refs', 'bill-01-card', '--', 'raised the ceiling'], { role: 'sup' });
+    assert.match(dt(['act', '--class', 'gate-change', '--approved', Qp, '--refs', 'bill-02-x', '--', 'and this'], { role: 'sup' }).err, /name the one this act is for/, 'nothing it did not name');
     // production releases are on the ladder: asked at rung 1, released and reported once the owner moves it to 3
     assert.equal(dt(['act', '--class', 'release-production', '--', 'tag v1'], { role: 'sup' }).status, 3, 'rung 1: ask first');
     const Qr = must(['ask', '--class', 'release-production', '--reasons', 'below-rung', '--question', 'Ship v1 to production?', '--recommendation', 'yes'], { role: 'sup' });
@@ -1407,6 +1419,7 @@ test('devteam kit', async (t) => {
     fs.appendFileSync(path.join(repo, 'docs/devteam/run/log/bill-03-a.jsonl'), line({ id: `h-${stamp.slice(0, 8)}-${stamp.slice(8)}-bill-03-a`, type: 'phase', op: 'new', at: at.toISOString(), by: 'bill-03-a', to: 'blocked' }));
     const kinds = () => json(must(['metrics', '--json'])).findings.filter((f) => f.subject === 'bill-03-a').map((f) => f.kind);
     assert.ok(kinds().includes('blocked'), 'blocked for 2h on nobody in particular');
+    assert.match(json(must(['metrics', '--json'])).findings.find((f) => f.subject === 'bill-03-a' && f.kind === 'blocked').suggestion, /a question put only in your chat never reaches the Inbox/, 'and if it waits on the owner, the question was never asked');
     const Qo = must(['ask', '--ticket', 'bill-03-a', '--question', 'Which shared module name?', '--recommendation', 'billing-shared'], sup);
     assert.deepEqual(kinds().filter((k) => k.startsWith('blocked')), ['blocked-on-owner'], "waiting on the owner's answer: say which question, don't tell the supervisor to act");
     assert.match(json(must(['metrics', '--json'])).findings.find((f) => f.kind === 'blocked-on-owner').detail, new RegExp(Qo));
