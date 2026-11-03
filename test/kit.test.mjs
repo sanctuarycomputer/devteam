@@ -395,6 +395,35 @@ test('devteam kit', async (t) => {
     git(['commit', '-q', '--amend', '-a', '--no-edit'], wt('bill-01-card'));
     assert.match(dt(['check-ticket', 'bill-01-card', '--sha', git(['rev-parse', 'HEAD'], wt('bill-01-card')), ...pr]).out, /does not hold|not at this head|review again|no final review/i, 'a merge that changes the work needs a new review');
     git(['reset', '-q', '--hard', H2], wt('bill-01-card'));
+    // main and the work change one file in different places: a clean merge still keeps the verdict,
+    // though the three-dot diff's text moved; a hand edit in that merge voids it
+    const onMain = (fn, msg) => {
+      git(['worktree', 'add', '-q', '--detach', wt('main-moves'), 'origin/main']);
+      fn(wt('main-moves'));
+      git(['add', '-A'], wt('main-moves'));
+      git(['commit', '-qm', msg], wt('main-moves'));
+      git(['push', '-q', 'origin', 'HEAD:main'], wt('main-moves'));
+      git(['worktree', 'remove', '--force', wt('main-moves')]);
+      git(['fetch', '-q', 'origin']);
+      git(['merge', '-q', '--ff-only', 'origin/main']);
+      git(['fetch', '-q', 'origin'], wt('bill-01-card'));
+    };
+    const lines = Array.from({ length: 12 }, (_, i) => `line ${i + 1}`);
+    onMain((w) => write(path.join(w, 'billing/shared.md'), `${lines.join('\n')}\n`), 'shared file on main');
+    git(['merge', '-q', '--no-edit', 'origin/main'], wt('bill-01-card'));
+    write(path.join(wt('bill-01-card'), 'billing/shared.md'), `${lines.map((l, i) => (i === 1 ? 'line 2, the ticket\'s' : l)).join('\n')}\n`);
+    git(['commit', '-qam', 'the work touches the shared file'], wt('bill-01-card'));
+    const V = git(['rev-parse', 'HEAD'], wt('bill-01-card'));
+    write(path.join(tdir, 'reviews/final-3.md'), review('reviewer-b', V));
+    git(['add', '-A'], wt('bill-01-card'));
+    git(['commit', '-qm', 'review 3'], wt('bill-01-card'));
+    onMain((w) => { const f = path.join(w, 'billing/shared.md'); write(f, fs.readFileSync(f, 'utf8').replace('line 9', "line 9, main's")); }, 'main edits the shared file elsewhere');
+    git(['merge', '-q', '--no-edit', 'origin/main'], wt('bill-01-card'));
+    must(['check-ticket', 'bill-01-card', '--sha', git(['rev-parse', 'HEAD'], wt('bill-01-card')), ...pr]);
+    fs.appendFileSync(path.join(wt('bill-01-card'), 'billing/shared.md'), 'slipped in during the merge\n');
+    git(['commit', '-q', '--amend', '-a', '--no-edit'], wt('bill-01-card'));
+    assert.match(dt(['check-ticket', 'bill-01-card', '--sha', git(['rev-parse', 'HEAD'], wt('bill-01-card')), ...pr]).out, /does not hold/, 'a hand edit inside the merge voids it');
+    git(['reset', '-q', '--hard', H2], wt('bill-01-card'));
     // a rename out of the footprint is a change outside touches
     git(['mv', 'AGENTS.md', 'billing/agents.md'], wt('bill-01-card'));
     git(['commit', '-qm', 'move'], wt('bill-01-card'));
@@ -636,6 +665,31 @@ test('devteam kit', async (t) => {
     assert.match(dt(['chore', 'pr', '../escape', '--title', 't'], { role: 'sup' }).err, /chore slug/, 'chore pr checks the slug too');
     assert.match(dt(['merge', '--chore', '../escape', '--dry-run'], { role: 'sup' }).err, /chore slug/, 'merge --chore checks the slug too');
     must(['check-pr', '--head-ref', 'chore-log', '--sha', shaL, '--title', 'chore-log: sync', '--body-file', body], { role: 'sup' });
+    // a planner's monthly file is its own stream: lines older than its plan file's (landed later by
+    // the plan PR) are in order
+    const stamp = (ms) => { const d = new Date(Date.now() - ms); return { at: d.toISOString(), id: d.toISOString().replace(/[-:T]/g, '').replace('.', '').slice(0, 17) }; };
+    const older = stamp(2 * 3600000), newer = stamp(3600000);
+    const msgLine = (s, by) => line({ id: `m-${s.id.slice(0, 8)}-${s.id.slice(8)}-${by}`, type: 'message', op: 'new', at: s.at, by, to: 'supervisor', kind: 'info', text: 'x' });
+    const onMainZ = (fn, msg) => {
+      git(['worktree', 'add', '-q', '--detach', wt('zeta-main'), 'origin/main']);
+      fn(wt('zeta-main'));
+      git(['add', '-A'], wt('zeta-main'));
+      git(['commit', '-qm', msg], wt('zeta-main'));
+      git(['push', '-q', 'origin', 'HEAD:main'], wt('zeta-main'));
+      git(['worktree', 'remove', '--force', wt('zeta-main')]);
+    };
+    onMainZ((w) => write(path.join(w, 'docs/devteam/project/log/plan-zeta.jsonl'), msgLine(newer, 'plan-zeta')), 'plan-zeta lands');
+    git(['fetch', '-q', 'origin'], wt('chore-log'));
+    git(['merge', '-q', '--no-edit', 'origin/main'], wt('chore-log'));
+    const zetaMonthly = `docs/devteam/project/log/plan-zeta-${older.at.slice(0, 7)}.jsonl`;
+    write(path.join(wt('chore-log'), zetaMonthly), msgLine(older, 'plan-zeta'));
+    git(['add', zetaMonthly], wt('chore-log'));
+    git(['commit', '-qm', 'sync the planner monthly file'], wt('chore-log'));
+    must(['check-pr', '--head-ref', 'chore-log', '--sha', git(['rev-parse', 'HEAD'], wt('chore-log')), '--title', 'chore-log: sync', '--body-file', body], { role: 'sup' });
+    git(['reset', '-q', '--hard', shaL], wt('chore-log'));
+    onMainZ((w) => fs.rmSync(path.join(w, 'docs/devteam/project/log/plan-zeta.jsonl')), 'test cleanup: plan-zeta');
+    git(['fetch', '-q', 'origin']);
+    git(['merge', '-q', '--ff-only', 'origin/main']);
     write(path.join(wt('chore-log'), 'docs/devteam/governance/constitution.md'), '# nothing\n');
     git(['commit', '-qam', 'kit edit'], wt('chore-log'));
     assert.match(dt(['check-pr', '--head-ref', 'chore-log', '--sha', git(['rev-parse', 'HEAD'], wt('chore-log')), '--title', 'chore-log: sync', '--body-file', body], { role: 'sup' }).out, /chore-log changes only project\/log/);
