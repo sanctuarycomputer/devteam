@@ -7,6 +7,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 
 const kit = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'docs', 'devteam');
@@ -1632,5 +1633,218 @@ test('devteam kit', async (t) => {
     assert.match(dt(['answer', Qm, '--review-result', '-'], { input: JSON.stringify({ v: 1, question: Qm, review_sha256: sha(PAGE.replace('Items', 'Entries')) }) }).err, /is gone or on no branch/);
     must(['withdraw', Qm, '--reason', 'test'], { role: 'sup' });
     assert.ok(!json(must(['metrics', '--json'])).findings.some((f) => f.kind === 'review-file-missing'), 'a withdrawn review raises nothing');
+  });
+
+  await t.test('review questions on the dashboard: the page in a sandboxed frame, the answer from the owner\'s own panel', async () => {
+    const sha = (b) => crypto.createHash('sha256').update(b).digest('hex');
+    const fx = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'review');
+    const PAGE = fs.readFileSync(path.join(fx, 'page.html'));
+    const DATA = fs.readFileSync(path.join(fx, 'data.json'));
+    const D = JSON.parse(DATA);
+    assert.match(must(['review', 'check', path.join(fx, 'page.html'), '--data', path.join(fx, 'data.json')]), /^ok: .*\(6 rows, 5 with a proposal\)/m, 'the example page passes the static checks');
+    const rw = wt('review-dash');
+    git(['worktree', 'add', '-q', '-b', 'review-dash', rw, 'origin/main']);
+    const rel = 'docs/devteam/project/questions/dash';
+    write(path.join(rw, rel, 'page.html'), PAGE);
+    write(path.join(rw, rel, 'data.json'), DATA);
+    git(['add', '-A'], rw);
+    git(['commit', '-qm', 'a review page'], rw);
+    const ask = (q) => must(['ask', '--kind', 'review', '--question', q, '--ref', 'review-dash', '--page', `${rel}/page.html`, '--data', `${rel}/data.json`], { role: 'sup' });
+    const Qa = ask('Which items belong to each group?');
+    const Qd = ask('Which items belong to each group, again?');
+    // a page on a branch that goes away
+    git(['checkout', '-q', '-b', 'review-dash-gone'], rw);
+    write(path.join(rw, rel, 'page.html'), String(PAGE).replace('Match items', 'Match things'));
+    git(['commit', '-qam', 'a page on a branch about to go'], rw);
+    const Qg = must(['ask', '--kind', 'review', '--question', 'Gone?', '--ref', 'review-dash-gone', '--page', `${rel}/page.html`], { role: 'sup' });
+    git(['checkout', '-q', 'review-dash'], rw);
+    git(['branch', '-q', '-D', 'review-dash-gone']);
+    // a question whose page no longer hashes to its line (a hand-edited line, as tampering would leave)
+    const supFile = path.join(repo, 'docs/devteam/run/log', fs.readdirSync(path.join(repo, 'docs/devteam/run/log')).filter((f) => f.startsWith('supervisor-')).sort().pop());
+    const askLine = JSON.parse(fs.readFileSync(supFile, 'utf8').split('\n').find((l) => l.includes(`"id":"${Qa}"`)));
+    // (dated before the secrets test's 2099 line, so no id the kit mints afterwards can be this one)
+    const Qt = 'q-20991231-235958000-supervisor';
+    fs.appendFileSync(supFile, line({ ...askLine, id: Qt, at: '2099-12-31T23:59:58.000Z', review: { ...askLine.review, page: { ...askLine.review.page, sha256: sha('another page') } } }));
+    const view = (id) => json(must(['questions', '--id', id, '--json']))[0];
+
+    const port = 4900 + Math.floor(Math.random() * 500);
+    const B = `http://127.0.0.1:${port}`;
+    const srv = spawn(process.execPath, [DT, 'dashboard', '--port', String(port)], { cwd: repo, env: { ...process.env, DEVTEAM_ROLE: '' }, stdio: 'ignore' });
+    try {
+      for (let i = 0; i < 50; i++) { try { await fetch(`${B}/`); break; } catch { await new Promise((r) => setTimeout(r, 100)); } }
+      // the page: its bytes verbatim, only into a frame of the dashboard, under a policy with no network
+      const frame = { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-origin' };
+      let r = await fetch(`${B}/review/${Qa}/`, { headers: frame });
+      assert.equal(r.status, 200);
+      assert.equal(sha(Buffer.from(await r.arrayBuffer())), sha(PAGE), 'the page, byte for byte');
+      const csp = r.headers.get('content-security-policy');
+      for (const d of ["default-src 'none'", "connect-src 'none'", 'sandbox allow-scripts', `frame-ancestors ${B}`, "form-action 'none'", "font-src 'none'", `script-src 'unsafe-inline' ${B}/review/`, `img-src data: blob: ${B}/api/file`]) assert.ok(csp.split('; ').includes(d), `the policy has ${d}: ${csp}`);
+      assert.doesNotMatch(csp, /https:|\*/, 'no outside origin, no wildcard');
+      assert.equal(r.headers.get('x-content-type-options'), 'nosniff');
+      assert.equal(r.headers.get('cache-control'), 'no-store');
+      assert.equal((await fetch(`${B}/review/${Qa}/`)).status, 403, 'opened top-level, without sec-fetch-dest: iframe, it is refused');
+      assert.equal((await fetch(`${B}/review/${Qa}/`, { headers: { ...frame, 'sec-fetch-dest': 'document' } })).status, 403);
+      assert.equal((await fetch(`${B}/review/${Qa}/`, { headers: { ...frame, 'sec-fetch-site': 'cross-site' } })).status, 403, 'framed by another site, it is refused');
+      assert.equal((await fetch(`${B}/review/${Qg}/`, { headers: frame })).status, 404, 'the pinned commit is gone');
+      r = await fetch(`${B}/review/${Qt}/`, { headers: frame });
+      assert.equal(r.status, 403, `the page does not hash to its question: ${await r.clone().text()}`);
+      assert.equal((await fetch(`${B}/review/q-20200101-000000000-supervisor/`, { headers: frame })).status, 404, 'no such question');
+      // under a question's path the server serves the kit's two helper files, and nothing else
+      r = await fetch(`${B}/review/${Qa}/devteam-ui.js`);
+      assert.equal(r.status, 200);
+      assert.match(r.headers.get('content-type'), /^text\/javascript/);
+      assert.equal(await r.text(), fs.readFileSync(path.join(kit, 'dashboard/devteam-ui.js'), 'utf8'));
+      r = await fetch(`${B}/review/${Qa}/devteam-ui.css`);
+      assert.equal(r.status, 200);
+      assert.match(r.headers.get('content-type'), /^text\/css/);
+      for (const other of ['other.js', 'data.json', 'page.html', 'index.html', 'devteam-ui.js/x']) assert.equal((await fetch(`${B}/review/${Qa}/${other}`, { headers: frame })).status, 404, other);
+      // a committed page previewed before anyone asks: same frame rules, no question
+      const pv = new URLSearchParams({ path: `${rel}/page.html`, ref: 'review-dash' });
+      r = await fetch(`${B}/review/preview/?${pv}`, { headers: frame });
+      assert.equal(r.status, 200);
+      assert.equal(sha(Buffer.from(await r.arrayBuffer())), sha(PAGE));
+      assert.match(r.headers.get('content-security-policy'), /connect-src 'none'.*sandbox allow-scripts/);
+      assert.equal((await fetch(`${B}/review/preview/?${pv}`)).status, 403);
+      assert.equal((await fetch(`${B}/review/preview/?path=../x.html&ref=review-dash`, { headers: frame })).status, 400);
+      assert.equal((await fetch(`${B}/review/preview/?${new URLSearchParams({ path: `${rel}/data.json`, ref: 'review-dash' })}`, { headers: frame })).status, 400, 'only a page');
+      assert.equal((await fetch(`${B}/`)).headers.get('content-security-policy'), "frame-src 'self'", "the dashboard's frames stay on the dashboard, even when a frame navigates itself");
+
+      // what the review view loads
+      r = await fetch(`${B}/api/review?id=${Qa}`);
+      let info = await r.json();
+      assert.equal(r.status, 200);
+      assert.deepEqual([info.status, info.result_status, info.draft, info.result_doc, info.question], ['open', 'verified', null, null, 'Which items belong to each group?']);
+      assert.deepEqual(info.data, D, 'the data, from the pinned commit');
+      assert.equal((await fetch(`${B}/api/review?id=not-a-qid`)).status, 400);
+      assert.equal((await fetch(`${B}/api/review?id=q-20200101-000000000-supervisor`)).status, 404);
+      assert.equal((await (await fetch(`${B}/api/review?id=${Qt}`)).json()).result_status, 'tampered');
+
+      // the owner's actions: browser headers required; a sandboxed frame's (Origin: null) refused
+      const browser = { 'content-type': 'application/json', 'sec-fetch-site': 'same-origin', origin: B };
+      const postJ = (what, b, headers = browser) => fetch(`${B}/api/${what}`, { method: 'POST', headers, body: typeof b === 'string' ? b : JSON.stringify(b) });
+      const rows = D.rows.map((x) => ({ id: x.id, decided: true, values: x.proposal ?? {} }));
+      const result = { v: 1, question: Qa, review_sha256: sha(PAGE), data_sha256: sha(DATA), rows };
+      const answerBody = (res) => ({ id: Qa, result: res, sha256: sha(JSON.stringify(res)) });
+      const draftBody = { id: Qa, state: { rows: { g1: { decided: true, values: { items: ['a', 'b'] } } } }, saved_at: '2026-11-03T10:00:00.000Z' };
+      for (const [w, b] of [['review-answer', answerBody(result)], ['review-draft', draftBody]]) {
+        assert.equal((await postJ(w, b, { 'content-type': 'application/json' })).status, 403, `${w} without browser headers`);
+        assert.equal((await postJ(w, b, { ...browser, origin: 'null', 'sec-fetch-site': 'cross-site' })).status, 403, `${w} from a sandboxed frame`);
+        assert.equal((await postJ(w, b, { ...browser, origin: 'null' })).status, 403, `${w} with origin null`);
+        assert.equal((await postJ(w, b, { 'content-type': 'application/json', origin: B })).status, 403, `${w} without sec-fetch-site`);
+        for (let i = 0; i < 2; i++) {
+          r = await postJ(w, JSON.stringify({ id: Qa, state: 'x'.repeat(5 * 1024 * 1024), result: {} }));
+          assert.equal(r.status, 400, `${w}: a 5 MB body`);
+          assert.match((await r.json()).error, /at most 4194304 \(4 MB\)/);
+        }
+      }
+      assert.equal((await fetch(`${B}/api/review?id=${Qa}`)).status, 200, 'the server carries on');
+      assert.equal(view(Qa).status, 'open', 'nothing refused was recorded');
+
+      // a draft: saved on disk for the owner, never a log line, gone when the answer lands
+      const logLines = () => fs.readdirSync(path.join(repo, 'docs/devteam/run/log')).reduce((n, f) => n + fs.readFileSync(path.join(repo, 'docs/devteam/run/log', f), 'utf8').split('\n').filter(Boolean).length, 0);
+      const before = logLines();
+      r = await postJ('review-draft', draftBody);
+      assert.equal(r.status, 200, await r.clone().text());
+      const draftFile = path.join(repo, 'docs/devteam/run/questions', Qa, 'draft.json');
+      assert.deepEqual(JSON.parse(fs.readFileSync(draftFile, 'utf8')), { state: draftBody.state, saved_at: draftBody.saved_at });
+      assert.equal(logLines(), before, 'a draft adds no log line');
+      info = await (await fetch(`${B}/api/review?id=${Qa}`)).json();
+      assert.deepEqual([info.draft.state, info.draft.saved_at], [draftBody.state, draftBody.saved_at], 'the view gets the draft back');
+
+      // the answer: exactly the result the preview hashed, validated by the owner's own process
+      r = await postJ('review-answer', { ...answerBody(result), sha256: sha('what the preview showed') });
+      assert.equal(r.status, 400);
+      assert.match((await r.json()).error, /not the one the preview showed/);
+      assert.equal((await postJ('review-answer', { id: Qa, result })).status, 400, 'no hash, no answer');
+      r = await postJ('review-answer', answerBody({ ...result, rows: rows.slice(1) }));
+      assert.equal(r.status, 400);
+      assert.match((await r.json()).error, /1 row\(s\) of .* are not in the result \(g1\)/, 'an undecided row, on a question asked without --allow-partial');
+      assert.equal(view(Qa).status, 'open');
+      r = await postJ('review-answer', answerBody(result));
+      assert.equal(r.status, 200, await r.clone().text());
+      assert.match((await r.json()).out, /^answered .*: Reviewed 6 rows: 5 kept, 0 changed, 1 set to none, 0 undecided/);
+      const q = view(Qa);
+      assert.deepEqual([q.status, q.channel, q.result_status], ['answered', 'dashboard', 'verified'], "the owner's line says it came from the dashboard");
+      const stored = JSON.parse(fs.readFileSync(path.join(repo, 'docs/devteam/run/questions', Qa, 'result.json'), 'utf8'));
+      assert.deepEqual([stored.channel, stored.rows.length], ['dashboard', 6]);
+      assert.ok(!fs.existsSync(draftFile), 'the draft is gone once answered');
+      r = await postJ('review-answer', answerBody(result));
+      assert.equal(r.status, 400);
+      assert.match((await r.json()).error, /already answered/, 'a second answer is refused');
+      assert.equal((await postJ('review-draft', draftBody)).status, 400, 'and so is a draft for an answered review');
+      // read-only replay: the stored result, and as TSV for the owner's own use
+      info = await (await fetch(`${B}/api/review?id=${Qa}`)).json();
+      assert.deepEqual([info.status, info.result_doc?.rows?.length, info.result.sha256], ['answered', 6, q.result.sha256]);
+      r = await fetch(`${B}/api/review?id=${Qa}&format=tsv`);
+      assert.equal(r.status, 200);
+      assert.match(await r.text(), /^g1\ttrue\ttrue\ta,b\t$/m);
+
+      // Send it back: the owner's reason, through the existing answer action
+      assert.equal((await postJ('answer', { id: Qd, answer: 'Group the items by area first', decline: 'yes' })).status, 400);
+      r = await postJ('answer', { id: Qd, answer: 'Group the items by area first', decline: true });
+      assert.equal(r.status, 200, await r.clone().text());
+      const qd = view(Qd);
+      assert.deepEqual([qd.status, qd.declined, qd.answer, qd.channel, qd.result_status], ['answered', true, 'Sent back: Group the items by area first', 'dashboard', 'declined']);
+    } finally { srv.kill(); }
+    must(['withdraw', Qg, '--reason', 'test'], { role: 'sup' });
+    must(['withdraw', Qt, '--reason', 'test'], { role: 'sup' });
+
+    // the bridge listener, loaded from index.html by itself: only that frame, only an opaque
+    // origin, only the known messages, within the caps; nothing else gets through
+    const html = fs.readFileSync(path.join(kit, 'dashboard/index.html'), 'utf8');
+    const src = html.slice(html.indexOf('/* review-bridge start */'), html.indexOf('/* review-bridge end */'));
+    assert.ok(src.length > 200, 'the bridge block is marked in index.html');
+    const ctx = vm.createContext({});
+    vm.runInContext(src, ctx);
+    const frameWin = {};
+    const ev = (data, over = {}) => ({ source: frameWin, origin: 'null', data, ...over });
+    const accept = (e) => JSON.parse(JSON.stringify(ctx.bridgeAccept(e, frameWin)));
+    assert.deepEqual(accept(ev({ type: 'ready' })), { type: 'ready' });
+    assert.deepEqual(accept(ev({ type: 'progress', done: 3, total: 6 })), { type: 'progress', done: 3, total: 6 });
+    assert.deepEqual(accept(ev({ type: 'propose', result: { rows: [] }, answer: true, sha256: 'x' })), { type: 'propose', result: { rows: [] } }, 'only the fields its type allows');
+    assert.deepEqual(accept(ev({ type: 'open', href: 'https://example.com/a?b=1' })), { type: 'open', href: 'https://example.com/a?b=1' });
+    assert.deepEqual(accept(ev({ type: 'open', path: 'docs/a.md', ref: 'main' })), { type: 'open', path: 'docs/a.md', ref: 'main' });
+    assert.deepEqual(accept(ev({ type: 'resize', height: 1e9 })), { type: 'resize', height: 100000 }, 'a height is clamped');
+    assert.deepEqual(accept(ev({ type: 'markdown', id: 1, text: '**hi**' })), { type: 'markdown', id: 1, text: '**hi**' });
+    const dropped = [
+      [ev({ type: 'ready' }, { source: {} }), 'source', 'another window'],
+      [ev({ type: 'ready' }, { source: null }), 'source', 'no window'],
+      [ev({ type: 'ready' }, { origin: B }), 'origin', "the dashboard's own origin: not a sandboxed frame"],
+      [ev({ type: 'ready' }, { origin: 'https://example.com' }), 'origin', 'another origin'],
+      [ev({ type: 'answer', result: {} }), 'type', 'an unknown type'],
+      [ev({ type: 'submit' }), 'type', 'an unknown type'],
+      [ev({}), 'type', 'no type'],
+      [ev('ready'), 'shape', 'not an object'],
+      [ev([{ type: 'ready' }]), 'shape', 'an array'],
+      [ev({ type: 'propose', result: { pad: 'x'.repeat(4 * 1024 * 1024) } }), 'size', 'an oversize proposal'],
+      [ev({ type: 'draft', state: 'x'.repeat(4 * 1024 * 1024 + 1) }), 'size', 'an oversize draft'],
+      [ev({ type: 'markdown', id: 1, text: 'x'.repeat(64 * 1024 + 1) }), 'size', 'oversize markdown'],
+      [ev({ type: 'propose', result: [1] }), 'fields', 'a result that is not an object'],
+      [ev({ type: 'draft' }), 'fields', 'a draft with no state'],
+      [ev({ type: 'progress', done: 7, total: 6 }), 'fields', 'more done than there are'],
+      [ev({ type: 'progress', done: 'all', total: 6 }), 'fields', 'not a number'],
+      [ev({ type: 'open', href: 'http://example.com/' }), 'href', 'plain http'],
+      [ev({ type: 'open', href: 'javascript:alert(1)' }), 'href', 'a script URL'],
+      [ev({ type: 'open', href: 'https://user@example.com/' }), 'href', 'credentials in the URL'],
+      [ev({ type: 'open', path: '../etc/passwd' }), 'path', 'a path out of the repo'],
+      [ev({ type: 'open', path: '/etc/passwd' }), 'path', 'an absolute path'],
+      [ev({ type: 'resize', height: Infinity }), 'fields', 'not a finite height'],
+    ];
+    for (const [e, why, msg] of dropped) assert.equal(accept(e).drop, why, msg);
+    // the hash the panel shows when the page isn't a secure context is the owner's process's hash
+    for (const n of [0, 3, 55, 56, 63, 64, 65, 1000]) {
+      const bytes = crypto.randomBytes(n);
+      assert.equal(ctx.sha256Js(new Uint8Array(bytes)), sha(bytes), `sha256 of ${n} bytes`);
+    }
+
+    // the helper files: the dashboard's tokens verbatim (dark mode too), and a script that loads nothing
+    const tokens = (s) => s.slice(s.indexOf('/* devteam-ui tokens start */'), s.indexOf('/* devteam-ui tokens end */'));
+    const css = fs.readFileSync(path.join(kit, 'dashboard/devteam-ui.css'), 'utf8');
+    assert.match(tokens(html), /prefers-color-scheme: dark/);
+    assert.equal(tokens(css), tokens(html), 'devteam-ui.css repeats the dashboard tokens');
+    assert.doesNotMatch(css, /@import|url\(|@font-face/, 'the helper CSS loads nothing');
+    const uiJs = fs.readFileSync(path.join(kit, 'dashboard/devteam-ui.js'), 'utf8');
+    assert.doesNotMatch(uiJs, /\bimport\b|\bfetch\(|XMLHttpRequest|https?:\/\//, 'the helper script loads nothing');
+    assert.doesNotThrow(() => new vm.Script(uiJs));
   });
 });

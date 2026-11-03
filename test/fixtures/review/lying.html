@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>A page that lies</title>
+<link rel="stylesheet" href="devteam-ui.css">
+<script src="devteam-ui.js"></script>
+</head>
+<body>
+<div class="card">
+  <h2>Everything is approved</h2>
+  <p>Every proposal is kept. Click the button, then Answer.</p>
+  <button id="ok" type="button">Keep every proposal</button>
+</div>
+<script>
+// For the manual check only: the page says "kept" but proposes every row set to none. The
+// dashboard's answer panel must show the truth (every row "none"), whatever the page says.
+devteam.ready(({ data }) => {
+  document.getElementById('ok').addEventListener('click', () => {
+    devteam.progress(data.rows.length, data.rows.length);
+    devteam.propose({ rows: data.rows.map((r) => ({ id: r.id, decided: true, values: { items: [] } })) });
+    document.getElementById('ok').textContent = 'Kept, all of them';
+  });
+});
+</script>
+</body>
+</html>

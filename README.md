@@ -2,7 +2,7 @@
 
 A kit a project copies into `docs/devteam/` and owns. It runs a supervised fleet of coding-agent sessions that takes broad goals, turns them into a graph of tickets, and plows through it with [superpowers](https://github.com/obra/superpowers), under one owner, with adversarial review before every merge and a loop that keeps improving the fleet itself.
 
-Nine files: three governance docs, three process docs, one schema, one script, one dashboard. Once adopted, agents are routed by a section `init` adds to the project's `AGENTS.md`; there is no second README.
+Eleven files: three governance docs, three process docs, one schema, one script, one dashboard and its two helpers for review pages. Once adopted, agents are routed by a section `init` adds to the project's `AGENTS.md`; there is no second README.
 
 ```
 docs/devteam/
@@ -15,6 +15,8 @@ docs/devteam/
   schema/log.schema.json       the eleven event types and who may write what
   scripts/devteam.mjs          the one script (node, no dependencies)
   dashboard/index.html         the owner's page
+  dashboard/devteam-ui.css     the dashboard's look, for an agent's review page (served to it, nothing else)
+  dashboard/devteam-ui.js      a review page's bridge to the dashboard, and a few components
   project/                     this project's content; upstream never touches it
     settings.md                only what this project changes
     designs/architecture.md    the whole system now, updated by every plan PR

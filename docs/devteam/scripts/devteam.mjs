@@ -2250,6 +2250,17 @@ const reviewDir = (qid) => {
   if (!/^[a-z0-9-]+$/.test(qid)) die(`${qid} is not a question id`);
   return path.join(runDir, 'questions', qid);
 };
+// The policy a review page is served under, as a header (a document can't remove a header; markup
+// before a <meta> could). No network at all: the only loads are the kit's two helper files and
+// committed images through /api/file, all from the dashboard itself, so even those never leave the
+// machine. No CDN either: source matching ignores query strings, so any allowed outside origin
+// would carry bytes out in a URL. `sandbox allow-scripts` makes the origin opaque even if the page
+// is opened top-level, and frame-ancestors lets only the dashboard frame it.
+const reviewPageCsp = (origin) => [
+  "default-src 'none'", `script-src 'unsafe-inline' ${origin}/review/`, `style-src 'unsafe-inline' ${origin}/review/`, `img-src data: blob: ${origin}/api/file`,
+  "connect-src 'none'", "font-src 'none'", "media-src 'none'", "object-src 'none'", "frame-src 'none'", "worker-src 'none'", "manifest-src 'none'",
+  "form-action 'none'", "base-uri 'none'", `frame-ancestors ${origin}`, 'sandbox allow-scripts',
+].join('; ');
 const reviewResultFile = (qid) => path.join(reviewDir(qid), 'result.json');
 const reviewDraftFile = (qid) => path.join(reviewDir(qid), 'draft.json');
 
@@ -2585,7 +2596,23 @@ function cmdReview() {
     const df = reviewDraftFile(v.id);
     const st = fs.statSync(df, { throwIfNoEntry: false });
     const draft = st ? { path: df, bytes: st.size, saved_at: st.mtime.toISOString() } : null;
-    if (flags.json) return json({ id: v.id, status: v.status, result_status: v.result_status, review: v.review, files: pins.files, reachable: pins.reachable, result: v.result, declined: v.declined, answer: v.answer, result_file: v.result ? reviewResultFile(v.id) : null, draft });
+    const shown = { id: v.id, status: v.status, result_status: v.result_status, review: v.review, files: pins.files, reachable: pins.reachable, result: v.result, declined: v.declined, answer: v.answer, result_file: v.result ? reviewResultFile(v.id) : null, draft };
+    // --contents (what the dashboard's review view loads): the question's words, and the files
+    // themselves, each only when it verifies: the data at the pinned commit, the owner's draft, and
+    // the owner's stored result.
+    if (flags.json && flags.contents) {
+      const parsed = (buf) => { try { return buf === null ? null : JSON.parse(buf.toString('utf8')); } catch { return null; } };
+      const dataPin = pins.files.find((f) => f.role === 'data');
+      const draftDoc = draft ? parsed(Buffer.from(readText(df) ?? 'null')) : null;
+      return json({
+        ...shown, question: v.question, context: v.context, links: v.links, ticket: v.ticket, blocks: v.blocks, class: v.class, why_asked: v.why_asked,
+        asked_at: v.asked_at, asked_by: q.created_by, answered_at: v.answered_at, channel: v.channel,
+        data: dataPin?.status === 'verified' ? parsed(gitBlob(q.review.commit, dataPin.path)) : null,
+        draft: draft && draftDoc ? { saved_at: typeof draftDoc.saved_at === 'string' ? draftDoc.saved_at : draft.saved_at, bytes: draft.bytes, state: draftDoc.state ?? null } : null,
+        result_doc: v.result && v.result_status === 'verified' ? parsed(fs.readFileSync(reviewResultFile(v.id))) : null,
+      });
+    }
+    if (flags.json) return json(shown);
     out(`${v.id}  [review, ${v.status}]  ${v.result_status}\n  ${v.question}`);
     out(`  pinned at ${String(q.review.commit).slice(0, 12)} (${q.review.ref})${pins.reachable ? '' : ', which no branch or tag contains any more'}`);
     for (const f of pins.files) out(`  ${f.role.padEnd(13)} ${f.path}  ${f.sha256.slice(0, 12)}  ${f.bytes} bytes  ${f.status}${f.role === 'data' ? `  (${q.review.data.rows} rows, ${q.review.data.proposals} with a proposal)` : ''}`);
@@ -4351,11 +4378,14 @@ function cmdDashboard() {
   const run = (args) => new Promise((resolve) => execFile(process.execPath, [self, ...args], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: ownerEnv }, (err, stdout, stderr) => resolve({ ok: !err, stdout, stderr })));
   const ID = /^[a-z]-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
   const text = (x, max = 4000) => typeof x === 'string' && x.trim() && x.length <= max;
+  const autonomyArgs = (b) => ([1, 2, 3].includes(b.autonomy) ? ['--autonomy', String(b.autonomy), ...(text(b.scope, 100) ? ['--scope', b.scope.trim()] : [])] : []);
   const ACTIONS = {
     answer: (b) => {
       if (!ID.test(b.id ?? '') || !text(b.answer)) return null;
-      const args = ['answer', b.id, b.answer.trim()];
-      if ([1, 2, 3].includes(b.autonomy)) args.push('--autonomy', String(b.autonomy), ...(text(b.scope, 100) ? ['--scope', b.scope.trim()] : []));
+      if (b.decline !== undefined && b.decline !== true) return null;
+      const args = ['answer', b.id, b.answer.trim(), ...autonomyArgs(b)];
+      // "Send it back" on a review: the owner's reason, no result
+      if (b.decline === true) return [...args, '--decline'];
       if (text(b.rule, 600)) args.push('--rule', b.rule.trim());
       return args;
     },
@@ -4366,7 +4396,12 @@ function cmdDashboard() {
   };
   const send = (res, code, type, body) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store' }); res.end(body); };
   const server = http.createServer(async (req, res) => {
-    if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) return send(res, 200, 'text/html; charset=utf-8', fs.readFileSync(page));
+    // frame-src 'self': a frame of this page (a review page, an HTML mock) may navigate itself, and
+    // this keeps it on the dashboard; a sandbox alone would let it load any URL, query string and all.
+    if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': "frame-src 'self'" });
+      return res.end(fs.readFileSync(page));
+    }
     if (req.method === 'GET' && req.url.startsWith('/api/data')) {
       const r = await run(['dashboard-data']);
       return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 500, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
@@ -4391,42 +4426,129 @@ function cmdDashboard() {
       res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store', 'content-security-policy': 'sandbox', 'x-content-type-options': 'nosniff' });
       return res.end(body);
     }
-    const isSecret = req.method === 'POST' && req.url === '/api/secret';
-    const action = req.method === 'POST' && req.url.startsWith('/api/') ? ACTIONS[req.url.slice(5)] : null;
-    if (!action && !isSecret) return send(res, 404, 'text/plain', 'not found');
     const okHost = [`127.0.0.1:${port}`, `localhost:${port}`, `${host}:${port}`].includes(req.headers.host ?? '');
+    // A review: what the dashboard's review view loads (the question, its verified files, the
+    // owner's draft and stored result), or the result as TSV for the owner's own use.
+    if (req.method === 'GET' && u.pathname === '/api/review') {
+      const id = u.searchParams.get('id') ?? '';
+      if (!ID.test(id)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad question id' }));
+      if (u.searchParams.get('format') === 'tsv') {
+        const r = await run(['review', 'result', id, '--tsv']);
+        return r.ok ? send(res, 200, 'text/tab-separated-values; charset=utf-8', r.stdout) : send(res, 404, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
+      }
+      const r = await run(['review', 'show', id, '--json', '--contents']);
+      return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 404, 'application/json', JSON.stringify({ error: r.stderr.trim().replace(/^devteam: /, '') }));
+    }
+    // A review page: the agent's bytes, verbatim, only into the dashboard's own sandboxed frame,
+    // under a policy that allows no network (reviewPageCsp). Under a question's path the server
+    // serves exactly two other files, the kit's helpers; nothing else.
+    const rvm = req.method === 'GET' ? /^\/review\/([^/]+)\/([^/]*)$/.exec(u.pathname) : null;
+    if (rvm) {
+      const [, seg, file] = rvm;
+      if (seg !== 'preview' && !ID.test(seg)) return send(res, 404, 'text/plain', 'not found');
+      if (file === 'devteam-ui.css' || file === 'devteam-ui.js') {
+        res.writeHead(200, { 'content-type': file.endsWith('.css') ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+        return res.end(fs.readFileSync(path.join(devteamDir, 'dashboard', file)));
+      }
+      if (file !== '') return send(res, 404, 'text/plain', 'not found');
+      // Opened top-level it would be same-origin with the owner API; it is served only into a frame
+      // of this page (and its policy makes its origin opaque even then).
+      if (!okHost || !['iframe', 'frame'].includes(req.headers['sec-fetch-dest']) || req.headers['sec-fetch-site'] !== 'same-origin') return send(res, 403, 'text/plain; charset=utf-8', 'A review page opens only inside the dashboard: open the Inbox and choose "Open the review".');
+      const blob = (spec) => new Promise((resolve) => execFile('git', ['cat-file', 'blob', spec], { cwd: mainRoot, encoding: 'buffer', maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => resolve(err ? null : stdout)));
+      let bytes;
+      if (seg === 'preview') {
+        // the supervisor's (or an agent's) look at a committed page before anyone asks
+        const p = u.searchParams.get('path') ?? '';
+        const ref = u.searchParams.get('ref') || mainRef() || 'HEAD';
+        if (!REPO_PATH.test(p) || !/\.html?$/i.test(p) || !/^(?!-)[A-Za-z0-9._\/-]+$/.test(ref)) return send(res, 400, 'text/plain', 'bad path or ref');
+        bytes = await blob(`${ref}:${p}`);
+        if (!bytes) return send(res, 404, 'text/plain', `not found: ${p} at ${ref}`);
+      } else {
+        const r = await run(['review', 'show', seg, '--json']);
+        if (!r.ok) return send(res, 404, 'text/plain', `not a review question: ${seg}`);
+        const shown = JSON.parse(r.stdout);
+        const rv = shown.review;
+        if (!shown.reachable || shown.files.some((f) => f.status === 'missing')) return send(res, 404, 'text/plain', `the page's commit ${String(rv.commit).slice(0, 12)} is gone; nothing can be answered on it`);
+        if (shown.files.some((f) => f.status === 'tampered')) return send(res, 403, 'text/plain', 'the page or its data no longer hash to the question; it is not the page the supervisor asked on');
+        bytes = await blob(`${rv.commit}:${rv.page.path}`);
+        if (!bytes) return send(res, 404, 'text/plain', 'the page is gone');
+        if (sha256(bytes) !== rv.page.sha256) return send(res, 403, 'text/plain', 'the page no longer hashes to the question');
+      }
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'content-security-policy': reviewPageCsp(`http://${req.headers.host}`), 'referrer-policy': 'no-referrer', 'x-dns-prefetch-control': 'off' });
+      return res.end(bytes);
+    }
+    const name = req.method === 'POST' && u.pathname.startsWith('/api/') ? u.pathname.slice(5) : null;
+    const isSecret = name === 'secret';
+    const isReview = name === 'review-draft' || name === 'review-answer';
+    const action = name && Object.hasOwn(ACTIONS, name) ? ACTIONS[name] : null;
+    if (!action && !isSecret && !isReview) return send(res, 404, 'text/plain', 'not found');
     const site = req.headers['sec-fetch-site'];
     const origin = req.headers.origin;
-    // A browser always sends both on a fetch POST; a secret is accepted only with both present.
-    const sameOrigin = isSecret ? site === 'same-origin' && origin === `http://${req.headers.host}` : (!site || site === 'same-origin') && (!origin || origin === `http://${req.headers.host}`);
+    // A browser always sends both on a fetch POST; a secret or a review is accepted only with both
+    // present. A sandboxed frame's request says Origin: null and is refused here too.
+    const strict = isSecret || isReview;
+    const sameOrigin = strict ? site === 'same-origin' && origin === `http://${req.headers.host}` : (!site || site === 'same-origin') && (!origin || origin === `http://${req.headers.host}`);
     if (!okHost || !sameOrigin || !(req.headers['content-type'] ?? '').startsWith('application/json')) return send(res, 403, 'application/json', JSON.stringify({ error: 'owner actions only from this page' }));
-    const cap = isSecret ? 4 * 1024 * 1024 : 20000;
+    // A review's result or draft is up to 4 MB, plus its envelope.
+    const cap = isSecret ? 4 * 1024 * 1024 : isReview ? REVIEW_MAX + 64 * 1024 : 20000;
     // Bytes first, decoded once: a multibyte character split across chunks stays whole.
     const chunks = [];
     let size = 0;
     let body = '';
-    req.on('data', (c) => { size += c.length; if (size > cap) { chunks.length = 0; req.destroy(); return; } chunks.push(c); });
+    let over = false;
+    req.on('data', (c) => {
+      size += c.length;
+      if (size <= cap) return void chunks.push(c);
+      over = true;
+      chunks.length = 0;
+      // a review body over the cap is drained and refused with a reason; one far over it is cut off
+      if (!isReview || size > 4 * cap) req.destroy();
+    });
     req.on('end', () => { const buf = Buffer.concat(chunks); body = buf.toString('utf8'); buf.fill(0); chunks.length = 0; });
+    // The owner's own process, with the body on its stdin (never in argv or the server's output).
+    const ownerChild = (args, input) => {
+      const child = spawn(process.execPath, [self, ...args], { cwd: mainRoot, env: ownerEnv, stdio: ['pipe', 'pipe', 'pipe'] });
+      let so = '';
+      let se = '';
+      let replied = false;
+      const reply = (code, payload) => { if (!replied) { replied = true; send(res, code, 'application/json', JSON.stringify(payload)); } };
+      child.stdin.on('error', () => {});
+      child.on('error', (e) => reply(500, { error: e.message }));
+      child.stdout.on('data', (c) => { so += c; });
+      child.stderr.on('data', (c) => { se += c; });
+      child.on('close', (code) => reply(code === 0 ? 200 : 400, code === 0 ? { ok: true, out: so.trim() } : { error: se.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') || 'failed', out: so.trim() }));
+      child.stdin.end(input);
+    };
     if (isSecret) {
-      // The values go to a child on stdin, never in argv or the server's own output; the child pipes
-      // each to its sink (secret post --json) and logs only names.
+      // The values go to a child on stdin; the child pipes each to its sink (secret post --json)
+      // and logs only names.
       return req.on('end', () => {
         let parsed;
         try { parsed = JSON.parse(body || '{}'); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'bad json' })); }
         body = '';
         if (!ID.test(parsed.id ?? '') || typeof parsed.values !== 'object' || !parsed.values) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
-        const child = spawn(process.execPath, [self, 'secret', 'post', parsed.id, '--json'], { cwd: mainRoot, env: ownerEnv, stdio: ['pipe', 'pipe', 'pipe'] });
-        let so = '';
-        let se = '';
-        let replied = false;
-        const reply = (code, payload) => { if (!replied) { replied = true; send(res, code, 'application/json', JSON.stringify(payload)); } };
-        child.stdin.on('error', () => {});
-        child.on('error', (e) => reply(500, { error: e.message }));
-        child.stdout.on('data', (c) => { so += c; });
-        child.stderr.on('data', (c) => { se += c; });
-        child.on('close', (code) => reply(code === 0 ? 200 : 400, code === 0 ? { ok: true, out: so.trim() } : { error: se.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') || 'failed', out: so.trim() }));
-        child.stdin.end(JSON.stringify(parsed.values));
+        ownerChild(['secret', 'post', parsed.id, '--json'], JSON.stringify(parsed.values));
         parsed = null;
+      });
+    }
+    if (isReview) {
+      return req.on('end', () => {
+        if (over) return send(res, 400, 'application/json', JSON.stringify({ error: `the body is over ${cap} bytes; a review result or draft is at most ${REVIEW_MAX} (4 MB)` }));
+        let parsed;
+        try { parsed = JSON.parse(body || '{}'); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'bad json' })); }
+        body = '';
+        if (!ID.test(parsed.id ?? '')) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
+        if (name === 'review-draft') {
+          if (parsed.state === undefined) return send(res, 400, 'application/json', JSON.stringify({ error: 'a draft has a state' }));
+          const savedAt = typeof parsed.saved_at === 'string' && !Number.isNaN(Date.parse(parsed.saved_at)) ? parsed.saved_at : nowIso();
+          return ownerChild(['review', 'draft', parsed.id, '-'], JSON.stringify({ state: parsed.state, saved_at: savedAt }));
+        }
+        // The answer is the object the owner's preview rendered: its JSON text is hashed in the page
+        // and here, and the owner's process reads exactly those bytes.
+        if (!isObj(parsed.result) || !/^[0-9a-f]{64}$/.test(parsed.sha256 ?? '')) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields: { id, result, sha256 }' }));
+        const textOut = JSON.stringify(parsed.result);
+        if (sha256(Buffer.from(textOut)) !== parsed.sha256) return send(res, 400, 'application/json', JSON.stringify({ error: 'the result is not the one the preview showed (its sha256 differs); nothing was answered' }));
+        ownerChild(['answer', parsed.id, '--review-result', '-', ...autonomyArgs(parsed)], textOut);
       });
     }
     req.on('end', async () => {
@@ -4929,7 +5051,7 @@ Decide and act (supervisor.md, constitution.md)
   ask --kind review --page <repo path> --ref <branch|sha> [--data <repo path>] [--result-schema <repo path>] [--allow-partial] --question q [--context c] [--class c] [--reasons r…] [--ticket id] [--blocks ids] [--re m-…]
                                   supervisor: an agent-drawn page for rows the owner decides; pins page, data and result schema to a commit and their sha256s
   review check <page.html> [--data d.json] [--result-schema s.json] [--json]   anyone: the static checks ask runs, with line numbers
-  review show <qid> [--json]      the pinned files and the result's status: verified, missing, tampered or declined
+  review show <qid> [--json [--contents]]   the pinned files and the result's status: verified, missing, tampered or declined (--contents adds the verified data, draft and result)
   review result <qid> [--json|--tsv]   the owner's result, once every hash verifies (exit 1 otherwise)
   review verify <qid> --applied <file>   rows applied ([{ "id", "values", "evidence" }]) vs rows the owner decided; exit 1 on any difference
   review draft <qid> [<file|->]   owner: save partial progress; without a file, print it (a draft is never an answer)

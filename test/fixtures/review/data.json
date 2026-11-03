@@ -1,0 +1,25 @@
+{
+  "v": 1,
+  "title": "Match items to groups",
+  "intro": "Six **groups** and eight **items**. Attach every item that belongs to a group; an item may sit on several groups, and a group may have none. I pre-filled what I could match; the ones I'm least sure of are first.",
+  "options": {
+    "items": [
+      { "id": "a", "label": "Alpha report", "detail": "2023", "group": "north" },
+      { "id": "b", "label": "Bravo study", "detail": "2023", "group": "north" },
+      { "id": "c", "label": "Charlie notes", "detail": "2024", "group": "south" },
+      { "id": "d", "label": "Delta brief", "detail": "2021", "group": "south" },
+      { "id": "e", "label": "Echo summary", "detail": "2022", "group": "east" },
+      { "id": "f", "label": "Foxtrot review", "detail": "2024", "group": "east" },
+      { "id": "g", "label": "Golf audit", "detail": "2020", "group": "west" },
+      { "id": "h", "label": "Hotel plan", "detail": "2024", "group": "west" }
+    ]
+  },
+  "rows": [
+    { "id": "g1", "title": "Group one", "cells": { "owner": "Ana", "year": 2023 }, "proposal": { "items": ["a", "b"] }, "confidence": "high", "reason": "Both items name this group in their first line." },
+    { "id": "g2", "title": "Group two", "cells": { "owner": "Ben", "year": 2023 }, "proposal": { "items": ["b"] }, "confidence": "medium", "reason": "Bravo covers groups one and two, so I proposed it on both." },
+    { "id": "g3", "title": "Group three", "cells": { "owner": "Cy", "year": 2024 }, "confidence": "low", "reason": "Nothing names this group. Charlie and Foxtrot are from the same year.", "links": [{ "title": "Its page", "url": "https://example.com/groups/3" }] },
+    { "id": "g4", "title": "Group four", "cells": { "owner": "Dee", "year": 2021 }, "proposal": { "items": ["d"] }, "confidence": "high", "reason": "Owner, subject and year match exactly." },
+    { "id": "g5", "title": "Group five", "cells": { "owner": "Eli", "year": 2022 }, "proposal": { "items": ["e", "f"] }, "confidence": "low", "reason": "Echo is a match; Foxtrot is a guess from its subject." },
+    { "id": "g6", "title": "Group six", "cells": { "owner": "Fay", "year": 2020 }, "proposal": { "items": ["g"] }, "confidence": "medium", "reason": "Golf names this group's owner." }
+  ]
+}
