@@ -4183,9 +4183,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0, ref: \${{ github.event.pull_request.head.sha }} }
+        with:
+          fetch-depth: 0
+          ref: \${{ github.event.pull_request.head.sha }}
       - uses: actions/setup-node@v4
-        with: { node-version: 22 }
+        with:
+          node-version: 22
       - run: git fetch --no-tags origin "+refs/heads/\${{ github.base_ref }}:refs/remotes/origin/\${{ github.base_ref }}"
       - env:
           HEAD_REF: \${{ github.head_ref }}
