@@ -789,6 +789,58 @@ function logRule(headRef, sha) {
   return fails;
 }
 
+// --- the review rule for a PR: the owner's results and the files they answered on never change ---
+// A result.json the PR adds or changes (project/questions/<qid>/, or a ticket's questions/<qid>/)
+// hashes to result.sha256 on the owner's answer line for <qid>. A file a review question pins
+// (page, data, result schema) that the PR changes either is absent at the head or still hashes to
+// its question line, while that question is open or answered (a page sent back or withdrawn may be
+// redrawn in place before it lands). Once a pinned file or a result is on main, as the merge base
+// holds it, it never changes and is never deleted, whatever its question's status.
+function reviewRule(sha, { forge = false } = {}) {
+  if (!commonDir || !projectInRepo) return [];
+  const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
+  if (!base) return []; // logRule says so
+  const changed = (git(['diff', '--name-status', '--no-renames', base, sha]) ?? '').split('\n').filter(Boolean).map((l) => l.split('\t'));
+  const touched = new Set(changed.map(([, f]) => f));
+  const fails = [];
+  const reviews = logObjects('question').filter((q) => q.kind === 'review' && q.review);
+  const byId = new Map(reviews.map((q) => [q.id, q]));
+  const how = `Copy it with \`review result <qid> --commit\` in the worktree of the PR that asked, never by hand`;
+  for (const [st, f] of changed) {
+    const qid = reviewResultPath(f);
+    if (!qid) continue;
+    if (st === 'D') { fails.push(`${f}: the owner's answer to ${qid} is on main; a landed review file is never deleted`); continue; }
+    const q = byId.get(qid);
+    const v = q ? questionView(q) : null;
+    const buf = gitBlob(sha, f);
+    const logHint = forge ? '; if the owner has answered since, land the log (log-sync, then merge --chore log) and run the check again' : '';
+    const why = !v ? `${qid} is not a review question in the log${logHint}`
+      : v.declined ? `${qid} was sent back, so it has no result`
+      : v.status !== 'answered' || !v.result?.sha256 ? `${qid} is ${v.status}, with no owner result${logHint}`
+      : buf === null || sha256(buf) !== v.result.sha256 ? `it hashes to ${buf === null ? 'nothing' : sha256(buf).slice(0, 12)}, and the owner's answer line names ${v.result.sha256.slice(0, 12)}`
+      : null;
+    if (why) fails.push(`${f} is not the owner's answer to ${qid}: ${why}. ${how.replace('<qid>', qid)}`);
+  }
+  // one message per pinned path, naming every question it breaks
+  const broken = new Map();
+  for (const q of reviews) {
+    const v = questionView(q);
+    const live = (v.status === 'open' || v.status === 'answered') && !v.declined;
+    for (const [role, f] of [['page', q.review.page], ['data', q.review.data], ['result schema', q.review.result_schema]]) {
+      if (!f?.path || !f.sha256 || !touched.has(f.path)) continue;
+      const before = gitBlob(base, f.path);
+      const after = gitBlob(sha, f.path);
+      const landed = before !== null && sha256(before) === f.sha256;
+      if (landed ? after !== null && sha256(after) === f.sha256 : !live || after === null || sha256(after) === f.sha256) continue;
+      const k = `${f.path}\0${role}`;
+      if (!broken.has(k)) broken.set(k, { path: f.path, role, landed, deleted: after === null, qs: [] });
+      broken.get(k).qs.push(`${q.id} (${v.declined ? 'sent back' : v.status})`);
+    }
+  }
+  for (const b of broken.values()) fails.push(`${b.path} is pinned as the ${b.role} of ${b.qs.join(', ')}${b.landed ? ', and is on main' : ''}; it ${b.deleted ? 'is never deleted' : 'never changes'}. Put a new ${b.role} at a new path and ask a new question`);
+  return fails;
+}
+
 const LOG_BRANCH = 'chore-log';
 
 // Mirror run/log into project/log on branch chore-log, in its own worktree, and open or update the
@@ -1661,7 +1713,7 @@ function cmdCheckTicket() {
 // run here. A chore PR may not touch the log (chore-log touches nothing else) or a ticket's folder.
 function checkPr({ headRef, sha, title, body, forge = false }) {
   const branch = headRef.replace(/^refs\/heads\//, '');
-  const fails = logRule(branch, sha);
+  const fails = [...logRule(branch, sha), ...reviewRule(sha, { forge })];
   if (branch.startsWith('ticket/')) return [...fails, ...checkTicket(branch.slice('ticket/'.length), { sha, title, body, approvals: !forge })];
   if (branch.startsWith('plan/')) {
     const feature = branch.slice('plan/'.length);
@@ -2263,6 +2315,11 @@ const reviewPageCsp = (origin) => [
 ].join('; ');
 const reviewResultFile = (qid) => path.join(reviewDir(qid), 'result.json');
 const reviewDraftFile = (qid) => path.join(reviewDir(qid), 'draft.json');
+// The permanent copy of the owner's result, in the PR that asked: project/questions/<qid>/, or
+// the ticket's own folder on a ticket branch (a ticket PR changes nothing else of project/).
+const reviewResultRel = (qid, ticket) => `${projectRel}/${ticket ? `tickets/${ticket}/` : ''}questions/${qid}/result.json`;
+const reReserved = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const reviewResultPath = (f) => (projectInRepo ? new RegExp(`^${reReserved(projectRel)}/(?:tickets/[^/]+/)?questions/([^/]+)/result\\.json$`).exec(f)?.[1] ?? null : null);
 
 // A blob's exact bytes at a commit (git() decodes and trims; a hash needs the bytes).
 function gitBlob(commit, p) {
@@ -2442,20 +2499,33 @@ function pinReview() {
 
 // Whether a review's pinned files still are what the owner was shown: each one's status
 // (verified, tampered: the bytes at the commit don't hash to the line, missing: unreadable or on
-// no branch or tag), and the worst of them.
+// no branch or tag), where its verified bytes are read from (`at`), and the worst of them.
+// A squash-merged PR leaves the pinned commit on no branch once its branch is deleted, but its
+// files are then on main at their paths: bytes there that hash to the line are the very files the
+// owner was shown, landed, so the file is verified at main (`landed`).
 const pinMemo = new Map();
+function pinStatus(commit, f) {
+  const key = `${commit}:${f.path}:${f.sha256}`;
+  if (!pinMemo.has(key)) { const buf = gitBlob(commit, f.path); pinMemo.set(key, buf === null ? 'missing' : sha256(buf) === f.sha256 ? 'verified' : 'tampered'); }
+  return pinMemo.get(key);
+}
 function reviewPins(rv) {
   // readers skip the schema walk, so a hand-made line without a page or commit pins nothing
-  if (!/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(rv?.commit ?? '') || !rv.page?.path || !rv.page?.sha256) return { status: 'missing', reachable: false, files: [] };
+  if (!/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(rv?.commit ?? '') || !rv.page?.path || !rv.page?.sha256) return { status: 'missing', reachable: false, landed: false, files: [] };
   const reachable = commitReachable(rv.commit);
+  const main = mainRef() ? resolveCommit(mainRef()) : null;
   const files = [['page', rv.page], ['data', rv.data], ['result_schema', rv.result_schema]].filter(([, f]) => f).map(([role, f]) => {
-    const key = `${rv.commit}:${f.path}:${f.sha256}`;
-    if (!pinMemo.has(key)) { const buf = gitBlob(rv.commit, f.path); pinMemo.set(key, buf === null ? 'missing' : sha256(buf) === f.sha256 ? 'verified' : 'tampered'); }
-    return { role, path: f.path, sha256: f.sha256, bytes: f.bytes, status: reachable ? pinMemo.get(key) : 'missing' };
+    const pinned = { role, path: f.path, sha256: f.sha256, bytes: f.bytes };
+    const st = reachable ? pinStatus(rv.commit, f) : 'missing';
+    if (st !== 'missing') return { ...pinned, status: st, at: rv.commit, landed: false };
+    if (main && pinStatus(main, f) === 'verified') return { ...pinned, status: 'verified', at: main, landed: true };
+    return { ...pinned, status: 'missing', at: null, landed: false };
   });
   const status = files.some((f) => f.status === 'missing') ? 'missing' : files.some((f) => f.status === 'tampered') ? 'tampered' : 'verified';
-  return { status, reachable, files };
+  return { status, reachable, landed: files.some((f) => f.landed), files };
 }
+// A pinned file's verified bytes (null unless it verifies).
+const pinnedBlob = (pins, role) => { const f = pins.files.find((x) => x.role === role); return f?.status === 'verified' ? gitBlob(f.at, f.path) : null; };
 // A review's status as the inbox shows it: declined, or the pinned files' status, and once
 // answered the result file's too (missing, or tampered when it no longer hashes to the owner's line).
 function reviewStatus(q, result, declined) {
@@ -2491,7 +2561,7 @@ const isObj = (x) => !!x && typeof x === 'object' && !Array.isArray(x);
 function acceptReviewResult(v, src) {
   const rv = v.review;
   const pins = reviewPins(rv);
-  if (pins.status === 'missing') die(`${v.id}: the page's commit ${rv.commit.slice(0, 12)} (${rv.ref}) is gone or on no branch, so nothing can be answered on it; tell the supervisor to ask again`);
+  if (pins.status === 'missing') die(`${v.id}: the page's commit ${rv.commit.slice(0, 12)} (${rv.ref}) is gone or on no branch, and its files are not on main, so nothing can be answered on it; tell the supervisor to ask again`);
   if (pins.status === 'tampered') die(`${v.id}: ${pins.files.filter((f) => f.status === 'tampered').map((f) => f.path).join(', ')} no longer hash to the question; the page the owner saw is not the page on record. Ask again`);
   const { value: result } = readJsonInput(src, 'the review result');
   if (!isObj(result)) die('the review result is a JSON object');
@@ -2500,11 +2570,11 @@ function acceptReviewResult(v, src) {
   if (result.review_sha256 !== rv.page.sha256) die(`the review result names page ${String(result.review_sha256 ?? 'none').slice(0, 12)}, not the page asked (${rv.page.sha256.slice(0, 12)})`);
   if (rv.data ? result.data_sha256 !== rv.data.sha256 : result.data_sha256 !== undefined) die(`the review result names data ${String(result.data_sha256 ?? 'none').slice(0, 12)}, not the data asked (${rv.data ? rv.data.sha256.slice(0, 12) : 'none'})`);
   if (rv.result_schema) {
-    const schema = JSON.parse(gitBlob(rv.commit, rv.result_schema.path).toString('utf8'));
+    const schema = JSON.parse(pinnedBlob(pins, 'result_schema').toString('utf8'));
     const errs = schemaErrors(schema, result, 'result');
     if (errs.length) die(`the review result does not satisfy ${rv.result_schema.path}:\n  - ${errs.slice(0, 20).join('\n  - ')}${errs.length > 20 ? `\n  (+${errs.length - 20} more)` : ''}`);
   }
-  const data = rv.data ? JSON.parse(gitBlob(rv.commit, rv.data.path).toString('utf8')) : null;
+  const data = rv.data ? JSON.parse(pinnedBlob(pins, 'data').toString('utf8')) : null;
   const stored = { ...result };
   for (const k of ['answered_at', 'channel', 'summary']) delete stored[k];
   let summary = null;
@@ -2596,7 +2666,7 @@ function cmdReview() {
     const df = reviewDraftFile(v.id);
     const st = fs.statSync(df, { throwIfNoEntry: false });
     const draft = st ? { path: df, bytes: st.size, saved_at: st.mtime.toISOString() } : null;
-    const shown = { id: v.id, status: v.status, result_status: v.result_status, review: v.review, files: pins.files, reachable: pins.reachable, result: v.result, declined: v.declined, answer: v.answer, result_file: v.result ? reviewResultFile(v.id) : null, draft };
+    const shown = { id: v.id, status: v.status, result_status: v.result_status, review: v.review, files: pins.files, reachable: pins.reachable, landed: pins.landed, result: v.result, declined: v.declined, answer: v.answer, result_file: v.result ? reviewResultFile(v.id) : null, draft };
     // --contents (what the dashboard's review view loads): the question's words, and the files
     // themselves, each only when it verifies: the data at the pinned commit, the owner's draft, and
     // the owner's stored result.
@@ -2607,15 +2677,15 @@ function cmdReview() {
       return json({
         ...shown, question: v.question, context: v.context, links: v.links, ticket: v.ticket, blocks: v.blocks, class: v.class, why_asked: v.why_asked,
         asked_at: v.asked_at, asked_by: q.created_by, answered_at: v.answered_at, channel: v.channel,
-        data: dataPin?.status === 'verified' ? parsed(gitBlob(q.review.commit, dataPin.path)) : null,
+        data: dataPin?.status === 'verified' ? parsed(pinnedBlob(pins, 'data')) : null,
         draft: draft && draftDoc ? { saved_at: typeof draftDoc.saved_at === 'string' ? draftDoc.saved_at : draft.saved_at, bytes: draft.bytes, state: draftDoc.state ?? null } : null,
         result_doc: v.result && v.result_status === 'verified' ? parsed(fs.readFileSync(reviewResultFile(v.id))) : null,
       });
     }
     if (flags.json) return json(shown);
     out(`${v.id}  [review, ${v.status}]  ${v.result_status}\n  ${v.question}`);
-    out(`  pinned at ${String(q.review.commit).slice(0, 12)} (${q.review.ref})${pins.reachable ? '' : ', which no branch or tag contains any more'}`);
-    for (const f of pins.files) out(`  ${f.role.padEnd(13)} ${f.path}  ${f.sha256.slice(0, 12)}  ${f.bytes} bytes  ${f.status}${f.role === 'data' ? `  (${q.review.data.rows} rows, ${q.review.data.proposals} with a proposal)` : ''}`);
+    out(`  pinned at ${String(q.review.commit).slice(0, 12)} (${q.review.ref})${pins.reachable ? '' : pins.landed ? ', which no branch holds any more (squash-merged): its files are on main' : ', which no branch or tag contains any more'}`);
+    for (const f of pins.files) out(`  ${f.role.padEnd(13)} ${f.path}  ${f.sha256.slice(0, 12)}  ${f.bytes} bytes  ${f.status}${f.landed ? ' on main' : ''}${f.role === 'data' ? `  (${q.review.data.rows} rows, ${q.review.data.proposals} with a proposal)` : ''}`);
     out(`  partial answers ${q.review.allow_partial ? 'allowed' : 'not allowed'}`);
     if (v.answer) out(`  answer: ${v.answer}`);
     if (v.result) out(`  result: ${reviewResultFile(v.id)}  sha256 ${v.result.sha256.slice(0, 12)}  ${v.result_status}`);
@@ -2623,8 +2693,26 @@ function cmdReview() {
     return;
   }
   if (sub === 'result') {
-    const { v } = reviewQuestion(id);
+    const { q, v } = reviewQuestion(id);
     const { text, result } = verifiedResult(v);
+    if (flags.commit) {
+      // The owner's bytes, verified, into the PR that asked; check-pr holds the copy to the hash on
+      // the owner's line, so a copy changed by anyone never lands.
+      if (!projectInRepo) die(`project/ is not inside this repo (${projectDir}); there is no PR to carry the result`);
+      const branch = git(['rev-parse', '--abbrev-ref', 'HEAD']);
+      if (branch && branch !== 'HEAD' && q.review.ref && !/^[0-9a-f]{40}$/.test(q.review.ref) && branch !== q.review.ref) warn(`${v.id} was asked on ${q.review.ref}, and this worktree is on ${branch}; its result belongs in the PR that asked it`);
+      const rel = reviewResultRel(v.id, currentTicketId());
+      const dest = path.join(repoRoot, ...rel.split('/'));
+      const buf = fs.readFileSync(reviewResultFile(v.id));
+      if (sha256(buf) !== v.result.sha256) die(`${v.id}: the result is tampered (${reviewResultFile(v.id)} no longer hashes to the owner's answer)`);
+      const had = fs.existsSync(dest) ? fs.readFileSync(dest) : null;
+      if (had && sha256(had) === v.result.sha256) return out(`${rel} is already the owner's result (sha256 ${v.result.sha256.slice(0, 12)})\n  git add ${rel}`);
+      if (had) warn(`${rel} was not the owner's result; replaced it with the owner's`);
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.writeFileSync(dest, buf);
+      if (sha256(fs.readFileSync(dest)) !== v.result.sha256) die(`${rel} does not hash to the owner's answer after copying; nothing to commit`);
+      return out(`copied the owner's result for ${v.id} (sha256 ${v.result.sha256.slice(0, 12)}, ${buf.length} bytes) to ${rel}\n  git add ${rel}`);
+    }
     if (flags.json) return process.stdout.write(text);
     if (flags.tsv) {
       if (!Array.isArray(result.rows)) die(`${v.id}'s result is not in the rows shape; read it with --json`);
@@ -2677,7 +2765,7 @@ function cmdReview() {
     for (const a of applied) if (!ok.has(a.id)) fails.push(`${a.id}: applied, but the owner did not decide it`);
     return report(fails, `${decided.length} row(s) applied as the owner decided them (${v.id}, result sha256 ${v.result.sha256.slice(0, 12)})`);
   }
-  die('usage: review check <page.html> [--data d] [--result-schema s] | review show <qid> [--json] | review result <qid> [--json|--tsv] | review verify <qid> --applied <file> | review draft <qid> [<file|->]');
+  die('usage: review check <page.html> [--data d] [--result-schema s] | review show <qid> [--json] | review result <qid> [--json|--tsv|--commit] | review verify <qid> --applied <file> | review draft <qid> [<file|->]');
 }
 
 // ===== secrets: the owner posts a value straight to where it goes =====
@@ -4155,9 +4243,23 @@ function collectMetrics(since) {
     else if (!p.waiting_on_supervisor.length && !p.waiting_on_owner.length && p.minutes_silent > settings.stale_after_minutes) add('high', 'stale-planner', who, `no sign of life for ${p.minutes_silent} min`, 'check its pane; message it or resume it (supervisor.md §11)');
   }
   for (const msg of openMsgs.filter((x) => now - Date.parse(x.created_at) > 30 * 60000)) add('medium', 'unanswered-message', msg.id, `${msg.kind} from ${msg.created_by}, ${Math.round((now - Date.parse(msg.created_at)) / 60000)} min old`, `reply with --re ${msg.id}`);
-  // A review's page lives on the branch that asked it; once no branch or tag holds that commit, the
-  // page the owner answers (or answered) on is lost at the next prune.
-  for (const q of questions().filter((x) => x.kind === 'review' && x.review && ['open', 'answered'].includes(x.status) && reviewPins(x.review).status === 'missing')) add('high', 'review-file-missing', q.id, `its page is pinned to ${String(q.review.commit).slice(0, 12)} (asked on ${q.review.ref}), which no branch or tag holds any more, or which can't be read`, q.status === 'open' ? 'withdraw it and ask again on a page committed to a live branch' : `restore the branch before the commit is pruned (git branch ${q.review.ref} ${q.review.commit}), so the page the owner answered on stays on record`);
+  // A review's page lives on the branch that asked it until its PR lands it on main; once no branch
+  // or tag holds that commit and its files are not on main either (a squash merge leaves them
+  // there, at their paths), the page the owner answers (or answered) on is lost at the next prune.
+  const reviewQs = questions().filter((x) => x.kind === 'review' && x.review && ['open', 'answered'].includes(x.status));
+  for (const q of reviewQs.filter((x) => reviewPins(x.review).status === 'missing')) add('high', 'review-file-missing', q.id, `its page is pinned to ${String(q.review.commit).slice(0, 12)} (asked on ${q.review.ref}), which no branch or tag holds any more, or which can't be read, and its files are not on main`, q.status === 'open' ? 'withdraw it and ask again on a page committed to a live branch' : `restore the branch before the commit is pruned (git branch ${q.review.ref} ${q.review.commit}), then land the page and the result in its PR (review result ${q.id} --commit), so the page the owner answered on stays on record`);
+  // The owner's result is permanent only once the PR that asked carries it onto main.
+  const unlandedAfter = settings.stale_after_minutes * 48 * 60000;
+  const answeredReviews = reviewQs.filter((x) => x.status === 'answered' && !x.declined && x.result?.sha256 && now - Date.parse(x.answered_at) > unlandedAfter);
+  if (answeredReviews.length && projectInRepo && mainRef()) {
+    const main = mainRef();
+    const onMain = new Map();
+    for (const f of (git(['ls-tree', '-r', '--name-only', main, '--', `${projectRel}/questions`, `${projectRel}/tickets`]) ?? '').split('\n')) { const qid = reviewResultPath(f); if (qid) onMain.set(qid, [...(onMain.get(qid) ?? []), f]); }
+    for (const q of answeredReviews) {
+      if ((onMain.get(q.id) ?? []).some((f) => { const b = gitBlob(main, f); return b !== null && sha256(b) === q.result.sha256; })) continue;
+      add('medium', 'review-unlanded', q.id, `answered ${hours(now - Date.parse(q.answered_at))}h ago; the owner's result is not on ${loadSettings().main_branch} yet (it lives only in run/, which no one backs up)`, `in the worktree of the PR that asked (${q.review.ref}): review result ${q.id} --commit, commit it, and land the PR`);
+    }
+  }
   for (const q of openQs.filter((x) => now - Date.parse(x.asked_at) > grace)) add('high', 'owner-question-waiting', q.id, q.question.slice(0, 120), q.default ? 'apply its default' : 'remind the owner; it blocks work');
   if (recentQs.length >= 4 && answeredRecent / recentQs.length < 0.5) add('high', 'inbox-stalled', 'owner questions', `${answeredRecent} of ${recentQs.length} answered in 14 days`, 'remind the owner what is blocked; give defaults where the class allows; withdraw what no longer matters');
   // churn is a signal to re-plan a ticket still in flight; a merged ticket's passes are retro material
@@ -4468,9 +4570,12 @@ function cmdDashboard() {
         if (!r.ok) return send(res, 404, 'text/plain', `not a review question: ${seg}`);
         const shown = JSON.parse(r.stdout);
         const rv = shown.review;
-        if (!shown.reachable || shown.files.some((f) => f.status === 'missing')) return send(res, 404, 'text/plain', `the page's commit ${String(rv.commit).slice(0, 12)} is gone; nothing can be answered on it`);
+        if (shown.files.some((f) => f.status === 'missing')) return send(res, 404, 'text/plain', `the page's commit ${String(rv.commit).slice(0, 12)} is gone and its files are not on main; nothing can be answered on it`);
         if (shown.files.some((f) => f.status === 'tampered')) return send(res, 403, 'text/plain', 'the page or its data no longer hash to the question; it is not the page the supervisor asked on');
-        bytes = await blob(`${rv.commit}:${rv.page.path}`);
+        // read from where it verified: the pinned commit, or main once a squash merge landed it
+        const at = shown.files.find((f) => f.role === 'page')?.at ?? rv.commit;
+        if (!/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(at)) return send(res, 404, 'text/plain', 'the page is gone');
+        bytes = await blob(`${at}:${rv.page.path}`);
         if (!bytes) return send(res, 404, 'text/plain', 'the page is gone');
         if (sha256(bytes) !== rv.page.sha256) return send(res, 403, 'text/plain', 'the page no longer hashes to the question');
       }
@@ -5052,7 +5157,7 @@ Decide and act (supervisor.md, constitution.md)
                                   supervisor: an agent-drawn page for rows the owner decides; pins page, data and result schema to a commit and their sha256s
   review check <page.html> [--data d.json] [--result-schema s.json] [--json]   anyone: the static checks ask runs, with line numbers
   review show <qid> [--json [--contents]]   the pinned files and the result's status: verified, missing, tampered or declined (--contents adds the verified data, draft and result)
-  review result <qid> [--json|--tsv]   the owner's result, once every hash verifies (exit 1 otherwise)
+  review result <qid> [--json|--tsv|--commit]   the owner's result, once every hash verifies (exit 1 otherwise); --commit copies it into this worktree, the PR that asked (project/questions/<qid>/result.json, or the ticket's questions/<qid>/ on a ticket branch), and prints the line to stage it
   review verify <qid> --applied <file>   rows applied ([{ "id", "values", "evidence" }]) vs rows the owner decided; exit 1 on any difference
   review draft <qid> [<file|->]   owner: save partial progress; without a file, print it (a draft is never an answer)
   answer <qid> --review-result <file|-> | answer <qid> "<why>" --decline   (owner) a review: validate and hash its result, or send it back

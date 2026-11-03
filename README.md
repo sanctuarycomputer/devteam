@@ -22,7 +22,8 @@ docs/devteam/
     designs/architecture.md    the whole system now, updated by every plan PR
     designs/<goal>.md          one design per goal, the spine; a feature's own design when it's planned
     log/<writer>.jsonl         the durable log
-    tickets/<id>/              spec.md, plan.md, verification.md, reviews/ (written by superpowers)
+    tickets/<id>/              spec.md, plan.md, verification.md, reviews/ (written by superpowers), questions/ (its review pages and the owner's results)
+    questions/<slug>/, questions/<qid>/   review pages the supervisor drew, and the owner's result.json for each, copied in by review result --commit; never changed once landed
     reviews/<feature>/, reviews/<design>/   graph and design review records
     retros/<date>.md
   run/                         gitignored: the live log, prompts

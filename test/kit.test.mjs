@@ -1847,4 +1847,143 @@ test('devteam kit', async (t) => {
     assert.doesNotMatch(uiJs, /\bimport\b|\bfetch\(|XMLHttpRequest|https?:\/\//, 'the helper script loads nothing');
     assert.doesNotThrow(() => new vm.Script(uiJs));
   });
+
+  await t.test("review permanence: the owner's result lands in the PR that asked, by hash, and landed review files never change", async () => {
+    const sha = (b) => crypto.createHash('sha256').update(b).digest('hex');
+    const fx = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'review');
+    const PAGE = fs.readFileSync(path.join(fx, 'page.html'), 'utf8');
+    const DATA = fs.readFileSync(path.join(fx, 'data.json'), 'utf8');
+    const D = JSON.parse(DATA);
+    const cw = wt('chore-perm');
+    git(['worktree', 'add', '-q', '-b', 'chore-perm', cw, 'origin/main']);
+    const rel = 'docs/devteam/project/questions/perm';
+    write(path.join(cw, rel, 'page.html'), PAGE);
+    write(path.join(cw, rel, 'redraw.html'), PAGE.replace('Match items', 'Sort items'));
+    write(path.join(cw, rel, 'data.json'), DATA);
+    git(['add', '-A'], cw);
+    git(['commit', '-qm', 'review pages'], cw);
+    const ask = (q, page = 'page.html') => must(['ask', '--kind', 'review', '--question', q, '--ref', 'chore-perm', '--page', `${rel}/${page}`, '--data', `${rel}/data.json`], { role: 'sup' });
+    const Qp = ask('Which items belong to each group, for good?');
+    const Qn = ask('Which items belong to each group, unlanded?');
+    const Qr = ask('Which items, sorted?', 'redraw.html');
+    const view = (id) => json(must(['questions', '--id', id, '--json']))[0];
+    const result = (id, page = PAGE) => JSON.stringify({ v: 1, question: id, review_sha256: sha(page), data_sha256: sha(DATA), rows: D.rows.map((x) => ({ id: x.id, decided: true, values: x.proposal ?? {} })) });
+    const commitAll = (wtDir, msg) => { git(['add', '-A'], wtDir); git(['commit', '-qm', msg], wtDir); };
+    const undo = (wtDir) => git(['reset', '-q', '--hard', 'HEAD~1'], wtDir);
+    const checkPr = (branch, wtDir) => dt(['check-pr', '--head-ref', branch, '--sha', git(['rev-parse', 'HEAD'], wtDir), '--title', `${branch}: review pages`, '--body-file', body], { role: 'sup', cwd: wtDir });
+    const resultRel = (id) => `docs/devteam/project/questions/${id}/result.json`;
+    const dest = path.join(cw, resultRel(Qp));
+
+    // nothing to copy before the owner answers, and a result for an unanswered question never lands
+    assert.match(dt(['review', 'result', Qp, '--commit'], { role: 'sup', cwd: cw }).err, /has no result \(open\)/);
+    write(dest, result(Qp));
+    commitAll(cw, 'a result nobody gave');
+    let r = checkPr('chore-perm', cw);
+    assert.equal(r.status, 1);
+    assert.match(r.out, new RegExp(`questions/${Qp}/result\\.json is not the owner's answer to ${Qp}: ${Qp} is open, with no owner result; if the owner has answered since, land the log .*\\. Copy it with \`review result ${Qp} --commit\``));
+    undo(cw);
+
+    must(['answer', Qp, '--review-result', '-'], { input: result(Qp) });
+    must(['answer', Qn, '--review-result', '-'], { input: result(Qn) });
+    const ownerSha = view(Qp).result.sha256;
+    // --commit verifies both hashes first: a tampered run/ copy is refused, and nothing is written
+    const runFile = path.join(repo, 'docs/devteam/run/questions', Qp, 'result.json');
+    const good = fs.readFileSync(runFile);
+    fs.writeFileSync(runFile, String(good).replace('"cli"', '"chat"'));
+    r = dt(['review', 'result', Qp, '--commit'], { role: 'sup', cwd: cw });
+    assert.equal(r.status, 1);
+    assert.match(r.err, /the result is tampered/);
+    assert.ok(!fs.existsSync(dest), 'nothing copied');
+    fs.writeFileSync(runFile, good);
+    // the owner's bytes, verified, into the PR that asked; check-pr holds them to the owner's hash
+    assert.match(must(['review', 'result', Qp, '--commit'], { role: 'sup', cwd: cw }), new RegExp(`copied the owner's result for ${Qp} .* to ${resultRel(Qp)}\\n  git add ${resultRel(Qp)}$`));
+    assert.equal(sha(fs.readFileSync(dest)), ownerSha, "the copy is the owner's bytes");
+    assert.match(must(['review', 'result', Qp, '--commit'], { role: 'sup', cwd: cw }), /is already the owner's result/);
+    commitAll(cw, "the owner's result");
+    must(['check-pr', '--head-ref', 'chore-perm', '--sha', git(['rev-parse', 'HEAD'], cw), '--title', 'chore-perm: review pages', '--body-file', body], { role: 'sup', cwd: cw });
+    // one byte changed: refused, with both hashes
+    const landedText = fs.readFileSync(dest, 'utf8');
+    fs.writeFileSync(dest, landedText.replace('"cli"', '"clj"'));
+    commitAll(cw, 'edit the result');
+    r = checkPr('chore-perm', cw);
+    assert.equal(r.status, 1);
+    assert.match(r.out, new RegExp(`is not the owner's answer to ${Qp}: it hashes to [0-9a-f]{12}, and the owner's answer line names ${ownerSha.slice(0, 12)}`));
+    undo(cw);
+    // a page a live question pins never changes, even before it lands; one sent back may be redrawn in place
+    write(path.join(cw, rel, 'page.html'), PAGE.replace('Match items', 'Match things'));
+    commitAll(cw, 'edit the page after asking');
+    r = checkPr('chore-perm', cw);
+    assert.equal(r.status, 1);
+    assert.match(r.out, new RegExp(`${rel}/page\\.html is pinned as the page of ${Qp} \\(answered\\), ${Qn} \\(answered\\); it never changes\\. Put a new page at a new path and ask a new question`));
+    undo(cw);
+    must(['answer', Qr, 'Sort them by area', '--decline']);
+    write(path.join(cw, rel, 'redraw.html'), PAGE.replace('Match items', 'Sort items by area'));
+    commitAll(cw, 'redraw the page sent back');
+    must(['check-pr', '--head-ref', 'chore-perm', '--sha', git(['rev-parse', 'HEAD'], cw), '--title', 'chore-perm: review pages', '--body-file', body], { role: 'sup', cwd: cw });
+    undo(cw);
+    // a worker's copy goes in its own ticket folder, held to the same hash
+    assert.match(must(['review', 'result', Qp, '--commit'], { role: 'worker', cwd: cw }), new RegExp(`git add docs/devteam/project/tickets/bill-01-card/questions/${Qp}/result\\.json$`));
+    const tdest = path.join(cw, `docs/devteam/project/tickets/bill-01-card/questions/${Qp}/result.json`);
+    assert.equal(sha(fs.readFileSync(tdest)), ownerSha);
+    fs.writeFileSync(tdest, landedText.replace('"cli"', '"clj"'));
+    commitAll(cw, 'a ticket copy, edited');
+    assert.match(checkPr('chore-perm', cw).out, new RegExp(`tickets/bill-01-card/questions/${Qp}/result\\.json is not the owner's answer to ${Qp}: it hashes to`));
+    undo(cw);
+
+    // squash-merged, its branch deleted: the pinned commit is on no branch, and the files on main still verify
+    const lw = wt('land-perm');
+    git(['worktree', 'add', '-q', '--detach', lw, 'origin/main']);
+    git(['merge', '--squash', '-q', 'chore-perm'], lw);
+    git(['commit', '-qm', 'chore-perm: review pages (squashed)'], lw);
+    git(['push', '-q', 'origin', 'HEAD:main'], lw);
+    git(['worktree', 'remove', '--force', lw]);
+    git(['worktree', 'remove', '--force', cw]);
+    git(['branch', '-q', '-D', 'chore-perm']);
+    git(['fetch', '-q', 'origin']);
+    const shown = json(must(['review', 'show', Qp, '--json']));
+    assert.deepEqual([shown.result_status, shown.reachable, shown.landed], ['verified', false, true], 'landed, not missing');
+    assert.ok(shown.files.every((f) => f.status === 'verified' && f.landed), 'every pinned file verifies on main');
+    assert.match(must(['review', 'show', Qp]), /no branch holds any more \(squash-merged\): its files are on main/);
+    assert.equal(sha(must(['review', 'result', Qp, '--json'], { role: 'sup' }) + '\n'), ownerSha, 'the result still reads');
+    // the dashboard serves the landed page from main, byte for byte
+    {
+      const port = 4900 + Math.floor(Math.random() * 500);
+      const B = `http://127.0.0.1:${port}`;
+      const srv = spawn(process.execPath, [DT, 'dashboard', '--port', String(port)], { cwd: repo, env: { ...process.env, DEVTEAM_ROLE: '' }, stdio: 'ignore' });
+      try {
+        for (let i = 0; i < 50; i++) { try { await fetch(`${B}/`); break; } catch { await new Promise((res) => setTimeout(res, 100)); } }
+        const pr = await fetch(`${B}/review/${Qp}/`, { headers: { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-origin' } });
+        assert.equal(pr.status, 200, 'a squash-merged page still opens');
+        assert.equal(sha(Buffer.from(await pr.arrayBuffer())), sha(PAGE));
+      } finally { srv.kill(); }
+    }
+    const stale = (on) => {
+      const sfile = path.join(repo, 'docs/devteam/project/settings.md');
+      const txt = fs.readFileSync(sfile, 'utf8');
+      fs.writeFileSync(sfile, on ? txt.replace('"gates": {', '"stale_after_minutes": -1, "gates": {') : txt.replace('"stale_after_minutes": -1, ', ''));
+    };
+    let findings = json(must(['metrics', '--json'])).findings;
+    assert.ok(!findings.some((f) => f.kind === 'review-file-missing' && [Qp, Qn].includes(f.subject)), 'a landed review is not missing');
+    assert.ok(!findings.some((f) => f.kind === 'review-unlanded'), 'review-unlanded waits stale_after_minutes × 48');
+    stale(true);
+    try {
+      findings = json(must(['metrics', '--json'])).findings;
+      assert.ok(findings.some((f) => f.kind === 'review-unlanded' && f.subject === Qn && /review result .* --commit/.test(f.suggestion)), 'an answered review whose result is not on main');
+      assert.ok(!findings.some((f) => f.kind === 'review-unlanded' && f.subject === Qp), 'its result is on main');
+      assert.ok(!findings.some((f) => f.kind === 'review-unlanded' && f.subject === Qr), 'a review sent back has no result to land');
+    } finally { stale(false); }
+
+    // once on main, a review file never changes and is never deleted, whatever its question's status
+    const nw = wt('chore-after');
+    git(['worktree', 'add', '-q', '-b', 'chore-after', nw, 'origin/main']);
+    const refused = (edit, re, msg) => { edit(); commitAll(nw, msg); const x = checkPr('chore-after', nw); assert.equal(x.status, 1, msg); assert.match(x.out, re, msg); undo(nw); };
+    refused(() => write(path.join(nw, rel, 'page.html'), PAGE.replace('Match items', 'Match things')), new RegExp(`${rel}/page\\.html is pinned as the page of ${Qp} \\(answered\\), ${Qn} \\(answered\\), and is on main; it never changes`), 'a landed page is edited');
+    refused(() => fs.rmSync(path.join(nw, rel, 'data.json')), new RegExp(`${rel}/data\\.json is pinned as the data of .*, and is on main; it is never deleted`), 'landed data is deleted');
+    refused(() => write(path.join(nw, rel, 'redraw.html'), PAGE.replace('Match items', 'Sort them')), new RegExp(`redraw\\.html is pinned as the page of ${Qr} \\(sent back\\), and is on main; it never changes`), 'a landed page sent back is still on record');
+    refused(() => fs.rmSync(path.join(nw, resultRel(Qp))), new RegExp(`${resultRel(Qp)}: the owner's answer to ${Qp} is on main; a landed review file is never deleted`), 'a landed result is deleted');
+    refused(() => write(path.join(nw, resultRel(Qp)), landedText.replace('"cli"', '"clj"')), /is not the owner's answer to .*: it hashes to/, 'a landed result is edited');
+    must(['check-pr', '--head-ref', 'chore-after', '--sha', git(['rev-parse', 'HEAD'], nw), '--title', 'chore-after: review pages', '--body-file', body], { role: 'sup', cwd: nw });
+    git(['worktree', 'remove', '--force', nw]);
+    git(['branch', '-q', '-D', 'chore-after']);
+  });
 });
