@@ -2221,6 +2221,7 @@ function cmdAsk() {
   for (const r of reasons) if (known.length && !known.includes(r)) warn(`reason "${r}" is not in constitution.md's table`);
   const blocks = asList(flags.blocks);
   for (const b of blocks) if (!tickets().has(b)) die(`--blocks ${b}: no such ticket`);
+  if (!flagStr('goal') && !flagStr('ticket') && !blocks.length && !['trust', 'proposal'].includes(kind)) warn('this question names no --goal, --ticket or --blocks: when it serves a goal, add --goal <g-id> so the goal shows it');
   // A question that asks about several acts names them up front; the owner's card lists them, and
   // the answer approves each once and nothing else (constitution.md §3, one answer, one act).
   const approves = [...new Set(asList(flags.approves).flatMap((x) => String(x).split(',')).map((x) => x.trim()).filter(Boolean))];
@@ -3302,7 +3303,14 @@ function cmdKnowledge() {
   const by = () => (flags.owner ? ownerWriter().by : (supervisorOnly('knowledge'), 'supervisor'));
   if (sub === 'add') {
     const w = by();
-    const line = appendLog({ type: 'knowledge', kind: flagStr('kind') ?? die('knowledge add needs --kind (fact, lesson, preference, constraint, pointer)'), statement: flagStr('statement') ?? die('knowledge add needs --statement'), scope: flagStr('scope') ?? 'project', status: w === 'owner' ? 'accepted' : 'candidate', confidence: flagNum('confidence'), valence: flagNum('valence'), evidence: asList(flags.evidence) }, w);
+    // An agent's lesson is proposed from what it saw: the log entries it rests on (observations,
+    // acts, questions, messages, problems) go with it, so the owner can check them before keeping it.
+    const evidence = asList(flags.evidence).flatMap((x) => String(x).split(',')).map((x) => x.trim()).filter(Boolean);
+    if (w !== 'owner' && flagStr('kind') === 'lesson') {
+      if (!evidence.length) die('a lesson names what it rests on: --evidence <log ids> (the observations, acts, questions or messages that show it)');
+      for (const e of evidence) if (!logGet(e)) die(`--evidence ${e}: no such log entry`);
+    }
+    const line = appendLog({ type: 'knowledge', kind: flagStr('kind') ?? die('knowledge add needs --kind (fact, lesson, preference, constraint, pointer)'), statement: flagStr('statement') ?? die('knowledge add needs --statement'), scope: flagStr('scope') ?? 'project', status: w === 'owner' ? 'accepted' : 'candidate', confidence: flagNum('confidence'), valence: flagNum('valence'), evidence }, w);
     return out(line.id);
   }
   if (sub === 'set') {
@@ -3798,7 +3806,10 @@ function retroDue() {
     if (first && Date.now() - Date.parse(first) >= every * DAY) { reasons.push(`no retro yet, and work started ${dateOnly(first)}`); since = new Date(Date.parse(first) + every * DAY).toISOString(); }
   } else if (Date.now() - lastAt >= every * DAY) { reasons.push(`${every} days since the last retro (${dateOnly(last.created_at)})`); since = new Date(lastAt + every * DAY).toISOString(); }
   for (const f of finishedFeatures()) if (!lastAt || Date.parse(f.finished_at) > lastAt) { reasons.push(`feature ${f.feature} finished ${dateOnly(f.finished_at)}`); if (!since || f.finished_at < since) since = f.finished_at; }
-  return { due: reasons.length > 0, reasons, due_since: since, last: last ? { at: last.created_at, summary: last.detail, file: last.source_ref ?? null } : null };
+  // every closed retro, newest first: its id is the closing observation's, its write-up the file
+  const all = logObjects('observation').filter((o) => o.kind === 'retro' && o.created_by === 'supervisor').sort(byTime).reverse()
+    .map((o) => ({ id: o.id, at: o.created_at, summary: o.detail, file: o.source_ref ?? null, refs: o.refs ?? [] }));
+  return { due: reasons.length > 0, reasons, due_since: since, last: last ? { id: last.id, at: last.created_at, summary: last.detail, file: last.source_ref ?? null } : null, all };
 }
 function retroNumbers(m) {
   return {

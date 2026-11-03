@@ -636,6 +636,8 @@ test('devteam kit', async (t) => {
     must(['observe', '--subject', 'bill', '--kind', 'slow-test', '--key', 'slow:x', '--detail', 'sup', '--valence', '-1'], { role: 'sup' });
     assert.equal(json(must(['orient', '--json'])).length, 1, 'repeated keys cluster');
     const ids = json(must(['log', '--type', 'observation', '--json'])).map((o) => o.id);
+    assert.match(dt(['knowledge', 'add', '--kind', 'lesson', '--statement', 'mock smtp', '--scope', 'component:bill'], { role: 'sup' }).err, /a lesson names what it rests on/);
+    assert.match(dt(['knowledge', 'add', '--kind', 'lesson', '--statement', 'mock smtp', '--evidence', 'o-20200101-000000000-nobody'], { role: 'sup' }).err, /no such log entry/);
     const K = must(['knowledge', 'add', '--kind', 'lesson', '--statement', 'mock smtp', '--scope', 'component:bill', '--evidence', ...ids], { role: 'sup' });
     must(['knowledge', 'set', K, '--status', 'accepted'], { role: 'sup' });
     assert.match(must(['knowledge', '--for', 'bill-01-card']), /mock smtp/);
@@ -1285,6 +1287,13 @@ test('devteam kit', async (t) => {
     assert.ok(d.ooda.acts.some((a) => a.id === A && a.correction?.reason === 'too early' && a.correction.repaired === 'fix-ticket'));
     assert.equal(d.progress.tickets.length, 1);
     assert.match(must(['history', 'bill-01-card']), /bill-01-card/);
+    // a retro is an object: its closing line's id, its write-up, what it decided; the dashboard lists every one
+    write(path.join(repo, 'docs/devteam/project/retros/2026-01-02.md'), '# Retro\n');
+    const R1 = must(['retro', 'close', '2026-01-02', '--summary', 'two things went well', '--refs', A], { role: 'sup' });
+    const rt = json(must(['dashboard-data'])).ooda.retro;
+    assert.deepEqual(rt.all.map((r) => [r.id, r.file, r.refs]), [[R1, 'project/retros/2026-01-02.md', [A]]]);
+    assert.equal(rt.last.id, R1);
+    fs.rmSync(path.join(repo, 'docs/devteam/project/retros/2026-01-02.md'));
   });
 
   await t.test("merge waits for the forge's checks at the head: pending is not passed, failing fails", () => {

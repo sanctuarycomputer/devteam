@@ -113,6 +113,9 @@
   .row-inline input[type=text] { flex: 1; min-width: 180px; }
   /* the row spaces its buttons; a solid button's own top margin would sit it lower than an outlined one */
   .row-inline > button { margin: 0; }
+  a.card.retro-row { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 12px; color: var(--fg); text-decoration: none; margin-bottom: 8px; font-size: 12.5px; }
+  a.card.retro-row:hover { background: var(--hover); }
+  a.card.retro-row span { color: var(--fg-2); }
   label { display: inline-flex; align-items: center; gap: 6px; }
 
   /* tables */
@@ -390,6 +393,7 @@
     <a href="#progress"><span class="nl"><i class="icon-chart-line" aria-hidden="true"></i>Progress</span> <span class="count" id="n-progress"></span></a>
     <a href="#board"><span class="nl"><i class="icon-kanban" aria-hidden="true"></i>Board</span> <span class="count" id="n-active"></span></a>
     <a href="#loop"><span class="nl"><i class="icon-repeat" aria-hidden="true"></i>Loop</span> <span class="count" id="n-knowledge"></span></a>
+    <a href="#retros"><span class="nl"><i class="icon-history" aria-hidden="true"></i>Retros</span> <span class="count" id="n-retros"></span></a>
     <a href="#health"><span class="nl"><i class="icon-heart-pulse" aria-hidden="true"></i>Health</span> <span class="count" id="n-findings"></span></a>
   </nav>
   <div class="foot"><span id="when"></span><br><span id="logline"></span><br><span class="err" id="err"></span><br><span id="notify"></span></div>
@@ -474,6 +478,12 @@
       <p class="loop-intro">Every decision the supervisor made on its own, newest first. If one is wrong, correct it: that drops its kind of decision back to "ask first" and becomes a lesson.</p>
       <div class="feed" id="acts-feed"></div>
     </div>
+  </section>
+
+  <section id="retros">
+    <h2>Retros <span class="sub">the supervisor's look back at how the work went, across every goal: what merged, what was slow or rejected, what it changed</span></h2>
+    <div id="retro-due"></div>
+    <div id="retro-list"></div>
   </section>
 
   <section id="health">
@@ -1547,7 +1557,7 @@ function renderOoda(o) {
   const R = o.roadmap;
   const week = (d) => { if (!d) return 'no date'; const x = new Date(`${d}T00:00:00Z`); x.setUTCDate(x.getUTCDate() - ((x.getUTCDay() + 6) % 7)); return `week of ${x.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })}`; };
   const rt = o.retro;
-  $('retro').innerHTML = `${rt.last ? 'retro ' : ''}${rt.last ? `${esc(rt.last.at.slice(0, 10))}: ${esc(rt.last.summary)}${rt.last.file ? ` (${esc(rt.last.file)})` : ''}` : 'no retro yet'}${rt.due ? ` · <span class="badge medium">due ${esc((rt.due_since || '').slice(0, 10))}</span>${esc(rt.reasons.join('; '))}` : ''}`;
+  $('retro').innerHTML = `${rt.last ? `<a class="linkish" href="#retro/${encodeURIComponent(rt.last.id)}">retro ${esc(retroDate(rt.last))}</a>: ${esc(rt.last.summary)}` : 'no retro yet'}${rt.due ? ` · <span class="badge medium">due ${esc((rt.due_since || '').slice(0, 10))}</span>${esc(rt.reasons.join('; '))}` : ''}`;
   $('unassigned').innerHTML = o.goals.length || R.unassigned.length ? `${R.unassigned.length ? `No goal: ${R.unassigned.map(esc).join(', ')} · ` : ''}${R.rate_points_per_day} pts/day` : '';
   const roadmapOf = (gid) => {
     const r = R.goals.find((x) => x.id === gid);
@@ -1685,7 +1695,9 @@ function openGoal(id) {
   const r = R.goals.find((x) => x.id === id);
   const feats = (r?.features || []).map((f) => R.features[f]).filter(Boolean);
   const week = (d) => (d ? `week of ${new Date(`${d}T00:00:00Z`).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })}` : 'no date');
-  const asks = [...(DATA.questions || []), ...(DATA.ooda.answered || [])].filter((q) => q.goal === id || (q.kind === 'goal-definition' && q.question.toLowerCase().includes(String(g.title).toLowerCase().split(':')[0])));
+  // the goal's questions: asked for it, or about (or holding up) a ticket in one of its features
+  const goalTickets = new Set((DATA.progress?.tickets || []).filter((t) => feats.some((f) => f.feature === t.feature)).map((t) => t.id));
+  const asks = [...(DATA.questions || []), ...(DATA.ooda.answered || [])].filter((q) => q.goal === id || goalTickets.has(q.ticket) || (q.blocks || []).some((b) => goalTickets.has(b)) || (q.kind === 'goal-definition' && q.question.toLowerCase().includes(String(g.title).toLowerCase().split(':')[0])));
   const design = s.ask?.links?.[0] ?? (['ready', 'met'].includes(g.status) && g.check.design ? { title: 'The design', path: `docs/devteam/${g.check.design}` } : null);
   const decisions = (g.updates || []).filter((u) => u.decision).map((u) => u.decision);
   showDrawer(`<h2 id="drawer-title">${esc(g.title)}</h2>
@@ -1806,6 +1818,34 @@ function openAct(id) {
       <dt>ID</dt><dd><code>${esc(a.id)}</code></dd>
     </dl>
     ${a.correction ? '' : '<p class="small muted">To correct it, use Correct on it in Loop → Act.</p>'}`);
+}
+// A retro's own date is its write-up's (retros/<date>.md); the closing line can come a day later.
+const retroDate = (r) => { const m = /(\d{4}-\d{2}-\d{2})\.md$/.exec(r.file || ''); return fmtDate(m ? Date.parse(`${m[1]}T12:00:00Z`) : Date.parse(r.at)); };
+// What a retro decided, in words where the log has them: a lesson's statement, an act's sentence.
+const retroRef = (x) => {
+  const k = (DATA.ooda.knowledge || []).find((y) => y.id === x);
+  if (k) return `<a class="linkish" href="#lesson/${encodeURIComponent(x)}">${esc(k.statement)}</a>`;
+  const a = (DATA.ooda.acts || []).find((y) => y.id === x);
+  if (a) return `${actView(a).head ?? esc(a.what)} <a class="linkish" href="#act/${encodeURIComponent(x)}">(the act)</a>`;
+  return linkify(x);
+};
+function openRetro(id) {
+  const all = DATA.ooda.retro?.all || [];
+  const i = all.findIndex((x) => x.id === id);
+  const r = all[i];
+  if (!r) return showDrawer(`<h2 id="drawer-title">No retro ${esc(id)}</h2>`);
+  DRAWER = { kind: 'retro', id };
+  const file = r.file ? { title: `The write-up (${r.file.split('/').pop()})`, path: `docs/devteam/${r.file}` } : null;
+  const nav = (x, w) => (x ? `<a class="linkish" href="#retro/${encodeURIComponent(x.id)}">${w} ${esc(retroDate(x))}</a>` : '');
+  showDrawer(`<h2 id="drawer-title">Retro, ${esc(retroDate(r))}</h2>
+    <p class="ctx measure">${linkify(r.summary)}</p>
+    ${file ? `<p><a class="linkish" href="${esc(fileHref(file))}">${esc(file.title)}</a></p>` : ''}
+    <dl>
+      ${row('What it decided', r.refs.length ? `<ul>${r.refs.map((x) => `<li>${retroRef(x)}</li>`).join('')}</ul>` : '')}
+      ${row('Closed', esc(when(r.at)))}
+      <dt>ID</dt><dd><code>${esc(r.id)}</code></dd>
+    </dl>
+    <p class="meta">${[nav(all[i + 1], '← the one before,'), nav(all[i - 1], 'the next,')].filter(Boolean).join(' · ')}</p>`);
 }
 function openLesson(id) {
   const k = (DATA.ooda.knowledge || []).find((x) => x.id === id);
@@ -1952,7 +1992,7 @@ function route() {
   if (h.startsWith('q/')) return void openQuestion(h.slice(2));
   if (h.startsWith('goal/')) return void openGoal(h.slice(5));
   if (h.startsWith('planner/')) return void openPlanner(h.slice(8));
-  const PEEKS = { feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, lesson: openLesson, problem: openProblem, thread: openThread };
+  const PEEKS = { feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread };
   const [kind, ...rest] = h.split('/');
   if (PEEKS[kind] && rest.length) return void PEEKS[kind](rest.join('/'));
   if (h.startsWith('file?')) return void openFile(new URLSearchParams(location.hash.slice(6)));
@@ -2011,6 +2051,14 @@ function render(d) {
   count('n-goals', o.goals.length);
   count('n-questions', d.questions.length + o.knowledge.filter((k) => k.status === 'candidate').length, true);
   count('n-active', active);
+  {
+    const rt = DATA.ooda.retro || {};
+    const all = rt.all || [];
+    count('n-retros', all.length);
+    if (rt.due) { $('n-retros').textContent = 'due'; $('n-retros').classList.add('hot'); }
+    $('retro-due').innerHTML = rt.due ? `<div class="card"><span class="badge medium">due since ${esc((rt.due_since || '').slice(0, 10))}</span> <span class="small">${esc(rt.reasons.join('; '))}</span><p class="meta">The supervisor drafts it next (supervisor.md §10).</p></div>` : '';
+    $('retro-list').innerHTML = all.length ? all.map((r) => `<a class="card retro-row" href="#retro/${encodeURIComponent(r.id)}"><b>${esc(retroDate(r))}</b><span>${esc(r.summary)}</span></a>`).join('') : '<p class="empty">No retro yet.</p>';
+  }
   count('n-findings', m.findings.length, m.findings.some((f) => f.severity === 'high'));
   count('n-knowledge', o.knowledge.filter((k) => k.status === 'candidate').length);
   $('n-observe').textContent = o.observations.length || '';
@@ -2044,7 +2092,7 @@ function render(d) {
     <div class="card qcard trust">
       ${cardHead('lightbulb', '<span class="badge good">Lesson to keep?</span>', { extra: `applies to ${esc(scopeWords(k.scope))}`, id: k.id, rows: [['Proposed', esc(when(k.created_at))], ['By', esc(who(k.created_by))]] })}
       <h4>${linkify(k.statement)}</h4>
-      <p class="ctx">${esc(cap(who(k.created_by)))} proposes this as a ${esc(k.kind)}${k.confidence != null ? `, ${Math.round(k.confidence * 100)}% sure` : ''}, based on ${(k.evidence || []).length} thing${(k.evidence || []).length === 1 ? '' : 's'} it noticed. Accepted lessons go into the instructions of every agent they apply to.</p>
+      <p class="ctx">${esc(cap(who(k.created_by)))} proposes this as a ${esc(k.kind)}${k.confidence != null ? `, ${Math.round(k.confidence * 100)}% sure` : ''}, ${(k.evidence || []).length ? `based on ${k.evidence.map((e) => linkify(e)).join(', ')}` : 'with no evidence recorded'}. Accepted lessons go into the instructions of every agent they apply to.</p>
       <div class="row-inline"><button data-know="${esc(k.id)}" data-status="accepted">Keep it</button><button class="ghost" data-know="${esc(k.id)}" data-status="retired">Retire it</button><span class="err" id="e-${esc(k.id)}"></span></div>
     </div>`).join('');
   for (const qid of [...ANSWERED.keys()]) if (!d.questions.some((q) => q.id === qid)) ANSWERED.delete(qid);
