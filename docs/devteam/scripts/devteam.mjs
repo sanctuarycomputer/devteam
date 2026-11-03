@@ -706,7 +706,7 @@ function questionView(q) {
   return {
     id: q.id, kind: q.kind, class: q.class ?? null, scope: q.scope ?? null, ticket: q.ticket ?? null, re: q.re ?? null, asked_at: q.created_at,
     question: q.question, context: q.context ?? '', options: q.options ?? [], choices: q.choices ?? [], links: q.links ?? [], goal: q.goal ?? null, change: q.change ?? null, rule_scope: q.rule_scope ?? null, recommendation: q.recommendation ?? '', confidence: q.confidence ?? null,
-    default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], evidence: q.evidence ?? [], note: q.note ?? null, why_asked: q.why_asked ?? null,
+    default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], approves: q.approves ?? [], evidence: q.evidence ?? [], note: q.note ?? null, why_asked: q.why_asked ?? null,
     secrets: (q.secrets ?? []).map((x) => ({ ...x, to: sinkWords(x.sink), sink_type: SINK_RE.exec(x.sink ?? '')?.[1] ?? null, warning: sinkWarning(x.sink) })), secrets_posted: q.updates.filter((u) => u.secrets_posted !== undefined && writerClass(u.by) === 'owner').pop()?.secrets_posted ?? [],
     status, answer, answered_by: answeredBy, answered_at: answeredAt, matched,
     autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans?.channel ?? null, said: ans?.said ?? null,
@@ -2026,9 +2026,15 @@ function cmdMerge() {
     if (av.secrets.length && (!chore?.startsWith('secret-') || !av.answer?.startsWith('Posted'))) fails.push(`${approved} asked for secrets; it approves only its own chore-secret PR, once the owner posted them (its answer: ${av.answer})`);
     // One answer approves one thing. The exception: one act of the answer's class that recorded the
     // decision for this very ticket or chore, which this merge now lands.
-    const prior = logObjects('act').filter((a) => a.approved_by === approved);
-    const landing = prior.length === 1 && prior[0].class === av.class && (prior[0].refs ?? []).includes(id ?? (chore ? `chore-${chore}` : plan));
-    if (prior.length && !landing) fails.push(`${approved} already approved an act; ask again for this one`);
+    // A question that declared its acts (ask --approves) approves each of them once: only the
+    // prior acts for this one count, and one not on its list is never approved by it.
+    const target = id ?? (chore ? `chore-${chore}` : plan);
+    const declared = av.approves ?? [];
+    const mine = (a) => !declared.length || (a.refs ?? []).some((r) => [target, `plan-${plan}`].includes(r));
+    if (declared.length && !declared.includes(target) && !(plan && declared.includes(`plan-${plan}`))) fails.push(`${approved} approves ${declared.join(', ')}, not ${target}; ask again for this one`);
+    const prior = logObjects('act').filter((a) => a.approved_by === approved && mine(a));
+    const landing = prior.length === 1 && prior[0].class === av.class && (prior[0].refs ?? []).includes(target);
+    if (prior.length && !landing) fails.push(`${approved} already approved ${declared.length ? `an act for ${target}` : 'an act'}; ask again for this one`);
   }
   // Gates: the project's own commands, at the exact head, in a detached worktree.
   const gates = Object.entries(loadSettings().gates ?? {});
@@ -2206,6 +2212,15 @@ function cmdAsk() {
   for (const r of reasons) if (known.length && !known.includes(r)) warn(`reason "${r}" is not in constitution.md's table`);
   const blocks = asList(flags.blocks);
   for (const b of blocks) if (!tickets().has(b)) die(`--blocks ${b}: no such ticket`);
+  // A question that asks about several acts names them up front; the owner's card lists them, and
+  // the answer approves each once and nothing else (constitution.md §3, one answer, one act).
+  const approves = [...new Set(asList(flags.approves).flatMap((x) => String(x).split(',')).map((x) => x.trim()).filter(Boolean))];
+  if (approves.length) {
+    if (!['owner-decision', 'one-way-door'].includes(kind)) die(`--approves belongs on an owner-decision or one-way-door question, not ${kind}`);
+    if (approves.length < 2) die('--approves names two or more acts; a question about one act needs no --approves');
+    if (approves.length > 10) die('--approves names at most 10 acts; split the question');
+    for (const a of approves) if (!(tickets().has(a) || /^chore-[a-z0-9][a-z0-9-]*$/.test(a) || /^plan-[a-z0-9][a-z0-9-]*$/.test(a))) die(`--approves ${a}: name a ticket id, chore-<slug> or plan-<feature>`);
+  }
   const open = questions().filter((x) => x.status === 'open');
   let evidence = asList(flags.evidence);
   let recommendation = flagStr('recommendation') ?? '';
@@ -2241,7 +2256,7 @@ function cmdAsk() {
     type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), question: q, context: kind === 'goal-approval' ? [flagStr('context'), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal'))))].filter(Boolean).join('\n\n') : flagStr('context'),
     rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: goalChangeFlag(cls), options: asList(flags.options), choices: jsonFlag('choices'), links: jsonFlag('links'), recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined,
     deadline: def ? new Date(Date.now() + loadSettings().question_default_after_hours * 3600000).toISOString() : undefined,
-    blocks, evidence, note: flagStr('note'), secrets, review,
+    blocks, approves: approves.length ? approves : undefined, evidence, note: flagStr('note'), secrets, review,
     why_asked: { rung: onLadder ? rungFor(cls, scope) : undefined, ceiling: onLadder ? L.classes[cls].ceiling : undefined, reasons },
   }, 'supervisor');
   out(line.id);
@@ -3137,7 +3152,13 @@ function cmdAct() {
   const doorCited = cls === 'approve-plan' && approval?.kind === 'one-way-door';
   if (approval && !doorCited) {
     if (approval.class !== cls) die(`${approved} was asked in class ${approval.class ?? '(none)'}, not ${cls}`);
-    if (logObjects('act').some((a) => a.approved_by === approved)) die(`${approved} already approved an act; ask again for another`);
+    const declared = approval.approves ?? [];
+    if (declared.length) {
+      // a question that declared its acts: this one names which (first in --refs), once each
+      const part = asList(flags.refs).flatMap((x) => String(x).split(',')).find((r) => declared.includes(r));
+      if (!part) die(`${approved} approves ${declared.join(', ')}; name the one this act is for in --refs`);
+      if (logObjects('act').some((a) => a.approved_by === approved && (a.refs ?? []).includes(part))) die(`${approved} already approved an act for ${part}; ask again for another`);
+    } else if (logObjects('act').some((a) => a.approved_by === approved)) die(`${approved} already approved an act; ask again for another`);
   }
   let rung;
   if ((L.owner_only ?? []).includes(cls)) {
@@ -4256,7 +4277,9 @@ function collectMetrics(since) {
     // owner's, already in their inbox, so say which question rather than tell the supervisor to act.
     const ownerQs = ['blocked', 'awaiting-word'].includes(p.phase) ? openQs.filter((q) => q.ticket === id || (q.blocks ?? []).includes(id)) : [];
     if (p.phase === 'blocked' && h >= 1 && ownerQs.length) add('medium', 'blocked-on-owner', id, `blocked for ${h.toFixed(1)}h on the owner's answer to ${ownerQs.map((q) => q.id).join(', ')}`, 'nothing for the supervisor until it is answered; remind the owner what it blocks if it sits');
-    else if (p.phase === 'blocked' && h >= 1) add('high', 'blocked', id, `blocked for ${h.toFixed(1)}h`, 'answer its message, re-plan, or park it');
+    // blocked with nothing in the owner's Inbox about it: if it waits on the owner, the question was
+    // never asked (one put only in the supervisor's chat never reaches the Inbox or the dashboard)
+    else if (p.phase === 'blocked' && h >= 1) add('high', 'blocked', id, `blocked for ${h.toFixed(1)}h, and no open owner question names it`, `if it waits on the owner, ask (ask --blocks ${id}): a question put only in your chat never reaches the Inbox; otherwise answer its message, re-plan, or park it`);
     // awaiting the word while an open owner question blocks it: the word waits on the owner
     if (p.phase === 'awaiting-word' && h >= 1 && ownerQs.length) add('medium', 'blocked-on-owner', id, `waiting for the word for ${h.toFixed(1)}h on the owner's answer to ${ownerQs.map((q) => q.id).join(', ')}`, 'nothing for the supervisor until it is answered; remind the owner what it blocks if it sits');
     else if (p.phase === 'awaiting-word' && h >= 1) add('medium', 'waiting-on-supervisor', id, `waiting for the stage or merge word for ${h.toFixed(1)}h`, 'answer its review-request: give the word, run merge, or say what is missing');
