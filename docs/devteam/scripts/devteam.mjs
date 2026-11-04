@@ -803,6 +803,9 @@ function goalChangeProblem(q, goalId, qid, l = null) {
 }
 
 // The correction on an act, with who made it and when.
+// The supervisor's calls: its decisions, and the acts that are their own decision (no decision
+// field: mechanical acts, and acts logged before decisions existed). Trust is earned and lost on these.
+const calls = () => [...logObjects('decision'), ...logObjects('act').filter((a) => !a.decision)];
 const correctionOf = (a) => {
   const u = a.updates.filter((x) => x.corrected !== undefined).pop();
   return u ? { ...u.corrected, by: u.by, at: u.at, repaired: a.repaired ?? null } : null;
@@ -1769,7 +1772,7 @@ function graphEdit(type, idRe) {
   if (sub === 'add' && logGet(id)) die(`${id} exists; use ${type} set`);
   if (sub === 'set' && logGet(id)?.type !== type) die(`no ${type} ${id}`);
   const line = appendLog({ ...body, type, id, op: sub === 'add' ? 'new' : 'set' }, by);
-  if (by === 'supervisor') appendLog({ type: 'act', class: sub === 'add' ? 'add-ticket' : 'replan-within-feature', what: `${sub === 'add' ? 'added' : 'changed'} ${type} ${id}${sub === 'set' ? ` (${Object.keys(body).join(', ')})` : ''}`, refs: [id], reversible: true }, 'supervisor');
+  if (by === 'supervisor') appendLog({ type: 'act', decision: citing(), class: sub === 'add' ? 'add-ticket' : 'replan-within-feature', what: `${sub === 'add' ? 'added' : 'changed'} ${type} ${id}${sub === 'set' ? ` (${Object.keys(body).join(', ')})` : ''}`, refs: [id], reversible: true }, 'supervisor');
   out(`${sub === 'add' ? 'added' : 'updated'} ${line.id}`);
 }
 
@@ -2292,7 +2295,9 @@ function cmdMerge() {
     const declared = av.approves ?? [];
     const mine = (a) => !declared.length || (a.refs ?? []).some((r) => [target, `plan-${plan}`].includes(r));
     if (declared.length && !declared.includes(target) && !(plan && declared.includes(`plan-${plan}`))) fails.push(`${approved} approves ${declared.join(', ')}, not ${target}; ask again for this one`);
-    const prior = logObjects('act').filter((a) => a.approved_by === approved && mine(a));
+    // Every earlier use counts, merges that cited a decision included; only the decision this merge
+    // carries out (--decision) is the call the answer approved, not a prior one.
+    const prior = [...logObjects('decision'), ...logObjects('act')].filter((a) => a.approved_by === approved && mine(a) && a.id !== flagStr('decision'));
     const landing = prior.length === 1 && prior[0].class === av.class && (prior[0].refs ?? []).includes(target);
     if (prior.length && !landing) fails.push(`${approved} already approved ${declared.length ? `an act for ${target}` : 'an act'}; ask again for this one`);
   }
@@ -2359,29 +2364,34 @@ function cmdMerge() {
   mainLogCache = undefined;
   mergeShaCache.clear();
   const cls = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
-  const act = appendLog({ type: 'act', class: cls, what: `merged ${branch} at ${sha}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag}, verbatim)` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [], reversible: false, approved_by: approved ?? standing?.rule.id ?? undefined }, 'supervisor');
+  const act = appendLog({ type: 'act', decision: citing(), class: cls, what: `merged ${branch} at ${sha}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag}, verbatim)` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [], reversible: false, approved_by: approved ?? standing?.rule.id ?? undefined }, 'supervisor');
   out(`merged ${branch} at ${sha.slice(0, 12)} (${act.id})`);
 }
 // ===== 7. trust =====
 
 // The rung a ladder class is on: its start, then every owner direction and every correction of an
 // act in the class (a drop to 1), in time order, capped at the ceiling.
+// How a class's rung moved: the owner's trust answers set it, a correction on a call in the class
+// drops it to 1. Oldest first; each event says what moved it.
+function rungHistory(cls, scope = null) {
+  const events = [];
+  for (const q of questions()) if (q.status === 'answered' && q.autonomy?.class === cls && (!q.autonomy.scope || q.autonomy.scope === scope)) events.push({ at: q.answered_at, rung: q.autonomy.rung, by: 'answer', id: q.id, why: q.question });
+  for (const a of calls()) { const c = correctionOf(a); if (c && a.class === cls) events.push({ at: c.at, rung: 1, by: 'correction', id: a.id, why: c.reason }); }
+  return events.sort((a, b) => a.at.localeCompare(b.at));
+}
 function rungFor(cls, scope = null) {
   const def = ladder().classes[cls];
   if (!def) return null;
-  const events = [];
-  for (const q of questions()) if (q.status === 'answered' && q.autonomy?.class === cls && (!q.autonomy.scope || q.autonomy.scope === scope)) events.push({ at: q.answered_at, rung: q.autonomy.rung });
-  for (const a of logObjects('act')) { const c = correctionOf(a); if (c && a.class === cls) events.push({ at: c.at, rung: 1 }); }
   let r = def.start;
-  for (const e of events.sort((a, b) => a.at.localeCompare(b.at))) r = e.rung;
+  for (const e of rungHistory(cls, scope)) r = e.rung;
   return Math.min(r, def.ceiling);
 }
 // Evidence for a trust question: how often the owner went with the supervisor's recommendation on
-// the last N answered questions of the class (defaulted answers don't count), and acts in the
-// class since it last dropped, none corrected.
+// the last N answered questions of the class (defaulted answers don't count), and calls in the
+// class since it last dropped (decisions, and acts that were their own), none corrected.
 function trustEvidence(cls) {
   const promo = ladder().promotion;
-  const acts = logObjects('act').filter((a) => a.class === cls).sort(byTime);
+  const acts = calls().filter((a) => a.class === cls).sort(byTime);
   const drops = acts.map(correctionOf).filter(Boolean).map((c) => c.at).sort();
   const since = drops[drops.length - 1] ?? '';
   const after = acts.filter((a) => a.created_at > since);
@@ -2397,8 +2407,79 @@ function trustTable() {
   return Object.entries(ladder().classes).map(([cls, def]) => {
     const ev = trustEvidence(cls);
     const rung = rungFor(cls);
-    return { class: cls, about: def.about, rung, rung_name: RUNG[rung], ceiling: def.ceiling, start: def.start, ...ev, can_ask: rung < def.ceiling && ev.meets_agreement };
+    return { class: cls, about: def.about, rung, rung_name: RUNG[rung], ceiling: def.ceiling, start: def.start, ...ev, can_ask: rung < def.ceiling && ev.meets_agreement, history: rungHistory(cls) };
   });
+}
+
+// What a call rested on, for one that recorded none (an act that was its own decision).
+function actAuthority(a) {
+  const L = ladder();
+  if (a.approved_by?.startsWith('k-')) return 'standing-rule';
+  if (a.approved_by) { const q = logGet(a.approved_by); return q?.type === 'question' && questionView(q).status === 'defaulted' ? 'default' : 'answer'; }
+  if (L.classes[a.class] && a.rung === 3) return 'rung';
+  return 'constitution';
+}
+// The Decide view: every call, who made it and under what. The supervisor's decisions and the acts
+// that were their own decision; the owner's calls computed from the owner's own lines (answers, goal
+// verdicts and holds, standing rules, corrections), shown as they are and never rewritten as
+// decision lines. Newest first.
+function decisionRecords() {
+  const acts = logObjects('act');
+  const carried = new Map();
+  for (const a of acts) if (a.decision) (carried.get(a.decision) ?? carried.set(a.decision, []).get(a.decision)).push(a.id);
+  const rows = [];
+  const allCalls = calls();
+  const usedBy = new Map();
+  for (const c of allCalls) if (c.approved_by) (usedBy.get(c.approved_by) ?? usedBy.set(c.approved_by, []).get(c.approved_by)).push(c.id);
+  const call = (o, kind, under) => ({
+    id: o.id, at: o.created_at, who: 'supervisor', kind, class: o.class, scope: o.scope ?? null, what: o.what, rationale: o.rationale ?? null, options: o.options ?? [], confidence: o.confidence ?? null,
+    refs: o.refs ?? [], reversible: o.reversible !== false, under, acts: kind === 'decision' ? carried.get(o.id) ?? [] : [], correction: correctionOf(o),
+  });
+  for (const d of logObjects('decision')) rows.push(call(d, 'decision', { authority: d.authority, rung: d.rung ?? null, ceiling: d.ceiling ?? null, approved_by: d.approved_by ?? null }));
+  for (const a of acts) if (!a.decision) rows.push(call(a, 'act', { authority: actAuthority(a), rung: a.rung ?? null, ceiling: ladder().classes[a.class]?.ceiling ?? null, approved_by: a.approved_by ?? null }));
+  for (const q of questions()) {
+    if (q.status !== 'answered') continue;
+    rows.push({
+      id: q.id, at: q.answered_at, who: 'owner', kind: 'answer', class: q.class, scope: q.scope, what: `${q.question} → ${q.answer}`, refs: [q.ticket, q.goal].filter(Boolean),
+      under: { recommendation: q.recommendation || null, matched: q.matched ?? null, autonomy: q.autonomy, standing_rule: q.standing_rule, channel: q.channel }, acts: usedBy.get(q.id) ?? [], correction: null,
+    });
+  }
+  for (const g of readLog().objects.values()) {
+    if (g.type !== 'goal') continue;
+    const title = g.kind === 'upkeep' ? 'Upkeep' : `"${g.title}"`;
+    for (const u of g.updates ?? []) {
+      if (writerClass(u.by) !== 'owner') continue;
+      const said = [
+        u.decision ? `${u.decision.verdict}${u.decision.notes ? ` (${u.decision.notes})` : ''}` : null,
+        u.status !== undefined && !u.decision ? `status ${u.status}` : null,
+        u.hold !== undefined ? (u.hold ? `${u.hold.mode}${u.hold.reason ? ` (${u.hold.reason})` : ''}` : 'run') : null,
+      ].filter(Boolean);
+      if (said.length) rows.push({ id: g.id, at: u.at, who: 'owner', kind: 'goal', class: u.hold !== undefined ? 'goal-hold' : 'goal-approval', scope: null, what: `${title}: ${said.join('; ')}`, refs: [g.id], under: null, acts: [], correction: null });
+    }
+  }
+  for (const k of logObjects('knowledge')) {
+    if (writerClass(k.created_by) !== 'owner' || k.status === 'retired') continue;
+    rows.push({ id: k.id, at: k.created_at, who: 'owner', kind: 'rule', class: null, scope: k.scope ?? null, what: k.statement, refs: k.evidence ?? [], under: { status: k.status }, acts: usedBy.get(k.id) ?? [], correction: null });
+  }
+  for (const c of allCalls) {
+    const x = correctionOf(c);
+    if (x) rows.push({ id: c.id, at: x.at, who: writerClass(x.by), kind: 'correction', class: c.class, scope: c.scope ?? null, what: `corrected "${c.what}": ${x.reason}`, refs: [c.id], under: { severity: x.severity ?? null, repaired: x.repaired }, acts: [], correction: null });
+  }
+  return rows.sort((a, b) => b.at.localeCompare(a.at));
+}
+const AUTHORITY_WORDS = { rung: 'its rung', answer: 'the owner\'s answer', default: 'a default', 'standing-rule': 'a standing rule', constitution: 'the constitution' };
+function cmdDecisions() {
+  let rows = decisionRecords();
+  if (flagStr('who')) rows = rows.filter((r) => r.who === flagStr('who'));
+  if (flagStr('class')) rows = rows.filter((r) => r.class === flagStr('class'));
+  if (flags.corrected) rows = rows.filter((r) => r.correction || r.kind === 'correction');
+  rows = rows.slice(0, Number(flagStr('tail') ?? 50));
+  if (flags.json) return json(rows);
+  if (!rows.length) return out('no decisions');
+  for (const r of rows) {
+    const under = ['decision', 'act'].includes(r.kind) ? ` under ${AUTHORITY_WORDS[r.under.authority] ?? r.under.authority}${r.under.rung ? ` (rung ${r.under.rung}${r.under.ceiling ? ` of ${r.under.ceiling}` : ''})` : ''}${r.under.approved_by ? ` ${r.under.approved_by}` : ''}` : '';
+    out(`${r.at.slice(0, 16).replace('T', ' ')} ${r.who.padEnd(10)} ${(r.kind).padEnd(10)} ${r.class ?? '-'}: ${String(r.what).slice(0, 120)}${under}${r.correction ? `  CORRECTED: ${r.correction.reason}` : ''}`);
+  }
 }
 function cmdTrust() {
   const rows = trustTable();
@@ -2596,7 +2677,7 @@ function cmdWithdraw() {
   supervisorOnly('withdraw');
   openQuestion(id);
   appendLog({ type: 'question', op: 'set', id, status: 'withdrawn', reason: flagStr('reason') }, 'supervisor');
-  appendLog({ type: 'act', class: 'withdraw-question', what: `withdrew ${id}${flagStr('reason') ? `: ${flagStr('reason')}` : ''}`, refs: [id], reversible: true }, 'supervisor');
+  appendLog({ type: 'act', decision: citing(), class: 'withdraw-question', what: `withdrew ${id}${flagStr('reason') ? `: ${flagStr('reason')}` : ''}`, refs: [id], reversible: true }, 'supervisor');
   out(`withdrew ${id}`);
 }
 
@@ -3420,52 +3501,166 @@ function cmdQuestions() {
 
 // An act: a decision the supervisor made. For a ladder class it checks the rung first and refuses
 // (writing nothing) when the supervisor may not act alone; an owner-only class needs an owner answer.
-function cmdAct() {
-  const what = rest ? rest.join(' ') : flagStr('what');
-  const cls = flagStr('class');
-  if (!cls || !what) die('usage: act --class <decision-class> [--scope s] [--approved <qid>] [--refs ids] [--irreversible] -- "<what you did>"');
-  supervisorOnly('act');
-  if (cls === 'improvement-trial') upkeepAllows('a new trial');
+// Whether the supervisor may make a call in class cls (scope), and on what authority: the class's
+// rung, an owner's answer or a default (approved q-…), a standing rule (approved k-…), or the
+// constitution for a class the ladder doesn't hold. Exits 3 when the rung says ask first. One
+// answer authorises one call (a decision, or an act that is its own decision); a question that
+// declared its acts (ask --approves) authorises one call for each.
+function authorise(cls, scope, approved, refs, verb) {
   const L = ladder();
-  const scope = flagStr('scope') ?? null;
-  const approved = flagStr('approved') ?? null;
+  const ownerOnly = (L.owner_only ?? []).includes(cls);
   let approval = null;
-  if (approved) {
+  let rule = null;
+  if (approved?.startsWith('k-')) {
+    rule = logGet(approved);
+    if (rule?.type !== 'knowledge' || writerClass(rule.created_by) !== 'owner' || rule.status !== 'accepted') die(`${approved} is not a standing rule of the owner's (accepted knowledge the owner wrote)`);
+    // Only a rule the owner scoped to this class: a project-wide preference ("flags first") is
+    // guidance, never authority over every class on the ladder.
+    if (rule.scope !== `class:${cls}`) die(`${approved} applies to ${rule.scope}; a standing rule authorises a call only when the owner scoped it to its class (answer … --rule "…" --rule-scope class:${cls})`);
+    if (ownerOnly) die(`${cls} is the owner's (constitution.md); a standing rule never covers it: ask`);
+  } else if (approved) {
     const q = logGet(approved);
     approval = q?.type === 'question' ? questionView(q) : null;
     if (!approval || !['answered', 'defaulted'].includes(approval.status)) die(`${approved} is not an answered question`);
-    reviewApproves(approval, 'act --approved');
+    reviewApproves(approval, `${verb} --approved`);
   }
   // approve-plan may cite the owner's answer to a one-way door asked at goal level (constitution.md §4);
-  // it is checked below, against the ticket's goals and its plan review, not as an approve-plan answer.
+  // the act checks it against the ticket's goals and its plan review, not as an approve-plan answer.
   const doorCited = cls === 'approve-plan' && approval?.kind === 'one-way-door';
   if (approval && !doorCited) {
     if (approval.class !== cls) die(`${approved} was asked in class ${approval.class ?? '(none)'}, not ${cls}`);
     const declared = approval.approves ?? [];
     if (declared.length) {
-      // a question that declared its acts: this one names which (first in --refs), once each
-      const part = asList(flags.refs).flatMap((x) => String(x).split(',')).find((r) => declared.includes(r));
-      if (!part) die(`${approved} approves ${declared.join(', ')}; name the one this act is for in --refs`);
-      if (logObjects('act').some((a) => a.approved_by === approved && (a.refs ?? []).includes(part))) die(`${approved} already approved an act for ${part}; ask again for another`);
-    } else if (logObjects('act').some((a) => a.approved_by === approved)) die(`${approved} already approved an act; ask again for another`);
-  }
-  let rung;
-  if ((L.owner_only ?? []).includes(cls)) {
-    if (!approval || approval.status !== 'answered') die(`${cls} is the owner's (constitution.md); it needs an owner answer in that class (--approved <qid>)`);
-  } else if (L.classes[cls]) {
-    rung = rungFor(cls, scope);
-    if (approval) {
-      if (approval.status === 'defaulted' && rung < 2) die(`${cls} is on rung ${rung} (${RUNG[rung]}); a defaulted answer is not approval there`);
-    } else if (rung < 3) {
-      process.stderr.write(`devteam: ${cls}${scope ? ` (${scope})` : ''} is on rung ${rung} (${RUNG[rung]}); ask first:\n  devteam.mjs ask --class ${cls} --question "…" --recommendation "…"${rung === 2 ? ' --default "…"' : ''} --reasons below-rung\nthen act with --approved <qid>.\n`);
-      process.exit(3);
+      const part = refs.flatMap((x) => String(x).split(',')).find((r) => declared.includes(r));
+      if (!part) die(`${approved} approves ${declared.join(', ')}; name the one this ${verb === 'decide' ? 'decision' : 'act'} is for in --refs`);
+      const used = calls().find((a) => a.approved_by === approved && (a.refs ?? []).includes(part));
+      if (used) die(`${approved} already approved ${used.type === 'decision' ? 'a decision' : 'an act'} for ${part} (${used.id}); ask again for another`);
+    } else {
+      const used = calls().find((a) => a.approved_by === approved);
+      if (used) die(`${approved} already approved ${used.type === 'decision' ? 'a decision' : 'an act'} (${used.id}); ask again for another`);
     }
-  } else if (!(L.constitutional ?? []).includes(cls)) warn(`class "${cls}" is not in constitution.md (ladder, constitutional or owner-only)`);
+  }
+  const def = L.classes[cls];
+  let rung;
+  let authority = 'constitution';
+  if (ownerOnly) {
+    if (!approval || approval.status !== 'answered') die(`${cls} is the owner's (constitution.md); it needs an owner answer in that class (--approved <qid>)`);
+    authority = 'answer';
+  } else if (def) {
+    rung = rungFor(cls, scope);
+    if (rule) authority = 'standing-rule';
+    else if (approval) {
+      if (approval.status === 'defaulted' && rung < 2) die(`${cls} is on rung ${rung} (${RUNG[rung]}); a defaulted answer is not approval there`);
+      authority = approval.status === 'defaulted' ? 'default' : 'answer';
+    } else if (rung < 3) {
+      process.stderr.write(`devteam: ${cls}${scope ? ` (${scope})` : ''} is on rung ${rung} (${RUNG[rung]}); ask first:\n  devteam.mjs ask --class ${cls} --question "…" --recommendation "…"${rung === 2 ? ' --default "…"' : ''} --reasons below-rung\nthen ${verb} with --approved <qid>.\n`);
+      process.exit(3);
+    } else authority = 'rung';
+  } else {
+    if (!(L.constitutional ?? []).includes(cls)) warn(`class "${cls}" is not in constitution.md (ladder, constitutional or owner-only)`);
+    if (rule) authority = 'standing-rule';
+    else if (approval) authority = approval.status === 'defaulted' ? 'default' : 'answer';
+  }
+  return { rung, ceiling: def?.ceiling, authority, approval, doorCited };
+}
+// A decision an act may carry out: the supervisor's, and not corrected (decide again after a correction).
+// A decision made on the class's own trust (its rung, or a default) lapses when the class drops after
+// it: a stockpiled call can't outlive the correction that took the trust back.
+function decisionFor(id) {
+  const d = logGet(id);
+  if (d?.type !== 'decision') die(`no decision ${id}`);
+  if (correctionOf(d)) die(`${id} was corrected (${correctionOf(d).reason}); decide again`);
+  if (['rung', 'default'].includes(d.authority) && rungHistory(d.class, d.scope ?? null).some((e) => e.by === 'correction' && e.at > d.created_at)) die(`${d.class} dropped to rung 1 after ${id} was decided; decide again`);
+  // The authority a decision records is checked against the log, not taken on its word: a decision
+  // line is the supervisor's own, so one written by hand can't carry trust it never had.
+  const why = decisionAuthorityGap(d);
+  if (why) die(`${id} records authority it doesn't have (${why}); decide again`);
+  return d;
+}
+function decisionAuthorityGap(d) {
+  const L = ladder();
+  const ownerOnly = (L.owner_only ?? []).includes(d.class);
+  const q = d.approved_by?.startsWith('q-') ? logGet(d.approved_by) : null;
+  const v = q?.type === 'question' ? questionView(q) : null;
+  const inClass = v && (v.class === d.class || (d.class === 'approve-plan' && v.kind === 'one-way-door'));
+  if (ownerOnly) return v && inClass && v.status === 'answered' ? null : `${d.class} is the owner's and needs the owner's answer in that class`;
+  switch (d.authority) {
+    case 'answer': return v && inClass && v.status === 'answered' ? null : `no answered ${d.class} question ${d.approved_by ?? ''}`.trim();
+    case 'default': return v && inClass && v.status === 'defaulted' ? null : `no defaulted ${d.class} question ${d.approved_by ?? ''}`.trim();
+    case 'standing-rule': { const k = logGet(d.approved_by ?? ''); return k?.type === 'knowledge' && writerClass(k.created_by) === 'owner' && k.status === 'accepted' && k.scope === `class:${d.class}` ? null : `no accepted owner rule scoped class:${d.class}`; }
+    case 'rung': return L.classes[d.class] && rungFor(d.class, d.scope ?? null) >= 3 ? null : `${d.class} is not on rung 3`;
+    case 'constitution': return (L.constitutional ?? []).includes(d.class) || !L.classes[d.class] ? null : `${d.class} is on the ladder, not constitutional`;
+    default: return `unknown authority ${d.authority}`;
+  }
+}
+// What a command's act would be about, for --decision: the act must be about something the decision named.
+function citeTargets() {
+  const [a, b] = positional;
+  switch (command) {
+    case 'merge': return [a, flagStr('chore') !== undefined ? `chore-${choreSlug(flagStr('chore'))}` : null, flagStr('plan'), flagStr('plan') ? `plan-${flagStr('plan')}` : null].filter(Boolean);
+    case 'ticket': return ['add', 'set'].includes(a) ? [b] : null;
+    case 'withdraw': return [a];
+    case 'goal': return a === 'hold' ? [b === 'upkeep' ? upkeepOrVirtual().id : b, b] : null;
+    case 'worker': return [a, ...(features().get(tickets().get(a)?.feature)?.goals ?? [])];
+    case 'planner': return [a, `plan-${a}`, ...asList(flags.goal)];
+    case 'fleet': return ['fleet', ...logObjects('goal').map((g) => g.id)];
+    default: return null;
+  }
+}
+// --decision on a command that logs its own act: checked before the command runs (see dispatch).
+const citing = () => flagStr('decision') ?? undefined;
+
+function cmdDecide() {
+  const what = rest ? rest.join(' ') : flagStr('what');
+  const cls = flagStr('class');
+  if (!cls || !what) die('usage: decide --class c [--scope s] [--approved qid|kid] [--options "a" "b"] [--rationale "…"] [--confidence 0-1] [--refs ids] [--irreversible] -- "<what you decided>"');
+  supervisorOnly('decide');
+  if (cls === 'improvement-trial') upkeepAllows('a new trial');
+  const scope = flagStr('scope') ?? null;
+  const approved = flagStr('approved') ?? null;
+  const refs = asList(flags.refs);
+  const confidence = flagNum('confidence');
+  if (confidence !== undefined && !(confidence >= 0 && confidence <= 1)) die('--confidence is a number from 0 to 1');
+  if (['approve-spec', 'approve-plan'].includes(cls) && !tickets().has(refs[0])) die(`${cls} names the ticket first: --refs <ticket-id> [other ids]`);
+  const a = authorise(cls, scope, approved, refs, 'decide');
+  if (a.doorCited && a.approval.ticket !== refs[0] && !(features().get(tickets().get(refs[0])?.feature)?.goals ?? []).includes(a.approval.goal)) die(`${approved} answered a one-way door for ${a.approval.ticket ?? a.approval.goal ?? 'something else'}, not for ${refs[0]} or a goal its feature serves`);
+  const line = appendLog({
+    type: 'decision', class: cls, scope: scope ?? undefined, what, rationale: flagStr('rationale'), options: flags.options !== undefined ? listFlag('options') : undefined,
+    confidence, refs, reversible: !flags.irreversible, rung: a.rung, ceiling: a.ceiling, authority: a.authority, approved_by: approved ?? undefined,
+  }, 'supervisor');
+  out(line.id);
+}
+
+function cmdAct() {
+  const what = rest ? rest.join(' ') : flagStr('what');
+  const decision = flagStr('decision') ? decisionFor(flagStr('decision')) : null;
+  if (decision && flagStr('class') && flagStr('class') !== decision.class) die(`${decision.id} is in class ${decision.class}; an act carrying it out takes its class`);
+  if (decision && (flagStr('approved') || flagStr('scope'))) die(`an act carrying out ${decision.id} takes its scope and approval from it; pass no --scope or --approved`);
+  const cls = decision?.class ?? flagStr('class');
+  if (!cls || !what) die('usage: act --decision d-… -- "<what you did>"   |   act --class c [--scope s] [--approved qid|kid] [--refs ids] [--irreversible] -- "<what you did>"   (without --decision the act is its own decision)');
+  supervisorOnly('act');
+  if (cls === 'improvement-trial') upkeepAllows('a new trial');
+  const scope = decision ? decision.scope ?? null : flagStr('scope') ?? null;
+  const approved = decision ? decision.approved_by ?? null : flagStr('approved') ?? null;
+  const refs = flags.refs !== undefined ? asList(flags.refs) : decision?.refs ?? [];
+  // An act carries out what its decision covered, nothing else.
+  if (decision) {
+    const outside = refs.filter((r) => !(decision.refs ?? []).includes(r));
+    if (outside.length) die(`${decision.id} covers ${(decision.refs ?? []).join(', ') || 'no refs'}; ${outside.join(', ')} ${outside.length > 1 ? 'are' : 'is'} outside it: decide again for ${outside.length > 1 ? 'them' : 'it'}`);
+    if (['approve-spec', 'approve-plan'].includes(cls) && refs[0] !== decision.refs?.[0]) die(`${decision.id} approves ${decision.refs?.[0]}; a ${cls} act under it names that ticket first`);
+  }
+  // A decision was authorised when it was made; an act without one is authorised now.
+  let auth;
+  if (decision) {
+    const q = approved?.startsWith('q-') ? logGet(approved) : null;
+    const approval = q?.type === 'question' ? questionView(q) : null;
+    auth = { rung: undefined, approval, doorCited: cls === 'approve-plan' && approval?.kind === 'one-way-door' };
+  } else auth = authorise(cls, scope, approved, refs, 'act');
+  const { approval, doorCited } = auth;
   // Classes that are about one ticket name it first in refs; checkTicket finds approvals by it.
-  if (['approve-spec', 'approve-plan'].includes(cls) && !tickets().has(asList(flags.refs)[0])) die(`${cls} names the ticket first: --refs <ticket-id> [other ids]`);
+  if (['approve-spec', 'approve-plan'].includes(cls) && !tickets().has(refs[0])) die(`${cls} names the ticket first: --refs <ticket-id> [other ids]`);
   if (cls === 'approve-plan') {
-    const t = tickets().get(asList(flags.refs)[0]);
-    if (!t) die('approve-plan names the ticket: --refs <ticket-id>');
+    const t = tickets().get(refs[0]);
     const doors = t.one_way_doors ?? [];
     let goalDoor = null;
     if (doorCited) {
@@ -3490,7 +3685,7 @@ function cmdAct() {
       if (!latest.some((r) => r.doors.includes(goalDoor))) die(`${goalDoor} is a goal-level answer; the latest approving plan review (reviews/plan-<n>.md on ticket/${t.id}) must say "- Goal-level door: ${goalDoor} covers this plan" (quality.md §3)`);
     }
   }
-  const line = appendLog({ type: 'act', class: cls, scope: scope ?? undefined, what, rung, refs: asList(flags.refs), reversible: !flags.irreversible, approved_by: approved ?? undefined }, 'supervisor');
+  const line = appendLog({ type: 'act', class: cls, scope: scope ?? undefined, what, rung: auth.rung, refs, reversible: decision ? decision.reversible !== false && !flags.irreversible : !flags.irreversible, approved_by: decision ? undefined : approved ?? undefined, decision: decision?.id }, 'supervisor');
   out(line.id);
 }
 // A plan or design opens with '## TL;DR' and a few bullets: the approach, skimmable (quality.md §6).
@@ -3507,14 +3702,18 @@ function tldrGap(text) {
   if (bullets > 7) return `has a TL;DR of ${bullets} bullets; seven at most, the rest belongs in the plan`;
   return null;
 }
+// A correction lands on the call that was wrong: a decision, or an act that was its own decision.
+// An act that carried out a decision sends you to the decision; if the decision was sound and the
+// act went wrong, that is a problem (or an escaped defect), not a trust drop (constitution.md §2).
 function cmdCorrect() {
   const [actId] = positional;
-  if (!actId) die('usage: correct <act-id> --reason r [--severity 0-4]   (owner; the supervisor at a retro adds --retro)');
+  if (!actId) die('usage: correct <decision-or-act-id> --reason r [--severity 0-4]   (owner; the supervisor at a retro adds --retro)');
   const by = flags.retro ? (supervisorOnly('correct --retro'), 'supervisor') : ownerWriter().by;
   const act = logGet(actId);
-  if (act?.type !== 'act') die(`no act ${actId}`);
+  if (!['act', 'decision'].includes(act?.type)) die(`no decision or act ${actId}`);
+  if (act.type === 'act' && act.decision) die(`${actId} carried out ${act.decision}. If the decision was wrong: correct ${act.decision} --reason "…". If it was sound and the act went wrong: problem add --title "…" --severity 0-4 --refs ${actId}${by === 'owner' ? ' --owner' : ''} (a problem, not a trust drop; constitution.md §2)`);
   if (correctionOf(act)) die(`${actId} is already corrected`);
-  appendLog({ type: 'act', op: 'set', id: actId, corrected: { reason: flagStr('reason') ?? die('correct needs --reason'), severity: flagNum('severity') } }, by);
+  appendLog({ type: act.type, op: 'set', id: actId, corrected: { reason: flagStr('reason') ?? die('correct needs --reason'), severity: flagNum('severity') } }, by);
   if (ladder().classes[act.class]) out(`${act.class} drops to rung 1 (ask)`);
   if (by === 'owner') nudgeSupervisor(`[devteam correction from owner] on ${actId}; read it with: devteam.mjs log --id ${actId}`);
   out(`corrected ${actId}`);
@@ -3526,8 +3725,8 @@ function cmdRepair() {
   if (!actId || !['undo', 'fix-ticket', 'none'].includes(how)) die('usage: repair <act-id> --how undo|fix-ticket|none');
   supervisorOnly('repair');
   const act = logGet(actId);
-  if (act?.type !== 'act' || !correctionOf(act)) die(`${actId} is not a corrected act`);
-  appendLog({ type: 'act', op: 'set', id: actId, repaired: how }, 'supervisor');
+  if (!['act', 'decision'].includes(act?.type) || !correctionOf(act)) die(`${actId} is not a corrected decision or act`);
+  appendLog({ type: act.type, op: 'set', id: actId, repaired: how }, 'supervisor');
   out(`repaired ${actId}: ${how}`);
 }
 
@@ -3638,7 +3837,7 @@ function orientClusters() {
     if (linked.has(o.id) || ['reading', 'retro', 'outcome'].includes(o.kind)) continue;
     add(o.source_key ?? `${o.kind}:${o.subject}`, { id: o.id, at: o.created_at, who: o.created_by, valence: o.valence ?? 0, detail: o.detail });
   }
-  for (const a of logObjects('act')) {
+  for (const a of calls()) {
     const c = correctionOf(a);
     if (c && !linked.has(a.id)) add(`correction:${a.class}:${a.scope ?? 'any'}`, { id: a.id, at: c.at, who: c.by, valence: -2, detail: c.reason });
   }
@@ -3842,7 +4041,7 @@ function cmdGoal() {
       // an earlier answer carried forward with --change is checked as such (its question recorded no change)
       const problem = goalChangeProblem(logGet(approved), id, approved, logGet(approved)?.type === 'question' && !questionView(logGet(approved)).change && flagStr('change') !== undefined ? { carried: true } : null);
       if (problem) die(`goal set --approved: ${problem}`);
-      if (logObjects('goal').some((g) => g.updates.some((u) => u.approved === approved)) || logObjects('act').some((a) => a.approved_by === approved)) die(`${approved} already authorised a change; ask again for another`);
+      if (logObjects('goal').some((g) => g.updates.some((u) => u.approved === approved)) || calls().some((a) => a.approved_by === approved)) die(`${approved} already authorised a change; ask again for another`);
       // the answer authorises the change the question proposed, applied as is
       if (Object.values(fields()).some((x) => x !== undefined)) die('goal set --approved applies the change its question proposed; pass no other fields');
       const qv = questionView(logGet(approved));
@@ -3914,7 +4113,7 @@ function cmdGoal() {
     logCache = null;
     const name = isUpkeep(g) ? 'upkeep' : g.id;
     const now = goalArg(isUpkeep(g) ? 'upkeep' : g.id);
-    if (by === 'supervisor') appendLog({ type: 'act', class: 'goal-hold', what: `${mode === 'drain' ? 'drained' : 'released my drain on'} ${isUpkeep(g) ? 'Upkeep' : `"${g.title}"`}: ${reason}`, refs: [now.id], reversible: true }, 'supervisor');
+    if (by === 'supervisor') appendLog({ type: 'act', decision: citing(), class: 'goal-hold', what: `${mode === 'drain' ? 'drained' : 'released my drain on'} ${isUpkeep(g) ? 'Upkeep' : `"${g.title}"`}: ${reason}`, refs: [now.id], reversible: true }, 'supervisor');
     out(`${isUpkeep(g) ? 'Upkeep' : g.id} is ${holdWords(mode)} (${line.id})`);
     if (mode === 'park') {
       if (by === 'supervisor') { const sent = sendParkRulings({ goal: now }); out(sent.length ? `told ${sent.join(', ')} to commit, push, write a handoff and park` : 'no running session of it to tell'); }
@@ -4188,7 +4387,7 @@ function retroDraft() {
   const rejected = [];
   for (const id of ts.keys()) { const b = ticketBranchRef(id); for (const r of ticketReviews(id, b && !mergeShaFor(id) ? { ref: b } : WORKTREE)) if (r.pass === 1 && !r.variant && r.verdict === 'CHANGES') rejected.push(`${id} ${r.stage}`); }
   const acts = logObjects('act');
-  const corrections = acts.map((a) => ({ a, c: correctionOf(a) })).filter((x) => x.c && after(x.c.at));
+  const corrections = calls().map((a) => ({ a, c: correctionOf(a) })).filter((x) => x.c && after(x.c.at));
   const outcomes = logObjects('observation').filter((o) => o.kind === 'outcome');
   const trials = acts.filter((a) => a.class === 'improvement-trial' && after(a.created_at));
   const openTrials = acts.filter((a) => a.class === 'improvement-trial' && !outcomes.some((o) => (o.refs ?? []).includes(a.id)));
@@ -4840,7 +5039,12 @@ function collectOoda() {
     const l = ticketSets.filter((x) => (a.refs ?? []).includes(x.id) && x.at <= a.created_at).pop();
     return l ? Object.fromEntries(Object.entries(l).filter(([k]) => !ENVELOPE.includes(k) && !k.startsWith('__'))) : undefined;
   };
-  const acts = logObjects('act').map((a) => ({ ...a, correction: correctionOf(a), ladder: !!L.classes[a.class], change: changeOf(a) }));
+  // Each act says what it carried out: a decision (whose correction is the one that counts), an
+  // owner's answer or a standing rule, or its own call.
+  const acts = logObjects('act').map((a) => {
+    const d = a.decision ? logGet(a.decision) : null;
+    return { ...a, correction: correctionOf(a), ladder: !!L.classes[a.class], change: changeOf(a), under: a.decision ? { decision: a.decision, what: d?.what ?? null, authority: d?.authority ?? null, corrected: d ? !!correctionOf(d) : false } : { authority: actAuthority(a), approved_by: a.approved_by ?? null, own: true } };
+  });
   return {
     goals: logObjects('goal').map(goalView).sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99)),
     roadmap: collectRoadmap(),
@@ -4850,6 +5054,7 @@ function collectOoda() {
     knowledge: recent(logObjects('knowledge').filter((k) => k.status !== 'retired'), 60),
     problems: logObjects('problem').filter((p) => p.status !== 'resolved').sort((a, b) => b.severity - a.severity),
     acts: recent(acts, 60),
+    decisions: decisionRecords().slice(0, 200),
     trust: trustTable(),
     classes: Object.fromEntries(Object.entries(L.classes).map(([k, v]) => [k, { ...v, rung: rungFor(k) }])),
     reasons: L.reasons,
@@ -5450,7 +5655,7 @@ function makeSession(role) {
   if (role === 'worker' && !resume) appendLog({ type: 'phase', from: null, to: 'starting', note: `started in ${target}` }, id);
   // a planner parked by a park is running again
   if (role === 'planner' && lastPhaseOf(name)?.to === 'parked') appendLog({ type: 'phase', from: 'parked', to: 'starting', note: `started in ${target}` }, name);
-  appendLog({ type: 'act', class: 'worker-slots', what: `${resume ? 'resumed' : 'made'} ${role} ${name} in ${target}${block ? `, ticket numbers ${padNN(block.from)}-${padNN(block.to)}` : ''}${refused ? ` while its goal is ${holdWords(mode)}, with --force` : ''}`, refs: role === 'worker' ? [id] : goalIds, reversible: true, id_block: block ?? undefined }, 'supervisor');
+  appendLog({ type: 'act', decision: citing(), class: 'worker-slots', what: `${resume ? 'resumed' : 'made'} ${role} ${name} in ${target}${block ? `, ticket numbers ${padNN(block.from)}-${padNN(block.to)}` : ''}${refused ? ` while its goal is ${holdWords(mode)}, with --force` : ''}`, refs: role === 'worker' ? [id] : goalIds, reversible: true, id_block: block ?? undefined }, 'supervisor');
   out(`${resume ? 'resumed' : 'made'} ${role} ${name} in ${target} at ${wt}${block ? `; ticket numbers ${padNN(block.from)}-${padNN(block.to)} reserved` : ''}`);
 }
 
@@ -5673,7 +5878,7 @@ function fleetOp(mode) {
     changed.push(isUpkeep(g) ? 'upkeep' : g.id);
   }
   if (!changed.length) return out(`every goal is already ${mode === 'park' ? 'parked' : 'draining or parked'}; nothing to do`);
-  if (by === 'supervisor') appendLog({ type: 'act', class: `fleet-${mode}`, what: `${mode === 'park' ? 'parked' : 'drained'} the fleet on ${host} (${op}): ${reason}`, refs: changed.filter((x) => x !== 'upkeep'), reversible: true }, 'supervisor');
+  if (by === 'supervisor') appendLog({ type: 'act', decision: citing(), class: `fleet-${mode}`, what: `${mode === 'park' ? 'parked' : 'drained'} the fleet on ${host} (${op}): ${reason}`, refs: changed.filter((x) => x !== 'upkeep'), reversible: true }, 'supervisor');
   out(`${mode === 'park' ? 'parked' : 'draining'} the fleet (${op}): ${changed.length} goal(s) set to ${mode}, Upkeep included; nothing new starts until fleet un${mode}`);
   if (mode === 'park') {
     if (by === 'supervisor') {
@@ -5906,7 +6111,7 @@ function fleetUndo(mode) {
     restored.push(`${isUpkeep(g) ? 'Upkeep' : g.title} → ${p.mode}`);
   }
   if (legacy) appendLog({ type: 'act', class: 'undrain', what: `undrained the fleet on ${host} (drained by ${legacy.id}${drainHost(legacy) ? ` on ${drainHost(legacy)}` : ''})`, refs: [legacy.id], reversible: true }, 'supervisor');
-  if (op && by === 'supervisor') appendLog({ type: 'act', class: `fleet-un${mode}`, what: `un${mode === 'park' ? 'parked' : 'drained'} the fleet on ${host} (${op})`, refs: held.filter((x) => x.hold.fleet === op && !isUpkeep(x)).map((x) => x.id), reversible: true }, 'supervisor');
+  if (op && by === 'supervisor') appendLog({ type: 'act', decision: citing(), class: `fleet-un${mode}`, what: `un${mode === 'park' ? 'parked' : 'drained'} the fleet on ${host} (${op})`, refs: held.filter((x) => x.hold.fleet === op && !isUpkeep(x)).map((x) => x.id), reversible: true }, 'supervisor');
   logCache = null;
   out(`un${mode === 'park' ? 'parked' : 'drained'} the fleet${op ? ` (${op})` : ''}${legacy ? `, and lifted the old drain ${legacy.id}` : ''}: ${restored.length ? restored.join('; ') : 'no goal to put back'}`);
   const rows = restartCommands().map((x) => `  devteam.mjs ${x.cmd.padEnd(36)} ${x.handoff ? 'its handoff note goes into its prompt' : 'no current handoff note'}`);
@@ -5993,11 +6198,11 @@ function cmdHistory() {
   const tail = Number(flagStr('tail') ?? 100);
   const rows = [];
   for (const o of readLog().objects.values()) {
-    const about = o.type === 'message' ? [o.created_by, o.to, o.ticket] : o.type === 'act' ? o.refs ?? [] : o.type === 'question' ? [o.ticket] : [o.created_by, o.subject];
+    const about = o.type === 'message' ? [o.created_by, o.to, o.ticket] : ['act', 'decision'].includes(o.type) ? o.refs ?? [] : o.type === 'question' ? [o.ticket] : [o.created_by, o.subject];
     if (scope && !about.some((x) => scope.has(x))) continue;
     if (['phase', 'gate'].includes(o.type) && !scope) continue;
     const what = o.question ? `${o.question} → ${questionView(o).answer ?? '(open)'}` : o.what ?? o.text ?? o.detail ?? o.statement ?? o.title ?? (o.type === 'phase' ? `${o.from ?? '-'} -> ${o.to}` : o.type === 'gate' ? `${o.gate} ${o.ok ? 'ok' : 'FAIL'}` : '');
-    rows.push({ at: o.created_at, line: `${o.created_at} ${o.type.padEnd(11)} ${o.created_by.padEnd(22)} ${String(what).slice(0, 140)}${o.type === 'act' && correctionOf(o) ? `  CORRECTED: ${correctionOf(o).reason}` : ''}` });
+    rows.push({ at: o.created_at, line: `${o.created_at} ${o.type.padEnd(11)} ${o.created_by.padEnd(22)} ${String(what).slice(0, 140)}${['act', 'decision'].includes(o.type) && correctionOf(o) ? `  CORRECTED: ${correctionOf(o).reason}` : ''}` });
   }
   for (const r of rows.sort((a, b) => a.at.localeCompare(b.at)).slice(-tail)) out(r.line);
 }
@@ -6198,8 +6403,11 @@ Decide and act (supervisor.md, constitution.md)
   answer <qid> --review-result <file|-> | answer <qid> "<why>" --decline   (owner) a review: validate and hash its result, or send it back
   answer <qid> "<text>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> "<text>" --from-chat --said "<owner's words>" | answer <qid> --defaulted   (supervisor)
   withdraw <qid> [--reason r] | questions [--all] [--id q] [--json]
-  act --class c [--scope s] [--approved qid] [--refs ids] [--irreversible] -- "<what>"
-  correct <act-id> --reason r [--severity n]   (owner; --retro for the supervisor) | repair <act-id> --how undo|fix-ticket|none
+  decide --class c [--scope s] [--approved qid|kid] [--options a b] [--rationale r] [--confidence 0-1] [--refs ids] [--irreversible] -- "<what>"   a judgment call and the trust it rests on; prints d-…
+  act --decision d-… -- "<what>"   carry out a decision (merge, ticket, withdraw, goal hold, worker, planner and fleet take --decision too)
+  act --class c [--scope s] [--approved qid|kid] [--refs ids] [--irreversible] -- "<what>"   an act that is its own decision
+  decisions [--who owner|supervisor] [--class c] [--corrected] [--tail n] [--json]   every call, who made it and under what
+  correct <decision-or-act-id> --reason r [--severity n]   (owner; --retro for the supervisor) | repair <id> --how undo|fix-ticket|none
   trust [--json]                  the ladder: rung, ceiling, agreement, corrections per class
 
 Observe and orient
@@ -6229,7 +6437,7 @@ const COMMANDS = {
   feature: cmdFeature, ticket: cmdTicket, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, roadmap: cmdRoadmap,
   'check-ticket': cmdCheckTicket, 'check-pr': cmdCheckPr, merge: cmdMerge, 'review-worktree': cmdReviewWorktree,
   phase: cmdPhase, gate: cmdGate, send: cmdSend, messages: cmdMessages, 'stop-ok': cmdStopOk,
-  ask: cmdAsk, answer: cmdAnswer, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, questions: cmdQuestions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
+  ask: cmdAsk, answer: cmdAnswer, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
   observe: cmdObserve, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, knowledge: cmdKnowledge, problem: cmdProblem,
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
   log: cmdLog, 'log-check': cmdLogCheck, 'log-sync': cmdLogSync, history: cmdHistory,
@@ -6238,4 +6446,17 @@ const COMMANDS = {
 };
 if (!command || command === 'help' || command === '--help') out(HELP);
 else if (!COMMANDS[command]) die(`unknown command "${command}"\n${HELP}`);
-else COMMANDS[command]();
+else {
+  // --decision names the decision a command's act carries out; check it before the command does anything.
+  if (flags.decision !== undefined) {
+    if (!flagStr('decision')) die('--decision needs a decision id (d-…)');
+    if (command !== 'act') {
+      const targets = citeTargets();
+      if (!targets) die(`${[command, positional[0]].filter(Boolean).join(' ')} logs no act; --decision is for act, merge, ticket add|set, withdraw, goal hold, worker, planner and fleet`);
+      supervisorOnly('--decision');
+      const d = decisionFor(flagStr('decision'));
+      if (!(d.refs ?? []).some((r) => targets.includes(r))) die(`${d.id} is about ${(d.refs ?? []).join(', ') || 'nothing in particular (it named no --refs)'}; this ${command} is about ${targets.slice(0, 4).join(', ')}${targets.length > 4 ? ', …' : ''}. Decide with --refs naming it, or act without --decision`);
+    }
+  }
+  COMMANDS[command]();
+}

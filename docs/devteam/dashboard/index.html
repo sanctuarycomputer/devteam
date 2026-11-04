@@ -402,6 +402,7 @@
     <a href="#progress"><span class="nl"><i class="icon-chart-line" aria-hidden="true"></i>Progress</span> <span class="count" id="n-progress"></span></a>
     <a href="#board"><span class="nl"><i class="icon-kanban" aria-hidden="true"></i>Board</span> <span class="count" id="n-active"></span></a>
     <a href="#loop"><span class="nl"><i class="icon-repeat" aria-hidden="true"></i>Loop</span> <span class="count" id="n-knowledge"></span></a>
+    <a href="#trust"><span class="nl"><i class="icon-shield-check" aria-hidden="true"></i>Trust Ladder</span> <span class="count" id="n-trust"></span></a>
     <a href="#retros"><span class="nl"><i class="icon-history" aria-hidden="true"></i>Retros</span> <span class="count" id="n-retros"></span></a>
     <a href="#health"><span class="nl"><i class="icon-heart-pulse" aria-hidden="true"></i>Health</span> <span class="count" id="n-findings"></span></a>
   </nav>
@@ -481,13 +482,27 @@
       <div id="knowledge"></div>
     </div>
     <div class="loop-panel" data-panel="decide" hidden>
-      <p class="loop-intro">Who decides what. Some of your decisions can be handed to the supervisor one step at a time as it keeps recommending what you'd have chosen: first it asks, then it asks with a default, then it acts and tells you. Your answers are in the Inbox.</p>
-      <div class="scroll"><table id="trust-table"></table></div>
+      <p class="loop-intro">Every call, newest first: what was decided, by whom, and on what authority (its trust, your answer, a default, a standing rule). Yours are shown as you made them. If one of the supervisor's is wrong, correct it: its kind of decision drops back to "ask first" (<a class="linkish" href="#trust">Trust Ladder</a>).</p>
+      <div class="filters">
+        <label>Who <select id="dec-who"><option value="">anyone</option><option value="owner">you</option><option value="supervisor">the supervisor</option></select></label>
+        <label>Kind <select id="dec-class"><option value="">any</option></select></label>
+        <label class="small"><input type="checkbox" id="dec-corrected"> Only corrected</label>
+        <label class="small"><input type="checkbox" id="dec-mechanical"> Include routine acts</label>
+      </div>
+      <div class="feed" id="decisions-feed"></div>
     </div>
     <div class="loop-panel" data-panel="act" hidden>
-      <p class="loop-intro">Every decision the supervisor made on its own, newest first. If one is wrong, correct it: that drops its kind of decision back to "ask first" and becomes a lesson.</p>
+      <p class="loop-intro">What the supervisor did, newest first, and the call each act carried out. An act under a decision is corrected through the decision (Decide); an act that was its own call is corrected here.</p>
       <div class="feed" id="acts-feed"></div>
     </div>
+  </section>
+
+  <section id="trust">
+    <h2>Trust Ladder <span class="sub">which of your decisions the supervisor may make, and how it earned or lost that</span></h2>
+    <p class="loop-intro">Some of your decisions can be handed to the supervisor one step at a time as it keeps recommending what you'd have chosen: first it asks, then it asks with a default, then it decides and tells you. A correction on one of its calls drops that kind back to asking. More trust is always your answer to a question in the Inbox.</p>
+    <div class="scroll"><table id="trust-table"></table></div>
+    <h3 style="margin-top:14px">How the rungs moved</h3>
+    <div class="feed" id="trust-history"></div>
   </section>
 
   <section id="retros">
@@ -805,13 +820,34 @@ const mlink = (gid, n, title) => `<a class="linkish" href="#milestone/${encodeUR
 const boardLink = (view) => `<a class="linkish" href="#board" data-view="${esc(view)}" data-left="1"><i class="icon-filter" aria-hidden="true"></i> What's left of it on the board</a> · <a class="linkish" href="#progress" data-view="${esc(view)}" data-left="0">its burn-up</a>`;
 // An id in text links to its panel: goals, lessons, acts, problems, messages (threads), observations.
 function idLink(k, id) {
-  const href = { g: 'goal', k: 'lesson', a: 'act', p: 'problem', m: 'thread' }[k];
+  const href = { g: 'goal', k: 'lesson', a: 'act', d: 'decision', p: 'problem', m: 'thread' }[k];
   if (!href) return `<code>${esc(id.slice(0, 22))}…</code>`;
   if (k === 'g' && goalOf(id)) return glink(id);
   return `<a class="linkish" href="#${href}/${encodeURIComponent(id)}"><code>${esc(id.slice(0, 22))}…</code></a>`;
 }
 const subjectLink = (subj) => (ticketMap().has(subj) ? tlink(subj) : /^[a-z]-\d{8}-\d{9}-/.test(subj ?? '') || /^plan-/.test(subj ?? '') ? linkify(subj) : subj ? `<code>${esc(subj)}</code>` : '');
 const scopeWords = (sc) => (!sc || sc === 'project' ? 'the whole project' : sc.replace(/^component:/, 'component ').replace(/^feature:/, 'feature ').replace(/^class:/, 'decisions of kind ').replace(/^chore:devteam-sync/, 'devteam upgrades').replace(/^chore:/, 'chore '));
+// What a call rested on, in words: the supervisor's trust, your answer or a default, a standing rule.
+function authorityWords(u) {
+  if (!u) return '';
+  const rung = u.rung ? ` (${esc(RUNG_WORDS[u.rung])}${u.ceiling && u.ceiling !== u.rung ? `, at most ${esc(RUNG_WORDS[u.ceiling])}` : ''})` : '';
+  switch (u.authority) {
+    case 'rung': return `within its trust${rung}`;
+    case 'answer': return u.approved_by ? `with your answer to ${qlink(u.approved_by)}` : 'with your answer';
+    case 'default': return u.approved_by ? `with the default on ${qlink(u.approved_by)}${rung}` : 'with a default';
+    case 'standing-rule': return u.approved_by ? `under <a class="linkish" href="#lesson/${encodeURIComponent(u.approved_by)}">a standing rule you gave</a>` : 'under a standing rule you gave';
+    default: return u.approved_by ? approvedBy(u.approved_by) : 'under the constitution';
+  }
+}
+const dlink = (id, text) => `<a class="linkish" href="#decision/${encodeURIComponent(id)}">${text ? esc(text) : 'a decision'}</a>`;
+// What an act carried out: a decision, your answer, a standing rule, or its own call.
+function actUnder(a) {
+  const u = a.under;
+  if (!u) return a.approved_by ? approvedBy(a.approved_by) : 'its own call';
+  if (u.decision) return `under ${dlink(u.decision, u.what ? `“${u.what.length > 70 ? `${u.what.slice(0, 70)}…` : u.what}”` : null)}${u.corrected ? ' <span class="badge high">decision corrected</span>' : ''}`;
+  if (u.approved_by) return approvedBy(u.approved_by);
+  return u.authority === 'rung' ? 'its own call, within its trust' : 'its own call';
+}
 const approvedBy = (id) => (id?.startsWith('q-') ? `with your answer to ${qlink(id)}` : id?.startsWith('k-') ? 'under a standing rule you gave' : `approved by ${esc(id)}`);
 // Escape, then turn ticket ids and question ids into links and full commit hashes into short ones.
 function linkify(text) {
@@ -819,7 +855,7 @@ function linkify(text) {
   const ids = [...ticketMap().keys()].sort((a, b) => b.length - a.length);
   if (ids.length) h = h.replace(new RegExp(`\\b(${ids.map((x) => x.replace(/[-]/g, '\\-')).join('|')})\\b`, 'g'), (m) => tlink(m));
   h = h.replace(/\bq-\d{8}-\d{9}-[a-z0-9-]+/g, (m) => qlink(m));
-  h = h.replace(/\b([gkapmo])-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*/g, (m, k) => idLink(k, m));
+  h = h.replace(/\b([gkapmod])-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*/g, (m, k) => idLink(k, m));
   h = h.replace(/\bplan-([a-z0-9]+(?:-[a-z0-9]+)*)\b/g, (m, f) => ((DATA?.planners || []).some((x) => x.feature === f) ? `<a class="linkish" href="#planner/${encodeURIComponent(f)}">${m}</a>` : m));
   h = h.replace(/\b([0-9a-f]{12})[0-9a-f]{28}\b/g, '<code>$1</code>');
   h = h.replace(/\b(sanctuarycomputer\/devteam)#(\d+)/g, '<a class="linkish" href="https://github.com/$1/pull/$2" target="_blank" rel="noopener">devteam #$2</a>');
@@ -1656,22 +1692,69 @@ function renderOoda(o) {
     (acc.length ? acc.map((k) => `<div class="card small"><a class="linkish" href="#lesson/${encodeURIComponent(k.id)}"><span class="badge good">${esc(k.kind)}</span></a>${linkify(k.statement)}${k.valence < 0 ? ' <span class="muted">(avoid)</span>' : ''} <span class="muted">· applies to ${esc(scopeWords(k.scope))}${k.created_by === 'owner' ? ' · from you' : ''}</span></div>`).join('') : '') ||
     empty('None yet. Things noticed more than once become proposed lessons, which you keep or retire in the Inbox.');
 
-  // Decide: trust ladder
+  // Trust Ladder
   $('trust-table').innerHTML = '<tr><th>Kind of decision</th><th>Now</th><th>At most</th><th>Agreed with you</th><th>Corrected</th></tr>' + o.trust.map((t) => `
     <tr><td>${esc(cap(t.about || words(t.class)))}<div class="muted small">${esc(t.class)}</div></td><td>${esc(RUNG_WORDS[t.rung])}</td><td>${esc(RUNG_WORDS[t.ceiling])}</td><td>${t.agreement == null ? '–' : `${Math.round(t.agreement * 100)}% of the last ${esc(t.agreement_questions.length)}`}${t.can_ask ? '<div><span class="badge good">ready to ask you for more trust</span></div>' : ''}</td><td>${t.corrections ? `${esc(t.corrections)} time${t.corrections > 1 ? 's' : ''}` : 'never'}</td></tr>`).join('');
+
+  const moves = (o.trust || []).flatMap((t) => (t.history || []).map((e) => ({ ...e, rung: Math.min(e.rung, t.ceiling), class: t.class, about: t.about }))).sort((a, b) => b.at.localeCompare(a.at)).slice(0, 40);
+  $('trust-history').innerHTML = moves.length ? moves.map((e) => `<div class="card small${e.by === 'correction' ? ' corrected' : ''}"><div>${esc(cap(e.about || words(e.class)))}: <b>${esc(RUNG_WORDS[e.rung])}</b>
+    <div class="meta">${esc(when(e.at))} · ${e.by === 'correction' ? `a correction on ${linkify(e.id)}: ${esc(e.why)}` : `your answer to ${qlink(e.id)}`}</div></div></div>`).join('') : empty('No moves yet. Every kind of decision is on its starting rung.');
+
+  // Decide: every call, the supervisor's and yours
+  renderDecisions(o);
 
   // Act
   const feed = o.acts;
   $('acts-feed').innerHTML = feed.length ? feed.map((a) => { const v = actView(a); return `
     <div class="card small ${a.correction ? 'corrected' : ''}">
       <div><div class="act-head">${v.head}</div>${v.detail ? `<div class="act-detail">${v.detail}</div>` : ''}
-        <div class="meta"><a class="linkish" href="#act/${encodeURIComponent(a.id)}">${when(a.created_at)}</a>${a.approved_by ? ` · ${approvedBy(a.approved_by)}` : ' · on its own'}${a.reversible === false ? ' · can’t be undone' : ''}</div>
+        <div class="meta"><a class="linkish" href="#act/${encodeURIComponent(a.id)}">${when(a.created_at)}</a> · ${actUnder(a)}${a.reversible === false ? ' · can’t be undone' : ''}</div>
         ${a.correction ? `<div class="err">Corrected by ${esc(who(a.correction.by))}: ${esc(a.correction.reason)}${a.correction.repaired ? ` · ${esc(a.correction.repaired)}` : ''}</div>` : ''}
         <div class="row-inline" hidden data-correct-form="${esc(a.id)}"><input type="text" data-reason="${esc(a.id)}" placeholder="Reason"><button class="ghost" data-correct-send="${esc(a.id)}">Send</button><span class="err" id="e-${esc(a.id)}"></span></div>
       </div>
-      ${a.correction ? '' : `<button class="ghost" data-correct="${esc(a.id)}">Correct</button>`}
-    </div>`; }).join('') : empty('None yet. Every decision the supervisor makes alone shows here, for you to correct.');
+      ${a.correction || a.decision ? '' : `<button class="ghost" data-correct="${esc(a.id)}">Correct</button>`}
+    </div>`; }).join('') : empty('None yet. Everything the supervisor does shows here.');
 }
+const DEC_KIND = { decision: 'Decided', act: 'Did, as its own call', answer: 'You answered', goal: 'Your call on a goal', rule: 'A standing rule you gave', correction: 'Corrected' };
+function decisionUnder(r) {
+  if (r.who === 'supervisor' && ['decision', 'act'].includes(r.kind)) return authorityWords(r.under);
+  const u = r.under || {};
+  if (r.kind === 'answer') return [u.recommendation ? (u.matched ? 'went with its recommendation' : `its recommendation was “${esc(u.recommendation)}”`) : '', u.autonomy ? `moved ${esc(words(u.autonomy.class))} to ${esc(RUNG_WORDS[u.autonomy.rung])}` : '', u.standing_rule ? `and gave a standing rule: “${esc(u.standing_rule)}”` : '', u.channel === 'chat' ? 'said in the supervisor chat' : ''].filter(Boolean).join(' · ');
+  if (r.kind === 'correction') return [u.severity != null ? `severity ${esc(u.severity)}` : '', u.repaired ? `repaired: ${esc(u.repaired)}` : 'not repaired yet'].filter(Boolean).join(' · ');
+  if (r.kind === 'rule') return u.status === 'accepted' ? '' : esc(u.status);
+  return '';
+}
+// A routine act (a merge the gates passed, a worker started, a default applied) is its own call under
+// the constitution; it is in the Act tab, and here only on request, so judgment calls stay in view.
+const routine = (r) => r.kind === 'act' && r.under?.authority === 'constitution';
+function renderDecisions(o) {
+  const all = (o.decisions || []).filter((r) => $('dec-mechanical').checked || !routine(r));
+  const sel = $('dec-class');
+  const cur = sel.value;
+  const classes = [...new Set(all.map((r) => r.class).filter(Boolean))].sort();
+  sel.innerHTML = '<option value="">any</option>' + classes.map((c) => `<option value="${esc(c)}">${esc(words(c))}</option>`).join('');
+  sel.value = classes.includes(cur) ? cur : '';
+  const fw = $('dec-who').value;
+  const only = $('dec-corrected').checked;
+  const rows = all.filter((r) => (!fw || r.who === fw) && (!sel.value || r.class === sel.value) && (!only || r.correction || r.kind === 'correction'));
+  const key = (r) => `${r.kind}:${r.id}:${r.at}`;
+  $('decisions-feed').innerHTML = rows.length ? rows.slice(0, 80).map((r) => {
+    const mine = r.who === 'supervisor' && ['decision', 'act'].includes(r.kind);
+    const open = r.kind === 'decision' ? `#decision/${encodeURIComponent(r.id)}` : r.kind === 'act' ? `#act/${encodeURIComponent(r.id)}` : r.kind === 'answer' ? `#q/${encodeURIComponent(r.id)}` : r.kind === 'goal' ? `#goal/${encodeURIComponent(r.id)}` : r.kind === 'rule' ? `#lesson/${encodeURIComponent(r.id)}` : r.id.startsWith('d-') ? `#decision/${encodeURIComponent(r.id)}` : `#act/${encodeURIComponent(r.id)}`;
+    const under = decisionUnder(r);
+    const evidence = (r.refs || []).length ? `about ${r.refs.slice(0, 4).map((x) => (ticketMap().has(x) ? tlink(x) : linkify(x))).join(', ')}` : '';
+    return `
+    <div class="card small ${r.correction ? 'corrected' : ''}" data-dec="${esc(key(r))}">
+      <div><div class="act-head"><span class="badge ${r.kind === 'correction' ? 'high' : r.who === 'owner' ? 'good' : 'medium'}">${esc(DEC_KIND[r.kind] || r.kind)}</span> ${linkify(r.what)}</div>
+        ${r.rationale ? `<div class="act-detail">${linkify(r.rationale)}${r.options?.length > 1 ? ` <span class="muted">(weighed: ${r.options.map(esc).join(' / ')})</span>` : ''}${r.confidence != null ? ` <span class="muted">· ${Math.round(r.confidence * 100)}% sure</span>` : ''}</div>` : ''}
+        <div class="meta"><a class="linkish" href="${open}">${esc(when(r.at))}</a> · ${esc(r.who === 'owner' ? 'you' : who(r.who))}${r.class ? ` · ${esc(words(r.class))}` : ''}${under ? ` · ${under}` : ''}${evidence ? ` · ${evidence}` : ''}${r.kind === 'decision' && r.acts.length ? ` · carried out by ${r.acts.length} act${r.acts.length > 1 ? 's' : ''}` : r.kind === 'decision' ? ' · not acted on yet' : ''}${r.reversible === false ? ' · can’t be undone' : ''}</div>
+        ${r.correction ? `<div class="err">Corrected by ${esc(who(r.correction.by))}: ${esc(r.correction.reason)}${r.correction.repaired ? ` · ${esc(r.correction.repaired)}` : ''}</div>` : ''}
+        ${mine ? `<div class="row-inline" hidden data-correct-form="dec:${esc(r.id)}"><input type="text" data-reason="dec:${esc(r.id)}" placeholder="Reason"><button class="ghost" data-correct-send="dec:${esc(r.id)}">Send</button><span class="err" id="e-dec:${esc(r.id)}"></span></div>` : ''}
+      </div>
+      ${mine && !r.correction ? `<button class="ghost" data-correct="dec:${esc(r.id)}">Correct</button>` : ''}
+    </div>`; }).join('') : empty(all.length ? 'Nothing matches.' : 'None yet. Every call, the supervisor\'s and yours, shows here.');
+}
+for (const id of ['dec-who', 'dec-class', 'dec-corrected', 'dec-mechanical']) $(id).addEventListener('change', () => { if (DATA) renderDecisions(DATA.ooda); });
 
 
 // ---- drawer: a ticket with everything that bears on it, a settled question, or an artifact ----
@@ -1709,7 +1792,8 @@ function lineView(l) {
     case 'gate': return [l.ok ? 'gate' : 'gate fail', `Check “${esc(l.gate)}” ${l.ok ? 'passed' : 'failed'}${l.sha ? ` at <code>${esc(l.sha.slice(0, 12))}</code>` : ''}`];
     case 'message': return ['msg', `${esc(cap(by))} ${esc(MSG_WORDS[l.kind] || l.kind)}${l.to ? ` → ${esc(who(l.to))}` : ''}: ${linkify(l.text)}`];
     case 'question': return l.op === 'new' ? ['q', `Asked you: ${qlink(l.id, l.question)}`] : l.answer !== undefined ? ['q', `You answered ${qlink(l.id, 'the question')}: <b>${esc(l.answer)}</b>`] : l.status ? ['q', `Question ${esc(l.status)}${l.reason ? `: ${linkify(l.reason)}` : ''}`] : null;
-    case 'act': { if (['add-ticket', 'replan-within-feature'].includes(l.class)) return null; const v = actView(l); return ['act', `${v.head}${v.detail ? `<div class="act-detail">${v.detail}</div>` : ''}`]; }
+    case 'act': { if (['add-ticket', 'replan-within-feature'].includes(l.class)) return null; const v = actView(l); return ['act', `${v.head}${v.detail ? `<div class="act-detail">${v.detail}</div>` : ''}${l.decision ? `<div class="act-detail">under ${dlink(l.decision)}</div>` : ''}`]; }
+    case 'decision': return l.op === 'new' ? ['act', `The supervisor decided (${esc(words(l.class))}): ${dlink(l.id, l.what)}${l.rationale ? `<div class="act-detail">${linkify(l.rationale)}</div>` : ''}`] : l.corrected ? ['act', `${esc(cap(by))} corrected ${dlink(l.id, 'a decision')}: ${esc(l.corrected.reason)}`] : null;
     case 'observation': return ['', `${esc(cap(by))} noticed (${esc(words(l.kind))}): ${linkify(l.detail)}`];
     case 'knowledge': return ['', `Learned: ${linkify(l.statement)}`];
     default: return ['', `${esc(words(l.type))} ${esc(l.op)}`];
@@ -1874,13 +1958,33 @@ function openAct(id) {
       ${row('What', linkify(a.what))}
       ${row('Kind', esc(words(a.class)))}
       ${row('When', esc(when(a.created_at)))}
-      ${row('Approved', a.approved_by ? approvedBy(a.approved_by) : 'on its own (within its trust)')}
+      ${row('Under', actUnder(a))}
       ${row('Undo', a.reversible === false ? 'can’t be undone' : 'reversible')}
       ${row('About', (a.refs || []).map((r) => linkify(r)).join(', '))}
       ${a.correction ? row('Corrected', `${esc(who(a.correction.by))}: ${esc(a.correction.reason)}${a.correction.repaired ? ` · ${esc(a.correction.repaired)}` : ''}`) : ''}
       <dt>ID</dt><dd><code>${esc(a.id)}</code></dd>
     </dl>
-    ${a.correction ? '' : '<p class="small muted">To correct it, use Correct on it in Loop → Act.</p>'}`);
+    ${a.correction ? '' : a.decision ? '<p class="small muted">It carried out a decision: correct the decision if the call was wrong (Loop → Decide). If the call was sound and the act went wrong, that is a problem, not a trust drop.</p>' : '<p class="small muted">To correct it, use Correct on it in Loop → Act.</p>'}`);
+}
+function openDecision(id) {
+  const r = (DATA.ooda.decisions || []).find((x) => x.id === id && ['decision', 'act'].includes(x.kind));
+  if (!r) return showDrawer(`<h2 id="drawer-title">No decision ${esc(id)}</h2><p class="muted">Only recent decisions are on the dashboard.</p>`);
+  DRAWER = { kind: 'decision', id };
+  showDrawer(`<h2 id="drawer-title">${linkify(r.what)}</h2>
+    <dl>
+      ${row('Kind', esc(words(r.class)))}${r.scope ? row('Scope', esc(r.scope)) : ''}
+      ${row('When', esc(when(r.at)))}
+      ${row('Under', authorityWords(r.under))}
+      ${r.options?.length ? row('Weighed', `<ul>${r.options.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>`) : ''}
+      ${r.rationale ? row('Why', linkify(r.rationale)) : ''}
+      ${r.confidence != null ? row('Sure', `${Math.round(r.confidence * 100)}%`) : ''}
+      ${row('Undo', r.reversible === false ? 'can’t be undone' : 'reversible')}
+      ${row('About', (r.refs || []).map((x) => (ticketMap().has(x) ? tlink(x) : linkify(x))).join(', '))}
+      ${row('Carried out by', r.acts.length ? `<ul>${r.acts.map((a) => { const x = (DATA.ooda.acts || []).find((y) => y.id === a); return `<li><a class="linkish" href="#act/${encodeURIComponent(a)}">${x ? actView(x).head : esc(a)}</a></li>`; }).join('')}</ul>` : 'nothing yet')}
+      ${r.correction ? row('Corrected', `${esc(who(r.correction.by))}: ${esc(r.correction.reason)}${r.correction.repaired ? ` · ${esc(r.correction.repaired)}` : ''}`) : ''}
+      <dt>ID</dt><dd><code>${esc(r.id)}</code></dd>
+    </dl>
+    ${r.correction ? '' : '<p class="small muted">To correct it, use Correct on it in Loop → Decide.</p>'}`);
 }
 // A retro's own date is its write-up's (retros/<date>.md); the closing line can come a day later.
 const retroDate = (r) => { const m = /(\d{4}-\d{2}-\d{2})\.md$/.exec(r.file || ''); return fmtDate(m ? Date.parse(`${m[1]}T12:00:00Z`) : Date.parse(r.at)); };
@@ -1890,6 +1994,8 @@ const retroRef = (x) => {
   if (k) return `<a class="linkish" href="#lesson/${encodeURIComponent(x)}">${esc(k.statement)}</a>`;
   const a = (DATA.ooda.acts || []).find((y) => y.id === x);
   if (a) return `${actView(a).head ?? esc(a.what)} <a class="linkish" href="#act/${encodeURIComponent(x)}">(the act)</a>`;
+  const dd = (DATA.ooda.decisions || []).find((y) => y.id === x && y.kind === 'decision');
+  if (dd) return `${dlink(x, dd.what)} (the decision)`;
   return linkify(x);
 };
 function openRetro(id) {
@@ -2055,7 +2161,7 @@ function route() {
   if (h.startsWith('q/')) return void openQuestion(h.slice(2));
   if (h.startsWith('goal/')) return void openGoal(h.slice(5));
   if (h.startsWith('planner/')) return void openPlanner(h.slice(8));
-  const PEEKS = { feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread };
+  const PEEKS = { feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread };
   const [kind, ...rest] = h.split('/');
   if (PEEKS[kind] && rest.length) return void PEEKS[kind](rest.join('/'));
   if (h.startsWith('file?')) return void openFile(new URLSearchParams(location.hash.slice(6)));
@@ -2126,7 +2232,9 @@ function render(d) {
   count('n-knowledge', o.knowledge.filter((k) => k.status === 'candidate').length);
   $('n-observe').textContent = o.observations.length || '';
   $('n-orient').textContent = (o.clusters.length + o.problems.length + o.knowledge.length) || '';
-  $('n-decide').textContent = o.trust.filter((t) => t.can_ask).length || '';
+  const weekAgo = new Date(Date.now() - 7 * 864e5).toISOString();
+  $('n-decide').textContent = (o.decisions || []).filter((r) => r.at > weekAgo && r.kind !== 'correction' && !routine(r)).length || '';
+  count('n-trust', o.trust.filter((t) => t.can_ask).length);
   $('n-act').textContent = o.acts.length || '';
   const fcAll = forecast(p.tickets, now);
   const stats = [
@@ -2473,7 +2581,8 @@ document.addEventListener('click', async (ev) => {
   if (send) {
     const id = send.dataset.correctSend;
     const reason = document.querySelector(`input[data-reason="${id}"]`).value;
-    return void post('correct', { id, reason }, id);
+    // the Decide feed's forms are keyed dec:<id>, so a call listed in both feeds has two
+    return void post('correct', { id: id.replace(/^dec:/, ''), reason }, id);
   }
 });
 

@@ -32,6 +32,7 @@
         "knowledge",
         "problem",
         "question",
+        "decision",
         "act",
         "spend"
       ]
@@ -1244,8 +1245,104 @@
           "declined"
         ]
       },
+      "decision": {
+        "description": "What the supervisor decided and under what trust: the class and scope, the options it weighed, why, and the authority it acted on, snapshotted when it decided (the class's rung and ceiling, and the owner's answer, default or standing rule it rests on). Acts that carry it out cite it with decision. Trust is earned and lost on decisions: a correction on a decision drops its class to rung 1. The owner, or the supervisor at a retro, sets corrected; the supervisor then sets repaired.",
+        "type": "object",
+        "properties": {
+          "class": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          },
+          "what": {
+            "type": "string"
+          },
+          "rationale": {
+            "type": "string"
+          },
+          "options": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "refs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "reversible": {
+            "type": "boolean"
+          },
+          "rung": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3
+          },
+          "ceiling": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3
+          },
+          "authority": {
+            "description": "rung: the class's rung let the supervisor act alone; answer: an owner's answer (approved_by) approved it; default: a question's default applied; standing-rule: a knowledge ruling (approved_by k-...) covers it; constitution: a class the ladder doesn't hold, acted on under the constitution's own terms",
+            "enum": [
+              "rung",
+              "answer",
+              "default",
+              "standing-rule",
+              "constitution"
+            ]
+          },
+          "approved_by": {
+            "type": "string",
+            "pattern": "^[qk]-"
+          },
+          "corrected": {
+            "type": "object",
+            "properties": {
+              "reason": {
+                "type": "string"
+              },
+              "severity": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          "repaired": {
+            "enum": [
+              "undo",
+              "fix-ticket",
+              "none"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "x-required-new": [
+          "class",
+          "what",
+          "authority"
+        ],
+        "x-set-only": [
+          "corrected",
+          "repaired"
+        ]
+      },
       "act": {
-        "description": "A decision the supervisor made (incl. approve-spec, approve-plan, merge-word, and worker-slots, whose planner acts carry the feature's id_block). The owner, or the supervisor at a retro, sets corrected; the supervisor then sets repaired.",
+        "description": "Something the supervisor did (incl. approve-spec, approve-plan, merge-word, and worker-slots, whose planner acts carry the feature's id_block). An act that carries decision did what that decision line decided, and the decision answers for it: the owner corrects the decision, not the act. An act without decision is its own decision (mechanical acts, and every act written before decisions existed). The owner, or the supervisor at a retro, sets corrected; the supervisor then sets repaired.",
         "type": "object",
         "properties": {
           "class": {
@@ -1273,6 +1370,11 @@
           },
           "approved_by": {
             "type": "string"
+          },
+          "decision": {
+            "description": "The decision line this act carries out (d-...). The act then takes its class and authority from it.",
+            "type": "string",
+            "pattern": "^d-"
           },
           "corrected": {
             "type": "object",
@@ -1415,6 +1517,7 @@
       "knowledge": "k",
       "problem": "p",
       "question": "q",
+      "decision": "d",
       "act": "a",
       "spend": "s"
     },
@@ -1447,6 +1550,7 @@
         "observation",
         "knowledge",
         "problem",
+        "decision",
         "act",
         "phase",
         "message",
@@ -1616,6 +1720,15 @@
           "assigned_to",
           "detail",
           "threatens"
+        ]
+      },
+      "decision": {
+        "supervisor": [
+          "corrected",
+          "repaired"
+        ],
+        "owner": [
+          "corrected"
         ]
       },
       "act": {
