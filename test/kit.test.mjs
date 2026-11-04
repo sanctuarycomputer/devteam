@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
@@ -23,6 +24,9 @@ process.env.TMUX_TMPDIR = fs.mkdtempSync(path.join(os.tmpdir(), 'dt-tmux-'));
 delete process.env.TMUX;
 delete process.env.TMUX_PANE;
 const hasTmux = spawnSync('tmux', ['-V']).status === 0;
+// A port the OS says is free: a random one in a range can land on a machine's own listener (macOS's
+// AirPlay receiver holds 5000 and answers 403), which then passes the test's startup probe.
+const freePort = () => new Promise((resolve, reject) => { const v = net.createServer(); v.on('error', reject); v.listen(0, '127.0.0.1', () => { const { port } = v.address(); v.close(() => resolve(port)); }); });
 
 function dt(args, { cwd = repo, role = 'owner', input } = {}) {
   const env = { ...process.env, ...ROLE[role] };
@@ -1395,7 +1399,7 @@ test('devteam kit', async (t) => {
     assert.match(must(['questions', '--id', 'q-20991231-235959000-supervisor', '--json']), /an unreadable sink/);
     must(['dashboard-data']);
     // the dashboard: browser headers required, a dead child doesn't kill the server, bytes decode whole
-    const port = 4400 + Math.floor(Math.random() * 500);
+    const port = await freePort();
     const srv = spawn(process.execPath, [DT, 'dashboard', '--port', String(port)], { cwd: repo, env: { ...process.env, DEVTEAM_ROLE: '' }, stdio: 'ignore' });
     try {
       for (let i = 0; i < 50; i++) { try { await fetch(`http://127.0.0.1:${port}/`); break; } catch { await new Promise((r) => setTimeout(r, 100)); } }
@@ -1948,7 +1952,7 @@ test('devteam kit', async (t) => {
     fs.appendFileSync(supFile, line({ ...askLine, id: Qt, at: '2099-12-31T23:59:58.000Z', review: { ...askLine.review, page: { ...askLine.review.page, sha256: sha('another page') } } }));
     const view = (id) => json(must(['questions', '--id', id, '--json']))[0];
 
-    const port = 4900 + Math.floor(Math.random() * 500);
+    const port = await freePort();
     const B = `http://127.0.0.1:${port}`;
     const srv = spawn(process.execPath, [DT, 'dashboard', '--port', String(port)], { cwd: repo, env: { ...process.env, DEVTEAM_ROLE: '' }, stdio: 'ignore' });
     try {
@@ -2236,7 +2240,7 @@ test('devteam kit', async (t) => {
     assert.equal(sha(must(['review', 'result', Qp, '--json'], { role: 'sup' }) + '\n'), ownerSha, 'the result still reads');
     // the dashboard serves the landed page from main, byte for byte
     {
-      const port = 4900 + Math.floor(Math.random() * 500);
+      const port = await freePort();
       const B = `http://127.0.0.1:${port}`;
       const srv = spawn(process.execPath, [DT, 'dashboard', '--port', String(port)], { cwd: repo, env: { ...process.env, DEVTEAM_ROLE: '' }, stdio: 'ignore' });
       try {
