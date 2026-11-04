@@ -5149,6 +5149,14 @@ function cmdDashboard() {
       const r = await run(['fleet', 'status', '--json', ...(u.searchParams.get('fetch') === '1' ? [] : ['--no-fetch'])]);
       return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 500, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
     }
+    // One record's stored fields, and the schema's words for each field (the sidepeek's attributes).
+    if (req.method === 'GET' && u.pathname === '/api/record') {
+      const id = u.searchParams.get('id') ?? '';
+      if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad id' }));
+      const r = await run(['record', id, '--json']);
+      return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 404, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
+    }
+    if (req.method === 'GET' && u.pathname === '/api/schema') return send(res, 200, 'application/json', JSON.stringify(schemaDocs()));
     if (req.method === 'GET' && u.pathname === '/api/timeline') {
       const id = u.searchParams.get('id') ?? '';
       if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad ticket id' }));
@@ -6161,6 +6169,32 @@ function cmdSettings() {
   out(v === null || v === undefined ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v));
 }
 
+// record <id>: one record as it stands, its stored fields only, for the sidepeek's attributes: who
+// created it and when, who last changed it, and who set each field. Fold bookkeeping is left out.
+const FOLD_KEYS = ['id', 'type', 'created_at', 'created_by', 'updates', 'hold_by'];
+function recordView(id) {
+  const o = logGet(id);
+  if (!o) return null;
+  const fields = Object.fromEntries(Object.entries(o).filter(([k]) => !FOLD_KEYS.includes(k) && !k.startsWith('__')));
+  const setBy = {};
+  for (const u of o.updates ?? []) for (const k of Object.keys(u)) if (!['at', 'by', 'channel'].includes(k)) setBy[k] = { by: u.by, at: u.at };
+  const last = (o.updates ?? []).at(-1);
+  return { id: o.id, type: o.type, created_at: o.created_at, created_by: o.created_by, updated_at: last?.at ?? null, updated_by: last?.by ?? null, fields, set_by: setBy };
+}
+function cmdRecord() {
+  const [id] = positional;
+  if (!id) die('usage: record <id> [--json]');
+  const r = recordView(id) ?? die(`no record ${id}`);
+  if (flags.json) return json(r);
+  out(`${r.id} (${r.type}) created ${r.created_at} by ${r.created_by}${r.updated_at ? `, last changed ${r.updated_at} by ${r.updated_by}` : ''}`);
+  for (const [k, v] of Object.entries(r.fields)) out(`  ${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`);
+}
+// The schema's descriptions of each field, for the sidepeek's tooltips: the envelope, then per type.
+function schemaDocs() {
+  const desc = (props) => Object.fromEntries(Object.entries(props ?? {}).filter(([, v]) => v?.description).map(([k, v]) => [k, v.description]));
+  return { envelope: desc(SCHEMA.properties), types: Object.fromEntries(Object.entries(SCHEMA.$defs.types).map(([t, d]) => [t, { about: d.description ?? null, fields: desc(d.properties) }])) };
+}
+
 // history [<ticket-id>]: what happened around a ticket (or everything), to catch up after a restart.
 function cmdHistory() {
   const id = positional[0];
@@ -6376,6 +6410,7 @@ Decide and act (supervisor.md, constitution.md)
   decide --class c [--scope s] [--approved qid|kid] [--options a b] [--rationale r] [--confidence 0-1] [--refs ids] [--irreversible] -- "<what>"   a judgment call and the trust it rests on; prints d-…
   act --decision d-… -- "<what>"   carry out a decision (merge, ticket, withdraw, goal hold, worker, planner and fleet take --decision too)
   act --class c [--scope s] [--approved qid|kid] [--refs ids] [--irreversible] -- "<what>"   an act that is its own decision
+  record <id> [--json]   one record's stored fields, who created it and who set each field
   decisions [--who owner|supervisor] [--class c] [--corrected] [--tail n] [--json]   every call, who made it and under what
   correct <decision-or-act-id> --reason r [--severity n]   (owner; --retro for the supervisor) | repair <id> --how undo|fix-ticket|none
   trust [--json]                  the ladder: rung, ceiling, agreement, corrections per class
@@ -6410,7 +6445,7 @@ const COMMANDS = {
   ask: cmdAsk, answer: cmdAnswer, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
   observe: cmdObserve, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, knowledge: cmdKnowledge, problem: cmdProblem,
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
-  log: cmdLog, 'log-check': cmdLogCheck, 'log-sync': cmdLogSync, history: cmdHistory,
+  log: cmdLog, record: cmdRecord, 'log-check': cmdLogCheck, 'log-sync': cmdLogSync, history: cmdHistory,
   drain: cmdDrain, undrain: cmdUndrain, fleet: cmdFleet, handoff: cmdHandoff, wait: cmdWait,
   dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes,
 };

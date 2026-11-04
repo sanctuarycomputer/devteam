@@ -14,13 +14,16 @@
   ],
   "properties": {
     "v": {
+      "description": "Version of the log line format.",
       "const": 1
     },
     "id": {
+      "description": "The record's id in the log: a type letter, when it was created, and who wrote it. Tickets and features use their own slug.",
       "type": "string",
       "minLength": 3
     },
     "type": {
+      "description": "What kind of record this is.",
       "enum": [
         "goal",
         "feature",
@@ -38,12 +41,14 @@
       ]
     },
     "op": {
+      "description": "new creates the record; set changes some of its fields later.",
       "enum": [
         "new",
         "set"
       ]
     },
     "at": {
+      "description": "When this line was written (UTC).",
       "type": "string",
       "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
     },
@@ -67,12 +72,15 @@
         "type": "object",
         "properties": {
           "title": {
+            "description": "The goal in a few words.",
             "type": "string"
           },
           "outcome": {
+            "description": "What is true for users or the business when the goal is met.",
             "type": "string"
           },
           "measure": {
+            "description": "The number that says whether it is met: what is measured, the target, its unit, and whether up or down is better.",
             "type": "object",
             "properties": {
               "description": {
@@ -94,24 +102,28 @@
             "additionalProperties": false
           },
           "horizon": {
+            "description": "The date the goal should be met by, if there is one.",
             "type": [
               "string",
               "null"
             ]
           },
           "non_goals": {
+            "description": "What this goal deliberately leaves out.",
             "type": "array",
             "items": {
               "type": "string"
             }
           },
           "preconditions": {
+            "description": "What must be true before the goal can be met; features are planned to make each one true.",
             "type": "array",
             "items": {
               "type": "string"
             }
           },
           "priority": {
+            "description": "Its order among the goals: 1 comes first.",
             "type": "integer",
             "minimum": 1,
             "maximum": 99
@@ -156,6 +168,7 @@
             }
           },
           "status": {
+            "description": "draft while it is being defined, ready once you approve it, met when the measure reaches its target, abandoned when let go.",
             "enum": [
               "draft",
               "ready",
@@ -296,21 +309,25 @@
         "type": "object",
         "properties": {
           "title": {
+            "description": "The feature in a few words.",
             "type": "string"
           },
           "goals": {
+            "description": "The goals this feature serves.",
             "type": "array",
             "items": {
               "type": "string"
             }
           },
           "preconditions": {
+            "description": "The goal preconditions this feature makes true (<goal-id>#<n>).",
             "type": "array",
             "items": {
               "type": "string"
             }
           },
           "stories": {
+            "description": "What users can do once it ships, each with the release it targets.",
             "type": "array",
             "items": {
               "type": "object",
@@ -337,9 +354,11 @@
             }
           },
           "design": {
+            "description": "The design document it implements.",
             "type": "string"
           },
           "notes": {
+            "description": "Anything else the planner wanted on record.",
             "type": "string"
           }
         },
@@ -355,17 +374,21 @@
         "type": "object",
         "properties": {
           "title": {
+            "description": "The ticket in a few words.",
             "type": "string"
           },
           "feature": {
+            "description": "The feature it is part of (chores for upkeep).",
             "type": "string",
             "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$"
           },
           "component": {
+            "description": "The part of the codebase it belongs to.",
             "type": "string",
             "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$"
           },
           "kind": {
+            "description": "contract (an interface others build on), build, integration, chore or spike (a time-boxed investigation).",
             "enum": [
               "contract",
               "build",
@@ -375,18 +398,21 @@
             ]
           },
           "size": {
+            "description": "S or M: tickets are kept small enough for one PR.",
             "enum": [
               "S",
               "M"
             ]
           },
           "risk": {
+            "description": "high gets two reviewers and a full plan read; normal is approved from its TL;DR and plan review.",
             "enum": [
               "normal",
               "high"
             ]
           },
           "serves": {
+            "description": "The stories it helps deliver.",
             "type": "array",
             "items": {
               "type": "string",
@@ -394,12 +420,14 @@
             }
           },
           "depends_on": {
+            "description": "Tickets that must merge before this one starts.",
             "type": "array",
             "items": {
               "type": "string"
             }
           },
           "contracts": {
+            "description": "Interfaces it provides to other tickets, and ones it consumes.",
             "type": "object",
             "properties": {
               "provides": {
@@ -418,6 +446,7 @@
             "additionalProperties": false
           },
           "touches": {
+            "description": "The files and folders it may change; two tickets in flight never overlap.",
             "type": "array",
             "items": {
               "type": "string",
@@ -426,6 +455,7 @@
             "minItems": 1
           },
           "done_when": {
+            "description": "What must be true for it to count as done.",
             "type": "array",
             "items": {
               "type": "string",
@@ -434,12 +464,14 @@
             "minItems": 1
           },
           "one_way_doors": {
+            "description": "Choices in it that are hard to undo; you answer each before its plan is approved.",
             "type": "array",
             "items": {
               "type": "string"
             }
           },
           "superseded_by": {
+            "description": "The ticket that replaced it in a re-plan.",
             "type": [
               "string",
               "null"
@@ -453,6 +485,7 @@
             "description": "Why the supervisor is not scheduling this ticket yet; null releases it. A held ticket is left out of `ready` and the idle-capacity finding."
           },
           "notes": {
+            "description": "Anything else the planner wanted on record.",
             "type": "string"
           }
         },
@@ -475,6 +508,7 @@
         "type": "object",
         "properties": {
           "to": {
+            "description": "The phase the agent moved to.",
             "enum": [
               "starting",
               "spec",
@@ -492,30 +526,37 @@
             ]
           },
           "from": {
+            "description": "The phase it left.",
             "type": [
               "string",
               "null"
             ]
           },
           "task": {
+            "description": "The step of its plan it is on.",
             "type": "string"
           },
           "note": {
+            "description": "What it said about the move.",
             "type": "string",
             "maxLength": 280
           },
           "sha": {
+            "description": "The commit it was at.",
             "type": "string"
           },
           "usd": {
+            "description": "What it had spent so far, in dollars.",
             "type": "number",
             "minimum": 0
           },
           "input_tokens": {
+            "description": "Tokens read so far.",
             "type": "number",
             "minimum": 0
           },
           "output_tokens": {
+            "description": "Tokens written so far.",
             "type": "number",
             "minimum": 0
           }
@@ -530,16 +571,20 @@
         "type": "object",
         "properties": {
           "gate": {
+            "description": "Which check ran.",
             "type": "string"
           },
           "ok": {
+            "description": "Whether it passed.",
             "type": "boolean"
           },
           "ms": {
+            "description": "How long it took, in milliseconds.",
             "type": "number",
             "minimum": 0
           },
           "sha": {
+            "description": "The commit it ran on.",
             "type": "string"
           },
           "dirty": {
@@ -547,11 +592,13 @@
             "type": "boolean"
           },
           "tests_total": {
+            "description": "How many tests ran.",
             "type": "integer",
             "minimum": 0,
             "maximum": 1000000000
           },
           "tests": {
+            "description": "Per-test results, for flaky and slow tests.",
             "type": "array",
             "items": {
               "type": "object",
@@ -593,9 +640,11 @@
         "type": "object",
         "properties": {
           "to": {
+            "description": "Who it was sent to.",
             "type": "string"
           },
           "kind": {
+            "description": "What sort of message: a question for a review or go-ahead, a merge request, blocked, a design change, a ruling, a relayed answer, or info.",
             "enum": [
               "design-change",
               "merge-request",
@@ -607,22 +656,26 @@
             ]
           },
           "text": {
+            "description": "What it said.",
             "type": "string",
             "maxLength": 600
           },
           "re": {
+            "description": "The message it replies to.",
             "type": [
               "string",
               "null"
             ]
           },
           "sha": {
+            "description": "The commit it is about.",
             "type": [
               "string",
               "null"
             ]
           },
           "ticket": {
+            "description": "The ticket it is about.",
             "type": [
               "string",
               "null"
@@ -641,46 +694,58 @@
         "type": "object",
         "properties": {
           "source": {
+            "description": "Who or what noticed it.",
             "type": "string"
           },
           "subject": {
+            "description": "What it is about: a ticket, component, feature, gate, goal, class or record.",
             "type": "string"
           },
           "kind": {
+            "description": "What sort of observation (a reading, a slow test, an escaped defect, a retro…).",
             "type": "string"
           },
           "detail": {
+            "description": "What was noticed.",
             "type": "string"
           },
           "detector": {
+            "description": "The check that found it.",
             "type": "string"
           },
           "severity": {
+            "description": "How bad, 0 (nothing) to 4 (severe).",
             "type": "integer",
             "minimum": 0,
             "maximum": 4
           },
           "valence": {
+            "description": "Good or bad, -2 to 2.",
             "type": "integer",
             "minimum": -2,
             "maximum": 2
           },
           "source_key": {
+            "description": "Groups repeats of the same signal together.",
             "type": "string"
           },
           "source_ref": {
+            "description": "The file or record it came from.",
             "type": "string"
           },
           "refs": {
+            "description": "Records it relates to.",
             "type": "array",
             "items": {
               "type": "string"
             }
           },
           "fix_hint": {
+            "description": "A suggested fix.",
             "type": "string"
           },
           "measure": {
+            "description": "The value it read, with its unit.",
             "type": "object",
             "properties": {
               "value": {
@@ -708,6 +773,7 @@
         "type": "object",
         "properties": {
           "kind": {
+            "description": "fact, lesson, preference (often a standing rule of yours), constraint or pointer.",
             "enum": [
               "fact",
               "lesson",
@@ -717,13 +783,16 @@
             ]
           },
           "statement": {
+            "description": "What was learned.",
             "type": "string"
           },
           "scope": {
+            "description": "Where it applies: the whole project, a component, a feature, a kind of decision or a chore.",
             "type": "string",
             "pattern": "^(project|component:[a-z0-9-]+|feature:[a-z0-9-]+|class:[a-z0-9-]+|chore:[a-z0-9-]+)$"
           },
           "status": {
+            "description": "candidate until you keep it; accepted ones go into the instructions of every agent they apply to; stale or retired ones no longer do.",
             "enum": [
               "candidate",
               "accepted",
@@ -732,16 +801,19 @@
             ]
           },
           "confidence": {
+            "description": "How sure whoever proposed it was, 0 to 1.",
             "type": "number",
             "minimum": 0,
             "maximum": 1
           },
           "valence": {
+            "description": "Negative means something to avoid.",
             "type": "integer",
             "minimum": -2,
             "maximum": 2
           },
           "evidence": {
+            "description": "The records it was learned from.",
             "type": "array",
             "items": {
               "type": "string"
@@ -761,17 +833,21 @@
         "type": "object",
         "properties": {
           "title": {
+            "description": "The problem in a few words.",
             "type": "string"
           },
           "realized": {
+            "description": "true for an issue that is happening, false for a risk that might.",
             "type": "boolean"
           },
           "severity": {
+            "description": "How bad, 0 to 4.",
             "type": "integer",
             "minimum": 0,
             "maximum": 4
           },
           "status": {
+            "description": "open, owned, mitigating or resolved.",
             "enum": [
               "open",
               "owned",
@@ -780,18 +856,22 @@
             ]
           },
           "detail": {
+            "description": "What is wrong and what is known.",
             "type": "string"
           },
           "threatens": {
+            "description": "Goals it puts at risk.",
             "type": "array",
             "items": {
               "type": "string"
             }
           },
           "assigned_to": {
+            "description": "Who is handling it.",
             "type": "string"
           },
           "refs": {
+            "description": "Records it relates to.",
             "type": "array",
             "items": {
               "type": "string"
@@ -811,6 +891,7 @@
         "type": "object",
         "properties": {
           "kind": {
+            "description": "What sort of question: a decision, a one-way door, a clarification, a proposal, more trust, defining or approving a goal, something only you can do, or a review.",
             "enum": [
               "owner-decision",
               "one-way-door",
@@ -824,21 +905,27 @@
             ]
           },
           "class": {
+            "description": "The kind of decision on the trust ladder it belongs to.",
             "type": "string"
           },
           "scope": {
+            "description": "Narrows the class to one area, if set.",
             "type": "string"
           },
           "ticket": {
+            "description": "The ticket it is about.",
             "type": "string"
           },
           "question": {
+            "description": "What was asked.",
             "type": "string"
           },
           "context": {
+            "description": "Background for answering.",
             "type": "string"
           },
           "options": {
+            "description": "The choices offered.",
             "type": "array",
             "items": {
               "type": "string"
@@ -959,24 +1046,29 @@
             "description": "The goal a goal-approval question asks the owner to approve, on its linked design."
           },
           "recommendation": {
+            "description": "The supervisor's recommendation.",
             "type": "string"
           },
           "confidence": {
+            "description": "How sure the supervisor was of its recommendation, 0 to 1.",
             "type": "number",
             "minimum": 0,
             "maximum": 1
           },
           "default": {
+            "description": "What happens if you do not answer by the deadline (only where the class allows one).",
             "type": [
               "string",
               "null"
             ]
           },
           "deadline": {
+            "description": "When the default applies.",
             "type": "string",
             "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
           },
           "blocks": {
+            "description": "Tickets or chores waiting on the answer.",
             "type": "array",
             "items": {
               "type": "string"
@@ -992,15 +1084,18 @@
             }
           },
           "evidence": {
+            "description": "Records behind the recommendation.",
             "type": "array",
             "items": {
               "type": "string"
             }
           },
           "note": {
+            "description": "The supervisor's note.",
             "type": "string"
           },
           "why_asked": {
+            "description": "Why it came to you: the rung and ceiling of its class, and the reasons.",
             "type": "object",
             "properties": {
               "rung": {
@@ -1023,15 +1118,18 @@
             "additionalProperties": false
           },
           "status": {
+            "description": "withdrawn or defaulted; an answered question carries your answer instead.",
             "enum": [
               "withdrawn",
               "defaulted"
             ]
           },
           "reason": {
+            "description": "Why it was withdrawn.",
             "type": "string"
           },
           "answer": {
+            "description": "Your answer.",
             "type": "string"
           },
           "said": {
@@ -1040,6 +1138,7 @@
             "description": "the owner's own words, verbatim, when the answer came through the supervisor's chat"
           },
           "autonomy": {
+            "description": "What your answer said about the next decision of this class: ask, ask with a default, or decide and tell you.",
             "type": [
               "object",
               "null"
@@ -1067,6 +1166,7 @@
             "additionalProperties": false
           },
           "standing_rule": {
+            "description": "A rule you gave with the answer, kept as knowledge.",
             "type": "string"
           },
           "re": {
@@ -1250,43 +1350,53 @@
         "type": "object",
         "properties": {
           "class": {
+            "description": "The kind of decision on the trust ladder.",
             "type": "string"
           },
           "scope": {
+            "description": "Narrows the class to one area, if set.",
             "type": "string"
           },
           "what": {
+            "description": "What was decided.",
             "type": "string"
           },
           "rationale": {
+            "description": "Why.",
             "type": "string"
           },
           "options": {
+            "description": "The options weighed.",
             "type": "array",
             "items": {
               "type": "string"
             }
           },
           "confidence": {
+            "description": "How sure the supervisor was, 0 to 1.",
             "type": "number",
             "minimum": 0,
             "maximum": 1
           },
           "refs": {
+            "description": "What it is about; acts under it stay within these.",
             "type": "array",
             "items": {
               "type": "string"
             }
           },
           "reversible": {
+            "description": "Whether it can be undone.",
             "type": "boolean"
           },
           "rung": {
+            "description": "The class's rung when it was decided: 1 asks, 2 asks with a default, 3 decides and tells you.",
             "type": "integer",
             "minimum": 1,
             "maximum": 3
           },
           "ceiling": {
+            "description": "The highest rung the class can reach.",
             "type": "integer",
             "minimum": 1,
             "maximum": 3
@@ -1302,10 +1412,12 @@
             ]
           },
           "approved_by": {
+            "description": "Your answer or standing rule it rests on.",
             "type": "string",
             "pattern": "^[qk]-"
           },
           "corrected": {
+            "description": "Your correction, if the call was wrong; it drops the class to rung 1.",
             "type": "object",
             "properties": {
               "reason": {
@@ -1323,6 +1435,7 @@
             "additionalProperties": false
           },
           "repaired": {
+            "description": "What the supervisor did about the correction.",
             "enum": [
               "undo",
               "fix-ticket",
@@ -1346,29 +1459,36 @@
         "type": "object",
         "properties": {
           "class": {
+            "description": "The kind of act or decision.",
             "type": "string"
           },
           "scope": {
+            "description": "Narrows the class to one area, if set.",
             "type": "string"
           },
           "what": {
+            "description": "What was done.",
             "type": "string"
           },
           "rung": {
+            "description": "The class's rung when it acted on its own trust.",
             "type": "integer",
             "minimum": 1,
             "maximum": 3
           },
           "refs": {
+            "description": "What it acted on.",
             "type": "array",
             "items": {
               "type": "string"
             }
           },
           "reversible": {
+            "description": "Whether it can be undone.",
             "type": "boolean"
           },
           "approved_by": {
+            "description": "Your answer or standing rule it rests on.",
             "type": "string"
           },
           "decision": {
@@ -1377,6 +1497,7 @@
             "pattern": "^d-"
           },
           "corrected": {
+            "description": "Your correction, if it was its own call and wrong.",
             "type": "object",
             "properties": {
               "reason": {
@@ -1394,6 +1515,7 @@
             "additionalProperties": false
           },
           "repaired": {
+            "description": "What the supervisor did about the correction.",
             "enum": [
               "undo",
               "fix-ticket",
@@ -1443,6 +1565,7 @@
             "description": "the ticket, planner (plan-<feature>) or supervisor"
           },
           "role": {
+            "description": "Worker, planner, reviewer or supervisor.",
             "enum": [
               "worker",
               "reviewer",
@@ -1451,6 +1574,7 @@
             ]
           },
           "phase": {
+            "description": "The phase the spend was in.",
             "type": "string"
           },
           "through": {
@@ -1458,26 +1582,32 @@
             "description": "ISO time of the latest response counted"
           },
           "usd": {
+            "description": "Dollars spent.",
             "type": "number",
             "minimum": 0
           },
           "input_tokens": {
+            "description": "Tokens read.",
             "type": "number",
             "minimum": 0
           },
           "output_tokens": {
+            "description": "Tokens written.",
             "type": "number",
             "minimum": 0
           },
           "cache_read_tokens": {
+            "description": "Tokens read from the prompt cache.",
             "type": "number",
             "minimum": 0
           },
           "cache_write_tokens": {
+            "description": "Tokens written to the prompt cache.",
             "type": "number",
             "minimum": 0
           },
           "by_model": {
+            "description": "The same, per model.",
             "type": "object",
             "additionalProperties": {
               "type": "object",
