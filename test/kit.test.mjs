@@ -2901,6 +2901,20 @@ test('the Links block: links whose for matches the ticket, plus the ticket\'s an
   } finally { F.done(); }
 });
 
+test('a question links a registry link by id; the inbox resolves it', () => {
+  const F = monoFixture('question-links');
+  const { old, ok, run, edit } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  try {
+    edit((j) => { j.links = { figma: { kind: 'url', title: 'Designs', url: 'https://figma.test/a' } }; });
+    const q = ok(old, ['ask', '--question', 'Which spacing?', '--links', JSON.stringify([{ title: 'The designs', link: 'figma' }, { title: 'x', url: 'https://x.test' }])], SUP);
+    const v = json(ok(old, ['questions', '--id', q, '--json']))[0];
+    assert.deepEqual(v.links[0], { title: 'The designs', link: 'figma', url: 'https://figma.test/a' });
+    assert.match(ok(old, ['questions', '--id', q]), /see: The designs \(https:\/\/figma\.test\/a\)/);
+    assert.match(run(old, ['ask', '--question', 'x?', '--links', JSON.stringify([{ title: 'y', link: 'nope' }])], SUP).err, /--links: link "nope" is not in settings links/);
+  } finally { F.done(); }
+});
+
 test('fleet park: every session stops with a handoff, and a clone elsewhere picks it up with parity', () => {
   const F = fleetFixture('park');
   const { org, old, neu, home, env, run, ok, g, base } = F;

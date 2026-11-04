@@ -1083,7 +1083,7 @@
           },
           "links": {
             "type": "array",
-            "description": "Artifacts the owner must look at to answer (a spec, a plan, a mock): a path in the repo at ref (default main), or a URL.",
+            "description": "Artifacts the owner must look at to answer (a spec, a plan, a mock): a path in the repo at ref (default main), a URL, or a registry link by id.",
             "items": {
               "type": "object",
               "properties": {
@@ -1102,6 +1102,11 @@
                 "url": {
                   "type": "string",
                   "pattern": "^https?://"
+                },
+                "link": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+                  "description": "A registry link's id (settings.md links); the inbox shows its locator."
                 }
               },
               "required": [

@@ -1064,7 +1064,9 @@ function questionView(q) {
   };
 }
 // The inbox's view: each question with its goal's hold (never inside questionView, which the fold uses).
-const questions = () => logObjects('question').map((q) => ({ ...questionView(q), goal_hold: questionHold(q) }));
+// A link item that names a registry link shows its kind's locator: a url link's url, a repo link's remote.
+const resolveQuestionLinks = (ls) => { const reg = loadSettings().links ?? {}; return (ls ?? []).map((l) => { const r = l?.link ? reg[l.link] : null; const K = r ? LINK_KINDS[r.kind] : null; if (!K) return l; const { text, ...where } = K.locator(r, l.link); return { ...l, ...where }; }); };
+const questions = () => logObjects('question').map((q) => { const v = questionView(q); return { ...v, links: resolveQuestionLinks(v.links), goal_hold: questionHold(q) }; });
 
 // Why question q does not authorise the supervisor to change goal goalId (null when it does): it
 // is a goal-change question about that goal, answered by the owner with its recommendation (an
@@ -3125,6 +3127,7 @@ function cmdAsk() {
       if (k.type === 'stdin' && !allowedCommand(k.argv)) die(`secret ${x.name}: \`${k.argv.join(' ')}\` is not in settings.secret_commands, the commands the owner lets a secret be piped to`);
     }
   }
+  for (const l of jsonFlag('links') ?? []) if (l?.link !== undefined && !(loadSettings().links ?? {})[l.link]) die(`--links: link "${l.link}" is not in settings links (devteam.mjs links)`);
   const line = appendLog({
     type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), question: q, context: kind === 'goal-approval' ? [flagStr('context'), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal'))))].filter(Boolean).join('\n\n') : flagStr('context'),
     rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: goalChangeFlag(cls), options: asList(flags.options), choices: jsonFlag('choices'), links: jsonFlag('links'), recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined,
@@ -4019,7 +4022,7 @@ function cmdQuestions() {
   for (const q of qs) {
     out(`${q.id}  [${q.kind}, ${q.status}${q.goal_hold ? `, its goal ${holdWords(q.goal_hold)}` : ''}]${q.blocks.length ? ` blocks ${q.blocks.join(',')}` : ''}\n  ${q.question}`);
     for (const c of q.choices) out(`  - ${c.label}${c.label === q.recommendation ? ' (recommended)' : ''}${c.detail ? `: ${c.detail}` : ''}${c.effect ? ` For users: ${c.effect}` : ''}`);
-    for (const l of q.links) out(`  see: ${l.title} (${l.url ?? `${l.ref ? `${l.ref}:` : ''}${l.path}`})`);
+    for (const l of q.links) out(`  see: ${l.title} (${l.url ?? (l.remote ? `repo ${l.remote}` : `${l.ref ? `${l.ref}:` : ''}${l.path}`)})`);
     if (q.review) out(`  review: ${q.review.page?.path} at ${String(q.review.commit).slice(0, 12)} (${q.review.ref})${q.review.data ? `, ${q.review.data.rows} rows` : ''}; ${q.result_status} (devteam.mjs review show ${q.id})`);
     if (q.recommendation) out(`  recommend: ${q.recommendation}${q.confidence != null ? ` (${Math.round(q.confidence * 100)}%)` : ''}`);
     if (q.why_asked?.reasons?.length) out(`  why asked: ${q.why_asked.reasons.join(', ')}${q.class ? ` (${q.class}, rung ${q.why_asked.rung ?? '-'} of ${q.why_asked.ceiling ?? '-'})` : ''}`);
