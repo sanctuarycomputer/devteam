@@ -2075,6 +2075,7 @@ function notSchedulable(t) {
   if (workerState(t.id)?.phase === 'parked') return 'parked';
   const b = ticketBranchRef(t.id);
   if (b && ticketReviews(t.id, { ref: b }).some((r) => r.stage === 'final')) return 'in review';
+  if (coverageGap()) return 'unowned files';
   return null;
 }
 function cmdReady() {
@@ -2099,7 +2100,7 @@ function cmdReady() {
   if (flags.json) return json({ ready: rows, held, waiting, active, active_per_component: perComponent, caps: { max_active_tickets: s.max_active_tickets, max_active_per_component: s.max_active_per_component } });
   out(`active workers: ${active.length}/${s.max_active_tickets}`);
   for (const h of held) out(`held       ${h.id}  (${h.held})`);
-  for (const w of waiting) out(`${w.why.padEnd(10)} ${w.id}  (no new worker: ${w.why === 'parked' ? 'resume it with `worker <id> --resume` when its ruling and its goal allow' : w.why.startsWith('goal ') ? 'its goal is on hold (goal hold)' : 'merge or answer its review'})`);
+  for (const w of waiting) out(`${w.why.padEnd(10)} ${w.id}  (no new worker: ${w.why === 'parked' ? 'resume it with `worker <id> --resume` when its ruling and its goal allow' : w.why.startsWith('goal ') ? 'its goal is on hold (goal hold)' : w.why === 'unowned files' ? 'main has files no component line owns; a chore PR that extends a line clears it (components check)' : 'merge or answer its review'})`);
   if (!rows.length) return out('nothing ready');
   for (const r of rows) out(`${r.mode.padEnd(10)} ${r.id}  (${r.kind}, ${r.size}, ${r.risk})${(perComponent[r.component] ?? 0) >= s.max_active_per_component ? '  (component at cap)' : ''}`);
 }
@@ -2337,6 +2338,9 @@ function settingsInForce(base, sha, R = homeFacts) {
 }
 // Coverage of one repo's tree under one set of settings, once per read of the log; null with no lines.
 const coverageAt = (ref, s, R = homeFacts) => (linesDeclared(s) ? memo(`coverage\0${R.name}\0${ref}\0${canonical(s.components)}`, () => coverage(R.treePaths(ref), componentsOn(s, R.name), R.devteamLine())) : null);
+// Gaps on main under main's committed lines (§4, point 3): commits that bypassed devteam. Zero
+// with no lines. While non-zero, no new ticket starts in that repo.
+const coverageGap = (name = 'home', R = homeFacts) => memo(`coverageGap\0${name}`, () => { const main = R.mainRef(); const s = main && projectInRepo ? settingsAt(mainRef(), { orNull: true }) : null; const cov = s ? coverageAt(main, s, R) : null; return cov ? coverageGaps(cov, s).count + cov.case_collisions.length : 0; });
 // The Baseline's floor gaps (§9a): unowned, owned twice, a component whose link can't hold files,
 // an owns glob that matches nothing. Case collisions fail the check but aren't a gap class.
 function coverageGaps(cov, s) {
@@ -4230,7 +4234,7 @@ function observeFindings(m) {
   for (const f of m.findings) {
     const key = `metrics:${f.kind}:${f.subject}`;
     if (Date.now() - (recent.get(key) ?? 0) < DAY) continue;
-    appendLog({ type: 'observation', source: 'metrics', subject: String(f.subject), kind: f.kind, detector: 'metrics', detail: f.detail, severity: SEV[f.severity] ?? 1, valence: -1, source_key: key, fix_hint: f.suggestion }, 'supervisor');
+    appendLog({ type: 'observation', source: 'metrics', subject: String(f.subject), kind: f.kind, detector: 'metrics', detail: f.detail, severity: f.sev ?? SEV[f.severity] ?? 1, valence: -1, source_key: key, fix_hint: f.suggestion }, 'supervisor');
     n++;
   }
   return n;
@@ -5321,7 +5325,7 @@ function collectMetrics(since) {
 
   // Findings: blockers and inefficiencies, each with a next step.
   const f = [];
-  const add = (severity, kind, subject, detail, suggestion) => f.push({ severity, kind, subject, detail, suggestion });
+  const add = (severity, kind, subject, detail, suggestion, extra = {}) => f.push({ severity, kind, subject, detail, suggestion, ...extra });
   for (const g of gates.flaky_gates) add('high', 'flaky-gate', g.gate, `failed then passed at the same commit ${g.commits} time(s)`, 'find the flaky tests (run with --junit) and fix or quarantine them');
   for (const t of gates.flaky_tests.slice(0, 10)) add('high', 'flaky-test', t.name, `failed then passed at the same commit ${t.times} time(s)`, 'make it deterministic (time, order, shared state, network) or quarantine it with a ticket');
   for (const g of gates.gates.filter((x) => x.median_seconds >= settings.slow_gate_minutes * 60)) add('medium', 'slow-gate', g.gate, `median ${(g.median_seconds / 60).toFixed(1)} min over ${g.runs} run(s)`, 'shard it, cache dependencies, or split fast checks from slow ones');
@@ -5449,6 +5453,11 @@ function collectMetrics(since) {
   const unpriced = Object.entries(m.cost.unpriced_models ?? {});
   if (unpriced.length) add('low', 'unpriced-model', unpriced.map(([k]) => k).join(', '), `${unpriced.map(([k, n]) => `${k}: ${(n / 1e6).toFixed(1)}M tokens`).join('; ')} with no price, so spend undercounts`, 'the owner adds them to settings.model_prices ($ per million tokens: input, output, cache_read, cache_write)');
   if (m.escaped_defects) add('high', 'escaped-defects', `${m.escaped_defects}`, 'defects found after merge', 'retro: which review or gate should have caught each one');
+  // Component lines on main (§4, point 3): a gap is a severity-4 observation (open issue 6).
+  {
+    const n = coverageGap();
+    if (n) add('high', 'unowned-files', 'home', `${n} tracked path(s) on ${mainRef()} no line owns, or more than one does (devteam.mjs components check lists them); no new ticket starts in home until it clears`, 'a chore PR that extends a line (settings components), or moves the files into one', { sev: 4 });
+  }
   const order = { high: 0, medium: 1, low: 2 };
   // A finding someone has looked at and set aside (`ack`) moves to acknowledged until the ack
   // expires or its subject changes; it is never hidden.
@@ -6093,6 +6102,8 @@ function makeSession(role) {
   const id = positional[0] ?? die(`usage: ${role} <${role === 'worker' ? 'ticket-id' : 'feature'}> [--resume] [--force]`);
   if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
   if (role === 'worker' && !tickets().has(id)) die(`no ticket ${id} (devteam.mjs ticket show ${id})`);
+  // A repo with files no line owns starts no new ticket (§4, point 3); a ticket already started carries on.
+  if (role === 'worker' && !lastPhaseOf(id) && coverageGap()) die(`home's main has ${coverageGap()} path(s) no component line owns, or more than one does: no new ticket starts there until a chore PR extends a line (devteam.mjs components check)`);
   // Every session serves a goal, and the goal's hold says whether it may start (planning.md §1):
   // drain lets a session that already ran carry on but starts nothing new; park and let-go start
   // nothing. --force does anyway, and its act says so. A planner names its goal until its feature

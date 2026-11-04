@@ -2739,6 +2739,31 @@ test('check-pr and merge judge the tree that would land, by committed lines (M1,
   } finally { F.done(); }
 });
 
+test('unowned files on main: a severity-4 finding, and no new ticket starts there until a line covers them', () => {
+  const F = monoFixture('unowned');
+  const { old, ok, run, g, lines } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  try {
+    lines(F.STD);
+    ok(old, ['ticket', 'add', 'api-01-a', '--json', JSON.stringify({ title: 'a', feature: 'chores', component: 'api', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['api/**'], done_when: ['the api suite passes'], notes: 'n' })], SUP);
+    assert.match(ok(old, ['ready']), /build +api-01-a/);
+    write(path.join(old, 'scripts/x.sh'), 'x\n');
+    g(['add', '-A'], old); g(['commit', '-qm', 'pushed past devteam'], old); g(['push', '-q', 'origin', 'main'], old);
+    const f = json(ok(old, ['metrics', '--json'])).findings.find((x) => x.kind === 'unowned-files');
+    assert.ok(f, 'the finding');
+    assert.equal(f.subject, 'home');
+    assert.match(f.detail, /1 tracked path\(s\) on .* no line owns/);
+    ok(old, ['observe-metrics'], SUP);
+    assert.equal(json(ok(old, ['log', '--type', 'observation', '--json'])).find((o) => o.kind === 'unowned-files').severity, 4);
+    const r = json(ok(old, ['ready', '--json']));
+    assert.deepEqual(r.waiting, [{ id: 'api-01-a', why: 'unowned files' }]);
+    assert.match(ok(old, ['ready']), /unowned files api-01-a .*a chore PR that extends a line/);
+    assert.match(run(old, ['worker', 'api-01-a'], SUP).err, /home's main has 1 path\(s\) no component line owns/);
+    lines({ ...F.STD, ops: { owns: [...F.STD.ops.owns, 'scripts/**'] } });
+    assert.match(ok(old, ['ready']), /build +api-01-a/, 'a line that covers them clears it');
+  } finally { F.done(); }
+});
+
 test('fleet park: every session stops with a handoff, and a clone elsewhere picks it up with parity', () => {
   const F = fleetFixture('park');
   const { org, old, neu, home, env, run, ok, g, base } = F;
