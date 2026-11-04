@@ -300,6 +300,15 @@
   .seg2 { display: inline-flex; border: 1px solid var(--line-2); border-radius: 7px; overflow: hidden; }
   .seg2 button { margin: 0; height: 24px; border: 0; border-radius: 0; background: var(--surface); color: var(--fg-2); font-weight: 500; padding: 0 10px; }
   .seg2 button[aria-pressed="true"] { background: var(--well); color: var(--fg); }
+  .holdbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 8px 0 2px; }
+  .holdbar .seg2 button[data-mode="drain"][aria-pressed="true"] { background: color-mix(in srgb, var(--amber, #c98a00) 18%, var(--surface)); }
+  .holdbar .seg2 button[data-mode="park"][aria-pressed="true"], .holdbar .seg2 button[data-mode="let-go"][aria-pressed="true"] { background: color-mix(in srgb, var(--red) 14%, var(--surface)); }
+  .holdbar .seg2 button.confirm { color: var(--red); }
+  .fleet-strip { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; margin-bottom: 14px; font-size: 12px; background: var(--surface); }
+  .fleet-strip .grow { flex: 1 1 auto; }
+  .fleet-strip details { width: 100%; }
+  .fleet-strip ul { margin: 6px 0 0 18px; padding: 0; }
+  .card.upkeep { padding-top: 8px; padding-bottom: 8px; }
   .md { max-width: var(--measure); font-size: 13.5px; line-height: 1.65; }
   .md h1 { font-size: 19px; margin: 6px 0 12px; } .md h2 { font-size: 16px; margin: 22px 0 8px; display: block; } .md h3 { font-size: 14px; margin: 18px 0 6px; color: var(--fg); }
   .md p, .md ul, .md ol { margin: 8px 0; } .md li { margin: 3px 0; }
@@ -403,6 +412,7 @@
   <div class="banner updated" id="updated" role="status" hidden>The dashboard was updated since this tab opened, so some of what you see may be out of date. <button id="reload-page">Reload</button></div>
   <p class="loading" id="loading">Loading…</p>
   <section id="overview">
+    <div id="fleet-strip" class="fleet-strip"></div>
     <div class="grid" id="stats"></div>
   </section>
 
@@ -924,7 +934,7 @@ function questionCard(q, o, reasonText) {
   const notePh = goalAsk ? 'Notes for the planner: taken into account whatever you choose (needed to refine)' : list.length ? 'Add a note (optional), or your own answer' : 'Your answer';
   return `
     <div class="card qcard ${kindCls}" id="q-${esc(q.id)}">
-      ${cardHead(KIND_ICON[q.kind] || 'circle-help', `<span class="badge ${q.kind === 'one-way-door' ? 'high' : q.kind === 'trust' ? 'good' : q.kind === 'owner-action' ? 'low' : 'medium'}">${esc(KIND_WORDS[q.kind] || words(q.kind))}</span>`, { extra: (q.blocks || []).length ? `holds up ${q.blocks.map(tlink).join(', ')}` : q.ticket ? `about ${tlink(q.ticket)}` : '', id: q.id, rows: [['Asked', esc(when(q.asked_at))], ...(q.class ? [['Kind', esc(q.class)]] : [])] })}
+      ${cardHead(KIND_ICON[q.kind] || 'circle-help', `<span class="badge ${q.kind === 'one-way-door' ? 'high' : q.kind === 'trust' ? 'good' : q.kind === 'owner-action' ? 'low' : 'medium'}">${esc(KIND_WORDS[q.kind] || words(q.kind))}</span>${q.goal_hold === 'park' ? '<span class="badge">its goal is parked</span>' : ''}`, { extra: (q.blocks || []).length ? `holds up ${q.blocks.map(tlink).join(', ')}` : q.ticket ? `about ${tlink(q.ticket)}` : '', id: q.id, rows: [['Asked', esc(when(q.asked_at))], ...(q.class ? [['Kind', esc(q.class)]] : [])] })}
       <h4>${linkify(q.question)}</h4>
       ${q.context ? `<p class="ctx">${linkify(q.context)}</p>` : ''}
       ${(q.links || []).length ? `<div class="links"><span class="muted small">Look at:</span>${q.links.map(linkOf).join('')}</div>` : ''}
@@ -1465,7 +1475,17 @@ async function reviewDecline(id, note, errId, btn) {
 }
 
 const GOAL_STEPS = ['Defined', 'Designed', 'Approved', 'Built', 'Met'];
+// A held goal keeps its step; its label says the hold first.
 function goalState(g, R, openQs) {
+  const s = goalStateOf(g, R, openQs);
+  const h = g.hold_view;
+  if (!h || h.mode === 'run' || h.mode === 'let-go') return s;
+  const words = { draining: 'Draining', drained: 'Drained', parking: 'Parking', parked: 'Parked' }[h.state] || h.state;
+  const running = h.running.length ? ` (${h.running.length} still running)` : '';
+  const why = `${h.fleet ? 'the whole fleet' : h.by === 'supervisor' ? 'the supervisor' : 'you'}${h.reason ? `: ${esc(h.reason)}` : ''}`;
+  return { ...s, label: `${words}${running} · ${s.label}`, tone: h.mode === 'park' ? 'high' : 'medium', next: `${h.mode === 'drain' ? 'Draining: what is running finishes and merges; nothing new starts' : 'Parked: its sessions stopped with their work pushed and a handoff; nothing starts and nothing merges'} (set by ${why}). ${s.next || ''}` };
+}
+function goalStateOf(g, R, openQs) {
   const ask = openQs.find((q) => q.kind === 'goal-approval' && q.goal === g.id);
   const defQ = openQs.find((q) => q.kind === 'goal-definition');
   if (g.status === 'met') return { key: 'met', label: 'Met', tone: 'good', step: 5, next: 'The measure reached its target.' };
@@ -1529,6 +1549,47 @@ function goalSteps(g, s, R) {
     return `<li class="${cls}${fill != null && !cls ? ' part' : ''}"${fill != null ? ` style="--fill:${Math.round(fill * 100)}%"` : ''}${tip ? ` title="${esc(tip)}"` : ''}>${x}${sub ? `<span class="step-sub">${esc(sub)}</span>` : ''}</li>`;
   }).join('')}</ol>`;
 }
+// The toggle: Run, Drain, Park, and Let go (Restore once let go). Let go asks to confirm in place.
+function holdControl(id, h, { letGo = true, status = null } = {}) {
+  if (status === 'met') return '';
+  if (status === 'abandoned') return `<div class="holdbar"><span class="seg2" role="group" aria-label="Hold"><button type="button" data-hold-id="${esc(id)}" data-mode="restore">Restore (parked)</button></span><span class="err" id="e-hold-${esc(id)}"></span></div>`;
+  const cur = h?.mode || 'run';
+  const fleet = DATA?.fleet?.mode ? '<span class="muted small">set for the whole fleet: use the strip at the top to resume it</span>' : '';
+  const btn = (m, label) => `<button type="button" data-hold-id="${esc(id)}" data-mode="${m}" aria-pressed="${cur === m}">${label}</button>`;
+  return `<div class="holdbar"><span class="seg2" role="group" aria-label="Hold">${btn('run', 'Run')}${btn('drain', 'Drain')}${btn('park', 'Park')}${letGo ? btn('let-go', 'Let go') : ''}</span>${fleet}<span class="err" id="e-hold-${esc(id)}"></span></div>`;
+}
+function upkeepCard(u) {
+  const words = { running: 'Running', draining: 'Draining', drained: 'Drained', parking: 'Parking', parked: 'Parked' }[u.state] || u.state;
+  const chores = u.chores || [];
+  return `<div class="card goal upkeep">
+    ${cardHead('wrench', `<span class="badge ${u.mode === 'run' ? 'good' : u.mode === 'park' ? 'high' : 'medium'}">${esc(words)}</span>`, { extra: 'always on: observing and keeping the record' })}
+    <h4>Upkeep</h4>
+    <p class="ctx">Chores, CI fixes, research, retros, kit syncs and the improvement loop's trials and proposals.${chores.length ? ` In flight: ${chores.slice(0, 6).map((c) => `<a class="linkish" href="#ticket/${encodeURIComponent(c.id)}">${esc(c.id)}</a>`).join(', ')}${chores.length > 6 ? '…' : ''}.` : ''}${u.reason ? ` <span class="muted">(${esc(u.reason)})</span>` : ''}</p>
+    ${holdControl('upkeep', u, { letGo: false })}
+  </div>`;
+}
+// Can the fleet move? The mode is in the data; readiness comes from fleet status, asked for apart.
+let FLEET = { at: 0, data: null, busy: false };
+function fleetStrip() {
+  const f = DATA?.fleet || {};
+  const mode = f.mode;
+  const st = FLEET.data;
+  const ready = st ? (st.ready ? '<span class="badge good">ready to move</span>' : `<span class="badge ${mode ? 'medium' : ''}">not ready to move</span>`) : mode || f.op ? '<span class="muted">checking…</span>' : '<span class="muted">park or drain the fleet to move it; Check says what a move needs</span>';
+  const left = st && !st.ready ? `<details><summary>${esc(st.blockers.length)} thing${st.blockers.length === 1 ? '' : 's'} left before a move</summary><ul>${st.blockers.map((b) => `<li>${linkify(b)}</li>`).join('')}</ul></details>` : '';
+  const parity = st?.parity ? `<span class="muted">parity <code>${esc(st.parity.hash)}</code></span>` : '';
+  const label = mode === 'park' ? '<b>Fleet parked</b>' : mode === 'drain' ? `<b>Fleet draining</b>${st && !st.sessions.some((x) => !x.parked) ? ' (drained)' : ''}` : f.op ? '<b>Fleet partly held</b> <span class="muted">(a goal was set apart after the fleet op)</span>' : '<b>Fleet running</b>';
+  const btns = mode || f.op
+    ? '<button type="button" data-fleet="resume">Resume</button>'
+    : '<button type="button" class="ghost" data-fleet="drain">Drain all</button><button type="button" class="ghost" data-fleet="park">Park all</button>';
+  return `<i class="icon-truck" aria-hidden="true"></i>${label}${f.reason ? ` <span class="muted">· ${esc(f.reason)}</span>` : ''}<span class="grow"></span>${ready}${parity}<span class="row-inline">${btns}<button type="button" class="ghost" data-fleet="check" title="Fetch from origin and check again">Check</button></span><span class="err" id="e-fleet"></span>${left}`;
+}
+async function loadFleet(fetchToo = false) {
+  if (FLEET.busy) return;
+  FLEET.busy = true;
+  try { const r = await fetch(`/api/fleet${fetchToo ? '?fetch=1' : ''}`); if (r.ok) FLEET = { ...FLEET, data: await r.json(), at: Date.now() }; } catch {}
+  FLEET.busy = false;
+  if ($('fleet-strip')) $('fleet-strip').innerHTML = fleetStrip();
+}
 function goalCard(g, R, openQs, week) {
   const s = goalState(g, R, openQs);
   const design = s.ask?.links?.[0] ?? (['ready', 'met'].includes(g.status) && g.check.design ? { title: 'The design', path: `docs/devteam/${g.check.design}` } : null);
@@ -1539,6 +1600,7 @@ function goalCard(g, R, openQs, week) {
     ${g.outcome ? `<p class="ctx">${esc(g.outcome)}</p>` : ''}
     ${steps}
     ${s.next ? `<p class="goal-next">${s.next}</p>` : ''}
+    ${holdControl(g.id, g.hold_view, { status: g.status })}
     <div class="meta"><a href="#goal/${encodeURIComponent(g.id)}">Open</a>${design ? ` · <a href="${esc(fileHref({ ...design, title: design.title || 'The design' }))}">Read the design</a>` : ''}${planningFor(g).length ? ` · ${planningFor(g).map((p) => `<a href="#planner/${encodeURIComponent(p.feature)}">planner on ${esc(p.title)}</a>${p.waiting ? ' <span class="badge high">stuck on a prompt</span>' : ''}`).join(', ')}` : ''}</div>
   </div>`;
 }
@@ -1573,10 +1635,10 @@ function renderOoda(o) {
   const openQs = DATA.questions || [];
   const live = o.goals.filter((g) => !['met', 'abandoned'].includes(g.status));
   const doneGoals = o.goals.filter((g) => ['met', 'abandoned'].includes(g.status));
-  $('goals-list').innerHTML = o.goals.length ? live.map((g) => goalCard(g, R, openQs, week)).join('') + (doneGoals.length ? `<details><summary>Met and let go (${doneGoals.length})</summary>${doneGoals.map((g) => goalCard(g, R, openQs, week)).join('')}</details>` : '') : (() => {
+  $('goals-list').innerHTML = (DATA.upkeep ? upkeepCard(DATA.upkeep) : '') + (o.goals.length ? live.map((g) => goalCard(g, R, openQs, week)).join('') + (doneGoals.length ? `<details><summary>Met and let go (${doneGoals.length})</summary>${doneGoals.map((g) => goalCard(g, R, openQs, week)).join('')}</details>` : '') : (() => {
     const ask = (DATA.questions || []).find((q) => q.kind === 'goal-definition');
     return empty(ask ? `No goals yet. The supervisor has asked for them: <a class="linkish" href="#q/${encodeURIComponent(ask.id)}">answer it in the Inbox</a>.` : 'No goals yet. The supervisor asks the owner for them first (<code>process/planning.md</code> §1).');
-  })();
+  })());
 
   // Observe
   $('observations').innerHTML = o.observations.length ? o.observations.slice(0, 40).map((x) => `
@@ -1705,6 +1767,7 @@ function openGoal(id) {
     ${g.outcome ? `<p class="ctx measure">${esc(g.outcome)}</p>` : ''}
     ${goalSteps(g, s, R)}
     ${s.next ? `<p class="goal-next measure">${s.next}</p>` : ''}
+    ${holdControl(g.id, g.hold_view, { status: g.status })}
     ${feats.length ? `<p>${boardLink(`goal:${g.id}`)}</p>` : ''}
     <dl>
       ${design ? `<dt>Design</dt><dd><a href="${esc(fileHref({ ...design, title: design.title || 'The design' }))}">${esc(design.title || 'The design')}</a></dd>` : ''}
@@ -2102,6 +2165,9 @@ function render(d) {
   $('answered').innerHTML = o.answered.length ? o.answered.map(answeredCard).join('') : empty('Nothing answered yet.');
 
   renderOoda(o);
+  // readiness is costly (git, gh, harness logs): asked for only while the fleet is held, or on Check
+  if (!$('fleet-strip').querySelector('.confirm')) $('fleet-strip').innerHTML = fleetStrip();
+  if ((d.fleet?.mode || d.fleet?.op) && Date.now() - FLEET.at > 60000) loadFleet();
   for (const id of openForms) { const f = document.querySelector(`[data-correct-form="${id}"]`); if (f) f.hidden = false; }
   renderProgress();
 
@@ -2246,6 +2312,28 @@ $('view').addEventListener('change', (e) => {
 });
 
 document.addEventListener('click', async (ev) => {
+  const hb = ev.target.closest('[data-hold-id]');
+  if (hb) {
+    const id = hb.dataset.holdId, mode = hb.dataset.mode;
+    const errId = `hold-${id}`;
+    if (mode === 'let-go' && !hb.classList.contains('confirm')) { hb.classList.add('confirm'); hb.textContent = 'Confirm let go'; setTimeout(() => { hb.classList.remove('confirm'); hb.textContent = 'Let go'; }, 6000); return; }
+    hb.disabled = true;
+    const ok = mode === 'let-go' ? await post('goal-decide', { id, verdict: 'let-go' }, errId) : mode === 'restore' ? await post('goal-decide', { id, verdict: 'restore' }, errId) : await post('goal-hold', { id, mode }, errId);
+    if (!ok) hb.disabled = false;
+    else loadFleet();
+    return;
+  }
+  const fb = ev.target.closest('[data-fleet]');
+  if (fb) {
+    const op = fb.dataset.fleet;
+    if (op === 'check') { fb.disabled = true; await loadFleet(true); return; }
+    if (op === 'park' && !fb.classList.contains('confirm')) { fb.classList.add('confirm'); fb.textContent = 'Confirm: park every session'; setTimeout(() => { fb.classList.remove('confirm'); fb.textContent = 'Park all'; }, 6000); return; }
+    fb.disabled = true;
+    const ok = await post('fleet', { op }, 'fleet');
+    if (!ok) fb.disabled = false;
+    else loadFleet();
+    return;
+  }
   const mv = ev.target.closest('[data-mdview]');
   if (mv) {
     const v = mv.dataset.mdview;

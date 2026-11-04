@@ -47,31 +47,30 @@ docs/devteam/
 4. Fill `project/settings.md` (`init` sets `main_branch` from the remote's default branch): components and stacks, `agent_command`, the `gates` map (name → command) the supervisor runs before every merge, `worktree_files`, the gitignored files a fresh worktree needs to boot (a Rails `config/master.key`, a `.env`), and `worktree_setup`, the command that makes it runnable (`npm ci`), both applied to every worker, planner and gate checkout, and `forge: "git"` if the remote has no `gh`. Record anything the repo already does differently from `governance/` (a release branch, its own CI) in the settings; the settings win. Infer what you can from the repo; ask the owner the rest in one batch.
 5. Run `devteam.mjs gate --all` on `main`. Every gate that fails there is a toolchain to fix, a gate to set to `"mode": "ratchet"`, or a chore ticket.
 6. Existing codebase: write `project/designs/architecture.md` from the code (components, contracts, persistence, dependencies, distance from the code rules, hotspots, tests, work in flight). New repo: leave the headings.
-7. **Raise the floor first.** For every gate in `quality.md` §2 and every Law in `code-style.md` the repo doesn't yet enforce (lint, format, types, tests in CI, coverage, dead code, duplication, secrets, lockfile, and an encrypted secret store per `code-style.md` §10 if the repo has none), add a chore ticket: `devteam.mjs ticket add <component>-NN-<slug> --json '{…, "kind": "chore", "feature": "chores", "serves": [], "notes": "turns on <gate>"}'`. Gates that fail on existing code go on in **ratchet** mode (`quality.md` §2). The fleet's first work is its own quality floor.
-8. Commit the kit, settings and architecture doc as one `chore-devteam-bootstrap` PR, then `devteam.mjs log-sync` for the tickets.
+7. **Propose the Baseline goal.** Draft the repo's first goal, **Baseline**: every gate in `quality.md` §2 and every Law in `code-style.md` enforced on main (lint, format, types, tests in CI, coverage, dead code, duplication, secrets, lockfile, and an encrypted secret store per `code-style.md` §10 if the repo has none), measured as the floor gaps left, target 0 (`process/planning.md` §7). The owner opts in through the regular flow; once approved, its features are the floor tickets, and gates that fail on existing code go on in **ratchet** mode (`quality.md` §2).
+8. Commit the kit, settings and architecture doc as one `chore-devteam-bootstrap` PR, then `devteam.mjs log-sync` for the Baseline goal draft.
 9. Start the supervisor. It is the owner's foreground session in the main checkout, never a background, headless or tmux-detached one. **If an agent session did this setup, that session becomes the supervisor:** it reads the prompt from `node docs/devteam/scripts/devteam.mjs prompt supervisor` and follows it in place; it does not launch a second agent. If the owner did the setup by hand, they start the agent in their terminal with `DEVTEAM_ROLE=supervisor` in its environment (`DEVTEAM_ROLE=supervisor claude "$(node docs/devteam/scripts/devteam.mjs prompt supervisor)"`), inside tmux if they want workers' messages typed into its pane as they happen. Agent CLIs such as Claude Code don't keep shell state between commands, so an `export` inside the session doesn't stick: a session already running prefixes each devteam command with `DEVTEAM_ROLE=supervisor`. Run the dashboard where it outlives the session (a tmux window, or another terminal): `node docs/devteam/scripts/devteam.mjs dashboard`, and open the address.
 10. The supervisor asks the owner for goals and the loop begins. To tell a session something from your own terminal as yourself, `node docs/devteam/scripts/devteam.mjs send <supervisor|ticket-id> "…" --owner`; answers to questions go through the inbox.
 
 Requirements: git, tmux (for the workers), Node 18+ (the project's own pinned Node is fine: asdf, nvm and the dashboard all run the script with it), the GitHub CLI, one agent CLI (Claude Code, Codex, OpenCode or similar) with superpowers installed.
 
-### Moving the fleet to another machine
+### Holding goals, and moving the fleet
 
-The fleet stops cleanly and picks up elsewhere: every session pushes its work and leaves a handoff note on its branch, the log lands on main, and the new machine starts from a clone (`process/supervisor.md` §12).
+Every goal, and the built-in Upkeep goal that owns chores, has a toggle on the dashboard: **Run**, **Drain** (nothing new starts; what's running finishes and merges), **Park** (sessions commit their work, push, leave a handoff commit and stop) and **Let go** (reversible). The strip at the top of the dashboard holds or resumes every goal at once and says whether the fleet can move (`process/supervisor.md` §12).
 
-**On the old machine**, tell the supervisor to drain (for example: "Drain the fleet; I'm moving it to my new laptop"). It runs:
+**Moving to another machine.** On the old one, park the fleet from the dashboard, or tell the supervisor ("Park the fleet; I'm moving it to my new laptop"). Fleet drain works too, more slowly: every ticket in flight finishes first. It runs:
 
 ```
-DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs drain --reason "moving to a new laptop"
-# once every session is parked: its own handoff, project/handoffs/supervisor.md, landed as chore drain-handoff
-DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs drain --status    # what's left; repeat until "ready to move: yes"
-DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs observe-spend     # then land the log:
+DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs fleet park --reason "moving to a new laptop"
+# once every session is parked, its own handoff, pushed as a tag:
+DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs handoff --supervisor < note.md
+DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs fleet status     # what's left; repeat until "ready to move: yes"
+DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs observe-spend    # then land the log:
 DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs log-sync
 DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs merge --chore log
 ```
 
-Anything needed for 1:1 parity is checked in and portable; only secrets travel by hand. So `drain --status` also blocks on files left in `run/`, worktrees with unpushed work, the owner's unfinished review drafts, and agent memory outside the repo that isn't folded into knowledge or the supervisor's handoff. When it's ready it prints a parity fingerprint of the log; `undrain` on the new machine prints its own, and they match.
-
-`drain --status` ends with the new machine's checklist, generated from the settings: which `worktree_files` and secret keys to copy, which logins, which tools.
+Anything needed for 1:1 parity is in git; only secrets travel by hand. So `fleet status` also blocks on files left in `run/`, worktrees with unpushed work, the owner's unfinished review drafts, and agent memory outside the repo that isn't folded into knowledge or the supervisor's handoff. When it's ready it prints a parity fingerprint of the log, and the new machine's checklist (which `worktree_files` and secret keys to copy, which logins, which tools).
 
 **On the new machine**, in this order:
 
@@ -84,7 +83,7 @@ tmux new -s supervisor
 DEVTEAM_ROLE=supervisor claude "$(node docs/devteam/scripts/devteam.mjs prompt supervisor)"
 ```
 
-That is step 9's start, unchanged: the supervisor's prompt sees the drain and opens with what to do, so it runs `undrain` (which rebuilds `run/log` from the landed log, records the undrain and prints each drained session's restart command), restarts the drained workers and planners (each gets its handoff note in its prompt), and then the dashboard is restarted where it outlives the session:
+That is step 9's start, unchanged: the supervisor's prompt sees the parked fleet and opens with what to do, so it runs `fleet unpark` (which rebuilds `run/log` from the landed log, prints the same parity fingerprint before writing anything, puts every goal back as it was and prints each parked session's restart command), restarts the parked workers and planners (each gets its handoff in its prompt), and then the dashboard is restarted where it outlives the session:
 
 ```
 tmux new-window -d -n dashboard 'node docs/devteam/scripts/devteam.mjs dashboard'

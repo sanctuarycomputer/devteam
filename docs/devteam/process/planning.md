@@ -10,7 +10,7 @@ A feature is what other teams call an epic: stories, many PRs, one reviewed plan
 
 The supervisor plans itself or makes a planner (`devteam.mjs planner <feature>`), a session in its own worktree on branch `plan/<feature>`. Everything a planner produces lands through one reviewed PR: the design, the architecture update, the review records, and `project/log/plan-<feature>.jsonl` holding the feature and its tickets. Nothing is schedulable until that PR merges.
 
-When the supervisor drains the fleet (`supervisor.md` §12), a planner does what `worker.md` §9 says, with its handoff note at `project/plans/<feature>/handoff.md` on `plan/<feature>`; `phase parked` is the one phase a planner logs.
+When its goal is parked, let go, or the fleet is parked (`supervisor.md` §12), a planner does what `worker.md` §9 says, recording its handoff on `plan/<feature>` with `devteam.mjs handoff`; `phase parked` is the one phase a planner logs.
 
 ## 1. Goals
 
@@ -18,7 +18,7 @@ The owner states the goals, in whatever words. The supervisor drafts them (`devt
 
 **Goals are meant to be ambitious.** A goal is the unit the fleet stays aligned on across many loops and PRs: weeks or months of work, many features, many workers. Never split a goal to make it fit one loop; a goal one loop could meet is a ticket or a feature. What keeps a large goal workable is its spine (§2), its milestones, and planning one milestone at a time.
 
-A goal moves through: **defining** (gaps, `goal-definition` questions) → **designing** (fully defined; the spine is written and reviewed and its milestones are on the goal) → **awaiting approval** (a `goal-approval` question in the inbox, the design linked) → **ready** (approved; the current milestone's features and tickets are planned from the design) → **met**, or **abandoned** if the owner lets it go.
+A goal moves through (its toggle, below, is separate): **defining** (gaps, `goal-definition` questions) → **designing** (fully defined; the spine is written and reviewed and its milestones are on the goal) → **awaiting approval** (a `goal-approval` question in the inbox, the design linked) → **ready** (approved; the current milestone's features and tickets are planned from the design) → **met**, or **abandoned** if the owner lets it go.
 
 A goal is **fully defined** when it has: an outcome (what is true for users or the business when it's met), a measure with a numeric target, unit and direction, at least one non-goal, the preconditions that must hold for the outcome, a priority distinct from the other goals, and a baseline reading (`goal reading <id> --value n`). `devteam.mjs goal check` lists what's missing.
 
@@ -42,6 +42,14 @@ A goal is **fully defined** when it has: an outcome (what is true for users or t
 - **Let go.** The goal is abandoned; stop any planning for it and say what was dropped.
 
 `goal approve` without a `goal-approval` question refuses: a goal is approved on its approach, not before one exists.
+
+**Holds: run, drain, park, let go.** Every goal has a toggle on the dashboard (or `goal hold <id> run|drain|park [--reason "…"]`; the owner adds `--owner` in a terminal). A hold is separate from the goal's status, so a draft and a ready goal can both be held, and the goal keeps its step.
+- **Run**: normal.
+- **Drain**: nothing new starts for it (no planner, no worker that hasn't run yet, no idle-planning or idle-capacity finding); work already running carries on, merges, and a parked session may resume to finish. It shows **draining**, then **drained** once nothing of it is running.
+- **Park**: its sessions get a park ruling (commit WIP, push, record a handoff, `phase parked`, stop; `worker.md` §9); nothing starts; its ticket merges wait (`merge` refuses without `--force`, logged). Its track and forecast stand still (no ETA, not "behind"), and it leaves the queue other goals' dates are computed from. Its questions stay open, labelled, and don't count as the owner falling behind.
+- **Let go** (`goal decide <id> let-go`): the goal is abandoned; its sessions park and its open questions leave the inbox. It is reversible: `goal decide <id> restore` brings it back with the status it had, parked, and its questions return.
+
+A plan PR still lands while its goal is held: landing a plan starts nothing. Work belongs to goals: a ticket to its feature's goals (when it serves several, it runs under the least restrictive of them, leaving out goals already met), a planner to the goal it plans (`planner <feature> --goal <g-id>` until its feature line or a question names one), a chore to **Upkeep** (§7). The owner sets and releases any hold. The supervisor may drain a running goal, with a reason (an act of class `goal-hold`, which the owner can correct), and release only a drain it set; it parks a single goal only by asking the owner. A whole-fleet hold is a shorthand for every goal at once (`supervisor.md` §12).
 
 **Readings.** At each retro the supervisor records a reading from CI, metrics or releases where the measure allows. On track or behind is computed from the readings, the target and the horizon.
 
@@ -147,8 +155,10 @@ A ticket may spec and plan while its dependencies are unmerged (plan-ahead); onl
 
 When a design change, a failed spike or a correction changes the graph: the supervisor sets the affected tickets (`ticket set <id> --json '{"superseded_by": …}'`, new `depends_on`, `touches`) and adds replacements; each such command logs its act (`replan-within-feature`, `add-ticket`); a ticket already in flight gets a ruling recorded in its spec. Ids are never reused. A re-plan big enough to need review goes through a new `plan/<feature>-<n>` branch like a first plan. Once the supervisor has set a field on a ticket, planners can no longer change that field; later re-plans of it are the supervisor's.
 
-## 7. Bootstrap tickets and existing codebases
+## 7. The Baseline goal, Upkeep, and existing codebases
 
-Bootstrap writes the first tickets in the reserved `chores` feature: one per gate in `quality.md` §2 and Law in `code-style.md` the repo doesn't yet enforce, each saying in `notes` which gate it turns on. Gates that fail on existing code start in ratchet mode. These are the fleet's first work, before any feature.
+**Baseline.** Bootstrap proposes the first goal, and the owner opts in through the regular flow (definition, design, approval): **Baseline**, the repo meeting the kit's floor. Its outcome: every gate in `quality.md` §2 and every Law in `code-style.md` enforced on main. Its measure: the floor gaps, the gates and Laws not yet enforced, counted from `gate --all` and the settings, direction down, target 0. Its preconditions group the gaps (format and lint, types, tests in CI, coverage, dead code and duplication, secrets and lockfile, an encrypted secret store); its milestones order them; its features are the floor tickets, each saying in `notes` which gate it turns on. Gates that fail on existing code start in ratchet mode. The owner may decline it, or hold it, like any goal.
+
+**Upkeep.** Work that serves no goal of the owner's belongs to the built-in **Upkeep** goal: the reserved `chores` feature (chores, spikes, CI fixes), and the supervisor's upkeep (retros, research, kit syncs, the improvement loop's trials and proposals, trust and lesson suggestions). It has no measure, design, milestones or place in the forecast, can't be let go, and has the same toggle as any goal (`goal hold upkeep …`); its line is made the first time it is held. While it is drained or parked, no chore ticket's worker, upkeep chore (`chore start`) or improvement act starts. Two things never stop: observing (metrics, findings, readings), so a held fleet still notices what it should; and keeping the record (`log-sync`, `merge --chore log`, posted secrets).
 
 Adopting an existing codebase: write `architecture.md` from the code; list work already in flight in its table and keep new footprints off those files; start `max_active_tickets` at 2 or 3, since old hotspots make footprints overlap, and raise it when `waves` shows real width; plan the first feature with contract tickets that carve stable interfaces around the hotspots; where the repo has its own process docs, map each rule to the devteam doc that covers it, link where they agree, ask the owner where they conflict.

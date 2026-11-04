@@ -166,6 +166,8 @@ const SETTINGS_DEFAULTS = {
   // count against max_active_tickets.
   max_active_planners: null,
   stale_after_minutes: 30,
+  // A goal parked this long (not by a fleet op) is worth asking the owner about again.
+  hold_review_days: 14,
   // How long `ack` sets a finding aside; it comes back sooner if its subject changes.
   finding_ack_hours: 24,
   tick_minutes: 15,
@@ -419,6 +421,7 @@ function fold(all) {
   const objects = new Map();
   const ignored = [];
   const goalApprovals = new Set();
+  const aliases = new Map();
   for (const l of lines) {
     if (l.op !== 'new') continue;
     if (objects.has(l.id)) {
@@ -426,12 +429,19 @@ function fold(all) {
       continue;
     }
     const { v, op, __file, __line, at, by, ...body } = l;
+    const kept = body.type === 'goal' && body.kind === 'upkeep' ? [...objects.values()].find((o) => o.type === 'goal' && o.kind === 'upkeep') : null;
+    if (kept) {
+      // two writers made Upkeep at once: the earliest is the one, and the other's holds apply to it
+      aliases.set(l.id, kept.id);
+      ignored.push({ line: l, why: `a second upkeep goal; its changes apply to ${kept.id}` });
+      continue;
+    }
     const rank = RANK[writerClass(by)];
     objects.set(l.id, { ...body, created_at: at, created_by: by, updates: [], __rank: Object.fromEntries(Object.keys(body).map((k) => [k, rank])) });
   }
   for (const l of lines) {
     if (l.op !== 'set') continue;
-    const obj = objects.get(l.id);
+    const obj = objects.get(aliases.get(l.id) ?? l.id);
     if (!obj) {
       ignored.push({ line: l, why: 'set on an unknown id' });
       continue;
@@ -446,7 +456,28 @@ function fold(all) {
       ignored.push({ line: l, why: `${l.by} may only change the feature "${f}" and its tickets` });
       continue;
     }
-    if (obj.type === 'goal' && cls === 'supervisor' && (obj.status ?? 'draft') !== 'draft') {
+    // A goal's hold has its own rule (planning.md §1, holds): the owner's line always counts; the
+    // supervisor's counts as a fleet op, the undo of a fleet op still in force on this goal, a drain
+    // of a running goal, or the release of a drain it set itself. Anything else is ignored, with why.
+    let holdLine = null;
+    if (obj.type === 'goal' && l.hold) {
+      const cur = obj.hold ?? { mode: 'run' };
+      const why = holdRefusal(l.hold, cur, obj.__holdBy ?? null, cls);
+      if (why) {
+        ignored.push({ line: l, why });
+        if (Object.keys(l).every((k) => ENVELOPE.includes(k) || k.startsWith('__') || k === 'hold')) continue;
+      } else holdLine = l.hold;
+    }
+    const holdOnly = obj.type === 'goal' && Object.keys(l).every((k) => ENVELOPE.includes(k) || k.startsWith('__') || k === 'hold');
+    if (holdOnly) {
+      if (holdLine) {
+        obj.hold = holdLine;
+        obj.__holdBy = cls;
+        obj.updates.push({ at: l.at, by: l.by, ...(l.channel ? { channel: l.channel } : {}), hold: holdLine });
+      }
+      continue;
+    }
+    if (obj.type === 'goal' && cls === 'supervisor' && (obj.status ?? 'draft') !== 'draft' && obj.kind !== 'upkeep') {
       const problem = !l.approved ? null : goalApprovals.has(l.approved) ? `${l.approved} already authorised a goal set` : goalChangeProblem(objects.get(l.approved), obj.id, l.approved, l);
       if (!l.approved || problem) {
         ignored.push({ line: l, why: l.approved ? `the supervisor edits a ${obj.status} goal only with an answered goal-change question: ${problem}` : 'the supervisor edits a goal only while it is a draft' });
@@ -459,8 +490,13 @@ function fold(all) {
     }
     const rank = RANK[cls];
     const changed = {};
+    if (holdLine) {
+      obj.hold = holdLine;
+      obj.__holdBy = cls;
+      changed.hold = holdLine;
+    }
     for (const [k, val] of Object.entries(l)) {
-      if (ENVELOPE.includes(k) || k.startsWith('__')) continue;
+      if (ENVELOPE.includes(k) || k.startsWith('__') || k === 'hold') continue;
       if ((obj.__rank[k] ?? -1) > rank) continue;
       obj[k] = val;
       obj.__rank[k] = rank;
@@ -470,8 +506,32 @@ function fold(all) {
     else ignored.push({ line: l, why: 'overridden by a higher-ranked writer' });
     if (obj.type === 'goal' && changed.approved) goalApprovals.add(changed.approved);
   }
-  for (const o of objects.values()) delete o.__rank;
+  for (const o of objects.values()) {
+    delete o.__rank;
+    if (o.__holdBy !== undefined) { o.hold_by = o.__holdBy; delete o.__holdBy; }
+  }
   return { objects, ignored };
+}
+// Why the fold ignores a hold line, or null when it counts. cur is the hold in force (run when
+// none), curBy who set it. A supervisor never parks a single goal or releases the owner's hold.
+function holdRefusal(h, cur, curBy, cls) {
+  if (cls === 'owner') return null;
+  if (cls !== 'supervisor') return `${cls} may not change a goal's hold`;
+  // An undo puts back exactly the hold the fleet op recorded as prior, nothing else.
+  if (h.undoes) {
+    if (cur.fleet !== h.undoes) return `this goal's hold is no longer the one ${h.undoes} set, so that fleet op doesn't undo it`;
+    const p = cur.prior ?? { mode: 'run' };
+    return h.mode === p.mode && (h.fleet ?? null) === (p.fleet ?? null) ? null : `undoing ${h.undoes} puts back ${p.mode}${p.fleet ? ` (${p.fleet})` : ''}, not ${h.mode}`;
+  }
+  // A fleet op only tightens (drain a running goal, park one not parked) and records what it replaced.
+  if (h.fleet) {
+    if (!['drain', 'park'].includes(h.mode)) return 'a fleet op drains or parks';
+    if (h.mode === 'drain' ? cur.mode !== 'run' : cur.mode === 'park') return `a fleet ${h.mode} doesn't change a goal on ${cur.mode}`;
+    return h.prior?.mode === cur.mode && (h.prior?.fleet ?? null) === (cur.fleet ?? null) ? null : `a fleet op records the hold it replaces (${cur.mode}) as prior`;
+  }
+  if (h.mode === 'drain') return cur.mode === 'run' ? null : `the supervisor drains only a running goal (this one is on ${cur.mode})`;
+  if (h.mode === 'run') return cur.mode === 'drain' && curBy === 'supervisor' && !cur.fleet ? null : 'the supervisor releases only a drain it set';
+  return 'only the owner parks a single goal (the supervisor may fleet park)';
 }
 
 // --- where the log lives ---
@@ -674,7 +734,9 @@ function readLog() {
   const { objects, ignored } = fold(lines);
   return (logCache = { lines, objects, errors, ignored });
 }
-const logObjects = (type) => [...readLog().objects.values()].filter((o) => o.type === type);
+const logObjects = (type) => [...readLog().objects.values()].filter((o) => o.type === type && !(type === 'goal' && o.kind === 'upkeep'));
+// The built-in Upkeep goal (planning.md §7), or null while it has no line yet (then it runs).
+const upkeepGoal = () => [...readLog().objects.values()].find((o) => o.type === 'goal' && o.kind === 'upkeep') ?? null;
 const logGet = (id) => readLog().objects.get(id) ?? null;
 const byTime = (a, b) => a.created_at.localeCompare(b.created_at);
 
@@ -714,7 +776,8 @@ function questionView(q) {
     review: review?.review ?? null, result: review?.result ?? null, declined: review ? review.declined : null, allow_partial: review ? review.allow_partial : null, result_status: review?.result_status ?? null,
   };
 }
-const questions = () => logObjects('question').map(questionView);
+// The inbox's view: each question with its goal's hold (never inside questionView, which the fold uses).
+const questions = () => logObjects('question').map((q) => ({ ...questionView(q), goal_hold: questionHold(q) }));
 
 // Why question q does not authorise the supervisor to change goal goalId (null when it does): it
 // is a goal-change question about that goal, answered by the owner with its recommendation (an
@@ -1025,8 +1088,10 @@ const projectFileText = (rel) => readText(path.join(projectDir, rel)) ?? (projec
 
 // ===== 5. the graph (tickets and features, folded from the log) =====
 
-const tickets = () => new Map(logObjects('ticket').map((t) => [t.id, t]));
-const features = () => new Map(logObjects('feature').map((f) => [f.id, f]));
+// Computed once per read of the log (a write starts a new read): callers don't change what they get.
+const memo = (key, fn) => { const l = readLog(); l.memo ??= new Map(); if (!l.memo.has(key)) l.memo.set(key, fn()); return l.memo.get(key); };
+const tickets = () => memo('tickets', () => new Map(logObjects('ticket').map((t) => [t.id, t])));
+const features = () => memo('features', () => new Map(logObjects('feature').map((f) => [f.id, f])));
 const isActive = (t) => !t.superseded_by;
 // A held ticket is one the supervisor chose not to schedule yet (`ticket set <id> --json '{"held": "why"}'`; null releases it).
 const isHeld = (t) => typeof t.held === 'string' && t.held.trim() !== '';
@@ -1230,7 +1295,8 @@ const paneWaiting = (id) => (activeWorker(id) ? paneWaitingIn(id) : null);
 // Planners in flight: a plan/<feature> branch whose plan file hasn't landed on main. They write no phase lines, so their
 // last sign of life is the newest of: a live log line (messages, observations), a commit on the
 // branch, their plan file, an uncommitted edit in their worktree. Their pane says if they're stuck.
-function planners() {
+function planners() { return memo('planners', plannersNow); }
+function plannersNow() {
   const s = loadSettings();
   const main = mainRef();
   const lines = readLog().lines;
@@ -1257,7 +1323,7 @@ function planners() {
     // Before its feature line exists (while designing), a planner's goal is the one its questions
     // name: a question whose links point at this plan branch.
     const refQs = questions().filter((q) => (q.links ?? []).some((l) => l.ref === b || l.ref === `refs/heads/${b}`));
-    const goals = [...new Set([...(feat.goals ?? []), ...refQs.map((q) => q.goal).filter(Boolean)])];
+    const goals = [...new Set([...(feat.goals ?? []), ...refQs.map((q) => q.goal).filter(Boolean), ...plannerLaunchGoals(feature)])];
     return {
       feature, title: feat.title ?? feature, goals, tickets: graph.split('\n').filter((t) => t.includes('"type":"ticket"') && t.includes('"op":"new"')).length,
       branch: b, window: !!target, problem: target ? null : problem, waiting: target ? paneWaitingIn(by) : null,
@@ -1391,6 +1457,8 @@ function cmdValidate() {
       for (const g of f.goals ?? []) {
         const o = logGet(g);
         if (o?.type !== 'goal') errors.push(`feature ${fid} names goal ${g}, which is not in the log`);
+        else if (o.kind === 'upkeep') errors.push(`feature ${fid} names the Upkeep goal; upkeep is the chores feature's, and a feature serves the goals it plans for`);
+        else if (o.status === 'abandoned') warnings.push(`feature ${fid} names goal ${g}, which the owner let go: its work waits unless another goal it serves runs (goal decide ${g} restore brings it back)`);
         else if (!['ready', 'met'].includes(o.status)) errors.push(`feature ${fid} names goal ${g}, which is ${o.status ?? 'draft'}; the owner approves a goal before features are planned from it`);
         else {
           // A feature's own design builds on its goal's design, the spine, and says so (planning.md §2).
@@ -1447,6 +1515,183 @@ function cmdValidate() {
 // Why a ticket with no worker isn't waiting for one, or null if it is: the supervisor parked its
 // last worker (a ruling stopped it), or its branch already carries a final review (it waits for
 // the merge, not for a new worker).
+// ===== holds: run, drain, park, let go (planning.md §1, holds) =====
+//
+// A goal's hold says what the fleet may do for it: run; drain (nothing new starts, in-flight work
+// finishes and merges); park (sessions commit WIP, push, write a handoff and stop; ticket merges
+// wait). Let go is the goal abandoned: parked, and reversible (goal decide <id> restore). Every
+// piece of work belongs to a goal: a ticket to its feature's goals, a chore to Upkeep, a planner to
+// the goal it plans. A fleet op (fleet drain, fleet park) sets every goal's hold at once and records
+// what each was, so fleet undrain or unpark puts back what it changed.
+const HOLD_RANK = { run: 0, drain: 1, park: 2, 'let-go': 3 };
+const UPKEEP_VIRTUAL = Object.freeze({ id: 'upkeep', type: 'goal', kind: 'upkeep', title: 'Upkeep', hold: null, updates: [] });
+const upkeepOrVirtual = () => upkeepGoal() ?? UPKEEP_VIRTUAL;
+const isUpkeep = (g) => g?.kind === 'upkeep';
+// A goal named on the command line: its id, or "upkeep".
+function goalArg(id) {
+  if (id === 'upkeep') return upkeepOrVirtual();
+  const g = logGet(id ?? '');
+  return g?.type === 'goal' ? g : null;
+}
+function goalMode(g) {
+  if (!g) return 'run';
+  if (g.status === 'abandoned') return 'let-go';
+  return g.hold?.mode ?? 'run';
+}
+// The mode work serving several goals runs under: the least restrictive among them, leaving out
+// goals already met (a feature that served a met goal and a parked one is parked).
+function modeOf(goals) {
+  const known = goals.filter(Boolean);
+  const live = known.filter((g) => g.status !== 'met');
+  const set = live.length ? live : known;
+  if (!set.length) return 'run';
+  return set.map(goalMode).sort((a, b) => HOLD_RANK[a] - HOLD_RANK[b])[0];
+}
+function ticketGoals(t) {
+  if (!t) return [];
+  if (t.feature === CHORES) return [upkeepOrVirtual()];
+  return (features().get(t.feature)?.goals ?? []).map((id) => logGet(id)).filter((g) => g?.type === 'goal');
+}
+// A ticket whose feature names no goal (an old project) follows the fleet, like its session.
+const ticketMode = (t) => { const gs = ticketGoals(t); return gs.length ? modeOf(gs) : fleetMode() ?? 'run'; };
+// The goals that can hold anything: live goals and Upkeep.
+const holdableGoals = () => [upkeepOrVirtual(), ...logObjects('goal').filter((g) => !['met', 'abandoned'].includes(g.status))];
+// When every holdable goal is parked, or every one is draining or parked, the fleet is too.
+function fleetMode() {
+  const modes = holdableGoals().map(goalMode);
+  if (modes.every((m) => m === 'park')) return 'park';
+  if (modes.every((m) => m === 'park' || m === 'drain') && modes.includes('drain')) return 'drain';
+  return null;
+}
+// The fleet op in force: the newest one whose hold is still on some goal.
+function fleetOpInForce() {
+  const hs = holdableGoals().map((g) => g.hold).filter((h) => h?.fleet);
+  return hs.sort((a, b) => b.fleet.localeCompare(a.fleet))[0] ?? null;
+}
+const newFleetId = () => { const at = nowIso(); return `f-${at.slice(0, 10).replace(/-/g, '')}-${at.slice(11, 23).replace(/[:.]/g, '')}`; };
+// A session's goals: a worker's ticket's; a planner's feature line's, its questions', or its launch's.
+function sessionGoals(name) {
+  const s = sessionOf(name);
+  if (s.role === 'worker') return ticketGoals(tickets().get(s.id));
+  const p = planners().find((x) => x.feature === s.id);
+  const ids = p ? p.goals : plannerLaunchGoals(s.id);
+  return ids.map((id) => logGet(id)).filter((g) => g?.type === 'goal');
+}
+// The goal a planner was started for (planner <feature> --goal), from its launch acts.
+function plannerLaunchGoals(feature) {
+  const re = new RegExp(` planner plan-${feature} `);
+  return [...new Set(logObjects('act').filter((a) => a.class === 'worker-slots' && re.test(` ${a.what} `)).flatMap((a) => (a.refs ?? []).filter((r) => r.startsWith('g-'))))];
+}
+// A session with no goal (an old planner) follows the fleet.
+function sessionMode(name) {
+  const gs = sessionGoals(name);
+  return gs.length ? modeOf(gs) : fleetMode() ?? 'run';
+}
+// The hold (or let-go) that holds a session now, as a cause: which goal, since when, and a marker a
+// park ruling carries so it is sent once per cause.
+function currentCause(name) {
+  const gs = sessionGoals(name);
+  const set = gs.length ? gs.filter((g) => g.status !== 'met') : holdableGoals();
+  const causes = set.map((g) => causeOf(g, Date.now())).filter(Boolean);
+  if (!causes.length || causes.length < set.length) return null;
+  return causes.sort((a, b) => b.at.localeCompare(a.at))[0];
+}
+// What parked or let go a goal at a time (ms), or null if it was running or draining then.
+function causeOf(g, when) {
+  const ups = (g.updates ?? []).filter((u) => Date.parse(u.at) <= when);
+  const st = ups.filter((u) => u.status !== undefined).pop();
+  if (st?.status === 'abandoned') return { kind: 'let-go', goal: g.id, title: g.title, at: st.at, marker: `let-go:${g.id}@${st.at}`, reason: g.decision?.notes ?? null };
+  const h = ups.filter((u) => u.hold !== undefined).pop();
+  if (h?.hold?.mode !== 'park') return null;
+  return h.hold.fleet
+    ? { kind: 'fleet', goal: g.id, title: g.title, at: h.at, fleet: h.hold.fleet, host: h.hold.host ?? null, marker: `fleet:${h.hold.fleet}`, reason: h.hold.reason ?? null }
+    : { kind: 'park', goal: g.id, title: g.title, at: h.at, marker: `park:${g.id}@${h.at}`, reason: h.hold.reason ?? null };
+}
+// What a session told to park must do; the marker in brackets lets a ruling be sent once per cause.
+function parkMessage(s, cause) {
+  const title = String(cause.title ?? '').slice(0, 60);
+  const reason = cause.reason ? ` (${String(cause.reason).slice(0, 80)})` : '';
+  const why = cause.kind === 'fleet' ? `the fleet is parked${reason}` : cause.kind === 'let-go' ? `the owner let go of "${title}"` : `"${title}" is parked${reason}`;
+  const tail = ` [${cause.marker}]`;
+  const body = `Park: ${why}. Commit all work (WIP is fine), then devteam.mjs handoff with your note on stdin (done, exact next step, open questions, anything uncommitted; it commits the note and pushes ${s.branch}), then devteam.mjs phase parked --note "parked", and stop (worker.md §9). Any merge-request you sent is void; resend it when resumed.`;
+  // a message line holds 600 characters; the marker that sends it once per cause is kept whole
+  return `${body.slice(0, 600 - tail.length)}${tail}`;
+}
+const parkRulingSent = (name, marker) => logObjects('message').some((m) => m.to === name && m.kind === 'ruling' && (m.text ?? '').includes(`[${marker}]`));
+// Every live session: workers with a phase that isn't done and no merge, planners in flight.
+function liveSessions() { return memo('liveSessions', liveSessionsNow); }
+function liveSessionsNow() {
+  const names = new Set();
+  for (const t of tickets().values()) if (activeWorker(t.id) || (workerState(t.id)?.phase === 'parked' && !mergeShaFor(t.id) && isActive(t))) names.add(t.id);
+  for (const p of planners()) names.add(`plan-${p.feature}`);
+  return [...names].sort().map(sessionOf);
+}
+// Send the park ruling to every running session a park or let-go holds and hasn't been told about
+// for its current cause (once; --again re-sends). goal: only that goal's sessions.
+function sendParkRulings({ goal = null, again = false } = {}) {
+  const sent = [];
+  for (const s of liveSessions()) {
+    if (lastPhaseOf(s.name)?.to === 'parked') continue;
+    if (goal && !sessionGoals(s.name).some((g) => g.id === goal.id) && !(isUpkeep(goal) && !sessionGoals(s.name).length)) continue;
+    if (!['park', 'let-go'].includes(sessionMode(s.name))) continue;
+    const cause = currentCause(s.name);
+    if (!cause || (!again && parkRulingSent(s.name, cause.marker))) continue;
+    sendLine({ to: s.name, kind: 'ruling', text: parkMessage(s, cause), from: 'supervisor', ticket: s.role === 'worker' ? s.id : null });
+    sent.push(s.name);
+  }
+  return sent;
+}
+// The restart command for each parked session a release lets run again.
+function restartCommands(filter = () => true) {
+  const windows = new Set((sh('tmux', ['list-windows', '-t', loadSettings().tmux_session, '-F', '#W']) ?? '').split('\n').filter(Boolean));
+  return liveSessions().filter((s) => lastPhaseOf(s.name)?.to === 'parked' && ['run', 'drain'].includes(sessionMode(s.name)) && filter(s)).map((s) => ({ name: s.name, cmd: `${s.role} ${s.id}${windows.has(s.name) && fs.existsSync(s.wt) ? ' --resume' : ''}`, handoff: !!handoffFor(s.name) }));
+}
+// Write one goal's hold, creating Upkeep's line the first time it is held.
+function writeHold(g, hold, by) {
+  let target = g;
+  if (isUpkeep(g) && !upkeepGoal()) target = appendLog({ type: 'goal', kind: 'upkeep', title: 'Upkeep' }, by);
+  return appendLog({ type: 'goal', op: 'set', id: target.id, hold }, by);
+}
+const holdWords = (m) => ({ run: 'running', drain: 'draining', park: 'parked', 'let-go': 'let go' }[m] ?? m);
+// The mode label a goal shows: drain splits into draining (work still running) and drained.
+function holdView(g) {
+  const mode = goalMode(g);
+  const running = mode === 'drain' || mode === 'park' ? liveSessions().filter((s) => sessionGoals(s.name).some((x) => x.id === g.id) && lastPhaseOf(s.name)?.to !== 'parked').map((s) => s.name) : [];
+  const state = mode === 'drain' ? (running.length ? 'draining' : 'drained') : mode === 'park' ? (running.length ? 'parking' : 'parked') : mode === 'let-go' ? 'let go' : 'running';
+  return { mode, state, running, reason: g.hold?.reason ?? null, by: g.hold_by ?? null, fleet: g.hold?.fleet ?? null, since: (g.updates ?? []).filter((u) => u.hold !== undefined).pop()?.at ?? null };
+}
+
+// What holds need from the supervisor, as findings with a next step (supervisor.md §3): rulings a
+// park hasn't sent yet, sessions parked under a goal that runs again, tickets waiting on a held
+// goal's work, a drain that has finished, and a goal parked long enough to ask about.
+function holdFindings(add, settings) {
+  const now = Date.now();
+  const sessions = liveSessions();
+  for (const s of sessions) {
+    const parkedNow = lastPhaseOf(s.name)?.to === 'parked';
+    const mode = sessionMode(s.name);
+    if (!parkedNow && ['park', 'let-go'].includes(mode)) {
+      const c = currentCause(s.name);
+      if (c && !parkRulingSent(s.name, c.marker)) add('high', 'park-unsent', s.name, `its goal is ${holdWords(mode)} (${causeWords(c)}), and it hasn't been told`, `goal park-sessions ${isUpkeep(logGet(c.goal) ?? UPKEEP_VIRTUAL) ? 'upkeep' : c.goal}`);
+    }
+    if (parkedNow && ['run', 'drain'].includes(mode) && !draining()) add('medium', 'parked-under-run', s.name, `parked, and its goal is ${holdWords(mode)} again`, `${s.role} ${s.id} --resume${mode === 'drain' ? ' (a draining goal finishes what it started)' : ''}`);
+  }
+  const ts = tickets();
+  const providers = new Map();
+  for (const t of ts.values()) for (const c of t.contracts?.provides ?? []) providers.set(c, t.id);
+  for (const t of ts.values()) {
+    if (!isActive(t) || mergeShaFor(t.id) || ticketMode(t) !== 'run') continue;
+    const blockers = [...(t.depends_on ?? []), ...(t.contracts?.consumes ?? []).map((c) => providers.get(c)).filter(Boolean)].filter((d) => ts.has(d) && !mergeShaFor(d) && ticketMode(ts.get(d)) !== 'run');
+    if (blockers.length) add('medium', 'blocked-by-goal-hold', t.id, `waits on ${blockers.map((d) => `${d} (its goal is ${holdWords(ticketMode(ts.get(d)))})`).join(', ')}`, 'ask the owner whether to run the goal it waits on, or re-plan the dependency');
+  }
+  for (const g of holdableGoals()) {
+    const v = holdView(g);
+    const name = isUpkeep(g) ? 'upkeep' : g.id;
+    if (v.state === 'drained' && !v.fleet) add('low', 'goal-drained', name, `${isUpkeep(g) ? 'Upkeep' : `"${g.title}"`} has finished its in-flight work`, `leave it drained, or run it again (goal hold ${name} run${v.by === 'owner' ? ' --owner: the owner set it' : ''})`);
+    const days = v.since ? (now - Date.parse(v.since)) / 86400000 : 0;
+    if (v.mode === 'park' && !v.fleet && days >= (settings.hold_review_days ?? 14)) add('low', 'held-long', name, `parked for ${Math.floor(days)} days${v.reason ? ` (${v.reason})` : ''}`, 'ask the owner whether to run it again or let it go (an owner-decision question)');
+  }
+}
 function notSchedulable(t) {
   if (workerState(t.id)?.phase === 'parked') return 'parked';
   const b = ticketBranchRef(t.id);
@@ -1463,6 +1708,8 @@ function cmdReady() {
     const why = notSchedulable(t);
     if (why) { waiting.push({ id: t.id, why }); continue; }
     const depsMerged = (t.depends_on ?? []).every((d) => mergeShaFor(d));
+    const gm = ticketMode(t);
+    if (gm !== 'run') { waiting.push({ id: t.id, why: `goal ${holdWords(gm)}` }); continue; }
     if (isHeld(t)) { if (depsMerged || flags['plan-ahead']) held.push({ id: t.id, held: t.held }); continue; }
     if (depsMerged || flags['plan-ahead']) rows.push({ id: t.id, component: t.component, kind: t.kind, size: t.size, risk: t.risk, mode: depsMerged ? 'build' : 'plan-ahead' });
   }
@@ -1473,7 +1720,7 @@ function cmdReady() {
   if (flags.json) return json({ ready: rows, held, waiting, active, active_per_component: perComponent, caps: { max_active_tickets: s.max_active_tickets, max_active_per_component: s.max_active_per_component } });
   out(`active workers: ${active.length}/${s.max_active_tickets}`);
   for (const h of held) out(`held       ${h.id}  (${h.held})`);
-  for (const w of waiting) out(`${w.why.padEnd(10)} ${w.id}  (no new worker: ${w.why === 'parked' ? 'resume it with `worker <id> --resume` when its ruling allows' : 'merge or answer its review'})`);
+  for (const w of waiting) out(`${w.why.padEnd(10)} ${w.id}  (no new worker: ${w.why === 'parked' ? 'resume it with `worker <id> --resume` when its ruling and its goal allow' : w.why.startsWith('goal ') ? 'its goal is on hold (goal hold)' : 'merge or answer its review'})`);
   if (!rows.length) return out('nothing ready');
   for (const r of rows) out(`${r.mode.padEnd(10)} ${r.id}  (${r.kind}, ${r.size}, ${r.risk})${(perComponent[r.component] ?? 0) >= s.max_active_per_component ? '  (component at cap)' : ''}`);
 }
@@ -1971,6 +2218,10 @@ function cmdMerge() {
   const sha = pr.headRefOid;
   if (!resolveCommit(sha)) die(`cannot find ${sha} locally after fetching ${branch}`);
   const fails = checkPr({ headRef: branch, sha, title: pr.title, body: pr.body });
+  // A parked or let-go goal's ticket waits to merge (a draining one merges: that's the point), and
+  // so does an upkeep chore while Upkeep is parked; record-keeping chores never wait. --force does.
+  const heldBy = id && tickets().has(id) ? ticketMode(tickets().get(id)) : chore && !isRecordKeeping(chore) ? goalMode(upkeepOrVirtual()) : 'run';
+  if (['park', 'let-go'].includes(heldBy) && !flags.force) fails.push(`its goal is ${holdWords(heldBy)}: it merges when the goal runs or drains again (planning.md §1, holds); --force merges it anyway, logged`);
   // A plan's ticket ids are new: one already on main (another plan took the number) is refused
   // outright; renumber on the branch.
   if (plan) {
@@ -2108,7 +2359,7 @@ function cmdMerge() {
   mainLogCache = undefined;
   mergeShaCache.clear();
   const cls = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
-  const act = appendLog({ type: 'act', class: cls, what: `merged ${branch} at ${sha}${standing?.tag ? ` (upstream ${standing.tag}, verbatim)` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [], reversible: false, approved_by: approved ?? standing?.rule.id ?? undefined }, 'supervisor');
+  const act = appendLog({ type: 'act', class: cls, what: `merged ${branch} at ${sha}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag}, verbatim)` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [], reversible: false, approved_by: approved ?? standing?.rule.id ?? undefined }, 'supervisor');
   out(`merged ${branch} at ${sha.slice(0, 12)} (${act.id})`);
 }
 // ===== 7. trust =====
@@ -2187,6 +2438,7 @@ function cmdAsk() {
   supervisorOnly('ask');
   const q = flagStr('question') ?? die('ask needs --question');
   const kind = flagStr('kind') ?? 'owner-decision';
+  if (['proposal', 'trust'].includes(kind)) upkeepAllows(`a ${kind} question`);
   const cls = flagStr('class') ?? null;
   const L = ladder();
   if (kind === 'goal-approval') {
@@ -3130,6 +3382,16 @@ function cmdSecret() {
   }
   if (failures.length) die(`not posted:\n  - ${failures.join('\n  - ')}`);
 }
+// The hold on the goal a question is about (its goal, or the goals of the tickets it is about or
+// blocks): null while that runs or drains. A let-go goal's open questions leave the inbox until it
+// is restored; a parked goal's stay, labelled.
+function questionHold(q) {
+  const ts = tickets();
+  const goals = q.goal ? [logGet(q.goal)].filter((g) => g?.type === 'goal') : [...new Set([q.ticket, ...(q.blocks ?? [])].filter((id) => ts.has(id)))].flatMap((id) => ticketGoals(ts.get(id)));
+  if (!goals.length) return null;
+  const m = modeOf(goals);
+  return ['park', 'let-go'].includes(m) ? m : null;
+}
 function rankQuestions(qs) {
   const sub = activeTickets();
   const crit = findCycle(sub) ? new Set() : new Set(criticalPath(sub).path);
@@ -3139,12 +3401,12 @@ function rankQuestions(qs) {
 function cmdQuestions() {
   let qs = questions();
   if (flagStr('id')) qs = qs.filter((q) => q.id === flagStr('id'));
-  else if (!flags.all) qs = qs.filter((q) => q.status === 'open');
+  else if (!flags.all) qs = qs.filter((q) => q.status === 'open' && q.goal_hold !== 'let-go');
   qs = rankQuestions(qs);
   if (flags.json) return json(qs);
   if (!qs.length) return out('no questions');
   for (const q of qs) {
-    out(`${q.id}  [${q.kind}, ${q.status}]${q.blocks.length ? ` blocks ${q.blocks.join(',')}` : ''}\n  ${q.question}`);
+    out(`${q.id}  [${q.kind}, ${q.status}${q.goal_hold ? `, its goal ${holdWords(q.goal_hold)}` : ''}]${q.blocks.length ? ` blocks ${q.blocks.join(',')}` : ''}\n  ${q.question}`);
     for (const c of q.choices) out(`  - ${c.label}${c.label === q.recommendation ? ' (recommended)' : ''}${c.detail ? `: ${c.detail}` : ''}${c.effect ? ` For users: ${c.effect}` : ''}`);
     for (const l of q.links) out(`  see: ${l.title} (${l.url ?? `${l.ref ? `${l.ref}:` : ''}${l.path}`})`);
     if (q.review) out(`  review: ${q.review.page?.path} at ${String(q.review.commit).slice(0, 12)} (${q.review.ref})${q.review.data ? `, ${q.review.data.rows} rows` : ''}; ${q.result_status} (devteam.mjs review show ${q.id})`);
@@ -3163,6 +3425,7 @@ function cmdAct() {
   const cls = flagStr('class');
   if (!cls || !what) die('usage: act --class <decision-class> [--scope s] [--approved <qid>] [--refs ids] [--irreversible] -- "<what you did>"');
   supervisorOnly('act');
+  if (cls === 'improvement-trial') upkeepAllows('a new trial');
   const L = ladder();
   const scope = flagStr('scope') ?? null;
   const approved = flagStr('approved') ?? null;
@@ -3319,6 +3582,7 @@ function cmdKnowledge() {
   const by = () => (flags.owner ? ownerWriter().by : (supervisorOnly('knowledge'), 'supervisor'));
   if (sub === 'add') {
     const w = by();
+    if (w !== 'owner') upkeepAllows('proposing a lesson');
     // An agent's lesson is proposed from what it saw: the log entries it rests on (observations,
     // acts, questions, messages, problems) go with it, so the owner can check them before keeping it.
     const evidence = asList(flags.evidence).flatMap((x) => String(x).split(',')).map((x) => x.trim()).filter(Boolean);
@@ -3540,7 +3804,11 @@ function goalView(g) {
     }
     track = reached(g, expected, last.measure.value) ? 'on track' : 'behind';
   }
-  return { ...g, status: g.status ?? 'draft', readings: readings.map((r) => ({ at: r.created_at, value: r.measure.value, source: r.source })), track, check: goalCheck(g), forecast: goalForecast(g) };
+  // A parked or let-go goal stands still on purpose: it is neither on track nor behind.
+  const mode = goalMode(g);
+  const still = ['park', 'let-go'].includes(mode);
+  const forecast = goalForecast(g);
+  return { ...g, status: g.status ?? 'draft', readings: readings.map((r) => ({ at: r.created_at, value: r.measure.value, source: r.source })), track: still ? null : track, check: goalCheck(g), forecast: forecast && still ? { ...forecast, eta: null, past_horizon: false } : forecast, hold_view: holdView(g) };
 }
 function cmdGoal() {
   const [sub, id] = positional;
@@ -3601,7 +3869,18 @@ function cmdGoal() {
     const g = logGet(id);
     if (g?.type !== 'goal') die(`no goal ${id}`);
     const verdict = sub === 'approve' ? 'approve' : positional[2];
-    if (!['approve', 'refine', 'let-go'].includes(verdict)) die('usage: goal decide <g-id> approve|refine|let-go [--notes "…"] [--question q-…]');
+    if (!['approve', 'refine', 'let-go', 'restore'].includes(verdict)) die('usage: goal decide <g-id> approve|refine|let-go|restore [--notes "…"] [--question q-…]');
+    // Restore undoes a let go: the goal gets back the status it had, parked, and its questions return.
+    if (verdict === 'restore') {
+      if (g.status !== 'abandoned') die(`${id} is ${g.status ?? 'draft'}, not let go; nothing to restore`);
+      const born = readLog().lines.find((l) => l.id === id && l.op === 'new')?.status ?? 'draft';
+      const statuses = [{ at: g.created_at, status: born }, ...g.updates.filter((u) => u.status !== undefined)];
+      const lastGo = statuses.map((u) => u.status).lastIndexOf('abandoned');
+      const prior = statuses.slice(0, lastGo).map((u) => u.status).filter((x) => x !== 'abandoned').pop() ?? 'draft';
+      appendLog({ type: 'goal', op: 'set', id, status: prior, decision: { verdict: 'restore', notes: flagStr('notes')?.trim() || undefined }, hold: { mode: 'park', reason: 'restored from let go' } }, by);
+      nudgeSupervisor(`[devteam goal restore ${id} from owner] it is back as ${prior}, parked; its questions are in the inbox again`);
+      return out(`${id}: restored as ${prior}, parked (goal hold ${id} run --owner to run it)`);
+    }
     const notes = flagStr('notes')?.trim() || undefined;
     if (verdict === 'refine' && !notes) die('refine needs --notes: what the planner should change');
     const ask = flagStr('question') ? questions().find((q) => q.id === flagStr('question')) : questions().find((q) => q.kind === 'goal-approval' && q.goal === id && q.status === 'open');
@@ -3614,8 +3893,45 @@ function cmdGoal() {
     const status = { approve: 'ready', refine: undefined, 'let-go': 'abandoned' }[verdict];
     appendLog({ type: 'goal', op: 'set', id, status, decision: { verdict, notes, question: ask?.id } }, by);
     if (ask?.status === 'open') appendLog({ type: 'question', op: 'set', id: ask.id, answer: `${{ approve: 'Approve', refine: 'Refine', 'let-go': 'Let go' }[verdict]}${notes ? ` — ${notes}` : ''}` }, by);
-    nudgeSupervisor(`[devteam goal ${verdict} ${id} from owner] read it with: devteam.mjs goal show ${id}`);
-    return out(`${id}: ${verdict}${status ? ` (${status})` : ''}`);
+    nudgeSupervisor(`[devteam goal ${verdict} ${id} from owner] read it with: devteam.mjs goal show ${id}${verdict === 'let-go' ? `; its sessions park: goal park-sessions ${id}` : ''}`);
+    return out(`${id}: ${verdict}${status ? ` (${status})` : ''}${verdict === 'let-go' ? '; its sessions park and its questions leave the inbox (goal decide restore undoes it)' : ''}`);
+  }
+  // The goal's toggle (planning.md §1, holds): run, drain or park. The owner sets any; the
+  // supervisor drains a running goal (with a reason) and releases only its own drain.
+  if (sub === 'hold') {
+    const g = goalArg(id) ?? die('usage: goal hold <g-id|upkeep> run|drain|park [--reason "…"] [--owner]');
+    const mode = positional[2];
+    if (!['run', 'drain', 'park'].includes(mode)) die('usage: goal hold <g-id|upkeep> run|drain|park [--reason "…"] [--owner]');
+    const by = flags.owner ? ownerWriter().by : (supervisorOnly('goal hold'), 'supervisor');
+    if (g.status === 'met') die(`${g.id} is met; there is no work to hold`);
+    if (g.status === 'abandoned') die(`${g.id} is let go: goal decide ${g.id} restore brings it back, parked`);
+    const why = holdRefusal({ mode }, g.hold ?? { mode: 'run' }, g.hold_by ?? null, by);
+    if (why) die(`goal hold: ${why}`);
+    const reason = flagStr('reason')?.trim();
+    if (by === 'supervisor' && !reason) die('the supervisor says why: --reason "…"');
+    const before = goalMode(g);
+    const line = writeHold(g, { mode, ...(reason ? { reason: reason.slice(0, 300) } : {}) }, by);
+    logCache = null;
+    const name = isUpkeep(g) ? 'upkeep' : g.id;
+    const now = goalArg(isUpkeep(g) ? 'upkeep' : g.id);
+    if (by === 'supervisor') appendLog({ type: 'act', class: 'goal-hold', what: `${mode === 'drain' ? 'drained' : 'released my drain on'} ${isUpkeep(g) ? 'Upkeep' : `"${g.title}"`}: ${reason}`, refs: [now.id], reversible: true }, 'supervisor');
+    out(`${isUpkeep(g) ? 'Upkeep' : g.id} is ${holdWords(mode)} (${line.id})`);
+    if (mode === 'park') {
+      if (by === 'supervisor') { const sent = sendParkRulings({ goal: now }); out(sent.length ? `told ${sent.join(', ')} to commit, push, write a handoff and park` : 'no running session of it to tell'); }
+      else nudgeSupervisor(`[devteam goal park ${name} from owner] send its sessions the park ruling: goal park-sessions ${name}`);
+    }
+    if (['park', 'let-go'].includes(before) && mode !== 'park') {
+      const rows = restartCommands((x) => sessionGoals(x.name).some((y) => y.id === now.id) || (isUpkeep(now) && !sessionGoals(x.name).length));
+      if (rows.length) out(`restart its parked sessions, as the supervisor:\n${rows.map((x) => `  devteam.mjs ${x.cmd}`).join('\n')}`);
+      if (by !== 'supervisor') nudgeSupervisor(`[devteam goal ${mode} ${name} from owner] ${rows.length ? `restart: ${rows.map((x) => x.cmd).join('; ')}` : 'nothing parked to restart'}`);
+    } else if (by !== 'supervisor' && mode !== 'park') nudgeSupervisor(`[devteam goal ${mode} ${name} from owner] ${mode === 'drain' ? 'start nothing new for it; let what runs finish' : 'it runs again'}`);
+    return;
+  }
+  if (sub === 'park-sessions') {
+    supervisorOnly('goal park-sessions');
+    const g = flags.all ? null : goalArg(id) ?? die('usage: goal park-sessions <g-id|upkeep> | --all  [--again]');
+    const sent = sendParkRulings({ goal: g, again: !!flags.again });
+    return out(sent.length ? `told ${sent.join(', ')} to commit, push, write a handoff and park` : 'every session it holds has been told (--again re-sends to those not yet parked)');
   }
   if (sub === 'status') {
     const { by } = ownerWriter();
@@ -3633,7 +3949,7 @@ function cmdGoal() {
     if (flags.json) return json(f);
     return out(f ? forecastText(g, f) : `${id} has no milestones yet`);
   }
-  if (sub === 'show') return json(goalView(logGet(id)?.type === 'goal' ? logGet(id) : die(`no goal ${id}`)));
+  if (sub === 'show') { const g = goalArg(id) ?? die(`no goal ${id}`); return json(isUpkeep(g) ? { ...g, hold_view: holdView(g) } : goalView(g)); }
   if (sub === 'reading') {
     if (!id || logGet(id)?.type !== 'goal') die('usage: goal reading <g-id> --value n [--source s] [--detail d]');
     const by = flags.owner ? ownerWriter().by : (supervisorOnly('goal reading'), 'supervisor');
@@ -3662,10 +3978,12 @@ function cmdGoal() {
   }
   const gs = logObjects('goal').map(goalView).sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99));
   if (flags.json) return json(gs);
+  const u = holdView(upkeepOrVirtual());
+  out(`upkeep [${u.state}${u.reason ? `: ${u.reason}` : ''}] Upkeep: chores, CI fixes, retros, kit syncs`);
   if (!gs.length) return out('no goals (the owner states them; planning.md §1)');
   for (const g of gs) {
     const last = g.readings[g.readings.length - 1];
-    out(`${g.id} [${g.status}${g.priority ? `, p${g.priority}` : ''}] ${g.title}\n  ${g.measure?.description ?? '-'}: ${last ? last.value : '?'} -> ${g.measure?.target ?? '?'} ${g.measure?.unit ?? ''} by ${g.horizon ?? '?'}${g.track ? ` (${g.track})` : ''}; features: ${g.check.features.join(', ') || 'none'}`);
+    out(`${g.id} [${g.status}${g.priority ? `, p${g.priority}` : ''}${g.hold_view.mode !== 'run' ? `, ${g.hold_view.state}` : ''}] ${g.title}\n  ${g.measure?.description ?? '-'}: ${last ? last.value : '?'} -> ${g.measure?.target ?? '?'} ${g.measure?.unit ?? ''} by ${g.horizon ?? '?'}${g.track ? ` (${g.track})` : ''}; features: ${g.check.features.join(', ') || 'none'}`);
   }
 }
 
@@ -3683,7 +4001,8 @@ function collectRoadmap() {
   const cycleDays = m.cycle_hours.median ? m.cycle_hours.median / 24 : null;
   const openQs = questions().filter((q) => q.status === 'open');
   const goals = logObjects('goal').filter((g) => !['met', 'abandoned'].includes(g.status)).sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99));
-  const rankOf = new Map(goals.map((g, i) => [g.id, i]));
+  // A parked goal's work stands still, so it stays out of the queue the others' dates come from.
+  const rankOf = new Map(goals.filter((g) => goalMode(g) !== 'park').map((g, i) => [g.id, i]));
   const fs_ = features();
   const views = [...new Set([...items.map((t) => t.feature), ...fs_.keys()])].map((fid) => {
     const f = fs_.get(fid);
@@ -3716,8 +4035,9 @@ function collectRoadmap() {
     const etas = feats.map((v) => v.eta).filter(Boolean).sort();
     // With milestones, the goal's date is the forecast's: later milestones count by their estimate.
     const fc = goalForecast(g, base);
-    const eta = fc ? (fc.milestones.every((m) => m.status === 'met') ? 'done' : fc.eta) : c.unplanned.length || !feats.length ? null : feats.every((v) => v.done) ? 'done' : etas.pop() ?? null;
-    return { id: g.id, title: g.title, priority: g.priority ?? null, status: g.status ?? 'draft', unplanned: c.unplanned.filter((u) => !c.later.includes(u.n)), later: c.later, current_milestone: c.current_milestone, milestones: fc?.milestones ?? [], past_horizon: fc?.past_horizon ?? false, features: feats.map((v) => v.feature), eta, has_design: !c.coverage.some((x) => x.startsWith('no design')) };
+    const parked = goalMode(g) === 'park';
+    const eta = parked ? null : fc ? (fc.milestones.every((m) => m.status === 'met') ? 'done' : fc.eta) : c.unplanned.length || !feats.length ? null : feats.every((v) => v.done) ? 'done' : etas.pop() ?? null;
+    return { id: g.id, title: g.title, priority: g.priority ?? null, status: g.status ?? 'draft', hold: goalMode(g), unplanned: c.unplanned.filter((u) => !c.later.includes(u.n)), later: c.later, current_milestone: c.current_milestone, milestones: fc?.milestones ?? [], past_horizon: fc?.past_horizon ?? false, features: feats.map((v) => v.feature), eta, has_design: !c.coverage.some((x) => x.startsWith('no design')) };
   });
   return {
     generated_at: nowIso(), rate_points_per_day: +rate.toFixed(2), median_cycle_days: cycleDays === null ? null : +cycleDays.toFixed(1),
@@ -3729,7 +4049,7 @@ const weekOf = (d) => { if (!d) return 'no date'; const x = new Date(`${d}T00:00
 function roadmapText(r) {
   const L = [`rate ${r.rate_points_per_day} points/day; median cycle ${r.median_cycle_days ?? '-'} days`];
   for (const g of r.goals) {
-    L.push('', `${g.priority ? `p${g.priority} ` : ''}${g.title} [${g.status}] -> ${g.eta === 'done' ? 'done' : weekOf(g.eta)}${g.past_horizon ? ' (after its horizon)' : ''}${g.has_design ? '' : ' (no design)'}`);
+    L.push('', `${g.priority ? `p${g.priority} ` : ''}${g.title} [${g.status}${g.hold !== 'run' ? `, ${holdWords(g.hold)}` : ''}] -> ${g.hold === 'park' ? 'no date while parked' : g.eta === 'done' ? 'done' : weekOf(g.eta)}${g.past_horizon ? ' (after its horizon)' : ''}${g.has_design ? '' : ' (no design)'}`);
     for (const m of g.milestones) L.push(`  milestone ${m.n} [${m.status}] ${m.title} -> ${m.eta === 'met' ? 'met' : weekOf(m.eta)}${m.features.length ? '' : ` (about ${m.estimate_tickets} tickets, unplanned)`}${m.late ? ' (after its date)' : ''}`);
     for (const u of g.unplanned) L.push(`  unplanned: precondition ${u.n}: ${u.text}`);
     for (const f of g.features) {
@@ -3784,9 +4104,27 @@ function openPr(wt, branch, title, bodyText) {
   if (!pr) pr = sh('gh', ['pr', 'create', '--head', branch, '--base', main, '--title', title, '--body', `${bodyText}\n\n## One-way doors\n\nNone.\n`], { cwd: wt }) ?? '';
   return pr;
 }
+// The improvement loop is Upkeep's work: while Upkeep is drained or parked it starts nothing new
+// (a trial, a proposal, a trust question, a proposed lesson, a retro); --force does, logged by
+// the act or line itself. Observing (metrics, findings, readings) and the record never stop.
+function upkeepAllows(what) {
+  const m = goalMode(upkeepOrVirtual());
+  if (m === 'run' || flags.force) return;
+  die(`Upkeep is ${holdWords(m)}: ${what} waits until it runs (goal hold upkeep run --owner), or --force`);
+}
+// Chores that keep the record rather than do upkeep: never held.
+const isRecordKeeping = (slug) => ['log', 'fleet-handoff', 'drain-handoff'].includes(slug) || /^secret-/.test(slug ?? '');
 function cmdChore() {
   const [sub, slugName] = positional;
-  if (sub === 'start') { if (!slugName) die('usage: chore start <slug>'); supervisorOnly('chore'); return out(choreWorktree(slugName, { setup: true })); }
+  if (sub === 'start') {
+    if (!slugName) die('usage: chore start <slug>');
+    supervisorOnly('chore');
+    // Upkeep work starts only while Upkeep runs; keeping the record (the log, the fleet handoff,
+    // posted secrets) never waits.
+    const um = goalMode(upkeepOrVirtual());
+    if (um !== 'run' && !isRecordKeeping(choreSlug(slugName)) && !flags.force) die(`Upkeep is ${holdWords(um)}: no new upkeep chore starts (goal hold upkeep run --owner, or --force, logged)`);
+    return out(choreWorktree(slugName, { setup: true }));
+  }
   if (sub !== 'pr' || !slugName || !flagStr('title')) die('usage: chore start <slug>   |   chore pr <slug> --title "<summary>"');
   supervisorOnly('chore');
   choreSlug(slugName);
@@ -3890,6 +4228,7 @@ function cmdRetro() {
     process.exit(d.due ? 0 : 1);
   }
   supervisorOnly('retro');
+  if (sub !== 'close' && !flags.print) upkeepAllows('a retro');
   if (sub === 'close') {
     const date = arg ?? die('usage: retro close <YYYY-MM-DD> --summary "<two lines>" [--refs ids]');
     const rel = `retros/${date}.md`;
@@ -4271,9 +4610,10 @@ function collectMetrics(since) {
   const msgWaits = expecting.filter((m) => replies.has(m.id)).map((m) => replies.get(m.id) - Date.parse(m.created_at));
   const qs = questions().filter((q) => Date.parse(q.asked_at) >= since);
   const qWaits = qs.filter((q) => q.answered_at && q.status === 'answered').map((q) => Date.parse(q.answered_at) - Date.parse(q.asked_at));
-  const openQs = qs.filter((q) => q.status === 'open');
+  // a held goal's open questions wait with it: not counted as the owner falling behind
+  const openQs = qs.filter((q) => q.status === 'open' && !q.goal_hold);
   const grace = settings.question_default_after_hours * 3600000;
-  const recentQs = questions().filter((q) => now - Date.parse(q.asked_at) <= 14 * DAY && q.status !== 'withdrawn' && (q.status !== 'open' || now - Date.parse(q.asked_at) > grace));
+  const recentQs = questions().filter((q) => now - Date.parse(q.asked_at) <= 14 * DAY && q.status !== 'withdrawn' && !(q.status === 'open' && q.goal_hold) && (q.status !== 'open' || now - Date.parse(q.asked_at) > grace));
   const answeredRecent = recentQs.filter((q) => q.status === 'answered').length;
 
   const reviews = reviewStats();
@@ -4369,8 +4709,10 @@ function collectMetrics(since) {
   if (recentQs.length >= 4 && answeredRecent / recentQs.length < 0.5) add('high', 'inbox-stalled', 'owner questions', `${answeredRecent} of ${recentQs.length} answered in 14 days`, 'remind the owner what is blocked; give defaults where the class allows; withdraw what no longer matters');
   // churn is a signal to re-plan a ticket still in flight; a merged ticket's passes are retro material
   for (const [id, n] of Object.entries(reviewPasses()).filter(([id2, n]) => n >= 3 && !mergeShaFor(id2))) add('medium', 'review-churn', id, `${n} final review passes`, 'the ticket may be too big or under-specified; re-plan it');
+  // An old fleet drain in force starts nothing; goal holds start nothing for their goals.
   const drained = !!draining();
-  const ready = [...ts.values()].filter((t) => isActive(t) && !isHeld(t) && !mergeShaFor(t.id) && !activeWorker(t.id) && (t.depends_on ?? []).every((d) => mergeShaFor(d)) && !notSchedulable(t));
+  const ready = [...ts.values()].filter((t) => isActive(t) && !isHeld(t) && !mergeShaFor(t.id) && !activeWorker(t.id) && (t.depends_on ?? []).every((d) => mergeShaFor(d)) && !notSchedulable(t) && ticketMode(t) === 'run');
+  holdFindings(add, settings);
   const active = [...ts.keys()].filter(activeWorker).length;
   // Goals that need planning with nobody planning them: a fully defined draft goal with no design up
   // for approval, or a ready goal whose current milestone has unplanned preconditions, and no
@@ -4382,7 +4724,7 @@ function collectMetrics(since) {
     // (a goal let go, or one that doesn't exist, holds nothing back)
     const blockedBy = (g) => (g.plan_after ?? []).filter((d) => logGet(d.goal)?.type === 'goal' && (logGet(d.goal).status ?? 'draft') === 'draft');
     const waiting = logObjects('goal').filter((g) => {
-      if (busy.has(g.id) || ['met', 'abandoned'].includes(g.status) || blockedBy(g).length) return false;
+      if (busy.has(g.id) || ['met', 'abandoned'].includes(g.status) || blockedBy(g).length || goalMode(g) !== 'run') return false;
       const c = goalCheck(g);
       if ((g.status ?? 'draft') === 'draft') return !c.definition.length && !questions().some((q) => q.goal === g.id && q.status === 'open');
       return g.status === 'ready' && c.coverage.some((x) => x.includes('has no feature') || x.startsWith('no feature names'));
@@ -4528,12 +4870,15 @@ function dashboardData() {
     gates_configured: Object.keys(settings.gates ?? {}),
     tickets: deriveStatus(),
     critical_path: findCycle(sub) ? [] : criticalPath(sub).path,
-    questions: rankQuestions(questions().filter((q) => q.status === 'open')),
+    questions: rankQuestions(questions().filter((q) => q.status === 'open' && q.goal_hold !== 'let-go')),
     open_messages: msgs.filter((m) => !['info', 'ruling', 'answer'].includes(m.kind) && !replied.has(m.id) && !settledByLanding(m)).map((m) => ({ id: m.id, kind: m.kind, actor: m.created_by, to: m.to, summary: m.text })),
     metrics: collectMetrics(0),
     progress: collectProgress(),
     planners: planners(),
     ooda: collectOoda(),
+    // holds: Upkeep's, and the fleet's mode when every goal is held (fleet status gives readiness)
+    upkeep: (() => { const u = upkeepOrVirtual(); const chores = deriveStatus().filter((r) => r.feature === CHORES && !r.merge_sha && r.stage !== 'superseded'); return { id: upkeepGoal()?.id ?? null, ...holdView(u), chores: chores.map((r) => ({ id: r.id, title: r.title, stage: r.stage, phase: r.phase })) }; })(),
+    fleet: { mode: draining() ? 'park' : fleetMode(), op: fleetOpInForce()?.fleet ?? draining()?.id ?? null, reason: fleetOpInForce()?.reason ?? (draining() ? drainReason(draining()) : null) },
   };
 }
 const cmdDashboardData = () => { gitReadCache = new Map(); out(JSON.stringify(dashboardData())); };
@@ -4599,7 +4944,9 @@ function cmdDashboard() {
       return args;
     },
     correct: (b) => (ID.test(b.id ?? '') && text(b.reason, 600) ? ['correct', b.id, '--reason', b.reason.trim()] : null),
-    'goal-decide': (b) => (ID.test(b.id ?? '') && ['approve', 'refine', 'let-go'].includes(b.verdict) && (b.notes === undefined || text(b.notes, 4000)) ? ['goal', 'decide', b.id, b.verdict, ...(b.notes ? ['--notes', b.notes.trim()] : [])] : null),
+    'goal-hold': (b) => ((ID.test(b.id ?? '') || b.id === 'upkeep') && ['run', 'drain', 'park'].includes(b.mode) && (b.reason === undefined || b.reason === '' || text(b.reason, 300)) ? ['goal', 'hold', b.id, b.mode, '--owner', ...(b.reason ? ['--reason', b.reason.trim()] : [])] : null),
+    fleet: (b) => (['drain', 'park', 'undrain', 'unpark', 'resume'].includes(b.op) && (b.reason === undefined || b.reason === '' || text(b.reason, 300)) ? ['fleet', b.op, '--owner', ...(b.reason && ['drain', 'park'].includes(b.op) ? ['--reason', b.reason.trim()] : [])] : null),
+    'goal-decide': (b) => (ID.test(b.id ?? '') && ['approve', 'refine', 'let-go', 'restore'].includes(b.verdict) && (b.notes === undefined || text(b.notes, 4000)) ? ['goal', 'decide', b.id, b.verdict, ...(b.notes ? ['--notes', b.notes.trim()] : [])] : null),
     knowledge: (b) => (ID.test(b.id ?? '') && ['accepted', 'retired', 'stale'].includes(b.status) ? ['knowledge', 'set', b.id, '--status', b.status, '--owner'] : null),
     ack: (b) => (/^[a-z][a-z-]*$/.test(b.kind ?? '') && text(b.subject, 200) && text(b.reason, 600) ? ['ack', b.kind, b.subject, '--reason', b.reason.trim(), '--owner'] : null),
   };
@@ -4622,6 +4969,11 @@ function cmdDashboard() {
       return res.end(r.stdout);
     }
     const u = new URL(req.url, 'http://x');
+    // Whether the fleet can move now: fleet status, without fetching (the strip at the top asks).
+    if (req.method === 'GET' && u.pathname === '/api/fleet') {
+      const r = await run(['fleet', 'status', '--json', ...(u.searchParams.get('fetch') === '1' ? [] : ['--no-fetch'])]);
+      return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 500, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
+    }
     if (req.method === 'GET' && u.pathname === '/api/timeline') {
       const id = u.searchParams.get('id') ?? '';
       if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad ticket id' }));
@@ -5021,13 +5373,27 @@ function makeSession(role) {
   supervisorOnly(role);
   const id = positional[0] ?? die(`usage: ${role} <${role === 'worker' ? 'ticket-id' : 'feature'}> [--resume] [--force]`);
   if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
-  // While the fleet drains for a move, no session starts here; --force does, and its act says so.
-  const drain = draining();
-  if (drain && !flags.force) die(`the fleet is draining (${drain.id}, ${drain.created_at}): no new sessions start. On the machine it moves to, run undrain first (supervisor.md, Moving the fleet); to start this one anyway, add --force (it is logged)`);
+  if (role === 'worker' && !tickets().has(id)) die(`no ticket ${id} (devteam.mjs ticket show ${id})`);
+  // Every session serves a goal, and the goal's hold says whether it may start (planning.md §1):
+  // drain lets a session that already ran carry on but starts nothing new; park and let-go start
+  // nothing. --force does anyway, and its act says so. A planner names its goal until its feature
+  // line or a question does.
+  const goalOpt = flagStr('goal');
+  if (goalOpt && (role !== 'planner' || logGet(goalOpt)?.type !== 'goal')) die(role === 'planner' ? `--goal ${goalOpt}: no such goal` : '--goal is for a planner');
+  let goalIds = [];
+  if (role === 'planner') {
+    goalIds = planners().find((p) => p.feature === id)?.goals ?? plannerLaunchGoals(id);
+    if (!goalIds.length && goalOpt) goalIds = [goalOpt];
+    if (!goalIds.length && !resolveCommit(`refs/heads/plan/${id}`)) die(`planner ${id} --goal <g-id>: which goal it plans (needed until its feature line or a question names one)`);
+  }
+  const legacyDrain = draining();
+  const mode = legacyDrain ? 'park' : role === 'worker' ? ticketMode(tickets().get(id)) : goalIds.length ? modeOf(goalIds.map((g) => logGet(g))) : fleetMode() ?? 'run';
+  const started = role === 'worker' ? !!lastPhaseOf(id) : !!resolveCommit(`refs/heads/plan/${id}`);
+  const refused = ['park', 'let-go'].includes(mode) || (mode === 'drain' && !started);
+  if (refused && !flags.force) die(legacyDrain ? `the fleet is drained by an old drain (${legacyDrain.id}): fleet unpark first (supervisor.md §12); to start this one anyway, add --force (it is logged)` : `its goal is ${holdWords(mode)}: ${mode === 'drain' ? 'a draining goal finishes what is running and starts nothing new' : 'nothing starts for it'} (planning.md §1, holds). To start it anyway, add --force (it is logged)`);
   if (!sh('tmux', ['-V'])) die('tmux not found');
   const s = loadSettings();
   let resume = !!flags.resume;
-  if (role === 'worker' && !tickets().has(id)) die(`no ticket ${id} (devteam.mjs ticket show ${id})`);
   const blockSize = flagNum('id-block') ?? ID_BLOCK_DEFAULT;
   if (role === 'planner' && !(Number.isInteger(blockSize) && blockSize >= 1)) die('--id-block takes a whole number of ticket numbers to reserve (at least 1)');
   const name = role === 'worker' ? id : `plan-${id}`;
@@ -5082,13 +5448,13 @@ function makeSession(role) {
   }
   typeInto(target, `${cmd} "$(cat '${promptFile}')"`);
   if (role === 'worker' && !resume) appendLog({ type: 'phase', from: null, to: 'starting', note: `started in ${target}` }, id);
-  // a planner parked by a drain is running again
+  // a planner parked by a park is running again
   if (role === 'planner' && lastPhaseOf(name)?.to === 'parked') appendLog({ type: 'phase', from: 'parked', to: 'starting', note: `started in ${target}` }, name);
-  appendLog({ type: 'act', class: 'worker-slots', what: `${resume ? 'resumed' : 'made'} ${role} ${name} in ${target}${block ? `, ticket numbers ${padNN(block.from)}-${padNN(block.to)}` : ''}${drain ? ` while the fleet is draining (${drain.id}), with --force` : ''}`, refs: role === 'worker' ? [id] : [], reversible: true, id_block: block ?? undefined }, 'supervisor');
+  appendLog({ type: 'act', class: 'worker-slots', what: `${resume ? 'resumed' : 'made'} ${role} ${name} in ${target}${block ? `, ticket numbers ${padNN(block.from)}-${padNN(block.to)}` : ''}${refused ? ` while its goal is ${holdWords(mode)}, with --force` : ''}`, refs: role === 'worker' ? [id] : goalIds, reversible: true, id_block: block ?? undefined }, 'supervisor');
   out(`${resume ? 'resumed' : 'made'} ${role} ${name} in ${target} at ${wt}${block ? `; ticket numbers ${padNN(block.from)}-${padNN(block.to)} reserved` : ''}`);
 }
 
-// --- moving the fleet: drain, drain --status, undrain (supervisor.md, Moving the fleet) ---
+// --- moving the fleet: fleet park | drain, fleet status, fleet unpark | undrain (supervisor.md §12) ---
 //
 // What git doesn't carry stays on this machine: run/ (the live log, review results and drafts,
 // forge-git PR text, caches), each session's worktree and its harness session, worktree_files and
@@ -5111,48 +5477,116 @@ function sessionOf(name) {
   return { name, role: planner ? 'planner' : 'worker', id, branch: planner ? `plan/${id}` : `ticket/${id}`, wt: path.join(mainRoot, '.worktrees', name), handoff: `${projectRel}/${planner ? `plans/${id}` : `tickets/${id}`}/handoff.md` };
 }
 const isHandoffFile = (file) => !!file && new RegExp(`^${reReserved(projectRel)}/(tickets|plans)/[^/]+/handoff\\.md$`).test(file);
-// The handoff note a session gets in its prompt, only while it is current: the session was parked
-// by the latest drain and has logged no phase of its own since (a "starting" line is the launch's).
-// After its first real phase line the note is history: it stays in its folder, never prompted again,
-// until a later drain overwrites it.
+// What parked a session at a time: an old fleet drain in force then, or the park or let-go of one
+// of its goals (a fleet park is one on every goal) in force then. A session parked for another
+// reason (a ruling about its ticket) has no cause, and so no handoff block.
+function parkCauseAt(name, at) {
+  const t = Date.parse(at);
+  const legacy = drainActs().filter((a) => Date.parse(a.created_at) <= t).pop();
+  if (legacy?.class === 'drain') return { kind: 'fleet', at: legacy.created_at, marker: `drain:${legacy.id}`, reason: drainReason(legacy), host: drainHost(legacy), legacy };
+  const gs = sessionGoals(name);
+  const set = gs.length ? gs : holdableGoals();
+  return set.map((g) => causeOf(g, t)).filter(Boolean).sort((a, b) => b.at.localeCompare(a.at))[0] ?? null;
+}
+// The handoff note a session gets in its prompt, only while it is current: the session's latest
+// parked line had a park cause, and it has logged no phase of its own since (a "starting" line is
+// the launch's). After its first real phase line the note is history: it stays in its folder,
+// never prompted again, until a later park overwrites it.
 function handoffFor(name) {
-  const d = latestDrain();
-  if (!d) return null;
-  // A planner logs no phases while it works, so any line of its own (a message, an observation) ends it.
   const planner = writerClass(name) === 'planner';
-  const since = readLog().lines.filter((l) => l.by === name && l.at > d.created_at && (planner || l.type === 'phase'));
+  const mine = readLog().lines.filter((l) => l.by === name).sort((x, y) => x.at.localeCompare(y.at));
+  const parked = mine.filter((l) => l.type === 'phase' && l.to === 'parked').pop();
+  if (!parked) return null;
+  // A planner logs no phases while it works, so any line of its own (a message, an observation) ends it.
   const launch = (l) => l.type === 'phase' && ['parked', 'starting'].includes(l.to);
-  if (!since.some((l) => l.type === 'phase' && l.to === 'parked') || since.some((l) => !launch(l))) return null;
+  if (mine.some((l) => l.at > parked.at && (planner || l.type === 'phase') && !launch(l))) return null;
   const s = sessionOf(name);
+  // A hold released while the session was parking leaves no cause in force at its parked line;
+  // a handoff commit it made for that park still counts.
+  const prev = mine.filter((l) => l.type === 'phase' && l.at < parked.at && !launch(l)).pop();
+  const own = [`refs/heads/${s.branch}`, `refs/remotes/origin/${s.branch}`].map((r) => handoffCommit(r, name)).find((c) => c && (!prev || c.at >= prev.at));
+  const cause = parkCauseAt(name, parked.at) ?? (own ? { kind: 'self', at: parked.at, marker: `self:${name}@${parked.at}`, reason: null } : null);
+  if (!cause) return null;
+  for (const r of [`refs/heads/${s.branch}`, `refs/remotes/origin/${s.branch}`]) {
+    const c = handoffCommit(r, name);
+    if (c) return { ...s, text: c.body, where: `the handoff commit ${c.sha.slice(0, 12)} on ${s.branch}, ${c.at}`, cause, parked_at: parked.at };
+  }
+  // the note used to be a file: read one a session parked by an old drain left
   const local = readText(path.join(s.wt, s.handoff));
-  if (local !== null) return { ...s, text: local, where: `${s.handoff} in its worktree`, drain: d };
+  if (local !== null) return { ...s, text: local, where: `${s.handoff} in its worktree`, cause, parked_at: parked.at };
   for (const r of [`refs/heads/${s.branch}`, `refs/remotes/origin/${s.branch}`]) {
     if (!resolveCommit(r)) continue;
     const text = git(['show', `${r}:${s.handoff}`]);
-    if (text !== null) return { ...s, text, where: `${s.handoff} on ${s.branch}, committed ${git(['log', '-1', '--format=%cI', r, '--', s.handoff]) ?? '?'}`, drain: d };
+    if (text !== null) return { ...s, text, where: `${s.handoff} on ${s.branch}, committed ${git(['log', '-1', '--format=%cI', r, '--', s.handoff]) ?? '?'}`, cause, parked_at: parked.at };
   }
   return null;
 }
+// A parked session's handoff is an empty commit on its own branch, titled "devteam handoff: <name>",
+// with the note as its body: nothing extra lands in the repo, and it travels with the branch.
+const HANDOFF_SUBJECT = (name) => `devteam handoff: ${name}`;
+function handoffCommit(ref, name) {
+  if (!resolveCommit(ref)) return null;
+  const raw = git(['log', '-1', '--format=%H%x00%cI%x00%B', `--grep=^${HANDOFF_SUBJECT(name).replace(/[.[\]*^$]/g, '\\$&')}$`, ref]);
+  if (!raw) return null;
+  const [sha, at, msg] = raw.split('\0');
+  return { sha, at, body: msg.split('\n').slice(1).join('\n').trim() };
+}
+// The supervisor's handoff is an annotated tag on origin, devteam-handoff/<fleet op>, with the note
+// as its message: no file, no PR. An older move's file on main is still read.
+const SUPERVISOR_TAGS = 'refs/tags/devteam-handoff/';
+function supervisorHandoff(since) {
+  if (!flags['no-fetch'] && commonDir) git(['fetch', '--quiet', 'origin', `+${SUPERVISOR_TAGS}*:${SUPERVISOR_TAGS}*`]);
+  const rows = (git(['for-each-ref', '--sort=-taggerdate', '--format=%(refname:short)%00%(taggerdate:iso-strict)%00%(contents)%00%01', SUPERVISOR_TAGS]) ?? '').split('\x01').map((x) => x.replace(/^\n/, '')).filter(Boolean);
+  for (const r of rows) {
+    const [tag, at, text] = r.split('\0');
+    if (!since || Date.parse(at) >= Date.parse(since) - 60000) return { text: (text ?? '').trim(), at, rel: tag };
+  }
+  const legacy = supervisorHandoffOnMain();
+  return legacy && (!since || Date.parse(legacy.at) >= Date.parse(since) - 60000) ? legacy : null;
+}
+// handoff [--file f] [--supervisor]: a worker or planner records its handoff note (stdin or a file)
+// as an empty commit on its branch and pushes the branch; the supervisor records its own as an
+// annotated tag on origin.
+function cmdHandoff() {
+  const note = (flagStr('file') ? fs.readFileSync(flagStr('file'), 'utf8') : fs.readFileSync(0, 'utf8')).trim();
+  if (!note) die('handoff: the note is empty (stdin or --file): what is done, the exact next step, open questions, anything not committed');
+  if (flags.supervisor) {
+    supervisorOnly('handoff --supervisor');
+    const op = fleetOpInForce()?.fleet ?? (draining() ? draining().id : null) ?? (fleetMode() ? `held-${newFleetId().slice(2)}` : null) ?? die('handoff --supervisor is for a fleet park or drain in force');
+    git(['fetch', '--quiet', 'origin', loadSettings().main_branch]);
+    const tag = `devteam-handoff/${op}-${newFleetId().slice(2)}`;
+    const base = mainRef() ?? 'HEAD';
+    withScratch((dir) => {
+      const f = path.join(dir, 'note');
+      fs.writeFileSync(f, `Supervisor handoff (${op})\n\n${note}\n`);
+      gitOrDie(['tag', '-a', tag, '-F', f, base], mainRoot);
+    });
+    gitOrDie(['push', '--quiet', 'origin', `refs/tags/${tag}`], mainRoot);
+    return out(`pushed ${tag} with your handoff; fleet status checks it, and fleet unpark prints it on the new machine`);
+  }
+  const role = process.env.DEVTEAM_ROLE;
+  if (!['worker', 'planner'].includes(role)) die('handoff: a worker or planner records its own (the supervisor adds --supervisor)');
+  const name = role === 'worker' ? (process.env.DEVTEAM_TICKET ?? currentTicketId() ?? die('handoff: no ticket')) : `plan-${process.env.DEVTEAM_FEATURE ?? die('handoff: no feature')}`;
+  const sess = sessionOf(name);
+  if ((git(['status', '--porcelain']) ?? '').trim()) die('handoff: commit your work in progress first (a WIP commit is fine); the handoff commit holds only the note');
+  const branch = git(['rev-parse', '--abbrev-ref', 'HEAD']);
+  if (branch !== sess.branch) die(`handoff: you are on ${branch}, not ${sess.branch}`);
+  withScratch((dir) => {
+    const f = path.join(dir, 'msg');
+    fs.writeFileSync(f, `${HANDOFF_SUBJECT(name)}\n\n${note}\n`);
+    gitOrDie(['commit', '--quiet', '--allow-empty', '-F', f]);
+  });
+  gitOrDie(['push', '--quiet', 'origin', `HEAD:refs/heads/${sess.branch}`]);
+  out(`handoff committed on ${sess.branch} and pushed; now: devteam.mjs phase parked --note "parked", and stop`);
+}
+const causeWords = (c) => (c.kind === 'self' ? 'it was told to park' : c.kind === 'fleet' ? `the fleet was parked${c.host ? ` on ${c.host}` : ''}${c.reason ? ` (${c.reason})` : ''}` : c.kind === 'let-go' ? `the owner let go of "${c.title}"` : `"${c.title}" was parked${c.reason ? ` (${c.reason})` : ''}`);
 const HANDOFF_MAX = 12000;
 function handoffBlock(name) {
   const h = handoffFor(name);
   if (!h) return null;
   const body = h.text.length > HANDOFF_MAX ? `${h.text.slice(0, HANDOFF_MAX)}\n\n(cut at ${HANDOFF_MAX} characters; read the whole file)` : h.text;
-  return `## Handoff from a drained session\n\nThe fleet was drained (${h.drain.id}, ${h.drain.created_at}${drainHost(h.drain) ? ` on ${drainHost(h.drain)}` : ''}) and this session starts without the earlier one's context. Before anything else in ${h.role === 'worker' ? 'worker.md §2' : 'planning.md'}, read this note, left by the session that stopped (${h.where}); then check it against your branch, your files and the log. Keep the file: it is part of the record and lands with your PR. Between the lines below is the note itself, as that session wrote it.\n\n-----\n${body.trimEnd()}\n-----`;
+  return `## Handoff from a parked session\n\nThis session was parked (${causeWords(h.cause)}, ${h.cause.at}) and starts without the earlier one's context. Before anything else in ${h.role === 'worker' ? 'worker.md §2' : 'planning.md'}, read this note, left by the session that stopped (${h.where}); then check it against your branch, your files and the log. It stays on your branch as a commit and lands with your PR. Between the lines below is the note itself, as that session wrote it.\n\n-----\n${body.trimEnd()}\n-----`;
 }
-// What a stopping session must do: the same message for every worker and planner.
-function drainMessage(s, reason) {
-  return `Drain: the fleet is stopping${reason ? ` (${reason.slice(0, 120)})` : ''} to move to another machine. Now: commit all work in progress (a WIP commit is fine) and push ${s.branch}; write ${s.handoff} with what is done, the exact next step, open questions and anything you could not commit; commit and push it; then devteam.mjs phase parked --note "drained", and stop (worker.md §9).`;
-}
-// The sessions a drain is about: everyone it messaged, and anyone running now, less what landed.
-function fleetSessions(d = draining()) {
-  const names = new Set(d?.refs ?? []);
-  for (const t of tickets().keys()) if (activeWorker(t)) names.add(t);
-  const inFlight = new Set(planners().map((p) => `plan-${p.feature}`));
-  for (const n of inFlight) names.add(n);
-  return [...names].sort().map(sessionOf).filter((s) => (s.role === 'worker' ? tickets().has(s.id) && !mergeShaFor(s.id) : inFlight.has(s.name)));
-}
-
 // The supervisor's own handoff: its context doesn't move either, so it writes one too, and it lands
 // on main like any project file (chore drain-handoff), so the next supervisor reads it from git.
 const SUPERVISOR_HANDOFF = 'handoffs/supervisor.md';
@@ -5187,55 +5621,109 @@ function harnessMemoryFiles() {
 // the undrain itself are the two lines only one side has, so neither counts.
 function parityPrint() {
   logCache = null;
-  const lines = readLog().lines.filter((l) => !(l.type === 'act' && (l.class === 'undrain' || (l.class === 'merge-chore' && /^merged chore-log at /.test(l.what ?? '')))));
+  const lines = readLog().lines.filter((l) => !(l.type === 'act' && (['undrain', 'fleet-unpark', 'fleet-undrain'].includes(l.class) || (l.class === 'merge-chore' && /^merged chore-log at /.test(l.what ?? '')))) && !(l.type === 'goal' && l.hold?.undoes));
   const ids = lines.map((l) => `${l.id}\t${JSON.stringify(l)}`).sort();
   return { hash: sha256(Buffer.from(ids.join('\n'))).slice(0, 16), lines: ids.length };
 }
 
+// drain and undrain are the old names. drain used to park the fleet; now fleet park does that and
+// fleet drain lets in-flight work finish. undrain still lifts an old drain still in force.
 function cmdDrain() {
-  if (flags.status) return drainStatus();
-  supervisorOnly('drain');
-  const reason = flagStr('reason') ?? 'moving the fleet to another machine';
-  const cur = draining();
-  const sessions = fleetSessions(cur).filter((s) => !cur || lastPhaseOf(s.name)?.to !== 'parked');
-  let act = cur;
-  if (!cur) act = appendLog({ type: 'act', class: 'drain', what: `drained the fleet on ${os.hostname()}: ${reason}`, refs: sessions.map((s) => s.name), reversible: true }, 'supervisor');
-  else out(`already draining since ${cur.created_at} (${cur.id}); messaging the sessions not yet parked again`);
-  for (const s of sessions) sendLine({ to: s.name, kind: 'ruling', text: drainMessage(s, drainReason(act)), from: 'supervisor', ticket: s.role === 'worker' ? s.id : null });
-  out(`${cur ? 'still draining' : `drained (${act.id})`}: ${sessions.length ? `told ${sessions.map((s) => s.name).join(', ')} to push, write a handoff and park` : 'no worker or planner to tell'}; no worker or planner starts until undrain`);
-  out(`next: once every session is parked, write your own handoff, ${projectRel}/${SUPERVISOR_HANDOFF} (what you were in the middle of, what you are waiting on, what you told the owner you would do, and anything from your agent's own memory the next supervisor needs: owner rules belong in knowledge), and land it: chore start drain-handoff, then chore pr drain-handoff and merge --chore drain-handoff`);
-  out('then: drain --status until it says "ready to move" (it lists what is left, and the new machine\'s checklist)');
+  if (flags.status) return fleetStatus();
+  die('drain has split in two (supervisor.md §12): fleet park stops every session with a WIP commit, a push and a handoff note (what drain used to do; use it to move machines), and fleet drain lets in-flight work finish while nothing new starts. Run the one you mean');
 }
-
+function cmdUndrain() {
+  if (!draining()) die('undrain lifts an old fleet drain; for a fleet op use fleet unpark or fleet undrain');
+  return fleetUndo('park');
+}
+const fleetWriter = () => (flags.owner ? ownerWriter().by : (supervisorOnly('fleet'), 'supervisor'));
+const fleetAt = (op) => (op ? `${op.slice(2, 6)}-${op.slice(6, 8)}-${op.slice(8, 10)}T${op.slice(11, 13)}:${op.slice(13, 15)}:${op.slice(15, 17)}.${op.slice(17, 20)}Z` : null);
+// fleet drain | park | undrain | unpark | status
+function cmdFleet() {
+  const sub = positional[0];
+  if (sub === 'status') return fleetStatus();
+  if (sub === 'drain' || sub === 'park') return fleetOp(sub);
+  if (sub === 'undrain') return fleetUndo('drain');
+  if (sub === 'unpark') return fleetUndo('park');
+  // resume: undo whatever fleet ops are in force, park first (a move), then drain.
+  if (sub === 'resume') {
+    const inForce = (m) => holdableGoals().some((g) => g.hold?.fleet && g.hold.mode === m);
+    if (!inForce('park') && !inForce('drain') && !draining()) return out('no fleet park or drain in force; nothing to resume');
+    if (inForce('park') || draining()) { fleetUndo('park'); logCache = null; }
+    if (inForce('drain')) fleetUndo('drain');
+    return;
+  }
+  die('usage: fleet drain | park [--reason "…"]   |   fleet undrain | unpark | resume   |   fleet status   (add --owner when the owner runs it)');
+}
+// Set every goal's hold at once (Upkeep included), recording what each was. A fleet drain touches
+// only running goals and a fleet park only goals not already parked, so undoing it puts back
+// exactly what it changed.
+function fleetOp(mode) {
+  const by = fleetWriter();
+  const reason = flagStr('reason') ?? (mode === 'park' ? 'moving the fleet to another machine' : 'finishing in-flight work, starting none');
+  const op = newFleetId();
+  const host = os.hostname();
+  const changed = [];
+  for (const g of holdableGoals()) {
+    const m = goalMode(g);
+    if (mode === 'drain' ? m !== 'run' : m === 'park') continue;
+    const cur = g.hold ?? { mode: 'run' };
+    const prior = { mode: cur.mode, ...(cur.reason ? { reason: cur.reason } : {}), ...(cur.fleet ? { fleet: cur.fleet } : {}) };
+    writeHold(g, { mode, reason, fleet: op, host, prior }, by);
+    changed.push(isUpkeep(g) ? 'upkeep' : g.id);
+  }
+  if (!changed.length) return out(`every goal is already ${mode === 'park' ? 'parked' : 'draining or parked'}; nothing to do`);
+  if (by === 'supervisor') appendLog({ type: 'act', class: `fleet-${mode}`, what: `${mode === 'park' ? 'parked' : 'drained'} the fleet on ${host} (${op}): ${reason}`, refs: changed.filter((x) => x !== 'upkeep'), reversible: true }, 'supervisor');
+  out(`${mode === 'park' ? 'parked' : 'draining'} the fleet (${op}): ${changed.length} goal(s) set to ${mode}, Upkeep included; nothing new starts until fleet un${mode}`);
+  if (mode === 'park') {
+    if (by === 'supervisor') {
+      const sent = sendParkRulings();
+      out(sent.length ? `told ${sent.join(', ')} to commit, push, write a handoff and park` : 'no running worker or planner to tell');
+      out("next: once every session is parked, write your own handoff (what you were in the middle of, what you are waiting on, what you told the owner you would do, and anything from your agent's own memory the next supervisor needs: owner rules belong in knowledge) and push it: devteam.mjs handoff --supervisor, the note on stdin");
+    } else nudgeSupervisor(`[devteam fleet park ${op} from owner] send the park rulings (goal park-sessions --all), write your handoff and land it, then fleet status`);
+  } else {
+    out('in-flight work carries on and merges; fleet status says "ready to move" once nothing is running');
+    if (by !== 'supervisor') nudgeSupervisor(`[devteam fleet drain ${op} from owner] start nothing new; let in-flight work finish and merge`);
+  }
+  out('then: fleet status until it says "ready to move" if you are moving machines (it lists what is left, and the new machine\'s checklist)');
+}
 // Everything the move needs, checked, then the new machine's checklist. Writes nothing.
-function drainStatus() {
+// A whole fleet parked or drained can move: parked sessions carry their work in git with a handoff
+// note, and a drained fleet has nothing in flight at all.
+function fleetStatus() {
   const s = loadSettings();
-  const d = draining();
+  const legacy = draining();
+  const fm = legacy ? 'park' : fleetMode();
+  const op = fleetOpInForce();
+  const since = legacy ? legacy.created_at : op ? fleetAt(op.fleet) : null;
+  const d = fm ? { id: legacy?.id ?? op?.fleet ?? 'holds', created_at: since } : null;
   if (!flags['no-fetch'] && commonDir) git(['fetch', '--quiet', 'origin']);
   mainRefCache = undefined;
   const main = mainRef();
   const blockers = [];
   const warnings = [];
-  if (!d) blockers.push('the fleet is not drained: run drain first');
+  if (!fm) blockers.push(`the fleet is neither parked nor drained (${holdableGoals().filter((g) => goalMode(g) === 'run').map((g) => (isUpkeep(g) ? 'Upkeep' : `"${g.title}"`)).join(', ')} still running): run fleet park or fleet drain first`);
 
-  const sessions = fleetSessions(d).map((x) => {
+  const sessions = liveSessions().map((x) => {
     const phase = lastPhaseOf(x.name);
+    const cause = phase?.to === 'parked' ? parkCauseAt(x.name, phase.created_at) : null;
     const local = resolveCommit(`refs/heads/${x.branch}`);
     const remote = resolveCommit(`refs/remotes/origin/${x.branch}`);
     const dirty = fs.existsSync(x.wt) ? (git(['status', '--porcelain'], x.wt) ?? '').split('\n').filter(Boolean) : [];
-    const handoffAt = remote && git(['cat-file', '-e', `${remote}:${x.handoff}`]) !== null ? git(['log', '-1', '--format=%cI', remote, '--', x.handoff]) : null;
+    const hc = remote ? handoffCommit(`refs/remotes/origin/${x.branch}`, x.name) : null;
+    const handoffAt = hc ? hc.at : remote && git(['cat-file', '-e', `${remote}:${x.handoff}`]) !== null ? git(['log', '-1', '--format=%cI', remote, '--', x.handoff]) : null;
     const r = {
       name: x.name, role: x.role, branch: x.branch,
       parked: phase?.to === 'parked', phase: phase?.to ?? null,
       pushed: !!remote && (!local || local === remote), local, remote,
       clean: !dirty.length, uncommitted: dirty.slice(0, 20),
-      handoff: !!handoffAt && (!d || Date.parse(handoffAt) >= Date.parse(d.created_at) - 60000), handoff_path: x.handoff, handoff_at: handoffAt,
+      handoff: !!handoffAt && (!cause || Date.parse(handoffAt) >= Date.parse(cause.at) - 60000), handoff_path: x.handoff, handoff_at: handoffAt,
     };
     r.problems = [
-      !r.parked && `not parked (phase ${r.phase ?? 'none'})`,
+      !r.parked && (fm === 'drain' ? `still running (phase ${r.phase ?? 'none'}): a drain finishes in-flight work; wait for it to merge, or fleet park to stop it now` : `not parked (phase ${r.phase ?? 'none'})`),
       !remote ? `${x.branch} is not on origin: push it` : !r.pushed && `${x.branch} here (${local.slice(0, 12)}) is not what origin has (${remote.slice(0, 12)}): push it`,
       !r.clean && `${dirty.length} uncommitted change(s) in its worktree`,
-      !r.handoff && (handoffAt ? 'its handoff note on origin is older than the drain' : `no ${x.handoff} on origin/${x.branch}`),
+      r.parked && !r.handoff && (handoffAt ? 'its handoff on origin is older than the park that stopped it' : `no handoff commit on origin/${x.branch} (devteam.mjs handoff in its worktree)`),
     ].filter(Boolean);
     for (const p of r.problems) blockers.push(`${x.name}: ${p}`);
     return r;
@@ -5288,9 +5776,9 @@ function drainStatus() {
 
   // The supervisor's handoff, on main, written since the drain; and nothing the agents keep outside
   // the repo changed after it (what the next supervisor needs from it is folded into the handoff).
-  const sh0 = supervisorHandoffOnMain();
-  const handoffOk = !!sh0 && !!d && Date.parse(sh0.at) >= Date.parse(d.created_at) - 60000;
-  if (d && !handoffOk) blockers.push(`${sh0 ? `${projectRel}/${SUPERVISOR_HANDOFF} on ${s.main_branch} is older than the drain` : `no ${projectRel}/${SUPERVISOR_HANDOFF} on ${s.main_branch}`}: write the supervisor's handoff and land it (chore start drain-handoff, chore pr drain-handoff, merge --chore drain-handoff)`);
+  const sh0 = d ? supervisorHandoff(d.created_at ?? null) : null;
+  const handoffOk = !!sh0;
+  if (d && !handoffOk) blockers.push(`no supervisor handoff since the fleet ${fm}: write it and push it (devteam.mjs handoff --supervisor, the note on stdin)`);
   const memory = harnessMemoryFiles();
   const newer = handoffOk ? memory.filter((m) => m.mtime > Date.parse(sh0.at)) : [];
   if (newer.length) blockers.push(`agent memory outside the repo changed after the supervisor's handoff landed (${newer.map((m) => path.basename(m.path)).join(', ')}): fold what the next session needs into knowledge or the handoff, and land it again`);
@@ -5333,11 +5821,11 @@ function drainStatus() {
   const checklist = moveChecklist(s, memory);
   const ready = !blockers.length;
   const parity = ready ? parityPrint() : null;
-  const r = { parity, supervisor_handoff: sh0 ? { at: sh0.at, current: handoffOk } : null, draining: d ? { id: d.id, at: d.created_at, host: drainHost(d), reason: drainReason(d) } : null, sessions, log: { landed: !unlanded.length, unlanded, left_behind: leftBehind }, spend: { unobserved: spendOthers, supervisor_usd: supUsd }, reviews: { uncommitted, drafts }, open_prs: prs ?? [], open_questions: openQs, blockers, warnings, ready, checklist };
+  const r = { parity, supervisor_handoff: sh0 ? { at: sh0.at, current: handoffOk } : null, fleet: fm ? { mode: fm, op: op?.fleet ?? legacy?.id ?? null, at: since, host: legacy ? drainHost(legacy) : op?.host ?? null, reason: legacy ? drainReason(legacy) : op?.reason ?? null } : null, sessions, log: { landed: !unlanded.length, unlanded, left_behind: leftBehind }, spend: { unobserved: spendOthers, supervisor_usd: supUsd }, reviews: { uncommitted, drafts }, open_prs: prs ?? [], open_questions: openQs, blockers, warnings, ready, checklist };
   if (flags.json) return json(r);
-  out(d ? `draining since ${d.created_at} (${d.id}${drainHost(d) ? `, on ${drainHost(d)}` : ''}): ${drainReason(d)}` : 'not draining');
+  out(fm ? `${fm === 'park' ? 'parked' : 'draining'}${since ? ` since ${since}` : ''} (${r.fleet.op ?? 'every goal held one by one'}${r.fleet.host ? `, on ${r.fleet.host}` : ''})${r.fleet.reason ? `: ${r.fleet.reason}` : ''}` : 'neither parked nor drained');
   out(`\nsessions:${sessions.length ? '' : ' none'}`);
-  for (const x of sessions) out(`  ${x.name.padEnd(28)} ${x.parked ? 'parked' : `NOT PARKED (${x.phase ?? '-'})`}  ${x.pushed ? 'pushed' : 'NOT PUSHED'}  ${x.clean ? 'clean' : 'UNCOMMITTED'}  ${x.handoff ? 'handoff' : 'NO HANDOFF'}`);
+  for (const x of sessions) out(`  ${x.name.padEnd(28)} ${x.parked ? 'parked' : fm === 'drain' ? `STILL RUNNING (${x.phase ?? '-'})` : `NOT PARKED (${x.phase ?? '-'})`}  ${x.pushed ? 'pushed' : 'NOT PUSHED'}  ${x.clean ? 'clean' : 'UNCOMMITTED'}  ${x.handoff ? 'handoff' : 'NO HANDOFF'}`);
   out(`\nlog: ${unlanded.length ? `not landed (${unlanded.map((u) => u.file).join(', ')}): run log-sync, then merge --chore log` : `on ${s.main_branch}`}${leftBehind ? " (the log's own merge act stays behind; git keeps the merge)" : ''}`);
   out(`spend: ${spendOthers.length ? `not yet observed for ${spendOthers.map((x) => `${x.who} $${x.usd}`).join(', ')}` : 'observed up to now'}${supUsd ? `; the supervisor's own $${supUsd} since its last observe-spend` : ''}`);
   out(`review results: ${uncommitted.length ? uncommitted.map((u) => `${u.id} not committed to ${u.ref}`).join('; ') : 'all in their PRs'}${drafts.length ? `; drafts that won't move: ${drafts.join(', ')}` : ''}`);
@@ -5346,7 +5834,7 @@ function drainStatus() {
   if (blockers.length) { out('\nleft to do:'); for (const b of blockers) out(`  - ${b}`); }
   if (warnings.length) { out('\nwarnings:'); for (const w of warnings) out(`  - ${w}`); }
   out(`\nready to move: ${ready ? 'yes' : 'no'}`);
-  if (parity) out(`parity: ${parity.hash} (${parity.lines} log entries). undrain on the new machine prints its own; they match when the move is 1:1. Stop now: anything you log from here on stays on this machine.`);
+  if (parity) out(`parity: ${parity.hash} (${parity.lines} log entries). fleet un${fm} on the new machine prints its own before it writes anything; they match when the move is 1:1. Stop now: anything you log from here on stays on this machine.`);
   out('\nnew-machine checklist:');
   checklist.forEach((c, i) => out(`  ${i + 1}. ${c}`));
 }
@@ -5376,19 +5864,21 @@ function moveChecklist(s, memory = []) {
     ...(commands.size ? [`log in to the commands that take posted secrets: ${[...commands].join(', ')}`] : []),
     ...(s.forge === 'git' ? ['copy run/pr/ from the old checkout (forge git keeps the PR text there)'] : []),
     ...(memory.length ? [`your agent's own memory for this project (${memory.length} file(s) under ${path.dirname(path.dirname(memory[0].path))}) isn't in the repo; the supervisor folded what the next session needs into knowledge and its handoff, so nothing to copy`] : []),
-    `start the supervisor inside tmux exactly as the README's step 9 does: DEVTEAM_ROLE=supervisor ${agent} "$(node docs/devteam/scripts/devteam.mjs prompt supervisor)"; its prompt sees the drain`,
-    'the supervisor runs undrain (it rebuilds run/log from the landed log) and restarts each drained session with the command it prints',
+    `start the supervisor inside tmux exactly as the README's step 9 does: DEVTEAM_ROLE=supervisor ${agent} "$(node docs/devteam/scripts/devteam.mjs prompt supervisor)"; its prompt sees the parked fleet`,
+    'the supervisor runs fleet unpark, or fleet undrain for a drained fleet (it rebuilds run/log from the landed log, prints the parity fingerprint, puts every goal back as it was) and restarts each parked session with the command it prints',
     'in the browser you use there: turn on "Notify me of new Inbox items" again (a browser setting)',
     `restart the dashboard where it outlives the session: tmux new-window -d -t ${s.tmux_session} -n dashboard 'node docs/devteam/scripts/devteam.mjs dashboard' (or another terminal), then open http://127.0.0.1:${s.dashboard_port}`,
   ];
 }
 
-// undrain: on any machine, after cloning. Rebuild run/log from the landed log if it is empty,
-// record the undrain, and say how to restart each drained session.
-function cmdUndrain() {
-  supervisorOnly('undrain');
-  if (!commonDir || !projectInRepo) die('undrain needs a git checkout with the project folder inside it');
-  if (repoRoot !== mainRoot) die(`run undrain from the main checkout (${mainRoot})`);
+// fleet undrain | unpark: on any machine (after cloning, for a move). Rebuild run/log from the
+// landed log if it is empty, take the parity fingerprint before writing anything, put back each
+// goal the fleet op changed (and the owner hasn't changed since), and say how to restart the
+// sessions that may run again. An old drain act still in force is lifted by unpark.
+function fleetUndo(mode) {
+  const by = fleetWriter();
+  if (!commonDir || !projectInRepo) die(`fleet un${mode} needs a git checkout with the project folder inside it`);
+  if (repoRoot !== mainRoot) die(`run it from the main checkout (${mainRoot})`);
   git(['fetch', '--quiet', 'origin']);
   mainRefCache = undefined;
   const live = liveLogDir();
@@ -5400,36 +5890,53 @@ function cmdUndrain() {
     logCache = null;
     out(`run/log was empty: rebuilt ${files.length} file(s) from ${projectRel}/log on ${main}`);
   }
-  const d = draining();
-  if (!d) die('the fleet is not drained (no drain act without a later undrain in the log). If it was drained on another machine, land its log there first: log-sync, then merge --chore log');
+  const legacy = mode === 'park' ? draining() : null;
+  const held = holdableGoals().filter((g) => g.hold?.fleet && g.hold.mode === mode);
+  const op = held.map((g) => g.hold.fleet).sort().pop() ?? null;
+  const oneByOne = !op && !legacy && fleetMode() === mode;
+  if (!op && !legacy && !oneByOne) die(`no fleet ${mode} is in force (no goal holds a fleet op's ${mode}). If the fleet was ${mode === 'park' ? 'parked' : 'drained'} on another machine, land its log there first: log-sync, then merge --chore log`);
+  if (oneByOne) out(`every goal was ${mode === 'park' ? 'parked' : 'drained'} one by one, not by a fleet op: nothing to put back here; set each goal with its toggle (goal hold <id> run)`);
+  if (legacy && by !== 'supervisor') die('an old drain is in force; the supervisor lifts it (fleet unpark, as the supervisor)');
   const parity = parityPrint();
-  const act = appendLog({ type: 'act', class: 'undrain', what: `undrained the fleet on ${os.hostname()} (drained by ${d.id}${drainHost(d) ? ` on ${drainHost(d)}` : ''})`, refs: [d.id], reversible: true }, 'supervisor');
-  out(`undrained (${act.id}); workers and planners can start again`);
-  const windows = new Set((sh('tmux', ['list-windows', '-t', loadSettings().tmux_session, '-F', '#W']) ?? '').split('\n').filter(Boolean));
-  const rows = fleetSessions(d).filter((x) => (d.refs ?? []).includes(x.name)).map((x) => {
-    const cmd = `${x.role} ${x.id}${windows.has(x.name) && fs.existsSync(x.wt) ? ' --resume' : ''}`;
-    const ph = lastPhaseOf(x.name)?.to;
-    return `  devteam.mjs ${cmd.padEnd(36)} ${ph === 'parked' ? 'parked' : `phase ${ph ?? '-'}`}; ${handoffFor(x.name) ? 'its handoff note goes into its prompt' : 'no current handoff note'}`;
-  });
-  out(rows.length ? `restart the drained sessions, as the supervisor:\n${rows.join('\n')}` : 'no drained session to restart');
+  const host = os.hostname();
+  const restored = [];
+  for (const g of held.filter((x) => x.hold.fleet === op)) {
+    const p = g.hold.prior ?? { mode: 'run' };
+    writeHold(g, { mode: p.mode, ...(p.reason ? { reason: p.reason } : {}), ...(p.fleet ? { fleet: p.fleet } : {}), undoes: op, host }, by);
+    restored.push(`${isUpkeep(g) ? 'Upkeep' : g.title} → ${p.mode}`);
+  }
+  if (legacy) appendLog({ type: 'act', class: 'undrain', what: `undrained the fleet on ${host} (drained by ${legacy.id}${drainHost(legacy) ? ` on ${drainHost(legacy)}` : ''})`, refs: [legacy.id], reversible: true }, 'supervisor');
+  if (op && by === 'supervisor') appendLog({ type: 'act', class: `fleet-un${mode}`, what: `un${mode === 'park' ? 'parked' : 'drained'} the fleet on ${host} (${op})`, refs: held.filter((x) => x.hold.fleet === op && !isUpkeep(x)).map((x) => x.id), reversible: true }, 'supervisor');
+  logCache = null;
+  out(`un${mode === 'park' ? 'parked' : 'drained'} the fleet${op ? ` (${op})` : ''}${legacy ? `, and lifted the old drain ${legacy.id}` : ''}: ${restored.length ? restored.join('; ') : 'no goal to put back'}`);
+  const rows = restartCommands().map((x) => `  devteam.mjs ${x.cmd.padEnd(36)} ${x.handoff ? 'its handoff note goes into its prompt' : 'no current handoff note'}`);
+  out(rows.length ? `restart the parked sessions that may run again, as the supervisor:\n${rows.join('\n')}` : 'no parked session to restart');
+  const stillParked = liveSessions().filter((x) => lastPhaseOf(x.name)?.to === 'parked' && ['park', 'let-go'].includes(sessionMode(x.name))).map((x) => x.name);
+  if (stillParked.length) out(`still parked, because their goal is: ${stillParked.join(', ')}`);
   out('then make sure the dashboard is running (supervisor.md §11)');
-  out(`parity: ${parity.hash} (${parity.lines} log entries): the drained machine's drain --status printed the same when the move is 1:1`);
-  const sh0 = supervisorHandoffOnMain();
-  if (sh0 && Date.parse(sh0.at) >= Date.parse(d.created_at) - 60000) out(`\n## Handoff from the drained supervisor (${sh0.rel}, ${sh0.at})\n\n${sh0.text.trimEnd()}\n\nRead it before anything else; it stays in the repo as the record.`);
-  else out(`\nno supervisor handoff from this drain on main (${projectRel}/${SUPERVISOR_HANDOFF})`);
+  out(`parity: ${parity.hash} (${parity.lines} log entries), taken before this wrote anything: fleet status printed the same on the old machine when the move is 1:1`);
+  const at = op ? fleetAt(op) : legacy?.created_at;
+  const sh0 = at || oneByOne ? supervisorHandoff(at ?? null) : null;
+  if (sh0) out(`\n## Handoff from the previous supervisor (${sh0.rel}, ${sh0.at})\n\n${sh0.text.trimEnd()}\n\nRead it before anything else; it stays in the repo as the record.`);
+  else if (mode === 'park') out('\nno supervisor handoff from this park (no devteam-handoff tag on origin since it)');
 }
 
-// The supervisor's prompt while the fleet is drained: what to do first.
+// The supervisor's prompt while the fleet is parked or draining: what to do first.
 function drainedPreface() {
-  const d = draining();
-  if (!d) return null;
+  const legacy = draining();
+  const fm = fleetMode();
+  if (!legacy && !fm) return null;
+  const op = fleetOpInForce();
+  const host = legacy ? drainHost(legacy) : op?.host ?? null;
+  const what = legacy ? `drained by an old drain (${legacy.id}, ${legacy.created_at}: ${drainReason(legacy)})` : `${fm === 'park' ? 'parked' : 'draining'}${op ? ` (${op.fleet}${op.reason ? `: ${op.reason}` : ''})` : ' (every goal is held)'}`;
+  if (fm === 'drain' && !legacy) return `The fleet is ${what}${host ? `, set on ${host}` : ''}: every goal is draining, so in-flight work finishes and merges and nothing new starts. Carry on with what is running; fleet status says "ready to move" once nothing is. fleet undrain lifts it.`;
   // A checkout with no live log is a fresh clone; hostnames repeat (a default laptop name), so a
   // matching one counts only where run/log is still there.
   const liveHere = fs.existsSync(liveLogDir()) && fs.readdirSync(liveLogDir()).some((f) => f.endsWith('.jsonl'));
-  const here = liveHere && (!drainHost(d) || drainHost(d) === os.hostname());
-  return `The fleet is drained (${d.id}, ${d.created_at}${drainHost(d) ? `, on ${drainHost(d)}` : ''}: ${drainReason(d)}). ${here
-    ? 'This is the machine it was drained on. If the move is under way, carry on with it (supervisor.md, Moving the fleet): node docs/devteam/scripts/devteam.mjs drain --status until it says "ready to move", landing the log with log-sync and merge --chore log; start nothing. Run undrain here only if the owner says to resume on this machine.'
-    : 'This looks like the machine it moved to. Before anything else: (1) DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs undrain (it rebuilds run/log from the landed log, records the undrain, and prints the restart command for each drained session); (2) run each of those commands; (3) make sure the dashboard is running (supervisor.md §11) and tell the owner its address; then carry on from supervisor.md §1.'}`;
+  const here = liveHere && (!host || host === os.hostname());
+  return `The fleet is ${what}${host ? `, on ${host}` : ''}. ${here
+    ? 'This is the machine it was parked on. If a move is under way, carry on with it (supervisor.md §12): node docs/devteam/scripts/devteam.mjs fleet status until it says "ready to move", landing the log with log-sync and merge --chore log; start nothing. Run fleet unpark here only if the owner says to resume on this machine.'
+    : 'This looks like the machine it moved to. Before anything else: (1) DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs fleet unpark (it rebuilds run/log from the landed log, prints the parity fingerprint, puts every goal back as it was and prints the restart command for each parked session); (2) run each of those commands; (3) make sure the dashboard is running (supervisor.md §11) and tell the owner its address; then carry on from supervisor.md §1.'}`;
 }
 
 // wait [--minutes n]: block between ticks until something needs the supervisor, then say what.
@@ -5647,13 +6154,18 @@ const HELP = `devteam <command>   (positionals before flags; flags take the word
 Setup and roles
   init [--name n] [--upstream-base vX] [--github]   project folders, settings, .gitignore, the devteam section of AGENTS.md
   prompt supervisor | worker <id> | planner <feature>    the prompt a session starts with
-  worker <ticket-id> [--resume] [--force] | planner <feature> [--resume] [--force] [--id-block <n>]   supervisor: a worktree, a tmux window and an agent for a ticket or a feature plan (a new planner reserves n ticket numbers, default 20); refused while the fleet drains unless --force (logged); --resume where no session exists starts fresh with the handoff note
+  worker <ticket-id> [--resume] [--force] | planner <feature> [--goal <g-id>] [--resume] [--force] [--id-block <n>]   supervisor: a worktree, a tmux window and an agent for a ticket or a feature plan (a new planner names its goal and reserves n ticket numbers, default 20); refused while its goal is parked or let go, or draining for a session that hasn't run, unless --force (logged); --resume where no session exists starts fresh with the handoff note
   whoami | settings [--get key]
 
-Moving the fleet (supervisor.md, Moving the fleet)
-  drain [--reason r]                 supervisor: log a drain act, tell every worker and planner to push, write a handoff and park; no session starts until undrain
-  drain --status [--json] [--no-fetch]   per session parked, pushed, clean, handoff on origin; the log landed, spend observed, review results committed; ready to move yes/no, and the new machine's checklist
-  undrain                            supervisor, on any machine after cloning: rebuild an empty run/log from the landed log, log an undrain act, print each drained session's restart command
+Holds and the fleet (planning.md §1, holds; supervisor.md §12)
+  goal hold <g-id|upkeep> run|drain|park [--reason r] [--owner]   a goal's toggle: drain starts nothing new and lets in-flight work finish; park stops its sessions (WIP commit, push, handoff). The supervisor drains a running goal (with --reason) and releases only its own drain
+  goal park-sessions <g-id|upkeep> | --all [--again]   supervisor: send the park ruling to the sessions a park or let go holds, once per cause
+  goal decide <g-id> let-go | restore [--notes n]   owner: let a goal go (its sessions park, its questions leave the inbox), or bring it back, parked
+  fleet drain | park [--reason r] [--owner]   every goal at once (Upkeep included): drain sets running goals to drain, park sets every goal not parked to park; each records what it replaced
+  fleet undrain | unpark | resume [--owner]   put back every goal the fleet op changed (and nobody changed since); resume does whichever are in force; on a new machine it first rebuilds an empty run/log from the landed log and prints the parity fingerprint before writing
+  handoff [--file f] [--supervisor]   a parked worker or planner: the note (stdin) as an empty "devteam handoff: <name>" commit on its branch, pushed; the supervisor: an annotated devteam-handoff/<op> tag on origin
+  fleet status [--json] [--no-fetch]   ready to move? per session parked (or, drained, nothing running), pushed, clean, handoff on origin; the log landed, spend observed, review results committed; the new machine's checklist
+  drain --status | undrain           the old names: drain --status is fleet status; undrain lifts an old drain still in force (drain itself now asks for fleet park or fleet drain)
 
 The graph (planning.md)
   feature add|set|show <slug> --json '{…}' | --file f    a feature: goals, preconditions, stories with releases, design
@@ -5700,7 +6212,7 @@ Observe and orient
   problem [--all] | problem add --title t --severity n [--risk] [--threatens g…] | problem set <id> …
 
 Goals and retros
-  goal [list|check|show|forecast|add|set|decide|approve|status|reading] …
+  goal [list|check|show|forecast|add|set|decide|approve|status|reading|hold|park-sessions] …
   goal set <g-id> --approved <qid> …   supervisor: apply an answered goal-change question to a goal past draft (one set per answer)
   retro [--due | --print | close <date> --summary s --refs ids]
   chore start <slug> | chore pr <slug> --title t    a supervisor-written file (design, retro, architecture) and its PR
@@ -5721,7 +6233,7 @@ const COMMANDS = {
   observe: cmdObserve, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, knowledge: cmdKnowledge, problem: cmdProblem,
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
   log: cmdLog, 'log-check': cmdLogCheck, 'log-sync': cmdLogSync, history: cmdHistory,
-  drain: cmdDrain, undrain: cmdUndrain, wait: cmdWait,
+  drain: cmdDrain, undrain: cmdUndrain, fleet: cmdFleet, handoff: cmdHandoff, wait: cmdWait,
   dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes,
 };
 if (!command || command === 'help' || command === '--help') out(HELP);
