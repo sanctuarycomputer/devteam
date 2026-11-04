@@ -2380,7 +2380,12 @@ test('fleet park: every session stops with a handoff, and a clone elsewhere pick
     // the worker does what the ruling says: commit, park without a handoff first (not ready), then the handoff
     g(['add', '-A'], ww);
     g(['commit', '-qm', 'WIP: park'], ww);
-    assert.match(run(ww, ['handoff'], WRK, '').err, /the note is empty/);
+    // a branch that forked before a kit upgrade carries an older script: the main checkout's runs
+    const wtScript = path.join(ww, 'docs/devteam/scripts/devteam.mjs');
+    fs.writeFileSync(wtScript, fs.readFileSync(wtScript, 'utf8').replace('handoff: cmdHandoff, ', ''));
+    assert.match(run(ww, ['handoff'], { ...WRK, DEVTEAM_OWN_KIT: '1' }, '').err, /unknown command "handoff"/, 'the stale copy lacks the command');
+    assert.match(run(ww, ['handoff'], WRK, '').err, /the note is empty/, 'the main checkout\'s kit ran');
+    g(['checkout', '--', 'docs/devteam/scripts/devteam.mjs'], ww);
     ok(ww, ['phase', 'parked', '--note', 'parked'], WRK);
     st = json(ok(old, ['fleet', 'status', '--json'], SUP));
     assert.deepEqual(st.sessions.map((x) => [x.parked, x.pushed, x.clean, x.handoff]), [[true, false, true, false]]);
@@ -2433,7 +2438,16 @@ test('fleet park: every session stops with a handoff, and a clone elsewhere pick
     for (const [k, v] of [['user.email', 't@t'], ['user.name', 't']]) g(['config', k, v], neu);
     assert.ok(!fs.existsSync(path.join(neu, 'docs/devteam/run/log')));
     assert.match(ok(neu, ['prompt', 'supervisor']), /^The fleet is parked .*This looks like the machine it moved to\. Before anything else: \(1\) DEVTEAM_ROLE=supervisor node docs\/devteam\/scripts\/devteam\.mjs fleet unpark/, 'the standard prompt sees the parked fleet, and that this is a fresh clone');
-    const up = ok(neu, ['fleet', 'resume'], SUP);
+    // a pinned tool this machine's asdf hasn't installed is named before anything restarts
+    const fakeBin = path.join(base, 'bin');
+    write(path.join(fakeBin, 'asdf'), '#!/bin/sh\n[ "$1" = --version ] && exit 0\n[ "$1" = where ] && [ "$3" = 9.9.9 ] && exit 1\nexit 0\n');
+    fs.chmodSync(path.join(fakeBin, 'asdf'), 0o755);
+    write(path.join(neu, '.tool-versions'), 'nodejs 18.20.4\nruby 9.9.9 # pinned\n');
+    const PINS = { PATH: `${fakeBin}${path.delimiter}${process.env.PATH}` };
+    assert.match(ok(neu, ['prompt', 'supervisor'], PINS), /Before anything else: \(0\) this machine lacks the tools \.tool-versions pins \(ruby 9\.9\.9\): run asdf install/);
+    const up = ok(neu, ['fleet', 'resume'], { ...SUP, ...PINS });
+    assert.match(up, /before restarting anything: this machine lacks the tools \.tool-versions pins \(ruby 9\.9\.9\)/);
+    fs.rmSync(path.join(neu, '.tool-versions'));
     assert.match(up, /run\/log was empty: rebuilt \d+ file\(s\)/);
     assert.equal(/parity: ([0-9a-f]{16})/.exec(up)?.[1], oldParity, 'the new machine holds exactly the log the old one did');
     assert.match(up, /## Handoff from the previous supervisor[\s\S]*Next: restart ch-01-tidy\./);

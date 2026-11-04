@@ -28,6 +28,23 @@ if (Number(process.versions.node.split('.')[0]) < 18) {
   process.exit(1);
 }
 
+// A worktree's branch carries the kit as it was when the branch forked, but every session writes the
+// one live log and answers to the rules on main, so in a project the main checkout's copy runs: a
+// worker on an old branch otherwise gets old commands (an "unknown command" for one the docs name)
+// and folds the log by old rules. Only where the main checkout holds a project (not the kit's own
+// repo, whose worktrees are where the kit is changed); DEVTEAM_OWN_KIT=1 runs this copy anyway.
+{
+  const self = fileURLToPath(import.meta.url);
+  let common = null;
+  try { common = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: path.dirname(self), encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch {}
+  const kitMain = common && path.join(path.dirname(common), 'docs', 'devteam');
+  const mainScript = kitMain && path.join(kitMain, 'scripts', 'devteam.mjs');
+  if (mainScript && !process.env.DEVTEAM_OWN_KIT && path.resolve(mainScript) !== path.resolve(self) && fs.existsSync(path.join(kitMain, 'project')) && fs.existsSync(mainScript) && fs.readFileSync(mainScript, 'utf8') !== fs.readFileSync(self, 'utf8')) {
+    const r = spawnSync(process.execPath, [mainScript, ...process.argv.slice(2)], { stdio: 'inherit' });
+    process.exit(r.status ?? 1);
+  }
+}
+
 // Object.groupBy is Node 21+.
 const groupBy = (xs, key) => { const o = {}; for (const x of xs) (o[key(x)] ??= []).push(x); return o; };
 
@@ -137,8 +154,12 @@ const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = git(['rev-parse', '--show-toplevel']) ?? process.cwd();
-// The kit of the checkout you are in (a worktree has its own copy), whichever copy of this script ran.
+// The kit folder of the checkout you are in (a worktree has its own copy): its project/ is the
+// branch's tickets and plans. Its rules are not read from here (kitDir, below).
 const devteamDir = fs.existsSync(path.join(repoRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs')) ? path.join(repoRoot, 'docs', 'devteam') : path.resolve(here, '..');
+// The rules (schema, constitution) and the dashboard come from the kit that is running: in a
+// project that is the main checkout's (the re-exec above), so every session folds by the same rules.
+const kitDir = path.resolve(here, '..');
 const commonDir = git(['rev-parse', '--path-format=absolute', '--git-common-dir']);
 const mainRoot = commonDir ? path.dirname(commonDir) : repoRoot;
 const projectDir = path.resolve(flagStr('project') ?? process.env.DEVTEAM_PROJECT ?? path.join(devteamDir, 'project'));
@@ -259,7 +280,7 @@ function loadSettings() {
 let ladderCache;
 function ladder() {
   if (ladderCache) return ladderCache;
-  const m = readText(path.join(devteamDir, 'governance', 'constitution.md'))?.match(/```json devteam\s*\n([\s\S]*?)\n```/);
+  const m = readText(path.join(kitDir, 'governance', 'constitution.md'))?.match(/```json devteam\s*\n([\s\S]*?)\n```/);
   let a = { classes: {}, constitutional: [], owner_only: [], reasons: [], promotion: {} };
   if (m) {
     try {
@@ -279,7 +300,7 @@ const RUNG = { 1: 'ask', 2: 'ask with a default', 3: 'act and report' };
 
 // ===== 3. the schema and the log =====
 
-const SCHEMA = readJson(path.join(devteamDir, 'schema', 'log.schema.json'));
+const SCHEMA = readJson(path.join(kitDir, 'schema', 'log.schema.json'));
 const ENVELOPE = ['v', 'id', 'type', 'op', 'at', 'by', 'channel'];
 const LINE_MAX = 4096;
 const TYPES = Object.keys(SCHEMA.$defs.types);
@@ -2065,6 +2086,17 @@ function checkPr({ headRef, sha, title, body, forge = false }) {
 // A gate run for a ticket's merge knows which ticket it checks (DEVTEAM_GATE_TICKET), so validate
 // can fail it only for what is its own (D4 below).
 const gateEnv = (ticket) => { const cache = path.join(runDir, 'cache'); fs.mkdirSync(cache, { recursive: true }); return { ...process.env, DEVTEAM_MAIN: mainRoot, DEVTEAM_CACHE: cache, ...(ticket ? { DEVTEAM_GATE_TICKET: ticket } : {}) }; };
+// The tools .tool-versions pins that this machine's asdf or mise hasn't installed. On a new machine
+// worktree_setup otherwise fails under whatever runtime the system has, which reads as a project bug.
+// Empty when there is no .tool-versions or neither manager is here (there is nothing to ask).
+function missingPins() {
+  const pins = (readText(path.join(mainRoot, '.tool-versions')) ?? '').split('\n').map((l) => l.replace(/#.*/, '').trim().split(/\s+/)).filter((p) => p[0] && p[1] && !['system', 'latest'].includes(p[1]));
+  const has = (bin) => spawnSync(bin, ['--version'], { stdio: 'ignore', timeout: 10000 }).status === 0;
+  const where = has('asdf') ? (t, v) => ['asdf', ['where', t, v]] : has('mise') ? (t, v) => ['mise', ['where', `${t}@${v}`]] : null;
+  if (!where) return [];
+  return pins.filter(([t, v]) => spawnSync(...where(t, v), { cwd: mainRoot, stdio: 'ignore', timeout: 20000 }).status !== 0).map(([t, v]) => `${t} ${v}`);
+}
+const pinsHint = (miss = missingPins()) => (miss.length ? `this machine lacks the tools .tool-versions pins (${miss.join(', ')}): run asdf install (or mise install) in ${mainRoot}, then try again` : null);
 function seedWorktree(wt, { setup = true } = {}) {
   const s = loadSettings();
   for (const rel of s.worktree_files ?? []) {
@@ -2077,7 +2109,8 @@ function seedWorktree(wt, { setup = true } = {}) {
     try {
       execFileSync('sh', ['-c', s.worktree_setup], { cwd: wt, stdio: ['ignore', 'inherit', 'inherit'], env: gateEnv() });
     } catch {
-      die(`worktree_setup failed in ${wt}`);
+      const hint = pinsHint();
+      die(`worktree_setup failed in ${wt}${hint ? `; ${hint}` : ''}`);
     }
   }
 }
@@ -5162,7 +5195,7 @@ function cmdDashboard() {
   process.on('uncaughtException', (e) => { log(`crashed: ${e?.stack ?? e}`); process.stderr.write(`devteam dashboard crashed: ${e?.stack ?? e}\n`); process.exit(1); });
   process.on('unhandledRejection', (e) => { log(`crashed (unhandled rejection): ${e?.stack ?? e}`); process.stderr.write(`devteam dashboard crashed: ${e?.stack ?? e}\n`); process.exit(1); });
   for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(sig, () => { log(`stopped by ${sig}`); process.exit(0); });
-  const page = path.join(devteamDir, 'dashboard', 'index.html');
+  const page = path.join(kitDir, 'dashboard', 'index.html');
   const self = fileURLToPath(import.meta.url);
   const ownerEnv = { ...process.env, DEVTEAM_CHANNEL: 'dashboard' };
   delete ownerEnv.DEVTEAM_ROLE;
@@ -5273,7 +5306,7 @@ function cmdDashboard() {
       if (seg !== 'preview' && !ID.test(seg)) return send(res, 404, 'text/plain', 'not found');
       if (file === 'devteam-ui.css' || file === 'devteam-ui.js') {
         res.writeHead(200, { 'content-type': file.endsWith('.css') ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
-        return res.end(fs.readFileSync(path.join(devteamDir, 'dashboard', file)));
+        return res.end(fs.readFileSync(path.join(kitDir, 'dashboard', file)));
       }
       if (file !== '') return send(res, 404, 'text/plain', 'not found');
       // Opened top-level it would be same-origin with the owner API; it is served only into a frame
@@ -6168,6 +6201,8 @@ function fleetUndo(mode) {
   logCache = null;
   out(`un${mode === 'park' ? 'parked' : 'drained'} the fleet${op ? ` (${op})` : ''}${legacy ? `, and lifted the old drain ${legacy.id}` : ''}: ${restored.length ? restored.join('; ') : 'no goal to put back'}`);
   const rows = restartCommands().map((x) => `  devteam.mjs ${x.cmd.padEnd(36)} ${x.handoff ? 'its handoff note goes into its prompt' : 'no current handoff note'}`);
+  const hint = rows.length ? pinsHint() : null;
+  if (hint) out(`before restarting anything: ${hint}`);
   out(rows.length ? `restart the parked sessions that may run again, as the supervisor:\n${rows.join('\n')}` : 'no parked session to restart');
   const stillParked = liveSessions().filter((x) => lastPhaseOf(x.name)?.to === 'parked' && ['park', 'let-go'].includes(sessionMode(x.name))).map((x) => x.name);
   if (stillParked.length) out(`still parked, because their goal is: ${stillParked.join(', ')}`);
@@ -6194,7 +6229,7 @@ function drainedPreface() {
   const here = liveHere && (!host || host === os.hostname());
   return `The fleet is ${what}${host ? `, on ${host}` : ''}. ${here
     ? 'This is the machine it was parked on. If a move is under way, carry on with it (supervisor.md §12): node docs/devteam/scripts/devteam.mjs fleet status until it says "ready to move", landing the log with log-sync and merge --chore log; start nothing. Run fleet unpark here only if the owner says to resume on this machine.'
-    : 'This looks like the machine it moved to. Before anything else: (1) DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs fleet unpark (it rebuilds run/log from the landed log, prints the parity fingerprint, puts every goal back as it was and prints the restart command for each parked session); (2) run each of those commands; (3) make sure the dashboard is running (supervisor.md §11) and tell the owner its address; then carry on from supervisor.md §1.'}`;
+    : `This looks like the machine it moved to. Before anything else: ${(() => { const h = pinsHint(); return h ? `(0) ${h}; ` : ''; })()}(1) DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs fleet unpark (it rebuilds run/log from the landed log, prints the parity fingerprint, puts every goal back as it was and prints the restart command for each parked session); (2) run each of those commands; (3) make sure the dashboard is running (supervisor.md §11) and tell the owner its address; then carry on from supervisor.md §1.`}`;
 }
 
 // wait [--minutes n]: block between ticks until something needs the supervisor, then say what.
