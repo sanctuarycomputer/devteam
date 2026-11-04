@@ -2518,6 +2518,52 @@ test('the registry and component lines are validated; labels-only components and
   } finally { F.done(); }
 });
 
+test('owner settings per entry: repo-link fields have classes, url links are the supervisor\'s, and repo links count as on main', () => {
+  const F = monoFixture('owner-entries');
+  const { old, ok, run, g, edit } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const body = path.join(F.base, 'body.md');
+  write(body, '## One-way doors\n\nNone.\n');
+  try {
+    const repoLink = { kind: 'repo', title: 'Console', remote: 'usbclub/console' };
+    edit((j) => { j.links = { console: repoLink, figma: { kind: 'url', title: 'Designs', url: 'https://figma.test/a' } }; });
+    g(['commit', '-qam', 'links'], old);
+    g(['push', '-q', 'origin', 'main'], old);
+    const chore = (slug, fn) => {
+      const w = path.join(old, '.worktrees', `chore-${slug}`);
+      g(['worktree', 'add', '-q', '-b', `chore-${slug}`, w, 'origin/main'], old);
+      edit(fn, w);
+      g(['commit', '-qam', slug], w);
+      g(['push', '-q', 'origin', `chore-${slug}`], w);
+      write(path.join(old, `docs/devteam/run/pr/chore-${slug}.md`), `# chore-${slug}: x\n\n## One-way doors\n\nNone.\n`);
+      const r = run(old, ['merge', '--chore', slug, '--dry-run'], SUP);
+      g(['worktree', 'remove', '--force', w], old);
+      return r.out + r.err;
+    };
+    assert.doesNotMatch(chore('figma', (j) => { j.links.figma.title = 'All designs'; j.links.figma.for = ['all']; }), /owner settings/, 'url-link edits are the supervisor\'s');
+    assert.match(chore('gates', (j) => { j.links.console.gates = { test: 'npm test' }; }), /changes owner settings: links\.console\.gates \(gate-change\)/);
+    assert.match(chore('remote', (j) => { j.links.console.remote = 'usbclub/console2'; }), /links\.console\.remote \(governance-edit\)/);
+    assert.match(chore('add', (j) => { j.links.companion = { kind: 'repo', title: 'C', remote: 'usbclub/companion' }; }), /links\.companion \(governance-edit\)/);
+    assert.match(chore('flip', (j) => { j.links.console = { kind: 'url', title: 'C', url: 'https://c.test' }; }), /links\.console \(governance-edit\)/, 'a repo→url flip is a repo removal');
+    assert.doesNotMatch(chore('path', (j) => { j.links.console.path = '../elsewhere'; }), /owner settings/, 'where the checkout is is never the owner\'s');
+    // M2: working-tree flips and removals are ignored; repo links count as on main
+    const settings = () => json(ok(old, ['settings']));
+    edit((j) => { j.links.console = { kind: 'url', title: 'flip', url: 'https://c.test' }; j.links.added = { kind: 'repo', title: 'A', remote: 'usbclub/added' }; j.links.figma.notes = 'working tree'; j.links.fresh = { kind: 'url', title: 'Fresh', url: 'https://fresh.test' }; });
+    const s1 = run(old, ['settings']);
+    assert.deepEqual(json(s1.out).links.console, repoLink, 'a url flip of a repo link on main is ignored');
+    assert.equal(json(s1.out).links.added, undefined, 'a repo link not on main is dropped');
+    assert.equal(json(s1.out).links.figma.notes, 'working tree', 'url links come from the working tree');
+    assert.equal(json(s1.out).links.fresh.title, 'Fresh');
+    assert.match(s1.err, /settings\.md here changes links\.added, links\.console; owner settings apply as they are on/);
+    edit((j) => { delete j.links.console; });
+    assert.deepEqual(settings().links.console, repoLink, 'a working-tree removal of a repo link is ignored');
+    g(['checkout', '-q', '--', 'docs/devteam/project/settings.md'], old);
+    edit((j) => { j.links.figma = { kind: 'repo', title: 'F', remote: 'usbclub/figma' }; });
+    assert.equal(settings().links.figma.kind, 'url', 'a url→repo flip in the working tree is ignored');
+    g(['checkout', '-q', '--', 'docs/devteam/project/settings.md'], old);
+  } finally { F.done(); }
+});
+
 test('fleet park: every session stops with a handoff, and a clone elsewhere picks it up with parity', () => {
   const F = fleetFixture('park');
   const { org, old, neu, home, env, run, ok, g, base } = F;

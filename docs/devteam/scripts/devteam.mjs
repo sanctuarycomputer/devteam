@@ -251,10 +251,28 @@ function settingsAt(ref) {
   try { return { ...SETTINGS_DEFAULTS, ...JSON.parse(m[1]) }; } catch { return null; }
 }
 // The owner's settings a commit changes against a base: [{ key, cls }], or null if unreadable.
+// Whole keys as before, then the links registry entry by entry (§3.4).
 function ownerSettingsChanged(base, head) {
   const a = settingsAt(base), b = settingsAt(head);
   if (!a || !b) return null;
-  return Object.entries(OWNER_SETTINGS).filter(([k]) => canonical(a[k]) !== canonical(b[k])).map(([key, cls]) => ({ key, cls }));
+  return [...Object.entries(OWNER_SETTINGS).filter(([k]) => canonical(a[k]) !== canonical(b[k])).map(([key, cls]) => ({ key, cls })), ...linkOwnerChanges(a.links, b.links)];
+}
+// A link is classified by both sides: an owner's kind (LINK_KINDS[k].ownedByOwner: repo) on
+// either side makes every change to it the owner's; an add, a removal or a kind flip is
+// governance-edit on the whole entry; a field change takes that kind's ownerClass(field).
+const ownersKind = (l) => !!l && !!LINK_KINDS[l.kind]?.ownedByOwner;
+function linkOwnerChanges(a = {}, b = {}) {
+  const out = [];
+  for (const id of [...new Set([...Object.keys(a ?? {}), ...Object.keys(b ?? {})])].sort()) {
+    const x = a?.[id], y = b?.[id];
+    if (!ownersKind(x) && !ownersKind(y)) continue;
+    if (!x || !y || x.kind !== y.kind) { out.push({ key: `links.${id}`, cls: 'governance-edit' }); continue; }
+    for (const f of [...new Set([...Object.keys(x), ...Object.keys(y)])].sort()) {
+      const cls = canonical(x[f]) === canonical(y[f]) ? null : LINK_KINDS[x.kind].ownerClass(f);
+      if (cls) out.push({ key: `links.${id}.${f}`, cls });
+    }
+  }
+  return out;
 }
 let settingsCache;
 function loadSettings() {
@@ -279,10 +297,29 @@ function loadSettings() {
     if (onMain) {
       const local = Object.keys(OWNER_SETTINGS).filter((k) => canonical(settingsCache[k]) !== canonical(onMain[k]));
       for (const k of local) settingsCache[k] = onMain[k];
+      const pinned = pinOwnedLinks(settingsCache.links, onMain.links);
+      settingsCache.links = pinned.links;
+      local.push(...pinned.changed);
       if (local.length && !process.env.DEVTEAM_QUIET_SETTINGS) { process.env.DEVTEAM_QUIET_SETTINGS = '1'; warn(`settings.md here changes ${local.join(', ')}; owner settings apply as they are on ${ref} until a PR with the owner's answer lands them`); }
     }
   }
   return settingsCache;
+}
+
+// Links of an owner's kind (repo) count as main has them, verbatim: a working-tree edit, removal
+// or kind flip of one is ignored, and a working-tree one main lacks is dropped. The supervisor's
+// kinds (url) come from the working tree, so a new one reaches the next prompt before it lands (§3.4).
+function pinOwnedLinks(local = {}, main = {}) {
+  const links = {};
+  const changed = [];
+  for (const id of [...new Set([...Object.keys(main ?? {}), ...Object.keys(local ?? {})])].sort()) {
+    const m = main?.[id], l = local?.[id];
+    if (ownersKind(m) || ownersKind(l)) {
+      if (m) links[id] = m;
+      if (canonical(m) !== canonical(l)) changed.push(`links.${id}`);
+    } else if (l) links[id] = l;
+  }
+  return { links, changed };
 }
 
 // ===== 2b. links and component lines (the registry) =====
