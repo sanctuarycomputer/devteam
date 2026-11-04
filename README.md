@@ -44,10 +44,10 @@ docs/devteam/
 1. Read the repo's own rules first: `CONTRIBUTING`, any AI or agent policy, `AGENTS.md`/`CLAUDE.md`, CI config. If they forbid autonomous agents (some projects do), stop and tell the owner: devteam can still run on a private fork, but nothing goes upstream without a human writing it. Everything they require goes into the settings in step 3.
 2. Copy `docs/devteam/` from the newest release tag of this repo (not `main`), except `project/` and `run/`.
 3. `node docs/devteam/scripts/devteam.mjs init --upstream-base <tag> [--github]`. It creates `project/`, the `.gitignore` entries and the devteam section of `AGENTS.md` (and an `@AGENTS.md` import in `CLAUDE.md` where one exists, since Claude Code reads only that); `--github` writes a one-job workflow that makes GitHub require `check-pr` on every PR (the supervisor's `merge` runs the same checks and the gates itself; this only makes the forge refuse a merge that skipped them).
-4. Fill `project/settings.md` (`init` sets `main_branch` from the remote's default branch): components and stacks, `agent_command`, the `gates` map (name → command) the supervisor runs before every merge, `worktree_files`, the gitignored files a fresh worktree needs to boot (a Rails `config/master.key`, a `.env`), and `worktree_setup`, the command that makes it runnable (`npm ci`), both applied to every worker, planner and gate checkout, and `forge: "git"` if the remote has no `gh`. Record anything the repo already does differently from `governance/` (a release branch, its own CI) in the settings; the settings win. Infer what you can from the repo; ask the owner the rest in one batch.
+4. Fill `project/settings.md` (`init` sets `main_branch` from the remote's default branch): the registry: sibling repos as `repo` links and design files and docs (Figma, specs, Notion) as `url` links, inferred from git remotes, links in the README and docs, and package manifests; the component lines (`components.<c>.owns`) once there is more than one deployable part; and the stacks, `agent_command`, the `gates` map (name → command) the supervisor runs before every merge, `worktree_files`, the gitignored files a fresh worktree needs to boot (a Rails `config/master.key`, a `.env`), and `worktree_setup`, the command that makes it runnable (`npm ci`), both applied to every worker, planner and gate checkout, and `forge: "git"` if the remote has no `gh`. Record anything the repo already does differently from `governance/` (a release branch, its own CI) in the settings; the settings win. Infer what you can from the repo; ask the owner the rest in one batch.
 5. Run `devteam.mjs gate --all` on `main`. Every gate that fails there is a toolchain to fix, a gate to set to `"mode": "ratchet"`, or a chore ticket.
 6. Existing codebase: write `project/designs/architecture.md` from the code (components, contracts, persistence, dependencies, distance from the code rules, hotspots, tests, work in flight). New repo: leave the headings.
-7. **Propose the Baseline goal.** Draft the repo's first goal, **Baseline**: every gate in `quality.md` §2 and every Law in `code-style.md` enforced on main (lint, format, types, tests in CI, coverage, dead code, duplication, secrets, lockfile, and an encrypted secret store per `code-style.md` §10 if the repo has none), measured as the floor gaps left, target 0 (`process/planning.md` §7). The owner opts in through the regular flow; once approved, its features are the floor tickets, and gates that fail on existing code go on in **ratchet** mode (`quality.md` §2).
+7. **Propose the Baseline goal.** Draft the repo's first goal, **Baseline**: every gate in `quality.md` §2 and every Law in `code-style.md` enforced on main (lint, format, types, tests in CI, coverage, dead code, duplication, secrets, lockfile, and an encrypted secret store per `code-style.md` §10 if the repo has none), measured as the floor gaps left, target 0 (`process/planning.md` §7). One of its preconditions is **the registry is complete**: `devteam.mjs components check --count` is 0 (counted with the gates), and the owner has said yes to "Does the registry list every repo, design file and doc this project depends on?". The owner opts in through the regular flow; once approved, its features are the floor tickets, and gates that fail on existing code go on in **ratchet** mode (`quality.md` §2).
 8. Commit the kit, settings and architecture doc as one `chore-devteam-bootstrap` PR, then `devteam.mjs log-sync` for the Baseline goal draft.
 9. Start the supervisor. It is the owner's foreground session in the main checkout, never a background, headless or tmux-detached one. **If an agent session did this setup, that session becomes the supervisor:** it reads the prompt from `node docs/devteam/scripts/devteam.mjs prompt supervisor` and follows it in place; it does not launch a second agent. If the owner did the setup by hand, they start the agent in their terminal with `DEVTEAM_ROLE=supervisor` in its environment (`DEVTEAM_ROLE=supervisor claude "$(node docs/devteam/scripts/devteam.mjs prompt supervisor)"`), inside tmux if they want workers' messages typed into its pane as they happen. Agent CLIs such as Claude Code don't keep shell state between commands, so an `export` inside the session doesn't stick: a session already running prefixes each devteam command with `DEVTEAM_ROLE=supervisor`. Run the dashboard where it outlives the session (a tmux window, or another terminal): `node docs/devteam/scripts/devteam.mjs dashboard`, and open the address.
 10. The supervisor asks the owner for goals and the loop begins. To tell a session something from your own terminal as yourself, `node docs/devteam/scripts/devteam.mjs send <supervisor|ticket-id> "…" --owner`; answers to questions go through the inbox.
@@ -89,6 +89,38 @@ That is step 9's start, unchanged: the supervisor's prompt sees the parked fleet
 ```
 tmux new-window -d -n dashboard 'node docs/devteam/scripts/devteam.mjs dashboard'
 ```
+
+### Links, components and other repos
+
+Three shapes, from nothing to add upward.
+
+**A single repo.** Nothing to add. `components` may stay `{}` or hold labels a project wrote for itself (`{"api": {"stack": "rails"}}`); labels draw no lines.
+
+**A monorepo.** Give each deployable part a line: `components.<c>.owns`, the globs of the files it owns. Once any component carries `owns` (or `link`, `shared` or `release`), every tracked file belongs to exactly one line; the kit's own files (`docs/devteam/**` and the project folder) are the computed `devteam` line and are never declared. Lines must not overlap:
+
+```json
+"components": {
+  "api": { "owns": ["app/**", "lib/**", "config/*.yml", "config/initializers/**"] },
+  "routes": { "owns": ["config/routes.rb"] },
+  "web": { "owns": ["web/**"] },
+  "ops": { "owns": [".github/**", "README.md", ".gitignore", "AGENTS.md"] }
+}
+```
+
+`devteam.mjs components check` lists the gaps: unowned paths grouped by folder with a suggested owner, paths two lines claim, globs that match nothing, and paths that differ only by case. From then on `validate`, `check-pr` and `merge`, `observe-metrics` and `check-ticket` hold the lines, always by the settings committed on main. A ticket changes one component's line; a contract or integration ticket names the others it spans in `touches_components`.
+
+**Links to design files and docs.** `links` names what the fleet uses:
+
+```json
+"links": {
+  "figma": { "kind": "url", "title": "Companion designs", "url": "https://www.figma.com/file/…", "for": ["component:web"], "notes": "ignore the archived page" },
+  "runbook": { "kind": "url", "title": "Runbook", "url": "https://www.notion.so/…", "for": ["all"] }
+}
+```
+
+A link whose `for` matches a ticket (`all`, `component:<c>`, `feature:<f>`, `goal:<g>`), or that the ticket or its feature lists in its own `links`, is in that worker's prompt. Url links are the supervisor's: the loop proposes them when the owner or a worker mentions one (`observe-link`, then `orient`), and the supervisor applies them with `link add|set|rm`. `"check": false` keeps a page behind a login from being probed. `devteam.mjs links` prints the registry.
+
+Sibling repos are `repo` links (`{ "kind": "repo", "title": "Console", "remote": "owner/console" }`, with an optional `path` and per-repo settings). They are accepted and validated now, and are the owner's like the settings they carry; they host components and tickets from the next release.
 
 ## Upgrading a project
 

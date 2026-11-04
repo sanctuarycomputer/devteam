@@ -14,7 +14,7 @@ A ticket may merge only when all of these hold at the PR's exact head. `devteam.
 6. The PR title is `<ticket-id>: <one line a user could read>`; the branch is `ticket/<ticket-id>`.
 7. Every ruling and owner answer the worker received is in the spec's or plan's Rulings section.
 8. No new bare lint suppression; every suppression is `doctrine-exception(<rule-id>): <reason>` (`code-style.md` §16).
-9. Every changed file is inside the ticket's `touches` or its own `project/tickets/<id>/` folder.
+9. Every changed file is inside the ticket's `touches`, and, once components draw lines, inside its component's line or a `touches_components` member's; or in its own `project/tickets/<id>/` folder.
 10. The PR body's `## One-way doors` section is `None.` or links the owner's answer (a `q-…` id); it can't say `None.` when the ticket lists one.
 
 Points 2, 3, 4, 6, 9 and 10 are mechanical. Points 1, 7 and 8 are the final reviewer's. Point 5 is the gates.
@@ -38,6 +38,8 @@ Every project, day one:
 | lockfile | install not frozen, or a dependency younger than the cooldown | `L-SEC-6`, `-8` |
 | escape-hatch | a bare suppression comment | `L-ESC-1` |
 | devteam | `devteam.mjs validate` fails | |
+
+**Component lines (invariant C).** Once `settings.components` draws lines, every tracked file in home belongs to exactly one component's `owns`, the kit's own files (`docs/devteam/**`, the project folder) to the computed `devteam` line. `validate` checks main; `check-pr` and `merge` check the tree that would land (the merge on forge `git`) and refuse what a PR adds outside every line; `observe-metrics` raises `unowned-files` and starts no new ticket until a chore extends a line; `check-ticket` refuses a file outside the ticket's line. All four read committed settings. A gap on main also blocks plan PRs: their `validate --strict` reports it as an error, so the chore that extends a line lands first.
 
 Add accessibility and lab performance once there is a UI, evals with thresholds once there is an AI feature.
 
@@ -103,7 +105,7 @@ merge --chore <slug>       a chore PR (log, retro, design, architecture): the lo
 
 `--dry-run` runs every check and gate and stops before the merge.
 
-Any of the three that changes a setting the owner owns needs `--approved <qid>`, an answered question of that class: `gates`, `worktree_setup` and `worktree_files` (`gate-change`: they decide what a gate run sees); `autonomy_ceilings`, `agent_command`, `resume_command`, `worker_denied_commands`, `forge`, `main_branch`, `merge_method`, `upstream_repo`, `release` and `secret_commands` (`governance-edit`). The rest of `project/settings.md` (caps, timings, components) is the supervisor's.
+Any of the three that changes a setting the owner owns needs `--approved <qid>`, an answered question of that class: `gates`, `worktree_setup` and `worktree_files` (`gate-change`: they decide what a gate run sees); `autonomy_ceilings`, `agent_command`, `resume_command`, `worker_denied_commands`, `forge`, `main_branch`, `merge_method`, `upstream_repo`, `release` and `secret_commands` (`governance-edit`); and, per entry, `links`: adding, removing or re-kinding a `repo` link, or changing its `remote`, `main_branch`, `forge`, `merge_method`, `release`, `project`, `title`, `notes`, `for` or `source` is `governance-edit`; its `gates`, `worktree_setup`, `worktree_files` or `ignored_checks` is `gate-change`; its `path` and anything on a `url` link are not the owner's (url links are the supervisor's, by `registry-edit` acts). The rest of `project/settings.md` (caps, timings, components) is the supervisor's.
 
 With no forge CLI (no `gh`, a self-hosted git remote), set `forge: "git"`. the PR is a file, `run/pr/<branch>.md` (a `# <title>` line, then the body; or `--title` and `--body-file`). `merge` checks it as it would a PR, merges the exact verified sha onto origin's main with `--no-ff`, and pushes. If main moved, the push fails, which is the same guard as `--match-head-commit`.
 
