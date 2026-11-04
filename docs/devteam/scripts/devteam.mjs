@@ -454,8 +454,38 @@ const devteamLine = () => [...(kitRel && !kitRel.startsWith('..') ? [`${kitRel}/
 // The kit's own repo has no lines: everything in it is the kit (§4, open issue 5).
 const kitsOwnRepo = () => { const o = git(['config', '--get', 'remote.origin.url']); return !!o && remoteKey(o) === remoteKey(loadSettings().upstream_repo ?? ''); };
 
-const SCOPE_HELP = { for: 'all, project, component:<c>, feature:<f>, goal:<g> or link:<id>' };
-const scopeValid = (sc) => /^(all|project|(component|feature|goal|link):[a-z0-9-]+)$/.test(String(sc));
+// One scope grammar (spec §7.1) for knowledge scopes and link `for` scopes: <kind> or <kind>:<id>.
+// all and project mean the whole project, and both stay accepted. A later scope kind is one entry.
+const SCOPES = {
+  all: () => true,
+  project: () => true,
+  component: (v, c) => c.component === v,
+  feature: (v, c) => c.feature === v,
+  goal: (v, c) => (c.goals ?? []).includes(v),
+  class: (v, c) => c.class === v,
+  chore: (v, c) => c.chore === v,
+  link: (v, c) => (c.links ?? []).includes(v),
+};
+const SCOPE_WHERE = { for: ['all', 'project', 'component', 'feature', 'goal', 'link'], knowledge: ['all', 'project', 'component', 'feature', 'class', 'chore', 'link'] };
+const SCOPE_HELP = Object.fromEntries(Object.entries(SCOPE_WHERE).map(([w, ks]) => [w, ks.map((k) => (['all', 'project'].includes(k) ? k : `${k}:<id>`)).join(', ')]));
+function scopeParts(scope) {
+  const m = /^([a-z]+)(?::([a-z0-9][a-z0-9-]*))?$/.exec(String(scope ?? ''));
+  return m && SCOPES[m[1]] && (['all', 'project'].includes(m[1]) ? !m[2] : !!m[2]) ? { kind: m[1], value: m[2] } : null;
+}
+const scopeValid = (scope, where = 'for') => { const p = scopeParts(scope); return !!p && SCOPE_WHERE[where].includes(p.kind); };
+const scopeMatches = (scope, ctx) => { const p = scopeParts(scope); return !!p && SCOPES[p.kind](p.value, ctx ?? {}); };
+// What a prompt is about, for both grammars: a ticket's component, feature, goals and links; a
+// feature's; or a class. links: the registry ids its Links block lists, plus the component's repo
+// link, so a link:<id> lesson reaches every prompt whose links or component include it.
+function scopeContext(target) {
+  const t = tickets().get(target);
+  const f = t ? features().get(t.feature) : features().get(target);
+  const ctx = t ? { component: t.component, feature: t.feature, goals: f?.goals ?? [] } : f ? { feature: target, goals: f.goals ?? [] } : target ? { class: target } : {};
+  const reg = loadSettings().links ?? {};
+  const own = [...(t?.links ?? []), ...(f?.links ?? [])];
+  const shown = Object.keys(reg).filter((id) => own.includes(id) || asList(reg[id].for).some((sc) => scopeMatches(sc, ctx)));
+  return { ...ctx, shown, links: [...new Set([...shown, ...(t ? [componentLink(t.component)] : [])])] };
+}
 // Every problem with the registry and the lines, worded for validate. Shape only: coverage of a
 // tree is coverage()'s, and runs on committed settings (§4). Per-kind checks are LINK_KINDS[k].validate.
 function registryProblems(s) {
@@ -4253,14 +4283,10 @@ function cmdObserveMetrics() {
   const s = observeSpend();
   out(`recorded ${s} spend line(s) and ${observeFindings(collectMetrics(0))} new observation(s)`);
 }
-// Accepted knowledge whose scope applies to a ticket (component, feature), a feature, or a class.
+// Accepted knowledge whose scope applies to a ticket, a feature, or a class (spec §7.1).
 function knowledgeFor(target) {
-  const t = tickets().get(target);
-  const scopes = new Set(['project']);
-  if (t) { scopes.add(`component:${t.component}`); scopes.add(`feature:${t.feature}`); }
-  else if (features().has(target)) scopes.add(`feature:${target}`);
-  else if (target) scopes.add(`class:${target}`);
-  return logObjects('knowledge').filter((k) => k.status === 'accepted' && scopes.has(k.scope));
+  const ctx = scopeContext(target);
+  return logObjects('knowledge').filter((k) => k.status === 'accepted' && scopeMatches(k.scope, ctx));
 }
 // The block a prompt ends with: what applies to this ticket or feature.
 const knowledgeBlock = (target) => {

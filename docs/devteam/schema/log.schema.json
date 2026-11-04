@@ -843,9 +843,9 @@
             "type": "string"
           },
           "scope": {
-            "description": "Where it applies: the whole project, a component, a feature, a kind of decision or a chore.",
+            "description": "Where it applies: the whole project, a component, a feature, a kind of decision, a chore, or a link (link:<id>: wherever that link is in the prompt).",
             "type": "string",
-            "pattern": "^(project|component:[a-z0-9-]+|feature:[a-z0-9-]+|class:[a-z0-9-]+|chore:[a-z0-9-]+)$"
+            "pattern": "^(all|project|component:[a-z0-9-]+|feature:[a-z0-9-]+|class:[a-z0-9-]+|chore:[a-z0-9-]+|link:[a-z0-9-]+)$"
           },
           "status": {
             "description": "candidate until you keep it; accepted ones go into the instructions of every agent they apply to; stale or retired ones no longer do.",

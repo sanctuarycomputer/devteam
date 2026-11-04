@@ -2853,6 +2853,27 @@ test('unowned files on main: a severity-4 finding, and no new ticket starts ther
   } finally { F.done(); }
 });
 
+test('one scope grammar: knowledge scopes unchanged, link: scopes reach prompts whose links include them', () => {
+  const F = monoFixture('scopes');
+  const { old, ok, run, lines, edit, g } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  try {
+    lines(F.STD);
+    ok(old, ['ticket', 'add', 'web-01-a', '--json', JSON.stringify({ title: 'a', feature: 'chores', component: 'web', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['web/**'], done_when: ['the web suite passes'], notes: 'n' })], SUP);
+    const K = (scope, statement) => ok(old, ['knowledge', 'add', '--kind', 'fact', '--statement', statement, '--scope', scope, '--owner']);
+    K('project', 'p-all'); K('component:web', 'c-web'); K('component:api', 'c-api'); K('feature:chores', 'f-chores'); K('class:merge-word', 'cls');
+    K('link:figma', 'l-figma');
+    const k = ok(old, ['knowledge', '--for', 'web-01-a']);
+    for (const s of ['p-all', 'c-web', 'f-chores']) assert.match(k, new RegExp(s));
+    for (const s of ['c-api', 'cls', 'l-figma']) assert.doesNotMatch(k, new RegExp(s));
+    assert.match(ok(old, ['knowledge', '--for', 'merge-word']), /cls/);
+    edit((j) => { j.links = { figma: { kind: 'url', title: 'Designs', url: 'https://figma.test/a', for: ['component:web'] } }; });
+    assert.match(ok(old, ['knowledge', '--for', 'web-01-a']), /l-figma/, 'a link: lesson reaches a prompt whose links include it');
+    assert.match(run(old, ['knowledge', 'add', '--kind', 'fact', '--statement', 'x', '--scope', 'goal:g-1', '--owner']).err, /scope/, 'knowledge takes no goal: scope');
+    g(['checkout', '-q', '--', 'docs/devteam/project/settings.md'], old);
+  } finally { F.done(); }
+});
+
 test('fleet park: every session stops with a handoff, and a clone elsewhere picks it up with parity', () => {
   const F = fleetFixture('park');
   const { org, old, neu, home, env, run, ok, g, base } = F;
