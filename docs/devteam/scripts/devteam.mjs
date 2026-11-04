@@ -2436,11 +2436,42 @@ function cmdCheckTicket() {
 }
 
 
+// The tree a PR would put on main (§4, point 2): its head on github, where merge refuses a head
+// that is behind; on forge git, merge lands it onto a main that may have moved, so it is the
+// merge of the two (open issue 8).
+function landingTree(sha, R = homeFacts) {
+  const main = R.mainRef();
+  if (R.settings.forge !== 'git' || !main) return { tree: sha };
+  const tree = R.mergeTree(main, sha);
+  return tree ? { tree } : { problem: `${sha.slice(0, 12)} does not merge cleanly onto ${main}; merge main into the branch and ask again` };
+}
+// Coverage problems in the landing tree that main doesn't already have: a path added outside every
+// line, renamed out of one, or left behind by a narrowed glob (open issue 7). Only once lines are declared.
+function coverageFails(base, sha, R = homeFacts) {
+  const main = R.mainRef();
+  if (!main || !projectInRepo) return [];
+  const land = landingTree(sha, R);
+  if (land.problem) return [land.problem];
+  const sIn = settingsInForce(base, sha, R);
+  const sLand = sIn.__fromHead ? (settingsAt(land.tree, { orNull: true }) ?? sIn) : sIn;
+  const now = coverageAt(land.tree, sLand, R);
+  if (!now) return [];
+  // main's own state, under main's committed settings (home's main: settings live in home)
+  const sMain = (mainRef() ? settingsAt(mainRef(), { orNull: true }) : null) ?? sIn;
+  const before = coverageAt(main, sMain, R) ?? { unowned: [], contested: [], empty: [], case_collisions: [] };
+  const was = new Set([...before.unowned.map((p) => `u${p}`), ...before.contested.map(([p, o]) => `c${p}\0${o}`), ...before.empty.map((x) => `e${x}`), ...before.case_collisions.map((x) => `k${x}`)]);
+  const fresh = { unowned: now.unowned.filter((p) => !was.has(`u${p}`)), contested: now.contested.filter(([p, o]) => !was.has(`c${p}\0${o}`)), empty: now.empty.filter((x) => !was.has(`e${x}`)), case_collisions: now.case_collisions.filter((x) => !was.has(`k${x}`)), unlinked: [], ref: land.tree };
+  return coverageReport(fresh, sLand, R).map((l) => `components${R.name === 'home' ? '' : ` (${R.name})`}: ${l} (extend a line in a chore PR, or keep the file inside one)`);
+}
 // What the forge's check (optional) and `merge` both check for a PR, by branch kind. Gates are not
 // run here. A chore PR may not touch the log (chore-log touches nothing else) or a ticket's folder.
 function checkPr({ headRef, sha, title, body, forge = false }) {
   const branch = headRef.replace(/^refs\/heads\//, '');
   const fails = [...logRule(branch, sha), ...reviewRule(sha, { forge })];
+  // Every PR, every kind, ticket PRs included (they return on the next line): the tree that would
+  // land keeps every path in exactly one line. A chore or settings PR gets this, never full
+  // validate, so an old graph error can't block a log PR (M10).
+  fails.push(...coverageFails(mainRef() ? git(['merge-base', mainRef(), sha]) : null, sha));
   if (branch.startsWith('ticket/')) return [...fails, ...checkTicket(branch.slice('ticket/'.length), { sha, title, body, approvals: !forge })];
   if (branch.startsWith('plan/')) {
     const feature = branch.slice('plan/'.length);

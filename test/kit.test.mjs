@@ -2678,6 +2678,67 @@ test('the ticket footprint: touches, and the component\'s line, and its own reco
   } finally { F.done(); }
 });
 
+test('check-pr and merge judge the tree that would land, by committed lines (M1, M5, M10)', () => {
+  const F = monoFixture('landing');
+  const { old, ok, run, g, lines, edit } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const body = path.join(F.base, 'body.md');
+  write(body, '## One-way doors\n\nNone.\n');
+  const chore = (slug, fn, { from = 'origin/main' } = {}) => {
+    const w = path.join(old, '.worktrees', `chore-${slug}`);
+    g(['worktree', 'add', '-q', '-b', `chore-${slug}`, w, from], old);
+    fn(w);
+    g(['add', '-A'], w);
+    g(['commit', '-qm', `chore-${slug}: x`], w);
+    g(['push', '-q', 'origin', `chore-${slug}`], w);
+    return { w, sha: g(['rev-parse', 'HEAD'], w) };
+  };
+  const checkPr = (slug, sha) => run(old, ['check-pr', '--head-ref', `chore-${slug}`, '--sha', sha, '--title', `chore-${slug}: x`, '--body-file', body]);
+  try {
+    // M10: before any lines, a chore PR passes check-pr even with a validate error in the graph
+    ok(old, ['ticket', 'add', 'api-01-dangling', '--json', JSON.stringify({ title: 'x', feature: 'chores', component: 'api', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: ['api-99-nope'], touches: ['api/**'], done_when: ['the api suite passes'], notes: 'n' })], SUP);
+    assert.notEqual(run(old, ['validate']).status, 0, 'a pre-existing validate error');
+    const m10 = chore('m10', (w) => write(path.join(w, 'docs/devteam/project/designs/note.md'), '# note\n'));
+    assert.equal(checkPr('m10', m10.sha).status, 0, 'M10: a chore PR never runs full validate');
+    lines(F.STD);
+    const stale = g(['rev-parse', 'origin/main'], old);
+    // a new top-level folder; a rename out of every line; a narrowed glob
+    assert.match(checkPr('top', chore('top', (w) => write(path.join(w, 'scripts/x.sh'), 'x\n')).sha).out, /unowned: scripts\/ \(1\): scripts\/x\.sh/);
+    assert.match(checkPr('mv', chore('mv', (w) => { fs.mkdirSync(path.join(w, 'misc')); g(['mv', 'api/app.rb', 'misc/app.rb'], w); }).sha).out, /unowned: misc\/ \(1\): misc\/app\.rb/);
+    // a ticket PR gets coverage too (checkPr returns early for ticket/ branches): a case collision
+    ok(old, ['ticket', 'add', 'api-02-case', '--json', JSON.stringify({ title: 'x', feature: 'chores', component: 'api', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['api/**'], done_when: ['the api suite passes'], notes: 'n' })], SUP);
+    const tw = path.join(old, '.worktrees', 'api-02-case');
+    g(['worktree', 'add', '-q', '-b', 'ticket/api-02-case', tw, 'origin/main'], old);
+    // through the index, not the disk: on a case-insensitive file system (macOS) api/App.rb is api/app.rb
+    const blob = execFileSync('git', ['hash-object', '-w', '--stdin'], { cwd: tw, input: 'beside app.rb\n', encoding: 'utf8' }).trim();
+    g(['update-index', '--add', '--cacheinfo', `100644,${blob},api/App.rb`], tw);
+    g(['commit', '-qm', 'api-02-case: x'], tw);
+    const tr = run(old, ['check-pr', '--head-ref', 'ticket/api-02-case', '--sha', g(['rev-parse', 'HEAD'], tw), '--title', 'api-02-case: x', '--body-file', body]);
+    assert.match(tr.out, /components: case: api\/App\.rb, api\/app\.rb differ only by case/, 'a ticket PR is checked for coverage');
+    assert.match(checkPr('narrow', chore('narrow', (w) => edit((j) => { j.components.api.owns = ['api/lib/**']; }, w)).sha).out, /unowned: api\/ \(1\): api\/app\.rb/);
+    // a gap already on main is not this PR's: it passes coverage (observe-metrics reports main's)
+    write(path.join(old, 'scripts/pushed.sh'), 'x\n');
+    g(['add', '-A'], old); g(['commit', '-qm', 'bypass'], old); g(['push', '-q', 'origin', 'main'], old);
+    assert.doesNotMatch(checkPr('clean', chore('clean', (w) => write(path.join(w, 'api/new.rb'), 'x\n')).sha).out, /unowned/);
+    g(['rm', '-q', 'scripts/pushed.sh'], old); g(['commit', '-qm', 'tidy'], old); g(['push', '-q', 'origin', 'main'], old);
+    // M5 (forge git): main narrows web and moves its file; a stale branch adds a path under the old line
+    edit((j) => { j.components.web.owns = ['web/src/**', 'web/package.json']; });
+    g(['commit', '-qam', 'narrow web'], old); g(['push', '-q', 'origin', 'main'], old);
+    chore('m5', (w) => write(path.join(w, 'web/extra.js'), 'x\n'), { from: stale });
+    write(path.join(old, 'docs/devteam/run/pr/chore-m5.md'), '# chore-m5: x\n\n## One-way doors\n\nNone.\n');
+    assert.match(run(old, ['merge', '--chore', 'm5', '--dry-run'], SUP).out, /unowned: web\/ \(1\): web\/extra\.js/, 'M5: refused on the merged tree');
+    chore('m5ok', (w) => write(path.join(w, 'api/stale-ok.rb'), 'x\n'), { from: stale });
+    write(path.join(old, 'docs/devteam/run/pr/chore-m5ok.md'), '# chore-m5ok: x\n\n## One-way doors\n\nNone.\n');
+    assert.doesNotMatch(run(old, ['merge', '--chore', 'm5ok', '--dry-run'], SUP).out, /unowned/, 'a stale branch main\'s move leaves clean is not refused');
+    // M1: merge reads committed lines; a working-tree widening has no effect
+    edit((j) => { j.components.ops.owns.push('scripts/**'); });
+    chore('m1', (w) => write(path.join(w, 'scripts/y.sh'), 'x\n'));
+    write(path.join(old, 'docs/devteam/run/pr/chore-m1.md'), '# chore-m1: x\n\n## One-way doors\n\nNone.\n');
+    assert.match(run(old, ['merge', '--chore', 'm1', '--dry-run'], SUP).out, /unowned: scripts\/ \(1\): scripts\/y\.sh/, 'M1');
+    g(['checkout', '-q', '--', 'docs/devteam/project/settings.md'], old);
+  } finally { F.done(); }
+});
+
 test('fleet park: every session stops with a handoff, and a clone elsewhere picks it up with parity', () => {
   const F = fleetFixture('park');
   const { org, old, neu, home, env, run, ok, g, base } = F;
