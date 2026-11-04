@@ -1216,6 +1216,16 @@ test('devteam kit', async (t) => {
     fs.appendFileSync(path.join(repo, 'docs/devteam/run/log', supFile), line({ id: G, type: 'goal', op: 'set', at: new Date(Date.now() + 500).toISOString(), by: 'supervisor', hold: { mode: 'run' } }));
     assert.equal(hold().mode, 'park');
     assert.match(must(['log-check']), /the supervisor releases only a drain it set/);
+    // a forged fleet line can't loosen the owner's park to a drain, and a forged undo puts back only what the op recorded
+    const supPath = path.join(repo, 'docs/devteam/run/log', supFile);
+    const before = fs.readFileSync(supPath, 'utf8');
+    const forge = (hold0, dt0 = 600) => fs.appendFileSync(path.join(repo, 'docs/devteam/run/log', supFile), line({ id: G, type: 'goal', op: 'set', at: new Date(Date.now() + dt0).toISOString(), by: 'supervisor', hold: hold0 }));
+    forge({ mode: 'drain', fleet: 'f-20261101-000000000', prior: { mode: 'park' } }, 700);
+    assert.equal(hold().mode, 'park', 'a fleet drain never loosens a park');
+    assert.match(must(['log-check']), /a fleet drain doesn't change a goal on park/);
+    forge({ mode: 'run', undoes: 'f-20261101-000000000' }, 800);
+    assert.equal(hold().mode, 'park', 'an undo of a fleet op not in force counts for nothing');
+    fs.writeFileSync(supPath, before);
     // the roadmap and the track stand still while parked
     assert.match(must(['roadmap']), /Self-serve billing \[ready, parked\] -> no date while parked/);
     assert.equal(json(must(['goal', 'show', G, '--json'])).track, null);
