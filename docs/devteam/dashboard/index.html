@@ -643,14 +643,17 @@ function forecast(items, now) {
 }
 
 // ---- burn-up chart (hand-built SVG) ----
-function burnup(items, now) {
-  const el = $('burnup');
-  $('legend').hidden = !items.some(isDone);
-  if (!items.length) { el.innerHTML = empty('No tickets yet. The chart starts when the supervisor or a planner adds them.'); $('forecast').textContent = ''; return; }
+// ui: where to draw (the Progress section's chart by default, or a sidepeek's).
+const PROGRESS_CHART = () => ({ el: $('burnup'), legend: $('legend'), tip: $('tip'), card: $('burnup-card'), forecast: $('forecast') });
+function burnup(items, now, ui = PROGRESS_CHART()) {
+  const el = ui.el;
+  const setForecast = (s) => { if (ui.forecast) ui.forecast.textContent = s; };
+  ui.legend.hidden = !items.some(isDone);
+  if (!items.length) { el.innerHTML = empty('No tickets yet. The chart starts when the supervisor or a planner adds them.'); setForecast(''); return; }
   const scopePts = items.reduce((a, t) => a + t.weight, 0);
   if (!items.some(isDone)) {
     el.innerHTML = empty(`Nothing merged yet: ${items.length} ticket${items.length > 1 ? 's' : ''}, ${scopePts} point${scopePts > 1 ? 's' : ''} of scope. The chart and the forecast start at the first merge.`);
-    $('forecast').textContent = `0/${scopePts} pts`;
+    setForecast(`0/${scopePts} pts`);
     return;
   }
   const evs = [];
@@ -693,10 +696,10 @@ function burnup(items, now) {
     svg += `<text x="${Math.min(x(fc.eta), W - R - 4)}" y="${y(fc.scope) - 8}" text-anchor="end" font-size="11" fill="var(--fg)">${fmtDate(fc.eta)}</text>`;
   }
   svg += `<line x1="${x(now)}" x2="${x(now)}" y1="${T}" y2="${H - B}" stroke="var(--muted)" stroke-width="1"/>${fc.eta && !fc.finished && x(fc.eta) - x(now) < 70 ? '' : `<text x="${x(now) + 4}" y="${T + 10}" font-size="10" fill="var(--muted)">today</text>`}`;
-  svg += `<line id="xh" x1="0" x2="0" y1="${T}" y2="${H - B}" stroke="var(--fg)" stroke-width="1" opacity="0"/>`;
-  svg += `<rect id="hit" x="${L}" y="${T}" width="${W - L - R}" height="${H - T - B}" fill="transparent"/></svg>`;
+  svg += `<line class="xh" x1="0" x2="0" y1="${T}" y2="${H - B}" stroke="var(--fg)" stroke-width="1" opacity="0"/>`;
+  svg += `<rect class="hit" x="${L}" y="${T}" width="${W - L - R}" height="${H - T - B}" fill="transparent"/></svg>`;
   el.innerHTML = svg;
-  const svgEl = el.querySelector('svg'), hit = el.querySelector('#hit'), xh = el.querySelector('#xh'), tip = $('tip');
+  const svgEl = el.querySelector('svg'), hit = el.querySelector('.hit'), xh = el.querySelector('.xh'), tip = ui.tip;
   hit.addEventListener('mousemove', (e) => {
     const r = svgEl.getBoundingClientRect();
     const vx = ((e.clientX - r.left) / r.width) * W;
@@ -706,15 +709,15 @@ function burnup(items, now) {
     xh.setAttribute('x1', vx); xh.setAttribute('x2', vx); xh.setAttribute('opacity', '.3');
     tip.style.display = 'block';
     tip.innerHTML = ts > now ? `${fmtDate(ts)}<br><span class="muted">forecast</span>` : `<b>${fmtDate(ts)}</b><br>done ${p[2]} · scope ${p[1]}`;
-    const box = $('burnup-card').getBoundingClientRect();
+    const box = ui.card.getBoundingClientRect();
     tip.style.left = `${Math.min(e.clientX - box.left + 12, box.width - 140)}px`;
     tip.style.top = `${e.clientY - box.top - 10}px`;
   });
   hit.addEventListener('mouseleave', () => { tip.style.display = 'none'; xh.setAttribute('opacity', '0'); });
   const range = fc.best && fc.worst && fc.worst - fc.best > DAY ? ` (range ${fmtDate(fc.best)} – ${fmtDate(fc.worst)})` : '';
-  $('forecast').textContent = fc.finished ? `done: ${fc.done} of ${fc.scope} points` : fc.eta
+  setForecast(fc.finished ? `done: ${fc.done} of ${fc.scope} points` : fc.eta
     ? `${fc.done}/${fc.scope} pts · ETA ${fmtDate(fc.eta)}${range} · ${fc.perDay.toFixed(1)} pts/day`
-    : `${fc.done}/${fc.scope} pts · ETA –`;
+    : `${fc.done}/${fc.scope} pts · ETA –`);
 }
 
 // ---- widgets ----
@@ -834,7 +837,6 @@ const goalOf = (gid) => (DATA?.ooda?.goals || []).find((g) => g.id === gid);
 const milestonesOf = (g) => g?.forecast?.milestones || [];
 const glink = (gid) => { const g = goalOf(gid); return g ? `<a class="linkish" href="#goal/${encodeURIComponent(gid)}">${esc(g.title)}</a>` : `<code>${esc(gid)}</code>`; };
 const mlink = (gid, n, title) => `<a class="linkish" href="#milestone/${encodeURIComponent(`${gid}:${n}`)}">${esc(title ?? milestonesOf(goalOf(gid)).find((m) => m.n === Number(n))?.title ?? `milestone ${n}`)}</a>`;
-const boardLink = (view) => `<a class="linkish" href="#board" data-view="${esc(view)}" data-left="1"><i class="icon-filter" aria-hidden="true"></i> What's left of it on the board</a> · <a class="linkish" href="#progress" data-view="${esc(view)}" data-left="0">its burn-up</a>`;
 // An id in text links to its panel: goals, lessons, acts, problems, messages (threads), observations.
 function idLink(k, id) {
   const href = { g: 'goal', k: 'lesson', a: 'act', d: 'decision', p: 'problem', m: 'thread' }[k];
@@ -2015,26 +2017,36 @@ function openGoal(id) {
     ${goalSteps(g, s, R)}
     ${s.next ? `<p class="goal-next measure">${s.next}</p>` : ''}
     ${holdControl(g.id, g.hold_view, { status: g.status })}
-    ${feats.length ? `<p>${boardLink(`goal:${g.id}`)}</p>` : ''}`);
+    ${feats.length ? `<h3>Progress</h3>${progressBlock(filterTickets(DATA.progress, `goal:${g.id}`))}` : ''}`);
+  if (feats.length) drawPeekChart(filterTickets(DATA.progress, `goal:${g.id}`));
 }
 // ---- panels for the rest: sets of tickets (feature, story, release, wave, milestone) and log
 // objects (act, lesson, problem, message thread). A set shows its progress, its forecast and its
 // tickets by column, with a link that filters the board and the burn-up to it.
-function openTicketSet({ kind, id, title, sub, computed = [], items, view, attr = {} }) {
-  DRAWER = { kind, id };
+// A set's progress in a sidepeek: its meter and forecast, its burn-up, then its tickets as the board.
+function progressBlock(items) {
   const now = Date.parse(DATA.progress.now);
   const fc = forecast(items, now);
   const live = items.filter((t) => t.stage !== 'superseded');
   const left = live.filter((t) => !isDone(t));
   const eta = fc.finished ? 'all merged' : fc.eta ? `ETA ${fmtDate(fc.eta)} at the recent ${fc.perDay.toFixed(1)} points a day` : fc.scope ? 'no forecast yet (nothing merged recently)' : 'no tickets yet';
+  const usd = live.reduce((a, t) => a + (ticketMap().get(t.id)?.usd || 0), 0);
+  return `${meterRow(`${fc.done} of ${fc.scope} points done`, fc.done, fc.scope)}
+    <p class="small muted">${esc(eta)} · ${left.length} of ${live.length} ticket${live.length === 1 ? '' : 's'} left${usd ? ` · $${usd.toFixed(2)} spent` : ''}</p>
+    ${live.length ? `<div class="card chart peek-chart" id="peek-card"><div class="legend" id="peek-legend"><span><i class="done"></i>done</span><span><i class="scope"></i>scope</span><span><i class="fc"></i>forecast</span><span class="dim">points: S = 1, M = 2</span></div><div id="peek-burnup"></div><div class="tip" id="peek-tip"></div></div>` : ''}
+    <h3>Tickets</h3>${live.length ? `<div class="board board-peek" style="--cols:${new Set(live.map(columnOf)).size}">${boardCols(live, new Set(DATA.critical_path), { only: true })}</div>` : '<p class="muted">None yet.</p>'}`;
+}
+// Drawn once the drawer is on screen, so the chart takes the drawer's width.
+function drawPeekChart(items) {
+  if ($('peek-burnup')) burnup(items, Date.parse(DATA.progress.now), { el: $('peek-burnup'), legend: $('peek-legend'), tip: $('peek-tip'), card: $('peek-card'), forecast: null });
+}
+function openTicketSet({ kind, id, title, sub, computed = [], items, attr = {} }) {
+  DRAWER = { kind, id };
   showDrawer(`<h2 id="drawer-title">${title}</h2>
     ${attrs({ id, type: kind, ...attr, computed })}
     ${sub ? `<p class="ctx measure">${sub}</p>` : ''}
-    ${meterRow(`${fc.done} of ${fc.scope} points done`, fc.done, fc.scope)}
-    <p class="small muted">${esc(eta)} · ${left.length} of ${live.length} ticket${live.length === 1 ? '' : 's'} left${(() => { const usd = live.reduce((a, t) => a + (ticketMap().get(t.id)?.usd || 0), 0); return usd ? ` · $${usd.toFixed(2)} spent` : ''; })()}</p>
-    ${live.length ? `<p>${boardLink(view)}</p>` : ''}
-    <h3>Tickets</h3>${live.length ? `<div class="board board-peek" style="--cols:${new Set(live.map(columnOf)).size}">${boardCols(live, new Set(DATA.critical_path), { only: true })}</div>` : '<p class="muted">None yet.</p>'}
-    `);
+    ${progressBlock(items)}`);
+  drawPeekChart(items);
 }
 const uniq = (xs) => [...new Set(xs.filter((x) => x !== undefined && x !== null && x !== ''))];
 function openFeature(f) {
@@ -2043,7 +2055,7 @@ function openFeature(f) {
   const items = p.tickets.filter((t) => t.feature === f);
   const stories = Object.entries(p.stories).filter(([, s]) => s.feature === f).map(([id]) => id);
   const ms = (DATA.ooda.goals || []).flatMap((g) => milestonesOf(g).filter((m) => (m.features || []).includes(f)).map((m) => mlink(g.id, m.n, m.title)));
-  openTicketSet({ kind: 'feature', id: f, title: esc(featureTitle(f)), sub: f === 'chores' ? 'Upkeep: tickets that serve no story.' : '', items, view: `feature:${f}`, attr: { rec: f === 'chores' ? null : f, idTip: 'The feature\'s slug; its tickets\' ids start with their component.' }, computed: [
+  openTicketSet({ kind: 'feature', id: f, title: esc(featureTitle(f)), sub: f === 'chores' ? 'Upkeep: tickets that serve no story.' : '', items, attr: { rec: f === 'chores' ? null : f, idTip: 'The feature\'s slug; its tickets\' ids start with their component.' }, computed: [
     ['Status', esc(rf?.status ?? ''), 'planned, building or done, from its tickets.'],
     ['Milestones', ms.join('<br>'), 'The goal milestones it counts toward.'],
     ['Releases', uniq([...(rf?.releases || []), ...items.map((t) => t.target_release)]).sort().map(rlink).join(', '), 'Releases its stories and tickets target.'],
@@ -2054,7 +2066,7 @@ function openFeature(f) {
 function openStory(sid) {
   const p = DATA.progress, st = p.stories[sid];
   if (!st) return showDrawer(`<h2 id="drawer-title">No story ${esc(sid)}</h2>`);
-  openTicketSet({ kind: 'story', id: sid, title: esc(st.text ?? sid), items: p.tickets.filter((t) => t.serves.includes(sid)), view: `story:${sid}`,
+  openTicketSet({ kind: 'story', id: sid, title: esc(st.text ?? sid), items: p.tickets.filter((t) => t.serves.includes(sid)),
     attr: { rec: st.feature && st.feature !== 'chores' ? st.feature : null, docType: 'feature', pick: (fs) => { const x = (fs.stories || []).find((y) => y.id === sid); if (!x) return null; const { id: _, ...rest } = x; return rest; }, idTip: 'The story\'s id, stored on its feature.' },
     computed: [['Feature', st.feature ? flink(st.feature) : '', 'The feature the story belongs to.']] });
 }
@@ -2063,7 +2075,7 @@ function openRelease(r) {
   const items = p.tickets.filter((t) => t.target_release === r);
   const stories = Object.entries(p.stories).filter(([, s]) => s.release === r).map(([id]) => id);
   const tagged = p.tickets.some((t) => t.released_in === r);
-  openTicketSet({ kind: 'release', id: r, title: `Release ${esc(r)}`, sub: tagged ? 'Tagged.' : stories.length && stories.every((s) => { const ts = p.tickets.filter((t) => t.serves.includes(s)); return ts.length && ts.every(isDone); }) ? 'Every story is done: ready to tag.' : '', items, view: `release:${r}`, attr: { idTip: 'The release\'s name; it is tagged once every story in it is done.' }, computed: [
+  openTicketSet({ kind: 'release', id: r, title: `Release ${esc(r)}`, sub: tagged ? 'Tagged.' : stories.length && stories.every((s) => { const ts = p.tickets.filter((t) => t.serves.includes(s)); return ts.length && ts.every(isDone); }) ? 'Every story is done: ready to tag.' : '', items, attr: { idTip: 'The release\'s name; it is tagged once every story in it is done.' }, computed: [
     ['Stories', stories.map((x) => `${slink(x)} ${esc(String(p.stories[x].text ?? '').slice(0, 90))}`).join('<br>'), 'Stories that target it.'],
     ['Features', uniq([...items.map((t) => t.feature), ...stories.map((x) => p.stories[x].feature)]).map(flink).join(', '), 'Features with work in it.'],
   ] });
@@ -2071,7 +2083,7 @@ function openRelease(r) {
 function openWave(w) {
   const p = DATA.progress;
   const items = p.tickets.filter((t) => String(t.wave) === String(w));
-  openTicketSet({ kind: 'wave', id: String(w), title: `Wave ${esc(w)}`, sub: 'Tickets that can run at the same time once the waves before them have merged.', items, view: `wave:${w}`, attr: { idTip: 'The wave\'s number: the waves before it merge first.' }, computed: [
+  openTicketSet({ kind: 'wave', id: String(w), title: `Wave ${esc(w)}`, sub: 'Tickets that can run at the same time once the waves before them have merged.', items, attr: { idTip: 'The wave\'s number: the waves before it merge first.' }, computed: [
     ['Features', uniq(items.map((t) => t.feature)).map(flink).join(', '), 'Features with tickets in it.'],
   ] });
 }
@@ -2081,7 +2093,7 @@ function openMilestone(key) {
   const g = goalOf(gid), m = milestonesOf(g).find((x) => x.n === n);
   if (!m) return showDrawer(`<h2 id="drawer-title">No milestone ${esc(key)}</h2>`);
   const fs = new Set(m.features || []);
-  openTicketSet({ kind: 'milestone', id: key, title: `${esc(m.title)}`, sub: `Milestone ${n} of ${glink(gid)}`, items: DATA.progress.tickets.filter((t) => fs.has(t.feature)), view: `milestone:${key}`,
+  openTicketSet({ kind: 'milestone', id: key, title: `${esc(m.title)}`, sub: `Milestone ${n} of ${glink(gid)}`, items: DATA.progress.tickets.filter((t) => fs.has(t.feature)),
     attr: { rec: gid, docType: 'goal', pick: (gf) => (gf.milestones || [])[n - 1] ?? null, idTip: 'Its goal\'s id and its number among the goal\'s milestones.' },
     computed: [
       ['Goal', glink(gid), 'The goal it is a milestone of.'],
