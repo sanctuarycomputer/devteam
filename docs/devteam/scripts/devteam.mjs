@@ -3571,7 +3571,27 @@ function decisionFor(id) {
   if (d?.type !== 'decision') die(`no decision ${id}`);
   if (correctionOf(d)) die(`${id} was corrected (${correctionOf(d).reason}); decide again`);
   if (['rung', 'default'].includes(d.authority) && rungHistory(d.class, d.scope ?? null).some((e) => e.by === 'correction' && e.at > d.created_at)) die(`${d.class} dropped to rung 1 after ${id} was decided; decide again`);
+  // The authority a decision records is checked against the log, not taken on its word: a decision
+  // line is the supervisor's own, so one written by hand can't carry trust it never had.
+  const why = decisionAuthorityGap(d);
+  if (why) die(`${id} records authority it doesn't have (${why}); decide again`);
   return d;
+}
+function decisionAuthorityGap(d) {
+  const L = ladder();
+  const ownerOnly = (L.owner_only ?? []).includes(d.class);
+  const q = d.approved_by?.startsWith('q-') ? logGet(d.approved_by) : null;
+  const v = q?.type === 'question' ? questionView(q) : null;
+  const inClass = v && (v.class === d.class || (d.class === 'approve-plan' && v.kind === 'one-way-door'));
+  if (ownerOnly) return v && inClass && v.status === 'answered' ? null : `${d.class} is the owner's and needs the owner's answer in that class`;
+  switch (d.authority) {
+    case 'answer': return v && inClass && v.status === 'answered' ? null : `no answered ${d.class} question ${d.approved_by ?? ''}`.trim();
+    case 'default': return v && inClass && v.status === 'defaulted' ? null : `no defaulted ${d.class} question ${d.approved_by ?? ''}`.trim();
+    case 'standing-rule': { const k = logGet(d.approved_by ?? ''); return k?.type === 'knowledge' && writerClass(k.created_by) === 'owner' && k.status === 'accepted' && k.scope === `class:${d.class}` ? null : `no accepted owner rule scoped class:${d.class}`; }
+    case 'rung': return L.classes[d.class] && rungFor(d.class, d.scope ?? null) >= 3 ? null : `${d.class} is not on rung 3`;
+    case 'constitution': return (L.constitutional ?? []).includes(d.class) || !L.classes[d.class] ? null : `${d.class} is on the ladder, not constitutional`;
+    default: return `unknown authority ${d.authority}`;
+  }
 }
 // What a command's act would be about, for --decision: the act must be about something the decision named.
 function citeTargets() {

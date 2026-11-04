@@ -598,6 +598,17 @@ test('devteam kit', async (t) => {
     const dl = Array.isArray(d) ? d[0] : d;
     assert.equal(dl.authority, 'answer');
     assert.equal(dl.rung, 1, 'the rung it was decided on is snapshotted');
+    // a decision written by hand can't carry trust it never had: an act under it is refused
+    {
+      const supFile = path.join(repo, 'docs/devteam/run/log', fs.readdirSync(path.join(repo, 'docs/devteam/run/log')).find((f) => /^supervisor-/.test(f)));
+      const before = fs.readFileSync(supFile, 'utf8');
+      const fid = 'd-20261101-235959000-supervisor';
+      fs.appendFileSync(supFile, line({ id: fid, type: 'decision', op: 'new', at: new Date().toISOString(), by: 'supervisor', class: 'gate-change', what: 'drop the lint gate', refs: ['bill-01-card'], authority: 'answer', approved_by: Qx, reversible: true }));
+      assert.match(dt(['act', '--decision', fid, '--', 'dropped it'], sup).err, /records authority it doesn't have \(gate-change is the owner's/);
+      fs.appendFileSync(supFile, line({ id: 'd-20261101-235959001-supervisor', type: 'decision', op: 'new', at: new Date().toISOString(), by: 'supervisor', class: 'production-migration', what: 'migrate it', refs: ['bill-01-card'], authority: 'rung', reversible: true }));
+      assert.match(dt(['act', '--decision', 'd-20261101-235959001-supervisor', '--', 'shipped'], sup).err, /production-migration is not on rung 3/);
+      fs.writeFileSync(supFile, before);
+    }
     assert.deepEqual(dl.options, ['ship flagged', 'hold a week']);
     assert.match(dt(['act', '--class', 'release-scope', '--approved', Qx, '--', 'again'], sup).err, new RegExp(`already approved a decision \\(${D}\\)`), 'the answer went to the decision');
     assert.match(dt(['act', '--decision', D, '--class', 'release-production', '--', 'x'], sup).err, /takes its class/);
