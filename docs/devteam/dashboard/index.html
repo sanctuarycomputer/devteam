@@ -1574,11 +1574,11 @@ function fleetStrip() {
   const f = DATA?.fleet || {};
   const mode = f.mode;
   const st = FLEET.data;
-  const ready = st ? (st.ready ? '<span class="badge good">ready to move</span>' : `<span class="badge ${mode ? 'medium' : ''}">not ready to move</span>`) : '<span class="muted">checking…</span>';
+  const ready = st ? (st.ready ? '<span class="badge good">ready to move</span>' : `<span class="badge ${mode ? 'medium' : ''}">not ready to move</span>`) : mode || f.op ? '<span class="muted">checking…</span>' : '<span class="muted">park or drain the fleet to move it; Check says what a move needs</span>';
   const left = st && !st.ready ? `<details><summary>${esc(st.blockers.length)} thing${st.blockers.length === 1 ? '' : 's'} left before a move</summary><ul>${st.blockers.map((b) => `<li>${linkify(b)}</li>`).join('')}</ul></details>` : '';
   const parity = st?.parity ? `<span class="muted">parity <code>${esc(st.parity.hash)}</code></span>` : '';
-  const label = mode === 'park' ? '<b>Fleet parked</b>' : mode === 'drain' ? `<b>Fleet draining</b>${st && !st.sessions.some((x) => !x.parked) ? ' (drained)' : ''}` : '<b>Fleet running</b>';
-  const btns = mode
+  const label = mode === 'park' ? '<b>Fleet parked</b>' : mode === 'drain' ? `<b>Fleet draining</b>${st && !st.sessions.some((x) => !x.parked) ? ' (drained)' : ''}` : f.op ? '<b>Fleet partly held</b> <span class="muted">(a goal was set apart after the fleet op)</span>' : '<b>Fleet running</b>';
+  const btns = mode || f.op
     ? '<button type="button" data-fleet="resume">Resume</button>'
     : '<button type="button" class="ghost" data-fleet="drain">Drain all</button><button type="button" class="ghost" data-fleet="park">Park all</button>';
   return `<i class="icon-truck" aria-hidden="true"></i>${label}${f.reason ? ` <span class="muted">· ${esc(f.reason)}</span>` : ''}<span class="grow"></span>${ready}${parity}<span class="row-inline">${btns}<button type="button" class="ghost" data-fleet="check" title="Fetch from origin and check again">Check</button></span><span class="err" id="e-fleet"></span>${left}`;
@@ -2165,8 +2165,9 @@ function render(d) {
   $('answered').innerHTML = o.answered.length ? o.answered.map(answeredCard).join('') : empty('Nothing answered yet.');
 
   renderOoda(o);
-  $('fleet-strip').innerHTML = fleetStrip();
-  if (Date.now() - FLEET.at > 60000) loadFleet();
+  // readiness is costly (git, gh, harness logs): asked for only while the fleet is held, or on Check
+  if (!$('fleet-strip').querySelector('.confirm')) $('fleet-strip').innerHTML = fleetStrip();
+  if ((d.fleet?.mode || d.fleet?.op) && Date.now() - FLEET.at > 60000) loadFleet();
   for (const id of openForms) { const f = document.querySelector(`[data-correct-form="${id}"]`); if (f) f.hidden = false; }
   renderProgress();
 

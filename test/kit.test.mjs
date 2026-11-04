@@ -1184,6 +1184,16 @@ test('devteam kit', async (t) => {
     assert.match(must(['goal', 'list']), /^upkeep \[(draining|drained): quiet\]/m);
     must(['goal', 'hold', 'upkeep', 'run', '--owner']);
     assert.equal(json(must(['dashboard-data'])).upkeep.mode, 'run');
+    // two Upkeep lines made at once fold to one, and a hold on the second applies to the first
+    const U = json(must(['dashboard-data'])).upkeep.id;
+    const ownerFile = fs.readdirSync(path.join(repo, 'docs/devteam/run/log')).find((f) => /^owner-/.test(f));
+    const at = new Date(Date.now() + 200).toISOString();
+    const U2 = `g-${at.slice(0, 10).replace(/-/g, '')}-${at.slice(11, 23).replace(/[:.]/g, '')}-owner`;
+    fs.appendFileSync(path.join(repo, 'docs/devteam/run/log', ownerFile), line({ id: U2, type: 'goal', op: 'new', at, by: 'owner', channel: 'cli', kind: 'upkeep', title: 'Upkeep' }));
+    fs.appendFileSync(path.join(repo, 'docs/devteam/run/log', ownerFile), line({ id: U2, type: 'goal', op: 'set', at: new Date(Date.now() + 300).toISOString(), by: 'owner', channel: 'cli', hold: { mode: 'drain' } }));
+    const up = json(must(['dashboard-data'])).upkeep;
+    assert.deepEqual([up.id, up.mode], [U, 'drain']);
+    must(['goal', 'hold', 'upkeep', 'run', '--owner']);
   });
 
   await t.test('secrets: the owner posts straight to a sink; the log never holds a value', async (t) => {

@@ -421,6 +421,7 @@ function fold(all) {
   const objects = new Map();
   const ignored = [];
   const goalApprovals = new Set();
+  const aliases = new Map();
   for (const l of lines) {
     if (l.op !== 'new') continue;
     if (objects.has(l.id)) {
@@ -428,8 +429,11 @@ function fold(all) {
       continue;
     }
     const { v, op, __file, __line, at, by, ...body } = l;
-    if (body.type === 'goal' && body.kind === 'upkeep' && [...objects.values()].some((o) => o.type === 'goal' && o.kind === 'upkeep')) {
-      ignored.push({ line: l, why: 'a second upkeep goal; the earliest is the one' });
+    const kept = body.type === 'goal' && body.kind === 'upkeep' ? [...objects.values()].find((o) => o.type === 'goal' && o.kind === 'upkeep') : null;
+    if (kept) {
+      // two writers made Upkeep at once: the earliest is the one, and the other's holds apply to it
+      aliases.set(l.id, kept.id);
+      ignored.push({ line: l, why: `a second upkeep goal; its changes apply to ${kept.id}` });
       continue;
     }
     const rank = RANK[writerClass(by)];
@@ -437,7 +441,7 @@ function fold(all) {
   }
   for (const l of lines) {
     if (l.op !== 'set') continue;
-    const obj = objects.get(l.id);
+    const obj = objects.get(aliases.get(l.id) ?? l.id);
     if (!obj) {
       ignored.push({ line: l, why: 'set on an unknown id' });
       continue;
@@ -1074,8 +1078,10 @@ const projectFileText = (rel) => readText(path.join(projectDir, rel)) ?? (projec
 
 // ===== 5. the graph (tickets and features, folded from the log) =====
 
-const tickets = () => new Map(logObjects('ticket').map((t) => [t.id, t]));
-const features = () => new Map(logObjects('feature').map((f) => [f.id, f]));
+// Computed once per read of the log (a write starts a new read): callers don't change what they get.
+const memo = (key, fn) => { const l = readLog(); l.memo ??= new Map(); if (!l.memo.has(key)) l.memo.set(key, fn()); return l.memo.get(key); };
+const tickets = () => memo('tickets', () => new Map(logObjects('ticket').map((t) => [t.id, t])));
+const features = () => memo('features', () => new Map(logObjects('feature').map((f) => [f.id, f])));
 const isActive = (t) => !t.superseded_by;
 // A held ticket is one the supervisor chose not to schedule yet (`ticket set <id> --json '{"held": "why"}'`; null releases it).
 const isHeld = (t) => typeof t.held === 'string' && t.held.trim() !== '';
@@ -1279,7 +1285,8 @@ const paneWaiting = (id) => (activeWorker(id) ? paneWaitingIn(id) : null);
 // Planners in flight: a plan/<feature> branch whose plan file hasn't landed on main. They write no phase lines, so their
 // last sign of life is the newest of: a live log line (messages, observations), a commit on the
 // branch, their plan file, an uncommitted edit in their worktree. Their pane says if they're stuck.
-function planners() {
+function planners() { return memo('planners', plannersNow); }
+function plannersNow() {
   const s = loadSettings();
   const main = mainRef();
   const lines = readLog().lines;
@@ -1441,7 +1448,7 @@ function cmdValidate() {
         const o = logGet(g);
         if (o?.type !== 'goal') errors.push(`feature ${fid} names goal ${g}, which is not in the log`);
         else if (o.kind === 'upkeep') errors.push(`feature ${fid} names the Upkeep goal; upkeep is the chores feature's, and a feature serves the goals it plans for`);
-        else if (o.status === 'abandoned') warnings.push(`feature ${fid} names goal ${g}, which the owner let go: its work stays parked until goal decide ${g} restore`);
+        else if (o.status === 'abandoned') warnings.push(`feature ${fid} names goal ${g}, which the owner let go: its work waits unless another goal it serves runs (goal decide ${g} restore brings it back)`);
         else if (!['ready', 'met'].includes(o.status)) errors.push(`feature ${fid} names goal ${g}, which is ${o.status ?? 'draft'}; the owner approves a goal before features are planned from it`);
         else {
           // A feature's own design builds on its goal's design, the spine, and says so (planning.md §2).
@@ -1535,7 +1542,8 @@ function ticketGoals(t) {
   if (t.feature === CHORES) return [upkeepOrVirtual()];
   return (features().get(t.feature)?.goals ?? []).map((id) => logGet(id)).filter((g) => g?.type === 'goal');
 }
-const ticketMode = (t) => modeOf(ticketGoals(t));
+// A ticket whose feature names no goal (an old project) follows the fleet, like its session.
+const ticketMode = (t) => { const gs = ticketGoals(t); return gs.length ? modeOf(gs) : fleetMode() ?? 'run'; };
 // The goals that can hold anything: live goals and Upkeep.
 const holdableGoals = () => [upkeepOrVirtual(), ...logObjects('goal').filter((g) => !['met', 'abandoned'].includes(g.status))];
 // When every holdable goal is parked, or every one is draining or parked, the fleet is too.
@@ -1591,12 +1599,18 @@ function causeOf(g, when) {
 }
 // What a session told to park must do; the marker in brackets lets a ruling be sent once per cause.
 function parkMessage(s, cause) {
-  const why = cause.kind === 'fleet' ? `the fleet is parked${cause.reason ? ` (${cause.reason.slice(0, 120)})` : ''}` : cause.kind === 'let-go' ? `the owner let go of "${cause.title}"` : `"${cause.title}" is parked${cause.reason ? ` (${cause.reason.slice(0, 120)})` : ''}`;
-  return `Park: ${why}. Now: commit all work in progress (a WIP commit is fine); then devteam.mjs handoff, with your note on stdin (what is done, the exact next step, open questions, anything you could not commit): it adds the note as an empty commit on ${s.branch} and pushes the branch; then devteam.mjs phase parked --note "parked", and stop (worker.md §9). A merge-request you sent is void once you push; send it again when you are resumed. [${cause.marker}]`;
+  const title = String(cause.title ?? '').slice(0, 60);
+  const reason = cause.reason ? ` (${String(cause.reason).slice(0, 80)})` : '';
+  const why = cause.kind === 'fleet' ? `the fleet is parked${reason}` : cause.kind === 'let-go' ? `the owner let go of "${title}"` : `"${title}" is parked${reason}`;
+  const tail = ` [${cause.marker}]`;
+  const body = `Park: ${why}. Commit all work (WIP is fine), then devteam.mjs handoff with your note on stdin (done, exact next step, open questions, anything uncommitted; it commits the note and pushes ${s.branch}), then devteam.mjs phase parked --note "parked", and stop (worker.md §9). Any merge-request you sent is void; resend it when resumed.`;
+  // a message line holds 600 characters; the marker that sends it once per cause is kept whole
+  return `${body.slice(0, 600 - tail.length)}${tail}`;
 }
 const parkRulingSent = (name, marker) => logObjects('message').some((m) => m.to === name && m.kind === 'ruling' && (m.text ?? '').includes(`[${marker}]`));
 // Every live session: workers with a phase that isn't done and no merge, planners in flight.
-function liveSessions() {
+function liveSessions() { return memo('liveSessions', liveSessionsNow); }
+function liveSessionsNow() {
   const names = new Set();
   for (const t of tickets().values()) if (activeWorker(t.id) || (workerState(t.id)?.phase === 'parked' && !mergeShaFor(t.id) && isActive(t))) names.add(t.id);
   for (const p of planners()) names.add(`plan-${p.feature}`);
@@ -3849,7 +3863,8 @@ function cmdGoal() {
     // Restore undoes a let go: the goal gets back the status it had, parked, and its questions return.
     if (verdict === 'restore') {
       if (g.status !== 'abandoned') die(`${id} is ${g.status ?? 'draft'}, not let go; nothing to restore`);
-      const statuses = [{ at: g.created_at, status: 'draft' }, ...g.updates.filter((u) => u.status !== undefined)];
+      const born = readLog().lines.find((l) => l.id === id && l.op === 'new')?.status ?? 'draft';
+      const statuses = [{ at: g.created_at, status: born }, ...g.updates.filter((u) => u.status !== undefined)];
       const lastGo = statuses.map((u) => u.status).lastIndexOf('abandoned');
       const prior = statuses.slice(0, lastGo).map((u) => u.status).filter((x) => x !== 'abandoned').pop() ?? 'draft';
       appendLog({ type: 'goal', op: 'set', id, status: prior, decision: { verdict: 'restore', notes: flagStr('notes')?.trim() || undefined }, hold: { mode: 'park', reason: 'restored from let go' } }, by);
@@ -5475,9 +5490,13 @@ function handoffFor(name) {
   // A planner logs no phases while it works, so any line of its own (a message, an observation) ends it.
   const launch = (l) => l.type === 'phase' && ['parked', 'starting'].includes(l.to);
   if (mine.some((l) => l.at > parked.at && (planner || l.type === 'phase') && !launch(l))) return null;
-  const cause = parkCauseAt(name, parked.at);
-  if (!cause) return null;
   const s = sessionOf(name);
+  // A hold released while the session was parking leaves no cause in force at its parked line;
+  // a handoff commit it made for that park still counts.
+  const prev = mine.filter((l) => l.type === 'phase' && l.at < parked.at && !launch(l)).pop();
+  const own = [`refs/heads/${s.branch}`, `refs/remotes/origin/${s.branch}`].map((r) => handoffCommit(r, name)).find((c) => c && (!prev || c.at >= prev.at));
+  const cause = parkCauseAt(name, parked.at) ?? (own ? { kind: 'self', at: parked.at, marker: `self:${name}@${parked.at}`, reason: null } : null);
+  if (!cause) return null;
   for (const r of [`refs/heads/${s.branch}`, `refs/remotes/origin/${s.branch}`]) {
     const c = handoffCommit(r, name);
     if (c) return { ...s, text: c.body, where: `the handoff commit ${c.sha.slice(0, 12)} on ${s.branch}, ${c.at}`, cause, parked_at: parked.at };
@@ -5523,7 +5542,7 @@ function cmdHandoff() {
   if (!note) die('handoff: the note is empty (stdin or --file): what is done, the exact next step, open questions, anything not committed');
   if (flags.supervisor) {
     supervisorOnly('handoff --supervisor');
-    const op = fleetOpInForce()?.fleet ?? (draining() ? draining().id : null) ?? die('handoff --supervisor is for a fleet park or drain in force');
+    const op = fleetOpInForce()?.fleet ?? (draining() ? draining().id : null) ?? (fleetMode() ? `held-${newFleetId().slice(2)}` : null) ?? die('handoff --supervisor is for a fleet park or drain in force');
     git(['fetch', '--quiet', 'origin', loadSettings().main_branch]);
     const tag = `devteam-handoff/${op}-${newFleetId().slice(2)}`;
     const base = mainRef() ?? 'HEAD';
@@ -5550,13 +5569,13 @@ function cmdHandoff() {
   gitOrDie(['push', '--quiet', 'origin', `HEAD:refs/heads/${sess.branch}`]);
   out(`handoff committed on ${sess.branch} and pushed; now: devteam.mjs phase parked --note "parked", and stop`);
 }
-const causeWords = (c) => (c.kind === 'fleet' ? `the fleet was parked${c.host ? ` on ${c.host}` : ''}${c.reason ? ` (${c.reason})` : ''}` : c.kind === 'let-go' ? `the owner let go of "${c.title}"` : `"${c.title}" was parked${c.reason ? ` (${c.reason})` : ''}`);
+const causeWords = (c) => (c.kind === 'self' ? 'it was told to park' : c.kind === 'fleet' ? `the fleet was parked${c.host ? ` on ${c.host}` : ''}${c.reason ? ` (${c.reason})` : ''}` : c.kind === 'let-go' ? `the owner let go of "${c.title}"` : `"${c.title}" was parked${c.reason ? ` (${c.reason})` : ''}`);
 const HANDOFF_MAX = 12000;
 function handoffBlock(name) {
   const h = handoffFor(name);
   if (!h) return null;
   const body = h.text.length > HANDOFF_MAX ? `${h.text.slice(0, HANDOFF_MAX)}\n\n(cut at ${HANDOFF_MAX} characters; read the whole file)` : h.text;
-  return `## Handoff from a parked session\n\nThis session was parked (${causeWords(h.cause)}, ${h.cause.at}) and starts without the earlier one's context. Before anything else in ${h.role === 'worker' ? 'worker.md §2' : 'planning.md'}, read this note, left by the session that stopped (${h.where}); then check it against your branch, your files and the log. Keep the file: it is part of the record and lands with your PR. Between the lines below is the note itself, as that session wrote it.\n\n-----\n${body.trimEnd()}\n-----`;
+  return `## Handoff from a parked session\n\nThis session was parked (${causeWords(h.cause)}, ${h.cause.at}) and starts without the earlier one's context. Before anything else in ${h.role === 'worker' ? 'worker.md §2' : 'planning.md'}, read this note, left by the session that stopped (${h.where}); then check it against your branch, your files and the log. It stays on your branch as a commit and lands with your PR. Between the lines below is the note itself, as that session wrote it.\n\n-----\n${body.trimEnd()}\n-----`;
 }
 // The supervisor's own handoff: its context doesn't move either, so it writes one too, and it lands
 // on main like any project file (chore drain-handoff), so the next supervisor reads it from git.
@@ -5667,7 +5686,7 @@ function fleetStatus() {
   const fm = legacy ? 'park' : fleetMode();
   const op = fleetOpInForce();
   const since = legacy ? legacy.created_at : op ? fleetAt(op.fleet) : null;
-  const d = since ? { id: legacy?.id ?? op?.fleet ?? 'holds', created_at: since } : null;
+  const d = fm ? { id: legacy?.id ?? op?.fleet ?? 'holds', created_at: since } : null;
   if (!flags['no-fetch'] && commonDir) git(['fetch', '--quiet', 'origin']);
   mainRefCache = undefined;
   const main = mainRef();
@@ -5747,7 +5766,7 @@ function fleetStatus() {
 
   // The supervisor's handoff, on main, written since the drain; and nothing the agents keep outside
   // the repo changed after it (what the next supervisor needs from it is folded into the handoff).
-  const sh0 = d ? supervisorHandoff(d.created_at) : null;
+  const sh0 = d ? supervisorHandoff(d.created_at ?? null) : null;
   const handoffOk = !!sh0;
   if (d && !handoffOk) blockers.push(`no supervisor handoff since the fleet ${fm}: write it and push it (devteam.mjs handoff --supervisor, the note on stdin)`);
   const memory = harnessMemoryFiles();
@@ -5864,7 +5883,9 @@ function fleetUndo(mode) {
   const legacy = mode === 'park' ? draining() : null;
   const held = holdableGoals().filter((g) => g.hold?.fleet && g.hold.mode === mode);
   const op = held.map((g) => g.hold.fleet).sort().pop() ?? null;
-  if (!op && !legacy) die(`no fleet ${mode} is in force (no goal holds a fleet op's ${mode}). If the fleet was ${mode === 'park' ? 'parked' : 'drained'} on another machine, land its log there first: log-sync, then merge --chore log`);
+  const oneByOne = !op && !legacy && fleetMode() === mode;
+  if (!op && !legacy && !oneByOne) die(`no fleet ${mode} is in force (no goal holds a fleet op's ${mode}). If the fleet was ${mode === 'park' ? 'parked' : 'drained'} on another machine, land its log there first: log-sync, then merge --chore log`);
+  if (oneByOne) out(`every goal was ${mode === 'park' ? 'parked' : 'drained'} one by one, not by a fleet op: nothing to put back here; set each goal with its toggle (goal hold <id> run)`);
   if (legacy && by !== 'supervisor') die('an old drain is in force; the supervisor lifts it (fleet unpark, as the supervisor)');
   const parity = parityPrint();
   const host = os.hostname();
@@ -5885,7 +5906,7 @@ function fleetUndo(mode) {
   out('then make sure the dashboard is running (supervisor.md §11)');
   out(`parity: ${parity.hash} (${parity.lines} log entries), taken before this wrote anything: fleet status printed the same on the old machine when the move is 1:1`);
   const at = op ? fleetAt(op) : legacy?.created_at;
-  const sh0 = at ? supervisorHandoff(at) : null;
+  const sh0 = at || oneByOne ? supervisorHandoff(at ?? null) : null;
   if (sh0) out(`\n## Handoff from the previous supervisor (${sh0.rel}, ${sh0.at})\n\n${sh0.text.trimEnd()}\n\nRead it before anything else; it stays in the repo as the record.`);
   else if (mode === 'park') out('\nno supervisor handoff from this park (no devteam-handoff tag on origin since it)');
 }
