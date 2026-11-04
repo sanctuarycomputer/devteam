@@ -153,6 +153,7 @@
   /* board */
   /* every column the same width, full or empty; the board scrolls sideways when they don't fit */
   .board { display: grid; grid-template-columns: repeat(7, minmax(132px, 1fr)); gap: 8px; overflow-x: auto; padding-bottom: 6px; }
+  .board-peek { grid-template-columns: repeat(var(--cols), minmax(150px, 1fr)); margin-top: 6px; }
   .col { min-width: 0; background: var(--well); border: 1px solid var(--line); border-radius: 8px; padding: 8px; min-height: 80px; }
   .col.none h3 { color: var(--muted); }
   button.tcard { cursor: pointer; text-align: left; width: 100%; height: auto; margin: 0 0 6px; font: inherit; font-size: 12px; font-weight: 400; color: var(--fg); background: var(--surface); border: 1px solid var(--line); display: block; white-space: normal; transition: none; }
@@ -771,7 +772,12 @@ function ticketPills(t) {
 }
 function board(items, crit) {
   $('planners').innerHTML = plannerCards(DATA.planners || []);
-  $('board-cols').innerHTML = COLUMNS.map(([name]) => {
+  $('board-cols').innerHTML = boardCols(items, crit);
+}
+// The board's columns and cards, for the Board and for a sidepeek's tickets (only: the columns that
+// have cards, so a few tickets don't sit in seven mostly empty columns).
+function boardCols(items, crit, { only = false } = {}) {
+  return COLUMNS.filter(([name]) => !only || items.some((t) => t.stage !== 'superseded' && columnOf(t) === name)).map(([name]) => {
     let cards = items.filter((t) => t.stage !== 'superseded' && columnOf(t) === name).sort((a, b) => (a.wave ?? 99) - (b.wave ?? 99));
     const total = cards.length;
     // finished columns show the most recent few; the rest are counted
@@ -2019,7 +2025,6 @@ function openTicketSet({ kind, id, title, sub, computed = [], items, view, attr 
   const fc = forecast(items, now);
   const live = items.filter((t) => t.stage !== 'superseded');
   const left = live.filter((t) => !isDone(t));
-  const cols = COLUMNS.map(([name]) => [name, live.filter((t) => columnOf(t) === name)]).filter(([, ts]) => ts.length);
   const eta = fc.finished ? 'all merged' : fc.eta ? `ETA ${fmtDate(fc.eta)} at the recent ${fc.perDay.toFixed(1)} points a day` : fc.scope ? 'no forecast yet (nothing merged recently)' : 'no tickets yet';
   showDrawer(`<h2 id="drawer-title">${title}</h2>
     ${attrs({ id, type: kind, ...attr, computed })}
@@ -2027,10 +2032,9 @@ function openTicketSet({ kind, id, title, sub, computed = [], items, view, attr 
     ${meterRow(`${fc.done} of ${fc.scope} points done`, fc.done, fc.scope)}
     <p class="small muted">${esc(eta)} · ${left.length} of ${live.length} ticket${live.length === 1 ? '' : 's'} left${(() => { const usd = live.reduce((a, t) => a + (ticketMap().get(t.id)?.usd || 0), 0); return usd ? ` · $${usd.toFixed(2)} spent` : ''; })()}</p>
     ${live.length ? `<p>${boardLink(view)}</p>` : ''}
-    <h3>Tickets</h3><div>${cols.length ? cols.map(([n, ts]) => `<div class="small muted">${esc(n)}</div><ul>${ts.map((t) => `<li>${tlink(t.id)}</li>`).join('')}</ul>`).join('') : 'None yet.'}</div>
+    <h3>Tickets</h3>${live.length ? `<div class="board board-peek" style="--cols:${new Set(live.map(columnOf)).size}">${boardCols(live, new Set(DATA.critical_path), { only: true })}</div>` : '<p class="muted">None yet.</p>'}
     `);
 }
-const row = (dt, dd) => (dd ? `<dt>${dt}</dt><dd>${dd}</dd>` : '');
 const uniq = (xs) => [...new Set(xs.filter((x) => x !== undefined && x !== null && x !== ''))];
 function openFeature(f) {
   const p = DATA.progress, R = DATA.ooda.roadmap, rf = R.features[f];
