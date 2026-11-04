@@ -162,15 +162,79 @@
               "abandoned"
             ]
           },
+          "kind": {
+            "description": "upkeep: the built-in goal that owns the reserved chores feature and the supervisor's upkeep (planning.md §7). It has no measure, design, milestones or status lifecycle; the earliest upkeep line is the one, later ones are ignored.",
+            "enum": [
+              "upkeep"
+            ]
+          },
+          "hold": {
+            "description": "The goal's toggle (planning.md §1, holds): run, drain (nothing new starts; in-flight work finishes and merges) or park (sessions commit WIP, push, write a handoff and stop; ticket merges wait). fleet names the fleet op that set it and prior the hold it replaced, so fleet undrain/unpark can put it back. The owner sets any hold; a supervisor line counts only as a drain of a running goal, the release of its own drain, or a fleet op (the fold enforces it).",
+            "type": "object",
+            "properties": {
+              "mode": {
+                "enum": [
+                  "run",
+                  "drain",
+                  "park"
+                ]
+              },
+              "reason": {
+                "type": "string",
+                "maxLength": 300
+              },
+              "fleet": {
+                "type": "string",
+                "pattern": "^f-\\d{8}-\\d{9}$"
+              },
+              "undoes": {
+                "type": "string",
+                "pattern": "^f-\\d{8}-\\d{9}$"
+              },
+              "prior": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "enum": [
+                      "run",
+                      "drain",
+                      "park"
+                    ]
+                  },
+                  "reason": {
+                    "type": "string",
+                    "maxLength": 300
+                  },
+                  "fleet": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "mode"
+                ],
+                "additionalProperties": false
+              },
+              "host": {
+                "type": "string",
+                "maxLength": 200,
+                "description": "The machine a fleet op ran on, so the moved fleet's supervisor knows whether it is on the old machine or the new one."
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "additionalProperties": false
+          },
           "decision": {
             "type": "object",
-            "description": "The owner's latest decision on the goal's design: approve (ready), refine (notes the planner takes into account before asking again), let-go (abandoned).",
+            "description": "The owner's latest decision on the goal's design: approve (ready), refine (notes the planner takes into account before asking again), let-go (abandoned), restore (a let-go goal back to the status it had, parked).",
             "properties": {
               "verdict": {
                 "enum": [
                   "approve",
                   "refine",
-                  "let-go"
+                  "let-go",
+                  "restore"
                 ]
               },
               "notes": {
@@ -222,7 +286,8 @@
         ],
         "x-set-only": [
           "approved",
-          "carried"
+          "carried",
+          "hold"
         ]
       },
       "feature": {
@@ -1415,7 +1480,8 @@
           "milestones",
           "plan_after",
           "approved",
-          "carried"
+          "carried",
+          "hold"
         ],
         "owner": [
           "title",
@@ -1428,7 +1494,8 @@
           "milestones",
           "status",
           "decision",
-          "plan_after"
+          "plan_after",
+          "hold"
         ]
       },
       "feature": {

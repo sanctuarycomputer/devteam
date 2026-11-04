@@ -959,9 +959,9 @@ test('devteam kit', async (t) => {
     // the planner's agent is a no-op here
     landSettings((txt) => txt.replace('"gates": {', '"agent_command": "true", "resume_command": "true", "gates": {'));
     // two planners started together: blocks above main's highest number (bill-01) and each other's
-    assert.match(must(['planner', 'alpha'], { role: 'sup' }), /ticket numbers 02-21 reserved/);
-    assert.match(must(['planner', 'beta', '--id-block', '5'], { role: 'sup' }), /ticket numbers 22-26 reserved/);
-    assert.match(dt(['planner', 'gamma', '--id-block', '0'], { role: 'sup' }).err, /--id-block takes a whole number/);
+    assert.match(must(['planner', 'alpha', '--goal', G], { role: 'sup' }), /ticket numbers 02-21 reserved/);
+    assert.match(must(['planner', 'beta', '--goal', G, '--id-block', '5'], { role: 'sup' }), /ticket numbers 22-26 reserved/);
+    assert.match(dt(['planner', 'gamma', '--goal', G, '--id-block', '0'], { role: 'sup' }).err, /--id-block takes a whole number/);
     const blocks = () => json(must(['log', '--type', 'act', '--json'])).filter((a) => a.id_block).map((a) => a.id_block);
     assert.deepEqual(blocks(), [{ feature: 'alpha', from: 2, to: 21 }, { feature: 'beta', from: 22, to: 26 }]);
     // the block is in the planner's prompt, and a relaunch keeps it rather than reserving another
@@ -1274,6 +1274,53 @@ test('devteam kit', async (t) => {
     const logs = fs.readdirSync(path.join(repo, 'docs/devteam/run/log')).map((f) => fs.readFileSync(path.join(repo, 'docs/devteam/run/log', f), 'utf8')).join('');
     for (const form of [VALUE, JSON.stringify(VALUE).slice(1, -1), Buffer.from(VALUE).toString('base64'), 'MIIBszCCAVmgAwIBAgIUQ', 'tok-123456', 'pässwörd']) assert.ok(!logs.includes(form), `log holds ${form}`);
     for (const f of ['config/apns.key', 'config/uni.key', 'config/credentials/test.key']) fs.rmSync(path.join(repo, f), { force: true });
+  });
+
+  await t.test('goal holds: who may set what, merges wait on a park, let go and restore', () => {
+    const hold = () => json(must(['goal', 'show', G, '--json'])).hold_view;
+    // the supervisor drains a running goal, with a reason; it can't park one, or release the owner's hold
+    assert.match(dt(['goal', 'hold', G, 'drain'], { role: 'sup' }).err, /--reason/);
+    must(['goal', 'hold', G, 'drain', '--reason', 'billing waits on pricing'], { role: 'sup' });
+    assert.deepEqual([hold().mode, hold().by], ['drain', 'supervisor']);
+    assert.ok(json(must(['log', '--type', 'act', '--json'])).some((a) => a.class === 'goal-hold' && /drained "Self-serve billing"/.test(a.what)));
+    assert.match(dt(['goal', 'hold', G, 'park', '--reason', 'x'], { role: 'sup' }).err, /only the owner parks a single goal/);
+    must(['goal', 'hold', G, 'park', '--owner', '--reason', 'pausing billing for a week']);
+    assert.deepEqual([hold().mode, hold().by], ['park', 'owner']);
+    assert.match(dt(['goal', 'hold', G, 'run', '--reason', 'x'], { role: 'sup' }).err, /releases only a drain it set/);
+    // a forged supervisor line is ignored by the fold, with why
+    const supFile = fs.readdirSync(path.join(repo, 'docs/devteam/run/log')).find((f) => /^supervisor-/.test(f));
+    fs.appendFileSync(path.join(repo, 'docs/devteam/run/log', supFile), line({ id: G, type: 'goal', op: 'set', at: '2099-01-01T00:00:00.000Z', by: 'supervisor', hold: { mode: 'run' } }));
+    assert.equal(hold().mode, 'park');
+    assert.match(must(['log-check']), /the supervisor releases only a drain it set/);
+    // the roadmap and the track stand still while parked
+    assert.match(must(['roadmap']), /Self-serve billing \[ready, parked\] -> no date while parked/);
+    assert.equal(json(must(['goal', 'show', G, '--json'])).track, null);
+    // its questions stay open and labelled; they don't count as the owner falling behind
+    const Qh = must(['ask', '--question', 'Monthly or yearly plans?', '--goal', G, '--recommendation', 'monthly'], { role: 'sup' });
+    assert.match(must(['questions']), new RegExp(`${Qh}  \\[owner-decision, open, its goal parked\\]`));
+    // let go: abandoned, its questions leave the inbox; restore brings both back, parked
+    must(['goal', 'decide', G, 'let-go', '--notes', 'not this quarter']);
+    assert.equal(hold().mode, 'let-go');
+    assert.doesNotMatch(must(['questions']), new RegExp(Qh));
+    assert.ok(!json(must(['dashboard-data'])).questions.some((q) => q.id === Qh));
+    assert.match(must(['validate']), /names goal g-[^,]+, which the owner let go/, 'a let-go goal\'s landed feature is a warning, not an error');
+    assert.match(dt(['goal', 'hold', G, 'run', '--owner']).err, /goal decide .* restore/);
+    assert.match(must(['goal', 'decide', G, 'restore']), /restored as ready, parked/);
+    const gv = json(must(['goal', 'show', G, '--json']));
+    assert.deepEqual([gv.status, gv.hold_view.mode], ['ready', 'park']);
+    assert.match(must(['questions']), new RegExp(Qh));
+    // run again; the owner's release lets the supervisor drain once more
+    must(['goal', 'hold', G, 'run', '--owner']);
+    must(['goal', 'hold', G, 'drain', '--reason', 'again'], { role: 'sup' });
+    must(['goal', 'hold', G, 'run', '--reason', 'pricing landed'], { role: 'sup' });
+    assert.equal(hold().mode, 'run');
+    must(['answer', Qh, 'monthly']);
+    // Upkeep: virtual until its first hold, held like any goal, never let go
+    assert.match(must(['goal', 'list']), /^upkeep \[running\] Upkeep/m);
+    must(['goal', 'hold', 'upkeep', 'drain', '--reason', 'quiet'], { role: 'sup' });
+    assert.match(must(['goal', 'list']), /^upkeep \[(draining|drained): quiet\]/m);
+    must(['goal', 'hold', 'upkeep', 'run', '--owner']);
+    assert.equal(json(must(['dashboard-data'])).upkeep.mode, 'run');
   });
 
   await t.test('computed views: metrics, roadmap, retro, dashboard data', () => {
@@ -2092,51 +2139,67 @@ test('devteam kit', async (t) => {
 });
 
 // Moving the fleet: its own throwaway repo, an old machine and a fresh clone standing in for the new one.
-test('drain: the fleet stops cleanly, and a clone elsewhere picks it up', () => {
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-drain-'));
+// A throwaway origin, an old machine and a new one, for the fleet tests.
+function fleetFixture(name) {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), `devteam-${name}-`));
   const org = path.join(base, 'origin.git');
   const old = path.join(base, 'old');
   const neu = path.join(base, 'new');
   const home = path.join(base, 'home');
   const tmuxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dt-tmux-'));
-  const ID = 'ch-01-tidy';
   const env = (role) => {
     const e = { ...process.env, CLAUDE_CONFIG_DIR: path.join(home, 'claude'), CODEX_HOME: path.join(home, 'codex'), TMUX_TMPDIR: tmuxDir };
     for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'TMUX', 'TMUX_PANE']) delete e[k];
     return { ...e, ...role };
   };
-  const run = (cwd, args, role = {}) => { const r = spawnSync(process.execPath, [path.join(cwd, 'docs/devteam/scripts/devteam.mjs'), ...args], { cwd, env: env(role), encoding: 'utf8' }); return { status: r.status, out: r.stdout.trim(), err: r.stderr.trim() }; };
-  const ok = (cwd, args, role) => { const r = run(cwd, args, role); assert.equal(r.status, 0, `${args.join(' ')}: ${r.err || r.out}`); return r.out; };
+  const run = (cwd, args, role = {}, input) => { const r = spawnSync(process.execPath, [path.join(cwd, 'docs/devteam/scripts/devteam.mjs'), ...args], { cwd, env: env(role), encoding: 'utf8', input }); return { status: r.status, out: r.stdout.trim(), err: r.stderr.trim() }; };
+  const ok = (cwd, args, role, input) => { const r = run(cwd, args, role, input); assert.equal(r.status, 0, `${args.join(' ')}: ${r.err || r.out}`); return r.out; };
   const g = (args, cwd) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  g(['init', '-q', '--bare', '-b', 'main', org], base); // the clone checks out origin's HEAD; CI's git defaults to master
+  fs.mkdirSync(old);
+  g(['init', '-q', '-b', 'main'], old);
+  for (const [k, v] of [['user.email', 't@t'], ['user.name', 't']]) g(['config', k, v], old);
+  g(['remote', 'add', 'origin', org], old);
+  fs.cpSync(kit, path.join(old, 'docs', 'devteam'), { recursive: true, filter: (p) => !/[\\/](project|run)([\\/]|$)/.test(p.slice(kit.length)) });
+  ok(old, ['init', '--name', name]);
+  const sf = path.join(old, 'docs/devteam/project/settings.md');
+  fs.writeFileSync(sf, fs.readFileSync(sf, 'utf8').replace('"gates": {}', '"gates": {}, "forge": "git", "worktree_files": ["config/dev.key"], "agent_command": "true", "resume_command": "true"'));
+  write(path.join(old, 'config/dev.key'), 'not a real key\n');
+  write(path.join(old, '.gitignore'), `${fs.readFileSync(path.join(old, '.gitignore'), 'utf8')}config/dev.key\n`);
+  g(['add', '-A'], old);
+  g(['commit', '-qm', 'init'], old);
+  g(['push', '-q', 'origin', 'main'], old);
+  // the log lands (as merge --chore log would put it on main)
+  const land = () => {
+    const live = path.join(old, 'docs/devteam/run/log');
+    for (const f of fs.readdirSync(live).filter((x) => x.endsWith('.jsonl'))) fs.copyFileSync(path.join(live, f), path.join(old, 'docs/devteam/project/log', f));
+    g(['add', '-A', 'docs/devteam/project/log'], old);
+    g(['commit', '-qm', 'chore-log: log through now'], old);
+    g(['push', '-q', 'origin', 'main'], old);
+  };
+  const done = () => { fs.rmSync(tmuxDir, { recursive: true, force: true }); if (!process.env.DEVTEAM_TEST_KEEP) fs.rmSync(base, { recursive: true, force: true }); else console.log(`${name} fixture kept at ${base}`); };
+  return { base, org, old, neu, home, env, run, ok, g, land, done };
+}
+
+test('fleet park: every session stops with a handoff, and a clone elsewhere picks it up with parity', () => {
+  const F = fleetFixture('park');
+  const { org, old, neu, home, env, run, ok, g, base } = F;
+  const ID = 'ch-01-tidy';
   const SUP = { DEVTEAM_ROLE: 'supervisor' };
   const WRK = { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: ID };
   try {
-    g(['init', '-q', '--bare', '-b', 'main', org], base); // the clone checks out origin's HEAD; CI's git defaults to master
-    fs.mkdirSync(old);
-    g(['init', '-q', '-b', 'main'], old);
-    for (const [k, v] of [['user.email', 't@t'], ['user.name', 't']]) g(['config', k, v], old);
-    g(['remote', 'add', 'origin', org], old);
-    fs.cpSync(kit, path.join(old, 'docs', 'devteam'), { recursive: true, filter: (p) => !/[\\/](project|run)([\\/]|$)/.test(p.slice(kit.length)) });
-    ok(old, ['init', '--name', 'moving']);
-    const sf = path.join(old, 'docs/devteam/project/settings.md');
-    fs.writeFileSync(sf, fs.readFileSync(sf, 'utf8').replace('"gates": {}', '"gates": {}, "forge": "git", "worktree_files": ["config/dev.key"], "agent_command": "true", "resume_command": "true"'));
-    write(path.join(old, 'config/dev.key'), 'not a real key\n');
-    write(path.join(old, '.gitignore'), `${fs.readFileSync(path.join(old, '.gitignore'), 'utf8')}config/dev.key\n`);
-    g(['add', '-A'], old);
-    g(['commit', '-qm', 'init'], old);
-    g(['push', '-q', 'origin', 'main'], old);
     ok(old, ['ticket', 'add', ID, '--json', JSON.stringify({ title: 'tidy up', feature: 'chores', component: 'ch', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['tidy/**'], done_when: ['the tidy check passes'], notes: 'turns on tidy' })], SUP);
 
-    // a planner logs one phase of its own: parked, when drained
+    // a planner logs one phase of its own: parked
     const pw = path.join(old, '.worktrees', 'plan-beta');
     g(['worktree', 'add', '-q', '-b', 'plan/beta', pw, 'origin/main'], old);
     assert.match(run(pw, ['phase', 'build'], { DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: 'beta' }).err, /a planner logs only phase parked/);
-    ok(pw, ['phase', 'parked', '--note', 'drained'], { DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: 'beta' });
+    ok(pw, ['phase', 'parked', '--note', 'parked'], { DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: 'beta' });
     assert.equal(json(ok(old, ['dashboard-data'])).planners.find((p) => p.feature === 'beta').parked, true);
     g(['worktree', 'remove', '--force', pw], old);
     g(['branch', '-q', '-D', 'plan/beta'], old);
 
-    // a worker mid-build, with work committed but not pushed, and an edit not committed
+    // a worker on a chore (Upkeep's) mid-build, with work committed but not pushed, and an edit not committed
     const ww = path.join(old, '.worktrees', ID);
     g(['worktree', 'add', '-q', '-b', `ticket/${ID}`, ww, 'origin/main'], old);
     ok(ww, ['phase', 'build', '--task', 'T1'], WRK);
@@ -2145,84 +2208,81 @@ test('drain: the fleet stops cleanly, and a clone elsewhere picks it up', () => 
     g(['commit', '-qm', 'T1'], ww);
     write(path.join(ww, 'tidy/b.txt'), 'b, not yet committed\n');
 
-    // drain is the supervisor's; it logs its act, messages the worker, and blocks new sessions
-    assert.match(run(ww, ['drain', '--reason', 'new laptop'], WRK).err, /drain: the supervisor does this/);
-    const drained = ok(old, ['drain', '--reason', 'new laptop'], SUP);
-    assert.match(drained, new RegExp(`drained \\(a-\\d{8}-\\d{9}-supervisor\\): told ${ID} to push`));
-    const act = json(ok(old, ['log', '--type', 'act', '--json'])).find((a) => a.class === 'drain');
-    assert.match(act.what, /^drained the fleet on \S+: new laptop$/);
-    assert.deepEqual(act.refs, [ID]);
+    // the old drain now asks which you mean; a worker can't park the fleet
+    assert.match(run(old, ['drain', '--reason', 'x'], SUP).err, /fleet park stops every session .*fleet drain lets in-flight work finish/);
+    assert.match(run(ww, ['fleet', 'park'], WRK).err, /fleet: the supervisor does this/);
+    const parked = ok(old, ['fleet', 'park', '--reason', 'new laptop'], SUP);
+    assert.match(parked, /parked the fleet \(f-\d{8}-\d{9}\): 1 goal\(s\) set to park, Upkeep included/);
+    assert.match(parked, new RegExp(`told ${ID} to commit, push, write a handoff and park`));
+    const act = json(ok(old, ['log', '--type', 'act', '--json'])).find((a) => a.class === 'fleet-park');
+    assert.match(act.what, /^parked the fleet on \S+ \(f-\d{8}-\d{9}\): new laptop$/);
     const msg = json(ok(old, ['messages', '--to', ID, '--json'])).pop();
-    assert.match(msg.text, new RegExp(`push ticket/${ID}; write docs/devteam/project/tickets/${ID}/handoff\\.md .*phase parked --note "drained"`));
-    assert.match(run(old, ['worker', ID], SUP).err, /the fleet is draining .*run undrain first.*--force/);
-    assert.match(run(old, ['planner', 'gamma'], SUP).err, /the fleet is draining/);
+    assert.match(msg.text, /^Park: the fleet is parked \(new laptop\)\. .*devteam\.mjs handoff.*phase parked --note "parked"/);
+    assert.equal(ok(old, ['fleet', 'park'], SUP), 'every goal is already parked; nothing to do');
+    assert.match(ok(old, ['goal', 'park-sessions', '--all'], SUP), /every session it holds has been told/, 'a park ruling goes once per cause');
+    assert.match(run(old, ['worker', ID, '--resume'], SUP).err, /its goal is parked: nothing starts for it.*--force/);
+    assert.match(run(old, ['planner', 'gamma'], SUP).err, /--goal <g-id>/);
     const findings = json(ok(old, ['metrics', '--json'])).findings;
-    assert.ok(!findings.some((f) => ['idle-capacity', 'idle-planning'].includes(f.kind)), 'nothing new is suggested while draining');
-    assert.match(ok(old, ['prompt', 'supervisor']), /^The fleet is drained .*This is the machine it was drained on/);
+    assert.ok(!findings.some((f) => ['idle-capacity', 'idle-planning', 'park-unsent'].includes(f.kind)), 'nothing new is suggested while parked, and the ruling was sent');
+    assert.match(ok(old, ['prompt', 'supervisor']), /^The fleet is parked .*This is the machine it was parked on/);
+    assert.match(run(old, ['chore', 'start', 'retro-x'], SUP).err, /Upkeep is parked: no new upkeep chore starts/);
 
     // not ready: unpushed, uncommitted, not parked, no handoff, log not landed
-    let st = json(ok(old, ['drain', '--status', '--json'], SUP));
+    let st = json(ok(old, ['fleet', 'status', '--json'], SUP));
     assert.equal(st.ready, false);
+    assert.equal(st.fleet.mode, 'park');
     const s0 = st.sessions.find((x) => x.name === ID);
-    assert.deepEqual([s0.parked, s0.pushed, s0.clean, s0.handoff], [false, false, false, false]);
+    assert.deepEqual([s0.parked, s0.pushed, s0.clean], [false, false, false]);
     assert.ok(st.blockers.some((b) => /live log is not on main/.test(b)));
     assert.ok(st.checklist.some((c) => /config\/dev\.key/.test(c) && /secure channel/.test(c)), 'the checklist lists worktree_files');
-    assert.ok(st.checklist.some((c) => /undrain/.test(c)) && st.checklist.some((c) => /dashboard/.test(c)));
-    assert.match(ok(old, ['drain', '--status'], SUP), /ready to move: no\n\nnew-machine checklist:/);
+    assert.ok(st.checklist.some((c) => /fleet unpark/.test(c)) && st.checklist.some((c) => /dashboard/.test(c)));
+    assert.match(ok(old, ['drain', '--status'], SUP), /ready to move: no\n\nnew-machine checklist:/, 'drain --status is fleet status');
 
-    // the worker does what the drain message says; a handoff without the push is still not ready
+    // the worker does what the ruling says: commit, park without a handoff first (not ready), then the handoff
     g(['add', '-A'], ww);
-    g(['commit', '-qm', 'WIP: drain'], ww);
-    write(path.join(ww, `docs/devteam/project/tickets/${ID}/handoff.md`), '# Handoff\n\nDone: T1. Next: write tidy/c.txt (T2). Open: none. Uncommitted: none.\n');
-    g(['add', '-A'], ww);
-    g(['commit', '-qm', 'handoff'], ww);
-    ok(ww, ['phase', 'parked', '--note', 'drained'], WRK);
-    st = json(ok(old, ['drain', '--status', '--json'], SUP));
+    g(['commit', '-qm', 'WIP: park'], ww);
+    assert.match(run(ww, ['handoff'], WRK, '').err, /the note is empty/);
+    ok(ww, ['phase', 'parked', '--note', 'parked'], WRK);
+    st = json(ok(old, ['fleet', 'status', '--json'], SUP));
     assert.deepEqual(st.sessions.map((x) => [x.parked, x.pushed, x.clean, x.handoff]), [[true, false, true, false]]);
-    g(['push', '-q', '-u', 'origin', `ticket/${ID}`], ww);
-    st = json(ok(old, ['drain', '--status', '--json'], SUP));
+    assert.match(ok(ww, ['handoff'], WRK, 'Done: T1. Next: write tidy/c.txt (T2). Open: none. Uncommitted: none.\n'), /handoff committed on ticket\/ch-01-tidy and pushed/);
+    assert.equal(g(['log', '-1', '--format=%s', `origin/ticket/${ID}`], ww), `devteam handoff: ${ID}`, 'the handoff is a commit, not a file');
+    assert.equal(g(['diff', '--name-only', 'HEAD~1', 'HEAD'], ww), '', 'it changes no file');
+    st = json(ok(old, ['fleet', 'status', '--json'], SUP));
     assert.deepEqual(st.sessions.map((x) => [x.parked, x.pushed, x.clean, x.handoff]), [[true, true, true, true]]);
     assert.equal(st.ready, false, 'the log has not landed yet');
-    // the log lands (as merge --chore log would put it on main)
-    const live = path.join(old, 'docs/devteam/run/log');
-    for (const f of fs.readdirSync(live).filter((x) => x.endsWith('.jsonl'))) fs.copyFileSync(path.join(live, f), path.join(old, 'docs/devteam/project/log', f));
-    g(['add', '-A', 'docs/devteam/project/log'], old);
-    g(['commit', '-qm', 'chore-log: log through now'], old);
-    g(['push', '-q', 'origin', 'main'], old);
+    F.land();
     // everything else that is only here blocks: no supervisor handoff, a loose run/ file, a worktree with unpushed work
-    st = json(ok(old, ['drain', '--status', '--json'], SUP));
-    assert.ok(st.blockers.some((b) => /no docs\/devteam\/project\/handoffs\/supervisor\.md on main/.test(b)), 'the supervisor writes a handoff too');
+    st = json(ok(old, ['fleet', 'status', '--json'], SUP));
+    assert.ok(st.blockers.some((b) => /no supervisor handoff since the fleet park/.test(b)), 'the supervisor writes a handoff too');
     write(path.join(old, 'docs/devteam/run/research-notes.md'), 'notes\n');
     const cw = path.join(old, '.worktrees', 'chore-notes');
     g(['worktree', 'add', '-q', '-b', 'chore-notes', cw, 'origin/main'], old);
     write(path.join(cw, 'notes.txt'), 'x\n');
     g(['add', '-A'], cw);
     g(['commit', '-qm', 'notes'], cw);
-    st = json(ok(old, ['drain', '--status', '--json'], SUP));
+    st = json(ok(old, ['fleet', 'status', '--json'], SUP));
     assert.ok(st.blockers.some((b) => /files in run\/ the kit didn't make, which don't move: research-notes\.md/.test(b)));
     assert.ok(st.blockers.some((b) => /worktrees holding work that isn't on the remote: chore-notes \(1 commit\(s\) on no remote\)/.test(b)));
     fs.rmSync(path.join(old, 'docs/devteam/run/research-notes.md'));
     g(['worktree', 'remove', '--force', cw], old);
     g(['branch', '-q', '-D', 'chore-notes'], old);
-    // the supervisor's handoff lands on main (as chore drain-handoff would put it there)
-    write(path.join(old, 'docs/devteam/project/handoffs/supervisor.md'), '# Supervisor handoff\n\nWaiting on: nothing. Next: restart ch-01-tidy.\n');
-    g(['add', '-A', 'docs/devteam/project/handoffs'], old);
-    g(['commit', '-qm', 'chore-drain-handoff'], old);
-    g(['push', '-q', 'origin', 'main'], old);
+    // the supervisor's handoff: an annotated tag on origin, no file
+    assert.match(ok(old, ['handoff', '--supervisor'], SUP, '# Supervisor handoff\n\nWaiting on: nothing. Next: restart ch-01-tidy.\n'), /pushed devteam-handoff\/f-/);
+    assert.match(g(['ls-remote', '--tags', 'origin'], old), /refs\/tags\/devteam-handoff\/f-/);
     // agent memory outside the repo that changed after the handoff blocks; folded in before it, it doesn't
     const mem = path.join(home, 'claude', 'projects', fs.realpathSync(old).replace(/[^a-zA-Z0-9]/g, '-'), 'memory');
     write(path.join(mem, 'rule.md'), 'the owner said X\n');
     const later = new Date(Date.now() + 120000);
     fs.utimesSync(path.join(mem, 'rule.md'), later, later);
-    st = json(ok(old, ['drain', '--status', '--json'], SUP));
+    st = json(ok(old, ['fleet', 'status', '--json'], SUP));
     assert.ok(st.blockers.some((b) => /agent memory outside the repo changed after the supervisor's handoff landed \(rule\.md\)/.test(b)));
     const earlier = new Date(Date.now() - 3600000);
     fs.utimesSync(path.join(mem, 'rule.md'), earlier, earlier);
-    st = json(ok(old, ['drain', '--status', '--json'], SUP));
+    st = json(ok(old, ['fleet', 'status', '--json'], SUP));
     assert.deepEqual(st.blockers, []);
     assert.equal(st.ready, true);
-    assert.ok(st.checklist.some((c) => /Notify me of new Inbox items/.test(c)));
-    const oldStatus = ok(old, ['drain', '--status'], SUP);
+    const oldStatus = ok(old, ['fleet', 'status'], SUP);
     assert.match(oldStatus, /ready to move: yes\nparity: [0-9a-f]{16} \(\d+ log entries\)/);
     const oldParity = /parity: ([0-9a-f]{16})/.exec(oldStatus)[1];
 
@@ -2230,38 +2290,82 @@ test('drain: the fleet stops cleanly, and a clone elsewhere picks it up', () => 
     g(['clone', '-q', org, neu], base);
     for (const [k, v] of [['user.email', 't@t'], ['user.name', 't']]) g(['config', k, v], neu);
     assert.ok(!fs.existsSync(path.join(neu, 'docs/devteam/run/log')));
-    assert.match(ok(neu, ['prompt', 'supervisor']), /^The fleet is drained .*This looks like the machine it moved to\. Before anything else: \(1\) DEVTEAM_ROLE=supervisor node docs\/devteam\/scripts\/devteam\.mjs undrain/, 'the standard prompt sees the drain, and that this is a fresh clone');
-    const up = ok(neu, ['undrain'], SUP);
+    assert.match(ok(neu, ['prompt', 'supervisor']), /^The fleet is parked .*This looks like the machine it moved to\. Before anything else: \(1\) DEVTEAM_ROLE=supervisor node docs\/devteam\/scripts\/devteam\.mjs fleet unpark/, 'the standard prompt sees the parked fleet, and that this is a fresh clone');
+    const up = ok(neu, ['fleet', 'resume'], SUP);
     assert.match(up, /run\/log was empty: rebuilt \d+ file\(s\)/);
     assert.equal(/parity: ([0-9a-f]{16})/.exec(up)?.[1], oldParity, 'the new machine holds exactly the log the old one did');
-    assert.match(up, /## Handoff from the drained supervisor[\s\S]*Next: restart ch-01-tidy\./);
-    assert.match(up, new RegExp(`undrained \\(a-[^)]+\\)[\\s\\S]*devteam\\.mjs worker ${ID} +parked; its handoff note goes into its prompt`));
-    assert.ok(fs.readdirSync(path.join(neu, 'docs/devteam/run/log')).some((f) => /^supervisor-/.test(f)));
-    assert.equal(json(ok(neu, ['drain', '--status', '--json', '--no-fetch'], SUP)).draining, null, 'the drain is lifted');
-    assert.doesNotMatch(ok(neu, ['prompt', 'supervisor']), /The fleet is drained/);
-    assert.ok(json(ok(neu, ['log', '--type', 'act', '--json'])).some((a) => a.class === 'undrain' && a.refs[0] === act.id));
+    assert.match(up, /## Handoff from the previous supervisor[\s\S]*Next: restart ch-01-tidy\./);
+    assert.match(up, /unparked the fleet \(f-\d{8}-\d{9}\): Upkeep → run/);
+    assert.match(up, new RegExp(`devteam\\.mjs worker ${ID} +its handoff note goes into its prompt`));
+    assert.equal(json(ok(neu, ['fleet', 'status', '--json', '--no-fetch'], SUP)).fleet, null, 'the park is lifted');
+    assert.doesNotMatch(ok(neu, ['prompt', 'supervisor']), /The fleet is parked/);
+    assert.ok(json(ok(neu, ['log', '--type', 'act', '--json'])).some((a) => a.class === 'fleet-unpark'));
 
     // the restarted worker's prompt carries the handoff until it logs its first phase
     const wp = ok(neu, ['prompt', 'worker', ID]);
-    assert.match(wp, /## Handoff from a drained session[\s\S]*Done: T1\. Next: write tidy\/c\.txt \(T2\)/);
-    assert.match(wp, new RegExp(`on ticket/${ID}, committed`));
+    assert.match(wp, /## Handoff from a parked session[\s\S]*the fleet was parked[\s\S]*Done: T1\. Next: write tidy\/c\.txt \(T2\)/);
+    assert.match(wp, new RegExp(`the handoff commit [0-9a-f]{12} on ticket/${ID}`));
     const nw = path.join(neu, '.worktrees', ID);
     if (hasTmux) {
-      // --resume where the harness has no session (no worktree here yet): a fresh start, said plainly,
-      // on the pushed branch, with the handoff in the prompt
       const rs = spawnSync(process.execPath, [path.join(neu, 'docs/devteam/scripts/devteam.mjs'), 'worker', ID, '--resume'], { cwd: neu, env: env(SUP), encoding: 'utf8' });
       spawnSync('tmux', ['kill-server'], { env: env({}) });
       assert.equal(rs.status, 0, rs.stderr);
       assert.match(rs.stderr, /no worker session to resume for ch-01-tidy: its worktree was just made here.*starting it fresh with agent_command and its handoff note/);
       assert.equal(g(['rev-parse', 'HEAD'], nw), g(['rev-parse', `origin/ticket/${ID}`], neu), 'the worktree continues the pushed branch, not main');
-      assert.match(fs.readFileSync(path.join(neu, `docs/devteam/run/prompts/${ID}.txt`), 'utf8'), /## Handoff from a drained session/);
-      assert.match(ok(neu, ['prompt', 'worker', ID]), /## Handoff from a drained session/, 'the launch\'s own "starting" line keeps the note current');
+      assert.match(fs.readFileSync(path.join(neu, `docs/devteam/run/prompts/${ID}.txt`), 'utf8'), /## Handoff from a parked session/);
     } else g(['worktree', 'add', '-q', '--track', '-b', `ticket/${ID}`, nw, `origin/ticket/${ID}`], neu);
     ok(nw, ['phase', 'build', '--task', 'T2'], WRK);
-    assert.doesNotMatch(ok(neu, ['prompt', 'worker', ID]), /Handoff from a drained session/, 'after its first phase line the note is history');
-    assert.ok(fs.existsSync(path.join(nw, `docs/devteam/project/tickets/${ID}/handoff.md`)), 'the note stays in the ticket folder');
+    assert.doesNotMatch(ok(neu, ['prompt', 'worker', ID]), /Handoff from a parked session/, 'after its first phase line the note is history');
   } finally {
-    fs.rmSync(tmuxDir, { recursive: true, force: true });
-    if (!process.env.DEVTEAM_TEST_KEEP) fs.rmSync(base, { recursive: true, force: true }); else console.log(`drain fixture kept at ${base}`);
+    F.done();
+  }
+});
+
+test('fleet drain: in-flight work finishes, nothing new starts, and a drained fleet moves with parity', () => {
+  const F = fleetFixture('drain');
+  const { org, old, neu, run, ok, g, base } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const ID = 'ch-01-small';
+  const WRK = { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: ID };
+  try {
+    ok(old, ['ticket', 'add', ID, '--json', JSON.stringify({ title: 'small', feature: 'chores', component: 'ch', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['small/**'], done_when: ['the small check passes'], notes: 'turns on small' })], SUP);
+    ok(old, ['ticket', 'add', 'ch-02-later', '--json', JSON.stringify({ title: 'later', feature: 'chores', component: 'ch', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['later/**'], done_when: ['the later check passes'], notes: 'turns on later' })], SUP);
+    const ww = path.join(old, '.worktrees', ID);
+    g(['worktree', 'add', '-q', '-b', `ticket/${ID}`, ww, 'origin/main'], old);
+    ok(ww, ['phase', 'build', '--task', 'T1'], WRK);
+    assert.match(ok(old, ['fleet', 'drain', '--reason', 'quiet week'], SUP), /draining the fleet \(f-\d{8}-\d{9}\): 1 goal\(s\) set to drain/);
+    assert.equal(json(ok(old, ['messages', '--to', ID, '--json'])).length, 0, 'a drain tells running sessions nothing: they finish');
+    const ready = json(ok(old, ['ready', '--json']));
+    assert.deepEqual(ready.ready, [], 'nothing new is ready');
+    assert.ok(ready.waiting.some((w) => w.id === 'ch-02-later' && w.why === 'goal draining'));
+    assert.match(run(old, ['worker', 'ch-02-later'], SUP).err, /its goal is draining: a draining goal finishes what is running and starts nothing new/);
+    assert.match(ok(old, ['goal', 'list']), /^upkeep \[draining: quiet week\] Upkeep/m);
+    let st = json(ok(old, ['fleet', 'status', '--json'], SUP));
+    assert.equal(st.fleet.mode, 'drain');
+    assert.ok(st.blockers.some((b) => new RegExp(`${ID}: still running \\(phase build\\): a drain finishes in-flight work`).test(b)));
+    // the ticket finishes (merged, as merge would put it on main)
+    write(path.join(ww, 'small/a.txt'), 'a\n');
+    g(['add', '-A'], ww);
+    g(['commit', '-qm', `${ID}: small`], ww);
+    g(['push', '-q', 'origin', `ticket/${ID}`], ww);
+    g(['merge', '-q', '--no-ff', '-m', `Merge pull request #1 from x/ticket/${ID}`, `ticket/${ID}`], old);
+    g(['push', '-q', 'origin', 'main'], old);
+    ok(ww, ['phase', 'done'], WRK);
+    g(['worktree', 'remove', '--force', ww], old);
+    assert.match(ok(old, ['goal', 'list']), /^upkeep \[drained: quiet week\]/m, 'drained once nothing of it runs');
+    F.land();
+    ok(old, ['handoff', '--supervisor'], SUP, 'Nothing in flight. Next: run Upkeep again.\n');
+    st = json(ok(old, ['fleet', 'status', '--json'], SUP));
+    assert.deepEqual(st.blockers, []);
+    assert.equal(st.ready, true, 'a drained fleet, nothing running, can move');
+    const oldParity = st.parity.hash;
+    g(['clone', '-q', org, neu], base);
+    for (const [k, v] of [['user.email', 't@t'], ['user.name', 't']]) g(['config', k, v], neu);
+    const up = ok(neu, ['fleet', 'undrain'], SUP);
+    assert.equal(/parity: ([0-9a-f]{16})/.exec(up)?.[1], oldParity);
+    assert.match(up, /undrained the fleet \(f-\d{8}-\d{9}\): Upkeep → run/);
+    assert.deepEqual(json(ok(neu, ['ready', '--json'])).ready.map((r) => r.id), ['ch-02-later'], 'work starts again');
+  } finally {
+    F.done();
   }
 });

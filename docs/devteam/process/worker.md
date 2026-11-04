@@ -8,7 +8,7 @@ You are a worker: one session bound to one ticket, from spec to merge, run with 
 
 ## 2. Catch up before you act
 
-0. If your prompt has a **Handoff from a drained session**, read it first: it is the previous session's own account (what's done, the exact next step, open questions, anything it couldn't commit). Check it against your branch and the log, then carry on from its next step. Keep `handoff.md`; it is part of the record and lands with your PR. Once you log your first phase, later prompts leave it out.
+0. If your prompt has a **Handoff from a parked session**, read it first: it is the previous session's own account (what's done, the exact next step, open questions, anything it couldn't commit). Check it against your branch and the log, then carry on from its next step. The handoff is the commit on your branch; it lands with your PR. Once you log your first phase, later prompts leave it out.
 1. `devteam.mjs ticket show <id>`: scope, dependencies, `touches`, done-whens, one-way doors.
 2. `project/tickets/<id>/` if it exists: you may be resuming; its files are what has been done.
 3. `devteam.mjs history <id>`: phases, messages, rulings and owner answers about your ticket and its dependencies. Then `devteam.mjs messages`. Make sure every `ruling` and `answer` is in your spec or plan before researching: someone may already have decided what you are about to investigate.
@@ -86,14 +86,13 @@ The supervisor turns recurring observations into lessons, and accepted lessons r
 5. `devteam.mjs send supervisor "<id> ready to merge" --kind merge-request` (it sends your exact head). Pushing after that voids the request; ask again with the new head.
 6. When the supervisor says it merged: `devteam.mjs phase done`, then exit. The supervisor removes the worktree and closes the window.
 
-## 9. When you are told to drain
+## 9. When you are told to park
 
-A `Drain:` ruling means the fleet is stopping, usually to move to another machine where a new session, without your context, will carry on from your branch. Stop what you are doing at the next safe point, then:
+A `Park:` ruling means your goal is parked, or let go, or the whole fleet is stopping to move to another machine; a new session, without your context, may carry on from your branch. Stop what you are doing at the next safe point, then:
 
-1. Commit all work in progress, even half-done (a `WIP:` commit is fine; never leave changes only in the worktree), and push your branch.
-2. Write `project/tickets/<id>/handoff.md` (a planner: `project/plans/<feature>/handoff.md`), overwriting any earlier one: what's done, the exact next step (the task, the file, the command), open questions and requests you're waiting on (with message and question ids), and anything you could not commit and why. Write it for a reader who has only your files and the log.
-3. Commit and push it.
-4. `devteam.mjs phase parked --note "drained"`.
-5. Stop: end your turn and exit. Don't start anything new, and don't wait for a reply.
+1. Commit all work in progress, even half-done (a `WIP:` commit is fine; never leave changes only in the worktree).
+2. Record your handoff: `devteam.mjs handoff`, with the note on stdin (or `--file`). Write it for a reader who has only your files and the log: what's done, the exact next step (the task, the file, the command), open questions and requests you're waiting on (with message and question ids), and anything you could not commit and why. It becomes an empty commit on your branch titled `devteam handoff: <your name>`, and the branch is pushed.
+3. `devteam.mjs phase parked --note "parked"`.
+4. Stop: end your turn and exit. Don't start anything new, and don't wait for a reply.
 
-A handoff note doesn't void a review verdict; nothing else about committing after an approval changes.
+A merge-request you sent before parking is void (you pushed); send it again once resumed. The handoff commit changes no file, so it doesn't void a review verdict. When your goal is drained rather than parked, nothing changes for you: finish your ticket.
