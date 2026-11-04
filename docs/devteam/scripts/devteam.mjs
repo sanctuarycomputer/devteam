@@ -1697,9 +1697,32 @@ function cmdValidate() {
   const warnings = [];
   const err = (id, m) => errors.push(`${id}: ${m}`);
   const STORY_RE = /^[A-Z][A-Z0-9]*-S[0-9]+$/;
+  // Ticket-level planning checks read the lines as the planner or supervisor has them now (the
+  // working tree), so a component declared in a draft can be planned against before it lands.
+  // They are advice for the graph, not one of the four enforcement points: check-ticket's footprint
+  // and check-pr's coverage judge the same tickets by committed settings (settingsInForce) at merge.
+  const S0 = loadSettings(); const lined = linesDeclared(S0); const comps0 = componentsOn(S0, 'home'); const dev0 = devteamLine();
   for (const [id, t] of ts) {
     if (!id.startsWith(`${t.component}-`)) err(id, `id must start with its component "${t.component}-"`);
     for (const g of t.touches ?? []) if (unbalanced(g)) err(id, `touches entry "${g}" has unbalanced braces`);
+    // Component lines (spec §6.1): the component is declared, and every touches entry lies in its
+    // line (or a touches_components member's) and no other, so a ticket's footprint is one line.
+    if (lined && isActive(t)) {
+      const decl = S0.components?.[t.component];
+      if (!decl) err(id, `component "${t.component}" is not declared in settings.components (declare it with its owns, or plan the ticket under a declared one)`);
+      const tc = t.touches_components ?? [];
+      if (tc.length && !['contract', 'integration'].includes(t.kind)) err(id, 'touches_components is for contract and integration tickets (planning.md D2, D7)');
+      for (const c of tc) if (!S0.components?.[c]) err(id, `touches_components "${c}" is not a declared component`);
+      else if (componentLink(c, S0) !== componentLink(t.component, S0)) err(id, `touches_components "${c}" is in another repo; a ticket changes one repo (split it per repo)`);
+      const mine = new Set([t.component, ...tc]);
+      for (const entry of t.touches ?? []) {
+        const owners = prefixOwners(entry, comps0, dev0);
+        if (owners === null) err(id, `touches "${entry}" has no static prefix, so it could be in any line; start it with a folder`);
+        else if (owners.includes('devteam')) err(id, `touches "${entry}" lies in the kit's own line; only the ticket's own ${projectRel}/tickets/${id}/ is its to write, and kit upgrades are chores`);
+        else if (!owners.length) err(id, `touches "${entry}" lies in no component's line`);
+        else if (owners.some((o) => !mine.has(o))) err(id, `touches "${entry}" lies in ${owners.filter((o) => !mine.has(o)).join(' and ')}'s line, not ${t.component}'s (list ${owners.filter((o) => !mine.has(o)).join(', ')} in touches_components on a contract or integration ticket, or split the ticket)`);
+      }
+    }
     for (const d of t.depends_on ?? []) {
       if (d === id) err(id, 'depends on itself');
       else if (!ts.has(d)) err(id, `depends_on "${d}" does not exist (D3)`);
@@ -1816,6 +1839,16 @@ function cmdValidate() {
     // A reserved slug as a component prefix: the one G1 exception, only for a project already using it.
     const reserved = [...ts.values()].filter((t) => RESERVED_LINKS.includes(t.component)).map((t) => t.id);
     if (reserved.length) errors.push(`tickets ${reserved.join(', ')}: component "${[...new Set(reserved.map((id) => ts.get(id).component))].join('" and "')}" is reserved (home is the repo that holds the kit, devteam the kit's own files); rename the component: supersede each ticket with one under another component (ticket add <new-id>, ticket set <old-id> --json '{"superseded_by": "<new-id>"}')`);
+    // Main's tree under the lines in force (§4, point 1): main's settings, or this head's when it
+    // changes settings.md (a plan or chore PR's validate, in its worktree). Checked for one ticket,
+    // a gap on main is not that ticket's to fix: a warning, as for D4.
+    const main = mainRef();
+    if (main && projectInRepo) {
+      const head = resolveCommit('HEAD');
+      const sIn = settingsInForce(head ? git(['merge-base', main, head]) : null, head);
+      const cov = coverageAt(main, sIn);
+      if (cov) for (const l of coverageReport({ ...coverageGaps(cov, sIn), ref: main }, sIn)) (scope ? warnings : errors).push(`components: ${l}${scope ? `; not ${scope}'s to fix` : ''}`);
+    }
   }
 
   for (const e of readLog().errors) warnings.push(`log ${e}`);

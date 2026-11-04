@@ -2613,6 +2613,40 @@ test('components check reads a commit\'s tree: dotfiles, gitlinks, symlinks, spa
   } finally { F.done(); }
 });
 
+test('validate: main\'s tree under the lines in force, declared components, touches inside one line', () => {
+  const F = monoFixture('validate-lines');
+  const { old, ok, run, g, lines } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const tk = (id, extra) => ok(old, ['ticket', 'add', id, '--json', JSON.stringify({ title: id, feature: 'chores', component: id.split('-')[0], kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['api/**'], done_when: ['the api suite passes'], notes: 'n', ...extra })], SUP);
+  try {
+    lines(F.STD);
+    tk('api-01-a');
+    tk('web-02-b', { touches: ['web/src/**', 'api/app.rb'] });
+    tk('ghost-03-c', { touches: ['web/**'] });
+    tk('web-04-d', { touches: ['**/*.js'] });
+    tk('api-05-e', { kind: 'contract', contracts: { provides: ['api-v1'] }, touches: ['api/lib/**', 'web/src/api.js'], touches_components: ['web'] });
+    tk('api-06-f', { touches: ['docs/devteam/governance/quality.md'] });
+    tk('ops-07-g', { touches_components: ['web'] });
+    const out = run(old, ['validate']).out;
+    assert.doesNotMatch(out, /api-01-a: touches/, 'inside its own line');
+    assert.match(out, /web-02-b: touches "api\/app\.rb" lies in api's line, not web's \(list api in touches_components on a contract or integration ticket, or split the ticket\)/);
+    assert.match(out, /ghost-03-c: component "ghost" is not declared in settings\.components/);
+    assert.match(out, /web-04-d: touches "\*\*\/\*\.js" has no static prefix, so it could be in any line/);
+    assert.doesNotMatch(out, /api-05-e: touches/, 'a contract ticket may span the lines it names');
+    assert.match(out, /api-06-f: touches "docs\/devteam\/governance\/quality\.md" lies in the kit's own line/);
+    assert.match(out, /ops-07-g: touches_components is for contract and integration tickets/);
+    // coverage of main's tree: a file pushed straight to main
+    write(path.join(old, 'scripts/x.sh'), 'x\n');
+    g(['add', '-A'], old);
+    g(['commit', '-qm', 'bypass'], old);
+    g(['push', '-q', 'origin', 'main'], old);
+    assert.match(run(old, ['validate']).out, /error: components: unowned: scripts\/ \(1\): scripts\/x\.sh/);
+    // checked for one ticket (its gate), the gap is main's, not the ticket's: a warning
+    const scoped = spawnSync(process.execPath, [path.join(old, 'docs/devteam/scripts/devteam.mjs'), 'validate'], { cwd: old, env: { ...F.env({}), DEVTEAM_GATE_TICKET: 'api-01-a' }, encoding: 'utf8' });
+    assert.match(scoped.stdout, /warning: components: unowned: scripts\/ .*; not api-01-a's to fix/);
+  } finally { F.done(); }
+});
+
 test('fleet park: every session stops with a handoff, and a clone elsewhere picks it up with parity', () => {
   const F = fleetFixture('park');
   const { org, old, neu, home, env, run, ok, g, base } = F;

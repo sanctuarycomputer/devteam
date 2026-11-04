@@ -475,6 +475,14 @@
             },
             "minItems": 1
           },
+          "touches_components": {
+            "description": "On a contract or integration ticket: other components in the same repo whose lines its touches may fall in (planning.md D2, D7).",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$"
+            }
+          },
           "done_when": {
             "description": "What must be true for it to count as done.",
             "type": "array",
@@ -1810,6 +1818,7 @@
           "depends_on",
           "contracts",
           "touches",
+          "touches_components",
           "done_when",
           "one_way_doors",
           "superseded_by",
@@ -1825,6 +1834,7 @@
           "depends_on",
           "contracts",
           "touches",
+          "touches_components",
           "done_when",
           "one_way_doors",
           "superseded_by",
@@ -1840,6 +1850,7 @@
           "depends_on",
           "contracts",
           "touches",
+          "touches_components",
           "done_when",
           "one_way_doors",
           "superseded_by",
