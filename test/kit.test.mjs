@@ -2874,6 +2874,33 @@ test('one scope grammar: knowledge scopes unchanged, link: scopes reach prompts 
   } finally { F.done(); }
 });
 
+test('the Links block: links whose for matches the ticket, plus the ticket\'s and feature\'s own; unknown ids refused', () => {
+  const F = monoFixture('links-block');
+  const { old, ok, run, edit, g } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  try {
+    edit((j) => { j.links = {
+      figma: { kind: 'url', title: 'Companion designs', url: 'https://figma.test/c', for: ['component:web'], notes: 'ignore the old page' },
+      runbook: { kind: 'url', title: 'Runbook', url: 'https://notion.test/r', for: ['all'] },
+      api: { kind: 'url', title: 'API docs', url: 'https://api.test/docs' },
+      unrelated: { kind: 'url', title: 'Other', url: 'https://o.test', for: ['component:api'] },
+    }; });
+    g(['commit', '-qam', 'links'], old); g(['push', '-q', 'origin', 'main'], old);
+    const tk = (id, extra = {}) => ok(old, ['ticket', 'add', id, '--json', JSON.stringify({ title: id, feature: 'chores', component: 'web', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['web/**'], done_when: ['the web suite passes'], notes: 'n', ...extra })], SUP);
+    tk('web-01-a', { links: ['api'] });
+    const p = ok(old, ['prompt', 'worker', 'web-01-a']);
+    assert.match(p, /Links this work uses[\s\S]*- Companion designs \(https:\/\/figma\.test\/c\): ignore the old page \[link:figma\]/);
+    assert.match(p, /- Runbook \(https:\/\/notion\.test\/r\) \[link:runbook\]/);
+    assert.match(p, /- API docs \(https:\/\/api\.test\/docs\) \[link:api\]/, "the ticket's own links");
+    assert.doesNotMatch(p, /Other/);
+    tk('web-02-b', { links: ['nope'] });
+    assert.match(run(old, ['validate']).out, /web-02-b: links "nope" is not in settings links/);
+    // designs cite link:<id>; an unknown id is an error while the registry has links
+    write(path.join(old, 'docs/devteam/project/designs/web.md'), '# Web\n\nSee link:figma and link:missing.\n');
+    assert.match(run(old, ['validate']).out, /designs\/web\.md cites link:missing, which is not in settings links/);
+  } finally { F.done(); }
+});
+
 test('fleet park: every session stops with a handoff, and a clone elsewhere picks it up with parity', () => {
   const F = fleetFixture('park');
   const { org, old, neu, home, env, run, ok, g, base } = F;

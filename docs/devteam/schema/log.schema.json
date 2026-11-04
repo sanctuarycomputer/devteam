@@ -394,6 +394,14 @@
             "description": "The design document it implements.",
             "type": "string"
           },
+          "links": {
+            "description": "Registry links (settings.md links) every ticket of this feature needs, by id.",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$"
+            }
+          },
           "notes": {
             "description": "Anything else the planner wanted on record.",
             "type": "string"
@@ -493,6 +501,14 @@
           },
           "touches_components": {
             "description": "On a contract or integration ticket: other components in the same repo whose lines its touches may fall in (planning.md D2, D7).",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$"
+            }
+          },
+          "links": {
+            "description": "Registry links (settings.md links) this ticket's worker needs, by id; they join its prompt's Links block.",
             "type": "array",
             "items": {
               "type": "string",
@@ -1813,6 +1829,7 @@
           "preconditions",
           "stories",
           "design",
+          "links",
           "notes"
         ],
         "supervisor": [
@@ -1821,6 +1838,7 @@
           "preconditions",
           "stories",
           "design",
+          "links",
           "notes"
         ],
         "owner": [
@@ -1829,6 +1847,7 @@
           "preconditions",
           "stories",
           "design",
+          "links",
           "notes"
         ]
       },
@@ -1843,6 +1862,7 @@
           "contracts",
           "touches",
           "touches_components",
+          "links",
           "done_when",
           "one_way_doors",
           "superseded_by",
@@ -1859,6 +1879,7 @@
           "contracts",
           "touches",
           "touches_components",
+          "links",
           "done_when",
           "one_way_doors",
           "superseded_by",
@@ -1875,6 +1896,7 @@
           "contracts",
           "touches",
           "touches_components",
+          "links",
           "done_when",
           "one_way_doors",
           "superseded_by",

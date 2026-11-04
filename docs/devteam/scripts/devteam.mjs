@@ -1753,6 +1753,7 @@ function cmdValidate() {
         else if (owners.some((o) => !mine.has(o))) err(id, `touches "${entry}" lies in ${owners.filter((o) => !mine.has(o)).join(' and ')}'s line, not ${t.component}'s (list ${owners.filter((o) => !mine.has(o)).join(', ')} in touches_components on a contract or integration ticket, or split the ticket)`);
       }
     }
+    for (const l of t.links ?? []) if (!(loadSettings().links ?? {})[l]) err(id, `links "${l}" is not in settings links`);
     for (const d of t.depends_on ?? []) {
       if (d === id) err(id, 'depends on itself');
       else if (!ts.has(d)) err(id, `depends_on "${d}" does not exist (D3)`);
@@ -1783,6 +1784,7 @@ function cmdValidate() {
   // Features: every story defined is served and every story served is defined (D6); a story across
   // components has an integration ticket (D7); an approved feature has reviews and ready goals.
   for (const [fid, f] of fs_) {
+    for (const l of f.links ?? []) if (!(loadSettings().links ?? {})[l]) errors.push(`feature ${fid}: links "${l}" is not in settings links`);
     const stories = new Set((f.stories ?? []).map((s) => s.id));
     const mine = [...ts.values()].filter((t) => isActive(t) && t.feature === fid);
     const served = new Set();
@@ -1878,6 +1880,13 @@ function cmdValidate() {
       const sIn = settingsInForce(head ? git(['merge-base', main, head]) : null, head);
       const cov = coverageAt(main, sIn);
       if (cov) for (const l of coverageReport({ ...coverageGaps(cov, sIn), ref: main }, sIn)) (scope ? warnings : errors).push(`components: ${l}${scope ? `; not ${scope}'s to fix` : ''}`);
+    }
+    // Designs cite links as link:<id>; checked only while the registry has links (open issue 12).
+    if (Object.keys(s.links ?? {}).length) {
+      const dd = path.join(projectDir, 'designs');
+      for (const f of fs.existsSync(dd) ? fs.readdirSync(dd).filter((x) => x.endsWith('.md')) : []) {
+        for (const m of (readText(path.join(dd, f)) ?? '').matchAll(/(?:^|[\s(`[])link:([a-z][a-z0-9]*(?:-[a-z0-9]+)*)/g)) if (!s.links[m[1]]) errors.push(`designs/${f} cites link:${m[1]}, which is not in settings links`);
+      }
     }
   }
 
@@ -4293,6 +4302,12 @@ const knowledgeBlock = (target) => {
   const ks = knowledgeFor(target);
   return ks.length ? `What this project has learned that applies here (accepted knowledge):\n${ks.map((k) => `- [${k.kind}${k.valence < 0 ? ', avoid' : ''}] ${k.statement} (${k.id})`).join('\n')}` : '';
 };
+// The block a prompt carries before its knowledge: the registry links this work uses (spec §6.3).
+const linksBlock = (target) => {
+  const reg = loadSettings().links ?? {};
+  const ids = target ? scopeContext(target).shown : [];
+  return ids.length ? `Links this work uses (the project's registry, settings.md links; look things up there rather than guessing):\n${ids.map((id) => LINK_KINDS[reg[id].kind]?.promptLine(reg[id], id) ?? `- ${reg[id].title} [link:${id}]`).join('\n')}` : '';
+};
 function cmdKnowledge() {
   const [sub, id] = positional;
   const by = () => (flags.owner ? ownerWriter().by : (supervisorOnly('knowledge'), 'supervisor'));
@@ -6012,8 +6027,9 @@ function cmdPrompt() {
   const p = role === 'planner' && positional[1] ? plannerPrompt(positional[1]) : PROMPTS[role].replace(/\{\{ID\}\}/g, positional[1] ?? '');
   if (role === 'supervisor') { const d = drainedPreface(); return out(d ? `${d}\n\n${p}` : p); }
   const handoff = positional[1] ? handoffBlock(role === 'worker' ? positional[1] : `plan-${positional[1]}`) : null;
+  const links = linksBlock(positional[1]);
   const block = knowledgeBlock(positional[1]);
-  out([p, handoff, block].filter(Boolean).join('\n\n'));
+  out([p, handoff, links, block].filter(Boolean).join('\n\n'));
 }
 
 const tmux = (args) => sh('tmux', args) !== null;
@@ -6293,10 +6309,11 @@ function makeSession(role) {
   seedWorktree(wt);
   const promptFile = path.join(runDir, 'prompts', `${name}.txt`);
   const knowledge = knowledgeBlock(id);
+  const links = linksBlock(id);
   const held = block ?? (role === 'planner' ? idBlockFor(id) : null);
   const text = `${PROMPTS[role].replace(/\{\{ID\}\}/g, id)}${held ? ` ${idBlockText(held)}` : ''}`;
   const handoff = handoffBlock(name);
-  fs.writeFileSync(promptFile, `${text}${handoff ? `\n\n${handoff}` : ''}${knowledge ? `\n\n${knowledge}` : ''}\n`);
+  fs.writeFileSync(promptFile, `${text}${handoff ? `\n\n${handoff}` : ''}${links ? `\n\n${links}` : ''}${knowledge ? `\n\n${knowledge}` : ''}\n`);
   // Workers live in detached tmux windows the owner can attach to; the supervisor is not one of them.
   let fresh = false;
   if (!tmux(['has-session', '-t', s.tmux_session])) { fresh = tmux(['new-session', '-d', '-s', s.tmux_session, '-n', name, '-c', wt]); if (!fresh) die('could not start tmux'); }
