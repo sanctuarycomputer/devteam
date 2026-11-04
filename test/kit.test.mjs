@@ -2911,6 +2911,54 @@ test('coverage at landing: no lines, no tree work; every forge judges the merge;
   } finally { F.done(); }
 });
 
+test('the registry at landing: checked whatever the PR, url edits tied to registry-edit acts, tickets judged by main (F3, F7, F8, O6)', () => {
+  const F = monoFixture('registry-landing');
+  const { old, ok, run, g, lines, edit } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const body = path.join(F.base, 'body.md');
+  write(body, '## One-way doors\n\nNone.\n');
+  const chore = (slug, fn) => {
+    const w = path.join(old, '.worktrees', `chore-${slug}`);
+    g(['worktree', 'add', '-q', '-b', `chore-${slug}`, w, 'origin/main'], old);
+    fn(w);
+    g(['add', '-A'], w);
+    g(['commit', '-qm', `chore-${slug}: x`], w);
+    g(['push', '-q', 'origin', `chore-${slug}`], w);
+    write(path.join(old, `docs/devteam/run/pr/chore-${slug}.md`), `# chore-${slug}: x\n\n## One-way doors\n\nNone.\n`);
+    return { w, sha: g(['rev-parse', 'HEAD'], w) };
+  };
+  const dry = (slug) => { const r = run(old, ['merge', '--chore', slug, '--dry-run'], SUP); return r.out + r.err; };
+  try {
+    lines(F.STD, { links: { figma: { kind: 'url', title: 'Designs', url: 'https://figma.test/a' }, console: { kind: 'repo', title: 'Console', remote: 'usbclub/console' } } });
+    // a url link edited by hand and landed with no act is refused; the same edit made with link set passes
+    chore('hand', (w) => edit((j) => { j.links.figma.title = 'All designs'; }, w));
+    assert.match(dry('hand'), /links\.figma.*no registry-edit act.*link add\|set\|rm/, 'F3: a hand edit to a url link has no act');
+    ok(old, ['link', 'set', 'figma', 'title', 'All designs'], SUP);
+    assert.doesNotMatch(dry('hand'), /registry-edit/, 'the act link set logged lands it');
+    g(['checkout', '-q', '--', 'docs/devteam/project/settings.md'], old);
+    // a bad registry is refused at landing, whatever the PR
+    const bad = chore('bad', (w) => edit((j) => { j.links.notes = { kind: 'doc', title: 'D' }; }, w));
+    assert.match(run(old, ['check-pr', '--head-ref', 'chore-bad', '--sha', bad.sha, '--title', 'chore-bad: x', '--body-file', body]).out, /links\.notes: unknown kind "doc"/);
+    // F7: a component on a repo link is refused at landing with the PR 2 note, not passed and then mis-reported
+    const comp = chore('console-comp', (w) => edit((j) => { j.components.desktop = { link: 'console' }; }, w));
+    assert.match(run(old, ['check-pr', '--head-ref', 'chore-console-comp', '--sha', comp.sha, '--title', 'chore-console-comp: x', '--body-file', body]).out, /components\.desktop: link "console".*repo links land in PR 2/);
+    // O6: a ticket PR is judged by main's settings, so rewriting settings.md can't switch its footprint off
+    ok(old, ['ticket', 'add', 'api-01-sneak', '--json', JSON.stringify({ title: 'x', feature: 'chores', component: 'api', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['api/**', 'docs/devteam/project/settings.md'], done_when: ['the api suite passes'], notes: 'n' })], SUP);
+    const tw = path.join(old, '.worktrees', 'api-01-sneak');
+    g(['worktree', 'add', '-q', '-b', 'ticket/api-01-sneak', tw, 'origin/main'], old);
+    edit((j) => { j.components = { api: { stack: 'rails' }, web: { stack: 'next' } }; }, tw);
+    write(path.join(tw, 'api/app.rb'), 'changed\n');
+    g(['commit', '-qam', 'api-01-sneak: x'], tw);
+    const ct = run(old, ['check-ticket', 'api-01-sneak', '--sha', g(['rev-parse', 'HEAD'], tw), '--title', 'api-01-sneak: x', '--body-file', body]).out;
+    assert.match(ct, /changes files outside the line of api: docs\/devteam\/project\/settings\.md/, 'O6: main\'s lines judge a ticket');
+    // F8: validate in a chore worktree that narrows a line and moves its files judges the tree that
+    // would land, as coverageFails does; in the main checkout it judges main under main's settings
+    const mv = chore('move', (w) => { edit((j) => { j.components.api.owns = ['api/lib/**', 'api/core/**']; }, w); fs.mkdirSync(path.join(w, 'api/core')); g(['mv', 'api/app.rb', 'api/core/app.rb'], w); });
+    assert.doesNotMatch(run(mv.w, ['validate']).out, /components: /, 'F8: the landing tree under the landing settings has no gap');
+    assert.doesNotMatch(run(old, ['validate']).out, /components: /, 'main under main\'s settings has none either');
+  } finally { F.done(); }
+});
+
 test('unowned files on main: a severity-4 finding, and no new ticket starts there until a line covers them', () => {
   const F = monoFixture('unowned');
   const { old, ok, run, g, lines } = F;
@@ -2924,13 +2972,13 @@ test('unowned files on main: a severity-4 finding, and no new ticket starts ther
     const f = json(ok(old, ['metrics', '--json'])).findings.find((x) => x.kind === 'unowned-files');
     assert.ok(f, 'the finding');
     assert.equal(f.subject, 'home');
-    assert.match(f.detail, /1 tracked path\(s\) on .* no line owns/);
+    assert.match(f.detail, /origin\/main has coverage gaps: 1 unowned \(devteam\.mjs components check lists them\)/, 'F7: the finding names what it counted');
     ok(old, ['observe-metrics'], SUP);
     assert.equal(json(ok(old, ['log', '--type', 'observation', '--json'])).find((o) => o.kind === 'unowned-files').severity, 4);
     const r = json(ok(old, ['ready', '--json']));
     assert.deepEqual(r.waiting, [{ id: 'api-01-a', why: 'unowned files' }]);
     assert.match(ok(old, ['ready']), /unowned files api-01-a .*a chore PR that extends a line/);
-    assert.match(run(old, ['worker', 'api-01-a'], SUP).err, /home's main has 1 path\(s\) no component line owns/);
+    assert.match(run(old, ['worker', 'api-01-a'], SUP).err, /home's main has coverage gaps \(1 unowned\)/);
     lines({ ...F.STD, ops: { owns: [...F.STD.ops.owns, 'scripts/**'] } });
     assert.match(ok(old, ['ready']), /build +api-01-a/, 'a line that covers them clears it');
   } finally { F.done(); }

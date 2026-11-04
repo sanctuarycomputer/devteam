@@ -250,8 +250,9 @@ function settingsAt(ref, { orNull = false } = {}) {
   if (!m) return orNull ? null : { ...SETTINGS_DEFAULTS };
   try { return { ...SETTINGS_DEFAULTS, ...JSON.parse(m[1]) }; } catch { return null; }
 }
-// The owner's settings a commit changes against a base: [{ key, cls }], or null if unreadable.
-// Whole keys as before, then the links registry entry by entry (§3.4).
+// The classed settings a commit changes against a base: [{ key, cls }], or null if unreadable.
+// Whole keys as before, then the links registry entry by entry (§3.4): an owner's class needs an
+// owner answer, a registry-edit the supervisor's act (merge checks both).
 function ownerSettingsChanged(base, head) {
   const a = settingsAt(base), b = settingsAt(head);
   if (!a || !b) return null;
@@ -259,13 +260,15 @@ function ownerSettingsChanged(base, head) {
 }
 // A link is classified by both sides: an owner's kind (LINK_KINDS[k].ownedByOwner: repo) on
 // either side makes every change to it the owner's; an add, a removal or a kind flip is
-// governance-edit on the whole entry; a field change takes that kind's ownerClass(field).
+// governance-edit on the whole entry; a field change takes that kind's ownerClass(field). A link
+// of the supervisor's kind (url) changed in any way is one registry-edit on the entry, never
+// nobody's (F3): an act names a link, not a field.
 const ownersKind = (l) => !!l && !!LINK_KINDS[l.kind]?.ownedByOwner;
 function linkOwnerChanges(a = {}, b = {}) {
   const out = [];
   for (const id of [...new Set([...Object.keys(a ?? {}), ...Object.keys(b ?? {})])].sort()) {
     const x = a?.[id], y = b?.[id];
-    if (!ownersKind(x) && !ownersKind(y)) continue;
+    if (!ownersKind(x) && !ownersKind(y)) { if (canonical(x) !== canonical(y)) out.push({ key: `links.${id}`, cls: 'registry-edit' }); continue; }
     if (!x || !y || x.kind !== y.kind) { out.push({ key: `links.${id}`, cls: 'governance-edit' }); continue; }
     for (const f of [...new Set([...Object.keys(x), ...Object.keys(y)])].sort()) {
       const cls = canonical(x[f]) === canonical(y[f]) ? null : LINK_KINDS[x.kind].ownerClass(f);
@@ -398,8 +401,9 @@ const LINK_KINDS = {
   },
   url: {
     fields: { required: ['url'], optional: ['check'] },
-    // a url link is the supervisor's, edited by registry-edit acts (§3.4, §7)
-    ownerClass: () => null,
+    // a url link is the supervisor's: every change to one is a registry-edit, which merge ties to
+    // the act that made it (§3.4, §7)
+    ownerClass: () => 'registry-edit',
     localOverrides: [],
     hostsComponents: false,
     effectiveSettings: () => null,
@@ -420,9 +424,11 @@ const LINK_KINDS = {
     promptLine: (link, id) => `- ${link.title} (${link.url})${link.notes ? `: ${link.notes}` : ''} [link:${id}]`,
   },
 };
-// A kind is the owner's when any of its fields is (repo); otherwise the supervisor's (url). Derived,
-// so a new kind's entry says it once, in ownerClass.
-for (const K of Object.values(LINK_KINDS)) K.ownedByOwner = [...LINK_COMMON.filter((f) => f !== 'kind'), ...K.fields.required, ...K.fields.optional].some((f) => K.ownerClass(f));
+// The classes a link change can be that are the supervisor's: a logged act, never an owner answer.
+const SUPERVISOR_LINK_CLASSES = ['registry-edit'];
+// A kind is the owner's when any of its fields is an owner's class (repo); otherwise the
+// supervisor's (url). Derived, so a new kind's entry says it once, in ownerClass.
+for (const K of Object.values(LINK_KINDS)) K.ownedByOwner = [...LINK_COMMON.filter((f) => f !== 'kind'), ...K.fields.required, ...K.fields.optional].some((f) => { const c = K.ownerClass(f); return !!c && !SUPERVISOR_LINK_CLASSES.includes(c); });
 const linkFields = (kind) => (LINK_KINDS[kind] ? [...LINK_COMMON, ...LINK_KINDS[kind].fields.required, ...LINK_KINDS[kind].fields.optional] : LINK_COMMON);
 // A remote's identity: owner/name for GitHub, however written; anything else is a URL or a path.
 // Read a checkout's origin with `git config --get remote.origin.url`, the URL as configured:
@@ -520,7 +526,7 @@ function registryProblems(s) {
     if (link !== 'home') {
       if (!links[link]) errors.push(`${at}: link "${link}" is not in links`);
       else if (!LINK_KINDS[links[link].kind]?.hostsComponents) errors.push(`${at}: link "${link}" is a ${links[link].kind} link, which holds no files`);
-      else errors.push(`${at}: link "${link}": only home holds components and tickets in this release`);
+      else errors.push(`${at}: link "${link}": only home holds components and tickets in this release (repo links land in PR 2)`);
     }
     if (c.owns !== undefined && !Array.isArray(c.owns)) errors.push(`${at}.owns: a list of globs`);
     // an empty list is a line around nothing; leave owns out for the sole-component ** default
@@ -1917,17 +1923,26 @@ function cmdValidate() {
     // A reserved slug as a component prefix: the one G1 exception, only for a project already using it.
     const reserved = [...ts.values()].filter((t) => RESERVED_LINKS.includes(t.component)).map((t) => t.id);
     if (reserved.length) errors.push(`tickets ${reserved.join(', ')}: component "${[...new Set(reserved.map((id) => ts.get(id).component))].join('" and "')}" is reserved (home is the repo that holds the kit, devteam the kit's own files); rename the component: supersede each ticket with one under another component (ticket add <new-id>, ticket set <old-id> --json '{"superseded_by": "<new-id>"}')`);
-    // Main's tree under the lines in force (§4, point 1): main's settings, or this head's when it
-    // changes settings.md (a plan or chore PR's validate, in its worktree). Checked for one ticket,
-    // a gap on main is not that ticket's to fix: a warning, as for D4.
+    // Which tree and which settings (§4, point 1), by the rule coverageFails applies at check-pr and
+    // merge (F8): main's tree under main's committed settings, except in a chore context (a chore-
+    // <slug> branch checked out here) whose head changes settings.md, where it is the tree that
+    // chore would land under the settings it would land. A plan's validate --strict runs on a
+    // detached head, so main's. Checked for one ticket, a gap on main is not that ticket's to fix:
+    // a warning, as for D4.
     const main = mainRef();
     if (main && projectInRepo) {
-      const head = resolveCommit('HEAD');
-      const sIn = settingsInForce(head ? git(['merge-base', main, head]) : null, head);
-      const read = readCoverage(() => coverageAt(main, sIn));
-      if (read.error) (scope ? warnings : errors).push(`components: ${read.error}; coverage fails closed until it can`);
+      const head = (git(['rev-parse', '--abbrev-ref', 'HEAD']) ?? '').startsWith('chore-') ? resolveCommit('HEAD') : null;
+      const S = head ? settingsInForce(git(['merge-base', main, head]), head) : null;
+      let ref = main, sIn = mainSettings(), problem = null;
+      if (S?.fromHead && (linesDeclared(S.head ?? {}) || linesDeclared(S.sMain))) {
+        const land = landingTree(head);
+        const J = land.problem ? land : S.landed();
+        if (J.problem) problem = J.problem; else { ref = land.tree; sIn = J.settings; }
+      }
+      const read = problem ? { error: problem.replace(/^components: /, '') } : readCoverage(() => coverageAt(ref, sIn));
+      if (read.error) (scope ? warnings : errors).push(`components: ${read.error}`);
       const cov = read.value;
-      if (cov) for (const l of coverageReport({ ...coverageGaps(cov, sIn), ref: main }, sIn)) (scope ? warnings : errors).push(`components: ${l}${scope ? `; not ${scope}'s to fix` : ''}`);
+      if (cov) for (const l of coverageReport({ ...coverageGaps(cov, sIn), ref }, sIn)) (scope ? warnings : errors).push(`components: ${l}${scope ? `; not ${scope}'s to fix` : ''}`);
     }
     // Designs cite links as link:<id>; checked only while the registry has links (open issue 12).
     if (Object.keys(s.links ?? {}).length) {
@@ -2436,22 +2451,50 @@ const homeFacts = {
 };
 // Main's committed settings (home's main: settings live in home), or the defaults before they land.
 const mainSettings = (fallback = { ...SETTINGS_DEFAULTS }) => (mainRef() ? settingsAt(mainRef(), { orNull: true }) : null) ?? fallback;
-// The settings that judge a PR (§4, "Which settings decide"): main's, committed, or the head's
-// when the PR itself changes settings.md. Never the working tree's. settings.md lives in home, so
-// for a PR in another repo (PR 2) they are home main's: that repo's diff can't touch it.
-function settingsInForce(base, sha, R = homeFacts) {
-  if (R.name !== 'home') return mainSettings();
-  const changes = !!base && !!sha && git(['diff', '--quiet', base, sha, '--', `${projectRel}/settings.md`]) === null;
-  const head = changes ? settingsAt(sha, { orNull: true }) : null;
-  // __fromHead: the landing tree's own settings decide (a merged settings.md)
-  return head ? { ...head, __fromHead: true } : mainSettings();
+// The settings that judge a PR (§4, "Which settings decide"). Never the working tree's.
+// - A ticket PR, and any PR that leaves settings.md alone: main's, committed. A ticket can never
+//   change settings.md (it's in the kit's line), so its head's settings never decide (O6).
+// - A plan or chore PR that changes settings.md: the settings that would land. That is the head's
+//   when main's settings.md hasn't moved since the branch left it, else the merge's (read from the
+//   landing tree, so a git that can't merge-tree fails closed). Judging a chore by what it lands
+//   is the point of a chore that redraws lines.
+// settings.md lives in home, so for a PR in another repo (PR 2) they are home main's.
+// Returns { sMain, head, fromHead, landed() → { settings, tree? } | { problem } }.
+function settingsInForce(base, sha, R = homeFacts, { ticket = false } = {}) {
+  const sMain = mainSettings();
+  const rel = `${projectRel}/settings.md`;
+  const changed = (a, b) => !!a && !!b && git(['diff', '--quiet', a, b, '--', rel]) === null;
+  if (R.name !== 'home' || ticket || !changed(base, sha)) return { sMain, head: sMain, fromHead: false, landed: () => ({ settings: sMain }) };
+  const head = settingsAt(sha, { orNull: true });
+  const invalid = (at) => ({ problem: `${rel} at ${at}: the json devteam block is missing or not valid JSON` });
+  return {
+    sMain, head, fromHead: true,
+    landed: () => {
+      if (!changed(base, R.mainRef())) return head ? { settings: head } : invalid(sha.slice(0, 12));
+      const land = landingTree(sha, R);
+      if (land.problem) return land;
+      const s = settingsAt(land.tree, { orNull: true });
+      return s ? { settings: s, tree: land.tree } : invalid(`the merge of ${sha.slice(0, 12)} onto ${R.mainRef()}`);
+    },
+  };
 }
 // Coverage of one repo's tree under one set of settings, once per read of the log; null with no lines.
 const coverageAt = (ref, s, R = homeFacts) => (linesDeclared(s) ? memo(`coverage\0${R.name}\0${ref}\0${canonical(s.components)}`, () => coverage(R.treePaths(ref), componentsOn(s, R.name), R.devteamLine())) : null);
 // Gaps on main under main's committed lines (§4, point 3): commits that bypassed devteam. Zero
 // with no lines. While non-zero, no new ticket starts in that repo.
-// A main whose tree can't be read counts as a gap (fail closed).
-const coverageGap = (name = 'home', R = homeFacts) => memo(`coverageGap\0${name}`, () => { const main = R.mainRef(); const s = main && projectInRepo ? mainSettings(null) : null; const read = s ? readCoverage(() => coverageAt(main, s, R)) : {}; const cov = read.value; return read.error ? 1 : cov ? coverageGaps(cov, s).count + cov.case_collisions.length : 0; });
+// What blocks new tickets in a repo, by class, so the message names what it counted (F7):
+// { count, words }. A main whose tree can't be read counts as a gap (fail closed).
+const coverageGapInfo = (name = 'home', R = homeFacts) => memo(`coverageGap\0${name}`, () => {
+  const main = R.mainRef();
+  const s = main && projectInRepo ? mainSettings(null) : null;
+  const read = s ? readCoverage(() => coverageAt(main, s, R)) : {};
+  if (read.error) return { count: 1, words: `its tree can't be read (${read.error})` };
+  if (!read.value) return { count: 0, words: '' };
+  const g = coverageGaps(read.value, s);
+  const parts = [[g.unowned.length, 'unowned'], [g.contested.length, 'contested'], [g.empty.length, 'empty glob(s)'], [g.unlinked.length, 'unlinked'], [g.case_collisions.length, 'case collision(s)']].filter(([n]) => n);
+  return { count: parts.reduce((t, [n]) => t + n, 0), words: parts.map(([n, w]) => `${n} ${w}`).join(', ') };
+});
+const coverageGap = (name = 'home', R = homeFacts) => coverageGapInfo(name, R).count;
 // A coverage read whose tree git couldn't read: { error }, never an empty tree (fail closed).
 function readCoverage(fn) {
   try { return { value: fn() }; } catch (e) { if (e instanceof GitReadError) return { error: e.message }; throw e; }
@@ -2521,8 +2564,9 @@ function checkTicket(id, { sha: shaArg, title, body, approvals = true }) {
     if (outside.length) fails.push(`changes files outside touches: ${outside.slice(0, 10).join(', ')}${outside.length > 10 ? ` (+${outside.length - 10} more)` : ''}`);
     // Component lines (§4, point 4): a changed file is also inside the ticket's component's line or
     // a touches_components member's; the kit's own line is closed but for the ticket's own folder.
-    // Judged by committed settings, so a line widened in a working tree changes nothing.
-    const s = settingsInForce(base, sha);
+    // Judged by main's committed settings, so neither a line widened in a working tree nor the
+    // ticket's own edit to settings.md changes anything (O6).
+    const s = mainSettings();
     if (linesDeclared(s)) {
       const comps = componentsOn(s, 'home');
       const names = [t.component, ...(t.touches_components ?? [])];
@@ -2561,35 +2605,53 @@ function cmdCheckTicket() {
 // head alone is not what lands (F14). A conflict, or a git that can't say, fails closed.
 function landingTree(sha, R = homeFacts) {
   const main = R.mainRef();
-  const m = R.mergeTree(main, sha);
-  if (m.tree) return { tree: m.tree };
-  if (m.conflict) return { problem: `components: ${sha.slice(0, 12)} does not merge cleanly onto ${main}, so the tree it would land can't be checked; merge main into the branch and ask again` };
-  return { problem: `components: ${gitTooOld() ?? `could not compute the tree ${sha.slice(0, 12)} would land on ${main} (git merge-tree --write-tree: ${m.error})`}; coverage fails closed until it can` };
+  return memo(`landing\0${R.name}\0${main}\0${sha}`, () => {
+    const m = R.mergeTree(main, sha);
+    if (m.tree) return { tree: m.tree };
+    if (m.conflict) return { problem: `components: ${sha.slice(0, 12)} does not merge cleanly onto ${main}, so the tree it would land can't be checked; merge main into the branch and ask again` };
+    return { problem: `components: ${gitTooOld() ?? `could not compute the tree ${sha.slice(0, 12)} would land on ${main} (git merge-tree --write-tree: ${m.error})`}; coverage fails closed until it can` };
+  });
 }
 // Coverage problems in the landing tree that main doesn't already have: a path added outside every
-// line, renamed out of one, or left behind by a narrowed glob (open issue 7). Only once lines are
-// declared: with none on main or at the head, no tree is read and nothing is merged (F1).
-function coverageFails(base, sha, R = homeFacts) {
+// line, renamed out of one, or left behind by a narrowed glob (open issue 7), judged by the settings
+// in force (settingsInForce). Only once lines are declared: with none on main or at the head, no
+// tree is read and nothing is merged (F1).
+function coverageFails(base, sha, R = homeFacts, { ticket = false } = {}) {
   const main = R.mainRef();
   if (!main || !projectInRepo) return [];
-  const sIn = settingsInForce(base, sha, R);
-  const sMain = mainSettings(sIn);
-  if (!linesDeclared(sIn) && !linesDeclared(sMain)) return [];
+  const pre = `components${R.name === 'home' ? '' : ` (${R.name})`}`;
+  const S = settingsInForce(base, sha, R, { ticket });
+  if (!linesDeclared(S.head ?? {}) && !linesDeclared(S.sMain)) return [];
   const land = landingTree(sha, R);
   if (land.problem) return [land.problem];
+  const J = S.landed();
+  if (J.problem) return [J.problem.startsWith('components') ? J.problem : `${pre}: ${J.problem}`];
+  const sLand = J.settings;
   try {
-    const sLand = sIn.__fromHead ? (settingsAt(land.tree, { orNull: true }) ?? sIn) : sIn;
     const now = coverageAt(land.tree, sLand, R);
     if (!now) return [];
     // main's own state, under main's committed settings
-    const before = coverageAt(main, sMain, R) ?? { unowned: [], contested: [], empty: [], case_collisions: [] };
-    const was = new Set([...before.unowned.map((p) => `u${p}`), ...before.contested.map(([p, o]) => `c${p}\0${o}`), ...before.empty.map((x) => `e${x}`), ...before.case_collisions.map((x) => `k${x}`)]);
-    const fresh = { unowned: now.unowned.filter((p) => !was.has(`u${p}`)), contested: now.contested.filter(([p, o]) => !was.has(`c${p}\0${o}`)), empty: now.empty.filter((x) => !was.has(`e${x}`)), case_collisions: now.case_collisions.filter((x) => !was.has(`k${x}`)), unlinked: [], ref: land.tree };
-    return coverageReport(fresh, sLand, R).map((l) => `components${R.name === 'home' ? '' : ` (${R.name})`}: ${l} (extend a line in a chore PR, or keep the file inside one)`);
+    const before = coverageAt(main, S.sMain, R) ?? { unowned: [], contested: [], empty: [], case_collisions: [] };
+    const nowG = coverageGaps(now, sLand), wasG = coverageGaps(before, S.sMain);
+    const was = new Set([...before.unowned.map((p) => `u${p}`), ...before.contested.map(([p, o]) => `c${p}\0${o}`), ...before.empty.map((x) => `e${x}`), ...before.case_collisions.map((x) => `k${x}`), ...wasG.unlinked.map((n) => `l${n}`)]);
+    const fresh = { unowned: now.unowned.filter((p) => !was.has(`u${p}`)), contested: now.contested.filter(([p, o]) => !was.has(`c${p}\0${o}`)), empty: now.empty.filter((x) => !was.has(`e${x}`)), case_collisions: now.case_collisions.filter((x) => !was.has(`k${x}`)), unlinked: nowG.unlinked.filter((n) => !was.has(`l${n}`)), ref: land.tree };
+    return coverageReport(fresh, sLand, R).map((l) => `${pre}: ${l} (extend a line in a chore PR, or keep the file inside one)`);
   } catch (e) {
-    if (e instanceof GitReadError) return [`components${R.name === 'home' ? '' : ` (${R.name})`}: ${e.message}; coverage fails closed until it can`];
+    if (e instanceof GitReadError) return [`${pre}: ${e.message}; coverage fails closed until it can`];
     throw e;
   }
+}
+// The registry that would land, checked as validate checks it (F3), on a PR of any kind that
+// changes settings.md: an unknown kind, a reserved id, a component on a link that can't hold one.
+// A project with no links and no lines on either side has nothing to check (G1).
+function registryFails(base, sha, R = homeFacts) {
+  const S = settingsInForce(base, sha, R);
+  if (!S.fromHead) return [];
+  const has = (x) => !!x && (Object.keys(x.links ?? {}).length > 0 || linesDeclared(x));
+  if (!has(S.head) && !has(S.sMain)) return [];
+  const J = S.landed();
+  if (J.problem) return [J.problem];
+  return registryProblems(J.settings).errors.map((e) => `settings at landing: ${e}`);
 }
 // What the forge's check (optional) and `merge` both check for a PR, by branch kind. Gates are not
 // run here. A chore PR may not touch the log (chore-log touches nothing else) or a ticket's folder.
@@ -2599,7 +2661,8 @@ function checkPr({ headRef, sha, title, body, forge = false }) {
   // Every PR, every kind, ticket PRs included (they return on the next line): the tree that would
   // land keeps every path in exactly one line. A chore or settings PR gets this, never full
   // validate, so an old graph error can't block a log PR (M10).
-  fails.push(...coverageFails(mainRef() ? git(['merge-base', mainRef(), sha]) : null, sha));
+  const base0 = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
+  fails.push(...coverageFails(base0, sha, homeFacts, { ticket: branch.startsWith('ticket/') }), ...registryFails(base0, sha));
   if (branch.startsWith('ticket/')) return [...fails, ...checkTicket(branch.slice('ticket/'.length), { sha, title, body, approvals: !forge })];
   if (branch.startsWith('plan/')) {
     const feature = branch.slice('plan/'.length);
@@ -2869,7 +2932,17 @@ function cmdMerge() {
   // Owner-only settings, on every kind of PR (a ticket, a plan or a chore).
   {
     const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
-    const changed = base ? ownerSettingsChanged(base, sha) : [];
+    const classed = base ? ownerSettingsChanged(base, sha) : [];
+    const changed = classed?.filter((c) => !SUPERVISOR_LINK_CLASSES.includes(c.cls)) ?? null;
+    // A url link lands only with the registry-edit act that made it (link add|set|rm), logged since
+    // main's settings.md last changed: a hand edit in settings.md has none (F3).
+    const edits = (classed ?? []).filter((c) => c.cls === 'registry-edit').map((c) => c.key.slice('links.'.length));
+    if (edits.length) {
+      const since = Date.parse(git(['log', '-1', '--format=%cI', mainRef(), '--', `${projectRel}/settings.md`]) ?? '') || 0;
+      const acts = logObjects('act').filter((a) => a.class === 'registry-edit' && Date.parse(a.created_at) > since);
+      const bare = edits.filter((l) => !acts.some((a) => (a.refs ?? []).includes(`link:${l}`)));
+      if (bare.length) fails.push(`changes ${bare.map((l) => `links.${l}`).join(', ')} with no registry-edit act since settings.md last landed on ${mainRef()}: make each change with link add|set|rm, which logs the act, rather than by hand in settings.md`);
+    }
     if (changed === null) fails.push(`${projectRel}/settings.md: the json devteam block is not valid JSON at the head`);
     else if (changed.length) {
       const classes = [...new Set(changed.map((c) => c.cls))];
@@ -5759,8 +5832,8 @@ function collectMetrics(since) {
   if (m.escaped_defects) add('high', 'escaped-defects', `${m.escaped_defects}`, 'defects found after merge', 'retro: which review or gate should have caught each one');
   // Component lines on main (§4, point 3): a gap is a severity-4 observation (open issue 6).
   {
-    const n = coverageGap();
-    if (n) add('high', 'unowned-files', 'home', `${n} tracked path(s) on ${mainRef()} no line owns, or more than one does (devteam.mjs components check lists them); no new ticket starts in home until it clears`, 'a chore PR that extends a line (settings components), or moves the files into one', { sev: 4 });
+    const gap = coverageGapInfo();
+    if (gap.count) add('high', 'unowned-files', 'home', `${mainRef()} has coverage gaps: ${gap.words} (devteam.mjs components check lists them); no new ticket starts in home until they clear`, 'a chore PR that extends a line (settings components), or moves the files into one', { sev: 4 });
   }
   // The registry (spec §7): a link that no longer resolves, and lines drawn in the wrong place.
   {
@@ -6432,7 +6505,7 @@ function makeSession(role) {
   if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
   if (role === 'worker' && !tickets().has(id)) die(`no ticket ${id} (devteam.mjs ticket show ${id})`);
   // A repo with files no line owns starts no new ticket (§4, point 3); a ticket already started carries on.
-  if (role === 'worker' && !lastPhaseOf(id) && coverageGap()) die(`home's main has ${coverageGap()} path(s) no component line owns, or more than one does: no new ticket starts there until a chore PR extends a line (devteam.mjs components check)`);
+  if (role === 'worker' && !lastPhaseOf(id) && coverageGap()) die(`home's main has coverage gaps (${coverageGapInfo().words}): no new ticket starts there until a chore PR fixes the lines (devteam.mjs components check)`);
   // Every session serves a goal, and the goal's hold says whether it may start (planning.md §1):
   // drain lets a session that already ran carry on but starts nothing new; park and let-go start
   // nothing. --force does anyway, and its act says so. A planner names its goal until its feature
