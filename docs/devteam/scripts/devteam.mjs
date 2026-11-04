@@ -2091,10 +2091,19 @@ const gateEnv = (ticket) => { const cache = path.join(runDir, 'cache'); fs.mkdir
 // Empty when there is no .tool-versions or neither manager is here (there is nothing to ask).
 function missingPins() {
   const pins = (readText(path.join(mainRoot, '.tool-versions')) ?? '').split('\n').map((l) => l.replace(/#.*/, '').trim().split(/\s+/)).filter((p) => p[0] && p[1] && !['system', 'latest'].includes(p[1]));
-  const has = (bin) => spawnSync(bin, ['--version'], { stdio: 'ignore', timeout: 10000 }).status === 0;
-  const where = has('asdf') ? (t, v) => ['asdf', ['where', t, v]] : has('mise') ? (t, v) => ['mise', ['where', `${t}@${v}`]] : null;
-  if (!where) return [];
-  return pins.filter(([t, v]) => spawnSync(...where(t, v), { cwd: mainRoot, stdio: 'ignore', timeout: 20000 }).status !== 0).map(([t, v]) => `${t} ${v}`);
+  // The first manager that is installed answers for every pin; one that isn't (ENOENT) passes to the
+  // next. A probe that times out on a loaded machine proves nothing, so it counts as installed.
+  for (const [bin, args] of [['asdf', (t, v) => ['where', t, v]], ['mise', (t, v) => ['where', `${t}@${v}`]]]) {
+    const missing = [];
+    let absent = false;
+    for (const [t, v] of pins) {
+      const r = spawnSync(bin, args(t, v), { cwd: mainRoot, stdio: 'ignore', timeout: 60000 });
+      if (r.error?.code === 'ENOENT') { absent = true; break; }
+      if (!r.error && r.status !== 0) missing.push(`${t} ${v}`);
+    }
+    if (!absent) return missing;
+  }
+  return [];
 }
 const pinsHint = (miss = missingPins()) => (miss.length ? `this machine lacks the tools .tool-versions pins (${miss.join(', ')}): run asdf install (or mise install) in ${mainRoot}, then try again` : null);
 function seedWorktree(wt, { setup = true } = {}) {

@@ -2440,7 +2440,7 @@ test('fleet park: every session stops with a handoff, and a clone elsewhere pick
     assert.match(ok(neu, ['prompt', 'supervisor']), /^The fleet is parked .*This looks like the machine it moved to\. Before anything else: \(1\) DEVTEAM_ROLE=supervisor node docs\/devteam\/scripts\/devteam\.mjs fleet unpark/, 'the standard prompt sees the parked fleet, and that this is a fresh clone');
     // a pinned tool this machine's asdf hasn't installed is named before anything restarts
     const fakeBin = path.join(base, 'bin');
-    write(path.join(fakeBin, 'asdf'), '#!/bin/sh\n[ "$1" = --version ] && exit 0\n[ "$1" = where ] && [ "$3" = 9.9.9 ] && exit 1\nexit 0\n');
+    write(path.join(fakeBin, 'asdf'), '#!/bin/sh\n[ "$1" = where ] && [ "$3" = 9.9.9 ] && exit 1\nexit 0\n');
     fs.chmodSync(path.join(fakeBin, 'asdf'), 0o755);
     write(path.join(neu, '.tool-versions'), 'nodejs 18.20.4\nruby 9.9.9 # pinned\n');
     const PINS = { PATH: `${fakeBin}${path.delimiter}${process.env.PATH}` };
