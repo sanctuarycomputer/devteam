@@ -79,9 +79,10 @@ git clone <repo-url> && cd <repo>
 asdf install                                  # the versions in .tool-versions, if the repo pins them
 gh auth login                                 # and log in to the agent CLI (claude: run it once, /login), with superpowers
 # copy each worktree_files entry and secret key from the checklist over a secure channel (never git or chat)
-tmux new -s supervisor
-DEVTEAM_ROLE=supervisor claude "$(node docs/devteam/scripts/devteam.mjs prompt supervisor)"
+claude        # or your agent CLI, in the repo; then say: "Assume the role of the devteam supervisor and resume the fleet"
 ```
+
+The supervisor needn't run inside tmux: it puts the workers in a tmux session of its own (tmux only has to be installed), and their messages reach it through the log (`wait`). Step 9's command works too.
 
 That is step 9's start, unchanged: the supervisor's prompt sees the parked fleet and opens with what to do, so it runs `fleet unpark` (which rebuilds `run/log` from the landed log, prints the same parity fingerprint before writing anything, puts every goal back as it was and prints each parked session's restart command), restarts the parked workers and planners (each gets its handoff in its prompt), and then the dashboard is restarted where it outlives the session:
 

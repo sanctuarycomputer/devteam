@@ -1666,7 +1666,7 @@ function sessionSettled(s) {
   if (ok) {
     const local = resolveCommit(`refs/heads/${s.branch}`);
     const remote = resolveCommit(`refs/remotes/origin/${s.branch}`);
-    const dirty = fs.existsSync(s.wt) ? (git(['status', '--porcelain'], s.wt) ?? '').trim() : '';
+    const dirty = fs.existsSync(s.wt) ? workLines(git(['status', '--porcelain'], s.wt)).join('\n') : '';
     const handoff = remote && (handoffCommit(`refs/remotes/origin/${s.branch}`, s.name) || git(['cat-file', '-e', `${remote}:${s.handoff}`]) !== null);
     ok = !!remote && (!local || local === remote) && !dirty && !!handoff;
   }
@@ -4329,6 +4329,16 @@ function upkeepAllows(what) {
   die(`Upkeep is ${holdWords(m)}: ${what} waits until it runs (goal hold upkeep run --owner), or --force`);
 }
 // Chores that keep the record rather than do upkeep: never held.
+// Files agent harnesses write into a checkout while they run: machine-local state, never the
+// project's (a lock, personal settings, the harness's own worktrees, chat caches). init ignores them;
+// one already tracked is a finding, and their churn never counts as a session's uncommitted work.
+// Shared harness config (.claude/settings.json, skills, agents, AGENTS.md) is the project's and stays.
+const HARNESS_RUNTIME = ['.claude/*.lock', '.claude/settings.local.json', '.claude/worktrees/', '.aider*'];
+const runtimePatRe = (pat) => new RegExp(`^${pat.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*').replace(/\/$/, '/.*')}$`);
+const RUNTIME_RES = HARNESS_RUNTIME.map((pat) => [pat, runtimePatRe(pat)]);
+const isHarnessRuntime = (f) => RUNTIME_RES.some(([, re]) => re.test(f));
+// git status --porcelain, less the harness's runtime files
+const workLines = (porcelain) => (porcelain ?? '').split('\n').filter(Boolean).filter((l) => !isHarnessRuntime(l.slice(3).replace(/^"|"$/g, '').split(' -> ').pop()));
 const isRecordKeeping = (slug) => ['log', 'fleet-handoff', 'drain-handoff'].includes(slug) || /^secret-/.test(slug ?? '');
 function cmdChore() {
   const [sub, slugName] = positional;
@@ -4950,6 +4960,9 @@ function collectMetrics(since) {
     if (!drained && waiting.length && (cap == null || ps.length < cap)) add('medium', 'idle-planning', `${waiting.length} goal${waiting.length > 1 ? 's' : ''}`, `${ps.length}${cap == null ? '' : `/${cap}`} planner${ps.length === 1 ? '' : 's'} active; nobody is planning ${waiting.map((g) => `"${g.title}"`).join(', ')}`, `start a planner for each (goals plan in parallel), or record why one waits on another's design (goal set <id> --plan-after <g-id> --reason "…"): ${waiting.slice(0, cap == null ? waiting.length : Math.max(1, cap - ps.length)).map((g) => g.id).join(', ')}`);
   }
   if (!drained && ready.length && active < settings.max_active_tickets) add('medium', 'idle-capacity', `${ready.length} ready`, `${active}/${settings.max_active_tickets} workers active`, `make workers for: ${ready.slice(0, 5).map((t) => t.id).join(', ')}`);
+  // A harness's runtime file committed by accident: it churns in every worktree and means nothing elsewhere.
+  const trackedRuntime = (git(['ls-files'], mainRoot) ?? '').split('\n').filter((f) => f && isHarnessRuntime(f));
+  if (trackedRuntime.length) add('medium', 'tracked-runtime-file', trackedRuntime.slice(0, 3).join(', '), `${trackedRuntime.length} agent-harness runtime file(s) are tracked in git (${trackedRuntime.slice(0, 5).join(', ')}): machine-local state that changes in every worktree`, `a chore (it changes .gitignore, so it needs the owner's answer): git rm --cached ${trackedRuntime.map((f) => `'${f}'`).join(' ')}, and add ${RUNTIME_RES.filter(([, re]) => trackedRuntime.some((f) => re.test(f))).map(([pat]) => pat).join(' ')} to .gitignore`);
   // A key that decrypts production, copied into every worktree, is readable by every agent
   // (code-style.md §10): production decrypts its own file, or the default one when it has none.
   const prodKey = fs.existsSync(path.join(mainRoot, 'config/credentials/production.yml.enc')) ? 'config/credentials/production.key' : fs.existsSync(path.join(mainRoot, 'config/credentials.yml.enc')) ? 'config/master.key' : null;
@@ -5813,7 +5826,7 @@ function cmdHandoff() {
   if (!['worker', 'planner'].includes(role)) die('handoff: a worker or planner records its own (the supervisor adds --supervisor)');
   const name = role === 'worker' ? (process.env.DEVTEAM_TICKET ?? currentTicketId() ?? die('handoff: no ticket')) : `plan-${process.env.DEVTEAM_FEATURE ?? die('handoff: no feature')}`;
   const sess = sessionOf(name);
-  if ((git(['status', '--porcelain']) ?? '').trim()) die('handoff: commit your work in progress first (a WIP commit is fine); the handoff commit holds only the note');
+  if (workLines(git(['status', '--porcelain'])).length) die('handoff: commit your work in progress first (a WIP commit is fine); the handoff commit holds only the note');
   const branch = git(['rev-parse', '--abbrev-ref', 'HEAD']);
   if (branch !== sess.branch) die(`handoff: you are on ${branch}, not ${sess.branch}`);
   withScratch((dir) => {
@@ -5954,7 +5967,7 @@ function fleetStatus() {
     const cause = phase?.to === 'parked' ? parkCauseAt(x.name, phase.created_at) : null;
     const local = resolveCommit(`refs/heads/${x.branch}`);
     const remote = resolveCommit(`refs/remotes/origin/${x.branch}`);
-    const dirty = fs.existsSync(x.wt) ? (git(['status', '--porcelain'], x.wt) ?? '').split('\n').filter(Boolean) : [];
+    const dirty = fs.existsSync(x.wt) ? workLines(git(['status', '--porcelain'], x.wt)) : [];
     const hc = remote ? handoffCommit(`refs/remotes/origin/${x.branch}`, x.name) : null;
     const handoffAt = hc ? hc.at : remote && git(['cat-file', '-e', `${remote}:${x.handoff}`]) !== null ? git(['log', '-1', '--format=%cI', remote, '--', x.handoff]) : null;
     const r = {
@@ -6037,7 +6050,7 @@ function fleetStatus() {
     const at = path.join(wtRoot, n);
     if (sessions.some((x) => x.name === n) || !fs.statSync(at).isDirectory()) continue;
     if (!fs.existsSync(path.join(at, '.git'))) { strays.push(`${n} (not a git worktree)`); continue; }
-    const dirty = (git(['status', '--porcelain'], at) ?? '').split('\n').filter(Boolean).length;
+    const dirty = workLines(git(['status', '--porcelain'], at)).length;
     const unpushed = Number(git(['rev-list', '--count', 'HEAD', '--not', '--remotes'], at) ?? 0);
     if (dirty || unpushed) strays.push(`${n} (${[dirty && `${dirty} uncommitted`, unpushed && `${unpushed} commit(s) on no remote`].filter(Boolean).join(', ')})`);
   }
@@ -6109,7 +6122,7 @@ function moveChecklist(s, memory = []) {
     ...(commands.size ? [`log in to the commands that take posted secrets: ${[...commands].join(', ')}`] : []),
     ...(s.forge === 'git' ? ['copy run/pr/ from the old checkout (forge git keeps the PR text there)'] : []),
     ...(memory.length ? [`your agent's own memory for this project (${memory.length} file(s) under ${path.dirname(path.dirname(memory[0].path))}) isn't in the repo; the supervisor folded what the next session needs into knowledge and its handoff, so nothing to copy`] : []),
-    `start the supervisor inside tmux exactly as the README's step 9 does: DEVTEAM_ROLE=supervisor ${agent} "$(node docs/devteam/scripts/devteam.mjs prompt supervisor)"; its prompt sees the parked fleet`,
+    `start the supervisor in the repo: open ${agent} there and say "Assume the role of the devteam supervisor and resume the fleet" (or step 9's command: DEVTEAM_ROLE=supervisor ${agent} "$(node docs/devteam/scripts/devteam.mjs prompt supervisor)"); tmux need only be installed: the workers get a tmux session of their own`,
     'the supervisor runs fleet unpark, or fleet undrain for a drained fleet (it rebuilds run/log from the landed log, prints the parity fingerprint, puts every goal back as it was) and restarts each parked session with the command it prints',
     'in the browser you use there: turn on "Notify me of new Inbox items" again (a browser setting)',
     `restart the dashboard where it outlives the session: tmux new-window -d -t ${s.tmux_session} -n dashboard 'node docs/devteam/scripts/devteam.mjs dashboard' (or another terminal), then open http://127.0.0.1:${s.dashboard_port}`,
@@ -6531,7 +6544,7 @@ function cmdInit() {
   for (const d of ['log', 'retros', 'tickets', 'reviews']) put(path.join(projectDir, d, '.gitkeep'), '');
   const gi = path.join(root, '.gitignore');
   const giText = readText(gi) ?? '';
-  const want = [`${path.relative(root, runDir).split(path.sep).join('/')}/`, '.worktrees/'];
+  const want = [`${path.relative(root, runDir).split(path.sep).join('/')}/`, '.worktrees/', ...HARNESS_RUNTIME];
   const add = want.filter((w) => !giText.split('\n').includes(w));
   if (add.length) { fs.writeFileSync(gi, `${giText}${giText && !giText.endsWith('\n') ? '\n' : ''}${add.join('\n')}\n`); made.push('.gitignore'); }
   const agents = path.join(root, 'AGENTS.md');
