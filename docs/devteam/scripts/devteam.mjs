@@ -4137,6 +4137,7 @@ function citeTargets() {
     case 'worker': return [a, ...(features().get(tickets().get(a)?.feature)?.goals ?? [])];
     case 'planner': return [a, `plan-${a}`, ...asList(flags.goal)];
     case 'fleet': return ['fleet', ...logObjects('goal').map((g) => g.id)];
+    case 'link': return [`link:${b}`];
     default: return null;
   }
 }
@@ -7123,6 +7124,90 @@ function cmdComponents() {
   process.exit(bad ? 1 : 0);
 }
 
+// Edit the json devteam block of the main checkout's settings.md in place, after checking the
+// result as validate would: the registry is configuration, written where the supervisor's next
+// chore PR picks it up (spec §7, open issue 14).
+function editSettingsBlock(mutate) {
+  if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
+  const f = path.join(projectDir, 'settings.md');
+  const text = readText(f) ?? die(`no ${path.relative(mainRoot, f)} (devteam.mjs init)`);
+  const m = text.match(/```json devteam\s*\n([\s\S]*?)\n```/) ?? die('settings.md has no ```json devteam block');
+  let block;
+  try { block = JSON.parse(m[1]); } catch (e) { die(`settings.md: the json devteam block is not valid JSON: ${e.message}`); }
+  const next = mutate(JSON.parse(JSON.stringify(block)));
+  const { errors } = registryProblems({ ...SETTINGS_DEFAULTS, ...next });
+  if (errors.length) die(`not written:\n  - ${errors.join('\n  - ')}`);
+  const at = m.index + m[0].indexOf(m[1]);
+  fs.writeFileSync(f, `${text.slice(0, at)}${JSON.stringify(next, null, 2)}${text.slice(at + m[1].length)}`);
+  settingsCache = undefined;
+  return next;
+}
+const LANDING_HINT = 'it applies here now; land it on main with the next chore PR: chore start registry, copy docs/devteam/project/settings.md into it, chore pr registry --title "registry", merge --chore registry';
+// link add|set|rm: a link of the supervisor's kind (url: LINK_KINDS[k].ownedByOwner false) is
+// written, then logged as registry-edit (constitutional), citing what it came from. A link of an
+// owner's kind (repo) is the owner's: PR 2 drafts it as a question; until then it is refused.
+// Nothing here branches on a kind name: the table says whose it is and which fields it has.
+function cmdLink() {
+  const [sub, id, field, ...vals] = positional;
+  if (!['add', 'set', 'rm'].includes(sub) || !id) die('usage: link add <id> --kind <kind> --title t [kind fields: --url u, --remote r …] [--for scope…] [--notes n] [--source id]   |   link set <id> <field> <value>   |   link rm <id>');
+  supervisorOnly('link');
+  const cur = loadSettings().links?.[id];
+  const kind = sub === 'add' ? flagStr('kind') : cur?.kind;
+  if (sub !== 'add' && !cur) die(`no link ${id} (devteam.mjs links)`);
+  if (sub === 'add' && cur) die(`${id} exists; use link set`);
+  const K = LINK_KINDS[kind] ?? die(`--kind is one of: ${Object.keys(LINK_KINDS).join(', ')}`);
+  if (sub === 'set' && field === 'kind') die('a link never changes kind in place: link rm it and link add it again (a kind flip is a removal and an addition)');
+  if (sub === 'set' && field && !linkFields(kind).includes(field)) die(`"${field}" is not a field of a ${kind} link (fields: ${linkFields(kind).join(', ')})`);
+  if (K.ownedByOwner) die(`a ${kind} link is the owner's (governance-edit): put the entry in settings.md on a chore branch and land it with merge --chore <slug> --approved <qid> (an answered governance-edit question)`);
+  const source = flagStr('source');
+  if (source && !logGet(source)) die(`--source ${source}: no such log entry`);
+  // authority first, so a refusal writes nothing
+  authorise('registry-edit', null, null, [], 'link');
+  const jsonish = (raw) => { try { return JSON.parse(raw); } catch { return raw; } };
+  let what;
+  editSettingsBlock((b) => {
+    b.links ??= {};
+    if (sub === 'add') {
+      const entry = { kind };
+      for (const f of linkFields(kind).filter((x) => x !== 'kind' && flags[x] !== undefined)) entry[f] = f === 'for' ? listFlag('for') : jsonish(flagStr(f));
+      for (const f of ['title', ...K.fields.required]) if (entry[f] === undefined) die(`link add --kind ${kind} needs --${f}`);
+      b.links[id] = entry;
+      what = `added ${kind} link ${id} (${K.locator(entry, id).text})`;
+    } else if (sub === 'set') {
+      if (!field || !vals.length) die('usage: link set <id> <field> <value>');
+      b.links[id] = { ...b.links[id], [field]: jsonish(vals.join(' ')) };
+      what = `set link ${id} ${field}`;
+    } else { delete b.links[id]; what = `removed ${kind} link ${id}`; }
+    return b;
+  });
+  appendLog({ type: 'act', decision: citing(), class: 'registry-edit', what, refs: [`link:${id}`, ...(source ? [source] : [])], reversible: true }, 'supervisor');
+  out(`${what}; ${LANDING_HINT}`);
+}
+// links [--json]: the registry, each repo's effective settings, and the lines on each with their state.
+function cmdLinks() {
+  const s = loadSettings();
+  const reg = s.links ?? {};
+  const main = mainRef();
+  const sMain = (main ? settingsAt(main, { orNull: true }) : null) ?? s;
+  const cov = main ? coverageAt(main, sMain) : null;
+  const home = { name: 'home', remote: git(['config', '--get', 'remote.origin.url']), root: mainRoot, effective: Object.fromEntries(REPO_KEYS.map((k) => [k, k === 'project' ? projectRel : s[k] ?? null])), components: componentsOn(s, 'home'), lines: linesDeclared(s), coverage: cov ? coverageGaps(cov, sMain) : null };
+  const links = Object.entries(reg).map(([id, l]) => {
+    const K = LINK_KINDS[l.kind];
+    if (!K) return { id, ...l };
+    const eff = K.effectiveSettings(l, s);
+    return { id, ...l, locator: K.locator(l, id).text, ...(K.localOverrides.includes('path') ? { location: linkLocation(id), found: fs.existsSync(linkLocation(id)) } : {}), ...(eff ? { effective: eff } : {}), ...(K.hostsComponents ? { components: componentsOn(s, id) } : {}) };
+  });
+  if (flags.json) return json({ home, links });
+  const gates = (g) => Object.keys(g ?? {}).join(', ') || 'none';
+  out(`home: this repo (${home.remote ?? 'no origin'}), main_branch ${s.main_branch}, forge ${s.forge}, gates ${gates(s.gates)}`);
+  out(`  components: ${home.lines ? home.components.map((c) => `${c.name}${c.shared ? ' (shared)' : ''} (${c.owns ? c.owns.join(', ') : 'everything devteam does not own'})`).join('; ') : `none declared: one implicit component owns every path${Object.keys(s.components ?? {}).length ? ' (components holds labels only)' : ''}`}`);
+  if (home.coverage) out(`  coverage on ${main}: ${home.coverage.count + home.coverage.case_collisions.length ? `${home.coverage.unowned.length} unowned, ${home.coverage.contested.length} contested, ${home.coverage.empty.length} empty glob(s), ${home.coverage.case_collisions.length} case collision(s) (components check)` : 'every path in exactly one line'}`);
+  for (const l of links) {
+    const eff = l.effective ? `, main_branch ${l.effective.main_branch}, forge ${l.effective.forge}, gates ${gates(l.effective.gates)}` : '';
+    out(`${l.id}: ${l.kind} ${l.locator ?? '(unknown kind)'} "${l.title}"${eff}${asList(l.for).length ? ` for ${asList(l.for).join(', ')}` : ''}${l.notes ? `; ${l.notes}` : ''}${l.check === false ? ' (not probed)' : ''}`);
+  }
+}
+
 // ===== 12. init, help, dispatch =====
 
 const ARCHITECTURE_MD = `# Architecture
@@ -7285,6 +7370,8 @@ Sessions (worker.md)
   stop-ok                         for a stop hook: refuses while the last commit is newer than the last phase line
 
 Decide and act (supervisor.md, constitution.md)
+  links [--json]                  the registry: home and each link, each repo's effective settings, the component lines and their coverage
+  link add <id> --kind url --url u --title t [--for scope…] [--notes n] [--source id] | link set <id> <field> <value> | link rm <id>   supervisor: a url link, written to settings.md and logged as registry-edit; repo links are the owner's
   ask --question q [--kind k] [--class c] [--reasons r…] [--recommendation r] [--confidence 0-1] [--default d] [--choices '[{"label","detail","effect"}…]'] [--rule-scope s] [--goal g-… (goal-approval)] [--links '[{"title","path","ref"}|{"title","url"}…]'] [--blocks ids] [--evidence ids] [--ticket id] [--re m-…] [--note path] [--secrets '[{"name","kind":"string|file","sink"}…]' (owner-action)]
   secret post <qid> [--file NAME=path] [--json]                          owner: post a question's secrets straight to their sinks; never logged (secret sinks lists them)
   ask --kind review --page <repo path> --ref <branch|sha> [--data <repo path>] [--result-schema <repo path>] [--allow-partial] --question q [--context c] [--class c] [--reasons r…] [--ticket id] [--blocks ids] [--re m-…]
@@ -7298,7 +7385,7 @@ Decide and act (supervisor.md, constitution.md)
   answer <qid> "<text>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> "<text>" --from-chat --said "<owner's words>" | answer <qid> --defaulted   (supervisor)
   withdraw <qid> [--reason r] | questions [--all] [--id q] [--json]
   decide --class c [--scope s] [--approved qid|kid] [--options a b] [--rationale r] [--confidence 0-1] [--refs ids] [--irreversible] -- "<what>"   a judgment call and the trust it rests on; prints d-…
-  act --decision d-… -- "<what>"   carry out a decision (merge, ticket, withdraw, goal hold, worker, planner and fleet take --decision too)
+  act --decision d-… -- "<what>"   carry out a decision (merge, ticket, withdraw, goal hold, worker, planner, fleet and link take --decision too)
   act --class c [--scope s] [--approved qid|kid] [--refs ids] [--irreversible] -- "<what>"   an act that is its own decision
   decisions [--who owner|supervisor] [--class c] [--corrected] [--tail n] [--json]   every call, who made it and under what
   correct <decision-or-act-id> --reason r [--severity n]   (owner; --retro for the supervisor) | repair <id> --how undo|fix-ticket|none
@@ -7330,7 +7417,7 @@ Dashboard and releases
 
 const COMMANDS = {
   init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), whoami: cmdWhoami, settings: cmdSettings,
-  feature: cmdFeature, ticket: cmdTicket, components: cmdComponents, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, roadmap: cmdRoadmap,
+  feature: cmdFeature, ticket: cmdTicket, components: cmdComponents, link: cmdLink, links: cmdLinks, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, roadmap: cmdRoadmap,
   'check-ticket': cmdCheckTicket, 'check-pr': cmdCheckPr, merge: cmdMerge, 'review-worktree': cmdReviewWorktree,
   phase: cmdPhase, gate: cmdGate, send: cmdSend, messages: cmdMessages, 'stop-ok': cmdStopOk,
   ask: cmdAsk, answer: cmdAnswer, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
@@ -7348,7 +7435,7 @@ else {
     if (!flagStr('decision')) die('--decision needs a decision id (d-…)');
     if (command !== 'act') {
       const targets = citeTargets();
-      if (!targets) die(`${[command, positional[0]].filter(Boolean).join(' ')} logs no act; --decision is for act, merge, ticket add|set, withdraw, goal hold, worker, planner and fleet`);
+      if (!targets) die(`${[command, positional[0]].filter(Boolean).join(' ')} logs no act; --decision is for act, merge, ticket add|set, withdraw, goal hold, worker, planner, fleet and link`);
       supervisorOnly('--decision');
       const d = decisionFor(flagStr('decision'));
       if (!(d.refs ?? []).some((r) => targets.includes(r))) die(`${d.id} is about ${(d.refs ?? []).join(', ') || 'nothing in particular (it named no --refs)'}; this ${command} is about ${targets.slice(0, 4).join(', ')}${targets.length > 4 ? ', …' : ''}. Decide with --refs naming it, or act without --decision`);

@@ -2915,6 +2915,40 @@ test('a question links a registry link by id; the inbox resolves it', () => {
   } finally { F.done(); }
 });
 
+test('link add, set and rm for url links: the supervisor writes settings and logs registry-edit, with no rung and no answer (B3)', () => {
+  const F = monoFixture('link-cmd');
+  const { old, ok, run } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  try {
+    const o = ok(old, ['observe', '--subject', 'https://figma.test/a', '--kind', 'link', '--detail', 'owner mentioned the designs'], SUP);
+    assert.match(run(old, ['link', 'add', 'figma', '--kind', 'url', '--url', 'https://figma.test/a', '--title', 'Designs'], { DEVTEAM_ROLE: 'worker' }).err, /the supervisor does this/);
+    ok(old, ['link', 'add', 'figma', '--kind', 'url', '--url', 'https://figma.test/a', '--title', 'Designs', '--for', 'component:web', '--notes', 'spacing source', '--source', o], SUP);
+    const s = json(ok(old, ['settings'])).links.figma;
+    assert.deepEqual(s, { kind: 'url', title: 'Designs', url: 'https://figma.test/a', for: ['component:web'], notes: 'spacing source', source: o });
+    const act = json(ok(old, ['log', '--type', 'act', '--json'])).find((a) => a.class === 'registry-edit');
+    assert.ok(act, 'B3: a registry-edit act');
+    assert.equal(act.rung, undefined, 'no rung');
+    assert.equal(act.approved_by, undefined, 'no answer');
+    assert.deepEqual(act.refs, ['link:figma', o], 'it cites the observation');
+    assert.ok(!json(ok(old, ['trust', '--json'])).some((r) => r.class === 'registry-edit'), 'constitutional, not on the ladder');
+    ok(old, ['link', 'set', 'figma', 'for', '["component:web","goal:g-1"]'], SUP);
+    assert.deepEqual(json(ok(old, ['settings'])).links.figma.for, ['component:web', 'goal:g-1']);
+    assert.match(run(old, ['link', 'set', 'figma', 'url', 'http://insecure.test'], SUP).err, /url must start with https:\/\//, 'validated before it is written');
+    assert.match(run(old, ['link', 'set', 'figma', 'kind', 'repo'], SUP).err, /a link never changes kind in place/);
+    assert.match(run(old, ['link', 'set', 'figma', 'colour', 'red'], SUP).err, /"colour" is not a field of a url link/);
+    assert.match(run(old, ['link', 'add', 'console', '--kind', 'repo', '--remote', 'usbclub/console', '--title', 'C'], SUP).err, /a repo link is the owner's \(governance-edit\)/);
+    assert.match(run(old, ['link', 'add', 'x', '--kind', 'doc', '--title', 'X'], SUP).err, /--kind is one of: repo, url/);
+    const l = json(ok(old, ['links', '--json']));
+    assert.equal(l.home.name, 'home');
+    assert.equal(l.links.find((x) => x.id === 'figma').url, 'https://figma.test/a');
+    assert.match(ok(old, ['links']), /figma: url https:\/\/figma\.test\/a "Designs" for component:web, goal:g-1/);
+    assert.equal(l.links.find((x) => x.id === 'figma').locator, 'https://figma.test/a');
+    ok(old, ['link', 'rm', 'figma'], SUP);
+    assert.equal(json(ok(old, ['settings'])).links.figma, undefined);
+    assert.equal(json(ok(old, ['log', '--type', 'act', '--json'])).filter((a) => a.class === 'registry-edit').length, 3);
+  } finally { F.done(); }
+});
+
 test('fleet park: every session stops with a handoff, and a clone elsewhere picks it up with parity', () => {
   const F = fleetFixture('park');
   const { org, old, neu, home, env, run, ok, g, base } = F;
