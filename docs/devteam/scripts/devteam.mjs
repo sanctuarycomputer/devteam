@@ -1657,9 +1657,26 @@ function writeHold(g, hold, by) {
 }
 const holdWords = (m) => ({ run: 'running', drain: 'draining', park: 'parked', 'let-go': 'let go' }[m] ?? m);
 // The mode label a goal shows: drain splits into draining (work still running) and drained.
+// A parked session has settled once it stopped (phase parked), its branch is on origin as it is here,
+// its worktree is clean and its handoff is recorded: until then its goal is still parking.
+const settledMemo = new Map();
+function sessionSettled(s) {
+  if (settledMemo.has(s.name)) return settledMemo.get(s.name);
+  let ok = lastPhaseOf(s.name)?.to === 'parked';
+  if (ok) {
+    const local = resolveCommit(`refs/heads/${s.branch}`);
+    const remote = resolveCommit(`refs/remotes/origin/${s.branch}`);
+    const dirty = fs.existsSync(s.wt) ? (git(['status', '--porcelain'], s.wt) ?? '').trim() : '';
+    const handoff = remote && (handoffCommit(`refs/remotes/origin/${s.branch}`, s.name) || git(['cat-file', '-e', `${remote}:${s.handoff}`]) !== null);
+    ok = !!remote && (!local || local === remote) && !dirty && !!handoff;
+  }
+  settledMemo.set(s.name, ok);
+  return ok;
+}
 function holdView(g) {
   const mode = goalMode(g);
-  const running = mode === 'drain' || mode === 'park' ? liveSessions().filter((s) => sessionGoals(s.name).some((x) => x.id === g.id) && lastPhaseOf(s.name)?.to !== 'parked').map((s) => s.name) : [];
+  // draining: what still runs; parking: what hasn't settled (stopped, pushed, clean, handed off)
+  const running = mode === 'drain' || mode === 'park' ? liveSessions().filter((s) => sessionGoals(s.name).some((x) => x.id === g.id) && (mode === 'park' ? !sessionSettled(s) : lastPhaseOf(s.name)?.to !== 'parked')).map((s) => s.name) : [];
   const state = mode === 'drain' ? (running.length ? 'draining' : 'drained') : mode === 'park' ? (running.length ? 'parking' : 'parked') : mode === 'let-go' ? 'let go' : 'running';
   return { mode, state, running, reason: g.hold?.reason ?? null, by: g.hold_by ?? null, fleet: g.hold?.fleet ?? null, since: (g.updates ?? []).filter((u) => u.hold !== undefined).pop()?.at ?? null };
 }

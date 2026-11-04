@@ -2337,12 +2337,15 @@ test('fleet park: every session stops with a handoff, and a clone elsewhere pick
     ok(ww, ['phase', 'parked', '--note', 'parked'], WRK);
     st = json(ok(old, ['fleet', 'status', '--json'], SUP));
     assert.deepEqual(st.sessions.map((x) => [x.parked, x.pushed, x.clean, x.handoff]), [[true, false, true, false]]);
+    const upkeepState = () => json(ok(old, ['goal', 'show', 'upkeep', '--json'])).hold_view.state;
+    assert.equal(upkeepState(), 'parking', 'stopped is not settled: still parking until it is pushed with its handoff');
     assert.match(ok(ww, ['handoff'], WRK, 'Done: T1. Next: write tidy/c.txt (T2). Open: none. Uncommitted: none.\n'), /handoff committed on ticket\/ch-01-tidy and pushed/);
     assert.equal(g(['log', '-1', '--format=%s', `origin/ticket/${ID}`], ww), `devteam handoff: ${ID}`, 'the handoff is a commit, not a file');
     assert.equal(g(['diff', '--name-only', 'HEAD~1', 'HEAD'], ww), '', 'it changes no file');
     st = json(ok(old, ['fleet', 'status', '--json'], SUP));
     assert.deepEqual(st.sessions.map((x) => [x.parked, x.pushed, x.clean, x.handoff]), [[true, true, true, true]]);
     assert.equal(st.ready, false, 'the log has not landed yet');
+    assert.equal(upkeepState(), 'parked', 'pushed, clean and handed off: parked');
     F.land();
     // everything else that is only here blocks: no supervisor handoff, a loose run/ file, a worktree with unpushed work
     st = json(ok(old, ['fleet', 'status', '--json'], SUP));
