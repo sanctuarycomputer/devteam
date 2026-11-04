@@ -1942,7 +1942,7 @@ function cmdValidate() {
       const read = problem ? { error: problem.replace(/^components: /, '') } : readCoverage(() => coverageAt(ref, sIn));
       if (read.error) (scope ? warnings : errors).push(`components: ${read.error}`);
       const cov = read.value;
-      if (cov) for (const l of coverageReport({ ...coverageGaps(cov, sIn), ref }, sIn)) (scope ? warnings : errors).push(`components: ${l}${scope ? `; not ${scope}'s to fix` : ''}`);
+      if (cov) for (const l of coverageReport({ ...coverageGaps(cov, sIn), ref }, sIn)) (scope || l.startsWith('line-empty:') ? warnings : errors).push(`components: ${l}${scope ? `; not ${scope}'s to fix` : ''}`);
     }
     // Designs cite links as link:<id>; checked only while the registry has links (open issue 12).
     if (Object.keys(s.links ?? {}).length) {
@@ -2491,8 +2491,9 @@ const coverageGapInfo = (name = 'home', R = homeFacts) => memo(`coverageGap\0${n
   if (read.error) return { count: 1, words: `its tree can't be read (${read.error})` };
   if (!read.value) return { count: 0, words: '' };
   const g = coverageGaps(read.value, s);
-  const parts = [[g.unowned.length, 'unowned'], [g.contested.length, 'contested'], [g.empty.length, 'empty glob(s)'], [g.unlinked.length, 'unlinked'], [g.case_collisions.length, 'case collision(s)']].filter(([n]) => n);
-  return { count: parts.reduce((t, [n]) => t + n, 0), words: parts.map(([n, w]) => `${n} ${w}`).join(', ') };
+  // an empty glob excludes nothing: a line-empty finding of its own, never a block (F17)
+  const parts = [[g.unowned.length, 'unowned'], [g.contested.length, 'contested'], [g.unlinked.length, 'unlinked'], [g.case_collisions.length, 'case collision(s)']].filter(([n]) => n);
+  return { count: parts.reduce((t, [n]) => t + n, 0), words: parts.map(([n, w]) => `${n} ${w}`).join(', '), empty: g.empty };
 });
 const coverageGap = (name = 'home', R = homeFacts) => coverageGapInfo(name, R).count;
 // A coverage read whose tree git couldn't read: { error }, never an empty tree (fail closed).
@@ -2634,7 +2635,7 @@ function coverageFails(base, sha, R = homeFacts, { ticket = false } = {}) {
     const before = coverageAt(main, S.sMain, R) ?? { unowned: [], contested: [], empty: [], case_collisions: [] };
     const nowG = coverageGaps(now, sLand), wasG = coverageGaps(before, S.sMain);
     const was = new Set([...before.unowned.map((p) => `u${p}`), ...before.contested.map(([p, o]) => `c${p}\0${o}`), ...before.empty.map((x) => `e${x}`), ...before.case_collisions.map((x) => `k${x}`), ...wasG.unlinked.map((n) => `l${n}`)]);
-    const fresh = { unowned: now.unowned.filter((p) => !was.has(`u${p}`)), contested: now.contested.filter(([p, o]) => !was.has(`c${p}\0${o}`)), empty: now.empty.filter((x) => !was.has(`e${x}`)), case_collisions: now.case_collisions.filter((x) => !was.has(`k${x}`)), unlinked: nowG.unlinked.filter((n) => !was.has(`l${n}`)), ref: land.tree };
+    const fresh = { unowned: now.unowned.filter((p) => !was.has(`u${p}`)), contested: now.contested.filter(([p, o]) => !was.has(`c${p}\0${o}`)), empty: [], case_collisions: now.case_collisions.filter((x) => !was.has(`k${x}`)), unlinked: nowG.unlinked.filter((n) => !was.has(`l${n}`)), ref: land.tree };
     return coverageReport(fresh, sLand, R).map((l) => `${pre}: ${l} (extend a line in a chore PR, or keep the file inside one)`);
   } catch (e) {
     if (e instanceof GitReadError) return [`${pre}: ${e.message}; coverage fails closed until it can`];
@@ -5833,6 +5834,7 @@ function collectMetrics(since) {
   // Component lines on main (§4, point 3): a gap is a severity-4 observation (open issue 6).
   {
     const gap = coverageGapInfo();
+    if (gap.empty?.length) add('low', 'line-empty', 'home', `${gap.empty.length} owns glob(s) on ${mainRef()} match nothing: ${gap.empty.slice(0, 5).map((x) => `"${x}"`).join(', ')}`, 'remove or fix the glob in a chore PR (settings components); an empty glob blocks nothing');
     if (gap.count) add('high', 'unowned-files', 'home', `${mainRef()} has coverage gaps: ${gap.words} (devteam.mjs components check lists them); no new ticket starts in home until they clear`, 'a chore PR that extends a line (settings components), or moves the files into one', { sev: 4 });
   }
   // The registry (spec §7): a link that no longer resolves, and lines drawn in the wrong place.
@@ -7327,7 +7329,8 @@ function coverageReport(cov, s, R = homeFacts) {
     lines.push(`unowned: ${dir} (${ps.length}): ${ps.slice(0, 8).join(', ')}${ps.length > 8 ? `, … (+${ps.length - 8})` : ''}${who ? `; suggested owner: ${who}` : ''}`);
   }
   for (const [p, owners] of cov.contested) lines.push(`contested: ${p} is owned by ${owners.join(' and ')}${owners[0] === 'devteam' ? " (the kit's own line: no component owns it)" : ''}`);
-  for (const g of cov.empty) lines.push(`empty: ${comps.find((c) => (c.owns ?? []).includes(g))?.name ?? '?'} owns "${g}", which matches nothing (a typo?)`);
+  // an empty glob excludes nothing, so invariant C holds with it: a warning, never a refusal (F17)
+  for (const g of cov.empty) lines.push(`line-empty: ${comps.find((c) => (c.owns ?? []).includes(g))?.name ?? '?'} owns "${g}", which matches nothing (a typo, or its last file was deleted): remove or fix the glob in a chore PR (settings components)`);
   for (const n of cov.unlinked ?? []) lines.push(`unlinked: component ${n}'s link "${s.components[n].link}" is not a link that holds files`);
   for (const grp of cov.case_collisions) lines.push(`case: ${grp.join(', ')} differ only by case (they break checkouts on macOS and Windows)`);
   return lines;

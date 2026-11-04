@@ -2959,6 +2959,33 @@ test('the registry at landing: checked whatever the PR, url edits tied to regist
   } finally { F.done(); }
 });
 
+test('deleting the last file under a glob: never refused, a line-empty warning that blocks nothing (F17, O3)', () => {
+  const F = monoFixture('line-empty');
+  const { old, ok, run, g, lines } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const body = path.join(F.base, 'body.md');
+  write(body, '## One-way doors\n\nNone.\n');
+  try {
+    lines({ ...F.STD, api: { owns: ['api/app.rb', 'api/lib/**'] } });
+    ok(old, ['ticket', 'add', 'api-01-a', '--json', JSON.stringify({ title: 'a', feature: 'chores', component: 'api', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['api/**'], done_when: ['the api suite passes'], notes: 'n' })], SUP);
+    const w = path.join(old, '.worktrees', 'chore-dead');
+    g(['worktree', 'add', '-q', '-b', 'chore-dead', w, 'origin/main'], old);
+    g(['rm', '-q', 'api/lib/x.rb'], w);
+    g(['commit', '-qm', 'chore-dead: x'], w);
+    const r = run(old, ['check-pr', '--head-ref', 'chore-dead', '--sha', g(['rev-parse', 'HEAD'], w), '--title', 'chore-dead: x', '--body-file', body]);
+    assert.equal(r.status, 0, `deleting the last file a glob matches is not refused: ${r.out}`);
+    // landed: validate warns with the fix, and nothing waits on it
+    g(['rm', '-q', 'api/lib/x.rb'], old); g(['commit', '-qm', 'dead code'], old); g(['push', '-q', 'origin', 'main'], old);
+    const v = run(old, ['validate']);
+    assert.match(v.out, /warning: components: line-empty: api owns "api\/lib\/\*\*", which matches nothing.*remove or fix the glob/);
+    assert.doesNotMatch(v.out, /error: components/);
+    assert.match(ok(old, ['ready']), /build +api-01-a/, 'an empty glob blocks no ticket');
+    const f = json(ok(old, ['metrics', '--json'])).findings;
+    assert.equal(f.find((x) => x.kind === 'line-empty')?.severity, 'low');
+    assert.ok(!f.some((x) => x.kind === 'unowned-files'));
+  } finally { F.done(); }
+});
+
 test('unowned files on main: a severity-4 finding, and no new ticket starts there until a line covers them', () => {
   const F = monoFixture('unowned');
   const { old, ok, run, g, lines } = F;
