@@ -4581,6 +4581,10 @@ function orientClusters() {
   }
   return res.sort((a, b) => b.count - a.count);
 }
+// One value as a POSIX shell word: single-quoted, each ' written '\''. Every value orient puts in a
+// command it proposes goes through this, since observation text is anyone's to write and the
+// supervisor runs what it pastes (O5, L-SEC-5).
+const shq = (v) => `'${String(v).replace(/'/g, "'\\''")}'`;
 // Link observations against the registry (spec §7, orient): a URL already there with a better
 // title, wider for or new notes is a proposed edit; a fresh URL a proposed add; a URL whose title
 // matches another link for an overlapping scope a question about which is the source of truth
@@ -4589,7 +4593,7 @@ function orientLinks() {
   const reg = loadSettings().links ?? {};
   const norm = (u) => String(u ?? '').replace(/\/+$/, '').toLowerCase();
   const used = new Set(Object.values(reg).map((l) => l.source).filter(Boolean));
-  const q = (x) => JSON.stringify(x);
+  const title = (x) => String(x ?? '');
   const overlap = (a, b) => { const x = asList(a).length ? asList(a) : ['all'], y = asList(b).length ? asList(b) : ['all']; return x.includes('all') || y.includes('all') || x.some((s) => y.includes(s)); };
   const res = [];
   for (const o of logObjects('observation').filter((x) => x.kind === 'link' && x.link?.url && !used.has(x.id)).sort(byTime)) {
@@ -4598,14 +4602,14 @@ function orientLinks() {
     if (same) {
       const [id, r] = same;
       const wider = asList(l.for).filter((s) => !asList(r.for).includes(s));
-      const sets = [...(wider.length ? [`link set ${id} for '${q([...asList(r.for), ...wider])}'`] : []), ...(l.notes && l.notes !== r.notes ? [`link set ${id} notes ${q(l.notes)}`] : []), ...(l.title !== r.title && l.title.length > r.title.length ? [`link set ${id} title ${q(l.title)}`] : [])];
+      const sets = [...(wider.length ? [`link set ${shq(id)} for ${shq(JSON.stringify([...asList(r.for), ...wider]))}`] : []), ...(l.notes && l.notes !== r.notes ? [`link set ${shq(id)} notes ${shq(l.notes)}`] : []), ...(l.title !== title(r.title) && l.title.length > title(r.title).length ? [`link set ${shq(id)} title ${shq(l.title)}`] : [])];
       // an edit to a link of an owner's kind (repo) is the owner's: the proposal is the question
-      if (sets.length) res.push({ key: `link-proposal:${id}`, proposal: 'edit', link: id, observation: o.id, command: LINK_KINDS[r.kind]?.ownedByOwner ? `ask --class governance-edit --question "Change ${id} in the registry: ${sets.join('; ').replace(/"/g, "'")}?" --evidence ${o.id} --recommendation yes` : sets.join(' && ') });
+      if (sets.length) res.push({ key: `link-proposal:${id}`, proposal: 'edit', link: id, observation: o.id, command: LINK_KINDS[r.kind]?.ownedByOwner ? `ask --class governance-edit --question ${shq(`Change ${id} in the registry: ${sets.join('; ')}?`)} --evidence ${shq(o.id)} --recommendation yes` : sets.join(' && ') });
       continue;
     }
-    const rival = Object.entries(reg).find(([id0, r]) => !!LINK_KINDS[r.kind]?.locator(r, id0).url && r.title.toLowerCase() === l.title.toLowerCase() && overlap(r.for, l.for));
-    if (rival) { res.push({ key: `link-proposal:${rival[0]}`, proposal: 'conflict', rival: rival[0], observation: o.id, command: `ask --question "Which is the source of truth for ${l.title}: ${LINK_KINDS[rival[1].kind].locator(rival[1], rival[0]).url} or ${l.url}?" --links '${q([{ title: rival[1].title, link: rival[0] }, { title: l.title, url: l.url }])}' --evidence ${o.id}` }); continue; }
-    res.push({ key: `link-proposal:${slug(l.title)}`, proposal: 'add', observation: o.id, command: `link add ${slug(l.title)} --kind url --url ${l.url} --title ${q(l.title)}${asList(l.for).length ? ` --for ${asList(l.for).join(' ')}` : ''}${l.notes ? ` --notes ${q(l.notes)}` : ''} --source ${o.id}` });
+    const rival = Object.entries(reg).find(([id0, r]) => !!LINK_KINDS[r.kind]?.locator(r, id0).url && title(r.title).toLowerCase() === l.title.toLowerCase() && overlap(r.for, l.for));
+    if (rival) { res.push({ key: `link-proposal:${rival[0]}`, proposal: 'conflict', rival: rival[0], observation: o.id, command: `ask --question ${shq(`Which is the source of truth for ${l.title}: ${LINK_KINDS[rival[1].kind].locator(rival[1], rival[0]).url} or ${l.url}?`)} --links ${shq(JSON.stringify([{ title: title(rival[1].title), link: rival[0] }, { title: l.title, url: l.url }]))} --evidence ${shq(o.id)}` }); continue; }
+    res.push({ key: `link-proposal:${slug(l.title)}`, proposal: 'add', observation: o.id, command: `link add ${shq(slug(l.title))} --kind url --url ${shq(l.url)} --title ${shq(l.title)}${asList(l.for).length ? ` --for ${asList(l.for).map(shq).join(' ')}` : ''}${l.notes ? ` --notes ${shq(l.notes)}` : ''} --source ${shq(o.id)}` });
   }
   return res;
 }

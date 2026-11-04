@@ -3133,11 +3133,36 @@ test('observe-link records a resource; orient proposes adds, edits and source-of
     assert.deepEqual([obs.kind, obs.subject, obs.link.title, obs.link.for], ['link', 'https://notion.test/runbook', 'Runbook', ['all']]);
     const props = json(ok(old, ['orient', '--json'])).filter((x) => x.proposal);
     assert.deepEqual(props.map((p) => [p.proposal, p.observation]).sort(), [['add', o1], ['conflict', o3], ['edit', o2]].sort());
-    assert.match(props.find((p) => p.proposal === 'add').command, /^link add runbook --kind url --url https:\/\/notion\.test\/runbook --title "Runbook" --for all --source o-/);
-    assert.match(props.find((p) => p.proposal === 'edit').command, /link set figma for '\["component:web","component:api"\]'/);
-    assert.match(props.find((p) => p.proposal === 'conflict').command, /^ask --question "Which is the source of truth/);
+    assert.match(props.find((p) => p.proposal === 'add').command, /^link add 'runbook' --kind url --url 'https:\/\/notion\.test\/runbook' --title 'Runbook' --for 'all' --source 'o-/);
+    assert.match(props.find((p) => p.proposal === 'edit').command, /link set 'figma' for '\["component:web","component:api"\]'/);
+    assert.match(props.find((p) => p.proposal === 'conflict').command, /^ask --question 'Which is the source of truth/);
     assert.match(ok(old, ['orient']), /link proposals:\n  add/);
     assert.match(run(old, ['observe-link', '--url', 'https://x.test'], SUP).err, /--title/);
+  } finally { F.done(); }
+});
+
+test("orient's proposed commands are shell-safe: every value single-quoted, so pasting one runs nothing (O5)", () => {
+  const F = monoFixture('orient-shq');
+  const { old, ok, edit } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  try {
+    edit((j) => { j.links = { figma: { kind: 'url', title: 'Designs', url: 'https://figma.test/a' }, console: { kind: 'repo', title: 'Console', remote: 'usbclub/console' } }; });
+    const pwned = path.join(F.base, 'pwned');
+    const evil = `see $(touch ${pwned}) and \`touch ${pwned}\` it's "quoted"`;
+    const url = 'https://www.figma.com/design/K/N?node-id=0-1&t=abc';
+    ok(old, ['observe-link', '--url', 'https://figma.test/a', '--title', 'Designs', '--notes', evil], { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'web-01-x' });
+    ok(old, ['observe-link', '--url', url, '--title', `Road $(touch ${pwned}) map`, '--notes', evil, '--for', 'component:web'], SUP);
+    const props = json(ok(old, ['orient', '--json'])).filter((x) => x.proposal);
+    assert.equal(props.length, 2);
+    // the shell reads each command back into exactly the values it was built from, and runs nothing
+    const argv = (cmd) => execFileSync('sh', ['-c', `set -- ${cmd}; for a in "$@"; do printf '%s\\0' "$a"; done`], { encoding: 'utf8' }).split('\0').slice(0, -1);
+    const edit1 = argv(props.find((p) => p.proposal === 'edit').command);
+    assert.deepEqual(edit1, ['link', 'set', 'figma', 'notes', evil]);
+    const add = argv(props.find((p) => p.proposal === 'add').command);
+    assert.equal(add[add.indexOf('--url') + 1], url, 'a URL with & and ? stays one argument');
+    assert.equal(add[add.indexOf('--title') + 1], `Road $(touch ${pwned}) map`);
+    assert.equal(add[add.indexOf('--notes') + 1], evil);
+    assert.ok(!fs.existsSync(pwned), 'no command substitution ran');
   } finally { F.done(); }
 });
 
