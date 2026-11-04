@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
@@ -23,6 +24,9 @@ process.env.TMUX_TMPDIR = fs.mkdtempSync(path.join(os.tmpdir(), 'dt-tmux-'));
 delete process.env.TMUX;
 delete process.env.TMUX_PANE;
 const hasTmux = spawnSync('tmux', ['-V']).status === 0;
+// A port the OS says is free: a random one in a range can land on a machine's own listener (macOS's
+// AirPlay receiver holds 5000 and answers 403), which then passes the test's startup probe.
+const freePort = () => new Promise((resolve, reject) => { const v = net.createServer(); v.on('error', reject); v.listen(0, '127.0.0.1', () => { const { port } = v.address(); v.close(() => resolve(port)); }); });
 
 function dt(args, { cwd = repo, role = 'owner', input } = {}) {
   const env = { ...process.env, ...ROLE[role] };
@@ -79,9 +83,9 @@ test('devteam kit', async (t) => {
   });
 
   await t.test('goals: supervisor drafts, owner approves', () => {
-    G = must(['goal', 'add', '--title', 'Self-serve billing', '--outcome', 'admins pay alone', '--measure', 'self-serve share', '--target', '80', '--unit', '%', '--direction', 'up', '--horizon', '2027-03-31', '--non-goals', 'enterprise invoicing', '--preconditions', 'cards work', 'prices defined', '--priority', '1'], { role: 'sup' });
+    G = must(['goal', 'add', '--title', 'Self-serve billing', '--outcome', 'admins pay alone', '--measure', 'self-serve share', '--target', '80', '--unit', '%', '--direction', 'up', '--source', 'prod', '--check', 'echo 5', '--horizon', '2027-03-31', '--non-goals', 'enterprise invoicing', '--preconditions', 'cards work', 'prices defined', '--priority', '1'], { role: 'sup' });
     assert.match(G, /^g-\d{8}-\d{9}-supervisor$/);
-    must(['goal', 'reading', G, '--value', '5'], { role: 'sup' });
+    must(['goal', 'reading', G, '--run'], { role: 'sup' });
     assert.notEqual(dt(['goal', 'approve', G], { role: 'sup' }).status, 0, 'supervisor cannot approve a goal');
     assert.match(dt(['goal', 'approve', G]).err, /no design up for approval/, 'a goal is approved on its design, not before');
     const design = [{ title: 'The approach', path: 'docs/devteam/project/designs/self-serve-billing.md', ref: 'plan/billing' }];
@@ -120,6 +124,91 @@ test('devteam kit', async (t) => {
     assert.equal(gv.status, 'ready');
     assert.equal(gv.decision.question, A2);
     assert.equal(json(must(['questions', '--id', A2, '--json']))[0].status, 'answered');
+  });
+
+  await t.test('goal measures: the source says how a reading is taken, and nobody types one in', (t) => {
+    const logDir = path.join(repo, 'docs/devteam/run/log');
+    // the lines written by hand here would be forgeries to every later test: put the log back
+    const snap = new Map(fs.readdirSync(logDir).map((f) => [f, fs.readFileSync(path.join(logDir, f))]));
+    t.after(() => { for (const f of fs.readdirSync(logDir)) if (snap.has(f)) fs.writeFileSync(path.join(logDir, f), snap.get(f)); else fs.rmSync(path.join(logDir, f), { recursive: true, force: true }); });
+    let n = 0;
+    // a line written by hand, the way a session could write its own file
+    const hand = (by, o) => {
+      const d = new Date(Date.now() + n++);
+      const file = path.join(logDir, fs.readdirSync(logDir).find((f) => f.startsWith(`${by}-`)) ?? `${by}-${d.toISOString().slice(0, 7)}.jsonl`);
+      const id = o.op === 'set' ? o.id : `o-${d.toISOString().slice(0, 10).replace(/-/g, '')}-${d.toISOString().slice(11, 23).replace(/[:.]/g, '')}-${by}`;
+      fs.appendFileSync(file, line({ op: 'new', ...o, id, at: d.toISOString(), by }));
+    };
+    const readings = (g) => json(must(['goal', 'show', g, '--json'])).readings;
+    const rest = ['--non-goals', 'everything else', '--preconditions', 'the work is merged'];
+    // no source: a draft can't be approved without one
+    const Gn = must(['goal', 'add', '--title', 'Sourceless', '--outcome', 'x', '--measure', 'things', '--target', '0', '--unit', 'n', '--direction', 'down', ...rest, '--priority', '41'], { role: 'sup' });
+    assert.match(must(['goal', 'check', Gn]), /no source: how the fleet reads the measure \(repo, prod or owner/);
+    assert.match(dt(['goal', 'set', Gn, '--source', 'vibes'], { role: 'sup' }).err, /--source is repo, prod or owner/);
+
+    // repo: the kit runs the check on main and records main's sha; nobody types the number
+    const Gr = must(['goal', 'add', '--title', 'Fewer scripts', '--outcome', 'one script', '--measure', 'files in scripts/', '--target', '0', '--unit', 'files', '--direction', 'down', '--source', 'repo', ...rest, '--priority', '42'], { role: 'sup' });
+    assert.match(must(['goal', 'check', Gr]), /no check: the command whose last line is the number/);
+    must(['goal', 'set', Gr, '--check', 'echo counting; ls docs/devteam/scripts | wc -l'], { role: 'sup' });
+    assert.match(dt(['goal', 'reading', Gr, '--value', '0'], { role: 'sup' }).err, /the kit runs its check \(goal reading .* --run\), nobody types the number/);
+    const main = git(['rev-parse', 'origin/main']);
+    assert.match(must(['goal', 'reading', Gr, '--run'], { role: 'sup' }), new RegExp(`recorded 1 for ${Gr} \\(main at ${main.slice(0, 12)}\\)`));
+    assert.deepEqual(readings(Gr).map((r) => [r.value, r.sha, r.source]), [[1, main, 'repo']]);
+    hand('supervisor', { type: 'observation', source: 'repo', subject: Gr, kind: 'reading', detail: 'typed', measure: { value: 0, unit: 'files' }, sha: '0123456789abcdef0123456789abcdef01234567' });
+    hand('supervisor', { type: 'observation', source: 'supervisor', subject: Gr, kind: 'reading', detail: 'typed', measure: { value: 0, unit: 'files' } });
+    assert.equal(readings(Gr).length, 1, 'a repo reading counts only with a commit on main; a typed one never');
+    assert.match(dt(['goal', 'status', Gr, 'met']).err, /check reads 1 on main .* not its target 0; --force/, 'met is read again, on main');
+    // the check is the supervisor's command: run from the owner's terminal, it still can't act as the owner
+    const Gx = must(['goal', 'add', '--title', 'Sly check', '--outcome', 'z', '--measure', 'zero', '--target', '0', '--unit', 'n', '--direction', 'down', '--source', 'repo', '--check', `node '${DT}' goal status ${Gn} abandoned >&2 || true; echo 0`, ...rest, '--priority', '45'], { role: 'sup' });
+    must(['goal', 'status', Gx, 'met']);
+    assert.notEqual(json(must(['goal', 'show', Gn, '--json'])).status, 'abandoned', "a check the owner's met runs is refused owner commands");
+
+    // prod: run from the main checkout, the output kept
+    const Gp = must(['goal', 'add', '--title', 'Prod count', '--outcome', 'y', '--measure', 'records synced', '--target', '10', '--unit', 'records', '--direction', 'up', '--source', 'prod', '--check', 'echo 7', ...rest, '--priority', '43'], { role: 'sup' });
+    assert.match(dt(['goal', 'reading', Gp, '--value', '10'], { role: 'sup' }).err, /read from prod: the kit runs its check/);
+    must(['goal', 'reading', Gp, '--run'], { role: 'sup' });
+    hand('supervisor', { type: 'observation', source: 'supervisor', subject: Gp, kind: 'reading', detail: 'typed', measure: { value: 10, unit: 'records' } });
+    assert.deepEqual(readings(Gp).map((r) => [r.value, r.source]), [[7, 'prod']]);
+
+    // owner: target 1, unit attested, from 0; only the owner's yes moves it
+    const Go = must(['goal', 'add', '--title', 'Sync validated', '--outcome', 'drifted records fix themselves', '--measure', 'validated on a real drifted record', '--source', 'owner', ...rest, '--priority', '44'], { role: 'sup' });
+    assert.match(must(['goal', 'check', Go]), /no question: the yes\/no the owner answers/);
+    must(['goal', 'set', Go, '--question', 'Have you validated sync on a drifted record in production?'], { role: 'sup' });
+    const gc = must(['goal', 'check', Go]);
+    for (const gap of [/no numeric target/, /no unit/, /no direction/, /no baseline reading/, /no source/]) assert.doesNotMatch(gc, gap);
+    const ov = json(must(['goal', 'show', Go, '--json']));
+    assert.deepEqual([ov.measure.target, ov.measure.unit, ov.measure.direction], [1, 'attested', 'up']);
+    assert.match(dt(['goal', 'reading', Go, '--value', '1'], { role: 'sup' }).err, /the owner's yes: ask a goal-met question/);
+    const metQ = (extra = []) => ['ask', '--class', 'goal-met', '--goal', Go, '--question', 'Have you validated sync on a drifted record in production?', ...extra];
+    assert.match(dt(metQ(), { role: 'sup' }).err, /recommends the answer that meets it/);
+    assert.match(dt(metQ(['--recommendation', 'yes', '--default', 'yes']), { role: 'sup' }).err, /has no --default/);
+    assert.match(dt(['ask', '--class', 'goal-met', '--goal', Gr, '--question', 'Done?', '--recommendation', 'yes'], { role: 'sup' }).err, /is read from repo/);
+    const Qwrong = must(['ask', '--class', 'release-scope', '--goal', Go, '--question', 'Is it validated?', '--recommendation', 'yes'], { role: 'sup' });
+    must(['answer', Qwrong, 'yes']);
+    assert.match(dt(['goal', 'reading', Go, '--approved', Qwrong], { role: 'sup' }).err, /class release-scope, not goal-met/);
+    const Qm = must(metQ(['--recommendation', 'yes']), { role: 'sup' });
+    assert.match(dt(['goal', 'reading', Go, '--approved', Qm], { role: 'sup' }).err, /not answered by the owner \(open\)/);
+    assert.notEqual(dt(['answer', Qm, 'yes', '--from-chat', '--said', 'yes'], { role: 'sup' }).status, 0, 'goal-met is owner-only: never answered from chat');
+    hand('supervisor', { type: 'observation', source: 'owner', subject: Go, kind: 'reading', detail: 'typed', measure: { value: 1, unit: 'attested' } });
+    hand('supervisor', { type: 'observation', source: 'owner', subject: Go, kind: 'reading', detail: 'typed', measure: { value: 1, unit: 'attested' }, approved: Qm });
+    assert.deepEqual(readings(Go), [], 'a hand-written reading attests nothing: not alone, not with an unanswered question');
+    assert.match(dt(['goal', 'status', Go, 'met']).err, /met when the owner says so/);
+    const Qno = must(metQ(['--recommendation', 'yes']), { role: 'sup' });
+    must(['answer', Qno, 'not yet']);
+    assert.match(dt(['goal', 'reading', Go, '--approved', Qno], { role: 'sup' }).err, /answered "not yet", not its recommendation/);
+    const Qchat = must(metQ(['--recommendation', 'yes']), { role: 'sup' });
+    hand('owner', { type: 'question', op: 'set', id: Qchat, channel: 'chat', answer: 'yes', said: 'yes' });
+    assert.match(dt(['goal', 'reading', Go, '--approved', Qchat], { role: 'sup' }).err, /answered in chat/);
+    hand('supervisor', { type: 'observation', source: 'owner', subject: Go, kind: 'reading', detail: 'typed', measure: { value: 1, unit: 'attested' }, approved: Qchat });
+    assert.deepEqual(readings(Go), [], 'a chat answer written by hand attests nothing');
+    // the hand-written line above cited Qm before the owner answered: it still counts for nothing
+    must(['answer', Qm, 'yes']);
+    assert.deepEqual(readings(Go), [], 'a reading written before the answer never counts');
+    assert.match(must(['goal', 'reading', Go, '--approved', Qm], { role: 'sup' }), new RegExp(`recorded 1 for ${Go} \\(${Qm}\\)`));
+    assert.match(dt(['goal', 'reading', Go, '--approved', Qm], { role: 'sup' }).err, /one answer, one reading/);
+    hand('supervisor', { type: 'observation', source: 'owner', subject: Go, kind: 'reading', detail: 'again', measure: { value: 1, unit: 'attested' }, approved: Qm });
+    assert.deepEqual(readings(Go).map((r) => [r.value, r.approved]), [[1, Qm]], 'each answer authorises one reading');
+    must(['goal', 'status', Go, 'met']);
   });
 
   await t.test('planner writes feature and tickets into its own log file in its worktree', () => {
@@ -1081,8 +1170,8 @@ test('devteam kit', async (t) => {
   });
 
   await t.test('a fully defined goal nobody is planning is idle planning', () => {
-    const Gi = must(['goal', 'add', '--title', 'Faster checkout', '--outcome', 'pay in under a minute', '--measure', 'median checkout', '--target', '60', '--unit', 's', '--direction', 'down', '--horizon', '2027-06-30', '--non-goals', 'mobile', '--preconditions', 'one-page form', '--priority', '7'], { role: 'sup' });
-    must(['goal', 'reading', Gi, '--value', '180'], { role: 'sup' });
+    const Gi = must(['goal', 'add', '--title', 'Faster checkout', '--outcome', 'pay in under a minute', '--measure', 'median checkout', '--target', '60', '--unit', 's', '--direction', 'down', '--source', 'prod', '--check', 'echo 180', '--horizon', '2027-06-30', '--non-goals', 'mobile', '--preconditions', 'one-page form', '--priority', '7'], { role: 'sup' });
+    must(['goal', 'reading', Gi, '--run'], { role: 'sup' });
     const idle = () => json(must(['metrics', '--json'])).findings.find((f) => f.kind === 'idle-planning');
     assert.match(idle()?.suggestion ?? '', new RegExp(Gi), 'nobody is designing it');
     const Qd = must(['ask', '--question', 'Which checkout first?', '--goal', Gi, '--recommendation', 'cards'], { role: 'sup' });
@@ -1395,7 +1484,7 @@ test('devteam kit', async (t) => {
     assert.match(must(['questions', '--id', 'q-20991231-235959000-supervisor', '--json']), /an unreadable sink/);
     must(['dashboard-data']);
     // the dashboard: browser headers required, a dead child doesn't kill the server, bytes decode whole
-    const port = 4400 + Math.floor(Math.random() * 500);
+    const port = await freePort();
     const srv = spawn(process.execPath, [DT, 'dashboard', '--port', String(port)], { cwd: repo, env: { ...process.env, DEVTEAM_ROLE: '' }, stdio: 'ignore' });
     try {
       for (let i = 0; i < 50; i++) { try { await fetch(`http://127.0.0.1:${port}/`); break; } catch { await new Promise((r) => setTimeout(r, 100)); } }
@@ -1948,7 +2037,7 @@ test('devteam kit', async (t) => {
     fs.appendFileSync(supFile, line({ ...askLine, id: Qt, at: '2099-12-31T23:59:58.000Z', review: { ...askLine.review, page: { ...askLine.review.page, sha256: sha('another page') } } }));
     const view = (id) => json(must(['questions', '--id', id, '--json']))[0];
 
-    const port = 4900 + Math.floor(Math.random() * 500);
+    const port = await freePort();
     const B = `http://127.0.0.1:${port}`;
     const srv = spawn(process.execPath, [DT, 'dashboard', '--port', String(port)], { cwd: repo, env: { ...process.env, DEVTEAM_ROLE: '' }, stdio: 'ignore' });
     try {
@@ -2236,7 +2325,7 @@ test('devteam kit', async (t) => {
     assert.equal(sha(must(['review', 'result', Qp, '--json'], { role: 'sup' }) + '\n'), ownerSha, 'the result still reads');
     // the dashboard serves the landed page from main, byte for byte
     {
-      const port = 4900 + Math.floor(Math.random() * 500);
+      const port = await freePort();
       const B = `http://127.0.0.1:${port}`;
       const srv = spawn(process.execPath, [DT, 'dashboard', '--port', String(port)], { cwd: repo, env: { ...process.env, DEVTEAM_ROLE: '' }, stdio: 'ignore' });
       try {
@@ -2907,8 +2996,13 @@ test('fleet park: every session stops with a handoff, and a clone elsewhere pick
     assert.match(wp, new RegExp(`the handoff commit [0-9a-f]{12} on ticket/${ID}`));
     const nw = path.join(neu, '.worktrees', ID);
     if (hasTmux) {
-      const rs = spawnSync(process.execPath, [path.join(neu, 'docs/devteam/scripts/devteam.mjs'), 'worker', ID, '--resume'], { cwd: neu, env: env(SUP), encoding: 'utf8' });
+      // the supervisor runs inside an agent session: its markers must not reach the worker's agent
+      const rs = spawnSync(process.execPath, [path.join(neu, 'docs/devteam/scripts/devteam.mjs'), 'worker', ID, '--resume'], { cwd: neu, env: env({ ...SUP, CLAUDECODE: '1', CLAUDE_CODE_CHILD_SESSION: '1', CLAUDE_CONFIG_DIR: path.join(home, 'claude') }), encoding: 'utf8' });
+      let pane = '';
+      for (let i = 0; i < 150 && !/env -u/.test(pane); i++) { pane = spawnSync('tmux', ['capture-pane', '-p', '-J', '-t', `devteam:${ID}`], { env: env({}), encoding: 'utf8' }).stdout ?? ''; Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100); }
       spawnSync('tmux', ['kill-server'], { env: env({}) });
+      for (const k of ['CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION']) assert.match(pane, new RegExp(`env (-u \\w+ )*-u ${k} (-u \\w+ )*true `), `the agent starts without the supervisor's session marker ${k}`);
+      assert.doesNotMatch(pane, /-u CLAUDE_CONFIG_DIR/, 'settings the owner exports stay');
       assert.equal(rs.status, 0, rs.stderr);
       assert.match(rs.stderr, /no worker session to resume for ch-01-tidy: its worktree was just made here.*starting it fresh with agent_command and its handoff note/);
       assert.equal(g(['rev-parse', 'HEAD'], nw), g(['rev-parse', `origin/ticket/${ID}`], neu), 'the worktree continues the pushed branch, not main');
