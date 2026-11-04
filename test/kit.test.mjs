@@ -2458,6 +2458,66 @@ test('coverage: the function reports a clean partition exactly when there is one
   assert.ok(collided > 0, 'some seeds produced a case collision');
 });
 
+// A monorepo: home with three apps and its own kit, forge git, one gate. Lines are set with
+// lines(...) and land on main as the supervisor's chore would.
+function monoFixture(name) {
+  const F = fleetFixture(name);
+  const { old, g } = F;
+  for (const f of ['api/app.rb', 'api/lib/x.rb', 'web/src/index.js', 'web/package.json', 'ops/deploy.sh', 'README.md', '.github/workflows/ci.yml']) write(path.join(old, f), `${f}\n`);
+  g(['add', '-A'], old);
+  g(['commit', '-qm', 'apps'], old);
+  g(['push', '-q', 'origin', 'main'], old);
+  const settingsFile = path.join(old, 'docs/devteam/project/settings.md');
+  const edit = (fn, cwd = old) => {
+    const f = path.join(cwd, 'docs/devteam/project/settings.md');
+    const txt = fs.readFileSync(f, 'utf8');
+    const m = txt.match(/```json devteam\s*\n([\s\S]*?)\n```/);
+    const j = JSON.parse(m[1]);
+    fn(j);
+    fs.writeFileSync(f, txt.replace(m[1], () => JSON.stringify(j, null, 2)));
+  };
+  const lines = (components, extra = {}) => { edit((j) => { j.components = components; Object.assign(j, extra); }); g(['commit', '-qam', 'lines'], old); g(['push', '-q', 'origin', 'main'], old); };
+  // every path init and fleetFixture track: AGENTS.md and .gitignore from init; config/dev.key is gitignored
+  const STD = { api: { owns: ['api/**'] }, web: { owns: ['web/**'] }, ops: { owns: ['ops/**', '.github/**', 'README.md', '.gitignore', 'AGENTS.md'] } };
+  return { ...F, settingsFile, edit, lines, STD };
+}
+
+test('the registry and component lines are validated; labels-only components and no links change nothing', () => {
+  const F = monoFixture('registry');
+  const { old, ok, run, lines, edit, g } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const v = () => { const r = run(old, ['validate']); return r.out + r.err; };
+  try {
+    // components written as labels before lines existed (a stack, a path): no new errors (open issue 1)
+    lines({ api: { stack: 'rails', path: 'api' }, web: { stack: 'next' } });
+    assert.doesNotMatch(v(), /component|owns|links/i, 'labels are not lines');
+    // unknown kind, reserved ids, http, unknown field, duplicate remotes, home's own remote
+    const bad = { bare: { kind: 'repo', title: 'Bare', remote: 'some-folder' }, console: { kind: 'repo', title: 'Console', remote: 'usbclub/console' }, dup: { kind: 'repo', title: 'Dup', remote: 'https://github.com/usbclub/console.git' }, home: { kind: 'url', title: 'x', url: 'https://x.test' }, figma: { kind: 'url', title: 'F', url: 'http://figma.test' }, notes: { kind: 'doc', title: 'D' }, self: { kind: 'repo', title: 'Self', remote: F.org }, extra: { kind: 'url', title: 'E', url: 'https://e.test', colour: 'red' } };
+    lines({}, { links: bad });
+    const out = v();
+    assert.match(out, /links\.notes: unknown kind "doc" \(known: repo, url\)/);
+    assert.match(out, /links\.home: "home" is reserved/);
+    assert.match(out, /links\.figma: url must start with https:\/\//);
+    assert.match(out, /links\.dup: the same remote as links\.console/);
+    assert.match(out, /links\.self: the repo that holds the kit \(home\)/);
+    assert.match(out, /links\.extra: "colour" is not a field of a url link/);
+    assert.match(out, /links\.bare: remote "some-folder" is neither owner\/name nor a URL; a local remote is a path starting \.\/, \.\.\/ or \//);
+    lines({}, { links: {} });
+    // declared lines: object entries are reserved, negations refused, two owns-less components, a non-home link (open issue 13)
+    lines({ api: { owns: ['api/**', { link: 'x', glob: 'y' }] }, web: { owns: ['!web/tmp/**', 'web/**'] }, ops: {}, misc: {}, none: { owns: [] }, console: { link: 'console' } });
+    const o2 = v();
+    assert.match(o2, /components\.api\.owns\[1\]: an object entry is reserved for a later release/);
+    assert.match(o2, /components\.web\.owns\[0\]: negation patterns are refused/);
+    assert.match(o2, /components ops and misc both have no owns on home/);
+    assert.match(o2, /components\.none\.owns: an empty list owns nothing/);
+    assert.match(o2, /components\.console: link "console" is not in links/);
+    // m1: a ticket whose component is a reserved slug is reported once, with the rename
+    lines(F.STD);
+    ok(old, ['ticket', 'add', 'home-01-x', '--json', JSON.stringify({ title: 'x', feature: 'chores', component: 'home', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['api/**'], done_when: ['the api check passes'], notes: 'n' })], SUP);
+    assert.match(v(), /tickets home-01-x: component "home" is reserved/);
+  } finally { F.done(); }
+});
+
 test('fleet park: every session stops with a handoff, and a clone elsewhere picks it up with parity', () => {
   const F = fleetFixture('park');
   const { org, old, neu, home, env, run, ok, g, base } = F;

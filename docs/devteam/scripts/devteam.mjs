@@ -164,6 +164,13 @@ const commonDir = git(['rev-parse', '--path-format=absolute', '--git-common-dir'
 const mainRoot = commonDir ? path.dirname(commonDir) : repoRoot;
 const projectDir = path.resolve(flagStr('project') ?? process.env.DEVTEAM_PROJECT ?? path.join(devteamDir, 'project'));
 const runDir = path.resolve(process.env.DEVTEAM_RUN ?? path.join(mainRoot, 'docs', 'devteam', 'run'));
+// What run/ holds that the kit made and rebuilds (or that is this machine's alone by nature);
+// anything else in it was put there by hand and doesn't move. A writer names its file through
+// runPath where it defines the path, so the list can't fall behind the files.
+const RUN_KNOWN = new Set(['log', 'prompts', 'questions', 'sent', 'cache', 'agent', 'pr', 'supervisor-pane', 'dashboard.log', 'supervisor-prompt.txt', '.DS_Store']);
+const runPath = (name) => { RUN_KNOWN.add(name); return path.join(runDir, name); };
+// Where this machine's checkouts of repo links are, when not where settings say (§3.5).
+const LINKS_LOCAL = runPath('links.local.json');
 const projectRel = path.relative(repoRoot, projectDir).split(path.sep).join('/');
 const projectInRepo = !!commonDir && projectRel !== '' && !projectRel.startsWith('..') && !path.isAbsolute(projectRel);
 const CHORES = 'chores';
@@ -195,6 +202,8 @@ const SETTINGS_DEFAULTS = {
   question_default_after_hours: 24,
   autonomy_ceilings: {},
   components: {},
+  // Named resources the fleet uses (spec §3.1): { "<id>": { "kind": "repo"|"url", "title": …, … } }.
+  links: {},
   // How a tagged release reaches production: 'tag' (deploys from the tag) or { branch: 'production' }.
   release: 'tag',
   // Commands a stdin: secret sink may run (prefixes, e.g. "gh secret set"); they run as the owner.
@@ -274,6 +283,196 @@ function loadSettings() {
     }
   }
   return settingsCache;
+}
+
+// ===== 2b. links and component lines (the registry) =====
+//
+// A link is a named resource the fleet uses; a repo link is one devteam can also operate on; a
+// component is a line drawn over a repo link: the files it owns. home is the repo that holds the
+// kit and project/, never declared; devteam is the kit's own line, computed (spec §3, §4).
+const RESERVED_LINKS = ['home', 'devteam'];
+const LINK_ID = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
+// The settings a repo link may carry for itself (spec §3.3). The first four default to the
+// project's; every other key is never inherited, so a repo with no gates is refused by merge like
+// home with none, and a per-repo key added later gets the no-inherit rule by default.
+const REPO_KEYS = ['main_branch', 'forge', 'merge_method', 'release', 'gates', 'worktree_setup', 'worktree_files', 'ignored_checks', 'project'];
+const REPO_INHERITED = ['main_branch', 'forge', 'merge_method', 'release'];
+const REPO_OWN = REPO_KEYS.filter((k) => !REPO_INHERITED.includes(k));
+const REPO_OWN_DEFAULTS = { gates: {}, worktree_setup: '', worktree_files: [], ignored_checks: [], project: 'docs/devteam/project' };
+// what a gate run sees is the owner's gate-change, as for home's own keys (OWNER_SETTINGS)
+const REPO_GATE_KEYS = ['gates', 'worktree_setup', 'worktree_files', 'ignored_checks'];
+const LINK_COMMON = ['kind', 'title', 'notes', 'for', 'source'];
+// Whether a repo checkout is where its link says and of its remote, once per process per location.
+const linkReachMemo = new Map();
+// The url probe: a child node does one HEAD request with a 10 s deadline and prints the status.
+const PROBE_JS = "fetch(process.argv[1],{method:'HEAD',redirect:'follow',signal:AbortSignal.timeout(10000)}).then((r)=>console.log(r.status)).catch(()=>console.log(0))";
+// A local remote is a path, written so nobody mistakes it for owner/name: ./, ../ or absolute.
+const localRemote = (r) => !/^[a-z][a-z0-9+.-]*:\/\//i.test(r) && !/^[\w.-]+@[\w.-]+:/.test(r) && !/^[\w.-]+\/[\w.-]+$/.test(r);
+// Every per-kind behaviour of a link (spec §3.1). A new kind (doc, dataset, mcp) is one entry here;
+// nothing outside this table branches on a kind.
+const LINK_KINDS = {
+  repo: {
+    fields: { required: ['remote'], optional: ['path', ...REPO_KEYS] },
+    // where the checkout is on this machine is never the owner's (§3.5); what a gate run sees is
+    // gate-change; anything else about a repo devteam merges into is governance-edit (open issue 4)
+    ownerClass: (field) => (field === 'path' ? null : REPO_GATE_KEYS.includes(field) ? 'gate-change' : 'governance-edit'),
+    localOverrides: ['path'],
+    hostsComponents: true,
+    effectiveSettings: (link, project) => ({ ...Object.fromEntries(REPO_INHERITED.map((k) => [k, link[k] ?? project[k]])), ...Object.fromEntries(REPO_OWN.map((k) => [k, link[k] ?? REPO_OWN_DEFAULTS[k]])) }),
+    // shape problems of one entry; ctx carries what spans entries (home's origin, remotes seen)
+    validate: (l, at, ctx) => {
+      const errs = [];
+      if (typeof l.remote !== 'string') return errs;
+      if (localRemote(l.remote) && !/^(\.{1,2}\/|\/)/.test(l.remote)) errs.push(`${at}: remote "${l.remote}" is neither owner/name nor a URL; a local remote is a path starting ./, ../ or /`);
+      const k = remoteKey(l.remote);
+      if (ctx.homeOrigin && k === remoteKey(ctx.homeOrigin)) errs.push(`${at}: the repo that holds the kit (home) is never a link`);
+      else if (fs.existsSync(linkLocation(ctx.id)) && realOrSelf(linkLocation(ctx.id)) === realOrSelf(mainRoot)) errs.push(`${at}: its path is the repo that holds the kit (home)`);
+      if (ctx.remotes.has(k)) errs.push(`${at}: the same remote as links.${ctx.remotes.get(k)}`);
+      else ctx.remotes.set(k, ctx.id);
+      if (l.project !== undefined && (typeof l.project !== 'string' || !REPO_PATH.test(l.project))) errs.push(`${at}: project is a path inside that repo`);
+      return errs;
+    },
+    // local and cheap: metrics asks it live
+    reachable: (link, id) => {
+      const at = linkLocation(id);
+      const key = `${id}\0${at}\0${link.remote}`;
+      if (linkReachMemo.has(key)) return linkReachMemo.get(key);
+      let why = null;
+      if (!fs.existsSync(at)) why = `its checkout ${at} is missing (set path, or run/links.local.json on this machine)`;
+      else {
+        const origin = git(['config', '--get', 'remote.origin.url'], at);
+        if (origin === null) why = `${at} is not a git checkout with an origin`;
+        else if (remoteKey(origin) !== remoteKey(link.remote)) why = `${at} is a checkout of ${origin}, not ${link.remote}`;
+      }
+      linkReachMemo.set(key, why);
+      return why;
+    },
+    // over the network, once a day (probeLinks): the remote still answers. Only asked once the
+    // checkout is there, through its own origin, so a test's local bare repo is all it contacts.
+    probe: (link, id) => {
+      if (LINK_KINDS.repo.reachable(link, id)) return null;
+      const r = spawnSync('git', ['ls-remote', '--exit-code', '-q', 'origin', 'HEAD'], { cwd: linkLocation(id), stdio: 'ignore', timeout: 12000 });
+      return r.status === 0 ? null : `its remote ${link.remote} does not resolve`;
+    },
+    fixHint: (link, id) => `clone ${link.remote} at ${linkLocation(id)}, or set its path (run/links.local.json on this machine)`,
+    // where it is, for a person, a question and the dashboard
+    locator: (link, id) => ({ text: `repo ${link.remote} at ${linkLocation(id)} (${fs.existsSync(linkLocation(id)) ? 'found' : 'missing'})`, remote: link.remote }),
+    promptLine: (link, id) => `- ${link.title} (repo ${link.remote}, checked out at ${linkLocation(id)}; read it for reference, change it only through a ticket in it)${link.notes ? `: ${link.notes}` : ''} [link:${id}]`,
+  },
+  url: {
+    fields: { required: ['url'], optional: ['check'] },
+    // a url link is the supervisor's, edited by registry-edit acts (§3.4, §7)
+    ownerClass: () => null,
+    localOverrides: [],
+    hostsComponents: false,
+    effectiveSettings: () => null,
+    validate: (l, at) => [
+      ...(typeof l.url === 'string' && !l.url.startsWith('https://') ? [`${at}: url must start with https://`] : []),
+      ...(l.check !== undefined && typeof l.check !== 'boolean' ? [`${at}: check is true or false`] : []),
+    ],
+    reachable: () => null,
+    // one HEAD request, 10 s, no body read (spec §7); DEVTEAM_URL_PROBE stands in for it in tests
+    probe: (link) => {
+      if (link.check === false) return null;
+      const r = process.env.DEVTEAM_URL_PROBE ? spawnSync(process.env.DEVTEAM_URL_PROBE, [link.url], { encoding: 'utf8', timeout: 12000 }) : spawnSync(process.execPath, ['-e', PROBE_JS, link.url], { encoding: 'utf8', timeout: 12000 });
+      const code = Number((r.stdout ?? '').trim());
+      return !code ? 'no answer to a HEAD request in 10 s' : code >= 400 ? `HEAD returned ${code}` : null;
+    },
+    fixHint: () => 'fix or remove the link (link set|rm), or "check": false for a page behind auth',
+    locator: (link) => ({ text: link.url, url: link.url }),
+    promptLine: (link, id) => `- ${link.title} (${link.url})${link.notes ? `: ${link.notes}` : ''} [link:${id}]`,
+  },
+};
+// A kind is the owner's when any of its fields is (repo); otherwise the supervisor's (url). Derived,
+// so a new kind's entry says it once, in ownerClass.
+for (const K of Object.values(LINK_KINDS)) K.ownedByOwner = [...LINK_COMMON.filter((f) => f !== 'kind'), ...K.fields.required, ...K.fields.optional].some((f) => K.ownerClass(f));
+const linkFields = (kind) => (LINK_KINDS[kind] ? [...LINK_COMMON, ...LINK_KINDS[kind].fields.required, ...LINK_KINDS[kind].fields.optional] : LINK_COMMON);
+// A remote's identity: owner/name for GitHub, however written; anything else is a URL or a path.
+// Read a checkout's origin with `git config --get remote.origin.url`, the URL as configured:
+// `git remote get-url` expands url.<base>.insteadOf, which would make a mirror look like another repo.
+const remoteKey = (r) => {
+  const s = String(r ?? '').trim().replace(/\/+$/, '');
+  const gh = /^(?:https?:\/\/(?:[^@/]+@)?github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)?([\w.-]+\/[\w.-]+?)(?:\.git)?$/.exec(s);
+  if (gh && !/^[./]/.test(s)) return gh[1].toLowerCase();
+  return /^[a-z]+:\/\//i.test(s) ? s.replace(/\.git$/, '') : realOrSelf(path.resolve(mainRoot, s)).replace(/\.git$/, '');
+};
+// Where a link's checkout is on this machine: run/links.local.json (untracked), the committed path,
+// or ../<id>, relative to home's main checkout (§3.5). PR 2 adds --path on the command line.
+function linkLocation(id) {
+  let local = {};
+  try { local = readJson(LINKS_LOCAL); } catch {}
+  const at = local?.[id]?.path ?? loadSettings().links?.[id]?.path ?? `../${id}`;
+  return path.resolve(mainRoot, at);
+}
+// A component map draws lines only once an entry says so (open issue 1): before that its entries
+// are labels a project wrote before lines existed, and nothing here applies to them.
+const COMPONENT_FIELDS = ['link', 'owns', 'shared', 'release'];
+const linesDeclared = (s) => Object.values(s?.components ?? {}).some((c) => isObj(c) && COMPONENT_FIELDS.some((k) => k in c));
+const componentLink = (name, s = loadSettings()) => (linesDeclared(s) ? s.components?.[name]?.link ?? 'home' : 'home');
+const componentsOn = (s, link = 'home') => (linesDeclared(s) ? Object.entries(s.components).filter(([, c]) => (c?.link ?? 'home') === link).map(([name, c]) => ({ name, owns: Array.isArray(c.owns) ? c.owns.filter((g) => typeof g === 'string') : undefined, shared: !!c.shared })) : []);
+// The kit's own files: the kit folder and the project folder, wherever --project moved it.
+// (upstreamSyncApproval reads this one too, rather than computing its own.)
+const kitRel = path.relative(repoRoot, devteamDir).split(path.sep).join('/');
+const devteamLine = () => [...(kitRel && !kitRel.startsWith('..') ? [`${kitRel}/**`] : []), ...(projectInRepo ? [`${projectRel}/**`] : [])];
+// The kit's own repo has no lines: everything in it is the kit (§4, open issue 5).
+const kitsOwnRepo = () => { const o = git(['config', '--get', 'remote.origin.url']); return !!o && remoteKey(o) === remoteKey(loadSettings().upstream_repo ?? ''); };
+
+const SCOPE_HELP = { for: 'all, project, component:<c>, feature:<f>, goal:<g> or link:<id>' };
+const scopeValid = (sc) => /^(all|project|(component|feature|goal|link):[a-z0-9-]+)$/.test(String(sc));
+// Every problem with the registry and the lines, worded for validate. Shape only: coverage of a
+// tree is coverage()'s, and runs on committed settings (§4). Per-kind checks are LINK_KINDS[k].validate.
+function registryProblems(s) {
+  const errors = [];
+  const warnings = [];
+  const links = s.links ?? {};
+  if (!isObj(links)) return { errors: ['settings links: an object of { "<id>": { kind, title, … } }'], warnings };
+  const ctx = { homeOrigin: git(['config', '--get', 'remote.origin.url']), remotes: new Map() };
+  for (const [id, l] of Object.entries(links)) {
+    const at = `links.${id}`;
+    if (RESERVED_LINKS.includes(id)) { errors.push(`${at}: "${id}" is reserved (home is the repo that holds the kit; devteam is the kit's own line)`); continue; }
+    if (!LINK_ID.test(id)) { errors.push(`${at}: an id is lowercase words joined by hyphens`); continue; }
+    if (!isObj(l)) { errors.push(`${at}: an object`); continue; }
+    const K = LINK_KINDS[l.kind];
+    if (!K) { errors.push(`${at}: unknown kind "${l.kind ?? ''}" (known: ${Object.keys(LINK_KINDS).join(', ')})`); continue; }
+    for (const f of ['title', ...K.fields.required]) if (l[f] === undefined || l[f] === '') errors.push(`${at}: ${f} is required`);
+    const known = new Set(linkFields(l.kind));
+    for (const f of Object.keys(l)) if (!known.has(f)) errors.push(`${at}: "${f}" is not a field of a ${l.kind} link (fields: ${[...known].join(', ')})`);
+    for (const sc of asList(l.for)) if (!scopeValid(sc, 'for')) errors.push(`${at}: for "${sc}" is not a scope (${SCOPE_HELP.for})`);
+    errors.push(...K.validate(l, at, { ...ctx, id }));
+  }
+  if (!linesDeclared(s)) return { errors, warnings };
+  if (kitsOwnRepo()) errors.push("components: the kit's own repo draws no lines (every file in it is the kit's)");
+  const byLink = new Map();
+  for (const [name, c] of Object.entries(s.components)) {
+    const at = `components.${name}`;
+    if (RESERVED_LINKS.includes(name)) { errors.push(`${at}: "${name}" is reserved`); continue; }
+    if (!LINK_ID.test(name)) { errors.push(`${at}: a component id is lowercase words joined by hyphens`); continue; }
+    if (!isObj(c)) { errors.push(`${at}: an object ({ "link": …, "owns": [globs], "shared": true })`); continue; }
+    for (const f of Object.keys(c)) if (!COMPONENT_FIELDS.includes(f)) errors.push(`${at}: "${f}" is not a component field (${COMPONENT_FIELDS.join(', ')})`);
+    const link = c.link ?? 'home';
+    if (link !== 'home') {
+      if (!links[link]) errors.push(`${at}: link "${link}" is not in links`);
+      else if (!LINK_KINDS[links[link].kind]?.hostsComponents) errors.push(`${at}: link "${link}" is a ${links[link].kind} link, which holds no files`);
+      else errors.push(`${at}: link "${link}": only home holds components and tickets in this release`);
+    }
+    if (c.owns !== undefined && !Array.isArray(c.owns)) errors.push(`${at}.owns: a list of globs`);
+    // an empty list is a line around nothing; leave owns out for the sole-component ** default
+    else if (Array.isArray(c.owns) && !c.owns.length) errors.push(`${at}.owns: an empty list owns nothing (leave owns out for a sole component that owns everything)`);
+    asList(c.owns).forEach((g, i) => {
+      if (isObj(g)) errors.push(`${at}.owns[${i}]: an object entry is reserved for a later release (a component spanning repos)`);
+      else if (typeof g !== 'string' || !g) errors.push(`${at}.owns[${i}]: a glob`);
+      else if (g.startsWith('!')) errors.push(`${at}.owns[${i}]: negation patterns are refused; draw the line with what it owns`);
+      else if (unbalanced(g)) errors.push(`${at}.owns[${i}]: "${g}" has unbalanced braces`);
+    });
+    if (c.shared !== undefined && typeof c.shared !== 'boolean') errors.push(`${at}.shared: true or false`);
+    if (c.release !== undefined && !(isObj(c.release) && typeof c.release.tag === 'string' && Object.keys(c.release).length === 1)) errors.push(`${at}.release: { "tag": "<glob>" }, e.g. { "tag": "web/v*" }`);
+    (byLink.get(link) ?? byLink.set(link, []).get(link)).push([name, c]);
+  }
+  for (const [link, cs] of byLink) {
+    const bare = cs.filter(([, c]) => c?.owns === undefined).map(([n]) => n);
+    if (bare.length && cs.length > 1) errors.push(`components ${bare.join(' and ')} ${bare.length > 1 ? 'both have' : 'has'} no owns on ${link}: a component without owns owns everything only while it is the only one there`);
+  }
+  return { errors, warnings };
 }
 
 // The trust ladder and its tables live in governance/constitution.md, in a ```json devteam block.
@@ -1571,6 +1770,17 @@ function cmdValidate() {
     }
   }
 
+  // The registry and the lines (spec §3). Labels-only components and an empty registry print nothing.
+  {
+    const s = loadSettings();
+    const reg = registryProblems(s);
+    errors.push(...reg.errors);
+    warnings.push(...reg.warnings);
+    // A reserved slug as a component prefix: the one G1 exception, only for a project already using it.
+    const reserved = [...ts.values()].filter((t) => RESERVED_LINKS.includes(t.component)).map((t) => t.id);
+    if (reserved.length) errors.push(`tickets ${reserved.join(', ')}: component "${[...new Set(reserved.map((id) => ts.get(id).component))].join('" and "')}" is reserved (home is the repo that holds the kit, devteam the kit's own files); rename the component: supersede each ticket with one under another component (ticket add <new-id>, ticket set <old-id> --json '{"superseded_by": "<new-id>"}')`);
+  }
+
   for (const e of readLog().errors) warnings.push(`log ${e}`);
   for (const i of readLog().ignored) if (['ticket', 'feature'].includes(i.line.type) && i.why === 'duplicate id') errors.push(`${i.line.id}: a second ${i.line.type} line with this id (${i.line.__file}:${i.line.__line}) was ignored; use ${i.line.type} set`);
   const raw = ladder().raw_ceilings;
@@ -2250,7 +2460,6 @@ function upstreamSyncApproval(chore, sha, changed) {
     if (git(['fetch', '--quiet', '--no-tags', src, `+refs/tags/${t}:refs/devteam-upstream/${t}`], mainRoot) !== null) { tag = t; break; }
   }
   if (!tag) return { problem: `standing approval for upstream syncs: no tag "${raw}" at ${s.upstream_repo}` };
-  const kitRel = path.relative(repoRoot, devteamDir).split(path.sep).join('/');
   const blob = (ref, f) => git(['rev-parse', '--verify', '--quiet', `${ref}:${f}`], mainRoot);
   const differ = [];
   for (const f of changed) {
@@ -5955,9 +6164,6 @@ const supervisorHandoffOnMain = () => {
   const text = git(['show', `${main}:${rel}`]);
   return text === null ? null : { text, at: git(['log', '-1', '--format=%cI', main, '--', rel]), rel };
 };
-// What run/ holds that the kit made and rebuilds (or that is this machine's alone by nature); anything
-// else in it was put there by hand and doesn't move.
-const RUN_KNOWN = new Set(['log', 'prompts', 'questions', 'sent', 'cache', 'agent', 'pr', 'supervisor-pane', 'dashboard.log', 'supervisor-prompt.txt', '.DS_Store']);
 // An agent harness's own memory for this project, outside the repo (Claude Code keeps it per
 // checkout folder). It doesn't move; what the next session needs goes into knowledge or a handoff.
 function harnessMemoryFiles() {
