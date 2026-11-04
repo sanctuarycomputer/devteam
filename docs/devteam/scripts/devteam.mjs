@@ -2344,6 +2344,7 @@ function coverageGaps(cov, s) {
   return { ...cov, unlinked, count: cov.unowned.length + cov.contested.length + cov.empty.length + unlinked.length };
 }
 
+const OFF_LINE = 'changes files outside the line of';
 // Definition of done at an exact head, reading the files committed at that head. The forge's
 // check-pr passes approvals: false, because the supervisor's approval acts live in its log.
 function checkTicket(id, { sha: shaArg, title, body, approvals = true }) {
@@ -2396,8 +2397,21 @@ function checkTicket(id, { sha: shaArg, title, body, approvals = true }) {
   if (base) {
     const changed = changedFiles(base, sha);
     const own = projectInRepo ? `${projectRel}/tickets/${id}/` : null;
-    const outside = changed.filter((f) => !(own && f.startsWith(own)) && !(t.touches ?? []).some((g) => pathMatches(g, f)));
+    const mineOwn = (f) => !!own && f.startsWith(own);
+    const outside = changed.filter((f) => !mineOwn(f) && !(t.touches ?? []).some((g) => pathMatches(g, f)));
     if (outside.length) fails.push(`changes files outside touches: ${outside.slice(0, 10).join(', ')}${outside.length > 10 ? ` (+${outside.length - 10} more)` : ''}`);
+    // Component lines (§4, point 4): a changed file is also inside the ticket's component's line or
+    // a touches_components member's; the kit's own line is closed but for the ticket's own folder.
+    // Judged by committed settings, so a line widened in a working tree changes nothing.
+    const s = settingsInForce(base, sha);
+    if (linesDeclared(s)) {
+      const comps = componentsOn(s, 'home');
+      const names = [t.component, ...(t.touches_components ?? [])];
+      const dev = devteamLine();
+      const inLine = (f) => { const o = ownersOf(f, comps, dev); return o[0] !== 'devteam' && o.some((n) => names.includes(n)); };
+      const off = changed.filter((f) => !mineOwn(f) && !outside.includes(f) && !inLine(f));
+      if (off.length) fails.push(`${OFF_LINE} ${names.join(', ')}: ${off.slice(0, 10).join(', ')}${off.length > 10 ? ` (+${off.length - 10} more)` : ''}`);
+    }
   }
   if (title !== undefined && !new RegExp(`^${id.replace(/-/g, '\\-')}: \\S`).test(title)) fails.push(`PR title must start with "${id}: "`);
   if (body !== undefined) {

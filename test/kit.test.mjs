@@ -2647,6 +2647,37 @@ test('validate: main\'s tree under the lines in force, declared components, touc
   } finally { F.done(); }
 });
 
+test('the ticket footprint: touches, and the component\'s line, and its own records (B1, M4)', () => {
+  const F = monoFixture('footprint');
+  const { old, ok, run, g, lines } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const body = path.join(F.base, 'body.md');
+  write(body, '## One-way doors\n\nNone.\n');
+  try {
+    lines(F.STD);
+    const branch = (id, ticket, files) => {
+      ok(old, ['ticket', 'add', id, '--json', JSON.stringify({ title: id, feature: 'chores', component: id.split('-')[0], kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], done_when: ['its suite passes in CI'], notes: 'n', ...ticket })], SUP);
+      const w = path.join(old, '.worktrees', id);
+      g(['worktree', 'add', '-q', '-b', `ticket/${id}`, w, 'origin/main'], old);
+      for (const [f, text] of Object.entries(files)) write(path.join(w, f), text);
+      g(['add', '-A'], w);
+      g(['commit', '-qm', `${id}: work`], w);
+      return run(old, ['check-ticket', id, '--sha', g(['rev-parse', 'HEAD'], w), '--title', `${id}: work`, '--body-file', body]).out;
+    };
+    // B1: an ordinary ticket's PR carries its own records, inside the kit's line
+    const b1 = branch('api-01-own', { touches: ['api/**'] }, { 'api/app.rb': 'changed\n', 'docs/devteam/project/tickets/api-01-own/spec.md': '# spec\n' });
+    assert.doesNotMatch(b1, /outside the line|outside touches/, 'B1');
+    // M4: a non-ASCII path is owned at point 4 too
+    assert.doesNotMatch(branch('api-02-utf', { touches: ['api/**'] }, { 'api/é.rb': 'x\n' }), /outside the line|outside touches/, 'M4: app/é.rb');
+    // touches that reach another line: refused at the footprint, whatever the globs claimed
+    assert.match(branch('web-03-reach', { touches: ['web/**', 'api/app.rb'] }, { 'api/app.rb': 'web edits api\n' }), /changes files outside the line of web: api\/app\.rb/);
+    // a contract ticket that names the second line passes
+    assert.doesNotMatch(branch('api-04-contract', { kind: 'contract', contracts: { provides: ['v1'] }, touches: ['api/lib/**', 'web/src/api.js'], touches_components: ['web'] }, { 'api/lib/v1.rb': 'v1\n', 'web/src/api.js': 'fake\n' }), /outside the line/);
+    // the kit's line: nothing but the ticket's own folder
+    assert.match(branch('api-05-kit', { touches: ['api/**', 'docs/devteam/governance/quality.md'] }, { 'docs/devteam/governance/quality.md': 'x\n' }), /changes files outside the line of api: docs\/devteam\/governance\/quality\.md/);
+  } finally { F.done(); }
+});
+
 test('fleet park: every session stops with a handoff, and a clone elsewhere picks it up with parity', () => {
   const F = fleetFixture('park');
   const { org, old, neu, home, env, run, ok, g, base } = F;
