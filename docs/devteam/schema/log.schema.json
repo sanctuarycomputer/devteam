@@ -103,6 +103,22 @@
                   "up",
                   "down"
                 ]
+              },
+              "source": {
+                "description": "How the fleet reads it: repo (a command the kit runs on main), prod (a read-only command against production) or owner (a yes/no question the owner answers; target 1, unit attested).",
+                "enum": [
+                  "repo",
+                  "prod",
+                  "owner"
+                ]
+              },
+              "check": {
+                "description": "For repo and prod: the command whose last line of output is the number.",
+                "type": "string"
+              },
+              "question": {
+                "description": "For owner: the yes/no question that says it is met.",
+                "type": "string"
               }
             },
             "additionalProperties": false
@@ -766,6 +782,14 @@
           },
           "fix_hint": {
             "description": "A suggested fix.",
+            "type": "string"
+          },
+          "sha": {
+            "description": "A reading of a repo measure: the commit on main its check ran on.",
+            "type": "string"
+          },
+          "approved": {
+            "description": "A reading of an owner measure the supervisor records: the goal-met question the owner answered yes.",
             "type": "string"
           },
           "measure": {

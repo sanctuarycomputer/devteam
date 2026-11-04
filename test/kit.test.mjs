@@ -79,9 +79,9 @@ test('devteam kit', async (t) => {
   });
 
   await t.test('goals: supervisor drafts, owner approves', () => {
-    G = must(['goal', 'add', '--title', 'Self-serve billing', '--outcome', 'admins pay alone', '--measure', 'self-serve share', '--target', '80', '--unit', '%', '--direction', 'up', '--horizon', '2027-03-31', '--non-goals', 'enterprise invoicing', '--preconditions', 'cards work', 'prices defined', '--priority', '1'], { role: 'sup' });
+    G = must(['goal', 'add', '--title', 'Self-serve billing', '--outcome', 'admins pay alone', '--measure', 'self-serve share', '--target', '80', '--unit', '%', '--direction', 'up', '--source', 'prod', '--check', 'echo 5', '--horizon', '2027-03-31', '--non-goals', 'enterprise invoicing', '--preconditions', 'cards work', 'prices defined', '--priority', '1'], { role: 'sup' });
     assert.match(G, /^g-\d{8}-\d{9}-supervisor$/);
-    must(['goal', 'reading', G, '--value', '5'], { role: 'sup' });
+    must(['goal', 'reading', G, '--run'], { role: 'sup' });
     assert.notEqual(dt(['goal', 'approve', G], { role: 'sup' }).status, 0, 'supervisor cannot approve a goal');
     assert.match(dt(['goal', 'approve', G]).err, /no design up for approval/, 'a goal is approved on its design, not before');
     const design = [{ title: 'The approach', path: 'docs/devteam/project/designs/self-serve-billing.md', ref: 'plan/billing' }];
@@ -120,6 +120,87 @@ test('devteam kit', async (t) => {
     assert.equal(gv.status, 'ready');
     assert.equal(gv.decision.question, A2);
     assert.equal(json(must(['questions', '--id', A2, '--json']))[0].status, 'answered');
+  });
+
+  await t.test('goal measures: the source says how a reading is taken, and nobody types one in', (t) => {
+    const logDir = path.join(repo, 'docs/devteam/run/log');
+    // the lines written by hand here would be forgeries to every later test: put the log back
+    const snap = new Map(fs.readdirSync(logDir).map((f) => [f, fs.readFileSync(path.join(logDir, f))]));
+    t.after(() => { for (const f of fs.readdirSync(logDir)) if (snap.has(f)) fs.writeFileSync(path.join(logDir, f), snap.get(f)); else fs.rmSync(path.join(logDir, f), { recursive: true, force: true }); });
+    let n = 0;
+    // a line written by hand, the way a session could write its own file
+    const hand = (by, o) => {
+      const d = new Date(Date.now() + n++);
+      const file = path.join(logDir, fs.readdirSync(logDir).find((f) => f.startsWith(`${by}-`)) ?? `${by}-${d.toISOString().slice(0, 7)}.jsonl`);
+      const id = o.op === 'set' ? o.id : `o-${d.toISOString().slice(0, 10).replace(/-/g, '')}-${d.toISOString().slice(11, 23).replace(/[:.]/g, '')}-${by}`;
+      fs.appendFileSync(file, line({ op: 'new', ...o, id, at: d.toISOString(), by }));
+    };
+    const readings = (g) => json(must(['goal', 'show', g, '--json'])).readings;
+    const rest = ['--non-goals', 'everything else', '--preconditions', 'the work is merged'];
+    // no source: a draft can't be approved without one
+    const Gn = must(['goal', 'add', '--title', 'Sourceless', '--outcome', 'x', '--measure', 'things', '--target', '0', '--unit', 'n', '--direction', 'down', ...rest, '--priority', '41'], { role: 'sup' });
+    assert.match(must(['goal', 'check', Gn]), /no source: how the fleet reads the measure \(repo, prod or owner/);
+    assert.match(dt(['goal', 'set', Gn, '--source', 'vibes'], { role: 'sup' }).err, /--source is repo, prod or owner/);
+
+    // repo: the kit runs the check on main and records main's sha; nobody types the number
+    const Gr = must(['goal', 'add', '--title', 'Fewer scripts', '--outcome', 'one script', '--measure', 'files in scripts/', '--target', '0', '--unit', 'files', '--direction', 'down', '--source', 'repo', ...rest, '--priority', '42'], { role: 'sup' });
+    assert.match(must(['goal', 'check', Gr]), /no check: the command whose last line is the number/);
+    must(['goal', 'set', Gr, '--check', 'echo counting; ls docs/devteam/scripts | wc -l'], { role: 'sup' });
+    assert.match(dt(['goal', 'reading', Gr, '--value', '0'], { role: 'sup' }).err, /the kit runs its check \(goal reading .* --run\), nobody types the number/);
+    const main = git(['rev-parse', 'origin/main']);
+    assert.match(must(['goal', 'reading', Gr, '--run'], { role: 'sup' }), new RegExp(`recorded 1 for ${Gr} \\(main at ${main.slice(0, 12)}\\)`));
+    assert.deepEqual(readings(Gr).map((r) => [r.value, r.sha, r.source]), [[1, main, 'repo']]);
+    hand('supervisor', { type: 'observation', source: 'repo', subject: Gr, kind: 'reading', detail: 'typed', measure: { value: 0, unit: 'files' }, sha: '0123456789abcdef0123456789abcdef01234567' });
+    hand('supervisor', { type: 'observation', source: 'supervisor', subject: Gr, kind: 'reading', detail: 'typed', measure: { value: 0, unit: 'files' } });
+    assert.equal(readings(Gr).length, 1, 'a repo reading counts only with a commit on main; a typed one never');
+    assert.match(dt(['goal', 'status', Gr, 'met']).err, /check reads 1 on main .* not its target 0; --force/, 'met is read again, on main');
+
+    // prod: run from the main checkout, the output kept
+    const Gp = must(['goal', 'add', '--title', 'Prod count', '--outcome', 'y', '--measure', 'records synced', '--target', '10', '--unit', 'records', '--direction', 'up', '--source', 'prod', '--check', 'echo 7', ...rest, '--priority', '43'], { role: 'sup' });
+    assert.match(dt(['goal', 'reading', Gp, '--value', '10'], { role: 'sup' }).err, /read from prod: the kit runs its check/);
+    must(['goal', 'reading', Gp, '--run'], { role: 'sup' });
+    hand('supervisor', { type: 'observation', source: 'supervisor', subject: Gp, kind: 'reading', detail: 'typed', measure: { value: 10, unit: 'records' } });
+    assert.deepEqual(readings(Gp).map((r) => [r.value, r.source]), [[7, 'prod']]);
+
+    // owner: target 1, unit attested, from 0; only the owner's yes moves it
+    const Go = must(['goal', 'add', '--title', 'Sync validated', '--outcome', 'drifted records fix themselves', '--measure', 'validated on a real drifted record', '--source', 'owner', ...rest, '--priority', '44'], { role: 'sup' });
+    assert.match(must(['goal', 'check', Go]), /no question: the yes\/no the owner answers/);
+    must(['goal', 'set', Go, '--question', 'Have you validated sync on a drifted record in production?'], { role: 'sup' });
+    const gc = must(['goal', 'check', Go]);
+    for (const gap of [/no numeric target/, /no unit/, /no direction/, /no baseline reading/, /no source/]) assert.doesNotMatch(gc, gap);
+    const ov = json(must(['goal', 'show', Go, '--json']));
+    assert.deepEqual([ov.measure.target, ov.measure.unit, ov.measure.direction], [1, 'attested', 'up']);
+    assert.match(dt(['goal', 'reading', Go, '--value', '1'], { role: 'sup' }).err, /the owner's yes: ask a goal-met question/);
+    const metQ = (extra = []) => ['ask', '--class', 'goal-met', '--goal', Go, '--question', 'Have you validated sync on a drifted record in production?', ...extra];
+    assert.match(dt(metQ(), { role: 'sup' }).err, /recommends the answer that meets it/);
+    assert.match(dt(metQ(['--recommendation', 'yes', '--default', 'yes']), { role: 'sup' }).err, /has no --default/);
+    assert.match(dt(['ask', '--class', 'goal-met', '--goal', Gr, '--question', 'Done?', '--recommendation', 'yes'], { role: 'sup' }).err, /is read from repo/);
+    const Qwrong = must(['ask', '--class', 'release-scope', '--goal', Go, '--question', 'Is it validated?', '--recommendation', 'yes'], { role: 'sup' });
+    must(['answer', Qwrong, 'yes']);
+    assert.match(dt(['goal', 'reading', Go, '--approved', Qwrong], { role: 'sup' }).err, /class release-scope, not goal-met/);
+    const Qm = must(metQ(['--recommendation', 'yes']), { role: 'sup' });
+    assert.match(dt(['goal', 'reading', Go, '--approved', Qm], { role: 'sup' }).err, /not answered by the owner \(open\)/);
+    assert.notEqual(dt(['answer', Qm, 'yes', '--from-chat', '--said', 'yes'], { role: 'sup' }).status, 0, 'goal-met is owner-only: never answered from chat');
+    hand('supervisor', { type: 'observation', source: 'owner', subject: Go, kind: 'reading', detail: 'typed', measure: { value: 1, unit: 'attested' } });
+    hand('supervisor', { type: 'observation', source: 'owner', subject: Go, kind: 'reading', detail: 'typed', measure: { value: 1, unit: 'attested' }, approved: Qm });
+    assert.deepEqual(readings(Go), [], 'a hand-written reading attests nothing: not alone, not with an unanswered question');
+    assert.match(dt(['goal', 'status', Go, 'met']).err, /met when the owner says so/);
+    const Qno = must(metQ(['--recommendation', 'yes']), { role: 'sup' });
+    must(['answer', Qno, 'not yet']);
+    assert.match(dt(['goal', 'reading', Go, '--approved', Qno], { role: 'sup' }).err, /answered "not yet", not its recommendation/);
+    const Qchat = must(metQ(['--recommendation', 'yes']), { role: 'sup' });
+    hand('owner', { type: 'question', op: 'set', id: Qchat, channel: 'chat', answer: 'yes', said: 'yes' });
+    assert.match(dt(['goal', 'reading', Go, '--approved', Qchat], { role: 'sup' }).err, /answered in chat/);
+    hand('supervisor', { type: 'observation', source: 'owner', subject: Go, kind: 'reading', detail: 'typed', measure: { value: 1, unit: 'attested' }, approved: Qchat });
+    assert.deepEqual(readings(Go), [], 'a chat answer written by hand attests nothing');
+    // the hand-written line above cited Qm before the owner answered: it still counts for nothing
+    must(['answer', Qm, 'yes']);
+    assert.deepEqual(readings(Go), [], 'a reading written before the answer never counts');
+    assert.match(must(['goal', 'reading', Go, '--approved', Qm], { role: 'sup' }), new RegExp(`recorded 1 for ${Go} \\(${Qm}\\)`));
+    assert.match(dt(['goal', 'reading', Go, '--approved', Qm], { role: 'sup' }).err, /one answer, one reading/);
+    hand('supervisor', { type: 'observation', source: 'owner', subject: Go, kind: 'reading', detail: 'again', measure: { value: 1, unit: 'attested' }, approved: Qm });
+    assert.deepEqual(readings(Go).map((r) => [r.value, r.approved]), [[1, Qm]], 'each answer authorises one reading');
+    must(['goal', 'status', Go, 'met']);
   });
 
   await t.test('planner writes feature and tickets into its own log file in its worktree', () => {
@@ -1081,8 +1162,8 @@ test('devteam kit', async (t) => {
   });
 
   await t.test('a fully defined goal nobody is planning is idle planning', () => {
-    const Gi = must(['goal', 'add', '--title', 'Faster checkout', '--outcome', 'pay in under a minute', '--measure', 'median checkout', '--target', '60', '--unit', 's', '--direction', 'down', '--horizon', '2027-06-30', '--non-goals', 'mobile', '--preconditions', 'one-page form', '--priority', '7'], { role: 'sup' });
-    must(['goal', 'reading', Gi, '--value', '180'], { role: 'sup' });
+    const Gi = must(['goal', 'add', '--title', 'Faster checkout', '--outcome', 'pay in under a minute', '--measure', 'median checkout', '--target', '60', '--unit', 's', '--direction', 'down', '--source', 'prod', '--check', 'echo 180', '--horizon', '2027-06-30', '--non-goals', 'mobile', '--preconditions', 'one-page form', '--priority', '7'], { role: 'sup' });
+    must(['goal', 'reading', Gi, '--run'], { role: 'sup' });
     const idle = () => json(must(['metrics', '--json'])).findings.find((f) => f.kind === 'idle-planning');
     assert.match(idle()?.suggestion ?? '', new RegExp(Gi), 'nobody is designing it');
     const Qd = must(['ask', '--question', 'Which checkout first?', '--goal', Gi, '--recommendation', 'cards'], { role: 'sup' });

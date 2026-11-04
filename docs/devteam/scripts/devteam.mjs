@@ -2555,6 +2555,15 @@ function cmdAsk() {
     if (cls) die('a goal-approval question has no --class: approving a goal is never delegated');
   }
   if (kind === 'goal-definition' && cls) die('a goal-definition question has no --class: defining a goal is never delegated (reason goal-ambiguity)');
+  // goal-met: the owner's yes that an owner-read goal is met (planning.md §1). Never defaulted.
+  if (cls === 'goal-met') {
+    const g = logGet(flagStr('goal') ?? '');
+    if (g?.type !== 'goal') die('a goal-met question needs --goal <g-id>');
+    if (measureOf(g).source !== 'owner') die(`${g.id} is read ${g.measure?.source ? `from ${g.measure.source}: goal reading ${g.id} --run` : 'by hand: give it a measure source first (a goal-change)'}; a goal-met question is for an owner-read goal`);
+    if (!['owner-decision', 'one-way-door'].includes(kind)) die('a goal-met question is an owner-decision');
+    if (!flagStr('recommendation')) die('a goal-met question recommends the answer that meets it (--recommendation yes)');
+    if (flagStr('default') !== undefined) die('a goal-met question has no --default: only the owner says a goal is met');
+  }
   // A review is answered with its result or sent back: never defaulted, never a secret, and its
   // choices and recommendation are the page and the data's proposals.
   let review;
@@ -3876,18 +3885,88 @@ function cmdOrient() {
 
 // ===== 9. goals, roadmap, retros, chore worktrees =====
 
-const goalReadings = (gid) => logObjects('observation').filter((o) => o.kind === 'reading' && o.subject === gid && o.measure && ['supervisor', 'owner'].includes(o.created_by)).sort(byTime);
+// How the fleet reads a goal's measure (planning.md §1): repo, a command the kit runs on main;
+// prod, a read-only command against production; owner, a yes/no question the owner answers. An
+// owner measure is a yes: target 1, unit attested, up, from 0.
+const MEASURE_SOURCES = ['repo', 'prod', 'owner'];
+const measureOf = (g) => (g?.measure?.source === 'owner' ? { target: 1, unit: 'attested', direction: 'up', ...g.measure } : g?.measure ?? {});
+const shaOnMain = new Map();
+const isOnMain = (sha) => {
+  if (!shaOnMain.has(sha)) shaOnMain.set(sha, !!mainRef() && /^[0-9a-f]{7,40}$/.test(sha) && spawnSync('git', ['merge-base', '--is-ancestor', sha, mainRef()], { cwd: mainRoot, stdio: 'ignore' }).status === 0);
+  return shaOnMain.get(sha);
+};
+// Why question q does not let the supervisor record goal goalId's owner reading (null when it does):
+// a goal-met question about that goal, answered by the owner with its recommendation, before the
+// reading was written (at), so a line that cites a question ahead of its answer never counts.
+function goalMetProblem(q, goalId, qid, at = null) {
+  const v = q?.type === 'question' ? questionView(q) : null;
+  if (!v) return `${qid} is not a question`;
+  if (v.class !== 'goal-met') return `${v.id} was asked in class ${v.class ?? '(none)'}, not goal-met`;
+  if (v.goal !== goalId) return `${v.id} is about ${v.goal ?? 'no goal'}, not ${goalId} (ask with --goal ${goalId})`;
+  if (v.status !== 'answered') return `${v.id} is not answered by the owner (${v.status})`;
+  // goal-met is owner_only: the supervisor can't record a chat answer to it, so a line that says so
+  // was written by hand.
+  if (v.channel === 'chat') return `${v.id} was answered in chat; the owner answers a goal-met question from the dashboard or their terminal`;
+  if (!v.matched) return `${v.id} was answered "${v.answer}", not its recommendation${v.recommendation ? ` ("${v.recommendation}")` : ''}`;
+  if (at && at < v.answered_at) return `the reading was written before ${v.id} was answered`;
+  return null;
+}
+// The readings that count. Each must match how the goal is read, whoever wrote the line: a repo
+// reading carries a commit on main, a prod one comes from prod, and an owner goal's only from the
+// owner, or with an answered goal-met question, each question once. A goal with no source keeps the
+// old rule (the supervisor's or the owner's) until a goal-change gives it one.
+function goalReadings(gid) {
+  const all = logObjects('observation').filter((o) => o.kind === 'reading' && o.subject === gid && o.measure && ['supervisor', 'owner'].includes(o.created_by)).sort(byTime);
+  const src = logGet(gid)?.measure?.source;
+  if (!src) return all;
+  const used = new Set();
+  return all.filter((o) => {
+    if (src === 'repo') return o.source === 'repo' && typeof o.sha === 'string' && isOnMain(o.sha);
+    if (src === 'prod') return o.source === 'prod';
+    if (o.created_by === 'owner') return o.channel !== 'chat';
+    if (!o.approved || used.has(o.approved) || o.measure.value !== 1 || goalMetProblem(logGet(o.approved), gid, o.approved, o.created_at)) return false;
+    used.add(o.approved);
+    return true;
+  });
+}
 const goalFeatures = (gid) => [...features().values()].filter((f) => (f.goals ?? []).includes(gid)).map((f) => f.id);
+
+// Run a repo or prod measure's check: repo on a throwaway checkout of main (so the number is main's,
+// with its sha), prod from the main checkout (it reads production, read-only by the owner's word).
+// The number is the last line of stdout.
+function runMeasureCheck(g) {
+  const m = measureOf(g);
+  let cwd = mainRoot;
+  let sha = null;
+  if (m.source === 'repo') {
+    git(['fetch', '--quiet', 'origin'], mainRoot);
+    mainRefCache = undefined;
+    sha = git(['rev-parse', `${mainRef() ?? die('no main branch to read the measure on')}^{commit}`], mainRoot) ?? die('cannot resolve main');
+    cwd = detachedWorktree(sha, 'reading');
+  }
+  const r = spawnSync('sh', ['-c', m.check], { cwd, env: gateEnv(), encoding: 'utf8', timeout: 900000, maxBuffer: 16 * 1024 * 1024 });
+  if (r.status !== 0) die(`${g.id}'s check failed (${r.error?.message ?? `exit ${r.status}`}): ${(r.stderr ?? '').trim().slice(-400)}`);
+  const last = (r.stdout ?? '').trim().split('\n').pop().trim();
+  const value = Number(last);
+  if (last === '' || !Number.isFinite(value)) die(`${g.id}'s check printed "${last.slice(0, 80)}" last, not a number`);
+  return { value, sha, out: (r.stdout ?? '').trim() };
+}
 
 // Mechanical readiness. Definition gaps block approval; coverage gaps are what planning closes.
 function goalCheck(g) {
   const definition = [];
   const coverage = [];
   if (!g.outcome) definition.push('no outcome: what is true for users or the business when this is met');
-  if (!g.measure?.description) definition.push('no measure: how we will know');
-  if (typeof g.measure?.target !== 'number') definition.push('no numeric target');
-  if (!g.measure?.unit) definition.push('no unit');
-  if (!g.measure?.direction) definition.push('no direction (up or down)');
+  const m = measureOf(g);
+  if (!m.description) definition.push('no measure: how we will know');
+  if (typeof m.target !== 'number') definition.push('no numeric target');
+  if (!m.unit) definition.push('no unit');
+  if (!m.direction) definition.push('no direction (up or down)');
+  // A running goal keeps running while the supervisor asks the owner for its source (a goal-change).
+  const draft = (g.status ?? 'draft') === 'draft';
+  if (!m.source) (draft ? definition : coverage).push('no source: how the fleet reads the measure (repo, prod or owner; planning.md §1)');
+  else if (!MEASURE_SOURCES.includes(m.source)) definition.push(`source "${m.source}" is not repo, prod or owner`);
+  else if (m.source === 'owner' ? !m.question : !m.check) definition.push(m.source === 'owner' ? 'no question: the yes/no the owner answers when it is met (measure.question)' : 'no check: the command whose last line is the number (measure.check)');
   // A horizon is the owner's real deadline, when there is one; never required, never guessed. The
   // forecast says when, from the measured rate (planning.md §1).
   if (g.horizon && Number.isNaN(Date.parse(g.horizon))) definition.push(`horizon "${g.horizon}" is not a date`);
@@ -3896,7 +3975,7 @@ function goalCheck(g) {
   if (typeof g.priority !== 'number') definition.push('no priority');
   const clash = logObjects('goal').filter((o) => o.id !== g.id && ['ready', 'draft'].includes(o.status ?? 'draft') && typeof g.priority === 'number' && o.priority === g.priority);
   if (clash.length) definition.push(`priority ${g.priority} is shared with ${clash.map((c) => c.id).join(', ')}`);
-  if (!goalReadings(g.id).length) definition.push('no baseline reading (devteam.mjs goal reading <id> --value v)');
+  if (m.source !== 'owner' && !goalReadings(g.id).length) definition.push(`no baseline reading (devteam.mjs goal reading <id> ${['repo', 'prod'].includes(m.source) ? '--run' : '--value v'})`);
   const approval = milestoneGaps(g);
   const feats = goalFeatures(g.id);
   const covered = new Set(feats.flatMap((f) => features().get(f).preconditions ?? []));
@@ -3921,8 +4000,8 @@ function milestoneGaps(g) {
   if (!ms.length) return ['no milestones: the outcome in order, each a usable slice with a target on the measure, its preconditions and a size in tickets (goal set --milestones; one is fine for a goal one loop can meet)'];
   const gaps = [];
   const seen = new Map();
-  const base = goalReadings(g.id)[0]?.measure.value;
-  const up = g.measure?.direction !== 'down';
+  const base = goalReadings(g.id)[0]?.measure.value ?? (measureOf(g).source === 'owner' ? 0 : undefined);
+  const up = measureOf(g).direction !== 'down';
   let prevT = base;
   let prevBy = null;
   ms.forEach((m, i) => {
@@ -3949,10 +4028,10 @@ function milestoneGaps(g) {
     }
   });
   pre.forEach((_, i) => { if (!seen.has(i + 1)) gaps.push(`precondition ${i + 1} is in no milestone`); });
-  if (typeof g.measure?.target === 'number' && ms[ms.length - 1].target !== g.measure.target) gaps.push(`the last milestone's target (${ms[ms.length - 1].target}) is not the goal's (${g.measure.target})`);
+  if (typeof measureOf(g).target === 'number' && ms[ms.length - 1].target !== measureOf(g).target) gaps.push(`the last milestone's target (${ms[ms.length - 1].target}) is not the goal's (${measureOf(g).target})`);
   return gaps;
 }
-const reached = (g, target, value) => (g.measure?.direction === 'down' ? value <= target : value >= target);
+const reached = (g, target, value) => (measureOf(g).direction === 'down' ? value <= target : value >= target);
 // The first milestone the latest reading has not reached; null once all are.
 function currentMilestone(g) {
   const last = goalReadings(g.id).pop()?.measure.value;
@@ -4024,15 +4103,15 @@ function goalView(g) {
   const mode = goalMode(g);
   const still = ['park', 'let-go'].includes(mode);
   const forecast = goalForecast(g);
-  return { ...g, status: g.status ?? 'draft', readings: readings.map((r) => ({ at: r.created_at, value: r.measure.value, source: r.source })), track: still ? null : track, check: goalCheck(g), forecast: forecast && still ? { ...forecast, eta: null, past_horizon: false } : forecast, hold_view: holdView(g) };
+  return { ...g, ...(g.measure ? { measure: measureOf(g) } : {}), status: g.status ?? 'draft', readings: readings.map((r) => ({ at: r.created_at, value: r.measure.value, source: r.source, ...(r.sha ? { sha: r.sha } : {}), ...(r.approved ? { approved: r.approved } : {}) })), track: still ? null : track, check: goalCheck(g), forecast: forecast && still ? { ...forecast, eta: null, past_horizon: false } : forecast, hold_view: holdView(g) };
 }
 function cmdGoal() {
   const [sub, id] = positional;
   const writer = () => (flags.owner ? ownerWriter() : (supervisorOnly('goal'), { by: 'supervisor' }));
   const fields = () => ({
     title: flagStr('title'), outcome: flagStr('outcome'),
-    measure: ['measure', 'target', 'unit', 'direction'].some((k) => flagStr(k) !== undefined)
-      ? { ...(id ? logGet(id)?.measure : {}), ...(flagStr('measure') ? { description: flagStr('measure') } : {}), ...(flagStr('target') ? { target: Number(flagStr('target')) } : {}), ...(flagStr('unit') ? { unit: flagStr('unit') } : {}), ...(flagStr('direction') ? { direction: flagStr('direction') } : {}) }
+    measure: ['measure', 'target', 'unit', 'direction', 'source', 'check', 'question'].some((k) => flagStr(k) !== undefined)
+      ? { ...(id ? logGet(id)?.measure : {}), ...(flagStr('measure') ? { description: flagStr('measure') } : {}), ...(flagStr('target') ? { target: Number(flagStr('target')) } : {}), ...(flagStr('unit') ? { unit: flagStr('unit') } : {}), ...(flagStr('direction') ? { direction: flagStr('direction') } : {}), ...(flagStr('source') ? { source: MEASURE_SOURCES.includes(flagStr('source')) ? flagStr('source') : die('--source is repo, prod or owner (planning.md §1)') } : {}), ...(flagStr('check') ? { check: flagStr('check') } : {}), ...(flagStr('question') ? { question: flagStr('question') } : {}) }
       : undefined,
     // `none` clears it: a horizon is the owner's real deadline or nothing (planning.md §1)
     horizon: flagStr('horizon') === 'none' ? null : flagStr('horizon'),
@@ -4049,7 +4128,7 @@ function cmdGoal() {
     return out(appendLog({ type: 'goal', status: 'draft', ...f }, by).id);
   }
   if (sub === 'set') {
-    if (!id || logGet(id)?.type !== 'goal') die('usage: goal set <g-id> [--title …] [--outcome …] [--measure …] [--target n] [--unit u] [--direction up|down] [--horizon date] [--non-goals a b | \'["a","b"]\'] [--preconditions a b | \'["a","b"]\'] [--priority n] [--milestones \'[{"title","target","by","preconditions":[n],"tickets"}…]\'] [--plan-after <g-id>… --reason "…"] [--approved <qid>] [--owner]');
+    if (!id || logGet(id)?.type !== 'goal') die('usage: goal set <g-id> [--title …] [--outcome …] [--measure …] [--target n] [--unit u] [--direction up|down] [--source repo|prod|owner] [--check "cmd"] [--question "…"] [--horizon date] [--non-goals a b | \'["a","b"]\'] [--preconditions a b | \'["a","b"]\'] [--priority n] [--milestones \'[{"title","target","by","preconditions":[n],"tickets"}…]\'] [--plan-after <g-id>… --reason "…"] [--approved <qid>] [--owner]');
     const { by } = writer();
     const approved = flagStr('approved') ?? null;
     if (approved && by !== 'supervisor') die('the owner changes a goal directly; --approved is the supervisor applying an owner answer');
@@ -4156,6 +4235,14 @@ function cmdGoal() {
     const to = positional[2];
     if (!['draft', 'ready', 'met', 'abandoned'].includes(to)) die('status is draft, ready, met or abandoned');
     if (to === 'ready') die(`a goal becomes ready through its design: goal decide ${id} approve`);
+    // Met means the measure says so: a repo goal's is read now, on main; an owner goal's is the
+    // owner's yes. --force sets it anyway (the owner's call).
+    const m = measureOf(g);
+    if (to === 'met' && !flags.force && m.source === 'repo' && m.check) {
+      const r = runMeasureCheck(g);
+      if (!reached(g, m.target, r.value)) die(`${id}'s check reads ${r.value} on main (${r.sha.slice(0, 12)}), not its target ${m.target}; --force to set it met anyway`);
+    }
+    if (to === 'met' && !flags.force && m.source === 'owner' && !goalReadings(id).some((x) => x.measure.value >= 1)) die(`${id} is met when the owner says so: answer its goal-met question, or record it with goal reading ${id} --value 1 --owner; --force to set it met anyway`);
     appendLog({ type: 'goal', op: 'set', id, status: to }, by);
     return out(`${id} is ${to}`);
   }
@@ -4167,11 +4254,30 @@ function cmdGoal() {
   }
   if (sub === 'show') { const g = goalArg(id) ?? die(`no goal ${id}`); return json(isUpkeep(g) ? { ...g, hold_view: holdView(g) } : goalView(g)); }
   if (sub === 'reading') {
-    if (!id || logGet(id)?.type !== 'goal') die('usage: goal reading <g-id> --value n [--source s] [--detail d]');
+    if (!id || logGet(id)?.type !== 'goal') die('usage: goal reading <g-id> --run | --approved <goal-met qid> | --value n [--source s] [--detail d]');
     const by = flags.owner ? ownerWriter().by : (supervisorOnly('goal reading'), 'supervisor');
+    const g = logGet(id);
+    const m = measureOf(g);
+    const unit = m.unit;
+    if (flags.run) {
+      if (!['repo', 'prod'].includes(m.source) || !m.check) die(`${id} is read ${m.source ? `from ${m.source}` : 'by hand (no measure source)'}; --run runs a repo or prod measure's check`);
+      const r = runMeasureCheck(g);
+      appendLog({ type: 'observation', source: m.source, subject: id, kind: 'reading', detail: m.source === 'repo' ? `reading ${r.value}${unit ? ` ${unit}` : ''} on main at ${r.sha.slice(0, 12)}` : `reading ${r.value}${unit ? ` ${unit}` : ''} from ${m.check}: ${r.out.slice(-300)}`, measure: { value: r.value, unit }, ...(r.sha ? { sha: r.sha } : {}), refs: [id] }, by);
+      return out(`recorded ${r.value} for ${id}${r.sha ? ` (main at ${r.sha.slice(0, 12)})` : ''}`);
+    }
+    const approved = flagStr('approved');
+    if (approved !== undefined) {
+      if (m.source !== 'owner') die(`--approved records an owner goal's yes; ${id} is read ${m.source ? `from ${m.source}` : 'by hand'}`);
+      const problem = goalMetProblem(logGet(approved), id, approved);
+      if (problem) die(`${approved} does not attest ${id}: ${problem}`);
+      if (goalReadings(id).some((x) => x.approved === approved)) die(`${approved} already recorded ${id}'s reading; one answer, one reading`);
+      appendLog({ type: 'observation', source: 'owner', subject: id, kind: 'reading', detail: `the owner said yes to ${approved}`, measure: { value: 1, unit }, approved, refs: [id, approved] }, by);
+      return out(`recorded 1 for ${id} (${approved})`);
+    }
+    if (['repo', 'prod'].includes(m.source)) die(`${id} is read from ${m.source}: the kit runs its check (goal reading ${id} --run), nobody types the number`);
+    if (m.source === 'owner' && by !== 'owner') die(`${id} is the owner's yes: ask a goal-met question (ask --class goal-met --goal ${id} --question "${m.question}" --recommendation yes), then goal reading ${id} --approved <qid>`);
     const v = flagNum('value');
     if (v === undefined || Number.isNaN(v)) die('goal reading needs --value <number>');
-    const unit = logGet(id).measure?.unit;
     appendLog({ type: 'observation', source: flagStr('source') ?? by, subject: id, kind: 'reading', detail: flagStr('detail') ?? `reading ${v}${unit ? ` ${unit}` : ''}`, measure: { value: v, unit }, refs: [id] }, by);
     return out(`recorded ${v} for ${id}`);
   }
@@ -6626,6 +6732,7 @@ Observe and orient
 Goals and retros
   goal [list|check|show|forecast|add|set|decide|approve|status|reading|hold|park-sessions] …
   goal set <g-id> --approved <qid> …   supervisor: apply an answered goal-change question to a goal past draft (one set per answer)
+  goal reading <g-id> --run | --approved <qid> | --value n   a reading by the measure's source: --run runs a repo check on main or a prod check; --approved records an owner goal's yes from its answered goal-met question; --value only for a goal with no source, or the owner's own (--owner)
   retro [--due | --print | close <date> --summary s --refs ids]
   chore start <slug> | chore pr <slug> --title t    a supervisor-written file (design, retro, architecture) and its PR
 
