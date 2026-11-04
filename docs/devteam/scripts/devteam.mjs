@@ -3953,9 +3953,9 @@ function cmdGoal() {
   }
   const gs = logObjects('goal').map(goalView).sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99));
   if (flags.json) return json(gs);
-  if (!gs.length) return out('no goals (the owner states them; planning.md §1)');
   const u = holdView(upkeepOrVirtual());
   out(`upkeep [${u.state}${u.reason ? `: ${u.reason}` : ''}] Upkeep: chores, CI fixes, retros, kit syncs`);
+  if (!gs.length) return out('no goals (the owner states them; planning.md §1)');
   for (const g of gs) {
     const last = g.readings[g.readings.length - 1];
     out(`${g.id} [${g.status}${g.priority ? `, p${g.priority}` : ''}${g.hold_view.mode !== 'run' ? `, ${g.hold_view.state}` : ''}] ${g.title}\n  ${g.measure?.description ?? '-'}: ${last ? last.value : '?'} -> ${g.measure?.target ?? '?'} ${g.measure?.unit ?? ''} by ${g.horizon ?? '?'}${g.track ? ` (${g.track})` : ''}; features: ${g.check.features.join(', ') || 'none'}`);

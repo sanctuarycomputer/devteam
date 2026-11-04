@@ -1139,6 +1139,53 @@ test('devteam kit', async (t) => {
     fs.writeFileSync(file, before);
   });
 
+  await t.test('goal holds: who may set what, merges wait on a park, let go and restore', () => {
+    const hold = () => json(must(['goal', 'show', G, '--json'])).hold_view;
+    // the supervisor drains a running goal, with a reason; it can't park one, or release the owner's hold
+    assert.match(dt(['goal', 'hold', G, 'drain'], { role: 'sup' }).err, /--reason/);
+    must(['goal', 'hold', G, 'drain', '--reason', 'billing waits on pricing'], { role: 'sup' });
+    assert.deepEqual([hold().mode, hold().by], ['drain', 'supervisor']);
+    assert.ok(json(must(['log', '--type', 'act', '--json'])).some((a) => a.class === 'goal-hold' && /drained "Self-serve billing"/.test(a.what)));
+    assert.match(dt(['goal', 'hold', G, 'park', '--reason', 'x'], { role: 'sup' }).err, /only the owner parks a single goal/);
+    must(['goal', 'hold', G, 'park', '--owner', '--reason', 'pausing billing for a week']);
+    assert.deepEqual([hold().mode, hold().by], ['park', 'owner']);
+    assert.match(dt(['goal', 'hold', G, 'run', '--reason', 'x'], { role: 'sup' }).err, /releases only a drain it set/);
+    // a forged supervisor line is ignored by the fold, with why
+    const supFile = fs.readdirSync(path.join(repo, 'docs/devteam/run/log')).find((f) => /^supervisor-/.test(f));
+    fs.appendFileSync(path.join(repo, 'docs/devteam/run/log', supFile), line({ id: G, type: 'goal', op: 'set', at: new Date(Date.now() + 500).toISOString(), by: 'supervisor', hold: { mode: 'run' } }));
+    assert.equal(hold().mode, 'park');
+    assert.match(must(['log-check']), /the supervisor releases only a drain it set/);
+    // the roadmap and the track stand still while parked
+    assert.match(must(['roadmap']), /Self-serve billing \[ready, parked\] -> no date while parked/);
+    assert.equal(json(must(['goal', 'show', G, '--json'])).track, null);
+    // its questions stay open and labelled; they don't count as the owner falling behind
+    const Qh = must(['ask', '--question', 'Monthly or yearly plans?', '--goal', G, '--recommendation', 'monthly'], { role: 'sup' });
+    assert.match(must(['questions']), new RegExp(`${Qh}  \\[owner-decision, open, its goal parked\\]`));
+    // let go: abandoned, its questions leave the inbox; restore brings both back, parked
+    must(['goal', 'decide', G, 'let-go', '--notes', 'not this quarter']);
+    assert.equal(hold().mode, 'let-go');
+    assert.doesNotMatch(must(['questions']), new RegExp(Qh));
+    assert.ok(!json(must(['dashboard-data'])).questions.some((q) => q.id === Qh));
+    assert.match(must(['validate']), /names goal g-[^,]+, which the owner let go/, 'a let-go goal\'s landed feature is a warning, not an error');
+    assert.match(dt(['goal', 'hold', G, 'run', '--owner']).err, /goal decide .* restore/);
+    assert.match(must(['goal', 'decide', G, 'restore']), /restored as ready, parked/);
+    const gv = json(must(['goal', 'show', G, '--json']));
+    assert.deepEqual([gv.status, gv.hold_view.mode], ['ready', 'park']);
+    assert.match(must(['questions']), new RegExp(Qh));
+    // run again; the owner's release lets the supervisor drain once more
+    must(['goal', 'hold', G, 'run', '--owner']);
+    must(['goal', 'hold', G, 'drain', '--reason', 'again'], { role: 'sup' });
+    must(['goal', 'hold', G, 'run', '--reason', 'pricing landed'], { role: 'sup' });
+    assert.equal(hold().mode, 'run');
+    must(['answer', Qh, 'monthly']);
+    // Upkeep: virtual until its first hold, held like any goal, never let go
+    assert.match(must(['goal', 'list']), /^upkeep \[running\] Upkeep/m);
+    must(['goal', 'hold', 'upkeep', 'drain', '--reason', 'quiet'], { role: 'sup' });
+    assert.match(must(['goal', 'list']), /^upkeep \[(draining|drained): quiet\]/m);
+    must(['goal', 'hold', 'upkeep', 'run', '--owner']);
+    assert.equal(json(must(['dashboard-data'])).upkeep.mode, 'run');
+  });
+
   await t.test('secrets: the owner posts straight to a sink; the log never holds a value', async (t) => {
     const VALUE = 'sk_test_51Hq"zz\\9-not-in-the-log';
     const CERT = '-----BEGIN CERTIFICATE-----\nMIIBszCCAVmgAwIBAgIUQ\n-----END CERTIFICATE-----\n';
@@ -1274,53 +1321,6 @@ test('devteam kit', async (t) => {
     const logs = fs.readdirSync(path.join(repo, 'docs/devteam/run/log')).map((f) => fs.readFileSync(path.join(repo, 'docs/devteam/run/log', f), 'utf8')).join('');
     for (const form of [VALUE, JSON.stringify(VALUE).slice(1, -1), Buffer.from(VALUE).toString('base64'), 'MIIBszCCAVmgAwIBAgIUQ', 'tok-123456', 'pässwörd']) assert.ok(!logs.includes(form), `log holds ${form}`);
     for (const f of ['config/apns.key', 'config/uni.key', 'config/credentials/test.key']) fs.rmSync(path.join(repo, f), { force: true });
-  });
-
-  await t.test('goal holds: who may set what, merges wait on a park, let go and restore', () => {
-    const hold = () => json(must(['goal', 'show', G, '--json'])).hold_view;
-    // the supervisor drains a running goal, with a reason; it can't park one, or release the owner's hold
-    assert.match(dt(['goal', 'hold', G, 'drain'], { role: 'sup' }).err, /--reason/);
-    must(['goal', 'hold', G, 'drain', '--reason', 'billing waits on pricing'], { role: 'sup' });
-    assert.deepEqual([hold().mode, hold().by], ['drain', 'supervisor']);
-    assert.ok(json(must(['log', '--type', 'act', '--json'])).some((a) => a.class === 'goal-hold' && /drained "Self-serve billing"/.test(a.what)));
-    assert.match(dt(['goal', 'hold', G, 'park', '--reason', 'x'], { role: 'sup' }).err, /only the owner parks a single goal/);
-    must(['goal', 'hold', G, 'park', '--owner', '--reason', 'pausing billing for a week']);
-    assert.deepEqual([hold().mode, hold().by], ['park', 'owner']);
-    assert.match(dt(['goal', 'hold', G, 'run', '--reason', 'x'], { role: 'sup' }).err, /releases only a drain it set/);
-    // a forged supervisor line is ignored by the fold, with why
-    const supFile = fs.readdirSync(path.join(repo, 'docs/devteam/run/log')).find((f) => /^supervisor-/.test(f));
-    fs.appendFileSync(path.join(repo, 'docs/devteam/run/log', supFile), line({ id: G, type: 'goal', op: 'set', at: '2099-01-01T00:00:00.000Z', by: 'supervisor', hold: { mode: 'run' } }));
-    assert.equal(hold().mode, 'park');
-    assert.match(must(['log-check']), /the supervisor releases only a drain it set/);
-    // the roadmap and the track stand still while parked
-    assert.match(must(['roadmap']), /Self-serve billing \[ready, parked\] -> no date while parked/);
-    assert.equal(json(must(['goal', 'show', G, '--json'])).track, null);
-    // its questions stay open and labelled; they don't count as the owner falling behind
-    const Qh = must(['ask', '--question', 'Monthly or yearly plans?', '--goal', G, '--recommendation', 'monthly'], { role: 'sup' });
-    assert.match(must(['questions']), new RegExp(`${Qh}  \\[owner-decision, open, its goal parked\\]`));
-    // let go: abandoned, its questions leave the inbox; restore brings both back, parked
-    must(['goal', 'decide', G, 'let-go', '--notes', 'not this quarter']);
-    assert.equal(hold().mode, 'let-go');
-    assert.doesNotMatch(must(['questions']), new RegExp(Qh));
-    assert.ok(!json(must(['dashboard-data'])).questions.some((q) => q.id === Qh));
-    assert.match(must(['validate']), /names goal g-[^,]+, which the owner let go/, 'a let-go goal\'s landed feature is a warning, not an error');
-    assert.match(dt(['goal', 'hold', G, 'run', '--owner']).err, /goal decide .* restore/);
-    assert.match(must(['goal', 'decide', G, 'restore']), /restored as ready, parked/);
-    const gv = json(must(['goal', 'show', G, '--json']));
-    assert.deepEqual([gv.status, gv.hold_view.mode], ['ready', 'park']);
-    assert.match(must(['questions']), new RegExp(Qh));
-    // run again; the owner's release lets the supervisor drain once more
-    must(['goal', 'hold', G, 'run', '--owner']);
-    must(['goal', 'hold', G, 'drain', '--reason', 'again'], { role: 'sup' });
-    must(['goal', 'hold', G, 'run', '--reason', 'pricing landed'], { role: 'sup' });
-    assert.equal(hold().mode, 'run');
-    must(['answer', Qh, 'monthly']);
-    // Upkeep: virtual until its first hold, held like any goal, never let go
-    assert.match(must(['goal', 'list']), /^upkeep \[running\] Upkeep/m);
-    must(['goal', 'hold', 'upkeep', 'drain', '--reason', 'quiet'], { role: 'sup' });
-    assert.match(must(['goal', 'list']), /^upkeep \[(draining|drained): quiet\]/m);
-    must(['goal', 'hold', 'upkeep', 'run', '--owner']);
-    assert.equal(json(must(['dashboard-data'])).upkeep.mode, 'run');
   });
 
   await t.test('computed views: metrics, roadmap, retro, dashboard data', () => {
