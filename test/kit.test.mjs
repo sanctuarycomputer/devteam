@@ -2320,6 +2320,80 @@ function fleetFixture(name) {
   return { base, org, old, neu, home, env, run, ok, g, land, done };
 }
 
+// G1 (spec §2): a single-repo project with no new settings prints exactly what it printed before
+// links and component lines. The goldens were recorded once from the kit before the change
+// (DEVTEAM_G1_RECORD=1); never re-record them to make this pass.
+const G1_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'g1');
+const g1Norm = (s, base) => s.split(fs.realpathSync(base)).join('<tmp>').split(base).join('<tmp>').replace(/\b[0-9a-f]{7,40}\b/g, '<sha>').replace(/-\d{4}-\d{2}\.jsonl\b/g, '-<month>.jsonl');
+function g1Outputs(F) {
+  const { old, ok, run, g } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const fake = 'g-20260101-000000000-supervisor';
+  ok(old, ['feature', 'add', 'g1-work', '--json', JSON.stringify({ title: 'G1', goals: [fake], stories: [{ id: 'G1-S1', text: 'it still works', release: 'v1.0.0' }] })], SUP);
+  const tk = (id, extra = {}) => ok(old, ['ticket', 'add', id, '--json', JSON.stringify({ title: id, feature: 'g1-work', component: 'g1', kind: 'build', size: 'S', risk: 'normal', serves: ['G1-S1'], depends_on: [], touches: ['src/**'], done_when: ['the src test passes in CI'], ...extra })], SUP);
+  tk('g1-01-a');
+  tk('g1-02-b', { depends_on: ['g1-01-a', 'g1-99-missing'], touches: ['src/b/**'] });
+  const w = path.join(old, '.worktrees', 'g1-01-a');
+  g(['worktree', 'add', '-q', '-b', 'ticket/g1-01-a', w, 'origin/main'], old);
+  const tdir = path.join(w, 'docs/devteam/project/tickets/g1-01-a');
+  write(path.join(tdir, 'spec.md'), '# spec\n');
+  write(path.join(tdir, 'plan.md'), '# plan\n\n## TL;DR\n\n- one file\n');
+  write(path.join(tdir, 'verification.md'), '| Done-when | Command | Result |\n|---|---|---|\n| src test | npm t | pass |\n');
+  write(path.join(w, 'src/a.js'), 'a\n');
+  write(path.join(w, 'OUTSIDE.md'), 'not in touches\n');
+  write(path.join(w, 'src/é.js'), 'non-ascii\n');
+  g(['add', '-A'], w);
+  g(['commit', '-qm', 'g1-01-a: work'], w);
+  const sha = g(['rev-parse', 'HEAD'], w);
+  write(path.join(tdir, 'reviews/final-1.md'), review('reviewer-b', sha));
+  g(['add', '-A'], w);
+  g(['commit', '-qm', 'review'], w);
+  const head = g(['rev-parse', 'HEAD'], w);
+  g(['push', '-q', 'origin', 'ticket/g1-01-a'], w);
+  const bodyFile = path.join(F.base, 'g1-body.md');
+  write(bodyFile, '## One-way doors\n\nNone.\n');
+  // what merge, metrics, knowledge, orient and questions have to show: approvals, a PR text (forge
+  // git), an accepted lesson, a recurring observation from two writers, an open question with links
+  ok(old, ['act', '--class', 'approve-spec', '--refs', 'g1-01-a', '--', 'spec ok'], SUP);
+  ok(old, ['act', '--class', 'approve-plan', '--refs', 'g1-01-a', '--', 'plan ok'], SUP);
+  write(path.join(old, 'docs/devteam/run/pr/ticket/g1-01-a.md'), '# g1-01-a: work\n\n## One-way doors\n\nNone.\n');
+  ok(old, ['knowledge', 'add', '--kind', 'fact', '--statement', 'g1 builds with make', '--scope', 'component:g1', '--owner']);
+  for (const i of [1, 2]) ok(old, ['observe', '--subject', 'g1', '--kind', 'slow-test', '--key', 'slow:g1', '--detail', `slow ${i}`, '--valence', '-1'], SUP);
+  ok(old, ['observe', '--subject', 'g1', '--kind', 'slow-test', '--key', 'slow:g1', '--detail', 'slow 3', '--valence', '-1', '--owner']);
+  ok(old, ['ask', '--question', 'Ship g1 behind a flag?', '--ticket', 'g1-01-a', '--recommendation', 'yes', '--choices', JSON.stringify([{ label: 'yes', detail: 'behind a flag' }, { label: 'no' }]), '--links', JSON.stringify([{ title: 'The spec', path: 'docs/devteam/project/tickets/g1-01-a/spec.md', ref: 'ticket/g1-01-a' }])], SUP);
+  const both = (r) => `exit ${r.status}\n--- stdout\n${r.out}\n--- stderr\n${r.err}\n`;
+  // metrics and fleet status carry clocks and durations; everything else in them must not move
+  const TIMEY = /(^since$|_at$|^at$|^now$|hours|minutes|seconds|_ms$|^ms$|^until$|^parity$)/;
+  const untimed = (x) => (Array.isArray(x) ? x.map(untimed) : x && typeof x === 'object' ? Object.fromEntries(Object.entries(x).filter(([k]) => !TIMEY.test(k)).map(([k, v]) => [k, untimed(v)])) : x);
+  const jsonOut = (r) => both({ ...r, out: r.status === 0 ? JSON.stringify(untimed(JSON.parse(r.out)), null, 2) : r.out });
+  const outs = {
+    validate: both(run(old, ['validate'])),
+    status: both(run(old, ['status'])),
+    ready: both(run(old, ['ready'])),
+    'check-ticket': both(run(old, ['check-ticket', 'g1-01-a', '--sha', head, '--title', 'g1-01-a: work', '--body-file', bodyFile])),
+    'prompt-worker': both(run(old, ['prompt', 'worker', 'g1-01-a'])),
+    'merge-dry-run': both(run(old, ['merge', 'g1-01-a', '--dry-run'], SUP)),
+    metrics: jsonOut(run(old, ['metrics', '--json'])),
+    'fleet-status': jsonOut(run(old, ['fleet', 'status', '--json', '--no-fetch'], SUP)),
+    knowledge: both(run(old, ['knowledge', '--for', 'g1-01-a'])),
+    orient: both(run(old, ['orient'])),
+    questions: both(run(old, ['questions'])),
+  };
+  return Object.fromEntries(Object.entries(outs).map(([k, v]) => [k, g1Norm(v, F.base)]));
+}
+
+test('G1: a single-repo project with no new settings prints what it printed before', () => {
+  const F = fleetFixture('g1');
+  try {
+    const outs = g1Outputs(F);
+    for (const [name, text] of Object.entries(outs)) {
+      const file = path.join(G1_DIR, `${name}.txt`);
+      if (process.env.DEVTEAM_G1_RECORD) { write(file, text); continue; }
+      assert.equal(text, fs.readFileSync(file, 'utf8'), `${name} changed for a single-repo project (G1); the golden is ${file}`);
+    }
+  } finally { F.done(); }
+});
+
 test('fleet park: every session stops with a handoff, and a clone elsewhere picks it up with parity', () => {
   const F = fleetFixture('park');
   const { org, old, neu, home, env, run, ok, g, base } = F;

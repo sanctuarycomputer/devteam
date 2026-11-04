@@ -1,0 +1,62 @@
+exit 0
+--- stdout
+{
+  "supervisor_handoff": null,
+  "fleet": null,
+  "sessions": [],
+  "log": {
+    "landed": false,
+    "unlanded": [
+      {
+        "file": "owner-<month>.jsonl",
+        "lines": 2
+      },
+      {
+        "file": "supervisor-<month>.jsonl",
+        "lines": 11
+      }
+    ],
+    "left_behind": 0
+  },
+  "spend": {
+    "unobserved": [],
+    "supervisor_usd": 0
+  },
+  "reviews": {
+    "uncommitted": [],
+    "drafts": []
+  },
+  "open_prs": [
+    {
+      "headRefName": "ticket/g1-01-a",
+      "title": "g1-01-a: work"
+    }
+  ],
+  "open_questions": [
+    {
+      "id": "q-<sha>-<sha>-supervisor",
+      "question": "Ship g1 behind a flag?"
+    }
+  ],
+  "blockers": [
+    "the fleet is neither parked nor drained (Upkeep still running): run fleet park or fleet drain first",
+    "the live log is not on main yet (owner-<month>.jsonl: 2 line(s), supervisor-<month>.jsonl: 11 line(s)): run log-sync, then merge --chore log"
+  ],
+  "warnings": [
+    "forge is git: the PR text for ticket/g1-01-a is only in run/pr here; copy run/pr/ to the new machine"
+  ],
+  "ready": false,
+  "checklist": [
+    "clone the repo: git clone <tmp>/origin.git, and cd into it",
+    "install Node 18 or newer",
+    "install git, tmux and true with superpowers; log in to true",
+    "copy these gitignored files from the old checkout over a secure channel (never git, chat or the log): config/dev.key",
+    "copy run/pr/ from the old checkout (forge git keeps the PR text there)",
+    "start the supervisor in the repo: open true there and say \"Assume the role of the devteam supervisor and resume the fleet\" (or step 9's command: DEVTEAM_ROLE=supervisor true \"$(node docs/devteam/scripts/devteam.mjs prompt supervisor)\"); tmux need only be installed: the workers get a tmux session of their own",
+    "the supervisor runs fleet unpark, or fleet undrain for a drained fleet (it rebuilds run/log from the landed log, prints the parity fingerprint, puts every goal back as it was) and restarts each parked session with the command it prints",
+    "in the browser you use there: turn on \"Notify me of new Inbox items\" again (a browser setting)",
+    "restart the dashboard where it outlives the session: tmux new-window -d -t devteam -n dashboard 'node docs/devteam/scripts/devteam.mjs dashboard' (or another terminal), then open http://127.0.0.1:4321"
+  ]
+}
+--- stderr
+
