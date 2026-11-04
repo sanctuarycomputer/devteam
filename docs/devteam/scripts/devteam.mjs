@@ -2285,8 +2285,9 @@ function cmdMerge() {
     const declared = av.approves ?? [];
     const mine = (a) => !declared.length || (a.refs ?? []).some((r) => [target, `plan-${plan}`].includes(r));
     if (declared.length && !declared.includes(target) && !(plan && declared.includes(`plan-${plan}`))) fails.push(`${approved} approves ${declared.join(', ')}, not ${target}; ask again for this one`);
-    // The decision this merge carries out (--decision) is the call the answer approved, not a prior one.
-    const prior = calls().filter((a) => a.approved_by === approved && mine(a) && a.id !== flagStr('decision'));
+    // Every earlier use counts, merges that cited a decision included; only the decision this merge
+    // carries out (--decision) is the call the answer approved, not a prior one.
+    const prior = [...logObjects('decision'), ...logObjects('act')].filter((a) => a.approved_by === approved && mine(a) && a.id !== flagStr('decision'));
     const landing = prior.length === 1 && prior[0].class === av.class && (prior[0].refs ?? []).includes(target);
     if (prior.length && !landing) fails.push(`${approved} already approved ${declared.length ? `an act for ${target}` : 'an act'}; ask again for this one`);
   }
@@ -2417,9 +2418,12 @@ function decisionRecords() {
   const carried = new Map();
   for (const a of acts) if (a.decision) (carried.get(a.decision) ?? carried.set(a.decision, []).get(a.decision)).push(a.id);
   const rows = [];
+  const allCalls = calls();
+  const usedBy = new Map();
+  for (const c of allCalls) if (c.approved_by) (usedBy.get(c.approved_by) ?? usedBy.set(c.approved_by, []).get(c.approved_by)).push(c.id);
   const call = (o, kind, under) => ({
     id: o.id, at: o.created_at, who: 'supervisor', kind, class: o.class, scope: o.scope ?? null, what: o.what, rationale: o.rationale ?? null, options: o.options ?? [], confidence: o.confidence ?? null,
-    refs: o.refs ?? [], reversible: o.reversible !== false, under, acts: kind === 'decision' ? carried.get(o.id) ?? [] : [o.id], correction: correctionOf(o),
+    refs: o.refs ?? [], reversible: o.reversible !== false, under, acts: kind === 'decision' ? carried.get(o.id) ?? [] : [], correction: correctionOf(o),
   });
   for (const d of logObjects('decision')) rows.push(call(d, 'decision', { authority: d.authority, rung: d.rung ?? null, ceiling: d.ceiling ?? null, approved_by: d.approved_by ?? null }));
   for (const a of acts) if (!a.decision) rows.push(call(a, 'act', { authority: actAuthority(a), rung: a.rung ?? null, ceiling: ladder().classes[a.class]?.ceiling ?? null, approved_by: a.approved_by ?? null }));
@@ -2427,7 +2431,7 @@ function decisionRecords() {
     if (q.status !== 'answered') continue;
     rows.push({
       id: q.id, at: q.answered_at, who: 'owner', kind: 'answer', class: q.class, scope: q.scope, what: `${q.question} → ${q.answer}`, refs: [q.ticket, q.goal].filter(Boolean),
-      under: { recommendation: q.recommendation || null, matched: q.matched ?? null, autonomy: q.autonomy, standing_rule: q.standing_rule, channel: q.channel }, acts: calls().filter((c) => c.approved_by === q.id).map((c) => c.id), correction: null,
+      under: { recommendation: q.recommendation || null, matched: q.matched ?? null, autonomy: q.autonomy, standing_rule: q.standing_rule, channel: q.channel }, acts: usedBy.get(q.id) ?? [], correction: null,
     });
   }
   for (const g of readLog().objects.values()) {
@@ -2445,9 +2449,9 @@ function decisionRecords() {
   }
   for (const k of logObjects('knowledge')) {
     if (writerClass(k.created_by) !== 'owner' || k.status === 'retired') continue;
-    rows.push({ id: k.id, at: k.created_at, who: 'owner', kind: 'rule', class: null, scope: k.scope ?? null, what: k.statement, refs: k.evidence ?? [], under: { status: k.status }, acts: calls().filter((c) => c.approved_by === k.id).map((c) => c.id), correction: null });
+    rows.push({ id: k.id, at: k.created_at, who: 'owner', kind: 'rule', class: null, scope: k.scope ?? null, what: k.statement, refs: k.evidence ?? [], under: { status: k.status }, acts: usedBy.get(k.id) ?? [], correction: null });
   }
-  for (const c of calls()) {
+  for (const c of allCalls) {
     const x = correctionOf(c);
     if (x) rows.push({ id: c.id, at: x.at, who: writerClass(x.by), kind: 'correction', class: c.class, scope: c.scope ?? null, what: `corrected "${c.what}": ${x.reason}`, refs: [c.id], under: { severity: x.severity ?? null, repaired: x.repaired }, acts: [], correction: null });
   }
@@ -2458,12 +2462,12 @@ function cmdDecisions() {
   let rows = decisionRecords();
   if (flagStr('who')) rows = rows.filter((r) => r.who === flagStr('who'));
   if (flagStr('class')) rows = rows.filter((r) => r.class === flagStr('class'));
-  if (flags.corrected) rows = rows.filter((r) => r.correction);
+  if (flags.corrected) rows = rows.filter((r) => r.correction || r.kind === 'correction');
   rows = rows.slice(0, Number(flagStr('tail') ?? 50));
   if (flags.json) return json(rows);
   if (!rows.length) return out('no decisions');
   for (const r of rows) {
-    const under = r.who === 'supervisor' ? ` under ${AUTHORITY_WORDS[r.under.authority] ?? r.under.authority}${r.under.rung ? ` (rung ${r.under.rung}${r.under.ceiling ? ` of ${r.under.ceiling}` : ''})` : ''}${r.under.approved_by ? ` ${r.under.approved_by}` : ''}` : '';
+    const under = ['decision', 'act'].includes(r.kind) ? ` under ${AUTHORITY_WORDS[r.under.authority] ?? r.under.authority}${r.under.rung ? ` (rung ${r.under.rung}${r.under.ceiling ? ` of ${r.under.ceiling}` : ''})` : ''}${r.under.approved_by ? ` ${r.under.approved_by}` : ''}` : '';
     out(`${r.at.slice(0, 16).replace('T', ' ')} ${r.who.padEnd(10)} ${(r.kind).padEnd(10)} ${r.class ?? '-'}: ${String(r.what).slice(0, 120)}${under}${r.correction ? `  CORRECTED: ${r.correction.reason}` : ''}`);
   }
 }
@@ -3500,7 +3504,9 @@ function authorise(cls, scope, approved, refs, verb) {
   if (approved?.startsWith('k-')) {
     rule = logGet(approved);
     if (rule?.type !== 'knowledge' || writerClass(rule.created_by) !== 'owner' || rule.status !== 'accepted') die(`${approved} is not a standing rule of the owner's (accepted knowledge the owner wrote)`);
-    if (!['project', `class:${cls}`].includes(rule.scope)) die(`${approved} applies to ${rule.scope}, not class ${cls}`);
+    // Only a rule the owner scoped to this class: a project-wide preference ("flags first") is
+    // guidance, never authority over every class on the ladder.
+    if (rule.scope !== `class:${cls}`) die(`${approved} applies to ${rule.scope}; a standing rule authorises a call only when the owner scoped it to its class (answer … --rule "…" --rule-scope class:${cls})`);
     if (ownerOnly) die(`${cls} is the owner's (constitution.md); a standing rule never covers it: ask`);
   } else if (approved) {
     const q = logGet(approved);
@@ -3548,14 +3554,31 @@ function authorise(cls, scope, approved, refs, verb) {
   return { rung, ceiling: def?.ceiling, authority, approval, doorCited };
 }
 // A decision an act may carry out: the supervisor's, and not corrected (decide again after a correction).
+// A decision made on the class's own trust (its rung, or a default) lapses when the class drops after
+// it: a stockpiled call can't outlive the correction that took the trust back.
 function decisionFor(id) {
   const d = logGet(id);
   if (d?.type !== 'decision') die(`no decision ${id}`);
   if (correctionOf(d)) die(`${id} was corrected (${correctionOf(d).reason}); decide again`);
+  if (['rung', 'default'].includes(d.authority) && rungHistory(d.class, d.scope ?? null).some((e) => e.by === 'correction' && e.at > d.created_at)) die(`${d.class} dropped to rung 1 after ${id} was decided; decide again`);
   return d;
 }
-// --decision on a command that logs its own act: the act says which decision it carries out.
-const citing = () => { const id = flagStr('decision'); return id ? decisionFor(id).id : undefined; };
+// What a command's act would be about, for --decision: the act must be about something the decision named.
+function citeTargets() {
+  const [a, b] = positional;
+  switch (command) {
+    case 'merge': return [a, flagStr('chore') !== undefined ? `chore-${choreSlug(flagStr('chore'))}` : null, flagStr('plan'), flagStr('plan') ? `plan-${flagStr('plan')}` : null].filter(Boolean);
+    case 'ticket': return ['add', 'set'].includes(a) ? [b] : null;
+    case 'withdraw': return [a];
+    case 'goal': return a === 'hold' ? [b === 'upkeep' ? upkeepOrVirtual().id : b, b] : null;
+    case 'worker': return [a, ...(features().get(tickets().get(a)?.feature)?.goals ?? [])];
+    case 'planner': return [a, `plan-${a}`, ...asList(flags.goal)];
+    case 'fleet': return ['fleet', ...logObjects('goal').map((g) => g.id)];
+    default: return null;
+  }
+}
+// --decision on a command that logs its own act: checked before the command runs (see dispatch).
+const citing = () => flagStr('decision') ?? undefined;
 
 function cmdDecide() {
   const what = rest ? rest.join(' ') : flagStr('what');
@@ -3570,6 +3593,7 @@ function cmdDecide() {
   if (confidence !== undefined && !(confidence >= 0 && confidence <= 1)) die('--confidence is a number from 0 to 1');
   if (['approve-spec', 'approve-plan'].includes(cls) && !tickets().has(refs[0])) die(`${cls} names the ticket first: --refs <ticket-id> [other ids]`);
   const a = authorise(cls, scope, approved, refs, 'decide');
+  if (a.doorCited && a.approval.ticket !== refs[0] && !(features().get(tickets().get(refs[0])?.feature)?.goals ?? []).includes(a.approval.goal)) die(`${approved} answered a one-way door for ${a.approval.ticket ?? a.approval.goal ?? 'something else'}, not for ${refs[0]} or a goal its feature serves`);
   const line = appendLog({
     type: 'decision', class: cls, scope: scope ?? undefined, what, rationale: flagStr('rationale'), options: flags.options !== undefined ? listFlag('options') : undefined,
     confidence, refs, reversible: !flags.irreversible, rung: a.rung, ceiling: a.ceiling, authority: a.authority, approved_by: approved ?? undefined,
@@ -3589,6 +3613,12 @@ function cmdAct() {
   const scope = decision ? decision.scope ?? null : flagStr('scope') ?? null;
   const approved = decision ? decision.approved_by ?? null : flagStr('approved') ?? null;
   const refs = flags.refs !== undefined ? asList(flags.refs) : decision?.refs ?? [];
+  // An act carries out what its decision covered, nothing else.
+  if (decision) {
+    const outside = refs.filter((r) => !(decision.refs ?? []).includes(r));
+    if (outside.length) die(`${decision.id} covers ${(decision.refs ?? []).join(', ') || 'no refs'}; ${outside.join(', ')} ${outside.length > 1 ? 'are' : 'is'} outside it: decide again for ${outside.length > 1 ? 'them' : 'it'}`);
+    if (['approve-spec', 'approve-plan'].includes(cls) && refs[0] !== decision.refs?.[0]) die(`${decision.id} approves ${decision.refs?.[0]}; a ${cls} act under it names that ticket first`);
+  }
   // A decision was authorised when it was made; an act without one is authorised now.
   let auth;
   if (decision) {
@@ -6389,9 +6419,14 @@ else if (!COMMANDS[command]) die(`unknown command "${command}"\n${HELP}`);
 else {
   // --decision names the decision a command's act carries out; check it before the command does anything.
   if (flags.decision !== undefined) {
-    if (!['act', 'merge', 'ticket', 'withdraw', 'goal', 'worker', 'planner', 'fleet'].includes(command)) die(`${command} logs no act; --decision is for act, merge, ticket, withdraw, goal hold, worker, planner and fleet`);
     if (!flagStr('decision')) die('--decision needs a decision id (d-…)');
-    decisionFor(flagStr('decision'));
+    if (command !== 'act') {
+      const targets = citeTargets();
+      if (!targets) die(`${[command, positional[0]].filter(Boolean).join(' ')} logs no act; --decision is for act, merge, ticket add|set, withdraw, goal hold, worker, planner and fleet`);
+      supervisorOnly('--decision');
+      const d = decisionFor(flagStr('decision'));
+      if (!(d.refs ?? []).some((r) => targets.includes(r))) die(`${d.id} is about ${(d.refs ?? []).join(', ') || 'nothing in particular (it named no --refs)'}; this ${command} is about ${targets.slice(0, 4).join(', ')}${targets.length > 4 ? ', …' : ''}. Decide with --refs naming it, or act without --decision`);
+    }
   }
   COMMANDS[command]();
 }

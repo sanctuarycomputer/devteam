@@ -618,18 +618,28 @@ test('devteam kit', async (t) => {
     assert.deepEqual(recs.find((r) => r.id === Qx && r.kind === 'answer').acts, [D], "the owner's answer, shown as the owner's");
     assert.ok(recs.some((r) => r.kind === 'act' && r.class === 'release-production'), 'an act without a decision is its own call');
     assert.ok(!recs.some((r) => r.id === A1), 'an act under a decision is not a call of its own');
-    // a standing rule and a rung are authorities too
+    // an act stays within what its decision covered
+    assert.match(dt(['act', '--decision', D, '--refs', 'bill-02-x', '--', 'and this'], sup).err, /bill-02-x is outside it/);
+    // another command's act may cite a decision only about what it acts on
+    assert.match(dt(['withdraw', Qx, '--decision', D], sup).err, /is about bill-01-card; this withdraw is about/);
+    // a project-wide preference is not authority over a class; a rule the owner scoped to the class is
     const K = json(must(['log', '--type', 'knowledge', '--json'])).find((k) => k.statement === 'flags first').id;
-    const Dk = must(['decide', '--class', 'release-scope', '--approved', K, '--', 'flag the export too'], sup);
+    assert.match(dt(['decide', '--class', 'release-scope', '--approved', K, '--', 'flag the export too'], sup).err, /applies to project; a standing rule authorises a call only when the owner scoped it/);
+    const Qk = must(['ask', '--question', 'May exports always ship behind a flag?', '--class', 'release-scope', '--recommendation', 'yes'], sup);
+    must(['answer', Qk, 'yes', '--rule', 'exports ship behind a flag', '--rule-scope', 'class:release-scope']);
+    const K2 = json(must(['log', '--type', 'knowledge', '--json'])).find((k) => k.statement === 'exports ship behind a flag').id;
+    const Dk = must(['decide', '--class', 'release-scope', '--approved', K2, '--', 'flag the export too'], sup);
     assert.equal(recs = json(must(['decisions', '--json', '--who', 'supervisor'])).find((r) => r.id === Dk).under.authority, 'standing-rule');
     const Dr = must(['decide', '--class', 'release-production', '--', 'ship v1.0.2'], sup);
     assert.equal(json(must(['decisions', '--json'])).find((r) => r.id === Dr).under.rung, 3);
+    const Ds = must(['decide', '--class', 'release-production', '--', 'ship v1.1.0 next week'], sup);
     // trust moves on the decision: a correction drops the class, and the decision can't be carried out again
     must(['correct', Dr, '--reason', 'not before the freeze lifts']);
     const tr = json(must(['trust', '--json'])).find((r) => r.class === 'release-production');
     assert.equal(tr.rung, 1, 'a corrected decision drops its class');
     assert.equal(tr.history.pop().id, Dr, 'the rung history names the call');
     assert.match(dt(['act', '--decision', Dr, '--', 'tagged'], sup).err, /was corrected.*decide again/);
+    assert.match(dt(['act', '--decision', Ds, '--', 'tagged v1.1.0'], sup).err, /dropped to rung 1 after .* was decided; decide again/, 'a call made on a rung lapses when the class drops');
     must(['repair', Dr, '--how', 'none'], sup);
     assert.ok(json(must(['decisions', '--json', '--corrected'])).some((r) => r.id === Dr && r.kind === 'decision'));
     const dash = json(must(['dashboard-data']));

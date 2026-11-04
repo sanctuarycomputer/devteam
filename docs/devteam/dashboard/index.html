@@ -487,6 +487,7 @@
         <label>Who <select id="dec-who"><option value="">anyone</option><option value="owner">you</option><option value="supervisor">the supervisor</option></select></label>
         <label>Kind <select id="dec-class"><option value="">any</option></select></label>
         <label class="small"><input type="checkbox" id="dec-corrected"> Only corrected</label>
+        <label class="small"><input type="checkbox" id="dec-mechanical"> Include routine acts</label>
       </div>
       <div class="feed" id="decisions-feed"></div>
     </div>
@@ -1695,7 +1696,7 @@ function renderOoda(o) {
   $('trust-table').innerHTML = '<tr><th>Kind of decision</th><th>Now</th><th>At most</th><th>Agreed with you</th><th>Corrected</th></tr>' + o.trust.map((t) => `
     <tr><td>${esc(cap(t.about || words(t.class)))}<div class="muted small">${esc(t.class)}</div></td><td>${esc(RUNG_WORDS[t.rung])}</td><td>${esc(RUNG_WORDS[t.ceiling])}</td><td>${t.agreement == null ? '–' : `${Math.round(t.agreement * 100)}% of the last ${esc(t.agreement_questions.length)}`}${t.can_ask ? '<div><span class="badge good">ready to ask you for more trust</span></div>' : ''}</td><td>${t.corrections ? `${esc(t.corrections)} time${t.corrections > 1 ? 's' : ''}` : 'never'}</td></tr>`).join('');
 
-  const moves = (o.trust || []).flatMap((t) => (t.history || []).map((e) => ({ ...e, class: t.class, about: t.about }))).sort((a, b) => b.at.localeCompare(a.at)).slice(0, 40);
+  const moves = (o.trust || []).flatMap((t) => (t.history || []).map((e) => ({ ...e, rung: Math.min(e.rung, t.ceiling), class: t.class, about: t.about }))).sort((a, b) => b.at.localeCompare(a.at)).slice(0, 40);
   $('trust-history').innerHTML = moves.length ? moves.map((e) => `<div class="card small${e.by === 'correction' ? ' corrected' : ''}"><div>${esc(cap(e.about || words(e.class)))}: <b>${esc(RUNG_WORDS[e.rung])}</b>
     <div class="meta">${esc(when(e.at))} · ${e.by === 'correction' ? `a correction on ${linkify(e.id)}: ${esc(e.why)}` : `your answer to ${qlink(e.id)}`}</div></div></div>`).join('') : empty('No moves yet. Every kind of decision is on its starting rung.');
 
@@ -1723,8 +1724,11 @@ function decisionUnder(r) {
   if (r.kind === 'rule') return u.status === 'accepted' ? '' : esc(u.status);
   return '';
 }
+// A routine act (a merge the gates passed, a worker started, a default applied) is its own call under
+// the constitution; it is in the Act tab, and here only on request, so judgment calls stay in view.
+const routine = (r) => r.kind === 'act' && r.under?.authority === 'constitution';
 function renderDecisions(o) {
-  const all = o.decisions || [];
+  const all = (o.decisions || []).filter((r) => $('dec-mechanical').checked || !routine(r));
   const sel = $('dec-class');
   const cur = sel.value;
   const classes = [...new Set(all.map((r) => r.class).filter(Boolean))].sort();
@@ -1750,7 +1754,7 @@ function renderDecisions(o) {
       ${mine && !r.correction ? `<button class="ghost" data-correct="dec:${esc(r.id)}">Correct</button>` : ''}
     </div>`; }).join('') : empty(all.length ? 'Nothing matches.' : 'None yet. Every call, the supervisor\'s and yours, shows here.');
 }
-for (const id of ['dec-who', 'dec-class', 'dec-corrected']) $(id).addEventListener('change', () => { if (DATA) renderDecisions(DATA.ooda); });
+for (const id of ['dec-who', 'dec-class', 'dec-corrected', 'dec-mechanical']) $(id).addEventListener('change', () => { if (DATA) renderDecisions(DATA.ooda); });
 
 
 // ---- drawer: a ticket with everything that bears on it, a settled question, or an artifact ----
@@ -1990,6 +1994,8 @@ const retroRef = (x) => {
   if (k) return `<a class="linkish" href="#lesson/${encodeURIComponent(x)}">${esc(k.statement)}</a>`;
   const a = (DATA.ooda.acts || []).find((y) => y.id === x);
   if (a) return `${actView(a).head ?? esc(a.what)} <a class="linkish" href="#act/${encodeURIComponent(x)}">(the act)</a>`;
+  const dd = (DATA.ooda.decisions || []).find((y) => y.id === x && y.kind === 'decision');
+  if (dd) return `${dlink(x, dd.what)} (the decision)`;
   return linkify(x);
 };
 function openRetro(id) {
@@ -2227,7 +2233,7 @@ function render(d) {
   $('n-observe').textContent = o.observations.length || '';
   $('n-orient').textContent = (o.clusters.length + o.problems.length + o.knowledge.length) || '';
   const weekAgo = new Date(Date.now() - 7 * 864e5).toISOString();
-  $('n-decide').textContent = (o.decisions || []).filter((r) => r.at > weekAgo && r.kind !== 'correction').length || '';
+  $('n-decide').textContent = (o.decisions || []).filter((r) => r.at > weekAgo && r.kind !== 'correction' && !routine(r)).length || '';
   count('n-trust', o.trust.filter((t) => t.can_ask).length);
   $('n-act').textContent = o.acts.length || '';
   const fcAll = forecast(p.tickets, now);
