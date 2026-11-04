@@ -586,6 +586,57 @@ test('devteam kit', async (t) => {
     assert.equal(q.channel, 'cli', 'an answer records where the owner typed it');
   });
 
+  await t.test('decisions: a call records the trust it rests on, acts carry it out, corrections land on the call', () => {
+    const sup = { role: 'sup' };
+    assert.equal(dt(['decide', '--class', 'release-scope', '--', 'slip BILL-S2'], sup).status, 3, 'decide asks first below rung 3, like act');
+    const Qx = must(['ask', '--question', 'Ship the refund flow flagged?', '--class', 'release-scope', '--reasons', 'below-rung', '--recommendation', 'yes'], sup);
+    must(['answer', Qx, 'yes']);
+    assert.match(dt(['decide', '--class', 'release-scope', '--confidence', '2', '--approved', Qx, '--', 'x'], sup).err, /--confidence is a number from 0 to 1/);
+    const D = must(['decide', '--class', 'release-scope', '--approved', Qx, '--options', 'ship flagged', 'hold a week', '--rationale', 'the flag makes it reversible', '--confidence', '0.8', '--refs', 'bill-01-card', '--', 'ship refunds behind a flag'], sup);
+    assert.match(D, /^d-\d{8}-\d{9}-supervisor$/);
+    const d = json(must(['log', '--id', D, '--json']));
+    const dl = Array.isArray(d) ? d[0] : d;
+    assert.equal(dl.authority, 'answer');
+    assert.equal(dl.rung, 1, 'the rung it was decided on is snapshotted');
+    assert.deepEqual(dl.options, ['ship flagged', 'hold a week']);
+    assert.match(dt(['act', '--class', 'release-scope', '--approved', Qx, '--', 'again'], sup).err, new RegExp(`already approved a decision \\(${D}\\)`), 'the answer went to the decision');
+    assert.match(dt(['act', '--decision', D, '--class', 'release-production', '--', 'x'], sup).err, /takes its class/);
+    assert.match(dt(['act', '--decision', D, '--approved', Qx, '--', 'x'], sup).err, /takes its scope and approval/);
+    const A1 = must(['act', '--decision', D, '--', 'turned the refund flag on in staging'], sup);
+    const A2 = must(['act', '--decision', D, '--', 'turned it on in production'], sup);
+    const acts = json(must(['log', '--type', 'act', '--json'])).filter((a) => a.decision === D);
+    assert.deepEqual(acts.map((a) => a.id), [A1, A2], 'one decision, several acts');
+    assert.ok(acts.every((a) => a.class === 'release-scope' && !a.approved_by && a.refs.includes('bill-01-card')), 'an act takes its class and refs from the decision');
+    assert.match(dt(['correct', A1, '--reason', 'wrong']).err, new RegExp(`carried out ${D}.*problem add`, 's'), 'a correction goes to the decision, or is a problem');
+    assert.match(dt(['status', '--decision', D], sup).err, /logs no act/);
+    assert.match(dt(['act', '--decision', 'd-20990101-000000000-supervisor', '--', 'x'], sup).err, /no decision/);
+    // the Decide view: the supervisor's call with its acts, and the owner's answer it rested on
+    let recs = json(must(['decisions', '--json']));
+    const rd = recs.find((r) => r.id === D && r.kind === 'decision');
+    assert.deepEqual(rd.acts, [A1, A2]);
+    assert.equal(rd.under.authority, 'answer');
+    assert.deepEqual(recs.find((r) => r.id === Qx && r.kind === 'answer').acts, [D], "the owner's answer, shown as the owner's");
+    assert.ok(recs.some((r) => r.kind === 'act' && r.class === 'release-production'), 'an act without a decision is its own call');
+    assert.ok(!recs.some((r) => r.id === A1), 'an act under a decision is not a call of its own');
+    // a standing rule and a rung are authorities too
+    const K = json(must(['log', '--type', 'knowledge', '--json'])).find((k) => k.statement === 'flags first').id;
+    const Dk = must(['decide', '--class', 'release-scope', '--approved', K, '--', 'flag the export too'], sup);
+    assert.equal(recs = json(must(['decisions', '--json', '--who', 'supervisor'])).find((r) => r.id === Dk).under.authority, 'standing-rule');
+    const Dr = must(['decide', '--class', 'release-production', '--', 'ship v1.0.2'], sup);
+    assert.equal(json(must(['decisions', '--json'])).find((r) => r.id === Dr).under.rung, 3);
+    // trust moves on the decision: a correction drops the class, and the decision can't be carried out again
+    must(['correct', Dr, '--reason', 'not before the freeze lifts']);
+    const tr = json(must(['trust', '--json'])).find((r) => r.class === 'release-production');
+    assert.equal(tr.rung, 1, 'a corrected decision drops its class');
+    assert.equal(tr.history.pop().id, Dr, 'the rung history names the call');
+    assert.match(dt(['act', '--decision', Dr, '--', 'tagged'], sup).err, /was corrected.*decide again/);
+    must(['repair', Dr, '--how', 'none'], sup);
+    assert.ok(json(must(['decisions', '--json', '--corrected'])).some((r) => r.id === Dr && r.kind === 'decision'));
+    const dash = json(must(['dashboard-data']));
+    assert.ok(dash.ooda.decisions.some((r) => r.id === D), 'the dashboard has the Decide feed');
+    assert.equal(dash.ooda.acts.find((a) => a.id === A1).under.decision, D);
+  });
+
   await t.test('an answer the owner gave in the supervisor chat: the owner\'s, quoted, listed for checking, never trust evidence', () => {
     const said = "you shouldn't need to ask me to submit those PRs";
     const Qc = must(['ask', '--question', 'Open upstream PRs without asking?', '--class', 'upstream-pr', '--reasons', 'below-rung', '--recommendation', 'yes'], { role: 'sup' });
