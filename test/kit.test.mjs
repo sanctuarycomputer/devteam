@@ -1452,6 +1452,18 @@ test('devteam kit', async (t) => {
 
   await t.test('computed views: metrics, roadmap, retro, dashboard data', () => {
     must(['metrics']);
+    // init ignores the harnesses' runtime files; one tracked anyway is a finding with the fix
+    const gi = fs.readFileSync(path.join(repo, '.gitignore'), 'utf8');
+    assert.ok(['.claude/*.lock', '.claude/settings.local.json', '.claude/worktrees/'].every((p) => gi.split('\n').includes(p)), 'init ignores harness runtime files');
+    write(path.join(repo, '.claude/scheduled_tasks.lock'), 'x');
+    git(['add', '-f', '.claude/scheduled_tasks.lock']);
+    git(['commit', '-qm', 'a lock, by accident']);
+    const tr = json(must(['metrics', '--json'])).findings.find((f) => f.kind === 'tracked-runtime-file');
+    assert.match(tr?.suggestion ?? '', /git rm --cached '\.claude\/scheduled_tasks\.lock', and add \.claude\/\*\.lock to \.gitignore/);
+    git(['rm', '-q', '--cached', '.claude/scheduled_tasks.lock']);
+    git(['commit', '-qm', 'untrack it']);
+    fs.rmSync(path.join(repo, '.claude/scheduled_tasks.lock'));
+    assert.ok(!json(must(['metrics', '--json'])).findings.some((f) => f.kind === 'tracked-runtime-file'));
     assert.match(must(['roadmap']), /Self-serve billing/);
     assert.match(must(['retro', '--print'], { role: 'sup' }), /## Numbers/);
     const d = json(must(['dashboard-data']));
