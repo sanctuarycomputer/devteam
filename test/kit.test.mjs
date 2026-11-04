@@ -2949,6 +2949,28 @@ test('link add, set and rm for url links: the supervisor writes settings and log
   } finally { F.done(); }
 });
 
+test('observe-link records a resource; orient proposes adds, edits and source-of-truth questions', () => {
+  const F = monoFixture('observe-link');
+  const { old, ok, run, edit } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  try {
+    edit((j) => { j.links = { figma: { kind: 'url', title: 'Designs', url: 'https://figma.test/a', for: ['component:web'] } }; });
+    assert.equal(json(ok(old, ['orient', '--json'])).length, 0);
+    const o1 = ok(old, ['observe-link', '--url', 'https://notion.test/runbook', '--title', 'Runbook', '--for', 'all', '--owner']);
+    const o2 = ok(old, ['observe-link', '--url', 'https://figma.test/a', '--title', 'Designs', '--for', 'component:api', '--notes', 'also the API screens'], SUP);
+    const o3 = ok(old, ['observe-link', '--url', 'https://figma.test/b', '--title', 'designs', '--for', 'component:web'], SUP);
+    const obs = json(ok(old, ['log', '--type', 'observation', '--json'])).find((x) => x.id === o1);
+    assert.deepEqual([obs.kind, obs.subject, obs.link.title, obs.link.for], ['link', 'https://notion.test/runbook', 'Runbook', ['all']]);
+    const props = json(ok(old, ['orient', '--json'])).filter((x) => x.proposal);
+    assert.deepEqual(props.map((p) => [p.proposal, p.observation]).sort(), [['add', o1], ['conflict', o3], ['edit', o2]].sort());
+    assert.match(props.find((p) => p.proposal === 'add').command, /^link add runbook --kind url --url https:\/\/notion\.test\/runbook --title "Runbook" --for all --source o-/);
+    assert.match(props.find((p) => p.proposal === 'edit').command, /link set figma for '\["component:web","component:api"\]'/);
+    assert.match(props.find((p) => p.proposal === 'conflict').command, /^ask --question "Which is the source of truth/);
+    assert.match(ok(old, ['orient']), /link proposals:\n  add/);
+    assert.match(run(old, ['observe-link', '--url', 'https://x.test'], SUP).err, /--title/);
+  } finally { F.done(); }
+});
+
 test('fleet park: every session stops with a handoff, and a clone elsewhere picks it up with parity', () => {
   const F = fleetFixture('park');
   const { org, old, neu, home, env, run, ok, g, base } = F;

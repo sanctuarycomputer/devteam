@@ -4277,6 +4277,18 @@ function cmdObserve() {
   }, by);
   out(line.id);
 }
+// observe-link: a resource the owner mentioned or the work depends on, for orient to fold into the
+// registry (spec §7). Anyone writes it; only the supervisor's link command changes the registry.
+function cmdObserveLink() {
+  const by = flags.owner ? ownerWriter().by : logWriter();
+  const url = flagStr('url'), p = flagStr('path');
+  if (!url === !p) die('observe-link needs --url <https://…> or --path <repo path>, and --title');
+  const title = flagStr('title') ?? die('observe-link needs --title (what it is called)');
+  const scopes = flags.for !== undefined ? listFlag('for') : [];
+  for (const sc of scopes) if (!scopeValid(sc, 'for')) die(`--for "${sc}" is not a scope (${SCOPE_HELP.for})`);
+  const line = appendLog({ type: 'observation', source: writerClass(by), subject: url ?? p, kind: 'link', detail: `${title}${flagStr('notes') ? `: ${flagStr('notes')}` : ''}`, source_key: `link:${url ?? p}`, link: { url, path: p, title, for: scopes.length ? scopes : undefined, notes: flagStr('notes') } }, by);
+  out(line.id);
+}
 const SEV = { low: 1, medium: 2, high: 3 };
 // Each metrics finding becomes an observation, once a day per finding (deduped on source_key).
 function observeFindings(m) {
@@ -4370,7 +4382,7 @@ function orientClusters() {
   const groups = new Map();
   const add = (key, item) => (groups.get(key) ?? groups.set(key, []).get(key)).push(item);
   for (const o of logObjects('observation')) {
-    if (linked.has(o.id) || ['reading', 'retro', 'outcome'].includes(o.kind)) continue;
+    if (linked.has(o.id) || ['reading', 'retro', 'outcome', 'link'].includes(o.kind)) continue;
     add(o.source_key ?? `${o.kind}:${o.subject}`, { id: o.id, at: o.created_at, who: o.created_by, valence: o.valence ?? 0, detail: o.detail });
   }
   for (const a of calls()) {
@@ -4386,11 +4398,41 @@ function orientClusters() {
   }
   return res.sort((a, b) => b.count - a.count);
 }
+// Link observations against the registry (spec §7, orient): a URL already there with a better
+// title, wider for or new notes is a proposed edit; a fresh URL a proposed add; a URL whose title
+// matches another link for an overlapping scope a question about which is the source of truth
+// (open issue 10). Proposals only: the supervisor decides and acts with link, or asks.
+function orientLinks() {
+  const reg = loadSettings().links ?? {};
+  const norm = (u) => String(u ?? '').replace(/\/+$/, '').toLowerCase();
+  const used = new Set(Object.values(reg).map((l) => l.source).filter(Boolean));
+  const q = (x) => JSON.stringify(x);
+  const overlap = (a, b) => { const x = asList(a).length ? asList(a) : ['all'], y = asList(b).length ? asList(b) : ['all']; return x.includes('all') || y.includes('all') || x.some((s) => y.includes(s)); };
+  const res = [];
+  for (const o of logObjects('observation').filter((x) => x.kind === 'link' && x.link?.url && !used.has(x.id)).sort(byTime)) {
+    const l = o.link;
+    const same = Object.entries(reg).find(([id0, r]) => { const u = LINK_KINDS[r.kind]?.locator(r, id0).url; return !!u && norm(u) === norm(l.url); });
+    if (same) {
+      const [id, r] = same;
+      const wider = asList(l.for).filter((s) => !asList(r.for).includes(s));
+      const sets = [...(wider.length ? [`link set ${id} for '${q([...asList(r.for), ...wider])}'`] : []), ...(l.notes && l.notes !== r.notes ? [`link set ${id} notes ${q(l.notes)}`] : []), ...(l.title !== r.title && l.title.length > r.title.length ? [`link set ${id} title ${q(l.title)}`] : [])];
+      // an edit to a link of an owner's kind (repo) is the owner's: the proposal is the question
+      if (sets.length) res.push({ key: `link-proposal:${id}`, proposal: 'edit', link: id, observation: o.id, command: LINK_KINDS[r.kind]?.ownedByOwner ? `ask --class governance-edit --question "Change ${id} in the registry: ${sets.join('; ').replace(/"/g, "'")}?" --evidence ${o.id} --recommendation yes` : sets.join(' && ') });
+      continue;
+    }
+    const rival = Object.entries(reg).find(([id0, r]) => !!LINK_KINDS[r.kind]?.locator(r, id0).url && r.title.toLowerCase() === l.title.toLowerCase() && overlap(r.for, l.for));
+    if (rival) { res.push({ key: `link-proposal:${rival[0]}`, proposal: 'conflict', rival: rival[0], observation: o.id, command: `ask --question "Which is the source of truth for ${l.title}: ${LINK_KINDS[rival[1].kind].locator(rival[1], rival[0]).url} or ${l.url}?" --links '${q([{ title: rival[1].title, link: rival[0] }, { title: l.title, url: l.url }])}' --evidence ${o.id}` }); continue; }
+    res.push({ key: `link-proposal:${slug(l.title)}`, proposal: 'add', observation: o.id, command: `link add ${slug(l.title)} --kind url --url ${l.url} --title ${q(l.title)}${asList(l.for).length ? ` --for ${asList(l.for).join(' ')}` : ''}${l.notes ? ` --notes ${q(l.notes)}` : ''} --source ${o.id}` });
+  }
+  return res;
+}
 function cmdOrient() {
   const cl = orientClusters();
-  if (flags.json) return json(cl);
-  if (!cl.length) return out('nothing recurring that is unexplained');
+  const lk = orientLinks();
+  if (flags.json) return json([...cl, ...lk]);
+  if (!cl.length && !lk.length) return out('nothing recurring that is unexplained');
   for (const c of cl) out(`${c.key}  x${c.count}  valence ${c.valence}\n  latest: ${c.latest}\n  evidence: ${c.ids.join(' ')}`);
+  if (lk.length) { out('link proposals:'); for (const p of lk) out(`  ${p.proposal} (${p.observation}): ${p.command}`); }
 }
 
 // ===== 9. goals, roadmap, retros, chore worktrees =====
@@ -7393,6 +7435,7 @@ Decide and act (supervisor.md, constitution.md)
 
 Observe and orient
   observe --subject s --kind k --detail d [--severity 0-4] [--valence -2..2] [--key k] [--refs ids] [--fix f] [--value n --unit u]
+  observe-link --url u | --path p --title t [--for scope…] [--notes n] [--owner]   a resource the work uses; orient proposes it for the registry
   wait [--minutes n]   supervisor, between ticks: blocks until a new message to you, a new owner line, a new high finding, or the tick is due (tick_minutes, default 15); an open high finding returns at once until acted on or acked
   observe-metrics | observe-spend | orient [--json] | metrics [--since date] [--json]   (observe-metrics records spend lines too)
   ack <finding-kind> <subject> --reason r [--owner]   set a finding aside for finding_ack_hours
@@ -7421,7 +7464,7 @@ const COMMANDS = {
   'check-ticket': cmdCheckTicket, 'check-pr': cmdCheckPr, merge: cmdMerge, 'review-worktree': cmdReviewWorktree,
   phase: cmdPhase, gate: cmdGate, send: cmdSend, messages: cmdMessages, 'stop-ok': cmdStopOk,
   ask: cmdAsk, answer: cmdAnswer, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
-  observe: cmdObserve, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, knowledge: cmdKnowledge, problem: cmdProblem,
+  observe: cmdObserve, 'observe-link': cmdObserveLink, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, knowledge: cmdKnowledge, problem: cmdProblem,
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
   log: cmdLog, record: cmdRecord, peek: cmdPeek, 'log-check': cmdLogCheck, 'log-sync': cmdLogSync, history: cmdHistory,
   drain: cmdDrain, undrain: cmdUndrain, fleet: cmdFleet, handoff: cmdHandoff, wait: cmdWait,

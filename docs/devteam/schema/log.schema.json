@@ -831,6 +831,37 @@
               "value"
             ],
             "additionalProperties": false
+          },
+          "link": {
+            "description": "On a link observation: the resource the work depends on, as the owner or a worker gave it (the supervisor folds these into the registry, settings.md links).",
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string",
+                "pattern": "^https?://"
+              },
+              "path": {
+                "type": "string",
+                "pattern": "^(?!/)(?!.*\\.\\.)[^\\s]+$"
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1
+              },
+              "for": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "notes": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "title"
+            ],
+            "additionalProperties": false
           }
         },
         "additionalProperties": false,
