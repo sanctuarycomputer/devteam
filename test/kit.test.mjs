@@ -2481,6 +2481,7 @@ test('fleet park: every session stops with a handoff, and a clone elsewhere pick
       let pane = '';
       for (let i = 0; i < 150 && !/env -u/.test(pane); i++) { pane = spawnSync('tmux', ['capture-pane', '-p', '-J', '-t', `devteam:${ID}`], { env: env({}), encoding: 'utf8' }).stdout ?? ''; Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100); }
       spawnSync('tmux', ['kill-server'], { env: env({}) });
+      pane = pane.replace(/\n/g, ''); // the shell wraps a long command at the pane's width, even mid-word
       for (const k of ['CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION']) assert.match(pane, new RegExp(`env (-u \\w+ )*-u ${k} (-u \\w+ )*true `), `the agent starts without the supervisor's session marker ${k}`);
       assert.doesNotMatch(pane, /-u CLAUDE_CONFIG_DIR/, 'settings the owner exports stay');
       assert.equal(rs.status, 0, rs.stderr);
