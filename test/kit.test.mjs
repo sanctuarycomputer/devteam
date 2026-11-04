@@ -3010,6 +3010,14 @@ test('link-unreachable for a missing checkout or a failing URL (stubbed), and li
   } finally { F.done(); }
 });
 
+test('help names the new commands', () => {
+  const F = monoFixture('help');
+  try {
+    const h = F.ok(F.old, ['help']);
+    for (const c of ['links [--json]', 'link add <id> --kind url', 'components check', 'observe-link']) assert.ok(h.includes(c), c);
+  } finally { F.done(); }
+});
+
 test('fleet park: every session stops with a handoff, and a clone elsewhere picks it up with parity', () => {
   const F = fleetFixture('park');
   const { org, old, neu, home, env, run, ok, g, base } = F;

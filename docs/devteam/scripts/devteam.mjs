@@ -7416,7 +7416,7 @@ function cmdInit() {
   if (fs.existsSync(claude) && !/@AGENTS\.md\b/.test(readText(claude))) { fs.appendFileSync(claude, `\n## devteam\n\n@AGENTS.md\n`); made.push('CLAUDE.md'); }
   if (flags.github) put(path.join(root, '.github', 'workflows', 'devteam.yml'), WORKFLOW_YML);
   out(made.length ? `created:\n${made.map((m) => `  ${m}`).join('\n')}` : 'nothing to create');
-  out('next: fill settings (components, agent_command, gates, worktree_files), write designs/architecture.md from the code, then start the supervisor (the upstream README, Setup)');
+  out('next: fill settings (components and their owns, links to sibling repos and design files, agent_command, gates, worktree_files), write designs/architecture.md from the code, then start the supervisor (the upstream README, Setup)');
 }
 
 const HELP = `devteam <command>   (positionals before flags; flags take the words after them)
