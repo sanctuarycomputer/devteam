@@ -1390,6 +1390,23 @@ test('devteam kit', async (t) => {
       assert.equal((await fetch(`http://127.0.0.1:${port}/api/record?id=..%2Fx`)).status, 400);
       const docs = await (await fetch(`http://127.0.0.1:${port}/api/schema`)).json();
       assert.ok(docs.envelope.id && docs.types.decision.fields.authority && docs.types.ticket.fields.done_when);
+      assert.ok(docs.types.goal.fields['milestones[].title'] && docs.types.feature.fields['stories[].text'], 'nested fields are keyed by path');
+      assert.ok(!/approved_by k-/.test(docs.types.decision.fields.authority), "the owner's words (x-tip) where a description is written for agents");
+      // a sidepeek's peek: the record, its history oldest first, and its kind's particulars
+      const peek = async (q) => fetch(`http://127.0.0.1:${port}/api/peek?${new URLSearchParams(q)}`);
+      const pq = await (await peek({ kind: 'q', id: Qs })).json();
+      assert.equal(pq.record.id, Qs);
+      assert.ok(pq.history.length && pq.history.every((l, i) => !i || pq.history[i - 1].at <= l.at));
+      const pt = await (await peek({ kind: 'ticket', id: 'bill-01-card' })).json();
+      assert.ok(pt.ticket && pt.deps && Array.isArray(pt.spend) && pt.history.some((l) => l.type === 'gate'));
+      const own = pt.history.find((l) => l.id === 'bill-01-card' && l.op === 'set');
+      assert.ok(own && own.prev, "a set line on the object carries what it replaced");
+      const pg = await (await peek({ kind: 'goal', id: G })).json();
+      assert.ok(pg.design === null || 'tldr' in pg.design);
+      const ps = await (await peek({ kind: 'story', id: 'BILL-S1', rec: 'billing', tickets: 'bill-01-card' })).json();
+      assert.equal(ps.record.id, 'billing', 'a story reads its feature\'s record');
+      assert.equal((await peek({ kind: 'story', id: 'BILL-S1', rec: '../x' })).status, 400);
+      assert.equal((await peek({ kind: 'ticket', id: 'nope-01-x' })).status, 404);
       const postSecret = (b, headers = browser) => fetch(`http://127.0.0.1:${port}/api/secret`, { method: 'POST', headers, body: JSON.stringify(b) });
       assert.equal((await postSecret({ id: Qs, values: {} }, { 'content-type': 'application/json' })).status, 403, 'a request without browser headers is refused');
       for (let i = 0; i < 3; i++) assert.equal((await postSecret({ id: 'q-20200101-000000000-supervisor', values: { A: 'x'.repeat(3 * 1024 * 1024) } })).status, 400);

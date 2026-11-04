@@ -5061,9 +5061,7 @@ const cmdDashboardData = () => { gitReadCache = new Map(); out(JSON.stringify(da
 // timeline <ticket-id> [--json]: the ticket, and every log line that bears on it (its own edits,
 // its worker's phases, gates and messages, questions it raised or that block it, acts and
 // observations that name it), oldest first; plus its review records and its files.
-function cmdTimeline() {
-  gitReadCache = new Map();
-  const [id] = positional;
+function timelineView(id) {
   const t = tickets().get(id) ?? die(`no ticket ${id}`);
   const touches = (l) => l.id === id || l.by === id || l.ticket === id || l.to === id || l.subject === id
     || (l.refs ?? []).includes(id) || (l.blocks ?? []).includes(id) || (l.serves ?? []).includes(id);
@@ -5076,7 +5074,13 @@ function cmdTimeline() {
   const ref = branch && !mergeShaFor(id) ? branch : mainRef();
   const files = ['spec.md', 'plan.md', 'verification.md'].map((f) => `${projectRel}/tickets/${id}/${f}`).filter((f) => ref && git(['cat-file', '-e', `${ref}:${f}`]) !== null).map((f) => ({ title: path.basename(f, '.md'), path: f, ref }));
   const reviews = ticketReviews(id, branch && !mergeShaFor(id) ? { ref: branch } : WORKTREE).map((r) => ({ file: r.file, stage: r.stage, pass: r.pass, verdict: r.verdict, reviewer: r.reviewer }));
-  const view = { ticket: { ...t, ...st }, files, reviews, lines: all.map((l) => Object.fromEntries(Object.entries(l).filter(([k]) => !k.startsWith('__')))) };
+  return { ticket: { ...t, ...st }, files, reviews, lines: all.map((l) => Object.fromEntries(Object.entries(l).filter(([k]) => !k.startsWith('__')))), st, all };
+}
+function cmdTimeline() {
+  gitReadCache = new Map();
+  const [id] = positional;
+  const { st, all, ...view } = timelineView(id);
+  const t = view.ticket;
   if (flags.json) return json(view);
   out(`${id} [${st?.stage}${st?.phase ? `, ${st.phase}` : ''}] ${t.title}`);
   for (const l of all) out(`${l.at} ${l.type.padEnd(11)} ${l.by.padEnd(14)} ${l.what ?? l.text ?? l.question ?? l.detail ?? l.answer ?? (l.type === 'phase' ? `${l.from ?? ''} -> ${l.to}` : l.op)}`);
@@ -5154,6 +5158,15 @@ function cmdDashboard() {
       const id = u.searchParams.get('id') ?? '';
       if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad id' }));
       const r = await run(['record', id, '--json']);
+      return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 404, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
+    }
+    if (req.method === 'GET' && u.pathname === '/api/peek') {
+      const kind = u.searchParams.get('kind') ?? '';
+      const id = u.searchParams.get('id') ?? '';
+      const ts = (u.searchParams.get('tickets') ?? '').split(',').filter(Boolean);
+      const rec = u.searchParams.get('rec') ?? '';
+      if (!/^[a-z]+$/.test(kind) || !id || id.length > 400 || /[\0\n]/.test(id) || id.startsWith('-') || ts.some((x) => !/^[a-z0-9][a-z0-9-]*$/.test(x)) || (rec && !/^[a-z0-9][a-z0-9-]*$/.test(rec))) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad kind, id, rec or tickets' }));
+      const r = await run(['peek', kind, id, ...(ts.length ? ['--tickets', JSON.stringify(ts)] : []), ...(rec ? ['--rec', rec] : []), '--json']);
       return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 404, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
     }
     if (req.method === 'GET' && u.pathname === '/api/schema') return send(res, 200, 'application/json', JSON.stringify(schemaDocs()));
@@ -6171,7 +6184,7 @@ function cmdSettings() {
 
 // record <id>: one record as it stands, its stored fields only, for the sidepeek's attributes: who
 // created it and when, who last changed it, and who set each field. Fold bookkeeping is left out.
-const FOLD_KEYS = ['id', 'type', 'created_at', 'created_by', 'updates', 'hold_by'];
+const FOLD_KEYS = [...ENVELOPE, 'created_at', 'created_by', 'updates', 'hold_by'];
 function recordView(id) {
   const o = logGet(id);
   if (!o) return null;
@@ -6189,10 +6202,124 @@ function cmdRecord() {
   out(`${r.id} (${r.type}) created ${r.created_at} by ${r.created_by}${r.updated_at ? `, last changed ${r.updated_at} by ${r.updated_by}` : ''}`);
   for (const [k, v] of Object.entries(r.fields)) out(`  ${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`);
 }
+// peek <kind> <id>: what a sidepeek's body needs beyond the dashboard data: the object's history
+// (every log line about it, oldest first, a set line on the object itself carrying the values it
+// replaced) and what is particular to its kind (a ticket's gates, phases, spend, dependencies and
+// handoff; a goal's or feature's design TL;DR; a planner's draft; a retro's numbers; the records an
+// object cites). Sets of tickets (story, release, wave, milestone) take their tickets as --tickets.
+const RETRO_BLOCK = /```json devteam-retro\s*\n([\s\S]*?)\n```/;
+const designTldr = (rel, ref = null) => {
+  if (!rel) return null;
+  const r = rel.replace(/^docs\/devteam\//, '').replace(/^project\//, '');
+  const text = ref ? git(['show', `${ref}:${projectRel}/${r}`]) : projectFileText(r);
+  if (text === null) return null;
+  const lines = text.split('\n');
+  const at = lines.findIndex((l) => /^##\s+TL;?DR\b/i.test(l.trim()));
+  const body = [];
+  if (at >= 0) for (const l of lines.slice(at + 1)) { if (/^#{1,2}\s/.test(l.trim())) break; body.push(l); }
+  return { path: `${projectRel}/${r}`, ref, tldr: at >= 0 ? body.join('\n').trim() : null };
+};
+function historyOf(ids, { types = null, limit = 300 } = {}) {
+  const want = new Set(ids);
+  const touches = (l) => want.has(l.id) || want.has(l.by) || want.has(l.ticket) || want.has(l.to) || want.has(l.subject) || want.has(l.who) || want.has(l.goal) || want.has(l.feature) && l.type === 'ticket'
+    || ['refs', 'blocks', 'serves', 'threatens', 'goals', 'evidence', 'depends_on'].some((k) => (l[k] ?? []).some?.((x) => want.has(x)));
+  const cur = new Map();
+  const res = [];
+  for (const l of [...readLog().lines].sort((a, b) => a.at.localeCompare(b.at))) {
+    const own = want.has(l.id);
+    const body = Object.fromEntries(Object.entries(l).filter(([k]) => !k.startsWith('__')));
+    if (own && l.op === 'set') {
+      const was = cur.get(l.id) ?? {};
+      body.prev = Object.fromEntries(Object.keys(body).filter((k) => !ENVELOPE.includes(k) && k !== 'prev').map((k) => [k, was[k] ?? null]));
+    }
+    if (own) cur.set(l.id, { ...(cur.get(l.id) ?? {}), ...Object.fromEntries(Object.entries(l).filter(([k]) => !ENVELOPE.includes(k) && !k.startsWith('__'))) });
+    if (touches(l) && (!types || types.includes(l.type))) res.push(body);
+  }
+  return res.slice(-limit);
+}
+const fileHistory = (rel) => (git(['log', '-n', '60', '--format=%H%x09%cI%x09%an%x09%s', '--', rel]) ?? '').split('\n').filter(Boolean).map((x) => { const [sha, at, author, subject] = x.split('\t'); return { sha, at, author, subject }; }).reverse();
+function peekView(kind, id) {
+  // the stored record this object is, or lives in (a story in its feature, a milestone in its goal)
+  const v = { kind, id, record: recordView(flagStr('rec') ?? (kind === 'planner' ? '' : id)) };
+  const cited = (refs) => Object.fromEntries([...new Set(refs ?? [])].map((r) => [r, logGet(r)]).filter(([, o]) => o).map(([r, o]) => [r, { type: o.type, created_at: o.created_at, created_by: o.created_by, kind: o.kind ?? null, text: o.detail ?? o.statement ?? o.what ?? o.title ?? o.question ?? o.text ?? null }]));
+  if (kind === 'ticket') {
+    gitReadCache = new Map();
+    const t = tickets().get(id) ?? die(`no ticket ${id}`);
+    const { ticket, files, reviews } = timelineView(id);
+    Object.assign(v, { ticket, files, reviews });
+    v.history = historyOf([id], { limit: 600 });
+    v.deps = { waits_on: t.depends_on ?? [], blocks: [...tickets().values()].filter((x) => (x.depends_on ?? []).includes(id)).map((x) => x.id) };
+    const h = sessionOf(id) ? handoffFor(id) : null;
+    v.handoff = h ? { text: h.text, where: h.where, parked_at: h.parked_at } : null;
+    v.spend = logObjects('spend').filter((s) => s.who === id).sort(byTime).map((s) => ({ at: s.created_at, role: s.role, usd: s.usd }));
+  } else if (kind === 'goal') {
+    const g = logGet(id) ?? die(`no goal ${id}`);
+    v.history = historyOf([id]);
+    const designs = [...features().values()].filter((f) => (f.goals ?? []).includes(id)).map((f) => f.design).filter(Boolean);
+    v.design = designTldr(goalCheck?.(g)?.design ?? designs[0] ?? null);
+  } else if (kind === 'feature') {
+    const f = features().get(id);
+    v.history = historyOf([id], { limit: 300 });
+    const planning = planners().find((p) => p.feature === id);
+    v.design = designTldr(f?.design ?? null, f ? null : planning?.branch);
+    v.plan_reviews = planning ? reviewRecordsIn({ ref: planning.branch }, `reviews/${id}`).map((r) => ({ file: r.file, stage: r.stage, pass: r.pass, verdict: r.verdict, reviewer: r.reviewer })) : null;
+  } else if (kind === 'planner') {
+    const p = planners().find((x) => x.feature === id);
+    const by = `plan-${id}`;
+    v.history = historyOf([by]);
+    if (p) {
+      const graph = git(['show', `${p.branch}:${projectRel}/log/${by}.jsonl`]) ?? readText(path.join(mainRoot, '.worktrees', by, projectRel, 'log', `${by}.jsonl`)) ?? '';
+      const ls = graph.split('\n').filter(Boolean).map((x) => { try { return JSON.parse(x); } catch { return null; } }).filter(Boolean);
+      const objs = new Map();
+      for (const l of ls) if (['ticket', 'feature'].includes(l.type)) objs.set(l.id, { ...(objs.get(l.id) ?? {}), ...Object.fromEntries(Object.entries(l).filter(([k]) => !['v', 'op', 'at', 'by'].includes(k))) });
+      v.draft = [...objs.values()].filter((o) => o.type === 'ticket');
+      const feat = [...objs.values()].find((o) => o.type === 'feature');
+      v.design = designTldr(feat?.design ?? null, p.branch);
+      v.plan_reviews = reviewRecordsIn({ ref: p.branch }, `reviews/${id}`).map((r) => ({ file: r.file, stage: r.stage, pass: r.pass, verdict: r.verdict, reviewer: r.reviewer }));
+    }
+  } else if (kind === 'retro') {
+    const o = logGet(id) ?? die(`no retro ${id}`);
+    v.history = historyOf([id]);
+    const all = logObjects('observation').filter((x) => x.kind === 'retro' && x.created_by === 'supervisor').sort(byTime);
+    const prev = all[all.findIndex((x) => x.id === id) - 1];
+    const nums = (x) => { try { return JSON.parse((x?.source_ref ? projectFileText(x.source_ref.replace(/^project\//, '')) : '')?.match(RETRO_BLOCK)?.[1] ?? 'null'); } catch { return null; } };
+    v.numbers = { now: nums(o), prev: nums(prev), prev_id: prev?.id ?? null };
+  } else if (kind === 'file') {
+    v.history = fileHistory(id);
+  } else if (['story', 'release', 'wave', 'milestone'].includes(kind)) {
+    v.history = historyOf(listFlag('tickets'), { types: ['ticket', 'act', 'decision', 'question'] }).filter((l) => l.type !== 'ticket' || l.op === 'new');
+    if (kind === 'release') {
+      // the latest run of each gate the supervisor ran at a merge: how main stands for the tag
+      const runs = readLog().lines.filter((l) => l.type === 'gate' && l.by === 'supervisor').sort((a, b) => a.at.localeCompare(b.at));
+      v.gates = Object.values(Object.fromEntries(runs.map((l) => [l.gate, { gate: l.gate, ok: l.ok, sha: l.sha ?? null, at: l.at }])));
+    }
+  } else {
+    const o = logGet(id) ?? die(`no record ${id}`);
+    v.history = historyOf([id]);
+    v.cited = cited([...(o.refs ?? []), ...(o.evidence ?? []), ...(o.approved_by ? [o.approved_by] : [])]);
+    if (o.type === 'problem' || o.type === 'knowledge') v.related = logObjects('observation').filter((x) => (x.refs ?? []).includes(id) || x.subject === id || (o.evidence ?? []).includes(x.id)).sort(byTime).map((x) => ({ id: x.id, at: x.created_at, by: x.created_by, kind: x.kind, detail: x.detail, severity: x.severity ?? null }));
+  }
+  return v;
+}
+function cmdPeek() {
+  const [kind, id] = positional;
+  if (!kind || !id) die('usage: peek <ticket|goal|feature|planner|retro|file|story|release|wave|milestone|act|decision|lesson|problem|q|thread> <id> [--tickets ids] --json');
+  json(peekView(kind, id));
+}
+
 // The schema's descriptions of each field, for the sidepeek's tooltips: the envelope, then per type.
+// Nested fields are keyed by path: measure.target, milestones[].title.
 function schemaDocs() {
-  const desc = (props) => Object.fromEntries(Object.entries(props ?? {}).filter(([, v]) => v?.description).map(([k, v]) => [k, v.description]));
-  return { envelope: desc(SCHEMA.properties), types: Object.fromEntries(Object.entries(SCHEMA.$defs.types).map(([t, d]) => [t, { about: d.description ?? null, fields: desc(d.properties) }])) };
+  const walk = (props, pre = '', acc = {}) => {
+    for (const [k, v] of Object.entries(props ?? {})) {
+      // x-tip: the owner's words for a field whose description is written for agents
+      if (v?.['x-tip'] ?? v?.description) acc[`${pre}${k}`] = v['x-tip'] ?? v.description;
+      if (v?.properties) walk(v.properties, `${pre}${k}.`, acc);
+      if (v?.items?.properties) walk(v.items.properties, `${pre}${k}[].`, acc);
+    }
+    return acc;
+  };
+  return { envelope: walk(SCHEMA.properties), types: Object.fromEntries(Object.entries(SCHEMA.$defs.types).map(([t, d]) => [t, { fields: walk(d.properties) }])) };
 }
 
 // history [<ticket-id>]: what happened around a ticket (or everything), to catch up after a restart.
@@ -6410,7 +6537,6 @@ Decide and act (supervisor.md, constitution.md)
   decide --class c [--scope s] [--approved qid|kid] [--options a b] [--rationale r] [--confidence 0-1] [--refs ids] [--irreversible] -- "<what>"   a judgment call and the trust it rests on; prints d-…
   act --decision d-… -- "<what>"   carry out a decision (merge, ticket, withdraw, goal hold, worker, planner and fleet take --decision too)
   act --class c [--scope s] [--approved qid|kid] [--refs ids] [--irreversible] -- "<what>"   an act that is its own decision
-  record <id> [--json]   one record's stored fields, who created it and who set each field
   decisions [--who owner|supervisor] [--class c] [--corrected] [--tail n] [--json]   every call, who made it and under what
   correct <decision-or-act-id> --reason r [--severity n]   (owner; --retro for the supervisor) | repair <id> --how undo|fix-ticket|none
   trust [--json]                  the ladder: rung, ceiling, agreement, corrections per class
@@ -6432,6 +6558,7 @@ Goals and retros
 
 The log
   log [--type t] [--by w] [--id x] [--tail n] [--json] | log-check | log-sync [--dry-run] | history [<ticket-id>]
+  record <id> [--json]   one record's stored fields, who created it and who set each field | peek <kind> <id> --json   what a dashboard sidepeek shows beyond the data: history and its kind's details
 
 Dashboard and releases
   dashboard [--port p] [--host h] | dashboard-data | notes <from-tag> [<to>]
@@ -6445,7 +6572,7 @@ const COMMANDS = {
   ask: cmdAsk, answer: cmdAnswer, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
   observe: cmdObserve, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, knowledge: cmdKnowledge, problem: cmdProblem,
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
-  log: cmdLog, record: cmdRecord, 'log-check': cmdLogCheck, 'log-sync': cmdLogSync, history: cmdHistory,
+  log: cmdLog, record: cmdRecord, peek: cmdPeek, 'log-check': cmdLogCheck, 'log-sync': cmdLogSync, history: cmdHistory,
   drain: cmdDrain, undrain: cmdUndrain, fleet: cmdFleet, handoff: cmdHandoff, wait: cmdWait,
   dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes,
 };

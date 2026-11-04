@@ -54,7 +54,8 @@
     },
     "by": {
       "type": "string",
-      "description": "owner, supervisor, a ticket id, or plan-<feature>; must match the file's writer (owner-<yyyy-mm>, supervisor-<yyyy-mm>, <ticket-id>, plan-<feature>)"
+      "description": "owner, supervisor, a ticket id, or plan-<feature>; must match the file's writer (owner-<yyyy-mm>, supervisor-<yyyy-mm>, <ticket-id>, plan-<feature>)",
+      "x-tip": "Who wrote the line: you, the supervisor, a ticket's agent or a planner."
     },
     "channel": {
       "enum": [
@@ -62,7 +63,8 @@
         "dashboard",
         "chat"
       ],
-      "description": "on owner lines only: where the owner typed it. chat: the owner said it in the supervisor's session and the supervisor recorded it (answers only, with the owner's words in said)"
+      "description": "on owner lines only: where the owner typed it. chat: the owner said it in the supervisor's session and the supervisor recorded it (answers only, with the owner's words in said)",
+      "x-tip": "Where you gave it: the dashboard, your terminal, or the supervisor's chat (recorded with your words)."
     }
   },
   "$defs": {
@@ -84,15 +86,19 @@
             "type": "object",
             "properties": {
               "description": {
+                "description": "What is measured.",
                 "type": "string"
               },
               "target": {
+                "description": "The value that meets the goal.",
                 "type": "number"
               },
               "unit": {
+                "description": "Its unit.",
                 "type": "string"
               },
               "direction": {
+                "description": "up if higher is better, down if lower is.",
                 "enum": [
                   "up",
                   "down"
@@ -135,18 +141,22 @@
               "type": "object",
               "properties": {
                 "title": {
+                  "description": "The milestone in a few words.",
                   "type": "string"
                 },
                 "target": {
+                  "description": "The value of the goal's measure that reaches it.",
                   "type": "number"
                 },
                 "by": {
+                  "description": "The date it should be reached by, if you set one.",
                   "type": [
                     "string",
                     "null"
                   ]
                 },
                 "preconditions": {
+                  "description": "The goal's preconditions it makes true, by number.",
                   "type": "array",
                   "items": {
                     "type": "integer",
@@ -154,6 +164,7 @@
                   }
                 },
                 "tickets": {
+                  "description": "A rough size, in tickets, before it is planned.",
                   "type": "integer",
                   "minimum": 1
                 }
@@ -165,7 +176,8 @@
                 "tickets"
               ],
               "additionalProperties": false
-            }
+            },
+            "x-tip": "The goal in usable slices, in order: each with a target on its measure, the preconditions it makes true, and an optional date."
           },
           "status": {
             "description": "draft while it is being defined, ready once you approve it, met when the measure reaches its target, abandoned when let go.",
@@ -180,7 +192,8 @@
             "description": "upkeep: the built-in goal that owns the reserved chores feature and the supervisor's upkeep (planning.md §7). It has no measure, design, milestones or status lifecycle; the earliest upkeep line is the one, later ones are ignored.",
             "enum": [
               "upkeep"
-            ]
+            ],
+            "x-tip": "upkeep for the built-in goal that owns chores and the supervisor's upkeep; empty for every other goal."
           },
           "hold": {
             "description": "The goal's toggle (planning.md §1, holds): run, drain (nothing new starts; in-flight work finishes and merges) or park (sessions commit WIP, push, write a handoff and stop; ticket merges wait). fleet names the fleet op that set it and prior the hold it replaced, so fleet undrain/unpark can put it back. The owner sets any hold; a supervisor line counts only as a drain of a running goal, the release of its own drain, or a fleet op (the fold enforces it).",
@@ -237,7 +250,8 @@
             "required": [
               "mode"
             ],
-            "additionalProperties": false
+            "additionalProperties": false,
+            "x-tip": "The goal's toggle: run, drain (nothing new starts, work in flight finishes) or park (sessions stop with a handoff)."
           },
           "decision": {
             "type": "object",
@@ -261,7 +275,8 @@
             "required": [
               "verdict"
             ],
-            "additionalProperties": false
+            "additionalProperties": false,
+            "x-tip": "Your latest verdict on its design: approve, refine, let go or restore."
           },
           "plan_after": {
             "type": "array",
@@ -283,15 +298,18 @@
                 "reason"
               ],
               "additionalProperties": false
-            }
+            },
+            "x-tip": "Goals whose design this one waits on, and why."
           },
           "approved": {
             "type": "string",
-            "description": "on a supervisor's set of a goal past draft: the goal-change question (its id) the owner answered with the recommendation. The set must be exactly the change that question proposed; each answer authorises one set."
+            "description": "on a supervisor's set of a goal past draft: the goal-change question (its id) the owner answered with the recommendation. The set must be exactly the change that question proposed; each answer authorises one set.",
+            "x-tip": "The goal-change question whose answer authorised the supervisor's latest change."
           },
           "carried": {
             "type": "boolean",
-            "description": "On a supervisor's set with approved: the answer was given before goal-change questions recorded their change, and the supervisor carries it forward (a carry-answer act the owner can correct)."
+            "description": "On a supervisor's set with approved: the answer was given before goal-change questions recorded their change, and the supervisor carries it forward (a carry-answer act the owner can correct).",
+            "x-tip": "The supervisor carried an older answer of yours forward to make this change."
           }
         },
         "additionalProperties": false,
@@ -333,13 +351,16 @@
               "type": "object",
               "properties": {
                 "id": {
+                  "description": "The story's id: the component's prefix and S with a number.",
                   "type": "string",
                   "pattern": "^[A-Z][A-Z0-9]*-S[0-9]+$"
                 },
                 "text": {
+                  "description": "What a user can do once it ships.",
                   "type": "string"
                 },
                 "release": {
+                  "description": "The release it targets.",
                   "type": [
                     "string",
                     "null"
@@ -482,7 +503,8 @@
               "string",
               "null"
             ],
-            "description": "Why the supervisor is not scheduling this ticket yet; null releases it. A held ticket is left out of `ready` and the idle-capacity finding."
+            "description": "Why the supervisor is not scheduling this ticket yet; null releases it. A held ticket is left out of `ready` and the idle-capacity finding.",
+            "x-tip": "Why the supervisor is not scheduling it yet; empty once released."
           },
           "notes": {
             "description": "Anything else the planner wanted on record.",
@@ -589,7 +611,8 @@
           },
           "dirty": {
             "description": "The run had uncommitted changes, so sha does not name what ran (a TDD red, then green). Not counted for flakiness.",
-            "type": "boolean"
+            "type": "boolean",
+            "x-tip": "The run had uncommitted changes, so it is not counted toward flakiness."
           },
           "tests_total": {
             "description": "How many tests ran.",
@@ -625,7 +648,8 @@
           },
           "preexisting": {
             "type": "boolean",
-            "description": "A ratchet gate that failed here and at the merge base too: pre-existing debt, allowed; not counted in the gate's fail rate."
+            "description": "A ratchet gate that failed here and at the merge base too: pre-existing debt, allowed; not counted in the gate's fail rate.",
+            "x-tip": "It failed on main too: existing debt, allowed, not counted against the check."
           }
         },
         "additionalProperties": false,
@@ -955,7 +979,8 @@
                 "label"
               ],
               "additionalProperties": false
-            }
+            },
+            "x-tip": "The answers offered: a label, what it means, and what it changes for users."
           },
           "secrets": {
             "description": "Values an owner-action question asks the owner to post, each with where it goes. The value is piped from the owner's process straight to its sink and never written to the log (supervisor.md, owner actions).",
@@ -984,7 +1009,8 @@
                 "sink"
               ],
               "additionalProperties": false
-            }
+            },
+            "x-tip": "Values it asked you to post, and where each goes. Values never reach the log."
           },
           "secrets_posted": {
             "description": "Which declared secrets the owner has posted, cumulative: the name and when. Never the value or its size.",
@@ -1004,7 +1030,8 @@
                 "at"
               ],
               "additionalProperties": false
-            }
+            },
+            "x-tip": "Which secrets you posted, and when. Never the values."
           },
           "links": {
             "type": "array",
@@ -1033,17 +1060,20 @@
                 "title"
               ],
               "additionalProperties": false
-            }
+            },
+            "x-tip": "What to look at to answer: files in the repo or URLs."
           },
           "rule_scope": {
             "type": "string",
             "pattern": "^(project|component:[a-z0-9-]+|feature:[a-z0-9-]+|class:[a-z0-9-]+|chore:[a-z0-9-]+)$",
-            "description": "Where a standing rule given with the answer applies, unless the owner names another scope (chore:devteam-sync for an upstream sync approval)."
+            "description": "Where a standing rule given with the answer applies, unless the owner names another scope (chore:devteam-sync for an upstream sync approval).",
+            "x-tip": "Where a standing rule given with the answer applies."
           },
           "goal": {
             "type": "string",
             "pattern": "^g-",
-            "description": "The goal a goal-approval question asks the owner to approve, on its linked design."
+            "description": "The goal a goal-approval question asks the owner to approve, on its linked design.",
+            "x-tip": "The goal it is about."
           },
           "recommendation": {
             "description": "The supervisor's recommendation.",
@@ -1081,7 +1111,8 @@
             "maxItems": 10,
             "items": {
               "type": "string"
-            }
+            },
+            "x-tip": "The tickets, chores or plans its answer approves, each once."
           },
           "evidence": {
             "description": "Records behind the recommendation.",
@@ -1135,7 +1166,8 @@
           "said": {
             "type": "string",
             "minLength": 1,
-            "description": "the owner's own words, verbatim, when the answer came through the supervisor's chat"
+            "description": "the owner's own words, verbatim, when the answer came through the supervisor's chat",
+            "x-tip": "Your words, verbatim, when you answered in the supervisor's chat."
           },
           "autonomy": {
             "description": "What your answer said about the next decision of this class: ask, ask with a default, or decide and tell you.",
@@ -1171,11 +1203,13 @@
           },
           "re": {
             "type": "string",
-            "description": "the worker message this question escalates"
+            "description": "the worker message this question escalates",
+            "x-tip": "The agent's message it escalates."
           },
           "change": {
             "type": "object",
-            "description": "On a goal-change question about a goal: the exact goal fields it proposes. The owner's answer with the recommendation authorises this change and no other (goal set --approved applies it as is)."
+            "description": "On a goal-change question about a goal: the exact goal fields it proposes. The owner's answer with the recommendation authorises this change and no other (goal set --approved applies it as is).",
+            "x-tip": "The exact change to the goal it proposed; your answer authorised that and nothing else."
           },
           "review": {
             "description": "A review question's pinned files (process/supervisor.md): the agent's page, its optional data and the result's optional schema, read at one commit, each with its sha256 and size; data counts its rows and the rows with a proposal. The owner's process re-hashes them before it accepts a result. A review is answered with its result (answer --review-result) or sent back (answer --decline), never with free text, a default or from chat.",
@@ -1280,7 +1314,8 @@
               "page",
               "allow_partial"
             ],
-            "additionalProperties": false
+            "additionalProperties": false,
+            "x-tip": "The pages and data you reviewed, pinned by hash."
           },
           "result": {
             "description": "On the owner's answer to a review: the sha256 and size of run/questions/<qid>/result.json as the owner's process wrote it and, for a result in the standard rows shape, the counts it recomputed: proposed is the rows whose data has a proposal; kept the decided rows whose values equal it (never taken from the page); cleared the other decided rows with every value empty; changed the rest.",
@@ -1327,11 +1362,13 @@
               "sha256",
               "bytes"
             ],
-            "additionalProperties": false
+            "additionalProperties": false,
+            "x-tip": "Your review result, by hash, with how many rows you kept, changed or cleared."
           },
           "declined": {
             "const": true,
-            "description": "On the owner's answer to a review: sent back without a result; the answer says why."
+            "description": "On the owner's answer to a review: sent back without a result; the answer says why.",
+            "x-tip": "You sent the review back without a result."
           }
         },
         "additionalProperties": false,
@@ -1409,7 +1446,8 @@
               "default",
               "standing-rule",
               "constitution"
-            ]
+            ],
+            "x-tip": "What allowed the call: its rung, your answer, a default, a standing rule, or the constitution."
           },
           "approved_by": {
             "description": "Your answer or standing rule it rests on.",
@@ -1494,7 +1532,8 @@
           "decision": {
             "description": "The decision line this act carries out (d-...). The act then takes its class and authority from it.",
             "type": "string",
-            "pattern": "^d-"
+            "pattern": "^d-",
+            "x-tip": "The decision it carried out."
           },
           "corrected": {
             "description": "Your correction, if it was its own call and wrong.",
@@ -1543,7 +1582,8 @@
               "from",
               "to"
             ],
-            "additionalProperties": false
+            "additionalProperties": false,
+            "x-tip": "The ticket numbers reserved for a planner's feature."
           }
         },
         "additionalProperties": false,
@@ -1562,7 +1602,8 @@
         "properties": {
           "who": {
             "type": "string",
-            "description": "the ticket, planner (plan-<feature>) or supervisor"
+            "description": "the ticket, planner (plan-<feature>) or supervisor",
+            "x-tip": "The ticket, planner or supervisor that spent it."
           },
           "role": {
             "description": "Worker, planner, reviewer or supervisor.",
@@ -1579,7 +1620,8 @@
           },
           "through": {
             "type": "string",
-            "description": "ISO time of the latest response counted"
+            "description": "ISO time of the latest response counted",
+            "x-tip": "The latest response counted."
           },
           "usd": {
             "description": "Dollars spent.",

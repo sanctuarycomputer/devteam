@@ -298,7 +298,24 @@
   .attrs-h { margin: 6px 0 0; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
   .attr-k { position: relative; cursor: help; border-bottom: 1px dotted color-mix(in srgb, var(--muted) 60%, transparent); }
   .attr-tip { display: none; position: absolute; left: 0; top: calc(100% + 4px); z-index: 5; width: 280px; padding: 7px 9px; border-radius: 6px; background: var(--raised); color: var(--fg); border: 1px solid var(--line); box-shadow: var(--shadow); font-size: 12px; line-height: 1.45; font-weight: 400; text-transform: none; letter-spacing: 0; white-space: normal; }
-  .attr-k:hover .attr-tip, .attr-k:focus .attr-tip { display: block; }
+  .attr-k:hover .attr-tip, .attr-k:focus-visible .attr-tip, .attr-k:focus .attr-tip { display: block; }
+  .drawer h3 { margin: 18px 0 6px; }
+  .hist-h { padding-top: 12px; border-top: 1px solid var(--line); }
+  .mini-chart svg { width: 100%; height: auto; display: block; }
+  .diagram-wrap { overflow-x: auto; margin: 4px 0 8px; }
+  .diagram-wrap figure { margin: 0; }
+  .md.tldr { font-size: 13px; }
+  .md.tldr ul { margin: 2px 0; }
+  .phase-strip { display: flex; height: 12px; border-radius: 6px; overflow: hidden; background: var(--well); }
+  .phase-strip .ph { display: block; height: 100%; }
+  .ph-think { background: var(--blue); } .ph-make { background: var(--green); } .ph-wait { background: var(--amber); } .ph-stop { background: var(--red); } .ph-other { background: var(--muted); }
+  .phase-legend { margin-top: 6px; } .phase-legend i { border-top: 0; height: 8px; width: 8px; border-radius: 2px; }
+  .gates-table { border-collapse: collapse; font-size: 12px; } .gates-table th, .gates-table td { padding: 3px 10px 3px 0; text-align: left; white-space: nowrap; }
+  .gate-dot.ok { color: var(--green-fg); } .gate-dot.fail { color: var(--red-fg); } .gate-dot.flaky { color: var(--amber-fg); }
+  .nums { border-collapse: collapse; font-size: 12.5px; } .nums th, .nums td { padding: 3px 14px 3px 0; text-align: left; vertical-align: top; }
+  .status-trail { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .handoff pre { white-space: pre-wrap; margin: 0; font-size: 12px; }
+  .tcard.inert { cursor: default; }
   .drawer dd { margin: 0; }
   .drawer ul { margin: 4px 0; padding-left: 18px; }
   .tl { list-style: none; padding: 0; margin: 8px 0; border-left: 1px solid var(--line-2); }
@@ -780,18 +797,18 @@ function board(items, crit) {
 }
 // The board's columns and cards, for the Board and for a sidepeek's tickets (only: the columns that
 // have cards, so a few tickets don't sit in seven mostly empty columns).
-function boardCols(items, crit, { only = false } = {}) {
+function boardCols(items, crit, { only = false, inert = false } = {}) {
   return COLUMNS.filter(([name]) => !only || items.some((t) => t.stage !== 'superseded' && columnOf(t) === name)).map(([name]) => {
     let cards = items.filter((t) => t.stage !== 'superseded' && columnOf(t) === name).sort((a, b) => (a.wave ?? 99) - (b.wave ?? 99));
     const total = cards.length;
     // finished columns show the most recent few; the rest are counted
     if (['Merged', 'Released'].includes(name)) cards = cards.sort((a, b) => (b.merged_at || '').localeCompare(a.merged_at || '')).slice(0, 5);
     return `<div class="col${total ? '' : ' none'}"><h3><span>${name}</span><span>${total}</span></h3>${cards.map((t) => `
-      <button type="button" class="tcard ${t.phase === 'blocked' || t.waiting ? 'blocked' : ''}" data-ticket="${esc(t.id)}" aria-label="Open ${esc(t.title)}">
+      <${inert ? 'div' : 'button type="button"'} class="tcard${inert ? ' inert' : ''} ${t.phase === 'blocked' || t.waiting ? 'blocked' : ''}" ${inert ? '' : `data-ticket="${esc(t.id)}" aria-label="Open ${esc(t.title)}"`}>
         <div class="t"><b>${crit.has(t.id) ? '<i class="icon-flag" title="on the critical path" aria-label="on the critical path"></i> ' : ''}${esc(t.title)}</b></div>
         <div class="muted">${esc(t.component)} · ${esc(t.size)}</div>
         ${(() => { const ps = ticketPills(t); return ps.length ? `<div class="pills">${ps.map(([label, tone, tip]) => `<span class="badge pill ${tone}" title="${esc(tip || label)}">${esc(label)}</span>`).join('')}</div>` : ''; })()}
-      </button>`).join('')}${total > cards.length ? `<div class="more">+ ${total - cards.length} more</div>` : ''}</div>`;
+      </${inert ? 'div' : 'button'}>`).join('')}${total > cards.length ? `<div class="more">+ ${total - cards.length} more</div>` : ''}</div>`;
   }).join('');
 }
 
@@ -1776,11 +1793,14 @@ function renderDecisions(o) {
 for (const id of ['dec-who', 'dec-class', 'dec-corrected', 'dec-mechanical']) $(id).addEventListener('change', () => { if (DATA) renderDecisions(DATA.ooda); });
 
 
-// ---- sidepeek attributes: every object opens with its attributes, ID first, as key/value rows.
-// Stored fields come from the record itself (/api/record), so a field added to the schema shows up
-// with no change here; a known field gets a label, an order and its links, any other a plain value.
-// Each key's tooltip is the schema's description of the field. Values computed from other records
-// (status, progress, forecast, spend, what links here) follow in their own group.
+// ---- sidepeek: every object opens the same way. The bar: its type's icon and name, then its title.
+// Then its attributes: ID first, its stored fields (from its record, so a field added to the schema
+// shows up with no change here; a known field gets a label and its links, any other a plain value;
+// each key's tooltip is the schema's words for the field), then what is computed from other records.
+// Then what is particular to it. Its history comes last.
+// The record, the history and the particulars come from one /api/peek per object, cached, fetched
+// again on each refresh; the drawer is redrawn from DATA and that peek, and left alone when nothing
+// it shows changed.
 const TYPE_META = {
   ticket: ['ticket', 'Ticket'], goal: ['target', 'Goal'], feature: ['layers', 'Feature'], story: ['book-open', 'Story'], release: ['tag', 'Release'],
   wave: ['waves', 'Wave'], milestone: ['milestone', 'Milestone'], act: ['zap', 'Act'], decision: ['scale', 'Decision'], retro: ['history', 'Retro'],
@@ -1788,14 +1808,17 @@ const TYPE_META = {
   q: ['circle-help', 'Question'], file: ['file-text', 'File'],
 };
 let SCHEMA_DOCS = null;
-const RECORDS = new Map();
-let ATTRS = null;
 async function loadSchemaDocs() {
   try { const r = await fetch('/api/schema'); if (r.ok) SCHEMA_DOCS = await r.json(); } catch {}
-  if (ATTRS) fillAttrs();
+  if (DRAWER.kind) redraw();
 }
-const tipFor = (type, k) => SCHEMA_DOCS?.types?.[type]?.fields?.[k] ?? SCHEMA_DOCS?.envelope?.[k] ?? '';
-const attrKey = (label, tip) => (tip ? `<span class="attr-k" tabindex="0">${esc(label)}<span class="attr-tip" role="tooltip">${esc(tip)}</span></span>` : esc(label));
+const tipFor = (type, k) => SCHEMA_DOCS?.types?.[type]?.fields?.[k] ?? (/[.[]/.test(k) ? '' : SCHEMA_DOCS?.envelope?.[k]) ?? '';
+let TIP_N = 0;
+const attrKey = (label, tip) => {
+  if (!tip) return esc(label);
+  const id = `attr-tip-${++TIP_N}`;
+  return `<span class="attr-k" tabindex="0" aria-describedby="${id}">${esc(label)}<span class="attr-tip" role="tooltip" id="${id}">${esc(tip)}</span></span>`;
+};
 const attrRow = (label, html, tip) => (html === '' || html == null || html === false ? '' : `<dt>${attrKey(label, tip)}</dt><dd>${html}</dd>`);
 const ISO_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
 const longList = (xs) => xs.length > 4 || xs.some((x) => String(x).length > 48);
@@ -1812,25 +1835,37 @@ function fmtAny(v) {
   return fmtObj(v);
 }
 const fmtObj = (o) => Object.entries(o).filter(([, x]) => !emptyVal(x)).map(([k, x]) => `<span class="muted">${esc(words(k).toLowerCase())}</span> ${fmtAny(x)}`).join(' · ');
+// A value in one line, for a history entry: long text and lists are cut short.
+const fmtShort = (v) => {
+  if (emptyVal(v)) return '<span class="muted">nothing</span>';
+  if (typeof v === 'string') return linkify(v.length > 120 ? `${v.slice(0, 120)}…` : v);
+  if (Array.isArray(v) && v.every((x) => typeof x !== 'object')) return v.length > 6 ? `${v.slice(0, 6).map((x) => linkify(String(x))).join(', ')} and ${v.length - 6} more` : v.map((x) => linkify(String(x))).join(', ');
+  if (Array.isArray(v)) return `${v.length} item${v.length === 1 ? '' : 's'}`;
+  return fmtAny(v);
+};
 const list = (xs, f) => (xs?.length ? (xs.length > 1 && longList(xs) ? `<ul>${xs.map((x) => `<li>${f(x)}</li>`).join('')}</ul>` : xs.map(f).join(', ')) : '');
 const linkList = (xs) => list(xs, (x) => (ticketMap().has(x) ? tlink(x) : linkify(String(x))));
 const share = (x) => `${Math.round(x * 100)}%`;
 const fmtDay = (d) => (d ? esc(new Date(Date.parse(d)).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC' })) : '');
+const unitOf = (u) => (u ? (u === '%' ? '%' : ` ${esc(u)}`) : '');
+const decisionTitle = (id) => (DATA.ooda.decisions || []).find((r) => r.id === id && r.kind === 'decision')?.what ?? null;
 // Fields any type may carry, then per type: a label where the field's name isn't plain enough, an
-// order (the rest follow in schema order), and how to show values that are links or codes.
+// order where the schema's isn't the one to read in, fields to leave out (hashes and bookkeeping the
+// body shows in full), and how to show values that are links or codes. A formatter gets the value
+// and the drawer's context (the record, its set_by, and what the opener passed).
 const ATTR_COMMON = {
-  label: { refs: 'About', approved_by: 'Approved by', depends_on: 'Waits on', done_when: 'Done when', non_goals: 'Not in scope', superseded_by: 'Replaced by', one_way_doors: 'One-way doors', why_asked: 'Why asked', source_ref: 'Source', fix_hint: 'Fix', plan_after: 'Plan after' },
+  label: { refs: 'About', approved_by: 'Approved by', depends_on: 'Waits on', done_when: 'Done when', non_goals: 'Not in scope', superseded_by: 'Replaced by', one_way_doors: 'One-way doors', why_asked: 'Why asked', source_ref: 'Source', fix_hint: 'Fix', plan_after: 'Plan after', held: 'On hold' },
   fmt: {
     refs: linkList, evidence: linkList, blocks: linkList, threatens: (v) => list(v, glink), goals: (v) => list(v, glink),
-    approved_by: (v) => approvedBy(v), decision: (v) => (typeof v === 'string' ? dlink(v) : fmtObj(v)), confidence: (v) => (typeof v === 'number' ? share(v) : fmtAny(v)),
+    approved_by: (v) => approvedBy(v), decision: (v) => (typeof v === 'string' ? dlink(v, decisionTitle(v)) : fmtObj(v)), confidence: (v) => (typeof v === 'number' ? share(v) : fmtAny(v)),
     rung: (v) => esc(RUNG_WORDS[v] || v), ceiling: (v) => esc(RUNG_WORDS[v] || v), scope: (v) => esc(scopeWords(v)),
-    corrected: (v) => `${esc(v.reason)}${v.severity != null ? ` <span class="muted">(severity ${esc(v.severity)})</span>` : ''}`,
+    corrected: (v, c) => `${esc(v.reason)}${v.severity != null ? ` <span class="muted">(severity ${esc(v.severity)})</span>` : ''}${c.set_by?.corrected ? ` <span class="muted">· by ${esc(who(c.set_by.corrected.by))}, ${esc(when(c.set_by.corrected.at))}</span>` : ''}`,
     horizon: fmtDay, deadline: fmtDay, ticket: (v) => tlink(v), feature: (v) => (v === 'chores' ? 'chores (upkeep, not a feature)' : flink(v)),
+    links: (v) => `<div class="links">${v.map(linkOf).join('')}</div>`,
   },
 };
 const ATTR = {
   ticket: {
-    order: ['title', 'feature', 'component', 'kind', 'size', 'risk', 'serves', 'depends_on', 'done_when', 'touches'],
     fmt: {
       size: (v) => (v === 'M' ? 'M (medium)' : v === 'S' ? 'S (small)' : esc(v)), risk: (v) => (v === 'high' ? 'high (two reviewers)' : esc(v)),
       serves: (v) => v.map((x) => `${slink(x)} ${esc(String(DATA.progress?.stories?.[x]?.text ?? '').slice(0, 90))}`).join('<br>'),
@@ -1841,9 +1876,9 @@ const ATTR = {
   goal: {
     order: ['title', 'outcome', 'status', 'priority', 'horizon', 'measure', 'milestones', 'preconditions', 'non_goals'],
     fmt: {
-      measure: (m) => `${esc(m.description ?? '')}${m.target != null ? `: <b>${esc(m.target)}</b>${m.unit ? ` ${esc(m.unit)}` : ''}` : ''}${m.direction ? ` <span class="muted">(${m.direction === 'down' ? 'lower' : 'higher'} is better)</span>` : ''}`,
-      milestones: (v) => `<ol>${v.map((m, i) => `<li>${ATTRS?.id ? mlink(ATTRS.id, i + 1, m.title) : esc(m.title)}${m.target != null ? `: ${esc(m.target)}` : ''}${m.by ? ` by ${fmtDay(m.by)}` : ''}</li>`).join('')}</ol>`,
-      preconditions: (v) => `<ol>${v.map((x) => `<li>${linkify(x)}</li>`).join('')}</ol>`,
+      measure: (m) => `${esc(m.description ?? '')}${m.target != null ? `: <b>${esc(m.target)}</b>${unitOf(m.unit)}` : ''}${m.direction ? ` <span class="muted">(${m.direction === 'down' ? 'lower' : 'higher'} is better)</span>` : ''}`,
+      milestones: (v, c) => `<ol>${v.map((m, i) => `<li>${mlink(c.id, i + 1, m.title)}${m.target != null ? `: ${esc(m.target)}` : ''}${m.by ? ` by ${fmtDay(m.by)}` : ''}</li>`).join('')}</ol>`,
+      preconditions: (v, c) => `<ol>${v.map((x, i) => `<li>${linkify(x)}${(c.unplanned || []).includes(i + 1) ? ' <span class="badge medium">no plan yet</span>' : ''}</li>`).join('')}</ol>`,
       non_goals: (v) => `<ul>${v.map((x) => `<li>${linkify(x)}</li>`).join('')}</ul>`,
       hold: (h) => (h ? `${esc(words(h.mode))}${h.reason ? `: ${linkify(h.reason)}` : ''}` : 'run'),
       decision: (d) => `<b>${esc(words(d.verdict))}</b>${d.notes ? `: ${linkify(d.notes)}` : ''}`,
@@ -1859,171 +1894,234 @@ const ATTR = {
   },
   question: {
     order: ['question', 'kind', 'class', 'scope', 'ticket', 'goal', 'recommendation', 'options', 'default', 'deadline', 'answer', 'status'],
-    fmt: { why_asked: (w) => `${w.rung ? `${esc(RUNG_WORDS[w.rung])}` : ''}${w.ceiling ? `, at most ${esc(RUNG_WORDS[w.ceiling])}` : ''}${(w.reasons || []).length ? ` · ${esc(w.reasons.map(words).join(', '))}` : ''}`, autonomy: (a) => `${esc(words(a.class))}: ${esc(RUNG_WORDS[a.rung])}${a.scope ? ` (${esc(a.scope)})` : ''}`, goal: (v) => glink(v) },
+    hide: ['review', 'result', 'secrets', 'secrets_posted', 'choices', 'status'],
+    fmt: { why_asked: (w) => `${w.rung ? `${esc(RUNG_WORDS[w.rung])}` : ''}${w.ceiling ? `, at most ${esc(RUNG_WORDS[w.ceiling])}` : ''}${(w.reasons || []).length ? ` · ${esc(w.reasons.map(words).join(', '))}` : ''}`, autonomy: (a) => `${esc(words(a.class))}: ${esc(RUNG_WORDS[a.rung])}${a.scope ? ` (${esc(a.scope)})` : ''}`, goal: (v) => glink(v), re: (v) => linkify(v) },
   },
   decision: { order: ['what', 'class', 'scope', 'authority', 'approved_by', 'rung', 'ceiling', 'options', 'rationale', 'confidence', 'refs', 'reversible'], fmt: { authority: (v) => esc(AUTHORITY_LABEL[v] || v) } },
   act: { order: ['what', 'class', 'scope', 'decision', 'approved_by', 'rung', 'refs', 'reversible'], fmt: { id_block: (b) => `${esc(b.feature)}: ${esc(b.from)} to ${esc(b.to)}` } },
   knowledge: { order: ['statement', 'kind', 'status', 'scope', 'confidence', 'valence', 'evidence'], fmt: { valence: (v) => (v < 0 ? `${esc(v)} (something to avoid)` : esc(v)) } },
-  problem: { order: ['title', 'status', 'severity', 'realized', 'threatens', 'assigned_to', 'detail', 'refs'], fmt: { realized: (v) => (v ? 'yes: an issue' : 'no: a risk'), assigned_to: (v) => linkify(v) } },
-  message: { order: ['kind', 'to', 'text', 're', 'ticket'], fmt: { to: (v) => esc(who(v)), re: (v) => linkify(v) } },
-  observation: { order: ['kind', 'subject', 'detail', 'refs'], fmt: { subject: (v) => subjectLink(v) } },
-  story: { order: ['text', 'release'], fmt: { release: (v) => rlink(v) } },
-  milestone: { order: ['title', 'target', 'by', 'preconditions', 'features'], fmt: { by: fmtDay } },
+  problem: { order: ['title', 'status', 'severity', 'realized', 'threatens', 'assigned_to', 'detail', 'refs'], fmt: { realized: (v) => (v ? 'yes: an issue' : 'no: a risk'), assigned_to: (v) => linkify(v), severity: (v) => `<span class="badge ${sevBadge(v)}">${esc(v)}</span>` } },
+  message: { fmt: { to: (v) => esc(who(v)), re: (v) => linkify(v) } },
+  observation: { order: ['kind', 'subject', 'detail', 'refs'], label: { source: 'Noticed by', source_ref: 'From file' }, fmt: { subject: (v) => subjectLink(v), source: (v) => esc(who(v)), source_ref: (v) => `<a class="linkish" href="${esc(fileHref({ title: v.split('/').pop(), path: `docs/devteam/${v}` }))}"><code>${esc(v)}</code></a>` } },
+  story: { fmt: { release: (v) => rlink(v) } },
+  milestone: { fmt: { by: fmtDay } },
 };
 const AUTHORITY_LABEL = { rung: 'its rung', answer: 'your answer', default: 'a default', 'standing-rule': 'a standing rule', constitution: 'the constitution' };
-function storedRows(type, fields, docType) {
+function storedRows(type, fields, docType, ctx, prefix = '') {
   const spec = ATTR[type] || {};
-  const schemaOrder = Object.keys(SCHEMA_DOCS?.types?.[docType]?.fields || {});
-  const keys = Object.keys(fields).filter((k) => !emptyVal(fields[k]));
+  const schemaOrder = Object.keys(SCHEMA_DOCS?.types?.[docType]?.fields || {}).filter((k) => k.startsWith(prefix)).map((k) => k.slice(prefix.length));
+  const keys = Object.keys(fields).filter((k) => !emptyVal(fields[k]) && !(spec.hide || []).includes(k));
   const rank = (k) => { const a = (spec.order || []).indexOf(k); if (a >= 0) return a; const b = schemaOrder.indexOf(k); return b >= 0 ? 100 + b : 1000; };
   keys.sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
   return keys.map((k) => {
     const f = spec.fmt?.[k] ?? ATTR_COMMON.fmt[k] ?? fmtAny;
     let html;
-    try { html = f(fields[k]); } catch { html = fmtAny(fields[k]); }
-    return attrRow(spec.label?.[k] ?? ATTR_COMMON.label[k] ?? words(k), html, tipFor(docType, k));
+    try { html = f(fields[k], ctx); } catch { html = fmtAny(fields[k]); }
+    return attrRow(spec.label?.[k] ?? ATTR_COMMON.label[k] ?? words(k), html, tipFor(docType, `${prefix}${k}`));
   }).join('');
 }
-// The attributes block for an object. rec: the id of its log record (or null when it has none); pick:
-// the part of that record that is this object (a story inside its feature, a milestone inside its
-// goal); computed: [label, html, tip] rows worked out from other records.
-function attrs({ id, idTip, rec = null, type, docType, pick = null, computed = [] }) {
-  ATTRS = { kind: DRAWER.kind, id, idTip, rec, type, docType: docType ?? type, pick, computed, html: '' };
-  if (rec) RECORDS.has(rec) ? queueMicrotask(fillAttrs) : fetchRecord(rec);
-  return `<section class="attrs" id="drawer-attrs">${attrsInner()}</section>`;
+// The attributes block. peek: the object's peek (undefined while it loads); pick: the part of the
+// record that is this object (a story inside its feature, with prefix 'stories[].' for its tooltips);
+// computed: [label, html, tip] rows worked out from other records; ctx: what formatters may need.
+function attrs({ id, idTip, peek, type, docType, pick = null, prefix = '', computed = [], ctx = {}, noRecord = false }) {
+  TIP_N = 0;
+  const r = peek?.record ?? null;
+  const fields = r ? (pick ? pick(r.fields) : r.fields) : null;
+  const c = { id, record: r, set_by: r?.set_by ?? {}, ...ctx };
+  const made = r && !pick ? attrRow('Created', `${esc(when(r.created_at))} by ${esc(who(r.created_by))}`, 'When the record was created, and by whom.') + (r.updated_at ? attrRow('Last changed', `${esc(when(r.updated_at))} by ${esc(who(r.updated_by))}`, 'The latest change to any of its fields, and who made it.') : '') : '';
+  const stored = fields ? storedRows(type, fields, docType ?? type, c, prefix)
+    : noRecord ? '' : peek === undefined ? '<dt class="muted">…</dt><dd class="muted">loading</dd>' : '<dt class="muted">Record</dt><dd class="muted">not in the log</dd>';
+  const comp = computed.filter((x) => x && x[1]).map(([l, h, t]) => attrRow(l, h, t)).join('');
+  return `<section class="attrs"><dl>${attrRow('ID', `<code>${esc(id)}</code>`, idTip ?? tipFor('_', 'id'))}${stored}${made}</dl>${comp ? `<h4 class="attrs-h">Computed</h4><dl>${comp}</dl>` : ''}</section>`;
 }
-function attrsInner() {
-  const a = ATTRS;
-  const r = a.rec ? RECORDS.get(a.rec) : null;
-  const fields = r ? (a.pick ? a.pick(r.fields) ?? {} : r.fields) : null;
-  const made = r && !a.pick ? attrRow('Created', `${esc(when(r.created_at))} by ${esc(who(r.created_by))}`, 'When the record was created, and by whom.') + (r.updated_at ? attrRow('Last changed', `${esc(when(r.updated_at))} by ${esc(who(r.updated_by))}`, 'The latest change to any of its fields, and who made it.') : '') : '';
-  const stored = fields ? storedRows(a.type, fields, a.docType) : a.rec && !RECORDS.has(a.rec) ? '<dt class="muted">…</dt><dd class="muted">loading</dd>' : '';
-  const comp = a.computed.filter((x) => x && x[1]).map(([l, h, t]) => attrRow(l, h, t)).join('');
-  return `<dl>${attrRow('ID', `<code>${esc(a.id)}</code>`, a.idTip ?? tipFor('_', 'id') ?? '')}${stored}${made}</dl>${comp ? `<h4 class="attrs-h">Computed</h4><dl>${comp}</dl>` : ''}`;
-}
-async function fetchRecord(rec) {
-  try {
-    const r = await fetch(`/api/record?id=${encodeURIComponent(rec)}`);
-    if (!r.ok) { RECORDS.set(rec, null); return fillAttrs(); }
-    RECORDS.set(rec, await r.json());
-  } catch { return; }
-  fillAttrs();
-}
-function fillAttrs() {
-  const el = $('drawer-attrs');
-  if (!el || !ATTRS || DRAWER.kind !== ATTRS.kind) return;
-  const html = attrsInner();
-  if (html !== ATTRS.html) { el.innerHTML = html; ATTRS.html = html; }
-}
-// After each refresh: the open object's record again, so a field someone just set shows.
-function refreshAttrs() { if (ATTRS?.rec && !$('drawer').hidden) fetchRecord(ATTRS.rec); }
 
-// ---- drawer: a ticket with everything that bears on it, a settled question, or an artifact ----
+// ---- peeks: one fetch per object, kept, fetched again on each refresh ----
+const PEEKS = new Map();
+const PEEK_FLIGHT = new Set();
+const peekKey = (kind, id) => `${kind}:${id}`;
+function peekOf(kind, id, q = {}) {
+  const k = peekKey(kind, id);
+  if (!PEEKS.has(k)) fetchPeek(kind, id, q);
+  return PEEKS.get(k);
+}
+async function fetchPeek(kind, id, q = {}) {
+  const k = peekKey(kind, id);
+  if (PEEK_FLIGHT.has(k)) return;
+  PEEK_FLIGHT.add(k);
+  if (DRAWER.kind === kind && DRAWER.id === id) DRAWER.q = q;
+  try {
+    const r = await fetch(`/api/peek?${new URLSearchParams({ kind, id, ...q })}`);
+    const j = await r.json();
+    PEEKS.set(k, r.ok ? j : { error: j.error || String(r.status) });
+  } catch (e) { if (!PEEKS.has(k)) PEEKS.set(k, { error: String(e?.message ?? e) }); } finally { PEEK_FLIGHT.delete(k); }
+  // a drawer may draw another object's peek too (a thread its ticket's): redraw whatever is open
+  redraw();
+}
+// On each data refresh: the open object's peek again (not one that wasn't found), then a redraw.
+function refreshDrawer() {
+  if (!DRAWER.kind || $('drawer').hidden) return;
+  const p = PEEKS.get(peekKey(DRAWER.kind, DRAWER.id));
+  if (p && !p.error) fetchPeek(DRAWER.kind, DRAWER.id, DRAWER.q || {});
+  redraw();
+}
+
+// ---- drawer ----
 let DRAWER = { kind: null, id: null };
 let lastFocus = null;
+let LAST_HTML = '';
+let AFTER = [];
+const OPENERS = () => ({ ticket: openTicket, goal: openGoal, feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, planner: openPlanner, q: openQuestion, file: openFile });
+function redraw() { if (DRAWER.kind && !$('drawer').hidden) OPENERS()[DRAWER.kind]?.(DRAWER.arg ?? DRAWER.id); }
+// Draw the drawer; the same HTML again leaves it as it is (charts, diagrams, scroll and focus kept).
 function showDrawer(html) {
-  if ($('drawer').hidden) lastFocus = document.activeElement;
+  const after = AFTER;
+  AFTER = [];
+  const opening = $('drawer').hidden;
+  if (!opening && html === LAST_HTML) return;
+  LAST_HTML = html;
+  if (opening) lastFocus = document.activeElement;
   $('drawer-body').innerHTML = html;
   const h = $('drawer-body').querySelector('h2#drawer-title');
-  // the bar: the type's icon and name, then the object's title
   const [icon, label] = TYPE_META[DRAWER.kind] || [];
   $('drawer-bar-title').innerHTML = `${label ? `<span class="dtype"><i class="icon-${icon}" aria-hidden="true"></i><span class="badge">${esc(label)}</span></span>` : ''}<span class="dtitle">${h ? h.innerHTML : ''}</span>`;
   if (h) h.remove();
   $('drawer').hidden = false; $('scrim').hidden = false;
   document.body.style.overflow = 'hidden';
-  $('drawer-close').focus();
+  if (opening) $('drawer-close').focus();
+  for (const f of after) f();
 }
 function closeDrawer() {
   DRAWER = { kind: null, id: null };
-  ATTRS = null;
+  LAST_HTML = '';
   $('drawer').hidden = true; $('scrim').hidden = true;
   document.body.style.overflow = '';
   if (/^#(ticket|q|file|goal|planner)/.test(location.hash)) history.replaceState(null, '', location.pathname + location.search);
   lastFocus?.focus?.();
 }
+// Each opener names the object (and how to draw it again), then draws it.
+const drawerFor = (kind, id, arg) => {
+  if (DRAWER.kind !== kind || DRAWER.id !== id) LAST_HTML = '';
+  DRAWER = { kind, id, arg, q: DRAWER.kind === kind && DRAWER.id === id ? DRAWER.q : undefined };
+};
+
+// ---- history: every line about the object, oldest first, always last in the drawer ----
 const STAGE_WORDS = { planned: 'waiting on other tickets', ready: 'ready to start', "spec'd": 'spec approved', 'planned-in-detail': 'plan approved', building: 'being built', 'in-review': 'in review', merged: 'merged', released: 'released', superseded: 'replaced by another ticket' };
 const MSG_WORDS = { 'review-request': 'asked for a review or a go-ahead', 'merge-request': 'asked to merge', blocked: 'is blocked', 'design-change': 'proposed a design change', ruling: 'ruled', answer: 'relayed your answer', info: 'said' };
-function lineView(l) {
+const NEW_WORDS = { goal: 'Proposed', feature: 'Planned', problem: 'Opened', knowledge: 'Proposed', ticket: 'Added to the plan', observation: 'Noticed', question: 'Asked', decision: 'Decided', act: 'Did' };
+// A set line on the object itself carries what it replaced: each field from what to what.
+function changeView(l) {
+  const by = cap(who(l.by));
+  const fields = Object.keys(l).filter((k) => !ENVELOPE_KEYS.includes(k) && k !== 'prev');
+  if (l.type === 'ticket' && fields.length === 1 && fields[0] === 'held') return ['', l.held ? `${esc(by)} put it on hold: ${linkify(l.held)}` : `${esc(by)} took it off hold`];
+  if (l.type === 'goal' && fields.length === 1 && fields[0] === 'hold') return ['', `${esc(by)} set it to ${esc(words(l.hold?.mode ?? 'run'))}${l.hold?.reason ? `: ${linkify(l.hold.reason)}` : ''}`];
+  const objs = (v) => Array.isArray(v) && v.some((x) => x && typeof x === 'object') || (v && typeof v === 'object' && !Array.isArray(v));
+  const one = (k) => (k === 'decision' && l.decision?.verdict ? `<b>verdict</b> ${esc(words(l.decision.verdict).toLowerCase())}${l.decision.notes ? `: ${linkify(l.decision.notes)}` : ''}` : k === 'hold' ? `<b>hold</b> to ${esc(words(l.hold?.mode ?? 'run').toLowerCase())}` : objs(l[k]) || objs(l.prev?.[k]) ? `<b>${esc(words(k).toLowerCase())}</b>${Array.isArray(l[k]) ? ` (now ${l[k].length})` : ''}` : `<b>${esc(words(k).toLowerCase())}</b> ${emptyVal(l.prev?.[k]) ? '' : `from ${fmtShort(l.prev[k])} `}to ${fmtShort(l[k])}`);
+  return ['', `${esc(by)} changed ${fields.map(one).join('; ')}`];
+}
+const ENVELOPE_KEYS = ['v', 'id', 'type', 'op', 'at', 'by', 'channel'];
+function lineView(l, self) {
   const by = who(l.by);
+  if (l.op === 'set' && l.prev && !['question', 'decision', 'act'].includes(l.type)) return changeView(l);
+  if (l.op === 'new' && l.id === self && !['phase', 'gate', 'message', 'question', 'decision', 'act'].includes(l.type)) return ['', `${esc(NEW_WORDS[l.type] || 'Created')} by ${esc(by)}`];
   switch (l.type) {
     case 'ticket': {
-      if (l.op === 'new') return ['', `Added to the plan by ${esc(by)}`];
+      if (l.op === 'new') return ['', `${esc(cap(by))} added ${tlink(l.id)} to the plan`];
       const keys = Object.keys(l).filter((k) => FIELD_WORDS[k]);
-      if (keys.length === 1 && keys[0] === 'held') return ['', l.held ? `${esc(cap(by))} put it on hold: ${linkify(l.held)}` : `${esc(cap(by))} took it off hold`];
-      return ['', `${esc(cap(by))} changed ${keys.map((k) => FIELD_WORDS[k]).join(', ') || 'details'}`];
+      if (keys.length === 1 && keys[0] === 'held') return ['', l.held ? `${esc(cap(by))} put ${tlink(l.id)} on hold: ${linkify(l.held)}` : `${esc(cap(by))} took ${tlink(l.id)} off hold`];
+      return ['', `${esc(cap(by))} changed ${keys.map((k) => FIELD_WORDS[k]).join(', ') || 'details'}${l.id !== self ? ` of ${tlink(l.id)}` : ''}`];
     }
     case 'phase': return l.to === 'supervisor' || (l.from && l.from === l.to) ? null : ['', `Agent: ${esc(PHASE_WORDS[l.to] || l.to)}${l.task ? ` (${esc(l.task)})` : ''}${l.note ? ` · ${linkify(l.note)}` : ''}`];
     case 'gate': return [l.ok ? 'gate' : 'gate fail', `Check “${esc(l.gate)}” ${l.ok ? 'passed' : 'failed'}${l.sha ? ` at <code>${esc(l.sha.slice(0, 12))}</code>` : ''}`];
     case 'message': return ['msg', `${esc(cap(by))} ${esc(MSG_WORDS[l.kind] || l.kind)}${l.to ? ` → ${esc(who(l.to))}` : ''}: ${linkify(l.text)}`];
     case 'question': return l.op === 'new' ? ['q', `Asked you: ${qlink(l.id, l.question)}`] : l.answer !== undefined ? ['q', `You answered ${qlink(l.id, 'the question')}: <b>${esc(l.answer)}</b>`] : l.status ? ['q', `Question ${esc(l.status)}${l.reason ? `: ${linkify(l.reason)}` : ''}`] : null;
-    case 'act': { if (['add-ticket', 'replan-within-feature'].includes(l.class)) return null; const v = actView(l); return ['act', `${v.head}${v.detail ? `<div class="act-detail">${v.detail}</div>` : ''}${l.decision ? `<div class="act-detail">under ${dlink(l.decision)}</div>` : ''}`]; }
-    case 'decision': return l.op === 'new' ? ['act', `The supervisor decided (${esc(words(l.class))}): ${dlink(l.id, l.what)}${l.rationale ? `<div class="act-detail">${linkify(l.rationale)}</div>` : ''}`] : l.corrected ? ['act', `${esc(cap(by))} corrected ${dlink(l.id, 'a decision')}: ${esc(l.corrected.reason)}`] : null;
-    case 'observation': return ['', `${esc(cap(by))} noticed (${esc(words(l.kind))}): ${linkify(l.detail)}`];
-    case 'knowledge': return ['', `Learned: ${linkify(l.statement)}`];
+    case 'act': {
+      if (l.op === 'set') return l.corrected ? ['act', `${esc(cap(by))} corrected it: ${esc(l.corrected.reason)}`] : l.repaired ? ['act', `${esc(cap(by))} repaired it: ${esc(l.repaired)}`] : null;
+      if (['add-ticket', 'replan-within-feature'].includes(l.class)) return null;
+      const v = actView(l);
+      return ['act', `${v.head}${v.detail ? `<div class="act-detail">${v.detail}</div>` : ''}${l.decision ? `<div class="act-detail">under ${dlink(l.decision, decisionTitle(l.decision))}</div>` : ''}`];
+    }
+    case 'decision': return l.op === 'new' ? ['act', `The supervisor decided (${esc(words(l.class))}): ${dlink(l.id, l.what)}${l.rationale ? `<div class="act-detail">${linkify(l.rationale)}</div>` : ''}`] : l.corrected ? ['act', `${esc(cap(by))} corrected ${dlink(l.id, 'a decision')}: ${esc(l.corrected.reason)}`] : l.repaired ? ['act', `${esc(cap(by))} repaired ${dlink(l.id, 'a decision')}: ${esc(l.repaired)}`] : null;
+    case 'observation': return l.kind === 'reading' && l.measure ? ['', `${esc(cap(by))} read the measure: <b>${esc(l.measure.value)}</b>${unitOf(l.measure.unit)}`] : ['', `${esc(cap(by))} noticed (${esc(words(l.kind))}): ${linkify(l.detail)}`];
+    case 'knowledge': return l.op === 'new' ? ['', `Learned: ${linkify(l.statement)}`] : ['', `${esc(cap(by))} set ${linkify(l.id)} to ${esc(l.status ?? 'changed')}`];
+    case 'spend': return ['', `Spent $${esc(Number(l.usd ?? 0).toFixed(2))} (${esc(l.role ?? 'agent')}${l.phase ? `, ${esc(l.phase)}` : ''})`];
+    case 'goal': return ['', `${esc(cap(by))} ${l.op === 'new' ? 'proposed' : 'changed'} ${glink(l.id)}`];
+    case 'feature': return ['', `${esc(cap(by))} ${l.op === 'new' ? 'planned' : 'changed'} ${flink(l.id)}`];
+    case 'problem': return ['', `${esc(cap(by))} ${l.op === 'new' ? 'opened' : 'updated'} a problem: ${linkify(l.title ?? l.id)}${l.status ? ` (${esc(l.status)})` : ''}`];
     default: return ['', `${esc(words(l.type))} ${esc(l.op)}`];
   }
 }
-async function openTicket(id, { quiet = false } = {}) {
-  DRAWER = { kind: 'ticket', id };
-  if (!quiet) showDrawer('<p class="loading">Loading…</p>');
-  let v;
-  try { const r = await fetch(`/api/timeline?id=${encodeURIComponent(id)}`); v = await r.json(); if (!r.ok) throw new Error(v.error || r.status); }
-  catch (e) { if (!quiet) showDrawer(`<p class="err">Could not load ${esc(id)}: ${esc(e.message)}</p>`); return; }
-  if (DRAWER.kind !== 'ticket' || DRAWER.id !== id) return;
-  const pt = (DATA.progress?.tickets || []).find((x) => x.id === id);
-  const t = v.ticket;
-  const items = v.lines.map((l) => [l, lineView(l)]).filter(([, x]) => x);
-  const html = `
-    <h2 id="drawer-title">${esc(t.title)}</h2>
-    ${attrs({ id: t.id, rec: t.id, type: 'ticket', computed: [
-      ['Status', `${esc(cap(STAGE_WORDS[t.stage] || t.stage))}${t.phase && !['merged', 'released'].includes(t.stage) ? ` · agent ${esc(PHASE_WORDS[t.phase] || t.phase)}` : ''}${t.waiting ? ` · <span class="badge high">${t.waiting.kind === 'limit' ? 'usage limit' : 'waiting on a prompt'}</span> ${esc(t.waiting.line)}` : ''}`, 'Where it is now, from its approvals, its agent\'s last phase and its merge.'],
-      ['Documents', v.files.length ? `<div class="links">${v.files.map(linkOf).join('')}</div>` : '', 'Its spec, plan and verification, from its branch until it merges, then from main.'],
-      ['Reviews', v.reviews.length ? `<ul>${v.reviews.map((r) => `<li>${esc(words(r.stage))} review, pass ${esc(r.pass)}: <b>${r.verdict === 'APPROVE' ? 'approved' : r.verdict === 'CHANGES' ? 'changes asked' : esc(r.verdict || '–')}</b>${r.reviewer ? ` by ${esc(r.reviewer)}` : ''}</li>`).join('')}</ul>` : '', 'Each review of its spec, plan and code, and its verdict.'],
-      ['Wave', pt?.wave ? wlink(pt.wave) : '', 'The batch of tickets that can run at the same time once the waves before them merge.'],
-      ['Ships in', pt?.target_release ? rlink(pt.target_release) : '', 'The release its stories target.'],
-      ['Spent', ticketMap().get(id)?.usd ? `$${esc(ticketMap().get(id).usd.toFixed(2))} so far (its worker and reviewers)` : '', 'What its worker and reviewers have spent, from their session logs.'],
-      ['Branch', t.branch ? `<code>${esc(t.branch.replace(/^refs\/(heads|remotes\/origin)\//, ''))}</code>` : '', 'Where its work is.'],
-      ['Merged', t.merge_sha ? `<code>${esc(t.merge_sha.slice(0, 12))}</code>` : '', 'The commit it landed as on main.'],
-    ] })}
-    <h3 style="margin-top:12px">History</h3>
-    ${items.length ? `<ol class="tl">${items.map(([l, [c, h]]) => `<li class="${c}"><time>${when(l.at)}</time>${h}</li>`).join('')}</ol>` : empty('Nothing logged yet.')}`;
-  showDrawer(html);
+function historySection(peek, self) {
+  const head = '<h3 class="hist-h">History</h3>';
+  if (peek === undefined) return `${head}<p class="loading">Loading…</p>`;
+  if (!peek || peek.error) return '';
+  if (DRAWER.kind === 'file') {
+    const cs = peek.history || [];
+    return `${head}${cs.length ? `<ol class="tl">${cs.map((c) => `<li><time>${esc(when(c.at))}</time>${esc(c.subject)} <span class="muted">· ${esc(c.author)} · <code>${esc(c.sha.slice(0, 12))}</code></span></li>`).join('')}</ol>` : empty('Not committed yet.')}`;
+  }
+  const items = (peek.history || []).map((l) => [l, lineView(l, self)]).filter(([, x]) => x);
+  return `${head}${items.length ? `<ol class="tl">${items.map(([l, [c, h]]) => `<li class="${c}"><time>${when(l.at)}</time>${h}</li>`).join('')}</ol>` : empty('Nothing logged yet.')}`;
 }
-function openGoal(id) {
-  const g = (DATA.ooda.goals || []).find((x) => x.id === id);
-  if (!g) return showDrawer(`<h2 id="drawer-title">No goal ${esc(id)}</h2>`);
-  DRAWER = { kind: 'goal', id };
-  const R = DATA.ooda.roadmap;
-  const s = goalState(g, R, DATA.questions || []);
-  const r = R.goals.find((x) => x.id === id);
-  const feats = (r?.features || []).map((f) => R.features[f]).filter(Boolean);
-  const week = (d) => (d ? `week of ${new Date(`${d}T00:00:00Z`).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })}` : 'no date');
-  // the goal's questions: asked for it, or about (or holding up) a ticket in one of its features
-  const goalTickets = new Set((DATA.progress?.tickets || []).filter((t) => feats.some((f) => f.feature === t.feature)).map((t) => t.id));
-  const asks = [...(DATA.questions || []), ...(DATA.ooda.answered || [])].filter((q) => q.goal === id || goalTickets.has(q.ticket) || (q.blocks || []).some((b) => goalTickets.has(b)) || (q.kind === 'goal-definition' && q.question.toLowerCase().includes(String(g.title).toLowerCase().split(':')[0])));
-  const design = s.ask?.links?.[0] ?? (['ready', 'met'].includes(g.status) && g.check.design ? { title: 'The design', path: `docs/devteam/${g.check.design}` } : null);
-  const decisions = (g.updates || []).filter((u) => u.decision).map((u) => u.decision);
-  showDrawer(`<h2 id="drawer-title">${esc(g.title)}</h2>
-    ${attrs({ id: g.id, rec: g.id, type: 'goal', computed: [
-      ['State', `<span class="badge ${s.tone}">${esc(s.label)}</span>`, 'Where the goal is: defining, waiting for your approval, planning, building, measuring, met, held or let go.'],
-      ['Design', design ? `<a href="${esc(fileHref({ ...design, title: design.title || 'The design' }))}">${esc(design.title || 'The design')}</a>` : '', 'The design document its features implement.'],
-      ['Forecast', (g.forecast?.milestones || []).length ? `<ol>${g.forecast.milestones.map((m) => `<li>${mlink(g.id, m.n, m.title)}: ${esc(m.target)}${esc(g.measure?.unit ? ` ${g.measure.unit}` : '')}${m.by ? ` by ${esc(m.by)}` : ''} <span class="badge ${m.status === 'met' ? 'good' : m.late ? 'high' : m.status === 'current' ? 'low' : 'medium'}">${esc(m.status === 'met' ? 'met' : m.late ? 'late' : m.status)}</span><br><span class="muted">${m.status === 'met' ? 'reached' : `${m.features.length ? `${esc(m.points_left)} points left` : `about ${esc(m.estimate_tickets)} tickets, not planned yet`}${m.eta ? ` · ETA ${esc(m.eta)}` : ''}`}</span></li>`).join('')}</ol>${g.forecast.past_horizon ? '<span class="badge high">forecast after the horizon</span>' : ''}${g.forecast.rate_points_per_day > 0 ? '' : '<div class="muted">No measured rate yet: sizes only, dates once tickets merge.</div>'}` : '', 'Each milestone: points left and an ETA at the recent rate.'],
-      ['Features', feats.length ? `<ul>${feats.map((v) => `<li>${flink(v.feature)}: ${v.points_total - v.points_left} of ${v.points_total} points${v.done ? ', done' : ''}</li>`).join('')}</ul>` : '', 'The features planned for it, and how far each is.'],
-      ['Planners', planningFor(g).length ? planningFor(g).map((p) => `<a href="#planner/${encodeURIComponent(p.feature)}">${esc(p.title)}</a> (${esc(ago(p.minutes_silent))})`).join(', ') : '', 'Planners working on its features now.'],
-      ['Readings', (g.readings || []).length ? `<ul>${g.readings.map((x) => `<li>${esc(x.value)} ${esc(g.measure?.unit || '')} · ${esc(when(x.at))}</li>`).join('')}</ul>` : '', 'Readings of its measure.'],
-      ['Your decisions', decisions.length ? `<ul>${decisions.map((d) => `<li><b>${esc(words(d.verdict))}</b>${d.notes ? `: ${esc(d.notes)}` : ''}</li>`).join('')}</ul>` : '', 'Every verdict you gave on it, oldest first.'],
-      ['Questions', asks.length ? `<ul>${asks.map((q) => `<li>${qlink(q.id, q.question)}${q.status === 'open' ? ' <span class="badge medium">open</span>' : ''}</li>`).join('')}</ul>` : '', 'Questions asked for it, or about its tickets.'],
-    ] })}
-    ${goalSteps(g, s, R)}
-    ${s.next ? `<p class="goal-next measure">${s.next}</p>` : ''}
-    ${holdControl(g.id, g.hold_view, { status: g.status })}
-    ${feats.length ? `<h3>Progress</h3>${progressBlock(filterTickets(DATA.progress, `goal:${g.id}`))}` : ''}`);
-  if (feats.length) drawPeekChart(filterTickets(DATA.progress, `goal:${g.id}`));
+
+// ---- pieces the bodies share ----
+// A Mermaid diagram, drawn once the drawer is on screen.
+function diagram(code) {
+  const id = `dg-${AFTER.length}`;
+  AFTER.push(() => renderMermaid(document.getElementById(id)));
+  return `<div class="diagram-wrap" id="${id}"><pre><code class="language-mermaid">${esc(code)}</code></pre></div>`;
 }
-// ---- panels for the rest: sets of tickets (feature, story, release, wave, milestone) and log
-// objects (act, lesson, problem, message thread). A set shows its progress, its forecast and its
-// tickets by column, with a link that filters the board and the burn-up to it.
-// A set's progress in a sidepeek: its meter and forecast, its burn-up, then its tickets as the board.
+const mmLabel = (s) => String(s ?? '').replace(/["<>`#;{}[\]()|]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 48) || '?';
+const DONE_STAGES = ['merged', 'released'];
+// Tickets and what waits on what, optionally in columns (waves); the focus ticket outlined.
+function depGraph(ts, { focus = null, groups = null } = {}) {
+  if (!ts.length) return '';
+  const n = new Map(ts.map((t, i) => [t.id, `n${i}`]));
+  const node = (t) => `${n.get(t.id)}["${mmLabel(t.title)}"]${DONE_STAGES.includes(t.stage) ? ':::done' : t.phase === 'blocked' ? ':::blocked' : ''}`;
+  const lines = ['flowchart LR', 'classDef done opacity:0.55', 'classDef blocked stroke:#d33,stroke-width:2px', 'classDef focus stroke-width:3px'];
+  if (groups) for (const [label, members] of groups) lines.push(`subgraph g${mmLabel(label).replace(/\W/g, '')}["${mmLabel(label)}"]`, ...members.map(node), 'end');
+  else lines.push(...ts.map(node));
+  for (const t of ts) for (const d of t.depends_on || []) if (n.has(d)) lines.push(`${n.get(d)} --> ${n.get(t.id)}`);
+  if (focus && n.has(focus)) lines.push(`class ${n.get(focus)} focus`);
+  return diagram(lines.join('\n'));
+}
+// The opening of a design: its TL;DR, rendered, and a link to the whole document.
+function designBlock(d, label = 'Design') {
+  if (!d) return '';
+  const href = fileHref({ title: label, path: d.path, ...(d.ref ? { ref: d.ref } : {}) });
+  const md = d.tldr && window.marked && window.DOMPurify ? DOMPurify.sanitize(marked.parse(d.tldr, { gfm: true }), { FORBID_TAGS: ['style', 'form', 'input'], FORBID_ATTR: ['style'] }) : d.tldr ? `<pre>${esc(d.tldr)}</pre>` : '<p class="muted">It has no TL;DR yet.</p>';
+  return `<h3>${esc(label)}: the TL;DR</h3><div class="md tldr">${md}</div><p class="small"><a class="linkish" href="${esc(href)}">Read the whole design</a></p>`;
+}
+const reviewList = (rs) => (rs?.length ? `<ul>${rs.map((r) => `<li>${esc(words(r.stage))} review, pass ${esc(r.pass)}: <b>${r.verdict === 'APPROVE' ? 'approved' : r.verdict === 'CHANGES' ? 'changes asked' : esc(r.verdict || 'not done')}</b>${r.reviewer ? ` by ${esc(r.reviewer)}` : ''}</li>`).join('')}</ul>` : '');
+// A small time chart: one line per series over time, optional horizontal marks (targets).
+function lineChart(series, { marks = [], unit = '', height = 160, yMin = 0 } = {}) {
+  const pts = series.flatMap((s) => s.points);
+  if (!pts.length) return '';
+  const W = 640, H = height, L = 40, R = 12, T = 12, B = 22;
+  const xs = pts.map((p) => p[0]);
+  let t0 = Math.min(...xs), t1 = Math.max(...xs, Date.now());
+  if (t1 - t0 < DAY) t0 = t1 - DAY;
+  const yMax = Math.max(...pts.map((p) => p[1]), ...marks.map((m) => m.value), 1) * 1.1;
+  const x = (ts) => L + ((ts - t0) / (t1 - t0)) * (W - L - R);
+  const y = (v) => H - B - ((v - yMin) / (yMax - yMin)) * (H - T - B);
+  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(series.map((s) => s.name).join(', '))} over time">`;
+  for (const v of [yMin, (yMin + yMax) / 2, yMax / 1.1]) svg += `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" stroke="var(--grid)"/><text x="${L - 6}" y="${y(v) + 4}" text-anchor="end" font-size="10" fill="var(--muted)">${esc(+v.toFixed(v < 10 ? 2 : 0))}${esc(unit)}</text>`;
+  svg += `<text x="${L}" y="${H - 6}" font-size="10" fill="var(--muted)">${esc(fmtDate(t0))}</text><text x="${W - R}" y="${H - 6}" text-anchor="end" font-size="10" fill="var(--muted)">${esc(fmtDate(t1))}</text>`;
+  const merged = [];
+  for (const m of marks) { const same = merged.find((x) => x.value === m.value); if (same) { same.label = `${same.label}; ${m.label}`; same.strong ||= m.strong; } else merged.push({ ...m }); }
+  let lastY = Infinity;
+  for (const m of merged.sort((a, b) => b.value - a.value)) {
+    const ly = Math.max(y(m.value) - 4, T + 8);
+    const ty = lastY - ly < 12 ? lastY + 12 : ly;
+    lastY = ty;
+    svg += `<line x1="${L}" x2="${W - R}" y1="${y(m.value)}" y2="${y(m.value)}" stroke="var(--muted)" stroke-dasharray="${m.strong ? '6 4' : '2 4'}"/><text x="${W - R - 2}" y="${ty}" text-anchor="end" font-size="10" fill="var(--fg)">${esc(m.label)}</text>`;
+  }
+  series.forEach((s, i) => {
+    const ps = s.points.slice().sort((a, b) => a[0] - b[0]);
+    svg += `<polyline fill="none" stroke="var(--series-${(i % 4) + 1}, var(--blue))" stroke-width="2" points="${ps.map((p) => `${x(p[0]).toFixed(1)},${y(p[1]).toFixed(1)}`).join(' ')}"/>`;
+    for (const p of ps) svg += `<circle cx="${x(p[0]).toFixed(1)}" cy="${y(p[1]).toFixed(1)}" r="3" fill="var(--series-${(i % 4) + 1}, var(--blue))"><title>${esc(`${s.name}: ${p[1]}${unit} · ${fmtDate(p[0])}`)}</title></circle>`;
+  });
+  return `<div class="card chart mini-chart">${series.length > 1 ? `<div class="legend">${series.map((s, i) => `<span><i style="border-top-color:var(--series-${(i % 4) + 1}, var(--blue))"></i>${esc(s.name)}</span>`).join('')}</div>` : ''}${svg}</svg></div>`;
+}
+// A set's progress: its meter and forecast, its burn-up, then its tickets as the board.
 function progressBlock(items) {
   const now = Date.parse(DATA.progress.now);
   const fc = forecast(items, now);
@@ -2031,101 +2129,253 @@ function progressBlock(items) {
   const left = live.filter((t) => !isDone(t));
   const eta = fc.finished ? 'all merged' : fc.eta ? `ETA ${fmtDate(fc.eta)} at the recent ${fc.perDay.toFixed(1)} points a day` : fc.scope ? 'no forecast yet (nothing merged recently)' : 'no tickets yet';
   const usd = live.reduce((a, t) => a + (ticketMap().get(t.id)?.usd || 0), 0);
+  if (live.length) AFTER.push(() => { if ($('peek-burnup')) burnup(items, now, { el: $('peek-burnup'), legend: $('peek-legend'), tip: $('peek-tip'), card: $('peek-card'), forecast: null }); });
   return `${meterRow(`${fc.done} of ${fc.scope} points done`, fc.done, fc.scope)}
     <p class="small muted">${esc(eta)} · ${left.length} of ${live.length} ticket${live.length === 1 ? '' : 's'} left${usd ? ` · $${usd.toFixed(2)} spent` : ''}</p>
     ${live.length ? `<div class="card chart peek-chart" id="peek-card"><div class="legend" id="peek-legend"><span><i class="done"></i>done</span><span><i class="scope"></i>scope</span><span><i class="fc"></i>forecast</span><span class="dim">points: S = 1, M = 2</span></div><div id="peek-burnup"></div><div class="tip" id="peek-tip"></div></div>` : ''}
     <h3>Tickets</h3>${live.length ? `<div class="board board-peek" style="--cols:${new Set(live.map(columnOf)).size}">${boardCols(live, new Set(DATA.critical_path), { only: true })}</div>` : '<p class="muted">None yet.</p>'}`;
 }
-// Drawn once the drawer is on screen, so the chart takes the drawer's width.
-function drawPeekChart(items) {
-  if ($('peek-burnup')) burnup(items, Date.parse(DATA.progress.now), { el: $('peek-burnup'), legend: $('peek-legend'), tip: $('peek-tip'), card: $('peek-card'), forecast: null });
-}
-function openTicketSet({ kind, id, title, sub, computed = [], items, attr = {} }) {
-  DRAWER = { kind, id };
-  showDrawer(`<h2 id="drawer-title">${title}</h2>
-    ${attrs({ id, type: kind, ...attr, computed })}
-    ${sub ? `<p class="ctx measure">${sub}</p>` : ''}
-    ${progressBlock(items)}`);
-  drawPeekChart(items);
-}
 const uniq = (xs) => [...new Set(xs.filter((x) => x !== undefined && x !== null && x !== ''))];
+const notFound = (kind, id, peek, text) => showDrawer(`<h2 id="drawer-title">${esc(id)}</h2>${attrs({ id, peek, type: kind })}${text ? `<p class="muted">${text}</p>` : ''}${historySection(peek, id)}`);
+// How long each phase took, as one bar: from each phase line to the next (or to the merge, or now).
+function phaseStrip(lines, endAt) {
+  const ps = lines.filter((l) => l.type === 'phase' && l.to !== 'supervisor').sort((a, b) => a.at.localeCompare(b.at));
+  if (!ps.length) return '';
+  const end = endAt ? Date.parse(endAt) : Date.now();
+  const spans = new Map();
+  ps.forEach((l, i) => {
+    const t0 = Date.parse(l.at), t1 = i + 1 < ps.length ? Date.parse(ps[i + 1].at) : Math.max(t0, end);
+    if (l.to === 'done') return;
+    spans.set(l.to, (spans.get(l.to) || 0) + Math.max(0, t1 - t0));
+  });
+  const total = [...spans.values()].reduce((a, b) => a + b, 0);
+  if (!total) return '';
+  const tone = (p) => (['blocked', 'parked'].includes(p) ? 'stop' : ['spec', 'plan', 'contract'].includes(p) ? 'think' : ['build', 'verify'].includes(p) ? 'make' : ['final-review', 'awaiting-word', 'merging'].includes(p) ? 'wait' : 'other');
+  const hrs = (ms) => (ms < 3600e3 ? `${Math.round(ms / 60e3)}m` : `${(ms / 3600e3).toFixed(ms < 36000e3 ? 1 : 0)}h`);
+  const segs = [...spans].map(([p, ms]) => ({ p, ms, w: (100 * ms) / total }));
+  return `<h3>Time per phase</h3><div class="phase-strip" role="img" aria-label="${esc(segs.map((s) => `${PHASE_SHORT[s.p] || s.p} ${hrs(s.ms)}`).join(', '))}">${segs.map((s) => `<span class="ph ph-${tone(s.p)}" style="width:${s.w.toFixed(2)}%" title="${esc(`${PHASE_SHORT[s.p] || words(s.p)}: ${hrs(s.ms)}`)}"></span>`).join('')}</div>
+    <div class="legend phase-legend">${segs.map((s) => `<span><i class="ph-${tone(s.p)}"></i>${esc(PHASE_SHORT[s.p] || words(s.p))} ${esc(hrs(s.ms))}</span>`).join('')}</div>`;
+}
+// Every check at every commit it ran on: passed or failed, flaky where one commit saw both, slow
+// where it took over twice the project's usual time for that check.
+function gateTable(lines) {
+  const gs = lines.filter((l) => l.type === 'gate');
+  if (!gs.length) return '';
+  const names = uniq(gs.map((g) => g.gate));
+  const shas = uniq(gs.slice().sort((a, b) => b.at.localeCompare(a.at)).map((g) => g.sha || 'uncommitted'));
+  const median = Object.fromEntries((DATA.metrics?.gates?.gates || []).map((g) => [g.gate, g.median_seconds]));
+  const cell = (sha, name) => {
+    const runs = gs.filter((g) => (g.sha || 'uncommitted') === sha && g.gate === name);
+    if (!runs.length) return '<td class="muted">–</td>';
+    const ok = runs.some((r) => r.ok), bad = runs.some((r) => !r.ok);
+    const last = runs.sort((a, b) => a.at.localeCompare(b.at)).pop();
+    const slow = median[name] && last.ms && last.ms / 1000 > 2 * median[name];
+    return `<td title="${esc(`${name} at ${sha.slice(0, 12)}: ${last.ok ? 'passed' : 'failed'}${last.ms ? `, ${(last.ms / 1000).toFixed(1)}s` : ''}${runs.length > 1 ? `, ${runs.length} runs` : ''}`)}"><span class="gate-dot ${ok && bad ? 'flaky' : last.ok ? 'ok' : 'fail'}">${ok && bad ? '≈' : last.ok ? '✓' : '✗'}</span>${slow ? ' <span class="badge medium">slow</span>' : ''}${ok && bad ? ' <span class="badge high">flaky</span>' : ''}</td>`;
+  };
+  return `<h3>Gate runs</h3><div class="scroll"><table class="gates-table"><tr><th>Commit</th>${names.map((n) => `<th>${esc(n)}</th>`).join('')}</tr>${shas.slice(0, 12).map((s) => `<tr><td><code>${esc(s.slice(0, 12))}</code></td>${names.map((n) => cell(s, n)).join('')}</tr>`).join('')}</table></div>`;
+}
+function spendChart(spend) {
+  if (!spend?.length) return '';
+  const roles = uniq(spend.map((s) => s.role || 'agent'));
+  const series = roles.map((r) => { let sum = 0; return { name: `${r} ($${spend.filter((s) => (s.role || 'agent') === r).reduce((a, s) => a + (s.usd || 0), 0).toFixed(2)})`, points: spend.filter((s) => (s.role || 'agent') === r).map((s) => [Date.parse(s.at), +(sum += s.usd || 0).toFixed(2)]) }; });
+  return `<h3>Spend over time</h3>${lineChart(series, { unit: '', height: 140 })}<p class="small muted">Cumulative dollars by role, from the agents' session logs.</p>`;
+}
+
+// ---- the openers ----
+async function openTicket(id) {
+  drawerFor('ticket', id);
+  const p = peekOf('ticket', id);
+  if (!p || p.error) return notFound('ticket', id, p, p?.error ? 'No such ticket.' : '');
+  const pt = (DATA.progress?.tickets || []).find((x) => x.id === id);
+  const t = { ...p.ticket, ...(pt || {}) };
+  const all = [...ticketMap().values()];
+  const near = [t, ...all.filter((x) => (p.deps.waits_on || []).includes(x.id) || (p.deps.blocks || []).includes(x.id))];
+  showDrawer(`<h2 id="drawer-title">${esc(t.title)}</h2>
+    ${attrs({ id, peek: p, type: 'ticket', computed: [
+      ['Status', `${esc(cap(STAGE_WORDS[t.stage] || t.stage))}${t.phase && !DONE_STAGES.includes(t.stage) ? ` · agent ${esc(PHASE_WORDS[t.phase] || t.phase)}` : ''}${t.waiting ? ` · <span class="badge high">${t.waiting.kind === 'limit' ? 'usage limit' : 'waiting on a prompt'}</span> ${esc(t.waiting.line)}` : ''}`, 'Where it is now, from its approvals, its agent\'s last phase and its merge.'],
+      ['Documents', p.files.length ? `<div class="links">${p.files.map(linkOf).join('')}</div>` : '', 'Its spec, plan and verification, from its branch until it merges, then from main.'],
+      ['Reviews', reviewList(p.reviews), 'Each review of its spec, plan and code, and its verdict.'],
+      ['Blocks', list(p.deps.blocks, tlink), 'Tickets that wait on this one.'],
+      ['Wave', pt?.wave ? wlink(pt.wave) : '', 'The batch of tickets that can run at the same time once the waves before them merge.'],
+      ['Ships in', pt?.target_release ? rlink(pt.target_release) : '', 'The release its stories target.'],
+      ['Spent', ticketMap().get(id)?.usd ? `$${esc(ticketMap().get(id).usd.toFixed(2))} so far (its worker and reviewers)` : '', 'What its worker and reviewers have spent, from their session logs.'],
+      ['Branch', t.branch ? `<code>${esc(t.branch.replace(/^refs\/(heads|remotes\/origin)\//, ''))}</code>` : '', 'Where its work is.'],
+      ['Merged', t.merge_sha ? `<code>${esc(t.merge_sha.slice(0, 12))}</code>` : '', 'The commit it landed as on main.'],
+    ] })}
+    ${p.handoff ? `<h3>Handoff</h3><div class="card small handoff"><pre>${esc(p.handoff.text)}</pre><div class="meta">${esc(p.handoff.where)}</div></div>` : ''}
+    ${phaseStrip(p.history, t.merged_at)}
+    ${gateTable(p.history)}
+    ${spendChart(p.spend)}
+    ${near.length > 1 ? `<h3>Dependencies</h3>${depGraph(near, { focus: id })}` : ''}
+    ${historySection(p, id)}`);
+}
+function openGoal(id) {
+  drawerFor('goal', id);
+  const g = (DATA.ooda.goals || []).find((x) => x.id === id);
+  const p = peekOf('goal', id);
+  if (!g) return notFound('goal', id, p, 'It is not among the goals on the dashboard.');
+  const R = DATA.ooda.roadmap;
+  const s = goalState(g, R, DATA.questions || []);
+  const r = R.goals.find((x) => x.id === id);
+  const feats = (r?.features || []).map((f) => R.features[f]).filter(Boolean);
+  const goalTickets = new Set((DATA.progress?.tickets || []).filter((t) => feats.some((f) => f.feature === t.feature)).map((t) => t.id));
+  const asks = [...(DATA.questions || []), ...(DATA.ooda.answered || [])].filter((q) => q.goal === id || goalTickets.has(q.ticket) || (q.blocks || []).some((b) => goalTickets.has(b)) || (q.kind === 'goal-definition' && q.question.toLowerCase().includes(String(g.title).toLowerCase().split(':')[0])));
+  const design = s.ask?.links?.[0] ?? (['ready', 'met'].includes(g.status) && g.check.design ? { title: 'The design', path: `docs/devteam/${g.check.design}` } : null);
+  const verdicts = (g.updates || []).filter((u) => u.decision).map((u) => u.decision);
+  const problems = (DATA.ooda.problems || []).filter((x) => (x.threatens || []).includes(id));
+  const featIds = new Set(feats.map((f) => f.feature));
+  // judgment calls only: routine acts (merges, sessions started, tickets edited) are in the history
+  const calls = (DATA.ooda.decisions || []).filter((x) => ['decision', 'act'].includes(x.kind) && !(x.kind === 'act' && x.under?.authority === 'constitution') && (x.refs || []).some((ref) => ref === id || goalTickets.has(ref) || featIds.has(ref)));
+  const unit = g.measure?.unit === '%' ? '%' : '';
+  const readings = (g.readings || []).map((x) => [Date.parse(x.at), x.value]);
+  const marks = [...(g.forecast?.milestones || []).map((m) => ({ value: m.target, label: `${m.title} (${m.target}${unit})` })), ...(g.measure?.target != null ? [{ value: g.measure.target, label: `target ${g.measure.target}${unit}`, strong: true }] : [])];
+  const items = filterTickets(DATA.progress, `goal:${id}`);
+  showDrawer(`<h2 id="drawer-title">${esc(g.title)}</h2>
+    ${attrs({ id, peek: p, type: 'goal', ctx: { unplanned: g.status === 'ready' ? (r?.unplanned || []).map((u) => u.n) : [] }, computed: [
+      ['State', `<span class="badge ${s.tone}">${esc(s.label)}</span>`, 'Where the goal is: defining, waiting for your approval, planning, building, measuring, met, held or let go.'],
+      ['Design', design ? `<a href="${esc(fileHref({ ...design, title: design.title || 'The design' }))}">${esc(design.title || 'The design')}</a>` : '', 'The design document its features implement.'],
+      ['Forecast', (g.forecast?.milestones || []).length ? `<ol>${g.forecast.milestones.map((m) => `<li>${mlink(g.id, m.n, m.title)}: ${esc(m.target)}${unitOf(g.measure?.unit)}${m.by ? ` by ${esc(m.by)}` : ''} <span class="badge ${m.status === 'met' ? 'good' : m.late ? 'high' : m.status === 'current' ? 'low' : 'medium'}">${esc(m.status === 'met' ? 'met' : m.late ? 'late' : m.status)}</span><br><span class="muted">${m.status === 'met' ? 'reached' : `${m.features.length ? `${esc(m.points_left)} points left` : `about ${esc(m.estimate_tickets)} tickets, not planned yet`}${m.eta ? ` · ETA ${esc(m.eta)}` : ''}`}</span></li>`).join('')}</ol>${g.forecast.past_horizon ? '<span class="badge high">forecast after the horizon</span>' : ''}${g.forecast.rate_points_per_day > 0 ? '' : '<div class="muted">No measured rate yet: sizes only, dates once tickets merge.</div>'}` : '', 'Each milestone: points left and an ETA at the recent rate.'],
+      ['Features', feats.length ? `<ul>${feats.map((v) => `<li>${flink(v.feature)}: ${v.points_total - v.points_left} of ${v.points_total} points${v.done ? ', done' : ''}</li>`).join('')}</ul>` : '', 'The features planned for it, and how far each is.'],
+      ['Planners', planningFor(g).length ? planningFor(g).map((x) => `<a href="#planner/${encodeURIComponent(x.feature)}">${esc(x.title)}</a> (${esc(ago(x.minutes_silent))})`).join(', ') : '', 'Planners working on its features now.'],
+      ['Your verdicts', verdicts.length ? `<ul>${verdicts.map((d) => `<li><b>${esc(words(d.verdict))}</b>${d.notes ? `: ${esc(d.notes)}` : ''}</li>`).join('')}</ul>` : '', 'Every verdict you gave on its design, oldest first.'],
+      ['Questions', asks.length ? `<ul>${asks.map((q) => `<li>${qlink(q.id, q.question)}${q.status === 'open' ? ' <span class="badge medium">open</span>' : ''}</li>`).join('')}</ul>` : '', 'Questions asked for it, or about its tickets.'],
+    ] })}
+    ${goalSteps(g, s, R)}
+    ${s.next ? `<p class="goal-next measure">${s.next}</p>` : ''}
+    ${holdControl(g.id, g.hold_view, { status: g.status })}
+    <h3>Readings</h3>${readings.length ? lineChart([{ name: g.measure?.description || 'the measure', points: readings }], { marks, unit }) : '<p class="muted">No readings yet. The supervisor reads the measure on its tick (devteam.mjs goal reading).</p>'}
+    ${designBlock(p?.design)}
+    ${problems.length ? `<h3>Problems that threaten it</h3>${problems.map((x) => `<div class="card small"><span class="badge ${sevBadge(x.severity)}">sev ${esc(x.severity)}</span> <a class="linkish" href="#problem/${encodeURIComponent(x.id)}">${esc(x.title)}</a> <span class="muted">· ${esc(x.status)}${x.realized ? '' : ' · a risk'}</span></div>`).join('')}` : ''}
+    ${calls.length ? `<h3>Decisions and acts</h3><ol class="tl">${calls.slice(0, 30).map((x) => `<li class="act"><time>${esc(when(x.at))}</time>${x.kind === 'decision' ? dlink(x.id, x.what) : `<a class="linkish" href="#act/${encodeURIComponent(x.id)}">${esc(x.what)}</a>`} <span class="muted">· ${authorityWords(x.under)}</span></li>`).join('')}</ol>` : ''}
+    ${feats.length ? `<h3>Progress</h3>${progressBlock(items)}` : ''}
+    ${historySection(p, id)}`);
+}
+function openTicketSet({ kind, id, title, sub, computed = [], items, attr = {}, extra = '', q = {} }) {
+  drawerFor(kind, id);
+  const p = peekOf(kind, id, { ...q, tickets: items.map((t) => t.id).join(',') });
+  showDrawer(`<h2 id="drawer-title">${title}</h2>
+    ${attrs({ id, peek: p, type: kind, ...attr, computed })}
+    ${sub ? `<p class="ctx measure">${sub}</p>` : ''}
+    ${extra}
+    ${progressBlock(items)}
+    ${historySection(p, id)}`);
+}
 function openFeature(f) {
-  const p = DATA.progress, R = DATA.ooda.roadmap, rf = R.features[f];
-  if (!rf && !p.features.includes(f)) return showDrawer(`<h2 id="drawer-title">No feature ${esc(f)}</h2>`);
-  const items = p.tickets.filter((t) => t.feature === f);
-  const stories = Object.entries(p.stories).filter(([, s]) => s.feature === f).map(([id]) => id);
+  const pr = DATA.progress, R = DATA.ooda.roadmap, rf = R.features[f];
+  if (!rf && !pr.features.includes(f)) { drawerFor('feature', f); return notFound('feature', f, peekOf('feature', f), 'Not on the roadmap.'); }
+  const items = pr.tickets.filter((t) => t.feature === f);
   const ms = (DATA.ooda.goals || []).flatMap((g) => milestonesOf(g).filter((m) => (m.features || []).includes(f)).map((m) => mlink(g.id, m.n, m.title)));
-  openTicketSet({ kind: 'feature', id: f, title: esc(featureTitle(f)), sub: f === 'chores' ? 'Upkeep: tickets that serve no story.' : '', items, attr: { rec: f === 'chores' ? null : f, idTip: 'The feature\'s slug; its tickets\' ids start with their component.' }, computed: [
+  const p = PEEKS.get(peekKey('feature', f));
+  const waves = uniq(items.map((t) => t.wave)).sort((a, b) => a - b);
+  const live = items.filter((t) => t.stage !== 'superseded');
+  openTicketSet({ kind: 'feature', id: f, title: esc(featureTitle(f)), sub: f === 'chores' ? 'Upkeep: tickets that serve no story.' : '', items, attr: { idTip: 'The feature\'s slug; its tickets\' ids start with their component.', noRecord: f === 'chores' }, computed: [
     ['Status', esc(rf?.status ?? ''), 'planned, building or done, from its tickets.'],
     ['Milestones', ms.join('<br>'), 'The goal milestones it counts toward.'],
     ['Releases', uniq([...(rf?.releases || []), ...items.map((t) => t.target_release)]).sort().map(rlink).join(', '), 'Releases its stories and tickets target.'],
     ['Waves', uniq(items.filter((t) => !isDone(t)).map((t) => t.wave)).sort((a, b) => a - b).map(wlink).join(', '), 'Waves its unfinished tickets are in.'],
     ['Planner', (DATA.planners || []).some((x) => x.feature === f) ? `<a class="linkish" href="#planner/${encodeURIComponent(f)}">planning now</a>` : '', 'A planner working on it now.'],
-  ] });
+    ['Plan reviews', p?.plan_reviews ? reviewList(p.plan_reviews) || 'none yet' : '', 'Reviews of its plan PR while it is being planned.'],
+  ], extra: `${designBlock(p?.design)}${live.length > 1 && f !== 'chores' ? `<h3>Dependencies</h3>${depGraph(live, { groups: waves.map((w) => [w ? `Wave ${w}` : 'No wave', live.filter((t) => t.wave === w)]) })}` : ''}` });
 }
 function openStory(sid) {
-  const p = DATA.progress, st = p.stories[sid];
-  if (!st) return showDrawer(`<h2 id="drawer-title">No story ${esc(sid)}</h2>`);
-  openTicketSet({ kind: 'story', id: sid, title: esc(st.text ?? sid), items: p.tickets.filter((t) => t.serves.includes(sid)),
-    attr: { rec: st.feature && st.feature !== 'chores' ? st.feature : null, docType: 'feature', pick: (fs) => { const x = (fs.stories || []).find((y) => y.id === sid); if (!x) return null; const { id: _, ...rest } = x; return rest; }, idTip: 'The story\'s id, stored on its feature.' },
+  const pr = DATA.progress, st = pr.stories[sid];
+  if (!st) { drawerFor('story', sid); return notFound('story', sid, null, 'No such story.'); }
+  openTicketSet({ kind: 'story', id: sid, title: esc(st.text ?? sid), items: pr.tickets.filter((t) => t.serves.includes(sid)), q: st.feature && st.feature !== 'chores' ? { rec: st.feature } : {},
+    attr: { docType: 'feature', prefix: 'stories[].', pick: (fs) => { const x = (fs.stories || []).find((y) => y.id === sid); if (!x) return null; const { id: _, ...rest } = x; return rest; }, idTip: 'The story\'s id, stored on its feature.' },
     computed: [['Feature', st.feature ? flink(st.feature) : '', 'The feature the story belongs to.']] });
 }
 function openRelease(r) {
-  const p = DATA.progress;
-  const items = p.tickets.filter((t) => t.target_release === r);
-  const stories = Object.entries(p.stories).filter(([, s]) => s.release === r).map(([id]) => id);
-  const tagged = p.tickets.some((t) => t.released_in === r);
-  openTicketSet({ kind: 'release', id: r, title: `Release ${esc(r)}`, sub: tagged ? 'Tagged.' : stories.length && stories.every((s) => { const ts = p.tickets.filter((t) => t.serves.includes(s)); return ts.length && ts.every(isDone); }) ? 'Every story is done: ready to tag.' : '', items, attr: { idTip: 'The release\'s name; it is tagged once every story in it is done.' }, computed: [
-    ['Stories', stories.map((x) => `${slink(x)} ${esc(String(p.stories[x].text ?? '').slice(0, 90))}`).join('<br>'), 'Stories that target it.'],
-    ['Features', uniq([...items.map((t) => t.feature), ...stories.map((x) => p.stories[x].feature)]).map(flink).join(', '), 'Features with work in it.'],
-  ] });
+  const pr = DATA.progress;
+  const items = pr.tickets.filter((t) => t.target_release === r);
+  const stories = Object.entries(pr.stories).filter(([, s]) => s.release === r).map(([id]) => id);
+  const tagged = pr.tickets.some((t) => t.released_in === r);
+  const storyDone = (s) => { const ts = pr.tickets.filter((t) => t.serves.includes(s)); return ts.length && ts.every(isDone); };
+  const open = stories.filter((s) => !storyDone(s));
+  const merged = items.filter(isDone).sort((a, b) => (b.merged_at || '').localeCompare(a.merged_at || ''));
+  const p = PEEKS.get(peekKey('release', r));
+  const gates = p?.gates || [];
+  openTicketSet({ kind: 'release', id: r, title: `Release ${esc(r)}`, items, attr: { idTip: 'The release\'s name; it is tagged once every story in it is done.', noRecord: true }, computed: [
+    ['Tagged', tagged ? 'yes' : 'not yet', 'Whether the release has been tagged.'],
+    ['Stories', stories.map((x) => `${slink(x)} ${esc(String(pr.stories[x].text ?? '').slice(0, 90))}${storyDone(x) ? ' <span class="badge good">done</span>' : ''}`).join('<br>'), 'Stories that target it.'],
+    ['Features', uniq([...items.map((t) => t.feature), ...stories.map((x) => pr.stories[x].feature)]).map(flink).join(', '), 'Features with work in it.'],
+  ], extra: `<h3>Readiness</h3><ul>
+      <li>${open.length ? `${open.length} of ${stories.length} stor${stories.length === 1 ? 'y' : 'ies'} still open: ${open.map(slink).join(', ')}` : stories.length ? `every story is done${tagged ? '' : ': ready to tag'}` : 'no stories target it'}</li>
+      <li>${items.filter((t) => !isDone(t)).length} ticket${items.filter((t) => !isDone(t)).length === 1 ? '' : 's'} not merged</li>
+      ${gates.length ? `<li>checks at the last merge: ${gates.map((g) => `<span class="gate-dot ${g.ok ? 'ok' : 'fail'}">${g.ok ? '✓' : '✗'}</span> ${esc(g.gate)}`).join(' · ')} <span class="muted">(${esc(when(gates.map((g) => g.at).sort().pop()))})</span></li>` : ''}
+    </ul>
+    <h3>Changelog</h3>${merged.length ? `<ul>${merged.map((t) => `<li>${tlink(t.id)} <span class="muted">· merged ${esc(when(t.merged_at))}</span></li>`).join('')}</ul>` : '<p class="muted">Nothing merged yet.</p>'}` });
 }
 function openWave(w) {
-  const p = DATA.progress;
-  const items = p.tickets.filter((t) => String(t.wave) === String(w));
-  openTicketSet({ kind: 'wave', id: String(w), title: `Wave ${esc(w)}`, sub: 'Tickets that can run at the same time once the waves before them have merged.', items, attr: { idTip: 'The wave\'s number: the waves before it merge first.' }, computed: [
+  const items = DATA.progress.tickets.filter((t) => String(t.wave) === String(w));
+  const before = DATA.progress.tickets.filter((t) => t.wave && t.wave < Number(w) && !isDone(t));
+  openTicketSet({ kind: 'wave', id: String(w), title: `Wave ${esc(w)}`, sub: 'Tickets that can run at the same time once the waves before them have merged.', items, attr: { idTip: 'The wave\'s number: the waves before it merge first.', noRecord: true }, computed: [
     ['Features', uniq(items.map((t) => t.feature)).map(flink).join(', '), 'Features with tickets in it.'],
+    ['Waiting on', before.length ? list(before.map((t) => t.id), tlink) : '', 'Unmerged tickets in earlier waves.'],
   ] });
 }
 function openMilestone(key) {
   const i = key.lastIndexOf(':');
   const gid = key.slice(0, i), n = Number(key.slice(i + 1));
   const g = goalOf(gid), m = milestonesOf(g).find((x) => x.n === n);
-  if (!m) return showDrawer(`<h2 id="drawer-title">No milestone ${esc(key)}</h2>`);
+  if (!m) { drawerFor('milestone', key); return notFound('milestone', key, null, 'No such milestone.'); }
   const fs = new Set(m.features || []);
-  openTicketSet({ kind: 'milestone', id: key, title: `${esc(m.title)}`, sub: `Milestone ${n} of ${glink(gid)}`, items: DATA.progress.tickets.filter((t) => fs.has(t.feature)),
-    attr: { rec: gid, docType: 'goal', pick: (gf) => (gf.milestones || [])[n - 1] ?? null, idTip: 'Its goal\'s id and its number among the goal\'s milestones.' },
+  const unit = g.measure?.unit === '%' ? '%' : '';
+  const readings = (g.readings || []).map((x) => [Date.parse(x.at), x.value]);
+  openTicketSet({ kind: 'milestone', id: key, title: `${esc(m.title)}`, sub: `Milestone ${n} of ${glink(gid)}`, items: DATA.progress.tickets.filter((t) => fs.has(t.feature)), q: { rec: gid },
+    attr: { docType: 'goal', prefix: 'milestones[].', pick: (gf) => (gf.milestones || [])[n - 1] ?? null, idTip: 'Its goal\'s id and its number among the goal\'s milestones.' },
     computed: [
       ['Goal', glink(gid), 'The goal it is a milestone of.'],
       ['Status', esc(m.status ?? ''), 'met, current or later, from the goal\'s measure and its features.'],
       ['Forecast', m.eta ? `${esc(fmtDate(Date.parse(m.eta)))}${m.late ? ' <span class="badge high">late</span>' : ''}` : '', 'When it should be reached at the recent rate.'],
       ['Features', [...fs].map(flink).join(', '), 'Features planned toward it.'],
-    ] });
+    ],
+    extra: readings.length ? `<h3>Readings</h3>${lineChart([{ name: g.measure?.description || 'the measure', points: readings }], { marks: [{ value: m.target, label: `this milestone (${m.target}${unit})`, strong: true }], unit })}` : '' });
 }
 function openAct(id) {
+  drawerFor('act', id);
   const a = (DATA.ooda.acts || []).find((x) => x.id === id);
-  DRAWER = { kind: 'act', id };
-  if (!a) return showDrawer(`<h2 id="drawer-title">${esc(id)}</h2>${attrs({ id, rec: id, type: 'act' })}`);
+  const p = peekOf('act', id);
+  if (!a) return notFound('act', id, p, p?.error ? 'No such act.' : 'Older than the acts on the dashboard; its record is above.');
   const v = actView(a);
+  const d = a.decision ? (DATA.ooda.decisions || []).find((x) => x.id === a.decision && x.kind === 'decision') : null;
   showDrawer(`<h2 id="drawer-title">${v.head}</h2>
-    ${attrs({ id: a.id, rec: a.id, type: 'act', computed: [
+    ${attrs({ id, peek: p, type: 'act', computed: [
       ['Under', actUnder(a), 'What it carried out: a decision, your answer, a standing rule, or its own call.'],
-      ['Repaired', a.correction?.repaired ? esc(a.correction.repaired) : '', 'What the supervisor did about your correction.'],
     ] })}
     ${v.detail ? `<p class="ctx measure">${v.detail}</p>` : ''}
-    ${a.correction ? '' : a.decision ? '<p class="small muted">It carried out a decision: correct the decision if the call was wrong (Loop → Decide). If the call was sound and the act went wrong, that is a problem, not a trust drop.</p>' : '<p class="small muted">To correct it, use Correct on it in Loop → Act.</p>'}`);
+    ${d ? `<h3>The decision it carried out</h3><div class="card small"><div>${dlink(d.id, d.what)}</div>${d.rationale ? `<div class="act-detail">${linkify(d.rationale)}</div>` : ''}<div class="meta">${authorityWords(d.under)} · ${esc(when(d.at))}${d.correction ? ` · <span class="badge high">corrected</span> ${esc(d.correction.reason)}` : ''}</div></div>` : ''}
+    ${citedBlock(p, a)}
+    ${a.correction ? '' : a.decision ? '<p class="small muted">It carried out a decision: correct the decision if the call was wrong (Loop → Decide). If the call was sound and the act went wrong, that is a problem, not a trust drop.</p>' : '<p class="small muted">To correct it, use Correct on it in Loop → Act.</p>'}
+    ${historySection(p, id)}`);
+}
+// What a call rested on, inline: your answer as you gave it, or the standing rule's words.
+function restsOn(approvedBy) {
+  if (!approvedBy) return '';
+  if (approvedBy.startsWith('q-')) { const q = allQuestions().find((x) => x.id === approvedBy); return q ? `<h3>The answer it rests on</h3>${answeredCard(q)}` : ''; }
+  const k = (DATA.ooda.knowledge || []).find((x) => x.id === approvedBy);
+  return k ? `<h3>The standing rule it rests on</h3><div class="card small"><a class="linkish" href="#lesson/${encodeURIComponent(k.id)}">${esc(k.statement)}</a> <span class="muted">· ${esc(scopeWords(k.scope))}</span></div>` : '';
+}
+// Records an object cites, in their own words (from its peek).
+function citedBlock(p, o) {
+  const c = Object.entries(p?.cited || {}).filter(([id]) => !id.startsWith('q-') || !o?.approved_by || id !== o.approved_by);
+  return c.length ? `<h3>What it cites</h3><ul>${c.map(([id, x]) => `<li>${linkify(id)} <span class="muted">${esc(words(x.type))}${x.kind ? ` (${esc(words(x.kind))})` : ''}</span>${x.text ? `: ${linkify(String(x.text).slice(0, 160))}` : ''}</li>`).join('')}</ul>` : '';
 }
 function openDecision(id) {
+  drawerFor('decision', id);
   const r = (DATA.ooda.decisions || []).find((x) => x.id === id && ['decision', 'act'].includes(x.kind));
-  DRAWER = { kind: 'decision', id };
-  if (!r) return showDrawer(`<h2 id="drawer-title">${esc(id)}</h2>${attrs({ id, rec: id, type: 'decision' })}`);
+  const p = peekOf('decision', id);
+  if (!r) return notFound('decision', id, p, p?.error ? 'No such decision.' : 'Older than the decisions on the dashboard; its record is above.');
+  const now = (DATA.ooda.trust || []).find((x) => x.class === r.class);
+  const acts = r.kind === 'decision' ? r.acts.map((a) => (DATA.ooda.acts || []).find((y) => y.id === a) || { id: a }) : [];
   showDrawer(`<h2 id="drawer-title">${linkify(r.what)}</h2>
-    ${attrs({ id: r.id, rec: r.id, type: r.kind, computed: [
+    ${attrs({ id, peek: p, type: r.kind, computed: [
       ['Under', authorityWords(r.under), 'The trust it rested on when it was made.'],
-      ['Carried out by', r.kind === 'decision' ? (r.acts.length ? `<ul>${r.acts.map((a) => { const x = (DATA.ooda.acts || []).find((y) => y.id === a); return `<li><a class="linkish" href="#act/${encodeURIComponent(a)}">${x ? actView(x).head : esc(a)}</a></li>`; }).join('')}</ul>` : 'nothing yet') : '', 'The acts that cite it.'],
-      ['Repaired', r.correction?.repaired ? esc(r.correction.repaired) : '', 'What the supervisor did about your correction.'],
+      ['Its class now', now ? `${esc(RUNG_WORDS[now.rung])}${r.under?.rung && r.under.rung !== now.rung ? ` <span class="muted">(was ${esc(RUNG_WORDS[r.under.rung])} when decided)</span>` : ''}` : '', 'Where its kind of decision is on the trust ladder today, against when it was made.'],
     ] })}
-    ${r.correction ? '' : '<p class="small muted">To correct it, use Correct on it in Loop → Decide.</p>'}`);
+    ${restsOn(r.under?.approved_by)}
+    ${r.kind === 'decision' ? `<h3>Carried out by</h3>${acts.length ? `<ol class="tl">${acts.map((a) => `<li class="act"><time>${a.created_at ? esc(when(a.created_at)) : ''}</time><a class="linkish" href="#act/${encodeURIComponent(a.id)}">${a.what ? actView(a).head : esc(a.id)}</a></li>`).join('')}</ol>` : '<p class="muted">Nothing yet.</p>'}` : ''}
+    ${r.correction ? '' : '<p class="small muted">To correct it, use Correct on it in Loop → Decide.</p>'}
+    ${historySection(p, id)}`);
 }
 // A retro's own date is its write-up's (retros/<date>.md); the closing line can come a day later.
 const retroDate = (r) => { const m = /(\d{4}-\d{2}-\d{2})\.md$/.exec(r.file || ''); return fmtDate(m ? Date.parse(`${m[1]}T12:00:00Z`) : Date.parse(r.at)); };
@@ -2140,112 +2390,165 @@ const retroRef = (x) => {
   return linkify(x);
 };
 function openRetro(id) {
+  drawerFor('retro', id);
   const all = DATA.ooda.retro?.all || [];
   const i = all.findIndex((x) => x.id === id);
   const r = all[i];
-  DRAWER = { kind: 'retro', id };
-  if (!r) return showDrawer(`<h2 id="drawer-title">${esc(id)}</h2>${attrs({ id, rec: id, type: 'observation' })}`);
+  const p = peekOf('retro', id);
+  if (!r) return notFound('retro', id, p, 'No such retro.');
   const file = r.file ? { title: `The write-up (${r.file.split('/').pop()})`, path: `docs/devteam/${r.file}` } : null;
   const nav = (x, w) => (x ? `<a class="linkish" href="#retro/${encodeURIComponent(x.id)}">${w} ${esc(retroDate(x))}</a>` : '');
+  const nums = p?.numbers;
+  const keys = nums?.now ? uniq([...Object.keys(nums.now), ...Object.keys(nums.prev || {})]) : [];
+  const val = (v) => (v === null || v === undefined ? '–' : typeof v === 'object' ? fmtObj(v) || '–' : esc(v));
   showDrawer(`<h2 id="drawer-title">${esc(retroDate(r))}</h2>
-    ${attrs({ id: r.id, rec: r.id, type: 'observation', computed: [
+    ${attrs({ id, peek: p, type: 'observation', computed: [
       ['What it decided', r.refs.length ? `<ul>${r.refs.map((x) => `<li>${retroRef(x)}</li>`).join('')}</ul>` : '', 'The lessons, decisions and acts it recorded, in words.'],
       ['Write-up', file ? `<a class="linkish" href="${esc(fileHref(file))}">${esc(file.title)}</a>` : '', 'The retro\'s document.'],
     ] })}
     <p class="ctx measure">${linkify(r.summary)}</p>
-    <p class="meta">${[nav(all[i + 1], '← the one before,'), nav(all[i - 1], 'the next,')].filter(Boolean).join(' · ')}</p>`);
+    ${keys.length ? `<h3>The numbers</h3><div class="scroll"><table class="nums"><tr><th></th><th>This retro</th><th>The one before</th></tr>${keys.map((k) => `<tr><td>${esc(words(k))}</td><td>${val(nums.now[k])}</td><td>${val(nums.prev?.[k])}</td></tr>`).join('')}</table></div>` : nums ? '<p class="muted">Its write-up has no numbers block.</p>' : ''}
+    <p class="meta">${[nav(all[i + 1], '← the one before,'), nav(all[i - 1], 'the next,')].filter(Boolean).join(' · ')}</p>
+    ${historySection(p, id)}`);
 }
+// Which agents' instructions a piece of knowledge goes into, from its scope.
+function whoGets(k) {
+  const sc = k.scope || 'project';
+  const ts = [...ticketMap().values()].filter((t) => !isDone(t));
+  if (sc === 'project') return 'every agent: the supervisor, planners and workers';
+  if (sc.startsWith('component:')) { const c = sc.slice(10); const xs = ts.filter((t) => t.component === c); return `workers on component ${esc(c)}${xs.length ? `: now ${list(xs.map((t) => t.id), tlink)}` : ''}`; }
+  if (sc.startsWith('feature:')) { const f = sc.slice(8); const xs = ts.filter((t) => t.feature === f); return `the planner and workers of ${flink(f)}${xs.length ? `: now ${list(xs.map((t) => t.id), tlink)}` : ''}`; }
+  if (sc.startsWith('class:')) return `the supervisor, when it makes a ${esc(words(sc.slice(6)).toLowerCase())} call`;
+  if (sc.startsWith('chore:')) return `the worker on the ${esc(sc.slice(6))} chore`;
+  return esc(sc);
+}
+const obsList = (os) => (os?.length ? `<ul>${os.map((o) => `<li>${o.severity != null ? `<span class="badge ${sevBadge(o.severity)}">${esc(o.severity)}</span> ` : ''}${linkify(o.detail)} <span class="muted">· ${esc(words(o.kind))} · ${esc(who(o.by))} · ${esc(when(o.at))}</span></li>`).join('')}</ul>` : '');
 function openLesson(id) {
+  drawerFor('lesson', id);
   const k = (DATA.ooda.knowledge || []).find((x) => x.id === id);
-  DRAWER = { kind: 'lesson', id };
-  if (!k) return showDrawer(`<h2 id="drawer-title">${esc(id)}</h2>${attrs({ id, rec: id, type: 'knowledge' })}`);
+  const p = peekOf('lesson', id);
+  if (!k) return notFound('knowledge', id, p, p?.error ? 'No such record.' : 'Retired, or older than the dashboard shows; its record is above.');
+  const obs = p?.related || [];
   showDrawer(`<h2 id="drawer-title">${esc(k.statement.length > 80 ? `${k.statement.slice(0, 80)}…` : k.statement)}</h2>
-    ${attrs({ id: k.id, rec: k.id, type: 'knowledge' })}
-    ${k.status === 'candidate' ? '<p><a class="linkish" href="#inbox">Keep or retire it in the Inbox</a></p>' : ''}`);
+    ${attrs({ id, peek: p, type: 'knowledge', computed: [
+      ['Goes to', k.status === 'accepted' ? whoGets(k) : `nobody yet: it is ${esc(k.status)}`, 'Whose instructions it is put into, from its scope; only accepted knowledge is.'],
+    ] })}
+    ${k.status === 'candidate' ? '<p><a class="linkish" href="#inbox">Keep or retire it in the Inbox</a></p>' : ''}
+    ${obs.length ? `<h3>The signals it came from</h3>${obsList(obs)}` : ''}
+    ${citedBlock(p, k)}
+    ${historySection(p, id)}`);
 }
 function openProblem(id) {
-  const p = (DATA.ooda.problems || []).find((x) => x.id === id);
-  DRAWER = { kind: 'problem', id };
-  if (!p) return showDrawer(`<h2 id="drawer-title">${esc(id)}</h2>${attrs({ id, rec: id, type: 'problem' })}`);
-  showDrawer(`<h2 id="drawer-title">${esc(p.title)}</h2>
-    ${attrs({ id: p.id, rec: p.id, type: 'problem' })}
-    <p><span class="badge ${sevBadge(p.severity)}">sev ${esc(p.severity)}</span><span class="badge">${p.realized ? 'issue' : 'risk'}</span></p>`);
+  drawerFor('problem', id);
+  const pb = (DATA.ooda.problems || []).find((x) => x.id === id);
+  const p = peekOf('problem', id);
+  const rec = p?.record?.fields;
+  if (!pb && !rec) return notFound('problem', id, p, p?.error ? 'No such problem.' : '');
+  const x = pb || { ...rec, id };
+  const statuses = (p?.history || []).filter((l) => l.id === id && (l.op === 'new' || l.status !== undefined));
+  const goals = (x.threatens || []).map((gid) => goalOf(gid)).filter(Boolean);
+  showDrawer(`<h2 id="drawer-title">${esc(x.title)}</h2>
+    ${attrs({ id, peek: p, type: 'problem' })}
+    ${statuses.length ? `<h3>Status</h3><div class="status-trail">${statuses.map((l) => `<span class="badge">${esc(l.status ?? 'open')}</span><span class="muted small">${esc(when(l.at))}</span>`).join('<span class="muted">→</span>')}</div>` : ''}
+    ${goals.length ? `<h3>What it puts at risk</h3><ul>${goals.map((g) => { const fc = g.forecast; const last = (fc?.milestones || []).slice(-1)[0]; return `<li>${glink(g.id)}: ${last?.eta ? `ETA ${esc(last.eta)}` : 'no ETA yet'}${g.horizon ? ` against ${fmtDay(g.horizon)}` : ''}${fc?.past_horizon ? ' <span class="badge high">after the horizon</span>' : ''}${(fc?.milestones || []).some((m) => m.late) ? ' <span class="badge high">a milestone is late</span>' : ''}</li>`; }).join('')}</ul>` : ''}
+    ${p?.related?.length ? `<h3>Related signals</h3>${obsList(p.related)}` : ''}
+    ${citedBlock(p, x)}
+    ${historySection(p, id)}`);
 }
 async function openThread(mid) {
-  DRAWER = { kind: 'thread', id: mid };
+  drawerFor('thread', mid);
   const by = mid.replace(/^m-\d{8}-\d{9}-/, '');
   const open = (DATA.open_messages || []).find((m) => m.id === mid);
   const ticket = ticketMap().has(by) ? by : ticketMap().has(open?.to) ? open.to : null;
-  const head = (title) => `<h2 id="drawer-title">${title}</h2>${attrs({ id: mid, rec: mid, type: 'message', computed: [['From', esc(who(by)), 'Who sent it.']] })}`;
-  if (!ticket) return showDrawer(`${head('Message')}<p class="muted">Its thread is on the ticket's timeline.</p>`);
-  showDrawer(`${head(`Thread on ${tlink(ticket)}`)}<p class="muted">Loading the thread…</p>`);
-  let v;
-  try { const r = await fetch(`/api/timeline?id=${encodeURIComponent(ticket)}`); v = await r.json(); if (!r.ok) throw new Error(v.error || r.status); } catch (e) { return showDrawer(`${head('Message')}<p class="err">Could not load the thread: ${esc(e.message || e)}</p>`); }
-  if (DRAWER.id !== mid) return;
-  const msgs = (v.lines || []).filter((l) => l.type === 'message');
+  const p = peekOf('thread', mid);
+  const tp = ticket ? peekOf('ticket', ticket) : null;
+  const msgs = (tp?.history || []).filter((l) => l.type === 'message' && l.op === 'new');
   const byId = new Map(msgs.map((m) => [m.id, m]));
   let root = byId.get(mid);
   while (root?.re && byId.has(root.re)) root = byId.get(root.re);
   const inThread = (m) => { let x = m; while (x) { if (x.id === root?.id) return true; x = x.re ? byId.get(x.re) : null; } return false; };
   const thread = root ? msgs.filter(inThread).sort((a, b) => a.at.localeCompare(b.at)) : [];
-  showDrawer(`${head(`Thread on ${tlink(ticket)}`)}
-    ${thread.length ? thread.map((m) => `<div class="card small ${m.id === mid ? 'qcard' : ''}"><div class="meta">${esc(who(m.by))} → ${esc(who(m.to))} · ${esc(words(m.kind || 'message'))} · ${esc(when(m.at))}</div><div>${linkify(m.text)}</div></div>`).join('') : `<p class="muted">Not on ${esc(ticket)}'s timeline.</p>`}`);
+  showDrawer(`<h2 id="drawer-title">${ticket ? `Thread on ${tlink(ticket)}` : 'Message'}</h2>
+    ${attrs({ id: mid, peek: p, type: 'message', computed: [['From', esc(who(by)), 'Who sent it.']] })}
+    ${!ticket ? '<p class="muted">Its thread is on the ticket\'s timeline.</p>' : tp === undefined ? '<p class="muted">Loading the thread…</p>' : thread.length ? `<h3>The thread</h3>${thread.map((m) => `<div class="card small ${m.id === mid ? 'qcard' : ''}"><div class="meta">${esc(who(m.by))} → ${esc(who(m.to))} · ${esc(words(m.kind || 'message'))} · ${esc(when(m.at))}</div><div>${linkify(m.text)}</div></div>`).join('')}` : `<p class="muted">Not on ${esc(ticket)}'s timeline.</p>`}
+    ${historySection(p, mid)}`);
 }
 function openPlanner(feature) {
-  const p = (DATA.planners || []).find((x) => x.feature === feature);
-  DRAWER = { kind: 'planner', id: feature };
-  if (!p) return showDrawer(`<h2 id="drawer-title">${esc(feature)}</h2>${attrs({ id: `plan-${feature}`, idTip: 'The planner\'s name: plan- and the feature it plans.' })}<p class="muted">No planner is working on it; its plan may have landed already.</p>`);
-  showDrawer(`<h2 id="drawer-title">Planning ${esc(p.title)}</h2>
-    ${attrs({ id: `plan-${p.feature}`, idTip: 'The planner\'s name: plan- and the feature it plans. Its tmux window and log file use it.', computed: [
-      ['Status', `${esc(cap(ago(p.minutes_silent)))}${p.waiting ? ` · <span class="badge high">${p.waiting.kind === 'limit' ? 'usage limit' : 'waiting on a prompt'}</span> ${esc(p.waiting.line)}` : ''}${!p.window ? ` · <span class="badge medium">window gone</span> ${esc(p.problem || '')}` : ''}`, 'How long since it last did anything, and whether it is stuck.'],
-      ['Feature', flink(p.feature), 'The feature it is planning.'],
-      ['For goal', p.goals.map(glink).join(', '), 'The goals the feature serves.'],
-      ['Tickets so far', esc(p.tickets), 'Tickets it has written into its plan.'],
-      ['Waiting on you', (p.waiting_on_owner || []).length ? `<ul>${p.waiting_on_owner.map((id) => `<li>${qlink(id)}</li>`).join('')}</ul>` : '', 'Your open questions it is waiting on.'],
-      ['Asked the supervisor', p.waiting_on_supervisor.length ? `<ul>${p.waiting_on_supervisor.map((m) => `<li>${esc(MSG_WORDS[m.kind] || m.kind)}: ${linkify(m.text)}</li>`).join('')}</ul>` : '', 'Messages to the supervisor it has had no reply to.'],
-      ['Branch', `<code>${esc(p.branch)}</code>`, 'Where its plan is being written.'],
+  drawerFor('planner', feature);
+  const pl = (DATA.planners || []).find((x) => x.feature === feature);
+  const p = peekOf('planner', feature);
+  const idTip = 'The planner\'s name: plan- and the feature it plans. Its tmux window and log file use it.';
+  if (!pl) return showDrawer(`<h2 id="drawer-title">${esc(feature)}</h2>${attrs({ id: `plan-${feature}`, idTip, peek: p, noRecord: true })}<p class="muted">No planner is working on it; its plan may have landed already.</p>${historySection(p, `plan-${feature}`)}`);
+  const draft = (p?.draft || []).map((t) => ({ ...t, stage: 'planned', depends_on: t.depends_on || [] }));
+  showDrawer(`<h2 id="drawer-title">Planning ${esc(pl.title)}</h2>
+    ${attrs({ id: `plan-${pl.feature}`, idTip, peek: p, noRecord: true, computed: [
+      ['Status', `${esc(cap(ago(pl.minutes_silent)))}${pl.waiting ? ` · <span class="badge high">${pl.waiting.kind === 'limit' ? 'usage limit' : 'waiting on a prompt'}</span> ${esc(pl.waiting.line)}` : ''}${!pl.window ? ` · <span class="badge medium">window gone</span> ${esc(pl.problem || '')}` : ''}`, 'How long since it last did anything, and whether it is stuck.'],
+      ['Feature', flink(pl.feature), 'The feature it is planning.'],
+      ['For goal', pl.goals.map(glink).join(', '), 'The goals the feature serves.'],
+      ['Tickets so far', esc(pl.tickets), 'Tickets it has written into its plan.'],
+      ['Waiting on you', (pl.waiting_on_owner || []).length ? `<ul>${pl.waiting_on_owner.map((x) => `<li>${qlink(x)}</li>`).join('')}</ul>` : '', 'Your open questions it is waiting on.'],
+      ['Asked the supervisor', pl.waiting_on_supervisor.length ? `<ul>${pl.waiting_on_supervisor.map((m) => `<li>${esc(MSG_WORDS[m.kind] || m.kind)}: ${linkify(m.text)}</li>`).join('')}</ul>` : '', 'Messages to the supervisor it has had no reply to.'],
+      ['Plan reviews', p?.plan_reviews ? reviewList(p.plan_reviews) || 'none yet' : '', 'Reviews of its plan so far.'],
+      ['Branch', `<code>${esc(pl.branch)}</code>`, 'Where its plan is being written.'],
     ] })}
-    <p class="meta">Its plan lands as one reviewed PR; until then its tickets aren't on the board.</p>`);
+    ${designBlock(p?.design, 'Its design')}
+    ${draft.length ? `<h3>Its draft</h3><p class="small muted">The tickets its plan holds so far; they reach the board when its plan PR lands.</p><div class="board board-peek" style="--cols:1">${boardCols(draft, new Set(), { only: true, inert: true })}</div>${draft.length > 1 ? depGraph(draft) : ''}` : ''}
+    <p class="meta">Its plan lands as one reviewed PR; until then its tickets aren't on the board.</p>
+    ${historySection(p, `plan-${feature}`)}`);
 }
 function openQuestion(id) {
   const q = allQuestions().find((x) => x.id === id);
-  if (!q) { DRAWER = { kind: 'q', id }; return showDrawer(`<h2 id="drawer-title">${esc(id)}</h2>${attrs({ id, rec: id, type: 'question' })}`); }
-  if (q.status === 'open') { closeDrawer(); location.hash = 'inbox'; setTimeout(() => document.getElementById(`q-${id}`)?.scrollIntoView({ block: 'center' }), 0); return; }
-  DRAWER = { kind: 'q', id };
-  const list = choicesOf(q);
+  if (q?.status === 'open') { closeDrawer(); location.hash = 'inbox'; setTimeout(() => document.getElementById(`q-${id}`)?.scrollIntoView({ block: 'center' }), 0); return; }
+  drawerFor('q', id);
+  const p = peekOf('q', id);
+  if (!q) return notFound('question', id, p, p?.error ? 'No such question.' : '');
+  const list2 = choicesOf(q);
+  const used = (DATA.ooda.decisions || []).find((x) => x.kind === 'answer' && x.id === id)?.acts || [];
+  const blocked = (q.blocks || []).map((b) => ticketMap().get(b) ? `${tlink(b)} <span class="muted">· ${esc(STAGE_WORDS[ticketMap().get(b).stage] || ticketMap().get(b).stage)}</span>` : linkify(b));
+  const took = q.answered_at && q.asked_at ? Date.parse(q.answered_at) - Date.parse(q.asked_at) : null;
   showDrawer(`<h2 id="drawer-title">${linkify(q.question)}</h2>
-    ${attrs({ id: q.id, rec: q.id, type: 'question', computed: [
+    ${attrs({ id, peek: p, type: 'question', computed: [
       ['Status', esc(q.status), 'open, answered, defaulted or withdrawn.'],
-      ['Answered', q.answered_at ? `${esc(when(q.answered_at))} by ${esc(q.answered_by === 'owner' ? 'you' : q.answered_by)}` : '', 'When it was settled, and by whom.'],
+      ['Settled', q.answered_at ? `${esc(when(q.answered_at))}${q.answered_by ? ` by ${esc(q.answered_by === 'owner' ? 'you' : q.answered_by)}` : ''}` : '', 'When it was answered, defaulted or withdrawn, and by whom.'],
+      ['Took', took != null && ['answered', 'defaulted'].includes(q.status) ? esc(took < 3600e3 ? `${Math.max(1, Math.round(took / 60e3))} minutes` : took < 2 * DAY ? `${(took / 3600e3).toFixed(1)} hours` : `${(took / DAY).toFixed(1)} days`) : '', 'From asking to the answer.'],
       ['Matched', q.matched == null ? '' : q.matched ? 'yes: you went with its recommendation' : 'no: you chose otherwise', 'Whether your answer was its recommendation; this is the evidence for more trust.'],
     ] })}
     ${q.context ? `<p class="ctx measure">${linkify(q.context)}</p>` : ''}
-    ${list.length ? `<ul class="measure">${list.map((c) => `<li><b>${esc(c.label)}</b>${c.rec ? ' <span class="tag muted">(recommended)</span>' : ''}${c.detail ? ` · ${linkify(c.detail)}` : ''}${c.effect ? ` · For users: ${linkify(c.effect)}` : ''}</li>`).join('')}</ul>` : ''}
+    ${list2.length ? `<ul class="measure">${list2.map((c) => `<li><b>${esc(c.label)}</b>${c.rec ? ' <span class="tag muted">(recommended)</span>' : ''}${c.detail ? ` · ${linkify(c.detail)}` : ''}${c.effect ? ` · For users: ${linkify(c.effect)}` : ''}</li>`).join('')}</ul>` : ''}
     ${(q.links || []).length ? `<div class="links">${q.links.map(linkOf).join('')}</div>` : ''}
-    ${answeredCard(q)}`);
+    ${answeredCard(q)}
+    ${blocked.length ? `<h3>What it held up</h3><ul>${blocked.map((b) => `<li>${b}</li>`).join('')}</ul>` : ''}
+    ${used.length ? `<h3>What used it</h3><ul>${used.map((x) => `<li>${x.startsWith('d-') ? dlink(x, decisionTitle(x)) : linkify(x)}</li>`).join('')}</ul>` : ''}
+    ${historySection(p, id)}`);
 }
+const FILES = new Map();
 async function openFile(params) {
-  DRAWER = { kind: 'file', id: params.get('path') };
-  const p = params.get('path'), title = params.get('title') || p;
-  const url = `/api/file?${new URLSearchParams({ path: p, ...(params.get('ref') ? { ref: params.get('ref') } : {}) })}`;
-  const ext = (p.split('.').pop() || '').toLowerCase();
-  const fa = () => attrs({ id: p, idTip: 'Its path in the repository.', computed: [['Version', `<code>${esc(params.get('ref') || 'main')}</code>`, 'The branch or commit it is read from; committed content only.']] });
-  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext)) return showDrawer(`<h2 id="drawer-title">${esc(title)}</h2>${fa()}<div class="viewer"><img src="${esc(url)}" alt="${esc(title)}"></div>`);
-  if (['html', 'pdf'].includes(ext)) return showDrawer(`<h2 id="drawer-title">${esc(title)}</h2>${fa()}<div class="viewer"><iframe sandbox src="${esc(url)}" title="${esc(title)}"></iframe></div><p class="meta"><a href="${esc(url)}" target="_blank" rel="noopener">Open in a new tab</a></p>`);
-  showDrawer(`<h2 id="drawer-title">${esc(title)}</h2>${fa()}<p class="loading">Loading…</p>`);
-  try {
-    const r = await fetch(url); const txt = await r.text(); if (!r.ok) throw new Error(txt);
-    const where = `<code>${esc(p)}</code>${params.get('ref') ? ` at <code>${esc(params.get('ref'))}</code>` : ''}`;
-    // Markdown renders (sanitized: agents write these files) with a toggle back to the raw text.
-    const isMd = ['md', 'markdown'].includes(ext) && window.marked && window.DOMPurify;
-    const mode = (() => { try { return localStorage.getItem('devteam.mdview') || 'rendered'; } catch { return 'rendered'; } })();
-    const rendered = isMd ? DOMPurify.sanitize(marked.parse(txt, { gfm: true }), { FORBID_TAGS: ['style', 'form', 'input'], FORBID_ATTR: ['style'] }) : '';
-    showDrawer(`<h2 id="drawer-title">${esc(title)}</h2>${fa()}
-      <div class="viewbar"><span class="grow">${where}</span>${isMd ? `<span class="seg2" role="group" aria-label="View"><button type="button" data-mdview="rendered" aria-pressed="${mode === 'rendered'}">Rendered</button><button type="button" data-mdview="raw" aria-pressed="${mode === 'raw'}">Raw</button></span>` : ''}</div>
-      <div class="viewer">${isMd ? `<div class="md" data-md="rendered" ${mode === 'raw' ? 'hidden' : ''}>${rendered}</div>` : ''}<pre data-md="raw" ${isMd && mode !== 'raw' ? 'hidden' : ''}>${esc(txt)}</pre></div>`);
-    if (isMd) renderMermaid($('drawer-body').querySelector('.md'));
+  const path = params.get('path'), title = params.get('title') || path, ref = params.get('ref');
+  drawerFor('file', path, params);
+  const url = `/api/file?${new URLSearchParams({ path, ...(ref ? { ref } : {}) })}`;
+  const ext = (path.split('.').pop() || '').toLowerCase();
+  const p = peekOf('file', path);
+  const head = `<h2 id="drawer-title">${esc(title)}</h2>${attrs({ id: path, idTip: 'Its path in the repository.', peek: p, noRecord: true, computed: [['Version', `<code>${esc(ref || 'main')}</code>`, 'The branch or commit it is read from; committed content only.'], ['Commits', p?.history?.length ? esc(p.history.length) : '', 'Commits that changed it (the latest 60).']] })}`;
+  const tail = historySection(p, path);
+  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext)) return showDrawer(`${head}<div class="viewer"><img src="${esc(url)}" alt="${esc(title)}"></div>${tail}`);
+  if (['html', 'pdf'].includes(ext)) return showDrawer(`${head}<div class="viewer"><iframe sandbox src="${esc(url)}" title="${esc(title)}"></iframe></div><p class="meta"><a href="${esc(url)}" target="_blank" rel="noopener">Open in a new tab</a></p>${tail}`);
+  let txt = FILES.get(url);
+  if (txt === undefined) {
+    showDrawer(`${head}<p class="loading">Loading…</p>${tail}`);
+    try { const r = await fetch(url); const t = await r.text(); if (!r.ok) throw new Error(t); FILES.set(url, txt = t); }
+    catch (e) { return showDrawer(`${head}<p class="err">${esc(e.message)}</p>${tail}`); }
+    if (DRAWER.kind !== 'file' || DRAWER.id !== path) return;
   }
-  catch (e) { showDrawer(`<h2 id="drawer-title">${esc(title)}</h2>${fa()}<p class="err">${esc(e.message)}</p>`); }
+  const where = `<code>${esc(path)}</code>${ref ? ` at <code>${esc(ref)}</code>` : ''}`;
+  // Markdown renders (sanitized: agents write these files) with a toggle back to the raw text.
+  const isMd = ['md', 'markdown'].includes(ext) && window.marked && window.DOMPurify;
+  const mode = (() => { try { return localStorage.getItem('devteam.mdview') || 'rendered'; } catch { return 'rendered'; } })();
+  const rendered = isMd ? DOMPurify.sanitize(marked.parse(txt, { gfm: true }), { FORBID_TAGS: ['style', 'form', 'input'], FORBID_ATTR: ['style'] }) : '';
+  if (isMd) AFTER.push(() => renderMermaid($('drawer-body').querySelector('.md')));
+  showDrawer(`${head}
+    <div class="viewbar"><span class="grow">${where}</span>${isMd ? `<span class="seg2" role="group" aria-label="View"><button type="button" data-mdview="rendered" aria-pressed="${mode === 'rendered'}">Rendered</button><button type="button" data-mdview="raw" aria-pressed="${mode === 'raw'}">Raw</button></span>` : ''}</div>
+    <div class="viewer">${isMd ? `<div class="md" data-md="rendered" ${mode === 'raw' ? 'hidden' : ''}>${rendered}</div>` : ''}<pre data-md="raw" ${isMd && mode !== 'raw' ? 'hidden' : ''}>${esc(txt)}</pre></div>
+    ${tail}`);
 }
 // Mermaid fenced blocks in markdown render as diagrams. The library loads from the CDN only when a
 // document has one; offline, or on a diagram with an error, the source stays as a code block.
@@ -2301,7 +2604,12 @@ function route() {
 window.addEventListener('hashchange', () => { if (DATA) route(); });
 $('drawer-close').addEventListener('click', closeDrawer);
 $('scrim').addEventListener('click', () => (RV ? leaveReview() : closeDrawer()));
-document.addEventListener('keydown', (e) => { if (e.key !== 'Escape') return; if (RV) leaveReview(); else if (!$('drawer').hidden) closeDrawer(); });
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  // Escape on an attribute's key closes its tooltip, not the drawer
+  if (document.activeElement?.classList?.contains('attr-k')) return void document.activeElement.blur();
+  if (RV) leaveReview(); else if (!$('drawer').hidden) closeDrawer();
+});
 document.addEventListener('click', (e) => { if (e.target.closest('[data-rv-close]')) leaveReview(); });
 // a review opened from the dashboard closes back to it; one opened from a link goes to the Inbox
 let RV_FROM = null;
@@ -2442,8 +2750,7 @@ function render(d) {
     m.gates.slowest_tests.length ? `<div><h3>Slowest tests</h3>${m.gates.slowest_tests.map((t) => `<div class="card"><code>${esc(t.name)}</code> <span class="muted">${t.median_seconds}s</span></div>`).join('')}</div>` : '',
   ].join('');
 
-  if (DRAWER.kind === 'ticket') openTicket(DRAWER.id, { quiet: true });
-  else refreshAttrs();
+  refreshDrawer();
   // last, so every section that holds an input is drawn before its half-typed value comes back
   for (const [sel, v] of kept) { const el = document.querySelector(sel); if (el) el.value = v; }
   for (const sel of keptChecks) { const el = document.querySelector(sel); if (el) el.checked = true; }
