@@ -3166,8 +3166,12 @@ test('fleet park: every session stops with a handoff, and a clone elsewhere pick
       let pane = '';
       for (let i = 0; i < 150 && !/env -u/.test(pane); i++) { pane = spawnSync('tmux', ['capture-pane', '-p', '-J', '-t', `devteam:${ID}`], { env: env({}), encoding: 'utf8' }).stdout ?? ''; Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100); }
       spawnSync('tmux', ['kill-server'], { env: env({}) });
-      for (const k of ['CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION']) assert.match(pane, new RegExp(`env (-u \\w+ )*-u ${k} (-u \\w+ )*true `), `the agent starts without the supervisor's session marker ${k}`);
-      assert.doesNotMatch(pane, /-u CLAUDE_CONFIG_DIR/, 'settings the owner exports stay');
+      // The keys arrive before or after the shell draws its prompt, depending on load. After it, the
+      // shell's line editor wraps the command at the pane's width with bare newlines that -J doesn't
+      // join, so the command is matched with those taken out.
+      const typed = pane.replace(/\n/g, '');
+      for (const k of ['CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION']) assert.match(typed, new RegExp(`env (-u \\w+ )*-u ${k} (-u \\w+ )*true `), `the agent starts without the supervisor's session marker ${k}`);
+      assert.doesNotMatch(typed, /-u CLAUDE_CONFIG_DIR/, 'settings the owner exports stay');
       assert.equal(rs.status, 0, rs.stderr);
       assert.match(rs.stderr, /no worker session to resume for ch-01-tidy: its worktree was just made here.*starting it fresh with agent_command and its handoff note/);
       assert.equal(g(['rev-parse', 'HEAD'], nw), g(['rev-parse', `origin/ticket/${ID}`], neu), 'the worktree continues the pushed branch, not main');
