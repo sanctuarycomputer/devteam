@@ -517,8 +517,18 @@ function fold(all) {
 function holdRefusal(h, cur, curBy, cls) {
   if (cls === 'owner') return null;
   if (cls !== 'supervisor') return `${cls} may not change a goal's hold`;
-  if (h.undoes) return cur.fleet === h.undoes ? null : `this goal's hold is no longer the one ${h.undoes} set, so that fleet op doesn't undo it`;
-  if (h.fleet) return ['drain', 'park'].includes(h.mode) ? null : 'a fleet op drains or parks';
+  // An undo puts back exactly the hold the fleet op recorded as prior, nothing else.
+  if (h.undoes) {
+    if (cur.fleet !== h.undoes) return `this goal's hold is no longer the one ${h.undoes} set, so that fleet op doesn't undo it`;
+    const p = cur.prior ?? { mode: 'run' };
+    return h.mode === p.mode && (h.fleet ?? null) === (p.fleet ?? null) ? null : `undoing ${h.undoes} puts back ${p.mode}${p.fleet ? ` (${p.fleet})` : ''}, not ${h.mode}`;
+  }
+  // A fleet op only tightens (drain a running goal, park one not parked) and records what it replaced.
+  if (h.fleet) {
+    if (!['drain', 'park'].includes(h.mode)) return 'a fleet op drains or parks';
+    if (h.mode === 'drain' ? cur.mode !== 'run' : cur.mode === 'park') return `a fleet ${h.mode} doesn't change a goal on ${cur.mode}`;
+    return h.prior?.mode === cur.mode && (h.prior?.fleet ?? null) === (cur.fleet ?? null) ? null : `a fleet op records the hold it replaces (${cur.mode}) as prior`;
+  }
   if (h.mode === 'drain') return cur.mode === 'run' ? null : `the supervisor drains only a running goal (this one is on ${cur.mode})`;
   if (h.mode === 'run') return cur.mode === 'drain' && curBy === 'supervisor' && !cur.fleet ? null : 'the supervisor releases only a drain it set';
   return 'only the owner parks a single goal (the supervisor may fleet park)';
