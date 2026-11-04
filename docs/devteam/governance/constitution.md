@@ -42,7 +42,7 @@ Some owner decisions can be handed to the supervisor a step at a time, as eviden
     "production-migration": { "ceiling": 3, "start": 1, "about": "run a rollback-safe migration against production data" }
   },
   "constitutional": ["merge-word", "approve-feature-plan", "merge-chore", "worker-slots", "replan-within-feature", "add-ticket", "approve-spec", "approve-plan", "approve-design-change", "contract-ruling", "improvement-trial", "release-staging", "goal-readiness", "apply-default", "withdraw-question", "recovery", "carry-answer", "drain", "undrain", "goal-hold", "fleet-drain", "fleet-park", "fleet-undrain", "fleet-unpark"],
-  "owner_only": ["one-way-door", "check-override", "governance-edit", "process-edit", "gate-change", "goal-change", "new-dependency"],
+  "owner_only": ["one-way-door", "check-override", "governance-edit", "process-edit", "gate-change", "goal-change", "goal-met", "new-dependency"],
   "reasons": [
     { "id": "below-rung", "means": "the class is on the ladder and the supervisor isn't trusted to act alone yet" },
     { "id": "owner-only", "means": "the constitution reserves this to the owner" },
