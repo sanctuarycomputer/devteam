@@ -1399,6 +1399,7 @@ test('devteam kit', async (t) => {
       assert.ok(pq.history.length && pq.history.every((l, i) => !i || pq.history[i - 1].at <= l.at));
       const pt = await (await peek({ kind: 'ticket', id: 'bill-01-card' })).json();
       assert.ok(pt.ticket && pt.deps && Array.isArray(pt.spend) && pt.history.some((l) => l.type === 'gate'));
+      assert.ok(pt.history.every((l) => !('tests' in l) && l.type !== 'spend'), 'no per-test bulk or spend lines in a history');
       const own = pt.history.find((l) => l.id === 'bill-01-card' && l.op === 'set');
       assert.ok(own && own.prev, "a set line on the object carries what it replaced");
       const pg = await (await peek({ kind: 'goal', id: G })).json();

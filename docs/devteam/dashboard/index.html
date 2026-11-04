@@ -1930,7 +1930,7 @@ function attrs({ id, idTip, peek, type, docType, pick = null, prefix = '', compu
   const c = { id, record: r, set_by: r?.set_by ?? {}, ...ctx };
   const made = r && !pick ? attrRow('Created', `${esc(when(r.created_at))} by ${esc(who(r.created_by))}`, 'When the record was created, and by whom.') + (r.updated_at ? attrRow('Last changed', `${esc(when(r.updated_at))} by ${esc(who(r.updated_by))}`, 'The latest change to any of its fields, and who made it.') : '') : '';
   const stored = fields ? storedRows(type, fields, docType ?? type, c, prefix)
-    : noRecord ? '' : peek === undefined ? '<dt class="muted">…</dt><dd class="muted">loading</dd>' : '<dt class="muted">Record</dt><dd class="muted">not in the log</dd>';
+    : noRecord ? '' : peek === undefined ? '<dt class="muted">…</dt><dd class="muted">loading</dd>' : peek?.transient ? '<dt class="muted">Record</dt><dd class="muted">could not load it just now</dd>' : '<dt class="muted">Record</dt><dd class="muted">not in the log</dd>';
   const comp = computed.filter((x) => x && x[1]).map(([l, h, t]) => attrRow(l, h, t)).join('');
   return `<section class="attrs"><dl>${attrRow('ID', `<code>${esc(id)}</code>`, idTip ?? tipFor('_', 'id'))}${stored}${made}</dl>${comp ? `<h4 class="attrs-h">Computed</h4><dl>${comp}</dl>` : ''}</section>`;
 }
@@ -1938,11 +1938,16 @@ function attrs({ id, idTip, peek, type, docType, pick = null, prefix = '', compu
 // ---- peeks: one fetch per object, kept, fetched again on each refresh ----
 const PEEKS = new Map();
 const PEEK_FLIGHT = new Set();
+// A failure that isn't "no such object" (the server restarting, a spawn timing out) is not kept:
+// the drawer says it couldn't load and tries again on the next refresh or open.
+const PEEK_FAIL = new Map();
 const peekKey = (kind, id) => `${kind}:${id}`;
 function peekOf(kind, id, q = {}) {
   const k = peekKey(kind, id);
-  if (!PEEKS.has(k)) fetchPeek(kind, id, q);
-  return PEEKS.get(k);
+  if (PEEKS.has(k)) return PEEKS.get(k);
+  const fail = PEEK_FAIL.get(k);
+  if (!fail || Date.now() - fail.at > 10000) fetchPeek(kind, id, q);
+  return fail ? { error: fail.error, transient: true } : undefined;
 }
 async function fetchPeek(kind, id, q = {}) {
   const k = peekKey(kind, id);
@@ -1951,17 +1956,22 @@ async function fetchPeek(kind, id, q = {}) {
   if (DRAWER.kind === kind && DRAWER.id === id) DRAWER.q = q;
   try {
     const r = await fetch(`/api/peek?${new URLSearchParams({ kind, id, ...q })}`);
-    const j = await r.json();
-    PEEKS.set(k, r.ok ? j : { error: j.error || String(r.status) });
-  } catch (e) { if (!PEEKS.has(k)) PEEKS.set(k, { error: String(e?.message ?? e) }); } finally { PEEK_FLIGHT.delete(k); }
+    const j = await r.json().catch(() => ({}));
+    if (r.ok) { PEEKS.set(k, j); PEEK_FAIL.delete(k); }
+    else if (r.status === 404) { PEEKS.set(k, { error: j.error || 'not found', missing: true }); PEEK_FAIL.delete(k); }
+    else if (!PEEKS.has(k)) PEEK_FAIL.set(k, { error: j.error || `HTTP ${r.status}`, at: Date.now() });
+  } catch (e) { if (!PEEKS.has(k)) PEEK_FAIL.set(k, { error: String(e?.message ?? e), at: Date.now() }); } finally { PEEK_FLIGHT.delete(k); }
   // a drawer may draw another object's peek too (a thread its ticket's): redraw whatever is open
   redraw();
 }
 // On each data refresh: the open object's peek again (not one that wasn't found), then a redraw.
 function refreshDrawer() {
   if (!DRAWER.kind || $('drawer').hidden) return;
-  const p = PEEKS.get(peekKey(DRAWER.kind, DRAWER.id));
-  if (p && !p.error) fetchPeek(DRAWER.kind, DRAWER.id, DRAWER.q || {});
+  for (const [kind, id, q] of [[DRAWER.kind, DRAWER.id, DRAWER.q || {}], ...(DRAWER.deps || [])]) {
+    const p = PEEKS.get(peekKey(kind, id));
+    if (!p?.missing) fetchPeek(kind, id, q || {});
+  }
+  if (DRAWER.kind === 'file' && DRAWER.url) refetchFile(DRAWER.url);
   redraw();
 }
 
@@ -1971,13 +1981,29 @@ let lastFocus = null;
 let LAST_HTML = '';
 let AFTER = [];
 const OPENERS = () => ({ ticket: openTicket, goal: openGoal, feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, planner: openPlanner, q: openQuestion, file: openFile });
-function redraw() { if (DRAWER.kind && !$('drawer').hidden) OPENERS()[DRAWER.kind]?.(DRAWER.arg ?? DRAWER.id); }
+// Not under someone mid-action: typing or choosing in the drawer, a confirm step showing, a request
+// in flight. The next refresh draws it.
+function busyDrawer() {
+  const body = $('drawer-body');
+  const ae = document.activeElement;
+  return !!(body.querySelector('.confirm, [aria-busy="true"]') || (ae && body.contains(ae) && ['TEXTAREA', 'SELECT', 'INPUT'].includes(ae.tagName)));
+}
+function redraw() { if (DRAWER.kind && !$('drawer').hidden && !busyDrawer()) OPENERS()[DRAWER.kind]?.(DRAWER.arg ?? DRAWER.id); }
+// Where focus was, as a selector that finds the same control after a redraw.
+function focusKey(el) {
+  if (!el || !$('drawer-body').contains(el)) return null;
+  if (el.id) return `#${CSS.escape(el.id)}`;
+  for (const a of ['href', 'data-ticket', 'data-hold-id', 'data-mdview', 'aria-describedby']) if (el.getAttribute(a)) return `${el.tagName.toLowerCase()}[${a}="${CSS.escape(el.getAttribute(a))}"]`;
+  return null;
+}
 // Draw the drawer; the same HTML again leaves it as it is (charts, diagrams, scroll and focus kept).
 function showDrawer(html) {
   const after = AFTER;
   AFTER = [];
   const opening = $('drawer').hidden;
   if (!opening && html === LAST_HTML) return;
+  const fresh = opening || LAST_HTML === '';
+  const keep = fresh ? null : focusKey(document.activeElement);
   LAST_HTML = html;
   if (opening) lastFocus = document.activeElement;
   $('drawer-body').innerHTML = html;
@@ -1987,7 +2013,8 @@ function showDrawer(html) {
   if (h) h.remove();
   $('drawer').hidden = false; $('scrim').hidden = false;
   document.body.style.overflow = 'hidden';
-  if (opening) $('drawer-close').focus();
+  if (fresh) $('drawer-close').focus();
+  else if (keep) $('drawer-body').querySelector(keep)?.focus();
   for (const f of after) f();
 }
 function closeDrawer() {
@@ -2000,8 +2027,9 @@ function closeDrawer() {
 }
 // Each opener names the object (and how to draw it again), then draws it.
 const drawerFor = (kind, id, arg) => {
-  if (DRAWER.kind !== kind || DRAWER.id !== id) LAST_HTML = '';
-  DRAWER = { kind, id, arg, q: DRAWER.kind === kind && DRAWER.id === id ? DRAWER.q : undefined };
+  if (DRAWER.kind !== kind || DRAWER.id !== id) { LAST_HTML = ''; PEEK_FAIL.delete(peekKey(kind, id)); }
+  const same = DRAWER.kind === kind && DRAWER.id === id;
+  DRAWER = { kind, id, arg, q: same ? DRAWER.q : undefined, deps: same ? DRAWER.deps : undefined, url: same ? DRAWER.url : undefined };
 };
 
 // ---- history: every line about the object, oldest first, always last in the drawer ----
@@ -2021,6 +2049,7 @@ function changeView(l) {
 const ENVELOPE_KEYS = ['v', 'id', 'type', 'op', 'at', 'by', 'channel'];
 function lineView(l, self) {
   const by = who(l.by);
+  if (l.ignored) return ['', `<span class="muted">${esc(cap(by))} tried to ${l.op === 'new' ? 'add' : 'change'} ${esc(Object.keys(l).filter((k) => !ENVELOPE_KEYS.includes(k) && !['prev', 'ignored'].includes(k)).map((k) => words(k).toLowerCase()).join(', ') || l.type)}: ignored (${esc(l.ignored)})</span>`];
   if (l.op === 'set' && l.prev && !['question', 'decision', 'act'].includes(l.type)) return changeView(l);
   if (l.op === 'new' && l.id === self && !['phase', 'gate', 'message', 'question', 'decision', 'act'].includes(l.type)) return ['', `${esc(NEW_WORDS[l.type] || 'Created')} by ${esc(by)}`];
   switch (l.type) {
@@ -2136,7 +2165,7 @@ function progressBlock(items) {
     <h3>Tickets</h3>${live.length ? `<div class="board board-peek" style="--cols:${new Set(live.map(columnOf)).size}">${boardCols(live, new Set(DATA.critical_path), { only: true })}</div>` : '<p class="muted">None yet.</p>'}`;
 }
 const uniq = (xs) => [...new Set(xs.filter((x) => x !== undefined && x !== null && x !== ''))];
-const notFound = (kind, id, peek, text) => showDrawer(`<h2 id="drawer-title">${esc(id)}</h2>${attrs({ id, peek, type: kind })}${text ? `<p class="muted">${text}</p>` : ''}${historySection(peek, id)}`);
+const notFound = (kind, id, peek, text, { noRecord = false } = {}) => showDrawer(`<h2 id="drawer-title">${esc(id)}</h2>${attrs({ id, peek, type: kind, noRecord })}${peek?.transient ? `<p class="err">Could not load it just now (${esc(peek.error)}); trying again.</p>` : text ? `<p class="muted">${text}</p>` : ''}${historySection(peek, id)}`);
 // How long each phase took, as one bar: from each phase line to the next (or to the merge, or now).
 function phaseStrip(lines, endAt) {
   const ps = lines.filter((l) => l.type === 'phase' && l.to !== 'supervisor').sort((a, b) => a.at.localeCompare(b.at));
@@ -2153,7 +2182,7 @@ function phaseStrip(lines, endAt) {
   const tone = (p) => (['blocked', 'parked'].includes(p) ? 'stop' : ['spec', 'plan', 'contract'].includes(p) ? 'think' : ['build', 'verify'].includes(p) ? 'make' : ['final-review', 'awaiting-word', 'merging'].includes(p) ? 'wait' : 'other');
   const hrs = (ms) => (ms < 3600e3 ? `${Math.round(ms / 60e3)}m` : `${(ms / 3600e3).toFixed(ms < 36000e3 ? 1 : 0)}h`);
   const segs = [...spans].map(([p, ms]) => ({ p, ms, w: (100 * ms) / total }));
-  return `<h3>Time per phase</h3><div class="phase-strip" role="img" aria-label="${esc(segs.map((s) => `${PHASE_SHORT[s.p] || s.p} ${hrs(s.ms)}`).join(', '))}">${segs.map((s) => `<span class="ph ph-${tone(s.p)}" style="width:${s.w.toFixed(2)}%" title="${esc(`${PHASE_SHORT[s.p] || words(s.p)}: ${hrs(s.ms)}`)}"></span>`).join('')}</div>
+  return `<h3>Time per phase${endAt ? '' : ' so far'}</h3><div class="phase-strip" role="img" aria-label="${esc(segs.map((s) => `${PHASE_SHORT[s.p] || s.p} ${hrs(s.ms)}`).join(', '))}">${segs.map((s) => `<span class="ph ph-${tone(s.p)}" style="width:${s.w.toFixed(2)}%" title="${esc(`${PHASE_SHORT[s.p] || words(s.p)}: ${hrs(s.ms)}`)}"></span>`).join('')}</div>
     <div class="legend phase-legend">${segs.map((s) => `<span><i class="ph-${tone(s.p)}"></i>${esc(PHASE_SHORT[s.p] || words(s.p))} ${esc(hrs(s.ms))}</span>`).join('')}</div>`;
 }
 // Every check at every commit it ran on: passed or failed, flaky where one commit saw both, slow
@@ -2162,12 +2191,14 @@ function gateTable(lines) {
   const gs = lines.filter((l) => l.type === 'gate');
   if (!gs.length) return '';
   const names = uniq(gs.map((g) => g.gate));
-  const shas = uniq(gs.slice().sort((a, b) => b.at.localeCompare(a.at)).map((g) => g.sha || 'uncommitted'));
+  // a run on uncommitted changes (a TDD red, then green) doesn't name what ran: never flaky
+  const shaOf = (g) => (g.dirty || !g.sha ? 'uncommitted' : g.sha);
+  const shas = uniq(gs.slice().sort((a, b) => b.at.localeCompare(a.at)).map(shaOf));
   const median = Object.fromEntries((DATA.metrics?.gates?.gates || []).map((g) => [g.gate, g.median_seconds]));
   const cell = (sha, name) => {
-    const runs = gs.filter((g) => (g.sha || 'uncommitted') === sha && g.gate === name);
+    const runs = gs.filter((g) => shaOf(g) === sha && g.gate === name);
     if (!runs.length) return '<td class="muted">–</td>';
-    const ok = runs.some((r) => r.ok), bad = runs.some((r) => !r.ok);
+    const ok = sha !== 'uncommitted' && runs.some((r) => r.ok), bad = sha !== 'uncommitted' && runs.some((r) => !r.ok);
     const last = runs.sort((a, b) => a.at.localeCompare(b.at)).pop();
     const slow = median[name] && last.ms && last.ms / 1000 > 2 * median[name];
     return `<td title="${esc(`${name} at ${sha.slice(0, 12)}: ${last.ok ? 'passed' : 'failed'}${last.ms ? `, ${(last.ms / 1000).toFixed(1)}s` : ''}${runs.length > 1 ? `, ${runs.length} runs` : ''}`)}"><span class="gate-dot ${ok && bad ? 'flaky' : last.ok ? 'ok' : 'fail'}">${ok && bad ? '≈' : last.ok ? '✓' : '✗'}</span>${slow ? ' <span class="badge medium">slow</span>' : ''}${ok && bad ? ' <span class="badge high">flaky</span>' : ''}</td>`;
@@ -2224,7 +2255,7 @@ function openGoal(id) {
   const verdicts = (g.updates || []).filter((u) => u.decision).map((u) => u.decision);
   const problems = (DATA.ooda.problems || []).filter((x) => (x.threatens || []).includes(id));
   const featIds = new Set(feats.map((f) => f.feature));
-  // judgment calls only: routine acts (merges, sessions started, tickets edited) are in the history
+  // judgment calls only: acts under the constitution (merges, sessions started, tickets edited) are in the history
   const calls = (DATA.ooda.decisions || []).filter((x) => ['decision', 'act'].includes(x.kind) && !(x.kind === 'act' && x.under?.authority === 'constitution') && (x.refs || []).some((ref) => ref === id || goalTickets.has(ref) || featIds.has(ref)));
   const unit = g.measure?.unit === '%' ? '%' : '';
   const readings = (g.readings || []).map((x) => [Date.parse(x.at), x.value]);
@@ -2252,7 +2283,8 @@ function openGoal(id) {
 }
 function openTicketSet({ kind, id, title, sub, computed = [], items, attr = {}, extra = '', q = {} }) {
   drawerFor(kind, id);
-  const p = peekOf(kind, id, { ...q, tickets: items.map((t) => t.id).join(',') });
+  DRAWER.q = { ...q, tickets: items.map((t) => t.id).join(',') };
+  const p = peekOf(kind, id, DRAWER.q);
   showDrawer(`<h2 id="drawer-title">${title}</h2>
     ${attrs({ id, peek: p, type: kind, ...attr, computed })}
     ${sub ? `<p class="ctx measure">${sub}</p>` : ''}
@@ -2279,7 +2311,7 @@ function openFeature(f) {
 }
 function openStory(sid) {
   const pr = DATA.progress, st = pr.stories[sid];
-  if (!st) { drawerFor('story', sid); return notFound('story', sid, null, 'No such story.'); }
+  if (!st) { drawerFor('story', sid); return notFound('story', sid, null, 'No such story.', { noRecord: true }); }
   openTicketSet({ kind: 'story', id: sid, title: esc(st.text ?? sid), items: pr.tickets.filter((t) => t.serves.includes(sid)), q: st.feature && st.feature !== 'chores' ? { rec: st.feature } : {},
     attr: { docType: 'feature', prefix: 'stories[].', pick: (fs) => { const x = (fs.stories || []).find((y) => y.id === sid); if (!x) return null; const { id: _, ...rest } = x; return rest; }, idTip: 'The story\'s id, stored on its feature.' },
     computed: [['Feature', st.feature ? flink(st.feature) : '', 'The feature the story belongs to.']] });
@@ -2301,7 +2333,7 @@ function openRelease(r) {
   ], extra: `<h3>Readiness</h3><ul>
       <li>${open.length ? `${open.length} of ${stories.length} stor${stories.length === 1 ? 'y' : 'ies'} still open: ${open.map(slink).join(', ')}` : stories.length ? `every story is done${tagged ? '' : ': ready to tag'}` : 'no stories target it'}</li>
       <li>${items.filter((t) => !isDone(t)).length} ticket${items.filter((t) => !isDone(t)).length === 1 ? '' : 's'} not merged</li>
-      ${gates.length ? `<li>checks at the last merge: ${gates.map((g) => `<span class="gate-dot ${g.ok ? 'ok' : 'fail'}">${g.ok ? '✓' : '✗'}</span> ${esc(g.gate)}`).join(' · ')} <span class="muted">(${esc(when(gates.map((g) => g.at).sort().pop()))})</span></li>` : ''}
+      ${gates.length && !tagged ? `<li>checks at the last merge into it (${p.last_merge?.ticket ? tlink(p.last_merge.ticket) : 'a ticket'}, <code>${esc(String(p.last_merge?.sha ?? '').slice(0, 12))}</code>): ${gates.map((g) => `<span class="gate-dot ${g.ok ? 'ok' : 'fail'}">${g.ok ? '✓' : '✗'}</span> ${esc(g.gate)}`).join(' · ')}</li>` : ''}
     </ul>
     <h3>Changelog</h3>${merged.length ? `<ul>${merged.map((t) => `<li>${tlink(t.id)} <span class="muted">· merged ${esc(when(t.merged_at))}</span></li>`).join('')}</ul>` : '<p class="muted">Nothing merged yet.</p>'}` });
 }
@@ -2317,7 +2349,7 @@ function openMilestone(key) {
   const i = key.lastIndexOf(':');
   const gid = key.slice(0, i), n = Number(key.slice(i + 1));
   const g = goalOf(gid), m = milestonesOf(g).find((x) => x.n === n);
-  if (!m) { drawerFor('milestone', key); return notFound('milestone', key, null, 'No such milestone.'); }
+  if (!m) { drawerFor('milestone', key); return notFound('milestone', key, null, 'No such milestone.', { noRecord: true }); }
   const fs = new Set(m.features || []);
   const unit = g.measure?.unit === '%' ? '%' : '';
   const readings = (g.readings || []).map((x) => [Date.parse(x.at), x.value]);
@@ -2462,6 +2494,7 @@ async function openThread(mid) {
   const ticket = ticketMap().has(by) ? by : ticketMap().has(open?.to) ? open.to : null;
   const p = peekOf('thread', mid);
   const tp = ticket ? peekOf('ticket', ticket) : null;
+  if (ticket) DRAWER.deps = [['ticket', ticket, {}]];
   const msgs = (tp?.history || []).filter((l) => l.type === 'message' && l.op === 'new');
   const byId = new Map(msgs.map((m) => [m.id, m]));
   let root = byId.get(mid);
@@ -2470,7 +2503,7 @@ async function openThread(mid) {
   const thread = root ? msgs.filter(inThread).sort((a, b) => a.at.localeCompare(b.at)) : [];
   showDrawer(`<h2 id="drawer-title">${ticket ? `Thread on ${tlink(ticket)}` : 'Message'}</h2>
     ${attrs({ id: mid, peek: p, type: 'message', computed: [['From', esc(who(by)), 'Who sent it.']] })}
-    ${!ticket ? '<p class="muted">Its thread is on the ticket\'s timeline.</p>' : tp === undefined ? '<p class="muted">Loading the thread…</p>' : thread.length ? `<h3>The thread</h3>${thread.map((m) => `<div class="card small ${m.id === mid ? 'qcard' : ''}"><div class="meta">${esc(who(m.by))} → ${esc(who(m.to))} · ${esc(words(m.kind || 'message'))} · ${esc(when(m.at))}</div><div>${linkify(m.text)}</div></div>`).join('')}` : `<p class="muted">Not on ${esc(ticket)}'s timeline.</p>`}
+    ${!ticket ? '<p class="muted">Its thread is on the ticket\'s timeline.</p>' : tp === undefined ? '<p class="muted">Loading the thread…</p>' : tp.error ? `<p class="err">Could not load the thread: ${esc(tp.error)}</p>` : thread.length ? `<h3>The thread</h3>${thread.map((m) => `<div class="card small ${m.id === mid ? 'qcard' : ''}"><div class="meta">${esc(who(m.by))} → ${esc(who(m.to))} · ${esc(words(m.kind || 'message'))} · ${esc(when(m.at))}</div><div>${linkify(m.text)}</div></div>`).join('')}` : `<p class="muted">Not on ${esc(ticket)}'s timeline.</p>`}
     ${historySection(p, mid)}`);
 }
 function openPlanner(feature) {
@@ -2521,24 +2554,35 @@ function openQuestion(id) {
     ${used.length ? `<h3>What used it</h3><ul>${used.map((x) => `<li>${x.startsWith('d-') ? dlink(x, decisionTitle(x)) : linkify(x)}</li>`).join('')}</ul>` : ''}
     ${historySection(p, id)}`);
 }
+// A file's text, kept per URL and fetched again on each refresh (a spec its worker is writing changes);
+// one fetch at a time per URL.
 const FILES = new Map();
-async function openFile(params) {
+const FILE_FLIGHT = new Map();
+function refetchFile(url) {
+  if (FILE_FLIGHT.has(url)) return FILE_FLIGHT.get(url);
+  const pr = (async () => {
+    try { const r = await fetch(url); const t = await r.text(); if (!r.ok) throw new Error(t); FILES.set(url, t); }
+    catch (e) { if (!FILES.has(url)) FILES.set(url, { error: e.message }); }
+    finally { FILE_FLIGHT.delete(url); }
+    redraw();
+  })();
+  FILE_FLIGHT.set(url, pr);
+  return pr;
+}
+function openFile(params) {
   const path = params.get('path'), title = params.get('title') || path, ref = params.get('ref');
   drawerFor('file', path, params);
   const url = `/api/file?${new URLSearchParams({ path, ...(ref ? { ref } : {}) })}`;
+  DRAWER.url = url;
   const ext = (path.split('.').pop() || '').toLowerCase();
-  const p = peekOf('file', path);
+  const p = peekOf('file', path, ref ? { ref } : {});
   const head = `<h2 id="drawer-title">${esc(title)}</h2>${attrs({ id: path, idTip: 'Its path in the repository.', peek: p, noRecord: true, computed: [['Version', `<code>${esc(ref || 'main')}</code>`, 'The branch or commit it is read from; committed content only.'], ['Commits', p?.history?.length ? esc(p.history.length) : '', 'Commits that changed it (the latest 60).']] })}`;
   const tail = historySection(p, path);
   if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext)) return showDrawer(`${head}<div class="viewer"><img src="${esc(url)}" alt="${esc(title)}"></div>${tail}`);
   if (['html', 'pdf'].includes(ext)) return showDrawer(`${head}<div class="viewer"><iframe sandbox src="${esc(url)}" title="${esc(title)}"></iframe></div><p class="meta"><a href="${esc(url)}" target="_blank" rel="noopener">Open in a new tab</a></p>${tail}`);
-  let txt = FILES.get(url);
-  if (txt === undefined) {
-    showDrawer(`${head}<p class="loading">Loading…</p>${tail}`);
-    try { const r = await fetch(url); const t = await r.text(); if (!r.ok) throw new Error(t); FILES.set(url, txt = t); }
-    catch (e) { return showDrawer(`${head}<p class="err">${esc(e.message)}</p>${tail}`); }
-    if (DRAWER.kind !== 'file' || DRAWER.id !== path) return;
-  }
+  const txt = FILES.get(url);
+  if (txt === undefined) { refetchFile(url); return showDrawer(`${head}<p class="loading">Loading…</p>${tail}`); }
+  if (typeof txt !== 'string') return showDrawer(`${head}<p class="err">${esc(txt.error)}</p>${tail}`);
   const where = `<code>${esc(path)}</code>${ref ? ` at <code>${esc(ref)}</code>` : ''}`;
   // Markdown renders (sanitized: agents write these files) with a toggle back to the raw text.
   const isMd = ['md', 'markdown'].includes(ext) && window.marked && window.DOMPurify;
@@ -2864,10 +2908,11 @@ document.addEventListener('click', async (ev) => {
     const id = hb.dataset.holdId, mode = hb.dataset.mode;
     const errId = `hold-${id}`;
     if (mode === 'let-go' && !hb.classList.contains('confirm')) { hb.classList.add('confirm'); hb.textContent = 'Confirm let go'; setTimeout(() => { hb.classList.remove('confirm'); hb.textContent = 'Let go'; }, 6000); return; }
-    hb.disabled = true;
+    hb.disabled = true; hb.setAttribute('aria-busy', 'true');
     const ok = mode === 'let-go' ? await post('goal-decide', { id, verdict: 'let-go' }, errId) : mode === 'restore' ? await post('goal-decide', { id, verdict: 'restore' }, errId) : await post('goal-hold', { id, mode }, errId);
+    hb.removeAttribute('aria-busy');
     if (!ok) hb.disabled = false;
-    else loadFleet();
+    else { loadFleet(); redraw(); }
     return;
   }
   const fb = ev.target.closest('[data-fleet]');

@@ -5165,8 +5165,10 @@ function cmdDashboard() {
       const id = u.searchParams.get('id') ?? '';
       const ts = (u.searchParams.get('tickets') ?? '').split(',').filter(Boolean);
       const rec = u.searchParams.get('rec') ?? '';
+      const ref = u.searchParams.get('ref') ?? '';
+      if (ref && !/^(?!-)[A-Za-z0-9._\/-]+$/.test(ref)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad ref' }));
       if (!/^[a-z]+$/.test(kind) || !id || id.length > 400 || /[\0\n]/.test(id) || id.startsWith('-') || ts.some((x) => !/^[a-z0-9][a-z0-9-]*$/.test(x)) || (rec && !/^[a-z0-9][a-z0-9-]*$/.test(rec))) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad kind, id, rec or tickets' }));
-      const r = await run(['peek', kind, id, ...(ts.length ? ['--tickets', JSON.stringify(ts)] : []), ...(rec ? ['--rec', rec] : []), '--json']);
+      const r = await run(['peek', kind, id, ...(ts.length ? ['--tickets', JSON.stringify(ts)] : []), ...(rec ? ['--rec', rec] : []), ...(ref ? ['--ref', ref] : []), '--json']);
       return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 404, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
     }
     if (req.method === 'GET' && u.pathname === '/api/schema') return send(res, 200, 'application/json', JSON.stringify(schemaDocs()));
@@ -6225,9 +6227,16 @@ function historyOf(ids, { types = null, limit = 300 } = {}) {
     || ['refs', 'blocks', 'serves', 'threatens', 'goals', 'evidence', 'depends_on'].some((k) => (l[k] ?? []).some?.((x) => want.has(x)));
   const cur = new Map();
   const res = [];
-  for (const l of [...readLog().lines].sort((a, b) => a.at.localeCompare(b.at))) {
+  // a line the fold ignored is shown as such and never becomes the value a later change replaced
+  const lineKey = (l) => `${l.id}|${l.at}|${l.by}`;
+  const ignored = new Map((readLog().ignored ?? []).map((x) => [lineKey(x.line), x.why]));
+  const BULK = ['tests', 'by_model'];
+  const all = [...readLog().lines, ...(readLog().ignored ?? []).map((x) => x.line)];
+  for (const l of all.sort((a, b) => a.at.localeCompare(b.at))) {
     const own = want.has(l.id);
-    const body = Object.fromEntries(Object.entries(l).filter(([k]) => !k.startsWith('__')));
+    const why = ignored.get(lineKey(l));
+    const body = Object.fromEntries(Object.entries(l).filter(([k]) => !k.startsWith('__') && !BULK.includes(k)));
+    if (why) { if (touches(l) && (!types || types.includes(l.type))) res.push({ ...body, ignored: why }); continue; }
     if (own && l.op === 'set') {
       const was = cur.get(l.id) ?? {};
       body.prev = Object.fromEntries(Object.keys(body).filter((k) => !ENVELOPE.includes(k) && k !== 'prev').map((k) => [k, was[k] ?? null]));
@@ -6237,7 +6246,7 @@ function historyOf(ids, { types = null, limit = 300 } = {}) {
   }
   return res.slice(-limit);
 }
-const fileHistory = (rel) => (git(['log', '-n', '60', '--format=%H%x09%cI%x09%an%x09%s', '--', rel]) ?? '').split('\n').filter(Boolean).map((x) => { const [sha, at, author, subject] = x.split('\t'); return { sha, at, author, subject }; }).reverse();
+const fileHistory = (rel, ref = null) => (git(['log', '-n', '60', '--format=%H%x09%cI%x09%an%x09%s', ...(ref ? [ref] : []), '--', rel]) ?? '').split('\n').filter(Boolean).map((x) => { const [sha, at, author, subject] = x.split('\t'); return { sha, at, author, subject }; }).reverse();
 function peekView(kind, id) {
   // the stored record this object is, or lives in (a story in its feature, a milestone in its goal)
   const v = { kind, id, record: recordView(flagStr('rec') ?? (kind === 'planner' ? '' : id)) };
@@ -6247,9 +6256,9 @@ function peekView(kind, id) {
     const t = tickets().get(id) ?? die(`no ticket ${id}`);
     const { ticket, files, reviews } = timelineView(id);
     Object.assign(v, { ticket, files, reviews });
-    v.history = historyOf([id], { limit: 600 });
+    v.history = historyOf([id], { limit: 600 }).filter((l) => l.type !== 'spend');
     v.deps = { waits_on: t.depends_on ?? [], blocks: [...tickets().values()].filter((x) => (x.depends_on ?? []).includes(id)).map((x) => x.id) };
-    const h = sessionOf(id) ? handoffFor(id) : null;
+    const h = handoffFor(id);
     v.handoff = h ? { text: h.text, where: h.where, parked_at: h.parked_at } : null;
     v.spend = logObjects('spend').filter((s) => s.who === id).sort(byTime).map((s) => ({ at: s.created_at, role: s.role, usd: s.usd }));
   } else if (kind === 'goal') {
@@ -6285,13 +6294,17 @@ function peekView(kind, id) {
     const nums = (x) => { try { return JSON.parse((x?.source_ref ? projectFileText(x.source_ref.replace(/^project\//, '')) : '')?.match(RETRO_BLOCK)?.[1] ?? 'null'); } catch { return null; } };
     v.numbers = { now: nums(o), prev: nums(prev), prev_id: prev?.id ?? null };
   } else if (kind === 'file') {
-    v.history = fileHistory(id);
+    v.history = fileHistory(id, flagStr('ref') ?? null);
   } else if (['story', 'release', 'wave', 'milestone'].includes(kind)) {
     v.history = historyOf(listFlag('tickets'), { types: ['ticket', 'act', 'decision', 'question'] }).filter((l) => l.type !== 'ticket' || l.op === 'new');
     if (kind === 'release') {
-      // the latest run of each gate the supervisor ran at a merge: how main stands for the tag
-      const runs = readLog().lines.filter((l) => l.type === 'gate' && l.by === 'supervisor').sort((a, b) => a.at.localeCompare(b.at));
+      // the gates the supervisor ran at the last merge into it, at that merge's head
+      const ts = listFlag('tickets');
+      const last = logObjects('act').filter((a) => /^merge/.test(a.class) && (a.refs ?? []).some((r) => ts.includes(r))).sort(byTime).pop();
+      const sha = last ? /\bat ([0-9a-f]{7,40})\b/.exec(last.what ?? '')?.[1] : null;
+      const runs = sha ? readLog().lines.filter((l) => l.type === 'gate' && l.by === 'supervisor' && l.sha && (l.sha.startsWith(sha) || sha.startsWith(l.sha))).sort((a, b) => a.at.localeCompare(b.at)) : [];
       v.gates = Object.values(Object.fromEntries(runs.map((l) => [l.gate, { gate: l.gate, ok: l.ok, sha: l.sha ?? null, at: l.at }])));
+      v.last_merge = last ? { id: last.id, at: last.created_at, ticket: (last.refs ?? []).find((r) => ts.includes(r)) ?? null, sha } : null;
     }
   } else {
     const o = logGet(id) ?? die(`no record ${id}`);
