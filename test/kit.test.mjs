@@ -658,6 +658,15 @@ test('devteam kit', async (t) => {
     assert.equal(dash.ooda.acts.find((a) => a.id === A1).under.decision, D);
   });
 
+  await t.test('every field in the log schema says what it means (the sidepeek shows it as the key\'s tooltip)', () => {
+    const s = JSON.parse(fs.readFileSync(path.join(kit, 'schema', 'log.schema.json'), 'utf8'));
+    const bare = Object.entries(s.$defs.types).flatMap(([type, d]) => Object.entries(d.properties ?? {}).filter(([, v]) => !v.description).map(([k]) => `${type}.${k}`));
+    assert.deepEqual(bare, [], 'add a description to each');
+    const r = json(must(['record', G, '--json']));
+    assert.equal(r.type, 'goal');
+    assert.ok(r.fields.title && r.set_by && !('hold_by' in r.fields));
+  });
+
   await t.test('an answer the owner gave in the supervisor chat: the owner\'s, quoted, listed for checking, never trust evidence', () => {
     const said = "you shouldn't need to ask me to submit those PRs";
     const Qc = must(['ask', '--question', 'Open upstream PRs without asking?', '--class', 'upstream-pr', '--reasons', 'below-rung', '--recommendation', 'yes'], { role: 'sup' });
@@ -1394,6 +1403,32 @@ test('devteam kit', async (t) => {
       // the data names the page version, so an open tab can tell it was updated underneath it
       const dataRes = await fetch(`http://127.0.0.1:${port}/api/data`);
       assert.match(dataRes.headers.get('x-devteam-page') ?? '', /^[0-9a-f]{16}$/);
+      // the sidepeek's attributes: a record's stored fields, and the schema's words for each field
+      const rec = await (await fetch(`http://127.0.0.1:${port}/api/record?id=${Qs}`)).json();
+      assert.deepEqual([rec.id, rec.type, rec.created_by], [Qs, 'question', 'supervisor']);
+      assert.ok(rec.fields.question && !('updates' in rec.fields) && !Object.keys(rec.fields).some((k) => k.startsWith('__')), 'stored fields only');
+      assert.equal((await fetch(`http://127.0.0.1:${port}/api/record?id=g-20200101-000000000-nobody`)).status, 404);
+      assert.equal((await fetch(`http://127.0.0.1:${port}/api/record?id=..%2Fx`)).status, 400);
+      const docs = await (await fetch(`http://127.0.0.1:${port}/api/schema`)).json();
+      assert.ok(docs.envelope.id && docs.types.decision.fields.authority && docs.types.ticket.fields.done_when);
+      assert.ok(docs.types.goal.fields['milestones[].title'] && docs.types.feature.fields['stories[].text'], 'nested fields are keyed by path');
+      assert.ok(!/approved_by k-/.test(docs.types.decision.fields.authority), "the owner's words (x-tip) where a description is written for agents");
+      // a sidepeek's peek: the record, its history oldest first, and its kind's particulars
+      const peek = async (q) => fetch(`http://127.0.0.1:${port}/api/peek?${new URLSearchParams(q)}`);
+      const pq = await (await peek({ kind: 'q', id: Qs })).json();
+      assert.equal(pq.record.id, Qs);
+      assert.ok(pq.history.length && pq.history.every((l, i) => !i || pq.history[i - 1].at <= l.at));
+      const pt = await (await peek({ kind: 'ticket', id: 'bill-01-card' })).json();
+      assert.ok(pt.ticket && pt.deps && Array.isArray(pt.spend) && pt.history.some((l) => l.type === 'gate'));
+      assert.ok(pt.history.every((l) => !('tests' in l) && l.type !== 'spend'), 'no per-test bulk or spend lines in a history');
+      const own = pt.history.find((l) => l.id === 'bill-01-card' && l.op === 'set');
+      assert.ok(own && own.prev, "a set line on the object carries what it replaced");
+      const pg = await (await peek({ kind: 'goal', id: G })).json();
+      assert.ok(pg.design === null || 'tldr' in pg.design);
+      const ps = await (await peek({ kind: 'story', id: 'BILL-S1', rec: 'billing', tickets: 'bill-01-card' })).json();
+      assert.equal(ps.record.id, 'billing', 'a story reads its feature\'s record');
+      assert.equal((await peek({ kind: 'story', id: 'BILL-S1', rec: '../x' })).status, 400);
+      assert.equal((await peek({ kind: 'ticket', id: 'nope-01-x' })).status, 404);
       const postSecret = (b, headers = browser) => fetch(`http://127.0.0.1:${port}/api/secret`, { method: 'POST', headers, body: JSON.stringify(b) });
       assert.equal((await postSecret({ id: Qs, values: {} }, { 'content-type': 'application/json' })).status, 403, 'a request without browser headers is refused');
       for (let i = 0; i < 3; i++) assert.equal((await postSecret({ id: 'q-20200101-000000000-supervisor', values: { A: 'x'.repeat(3 * 1024 * 1024) } })).status, 400);
