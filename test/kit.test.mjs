@@ -3141,6 +3141,37 @@ test('observe-link records a resource; orient proposes adds, edits and source-of
   } finally { F.done(); }
 });
 
+test('credentials never enter settings or the log: userinfo refused, and remotes redacted wherever they are echoed (O2)', () => {
+  const F = monoFixture('creds');
+  const { old, ok, run, edit, g } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  try {
+    assert.match(run(old, ['link', 'add', 'figma', '--kind', 'url', '--url', 'https://bob:hunter2@figma.example.com/x', '--title', 'D'], SUP).err, /links\.figma: .*credentials never go in settings/);
+    assert.match(run(old, ['link', 'add', 'figma', '--kind', 'url', '--url', 'https://ghp_TOKEN@figma.example.com/x', '--title', 'D'], SUP).err, /credentials never go in settings/, 'a bare token is userinfo too');
+    ok(old, ['link', 'add', 'figma', '--kind', 'url', '--url', 'https://figma.example.com/x', '--title', 'D'], SUP);
+    assert.match(run(old, ['link', 'set', 'figma', 'url', 'https://u:p@figma.example.com/y'], SUP).err, /credentials never go in settings/);
+    assert.match(run(old, ['observe-link', '--url', 'https://u:hunter2@notion.test/r', '--title', 'R'], SUP).err, /credentials/);
+    g(['checkout', '-q', '--', 'docs/devteam/project/settings.md'], old);
+    // a hand-written remote with a token is a validate error (on main: a working-tree repo link never counts)
+    edit((j) => { j.links = { leak: { kind: 'repo', title: 'L', remote: 'https://x-access-token:ghp_SECRET1@github.com/me/leak.git' } }; });
+    g(['commit', '-qam', 'leak'], old); g(['push', '-q', 'origin', 'main'], old);
+    assert.match(run(old, ['validate']).out, /links\.leak: .*credentials never go in settings/);
+    // a checkout whose origin carries a token: the mismatch is reported with the token stripped
+    const co = path.join(F.base, 'console');
+    g(['init', '-q', co], F.base);
+    g(['remote', 'add', 'origin', 'https://x-access-token:ghp_SECRET123@github.com/me/fork-console.git'], co);
+    edit((j) => { j.links = { console: { kind: 'repo', title: 'Console', remote: 'usbclub/console', path: co } }; });
+    g(['commit', '-qam', 'links'], old); g(['push', '-q', 'origin', 'main'], old);
+    ok(old, ['observe-metrics'], { ...SUP, DEVTEAM_URL_PROBE: '/usr/bin/true' });
+    const f = json(ok(old, ['metrics', '--json'])).findings.find((x) => x.kind === 'link-unreachable');
+    assert.match(f.detail, /is a checkout of https:\/\/github\.com\/me\/fork-console\.git, not usbclub\/console/);
+    const logDir = path.join(old, 'docs/devteam/run/log');
+    const all = fs.readdirSync(logDir).map((x) => fs.readFileSync(path.join(logDir, x), 'utf8')).join('');
+    assert.match(all, /link-unreachable/);
+    assert.doesNotMatch(all, /ghp_SECRET|hunter2|ghp_TOKEN/, 'no credential reaches the log');
+  } finally { F.done(); }
+});
+
 test("orient's proposed commands are shell-safe: every value single-quoted, so pasting one runs nothing (O5)", () => {
   const F = monoFixture('orient-shq');
   const { old, ok, edit } = F;

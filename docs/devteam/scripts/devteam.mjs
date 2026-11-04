@@ -346,6 +346,18 @@ const LINK_COMMON = ['kind', 'title', 'notes', 'for', 'source'];
 const linkReachMemo = new Map();
 // The url probe: a child node does one HEAD request with a 10 s deadline and prints the status.
 const PROBE_JS = "fetch(process.argv[1],{method:'HEAD',redirect:'follow',signal:AbortSignal.timeout(10000)}).then((r)=>console.log(r.status)).catch(()=>console.log(0))";
+// Credentials in a URL or remote (O2): on http(s) any userinfo (a user:pass or a bare token), on any
+// other scheme a password (ssh://git@host/… names the ssh user, not a secret). settings.md, the
+// log and every prompt are shared and permanent, so a credential never goes in them.
+function hasCredentials(u) {
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(String(u ?? ''))) return false;
+  let x;
+  try { x = new URL(u); } catch { return /^[a-z][a-z0-9+.-]*:\/\/[^/?#]*@/i.test(u); }
+  return /^https?:$/i.test(x.protocol) ? !!(x.username || x.password) : !!x.password;
+}
+const CREDENTIALS_REFUSED = 'credentials never go in settings or the log; use git\'s credential helper, or "check": false for a page behind auth';
+// A URL or remote as it may be echoed into a message, a log line or a prompt: credentials stripped.
+const redactUrl = (text) => String(text ?? '').replace(/\b(https?:\/\/)[^/\s@]+@/gi, '$1').replace(/\b([a-z][a-z0-9+.-]*:\/\/[^/\s:@]+):[^/\s@]*@/gi, '$1@');
 // A local remote is a path, written so nobody mistakes it for owner/name: ./, ../ or absolute.
 const localRemote = (r) => !/^[a-z][a-z0-9+.-]*:\/\//i.test(r) && !/^[\w.-]+@[\w.-]+:/.test(r) && !/^[\w.-]+\/[\w.-]+$/.test(r);
 // Every per-kind behaviour of a link (spec §3.1). A new kind (doc, dataset, mcp) is one entry here;
@@ -363,6 +375,7 @@ const LINK_KINDS = {
     validate: (l, at, ctx) => {
       const errs = [];
       if (typeof l.remote !== 'string') return errs;
+      if (hasCredentials(l.remote)) return [`${at}: its remote carries credentials; ${CREDENTIALS_REFUSED}`];
       if (localRemote(l.remote) && !/^(\.{1,2}\/|\/)/.test(l.remote)) errs.push(`${at}: remote "${l.remote}" is neither owner/name nor a URL; a local remote is a path starting ./, ../ or /`);
       const k = remoteKey(l.remote);
       if (ctx.homeOrigin && k === remoteKey(ctx.homeOrigin)) errs.push(`${at}: the repo that holds the kit (home) is never a link`);
@@ -382,7 +395,7 @@ const LINK_KINDS = {
       else {
         const origin = git(['config', '--get', 'remote.origin.url'], at);
         if (origin === null) why = `${at} is not a git checkout with an origin`;
-        else if (remoteKey(origin) !== remoteKey(link.remote)) why = `${at} is a checkout of ${origin}, not ${link.remote}`;
+        else if (remoteKey(origin) !== remoteKey(link.remote)) why = `${at} is a checkout of ${redactUrl(origin)}, not ${redactUrl(link.remote)}`;
       }
       linkReachMemo.set(key, why);
       return why;
@@ -409,6 +422,7 @@ const LINK_KINDS = {
     effectiveSettings: () => null,
     validate: (l, at) => [
       ...(typeof l.url === 'string' && !l.url.startsWith('https://') ? [`${at}: url must start with https://`] : []),
+      ...(hasCredentials(l.url) ? [`${at}: its url carries credentials; ${CREDENTIALS_REFUSED}`] : []),
       ...(l.check !== undefined && typeof l.check !== 'boolean' ? [`${at}: check is true or false`] : []),
     ],
     reachable: () => null,
@@ -4448,6 +4462,7 @@ function cmdObserveLink() {
   const by = flags.owner ? ownerWriter().by : logWriter();
   const url = flagStr('url'), p = flagStr('path');
   if (!url === !p) die('observe-link needs --url <https://…> or --path <repo path>, and --title');
+  if (hasCredentials(url)) die(`--url carries credentials; ${CREDENTIALS_REFUSED}`);
   const title = flagStr('title') ?? die('observe-link needs --title (what it is called)');
   const scopes = flags.for !== undefined ? listFlag('for') : [];
   for (const sc of scopes) if (!scopeValid(sc, 'for')) die(`--for "${sc}" is not a scope (${SCOPE_HELP.for})`);
@@ -7425,6 +7440,7 @@ function cmdLink() {
     } else { delete b.links[id]; what = `removed ${kind} link ${id}`; }
     return b;
   });
+  what = redactUrl(what);
   appendLog({ type: 'act', decision: citing(), class: 'registry-edit', what, refs: [`link:${id}`, ...(source ? [source] : [])], reversible: true }, 'supervisor');
   out(`${what}; ${LANDING_HINT}`);
 }

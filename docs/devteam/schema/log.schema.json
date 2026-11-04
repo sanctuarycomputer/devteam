@@ -838,7 +838,8 @@
             "properties": {
               "url": {
                 "type": "string",
-                "pattern": "^https?://"
+                "description": "https only, and never with credentials (no user or token before an @ in the host)",
+                "pattern": "^https://[^/?#@\\s]+([/?#]\\S*)?$"
               },
               "path": {
                 "type": "string",
