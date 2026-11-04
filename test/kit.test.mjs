@@ -2394,6 +2394,70 @@ test('G1: a single-repo project with no new settings prints what it printed befo
   } finally { F.done(); }
 });
 
+// The coverage function, loaded from the script by itself (as the review bridge is): tables for
+// the shapes a tree can take, then a property test against a brute-force oracle.
+function coverageFns() {
+  const src = fs.readFileSync(path.join(kit, 'scripts', 'devteam.mjs'), 'utf8');
+  const cut = (a, b) => { const i = src.indexOf(a), j = src.indexOf(b); assert.ok(i >= 0 && j > i, `${a} … ${b} marks a block in devteam.mjs`); return src.slice(i, j); };
+  const ctx = vm.createContext({});
+  return vm.runInContext(`${cut('/* globs start */', '/* globs end */')}\n${cut('/* coverage start */', '/* coverage end */')}\n;({ coverage, caseCollisions, coverageClean, prefixOwners, ownersOf, pathMatches })`, ctx);
+}
+
+test('coverage: every tracked path has exactly one owner', () => {
+  const { coverage, coverageClean, prefixOwners } = coverageFns();
+  const DEV = ['docs/devteam/**'];
+  const plain = (r) => JSON.parse(JSON.stringify(r));
+  const paths = ['.github/workflows/ci.yml', '.tool-versions', 'app/.keep', 'app/a b/c.rb', 'app/é.rb', 'app/x.rb', 'lib/deep/.hidden/x', 'vendor/sub', 'link-to-app', 'docs/devteam/project/settings.md', 'docs/devteam/scripts/devteam.mjs'];
+  const comps = [{ name: 'api', owns: ['app/**', 'lib/**'] }, { name: 'ops', owns: ['.github/**', '.tool-versions', 'vendor/sub', 'link-to-app'] }];
+  // dotfiles, dot-directories, spaces, non-ASCII, a submodule gitlink and a symlink are paths like any other
+  assert.deepEqual(plain(coverage(paths, comps, DEV)), { unowned: [], contested: [], empty: [], case_collisions: [] });
+  assert.equal(coverageClean(coverage(paths, comps, DEV)), true);
+  assert.deepEqual(plain(coverage([...paths, 'scripts/x.sh'], comps, DEV)).unowned, ['scripts/x.sh'], 'a path no line owns');
+  assert.deepEqual(plain(coverage(paths, [...comps, { name: 'web', owns: ['app/x.rb'] }], DEV)).contested, [['app/x.rb', ['api', 'web']]], 'a path two lines own');
+  assert.deepEqual(plain(coverage(paths, [...comps, { name: 'web', owns: ['web/**'] }], DEV)).empty, ['web/**'], 'a glob that matches nothing is a typo');
+  assert.deepEqual(plain(coverage(paths, [{ name: 'all', owns: ['**'] }], DEV)).contested.map(([p]) => p), ['docs/devteam/project/settings.md', 'docs/devteam/scripts/devteam.mjs'], "a declared glob reaching into the kit's line is contested with devteam");
+  assert.deepEqual(plain(coverage(paths, [{ name: 'all' }], DEV)), { unowned: [], contested: [], empty: [], case_collisions: [] }, 'B2: a sole component with no owns owns everything devteam does not');
+  assert.deepEqual(plain(coverage(paths, [{ name: 'a' }, { name: 'b', owns: ['app/**'] }], DEV)).unowned.length > 0, true, 'the ** default holds only for a sole component');
+  assert.deepEqual(plain(coverage(['App.rb', 'app.rb'], [{ name: 'x', owns: ['App.rb', 'app.rb'] }], DEV)).case_collisions, [['App.rb', 'app.rb']], 'paths that differ only by case');
+  assert.deepEqual(plain(coverage(['App.rb'], [{ name: 'x', owns: ['app.rb'] }], DEV)).unowned, ['App.rb'], 'matching is case-sensitive');
+  // touches containment: the static prefix of a touches entry and who owns it
+  assert.deepEqual(plain(prefixOwners('app/models/**', comps, DEV)), ['api']);
+  assert.deepEqual(plain(prefixOwners('app', comps, DEV)), ['api'], 'a plain path is the folder and what is in it');
+  assert.equal(prefixOwners('**/*.rb', comps, DEV), null, 'no static prefix');
+  assert.deepEqual(plain(prefixOwners('docs/devteam/project/x', comps, DEV)), ['devteam']);
+  const { ownersOf } = coverageFns();
+  assert.deepEqual(plain(ownersOf('app/x.rb', comps, DEV)), ['api']);
+  assert.deepEqual(plain(ownersOf('docs/devteam/scripts/devteam.mjs', [{ name: 'all' }], DEV)), ['devteam'], 'the ** default never reaches the kit\'s line');
+});
+
+test('coverage: the function reports a clean partition exactly when there is one (property)', () => {
+  const { coverage, coverageClean, pathMatches } = coverageFns();
+  // mulberry32: a seeded generator, so a failure names the seed that reproduces it
+  const rng = (seed) => () => { seed |= 0; seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  const pick = (r, xs) => xs[Math.floor(r() * xs.length)];
+  let collided = 0;
+  for (let seed = 1; seed <= 300; seed++) {
+    const r = rng(seed);
+    const dirs = ['a', 'a/b', '.c', 'd e', 'é', 'x/.y'];
+    // 'f' and 'F' in one folder are a case collision, so some seeds exercise case_collisions
+    const paths = [...new Set(Array.from({ length: 2 + Math.floor(r() * 12) }, () => `${pick(r, dirs)}/${pick(r, ['f', 'F', 'g.rb', '.h', 'Ö'])}`))];
+    const candidates = [...dirs.map((d) => `${d}/**`), ...paths, '**/*.rb', 'nowhere/**'];
+    const comps = Array.from({ length: 1 + Math.floor(r() * 3) }, (_, i) => ({ name: `c${i}`, owns: Array.from({ length: 1 + Math.floor(r() * 3) }, () => pick(r, candidates)) }));
+    const oracle = paths.every((p) => comps.filter((c) => c.owns.some((g) => pathMatches(g, p))).length === 1)
+      && comps.every((c) => c.owns.every((g) => paths.some((p) => pathMatches(g, p))))
+      && new Set(paths.map((p) => p.toLowerCase())).size === paths.length;
+    assert.equal(coverageClean(coverage(paths, comps, [])), oracle, `seed ${seed}: ${JSON.stringify({ paths, comps })}`);
+    // and a partition built to be clean always is: each path owned by exactly one exact-path glob
+    const parts = comps.map((c) => ({ name: c.name, owns: [] }));
+    paths.forEach((p, i) => parts[i % parts.length].owns.push(p));
+    const live = parts.filter((c) => c.owns.length);
+    const unique = new Set(paths.map((p) => p.toLowerCase())).size === paths.length;
+    assert.equal(coverageClean(coverage(paths, live, [])), unique, `seed ${seed}: a built partition`);
+    if (!unique) collided++;
+  }
+  assert.ok(collided > 0, 'some seeds produced a case collision');
+});
+
 test('fleet park: every session stops with a handoff, and a clone elsewhere picks it up with parity', () => {
   const F = fleetFixture('park');
   const { org, old, neu, home, env, run, ok, g, base } = F;

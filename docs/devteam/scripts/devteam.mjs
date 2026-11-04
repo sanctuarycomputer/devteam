@@ -1184,6 +1184,7 @@ function levels(ts) {
   return level;
 }
 
+/* globs start */
 // touches entries: a plain path matches itself and everything beneath it; globs use * ** ? {a,b}.
 const escRe = (s) => s.replace(/[.+^$()|[\]\\]/g, '\\$&');
 const hasWild = (g) => /[*?{[]/.test(g);
@@ -1218,6 +1219,63 @@ function globsOverlap(a, b) {
   const pa = staticPrefix(a), pb = staticPrefix(b);
   return pa.startsWith(pb) || pb.startsWith(pa);
 }
+/* globs end */
+/* coverage start */
+// Component lines (spec §4): every tracked path matches exactly one component's owns, once the
+// kit's own line (devteam) is set aside. Pure: the caller reads the tree and the settings, so the
+// four places that enforce this (validate, check-pr and merge, observe-metrics, check-ticket) run
+// the same function on the same kind of input.
+//
+// Who owns one path: 'devteam' first when it lies in the kit's line, then every component whose
+// owns match it. A sole component with no owns owns everything devteam doesn't; with two or more,
+// a component without owns owns nothing (validate says why). onHit(name, glob) counts glob hits.
+// coverage, prefixOwners, coverageReport and checkTicket's footprint all ask this one function.
+function ownersOf(p, components, devteamLine, onHit = null) {
+  const owners = devteamLine.some((g) => pathMatches(g, p)) ? ['devteam'] : [];
+  const sole = components.length === 1;
+  for (const c of components) {
+    if (c.owns === undefined) { if (sole && owners[0] !== 'devteam') owners.push(c.name); continue; }
+    let mine = false;
+    for (const g of c.owns) if (pathMatches(g, p)) { mine = true; if (onHit) onHit(c.name, g); }
+    if (mine) owners.push(c.name);
+  }
+  return owners;
+}
+function coverage(paths, components, devteamLine) {
+  const hits = new Map();
+  for (const c of components) for (const g of c.owns ?? []) hits.set(`${c.name}\0${g}`, 0);
+  const count = (name, g) => hits.set(`${name}\0${g}`, hits.get(`${name}\0${g}`) + 1);
+  const unowned = [];
+  const contested = [];
+  for (const p of paths) {
+    const owners = ownersOf(p, components, devteamLine, count);
+    // a declared glob reaching into the kit's line is two owners for one path: devteam and it
+    if (owners[0] === 'devteam') { if (owners.length > 1) contested.push([p, owners]); continue; }
+    if (!owners.length) unowned.push(p);
+    else if (owners.length > 1) contested.push([p, owners]);
+  }
+  const empty = [...hits].filter(([, n]) => n === 0).map(([k]) => k.slice(k.indexOf('\0') + 1));
+  return { unowned, contested, empty, case_collisions: caseCollisions(paths) };
+}
+// Two tracked paths that differ only by case break a checkout on macOS and Windows.
+function caseCollisions(paths) {
+  const by = new Map();
+  for (const p of paths) { const k = p.toLowerCase(); if (!by.has(k)) by.set(k, []); by.get(k).push(p); }
+  return [...by.values()].filter((g) => g.length > 1).map((g) => [...g].sort());
+}
+function coverageClean(r) {
+  return !r.unowned.length && !r.contested.length && !r.empty.length && !r.case_collisions.length;
+}
+// Who owns a touches entry's static prefix (the part before its first wildcard), by ownersOf.
+// Null when there is no prefix (`**/*.rb` could be anywhere). A plain path is a folder and what is
+// in it, as in touches, so both the path and the path with a trailing slash are asked.
+function prefixOwners(entry, components, devteamLine) {
+  const pre = staticPrefix(entry);
+  if (!pre) return null;
+  const probes = hasWild(entry) ? [pre] : [trimSlash(pre), `${trimSlash(pre)}/`];
+  return [...new Set(probes.flatMap((p) => ownersOf(p, components, devteamLine)))];
+}
+/* coverage end */
 
 // Live state of a ticket's worker: its last phase line, and its last line of any kind.
 function workerState(id) {
