@@ -5452,6 +5452,8 @@ function cmdPrompt() {
 }
 
 const tmux = (args) => sh('tmux', args) !== null;
+// Environment variables that mark a process as inside one running agent session (Claude Code's).
+const SESSION_MARKERS = /^(CLAUDECODE|CLAUDE_CODE_[A-Z0-9_]+|CLAUDE_PID)$/;
 // The session:window running this command. TMUX_PANE pins it to our own pane.
 const tmuxHere = () => (process.env.TMUX && process.env.TMUX_PANE ? sh('tmux', ['display-message', '-p', '-t', process.env.TMUX_PANE, '#S:#W']) : null);
 const supervisorTarget = () => process.env.DEVTEAM_SUPERVISOR ?? readText(supervisorPaneFile())?.trim() ?? null;
@@ -5746,7 +5748,12 @@ function makeSession(role) {
     fs.writeFileSync(policy, `${JSON.stringify({ permissions: { deny: s.worker_denied_commands.map((c) => `Bash(${c})`) }, hooks: { Stop: [{ hooks: [{ type: 'command', command: `node '${path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs')}' stop-ok` }] }] } }, null, 2)}\n`);
     cmd = cmd.replace(/^claude/, `claude --settings '${policy}'`);
   }
-  typeInto(target, `${cmd} "$(cat '${promptFile}')"`);
+  // A tmux server started from inside an agent session (the supervisor's, on a new machine) hands
+  // every window that session's markers; a worker that inherits them runs as its child (Claude Code
+  // then saves no transcript, so its spend goes unmeasured). Strip them for the agent, whatever the
+  // window's shell is. Only per-session markers: settings an owner may export (CLAUDE_CONFIG_DIR) stay.
+  const markers = [...new Set([...Object.keys(process.env), ...(sh('tmux', ['show-environment', '-g']) ?? '').split('\n'), ...(sh('tmux', ['show-environment', '-t', s.tmux_session]) ?? '').split('\n')].map((l) => l.replace(/^-/, '').split('=')[0]).filter((k) => SESSION_MARKERS.test(k)))].sort();
+  typeInto(target, `${markers.length ? `env ${markers.map((k) => `-u ${k}`).join(' ')} ` : ''}${cmd} "$(cat '${promptFile}')"`);
   if (role === 'worker' && !resume) appendLog({ type: 'phase', from: null, to: 'starting', note: `started in ${target}` }, id);
   // a planner parked by a park is running again
   if (role === 'planner' && lastPhaseOf(name)?.to === 'parked') appendLog({ type: 'phase', from: 'parked', to: 'starting', note: `started in ${target}` }, name);
