@@ -1457,7 +1457,12 @@ function levels(ts) {
 const escRe = (s) => s.replace(/[.+^$()|[\]\\]/g, '\\$&');
 const hasWild = (g) => /[*?{[]/.test(g);
 const unbalanced = (g) => (g.match(/\{/g) ?? []).length !== (g.match(/\}/g) ?? []).length;
+// Each glob is compiled once per process, keyed by its text: coverage asks every glob about every
+// tracked path, and compiling per call made 50k paths x 30 globs take seconds (F2).
+const globCache = new Map();
 function globToRegex(g) {
+  const hit = globCache.get(g);
+  if (hit) return hit;
   let re = '';
   for (let i = 0; i < g.length; i++) {
     const c = g[i];
@@ -1471,14 +1476,24 @@ function globToRegex(g) {
       i = end;
     } else re += escRe(c);
   }
-  return new RegExp(`^${re}$`);
+  const rx = new RegExp(`^${re}$`);
+  globCache.set(g, rx);
+  return rx;
 }
 const trimSlash = (p) => p.replace(/\/+$/, '');
 const staticPrefix = (g) => { const i = g.search(/[*?{[]/); return i === -1 ? g : g.slice(0, i); };
-function pathMatches(entry, file) {
-  if (!hasWild(entry)) { const e = trimSlash(entry); return file === e || file.startsWith(`${e}/`); }
-  return globToRegex(entry).test(file);
+// One matcher per touches entry or glob, built once per process and kept by its text.
+const matcherCache = new Map();
+function globMatcher(entry) {
+  let m = matcherCache.get(entry);
+  if (!m) {
+    if (!hasWild(entry)) { const e = trimSlash(entry), under = `${e}/`; m = (file) => file === e || file.startsWith(under); }
+    else { const rx = globToRegex(entry); m = (file) => rx.test(file); }
+    matcherCache.set(entry, m);
+  }
+  return m;
 }
+const pathMatches = (entry, file) => globMatcher(entry)(file);
 // Conservative: may report an overlap that isn't real, never misses one.
 function globsOverlap(a, b) {
   if (!hasWild(a) && !hasWild(b)) { const x = trimSlash(a), y = trimSlash(b); return x === y || x.startsWith(`${y}/`) || y.startsWith(`${x}/`); }
@@ -1498,25 +1513,32 @@ function globsOverlap(a, b) {
 // owns match it. A sole component with no owns owns everything devteam doesn't; with two or more,
 // a component without owns owns nothing (validate says why). onHit(name, glob) counts glob hits.
 // coverage, prefixOwners, coverageReport and checkTicket's footprint all ask this one function.
-function ownersOf(p, components, devteamLine, onHit = null) {
-  const owners = devteamLine.some((g) => pathMatches(g, p)) ? ['devteam'] : [];
-  const sole = components.length === 1;
-  for (const c of components) {
-    if (c.owns === undefined) { if (sole && owners[0] !== 'devteam') owners.push(c.name); continue; }
+// The lines compiled: each glob's matcher looked up once, not once per path.
+const compileLines = (components, devteamLine) => ({
+  dev: devteamLine.map(globMatcher),
+  sole: components.length === 1,
+  comps: components.map((c) => ({ name: c.name, bare: c.owns === undefined, globs: (c.owns ?? []).map((g) => [g, globMatcher(g)]) })),
+});
+function ownersIn(p, L, onHit) {
+  const owners = L.dev.some((m) => m(p)) ? ['devteam'] : [];
+  for (const c of L.comps) {
+    if (c.bare) { if (L.sole && owners[0] !== 'devteam') owners.push(c.name); continue; }
     let mine = false;
-    for (const g of c.owns) if (pathMatches(g, p)) { mine = true; if (onHit) onHit(c.name, g); }
+    for (const [g, m] of c.globs) if (m(p)) { mine = true; if (onHit) onHit(c.name, g); }
     if (mine) owners.push(c.name);
   }
   return owners;
 }
+const ownersOf = (p, components, devteamLine, onHit = null) => ownersIn(p, compileLines(components, devteamLine), onHit);
 function coverage(paths, components, devteamLine) {
   const hits = new Map();
   for (const c of components) for (const g of c.owns ?? []) hits.set(`${c.name}\0${g}`, 0);
   const count = (name, g) => hits.set(`${name}\0${g}`, hits.get(`${name}\0${g}`) + 1);
+  const L = compileLines(components, devteamLine);
   const unowned = [];
   const contested = [];
   for (const p of paths) {
-    const owners = ownersOf(p, components, devteamLine, count);
+    const owners = ownersIn(p, L, count);
     // a declared glob reaching into the kit's line is two owners for one path: devteam and it
     if (owners[0] === 'devteam') { if (owners.length > 1) contested.push([p, owners]); continue; }
     if (!owners.length) unowned.push(p);
@@ -1533,6 +1555,28 @@ function caseCollisions(paths) {
 }
 function coverageClean(r) {
   return !r.unowned.length && !r.contested.length && !r.empty.length && !r.case_collisions.length;
+}
+// The owner to suggest for an unowned folder: the owner of the first owned path (in tree order) in
+// that folder, else in the nearest folder above it; the repo root suggests nothing. One pass over
+// the tree indexes the first owned path under every folder, so each path's owner is asked once,
+// however many folders are unowned (F2). ownerOf(p) is the owner to name, or null.
+function ownerSuggestions(paths, unowned, ownerOf) {
+  const first = new Map();
+  for (const p of paths) {
+    if (unowned.has(p)) continue;
+    let who;
+    for (let i = p.indexOf('/'); i !== -1; i = p.indexOf('/', i + 1)) {
+      const d = p.slice(0, i + 1);
+      if (first.has(d)) continue;
+      if (who === undefined) who = ownerOf(p);
+      if (!who) break;
+      first.set(d, who);
+    }
+  }
+  return (dir) => {
+    for (let d = dir; d && d !== './'; d = d.slice(0, d.slice(0, -1).lastIndexOf('/') + 1)) if (first.has(d)) return first.get(d);
+    return null;
+  };
 }
 // Who owns a touches entry's static prefix (the part before its first wildcard), by ownersOf.
 // Null when there is no prefix (`**/*.rb` could be anywhere). A plain path is a folder and what is
@@ -7204,17 +7248,7 @@ function coverageReport(cov, s, R = homeFacts) {
   const dev = R.devteamLine();
   const ownerOf = (p) => ownersOf(p, comps, dev).find((n) => n !== 'devteam') ?? null;
   const dirOf = (p) => (p.includes('/') ? `${p.slice(0, p.lastIndexOf('/'))}/` : './');
-  const all = treePathsMemo(cov.ref, R);
-  const unowned = new Set(cov.unowned);
-  // the owner of an owned path in the same folder, else in the nearest folder above it; the repo
-  // root suggests nothing (every path is under it)
-  const suggest = (dir) => {
-    for (let d = dir; d !== './'; d = dirOf(d.slice(0, -1))) {
-      const sib = all.find((p) => p.startsWith(d) && !unowned.has(p) && ownerOf(p));
-      if (sib) return ownerOf(sib);
-    }
-    return null;
-  };
+  const suggest = cov.unowned.length ? ownerSuggestions(treePathsMemo(cov.ref, R), new Set(cov.unowned), ownerOf) : () => null;
   for (const [dir, ps] of Object.entries(groupBy(cov.unowned, dirOf)).sort()) {
     const who = suggest(dir);
     lines.push(`unowned: ${dir} (${ps.length}): ${ps.slice(0, 8).join(', ')}${ps.length > 8 ? `, … (+${ps.length - 8})` : ''}${who ? `; suggested owner: ${who}` : ''}`);
