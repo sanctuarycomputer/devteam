@@ -2623,8 +2623,20 @@ test('the registry and component lines are validated; labels-only components and
     assert.match(o2, /components\.console: link "console" is not in links/);
     // m1: a ticket whose component is a reserved slug is reported once, with the rename
     lines(F.STD);
-    ok(old, ['ticket', 'add', 'home-01-x', '--json', JSON.stringify({ title: 'x', feature: 'chores', component: 'home', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['api/**'], done_when: ['the api check passes'], notes: 'n' })], SUP);
+    const tj = (component, extra = {}) => JSON.stringify({ title: 'x', feature: 'chores', component, kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['api/**'], done_when: ['the api check passes'], notes: 'n', ...extra });
+    // F5, O4: new tickets can't take a reserved name, and the refusal names the list
+    assert.match(run(old, ['ticket', 'add', 'home-01-x', '--json', tj('home')], SUP).err, /component "home" is reserved \(reserved: home, devteam\)/);
+    ok(old, ['ticket', 'add', 'api-02-y', '--json', tj('api')], SUP);
+    assert.match(run(old, ['ticket', 'set', 'api-02-y', '--json', JSON.stringify({ component: 'devteam' })], SUP).err, /component "devteam" is reserved \(reserved: home, devteam\)/);
+    // a ticket a project wrote before the names were reserved: one error, and the prescribed fix clears it
+    const logDir = path.join(old, 'docs/devteam/run/log');
+    const file = path.join(logDir, fs.readdirSync(logDir).find((f) => f.startsWith('supervisor-')));
+    const mine = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).find((o) => o.type === 'ticket' && o.id === 'api-02-y' && o.op === 'new');
+    fs.appendFileSync(file, `${JSON.stringify({ ...mine, id: 'home-01-x', component: 'home', at: new Date().toISOString() })}\n`);
     assert.match(v(), /tickets home-01-x: component "home" is reserved/);
+    ok(old, ['ticket', 'add', 'api-03-x', '--json', tj('api')], SUP);
+    ok(old, ['ticket', 'set', 'home-01-x', '--json', JSON.stringify({ superseded_by: 'api-03-x' })], SUP);
+    assert.doesNotMatch(v(), /is reserved/, 'superseding it, as the message says, clears it (F5)');
   } finally { F.done(); }
 });
 

@@ -1921,7 +1921,8 @@ function cmdValidate() {
     errors.push(...reg.errors);
     warnings.push(...reg.warnings);
     // A reserved slug as a component prefix: the one G1 exception, only for a project already using it.
-    const reserved = [...ts.values()].filter((t) => RESERVED_LINKS.includes(t.component)).map((t) => t.id);
+    // Only live tickets: a superseded or merged one is history, so the prescribed fix clears it (F5).
+    const reserved = [...ts.values()].filter((t) => isActive(t) && !mergeShaFor(t.id) && RESERVED_LINKS.includes(t.component)).map((t) => t.id);
     if (reserved.length) errors.push(`tickets ${reserved.join(', ')}: component "${[...new Set(reserved.map((id) => ts.get(id).component))].join('" and "')}" is reserved (home is the repo that holds the kit, devteam the kit's own files); rename the component: supersede each ticket with one under another component (ticket add <new-id>, ticket set <old-id> --json '{"superseded_by": "<new-id>"}')`);
     // Which tree and which settings (§4, point 1), by the rule coverageFails applies at check-pr and
     // merge (F8): main's tree under main's committed settings, except in a chore context (a chore-
@@ -2250,6 +2251,8 @@ function graphEdit(type, idRe) {
   }
   if (sub === 'add' && logGet(id)) die(`${id} exists; use ${type} set`);
   if (sub === 'set' && logGet(id)?.type !== type) die(`no ${type} ${id}`);
+  // home and devteam name the repo that holds the kit and the kit's own line (spec §3.1, O4)
+  if (type === 'ticket' && RESERVED_LINKS.includes(body.component)) die(`component "${body.component}" is reserved (reserved: ${RESERVED_LINKS.join(', ')}): home is the repo that holds the kit, devteam the kit's own files; plan the ticket under another component`);
   const line = appendLog({ ...body, type, id, op: sub === 'add' ? 'new' : 'set' }, by);
   if (by === 'supervisor') appendLog({ type: 'act', decision: citing(), class: sub === 'add' ? 'add-ticket' : 'replan-within-feature', what: `${sub === 'add' ? 'added' : 'changed'} ${type} ${id}${sub === 'set' ? ` (${Object.keys(body).join(', ')})` : ''}`, refs: [id], reversible: true }, 'supervisor');
   out(`${sub === 'add' ? 'added' : 'updated'} ${line.id}`);
