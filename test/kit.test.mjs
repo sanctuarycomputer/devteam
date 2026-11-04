@@ -158,6 +158,10 @@ test('devteam kit', async (t) => {
     hand('supervisor', { type: 'observation', source: 'supervisor', subject: Gr, kind: 'reading', detail: 'typed', measure: { value: 0, unit: 'files' } });
     assert.equal(readings(Gr).length, 1, 'a repo reading counts only with a commit on main; a typed one never');
     assert.match(dt(['goal', 'status', Gr, 'met']).err, /check reads 1 on main .* not its target 0; --force/, 'met is read again, on main');
+    // the check is the supervisor's command: run from the owner's terminal, it still can't act as the owner
+    const Gx = must(['goal', 'add', '--title', 'Sly check', '--outcome', 'z', '--measure', 'zero', '--target', '0', '--unit', 'n', '--direction', 'down', '--source', 'repo', '--check', `node '${DT}' goal status ${Gn} abandoned >&2 || true; echo 0`, ...rest, '--priority', '45'], { role: 'sup' });
+    must(['goal', 'status', Gx, 'met']);
+    assert.notEqual(json(must(['goal', 'show', Gn, '--json'])).status, 'abandoned', "a check the owner's met runs is refused owner commands");
 
     // prod: run from the main checkout, the output kept
     const Gp = must(['goal', 'add', '--title', 'Prod count', '--outcome', 'y', '--measure', 'records synced', '--target', '10', '--unit', 'records', '--direction', 'up', '--source', 'prod', '--check', 'echo 7', ...rest, '--priority', '43'], { role: 'sup' });

@@ -3986,7 +3986,12 @@ function runMeasureCheck(g) {
     sha = git(['rev-parse', `${mainRef() ?? die('no main branch to read the measure on')}^{commit}`], mainRoot) ?? die('cannot resolve main');
     cwd = detachedWorktree(sha, 'reading');
   }
-  const r = spawnSync('sh', ['-c', m.check], { cwd, env: gateEnv(), encoding: 'utf8', timeout: 900000, maxBuffer: 16 * 1024 * 1024 });
+  // The check is the supervisor's command (it drafted the goal), and goal status met runs it from
+  // the owner's terminal or the dashboard: it runs as the supervisor, never as the owner, so what it
+  // writes is the supervisor's and owner commands refuse it.
+  const env = { ...gateEnv(), DEVTEAM_ROLE: 'supervisor' };
+  for (const k of ['DEVTEAM_CHANNEL', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE']) delete env[k];
+  const r = spawnSync('sh', ['-c', m.check], { cwd, env, encoding: 'utf8', timeout: 900000, maxBuffer: 16 * 1024 * 1024 });
   if (r.status !== 0) die(`${g.id}'s check failed (${r.error?.message ?? `exit ${r.status}`}): ${(r.stderr ?? '').trim().slice(-400)}`);
   const last = (r.stdout ?? '').trim().split('\n').pop().trim();
   const value = Number(last);
