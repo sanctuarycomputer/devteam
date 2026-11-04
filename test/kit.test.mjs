@@ -27,6 +27,9 @@ const hasTmux = spawnSync('tmux', ['-V']).status === 0;
 // A port the OS says is free: a random one in a range can land on a machine's own listener (macOS's
 // AirPlay receiver holds 5000 and answers 403), which then passes the test's startup probe.
 const freePort = () => new Promise((resolve, reject) => { const v = net.createServer(); v.on('error', reject); v.listen(0, '127.0.0.1', () => { const { port } = v.address(); v.close(() => resolve(port)); }); });
+// Wait for a server the test started to answer: up to 30s, since a loaded machine starts it slowly;
+// a server that never answers fails here, not at the test's first real request.
+const serverUp = async (url) => { for (let i = 0; i < 300; i++) { try { await fetch(url); return; } catch { await new Promise((r) => setTimeout(r, 100)); } } throw new Error(`no server at ${url} after 30s`); };
 
 function dt(args, { cwd = repo, role = 'owner', input } = {}) {
   const env = { ...process.env, ...ROLE[role] };
@@ -1487,7 +1490,7 @@ test('devteam kit', async (t) => {
     const port = await freePort();
     const srv = spawn(process.execPath, [DT, 'dashboard', '--port', String(port)], { cwd: repo, env: { ...process.env, DEVTEAM_ROLE: '' }, stdio: 'ignore' });
     try {
-      for (let i = 0; i < 50; i++) { try { await fetch(`http://127.0.0.1:${port}/`); break; } catch { await new Promise((r) => setTimeout(r, 100)); } }
+      await serverUp(`http://127.0.0.1:${port}/`);
       const browser = { 'content-type': 'application/json', 'sec-fetch-site': 'same-origin', origin: `http://127.0.0.1:${port}` };
       // the data names the page version, so an open tab can tell it was updated underneath it
       const dataRes = await fetch(`http://127.0.0.1:${port}/api/data`);
@@ -2050,7 +2053,7 @@ test('devteam kit', async (t) => {
     const B = `http://127.0.0.1:${port}`;
     const srv = spawn(process.execPath, [DT, 'dashboard', '--port', String(port)], { cwd: repo, env: { ...process.env, DEVTEAM_ROLE: '' }, stdio: 'ignore' });
     try {
-      for (let i = 0; i < 50; i++) { try { await fetch(`${B}/`); break; } catch { await new Promise((r) => setTimeout(r, 100)); } }
+      await serverUp(`${B}/`);
       // the page: its bytes verbatim, only into a frame of the dashboard, under a policy with no network
       const frame = { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-origin' };
       let r = await fetch(`${B}/review/${Qa}/`, { headers: frame });
@@ -2338,7 +2341,7 @@ test('devteam kit', async (t) => {
       const B = `http://127.0.0.1:${port}`;
       const srv = spawn(process.execPath, [DT, 'dashboard', '--port', String(port)], { cwd: repo, env: { ...process.env, DEVTEAM_ROLE: '' }, stdio: 'ignore' });
       try {
-        for (let i = 0; i < 50; i++) { try { await fetch(`${B}/`); break; } catch { await new Promise((res) => setTimeout(res, 100)); } }
+        await serverUp(`${B}/`);
         const pr = await fetch(`${B}/review/${Qp}/`, { headers: { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-origin' } });
         assert.equal(pr.status, 200, 'a squash-merged page still opens');
         assert.equal(sha(Buffer.from(await pr.arrayBuffer())), sha(PAGE));
