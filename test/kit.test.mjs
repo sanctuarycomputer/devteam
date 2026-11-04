@@ -2564,6 +2564,55 @@ test('owner settings per entry: repo-link fields have classes, url links are the
   } finally { F.done(); }
 });
 
+test('components check reads a commit\'s tree: dotfiles, gitlinks, symlinks, spaces, unicode; never the index', () => {
+  const F = monoFixture('components-check');
+  const { old, ok, run, g, lines } = F;
+  try {
+    assert.match(ok(old, ['components', 'check']), /no component lines declared/, 'labels-only or none: nothing to check');
+    assert.equal(ok(old, ['components', 'check', '--count']), '0');
+    // a submodule gitlink, a symlink, a dot-directory, a space, a non-ASCII name
+    const sub = path.join(F.base, 'sub');
+    g(['init', '-q', '-b', 'main', sub], F.base);
+    write(path.join(sub, 'x'), 'x\n');
+    g(['add', 'x'], sub);
+    g(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'x'], sub);
+    g(['-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', sub, 'vendor/sub'], old);
+    fs.symlinkSync('api', path.join(old, 'api-link'));
+    write(path.join(old, 'api/.hidden/deep/x.rb'), 'x\n');
+    write(path.join(old, 'api/with space.rb'), 'x\n');
+    write(path.join(old, 'api/é.rb'), 'x\n');
+    g(['add', '-A'], old);
+    g(['commit', '-qm', 'shapes'], old);
+    g(['push', '-q', 'origin', 'main'], old);
+    lines({ ...F.STD, ops: { owns: [...F.STD.ops.owns, '.gitmodules', 'vendor/sub', 'api-link'] } });
+    ok(old, ['components', 'check']);
+    assert.equal(ok(old, ['components', 'check', '--count']), '0');
+    // M4: a staged, uncommitted file is not in any tree
+    write(path.join(old, 'stray.txt'), 'staged only\n');
+    g(['add', 'stray.txt'], old);
+    ok(old, ['components', 'check']);
+    g(['reset', '-q', 'stray.txt'], old);
+    fs.rmSync(path.join(old, 'stray.txt'));
+    // committed but owned by nobody: unowned, grouped by folder, with a suggested owner
+    write(path.join(old, 'api/new/one.rb'), '1\n');
+    write(path.join(old, 'scripts/run.sh'), '1\n');
+    g(['add', '-A'], old);
+    g(['commit', '-qm', 'stray'], old);
+    lines({ ...F.STD, api: { owns: ['api/*.rb', 'api/lib/**', 'api/.hidden/**', 'api/app.rb'] }, ops: { owns: [...F.STD.ops.owns, '.gitmodules', 'vendor/sub', 'api-link', 'docs/nowhere/**'] } });
+    const r = run(old, ['components', 'check']);
+    assert.equal(r.status, 1);
+    assert.match(r.out, /unowned: api\/new\/ \(1\): api\/new\/one\.rb; suggested owner: api/);
+    assert.match(r.out, /unowned: scripts\/ \(1\): scripts\/run\.sh/);
+    assert.match(r.out, /empty: ops owns "docs\/nowhere\/\*\*", which matches nothing/);
+    assert.doesNotMatch(r.out, /contested: api\/app\.rb/, 'two globs of one component are still one owner');
+    assert.equal(run(old, ['components', 'check', '--count']).out, '3');
+    const j = json(run(old, ['components', 'check', '--json']).out);
+    assert.deepEqual(j.unowned.sort(), ['api/new/one.rb', 'scripts/run.sh']);
+    // --ref reads that commit's tree and that commit's settings
+    ok(old, ['components', 'check', '--ref', 'HEAD~2']);
+  } finally { F.done(); }
+});
+
 test('fleet park: every session stops with a handoff, and a clone elsewhere picks it up with parity', () => {
   const F = fleetFixture('park');
   const { org, old, neu, home, env, run, ok, g, base } = F;

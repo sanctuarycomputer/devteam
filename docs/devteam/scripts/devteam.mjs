@@ -244,10 +244,10 @@ const OWNER_SETTINGS = {
   release: 'governance-edit', secret_commands: 'governance-edit', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit',
 };
 const canonical = (v) => (Array.isArray(v) ? `[${v.map(canonical).join(',')}]` : v && typeof v === 'object' ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(',')}}` : JSON.stringify(v));
-function settingsAt(ref) {
+function settingsAt(ref, { orNull = false } = {}) {
   const text = git(['show', `${ref}:${projectRel}/settings.md`]);
   const m = text?.match(/```json devteam\s*\n([\s\S]*?)\n```/);
-  if (!m) return { ...SETTINGS_DEFAULTS };
+  if (!m) return orNull ? null : { ...SETTINGS_DEFAULTS };
   try { return { ...SETTINGS_DEFAULTS, ...JSON.parse(m[1]) }; } catch { return null; }
 }
 // The owner's settings a commit changes against a base: [{ key, cls }], or null if unreadable.
@@ -2272,7 +2272,44 @@ function verdictHolds(v, head, dir) {
     return !!tree && /^[0-9a-f]{40}$/.test(tree) && git(['diff', '--quiet', tree, `${m}^{tree}`, '--', '.', records]) !== null;
   });
 }
-const changedFiles = (base, sha) => (git(['diff', '--name-only', '--no-renames', base, sha]) ?? '').split('\n').filter(Boolean);
+// The three tree reads every repo needs, over one git function (home's, or a repo link's bound to
+// its checkout). changedFiles is -z: no quoting of spaces or non-ASCII, so every enforcement point
+// compares the same bytes treePaths gives (§4; rev 1 compared quoted octal with raw). treePaths
+// reads a commit's tree (or a tree id): dotfiles, submodule gitlinks and symlinks included, never
+// the index or the working tree. mergeTree is what landing sha on base would produce, as a tree
+// id, or null when it doesn't merge cleanly.
+const gitFacts = (gitFn) => ({
+  changedFiles: (base, sha) => (gitFn(['diff', '-z', '--name-only', '--no-renames', base, sha]) ?? '').split('\0').filter(Boolean),
+  treePaths: (ref) => (gitFn(['ls-tree', '-r', '-z', '--name-only', ref]) ?? '').split('\0').filter(Boolean),
+  mergeTree: (base, sha) => { const t = gitFn(['merge-tree', '--write-tree', '--no-messages', base, sha])?.split('\n')[0]; return t && /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(t) ? t : null; },
+});
+const { changedFiles, treePaths, mergeTree } = gitFacts((args, cwd) => git(args, cwd));
+// Home as the coverage code sees a repo. Every coverage helper takes a repo argument defaulting to
+// this, so PR 2's repo(name) objects (which carry the same fields) slot in without new call shapes.
+const homeFacts = {
+  name: 'home', changedFiles, treePaths, mergeTree,
+  mainRef: () => mainRef(), git: (args, cwd) => git(args, cwd), devteamLine: () => devteamLine(),
+  get settings() { return loadSettings(); },
+};
+// The settings that judge a PR (§4, "Which settings decide"): main's, committed, or the head's
+// when the PR itself changes settings.md. Never the working tree's. settings.md lives in home, so
+// for a PR in another repo (PR 2) they are home main's: that repo's diff can't touch it.
+function settingsInForce(base, sha, R = homeFacts) {
+  const mainS = () => (mainRef() ? settingsAt(mainRef(), { orNull: true }) : null) ?? { ...SETTINGS_DEFAULTS };
+  if (R.name !== 'home') return mainS();
+  const changes = !!base && !!sha && git(['diff', '--quiet', base, sha, '--', `${projectRel}/settings.md`]) === null;
+  const head = changes ? settingsAt(sha, { orNull: true }) : null;
+  // __fromHead: the landing tree's own settings decide (a merged settings.md on forge git)
+  return head ? { ...head, __fromHead: true } : mainS();
+}
+// Coverage of one repo's tree under one set of settings, once per read of the log; null with no lines.
+const coverageAt = (ref, s, R = homeFacts) => (linesDeclared(s) ? memo(`coverage\0${R.name}\0${ref}\0${canonical(s.components)}`, () => coverage(R.treePaths(ref), componentsOn(s, R.name), R.devteamLine())) : null);
+// The Baseline's floor gaps (§9a): unowned, owned twice, a component whose link can't hold files,
+// an owns glob that matches nothing. Case collisions fail the check but aren't a gap class.
+function coverageGaps(cov, s) {
+  const unlinked = Object.entries(s.components ?? {}).filter(([, c]) => isObj(c) && (c.link ?? 'home') !== 'home' && !LINK_KINDS[s.links?.[c.link]?.kind]?.hostsComponents).map(([n]) => n);
+  return { ...cov, unlinked, count: cov.unowned.length + cov.contested.length + cov.empty.length + unlinked.length };
+}
 
 // Definition of done at an exact head, reading the files committed at that head. The forge's
 // check-pr passes approvals: false, because the supervisor's approval acts live in its log.
@@ -6779,6 +6816,60 @@ function cmdNotes() {
   if (chores.length) out(`\n## Other\n\n${chores.map((id) => `- ${id}: ${ts.get(id).title}`).join('\n')}`);
 }
 
+// Coverage problems as lines a person reads: unowned paths grouped by folder, with the component
+// that owns a sibling path in that folder as the suggestion (§4, point 1).
+function coverageReport(cov, s, R = homeFacts) {
+  const lines = [];
+  const comps = componentsOn(s, R.name);
+  const dev = R.devteamLine();
+  const ownerOf = (p) => ownersOf(p, comps, dev).find((n) => n !== 'devteam') ?? null;
+  const dirOf = (p) => (p.includes('/') ? `${p.slice(0, p.lastIndexOf('/'))}/` : './');
+  const all = treePathsMemo(cov.ref, R);
+  const unowned = new Set(cov.unowned);
+  // the owner of an owned path in the same folder, else in the nearest folder above it; the repo
+  // root suggests nothing (every path is under it)
+  const suggest = (dir) => {
+    for (let d = dir; d !== './'; d = dirOf(d.slice(0, -1))) {
+      const sib = all.find((p) => p.startsWith(d) && !unowned.has(p) && ownerOf(p));
+      if (sib) return ownerOf(sib);
+    }
+    return null;
+  };
+  for (const [dir, ps] of Object.entries(groupBy(cov.unowned, dirOf)).sort()) {
+    const who = suggest(dir);
+    lines.push(`unowned: ${dir} (${ps.length}): ${ps.slice(0, 8).join(', ')}${ps.length > 8 ? `, … (+${ps.length - 8})` : ''}${who ? `; suggested owner: ${who}` : ''}`);
+  }
+  for (const [p, owners] of cov.contested) lines.push(`contested: ${p} is owned by ${owners.join(' and ')}${owners[0] === 'devteam' ? " (the kit's own line: no component owns it)" : ''}`);
+  for (const g of cov.empty) lines.push(`empty: ${comps.find((c) => (c.owns ?? []).includes(g))?.name ?? '?'} owns "${g}", which matches nothing (a typo?)`);
+  for (const n of cov.unlinked ?? []) lines.push(`unlinked: component ${n}'s link "${s.components[n].link}" is not a link that holds files`);
+  for (const grp of cov.case_collisions) lines.push(`case: ${grp.join(', ')} differ only by case (they break checkouts on macOS and Windows)`);
+  return lines;
+}
+const treePathsMemo = (ref, R = homeFacts) => memo(`tree\0${R.name}\0${ref}`, () => R.treePaths(ref));
+
+// components check [--ref r] [--count] [--json]: coverage of a commit's tree under that commit's
+// settings (open issue 9). Exits 1 on any problem; --count prints the Baseline's gap count.
+function cmdComponents() {
+  const [sub] = positional;
+  if (sub !== 'check') die('usage: components check [--ref <ref>] [--count] [--json]');
+  const ref = flagStr('ref') ?? mainRef() ?? 'HEAD';
+  const sha = resolveCommit(ref) ?? die(`${ref} is not a commit here (git fetch first?)`);
+  const s = settingsAt(sha) ?? die(`${projectRel}/settings.md at ${ref}: the json devteam block is not valid JSON`);
+  const cov = coverageAt(sha, s);
+  if (!cov) {
+    if (flags.count) return out('0');
+    if (flags.json) return json({ ref, declared: false, unowned: [], contested: [], empty: [], unlinked: [], case_collisions: [], count: 0 });
+    return out(`no component lines declared at ${ref}: one implicit component owns every path${Object.keys(s.components ?? {}).length ? ' (components holds labels only; a line is an entry with owns, link, shared or release)' : ''}`);
+  }
+  const gaps = { ...coverageGaps(cov, s), ref: sha };
+  const bad = gaps.count + gaps.case_collisions.length;
+  if (flags.count) { out(String(gaps.count)); return void process.exit(bad ? 1 : 0); }
+  if (flags.json) { json({ ref, declared: true, ...gaps }); return void process.exit(bad ? 1 : 0); }
+  for (const l of coverageReport(gaps, s)) out(l);
+  out(`${treePathsMemo(sha).length} tracked path(s) at ${ref}: ${gaps.unowned.length} unowned, ${gaps.contested.length} contested, ${gaps.empty.length} empty glob(s), ${gaps.unlinked.length} unlinked, ${gaps.case_collisions.length} case collision(s)`);
+  process.exit(bad ? 1 : 0);
+}
+
 // ===== 12. init, help, dispatch =====
 
 const ARCHITECTURE_MD = `# Architecture
@@ -6926,6 +7017,7 @@ The graph (planning.md)
   ticket add|set|show <id> --json '{…}' | --file f       a ticket: one PR of work
   validate [--strict]            graph rules D1-D11, reviews, goals, log health
   waves [--feature f] | ready [--plan-ahead] | status [--json] | roadmap [--json]
+  components check [--ref r] [--count] [--json]   coverage: every tracked path at r (default main) owned by exactly one component line; exit 1 on any gap (--count: the Baseline's number)
 
 Checks and merging (quality.md)
   check-ticket <id> [--sha s] [--title t] [--body-file f] [--pr n]   definition of done at an exact head
@@ -6984,7 +7076,7 @@ Dashboard and releases
 
 const COMMANDS = {
   init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), whoami: cmdWhoami, settings: cmdSettings,
-  feature: cmdFeature, ticket: cmdTicket, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, roadmap: cmdRoadmap,
+  feature: cmdFeature, ticket: cmdTicket, components: cmdComponents, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, roadmap: cmdRoadmap,
   'check-ticket': cmdCheckTicket, 'check-pr': cmdCheckPr, merge: cmdMerge, 'review-worktree': cmdReviewWorktree,
   phase: cmdPhase, gate: cmdGate, send: cmdSend, messages: cmdMessages, 'stop-ok': cmdStopOk,
   ask: cmdAsk, answer: cmdAnswer, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,

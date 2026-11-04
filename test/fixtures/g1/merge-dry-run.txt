@@ -1,6 +1,6 @@
 exit 1
 --- stdout
-fail: changes files outside touches: OUTSIDE.md, "src/\303\251.js"
+fail: changes files outside touches: OUTSIDE.md
 fail: no gates in settings (gates: {name: command}); pass --no-gates to merge without running any
 --- stderr
 
