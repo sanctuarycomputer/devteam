@@ -294,6 +294,7 @@
   .dtitle { min-width: 0; }
   .attrs { margin: 2px 0 18px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
   .attrs dl { margin: 8px 0 10px; }
+  .attrs dd .links { margin: 0; }
   .attrs-h { margin: 6px 0 0; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
   .attr-k { position: relative; cursor: help; border-bottom: 1px dotted color-mix(in srgb, var(--muted) 60%, transparent); }
   .attr-tip { display: none; position: absolute; left: 0; top: calc(100% + 4px); z-index: 5; width: 280px; padding: 7px 9px; border-radius: 6px; background: var(--raised); color: var(--fg); border: 1px solid var(--line); box-shadow: var(--shadow); font-size: 12px; line-height: 1.45; font-weight: 400; text-transform: none; letter-spacing: 0; white-space: normal; }
@@ -1974,14 +1975,14 @@ async function openTicket(id, { quiet = false } = {}) {
     <h2 id="drawer-title">${esc(t.title)}</h2>
     ${attrs({ id: t.id, rec: t.id, type: 'ticket', computed: [
       ['Status', `${esc(cap(STAGE_WORDS[t.stage] || t.stage))}${t.phase && !['merged', 'released'].includes(t.stage) ? ` · agent ${esc(PHASE_WORDS[t.phase] || t.phase)}` : ''}${t.waiting ? ` · <span class="badge high">${t.waiting.kind === 'limit' ? 'usage limit' : 'waiting on a prompt'}</span> ${esc(t.waiting.line)}` : ''}`, 'Where it is now, from its approvals, its agent\'s last phase and its merge.'],
+      ['Documents', v.files.length ? `<div class="links">${v.files.map(linkOf).join('')}</div>` : '', 'Its spec, plan and verification, from its branch until it merges, then from main.'],
+      ['Reviews', v.reviews.length ? `<ul>${v.reviews.map((r) => `<li>${esc(words(r.stage))} review, pass ${esc(r.pass)}: <b>${r.verdict === 'APPROVE' ? 'approved' : r.verdict === 'CHANGES' ? 'changes asked' : esc(r.verdict || '–')}</b>${r.reviewer ? ` by ${esc(r.reviewer)}` : ''}</li>`).join('')}</ul>` : '', 'Each review of its spec, plan and code, and its verdict.'],
       ['Wave', pt?.wave ? wlink(pt.wave) : '', 'The batch of tickets that can run at the same time once the waves before them merge.'],
       ['Ships in', pt?.target_release ? rlink(pt.target_release) : '', 'The release its stories target.'],
       ['Spent', ticketMap().get(id)?.usd ? `$${esc(ticketMap().get(id).usd.toFixed(2))} so far (its worker and reviewers)` : '', 'What its worker and reviewers have spent, from their session logs.'],
       ['Branch', t.branch ? `<code>${esc(t.branch.replace(/^refs\/(heads|remotes\/origin)\//, ''))}</code>` : '', 'Where its work is.'],
       ['Merged', t.merge_sha ? `<code>${esc(t.merge_sha.slice(0, 12))}</code>` : '', 'The commit it landed as on main.'],
     ] })}
-    ${v.files.length ? `<h3>Documents</h3><div class="links">${v.files.map(linkOf).join('')}</div>` : ''}
-    ${v.reviews.length ? `<h3 style="margin-top:12px">Reviews</h3><ul>${v.reviews.map((r) => `<li>${esc(words(r.stage))} review, pass ${esc(r.pass)}: <b>${r.verdict === 'APPROVE' ? 'approved' : r.verdict === 'CHANGES' ? 'changes asked' : esc(r.verdict || '–')}</b>${r.reviewer ? ` by ${esc(r.reviewer)}` : ''}</li>`).join('')}</ul>` : ''}
     <h3 style="margin-top:12px">History</h3>
     ${items.length ? `<ol class="tl">${items.map(([l, [c, h]]) => `<li class="${c}"><time>${when(l.at)}</time>${h}</li>`).join('')}</ol>` : empty('Nothing logged yet.')}`;
   showDrawer(html);
