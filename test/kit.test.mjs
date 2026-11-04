@@ -1650,6 +1650,15 @@ test('devteam kit', async (t) => {
       await done;
       assert.match(got, new RegExp(`^something needs you:\\n  message ${Mw} \\[blocked\\] from bill-03-a`), 'a worker\'s message wakes it');
     }
+    {
+      // a message that lands during the tick, before wait looks, still wakes it, and only once
+      const env = { ...process.env, DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'bill-03-a' };
+      const early = spawnSync(process.execPath, [DT, 'send', 'supervisor', 'please review the fixture spec', '--kind', 'review-request'], { cwd: repo, encoding: 'utf8', env });
+      assert.equal(early.status, 0, early.stderr);
+      const Me = early.stdout.trim();
+      assert.match(must(['wait', '--minutes', '0.05'], sup), new RegExp(`^something needs you:\\n  message ${Me} \\[review-request\\] from bill-03-a`), 'a message from during the tick is not taken for an old one');
+      assert.match(must(['wait', '--minutes', '0.05'], sup), /^nothing new in 0\.05 min/, 'left open, it wakes the supervisor once');
+    }
     const Qo = must(['ask', '--ticket', 'bill-03-a', '--question', 'Which shared module name?', '--recommendation', 'billing-shared'], sup);
     assert.deepEqual(kinds().filter((k) => k.startsWith('blocked')), ['blocked-on-owner'], "waiting on the owner's answer: say which question, don't tell the supervisor to act");
     assert.match(json(must(['metrics', '--json'])).findings.find((f) => f.kind === 'blocked-on-owner').detail, new RegExp(Qo));

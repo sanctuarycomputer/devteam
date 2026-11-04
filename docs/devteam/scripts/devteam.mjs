@@ -5906,7 +5906,7 @@ const supervisorHandoffOnMain = () => {
 };
 // What run/ holds that the kit made and rebuilds (or that is this machine's alone by nature); anything
 // else in it was put there by hand and doesn't move.
-const RUN_KNOWN = new Set(['log', 'prompts', 'questions', 'sent', 'cache', 'agent', 'pr', 'supervisor-pane', 'dashboard.log', 'supervisor-prompt.txt', '.DS_Store']);
+const RUN_KNOWN = new Set(['log', 'prompts', 'questions', 'sent', 'cache', 'agent', 'pr', 'supervisor-pane', 'wait-since', 'dashboard.log', 'supervisor-prompt.txt', '.DS_Store']);
 // An agent harness's own memory for this project, outside the repo (Claude Code keeps it per
 // checkout folder). It doesn't move; what the next session needs goes into knowledge or a handoff.
 function harnessMemoryFiles() {
@@ -6260,22 +6260,34 @@ function cmdWait() {
   if (!(minutes > 0 && minutes <= 240)) die('--minutes takes 1 to 240');
   const self = fileURLToPath(import.meta.url);
   const sub = (args) => { const r = spawnSync(process.execPath, [self, ...args], { cwd: mainRoot, env: process.env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }); try { return r.status === 0 ? JSON.parse(r.stdout) : null; } catch { return null; } };
+  // What arrived since the last wait woke the supervisor counts as new, though it is already in the
+  // first snapshot: a worker's message that lands during the tick (or while metrics runs, which on a
+  // long log takes a while) would otherwise wait out the whole next tick. A message the supervisor
+  // leaves open wakes it once, not every time.
+  const sinceFile = path.join(runDir, 'wait-since');
+  const since = Number(readText(sinceFile)) || null;
   const snap = () => {
     logCache = null;
-    const owner = readLog().lines.filter((l) => l.by === 'owner').map((l) => l.id);
-    const msgs = (sub(['messages', '--open', '--to', 'supervisor', '--json']) ?? []).map((m) => `${m.id} [${m.kind}] from ${m.created_by}: ${String(m.text).slice(0, 160)}`);
+    const owner = readLog().lines.filter((l) => l.by === 'owner').map((l) => ({ k: l.id, at: Date.parse(l.at) }));
+    const msgs = (sub(['messages', '--open', '--to', 'supervisor', '--json']) ?? []).map((m) => ({ k: `${m.id} [${m.kind}] from ${m.created_by}: ${String(m.text).slice(0, 160)}`, at: Date.parse(m.created_at) }));
     const high = (sub(['metrics', '--json'])?.findings ?? []).filter((f) => f.severity === 'high').map((f) => `${f.kind} ${f.subject}: ${f.detail}`);
     return { owner, msgs, high };
   };
-  const base = snap();
-  const report = (why, lines) => { out(why); for (const l of lines) out(`  ${l}`); out('then: the tick (supervisor.md §3), and wait again'); };
+  const first = snap();
+  const late = (xs) => (since ? xs.filter((x) => x.at > since) : []);
+  const base = { owner: first.owner.filter((x) => !late(first.owner).includes(x)).map((x) => x.k), msgs: first.msgs.filter((x) => !late(first.msgs).includes(x)).map((x) => x.k), high: first.high };
+  const report = (why, lines) => { fs.mkdirSync(runDir, { recursive: true }); fs.writeFileSync(sinceFile, `${Date.now()}\n`); out(why); for (const l of lines) out(`  ${l}`); out('then: the tick (supervisor.md §3), and wait again'); };
   if (base.high.length) return report('high findings are open; act on each, or ack it with a reason (ack <kind> <subject> --reason "…"):', base.high);
+  const lateMsgs = late(first.msgs).map((x) => `message ${x.k}`);
+  const lateOwner = late(first.owner).map((x) => x.k);
+  if (lateMsgs.length || lateOwner.length) return report('something needs you:', [...lateMsgs, ...(lateOwner.length ? [`${lateOwner.length} new line(s) from the owner: ${lateOwner.slice(-5).join(', ')} (questions --all, history --tail 20)`] : [])]);
   const until = Date.now() + minutes * 60000;
   const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
   while (Date.now() < until) {
     sleep(Math.min(Math.max(2000, (minutes * 60000) / 10), 45000, Math.max(0, until - Date.now())));
     const now = snap();
-    const fresh = (k) => now[k].filter((x) => !base[k].includes(x));
+    const keys = { ...now, owner: now.owner.map((x) => x.k), msgs: now.msgs.map((x) => x.k) };
+    const fresh = (k) => keys[k].filter((x) => !base[k].includes(x));
     const lines = [...fresh('msgs').map((x) => `message ${x}`), ...(fresh('owner').length ? [`${fresh('owner').length} new line(s) from the owner: ${fresh('owner').slice(-5).join(', ')} (questions --all, history --tail 20)`] : []), ...fresh('high').map((x) => `finding ${x}`)];
     if (lines.length) return report('something needs you:', lines);
   }
