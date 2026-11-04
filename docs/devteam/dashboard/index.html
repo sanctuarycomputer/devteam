@@ -1547,13 +1547,22 @@ async function reviewDecline(id, note, errId, btn) {
 }
 
 const GOAL_STEPS = ['Defined', 'Designed', 'Approved', 'Built', 'Met'];
+// A hold's state in words. Parking and draining are transitions, shown as such everywhere until they
+// finish; a goal the fleet op holds finishes only when the fleet is ready to move (fleet status).
+const HOLD_STATE_WORDS = { running: 'Running', draining: 'Draining…', drained: 'Drained', parking: 'Parking…', parked: 'Parked', 'let go': 'Let go' };
+function holdState(h) {
+  if (!h) return 'running';
+  if (h.fleet && ['parked', 'drained'].includes(h.state) && !(FLEET.data && FLEET.data.ready)) return h.state === 'parked' ? 'parking' : 'draining';
+  return h.state;
+}
 // A held goal keeps its step; its label says the hold first.
 function goalState(g, R, openQs) {
   const s = goalStateOf(g, R, openQs);
   const h = g.hold_view;
   if (!h || h.mode === 'run' || h.mode === 'let-go') return s;
-  const words = { draining: 'Draining', drained: 'Drained', parking: 'Parking', parked: 'Parked' }[h.state] || h.state;
-  const running = h.running.length ? ` (${h.running.length} still running)` : '';
+  const st = holdState(h);
+  const words = HOLD_STATE_WORDS[st] || st;
+  const running = h.running.length ? ` (${h.running.length} ${h.mode === 'park' ? 'still settling' : 'still running'})` : st !== h.state ? ' (the fleet is still getting ready to move)' : '';
   const why = `${h.fleet ? 'the whole fleet' : h.by === 'supervisor' ? 'the supervisor' : 'you'}${h.reason ? `: ${esc(h.reason)}` : ''}`;
   return { ...s, label: `${words}${running} · ${s.label}`, tone: h.mode === 'park' ? 'high' : 'medium', next: `${h.mode === 'drain' ? 'Draining: what is running finishes and merges; nothing new starts' : 'Parked: its sessions stopped with their work pushed and a handoff; nothing starts and nothing merges'} (set by ${why}). ${s.next || ''}` };
 }
@@ -1631,7 +1640,7 @@ function holdControl(id, h, { letGo = true, status = null } = {}) {
   return `<div class="holdbar"><span class="seg2" role="group" aria-label="Hold">${btn('run', 'Run')}${btn('drain', 'Drain')}${btn('park', 'Park')}${letGo ? btn('let-go', 'Let go') : ''}</span>${fleet}<span class="err" id="e-hold-${esc(id)}"></span></div>`;
 }
 function upkeepCard(u) {
-  const words = { running: 'Running', draining: 'Draining', drained: 'Drained', parking: 'Parking', parked: 'Parked' }[u.state] || u.state;
+  const words = HOLD_STATE_WORDS[holdState(u)] || u.state;
   const chores = u.chores || [];
   return `<div class="card goal upkeep">
     ${cardHead('wrench', `<span class="badge ${u.mode === 'run' ? 'good' : u.mode === 'park' ? 'high' : 'medium'}">${esc(words)}</span>`, { extra: 'always on: observing and keeping the record' })}
@@ -1649,7 +1658,9 @@ function fleetStrip() {
   const ready = st ? (st.ready ? '<span class="badge good">ready to move</span>' : `<span class="badge ${mode ? 'medium' : ''}">not ready to move</span>`) : mode || f.op ? '<span class="muted">checking…</span>' : '<span class="muted">park or drain the fleet to move it; Check says what a move needs</span>';
   const left = st && !st.ready ? `<details><summary>${esc(st.blockers.length)} thing${st.blockers.length === 1 ? '' : 's'} left before a move</summary><ul>${st.blockers.map((b) => `<li>${linkify(b)}</li>`).join('')}</ul></details>` : '';
   const parity = st?.parity ? `<span class="muted">parity <code>${esc(st.parity.hash)}</code></span>` : '';
-  const label = mode === 'park' ? '<b>Fleet parked</b>' : mode === 'drain' ? `<b>Fleet draining</b>${st && !st.sessions.some((x) => !x.parked) ? ' (drained)' : ''}` : f.op ? '<b>Fleet partly held</b> <span class="muted">(a goal was set apart after the fleet op)</span>' : '<b>Fleet running</b>';
+  // parked or drained only once fleet status says the move is ready; until then it is a transition
+  const settled = !!(st && st.ready);
+  const label = mode === 'park' ? `<b>${settled ? 'Fleet parked' : 'Fleet parking…'}</b>` : mode === 'drain' ? `<b>${settled ? 'Fleet drained' : 'Fleet draining…'}</b>` : f.op ? '<b>Fleet partly held</b> <span class="muted">(a goal was set apart after the fleet op)</span>' : '<b>Fleet running</b>';
   const btns = mode || f.op
     ? '<button type="button" data-fleet="resume">Resume</button>'
     : '<button type="button" class="ghost" data-fleet="drain">Drain all</button><button type="button" class="ghost" data-fleet="park">Park all</button>';
@@ -1659,8 +1670,12 @@ async function loadFleet(fetchToo = false) {
   if (FLEET.busy) return;
   FLEET.busy = true;
   try { const r = await fetch(`/api/fleet${fetchToo ? '?fetch=1' : ''}`); if (r.ok) FLEET = { ...FLEET, data: await r.json(), at: Date.now() }; } catch {}
+  const wasReady = !!FLEET.prevReady;
   FLEET.busy = false;
+  FLEET.prevReady = !!FLEET.data?.ready;
   if ($('fleet-strip')) $('fleet-strip').innerHTML = fleetStrip();
+  // the goal cards say parking or parked by the fleet's readiness: redraw them when it changes
+  if (DATA && wasReady !== FLEET.prevReady && typeof render === 'function') render(DATA);
 }
 function goalCard(g, R, openQs, week) {
   const s = goalState(g, R, openQs);
@@ -2758,7 +2773,7 @@ function render(d) {
   renderOoda(o);
   // readiness is costly (git, gh, harness logs): asked for only while the fleet is held, or on Check
   if (!$('fleet-strip').querySelector('.confirm')) $('fleet-strip').innerHTML = fleetStrip();
-  if ((d.fleet?.mode || d.fleet?.op) && Date.now() - FLEET.at > 60000) loadFleet();
+  if ((d.fleet?.mode || d.fleet?.op) && Date.now() - FLEET.at > (FLEET.data && FLEET.data.ready ? 600000 : 120000)) loadFleet();
   for (const id of openForms) { const f = document.querySelector(`[data-correct-form="${id}"]`); if (f) f.hidden = false; }
   renderProgress();
 

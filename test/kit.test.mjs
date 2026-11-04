@@ -598,6 +598,17 @@ test('devteam kit', async (t) => {
     const dl = Array.isArray(d) ? d[0] : d;
     assert.equal(dl.authority, 'answer');
     assert.equal(dl.rung, 1, 'the rung it was decided on is snapshotted');
+    // a decision written by hand can't carry trust it never had: an act under it is refused
+    {
+      const supFile = path.join(repo, 'docs/devteam/run/log', fs.readdirSync(path.join(repo, 'docs/devteam/run/log')).find((f) => /^supervisor-/.test(f)));
+      const before = fs.readFileSync(supFile, 'utf8');
+      const fid = 'd-20261101-235959000-supervisor';
+      fs.appendFileSync(supFile, line({ id: fid, type: 'decision', op: 'new', at: new Date().toISOString(), by: 'supervisor', class: 'gate-change', what: 'drop the lint gate', refs: ['bill-01-card'], authority: 'answer', approved_by: Qx, reversible: true }));
+      assert.match(dt(['act', '--decision', fid, '--', 'dropped it'], sup).err, /records authority it doesn't have \(gate-change is the owner's/);
+      fs.appendFileSync(supFile, line({ id: 'd-20261101-235959001-supervisor', type: 'decision', op: 'new', at: new Date().toISOString(), by: 'supervisor', class: 'production-migration', what: 'migrate it', refs: ['bill-01-card'], authority: 'rung', reversible: true }));
+      assert.match(dt(['act', '--decision', 'd-20261101-235959001-supervisor', '--', 'shipped'], sup).err, /production-migration is not on rung 3/);
+      fs.writeFileSync(supFile, before);
+    }
     assert.deepEqual(dl.options, ['ship flagged', 'hold a week']);
     assert.match(dt(['act', '--class', 'release-scope', '--approved', Qx, '--', 'again'], sup).err, new RegExp(`already approved a decision \\(${D}\\)`), 'the answer went to the decision');
     assert.match(dt(['act', '--decision', D, '--class', 'release-production', '--', 'x'], sup).err, /takes its class/);
@@ -1225,6 +1236,16 @@ test('devteam kit', async (t) => {
     fs.appendFileSync(path.join(repo, 'docs/devteam/run/log', supFile), line({ id: G, type: 'goal', op: 'set', at: new Date(Date.now() + 500).toISOString(), by: 'supervisor', hold: { mode: 'run' } }));
     assert.equal(hold().mode, 'park');
     assert.match(must(['log-check']), /the supervisor releases only a drain it set/);
+    // a forged fleet line can't loosen the owner's park to a drain, and a forged undo puts back only what the op recorded
+    const supPath = path.join(repo, 'docs/devteam/run/log', supFile);
+    const before = fs.readFileSync(supPath, 'utf8');
+    const forge = (hold0, dt0 = 600) => fs.appendFileSync(path.join(repo, 'docs/devteam/run/log', supFile), line({ id: G, type: 'goal', op: 'set', at: new Date(Date.now() + dt0).toISOString(), by: 'supervisor', hold: hold0 }));
+    forge({ mode: 'drain', fleet: 'f-20261101-000000000', prior: { mode: 'park' } }, 700);
+    assert.equal(hold().mode, 'park', 'a fleet drain never loosens a park');
+    assert.match(must(['log-check']), /a fleet drain doesn't change a goal on park/);
+    forge({ mode: 'run', undoes: 'f-20261101-000000000' }, 800);
+    assert.equal(hold().mode, 'park', 'an undo of a fleet op not in force counts for nothing');
+    fs.writeFileSync(supPath, before);
     // the roadmap and the track stand still while parked
     assert.match(must(['roadmap']), /Self-serve billing \[ready, parked\] -> no date while parked/);
     assert.equal(json(must(['goal', 'show', G, '--json'])).track, null);
@@ -2351,12 +2372,15 @@ test('fleet park: every session stops with a handoff, and a clone elsewhere pick
     ok(ww, ['phase', 'parked', '--note', 'parked'], WRK);
     st = json(ok(old, ['fleet', 'status', '--json'], SUP));
     assert.deepEqual(st.sessions.map((x) => [x.parked, x.pushed, x.clean, x.handoff]), [[true, false, true, false]]);
+    const upkeepState = () => json(ok(old, ['goal', 'show', 'upkeep', '--json'])).hold_view.state;
+    assert.equal(upkeepState(), 'parking', 'stopped is not settled: still parking until it is pushed with its handoff');
     assert.match(ok(ww, ['handoff'], WRK, 'Done: T1. Next: write tidy/c.txt (T2). Open: none. Uncommitted: none.\n'), /handoff committed on ticket\/ch-01-tidy and pushed/);
     assert.equal(g(['log', '-1', '--format=%s', `origin/ticket/${ID}`], ww), `devteam handoff: ${ID}`, 'the handoff is a commit, not a file');
     assert.equal(g(['diff', '--name-only', 'HEAD~1', 'HEAD'], ww), '', 'it changes no file');
     st = json(ok(old, ['fleet', 'status', '--json'], SUP));
     assert.deepEqual(st.sessions.map((x) => [x.parked, x.pushed, x.clean, x.handoff]), [[true, true, true, true]]);
     assert.equal(st.ready, false, 'the log has not landed yet');
+    assert.equal(upkeepState(), 'parked', 'pushed, clean and handed off: parked');
     F.land();
     // everything else that is only here blocks: no supervisor handoff, a loose run/ file, a worktree with unpushed work
     st = json(ok(old, ['fleet', 'status', '--json'], SUP));

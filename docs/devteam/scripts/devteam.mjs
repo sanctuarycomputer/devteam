@@ -517,8 +517,18 @@ function fold(all) {
 function holdRefusal(h, cur, curBy, cls) {
   if (cls === 'owner') return null;
   if (cls !== 'supervisor') return `${cls} may not change a goal's hold`;
-  if (h.undoes) return cur.fleet === h.undoes ? null : `this goal's hold is no longer the one ${h.undoes} set, so that fleet op doesn't undo it`;
-  if (h.fleet) return ['drain', 'park'].includes(h.mode) ? null : 'a fleet op drains or parks';
+  // An undo puts back exactly the hold the fleet op recorded as prior, nothing else.
+  if (h.undoes) {
+    if (cur.fleet !== h.undoes) return `this goal's hold is no longer the one ${h.undoes} set, so that fleet op doesn't undo it`;
+    const p = cur.prior ?? { mode: 'run' };
+    return h.mode === p.mode && (h.fleet ?? null) === (p.fleet ?? null) ? null : `undoing ${h.undoes} puts back ${p.mode}${p.fleet ? ` (${p.fleet})` : ''}, not ${h.mode}`;
+  }
+  // A fleet op only tightens (drain a running goal, park one not parked) and records what it replaced.
+  if (h.fleet) {
+    if (!['drain', 'park'].includes(h.mode)) return 'a fleet op drains or parks';
+    if (h.mode === 'drain' ? cur.mode !== 'run' : cur.mode === 'park') return `a fleet ${h.mode} doesn't change a goal on ${cur.mode}`;
+    return h.prior?.mode === cur.mode && (h.prior?.fleet ?? null) === (cur.fleet ?? null) ? null : `a fleet op records the hold it replaces (${cur.mode}) as prior`;
+  }
   if (h.mode === 'drain') return cur.mode === 'run' ? null : `the supervisor drains only a running goal (this one is on ${cur.mode})`;
   if (h.mode === 'run') return cur.mode === 'drain' && curBy === 'supervisor' && !cur.fleet ? null : 'the supervisor releases only a drain it set';
   return 'only the owner parks a single goal (the supervisor may fleet park)';
@@ -1647,9 +1657,26 @@ function writeHold(g, hold, by) {
 }
 const holdWords = (m) => ({ run: 'running', drain: 'draining', park: 'parked', 'let-go': 'let go' }[m] ?? m);
 // The mode label a goal shows: drain splits into draining (work still running) and drained.
+// A parked session has settled once it stopped (phase parked), its branch is on origin as it is here,
+// its worktree is clean and its handoff is recorded: until then its goal is still parking.
+const settledMemo = new Map();
+function sessionSettled(s) {
+  if (settledMemo.has(s.name)) return settledMemo.get(s.name);
+  let ok = lastPhaseOf(s.name)?.to === 'parked';
+  if (ok) {
+    const local = resolveCommit(`refs/heads/${s.branch}`);
+    const remote = resolveCommit(`refs/remotes/origin/${s.branch}`);
+    const dirty = fs.existsSync(s.wt) ? (git(['status', '--porcelain'], s.wt) ?? '').trim() : '';
+    const handoff = remote && (handoffCommit(`refs/remotes/origin/${s.branch}`, s.name) || git(['cat-file', '-e', `${remote}:${s.handoff}`]) !== null);
+    ok = !!remote && (!local || local === remote) && !dirty && !!handoff;
+  }
+  settledMemo.set(s.name, ok);
+  return ok;
+}
 function holdView(g) {
   const mode = goalMode(g);
-  const running = mode === 'drain' || mode === 'park' ? liveSessions().filter((s) => sessionGoals(s.name).some((x) => x.id === g.id) && lastPhaseOf(s.name)?.to !== 'parked').map((s) => s.name) : [];
+  // draining: what still runs; parking: what hasn't settled (stopped, pushed, clean, handed off)
+  const running = mode === 'drain' || mode === 'park' ? liveSessions().filter((s) => sessionGoals(s.name).some((x) => x.id === g.id) && (mode === 'park' ? !sessionSettled(s) : lastPhaseOf(s.name)?.to !== 'parked')).map((s) => s.name) : [];
   const state = mode === 'drain' ? (running.length ? 'draining' : 'drained') : mode === 'park' ? (running.length ? 'parking' : 'parked') : mode === 'let-go' ? 'let go' : 'running';
   return { mode, state, running, reason: g.hold?.reason ?? null, by: g.hold_by ?? null, fleet: g.hold?.fleet ?? null, since: (g.updates ?? []).filter((u) => u.hold !== undefined).pop()?.at ?? null };
 }
@@ -3561,7 +3588,27 @@ function decisionFor(id) {
   if (d?.type !== 'decision') die(`no decision ${id}`);
   if (correctionOf(d)) die(`${id} was corrected (${correctionOf(d).reason}); decide again`);
   if (['rung', 'default'].includes(d.authority) && rungHistory(d.class, d.scope ?? null).some((e) => e.by === 'correction' && e.at > d.created_at)) die(`${d.class} dropped to rung 1 after ${id} was decided; decide again`);
+  // The authority a decision records is checked against the log, not taken on its word: a decision
+  // line is the supervisor's own, so one written by hand can't carry trust it never had.
+  const why = decisionAuthorityGap(d);
+  if (why) die(`${id} records authority it doesn't have (${why}); decide again`);
   return d;
+}
+function decisionAuthorityGap(d) {
+  const L = ladder();
+  const ownerOnly = (L.owner_only ?? []).includes(d.class);
+  const q = d.approved_by?.startsWith('q-') ? logGet(d.approved_by) : null;
+  const v = q?.type === 'question' ? questionView(q) : null;
+  const inClass = v && (v.class === d.class || (d.class === 'approve-plan' && v.kind === 'one-way-door'));
+  if (ownerOnly) return v && inClass && v.status === 'answered' ? null : `${d.class} is the owner's and needs the owner's answer in that class`;
+  switch (d.authority) {
+    case 'answer': return v && inClass && v.status === 'answered' ? null : `no answered ${d.class} question ${d.approved_by ?? ''}`.trim();
+    case 'default': return v && inClass && v.status === 'defaulted' ? null : `no defaulted ${d.class} question ${d.approved_by ?? ''}`.trim();
+    case 'standing-rule': { const k = logGet(d.approved_by ?? ''); return k?.type === 'knowledge' && writerClass(k.created_by) === 'owner' && k.status === 'accepted' && k.scope === `class:${d.class}` ? null : `no accepted owner rule scoped class:${d.class}`; }
+    case 'rung': return L.classes[d.class] && rungFor(d.class, d.scope ?? null) >= 3 ? null : `${d.class} is not on rung 3`;
+    case 'constitution': return (L.constitutional ?? []).includes(d.class) || !L.classes[d.class] ? null : `${d.class} is on the ladder, not constitutional`;
+    default: return `unknown authority ${d.authority}`;
+  }
 }
 // What a command's act would be about, for --decision: the act must be about something the decision named.
 function citeTargets() {
