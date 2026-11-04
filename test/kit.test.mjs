@@ -2828,6 +2828,68 @@ test('check-pr and merge judge the tree that would land, by committed lines (M1,
   } finally { F.done(); }
 });
 
+// A git on PATH ahead of the real one: it logs every call to GIT_SPY_LOG, and GIT_SHIM_MODE makes
+// it act out a git it isn't: "old" is 2.34 (no merge-tree --write-tree), "lstree" fails every ls-tree.
+const REAL_GIT = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+function gitShim(F, mode = '') {
+  const dir = path.join(F.base, `git-shim-${mode || 'spy'}`);
+  const log = path.join(dir, 'calls.log');
+  write(path.join(dir, 'git'), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${log}"\ncase "${mode}:$1" in\n  old:--version) echo "git version 2.34.1"; exit 0 ;;\n  old:merge-tree) case " $* " in *" --write-tree "*) echo "error: unknown option \\\`write-tree'" >&2; exit 129 ;; esac ;;\n  lstree:ls-tree) echo "fatal: not a tree object" >&2; exit 128 ;;\nesac\nexec "${REAL_GIT}" "$@"\n`);
+  fs.chmodSync(path.join(dir, 'git'), 0o755);
+  return { env: { PATH: `${dir}${path.delimiter}${process.env.PATH}` }, calls: () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : ''), reset: () => fs.rmSync(log, { force: true }) };
+}
+
+test('coverage at landing: no lines, no tree work; every forge judges the merge; a git that cannot merge-tree fails closed (F1, F14, O1, O12)', () => {
+  const F = monoFixture('landing-forges');
+  const { old, run, g, lines, edit } = F;
+  const body = path.join(F.base, 'body.md');
+  write(body, '## One-way doors\n\nNone.\n');
+  const chore = (slug, fn, { from = 'origin/main' } = {}) => {
+    const w = path.join(old, '.worktrees', `chore-${slug}`);
+    g(['worktree', 'add', '-q', '-b', `chore-${slug}`, w, from], old);
+    fn(w);
+    g(['add', '-A'], w);
+    g(['commit', '-qm', `chore-${slug}: x`], w);
+    g(['push', '-q', 'origin', `chore-${slug}`], w);
+    return g(['rev-parse', 'HEAD'], w);
+  };
+  const checkPr = (slug, sha, env = {}) => run(old, ['check-pr', '--head-ref', `chore-${slug}`, '--sha', sha, '--title', `chore-${slug}: x`, '--body-file', body], env);
+  try {
+    // no lines: a branch that conflicts with main passes check-pr, and coverage reads no tree
+    const stale = g(['rev-parse', 'origin/main'], old);
+    write(path.join(old, 'README.md'), 'main moved\n');
+    g(['commit', '-qam', 'main edits README'], old); g(['push', '-q', 'origin', 'main'], old);
+    const conflicting = chore('conflict', (w) => write(path.join(w, 'README.md'), 'the branch edits it too\n'), { from: stale });
+    const spy = gitShim(F);
+    const r0 = checkPr('conflict', conflicting, spy.env);
+    assert.equal(r0.status, 0, `no lines: check-pr passes a conflicting chore (merge is where it conflicts): ${r0.out}`);
+    assert.doesNotMatch(spy.calls(), /^(merge-tree|ls-tree)\b/m, 'no lines: coverage does no tree work (F1)');
+    // lines on forge git: the same branch is refused as not merging cleanly, naming the fix
+    lines(F.STD);
+    assert.match(checkPr('conflict', conflicting).out, /does not merge cleanly onto origin\/main.*merge main into the branch/);
+    // a git without merge-tree --write-tree fails closed, with its own message (O12)
+    const clean = chore('clean', (w) => write(path.join(w, 'api/new.rb'), 'x\n'));
+    const oldGit = gitShim(F, 'old');
+    const r1 = checkPr('clean', clean, oldGit.env);
+    assert.notEqual(r1.status, 0);
+    assert.match(r1.out, /coverage needs git ≥ 2\.38 \(merge-tree --write-tree\); found 2\.34\.1/);
+    assert.doesNotMatch(r1.out, /does not merge cleanly/, 'a git that cannot merge-tree is not a conflict');
+    // a tree that can't be read fails closed too, never as an empty tree (O12)
+    const r2 = checkPr('clean', clean, gitShim(F, 'lstree').env);
+    assert.notEqual(r2.status, 0);
+    assert.match(r2.out, /could not read the tree/);
+    // forge github: a behind PR is judged on the merge, not its head (F14, O1). The branch narrows
+    // web to the files it sees; main meanwhile adds web/extra.js under the old line.
+    edit((j) => { j.forge = 'github'; });
+    g(['commit', '-qam', 'forge github'], old); g(['push', '-q', 'origin', 'main'], old);
+    const before = g(['rev-parse', 'origin/main'], old);
+    write(path.join(old, 'web/extra.js'), 'x\n');
+    g(['add', '-A'], old); g(['commit', '-qm', 'web extra'], old); g(['push', '-q', 'origin', 'main'], old);
+    const narrow = chore('narrow-web', (w) => edit((j) => { j.components.web.owns = ['web/src/**', 'web/package.json']; }, w), { from: before });
+    assert.match(checkPr('narrow-web', narrow).out, /unowned: web\/ \(1\): web\/extra\.js/, 'forge github: the merge result lands web/extra.js outside every line');
+  } finally { F.done(); }
+});
+
 test('unowned files on main: a severity-4 finding, and no new ticket starts there until a line covers them', () => {
   const F = monoFixture('unowned');
   const { old, ok, run, g, lines } = F;

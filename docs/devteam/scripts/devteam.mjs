@@ -1880,7 +1880,9 @@ function cmdValidate() {
     if (main && projectInRepo) {
       const head = resolveCommit('HEAD');
       const sIn = settingsInForce(head ? git(['merge-base', main, head]) : null, head);
-      const cov = coverageAt(main, sIn);
+      const read = readCoverage(() => coverageAt(main, sIn));
+      if (read.error) (scope ? warnings : errors).push(`components: ${read.error}; coverage fails closed until it can`);
+      const cov = read.value;
       if (cov) for (const l of coverageReport({ ...coverageGaps(cov, sIn), ref: main }, sIn)) (scope ? warnings : errors).push(`components: ${l}${scope ? `; not ${scope}'s to fix` : ''}`);
     }
     // Designs cite links as link:<id>; checked only while the registry has links (open issue 12).
@@ -2347,41 +2349,69 @@ function verdictHolds(v, head, dir) {
     return !!tree && /^[0-9a-f]{40}$/.test(tree) && git(['diff', '--quiet', tree, `${m}^{tree}`, '--', '.', records]) !== null;
   });
 }
-// The three tree reads every repo needs, over one git function (home's, or a repo link's bound to
-// its checkout). changedFiles is -z: no quoting of spaces or non-ASCII, so every enforcement point
-// compares the same bytes treePaths gives (§4; rev 1 compared quoted octal with raw). treePaths
-// reads a commit's tree (or a tree id): dotfiles, submodule gitlinks and symlinks included, never
-// the index or the working tree. mergeTree is what landing sha on base would produce, as a tree
-// id, or null when it doesn't merge cleanly.
-const gitFacts = (gitFn) => ({
+// The three tree reads every repo needs, over one git function and runner (home's, or a repo link's bound to
+// its checkout; the tree reads use its runner, which returns { status, out, err }). changedFiles is -z: no quoting of spaces or
+// non-ASCII, so every enforcement point compares the same bytes treePaths gives (§4; rev 1 compared
+// quoted octal with raw). treePaths reads a commit's tree (or a tree id): dotfiles, submodule
+// gitlinks and symlinks included, never the index or the working tree; a git that fails throws,
+// so no caller can read a failure as an empty tree. mergeTree is what landing sha on base would
+// produce: { tree }, { conflict: true }, or { error } when git couldn't say (git < 2.38 has no
+// merge-tree --write-tree), which callers fail closed on.
+class GitReadError extends Error {}
+const firstLine = (s) => String(s ?? '').trim().split('\n')[0];
+const gitFacts = (gitFn, run) => ({
   changedFiles: (base, sha) => (gitFn(['diff', '-z', '--name-only', '--no-renames', base, sha]) ?? '').split('\0').filter(Boolean),
-  treePaths: (ref) => (gitFn(['ls-tree', '-r', '-z', '--name-only', ref]) ?? '').split('\0').filter(Boolean),
-  mergeTree: (base, sha) => { const t = gitFn(['merge-tree', '--write-tree', '--no-messages', base, sha])?.split('\n')[0]; return t && /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(t) ? t : null; },
+  treePaths: (ref) => {
+    const r = run(['ls-tree', '-r', '-z', '--name-only', ref]);
+    if (r.status !== 0) throw new GitReadError(`could not read the tree at ${String(ref).slice(0, 12)} (git ls-tree: ${firstLine(r.err) || `exit ${r.status}`})`);
+    return r.out.split('\0').filter(Boolean);
+  },
+  mergeTree: (base, sha) => {
+    const r = run(['merge-tree', '--write-tree', '--no-messages', base, sha]);
+    const t = r.out.split('\n')[0];
+    if (r.status === 0 && /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(t)) return { tree: t };
+    if (r.status === 1 && /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(t)) return { conflict: true };
+    return { error: firstLine(r.err) || `exit ${r.status}` };
+  },
 });
-const { changedFiles, treePaths, mergeTree } = gitFacts((args, cwd) => git(args, cwd));
+// git with its exit status, for the reads whose failure means something (the tree reads above).
+function gitRun(args, cwd) {
+  const r = spawnSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 });
+  return { status: r.status ?? -1, out: (r.stdout ?? '').replace(/\n$/, ''), err: r.stderr || r.error?.message || '' };
+}
+const { changedFiles, treePaths, mergeTree } = gitFacts((args, cwd) => git(args, cwd), gitRun);
+// merge-tree --write-tree is git 2.38's; an older git can't say what a PR would land.
+const gitVersion = () => memo('git-version', () => /(\d+\.\d+(\.\d+)?)/.exec(git(['--version']) ?? '')?.[1] ?? null);
+const gitTooOld = () => { const v = gitVersion(); const [a, b] = (v ?? '').split('.').map(Number); return v && (a < 2 || (a === 2 && b < 38)) ? `coverage needs git ≥ 2.38 (merge-tree --write-tree); found ${v}` : null; };
 // Home as the coverage code sees a repo. Every coverage helper takes a repo argument defaulting to
 // this, so PR 2's repo(name) objects (which carry the same fields) slot in without new call shapes.
 const homeFacts = {
   name: 'home', changedFiles, treePaths, mergeTree,
-  mainRef: () => mainRef(), git: (args, cwd) => git(args, cwd), devteamLine: () => devteamLine(),
+  mainRef: () => mainRef(), devteamLine: () => devteamLine(),
   get settings() { return loadSettings(); },
 };
+// Main's committed settings (home's main: settings live in home), or the defaults before they land.
+const mainSettings = (fallback = { ...SETTINGS_DEFAULTS }) => (mainRef() ? settingsAt(mainRef(), { orNull: true }) : null) ?? fallback;
 // The settings that judge a PR (§4, "Which settings decide"): main's, committed, or the head's
 // when the PR itself changes settings.md. Never the working tree's. settings.md lives in home, so
 // for a PR in another repo (PR 2) they are home main's: that repo's diff can't touch it.
 function settingsInForce(base, sha, R = homeFacts) {
-  const mainS = () => (mainRef() ? settingsAt(mainRef(), { orNull: true }) : null) ?? { ...SETTINGS_DEFAULTS };
-  if (R.name !== 'home') return mainS();
+  if (R.name !== 'home') return mainSettings();
   const changes = !!base && !!sha && git(['diff', '--quiet', base, sha, '--', `${projectRel}/settings.md`]) === null;
   const head = changes ? settingsAt(sha, { orNull: true }) : null;
-  // __fromHead: the landing tree's own settings decide (a merged settings.md on forge git)
-  return head ? { ...head, __fromHead: true } : mainS();
+  // __fromHead: the landing tree's own settings decide (a merged settings.md)
+  return head ? { ...head, __fromHead: true } : mainSettings();
 }
 // Coverage of one repo's tree under one set of settings, once per read of the log; null with no lines.
 const coverageAt = (ref, s, R = homeFacts) => (linesDeclared(s) ? memo(`coverage\0${R.name}\0${ref}\0${canonical(s.components)}`, () => coverage(R.treePaths(ref), componentsOn(s, R.name), R.devteamLine())) : null);
 // Gaps on main under main's committed lines (§4, point 3): commits that bypassed devteam. Zero
 // with no lines. While non-zero, no new ticket starts in that repo.
-const coverageGap = (name = 'home', R = homeFacts) => memo(`coverageGap\0${name}`, () => { const main = R.mainRef(); const s = main && projectInRepo ? settingsAt(mainRef(), { orNull: true }) : null; const cov = s ? coverageAt(main, s, R) : null; return cov ? coverageGaps(cov, s).count + cov.case_collisions.length : 0; });
+// A main whose tree can't be read counts as a gap (fail closed).
+const coverageGap = (name = 'home', R = homeFacts) => memo(`coverageGap\0${name}`, () => { const main = R.mainRef(); const s = main && projectInRepo ? mainSettings(null) : null; const read = s ? readCoverage(() => coverageAt(main, s, R)) : {}; const cov = read.value; return read.error ? 1 : cov ? coverageGaps(cov, s).count + cov.case_collisions.length : 0; });
+// A coverage read whose tree git couldn't read: { error }, never an empty tree (fail closed).
+function readCoverage(fn) {
+  try { return { value: fn() }; } catch (e) { if (e instanceof GitReadError) return { error: e.message }; throw e; }
+}
 // The Baseline's floor gaps (§9a): unowned, owned twice, a component whose link can't hold files,
 // an owns glob that matches nothing. Case collisions fail the check but aren't a gap class.
 function coverageGaps(cov, s) {
@@ -2481,32 +2511,41 @@ function cmdCheckTicket() {
 }
 
 
-// The tree a PR would put on main (§4, point 2): its head on github, where merge refuses a head
-// that is behind; on forge git, merge lands it onto a main that may have moved, so it is the
-// merge of the two (open issue 8).
+// The tree a PR would put on main (§4, point 2): the merge of the head onto main, on every forge.
+// Squash, rebase and merge all land that tree when the merge is clean, and a forge that merges a
+// behind PR (github without "require branches to be up to date") lands it by 3-way merge, so the
+// head alone is not what lands (F14). A conflict, or a git that can't say, fails closed.
 function landingTree(sha, R = homeFacts) {
   const main = R.mainRef();
-  if (R.settings.forge !== 'git' || !main) return { tree: sha };
-  const tree = R.mergeTree(main, sha);
-  return tree ? { tree } : { problem: `${sha.slice(0, 12)} does not merge cleanly onto ${main}; merge main into the branch and ask again` };
+  const m = R.mergeTree(main, sha);
+  if (m.tree) return { tree: m.tree };
+  if (m.conflict) return { problem: `components: ${sha.slice(0, 12)} does not merge cleanly onto ${main}, so the tree it would land can't be checked; merge main into the branch and ask again` };
+  return { problem: `components: ${gitTooOld() ?? `could not compute the tree ${sha.slice(0, 12)} would land on ${main} (git merge-tree --write-tree: ${m.error})`}; coverage fails closed until it can` };
 }
 // Coverage problems in the landing tree that main doesn't already have: a path added outside every
-// line, renamed out of one, or left behind by a narrowed glob (open issue 7). Only once lines are declared.
+// line, renamed out of one, or left behind by a narrowed glob (open issue 7). Only once lines are
+// declared: with none on main or at the head, no tree is read and nothing is merged (F1).
 function coverageFails(base, sha, R = homeFacts) {
   const main = R.mainRef();
   if (!main || !projectInRepo) return [];
+  const sIn = settingsInForce(base, sha, R);
+  const sMain = mainSettings(sIn);
+  if (!linesDeclared(sIn) && !linesDeclared(sMain)) return [];
   const land = landingTree(sha, R);
   if (land.problem) return [land.problem];
-  const sIn = settingsInForce(base, sha, R);
-  const sLand = sIn.__fromHead ? (settingsAt(land.tree, { orNull: true }) ?? sIn) : sIn;
-  const now = coverageAt(land.tree, sLand, R);
-  if (!now) return [];
-  // main's own state, under main's committed settings (home's main: settings live in home)
-  const sMain = (mainRef() ? settingsAt(mainRef(), { orNull: true }) : null) ?? sIn;
-  const before = coverageAt(main, sMain, R) ?? { unowned: [], contested: [], empty: [], case_collisions: [] };
-  const was = new Set([...before.unowned.map((p) => `u${p}`), ...before.contested.map(([p, o]) => `c${p}\0${o}`), ...before.empty.map((x) => `e${x}`), ...before.case_collisions.map((x) => `k${x}`)]);
-  const fresh = { unowned: now.unowned.filter((p) => !was.has(`u${p}`)), contested: now.contested.filter(([p, o]) => !was.has(`c${p}\0${o}`)), empty: now.empty.filter((x) => !was.has(`e${x}`)), case_collisions: now.case_collisions.filter((x) => !was.has(`k${x}`)), unlinked: [], ref: land.tree };
-  return coverageReport(fresh, sLand, R).map((l) => `components${R.name === 'home' ? '' : ` (${R.name})`}: ${l} (extend a line in a chore PR, or keep the file inside one)`);
+  try {
+    const sLand = sIn.__fromHead ? (settingsAt(land.tree, { orNull: true }) ?? sIn) : sIn;
+    const now = coverageAt(land.tree, sLand, R);
+    if (!now) return [];
+    // main's own state, under main's committed settings
+    const before = coverageAt(main, sMain, R) ?? { unowned: [], contested: [], empty: [], case_collisions: [] };
+    const was = new Set([...before.unowned.map((p) => `u${p}`), ...before.contested.map(([p, o]) => `c${p}\0${o}`), ...before.empty.map((x) => `e${x}`), ...before.case_collisions.map((x) => `k${x}`)]);
+    const fresh = { unowned: now.unowned.filter((p) => !was.has(`u${p}`)), contested: now.contested.filter(([p, o]) => !was.has(`c${p}\0${o}`)), empty: now.empty.filter((x) => !was.has(`e${x}`)), case_collisions: now.case_collisions.filter((x) => !was.has(`k${x}`)), unlinked: [], ref: land.tree };
+    return coverageReport(fresh, sLand, R).map((l) => `components${R.name === 'home' ? '' : ` (${R.name})`}: ${l} (extend a line in a chore PR, or keep the file inside one)`);
+  } catch (e) {
+    if (e instanceof GitReadError) return [`components${R.name === 'home' ? '' : ` (${R.name})`}: ${e.message}; coverage fails closed until it can`];
+    throw e;
+  }
 }
 // What the forge's check (optional) and `merge` both check for a PR, by branch kind. Gates are not
 // run here. A chore PR may not touch the log (chore-log touches nothing else) or a ticket's folder.
@@ -7196,7 +7235,9 @@ function cmdComponents() {
   const ref = flagStr('ref') ?? mainRef() ?? 'HEAD';
   const sha = resolveCommit(ref) ?? die(`${ref} is not a commit here (git fetch first?)`);
   const s = settingsAt(sha) ?? die(`${projectRel}/settings.md at ${ref}: the json devteam block is not valid JSON`);
-  const cov = coverageAt(sha, s);
+  const read = readCoverage(() => coverageAt(sha, s));
+  if (read.error) die(`components check: ${read.error}`);
+  const cov = read.value;
   if (!cov) {
     if (flags.count) return out('0');
     if (flags.json) return json({ ref, declared: false, unowned: [], contested: [], empty: [], unlinked: [], case_collisions: [], count: 0 });
@@ -7275,9 +7316,10 @@ function cmdLinks() {
   const s = loadSettings();
   const reg = s.links ?? {};
   const main = mainRef();
-  const sMain = (main ? settingsAt(main, { orNull: true }) : null) ?? s;
-  const cov = main ? coverageAt(main, sMain) : null;
-  const home = { name: 'home', remote: git(['config', '--get', 'remote.origin.url']), root: mainRoot, effective: Object.fromEntries(REPO_KEYS.map((k) => [k, k === 'project' ? projectRel : s[k] ?? null])), components: componentsOn(s, 'home'), lines: linesDeclared(s), coverage: cov ? coverageGaps(cov, sMain) : null };
+  const sMain = mainSettings(s);
+  const read = main ? readCoverage(() => coverageAt(main, sMain)) : {};
+  const cov = read.value ?? null;
+  const home = { name: 'home', remote: git(['config', '--get', 'remote.origin.url']), root: mainRoot, effective: Object.fromEntries(REPO_KEYS.map((k) => [k, k === 'project' ? projectRel : s[k] ?? null])), components: componentsOn(s, 'home'), lines: linesDeclared(s), coverage: cov ? coverageGaps(cov, sMain) : null, ...(read.error ? { coverage_error: read.error } : {}) };
   const links = Object.entries(reg).map(([id, l]) => {
     const K = LINK_KINDS[l.kind];
     if (!K) return { id, ...l };
@@ -7288,6 +7330,7 @@ function cmdLinks() {
   const gates = (g) => Object.keys(g ?? {}).join(', ') || 'none';
   out(`home: this repo (${home.remote ?? 'no origin'}), main_branch ${s.main_branch}, forge ${s.forge}, gates ${gates(s.gates)}`);
   out(`  components: ${home.lines ? home.components.map((c) => `${c.name}${c.shared ? ' (shared)' : ''} (${c.owns ? c.owns.join(', ') : 'everything devteam does not own'})`).join('; ') : `none declared: one implicit component owns every path${Object.keys(s.components ?? {}).length ? ' (components holds labels only)' : ''}`}`);
+  if (home.coverage_error) out(`  coverage on ${main}: ${home.coverage_error}`);
   if (home.coverage) out(`  coverage on ${main}: ${home.coverage.count + home.coverage.case_collisions.length ? `${home.coverage.unowned.length} unowned, ${home.coverage.contested.length} contested, ${home.coverage.empty.length} empty glob(s), ${home.coverage.case_collisions.length} case collision(s) (components check)` : 'every path in exactly one line'}`);
   for (const l of links) {
     const eff = l.effective ? `, main_branch ${l.effective.main_branch}, forge ${l.effective.forge}, gates ${gates(l.effective.gates)}` : '';
