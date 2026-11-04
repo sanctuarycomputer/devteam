@@ -2744,6 +2744,11 @@ function cmdMerge() {
   const sha = pr.headRefOid;
   if (!resolveCommit(sha)) die(`cannot find ${sha} locally after fetching ${branch}`);
   const fails = checkPr({ headRef: branch, sha, title: pr.title, body: pr.body });
+  // A refused footprint is a sign about the line (line-pressure, spec §7): one observation per head.
+  if (id && fails.some((x) => x.startsWith(OFF_LINE))) {
+    const key = `footprint:${id}:${sha}`;
+    if (!logObjects('observation').some((o) => o.source_key === key)) appendLog({ type: 'observation', source: 'supervisor', subject: tickets().get(id)?.component ?? id, kind: 'footprint-refusal', detail: `${id} at ${sha.slice(0, 12)} changes files outside its line`, source_key: key, refs: [id] }, 'supervisor');
+  }
   // A parked or let-go goal's ticket waits to merge (a draining one merges: that's the point), and
   // so does an upkeep chore while Upkeep is parked; record-keeping chores never wait. --force does.
   const heldBy = id && tickets().has(id) ? ticketMode(tickets().get(id)) : chore && !isRecordKeeping(chore) ? goalMode(upkeepOrVirtual()) : 'run';
@@ -4305,8 +4310,26 @@ function observeFindings(m) {
 }
 function cmdObserveMetrics() {
   supervisorOnly('observe-metrics');
+  probeLinks();
   const s = observeSpend();
   out(`recorded ${s} spend line(s) and ${observeFindings(collectMetrics(0))} new observation(s)`);
+}
+// Whether each link still exists, at most once a day per link, by its kind's probe (one HEAD
+// request, one ls-remote); nothing is fetched (spec §2, non-goals). The result waits in run/ for
+// metrics to read, so metrics and the dashboard never touch the network. A link edited since its
+// last probe (any field) is probed again. DEVTEAM_URL_PROBE stands in for the HEAD request in tests.
+const PROBE_FILE = runPath('link-probes.json');
+function probeLinks() {
+  const reg = loadSettings().links ?? {};
+  if (!Object.keys(reg).length) return;
+  let cache = {};
+  try { cache = readJson(PROBE_FILE); } catch {}
+  for (const [id, l] of Object.entries(reg)) {
+    const K = LINK_KINDS[l.kind];
+    if (!K || (cache[id] && Date.now() - Date.parse(cache[id].at) < DAY && cache[id].target === canonical(l))) continue;
+    cache[id] = { at: nowIso(), target: canonical(l), problem: K.probe(l, id) };
+  }
+  writeJson(PROBE_FILE, cache);
 }
 // Accepted knowledge whose scope applies to a ticket, a feature, or a class (spec §7.1).
 function knowledgeFor(target) {
@@ -5655,6 +5678,28 @@ function collectMetrics(since) {
   {
     const n = coverageGap();
     if (n) add('high', 'unowned-files', 'home', `${n} tracked path(s) on ${mainRef()} no line owns, or more than one does (devteam.mjs components check lists them); no new ticket starts in home until it clears`, 'a chore PR that extends a line (settings components), or moves the files into one', { sev: 4 });
+  }
+  // The registry (spec §7): a link that no longer resolves, and lines drawn in the wrong place.
+  {
+    const reg = settings.links ?? {};
+    let probes = {};
+    try { probes = readJson(PROBE_FILE); } catch {}
+    for (const [id, l] of Object.entries(reg)) {
+      const K = LINK_KINDS[l.kind];
+      if (!K) continue;
+      const why = K.reachable(l, id) ?? (probes[id]?.target === canonical(l) ? probes[id].problem : null);
+      if (why) add('high', 'link-unreachable', id, why, K.fixHint(l, id));
+    }
+    if (linesDeclared(settings)) {
+      const since14 = now - 14 * DAY;
+      const refusals = groupBy(logObjects('observation').filter((o) => o.kind === 'footprint-refusal' && Date.parse(o.created_at) >= since14), (o) => o.subject);
+      const shared = Object.entries(settings.components).filter(([, c]) => c?.shared).map(([n]) => n);
+      for (const c of [...new Set([...Object.keys(refusals), ...shared])]) {
+        const n = refusals[c]?.length ?? 0;
+        const planned = shared.includes(c) ? [...ts.values()].filter((t) => Date.parse(t.created_at) >= since14 && (t.component === c || (t.touches_components ?? []).includes(c))).length : 0;
+        if (n >= 3 || planned >= 3) add('medium', 'line-pressure', c, [n >= 3 && `${n} footprint refusals in 14 days`, planned >= 3 && `${planned} tickets planned against the shared component in 14 days`].filter(Boolean).join('; '), 'the line may be in the wrong place: move it in a chore PR (settings components), or plan a contract ticket that settles the shared part');
+      }
+    }
   }
   const order = { high: 0, medium: 1, low: 2 };
   // A finding someone has looked at and set aside (`ack`) moves to acknowledged until the ack

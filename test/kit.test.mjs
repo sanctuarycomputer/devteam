@@ -2971,6 +2971,45 @@ test('observe-link records a resource; orient proposes adds, edits and source-of
   } finally { F.done(); }
 });
 
+test('link-unreachable for a missing checkout or a failing URL (stubbed), and line-pressure from refusals', () => {
+  const F = monoFixture('reach');
+  const { old, ok, edit, g } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const stub = path.join(F.base, 'probe.sh');
+  write(stub, '#!/bin/sh\ncase "$1" in *gone*) echo 404 ;; *) echo 200 ;; esac\n');
+  fs.chmodSync(stub, 0o755);
+  try {
+    edit((j) => { j.links = { console: { kind: 'repo', title: 'Console', remote: 'usbclub/console' }, gone: { kind: 'url', title: 'Gone', url: 'https://gone.test/x' }, fine: { kind: 'url', title: 'Fine', url: 'https://fine.test' }, private: { kind: 'url', title: 'P', url: 'https://gone.test/private', check: false } }; });
+    g(['commit', '-qam', 'links'], old); g(['push', '-q', 'origin', 'main'], old);
+    const run2 = (args) => { const r = spawnSync(process.execPath, [path.join(old, 'docs/devteam/scripts/devteam.mjs'), ...args], { cwd: old, env: { ...F.env(SUP), DEVTEAM_URL_PROBE: stub }, encoding: 'utf8' }); assert.equal(r.status, 0, r.stderr); return r.stdout; };
+    run2(['observe-metrics']);
+    const fs_ = json(ok(old, ['metrics', '--json'])).findings.filter((f) => f.kind === 'link-unreachable');
+    assert.deepEqual(fs_.map((f) => f.subject).sort(), ['console', 'gone']);
+    assert.match(fs_.find((f) => f.subject === 'console').detail, /its checkout .*console is missing/);
+    assert.match(fs_.find((f) => f.subject === 'gone').detail, /HEAD returned 404/);
+    assert.equal(json(ok(old, ['log', '--type', 'observation', '--json'])).find((o) => o.kind === 'link-unreachable').severity, 3);
+    assert.ok(fs.existsSync(path.join(old, 'docs/devteam/run/link-probes.json')));
+    assert.doesNotMatch(json(ok(old, ['fleet', 'status', '--json', '--no-fetch'], SUP)).blockers.join('\n'), /files in run\/ the kit didn't make/, 'the probe file is a kit file (RUN_KNOWN)');
+    // line-pressure: three footprint refusals on one component in 14 days
+    F.lines(F.STD);
+    for (const n of ['01', '02', '03']) ok(old, ['observe', '--subject', 'web', '--kind', 'footprint-refusal', '--detail', `web-${n}-x refused`, '--key', `footprint:web-${n}-x:${n}`], SUP);
+    const lp = json(ok(old, ['metrics', '--json'])).findings.find((f) => f.kind === 'line-pressure');
+    assert.equal(lp?.subject, 'web');
+    assert.match(lp.detail, /3 footprint refusals in 14 days/);
+    // merge records the refusal itself, once per head
+    ok(old, ['ticket', 'add', 'web-04-reach', '--json', JSON.stringify({ title: 'reach', feature: 'chores', component: 'web', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['web/**', 'api/app.rb'], done_when: ['the web suite passes'], notes: 'n' })], SUP);
+    const w = path.join(old, '.worktrees', 'web-04-reach');
+    g(['worktree', 'add', '-q', '-b', 'ticket/web-04-reach', w, 'origin/main'], old);
+    write(path.join(w, 'api/app.rb'), 'web edits api\n');
+    g(['commit', '-qam', 'web-04-reach: work'], w);
+    g(['push', '-q', 'origin', 'ticket/web-04-reach'], w);
+    write(path.join(old, 'docs/devteam/run/pr/ticket/web-04-reach.md'), '# web-04-reach: work\n\n## One-way doors\n\nNone.\n');
+    for (let i = 0; i < 2; i++) assert.match(F.run(old, ['merge', 'web-04-reach', '--dry-run'], SUP).out, /changes files outside the line of web/);
+    const refused = json(ok(old, ['log', '--type', 'observation', '--json'])).filter((o) => o.kind === 'footprint-refusal' && (o.refs ?? []).includes('web-04-reach'));
+    assert.deepEqual(refused.map((o) => o.subject), ['web'], 'one footprint-refusal per head, on the component');
+  } finally { F.done(); }
+});
+
 test('fleet park: every session stops with a handoff, and a clone elsewhere picks it up with parity', () => {
   const F = fleetFixture('park');
   const { org, old, neu, home, env, run, ok, g, base } = F;
