@@ -2684,7 +2684,7 @@ function monoFixture(name) {
 
 // Three repos: home (the kit, project/, its log) and two siblings, each a bare remote plus a
 // checkout laid out where path says (../<id>), forge git so no GitHub is needed. Console's main
-// branch is trunk (M7).
+// branch is trunk.
 function multiFixture(name) {
   const F = monoFixture(name);
   const { base, g, old } = F;
@@ -3617,7 +3617,7 @@ test('link add, set and rm for url links: the supervisor writes settings and log
     assert.match(run(old, ['link', 'set', 'figma', 'url', 'http://insecure.test'], SUP).err, /url must start with https:\/\//, 'validated before it is written');
     assert.match(run(old, ['link', 'set', 'figma', 'kind', 'repo'], SUP).err, /a link never changes kind in place/);
     assert.match(run(old, ['link', 'set', 'figma', 'colour', 'red'], SUP).err, /"colour" is not a field of a url link/);
-    // a repo link is the owner's: since PR 2 the supervisor drafts it as a question, and writes nothing
+    // a repo link is the owner's: the supervisor drafts it as a question, and writes nothing
     const sBefore = fs.readFileSync(path.join(old, 'docs/devteam/project/settings.md'), 'utf8');
     assert.match(ok(old, ['link', 'add', 'console', '--kind', 'repo', '--remote', 'usbclub/console', '--title', 'C'], SUP), /asked the owner \(governance-edit\); nothing is written until it is answered/);
     assert.equal(fs.readFileSync(path.join(old, 'docs/devteam/project/settings.md'), 'utf8'), sBefore);
@@ -4449,7 +4449,7 @@ test('the hub: lists every instance on the machine, links to each one, moves whe
   }
 });
 
-// ===== components in other repos (PR 2) =====
+// ===== components in other repos =====
 
 test('three repos: the fixture validates, and links shows each', () => {
   const F = multiFixture('multi-smoke');
@@ -4459,7 +4459,7 @@ test('three repos: the fixture validates, and links shows each', () => {
   } finally { F.done(); }
 });
 
-test('a worker in a sibling worktree runs home\'s kit: home\'s run directory and project (M6); a bad DEVTEAM_HOME, or a sibling\'s own kit, is refused', () => {
+test('a worker in a sibling worktree runs home\'s kit: home\'s run directory and project; a bad DEVTEAM_HOME, or a sibling\'s own kit, is refused', () => {
   const F = multiFixture('m6');
   const { old, g, runIn, okIn } = F;
   try {
@@ -4503,7 +4503,7 @@ test('a worker in a sibling worktree runs home\'s kit: home\'s run directory and
   } finally { F.done(); }
 });
 
-test('repo(): each repo its own main and caches (M7); --path and links.local.json override path; a wrong origin is refused (M9)', () => {
+test('repo(): each repo its own main and caches; --path and links.local.json override path; a wrong origin is refused', () => {
   const F = multiFixture('repo-obj');
   const { old, g, runIn, okIn } = F;
   try {
@@ -4513,8 +4513,8 @@ test('repo(): each repo its own main and caches (M7); --path and links.local.jso
     const con = l.links.find((x) => x.id === 'console');
     assert.equal(con.main_ref, 'origin/trunk', "console's own main branch");
     assert.equal(con.main_sha, g(['rev-parse', 'origin/trunk'], F.console));
-    assert.notEqual(con.main_sha, l.home.main_sha, 'M7: no cache bleed between repos');
-    // M9: run/links.local.json, then --path, override the committed path
+    assert.notEqual(con.main_sha, l.home.main_sha, 'no cache bleed between repos');
+    // run/links.local.json, then --path, override the committed path
     const elsewhere = path.join(F.base, 'console-elsewhere');
     g(['clone', '-q', F.consoleOrigin, elsewhere], F.base);
     write(path.join(old, 'docs/devteam/run/links.local.json'), JSON.stringify({ console: { path: elsewhere } }));
@@ -4605,7 +4605,7 @@ test('a sibling ticket\'s records are read from its repo at the exact head', () 
   } finally { F.done(); }
 });
 
-test('B1: a sibling ticket\'s footprint is judged by home\'s committed lines', () => {
+test('a sibling ticket\'s footprint is judged by home\'s committed lines', () => {
   const F = multiFixture('sibling-footprint');
   const { old, g, runIn, ticket } = F;
   const bodyF = path.join(F.base, 'body.md');
@@ -4649,7 +4649,7 @@ test('views of a sibling ticket: status, approve-plan, timeline; a missing check
     g(['push', '-q', 'origin', 'trunk'], F.console);
     assert.match(okIn(old, ['status']), /merged +console-01-a/);
     assert.equal(json(okIn(old, ['timeline', 'console-01-a', '--json'])).files.find((f) => f.title === 'spec').ref, 'origin/trunk', "a merged ticket's records are on its repo's main");
-    // no console checkout here: status, metrics and the dashboard's data carry on (open issue 8)
+    // no console checkout here: status, metrics and the dashboard's data carry on
     write(path.join(old, 'docs/devteam/run/links.local.json'), JSON.stringify({ console: { path: path.join(F.base, 'not-cloned') } }));
     assert.match(okIn(old, ['status']), /console-01-a/);
     assert.ok(json(okIn(old, ['metrics', '--json'])).findings.some((x) => x.kind === 'link-unreachable' && x.subject === 'console'));
@@ -4660,7 +4660,7 @@ test('views of a sibling ticket: status, approve-plan, timeline; a missing check
   } finally { F.done(); }
 });
 
-test('a sibling ticket\'s review worktree: under home/.worktrees, of its repo, seeded from that repo\'s settings, and removed through it (M8)', () => {
+test('a sibling ticket\'s review worktree: under home/.worktrees, of its repo, seeded from that repo\'s settings, and removed through it', () => {
   const F = multiFixture('sibling-review-wt');
   const { old, g, okIn, runIn, ticket } = F;
   try {
@@ -4795,7 +4795,7 @@ test('check-pr --repo checks a sibling PR in that repo, from any checkout of it 
   } finally { F.done(); }
 });
 
-test('merge runs a sibling ticket\'s gates in its repo and lands it on that repo\'s main; a repo with no gates is refused (M3)', () => {
+test('merge runs a sibling ticket\'s gates in its repo and lands it on that repo\'s main; a repo with no gates is refused', () => {
   const F = multiFixture('sibling-merge');
   const { old, g, okIn, runIn, ticket } = F;
   const SUP = { DEVTEAM_ROLE: 'supervisor' };
@@ -4836,12 +4836,12 @@ test('merge runs a sibling ticket\'s gates in its repo and lands it on that repo
     const act = json(okIn(old, ['log', '--type', 'act', '--json'])).find((a) => a.class === 'merge-word' && a.refs.includes('console-01-a'));
     assert.equal(act.repo, 'console');
     assert.match(okIn(old, ['status']), /merged +console-01-a/, "status reads console's main");
-    // M3
+    // a repo with no gates of its own is refused, never given home's
     land('companion-02-b', F.companion, 'main', { 'app/index.js': 'changed\n' });
     const r = runIn(old, ['merge', 'companion-02-b', '--dry-run'], SUP);
     assert.notEqual(r.status, 0);
     assert.match(r.out, /no gates in companion's settings \(links\.companion\.gates\); pass --no-gates/);
-    // B1 at merge: a console-ui ticket that edits console-build's file is refused, by home's lines
+    // at merge too: a console-ui ticket that edits console-build's file is refused, by home's lines
     F.lines({ ...F.STD, 'console-ui': { link: 'console', owns: ['src/**'] }, 'console-build': { link: 'console', owns: ['package.json', '.gitignore'] }, companion: { link: 'companion' } }, { gates: { web: { cmd: 'true', paths: ['web/**'] } } });
     ticket('console-ui-03-c', { component: 'console-ui', touches: ['src/**', 'package.json'] });
     const uw = path.join(old, '.worktrees', 'console-ui-03-c');
@@ -4849,7 +4849,7 @@ test('merge runs a sibling ticket\'s gates in its repo and lands it on that repo
     write(path.join(uw, 'package.json'), '{"name":"edited by the ui"}\n');
     g(['commit', '-qam', 'console-ui-03-c: x'], uw); g(['push', '-q', 'origin', 'ticket/console-ui-03-c'], uw);
     write(path.join(old, 'docs/devteam/run/pr/ticket/console-ui-03-c.md'), '# console-ui-03-c: x\n\n## One-way doors\n\nNone.\n');
-    assert.match(runIn(old, ['merge', 'console-ui-03-c', '--dry-run'], SUP).out, /changes files outside the line of console-ui: package\.json/, 'B1: merge refuses it too');
+    assert.match(runIn(old, ['merge', 'console-ui-03-c', '--dry-run'], SUP).out, /changes files outside the line of console-ui: package\.json/, 'merge refuses it too');
     // the fetch of a sibling's main fails: refused, never judged against a stale one
     fs.renameSync(F.consoleOrigin, `${F.consoleOrigin}-away`);
     try {
@@ -4865,7 +4865,7 @@ test('every gh call names its repo (-R)', () => {
 });
 
 // Views route by name (repoOfTicketLink, factsRepo, repoReadable), so a machine without one
-// sibling's checkout still shows status and metrics; acts route by object and fail fast (open issue 8).
+// sibling's checkout still shows status and metrics; acts route by object and fail fast.
 test('views never use the object routers', () => {
   const src = fs.readFileSync(path.join(kit, 'scripts', 'devteam.mjs'), 'utf8').split('\n');
   const VIEWS = ['deriveStatus', 'collectMetrics', 'collectProgress', 'notSchedulable', 'cmdReady', 'cmdStatus', 'sessionOf', 'liveSessionsNow', 'restartCommands', 'holdView', 'holdFindings', 'sessionSettled', 'timelineView', 'dashboardData', 'fleetStatus', 'moveChecklist', 'cmdLinks', 'cmdPrompt'];
@@ -5023,7 +5023,7 @@ test('cross-repo planning: footprints overlap only within a repo; a story across
     assert.doesNotMatch(runIn(old, ['validate']).out, /console-01-a and companion-02-b can run concurrently/);
     ticket('console-03-c', { touches: ['src/**'] });
     assert.match(runIn(old, ['validate']).out, /console-01-a and console-03-c can run concurrently/, 'within one repo they still overlap');
-    // review questions pin a page in home (open issue 3): a sibling ticket's is refused, with what to do
+    // review questions pin a page in home: a sibling ticket's is refused, with what to do
     assert.match(runIn(old, ['ask', '--kind', 'review', '--ticket', 'console-01-a', '--question', 'Does it look right?'], { DEVTEAM_ROLE: 'supervisor' }).err, /console-01-a is a ticket in console: a review question pins a page committed in home, so draw the page in a home chore and ask it there/);
     // a story served in two repos: --strict wants the end-to-end ticket that depends on the rest
     okIn(old, ['feature', 'add', 'sync', '--json', JSON.stringify({ title: 'Sync', goals: ['g-20260101-000000000-supervisor'], stories: [{ id: 'SYNC-S1', text: 'sync works', release: 'v1' }] })], { DEVTEAM_ROLE: 'supervisor' });
@@ -5083,7 +5083,7 @@ test('link add --kind repo asks the owner a governance-edit question and writes 
   } finally { F.done(); }
 });
 
-test('a repo measure names the link it runs in (spec §9 measure.link): read on that repo\'s main, default home', () => {
+test('a repo measure names the link it runs in (measure.link): read on that repo\'s main, default home', () => {
   const F = multiFixture('measure-link');
   const { old, g, okIn, runIn } = F;
   const SUP = { DEVTEAM_ROLE: 'supervisor' };

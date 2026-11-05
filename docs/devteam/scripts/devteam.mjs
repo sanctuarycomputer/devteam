@@ -217,7 +217,7 @@ function remoteKeyAt(r, base) {
 }
 // Home is the repo that holds the kit, project/ and the live log. It comes from DEVTEAM_HOME, or
 // from the script that runs (the re-exec above makes that the main checkout's kit), never from the
-// cwd: a worker in another repo's worktree runs home's kit by absolute path (spec §5.1). Anything
+// cwd: a worker in another repo's worktree runs home's kit by absolute path. Anything
 // that isn't a home is refused loudly, never followed, so nothing runs against the wrong live log:
 // a DEVTEAM_HOME that is no checkout, has no project settings, or is a repo link's checkout; another
 // repo's copy of the kit run with DEVTEAM_HOME; and a kit whose project folder holds a repo link's
@@ -1387,7 +1387,7 @@ function logRule(headRef, sha, R = repo('home')) {
 // redrawn in place before it lands). Once a pinned file or a result is on main, as the merge base
 // holds it, it never changes and is never deleted, whatever its question's status.
 function reviewRule(sha, { forge = false, repo: R = repo('home') } = {}) {
-  // review questions are home's (open issue 3): another repo's PR carries no review result
+  // review questions are home's: another repo's PR carries no review result
   if (!commonDir || !projectInRepo || R.name !== 'home') return [];
   const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
   if (!base) return []; // logRule says so
@@ -1616,7 +1616,7 @@ const WORKTREE = { ref: null };
 // A project file from this checkout, or main's copy when this checkout lacks it.
 const projectFileText = (rel) => readText(path.join(projectDir, rel)) ?? (projectInRepo && mainRef() ? git(['show', `${mainRef()}:${projectRel}/${rel}`]) : null);
 
-// ===== 4b. repos: home and each repo link, one object each (spec §5.1) =====
+// ===== 4b. repos: home and each repo link, one object each =====
 
 // The repo a GitHub CLI call names (-R): owner/name, or host/owner/name on GitHub Enterprise;
 // null for a remote gh can't name (a path, a non-GitHub host), where gh then runs in the checkout.
@@ -1633,7 +1633,7 @@ function repo(name = 'home') {
   if (!repoMemo.has(name)) repoMemo.set(name, name === 'home' ? homeRepo() : linkRepo(name));
   return repoMemo.get(name);
 }
-// Home's object is PR 1's homeFacts (name, the three tree reads, mainRef, devteamLine, settings)
+// Home's object is homeFacts (name, the three tree reads, mainRef, devteamLine, settings)
 // plus the rest, so every coverage helper that defaulted to homeFacts gets the same answers.
 function homeRepo() {
   return Object.assign(Object.create(homeFacts), {
@@ -1669,7 +1669,7 @@ function linkRepo(id) {
   const R = {
     name: id, root, commonDir: common, remote: l.remote, settings, projectRel: rel, projectInRepo: true,
     mainRef: mainRefR, resolveCommit: resolve,
-    // the same three tree reads home has (PR 1's gitFacts), bound to this checkout
+    // the same three tree reads home has (gitFacts), bound to this checkout
     ...gitFacts(g, (args) => gitRun(args, root)),
     git: g, gitOrDie: (args, cwd = root) => gitOrDie(args, cwd),
     gh: (args, opts = {}) => { const spec = ghSpec(l.remote); return sh('gh', [...args, ...(spec ? ['-R', spec] : [])], { cwd: root, ...opts }); },
@@ -1685,26 +1685,26 @@ function linkRepo(id) {
   };
   return R;
 }
-// The components that route a ticket to its repo: main's, committed (open issue 2).
+// The components that route a ticket to its repo: main's, committed.
 const committedComponents = () => memo('committedComponents', () => mainSettings(null) ?? loadSettings());
-// Two routers (open issue 8). By name, for views: never touches a checkout, never fails.
+// Two routers. By name, for views: never touches a checkout, never fails.
 const repoOfTicketLink = (t) => componentLink(t.component, committedComponents());
 // Whether a repo can be read on this machine, without failing: home always; a link when its
-// checkout is where it says and of its remote (PR 1's reachable, memoized per process).
+// checkout is where it says and of its remote (the repo kind's reachable, memoized per process).
 const repoReadable = (name) => { if (name === 'home') return true; const l = ownEntry(loadSettings().links, name); return !!LINK_KINDS[l?.kind]?.hostsComponents && !LINK_KINDS[l.kind].reachable(l, name); };
 // By object, for acts on one ticket: fails fast with one message when the checkout is wrong.
 const repoOfTicket = (t) => repo(repoOfTicketLink(t));
 const repoOfTicketId = (id) => { const t = tickets().get(id); return t ? repoOfTicket(t) : repo('home'); };
-// A ticket's git facts come from its own repo (spec §5.1). Views ask by name, through factsRepo,
+// A ticket's git facts come from its own repo. Views ask by name, through factsRepo,
 // which is null for a repo this machine can't read: its tickets read as unmerged and branchless
-// while link-unreachable says why (open issue 8). Home's methods are today's functions.
+// while link-unreachable says why. Home's methods are today's functions.
 const factsRepo = (id) => { const t = tickets().get(id); const name = t ? repoOfTicketLink(t) : 'home'; return repoReadable(name) ? repo(name) : null; };
 const mergeShaFor = (id) => factsRepo(id)?.mergeShaFor(id) ?? null;
 const mergedAt = (id) => factsRepo(id)?.mergedAt(id) ?? null;
 const ticketBranchRef = (id) => factsRepo(id)?.ticketBranchRef(id) ?? null;
-// A release of a repo (§5.5): the component's tag pattern, else v*; home's by default.
+// A release of a repo: the component's tag pattern, else v*; home's by default.
 const releasedIn = (sha, { repo: R = repo('home'), pattern } = {}) => R.releasedIn(sha, pattern);
-// Where a ticket's release is read: its repo's tags, matching its component's pattern (§3.2, §5.5).
+// Where a ticket's release is read: its repo's tags, matching its component's pattern.
 // A merge sha is non-null only when factsRepo found the repo; undefined lets releasedIn's default
 // (home) apply rather than a null.
 const releaseOf = (t) => { const c = committedComponents().components?.[t.component]; return { repo: factsRepo(t.id) ?? undefined, pattern: isObj(c?.release) ? c.release.tag : undefined }; };
@@ -2190,7 +2190,7 @@ function cmdValidate() {
       const servers = mine.filter((t) => (t.serves ?? []).includes(s));
       const comps = new Set(servers.filter((t) => t.kind !== 'contract').map((t) => t.component));
       if (comps.size > 1 && !servers.some((t) => t.kind === 'integration')) warnings.push(`feature ${fid}: story ${s} spans ${[...comps].join(', ')} but has no integration ticket (D7)`);
-      // Across repos there are no multi-repo tickets (spec §6.2): a story served in two repos is
+      // Across repos there are no multi-repo tickets: a story served in two repos is
       // split per repo, with its end-to-end check in the ticket that lands last, one that depends
       // (transitively) on every other ticket serving it.
       if (flags.strict) {
@@ -2303,7 +2303,7 @@ function cmdValidate() {
       if (cov) for (const l of coverageReport({ ...coverageGaps(cov, sIn), ref }, sIn)) (scope || l.startsWith('line-empty:') ? warnings : errors).push(`components: ${l}${scope ? `; not ${scope}'s to fix` : ''}`);
       // Every repo link with components: its main's tree under the same lines (settings live in
       // home). A repo this machine can't read is skipped with a warning; link-unreachable says how
-      // to fix it at tick time. Its project folder holds only tickets/ (spec §5.3).
+      // to fix it at tick time. Its project folder holds only tickets/.
       for (const [id, l] of Object.entries(sIn.links ?? {})) {
         if (!LINK_KINDS[l?.kind]?.hostsComponents || !componentsOn(sIn, id).length) continue;
         if (!repoReadable(id)) { warnings.push(`components (${id}): not checked, ${LINK_KINDS[l.kind].reachable(l, id)}`); continue; }
@@ -3105,8 +3105,8 @@ function registryActFails(base, sha) {
 // run here. A chore PR may not touch the log (chore-log touches nothing else) or a ticket's folder.
 function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('home') }) {
   const branch = headRef.replace(/^refs\/heads\//, '');
-  // A ticket's PR is in its own repo; plan and chore PRs are always home's (spec §5.4).
-  if (R.name !== 'home' && !branch.startsWith('ticket/')) return ["plan and chore PRs are always home's (spec §5.4); a chore in another repo is a ticket of kind chore in its component"];
+  // A ticket's PR is in its own repo; plan and chore PRs are always home's.
+  if (R.name !== 'home' && !branch.startsWith('ticket/')) return ["plan and chore PRs are always home's; a chore in another repo is a ticket of kind chore in its component"];
   if (branch.startsWith('ticket/') && tickets().has(branch.slice('ticket/'.length))) {
     const own = repoOfTicketLink(tickets().get(branch.slice('ticket/'.length)));
     if (own !== R.name) return [`${branch} is a ticket of ${own}, not ${R.name}`];
@@ -3172,7 +3172,7 @@ function missingPins(root = mainRoot) {
   return [];
 }
 const pinsHint = (miss = missingPins(), root = mainRoot) => (miss.length ? `this machine lacks the tools .tool-versions pins (${miss.join(', ')}): run asdf install (or mise install) in ${root}, then try again` : null);
-// A worktree of repo R is seeded from R's own settings and main checkout, never home's (spec §5.2).
+// A worktree of repo R is seeded from R's own settings and main checkout, never home's.
 function seedWorktree(wt, { setup = true, repo: R = repo('home') } = {}) {
   const s = R.settings;
   for (const rel of s.worktree_files ?? []) {
@@ -3199,7 +3199,7 @@ function detachedWorktree(sha, name, R = repo('home')) {
   seedWorktree(wt, { repo: R });
   return wt;
 }
-// The repo a worktree belongs to, computed from git, never recorded (spec §5.2): null for a
+// The repo a worktree belongs to, computed from git, never recorded: null for a
 // worktree of no repo this machine can read.
 function worktreeRepo(wt) {
   const c = fs.existsSync(wt) ? commonOf(wt) : null;
@@ -3345,7 +3345,7 @@ function cmdMerge() {
   const chore = flagStr('chore') !== undefined ? choreSlug(flagStr('chore')) : undefined;
   const dry = !!flags['dry-run'];
   const branch = plan ? `plan/${plan}` : chore ? `chore-${chore}` : id ? `ticket/${id}` : die('usage: merge <ticket-id> | merge --plan <feature> | merge --chore <slug>   [--approved <qid>] [--no-gates] [--dry-run [--title t] [--body-file f]]');
-  // A ticket merges in its own repo (spec §5.4): its PR, gates, forge and merge method; plans and
+  // A ticket merges in its own repo: its PR, gates, forge and merge method; plans and
   // chores are always home's. For home R is today's functions and settings.
   const R = id && tickets().has(id) ? repoOfTicket(tickets().get(id)) : repo('home');
   const S = R.settings;
@@ -3460,7 +3460,7 @@ function cmdMerge() {
     const landing = prior.length === 1 && prior[0].class === av.class && (prior[0].refs ?? []).includes(target);
     if (prior.length && !landing) fails.push(`${approved} already approved ${declared.length ? `an act for ${target}` : 'an act'}; ask again for this one`);
   }
-  // Gates: the repo's own commands (never inherited, spec §3.1), at the exact head, in a detached
+  // Gates: the repo's own commands (never inherited), at the exact head, in a detached
   // worktree of that repo seeded from that repo's settings.
   const gates = Object.entries(S.gates ?? {});
   if (!gates.length && !flags['no-gates'] && !chore) fails.push(R.name === 'home' ? 'no gates in settings (gates: {name: command}); pass --no-gates to merge without running any' : `no gates in ${R.name}'s settings (links.${R.name}.gates); pass --no-gates to merge without running any`);
@@ -5256,7 +5256,7 @@ const goalFeatures = (gid) => [...features().values()].filter((f) => (f.goals ??
 // Run a repo or prod measure's check: repo on a throwaway checkout of main (so the number is main's,
 // with its sha), prod from the main checkout (it reads production, read-only by the owner's word).
 // The number is the last line of stdout.
-// A repo measure runs on the main of the repo its link names (measure.link, default home; spec §9).
+// A repo measure runs on the main of the repo its link names (measure.link, default home).
 function runMeasureCheck(g) {
   const m = measureOf(g);
   let cwd = mainRoot;
@@ -7311,7 +7311,7 @@ function makeSession(role) {
   // it, and one that numbered tickets before blocks existed gets none (nothing to check it against).
   const block = role === 'planner' && !idBlockFor(id) && !inFlightPlanTickets(branch).length ? reserveIdBlock(id, blockSize) : null;
   let madeWorktree = false;
-  // A worker's worktree is a checkout of its ticket's repo (spec §5.2), under home's .worktrees;
+  // A worker's worktree is a checkout of its ticket's repo, under home's .worktrees;
   // a planner's is home's. s stays home's for the session, the agent and its policy.
   const R = role === 'worker' ? repoOfTicket(tickets().get(id)) : repo('home');
   const mb = R.settings.main_branch;
@@ -7392,7 +7392,7 @@ const drainReason = (a) => DRAIN_WHAT.exec(a?.what ?? '')?.[2] ?? a?.what ?? '';
 const lastPhaseOf = (who) => logObjects('phase').filter((p) => p.created_by === who).sort(byTime).pop() ?? null;
 // A session by its writer name: a ticket id, or plan-<feature>.
 // A session by its writer name: a ticket id, or plan-<feature>. Its repo by name; the object only
-// on use, so listing sessions never needs a checkout of every repo (open issue 8).
+// on use, so listing sessions never needs a checkout of every repo.
 function sessionOf(name) {
   const planner = writerClass(name) === 'planner';
   const id = planner ? name.slice('plan-'.length) : name;
@@ -8368,7 +8368,7 @@ function cmdLink() {
 // The json devteam block of the main checkout's settings.md as written, not as loadSettings pins
 // it: a repo link written by an earlier --approved run is here before it lands on main.
 const rawSettingsBlock = () => { const m = readText(path.join(projectDir, 'settings.md'))?.match(/```json devteam\s*\n([\s\S]*?)\n```/); try { return m ? JSON.parse(m[1]) : {}; } catch { return {}; } };
-// A link of an owner's kind (spec §3.4, §7): draft the change and ask a question in the class its
+// A link of an owner's kind: draft the change and ask a question in the class its
 // field takes (gate-change for a gate field, else governance-edit); with --approved <qid>, apply
 // exactly that change and log the act the chore-registry merge then lands under the same answer.
 // Asking twice for the same draft reuses the open question; applying a draft already written is a
@@ -8382,7 +8382,7 @@ function linkByOwner(sub, id, field, vals, kind) {
   const next = sub === 'rm' ? undefined : sub === 'add' ? { kind, ...pick } : { ...cur, [field]: linkValue(field, vals) };
   if (sub === 'add') for (const f of ['title', ...K.fields.required]) if (next[f] === undefined) die(`link add --kind ${kind} needs --${f}`);
   const cls = sub === 'set' ? K.ownerClass(field) : 'governance-edit';
-  // a field that is no one's (a repo link's path, §3.5) is written like a url link's, as registry-edit
+  // a field that is no one's (a repo link's path) is written like a url link's, as registry-edit
   if (sub === 'set' && !cls) return editUnownedField(id, field, next[field]);
   if (canonical(ownEntry(raw, id) ?? null) === canonical(next ?? null)) return out(`links.${id} is already ${next ? 'that' : 'gone'} in settings.md here; ${LANDING_HINT}`);
   const { errors } = registryProblems({ ...loadSettings(), links: { ...Object.fromEntries(Object.entries(loadSettings().links ?? {}).filter(([k]) => k !== id)), ...(next ? { [id]: next } : {}) } });
@@ -8404,7 +8404,7 @@ function linkByOwner(sub, id, field, vals, kind) {
   appendLog({ type: 'act', decision: citing(), class: cls, what: `${sub === 'rm' ? 'removed' : sub === 'add' ? 'added' : `set ${field} on`} ${kind} link ${id}`, refs: ['chore-registry', `link:${id}`], reversible: true, approved_by: approved, entry_hash: linkEntryHash(next) }, 'supervisor');
   out(`applied ${approved}; ${LANDING_HINT} --approved ${approved}`);
 }
-// A field no owner class guards (a repo link's path: where its checkout is on this machine, §3.5).
+// A field no owner class guards (a repo link's path: where its checkout is on this machine).
 function editUnownedField(id, field, value) {
   authorise('registry-edit', null, null, [], 'link');
   let entry;
