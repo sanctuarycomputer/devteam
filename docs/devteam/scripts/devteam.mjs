@@ -5204,10 +5204,12 @@ function collectMetrics(since) {
   for (const p of incidentList().filter((x) => x.status === 'mitigating')) {
     const t = fixTicketOf(p.id);
     const at = t ? mergedAt(t.id) : null;
-    if (at && Date.now() - at > vd.deploy_lag_minutes * 60000 + 86400000) add('medium', 'fix-unverified', p.id, `${t.id} merged ${new Date(at).toISOString()} and no deploy has its commit yet`, 'check the release went out (the deploy probe, the platform); a deploy probe is how verification sees it');
+    const since = at ? deploysSince(at) : [];
+    const why = !since.length ? 'no deploy observed since' : since.every((o) => !deployCommit(o)) ? 'the deploys since carry no commit' : since.some((o) => deployCommit(o) && !knownCommit(deployCommit(o))) ? 'a deploy since names a commit this repo doesn\'t have (git fetch?)' : 'no deploy since has its commit';
+    if (at && Date.now() - at > vd.deploy_lag_minutes * 60000 + 86400000) add('medium', 'fix-unverified', p.id, `${t.id} merged ${new Date(at).toISOString()}: ${why}`, 'check the release went out (the deploy probe, the platform); a deploy probe is how verification sees it');
   }
   const monitorSaw = (ms) => logObjects('observation').some((o) => o.detector === 'monitor' && TRIAGE_KINDS.includes(o.kind) && Date.parse(o.created_at) <= ms && Date.parse(o.created_at) >= ms - 48 * 3600000);
-  if (monitorList().length) for (const x of [...logObjects('observation').filter((o) => o.kind === 'escaped-defect'), ...logObjects('problem').filter((p) => p.created_by === 'owner' && p.realized && !isIncident(p))].filter((x) => Date.now() - Date.parse(x.created_at) < 14 * 86400000 && !monitorSaw(Date.parse(x.created_at)))) add('low', 'probe-missed', x.id, `${x.type === 'problem' ? 'the owner opened a problem' : 'an escaped defect'} (${String(x.title ?? x.detail ?? '').slice(0, 80)}) that no monitor observed in the 48h before`, 'if it was production, find what would have seen it (a probe, a threshold) and offer it');
+  if (monitorList().length) for (const x of [...logObjects('observation').filter((o) => o.kind === 'escaped-defect'), ...logObjects('problem').filter((p) => p.created_by === 'owner' && p.realized && !isIncident(p) && /production|outage|\bprod\b|\bdown\b|customers?|users? (?:see|saw|report)/i.test(`${p.title} ${p.detail ?? ''}`))].filter((x) => Date.now() - Date.parse(x.created_at) < 14 * 86400000 && !monitorSaw(Date.parse(x.created_at)))) add('low', 'probe-missed', x.id, `${x.type === 'problem' ? 'the owner opened a problem' : 'an escaped defect'} (${String(x.title ?? x.detail ?? '').slice(0, 80)}) that no monitor observed in the 48h before`, 'if it was production, find what would have seen it (a probe, a threshold) and offer it');
   // an incident of severity 3 or more, open over an hour with no decision
   for (const p of incidentList().filter((x) => ['open', 'owned'].includes(x.status) && Date.now() - Date.parse(x.created_at) > 3600000)) {
     const sev = incidentSeverity(p);
@@ -7229,6 +7231,7 @@ function eventInvalid(e) {
   if (e.frames != null && !Array.isArray(e.frames)) return 'frames is a list';
   if (isStr(e.fingerprint) && e.fingerprint.length > 200) return 'fingerprint is at most 200 characters';
   if (e.kind === 'platform' && !/^[A-Z]\d{1,3}$/.test(e.code)) return 'code is a platform error code (H12, R14)';
+  if (e.kind === 'deploy' && e.commit != null && !/^[0-9a-fA-F]{7,40}$/.test(String(e.commit))) return 'commit is a git sha';
   return null;
 }
 function parseProbeLine(line) {
@@ -7426,7 +7429,7 @@ function ingestEvents(m, events, st, at = nowIso()) {
     day.events++;
     if (e.kind === 'metric') { metrics.push({ at: e.at ?? at, metric: e.name, value: e.value, unit: e.unit ?? null }); continue; }
     if (e.kind === 'deploy') {
-      monitorObserveOnce(m, { kind: 'deploy', detail: `${m.name}: release ${e.release}${e.commit ? ` (commit ${e.commit})` : ''}${e.at ? ` at ${e.at}` : ''}`, severity: 0, valence: 0, source_key: `monitor:${m.name}:deploy:${e.release}`, ...(isStr(e.url) ? { source_ref: e.url } : {}) });
+      monitorObserveOnce(m, { kind: 'deploy', detail: `${m.name}: release ${e.release}${e.commit ? ` (commit ${String(e.commit).toLowerCase()})` : ''}${e.at ? ` at ${e.at}` : ''}`, severity: 0, valence: 0, source_key: `monitor:${m.name}:deploy:${e.release}`, ...(isStr(e.url) ? { source_ref: e.url } : {}) });
       continue;
     }
     const fp = e.kind === 'platform' ? `platform:${e.code}` : `${e.kind}:${e.fingerprint}`;
@@ -7490,6 +7493,7 @@ function ingestEvents(m, events, st, at = nowIso()) {
     }
   }
   writeJsonAtomic(path.join(dir, 'fingerprints.json'), fps);
+  FPS_CACHE.delete(m.name);
   writeJsonAtomic(path.join(dir, 'counts.json'), counts);
   if (metrics.length) { fs.appendFileSync(path.join(dir, 'samples.jsonl'), metrics.map((x) => `${JSON.stringify(x)}\n`).join('')); SAMPLES.delete(m.name); }
   return alerts;
@@ -7642,13 +7646,16 @@ function componentFor(file) {
   }
   return null;
 }
-const fpSummary = (id) => { const { monitor, key } = splitFpId(id); const f = jsonOr(path.join(monitorDir(monitor), 'fingerprints.json'), {}); return Object.hasOwn(f, key) ? { monitor, key, ...f[key] } : { monitor, key }; };
+// each monitor's fingerprints, read once per process (ingest drops its copy when it writes)
+const FPS_CACHE = new Map();
+const fpsOf = (monitor) => (FPS_CACHE.has(monitor) ? FPS_CACHE.get(monitor) : FPS_CACHE.set(monitor, jsonOr(path.join(monitorDir(monitor), 'fingerprints.json'), {})).get(monitor));
+const fpSummary = (id) => { const { monitor, key } = splitFpId(id); const f = fpsOf(monitor); return Object.hasOwn(f, key) ? { monitor, key, ...f[key] } : { monitor, key }; };
 // An incident as the board and its sidepeek show it: computed severity, its stage, who it waits on.
 function incidentView(p) {
   const sev = incidentSeverity(p);
   const ds = incidentDecisions(p.id);
-  const t = fixTicketOf(p.id);
-  const q = questions().filter((x) => x.class === 'incident-fix' && [...(x.blocks ?? []), ...(x.approves ?? [])].includes(p.id)).sort((a, b) => String(a.asked_at).localeCompare(String(b.asked_at))).pop() ?? null;
+  const t = followTicket(fixTicketOf(p.id));
+  const q = questions().filter((x) => (x.class === 'incident-fix' || !x.class) && [...(x.blocks ?? []), ...(x.approves ?? [])].includes(p.id)).sort((a, b) => String(a.asked_at).localeCompare(String(b.asked_at))).pop() ?? null;
   const fps = p.fingerprints.map((f) => ({ id: f, ...fpSummary(f) }));
   const merged = t ? mergeShaFor(t.id) : null;
   const regressed = (p.verify?.regressed ?? []).includes(merged ?? '');
@@ -7758,39 +7765,64 @@ function cmdMonitorIncident() {
 
 // ---- verify: an incident's fix in production ----
 // After a fix ticket merges the incident is mitigating; once a deploy observation's commit has the
-// merge commit as an ancestor it is verifying (with no deploy signal anywhere, the window starts
-// deploy_lag_minutes after the merge and is "assumed"). Quiet for the window (verify_hours, or 3
-// times the fingerprint's usual interval when it was seen 3 or more times, whichever is longer)
-// resolves it with an outcome; an event in the window is a regression: fix-regressed, the
-// incident reopened, a problem on the decision, and one question to the owner (wrong call, or
-// sound call and a failed fix). The kit never corrects: that stays the owner's.
-const isAncestor = (a, b) => /^[0-9a-f]{7,40}$/.test(a ?? '') && /^[0-9a-f]{7,40}$/.test(b ?? '') && spawnSync('git', ['merge-base', '--is-ancestor', a, b], { cwd: mainRoot, stdio: 'ignore' }).status === 0;
-const deployCommit = (o) => /\(commit ([0-9a-f]{7,40})\)/.exec(o.detail ?? '')?.[1] ?? null;
+// merge commit as an ancestor it is verifying (when no deploy since the merge carries a commit
+// this repo knows, the window starts deploy_lag_minutes after the merge and is "assumed").
+// Quiet for the window (verify_hours, or 3 times the fingerprint's usual gap when it was seen 3
+// or more times, whichever is longer, at most 7 days) resolves it with an outcome; an event in
+// the window (by the provider's last_seen) is a regression: fix-regressed, the incident
+// reopened, a problem on the decision, and one question to the owner (wrong call, or sound call
+// and a failed fix). The kit never corrects: that stays the owner's. A status the owner set is
+// the owner's: verification doesn't move it.
+const SHA_RE = /^[0-9a-f]{7,40}$/;
+const isAncestor = (a, b) => SHA_RE.test(a ?? '') && SHA_RE.test(b ?? '') && spawnSync('git', ['merge-base', '--is-ancestor', a, b], { cwd: mainRoot, stdio: 'ignore' }).status === 0;
+const knownCommit = (c) => SHA_RE.test(c ?? '') && spawnSync('git', ['cat-file', '-e', `${c}^{commit}`], { cwd: mainRoot, stdio: 'ignore' }).status === 0;
+const deployCommit = (o) => /\(commit ([0-9a-fA-F]{7,40})\)/.exec(o.detail ?? '')?.[1]?.toLowerCase() ?? null;
 const deployRelease = (o) => /: release (\S+)/.exec(o.detail ?? '')?.[1] ?? null;
 const deploysSince = (ms) => logObjects('observation').filter((o) => o.detector === 'monitor' && o.kind === 'deploy' && Date.parse(o.created_at) >= ms).sort(byTime);
 const verifyDefaults = () => ({ verify_hours: 24, deploy_lag_minutes: 15, ...(loadSettings().monitor_defaults ?? {}) });
-// When a fingerprint was last read, by the kit's clock.
-const fpLastRead = (id) => { const f = fpSummary(id); return Date.parse(f.ingested_at ?? f.last_seen ?? '') || 0; };
-// The window a fix must stay quiet for: verify_hours, or 3 times the usual gap between events.
+// When a fingerprint last happened: the provider's last_seen (the kit's ingest time when it
+// gave none), so an event from before the deploy fetched after it isn't a regression.
+const fpLastEvent = (id) => { const f = fpSummary(id); return Date.parse(f.last_seen ?? '') || Date.parse(f.ingested_at ?? '') || 0; };
+// The window a fix must stay quiet for: verify_hours, or 3 times the usual gap between events in
+// the kit's own hourly counts, at most 7 days.
 function verifyWindowMs(p) {
   const base = verifyDefaults().verify_hours * 3600000;
-  const gaps = p.fingerprints.map(fpSummary).filter((f) => (f.total ?? 0) >= 3 && f.first_seen && f.last_seen).map((f) => (3 * (Date.parse(f.last_seen) - Date.parse(f.first_seen))) / ((f.total ?? 1) - 1)).filter((x) => x > 0);
-  return Math.max(base, ...gaps);
+  const gaps = p.fingerprints.map((id) => {
+    const { monitor, key } = splitFpId(id);
+    const hours = Object.entries(jsonOr(path.join(monitorDir(monitor), 'counts.json'), {})[key] ?? {}).filter(([, n]) => n > 0).map(([h]) => Date.parse(`${h}:00:00.000Z`)).sort((a, b) => a - b);
+    return hours.length >= 3 ? (3 * (hours.at(-1) - hours[0])) / (hours.length - 1) : 0;
+  });
+  return Math.min(7 * 86400000, Math.max(base, ...gaps));
 }
-const setIncident = (p, fields) => appendLog({ type: 'problem', op: 'set', id: p.id, ...fields }, 'supervisor');
+// A field of an incident the owner set: the owner's, so the kit doesn't write it (the fold would
+// drop the line, and the next poll would write it again).
+const ownerHolds = (p, k) => (p.updates ?? []).some((u) => writerClass(u.by) === 'owner' && k in u);
+function setIncident(p, fields) {
+  const mine = Object.fromEntries(Object.entries(fields).filter(([k]) => !ownerHolds(p, k)));
+  if (!Object.keys(mine).length) return null;
+  return appendLog({ type: 'problem', op: 'set', id: p.id, ...mine }, 'supervisor');
+}
+const followTicket = (t) => { const ts = tickets(); const seen = new Set(); while (t?.superseded_by && ts.has(t.superseded_by) && !seen.has(t.id)) { seen.add(t.id); t = ts.get(t.superseded_by); } return t; };
 function verifyIncidents() {
   const alerts = [], notes = [];
   const d = verifyDefaults();
-  const anyDeploySignal = deploysSince(Date.now() - 30 * 86400000).length > 0;
-  for (const p of incidentList()) {
-    const t = fixTicketOf(p.id);
+  const incs = incidentList();
+  const ign = monitorIgnores();
+  for (const p of incs) {
+    if (ownerHolds(p, 'status')) {
+      if (p.status !== 'resolved') monitorObserveOnce({ name: p.monitor ?? 'monitors' }, { subject: p.id, kind: 'verify-paused', detail: `the owner set ${p.id}'s status (${p.status}); verification leaves it to them`, severity: 0, valence: 0, source_key: `monitor:verify-paused:${p.id}` });
+      continue;
+    }
+    const t = followTicket(fixTicketOf(p.id));
     const dec = incidentDecisions(p.id).at(-1);
-    // a resolved incident whose fingerprints are read again: a new incident that refs it
+    // an incident the kit resolved, whose fingerprints happen again: a new incident that refs it
     if (p.status === 'resolved') {
+      if (!p.verify?.until) continue;
       const resolvedAt = Date.parse([...(p.updates ?? [])].reverse().find((u) => u.status === 'resolved')?.at ?? p.created_at);
-      const back = p.fingerprints.filter((f) => fpLastRead(f) > resolvedAt && !openIncidentOf(f));
-      if (back.length && !incidentList().some((x) => (x.refs ?? []).includes(p.id) && x.fingerprints.some((f) => back.includes(f)))) {
-        const n = appendLog({ type: 'problem', title: `${p.title} (recurred)`, severity: incidentSeverity({ fingerprints: back }), realized: true, status: 'open', threatens: p.threatens ?? [], refs: [p.id], fingerprints: back, monitor: p.monitor }, 'supervisor');
+      const back = p.fingerprints.filter((f) => !ign.has(f) && fpLastEvent(f) > resolvedAt && !openIncidentOf(f));
+      if (back.length && !incs.some((x) => (x.refs ?? []).includes(p.id) && x.fingerprints.some((f) => back.includes(f)))) {
+        const title = `${p.title.replace(/( \(recurred\))+$/, '')} (recurred)`;
+        const n = appendLog({ type: 'problem', title, severity: incidentSeverity({ fingerprints: back }), realized: true, status: 'open', threatens: p.threatens ?? [], refs: [p.id], fingerprints: back, monitor: p.monitor }, 'supervisor');
         monitorObserveOnce({ name: splitFpId(back[0]).monitor }, { subject: n.id, kind: 'recurred', detail: `${back.join(', ')} recurred after ${p.id} was resolved${p.verify?.unverified ? ' (unverified)' : ''}; opened ${n.id}`, severity: Math.min(4, incidentSeverity({ fingerprints: back })), valence: -1, refs: [p.id, n.id], source_key: `monitor:recurred:${p.id}:${n.id}` });
         notes.push(`${n.id}: ${p.title} recurred`);
       }
@@ -7802,38 +7834,44 @@ function verifyIncidents() {
     // a fix that regressed waits for the next decision's ticket
     if (merge && (v0.regressed ?? []).includes(merge)) continue;
     if (!merge) { if (p.status === 'open') setIncident(p, { status: 'owned' }); continue; }
-    const mergedMs = mergedAt(t.id) ?? Date.now();
+    const mergedMs = mergedAt(t.id);
+    if (mergedMs == null) { notes.push(`${p.id}: can't read when ${t.id} merged (${merge.slice(0, 12)})`); continue; }
     if (v0.commit !== merge || !v0.until) {
-      const dep = deploysSince(mergedMs).find((o) => isAncestor(merge, deployCommit(o)));
-      const assumed = !dep && !anyDeploySignal && Date.now() >= mergedMs + d.deploy_lag_minutes * 60000;
+      const since = deploysSince(mergedMs);
+      const dep = since.find((o) => isAncestor(merge, deployCommit(o)));
+      // assumed only when nothing since the merge says which commit went out
+      const assumed = !dep && !since.some((o) => knownCommit(deployCommit(o))) && Date.now() >= mergedMs + d.deploy_lag_minutes * 60000;
       if (!dep && !assumed) { if (p.status !== 'mitigating') setIncident(p, { status: 'mitigating' }); continue; }
       const from = dep ? Date.parse(dep.created_at) : mergedMs + d.deploy_lag_minutes * 60000;
-      setIncident(p, { status: 'verifying', verify: { commit: merge, from: new Date(from).toISOString(), until: new Date(from + verifyWindowMs(p)).toISOString(), assumed: !dep, ...(v0.regressed ? { regressed: v0.regressed } : {}) } });
-      monitorObserveOnce({ name: p.monitor ?? 'monitors' }, { subject: p.id, kind: 'fix-deployed', detail: `the fix for ${p.id} (${t.id}, ${merge.slice(0, 12)}) is ${dep ? `in release ${deployRelease(dep) ?? '?'}` : 'assumed deployed (no deploy signal)'}; verifying until ${new Date(from + verifyWindowMs(p)).toISOString()}`, severity: 0, valence: 0, refs: [p.id, t.id, ...(dep ? [dep.id] : [])], source_key: `monitor:fix-deployed:${p.id}:${merge}` });
+      const until = new Date(from + verifyWindowMs(p)).toISOString();
+      const seen = p.fingerprints.map(fpSummary).reduce((s, f) => s + (f.total ?? 0), 0);
+      setIncident(p, { status: 'verifying', verify: { commit: merge, from: new Date(from).toISOString(), until, assumed: !dep, seen, ...(v0.regressed ? { regressed: v0.regressed } : {}) } });
+      monitorObserveOnce({ name: p.monitor ?? 'monitors' }, { subject: p.id, kind: 'fix-deployed', detail: `the fix for ${p.id} (${t.id}, ${merge.slice(0, 12)}) is ${dep ? `in release ${deployRelease(dep) ?? '?'}` : 'assumed deployed (no deploy since the merge says which commit went out)'}; verifying until ${until}`, severity: 0, valence: 0, refs: [p.id, t.id, ...(dep ? [dep.id] : [])], source_key: `monitor:fix-deployed:${p.id}:${merge}` });
       continue;
     }
     const v = v0;
     const from = Date.parse(v.from);
-    const dep = deploysSince(mergedMs).find((o) => isAncestor(merge, deployCommit(o)));
-    const recurred = p.fingerprints.filter((f) => fpLastRead(f) > from);
+    const recurred = p.fingerprints.filter((f) => fpLastEvent(f) > from);
     if (recurred.length) {
       // regressed: observed, reopened, a problem on the decision, one question; never a correction
-      const o = monitorObserveOnce({ name: p.monitor ?? 'monitors' }, { subject: p.id, kind: 'fix-regressed', detail: `the fix for ${p.id} didn't hold: ${recurred.join(', ')} recurred after ${t.id} was deployed`, severity: 3, valence: -2, refs: [p.id, t.id, ...(dec ? [dec.id] : [])], source_key: `monitor:fix-regressed:${p.id}:${v.commit}` });
-      if (!o) continue;
+      const key = `monitor:fix-regressed:${p.id}:${v.commit}`;
+      const o = monitorObserveOnce({ name: p.monitor ?? 'monitors' }, { subject: p.id, kind: 'fix-regressed', detail: `the fix for ${p.id} didn't hold: ${recurred.join(', ')} recurred after ${t.id} was deployed`, severity: 3, valence: -2, refs: [p.id, t.id, ...(dec ? [dec.id] : [])], source_key: key }) ?? logObjects('observation').find((x) => x.source_key === key);
       setIncident(p, { status: 'open', verify: { commit: v.commit, regressed: [...(v.regressed ?? []), v.commit] } });
+      // a run that died after the observation makes these on the next poll, once
+      if (logObjects('problem').some((x) => (x.refs ?? []).includes(o.id))) continue;
       const prob = appendLog({ type: 'problem', title: `the fix for ${p.title} didn't hold`, severity: 3, realized: true, status: 'open', detail: `${t.id} merged as ${v.commit.slice(0, 12)}, and ${recurred.join(', ')} came back. Stale dynos, cached client bundles, replayed jobs or a second cause sharing the frame can do this as well as a wrong fix.`, threatens: p.threatens ?? [], refs: [p.id, t.id, ...(dec ? [dec.id] : []), o.id] }, 'supervisor');
       const q = appendLog({
         type: 'question', kind: 'owner-decision', question: `The fix for "${p.title}" didn't hold (${t.id}). Was deciding it a wrong call, or a sound call whose fix failed?`,
         context: `${recurred.join(', ')} recurred after the deploy. A wrong call is a correction you make (correct ${dec?.id ?? '<decision>'} --reason "…"), and incident-fix drops to rung 1. A sound call that failed is a problem (${prob.id}) and changes no trust. Recurrence has innocent causes: stale dynos, cached client bundles, replayed jobs, a second cause sharing the frame.`,
         recommendation: 'Sound call, failed fix', choices: [{ label: 'Sound call, failed fix', detail: `keep ${prob.id} open, fix forward`, effect: 'no trust change' }, { label: 'Wrong call', detail: `correct ${dec?.id ?? 'the decision'} yourself`, effect: 'incident-fix drops to rung 1' }],
-        evidence: [o.id, prob.id], why_asked: { reasons: ['owner-only'] },
+        blocks: [p.id], evidence: [o.id, prob.id], why_asked: { reasons: ['owner-only'] },
       }, 'supervisor');
       alerts.push(`the fix for ${p.id} didn't hold (${o.id}; question ${q.id})`);
       continue;
     }
     if (Date.now() >= Date.parse(v.until)) {
-      const seen = p.fingerprints.map(fpSummary).reduce((s, f) => s + (f.total ?? 0), 0);
-      const unverified = seen < 3;
+      const unverified = (v.seen ?? p.fingerprints.map(fpSummary).reduce((s, f) => s + (f.total ?? 0), 0)) < 3;
+      const dep = deploysSince(mergedMs).find((o) => isAncestor(merge, deployCommit(o)));
       setIncident(p, { status: 'resolved', verify: { ...v, unverified } });
       monitorObserveOnce({ name: p.monitor ?? 'monitors' }, { subject: p.id, kind: 'outcome', detail: `${p.id} ${unverified ? 'resolved (unverified: seen fewer than 3 times)' : 'resolved'}: quiet since the fix ${t.id}${v.assumed ? ' was assumed deployed' : ' was deployed'}`, severity: 0, valence: unverified ? 0 : 1, refs: [...(dec ? [dec.id] : []), t.id, ...(dep ? [dep.id] : []), p.id], source_key: `monitor:verified:${p.id}:${v.commit}` });
       notes.push(`${p.id} resolved${unverified ? ' (unverified)' : ''}`);
@@ -7843,27 +7881,31 @@ function verifyIncidents() {
 }
 // A fingerprint first seen in a release whose merges changed its top in-app frame: a suspected
 // escaped defect on that ticket (severity 1, so the high escaped-defects finding doesn't wake wait
-// on a guess; the supervisor promotes it when the fix shows the cause).
+// on a guess; the supervisor promotes it when the fix shows the cause). The release is the one in
+// the first observation's own detail; the merges are those between that release's deploy and the
+// one before it. At most 50 observations a poll, from a high-water mark.
 function suspectEscapes() {
-  const checkedFile = path.join(runDir, 'monitors', 'escapes.json');
-  const checked = new Set(jsonOr(checkedFile, []));
+  const markFile = path.join(runDir, 'monitors', 'escapes.json');
+  const mark = jsonOr(markFile, {}).at ?? '';
+  const obs = logObjects('observation').filter((x) => x.detector === 'monitor' && x.kind === 'exception' && x.created_at > mark).sort(byTime).slice(0, 50);
+  if (!obs.length) return;
   const deploys = deploysSince(0);
-  const ts = [...tickets().values()].filter((t) => mergeShaFor(t.id));
-  for (const o of logObjects('observation').filter((x) => x.detector === 'monitor' && x.kind === 'exception' && !checked.has(x.id))) {
-    checked.add(o.id);
-    const f = fpSummary(fpIdOfObservation(o) ?? '');
-    const top = f.frames?.find((fr) => fr.in_repo)?.file;
-    const i = deploys.findIndex((x) => deployRelease(x) === f.release);
-    if (!top || i < 0) continue;
-    const to = deployCommit(deploys[i]), prev = i > 0 ? deployCommit(deploys[i - 1]) : null;
-    for (const t of ts) {
-      const sha = mergeShaFor(t.id);
-      if (!isAncestor(sha, to) || (prev && isAncestor(sha, prev))) continue;
-      if (!changedFiles(`${sha}^1`, sha).includes(top)) continue;
-      monitorObserveOnce({ name: splitFpId(fpIdOfObservation(o)).monitor }, { kind: 'suspected-escaped-defect', subject: t.id, detail: `${fpIdOfObservation(o)} was first seen in release ${f.release}, whose merge of ${t.id} changed ${top}`, severity: 1, valence: -1, refs: [o.id], source_key: `monitor:suspected-escape:${o.id}:${t.id}` });
+  let merged = null;
+  for (const o of obs) {
+    const id = fpIdOfObservation(o);
+    const release = /\(release (\S+?)\)/.exec(o.detail ?? '')?.[1];
+    const top = fpSummary(id ?? '').frames?.find((fr) => fr.in_repo)?.file;
+    const i = release ? deploys.findIndex((x) => deployRelease(x) === release) : -1;
+    const to = i > 0 ? deployCommit(deploys[i]) : null, prev = i > 0 ? deployCommit(deploys[i - 1]) : null;
+    if (!top || !knownCommit(to) || !knownCommit(prev)) continue;
+    const range = new Set((git(['rev-list', `${prev}..${to}`], mainRoot) ?? '').split('\n').filter(Boolean));
+    merged ??= [...tickets().values()].map((t) => [t, mergeShaFor(t.id)]).filter(([, s]) => s);
+    for (const [t, sha] of merged) {
+      if (!range.has(sha) || !changedFiles(`${sha}^1`, sha).includes(top)) continue;
+      monitorObserveOnce({ name: splitFpId(id).monitor }, { kind: 'suspected-escaped-defect', subject: t.id, detail: `${id} was first seen in release ${release}, whose merge of ${t.id} changed ${top}`, severity: 1, valence: -1, refs: [o.id], source_key: `monitor:suspected-escape:${o.id}:${t.id}` });
     }
   }
-  writeJsonAtomic(checkedFile, [...checked].slice(-5000));
+  writeJsonAtomic(markFile, { at: obs.at(-1).created_at });
 }
 
 // A monitor as this checkout's settings have it (a chore ticket adding one tests it before it
@@ -7968,13 +8010,16 @@ async function cmdMonitor() {
     const res = await Promise.all(due.map(async (m) => ({ name: m.name, ...(await pollMonitor(m, { rollupDay: flagStr('rollup-day') ?? null })) })));
     // then incidents' fixes: deployed, verified, or regressed (a regression wakes wait)
     let ver = { alerts: [], notes: [] };
-    if (res.length || flags.verify) { MONITOR_KEYS = null; logCache = null; ver = verifyIncidents(); suspectEscapes(); }
+    if (res.length) { MONITOR_KEYS = null; logCache = null; ver = verifyIncidents(); }
     const alerts = [...res.flatMap((r) => r.alerts ?? []), ...ver.alerts];
-    if (flags.json) return json({ polled: res.map((r) => r.name), alerts });
+    // what wait needs goes out first; the escape scan after it may be slow, and a poll killed then
+    // has already said its alerts
+    if (flags.json) { json({ polled: res.map((r) => r.name), alerts }); if (res.length) suspectEscapes(); return; }
     if (!res.length) return out(all.length ? 'nothing due' : 'no monitors (settings: monitors)');
     for (const r of res) out(r.skipped ? `${r.name}: skipped (${r.skipped})` : `${r.name}: ${r.sample.ok ? 'ok' : r.sample.error}${r.sample.events != null ? `, ${r.sample.events} event(s)` : ''} ${fmtMs(r.sample.ms)}`);
     for (const n of ver.notes) out(n);
     for (const a of alerts) out(`ALERT ${a}`);
+    if (res.length) suspectEscapes();
     return;
   }
   die('usage: monitor status [--json] | monitor test <name> [--since t] | monitor poll [--due] [--name n] [--rollup-day yyyy-mm-dd] [--json] | monitor series <name> [--range 24h|7d] | monitor show <fingerprint> | monitor discover [--record] [--json] | monitor stream <name> | monitor scrub < text | monitor triage [--all] [--peek] [--json] | monitor ignore|unignore <fingerprint> [--reason r] [--owner] | monitor incident <fingerprint…> --title t | monitor incident <p-id> --add <fingerprint…>');
@@ -8010,7 +8055,8 @@ function cmdWait() {
     if (!ms.some((m) => monitorDue(m, monitorState(m.name)))) return [];
     const budget = (Math.max(0, ...ms.filter((m) => m.kind === 'probe').map((m) => m.probe_timeout_s)) + 60) * 1000;
     const r = spawnSync(process.execPath, [self, 'monitor', 'poll', '--due', '--json'], { cwd: mainRoot, env: { ...process.env, NODE_USE_ENV_PROXY: '1' }, encoding: 'utf8', timeout: budget, maxBuffer: 8 * 1024 * 1024 });
-    try { if (r.status === 0) return JSON.parse(r.stdout).alerts ?? []; } catch {}
+    // a poll killed after it printed still said its alerts
+    try { const j = (r.stdout ?? '').trim() ? JSON.parse(r.stdout) : null; if (r.status === 0 && j) return j.alerts ?? []; if (j?.alerts?.length) { if (!pollWarned) process.stderr.write('devteam: monitor poll ran out of time after it polled; its alerts are below\n'); pollWarned = true; return j.alerts; } } catch {}
     if (!pollWarned) process.stderr.write(`devteam: monitor poll ${r.error?.code === 'ETIMEDOUT' ? `took over ${Math.round(budget / 1000)}s` : `failed: ${(r.stderr || '').trim().split('\n').pop()}`}; monitoring didn't run this cycle (monitor status)\n`);
     pollWarned = true;
     return [];

@@ -968,6 +968,10 @@
                   "type": "string"
                 },
                 "description": "Merge commits whose fix didn't hold."
+              },
+              "seen": {
+                "type": "integer",
+                "description": "How many times its fingerprints had been seen when the window started."
               }
             },
             "additionalProperties": false
