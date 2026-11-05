@@ -4884,6 +4884,14 @@ function orientLinks() {
   const overlap = (a, b) => { const x = asList(a).length ? asList(a) : ['all'], y = asList(b).length ? asList(b) : ['all']; return x.includes('all') || y.includes('all') || x.some((s) => y.includes(s)); };
   const res = [];
   for (const o of logObjects('observation').filter((x) => x.kind === 'link' && (x.link?.url || x.link?.path) && !used.has(x.id)).sort(byTime)) {
+    // A line written by hand can hold text observe-link refuses (log-check flags it, link add refuses
+    // it). Nothing from it is proposed: one line says so, with the offending fields quoted as data.
+    const unsafe = [...['title', 'notes'].filter((f) => linkTextProblem(f, o.link[f])), ...['url', 'path'].filter((f) => unsafeLocator(o.link[f]))];
+    if (unsafe.length) {
+      const cut = (f) => { const v = [...String(o.link[f])]; const max = LINK_TEXT_MAX[f] ?? 200; return `${quoteData(v.slice(0, max).join(''))}${v.length > max ? '…' : ''}`; };
+      res.push({ key: `link-proposal:${o.id}`, proposal: 'not-proposed', observation: o.id, note: `observation ${o.id} has link text that isn't plain one-line text; not proposed: ${unsafe.map((f) => `${f} ${cut(f)}`).join(', ')}` });
+      continue;
+    }
     // A worker's or planner's observation is proposed as theirs, to be checked before it is
     // applied, and never for the whole project: all (or project) narrows to its ticket's component
     // or its plan's feature, and goes when there is neither.
@@ -4920,7 +4928,7 @@ function cmdOrient() {
   if (flags.json) return json([...cl, ...lk]);
   if (!cl.length && !lk.length) return out('nothing recurring that is unexplained');
   for (const c of cl) out(`${c.key}  x${c.count}  valence ${c.valence}\n  latest: ${c.latest}\n  evidence: ${c.ids.join(' ')}`);
-  if (lk.length) { out('link proposals:'); for (const p of lk) out(`  ${p.proposal} (${p.observation})${p.proposed_by ? `, proposed by ${p.proposed_by}; check before adding` : ''}: ${p.command}`); out('  (dismiss one: decide --class registry-edit --refs <observation> -- "<why the registry stays as it is>")'); }
+  if (lk.length) { out('link proposals:'); for (const p of lk) out(p.note ? `  ${p.note}` : `  ${p.proposal} (${p.observation})${p.proposed_by ? `, proposed by ${p.proposed_by}; check before adding` : ''}: ${p.command}`); out('  (dismiss one: decide --class registry-edit --refs <observation> -- "<why the registry stays as it is>")'); }
 }
 
 // ===== 9. goals, roadmap, retros, chore worktrees =====
