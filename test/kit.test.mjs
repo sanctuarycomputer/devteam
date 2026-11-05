@@ -3143,6 +3143,14 @@ test('link add, set and rm for url links: the supervisor writes settings and log
     assert.equal(l.links.find((x) => x.id === 'figma').url, 'https://figma.test/a');
     assert.match(ok(old, ['links']), /figma: url https:\/\/figma\.test\/a "Designs" for component:web, goal:g-1/);
     assert.equal(l.links.find((x) => x.id === 'figma').locator, 'https://figma.test/a');
+    // O9: link rm refuses while anything cites the link, and names the citers
+    ok(old, ['ticket', 'add', 'web-01-cite', '--json', JSON.stringify({ title: 'x', feature: 'chores', component: 'web', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['web/**'], done_when: ['the web suite passes'], notes: 'n', links: ['figma'] })], SUP);
+    write(path.join(old, 'docs/devteam/project/designs/web.md'), '# Web\n\nSpacing from link:figma.\n');
+    const rm = run(old, ['link', 'rm', 'figma'], SUP);
+    assert.notEqual(rm.status, 0);
+    assert.match(rm.err, /figma is cited by ticket web-01-cite, designs\/web\.md/);
+    ok(old, ['ticket', 'set', 'web-01-cite', '--json', JSON.stringify({ links: [] })], SUP);
+    fs.rmSync(path.join(old, 'docs/devteam/project/designs/web.md'));
     ok(old, ['link', 'rm', 'figma'], SUP);
     assert.equal(json(ok(old, ['settings'])).links.figma, undefined);
     assert.equal(json(ok(old, ['log', '--type', 'act', '--json'])).filter((a) => a.class === 'registry-edit').length, 7);
@@ -3173,6 +3181,26 @@ test('observe-link records a resource; orient proposes adds, edits and source-of
     assert.match(props.find((p) => p.proposal === 'conflict').command, /^ask --question 'Which is the source of truth/);
     assert.match(ok(old, ['orient']), /link proposals:\n  add/);
     assert.match(run(old, ['observe-link', '--url', 'https://x.test'], SUP).err, /--title/);
+    // F15: http is refused here as link add refuses it, so orient never proposes what the kit can't apply
+    assert.match(run(old, ['observe-link', '--url', 'http://insecure.test', '--title', 'X'], SUP).err, /--url must start with https:\/\//);
+    assert.match(run(old, ['observe-link', '--path', '../console', '--title', 'C'], SUP).err, /--path is a path inside this repo/, 'O11: said before the schema says it');
+    // O11: an add proposal's id is one link add accepts: a letter first, de-duplicated
+    const o4 = ok(old, ['observe-link', '--url', 'https://figma.test/roadmap', '--title', '2026 Roadmap'], SUP);
+    const o5 = ok(old, ['observe-link', '--url', 'https://figma.test/roadmap-2', '--title', '2026 roadmap!'], SUP);
+    const adds = json(ok(old, ['orient', '--json'])).filter((x) => x.proposal === 'add');
+    const idOf = (o) => /^link add '([^']+)'/.exec(adds.find((p) => p.observation === o).command)[1];
+    assert.equal(idOf(o4), 'link-2026-roadmap');
+    assert.equal(idOf(o5), 'link-2026-roadmap-2', 'two proposals never share an id');
+    ok(old, [...adds.find((p) => p.observation === o4).command.match(/'[^']*'|\S+/g).map((w) => w.replace(/^'|'$/g, ''))], SUP);
+    // O11: a path observation is surfaced (as a pointer for knowledge), never dropped
+    const o6 = ok(old, ['observe-link', '--path', 'docs/runbook.md', '--title', 'Runbook', '--for', 'component:web'], SUP);
+    const ptr = json(ok(old, ['orient', '--json'])).find((x) => x.observation === o6);
+    assert.equal(ptr?.proposal, 'pointer');
+    assert.match(ptr.command, /^knowledge add --kind pointer --statement 'Runbook: docs\/runbook\.md' --scope 'component:web' --evidence 'o-/);
+    // F16: a decision citing the observation dismisses its proposal, which is not proposed again
+    assert.match(ok(old, ['orient']), /dismiss one: decide --class registry-edit --refs <observation>/);
+    ok(old, ['decide', '--class', 'registry-edit', '--refs', o3, '--', 'figma.test/b is a scratch copy; the registry stays as it is'], SUP);
+    assert.ok(!json(ok(old, ['orient', '--json'])).some((x) => x.observation === o3), 'a dismissed proposal stays dismissed');
   } finally { F.done(); }
 });
 
@@ -3298,12 +3326,15 @@ test('link-unreachable for a missing checkout or a failing URL (stubbed), and li
     assert.equal(json(ok(old, ['log', '--type', 'observation', '--json'])).find((o) => o.kind === 'link-unreachable').severity, 3);
     assert.ok(fs.existsSync(path.join(old, 'docs/devteam/run/link-probes.json')));
     assert.doesNotMatch(json(ok(old, ['fleet', 'status', '--json', '--no-fetch'], SUP)).blockers.join('\n'), /files in run\/ the kit didn't make/, 'the probe file is a kit file (RUN_KNOWN)');
-    // line-pressure: three footprint refusals on one component in 14 days
+    // line-pressure counts tickets, not heads (O10): one ticket refused three times is that ticket's
     F.lines(F.STD);
-    for (const n of ['01', '02', '03']) ok(old, ['observe', '--subject', 'web', '--kind', 'footprint-refusal', '--detail', `web-${n}-x refused`, '--key', `footprint:web-${n}-x:${n}`], SUP);
+    for (const n of ['a', 'b', 'c']) ok(old, ['observe', '--subject', 'web', '--kind', 'footprint-refusal', '--detail', 'web-09-one refused', '--key', `footprint:web-09-one:${n}`, '--refs', 'web-09-one'], SUP);
+    assert.ok(!json(ok(old, ['metrics', '--json'])).findings.some((f) => f.kind === 'line-pressure'), 'one ticket, three heads: no line pressure');
+    // three tickets refused on one component in 14 days
+    for (const n of ['01', '02']) ok(old, ['observe', '--subject', 'web', '--kind', 'footprint-refusal', '--detail', `web-${n}-x refused`, '--key', `footprint:web-${n}-x:${n}`], SUP);
     const lp = json(ok(old, ['metrics', '--json'])).findings.find((f) => f.kind === 'line-pressure');
     assert.equal(lp?.subject, 'web');
-    assert.match(lp.detail, /3 footprint refusals in 14 days/);
+    assert.match(lp.detail, /footprint refusals on 3 tickets in 14 days/);
     // merge records the refusal itself, once per head
     ok(old, ['ticket', 'add', 'web-04-reach', '--json', JSON.stringify({ title: 'reach', feature: 'chores', component: 'web', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['web/**', 'api/app.rb'], done_when: ['the web suite passes'], notes: 'n' })], SUP);
     const w = path.join(old, '.worktrees', 'web-04-reach');

@@ -1852,7 +1852,7 @@ function cmdValidate() {
         else if (owners.some((o) => !mine.has(o))) err(id, `touches "${entry}" lies in ${owners.filter((o) => !mine.has(o)).join(' and ')}'s line, not ${t.component}'s (list ${owners.filter((o) => !mine.has(o)).join(', ')} in touches_components on a contract or integration ticket, or split the ticket)`);
       }
     }
-    for (const l of t.links ?? []) if (!(loadSettings().links ?? {})[l]) err(id, `links "${l}" is not in settings links`);
+    if (isActive(t) && !mergeShaFor(id)) for (const l of t.links ?? []) if (!(loadSettings().links ?? {})[l]) err(id, `links "${l}" is not in settings links`);
     for (const d of t.depends_on ?? []) {
       if (d === id) err(id, 'depends on itself');
       else if (!ts.has(d)) err(id, `depends_on "${d}" does not exist (D3)`);
@@ -4506,7 +4506,9 @@ function cmdObserveLink() {
   const by = flags.owner ? ownerWriter().by : logWriter();
   const url = flagStr('url'), p = flagStr('path');
   if (!url === !p) die('observe-link needs --url <https://…> or --path <repo path>, and --title');
+  if (url && !url.startsWith('https://')) die('--url must start with https:// (link add refuses anything else)');
   if (hasCredentials(url)) die(`--url carries credentials; ${CREDENTIALS_REFUSED}`);
+  if (p && (path.isAbsolute(p) || p.split(/[\\/]/).includes('..'))) die('--path is a path inside this repo (a sibling repo is a repo link, which the owner adds: governance-edit)');
   const title = flagStr('title') ?? die('observe-link needs --title (what it is called)');
   const scopes = flags.for !== undefined ? listFlag('for') : [];
   for (const sc of scopes) if (!scopeValid(sc, 'for')) die(`--for "${sc}" is not a scope (${SCOPE_HELP.for})`);
@@ -4683,12 +4685,31 @@ const shq = (v) => `'${String(v).replace(/'/g, "'\\''")}'`;
 function orientLinks() {
   const reg = loadSettings().links ?? {};
   const norm = (u) => String(u ?? '').replace(/\/+$/, '').toLowerCase();
-  const used = new Set(Object.values(reg).map((l) => l.source).filter(Boolean));
+  // handled: a registry entry's source, anything a decision or act cites (a dismissal is a decision
+  // that cites the observation, F16), and the evidence of knowledge it became
+  const used = new Set([...Object.values(reg).map((l) => l.source), ...[...logObjects('decision'), ...logObjects('act')].flatMap((a) => a.refs ?? []), ...logObjects('knowledge').flatMap((k) => k.evidence ?? [])].filter(Boolean));
   const title = (x) => String(x ?? '');
+  // an id link add accepts (LINK_ID, not reserved), unique among the registry and this run's proposals (O11)
+  const taken = new Set([...Object.keys(reg), ...RESERVED_LINKS]);
+  const newId = (t) => {
+    let base = slug(t).replace(/-+$/, '');
+    if (!/^[a-z]/.test(base)) base = `link-${base}`;
+    if (!LINK_ID.test(base)) base = 'link';
+    let id = base;
+    for (let n = 2; taken.has(id); n++) id = `${base}-${n}`;
+    taken.add(id);
+    return id;
+  };
   const overlap = (a, b) => { const x = asList(a).length ? asList(a) : ['all'], y = asList(b).length ? asList(b) : ['all']; return x.includes('all') || y.includes('all') || x.some((s) => y.includes(s)); };
   const res = [];
-  for (const o of logObjects('observation').filter((x) => x.kind === 'link' && x.link?.url && !used.has(x.id)).sort(byTime)) {
+  for (const o of logObjects('observation').filter((x) => x.kind === 'link' && (x.link?.url || x.link?.path) && !used.has(x.id)).sort(byTime)) {
     const l = o.link;
+    // a file in this repo: no v1 link kind holds one, so it becomes a pointer in knowledge (O11)
+    if (!l.url) {
+      const scope = asList(l.for).find((sc) => scopeValid(sc, 'knowledge')) ?? 'project';
+      res.push({ key: `link-proposal:${l.path}`, proposal: 'pointer', observation: o.id, command: `knowledge add --kind pointer --statement ${shq(`${l.title}: ${l.path}${l.notes ? ` (${l.notes})` : ''}`)} --scope ${shq(scope)} --evidence ${shq(o.id)}` });
+      continue;
+    }
     const same = Object.entries(reg).find(([id0, r]) => { const u = LINK_KINDS[r.kind]?.locator(r, id0).url; return !!u && norm(u) === norm(l.url); });
     if (same) {
       const [id, r] = same;
@@ -4700,7 +4721,8 @@ function orientLinks() {
     }
     const rival = Object.entries(reg).find(([id0, r]) => !!LINK_KINDS[r.kind]?.locator(r, id0).url && title(r.title).toLowerCase() === l.title.toLowerCase() && overlap(r.for, l.for));
     if (rival) { res.push({ key: `link-proposal:${rival[0]}`, proposal: 'conflict', rival: rival[0], observation: o.id, command: `ask --question ${shq(`Which is the source of truth for ${l.title}: ${LINK_KINDS[rival[1].kind].locator(rival[1], rival[0]).url} or ${l.url}?`)} --links ${shq(JSON.stringify([{ title: title(rival[1].title), link: rival[0] }, { title: l.title, url: l.url }]))} --evidence ${shq(o.id)}` }); continue; }
-    res.push({ key: `link-proposal:${slug(l.title)}`, proposal: 'add', observation: o.id, command: `link add ${shq(slug(l.title))} --kind url --url ${shq(l.url)} --title ${shq(l.title)}${asList(l.for).length ? ` --for ${asList(l.for).map(shq).join(' ')}` : ''}${l.notes ? ` --notes ${shq(l.notes)}` : ''} --source ${shq(o.id)}` });
+    const nid = newId(l.title);
+    res.push({ key: `link-proposal:${nid}`, proposal: 'add', observation: o.id, command: `link add ${shq(nid)} --kind url --url ${shq(l.url)} --title ${shq(l.title)}${asList(l.for).length ? ` --for ${asList(l.for).map(shq).join(' ')}` : ''}${l.notes ? ` --notes ${shq(l.notes)}` : ''} --source ${shq(o.id)}` });
   }
   return res;
 }
@@ -4710,7 +4732,7 @@ function cmdOrient() {
   if (flags.json) return json([...cl, ...lk]);
   if (!cl.length && !lk.length) return out('nothing recurring that is unexplained');
   for (const c of cl) out(`${c.key}  x${c.count}  valence ${c.valence}\n  latest: ${c.latest}\n  evidence: ${c.ids.join(' ')}`);
-  if (lk.length) { out('link proposals:'); for (const p of lk) out(`  ${p.proposal} (${p.observation}): ${p.command}`); }
+  if (lk.length) { out('link proposals:'); for (const p of lk) out(`  ${p.proposal} (${p.observation}): ${p.command}`); out('  (dismiss one: decide --class registry-edit --refs <observation> -- "<why the registry stays as it is>")'); }
 }
 
 // ===== 9. goals, roadmap, retros, chore worktrees =====
@@ -5953,9 +5975,10 @@ function collectMetrics(since) {
       const refusals = groupBy(logObjects('observation').filter((o) => o.kind === 'footprint-refusal' && Date.parse(o.created_at) >= since14), (o) => o.subject);
       const shared = Object.entries(settings.components).filter(([, c]) => c?.shared).map(([n]) => n);
       for (const c of [...new Set([...Object.keys(refusals), ...shared])]) {
-        const n = refusals[c]?.length ?? 0;
+        // tickets, not heads or dry runs: one ticket refused three times is that ticket's (O10)
+        const n = new Set((refusals[c] ?? []).map((o) => o.refs?.[0] ?? String(o.source_key ?? '').split(':')[1] ?? o.id)).size;
         const planned = shared.includes(c) ? [...ts.values()].filter((t) => Date.parse(t.created_at) >= since14 && (t.component === c || (t.touches_components ?? []).includes(c))).length : 0;
-        if (n >= 3 || planned >= 3) add('medium', 'line-pressure', c, [n >= 3 && `${n} footprint refusals in 14 days`, planned >= 3 && `${planned} tickets planned against the shared component in 14 days`].filter(Boolean).join('; '), 'the line may be in the wrong place: move it in a chore PR (settings components), or plan a contract ticket that settles the shared part');
+        if (n >= 3 || planned >= 3) add('medium', 'line-pressure', c, [n >= 3 && `footprint refusals on ${n} tickets in 14 days`, planned >= 3 && `${planned} tickets planned against the shared component in 14 days`].filter(Boolean).join('; '), 'the line may be in the wrong place: move it in a chore PR (settings components), or plan a contract ticket that settles the shared part');
       }
     }
   }
@@ -7497,6 +7520,17 @@ function cmdLink() {
   const K = LINK_KINDS[kind] ?? die(`--kind is one of: ${Object.keys(LINK_KINDS).join(', ')}`);
   if (sub === 'set' && field === 'kind') die('a link never changes kind in place: link rm it and link add it again (a kind flip is a removal and an addition)');
   if (sub === 'set' && field && !linkFields(kind).includes(field)) die(`"${field}" is not a field of a ${kind} link (fields: ${linkFields(kind).join(', ')})`);
+  // a link still cited can't go: validate would fail for every citer, and so every merge gate (O9)
+  if (sub === 'rm') {
+    const live = (t) => isActive(t) && !mergeShaFor(t.id);
+    const dd = path.join(projectDir, 'designs');
+    const citers = [
+      ...[...tickets().values()].filter((t) => live(t) && (t.links ?? []).includes(id)).map((t) => `ticket ${t.id}`),
+      ...[...features().values()].filter((f) => (f.links ?? []).includes(id)).map((f) => `feature ${f.id}`),
+      ...(fs.existsSync(dd) ? fs.readdirSync(dd).filter((x) => x.endsWith('.md') && new RegExp(`(?:^|[\\s(\`[])link:${id}(?![a-z0-9-])`).test(readText(path.join(dd, x)) ?? '')).map((x) => `designs/${x}`) : []),
+    ];
+    if (citers.length) die(`${id} is cited by ${citers.join(', ')}; take it out of their links (ticket set, feature set) and their text first`);
+  }
   if (K.ownedByOwner) die(`a ${kind} link is the owner's (governance-edit): put the entry in settings.md on a chore branch and land it with merge --chore <slug> --approved <qid> (an answered governance-edit question)`);
   const source = flagStr('source');
   if (source && !logGet(source)) die(`--source ${source}: no such log entry`);
