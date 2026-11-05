@@ -4471,3 +4471,66 @@ test('check-pr --repo checks a sibling PR in that repo, from any checkout (the f
     } finally { fs.renameSync(`${F.consoleOrigin}-away`, F.consoleOrigin); }
   } finally { F.done(); }
 });
+
+test('merge runs a sibling ticket\'s gates in its repo and lands it on that repo\'s main; a repo with no gates is refused (M3)', () => {
+  const F = multiFixture('sibling-merge');
+  const { old, g, okIn, runIn, ticket } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  try {
+    // home's own gates are path-filtered; companion has none, and inherits none
+    F.lines({ ...F.STD, console: { link: 'console' }, companion: { link: 'companion' } }, { gates: { web: { cmd: 'true', paths: ['web/**'] } } });
+    const land = (id, repoDir, branch, files) => {
+      ticket(id, { touches: Object.keys(files).map((f) => `${f.split('/')[0]}/**`) });
+      const w = path.join(old, '.worktrees', id);
+      g(['worktree', 'add', '-q', '-b', `ticket/${id}`, w, `origin/${branch}`], repoDir);
+      const tdir = path.join(w, `docs/devteam/project/tickets/${id}`);
+      write(path.join(tdir, 'spec.md'), '# spec\n');
+      write(path.join(tdir, 'plan.md'), '# plan\n\n## TL;DR\n\n- x\n');
+      write(path.join(tdir, 'verification.md'), '| Done-when | Command | Result |\n|---|---|---|\n| s | t | pass |\n');
+      for (const [f, text] of Object.entries(files)) write(path.join(w, f), text);
+      g(['add', '-A'], w); g(['commit', '-qm', `${id}: work`], w);
+      write(path.join(tdir, 'reviews/final-1.md'), review('reviewer-b', g(['rev-parse', 'HEAD'], w)));
+      g(['add', '-A'], w); g(['commit', '-qm', 'review'], w); g(['push', '-q', 'origin', `ticket/${id}`], w);
+      okIn(old, ['act', '--class', 'approve-spec', '--refs', id, '--', 'ok'], SUP);
+      okIn(old, ['act', '--class', 'approve-plan', '--refs', id, '--', 'ok'], SUP);
+      write(path.join(old, `docs/devteam/run/pr/ticket/${id}.md`), `# ${id}: work\n\n## One-way doors\n\nNone.\n`);
+      return g(['rev-parse', 'HEAD'], w);
+    };
+    const sha = land('console-01-a', F.console, 'trunk', { 'src/main.js': 'changed\n' });
+    // a push to console's main from another clone since console's checkout fetched: merge fetches it first
+    const other = path.join(F.base, 'console-other');
+    g(['clone', '-q', F.consoleOrigin, other], F.base);
+    write(path.join(other, 'package.json'), '{"moved":true}\n');
+    g(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qam', 'elsewhere'], other); g(['push', '-q', 'origin', 'trunk'], other);
+    const moved = g(['rev-parse', 'HEAD'], other);
+    assert.match(okIn(old, ['merge', 'console-01-a'], SUP), /merged ticket\/console-01-a at \w{12} in console/);
+    g(['fetch', '-q', 'origin'], F.console);
+    assert.equal(g(['rev-parse', 'origin/trunk^2'], F.console), sha, "console's main merged the verified head");
+    assert.equal(g(['rev-parse', 'origin/trunk^1'], F.console), moved, 'onto the main its origin has now');
+    const gate = json(okIn(old, ['log', '--type', 'gate', '--json'])).find((x) => x.sha === sha);
+    assert.deepEqual([gate.gate, gate.ok, gate.repo], ['test', true, 'console'], "console's gate, in home's log, naming its repo");
+    assert.ok(!json(okIn(old, ['log', '--type', 'gate', '--json'])).some((x) => x.gate === 'web'), "home's gates never run for console");
+    const act = json(okIn(old, ['log', '--type', 'act', '--json'])).find((a) => a.class === 'merge-word' && a.refs.includes('console-01-a'));
+    assert.equal(act.repo, 'console');
+    assert.match(okIn(old, ['status']), /merged +console-01-a/, "status reads console's main");
+    // M3
+    land('companion-02-b', F.companion, 'main', { 'app/index.js': 'changed\n' });
+    const r = runIn(old, ['merge', 'companion-02-b', '--dry-run'], SUP);
+    assert.notEqual(r.status, 0);
+    assert.match(r.out, /no gates in companion's settings \(links\.companion\.gates\); pass --no-gates/);
+    // B1 at merge: a console-ui ticket that edits console-build's file is refused, by home's lines
+    F.lines({ ...F.STD, 'console-ui': { link: 'console', owns: ['src/**'] }, 'console-build': { link: 'console', owns: ['package.json', '.gitignore'] }, companion: { link: 'companion' } }, { gates: { web: { cmd: 'true', paths: ['web/**'] } } });
+    ticket('console-ui-03-c', { component: 'console-ui', touches: ['src/**', 'package.json'] });
+    const uw = path.join(old, '.worktrees', 'console-ui-03-c');
+    g(['worktree', 'add', '-q', '-b', 'ticket/console-ui-03-c', uw, 'origin/trunk'], F.console);
+    write(path.join(uw, 'package.json'), '{"name":"edited by the ui"}\n');
+    g(['commit', '-qam', 'console-ui-03-c: x'], uw); g(['push', '-q', 'origin', 'ticket/console-ui-03-c'], uw);
+    write(path.join(old, 'docs/devteam/run/pr/ticket/console-ui-03-c.md'), '# console-ui-03-c: x\n\n## One-way doors\n\nNone.\n');
+    assert.match(runIn(old, ['merge', 'console-ui-03-c', '--dry-run'], SUP).out, /changes files outside the line of console-ui: package\.json/, 'B1: merge refuses it too');
+    // the fetch of a sibling's main fails: refused, never judged against a stale one
+    fs.renameSync(F.consoleOrigin, `${F.consoleOrigin}-away`);
+    try {
+      assert.match(runIn(old, ['merge', 'console-ui-03-c', '--dry-run'], SUP).err, /could not fetch origin trunk in console/);
+    } finally { fs.renameSync(`${F.consoleOrigin}-away`, F.consoleOrigin); }
+  } finally { F.done(); }
+});

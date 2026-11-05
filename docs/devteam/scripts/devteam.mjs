@@ -3286,9 +3286,16 @@ function cmdMerge() {
   const chore = flagStr('chore') !== undefined ? choreSlug(flagStr('chore')) : undefined;
   const dry = !!flags['dry-run'];
   const branch = plan ? `plan/${plan}` : chore ? `chore-${chore}` : id ? `ticket/${id}` : die('usage: merge <ticket-id> | merge --plan <feature> | merge --chore <slug>   [--approved <qid>] [--no-gates] [--dry-run [--title t] [--body-file f]]');
-  const viaGit = loadSettings().forge === 'git';
+  // A ticket merges in its own repo (spec §5.4): its PR, gates, forge and merge method; plans and
+  // chores are always home's. For home R is today's functions and settings.
+  const R = id && tickets().has(id) ? repoOfTicket(tickets().get(id)) : repo('home');
+  const S = R.settings;
+  const onR = R.name === 'home' ? {} : { repo: R.name };
+  const inR = R.name === 'home' ? '' : ` in ${R.name}`;
+  const viaGit = S.forge === 'git';
   if (viaGit && !flagStr('title') && !flagStr('body-file')) {
-    // The PR, with no forge: run/pr/<branch>.md, a '# <title>' line then the body (worker.md §8).
+    // The PR, with no forge: run/pr/<branch>.md in home's run/ (ticket ids are unique across
+    // repos), a '# <title>' line then the body (worker.md §8).
     const f = path.join(runDir, 'pr', `${branch}.md`);
     if (fs.existsSync(f)) {
       const first = fs.readFileSync(f, 'utf8').split('\n')[0];
@@ -3296,15 +3303,16 @@ function cmdMerge() {
     }
   }
   if (viaGit && !dry && !(flagStr('title') && flagStr('body-file'))) die(`forge is git: merge needs the PR text, in ${path.relative(mainRoot, path.join(runDir, 'pr', `${branch}.md`))} ('# <title>' then the body) or as --title and --body-file`);
-  const prJson = viaGit ? null : sh('gh', ['pr', 'view', branch, '--json', 'number,headRefOid,title,body,isDraft,mergeStateStatus,url,statusCheckRollup']);
-  if (prJson === null && !dry && !viaGit) die(`no open PR from ${branch} (gh pr view failed; with no forge CLI set forge: "git")`);
-  git(['fetch', '--quiet', 'origin', branch]);
-  fetchMain();
-  const pr = prJson !== null ? JSON.parse(prJson) : { headRefOid: resolveCommit(`origin/${branch}`) ?? resolveCommit(branch) ?? die(`no branch ${branch}`), title: flagStr('title'), body: flagStr('body-file') ? fs.readFileSync(flagStr('body-file'), 'utf8') : undefined };
+  const prJson = viaGit ? null : R.gh(['pr', 'view', branch, '--json', 'number,headRefOid,title,body,isDraft,mergeStateStatus,url,statusCheckRollup']);
+  if (prJson === null && !dry && !viaGit) die(`no open PR from ${branch}${inR} (gh pr view failed; with no forge CLI set forge: "git")`);
+  R.git(['fetch', '--quiet', 'origin', branch]);
+  // main as each origin has it now: home's (the settings) and the ticket's repo's (what it lands on)
+  fetchMain(R);
+  const pr = prJson !== null ? JSON.parse(prJson) : { headRefOid: R.resolveCommit(`origin/${branch}`) ?? R.resolveCommit(branch) ?? die(`no branch ${branch}${inR}`), title: flagStr('title'), body: flagStr('body-file') ? fs.readFileSync(flagStr('body-file'), 'utf8') : undefined };
   if (pr.isDraft) die(`${pr.url} is a draft`);
   const sha = pr.headRefOid;
-  if (!resolveCommit(sha)) die(`cannot find ${sha} locally after fetching ${branch}`);
-  const fails = checkPr({ headRef: branch, sha, title: pr.title, body: pr.body });
+  if (!R.resolveCommit(sha)) die(`cannot find ${sha} locally after fetching ${branch}${inR}`);
+  const fails = checkPr({ headRef: branch, sha, title: pr.title, body: pr.body, repo: R });
   // A refused footprint is a sign about the line (line-pressure, spec §7): one observation per head.
   if (id && fails.some((x) => x.startsWith(OFF_LINE))) {
     const key = `footprint:${id}:${sha}`;
@@ -3328,7 +3336,7 @@ function cmdMerge() {
   // fails, whether or not branch protection marks them required. The owner can name checks to
   // skip (settings ignored_checks, gate-change).
   {
-    const ignored = new Set(loadSettings().ignored_checks ?? []);
+    const ignored = new Set(S.ignored_checks ?? []);
     const pending = [], failing = [];
     for (const c of pr.statusCheckRollup ?? []) {
       const name = c.name ?? c.context ?? '?';
@@ -3344,8 +3352,9 @@ function cmdMerge() {
   // (classes governance-edit, process-edit, gate-change); project/ files are the supervisor's.
   let approved = flagStr('approved') ?? null;
   let standing = null;
-  // Owner-only settings, on every kind of PR (a ticket, a plan or a chore).
-  {
+  // Owner-only settings, on every kind of PR (a ticket, a plan or a chore) in home, where
+  // settings.md is: another repo's PR can't change it.
+  if (R.name === 'home') {
     const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
     const classed = base ? ownerSettingsChanged(base, sha) : [];
     const changed = classed?.filter((c) => !SUPERVISOR_LINK_CLASSES.includes(c.cls)) ?? null;
@@ -3392,25 +3401,26 @@ function cmdMerge() {
     const landing = prior.length === 1 && prior[0].class === av.class && (prior[0].refs ?? []).includes(target);
     if (prior.length && !landing) fails.push(`${approved} already approved ${declared.length ? `an act for ${target}` : 'an act'}; ask again for this one`);
   }
-  // Gates: the project's own commands, at the exact head, in a detached worktree.
-  const gates = Object.entries(loadSettings().gates ?? {});
-  if (!gates.length && !flags['no-gates'] && !chore) fails.push('no gates in settings (gates: {name: command}); pass --no-gates to merge without running any');
+  // Gates: the repo's own commands (never inherited, spec §3.1), at the exact head, in a detached
+  // worktree of that repo seeded from that repo's settings.
+  const gates = Object.entries(S.gates ?? {});
+  if (!gates.length && !flags['no-gates'] && !chore) fails.push(R.name === 'home' ? 'no gates in settings (gates: {name: command}); pass --no-gates to merge without running any' : `no gates in ${R.name}'s settings (links.${R.name}.gates); pass --no-gates to merge without running any`);
   if (!fails.length && gates.length && !chore && !flags['no-gates']) {
     // A gate with `paths` runs only when the PR changes a file matching one of them (a monorepo's
     // per-app gates); a gate without runs on every PR.
-    const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
-    const changed = base ? changedFiles(base, sha) : null;
+    const base = R.mainRef() ? R.git(['merge-base', R.mainRef(), sha]) : null;
+    const changed = base ? R.changedFiles(base, sha) : null;
     const applies = ([, spec]) => typeof spec === 'string' || !spec.paths || !changed || changed.some((f) => spec.paths.some((g) => pathMatches(g, f)));
     const skipped = gates.filter((g) => !applies(g)).map(([n]) => n);
     if (skipped.length) out(`gates not applicable to this PR: ${skipped.join(', ')}`);
-    const wt = detachedWorktree(sha, `merge-${slug(branch)}`);
+    const wt = detachedWorktree(sha, `merge-${slug(branch)}`, R);
     try {
       for (const [name, spec] of gates.filter(applies)) {
         const cmd = typeof spec === 'string' ? spec : spec.cmd;
         const started = Date.now();
         let ok = true;
         try {
-          execFileSync('sh', ['-c', cmd], { cwd: wt, stdio: 'inherit', env: gateEnv(!plan && !chore ? id : null) });
+          execFileSync('sh', ['-c', cmd], { cwd: wt, stdio: 'inherit', env: gateEnv(!plan && !chore ? id : null, R) });
         } catch {
           ok = false;
         }
@@ -3421,42 +3431,43 @@ function cmdMerge() {
         // gate's fail rate counts only failures that were the PR's.
         let preexisting = false;
         if (!ok && spec.mode === 'ratchet' && base) {
-          const bwt = detachedWorktree(base, `base-${slug(branch)}`);
+          const bwt = detachedWorktree(base, `base-${slug(branch)}`, R);
           let baseOk = true;
-          try { execFileSync('sh', ['-c', cmd], { cwd: bwt, stdio: 'ignore', env: gateEnv(!plan && !chore ? id : null) }); } catch { baseOk = false; } finally { git(['worktree', 'remove', '--force', bwt], mainRoot); }
+          try { execFileSync('sh', ['-c', cmd], { cwd: bwt, stdio: 'ignore', env: gateEnv(!plan && !chore ? id : null, R) }); } catch { baseOk = false; } finally { R.git(['worktree', 'remove', '--force', bwt], R.root); }
           preexisting = !baseOk;
         }
-        appendLog({ type: 'gate', gate: name, ok, ms, sha, tests_total: tests.length, tests: keepTests(tests), preexisting: preexisting || undefined }, 'supervisor');
+        // the gate line lands in home's live log, naming the repo it ran in when not home
+        appendLog({ type: 'gate', gate: name, ok, ms, sha, tests_total: tests.length, tests: keepTests(tests), preexisting: preexisting || undefined, ...onR }, 'supervisor');
         if (preexisting) { warn(`gate ${name} fails at the merge base ${base.slice(0, 12)} too: pre-existing, allowed by ratchet mode`); continue; }
         if (!ok) fails.push(`gate ${name} failed at ${sha.slice(0, 12)}`);
       }
     } finally {
-      git(['worktree', 'remove', '--force', wt], mainRoot);
+      R.git(['worktree', 'remove', '--force', wt], R.root);
     }
   }
   if (fails.length) report(fails, '');
-  if (dry) return out(`ok: ${branch} at ${sha.slice(0, 12)} would merge`);
-  const mainBranch = loadSettings().main_branch;
+  if (dry) return out(`ok: ${branch} at ${sha.slice(0, 12)} would merge${inR}`);
+  const mainBranch = S.main_branch;
   if (viaGit) {
     // Merge the exact verified sha (never the branch name, which may have moved) onto origin's main.
-    git(['fetch', '--quiet', 'origin', mainBranch]);
-    const wt = detachedWorktree(`origin/${mainBranch}`, `land-${slug(branch)}`);
+    R.git(['fetch', '--quiet', 'origin', mainBranch]);
+    const wt = detachedWorktree(`origin/${mainBranch}`, `land-${slug(branch)}`, R);
     try {
-      gitOrDie(['merge', '--no-ff', '--quiet', '-m', `${pr.title}\n\n${(pr.body ?? '').trim()}\n\nMerged ${branch} at ${sha}`, sha], wt);
-      if (git(['push', '--quiet', 'origin', `HEAD:refs/heads/${mainBranch}`], wt) === null) die(`push to ${mainBranch} refused (did main move?); verify from the start`);
+      R.gitOrDie(['merge', '--no-ff', '--quiet', '-m', `${pr.title}\n\n${(pr.body ?? '').trim()}\n\nMerged ${branch} at ${sha}`, sha], wt);
+      if (R.git(['push', '--quiet', 'origin', `HEAD:refs/heads/${mainBranch}`], wt) === null) die(`push to ${mainBranch}${inR} refused (did main move?); verify from the start`);
     } finally {
-      git(['worktree', 'remove', '--force', wt], mainRoot);
+      R.git(['worktree', 'remove', '--force', wt], R.root);
     }
   } else {
-    const merged = sh('gh', ['pr', 'merge', String(pr.number), `--${loadSettings().merge_method}`, '--match-head-commit', sha]);
+    const merged = R.gh(['pr', 'merge', String(pr.number), `--${S.merge_method}`, '--match-head-commit', sha]);
     if (merged === null) die(`gh pr merge refused (did the head move?); verify from the start`);
   }
-  git(['fetch', '--quiet', 'origin', mainBranch]);
-  mainLogCache = undefined;
-  mergeShaCache.clear();
+  R.git(['fetch', '--quiet', 'origin', mainBranch]);
+  // home resets exactly what it reset before (G1); another repo resets all of its own caches
+  if (R.name === 'home') { mainLogCache = undefined; mergeShaCache.clear(); } else R.resetCaches();
   const cls = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
-  const act = appendLog({ type: 'act', decision: citing(), class: cls, what: `merged ${branch} at ${sha}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag}, verbatim)` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [], reversible: false, approved_by: approved ?? standing?.rule.id ?? undefined }, 'supervisor');
-  out(`merged ${branch} at ${sha.slice(0, 12)} (${act.id})`);
+  const act = appendLog({ type: 'act', decision: citing(), class: cls, what: `merged ${branch} at ${sha}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag}, verbatim)` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [], reversible: false, approved_by: approved ?? standing?.rule.id ?? undefined, ...onR }, 'supervisor');
+  out(`merged ${branch} at ${sha.slice(0, 12)}${inR} (${act.id})`);
 }
 // ===== 7. trust =====
 

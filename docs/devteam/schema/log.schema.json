@@ -690,6 +690,12 @@
             "type": "boolean",
             "description": "A ratchet gate that failed here and at the merge base too: pre-existing debt, allowed; not counted in the gate's fail rate.",
             "x-tip": "It failed on main too: existing debt, allowed, not counted against the check."
+          },
+          "repo": {
+            "description": "The repo link the gate ran in, for a ticket outside home (absent: home).",
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+            "x-tip": "The repo this check ran in, when not this one."
           }
         },
         "additionalProperties": false,
@@ -1684,6 +1690,12 @@
             "type": "string",
             "pattern": "^sha256:[0-9a-f]{64}$",
             "x-tip": "The link entry this rm act removed."
+          },
+          "repo": {
+            "description": "The repo link the act was about (a merge, a release), when not home.",
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+            "x-tip": "The repo this was in, when not this one."
           }
         },
         "additionalProperties": false,
