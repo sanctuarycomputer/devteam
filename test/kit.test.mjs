@@ -4114,7 +4114,8 @@ test('link probes: four at a time inside a tick budget, never a prompt, and a pa
     // 401/403/405 is a page behind auth: a low note, never a high finding that wakes wait
     edit((j) => { j.links = { locked: url('locked', 'auth'), gone: url('gone', 'gone'), console: { kind: 'repo', title: 'Console', remote: 'usbclub/console', path: co } }; });
     g(['commit', '-qam', 'links 2'], old); g(['push', '-q', 'origin', 'main'], old);
-    tick({ PATH: `${shim}${path.delimiter}${process.env.PATH}` });
+    // these probes are all quick: a long budget only stands in for a loaded machine
+    tick({ PATH: `${shim}${path.delimiter}${process.env.PATH}`, DEVTEAM_PROBE_BUDGET_MS: '120000' });
     const fs2 = json(ok(old, ['metrics', '--json'])).findings;
     assert.equal(fs2.find((f) => f.subject === 'locked')?.kind, 'link-behind-auth');
     assert.equal(fs2.find((f) => f.subject === 'locked').severity, 'low');
