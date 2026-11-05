@@ -146,10 +146,11 @@ function tmuxSession({ save = false } = {}) {
   const file = path.join(runDir, 'tmux-session');
   const saved = readText(file)?.trim();
   if (saved) return (tmuxSessionName = saved);
-  // Ours means a window named after one of this project's tickets or planners (plan-<feature>),
-  // from the log alone: liveSessions() lists windows, which asks this function, so it can't be used.
+  // Ours: a window named after one of this project's tickets, or after a worktree this checkout
+  // holds (a worker's ticket id, a planner's plan-<feature>, whose feature may not be in the log
+  // yet). Not liveSessions(): it lists windows, which asks this function.
   const legacy = (sh('tmux', ['list-windows', '-t', '=devteam', '-F', '#W']) ?? '').split('\n').filter(Boolean);
-  const ours = (w) => tickets().has(w) || (w.startsWith('plan-') && features().has(w.slice('plan-'.length)));
+  const ours = (w) => tickets().has(w) || (/^[a-z0-9][a-z0-9-]*$/.test(w) && fs.existsSync(path.join(mainRoot, '.worktrees', w)));
   const name = legacy.some(ours) ? 'devteam' : `devteam-${slug(s.project ?? path.basename(mainRoot))}`;
   if (save) { fs.mkdirSync(runDir, { recursive: true }); fs.writeFileSync(file, `${name}\n`); }
   return (tmuxSessionName = name);

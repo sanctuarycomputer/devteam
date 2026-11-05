@@ -1213,7 +1213,7 @@ test('devteam kit', async (t) => {
       const sf = path.join(tmp, 'screen.txt');
       write(sf, screen);
       write(sent, JSON.stringify({ text, at: new Date(Date.now() - agoSec * 1000).toISOString() }));
-      spawnSync('tmux', ['new-session', '-d', '-x', '80', '-y', '24', '-s', 'devteam', '-n', 'plan-enter', `${process.execPath} ${agent} ${sf} ${keys}`]);
+      spawnSync('tmux', ['new-session', '-d', '-x', '80', '-y', '24', '-s', 'devteam-demo', '-n', 'plan-enter', `${process.execPath} ${agent} ${sf} ${keys}`]);
       for (let i = 0; i < 30 && !/approved|devteam|Done/.test(spawnSync('tmux', ['capture-pane', '-p', '-t', '=devteam-demo:plan-enter'], { encoding: 'utf8' }).stdout ?? ''); i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
       must(['metrics', '--json'], { role: 'sup' });
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
@@ -1225,7 +1225,7 @@ test('devteam kit', async (t) => {
     fs.rmSync(keys, { force: true });
     write(path.join(tmp, 'screen.txt'), stuck);
     write(sent, JSON.stringify({ text, at: new Date(Date.now() - 3600 * 1000).toISOString() }));
-    spawnSync('tmux', ['new-session', '-d', '-x', '80', '-y', '24', '-s', 'devteam', '-n', 'plan-enter', `${process.execPath} ${agent} ${path.join(tmp, 'screen.txt')} ${keys}`]);
+    spawnSync('tmux', ['new-session', '-d', '-x', '80', '-y', '24', '-s', 'devteam-demo', '-n', 'plan-enter', `${process.execPath} ${agent} ${path.join(tmp, 'screen.txt')} ${keys}`]);
     for (let i = 0; i < 30 && !/approved|devteam/.test(spawnSync('tmux', ['capture-pane', '-p', '-t', '=devteam-demo:plan-enter'], { encoding: 'utf8' }).stdout ?? ''); i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
     must(['dashboard-data']);
     must(['metrics', '--json']);
