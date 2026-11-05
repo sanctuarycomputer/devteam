@@ -3085,6 +3085,13 @@ test('a fetch of main that fails refuses merge and check-pr, never judges the st
     const c = run(old, ['check-pr', '--head-ref', 'chore-tick', '--sha', sha, '--title', 'chore-tick: x', '--body-file', body]);
     assert.notEqual(c.status, 0, c.out);
     assert.match(c.err, refused, 'check-pr');
+    // a checkout with no origin at all has nothing to fetch from: it judges its own main
+    g(['remote', 'remove', 'origin'], old);
+    const c2 = run(old, ['check-pr', '--head-ref', 'chore-tick', '--sha', sha, '--title', 'chore-tick: x', '--body-file', body]);
+    assert.doesNotMatch(c2.err, /could not fetch/, `no origin: check-pr skips the fetch: ${c2.err}`);
+    assert.equal(c2.status, 0, `no origin: check-pr judges the local main: ${c2.out}${c2.err}`);
+    const d2 = run(old, ['merge', '--chore', 'tick', '--dry-run'], SUP);
+    assert.doesNotMatch(d2.err, /could not fetch/, `no origin: merge --dry-run skips the fetch: ${d2.err}`);
   } finally { F.done(); }
 });
 
