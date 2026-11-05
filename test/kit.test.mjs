@@ -23,6 +23,10 @@ const line = (o) => `${JSON.stringify({ v: 1, ...o })}\n`;
 process.env.TMUX_TMPDIR = fs.mkdtempSync(path.join(os.tmpdir(), 'dt-tmux-'));
 delete process.env.TMUX;
 delete process.env.TMUX_PANE;
+// Dashboards started by tests never use the machine's real ports or become its hub: the hub and
+// the instance block move to ports the tests own.
+process.env.DEVTEAM_HUB_PORT = '47320';
+process.env.DEVTEAM_PORT_BASE = '47321';
 const hasTmux = spawnSync('tmux', ['-V']).status === 0;
 // A port the OS says is free: a random one in a range can land on a machine's own listener (macOS's
 // AirPlay receiver holds 5000 and answers 403), which then passes the test's startup probe.
@@ -2650,3 +2654,53 @@ test('fleet drain: in-flight work finishes, nothing new starts, and a drained fl
     F.done();
   }
 });
+
+// A fresh project of its own, for tests that need more than one instance on the machine.
+function bareProject(base, name) {
+  const r = path.join(base, name);
+  fs.mkdirSync(r);
+  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: r });
+  fs.cpSync(kit, path.join(r, 'docs', 'devteam'), { recursive: true, filter: (p) => !/[\\/](project|run)([\\/]|$)/.test(p.slice(kit.length)) });
+  const i = spawnSync(process.execPath, [path.join(r, 'docs/devteam/scripts/devteam.mjs'), 'init', '--name', name], { cwd: r, encoding: 'utf8' });
+  assert.equal(i.status, 0, i.stderr);
+  return r;
+}
+function startDashboard(root, env, args = []) {
+  const p = spawn(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), 'dashboard', ...args], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let o = '';
+  p.stdout.on('data', (b) => { o += b; });
+  p.stderr.on('data', (b) => { o += b; });
+  return { p, out: () => o, stop: () => new Promise((r) => { if (p.exitCode !== null) return r(); p.on('close', r); p.kill(); }) };
+}
+async function until(f, what = 'the condition') {
+  for (let i = 0; i < 300; i++) { const v = await f(); if (v) return v; await new Promise((r) => setTimeout(r, 100)); }
+  assert.fail(`timed out waiting for ${what}`);
+}
+
+test('dashboard ports: saved and reused, +1 from the highest instance, held ports skipped, pinned outside the block warned', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-ports-'));
+  const env = { ...process.env, DEVTEAM_HUB_PORT: '47390', DEVTEAM_PORT_BASE: '47391' };
+  const blocker = net.createServer().listen(47392, '127.0.0.1');
+  try {
+    const A = bareProject(base, 'alpha');
+    const B = bareProject(base, 'beta');
+    const a = startDashboard(A, env);
+    try {
+      await until(() => /dashboard on http:\/\/127\.0\.0\.1:47391/.test(a.out()), "alpha's dashboard on 47391");
+      assert.equal(fs.readFileSync(path.join(A, 'docs/devteam/run/dashboard-port'), 'utf8').trim(), '47391');
+      const b = startDashboard(B, env);
+      try {
+        // 47392 is held by something that isn't devteam, so the one after alpha's 47391 is 47393
+        await until(() => /dashboard on http:\/\/127\.0\.0\.1:47393/.test(b.out()), "beta's dashboard on 47393");
+      } finally { await b.stop(); }
+    } finally { await a.stop(); }
+    const again = startDashboard(A, env);
+    try { await until(() => /127\.0\.0\.1:47391/.test(again.out()), 'alpha back on its saved port'); } finally { await again.stop(); }
+    const pinned = startDashboard(A, env, ['--port', String(await freePort())]);
+    try { await until(() => /outside 47391-47415: the hub won't list it/.test(pinned.out()), 'the warning for a pinned port outside the block'); } finally { await pinned.stop(); }
+  } finally {
+    blocker.close();
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+

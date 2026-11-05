@@ -16,6 +16,7 @@ import crypto from 'node:crypto';
 import os from 'node:os';
 import fs from 'node:fs';
 import http from 'node:http';
+import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -234,7 +235,7 @@ const SETTINGS_DEFAULTS = {
   // `chore start`, after worktree_files are copied (install dependencies, link env files). Empty for none.
   worktree_setup: '',
   worker_denied_commands: ['gh pr merge*', 'gh api*', 'git push*main*', 'git push*--force*', 'git push*-f *', 'git push*+*'],
-  dashboard_port: 4321,
+  dashboard_port: null,
   upstream_repo: 'sanctuarycomputer/devteam',
   upstream_base: null,
   upstream_check_hours: 24,
@@ -5327,10 +5328,55 @@ function dashboardLogger() {
   try { if (fs.statSync(file).size > 1024 * 1024) fs.renameSync(file, `${file}.1`); } catch {}
   return (msg) => { try { fs.mkdirSync(runDir, { recursive: true }); fs.appendFileSync(file, `${nowIso()} [${process.pid}] ${msg}\n`); } catch {} };
 }
-function cmdDashboard() {
-  const port = Number(flagStr('port') ?? loadSettings().dashboard_port);
+// Every instance on a machine has its own dashboard port in one block, so the hub finds them all
+// by asking each port who it is (/api/hello). DEVTEAM_HUB_PORT and DEVTEAM_PORT_BASE are for tests.
+const HUB_PORT = Number(process.env.DEVTEAM_HUB_PORT ?? 4320);
+const PORT_BASE = Number(process.env.DEVTEAM_PORT_BASE ?? 4321);
+const PORT_RANGE = Array.from({ length: 25 }, (_, i) => PORT_BASE + i);
+// Who answers on a port: a devteam dashboard's /api/hello, or null (closed, slow, or not devteam).
+function probeHello(port, ms = 300) {
+  return new Promise((resolve) => {
+    const req = http.get({ host: '127.0.0.1', port, path: '/api/hello', timeout: ms, headers: { host: `127.0.0.1:${port}` } }, (res) => {
+      let b = '';
+      res.on('data', (c) => { b += c; if (b.length > 65536) req.destroy(); });
+      res.on('end', () => { try { const j = JSON.parse(b); resolve(res.statusCode === 200 && Number(j?.devteam) >= 1 ? j : null); } catch { resolve(null); } });
+    });
+    req.on('timeout', () => { req.destroy(); resolve(null); });
+    req.on('error', () => resolve(null));
+  });
+}
+const portFree = (port) => new Promise((resolve) => { const v = net.createServer(); v.once('error', () => resolve(false)); v.listen(port, '127.0.0.1', () => v.close(() => resolve(true))); });
+// The dashboard's port: the one pinned (settings or --port); else the one this checkout used last,
+// if it is free; else one past the highest instance answering in the block, skipping ports held by
+// anything else; else the lowest free one. Saved to run/dashboard-port.
+async function pickDashboardPort() {
+  const pinned = flagStr('port') ?? loadSettings().dashboard_port;
+  const span = `${PORT_RANGE[0]}-${PORT_RANGE.at(-1)}`;
+  if (pinned != null) {
+    const port = Number(pinned);
+    return { port, warn: PORT_RANGE.includes(port) ? null : `port ${port} is outside ${span}: the hub won't list it` };
+  }
+  const file = path.join(runDir, 'dashboard-port');
+  const last = Number(readText(file)?.trim());
+  if (PORT_RANGE.includes(last) && (await portFree(last))) return { port: last, warn: null };
+  const hellos = await Promise.all(PORT_RANGE.map((p) => probeHello(p)));
+  const top = PORT_RANGE.filter((_, i) => hellos[i]).pop();
+  const order = top === undefined ? PORT_RANGE : [...PORT_RANGE.filter((p) => p > top), ...PORT_RANGE.filter((p) => p <= top)];
+  for (const p of order) {
+    if (hellos[PORT_RANGE.indexOf(p)] || !(await portFree(p))) continue;
+    fs.mkdirSync(runDir, { recursive: true });
+    fs.writeFileSync(file, `${p}\n`);
+    return { port: p, warn: null };
+  }
+  die(`every dashboard port in ${span} is taken: stop an instance, or pin one with "dashboard_port" in settings.md (the hub won't list a port outside ${span})`);
+}
+
+async function cmdDashboard() {
+  const picked = await pickDashboardPort();
+  const port = picked.port;
   const host = flagStr('host') ?? '127.0.0.1';
   const log = dashboardLogger();
+  if (picked.warn) { log(picked.warn); process.stderr.write(`devteam dashboard: ${picked.warn}\n`); }
   process.on('uncaughtException', (e) => { log(`crashed: ${e?.stack ?? e}`); process.stderr.write(`devteam dashboard crashed: ${e?.stack ?? e}\n`); process.exit(1); });
   process.on('unhandledRejection', (e) => { log(`crashed (unhandled rejection): ${e?.stack ?? e}`); process.stderr.write(`devteam dashboard crashed: ${e?.stack ?? e}\n`); process.exit(1); });
   for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(sig, () => { log(`stopped by ${sig}`); process.exit(0); });
@@ -6306,7 +6352,7 @@ function moveChecklist(s, memory = []) {
     `start the supervisor in the repo: open ${agent} there and say "Assume the role of the devteam supervisor and resume the fleet" (or step 9's command: DEVTEAM_ROLE=supervisor ${agent} "$(node docs/devteam/scripts/devteam.mjs prompt supervisor)"); tmux need only be installed: the workers get a tmux session of their own`,
     'the supervisor runs fleet unpark, or fleet undrain for a drained fleet (it rebuilds run/log from the landed log, prints the parity fingerprint, puts every goal back as it was) and restarts each parked session with the command it prints',
     'in the browser you use there: turn on "Notify me of new Inbox items" again (a browser setting)',
-    `restart the dashboard where it outlives the session: tmux new-window -d -t ${tmuxSession()} -n dashboard 'node docs/devteam/scripts/devteam.mjs dashboard' (or another terminal), then open http://127.0.0.1:${s.dashboard_port}`,
+    `restart the dashboard where it outlives the session: tmux new-window -d -t ${tmuxSession()} -n dashboard 'node docs/devteam/scripts/devteam.mjs dashboard' (or another terminal), then open the hub, http://127.0.0.1:${HUB_PORT}, which lists every instance on the machine (or the address the dashboard prints)`,
   ];
 }
 
@@ -6860,5 +6906,6 @@ else {
       if (!(d.refs ?? []).some((r) => targets.includes(r))) die(`${d.id} is about ${(d.refs ?? []).join(', ') || 'nothing in particular (it named no --refs)'}; this ${command} is about ${targets.slice(0, 4).join(', ')}${targets.length > 4 ? ', …' : ''}. Decide with --refs naming it, or act without --decision`);
     }
   }
-  COMMANDS[command]();
+  const r = COMMANDS[command]();
+  if (r && typeof r.catch === 'function') r.catch((e) => die(e?.message ?? String(e)));
 }
