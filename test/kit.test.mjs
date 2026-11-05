@@ -983,6 +983,18 @@ test('devteam kit', async (t) => {
     const Qgate = must(['ask', '--question', 'Add a lint gate and move upstream?', '--class', 'governance-edit', '--reasons', 'owner-only', '--recommendation', 'yes'], { role: 'sup' });
     must(['answer', Qgate, 'yes']);
     must([...args, '--approved', Qgate], { role: 'sup' });
+    // a standing rule the owner gave themselves settles gate-change (constitution.md owner_rules), alone
+    const Qr = must(['ask', '--question', 'May I add dev tooling gates without asking?', '--class', 'gate-change', '--reasons', 'owner-only', '--recommendation', 'yes', '--rule-scope', 'class:gate-change'], { role: 'sup' });
+    assert.match(dt(['answer', Qr, 'yes', '--from-chat', '--said', 'sure', '--rule', 'add dev tooling without asking'], { role: 'sup' }).err, /takes no --rule/, 'a rule is never relayed from chat');
+    must(['answer', Qr, 'yes', '--rule', 'Dev tooling and gates need no question', '--rule-scope', 'class:gate-change']);
+    setTo(wt('caps'), (j) => { j.upstream_repo = undefined; delete j.upstream_repo; });
+    git(['commit', '-qam', 'gates only'], wt('caps'));
+    git(['push', '-q', 'origin', 'chore-caps'], wt('caps'));
+    assert.match(must(['merge', '--chore', 'caps', '--dry-run', '--title', 'chore-caps: lint gate', '--body-file', body], { role: 'sup' }), /approved by the owner's standing rule k-\d{8}-\d{9}-owner \("Dev tooling and gates need no question"\)/);
+    setTo(wt('caps'), (j) => { j.upstream_repo = 'someone/fork'; });
+    git(['commit', '-qam', 'and governance'], wt('caps'));
+    git(['push', '-q', 'origin', 'chore-caps'], wt('caps'));
+    assert.match(dt(['merge', '--chore', 'caps', '--dry-run', '--title', 'chore-caps: gates', '--body-file', body], { role: 'sup' }).out, /the owner's answer is needed/, 'the rule settles gate-change alone, never another owner class with it');
     git(['worktree', 'remove', '--force', wt('caps')]);
   });
 
