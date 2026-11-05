@@ -2390,9 +2390,11 @@ function cmdMerge() {
     const deploys = deployingFiles(base, sha);
     if (deploys.length) {
       const target = id ?? (chore ? `chore-${chore}` : plan);
-      const d = flagStr('decision') ? logGet(flagStr('decision')) : null;
+      // the decision is checked like an act's: not corrected, not lapsed, and naming this target
+      const d = flagStr('decision') ? decisionFor(flagStr('decision')) : null;
       const rung = rungFor('release-production');
-      if (d?.type === 'decision' && d.class === 'release-production') release = { decision: d.id, target };
+      if (d?.class === 'release-production' && !(d.refs ?? []).some((r) => [target, `plan-${plan}`].includes(r))) fails.push(`${d.id} releases ${(d.refs ?? []).join(', ') || 'nothing named'}, not ${target}; decide again for this one`);
+      else if (d?.class === 'release-production') release = { decision: d.id, target };
       else if (rung >= 3) release = { rung, target };
       else fails.push(`merging deploys to production (release: merge; it changes ${deploys.slice(0, 3).join(', ')}${deploys.length > 3 ? ', …' : ''}), and release-production is on rung ${rung} (${RUNG[rung]}): decide --class release-production --refs ${target} [--approved <qid>] -- "release …", then merge --decision <d-id>`);
       if (release) out(`merging deploys to production: a release-production act will be logged (${release.decision ? `under ${release.decision}` : `rung ${rung}`})`);
@@ -2492,7 +2494,7 @@ function cmdMerge() {
   mainLogCache = undefined;
   mergeShaCache.clear();
   const cls = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
-  const act = appendLog({ type: 'act', decision: citing(), class: cls, what: `merged ${branch} at ${sha}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag}, verbatim)` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [], reversible: false, approved_by: approved ?? standing?.rule.id ?? undefined }, 'supervisor');
+  const act = appendLog({ type: 'act', decision: release?.decision ? undefined : citing(), class: cls, what: `merged ${branch} at ${sha}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag}, verbatim)` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [], reversible: false, approved_by: approved ?? standing?.rule.id ?? undefined }, 'supervisor');
   if (release) {
     const rel = appendLog({ type: 'act', class: 'release-production', decision: release.decision, rung: release.rung, what: `released ${release.target} to production by merging ${branch} at ${sha} (release: merge)`, refs: [release.target, act.id], reversible: false }, 'supervisor');
     out(`released ${release.target} to production (${rel.id})`);
