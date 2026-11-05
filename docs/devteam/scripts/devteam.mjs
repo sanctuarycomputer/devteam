@@ -5042,9 +5042,42 @@ function observeFindings(m) {
 }
 async function cmdObserveMetrics() {
   supervisorOnly('observe-metrics');
-  const { skipped } = await probeLinks();
+  // one budget for the tick's network: each repo link's main first (what the rest reads), then probes
+  const end = Date.now() + (Number(process.env.DEVTEAM_PROBE_BUDGET_MS) || 20000);
+  const unfetched = await fetchLinkMains(end);
+  const { skipped } = await probeLinks(end);
   const s = observeSpend();
-  out(`recorded ${s} spend line(s) and ${observeFindings(collectMetrics(0))} new observation(s)${skipped.length ? `; ${skipped.length} link(s) not probed this tick (time budget): ${skipped.join(', ')}` : ''}`);
+  out(`recorded ${s} spend line(s) and ${observeFindings(collectMetrics(0))} new observation(s)${unfetched.length ? `; ${unfetched.length} repo link(s) not fetched this tick (time budget): ${unfetched.join(', ')}` : ''}${skipped.length ? `; ${skipped.length} link(s) not probed this tick (time budget): ${skipped.join(', ')}` : ''}`);
+}
+// The tick's fetch of each repo link's main (home's is the tick's own git fetch), four at a time
+// inside the tick's budget, so status, metrics and the dashboard read every repo's main as its
+// origin has it now, not as some other command last fetched it. Never a prompt (as the probe), and
+// never a crash: a fetch that fails is recorded in run/ for metrics to raise as repo-unreachable,
+// until a later tick's fetch succeeds. A repo this machine can't read is link-unreachable's.
+const FETCH_FILE = runPath('repo-fetches.json');
+async function fetchLinkMains(end) {
+  const ids = Object.entries(loadSettings().links ?? {}).filter(([id, l]) => LINK_KINDS[l?.kind]?.hostsComponents && repoReadable(id)).map(([id]) => id);
+  if (!ids.length) return [];
+  let state = {};
+  try { state = readJson(FETCH_FILE); } catch {}
+  const skipped = [];
+  const queue = [...ids];
+  const one = async () => {
+    for (let id = queue.shift(); id; id = queue.shift()) {
+      if (Date.now() >= end) { skipped.push(id); continue; }
+      const R = repo(id);
+      const b = R.settings.main_branch;
+      const ssh = process.env.GIT_SSH_COMMAND || R.git(['config', '--get', 'core.sshCommand']) ? {} : { GIT_SSH_COMMAND: 'ssh -o BatchMode=yes' };
+      const r = await runProbe({ cmd: 'git', args: ['fetch', '--quiet', 'origin', b], cwd: R.root, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '', SSH_ASKPASS: '', ...ssh }, judge: (code) => (code === 0 ? {} : { problem: `could not fetch origin ${b} from ${redactUrl(R.remote)} in ${R.root}; its main here is as last fetched` }) }, end);
+      if (r === 'budget') { skipped.push(id); continue; }
+      state[id] = { at: nowIso(), problem: r.problem ?? null };
+      if (!r.problem) R.resetCaches();
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(PROBE_AT_ONCE, ids.length) }, one));
+  for (const id of Object.keys(state)) if (!ids.includes(id)) delete state[id];
+  writeJson(FETCH_FILE, state);
+  return skipped;
 }
 // Whether each link still exists, at most once a day per link, by its kind's probe (one HEAD
 // request, one ls-remote); nothing is fetched. The result waits in run/ for
@@ -5072,13 +5105,12 @@ function runProbe(spec, end) {
     child.on('close', (code) => finish(spec.judge(code, outText)));
   });
 }
-async function probeLinks() {
+async function probeLinks(end = Date.now() + (Number(process.env.DEVTEAM_PROBE_BUDGET_MS) || 20000)) {
   const reg = loadSettings().links ?? {};
   if (!Object.keys(reg).length) return { skipped: [] };
   let cache = {};
   try { cache = readJson(PROBE_FILE); } catch {}
   const due = Object.entries(reg).filter(([id, l]) => LINK_KINDS[l?.kind] && !(ownEntry(cache, id) && Date.now() - Date.parse(cache[id].at) < DAY && cache[id].target === canonical(l)));
-  const end = Date.now() + (Number(process.env.DEVTEAM_PROBE_BUDGET_MS) || 20000);
   const skipped = [];
   const queue = [...due];
   const one = async () => {
@@ -6579,12 +6611,15 @@ function collectMetrics(since) {
     const reg = settings.links ?? {};
     let probes = {};
     try { probes = readJson(PROBE_FILE); } catch {}
+    let fetches = {};
+    try { fetches = readJson(FETCH_FILE); } catch {}
     for (const [id, l] of Object.entries(reg)) {
       const K = LINK_KINDS[l.kind];
       if (!K) continue;
       const fresh = ownEntry(probes, id)?.target === canonical(l) ? probes[id] : null;
       const why = K.reachable(l, id) ?? fresh?.problem ?? null;
       if (why) add('high', 'link-unreachable', id, why, K.fixHint(l, id));
+      else if (K.hostsComponents && ownEntry(fetches, id)?.problem) add('high', 'repo-unreachable', id, fetches[id].problem, `check this machine can reach ${redactUrl(l.remote)} (credentials, network), then git -C ${shq(linkLocation(id))} fetch origin; the next tick fetches it again`);
       else if (fresh?.note) add('low', 'link-behind-auth', id, fresh.note, 'fine if the fleet needs no access to it; "check": false stops the daily probe');
     }
     if (linesDeclared(settings)) {

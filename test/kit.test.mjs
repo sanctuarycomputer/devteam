@@ -5196,6 +5196,44 @@ test('a ticket merges only after its depends_on, in any repo; unreadable fails c
   } finally { F.done(); }
 });
 
+// The tick reads every repo's main as its origin has it now: observe-metrics fetches each repo
+// link's main before it reads anything, so a push from another clone (or a forge-UI merge) shows.
+test('observe-metrics fetches each repo link\'s main; a failed fetch is a repo-unreachable finding, never a crash', () => {
+  const F = multiFixture('tick-fetch');
+  const { old, g, okIn, ticket } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  try {
+    ticket('console-01-a');
+    assert.match(okIn(old, ['status']), /ready +console-01-a/);
+    // from another clone of console: a commit for console-01-a lands on trunk by hand
+    const other = path.join(F.base, 'console-other');
+    g(['clone', '-q', F.consoleOrigin, other], F.base);
+    write(path.join(other, 'src/x.js'), 'by hand\n');
+    g(['add', '-A'], other);
+    g(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'console-01-a: by hand'], other);
+    g(['push', '-q', 'origin', 'trunk'], other);
+    g(['fetch', '-q', 'origin'], old);
+    assert.match(okIn(old, ['status']), /ready +console-01-a/, "before the tick's observe step, console's main is as last fetched");
+    assert.match(okIn(old, ['observe-metrics'], SUP), /recorded/);
+    assert.equal(g(['rev-parse', 'origin/trunk'], F.console), g(['rev-parse', 'HEAD'], other), "console's main is fetched");
+    assert.match(okIn(old, ['status']), /merged +console-01-a/);
+    // console's origin is gone: a finding naming the link, and the tick carries on
+    fs.renameSync(F.consoleOrigin, `${F.consoleOrigin}-away`);
+    try {
+      const out = okIn(old, ['observe-metrics'], SUP);
+      assert.match(out, /recorded/);
+      const f = json(okIn(old, ['metrics', '--json'])).findings.find((x) => x.kind === 'repo-unreachable');
+      assert.ok(f, 'a repo-unreachable finding');
+      assert.equal(f.subject, 'console');
+      assert.match(f.detail, /could not fetch origin trunk/);
+      assert.ok(json(okIn(old, ['log', '--type', 'observation', '--json'])).some((o) => o.kind === 'repo-unreachable' && o.subject === 'console'), 'observed');
+    } finally { fs.renameSync(`${F.consoleOrigin}-away`, F.consoleOrigin); }
+    // back: the next tick's fetch clears it
+    okIn(old, ['observe-metrics'], SUP);
+    assert.ok(!json(okIn(old, ['metrics', '--json'])).findings.some((x) => x.kind === 'repo-unreachable'));
+  } finally { F.done(); }
+});
+
 test('a github-forge sibling: gh is asked about that repo', () => {
   const F = multiFixture('gh-r');
   const { old, g, okIn, runIn, ticket } = F;
