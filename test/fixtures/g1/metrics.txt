@@ -1,0 +1,55 @@
+exit 0
+--- stdout
+{
+  "tickets_merged": 0,
+  "phase_usd": {},
+  "cost": {
+    "source": "reported",
+    "usd_all": 0,
+    "tokens": {
+      "input": 0,
+      "output": 0,
+      "cache_read": 0,
+      "cache_write": 0
+    },
+    "by_model": {},
+    "unpriced_models": {},
+    "per_point": null,
+    "per_point_this_week": null,
+    "per_point_last_week": null,
+    "usd_total": 0,
+    "usd_per_merged_ticket": null,
+    "by_ticket": {}
+  },
+  "reviews": {
+    "by_stage": {
+      "final": {
+        "first_passes": 1,
+        "rejected": 0,
+        "rejection_rate": 0
+      }
+    },
+    "findings": 0,
+    "false_positive_rate": null
+  },
+  "gates": {
+    "gates": [],
+    "flaky_gates": [],
+    "flaky_tests": [],
+    "slowest_tests": []
+  },
+  "messages": {
+    "expecting_reply": 0,
+    "still_open": 0
+  },
+  "owner_questions": {
+    "asked": 1,
+    "open": 1,
+    "answer_rate_14d": null
+  },
+  "escaped_defects": 0,
+  "findings": [],
+  "acknowledged": []
+}
+--- stderr
+
