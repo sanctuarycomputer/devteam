@@ -1,0 +1,7 @@
+exit 0
+--- stdout
+active workers: 0/5
+in review  g1-01-a  (no new worker: merge or answer its review)
+nothing ready
+--- stderr
+
