@@ -4208,3 +4208,35 @@ test('a worker in a sibling worktree runs home\'s kit: home\'s run directory and
     assert.match(other.stderr, /DEVTEAM_HOME=.*old, but this kit is .*console.*: run home's kit, node '.*\/old\/docs\/devteam\/scripts\/devteam\.mjs'/);
   } finally { F.done(); }
 });
+
+test('repo(): each repo its own main and caches (M7); --path and links.local.json override path; a wrong origin is refused (M9)', () => {
+  const F = multiFixture('repo-obj');
+  const { old, g, runIn, okIn } = F;
+  try {
+    const l = json(okIn(old, ['links', '--json']));
+    assert.equal(l.home.main_ref, 'origin/main');
+    assert.equal(l.home.main_sha, g(['rev-parse', 'origin/main'], old));
+    const con = l.links.find((x) => x.id === 'console');
+    assert.equal(con.main_ref, 'origin/trunk', "console's own main branch");
+    assert.equal(con.main_sha, g(['rev-parse', 'origin/trunk'], F.console));
+    assert.notEqual(con.main_sha, l.home.main_sha, 'M7: no cache bleed between repos');
+    // M9: run/links.local.json, then --path, override the committed path
+    const elsewhere = path.join(F.base, 'console-elsewhere');
+    g(['clone', '-q', F.consoleOrigin, elsewhere], F.base);
+    write(path.join(old, 'docs/devteam/run/links.local.json'), JSON.stringify({ console: { path: elsewhere } }));
+    assert.equal(F.real(json(okIn(old, ['links', '--json'])).links.find((x) => x.id === 'console').location), F.real(elsewhere));
+    assert.match(okIn(old, ['components', 'check', '--repo', 'console', '--path', F.console]), /tracked path\(s\) at origin\/trunk: 0 unowned/, '--path wins over links.local.json');
+    // a checkout of another remote is refused, with one message
+    write(path.join(old, 'docs/devteam/run/links.local.json'), JSON.stringify({ console: { path: F.companion } }));
+    const r = runIn(old, ['components', 'check', '--repo', 'console']);
+    assert.notEqual(r.status, 0);
+    assert.match(r.err, /repo console: .*companion is a checkout of .*companion\.git, not .*console\.git/);
+    // links --json still lists it, without main refs: a view never fails on a wrong checkout
+    assert.equal(json(okIn(old, ['links', '--json'])).links.find((x) => x.id === 'console').main_ref, undefined);
+    // no checkout at all: one message that says what to clone where
+    write(path.join(old, 'docs/devteam/run/links.local.json'), JSON.stringify({ console: { path: path.join(F.base, 'not-cloned') } }));
+    assert.match(runIn(old, ['components', 'check', '--repo', 'console']).err, /repo console: no checkout at .*not-cloned; clone .*console\.git there/);
+    assert.match(runIn(old, ['components', 'check', '--repo', 'nope']).err, /no repo link "nope"/);
+    fs.rmSync(path.join(old, 'docs/devteam/run/links.local.json'));
+  } finally { F.done(); }
+});

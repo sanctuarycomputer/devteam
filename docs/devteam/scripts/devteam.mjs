@@ -588,8 +588,10 @@ const linkFields = (kind) => (LINK_KINDS[kind] ? [...LINK_COMMON, ...LINK_KINDS[
 // A remote's identity (remoteKeyAt), a path resolved from home's main checkout.
 const remoteKey = (r) => remoteKeyAt(r, mainRoot);
 // Where a link's checkout is on this machine: run/links.local.json (untracked), the committed path,
-// or ../<id>, relative to home's main checkout (§3.5). PR 2 adds --path on the command line.
+// or ../<id>, relative to home's main checkout (§3.5); --path on a command about that repo first.
 function linkLocation(id) {
+  // --path <dir> on a command about this repo (--repo <id>): the checkout CI or a one-off run uses
+  if (flagStr('path') && flagStr('repo') === id) return path.resolve(flagStr('path'));
   let local = {};
   try { local = readJson(LINKS_LOCAL); } catch {}
   const at = local?.[id]?.path ?? loadSettings().links?.[id]?.path ?? `../${id}`;
@@ -1481,61 +1483,67 @@ function report(fails, okMsg) {
 }
 // ===== 4. facts from git =====
 
+// Pure readers of a repo's main, shared by home's functions below and each repo link's (repo()).
+const parseMainLog = (o) => (o ? o.split('\n') : []).filter(Boolean).map((l) => { const [sha, ...r] = l.split('\t'); return { sha, subject: r.join('\t') }; });
+const parseParents = (o) => (o ? o.split('\n') : []).filter(Boolean).map((l) => l.split(' '));
+// The commit on main that landed a ticket, for any repo: a merge from ticket/<id>, a squash titled
+// "<id>: …", or a merge whose second parent contains the branch tip and whose first parent does not.
+function findMergeSha(id, { log, parents, resolve, gitFn, ref }) {
+  const esc = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const fromBranch = new RegExp(`from \\S*ticket/${esc}$`);
+  for (const { sha, subject } of log()) if (fromBranch.test(subject) || subject.startsWith(`${id}:`)) return sha;
+  if (!ref) return null;
+  for (const r of [`refs/heads/ticket/${id}`, `refs/remotes/origin/ticket/${id}`]) {
+    const tip = resolve(r);
+    if (!tip || gitFn(['merge-base', '--is-ancestor', tip, ref]) === null) continue;
+    for (const [sha, p1, p2] of parents()) {
+      if (p2 && gitFn(['merge-base', '--is-ancestor', tip, p2]) !== null && gitFn(['merge-base', '--is-ancestor', tip, p1]) === null) return sha;
+    }
+  }
+  return null;
+}
+// The first tag matching pattern (default v*), not a release candidate, that contains sha.
+const releasedInWith = (gitFn, sha, pattern = 'v*') => (gitFn(['tag', '--contains', sha, '--list', pattern, '--sort=creatordate']) ?? '').split('\n').find((t) => t && !/-rc/.test(t)) ?? null;
+
 let mainLogCache;
 function mainLog() {
   if (mainLogCache) return mainLogCache;
   const ref = mainRef();
   // First-parent only: merge and squash commits are on it; a branch's own commits are not.
-  const o = ref ? git(['log', ref, '--first-parent', '--format=%H%x09%s']) : null;
-  return (mainLogCache = (o ? o.split('\n') : []).filter(Boolean).map((l) => {
-    const [sha, ...r] = l.split('\t');
-    return { sha, subject: r.join('\t') };
-  }));
+  return (mainLogCache = parseMainLog(ref ? git(['log', ref, '--first-parent', '--format=%H%x09%s']) : null));
 }
 let mergeParentsCache;
 function mergeParents() {
   if (mergeParentsCache) return mergeParentsCache;
   const ref = mainRef();
-  const o = ref ? git(['log', ref, '--merges', '--first-parent', '-n', '500', '--format=%H %P']) : null;
-  return (mergeParentsCache = (o ? o.split('\n') : []).filter(Boolean).map((l) => l.split(' ')));
+  return (mergeParentsCache = parseParents(ref ? git(['log', ref, '--merges', '--first-parent', '-n', '500', '--format=%H %P']) : null));
 }
-function ticketBranchRef(id) {
+function homeTicketBranchRef(id) {
   for (const r of [`refs/heads/ticket/${id}`, `refs/remotes/origin/ticket/${id}`]) if (resolveCommit(r)) return r;
   return null;
 }
-// The commit on main that landed a ticket: a merge from ticket/<id>, a squash titled "<id>: …", or
-// a merge whose second parent contains the branch tip and whose first parent does not.
 const mergeShaCache = new Map();
-function mergeShaFor(id) {
+function homeMergeShaFor(id) {
   if (mergeShaCache.has(id)) return mergeShaCache.get(id);
-  const done = (v) => (mergeShaCache.set(id, v), v);
-  const esc = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const fromBranch = new RegExp(`from \\S*ticket/${esc}$`);
-  for (const { sha, subject } of mainLog()) if (fromBranch.test(subject) || subject.startsWith(`${id}:`)) return done(sha);
-  const ref = mainRef();
-  if (!ref) return done(null);
-  for (const r of [`refs/heads/ticket/${id}`, `refs/remotes/origin/ticket/${id}`]) {
-    const tip = resolveCommit(r);
-    if (!tip || git(['merge-base', '--is-ancestor', tip, ref]) === null) continue;
-    for (const [sha, p1, p2] of mergeParents()) {
-      if (p2 && git(['merge-base', '--is-ancestor', tip, p2]) !== null && git(['merge-base', '--is-ancestor', tip, p1]) === null) return done(sha);
-    }
-  }
-  return done(null);
+  const v = findMergeSha(id, { log: mainLog, parents: mergeParents, resolve: resolveCommit, gitFn: (a) => git(a), ref: mainRef() });
+  mergeShaCache.set(id, v);
+  return v;
 }
 const mergedAtCache = new Map();
-function mergedAt(id) {
+function homeMergedAt(id) {
   if (!mergedAtCache.has(id)) {
-    const sha = mergeShaFor(id);
+    const sha = homeMergeShaFor(id);
     const t = sha ? Date.parse(git(['show', '-s', '--format=%cI', sha]) ?? '') : NaN;
     mergedAtCache.set(id, Number.isNaN(t) ? null : t);
   }
   return mergedAtCache.get(id);
 }
-function releasedIn(sha) {
-  const tags = git(['tag', '--contains', sha, '--list', 'v*', '--sort=creatordate']);
-  return (tags ?? '').split('\n').find((t) => t && !/-rc/.test(t)) ?? null;
-}
+const homeReleasedIn = (sha, pattern) => releasedInWith((a) => git(a), sha, pattern);
+// Re-bound in the routers below (repo()) to the ticket's own repo.
+const mergeShaFor = (id) => homeMergeShaFor(id);
+const mergedAt = (id) => homeMergedAt(id);
+const ticketBranchRef = (id) => homeTicketBranchRef(id);
+const releasedIn = (sha, opts = {}) => homeReleasedIn(sha, opts.pattern);
 // Read a project file from a git ref (a ticket's branch, an exact head) or the working tree.
 function srcRead(src, rel) {
   if (src.ref && projectInRepo) return git(['show', `${src.ref}:${projectRel}/${rel}`]);
@@ -1549,6 +1557,96 @@ function srcList(src, relDir) {
 const WORKTREE = { ref: null };
 // A project file from this checkout, or main's copy when this checkout lacks it.
 const projectFileText = (rel) => readText(path.join(projectDir, rel)) ?? (projectInRepo && mainRef() ? git(['show', `${mainRef()}:${projectRel}/${rel}`]) : null);
+
+// ===== 4b. repos: home and each repo link, one object each (spec §5.1) =====
+
+// The repo a GitHub CLI call names (-R): owner/name, or host/owner/name on GitHub Enterprise;
+// null for a remote gh can't name (a path, a non-GitHub host), where gh then runs in the checkout.
+const ghSpec = (remote) => {
+  const k = remoteKey(remote ?? '');
+  if (/^[\w.-]+\/[\w.-]+$/.test(k)) return k;
+  const m = /^https:\/\/([^/@]+)\/([\w.-]+\/[\w.-]+?)(?:\.git)?$/.exec(String(remote ?? ''));
+  return m ? `${m[1]}/${m[2]}` : null;
+};
+// One object per repo, made once. Home's is the module's own helpers, so a single-repo project
+// runs exactly today's code; a link's binds git and gh to its checkout and keeps its own caches.
+const repoMemo = new Map();
+function repo(name = 'home') {
+  if (!repoMemo.has(name)) repoMemo.set(name, name === 'home' ? homeRepo() : linkRepo(name));
+  return repoMemo.get(name);
+}
+// Home's object is PR 1's homeFacts (name, the three tree reads, mainRef, devteamLine, settings)
+// plus the rest, so every coverage helper that defaulted to homeFacts gets the same answers.
+function homeRepo() {
+  return Object.assign(Object.create(homeFacts), {
+    root: mainRoot, commonDir, projectRel, projectInRepo,
+    get remote() { return git(['config', '--get', 'remote.origin.url']); },
+    resolveCommit,
+    git: (args, cwd) => git(args, cwd),
+    gitOrDie: (args, cwd) => gitOrDie(args, cwd),
+    gh: (args, opts = {}) => { const spec = ghSpec(git(['config', '--get', 'remote.origin.url'])); return sh('gh', [...args, ...(spec ? ['-R', spec] : [])], opts); },
+    mergeShaFor: homeMergeShaFor, mergedAt: homeMergedAt, ticketBranchRef: homeTicketBranchRef, releasedIn: homeReleasedIn,
+    srcRead: (ref, rel) => srcRead({ ref }, rel), srcList: (ref, relDir) => srcList({ ref }, relDir),
+    resetCaches: () => { mainRefCache = undefined; mainLogCache = undefined; mergeParentsCache = undefined; mergeShaCache.clear(); mergedAtCache.clear(); },
+  });
+}
+function linkRepo(id) {
+  const s = loadSettings();
+  const l = s.links?.[id];
+  if (!l || !LINK_KINDS[l.kind]?.hostsComponents) die(`no repo link "${id}" in settings links (devteam.mjs links)`);
+  const at = linkLocation(id);
+  if (!fs.existsSync(at)) die(`repo ${id}: no checkout at ${at}; clone ${redactUrl(l.remote)} there, set its path, or name this machine's in run/links.local.json`);
+  const origin = git(['config', '--get', 'remote.origin.url'], at);
+  if (!origin || remoteKey(origin) !== remoteKey(l.remote)) die(`repo ${id}: ${at} is a checkout of ${origin ? redactUrl(origin) : 'nothing'}, not ${redactUrl(l.remote)}`);
+  const common = commonOf(at);
+  const root = path.dirname(common);
+  const settings = LINK_KINDS[l.kind].effectiveSettings(l, s);
+  const rel = settings.project;
+  const g = (args, cwd = root) => git(args, cwd);
+  const c = { mainRef: undefined, log: null, parents: null, mergeSha: new Map(), mergedAt: new Map() };
+  const resolve = (ref) => g(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
+  const mainRefR = () => { if (c.mainRef === undefined) c.mainRef = [`origin/${settings.main_branch}`, settings.main_branch].find((r) => resolve(r)) ?? null; return c.mainRef; };
+  const log = () => (c.log ??= parseMainLog(mainRefR() ? g(['log', mainRefR(), '--first-parent', '--format=%H%x09%s']) : null));
+  const parents = () => (c.parents ??= parseParents(mainRefR() ? g(['log', mainRefR(), '--merges', '--first-parent', '-n', '500', '--format=%H %P']) : null));
+  const R = {
+    name: id, root, commonDir: common, remote: l.remote, settings, projectRel: rel, projectInRepo: true,
+    mainRef: mainRefR, resolveCommit: resolve,
+    // the same three tree reads home has (PR 1's gitFacts), bound to this checkout
+    ...gitFacts(g, (args) => gitRun(args, root)),
+    git: g, gitOrDie: (args, cwd = root) => gitOrDie(args, cwd),
+    gh: (args, opts = {}) => { const spec = ghSpec(l.remote); return sh('gh', [...args, ...(spec ? ['-R', spec] : [])], { cwd: root, ...opts }); },
+    mergeShaFor: (tid) => { if (!c.mergeSha.has(tid)) c.mergeSha.set(tid, findMergeSha(tid, { log, parents, resolve, gitFn: g, ref: mainRefR() })); return c.mergeSha.get(tid); },
+    mergedAt: (tid) => { if (!c.mergedAt.has(tid)) { const sha = R.mergeShaFor(tid); const t = sha ? Date.parse(g(['show', '-s', '--format=%cI', sha]) ?? '') : NaN; c.mergedAt.set(tid, Number.isNaN(t) ? null : t); } return c.mergedAt.get(tid); },
+    ticketBranchRef: (tid) => [`refs/heads/ticket/${tid}`, `refs/remotes/origin/ticket/${tid}`].find((r) => resolve(r)) ?? null,
+    releasedIn: (sha, pattern) => releasedInWith(g, sha, pattern),
+    srcRead: (ref, relPath) => (ref ?? mainRefR() ? g(['show', `${ref ?? mainRefR()}:${rel}/${relPath}`]) : null),
+    srcList: (ref, relDir) => (ref ?? mainRefR() ? (g(['ls-tree', '--name-only', `${ref ?? mainRefR()}:${rel}/${relDir}`]) ?? '').split('\n').filter(Boolean) : []),
+    resetCaches: () => { c.mainRef = undefined; c.log = null; c.parents = null; c.mergeSha.clear(); c.mergedAt.clear(); },
+    // in another repo the kit's line is only its project folder, where tickets keep their records
+    devteamLine: () => [`${rel}/**`],
+  };
+  return R;
+}
+// The components that route a ticket to its repo: main's, committed (open issue 2).
+const committedComponents = () => memo('committedComponents', () => mainSettings(null) ?? loadSettings());
+// Two routers (open issue 8). By name, for views: never touches a checkout, never fails.
+const repoOfTicketLink = (t) => componentLink(t.component, committedComponents());
+// Whether a repo can be read on this machine, without failing: home always; a link when its
+// checkout is where it says and of its remote (PR 1's reachable, memoized per process).
+const repoReadable = (name) => { if (name === 'home') return true; const l = loadSettings().links?.[name]; return !!LINK_KINDS[l?.kind]?.hostsComponents && !LINK_KINDS[l.kind].reachable(l, name); };
+// By object, for acts on one ticket: fails fast with one message when the checkout is wrong.
+const repoOfTicket = (t) => repo(repoOfTicketLink(t));
+const repoOfTicketId = (id) => { const t = tickets().get(id); return t ? repoOfTicket(t) : repo('home'); };
+// The repo of the checkout this command runs in (home, or a repo link's), by its git common dir.
+function cwdRepo() {
+  if (cwdIsHome) return repo('home');
+  if (!cwdCommon) return null;
+  for (const [id, l] of Object.entries(loadSettings().links ?? {})) {
+    if (!LINK_KINDS[l.kind]?.hostsComponents || !repoReadable(id)) continue;
+    if (realPath(commonOf(linkLocation(id)) ?? '') === realPath(cwdCommon)) return repo(id);
+  }
+  return null;
+}
 
 // ===== 5. the graph (tickets and features, folded from the log) =====
 
@@ -7820,11 +7918,13 @@ const treePathsMemo = (ref, R = homeFacts) => memo(`tree\0${R.name}\0${ref}`, ()
 // settings (open issue 9). Exits 1 on any problem; --count prints the Baseline's gap count.
 function cmdComponents() {
   const [sub] = positional;
-  if (sub !== 'check') die('usage: components check [--ref <ref>] [--count] [--json]');
-  const ref = flagStr('ref') ?? mainRef() ?? 'HEAD';
-  const sha = resolveCommit(ref) ?? die(`${ref} is not a commit here (git fetch first?)`);
-  const s = settingsAt(sha) ?? die(`${projectRel}/settings.md at ${ref}: the json devteam block is not valid JSON`);
-  const read = readCoverage(() => coverageAt(sha, s));
+  if (sub !== 'check') die('usage: components check [--ref <ref>] [--repo <link> [--path <checkout>]] [--count] [--json]');
+  // another repo's tree under home's committed lines (settings live in home); home's under its own
+  const R = repo(flagStr('repo') ?? 'home');
+  const ref = flagStr('ref') ?? R.mainRef() ?? 'HEAD';
+  const sha = R.resolveCommit(ref) ?? die(`${ref} is not a commit${R.name === 'home' ? '' : ` in ${R.name}`} here (git fetch first?)`);
+  const s = (R.name === 'home' ? settingsAt(sha) : mainSettings()) ?? die(`${projectRel}/settings.md at ${ref}: the json devteam block is not valid JSON`);
+  const read = readCoverage(() => coverageAt(sha, s, R));
   if (read.error) die(`components check: ${read.error}`);
   const cov = read.value;
   if (!cov) {
@@ -7836,8 +7936,8 @@ function cmdComponents() {
   const bad = gaps.count + gaps.case_collisions.length;
   if (flags.count) { out(String(gaps.count)); return void process.exit(bad ? 1 : 0); }
   if (flags.json) { json({ ref, declared: true, ...gaps }); return void process.exit(bad ? 1 : 0); }
-  for (const l of coverageReport(gaps, s)) out(l);
-  out(`${treePathsMemo(sha).length} tracked path(s) at ${ref}: ${gaps.unowned.length} unowned, ${gaps.contested.length} contested, ${gaps.empty.length} empty glob(s), ${gaps.unlinked.length} unlinked, ${gaps.case_collisions.length} case collision(s)`);
+  for (const l of coverageReport(gaps, s, R)) out(l);
+  out(`${treePathsMemo(sha, R).length} tracked path(s) at ${ref}: ${gaps.unowned.length} unowned, ${gaps.contested.length} contested, ${gaps.empty.length} empty glob(s), ${gaps.unlinked.length} unlinked, ${gaps.case_collisions.length} case collision(s)`);
   process.exit(bad ? 1 : 0);
 }
 
@@ -7925,12 +8025,14 @@ function cmdLinks() {
   const read = main ? readCoverage(() => coverageAt(main, sMain)) : {};
   const cov = read.value ?? null;
   const origin = git(['config', '--get', 'remote.origin.url']);
-  const home = { name: 'home', remote: origin === null ? null : redactUrl(origin), root: mainRoot, effective: Object.fromEntries(REPO_KEYS.map((k) => [k, k === 'project' ? projectRel : s[k] ?? null])), components: componentsOn(s, 'home'), lines: linesDeclared(s), coverage: cov ? coverageGaps(cov, sMain) : null, ...(read.error ? { coverage_error: read.error } : {}) };
+  // each readable repo's own main (a view: a link whose checkout is wrong or missing just has none)
+  const mains = (R) => ({ main_ref: R.mainRef(), main_sha: R.mainRef() ? R.resolveCommit(R.mainRef()) : null });
+  const home = { name: 'home', remote: origin === null ? null : redactUrl(origin), root: mainRoot, ...mains(repo('home')), effective: Object.fromEntries(REPO_KEYS.map((k) => [k, k === 'project' ? projectRel : s[k] ?? null])), components: componentsOn(s, 'home'), lines: linesDeclared(s), coverage: cov ? coverageGaps(cov, sMain) : null, ...(read.error ? { coverage_error: read.error } : {}) };
   const links = Object.entries(reg).map(([id, l]) => {
     const K = LINK_KINDS[l.kind];
     if (!K) return { id, ...redactLink(l) };
     const eff = K.effectiveSettings(l, s);
-    return { id, ...redactLink(l), locator: K.locator(l, id).text, ...(K.localOverrides.includes('path') ? { location: linkLocation(id), found: fs.existsSync(linkLocation(id)) } : {}), ...(eff ? { effective: eff } : {}), ...(K.hostsComponents ? { components: componentsOn(s, id) } : {}) };
+    return { id, ...redactLink(l), locator: K.locator(l, id).text, ...(K.localOverrides.includes('path') ? { location: linkLocation(id), found: fs.existsSync(linkLocation(id)) } : {}), ...(eff ? { effective: eff } : {}), ...(K.hostsComponents ? { components: componentsOn(s, id), ...(repoReadable(id) ? mains(repo(id)) : {}) } : {}) };
   });
   if (flags.json) return json({ home, links });
   const gates = (g) => Object.keys(g ?? {}).join(', ') || 'none';
