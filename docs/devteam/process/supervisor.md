@@ -190,7 +190,7 @@ Due `retro_every_days` after the last one, or when a feature has fully merged si
 - Kill only a known PID, never by pattern on a shared machine.
 - After your own restart: §1 again, then message every worker to re-read its files.
 - Stopping work on a goal, or the whole fleet (to move it, or for any planned stop): §12 (`goal hold`, `fleet drain|park`, `fleet status`, `fleet unpark|undrain|resume`).
-- After a merge, and only once `merge` has succeeded (chain cleanup with `&&`, never `;`: a refused merge, such as a forge outage, must leave the worker's window and worktree alone): once the worker has logged `phase done` (its final spend; on a later tick if it hasn't yet), `git worktree remove .worktrees/<id>` and close the window. Closing it first loses the ticket's cost. The log keeps the history.
+- After a merge, and only once `merge` has succeeded (chain cleanup with `&&`, never `;`: a refused merge, such as a forge outage, must leave the worker's window and worktree alone): once the worker has logged `phase done` (its final spend; on a later tick if it hasn't yet), `devteam.mjs worker <id> --remove` and close the window. It removes the worktree through the repo it belongs to (a sibling ticket's worktree is that repo's, which home's `git worktree remove` can't touch) and prunes that repo's worktree list, so a worktree deleted by hand leaves no entry holding `ticket/<id>` checked out; it refuses before the merge and the `phase done` (`--force` overrides, losing uncommitted work). Closing it first loses the ticket's cost. The log keeps the history.
 
 ## 12. Holding the fleet, and moving it
 

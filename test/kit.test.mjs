@@ -4962,6 +4962,50 @@ test('a sibling ticket\'s worker: its worktree from its repo, home\'s kit by abs
   } finally { F.done(); }
 });
 
+// A sibling worker's worktree is its repo's, so home's git can't remove it: worker <id> --remove
+// does, through that repo, and prunes that repo's list, so a later worker <id> starts cleanly.
+test('worker <id> --remove removes a sibling ticket\'s worktree through its repo, and the worker starts again cleanly', (t) => {
+  const F = multiFixture('sibling-wt-remove');
+  const { old, g, okIn, runIn, ticket } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const W = { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'console-01-a' };
+  const listed = () => g(['worktree', 'list', '--porcelain'], F.console).split('\n').filter((l) => l.startsWith('worktree ')).map((l) => F.real(l.slice(9)));
+  try {
+    ticket('console-01-a');
+    const w = path.join(old, '.worktrees', 'console-01-a');
+    g(['worktree', 'add', '-q', '-b', 'ticket/console-01-a', w, 'origin/trunk'], F.console);
+    okIn(w, ['phase', 'build'], W);
+    write(path.join(w, 'src/main.js'), 'done\n');
+    g(['commit', '-qam', 'console-01-a: work'], w); g(['push', '-q', 'origin', 'ticket/console-01-a'], w);
+    // home's git can't: what supervisor.md used to say fails for a sibling's worktree
+    assert.throws(() => g(['worktree', 'remove', '.worktrees/console-01-a'], old), /is not a working tree/);
+    // not merged, or no phase done (its final spend): refused, and nothing is removed
+    assert.match(runIn(old, ['worker', 'console-01-a', '--remove'], SUP).err, /console-01-a is not merged yet; --force removes its worktree anyway/);
+    g(['checkout', '-q', 'trunk'], F.console);
+    g(['merge', '-q', '--no-ff', '-m', 'Merge ticket/console-01-a', 'ticket/console-01-a'], F.console);
+    g(['push', '-q', 'origin', 'trunk'], F.console);
+    assert.match(runIn(old, ['worker', 'console-01-a', '--remove'], SUP).err, /console-01-a's worker hasn't logged phase done \(its final spend\)/);
+    assert.ok(fs.existsSync(w));
+    okIn(w, ['phase', 'done'], W);
+    assert.match(okIn(old, ['worker', 'console-01-a', '--remove'], SUP), /removed .*console-01-a \(a worktree of console\)/);
+    assert.ok(!fs.existsSync(w), 'the worktree is gone');
+    assert.ok(!listed().some((x) => x.endsWith(`${path.sep}console-01-a`)), "and console's list no longer has it");
+    assert.equal(g(['rev-parse', '--verify', '-q', 'refs/heads/ticket/console-01-a'], F.console).length, 40, 'the branch stays');
+    // a worktree removed by hand (rm -rf): --remove prunes console's stale entry
+    g(['worktree', 'add', '-q', w, 'ticket/console-01-a'], F.console);
+    fs.rmSync(w, { recursive: true, force: true });
+    assert.ok(g(['worktree', 'list', '--porcelain'], F.console).includes('console-01-a'), 'git still lists it');
+    assert.match(okIn(old, ['worker', 'console-01-a', '--remove'], SUP), /pruned console's worktree list/);
+    assert.ok(!g(['worktree', 'list', '--porcelain'], F.console).includes('console-01-a'));
+    // the ticket reopened: its worker starts again from its branch, in console
+    if (!hasTmux) return t.diagnostic('tmux not installed: the restart is not exercised');
+    okIn(old, ['worker', 'console-01-a', '--force'], SUP);
+    spawnSync('tmux', ['kill-server'], { env: F.env({}) });
+    assert.equal(g(['rev-parse', '--abbrev-ref', 'HEAD'], w), 'ticket/console-01-a');
+    assert.equal(F.real(g(['rev-parse', '--path-format=absolute', '--git-common-dir'], w)), F.real(path.join(F.console, '.git')));
+  } finally { F.done(); }
+});
+
 test('a sibling ticket\'s worker starts only from a fresh main: the fetch of its repo\'s main failing refuses', (t) => {
   if (!hasTmux) return t.skip('tmux not installed');
   const F = multiFixture('sibling-wt-stale');

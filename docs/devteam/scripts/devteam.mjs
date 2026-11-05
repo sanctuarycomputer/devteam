@@ -7453,11 +7453,32 @@ const plannerPrompt = (feature) => {
 
 // worker <ticket-id> [--resume] | planner <feature> [--resume]: a git worktree, a tmux window, the
 // agent command from the settings, and the role's prompt (plus the knowledge that applies).
+// worker <id> --remove: after its merge, a worker's worktree removed through the repo it is a
+// worktree of (a sibling's can't be removed by home's git), and that repo's worktree list pruned, so
+// one removed by hand leaves no stale entry holding ticket/<id> checked out. Refused until the
+// ticket is merged and its worker has logged phase done (its final spend); --force removes it
+// anyway. The branch stays, so a reopened ticket's worker starts again from it.
+function removeWorkerWorktree(id) {
+  const wt = path.join(mainRoot, '.worktrees', id);
+  const T = repoOfTicket(tickets().get(id)); // an act: fails fast on a missing or wrong checkout
+  if (!flags.force) {
+    if (!T.mergeShaFor(id)) die(`${id} is not merged yet; --force removes its worktree anyway (uncommitted work in it is lost)`);
+    if (lastPhaseOf(id)?.to !== 'done') die(`${id}'s worker hasn't logged phase done (its final spend); wait for it, or --force removes its worktree anyway`);
+  }
+  const R = fs.existsSync(wt) ? worktreeRepo(wt) ?? die(`${wt} is a worktree of no repo this machine can read`) : T;
+  if (fs.existsSync(wt)) {
+    R.gitOrDie(['worktree', 'remove', ...(flags.force ? ['--force'] : []), wt], R.root);
+    out(`removed ${wt} (a worktree of ${R.name})`);
+  }
+  R.gitOrDie(['worktree', 'prune'], R.root);
+  out(`pruned ${R.name}'s worktree list; now close its window`);
+}
 function makeSession(role) {
   supervisorOnly(role);
   const id = positional[0] ?? die(`usage: ${role} <${role === 'worker' ? 'ticket-id' : 'feature'}> [--resume] [--force]`);
   if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
   if (role === 'worker' && !tickets().has(id)) die(`no ticket ${id} (devteam.mjs ticket show ${id})`);
+  if (role === 'worker' && flags.remove) return removeWorkerWorktree(id);
   // A repo with files no line owns starts no new ticket; a ticket already started carries on.
   if (role === 'worker' && !lastPhaseOf(id)) {
     const R = repoOfTicket(tickets().get(id)); // an act: fails fast on a missing or wrong checkout
@@ -8769,7 +8790,7 @@ const HELP = `devteam <command>   (positionals before flags; flags take the word
 Setup and roles
   init [--name n] [--upstream-base vX] [--github]   project folders, settings, .gitignore, the devteam section of AGENTS.md
   prompt supervisor | worker <id> | planner <feature>    the prompt a session starts with
-  worker <ticket-id> [--resume] [--force] | planner <feature> [--goal <g-id>] [--resume] [--force] [--id-block <n>]   supervisor: a worktree, a tmux window and an agent for a ticket or a feature plan (a new planner names its goal and reserves n ticket numbers, default 20); refused while its goal is parked or let go, or draining for a session that hasn't run, unless --force (logged); --resume where no session exists starts fresh with the handoff note
+  worker <ticket-id> [--resume] [--force] | worker <ticket-id> --remove [--force] | planner <feature> [--goal <g-id>] [--resume] [--force] [--id-block <n>]   supervisor: a worktree, a tmux window and an agent for a ticket or a feature plan (a new planner names its goal and reserves n ticket numbers, default 20); refused while its goal is parked or let go, or draining for a session that hasn't run, unless --force (logged); --resume where no session exists starts fresh with the handoff note; worker --remove, once the ticket is merged and its worker logged phase done (--force before that), removes its worktree through the repo it belongs to and prunes that repo's worktree list (the branch stays)
   whoami | settings [--get key]
   hello [--json]                   who this instance is (root, name, kit, open questions, fleet): what the hub lists
 
