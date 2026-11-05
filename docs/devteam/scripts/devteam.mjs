@@ -56,8 +56,10 @@ process.stdout.on('error', (e) => {
 const argv = process.argv.slice(2);
 const command = argv.shift();
 
+/* args start */
 // Flags take every following non-flag token as their value(s); put positionals before flags.
-// Everything after a bare `--` is left for commands that run another command (gate, act).
+// --key=value takes the value whole, so a value that starts with -- can be passed (round 2, N5).
+// Everything after a bare `--` is left for commands that run another command (gate, act, link set).
 function parseArgs(args) {
   const flags = {};
   const positional = [];
@@ -66,14 +68,16 @@ function parseArgs(args) {
   for (let i = 0; i < own.length; i++) {
     const a = own[i];
     if (a.startsWith('--')) {
-      const key = a.slice(2);
-      const values = [];
+      const eq = a.indexOf('=');
+      const key = eq > 2 ? a.slice(2, eq) : a.slice(2);
+      const values = eq > 2 ? [a.slice(eq + 1)] : [];
       while (i + 1 < own.length && !own[i + 1].startsWith('--')) values.push(own[++i]);
       flags[key] = values.length === 0 ? true : values.length === 1 ? values[0] : values;
     } else positional.push(a);
   }
   return { flags, positional, rest: dash === -1 ? null : args.slice(dash + 1) };
 }
+/* args end */
 
 const { flags, positional, rest } = parseArgs(argv);
 const asList = (v) => (v === undefined || v === true ? [] : Array.isArray(v) ? v : [v]);
@@ -4726,6 +4730,10 @@ function orientClusters() {
 // command it proposes goes through this, since observation text is anyone's to write and the
 // supervisor runs what it pastes (O5, L-SEC-5).
 const shq = (v) => `'${String(v).replace(/'/g, "'\\''")}'`;
+// A flag and its value for a proposed command: --key=value when the value starts with --, which
+// parseArgs would otherwise read as a flag (N5); a link set value then goes after a bare --.
+const shFlag = (k, v) => (String(v).startsWith('--') ? `--${k}=${shq(v)}` : `--${k} ${shq(v)}`);
+const shSetValue = (v) => (String(v).startsWith('--') ? `-- ${shq(v)}` : shq(v));
 // Link observations against the registry (spec §7, orient): a URL already there with a better
 // title, wider for or new notes is a proposed edit; a fresh URL a proposed add; a URL whose title
 // matches another link for an overlapping scope a question about which is the source of truth
@@ -4755,14 +4763,14 @@ function orientLinks() {
     // a file in this repo: no v1 link kind holds one, so it becomes a pointer in knowledge (O11)
     if (!l.url) {
       const scope = asList(l.for).find((sc) => scopeValid(sc, 'knowledge')) ?? 'project';
-      res.push({ key: `link-proposal:${l.path}`, proposal: 'pointer', observation: o.id, command: `knowledge add --kind pointer --statement ${shq(`${l.title}: ${l.path}${l.notes ? ` (${l.notes})` : ''}`)} --scope ${shq(scope)} --evidence ${shq(o.id)}` });
+      res.push({ key: `link-proposal:${l.path}`, proposal: 'pointer', observation: o.id, command: `knowledge add --kind pointer ${shFlag('statement', `${l.title}: ${l.path}${l.notes ? ` (${l.notes})` : ''}`)} --scope ${shq(scope)} --evidence ${shq(o.id)}` });
       continue;
     }
     const same = Object.entries(reg).find(([id0, r]) => { const u = LINK_KINDS[r.kind]?.locator(r, id0).url; return !!u && norm(u) === norm(l.url); });
     if (same) {
       const [id, r] = same;
       const wider = asList(l.for).filter((s) => !asList(r.for).includes(s));
-      const sets = [...(wider.length ? [`link set ${shq(id)} for ${shq(JSON.stringify([...asList(r.for), ...wider]))}`] : []), ...(l.notes && l.notes !== r.notes ? [`link set ${shq(id)} notes ${shq(l.notes)}`] : []), ...(l.title !== title(r.title) && l.title.length > title(r.title).length ? [`link set ${shq(id)} title ${shq(l.title)}`] : [])];
+      const sets = [...(wider.length ? [`link set ${shq(id)} for ${shq(JSON.stringify([...asList(r.for), ...wider]))}`] : []), ...(l.notes && l.notes !== r.notes ? [`link set ${shq(id)} notes ${shSetValue(l.notes)}`] : []), ...(l.title !== title(r.title) && l.title.length > title(r.title).length ? [`link set ${shq(id)} title ${shSetValue(l.title)}`] : [])];
       // an edit to a link of an owner's kind (repo) is the owner's: the proposal is the question
       if (sets.length) res.push({ key: `link-proposal:${id}`, proposal: 'edit', link: id, observation: o.id, command: LINK_KINDS[r.kind]?.ownedByOwner ? `ask --class governance-edit --question ${shq(`Change ${id} in the registry: ${sets.join('; ')}?`)} --evidence ${shq(o.id)} --recommendation yes` : sets.join(' && ') });
       continue;
@@ -4770,7 +4778,7 @@ function orientLinks() {
     const rival = Object.entries(reg).find(([id0, r]) => !!LINK_KINDS[r.kind]?.locator(r, id0).url && title(r.title).toLowerCase() === l.title.toLowerCase() && overlap(r.for, l.for));
     if (rival) { res.push({ key: `link-proposal:${rival[0]}`, proposal: 'conflict', rival: rival[0], observation: o.id, command: `ask --question ${shq(`Which is the source of truth for ${l.title}: ${LINK_KINDS[rival[1].kind].locator(rival[1], rival[0]).url} or ${l.url}?`)} --links ${shq(JSON.stringify([{ title: title(rival[1].title), link: rival[0] }, { title: l.title, url: l.url }]))} --evidence ${shq(o.id)}` }); continue; }
     const nid = newId(l.title);
-    res.push({ key: `link-proposal:${nid}`, proposal: 'add', observation: o.id, command: `link add ${shq(nid)} --kind url --url ${shq(l.url)} --title ${shq(l.title)}${asList(l.for).length ? ` --for ${asList(l.for).map(shq).join(' ')}` : ''}${l.notes ? ` --notes ${shq(l.notes)}` : ''} --source ${shq(o.id)}` });
+    res.push({ key: `link-proposal:${nid}`, proposal: 'add', observation: o.id, command: `link add ${shq(nid)} --kind url --url ${shq(l.url)} ${shFlag('title', l.title)}${asList(l.for).length ? ` --for ${asList(l.for).map(shq).join(' ')}` : ''}${l.notes ? ` ${shFlag('notes', l.notes)}` : ''} --source ${shq(o.id)}` });
   }
   return res;
 }
@@ -7560,8 +7568,10 @@ const LANDING_HINT = 'it applies here now; land it on main with the next chore P
 // owner's kind (repo) is the owner's: PR 2 drafts it as a question; until then it is refused.
 // Nothing here branches on a kind name: the table says whose it is and which fields it has.
 function cmdLink() {
-  const [sub, id, field, ...vals] = positional;
-  if (!['add', 'set', 'rm'].includes(sub) || !id) die('usage: link add <id> --kind <kind> --title t [kind fields: --url u, --remote r …] [--for scope…] [--notes n] [--source id]   |   link set <id> <field> <value>   |   link rm <id>');
+  const [sub, id, field, ...given] = positional;
+  // a set value that starts with -- comes after a bare --: link set <id> <field> -- <value>
+  const vals = [...given, ...(rest ?? [])];
+  if (!['add', 'set', 'rm'].includes(sub) || !id) die('usage: link add <id> --kind <kind> --title t [kind fields: --url u, --remote r …] [--for scope…] [--notes n] [--source id]   |   link set <id> <field> [--] <value>   |   link rm <id>');
   supervisorOnly('link');
   const cur = loadSettings().links?.[id];
   const kind = sub === 'add' ? flagStr('kind') : cur?.kind;
@@ -7597,7 +7607,7 @@ function cmdLink() {
       b.links[id] = entry;
       what = `added ${kind} link ${id} (${K.locator(entry, id).text})`;
     } else if (sub === 'set') {
-      if (!field || !vals.length) die('usage: link set <id> <field> <value>');
+      if (!field || !vals.length) die('usage: link set <id> <field> [--] <value> (a value that starts with -- goes after a bare --)');
       b.links[id] = { ...b.links[id], [field]: linkValue(field, vals) };
       what = `set link ${id} ${field}`;
     } else { delete b.links[id]; what = `removed ${kind} link ${id}`; }
@@ -7799,7 +7809,7 @@ Sessions (worker.md)
 
 Decide and act (supervisor.md, constitution.md)
   links [--json]                  the registry: home and each link, each repo's effective settings, the component lines and their coverage
-  link add <id> --kind url --url u --title t [--for scope…] [--notes n] [--source id] | link set <id> <field> <value> | link rm <id>   supervisor: a url link, written to settings.md and logged as registry-edit; repo links are the owner's
+  link add <id> --kind url --url u --title t [--for scope…] [--notes n] [--source id] | link set <id> <field> [--] <value> | link rm <id>   supervisor: a url link, written to settings.md and logged as registry-edit; repo links are the owner's
   ask --question q [--kind k] [--class c] [--reasons r…] [--recommendation r] [--confidence 0-1] [--default d] [--choices '[{"label","detail","effect"}…]'] [--rule-scope s] [--goal g-… (goal-approval)] [--links '[{"title","path","ref"}|{"title","url"}|{"title","link"}…]' (link: a registry id)] [--blocks ids] [--evidence ids] [--ticket id] [--re m-…] [--note path] [--secrets '[{"name","kind":"string|file","sink"}…]' (owner-action)]
   secret post <qid> [--file NAME=path] [--json]                          owner: post a question's secrets straight to their sinks; never logged (secret sinks lists them)
   ask --kind review --page <repo path> --ref <branch|sha> [--data <repo path>] [--result-schema <repo path>] [--allow-partial] --question q [--context c] [--class c] [--reasons r…] [--ticket id] [--blocks ids] [--re m-…]

@@ -3471,7 +3471,43 @@ test("orient's proposed commands are shell-safe: every value single-quoted, so p
     assert.equal(add[add.indexOf('--title') + 1], `Road $(touch ${pwned}) map`);
     assert.equal(add[add.indexOf('--notes') + 1], evil);
     assert.ok(!fs.existsSync(pwned), 'no command substitution ran');
+    // a value that starts with -- survives the round trip (N5): as --key=value for a flag, after a
+    // bare -- for link set's value; run as printed, each lands exactly as observed
+    ok(old, ['observe-link', '--url', 'https://figma.test/a', '--title', 'Designs', '--notes=--kind repo'], SUP);
+    ok(old, ['observe-link', '--url', 'https://odd.test/x', '--title=--odd', '--notes=--kind repo'], SUP);
+    ok(old, ['observe-link', '--path', 'docs/runbook.md', '--title=--runbook'], SUP);
+    const dashed = json(ok(old, ['orient', '--json'])).filter((x) => x.proposal && x.command.includes('--kind repo') || x.command?.includes('--runbook'));
+    const runAs = (cmd) => { for (const part of cmd.split(' && ')) ok(old, argv(part), SUP); };
+    const e2 = dashed.find((p) => p.proposal === 'edit');
+    assert.deepEqual(argv(e2.command).slice(-2), ['--', '--kind repo']);
+    runAs(e2.command);
+    assert.equal(json(ok(old, ['settings'])).links.figma.notes, '--kind repo');
+    const a2 = dashed.find((p) => p.proposal === 'add');
+    assert.ok(argv(a2.command).includes('--title=--odd') && argv(a2.command).includes('--notes=--kind repo'), a2.command);
+    runAs(a2.command);
+    const odd = Object.values(json(ok(old, ['settings'])).links).find((l) => l.url === 'https://odd.test/x');
+    assert.deepEqual([odd?.title, odd?.notes], ['--odd', '--kind repo']);
+    const p2 = dashed.find((p) => p.proposal === 'pointer');
+    runAs(p2.command);
+    assert.ok(json(ok(old, ['knowledge', '--json'])).some((k) => k.statement === '--runbook: docs/runbook.md'), 'the pointer statement lands whole');
   } finally { F.done(); }
+});
+
+test('parseArgs: --key=value carries a value that starts with --; every other form parses as before (round 2 N5)', () => {
+  const src = fs.readFileSync(path.join(kit, 'scripts', 'devteam.mjs'), 'utf8');
+  const i = src.indexOf('/* args start */'), j = src.indexOf('/* args end */');
+  assert.ok(i >= 0 && j > i, 'parseArgs is marked in devteam.mjs');
+  const parseArgs = vm.runInContext(`${src.slice(i, j)}\n;parseArgs`, vm.createContext({}));
+  const p = (args) => JSON.parse(JSON.stringify(parseArgs(args)));
+  // unchanged: positionals first, a flag takes every following non-flag token, a bare flag is true, -- ends parsing
+  assert.deepEqual(p(['set', 'figma', '--for', 'a', 'b', '--json', '--title', 'T x', '--', 'cmd', '--x']), { flags: { for: ['a', 'b'], json: true, title: 'T x' }, positional: ['set', 'figma'], rest: ['cmd', '--x'] });
+  assert.deepEqual(p(['--a', '-x', '--b']), { flags: { a: '-x', b: true }, positional: [], rest: null }, 'a single-dash value is a value');
+  assert.deepEqual(p([]), { flags: {}, positional: [], rest: null });
+  // new: --key=value, the value taken whole (it may start with -- or hold =), then any following values
+  assert.deepEqual(p(['--notes=--kind repo', '--source', 'o-1']).flags, { notes: '--kind repo', source: 'o-1' });
+  assert.deepEqual(p(['--q=a=b']).flags, { q: 'a=b' });
+  assert.deepEqual(p(['--q=']).flags, { q: '' });
+  assert.deepEqual(p(['--for=a', 'b']).flags, { for: ['a', 'b'] });
 });
 
 test('link-unreachable for a missing checkout or a failing URL (stubbed), and line-pressure from refusals', () => {
