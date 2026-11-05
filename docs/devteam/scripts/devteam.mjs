@@ -972,9 +972,13 @@ function mainRef() {
 // one kept. A push to main from another clone since this checkout last fetched would otherwise be
 // left out of the landing tree, the settings in force and the registry acts (round 2, N1/N4).
 // Settings, the log's memos (landing, coverage), main's log and merge shas are all re-read.
+// A fetch that fails refuses the run, dry runs included: judging the last-fetched main would pass
+// a PR against a main that may have moved (round 3, V1).
 function fetchMain() {
   if (!commonDir) return;
-  git(['fetch', '--quiet', 'origin', loadSettings().main_branch]);
+  const b = loadSettings().main_branch;
+  const f = gitRun(['fetch', '--quiet', 'origin', b]);
+  if (f.status !== 0) die(`could not fetch origin ${b}: ${redactUrl(firstLine(f.err)) || `exit ${f.status}`}; refusing to judge against a stale main`);
   mainRefCache = undefined;
   settingsCache = undefined;
   logCache = null;

@@ -2978,6 +2978,35 @@ test('merge and check-pr fetch main before judging: a push from another clone is
   } finally { F.done(); }
 });
 
+test('a fetch of main that fails refuses merge and check-pr, never judges the stale ref (round 3 V1)', () => {
+  const F = monoFixture('fetch-fails');
+  const { old, run, g, edit } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const body = path.join(F.base, 'body.md');
+  write(body, '## One-way doors\n\nNone.\n');
+  try {
+    const w = path.join(old, '.worktrees', 'chore-tick');
+    g(['worktree', 'add', '-q', '-b', 'chore-tick', w, 'origin/main'], old);
+    edit((j) => { j.tick_minutes = 7; }, w);
+    g(['commit', '-qam', 'chore-tick: x'], w);
+    g(['push', '-q', 'origin', 'chore-tick'], w);
+    const sha = g(['rev-parse', 'HEAD'], w);
+    write(path.join(old, 'docs/devteam/run/pr/chore-tick.md'), '# chore-tick: x\n\n## One-way doors\n\nNone.\n');
+    { const r0 = run(old, ['merge', '--chore', 'tick', '--dry-run'], SUP); assert.equal(r0.status, 0, `with origin reachable it would merge: ${r0.out}${r0.err}`); }
+    // origin becomes unreachable (offline, a broken credential helper): this checkout's origin/main is all it has
+    g(['remote', 'set-url', 'origin', path.join(F.base, 'nope.git')], old);
+    const refused = /could not fetch origin main: .*nope\.git.*; refusing to judge against a stale main/;
+    for (const args of [['merge', '--chore', 'tick', '--dry-run'], ['merge', '--chore', 'tick']]) {
+      const r = run(old, args, SUP);
+      assert.notEqual(r.status, 0, `${args.join(' ')}: ${r.out}`);
+      assert.match(r.err, refused, args.join(' '));
+    }
+    const c = run(old, ['check-pr', '--head-ref', 'chore-tick', '--sha', sha, '--title', 'chore-tick: x', '--body-file', body]);
+    assert.notEqual(c.status, 0, c.out);
+    assert.match(c.err, refused, 'check-pr');
+  } finally { F.done(); }
+});
+
 test('the registry at landing: checked whatever the PR, url edits tied to registry-edit acts, tickets judged by main (F3, F7, F8, O6)', () => {
   const F = monoFixture('registry-landing');
   const { old, ok, run, g, lines, edit } = F;
