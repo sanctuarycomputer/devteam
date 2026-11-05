@@ -1,0 +1,7 @@
+exit 0
+--- stdout
+in-review          g1-01-a
+planned            g1-02-b
+review final: first-pass rejection 0/1
+--- stderr
+
