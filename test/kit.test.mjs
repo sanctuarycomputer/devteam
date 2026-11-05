@@ -705,6 +705,16 @@ test('devteam kit', async (t) => {
       assert.match(dt(['act', '--decision', fid, '--', 'dropped it'], sup).err, /records authority it doesn't have \(gate-change is the owner's/);
       fs.appendFileSync(supFile, line({ id: 'd-20261101-235959001-supervisor', type: 'decision', op: 'new', at: new Date().toISOString(), by: 'supervisor', class: 'production-migration', what: 'migrate it', refs: ['bill-01-card'], authority: 'rung', reversible: true }));
       assert.match(dt(['act', '--decision', 'd-20261101-235959001-supervisor', '--', 'shipped'], sup).err, /production-migration is not on rung 3/);
+      // nor reuse an owner's answer that already approved a call (D used Qx): the earliest call is the one it approved
+      const rid = 'd-20261101-235959002-supervisor';
+      fs.appendFileSync(supFile, line({ id: rid, type: 'decision', op: 'new', at: new Date(Date.now() + 1000).toISOString(), by: 'supervisor', class: 'release-scope', what: 'ship something else', refs: ['bill-02-x'], authority: 'answer', approved_by: Qx }));
+      assert.match(dt(['act', '--decision', rid, '--', 'shipped'], sup).err, new RegExp(`records authority it doesn't have \\(${Qx} already approved a decision \\(${D}\\)`));
+      // nor carry an answer asked about one ticket into a call about another
+      const Qt = must(['ask', '--question', 'Ship the card flow flagged?', '--class', 'release-scope', '--ticket', 'bill-01-card', '--reasons', 'below-rung', '--recommendation', 'yes'], sup);
+      must(['answer', Qt, 'yes']);
+      const tid = 'd-20261101-235959003-supervisor';
+      fs.appendFileSync(supFile, line({ id: tid, type: 'decision', op: 'new', at: new Date(Date.now() + 2000).toISOString(), by: 'supervisor', class: 'release-scope', what: 'ship another', refs: ['bill-02-x'], authority: 'answer', approved_by: Qt }));
+      assert.match(dt(['act', '--decision', tid, '--', 'shipped'], sup).err, new RegExp(`${Qt} was asked about bill-01-card, not bill-02-x`));
       fs.writeFileSync(supFile, before);
     }
     assert.deepEqual(dl.options, ['ship flagged', 'hold a week']);
