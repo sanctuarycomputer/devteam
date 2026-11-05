@@ -784,7 +784,7 @@ http.createServer((req, res) => { const m = fs.readFileSync(${JSON.stringify(mod
     try {
       await serverUp(`http://127.0.0.1:${port}/`);
       landSettings((txt) => txt.replace('"gates": {', `"monitors": { "web": { "kind": "http", "url": "http://127.0.0.1:${port}/up", "expect": { "status": 200, "contains": "ok" }, "down_after": 2, "slo": { "uptime": 0.999, "p95_ms": 100 } } }, "gates": {`));
-      assert.notEqual(dt(['monitor', 'poll']).status, 0, 'only the supervisor polls');
+      assert.notEqual(dt(['monitor', 'poll'], { role: 'worker' }).status, 0, 'a worker never polls production');
       assert.match(must(['monitor', 'test', 'web']), /web: ok \(HTTP 200/);
       must(['monitor', 'poll', '--name', 'web'], sup);
       const status = () => json(must(['monitor', 'status', '--json'])).find((m) => m.name === 'web');
