@@ -136,8 +136,8 @@ function sh(cmd, args, opts = {}) {
 // The tmux session that holds this project's workers and planners: settings.tmux_session when set;
 // else the name saved in run/tmux-session; else devteam-<project>, so two projects on one machine
 // never share a session. A project whose live sessions already sit in a `devteam` session (the
-// default before) keeps it. Resolving writes nothing: the name is saved when the kit creates the
-// session (save), so a read-only command, or CI, never writes into run/.
+// default before) keeps it. Resolving writes nothing, except to keep that legacy name: the name is
+// saved when the kit creates the session (save), so a read-only command, or CI, never writes run/.
 let tmuxSessionName = null;
 function tmuxSession({ save = false } = {}) {
   const s = loadSettings();
@@ -151,12 +151,17 @@ function tmuxSession({ save = false } = {}) {
   // yet). Not liveSessions(): it lists windows, which asks this function.
   const legacy = (sh('tmux', ['list-windows', '-t', '=devteam', '-F', '#W']) ?? '').split('\n').filter(Boolean);
   const ours = (w) => tickets().has(w) || (/^[a-z0-9][a-z0-9-]*$/.test(w) && fs.existsSync(path.join(mainRoot, '.worktrees', w)));
-  const name = legacy.some(ours) ? 'devteam' : `devteam-${slug(s.project ?? path.basename(mainRoot))}`;
-  if (save) { fs.mkdirSync(runDir, { recursive: true }); fs.writeFileSync(file, `${name}\n`); }
+  // Named after the project and this checkout's path, so two clones of one repo (or two repos with
+  // one name) never share a session either.
+  const keep = legacy.some(ours);
+  const name = keep ? 'devteam' : `devteam-${slug(s.project ?? path.basename(mainRoot))}-${crypto.createHash('sha1').update(fs.realpathSync(mainRoot)).digest('hex').slice(0, 6)}`;
+  // A legacy name is saved the moment it is found: once this project's last window there closes it
+  // could no longer be told apart, and the next session would start somewhere else.
+  if (save || keep) { fs.mkdirSync(runDir, { recursive: true }); fs.writeFileSync(file, `${name}\n`); }
   return (tmuxSessionName = name);
 }
 // A window of this project's session, matched exactly: tmux would otherwise take a prefix, so
-// `devteam` would find `devteam-stacks`.
+// `devteam` would find `devteam-<another project>`.
 const tmuxTarget = (window) => `=${tmuxSession()}:${window}`;
 
 const readJson = (p) => JSON.parse(fs.readFileSync(p, 'utf8'));
@@ -5075,7 +5080,7 @@ function collectMetrics(since) {
   for (const id of ts.keys()) {
     const w = workerState(id);
     const wait = paneWaiting(id);
-    if (wait) add('high', 'blocked-prompt', id, wait.kind === 'limit' ? `a usage-limit banner in its pane: "${wait.line}"` : `waiting on a prompt in its pane: "${wait.line}"`, `look (tmux select-window -t ${tmuxTarget(id)}) and clear it (supervisor.md §11); a permission prompt a worker should never see means agent_command or its deny rules need a fix`);
+    if (wait) add('high', 'blocked-prompt', id, wait.kind === 'limit' ? `a usage-limit banner in its pane: "${wait.line}"` : `waiting on a prompt in its pane: "${wait.line}"`, `look (tmux select-window -t '${tmuxTarget(id)}') and clear it (supervisor.md §11); a permission prompt a worker should never see means agent_command or its deny rules need a fix`);
     // waiting is not stale: an open owner question that blocks the ticket, or the worker's own
     // request to the supervisor still unanswered (the unanswered-message finding covers that)
     const waitingOnOwner = openQs.some((q) => (q.blocks ?? []).includes(id) || q.ticket === id);
@@ -5088,7 +5093,7 @@ function collectMetrics(since) {
     const who = `plan-${p.feature}`;
     // a planner parked by a drain stopped on purpose: not gone, exited or stale
     if (p.parked) continue;
-    if (p.waiting) add('high', 'blocked-prompt', who, p.waiting.kind === 'limit' ? `a usage-limit banner in its pane: "${p.waiting.line}"` : `waiting on a prompt in its pane: "${p.waiting.line}"`, `look (tmux select-window -t ${tmuxTarget(who)}) and clear it (supervisor.md §11)`);
+    if (p.waiting) add('high', 'blocked-prompt', who, p.waiting.kind === 'limit' ? `a usage-limit banner in its pane: "${p.waiting.line}"` : `waiting on a prompt in its pane: "${p.waiting.line}"`, `look (tmux select-window -t '${tmuxTarget(who)}') and clear it (supervisor.md §11)`);
     else if (/no agent is running|has exited/.test(p.problem ?? '')) add('high', 'agent-exited', who, p.problem.replace(/; resume it first$/, ''), `resume it: planner ${p.feature} --resume (supervisor.md §11)`);
     else if (!p.window) add('medium', 'planner-gone', who, `plan/${p.feature} isn't on main and its window is gone (${p.problem})`, `resume it (planner ${p.feature} --resume) or, if the plan was dropped, delete the branch`);
     else if (!p.waiting_on_supervisor.length && !p.waiting_on_owner.length && p.minutes_silent > settings.stale_after_minutes) add('high', 'stale-planner', who, `no sign of life for ${p.minutes_silent} min`, 'check its pane; message it or resume it (supervisor.md §11)');
@@ -5352,25 +5357,30 @@ function probeHello(port, ms = 300) {
     req.on('error', () => resolve(null));
   });
 }
-const portFree = (port) => new Promise((resolve) => { const v = net.createServer(); v.once('error', () => resolve(false)); v.listen(port, '127.0.0.1', () => v.close(() => resolve(true))); });
+// Free means nothing answers there and this process could bind it: a dev server on localhost (::1)
+// or on every interface would still pass a bind of 127.0.0.1 alone, then take the owner's
+// localhost:<port> while the dashboard holds 127.0.0.1:<port>.
+const answers = (port, host) => new Promise((resolve) => { const c = net.connect({ port, host, timeout: 300 }); c.once('connect', () => { c.destroy(); resolve(true); }); c.once('timeout', () => { c.destroy(); resolve(false); }); c.once('error', () => resolve(false)); });
+const binds = (port) => new Promise((resolve) => { const v = net.createServer(); v.once('error', () => resolve(false)); v.listen(port, '127.0.0.1', () => v.close(() => resolve(true))); });
+const portFree = async (port) => !(await answers(port, '127.0.0.1')) && !(await answers(port, '::1')) && (await binds(port));
 // The dashboard's port: the one pinned (settings or --port); else the one this checkout used last,
 // if it is free; else one past the highest instance answering in the block, skipping ports held by
 // anything else; else the lowest free one. Saved to run/dashboard-port.
-async function pickDashboardPort() {
+async function pickDashboardPort({ skip = [] } = {}) {
   const pinned = flagStr('port') ?? loadSettings().dashboard_port;
   const span = `${PORT_RANGE[0]}-${PORT_RANGE.at(-1)}`;
   if (pinned != null) {
     const port = Number(pinned);
-    return { port, warn: PORT_RANGE.includes(port) ? null : `port ${port} is outside ${span}: the hub won't list it` };
+    return { port, pinned: true, warn: PORT_RANGE.includes(port) ? null : `port ${port} is outside ${span}: the hub won't list it` };
   }
   const file = path.join(runDir, 'dashboard-port');
   const last = Number(readText(file)?.trim());
-  if (PORT_RANGE.includes(last) && (await portFree(last))) return { port: last, warn: null };
+  if (PORT_RANGE.includes(last) && !skip.includes(last) && (await portFree(last))) return { port: last, warn: null };
   const hellos = await Promise.all(PORT_RANGE.map((p) => probeHello(p)));
   const top = PORT_RANGE.filter((_, i) => hellos[i]).pop();
   const order = top === undefined ? PORT_RANGE : [...PORT_RANGE.filter((p) => p > top), ...PORT_RANGE.filter((p) => p <= top)];
   for (const p of order) {
-    if (hellos[PORT_RANGE.indexOf(p)] || !(await portFree(p))) continue;
+    if (skip.includes(p) || hellos[PORT_RANGE.indexOf(p)] || !(await portFree(p))) continue;
     fs.mkdirSync(runDir, { recursive: true });
     fs.writeFileSync(file, `${p}\n`);
     return { port: p, warn: null };
@@ -5387,24 +5397,43 @@ function startHub(log) {
   const page = path.join(kitDir, 'dashboard', 'hub.html');
   const retry = Number(process.env.DEVTEAM_HUB_RETRY_MS ?? 30000);
   const ownHost = (h) => [`127.0.0.1:${HUB_PORT}`, `localhost:${HUB_PORT}`].includes(h ?? '');
-  const scan = async () => (await Promise.all(PORT_RANGE.map(async (p) => { const h = await probeHello(p); return h ? { ...h, port: p } : null; }))).filter(Boolean).sort((a, b) => String(a.root).localeCompare(String(b.root)));
-  const isHub = () => new Promise((resolve) => {
-    const r = http.get({ host: '127.0.0.1', port: HUB_PORT, path: '/instances.json', timeout: 2000, headers: { host: `127.0.0.1:${HUB_PORT}` } }, (res) => { let b = ''; res.on('data', (c) => { b += c; }); res.on('end', () => { try { resolve(JSON.parse(b)?.hub === 1); } catch { resolve(false); } }); });
-    r.on('timeout', () => { r.destroy(); resolve(false); });
-    r.on('error', () => resolve(false));
+  // One scan at a time, its answer kept for 2 s: however often pages ask, the block is probed at
+  // most every 2 s. An instance speaking a newer hello than this hub knows lists only root and port.
+  let scanning = null;
+  let scanned = { at: 0, list: [] };
+  const probeAll = async () => (await Promise.all(PORT_RANGE.map(async (p) => {
+    const h = await probeHello(p);
+    if (!h) return null;
+    return Number(h.devteam) === 1 ? { ...h, port: p } : { devteam: h.devteam, root: h.root, port: p };
+  }))).filter(Boolean).sort((a, b) => String(a.root).localeCompare(String(b.root)));
+  const scan = () => {
+    if (Date.now() - scanned.at < 2000) return Promise.resolve(scanned.list);
+    scanning ??= probeAll().then((list) => { scanned = { at: Date.now(), list }; return list; }).finally(() => { scanning = null; });
+    return scanning;
+  };
+  // What holds the hub port: 'hub', 'other' (a clean answer that isn't a hub), or 'unsure' (slow,
+  // or gone between the bind and the ask), which is no reason to stop trying.
+  const holder = () => new Promise((resolve) => {
+    const r = http.get({ host: '127.0.0.1', port: HUB_PORT, path: '/instances.json', timeout: 2000, headers: { host: `127.0.0.1:${HUB_PORT}`, 'sec-fetch-site': 'same-origin' } }, (res) => { let b = ''; res.on('data', (c) => { b += c; }); res.on('end', () => { try { resolve(JSON.parse(b)?.hub === 1 ? 'hub' : 'other'); } catch { resolve('other'); } }); });
+    r.on('timeout', () => { r.destroy(); resolve('unsure'); });
+    r.on('error', () => resolve('unsure'));
   });
   const tryListen = () => {
     const hub = http.createServer(async (req, res) => {
       const send = (code, type, body, extra = {}) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...extra }); res.end(body); };
       if (!ownHost(req.headers.host)) return send(403, 'text/plain; charset=utf-8', 'the hub answers only on its own address');
       if (req.method !== 'GET') return send(405, 'text/plain; charset=utf-8', 'the hub only lists', { allow: 'GET' });
+      // The page asks from itself, and a person opens it directly; another site's page doesn't get to
+      // make the hub probe anything (a browser always says where a request came from).
+      const site = req.headers['sec-fetch-site'];
+      if (site && !['same-origin', 'none'].includes(site)) return send(403, 'text/plain; charset=utf-8', 'the hub answers only its own page');
       if (req.url === '/') return send(200, 'text/html; charset=utf-8', fs.readFileSync(page), { 'content-security-policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'" });
       if (req.url === '/instances.json') return send(200, 'application/json', JSON.stringify({ hub: 1, instances: await scan() }));
       return send(404, 'text/plain; charset=utf-8', 'not found');
     });
     hub.once('error', async (e) => {
       if (e.code !== 'EADDRINUSE') return log(`hub: ${e.message}`);
-      if (await isHub()) setTimeout(tryListen, retry).unref();
+      if ((await holder()) !== 'other') setTimeout(tryListen, retry).unref();
       else log(`hub: port ${HUB_PORT} is held by something that isn't a devteam hub; this dashboard won't serve the hub`);
     });
     hub.listen(HUB_PORT, '127.0.0.1', () => log(`hub on http://127.0.0.1:${HUB_PORT}`));
@@ -5414,7 +5443,7 @@ function startHub(log) {
 
 async function cmdDashboard() {
   const picked = await pickDashboardPort();
-  const port = picked.port;
+  let port = picked.port;
   const host = flagStr('host') ?? '127.0.0.1';
   const log = dashboardLogger();
   if (picked.warn) { log(picked.warn); process.stderr.write(`devteam dashboard: ${picked.warn}\n`); }
@@ -5451,11 +5480,22 @@ async function cmdDashboard() {
   const send = (res, code, type, body) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store' }); res.end(body); };
   // /api/hello answers at once from the last `hello` run, which the dashboard refreshes every 30 s
   // in the background: the hub probes every port with a 300 ms budget, and /api/data takes far longer.
+  // One run at a time, each given 20 s; the kit's version is read once, on the first run.
   let hello = null;
-  const refreshHello = async () => { const r = await run(['hello', '--json']); if (r.ok) { try { hello = JSON.parse(r.stdout); } catch {} } };
+  let kit = null;
+  let helloRunning = false;
+  const refreshHello = () => {
+    if (helloRunning) return;
+    helloRunning = true;
+    execFile(process.execPath, [self, 'hello', '--json', ...(kit ? ['--no-kit'] : [])], { cwd: mainRoot, env: ownerEnv, timeout: 20000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
+      helloRunning = false;
+      if (err) return;
+      try { hello = JSON.parse(stdout); kit ??= hello.kit; } catch {}
+    });
+  };
   refreshHello();
   setInterval(refreshHello, 30000).unref();
-  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit: hello?.kit ?? null, inbox: hello?.inbox ?? null, fleet: hello?.fleet ?? null });
+  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, inbox: hello?.inbox ?? null, fleet: hello?.fleet ?? null });
   const server = http.createServer(async (req, res) => {
     // Every route answers only on the dashboard's own address: a page elsewhere that points its own
     // name at 127.0.0.1 (DNS rebinding) sends its own Host, and gets nothing, not even a read.
@@ -5658,8 +5698,18 @@ async function cmdDashboard() {
       send(res, r.ok ? 200 : 400, 'application/json', JSON.stringify(r.ok ? { ok: true, out: r.stdout.trim() } : { error: r.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') }));
     });
   });
-  server.on('error', (e) => { log(`server error: ${e?.stack ?? e}`); process.stderr.write(`devteam dashboard: ${e.message}\n`); process.exit(1); });
-  server.listen(port, host, () => { log(`started on http://${host}:${port} (node ${process.version})`); out(`devteam dashboard on http://${host}:${port}`); startHub(log); });
+  // Two dashboards starting at once can pick the same free port: the one that loses picks again.
+  const tried = [];
+  server.on('error', async (e) => {
+    if (e.code === 'EADDRINUSE' && !picked.pinned && tried.length < PORT_RANGE.length) {
+      tried.push(port);
+      port = (await pickDashboardPort({ skip: tried })).port;
+      return server.listen(port, host);
+    }
+    log(`server error: ${e?.stack ?? e}`); process.stderr.write(`devteam dashboard: ${e.message}\n`); process.exit(1);
+  });
+  server.once('listening', () => { log(`started on http://${host}:${port} (node ${process.version})`); out(`devteam dashboard on http://${host}:${port}`); startHub(log); });
+  server.listen(port, host);
 }
 
 // ===== 11. sessions: workers, planners, messages, phases, gates =====
@@ -6404,7 +6454,7 @@ function moveChecklist(s, memory = []) {
     `start the supervisor in the repo: open ${agent} there and say "Assume the role of the devteam supervisor and resume the fleet" (or step 9's command: DEVTEAM_ROLE=supervisor ${agent} "$(node docs/devteam/scripts/devteam.mjs prompt supervisor)"); tmux need only be installed: the workers get a tmux session of their own`,
     'the supervisor runs fleet unpark, or fleet undrain for a drained fleet (it rebuilds run/log from the landed log, prints the parity fingerprint, puts every goal back as it was) and restarts each parked session with the command it prints',
     'in the browser you use there: turn on "Notify me of new Inbox items" again (a browser setting)',
-    `restart the dashboard where it outlives the session: tmux new-window -d -t ${tmuxSession()} -n dashboard 'node docs/devteam/scripts/devteam.mjs dashboard' (or another terminal), then open the hub, http://127.0.0.1:${HUB_PORT}, which lists every instance on the machine (or the address the dashboard prints)`,
+    `restart the dashboard where it outlives the session: tmux new-window -d -t '=${tmuxSession()}' -n dashboard 'node docs/devteam/scripts/devteam.mjs dashboard' (or another terminal), then open the hub, http://127.0.0.1:${HUB_PORT}, which lists every instance on the machine (or the address the dashboard prints)`,
   ];
 }
 
@@ -6524,13 +6574,15 @@ function cmdWait() {
   report(`nothing new in ${minutes} min: the tick is due`, []);
 }
 
-// hello: who this instance is, for the hub. A fold of the log, without metrics, so the dashboard can
-// run it every 30 s and the hub can read it from /api/hello.
+// hello: who this instance is, for the hub. A fold of the log and one tmux call (no metrics, no git
+// per session), so the dashboard can run it every 30 s; --no-kit skips the kit's file check, which
+// the dashboard does once. The hub reads it from /api/hello.
 function cmdHello() {
   const s = loadSettings();
   const inbox = questions().filter((q) => q.status === 'open').length;
-  const workers = liveSessions().filter((x) => lastPhaseOf(x.name)?.to !== 'parked').length;
-  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: kitVersion(), inbox, fleet: { mode: fleetMode() ?? 'run', workers } };
+  const ours = (w) => tickets().has(w) || (/^[a-z0-9][a-z0-9-]*$/.test(w) && fs.existsSync(path.join(mainRoot, '.worktrees', w)));
+  const workers = (sh('tmux', ['list-windows', '-t', `=${tmuxSession()}`, '-F', '#W']) ?? '').split('\n').filter((w) => w && ours(w)).length;
+  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, fleet: { mode: fleetMode() ?? 'run', workers } };
   return flags.json ? json(r) : out(`${r.name} at ${r.root}: kit ${r.kit}, ${inbox} open question(s), fleet ${r.fleet.mode}, ${workers} session(s)`);
 }
 // The kit's release (settings.upstream_base), +local when the kit that is running differs from the
@@ -6546,6 +6598,10 @@ function kitVersion() {
     const abs = path.join(mainRoot, f);
     if (!fs.existsSync(abs) || git(['hash-object', abs], mainRoot) !== blob) return `${tag}+local`;
   }
+  // a kit file main doesn't have counts too
+  const known = new Set(committed.map(([f]) => f));
+  const walk = (d) => fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => { const abs = path.join(d, e.name); const r = path.relative(mainRoot, abs).split(path.sep).join('/'); if (/^(project|run)(\/|$)/.test(r.slice(rel.length + 1))) return []; return e.isDirectory() ? walk(abs) : [r]; });
+  if (walk(kitDir).some((f) => !known.has(f) && !/(^|\/)\.DS_Store$/.test(f))) return `${tag}+local`;
   return tag;
 }
 function cmdWhoami() {
