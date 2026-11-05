@@ -580,7 +580,10 @@ const linesDeclared = (s) => Object.values(s?.components ?? {}).some((c) => isOb
 const componentLink = (name, s = loadSettings()) => (linesDeclared(s) ? ownEntry(s.components, name)?.link ?? 'home' : 'home');
 const componentsOn = (s, link = 'home') => (linesDeclared(s) ? Object.entries(s.components).filter(([, c]) => (c?.link ?? 'home') === link).map(([name, c]) => ({ name, owns: Array.isArray(c.owns) ? c.owns.filter((g) => typeof g === 'string') : undefined, shared: !!c.shared })) : []);
 // The kit's own files: the kit folder and the project folder, wherever --project moved it.
-// (upstreamSyncApproval reads this one too, rather than computing its own.)
+// (upstreamSyncApproval reads this one too, rather than computing its own.) init also writes into
+// .gitignore, AGENTS.md and CLAUDE.md, but each holds the project's own content beside the kit's,
+// so they are the project's files and a component owns them (the README says so); the workers'
+// harness policy is written per launch under run/, untracked.
 const kitRel = path.relative(repoRoot, devteamDir).split(path.sep).join('/');
 const devteamLine = () => [...(kitRel && !kitRel.startsWith('..') ? [`${kitRel}/**`] : []), ...(projectInRepo ? [`${projectRel}/**`] : [])];
 // The kit's own repo has no lines: everything in it is the kit (§4, open issue 5).

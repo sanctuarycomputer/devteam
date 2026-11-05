@@ -2678,6 +2678,36 @@ function monoFixture(name) {
   return { ...F, settingsFile, edit, lines, STD };
 }
 
+test('every path init writes is in the devteam line or one of the project files the README names', () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-init-paths-'));
+  try {
+    const r = path.join(base, 'repo');
+    fs.mkdirSync(r);
+    const gx = (args) => execFileSync('git', args, { cwd: r, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    gx(['init', '-q', '-b', 'main']);
+    for (const [k, v] of [['user.email', 't@t'], ['user.name', 't']]) gx(['config', k, v]);
+    // a project that already has its own CLAUDE.md, AGENTS.md and .gitignore, so init appends to each
+    write(path.join(r, 'CLAUDE.md'), '# Claude\n\nOur rules.\n');
+    write(path.join(r, 'AGENTS.md'), '# Agents\n\nOur agents.\n');
+    write(path.join(r, '.gitignore'), 'node_modules/\n');
+    fs.cpSync(kit, path.join(r, 'docs', 'devteam'), { recursive: true, filter: (p) => !/[\\/](project|run)([\\/]|$)/.test(p.slice(kit.length)) });
+    gx(['add', '-A']); gx(['commit', '-qm', 'before init']);
+    const env = { ...process.env };
+    for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN']) delete env[k];
+    execFileSync(process.execPath, [path.join(r, 'docs/devteam/scripts/devteam.mjs'), 'init', '--name', 'x'], { cwd: r, env, encoding: 'utf8' });
+    const touched = execFileSync('git', ['status', '--porcelain', '-uall'], { cwd: r, encoding: 'utf8' }).split('\n').filter(Boolean).map((l) => l.slice(3));
+    assert.ok(touched.length, 'init wrote something');
+    const outside = [...new Set(touched.filter((p) => !p.startsWith('docs/devteam/')))].sort();
+    const readme = fs.readFileSync(path.join(path.dirname(kit), '..', 'README.md'), 'utf8');
+    const named = /`init` writes into these files outside `docs\/devteam\/`, and they stay the project's:([^\n]*)/.exec(readme);
+    assert.ok(named, 'the README names the project files init writes into');
+    for (const p of outside) assert.ok(named[1].includes(`\`${p}\``), `${p}: init writes it outside the devteam line, so the README names it as the project's`);
+    assert.deepEqual(outside, ['.gitignore', 'AGENTS.md', 'CLAUDE.md']);
+    // and the README's example lines never claim one of them as a component's own kind of file
+    assert.doesNotMatch(readme.match(/"ops": \{[^\n]*/)?.[0] ?? '', /AGENTS\.md|devteam\.yml/);
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
+});
+
 test('the registry and component lines are validated; labels-only components and no links change nothing', () => {
   const F = monoFixture('registry');
   const { old, ok, run, lines, edit, g } = F;

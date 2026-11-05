@@ -106,9 +106,11 @@ Three shapes, from nothing to add upward.
   "api": { "owns": ["app/**", "lib/**", "config/*.yml", "config/initializers/**"] },
   "routes": { "owns": ["config/routes.rb"] },
   "web": { "owns": ["web/**"] },
-  "ops": { "owns": [".github/**", "README.md", ".gitignore", "AGENTS.md"] }
+  "ops": { "owns": ["ops/**", "Dockerfile", "README.md"] }
 }
 ```
+
+`init` writes into these files outside `docs/devteam/`, and they stay the project's: `.gitignore` (the run folder, worktrees and harness runtime entries), `AGENTS.md` (the devteam section, beside the project's own agent instructions) and `CLAUDE.md` (an `@AGENTS.md` import, only where one exists). Each holds the project's content as well as the kit's, so none is in the `devteam` line: give each to a component like any other file. The workers' harness policy (deny rules, the stop hook) is written per launch under `docs/devteam/run/`, which is gitignored and never tracked.
 
 `devteam.mjs components check` lists the gaps, each with its fix: unowned paths grouped by folder with a suggested owner, paths two lines claim (with both globs), globs that match nothing, and paths that differ only by case. The kit's own files (`docs/devteam/**` and the project folder) are set aside before any line is asked, so `"docs": { "owns": ["docs/**"] }` owns the rest of `docs/` without contesting the kit. A glob that matches nothing (a typo, or a folder whose last file was deleted) is a `line-empty` warning, never a refusal. From then on `validate`, `check-pr` and `merge`, `observe-metrics` and `check-ticket` hold the lines, always by committed settings: main's for a ticket PR and for any PR that leaves `settings.md` alone; for a plan or chore that changes `settings.md`, the settings it would land (and `validate` in that chore's `chore-<slug>` checkout judges its landing tree the same way). `check-pr` and `merge` fetch main first, so a push from another clone is in the tree they judge. A ticket changes one component's line; a contract or integration ticket names the others it spans in `touches_components`.
 
