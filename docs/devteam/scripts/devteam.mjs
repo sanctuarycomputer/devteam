@@ -6637,7 +6637,9 @@ async function httpCheck(m) {
     const bodyOk = !m.expect?.contains || body.includes(m.expect.contains);
     return { ok: statusOk && bodyOk, status: r.status, ms, error: statusOk ? (bodyOk ? null : `the body has no "${m.expect.contains}"`) : `HTTP ${r.status}` };
   } catch (e) {
-    const err = e?.name === 'TimeoutError' ? `no answer in ${m.timeout_s}s` : String(e?.cause?.code ?? e?.cause?.message ?? e?.message ?? e).slice(0, 160);
+    const code = e?.cause?.code;
+    const words = { ECONNREFUSED: 'connection refused', ENOTFOUND: 'no such host', EAI_AGAIN: 'DNS lookup failed', ECONNRESET: 'connection reset', ETIMEDOUT: 'connection timed out', EHOSTUNREACH: 'host unreachable', CERT_HAS_EXPIRED: 'certificate expired', DEPTH_ZERO_SELF_SIGNED_CERT: 'self-signed certificate', ERR_TLS_CERT_ALTNAME_INVALID: 'certificate does not match the host' };
+    const err = e?.name === 'TimeoutError' ? `no answer in ${m.timeout_s}s` : words[code] ?? String(code ?? e?.cause?.message ?? e?.message ?? e).slice(0, 160);
     return { ok: false, status: null, ms: Math.round(performance.now() - t0), error: err };
   }
 }
@@ -6687,7 +6689,7 @@ async function pollMonitor(m, { rollupDay = null } = {}) {
     st.fails = (st.fails ?? 0) + 1;
     st.failing_since ??= sample.at;
     if (st.fails >= m.down_after && st.state !== 'down') {
-      const o = monitorObserve(m, { kind: 'down', detail: `${m.name} is down: ${sample.error} (${st.fails} checks in a row since ${st.failing_since})`, severity: 4, valence: -2, measure: { value: st.fails, unit: 'checks' }, source_key: `monitor:${m.name}:down:${st.failing_since}` });
+      const o = monitorObserve(m, { kind: 'down', detail: `${m.name} is down: ${sample.error} (${st.fails} failed check${st.fails === 1 ? '' : 's'} in a row)`, severity: 4, valence: -2, measure: { value: st.fails, unit: 'checks' }, source_key: `monitor:${m.name}:down:${st.failing_since}` });
       Object.assign(st, { state: 'down', since: st.failing_since, down_id: o.id });
       alerts.push(`${m.name} is down: ${sample.error} (${m.url}; ${o.id})`);
     }
