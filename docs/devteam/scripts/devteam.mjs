@@ -2372,7 +2372,7 @@ function cmdMerge() {
   // (classes governance-edit, process-edit, gate-change); project/ files are the supervisor's.
   let approved = flagStr('approved') ?? null;
   let standing = null;
-  let settingsByRung = null;
+  let settingsActs = null;
   // Owner-only settings, on every kind of PR (a ticket, a plan or a chore).
   {
     const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
@@ -2382,8 +2382,10 @@ function cmdMerge() {
       // A class on the ladder (monitor-change) may also be carried out under a decision in it, or on
       // its rung 3; the owner-only ones need the owner's answer.
       const L = ladder();
-      const d = flagStr('decision') ? logGet(flagStr('decision')) : null;
-      const open = [...new Set(changed.map((c) => c.cls))].filter((cls) => !(L.classes[cls] && ((d?.type === 'decision' && d.class === cls) || rungFor(cls) >= 3)));
+      const target = id ?? (chore ? `chore-${chore}` : plan);
+      const d = flagStr('decision') ? decisionFor(flagStr('decision')) : null;
+      const covers = (cls) => d?.class === cls && (d.refs ?? []).some((r) => [target, `plan-${plan}`].includes(r));
+      const open = [...new Set(changed.map((c) => c.cls))].filter((cls) => !(L.classes[cls] && (covers(cls) || rungFor(cls) >= 3)));
       const classes = [...new Set(changed.map((c) => c.cls))];
       const what = changed.map((c) => `${c.key} (${c.cls})`).join(', ');
       if (open.length && !approved) fails.push(`changes owner settings: ${what}; the owner's answer is needed: --approved <qid> of class ${open.join(' or ')}${open.some((c) => L.classes[c]) ? ` (or, for ${open.filter((c) => L.classes[c]).join(', ')}, a decision in that class: merge --decision <d-id>)` : ''}`);
@@ -2391,7 +2393,7 @@ function cmdMerge() {
         const q = ownerAnswer(approved, 'merge --approved');
         if (!open.includes(q.class)) fails.push(`${approved} is a ${q.class ?? 'classless'} question; changing ${what} needs an answered ${open.join(' or ')} question`);
       }
-      if (!open.length && classes.some((c) => L.classes[c]) && !d) settingsByRung = classes.filter((c) => L.classes[c]);
+      settingsActs = classes.filter((c) => L.classes[c] && !open.includes(c)).map((c) => ({ cls: c, decision: covers(c) ? d.id : undefined, keys: changed.filter((x) => x.cls === c).map((x) => x.key) }));
     }
   }
   // Deploys on merge: merging this is releasing it, so it needs release-production's authority: the
@@ -2402,9 +2404,11 @@ function cmdMerge() {
     const deploys = deployingFiles(base, sha);
     if (deploys.length) {
       const target = id ?? (chore ? `chore-${chore}` : plan);
-      const d = flagStr('decision') ? logGet(flagStr('decision')) : null;
+      // the decision is checked like an act's: not corrected, not lapsed, and naming this target
+      const d = flagStr('decision') ? decisionFor(flagStr('decision')) : null;
       const rung = rungFor('release-production');
-      if (d?.type === 'decision' && d.class === 'release-production') release = { decision: d.id, target };
+      if (d?.class === 'release-production' && !(d.refs ?? []).some((r) => [target, `plan-${plan}`].includes(r))) fails.push(`${d.id} releases ${(d.refs ?? []).join(', ') || 'nothing named'}, not ${target}; decide again for this one`);
+      else if (d?.class === 'release-production') release = { decision: d.id, target };
       else if (rung >= 3) release = { rung, target };
       else fails.push(`merging deploys to production (release: merge; it changes ${deploys.slice(0, 3).join(', ')}${deploys.length > 3 ? ', …' : ''}), and release-production is on rung ${rung} (${RUNG[rung]}): decide --class release-production --refs ${target} [--approved <qid>] -- "release …", then merge --decision <d-id>`);
       if (release) out(`merging deploys to production: a release-production act will be logged (${release.decision ? `under ${release.decision}` : `rung ${rung}`})`);
@@ -2504,9 +2508,11 @@ function cmdMerge() {
   mainLogCache = undefined;
   mergeShaCache.clear();
   const cls = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
-  const act = appendLog({ type: 'act', decision: citing(), class: cls, what: `merged ${branch} at ${sha}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag}, verbatim)` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [], reversible: false, approved_by: approved ?? standing?.rule.id ?? undefined }, 'supervisor');
-  // a ladder class's settings change made on its own rung is an act of that class, like any other
-  for (const cls of settingsByRung ?? []) appendLog({ type: 'act', class: cls, rung: rungFor(cls), what: `changed ${cls === 'monitor-change' ? 'the monitors' : cls} in settings by merging ${branch} at ${sha}`, refs: [id ?? (chore ? `chore-${chore}` : plan), act.id], reversible: true }, 'supervisor');
+  // a release or settings-class decision is carried out by its own act below, not by the merge's
+  const own = release?.decision || (settingsActs ?? []).some((x) => x.decision);
+  const act = appendLog({ type: 'act', decision: own ? undefined : citing(), class: cls, what: `merged ${branch} at ${sha}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag}, verbatim)` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [], reversible: false, approved_by: approved ?? standing?.rule.id ?? undefined }, 'supervisor');
+  // a ladder class's settings change (monitor-change) is an act of that class: under its decision, or on its rung
+  for (const x of settingsActs ?? []) appendLog({ type: 'act', class: x.cls, decision: x.decision, rung: x.decision ? undefined : rungFor(x.cls), what: `changed ${x.keys.join(', ')} in settings by merging ${branch} at ${sha}`, refs: [id ?? (chore ? `chore-${chore}` : plan), act.id], reversible: true }, 'supervisor');
   if (release) {
     const rel = appendLog({ type: 'act', class: 'release-production', decision: release.decision, rung: release.rung, what: `released ${release.target} to production by merging ${branch} at ${sha} (release: merge)`, refs: [release.target, act.id], reversible: false }, 'supervisor');
     out(`released ${release.target} to production (${rel.id})`);
