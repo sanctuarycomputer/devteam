@@ -1654,6 +1654,7 @@ test('devteam kit', async (t) => {
     must(['merge', 'bill-01-card', '--decision', Drel], { role: 'sup' });
     const relAct = json(must(['log', '--type', 'act', '--json'])).find((a) => a.class === 'release-production' && a.refs.includes('bill-01-card'));
     assert.ok(relAct && relAct.decision === Drel && relAct.reversible === false, 'the release is logged as an act under its decision');
+    git(['pull', '-q', '--ff-only', 'origin', 'main']);
     landSettings((txt) => txt.replace('"release": "merge", ', ''));
     git(['fetch', '-q', 'origin', 'main']);
     assert.equal(git(['rev-parse', 'origin/main^2']), H2, 'main merges the verified head');
