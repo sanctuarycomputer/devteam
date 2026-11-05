@@ -1047,7 +1047,7 @@ out({ cursor: 'x' });
     git(['commit', '-qm', 'errs probe']);
     git(['push', '-q', 'origin', 'HEAD:main']);
     landSettings((txt) => txt.replace('"gates": {', `"monitors": { "errs": { "kind": "probe", "probe": "project/monitors/errs.mjs", "triage": { "min_level": "warning" }, "params": { "mode": ${JSON.stringify(mode)}, "deploy_file": ${JSON.stringify(deployFile)} } } }, "gates": {`));
-    let tid = null, tid2 = null;
+    let tid = null, tid2 = null, tid3 = null;
     try {
       must(['monitor', 'poll', '--name', 'errs'], sup);
       // triage: fields first, the messages framed as untrusted, then nothing new
@@ -1136,8 +1136,16 @@ out({ cursor: 'x' });
       fs.writeFileSync(mode, 'late');
       must(['monitor', 'poll', '--name', 'errs'], sup);
       assert.equal(inc().stage, 'verifying', 'a late report of an old event');
-      // an incident whose status the owner set is theirs: verification writes nothing for it
-      must(['problem', 'set', low, '--status', 'owned', '--owner']);
+      // an incident whose status the owner set is theirs: verification writes nothing for it, even
+      // with its fix merged
+      tid3 = 'bill-01-old-api';
+      const ql = must(['ask', '--class', 'incident-fix', '--blocks', low, '--question', 'Fix the old API calls?', '--recommendation', 'fix it', '--default', 'watch', '--reasons', 'below-rung'], sup);
+      must(['answer', ql, 'fix it']);
+      const dl = must(['decide', '--class', 'incident-fix', '--approved', ql, '--refs', low, tid3, '--', 'move off the old API'], sup);
+      must(['ticket', 'add', tid3, '--json', tk, '--decision', dl], sup);
+      must(['problem', 'set', low, '--status', 'mitigating', '--owner']);
+      git(['commit', '-q', '--allow-empty', '-m', `${tid3}: move off the old API`]);
+      git(['push', '-q', 'origin', 'HEAD:main']);
       const logDir = path.join(repo, 'docs/devteam/run/log');
       const sets = () => fs.readdirSync(logDir).flatMap((x) => fs.readFileSync(path.join(logDir, x), 'utf8').split('\n')).filter((l) => l.includes(`"id":"${low}"`) && l.includes('"op":"set"')).length;
       const before = sets();
@@ -1197,7 +1205,7 @@ out({ cursor: 'x' });
       must(['withdraw', q2, '--reason', 'test'], sup);
     } finally {
       for (const q of json(must(['questions', '--json'])).filter((x) => x.status === 'open')) dt(['withdraw', q.id, '--reason', 'test over'], sup);
-      for (const x of [tid, tid2]) if (x && dt(['ticket', 'show', x]).status === 0) must(['ticket', 'set', x, '--json', JSON.stringify({ superseded_by: 'bill-01-card' })], sup);
+      for (const x of [tid, tid2, tid3]) if (x && dt(['ticket', 'show', x]).status === 0) must(['ticket', 'set', x, '--json', JSON.stringify({ superseded_by: 'bill-01-card' })], sup);
       landSettings(() => settingsBefore);
       if (git(['ls-files', 'billing/oom.js'])) { git(['rm', '-q', 'billing/oom.js']); git(['commit', '-qm', 'no oom']); git(['push', '-q', 'origin', 'HEAD:main']); }
       if (git(['ls-files', 'docs/devteam/project/monitors'])) {

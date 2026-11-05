@@ -5202,7 +5202,7 @@ function collectMetrics(since) {
   // a fix merged a day past its deploy lag with no deploy seen; a production problem no monitor saw
   const vd = verifyDefaults();
   for (const p of incidentList().filter((x) => x.status === 'mitigating')) {
-    const t = fixTicketOf(p.id);
+    const t = followTicket(fixTicketOf(p.id));
     const at = t ? mergedAt(t.id) : null;
     const since = at ? deploysSince(at) : [];
     const why = !since.length ? 'no deploy observed since' : since.every((o) => !deployCommit(o)) ? 'the deploys since carry no commit' : since.some((o) => deployCommit(o) && !knownCommit(deployCommit(o))) ? 'a deploy since names a commit this repo doesn\'t have (git fetch?)' : 'no deploy since has its commit';
@@ -7778,6 +7778,8 @@ const isAncestor = (a, b) => SHA_RE.test(a ?? '') && SHA_RE.test(b ?? '') && spa
 const knownCommit = (c) => SHA_RE.test(c ?? '') && spawnSync('git', ['cat-file', '-e', `${c}^{commit}`], { cwd: mainRoot, stdio: 'ignore' }).status === 0;
 const deployCommit = (o) => /\(commit ([0-9a-fA-F]{7,40})\)/.exec(o.detail ?? '')?.[1]?.toLowerCase() ?? null;
 const deployRelease = (o) => /: release (\S+)/.exec(o.detail ?? '')?.[1] ?? null;
+// when a deploy went out: the time the probe gave (no later than the kit saw it), else when it was seen
+const deployAt = (o) => { const at = Date.parse(/ at (\S+)$/.exec(o.detail ?? '')?.[1] ?? ''); const seen = Date.parse(o.created_at); return Number.isNaN(at) ? seen : Math.min(at, seen); };
 const deploysSince = (ms) => logObjects('observation').filter((o) => o.detector === 'monitor' && o.kind === 'deploy' && Date.parse(o.created_at) >= ms).sort(byTime);
 const verifyDefaults = () => ({ verify_hours: 24, deploy_lag_minutes: 15, ...(loadSettings().monitor_defaults ?? {}) });
 // When a fingerprint last happened: the provider's last_seen (the kit's ingest time when it
@@ -7842,30 +7844,38 @@ function verifyIncidents() {
       // assumed only when nothing since the merge says which commit went out
       const assumed = !dep && !since.some((o) => knownCommit(deployCommit(o))) && Date.now() >= mergedMs + d.deploy_lag_minutes * 60000;
       if (!dep && !assumed) { if (p.status !== 'mitigating') setIncident(p, { status: 'mitigating' }); continue; }
-      const from = dep ? Date.parse(dep.created_at) : mergedMs + d.deploy_lag_minutes * 60000;
+      const from = dep ? deployAt(dep) : mergedMs + d.deploy_lag_minutes * 60000;
       const until = new Date(from + verifyWindowMs(p)).toISOString();
       const seen = p.fingerprints.map(fpSummary).reduce((s, f) => s + (f.total ?? 0), 0);
       setIncident(p, { status: 'verifying', verify: { commit: merge, from: new Date(from).toISOString(), until, assumed: !dep, seen, ...(v0.regressed ? { regressed: v0.regressed } : {}) } });
       monitorObserveOnce({ name: p.monitor ?? 'monitors' }, { subject: p.id, kind: 'fix-deployed', detail: `the fix for ${p.id} (${t.id}, ${merge.slice(0, 12)}) is ${dep ? `in release ${deployRelease(dep) ?? '?'}` : 'assumed deployed (no deploy since the merge says which commit went out)'}; verifying until ${until}`, severity: 0, valence: 0, refs: [p.id, t.id, ...(dep ? [dep.id] : [])], source_key: `monitor:fix-deployed:${p.id}:${merge}` });
       continue;
     }
-    const v = v0;
+    let v = v0;
+    // assumed, and the real deploy has turned up since: the window starts there
+    if (v.assumed) {
+      const dep = deploysSince(mergedMs).find((o) => isAncestor(merge, deployCommit(o)));
+      if (dep) {
+        v = { ...v, from: new Date(deployAt(dep)).toISOString(), until: new Date(deployAt(dep) + verifyWindowMs(p)).toISOString(), assumed: false };
+        setIncident(p, { verify: v });
+      }
+    }
     const from = Date.parse(v.from);
     const recurred = p.fingerprints.filter((f) => fpLastEvent(f) > from);
     if (recurred.length) {
       // regressed: observed, reopened, a problem on the decision, one question; never a correction
       const key = `monitor:fix-regressed:${p.id}:${v.commit}`;
       const o = monitorObserveOnce({ name: p.monitor ?? 'monitors' }, { subject: p.id, kind: 'fix-regressed', detail: `the fix for ${p.id} didn't hold: ${recurred.join(', ')} recurred after ${t.id} was deployed`, severity: 3, valence: -2, refs: [p.id, t.id, ...(dec ? [dec.id] : [])], source_key: key }) ?? logObjects('observation').find((x) => x.source_key === key);
-      setIncident(p, { status: 'open', verify: { commit: v.commit, regressed: [...(v.regressed ?? []), v.commit] } });
-      // a run that died after the observation makes these on the next poll, once
-      if (logObjects('problem').some((x) => (x.refs ?? []).includes(o.id))) continue;
-      const prob = appendLog({ type: 'problem', title: `the fix for ${p.title} didn't hold`, severity: 3, realized: true, status: 'open', detail: `${t.id} merged as ${v.commit.slice(0, 12)}, and ${recurred.join(', ')} came back. Stale dynos, cached client bundles, replayed jobs or a second cause sharing the frame can do this as well as a wrong fix.`, threatens: p.threatens ?? [], refs: [p.id, t.id, ...(dec ? [dec.id] : []), o.id] }, 'supervisor');
-      const q = appendLog({
+      // the problem and the question before the reopen, each once: a run that dies part-way is
+      // finished by the next poll, which still sees the incident verifying
+      const prob = logObjects('problem').find((x) => (x.refs ?? []).includes(o.id) && !isIncident(x)) ?? appendLog({ type: 'problem', title: `the fix for ${p.title} didn't hold`, severity: 3, realized: true, status: 'open', detail: `${t.id} merged as ${v.commit.slice(0, 12)}, and ${recurred.join(', ')} came back. Stale dynos, cached client bundles, replayed jobs or a second cause sharing the frame can do this as well as a wrong fix.`, threatens: p.threatens ?? [], refs: [p.id, t.id, ...(dec ? [dec.id] : []), o.id] }, 'supervisor');
+      const q = logObjects('question').find((x) => (x.evidence ?? []).includes(prob.id)) ?? appendLog({
         type: 'question', kind: 'owner-decision', question: `The fix for "${p.title}" didn't hold (${t.id}). Was deciding it a wrong call, or a sound call whose fix failed?`,
         context: `${recurred.join(', ')} recurred after the deploy. A wrong call is a correction you make (correct ${dec?.id ?? '<decision>'} --reason "…"), and incident-fix drops to rung 1. A sound call that failed is a problem (${prob.id}) and changes no trust. Recurrence has innocent causes: stale dynos, cached client bundles, replayed jobs, a second cause sharing the frame.`,
         recommendation: 'Sound call, failed fix', choices: [{ label: 'Sound call, failed fix', detail: `keep ${prob.id} open, fix forward`, effect: 'no trust change' }, { label: 'Wrong call', detail: `correct ${dec?.id ?? 'the decision'} yourself`, effect: 'incident-fix drops to rung 1' }],
         blocks: [p.id], evidence: [o.id, prob.id], why_asked: { reasons: ['owner-only'] },
       }, 'supervisor');
+      setIncident(p, { status: 'open', verify: { commit: v.commit, regressed: [...(v.regressed ?? []), v.commit] } });
       alerts.push(`the fix for ${p.id} didn't hold (${o.id}; question ${q.id})`);
       continue;
     }
@@ -7886,7 +7896,8 @@ function verifyIncidents() {
 // one before it. At most 50 observations a poll, from a high-water mark.
 function suspectEscapes() {
   const markFile = path.join(runDir, 'monitors', 'escapes.json');
-  const mark = jsonOr(markFile, {}).at ?? '';
+  const saved = jsonOr(markFile, {});
+  const mark = typeof saved?.at === 'string' ? saved.at : '';
   const obs = logObjects('observation').filter((x) => x.detector === 'monitor' && x.kind === 'exception' && x.created_at > mark).sort(byTime).slice(0, 50);
   if (!obs.length) return;
   const deploys = deploysSince(0);
@@ -7896,7 +7907,10 @@ function suspectEscapes() {
     const release = /\(release (\S+?)\)/.exec(o.detail ?? '')?.[1];
     const top = fpSummary(id ?? '').frames?.find((fr) => fr.in_repo)?.file;
     const i = release ? deploys.findIndex((x) => deployRelease(x) === release) : -1;
-    const to = i > 0 ? deployCommit(deploys[i]) : null, prev = i > 0 ? deployCommit(deploys[i - 1]) : null;
+    // the release before it: the latest earlier deploy from the same monitor whose commit this repo
+    // knows and is an ancestor of this one (several releases in one run, or two apps, stay apart)
+    const to = i >= 0 ? deployCommit(deploys[i]) : null;
+    const prev = to ? deploys.filter((x, j) => j !== i && x.source === deploys[i].source && deployAt(x) <= deployAt(deploys[i])).map(deployCommit).reverse().find((c) => c && c !== to && knownCommit(c) && isAncestor(c, to)) ?? null : null;
     if (!top || !knownCommit(to) || !knownCommit(prev)) continue;
     const range = new Set((git(['rev-list', `${prev}..${to}`], mainRoot) ?? '').split('\n').filter(Boolean));
     merged ??= [...tickets().values()].map((t) => [t, mergeShaFor(t.id)]).filter(([, s]) => s);
