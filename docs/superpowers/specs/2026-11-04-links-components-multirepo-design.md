@@ -153,7 +153,7 @@ Everything lives in the existing `json devteam` block in `project/settings.md`.
   4. `../<id>`.
 - **Verification:** `repo(id)` checks that the checkout's `origin` matches `remote`, and refuses with one clear message otherwise.
 - **Moving machines:** `fleet status` lists each repo link with its resolved path, and the move checklist names each one.
-- **In CI:** the workflow passes `--path "$GITHUB_WORKSPACE"` for the repo under test (§5.4).
+- **Elsewhere:** a run from another checkout of the repo (a CI job, say) passes `--path <checkout>` (§5.4).
 
 ## 4. Coverage: no part of a codebase can be left out
 
@@ -188,7 +188,7 @@ Everything lives in the existing `json devteam` block in `project/settings.md`.
      - With no lines declared on main or at the head, none of this runs: no tree is read and nothing is merged (G1).
    - **What fails:** a PR that adds an unowned path, renames files out of every line, or narrows a glob. Each refusal names its fix: unowned (extend a line), contested (both globs; narrow one), case (rename one), unlinked.
    - **Chore and settings PRs** get `coverage()` only, and only when components are declared. They never get full `validate`, so an unrelated pre-existing validate error can't block a log or retro PR in a single-repo project.
-   - **At the forge:** the workflow runs the same check, so a PR merged outside the supervisor is caught there too.
+   - **At the forge:** nothing. The kit installs no forge workflow (upstream #102); `merge` is where the check is enforced, and a PR merged with the forge's own button skips it until `observe-metrics` (point 3) finds the gap.
 3. **`observe-metrics`** checks every repo's main each tick. This covers commits that bypass devteam, such as a person pushing to main. A gap becomes an `unowned-files` finding at severity 4. `ready` and `worker` refuse new tickets in that repo until it clears, with a message pointing at the fix: a chore PR that extends a line.
 4. **Ticket footprint.** `check-ticket` refuses a changed file unless:
    - it matches the ticket's `touches`;
@@ -263,9 +263,7 @@ repoOfTicket(t) → repo(component(t.component).link)
 
 - **`merge <id>`** fetches the PR in the ticket's repo using that repo's forge. It runs `checkPr` there, runs the repo's gates (with their `paths` filters) in a detached worktree of that repo at the exact sha, and merges with that repo's `merge_method` and `--match-head-commit` (or the forge-`git` path). The `act` and `gate` lines land in home's live log as today, plus a `repo` field on gate lines.
 - **Plan and chore PRs are always home's.** A chore that must change another repo is a ticket of kind `chore` in that repo's component, under the Upkeep goal.
-- **`init --github` and a new `init --github --repo <link>`:**
-  - `--repo <link>` writes the one-job `check-pr` workflow into a component repo. That workflow makes two checkouts: the repo under test at `$GITHUB_WORKSPACE`, and home read-only beside it (with a `DEVTEAM_HOME_TOKEN` secret when home is private). It runs home's kit with `check-pr --repo <link> --path "$GITHUB_WORKSPACE"`. The setup checklist names that secret.
-  - `fleet status` lists any repo link whose workflow is missing, as a warning, not a block. `merge` runs the same checks itself, so the forge check is defence in depth.
+- **No forge workflow (upstream #102, the owner's decision).** The kit installs no workflow in home or in any repo link; `merge` runs the checks. `check-pr --repo <link> [--path <checkout>]` stays as a command: the same checks for a PR in another repo, minus the gates and the supervisor's approval acts, from that repo's checkout or the one `--path` names. (Rev 2 had `init --github --repo <link>` write a two-checkout workflow; dropped with #102.)
 
 ### 5.5 Releases
 
@@ -337,7 +335,7 @@ Knowledge scopes (`project`, `component:`, `feature:`, `class:`) and link `for` 
 | `link set <id> <field> <value>` and `link rm <id>` | As above, with the class of the field changed. `link rm` refuses while a live ticket, a feature or a design cites the link, and names them (rev 2.2). |
 | `components check [--repo <link>] [--ref <ref>]` | Runs `coverage()` and prints unowned, contested and empty-glob results. Exits 1 on any. |
 | `observe-link …` | §7. |
-| `init --github --repo <link>` | §5.4. |
+| `check-pr --repo <link> [--path <checkout>]` | §5.4. |
 
 Every existing command keeps its arguments. Where a ticket implies a repo, the command uses it. `--repo <link>` is accepted wherever a command takes a ref.
 
@@ -387,7 +385,7 @@ Two PRs, in order. Each is green on its own, and each gets its own release notes
   - §3, §4, §6.1, §6.3, §7, §8 (except `--repo` flags and repo-link adds), §9, and the matching docs;
   - repo links are accepted in settings and validated, but only `home` can host tickets.
   - Migration: none. A single repo is unchanged; a monorepo opts in by declaring components.
-- **PR 2, "Components in other repos":** §5, §6.2 (cross-repo), `--repo` flags, repo-link `link add`, `init --github --repo`, and the docs. Migration: none for existing projects.
+- **PR 2, "Components in other repos":** §5, §6.2 (cross-repo), `--repo` flags, repo-link `link add`, and the docs. Migration: none for existing projects.
 
 ## 12. Testing
 

@@ -4755,7 +4755,7 @@ test('a sibling worker\'s prompt shows its repo\'s remote and project folder as 
   } finally { F.done(); }
 });
 
-test('check-pr --repo checks a sibling PR in that repo, from any checkout (the forge\'s two-checkout run)', () => {
+test('check-pr --repo checks a sibling PR in that repo, from any checkout of it (--path)', () => {
   const F = multiFixture('check-pr-repo');
   const { old, g, runIn, ticket } = F;
   const bodyF = path.join(F.base, 'body.md');
@@ -4769,7 +4769,7 @@ test('check-pr --repo checks a sibling PR in that repo, from any checkout (the f
     g(['add', '-A'], w); g(['commit', '-qm', 'console-01-a: x'], w); g(['push', '-q', 'origin', 'ticket/console-01-a'], w);
     const sha = g(['rev-parse', 'HEAD'], w);
     F.lines({ ...F.STD, console: { link: 'console', owns: ['src/**', 'package.json', '.gitignore'] }, companion: { link: 'companion' } });
-    // as the forge runs it: the sibling checked out at $GITHUB_WORKSPACE, home's kit beside it
+    // from another checkout of the sibling (a CI run's, say), with home's kit
     const ci = path.join(F.base, 'ci-console');
     g(['clone', '-q', F.consoleOrigin, ci], F.base);
     g(['fetch', '-q', 'origin', 'ticket/console-01-a'], ci);
@@ -4943,12 +4943,12 @@ test('fleet status checks a sibling session against its own remote and lists eve
     try {
       assert.match(json(okIn(old, ['fleet', 'status', '--json'], SUP)).blockers.join('\n'), /(^|\n)console: could not fetch origin: .*; what its sessions pushed is unchecked/);
     } finally { fs.renameSync(`${F.consoleOrigin}-away`, F.consoleOrigin); }
-    // a sibling on GitHub with no devteam workflow on its main: a warning, never a blocker
+    // the kit installs no forge workflow, so a sibling on GitHub has no workflow check either
     const links = json(okIn(old, ['settings'])).links;
     F.lines({ ...F.STD, console: { link: 'console' }, companion: { link: 'companion' } }, { links: { ...links, companion: { ...links.companion, forge: 'github' } } });
     const gh = json(okIn(old, ['fleet', 'status', '--json', '--no-fetch'], SUP));
-    assert.match(gh.warnings.join('\n'), /companion has no devteam workflow on its main \(init --github --repo companion\)/);
-    assert.equal(gh.repos.find((r) => r.id === 'companion').workflow, false);
+    assert.doesNotMatch(gh.warnings.join('\n'), /workflow/);
+    assert.equal(gh.repos.find((r) => r.id === 'companion').workflow, undefined);
   } finally { F.done(); }
 });
 
@@ -4983,35 +4983,6 @@ test('the dashboard reads a sibling ticket\'s documents from its repo', async ()
       assert.deepEqual([code, text], [404, 'no checkout of console here']);
       fs.rmSync(path.join(old, 'docs/devteam/run/links.local.json'));
     } finally { srv.kill(); }
-  } finally { F.done(); }
-});
-
-test('init --github --repo writes a component repo\'s check-pr workflow: its checkout and home\'s, beside it', (t) => {
-  const F = multiFixture('init-repo');
-  try {
-    // home's origin written as GitHub's (the workflow checks it out by name); fetches stay local
-    F.g(['remote', 'set-url', 'origin', 'https://github.com/usbclub/home.git'], F.old);
-    F.g(['config', `url.${F.org}.insteadOf`, 'https://github.com/usbclub/home.git'], F.old);
-    const out = F.okIn(F.old, ['init', '--github', '--repo', 'console'], { DEVTEAM_ROLE: 'supervisor' });
-    const wf = path.join(F.console, '.github/workflows/devteam.yml');
-    assert.ok(fs.existsSync(wf), out);
-    assert.ok(!fs.existsSync(path.join(F.old, '.github/workflows/devteam.yml')), "home's own workflow is not this");
-    const y = fs.readFileSync(wf, 'utf8');
-    assert.doesNotMatch(y, /\{[^}\n]*\$\{\{/, 'no ${{ }} inside a flow mapping');
-    assert.match(y, /repository: usbclub\/home\n/);
-    assert.match(y, /path: \.devteam-home/);
-    assert.match(y, /token: \$\{\{ secrets\.DEVTEAM_HOME_TOKEN \|\| github\.token \}\}/);
-    assert.match(y, /DEVTEAM_HOME: \$\{\{ github\.workspace \}\}\/\.devteam-home/);
-    assert.match(y, /node \.devteam-home\/docs\/devteam\/scripts\/devteam\.mjs check-pr --repo console --path "\$GITHUB_WORKSPACE" --head-ref "\$HEAD_REF" --sha "\$HEAD_SHA"/);
-    assert.match(out, /DEVTEAM_HOME_TOKEN/, 'the setup checklist names the secret');
-    assert.match(F.okIn(F.old, ['init', '--github', '--repo', 'console'], { DEVTEAM_ROLE: 'supervisor' }), /exists; nothing to create/);
-    const ry = spawnSync('ruby', ['-ryaml', '-e', 'w = YAML.load_file(ARGV[0]); exit(w["jobs"]["check-pr"]["steps"].size >= 4 ? 0 : 2)', wf], { encoding: 'utf8' });
-    if (ry.error || /No version is set|command not found/.test(ry.stderr ?? '')) t.diagnostic('no runnable ruby: the workflow YAML was checked by pattern only');
-    else assert.equal(ry.status, 0, ry.stderr);
-    assert.match(F.runIn(F.old, ['init', '--github', '--repo', 'nope'], { DEVTEAM_ROLE: 'supervisor' }).err, /no repo link "nope"/);
-    // a home that GitHub can't name: refused, the workflow couldn't check it out
-    F.g(['remote', 'set-url', 'origin', F.org], F.old);
-    assert.match(F.runIn(F.old, ['init', '--github', '--repo', 'companion'], { DEVTEAM_ROLE: 'supervisor' }).err, /home's origin is not a GitHub repo/);
   } finally { F.done(); }
 });
 

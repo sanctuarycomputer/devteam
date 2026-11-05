@@ -3247,7 +3247,7 @@ function cmdReviewWorktree() {
 }
 function cmdCheckPr() {
   const headRef = flagStr('head-ref') ?? die('check-pr needs --head-ref (and --sha, --title, --body-file)');
-  // --repo: a PR in another repo, checked in its checkout (--path, on the forge $GITHUB_WORKSPACE)
+  // --repo: a PR in another repo, checked in its checkout (--path names another one, such as a CI run's)
   const R = repo(flagStr('repo') ?? 'home');
   const sha = R.resolveCommit(flagStr('sha') ?? 'HEAD') ?? die(`cannot resolve the head${R.name === 'home' ? '' : ` in ${R.name}`}`);
   const body = flagStr('body-file') ? fs.readFileSync(flagStr('body-file'), 'utf8') : undefined;
@@ -7776,18 +7776,13 @@ function fleetStatus() {
     else prs = [...(prs ?? []), ...theirs.map((p) => ({ ...p, headRefName: `${R.name}:${p.headRefName}` }))];
   }
 
-  // Every repo link: where its checkout is here, and on GitHub whether its main has the devteam
-  // workflow (defence in depth: merge runs the same checks). Only with repo links, so a
-  // single-repo project's JSON and text are as before.
+  // Every repo link: where its checkout is here. Only with repo links, so a single-repo
+  // project's JSON and text are as before.
   const repos = repoLinks.map(([id, l]) => {
     const at = linkLocation(id);
     const readable = repoReadable(id);
-    const R = readable ? repo(id) : null;
-    const forge = LINK_KINDS[l.kind].effectiveSettings(l, s).forge;
-    const workflow = R && forge === 'github' ? !!R.mainRef() && R.git(['cat-file', '-e', `${R.mainRef()}:.github/workflows/devteam.yml`]) !== null : null;
     if (!readable) blockers.push(`${id}: ${LINK_KINDS[l.kind].fixHint(l, id)}`);
-    if (workflow === false) warnings.push(`${id} has no devteam workflow on its main (init --github --repo ${id}); merge runs the same checks, so this is defence in depth`);
-    return { id, remote: redactUrl(l.remote), path: at, found: fs.existsSync(at), readable, workflow };
+    return { id, remote: redactUrl(l.remote), path: at, found: fs.existsSync(at), readable };
   });
   const checklist = moveChecklist(s, memory);
   const ready = !blockers.length;
@@ -7797,7 +7792,7 @@ function fleetStatus() {
   out(fm ? `${fm === 'park' ? 'parked' : 'draining'}${since ? ` since ${since}` : ''} (${r.fleet.op ?? 'every goal held one by one'}${r.fleet.host ? `, on ${r.fleet.host}` : ''})${r.fleet.reason ? `: ${r.fleet.reason}` : ''}` : 'neither parked nor drained');
   out(`\nsessions:${sessions.length ? '' : ' none'}`);
   for (const x of sessions) out(x.readable === false ? `  ${x.name.padEnd(28)} ${x.parked ? 'parked' : `NOT PARKED (${x.phase ?? '-'})`}  ${x.repo}: NO CHECKOUT HERE` : `  ${x.name.padEnd(28)} ${x.parked ? 'parked' : fm === 'drain' ? `STILL RUNNING (${x.phase ?? '-'})` : `NOT PARKED (${x.phase ?? '-'})`}  ${x.pushed ? 'pushed' : 'NOT PUSHED'}  ${x.clean ? 'clean' : 'UNCOMMITTED'}  ${x.handoff ? 'handoff' : 'NO HANDOFF'}${x.repo ? `  (${x.repo})` : ''}`);
-  if (repoLinks.length) { out('\nrepos:'); for (const x of repos) out(`  ${x.id.padEnd(28)} ${x.remote} at ${x.path}  ${x.readable ? 'found' : x.found ? 'WRONG CHECKOUT' : 'MISSING'}${x.workflow === false ? '  no devteam workflow' : ''}`); }
+  if (repoLinks.length) { out('\nrepos:'); for (const x of repos) out(`  ${x.id.padEnd(28)} ${x.remote} at ${x.path}  ${x.readable ? 'found' : x.found ? 'WRONG CHECKOUT' : 'MISSING'}`); }
   out(`\nlog: ${unlanded.length ? `not landed (${unlanded.map((u) => u.file).join(', ')}): run log-sync, then merge --chore log` : `on ${s.main_branch}`}${leftBehind ? " (the log's own merge act stays behind; git keeps the merge)" : ''}`);
   out(`spend: ${spendOthers.length ? `not yet observed for ${spendOthers.map((x) => `${x.who} $${x.usd}`).join(', ')}` : 'observed up to now'}${supUsd ? `; the supervisor's own $${supUsd} since its last observe-spend` : ''}`);
   out(`review results: ${uncommitted.length ? uncommitted.map((u) => `${u.id} not committed to ${u.ref}`).join('; ') : 'all in their PRs'}${drafts.length ? `; drafts that won't move: ${drafts.join(', ')}` : ''}`);
@@ -8546,62 +8541,7 @@ The record is the log (\`node docs/devteam/scripts/devteam.mjs log | history | q
 Where rules conflict: the owner's explicit instruction, then enforcing configuration (lint, gates, branch protection), then \`project/settings.md\`, then \`governance/\`, then \`process/\`, then the framework's conventions and your judgment (\`constitution.md\` §6).
 `;
 
-// The forge check for a component repo (spec §5.4): the repo under test at $GITHUB_WORKSPACE, home
-// read-only inside it at .devteam-home (actions/checkout can only write under the workspace), and
-// home's kit run against the first. merge runs the same checks itself; this is defence in depth.
-// link is a link id and homeSpec an owner/name, both validated, so neither needs YAML quoting.
-const REPO_WORKFLOW_YML = (link, homeSpec) => `# devteam: an optional required check for a repo whose tickets live in ${homeSpec}'s fleet.
-name: devteam
-on:
-  pull_request:
-    types: [opened, synchronize, reopened, edited, ready_for_review]
-permissions:
-  contents: read
-jobs:
-  check-pr:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: \${{ github.event.pull_request.head.sha }}
-      - uses: actions/checkout@v4
-        with:
-          repository: ${homeSpec}
-          path: .devteam-home
-          fetch-depth: 0
-          # a private home needs a read-only token in this repo's secrets
-          token: \${{ secrets.DEVTEAM_HOME_TOKEN || github.token }}
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - run: git fetch --no-tags origin "+refs/heads/\${{ github.base_ref }}:refs/remotes/origin/\${{ github.base_ref }}"
-      - env:
-          DEVTEAM_HOME: \${{ github.workspace }}/.devteam-home
-          HEAD_REF: \${{ github.head_ref }}
-          HEAD_SHA: \${{ github.event.pull_request.head.sha }}
-          PR_TITLE: \${{ github.event.pull_request.title }}
-          PR_BODY: \${{ github.event.pull_request.body }}
-        run: |
-          printf '%s' "$PR_BODY" > "$RUNNER_TEMP/pr-body.md"
-          node .devteam-home/docs/devteam/scripts/devteam.mjs check-pr --repo ${link} --path "$GITHUB_WORKSPACE" --head-ref "$HEAD_REF" --sha "$HEAD_SHA" --title "$PR_TITLE" --body-file "$RUNNER_TEMP/pr-body.md"
-`;
-// init --github --repo <link>: that repo's check-pr workflow, written into its checkout.
-function initRepoWorkflow(id) {
-  const R = repo(id);
-  const homeSpec = ghSpec(git(['config', '--get', 'remote.origin.url'])) ?? die("init --github --repo: home's origin is not a GitHub repo the workflow can check out");
-  const wf = path.join(R.root, '.github', 'workflows', 'devteam.yml');
-  if (fs.existsSync(wf)) return out(`${wf} exists; nothing to create`);
-  fs.mkdirSync(path.dirname(wf), { recursive: true });
-  fs.writeFileSync(wf, REPO_WORKFLOW_YML(R.name, homeSpec));
-  out(`created:\n  ${wf}`);
-  // the workflow file is a tracked path like any other: once lines are declared it needs an owner
-  const s = committedComponents();
-  const owned = !linesDeclared(s) || ownersOf('.github/workflows/devteam.yml', componentsOn(s, R.name), R.devteamLine()).some((n) => n !== 'devteam');
-  out(`next: land it in ${R.name} as a chore ticket in its component${owned ? '' : `; first put .github/** inside one of ${R.name}'s component lines (settings components), or the new file is unowned and its PR is refused`}; if ${homeSpec} is private, add a read-only token for it to ${redactUrl(R.remote)}'s secrets as DEVTEAM_HOME_TOKEN; then make the devteam check required there`);
-}
 function cmdInit() {
-  if (flags.github && flagStr('repo')) return initRepoWorkflow(flagStr('repo'));
   const root = mainRoot;
   const made = [];
   const put = (p, text) => { if (!fs.existsSync(p)) { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, text); made.push(path.relative(root, p)); } };
@@ -8629,7 +8569,7 @@ function cmdInit() {
 const HELP = `devteam <command>   (positionals before flags; flags take the words after them)
 
 Setup and roles
-  init [--name n] [--upstream-base vX] [--github [--repo <link>]]   project folders, settings, .gitignore, the devteam section of AGENTS.md; --github --repo writes the check-pr workflow into a component repo (its checkout and home's beside it)
+  init [--name n] [--upstream-base vX] [--github]   project folders, settings, .gitignore, the devteam section of AGENTS.md
   prompt supervisor | worker <id> | planner <feature>    the prompt a session starts with
   worker <ticket-id> [--resume] [--force] | planner <feature> [--goal <g-id>] [--resume] [--force] [--id-block <n>]   supervisor: a worktree, a tmux window and an agent for a ticket or a feature plan (a new planner names its goal and reserves n ticket numbers, default 20); refused while its goal is parked or let go, or draining for a session that hasn't run, unless --force (logged); --resume where no session exists starts fresh with the handoff note
   whoami | settings [--get key]
@@ -8654,7 +8594,7 @@ The graph (planning.md)
 
 Checks and merging (quality.md)
   check-ticket <id> [--sha s] [--title t] [--body-file f] [--pr n]   definition of done at an exact head
-  check-pr --head-ref r --sha s [--title t] [--body-file f] [--repo <link> [--path <checkout>]]   what the forge's required check runs (optional; no gates, no approval acts); --repo checks a PR in another repo (the forge's run passes --path "$GITHUB_WORKSPACE")
+  check-pr --head-ref r --sha s [--title t] [--body-file f] [--repo <link> [--path <checkout>]]   what the forge's required check runs (optional; no gates, no approval acts); --repo checks a PR in another repo, in its checkout (--path names another one, such as a CI run's)
   merge <ticket-id> | merge --plan <feature> | merge --chore <slug> [--approved qid] [--no-gates] [--dry-run]   supervisor: verify, run gates at the head, merge, log the act
   review-worktree <ticket-id> <sha> [--name suffix] | review-worktree --remove <path>   a final reviewer's detached worktree at exactly that sha, seeded like a worker's
 
