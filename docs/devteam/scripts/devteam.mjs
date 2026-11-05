@@ -3164,15 +3164,23 @@ function registryActFails(base, sha) {
 // main has (prior_hash) to the entry that lands (entry_hash). One answer may approve a bundle (its
 // question showed every entry), but an entry its question never showed, or a hand edit of one it
 // did, has no such act and is refused by name.
+// What the owner saw binds what lands: every changed owner-kind link entry must appear in the
+// answered question's settings diff exactly (main's entry then, and the entry that lands). Acts
+// are history only: a hand-written act line can't widen an answer. The question is read as it
+// stood when the owner answered; a context written after the answer approves nothing.
 function ownerLinkActFails(changed, sha, approved) {
   const keys = changed.filter((c) => c.key.startsWith('links.'));
   if (!keys.length) return [];
+  const q = logGet(approved);
+  const ups = q?.updates ?? [];
+  const ansAt = ups.findLastIndex((u) => u.answer !== undefined && writerClass(u.by) === 'owner');
+  if (ansAt >= 0 && ups.slice(ansAt + 1).some((u) => u.context !== undefined || u.question !== undefined)) return [`${approved}'s question was changed after the owner answered it: that answer approves only what it showed then; ask again`];
+  const shown = String(q?.context ?? '');
   const lands = settingsAt(sha, { orNull: true })?.links ?? {};
   const onMain = mainSettings(null)?.links ?? {};
-  const acts = logObjects('act').filter((a) => a.approved_by === approved && ['governance-edit', 'gate-change'].includes(a.class) && Object.hasOwn(a, 'entry_hash') && Object.hasOwn(a, 'prior_hash'));
-  const bound = (l) => acts.some((a) => (a.refs ?? []).includes(`link:${l}`) && a.entry_hash === linkEntryHash(ownEntry(lands, l)) && a.prior_hash === linkEntryHash(ownEntry(onMain, l)));
-  const bare = keys.filter((c) => !bound(c.key.split('.')[1])).map((c) => c.key);
-  return bare.length ? [`changes ${bare.join(', ')}, which ${approved} did not approve: an answer lands only the entries its question showed, as link add|set|rm --approved ${approved} wrote them; ask the owner about ${bare.length > 1 ? 'these' : 'this one'} (link add|set|rm, whose question shows every repo link change waiting to land), or take ${bare.length > 1 ? 'them' : 'it'} out of this PR`] : [];
+  const saw = (l) => shown.split('\n').includes(`links.${l}: main has ${canonical(ownEntry(onMain, l) ?? null)}; would be ${canonical(ownEntry(lands, l) ?? null)}`);
+  const bare = [...new Set(keys.map((c) => c.key.split('.')[1]))].filter((l) => !saw(l)).map((l) => keys.filter((c) => c.key.split('.')[1] === l).map((c) => c.key)).flat();
+  return bare.length ? [`changes ${bare.join(', ')}, which ${approved} did not approve: an answer lands only the entries its question showed, exactly as it showed them; ask the owner about ${bare.length > 1 ? 'these' : 'this one'} (link add|set|rm, whose question shows every repo link change waiting to land), or take ${bare.length > 1 ? 'them' : 'it'} out of this PR`] : [];
 }
 // What the forge's check (optional) and `merge` both check for a PR, by branch kind. Gates are not
 // run here. A chore PR may not touch the log (chore-log touches nothing else) or a ticket's folder.

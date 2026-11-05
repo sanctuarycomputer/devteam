@@ -5625,6 +5625,52 @@ test('link add --kind repo asks the owner a governance-edit question and writes 
 
 // One answer may approve a bundle of repo link changes, but only the bundle its question showed:
 // merge binds each changed owner-kind entry to an act of that answer with the entry that lands.
+test('what the owner saw binds what lands: a hand-written act, or a question changed after the answer, widens nothing', () => {
+  const F = multiFixture('link-forge');
+  const { old, g, okIn, runIn } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const add = ['link', 'add', 'docs', '--kind', 'repo', '--remote', 'usbclub/docs', '--title', 'Docs site'];
+  const canon = (v) => (Array.isArray(v) ? `[${v.map(canon).join(',')}]` : v && typeof v === 'object' ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canon(v[k])}`).join(',')}}` : JSON.stringify(v));
+  const hash = (e) => `sha256:${crypto.createHash('sha256').update(canon(e)).digest('hex')}`;
+  try {
+    const qid = /q-[0-9]+-[0-9]+-supervisor/.exec(okIn(old, add, SUP))[0];
+    okIn(old, ['answer', qid, 'yes']);
+    okIn(old, [...add, '--approved', qid], SUP);
+    const wt = path.join(old, '.worktrees', 'chore-registry');
+    g(['worktree', 'add', '-q', '-b', 'chore-registry', wt, 'origin/main'], old);
+    okIn(old, ['link', 'land', 'registry'], SUP);
+    const wf = path.join(wt, 'docs/devteam/project/settings.md');
+    const text = fs.readFileSync(wf, 'utf8');
+    const m = /```json devteam\s*\n([\s\S]*?)\n```/.exec(text);
+    const blk = JSON.parse(m[1]);
+    const mainConsole = structuredClone(blk.links.console);
+    blk.links.console.gates = { test: 'true' };
+    fs.writeFileSync(wf, text.replace(m[1], JSON.stringify(blk, null, 2)));
+    g(['commit', '-qam', 'chore-registry: docs repo'], wt);
+    g(['push', '-q', 'origin', 'chore-registry'], wt);
+    write(path.join(old, 'docs/devteam/run/pr/chore-registry.md'), '# chore-registry: docs repo\n\n## One-way doors\n\nNone.\n');
+    const logDir = path.join(old, 'docs/devteam/run/log');
+    const supFile = path.join(logDir, fs.readdirSync(logDir).find((f) => /^supervisor-/.test(f)));
+    const before = fs.readFileSync(supFile, 'utf8');
+    // a hand-written act binding console's edited entry to the owner's yes about docs
+    fs.appendFileSync(supFile, line({ id: 'a-20261105-120000001-supervisor', type: 'act', op: 'new', at: new Date().toISOString(), by: 'supervisor', class: 'governance-edit', what: 'links.console', refs: ['chore-registry', 'link:console'], reversible: true, approved_by: qid, entry_hash: hash(blk.links.console), prior_hash: hash(mainConsole) }));
+    const forged = runIn(old, ['merge', '--chore', 'registry', '--dry-run', '--approved', qid], SUP);
+    assert.notEqual(forged.status, 0);
+    assert.match(forged.out + forged.err, new RegExp(`changes links\\.console\\.gates, which ${qid} did not approve`));
+    fs.writeFileSync(supFile, before);
+    // the question's context rewritten after the answer to show console too: widens nothing
+    const shown = `links.console: main has ${canon(mainConsole)}; would be ${canon(blk.links.console)}`;
+    const q = json(okIn(old, ['questions', '--id', qid, '--json']))[0];
+    fs.appendFileSync(supFile, line({ id: qid, type: 'question', op: 'set', at: new Date(Date.now() + 1000).toISOString(), by: 'supervisor', context: `${q.context}\n${shown}` }));
+    // the log refuses the line (a question's context is the asker's, written once), so the owner's record stands
+    assert.match(runIn(old, ['log-check']).out, /may not set question\.context/);
+    const widened = runIn(old, ['merge', '--chore', 'registry', '--dry-run', '--approved', qid], SUP);
+    assert.notEqual(widened.status, 0);
+    assert.match(widened.out + widened.err, new RegExp(`changes links\\.console\\.gates, which ${qid} did not approve|question was changed after the owner answered it`));
+    fs.writeFileSync(supFile, before);
+  } finally { F.done(); }
+});
+
 test('the owner\'s "no" adds no repo link: link --approved and merge --approved both refuse it', () => {
   const F = multiFixture('link-no');
   const { old, okIn, runIn } = F;
