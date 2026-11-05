@@ -847,6 +847,7 @@ http.createServer((req, res) => { const m = fs.readFileSync(${JSON.stringify(mod
       ['random Xk9mP2qR7vT4wY6zB8nC1dF3gH5jK0lQ end', 'random [token] end'],
       ['Cookie: _session=abc; theme=dark', 'Cookie: [redacted]'],
       ['call +14155550100 now', 'call [phone] now'],
+      ['Authorization: Basic YWRtaW46c2VjcmV0', 'Authorization: [redacted] [token]'],
       ['Token validation failed; Basic authentication required', null],
       ['set address=12 Main St, then', 'set address=[redacted] Main St, then'],
       // what stays: classes, paths, line numbers, timestamps, versions, ids, shas, hosts
@@ -861,7 +862,7 @@ http.createServer((req, res) => { const m = fs.readFileSync(${JSON.stringify(mod
     const t0 = Date.now();
     const scrubbed = must(['monitor', 'scrub'], { input: `${long}\n${'b'.repeat(64000)}@x` });
     assert.ok(Date.now() - t0 < 5000, `scrubbing 360 KB took ${Date.now() - t0}ms`);
-    assert.match(scrubbed.split('\n')[0], /^a{16384}…\[cut at 16 KB\]$/);
+    assert.match(scrubbed.split('\n')[0], /^a{16384} …\[cut at 16 KB\]$/);
   });
 
   await t.test('monitoring probes: run from main, credentials redacted, events scrubbed and observed once, spikes, back-off and drift findings, a stream spooled, and discovery', async () => {
