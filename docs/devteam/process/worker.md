@@ -65,7 +65,7 @@ Record what is worth knowing beyond your ticket as an observation: a slow or fla
 devteam.mjs observe --subject api --kind slow-test --detail "auth suite takes 40s; hits a real SMTP server" --severity 2 --valence -1 --key slow:auth-suite
 ```
 
-When the work depends on a resource the registry lacks (a design cited in a PR, a runbook), log it: `devteam.mjs observe-link --url <u> --title <t> [--for component:<c>]`.
+When the work depends on a resource the registry lacks (a design cited in a PR, a runbook), log it: `devteam.mjs observe-link --url <u> --title <t> [--for component:<c>]`. The title and any `--notes` are one line each (at most 120 and 500 characters); orient proposes your observation as yours, for the supervisor to check, and narrows `--for all` to your ticket's component.
 
 The supervisor turns recurring observations into lessons, and accepted lessons reach the next workers' prompts. You write only what git can't know; never merged, reviewed or released status.
 
