@@ -67,7 +67,7 @@ The checks run over a **tree**, not only a checkout: one function takes a list o
 - planners, in their plan worktree, landing with the plan PR;
 - the supervisor, in a chore worktree (`devteam.mjs chore start artifact-<slug>`), landing with that chore PR.
 
-That includes artifacts the owner asks for. An artifact is not production code, so the supervisor drawing one stays inside its "writes no production code" rule. The constitution's role line says so.
+That includes artifacts the owner asks for. An artifact is not production code, so the supervisor drawing one stays inside its "writes no production code" rule, and `process/supervisor.md` says so.
 
 ### Commands
 
@@ -178,7 +178,7 @@ The server resolves each open question's artifact links when it builds `dashboar
 - **`process/supervisor.md` §6.** Question links can now carry `name`, inline `[[name]]` and `artifact`. Link mocks inline. A decision on a mock is a normal question about it, or a review page when the answer is structured. An HTML mock is an artifact, never a `path` link to an `.html` file (the drawer shows such a file with scripts off).
 - **`process/supervisor.md`, a new short section "Artifacts".** What they are, when to draw one, the owner asking for one (draw it in a chore worktree, tell the owner it's in the Library, iterate, land it), and the commands.
 - **`process/worker.md` §7.** A worker may draw an artifact for its ticket and link it from its review request.
-- **`governance/constitution.md`.** The supervisor's role line notes that artifacts aren't production code.
+- **`process/supervisor.md` opening and the README roles.** The supervisor's "writes no production code" line notes that artifacts aren't production code.
 - **README.** The tree gains `project/artifacts/<slug>/`, and the agent docs gain a short paragraph.
 - **Schema.** The question link item gains `name`, `artifact`, `at` and `sha256`.
 
