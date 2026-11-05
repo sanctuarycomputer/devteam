@@ -3024,6 +3024,22 @@ test('coverage at landing: no lines, no tree work; every forge judges the merge;
   } finally { F.done(); }
 });
 
+test('validate warns when lines are declared and git is older than 2.38, in the words merge refuses with', () => {
+  const F = monoFixture('old-git-warn');
+  const { old, run, lines } = F;
+  const oldGit = gitShim(F, 'old');
+  const said = 'components: coverage needs git ≥ 2.38 (merge-tree --write-tree); found 2.34.1; coverage fails closed until it can';
+  try {
+    const v0 = run(old, ['validate'], oldGit.env);
+    assert.doesNotMatch(v0.out + v0.err, /git ≥ 2\.38/, 'no lines: an older git is fine');
+    lines(F.STD);
+    const v = run(old, ['validate'], oldGit.env);
+    assert.equal(v.status, 0, `a warning, not an error: ${v.out}${v.err}`);
+    assert.ok((v.out + v.err).includes(said), `the merge refusal's words: ${v.out}${v.err}`);
+    assert.doesNotMatch(run(old, ['validate']).out, /git ≥ 2\.38/, 'a current git: nothing to say');
+  } finally { F.done(); }
+});
+
 test('merge and check-pr fetch main before judging: a push from another clone is in the tree they check (round 2 N1, N4)', () => {
   const F = monoFixture('fresh-main');
   const { old, run, g, lines, edit } = F;

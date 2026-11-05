@@ -2069,6 +2069,9 @@ function cmdValidate() {
     const reg = registryProblems(s);
     errors.push(...reg.errors);
     warnings.push(...reg.warnings);
+    // With lines, check-pr and merge judge the tree a PR would land, which takes git 2.38; say so
+    // here, in the words merge refuses with, before the first PR meets it.
+    if (linesDeclared(s) && gitTooOld()) warnings.push(`components: ${gitTooOld()}; coverage fails closed until it can`);
     // A reserved slug as a component prefix: the one G1 exception, only for a project already using it.
     // Only live tickets: a superseded or merged one is history, so the prescribed fix clears it (F5).
     const reserved = [...ts.values()].filter((t) => isActive(t) && !mergeShaFor(t.id) && RESERVED_LINKS.includes(t.component)).map((t) => t.id);
