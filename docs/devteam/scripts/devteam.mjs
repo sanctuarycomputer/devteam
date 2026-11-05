@@ -377,7 +377,11 @@ function hasCredentials(u) {
 }
 const CREDENTIALS_REFUSED = 'credentials never go in settings or the log; use git\'s credential helper, or "check": false for a page behind auth';
 // A URL or remote as it may be echoed into a message, a log line or a prompt: credentials stripped.
-const redactUrl = (text) => String(text ?? '').replace(/\b(https?:\/\/)[^/\s@]+@/gi, '$1').replace(/\b([a-z][a-z0-9+.-]*:\/\/[^/\s:@]+):[^/\s@]*@/gi, '$1@');
+// Userinfo runs to the LAST @ before the host, as URL parsers and git split it, so a password
+// holding a raw @ goes too (round 2, N5); it never runs past the first / ? or #.
+const redactUrl = (text) => String(text ?? '').replace(/\b(https?:\/\/)[^/?#\s]*@/gi, '$1').replace(/\b([a-z][a-z0-9+.-]*:\/\/[^/?#\s:@]+):[^/?#\s]*@/gi, '$1@');
+// A link entry as it may be shown (links, settings, a question's links): url and remote redacted.
+const redactLink = (l) => (isObj(l) ? { ...l, ...(typeof l.url === 'string' ? { url: redactUrl(l.url) } : {}), ...(typeof l.remote === 'string' ? { remote: redactUrl(l.remote) } : {}) } : l);
 // A local remote is a path, written so nobody mistakes it for owner/name: ./, ../ or absolute.
 const localRemote = (r) => !/^[a-z][a-z0-9+.-]*:\/\//i.test(r) && !/^[\w.-]+@[\w.-]+:/.test(r) && !/^[\w.-]+\/[\w.-]+$/.test(r);
 // Every per-kind behaviour of a link (spec §3.1). A new kind (doc, dataset, mcp) is one entry here;
@@ -396,7 +400,7 @@ const LINK_KINDS = {
       const errs = [];
       if (typeof l.remote !== 'string') return errs;
       if (hasCredentials(l.remote)) return [`${at}: its remote carries credentials; ${CREDENTIALS_REFUSED}`];
-      if (localRemote(l.remote) && !/^(\.{1,2}\/|\/)/.test(l.remote)) errs.push(`${at}: remote "${l.remote}" is neither owner/name nor a URL; a local remote is a path starting ./, ../ or /`);
+      if (localRemote(l.remote) && !/^(\.{1,2}\/|\/)/.test(l.remote)) errs.push(`${at}: remote "${redactUrl(l.remote)}" is neither owner/name nor a URL; a local remote is a path starting ./, ../ or /`);
       const k = remoteKey(l.remote);
       if (ctx.homeOrigin && k === remoteKey(ctx.homeOrigin)) errs.push(`${at}: the repo that holds the kit (home) is never a link`);
       else if (fs.existsSync(linkLocation(ctx.id)) && realOrSelf(linkLocation(ctx.id)) === realOrSelf(mainRoot)) errs.push(`${at}: its path is the repo that holds the kit (home)`);
@@ -430,10 +434,10 @@ const LINK_KINDS = {
       const ssh = process.env.GIT_SSH_COMMAND || git(['config', '--get', 'core.sshCommand'], at) ? {} : { GIT_SSH_COMMAND: 'ssh -o BatchMode=yes' };
       return { cmd: 'git', args: ['ls-remote', '--exit-code', '-q', 'origin', 'HEAD'], cwd: at, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '', SSH_ASKPASS: '', ...ssh }, judge: (code) => (code === 0 ? {} : { problem: `its remote ${redactUrl(link.remote)} does not resolve` }) };
     },
-    fixHint: (link, id) => `clone ${link.remote} at ${linkLocation(id)}, or set its path (run/links.local.json on this machine)`,
+    fixHint: (link, id) => `clone ${redactUrl(link.remote)} at ${linkLocation(id)}, or set its path (run/links.local.json on this machine)`,
     // where it is, for a person, a question and the dashboard
-    locator: (link, id) => ({ text: `repo ${link.remote} at ${linkLocation(id)} (${fs.existsSync(linkLocation(id)) ? 'found' : 'missing'})`, remote: link.remote }),
-    promptLine: (link, id) => `- ${link.title} (repo ${link.remote}, checked out at ${linkLocation(id)}; read it for reference, change it only through a ticket in it)${link.notes ? `: ${link.notes}` : ''} [link:${id}]`,
+    locator: (link, id) => ({ text: `repo ${redactUrl(link.remote)} at ${linkLocation(id)} (${fs.existsSync(linkLocation(id)) ? 'found' : 'missing'})`, remote: redactUrl(link.remote) }),
+    promptLine: (link, id) => `- ${link.title} (repo ${redactUrl(link.remote)}, checked out at ${linkLocation(id)}; read it for reference, change it only through a ticket in it)${link.notes ? `: ${link.notes}` : ''} [link:${id}]`,
   },
   url: {
     fields: { required: ['url'], optional: ['check'] },
@@ -465,8 +469,8 @@ const LINK_KINDS = {
       };
     },
     fixHint: () => 'fix or remove the link (link set|rm), or "check": false for a page behind auth',
-    locator: (link) => ({ text: link.url, url: link.url }),
-    promptLine: (link, id) => `- ${link.title} (${link.url})${link.notes ? `: ${link.notes}` : ''} [link:${id}]`,
+    locator: (link) => ({ text: redactUrl(link.url), url: redactUrl(link.url) }),
+    promptLine: (link, id) => `- ${link.title} (${redactUrl(link.url)})${link.notes ? `: ${link.notes}` : ''} [link:${id}]`,
   },
 };
 // The classes a link change can be that are the supervisor's: a logged act, never an owner answer.
@@ -1130,7 +1134,7 @@ function questionView(q) {
 }
 // The inbox's view: each question with its goal's hold (never inside questionView, which the fold uses).
 // A link item that names a registry link shows its kind's locator: a url link's url, a repo link's remote.
-const resolveQuestionLinks = (ls) => { const reg = loadSettings().links ?? {}; return (ls ?? []).map((l) => { const r = l?.link ? reg[l.link] : null; const K = r ? LINK_KINDS[r.kind] : null; if (!K) return l; const { text, ...where } = K.locator(r, l.link); return { ...l, ...where }; }); };
+const resolveQuestionLinks = (ls) => { const reg = loadSettings().links ?? {}; return (ls ?? []).map((l) => { const r = l?.link ? reg[l.link] : null; const K = r ? LINK_KINDS[r.kind] : null; if (!K) return redactLink(l); const { text, ...where } = K.locator(r, l.link); return redactLink({ ...l, ...where }); }); };
 const questions = () => logObjects('question').map((q) => { const v = questionView(q); return { ...v, links: resolveQuestionLinks(v.links), goal_hold: questionHold(q) }; });
 
 // Why question q does not authorise the supervisor to change goal goalId (null when it does): it
@@ -2878,7 +2882,7 @@ function upstreamSyncApproval(chore, sha, changed) {
   for (const t of new Set([raw, raw.replace(/^(v\d+)-(\d+)-(\d+)/, '$1.$2.$3')])) {
     if (git(['fetch', '--quiet', '--no-tags', src, `+refs/tags/${t}:refs/devteam-upstream/${t}`], mainRoot) !== null) { tag = t; break; }
   }
-  if (!tag) return { problem: `standing approval for upstream syncs: no tag "${raw}" at ${s.upstream_repo}` };
+  if (!tag) return { problem: `standing approval for upstream syncs: no tag "${raw}" at ${redactUrl(s.upstream_repo)}` };
   const blob = (ref, f) => git(['rev-parse', '--verify', '--quiet', `${ref}:${f}`], mainRoot);
   const differ = [];
   for (const f of changed) {
@@ -7116,7 +7120,7 @@ function fleetStatus() {
 
 // The new machine's steps, from the settings and the log: what git doesn't carry.
 function moveChecklist(s, memory = []) {
-  const url = git(['remote', 'get-url', 'origin']) ?? '<the repo>';
+  const url = redactUrl(git(['remote', 'get-url', 'origin']) ?? '<the repo>');
   const pins = ['.tool-versions', '.nvmrc', '.node-version'].filter((f) => fs.existsSync(path.join(mainRoot, f)));
   const agent = (s.agent_command ?? '').trim().split(/\s+/)[0] || 'the agent CLI';
   const keys = new Map();
@@ -7258,8 +7262,10 @@ function cmdWhoami() {
 function cmdSettings() {
   const s = loadSettings();
   const key = flagStr('get');
-  if (!key) return json(s);
-  const v = s[key];
+  // the registry as shown: a credential that reached settings.md (validate refuses it) isn't echoed
+  const shown = { ...s, links: Object.fromEntries(Object.entries(s.links ?? {}).map(([id, l]) => [id, redactLink(l)])) };
+  if (!key) return json(shown);
+  const v = shown[key];
   out(v === null || v === undefined ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v));
 }
 
@@ -7579,12 +7585,13 @@ function cmdLinks() {
   const sMain = mainSettings(s);
   const read = main ? readCoverage(() => coverageAt(main, sMain)) : {};
   const cov = read.value ?? null;
-  const home = { name: 'home', remote: git(['config', '--get', 'remote.origin.url']), root: mainRoot, effective: Object.fromEntries(REPO_KEYS.map((k) => [k, k === 'project' ? projectRel : s[k] ?? null])), components: componentsOn(s, 'home'), lines: linesDeclared(s), coverage: cov ? coverageGaps(cov, sMain) : null, ...(read.error ? { coverage_error: read.error } : {}) };
+  const origin = git(['config', '--get', 'remote.origin.url']);
+  const home = { name: 'home', remote: origin === null ? null : redactUrl(origin), root: mainRoot, effective: Object.fromEntries(REPO_KEYS.map((k) => [k, k === 'project' ? projectRel : s[k] ?? null])), components: componentsOn(s, 'home'), lines: linesDeclared(s), coverage: cov ? coverageGaps(cov, sMain) : null, ...(read.error ? { coverage_error: read.error } : {}) };
   const links = Object.entries(reg).map(([id, l]) => {
     const K = LINK_KINDS[l.kind];
-    if (!K) return { id, ...l };
+    if (!K) return { id, ...redactLink(l) };
     const eff = K.effectiveSettings(l, s);
-    return { id, ...l, locator: K.locator(l, id).text, ...(K.localOverrides.includes('path') ? { location: linkLocation(id), found: fs.existsSync(linkLocation(id)) } : {}), ...(eff ? { effective: eff } : {}), ...(K.hostsComponents ? { components: componentsOn(s, id) } : {}) };
+    return { id, ...redactLink(l), locator: K.locator(l, id).text, ...(K.localOverrides.includes('path') ? { location: linkLocation(id), found: fs.existsSync(linkLocation(id)) } : {}), ...(eff ? { effective: eff } : {}), ...(K.hostsComponents ? { components: componentsOn(s, id) } : {}) };
   });
   if (flags.json) return json({ home, links });
   const gates = (g) => Object.keys(g ?? {}).join(', ') || 'none';

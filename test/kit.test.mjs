@@ -3314,6 +3314,33 @@ test('credentials never enter settings or the log: userinfo refused, and remotes
     const all = fs.readdirSync(logDir).map((x) => fs.readFileSync(path.join(logDir, x), 'utf8')).join('');
     assert.match(all, /link-unreachable/);
     assert.doesNotMatch(all, /ghp_SECRET|hunter2|ghp_TOKEN/, 'no credential reaches the log');
+    // round 2 (N1, N3, N5): a credentialed remote pushed straight to main, its password holding a
+    // raw @, never reaches the log, a prompt, links or the dashboard data; nor does home's own origin
+    const leak = 'https://x-access-token:ghp_AB@SECRET9@github.com/me/leak.git';
+    edit((j) => { j.links = { leak: { kind: 'repo', title: 'Leak', remote: leak, for: ['all'] } }; });
+    g(['commit', '-qam', 'leak 2'], old); g(['push', '-q', 'origin', 'main'], old);
+    fs.rmSync(path.join(old, 'docs/devteam/run/link-probes.json'), { force: true });
+    ok(old, ['observe-metrics'], { ...SUP, DEVTEAM_URL_PROBE: '/usr/bin/true' });
+    ok(old, ['ticket', 'add', 'web-01-leak', '--json', JSON.stringify({ title: 'x', feature: 'chores', component: 'web', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['web/**'], done_when: ['the web suite passes'], notes: 'n' })], SUP);
+    ok(old, ['ask', '--question', 'Is the leak repo still used?', '--recommendation', 'yes', '--links', JSON.stringify([{ title: 'Leak', link: 'leak' }])], SUP);
+    const secret = /ghp_AB|SECRET9/;
+    const log2 = fs.readdirSync(logDir).map((x) => fs.readFileSync(path.join(logDir, x), 'utf8')).join('');
+    assert.match(log2, /clone https:\/\/github\.com\/me\/leak\.git/, 'the fix hint names the remote, redacted');
+    assert.doesNotMatch(log2, secret, 'the fix hint carries no credential');
+    const prompt = ok(old, ['prompt', 'worker', 'web-01-leak']);
+    assert.match(prompt, /\[link:leak\]/);
+    assert.doesNotMatch(prompt, secret, 'prompts');
+    assert.doesNotMatch(ok(old, ['metrics', '--json']), secret, 'metrics');
+    assert.doesNotMatch(ok(old, ['questions']), secret, 'questions');
+    assert.doesNotMatch(ok(old, ['dashboard-data']), secret, 'the dashboard data');
+    const origin0 = g(['config', '--get', 'remote.origin.url'], old);
+    g(['config', 'remote.origin.url', 'https://x-access-token:ghp_AB@SECRET9@github.com/me/home.git'], old);
+    try {
+      const l = ok(old, ['links']);
+      assert.match(l, /home: this repo \(https:\/\/github\.com\/me\/home\.git\)/);
+      assert.doesNotMatch(l, secret, 'links');
+      assert.doesNotMatch(ok(old, ['links', '--json']), secret, 'links --json');
+    } finally { g(['config', 'remote.origin.url', origin0], old); }
   } finally { F.done(); }
 });
 
