@@ -4686,3 +4686,30 @@ test('init --github --repo writes a component repo\'s check-pr workflow: its che
     assert.match(F.runIn(F.old, ['init', '--github', '--repo', 'companion'], { DEVTEAM_ROLE: 'supervisor' }).err, /home's origin is not a GitHub repo/);
   } finally { F.done(); }
 });
+
+test('releases per repo: a component\'s tag pattern, the act names the repo, notes read that repo', () => {
+  const F = multiFixture('releases');
+  const { old, g, okIn, runIn, ticket } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  try {
+    F.lines({ ...F.STD, console: { link: 'console', release: { tag: 'console/v*' } }, companion: { link: 'companion' } });
+    ticket('console-01-a');
+    const w = path.join(old, '.worktrees', 'console-01-a');
+    g(['worktree', 'add', '-q', '-b', 'ticket/console-01-a', w, 'origin/trunk'], F.console);
+    write(path.join(w, 'src/main.js'), 'v1\n');
+    g(['commit', '-qam', 'console-01-a: v1'], w);
+    g(['checkout', '-q', 'trunk'], F.console);
+    g(['merge', '-q', '--no-ff', '-m', 'Merge ticket/console-01-a', 'ticket/console-01-a'], F.console);
+    g(['push', '-q', 'origin', 'trunk'], F.console);
+    g(['tag', '-a', 'v9.9.9', '-m', 'not this component\'s', 'trunk'], F.console);
+    assert.match(okIn(old, ['status']), /merged +console-01-a/, 'a v* tag is not a console/v* release');
+    g(['tag', '-a', 'console/v1.0.0', '-m', 'console 1.0.0', 'trunk'], F.console);
+    assert.match(okIn(old, ['status']), /released +console-01-a/);
+    const a = okIn(old, ['act', '--class', 'release-staging', '--repo', 'console', '--', 'staged console/v1.0.0'], SUP);
+    assert.equal(json(okIn(old, ['log', '--id', a, '--json']))[0].repo, 'console');
+    assert.equal(json(okIn(old, ['log', '--id', okIn(old, ['act', '--class', 'release-staging', '--', 'staged v2'], SUP), '--json']))[0].repo, undefined, "home's acts carry no repo");
+    assert.match(runIn(old, ['act', '--class', 'release-staging', '--repo', 'nope', '--', 'x'], SUP).err, /--repo nope: not a repo link/);
+    assert.match(okIn(old, ['notes', 'trunk~1', 'trunk', '--repo', 'console']), /Other\n\n- console-01-a/);
+    assert.doesNotMatch(okIn(old, ['notes', 'origin/main~1', 'origin/main']), /console-01-a/, "home's notes read home's history");
+  } finally { F.done(); }
+});

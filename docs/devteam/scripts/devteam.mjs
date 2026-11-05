@@ -4754,6 +4754,9 @@ function cmdAct() {
   const cls = decision?.class ?? flagStr('class');
   if (!cls || !what) die('usage: act --decision d-… -- "<what you did>"   |   act --class c [--scope s] [--approved qid|kid] [--refs ids] [--irreversible] -- "<what you did>"   (without --decision the act is its own decision)');
   supervisorOnly('act');
+  // --repo: the repo link the act was about (a release, staging, production), when not home
+  const rid = flagStr('repo');
+  if (rid && rid !== 'home' && !LINK_KINDS[loadSettings().links?.[rid]?.kind]?.hostsComponents) die(`--repo ${rid}: not a repo link (devteam.mjs links)`);
   if (cls === 'improvement-trial') upkeepAllows('a new trial');
   const scope = decision ? decision.scope ?? null : flagStr('scope') ?? null;
   const approved = decision ? decision.approved_by ?? null : flagStr('approved') ?? null;
@@ -4801,7 +4804,7 @@ function cmdAct() {
       if (!latest.some((r) => r.doors.includes(goalDoor))) die(`${goalDoor} is a goal-level answer; the latest approving plan review (reviews/plan-<n>.md on ticket/${t.id}) must say "- Goal-level door: ${goalDoor} covers this plan" (quality.md §3)`);
     }
   }
-  const line = appendLog({ type: 'act', class: cls, scope: scope ?? undefined, what, rung: auth.rung, refs, reversible: decision ? decision.reversible !== false && !flags.irreversible : !flags.irreversible, approved_by: decision ? undefined : approved ?? undefined, decision: decision?.id }, 'supervisor');
+  const line = appendLog({ type: 'act', class: cls, scope: scope ?? undefined, what, rung: auth.rung, refs, reversible: decision ? decision.reversible !== false && !flags.irreversible : !flags.irreversible, approved_by: decision ? undefined : approved ?? undefined, decision: decision?.id, repo: rid && rid !== 'home' ? rid : undefined }, 'supervisor');
   out(line.id);
 }
 // A plan or design opens with '## TL;DR' and a few bullets: the approach, skimmable (quality.md §6).
@@ -8045,12 +8048,14 @@ function cmdHistory() {
 // Story-grouped release notes between two refs, from the fold.
 function cmdNotes() {
   const [from, to = 'HEAD'] = positional;
-  if (!from) die('usage: notes <from-tag> [<to-ref>]');
-  const log = git(['log', `${from}..${to}`, '--format=%s']) ?? die(`cannot read git log ${from}..${to}`);
-  const ts = tickets();
+  if (!from) die('usage: notes <from-tag> [<to-ref>] [--repo <link>]');
+  // another repo's release: its history, and only its tickets
+  const R = repo(flagStr('repo') ?? 'home');
+  const log = R.git(['log', `${from}..${to}`, '--format=%s']) ?? die(`cannot read git log ${from}..${to}${R.name === 'home' ? '' : ` in ${R.name}`}`);
+  const ts = new Map([...tickets()].filter(([, t]) => repoOfTicketLink(t) === R.name));
   const landed = new Set();
   for (const s of log.split('\n')) { const m = s.match(/from \S*ticket\/([a-z0-9-]+)$/) ?? s.match(/^([a-z][a-z0-9-]*-\d{2,}-[a-z0-9-]+):/); if (m && ts.has(m[1])) landed.add(m[1]); }
-  const landedBy = (id) => landed.has(id) || (!!mergeShaFor(id) && git(['merge-base', '--is-ancestor', mergeShaFor(id), to]) !== null);
+  const landedBy = (id) => landed.has(id) || (!!mergeShaFor(id) && R.git(['merge-base', '--is-ancestor', mergeShaFor(id), to]) !== null);
   const stories = new Map();
   for (const id of landed) for (const s of ts.get(id).serves ?? []) (stories.get(s) ?? stories.set(s, []).get(s)).push(id);
   const completed = [];
@@ -8454,7 +8459,7 @@ Decide and act (supervisor.md, constitution.md)
   withdraw <qid> [--reason r] | questions [--all] [--id q] [--json]
   decide --class c [--scope s] [--approved qid|kid] [--options a b] [--rationale r] [--confidence 0-1] [--refs ids] [--irreversible] -- "<what>"   a judgment call and the trust it rests on; prints d-…
   act --decision d-… -- "<what>"   carry out a decision (merge, ticket, withdraw, goal hold, worker, planner, fleet and link take --decision too)
-  act --class c [--scope s] [--approved qid|kid] [--refs ids] [--irreversible] -- "<what>"   an act that is its own decision
+  act --class c [--scope s] [--approved qid|kid] [--refs ids] [--irreversible] [--repo <link>] -- "<what>"   an act that is its own decision; --repo names the repo a release, staging or production act was in
   decisions [--who owner|supervisor] [--class c] [--corrected] [--tail n] [--json]   every call, who made it and under what
   correct <decision-or-act-id> --reason r [--severity n]   (owner; --retro for the supervisor) | repair <id> --how undo|fix-ticket|none
   trust [--json]                  the ladder: rung, ceiling, agreement, corrections per class
@@ -8481,7 +8486,7 @@ The log
   record <id> [--json]   one record's stored fields, who created it and who set each field | peek <kind> <id> --json   what a dashboard sidepeek shows beyond the data: history and its kind's details
 
 Dashboard and releases
-  dashboard [--port p] [--host h] | dashboard-data | notes <from-tag> [<to>]
+  dashboard [--port p] [--host h] | dashboard-data | notes <from-tag> [<to>] [--repo <link>]
 `;
 
 const COMMANDS = {
