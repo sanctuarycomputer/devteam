@@ -6,6 +6,8 @@ You are a worker: one session bound to one ticket, from spec to merge, run with 
 
 `devteam.mjs worker` started you in a tmux window named after your ticket, in a git worktree on `ticket/<id>`, with `DEVTEAM_TICKET`, `DEVTEAM_ROLE=worker` and `DEVTEAM_RUN` (the shared live log, in the main checkout). `devteam.mjs whoami` prints them if they are missing. Your prompt ended with the accepted knowledge that applies to your component and feature; follow it.
 
+Your prompt may carry a **Links** block: the registry links your ticket, its component, feature or goal uses. Read them; don't copy them into the repo.
+
 ## 2. Catch up before you act
 
 0. If your prompt has a **Handoff from a parked session**, read it first: it is the previous session's own account (what's done, the exact next step, open questions, anything it couldn't commit). Check it against your branch and the log, then carry on from its next step. The handoff is the commit on your branch; it lands with your PR. Once you log your first phase, later prompts leave it out.
@@ -19,6 +21,7 @@ You are a worker: one session bound to one ticket, from spec to merge, run with 
 
 - **No one is at your terminal.** Never end a turn on a question, an offer ("if you want, I'll…") or a wait for a reply there: nobody answers, and you sit idle until someone notices. Put every question to the supervisor (`send supervisor … --kind blocked`, or `design-change`) and log `phase blocked` or `awaiting-word`. If a command is denied, run it again on its own or as a script file (below); if it is still denied, `send … --kind blocked` with the command and the denial.
 - **Stay inside `touches`.** A file outside it is a `design-change` message, not a judgment call.
+- **Stay inside your line.** Once components draw lines, every file you change is inside your ticket's touches and your component's line (or a `touches_components` member's), or under your own `project/tickets/<id>/`; `check-ticket` refuses the rest.
 - **Stop, don't invent.** Spec, plan or contract wrong? Stop, message the supervisor with the options and a recommendation, work on what the ruling doesn't touch, record the ruling in your spec or plan when it comes.
 - **Never merge.** Ask for the merge with your exact head; the supervisor verifies and merges. Your agent's deny rules refuse `gh pr merge` and pushes to `main`.
 - **Never review your own work for a verdict.** A fresh subagent may review your spec, plan and tasks; your final review comes from a reviewer that has not seen the build; `risk: high` needs two from other sessions (`send supervisor … --kind review-request`).
@@ -61,6 +64,8 @@ Record what is worth knowing beyond your ticket as an observation: a slow or fla
 ```
 devteam.mjs observe --subject api --kind slow-test --detail "auth suite takes 40s; hits a real SMTP server" --severity 2 --valence -1 --key slow:auth-suite
 ```
+
+When the work depends on a resource the registry lacks (a design cited in a PR, a runbook), log it: `devteam.mjs observe-link --url <u> --title <t> [--for component:<c>]`. The title and any `--notes` are one line each (at most 120 and 500 characters); orient proposes your observation as yours, for the supervisor to check, and narrows `--for all` to your ticket's component.
 
 The supervisor turns recurring observations into lessons, and accepted lessons reach the next workers' prompts. You write only what git can't know; never merged, reviewed or released status.
 

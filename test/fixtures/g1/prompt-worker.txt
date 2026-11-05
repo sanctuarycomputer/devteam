@@ -1,0 +1,8 @@
+exit 0
+--- stdout
+You are the worker for ticket g1-01-a. Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md, and follow it from §1. Your ticket: node docs/devteam/scripts/devteam.mjs ticket show g1-01-a. Use superpowers for every step; devteam says where files go and what must be true before you ask for the merge.
+
+What this project has learned that applies here (accepted knowledge):
+- [fact] g1 builds with make (k-<sha>-<sha>-owner)
+--- stderr
+

@@ -1042,7 +1042,7 @@ function cardHead(icon, label, { extra = '', id = null, rows = [] } = {}) {
 }
 const KIND_ICON = { 'owner-decision': 'scale', 'one-way-door': 'triangle-alert', clarification: 'circle-help', proposal: 'lightbulb', trust: 'users', 'goal-definition': 'target', 'goal-approval': 'flag', 'owner-action': 'zap', review: 'list-checks' };
 const fileHref = (l) => `#file?${new URLSearchParams({ path: l.path, ...(l.ref ? { ref: l.ref } : {}), title: l.title || l.path })}`;
-const linkOf = (l) => (l.url ? `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.title)}</a>` : `<a href="${esc(fileHref(l))}">${esc(l.title)}</a>`);
+const linkOf = (l) => (l.url ? `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.title)}</a>` : l.path ? `<a href="${esc(fileHref(l))}">${esc(l.title)}</a>` : `<span>${esc(l.title)}${l.remote ? ` <span class="muted">(${esc(l.remote)})</span>` : ''}</span>`);
 function answeredCard(q) {
   const how = q.status === 'defaulted' ? 'went with the default; you didn’t answer in time' : q.status === 'withdrawn' ? 'withdrawn by the supervisor' : `answered ${CHANNEL_WORDS[q.channel] || ''}`;
   return `<div class="card small">
@@ -1700,10 +1700,13 @@ function goalCard(g, R, openQs, week) {
     ${g.outcome ? `<p class="ctx">${esc(g.outcome)}</p>` : ''}
     ${steps}
     ${s.next ? `<p class="goal-next">${s.next}</p>` : ''}
+    ${registryAttestLine(g)}
     ${holdControl(g.id, g.hold_view, { status: g.status })}
     <div class="meta"><a href="#goal/${encodeURIComponent(g.id)}">Open</a>${design ? ` · <a href="${esc(fileHref({ ...design, title: design.title || 'The design' }))}">Read the design</a>` : ''}${planningFor(g).length ? ` · ${planningFor(g).map((p) => `<a href="#planner/${encodeURIComponent(p.feature)}">planner on ${esc(p.title)}</a>${p.waiting ? ' <span class="badge high">stuck on a prompt</span>' : ''}`).join(', ')}` : ''}</div>
   </div>`;
 }
+// The goal's registry attestation (planning.md §7), when it marks a precondition as the registry being complete.
+const registryAttestLine = (g) => { const r = g.registry_attest; return r ? `<div class="meta">Registry attestation: precondition ${esc(r.precondition)}, ${esc(r.status)}${r.question ? ` (${qlink(r.question, r.answer ? `answered “${r.answer}”` : 'the question')})` : ''}</div>` : ''; };
 const planningFor = (g) => (DATA?.planners || []).filter((p) => p.goals.includes(g.id));
 const ago = (m) => (m == null ? 'no activity yet' : m < 1 ? 'active just now' : m < 60 ? `active ${m} min ago` : `active ${Math.round(m / 60)} h ago`);
 function plannerCards(ps) {
@@ -2726,7 +2729,9 @@ function render(d) {
   $('when').textContent = `updated ${new Date(d.generated_at).toLocaleTimeString()}`;
   const o = d.ooda;
   $('logline').textContent = `log ${o.log.lines} lines${o.log.errors || o.log.ignored ? ` · ${o.log.errors} invalid · ${o.log.ignored} ignored` : ''}`;
-  const active = d.tickets.filter((t) => t.phase && !['done', 'parked'].includes(t.phase)).length;
+  // A worker is active until its ticket merges, as the kit counts slots (activeWorker): a worker
+  // that never logged done (it stopped at awaiting-word or final-review) isn't working any more.
+  const active = d.tickets.filter((t) => t.phase && !['done', 'parked'].includes(t.phase) && !['merged', 'released'].includes(t.stage)).length;
   const count = (id, n, hot = false) => { const el = $(id); el.textContent = n || ''; el.classList.toggle('hot', hot && n > 0); };
   count('n-goals', o.goals.length);
   count('n-questions', d.questions.length + o.knowledge.filter((k) => k.status === 'candidate').length, true);
