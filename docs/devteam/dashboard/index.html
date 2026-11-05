@@ -1940,7 +1940,7 @@ const ATTR = {
   knowledge: { order: ['statement', 'kind', 'status', 'scope', 'confidence', 'valence', 'evidence'], fmt: { valence: (v) => (v < 0 ? `${esc(v)} (something to avoid)` : esc(v)) } },
   problem: { order: ['title', 'status', 'severity', 'realized', 'threatens', 'assigned_to', 'detail', 'refs'], fmt: { realized: (v) => (v ? 'yes: an issue' : 'no: a risk'), assigned_to: (v) => linkify(v), severity: (v) => `<span class="badge ${sevBadge(v)}">${esc(v)}</span>` } },
   message: { fmt: { to: (v) => esc(who(v)), re: (v) => linkify(v) } },
-  observation: { order: ['kind', 'subject', 'detail', 'refs'], label: { source: 'Noticed by', source_ref: 'From file' }, fmt: { subject: (v) => subjectLink(v), source: (v) => esc(who(v)), source_ref: (v) => `<a class="linkish" href="${esc(fileHref({ title: v.split('/').pop(), path: `docs/devteam/${v}` }))}"><code>${esc(v)}</code></a>` } },
+  observation: { order: ['kind', 'subject', 'detail', 'refs'], label: { source: 'Noticed by', source_ref: 'From' }, fmt: { subject: (v) => subjectLink(v), source: (v) => esc(who(v)), source_ref: (v) => /^https:\/\//.test(v) ? `<a href="${esc(v)}" target="_blank" rel="noopener noreferrer">${esc(v)}</a>` : `<a class="linkish" href="${esc(fileHref({ title: v.split('/').pop(), path: `docs/devteam/${v}` }))}"><code>${esc(v)}</code></a>` } },
   story: { fmt: { release: (v) => rlink(v) } },
   milestone: { fmt: { by: fmtDay } },
 };

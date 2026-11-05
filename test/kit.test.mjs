@@ -846,6 +846,8 @@ http.createServer((req, res) => { const m = fs.readFileSync(${JSON.stringify(mod
       ['keys sk_live_51HxYzAbCdEfGhIjKlMn AKIAIOSFODNN7EXAMPLE ghp_abcdefghijklmnopqrstuvwxyz0123456789', 'keys [key] [key] [key]'],
       ['random Xk9mP2qR7vT4wY6zB8nC1dF3gH5jK0lQ end', 'random [token] end'],
       ['Cookie: _session=abc; theme=dark', 'Cookie: [redacted]'],
+      ['call +14155550100 now', 'call [phone] now'],
+      ['Token validation failed; Basic authentication required', null],
       ['set address=12 Main St, then', 'set address=[redacted] Main St, then'],
       // what stays: classes, paths, line numbers, timestamps, versions, ids, shas, hosts
       ['ActiveRecord::RecordNotFound in Admin::UsersController#show at app/models/user.rb:42', null],
@@ -854,6 +856,12 @@ http.createServer((req, res) => { const m = fs.readFileSync(${JSON.stringify(mod
     ];
     const outLines = must(['monitor', 'scrub'], { input: corpus.map(([a]) => a).join('\n') }).split('\n');
     corpus.forEach(([input, want], i) => assert.equal(outLines[i], want ?? input, input));
+    // linear on a long line, and a line past 16 KB is cut there
+    const long = `${'a'.repeat(300000)} jane@example.com`;
+    const t0 = Date.now();
+    const scrubbed = must(['monitor', 'scrub'], { input: `${long}\n${'b'.repeat(64000)}@x` });
+    assert.ok(Date.now() - t0 < 5000, `scrubbing 360 KB took ${Date.now() - t0}ms`);
+    assert.match(scrubbed.split('\n')[0], /^a{16384}…\[cut at 16 KB\]$/);
   });
 
   await t.test('monitoring probes: run from main, credentials redacted, events scrubbed and observed once, spikes, back-off and drift findings, a stream spooled, and discovery', async () => {
@@ -901,7 +909,8 @@ out({ cursor: 'c-' + mode });
       write(path.join(projDir, 'monitors/fake.mjs'), 'console.log("not json"); process.exit(0);\n');
       assert.match(must(['monitor', 'test', 'fake', '--json'], { role: 'worker' }), /"credentials": false/, "a worker tests an edited probe without the production credential");
       const first = json(must(['monitor', 'poll', '--name', 'fake', '--json'], sup));
-      assert.match(first.alerts.join('\n'), /fake: OutOfMemory: worker killed/, 'a severity-4 event wakes wait');
+      assert.match(first.alerts.join('\n'), /fake: a fatal OutOfMemory \(o-[^;]+; monitor show F1\)/, 'a severity-4 event wakes wait, naming the class, not its text');
+      assert.ok(!first.alerts.join('\n').includes('worker killed'));
       assert.ok(fs.readFileSync(sinceOut, 'utf8'), 'the probe gets its window');
       const kinds = obs().map((o) => o.kind).sort();
       assert.deepEqual(kinds, ['deploy', 'exception', 'exception', 'platform-error'], 'each qualifying fingerprint is observed once; the warning is counted, not observed');
@@ -921,7 +930,7 @@ out({ cursor: 'c-' + mode });
       const show = must(['monitor', 'show', 'E1']);
       assert.match(show, /fake exception:E1: error exception NoMethodError, 4 event\(s\)/);
       assert.match(show, /docs\/devteam\/scripts\/devteam\.mjs:10 charge\n/);
-      assert.match(show, /--- untrusted production data[\s\S]*\[email\][\s\S]*--- end of untrusted data ---/);
+      assert.match(show, /--- untrusted production data (\w+) [\s\S]*\[email\][\s\S]*--- end of untrusted data \1 ---/);
       const feed = json(must(['dashboard-data'])).monitor_feed;
       assert.ok(feed.some((x) => x.key === 'exception:E1' && x.last_24h === 4 && x.spark.length === 24 && x.observed === e1.id));
       assert.ok(json(must(['peek', 'monitor', 'fake', '--json'])).feed.length >= 4);
@@ -941,7 +950,7 @@ out({ cursor: 'c-' + mode });
       // a spike: a known fingerprint well over its hourly median
       const fpsFile = path.join(runMon, 'fake/fingerprints.json');
       const fps = json(fs.readFileSync(fpsFile, 'utf8'));
-      fps['log:S1'] = { kind: 'log', first_seen: new Date(Date.now() - 2 * 86400000).toISOString(), total: 40, users: 0, level: 'error', observed: true };
+      fps['log:S1'] = { kind: 'log', first_seen: new Date(Date.now() - 2 * 86400000).toISOString(), seen_at: new Date(Date.now() - 2 * 86400000).toISOString(), total: 40, users: 0, level: 'error', observed: true };
       fs.writeFileSync(fpsFile, JSON.stringify(fps));
       const counts = json(fs.readFileSync(path.join(runMon, 'fake/counts.json'), 'utf8'));
       counts['log:S1'] = Object.fromEntries([...Array(40)].map((_, i) => [new Date(Date.now() - (i + 1) * 3600000).toISOString().slice(0, 13), 1]));
