@@ -1669,6 +1669,15 @@
             ],
             "additionalProperties": false,
             "x-tip": "The ticket numbers reserved for a planner's feature."
+          },
+          "entry_hash": {
+            "description": "On a registry-edit act (link add|set|rm): the link entry it wrote, as sha256:<hex> of its canonical JSON, or null when it removed the link. merge lands a change to a url link only when an act naming the link recorded exactly the entry that lands. An act without it (written before it existed) never matches.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "x-tip": "The link entry this act wrote."
           }
         },
         "additionalProperties": false,

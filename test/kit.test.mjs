@@ -3026,6 +3026,67 @@ test('the registry at landing: checked whatever the PR, url edits tied to regist
   } finally { F.done(); }
 });
 
+test('a url link lands only as a registry-edit act wrote it: matched by the entry, main to landing, with no time window (round 2 N2, N3)', () => {
+  const F = monoFixture('registry-acts');
+  const { old, ok, run, g, edit } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const chore = (slug, fn, { from = 'origin/main' } = {}) => {
+    const w = path.join(old, '.worktrees', `chore-${slug}`);
+    g(['worktree', 'add', '-q', '-b', `chore-${slug}`, w, from], old);
+    fn(w);
+    g(['add', '-A'], w);
+    g(['commit', '-qm', `chore-${slug}: x`], w);
+    g(['push', '-q', 'origin', `chore-${slug}`], w);
+    write(path.join(old, `docs/devteam/run/pr/chore-${slug}.md`), `# chore-${slug}: x\n\n## One-way doors\n\nNone.\n`);
+    return w;
+  };
+  const merge = (slug, extra = []) => { const r = run(old, ['merge', '--chore', slug, ...extra], SUP); return { status: r.status, text: r.out + r.err }; };
+  const settingsRel = 'docs/devteam/project/settings.md';
+  try {
+    edit((j) => { j.links = { figma: { kind: 'url', title: 'Designs', url: 'https://figma.test/a' } }; });
+    g(['commit', '-qam', 'figma, by hand on main'], old); g(['push', '-q', 'origin', 'main'], old);
+    const before = g(['rev-parse', 'origin/main'], old);
+    // the act records the entry it wrote: a hash of its canonical JSON, null for a removal
+    ok(old, ['link', 'set', 'figma', 'notes', 'see page 2'], SUP);
+    const act = json(ok(old, ['log', '--type', 'act', '--json'])).filter((a) => a.class === 'registry-edit').pop();
+    const canon = (v) => (Array.isArray(v) ? `[${v.map(canon).join(',')}]` : v && typeof v === 'object' ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canon(v[k])}`).join(',')}}` : JSON.stringify(v));
+    const entry = { kind: 'url', title: 'Designs', url: 'https://figma.test/a', notes: 'see page 2' };
+    assert.equal(act.entry_hash, `sha256:${crypto.createHash('sha256').update(canon(entry)).digest('hex')}`);
+    g(['checkout', '-q', '--', settingsRel], old);
+    // a stale act for figma's notes can't authorise a hand edit of its url
+    chore('hand-url', (w) => edit((j) => { j.links.figma.url = 'https://evil.test/x'; }, w));
+    const h = merge('hand-url', ['--dry-run']);
+    assert.notEqual(h.status, 0, h.text);
+    assert.match(h.text, /links\.figma to an entry no registry-edit act wrote/);
+    // an act with no entry_hash (as every act before this rule) names the link but never matches
+    ok(old, ['act', '--class', 'registry-edit', '--refs', 'link:figma', '--', 'set link figma url'], SUP);
+    assert.match(merge('hand-url', ['--dry-run']).text, /links\.figma to an entry no registry-edit act wrote/, 'an old act never matches');
+    // an unrelated settings chore lands first; the pending notes act still lands its own edit
+    chore('tick', (w) => edit((j) => { j.tick_minutes = 7; }, w));
+    assert.equal(merge('tick').status, 0, 'the unrelated chore merges');
+    chore('notes', (w) => edit((j) => { j.links.figma.notes = 'see page 2'; }, w));
+    const n = merge('notes', ['--dry-run']);
+    assert.equal(n.status, 0, `an act outlives an unrelated settings landing: ${n.text}`);
+    // a link identical on main needs no act (N3): main's figma title changes by hand; a branch from
+    // before makes the same change and adds notion, which link add wrote (its act)
+    g(['merge', '-q', '--ff-only', 'origin/main'], old);
+    edit((j) => { j.links.figma.title = 'All designs'; });
+    g(['commit', '-qam', 'figma title, by hand on main'], old); g(['push', '-q', 'origin', 'main'], old);
+    ok(old, ['link', 'add', 'notion', '--kind', 'url', '--url', 'https://notion.test/r', '--title', 'Runbook'], SUP);
+    g(['checkout', '-q', '--', settingsRel], old);
+    chore('both', (w) => edit((j) => { j.links = { notion: { kind: 'url', url: 'https://notion.test/r', title: 'Runbook' }, figma: { ...j.links.figma, title: 'All designs' } }; }, w), { from: before });
+    const r = merge('both', ['--dry-run']);
+    assert.equal(r.status, 0, `figma is as main has it and notion has its act: ${r.text}`);
+    // a removal lands with the act that removed it (entry_hash null)
+    g(['checkout', '-q', '--', settingsRel], old);
+    ok(old, ['link', 'rm', 'figma'], SUP);
+    assert.equal(json(ok(old, ['log', '--type', 'act', '--json'])).filter((a) => a.class === 'registry-edit').pop().entry_hash, null);
+    g(['checkout', '-q', '--', settingsRel], old);
+    chore('rm-figma', (w) => edit((j) => { delete j.links.figma; }, w));
+    assert.doesNotMatch(merge('rm-figma', ['--dry-run']).text, /registry-edit/, 'the rm act lands the removal');
+  } finally { F.done(); }
+});
+
 test('deleting the last file under a glob: never refused, a line-empty warning that blocks nothing (F17, O3)', () => {
   const F = monoFixture('line-empty');
   const { old, ok, run, g, lines } = F;

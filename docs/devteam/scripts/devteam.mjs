@@ -473,6 +473,9 @@ const LINK_KINDS = {
     promptLine: (link, id) => `- ${link.title} (${redactUrl(link.url)})${link.notes ? `: ${link.notes}` : ''} [link:${id}]`,
   },
 };
+// What a registry-edit act records of the entry it wrote: sha256 of its canonical JSON, or null
+// when it removed the link. merge lands a url link only as an act wrote it (registryActFails).
+const linkEntryHash = (e) => (e === undefined || e === null ? null : `sha256:${sha256(canonical(e))}`);
 // The classes a link change can be that are the supervisor's: a logged act, never an owner answer.
 const SUPERVISOR_LINK_CLASSES = ['registry-edit'];
 // A kind is the owner's when any of its fields is an owner's class (repo); otherwise the
@@ -2732,6 +2735,24 @@ function registryFails(base, sha, R = homeFacts) {
   if (J.problem) return [J.problem];
   return registryProblems(J.settings).errors.map((e) => `settings at landing: ${e}`);
 }
+// A url link lands only as a registry-edit act wrote it (link add|set|rm), matched by content (F3;
+// round 2, N2/N3): each url link the merge would change on main, main's settings against the ones
+// that would land, needs an act naming it whose entry_hash is the entry that lands (null: removed).
+// No time window, so an unrelated settings landing expires nothing; a link already as main has it
+// needs nothing; an act for one value never covers another. An act written before entry_hash
+// existed never matches. A landing that can't be computed is registryFails' to report.
+function registryActFails(base, sha) {
+  const S = settingsInForce(base, sha);
+  if (!S.fromHead) return [];
+  const J = S.landed();
+  if (J.problem) return [];
+  const lands = J.settings.links ?? {};
+  const edits = linkOwnerChanges(S.sMain.links, lands).filter((c) => c.cls === 'registry-edit').map((c) => c.key.slice('links.'.length));
+  if (!edits.length) return [];
+  const acts = logObjects('act').filter((a) => a.class === 'registry-edit' && Object.hasOwn(a, 'entry_hash'));
+  const bare = edits.filter((l) => !acts.some((a) => (a.refs ?? []).includes(`link:${l}`) && a.entry_hash === linkEntryHash(lands[l])));
+  return bare.length ? [`changes ${bare.map((l) => `links.${l}`).join(', ')} to an entry no registry-edit act wrote: make each change with link add|set|rm, which logs the act with the entry it wrote, rather than by hand in settings.md (an act for an earlier value of the link doesn't cover this one)`] : [];
+}
 // What the forge's check (optional) and `merge` both check for a PR, by branch kind. Gates are not
 // run here. A chore PR may not touch the log (chore-log touches nothing else) or a ticket's folder.
 function checkPr({ headRef, sha, title, body, forge = false }) {
@@ -3015,15 +3036,7 @@ function cmdMerge() {
     const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
     const classed = base ? ownerSettingsChanged(base, sha) : [];
     const changed = classed?.filter((c) => !SUPERVISOR_LINK_CLASSES.includes(c.cls)) ?? null;
-    // A url link lands only with the registry-edit act that made it (link add|set|rm), logged since
-    // main's settings.md last changed: a hand edit in settings.md has none (F3).
-    const edits = (classed ?? []).filter((c) => c.cls === 'registry-edit').map((c) => c.key.slice('links.'.length));
-    if (edits.length) {
-      const since = Date.parse(git(['log', '-1', '--format=%cI', mainRef(), '--', `${projectRel}/settings.md`]) ?? '') || 0;
-      const acts = logObjects('act').filter((a) => a.class === 'registry-edit' && Date.parse(a.created_at) > since);
-      const bare = edits.filter((l) => !acts.some((a) => (a.refs ?? []).includes(`link:${l}`)));
-      if (bare.length) fails.push(`changes ${bare.map((l) => `links.${l}`).join(', ')} with no registry-edit act since settings.md last landed on ${mainRef()}: make each change with link add|set|rm, which logs the act, rather than by hand in settings.md`);
-    }
+    fails.push(...registryActFails(base, sha));
     if (changed === null) fails.push(`${projectRel}/settings.md: the json devteam block is not valid JSON at the head`);
     else if (changed.length) {
       const classes = [...new Set(changed.map((c) => c.cls))];
@@ -7558,6 +7571,7 @@ function cmdLink() {
   // authority first, so a refusal writes nothing
   authorise('registry-edit', null, null, [], 'link');
   let what;
+  let entry;
   editSettingsBlock((b) => {
     b.links ??= {};
     if (sub === 'add') {
@@ -7571,10 +7585,11 @@ function cmdLink() {
       b.links[id] = { ...b.links[id], [field]: linkValue(field, vals) };
       what = `set link ${id} ${field}`;
     } else { delete b.links[id]; what = `removed ${kind} link ${id}`; }
+    entry = b.links[id];
     return b;
   });
   what = redactUrl(what);
-  appendLog({ type: 'act', decision: citing(), class: 'registry-edit', what, refs: [`link:${id}`, ...(source ? [source] : [])], reversible: true }, 'supervisor');
+  appendLog({ type: 'act', decision: citing(), class: 'registry-edit', what, refs: [`link:${id}`, ...(source ? [source] : [])], reversible: true, entry_hash: linkEntryHash(entry) }, 'supervisor');
   out(`${what}; ${LANDING_HINT}`);
 }
 // links [--json]: the registry, each repo's effective settings, and the lines on each with their state.
