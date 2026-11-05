@@ -3425,6 +3425,8 @@ function cmdAsk() {
     }
   }
   for (const l of jsonFlag('links') ?? []) if (l?.link !== undefined && !(loadSettings().links ?? {})[l.link]) die(`--links: link "${l.link}" is not in settings links (devteam.mjs links)`);
+  // an inline link is logged as given, so a credential in it would be in the log and every view of the question (round 3, V4)
+  for (const l of jsonFlag('links') ?? []) if (hasCredentials(l?.url)) die(`--links: ${redactUrl(l.url)} carries credentials; ${CREDENTIALS_REFUSED}`);
   const line = appendLog({
     type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), question: q, context: kind === 'goal-approval' ? [flagStr('context'), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal'))))].filter(Boolean).join('\n\n') : flagStr('context'),
     rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: goalChangeFlag(cls), options: asList(flags.options), choices: jsonFlag('choices'), links: jsonFlag('links'), recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined,
@@ -4798,7 +4800,7 @@ function orientLinks() {
       continue;
     }
     const rival = Object.entries(reg).find(([id0, r]) => !!LINK_KINDS[r.kind]?.locator(r, id0).url && title(r.title).toLowerCase() === l.title.toLowerCase() && overlap(r.for, l.for));
-    if (rival) { res.push({ key: `link-proposal:${rival[0]}`, proposal: 'conflict', rival: rival[0], observation: o.id, command: `ask --question ${shq(`Which is the source of truth for ${l.title}: ${LINK_KINDS[rival[1].kind].locator(rival[1], rival[0]).url} or ${l.url}?`)} --links ${shq(JSON.stringify([{ title: title(rival[1].title), link: rival[0] }, { title: l.title, url: l.url }]))} --evidence ${shq(o.id)}` }); continue; }
+    if (rival) { res.push({ key: `link-proposal:${rival[0]}`, proposal: 'conflict', rival: rival[0], observation: o.id, command: `ask --question ${shq(`Which is the source of truth for ${l.title}: ${LINK_KINDS[rival[1].kind].locator(rival[1], rival[0]).url} or ${redactUrl(l.url)}?`)} --links ${shq(JSON.stringify([{ title: title(rival[1].title), link: rival[0] }, { title: l.title, url: redactUrl(l.url) }]))} --evidence ${shq(o.id)}` }); continue; }
     const nid = newId(l.title);
     res.push({ key: `link-proposal:${nid}`, proposal: 'add', observation: o.id, command: `link add ${shq(nid)} --kind url --url ${shq(l.url)} ${shFlag('title', l.title)}${asList(l.for).length ? ` --for ${asList(l.for).map(shq).join(' ')}` : ''}${l.notes ? ` ${shFlag('notes', l.notes)}` : ''} --source ${shq(o.id)}` });
   }

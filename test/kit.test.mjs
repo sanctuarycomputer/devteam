@@ -3581,6 +3581,30 @@ test('credentials never enter settings or the log: userinfo refused, and remotes
   } finally { F.done(); }
 });
 
+test('a credentialed url never reaches a question: orient redacts it in its proposal, ask --links refuses it (round 3 V4)', () => {
+  const F = monoFixture('ask-creds');
+  const { old, ok, run, g, edit } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  try {
+    edit((j) => { j.links = { figma: { kind: 'url', title: 'Designs', url: 'https://figma.test/a' } }; });
+    g(['commit', '-qam', 'figma'], old); g(['push', '-q', 'origin', 'main'], old);
+    // observe-link refuses credentials, but observation lines are anyone's to write (ZZ6)
+    const logDir = path.join(old, 'docs/devteam/run/log');
+    fs.mkdirSync(logDir, { recursive: true });
+    const f = fs.readdirSync(logDir).find((x) => x.startsWith('supervisor-')) ?? 'supervisor-2026-11.jsonl';
+    fs.appendFileSync(path.join(logDir, f), line({ id: 'o-20261104-120000000-supervisor', type: 'observation', op: 'new', at: '2026-11-04T12:00:00.000Z', by: 'supervisor', source: 'supervisor', subject: 'x', kind: 'link', detail: 'Designs', source_key: 'link:zz', link: { url: 'https://tok:ghp_ZZSECRET@other.test/d', title: 'Designs' } }));
+    const props = json(ok(old, ['orient', '--json'], SUP)).filter((x) => x.proposal === 'conflict');
+    assert.equal(props.length, 1, 'the rival title is a conflict proposal');
+    assert.doesNotMatch(props[0].command, /ghp_ZZSECRET|tok:/, props[0].command);
+    assert.match(props[0].command, /https:\/\/other\.test\/d/, 'the url is still named, redacted');
+    // pasted as printed, or with the secret put back, ask refuses a credentialed inline link
+    const r = run(old, ['ask', '--question', 'Which is the source of truth?', '--links', JSON.stringify([{ title: 'Designs', url: 'https://tok:ghp_ZZSECRET@other.test/d' }])], SUP);
+    assert.notEqual(r.status, 0, r.out);
+    assert.match(r.err, /--links: .*carries credentials; credentials never go in settings or the log/);
+    assert.doesNotMatch(fs.readdirSync(logDir).map((x) => fs.readFileSync(path.join(logDir, x), 'utf8')).join('').split('\n').filter((l) => l.includes('"question"')).join('\n'), /ghp_ZZSECRET/, 'no question logged it');
+  } finally { F.done(); }
+});
+
 test("orient's proposed commands are shell-safe: every value single-quoted, so pasting one runs nothing (O5)", () => {
   const F = monoFixture('orient-shq');
   const { old, ok, edit } = F;
