@@ -2478,6 +2478,7 @@ function fleetFixture(name) {
   // the log lands (as merge --chore log would put it on main)
   const land = () => {
     const live = path.join(old, 'docs/devteam/run/log');
+    fs.mkdirSync(path.join(old, 'docs/devteam/project/log'), { recursive: true }); // as log-sync makes it: init leaves no placeholder
     for (const f of fs.readdirSync(live).filter((x) => x.endsWith('.jsonl'))) fs.copyFileSync(path.join(live, f), path.join(old, 'docs/devteam/project/log', f));
     g(['add', '-A', 'docs/devteam/project/log'], old);
     g(['commit', '-qm', 'chore-log: log through now'], old);
