@@ -232,7 +232,10 @@ const SETTINGS_DEFAULTS = {
   question_default_after_hours: 24,
   autonomy_ceilings: {},
   components: {},
-  // How a tagged release reaches production: 'tag' (deploys from the tag) or { branch: 'production' }.
+  // How a release reaches production: 'tag' (deploys from the tag), { branch: 'production' }, or
+  // 'merge' (production deploys whenever main changes, e.g. Heroku's automatic deploys; also
+  // { on: 'merge', paths: ['app/**'] } when only some paths deploy). With 'merge', a merge that
+  // changes what deploys is a release (release-production).
   release: 'tag',
   // Commands a stdin: secret sink may run (prefixes, e.g. "gh secret set"); they run as the owner.
   secret_commands: [],
@@ -2290,6 +2293,18 @@ function reviewApproves(v, what) {
   if (v.result_status !== 'verified') die(`${what}: ${v.id} is a review whose result is ${v.result_status}; it approves nothing until it verifies (review show ${v.id})`);
 }
 
+// On a project that deploys when main changes, the files of a PR that deploy: those outside the kit
+// (or matching release.paths). Empty when merging deploys nothing.
+function deployingFiles(base, sha) {
+  const s = loadSettings();
+  const r = s.release;
+  const onMerge = r === 'merge' || r?.on === 'merge' || (r?.branch && r.branch === s.main_branch);
+  if (!onMerge || !base) return [];
+  const kitRel = path.relative(repoRoot, devteamDir).split(path.sep).join('/');
+  const files = changedFiles(base, sha) ?? [];
+  return Array.isArray(r?.paths) && r.paths.length ? files.filter((f) => r.paths.some((g) => pathMatches(g, f))) : files.filter((f) => !f.startsWith(`${kitRel}/`));
+}
+
 // The merge word, as a command: verify everything at the PR's exact head, run the project's gates
 // there, then merge refusing a moved head, then log the act. Only the supervisor runs it.
 // --dry-run runs every check and gate and stops; without a PR it checks the branch's local head.
@@ -2365,6 +2380,22 @@ function cmdMerge() {
         const q = ownerAnswer(approved, 'merge --approved');
         if (!classes.includes(q.class)) fails.push(`${approved} is a ${q.class ?? 'classless'} question; changing ${what} needs an answered ${classes.join(' or ')} question`);
       }
+    }
+  }
+  // Deploys on merge: merging this is releasing it, so it needs release-production's authority: the
+  // class on rung 3, or a release-production decision this merge carries out (--decision).
+  let release = null;
+  {
+    const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
+    const deploys = deployingFiles(base, sha);
+    if (deploys.length) {
+      const target = id ?? (chore ? `chore-${chore}` : plan);
+      const d = flagStr('decision') ? logGet(flagStr('decision')) : null;
+      const rung = rungFor('release-production');
+      if (d?.type === 'decision' && d.class === 'release-production') release = { decision: d.id, target };
+      else if (rung >= 3) release = { rung, target };
+      else fails.push(`merging deploys to production (release: merge; it changes ${deploys.slice(0, 3).join(', ')}${deploys.length > 3 ? ', …' : ''}), and release-production is on rung ${rung} (${RUNG[rung]}): decide --class release-production --refs ${target} [--approved <qid>] -- "release …", then merge --decision <d-id>`);
+      if (release) out(`merging deploys to production: a release-production act will be logged (${release.decision ? `under ${release.decision}` : `rung ${rung}`})`);
     }
   }
   if (chore) {
@@ -2462,6 +2493,10 @@ function cmdMerge() {
   mergeShaCache.clear();
   const cls = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
   const act = appendLog({ type: 'act', decision: citing(), class: cls, what: `merged ${branch} at ${sha}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag}, verbatim)` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [], reversible: false, approved_by: approved ?? standing?.rule.id ?? undefined }, 'supervisor');
+  if (release) {
+    const rel = appendLog({ type: 'act', class: 'release-production', decision: release.decision, rung: release.rung, what: `released ${release.target} to production by merging ${branch} at ${sha} (release: merge)`, refs: [release.target, act.id], reversible: false }, 'supervisor');
+    out(`released ${release.target} to production (${rel.id})`);
+  }
   out(`merged ${branch} at ${sha.slice(0, 12)} (${act.id})`);
 }
 // ===== 7. trust =====

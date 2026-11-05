@@ -1642,7 +1642,19 @@ test('devteam kit', async (t) => {
     landSettings((txt) => txt.replace('"gates": {', '"gates": { "debt": { "cmd": "false", "mode": "ratchet" },'));
     assert.match(dt(['merge', 'bill-01-card'], { role: 'sup' }).err, /needs the PR text/);
     write(path.join(repo, 'docs/devteam/run/pr/ticket/bill-01-card.md'), `# bill-01-card: card capture\n\n${fs.readFileSync(body, 'utf8')}`);
-    must(['merge', 'bill-01-card'], { role: 'sup' });
+    // where production deploys whenever main changes, merging is releasing: release-production's authority
+    landSettings((txt) => txt.replace('"gates": {', '"release": "merge", "gates": {'));
+    const rung = json(must(['trust', '--json'])).find((r) => r.class === 'release-production').rung;
+    assert.ok(rung < 3, 'release-production is below rung 3 here');
+    const refused = dt(['merge', 'bill-01-card', '--dry-run'], { role: 'sup' });
+    assert.match(`${refused.out}\n${refused.err}`, /merging deploys to production \(release: merge; it changes billing/, 'a deploying merge needs a release decision');
+    const Qrel = must(['ask', '--class', 'release-production', '--reasons', 'below-rung', '--question', 'Release card capture with its merge?', '--recommendation', 'yes', '--ticket', 'bill-01-card'], { role: 'sup' });
+    must(['answer', Qrel, 'yes']);
+    const Drel = must(['decide', '--class', 'release-production', '--approved', Qrel, '--refs', 'bill-01-card', '--', 'release card capture by merging it'], { role: 'sup' });
+    must(['merge', 'bill-01-card', '--decision', Drel], { role: 'sup' });
+    const relAct = json(must(['log', '--type', 'act', '--json'])).find((a) => a.class === 'release-production' && a.refs.includes('bill-01-card'));
+    assert.ok(relAct && relAct.decision === Drel && relAct.reversible === false, 'the release is logged as an act under its decision');
+    landSettings((txt) => txt.replace('"release": "merge", ', ''));
     git(['fetch', '-q', 'origin', 'main']);
     assert.equal(git(['rev-parse', 'origin/main^2']), H2, 'main merges the verified head');
     const debt = json(must(['log', '--type', 'gate', '--json'])).filter((g) => g.gate === 'debt');
