@@ -4329,3 +4329,39 @@ test('B1: a sibling ticket\'s footprint is judged by home\'s committed lines', (
     assert.match(r.out, /changes files outside the line of console-ui: package\.json \(console-build's line\)/, "home's lines judge the sibling's diff (not the defaults)");
   } finally { F.done(); }
 });
+
+test('views of a sibling ticket: status, approve-plan, timeline; a missing checkout never stops a view', () => {
+  const F = multiFixture('sibling-views');
+  const { old, g, okIn, runIn, ticket } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  try {
+    ticket('console-01-a');
+    const w = path.join(old, '.worktrees', 'console-01-a');
+    g(['worktree', 'add', '-q', '-b', 'ticket/console-01-a', w, 'origin/trunk'], F.console);
+    const tdir = path.join(w, 'docs/devteam/project/tickets/console-01-a');
+    write(path.join(tdir, 'spec.md'), '# spec\n');
+    write(path.join(tdir, 'plan.md'), '# plan\n\n## TL;DR\n\n- one change\n');
+    g(['add', '-A'], w); g(['commit', '-qm', 'console-01-a: plan'], w);
+    okIn(old, ['act', '--class', 'approve-spec', '--refs', 'console-01-a', '--', 'ok'], SUP);
+    assert.match(okIn(old, ['act', '--class', 'approve-plan', '--refs', 'console-01-a', '--', 'ok'], SUP), /^a-/, "approve-plan reads the plan from the ticket's repo");
+    okIn(w, ['phase', 'build'], { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'console-01-a' });
+    assert.match(okIn(old, ['status']), /building +console-01-a/);
+    const tl = json(okIn(old, ['timeline', 'console-01-a', '--json']));
+    const spec = tl.files.find((f) => f.title === 'spec');
+    assert.deepEqual([spec.repo, spec.ref, spec.path], ['console', 'refs/heads/ticket/console-01-a', 'docs/devteam/project/tickets/console-01-a/spec.md']);
+    // merged on console's main: status reads console's history, and its release its tags
+    g(['checkout', '-q', 'trunk'], F.console);
+    g(['merge', '-q', '--no-ff', '-m', 'Merge ticket/console-01-a', 'ticket/console-01-a'], F.console);
+    g(['push', '-q', 'origin', 'trunk'], F.console);
+    assert.match(okIn(old, ['status']), /merged +console-01-a/);
+    assert.equal(json(okIn(old, ['timeline', 'console-01-a', '--json'])).files.find((f) => f.title === 'spec').ref, 'origin/trunk', "a merged ticket's records are on its repo's main");
+    // no console checkout here: status, metrics and the dashboard's data carry on (open issue 8)
+    write(path.join(old, 'docs/devteam/run/links.local.json'), JSON.stringify({ console: { path: path.join(F.base, 'not-cloned') } }));
+    assert.match(okIn(old, ['status']), /console-01-a/);
+    assert.ok(json(okIn(old, ['metrics', '--json'])).findings.some((x) => x.kind === 'link-unreachable' && x.subject === 'console'));
+    assert.deepEqual(json(okIn(old, ['timeline', 'console-01-a', '--json'])).files, [], 'a view of an unreadable repo shows no files, and still runs');
+    okIn(old, ['dashboard-data']);
+    assert.match(runIn(old, ['act', '--class', 'approve-plan', '--refs', 'console-01-a', '--', 'again'], SUP).err, /repo console: no checkout/, 'an act fails fast');
+    fs.rmSync(path.join(old, 'docs/devteam/run/links.local.json'));
+  } finally { F.done(); }
+});

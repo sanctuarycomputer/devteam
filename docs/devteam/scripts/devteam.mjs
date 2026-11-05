@@ -1642,6 +1642,10 @@ const mergedAt = (id) => factsRepo(id)?.mergedAt(id) ?? null;
 const ticketBranchRef = (id) => factsRepo(id)?.ticketBranchRef(id) ?? null;
 // A release of a repo (§5.5): the component's tag pattern, else v*; home's by default.
 const releasedIn = (sha, { repo: R = repo('home'), pattern } = {}) => R.releasedIn(sha, pattern);
+// Where a ticket's release is read: its repo's tags, matching its component's pattern (§3.2, §5.5).
+// A merge sha is non-null only when factsRepo found the repo; undefined lets releasedIn's default
+// (home) apply rather than a null.
+const releaseOf = (t) => { const c = committedComponents().components?.[t.component]; return { repo: factsRepo(t.id) ?? undefined, pattern: isObj(c?.release) ? c.release.tag : undefined }; };
 // The head a check of R reads: --sha, else this checkout's HEAD when it is a checkout of R, else
 // R's main checkout's.
 const headIn = (R, shaArg) => (shaArg ? R.resolveCommit(shaArg) : cwdRepo() === R ? cwdGit(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}']) : R.resolveCommit('HEAD'));
@@ -2028,7 +2032,7 @@ function deriveStatus() {
     const depsMerged = (t.depends_on ?? []).every((d) => mergeShaFor(d));
     let stage = 'planned';
     if (t.superseded_by) stage = 'superseded';
-    else if (mergeSha) stage = releasedIn(mergeSha) ? 'released' : 'merged';
+    else if (mergeSha) stage = releasedIn(mergeSha, releaseOf(t)) ? 'released' : 'merged';
     else if (reviews.some((r) => r.stage === 'final')) stage = 'in-review';
     else if (branch && plan === 'approved' && depsMerged) stage = 'building';
     else if (plan === 'approved') stage = 'planned-in-detail';
@@ -6354,7 +6358,7 @@ function collectProgress() {
     return {
       id: t.id, title: t.title, feature: t.feature, component: t.component, kind: t.kind, size: t.size, risk: t.risk, weight: weight(t), serves: t.serves ?? [], depends_on: t.depends_on ?? [],
       wave: level.has(t.id) ? level.get(t.id) + 1 : null, added_at: t.created_at,
-      merged_at: sha ? new Date(mergedAt(t.id)).toISOString() : null, released_in: sha ? releasedIn(sha) : null, target_release: targets[0] ?? null,
+      merged_at: sha ? new Date(mergedAt(t.id)).toISOString() : null, released_in: sha ? releasedIn(sha, releaseOf(t)) : null, target_release: targets[0] ?? null,
       stage: st?.stage ?? 'planned', phase: st?.phase ?? null, task: st?.task ?? null, held: isHeld(t) ? t.held : null, waiting: st?.waiting ?? null,
     };
   });
@@ -6434,9 +6438,11 @@ function timelineView(id) {
   const qids = new Set(lines.filter((l) => l.type === 'question').map((l) => l.id));
   const all = readLog().lines.filter((l) => touches(l) || (l.type === 'question' && qids.has(l.id))).sort((a, b) => a.at.localeCompare(b.at));
   const st = deriveStatus().find((r) => r.id === id);
+  // a view: the ticket's repo by name, and nothing read from one this machine can't read
+  const R = factsRepo(id);
   const branch = ticketBranchRef(id);
-  const ref = branch && !mergeShaFor(id) ? branch : mainRef();
-  const files = ['spec.md', 'plan.md', 'verification.md'].map((f) => `${projectRel}/tickets/${id}/${f}`).filter((f) => ref && git(['cat-file', '-e', `${ref}:${f}`]) !== null).map((f) => ({ title: path.basename(f, '.md'), path: f, ref }));
+  const ref = branch && !mergeShaFor(id) ? branch : R?.mainRef() ?? null;
+  const files = !R ? [] : ['spec.md', 'plan.md', 'verification.md'].map((f) => `${R.projectRel}/tickets/${id}/${f}`).filter((f) => ref && R.git(['cat-file', '-e', `${ref}:${f}`]) !== null).map((f) => ({ title: path.basename(f, '.md'), path: f, ref, ...(R.name === 'home' ? {} : { repo: R.name }) }));
   const reviews = ticketReviews(id, branch && !mergeShaFor(id) ? { ref: branch } : WORKTREE).map((r) => ({ file: r.file, stage: r.stage, pass: r.pass, verdict: r.verdict, reviewer: r.reviewer }));
   return { ticket: { ...t, ...st }, files, reviews, lines: all.map((l) => Object.fromEntries(Object.entries(l).filter(([k]) => !k.startsWith('__')))), st, all };
 }
