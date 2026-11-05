@@ -2420,12 +2420,14 @@ const holdWords = (m) => ({ run: 'running', drain: 'draining', park: 'parked', '
 const settledMemo = new Map();
 function sessionSettled(s) {
   if (settledMemo.has(s.name)) return settledMemo.get(s.name);
-  let ok = lastPhaseOf(s.name)?.to === 'parked';
+  // a session in a repo this machine can't read never reads as settled (fleet status says why)
+  let ok = lastPhaseOf(s.name)?.to === 'parked' && s.readable;
   if (ok) {
-    const local = resolveCommit(`refs/heads/${s.branch}`);
-    const remote = resolveCommit(`refs/remotes/origin/${s.branch}`);
+    const R = s.repo;
+    const local = R.resolveCommit(`refs/heads/${s.branch}`);
+    const remote = R.resolveCommit(`refs/remotes/origin/${s.branch}`);
     const dirty = fs.existsSync(s.wt) ? workLines(git(['status', '--porcelain'], s.wt)).join('\n') : '';
-    const handoff = remote && (handoffCommit(`refs/remotes/origin/${s.branch}`, s.name) || git(['cat-file', '-e', `${remote}:${s.handoff}`]) !== null);
+    const handoff = remote && (handoffCommit(`refs/remotes/origin/${s.branch}`, s.name, R) || R.git(['cat-file', '-e', `${remote}:${s.handoff}`]) !== null);
     ok = !!remote && (!local || local === remote) && !dirty && !!handoff;
   }
   settledMemo.set(s.name, ok);
@@ -6862,10 +6864,21 @@ const PROMPTS = {
   worker: 'You are the worker for ticket {{ID}}. Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md, and follow it from §1. Your ticket: node docs/devteam/scripts/devteam.mjs ticket show {{ID}}. Use superpowers for every step; devteam says where files go and what must be true before you ask for the merge.',
   planner: 'You are planning feature {{ID}} on branch plan/{{ID}}, in this worktree. Read the devteam section of AGENTS.md, then docs/devteam/process/planning.md, and run the pipeline from §2 for this feature. Your tickets and the feature line go to the log with devteam.mjs feature add / ticket add; commit everything as you go; message the supervisor (devteam.mjs send supervisor) when the graph review passes.',
 };
+// What a prompt says about a repo, from settings alone (a view: no checkout needed).
+const repoAbout = (name) => (name === 'home' ? repo('home') : { name, remote: loadSettings().links?.[name]?.remote, projectRel: projectRelOf(name) });
+// A role's opening prompt. A ticket in another repo has no kit of its own in its worktree: it runs
+// home's kit by absolute path and keeps its records in that repo's project folder (spec §5.2).
+function promptFor(role, id, R = repo('home')) {
+  const base = PROMPTS[role].replace(/\{\{ID\}\}/g, id);
+  if (R.name === 'home') return base;
+  const kitCmd = `node ${shq(path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs'))}`;
+  return `${base.replace(/node docs\/devteam\/scripts\/devteam\.mjs/g, kitCmd).replace('Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md', `Read ${path.join(mainRoot, 'docs', 'devteam', 'process', 'worker.md')}`)} This worktree is a checkout of ${R.name} (${redactUrl(R.remote)}); run every devteam command as ${kitCmd}, and keep this ticket's records under ${R.projectRel}/tickets/${id}/ in this repo.`;
+}
 function cmdPrompt() {
   const role = positional[0];
   if (!PROMPTS[role]) die('usage: prompt supervisor|worker <ticket-id>|planner <feature>');
-  const p = role === 'planner' && positional[1] ? plannerPrompt(positional[1]) : PROMPTS[role].replace(/\{\{ID\}\}/g, positional[1] ?? '');
+  const t = role === 'worker' && positional[1] ? tickets().get(positional[1]) : null;
+  const p = role === 'planner' && positional[1] ? plannerPrompt(positional[1]) : t ? promptFor('worker', t.id, repoAbout(repoOfTicketLink(t))) : PROMPTS[role].replace(/\{\{ID\}\}/g, positional[1] ?? '');
   if (role === 'supervisor') { const d = drainedPreface(); return out(d ? `${d}\n\n${p}` : p); }
   const handoff = positional[1] ? handoffBlock(role === 'worker' ? positional[1] : `plan-${positional[1]}`) : null;
   const links = linksBlock(positional[1]);
@@ -7133,14 +7146,18 @@ function makeSession(role) {
   // it, and one that numbered tickets before blocks existed gets none (nothing to check it against).
   const block = role === 'planner' && !idBlockFor(id) && !inFlightPlanTickets(branch).length ? reserveIdBlock(id, blockSize) : null;
   let madeWorktree = false;
+  // A worker's worktree is a checkout of its ticket's repo (spec §5.2), under home's .worktrees;
+  // a planner's is home's. s stays home's for the session, the agent and its policy.
+  const R = role === 'worker' ? repoOfTicket(tickets().get(id)) : repo('home');
+  const mb = R.settings.main_branch;
   if (!fs.existsSync(wt)) {
-    git(['fetch', '--quiet', 'origin', s.main_branch]);
+    R.git(['fetch', '--quiet', 'origin', mb]);
     // a branch pushed from another machine (a moved fleet) continues from origin, never from main
-    git(['fetch', '--quiet', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
-    const base = resolveCommit(`origin/${s.main_branch}`) ? `origin/${s.main_branch}` : s.main_branch;
-    if (resolveCommit(`refs/heads/${branch}`)) gitOrDie(['worktree', 'add', '--quiet', wt, branch], mainRoot);
-    else if (resolveCommit(`refs/remotes/origin/${branch}`)) gitOrDie(['worktree', 'add', '--quiet', '--track', '-b', branch, wt, `origin/${branch}`], mainRoot);
-    else gitOrDie(['worktree', 'add', '--quiet', '-b', branch, wt, base], mainRoot);
+    R.git(['fetch', '--quiet', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
+    const base = R.resolveCommit(`origin/${mb}`) ? `origin/${mb}` : mb;
+    if (R.resolveCommit(`refs/heads/${branch}`)) R.gitOrDie(['worktree', 'add', '--quiet', wt, branch], R.root);
+    else if (R.resolveCommit(`refs/remotes/origin/${branch}`)) R.gitOrDie(['worktree', 'add', '--quiet', '--track', '-b', branch, wt, `origin/${branch}`], R.root);
+    else R.gitOrDie(['worktree', 'add', '--quiet', '-b', branch, wt, base], R.root);
     madeWorktree = true;
   }
   // A harness keeps its sessions by directory on its own machine: a worktree made just now has no
@@ -7150,12 +7167,12 @@ function makeSession(role) {
     warn(`no ${role} session to resume for ${name}: its worktree was just made here, so the agent has no earlier session in it (a new machine, or the worktree was removed); starting it fresh with agent_command${handoffFor(name) ? ' and its handoff note' : ''} instead`);
     resume = false;
   }
-  seedWorktree(wt);
+  seedWorktree(wt, { repo: R });
   const promptFile = path.join(runDir, 'prompts', `${name}.txt`);
   const knowledge = knowledgeBlock(id);
   const links = linksBlock(id);
   const held = block ?? (role === 'planner' ? idBlockFor(id) : null);
-  const text = `${PROMPTS[role].replace(/\{\{ID\}\}/g, id)}${held ? ` ${idBlockText(held)}` : ''}`;
+  const text = `${promptFor(role, id, R)}${held ? ` ${idBlockText(held)}` : ''}`;
   const handoff = handoffBlock(name);
   fs.writeFileSync(promptFile, `${text}${handoff ? `\n\n${handoff}` : ''}${links ? `\n\n${links}` : ''}${knowledge ? `\n\n${knowledge}` : ''}\n`);
   // Workers live in detached tmux windows the owner can attach to; the supervisor is not one of them.
@@ -7167,7 +7184,7 @@ function makeSession(role) {
   else if (!fresh) tmux(['new-window', '-d', '-t', `=${session}`, '-n', name, '-c', wt]);
   const target = `=${session}:${name}`;
   const shown = `${session}:${name}`;
-  const env = `export DEVTEAM_RUN='${runDir}' DEVTEAM_ROLE='${role}' ${role === 'worker' ? `DEVTEAM_TICKET='${id}'` : `DEVTEAM_FEATURE='${id}'`}`;
+  const env = `export DEVTEAM_HOME=${shq(mainRoot)} DEVTEAM_RUN='${runDir}' DEVTEAM_ROLE='${role}' ${role === 'worker' ? `DEVTEAM_TICKET='${id}'` : `DEVTEAM_FEATURE='${id}'`}`;
   typeInto(target, env);
   // Worker and planner policy travels with the launch, not the repo's agent config (which may be
   // gitignored, and would bind the supervisor too): for Claude Code, a --settings file in run/.
@@ -7208,12 +7225,19 @@ const drainHost = (a) => DRAIN_WHAT.exec(a?.what ?? '')?.[1] ?? null;
 const drainReason = (a) => DRAIN_WHAT.exec(a?.what ?? '')?.[2] ?? a?.what ?? '';
 const lastPhaseOf = (who) => logObjects('phase').filter((p) => p.created_by === who).sort(byTime).pop() ?? null;
 // A session by its writer name: a ticket id, or plan-<feature>.
+// A session by its writer name: a ticket id, or plan-<feature>. Its repo by name; the object only
+// on use, so listing sessions never needs a checkout of every repo (open issue 8).
 function sessionOf(name) {
   const planner = writerClass(name) === 'planner';
   const id = planner ? name.slice('plan-'.length) : name;
-  return { name, role: planner ? 'planner' : 'worker', id, branch: planner ? `plan/${id}` : `ticket/${id}`, wt: path.join(mainRoot, '.worktrees', name), handoff: `${projectRel}/${planner ? `plans/${id}` : `tickets/${id}`}/handoff.md` };
+  const t = planner ? null : tickets().get(id);
+  const repoName = t ? repoOfTicketLink(t) : 'home';
+  return { name, role: planner ? 'planner' : 'worker', id, branch: planner ? `plan/${id}` : `ticket/${id}`, wt: path.join(mainRoot, '.worktrees', name), handoff: `${projectRelOf(repoName)}/${planner ? `plans/${id}` : `tickets/${id}`}/handoff.md`, repoName, readable: repoReadable(repoName), get repo() { return repo(repoName); } };
 }
-const isHandoffFile = (file) => !!file && new RegExp(`^${reReserved(projectRel)}/(tickets|plans)/[^/]+/handoff\\.md$`).test(file);
+// A repo's project folder by name, from settings alone (no checkout needed).
+const projectRelOf = (name) => { if (name === 'home') return projectRel; const s = loadSettings(); const l = s.links?.[name]; return LINK_KINDS[l?.kind]?.effectiveSettings(l, s)?.project ?? REPO_OWN_DEFAULTS.project; };
+// A handoff note's old file form, under any repo's project folder.
+const isHandoffFile = (file) => !!file && [...new Set([projectRel, ...Object.keys(loadSettings().links ?? {}).filter((id) => LINK_KINDS[loadSettings().links[id]?.kind]?.hostsComponents).map(projectRelOf)])].some((rel) => new RegExp(`^${reReserved(rel)}/(tickets|plans)/[^/]+/handoff\\.md$`).test(file));
 // What parked a session at a time: an old fleet drain in force then, or the park or let-go of one
 // of its goals (a fleet park is one on every goal) in force then. A session parked for another
 // reason (a ruling about its ticket) has no cause, and so no handoff block.
@@ -7238,32 +7262,35 @@ function handoffFor(name) {
   const launch = (l) => l.type === 'phase' && ['parked', 'starting'].includes(l.to);
   if (mine.some((l) => l.at > parked.at && (planner || l.type === 'phase') && !launch(l))) return null;
   const s = sessionOf(name);
+  // its branch is in its own repo; one this machine can't read has no handoff here
+  if (!s.readable) return null;
+  const R = s.repo;
   // A hold released while the session was parking leaves no cause in force at its parked line;
   // a handoff commit it made for that park still counts.
   const prev = mine.filter((l) => l.type === 'phase' && l.at < parked.at && !launch(l)).pop();
-  const own = [`refs/heads/${s.branch}`, `refs/remotes/origin/${s.branch}`].map((r) => handoffCommit(r, name)).find((c) => c && (!prev || c.at >= prev.at));
+  const own = [`refs/heads/${s.branch}`, `refs/remotes/origin/${s.branch}`].map((r) => handoffCommit(r, name, R)).find((c) => c && (!prev || c.at >= prev.at));
   const cause = parkCauseAt(name, parked.at) ?? (own ? { kind: 'self', at: parked.at, marker: `self:${name}@${parked.at}`, reason: null } : null);
   if (!cause) return null;
   for (const r of [`refs/heads/${s.branch}`, `refs/remotes/origin/${s.branch}`]) {
-    const c = handoffCommit(r, name);
+    const c = handoffCommit(r, name, R);
     if (c) return { ...s, text: c.body, where: `the handoff commit ${c.sha.slice(0, 12)} on ${s.branch}, ${c.at}`, cause, parked_at: parked.at };
   }
   // the note used to be a file: read one a session parked by an old drain left
   const local = readText(path.join(s.wt, s.handoff));
   if (local !== null) return { ...s, text: local, where: `${s.handoff} in its worktree`, cause, parked_at: parked.at };
   for (const r of [`refs/heads/${s.branch}`, `refs/remotes/origin/${s.branch}`]) {
-    if (!resolveCommit(r)) continue;
-    const text = git(['show', `${r}:${s.handoff}`]);
-    if (text !== null) return { ...s, text, where: `${s.handoff} on ${s.branch}, committed ${git(['log', '-1', '--format=%cI', r, '--', s.handoff]) ?? '?'}`, cause, parked_at: parked.at };
+    if (!R.resolveCommit(r)) continue;
+    const text = R.git(['show', `${r}:${s.handoff}`]);
+    if (text !== null) return { ...s, text, where: `${s.handoff} on ${s.branch}, committed ${R.git(['log', '-1', '--format=%cI', r, '--', s.handoff]) ?? '?'}`, cause, parked_at: parked.at };
   }
   return null;
 }
 // A parked session's handoff is an empty commit on its own branch, titled "devteam handoff: <name>",
 // with the note as its body: nothing extra lands in the repo, and it travels with the branch.
 const HANDOFF_SUBJECT = (name) => `devteam handoff: ${name}`;
-function handoffCommit(ref, name) {
-  if (!resolveCommit(ref)) return null;
-  const raw = git(['log', '-1', '--format=%H%x00%cI%x00%B', `--grep=^${HANDOFF_SUBJECT(name).replace(/[.[\]*^$]/g, '\\$&')}$`, ref]);
+function handoffCommit(ref, name, R = repo('home')) {
+  if (!R.resolveCommit(ref)) return null;
+  const raw = R.git(['log', '-1', '--format=%H%x00%cI%x00%B', `--grep=^${HANDOFF_SUBJECT(name).replace(/[.[\]*^$]/g, '\\$&')}$`, ref]);
   if (!raw) return null;
   const [sha, at, msg] = raw.split('\0');
   return { sha, at, body: msg.split('\n').slice(1).join('\n').trim() };

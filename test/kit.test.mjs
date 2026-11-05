@@ -4390,3 +4390,44 @@ test('a sibling ticket\'s review worktree: under home/.worktrees, of its repo, s
     assert.doesNotMatch(g(['worktree', 'list'], F.console), /\.worktrees\/review-/, "console's git forgets it");
   } finally { F.done(); }
 });
+
+test('a sibling ticket\'s worker: its worktree from its repo, home\'s kit by absolute path in its prompt', (t) => {
+  const F = multiFixture('sibling-wt');
+  const { old, g, okIn, ticket } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  try {
+    // console's own worktree_files and worktree_setup, never home's; DEVTEAM_MAIN is console's root
+    write(path.join(F.console, '.env'), 'CONSOLE=1\n');
+    write(path.join(F.console, '.gitignore'), 'node_modules/\n.env\n.seeded-from-console\n');
+    g(['commit', '-qam', 'ignore the seeded files'], F.console); g(['push', '-q', 'origin', 'trunk'], F.console);
+    const links = json(okIn(old, ['settings'])).links;
+    F.lines({ ...F.STD, console: { link: 'console' }, companion: { link: 'companion' } }, { links: { ...links, console: { ...links.console, worktree_files: ['.env'], worktree_setup: 'test -f "$DEVTEAM_MAIN/src/main.js" && touch .seeded-from-console' } } });
+    ticket('console-01-a');
+    const w = path.join(old, '.worktrees', 'console-01-a');
+    if (hasTmux) {
+      okIn(old, ['worker', 'console-01-a'], SUP);
+      spawnSync('tmux', ['kill-server'], { env: F.env({}) });
+      assert.equal(fs.realpathSync(g(['rev-parse', '--path-format=absolute', '--git-common-dir'], w)), fs.realpathSync(path.join(F.console, '.git')), 'a worktree of console');
+      assert.equal(g(['rev-parse', '--abbrev-ref', 'HEAD'], w), 'ticket/console-01-a');
+      assert.equal(g(['merge-base', 'HEAD', 'origin/trunk'], w), g(['rev-parse', 'origin/trunk'], F.console), "based on console's main");
+      assert.equal(fs.readFileSync(path.join(w, '.env'), 'utf8'), 'CONSOLE=1\n', "console's worktree_files");
+      assert.ok(fs.existsSync(path.join(w, '.seeded-from-console')), "console's worktree_setup, with DEVTEAM_MAIN at console's root");
+      const prompt = fs.readFileSync(path.join(old, 'docs/devteam/run/prompts/console-01-a.txt'), 'utf8');
+      assert.match(prompt, /node '[^']*\/old\/docs\/devteam\/scripts\/devteam\.mjs' ticket show console-01-a/, "home's kit by absolute path");
+      assert.match(prompt, /keep this ticket's records under docs\/devteam\/project\/tickets\/console-01-a\/ in this repo/);
+      assert.doesNotMatch(prompt, /Read the devteam section of AGENTS\.md/, 'a sibling has no devteam AGENTS.md section');
+    } else {
+      t.diagnostic('tmux not installed: worker launch not exercised');
+      g(['worktree', 'add', '-q', '-b', 'ticket/console-01-a', w, 'origin/trunk'], F.console);
+    }
+    // a handoff on a sibling branch: sessions read it from the sibling, by repo name
+    const W = { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'console-01-a' };
+    okIn(w, ['phase', 'build'], W);
+    okIn(w, ['handoff'], W, {}, 'Done: T1. Next: T2.\n');
+    assert.equal(g(['log', '-1', '--format=%s', 'origin/ticket/console-01-a'], F.console), 'devteam handoff: console-01-a', "pushed to console's origin");
+    // sessions are listed by name: without the checkout, the session is still there, unreadable
+    write(path.join(old, 'docs/devteam/run/links.local.json'), JSON.stringify({ console: { path: path.join(F.base, 'not-cloned') } }));
+    okIn(old, ['dashboard-data']);
+    fs.rmSync(path.join(old, 'docs/devteam/run/links.local.json'));
+  } finally { F.done(); }
+});
