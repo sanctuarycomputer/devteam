@@ -318,7 +318,7 @@
   .tcard.inert { cursor: default; }
   .down-banner { margin: 0 0 12px; padding: 10px 14px; border-radius: 8px; background: color-mix(in srgb, var(--red) 14%, var(--surface)); border: 1px solid color-mix(in srgb, var(--red) 45%, var(--line)); color: var(--red-fg); font-weight: 500; }
   .down-banner a { color: inherit; }
-  .mon-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
+  .mon-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr)); gap: 12px; }
   .mon-card h4 { margin: 0; display: flex; align-items: center; gap: 8px; }
   .mon-card .mon-url { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; margin: 2px 0 8px; }
   .mon-stats { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12px; margin-bottom: 6px; }
@@ -2182,7 +2182,7 @@ function lineChart(series, { marks = [], unit = '', height = 160, yMin = 0, span
   series.forEach((s, i) => {
     const ps = s.points.slice().sort((a, b) => a[0] - b[0]);
     svg += `<polyline fill="none" stroke="${s.color || `var(--series-${(i % 4) + 1}, var(--blue))`}" stroke-width="2" points="${ps.map((p) => `${x(p[0]).toFixed(1)},${y(p[1]).toFixed(1)}`).join(' ')}"/>`;
-    for (const p of ps) svg += `<circle cx="${x(p[0]).toFixed(1)}" cy="${y(p[1]).toFixed(1)}" r="3" fill="${s.color || `var(--series-${(i % 4) + 1}, var(--blue))`}"><title>${esc(`${s.name}: ${p[1]}${unit} · ${fmtDate(p[0])}`)}</title></circle>`;
+    if (ps.length <= 60) for (const p of ps) svg += `<circle cx="${x(p[0]).toFixed(1)}" cy="${y(p[1]).toFixed(1)}" r="3" fill="${s.color || `var(--series-${(i % 4) + 1}, var(--blue))`}"><title>${esc(`${s.name}: ${p[1]}${unit} · ${fmtDate(p[0])}`)}</title></circle>`;
   });
   return `<div class="card chart mini-chart">${series.length > 1 ? `<div class="legend">${series.map((s, i) => `<span><i style="border-top-color:${s.color || `var(--series-${(i % 4) + 1}, var(--blue))`}"></i>${esc(s.name)}</span>`).join('')}</div>` : ''}${svg}</svg></div>`;
 }
@@ -2279,8 +2279,9 @@ function renderMonitoring(d) {
   const down = ms.filter((m) => m.state === 'down');
   $('n-monitors').textContent = down.length ? `${down.length} down` : '';
   $('n-monitors').classList.toggle('hot', down.length > 0);
-  $('down-banner').hidden = !down.length;
-  $('down-banner').innerHTML = down.length ? `<i class="icon-triangle-alert" aria-hidden="true"></i> ${down.map((m) => `<a href="#monitor/${encodeURIComponent(m.name)}">${esc(m.name)}</a> is down since ${esc(when(m.since))}${m.last?.error ? ` (${esc(m.last.error)})` : ''}`).join('; ')}` : '';
+  const banner = down.length ? `<i class="icon-triangle-alert" aria-hidden="true"></i> ${down.map((m) => `<a href="#monitor/${encodeURIComponent(m.name)}">${esc(m.name)}</a> is down since ${esc(when(m.since))}${m.last?.error ? ` (${esc(m.last.error)})` : ''}`).join('; ')}` : '';
+  // only when it changes, so a screen reader announces an outage once
+  if ($('down-banner').innerHTML !== banner) { $('down-banner').innerHTML = banner; $('down-banner').hidden = !down.length; }
   $('monitors').innerHTML = ms.length ? `<div class="mon-grid">${ms.map((m) => {
     const [tone, label] = monState(m);
     return `<div class="card mon-card">

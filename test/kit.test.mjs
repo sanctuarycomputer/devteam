@@ -802,8 +802,11 @@ http.createServer((req, res) => { const m = fs.readFileSync(${JSON.stringify(mod
       must(['monitor', 'poll', '--name', 'web'], sup);
       assert.deepEqual(obs().find((o) => o.kind === 'up')?.refs, [down.id], 'up refers to the outage it ends');
       assert.equal(status().state, 'up');
+      for (let i = 0; i < 20; i++) must(['monitor', 'poll', '--name', 'web'], sup);
       fs.writeFileSync(mode, 'slow');
-      for (let i = 0; i < 6; i++) must(['monitor', 'poll', '--name', 'web'], sup);
+      for (let i = 0; i < 3; i++) must(['monitor', 'poll', '--name', 'web'], sup);
+      assert.equal(obs().filter((o) => o.kind === 'slow').length, 0, 'a few slow answers among fast ones are not slow');
+      for (let i = 0; i < 24; i++) must(['monitor', 'poll', '--name', 'web'], sup);
       assert.equal(obs().filter((o) => o.kind === 'slow').length, 1, 'slow once per breach');
       must(['monitor', 'poll', '--name', 'web', '--rollup-day', new Date().toISOString().slice(0, 10)], sup);
       const roll = obs().find((o) => o.kind === 'reading');
@@ -1048,6 +1051,23 @@ http.createServer((req, res) => { const m = fs.readFileSync(${JSON.stringify(mod
     must(['answer', Qgate, 'yes']);
     must([...args, '--approved', Qgate], { role: 'sup' });
     git(['worktree', 'remove', '--force', wt('caps')]);
+    // monitors are owner settings in a ladder class: a decision in the class naming the PR covers them
+    git(['worktree', 'add', '-q', '-b', 'chore-mon', wt('mon'), 'origin/main']);
+    setTo(wt('mon'), (j) => { j.monitors = { web: { kind: 'http', url: 'https://example.com/up' } }; });
+    git(['commit', '-qam', 'monitor'], wt('mon'));
+    git(['push', '-q', 'origin', 'chore-mon'], wt('mon'));
+    const margs = ['merge', '--chore', 'mon', '--dry-run', '--title', 'chore-mon: watch production', '--body-file', body];
+    const rm = dt(margs, { role: 'sup' });
+    assert.match(rm.out + rm.err, /monitors \(monitor-change\)[\s\S]*a decision in that class/);
+    const Qm = must(['ask', '--class', 'monitor-change', '--question', 'Watch https://example.com/up?', '--recommendation', 'yes', '--default', 'yes'], { role: 'sup' });
+    must(['answer', Qm, 'yes']);
+    const Dother = must(['decide', '--class', 'monitor-change', '--approved', Qm, '--refs', 'chore-elsewhere', '--', 'watch something else'], { role: 'sup' });
+    assert.match(dt([...margs, '--decision', Dother], { role: 'sup' }).err, /is about chore-elsewhere/, 'a decision for another PR does not cover this one');
+    const Qm2 = must(['ask', '--class', 'monitor-change', '--question', 'Watch https://example.com/up, really?', '--recommendation', 'yes', '--default', 'yes'], { role: 'sup' });
+    must(['answer', Qm2, 'yes']);
+    const Dm = must(['decide', '--class', 'monitor-change', '--approved', Qm2, '--refs', 'chore-mon', '--', 'watch the production health route'], { role: 'sup' });
+    assert.match(must([...margs, '--decision', Dm], { role: 'sup' }), /would merge/);
+    git(['worktree', 'remove', '--force', wt('mon')]);
   });
 
   await t.test('an answer one act recorded can approve the merge that lands it, once', () => {

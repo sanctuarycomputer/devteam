@@ -6626,31 +6626,47 @@ function drainedPreface() {
 // observations on subject monitor:<name>: down and up on the transition, slow once per breach, and a
 // daily rollup (kind reading). `wait` returns once on a new down, never on a standing finding.
 const MONITOR_DEFAULTS = { every_minutes: 1, timeout_s: 10, down_after: 2, slow_after: 3, tls_warn_days: 14, sample_days: 30 };
+// A monitor's name is a folder under run/monitors: letters, digits, dot, dash, underscore only.
+const MONITOR_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 const monitorList = () => {
   const s = loadSettings();
-  return Object.entries(s.monitors ?? {}).map(([name, m]) => ({ name, ...MONITOR_DEFAULTS, ...(s.monitor_defaults ?? {}), ...m }));
+  return Object.entries(s.monitors ?? {}).filter(([name]) => MONITOR_NAME.test(name) || (warn(`monitor "${name}" ignored: a name is letters, digits, dot, dash or underscore`), false)).map(([name, m]) => ({ name, ...MONITOR_DEFAULTS, ...(s.monitor_defaults ?? {}), ...m }));
 };
 const monitorOf = (name) => monitorList().find((m) => m.name === name) ?? die(`no monitor ${name} in settings (monitors)`);
 const monitorDir = (name) => path.join(runDir, 'monitors', name);
 const monitorState = (name) => { try { return JSON.parse(fs.readFileSync(path.join(monitorDir(name), 'state.json'), 'utf8')); } catch { return { state: 'unknown', fails: 0 }; } };
 const saveMonitorState = (name, st) => { fs.mkdirSync(monitorDir(name), { recursive: true }); fs.writeFileSync(path.join(monitorDir(name), 'state.json'), `${JSON.stringify(st, null, 2)}\n`); };
+// Samples are read once per process (the dashboard and metrics ask several times a refresh).
+const SAMPLES = new Map();
 function monitorSamples(name, sinceMs = 0) {
-  const text = readText(path.join(monitorDir(name), 'samples.jsonl')) ?? '';
-  const out = [];
-  for (const l of text.split('\n')) {
-    if (!l) continue;
-    try { const s = JSON.parse(l); if (Date.parse(s.at) >= sinceMs) out.push(s); } catch {}
+  if (!SAMPLES.has(name)) {
+    const all = [];
+    for (const l of (readText(path.join(monitorDir(name), 'samples.jsonl')) ?? '').split('\n')) {
+      if (!l) continue;
+      try { const s = JSON.parse(l); s.t = Date.parse(s.at); all.push(s); } catch {}
+    }
+    SAMPLES.set(name, all);
   }
-  return out;
+  return SAMPLES.get(name).filter((s) => s.t >= sinceMs);
 }
-const quantile = (xs, q) => { if (!xs.length) return null; const s = [...xs].sort((a, b) => a - b); return s[Math.min(s.length - 1, Math.floor(q * s.length))]; };
+// Nearest-rank quantile: the value at rank ceil(q n).
+const quantile = (xs, q) => { if (!xs.length) return null; const s = [...xs].sort((a, b) => a - b); return s[Math.max(0, Math.ceil(q * s.length) - 1)]; };
 const fmtMs = (ms) => (ms == null ? '-' : ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`);
 // One URL check. Never throws: a failure is a sample like any other.
 async function httpCheck(m) {
   const t0 = performance.now();
   try {
-    const r = await fetch(m.url, { signal: AbortSignal.timeout(m.timeout_s * 1000), redirect: 'follow', headers: { 'user-agent': 'devteam-monitor' } });
-    const body = await r.text();
+    // A redirect is an answer, not up: a health URL that 302s to a login or maintenance page fails
+    // unless the monitor expects that status (or sets follow_redirects).
+    const r = await fetch(m.url, { signal: AbortSignal.timeout(m.timeout_s * 1000), redirect: m.follow_redirects ? 'follow' : 'manual', headers: { 'user-agent': 'devteam-monitor' } });
+    let body = '';
+    if (m.expect?.contains) {
+      // read at most 1 MB of the body, enough for a health page
+      const reader = r.body?.getReader();
+      const dec = new TextDecoder();
+      while (reader && body.length < 1048576) { const { done, value } = await reader.read(); if (done) break; body += dec.decode(value, { stream: true }); }
+      reader?.cancel().catch(() => {});
+    } else await r.body?.cancel().catch(() => {});
     const ms = Math.round(performance.now() - t0);
     const want = m.expect?.status;
     const statusOk = want ? r.status === want : r.status < 400;
@@ -6681,27 +6697,45 @@ async function tlsDaysLeft(url) {
 }
 const monitorSubject = (name) => `monitor:${name}`;
 function monitorObserve(m, fields) {
-  return appendLog({ type: 'observation', source: m.name, subject: monitorSubject(m.name), detector: 'monitor', fix_hint: m.url, ...fields }, 'supervisor');
+  return appendLog({ type: 'observation', source: m.name, subject: monitorSubject(m.name), detector: 'monitor', ...fields }, 'supervisor');
 }
 // A day's rollup from its samples: uptime, latency, outages.
 function monitorRollup(m, day) {
   const from = Date.parse(`${day}T00:00:00.000Z`);
-  const xs = monitorSamples(m.name, from).filter((s) => Date.parse(s.at) < from + 86400000);
+  const xs = monitorSamples(m.name, from).filter((s) => s.t < from + 86400000);
   if (!xs.length) return null;
   const ok = xs.filter((s) => s.ok);
   const uptime = +((100 * ok.length) / xs.length).toFixed(3);
   const p50 = quantile(ok.map((s) => s.ms), 0.5), p95 = quantile(ok.map((s) => s.ms), 0.95);
   const downs = logObjects('observation').filter((o) => o.subject === monitorSubject(m.name) && o.kind === 'down' && dateOnly(o.created_at) === day).length;
-  return monitorObserve(m, { kind: 'reading', detail: `${day}: up ${uptime}% of ${xs.length} checks, p50 ${fmtMs(p50)}, p95 ${fmtMs(p95)}${downs ? `, ${downs} outage${downs > 1 ? 's' : ''}` : ''}`, severity: 0, valence: 0, measure: { value: uptime, unit: '%' }, source_key: `monitor:${m.name}:rollup:${day}` });
+  return monitorObserve(m, { kind: 'reading', detail: `${day} (UTC): up ${uptime}% of ${xs.length} checks, p50 ${fmtMs(p50)}, p95 ${fmtMs(p95)}${downs ? `, ${downs} outage${downs > 1 ? 's' : ''}` : ''}`, severity: 0, valence: 0, measure: { value: uptime, unit: '%' }, source_key: `monitor:${m.name}:rollup:${day}` });
 }
 // Poll one monitor: check, record the sample, append observations on change. Returns alert lines
 // (a new outage) for wait.
-async function pollMonitor(m, { rollupDay = null } = {}) {
+async function pollMonitor(m, opts = {}) {
   if (m.kind !== 'http') return { skipped: `kind ${m.kind} is not built in yet` };
-  const st = monitorState(m.name);
-  const sample = { at: nowIso(), ...(await httpCheck(m)) };
+  // one poll of a monitor at a time (wait's and a manual one): the other skips it this round
   fs.mkdirSync(monitorDir(m.name), { recursive: true });
+  const lock = path.join(monitorDir(m.name), 'poll.lock');
+  try { fs.writeFileSync(lock, `${process.pid}\n`, { flag: 'wx' }); } catch {
+    let age = Infinity;
+    try { age = Date.now() - fs.statSync(lock).mtimeMs; } catch {}
+    if (age < 120000) return { skipped: 'another poll of it is running' };
+    fs.writeFileSync(lock, `${process.pid}\n`);
+  }
+  try { return await pollMonitorLocked(m, opts); } finally { fs.rmSync(lock, { force: true }); }
+}
+// What the log says a monitor's state was: its latest down or up (a fresh host, or lost run/).
+function monitorStateFromLog(name) {
+  const last = logObjects('observation').filter((o) => o.subject === monitorSubject(name) && ['down', 'up'].includes(o.kind)).sort(byTime).pop();
+  return last?.kind === 'down' ? { state: 'down', since: last.created_at, down_id: last.id, fails: 0 } : { state: last ? 'up' : 'unknown', fails: 0 };
+}
+async function pollMonitorLocked(m, { rollupDay = null } = {}) {
+  let st = monitorState(m.name);
+  if (!st.state || st.state === 'unknown') st = { ...st, ...monitorStateFromLog(m.name) };
+  const sample = { at: nowIso(), ...(await httpCheck(m)) };
   fs.appendFileSync(path.join(monitorDir(m.name), 'samples.jsonl'), `${JSON.stringify(sample)}\n`);
+  SAMPLES.delete(m.name);
   const alerts = [];
   st.last = sample;
   st.last_at = sample.at;
@@ -6720,10 +6754,12 @@ async function pollMonitor(m, { rollupDay = null } = {}) {
     }
     if (st.state !== 'up') st.since = sample.at;
     Object.assign(st, { state: 'up', fails: 0, failing_since: null, down_id: null });
-    // slow: the p95 of the last 20 good checks over the SLO for slow_after checks in a row, once per breach
+    // slow: the p95 of the last hour's good checks (at least 20 of them) over the target for
+    // slow_after checks in a row, once per breach; one slow answer among fast ones is not slow
     if (m.slo?.p95_ms) {
-      const p95 = quantile(monitorSamples(m.name, Date.now() - 6 * 3600000).filter((s) => s.ok).slice(-20).map((s) => s.ms), 0.95);
-      st.slow_streak = p95 > m.slo.p95_ms ? (st.slow_streak ?? 0) + 1 : 0;
+      const recent = monitorSamples(m.name, Date.now() - 3600000).filter((s) => s.ok).map((s) => s.ms);
+      const p95 = recent.length >= 20 ? quantile(recent, 0.95) : null;
+      st.slow_streak = p95 != null && p95 > m.slo.p95_ms ? (st.slow_streak ?? 0) + 1 : 0;
       if (st.slow_streak >= m.slow_after && !st.slow) {
         monitorObserve(m, { kind: 'slow', detail: `${m.name} is slow: p95 ${fmtMs(p95)} over the ${fmtMs(m.slo.p95_ms)} target for ${st.slow_streak} checks`, severity: 2, valence: -1, measure: { value: p95, unit: 'ms' }, source_key: `monitor:${m.name}:slow:${sample.at}` });
         st.slow = true;
@@ -6732,18 +6768,21 @@ async function pollMonitor(m, { rollupDay = null } = {}) {
   }
   // TLS, hourly
   if (/^https:/i.test(m.url) && (!st.tls_at || Date.now() - Date.parse(st.tls_at) > 3600000)) { st.tls_days = await tlsDaysLeft(m.url); st.tls_at = nowIso(); }
-  // the rollup for yesterday, once (or a day asked for)
+  // a rollup for each finished UTC day not rolled up yet (up to a week back), or the day asked for
   const yesterday = dateOnly(new Date(Date.now() - 86400000).toISOString());
-  const day = rollupDay ?? yesterday;
   if (rollupDay || st.rollup_day !== yesterday) {
-    const done = logObjects('observation').some((o) => o.source_key === `monitor:${m.name}:rollup:${day}`);
-    if (!done) monitorRollup(m, day);
+    const days = rollupDay ? [rollupDay] : [6, 5, 4, 3, 2, 1].map((n) => dateOnly(new Date(Date.now() - n * 86400000).toISOString())).filter((d) => !st.rollup_day || d > st.rollup_day);
+    const done = new Set(logObjects('observation').filter((o) => o.subject === monitorSubject(m.name) && o.kind === 'reading').map((o) => o.source_key));
+    for (const day of days) if (!done.has(`monitor:${m.name}:rollup:${day}`)) monitorRollup(m, day);
     if (!rollupDay) st.rollup_day = yesterday;
   }
-  // samples past sample_days, pruned once a day
+  // samples past sample_days, pruned once a day (written aside, then renamed over)
   if (st.pruned !== dateOnly(nowIso())) {
-    const keep = monitorSamples(m.name, Date.now() - m.sample_days * 86400000);
-    fs.writeFileSync(path.join(monitorDir(m.name), 'samples.jsonl'), keep.map((s) => `${JSON.stringify(s)}\n`).join(''));
+    const keep = monitorSamples(m.name, Date.now() - m.sample_days * 86400000).map(({ t: _, ...s }) => `${JSON.stringify(s)}\n`).join('');
+    const file = path.join(monitorDir(m.name), 'samples.jsonl');
+    fs.writeFileSync(`${file}.tmp`, keep);
+    fs.renameSync(`${file}.tmp`, file);
+    SAMPLES.delete(m.name);
     st.pruned = dateOnly(nowIso());
   }
   saveMonitorState(m.name, st);
@@ -6751,11 +6790,13 @@ async function pollMonitor(m, { rollupDay = null } = {}) {
 }
 const monitorDue = (m, st) => !st.last_at || Date.now() - Date.parse(st.last_at) >= m.every_minutes * 60000 - 5000;
 // What the dashboard and `monitor status` show: state, last check, uptime and latency over 24h and 7d.
+let STATUS_MEMO = null;
 function monitorStatus() {
-  return monitorList().map((m) => {
+  if (STATUS_MEMO) return STATUS_MEMO;
+  return (STATUS_MEMO = monitorList().map((m) => {
     const st = monitorState(m.name);
     const week = monitorSamples(m.name, Date.now() - 7 * 86400000);
-    const day = week.filter((s) => Date.parse(s.at) >= Date.now() - 86400000);
+    const day = week.filter((s) => s.t >= Date.now() - 86400000);
     const up = (xs) => (xs.length ? +((100 * xs.filter((s) => s.ok).length) / xs.length).toFixed(2) : null);
     const lat = (xs, q) => quantile(xs.filter((s) => s.ok).map((s) => s.ms), q);
     return {
@@ -6763,7 +6804,7 @@ function monitorStatus() {
       state: st.state ?? 'unknown', since: st.since ?? null, last_at: st.last_at ?? null, last: st.last ?? null, fails: st.fails ?? 0, slow: !!st.slow, tls_days: st.tls_days ?? null, tls_warn_days: m.tls_warn_days,
       uptime_24h: up(day), uptime_7d: up(week), p50_24h: lat(day, 0.5), p95_24h: lat(day, 0.95), p95_7d: lat(week, 0.95), checks_24h: day.length,
     };
-  });
+  }));
 }
 // A monitor's latency and uptime in buckets, for a chart: 24h in 5-minute buckets, 7d in hours.
 function monitorSeries(name, range) {
@@ -6773,7 +6814,7 @@ function monitorSeries(name, range) {
   const from = Date.now() - span;
   const buckets = new Map();
   for (const s of monitorSamples(name, from)) {
-    const b = Math.floor(Date.parse(s.at) / step) * step;
+    const b = Math.floor(s.t / step) * step;
     (buckets.get(b) ?? buckets.set(b, []).get(b)).push(s);
   }
   return { name, range: range === '7d' ? '7d' : '24h', step_ms: step, buckets: [...buckets].sort((a, b) => a[0] - b[0]).map(([t, xs]) => ({ t, n: xs.length, ok: xs.filter((s) => s.ok).length, p50: quantile(xs.filter((s) => s.ok).map((s) => s.ms), 0.5), p95: quantile(xs.filter((s) => s.ok).map((s) => s.ms), 0.95) })) };
@@ -6810,7 +6851,7 @@ async function cmdMonitor() {
     for (const a of alerts) out(`ALERT ${a}`);
     return;
   }
-  die('usage: monitor status [--json] | monitor test <name> | monitor poll [--due] [--name n] [--json] | monitor series <name> [--range 24h|7d]');
+  die('usage: monitor status [--json] | monitor test <name> | monitor poll [--due] [--name n] [--rollup-day yyyy-mm-dd] [--json] | monitor series <name> [--range 24h|7d]');
 }
 
 // wait [--minutes n]: block between ticks until something needs the supervisor, then say what.
@@ -6831,8 +6872,17 @@ function cmdWait() {
   // leaves open wakes it once, not every time.
   const sinceFile = path.join(runDir, 'wait-since');
   const since = Number(readText(sinceFile)) || null;
-  // Monitors are polled on every cycle when due; a new outage wakes the supervisor once.
-  const poll = () => (monitorList().length ? sub(['monitor', 'poll', '--due', '--json'])?.alerts ?? [] : []);
+  // Monitors are polled on every cycle when one is due (checked here, before spawning anything); a
+  // new outage wakes the supervisor once. A poll gets a minute; one that fails says so once.
+  let pollWarned = false;
+  const poll = () => {
+    if (!monitorList().some((m) => monitorDue(m, monitorState(m.name)))) return [];
+    const r = spawnSync(process.execPath, [self, 'monitor', 'poll', '--due', '--json'], { cwd: mainRoot, env: { ...process.env, NODE_USE_ENV_PROXY: '1' }, encoding: 'utf8', timeout: 60000, maxBuffer: 8 * 1024 * 1024 });
+    try { if (r.status === 0) return JSON.parse(r.stdout).alerts ?? []; } catch {}
+    if (!pollWarned) process.stderr.write(`devteam: monitor poll ${r.error?.code === 'ETIMEDOUT' ? 'took over a minute' : `failed: ${(r.stderr || '').trim().split('\n').pop()}`}; monitoring didn't run this cycle (monitor status)\n`);
+    pollWarned = true;
+    return [];
+  };
   const snap = () => {
     logCache = null;
     const owner = readLog().lines.filter((l) => l.by === 'owner').map((l) => ({ k: l.id, at: Date.parse(l.at) }));
@@ -7304,7 +7354,7 @@ Goals and retros
 The log
   log [--type t] [--by w] [--id x] [--tail n] [--json] | log-check | log-sync [--dry-run] | history [<ticket-id>]
   record <id> [--json]   one record's stored fields, who created it and who set each field | peek <kind> <id> --json   what a dashboard sidepeek shows beyond the data: history and its kind's details
-  monitor status [--json] | monitor test <name> | monitor poll [--due] [--name n] [--json] (supervisor; wait runs it) | monitor series <name> [--range 24h|7d]   production monitors from settings
+  monitor status [--json] | monitor test <name> | monitor poll [--due] [--name n] [--rollup-day d] [--json] (supervisor; wait runs it) | monitor series <name> [--range 24h|7d]   production monitors from settings
 
 Dashboard and releases
   dashboard [--port p] [--host h] | dashboard-data | notes <from-tag> [<to>]
