@@ -707,6 +707,16 @@ test('devteam kit', async (t) => {
       assert.match(dt(['act', '--decision', fid, '--', 'dropped it'], sup).err, /records authority it doesn't have \(gate-change is the owner's/);
       fs.appendFileSync(supFile, line({ id: 'd-20261101-235959001-supervisor', type: 'decision', op: 'new', at: new Date().toISOString(), by: 'supervisor', class: 'production-migration', what: 'migrate it', refs: ['bill-01-card'], authority: 'rung', reversible: true }));
       assert.match(dt(['act', '--decision', 'd-20261101-235959001-supervisor', '--', 'shipped'], sup).err, /production-migration is not on rung 3/);
+      // nor reuse an owner's answer that already approved a call (D used Qx): the earliest call is the one it approved
+      const rid = 'd-20261101-235959002-supervisor';
+      fs.appendFileSync(supFile, line({ id: rid, type: 'decision', op: 'new', at: new Date(Date.now() + 1000).toISOString(), by: 'supervisor', class: 'release-scope', what: 'ship something else', refs: ['bill-02-x'], authority: 'answer', approved_by: Qx }));
+      assert.match(dt(['act', '--decision', rid, '--', 'shipped'], sup).err, new RegExp(`records authority it doesn't have \\(${Qx} already approved a decision \\(${D}\\)`));
+      // nor carry an answer asked about one ticket into a call about another
+      const Qt = must(['ask', '--question', 'Ship the card flow flagged?', '--class', 'release-scope', '--ticket', 'bill-01-card', '--reasons', 'below-rung', '--recommendation', 'yes'], sup);
+      must(['answer', Qt, 'yes']);
+      const tid = 'd-20261101-235959003-supervisor';
+      fs.appendFileSync(supFile, line({ id: tid, type: 'decision', op: 'new', at: new Date(Date.now() + 2000).toISOString(), by: 'supervisor', class: 'release-scope', what: 'ship another', refs: ['bill-02-x'], authority: 'answer', approved_by: Qt }));
+      assert.match(dt(['act', '--decision', tid, '--', 'shipped'], sup).err, new RegExp(`${Qt} was asked about bill-01-card, not bill-02-x`));
       fs.writeFileSync(supFile, before);
     }
     assert.deepEqual(dl.options, ['ship flagged', 'hold a week']);
@@ -950,6 +960,10 @@ test('devteam kit', async (t) => {
     const refused = dt(['merge', '--chore', 'rules', '--dry-run', '--title', 'chore-rules: tighten', '--body-file', body], { role: 'sup' });
     assert.notEqual(refused.status, 0);
     assert.match(refused.out, /outside project\//);
+    // the owner's "no" approves nothing: merge needs the answer to be the question's recommendation
+    const Qn = must(['ask', '--question', 'Add a different rule to quality.md?', '--class', 'governance-edit', '--reasons', 'owner-only', '--recommendation', 'yes'], { role: 'sup' });
+    must(['answer', Qn, 'no, leave quality.md alone']);
+    assert.match(dt(['merge', '--chore', 'rules', '--dry-run', '--approved', Qn, '--title', 'chore-rules: tighten', '--body-file', body], { role: 'sup' }).err, /was answered "no, leave quality\.md alone", not its recommendation \("yes"\): that approves nothing/);
     const Qg = must(['ask', '--question', 'Add the extra rule to quality.md?', '--class', 'governance-edit', '--reasons', 'owner-only', '--recommendation', 'yes'], { role: 'sup' });
     must(['answer', Qg, 'yes']);
     must(['merge', '--chore', 'rules', '--dry-run', '--approved', Qg, '--title', 'chore-rules: tighten', '--body-file', body], { role: 'sup' });
@@ -1653,6 +1667,11 @@ test('devteam kit', async (t) => {
     assert.deepEqual([dg.fail_rate, dg.preexisting_fails], [0, debt.length], "and not counted in the gate's fail rate");
     assert.ok(json(must(['log', '--type', 'act', '--json'])).some((a) => a.class === 'merge-word' && a.refs.includes('bill-01-card')));
     assert.match(must(['status']), /merged.*bill-01-card/);
+    // merging it again (a second run, a stale background job) lands nothing and logs nothing
+    const acts = () => json(must(['log', '--type', 'act', '--json'])).length;
+    const before = acts();
+    assert.match(must(['merge', 'bill-01-card'], { role: 'sup' }), /is already on main: nothing to merge, nothing logged/);
+    assert.equal(acts(), before, 'no second merge act');
     // its merge settles the worker's requests, replied to or not
     assert.ok(!json(must(['messages', '--to', 'supervisor', '--open', '--json'])).some((m) => m.created_by === 'bill-01-card'), 'a merged ticket asks nothing');
     assert.ok(!json(must(['dashboard-data'])).open_messages.some((m) => m.actor === 'bill-01-card'));
@@ -2066,7 +2085,8 @@ test('devteam kit', async (t) => {
     assert.equal(h.root, fs.realpathSync(repo));
     assert.equal(h.name, 'demo');
     assert.equal(typeof h.inbox, 'number');
-    assert.equal(h.inbox, json(must(['questions', '--json'])).filter((q) => q.status === 'open').length, 'the Inbox count is the open questions');
+    const dd = json(must(['dashboard-data']));
+    assert.equal(h.inbox, dd.questions.length + dd.ooda.knowledge.filter((k) => k.status === 'candidate').length, "the Inbox as the dashboard counts it: its questions and lessons to keep");
     assert.ok(['run', 'drain', 'park'].includes(h.fleet.mode));
     assert.equal(typeof h.fleet.workers, 'number');
     assert.match(h.kit, /^(v\d+\.\d+\.\d+|unreleased)(\+local)?$/);
@@ -5605,6 +5625,25 @@ test('link add --kind repo asks the owner a governance-edit question and writes 
 
 // One answer may approve a bundle of repo link changes, but only the bundle its question showed:
 // merge binds each changed owner-kind entry to an act of that answer with the entry that lands.
+test('the owner\'s "no" adds no repo link: link --approved and merge --approved both refuse it', () => {
+  const F = multiFixture('link-no');
+  const { old, okIn, runIn } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const add = ['link', 'add', 'docs', '--kind', 'repo', '--remote', 'usbclub/docs', '--title', 'Docs site'];
+  try {
+    const qid = /q-[0-9]+-[0-9]+-supervisor/.exec(okIn(old, add, SUP))[0];
+    okIn(old, ['answer', qid, 'no, do not add it']);
+    const r = runIn(old, [...add, '--approved', qid], SUP);
+    assert.notEqual(r.status, 0);
+    assert.match(r.err, /was answered "no, do not add it", not its recommendation \("yes"\): that approves nothing/);
+    assert.ok(!/"docs"/.test(fs.readFileSync(path.join(old, 'docs/devteam/project/settings.md'), 'utf8')), 'nothing written');
+    assert.ok(!json(okIn(old, ['log', '--type', 'act', '--json'])).some((a) => a.approved_by === qid), 'no act');
+    const m = runIn(old, ['merge', '--chore', 'registry', '--dry-run', '--approved', qid], SUP);
+    assert.notEqual(m.status, 0);
+    assert.match(m.out + m.err, /not its recommendation|no open PR|no branch/);
+  } finally { F.done(); }
+});
+
 test('merge --approved lands only the repo link entries the answer approved: a hand edit beside them is refused by name', () => {
   const F = multiFixture('link-bundle');
   const { old, g, okIn, runIn } = F;

@@ -3433,6 +3433,10 @@ function ownerAnswer(qid, what) {
   const v = q?.type === 'question' ? questionView(q) : null;
   if (!v || v.status !== 'answered') die(`${what}: ${qid} is not a question the owner answered`);
   reviewApproves(v, what);
+  // An answer approves what it said yes to: the owner's answer must be the question's
+  // recommendation (a review, its verified result). Answered any other way, the owner declined or
+  // changed it, and the supervisor asks again; a secrets question approves by what was posted.
+  if (!(v.secrets ?? []).length && v.kind !== 'review' && !v.matched) die(`${what}: ${qid} was answered "${String(v.answer ?? '').slice(0, 80)}", not its recommendation${v.recommendation ? ` ("${v.recommendation}")` : ' (it has none)'}: that approves nothing; ask again for what the owner wants`);
   return v;
 }
 // A review approves something only through a result the owner gave that still verifies.
@@ -3478,6 +3482,11 @@ function cmdMerge() {
   if (pr.isDraft) die(`${pr.url} is a draft`);
   const sha = pr.headRefOid;
   if (!R.resolveCommit(sha)) die(`cannot find ${sha} locally after fetching ${branch}${inR}`);
+  // Merged already (a second run, a stale background job): nothing lands, nothing is logged. The
+  // forge still shows a merged PR, and its head is on main.
+  const mainBranch0 = S.main_branch;
+  R.git(['fetch', '--quiet', 'origin', mainBranch0]);
+  if (R.resolveCommit(`origin/${mainBranch0}`) && R.git(['merge-base', '--is-ancestor', sha, `origin/${mainBranch0}`]) !== null) return out(`${branch}${inR} at ${sha.slice(0, 12)} is already on ${mainBranch0}: nothing to merge, nothing logged`);
   const fails = checkPr({ headRef: branch, sha, title: pr.title, body: pr.body, repo: R });
   // A refused footprint is a sign about the line (line-pressure): one observation per head.
   if (id && fails.some((x) => x.startsWith(OFF_LINE))) {
@@ -4880,15 +4889,29 @@ function decisionAuthorityGap(d) {
   const q = d.approved_by?.startsWith('q-') ? logGet(d.approved_by) : null;
   const v = q?.type === 'question' ? questionView(q) : null;
   const inClass = v && (v.class === d.class || (d.class === 'approve-plan' && v.kind === 'one-way-door'));
-  if (ownerOnly) return v && inClass && v.status === 'answered' ? null : `${d.class} is the owner's and needs the owner's answer in that class`;
+  if (ownerOnly) return v && inClass && v.status === 'answered' ? answerUseGap(d, v) : `${d.class} is the owner's and needs the owner's answer in that class`;
   switch (d.authority) {
-    case 'answer': return v && inClass && v.status === 'answered' ? null : `no answered ${d.class} question ${d.approved_by ?? ''}`.trim();
+    case 'answer': return v && inClass && v.status === 'answered' ? answerUseGap(d, v) : `no answered ${d.class} question ${d.approved_by ?? ''}`.trim();
     case 'default': return v && inClass && v.status === 'defaulted' ? null : `no defaulted ${d.class} question ${d.approved_by ?? ''}`.trim();
     case 'standing-rule': { const k = logGet(d.approved_by ?? ''); return k?.type === 'knowledge' && writerClass(k.created_by) === 'owner' && k.status === 'accepted' && k.scope === `class:${d.class}` ? null : `no accepted owner rule scoped class:${d.class}`; }
     case 'rung': return L.classes[d.class] && rungFor(d.class, d.scope ?? null) >= 3 ? null : `${d.class} is not on rung 3`;
     case 'constitution': return (L.constitutional ?? []).includes(d.class) || !L.classes[d.class] ? null : `${d.class} is on the ladder, not constitutional`;
     default: return `unknown authority ${d.authority}`;
   }
+}
+// An owner's answer approves one call, as decide and act enforce (or one per item it approves),
+// and the call is about what the question was: a decision line written by hand gets the same rule,
+// so it can't reuse an answer that already approved something, or carry one asked about another
+// ticket. The earliest call citing the answer (for that item) is the one it approved.
+function answerUseGap(d, v) {
+  const refs = (d.refs ?? []).flatMap((x) => String(x).split(','));
+  if (v.ticket && !refs.includes(v.ticket) && !(v.approves ?? []).some((a) => refs.includes(a))) return `${v.id} was asked about ${v.ticket}, not ${refs.join(', ') || 'nothing'}`;
+  if (d.class === 'approve-plan' && v.kind === 'one-way-door') return null; // a goal-level door covers each plan it names (approve-plan's own check)
+  const declared = v.approves ?? [];
+  const part = declared.length ? refs.find((r) => declared.includes(r)) : null;
+  if (declared.length && !part) return `${v.id} approves ${declared.join(', ')}, and this names none of them`;
+  const first = calls().filter((c) => c.approved_by === v.id && (!part || (c.refs ?? []).flatMap((x) => String(x).split(',')).includes(part))).sort(byTime)[0];
+  return first && first.id !== d.id ? `${v.id} already approved ${first.type === 'decision' ? 'a decision' : 'an act'}${part ? ` for ${part}` : ''} (${first.id})` : null;
 }
 // What a command's act would be about, for --decision: the act must be about something the decision named.
 function citeTargets() {
@@ -7045,8 +7068,17 @@ async function cmdDashboard() {
     });
   };
   refreshHello();
-  setInterval(refreshHello, 30000).unref();
+  setInterval(refreshHello, 10000).unref();
   const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, inbox: hello?.inbox ?? null, fleet: hello?.fleet ?? null });
+  // One dashboard-data run at a time, shared by every page waiting on it, given 2 minutes: each
+  // refresh used to start its own, and on a slow machine they piled up (one ran for an hour).
+  let dataRun = null;
+  let lastData = null;
+  const dashboardData = () => (dataRun ??= new Promise((resolve) => execFile(process.execPath, [self, 'dashboard-data'], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: ownerEnv, timeout: 120000, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
+    dataRun = null;
+    if (!err) lastData = stdout;
+    resolve({ ok: !err, stdout, stderr: err?.killed ? 'dashboard-data took over 2 minutes and was stopped' : String(stderr ?? '') });
+  })));
   const server = http.createServer(async (req, res) => {
     // Every route answers only on the dashboard's own address: a page elsewhere that points its own
     // name at 127.0.0.1 (DNS rebinding) sends its own Host, and gets nothing, not even a read.
@@ -7062,14 +7094,15 @@ async function cmdDashboard() {
       return res.end(fs.readFileSync(page));
     }
     if (req.method === 'GET' && req.url.startsWith('/api/data')) {
-      const r = await run(['dashboard-data']);
-      if (!r.ok) return send(res, 500, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
+      const r = await dashboardData();
+      if (!r.ok && !lastData) return send(res, 500, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
       // The page in use says which version of itself it is: an open tab keeps the code it loaded,
       // so after a kit update it compares this with the first one it saw and offers a reload.
       let version = '';
       try { version = sha256(fs.readFileSync(page)).slice(0, 16); } catch {}
-      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-devteam-page': version });
-      return res.end(r.stdout);
+      // a run that failed or timed out serves the last good data, marked stale
+      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-devteam-page': version, ...(r.ok ? {} : { 'x-devteam-stale': 'true' }) });
+      return res.end(r.ok ? r.stdout : lastData);
     }
     const u = new URL(req.url, 'http://x');
     // Whether the fleet can move now: fleet status, without fetching (the strip at the top asks).
@@ -7313,22 +7346,39 @@ const supervisorTarget = () => process.env.DEVTEAM_SUPERVISOR ?? readText(superv
 const SHELLS = new Set(['bash', 'zsh', 'sh', 'fish', 'dash', 'ksh', 'tcsh', 'csh', 'login']);
 // Resolve a session:window exactly and check an agent, not a bare shell, is running there (typing
 // into a shell would execute the text).
+// A session's windows, each with its active pane's state, from one tmux call kept for a few
+// seconds: a busy tmux server answers each call slowly (seconds, with many agents' panes), and a
+// dashboard refresh asked it two calls per window.
+const paneTables = new Map();
+function paneTable(session, { fresh = false } = {}) {
+  const hit = paneTables.get(session);
+  if (hit && !fresh && Date.now() - hit.at < 5000) return hit.rows;
+  const listed = sh('tmux', ['list-panes', '-s', '-t', session, '-F', '#{window_index}\t#{window_name}\t#{pane_active}\t#{pane_dead}\t#{pane_current_command}']);
+  const rows = listed === null ? null : listed.split('\n').filter(Boolean).map((l) => l.split('\t')).filter((r) => r[2] === '1').map(([index, name, , dead, cmd]) => ({ index, name, dead, cmd: cmd ?? '' }));
+  paneTables.set(session, { at: Date.now(), rows });
+  return rows;
+}
 function resolvePane(target) {
   if (!target) return { problem: 'the supervisor has not run inside tmux yet (no pane recorded); it reads messages on its tick' };
   let exact = target;
+  let dead;
+  let cmd = '';
   if (!target.startsWith('%')) {
     const i = target.lastIndexOf(':');
     const [session, win] = i === -1 ? [target, '0'] : [target.slice(0, i), target.slice(i + 1)];
-    const listed = sh('tmux', ['list-windows', '-t', session, '-F', '#{window_index} #{window_name}']);
-    if (listed === null) return { problem: `no tmux session "${session}"` };
-    const rows = listed.split('\n').filter(Boolean).map((l) => [l.slice(0, l.indexOf(' ')), l.slice(l.indexOf(' ') + 1)]);
-    const row = rows.find(([idx, name]) => name === win || idx === win);
+    const find = (rows) => rows?.find((r) => r.name === win || r.index === win);
+    let rows = paneTable(session);
+    let row = find(rows);
+    if (!row) { rows = paneTable(session, { fresh: true }); row = find(rows); }
+    if (rows === null) return { problem: `no tmux session "${session}"` };
     if (!row) return { problem: `no tmux window "${win}" in session "${session}"` };
-    exact = `${session}:${row[0]}`;
+    exact = `${session}:${row.index}`;
+    ({ dead, cmd } = row);
+  } else {
+    const info = sh('tmux', ['display-message', '-p', '-t', exact, '#{pane_dead} #{pane_current_command}']);
+    if (info === null) return { problem: `cannot inspect ${exact}` };
+    [dead, cmd = ''] = info.split(' ');
   }
-  const info = sh('tmux', ['display-message', '-p', '-t', exact, '#{pane_dead} #{pane_current_command}']);
-  if (info === null) return { problem: `cannot inspect ${exact}` };
-  const [dead, cmd = ''] = info.split(' ');
   if (dead === '1') return { problem: `the pane in ${exact} has exited` };
   if (SHELLS.has(cmd.replace(/^-/, ''))) return { problem: `no agent is running in ${exact} (it is at a ${cmd} prompt); resume it first` };
   return { target: exact };
@@ -8255,7 +8305,8 @@ function cmdWait() {
 // the dashboard does once. The hub reads it from /api/hello.
 function cmdHello() {
   const s = loadSettings();
-  const inbox = questions().filter((q) => q.status === 'open').length;
+  // the Inbox as the dashboard counts it: open questions and lessons waiting to be kept
+  const inbox = questions().filter((q) => q.status === 'open' && q.goal_hold !== 'let-go').length + logObjects('knowledge').filter((k) => k.status === 'candidate').length;
   const workers = ourWindows(tmuxSession()).length;
   const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, fleet: { mode: fleetMode() ?? 'run', workers } };
   return flags.json ? json(r) : out(`${r.name} at ${r.root}: kit ${r.kit}, ${inbox} open question(s), fleet ${r.fleet.mode}, ${workers} session(s)`);
