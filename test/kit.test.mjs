@@ -5533,6 +5533,53 @@ test('link add --kind repo asks the owner a governance-edit question and writes 
   } finally { F.done(); }
 });
 
+// One answer may approve a bundle of repo link changes, but only the bundle its question showed:
+// merge binds each changed owner-kind entry to an act of that answer with the entry that lands.
+test('merge --approved lands only the repo link entries the answer approved: a hand edit beside them is refused by name', () => {
+  const F = multiFixture('link-bundle');
+  const { old, g, okIn, runIn } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const add = ['link', 'add', 'docs', '--kind', 'repo', '--remote', 'usbclub/docs', '--title', 'Docs site'];
+  try {
+    const qid = /q-[0-9]+-[0-9]+-supervisor/.exec(okIn(old, add, SUP))[0];
+    const q = json(okIn(old, ['questions', '--id', qid, '--json']))[0];
+    assert.match(q.context, /links\.docs: main has null; would be \{"kind":"repo","remote":"usbclub\/docs","title":"Docs site"\}/, 'the question carries the settings diff it covers');
+    okIn(old, ['answer', qid, 'yes']);
+    okIn(old, [...add, '--approved', qid], SUP);
+    const act = json(okIn(old, ['log', '--type', 'act', '--json'])).find((a) => a.approved_by === qid);
+    assert.equal(act.prior_hash, null, 'the act records the entry main has (none: an add)');
+    // a second question shows the whole bundle waiting to land: docs as well as console's gates
+    const q2id = /q-[0-9]+-[0-9]+-supervisor/.exec(okIn(old, ['link', 'set', 'console', 'gates', '{"test":"true"}'], SUP))[0];
+    const q2 = json(okIn(old, ['questions', '--id', q2id, '--json']))[0];
+    assert.match(q2.context, /links\.console: main has .*would be .*"gates":\{"test":"true"\}/);
+    assert.match(q2.context, /links\.docs: main has null; would be /, 'the bundle includes the change already waiting');
+    // the registry chore with docs, plus hand edits to console's gates and companion's remote
+    const wt = path.join(old, '.worktrees', 'chore-registry');
+    g(['worktree', 'add', '-q', '-b', 'chore-registry', wt, 'origin/main'], old);
+    assert.match(okIn(old, ['link', 'land', 'registry'], SUP), /links\.docs \(added\)/);
+    const wf = path.join(wt, 'docs/devteam/project/settings.md');
+    const text = fs.readFileSync(wf, 'utf8');
+    const m = /```json devteam\s*\n([\s\S]*?)\n```/.exec(text);
+    const blk = JSON.parse(m[1]);
+    blk.links.console.gates = { test: 'true' };
+    blk.links.companion.remote = F.consoleOrigin;
+    fs.writeFileSync(wf, text.replace(m[1], JSON.stringify(blk, null, 2)));
+    g(['commit', '-qam', 'chore-registry: docs repo'], wt);
+    g(['push', '-q', 'origin', 'chore-registry'], wt);
+    write(path.join(old, 'docs/devteam/run/pr/chore-registry.md'), '# chore-registry: docs repo\n\n## One-way doors\n\nNone.\n');
+    const dry = runIn(old, ['merge', '--chore', 'registry', '--dry-run', '--approved', qid], SUP);
+    assert.notEqual(dry.status, 0);
+    assert.match(dry.out + dry.err, new RegExp(`changes links\\.companion\\.remote, links\\.console\\.gates, which ${qid} did not approve`));
+    assert.doesNotMatch(dry.out + dry.err, /links\.docs[,.]? .*did not approve|links\.docs, which/, 'the approved entry is bound');
+    // without the hand edits, the same answer lands docs
+    fs.writeFileSync(wf, text);
+    g(['commit', '-qam', 'chore-registry: only docs'], wt);
+    g(['push', '-q', 'origin', 'chore-registry'], wt);
+    const ok2 = runIn(old, ['merge', '--chore', 'registry', '--dry-run', '--approved', qid], SUP);
+    assert.match(ok2.out, /ok: chore-registry at \w{12} would merge/, ok2.err);
+  } finally { F.done(); }
+});
+
 test('a repo measure names the link it runs in (measure.link): read on that repo\'s main, default home', () => {
   const F = multiFixture('measure-link');
   const { old, g, okIn, runIn } = F;

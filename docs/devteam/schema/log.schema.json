@@ -1697,7 +1697,7 @@
             "x-tip": "The ticket numbers reserved for a planner's feature."
           },
           "entry_hash": {
-            "description": "On a registry-edit act (link add|set|rm), or a governance-edit or gate-change act from link … --approved: the link entry it wrote, as sha256:<hex> of its canonical JSON, or null when it removed the link. merge lands a change to a url link only when an act naming the link recorded exactly the entry that lands. An act without it (written before it existed) never matches.",
+            "description": "On a registry-edit act (link add|set|rm), or a governance-edit or gate-change act from link … --approved: the link entry it wrote, as sha256:<hex> of its canonical JSON, or null when it removed the link. merge lands a change to a url link only when an act naming the link recorded exactly the entry that lands, and a change to a repo link only when an act of the --approved answer naming the link did. An act without it (written before it existed) never matches.",
             "type": [
               "string",
               "null"
@@ -1706,7 +1706,7 @@
             "x-tip": "The link entry this act wrote."
           },
           "prior_hash": {
-            "description": "On a registry-edit act (link add|set|rm): the link entry it replaced, as sha256:<hex> of its canonical JSON, or null when it added the link. merge lands a change to a url link only when acts naming the link lead from the entry main has (prior_hash) to the one that lands (entry_hash), and link land carries an entry only on the same terms, so an act made from an entry main has since changed (a stale set, an rm of an earlier entry) never lands. An act without it (written before it existed) never matches.",
+            "description": "On a registry-edit act (link add|set|rm), or a governance-edit or gate-change act from link … --approved: the link entry it replaced (for an --approved act, the entry main had), as sha256:<hex> of its canonical JSON, or null when it added the link. merge lands a change to a url link only when acts naming the link lead from the entry main has (prior_hash) to the one that lands (entry_hash), and link land carries an entry only on the same terms, so an act made from an entry main has since changed (a stale set, an rm of an earlier entry) never lands. An act without it (written before it existed) never matches.",
             "type": [
               "string",
               "null"

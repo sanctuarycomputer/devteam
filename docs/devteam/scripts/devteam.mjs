@@ -3143,6 +3143,21 @@ function registryActFails(base, sha) {
   const bare = edits.filter((l) => !linkActsLead(l, linkEntryHash(ownEntry(S.sMain.links, l)), linkEntryHash(ownEntry(lands, l))));
   return bare.length ? [`changes ${bare.map((l) => `links.${l}`).join(', ')} to an entry no registry-edit act wrote: make each change with link add|set|rm, which logs the act with the entry it wrote and the one it replaced, rather than by hand in settings.md (an act for an earlier value of the link, or made from an entry main has since changed, doesn't cover this one)`] : [];
 }
+// A link of an owner's kind lands only as the answer approved it: each one the merge changes
+// needs an act of that answer (linkByOwner's, approved_by) naming the link, written from the entry
+// main has (prior_hash) to the entry that lands (entry_hash). One answer may approve a bundle (its
+// question showed every entry), but an entry its question never showed, or a hand edit of one it
+// did, has no such act and is refused by name.
+function ownerLinkActFails(changed, sha, approved) {
+  const keys = changed.filter((c) => c.key.startsWith('links.'));
+  if (!keys.length) return [];
+  const lands = settingsAt(sha, { orNull: true })?.links ?? {};
+  const onMain = mainSettings(null)?.links ?? {};
+  const acts = logObjects('act').filter((a) => a.approved_by === approved && ['governance-edit', 'gate-change'].includes(a.class) && Object.hasOwn(a, 'entry_hash') && Object.hasOwn(a, 'prior_hash'));
+  const bound = (l) => acts.some((a) => (a.refs ?? []).includes(`link:${l}`) && a.entry_hash === linkEntryHash(ownEntry(lands, l)) && a.prior_hash === linkEntryHash(ownEntry(onMain, l)));
+  const bare = keys.filter((c) => !bound(c.key.split('.')[1])).map((c) => c.key);
+  return bare.length ? [`changes ${bare.join(', ')}, which ${approved} did not approve: an answer lands only the entries its question showed, as link add|set|rm --approved ${approved} wrote them; ask the owner about ${bare.length > 1 ? 'these' : 'this one'} (link add|set|rm, whose question shows every repo link change waiting to land), or take ${bare.length > 1 ? 'them' : 'it'} out of this PR`] : [];
+}
 // What the forge's check (optional) and `merge` both check for a PR, by branch kind. Gates are not
 // run here. A chore PR may not touch the log (chore-log touches nothing else) or a ticket's folder.
 function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('home') }) {
@@ -3494,6 +3509,7 @@ function cmdMerge() {
       else {
         const q = ownerAnswer(approved, 'merge --approved');
         if (!classes.includes(q.class)) fails.push(`${approved} is a ${q.class ?? 'classless'} question; changing ${what} needs an answered ${classes.join(' or ')} question`);
+        fails.push(...ownerLinkActFails(changed, sha, approved));
       }
     }
   }
@@ -3525,7 +3541,9 @@ function cmdMerge() {
     // Every earlier use counts, merges that cited a decision included; only the decision this merge
     // carries out (--decision) is the call the answer approved, not a prior one.
     const prior = [...logObjects('decision'), ...logObjects('act')].filter((a) => a.approved_by === approved && mine(a) && a.id !== flagStr('decision'));
-    const landing = prior.length === 1 && prior[0].class === av.class && (prior[0].refs ?? []).includes(target);
+    // a bundle's link acts (one per entry its question showed) are one landing too
+    const linkAct = (a) => Object.hasOwn(a, 'entry_hash') && (a.refs ?? []).some((r) => r.startsWith('link:'));
+    const landing = prior.length >= 1 && (prior.length === 1 || prior.every(linkAct)) && prior.every((a) => a.class === av.class && (a.refs ?? []).includes(target));
     if (prior.length && !landing) fails.push(`${approved} already approved ${declared.length ? `an act for ${target}` : 'an act'}; ask again for this one`);
   }
   // Gates: the repo's own commands (never inherited), at the exact head, in a detached
@@ -8606,21 +8624,33 @@ function linkByOwner(sub, id, field, vals, kind) {
   if (canonical(ownEntry(raw, id) ?? null) === canonical(next ?? null)) return out(`links.${id} is already ${next ? 'that' : 'gone'} in settings.md here; ${LANDING_HINT}`);
   const { errors } = registryProblems({ ...loadSettings(), links: { ...Object.fromEntries(Object.entries(loadSettings().links ?? {}).filter(([k]) => k !== id)), ...(next ? { [id]: next } : {}) } });
   if (errors.length) die(`not drafted:\n  - ${errors.join('\n  - ')}`);
-  const draft = JSON.stringify({ [id]: next ?? null }, null, 2);
+  // The bundle the answer covers: every link of an owner's kind that settings.md here, with this
+  // change, would land differently from main, this one included. One answer may approve a bundle,
+  // so the question shows all of it; merge then lands exactly these entries under that answer.
+  const mainLinks = mainSettings(null)?.links ?? {};
+  const after = Object.assign(Object.create(null), raw);
+  if (next) after[id] = next; else delete after[id];
+  const bundleIds = [...new Set(linkOwnerChanges(mainLinks, after).filter((c) => !SUPERVISOR_LINK_CLASSES.includes(c.cls)).map((c) => c.key.split('.')[1]))].sort();
+  if (!bundleIds.includes(id)) bundleIds.push(id);
+  const bundle = Object.fromEntries(bundleIds.map((l) => [l, ownEntry(after, l) ?? null]));
+  const draft = JSON.stringify(bundle, null, 2);
+  const diff = bundleIds.map((l) => `links.${l}: main has ${canonical(ownEntry(mainLinks, l) ?? null)}; would be ${canonical(ownEntry(after, l) ?? null)}`).join('\n');
   const approved = flagStr('approved');
   // the command to run once answered: this one, every value quoted, plus --approved
   const again = (qid) => `node docs/devteam/scripts/devteam.mjs link ${argv.filter((a, i) => a !== '--approved' && argv[i - 1] !== '--approved').map(shq).join(' ')} --approved ${qid}`;
   if (!approved) {
     const open = questions().find((q) => q.status === 'open' && q.class === cls && (q.context ?? '').includes(draft));
     if (open) return out(`${open.id}: already asked the owner about this exact change; once answered: ${again(open.id)}`);
-    const q = appendLog({ type: 'question', kind: 'owner-decision', class: cls, question: `${sub === 'add' ? 'Add' : sub === 'rm' ? 'Remove' : 'Change'} the ${kind} link ${id}${sub === 'set' ? ` (${field})` : ''}?`, context: `The registry entry, as it would be in settings.md links:\n${draft}`, recommendation: 'yes', why_asked: { reasons: ['owner-only'] } }, 'supervisor');
+    const q = appendLog({ type: 'question', kind: 'owner-decision', class: cls, question: `${sub === 'add' ? 'Add' : sub === 'rm' ? 'Remove' : 'Change'} the ${kind} link ${id}${sub === 'set' ? ` (${field})` : ''}?`, context: `The settings diff this answer approves${bundleIds.length > 1 ? ` (this change and ${bundleIds.length - 1} other repo link change(s) waiting in settings.md to land with it)` : ''}, each links entry main has and what would land:\n${diff}\n\nThe registry entries, as they would be in settings.md links (merge lands exactly these under this answer, and no other):\n${draft}`, recommendation: 'yes', why_asked: { reasons: ['owner-only'] } }, 'supervisor');
     return out(`${q.id}: asked the owner (${cls}); nothing is written until it is answered. Then: ${again(q.id)}`);
   }
   const v = ownerAnswer(approved, 'link --approved');
   if (v.class !== cls) die(`${approved} was asked in class ${v.class ?? '(none)'}, not ${cls}`);
   if (!(v.context ?? '').includes(draft)) die(`${approved} asked about another change; ask again for this one`);
   editSettingsBlock((b) => { b.links ??= {}; if (next) b.links[id] = next; else delete b.links[id]; return b; });
-  appendLog({ type: 'act', decision: citing(), class: cls, what: `${sub === 'rm' ? 'removed' : sub === 'add' ? 'added' : `set ${field} on`} ${kind} link ${id}`, refs: ['chore-registry', `link:${id}`], reversible: true, approved_by: approved, entry_hash: linkEntryHash(next) }, 'supervisor');
+  // one act per entry of the bundle: the entry it lands (entry_hash) from the one main has
+  // (prior_hash), so merge binds each changed entry to this answer
+  for (const l of bundleIds) appendLog({ type: 'act', decision: citing(), class: cls, what: l === id ? `${sub === 'rm' ? 'removed' : sub === 'add' ? 'added' : `set ${field} on`} ${kind} link ${id}` : `links.${l} as ${approved} showed it, landing with ${id}`, refs: ['chore-registry', `link:${l}`], reversible: true, approved_by: approved, entry_hash: linkEntryHash(bundle[l]), prior_hash: linkEntryHash(ownEntry(mainLinks, l)) }, 'supervisor');
   out(`applied ${approved}; ${LANDING_HINT} --approved ${approved}`);
 }
 // A field no owner class guards (a repo link's path: where its checkout is on this machine).
