@@ -5093,6 +5093,32 @@ test('views never use the object routers', () => {
   assert.deepEqual(bad, [], 'a view calls an object router; use repoOfTicketLink, factsRepo or repoReadable');
 });
 
+test('gate --all and gate <name> in a sibling worktree run that repo\'s gates and log them as that repo\'s', () => {
+  const F = multiFixture('gate-sibling');
+  const { old, g, okIn, runIn, ticket } = F;
+  const W = { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'console-01-a' };
+  try {
+    const seen = path.join(F.base, 'console-gate-main');
+    const links = json(okIn(old, ['settings'])).links;
+    F.lines({ ...F.STD, console: { link: 'console' }, companion: { link: 'companion' } }, { gates: { homegate: 'test -f api/app.rb' }, links: { ...links, console: { ...links.console, gates: { consolegate: `test -f src/main.js && printf %s "$DEVTEAM_MAIN" > '${seen}'` } } } });
+    ticket('console-01-a');
+    const w = path.join(old, '.worktrees', 'console-01-a');
+    g(['worktree', 'add', '-q', '-b', 'ticket/console-01-a', w, 'origin/trunk'], F.console);
+    const head = g(['rev-parse', 'HEAD'], w);
+    const r = runIn(w, ['gate', '--all'], W);
+    assert.equal(r.status, 0, r.err || r.out);
+    assert.match(r.out, /^pass {2}consolegate /m, "console's gate ran");
+    assert.doesNotMatch(r.out, /homegate/, "home's gates are never a sibling's");
+    assert.equal(F.real(fs.readFileSync(seen, 'utf8')), F.real(F.console), "DEVTEAM_MAIN is console's root");
+    okIn(w, ['gate', 'unit', '--', 'true'], W);
+    const gates = json(okIn(old, ['log', '--type', 'gate', '--json']));
+    assert.deepEqual(gates.map((x) => [x.gate, x.repo, x.sha]), [['consolegate', 'console', head], ['unit', 'console', head]], 'each gate line names console');
+    // home's gate --all is as it was: home's gates, no repo on the line
+    okIn(old, ['gate', '--all'], W);
+    assert.deepEqual(json(okIn(old, ['log', '--type', 'gate', '--json'])).filter((x) => x.gate === 'homegate').map((x) => x.repo), [undefined]);
+  } finally { F.done(); }
+});
+
 test('a github-forge sibling: gh is asked about that repo', () => {
   const F = multiFixture('gh-r');
   const { old, g, okIn, runIn, ticket } = F;

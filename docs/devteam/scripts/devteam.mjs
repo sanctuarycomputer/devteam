@@ -7295,24 +7295,29 @@ function cmdGate() {
     ok = false;
   }
   const tests = readJunit(flagStr('junit'));
-  appendLog({ type: 'gate', gate: name, ok, ms: Date.now() - started, sha: cwdGit(['rev-parse', 'HEAD']) ?? undefined, dirty: cwdGit(['status', '--porcelain']) ? true : undefined, tests_total: tests.length, tests: keepTests(tests) });
+  appendLog({ type: 'gate', gate: name, ok, ms: Date.now() - started, ...repoField(cwdRepo()), sha: cwdGit(['rev-parse', 'HEAD']) ?? undefined, dirty: cwdGit(['status', '--porcelain']) ? true : undefined, tests_total: tests.length, tests: keepTests(tests) });
   process.stderr.write(`devteam: gate ${name} ${ok ? 'passed' : 'FAILED'} in ${((Date.now() - started) / 1000).toFixed(1)}s\n`);
   process.exit(ok ? 0 : 1);
 }
 
+// A gate line run in a repo link's checkout names that repo; home's carry no field, as before.
+const repoField = (R) => (R && R.name !== 'home' ? { repo: R.name } : {});
 // Run every gate in the settings here, as merge would, and print which pass. Run once at adoption
 // on main: a gate that fails there goes on in ratchet mode or gets a chore ticket (quality.md §2).
+// "Here" is the repo of this checkout: in a repo link's, that repo's gates and DEVTEAM_MAIN, never
+// home's.
 function gateAll() {
-  const gates = Object.entries(loadSettings().gates ?? {});
-  if (!gates.length) die('no gates in settings');
+  const R = cwdRepo() ?? repo('home');
+  const gates = Object.entries(R.settings.gates ?? {});
+  if (!gates.length) die(R.name === 'home' ? 'no gates in settings' : `no gates for ${R.name} in settings (links.${R.name}.gates)`);
   const rows = [];
   for (const [name, spec] of gates) {
     const cmd = typeof spec === 'string' ? spec : spec.cmd;
     const started = Date.now();
     let ok = true;
-    try { execFileSync('sh', ['-c', cmd], { stdio: ['ignore', 'ignore', 'inherit'], env: gateEnv() }); } catch { ok = false; }
+    try { execFileSync('sh', ['-c', cmd], { stdio: ['ignore', 'ignore', 'inherit'], env: gateEnv(null, R) }); } catch { ok = false; }
     const ms = Date.now() - started;
-    appendLog({ type: 'gate', gate: name, ok, ms, sha: cwdGit(['rev-parse', 'HEAD']) ?? undefined, tests_total: 0, tests: [] });
+    appendLog({ type: 'gate', gate: name, ok, ms, ...repoField(R), sha: cwdGit(['rev-parse', 'HEAD']) ?? undefined, tests_total: 0, tests: [] });
     rows.push({ name, ok, ms, mode: spec.mode ?? 'enforced' });
     out(`${ok ? 'pass' : 'FAIL'}  ${name.padEnd(20)} ${(ms / 1000).toFixed(1)}s  ${spec.mode ?? 'enforced'}`);
   }
