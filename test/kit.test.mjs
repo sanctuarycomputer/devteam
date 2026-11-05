@@ -2487,9 +2487,11 @@ function fleetFixture(name) {
   return { base, org, old, neu, home, env, run, ok, g, land, done };
 }
 
-// G1 (spec §2): a single-repo project with no new settings prints exactly what it printed before
-// links and component lines. The goldens were recorded once from the kit before the change
-// (DEVTEAM_G1_RECORD=1); never re-record them to make this pass.
+// G1: a single-repo project with no new settings prints exactly what it printed before
+// links and component lines. The goldens were recorded from the kit before the change
+// (DEVTEAM_G1_RECORD=1) and re-recorded twice, each time for one line: check-ticket and merge
+// --dry-run print a non-ASCII path raw rather than as git's quoted octal (a fix in this change), and
+// fleet-status's last checklist line names the hub (upstream). Never re-record them to make this pass.
 const G1_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'g1');
 // The tmux session is named after a hash of the fixture's path and the hub port follows the
 // suite's pid, so both move between runs as <tmp> does.
@@ -2587,11 +2589,11 @@ test('coverage: every tracked path has exactly one owner', () => {
   assert.deepEqual(plain(coverage(paths, comps, DEV)), { unowned: [], contested: [], empty: [], case_collisions: [] });
   assert.equal(coverageClean(coverage(paths, comps, DEV)), true);
   assert.deepEqual(plain(coverage([...paths, 'scripts/x.sh'], comps, DEV)).unowned, ['scripts/x.sh'], 'a path no line owns');
-  assert.deepEqual(plain(coverage(paths, [...comps, { name: 'web', owns: ['app/x.rb'] }], DEV)).contested, [['app/x.rb', ['api', 'web'], [['api', 'app/**'], ['web', 'app/x.rb']]]], 'a path two lines own, and the globs that collide (O8)');
+  assert.deepEqual(plain(coverage(paths, [...comps, { name: 'web', owns: ['app/x.rb'] }], DEV)).contested, [['app/x.rb', ['api', 'web'], [['api', 'app/**'], ['web', 'app/x.rb']]]], 'a path two lines own, and the globs that collide');
   assert.deepEqual(plain(coverage(paths, [...comps, { name: 'web', owns: ['web/**'] }], DEV)).empty, ['web/**'], 'a glob that matches nothing is a typo');
-  assert.deepEqual(plain(coverage(paths, [{ name: 'all', owns: ['**'] }], DEV)).contested, [], "the kit's line is set aside before any contest: a glob reaching into it claims nothing there (F13)");
+  assert.deepEqual(plain(coverage(paths, [{ name: 'all', owns: ['**'] }], DEV)).contested, [], "the kit's line is set aside before any contest: a glob reaching into it claims nothing there");
   assert.deepEqual(plain(coverage(paths, [...comps, { name: 'docs', owns: ['docs/**'] }], DEV)).empty, ['docs/**'], 'a glob that only reaches the kit owns nothing');
-  assert.deepEqual(plain(coverage(paths, [{ name: 'all' }], DEV)), { unowned: [], contested: [], empty: [], case_collisions: [] }, 'B2: a sole component with no owns owns everything devteam does not');
+  assert.deepEqual(plain(coverage(paths, [{ name: 'all' }], DEV)), { unowned: [], contested: [], empty: [], case_collisions: [] }, 'a sole component with no owns owns everything devteam does not');
   assert.deepEqual(plain(coverage(paths, [{ name: 'a' }, { name: 'b', owns: ['app/**'] }], DEV)).unowned.length > 0, true, 'the ** default holds only for a sole component');
   assert.deepEqual(plain(coverage(['App.rb', 'app.rb'], [{ name: 'x', owns: ['App.rb', 'app.rb'] }], DEV)).case_collisions, [['App.rb', 'app.rb']], 'paths that differ only by case');
   assert.deepEqual(plain(coverage(['App.rb'], [{ name: 'x', owns: ['app.rb'] }], DEV)).unowned, ['App.rb'], 'matching is case-sensitive');
@@ -2633,7 +2635,7 @@ test('coverage: the function reports a clean partition exactly when there is one
   assert.ok(collided > 0, 'some seeds produced a case collision');
 });
 
-test('coverage: bounded on a big tree; each glob compiled once, and owner suggestions match each file once (F2)', () => {
+test('coverage: bounded on a big tree; each glob compiled once, and owner suggestions match each file once', () => {
   const { coverage, ownerSuggestions, ownersOf } = coverageFns();
   // 50k paths in 1,000 folders under 10 apps; 30 globs over 10 components; a tenth of the folders unowned
   const paths = [];
@@ -2714,7 +2716,7 @@ test('the registry and component lines are validated; labels-only components and
   const SUP = { DEVTEAM_ROLE: 'supervisor' };
   const v = () => { const r = run(old, ['validate']); return r.out + r.err; };
   try {
-    // components written as labels before lines existed (a stack, a path): no new errors (open issue 1)
+    // components written as labels before lines existed (a stack, a path): no new errors
     lines({ api: { stack: 'rails', path: 'api' }, web: { stack: 'next' } });
     assert.doesNotMatch(v(), /component|owns|links/i, 'labels are not lines');
     // unknown kind, reserved ids, http, unknown field, duplicate remotes, home's own remote
@@ -2729,7 +2731,7 @@ test('the registry and component lines are validated; labels-only components and
     assert.match(out, /links\.extra: "colour" is not a field of a url link/);
     assert.match(out, /links\.bare: remote "some-folder" is neither owner\/name nor a URL; a local remote is a path starting \.\/, \.\.\/ or \//);
     lines({}, { links: {} });
-    // declared lines: object entries are reserved, negations refused, two owns-less components, a non-home link (open issue 13)
+    // declared lines: object entries are reserved, negations refused, two owns-less components, a non-home link
     lines({ api: { owns: ['api/**', { link: 'x', glob: 'y' }] }, web: { owns: ['!web/tmp/**', 'web/**'] }, ops: {}, misc: {}, none: { owns: [] }, console: { link: 'console' } });
     const o2 = v();
     assert.match(o2, /components\.api\.owns\[1\]: an object entry is reserved for a later release/);
@@ -2740,7 +2742,7 @@ test('the registry and component lines are validated; labels-only components and
     // m1: a ticket whose component is a reserved slug is reported once, with the rename
     lines(F.STD);
     const tj = (component, extra = {}) => JSON.stringify({ title: 'x', feature: 'chores', component, kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['api/**'], done_when: ['the api check passes'], notes: 'n', ...extra });
-    // F5, O4: new tickets can't take a reserved name, and the refusal names the list
+    // new tickets can't take a reserved name, and the refusal names the list
     assert.match(run(old, ['ticket', 'add', 'home-01-x', '--json', tj('home')], SUP).err, /component "home" is reserved \(reserved: home, devteam\)/);
     ok(old, ['ticket', 'add', 'api-02-y', '--json', tj('api')], SUP);
     assert.match(run(old, ['ticket', 'set', 'api-02-y', '--json', JSON.stringify({ component: 'devteam' })], SUP).err, /component "devteam" is reserved \(reserved: home, devteam\)/);
@@ -2752,7 +2754,7 @@ test('the registry and component lines are validated; labels-only components and
     assert.match(v(), /tickets home-01-x: component "home" is reserved/);
     ok(old, ['ticket', 'add', 'api-03-x', '--json', tj('api')], SUP);
     ok(old, ['ticket', 'set', 'home-01-x', '--json', JSON.stringify({ superseded_by: 'api-03-x' })], SUP);
-    assert.doesNotMatch(v(), /is reserved/, 'superseding it, as the message says, clears it (F5)');
+    assert.doesNotMatch(v(), /is reserved/, 'superseding it, as the message says, clears it');
   } finally { F.done(); }
 });
 
@@ -2784,7 +2786,7 @@ test('owner settings per entry: repo-link fields have classes, url links are the
     assert.match(chore('add', (j) => { j.links.companion = { kind: 'repo', title: 'C', remote: 'usbclub/companion' }; }), /links\.companion \(governance-edit\)/);
     assert.match(chore('flip', (j) => { j.links.console = { kind: 'url', title: 'C', url: 'https://c.test' }; }), /links\.console \(governance-edit\)/, 'a repo→url flip is a repo removal');
     assert.doesNotMatch(chore('path', (j) => { j.links.console.path = '../elsewhere'; }), /owner settings/, 'where the checkout is is never the owner\'s');
-    // M2: working-tree flips and removals are ignored; repo links count as on main
+    // working-tree flips and removals are ignored; repo links count as on main
     const settings = () => json(ok(old, ['settings']));
     edit((j) => { j.links.console = { kind: 'url', title: 'flip', url: 'https://c.test' }; j.links.added = { kind: 'repo', title: 'A', remote: 'usbclub/added' }; j.links.figma.notes = 'working tree'; j.links.fresh = { kind: 'url', title: 'Fresh', url: 'https://fresh.test' }; });
     const s1 = run(old, ['settings']);
@@ -2825,7 +2827,7 @@ test('components check reads a commit\'s tree: dotfiles, gitlinks, symlinks, spa
     lines({ ...F.STD, ops: { owns: [...F.STD.ops.owns, '.gitmodules', 'vendor/sub', 'api-link'] } });
     ok(old, ['components', 'check']);
     assert.equal(ok(old, ['components', 'check', '--count']), '0');
-    // M4: a staged, uncommitted file is not in any tree
+    // a staged, uncommitted file is not in any tree
     write(path.join(old, 'stray.txt'), 'staged only\n');
     g(['add', 'stray.txt'], old);
     ok(old, ['components', 'check']);
@@ -2846,11 +2848,11 @@ test('components check reads a commit\'s tree: dotfiles, gitlinks, symlinks, spa
     assert.equal(run(old, ['components', 'check', '--count']).out, '3');
     const j = json(run(old, ['components', 'check', '--json']).out);
     assert.deepEqual(j.unowned.sort(), ['api/new/one.rb', 'scripts/run.sh']);
-    // O8: each kind of gap carries its own fix; a contest names both globs
+    // each kind of gap carries its own fix; a contest names both globs
     assert.match(r.out, /unowned: scripts\/ \(1\): scripts\/run\.sh.* -> extend a line \(settings components\) in a chore PR, or move the files into one/);
     lines({ ...F.STD, web: { owns: ['web/**', 'api/app.rb'] }, ops: { owns: [...F.STD.ops.owns, '.gitmodules', 'vendor/sub', 'api-link', 'scripts/**'] } });
     assert.match(run(old, ['components', 'check']).out, /contested: api\/app\.rb is owned by api \("api\/\*\*"\) and web \("api\/app\.rb"\) -> narrow one of those globs so one line owns it/);
-    // F13: a project line over docs/ coexists with the kit's docs/devteam/**: the kit is set aside first
+    // a project line over docs/ coexists with the kit's docs/devteam/**: the kit is set aside first
     write(path.join(old, 'docs/guide.md'), '# guide\n');
     g(['add', '-A'], old); g(['commit', '-qm', 'docs'], old);
     lines({ ...F.STD, ops: { owns: [...F.STD.ops.owns, '.gitmodules', 'vendor/sub', 'api-link', 'scripts/**'] }, docs: { owns: ['docs/**'] } });
@@ -2894,7 +2896,7 @@ test('validate: main\'s tree under the lines in force, declared components, touc
   } finally { F.done(); }
 });
 
-test('the ticket footprint: touches, and the component\'s line, and its own records (B1, M4)', () => {
+test('the ticket footprint: touches, and the component\'s line, and its own records', () => {
   const F = monoFixture('footprint');
   const { old, ok, run, g, lines } = F;
   const SUP = { DEVTEAM_ROLE: 'supervisor' };
@@ -2911,16 +2913,16 @@ test('the ticket footprint: touches, and the component\'s line, and its own reco
       g(['commit', '-qm', `${id}: work`], w);
       return run(old, ['check-ticket', id, '--sha', g(['rev-parse', 'HEAD'], w), '--title', `${id}: work`, '--body-file', body]).out;
     };
-    // B1: an ordinary ticket's PR carries its own records, inside the kit's line
+    // an ordinary ticket's PR carries its own records, inside the kit's line
     const b1 = branch('api-01-own', { touches: ['api/**'] }, { 'api/app.rb': 'changed\n', 'docs/devteam/project/tickets/api-01-own/spec.md': '# spec\n' });
-    assert.doesNotMatch(b1, /outside the line|outside touches/, 'B1');
-    // M4: a non-ASCII path is owned at point 4 too
-    assert.doesNotMatch(branch('api-02-utf', { touches: ['api/**'] }, { 'api/é.rb': 'x\n' }), /outside the line|outside touches/, 'M4: app/é.rb');
+    assert.doesNotMatch(b1, /outside the line|outside touches/, "a ticket's own records are in the kit's line");
+    // a non-ASCII path is owned at point 4 too
+    assert.doesNotMatch(branch('api-02-utf', { touches: ['api/**'] }, { 'api/é.rb': 'x\n' }), /outside the line|outside touches/, 'app/é.rb');
     // touches that reach another line: refused at the footprint, whatever the globs claimed
     const reach = branch('web-03-reach', { touches: ['web/**', 'api/app.rb'] }, { 'api/app.rb': 'web edits api\n' });
-    assert.match(reach, /changes files outside the line of web: api\/app\.rb \(api's line\)/, 'O8: the file and its owner');
-    assert.match(reach, /drop those changes, plan them as a contract or integration ticket that lists api in touches_components, or split the ticket/, 'O8: the fix');
-    // F4: touches_components widens only a contract or integration ticket, here as in validate
+    assert.match(reach, /changes files outside the line of web: api\/app\.rb \(api's line\)/, 'the file and its owner');
+    assert.match(reach, /drop those changes, plan them as a contract or integration ticket that lists api in touches_components, or split the ticket/, 'the fix');
+    // touches_components widens only a contract or integration ticket, here as in validate
     const wide = branch('api-06-build', { kind: 'build', touches: ['api/**', 'web/src/x.js'], touches_components: ['web'] }, { 'web/src/x.js': 'x\n' });
     assert.match(wide, /changes files outside the line of api: web\/src\/x\.js \(web's line\)/);
     assert.match(wide, /touches_components is for contract and integration tickets; this build ticket's line is api's alone/);
@@ -2931,7 +2933,7 @@ test('the ticket footprint: touches, and the component\'s line, and its own reco
   } finally { F.done(); }
 });
 
-test('check-pr and merge judge the tree that would land, by committed lines (M1, M5, M10)', () => {
+test('check-pr and merge judge the tree that would land, by committed lines', () => {
   const F = monoFixture('landing');
   const { old, ok, run, g, lines, edit } = F;
   const SUP = { DEVTEAM_ROLE: 'supervisor' };
@@ -2948,11 +2950,11 @@ test('check-pr and merge judge the tree that would land, by committed lines (M1,
   };
   const checkPr = (slug, sha) => run(old, ['check-pr', '--head-ref', `chore-${slug}`, '--sha', sha, '--title', `chore-${slug}: x`, '--body-file', body]);
   try {
-    // M10: before any lines, a chore PR passes check-pr even with a validate error in the graph
+    // before any lines, a chore PR passes check-pr even with a validate error in the graph
     ok(old, ['ticket', 'add', 'api-01-dangling', '--json', JSON.stringify({ title: 'x', feature: 'chores', component: 'api', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: ['api-99-nope'], touches: ['api/**'], done_when: ['the api suite passes'], notes: 'n' })], SUP);
     assert.notEqual(run(old, ['validate']).status, 0, 'a pre-existing validate error');
     const m10 = chore('m10', (w) => write(path.join(w, 'docs/devteam/project/designs/note.md'), '# note\n'));
-    assert.equal(checkPr('m10', m10.sha).status, 0, 'M10: a chore PR never runs full validate');
+    assert.equal(checkPr('m10', m10.sha).status, 0, 'a chore PR never runs full validate');
     lines(F.STD);
     const stale = g(['rev-parse', 'origin/main'], old);
     // a new top-level folder; a rename out of every line; a narrowed glob
@@ -2974,20 +2976,20 @@ test('check-pr and merge judge the tree that would land, by committed lines (M1,
     g(['add', '-A'], old); g(['commit', '-qm', 'bypass'], old); g(['push', '-q', 'origin', 'main'], old);
     assert.doesNotMatch(checkPr('clean', chore('clean', (w) => write(path.join(w, 'api/new.rb'), 'x\n')).sha).out, /unowned/);
     g(['rm', '-q', 'scripts/pushed.sh'], old); g(['commit', '-qm', 'tidy'], old); g(['push', '-q', 'origin', 'main'], old);
-    // M5 (forge git): main narrows web and moves its file; a stale branch adds a path under the old line
+    // forge git: main narrows web and moves its file; a stale branch adds a path under the old line
     edit((j) => { j.components.web.owns = ['web/src/**', 'web/package.json']; });
     g(['commit', '-qam', 'narrow web'], old); g(['push', '-q', 'origin', 'main'], old);
     chore('m5', (w) => write(path.join(w, 'web/extra.js'), 'x\n'), { from: stale });
     write(path.join(old, 'docs/devteam/run/pr/chore-m5.md'), '# chore-m5: x\n\n## One-way doors\n\nNone.\n');
-    assert.match(run(old, ['merge', '--chore', 'm5', '--dry-run'], SUP).out, /unowned: web\/ \(1\): web\/extra\.js/, 'M5: refused on the merged tree');
+    assert.match(run(old, ['merge', '--chore', 'm5', '--dry-run'], SUP).out, /unowned: web\/ \(1\): web\/extra\.js/, 'refused on the merged tree');
     chore('m5ok', (w) => write(path.join(w, 'api/stale-ok.rb'), 'x\n'), { from: stale });
     write(path.join(old, 'docs/devteam/run/pr/chore-m5ok.md'), '# chore-m5ok: x\n\n## One-way doors\n\nNone.\n');
     assert.doesNotMatch(run(old, ['merge', '--chore', 'm5ok', '--dry-run'], SUP).out, /unowned/, 'a stale branch main\'s move leaves clean is not refused');
-    // M1: merge reads committed lines; a working-tree widening has no effect
+    // merge reads committed lines; a working-tree widening has no effect
     edit((j) => { j.components.ops.owns.push('scripts/**'); });
     chore('m1', (w) => write(path.join(w, 'scripts/y.sh'), 'x\n'));
     write(path.join(old, 'docs/devteam/run/pr/chore-m1.md'), '# chore-m1: x\n\n## One-way doors\n\nNone.\n');
-    assert.match(run(old, ['merge', '--chore', 'm1', '--dry-run'], SUP).out, /unowned: scripts\/ \(1\): scripts\/y\.sh/, 'M1');
+    assert.match(run(old, ['merge', '--chore', 'm1', '--dry-run'], SUP).out, /unowned: scripts\/ \(1\): scripts\/y\.sh/, 'committed lines, not the working tree');
     g(['checkout', '-q', '--', 'docs/devteam/project/settings.md'], old);
   } finally { F.done(); }
 });
@@ -3003,7 +3005,7 @@ function gitShim(F, mode = '') {
   return { env: { PATH: `${dir}${path.delimiter}${process.env.PATH}` }, calls: () => (fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : ''), reset: () => fs.rmSync(log, { force: true }) };
 }
 
-test('coverage at landing: no lines, no tree work; every forge judges the merge; a git that cannot merge-tree fails closed (F1, F14, O1, O12)', () => {
+test('coverage at landing: no lines, no tree work; every forge judges the merge; a git that cannot merge-tree fails closed', () => {
   const F = monoFixture('landing-forges');
   const { old, run, g, lines, edit } = F;
   const body = path.join(F.base, 'body.md');
@@ -3027,22 +3029,22 @@ test('coverage at landing: no lines, no tree work; every forge judges the merge;
     const spy = gitShim(F);
     const r0 = checkPr('conflict', conflicting, spy.env);
     assert.equal(r0.status, 0, `no lines: check-pr passes a conflicting chore (merge is where it conflicts): ${r0.out}`);
-    assert.doesNotMatch(spy.calls(), /^(merge-tree|ls-tree)\b/m, 'no lines: coverage does no tree work (F1)');
+    assert.doesNotMatch(spy.calls(), /^(merge-tree|ls-tree)\b/m, 'no lines: coverage does no tree work');
     // lines on forge git: the same branch is refused as not merging cleanly, naming the fix
     lines(F.STD);
     assert.match(checkPr('conflict', conflicting).out, /does not merge cleanly onto origin\/main.*merge main into the branch/);
-    // a git without merge-tree --write-tree fails closed, with its own message (O12)
+    // a git without merge-tree --write-tree fails closed, with its own message
     const clean = chore('clean', (w) => write(path.join(w, 'api/new.rb'), 'x\n'));
     const oldGit = gitShim(F, 'old');
     const r1 = checkPr('clean', clean, oldGit.env);
     assert.notEqual(r1.status, 0);
     assert.match(r1.out, /coverage needs git ≥ 2\.38 \(merge-tree --write-tree\); found 2\.34\.1/);
     assert.doesNotMatch(r1.out, /does not merge cleanly/, 'a git that cannot merge-tree is not a conflict');
-    // a tree that can't be read fails closed too, never as an empty tree (O12)
+    // a tree that can't be read fails closed too, never as an empty tree
     const r2 = checkPr('clean', clean, gitShim(F, 'lstree').env);
     assert.notEqual(r2.status, 0);
     assert.match(r2.out, /could not read the tree/);
-    // forge github: a behind PR is judged on the merge, not its head (F14, O1). The branch narrows
+    // forge github: a behind PR is judged on the merge, not its head. The branch narrows
     // web to the files it sees; main meanwhile adds web/extra.js under the old line.
     edit((j) => { j.forge = 'github'; });
     g(['commit', '-qam', 'forge github'], old); g(['push', '-q', 'origin', 'main'], old);
@@ -3070,7 +3072,7 @@ test('validate warns when lines are declared and git is older than 2.38, in the 
   } finally { F.done(); }
 });
 
-test('merge and check-pr fetch main before judging: a push from another clone is in the tree they check (round 2 N1, N4)', () => {
+test('merge and check-pr fetch main before judging: a push from another clone is in the tree they check', () => {
   const F = monoFixture('fresh-main');
   const { old, run, g, lines, edit } = F;
   const SUP = { DEVTEAM_ROLE: 'supervisor' };
@@ -3105,7 +3107,7 @@ test('merge and check-pr fetch main before judging: a push from another clone is
   } finally { F.done(); }
 });
 
-test('a fetch of main that fails refuses merge and check-pr, never judges the stale ref (round 3 V1)', () => {
+test('a fetch of main that fails refuses merge and check-pr, never judges the stale ref', () => {
   const F = monoFixture('fetch-fails');
   const { old, run, g, edit } = F;
   const SUP = { DEVTEAM_ROLE: 'supervisor' };
@@ -3141,7 +3143,7 @@ test('a fetch of main that fails refuses merge and check-pr, never judges the st
   } finally { F.done(); }
 });
 
-test('the registry at landing: checked whatever the PR, url edits tied to registry-edit acts, tickets judged by main (F3, F7, F8, O6)', () => {
+test('the registry at landing: checked whatever the PR, url edits tied to registry-edit acts, tickets judged by main', () => {
   const F = monoFixture('registry-landing');
   const { old, ok, run, g, lines, edit } = F;
   const SUP = { DEVTEAM_ROLE: 'supervisor' };
@@ -3162,17 +3164,17 @@ test('the registry at landing: checked whatever the PR, url edits tied to regist
     lines(F.STD, { links: { figma: { kind: 'url', title: 'Designs', url: 'https://figma.test/a' }, console: { kind: 'repo', title: 'Console', remote: 'usbclub/console' } } });
     // a url link edited by hand and landed with no act is refused; the same edit made with link set passes
     chore('hand', (w) => edit((j) => { j.links.figma.title = 'All designs'; }, w));
-    assert.match(dry('hand'), /links\.figma.*no registry-edit act.*link add\|set\|rm/, 'F3: a hand edit to a url link has no act');
+    assert.match(dry('hand'), /links\.figma.*no registry-edit act.*link add\|set\|rm/, 'a hand edit to a url link has no act');
     ok(old, ['link', 'set', 'figma', 'title', 'All designs'], SUP);
     assert.doesNotMatch(dry('hand'), /registry-edit/, 'the act link set logged lands it');
     g(['checkout', '-q', '--', 'docs/devteam/project/settings.md'], old);
     // a bad registry is refused at landing, whatever the PR
     const bad = chore('bad', (w) => edit((j) => { j.links.notes = { kind: 'doc', title: 'D' }; }, w));
     assert.match(run(old, ['check-pr', '--head-ref', 'chore-bad', '--sha', bad.sha, '--title', 'chore-bad: x', '--body-file', body]).out, /links\.notes: unknown kind "doc"/);
-    // F7: a component on a repo link is refused at landing with the PR 2 note, not passed and then mis-reported
+    // a component on a repo link is refused at landing with the this-release note, not passed and then mis-reported
     const comp = chore('console-comp', (w) => edit((j) => { j.components.desktop = { link: 'console' }; }, w));
-    assert.match(run(old, ['check-pr', '--head-ref', 'chore-console-comp', '--sha', comp.sha, '--title', 'chore-console-comp: x', '--body-file', body]).out, /components\.desktop: link "console".*repo links land in PR 2/);
-    // O6: a ticket PR is judged by main's settings, so rewriting settings.md can't switch its footprint off
+    assert.match(run(old, ['check-pr', '--head-ref', 'chore-console-comp', '--sha', comp.sha, '--title', 'chore-console-comp: x', '--body-file', body]).out, /components\.desktop: link "console".*only home holds components and tickets in this release/);
+    // a ticket PR is judged by main's settings, so rewriting settings.md can't switch its footprint off
     ok(old, ['ticket', 'add', 'api-01-sneak', '--json', JSON.stringify({ title: 'x', feature: 'chores', component: 'api', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['api/**', 'docs/devteam/project/settings.md'], done_when: ['the api suite passes'], notes: 'n' })], SUP);
     const tw = path.join(old, '.worktrees', 'api-01-sneak');
     g(['worktree', 'add', '-q', '-b', 'ticket/api-01-sneak', tw, 'origin/main'], old);
@@ -3180,16 +3182,16 @@ test('the registry at landing: checked whatever the PR, url edits tied to regist
     write(path.join(tw, 'api/app.rb'), 'changed\n');
     g(['commit', '-qam', 'api-01-sneak: x'], tw);
     const ct = run(old, ['check-ticket', 'api-01-sneak', '--sha', g(['rev-parse', 'HEAD'], tw), '--title', 'api-01-sneak: x', '--body-file', body]).out;
-    assert.match(ct, /changes files outside the line of api: docs\/devteam\/project\/settings\.md/, 'O6: main\'s lines judge a ticket');
-    // F8: validate in a chore worktree that narrows a line and moves its files judges the tree that
+    assert.match(ct, /changes files outside the line of api: docs\/devteam\/project\/settings\.md/, 'main\'s lines judge a ticket');
+    // validate in a chore worktree that narrows a line and moves its files judges the tree that
     // would land, as coverageFails does; in the main checkout it judges main under main's settings
     const mv = chore('move', (w) => { edit((j) => { j.components.api.owns = ['api/lib/**', 'api/core/**']; }, w); fs.mkdirSync(path.join(w, 'api/core')); g(['mv', 'api/app.rb', 'api/core/app.rb'], w); });
-    assert.doesNotMatch(run(mv.w, ['validate']).out, /components: /, 'F8: the landing tree under the landing settings has no gap');
+    assert.doesNotMatch(run(mv.w, ['validate']).out, /components: /, 'the landing tree under the landing settings has no gap');
     assert.doesNotMatch(run(old, ['validate']).out, /components: /, 'main under main\'s settings has none either');
   } finally { F.done(); }
 });
 
-test('a url link lands only as a registry-edit act wrote it: matched by the entry, main to landing, with no time window (round 2 N2, N3)', () => {
+test('a url link lands only as a registry-edit act wrote it: matched by the entry, main to landing, with no time window', () => {
   const F = monoFixture('registry-acts');
   const { old, ok, run, g, edit } = F;
   const SUP = { DEVTEAM_ROLE: 'supervisor' };
@@ -3230,7 +3232,7 @@ test('a url link lands only as a registry-edit act wrote it: matched by the entr
     chore('notes', (w) => edit((j) => { j.links.figma.notes = 'see page 2'; }, w));
     const n = merge('notes', ['--dry-run']);
     assert.equal(n.status, 0, `an act outlives an unrelated settings landing: ${n.text}`);
-    // a link identical on main needs no act (N3): main's figma title changes by hand; a branch from
+    // a link identical on main needs no act: main's figma title changes by hand; a branch from
     // before makes the same change and adds notion, which link add wrote (its act)
     g(['merge', '-q', '--ff-only', 'origin/main'], old);
     edit((j) => { j.links.figma.title = 'All designs'; });
@@ -3250,7 +3252,7 @@ test('a url link lands only as a registry-edit act wrote it: matched by the entr
   } finally { F.done(); }
 });
 
-test('a removal lands only by an rm act for the entry main has: a stale link rm never re-deletes a re-added link (round 3 V2)', () => {
+test('a removal lands only by an rm act for the entry main has: a stale link rm never re-deletes a re-added link', () => {
   const F = monoFixture('registry-rm');
   const { old, ok, run, g, edit } = F;
   const SUP = { DEVTEAM_ROLE: 'supervisor' };
@@ -3285,7 +3287,7 @@ test('a removal lands only by an rm act for the entry main has: a stale link rm 
     chore('add', (w) => edit((j) => { j.links.figma = { kind: 'url', url: 'https://figma.test/v2', title: 'Designs v2' }; }, w));
     assert.equal(merge('add').status, 0);
     g(['merge', '-q', '--ff-only', 'origin/main'], old);
-    // a hand deletion of the re-added link: the old rm act removed a different entry (ZZ2)
+    // a hand deletion of the re-added link: the old rm act removed a different entry
     chore('hand-rm', (w) => edit((j) => { delete j.links.figma; }, w));
     const h = merge('hand-rm', ['--dry-run']);
     assert.notEqual(h.status, 0, `a stale rm act landed a removal: ${h.text}`);
@@ -3300,7 +3302,7 @@ test('a removal lands only by an rm act for the entry main has: a stale link rm 
   } finally { F.done(); }
 });
 
-test('without lines, a key or link both main and the branch changed is refused, dry run and merge alike (round 3 V3)', () => {
+test('without lines, a key or link both main and the branch changed is refused, dry run and merge alike', () => {
   const F = monoFixture('settings-both');
   const { old, ok, run, g, edit } = F;
   const SUP = { DEVTEAM_ROLE: 'supervisor' };
@@ -3326,7 +3328,7 @@ test('without lines, a key or link both main and the branch changed is refused, 
     chore('url', (w) => edit((j) => { j.links.figma.url = 'https://figma.test/b'; }, w));
     assert.equal(merge('url').status, 0);
     // a branch from before changes figma's notes (its act records {url a, notes n1}): git's text merge
-    // of the two lines is clean and would land {url b, notes n1}, an entry no act wrote (ZZ1)
+    // of the two lines is clean and would land {url b, notes n1}, an entry no act wrote
     ok(old, ['link', 'set', 'figma', 'notes', 'n1'], SUP); g(['checkout', '-q', '--', settingsRel], old);
     chore('notes', (w) => edit((j) => { j.links.figma.notes = 'n1'; }, w), { from: before });
     const refused = /settings\.md: both main and this branch changed links\.figma; merge main into the branch first/;
@@ -3336,10 +3338,10 @@ test('without lines, a key or link both main and the branch changed is refused, 
       assert.match(r.text, refused, extra.join(' ') || 'merge');
     }
     assert.deepEqual(mainFigma(), { kind: 'url', title: 'Designs', url: 'https://figma.test/b', for: ['all'], notes: 'n0' }, 'nothing landed');
-    // a branch from before whose edit git can't merge either (ZZ1b): the same refusal, not git's raw error
+    // a branch from before whose edit git can't merge either: the same refusal, not git's raw error
     ok(old, ['link', 'set', 'figma', 'url', 'https://figma.test/c'], SUP); g(['checkout', '-q', '--', settingsRel], old);
     chore('url2', (w) => edit((j) => { j.links.figma.url = 'https://figma.test/c'; }, w), { from: before });
-    for (const extra of [['--dry-run'], []]) assert.match(merge('url2', extra).text, refused, `ZZ1b ${extra.join(' ') || 'merge'}`);
+    for (const extra of [['--dry-run'], []]) assert.match(merge('url2', extra).text, refused, `a conflicting branch: ${extra.join(' ') || 'merge'}`);
     assert.deepEqual(g(['worktree', 'list'], old).split('\n').filter((l) => /land-/.test(l)), [], 'no landing worktree left');
     // a top-level key both sides changed is refused the same way; changed identically, it lands
     g(['merge', '-q', '--ff-only', 'origin/main'], old);
@@ -3353,7 +3355,7 @@ test('without lines, a key or link both main and the branch changed is refused, 
   } finally { F.done(); }
 });
 
-test('url links and no lines need no git 2.38: the registry at landing is read from settings.md, never merge-tree (round 2 N2)', () => {
+test('url links and no lines need no git 2.38: the registry at landing is read from settings.md, never merge-tree', () => {
   const F = monoFixture('registry-oldgit');
   const { old, ok, run, g, edit } = F;
   const SUP = { DEVTEAM_ROLE: 'supervisor' };
@@ -3390,7 +3392,7 @@ test('url links and no lines need no git 2.38: the registry at landing is read f
   } finally { F.done(); }
 });
 
-test('deleting the last file under a glob: never refused, a line-empty warning that blocks nothing (F17, O3)', () => {
+test('deleting the last file under a glob: never refused, a line-empty warning that blocks nothing', () => {
   const F = monoFixture('line-empty');
   const { old, ok, run, g, lines } = F;
   const SUP = { DEVTEAM_ROLE: 'supervisor' };
@@ -3430,7 +3432,7 @@ test('unowned files on main: a severity-4 finding, and no new ticket starts ther
     const f = json(ok(old, ['metrics', '--json'])).findings.find((x) => x.kind === 'unowned-files');
     assert.ok(f, 'the finding');
     assert.equal(f.subject, 'home');
-    assert.match(f.detail, /origin\/main has coverage gaps: 1 unowned \(devteam\.mjs components check lists them\)/, 'F7: the finding names what it counted');
+    assert.match(f.detail, /origin\/main has coverage gaps: 1 unowned \(devteam\.mjs components check lists them\)/, 'the finding names what it counted');
     ok(old, ['observe-metrics'], SUP);
     assert.equal(json(ok(old, ['log', '--type', 'observation', '--json'])).find((o) => o.kind === 'unowned-files').severity, 4);
     const r = json(ok(old, ['ready', '--json']));
@@ -3545,7 +3547,7 @@ test('a question links a registry link by id; the inbox resolves it', () => {
   } finally { F.done(); }
 });
 
-test('link add, set and rm for url links: the supervisor writes settings and logs registry-edit, with no rung and no answer (B3)', () => {
+test('link add, set and rm for url links: the supervisor writes settings and logs registry-edit, with no rung and no answer', () => {
   const F = monoFixture('link-cmd');
   const { old, ok, run } = F;
   const SUP = { DEVTEAM_ROLE: 'supervisor' };
@@ -3556,12 +3558,12 @@ test('link add, set and rm for url links: the supervisor writes settings and log
     const s = json(ok(old, ['settings'])).links.figma;
     assert.deepEqual(s, { kind: 'url', title: 'Designs', url: 'https://figma.test/a', for: ['component:web'], notes: 'spacing source', source: o });
     const act = json(ok(old, ['log', '--type', 'act', '--json'])).find((a) => a.class === 'registry-edit');
-    assert.ok(act, 'B3: a registry-edit act');
+    assert.ok(act, 'a registry-edit act');
     assert.equal(act.rung, undefined, 'no rung');
     assert.equal(act.approved_by, undefined, 'no answer');
     assert.deepEqual(act.refs, ['link:figma', o], 'it cites the observation');
     assert.ok(!json(ok(old, ['trust', '--json'])).some((r) => r.class === 'registry-edit'), 'constitutional, not on the ladder');
-    // F6: values are strings, typed by the field, never JSON-coerced
+    // values are strings, typed by the field, never JSON-coerced
     ok(old, ['link', 'set', 'figma', 'title', '2024'], SUP);
     assert.equal(json(ok(old, ['settings'])).links.figma.title, '2024');
     ok(old, ['link', 'set', 'figma', 'notes', 'true'], SUP);
@@ -3583,7 +3585,7 @@ test('link add, set and rm for url links: the supervisor writes settings and log
     assert.equal(l.links.find((x) => x.id === 'figma').url, 'https://figma.test/a');
     assert.match(ok(old, ['links']), /figma: url https:\/\/figma\.test\/a "Designs" for component:web, goal:g-1/);
     assert.equal(l.links.find((x) => x.id === 'figma').locator, 'https://figma.test/a');
-    // O9: link rm refuses while anything cites the link, and names the citers
+    // link rm refuses while anything cites the link, and names the citers
     ok(old, ['ticket', 'add', 'web-01-cite', '--json', JSON.stringify({ title: 'x', feature: 'chores', component: 'web', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['web/**'], done_when: ['the web suite passes'], notes: 'n', links: ['figma'] })], SUP);
     write(path.join(old, 'docs/devteam/project/designs/web.md'), '# Web\n\nSpacing from link:figma.\n');
     const rm = run(old, ['link', 'rm', 'figma'], SUP);
@@ -3621,10 +3623,10 @@ test('observe-link records a resource; orient proposes adds, edits and source-of
     assert.match(props.find((p) => p.proposal === 'conflict').command, /^ask --question 'Which is the source of truth/);
     assert.match(ok(old, ['orient']), /link proposals:\n  add/);
     assert.match(run(old, ['observe-link', '--url', 'https://x.test'], SUP).err, /--title/);
-    // F15: http is refused here as link add refuses it, so orient never proposes what the kit can't apply
+    // http is refused here as link add refuses it, so orient never proposes what the kit can't apply
     assert.match(run(old, ['observe-link', '--url', 'http://insecure.test', '--title', 'X'], SUP).err, /--url must start with https:\/\//);
-    assert.match(run(old, ['observe-link', '--path', '../console', '--title', 'C'], SUP).err, /--path is a path inside this repo/, 'O11: said before the schema says it');
-    // O11: an add proposal's id is one link add accepts: a letter first, de-duplicated
+    assert.match(run(old, ['observe-link', '--path', '../console', '--title', 'C'], SUP).err, /--path is a path inside this repo/, 'said before the schema says it');
+    // an add proposal's id is one link add accepts: a letter first, de-duplicated
     const o4 = ok(old, ['observe-link', '--url', 'https://figma.test/roadmap', '--title', '2026 Roadmap'], SUP);
     const o5 = ok(old, ['observe-link', '--url', 'https://figma.test/roadmap-2', '--title', '2026 roadmap!'], SUP);
     const adds = json(ok(old, ['orient', '--json'])).filter((x) => x.proposal === 'add');
@@ -3632,12 +3634,12 @@ test('observe-link records a resource; orient proposes adds, edits and source-of
     assert.equal(idOf(o4), 'link-2026-roadmap');
     assert.equal(idOf(o5), 'link-2026-roadmap-2', 'two proposals never share an id');
     ok(old, [...adds.find((p) => p.observation === o4).command.match(/'[^']*'|\S+/g).map((w) => w.replace(/^'|'$/g, ''))], SUP);
-    // O11: a path observation is surfaced (as a pointer for knowledge), never dropped
+    // a path observation is surfaced (as a pointer for knowledge), never dropped
     const o6 = ok(old, ['observe-link', '--path', 'docs/runbook.md', '--title', 'Runbook', '--for', 'component:web'], SUP);
     const ptr = json(ok(old, ['orient', '--json'])).find((x) => x.observation === o6);
     assert.equal(ptr?.proposal, 'pointer');
     assert.match(ptr.command, /^knowledge add --kind pointer --statement 'Runbook: docs\/runbook\.md' --scope 'component:web' --evidence 'o-/);
-    // F16: a decision citing the observation dismisses its proposal, which is not proposed again
+    // a decision citing the observation dismisses its proposal, which is not proposed again
     assert.match(ok(old, ['orient']), /dismiss one: decide --class registry-edit --refs <observation>/);
     ok(old, ['decide', '--class', 'registry-edit', '--refs', o3, '--', 'figma.test/b is a scratch copy; the registry stays as it is'], SUP);
     assert.ok(!json(ok(old, ['orient', '--json'])).some((x) => x.observation === o3), 'a dismissed proposal stays dismissed');
@@ -3782,13 +3784,13 @@ test('the registry attestation is the owner\'s: registry-attest is never answere
   } finally { F.done(); }
 });
 
-test('link probes: four at a time inside a tick budget, never a prompt, and a page behind auth is a note (F10, O7)', () => {
+test('link probes: four at a time inside a tick budget, never a prompt, and a page behind auth is a note', () => {
   const F = monoFixture('probes');
   const { old, ok, edit, g } = F;
   const SUP = { DEVTEAM_ROLE: 'supervisor' };
   const starts = path.join(F.base, 'starts.log');
   // the first stub to start leaves a marker: its mtime is when probing began, so exec latency on a
-  // loaded machine (seconds, before any probe runs) never counts against the budget's bound (N4)
+  // loaded machine (seconds, before any probe runs) never counts against the budget's bound
   const first = path.join(F.base, 'first-probe');
   const stub = path.join(F.base, 'probe.sh');
   write(stub, `#!/bin/sh\n[ -e "${first}" ] || : > "${first}"\necho "$1" >> "${starts}"\ncase "$1" in *slow*) sleep 30; echo 200 ;; *auth*) echo 403 ;; *gone*) echo 404 ;; *) echo 200 ;; esac\n`);
@@ -3836,7 +3838,7 @@ test('link probes: four at a time inside a tick budget, never a prompt, and a pa
   } finally { F.done(); }
 });
 
-test('credentials never enter settings or the log: userinfo refused, and remotes redacted wherever they are echoed (O2)', () => {
+test('credentials never enter settings or the log: userinfo refused, and remotes redacted wherever they are echoed', () => {
   const F = monoFixture('creds');
   const { old, ok, run, edit, g } = F;
   const SUP = { DEVTEAM_ROLE: 'supervisor' };
@@ -3864,7 +3866,7 @@ test('credentials never enter settings or the log: userinfo refused, and remotes
     const all = fs.readdirSync(logDir).map((x) => fs.readFileSync(path.join(logDir, x), 'utf8')).join('');
     assert.match(all, /link-unreachable/);
     assert.doesNotMatch(all, /ghp_SECRET|hunter2|ghp_TOKEN/, 'no credential reaches the log');
-    // round 2 (N1, N3, N5): a credentialed remote pushed straight to main, its password holding a
+    // a credentialed remote pushed straight to main, its password holding a
     // raw @, never reaches the log, a prompt, links or the dashboard data; nor does home's own origin
     const leak = 'https://x-access-token:ghp_AB@SECRET9@github.com/me/leak.git';
     edit((j) => { j.links = { leak: { kind: 'repo', title: 'Leak', remote: leak, for: ['all'] } }; });
@@ -3938,14 +3940,14 @@ test('credentials in a query string, a fragment or an scp-style remote are refus
   } finally { F.done(); }
 });
 
-test('a credentialed url never reaches a question: orient redacts it in its proposal, ask --links refuses it (round 3 V4)', () => {
+test('a credentialed url never reaches a question: orient redacts it in its proposal, ask --links refuses it', () => {
   const F = monoFixture('ask-creds');
   const { old, ok, run, g, edit } = F;
   const SUP = { DEVTEAM_ROLE: 'supervisor' };
   try {
     edit((j) => { j.links = { figma: { kind: 'url', title: 'Designs', url: 'https://figma.test/a' } }; });
     g(['commit', '-qam', 'figma'], old); g(['push', '-q', 'origin', 'main'], old);
-    // observe-link refuses credentials, but observation lines are anyone's to write (ZZ6)
+    // observe-link refuses credentials, but observation lines are anyone's to write
     const logDir = path.join(old, 'docs/devteam/run/log');
     fs.mkdirSync(logDir, { recursive: true });
     const f = fs.readdirSync(logDir).find((x) => x.startsWith('supervisor-')) ?? 'supervisor-2026-11.jsonl';
@@ -3962,7 +3964,7 @@ test('a credentialed url never reaches a question: orient redacts it in its prop
   } finally { F.done(); }
 });
 
-test("orient's proposed commands are shell-safe: every value single-quoted, so pasting one runs nothing (O5)", () => {
+test("orient's proposed commands are shell-safe: every value single-quoted, so pasting one runs nothing", () => {
   const F = monoFixture('orient-shq');
   const { old, ok, edit } = F;
   const SUP = { DEVTEAM_ROLE: 'supervisor' };
@@ -3984,7 +3986,7 @@ test("orient's proposed commands are shell-safe: every value single-quoted, so p
     assert.equal(add[add.indexOf('--title') + 1], `Road $(touch ${pwned}) map`);
     assert.equal(add[add.indexOf('--notes') + 1], evil);
     assert.ok(!fs.existsSync(pwned), 'no command substitution ran');
-    // a value that starts with -- survives the round trip (N5): as --key=value for a flag, after a
+    // a value that starts with -- survives the round trip: as --key=value for a flag, after a
     // bare -- for link set's value; run as printed, each lands exactly as observed
     ok(old, ['observe-link', '--url', 'https://figma.test/a', '--title', 'Designs', '--notes=--kind repo'], SUP);
     ok(old, ['observe-link', '--url', 'https://odd.test/x', '--title=--odd', '--notes=--kind repo'], SUP);
@@ -4006,7 +4008,7 @@ test("orient's proposed commands are shell-safe: every value single-quoted, so p
   } finally { F.done(); }
 });
 
-test('parseArgs: --key=value carries a value that starts with --; every other form parses as before (round 2 N5)', () => {
+test('parseArgs: --key=value carries a value that starts with --; every other form parses as before', () => {
   const src = fs.readFileSync(path.join(kit, 'scripts', 'devteam.mjs'), 'utf8');
   const i = src.indexOf('/* args start */'), j = src.indexOf('/* args end */');
   assert.ok(i >= 0 && j > i, 'parseArgs is marked in devteam.mjs');
@@ -4042,7 +4044,7 @@ test('link-unreachable for a missing checkout or a failing URL (stubbed), and li
     assert.equal(json(ok(old, ['log', '--type', 'observation', '--json'])).find((o) => o.kind === 'link-unreachable').severity, 3);
     assert.ok(fs.existsSync(path.join(old, 'docs/devteam/run/link-probes.json')));
     assert.doesNotMatch(json(ok(old, ['fleet', 'status', '--json', '--no-fetch'], SUP)).blockers.join('\n'), /files in run\/ the kit didn't make/, 'the probe file is a kit file (RUN_KNOWN)');
-    // line-pressure counts tickets, not heads (O10): one ticket refused three times is that ticket's
+    // line-pressure counts tickets, not heads: one ticket refused three times is that ticket's
     F.lines(F.STD);
     for (const n of ['a', 'b', 'c']) ok(old, ['observe', '--subject', 'web', '--kind', 'footprint-refusal', '--detail', 'web-09-one refused', '--key', `footprint:web-09-one:${n}`, '--refs', 'web-09-one'], SUP);
     assert.ok(!json(ok(old, ['metrics', '--json'])).findings.some((f) => f.kind === 'line-pressure'), 'one ticket, three heads: no line pressure');

@@ -59,7 +59,7 @@ const command = argv.shift();
 
 /* args start */
 // Flags take every following non-flag token as their value(s); put positionals before flags.
-// --key=value takes the value whole, so a value that starts with -- can be passed (round 2, N5).
+// --key=value takes the value whole, so a value that starts with -- can be passed.
 // Everything after a bare `--` is left for commands that run another command (gate, act, link set).
 function parseArgs(args) {
   const flags = {};
@@ -210,7 +210,7 @@ const runDir = path.resolve(process.env.DEVTEAM_RUN ?? path.join(mainRoot, 'docs
 // runPath where it defines the path, so the list can't fall behind the files.
 const RUN_KNOWN = new Set(['log', 'prompts', 'questions', 'sent', 'cache', 'agent', 'pr', 'supervisor-pane', 'wait-since', 'tmux-session', 'dashboard-port', 'dashboard.log', 'supervisor-prompt.txt', '.DS_Store']);
 const runPath = (name) => { RUN_KNOWN.add(name); return path.join(runDir, name); };
-// Where this machine's checkouts of repo links are, when not where settings say (§3.5).
+// Where this machine's checkouts of repo links are, when not where settings say.
 const LINKS_LOCAL = runPath('links.local.json');
 const projectRel = path.relative(repoRoot, projectDir).split(path.sep).join('/');
 const projectInRepo = !!commonDir && projectRel !== '' && !projectRel.startsWith('..') && !path.isAbsolute(projectRel);
@@ -243,7 +243,7 @@ const SETTINGS_DEFAULTS = {
   question_default_after_hours: 24,
   autonomy_ceilings: {},
   components: {},
-  // Named resources the fleet uses (spec §3.1): { "<id>": { "kind": "repo"|"url", "title": …, … } }.
+  // Named resources the fleet uses: { "<id>": { "kind": "repo"|"url", "title": …, … } }.
   links: {},
   // How a tagged release reaches production: 'tag' (deploys from the tag) or { branch: 'production' }.
   release: 'tag',
@@ -292,7 +292,7 @@ function settingsAt(ref, { orNull = false } = {}) {
   try { return { ...SETTINGS_DEFAULTS, ...JSON.parse(m[1]) }; } catch { return null; }
 }
 // The classed settings a commit changes against a base: [{ key, cls }], or null if unreadable.
-// Whole keys as before, then the links registry entry by entry (§3.4): an owner's class needs an
+// Whole keys as before, then the links registry entry by entry: an owner's class needs an
 // owner answer, a registry-edit the supervisor's act (merge checks both).
 function ownerSettingsChanged(base, head) {
   const a = settingsAt(base), b = settingsAt(head);
@@ -303,7 +303,7 @@ function ownerSettingsChanged(base, head) {
 // either side makes every change to it the owner's; an add, a removal or a kind flip is
 // governance-edit on the whole entry; a field change takes that kind's ownerClass(field). A link
 // of the supervisor's kind (url) changed in any way is one registry-edit on the entry, never
-// nobody's (F3): an act names a link, not a field.
+// nobody's: an act names a link, not a field.
 const ownersKind = (l) => !!l && !!LINK_KINDS[l.kind]?.ownedByOwner;
 function linkOwnerChanges(a = {}, b = {}) {
   const out = [];
@@ -352,7 +352,7 @@ function loadSettings() {
 
 // Links of an owner's kind (repo) count as main has them, verbatim: a working-tree edit, removal
 // or kind flip of one is ignored, and a working-tree one main lacks is dropped. The supervisor's
-// kinds (url) come from the working tree, so a new one reaches the next prompt before it lands (§3.4).
+// kinds (url) come from the working tree, so a new one reaches the next prompt before it lands.
 function pinOwnedLinks(local = {}, main = {}) {
   const links = {};
   const changed = [];
@@ -370,10 +370,10 @@ function pinOwnedLinks(local = {}, main = {}) {
 //
 // A link is a named resource the fleet uses; a repo link is one devteam can also operate on; a
 // component is a line drawn over a repo link: the files it owns. home is the repo that holds the
-// kit and project/, never declared; devteam is the kit's own line, computed (spec §3, §4).
+// kit and project/, never declared; devteam is the kit's own line, computed.
 const RESERVED_LINKS = ['home', 'devteam'];
 const LINK_ID = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
-// The settings a repo link may carry for itself (spec §3.3). The first four default to the
+// The settings a repo link may carry for itself. The first four default to the
 // project's; every other key is never inherited, so a repo with no gates is refused by merge like
 // home with none, and a per-repo key added later gets the no-inherit rule by default.
 const REPO_KEYS = ['main_branch', 'forge', 'merge_method', 'release', 'gates', 'worktree_setup', 'worktree_files', 'ignored_checks', 'project'];
@@ -398,7 +398,7 @@ const unsafeLocator = (v) => typeof v === 'string' && (/\s/.test(v) || UNSAFE_TE
 // U+2028/2029, bidi controls) escaped too, so it stays one quoted line whatever it holds.
 const quoteData = (v) => JSON.stringify(String(v ?? '')).replace(UNSAFE_TEXT_ALL, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
 const locatorForPrompt = (v) => redactUrl(v).replace(/\s/g, encodeURIComponent).replace(UNSAFE_TEXT_ALL, encodeURIComponent);
-// The type of every link field (F6): link add|set parse a value by it, and validate checks it, so a
+// The type of every link field: link add|set parse a value by it, and validate checks it, so a
 // title typed 2024 is the string "2024" and nothing downstream meets a number where text belongs.
 const LINK_TYPES = Object.assign(Object.create(null), {
   kind: 'string', title: 'string', notes: 'string', for: 'list', source: 'string', url: 'string', check: 'boolean',
@@ -455,14 +455,14 @@ const redactUrl = (text) => String(text ?? '')
 const redactLink = (l) => (isObj(l) ? { ...l, ...(typeof l.url === 'string' ? { url: redactUrl(l.url) } : {}), ...(typeof l.remote === 'string' ? { remote: redactUrl(l.remote) } : {}) } : l);
 // A local remote is a path, written so nobody mistakes it for owner/name: ./, ../ or absolute.
 const localRemote = (r) => !/^[a-z][a-z0-9+.-]*:\/\//i.test(r) && !/^[\w.-]+@[\w.-]+:/.test(r) && !/^[\w.-]+\/[\w.-]+$/.test(r);
-// Every per-kind behaviour of a link (spec §3.1). A new kind (doc, dataset, mcp) is one entry here;
+// Every per-kind behaviour of a link. A new kind (doc, dataset, mcp) is one entry here;
 // nothing outside this table branches on a kind. Null-prototype, as every table a user's word
 // looks up: kind "constructor" is unknown, not Object's.
 const LINK_KINDS = Object.assign(Object.create(null), {
   repo: {
     fields: { required: ['remote'], optional: ['path', ...REPO_KEYS] },
-    // where the checkout is on this machine is never the owner's (§3.5); what a gate run sees is
-    // gate-change; anything else about a repo devteam merges into is governance-edit (open issue 4)
+    // where the checkout is on this machine is never the owner's; what a gate run sees is
+    // gate-change; anything else about a repo devteam merges into is governance-edit
     ownerClass: (field) => (field === 'path' ? null : REPO_GATE_KEYS.includes(field) ? 'gate-change' : 'governance-edit'),
     localOverrides: ['path'],
     hostsComponents: true,
@@ -499,7 +499,7 @@ const LINK_KINDS = Object.assign(Object.create(null), {
     },
     // over the network, once a day (probeLinks): the remote still answers. Only asked once the
     // checkout is there, through its own origin, so a test's local bare repo is all it contacts.
-    // Never a prompt (O7): no terminal prompt, no askpass, and ssh in batch mode unless this
+    // Never a prompt: no terminal prompt, no askpass, and ssh in batch mode unless this
     // machine already says how to run ssh.
     probe: (link, id) => {
       if (LINK_KINDS.repo.reachable(link, id)) return null;
@@ -515,7 +515,7 @@ const LINK_KINDS = Object.assign(Object.create(null), {
   url: {
     fields: { required: ['url'], optional: ['check'] },
     // a url link is the supervisor's: every change to one is a registry-edit, which merge ties to
-    // the act that made it (§3.4, §7)
+    // the act that made it
     ownerClass: () => 'registry-edit',
     localOverrides: [],
     hostsComponents: false,
@@ -526,9 +526,9 @@ const LINK_KINDS = Object.assign(Object.create(null), {
       ...(hasCredentials(l.url) ? [`${at}: its url carries credentials; ${CREDENTIALS_REFUSED}`] : []),
     ],
     reachable: () => null,
-    // one HEAD request, 10 s, no body read (spec §7); DEVTEAM_URL_PROBE stands in for it in tests.
+    // one HEAD request, 10 s, no body read; DEVTEAM_URL_PROBE stands in for it in tests.
     // 401, 403 and 405 mean the page is there behind auth (or refuses HEAD): a note, not a finding
-    // that wakes wait (O7).
+    // that wakes wait.
     probe: (link) => {
       if (link.check === false) return null;
       const stub = process.env.DEVTEAM_URL_PROBE;
@@ -566,14 +566,14 @@ const remoteKey = (r) => {
   return /^[a-z]+:\/\//i.test(s) ? s.replace(/\.git$/, '') : realOrSelf(path.resolve(mainRoot, s)).replace(/\.git$/, '');
 };
 // Where a link's checkout is on this machine: run/links.local.json (untracked), the committed path,
-// or ../<id>, relative to home's main checkout (§3.5). PR 2 adds --path on the command line.
+// or ../<id>, relative to home's main checkout.
 function linkLocation(id) {
   let local = {};
   try { local = readJson(LINKS_LOCAL); } catch {}
   const at = ownEntry(local, id)?.path ?? ownEntry(loadSettings().links, id)?.path ?? `../${id}`;
   return path.resolve(mainRoot, at);
 }
-// A component map draws lines only once an entry says so (open issue 1): before that its entries
+// A component map draws lines only once an entry says so: before that its entries
 // are labels a project wrote before lines existed, and nothing here applies to them.
 const COMPONENT_FIELDS = ['link', 'owns', 'shared', 'release'];
 const linesDeclared = (s) => Object.values(s?.components ?? {}).some((c) => isObj(c) && COMPONENT_FIELDS.some((k) => k in c));
@@ -586,10 +586,10 @@ const componentsOn = (s, link = 'home') => (linesDeclared(s) ? Object.entries(s.
 // harness policy is written per launch under run/, untracked.
 const kitRel = path.relative(repoRoot, devteamDir).split(path.sep).join('/');
 const devteamLine = () => [...(kitRel && !kitRel.startsWith('..') ? [`${kitRel}/**`] : []), ...(projectInRepo ? [`${projectRel}/**`] : [])];
-// The kit's own repo has no lines: everything in it is the kit (§4, open issue 5).
+// The kit's own repo has no lines: everything in it is the kit.
 const kitsOwnRepo = () => { const o = git(['config', '--get', 'remote.origin.url']); return !!o && remoteKey(o) === remoteKey(loadSettings().upstream_repo ?? ''); };
 
-// One scope grammar (spec §7.1) for knowledge scopes and link `for` scopes: <kind> or <kind>:<id>.
+// One scope grammar for knowledge scopes and link `for` scopes: <kind> or <kind>:<id>.
 // all and project mean the whole project, and both stay accepted. A later scope kind is one entry.
 const SCOPES = Object.assign(Object.create(null), {
   all: () => true,
@@ -622,7 +622,7 @@ function scopeContext(target) {
   return { ...ctx, shown, links: [...new Set([...shown, ...(t ? [componentLink(t.component)] : [])])] };
 }
 // Every problem with the registry and the lines, worded for validate. Shape only: coverage of a
-// tree is coverage()'s, and runs on committed settings (§4). Per-kind checks are LINK_KINDS[k].validate.
+// tree is coverage()'s, and runs on committed settings. Per-kind checks are LINK_KINDS[k].validate.
 function registryProblems(s) {
   const errors = [];
   const warnings = [];
@@ -657,7 +657,7 @@ function registryProblems(s) {
     if (link !== 'home') {
       if (!ownEntry(links, link)) errors.push(`${at}: link "${link}" is not in links`);
       else if (!LINK_KINDS[links[link].kind]?.hostsComponents) errors.push(`${at}: link "${link}" is a ${links[link].kind} link, which holds no files`);
-      else errors.push(`${at}: link "${link}": only home holds components and tickets in this release (repo links land in PR 2)`);
+      else errors.push(`${at}: link "${link}": only home holds components and tickets in this release (components on repo links come in a later one)`);
     }
     if (c.owns !== undefined && !Array.isArray(c.owns)) errors.push(`${at}.owns: a list of globs`);
     // an empty list is a line around nothing; leave owns out for the sole-component ** default
@@ -1044,7 +1044,7 @@ function mainRef() {
 }
 // Before judging a PR (check-pr, merge): main as origin has it now, and nothing read from the old
 // one kept. A push to main from another clone since this checkout last fetched would otherwise be
-// left out of the landing tree, the settings in force and the registry acts (round 2, N1/N4).
+// left out of the landing tree, the settings in force and the registry acts.
 // Settings, the log's memos (landing, coverage), main's log and merge shas are all re-read.
 // A fetch that fails refuses the run, dry runs included: judging the last-fetched main would pass
 // a PR against a main that may have moved. A checkout with no origin remote has nowhere to fetch
@@ -1614,7 +1614,7 @@ const escRe = (s) => s.replace(/[.+^$()|[\]\\]/g, '\\$&');
 const hasWild = (g) => /[*?{[]/.test(g);
 const unbalanced = (g) => (g.match(/\{/g) ?? []).length !== (g.match(/\}/g) ?? []).length;
 // Each glob is compiled once per process, keyed by its text: coverage asks every glob about every
-// tracked path, and compiling per call made 50k paths x 30 globs take seconds (F2).
+// tracked path, and compiling per call made 50k paths x 30 globs take seconds.
 const globCache = new Map();
 function globToRegex(g) {
   const hit = globCache.get(g);
@@ -1660,7 +1660,7 @@ function globsOverlap(a, b) {
 }
 /* globs end */
 /* coverage start */
-// Component lines (spec §4): every tracked path matches exactly one component's owns, once the
+// Component lines: every tracked path matches exactly one component's owns, once the
 // kit's own line (devteam) is set aside. Pure: the caller reads the tree and the settings, so the
 // four places that enforce this (validate, check-pr and merge, observe-metrics, check-ticket) run
 // the same function on the same kind of input.
@@ -1675,7 +1675,7 @@ const compileLines = (components, devteamLine) => ({
   sole: components.length === 1,
   comps: components.map((c) => ({ name: c.name, bare: c.owns === undefined, globs: (c.owns ?? []).map((g) => [g, globMatcher(g)]) })),
 });
-// The kit's own line is set aside before any component is asked (F13): a path in it is devteam's
+// The kit's own line is set aside before any component is asked: a path in it is devteam's
 // alone, so a project line over docs/** coexists with the kit at docs/devteam/** with no contest,
 // and a glob reaching into it claims nothing there.
 function ownersIn(p, L, onHit) {
@@ -1701,7 +1701,7 @@ function coverage(paths, components, devteamLine) {
     const owners = ownersIn(p, L, count);
     if (owners[0] === 'devteam') continue;
     if (!owners.length) unowned.push(p);
-    // a contest names the globs that collide, so the fix can say which to narrow (O8)
+    // a contest names the globs that collide, so the fix can say which to narrow
     else if (owners.length > 1) { const globs = []; ownersIn(p, L, (n, g) => globs.push([n, g])); contested.push([p, owners, globs]); }
   }
   const empty = [...hits].filter(([, n]) => n === 0).map(([k]) => k.slice(k.indexOf('\0') + 1));
@@ -1716,7 +1716,7 @@ function caseCollisions(paths) {
 // The owner to suggest for an unowned folder: the owner of the first owned path (in tree order) in
 // that folder, else in the nearest folder above it; the repo root suggests nothing. One pass over
 // the tree indexes the first owned path under every folder, so each path's owner is asked once,
-// however many folders are unowned (F2). ownerOf(p) is the owner to name, or null.
+// however many folders are unowned. ownerOf(p) is the owner to name, or null.
 function ownerSuggestions(paths, unowned, ownerOf) {
   const first = new Map();
   for (const p of paths) {
@@ -1939,7 +1939,7 @@ function cmdValidate() {
   for (const [id, t] of ts) {
     if (!id.startsWith(`${t.component}-`)) err(id, `id must start with its component "${t.component}-"`);
     for (const g of t.touches ?? []) if (unbalanced(g)) err(id, `touches entry "${g}" has unbalanced braces`);
-    // Component lines (spec §6.1): the component is declared, and every touches entry lies in its
+    // Component lines: the component is declared, and every touches entry lies in its
     // line (or a touches_components member's) and no other, so a ticket's footprint is one line.
     if (lined && isActive(t)) {
       const decl = ownEntry(S0.components, t.component);
@@ -2066,7 +2066,7 @@ function cmdValidate() {
     }
   }
 
-  // The registry and the lines (spec §3). Labels-only components and an empty registry print nothing.
+  // The registry and the lines. Labels-only components and an empty registry print nothing.
   {
     const s = loadSettings();
     const reg = registryProblems(s);
@@ -2076,11 +2076,11 @@ function cmdValidate() {
     // here, in the words merge refuses with, before the first PR meets it.
     if (linesDeclared(s) && gitTooOld()) warnings.push(`components: ${gitTooOld()}; coverage fails closed until it can`);
     // A reserved slug as a component prefix: the one G1 exception, only for a project already using it.
-    // Only live tickets: a superseded or merged one is history, so the prescribed fix clears it (F5).
+    // Only live tickets: a superseded or merged one is history, so the prescribed fix clears it.
     const reserved = [...ts.values()].filter((t) => isActive(t) && !mergeShaFor(t.id) && RESERVED_LINKS.includes(t.component)).map((t) => t.id);
     if (reserved.length) errors.push(`tickets ${reserved.join(', ')}: component "${[...new Set(reserved.map((id) => ts.get(id).component))].join('" and "')}" is reserved (home is the repo that holds the kit, devteam the kit's own files); rename the component: supersede each ticket with one under another component (ticket add <new-id>, ticket set <old-id> --json '{"superseded_by": "<new-id>"}')`);
-    // Which tree and which settings (§4, point 1), by the rule coverageFails applies at check-pr and
-    // merge (F8): main's tree under main's committed settings, except in a chore context (a chore-
+    // Which tree and which settings, by the rule coverageFails applies at check-pr and
+    // merge: main's tree under main's committed settings, except in a chore context (a chore-
     // <slug> branch checked out here) whose head changes settings.md, where it is the tree that
     // chore would land under the settings it would land. A plan's validate --strict runs on a
     // detached head, so main's. Checked for one ticket, a gap on main is not that ticket's to fix:
@@ -2100,7 +2100,7 @@ function cmdValidate() {
       const cov = read.value;
       if (cov) for (const l of coverageReport({ ...coverageGaps(cov, sIn), ref }, sIn)) (scope || l.startsWith('line-empty:') ? warnings : errors).push(`components: ${l}${scope ? `; not ${scope}'s to fix` : ''}`);
     }
-    // Designs cite links as link:<id>; checked only while the registry has links (open issue 12).
+    // Designs cite links as link:<id>; checked only while the registry has links.
     if (Object.keys(s.links ?? {}).length) {
       const dd = path.join(projectDir, 'designs');
       for (const f of fs.existsSync(dd) ? fs.readdirSync(dd).filter((x) => x.endsWith('.md')) : []) {
@@ -2406,7 +2406,7 @@ function graphEdit(type, idRe) {
   }
   if (sub === 'add' && logGet(id)) die(`${id} exists; use ${type} set`);
   if (sub === 'set' && logGet(id)?.type !== type) die(`no ${type} ${id}`);
-  // home and devteam name the repo that holds the kit and the kit's own line (spec §3.1, O4)
+  // home and devteam name the repo that holds the kit and the kit's own line
   if (type === 'ticket' && RESERVED_LINKS.includes(body.component)) die(`component "${body.component}" is reserved (reserved: ${RESERVED_LINKS.join(', ')}): home is the repo that holds the kit, devteam the kit's own files; plan the ticket under another component`);
   const line = appendLog({ ...body, type, id, op: sub === 'add' ? 'new' : 'set' }, by);
   if (by === 'supervisor') appendLog({ type: 'act', decision: citing(), class: sub === 'add' ? 'add-ticket' : 'replan-within-feature', what: `${sub === 'add' ? 'added' : 'changed'} ${type} ${id}${sub === 'set' ? ` (${Object.keys(body).join(', ')})` : ''}`, refs: [id], reversible: true }, 'supervisor');
@@ -2568,8 +2568,8 @@ function verdictHolds(v, head, dir) {
 }
 // The three tree reads every repo needs, over one git function and runner (home's, or a repo link's bound to
 // its checkout; the tree reads use its runner, which returns { status, out, err }). changedFiles is -z: no quoting of spaces or
-// non-ASCII, so every enforcement point compares the same bytes treePaths gives (§4; rev 1 compared
-// quoted octal with raw). treePaths reads a commit's tree (or a tree id): dotfiles, submodule
+// non-ASCII, so every enforcement point compares the same bytes treePaths gives (git's
+// quoted octal never meets a raw path). treePaths reads a commit's tree (or a tree id): dotfiles, submodule
 // gitlinks and symlinks included, never the index or the working tree; a git that fails throws,
 // so no caller can read a failure as an empty tree. mergeTree is what landing sha on base would
 // produce: { tree }, { conflict: true }, or { error } when git couldn't say (git < 2.38 has no
@@ -2601,7 +2601,7 @@ const { changedFiles, treePaths, mergeTree } = gitFacts((args, cwd) => git(args,
 const gitVersion = () => memo('git-version', () => /(\d+\.\d+(\.\d+)?)/.exec(git(['--version']) ?? '')?.[1] ?? null);
 const gitTooOld = () => { const v = gitVersion(); const [a, b] = (v ?? '').split('.').map(Number); return v && (a < 2 || (a === 2 && b < 38)) ? `coverage needs git ≥ 2.38 (merge-tree --write-tree); found ${v}` : null; };
 // Home as the coverage code sees a repo. Every coverage helper takes a repo argument defaulting to
-// this, so PR 2's repo(name) objects (which carry the same fields) slot in without new call shapes.
+// this, so a repo link's object (with the same fields) can slot in later without new call shapes.
 const homeFacts = {
   name: 'home', changedFiles, treePaths, mergeTree,
   mainRef: () => mainRef(), devteamLine: () => devteamLine(),
@@ -2609,17 +2609,17 @@ const homeFacts = {
 };
 // Main's committed settings (home's main: settings live in home), or the defaults before they land.
 const mainSettings = (fallback = { ...SETTINGS_DEFAULTS }) => (mainRef() ? settingsAt(mainRef(), { orNull: true }) : null) ?? fallback;
-// The settings that judge a PR (§4, "Which settings decide"). Never the working tree's.
+// The settings that judge a PR. Never the working tree's.
 // - A ticket PR, and any PR that leaves settings.md alone: main's, committed. A ticket can never
-//   change settings.md (it's in the kit's line), so its head's settings never decide (O6).
+//   change settings.md (it's in the kit's line), so its head's settings never decide.
 // - A plan or chore PR that changes settings.md: the settings that would land. That is the head's
 //   when main's settings.md hasn't moved since the branch left it. Else, once lines are declared on
 //   main or at the head, the merge's (read from the landing tree, so a git that can't merge-tree
 //   fails closed): judging a chore by what it lands is the point of a chore that redraws lines.
 //   With no lines, only the registry is judged, so no tree is merged (git < 2.38 is fine): the
 //   settings are merged key by key, and links entry by entry, from base, head and main as git show
-//   reads them (mergeSettings; round 2, N2).
-// settings.md lives in home, so for a PR in another repo (PR 2) they are home main's.
+//   reads them (mergeSettings).
+// settings.md lives in home, so for a PR in another repo they would be home main's.
 // Returns { sMain, head, fromHead, landed() → { settings, tree? } | { problem } }.
 function settingsInForce(base, sha, R = homeFacts, { ticket = false } = {}) {
   const sMain = mainSettings();
@@ -2648,7 +2648,7 @@ function settingsInForce(base, sha, R = homeFacts, { ticket = false } = {}) {
 // a key the head left as the base had it is main's, else the head's; links go entry by entry the
 // same way. Where both sides changed one key, or one link entry, and differently, it is refused:
 // git's text merge may still combine the two into a value neither side wrote (an entry no act
-// wrote), or conflict, and either way what lands isn't this merge's to say (round 3, V3).
+// wrote), or conflict, and either way what lands isn't this merge's to say.
 // Returns { settings } | { problem }.
 function mergeSettings(b, h, m) {
   const both = [];
@@ -2668,9 +2668,9 @@ function mergeSettings(b, h, m) {
 }
 // Coverage of one repo's tree under one set of settings, once per read of the log; null with no lines.
 const coverageAt = (ref, s, R = homeFacts) => (linesDeclared(s) ? memo(`coverage\0${R.name}\0${ref}\0${canonical(s.components)}`, () => coverage(R.treePaths(ref), componentsOn(s, R.name), R.devteamLine())) : null);
-// Gaps on main under main's committed lines (§4, point 3): commits that bypassed devteam. Zero
+// Gaps on main under main's committed lines: commits that bypassed devteam. Zero
 // with no lines. While non-zero, no new ticket starts in that repo.
-// What blocks new tickets in a repo, by class, so the message names what it counted (F7):
+// What blocks new tickets in a repo, by class, so the message names what it counted:
 // { count, words }. A main whose tree can't be read counts as a gap (fail closed).
 const coverageGapInfo = (name = 'home', R = homeFacts) => memo(`coverageGap\0${name}`, () => {
   const main = R.mainRef();
@@ -2679,7 +2679,7 @@ const coverageGapInfo = (name = 'home', R = homeFacts) => memo(`coverageGap\0${n
   if (read.error) return { count: 1, words: `its tree can't be read (${read.error})` };
   if (!read.value) return { count: 0, words: '' };
   const g = coverageGaps(read.value, s);
-  // an empty glob excludes nothing: a line-empty finding of its own, never a block (F17)
+  // an empty glob excludes nothing: a line-empty finding of its own, never a block
   const parts = [[g.unowned.length, 'unowned'], [g.contested.length, 'contested'], [g.unlinked.length, 'unlinked'], [g.case_collisions.length, 'case collision(s)']].filter(([n]) => n);
   return { count: parts.reduce((t, [n]) => t + n, 0), words: parts.map(([n, w]) => `${n} ${w}`).join(', '), empty: g.empty };
 });
@@ -2688,7 +2688,7 @@ const coverageGap = (name = 'home', R = homeFacts) => coverageGapInfo(name, R).c
 function readCoverage(fn) {
   try { return { value: fn() }; } catch (e) { if (e instanceof GitReadError) return { error: e.message }; throw e; }
 }
-// The Baseline's floor gaps (§9a): unowned, owned twice, a component whose link can't hold files,
+// The Baseline's floor gaps (planning.md §7): unowned, owned twice, a component whose link can't hold files,
 // an owns glob that matches nothing. Case collisions fail the check but aren't a gap class.
 function coverageGaps(cov, s) {
   const unlinked = Object.entries(s.components ?? {}).filter(([, c]) => isObj(c) && (c.link ?? 'home') !== 'home' && !LINK_KINDS[ownEntry(s.links, c.link)?.kind]?.hostsComponents).map(([n]) => n);
@@ -2751,14 +2751,14 @@ function checkTicket(id, { sha: shaArg, title, body, approvals = true }) {
     const mineOwn = (f) => !!own && f.startsWith(own);
     const outside = changed.filter((f) => !mineOwn(f) && !(t.touches ?? []).some((g) => pathMatches(g, f)));
     if (outside.length) fails.push(`changes files outside touches: ${outside.slice(0, 10).join(', ')}${outside.length > 10 ? ` (+${outside.length - 10} more)` : ''}`);
-    // Component lines (§4, point 4): a changed file is also inside the ticket's component's line or
+    // Component lines: a changed file is also inside the ticket's component's line or
     // a touches_components member's; the kit's own line is closed but for the ticket's own folder.
     // Judged by main's committed settings, so neither a line widened in a working tree nor the
-    // ticket's own edit to settings.md changes anything (O6).
+    // ticket's own edit to settings.md changes anything.
     const s = mainSettings();
     if (linesDeclared(s)) {
       const comps = componentsOn(s, 'home');
-      // touches_components widens only a contract or integration ticket (spec §6.2, F4), as in validate
+      // touches_components widens only a contract or integration ticket, as in validate
       const tc = t.touches_components ?? [];
       const wide = ['contract', 'integration'].includes(t.kind);
       if (tc.length && !wide) fails.push(`touches_components is for contract and integration tickets; this ${t.kind ?? ''} ticket's line is ${t.component}'s alone`);
@@ -2768,7 +2768,7 @@ function checkTicket(id, { sha: shaArg, title, body, approvals = true }) {
       const inLine = (f) => { const o = ownerOf.get(f); return o[0] !== 'devteam' && o.some((n) => names.includes(n)); };
       const off = changed.filter((f) => !mineOwn(f) && !outside.includes(f) && !inLine(f));
       if (off.length) {
-        // each file with whose line it is in, and the fixes that fit (O8)
+        // each file with whose line it is in, and the fixes that fit
         const where = (f) => { const o = ownerOf.get(f); return o[0] === 'devteam' ? "the kit's own line" : o.length ? `${o.join(' and ')}'s line` : 'no line'; };
         const others = [...new Set(off.flatMap((f) => ownerOf.get(f)).filter((n) => n !== 'devteam' && !names.includes(n)))];
         const fixes = ['drop those changes', ...(others.length ? [`plan them as a contract or integration ticket that lists ${others.join(', ')} in touches_components`] : []), ...(off.some((f) => ownerOf.get(f)[0] === 'devteam') ? ['make kit changes in a chore'] : []), ...(off.some((f) => !ownerOf.get(f).length) ? ['draw a line around unowned files in a chore PR'] : []), 'or split the ticket'];
@@ -2799,10 +2799,10 @@ function cmdCheckTicket() {
 }
 
 
-// The tree a PR would put on main (§4, point 2): the merge of the head onto main, on every forge.
+// The tree a PR would put on main: the merge of the head onto main, on every forge.
 // Squash, rebase and merge all land that tree when the merge is clean, and a forge that merges a
 // behind PR (github without "require branches to be up to date") lands it by 3-way merge, so the
-// head alone is not what lands (F14). A conflict, or a git that can't say, fails closed.
+// head alone is not what lands. A conflict, or a git that can't say, fails closed.
 function landingTree(sha, R = homeFacts) {
   const main = R.mainRef();
   return memo(`landing\0${R.name}\0${main}\0${sha}`, () => {
@@ -2813,9 +2813,9 @@ function landingTree(sha, R = homeFacts) {
   });
 }
 // Coverage problems in the landing tree that main doesn't already have: a path added outside every
-// line, renamed out of one, or left behind by a narrowed glob (open issue 7), judged by the settings
+// line, renamed out of one, or left behind by a narrowed glob, judged by the settings
 // in force (settingsInForce). Only once lines are declared: with none on main or at the head, no
-// tree is read and nothing is merged (F1).
+// tree is read and nothing is merged.
 function coverageFails(base, sha, R = homeFacts, { ticket = false } = {}) {
   const main = R.mainRef();
   if (!main || !projectInRepo) return [];
@@ -2841,7 +2841,7 @@ function coverageFails(base, sha, R = homeFacts, { ticket = false } = {}) {
     throw e;
   }
 }
-// The registry that would land, checked as validate checks it (F3), on a PR of any kind that
+// The registry that would land, checked as validate checks it, on a PR of any kind that
 // changes settings.md: an unknown kind, a reserved id, a component on a link that can't hold one.
 // A project with no links and no lines on either side has nothing to check (G1).
 function registryFails(base, sha, R = homeFacts) {
@@ -2853,13 +2853,13 @@ function registryFails(base, sha, R = homeFacts) {
   if (J.problem) return [J.problem];
   return registryProblems(J.settings).errors.map((e) => `settings at landing: ${e}`);
 }
-// A url link lands only as a registry-edit act wrote it (link add|set|rm), matched by content (F3;
-// round 2, N2/N3): each url link the merge would change on main, main's settings against the ones
+// A url link lands only as a registry-edit act wrote it (link add|set|rm), matched by content:
+// each url link the merge would change on main, main's settings against the ones
 // that would land, needs an act naming it whose entry_hash is the entry that lands (null: removed).
 // No time window, so an unrelated settings landing expires nothing; a link already as main has it
 // needs nothing; an act for one value never covers another. A removal needs an rm act whose
 // prior_hash is main's entry, so an rm of an earlier entry never deletes a link added again
-// since (round 3, V2). An act written before entry_hash (or, for a removal, prior_hash) existed
+// since. An act written before entry_hash (or, for a removal, prior_hash) existed
 // never matches. A landing that can't be computed is registryFails' to report.
 function registryActFails(base, sha) {
   const S = settingsInForce(base, sha);
@@ -2882,7 +2882,7 @@ function checkPr({ headRef, sha, title, body, forge = false }) {
   const fails = [...logRule(branch, sha), ...reviewRule(sha, { forge })];
   // Every PR, every kind, ticket PRs included (they return on the next line): the tree that would
   // land keeps every path in exactly one line. A chore or settings PR gets this, never full
-  // validate, so an old graph error can't block a log PR (M10).
+  // validate, so an old graph error can't block a log PR.
   const base0 = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
   fails.push(...coverageFails(base0, sha, homeFacts, { ticket: branch.startsWith('ticket/') }), ...registryFails(base0, sha));
   if (branch.startsWith('ticket/')) return [...fails, ...checkTicket(branch.slice('ticket/'.length), { sha, title, body, approvals: !forge })];
@@ -3114,7 +3114,7 @@ function cmdMerge() {
   const sha = pr.headRefOid;
   if (!resolveCommit(sha)) die(`cannot find ${sha} locally after fetching ${branch}`);
   const fails = checkPr({ headRef: branch, sha, title: pr.title, body: pr.body });
-  // A refused footprint is a sign about the line (line-pressure, spec §7): one observation per head.
+  // A refused footprint is a sign about the line (line-pressure): one observation per head.
   if (id && fails.some((x) => x.startsWith(OFF_LINE))) {
     const key = `footprint:${id}:${sha}`;
     if (!logObjects('observation').some((o) => o.source_key === key)) appendLog({ type: 'observation', source: 'supervisor', subject: tickets().get(id)?.component ?? id, kind: 'footprint-refusal', detail: `${id} at ${sha.slice(0, 12)} changes files outside its line`, source_key: key, refs: [id] }, 'supervisor');
@@ -3514,7 +3514,7 @@ function cmdAsk() {
     }
   }
   for (const l of jsonFlag('links') ?? []) if (l?.link !== undefined && !ownEntry(loadSettings().links, l.link)) die(`--links: link "${l.link}" is not in settings links (devteam.mjs links)`);
-  // an inline link is logged as given, so a credential in it would be in the log and every view of the question (round 3, V4)
+  // an inline link is logged as given, so a credential in it would be in the log and every view of the question
   for (const l of jsonFlag('links') ?? []) if (hasCredentials(l?.url)) die(`--links: ${redactUrl(l.url)} carries credentials; ${CREDENTIALS_REFUSED}`);
   const line = appendLog({
     type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), question: q, context: kind === 'goal-approval' ? [flagStr('context'), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal'))))].filter(Boolean).join('\n\n') : flagStr('context'),
@@ -4673,7 +4673,7 @@ function cmdObserve() {
   out(line.id);
 }
 // observe-link: a resource the owner mentioned or the work depends on, for orient to fold into the
-// registry (spec §7). Anyone writes it; only the supervisor's link command changes the registry.
+// registry. Anyone writes it; only the supervisor's link command changes the registry.
 function cmdObserveLink() {
   const by = flags.owner ? ownerWriter().by : logWriter();
   const url = flagStr('url'), p = flagStr('path');
@@ -4710,13 +4710,13 @@ async function cmdObserveMetrics() {
   out(`recorded ${s} spend line(s) and ${observeFindings(collectMetrics(0))} new observation(s)${skipped.length ? `; ${skipped.length} link(s) not probed this tick (time budget): ${skipped.join(', ')}` : ''}`);
 }
 // Whether each link still exists, at most once a day per link, by its kind's probe (one HEAD
-// request, one ls-remote); nothing is fetched (spec §2, non-goals). The result waits in run/ for
+// request, one ls-remote); nothing is fetched. The result waits in run/ for
 // metrics to read, so metrics and the dashboard never touch the network. A link edited since its
 // last probe (any field) is probed again. DEVTEAM_URL_PROBE stands in for the HEAD request in tests.
 const PROBE_FILE = runPath('link-probes.json');
 // Probes run four at a time, each with its own 12 s deadline, inside a budget per tick (20 s;
 // DEVTEAM_PROBE_BUDGET_MS in tests): a probe the budget cuts short, or one never started, is "not
-// probed this tick", writes nothing, and is asked again next tick; it is never a finding (F10, O7).
+// probed this tick", writes nothing, and is asked again next tick; it is never a finding.
 // A probe is a kind's { cmd, args, cwd?, env?, judge(code, stdout) → { problem?, note? } }, or null.
 const PROBE_AT_ONCE = 4;
 const PROBE_EACH_MS = 12000;
@@ -4758,7 +4758,7 @@ async function probeLinks() {
   writeJson(PROBE_FILE, cache);
   return { skipped: due.map(([id]) => id).filter((id) => skipped.includes(id)) };
 }
-// Accepted knowledge whose scope applies to a ticket, a feature, or a class (spec §7.1).
+// Accepted knowledge whose scope applies to a ticket, a feature, or a class.
 function knowledgeFor(target) {
   const ctx = scopeContext(target);
   return logObjects('knowledge').filter((k) => k.status === 'accepted' && scopeMatches(k.scope, ctx));
@@ -4768,7 +4768,7 @@ const knowledgeBlock = (target) => {
   const ks = knowledgeFor(target);
   return ks.length ? `What this project has learned that applies here (accepted knowledge):\n${ks.map((k) => `- [${k.kind}${k.valence < 0 ? ', avoid' : ''}] ${k.statement} (${k.id})`).join('\n')}` : '';
 };
-// The block a prompt carries before its knowledge: the registry links this work uses (spec §6.3).
+// The block a prompt carries before its knowledge: the registry links this work uses.
 // Titles and notes are quoted data: whoever wrote them, they describe a link and instruct nobody.
 const linksBlock = (target) => {
   const reg = loadSettings().links ?? {};
@@ -4851,24 +4851,24 @@ function orientClusters() {
 }
 // One value as a POSIX shell word: single-quoted, each ' written '\''. Every value orient puts in a
 // command it proposes goes through this, since observation text is anyone's to write and the
-// supervisor runs what it pastes (O5, L-SEC-5).
+// supervisor runs what it pastes (L-SEC-5).
 const shq = (v) => `'${String(v).replace(/'/g, "'\\''")}'`;
 // A flag and its value for a proposed command: --key=value when the value starts with --, which
-// parseArgs would otherwise read as a flag (N5); a link set value then goes after a bare --.
+// parseArgs would otherwise read as a flag; a link set value then goes after a bare --.
 const shFlag = (k, v) => (String(v).startsWith('--') ? `--${k}=${shq(v)}` : `--${k} ${shq(v)}`);
 const shSetValue = (v) => (String(v).startsWith('--') ? `-- ${shq(v)}` : shq(v));
-// Link observations against the registry (spec §7, orient): a URL already there with a better
+// Link observations against the registry, for orient: a URL already there with a better
 // title, wider for or new notes is a proposed edit; a fresh URL a proposed add; a URL whose title
-// matches another link for an overlapping scope a question about which is the source of truth
-// (open issue 10). Proposals only: the supervisor decides and acts with link, or asks.
+// matches another link for an overlapping scope a question about which is the source of truth.
+// Proposals only: the supervisor decides and acts with link, or asks.
 function orientLinks() {
   const reg = loadSettings().links ?? {};
   const norm = (u) => String(u ?? '').replace(/\/+$/, '').toLowerCase();
   // handled: a registry entry's source, anything a decision or act cites (a dismissal is a decision
-  // that cites the observation, F16), and the evidence of knowledge it became
+  // that cites the observation), and the evidence of knowledge it became
   const used = new Set([...Object.values(reg).map((l) => l.source), ...[...logObjects('decision'), ...logObjects('act')].flatMap((a) => a.refs ?? []), ...logObjects('knowledge').flatMap((k) => k.evidence ?? [])].filter(Boolean));
   const title = (x) => String(x ?? '');
-  // an id link add accepts (LINK_ID, not reserved), unique among the registry and this run's proposals (O11)
+  // an id link add accepts (LINK_ID, not reserved), unique among the registry and this run's proposals
   const taken = new Set([...Object.keys(reg), ...RESERVED_LINKS]);
   const newId = (t) => {
     let base = slug(t).replace(/-+$/, '');
@@ -4890,7 +4890,7 @@ function orientLinks() {
     const fors = worker ? [...new Set(asList(o.link.for).map((sc) => (['all', 'project'].includes(sc) ? narrow : sc)).filter(Boolean))] : asList(o.link.for);
     const l = { ...o.link, for: fors };
     const mark = worker ? { proposed_by: worker } : {};
-    // a file in this repo: no v1 link kind holds one, so it becomes a pointer in knowledge (O11)
+    // a file in this repo: no v1 link kind holds one, so it becomes a pointer in knowledge
     if (!l.url) {
       const scope = asList(l.for).find((sc) => scopeValid(sc, 'knowledge')) ?? (worker ? narrow : null) ?? 'project';
       res.push({ key: `link-proposal:${l.path}`, proposal: 'pointer', observation: o.id, ...mark, command: `knowledge add --kind pointer ${shFlag('statement', `${l.title}: ${l.path}${l.notes ? ` (${l.notes})` : ''}`)} --scope ${shq(scope)} --evidence ${shq(o.id)}` });
@@ -6151,13 +6151,13 @@ function collectMetrics(since) {
   const unpriced = Object.entries(m.cost.unpriced_models ?? {});
   if (unpriced.length) add('low', 'unpriced-model', unpriced.map(([k]) => k).join(', '), `${unpriced.map(([k, n]) => `${k}: ${(n / 1e6).toFixed(1)}M tokens`).join('; ')} with no price, so spend undercounts`, 'the owner adds them to settings.model_prices ($ per million tokens: input, output, cache_read, cache_write)');
   if (m.escaped_defects) add('high', 'escaped-defects', `${m.escaped_defects}`, 'defects found after merge', 'retro: which review or gate should have caught each one');
-  // Component lines on main (§4, point 3): a gap is a severity-4 observation (open issue 6).
+  // Component lines on main: a gap is a severity-4 observation.
   {
     const gap = coverageGapInfo();
     if (gap.empty?.length) add('low', 'line-empty', 'home', `${gap.empty.length} owns glob(s) on ${mainRef()} match nothing: ${gap.empty.slice(0, 5).map((x) => `"${x}"`).join(', ')}`, 'remove or fix the glob in a chore PR (settings components); an empty glob blocks nothing');
     if (gap.count) add('high', 'unowned-files', 'home', `${mainRef()} has coverage gaps: ${gap.words} (devteam.mjs components check lists them); no new ticket starts in home until they clear`, 'a chore PR that extends a line (settings components), or moves the files into one', { sev: 4 });
   }
-  // The registry (spec §7): a link that no longer resolves, and lines drawn in the wrong place.
+  // The registry: a link that no longer resolves, and lines drawn in the wrong place.
   {
     const reg = settings.links ?? {};
     let probes = {};
@@ -6175,7 +6175,7 @@ function collectMetrics(since) {
       const refusals = groupBy(logObjects('observation').filter((o) => o.kind === 'footprint-refusal' && Date.parse(o.created_at) >= since14), (o) => o.subject);
       const shared = Object.entries(settings.components).filter(([, c]) => c?.shared).map(([n]) => n);
       for (const c of [...new Set([...Object.keys(refusals), ...shared])]) {
-        // tickets, not heads or dry runs: one ticket refused three times is that ticket's (O10)
+        // tickets, not heads or dry runs: one ticket refused three times is that ticket's
         const n = new Set((refusals[c] ?? []).map((o) => o.refs?.[0] ?? String(o.source_key ?? '').split(':')[1] ?? o.id)).size;
         const planned = shared.includes(c) ? [...ts.values()].filter((t) => Date.parse(t.created_at) >= since14 && (t.component === c || (t.touches_components ?? []).includes(c))).length : 0;
         if (n >= 3 || planned >= 3) add('medium', 'line-pressure', c, [n >= 3 && `footprint refusals on ${n} tickets in 14 days`, planned >= 3 && `${planned} tickets planned against the shared component in 14 days`].filter(Boolean).join('; '), 'the line may be in the wrong place: move it in a chore PR (settings components), or plan a contract ticket that settles the shared part');
@@ -6965,7 +6965,7 @@ function makeSession(role) {
   const id = positional[0] ?? die(`usage: ${role} <${role === 'worker' ? 'ticket-id' : 'feature'}> [--resume] [--force]`);
   if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
   if (role === 'worker' && !tickets().has(id)) die(`no ticket ${id} (devteam.mjs ticket show ${id})`);
-  // A repo with files no line owns starts no new ticket (§4, point 3); a ticket already started carries on.
+  // A repo with files no line owns starts no new ticket; a ticket already started carries on.
   if (role === 'worker' && !lastPhaseOf(id) && coverageGap()) die(`home's main has coverage gaps (${coverageGapInfo().words}): no new ticket starts there until a chore PR fixes the lines (devteam.mjs components check)`);
   // Every session serves a goal, and the goal's hold says whether it may start (planning.md §1):
   // drain lets a session that already ran carry on but starts nothing new; park and let-go start
@@ -7821,7 +7821,7 @@ function cmdNotes() {
 }
 
 // Coverage problems as lines a person reads: unowned paths grouped by folder, with the component
-// that owns a sibling path in that folder as the suggestion (§4, point 1).
+// that owns a sibling path in that folder as the suggestion.
 function coverageReport(cov, s, R = homeFacts) {
   const lines = [];
   const comps = componentsOn(s, R.name);
@@ -7833,9 +7833,9 @@ function coverageReport(cov, s, R = homeFacts) {
     const who = suggest(dir);
     lines.push(`unowned: ${dir} (${ps.length}): ${ps.slice(0, 8).join(', ')}${ps.length > 8 ? `, … (+${ps.length - 8})` : ''}${who ? `; suggested owner: ${who}` : ''} -> extend a line (settings components) in a chore PR, or move the files into one`);
   }
-  // each kind of gap carries its own fix (O8)
+  // each kind of gap carries its own fix
   for (const [p, owners, globs = []] of cov.contested) lines.push(`contested: ${p} is owned by ${owners.map((n) => { const gs = globs.filter(([c]) => c === n).map(([, g]) => `"${g}"`); return gs.length ? `${n} (${gs.join(', ')})` : n; }).join(' and ')} -> narrow one of those globs so one line owns it`);
-  // an empty glob excludes nothing, so invariant C holds with it: a warning, never a refusal (F17)
+  // an empty glob excludes nothing, so invariant C holds with it: a warning, never a refusal
   for (const g of cov.empty) lines.push(`line-empty: ${comps.find((c) => (c.owns ?? []).includes(g))?.name ?? '?'} owns "${g}", which matches nothing (a typo, or its last file was deleted) -> remove or fix the glob in a chore PR (settings components)`);
   for (const n of cov.unlinked ?? []) lines.push(`unlinked: component ${n}'s link "${s.components[n].link}" is not a link that holds files -> point it at home (leave link out)`);
   for (const grp of cov.case_collisions) lines.push(`case: ${grp.join(', ')} differ only by case (they break checkouts on macOS and Windows) -> rename one of them`);
@@ -7844,7 +7844,7 @@ function coverageReport(cov, s, R = homeFacts) {
 const treePathsMemo = (ref, R = homeFacts) => memo(`tree\0${R.name}\0${ref}`, () => R.treePaths(ref));
 
 // components check [--ref r] [--count] [--json]: coverage of a commit's tree under that commit's
-// settings (open issue 9). Exits 1 on any problem; --count prints the Baseline's gap count.
+// settings. Exits 1 on any problem; --count prints the Baseline's gap count.
 function cmdComponents() {
   const [sub] = positional;
   if (sub !== 'check') die('usage: components check [--ref <ref>] [--count] [--json]');
@@ -7870,7 +7870,7 @@ function cmdComponents() {
 
 // Edit the json devteam block of the main checkout's settings.md in place, after checking the
 // result as validate would: the registry is configuration, written where the supervisor's next
-// chore PR picks it up (spec §7, open issue 14).
+// chore PR picks it up.
 function editSettingsBlock(mutate) {
   if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
   return editSettingsFile(path.join(projectDir, 'settings.md'), mutate);
@@ -7925,7 +7925,7 @@ function linkLand(slugName) {
 }
 // link add|set|rm: a link of the supervisor's kind (url: LINK_KINDS[k].ownedByOwner false) is
 // written, then logged as registry-edit (constitutional), citing what it came from. A link of an
-// owner's kind (repo) is the owner's: PR 2 drafts it as a question; until then it is refused.
+// owner's kind (repo) is the owner's, and refused here: it lands on a chore with the owner's governance-edit answer.
 // Nothing here branches on a kind name: the table says whose it is and which fields it has.
 function cmdLink() {
   const [sub, id, field, ...given] = positional;
@@ -7942,7 +7942,7 @@ function cmdLink() {
   const K = LINK_KINDS[kind] ?? die(`--kind is one of: ${Object.keys(LINK_KINDS).join(', ')}`);
   if (sub === 'set' && field === 'kind') die('a link never changes kind in place: link rm it and link add it again (a kind flip is a removal and an addition)');
   if (sub === 'set' && field && !linkFields(kind).includes(field)) die(`"${field}" is not a field of a ${kind} link (fields: ${linkFields(kind).join(', ')})`);
-  // a link still cited can't go: validate would fail for every citer, and so every merge gate (O9)
+  // a link still cited can't go: validate would fail for every citer, and so every merge gate
   if (sub === 'rm') {
     const live = (t) => isActive(t) && !mergeShaFor(t.id);
     const dd = path.join(projectDir, 'designs');
@@ -7977,7 +7977,7 @@ function cmdLink() {
     return b;
   });
   what = redactUrl(what);
-  // a removal also records the entry it removed, so it lands only while main still has that one (round 3, V2)
+  // a removal also records the entry it removed, so it lands only while main still has that one
   appendLog({ type: 'act', decision: citing(), class: 'registry-edit', what, refs: [`link:${id}`, ...(source ? [source] : [])], reversible: true, entry_hash: linkEntryHash(entry), ...(sub === 'rm' ? { prior_hash: linkEntryHash(cur) } : {}) }, 'supervisor');
   out(`${what}; ${LANDING_HINT}`);
 }
