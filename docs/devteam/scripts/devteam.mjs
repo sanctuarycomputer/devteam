@@ -5429,7 +5429,7 @@ function startHub(log) {
       const send = (code, type, body, extra = {}) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...extra }); res.end(body); };
       if (!ownHost(req.headers.host)) return send(403, 'text/plain; charset=utf-8', 'the hub answers only on its own address');
       if (req.method !== 'GET') return send(405, 'text/plain; charset=utf-8', 'the hub only lists', { allow: 'GET' });
-      if (req.url === '/') return send(200, 'text/html; charset=utf-8', fs.readFileSync(page), { 'content-security-policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'" });
+      if (req.url === '/') return send(200, 'text/html; charset=utf-8', fs.readFileSync(page), { 'content-security-policy': `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-src ${PORT_RANGE.map((p) => `http://127.0.0.1:${p}`).join(' ')}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'` });
       // The list is for the hub's own page: another site's page doesn't get to make the hub probe
       // the block (a browser always says where a request came from). The page itself opens from
       // anywhere, a link in a README included.
@@ -5512,7 +5512,9 @@ async function cmdDashboard() {
     // frame-src 'self': a frame of this page (a review page, an HTML mock) may navigate itself, and
     // this keeps it on the dashboard; a sandbox alone would let it load any URL, query string and all.
     if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) {
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': "frame-src 'self'" });
+      // frame-ancestors: only this dashboard and the machine's hub may frame it, so another site
+      // can't lay it under its own page and steer a click onto an owner action.
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': `frame-src 'self'; frame-ancestors 'self' http://127.0.0.1:${HUB_PORT} http://localhost:${HUB_PORT}` });
       return res.end(fs.readFileSync(page));
     }
     if (req.method === 'GET' && req.url.startsWith('/api/data')) {

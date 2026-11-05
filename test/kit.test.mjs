@@ -2783,6 +2783,13 @@ test('the hub: lists every instance on the machine, links to each one, moves whe
     const page = await fetch(`http://127.0.0.1:${HUB}/`);
     assert.match(await page.text(), /instances\.json/, 'the page reads the list from its own hub');
     assert.match(page.headers.get('content-security-policy'), /connect-src 'self'/, 'and can talk to nothing else');
+    const csp = page.headers.get('content-security-policy');
+    for (let p = P; p < P + 25; p++) assert.ok(csp.includes(`http://127.0.0.1:${p} `) || csp.includes(`http://127.0.0.1:${p};`), `the hub may frame ${p}`);
+    assert.ok(!csp.includes(`http://127.0.0.1:${P + 25}`), 'and nothing outside the block');
+    const dash = await fetch(`http://127.0.0.1:${P}/`);
+    assert.match(dash.headers.get('content-security-policy'), new RegExp(`frame-ancestors 'self' http://127\\.0\\.0\\.1:${HUB} http://localhost:${HUB}`), 'only the dashboard itself and the hub can frame a dashboard');
+    const page2 = await (await fetch(`http://127.0.0.1:${HUB}/`)).text();
+    assert.match(page2, /id="tabs"/, 'the page is a tab bar');
     assert.equal(await statusWithHost(HUB, '/instances.json', 'rebound.example'), 403, 'its own Host only');
     assert.equal(await statusWithHost(HUB, '/instances.json', `127.0.0.1:${HUB}`, 'POST'), 405, 'it only lists');
     assert.equal(await statusWithHost(HUB, '/instances.json', `127.0.0.1:${HUB}`, 'GET', { 'sec-fetch-site': 'cross-site' }), 403, "another site's page can't make it probe");
