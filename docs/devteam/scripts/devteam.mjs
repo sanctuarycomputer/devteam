@@ -2816,7 +2816,7 @@ const reviewDir = (qid) => {
 const reviewPageCsp = (origin) => [
   "default-src 'none'", `script-src 'unsafe-inline' ${origin}/review/`, `style-src 'unsafe-inline' ${origin}/review/`, `img-src data: blob: ${origin}/api/file`,
   "connect-src 'none'", "font-src 'none'", "media-src 'none'", "object-src 'none'", "frame-src 'none'", "worker-src 'none'", "manifest-src 'none'",
-  "form-action 'none'", "base-uri 'none'", `frame-ancestors ${origin}`, 'sandbox allow-scripts',
+  "form-action 'none'", "base-uri 'none'", `frame-ancestors ${origin} http://127.0.0.1:${HUB_PORT}`, 'sandbox allow-scripts',
 ].join('; ');
 const reviewResultFile = (qid) => path.join(reviewDir(qid), 'result.json');
 const reviewDraftFile = (qid) => path.join(reviewDir(qid), 'draft.json');
@@ -5395,9 +5395,10 @@ async function pickDashboardPort({ skip = [] } = {}) {
 }
 
 // The hub: every dashboard tries to serve 127.0.0.1:HUB_PORT, and the one that gets it lists every
-// instance in the block by asking each port /api/hello, linking to each one's own dashboard. It
-// owns no state and does nothing for the owner: GET only, no proxy, its own Host only, a page that
-// can talk only to itself. The others retry, so the hub moves when its dashboard stops. Something
+// instance in the block by asking each port /api/hello: a tab per instance, with that instance's
+// own dashboard in a sandboxed frame on its own address. It owns no state and does nothing for the
+// owner: GET only, no proxy, its own Host only, a page that fetches only from itself and frames only
+// the block. The others retry, so the hub moves when its dashboard stops. Something
 // that isn't a devteam hub on the port: logged once, and this dashboard stops trying.
 function startHub(log) {
   const page = path.join(kitDir, 'dashboard', 'hub.html');
@@ -5428,6 +5429,9 @@ function startHub(log) {
     const hub = http.createServer(async (req, res) => {
       const send = (code, type, body, extra = {}) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...extra }); res.end(body); };
       if (!ownHost(req.headers.host)) return send(403, 'text/plain; charset=utf-8', 'the hub answers only on its own address');
+      // One address: the hub listens on 127.0.0.1 only, and dashboards let only that origin frame
+      // them, so localhost (which may mean ::1, held by something else) is sent there.
+      if (req.headers.host !== `127.0.0.1:${HUB_PORT}`) { res.writeHead(302, { location: `http://127.0.0.1:${HUB_PORT}${req.url.startsWith('/') ? req.url : '/'}`, 'cache-control': 'no-store' }); return res.end(); }
       if (req.method !== 'GET') return send(405, 'text/plain; charset=utf-8', 'the hub only lists', { allow: 'GET' });
       if (req.url === '/') return send(200, 'text/html; charset=utf-8', fs.readFileSync(page), { 'content-security-policy': `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-src ${PORT_RANGE.map((p) => `http://127.0.0.1:${p}`).join(' ')}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'` });
       // The list is for the hub's own page: another site's page doesn't get to make the hub probe
@@ -5490,14 +5494,18 @@ async function cmdDashboard() {
   // One run at a time, each given 20 s; the kit's version is read once, on the first run.
   let hello = null;
   let kit = null;
+  let kitAt = { main: null, at: 0 };
   let helloRunning = false;
   const refreshHello = () => {
     if (helloRunning) return;
     helloRunning = true;
-    execFile(process.execPath, [self, 'hello', '--json', ...(kit ? ['--no-kit'] : [])], { cwd: mainRoot, env: ownerEnv, timeout: 20000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
+    // The kit's version is checked again when main moves (an adoption landing) and every 10 min.
+    const main = mainRef() ? git(['rev-parse', '--verify', '--quiet', mainRef()], mainRoot) : null;
+    const fresh = !kit || main !== kitAt.main || Date.now() - kitAt.at > 600000;
+    execFile(process.execPath, [self, 'hello', '--json', ...(fresh ? [] : ['--no-kit'])], { cwd: mainRoot, env: ownerEnv, timeout: 20000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
       helloRunning = false;
       if (err) return;
-      try { hello = JSON.parse(stdout); kit ??= hello.kit; } catch {}
+      try { hello = JSON.parse(stdout); if (fresh && hello.kit) { kit = hello.kit; kitAt = { main, at: Date.now() }; } } catch {}
     });
   };
   refreshHello();
@@ -5514,7 +5522,7 @@ async function cmdDashboard() {
     if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) {
       // frame-ancestors: only this dashboard and the machine's hub may frame it, so another site
       // can't lay it under its own page and steer a click onto an owner action.
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': `frame-src 'self'; frame-ancestors 'self' http://127.0.0.1:${HUB_PORT} http://localhost:${HUB_PORT}` });
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': `frame-src 'self'; frame-ancestors 'self' http://127.0.0.1:${HUB_PORT}` });
       return res.end(fs.readFileSync(page));
     }
     if (req.method === 'GET' && req.url.startsWith('/api/data')) {

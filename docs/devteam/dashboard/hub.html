@@ -75,6 +75,8 @@ function keyOf(it) {
   return twins ? `${it.x.name}-${hex6.get(it.x.root)}` : String(it.x.name);
 }
 const urlOf = (x) => `http://127.0.0.1:${Number(x.port)}/`;
+const byRoot = (a, b) => String(a).localeCompare(String(b));
+const wanted = () => { try { return decodeURIComponent(location.hash.slice(1)); } catch { return ''; } };
 
 function select(root) {
   const it = items.get(root);
@@ -84,6 +86,10 @@ function select(root) {
   if (!it.frame) {
     it.frame = document.createElement('iframe');
     it.frame.title = String(it.x.name);
+    // A dashboard runs scripts, fetches its own origin, posts forms and opens links in new tabs; it
+    // never navigates this page, whatever answers in the block.
+    it.frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads');
+    it.frame.setAttribute('allow', 'clipboard-write');
     it.frame.src = urlOf(it.x);
     framesEl.append(it.frame);
   }
@@ -107,7 +113,8 @@ function paintTab(it) {
     tab.append(b);
   }
   const state = x.inbox === null || x.inbox === undefined ? 'starting' : `${x.inbox} in the Inbox; ${x.fleet ? `${x.fleet.mode}, ${x.fleet.workers} session${x.fleet.workers === 1 ? '' : 's'}` : ''}`;
-  tab.title = `${x.root}\nkit ${x.kit ?? '?'}\n${state}${it.goneAt ? '\nnot answering' : ''}`;
+  tab.title = `${x.root}\nport ${Number(x.port)} · kit ${x.kit ?? '?'}\n${state}${it.goneAt ? '\nnot answering' : ''}`;
+  if (it.frame) it.frame.title = String(x.name);
   tab.classList.toggle('gone', Boolean(it.goneAt));
 }
 function notifyFor(it, before) {
@@ -134,8 +141,16 @@ async function draw() {
   try { data = await (await fetch('instances.json', { cache: 'no-store' })).json(); } catch { return; }
   const now = Date.now();
   const seen = new Set();
+  // One tab per root: if two answers claim one root (a second dashboard of one repo, or something
+  // pretending), the tab keeps the port it already shows, else the lowest; the rest are ignored.
+  const perRoot = new Map();
   for (const x of data.instances ?? []) {
-    if (!x || typeof x.root !== 'string') continue;
+    if (!x || typeof x.root !== 'string' || !Number.isInteger(Number(x.port))) continue;
+    const had = perRoot.get(x.root);
+    const keep = items.get(x.root)?.x.port;
+    if (!had || Number(x.port) === Number(keep) || (Number(had.port) !== Number(keep) && Number(x.port) < Number(had.port))) perRoot.set(x.root, x);
+  }
+  for (const x of perRoot.values()) {
     seen.add(x.root);
     await hexOf(x.root);
     let it = items.get(x.root);
@@ -153,7 +168,8 @@ async function draw() {
     it.x = x;
     it.goneAt = null;
     if (moved) it.frame.src = urlOf(x);
-    if (!firstDraw) notifyFor(it, before);
+    // an instance that turns up later with items already waiting counts them as new
+    if (!firstDraw) notifyFor(it, before ?? (typeof x.inbox === 'number' ? 0 : undefined));
     if (typeof x.inbox === 'number') lastInbox.set(x.root, x.inbox);
   }
   for (const [root, it] of items) {
@@ -167,26 +183,26 @@ async function draw() {
     }
   }
   // tabs in the hub's order (by root)
-  for (const root of [...items.keys()].sort()) tabsEl.append(items.get(root).tab);
+  for (const root of [...items.keys()].sort(byRoot)) tabsEl.append(items.get(root).tab);
   for (const it of items.values()) paintTab(it);
   empty.hidden = items.size > 0;
   if (!items.size) empty.textContent = 'No devteam dashboards are running on this machine.';
   if (!selected || !items.has(selected)) {
-    const want = decodeURIComponent(location.hash.slice(1));
-    const byHash = [...items.values()].find((it) => keyOf(it) === want);
-    const pick = byHash ?? [...items.values()].sort((a, b) => a.x.root.localeCompare(b.x.root)).find((it) => it.x.inbox > 0) ?? [...items.values()].sort((a, b) => a.x.root.localeCompare(b.x.root))[0];
+    const want = wanted();
+    const ordered = [...items.values()].sort((a, b) => byRoot(a.x.root, b.x.root));
+    const pick = ordered.find((it) => keyOf(it) === want) ?? ordered.find((it) => it.x.inbox > 0) ?? ordered[0];
     if (pick) select(pick.x.root);
   }
   firstDraw = false;
 }
 window.addEventListener('hashchange', () => {
-  const want = decodeURIComponent(location.hash.slice(1));
+  const want = wanted();
   const it = [...items.values()].find((o) => keyOf(o) === want);
   if (it && it.x.root !== selected) select(it.x.root);
 });
 tabsEl.addEventListener('keydown', (e) => {
   if (!['ArrowLeft', 'ArrowRight'].includes(e.key)) return;
-  const roots = [...items.keys()].sort();
+  const roots = [...items.keys()].sort(byRoot);
   const i = roots.indexOf(selected);
   const next = roots[(i + (e.key === 'ArrowRight' ? 1 : roots.length - 1)) % roots.length];
   if (next) { select(next); items.get(next).tab.focus(); }
