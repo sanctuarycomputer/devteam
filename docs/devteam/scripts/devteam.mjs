@@ -1120,13 +1120,17 @@ function fetchMain(R = null) {
     mainLogCache = undefined;
     mergeShaCache.clear();
   }
-  // a repo link always has an origin: its checkout is matched to the link by it (repo())
-  if (R && R.name !== 'home') {
-    const rb = R.settings.main_branch;
-    const fr = gitRun(['fetch', '--quiet', 'origin', rb], R.root);
-    if (fr.status !== 0) die(`could not fetch origin ${rb} in ${R.name}: ${redactUrl(firstLine(fr.err)) || `exit ${fr.status}`}; refusing to judge against a stale main`);
-    R.resetCaches();
-  }
+  if (R && R.name !== 'home') fetchLinkMain(R);
+}
+// Another repo's main, fetched into its checkout by the same rule as home's: skipped when the
+// checkout has no origin, refused when the fetch fails, so nothing is judged, read or started on a
+// stale main. (repo() matches a checkout to its link by origin, so the skip is home's rule kept.)
+function fetchLinkMain(R, refusing = 'refusing to judge against a stale main') {
+  if (R.git(['config', '--get', 'remote.origin.url'], R.root) === null) return;
+  const rb = R.settings.main_branch;
+  const fr = gitRun(['fetch', '--quiet', 'origin', rb], R.root);
+  if (fr.status !== 0) die(`could not fetch origin ${rb} in ${R.name}: ${redactUrl(firstLine(fr.err)) || `exit ${fr.status}`}; ${refusing}`);
+  R.resetCaches();
 }
 // In a read-only command, full ref names resolve from one for-each-ref listing (a dashboard
 // refresh asked git about each ticket branch separately: ~90 processes). Anything else, and every
@@ -5259,8 +5263,7 @@ function runMeasureCheck(g) {
   let sha = null;
   const R = repo(m.source === 'repo' ? m.link ?? 'home' : 'home'); // an act: fails fast on a missing checkout
   if (m.source === 'repo') {
-    R.git(['fetch', '--quiet', 'origin'], R.root);
-    if (R.name === 'home') mainRefCache = undefined; else R.resetCaches();
+    if (R.name === 'home') { R.git(['fetch', '--quiet', 'origin'], R.root); mainRefCache = undefined; } else fetchLinkMain(R, 'refusing to read the measure on a stale main');
     sha = R.git(['rev-parse', `${R.mainRef() ?? die(`no main branch${R.name === 'home' ? '' : ` in ${R.name}`} to read the measure on`)}^{commit}`], R.root) ?? die('cannot resolve main');
     cwd = detachedWorktree(sha, 'reading', R);
   }
@@ -7313,7 +7316,8 @@ function makeSession(role) {
   const R = role === 'worker' ? repoOfTicket(tickets().get(id)) : repo('home');
   const mb = R.settings.main_branch;
   if (!fs.existsSync(wt)) {
-    R.git(['fetch', '--quiet', 'origin', mb]);
+    if (R.name === 'home') R.git(['fetch', '--quiet', 'origin', mb]);
+    else fetchLinkMain(R, 'refusing to start a ticket on a stale main');
     // a branch pushed from another machine (a moved fleet) continues from origin, never from main
     R.git(['fetch', '--quiet', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
     const base = R.resolveCommit(`origin/${mb}`) ? `origin/${mb}` : mb;
@@ -7623,10 +7627,20 @@ function fleetStatus() {
   // Every repo link, and whether this machine can read it (a view: never fails on one it can't).
   const repoLinks = Object.entries(s.links ?? {}).filter(([, l]) => LINK_KINDS[l?.kind]?.hostsComponents);
   const readableLinks = repoLinks.filter(([id]) => repoReadable(id)).map(([id]) => repo(id));
-  if (!flags['no-fetch'] && commonDir) { git(['fetch', '--quiet', 'origin']); for (const R of readableLinks) { R.git(['fetch', '--quiet', 'origin']); R.resetCaches(); } }
+  // another repo's fetch failing is a blocker: its sessions' pushed state would be read from a stale origin
+  const fetchFails = [];
+  if (!flags['no-fetch'] && commonDir) {
+    git(['fetch', '--quiet', 'origin']);
+    for (const R of readableLinks) {
+      if (R.git(['config', '--get', 'remote.origin.url'], R.root) === null) continue;
+      const f = gitRun(['fetch', '--quiet', 'origin'], R.root);
+      if (f.status !== 0) fetchFails.push(`${R.name}: could not fetch origin: ${redactUrl(firstLine(f.err)) || `exit ${f.status}`}; what its sessions pushed is unchecked`);
+      R.resetCaches();
+    }
+  }
   mainRefCache = undefined;
   const main = mainRef();
-  const blockers = [];
+  const blockers = [...fetchFails];
   const warnings = [];
   if (!fm) blockers.push(`the fleet is neither parked nor drained (${holdableGoals().filter((g) => goalMode(g) === 'run').map((g) => (isUpkeep(g) ? 'Upkeep' : `"${g.title}"`)).join(', ')} still running): run fleet park or fleet drain first`);
 

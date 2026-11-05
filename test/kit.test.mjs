@@ -4726,6 +4726,20 @@ test('a sibling ticket\'s worker: its worktree from its repo, home\'s kit by abs
   } finally { F.done(); }
 });
 
+test('a sibling ticket\'s worker starts only from a fresh main: the fetch of its repo\'s main failing refuses', (t) => {
+  if (!hasTmux) return t.skip('tmux not installed');
+  const F = multiFixture('sibling-wt-stale');
+  const { old, runIn, ticket } = F;
+  try {
+    ticket('console-01-a');
+    fs.renameSync(F.consoleOrigin, `${F.consoleOrigin}-away`);
+    try {
+      assert.match(runIn(old, ['worker', 'console-01-a'], { DEVTEAM_ROLE: 'supervisor' }).err, /could not fetch origin trunk in console: .*refusing to start a ticket on a stale main/);
+      assert.ok(!fs.existsSync(path.join(old, '.worktrees', 'console-01-a')), 'no worktree');
+    } finally { fs.renameSync(`${F.consoleOrigin}-away`, F.consoleOrigin); }
+  } finally { F.done(); }
+});
+
 test('a sibling worker\'s prompt shows its repo\'s remote and project folder as data: one line, whatever main holds', () => {
   const F = multiFixture('sibling-prompt-data');
   const { old, okIn, ticket } = F;
@@ -4924,6 +4938,11 @@ test('fleet status checks a sibling session against its own remote and lists eve
     assert.ok(miss.checklist.some((c) => /run\/links\.local\.json/.test(c)), 'the checklist says links.local.json does not move');
     assert.doesNotMatch(miss.blockers.join('\n'), /files in run\/ the kit didn't make/, 'links.local.json is a kit file');
     fs.rmSync(path.join(old, 'docs/devteam/run/links.local.json'));
+    // with fetching, console's origin gone: a blocker, never a stale "pushed"
+    fs.renameSync(F.consoleOrigin, `${F.consoleOrigin}-away`);
+    try {
+      assert.match(json(okIn(old, ['fleet', 'status', '--json'], SUP)).blockers.join('\n'), /(^|\n)console: could not fetch origin: .*; what its sessions pushed is unchecked/);
+    } finally { fs.renameSync(`${F.consoleOrigin}-away`, F.consoleOrigin); }
     // a sibling on GitHub with no devteam workflow on its main: a warning, never a blocker
     const links = json(okIn(old, ['settings'])).links;
     F.lines({ ...F.STD, console: { link: 'console' }, companion: { link: 'companion' } }, { links: { ...links, companion: { ...links.companion, forge: 'github' } } });
@@ -5117,5 +5136,10 @@ test('a repo measure names the link it runs in (spec §9 measure.link): read on 
     assert.match(runIn(old, ['goal', 'reading', G, '--run'], SUP).err, /repo console: no checkout at .*not-cloned/);
     okIn(old, ['goal', 'show', G]);
     fs.rmSync(path.join(old, 'docs/devteam/run/links.local.json'));
+    // the fetch of console's main fails: refused, never read on a stale main
+    fs.renameSync(F.consoleOrigin, `${F.consoleOrigin}-away`);
+    try {
+      assert.match(runIn(old, ['goal', 'reading', G, '--run'], SUP).err, /could not fetch origin trunk in console: .*refusing to read the measure on a stale main/);
+    } finally { fs.renameSync(`${F.consoleOrigin}-away`, F.consoleOrigin); }
   } finally { F.done(); }
 });
