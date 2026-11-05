@@ -1646,7 +1646,7 @@ function homeRepo() {
 }
 function linkRepo(id) {
   const s = loadSettings();
-  const l = s.links?.[id];
+  const l = ownEntry(s.links, id);
   if (!l || !LINK_KINDS[l.kind]?.hostsComponents) die(`no repo link "${id}" in settings links (devteam.mjs links)`);
   const at = linkLocation(id);
   if (!fs.existsSync(at)) die(`repo ${id}: no checkout at ${at}; clone ${redactUrl(l.remote)} there, set its path, or name this machine's in run/links.local.json`);
@@ -1687,7 +1687,7 @@ const committedComponents = () => memo('committedComponents', () => mainSettings
 const repoOfTicketLink = (t) => componentLink(t.component, committedComponents());
 // Whether a repo can be read on this machine, without failing: home always; a link when its
 // checkout is where it says and of its remote (PR 1's reachable, memoized per process).
-const repoReadable = (name) => { if (name === 'home') return true; const l = loadSettings().links?.[name]; return !!LINK_KINDS[l?.kind]?.hostsComponents && !LINK_KINDS[l.kind].reachable(l, name); };
+const repoReadable = (name) => { if (name === 'home') return true; const l = ownEntry(loadSettings().links, name); return !!LINK_KINDS[l?.kind]?.hostsComponents && !LINK_KINDS[l.kind].reachable(l, name); };
 // By object, for acts on one ticket: fails fast with one message when the checkout is wrong.
 const repoOfTicket = (t) => repo(repoOfTicketLink(t));
 const repoOfTicketId = (id) => { const t = tickets().get(id); return t ? repoOfTicket(t) : repo('home'); };
@@ -2122,7 +2122,7 @@ function cmdValidate() {
   // Each ticket against its own repo's lines; another repo's kit line is its project folder, read
   // from settings alone (no checkout needed, so a missing one never stops validate).
   const S0 = loadSettings(); const lined = linesDeclared(S0);
-  const linesOf = (link) => ({ comps: componentsOn(S0, link), dev: link === 'home' ? devteamLine() : [`${LINK_KINDS[S0.links?.[link]?.kind]?.effectiveSettings(S0.links[link], S0)?.project ?? REPO_OWN_DEFAULTS.project}/**`] });
+  const linesOf = (link) => ({ comps: componentsOn(S0, link), dev: link === 'home' ? devteamLine() : [`${projectRelOf(link)}/**`] });
   for (const [id, t] of ts) {
     if (!id.startsWith(`${t.component}-`)) err(id, `id must start with its component "${t.component}-"`);
     for (const g of t.touches ?? []) if (unbalanced(g)) err(id, `touches entry "${g}" has unbalanced braces`);
@@ -4825,7 +4825,7 @@ function cmdAct() {
   supervisorOnly('act');
   // --repo: the repo link the act was about (a release, staging, production), when not home
   const rid = flagStr('repo');
-  if (rid && rid !== 'home' && !LINK_KINDS[loadSettings().links?.[rid]?.kind]?.hostsComponents) die(`--repo ${rid}: not a repo link (devteam.mjs links)`);
+  if (rid && rid !== 'home' && !LINK_KINDS[ownEntry(loadSettings().links, rid)?.kind]?.hostsComponents) die(`--repo ${rid}: not a repo link (devteam.mjs links)`);
   if (cls === 'improvement-trial') upkeepAllows('a new trial');
   const scope = decision ? decision.scope ?? null : flagStr('scope') ?? null;
   const approved = decision ? decision.approved_by ?? null : flagStr('approved') ?? null;
@@ -5293,7 +5293,7 @@ function goalCheck(g) {
   else if (!MEASURE_SOURCES.includes(m.source)) definition.push(`source "${m.source}" is not repo, prod or owner`);
   else if (m.source === 'owner' ? !m.question : !m.check) definition.push(m.source === 'owner' ? 'no question: the yes/no the owner answers when it is met (measure.question)' : 'no check: the command whose last line is the number (measure.check)');
   if (m.link !== undefined && m.source !== 'repo') definition.push('measure.link is for a repo measure: the repo whose main its check runs on');
-  else if (m.link !== undefined && m.link !== 'home' && !LINK_KINDS[loadSettings().links?.[m.link]?.kind]?.hostsComponents) definition.push(`measure.link "${m.link}" is not a repo link (devteam.mjs links)`);
+  else if (m.link !== undefined && m.link !== 'home' && !LINK_KINDS[ownEntry(loadSettings().links, m.link)?.kind]?.hostsComponents) definition.push(`measure.link "${m.link}" is not a repo link (devteam.mjs links)`);
   // A horizon is the owner's real deadline, when there is one; never required, never guessed. The
   // forecast says when, from the measured rate (planning.md §1).
   if (g.horizon && Number.isNaN(Date.parse(g.horizon))) definition.push(`horizon "${g.horizon}" is not a date`);
@@ -7012,7 +7012,7 @@ const PROMPTS = {
   planner: 'You are planning feature {{ID}} on branch plan/{{ID}}, in this worktree. Read the devteam section of AGENTS.md, then docs/devteam/process/planning.md, and run the pipeline from §2 for this feature. Your tickets and the feature line go to the log with devteam.mjs feature add / ticket add; commit everything as you go; message the supervisor (devteam.mjs send supervisor) when the graph review passes.',
 };
 // What a prompt says about a repo, from settings alone (a view: no checkout needed).
-const repoAbout = (name) => (name === 'home' ? repo('home') : { name, remote: loadSettings().links?.[name]?.remote, projectRel: projectRelOf(name) });
+const repoAbout = (name) => (name === 'home' ? repo('home') : { name, remote: ownEntry(loadSettings().links, name)?.remote, projectRel: projectRelOf(name) });
 // A role's opening prompt. A ticket in another repo has no kit of its own in its worktree: it runs
 // home's kit by absolute path and keeps its records in that repo's project folder (spec §5.2).
 function promptFor(role, id, R = repo('home')) {
@@ -7382,7 +7382,7 @@ function sessionOf(name) {
   return { name, role: planner ? 'planner' : 'worker', id, branch: planner ? `plan/${id}` : `ticket/${id}`, wt: path.join(mainRoot, '.worktrees', name), handoff: `${projectRelOf(repoName)}/${planner ? `plans/${id}` : `tickets/${id}`}/handoff.md`, repoName, readable: repoReadable(repoName), get repo() { return repo(repoName); } };
 }
 // A repo's project folder by name, from settings alone (no checkout needed).
-const projectRelOf = (name) => { if (name === 'home') return projectRel; const s = loadSettings(); const l = s.links?.[name]; return LINK_KINDS[l?.kind]?.effectiveSettings(l, s)?.project ?? REPO_OWN_DEFAULTS.project; };
+const projectRelOf = (name) => { if (name === 'home') return projectRel; const s = loadSettings(); const l = ownEntry(s.links, name); return LINK_KINDS[l?.kind]?.effectiveSettings(l, s)?.project ?? REPO_OWN_DEFAULTS.project; };
 // A handoff note's old file form, under any repo's project folder.
 const isHandoffFile = (file) => !!file && [...new Set([projectRel, ...Object.keys(loadSettings().links ?? {}).filter((id) => LINK_KINDS[loadSettings().links[id]?.kind]?.hostsComponents).map(projectRelOf)])].some((rel) => new RegExp(`^${reReserved(rel)}/(tickets|plans)/[^/]+/handoff\\.md$`).test(file));
 // What parked a session at a time: an old fleet drain in force then, or the park or let-go of one
@@ -7619,7 +7619,7 @@ function fleetStatus() {
     const phase = lastPhaseOf(x.name);
     // a session in a repo this machine can't read: one blocker that says what to clone where
     if (!x.readable) {
-      const l = s.links?.[x.repoName];
+      const l = ownEntry(s.links, x.repoName);
       const p = `its repo ${x.repoName} has no checkout here, or the wrong one: ${LINK_KINDS[l?.kind]?.fixHint(l, x.repoName) ?? `no repo link "${x.repoName}"`}`;
       blockers.push(`${x.name}: ${p}`);
       return { name: x.name, role: x.role, branch: x.branch, repo: x.repoName, readable: false, parked: phase?.to === 'parked', phase: phase?.to ?? null, problems: [p] };
@@ -8250,7 +8250,11 @@ const LANDING_HINT = 'it applies here now; land it on main with the next chore P
 // entry of the supervisor's kind that differs here from the chore's is set or removed there, and
 // nothing else in the chore's settings.md changes: this checkout's copy of every other key may be
 // older than main's (a components line widened since), and carrying the whole file would revert it.
-// A link of an owner's kind is left alone: it lands with the owner's governance-edit answer.
+// A link of an owner's kind is carried only as the owner approved it: link add|set|rm --approved
+// logged an act naming the link with the entry it wrote (entry_hash); anything else of an owner's
+// kind is left alone, to land with the owner's answer.
+// An entry of an owner's kind exactly as an answered question approved it (linkByOwner's act).
+const ownerApproved = (id, entry) => logObjects('act').some((a) => a.approved_by && ['governance-edit', 'gate-change'].includes(a.class) && (a.refs ?? []).includes(`link:${id}`) && Object.hasOwn(a, 'entry_hash') && a.entry_hash === linkEntryHash(entry));
 function linkLand(slugName) {
   choreSlug(slugName);
   if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
@@ -8267,7 +8271,7 @@ function linkLand(slugName) {
     for (const id of [...new Set([...Object.keys(there), ...Object.keys(here)])].sort()) {
       const h = ownEntry(here, id), t = ownEntry(there, id);
       if (canonical(h) === canonical(t)) continue;
-      if (ownersKind(h) || ownersKind(t)) { owners.push(`links.${id}`); continue; }
+      if ((ownersKind(h) || ownersKind(t)) && !ownerApproved(id, h)) { owners.push(`links.${id}`); continue; }
       if (h === undefined) delete links[id]; else links[id] = h;
       changed.push(`links.${id} (${t === undefined ? 'added' : h === undefined ? 'removed' : 'changed'})`);
     }
@@ -8348,7 +8352,7 @@ const rawSettingsBlock = () => { const m = readText(path.join(projectDir, 'setti
 function linkByOwner(sub, id, field, vals, kind) {
   const K = LINK_KINDS[kind];
   const raw = rawSettingsBlock().links ?? {};
-  const cur = raw[id] ?? loadSettings().links?.[id];
+  const cur = ownEntry(raw, id) ?? ownEntry(loadSettings().links, id);
   const pick = Object.fromEntries(linkFields(kind).filter((k) => k !== 'kind' && flags[k] !== undefined).map((k) => [k, k === 'for' ? listFlag('for') : linkValue(k, [flagStr(k)])]));
   if (sub === 'set' && (!field || !vals.length)) die('usage: link set <id> <field> [--] <value> (a value that starts with -- goes after a bare --)');
   const next = sub === 'rm' ? undefined : sub === 'add' ? { kind, ...pick } : { ...cur, [field]: linkValue(field, vals) };
@@ -8356,7 +8360,7 @@ function linkByOwner(sub, id, field, vals, kind) {
   const cls = sub === 'set' ? K.ownerClass(field) : 'governance-edit';
   // a field that is no one's (a repo link's path, §3.5) is written like a url link's, as registry-edit
   if (sub === 'set' && !cls) return editUnownedField(id, field, next[field]);
-  if (canonical(raw[id] ?? null) === canonical(next ?? null)) return out(`links.${id} is already ${next ? 'that' : 'gone'} in settings.md here; ${LANDING_HINT}`);
+  if (canonical(ownEntry(raw, id) ?? null) === canonical(next ?? null)) return out(`links.${id} is already ${next ? 'that' : 'gone'} in settings.md here; ${LANDING_HINT}`);
   const { errors } = registryProblems({ ...loadSettings(), links: { ...Object.fromEntries(Object.entries(loadSettings().links ?? {}).filter(([k]) => k !== id)), ...(next ? { [id]: next } : {}) } });
   if (errors.length) die(`not drafted:\n  - ${errors.join('\n  - ')}`);
   const draft = JSON.stringify({ [id]: next ?? null }, null, 2);
@@ -8373,14 +8377,14 @@ function linkByOwner(sub, id, field, vals, kind) {
   if (v.class !== cls) die(`${approved} was asked in class ${v.class ?? '(none)'}, not ${cls}`);
   if (!(v.context ?? '').includes(draft)) die(`${approved} asked about another change; ask again for this one`);
   editSettingsBlock((b) => { b.links ??= {}; if (next) b.links[id] = next; else delete b.links[id]; return b; });
-  appendLog({ type: 'act', decision: citing(), class: cls, what: `${sub === 'rm' ? 'removed' : sub === 'add' ? 'added' : `set ${field} on`} ${kind} link ${id}`, refs: ['chore-registry', `link:${id}`], reversible: true, approved_by: approved }, 'supervisor');
+  appendLog({ type: 'act', decision: citing(), class: cls, what: `${sub === 'rm' ? 'removed' : sub === 'add' ? 'added' : `set ${field} on`} ${kind} link ${id}`, refs: ['chore-registry', `link:${id}`], reversible: true, approved_by: approved, entry_hash: linkEntryHash(next) }, 'supervisor');
   out(`applied ${approved}; ${LANDING_HINT} --approved ${approved}`);
 }
 // A field no owner class guards (a repo link's path: where its checkout is on this machine, §3.5).
 function editUnownedField(id, field, value) {
   authorise('registry-edit', null, null, [], 'link');
   let entry;
-  editSettingsBlock((b) => { b.links ??= {}; b.links[id] = { ...(b.links[id] ?? loadSettings().links?.[id]), [field]: value }; entry = b.links[id]; return b; });
+  editSettingsBlock((b) => { b.links ??= {}; b.links[id] = { ...(ownEntry(b.links, id) ?? ownEntry(loadSettings().links, id)), [field]: value }; entry = b.links[id]; return b; });
   appendLog({ type: 'act', decision: citing(), class: 'registry-edit', what: redactUrl(`set ${field} on link ${id}`), refs: [`link:${id}`], reversible: true, entry_hash: linkEntryHash(entry) }, 'supervisor');
   out(`set ${id}.${field}; ${LANDING_HINT}`);
 }

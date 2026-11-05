@@ -5042,13 +5042,20 @@ test('link add --kind repo asks the owner a governance-edit question and writes 
     // and the registry chore lands with that one answer
     const wt = path.join(old, '.worktrees', 'chore-registry');
     g(['worktree', 'add', '-q', '-b', 'chore-registry', wt, 'origin/main'], old);
-    fs.copyFileSync(F.settingsFile, path.join(wt, 'docs/devteam/project/settings.md'));
+    // link land carries the entry the owner approved (and only an approved one)
+    assert.match(okIn(old, ['link', 'land', 'registry'], SUP), /links\.docs \(added\)/);
+    assert.equal(JSON.parse(/```json devteam\s*\n([\s\S]*?)\n```/.exec(fs.readFileSync(path.join(wt, 'docs/devteam/project/settings.md'), 'utf8'))[1]).links.docs.remote, 'usbclub/docs');
     g(['commit', '-qam', 'chore-registry: docs repo'], wt);
     g(['push', '-q', 'origin', 'chore-registry'], wt);
     write(path.join(old, 'docs/devteam/run/pr/chore-registry.md'), '# chore-registry: docs repo\n\n## One-way doors\n\nNone.\n');
     const dry = runIn(old, ['merge', '--chore', 'registry', '--dry-run', '--approved', qid], SUP);
     assert.doesNotMatch(dry.out + dry.err, /changes owner settings|already approved/);
     assert.match(dry.out, /ok: chore-registry at \w{12} would merge/);
+    // a repo link edited by hand in settings.md, with no answer: link land leaves it for the owner
+    F.edit((j) => { j.links.companion.title = 'Hand edit'; });
+    const w2 = path.join(old, '.worktrees', 'chore-hand');
+    g(['worktree', 'add', '-q', '-b', 'chore-hand', w2, 'origin/main'], old);
+    assert.match(okIn(old, ['link', 'land', 'hand'], SUP), /not carried, as the owner's .*links\.companion/);
     // a gate field is the owner's gate-change; a repo link's path is no one's, a logged registry-edit
     assert.match(okIn(old, ['link', 'set', 'console', 'gates', '{"test":"true"}'], SUP), /asked the owner \(gate-change\)/);
     okIn(old, ['link', 'set', 'console', 'path', '../console'], SUP);
