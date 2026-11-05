@@ -2144,6 +2144,14 @@ function cmdValidate() {
       const servers = mine.filter((t) => (t.serves ?? []).includes(s));
       const comps = new Set(servers.filter((t) => t.kind !== 'contract').map((t) => t.component));
       if (comps.size > 1 && !servers.some((t) => t.kind === 'integration')) warnings.push(`feature ${fid}: story ${s} spans ${[...comps].join(', ')} but has no integration ticket (D7)`);
+      // Across repos there are no multi-repo tickets (spec §6.2): a story served in two repos is
+      // split per repo, with its end-to-end check in the ticket that lands last, one that depends
+      // (transitively) on every other ticket serving it.
+      if (flags.strict) {
+        const repos = [...new Set(servers.map(repoOfTicketLink))];
+        const clos = closures(ts);
+        if (repos.length > 1 && !servers.some((t) => servers.every((o) => o === t || clos.get(t.id)?.has(o.id)))) errors.push(`feature ${fid}: story ${s} is served in ${[...new Set(servers.map((t) => t.component))].join(', ')} (${repos.join(', ')}) and no ticket serving it depends on all the others; add the end-to-end ticket that lands last (planning.md D2, D7)`);
+      }
     }
     // A feature that has reached this checkout is landed (or being planned here): its design and
     // graph reviews must say APPROVE. On a plan/<feature> branch that is a warning until review.
@@ -2208,6 +2216,8 @@ function cmdValidate() {
     for (let i = 0; i < live.length; i++) for (let j = i + 1; j < live.length; j++) {
       const a = live[i], b = live[j];
       if (clos.get(a.id)?.has(b.id) || clos.get(b.id)?.has(a.id)) continue;
+      // the same path in two repos is two files (by name: validate never needs a checkout)
+      if (repoOfTicketLink(a) !== repoOfTicketLink(b)) continue;
       outer: for (const ga of a.touches ?? []) for (const gb of b.touches ?? []) if (globsOverlap(ga, gb)) { const m = `${a.id} and ${b.id} can run concurrently but both touch "${ga}" / "${gb}" (D4)`; if (scope && a.id !== scope && b.id !== scope) warnings.push(`${m}; not ${scope}'s to fix`); else errors.push(m); break outer; }
     }
   }
@@ -3655,6 +3665,8 @@ function cmdAsk() {
   if (kind === 'review') {
     const why = { default: 'a review is never defaulted; the owner answers it or sends it back', secrets: 'a review never carries a secret; ask for secrets with --secrets on an owner-action question', choices: "a review's choices are its page", options: "a review's choices are its page", recommendation: "a review's recommendation is the proposals in its data" };
     for (const [k, w] of Object.entries(why)) if (flags[k] !== undefined) die(`ask --kind review takes no --${k}: ${w}`);
+    // a review page is pinned to a commit of home; a ticket in another repo draws its page in a home chore
+    if (flagStr('ticket') && tickets().has(flagStr('ticket')) && repoOfTicketLink(tickets().get(flagStr('ticket'))) !== 'home') die(`${flagStr('ticket')} is a ticket in ${repoOfTicketLink(tickets().get(flagStr('ticket')))}: a review question pins a page committed in home, so draw the page in a home chore and ask it there`);
     review = pinReview();
   } else for (const k of ['page', 'ref', 'data', 'result-schema', 'allow-partial']) if (flags[k] !== undefined) die(`--${k} belongs on a review question (--kind review)`);
   const onLadder = cls && L.classes[cls];
@@ -8167,7 +8179,7 @@ function cmdLink() {
     ];
     if (citers.length) die(`${id} is cited by ${citers.join(', ')}; take it out of their links (ticket set, feature set) and their text first`);
   }
-  if (K.ownedByOwner) die(`a ${kind} link is the owner's (governance-edit): put the entry in settings.md on a chore branch and land it with merge --chore <slug> --approved <qid> (an answered governance-edit question)`);
+  if (K.ownedByOwner) return linkByOwner(sub, id, field, vals, kind);
   const source = flagStr('source');
   if (source && !logGet(source)) die(`--source ${source}: no such log entry`);
   // authority first, so a refusal writes nothing
@@ -8194,6 +8206,53 @@ function cmdLink() {
   // a removal also records the entry it removed, so it lands only while main still has that one (round 3, V2)
   appendLog({ type: 'act', decision: citing(), class: 'registry-edit', what, refs: [`link:${id}`, ...(source ? [source] : [])], reversible: true, entry_hash: linkEntryHash(entry), ...(sub === 'rm' ? { prior_hash: linkEntryHash(cur) } : {}) }, 'supervisor');
   out(`${what}; ${LANDING_HINT}`);
+}
+// The json devteam block of the main checkout's settings.md as written, not as loadSettings pins
+// it: a repo link written by an earlier --approved run is here before it lands on main.
+const rawSettingsBlock = () => { const m = readText(path.join(projectDir, 'settings.md'))?.match(/```json devteam\s*\n([\s\S]*?)\n```/); try { return m ? JSON.parse(m[1]) : {}; } catch { return {}; } };
+// A link of an owner's kind (spec §3.4, §7): draft the change and ask a question in the class its
+// field takes (gate-change for a gate field, else governance-edit); with --approved <qid>, apply
+// exactly that change and log the act the chore-registry merge then lands under the same answer.
+// Asking twice for the same draft reuses the open question; applying a draft already written is a
+// no-op. Nothing here names a kind: the table gives fields and classes.
+function linkByOwner(sub, id, field, vals, kind) {
+  const K = LINK_KINDS[kind];
+  const raw = rawSettingsBlock().links ?? {};
+  const cur = raw[id] ?? loadSettings().links?.[id];
+  const pick = Object.fromEntries(linkFields(kind).filter((k) => k !== 'kind' && flags[k] !== undefined).map((k) => [k, k === 'for' ? listFlag('for') : linkValue(k, [flagStr(k)])]));
+  if (sub === 'set' && (!field || !vals.length)) die('usage: link set <id> <field> [--] <value> (a value that starts with -- goes after a bare --)');
+  const next = sub === 'rm' ? undefined : sub === 'add' ? { kind, ...pick } : { ...cur, [field]: linkValue(field, vals) };
+  if (sub === 'add') for (const f of ['title', ...K.fields.required]) if (next[f] === undefined) die(`link add --kind ${kind} needs --${f}`);
+  const cls = sub === 'set' ? K.ownerClass(field) : 'governance-edit';
+  // a field that is no one's (a repo link's path, §3.5) is written like a url link's, as registry-edit
+  if (sub === 'set' && !cls) return editUnownedField(id, field, next[field]);
+  if (canonical(raw[id] ?? null) === canonical(next ?? null)) return out(`links.${id} is already ${next ? 'that' : 'gone'} in settings.md here; ${LANDING_HINT}`);
+  const { errors } = registryProblems({ ...loadSettings(), links: { ...Object.fromEntries(Object.entries(loadSettings().links ?? {}).filter(([k]) => k !== id)), ...(next ? { [id]: next } : {}) } });
+  if (errors.length) die(`not drafted:\n  - ${errors.join('\n  - ')}`);
+  const draft = JSON.stringify({ [id]: next ?? null }, null, 2);
+  const approved = flagStr('approved');
+  // the command to run once answered: this one, every value quoted, plus --approved
+  const again = (qid) => `node docs/devteam/scripts/devteam.mjs link ${argv.filter((a, i) => a !== '--approved' && argv[i - 1] !== '--approved').map(shq).join(' ')} --approved ${qid}`;
+  if (!approved) {
+    const open = questions().find((q) => q.status === 'open' && q.class === cls && (q.context ?? '').includes(draft));
+    if (open) return out(`${open.id}: already asked the owner about this exact change; once answered: ${again(open.id)}`);
+    const q = appendLog({ type: 'question', kind: 'owner-decision', class: cls, question: `${sub === 'add' ? 'Add' : sub === 'rm' ? 'Remove' : 'Change'} the ${kind} link ${id}${sub === 'set' ? ` (${field})` : ''}?`, context: `The registry entry, as it would be in settings.md links:\n${draft}`, recommendation: 'yes', why_asked: { reasons: ['owner-only'] } }, 'supervisor');
+    return out(`${q.id}: asked the owner (${cls}); nothing is written until it is answered. Then: ${again(q.id)}`);
+  }
+  const v = ownerAnswer(approved, 'link --approved');
+  if (v.class !== cls) die(`${approved} was asked in class ${v.class ?? '(none)'}, not ${cls}`);
+  if (!(v.context ?? '').includes(draft)) die(`${approved} asked about another change; ask again for this one`);
+  editSettingsBlock((b) => { b.links ??= {}; if (next) b.links[id] = next; else delete b.links[id]; return b; });
+  appendLog({ type: 'act', decision: citing(), class: cls, what: `${sub === 'rm' ? 'removed' : sub === 'add' ? 'added' : `set ${field} on`} ${kind} link ${id}`, refs: ['chore-registry', `link:${id}`], reversible: true, approved_by: approved }, 'supervisor');
+  out(`applied ${approved}; ${LANDING_HINT} --approved ${approved}`);
+}
+// A field no owner class guards (a repo link's path: where its checkout is on this machine, §3.5).
+function editUnownedField(id, field, value) {
+  authorise('registry-edit', null, null, [], 'link');
+  let entry;
+  editSettingsBlock((b) => { b.links ??= {}; b.links[id] = { ...(b.links[id] ?? loadSettings().links?.[id]), [field]: value }; entry = b.links[id]; return b; });
+  appendLog({ type: 'act', decision: citing(), class: 'registry-edit', what: redactUrl(`set ${field} on link ${id}`), refs: [`link:${id}`], reversible: true, entry_hash: linkEntryHash(entry) }, 'supervisor');
+  out(`set ${id}.${field}; ${LANDING_HINT}`);
 }
 // links [--json]: the registry, each repo's effective settings, and the lines on each with their state.
 function cmdLinks() {
@@ -8444,7 +8503,8 @@ Sessions (worker.md)
 
 Decide and act (supervisor.md, constitution.md)
   links [--json]                  the registry: home and each link, each repo's effective settings, the component lines and their coverage
-  link add <id> --kind url --url u --title t [--for scope…] [--notes n] [--source id] | link set <id> <field> [--] <value> | link rm <id>   supervisor: a url link, written to settings.md and logged as registry-edit; repo links are the owner's
+  link add <id> --kind url --url u --title t [--for scope…] [--notes n] [--source id] | link set <id> <field> [--] <value> | link rm <id>   supervisor: a url link, written to settings.md and logged as registry-edit
+  link add <id> --kind repo --remote r --title t [--path p] [--main_branch b] [--forge f] [--gates '{…}'] … [--approved qid]   supervisor: drafts a repo link (or link set|rm on one) and asks the owner (governance-edit; gate-change for a gate field); with the answer, writes it for the chore-registry PR
   ask --question q [--kind k] [--class c] [--reasons r…] [--recommendation r] [--confidence 0-1] [--default d] [--choices '[{"label","detail","effect"}…]'] [--rule-scope s] [--goal g-… (goal-approval)] [--links '[{"title","path","ref"}|{"title","url"}|{"title","link"}…]' (link: a registry id)] [--blocks ids] [--evidence ids] [--ticket id] [--re m-…] [--note path] [--secrets '[{"name","kind":"string|file","sink"}…]' (owner-action)]
   secret post <qid> [--file NAME=path] [--json]                          owner: post a question's secrets straight to their sinks; never logged (secret sinks lists them)
   ask --kind review --page <repo path> --ref <branch|sha> [--data <repo path>] [--result-schema <repo path>] [--allow-partial] --question q [--context c] [--class c] [--reasons r…] [--ticket id] [--blocks ids] [--re m-…]

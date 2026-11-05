@@ -3521,7 +3521,10 @@ test('link add, set and rm for url links: the supervisor writes settings and log
     assert.match(run(old, ['link', 'set', 'figma', 'url', 'http://insecure.test'], SUP).err, /url must start with https:\/\//, 'validated before it is written');
     assert.match(run(old, ['link', 'set', 'figma', 'kind', 'repo'], SUP).err, /a link never changes kind in place/);
     assert.match(run(old, ['link', 'set', 'figma', 'colour', 'red'], SUP).err, /"colour" is not a field of a url link/);
-    assert.match(run(old, ['link', 'add', 'console', '--kind', 'repo', '--remote', 'usbclub/console', '--title', 'C'], SUP).err, /a repo link is the owner's \(governance-edit\)/);
+    // a repo link is the owner's: since PR 2 the supervisor drafts it as a question, and writes nothing
+    const sBefore = fs.readFileSync(path.join(old, 'docs/devteam/project/settings.md'), 'utf8');
+    assert.match(ok(old, ['link', 'add', 'console', '--kind', 'repo', '--remote', 'usbclub/console', '--title', 'C'], SUP), /asked the owner \(governance-edit\); nothing is written until it is answered/);
+    assert.equal(fs.readFileSync(path.join(old, 'docs/devteam/project/settings.md'), 'utf8'), sBefore);
     assert.match(run(old, ['link', 'add', 'x', '--kind', 'doc', '--title', 'X'], SUP).err, /--kind is one of: repo, url/);
     const l = json(ok(old, ['links', '--json']));
     assert.equal(l.home.name, 'home');
@@ -4711,5 +4714,68 @@ test('releases per repo: a component\'s tag pattern, the act names the repo, not
     assert.match(runIn(old, ['act', '--class', 'release-staging', '--repo', 'nope', '--', 'x'], SUP).err, /--repo nope: not a repo link/);
     assert.match(okIn(old, ['notes', 'trunk~1', 'trunk', '--repo', 'console']), /Other\n\n- console-01-a/);
     assert.doesNotMatch(okIn(old, ['notes', 'origin/main~1', 'origin/main']), /console-01-a/, "home's notes read home's history");
+  } finally { F.done(); }
+});
+
+test('cross-repo planning: footprints overlap only within a repo; a story across repos needs one ticket that lands last', () => {
+  const F = multiFixture('xrepo-plan');
+  const { old, okIn, runIn, ticket } = F;
+  try {
+    // the same path in two repos is two different files
+    ticket('console-01-a', { touches: ['src/**'] });
+    ticket('companion-02-b', { touches: ['src/**'] });
+    assert.doesNotMatch(runIn(old, ['validate']).out, /console-01-a and companion-02-b can run concurrently/);
+    ticket('console-03-c', { touches: ['src/**'] });
+    assert.match(runIn(old, ['validate']).out, /console-01-a and console-03-c can run concurrently/, 'within one repo they still overlap');
+    // review questions pin a page in home (open issue 3): a sibling ticket's is refused, with what to do
+    assert.match(runIn(old, ['ask', '--kind', 'review', '--ticket', 'console-01-a', '--question', 'Does it look right?'], { DEVTEAM_ROLE: 'supervisor' }).err, /console-01-a is a ticket in console: a review question pins a page committed in home, so draw the page in a home chore and ask it there/);
+    // a story served in two repos: --strict wants the end-to-end ticket that depends on the rest
+    okIn(old, ['feature', 'add', 'sync', '--json', JSON.stringify({ title: 'Sync', goals: ['g-20260101-000000000-supervisor'], stories: [{ id: 'SYNC-S1', text: 'sync works', release: 'v1' }] })], { DEVTEAM_ROLE: 'supervisor' });
+    const tk = (id, extra) => okIn(old, ['ticket', 'add', id, '--json', JSON.stringify({ title: id, feature: 'sync', component: id.split('-')[0], kind: 'build', size: 'S', risk: 'normal', serves: ['SYNC-S1'], depends_on: [], touches: [`${id.split('-')[0] === 'api' ? 'api' : 'src'}/**`], done_when: ['the sync check passes'], ...extra })], { DEVTEAM_ROLE: 'supervisor' });
+    tk('api-10-provide', { kind: 'contract', contracts: { provides: ['sync-v1'] } });
+    tk('console-11-use', {});
+    assert.match(runIn(old, ['validate', '--strict']).out, /feature sync: story SYNC-S1 is served in api, console \(home, console\) and no ticket serving it depends on all the others/);
+    assert.doesNotMatch(runIn(old, ['validate']).out, /story SYNC-S1 is served in/, 'only under --strict');
+    tk('console-12-e2e', { kind: 'integration', depends_on: ['api-10-provide', 'console-11-use'] });
+    assert.doesNotMatch(runIn(old, ['validate', '--strict']).out, /story SYNC-S1 is served in/);
+  } finally { F.done(); }
+});
+
+test('link add --kind repo asks the owner a governance-edit question and writes nothing until it is answered', () => {
+  const F = multiFixture('link-repo');
+  const { old, g, okIn, runIn } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const add = ['link', 'add', 'docs', '--kind', 'repo', '--remote', 'usbclub/docs', '--title', 'Docs site', '--main_branch', 'trunk'];
+  try {
+    const before = fs.readFileSync(F.settingsFile, 'utf8');
+    const draft = okIn(old, add, SUP);
+    const qid = /q-[0-9]+-[0-9]+-supervisor/.exec(draft)[0];
+    assert.equal(fs.readFileSync(F.settingsFile, 'utf8'), before, 'nothing written before the answer');
+    assert.match(okIn(old, add, SUP), new RegExp(`${qid}: already asked the owner about this exact change`), 'asking twice reuses the question');
+    const q = json(okIn(old, ['questions', '--id', qid, '--json']))[0];
+    assert.deepEqual([q.kind, q.class], ['owner-decision', 'governance-edit']);
+    assert.match(q.context, /"docs": \{[\s\S]*"kind": "repo"[\s\S]*"remote": "usbclub\/docs"/);
+    assert.match(runIn(old, [...add, '--approved', qid], SUP).err, /is not a question the owner answered/);
+    okIn(old, ['answer', qid, 'yes']);
+    assert.match(runIn(old, ['link', 'add', 'docs', '--kind', 'repo', '--remote', 'usbclub/other', '--title', 'Docs site', '--approved', qid], SUP).err, /asked about another change; ask again for this one/, 'an answer approves the draft it was asked about');
+    okIn(old, [...add, '--approved', qid], SUP);
+    assert.match(okIn(old, [...add, '--approved', qid], SUP), /links\.docs is already that in settings\.md here/, 'a second apply is a no-op (the entry is in the raw block, not yet on main)');
+    assert.equal(JSON.parse(/```json devteam\s*\n([\s\S]*?)\n```/.exec(fs.readFileSync(F.settingsFile, 'utf8'))[1]).links.docs.remote, 'usbclub/docs');
+    const act = json(okIn(old, ['log', '--type', 'act', '--json'])).find((a) => a.approved_by === qid);
+    assert.deepEqual([act.class, act.refs], ['governance-edit', ['chore-registry', 'link:docs']]);
+    // and the registry chore lands with that one answer
+    const wt = path.join(old, '.worktrees', 'chore-registry');
+    g(['worktree', 'add', '-q', '-b', 'chore-registry', wt, 'origin/main'], old);
+    fs.copyFileSync(F.settingsFile, path.join(wt, 'docs/devteam/project/settings.md'));
+    g(['commit', '-qam', 'chore-registry: docs repo'], wt);
+    g(['push', '-q', 'origin', 'chore-registry'], wt);
+    write(path.join(old, 'docs/devteam/run/pr/chore-registry.md'), '# chore-registry: docs repo\n\n## One-way doors\n\nNone.\n');
+    const dry = runIn(old, ['merge', '--chore', 'registry', '--dry-run', '--approved', qid], SUP);
+    assert.doesNotMatch(dry.out + dry.err, /changes owner settings|already approved/);
+    assert.match(dry.out, /ok: chore-registry at \w{12} would merge/);
+    // a gate field is the owner's gate-change; a repo link's path is no one's, a logged registry-edit
+    assert.match(okIn(old, ['link', 'set', 'console', 'gates', '{"test":"true"}'], SUP), /asked the owner \(gate-change\)/);
+    okIn(old, ['link', 'set', 'console', 'path', '../console'], SUP);
+    assert.ok(json(okIn(old, ['log', '--type', 'act', '--json'])).some((a) => a.class === 'registry-edit' && a.refs.includes('link:console') && /set path on link console/.test(a.what)));
   } finally { F.done(); }
 });
