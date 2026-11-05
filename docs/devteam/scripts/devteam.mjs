@@ -2555,7 +2555,7 @@ function settingsInForce(base, sha, R = homeFacts, { ticket = false } = {}) {
       if (!linesDeclared(head ?? {}) && !linesDeclared(sMain)) {
         if (!head) return invalid(sha.slice(0, 12));
         const sBase = settingsAt(base, { orNull: true });
-        return { settings: sBase ? mergeSettings(sBase, head, sMain) : head };
+        return sBase ? mergeSettings(sBase, head, sMain) : { settings: head };
       }
       const land = landingTree(sha, R);
       if (land.problem) return land;
@@ -2566,11 +2566,25 @@ function settingsInForce(base, sha, R = homeFacts, { ticket = false } = {}) {
 }
 // The settings a merge of head onto main lands, for a project with no lines (no tree is merged):
 // a key the head left as the base had it is main's, else the head's; links go entry by entry the
-// same way. Where both sides changed one key differently, the head's stands in: git's own merge
-// of settings.md would conflict there, and judging the head's value is the stricter reading.
+// same way. Where both sides changed one key, or one link entry, and differently, it is refused:
+// git's text merge may still combine the two into a value neither side wrote (an entry no act
+// wrote), or conflict, and either way what lands isn't this merge's to say (round 3, V3).
+// Returns { settings } | { problem }.
 function mergeSettings(b, h, m) {
-  const pick = (x, y, z) => { const out = {}; for (const k of new Set([...Object.keys(x ?? {}), ...Object.keys(y ?? {}), ...Object.keys(z ?? {})])) { const v = canonical(y?.[k]) === canonical(x?.[k]) ? z?.[k] : y?.[k]; if (v !== undefined) out[k] = v; } return out; };
-  return { ...pick(b, h, m), links: pick(b.links, h.links, m.links) };
+  const both = [];
+  const pick = (x, y, z, pre = '') => {
+    const out = {};
+    for (const k of new Set([...Object.keys(x ?? {}), ...Object.keys(y ?? {}), ...Object.keys(z ?? {})])) {
+      if (!pre && k === 'links') continue;
+      const [cb, ch, cm] = [x?.[k], y?.[k], z?.[k]].map(canonical);
+      if (ch !== cb && cm !== cb && ch !== cm) both.push(`${pre}${k}`);
+      const v = ch === cb ? z?.[k] : y?.[k];
+      if (v !== undefined) out[k] = v;
+    }
+    return out;
+  };
+  const settings = { ...pick(b, h, m), links: pick(b.links, h.links, m.links, 'links.') };
+  return both.length ? { problem: `${projectRel}/settings.md: both main and this branch changed ${both.join(', ')}; merge main into the branch first` } : { settings };
 }
 // Coverage of one repo's tree under one set of settings, once per read of the log; null with no lines.
 const coverageAt = (ref, s, R = homeFacts) => (linesDeclared(s) ? memo(`coverage\0${R.name}\0${ref}\0${canonical(s.components)}`, () => coverage(R.treePaths(ref), componentsOn(s, R.name), R.devteamLine())) : null);

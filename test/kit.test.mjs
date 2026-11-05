@@ -3116,6 +3116,59 @@ test('a url link lands only as a registry-edit act wrote it: matched by the entr
   } finally { F.done(); }
 });
 
+test('without lines, a key or link both main and the branch changed is refused, dry run and merge alike (round 3 V3)', () => {
+  const F = monoFixture('settings-both');
+  const { old, ok, run, g, edit } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const settingsRel = 'docs/devteam/project/settings.md';
+  const chore = (slug, fn, { from = 'origin/main' } = {}) => {
+    const w = path.join(old, '.worktrees', `chore-${slug}`);
+    g(['worktree', 'add', '-q', '-b', `chore-${slug}`, w, from], old);
+    fn(w);
+    g(['add', '-A'], w);
+    g(['commit', '-qm', `chore-${slug}: x`], w);
+    g(['push', '-q', 'origin', `chore-${slug}`], w);
+    write(path.join(old, `docs/devteam/run/pr/chore-${slug}.md`), `# chore-${slug}: x\n\n## One-way doors\n\nNone.\n`);
+    return w;
+  };
+  const merge = (slug, extra = []) => { const r = run(old, ['merge', '--chore', slug, ...extra], SUP); return { status: r.status, text: r.out + r.err }; };
+  const mainFigma = () => { g(['fetch', '-q', 'origin'], old); return JSON.parse(g(['show', `origin/main:${settingsRel}`], old).match(/```json devteam\s*\n([\s\S]*?)\n```/)[1]).links.figma; };
+  try {
+    edit((j) => { j.links = { figma: { kind: 'url', title: 'Designs', url: 'https://figma.test/a', for: ['all'], notes: 'n0' } }; });
+    g(['commit', '-qam', 'figma'], old); g(['push', '-q', 'origin', 'main'], old);
+    const before = g(['rev-parse', 'origin/main'], old);
+    // main moves figma's url, with its act
+    ok(old, ['link', 'set', 'figma', 'url', 'https://figma.test/b'], SUP); g(['checkout', '-q', '--', settingsRel], old);
+    chore('url', (w) => edit((j) => { j.links.figma.url = 'https://figma.test/b'; }, w));
+    assert.equal(merge('url').status, 0);
+    // a branch from before changes figma's notes (its act records {url a, notes n1}): git's text merge
+    // of the two lines is clean and would land {url b, notes n1}, an entry no act wrote (ZZ1)
+    ok(old, ['link', 'set', 'figma', 'notes', 'n1'], SUP); g(['checkout', '-q', '--', settingsRel], old);
+    chore('notes', (w) => edit((j) => { j.links.figma.notes = 'n1'; }, w), { from: before });
+    const refused = /settings\.md: both main and this branch changed links\.figma; merge main into the branch first/;
+    for (const extra of [['--dry-run'], []]) {
+      const r = merge('notes', extra);
+      assert.notEqual(r.status, 0, `${extra.join(' ') || 'merge'}: ${r.text}`);
+      assert.match(r.text, refused, extra.join(' ') || 'merge');
+    }
+    assert.deepEqual(mainFigma(), { kind: 'url', title: 'Designs', url: 'https://figma.test/b', for: ['all'], notes: 'n0' }, 'nothing landed');
+    // a branch from before whose edit git can't merge either (ZZ1b): the same refusal, not git's raw error
+    ok(old, ['link', 'set', 'figma', 'url', 'https://figma.test/c'], SUP); g(['checkout', '-q', '--', settingsRel], old);
+    chore('url2', (w) => edit((j) => { j.links.figma.url = 'https://figma.test/c'; }, w), { from: before });
+    for (const extra of [['--dry-run'], []]) assert.match(merge('url2', extra).text, refused, `ZZ1b ${extra.join(' ') || 'merge'}`);
+    assert.deepEqual(g(['worktree', 'list'], old).split('\n').filter((l) => /land-/.test(l)), [], 'no landing worktree left');
+    // a top-level key both sides changed is refused the same way; changed identically, it lands
+    g(['merge', '-q', '--ff-only', 'origin/main'], old);
+    const mid = g(['rev-parse', 'origin/main'], old);
+    edit((j) => { j.tick_minutes = 7; }); g(['commit', '-qam', 'tick 7'], old); g(['push', '-q', 'origin', 'main'], old);
+    chore('tick9', (w) => edit((j) => { j.tick_minutes = 9; }, w), { from: mid });
+    assert.match(merge('tick9', ['--dry-run']).text, /settings\.md: both main and this branch changed tick_minutes; merge main into the branch first/);
+    chore('tick7', (w) => edit((j) => { j.tick_minutes = 7; j.stale_after_minutes = 40; }, w), { from: mid });
+    const same = merge('tick7', ['--dry-run']);
+    assert.equal(same.status, 0, `the same change on both sides: ${same.text}`);
+  } finally { F.done(); }
+});
+
 test('url links and no lines need no git 2.38: the registry at landing is read from settings.md, never merge-tree (round 2 N2)', () => {
   const F = monoFixture('registry-oldgit');
   const { old, ok, run, g, edit } = F;
