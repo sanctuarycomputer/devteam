@@ -1713,8 +1713,6 @@ http.createServer((req, res) => { const m = fs.readFileSync(${JSON.stringify(mod
     must(['merge', 'bill-01-card', '--decision', Drel], { role: 'sup' });
     const relAct = json(must(['log', '--type', 'act', '--json'])).find((a) => a.class === 'release-production' && a.refs.includes('bill-01-card'));
     assert.ok(relAct && relAct.decision === Drel && relAct.reversible === false, 'the release is logged as an act under its decision');
-    git(['pull', '-q', '--ff-only', 'origin', 'main']);
-    landSettings((txt) => txt.replace('"release": "merge", ', ''));
     git(['fetch', '-q', 'origin', 'main']);
     assert.equal(git(['rev-parse', 'origin/main^2']), H2, 'main merges the verified head');
     const debt = json(must(['log', '--type', 'gate', '--json'])).filter((g) => g.gate === 'debt');
@@ -1731,6 +1729,8 @@ http.createServer((req, res) => { const m = fs.readFileSync(${JSON.stringify(mod
     write(r3, review('reviewer-z', git(['rev-parse', 'HEAD'])));
     assert.ok(!json(must(['metrics', '--json'])).findings.some((f) => f.kind === 'review-churn' && f.subject === 'bill-01-card'));
     fs.rmSync(r3);
+    git(['pull', '-q', '--ff-only', 'origin', 'main']);
+    landSettings((txt) => txt.replace('"release": "merge", ', ''));
   });
 
   await t.test('goal list flags take separate values or one JSON array of strings, and refuse anything else that looks like JSON', () => {
