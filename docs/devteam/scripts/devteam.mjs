@@ -2525,9 +2525,12 @@ const mainSettings = (fallback = { ...SETTINGS_DEFAULTS }) => (mainRef() ? setti
 // - A ticket PR, and any PR that leaves settings.md alone: main's, committed. A ticket can never
 //   change settings.md (it's in the kit's line), so its head's settings never decide (O6).
 // - A plan or chore PR that changes settings.md: the settings that would land. That is the head's
-//   when main's settings.md hasn't moved since the branch left it, else the merge's (read from the
-//   landing tree, so a git that can't merge-tree fails closed). Judging a chore by what it lands
-//   is the point of a chore that redraws lines.
+//   when main's settings.md hasn't moved since the branch left it. Else, once lines are declared on
+//   main or at the head, the merge's (read from the landing tree, so a git that can't merge-tree
+//   fails closed): judging a chore by what it lands is the point of a chore that redraws lines.
+//   With no lines, only the registry is judged, so no tree is merged (git < 2.38 is fine): the
+//   settings are merged key by key, and links entry by entry, from base, head and main as git show
+//   reads them (mergeSettings; round 2, N2).
 // settings.md lives in home, so for a PR in another repo (PR 2) they are home main's.
 // Returns { sMain, head, fromHead, landed() → { settings, tree? } | { problem } }.
 function settingsInForce(base, sha, R = homeFacts, { ticket = false } = {}) {
@@ -2541,12 +2544,25 @@ function settingsInForce(base, sha, R = homeFacts, { ticket = false } = {}) {
     sMain, head, fromHead: true,
     landed: () => {
       if (!changed(base, R.mainRef())) return head ? { settings: head } : invalid(sha.slice(0, 12));
+      if (!linesDeclared(head ?? {}) && !linesDeclared(sMain)) {
+        if (!head) return invalid(sha.slice(0, 12));
+        const sBase = settingsAt(base, { orNull: true });
+        return { settings: sBase ? mergeSettings(sBase, head, sMain) : head };
+      }
       const land = landingTree(sha, R);
       if (land.problem) return land;
       const s = settingsAt(land.tree, { orNull: true });
       return s ? { settings: s, tree: land.tree } : invalid(`the merge of ${sha.slice(0, 12)} onto ${R.mainRef()}`);
     },
   };
+}
+// The settings a merge of head onto main lands, for a project with no lines (no tree is merged):
+// a key the head left as the base had it is main's, else the head's; links go entry by entry the
+// same way. Where both sides changed one key differently, the head's stands in: git's own merge
+// of settings.md would conflict there, and judging the head's value is the stricter reading.
+function mergeSettings(b, h, m) {
+  const pick = (x, y, z) => { const out = {}; for (const k of new Set([...Object.keys(x ?? {}), ...Object.keys(y ?? {}), ...Object.keys(z ?? {})])) { const v = canonical(y?.[k]) === canonical(x?.[k]) ? z?.[k] : y?.[k]; if (v !== undefined) out[k] = v; } return out; };
+  return { ...pick(b, h, m), links: pick(b.links, h.links, m.links) };
 }
 // Coverage of one repo's tree under one set of settings, once per read of the log; null with no lines.
 const coverageAt = (ref, s, R = homeFacts) => (linesDeclared(s) ? memo(`coverage\0${R.name}\0${ref}\0${canonical(s.components)}`, () => coverage(R.treePaths(ref), componentsOn(s, R.name), R.devteamLine())) : null);
