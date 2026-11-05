@@ -3116,6 +3116,56 @@ test('a url link lands only as a registry-edit act wrote it: matched by the entr
   } finally { F.done(); }
 });
 
+test('a removal lands only by an rm act for the entry main has: a stale link rm never re-deletes a re-added link (round 3 V2)', () => {
+  const F = monoFixture('registry-rm');
+  const { old, ok, run, g, edit } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const settingsRel = 'docs/devteam/project/settings.md';
+  const chore = (slug, fn) => {
+    const w = path.join(old, '.worktrees', `chore-${slug}`);
+    g(['worktree', 'add', '-q', '-b', `chore-${slug}`, w, 'origin/main'], old);
+    fn(w);
+    g(['add', '-A'], w);
+    g(['commit', '-qm', `chore-${slug}: x`], w);
+    g(['push', '-q', 'origin', `chore-${slug}`], w);
+    write(path.join(old, `docs/devteam/run/pr/chore-${slug}.md`), `# chore-${slug}: x\n\n## One-way doors\n\nNone.\n`);
+    return w;
+  };
+  const merge = (slug, extra = []) => { const r = run(old, ['merge', '--chore', slug, ...extra], SUP); return { status: r.status, text: r.out + r.err }; };
+  const lastAct = () => json(ok(old, ['log', '--type', 'act', '--json'])).filter((a) => a.class === 'registry-edit').pop();
+  const canon = (v) => (Array.isArray(v) ? `[${v.map(canon).join(',')}]` : v && typeof v === 'object' ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canon(v[k])}`).join(',')}}` : JSON.stringify(v));
+  const hash = (e) => `sha256:${crypto.createHash('sha256').update(canon(e)).digest('hex')}`;
+  try {
+    const v1 = { kind: 'url', title: 'Designs', url: 'https://figma.test/a' };
+    edit((j) => { j.links = { figma: v1 }; });
+    g(['commit', '-qam', 'figma'], old); g(['push', '-q', 'origin', 'main'], old);
+    // link rm records the entry it removed
+    ok(old, ['link', 'rm', 'figma'], SUP); g(['checkout', '-q', '--', settingsRel], old);
+    assert.equal(lastAct().entry_hash, null);
+    assert.equal(lastAct().prior_hash, hash(v1));
+    chore('rm', (w) => edit((j) => { delete j.links.figma; }, w));
+    assert.equal(merge('rm').status, 0, 'the rm act lands its removal');
+    g(['merge', '-q', '--ff-only', 'origin/main'], old);
+    // figma is added again, and lands
+    ok(old, ['link', 'add', 'figma', '--kind', 'url', '--url', 'https://figma.test/v2', '--title', 'Designs v2'], SUP); g(['checkout', '-q', '--', settingsRel], old);
+    chore('add', (w) => edit((j) => { j.links.figma = { kind: 'url', url: 'https://figma.test/v2', title: 'Designs v2' }; }, w));
+    assert.equal(merge('add').status, 0);
+    g(['merge', '-q', '--ff-only', 'origin/main'], old);
+    // a hand deletion of the re-added link: the old rm act removed a different entry (ZZ2)
+    chore('hand-rm', (w) => edit((j) => { delete j.links.figma; }, w));
+    const h = merge('hand-rm', ['--dry-run']);
+    assert.notEqual(h.status, 0, `a stale rm act landed a removal: ${h.text}`);
+    assert.match(h.text, /links\.figma to an entry no registry-edit act wrote/);
+    // an rm act from before prior_hash existed (null, no prior_hash) never lands a removal either
+    ok(old, ['act', '--class', 'registry-edit', '--refs', 'link:figma', '--', 'removed url link figma'], SUP);
+    assert.match(merge('hand-rm', ['--dry-run']).text, /links\.figma to an entry no registry-edit act wrote/);
+    // link rm of the entry main has now lands it
+    ok(old, ['link', 'rm', 'figma'], SUP); g(['checkout', '-q', '--', settingsRel], old);
+    const again = merge('hand-rm', ['--dry-run']);
+    assert.equal(again.status, 0, `the rm act for main's entry lands it: ${again.text}`);
+  } finally { F.done(); }
+});
+
 test('without lines, a key or link both main and the branch changed is refused, dry run and merge alike (round 3 V3)', () => {
   const F = monoFixture('settings-both');
   const { old, ok, run, g, edit } = F;

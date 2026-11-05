@@ -1678,6 +1678,12 @@
             ],
             "pattern": "^sha256:[0-9a-f]{64}$",
             "x-tip": "The link entry this act wrote."
+          },
+          "prior_hash": {
+            "description": "On a registry-edit act from link rm: the link entry it removed, as sha256:<hex> of its canonical JSON. merge lands a removal only when an act naming the link has entry_hash null and prior_hash equal to the entry main has, so an rm of an earlier entry never removes a link added again since. A removal act without it (written before it existed) never matches.",
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "x-tip": "The link entry this rm act removed."
           }
         },
         "additionalProperties": false,

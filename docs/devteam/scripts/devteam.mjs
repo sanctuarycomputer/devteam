@@ -2777,8 +2777,10 @@ function registryFails(base, sha, R = homeFacts) {
 // round 2, N2/N3): each url link the merge would change on main, main's settings against the ones
 // that would land, needs an act naming it whose entry_hash is the entry that lands (null: removed).
 // No time window, so an unrelated settings landing expires nothing; a link already as main has it
-// needs nothing; an act for one value never covers another. An act written before entry_hash
-// existed never matches. A landing that can't be computed is registryFails' to report.
+// needs nothing; an act for one value never covers another. A removal needs an rm act whose
+// prior_hash is main's entry, so an rm of an earlier entry never deletes a link added again
+// since (round 3, V2). An act written before entry_hash (or, for a removal, prior_hash) existed
+// never matches. A landing that can't be computed is registryFails' to report.
 function registryActFails(base, sha) {
   const S = settingsInForce(base, sha);
   if (!S.fromHead) return [];
@@ -2788,7 +2790,9 @@ function registryActFails(base, sha) {
   const edits = linkOwnerChanges(S.sMain.links, lands).filter((c) => c.cls === 'registry-edit').map((c) => c.key.slice('links.'.length));
   if (!edits.length) return [];
   const acts = logObjects('act').filter((a) => a.class === 'registry-edit' && Object.hasOwn(a, 'entry_hash'));
-  const bare = edits.filter((l) => !acts.some((a) => (a.refs ?? []).includes(`link:${l}`) && a.entry_hash === linkEntryHash(lands[l])));
+  // a removal (entry_hash null) needs an act that removed the very entry main has (prior_hash)
+  const wrote = (a, l) => a.entry_hash === linkEntryHash(lands[l]) && (a.entry_hash !== null || a.prior_hash === linkEntryHash(S.sMain.links?.[l]));
+  const bare = edits.filter((l) => !acts.some((a) => (a.refs ?? []).includes(`link:${l}`) && wrote(a, l)));
   return bare.length ? [`changes ${bare.map((l) => `links.${l}`).join(', ')} to an entry no registry-edit act wrote: make each change with link add|set|rm, which logs the act with the entry it wrote, rather than by hand in settings.md (an act for an earlier value of the link doesn't cover this one)`] : [];
 }
 // What the forge's check (optional) and `merge` both check for a PR, by branch kind. Gates are not
@@ -7633,7 +7637,8 @@ function cmdLink() {
     return b;
   });
   what = redactUrl(what);
-  appendLog({ type: 'act', decision: citing(), class: 'registry-edit', what, refs: [`link:${id}`, ...(source ? [source] : [])], reversible: true, entry_hash: linkEntryHash(entry) }, 'supervisor');
+  // a removal also records the entry it removed, so it lands only while main still has that one (round 3, V2)
+  appendLog({ type: 'act', decision: citing(), class: 'registry-edit', what, refs: [`link:${id}`, ...(source ? [source] : [])], reversible: true, entry_hash: linkEntryHash(entry), ...(sub === 'rm' ? { prior_hash: linkEntryHash(cur) } : {}) }, 'supervisor');
   out(`${what}; ${LANDING_HINT}`);
 }
 // links [--json]: the registry, each repo's effective settings, and the lines on each with their state.
