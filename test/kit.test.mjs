@@ -4365,3 +4365,28 @@ test('views of a sibling ticket: status, approve-plan, timeline; a missing check
     fs.rmSync(path.join(old, 'docs/devteam/run/links.local.json'));
   } finally { F.done(); }
 });
+
+test('a sibling ticket\'s review worktree: under home/.worktrees, of its repo, seeded from that repo\'s settings, and removed through it (M8)', () => {
+  const F = multiFixture('sibling-review-wt');
+  const { old, g, okIn, runIn, ticket } = F;
+  try {
+    // console's own worktree_files and worktree_setup, never home's; DEVTEAM_MAIN is console's root
+    write(path.join(F.console, '.env'), 'CONSOLE=1\n');
+    const links = json(okIn(old, ['settings'])).links;
+    F.lines({ ...F.STD, console: { link: 'console' }, companion: { link: 'companion' } }, { links: { ...links, console: { ...links.console, worktree_files: ['.env'], worktree_setup: 'test -f "$DEVTEAM_MAIN/src/main.js" && test -f "$DEVTEAM_HOME/docs/devteam/project/settings.md" && touch .seeded-from-console' } } });
+    ticket('console-01-a');
+    const w = path.join(old, '.worktrees', 'console-01-a');
+    g(['worktree', 'add', '-q', '-b', 'ticket/console-01-a', w, 'origin/trunk'], F.console);
+    const sha = g(['rev-parse', 'HEAD'], w);
+    const rw = okIn(old, ['review-worktree', 'console-01-a', sha]);
+    assert.equal(path.dirname(fs.realpathSync(rw)), fs.realpathSync(path.join(old, '.worktrees')));
+    assert.equal(fs.realpathSync(g(['rev-parse', '--path-format=absolute', '--git-common-dir'], rw)), fs.realpathSync(path.join(F.console, '.git')), 'a worktree of console');
+    assert.equal(g(['rev-parse', 'HEAD'], rw), sha);
+    assert.equal(fs.readFileSync(path.join(rw, '.env'), 'utf8'), 'CONSOLE=1\n', "console's worktree_files");
+    assert.ok(fs.existsSync(path.join(rw, '.seeded-from-console')), "console's worktree_setup, with DEVTEAM_MAIN at console's root and DEVTEAM_HOME at home");
+    assert.match(runIn(old, ['review-worktree', '--remove', w]).err, /is not a review worktree/, 'only what it made');
+    okIn(old, ['review-worktree', '--remove', rw]);
+    assert.ok(!fs.existsSync(rw));
+    assert.doesNotMatch(g(['worktree', 'list'], F.console), /\.worktrees\/review-/, "console's git forgets it");
+  } finally { F.done(); }
+});

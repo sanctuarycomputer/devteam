@@ -3067,19 +3067,21 @@ function checkPr({ headRef, sha, title, body, forge = false }) {
 // for build outputs and package caches shared across worktrees (quality.md §2).
 // A gate run for a ticket's merge knows which ticket it checks (DEVTEAM_GATE_TICKET), so validate
 // can fail it only for what is its own (D4 below).
-const gateEnv = (ticket) => { const cache = path.join(runDir, 'cache'); fs.mkdirSync(cache, { recursive: true }); return { ...process.env, DEVTEAM_MAIN: mainRoot, DEVTEAM_CACHE: cache, ...(ticket ? { DEVTEAM_GATE_TICKET: ticket } : {}) }; };
+// What a gate or worktree_setup sees: DEVTEAM_MAIN is the main checkout of the repo it runs for,
+// DEVTEAM_HOME home's (where the kit and the live log are).
+const gateEnv = (ticket, R = repo('home')) => { const cache = path.join(runDir, 'cache'); fs.mkdirSync(cache, { recursive: true }); return { ...process.env, DEVTEAM_MAIN: R.root, DEVTEAM_HOME: mainRoot, DEVTEAM_CACHE: cache, ...(ticket ? { DEVTEAM_GATE_TICKET: ticket } : {}) }; };
 // The tools .tool-versions pins that this machine's asdf or mise hasn't installed. On a new machine
 // worktree_setup otherwise fails under whatever runtime the system has, which reads as a project bug.
 // Empty when there is no .tool-versions or neither manager is here (there is nothing to ask).
-function missingPins() {
-  const pins = (readText(path.join(mainRoot, '.tool-versions')) ?? '').split('\n').map((l) => l.replace(/#.*/, '').trim().split(/\s+/)).filter((p) => p[0] && p[1] && !['system', 'latest'].includes(p[1]));
+function missingPins(root = mainRoot) {
+  const pins = (readText(path.join(root, '.tool-versions')) ?? '').split('\n').map((l) => l.replace(/#.*/, '').trim().split(/\s+/)).filter((p) => p[0] && p[1] && !['system', 'latest'].includes(p[1]));
   // The first manager that is installed answers for every pin; one that isn't (ENOENT) passes to the
   // next. A probe that times out on a loaded machine proves nothing, so it counts as installed.
   for (const [bin, args] of [['asdf', (t, v) => ['where', t, v]], ['mise', (t, v) => ['where', `${t}@${v}`]]]) {
     const missing = [];
     let absent = false;
     for (const [t, v] of pins) {
-      const r = spawnSync(bin, args(t, v), { cwd: mainRoot, stdio: 'ignore', timeout: 60000 });
+      const r = spawnSync(bin, args(t, v), { cwd: root, stdio: 'ignore', timeout: 60000 });
       if (r.error?.code === 'ENOENT') { absent = true; break; }
       if (!r.error && r.status !== 0) missing.push(`${t} ${v}`);
     }
@@ -3087,31 +3089,42 @@ function missingPins() {
   }
   return [];
 }
-const pinsHint = (miss = missingPins()) => (miss.length ? `this machine lacks the tools .tool-versions pins (${miss.join(', ')}): run asdf install (or mise install) in ${mainRoot}, then try again` : null);
-function seedWorktree(wt, { setup = true } = {}) {
-  const s = loadSettings();
+const pinsHint = (miss = missingPins(), root = mainRoot) => (miss.length ? `this machine lacks the tools .tool-versions pins (${miss.join(', ')}): run asdf install (or mise install) in ${root}, then try again` : null);
+// A worktree of repo R is seeded from R's own settings and main checkout, never home's (spec §5.2).
+function seedWorktree(wt, { setup = true, repo: R = repo('home') } = {}) {
+  const s = R.settings;
   for (const rel of s.worktree_files ?? []) {
-    const from = path.join(mainRoot, rel);
-    if (!fs.existsSync(from)) { warn(`worktree_files: ${rel} is not in the main checkout`); continue; }
+    const from = path.join(R.root, rel);
+    if (!fs.existsSync(from)) { warn(`worktree_files: ${rel} is not in ${R.name === 'home' ? 'the main checkout' : `${R.name}'s checkout (${R.root})`}`); continue; }
     fs.mkdirSync(path.dirname(path.join(wt, rel)), { recursive: true });
     fs.copyFileSync(from, path.join(wt, rel));
   }
   if (setup && s.worktree_setup) {
     try {
-      execFileSync('sh', ['-c', s.worktree_setup], { cwd: wt, stdio: ['ignore', 'inherit', 'inherit'], env: gateEnv() });
+      execFileSync('sh', ['-c', s.worktree_setup], { cwd: wt, stdio: ['ignore', 'inherit', 'inherit'], env: gateEnv(null, R) });
     } catch {
-      const hint = pinsHint();
+      const hint = pinsHint(missingPins(R.root), R.root);
       die(`worktree_setup failed in ${wt}${hint ? `; ${hint}` : ''}`);
     }
   }
 }
-// A throwaway checkout of one commit, removed when the process ends however it ends.
-function detachedWorktree(sha, name) {
+// A throwaway checkout of one commit of a repo, under home's .worktrees, removed when the process
+// ends however it ends.
+function detachedWorktree(sha, name, R = repo('home')) {
   const wt = path.join(mainRoot, '.worktrees', `tmp-${name}-${process.pid}`);
-  gitOrDie(['worktree', 'add', '--quiet', '--detach', wt, sha], mainRoot);
-  process.once('exit', () => { if (fs.existsSync(wt)) git(['worktree', 'remove', '--force', wt], mainRoot); });
-  seedWorktree(wt);
+  R.gitOrDie(['worktree', 'add', '--quiet', '--detach', wt, sha], R.root);
+  process.once('exit', () => { if (fs.existsSync(wt)) R.git(['worktree', 'remove', '--force', wt], R.root); });
+  seedWorktree(wt, { repo: R });
   return wt;
+}
+// The repo a worktree belongs to, computed from git, never recorded (spec §5.2): null for a
+// worktree of no repo this machine can read.
+function worktreeRepo(wt) {
+  const c = fs.existsSync(wt) ? commonOf(wt) : null;
+  if (!c) return null;
+  if (commonDir && realPath(c) === realPath(commonDir)) return repo('home');
+  for (const [id, l] of Object.entries(loadSettings().links ?? {})) if (LINK_KINDS[l?.kind]?.hostsComponents && repoReadable(id) && realPath(repo(id).commonDir) === realPath(c)) return repo(id);
+  return null;
 }
 // review-worktree <ticket> <sha> [--name <suffix>] | review-worktree --remove <path>: a final
 // reviewer's checkout of exactly the commit it reviews, under .worktrees/ and seeded like a worker's
@@ -3126,15 +3139,19 @@ function cmdReviewWorktree() {
     const abs = path.resolve(target);
     const real = (p) => { try { return fs.realpathSync(p); } catch { return null; } };
     const at = real(abs);
-    const listed = (git(['worktree', 'list', '--porcelain'], mainRoot) ?? '').split('\n').filter((l) => l.startsWith('worktree ')).map((l) => real(l.slice(9)));
+    // removed through the repo it is a worktree of (home's, or a sibling's)
+    const R = at ? worktreeRepo(at) : null;
+    const listed = R ? (R.git(['worktree', 'list', '--porcelain'], R.root) ?? '').split('\n').filter((l) => l.startsWith('worktree ')).map((l) => real(l.slice(9))) : [];
     if (!at || path.dirname(at) !== real(root) || !path.basename(at).startsWith('review-') || !listed.includes(at)) die(`${target} is not a review worktree under ${root} (review-worktree removes only what it made)`);
-    gitOrDie(['worktree', 'remove', '--force', at], mainRoot);
+    R.gitOrDie(['worktree', 'remove', '--force', at], R.root);
     return out(`removed ${at}`);
   }
   const [id, ref] = positional;
   if (!id || !ref) die('usage: review-worktree <ticket-id> <sha> [--name <suffix>]   |   review-worktree --remove <path>');
   if (!tickets().has(id)) die(`no ticket ${id} (devteam.mjs ticket show ${id})`);
-  const sha = resolveCommit(ref) ?? die(`${ref} is not a commit here (git fetch first?)`);
+  // a checkout of the ticket's own repo (an act: fails fast on a missing or wrong checkout)
+  const R = repoOfTicketId(id);
+  const sha = R.resolveCommit(ref) ?? die(`${ref} is not a commit${R.name === 'home' ? '' : ` in ${R.name}`} here (git fetch first?)`);
   const suffix = flagStr('name');
   if (flags.name !== undefined && !REVIEW_SUFFIX.test(suffix ?? '')) die(`--name "${suffix ?? ''}" must be lowercase words joined by hyphens`);
   // Short enough to name things after (a database identifier is 63 bytes in Postgres): the ticket's
@@ -3142,8 +3159,8 @@ function cmdReviewWorktree() {
   const short = /^(.+?-\d+)(-|$)/.exec(id)?.[1] ?? id;
   const wt = path.join(root, `review-${short}-${sha.slice(0, 8)}${suffix ? `-${suffix}` : ''}`);
   if (fs.existsSync(wt)) die(`${wt} exists; give this reviewer its own --name, or remove it: devteam.mjs review-worktree --remove ${wt}`);
-  gitOrDie(['worktree', 'add', '--quiet', '--detach', wt, sha], mainRoot);
-  seedWorktree(wt);
+  R.gitOrDie(['worktree', 'add', '--quiet', '--detach', wt, sha], R.root);
+  seedWorktree(wt, { repo: R });
   out(wt);
 }
 function cmdCheckPr() {
