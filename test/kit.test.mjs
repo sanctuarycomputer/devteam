@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -2039,6 +2040,31 @@ test('devteam kit', async (t) => {
     assert.ok(!json(must(['metrics', '--json'])).findings.some((f) => f.kind === 'review-file-missing'), 'a withdrawn review raises nothing');
   });
 
+  await t.test('hello: who this instance is, light enough for the hub; /api/hello answers from the last run; every route checks Host', async () => {
+    const h = json(must(['hello', '--json']));
+    assert.equal(h.devteam, 1);
+    assert.equal(h.root, fs.realpathSync(repo));
+    assert.equal(h.name, 'demo');
+    assert.equal(typeof h.inbox, 'number');
+    assert.equal(h.inbox, json(must(['questions', '--json'])).filter((q) => q.status === 'open').length, 'the Inbox count is the open questions');
+    assert.ok(['run', 'drain', 'park'].includes(h.fleet.mode));
+    assert.equal(typeof h.fleet.workers, 'number');
+    assert.match(h.kit, /^(v\d+\.\d+\.\d+|unreleased)(\+local)?$/);
+    const port = await freePort();
+    const B = `http://127.0.0.1:${port}`;
+    const srv = spawn(process.execPath, [DT, 'dashboard', '--port', String(port)], { cwd: repo, env: { ...process.env, DEVTEAM_ROLE: '' }, stdio: 'ignore' });
+    try {
+      await serverUp(`${B}/`);
+      const j = await until(async () => { const x = await (await fetch(`${B}/api/hello`)).json(); return x.inbox !== null && x; }, 'the first hello run');
+      assert.deepEqual([j.port, j.root, j.inbox], [port, h.root, h.inbox], 'the background run fills it in');
+      const t0 = Date.now();
+      await (await fetch(`${B}/api/hello`)).json();
+      assert.ok(Date.now() - t0 < 300, 'answered from the last run, never recomputed');
+      // a page elsewhere that points its own name at 127.0.0.1 sends its own Host: nothing, not even a read
+      for (const route of ['/api/hello', '/api/data', '/']) assert.equal(await statusWithHost(port, route, `rebound.example:${port}`), 403, route);
+    } finally { srv.kill(); }
+  });
+
   await t.test('review questions on the dashboard: the page in a sandboxed frame, the answer from the owner\'s own panel', async () => {
     const sha = (b) => crypto.createHash('sha256').update(b).digest('hex');
     const fx = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'review');
@@ -2703,4 +2729,13 @@ test('dashboard ports: saved and reused, +1 from the highest instance, held port
     fs.rmSync(base, { recursive: true, force: true });
   }
 });
+
+// A request with a Host the test chooses (fetch may not send one): the status code.
+function statusWithHost(port, route, host, method = 'GET') {
+  return new Promise((resolve, reject) => {
+    const r = http.request({ host: '127.0.0.1', port, path: route, method, headers: { host } }, (res) => { res.resume(); res.on('end', () => resolve(res.statusCode)); });
+    r.on('error', reject);
+    r.end();
+  });
+}
 

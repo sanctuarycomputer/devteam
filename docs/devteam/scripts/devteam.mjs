@@ -5408,7 +5408,19 @@ async function cmdDashboard() {
     ack: (b) => (/^[a-z][a-z-]*$/.test(b.kind ?? '') && text(b.subject, 200) && text(b.reason, 600) ? ['ack', b.kind, b.subject, '--reason', b.reason.trim(), '--owner'] : null),
   };
   const send = (res, code, type, body) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store' }); res.end(body); };
+  // /api/hello answers at once from the last `hello` run, which the dashboard refreshes every 30 s
+  // in the background: the hub probes every port with a 300 ms budget, and /api/data takes far longer.
+  let hello = null;
+  const refreshHello = async () => { const r = await run(['hello', '--json']); if (r.ok) { try { hello = JSON.parse(r.stdout); } catch {} } };
+  refreshHello();
+  setInterval(refreshHello, 30000).unref();
+  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit: hello?.kit ?? null, inbox: hello?.inbox ?? null, fleet: hello?.fleet ?? null });
   const server = http.createServer(async (req, res) => {
+    // Every route answers only on the dashboard's own address: a page elsewhere that points its own
+    // name at 127.0.0.1 (DNS rebinding) sends its own Host, and gets nothing, not even a read.
+    const okHost = [`127.0.0.1:${port}`, `localhost:${port}`, `${host}:${port}`].includes(req.headers.host ?? '');
+    if (!okHost) return send(res, 403, 'text/plain; charset=utf-8', 'the dashboard answers only on its own address');
+    if (req.method === 'GET' && req.url === '/api/hello') return send(res, 200, 'application/json', helloBody());
     // frame-src 'self': a frame of this page (a review page, an HTML mock) may navigate itself, and
     // this keeps it on the dashboard; a sandbox alone would let it load any URL, query string and all.
     if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) {
@@ -5469,7 +5481,6 @@ async function cmdDashboard() {
       res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store', 'content-security-policy': 'sandbox', 'x-content-type-options': 'nosniff' });
       return res.end(body);
     }
-    const okHost = [`127.0.0.1:${port}`, `localhost:${port}`, `${host}:${port}`].includes(req.headers.host ?? '');
     // A review: what the dashboard's review view loads (the question, its verified files, the
     // owner's draft and stored result), or the result as TSV for the owner's own use.
     if (req.method === 'GET' && u.pathname === '/api/review') {
@@ -6472,6 +6483,30 @@ function cmdWait() {
   report(`nothing new in ${minutes} min: the tick is due`, []);
 }
 
+// hello: who this instance is, for the hub. A fold of the log, without metrics, so the dashboard can
+// run it every 30 s and the hub can read it from /api/hello.
+function cmdHello() {
+  const s = loadSettings();
+  const inbox = questions().filter((q) => q.status === 'open').length;
+  const workers = liveSessions().filter((x) => lastPhaseOf(x.name)?.to !== 'parked').length;
+  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: kitVersion(), inbox, fleet: { mode: fleetMode() ?? 'run', workers } };
+  return flags.json ? json(r) : out(`${r.name} at ${r.root}: kit ${r.kit}, ${inbox} open question(s), fleet ${r.fleet.mode}, ${workers} session(s)`);
+}
+// The kit's release (settings.upstream_base), +local when the kit that is running differs from the
+// kit committed on main: its files outside project/ and run/, by blob. Offline, never upstream.
+function kitVersion() {
+  const tag = loadSettings().upstream_base ?? 'unreleased';
+  const main = mainRef();
+  const rel = path.relative(mainRoot, kitDir).split(path.sep).join('/');
+  if (!main || !rel || rel.startsWith('..')) return tag;
+  const committed = (git(['ls-tree', '-r', main, '--', rel], mainRoot) ?? '').split('\n').filter(Boolean).map((l) => { const [meta, f] = l.split('\t'); return [f, meta.split(' ')[2]]; }).filter(([f]) => !/^(project|run)\//.test(f.slice(rel.length + 1)));
+  if (!committed.length) return `${tag}+local`;
+  for (const [f, blob] of committed) {
+    const abs = path.join(mainRoot, f);
+    if (!fs.existsSync(abs) || git(['hash-object', abs], mainRoot) !== blob) return `${tag}+local`;
+  }
+  return tag;
+}
 function cmdWhoami() {
   const id = currentTicketId();
   const s = loadSettings();
@@ -6807,6 +6842,7 @@ Setup and roles
   prompt supervisor | worker <id> | planner <feature>    the prompt a session starts with
   worker <ticket-id> [--resume] [--force] | planner <feature> [--goal <g-id>] [--resume] [--force] [--id-block <n>]   supervisor: a worktree, a tmux window and an agent for a ticket or a feature plan (a new planner names its goal and reserves n ticket numbers, default 20); refused while its goal is parked or let go, or draining for a session that hasn't run, unless --force (logged); --resume where no session exists starts fresh with the handoff note
   whoami | settings [--get key]
+  hello [--json]                   who this instance is (root, name, kit, open questions, fleet): what the hub lists
 
 Holds and the fleet (planning.md §1, holds; supervisor.md §12)
   goal hold <g-id|upkeep> run|drain|park [--reason r] [--owner]   a goal's toggle: drain starts nothing new and lets in-flight work finish; park stops its sessions (WIP commit, push, handoff). The supervisor drains a running goal (with --reason) and releases only its own drain
@@ -6881,7 +6917,7 @@ Dashboard and releases
 `;
 
 const COMMANDS = {
-  init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), whoami: cmdWhoami, settings: cmdSettings,
+  init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), whoami: cmdWhoami, hello: cmdHello, settings: cmdSettings,
   feature: cmdFeature, ticket: cmdTicket, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, roadmap: cmdRoadmap,
   'check-ticket': cmdCheckTicket, 'check-pr': cmdCheckPr, merge: cmdMerge, 'review-worktree': cmdReviewWorktree,
   phase: cmdPhase, gate: cmdGate, send: cmdSend, messages: cmdMessages, 'stop-ok': cmdStopOk,
