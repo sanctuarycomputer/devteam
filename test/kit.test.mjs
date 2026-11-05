@@ -3444,6 +3444,47 @@ test('the Links block: links whose for matches the ticket, plus the ticket\'s an
   } finally { F.done(); }
 });
 
+test('a kind, scope or link id that names a built-in (constructor, toString, __proto__) is unknown, never a crash or a match', () => {
+  const F = monoFixture('builtin-names');
+  const { old, ok, run, edit, g } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const noCrash = (r, what) => assert.doesNotMatch(`${r.out}\n${r.err}`, /TypeError|is not a function|Cannot read prop/, `${what}: ${r.err}`);
+  try {
+    edit((j) => { j.links = {
+      ctor: { kind: 'constructor', title: 'C', url: 'https://c.test' },
+      proto: { kind: '__proto__', title: 'P', url: 'https://p.test' },
+      ts: { kind: 'url', title: 'Everywhere', url: 'https://t.test', for: ['toString:x'], check: false },
+      pp: { kind: 'url', title: 'Protos', url: 'https://pp.test', for: ['__proto__', 'constructor:x'], check: false },
+    }; });
+    const v = run(old, ['validate']);
+    noCrash(v, 'validate');
+    assert.match(v.out, /links\.ctor: unknown kind "constructor" \(known: repo, url\)/);
+    assert.match(v.out, /links\.proto: unknown kind "__proto__" \(known: repo, url\)/);
+    assert.match(v.out, /links\.ts: for "toString:x" is not a scope/);
+    assert.match(v.out, /links\.pp: for "__proto__" is not a scope/);
+    assert.match(v.out, /links\.pp: for "constructor:x" is not a scope/);
+    noCrash(run(old, ['observe-metrics'], { ...SUP, DEVTEAM_URL_PROBE: '/usr/bin/true' }), 'observe-metrics');
+    noCrash(run(old, ['links', '--json']), 'links');
+    ok(old, ['ticket', 'add', 'web-01-a', '--json', JSON.stringify({ title: 'a', feature: 'chores', component: 'web', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['web/**'], done_when: ['the web suite passes'], notes: 'n', links: ['constructor'] })], SUP);
+    const p = run(old, ['prompt', 'worker', 'web-01-a']);
+    noCrash(p, 'prompt worker');
+    assert.doesNotMatch(p.out, /Everywhere|Protos/, 'a toString: or __proto__ scope matches no prompt');
+    // an id that is a built-in name is not in the registry until someone adds it
+    assert.match(run(old, ['validate']).out, /web-01-a: links "constructor" is not in settings links/);
+    assert.match(run(old, ['ask', '--question', 'x?', '--links', JSON.stringify([{ title: 'y', link: 'constructor' }])], SUP).err, /--links: link "constructor" is not in settings links/);
+    assert.match(run(old, ['link', 'set', 'constructor', 'title', 'x'], SUP).err, /no link constructor/);
+    edit((j) => { j.links = {}; j.components = { web: { owns: ['web/**'], link: 'constructor' }, rest: { owns: ['**'] } }; });
+    const v2 = run(old, ['validate']);
+    noCrash(v2, 'validate with a component on a built-in name');
+    assert.match(v2.out, /components\.web: link "constructor" is not in links/);
+    edit((j) => { delete j.components; });
+    ok(old, ['link', 'add', 'constructor', '--kind', 'url', '--url', 'https://k.test', '--title', 'K'], SUP);
+    assert.match(ok(old, ['links']), /constructor/, 'constructor is an id like any other once added');
+    assert.match(run(old, ['link', 'add', '__proto__', '--kind', 'url', '--url', 'https://k.test', '--title', 'K'], SUP).err, /__proto__: a link id is lowercase words joined by hyphens/);
+    g(['checkout', '-q', '--', 'docs/devteam/project/settings.md'], old);
+  } finally { F.done(); }
+});
+
 test('a question links a registry link by id; the inbox resolves it', () => {
   const F = monoFixture('question-links');
   const { old, ok, run, edit } = F;

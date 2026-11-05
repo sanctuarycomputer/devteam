@@ -308,7 +308,7 @@ const ownersKind = (l) => !!l && !!LINK_KINDS[l.kind]?.ownedByOwner;
 function linkOwnerChanges(a = {}, b = {}) {
   const out = [];
   for (const id of [...new Set([...Object.keys(a ?? {}), ...Object.keys(b ?? {})])].sort()) {
-    const x = a?.[id], y = b?.[id];
+    const x = ownEntry(a, id), y = ownEntry(b, id);
     if (!ownersKind(x) && !ownersKind(y)) { if (canonical(x) !== canonical(y)) out.push({ key: `links.${id}`, cls: 'registry-edit' }); continue; }
     if (!x || !y || x.kind !== y.kind) { out.push({ key: `links.${id}`, cls: 'governance-edit' }); continue; }
     for (const f of [...new Set([...Object.keys(x), ...Object.keys(y)])].sort()) {
@@ -357,7 +357,7 @@ function pinOwnedLinks(local = {}, main = {}) {
   const links = {};
   const changed = [];
   for (const id of [...new Set([...Object.keys(main ?? {}), ...Object.keys(local ?? {})])].sort()) {
-    const m = main?.[id], l = local?.[id];
+    const m = ownEntry(main, id), l = ownEntry(local, id);
     if (ownersKind(m) || ownersKind(l)) {
       if (m) links[id] = m;
       if (canonical(m) !== canonical(l)) changed.push(`links.${id}`);
@@ -385,12 +385,12 @@ const REPO_GATE_KEYS = ['gates', 'worktree_setup', 'worktree_files', 'ignored_ch
 const LINK_COMMON = ['kind', 'title', 'notes', 'for', 'source'];
 // The type of every link field (F6): link add|set parse a value by it, and validate checks it, so a
 // title typed 2024 is the string "2024" and nothing downstream meets a number where text belongs.
-const LINK_TYPES = {
+const LINK_TYPES = Object.assign(Object.create(null), {
   kind: 'string', title: 'string', notes: 'string', for: 'list', source: 'string', url: 'string', check: 'boolean',
   remote: 'string', path: 'string', main_branch: 'string', forge: 'string', merge_method: 'string', release: 'any',
   gates: 'object', worktree_setup: 'string', worktree_files: 'list', ignored_checks: 'list', project: 'string',
-};
-const TYPE_WORDS = { string: 'a string', boolean: 'true or false', list: 'a list of strings', object: 'an object' };
+});
+const TYPE_WORDS = Object.assign(Object.create(null), { string: 'a string', boolean: 'true or false', list: 'a list of strings', object: 'an object' });
 const typeOk = (t, v) => t === 'any' || (t === 'string' ? typeof v === 'string' : t === 'boolean' ? typeof v === 'boolean' : t === 'list' ? Array.isArray(v) && v.every((x) => typeof x === 'string') : t === 'object' ? isObj(v) : true);
 // A value from the command line, as its field's type: a list is separate values or one JSON array
 // of strings; a boolean is true or false (anything else stays text, for validate to refuse); an
@@ -426,8 +426,9 @@ const redactLink = (l) => (isObj(l) ? { ...l, ...(typeof l.url === 'string' ? { 
 // A local remote is a path, written so nobody mistakes it for owner/name: ./, ../ or absolute.
 const localRemote = (r) => !/^[a-z][a-z0-9+.-]*:\/\//i.test(r) && !/^[\w.-]+@[\w.-]+:/.test(r) && !/^[\w.-]+\/[\w.-]+$/.test(r);
 // Every per-kind behaviour of a link (spec §3.1). A new kind (doc, dataset, mcp) is one entry here;
-// nothing outside this table branches on a kind.
-const LINK_KINDS = {
+// nothing outside this table branches on a kind. Null-prototype, as every table a user's word
+// looks up: kind "constructor" is unknown, not Object's.
+const LINK_KINDS = Object.assign(Object.create(null), {
   repo: {
     fields: { required: ['remote'], optional: ['path', ...REPO_KEYS] },
     // where the checkout is on this machine is never the owner's (§3.5); what a gate run sees is
@@ -513,7 +514,7 @@ const LINK_KINDS = {
     locator: (link) => ({ text: redactUrl(link.url), url: redactUrl(link.url) }),
     promptLine: (link, id) => `- ${link.title} (${redactUrl(link.url)})${link.notes ? `: ${link.notes}` : ''} [link:${id}]`,
   },
-};
+});
 // What a registry-edit act records of the entry it wrote: sha256 of its canonical JSON, or null
 // when it removed the link. merge lands a url link only as an act wrote it (registryActFails).
 const linkEntryHash = (e) => (e === undefined || e === null ? null : `sha256:${sha256(canonical(e))}`);
@@ -537,14 +538,14 @@ const remoteKey = (r) => {
 function linkLocation(id) {
   let local = {};
   try { local = readJson(LINKS_LOCAL); } catch {}
-  const at = local?.[id]?.path ?? loadSettings().links?.[id]?.path ?? `../${id}`;
+  const at = ownEntry(local, id)?.path ?? ownEntry(loadSettings().links, id)?.path ?? `../${id}`;
   return path.resolve(mainRoot, at);
 }
 // A component map draws lines only once an entry says so (open issue 1): before that its entries
 // are labels a project wrote before lines existed, and nothing here applies to them.
 const COMPONENT_FIELDS = ['link', 'owns', 'shared', 'release'];
 const linesDeclared = (s) => Object.values(s?.components ?? {}).some((c) => isObj(c) && COMPONENT_FIELDS.some((k) => k in c));
-const componentLink = (name, s = loadSettings()) => (linesDeclared(s) ? s.components?.[name]?.link ?? 'home' : 'home');
+const componentLink = (name, s = loadSettings()) => (linesDeclared(s) ? ownEntry(s.components, name)?.link ?? 'home' : 'home');
 const componentsOn = (s, link = 'home') => (linesDeclared(s) ? Object.entries(s.components).filter(([, c]) => (c?.link ?? 'home') === link).map(([name, c]) => ({ name, owns: Array.isArray(c.owns) ? c.owns.filter((g) => typeof g === 'string') : undefined, shared: !!c.shared })) : []);
 // The kit's own files: the kit folder and the project folder, wherever --project moved it.
 // (upstreamSyncApproval reads this one too, rather than computing its own.)
@@ -555,7 +556,7 @@ const kitsOwnRepo = () => { const o = git(['config', '--get', 'remote.origin.url
 
 // One scope grammar (spec §7.1) for knowledge scopes and link `for` scopes: <kind> or <kind>:<id>.
 // all and project mean the whole project, and both stay accepted. A later scope kind is one entry.
-const SCOPES = {
+const SCOPES = Object.assign(Object.create(null), {
   all: () => true,
   project: () => true,
   component: (v, c) => c.component === v,
@@ -564,7 +565,7 @@ const SCOPES = {
   class: (v, c) => c.class === v,
   chore: (v, c) => c.chore === v,
   link: (v, c) => (c.links ?? []).includes(v),
-};
+});
 const SCOPE_WHERE = { for: ['all', 'project', 'component', 'feature', 'goal', 'link'], knowledge: ['all', 'project', 'component', 'feature', 'class', 'chore', 'link'] };
 const SCOPE_HELP = Object.fromEntries(Object.entries(SCOPE_WHERE).map(([w, ks]) => [w, ks.map((k) => (['all', 'project'].includes(k) ? k : `${k}:<id>`)).join(', ')]));
 function scopeParts(scope) {
@@ -618,7 +619,7 @@ function registryProblems(s) {
     for (const f of Object.keys(c)) if (!COMPONENT_FIELDS.includes(f)) errors.push(`${at}: "${f}" is not a component field (${COMPONENT_FIELDS.join(', ')})`);
     const link = c.link ?? 'home';
     if (link !== 'home') {
-      if (!links[link]) errors.push(`${at}: link "${link}" is not in links`);
+      if (!ownEntry(links, link)) errors.push(`${at}: link "${link}" is not in links`);
       else if (!LINK_KINDS[links[link].kind]?.hostsComponents) errors.push(`${at}: link "${link}" is a ${links[link].kind} link, which holds no files`);
       else errors.push(`${at}: link "${link}": only home holds components and tickets in this release (repo links land in PR 2)`);
     }
@@ -1184,7 +1185,7 @@ function questionView(q) {
 }
 // The inbox's view: each question with its goal's hold (never inside questionView, which the fold uses).
 // A link item that names a registry link shows its kind's locator: a url link's url, a repo link's remote.
-const resolveQuestionLinks = (ls) => { const reg = loadSettings().links ?? {}; return (ls ?? []).map((l) => { const r = l?.link ? reg[l.link] : null; const K = r ? LINK_KINDS[r.kind] : null; if (!K) return redactLink(l); const { text, ...where } = K.locator(r, l.link); return redactLink({ ...l, ...where }); }); };
+const resolveQuestionLinks = (ls) => { const reg = loadSettings().links ?? {}; return (ls ?? []).map((l) => { const r = l?.link ? ownEntry(reg, l.link) : null; const K = r ? LINK_KINDS[r.kind] : null; if (!K) return redactLink(l); const { text, ...where } = K.locator(r, l.link); return redactLink({ ...l, ...where }); }); };
 const questions = () => logObjects('question').map((q) => { const v = questionView(q); return { ...v, links: resolveQuestionLinks(v.links), goal_hold: questionHold(q) }; });
 
 // Why question q does not authorise the supervisor to change goal goalId (null when it does): it
@@ -1905,11 +1906,11 @@ function cmdValidate() {
     // Component lines (spec §6.1): the component is declared, and every touches entry lies in its
     // line (or a touches_components member's) and no other, so a ticket's footprint is one line.
     if (lined && isActive(t)) {
-      const decl = S0.components?.[t.component];
+      const decl = ownEntry(S0.components, t.component);
       if (!decl) err(id, `component "${t.component}" is not declared in settings.components (declare it with its owns, or plan the ticket under a declared one)`);
       const tc = t.touches_components ?? [];
       if (tc.length && !['contract', 'integration'].includes(t.kind)) err(id, 'touches_components is for contract and integration tickets (planning.md D2, D7)');
-      for (const c of tc) if (!S0.components?.[c]) err(id, `touches_components "${c}" is not a declared component`);
+      for (const c of tc) if (!ownEntry(S0.components, c)) err(id, `touches_components "${c}" is not a declared component`);
       else if (componentLink(c, S0) !== componentLink(t.component, S0)) err(id, `touches_components "${c}" is in another repo; a ticket changes one repo (split it per repo)`);
       const mine = new Set([t.component, ...tc]);
       for (const entry of t.touches ?? []) {
@@ -1920,7 +1921,7 @@ function cmdValidate() {
         else if (owners.some((o) => !mine.has(o))) err(id, `touches "${entry}" lies in ${owners.filter((o) => !mine.has(o)).join(' and ')}'s line, not ${t.component}'s (list ${owners.filter((o) => !mine.has(o)).join(', ')} in touches_components on a contract or integration ticket, or split the ticket)`);
       }
     }
-    if (isActive(t) && !mergeShaFor(id)) for (const l of t.links ?? []) if (!(loadSettings().links ?? {})[l]) err(id, `links "${l}" is not in settings links`);
+    if (isActive(t) && !mergeShaFor(id)) for (const l of t.links ?? []) if (!ownEntry(loadSettings().links, l)) err(id, `links "${l}" is not in settings links`);
     for (const d of t.depends_on ?? []) {
       if (d === id) err(id, 'depends on itself');
       else if (!ts.has(d)) err(id, `depends_on "${d}" does not exist (D3)`);
@@ -1951,7 +1952,7 @@ function cmdValidate() {
   // Features: every story defined is served and every story served is defined (D6); a story across
   // components has an integration ticket (D7); an approved feature has reviews and ready goals.
   for (const [fid, f] of fs_) {
-    for (const l of f.links ?? []) if (!(loadSettings().links ?? {})[l]) errors.push(`feature ${fid}: links "${l}" is not in settings links`);
+    for (const l of f.links ?? []) if (!ownEntry(loadSettings().links, l)) errors.push(`feature ${fid}: links "${l}" is not in settings links`);
     const stories = new Set((f.stories ?? []).map((s) => s.id));
     const mine = [...ts.values()].filter((t) => isActive(t) && t.feature === fid);
     const served = new Set();
@@ -2064,7 +2065,7 @@ function cmdValidate() {
     if (Object.keys(s.links ?? {}).length) {
       const dd = path.join(projectDir, 'designs');
       for (const f of fs.existsSync(dd) ? fs.readdirSync(dd).filter((x) => x.endsWith('.md')) : []) {
-        for (const m of (readText(path.join(dd, f)) ?? '').matchAll(/(?:^|[\s(`[])link:([a-z][a-z0-9]*(?:-[a-z0-9]+)*)/g)) if (!s.links[m[1]]) errors.push(`designs/${f} cites link:${m[1]}, which is not in settings links`);
+        for (const m of (readText(path.join(dd, f)) ?? '').matchAll(/(?:^|[\s(`[])link:([a-z][a-z0-9]*(?:-[a-z0-9]+)*)/g)) if (!ownEntry(s.links, m[1])) errors.push(`designs/${f} cites link:${m[1]}, which is not in settings links`);
       }
     }
   }
@@ -2613,12 +2614,12 @@ function settingsInForce(base, sha, R = homeFacts, { ticket = false } = {}) {
 function mergeSettings(b, h, m) {
   const both = [];
   const pick = (x, y, z, pre = '') => {
-    const out = {};
+    const out = Object.create(null);
     for (const k of new Set([...Object.keys(x ?? {}), ...Object.keys(y ?? {}), ...Object.keys(z ?? {})])) {
       if (!pre && k === 'links') continue;
-      const [cb, ch, cm] = [x?.[k], y?.[k], z?.[k]].map(canonical);
+      const [cb, ch, cm] = [ownEntry(x, k), ownEntry(y, k), ownEntry(z, k)].map(canonical);
       if (ch !== cb && cm !== cb && ch !== cm) both.push(`${pre}${k}`);
-      const v = ch === cb ? z?.[k] : y?.[k];
+      const v = ch === cb ? ownEntry(z, k) : ownEntry(y, k);
       if (v !== undefined) out[k] = v;
     }
     return out;
@@ -2651,7 +2652,7 @@ function readCoverage(fn) {
 // The Baseline's floor gaps (§9a): unowned, owned twice, a component whose link can't hold files,
 // an owns glob that matches nothing. Case collisions fail the check but aren't a gap class.
 function coverageGaps(cov, s) {
-  const unlinked = Object.entries(s.components ?? {}).filter(([, c]) => isObj(c) && (c.link ?? 'home') !== 'home' && !LINK_KINDS[s.links?.[c.link]?.kind]?.hostsComponents).map(([n]) => n);
+  const unlinked = Object.entries(s.components ?? {}).filter(([, c]) => isObj(c) && (c.link ?? 'home') !== 'home' && !LINK_KINDS[ownEntry(s.links, c.link)?.kind]?.hostsComponents).map(([n]) => n);
   return { ...cov, unlinked, count: cov.unowned.length + cov.contested.length + cov.empty.length + unlinked.length };
 }
 
@@ -2831,7 +2832,7 @@ function registryActFails(base, sha) {
   if (!edits.length) return [];
   const acts = logObjects('act').filter((a) => a.class === 'registry-edit' && Object.hasOwn(a, 'entry_hash'));
   // a removal (entry_hash null) needs an act that removed the very entry main has (prior_hash)
-  const wrote = (a, l) => a.entry_hash === linkEntryHash(lands[l]) && (a.entry_hash !== null || a.prior_hash === linkEntryHash(S.sMain.links?.[l]));
+  const wrote = (a, l) => a.entry_hash === linkEntryHash(ownEntry(lands, l)) && (a.entry_hash !== null || a.prior_hash === linkEntryHash(ownEntry(S.sMain.links, l)));
   const bare = edits.filter((l) => !acts.some((a) => (a.refs ?? []).includes(`link:${l}`) && wrote(a, l)));
   return bare.length ? [`changes ${bare.map((l) => `links.${l}`).join(', ')} to an entry no registry-edit act wrote: make each change with link add|set|rm, which logs the act with the entry it wrote, rather than by hand in settings.md (an act for an earlier value of the link doesn't cover this one)`] : [];
 }
@@ -3464,7 +3465,7 @@ function cmdAsk() {
       if (k.type === 'stdin' && !allowedCommand(k.argv)) die(`secret ${x.name}: \`${k.argv.join(' ')}\` is not in settings.secret_commands, the commands the owner lets a secret be piped to`);
     }
   }
-  for (const l of jsonFlag('links') ?? []) if (l?.link !== undefined && !(loadSettings().links ?? {})[l.link]) die(`--links: link "${l.link}" is not in settings links (devteam.mjs links)`);
+  for (const l of jsonFlag('links') ?? []) if (l?.link !== undefined && !ownEntry(loadSettings().links, l.link)) die(`--links: link "${l.link}" is not in settings links (devteam.mjs links)`);
   // an inline link is logged as given, so a credential in it would be in the log and every view of the question (round 3, V4)
   for (const l of jsonFlag('links') ?? []) if (hasCredentials(l?.url)) die(`--links: ${redactUrl(l.url)} carries credentials; ${CREDENTIALS_REFUSED}`);
   const line = appendLog({
@@ -3839,6 +3840,9 @@ function readJsonInput(src, what) {
 }
 const emptyValue = (x) => x === null || x === undefined || x === '' || (Array.isArray(x) ? !x.length : typeof x === 'object' && !Object.keys(x).length);
 const isObj = (x) => !!x && typeof x === 'object' && !Array.isArray(x);
+// o[k] for a key that comes from settings, the log or the command line: only o's own entry, so a
+// name like constructor, toString or __proto__ is never mistaken for one (Object.prototype's).
+const ownEntry = (o, k) => (o !== null && typeof o === 'object' && Object.hasOwn(o, k) ? o[k] : undefined);
 
 // The owner's process accepts a review result: the pinned files still hash to the question line,
 // the result names them, satisfies the question's schema and, in the standard shape (data rows and
@@ -4682,7 +4686,7 @@ async function probeLinks() {
   if (!Object.keys(reg).length) return { skipped: [] };
   let cache = {};
   try { cache = readJson(PROBE_FILE); } catch {}
-  const due = Object.entries(reg).filter(([id, l]) => LINK_KINDS[l.kind] && !(cache[id] && Date.now() - Date.parse(cache[id].at) < DAY && cache[id].target === canonical(l)));
+  const due = Object.entries(reg).filter(([id, l]) => LINK_KINDS[l?.kind] && !(ownEntry(cache, id) && Date.now() - Date.parse(cache[id].at) < DAY && cache[id].target === canonical(l)));
   const end = Date.now() + (Number(process.env.DEVTEAM_PROBE_BUDGET_MS) || 20000);
   const skipped = [];
   const queue = [...due];
@@ -6085,7 +6089,7 @@ function collectMetrics(since) {
     for (const [id, l] of Object.entries(reg)) {
       const K = LINK_KINDS[l.kind];
       if (!K) continue;
-      const fresh = probes[id]?.target === canonical(l) ? probes[id] : null;
+      const fresh = ownEntry(probes, id)?.target === canonical(l) ? probes[id] : null;
       const why = K.reachable(l, id) ?? fresh?.problem ?? null;
       if (why) add('high', 'link-unreachable', id, why, K.fixHint(l, id));
       else if (fresh?.note) add('low', 'link-behind-auth', id, fresh.note, 'fine if the fleet needs no access to it; "check": false stops the daily probe');
@@ -7817,7 +7821,8 @@ function cmdLink() {
   const vals = [...given, ...(rest ?? [])];
   if (!['add', 'set', 'rm'].includes(sub) || !id) die('usage: link add <id> --kind <kind> --title t [kind fields: --url u, --remote r …] [--for scope…] [--notes n] [--source id]   |   link set <id> <field> [--] <value>   |   link rm <id>');
   supervisorOnly('link');
-  const cur = loadSettings().links?.[id];
+  if (!LINK_ID.test(id) || RESERVED_LINKS.includes(id)) die(`${id}: a link id is lowercase words joined by hyphens, and not ${RESERVED_LINKS.join(' or ')}`);
+  const cur = ownEntry(loadSettings().links, id);
   const kind = sub === 'add' ? flagStr('kind') : cur?.kind;
   if (sub !== 'add' && !cur) die(`no link ${id} (devteam.mjs links)`);
   if (sub === 'add' && cur) die(`${id} exists; use link set`);
