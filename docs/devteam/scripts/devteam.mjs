@@ -5150,8 +5150,11 @@ function goalReadings(gid) {
   const src = logGet(gid)?.measure?.source;
   if (!src) return all;
   const used = new Set();
+  // a view: another repo's main only when this machine can read it (else its readings can't be checked)
+  const link = logGet(gid)?.measure?.link ?? 'home';
+  const onMain = link === 'home' ? isOnMain : (sha) => { if (!repoReadable(link)) return false; const R = repo(link); return !!R.mainRef() && /^[0-9a-f]{7,40}$/.test(sha) && R.git(['merge-base', '--is-ancestor', sha, R.mainRef()]) !== null; };
   return all.filter((o) => {
-    if (src === 'repo') return o.source === 'repo' && typeof o.sha === 'string' && isOnMain(o.sha);
+    if (src === 'repo') return o.source === 'repo' && typeof o.sha === 'string' && onMain(o.sha);
     if (src === 'prod') return o.source === 'prod';
     if (o.created_by === 'owner') return o.channel !== 'chat';
     if (!o.approved || used.has(o.approved) || o.measure.value !== 1 || goalMetProblem(logGet(o.approved), gid, o.approved, o.created_at)) return false;
@@ -5164,27 +5167,29 @@ const goalFeatures = (gid) => [...features().values()].filter((f) => (f.goals ??
 // Run a repo or prod measure's check: repo on a throwaway checkout of main (so the number is main's,
 // with its sha), prod from the main checkout (it reads production, read-only by the owner's word).
 // The number is the last line of stdout.
+// A repo measure runs on the main of the repo its link names (measure.link, default home; spec §9).
 function runMeasureCheck(g) {
   const m = measureOf(g);
   let cwd = mainRoot;
   let sha = null;
+  const R = repo(m.source === 'repo' ? m.link ?? 'home' : 'home'); // an act: fails fast on a missing checkout
   if (m.source === 'repo') {
-    git(['fetch', '--quiet', 'origin'], mainRoot);
-    mainRefCache = undefined;
-    sha = git(['rev-parse', `${mainRef() ?? die('no main branch to read the measure on')}^{commit}`], mainRoot) ?? die('cannot resolve main');
-    cwd = detachedWorktree(sha, 'reading');
+    R.git(['fetch', '--quiet', 'origin'], R.root);
+    if (R.name === 'home') mainRefCache = undefined; else R.resetCaches();
+    sha = R.git(['rev-parse', `${R.mainRef() ?? die(`no main branch${R.name === 'home' ? '' : ` in ${R.name}`} to read the measure on`)}^{commit}`], R.root) ?? die('cannot resolve main');
+    cwd = detachedWorktree(sha, 'reading', R);
   }
   // The check is the supervisor's command (it drafted the goal), and goal status met runs it from
   // the owner's terminal or the dashboard: it runs as the supervisor, never as the owner, so what it
   // writes is the supervisor's and owner commands refuse it.
-  const env = { ...gateEnv(), DEVTEAM_ROLE: 'supervisor' };
+  const env = { ...gateEnv(null, R), DEVTEAM_ROLE: 'supervisor' };
   for (const k of ['DEVTEAM_CHANNEL', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE']) delete env[k];
   const r = spawnSync('sh', ['-c', m.check], { cwd, env, encoding: 'utf8', timeout: 900000, maxBuffer: 16 * 1024 * 1024 });
   if (r.status !== 0) die(`${g.id}'s check failed (${r.error?.message ?? `exit ${r.status}`}): ${(r.stderr ?? '').trim().slice(-400)}`);
   const last = (r.stdout ?? '').trim().split('\n').pop().trim();
   const value = Number(last);
   if (last === '' || !Number.isFinite(value)) die(`${g.id}'s check printed "${last.slice(0, 80)}" last, not a number`);
-  return { value, sha, out: (r.stdout ?? '').trim() };
+  return { value, sha, out: (r.stdout ?? '').trim(), on: R.name === 'home' ? 'main' : `${R.name}'s main` };
 }
 
 // Mechanical readiness. Definition gaps block approval; coverage gaps are what planning closes.
@@ -5202,6 +5207,8 @@ function goalCheck(g) {
   if (!m.source) (draft ? definition : coverage).push('no source: how the fleet reads the measure (repo, prod or owner; planning.md §1)');
   else if (!MEASURE_SOURCES.includes(m.source)) definition.push(`source "${m.source}" is not repo, prod or owner`);
   else if (m.source === 'owner' ? !m.question : !m.check) definition.push(m.source === 'owner' ? 'no question: the yes/no the owner answers when it is met (measure.question)' : 'no check: the command whose last line is the number (measure.check)');
+  if (m.link !== undefined && m.source !== 'repo') definition.push('measure.link is for a repo measure: the repo whose main its check runs on');
+  else if (m.link !== undefined && m.link !== 'home' && !LINK_KINDS[loadSettings().links?.[m.link]?.kind]?.hostsComponents) definition.push(`measure.link "${m.link}" is not a repo link (devteam.mjs links)`);
   // A horizon is the owner's real deadline, when there is one; never required, never guessed. The
   // forecast says when, from the measured rate (planning.md §1).
   if (g.horizon && Number.isNaN(Date.parse(g.horizon))) definition.push(`horizon "${g.horizon}" is not a date`);
@@ -5345,8 +5352,8 @@ function cmdGoal() {
   const writer = () => (flags.owner ? ownerWriter() : (supervisorOnly('goal'), { by: 'supervisor' }));
   const fields = () => ({
     title: flagStr('title'), outcome: flagStr('outcome'),
-    measure: ['measure', 'target', 'unit', 'direction', 'source', 'check', 'question'].some((k) => flagStr(k) !== undefined)
-      ? { ...(id ? logGet(id)?.measure : {}), ...(flagStr('measure') ? { description: flagStr('measure') } : {}), ...(flagStr('target') ? { target: Number(flagStr('target')) } : {}), ...(flagStr('unit') ? { unit: flagStr('unit') } : {}), ...(flagStr('direction') ? { direction: flagStr('direction') } : {}), ...(flagStr('source') ? { source: MEASURE_SOURCES.includes(flagStr('source')) ? flagStr('source') : die('--source is repo, prod or owner (planning.md §1)') } : {}), ...(flagStr('check') ? { check: flagStr('check') } : {}), ...(flagStr('question') ? { question: flagStr('question') } : {}) }
+    measure: ['measure', 'target', 'unit', 'direction', 'source', 'check', 'question', 'link'].some((k) => flagStr(k) !== undefined)
+      ? { ...(id ? logGet(id)?.measure : {}), ...(flagStr('measure') ? { description: flagStr('measure') } : {}), ...(flagStr('target') ? { target: Number(flagStr('target')) } : {}), ...(flagStr('unit') ? { unit: flagStr('unit') } : {}), ...(flagStr('direction') ? { direction: flagStr('direction') } : {}), ...(flagStr('source') ? { source: MEASURE_SOURCES.includes(flagStr('source')) ? flagStr('source') : die('--source is repo, prod or owner (planning.md §1)') } : {}), ...(flagStr('check') ? { check: flagStr('check') } : {}), ...(flagStr('question') ? { question: flagStr('question') } : {}), ...(flagStr('link') ? { link: flagStr('link') } : {}) }
       : undefined,
     // `none` clears it: a horizon is the owner's real deadline or nothing (planning.md §1)
     horizon: flagStr('horizon') === 'none' ? null : flagStr('horizon'),
@@ -5363,7 +5370,7 @@ function cmdGoal() {
     return out(appendLog({ type: 'goal', status: 'draft', ...f }, by).id);
   }
   if (sub === 'set') {
-    if (!id || logGet(id)?.type !== 'goal') die('usage: goal set <g-id> [--title …] [--outcome …] [--measure …] [--target n] [--unit u] [--direction up|down] [--source repo|prod|owner] [--check "cmd"] [--question "…"] [--horizon date] [--non-goals a b | \'["a","b"]\'] [--preconditions a b | \'["a","b"]\'] [--priority n] [--milestones \'[{"title","target","by","preconditions":[n],"tickets"}…]\'] [--plan-after <g-id>… --reason "…"] [--approved <qid>] [--owner]');
+    if (!id || logGet(id)?.type !== 'goal') die('usage: goal set <g-id> [--title …] [--outcome …] [--measure …] [--target n] [--unit u] [--direction up|down] [--source repo|prod|owner] [--check "cmd"] [--link <repo>] [--question "…"] [--horizon date] [--non-goals a b | \'["a","b"]\'] [--preconditions a b | \'["a","b"]\'] [--priority n] [--milestones \'[{"title","target","by","preconditions":[n],"tickets"}…]\'] [--plan-after <g-id>… --reason "…"] [--approved <qid>] [--owner]');
     const { by } = writer();
     const approved = flagStr('approved') ?? null;
     if (approved && by !== 'supervisor') die('the owner changes a goal directly; --approved is the supervisor applying an owner answer');
@@ -5475,7 +5482,7 @@ function cmdGoal() {
     const m = measureOf(g);
     if (to === 'met' && !flags.force && m.source === 'repo' && m.check) {
       const r = runMeasureCheck(g);
-      if (!reached(g, m.target, r.value)) die(`${id}'s check reads ${r.value} on main (${r.sha.slice(0, 12)}), not its target ${m.target}; --force to set it met anyway`);
+      if (!reached(g, m.target, r.value)) die(`${id}'s check reads ${r.value} on ${r.on} (${r.sha.slice(0, 12)}), not its target ${m.target}; --force to set it met anyway`);
     }
     if (to === 'met' && !flags.force && m.source === 'owner' && !goalReadings(id).some((x) => x.measure.value >= 1)) die(`${id} is met when the owner says so: answer its goal-met question, or record it with goal reading ${id} --value 1 --owner; --force to set it met anyway`);
     appendLog({ type: 'goal', op: 'set', id, status: to }, by);
@@ -5497,8 +5504,8 @@ function cmdGoal() {
     if (flags.run) {
       if (!['repo', 'prod'].includes(m.source) || !m.check) die(`${id} is read ${m.source ? `from ${m.source}` : 'by hand (no measure source)'}; --run runs a repo or prod measure's check`);
       const r = runMeasureCheck(g);
-      appendLog({ type: 'observation', source: m.source, subject: id, kind: 'reading', detail: m.source === 'repo' ? `reading ${r.value}${unit ? ` ${unit}` : ''} on main at ${r.sha.slice(0, 12)}` : `reading ${r.value}${unit ? ` ${unit}` : ''} from ${m.check}: ${r.out.slice(-300)}`, measure: { value: r.value, unit }, ...(r.sha ? { sha: r.sha } : {}), refs: [id] }, by);
-      return out(`recorded ${r.value} for ${id}${r.sha ? ` (main at ${r.sha.slice(0, 12)})` : ''}`);
+      appendLog({ type: 'observation', source: m.source, subject: id, kind: 'reading', detail: m.source === 'repo' ? `reading ${r.value}${unit ? ` ${unit}` : ''} on ${r.on} at ${r.sha.slice(0, 12)}` : `reading ${r.value}${unit ? ` ${unit}` : ''} from ${m.check}: ${r.out.slice(-300)}`, measure: { value: r.value, unit }, ...(r.sha ? { sha: r.sha } : {}), refs: [id] }, by);
+      return out(`recorded ${r.value} for ${id}${r.sha ? ` (${r.on} at ${r.sha.slice(0, 12)})` : ''}`);
     }
     const approved = flagStr('approved');
     if (approved !== undefined) {

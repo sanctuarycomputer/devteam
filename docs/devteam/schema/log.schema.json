@@ -119,6 +119,11 @@
               "question": {
                 "description": "For owner: the yes/no question that says it is met.",
                 "type": "string"
+              },
+              "link": {
+                "description": "For repo: the repo link whose main the check runs on (absent: home).",
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$"
               }
             },
             "additionalProperties": false

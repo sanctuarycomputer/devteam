@@ -4779,3 +4779,30 @@ test('link add --kind repo asks the owner a governance-edit question and writes 
     assert.ok(json(okIn(old, ['log', '--type', 'act', '--json'])).some((a) => a.class === 'registry-edit' && a.refs.includes('link:console') && /set path on link console/.test(a.what)));
   } finally { F.done(); }
 });
+
+test('a repo measure names the link it runs in (spec §9 measure.link): read on that repo\'s main, default home', () => {
+  const F = multiFixture('measure-link');
+  const { old, g, okIn, runIn } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  try {
+    const rest = ['--horizon', '2027-03-31', '--non-goals', 'none', '--preconditions', 'it builds'];
+    const G = okIn(old, ['goal', 'add', '--title', 'Console sources', '--outcome', 'one entry point', '--measure', 'files in src/', '--target', '1', '--unit', 'files', '--direction', 'down', '--source', 'repo', '--link', 'console', '--check', 'ls src | wc -l', ...rest, '--priority', '7'], SUP);
+    assert.equal(json(okIn(old, ['goal', 'show', G])).measure.link, 'console');
+    const trunk = g(['rev-parse', 'origin/trunk'], F.console);
+    assert.match(okIn(old, ['goal', 'reading', G, '--run'], SUP), new RegExp(`recorded 1 for ${G} \\(console's main at ${trunk.slice(0, 12)}\\)`), "console's tree (home has no src/), at console's main");
+    assert.deepEqual(json(okIn(old, ['goal', 'show', G])).readings.map((r) => [r.value, r.sha]), [[1, trunk]], "a reading counts when its sha is on its own repo's main");
+    // home is the default: the same check on home's main finds no src/
+    const H = okIn(old, ['goal', 'add', '--title', 'Home sources', '--outcome', 'x', '--measure', 'files in api/', '--target', '1', '--unit', 'files', '--direction', 'up', '--source', 'repo', '--check', 'ls api | wc -l', ...rest, '--priority', '8'], SUP);
+    assert.match(okIn(old, ['goal', 'reading', H, '--run'], SUP), new RegExp(`recorded 2 for ${H} \\(main at ${g(['rev-parse', 'origin/main'], old).slice(0, 12)}\\)`));
+    // a link that is no repo, or a link on a measure that isn't a repo's: definition gaps
+    okIn(old, ['goal', 'set', H, '--link', 'nope'], SUP);
+    assert.match(okIn(old, ['goal', 'check', H]), /measure\.link "nope" is not a repo link/);
+    const P = okIn(old, ['goal', 'add', '--title', 'Prod', '--outcome', 'y', '--measure', 'm', '--target', '1', '--unit', 'n', '--direction', 'up', '--source', 'prod', '--link', 'console', '--check', 'echo 1', ...rest, '--priority', '9'], SUP);
+    assert.match(okIn(old, ['goal', 'check', P]), /measure\.link is for a repo measure/);
+    // no console checkout here: reading it fails fast, saying what to clone where
+    write(path.join(old, 'docs/devteam/run/links.local.json'), JSON.stringify({ console: { path: path.join(F.base, 'not-cloned') } }));
+    assert.match(runIn(old, ['goal', 'reading', G, '--run'], SUP).err, /repo console: no checkout at .*not-cloned/);
+    okIn(old, ['goal', 'show', G]);
+    fs.rmSync(path.join(old, 'docs/devteam/run/links.local.json'));
+  } finally { F.done(); }
+});
