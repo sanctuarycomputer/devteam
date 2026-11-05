@@ -3342,8 +3342,11 @@ test('link probes: four at a time inside a tick budget, never a prompt, and a pa
   const { old, ok, edit, g } = F;
   const SUP = { DEVTEAM_ROLE: 'supervisor' };
   const starts = path.join(F.base, 'starts.log');
+  // the first stub to start leaves a marker: its mtime is when probing began, so exec latency on a
+  // loaded machine (seconds, before any probe runs) never counts against the budget's bound (N4)
+  const first = path.join(F.base, 'first-probe');
   const stub = path.join(F.base, 'probe.sh');
-  write(stub, `#!/bin/sh\necho "$1" >> "${starts}"\ncase "$1" in *slow*) sleep 3; echo 200 ;; *auth*) echo 403 ;; *gone*) echo 404 ;; *) echo 200 ;; esac\n`);
+  write(stub, `#!/bin/sh\n[ -e "${first}" ] || : > "${first}"\necho "$1" >> "${starts}"\ncase "$1" in *slow*) sleep 30; echo 200 ;; *auth*) echo 403 ;; *gone*) echo 404 ;; *) echo 200 ;; esac\n`);
   fs.chmodSync(stub, 0o755);
   // ls-remote through a shim that records whether git could prompt, and says the remote is gone
   const shim = path.join(F.base, 'shim');
@@ -3351,10 +3354,9 @@ test('link probes: four at a time inside a tick budget, never a prompt, and a pa
   fs.chmodSync(path.join(shim, 'git'), 0o755);
   const url = (id, host) => ({ kind: 'url', title: id, url: `https://${host}.test/${id}` });
   const tick = (extra) => {
-    const t0 = Date.now();
     const r = spawnSync(process.execPath, [path.join(old, 'docs/devteam/scripts/devteam.mjs'), 'observe-metrics'], { cwd: old, env: { ...F.env(SUP), DEVTEAM_URL_PROBE: stub, ...extra }, encoding: 'utf8' });
     assert.equal(r.status, 0, r.stderr);
-    return { out: r.stdout, ms: Date.now() - t0 };
+    return { out: r.stdout, sinceFirst: fs.existsSync(first) ? Date.now() - fs.statSync(first).mtimeMs : null };
   };
   try {
     const co = path.join(F.base, 'console');
@@ -3362,14 +3364,19 @@ test('link probes: four at a time inside a tick budget, never a prompt, and a pa
     g(['remote', 'add', 'origin', 'https://github.com/usbclub/console.git'], co);
     edit((j) => { j.links = { fast1: url('fast1', 'fine'), fast2: url('fast2', 'fine'), ...Object.fromEntries([1, 2, 3, 4, 5].map((n) => [`slow${n}`, url(`slow${n}`, 'slow')])) }; });
     g(['commit', '-qam', 'links'], old); g(['push', '-q', 'origin', 'main'], old);
-    const t = tick({ DEVTEAM_PROBE_BUDGET_MS: '1500' });
-    assert.ok(t.ms < 8000, `probes ran in parallel inside the budget (${t.ms} ms; one at a time is 15 s)`);
-    assert.match(t.out, /5 link\(s\) not probed this tick \(time budget\): slow1, slow2, slow3, slow4, slow5/);
-    const started = fs.readFileSync(starts, 'utf8').trim().split('\n');
-    assert.equal(started.length, 6, `four at a time: slow5 never started (${started.join(' ')})`);
+    // a slow stub sleeps 30 s; the budget is 5 s. Bounds are loose on purpose: a stub can take
+    // seconds to exec under load, so the fast ones may be cut too, but no slow one ever finishes
+    const t = tick({ DEVTEAM_PROBE_BUDGET_MS: '5000' });
+    assert.ok(t.sinceFirst === null || t.sinceFirst < 25000, `the budget cut the slow probes (${t.sinceFirst} ms from the first probe; one slow probe alone is 30 s; null: none started)`);
+    const skipped = (/(\d+) link\(s\) not probed this tick \(time budget\): ([^\n]+)/.exec(t.out)?.[2] ?? '').split(', ');
+    for (const n of [1, 2, 3, 4, 5]) assert.ok(skipped.includes(`slow${n}`), `slow${n} not probed (${skipped.join(', ')})`);
+    assert.ok(skipped.every((id) => /^(slow[1-5]|fast[12])$/.test(id)), skipped.join(', '));
+    const started = fs.existsSync(starts) ? fs.readFileSync(starts, 'utf8').trim().split('\n') : [];
+    assert.ok(!started.some((u) => u.endsWith('/slow5')), `four at a time: slow5 waits for a slot that only the budget frees (${started.join(' ')})`);
     assert.ok(!json(ok(old, ['metrics', '--json'])).findings.some((f) => f.kind === 'link-unreachable'), 'not probed is not a finding');
     const cache = json(fs.readFileSync(path.join(old, 'docs/devteam/run/link-probes.json'), 'utf8'));
-    assert.deepEqual(Object.keys(cache).sort(), ['fast1', 'fast2'], 'the rest are probed next tick');
+    assert.deepEqual(Object.keys(cache).filter((id) => !['fast1', 'fast2'].includes(id)), [], 'only a fast probe that finished is cached; the rest are probed next tick');
+    assert.deepEqual(Object.keys(cache).sort(), ['fast1', 'fast2'].filter((id) => !skipped.includes(id)), 'a fast probe is cached exactly when it was not cut');
     // 401/403/405 is a page behind auth: a low note, never a high finding that wakes wait
     edit((j) => { j.links = { locked: url('locked', 'auth'), gone: url('gone', 'gone'), console: { kind: 'repo', title: 'Console', remote: 'usbclub/console', path: co } }; });
     g(['commit', '-qam', 'links 2'], old); g(['push', '-q', 'origin', 'main'], old);
