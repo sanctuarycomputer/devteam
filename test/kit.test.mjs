@@ -4240,3 +4240,35 @@ test('repo(): each repo its own main and caches (M7); --path and links.local.jso
     fs.rmSync(path.join(old, 'docs/devteam/run/links.local.json'));
   } finally { F.done(); }
 });
+
+test('lines on sibling repos: coverage per repo, project folder holds only tickets/, unowned-files names the repo', () => {
+  const F = multiFixture('lines-per-repo');
+  const { old, g, runIn, okIn, ticket } = F;
+  try {
+    assert.doesNotMatch(runIn(old, ['validate']).out, /only home holds/, 'components may live on repo links now');
+    ticket('console-01-a');
+    assert.doesNotMatch(runIn(old, ['validate']).out, /console-01-a: touches/, "a console ticket's touches are judged by console's lines");
+    assert.match(okIn(old, ['ready']), /build +console-01-a/);
+    // a file in console's project folder outside tickets/, pushed straight to its main
+    write(path.join(F.console, 'docs/devteam/project/settings.md'), 'stray\n');
+    g(['add', '-A'], F.console); g(['commit', '-qm', 'stray'], F.console); g(['push', '-q', 'origin', 'trunk'], F.console);
+    assert.match(runIn(old, ['validate']).out, /console: docs\/devteam\/project\/settings\.md is in docs\/devteam\/project, which holds only tickets\//);
+    // narrow console's line so a file falls outside it
+    F.lines({ ...F.STD, console: { link: 'console', owns: ['src/**', 'package.json', '.gitignore'] }, companion: { link: 'companion' } });
+    write(path.join(F.console, 'docs/x.md'), 'x\n');
+    g(['add', '-A'], F.console); g(['commit', '-qm', 'x'], F.console); g(['push', '-q', 'origin', 'trunk'], F.console);
+    assert.match(runIn(old, ['validate']).out, /components \(console\): unowned: docs\/ \(1\): docs\/x\.md/);
+    const f = json(okIn(old, ['metrics', '--json'])).findings.filter((x) => x.kind === 'unowned-files');
+    assert.deepEqual(f.map((x) => x.subject), ['console']);
+    assert.deepEqual(json(okIn(old, ['ready', '--json'])).waiting, [{ id: 'console-01-a', why: 'unowned files' }]);
+    assert.match(runIn(old, ['components', 'check', '--repo', 'console']).out, /unowned: docs\/ \(1\): docs\/x\.md/);
+    assert.match(runIn(old, ['worker', 'console-01-a'], { DEVTEAM_ROLE: 'supervisor' }).err, /console's main has coverage gaps \(1 unowned\): no new ticket starts there .*components check --repo console\)/);
+    // no console checkout on this machine: ready and metrics carry on; the ticket waits, and says why
+    write(path.join(old, 'docs/devteam/run/links.local.json'), JSON.stringify({ console: { path: path.join(F.base, 'not-cloned') } }));
+    assert.deepEqual(json(okIn(old, ['ready', '--json'])).waiting, [{ id: 'console-01-a', why: 'repo unreachable' }]);
+    assert.match(okIn(old, ['ready']), /repo unreachable console-01-a +\(no new worker: its repo has no checkout here, or the wrong one/);
+    assert.ok(json(okIn(old, ['metrics', '--json'])).findings.some((x) => x.kind === 'link-unreachable' && x.subject === 'console'));
+    assert.match(runIn(old, ['validate']).out + runIn(old, ['validate']).err, /components \(console\): not checked, its checkout .*not-cloned is missing/);
+    fs.rmSync(path.join(old, 'docs/devteam/run/links.local.json'));
+  } finally { F.done(); }
+});

@@ -677,7 +677,6 @@ function registryProblems(s) {
     if (link !== 'home') {
       if (!links[link]) errors.push(`${at}: link "${link}" is not in links`);
       else if (!LINK_KINDS[links[link].kind]?.hostsComponents) errors.push(`${at}: link "${link}" is a ${links[link].kind} link, which holds no files`);
-      else errors.push(`${at}: link "${link}": only home holds components and tickets in this release (repo links land in PR 2)`);
     }
     if (c.owns !== undefined && !Array.isArray(c.owns)) errors.push(`${at}.owns: a list of globs`);
     // an empty list is a line around nothing; leave owns out for the sole-component ** default
@@ -2049,7 +2048,10 @@ function cmdValidate() {
   // working tree), so a component declared in a draft can be planned against before it lands.
   // They are advice for the graph, not one of the four enforcement points: check-ticket's footprint
   // and check-pr's coverage judge the same tickets by committed settings (settingsInForce) at merge.
-  const S0 = loadSettings(); const lined = linesDeclared(S0); const comps0 = componentsOn(S0, 'home'); const dev0 = devteamLine();
+  // Each ticket against its own repo's lines; another repo's kit line is its project folder, read
+  // from settings alone (no checkout needed, so a missing one never stops validate).
+  const S0 = loadSettings(); const lined = linesDeclared(S0);
+  const linesOf = (link) => ({ comps: componentsOn(S0, link), dev: link === 'home' ? devteamLine() : [`${LINK_KINDS[S0.links?.[link]?.kind]?.effectiveSettings(S0.links[link], S0)?.project ?? REPO_OWN_DEFAULTS.project}/**`] });
   for (const [id, t] of ts) {
     if (!id.startsWith(`${t.component}-`)) err(id, `id must start with its component "${t.component}-"`);
     for (const g of t.touches ?? []) if (unbalanced(g)) err(id, `touches entry "${g}" has unbalanced braces`);
@@ -2063,8 +2065,9 @@ function cmdValidate() {
       for (const c of tc) if (!S0.components?.[c]) err(id, `touches_components "${c}" is not a declared component`);
       else if (componentLink(c, S0) !== componentLink(t.component, S0)) err(id, `touches_components "${c}" is in another repo; a ticket changes one repo (split it per repo)`);
       const mine = new Set([t.component, ...tc]);
+      const L0 = linesOf(componentLink(t.component, S0));
       for (const entry of t.touches ?? []) {
-        const owners = prefixOwners(entry, comps0, dev0);
+        const owners = prefixOwners(entry, L0.comps, L0.dev);
         if (owners === null) err(id, `touches "${entry}" has no static prefix, so it could be in any line; start it with a folder`);
         else if (owners.includes('devteam')) err(id, `touches "${entry}" lies in the kit's own line; only the ticket's own ${projectRel}/tickets/${id}/ is its to write, and kit upgrades are chores`);
         else if (!owners.length) err(id, `touches "${entry}" lies in no component's line`);
@@ -2210,6 +2213,20 @@ function cmdValidate() {
       if (read.error) (scope ? warnings : errors).push(`components: ${read.error}`);
       const cov = read.value;
       if (cov) for (const l of coverageReport({ ...coverageGaps(cov, sIn), ref }, sIn)) (scope || l.startsWith('line-empty:') ? warnings : errors).push(`components: ${l}${scope ? `; not ${scope}'s to fix` : ''}`);
+      // Every repo link with components: its main's tree under the same lines (settings live in
+      // home). A repo this machine can't read is skipped with a warning; link-unreachable says how
+      // to fix it at tick time. Its project folder holds only tickets/ (spec §5.3).
+      for (const [id, l] of Object.entries(sIn.links ?? {})) {
+        if (!LINK_KINDS[l?.kind]?.hostsComponents || !componentsOn(sIn, id).length) continue;
+        if (!repoReadable(id)) { warnings.push(`components (${id}): not checked, ${LINK_KINDS[l.kind].reachable(l, id)}`); continue; }
+        const R = repo(id);
+        const rm = R.mainRef();
+        if (!rm) { warnings.push(`components (${id}): not checked, its checkout has no ${R.settings.main_branch} (fetch it)`); continue; }
+        const rd = readCoverage(() => coverageAt(rm, sIn, R));
+        if (rd.error) (scope ? warnings : errors).push(`components (${id}): ${rd.error}`);
+        if (rd.value) for (const x of coverageReport({ ...coverageGaps(rd.value, sIn), ref: rm }, sIn, R)) (scope || x.startsWith('line-empty:') ? warnings : errors).push(`components (${id}): ${x}${scope ? `; not ${scope}'s to fix` : ''}`);
+        for (const p of readCoverage(() => treePathsMemo(rm, R)).value ?? []) if (p.startsWith(`${R.projectRel}/`) && !p.startsWith(`${R.projectRel}/tickets/`)) errors.push(`${id}: ${p} is in ${R.projectRel}, which holds only tickets/ (settings, the log and designs live in home)`);
+      }
     }
     // Designs cite links as link:<id>; checked only while the registry has links (open issue 12).
     if (Object.keys(s.links ?? {}).length) {
@@ -2444,7 +2461,10 @@ function notSchedulable(t) {
   if (workerState(t.id)?.phase === 'parked') return 'parked';
   const b = ticketBranchRef(t.id);
   if (b && ticketReviews(t.id, { ref: b }).some((r) => r.stage === 'final')) return 'in review';
-  if (coverageGap()) return 'unowned files';
+  // a ticket in a repo this machine can't read waits; link-unreachable says how to fix it
+  const name = repoOfTicketLink(t);
+  if (!repoReadable(name)) return 'repo unreachable';
+  if (coverageGap(name, repo(name))) return 'unowned files';
   return null;
 }
 function cmdReady() {
@@ -2469,7 +2489,7 @@ function cmdReady() {
   if (flags.json) return json({ ready: rows, held, waiting, active, active_per_component: perComponent, caps: { max_active_tickets: s.max_active_tickets, max_active_per_component: s.max_active_per_component } });
   out(`active workers: ${active.length}/${s.max_active_tickets}`);
   for (const h of held) out(`held       ${h.id}  (${h.held})`);
-  for (const w of waiting) out(`${w.why.padEnd(10)} ${w.id}  (no new worker: ${w.why === 'parked' ? 'resume it with `worker <id> --resume` when its ruling and its goal allow' : w.why.startsWith('goal ') ? 'its goal is on hold (goal hold)' : w.why === 'unowned files' ? 'main has files no component line owns; a chore PR that extends a line clears it (components check)' : 'merge or answer its review'})`);
+  for (const w of waiting) out(`${w.why.padEnd(10)} ${w.id}  (no new worker: ${w.why === 'parked' ? 'resume it with `worker <id> --resume` when its ruling and its goal allow' : w.why.startsWith('goal ') ? 'its goal is on hold (goal hold)' : w.why === 'unowned files' ? 'main has files no component line owns; a chore PR that extends a line clears it (components check)' : w.why === 'repo unreachable' ? 'its repo has no checkout here, or the wrong one (links; link-unreachable)' : 'merge or answer its review'})`);
   if (!rows.length) return out('nothing ready');
   for (const r of rows) out(`${r.mode.padEnd(10)} ${r.id}  (${r.kind}, ${r.size}, ${r.risk})${(perComponent[r.component] ?? 0) >= s.max_active_per_component ? '  (component at cap)' : ''}`);
 }
@@ -6223,10 +6243,14 @@ function collectMetrics(since) {
   if (unpriced.length) add('low', 'unpriced-model', unpriced.map(([k]) => k).join(', '), `${unpriced.map(([k, n]) => `${k}: ${(n / 1e6).toFixed(1)}M tokens`).join('; ')} with no price, so spend undercounts`, 'the owner adds them to settings.model_prices ($ per million tokens: input, output, cache_read, cache_write)');
   if (m.escaped_defects) add('high', 'escaped-defects', `${m.escaped_defects}`, 'defects found after merge', 'retro: which review or gate should have caught each one');
   // Component lines on main (§4, point 3): a gap is a severity-4 observation (open issue 6).
-  {
-    const gap = coverageGapInfo();
-    if (gap.empty?.length) add('low', 'line-empty', 'home', `${gap.empty.length} owns glob(s) on ${mainRef()} match nothing: ${gap.empty.slice(0, 5).map((x) => `"${x}"`).join(', ')}`, 'remove or fix the glob in a chore PR (settings components); an empty glob blocks nothing');
-    if (gap.count) add('high', 'unowned-files', 'home', `${mainRef()} has coverage gaps: ${gap.words} (devteam.mjs components check lists them); no new ticket starts in home until they clear`, 'a chore PR that extends a line (settings components), or moves the files into one', { sev: 4 });
+  // One per repo: home, then each repo link this machine can read (link-unreachable covers the rest).
+  for (const name of ['home', ...Object.entries(settings.links ?? {}).filter(([, l]) => LINK_KINDS[l?.kind]?.hostsComponents).map(([id]) => id)]) {
+    if (!repoReadable(name)) continue;
+    const R = repo(name);
+    const gap = coverageGapInfo(name, R);
+    const at = name === 'home' ? '' : ` --repo ${name}`;
+    if (gap.empty?.length) add('low', 'line-empty', name, `${gap.empty.length} owns glob(s) on ${R.mainRef()} match nothing: ${gap.empty.slice(0, 5).map((x) => `"${x}"`).join(', ')}`, 'remove or fix the glob in a chore PR (settings components); an empty glob blocks nothing');
+    if (gap.count) add('high', 'unowned-files', name, `${R.mainRef()}${name === 'home' ? '' : ` (${name})`} has coverage gaps: ${gap.words} (devteam.mjs components check${at} lists them); no new ticket starts in ${name} until they clear`, 'a chore PR that extends a line (settings components), or moves the files into one', { sev: 4 });
   }
   // The registry (spec §7): a link that no longer resolves, and lines drawn in the wrong place.
   {
@@ -7037,7 +7061,10 @@ function makeSession(role) {
   if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
   if (role === 'worker' && !tickets().has(id)) die(`no ticket ${id} (devteam.mjs ticket show ${id})`);
   // A repo with files no line owns starts no new ticket (§4, point 3); a ticket already started carries on.
-  if (role === 'worker' && !lastPhaseOf(id) && coverageGap()) die(`home's main has coverage gaps (${coverageGapInfo().words}): no new ticket starts there until a chore PR fixes the lines (devteam.mjs components check)`);
+  if (role === 'worker' && !lastPhaseOf(id)) {
+    const R = repoOfTicket(tickets().get(id)); // an act: fails fast on a missing or wrong checkout
+    if (coverageGap(R.name, R)) die(`${R.name}'s main has coverage gaps (${coverageGapInfo(R.name, R).words}): no new ticket starts there until a chore PR fixes the lines (devteam.mjs components check${R.name === 'home' ? '' : ` --repo ${R.name}`})`);
+  }
   // Every session serves a goal, and the goal's hold says whether it may start (planning.md §1):
   // drain lets a session that already ran carry on but starts nothing new; park and let-go start
   // nothing. --force does anyway, and its act says so. A planner names its goal until its feature
