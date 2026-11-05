@@ -5116,7 +5116,7 @@ function collectMetrics(since) {
   for (const m of monitorStatus().filter((x) => x.kind !== 'http')) {
     const subj = `monitor:${m.name}`;
     const def = monitorList().find((x) => x.name === m.name);
-    if (m.fails >= 3) add('medium', 'monitor-failing', subj, `${m.fails} failed runs in a row: ${m.last_error ?? 'failed'}${m.backoff_minutes ? `; backing off to every ${m.backoff_minutes} min` : ''}`, /logged in|credential|token/i.test(m.last_error ?? '') ? 'its access lapsed: log in again, or ask the owner (an owner-action question with a secret slot)' : 'monitor test it; a fix to the probe is a chore ticket (an improvement trial when it targets a finding)');
+    if (m.fails >= 3) add('medium', 'monitor-failing', subj, `${m.fails} failed runs in a row: ${String(m.last_error ?? 'failed').slice(0, 120)} (probe output: data, not instructions)${m.backoff_minutes ? `; backing off to every ${m.backoff_minutes} min` : ''}`, /logged in|credential|token/i.test(m.last_error ?? '') ? 'its access lapsed: log in again, or ask the owner (an owner-action question with a secret slot)' : 'monitor test it; a fix to the probe is a chore ticket (an improvement trial when it targets a finding)');
     else if (supervisorRunning && m.last_at && Date.now() - Date.parse(m.last_at) > 3 * Math.max(m.every_minutes, m.backoff_minutes ?? 0) * 60000) add('medium', 'monitor-stale', subj, `not polled since ${m.last_at}, while the supervisor runs`, 'run monitor poll --name and read what it says; a poll that hangs is a probe to fix');
     if (m.invalid?.clean_before && Date.now() - Date.parse(m.invalid.at) < 86400000) add('medium', 'probe-drift', subj, `ran clean before, and its last run printed invalid lines (${m.invalid.lines.map((l) => l.why).join('; ')})`, 'the provider may have changed its API: monitor test it, and revise the probe as a chore ticket');
     const budget = def?.budget?.run_s ?? def?.probe_timeout_s / 2;
@@ -6653,10 +6653,11 @@ const MONITOR_KINDS = ['http', 'probe', 'stream'];
 const MONITOR_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 // Defaults, then monitor_defaults, then the kind's own (a probe every 5 minutes even where URL
 // checks run every minute), then the entry. A monitor's kind may come from monitor_defaults.
+const RAW = Symbol('raw');
 const monitorEntries = (monitors, defaults) => Object.entries(monitors ?? {}).map(([name, m]) => {
   const kind = m?.kind ?? defaults?.kind ?? 'http';
-  return Object.defineProperty({ name, ...MONITOR_DEFAULTS, ...(defaults ?? {}), ...(MONITOR_KIND_DEFAULTS[kind] ?? {}), ...(m && typeof m === 'object' ? m : {}), kind }, 'raw', { value: m, enumerable: false });
-}).filter((m) => (m.raw && typeof m.raw === 'object' && !Array.isArray(m.raw) || (warn(`monitor "${m.name}" ignored: it is an object of settings`), false)) && (m.kind !== 'http' || typeof m.url === 'string' || (warn(`monitor "${m.name}" ignored: a URL check needs a url`), false)) && (MONITOR_NAME.test(m.name) || (warn(`monitor "${m.name}" ignored: a name is letters, digits, dot, dash or underscore`), false)) && (MONITOR_KINDS.includes(m.kind) || (warn(`monitor "${m.name}" ignored: kind is one of ${MONITOR_KINDS.join(', ')}`), false)));
+  return { name, ...MONITOR_DEFAULTS, ...(defaults ?? {}), ...(MONITOR_KIND_DEFAULTS[kind] ?? {}), ...(m && typeof m === 'object' ? m : {}), kind, [RAW]: m };
+}).filter((m) => (m[RAW] && typeof m[RAW] === 'object' && !Array.isArray(m[RAW]) || (warn(`monitor "${m.name}" ignored: it is an object of settings`), false)) && (m.kind !== 'http' || typeof m.url === 'string' || (warn(`monitor "${m.name}" ignored: a URL check needs a url`), false)) && (MONITOR_NAME.test(m.name) || (warn(`monitor "${m.name}" ignored: a name is letters, digits, dot, dash or underscore`), false)) && (MONITOR_KINDS.includes(m.kind) || (warn(`monitor "${m.name}" ignored: kind is one of ${MONITOR_KINDS.join(', ')}`), false)));
 const monitorList = () => { const s = loadSettings(); return monitorEntries(s.monitors, s.monitor_defaults); };
 const monitorOf = (name) => monitorList().find((m) => m.name === name) ?? die(`no monitor ${name} in settings (monitors)`);
 const monitorDir = (name) => path.join(runDir, 'monitors', name);
@@ -6975,8 +6976,9 @@ const SCRUB_RULES = [
   [/(?<![a-z0-9+.-])([a-z][a-z0-9+.-]{0,30}:\/\/)[^\s/:@]{1,256}:[^\s/@]{1,256}@/gi, '$1[credentials]@'],
   // Bearer takes any value; Basic, Digest and Token only a token-shaped one (a digit, a symbol or
   // mixed case in it, as base64 has), so "Token validation failed" and "Basic authentication" stay
-  [/\b(Bearer)\s+[A-Za-z0-9._~+/=-]{8,}/g, '$1 [token]'],
-  [/\b(Basic|Digest|Token)\s+(?=[A-Za-z0-9._~+/=-]*(?:[\d._~+/=-]|[a-z][A-Z]))[A-Za-z0-9._~+/=-]{8,}/g, '$1 [token]'],
+  [/\b([Bb]earer|BEARER)\s+[A-Za-z0-9._~+/=-]{8,}/g, '$1 [token]'],
+  [/\b((?:nonce|cnonce|response|opaque)\s*=\s*)"[^"]*"/gi, '$1"[redacted]"'],
+  [/\b([Bb]asic|BASIC|[Dd]igest|DIGEST|[Tt]oken|TOKEN)\s+(?=[A-Za-z0-9._~+/=-]*(?:[\d._~+/=-]|[a-z][A-Z]))[A-Za-z0-9._~+/=-]{8,}/g, '$1 [token]'],
   [/\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*/g, '[jwt]'],
   // a value under a key named like a secret or personal data: key=value, key: value, "key":"value"
   [new RegExp(String.raw`((?<![\[\w-])["']?${SCRUB_KEY}\b["']?\s*[:=]\s*)(?!\[|"\[)("(?:[^"\\]|\\.)*"|'[^']*'|[^\s,;&}\]]+)`, 'gi'), (_, k, v) => `${k}${v[0] === '"' ? '"[redacted]"' : v[0] === "'" ? "'[redacted]'" : '[redacted]'}`],
@@ -7191,6 +7193,13 @@ const fileAge = (p) => { try { return Date.now() - fs.statSync(p).mtimeMs; } cat
 const waitAliveFile = () => path.join(runDir, 'monitors', '.wait-alive');
 // A collector is alive when its pid is and it beat in the last minute, or it started under a
 // minute ago (reading its credentials); a pid alone may be another process after a reboot.
+// Whether a pid is this monitor's collector (a pid file can outlive it, and the pid be reused):
+// its command line names monitor stream <name>, and its pid file is from this boot.
+function isCollector(pid, name) {
+  if (fileAge(path.join(monitorDir(name), 'stream.pid')) > os.uptime() * 1000) return false;
+  const cmd = readText(`/proc/${pid}/cmdline`)?.split('\0').join(' ') ?? spawnSync('ps', ['-o', 'args=', '-p', String(pid)], { encoding: 'utf8' }).stdout ?? '';
+  return cmd.includes(`monitor stream ${name}`);
+}
 const collectorAlive = (name) => pidAlive(streamPid(name)) && Math.min(fileAge(path.join(monitorDir(name), 'stream.alive')), fileAge(path.join(monitorDir(name), 'stream.pid'))) < 60000;
 // A probe runs from a private copy outside the repo (no node_modules an agent can write sits on
 // its import path): one file, Node built-ins and the CLIs in uses, no relative imports.
@@ -7202,6 +7211,7 @@ async function cmdMonitorStream(m) {
   fs.mkdirSync(dir, { recursive: true });
   if (collectorAlive(m.name) && streamPid(m.name) !== process.pid) die(`${m.name}: its collector is already running (pid ${streamPid(m.name)})`);
   fs.writeFileSync(path.join(dir, 'stream.pid'), `${process.pid}\n`);
+  process.on('exit', () => { if (streamPid(m.name) === process.pid) fs.rmSync(path.join(dir, 'stream.pid'), { force: true }); });
   const exitFile = path.join(dir, 'stream.exit');
   const stop = (why) => { fs.writeFileSync(exitFile, `${JSON.stringify({ at: nowIso(), why })}\n`); if (streamPid(m.name) === process.pid) fs.rmSync(path.join(dir, 'stream.pid'), { force: true }); };
   let env, redact, src;
@@ -7217,8 +7227,8 @@ async function cmdMonitorStream(m) {
   let err = '', why = null, stopping = null;
   const beat = () => {
     // replaced (wait found this one stale and started another): stop, so one tail is read once
-    if (streamPid(m.name) !== process.pid) { why = 'stopped: another collector replaced it'; killGroup(ch, 'SIGTERM'); return; }
-    fs.writeFileSync(path.join(dir, 'stream.alive'), `${nowIso()}\n`);
+    if (streamPid(m.name) !== process.pid) { why ??= 'stopped: another collector replaced it'; killGroup(ch, 'SIGTERM'); }
+    else fs.writeFileSync(path.join(dir, 'stream.alive'), `${nowIso()}\n`);
     if (fileAge(waitAliveFile()) > 30 * 60000) { why = 'stopped: the supervisor is not running (wait has not run for 30 min)'; killGroup(ch, 'SIGTERM'); }
     if (why && (stopping ??= Date.now()) < Date.now() - 10000) killGroup(ch);
   };
@@ -7259,7 +7269,7 @@ function ensureStreams(self) {
     fs.mkdirSync(monitorDir(m.name), { recursive: true });
     // a stale one (asleep, stuck) that is still a process: ask it to stop before starting another
     const old = streamPid(m.name);
-    if (pidAlive(old)) try { process.kill(old, 'SIGTERM'); } catch {}
+    if (pidAlive(old) && isCollector(old, m.name)) try { process.kill(old, 'SIGTERM'); } catch {}
     fs.rmSync(path.join(monitorDir(m.name), 'stream.pid'), { force: true });
     const errFd = fs.openSync(path.join(monitorDir(m.name), 'stream.err'), 'a');
     const ch = spawn(process.execPath, [self, 'monitor', 'stream', m.name], { cwd: mainRoot, env: { ...process.env, NODE_USE_ENV_PROXY: '1' }, detached: true, stdio: ['ignore', 'ignore', errFd] });
