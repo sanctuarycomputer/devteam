@@ -23,19 +23,15 @@ The dashboard trusts a request because it reaches loopback. It allows only a `Ho
 
 These are prerequisites, and they also fix today's collisions: two projects sharing the `devteam` tmux session, where window names like `plan-<feature>` or `dashboard` clash and `send <id>` could type into the other project's worker, and two dashboards fighting over 4321.
 
-- **Port.** `dashboard_port` defaults to `null`. With an explicit number, the dashboard uses that and nothing else. With `null`:
+- **Port.** `dashboard_port` defaults to `null`. With an explicit number in the settings, or `--port` on the command line, the dashboard uses that and saves nothing. With `null`:
   1. If `run/dashboard-port` holds a port and it is free, use it. This keeps the owner's bookmark stable.
   2. Otherwise, scan 4321–4345 (as in §3). Take the port after the highest one that answers as devteam, skipping any port that something else holds.
   3. If that runs past 4345, take the lowest free port in the range.
   4. If all 25 are taken, stop with a message naming the range and saying how to pin a port.
   5. Save the chosen port to `run/dashboard-port`.
 - **Pinned outside the range.** A pinned port outside 4321–4345 works, but the dashboard warns once at start that the hub won't list it.
-- **tmux session.** `tmux_session` defaults to `null`, meaning use the session saved in `run/tmux-session`. If none is saved, use `devteam-<project name>` (the project name from `init --name`, slugged) and save it.
-- **Migration, so a running fleet keeps what it has.** When the setting is `null` and `run/tmux-session` doesn't exist yet:
-  - If a tmux session named `devteam` exists with a window named after one of this project's live sessions (a ticket id or `plan-<feature>`), save `devteam`.
-  - Likewise for the port: when the setting is `null`, `run/dashboard-port` doesn't exist, and this project's dashboard is answering on 4321 (its `/api/hello` returns this repo root), save 4321.
-
-  Stacks therefore keeps `devteam` and 4321 with no change. A new project gets `devteam-<name>` and the next free port.
+- **tmux session.** `tmux_session` defaults to `null`, meaning use the session saved in `run/tmux-session`. If none is saved, use `devteam-<project>`, where `<project>` is `settings.project` (written by `init --name`, defaulting to the repo's folder name), slugged. Resolving the name writes nothing. `run/tmux-session` is written only when the kit actually creates the tmux session (the first `worker` or `planner`), so a read-only command, or CI, never writes into `run/`.
+- **Migration, so a running fleet keeps what it has.** When the setting is `null` and `run/tmux-session` doesn't exist yet, and a tmux session named `devteam` exists with a window named after one of this project's live sessions (a ticket id or `plan-<feature>`), the resolved name is `devteam`, saved the first time it is used. A second project on the machine sees no window of its own there, so it gets `devteam-<project>`. The port needs no special case: with nothing answering in the range, the "+1" rule starts at 4321. So Stacks keeps `devteam` and 4321 with no change, and a new project gets `devteam-<project>` and the next port.
 - **Machine-local files.** `run/dashboard-port` and `run/tmux-session` join `RUN_KNOWN`. Both are machine-local, so `fleet status` neither blocks a move on them nor lists them to copy. A new machine picks its own.
 - **Every command uses the resolved session name** (`worker`, `planner`, `send`, metrics, the pane checks), via one helper, never the raw setting. `supervisor.md` §11's dashboard restart command names the project's session (`devteam.mjs settings --get tmux_session` resolves it).
 
@@ -50,7 +46,7 @@ Each dashboard answers `GET /api/hello`:
 
 - `kit` is `settings.upstream_base` (such as `v0.18.1`), with `+local` appended when the kit that is running differs from the kit committed on the project's main: the kit's files outside `project/` and `run/`, compared by git blob. That happens with uncommitted edits, a branch's kit, or `DEVTEAM_OWN_KIT=1`. It is computed once, at start, offline, and is never compared with upstream over the network.
 - `inbox` is the number of open owner questions. `fleet.mode` is `run`, `drain` or `park`. `fleet.workers` is the number of live worker and planner sessions.
-- It is built from the dashboard's most recent `/api/data` result, which the dashboard already computes and caches. `/api/hello` never recomputes (on a long log that takes 13–47 s). Before the first result exists, `inbox` and `fleet` are `null`.
+- The dashboard does not cache `/api/data`: each request runs `dashboard-data`, which takes 13–47 s on a long log. So the counts come from a new, light subcommand, `devteam.mjs hello --json`, which folds the log for open owner questions, the fleet mode and the live sessions, without metrics or git. The dashboard runs it at start and then every 30 s in the background, keeping the last result. `/api/hello` answers instantly from that result and never waits for a run. Before the first run finishes, `inbox` and `fleet` are `null`.
 - It sits behind the same `Host` guard as every dashboard route, so only `127.0.0.1:<port>` and `localhost:<port>` get an answer.
 
 ### 3. The hub
@@ -84,8 +80,8 @@ On a hosted machine, the same hub page is the deployment's root, and instances a
   - Killing the hub's dashboard moves the hub to the other within 30 s. The test uses a shortened retry interval through an env var, only in tests.
 - The hub refuses a foreign `Host` and has no POST routes.
 - `/api/hello` doesn't recompute: it returns `null` counts before the first data result.
-- Migration: a project with a live log and a `devteam` tmux session holding its window saves `devteam`, and one answering on 4321 saves 4321.
-- The tests use ports outside the real range (an env override for the range base), so a test never collides with, or lists, a real instance on the machine.
+- Migration: a project whose live session has a window in a `devteam` tmux session resolves to `devteam`. A second project resolves to `devteam-<project>`. A read-only command writes no `run/tmux-session`.
+- The tests never touch the real ports. `DEVTEAM_HUB_PORT` (the hub's port) and `DEVTEAM_PORT_BASE` (the start of the 25-port range) are set for the whole test file, at the top, so every dashboard any test starts, including the existing tests' dashboards that pass `--port`, uses fixture ports and never becomes the machine's hub on 4320. `DEVTEAM_HUB_RETRY_MS` shortens the 30 s takeover retry for the failover test. These three variables are for tests and are documented as such.
 
 ## Migration (for the release notes)
 
