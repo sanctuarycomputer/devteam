@@ -7492,7 +7492,10 @@ function fleetStatus() {
   const op = fleetOpInForce();
   const since = legacy ? legacy.created_at : op ? fleetAt(op.fleet) : null;
   const d = fm ? { id: legacy?.id ?? op?.fleet ?? 'holds', created_at: since } : null;
-  if (!flags['no-fetch'] && commonDir) git(['fetch', '--quiet', 'origin']);
+  // Every repo link, and whether this machine can read it (a view: never fails on one it can't).
+  const repoLinks = Object.entries(s.links ?? {}).filter(([, l]) => LINK_KINDS[l?.kind]?.hostsComponents);
+  const readableLinks = repoLinks.filter(([id]) => repoReadable(id)).map(([id]) => repo(id));
+  if (!flags['no-fetch'] && commonDir) { git(['fetch', '--quiet', 'origin']); for (const R of readableLinks) { R.git(['fetch', '--quiet', 'origin']); R.resetCaches(); } }
   mainRefCache = undefined;
   const main = mainRef();
   const blockers = [];
@@ -7501,14 +7504,23 @@ function fleetStatus() {
 
   const sessions = liveSessions().map((x) => {
     const phase = lastPhaseOf(x.name);
+    // a session in a repo this machine can't read: one blocker that says what to clone where
+    if (!x.readable) {
+      const l = s.links?.[x.repoName];
+      const p = `its repo ${x.repoName} has no checkout here, or the wrong one: ${LINK_KINDS[l?.kind]?.fixHint(l, x.repoName) ?? `no repo link "${x.repoName}"`}`;
+      blockers.push(`${x.name}: ${p}`);
+      return { name: x.name, role: x.role, branch: x.branch, repo: x.repoName, readable: false, parked: phase?.to === 'parked', phase: phase?.to ?? null, problems: [p] };
+    }
+    // its branch, remote and handoff in its own repo (home's for a home ticket or a planner)
+    const R = x.repo;
     const cause = phase?.to === 'parked' ? parkCauseAt(x.name, phase.created_at) : null;
-    const local = resolveCommit(`refs/heads/${x.branch}`);
-    const remote = resolveCommit(`refs/remotes/origin/${x.branch}`);
+    const local = R.resolveCommit(`refs/heads/${x.branch}`);
+    const remote = R.resolveCommit(`refs/remotes/origin/${x.branch}`);
     const dirty = fs.existsSync(x.wt) ? workLines(git(['status', '--porcelain'], x.wt)) : [];
-    const hc = remote ? handoffCommit(`refs/remotes/origin/${x.branch}`, x.name) : null;
-    const handoffAt = hc ? hc.at : remote && git(['cat-file', '-e', `${remote}:${x.handoff}`]) !== null ? git(['log', '-1', '--format=%cI', remote, '--', x.handoff]) : null;
+    const hc = remote ? handoffCommit(`refs/remotes/origin/${x.branch}`, x.name, R) : null;
+    const handoffAt = hc ? hc.at : remote && R.git(['cat-file', '-e', `${remote}:${x.handoff}`]) !== null ? R.git(['log', '-1', '--format=%cI', remote, '--', x.handoff]) : null;
     const r = {
-      name: x.name, role: x.role, branch: x.branch,
+      name: x.name, role: x.role, branch: x.branch, ...(x.repoName === 'home' ? {} : { repo: x.repoName, readable: true }),
       parked: phase?.to === 'parked', phase: phase?.to ?? null,
       pushed: !!remote && (!local || local === remote), local, remote,
       clean: !dirty.length, uncommitted: dirty.slice(0, 20),
@@ -7592,8 +7604,10 @@ function fleetStatus() {
     if (dirty || unpushed) strays.push(`${n} (${[dirty && `${dirty} uncommitted`, unpushed && `${unpushed} commit(s) on no remote`].filter(Boolean).join(', ')})`);
   }
   if (strays.length) blockers.push(`worktrees holding work that isn't on the remote: ${strays.join('; ')}: push or land it, or remove the worktree`);
-  const unpushedBranches = (git(['for-each-ref', '--format=%(refname:short)', 'refs/heads']) ?? '').split('\n').filter(Boolean)
-    .filter((b) => Number(git(['rev-list', '--count', b, '--not', '--remotes']) ?? 0) > 0 && git(['cherry', mainRef() ?? 'HEAD', b])?.split('\n').some((l) => l.startsWith('+')));
+  // in every repo this machine can read: home's branches as before, another repo's named <repo>:<branch>
+  const unpushedIn = (R) => (R.git(['for-each-ref', '--format=%(refname:short)', 'refs/heads']) ?? '').split('\n').filter(Boolean)
+    .filter((b) => Number(R.git(['rev-list', '--count', b, '--not', '--remotes']) ?? 0) > 0 && R.git(['cherry', R.mainRef() ?? 'HEAD', b])?.split('\n').some((l) => l.startsWith('+')));
+  const unpushedBranches = [...unpushedIn(repo('home')), ...readableLinks.flatMap((R) => unpushedIn(R).map((b) => `${R.name}:${b}`))];
   if (unpushedBranches.length) warnings.push(`local branches with commits on no remote (squash-merged ones show here too): ${unpushedBranches.join(', ')}: push any that still matter`);
   if ((git(['stash', 'list']) ?? '').trim()) warnings.push('git stash has entries; they stay here: commit what matters to a branch and push it');
 
@@ -7612,15 +7626,36 @@ function fleetStatus() {
     prs = texts.map((b) => ({ headRefName: b, title: (readText(path.join(dir, `${b}.md`)) ?? '').split('\n')[0].replace(/^# /, '') }));
     if (texts.length) warnings.push(`forge is git: the PR text for ${texts.join(', ')} is only in run/pr here; copy run/pr/ to the new machine`);
   }
+  // each repo link on GitHub lists its own (forge git PR text is in home's run/pr, above)
+  for (const R of readableLinks.filter((x) => x.settings.forge !== 'git')) {
+    let theirs = null;
+    try { theirs = JSON.parse(R.gh(['pr', 'list', '--state', 'open', '--json', 'number,title,headRefName,url']) ?? 'null'); } catch { theirs = null; }
+    if (theirs === null) warnings.push(`gh could not list ${R.name}'s open PRs`);
+    else prs = [...(prs ?? []), ...theirs.map((p) => ({ ...p, headRefName: `${R.name}:${p.headRefName}` }))];
+  }
 
+  // Every repo link: where its checkout is here, and on GitHub whether its main has the devteam
+  // workflow (defence in depth: merge runs the same checks). Only with repo links, so a
+  // single-repo project's JSON and text are as before.
+  const repos = repoLinks.map(([id, l]) => {
+    const at = linkLocation(id);
+    const readable = repoReadable(id);
+    const R = readable ? repo(id) : null;
+    const forge = LINK_KINDS[l.kind].effectiveSettings(l, s).forge;
+    const workflow = R && forge === 'github' ? !!R.mainRef() && R.git(['cat-file', '-e', `${R.mainRef()}:.github/workflows/devteam.yml`]) !== null : null;
+    if (!readable) blockers.push(`${id}: ${LINK_KINDS[l.kind].fixHint(l, id)}`);
+    if (workflow === false) warnings.push(`${id} has no devteam workflow on its main (init --github --repo ${id}); merge runs the same checks, so this is defence in depth`);
+    return { id, remote: redactUrl(l.remote), path: at, found: fs.existsSync(at), readable, workflow };
+  });
   const checklist = moveChecklist(s, memory);
   const ready = !blockers.length;
   const parity = ready ? parityPrint() : null;
-  const r = { parity, supervisor_handoff: sh0 ? { at: sh0.at, current: handoffOk } : null, fleet: fm ? { mode: fm, op: op?.fleet ?? legacy?.id ?? null, at: since, host: legacy ? drainHost(legacy) : op?.host ?? null, reason: legacy ? drainReason(legacy) : op?.reason ?? null } : null, sessions, log: { landed: !unlanded.length, unlanded, left_behind: leftBehind }, spend: { unobserved: spendOthers, supervisor_usd: supUsd }, reviews: { uncommitted, drafts }, open_prs: prs ?? [], open_questions: openQs, blockers, warnings, ready, checklist };
+  const r = { parity, supervisor_handoff: sh0 ? { at: sh0.at, current: handoffOk } : null, fleet: fm ? { mode: fm, op: op?.fleet ?? legacy?.id ?? null, at: since, host: legacy ? drainHost(legacy) : op?.host ?? null, reason: legacy ? drainReason(legacy) : op?.reason ?? null } : null, sessions, log: { landed: !unlanded.length, unlanded, left_behind: leftBehind }, spend: { unobserved: spendOthers, supervisor_usd: supUsd }, reviews: { uncommitted, drafts }, open_prs: prs ?? [], open_questions: openQs, ...(repoLinks.length ? { repos } : {}), blockers, warnings, ready, checklist };
   if (flags.json) return json(r);
   out(fm ? `${fm === 'park' ? 'parked' : 'draining'}${since ? ` since ${since}` : ''} (${r.fleet.op ?? 'every goal held one by one'}${r.fleet.host ? `, on ${r.fleet.host}` : ''})${r.fleet.reason ? `: ${r.fleet.reason}` : ''}` : 'neither parked nor drained');
   out(`\nsessions:${sessions.length ? '' : ' none'}`);
-  for (const x of sessions) out(`  ${x.name.padEnd(28)} ${x.parked ? 'parked' : fm === 'drain' ? `STILL RUNNING (${x.phase ?? '-'})` : `NOT PARKED (${x.phase ?? '-'})`}  ${x.pushed ? 'pushed' : 'NOT PUSHED'}  ${x.clean ? 'clean' : 'UNCOMMITTED'}  ${x.handoff ? 'handoff' : 'NO HANDOFF'}`);
+  for (const x of sessions) out(x.readable === false ? `  ${x.name.padEnd(28)} ${x.parked ? 'parked' : `NOT PARKED (${x.phase ?? '-'})`}  ${x.repo}: NO CHECKOUT HERE` : `  ${x.name.padEnd(28)} ${x.parked ? 'parked' : fm === 'drain' ? `STILL RUNNING (${x.phase ?? '-'})` : `NOT PARKED (${x.phase ?? '-'})`}  ${x.pushed ? 'pushed' : 'NOT PUSHED'}  ${x.clean ? 'clean' : 'UNCOMMITTED'}  ${x.handoff ? 'handoff' : 'NO HANDOFF'}${x.repo ? `  (${x.repo})` : ''}`);
+  if (repoLinks.length) { out('\nrepos:'); for (const x of repos) out(`  ${x.id.padEnd(28)} ${x.remote} at ${x.path}  ${x.readable ? 'found' : x.found ? 'WRONG CHECKOUT' : 'MISSING'}${x.workflow === false ? '  no devteam workflow' : ''}`); }
   out(`\nlog: ${unlanded.length ? `not landed (${unlanded.map((u) => u.file).join(', ')}): run log-sync, then merge --chore log` : `on ${s.main_branch}`}${leftBehind ? " (the log's own merge act stays behind; git keeps the merge)" : ''}`);
   out(`spend: ${spendOthers.length ? `not yet observed for ${spendOthers.map((x) => `${x.who} $${x.usd}`).join(', ')}` : 'observed up to now'}${supUsd ? `; the supervisor's own $${supUsd} since its last observe-spend` : ''}`);
   out(`review results: ${uncommitted.length ? uncommitted.map((u) => `${u.id} not committed to ${u.ref}`).join('; ') : 'all in their PRs'}${drafts.length ? `; drafts that won't move: ${drafts.join(', ')}` : ''}`);
@@ -7650,8 +7685,15 @@ function moveChecklist(s, memory = []) {
     else if (k.type === 'stdin') commands.add(k.argv.slice(0, 2).join(' '));
   }
   const files = (s.worktree_files ?? []).filter((f) => !keys.has(f));
+  // each repo link cloned where its path says (its checkout's own origin when it is here)
+  const siblings = Object.entries(s.links ?? {}).filter(([, l]) => LINK_KINDS[l?.kind]?.hostsComponents).map(([id, l]) => {
+    const from = redactUrl((repoReadable(id) ? git(['config', '--get', 'remote.origin.url'], linkLocation(id)) : null) ?? l.remote);
+    return `clone ${redactUrl(l.remote)}: git clone ${shq(from)} ${shq(linkLocation(id))} (where settings path says)`;
+  });
   return [
     `clone the repo: git clone ${url}, and cd into it`,
+    ...siblings,
+    ...(fs.existsSync(LINKS_LOCAL) ? ['this machine kept its own checkout paths in run/links.local.json (it doesn\'t move): on the new machine, clone where settings say, or write run/links.local.json there with that machine\'s paths'] : []),
     pins.length ? `install the pinned tools from ${pins.join(', ')} (asdf: asdf install)` : 'install Node 18 or newer',
     `install git, tmux${s.forge === 'git' ? '' : ', the GitHub CLI'} and ${agent} with superpowers; log in to ${agent}${s.forge === 'git' ? '' : ' and gh (gh auth login)'}`,
     ...(files.length ? [`copy these gitignored files from the old checkout over a secure channel (never git, chat or the log): ${files.join(', ')}`] : []),

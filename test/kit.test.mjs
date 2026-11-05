@@ -4576,3 +4576,50 @@ test('a github-forge sibling: gh is asked about that repo', () => {
     assert.match(fs.readFileSync(logf, 'utf8'), /^pr view ticket\/console-01-a --json \S+ -R usbclub\/console$/m);
   } finally { F.done(); }
 });
+
+test('fleet status checks a sibling session against its own remote and lists every repo', () => {
+  const F = multiFixture('fleet-multi');
+  const { old, g, okIn, ticket } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const W = { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'console-01-a' };
+  try {
+    ticket('console-01-a');
+    const w = path.join(old, '.worktrees', 'console-01-a');
+    g(['worktree', 'add', '-q', '-b', 'ticket/console-01-a', w, 'origin/trunk'], F.console);
+    okIn(w, ['phase', 'build', '--task', 'T1'], W);
+    write(path.join(w, 'src/a.js'), 'a\n');
+    g(['add', '-A'], w); g(['commit', '-qm', 'T1'], w);
+    okIn(old, ['fleet', 'park', '--reason', 'move'], SUP);
+    okIn(w, ['handoff'], W, {}, 'Done: T1. Next: T2.\n');
+    okIn(w, ['phase', 'parked', '--note', 'parked'], W);
+    const st = json(okIn(old, ['fleet', 'status', '--json', '--no-fetch'], SUP));
+    const s = st.sessions.find((x) => x.name === 'console-01-a');
+    assert.equal(s.repo, 'console');
+    assert.equal(s.pushed, true, "its branch is on console's origin (handoff pushed it)");
+    assert.equal(s.handoff, true);
+    assert.deepEqual(st.repos.map((r) => [r.id, F.real(r.path), r.found]), [['companion', F.real(F.companion), true], ['console', F.real(F.console), true]]);
+    assert.ok(st.checklist.some((c) => /^clone .*console\.git: git clone '\S*console\.git' '\S*\/console' /.test(c)), 'the new machine clones each sibling where its path says');
+    assert.match(okIn(old, ['fleet', 'status', '--no-fetch'], SUP), /\nrepos:\n {2}companion +.*\n {2}console +/);
+    // a commit not on console's origin is a blocker named for console's remote
+    okIn(w, ['phase', 'build'], W);
+    write(path.join(w, 'src/b.js'), 'b\n');
+    g(['add', '-A'], w); g(['commit', '-qm', 'T2'], w);
+    okIn(w, ['phase', 'parked', '--note', 'parked'], W);
+    assert.match(json(okIn(old, ['fleet', 'status', '--json', '--no-fetch'], SUP)).blockers.join('\n'), /console-01-a: ticket\/console-01-a here \(\w{12}\) is not what origin has/);
+    // a machine without the console checkout: fleet status still runs, and says what to clone where
+    write(path.join(old, 'docs/devteam/run/links.local.json'), JSON.stringify({ console: { path: path.join(F.base, 'not-cloned') } }));
+    const miss = json(okIn(old, ['fleet', 'status', '--json', '--no-fetch'], SUP));
+    assert.equal(miss.sessions.find((x) => x.name === 'console-01-a').readable, false);
+    assert.match(miss.blockers.join('\n'), /console-01-a: its repo console has no checkout here, or the wrong one: clone .*console\.git at .*not-cloned/);
+    assert.match(miss.blockers.join('\n'), /(^|\n)console: clone .*console\.git at .*not-cloned/);
+    assert.ok(miss.checklist.some((c) => /run\/links\.local\.json/.test(c)), 'the checklist says links.local.json does not move');
+    assert.doesNotMatch(miss.blockers.join('\n'), /files in run\/ the kit didn't make/, 'links.local.json is a kit file');
+    fs.rmSync(path.join(old, 'docs/devteam/run/links.local.json'));
+    // a sibling on GitHub with no devteam workflow on its main: a warning, never a blocker
+    const links = json(okIn(old, ['settings'])).links;
+    F.lines({ ...F.STD, console: { link: 'console' }, companion: { link: 'companion' } }, { links: { ...links, companion: { ...links.companion, forge: 'github' } } });
+    const gh = json(okIn(old, ['fleet', 'status', '--json', '--no-fetch'], SUP));
+    assert.match(gh.warnings.join('\n'), /companion has no devteam workflow on its main \(init --github --repo companion\)/);
+    assert.equal(gh.repos.find((r) => r.id === 'companion').workflow, false);
+  } finally { F.done(); }
+});
