@@ -2678,6 +2678,43 @@ function monoFixture(name) {
   return { ...F, settingsFile, edit, lines, STD };
 }
 
+// Three repos: home (the kit, project/, its log) and two siblings, each a bare remote plus a
+// checkout laid out where path says (../<id>), forge git so no GitHub is needed. Console's main
+// branch is trunk (M7).
+function multiFixture(name) {
+  const F = monoFixture(name);
+  const { base, g, old } = F;
+  const sibling = (id, branch, files) => {
+    const bare = path.join(base, `${id}.git`);
+    const co = path.join(base, id);
+    g(['init', '-q', '--bare', '-b', branch, bare], base);
+    fs.mkdirSync(co);
+    g(['init', '-q', '-b', branch], co);
+    for (const [k, v] of [['user.email', 't@t'], ['user.name', 't']]) g(['config', k, v], co);
+    g(['remote', 'add', 'origin', bare], co);
+    for (const [f, text] of Object.entries(files)) write(path.join(co, f), text);
+    g(['add', '-A'], co);
+    g(['commit', '-qm', 'init'], co);
+    g(['push', '-q', 'origin', branch], co);
+    g(['fetch', '-q', 'origin'], co);
+    return { bare, co };
+  };
+  const c = sibling('console', 'trunk', { 'src/main.js': 'console\n', 'package.json': '{}\n', '.gitignore': 'node_modules/\n' });
+  const p = sibling('companion', 'main', { 'app/index.js': 'companion\n', 'README.md': 'c\n' });
+  F.lines({ ...F.STD, console: { link: 'console' }, companion: { link: 'companion' } }, { links: {
+    console: { kind: 'repo', title: 'Electron console', remote: c.bare, main_branch: 'trunk', gates: { test: 'test -f src/main.js' } },
+    companion: { kind: 'repo', title: 'Companion app', remote: p.bare },
+  } });
+  // the kit is home's, run by absolute path from any checkout (a sibling worktree has no kit)
+  const kitDT = path.join(old, 'docs/devteam/scripts/devteam.mjs');
+  const runIn = (cwd, args, role = {}, extra = {}, input) => { const r = spawnSync(process.execPath, [kitDT, ...args], { cwd, env: { ...F.env(role), ...extra }, encoding: 'utf8', input }); return { status: r.status, out: r.stdout.trim(), err: r.stderr.trim() }; };
+  const okIn = (cwd, args, role, extra, input) => { const r = runIn(cwd, args, role, extra, input); assert.equal(r.status, 0, `${args.join(' ')}: ${r.err || r.out}`); return r.out; };
+  // git prints real paths (/private/var on macOS); compare paths through this
+  const real = (x) => fs.realpathSync(x);
+  const ticket = (id, extra = {}) => okIn(old, ['ticket', 'add', id, '--json', JSON.stringify({ title: id, feature: 'chores', component: id.split('-')[0], kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['src/**'], done_when: ['its suite passes in CI'], notes: 'n', ...extra })], { DEVTEAM_ROLE: 'supervisor' });
+  return { ...F, consoleOrigin: c.bare, console: c.co, companionOrigin: p.bare, companion: p.co, kitDT, runIn, okIn, ticket, real };
+}
+
 test('the registry and component lines are validated; labels-only components and no links change nothing', () => {
   const F = monoFixture('registry');
   const { old, ok, run, lines, edit, g } = F;
@@ -4114,4 +4151,14 @@ test('the hub: lists every instance on the machine, links to each one, moves whe
     if (b) await b.stop();
     fs.rmSync(base, { recursive: true, force: true });
   }
+});
+
+// ===== components in other repos (PR 2) =====
+
+test('three repos: the fixture validates, and links shows each', () => {
+  const F = multiFixture('multi-smoke');
+  try {
+    const l = json(F.okIn(F.old, ['links', '--json']));
+    assert.deepEqual(l.links.map((x) => [x.id, x.found]).sort(), [['companion', true], ['console', true]]);
+  } finally { F.done(); }
 });
