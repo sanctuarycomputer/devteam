@@ -237,6 +237,11 @@ const SETTINGS_DEFAULTS = {
   // { on: 'merge', paths: ['app/**'] } when only some paths deploy). With 'merge', a merge that
   // changes what deploys is a release (release-production).
   release: 'tag',
+  // Production monitors (process/supervisor.md, Monitoring): { name: { kind: 'http', url, expect:
+  // { status, contains }, slo: { uptime, p95_ms }, every_minutes, down_after, timeout_s } }; owner
+  // settings, class monitor-change. monitor_defaults overrides the built-in defaults for all of them.
+  monitors: {},
+  monitor_defaults: {},
   // Commands a stdin: secret sink may run (prefixes, e.g. "gh secret set"); they run as the owner.
   secret_commands: [],
   // The forge's checks merge doesn't wait for (names, e.g. a broken optional one); owner-only.
@@ -272,7 +277,7 @@ const OWNER_SETTINGS = {
   gates: 'gate-change', worktree_setup: 'gate-change', worktree_files: 'gate-change',
   autonomy_ceilings: 'governance-edit', agent_command: 'governance-edit', resume_command: 'governance-edit', worker_denied_commands: 'governance-edit',
   forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', upstream_repo: 'governance-edit',
-  release: 'governance-edit', secret_commands: 'governance-edit', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit',
+  release: 'governance-edit', secret_commands: 'governance-edit', monitors: 'monitor-change', monitor_defaults: 'monitor-change', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit',
 };
 const canonical = (v) => (Array.isArray(v) ? `[${v.map(canonical).join(',')}]` : v && typeof v === 'object' ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(',')}}` : JSON.stringify(v));
 function settingsAt(ref) {
@@ -2367,19 +2372,26 @@ function cmdMerge() {
   // (classes governance-edit, process-edit, gate-change); project/ files are the supervisor's.
   let approved = flagStr('approved') ?? null;
   let standing = null;
+  let settingsByRung = null;
   // Owner-only settings, on every kind of PR (a ticket, a plan or a chore).
   {
     const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
     const changed = base ? ownerSettingsChanged(base, sha) : [];
     if (changed === null) fails.push(`${projectRel}/settings.md: the json devteam block is not valid JSON at the head`);
     else if (changed.length) {
+      // A class on the ladder (monitor-change) may also be carried out under a decision in it, or on
+      // its rung 3; the owner-only ones need the owner's answer.
+      const L = ladder();
+      const d = flagStr('decision') ? logGet(flagStr('decision')) : null;
+      const open = [...new Set(changed.map((c) => c.cls))].filter((cls) => !(L.classes[cls] && ((d?.type === 'decision' && d.class === cls) || rungFor(cls) >= 3)));
       const classes = [...new Set(changed.map((c) => c.cls))];
       const what = changed.map((c) => `${c.key} (${c.cls})`).join(', ');
-      if (!approved) fails.push(`changes owner settings: ${what}; the owner's answer is needed: --approved <qid> of class ${classes.join(' or ')}`);
-      else {
+      if (open.length && !approved) fails.push(`changes owner settings: ${what}; the owner's answer is needed: --approved <qid> of class ${open.join(' or ')}${open.some((c) => L.classes[c]) ? ` (or, for ${open.filter((c) => L.classes[c]).join(', ')}, a decision in that class: merge --decision <d-id>)` : ''}`);
+      else if (open.length) {
         const q = ownerAnswer(approved, 'merge --approved');
-        if (!classes.includes(q.class)) fails.push(`${approved} is a ${q.class ?? 'classless'} question; changing ${what} needs an answered ${classes.join(' or ')} question`);
+        if (!open.includes(q.class)) fails.push(`${approved} is a ${q.class ?? 'classless'} question; changing ${what} needs an answered ${open.join(' or ')} question`);
       }
+      if (!open.length && classes.some((c) => L.classes[c]) && !d) settingsByRung = classes.filter((c) => L.classes[c]);
     }
   }
   // Deploys on merge: merging this is releasing it, so it needs release-production's authority: the
@@ -2493,6 +2505,8 @@ function cmdMerge() {
   mergeShaCache.clear();
   const cls = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
   const act = appendLog({ type: 'act', decision: citing(), class: cls, what: `merged ${branch} at ${sha}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag}, verbatim)` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [], reversible: false, approved_by: approved ?? standing?.rule.id ?? undefined }, 'supervisor');
+  // a ladder class's settings change made on its own rung is an act of that class, like any other
+  for (const cls of settingsByRung ?? []) appendLog({ type: 'act', class: cls, rung: rungFor(cls), what: `changed ${cls === 'monitor-change' ? 'the monitors' : cls} in settings by merging ${branch} at ${sha}`, refs: [id ?? (chore ? `chore-${chore}` : plan), act.id], reversible: true }, 'supervisor');
   if (release) {
     const rel = appendLog({ type: 'act', class: 'release-production', decision: release.decision, rung: release.rung, what: `released ${release.target} to production by merging ${branch} at ${sha} (release: merge)`, refs: [release.target, act.id], reversible: false }, 'supervisor');
     out(`released ${release.target} to production (${rel.id})`);
@@ -5087,6 +5101,13 @@ function collectMetrics(since) {
   // Findings: blockers and inefficiencies, each with a next step.
   const f = [];
   const add = (severity, kind, subject, detail, suggestion) => f.push({ severity, kind, subject, detail, suggestion });
+  // Production monitors: a standing outage is medium (the down observation already woke the
+  // supervisor once), a certificate about to lapse, a week under the uptime target.
+  for (const m of monitorStatus()) {
+    if (m.state === 'down') add('medium', 'monitor-down', `monitor:${m.name}`, `${m.url} down since ${m.since}: ${m.last?.error ?? 'failing'}`, 'find why (the last deploy, the app logs), tell the owner, fix forward through a ticket (supervisor.md, Monitoring)');
+    if (m.tls_days != null && m.tls_days <= m.tls_warn_days) add(m.tls_days <= 3 ? 'high' : 'medium', 'cert-expiring', `monitor:${m.name}`, `the certificate for ${m.url} expires in ${m.tls_days} day(s)`, 'renew it, or check the auto-renewal; ask the owner if it needs their account');
+    if (m.slo?.uptime && m.uptime_7d != null && m.uptime_7d < 100 * m.slo.uptime) add('medium', 'slo-breach-week', `monitor:${m.name}`, `up ${m.uptime_7d}% over 7 days, under the ${100 * m.slo.uptime}% target`, 'read the down observations for a cause; a fix is a ticket, a target that is wrong is the owner\'s to change');
+  }
   for (const g of gates.flaky_gates) add('high', 'flaky-gate', g.gate, `failed then passed at the same commit ${g.commits} time(s)`, 'find the flaky tests (run with --junit) and fix or quarantine them');
   for (const t of gates.flaky_tests.slice(0, 10)) add('high', 'flaky-test', t.name, `failed then passed at the same commit ${t.times} time(s)`, 'make it deterministic (time, order, shared state, network) or quarantine it with a ticket');
   for (const g of gates.gates.filter((x) => x.median_seconds >= settings.slow_gate_minutes * 60)) add('medium', 'slow-gate', g.gate, `median ${(g.median_seconds / 60).toFixed(1)} min over ${g.runs} run(s)`, 'shard it, cache dependencies, or split fast checks from slow ones');
@@ -5339,6 +5360,7 @@ function dashboardData() {
     ooda: collectOoda(),
     // holds: Upkeep's, and the fleet's mode when every goal is held (fleet status gives readiness)
     upkeep: (() => { const u = upkeepOrVirtual(); const chores = deriveStatus().filter((r) => r.feature === CHORES && !r.merge_sha && r.stage !== 'superseded'); return { id: upkeepGoal()?.id ?? null, ...holdView(u), chores: chores.map((r) => ({ id: r.id, title: r.title, stage: r.stage, phase: r.phase })) }; })(),
+    monitors: monitorStatus(),
     fleet: { mode: draining() ? 'park' : fleetMode(), op: fleetOpInForce()?.fleet ?? draining()?.id ?? null, reason: fleetOpInForce()?.reason ?? (draining() ? drainReason(draining()) : null) },
   };
 }
@@ -5582,6 +5604,13 @@ async function cmdDashboard() {
       if (ref && !/^(?!-)[A-Za-z0-9._\/-]+$/.test(ref)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad ref' }));
       if (!/^[a-z]+$/.test(kind) || !id || id.length > 400 || /[\0\n]/.test(id) || id.startsWith('-') || ts.some((x) => !/^[a-z0-9][a-z0-9-]*$/.test(x)) || (rec && !/^[a-z0-9][a-z0-9-]*$/.test(rec))) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad kind, id, rec or tickets' }));
       const r = await run(['peek', kind, id, ...(ts.length ? ['--tickets', JSON.stringify(ts)] : []), ...(rec ? ['--rec', rec] : []), ...(ref ? ['--ref', ref] : []), '--json']);
+      return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 404, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
+    }
+    if (req.method === 'GET' && u.pathname === '/api/monitor') {
+      const name = u.searchParams.get('name') ?? '';
+      const range = u.searchParams.get('range') === '7d' ? '7d' : '24h';
+      if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(name)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad monitor name' }));
+      const r = await run(['monitor', 'series', name, '--range', range]);
       return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 404, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
     }
     if (req.method === 'GET' && u.pathname === '/api/schema') return send(res, 200, 'application/json', JSON.stringify(schemaDocs()));
@@ -6570,6 +6599,198 @@ function drainedPreface() {
     : `This looks like the machine it moved to. Before anything else: ${(() => { const h = pinsHint(); return h ? `(0) ${h}; ` : ''; })()}(1) DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs fleet unpark (it rebuilds run/log from the landed log, prints the parity fingerprint, puts every goal back as it was and prints the restart command for each parked session); (2) run each of those commands; (3) make sure the dashboard is running (supervisor.md §11) and tell the owner its address; then carry on from supervisor.md §1.`}`;
 }
 
+// ===== monitoring: production signals into the loop =====
+// Monitors are owner settings (`monitors`, class monitor-change). A URL check (kind http) runs on
+// every `wait` cycle when due: status, an optional body substring, latency, and TLS expiry. Samples
+// stay local in run/monitors/<name>/ (gitignored, not the record); only meaning reaches the log, as
+// observations on subject monitor:<name>: down and up on the transition, slow once per breach, and a
+// daily rollup (kind reading). `wait` returns once on a new down, never on a standing finding.
+const MONITOR_DEFAULTS = { every_minutes: 1, timeout_s: 10, down_after: 2, slow_after: 3, tls_warn_days: 14, sample_days: 30 };
+const monitorList = () => {
+  const s = loadSettings();
+  return Object.entries(s.monitors ?? {}).map(([name, m]) => ({ name, ...MONITOR_DEFAULTS, ...(s.monitor_defaults ?? {}), ...m }));
+};
+const monitorOf = (name) => monitorList().find((m) => m.name === name) ?? die(`no monitor ${name} in settings (monitors)`);
+const monitorDir = (name) => path.join(runDir, 'monitors', name);
+const monitorState = (name) => { try { return JSON.parse(fs.readFileSync(path.join(monitorDir(name), 'state.json'), 'utf8')); } catch { return { state: 'unknown', fails: 0 }; } };
+const saveMonitorState = (name, st) => { fs.mkdirSync(monitorDir(name), { recursive: true }); fs.writeFileSync(path.join(monitorDir(name), 'state.json'), `${JSON.stringify(st, null, 2)}\n`); };
+function monitorSamples(name, sinceMs = 0) {
+  const text = readText(path.join(monitorDir(name), 'samples.jsonl')) ?? '';
+  const out = [];
+  for (const l of text.split('\n')) {
+    if (!l) continue;
+    try { const s = JSON.parse(l); if (Date.parse(s.at) >= sinceMs) out.push(s); } catch {}
+  }
+  return out;
+}
+const quantile = (xs, q) => { if (!xs.length) return null; const s = [...xs].sort((a, b) => a - b); return s[Math.min(s.length - 1, Math.floor(q * s.length))]; };
+const fmtMs = (ms) => (ms == null ? '-' : ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`);
+// One URL check. Never throws: a failure is a sample like any other.
+async function httpCheck(m) {
+  const t0 = performance.now();
+  try {
+    const r = await fetch(m.url, { signal: AbortSignal.timeout(m.timeout_s * 1000), redirect: 'follow', headers: { 'user-agent': 'devteam-monitor' } });
+    const body = await r.text();
+    const ms = Math.round(performance.now() - t0);
+    const want = m.expect?.status;
+    const statusOk = want ? r.status === want : r.status < 400;
+    const bodyOk = !m.expect?.contains || body.includes(m.expect.contains);
+    return { ok: statusOk && bodyOk, status: r.status, ms, error: statusOk ? (bodyOk ? null : `the body has no "${m.expect.contains}"`) : `HTTP ${r.status}` };
+  } catch (e) {
+    const err = e?.name === 'TimeoutError' ? `no answer in ${m.timeout_s}s` : String(e?.cause?.code ?? e?.cause?.message ?? e?.message ?? e).slice(0, 160);
+    return { ok: false, status: null, ms: Math.round(performance.now() - t0), error: err };
+  }
+}
+// Days until the certificate of an https URL expires (null when it isn't https or can't be read).
+async function tlsDaysLeft(url) {
+  let u;
+  try { u = new URL(url); } catch { return null; }
+  if (u.protocol !== 'https:') return null;
+  const tls = await import('node:tls');
+  return new Promise((resolve) => {
+    const sock = tls.connect({ host: u.hostname, port: Number(u.port || 443), servername: u.hostname, timeout: 10000 }, () => {
+      const c = sock.getPeerCertificate();
+      sock.end();
+      resolve(c?.valid_to ? Math.floor((Date.parse(c.valid_to) - Date.now()) / 86400000) : null);
+    });
+    sock.on('error', () => resolve(null));
+    sock.on('timeout', () => { sock.destroy(); resolve(null); });
+  });
+}
+const monitorSubject = (name) => `monitor:${name}`;
+function monitorObserve(m, fields) {
+  return appendLog({ type: 'observation', source: m.name, subject: monitorSubject(m.name), detector: 'monitor', fix_hint: m.url, ...fields }, 'supervisor');
+}
+// A day's rollup from its samples: uptime, latency, outages.
+function monitorRollup(m, day) {
+  const from = Date.parse(`${day}T00:00:00.000Z`);
+  const xs = monitorSamples(m.name, from).filter((s) => Date.parse(s.at) < from + 86400000);
+  if (!xs.length) return null;
+  const ok = xs.filter((s) => s.ok);
+  const uptime = +((100 * ok.length) / xs.length).toFixed(3);
+  const p50 = quantile(ok.map((s) => s.ms), 0.5), p95 = quantile(ok.map((s) => s.ms), 0.95);
+  const downs = logObjects('observation').filter((o) => o.subject === monitorSubject(m.name) && o.kind === 'down' && dateOnly(o.created_at) === day).length;
+  return monitorObserve(m, { kind: 'reading', detail: `${day}: up ${uptime}% of ${xs.length} checks, p50 ${fmtMs(p50)}, p95 ${fmtMs(p95)}${downs ? `, ${downs} outage${downs > 1 ? 's' : ''}` : ''}`, severity: 0, valence: 0, measure: { value: uptime, unit: '%' }, source_key: `monitor:${m.name}:rollup:${day}` });
+}
+// Poll one monitor: check, record the sample, append observations on change. Returns alert lines
+// (a new outage) for wait.
+async function pollMonitor(m, { rollupDay = null } = {}) {
+  if (m.kind !== 'http') return { skipped: `kind ${m.kind} is not built in yet` };
+  const st = monitorState(m.name);
+  const sample = { at: nowIso(), ...(await httpCheck(m)) };
+  fs.mkdirSync(monitorDir(m.name), { recursive: true });
+  fs.appendFileSync(path.join(monitorDir(m.name), 'samples.jsonl'), `${JSON.stringify(sample)}\n`);
+  const alerts = [];
+  st.last = sample;
+  st.last_at = sample.at;
+  if (!sample.ok) {
+    st.fails = (st.fails ?? 0) + 1;
+    st.failing_since ??= sample.at;
+    if (st.fails >= m.down_after && st.state !== 'down') {
+      const o = monitorObserve(m, { kind: 'down', detail: `${m.name} is down: ${sample.error} (${st.fails} checks in a row since ${st.failing_since})`, severity: 4, valence: -2, measure: { value: st.fails, unit: 'checks' }, source_key: `monitor:${m.name}:down:${st.failing_since}` });
+      Object.assign(st, { state: 'down', since: st.failing_since, down_id: o.id });
+      alerts.push(`${m.name} is down: ${sample.error} (${m.url}; ${o.id})`);
+    }
+  } else {
+    if (st.state === 'down') {
+      const mins = Math.max(1, Math.round((Date.parse(sample.at) - Date.parse(st.since)) / 60000));
+      monitorObserve(m, { kind: 'up', detail: `${m.name} is up again after ${mins} min down`, severity: 0, valence: 1, measure: { value: mins, unit: 'min' }, refs: st.down_id ? [st.down_id] : [], source_key: `monitor:${m.name}:up:${st.since}` });
+    }
+    if (st.state !== 'up') st.since = sample.at;
+    Object.assign(st, { state: 'up', fails: 0, failing_since: null, down_id: null });
+    // slow: the p95 of the last 20 good checks over the SLO for slow_after checks in a row, once per breach
+    if (m.slo?.p95_ms) {
+      const p95 = quantile(monitorSamples(m.name, Date.now() - 6 * 3600000).filter((s) => s.ok).slice(-20).map((s) => s.ms), 0.95);
+      st.slow_streak = p95 > m.slo.p95_ms ? (st.slow_streak ?? 0) + 1 : 0;
+      if (st.slow_streak >= m.slow_after && !st.slow) {
+        monitorObserve(m, { kind: 'slow', detail: `${m.name} is slow: p95 ${fmtMs(p95)} over the ${fmtMs(m.slo.p95_ms)} target for ${st.slow_streak} checks`, severity: 2, valence: -1, measure: { value: p95, unit: 'ms' }, source_key: `monitor:${m.name}:slow:${sample.at}` });
+        st.slow = true;
+      } else if (!st.slow_streak) st.slow = false;
+    }
+  }
+  // TLS, hourly
+  if (/^https:/i.test(m.url) && (!st.tls_at || Date.now() - Date.parse(st.tls_at) > 3600000)) { st.tls_days = await tlsDaysLeft(m.url); st.tls_at = nowIso(); }
+  // the rollup for yesterday, once (or a day asked for)
+  const yesterday = dateOnly(new Date(Date.now() - 86400000).toISOString());
+  const day = rollupDay ?? yesterday;
+  if (rollupDay || st.rollup_day !== yesterday) {
+    const done = logObjects('observation').some((o) => o.source_key === `monitor:${m.name}:rollup:${day}`);
+    if (!done) monitorRollup(m, day);
+    if (!rollupDay) st.rollup_day = yesterday;
+  }
+  // samples past sample_days, pruned once a day
+  if (st.pruned !== dateOnly(nowIso())) {
+    const keep = monitorSamples(m.name, Date.now() - m.sample_days * 86400000);
+    fs.writeFileSync(path.join(monitorDir(m.name), 'samples.jsonl'), keep.map((s) => `${JSON.stringify(s)}\n`).join(''));
+    st.pruned = dateOnly(nowIso());
+  }
+  saveMonitorState(m.name, st);
+  return { sample, alerts };
+}
+const monitorDue = (m, st) => !st.last_at || Date.now() - Date.parse(st.last_at) >= m.every_minutes * 60000 - 5000;
+// What the dashboard and `monitor status` show: state, last check, uptime and latency over 24h and 7d.
+function monitorStatus() {
+  return monitorList().map((m) => {
+    const st = monitorState(m.name);
+    const week = monitorSamples(m.name, Date.now() - 7 * 86400000);
+    const day = week.filter((s) => Date.parse(s.at) >= Date.now() - 86400000);
+    const up = (xs) => (xs.length ? +((100 * xs.filter((s) => s.ok).length) / xs.length).toFixed(2) : null);
+    const lat = (xs, q) => quantile(xs.filter((s) => s.ok).map((s) => s.ms), q);
+    return {
+      name: m.name, kind: m.kind, url: m.url, every_minutes: m.every_minutes, slo: m.slo ?? null, expect: m.expect ?? null, down_after: m.down_after, component: m.component ?? null,
+      state: st.state ?? 'unknown', since: st.since ?? null, last_at: st.last_at ?? null, last: st.last ?? null, fails: st.fails ?? 0, slow: !!st.slow, tls_days: st.tls_days ?? null, tls_warn_days: m.tls_warn_days,
+      uptime_24h: up(day), uptime_7d: up(week), p50_24h: lat(day, 0.5), p95_24h: lat(day, 0.95), p95_7d: lat(week, 0.95), checks_24h: day.length,
+    };
+  });
+}
+// A monitor's latency and uptime in buckets, for a chart: 24h in 5-minute buckets, 7d in hours.
+function monitorSeries(name, range) {
+  monitorOf(name);
+  const span = range === '7d' ? 7 * 86400000 : 86400000;
+  const step = range === '7d' ? 3600000 : 300000;
+  const from = Date.now() - span;
+  const buckets = new Map();
+  for (const s of monitorSamples(name, from)) {
+    const b = Math.floor(Date.parse(s.at) / step) * step;
+    (buckets.get(b) ?? buckets.set(b, []).get(b)).push(s);
+  }
+  return { name, range: range === '7d' ? '7d' : '24h', step_ms: step, buckets: [...buckets].sort((a, b) => a[0] - b[0]).map(([t, xs]) => ({ t, n: xs.length, ok: xs.filter((s) => s.ok).length, p50: quantile(xs.filter((s) => s.ok).map((s) => s.ms), 0.5), p95: quantile(xs.filter((s) => s.ok).map((s) => s.ms), 0.95) })) };
+}
+async function cmdMonitor() {
+  const [sub, name] = positional;
+  if (sub === 'status') {
+    const rows = monitorStatus();
+    if (flags.json) return json(rows);
+    if (!rows.length) return out('no monitors (settings: monitors)');
+    for (const r of rows) out(`${r.name.padEnd(16)} ${r.state.padEnd(7)} ${r.url}  last ${r.last_at ? `${r.last_at.slice(0, 16)} ${r.last?.ok ? 'ok' : r.last?.error ?? 'failed'} ${fmtMs(r.last?.ms)}` : 'never'}  24h up ${r.uptime_24h ?? '-'}% p95 ${fmtMs(r.p95_24h)}${r.tls_days != null ? `  tls ${r.tls_days}d` : ''}`);
+    return;
+  }
+  if (sub === 'series') return json(monitorSeries(name ?? die('usage: monitor series <name> [--range 24h|7d]'), flagStr('range')));
+  if (sub === 'test') {
+    const m = monitorOf(name ?? die('usage: monitor test <name>'));
+    if (m.kind !== 'http') die(`kind ${m.kind} is not built in yet`);
+    const r = await httpCheck(m);
+    const tls = await tlsDaysLeft(m.url);
+    out(`${m.name}: ${r.ok ? 'ok' : `FAIL ${r.error}`} (HTTP ${r.status ?? '-'}, ${fmtMs(r.ms)})${tls != null ? `, certificate expires in ${tls} days` : ''}`);
+    if (!r.ok) process.exitCode = 1;
+    return;
+  }
+  if (sub === 'poll') {
+    supervisorOnly('monitor poll');
+    const all = monitorList().filter((m) => !name && !flagStr('name') ? true : m.name === (flagStr('name') ?? name));
+    if ((flagStr('name') ?? name) && !all.length) die(`no monitor ${flagStr('name') ?? name}`);
+    const due = flags.due ? all.filter((m) => monitorDue(m, monitorState(m.name))) : all;
+    const res = await Promise.all(due.map(async (m) => ({ name: m.name, ...(await pollMonitor(m, { rollupDay: flagStr('rollup-day') ?? null })) })));
+    const alerts = res.flatMap((r) => r.alerts ?? []);
+    if (flags.json) return json({ polled: res.map((r) => r.name), alerts });
+    if (!res.length) return out(all.length ? 'nothing due' : 'no monitors (settings: monitors)');
+    for (const r of res) out(r.skipped ? `${r.name}: skipped (${r.skipped})` : `${r.name}: ${r.sample.ok ? 'ok' : r.sample.error} ${fmtMs(r.sample.ms)}`);
+    for (const a of alerts) out(`ALERT ${a}`);
+    return;
+  }
+  die('usage: monitor status [--json] | monitor test <name> | monitor poll [--due] [--name n] [--json] | monitor series <name> [--range 24h|7d]');
+}
+
 // wait [--minutes n]: block between ticks until something needs the supervisor, then say what.
 // It wakes on a new open message to the supervisor, any new line from the owner (an answer, a goal
 // decision, an ack, a message), a new high finding (a worker that stopped on an API error sends no
@@ -6588,6 +6809,8 @@ function cmdWait() {
   // leaves open wakes it once, not every time.
   const sinceFile = path.join(runDir, 'wait-since');
   const since = Number(readText(sinceFile)) || null;
+  // Monitors are polled on every cycle when due; a new outage wakes the supervisor once.
+  const poll = () => (monitorList().length ? sub(['monitor', 'poll', '--due', '--json'])?.alerts ?? [] : []);
   const snap = () => {
     logCache = null;
     const owner = readLog().lines.filter((l) => l.by === 'owner').map((l) => ({ k: l.id, at: Date.parse(l.at) }));
@@ -6595,10 +6818,12 @@ function cmdWait() {
     const high = (sub(['metrics', '--json'])?.findings ?? []).filter((f) => f.severity === 'high').map((f) => `${f.kind} ${f.subject}: ${f.detail}`);
     return { owner, msgs, high };
   };
+  const firstAlerts = poll();
   const first = snap();
   const late = (xs) => (since ? xs.filter((x) => x.at > since) : []);
   const base = { owner: first.owner.filter((x) => !late(first.owner).includes(x)).map((x) => x.k), msgs: first.msgs.filter((x) => !late(first.msgs).includes(x)).map((x) => x.k), high: first.high };
   const report = (why, lines) => { fs.mkdirSync(runDir, { recursive: true }); fs.writeFileSync(sinceFile, `${Date.now()}\n`); out(why); for (const l of lines) out(`  ${l}`); out('then: the tick (supervisor.md §3), and wait again'); };
+  if (firstAlerts.length) return report('production needs you (monitor status; supervisor.md, Monitoring):', firstAlerts);
   if (base.high.length) return report('high findings are open; act on each, or ack it with a reason (ack <kind> <subject> --reason "…"):', base.high);
   const lateMsgs = late(first.msgs).map((x) => `message ${x.k}`);
   const lateOwner = late(first.owner).map((x) => x.k);
@@ -6607,6 +6832,8 @@ function cmdWait() {
   const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
   while (Date.now() < until) {
     sleep(Math.min(Math.max(2000, (minutes * 60000) / 10), 45000, Math.max(0, until - Date.now())));
+    const alerts = poll();
+    if (alerts.length) return report('production needs you (monitor status; supervisor.md, Monitoring):', alerts);
     const now = snap();
     const keys = { ...now, owner: now.owner.map((x) => x.k), msgs: now.msgs.map((x) => x.k) };
     const fresh = (k) => keys[k].filter((x) => !base[k].includes(x));
@@ -6768,6 +6995,12 @@ function peekView(kind, id) {
     const prev = all[all.findIndex((x) => x.id === id) - 1];
     const nums = (x) => { try { return JSON.parse((x?.source_ref ? projectFileText(x.source_ref.replace(/^project\//, '')) : '')?.match(RETRO_BLOCK)?.[1] ?? 'null'); } catch { return null; } };
     v.numbers = { now: nums(o), prev: nums(prev), prev_id: prev?.id ?? null };
+  } else if (kind === 'monitor') {
+    monitorOf(id);
+    v.history = historyOf([monitorSubject(id)]);
+    v.status = monitorStatus().find((m) => m.name === id) ?? null;
+    v.series = { '24h': monitorSeries(id, '24h'), '7d': monitorSeries(id, '7d') };
+    v.failures = monitorSamples(id, Date.now() - 7 * 86400000).filter((s) => !s.ok).slice(-20).reverse();
   } else if (kind === 'file') {
     v.history = fileHistory(id, flagStr('ref') ?? null);
   } else if (['story', 'release', 'wave', 'milestone'].includes(kind)) {
@@ -7049,6 +7282,7 @@ Goals and retros
 The log
   log [--type t] [--by w] [--id x] [--tail n] [--json] | log-check | log-sync [--dry-run] | history [<ticket-id>]
   record <id> [--json]   one record's stored fields, who created it and who set each field | peek <kind> <id> --json   what a dashboard sidepeek shows beyond the data: history and its kind's details
+  monitor status [--json] | monitor test <name> | monitor poll [--due] [--name n] [--json] (supervisor; wait runs it) | monitor series <name> [--range 24h|7d]   production monitors from settings
 
 Dashboard and releases
   dashboard [--port p] [--host h] | dashboard-data | notes <from-tag> [<to>]
@@ -7062,7 +7296,7 @@ const COMMANDS = {
   ask: cmdAsk, answer: cmdAnswer, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
   observe: cmdObserve, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, knowledge: cmdKnowledge, problem: cmdProblem,
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
-  log: cmdLog, record: cmdRecord, peek: cmdPeek, 'log-check': cmdLogCheck, 'log-sync': cmdLogSync, history: cmdHistory,
+  log: cmdLog, record: cmdRecord, peek: cmdPeek, monitor: cmdMonitor, 'log-check': cmdLogCheck, 'log-sync': cmdLogSync, history: cmdHistory,
   drain: cmdDrain, undrain: cmdUndrain, fleet: cmdFleet, handoff: cmdHandoff, wait: cmdWait,
   dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes,
 };

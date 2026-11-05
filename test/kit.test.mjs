@@ -770,6 +770,65 @@ test('devteam kit', async (t) => {
     assert.ok(r.fields.title && r.set_by && !('hold_by' in r.fields));
   });
 
+  await t.test('monitoring: a URL check goes down and up once each, is slow once per breach, rolls up a day, and wakes wait', async () => {
+    const sup = { role: 'sup' };
+    const port = await freePort();
+    const mode = path.join(tmp, 'mon-mode');
+    fs.writeFileSync(mode, 'ok');
+    const srvFile = path.join(tmp, 'mon-server.mjs');
+    fs.writeFileSync(srvFile, `import http from 'node:http'; import fs from 'node:fs';
+http.createServer((req, res) => { const m = fs.readFileSync(${JSON.stringify(mode)}, 'utf8').trim();
+  if (m === 'fail') { res.writeHead(500); return res.end('boom'); }
+  setTimeout(() => { res.writeHead(200); res.end('ok'); }, m === 'slow' ? 150 : 0); }).listen(${port}, '127.0.0.1');`);
+    const srv = spawn(process.execPath, [srvFile], { stdio: 'ignore' });
+    try {
+      await serverUp(`http://127.0.0.1:${port}/`);
+      landSettings((txt) => txt.replace('"gates": {', `"monitors": { "web": { "kind": "http", "url": "http://127.0.0.1:${port}/up", "expect": { "status": 200, "contains": "ok" }, "down_after": 2, "slo": { "uptime": 0.999, "p95_ms": 100 } } }, "gates": {`));
+      assert.notEqual(dt(['monitor', 'poll']).status, 0, 'only the supervisor polls');
+      assert.match(must(['monitor', 'test', 'web']), /web: ok \(HTTP 200/);
+      must(['monitor', 'poll', '--name', 'web'], sup);
+      const status = () => json(must(['monitor', 'status', '--json'])).find((m) => m.name === 'web');
+      assert.equal(status().state, 'up');
+      const obs = () => json(must(['log', '--type', 'observation', '--json'])).filter((o) => o.subject === 'monitor:web');
+      fs.writeFileSync(mode, 'fail');
+      assert.deepEqual(json(must(['monitor', 'poll', '--name', 'web', '--json'], sup)).alerts, [], 'one failed check is not an outage');
+      assert.match(json(must(['monitor', 'poll', '--name', 'web', '--json'], sup)).alerts[0] ?? '', /web is down: HTTP 500/, 'down_after failed checks are');
+      const down = obs().find((o) => o.kind === 'down');
+      assert.ok(down && down.severity === 4 && down.detector === 'monitor');
+      must(['monitor', 'poll', '--name', 'web'], sup);
+      assert.equal(obs().filter((o) => o.kind === 'down').length, 1, 'an outage is observed once');
+      assert.ok(json(must(['metrics', '--json'])).findings.some((x) => x.kind === 'monitor-down' && x.severity === 'medium'), 'a standing outage is a medium finding, so wait does not loop on it');
+      fs.writeFileSync(mode, 'ok');
+      must(['monitor', 'poll', '--name', 'web'], sup);
+      assert.deepEqual(obs().find((o) => o.kind === 'up')?.refs, [down.id], 'up refers to the outage it ends');
+      assert.equal(status().state, 'up');
+      fs.writeFileSync(mode, 'slow');
+      for (let i = 0; i < 6; i++) must(['monitor', 'poll', '--name', 'web'], sup);
+      assert.equal(obs().filter((o) => o.kind === 'slow').length, 1, 'slow once per breach');
+      must(['monitor', 'poll', '--name', 'web', '--rollup-day', new Date().toISOString().slice(0, 10)], sup);
+      const roll = obs().find((o) => o.kind === 'reading');
+      assert.ok(roll && roll.measure.unit === '%' && roll.measure.value < 100, 'the rollup counts the failed checks');
+      assert.deepEqual(json(must(['monitor', 'poll', '--due', '--json'], sup)).polled, [], 'just polled: nothing due');
+      const series = json(must(['monitor', 'series', 'web']));
+      assert.ok(series.buckets.some((b) => b.ok < b.n), 'the series shows the failed checks');
+      assert.ok(json(must(['dashboard-data'])).monitors.some((m) => m.name === 'web' && m.uptime_24h < 100));
+      const pk = json(must(['peek', 'monitor', 'web', '--json']));
+      assert.ok(pk.history.some((l) => l.kind === 'down') && pk.series['24h'].buckets.length && pk.failures.length);
+      // wait polls what is due and wakes once on a new outage
+      fs.writeFileSync(mode, 'fail');
+      landSettings((txt) => txt.replace('"monitors": { ', `"monitors": { "api": { "kind": "http", "url": "http://127.0.0.1:${port}/api", "down_after": 1 }, `));
+      assert.match(must(['wait', '--minutes', '1'], sup), /production needs you[\s\S]*api is down/);
+      // monitors are owner settings in a ladder class that starts at ask with a default
+      assert.equal(dt(['decide', '--class', 'monitor-change', '--refs', 'chore-monitors', '--', 'turn on the web check'], sup).status, 3);
+      assert.equal(json(must(['trust', '--json'])).find((r) => r.class === 'monitor-change').rung, 2);
+    } finally {
+      srv.kill();
+      landSettings((txt) => txt.replace(/"monitors": \{[\s\S]*?\} \} \}, /, '').replace(/"monitors": \{ "api": [^\n]*?\} \}, /, ''));
+      fs.rmSync(path.join(repo, 'docs/devteam/run/monitors'), { recursive: true, force: true });
+    }
+    assert.ok(!json(must(['monitor', 'status', '--json'])).length, 'cleaned up');
+  });
+
   await t.test('an answer the owner gave in the supervisor chat: the owner\'s, quoted, listed for checking, never trust evidence', () => {
     const said = "you shouldn't need to ask me to submit those PRs";
     const Qc = must(['ask', '--question', 'Open upstream PRs without asking?', '--class', 'upstream-pr', '--reasons', 'below-rung', '--recommendation', 'yes'], { role: 'sup' });
