@@ -4708,11 +4708,34 @@ test('a worker in a sibling worktree runs home\'s kit: home\'s run directory and
     write(path.join(F.console, 'docs/devteam/project/tickets/console-01-x/spec.md'), '# spec\n');
     const own = spawnSync(process.execPath, [path.join(F.console, 'docs/devteam/scripts/devteam.mjs'), 'status'], { cwd: F.console, env: F.env({}), encoding: 'utf8' });
     assert.notEqual(own.status, 0);
-    assert.match(own.stderr, /holds tickets\/ but no settings\.md: it is a repo link's checkout, not a devteam home; run home's kit/);
+    assert.match(own.stderr, /no docs\/devteam\/project\/settings\.md here .*: run init to adopt devteam in this repo, or run home's kit with DEVTEAM_HOME=<home>/);
     // DEVTEAM_HOME names home, but the kit running is another repo's copy: refused, with the command to run
     const other = spawnSync(process.execPath, [path.join(F.console, 'docs/devteam/scripts/devteam.mjs'), 'status'], { cwd: F.console, env: { ...F.env({}), DEVTEAM_HOME: old }, encoding: 'utf8' });
     assert.notEqual(other.status, 0);
     assert.match(other.stderr, /DEVTEAM_HOME=.*old, but this kit is .*console.*: run home's kit, node '.*\/old\/docs\/devteam\/scripts\/devteam\.mjs'/);
+  } finally { F.done(); }
+});
+
+// A copy of the kit in a repo with no project settings (a sibling the kit was copied into by
+// mistake, before it has any tickets/) is no home: nothing runs but init and help.
+test('a kit copy with no project settings.md never runs as a home: only init and help', () => {
+  const F = multiFixture('phantom');
+  const { old } = F;
+  try {
+    const src = path.join(old, 'docs/devteam');
+    fs.cpSync(src, path.join(F.console, 'docs/devteam'), { recursive: true, filter: (x) => !/[\\/](project|run)([\\/]|$)/.test(x.slice(src.length)) });
+    const own = (args) => spawnSync(process.execPath, [path.join(F.console, 'docs/devteam/scripts/devteam.mjs'), ...args], { cwd: F.console, env: F.env({ DEVTEAM_ROLE: 'supervisor' }), encoding: 'utf8' });
+    for (const args of [['whoami'], ['status'], ['act', '--class', 'merge-word', '--', 'phantom merge']]) {
+      const r = own(args);
+      assert.notEqual(r.status, 0, `${args[0]} is refused`);
+      assert.match(r.stderr, /no docs\/devteam\/project\/settings\.md here .*: run init to adopt devteam in this repo, or run home's kit with DEVTEAM_HOME=<home>/);
+    }
+    assert.ok(!fs.existsSync(path.join(F.console, 'docs/devteam/run')), 'nothing was written in the copy');
+    assert.equal(own(['help']).status, 0, 'help still prints');
+    // init adopts devteam in this repo; then it is a home of its own, as asked
+    const i = own(['init', '--name', 'console']);
+    assert.equal(i.status, 0, i.stderr);
+    assert.equal(own(['whoami']).status, 0);
   } finally { F.done(); }
 });
 

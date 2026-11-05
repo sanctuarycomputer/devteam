@@ -220,8 +220,9 @@ function remoteKeyAt(r, base) {
 // cwd: a worker in another repo's worktree runs home's kit by absolute path. Anything
 // that isn't a home is refused loudly, never followed, so nothing runs against the wrong live log:
 // a DEVTEAM_HOME that is no checkout, has no project settings, or is a repo link's checkout; another
-// repo's copy of the kit run with DEVTEAM_HOME; and a kit whose project folder holds a repo link's
-// tickets/ and no settings.md (a sibling's own copy).
+// repo's copy of the kit run with DEVTEAM_HOME; and a kit whose project folder has no settings.md
+// (a sibling's own copy, with or without tickets/, or a repo not adopted yet), for every command but
+// init (which adopts) and help.
 const cwdCommon = commonOf(process.cwd());
 const projectIn = (root) => path.resolve(flagStr('project') ?? process.env.DEVTEAM_PROJECT ?? path.join(root, 'docs', 'devteam', 'project'));
 // The repo links a settings.md names, as { id: remote } (read raw: settings aren't loaded yet).
@@ -234,7 +235,7 @@ const homeAt = (() => {
     const common = scriptCommon ?? cwdCommon;
     const root = common ? path.dirname(common) : null;
     const proj = root && path.join(root, 'docs', 'devteam', 'project');
-    if (proj && command !== 'help' && !process.env.DEVTEAM_PROJECT && !flagStr('project') && fs.existsSync(path.join(proj, 'tickets')) && !fs.existsSync(path.join(proj, 'settings.md'))) die(`${proj} holds tickets/ but no settings.md: it is a repo link's checkout, not a devteam home; run home's kit, node '<home>/docs/devteam/scripts/devteam.mjs', or set DEVTEAM_HOME to home's main checkout`);
+    if (proj && command && !['help', '--help', 'init'].includes(command) && !process.env.DEVTEAM_PROJECT && !flagStr('project') && !fs.existsSync(path.join(proj, 'settings.md'))) die(`no ${path.relative(root, proj).split(path.sep).join('/')}/settings.md here (${root}): run init to adopt devteam in this repo, or run home's kit with DEVTEAM_HOME=<home>`);
     return { common, proj: null };
   }
   const notHome = `DEVTEAM_HOME=${env} is not a devteam home (a checkout whose project folder has settings.md); unset it, or point it at home's main checkout`;
