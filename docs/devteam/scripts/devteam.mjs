@@ -3441,6 +3441,15 @@ function cmdAsk() {
     if (!flagStr('recommendation')) die('a goal-met question recommends the answer that meets it (--recommendation yes)');
     if (flagStr('default') !== undefined) die('a goal-met question has no --default: only the owner says a goal is met');
   }
+  // registry-attest: the owner's yes that the registry lists every repo, design file and doc the
+  // project depends on (planning.md §7). Owner-only, like goal-met: never defaulted, never from chat.
+  if (cls === 'registry-attest') {
+    const g = logGet(flagStr('goal') ?? '');
+    if (g?.type !== 'goal') die('a registry-attest question needs --goal <g-id> (the goal whose preconditions include the registry is complete)');
+    if (kind !== 'owner-decision') die('a registry-attest question is an owner-decision');
+    if (flagStr('recommendation')?.trim().toLowerCase() !== 'yes') die('a registry-attest question recommends --recommendation yes (the owner says no when something is missing)');
+    if (flagStr('default') !== undefined) die('a registry-attest question has no --default: only the owner knows what the registry is missing');
+  }
   // A review is answered with its result or sent back: never defaulted, never a secret, and its
   // choices and recommendation are the page and the data's proposals.
   let review;
@@ -4595,6 +4604,10 @@ function cmdAct() {
       if (!latest.some((r) => r.doors.includes(goalDoor))) die(`${goalDoor} is a goal-level answer; the latest approving plan review (reviews/plan-<n>.md on ticket/${t.id}) must say "- Goal-level door: ${goalDoor} covers this plan" (quality.md §3)`);
     }
   }
+  if (cls === 'goal-readiness') for (const g of refs.map(logGet).filter((o) => o?.type === 'goal' && asList(o.preconditions).some((p) => REGISTRY_COMPLETE.test(p)))) {
+    const why = registryAttestGap(g.id);
+    if (why) die(`${g.id} lists "the registry is complete" among its preconditions, and has no owner's yes to a registry-attest question (${why}): ask --class registry-attest --goal ${g.id} --question "Does the registry list every repo, design file and doc this project depends on?" --recommendation yes, and log goal-readiness once the owner answers yes (planning.md §7)`);
+  }
   const line = appendLog({ type: 'act', class: cls, scope: scope ?? undefined, what, rung: auth.rung, refs, reversible: decision ? decision.reversible !== false && !flags.irreversible : !flags.irreversible, approved_by: decision ? undefined : approved ?? undefined, decision: decision?.id }, 'supervisor');
   out(line.id);
 }
@@ -4929,6 +4942,20 @@ function goalMetProblem(q, goalId, qid, at = null) {
   if (!v.matched) return `${v.id} was answered "${v.answer}", not its recommendation${v.recommendation ? ` ("${v.recommendation}")` : ''}`;
   if (at && at < v.answered_at) return `the reading was written before ${v.id} was answered`;
   return null;
+}
+// The registry is complete (planning.md §7), the precondition the Baseline carries: its count half
+// is components check --count, with the gates; its other half is the owner's yes to a
+// registry-attest question about the goal, which goal-readiness waits for. Only the owner's own
+// answer counts (registry-attest is owner_only, so never a chat answer or a default), and only yes.
+const REGISTRY_COMPLETE = /\bthe registry is complete\b/i;
+function registryAttestGap(goalId) {
+  const qs = questions().filter((q) => q.class === 'registry-attest' && q.goal === goalId);
+  if (qs.some((q) => q.status === 'answered' && q.channel !== 'chat' && q.matched && q.answer.trim().toLowerCase().split(' — ')[0] === 'yes')) return null;
+  const last = qs.sort((a, b) => (a.asked_at < b.asked_at ? -1 : 1)).pop();
+  if (!last) return 'none asked yet';
+  if (last.status !== 'answered') return `${last.id} is not answered by the owner (${last.status})`;
+  if (last.channel === 'chat') return `${last.id} was answered in chat; the owner answers it from the dashboard or their terminal`;
+  return `${last.id} was answered "${last.answer}", not yes`;
 }
 // The readings that count. Each must match how the goal is read, whoever wrote the line: a repo
 // reading carries a commit on main, a prod one comes from prod, and an owner goal's only from the

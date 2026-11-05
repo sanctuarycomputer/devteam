@@ -3671,6 +3671,35 @@ test('link text is data: one short line, refused otherwise everywhere it enters,
   } finally { F.done(); }
 });
 
+test('the registry attestation is the owner\'s: registry-attest is never answered from chat or defaulted, and a goal that needs the registry complete waits for the owner\'s yes', () => {
+  const F = fleetFixture('attest');
+  const { old, ok, run } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  try {
+    const goal = (title, pre, prio) => ok(old, ['goal', 'add', '--title', title, '--outcome', 'the floor holds', '--measure', 'floor gaps', '--target', '0', '--unit', 'gaps', '--direction', 'down', '--source', 'repo', '--check', 'echo 3', '--non-goals', 'new features', '--preconditions', ...pre, '--priority', prio], SUP);
+    const G = goal('Baseline', ['format and lint', 'the registry is complete'], '1');
+    const other = goal('Other', ['format and lint'], '2');
+    const ready = (g) => run(old, ['act', '--class', 'goal-readiness', '--refs', g, '--', `${g} is ready`], SUP);
+    assert.match(ready(G).err, /the registry is complete.*no owner's yes to a registry-attest question .*ask --class registry-attest --goal/);
+    assert.equal(ready(other).status, 0, 'a goal without that precondition is not held');
+    const ask = ['ask', '--class', 'registry-attest', '--goal', G, '--question', 'Does the registry list every repo, design file and doc this project depends on?'];
+    assert.match(run(old, [...ask, '--recommendation', 'yes', '--default', 'yes'], SUP).err, /registry-attest question has no --default/);
+    assert.match(run(old, ask, SUP).err, /--recommendation yes/);
+    assert.match(run(old, ['ask', '--class', 'registry-attest', '--question', 'Complete?', '--recommendation', 'yes'], SUP).err, /registry-attest question needs --goal/);
+    const Q = ok(old, [...ask, '--recommendation', 'yes'], SUP);
+    const chat = run(old, ['answer', Q, 'yes', '--from-chat', '--said', 'yes, that is everything'], SUP);
+    assert.notEqual(chat.status, 0, 'never answered from chat');
+    assert.match(chat.err, /reserved to the owner \(owner-decision, registry-attest\)/);
+    assert.match(run(old, ['answer', Q, '--defaulted'], SUP).err, /no default to apply/, 'never defaulted');
+    assert.match(ready(G).err, new RegExp(`${Q} is not answered by the owner`), 'readiness waits while the question is open');
+    ok(old, ['answer', Q, 'no, the designs are missing']);
+    assert.match(ready(G).err, new RegExp(`${Q} was answered "no, the designs are missing"`));
+    const Q2 = ok(old, [...ask, '--recommendation', 'yes'], SUP);
+    ok(old, ['answer', Q2, 'yes']);
+    assert.equal(ready(G).status, 0, "the owner's yes is the attestation");
+  } finally { F.done(); }
+});
+
 test('link probes: four at a time inside a tick budget, never a prompt, and a page behind auth is a note (F10, O7)', () => {
   const F = monoFixture('probes');
   const { old, ok, edit, g } = F;
