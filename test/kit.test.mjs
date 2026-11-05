@@ -4719,9 +4719,9 @@ test('a worker in a sibling worktree runs home\'s kit: home\'s run directory and
 
 // A copy of the kit in a repo with no project settings (a sibling the kit was copied into by
 // mistake, before it has any tickets/) is no home: nothing runs but init and help.
-test('a kit copy with no project settings.md never runs as a home: only init and help', () => {
+test('a kit copy with no project settings.md never runs as a home: only init and help (and, in the kit\'s own repo, its views)', () => {
   const F = multiFixture('phantom');
-  const { old } = F;
+  const { old, g } = F;
   try {
     const src = path.join(old, 'docs/devteam');
     fs.cpSync(src, path.join(F.console, 'docs/devteam'), { recursive: true, filter: (x) => !/[\\/](project|run)([\\/]|$)/.test(x.slice(src.length)) });
@@ -4733,6 +4733,20 @@ test('a kit copy with no project settings.md never runs as a home: only init and
     }
     assert.ok(!fs.existsSync(path.join(F.console, 'docs/devteam/run')), 'nothing was written in the copy');
     assert.equal(own(['help']).status, 0, 'help still prints');
+    // the kit's own repo (a remote of it is the kit's upstream) runs its read-only views, over no
+    // tickets, and still refuses anything that writes
+    const kr = path.join(F.base, 'kit-own');
+    fs.mkdirSync(kr);
+    g(['init', '-q', '-b', 'main'], kr);
+    for (const [k, v] of [['user.email', 't@t'], ['user.name', 't']]) g(['config', k, v], kr);
+    g(['remote', 'add', 'origin', 'https://github.com/sanctuarycomputer/devteam.git'], kr);
+    fs.cpSync(src, path.join(kr, 'docs/devteam'), { recursive: true, filter: (x) => !/[\\/](project|run)([\\/]|$)/.test(x.slice(src.length)) });
+    g(['add', '-A'], kr); g(['commit', '-qm', 'kit'], kr);
+    const kitOwn = (args) => spawnSync(process.execPath, [path.join(kr, 'docs/devteam/scripts/devteam.mjs'), ...args], { cwd: kr, env: F.env({ DEVTEAM_ROLE: 'supervisor' }), encoding: 'utf8' });
+    for (const v of ['status', 'whoami', 'validate', 'links']) { const r = kitOwn([v]); assert.equal(r.status, 0, `${v} runs in the kit's own repo: ${r.stderr}`); }
+    assert.match(kitOwn(['validate']).stdout, /0 ticket\(s\), 0 feature\(s\), 0 error\(s\)/);
+    assert.match(kitOwn(['act', '--class', 'merge-word', '--', 'x']).stderr, /no docs\/devteam\/project\/settings\.md here .*: run init to adopt/, 'a command that writes is still refused');
+    assert.equal(g(['status', '--porcelain'], kr), '', 'the views wrote nothing tracked');
     // init adopts devteam in this repo; then it is a home of its own, as asked
     const i = own(['init', '--name', 'console']);
     assert.equal(i.status, 0, i.stderr);

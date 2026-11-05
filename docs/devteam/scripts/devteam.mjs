@@ -222,8 +222,13 @@ function remoteKeyAt(r, base) {
 // a DEVTEAM_HOME that is no checkout, has no project settings, or is a repo link's checkout; another
 // repo's copy of the kit run with DEVTEAM_HOME; and a kit whose project folder has no settings.md
 // (a sibling's own copy, with or without tickets/, or a repo not adopted yet), for every command but
-// init (which adopts) and help.
+// init (which adopts) and help, and, in the kit's own repo, its read-only views (KIT_VIEWS).
 const cwdCommon = commonOf(process.cwd());
+// The kit's own repo (a remote of it is the kit's upstream) has no project of its own, but its
+// read-only views run there as they always did, over no tickets: nothing in them writes.
+const KIT_UPSTREAM = 'sanctuarycomputer/devteam';
+const KIT_VIEWS = ['status', 'whoami', 'validate', 'links'];
+const kitsOwnRepoAt = (root) => (git(['config', '--get-regexp', '^remote\\..*\\.url$'], root) ?? '').split('\n').some((l) => l && remoteKeyAt(l.slice(l.indexOf(' ') + 1), root) === KIT_UPSTREAM);
 const projectIn = (root) => path.resolve(flagStr('project') ?? process.env.DEVTEAM_PROJECT ?? path.join(root, 'docs', 'devteam', 'project'));
 // The repo links a settings.md names, as { id: remote } (read raw: settings aren't loaded yet).
 const repoLinksIn = (file) => { try { const m = readText(file)?.match(/```json devteam\s*\n([\s\S]*?)\n```/); return Object.entries(JSON.parse(m[1]).links ?? {}).filter(([, l]) => l?.kind === 'repo' && typeof l.remote === 'string'); } catch { return []; } };
@@ -235,7 +240,7 @@ const homeAt = (() => {
     const common = scriptCommon ?? cwdCommon;
     const root = common ? path.dirname(common) : null;
     const proj = root && path.join(root, 'docs', 'devteam', 'project');
-    if (proj && command && !['help', '--help', 'init'].includes(command) && !process.env.DEVTEAM_PROJECT && !flagStr('project') && !fs.existsSync(path.join(proj, 'settings.md'))) die(`no ${path.relative(root, proj).split(path.sep).join('/')}/settings.md here (${root}): run init to adopt devteam in this repo, or run home's kit with DEVTEAM_HOME=<home>`);
+    if (proj && command && !['help', '--help', 'init'].includes(command) && !process.env.DEVTEAM_PROJECT && !flagStr('project') && !fs.existsSync(path.join(proj, 'settings.md')) && !(KIT_VIEWS.includes(command) && kitsOwnRepoAt(root))) die(`no ${path.relative(root, proj).split(path.sep).join('/')}/settings.md here (${root}): run init to adopt devteam in this repo, or run home's kit with DEVTEAM_HOME=<home>`);
     return { common, proj: null };
   }
   const notHome = `DEVTEAM_HOME=${env} is not a devteam home (a checkout whose project folder has settings.md); unset it, or point it at home's main checkout`;
@@ -329,7 +334,7 @@ const SETTINGS_DEFAULTS = {
   worktree_setup: '',
   worker_denied_commands: ['gh pr merge*', 'gh api*', 'git push*main*', 'git push*--force*', 'git push*-f *', 'git push*+*'],
   dashboard_port: null,
-  upstream_repo: 'sanctuarycomputer/devteam',
+  upstream_repo: KIT_UPSTREAM,
   upstream_base: null,
   upstream_check_hours: 24,
   retro_every_days: 7,
@@ -645,8 +650,6 @@ const componentsOn = (s, link = 'home') => (linesDeclared(s) ? Object.entries(s.
 // the project (home's, from a sibling's worktree), like projectRel.
 const kitRel = path.relative(projectRoot, devteamDir).split(path.sep).join('/');
 const devteamLine = () => [...(kitRel && !kitRel.startsWith('..') ? [`${kitRel}/**`] : []), ...(projectInRepo ? [`${projectRel}/**`] : [])];
-// The kit's own repo has no lines: everything in it is the kit.
-const kitsOwnRepo = () => { const o = git(['config', '--get', 'remote.origin.url']); return !!o && remoteKey(o) === remoteKey(loadSettings().upstream_repo ?? ''); };
 
 // One scope grammar for knowledge scopes and link `for` scopes: <kind> or <kind>:<id>.
 // all and project mean the whole project, and both stay accepted. A later scope kind is one entry.
@@ -704,7 +707,6 @@ function registryProblems(s) {
     errors.push(...K.validate(l, at, { ...ctx, id }));
   }
   if (!linesDeclared(s)) return { errors, warnings };
-  if (kitsOwnRepo()) errors.push("components: the kit's own repo draws no lines (every file in it is the kit's)");
   const byLink = new Map();
   for (const [name, c] of Object.entries(s.components)) {
     const at = `components.${name}`;
