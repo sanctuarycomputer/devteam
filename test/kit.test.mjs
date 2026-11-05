@@ -3155,9 +3155,9 @@ test('the registry at landing: checked whatever the PR, url edits tied to regist
     // a bad registry is refused at landing, whatever the PR
     const bad = chore('bad', (w) => edit((j) => { j.links.notes = { kind: 'doc', title: 'D' }; }, w));
     assert.match(run(old, ['check-pr', '--head-ref', 'chore-bad', '--sha', bad.sha, '--title', 'chore-bad: x', '--body-file', body]).out, /links\.notes: unknown kind "doc"/);
-    // F7: a component on a repo link is refused at landing with the PR 2 note, not passed and then mis-reported
+    // F7: a component on a repo link lands since PR 2 (components in other repos); its registry is still checked at landing
     const comp = chore('console-comp', (w) => edit((j) => { j.components.desktop = { link: 'console' }; }, w));
-    assert.match(run(old, ['check-pr', '--head-ref', 'chore-console-comp', '--sha', comp.sha, '--title', 'chore-console-comp: x', '--body-file', body]).out, /components\.desktop: link "console".*repo links land in PR 2/);
+    assert.match(run(old, ['check-pr', '--head-ref', 'chore-console-comp', '--sha', comp.sha, '--title', 'chore-console-comp: x', '--body-file', body]).out, /^ok: chore-console-comp passes the checks/);
     // O6: a ticket PR is judged by main's settings, so rewriting settings.md can't switch its footprint off
     ok(old, ['ticket', 'add', 'api-01-sneak', '--json', JSON.stringify({ title: 'x', feature: 'chores', component: 'api', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['api/**', 'docs/devteam/project/settings.md'], done_when: ['the api suite passes'], notes: 'n' })], SUP);
     const tw = path.join(old, '.worktrees', 'api-01-sneak');
@@ -4429,5 +4429,45 @@ test('a sibling ticket\'s worker: its worktree from its repo, home\'s kit by abs
     write(path.join(old, 'docs/devteam/run/links.local.json'), JSON.stringify({ console: { path: path.join(F.base, 'not-cloned') } }));
     okIn(old, ['dashboard-data']);
     fs.rmSync(path.join(old, 'docs/devteam/run/links.local.json'));
+  } finally { F.done(); }
+});
+
+test('check-pr --repo checks a sibling PR in that repo, from any checkout (the forge\'s two-checkout run)', () => {
+  const F = multiFixture('check-pr-repo');
+  const { old, g, runIn, ticket } = F;
+  const bodyF = path.join(F.base, 'body.md');
+  write(bodyF, '## One-way doors\n\nNone.\n');
+  try {
+    ticket('console-01-a');
+    const w = path.join(old, '.worktrees', 'console-01-a');
+    g(['worktree', 'add', '-q', '-b', 'ticket/console-01-a', w, 'origin/trunk'], F.console);
+    write(path.join(w, 'scripts/new.sh'), 'x\n');
+    write(path.join(w, 'docs/devteam/project/log/console-01-a.jsonl'), '');
+    g(['add', '-A'], w); g(['commit', '-qm', 'console-01-a: x'], w); g(['push', '-q', 'origin', 'ticket/console-01-a'], w);
+    const sha = g(['rev-parse', 'HEAD'], w);
+    F.lines({ ...F.STD, console: { link: 'console', owns: ['src/**', 'package.json', '.gitignore'] }, companion: { link: 'companion' } });
+    // as the forge runs it: the sibling checked out at $GITHUB_WORKSPACE, home's kit beside it
+    const ci = path.join(F.base, 'ci-console');
+    g(['clone', '-q', F.consoleOrigin, ci], F.base);
+    g(['fetch', '-q', 'origin', 'ticket/console-01-a'], ci);
+    const r = runIn(ci, ['check-pr', '--repo', 'console', '--path', ci, '--head-ref', 'ticket/console-01-a', '--sha', sha, '--title', 'console-01-a: x', '--body-file', bodyF], {}, { DEVTEAM_HOME: old });
+    assert.notEqual(r.status, 0, r.err);
+    assert.match(r.out, /components \(console\): unowned: scripts\/ \(1\): scripts\/new\.sh/);
+    assert.match(r.out, /docs\/devteam\/project\/log\/console-01-a\.jsonl: .*holds only tickets\//, 'no log in another repo');
+    assert.match(r.out, /spec\.md missing at this head/, 'records are read from console at the head');
+    assert.match(runIn(ci, ['check-pr', '--repo', 'nope', '--head-ref', 'ticket/x', '--sha', sha], {}, { DEVTEAM_HOME: old }).err, /no repo link "nope"/);
+    // a ticket of one repo checked as another's, and a plan PR outside home: refused
+    assert.match(runIn(old, ['check-pr', '--repo', 'companion', '--head-ref', 'ticket/console-01-a', '--sha', 'origin/main']).out, /ticket\/console-01-a is a ticket of console, not companion/);
+    assert.match(runIn(ci, ['check-pr', '--repo', 'console', '--path', ci, '--head-ref', 'plan/x', '--sha', sha], {}, { DEVTEAM_HOME: old }).out, /plan and chore PRs are always home's/);
+    // console's main moved since this checkout fetched (a push from another clone): check-pr
+    // fetches it first, so the landing it judges is onto that main
+    write(path.join(F.console, 'scripts/new.sh'), 'main has its own\n');
+    g(['add', '-A'], F.console); g(['commit', '-qm', 'main moved'], F.console); g(['push', '-q', 'origin', 'trunk'], F.console);
+    assert.match(runIn(ci, ['check-pr', '--repo', 'console', '--path', ci, '--head-ref', 'ticket/console-01-a', '--sha', sha], {}, { DEVTEAM_HOME: old }).out, /does not merge cleanly onto origin\/trunk/);
+    // the fetch of the sibling's main fails: refused, never judged against a stale one
+    fs.renameSync(F.consoleOrigin, `${F.consoleOrigin}-away`);
+    try {
+      assert.match(runIn(ci, ['check-pr', '--repo', 'console', '--path', ci, '--head-ref', 'ticket/console-01-a', '--sha', sha], {}, { DEVTEAM_HOME: old }).err, /could not fetch origin trunk in console: .*refusing to judge against a stale main/);
+    } finally { fs.renameSync(`${F.consoleOrigin}-away`, F.consoleOrigin); }
   } finally { F.done(); }
 });

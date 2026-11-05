@@ -1067,7 +1067,9 @@ function mainRef() {
 // Settings, the log's memos (landing, coverage), main's log and merge shas are all re-read.
 // A fetch that fails refuses the run, dry runs included: judging the last-fetched main would pass
 // a PR against a main that may have moved (round 3, V1).
-function fetchMain() {
+// A PR in another repo (R) also needs that repo's main as its origin has it now: home's main
+// holds the settings and lines that judge it, R's the tree it lands on. Either fetch failing refuses.
+function fetchMain(R = null) {
   if (!commonDir) return;
   const b = loadSettings().main_branch;
   const f = gitRun(['fetch', '--quiet', 'origin', b]);
@@ -1077,6 +1079,12 @@ function fetchMain() {
   logCache = null;
   mainLogCache = undefined;
   mergeShaCache.clear();
+  if (R && R.name !== 'home') {
+    const rb = R.settings.main_branch;
+    const fr = gitRun(['fetch', '--quiet', 'origin', rb], R.root);
+    if (fr.status !== 0) die(`could not fetch origin ${rb} in ${R.name}: ${redactUrl(firstLine(fr.err)) || `exit ${fr.status}`}; refusing to judge against a stale main`);
+    R.resetCaches();
+  }
 }
 // In a read-only command, full ref names resolve from one for-each-ref listing (a dashboard
 // refresh asked git about each ticket branch separately: ~90 processes). Anything else, and every
@@ -1277,8 +1285,15 @@ const correctionOf = (a) => {
 // base..sha may change project/log/<X>.jsonl only if X is the branch's own planner file (plan/<f>)
 // or the branch is chore-log (any file but plan-*). Existing lines never change; new lines are
 // valid, in time order, in their month, and not in the future.
-function logRule(headRef, sha) {
-  if (!commonDir || !projectInRepo) return [];
+function logRule(headRef, sha, R = repo('home')) {
+  if (!commonDir) return [];
+  // another repo has no log: its project folder holds only tickets/ (the log lives in home)
+  if (R.name !== 'home') {
+    const base = R.mainRef() ? R.git(['merge-base', R.mainRef(), sha]) : null;
+    if (!base) return [`cannot resolve the merge base with ${R.name}'s main; its project folder not checked`];
+    return R.changedFiles(base, sha).filter((f) => f.startsWith(`${R.projectRel}/`) && !f.startsWith(`${R.projectRel}/tickets/`)).map((f) => `${f}: ${R.projectRel} in another repo holds only tickets/ (the log, settings and designs live in home)`);
+  }
+  if (!projectInRepo) return [];
   const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
   if (!base) return ['cannot resolve the merge base with main; log changes not checked'];
   const prefix = `${projectRel}/log/`;
@@ -1325,8 +1340,9 @@ function logRule(headRef, sha) {
 // its question line, while that question is open or answered (a page sent back or withdrawn may be
 // redrawn in place before it lands). Once a pinned file or a result is on main, as the merge base
 // holds it, it never changes and is never deleted, whatever its question's status.
-function reviewRule(sha, { forge = false } = {}) {
-  if (!commonDir || !projectInRepo) return [];
+function reviewRule(sha, { forge = false, repo: R = repo('home') } = {}) {
+  // review questions are home's (open issue 3): another repo's PR carries no review result
+  if (!commonDir || !projectInRepo || R.name !== 'home') return [];
   const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
   if (!base) return []; // logRule says so
   const changed = (git(['diff', '--name-status', '--no-renames', base, sha]) ?? '').split('\n').filter(Boolean).map((l) => l.split('\t'));
@@ -3028,14 +3044,20 @@ function registryActFails(base, sha) {
 }
 // What the forge's check (optional) and `merge` both check for a PR, by branch kind. Gates are not
 // run here. A chore PR may not touch the log (chore-log touches nothing else) or a ticket's folder.
-function checkPr({ headRef, sha, title, body, forge = false }) {
+function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('home') }) {
   const branch = headRef.replace(/^refs\/heads\//, '');
-  const fails = [...logRule(branch, sha), ...reviewRule(sha, { forge })];
+  // A ticket's PR is in its own repo; plan and chore PRs are always home's (spec §5.4).
+  if (R.name !== 'home' && !branch.startsWith('ticket/')) return ["plan and chore PRs are always home's (spec §5.4); a chore in another repo is a ticket of kind chore in its component"];
+  if (branch.startsWith('ticket/') && tickets().has(branch.slice('ticket/'.length))) {
+    const own = repoOfTicketLink(tickets().get(branch.slice('ticket/'.length)));
+    if (own !== R.name) return [`${branch} is a ticket of ${own}, not ${R.name}`];
+  }
+  const fails = [...logRule(branch, sha, R), ...reviewRule(sha, { forge, repo: R })];
   // Every PR, every kind, ticket PRs included (they return on the next line): the tree that would
   // land keeps every path in exactly one line. A chore or settings PR gets this, never full
   // validate, so an old graph error can't block a log PR (M10).
-  const base0 = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
-  fails.push(...coverageFails(base0, sha, homeFacts, { ticket: branch.startsWith('ticket/') }), ...registryFails(base0, sha));
+  const base0 = R.mainRef() ? R.git(['merge-base', R.mainRef(), sha]) : null;
+  fails.push(...coverageFails(base0, sha, R, { ticket: branch.startsWith('ticket/') }), ...registryFails(base0, sha, R));
   if (branch.startsWith('ticket/')) return [...fails, ...checkTicket(branch.slice('ticket/'.length), { sha, title, body, approvals: !forge })];
   if (branch.startsWith('plan/')) {
     const feature = branch.slice('plan/'.length);
@@ -3063,14 +3085,13 @@ function checkPr({ headRef, sha, title, body, forge = false }) {
   }
   return fails;
 }
-// Copy settings.worktree_files from the main checkout into a new worktree.
-// Then run settings.worktree_setup there (with DEVTEAM_MAIN set to the main checkout).
-// What every gate and worktree_setup command sees: the main checkout, and a gitignored cache dir
-// for build outputs and package caches shared across worktrees (quality.md §2).
+// Copy a repo's worktree_files from its main checkout into a new worktree.
+// Then run its worktree_setup there (with DEVTEAM_MAIN set to that main checkout).
+// What every gate and worktree_setup command sees: the main checkout of the repo it runs for
+// (DEVTEAM_MAIN), home's (DEVTEAM_HOME: the kit and the live log), and a gitignored cache dir for
+// build outputs and package caches shared across worktrees (quality.md §2).
 // A gate run for a ticket's merge knows which ticket it checks (DEVTEAM_GATE_TICKET), so validate
 // can fail it only for what is its own (D4 below).
-// What a gate or worktree_setup sees: DEVTEAM_MAIN is the main checkout of the repo it runs for,
-// DEVTEAM_HOME home's (where the kit and the live log are).
 const gateEnv = (ticket, R = repo('home')) => { const cache = path.join(runDir, 'cache'); fs.mkdirSync(cache, { recursive: true }); return { ...process.env, DEVTEAM_MAIN: R.root, DEVTEAM_HOME: mainRoot, DEVTEAM_CACHE: cache, ...(ticket ? { DEVTEAM_GATE_TICKET: ticket } : {}) }; };
 // The tools .tool-versions pins that this machine's asdf or mise hasn't installed. On a new machine
 // worktree_setup otherwise fails under whatever runtime the system has, which reads as a project bug.
@@ -3167,10 +3188,12 @@ function cmdReviewWorktree() {
 }
 function cmdCheckPr() {
   const headRef = flagStr('head-ref') ?? die('check-pr needs --head-ref (and --sha, --title, --body-file)');
-  const sha = resolveCommit(flagStr('sha') ?? 'HEAD') ?? die('cannot resolve the head');
+  // --repo: a PR in another repo, checked in its checkout (--path, on the forge $GITHUB_WORKSPACE)
+  const R = repo(flagStr('repo') ?? 'home');
+  const sha = R.resolveCommit(flagStr('sha') ?? 'HEAD') ?? die(`cannot resolve the head${R.name === 'home' ? '' : ` in ${R.name}`}`);
   const body = flagStr('body-file') ? fs.readFileSync(flagStr('body-file'), 'utf8') : undefined;
-  fetchMain();
-  report(checkPr({ headRef, sha, title: flagStr('title'), body, forge: true }), `${headRef} passes the checks at ${sha.slice(0, 12)} (gates and the supervisor's approval acts are merge's to check)`);
+  fetchMain(R);
+  report(checkPr({ headRef, sha, title: flagStr('title'), body, forge: true, repo: R }), `${headRef} passes the checks at ${sha.slice(0, 12)}${R.name === 'home' ? '' : ` in ${R.name}`} (gates and the supervisor's approval acts are merge's to check)`);
 }
 // An owner-answered question, for commands that need the owner's yes.
 // A standing approval for upstream syncs: an accepted owner rule scoped chore:devteam-sync
@@ -8286,11 +8309,11 @@ The graph (planning.md)
   ticket add|set|show <id> --json '{…}' | --file f       a ticket: one PR of work
   validate [--strict]            graph rules D1-D11, reviews, goals, log health
   waves [--feature f] | ready [--plan-ahead] | status [--json] | roadmap [--json]
-  components check [--ref r] [--count] [--json]   coverage: every tracked path at r (default main) owned by exactly one component line; exit 1 on any gap (--count: the Baseline's number)
+  components check [--ref r] [--repo <link> [--path <checkout>]] [--count] [--json]   coverage: every tracked path at r (default main) owned by exactly one component line; exit 1 on any gap (--count: the Baseline's number); --repo checks another repo's tree under home's lines
 
 Checks and merging (quality.md)
   check-ticket <id> [--sha s] [--title t] [--body-file f] [--pr n]   definition of done at an exact head
-  check-pr --head-ref r --sha s [--title t] [--body-file f]           what the forge's required check runs (optional; no gates, no approval acts)
+  check-pr --head-ref r --sha s [--title t] [--body-file f] [--repo <link> [--path <checkout>]]   what the forge's required check runs (optional; no gates, no approval acts); --repo checks a PR in another repo (the forge's run passes --path "$GITHUB_WORKSPACE")
   merge <ticket-id> | merge --plan <feature> | merge --chore <slug> [--approved qid] [--no-gates] [--dry-run]   supervisor: verify, run gates at the head, merge, log the act
   review-worktree <ticket-id> <sha> [--name suffix] | review-worktree --remove <path>   a final reviewer's detached worktree at exactly that sha, seeded like a worker's
 
