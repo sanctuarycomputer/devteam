@@ -206,7 +206,7 @@ repo(name = 'home') → {
   name, root /* main checkout on this machine */, commonDir, remote, settings /* effective, §3.3 */,
   projectRel, projectInRepo,
   mainRef(), resolveCommit(ref), changedFiles(base, sha), treePaths(ref), mergeTree(base, sha),
-  git(args), gh(args) /* always -R <remote> */, caches /* per repo */
+  git(args), gh(args) /* -R <remote> for a repo link; home's as before */, caches /* per repo */
 }
 repoOfTicket(t) → repo(component(t.component).link)
 ```
@@ -234,7 +234,7 @@ repoOfTicket(t) → repo(component(t.component).link)
 - `checkTicket`, `checkPr` and `cmdCheckPr` (`--repo`);
 - `cmdMerge`: PR lookup, fetch, gates, landing, both forges;
 - `mergeShaFor`, `mergedAt`, `ticketBranchRef` and `releasedIn`;
-- every `gh` call, through `repo.gh`, which always passes `-R`;
+- every `gh` call, through `repo.gh`, which passes `-R` for a repo link (home's calls stay as they were, so gh resolves home as it always has);
 - `fleet status`, `unpushedBranches` and open-PR listing, per repo;
 - handoff files (in the ticket repo's project folder);
 - the dashboard's ticket views and review pages;

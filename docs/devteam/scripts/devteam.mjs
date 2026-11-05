@@ -1619,8 +1619,10 @@ const projectFileText = (rel) => readText(path.join(projectDir, rel)) ?? (projec
 
 // ===== 4b. repos: home and each repo link, one object each =====
 
-// The repo a GitHub CLI call names (-R): owner/name, or host/owner/name on GitHub Enterprise;
-// null for a remote gh can't name (a path, a non-GitHub host), where gh then runs in the checkout.
+// The repo a sibling's GitHub CLI call names (-R): owner/name, or host/owner/name on GitHub
+// Enterprise; null for a remote gh can't name (a path, a non-GitHub host), where gh then runs in
+// the checkout. Home's calls name none: gh resolves home as it always has (gh repo set-default,
+// else the only remote), which need not be origin.
 const ghSpec = (remote) => {
   const k = remoteKey(remote ?? '');
   if (/^[\w.-]+\/[\w.-]+$/.test(k)) return k;
@@ -1643,7 +1645,7 @@ function homeRepo() {
     resolveCommit,
     git: (args, cwd) => git(args, cwd),
     gitOrDie: (args, cwd) => gitOrDie(args, cwd),
-    gh: (args, opts = {}) => { const spec = ghSpec(git(['config', '--get', 'remote.origin.url'])); return sh('gh', [...args, ...(spec ? ['-R', spec] : [])], opts); },
+    gh: (args, opts = {}) => sh('gh', args, opts),
     mergeShaFor: homeMergeShaFor, mergedAt: homeMergedAt, ticketBranchRef: homeTicketBranchRef, releasedIn: homeReleasedIn,
     srcRead: (ref, rel) => srcRead({ ref }, rel), srcList: (ref, relDir) => srcList({ ref }, relDir),
     resetCaches: () => { mainRefCache = undefined; mainLogCache = undefined; mergeParentsCache = undefined; mergeShaCache.clear(); mergedAtCache.clear(); },

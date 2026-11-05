@@ -5071,7 +5071,7 @@ test('merge runs a sibling ticket\'s gates in its repo and lands it on that repo
   } finally { F.done(); }
 });
 
-test('every gh call names its repo (-R)', () => {
+test('every gh call goes through its repo\'s gh', () => {
   const src = fs.readFileSync(path.join(kit, 'scripts', 'devteam.mjs'), 'utf8');
   const direct = src.split('\n').map((l, i) => [i + 1, l]).filter(([, l]) => /sh\('gh', \[/.test(l) && !/sh\('gh', \[\.\.\.args/.test(l));
   assert.deepEqual(direct.map(([n]) => n), [], `gh called outside repo.gh at lines ${direct.map(([n]) => n).join(', ')}`);
@@ -5110,6 +5110,29 @@ test('a github-forge sibling: gh is asked about that repo', () => {
     fs.chmodSync(path.join(bin, 'gh'), 0o755);
     runIn(old, ['merge', 'console-01-a', '--dry-run'], SUP, { PATH: `${bin}${path.delimiter}${process.env.PATH}` });
     assert.match(fs.readFileSync(logf, 'utf8'), /^pr view ticket\/console-01-a --json \S+ -R usbclub\/console$/m);
+  } finally { F.done(); }
+});
+
+// gh resolves a single-repo project's base repo itself (gh repo set-default, else the only remote),
+// so home's gh calls name no repo, as before repo links; only a sibling's say -R.
+test('a single-repo project\'s gh calls name no repo (-R), as before repo links', () => {
+  const F = monoFixture('gh-home');
+  const { old, g } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  try {
+    g(['remote', 'set-url', 'origin', 'https://github.com/acme/home.git'], old);
+    g(['config', `url.${F.org}.insteadOf`, 'https://github.com/acme/home.git'], old);
+    F.lines(F.STD, { forge: 'github' });
+    const bin = path.join(F.base, 'fakegh');
+    const logf = path.join(F.base, 'gh-args.log');
+    write(path.join(bin, 'gh'), `#!/bin/sh\necho "$@" >> "${logf}"\necho '[]'\n`);
+    fs.chmodSync(path.join(bin, 'gh'), 0o755);
+    const gh = (cmd) => spawnSync(process.execPath, [path.join(old, 'docs/devteam/scripts/devteam.mjs'), ...cmd], { cwd: old, env: { ...F.env(SUP), PATH: `${bin}${path.delimiter}${process.env.PATH}` }, encoding: 'utf8' });
+    gh(['fleet', 'status', '--json', '--no-fetch']);
+    gh(['merge', 'api-01-x', '--dry-run']);
+    const calls = fs.readFileSync(logf, 'utf8').split('\n').filter(Boolean);
+    assert.ok(calls.some((c) => /^pr list /.test(c)), `fleet status asked gh for open PRs: ${calls.join(' | ')}`);
+    assert.deepEqual(calls.filter((c) => /(^| )-R( |$)/.test(c)), [], 'no home gh call names a repo');
   } finally { F.done(); }
 });
 
