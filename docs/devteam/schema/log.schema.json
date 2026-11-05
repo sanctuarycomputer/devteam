@@ -425,13 +425,14 @@
             "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$"
           },
           "kind": {
-            "description": "contract (an interface others build on), build, integration, chore or spike (a time-boxed investigation).",
+            "description": "contract (an interface others build on), build, integration, chore, spike (a time-boxed investigation) or fix (a production incident, from a decision in incident-fix).",
             "enum": [
               "contract",
               "build",
               "integration",
               "chore",
-              "spike"
+              "spike",
+              "fix"
             ]
           },
           "size": {
@@ -877,7 +878,7 @@
         ]
       },
       "problem": {
-        "description": "Something wrong (realized) or that could go wrong (a risk), with a lifecycle.",
+        "description": "Something wrong (realized) or that could go wrong (a risk), with a lifecycle. An incident is a problem the monitors found: it holds their fingerprints, and its severity is computed from their observations.",
         "type": "object",
         "properties": {
           "title": {
@@ -895,11 +896,12 @@
             "maximum": 4
           },
           "status": {
-            "description": "open, owned, mitigating or resolved.",
+            "description": "open, owned, mitigating, verifying (a fix is out, inside its verify window) or resolved.",
             "enum": [
               "open",
               "owned",
               "mitigating",
+              "verifying",
               "resolved"
             ]
           },
@@ -924,6 +926,36 @@
             "items": {
               "type": "string"
             }
+          },
+          "fingerprints": {
+            "description": "An incident's fingerprints: <monitor>:<kind>:<fingerprint>, as monitor triage lists them.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "monitor": {
+            "description": "The monitor whose fingerprints an incident holds first.",
+            "type": "string"
+          },
+          "verify": {
+            "description": "An incident's fix in production: the commit, the end of its verify window, and whether the deploy was matched or assumed.",
+            "type": "object",
+            "properties": {
+              "commit": {
+                "type": "string",
+                "description": "The merge commit of the fix."
+              },
+              "until": {
+                "type": "string",
+                "description": "The end of the verify window."
+              },
+              "assumed": {
+                "type": "boolean",
+                "description": "true when no deploy event matched the commit and the window started deploy_lag_minutes after the merge."
+              }
+            },
+            "additionalProperties": false
           }
         },
         "additionalProperties": false,
