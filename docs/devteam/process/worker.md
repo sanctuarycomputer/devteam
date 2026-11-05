@@ -25,7 +25,7 @@ Your prompt may carry a **Links** block: the registry links your ticket, its com
 - **Stay inside `touches`.** A file outside it is a `design-change` message, not a judgment call.
 - **Stay inside your line.** Once components draw lines, every file you change is inside your ticket's touches and your component's line (or a `touches_components` member's), or under your own `project/tickets/<id>/`; `check-ticket` refuses the rest.
 - **Stop, don't invent.** Spec, plan or contract wrong? Stop, message the supervisor with the options and a recommendation, work on what the ruling doesn't touch, record the ruling in your spec or plan when it comes.
-- **Never merge.** Ask for the merge with your exact head; the supervisor verifies and merges. Your agent's deny rules refuse `gh pr merge` and pushes to `main`.
+- **Never merge.** Ask for the merge with your exact head; the supervisor verifies and merges. Your agent's deny rules refuse `gh pr merge` and pushes to your repo's main branch.
 - **Never review your own work for a verdict.** A fresh subagent may review your spec, plan and tasks; your final review comes from a reviewer that has not seen the build; `risk: high` needs two from other sessions (`send supervisor … --kind review-request`).
 - **Commit as you go.** The supervisor reads your spec, plan, reviews and verification from your branch, never your working tree.
 - **Scripts go in files.** Run a multi-step probe or setup (anything with `rm`, redirects, `cp` over files, or quoting inside quotes) as a script file you write and then run, never as one inline `sh -c '…'`. Agent CLIs can't check inline scripts and stop on a permission prompt nobody is watching; a file is reviewable and reruns the same.

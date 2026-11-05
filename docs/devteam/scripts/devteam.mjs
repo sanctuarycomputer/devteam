@@ -1592,6 +1592,20 @@ function homeMergeShaFor(id) {
   mergeShaCache.set(id, v);
   return v;
 }
+// When a finding first reached home's main: the commit time of the first commit on main whose kit
+// script added its token (a sync chore's commit, in a project). A finding about merges reads only
+// merges after it, so an upgrade raises nothing for history the kit couldn't have refused. Null
+// when the kit isn't tracked on main.
+const upgradeAtCache = new Map();
+function upgradeAt(token) {
+  if (upgradeAtCache.has(token)) return upgradeAtCache.get(token);
+  const ref = mainRef();
+  const file = `${kitRel ? `${kitRel}/` : ''}scripts/devteam.mjs`;
+  const rows = ref && !kitRel.startsWith('..') ? (git(['log', '--reverse', '--format=%ct', `-S${token}`, ref, '--', file]) ?? '').split('\n').filter(Boolean) : [];
+  const at = rows.length ? Number(rows[0]) * 1000 : null;
+  upgradeAtCache.set(token, at);
+  return at;
+}
 const mergedAtCache = new Map();
 function homeMergedAt(id) {
   if (!mergedAtCache.has(id)) {
@@ -6624,6 +6638,38 @@ function collectMetrics(since) {
     const name = repoOfTicketLink(t);
     if (early.length) add('high', 'merged-out-of-order', t.id, `${t.id} reached ${name === 'home' ? '' : `${name}'s `}main before ${early.join(', ')}, which it depends on`, `check that ${t.id} works without ${early.length > 1 ? 'them' : 'it'}, and merge ${early.join(', ')} next; a revert is a ticket of its own`, { sev: 3 });
   }
+  // A merge on any repo's main that merge never made (a worker's push to its repo's main, a merge
+  // on the forge's button): no gates, reviews or checks ran on it. A ticket that reads merged with
+  // no merge-word act, and a merge commit whose branch head no merge act names. Only merges after
+  // this finding reached home's main, so an existing project's history raises nothing.
+  {
+    const since = upgradeAt('merged-without-merge');
+    if (since !== null) {
+      const acts = logObjects('act').filter((a) => ['merge-word', 'merge-chore', 'approve-feature-plan'].includes(a.class));
+      const heads = new Set(acts.map((a) => /\bat ([0-9a-f]{40})\b/.exec(a.what ?? '')?.[1]).filter(Boolean));
+      const worded = new Set(acts.filter((a) => a.class === 'merge-word').flatMap((a) => a.refs ?? []));
+      const seen = new Set();
+      for (const t of ts.values()) {
+        const at = mergedAt(t.id);
+        if (!at || at < since || worded.has(t.id)) continue;
+        const sha = mergeShaFor(t.id);
+        const name = repoOfTicketLink(t);
+        seen.add(sha);
+        add('high', 'merged-without-merge', t.id, `${t.id} reached ${name === 'home' ? '' : `${name}'s `}main at ${sha.slice(0, 12)} with no merge act: no gates, reviews or checks ran on it`, `check it now (check-pr${name === 'home' ? '' : ` --repo ${name}`} at that sha, its records, its gates); a revert is a ticket of its own; then find how it landed (a push to main, the forge's button) and close that path`, { sev: 3 });
+      }
+      for (const name of ['home', ...Object.entries(settings.links ?? {}).filter(([, l]) => LINK_KINDS[l?.kind]?.hostsComponents).map(([id]) => id)]) {
+        if (!repoReadable(name)) continue;
+        const R = repo(name);
+        const ref = R.mainRef();
+        if (!ref) continue;
+        for (const row of (R.git(['log', ref, '--first-parent', '--merges', `--since=${Math.floor(since / 1000)}`, '--format=%H %ct %P']) ?? '').split('\n').filter(Boolean)) {
+          const [sha, ct, , p2] = row.split(' ');
+          if (Number(ct) * 1000 < since || seen.has(sha) || heads.has(p2)) continue;
+          add('high', 'merged-without-merge', `${name}:${sha.slice(0, 12)}`, `${name === 'home' ? '' : `${name}'s `}main has merge ${sha.slice(0, 12)} (of ${p2.slice(0, 12)}) that no merge act made: no gates, reviews or checks ran on it`, 'find what it merged and check it now; merges go through devteam.mjs merge, never the forge\'s button or a push to main', { sev: 3 });
+        }
+      }
+    }
+  }
   // The registry: a link that no longer resolves, and lines drawn in the wrong place.
   {
     const reg = settings.links ?? {};
@@ -7577,9 +7623,10 @@ function makeSession(role) {
   // gitignored, and would bind the supervisor too): for Claude Code, a --settings file in run/.
   let cmd = resume ? s.resume_command : s.agent_command;
   if (/^claude(\s|$)/.test(cmd)) {
-    const policy = path.join(runDir, 'agent', `${role}-claude.json`);
+    // per session: the deny rules name the main branch of the repo this session works in
+    const policy = path.join(runDir, 'agent', `${name}-claude.json`);
     fs.mkdirSync(path.dirname(policy), { recursive: true });
-    fs.writeFileSync(policy, `${JSON.stringify({ permissions: { deny: s.worker_denied_commands.map((c) => `Bash(${c})`) }, hooks: { Stop: [{ hooks: [{ type: 'command', command: `node '${path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs')}' stop-ok` }] }] } }, null, 2)}\n`);
+    fs.writeFileSync(policy, `${JSON.stringify({ permissions: { deny: deniedFor(s.worker_denied_commands, mb).map((c) => `Bash(${c})`) }, hooks: { Stop: [{ hooks: [{ type: 'command', command: `node '${path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs')}' stop-ok` }] }] } }, null, 2)}\n`);
     cmd = cmd.replace(/^claude/, `claude --settings '${policy}'`);
   }
   // A tmux server started from inside an agent session (the supervisor's, on a new machine) hands
@@ -7593,6 +7640,15 @@ function makeSession(role) {
   if (role === 'planner' && lastPhaseOf(name)?.to === 'parked') appendLog({ type: 'phase', from: 'parked', to: 'starting', note: `started in ${shown}` }, name);
   appendLog({ type: 'act', decision: citing(), class: 'worker-slots', what: `${resume ? 'resumed' : 'made'} ${role} ${name} in ${shown}${block ? `, ticket numbers ${padNN(block.from)}-${padNN(block.to)}` : ''}${refused ? ` while its goal is ${holdWords(mode)}, with --force` : ''}`, refs: role === 'worker' ? [id] : goalIds, reversible: true, id_block: block ?? undefined }, 'supervisor');
   out(`${resume ? 'resumed' : 'made'} ${role} ${name} in ${shown} at ${wt}${block ? `; ticket numbers ${padNN(block.from)}-${padNN(block.to)} reserved` : ''}`);
+}
+
+// A session's deny rules: the owner's worker_denied_commands, where a push rule that names the
+// literal branch main also names the main branch of the repo the session works in (a sibling on
+// trunk, or a home whose main_branch isn't main), so no worker pushes straight to its repo's main.
+function deniedFor(rules, mb) {
+  const out = [...rules];
+  if (mb && mb !== 'main') for (const c of rules) if (/^git push\b/.test(c) && /\bmain\b/.test(c)) out.push(c.replace(/\bmain\b/g, mb));
+  return [...new Set(out)];
 }
 
 // --- moving the fleet: fleet park | drain, fleet status, fleet unpark | undrain (supervisor.md §12) ---

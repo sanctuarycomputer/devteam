@@ -5241,6 +5241,48 @@ test('a ticket merges only after its depends_on, in any repo; unreadable fails c
   } finally { F.done(); }
 });
 
+// A worker's deny rules name its own repo's main, and a merge no merge act made, on any repo's
+// main, is a finding (a worker's push, the forge's button), counted only after the upgrade.
+test('a worker session denies pushes to its own repo\'s main; a merge with no merge act on any main is merged-without-merge', () => {
+  const src = fs.readFileSync(path.join(kit, 'scripts', 'devteam.mjs'), 'utf8');
+  const fn = /\nfunction deniedFor\(rules, mb\) \{[\s\S]*?\n\}\n/.exec(src);
+  assert.ok(fn, 'deniedFor is defined');
+  const deniedFor = new Function(`${fn[0]}; return deniedFor;`)();
+  const defaults = ['gh pr merge*', 'gh api*', 'git push*main*', 'git push*--force*', 'git push*-f *', 'git push*+*'];
+  assert.deepEqual(deniedFor(defaults, 'main'), defaults, "home on main: the owner's rules as written");
+  assert.ok(deniedFor(defaults, 'trunk').includes('git push*trunk*'), 'a sibling on trunk: its main is denied too');
+  assert.ok(deniedFor(defaults, 'trunk').includes('git push*main*'));
+  assert.match(src, /policy = path\.join\(runDir, 'agent', `\$\{name\}-claude\.json`\)/, 'one policy file per session');
+  assert.match(src, /deny: deniedFor\(s\.worker_denied_commands, mb\)/, "built from the session's repo's main branch");
+  const F = multiFixture('no-merge-act');
+  const { old, g, okIn, ticket } = F;
+  try {
+    ticket('console-01-a');
+    // a worker pushes its ticket straight to console's trunk: it reads merged, with no merge act
+    const w = path.join(F.base, 'console-push');
+    g(['worktree', 'add', '-q', '-b', 'ticket/console-01-a', w, 'origin/trunk'], F.console);
+    write(path.join(w, 'src/main.js'), 'pushed\n');
+    g(['commit', '-qam', 'console-01-a: work'], w);
+    g(['push', '-q', 'origin', 'HEAD:trunk'], w);
+    // a merge on companion's main from the forge's button, no ticket
+    g(['checkout', '-q', '-b', 'side'], F.companion);
+    write(path.join(F.companion, 'app/x.js'), 'x\n');
+    g(['add', '-A'], F.companion); g(['commit', '-qm', 'side'], F.companion);
+    g(['checkout', '-q', 'main'], F.companion);
+    g(['merge', '-q', '--no-ff', '-m', 'Merge pull request #1', 'side'], F.companion);
+    g(['push', '-q', 'origin', 'main'], F.companion);
+    okIn(old, ['observe-metrics'], { DEVTEAM_ROLE: 'supervisor' });
+    const fs1 = json(okIn(old, ['metrics', '--json'])).findings.filter((x) => x.kind === 'merged-without-merge');
+    const t = fs1.find((x) => x.subject === 'console-01-a');
+    assert.ok(t, `a finding for the pushed ticket: ${JSON.stringify(fs1)}`);
+    assert.match(t.detail, /console-01-a reached console's main at \w{12} with no merge act/);
+    const m = fs1.find((x) => x.subject.startsWith('companion:'));
+    assert.ok(m, 'a finding for the merge on companion\'s main');
+    assert.match(m.detail, /companion's main has merge \w{12} .* that no merge act made/);
+    assert.equal(fs1.length, 2, 'nothing for home, where nothing was merged');
+  } finally { F.done(); }
+});
+
 // The tick reads every repo's main as its origin has it now: observe-metrics fetches each repo
 // link's main before it reads anything, so a push from another clone (or a forge-UI merge) shows.
 test('observe-metrics fetches each repo link\'s main; a failed fetch is a repo-unreachable finding, never a crash', () => {
