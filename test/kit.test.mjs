@@ -5078,11 +5078,14 @@ test('check-pr --repo checks a sibling PR in that repo, from any checkout of it 
 
 test('merge runs a sibling ticket\'s gates in its repo and lands it on that repo\'s main; a repo with no gates is refused', () => {
   const F = multiFixture('sibling-merge');
-  const { old, g, okIn, runIn, ticket } = F;
+  const { old, g, okIn, runIn, ticket, real } = F;
   const SUP = { DEVTEAM_ROLE: 'supervisor' };
   try {
-    // home's own gates are path-filtered; companion has none, and inherits none
-    F.lines({ ...F.STD, console: { link: 'console' }, companion: { link: 'companion' } }, { gates: { web: { cmd: 'true', paths: ['web/**'] } } });
+    // home's own gates are path-filtered; companion has none, and inherits none. Console's gate
+    // records where it ran: outside home's tree, so nothing of home's is found by walking up.
+    const cwdFile = path.join(F.base, 'gate-cwd');
+    const links0 = json(okIn(old, ['settings'])).links;
+    F.lines({ ...F.STD, console: { link: 'console' }, companion: { link: 'companion' } }, { gates: { web: { cmd: 'true', paths: ['web/**'] } }, links: { ...links0, console: { ...links0.console, gates: { test: `test -f src/main.js && pwd -P > '${cwdFile}'` } } } });
     const land = (id, repoDir, branch, files) => {
       ticket(id, { touches: Object.keys(files).map((f) => `${f.split('/')[0]}/**`) });
       const w = path.join(old, '.worktrees', id);
@@ -5108,6 +5111,10 @@ test('merge runs a sibling ticket\'s gates in its repo and lands it on that repo
     g(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qam', 'elsewhere'], other); g(['push', '-q', 'origin', 'trunk'], other);
     const moved = g(['rev-parse', 'HEAD'], other);
     assert.match(okIn(old, ['merge', 'console-01-a'], SUP), /merged ticket\/console-01-a at \w{12} in console/);
+    const ran = fs.readFileSync(cwdFile, 'utf8').trim();
+    assert.ok(!ran.startsWith(`${real(old)}${path.sep}`), `console's gate ran outside home's tree (${ran})`);
+    assert.ok(ran.startsWith(real(os.tmpdir())), `in the OS temp folder (${ran})`);
+    assert.ok(!fs.existsSync(path.dirname(ran)), 'and its holder is gone after the merge');
     g(['fetch', '-q', 'origin'], F.console);
     assert.equal(g(['rev-parse', 'origin/trunk^2'], F.console), sha, "console's main merged the verified head");
     assert.equal(g(['rev-parse', 'origin/trunk^1'], F.console), moved, 'onto the main its origin has now');

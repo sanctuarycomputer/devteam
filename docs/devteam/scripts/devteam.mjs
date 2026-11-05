@@ -3289,10 +3289,18 @@ function seedWorktree(wt, { setup = true, repo: R = repo('home') } = {}) {
 }
 // A throwaway checkout of one commit of a repo, under home's .worktrees, removed when the process
 // ends however it ends.
+// Another repo's lives in the OS temp folder (where secret post already makes its own), never under
+// home's tree: a gate there would otherwise pass on home's node_modules, .tool-versions and lint or
+// ts configs, found by walking up the directories. Home's stays under home's .worktrees, as before.
 function detachedWorktree(sha, name, R = repo('home')) {
-  const wt = path.join(mainRoot, '.worktrees', `tmp-${name}-${process.pid}`);
+  const holder = R.name === 'home' ? null : fs.mkdtempSync(path.join(os.tmpdir(), `devteam-${R.name}-`));
+  const wt = holder ? path.join(holder, `tmp-${name}`) : path.join(mainRoot, '.worktrees', `tmp-${name}-${process.pid}`);
   R.gitOrDie(['worktree', 'add', '--quiet', '--detach', wt, sha], R.root);
-  process.once('exit', () => { if (fs.existsSync(wt)) R.git(['worktree', 'remove', '--force', wt], R.root); });
+  process.once('exit', () => {
+    if (fs.existsSync(wt)) R.git(['worktree', 'remove', '--force', wt], R.root);
+    // the empty holder only (rmdir refuses anything with files left in it)
+    if (holder) try { fs.rmdirSync(holder); } catch {}
+  });
   seedWorktree(wt, { repo: R });
   return wt;
 }

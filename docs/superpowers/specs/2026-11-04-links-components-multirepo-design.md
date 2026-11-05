@@ -245,6 +245,7 @@ repoOfTicket(t) → repo(component(t.component).link)
 ### 5.2 Worktrees and the kit
 
 - **Worker, planner, review and gate worktrees all live at `home/.worktrees/<name>`,** made with `repo.git(['worktree', 'add', …])` from the ticket's repo. One directory holds every session.
+- **Where a sibling's worktrees are.** `merge`'s throwaway checkouts of another repo (gate, ratchet base, landing) and a sibling measure's are made in the OS temp folder (`devteam-<repo>-*`, as `secret post` makes its own), never under home's tree, so a gate can't pass on home's `node_modules`, `.tool-versions` or lint and ts configs found by walking up. Worker and review worktrees stay under home's `.worktrees/` (fleet status, strays, `worker --remove` and the prompts all find them there); the risk that a tool walking up finds home's copy there is the README's to state, and the gates at merge are the check.
 - **A worktree's repo is computed, not recorded:** `git -C <wt> rev-parse --git-common-dir`, matched to a repo link. Fleet park, status and unpark use it to check "pushed, clean, handoff" against the right remote.
 - **A worker in another repo's worktree runs home's kit by absolute path,** with `DEVTEAM_HOME` and `DEVTEAM_RUN` in its env, as `makeSession` already does for `DEVTEAM_RUN`.
 - **`seedWorktree` uses the ticket repo's settings:**
