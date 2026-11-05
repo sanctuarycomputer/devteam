@@ -2139,7 +2139,7 @@ test('devteam kit', async (t) => {
       assert.equal(r.status, 200);
       assert.equal(sha(Buffer.from(await r.arrayBuffer())), sha(PAGE), 'the page, byte for byte');
       const csp = r.headers.get('content-security-policy');
-      for (const d of ["default-src 'none'", "connect-src 'none'", 'sandbox allow-scripts', `frame-ancestors ${B}`, "form-action 'none'", "font-src 'none'", `script-src 'unsafe-inline' ${B}/review/`, `img-src data: blob: ${B}/api/file`]) assert.ok(csp.split('; ').includes(d), `the policy has ${d}: ${csp}`);
+      for (const d of ["default-src 'none'", "connect-src 'none'", 'sandbox allow-scripts', `frame-ancestors ${B} http://127.0.0.1:${process.env.DEVTEAM_HUB_PORT}`, "form-action 'none'", "font-src 'none'", `script-src 'unsafe-inline' ${B}/review/`, `img-src data: blob: ${B}/api/file`]) assert.ok(csp.split('; ').includes(d), `the policy has ${d}: ${csp}`);
       assert.doesNotMatch(csp, /https:|\*/, 'no outside origin, no wildcard');
       assert.equal(r.headers.get('x-content-type-options'), 'nosniff');
       assert.equal(r.headers.get('cache-control'), 'no-store');
@@ -2168,7 +2168,7 @@ test('devteam kit', async (t) => {
       assert.equal((await fetch(`${B}/review/preview/?${pv}`)).status, 403);
       assert.equal((await fetch(`${B}/review/preview/?path=../x.html&ref=review-dash`, { headers: frame })).status, 400);
       assert.equal((await fetch(`${B}/review/preview/?${new URLSearchParams({ path: `${rel}/data.json`, ref: 'review-dash' })}`, { headers: frame })).status, 400, 'only a page');
-      assert.equal((await fetch(`${B}/`)).headers.get('content-security-policy'), "frame-src 'self'", "the dashboard's frames stay on the dashboard, even when a frame navigates itself");
+      assert.equal((await fetch(`${B}/`)).headers.get('content-security-policy'), `frame-src 'self'; frame-ancestors 'self' http://127.0.0.1:${process.env.DEVTEAM_HUB_PORT}`, "the dashboard's frames stay on the dashboard, even when a frame navigates itself; only it and the hub may frame it");
 
       // what the review view loads
       r = await fetch(`${B}/api/review?id=${Qa}`);
@@ -2796,6 +2796,19 @@ test('the hub: lists every instance on the machine, links to each one, moves whe
     const page = await fetch(`http://127.0.0.1:${HUB}/`);
     assert.match(await page.text(), /instances\.json/, 'the page reads the list from its own hub');
     assert.match(page.headers.get('content-security-policy'), /connect-src 'self'/, 'and can talk to nothing else');
+    const csp = page.headers.get('content-security-policy');
+    for (let p = P; p < P + 25; p++) assert.ok(csp.includes(`http://127.0.0.1:${p} `) || csp.includes(`http://127.0.0.1:${p};`), `the hub may frame ${p}`);
+    assert.ok(!csp.includes(`http://127.0.0.1:${P + 25}`), 'and nothing outside the block');
+    const dash = await fetch(`http://127.0.0.1:${P}/`);
+    assert.ok(dash.headers.get('content-security-policy').split('; ').includes(`frame-ancestors 'self' http://127.0.0.1:${HUB}`), 'only the dashboard itself and the hub, at its one address, can frame a dashboard');
+    // the hub has one address: localhost (which may be ::1, held by something else) is sent to 127.0.0.1
+    const viaLocalhost = await new Promise((resolve, reject) => { const r = http.request({ host: '127.0.0.1', port: HUB, path: '/#beta', headers: { host: `localhost:${HUB}` } }, (res) => { res.resume(); resolve([res.statusCode, res.headers.location]); }); r.on('error', reject); r.end(); });
+    assert.deepEqual(viaLocalhost, [302, `http://127.0.0.1:${HUB}/#beta`]);
+    const page2 = await (await fetch(`http://127.0.0.1:${HUB}/`)).text();
+    assert.match(page2, /id="tabs"/, 'the page is a tab bar');
+    // idle connections stay open longer than any client reuses one (Node 18's fetch: about 4 s)
+    assert.match(page.headers.get('keep-alive') ?? '', /timeout=65/, "the hub's");
+    assert.match((await fetch(`http://127.0.0.1:${P}/api/hello`)).headers.get('keep-alive') ?? '', /timeout=65/, "and a dashboard's");
     assert.equal(await statusWithHost(HUB, '/instances.json', 'rebound.example'), 403, 'its own Host only');
     assert.equal(await statusWithHost(HUB, '/instances.json', `127.0.0.1:${HUB}`, 'POST'), 405, 'it only lists');
     assert.equal(await statusWithHost(HUB, '/instances.json', `127.0.0.1:${HUB}`, 'GET', { 'sec-fetch-site': 'cross-site' }), 403, "another site's page can't make it probe");

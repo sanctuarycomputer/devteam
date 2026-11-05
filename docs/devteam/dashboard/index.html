@@ -2874,7 +2874,9 @@ async function loadNow({ force = false } = {}) {
 // front of them, the browser shows a notification; clicking it brings them to the card. The tab
 // title carries the Inbox count. The first load only records what is already there, and the
 // browser asks permission once, from the owner's click (it never asks on its own).
-const NOTIFY_OK = 'Notification' in window && window.isSecureContext;
+// Inside the hub's frame a page can't ask for notification permission (a cross-origin frame), and
+// the hub notifies for every instance: so a framed dashboard shows no control and sends nothing.
+const NOTIFY_OK = 'Notification' in window && window.isSecureContext && window.top === window;
 let inboxSeen = null;
 function inboxItems(d) {
   return [

@@ -24,51 +24,193 @@
   /* devteam-ui tokens end */
   :root { --sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; --mono: ui-monospace, SFMono-Regular, Menlo, monospace; }
   * { box-sizing: border-box; }
-  html { -webkit-text-size-adjust: 100%; background: var(--bg); }
-  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
-  main { max-width: 760px; margin: 0 auto; padding: 32px 16px; }
-  h1 { font-size: 16px; font-weight: 600; margin: 0 0 4px; }
-  .sub { color: var(--fg-2); margin: 0 0 20px; }
-  .card { display: block; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; margin: 0 0 10px; color: inherit; text-decoration: none; box-shadow: var(--shadow); }
-  .card:hover { background: var(--hover); border-color: var(--line-2); }
-  .root { font: 500 14px/1.4 var(--mono); color: var(--blue-fg); word-break: break-all; }
-  .meta { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 6px; color: var(--fg-2); font-size: 13px; }
-  .badge { border: 1px solid var(--line-2); border-radius: 999px; padding: 0 8px; font: 12px/18px var(--mono); }
-  .local { color: var(--amber-fg); border-color: var(--amber); }
-  .inbox { color: var(--amber-fg); font-weight: 600; }
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.5 var(--sans); -webkit-font-smoothing: antialiased; display: flex; flex-direction: column; }
+  header { display: flex; align-items: flex-end; gap: 12px; padding: 6px 12px 0; background: var(--surface); border-bottom: 1px solid var(--line); flex: 0 0 auto; }
+  nav { display: flex; gap: 2px; overflow-x: auto; flex: 1 1 auto; scrollbar-width: none; }
+  nav::-webkit-scrollbar { display: none; }
+  .tab { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px 7px; border: 1px solid transparent; border-bottom: 0; border-radius: 7px 7px 0 0; background: none; color: var(--fg-2); font: 500 13px/18px var(--sans); cursor: pointer; white-space: nowrap; margin-bottom: -1px; }
+  .tab:hover { color: var(--fg); background: var(--hover); }
+  .tab[aria-selected="true"] { color: var(--fg); background: var(--bg); border-color: var(--line); }
+  .tab.gone { opacity: .45; }
+  .badge { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; background: var(--amber); color: #000; font: 600 11px/18px var(--sans); text-align: center; }
+  #notify { flex: 0 0 auto; padding-bottom: 7px; color: var(--muted); font-size: 12px; }
+  #notify button { font: inherit; color: var(--fg-2); background: none; border: 1px solid var(--line-2); border-radius: 6px; padding: 2px 8px; cursor: pointer; }
+  main { flex: 1 1 auto; position: relative; }
+  iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: var(--bg); }
+  iframe[hidden] { display: none; }
+  #empty { margin: 48px auto; max-width: 520px; padding: 0 16px; color: var(--fg-2); text-align: center; }
 </style>
 </head>
 <body>
-<main>
-  <h1>devteam on this machine</h1>
-  <p class="sub">Every running instance. Open one to go to its own dashboard.</p>
-  <div id="list"><p class="sub">Looking…</p></div>
-</main>
+<header>
+  <nav id="tabs" role="tablist" aria-label="devteam instances"></nav>
+  <span id="notify"></span>
+</header>
+<main id="frames"><p id="empty">Looking for devteam dashboards on this machine…</p></main>
 <script>
-// The hub's page: it lists what its own server found (instances.json), one card per instance,
-// each linking to that instance's own dashboard. Text goes in as text, never as markup.
-const list = document.getElementById('list');
-const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
+// The hub's page: a tab per devteam instance on the machine (its name, and a badge when its Inbox
+// has something), and that instance's own dashboard in a frame under it, on the instance's own
+// address. The list comes from the hub's own server (instances.json); text goes in as text.
+const $ = (id) => document.getElementById(id);
+const tabsEl = $('tabs');
+const framesEl = $('frames');
+const empty = $('empty');
+const items = new Map(); // root -> { x, tab, frame, goneAt }
+const hex6 = new Map();  // root -> 6 hex of its sha1, for telling two same-named instances apart
+const lastInbox = new Map();
+const openedWith = new Set(); // roots already there when the page opened: their first count is a baseline
+let selected = null;
+let firstDraw = true;
+const GONE_MS = 30000;
+const NOTIFY_OK = 'Notification' in window && window.isSecureContext;
+
+async function hexOf(root) {
+  if (!hex6.has(root)) {
+    try { const d = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(root)); hex6.set(root, [...new Uint8Array(d)].slice(0, 3).map((b) => b.toString(16).padStart(2, '0')).join('')); } catch { hex6.set(root, String(hex6.size)); }
+  }
+  return hex6.get(root);
+}
+function keyOf(it) {
+  const twins = [...items.values()].filter((o) => o.x.name === it.x.name).length > 1;
+  return twins ? `${it.x.name}-${hex6.get(it.x.root)}` : String(it.x.name);
+}
+const urlOf = (x) => `http://127.0.0.1:${Number(x.port)}/`;
+const byRoot = (a, b) => String(a).localeCompare(String(b));
+const wanted = () => { try { return decodeURIComponent(location.hash.slice(1)); } catch { return ''; } };
+
+function select(root) {
+  const it = items.get(root);
+  if (!it) return;
+  selected = root;
+  history.replaceState(null, '', `#${encodeURIComponent(keyOf(it))}`);
+  if (!it.frame) {
+    it.frame = document.createElement('iframe');
+    it.frame.title = String(it.x.name);
+    // A dashboard runs scripts, fetches its own origin, posts forms and opens links in new tabs; it
+    // never navigates this page, whatever answers in the block.
+    it.frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads');
+    it.frame.setAttribute('allow', 'clipboard-write');
+    it.frame.src = urlOf(it.x);
+    framesEl.append(it.frame);
+  }
+  for (const [r, o] of items) {
+    o.tab.setAttribute('aria-selected', String(r === root));
+    o.tab.tabIndex = r === root ? 0 : -1;
+    if (o.frame) o.frame.hidden = r !== root;
+  }
+}
+function paintTab(it) {
+  const { x, tab } = it;
+  tab.replaceChildren();
+  const label = document.createElement('span');
+  label.textContent = String(x.name);
+  tab.append(label);
+  if (typeof x.inbox === 'number' && x.inbox > 0) {
+    const b = document.createElement('span');
+    b.className = 'badge';
+    b.textContent = String(x.inbox);
+    b.setAttribute('aria-label', `${x.inbox} in the Inbox`);
+    tab.append(b);
+  }
+  const state = x.inbox === null || x.inbox === undefined ? 'starting' : `${x.inbox} in the Inbox; ${x.fleet ? `${x.fleet.mode}, ${x.fleet.workers} session${x.fleet.workers === 1 ? '' : 's'}` : ''}`;
+  tab.title = `${x.root}\nport ${Number(x.port)} · kit ${x.kit ?? '?'}\n${state}${it.goneAt ? '\nnot answering' : ''}`;
+  if (it.frame) it.frame.title = String(x.name);
+  tab.classList.toggle('gone', Boolean(it.goneAt));
+}
+function notifyFor(it, before) {
+  const n = it.x.inbox;
+  if (!NOTIFY_OK || Notification.permission !== 'granted' || typeof n !== 'number' || typeof before !== 'number' || n <= before) return;
+  const note = new Notification(`${it.x.name}: ${n - before} new in the Inbox`, { body: String(it.x.root), tag: `devteam-${it.x.root}` });
+  note.onclick = () => { window.focus(); select(it.x.root); note.close(); };
+}
+function notifyControl() {
+  const el = $('notify');
+  el.replaceChildren();
+  if (!NOTIFY_OK) return;
+  const p = Notification.permission;
+  if (p === 'granted') { el.textContent = 'Notifying you of new Inbox items'; return; }
+  if (p === 'denied') { el.textContent = 'Notifications are blocked for this page'; return; }
+  const b = document.createElement('button');
+  b.textContent = 'Notify me of new Inbox items';
+  b.onclick = async () => { try { await Notification.requestPermission(); } catch {} notifyControl(); };
+  el.append(b);
+}
+
 async function draw() {
   let data;
   try { data = await (await fetch('instances.json', { cache: 'no-store' })).json(); } catch { return; }
-  list.replaceChildren();
-  if (!data.instances.length) { list.append(el('p', 'sub', 'No devteam dashboards are running on this machine.')); return; }
-  for (const x of data.instances) {
-    const card = el('a', 'card');
-    card.href = `http://127.0.0.1:${Number(x.port)}/`;
-    const meta = el('div', 'meta');
-    if (x.name) meta.append(el('span', '', String(x.name)));
-    if (x.kit) meta.append(el('span', String(x.kit).endsWith('+local') ? 'badge local' : 'badge', String(x.kit)));
-    if (x.inbox === null || x.inbox === undefined) meta.append(el('span', '', 'starting'));
-    else {
-      meta.append(el('span', x.inbox > 0 ? 'inbox' : '', `${x.inbox} in the Inbox`));
-      if (x.fleet) meta.append(el('span', '', `${x.fleet.mode}, ${x.fleet.workers} session${x.fleet.workers === 1 ? '' : 's'}`));
-    }
-    card.append(el('div', 'root', String(x.root)), meta);
-    list.append(card);
+  const now = Date.now();
+  const seen = new Set();
+  // One tab per root: if two answers claim one root (a second dashboard of one repo, or something
+  // pretending), the tab keeps the port it already shows, else the lowest; the rest are ignored.
+  const perRoot = new Map();
+  for (const x of data.instances ?? []) {
+    if (!x || typeof x.root !== 'string' || !Number.isInteger(Number(x.port))) continue;
+    const had = perRoot.get(x.root);
+    const keep = items.get(x.root)?.x.port;
+    if (!had || Number(x.port) === Number(keep) || (Number(had.port) !== Number(keep) && Number(x.port) < Number(had.port))) perRoot.set(x.root, x);
   }
+  for (const x of perRoot.values()) {
+    seen.add(x.root);
+    await hexOf(x.root);
+    let it = items.get(x.root);
+    if (!it) {
+      const tab = document.createElement('button');
+      tab.className = 'tab';
+      tab.setAttribute('role', 'tab');
+      tab.onclick = () => select(x.root);
+      tabsEl.append(tab);
+      it = { x, tab, frame: null, goneAt: null };
+      items.set(x.root, it);
+    }
+    const moved = it.frame && Number(it.x.port) !== Number(x.port);
+    const before = lastInbox.get(x.root);
+    it.x = x;
+    it.goneAt = null;
+    if (moved) it.frame.src = urlOf(x);
+    // an instance that turns up later with items already waiting counts them as new; one that was
+    // there when the page opened (still starting) takes its first count as the baseline
+    if (firstDraw) openedWith.add(x.root);
+    else notifyFor(it, before ?? (typeof x.inbox === 'number' && !openedWith.has(x.root) ? 0 : undefined));
+    if (typeof x.inbox === 'number') lastInbox.set(x.root, x.inbox);
+  }
+  for (const [root, it] of items) {
+    if (seen.has(root)) continue;
+    it.goneAt ??= now;
+    if (now - it.goneAt > GONE_MS) {
+      it.tab.remove();
+      it.frame?.remove();
+      items.delete(root);
+      if (selected === root) selected = null;
+    }
+  }
+  // tabs in the hub's order (by root)
+  for (const root of [...items.keys()].sort(byRoot)) tabsEl.append(items.get(root).tab);
+  for (const it of items.values()) paintTab(it);
+  empty.hidden = items.size > 0;
+  if (!items.size) empty.textContent = 'No devteam dashboards are running on this machine.';
+  if (!selected || !items.has(selected)) {
+    const want = wanted();
+    const ordered = [...items.values()].sort((a, b) => byRoot(a.x.root, b.x.root));
+    const pick = ordered.find((it) => keyOf(it) === want) ?? ordered.find((it) => it.x.inbox > 0) ?? ordered[0];
+    if (pick) select(pick.x.root);
+  }
+  firstDraw = false;
 }
+window.addEventListener('hashchange', () => {
+  const want = wanted();
+  const it = [...items.values()].find((o) => keyOf(o) === want);
+  if (it && it.x.root !== selected) select(it.x.root);
+});
+tabsEl.addEventListener('keydown', (e) => {
+  if (!['ArrowLeft', 'ArrowRight'].includes(e.key)) return;
+  const roots = [...items.keys()].sort(byRoot);
+  const i = roots.indexOf(selected);
+  const next = roots[(i + (e.key === 'ArrowRight' ? 1 : roots.length - 1)) % roots.length];
+  if (next) { select(next); items.get(next).tab.focus(); }
+});
+notifyControl();
 draw();
 setInterval(draw, 10000);
 </script>
