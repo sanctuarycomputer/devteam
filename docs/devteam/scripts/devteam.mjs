@@ -2747,6 +2747,12 @@ function cmdAsk() {
     const rel = blocks.filter((b) => b.startsWith('release:'));
     if (r.kind === 'rollback' && rel.length !== 1) die('a rollback question names its target in --blocks release:<version>');
     if (r.kind !== 'rollback' && rel.length) die(`${r.name} is a ${r.kind}, not a rollback: it takes no release`);
+    if (rel.length && !migrationsSince(rel[0].slice('release:'.length))) die(`no deploy of ${rel[0].slice('release:'.length)} was observed by a monitor: a rollback goes to a release the monitors saw`);
+    upkeepAllows('a remediation');
+    // a default is the recommendation or nothing: silence never runs something the owner wasn't recommended
+    const rec = flagStr('recommendation');
+    if (!rec) die('a production-remediation question needs --recommendation');
+    if (def && def.trim().toLowerCase() !== rec.trim().toLowerCase()) die('a production-remediation default is its recommendation (or there is none): silence never runs anything else');
   }
   if (!flagStr('goal') && !flagStr('ticket') && !blocks.length && !['trust', 'proposal'].includes(kind)) warn('this question names no --goal, --ticket or --blocks: when it serves a goal, add --goal <g-id> so the goal shows it');
   // A question that asks about several acts names them up front; the owner's card lists them, and
@@ -3839,7 +3845,7 @@ function cmdDecide() {
   if (cls === 'production-remediation') {
     upkeepAllows('a remediation');
     const rs = refs.filter((r) => String(r).startsWith('remediation:'));
-    if (rs.length !== 1) die('a production-remediation decision names exactly one remediation:<action> in --refs (and the incident it is for)');
+    if (rs.length !== 1) die('a production-remediation decision names exactly one remediation:<action> in --refs (and, if there is one, the incident it is for)');
     const r = remediationOf(rs[0].slice('remediation:'.length));
     const rel = refs.filter((x) => String(x).startsWith('release:'));
     if (r.kind === 'rollback' && rel.length !== 1) die('a rollback decision names its target in --refs release:<version>');
@@ -3849,6 +3855,7 @@ function cmdDecide() {
       const q = questionView(logGet(approved) ?? die(`no question ${approved}`));
       for (const ref of [rs[0], ...rel]) if (!(q.blocks ?? []).includes(ref)) die(`${approved} was asked about ${(q.blocks ?? []).join(', ') || 'nothing in particular'}, not ${ref}`);
       if (q.status === 'answered' && !q.matched) die(`${approved}'s answer ("${q.answer}") isn't its recommendation ("${q.recommendation}"): a remediation runs only on a yes`);
+      if (q.status === 'defaulted' && String(q.default ?? '').trim().toLowerCase() !== String(q.recommendation ?? '').trim().toLowerCase()) die(`${approved} defaulted to "${q.default}", not its recommendation: a remediation runs only on a yes`);
     }
   }
   // an incident fix is scoped by the incident's computed severity, never by the caller
@@ -3988,6 +3995,8 @@ function cmdRepair() {
 function cmdObserve() {
   const by = flags.owner ? ownerWriter().by : logWriter();
   const subject = flagStr('subject') ?? die('observe needs --subject (a ticket, component, feature, gate, goal, class or act id)');
+  // the kit's own detectors write their own lines: a hand-written one could pass for a poll's
+  if (['monitor', 'metrics', 'pane'].includes(flagStr('detector'))) die(`observe --detector ${flagStr('detector')}: those lines come from the kit itself (monitor poll, observe-metrics, the pane check); use another detector name`);
   const line = appendLog({
     type: 'observation', source: flagStr('source') ?? writerClass(by), subject, kind: flagStr('kind') ?? die('observe needs --kind (a slug)'),
     detail: flagStr('detail') ?? die('observe needs --detail'), detector: flagStr('detector'), severity: flagNum('severity'), valence: flagNum('valence'),
@@ -7978,6 +7987,10 @@ function remediationOf(action) {
   if (typeof r.script !== 'string') die(`remediation ${action}: script is project/remediations/<name>.mjs`);
   if (r.params != null && (typeof r.params !== 'object' || Array.isArray(r.params))) die(`remediation ${action}: params is an object`);
   if (typeof r.sha !== 'string' || !/^[0-9a-f]{7,40}$/.test(r.sha)) die(`remediation ${action}: sha pins the reviewed script (git rev-parse main:docs/devteam/${r.script}), so a change to it is a settings change the owner answers`);
+  if (r.uses != null && !(Array.isArray(r.uses) && r.uses.every((x) => typeof x === 'string'))) die(`remediation ${action}: uses is a list of CLI names`);
+  if (r.undo != null && typeof r.undo !== 'string') die(`remediation ${action}: undo is the name of another remediation, or null`);
+  if (r.credentials != null && (typeof r.credentials !== 'object' || Array.isArray(r.credentials) || Object.keys(r.credentials).some((k) => !/^[A-Z_][A-Z0-9_]*$/.test(k)))) die(`remediation ${action}: credentials map environment variable names to sinks`);
+  try { probeRel({ probe: r.script }, 'remediations'); } catch (e) { die(`remediation ${action}: ${e.message}`); }
   const valid = Number(r.valid_minutes ?? 60);
   return { name: action, kind, script: r.script, sha: r.sha, params: r.params ?? {}, uses: r.uses ?? [], credentials: r.credentials ?? {}, undo: r.undo ?? null, about: r.about ?? null, timeout_s: timeout, valid_minutes: Number.isFinite(valid) && valid > 0 ? valid : 60 };
 }
@@ -8021,21 +8034,25 @@ async function cmdRemediate() {
   let env, redact, src;
   try {
     for (const cli of r.uses) { const why = cliReady(cli); if (why) throw new Error(why); }
-    src = probeSource(m, { dir: 'remediations' });
-    const onMain = projectInRepo && mainRef() ? git(['rev-parse', `${mainRef()}:${projectRel}/${probeRel(m, 'remediations')}`], mainRoot) : null;
-    if (!(onMain ?? '').startsWith(r.sha)) throw new Error(`main's ${r.script} is not the reviewed one (sha ${r.sha}); a changed script needs the owner's settings answer`);
+    if (!projectInRepo || !mainRef()) throw new Error('a remediation runs from main, and this project has no main to read it from');
+    const onMain = git(['rev-parse', `${mainRef()}:${projectRel}/${probeRel(m, 'remediations')}`], mainRoot);
+    if (!onMain) throw new Error(`${r.script} is not on ${mainRef()}`);
+    if (!onMain.startsWith(r.sha)) throw new Error(`main's ${r.script} is not the reviewed one (sha ${r.sha}); a changed script needs the owner's settings answer`);
+    // the exact bytes of the pinned blob
+    const text = execFileSync('git', ['cat-file', 'blob', onMain], { cwd: mainRoot, encoding: 'utf8' });
+    src = { text };
     ({ env, redact } = probeEnv(m, null));
   } catch (e) { die(`${action}: ${e.message}`); }
-  fs.mkdirSync(lockDir, { recursive: true });
-  try { fs.writeFileSync(lock, `${process.pid}\n`, { flag: 'wx' }); } catch { die(`${d.id} is being carried out now`); }
   const copy = probeCopy(src.text);
+  fs.mkdirSync(lockDir, { recursive: true });
+  try { fs.writeFileSync(lock, `${process.pid}\n`, { flag: 'wx' }); } catch { copy.done(); die(`${d.id} is being carried out now (or a run died after it started: check production, then remove ${lock})`); }
   const t0 = performance.now();
   let res;
   // a writing action isn't killed for printing too much; past the cap its output is dropped
-  try { res = await spawnCapped(process.execPath, [copy.file], { cwd: mainRoot, env, timeoutMs: r.timeout_s * 1000, maxBytes: 1024 * 1024, keepRunning: true }); } finally { copy.done(); }
+  try { res = await spawnCapped(process.execPath, [copy.file], { cwd: mainRoot, env, timeoutMs: r.timeout_s * 1000, maxBytes: 1024 * 1024, keepRunning: true }); } finally { copy.done(); if (!res) fs.rmSync(lock, { force: true }); }
   const ok = res.status === 0 && !res.timedOut;
   const why = res.timedOut ? `stopped after ${r.timeout_s}s: its effect is unknown, check production${r.undo ? ` (undo: ${r.undo})` : ''}` : res.status !== 0 ? `exited ${res.status ?? 'abnormally'}` : null;
-  const output = scrubText(redact(`${res.out}${res.err ? `\n${res.err}` : ''}`)).trim();
+  const output = `${scrubText(redact(`${res.out}${res.err ? `\n${res.err}` : ''}`)).trim()}${res.over ? '\n(output over 1 MB: the rest was dropped)' : ''}`.trim();
   const act = appendLog({ type: 'act', decision: d.id, class: 'production-remediation', what: `ran ${action}${to ? ` to ${to}` : ''} (${r.kind}): ${ok ? 'ok' : `failed, ${why}`}${r.undo ? `; undo is ${r.undo}` : ''}`, refs: d.refs, reversible: !!r.undo && d.reversible !== false }, 'supervisor');
   monitorObserve({ name: 'remediations' }, { subject: remediationRef(action), kind: ok ? 'remediation' : 'remediation-failed', detail: `${action}${to ? ` to ${to}` : ''}: ${ok ? 'ok' : why} in ${fmtMs(performance.now() - t0)}${output ? `; output: ${output.slice(-600)}` : ''}`.slice(0, 900), severity: ok ? 0 : 3, valence: ok ? 1 : -1, refs: [act.id, d.id], source_key: `remediation:${action}:${act.id}` });
   fs.rmSync(lock, { force: true });

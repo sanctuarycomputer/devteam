@@ -1250,6 +1250,8 @@ process.exit(${code});
       assert.match(dt(['decide', '--class', 'production-remediation', '--refs', 'remediation:nope', '--', 'x'], sup).err, /no remediation nope/);
       assert.match(dt(['decide', '--class', 'production-remediation', '--refs', 'remediation:restart-web', 'remediation:rollback-web', '--', 'x'], sup).err, /exactly one remediation/);
       assert.match(dt(['ask', '--class', 'production-remediation', '--question', 'restart?', '--recommendation', 'yes'], sup).err, /names its remediation in --blocks/);
+      assert.match(dt(['ask', '--class', 'production-remediation', '--blocks', 'remediation:restart-web', '--question', 'restart?', '--recommendation', 'restart it', '--default', 'leave it'], sup).err, /default is its recommendation/, 'silence never runs anything else');
+      assert.match(dt(['observe', '--subject', 'production', '--kind', 'deploy', '--detector', 'monitor', '--source', 'web', '--key', 'monitor:web:deploy:v9', '--detail', 'web: release v9'], sup).err, /come from the kit itself/, 'a deploy line can\'t be written by hand');
       // the answer is about this remediation, and is the recommendation
       const q = ask(['remediation:restart-web'], { rec: 'restart it' });
       must(['answer', q, 'restart it']);
@@ -1291,7 +1293,7 @@ process.exit(${code});
       assert.match(dt(['ask', '--class', 'production-remediation', '--blocks', 'remediation:rollback-web', '--question', 'roll back?', '--recommendation', 'yes'], sup).err, /names its target in --blocks release:/);
       assert.match(dt(['remediate', 'rollback-web', '--decision', rb(rel)], sup).err, /names its target/);
       assert.match(dt(['remediate', 'rollback-web', '--decision', rb(rel), '--to', 'v-other'], sup).err, /decided a rollback to .*, not v-other/);
-      assert.match(dt(['remediate', 'rollback-web', '--decision', rb('v-never'), '--to', 'v-never'], sup).err, /no deploy of release v-never was observed/);
+      assert.match(dt(['ask', '--class', 'production-remediation', '--blocks', 'remediation:rollback-web', 'release:v-never', '--question', 'roll back?', '--recommendation', 'roll back'], sup).err, /no deploy of v-never was observed/, 'the owner is never asked about a rollback the kit would refuse');
       assert.match(dt(['remediate', 'rollback-web', '--decision', rb(rel), '--to', rel], sup).err, /crosses a-\S+ \(production-migration\): a one-way door/, 'an ordinary question is not enough');
       // a one-way-door question answered from chat isn't the owner's own answer either
       const qchat = ask(['remediation:rollback-web', `release:${rel}`], { kind: 'one-way-door', rec: 'roll back' });
