@@ -2853,14 +2853,25 @@ function registryFails(base, sha, R = homeFacts) {
   if (J.problem) return [J.problem];
   return registryProblems(J.settings).errors.map((e) => `settings at landing: ${e}`);
 }
-// A url link lands only as a registry-edit act wrote it (link add|set|rm), matched by content:
-// each url link the merge would change on main, main's settings against the ones
-// that would land, needs an act naming it whose entry_hash is the entry that lands (null: removed).
-// No time window, so an unrelated settings landing expires nothing; a link already as main has it
-// needs nothing; an act for one value never covers another. A removal needs an rm act whose
-// prior_hash is main's entry, so an rm of an earlier entry never deletes a link added again
-// since. An act written before entry_hash (or, for a removal, prior_hash) existed
-// never matches. A landing that can't be computed is registryFails' to report.
+// The registry-edit acts that can carry link id from one entry to another: each records the entry
+// it replaced (prior_hash, null for an add) and the one it wrote (entry_hash, null for a removal).
+// An act without both (written before they existed) never counts.
+const linkActs = (id) => logObjects('act').filter((a) => a.class === 'registry-edit' && Object.hasOwn(a, 'entry_hash') && Object.hasOwn(a, 'prior_hash') && (a.refs ?? []).includes(`link:${id}`)).sort(byTime);
+// Whether link id's acts, in the order they were written, lead from entry hash `from` (main's) to
+// `to`: one act from main's entry, or a chain of them (link add, then link set, between landings).
+// An act whose prior_hash main no longer has leads nowhere, so an act for an older main never lands.
+function linkActsLead(id, from, to) {
+  const reached = new Set([from]);
+  for (const a of linkActs(id)) if (reached.has(a.prior_hash)) reached.add(a.entry_hash);
+  return reached.has(to);
+}
+// A url link lands only as registry-edit acts wrote it (link add|set|rm), matched by content:
+// each url link the merge would change on main, main's settings against the ones that would land,
+// needs acts naming it that lead from the entry main has (prior_hash) to the entry that lands
+// (entry_hash, null: removed). No time window, so an unrelated settings landing expires nothing; a
+// link already as main has it needs nothing; an act for one value never covers another, and an act
+// made from an entry main has since changed never matches, so neither a stale set nor an rm of an
+// earlier entry lands. A landing that can't be computed is registryFails' to report.
 function registryActFails(base, sha) {
   const S = settingsInForce(base, sha);
   if (!S.fromHead) return [];
@@ -2869,11 +2880,8 @@ function registryActFails(base, sha) {
   const lands = J.settings.links ?? {};
   const edits = linkOwnerChanges(S.sMain.links, lands).filter((c) => c.cls === 'registry-edit').map((c) => c.key.slice('links.'.length));
   if (!edits.length) return [];
-  const acts = logObjects('act').filter((a) => a.class === 'registry-edit' && Object.hasOwn(a, 'entry_hash'));
-  // a removal (entry_hash null) needs an act that removed the very entry main has (prior_hash)
-  const wrote = (a, l) => a.entry_hash === linkEntryHash(ownEntry(lands, l)) && (a.entry_hash !== null || a.prior_hash === linkEntryHash(ownEntry(S.sMain.links, l)));
-  const bare = edits.filter((l) => !acts.some((a) => (a.refs ?? []).includes(`link:${l}`) && wrote(a, l)));
-  return bare.length ? [`changes ${bare.map((l) => `links.${l}`).join(', ')} to an entry no registry-edit act wrote: make each change with link add|set|rm, which logs the act with the entry it wrote, rather than by hand in settings.md (an act for an earlier value of the link doesn't cover this one)`] : [];
+  const bare = edits.filter((l) => !linkActsLead(l, linkEntryHash(ownEntry(S.sMain.links, l)), linkEntryHash(ownEntry(lands, l))));
+  return bare.length ? [`changes ${bare.map((l) => `links.${l}`).join(', ')} to an entry no registry-edit act wrote: make each change with link add|set|rm, which logs the act with the entry it wrote and the one it replaced, rather than by hand in settings.md (an act for an earlier value of the link, or made from an entry main has since changed, doesn't cover this one)`] : [];
 }
 // What the forge's check (optional) and `merge` both check for a PR, by branch kind. Gates are not
 // run here. A chore PR may not touch the log (chore-log touches nothing else) or a ticket's folder.
@@ -7944,6 +7952,9 @@ const LANDING_HINT = 'it applies here now; land it on main with the next chore P
 // nothing else in the chore's settings.md changes: this checkout's copy of every other key may be
 // older than main's (a components line widened since), and carrying the whole file would revert it.
 // A link of an owner's kind is left alone: it lands with the owner's governance-edit answer.
+// An entry is carried only when its acts lead from the chore's (main's) entry to this one: when
+// main's entry changed since the act was made, the act's parent state is gone, and the entry is
+// refused (the run exits 1, after carrying the others).
 function linkLand(slugName) {
   choreSlug(slugName);
   if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
@@ -7957,20 +7968,28 @@ function linkLand(slugName) {
     const links = Object.assign(Object.create(null), there);
     const changed = [];
     const owners = [];
+    const refused = [];
     for (const id of [...new Set([...Object.keys(there), ...Object.keys(here)])].sort()) {
       const h = ownEntry(here, id), t = ownEntry(there, id);
       if (canonical(h) === canonical(t)) continue;
       if (ownersKind(h) || ownersKind(t)) { owners.push(`links.${id}`); continue; }
+      if (!linkActsLead(id, linkEntryHash(t), linkEntryHash(h))) {
+        const act = logObjects('act').filter((a) => a.class === 'registry-edit' && (a.refs ?? []).includes(`link:${id}`) && a.entry_hash === linkEntryHash(h)).sort(byTime).pop();
+        refused.push(act ? `main's links.${id} changed since ${act.id}; re-run link ${h === undefined ? 'rm' : 'set'} from main's entry (bring this checkout's settings.md up to date first)` : `links.${id} differs here from main and no registry-edit act wrote it from main's entry; make the change with link add|set|rm`);
+        continue;
+      }
       if (h === undefined) delete links[id]; else links[id] = h;
       changed.push(`links.${id} (${t === undefined ? 'added' : h === undefined ? 'removed' : 'changed'})`);
     }
-    return { links, changed, owners };
+    return { links, changed, owners, refused };
   };
-  const { changed, owners } = carry(linksIn(target));
+  const { changed, owners, refused } = carry(linksIn(target));
   const skipped = owners.length ? `; not carried, as the owner's (a repo link lands with its governance-edit answer): ${owners.join(', ')}` : '';
-  if (!changed.length) return out(`nothing to land: the chore's links are the ones here${skipped}`);
+  const refuse = () => { if (refused.length) { process.stderr.write(`devteam: not carried:\n  - ${refused.join('\n  - ')}\n`); process.exitCode = 1; } };
+  if (!changed.length) { out(`nothing to land: ${refused.length ? 'no entry here can be carried' : "the chore's links are the ones here"}${skipped}`); return refuse(); }
   editSettingsFile(target, (blk) => ({ ...blk, links: carry(blk.links ?? {}).links }));
   out(`landed into chore-${slugName}: ${changed.join(', ')}; nothing else in its settings.md changed${skipped}`);
+  refuse();
 }
 // link add|set|rm: a link of the supervisor's kind (url: LINK_KINDS[k].ownedByOwner false) is
 // written, then logged as registry-edit (constitutional), citing what it came from. A link of an
@@ -8026,8 +8045,9 @@ function cmdLink() {
     return b;
   });
   what = redactUrl(what);
-  // a removal also records the entry it removed, so it lands only while main still has that one
-  appendLog({ type: 'act', decision: citing(), class: 'registry-edit', what, refs: [`link:${id}`, ...(source ? [source] : [])], reversible: true, entry_hash: linkEntryHash(entry), ...(sub === 'rm' ? { prior_hash: linkEntryHash(cur) } : {}) }, 'supervisor');
+  // every edit also records the entry it replaced (null for an add), so it lands only while main
+  // still has that one
+  appendLog({ type: 'act', decision: citing(), class: 'registry-edit', what, refs: [`link:${id}`, ...(source ? [source] : [])], reversible: true, entry_hash: linkEntryHash(entry), prior_hash: linkEntryHash(cur) }, 'supervisor');
   out(`${what}; ${LANDING_HINT}`);
 }
 // links [--json]: the registry, each repo's effective settings, and the lines on each with their state.

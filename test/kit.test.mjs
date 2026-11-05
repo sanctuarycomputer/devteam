@@ -3772,6 +3772,86 @@ test('landing link edits: link land carries only the changed links entries into 
   } finally { F.done(); }
 });
 
+test('a link edit lands only from the entry main has: link land refuses an entry main changed since its act, and merge matches every act by the entry it replaced', () => {
+  const F = monoFixture('link-stale');
+  const { old, ok, run, g, edit } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const settingsRel = 'docs/devteam/project/settings.md';
+  const block = (f) => JSON.parse(fs.readFileSync(f, 'utf8').match(/```json devteam\s*\n([\s\S]*?)\n```/)[1]);
+  const acts = () => json(ok(old, ['log', '--type', 'act', '--json'])).filter((a) => a.class === 'registry-edit');
+  const canon = (v) => (Array.isArray(v) ? `[${v.map(canon).join(',')}]` : v && typeof v === 'object' ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canon(v[k])}`).join(',')}}` : JSON.stringify(v));
+  const hash = (e) => `sha256:${crypto.createHash('sha256').update(canon(e)).digest('hex')}`;
+  const chore = (slug, fn) => {
+    const w = path.join(old, '.worktrees', `chore-${slug}`);
+    g(['worktree', 'add', '-q', '-b', `chore-${slug}`, w, 'origin/main'], old);
+    fn(w);
+    g(['add', '-A'], w);
+    g(['commit', '-qm', `chore-${slug}: x`], w);
+    g(['push', '-q', 'origin', `chore-${slug}`], w);
+    write(path.join(old, `docs/devteam/run/pr/chore-${slug}.md`), `# chore-${slug}: x\n\n## One-way doors\n\nNone.\n`);
+    return w;
+  };
+  const merge = (slug, extra = []) => { const r = run(old, ['merge', '--chore', slug, ...extra], SUP); return { status: r.status, text: r.out + r.err }; };
+  try {
+    const keep = { kind: 'url', title: 'Keep', url: 'https://keep.test' };
+    edit((j) => { j.links = { keep, other: { kind: 'url', title: 'Other', url: 'https://other.test' } }; });
+    g(['commit', '-qam', 'links'], old); g(['push', '-q', 'origin', 'main'], old);
+    // add and set record the entry they replaced too (prior_hash; null for an add)
+    ok(old, ['link', 'add', 'figma', '--kind', 'url', '--url', 'https://figma.test/a', '--title', 'Designs'], SUP);
+    assert.equal(acts().pop().prior_hash, null);
+    ok(old, ['link', 'set', 'keep', 'notes', 'still used'], SUP);
+    const setAct = acts().pop();
+    assert.equal(setAct.prior_hash, hash(keep));
+    ok(old, ['link', 'set', 'other', 'notes', 'n'], SUP);
+    // meanwhile main's keep changes from another clone
+    const other = path.join(F.base, 'other');
+    g(['clone', '-q', F.org, other], F.base);
+    for (const [k, v] of [['user.email', 'o@o'], ['user.name', 'o']]) g(['config', k, v], other);
+    edit((j) => { j.links.keep.title = 'Keep (v2)'; }, other);
+    g(['commit', '-qam', 'keep v2'], other); g(['push', '-q', 'origin', 'main'], other);
+    const wt = ok(old, ['chore', 'start', 'registry'], SUP).trim();
+    const landed = run(old, ['link', 'land', 'registry'], SUP);
+    assert.notEqual(landed.status, 0, 'a refused entry fails the run');
+    assert.match(landed.err, new RegExp(`main's links\\.keep changed since ${setAct.id}; re-run link set`));
+    assert.match(landed.out, /links\.figma \(added\), links\.other \(changed\)/, 'the other entries are carried');
+    const j = block(path.join(wt, settingsRel));
+    assert.equal(j.links.keep.title, 'Keep (v2)', "main's newer keep is kept");
+    assert.equal(j.links.keep.notes, undefined);
+    assert.equal(j.links.other.notes, 'n');
+    // a hand edit of the chore back to the act's entry: merge matches the act by the entry it
+    // replaced, which main no longer has
+    edit((x) => { x.links.keep = { ...keep, notes: 'still used' }; }, wt);
+    g(['commit', '-qam', 'registry'], wt); g(['push', '-q', 'origin', 'chore-registry'], wt);
+    write(path.join(old, 'docs/devteam/run/pr/chore-registry.md'), '# chore-registry: registry\n\n## One-way doors\n\nNone.\n');
+    const m = merge('registry', ['--dry-run']);
+    assert.notEqual(m.status, 0, `a stale set act landed: ${m.text}`);
+    assert.match(m.text, /links\.keep to an entry no registry-edit act wrote/);
+    assert.doesNotMatch(m.text, /links\.(figma|other)/, 'the add and set acts from main\'s entries still land theirs');
+    // an act without prior_hash (written before add and set recorded it) never matches
+    g(['checkout', '-q', '--', settingsRel], old);
+    g(['merge', '-q', '--ff-only', 'origin/main'], old);
+    ok(old, ['link', 'set', 'keep', 'notes', 'v2 notes'], SUP);
+    const logDir = path.join(old, 'docs/devteam/run/log');
+    const file = path.join(logDir, fs.readdirSync(logDir).find((f) => f.startsWith('supervisor-')));
+    const kept = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    const last = kept.pop();
+    assert.equal(last.type, 'act');
+    const { prior_hash: _gone, ...legacy } = last;
+    fs.writeFileSync(file, [...kept, legacy].map((o) => JSON.stringify(o)).join('\n') + '\n');
+    g(['checkout', '-q', '--', settingsRel], old);
+    chore('legacy', (w) => edit((x) => { x.links.keep.notes = 'v2 notes'; }, w));
+    assert.match(merge('legacy', ['--dry-run']).text, /links\.keep to an entry no registry-edit act wrote/, 'an act without prior_hash never matches');
+    // link set from main's entry lands it, and so does a set after an add between landings
+    ok(old, ['link', 'set', 'keep', 'notes', 'v2 notes'], SUP);
+    ok(old, ['link', 'add', 'notion', '--kind', 'url', '--url', 'https://notion.test/r', '--title', 'Runbook'], SUP);
+    ok(old, ['link', 'set', 'notion', 'notes', 'ops'], SUP);
+    g(['checkout', '-q', '--', settingsRel], old);
+    chore('fresh', (w) => edit((x) => { x.links.keep.notes = 'v2 notes'; x.links.notion = { kind: 'url', url: 'https://notion.test/r', title: 'Runbook', notes: 'ops' }; }, w));
+    const fr = merge('fresh', ['--dry-run']);
+    assert.equal(fr.status, 0, `acts from main's entry, chained, land: ${fr.text}`);
+  } finally { F.done(); }
+});
+
 test('the registry attestation is the owner\'s: registry-attest is never answered from chat or defaulted, and a goal that needs the registry complete waits for the owner\'s yes', () => {
   const F = fleetFixture('attest');
   const { old, ok, run } = F;
