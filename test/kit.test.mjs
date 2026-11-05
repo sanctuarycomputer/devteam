@@ -2083,7 +2083,8 @@ test('devteam kit', async (t) => {
     assert.equal(h.root, fs.realpathSync(repo));
     assert.equal(h.name, 'demo');
     assert.equal(typeof h.inbox, 'number');
-    assert.equal(h.inbox, json(must(['questions', '--json'])).filter((q) => q.status === 'open').length, 'the Inbox count is the open questions');
+    const dd = json(must(['dashboard-data']));
+    assert.equal(h.inbox, dd.questions.length + dd.ooda.knowledge.filter((k) => k.status === 'candidate').length, "the Inbox as the dashboard counts it: its questions and lessons to keep");
     assert.ok(['run', 'drain', 'park'].includes(h.fleet.mode));
     assert.equal(typeof h.fleet.workers, 'number');
     assert.match(h.kit, /^(v\d+\.\d+\.\d+|unreleased)(\+local)?$/);
