@@ -342,6 +342,26 @@ const REPO_OWN_DEFAULTS = { gates: {}, worktree_setup: '', worktree_files: [], i
 // what a gate run sees is the owner's gate-change, as for home's own keys (OWNER_SETTINGS)
 const REPO_GATE_KEYS = ['gates', 'worktree_setup', 'worktree_files', 'ignored_checks'];
 const LINK_COMMON = ['kind', 'title', 'notes', 'for', 'source'];
+// The type of every link field (F6): link add|set parse a value by it, and validate checks it, so a
+// title typed 2024 is the string "2024" and nothing downstream meets a number where text belongs.
+const LINK_TYPES = {
+  kind: 'string', title: 'string', notes: 'string', for: 'list', source: 'string', url: 'string', check: 'boolean',
+  remote: 'string', path: 'string', main_branch: 'string', forge: 'string', merge_method: 'string', release: 'any',
+  gates: 'object', worktree_setup: 'string', worktree_files: 'list', ignored_checks: 'list', project: 'string',
+};
+const TYPE_WORDS = { string: 'a string', boolean: 'true or false', list: 'a list of strings', object: 'an object' };
+const typeOk = (t, v) => t === 'any' || (t === 'string' ? typeof v === 'string' : t === 'boolean' ? typeof v === 'boolean' : t === 'list' ? Array.isArray(v) && v.every((x) => typeof x === 'string') : t === 'object' ? isObj(v) : true);
+// A value from the command line, as its field's type: a list is separate values or one JSON array
+// of strings; a boolean is true or false (anything else stays text, for validate to refuse); an
+// object is JSON; everything else is the text as typed.
+function linkValue(field, vals) {
+  const t = LINK_TYPES[field] ?? 'string';
+  const one = vals.join(' ');
+  if (t === 'list') { if (vals.length === 1 && one.trim().startsWith('[')) { try { const v = JSON.parse(one); if (Array.isArray(v)) return v; } catch {} } return vals; }
+  if (t === 'boolean') return one === 'true' ? true : one === 'false' ? false : one;
+  if (t === 'object') { try { return JSON.parse(one); } catch { return one; } }
+  return one;
+}
 // Whether a repo checkout is where its link says and of its remote, once per process per location.
 const linkReachMemo = new Map();
 // The url probe: a child node does one HEAD request with a 10 s deadline and prints the status.
@@ -426,7 +446,6 @@ const LINK_KINDS = {
     validate: (l, at) => [
       ...(typeof l.url === 'string' && !l.url.startsWith('https://') ? [`${at}: url must start with https://`] : []),
       ...(hasCredentials(l.url) ? [`${at}: its url carries credentials; ${CREDENTIALS_REFUSED}`] : []),
-      ...(l.check !== undefined && typeof l.check !== 'boolean' ? [`${at}: check is true or false`] : []),
     ],
     reachable: () => null,
     // one HEAD request, 10 s, no body read (spec §7); DEVTEAM_URL_PROBE stands in for it in tests.
@@ -536,6 +555,7 @@ function registryProblems(s) {
     for (const f of ['title', ...K.fields.required]) if (l[f] === undefined || l[f] === '') errors.push(`${at}: ${f} is required`);
     const known = new Set(linkFields(l.kind));
     for (const f of Object.keys(l)) if (!known.has(f)) errors.push(`${at}: "${f}" is not a field of a ${l.kind} link (fields: ${[...known].join(', ')})`);
+      else if (f !== 'kind' && l[f] !== undefined && !typeOk(LINK_TYPES[f] ?? 'string', l[f])) errors.push(`${at}: ${f} is ${TYPE_WORDS[LINK_TYPES[f] ?? 'string']}`);
     for (const sc of asList(l.for)) if (!scopeValid(sc, 'for')) errors.push(`${at}: for "${sc}" is not a scope (${SCOPE_HELP.for})`);
     errors.push(...K.validate(l, at, { ...ctx, id }));
   }
@@ -1541,7 +1561,7 @@ function globsOverlap(a, b) {
 // four places that enforce this (validate, check-pr and merge, observe-metrics, check-ticket) run
 // the same function on the same kind of input.
 //
-// Who owns one path: 'devteam' first when it lies in the kit's line, then every component whose
+// Who owns one path: 'devteam' alone when it lies in the kit's line, else every component whose
 // owns match it. A sole component with no owns owns everything devteam doesn't; with two or more,
 // a component without owns owns nothing (validate says why). onHit(name, glob) counts glob hits.
 // coverage, prefixOwners, coverageReport and checkTicket's footprint all ask this one function.
@@ -1551,10 +1571,14 @@ const compileLines = (components, devteamLine) => ({
   sole: components.length === 1,
   comps: components.map((c) => ({ name: c.name, bare: c.owns === undefined, globs: (c.owns ?? []).map((g) => [g, globMatcher(g)]) })),
 });
+// The kit's own line is set aside before any component is asked (F13): a path in it is devteam's
+// alone, so a project line over docs/** coexists with the kit at docs/devteam/** with no contest,
+// and a glob reaching into it claims nothing there.
 function ownersIn(p, L, onHit) {
-  const owners = L.dev.some((m) => m(p)) ? ['devteam'] : [];
+  if (L.dev.some((m) => m(p))) return ['devteam'];
+  const owners = [];
   for (const c of L.comps) {
-    if (c.bare) { if (L.sole && owners[0] !== 'devteam') owners.push(c.name); continue; }
+    if (c.bare) { if (L.sole) owners.push(c.name); continue; }
     let mine = false;
     for (const [g, m] of c.globs) if (m(p)) { mine = true; if (onHit) onHit(c.name, g); }
     if (mine) owners.push(c.name);
@@ -1571,10 +1595,10 @@ function coverage(paths, components, devteamLine) {
   const contested = [];
   for (const p of paths) {
     const owners = ownersIn(p, L, count);
-    // a declared glob reaching into the kit's line is two owners for one path: devteam and it
-    if (owners[0] === 'devteam') { if (owners.length > 1) contested.push([p, owners]); continue; }
+    if (owners[0] === 'devteam') continue;
     if (!owners.length) unowned.push(p);
-    else if (owners.length > 1) contested.push([p, owners]);
+    // a contest names the globs that collide, so the fix can say which to narrow (O8)
+    else if (owners.length > 1) { const globs = []; ownersIn(p, L, (n, g) => globs.push([n, g])); contested.push([p, owners, globs]); }
   }
   const empty = [...hits].filter(([, n]) => n === 0).map(([k]) => k.slice(k.indexOf('\0') + 1));
   return { unowned, contested, empty, case_collisions: caseCollisions(paths) };
@@ -1584,9 +1608,6 @@ function caseCollisions(paths) {
   const by = new Map();
   for (const p of paths) { const k = p.toLowerCase(); if (!by.has(k)) by.set(k, []); by.get(k).push(p); }
   return [...by.values()].filter((g) => g.length > 1).map((g) => [...g].sort());
-}
-function coverageClean(r) {
-  return !r.unowned.length && !r.contested.length && !r.empty.length && !r.case_collisions.length;
 }
 // The owner to suggest for an unowned folder: the owner of the first owned path (in tree order) in
 // that folder, else in the nearest folder above it; the repo root suggests nothing. One pass over
@@ -2599,11 +2620,22 @@ function checkTicket(id, { sha: shaArg, title, body, approvals = true }) {
     const s = mainSettings();
     if (linesDeclared(s)) {
       const comps = componentsOn(s, 'home');
-      const names = [t.component, ...(t.touches_components ?? [])];
-      const dev = devteamLine();
-      const inLine = (f) => { const o = ownersOf(f, comps, dev); return o[0] !== 'devteam' && o.some((n) => names.includes(n)); };
+      // touches_components widens only a contract or integration ticket (spec §6.2, F4), as in validate
+      const tc = t.touches_components ?? [];
+      const wide = ['contract', 'integration'].includes(t.kind);
+      if (tc.length && !wide) fails.push(`touches_components is for contract and integration tickets; this ${t.kind ?? ''} ticket's line is ${t.component}'s alone`);
+      const names = [t.component, ...(wide ? tc : [])];
+      const L = compileLines(comps, devteamLine());
+      const ownerOf = new Map(changed.map((f) => [f, ownersIn(f, L)]));
+      const inLine = (f) => { const o = ownerOf.get(f); return o[0] !== 'devteam' && o.some((n) => names.includes(n)); };
       const off = changed.filter((f) => !mineOwn(f) && !outside.includes(f) && !inLine(f));
-      if (off.length) fails.push(`${OFF_LINE} ${names.join(', ')}: ${off.slice(0, 10).join(', ')}${off.length > 10 ? ` (+${off.length - 10} more)` : ''}`);
+      if (off.length) {
+        // each file with whose line it is in, and the fixes that fit (O8)
+        const where = (f) => { const o = ownerOf.get(f); return o[0] === 'devteam' ? "the kit's own line" : o.length ? `${o.join(' and ')}'s line` : 'no line'; };
+        const others = [...new Set(off.flatMap((f) => ownerOf.get(f)).filter((n) => n !== 'devteam' && !names.includes(n)))];
+        const fixes = ['drop those changes', ...(others.length ? [`plan them as a contract or integration ticket that lists ${others.join(', ')} in touches_components`] : []), ...(off.some((f) => ownerOf.get(f)[0] === 'devteam') ? ['make kit changes in a chore'] : []), ...(off.some((f) => !ownerOf.get(f).length) ? ['draw a line around unowned files in a chore PR'] : []), 'or split the ticket'];
+        fails.push(`${OFF_LINE} ${names.join(', ')}: ${off.slice(0, 10).map((f) => `${f} (${where(f)})`).join(', ')}${off.length > 10 ? ` (+${off.length - 10} more)` : ''}; ${fixes.join(', ')}`);
+      }
     }
   }
   if (title !== undefined && !new RegExp(`^${id.replace(/-/g, '\\-')}: \\S`).test(title)) fails.push(`PR title must start with "${id}: "`);
@@ -2665,7 +2697,7 @@ function coverageFails(base, sha, R = homeFacts, { ticket = false } = {}) {
     const nowG = coverageGaps(now, sLand), wasG = coverageGaps(before, S.sMain);
     const was = new Set([...before.unowned.map((p) => `u${p}`), ...before.contested.map(([p, o]) => `c${p}\0${o}`), ...before.empty.map((x) => `e${x}`), ...before.case_collisions.map((x) => `k${x}`), ...wasG.unlinked.map((n) => `l${n}`)]);
     const fresh = { unowned: now.unowned.filter((p) => !was.has(`u${p}`)), contested: now.contested.filter(([p, o]) => !was.has(`c${p}\0${o}`)), empty: [], case_collisions: now.case_collisions.filter((x) => !was.has(`k${x}`)), unlinked: nowG.unlinked.filter((n) => !was.has(`l${n}`)), ref: land.tree };
-    return coverageReport(fresh, sLand, R).map((l) => `${pre}: ${l} (extend a line in a chore PR, or keep the file inside one)`);
+    return coverageReport(fresh, sLand, R).map((l) => `${pre}: ${l}`);
   } catch (e) {
     if (e instanceof GitReadError) return [`${pre}: ${e.message}; coverage fails closed until it can`];
     throw e;
@@ -7394,13 +7426,14 @@ function coverageReport(cov, s, R = homeFacts) {
   const suggest = cov.unowned.length ? ownerSuggestions(treePathsMemo(cov.ref, R), new Set(cov.unowned), ownerOf) : () => null;
   for (const [dir, ps] of Object.entries(groupBy(cov.unowned, dirOf)).sort()) {
     const who = suggest(dir);
-    lines.push(`unowned: ${dir} (${ps.length}): ${ps.slice(0, 8).join(', ')}${ps.length > 8 ? `, … (+${ps.length - 8})` : ''}${who ? `; suggested owner: ${who}` : ''}`);
+    lines.push(`unowned: ${dir} (${ps.length}): ${ps.slice(0, 8).join(', ')}${ps.length > 8 ? `, … (+${ps.length - 8})` : ''}${who ? `; suggested owner: ${who}` : ''} -> extend a line (settings components) in a chore PR, or move the files into one`);
   }
-  for (const [p, owners] of cov.contested) lines.push(`contested: ${p} is owned by ${owners.join(' and ')}${owners[0] === 'devteam' ? " (the kit's own line: no component owns it)" : ''}`);
+  // each kind of gap carries its own fix (O8)
+  for (const [p, owners, globs = []] of cov.contested) lines.push(`contested: ${p} is owned by ${owners.map((n) => { const gs = globs.filter(([c]) => c === n).map(([, g]) => `"${g}"`); return gs.length ? `${n} (${gs.join(', ')})` : n; }).join(' and ')} -> narrow one of those globs so one line owns it`);
   // an empty glob excludes nothing, so invariant C holds with it: a warning, never a refusal (F17)
-  for (const g of cov.empty) lines.push(`line-empty: ${comps.find((c) => (c.owns ?? []).includes(g))?.name ?? '?'} owns "${g}", which matches nothing (a typo, or its last file was deleted): remove or fix the glob in a chore PR (settings components)`);
-  for (const n of cov.unlinked ?? []) lines.push(`unlinked: component ${n}'s link "${s.components[n].link}" is not a link that holds files`);
-  for (const grp of cov.case_collisions) lines.push(`case: ${grp.join(', ')} differ only by case (they break checkouts on macOS and Windows)`);
+  for (const g of cov.empty) lines.push(`line-empty: ${comps.find((c) => (c.owns ?? []).includes(g))?.name ?? '?'} owns "${g}", which matches nothing (a typo, or its last file was deleted) -> remove or fix the glob in a chore PR (settings components)`);
+  for (const n of cov.unlinked ?? []) lines.push(`unlinked: component ${n}'s link "${s.components[n].link}" is not a link that holds files -> point it at home (leave link out)`);
+  for (const grp of cov.case_collisions) lines.push(`case: ${grp.join(', ')} differ only by case (they break checkouts on macOS and Windows) -> rename one of them`);
   return lines;
 }
 const treePathsMemo = (ref, R = homeFacts) => memo(`tree\0${R.name}\0${ref}`, () => R.treePaths(ref));
@@ -7469,19 +7502,18 @@ function cmdLink() {
   if (source && !logGet(source)) die(`--source ${source}: no such log entry`);
   // authority first, so a refusal writes nothing
   authorise('registry-edit', null, null, [], 'link');
-  const jsonish = (raw) => { try { return JSON.parse(raw); } catch { return raw; } };
   let what;
   editSettingsBlock((b) => {
     b.links ??= {};
     if (sub === 'add') {
       const entry = { kind };
-      for (const f of linkFields(kind).filter((x) => x !== 'kind' && flags[x] !== undefined)) entry[f] = f === 'for' ? listFlag('for') : jsonish(flagStr(f));
+      for (const f of linkFields(kind).filter((x) => x !== 'kind' && flags[x] !== undefined)) entry[f] = f === 'for' ? listFlag('for') : linkValue(f, [flagStr(f)]);
       for (const f of ['title', ...K.fields.required]) if (entry[f] === undefined) die(`link add --kind ${kind} needs --${f}`);
       b.links[id] = entry;
       what = `added ${kind} link ${id} (${K.locator(entry, id).text})`;
     } else if (sub === 'set') {
       if (!field || !vals.length) die('usage: link set <id> <field> <value>');
-      b.links[id] = { ...b.links[id], [field]: jsonish(vals.join(' ')) };
+      b.links[id] = { ...b.links[id], [field]: linkValue(field, vals) };
       what = `set link ${id} ${field}`;
     } else { delete b.links[id]; what = `removed ${kind} link ${id}`; }
     return b;
@@ -7681,7 +7713,7 @@ Sessions (worker.md)
 Decide and act (supervisor.md, constitution.md)
   links [--json]                  the registry: home and each link, each repo's effective settings, the component lines and their coverage
   link add <id> --kind url --url u --title t [--for scope…] [--notes n] [--source id] | link set <id> <field> <value> | link rm <id>   supervisor: a url link, written to settings.md and logged as registry-edit; repo links are the owner's
-  ask --question q [--kind k] [--class c] [--reasons r…] [--recommendation r] [--confidence 0-1] [--default d] [--choices '[{"label","detail","effect"}…]'] [--rule-scope s] [--goal g-… (goal-approval)] [--links '[{"title","path","ref"}|{"title","url"}…]'] [--blocks ids] [--evidence ids] [--ticket id] [--re m-…] [--note path] [--secrets '[{"name","kind":"string|file","sink"}…]' (owner-action)]
+  ask --question q [--kind k] [--class c] [--reasons r…] [--recommendation r] [--confidence 0-1] [--default d] [--choices '[{"label","detail","effect"}…]'] [--rule-scope s] [--goal g-… (goal-approval)] [--links '[{"title","path","ref"}|{"title","url"}|{"title","link"}…]' (link: a registry id)] [--blocks ids] [--evidence ids] [--ticket id] [--re m-…] [--note path] [--secrets '[{"name","kind":"string|file","sink"}…]' (owner-action)]
   secret post <qid> [--file NAME=path] [--json]                          owner: post a question's secrets straight to their sinks; never logged (secret sinks lists them)
   ask --kind review --page <repo path> --ref <branch|sha> [--data <repo path>] [--result-schema <repo path>] [--allow-partial] --question q [--context c] [--class c] [--reasons r…] [--ticket id] [--blocks ids] [--re m-…]
                                   supervisor: an agent-drawn page for rows the owner decides; pins page, data and result schema to a commit and their sha256s

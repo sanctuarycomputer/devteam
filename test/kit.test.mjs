@@ -2489,11 +2489,15 @@ function coverageFns() {
   const src = fs.readFileSync(path.join(kit, 'scripts', 'devteam.mjs'), 'utf8');
   const cut = (a, b) => { const i = src.indexOf(a), j = src.indexOf(b); assert.ok(i >= 0 && j > i, `${a} … ${b} marks a block in devteam.mjs`); return src.slice(i, j); };
   const ctx = vm.createContext({});
-  return vm.runInContext(`${cut('/* globs start */', '/* globs end */')}\n${cut('/* coverage start */', '/* coverage end */')}\n;({ coverage, caseCollisions, coverageClean, prefixOwners, ownersOf, pathMatches, ownerSuggestions: typeof ownerSuggestions === 'function' ? ownerSuggestions : null })`, ctx);
+  return vm.runInContext(`${cut('/* globs start */', '/* globs end */')}\n${cut('/* coverage start */', '/* coverage end */')}\n;({ coverage, caseCollisions, prefixOwners, ownersOf, pathMatches, ownerSuggestions })`, ctx);
+}
+// A clean partition: nothing unowned, contested, empty or colliding (the script has no caller for it).
+function coverageClean(r) {
+  return !r.unowned.length && !r.contested.length && !r.empty.length && !r.case_collisions.length;
 }
 
 test('coverage: every tracked path has exactly one owner', () => {
-  const { coverage, coverageClean, prefixOwners } = coverageFns();
+  const { coverage, prefixOwners } = coverageFns();
   const DEV = ['docs/devteam/**'];
   const plain = (r) => JSON.parse(JSON.stringify(r));
   const paths = ['.github/workflows/ci.yml', '.tool-versions', 'app/.keep', 'app/a b/c.rb', 'app/é.rb', 'app/x.rb', 'lib/deep/.hidden/x', 'vendor/sub', 'link-to-app', 'docs/devteam/project/settings.md', 'docs/devteam/scripts/devteam.mjs'];
@@ -2502,9 +2506,10 @@ test('coverage: every tracked path has exactly one owner', () => {
   assert.deepEqual(plain(coverage(paths, comps, DEV)), { unowned: [], contested: [], empty: [], case_collisions: [] });
   assert.equal(coverageClean(coverage(paths, comps, DEV)), true);
   assert.deepEqual(plain(coverage([...paths, 'scripts/x.sh'], comps, DEV)).unowned, ['scripts/x.sh'], 'a path no line owns');
-  assert.deepEqual(plain(coverage(paths, [...comps, { name: 'web', owns: ['app/x.rb'] }], DEV)).contested, [['app/x.rb', ['api', 'web']]], 'a path two lines own');
+  assert.deepEqual(plain(coverage(paths, [...comps, { name: 'web', owns: ['app/x.rb'] }], DEV)).contested, [['app/x.rb', ['api', 'web'], [['api', 'app/**'], ['web', 'app/x.rb']]]], 'a path two lines own, and the globs that collide (O8)');
   assert.deepEqual(plain(coverage(paths, [...comps, { name: 'web', owns: ['web/**'] }], DEV)).empty, ['web/**'], 'a glob that matches nothing is a typo');
-  assert.deepEqual(plain(coverage(paths, [{ name: 'all', owns: ['**'] }], DEV)).contested.map(([p]) => p), ['docs/devteam/project/settings.md', 'docs/devteam/scripts/devteam.mjs'], "a declared glob reaching into the kit's line is contested with devteam");
+  assert.deepEqual(plain(coverage(paths, [{ name: 'all', owns: ['**'] }], DEV)).contested, [], "the kit's line is set aside before any contest: a glob reaching into it claims nothing there (F13)");
+  assert.deepEqual(plain(coverage(paths, [...comps, { name: 'docs', owns: ['docs/**'] }], DEV)).empty, ['docs/**'], 'a glob that only reaches the kit owns nothing');
   assert.deepEqual(plain(coverage(paths, [{ name: 'all' }], DEV)), { unowned: [], contested: [], empty: [], case_collisions: [] }, 'B2: a sole component with no owns owns everything devteam does not');
   assert.deepEqual(plain(coverage(paths, [{ name: 'a' }, { name: 'b', owns: ['app/**'] }], DEV)).unowned.length > 0, true, 'the ** default holds only for a sole component');
   assert.deepEqual(plain(coverage(['App.rb', 'app.rb'], [{ name: 'x', owns: ['App.rb', 'app.rb'] }], DEV)).case_collisions, [['App.rb', 'app.rb']], 'paths that differ only by case');
@@ -2520,7 +2525,7 @@ test('coverage: every tracked path has exactly one owner', () => {
 });
 
 test('coverage: the function reports a clean partition exactly when there is one (property)', () => {
-  const { coverage, coverageClean, pathMatches } = coverageFns();
+  const { coverage, pathMatches } = coverageFns();
   // mulberry32: a seeded generator, so a failure names the seed that reproduces it
   const rng = (seed) => () => { seed |= 0; seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
   const pick = (r, xs) => xs[Math.floor(r() * xs.length)];
@@ -2730,8 +2735,17 @@ test('components check reads a commit\'s tree: dotfiles, gitlinks, symlinks, spa
     assert.equal(run(old, ['components', 'check', '--count']).out, '3');
     const j = json(run(old, ['components', 'check', '--json']).out);
     assert.deepEqual(j.unowned.sort(), ['api/new/one.rb', 'scripts/run.sh']);
+    // O8: each kind of gap carries its own fix; a contest names both globs
+    assert.match(r.out, /unowned: scripts\/ \(1\): scripts\/run\.sh.* -> extend a line \(settings components\) in a chore PR, or move the files into one/);
+    lines({ ...F.STD, web: { owns: ['web/**', 'api/app.rb'] }, ops: { owns: [...F.STD.ops.owns, '.gitmodules', 'vendor/sub', 'api-link', 'scripts/**'] } });
+    assert.match(run(old, ['components', 'check']).out, /contested: api\/app\.rb is owned by api \("api\/\*\*"\) and web \("api\/app\.rb"\) -> narrow one of those globs so one line owns it/);
+    // F13: a project line over docs/ coexists with the kit's docs/devteam/**: the kit is set aside first
+    write(path.join(old, 'docs/guide.md'), '# guide\n');
+    g(['add', '-A'], old); g(['commit', '-qm', 'docs'], old);
+    lines({ ...F.STD, ops: { owns: [...F.STD.ops.owns, '.gitmodules', 'vendor/sub', 'api-link', 'scripts/**'] }, docs: { owns: ['docs/**'] } });
+    ok(old, ['components', 'check']);
     // --ref reads that commit's tree and that commit's settings
-    ok(old, ['components', 'check', '--ref', 'HEAD~2']);
+    ok(old, ['components', 'check', '--ref', 'HEAD~5']);
   } finally { F.done(); }
 });
 
@@ -2792,11 +2806,17 @@ test('the ticket footprint: touches, and the component\'s line, and its own reco
     // M4: a non-ASCII path is owned at point 4 too
     assert.doesNotMatch(branch('api-02-utf', { touches: ['api/**'] }, { 'api/é.rb': 'x\n' }), /outside the line|outside touches/, 'M4: app/é.rb');
     // touches that reach another line: refused at the footprint, whatever the globs claimed
-    assert.match(branch('web-03-reach', { touches: ['web/**', 'api/app.rb'] }, { 'api/app.rb': 'web edits api\n' }), /changes files outside the line of web: api\/app\.rb/);
+    const reach = branch('web-03-reach', { touches: ['web/**', 'api/app.rb'] }, { 'api/app.rb': 'web edits api\n' });
+    assert.match(reach, /changes files outside the line of web: api\/app\.rb \(api's line\)/, 'O8: the file and its owner');
+    assert.match(reach, /drop those changes, plan them as a contract or integration ticket that lists api in touches_components, or split the ticket/, 'O8: the fix');
+    // F4: touches_components widens only a contract or integration ticket, here as in validate
+    const wide = branch('api-06-build', { kind: 'build', touches: ['api/**', 'web/src/x.js'], touches_components: ['web'] }, { 'web/src/x.js': 'x\n' });
+    assert.match(wide, /changes files outside the line of api: web\/src\/x\.js \(web's line\)/);
+    assert.match(wide, /touches_components is for contract and integration tickets; this build ticket's line is api's alone/);
     // a contract ticket that names the second line passes
     assert.doesNotMatch(branch('api-04-contract', { kind: 'contract', contracts: { provides: ['v1'] }, touches: ['api/lib/**', 'web/src/api.js'], touches_components: ['web'] }, { 'api/lib/v1.rb': 'v1\n', 'web/src/api.js': 'fake\n' }), /outside the line/);
     // the kit's line: nothing but the ticket's own folder
-    assert.match(branch('api-05-kit', { touches: ['api/**', 'docs/devteam/governance/quality.md'] }, { 'docs/devteam/governance/quality.md': 'x\n' }), /changes files outside the line of api: docs\/devteam\/governance\/quality\.md/);
+    assert.match(branch('api-05-kit', { touches: ['api/**', 'docs/devteam/governance/quality.md'] }, { 'docs/devteam/governance/quality.md': 'x\n' }), /changes files outside the line of api: docs\/devteam\/governance\/quality\.md \(the kit's own line\)/);
   } finally { F.done(); }
 });
 
@@ -3101,6 +3121,16 @@ test('link add, set and rm for url links: the supervisor writes settings and log
     assert.equal(act.approved_by, undefined, 'no answer');
     assert.deepEqual(act.refs, ['link:figma', o], 'it cites the observation');
     assert.ok(!json(ok(old, ['trust', '--json'])).some((r) => r.class === 'registry-edit'), 'constitutional, not on the ladder');
+    // F6: values are strings, typed by the field, never JSON-coerced
+    ok(old, ['link', 'set', 'figma', 'title', '2024'], SUP);
+    assert.equal(json(ok(old, ['settings'])).links.figma.title, '2024');
+    ok(old, ['link', 'set', 'figma', 'notes', 'true'], SUP);
+    assert.equal(json(ok(old, ['settings'])).links.figma.notes, 'true');
+    ok(old, ['link', 'set', 'figma', 'check', 'false'], SUP);
+    assert.equal(json(ok(old, ['settings'])).links.figma.check, false);
+    assert.match(run(old, ['link', 'set', 'figma', 'check', 'maybe'], SUP).err, /check is true or false/);
+    assert.match(run(old, ['link', 'set', 'figma', 'url', '0'], SUP).err, /url must start with https:\/\//);
+    ok(old, ['link', 'set', 'figma', 'title', 'Designs'], SUP);
     ok(old, ['link', 'set', 'figma', 'for', '["component:web","goal:g-1"]'], SUP);
     assert.deepEqual(json(ok(old, ['settings'])).links.figma.for, ['component:web', 'goal:g-1']);
     assert.match(run(old, ['link', 'set', 'figma', 'url', 'http://insecure.test'], SUP).err, /url must start with https:\/\//, 'validated before it is written');
@@ -3115,7 +3145,12 @@ test('link add, set and rm for url links: the supervisor writes settings and log
     assert.equal(l.links.find((x) => x.id === 'figma').locator, 'https://figma.test/a');
     ok(old, ['link', 'rm', 'figma'], SUP);
     assert.equal(json(ok(old, ['settings'])).links.figma, undefined);
-    assert.equal(json(ok(old, ['log', '--type', 'act', '--json'])).filter((a) => a.class === 'registry-edit').length, 3);
+    assert.equal(json(ok(old, ['log', '--type', 'act', '--json'])).filter((a) => a.class === 'registry-edit').length, 7);
+    // a hand-edited non-string title is a validate error, and orient still runs
+    F.edit((j) => { j.links = { odd: { kind: 'url', title: 2024, url: 'https://odd.test' } }; });
+    assert.match(run(old, ['validate']).out, /links\.odd: title is a string/);
+    ok(old, ['observe-link', '--url', 'https://other.test', '--title', '2024'], SUP);
+    ok(old, ['orient']);
   } finally { F.done(); }
 });
 
@@ -3287,7 +3322,7 @@ test('help names the new commands', () => {
   const F = monoFixture('help');
   try {
     const h = F.ok(F.old, ['help']);
-    for (const c of ['links [--json]', 'link add <id> --kind url', 'components check', 'observe-link']) assert.ok(h.includes(c), c);
+    for (const c of ['links [--json]', 'link add <id> --kind url', 'components check', 'observe-link', '{"title","link"}']) assert.ok(h.includes(c), c);
   } finally { F.done(); }
 });
 
