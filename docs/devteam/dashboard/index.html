@@ -1955,21 +1955,24 @@ function attrs({ id, idTip, peek, type, docType, pick = null, prefix = '', compu
 }
 
 // ---- peeks: one fetch per object, kept, fetched again on each refresh ----
+/* peeks start */
 const PEEKS = new Map();
 const PEEK_FLIGHT = new Set();
 // A failure that isn't "no such object" (the server restarting, a spawn timing out) is not kept:
 // the drawer says it couldn't load and tries again on the next refresh or open.
 const PEEK_FAIL = new Map();
-const peekKey = (kind, id) => `${kind}:${id}`;
+// A file is one object per repo and ref (home's README.md is not a sibling's). NUL is in no path,
+// ref or repo id, so the parts can't run together.
+const peekKey = (kind, id, q = {}) => `${kind}:${id}${q.repo ? `\0repo=${q.repo}` : ''}${q.ref ? `\0ref=${q.ref}` : ''}`;
 function peekOf(kind, id, q = {}) {
-  const k = peekKey(kind, id);
+  const k = peekKey(kind, id, q);
   if (PEEKS.has(k)) return PEEKS.get(k);
   const fail = PEEK_FAIL.get(k);
   if (!fail || Date.now() - fail.at > 10000) fetchPeek(kind, id, q);
   return fail ? { error: fail.error, transient: true } : undefined;
 }
 async function fetchPeek(kind, id, q = {}) {
-  const k = peekKey(kind, id);
+  const k = peekKey(kind, id, q);
   if (PEEK_FLIGHT.has(k)) return;
   PEEK_FLIGHT.add(k);
   if (DRAWER.kind === kind && DRAWER.id === id) DRAWER.q = q;
@@ -1983,11 +1986,12 @@ async function fetchPeek(kind, id, q = {}) {
   // a drawer may draw another object's peek too (a thread its ticket's): redraw whatever is open
   redraw();
 }
+/* peeks end */
 // On each data refresh: the open object's peek again (not one that wasn't found), then a redraw.
 function refreshDrawer() {
   if (!DRAWER.kind || $('drawer').hidden) return;
   for (const [kind, id, q] of [[DRAWER.kind, DRAWER.id, DRAWER.q || {}], ...(DRAWER.deps || [])]) {
-    const p = PEEKS.get(peekKey(kind, id));
+    const p = PEEKS.get(peekKey(kind, id, q || {}));
     if (!p?.missing) fetchPeek(kind, id, q || {});
   }
   if (DRAWER.kind === 'file' && DRAWER.url) refetchFile(DRAWER.url);
@@ -2046,7 +2050,7 @@ function closeDrawer() {
 }
 // Each opener names the object (and how to draw it again), then draws it.
 const drawerFor = (kind, id, arg) => {
-  if (DRAWER.kind !== kind || DRAWER.id !== id) { LAST_HTML = ''; PEEK_FAIL.delete(peekKey(kind, id)); }
+  if (DRAWER.kind !== kind || DRAWER.id !== id) { LAST_HTML = ''; const k = peekKey(kind, id); for (const f of [...PEEK_FAIL.keys()]) if (f === k || f.startsWith(`${k}\0`)) PEEK_FAIL.delete(f); }
   const same = DRAWER.kind === kind && DRAWER.id === id;
   DRAWER = { kind, id, arg, q: same ? DRAWER.q : undefined, deps: same ? DRAWER.deps : undefined, url: same ? DRAWER.url : undefined };
 };

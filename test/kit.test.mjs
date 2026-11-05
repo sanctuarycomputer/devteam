@@ -5230,6 +5230,26 @@ test('the dashboard reads a sibling ticket\'s documents from its repo', async ()
   } finally { F.done(); }
 });
 
+// The drawer's peek cache, loaded from index.html by itself: a file is one object per repo and ref,
+// so home's README.md and a sibling's README.md never share a cached Commits list.
+test('the dashboard caches a file\'s peek per repo and ref', async () => {
+  const html = fs.readFileSync(path.join(kit, 'dashboard/index.html'), 'utf8');
+  const src = html.slice(html.indexOf('/* peeks start */'), html.indexOf('/* peeks end */'));
+  assert.ok(src.length > 200, 'the peek block is marked in index.html');
+  const answers = { '': ['apps'], companion: ['init'], 'companion#v1': ['old'] };
+  const fetch = async (u) => { const q = new URL(u, 'http://x').searchParams; const k = `${q.get('repo') ?? ''}${q.get('ref') ? `#${q.get('ref')}` : ''}`; return { ok: true, status: 200, json: async () => ({ history: answers[k] }) }; };
+  const ctx = vm.createContext({ fetch, URLSearchParams, DRAWER: { kind: null, id: null }, redraw: () => {} });
+  vm.runInContext(`${src}\n;globalThis.api = { PEEKS, peekOf, fetchPeek, peekKey };`, ctx);
+  const { peekOf, fetchPeek } = ctx.api;
+  await fetchPeek('file', 'README.md', {});
+  await fetchPeek('file', 'README.md', { repo: 'companion' });
+  await fetchPeek('file', 'README.md', { repo: 'companion', ref: 'v1' });
+  assert.deepEqual([...peekOf('file', 'README.md').history], ['apps'], "home's file");
+  assert.deepEqual([...peekOf('file', 'README.md', { repo: 'companion' }).history], ['init'], "companion's file, not home's");
+  assert.deepEqual([...peekOf('file', 'README.md', { repo: 'companion', ref: 'v1' }).history], ['old'], 'the same file at another ref');
+  assert.equal(ctx.api.PEEKS.size, 3);
+});
+
 test('releases per repo: a component\'s tag pattern, the act names the repo, notes read that repo', () => {
   const F = multiFixture('releases');
   const { old, g, okIn, runIn, ticket } = F;
