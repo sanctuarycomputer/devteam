@@ -1392,7 +1392,7 @@ const LOG_BRANCH = 'chore-log';
 // log-only PR. Run it every tick (it pushes); merge it daily with `merge --chore log`.
 function logPrOpen(wt, main) {
   if (loadSettings().forge !== 'git') {
-    const open = sh('gh', ['pr', 'list', '--head', LOG_BRANCH, '--state', 'open', '--json', 'number', '--jq', 'length'], { cwd: wt });
+    const open = repo('home').gh(['pr', 'list', '--head', LOG_BRANCH, '--state', 'open', '--json', 'number', '--jq', 'length'], { cwd: wt });
     if (open !== null) return Number(open) > 0;
   }
   // forge git (merge lands a --no-ff merge) or no gh: open means not yet on main
@@ -5641,9 +5641,9 @@ function openPr(wt, branch, title, bodyText) {
     fs.writeFileSync(f, `# ${title}\n\n${bodyText}\n\n## One-way doors\n\nNone.\n`);
     return `forge is git; PR text in ${path.relative(mainRoot, f)}; land it with: merge --chore ${branch.replace(/^chore-/, '')}`;
   }
-  let pr = sh('gh', ['pr', 'list', '--head', branch, '--state', 'open', '--json', 'url', '--jq', '.[0].url'], { cwd: wt });
+  let pr = repo('home').gh(['pr', 'list', '--head', branch, '--state', 'open', '--json', 'url', '--jq', '.[0].url'], { cwd: wt });
   if (pr === null) { warn('gh is not available; open the PR by hand'); return ''; }
-  if (!pr) pr = sh('gh', ['pr', 'create', '--head', branch, '--base', main, '--title', title, '--body', `${bodyText}\n\n## One-way doors\n\nNone.\n`], { cwd: wt }) ?? '';
+  if (!pr) pr = repo('home').gh(['pr', 'create', '--head', branch, '--base', main, '--title', title, '--body', `${bodyText}\n\n## One-way doors\n\nNone.\n`], { cwd: wt }) ?? '';
   return pr;
 }
 // The improvement loop is Upkeep's work: while Upkeep is drained or parked it starts nothing new
@@ -7601,7 +7601,7 @@ function fleetStatus() {
   const openQs = questions().filter((q) => q.status === 'open').map((q) => ({ id: q.id, question: q.question }));
   let prs = null;
   if (s.forge !== 'git') {
-    const raw = sh('gh', ['pr', 'list', '--state', 'open', '--json', 'number,title,headRefName,url']);
+    const raw = repo('home').gh(['pr', 'list', '--state', 'open', '--json', 'number,title,headRefName,url']);
     try { prs = raw === null ? null : JSON.parse(raw); } catch { prs = null; }
     if (prs === null) warnings.push('gh could not list the open PRs');
   } else {

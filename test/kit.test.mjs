@@ -4534,3 +4534,45 @@ test('merge runs a sibling ticket\'s gates in its repo and lands it on that repo
     } finally { fs.renameSync(`${F.consoleOrigin}-away`, F.consoleOrigin); }
   } finally { F.done(); }
 });
+
+test('every gh call names its repo (-R)', () => {
+  const src = fs.readFileSync(path.join(kit, 'scripts', 'devteam.mjs'), 'utf8');
+  const direct = src.split('\n').map((l, i) => [i + 1, l]).filter(([, l]) => /sh\('gh', \[/.test(l) && !/sh\('gh', \[\.\.\.args/.test(l));
+  assert.deepEqual(direct.map(([n]) => n), [], `gh called outside repo.gh at lines ${direct.map(([n]) => n).join(', ')}`);
+});
+
+// Views route by name (repoOfTicketLink, factsRepo, repoReadable), so a machine without one
+// sibling's checkout still shows status and metrics; acts route by object and fail fast (open issue 8).
+test('views never use the object routers', () => {
+  const src = fs.readFileSync(path.join(kit, 'scripts', 'devteam.mjs'), 'utf8').split('\n');
+  const VIEWS = ['deriveStatus', 'collectMetrics', 'collectProgress', 'notSchedulable', 'cmdReady', 'cmdStatus', 'sessionOf', 'liveSessionsNow', 'restartCommands', 'holdView', 'holdFindings', 'sessionSettled', 'timelineView', 'dashboardData', 'fleetStatus', 'moveChecklist', 'cmdLinks', 'cmdPrompt'];
+  const body = (name) => {
+    const at = src.findIndex((l) => new RegExp(`^(async )?function ${name}\\(`).test(l) || l.startsWith(`const ${name} = `));
+    assert.ok(at >= 0, `${name} is defined`);
+    if (src[at].startsWith('const ')) return [[at + 1, src[at]]];
+    const end = src.findIndex((l, i) => i > at && l === '}');
+    return src.slice(at, end + 1).map((l, i) => [at + 1 + i, l]);
+  };
+  const bad = VIEWS.flatMap((v) => body(v).filter(([, l]) => /\brepoOfTicket(Id)?\(/.test(l)).map(([n]) => `${v}:${n}`));
+  assert.deepEqual(bad, [], 'a view calls an object router; use repoOfTicketLink, factsRepo or repoReadable');
+});
+
+test('a github-forge sibling: gh is asked about that repo', () => {
+  const F = multiFixture('gh-r');
+  const { old, g, okIn, runIn, ticket } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  try {
+    // console's origin is written as GitHub's; insteadOf sends fetches to the local bare repo
+    g(['remote', 'set-url', 'origin', 'https://github.com/usbclub/console.git'], F.console);
+    g(['config', `url.${F.consoleOrigin}.insteadOf`, 'https://github.com/usbclub/console.git'], F.console);
+    const links = json(okIn(old, ['settings'])).links;
+    F.lines({ ...F.STD, console: { link: 'console' }, companion: { link: 'companion' } }, { links: { ...links, console: { ...links.console, remote: 'usbclub/console', forge: 'github' } } });
+    ticket('console-01-a');
+    const bin = path.join(F.base, 'fakegh');
+    const logf = path.join(F.base, 'gh-args.log');
+    write(path.join(bin, 'gh'), `#!/bin/sh\necho "$@" >> "${logf}"\nexit 1\n`);
+    fs.chmodSync(path.join(bin, 'gh'), 0o755);
+    runIn(old, ['merge', 'console-01-a', '--dry-run'], SUP, { PATH: `${bin}${path.delimiter}${process.env.PATH}` });
+    assert.match(fs.readFileSync(logf, 'utf8'), /^pr view ticket\/console-01-a --json \S+ -R usbclub\/console$/m);
+  } finally { F.done(); }
+});
