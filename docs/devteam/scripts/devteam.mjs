@@ -5349,6 +5349,9 @@ function dashboardLogger() {
 // Every instance on a machine has its own dashboard port in one block, so the hub finds them all
 // by asking each port who it is (/api/hello). DEVTEAM_HUB_PORT and DEVTEAM_PORT_BASE are for tests.
 const HUB_PORT = Number(process.env.DEVTEAM_HUB_PORT ?? 4320);
+// A kept-alive connection outlives any client's idle reuse: Node's 5 s default closed sockets a
+// fetch client (Node 18's keeps them about 4 s) was just reusing, and that request failed.
+const keepAlive = (srv) => { srv.keepAliveTimeout = 65000; srv.headersTimeout = 66000; return srv; };
 const PORT_BASE = Number(process.env.DEVTEAM_PORT_BASE ?? 4321);
 const PORT_RANGE = Array.from({ length: 25 }, (_, i) => PORT_BASE + i);
 // Who answers on a port: a devteam dashboard's /api/hello, or null (closed, slow, or not devteam).
@@ -5443,7 +5446,7 @@ function startHub(log) {
       if ((await holder()) !== 'other') setTimeout(tryListen, retry).unref();
       else log(`hub: port ${HUB_PORT} is held by something that isn't a devteam hub; this dashboard won't serve the hub`);
     });
-    hub.listen(HUB_PORT, '127.0.0.1', () => log(`hub on http://127.0.0.1:${HUB_PORT}`));
+    keepAlive(hub).listen(HUB_PORT, '127.0.0.1', () => log(`hub on http://127.0.0.1:${HUB_PORT}`));
   };
   tryListen();
 }
@@ -5715,6 +5718,7 @@ async function cmdDashboard() {
     }
     log(`server error: ${e?.stack ?? e}`); process.stderr.write(`devteam dashboard: ${e.message}\n`); process.exit(1);
   });
+  keepAlive(server);
   server.once('listening', () => { log(`started on http://${host}:${port} (node ${process.version})`); out(`devteam dashboard on http://${host}:${port}`); startHub(log); });
   server.listen(port, host);
 }

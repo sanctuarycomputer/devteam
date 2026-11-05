@@ -2783,6 +2783,9 @@ test('the hub: lists every instance on the machine, links to each one, moves whe
     const page = await fetch(`http://127.0.0.1:${HUB}/`);
     assert.match(await page.text(), /instances\.json/, 'the page reads the list from its own hub');
     assert.match(page.headers.get('content-security-policy'), /connect-src 'self'/, 'and can talk to nothing else');
+    // idle connections stay open longer than any client reuses one (Node 18's fetch: about 4 s)
+    assert.match(page.headers.get('keep-alive') ?? '', /timeout=65/, "the hub's");
+    assert.match((await fetch(`http://127.0.0.1:${P}/api/hello`)).headers.get('keep-alive') ?? '', /timeout=65/, "and a dashboard's");
     assert.equal(await statusWithHost(HUB, '/instances.json', 'rebound.example'), 403, 'its own Host only');
     assert.equal(await statusWithHost(HUB, '/instances.json', `127.0.0.1:${HUB}`, 'POST'), 405, 'it only lists');
     assert.equal(await statusWithHost(HUB, '/instances.json', `127.0.0.1:${HUB}`, 'GET', { 'sec-fetch-site': 'cross-site' }), 403, "another site's page can't make it probe");
