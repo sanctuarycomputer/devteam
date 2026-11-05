@@ -6876,36 +6876,8 @@ The whole system as planned now: the sum of every design so far. Written at boot
 | Feature | Design | Date | What changed |
 |---|---|---|---|
 `;
-const WORKFLOW_YML = `# devteam: an optional required check. The supervisor's \`merge\` runs the same checks; this makes GitHub refuse a merge that skipped it.
-name: devteam
-on:
-  pull_request:
-    types: [opened, synchronize, reopened, edited, ready_for_review]
-permissions:
-  contents: read
-jobs:
-  check-pr:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: \${{ github.event.pull_request.head.sha }}
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - run: git fetch --no-tags origin "+refs/heads/\${{ github.base_ref }}:refs/remotes/origin/\${{ github.base_ref }}"
-      - env:
-          HEAD_REF: \${{ github.head_ref }}
-          HEAD_SHA: \${{ github.event.pull_request.head.sha }}
-          PR_TITLE: \${{ github.event.pull_request.title }}
-          PR_BODY: \${{ github.event.pull_request.body }}
-        run: |
-          printf '%s' "$PR_BODY" > "$RUNNER_TEMP/pr-body.md"
-          node docs/devteam/scripts/devteam.mjs check-pr --head-ref "$HEAD_REF" --sha "$HEAD_SHA" --title "$PR_TITLE" --body-file "$RUNNER_TEMP/pr-body.md"
-`;
 
-// init [--name project] [--upstream-base vX.Y.Z] [--github]: the project folders,
+// init [--name project] [--upstream-base vX.Y.Z]: the project folders,
 // settings, .gitignore entries, the AGENTS.md pointer; optionally the GitHub check and agent config.
 // The section init adds to the project's AGENTS.md: every agent reads this first, then its doc.
 const AGENTS_SECTION = `## devteam
@@ -6928,14 +6900,23 @@ Where rules conflict: the owner's explicit instruction, then enforcing configura
 `;
 
 function cmdInit() {
+  // From the main checkout only: a worktree's kit folder is the branch's, so project/ would land
+  // there while AGENTS.md, .gitignore and the rest went to the main checkout.
+  if (repoRoot !== mainRoot) die(`run init from the main checkout (${mainRoot}), not a worktree`);
   const root = mainRoot;
   const made = [];
   const put = (p, text) => { if (!fs.existsSync(p)) { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, text); made.push(path.relative(root, p)); } };
-  const remoteHead = git(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'])?.replace(/^origin\//, '') ?? git(['rev-parse', '--abbrev-ref', 'HEAD']);
+  // main is the remote's default branch: origin/HEAD, or the remote itself where a repo was made
+  // with git init (no origin/HEAD); never the branch the checkout happens to be on.
+  const remoteHead = git(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'])?.replace(/^origin\//, '')
+    ?? (git(['ls-remote', '--symref', 'origin', 'HEAD']) ?? '').match(/^ref: refs\/heads\/(\S+)\s+HEAD/m)?.[1]
+    ?? null;
   const block = { project: flagStr('name') ?? path.basename(root), upstream_base: flagStr('upstream-base') ?? null, ...(remoteHead && remoteHead !== 'main' && remoteHead !== 'HEAD' ? { main_branch: remoteHead } : {}), components: {}, gates: {} };
   put(path.join(projectDir, 'settings.md'), `# Project settings\n\nOnly what this project changes; every setting has a default in scripts/devteam.mjs (\`devteam.mjs settings\` shows the result). Below the block, record project-specific answers to the decisions the governance docs leave open (components and stacks, persistence tiers, one-way doors, release tags, how to notify the owner), each with its date.\n\n\`\`\`json devteam\n${JSON.stringify(block, null, 2)}\n\`\`\`\n`);
   put(path.join(projectDir, 'designs', 'architecture.md'), ARCHITECTURE_MD);
-  for (const d of ['log', 'retros', 'tickets', 'reviews']) put(path.join(projectDir, d, '.gitkeep'), '');
+  // retros/ and reviews/ hold placeholders; log/ and tickets/ fill as the fleet writes, and merge
+  // refuses anything in them that isn't the fleet's (a .gitkeep included).
+  for (const d of ['retros', 'reviews']) put(path.join(projectDir, d, '.gitkeep'), '');
   const gi = path.join(root, '.gitignore');
   const giText = readText(gi) ?? '';
   const want = [`${path.relative(root, runDir).split(path.sep).join('/')}/`, '.worktrees/', ...HARNESS_RUNTIME];
@@ -6947,7 +6928,6 @@ function cmdInit() {
   // Claude Code reads CLAUDE.md, not AGENTS.md: where a CLAUDE.md exists, it imports AGENTS.md.
   const claude = path.join(root, 'CLAUDE.md');
   if (fs.existsSync(claude) && !/@AGENTS\.md\b/.test(readText(claude))) { fs.appendFileSync(claude, `\n## devteam\n\n@AGENTS.md\n`); made.push('CLAUDE.md'); }
-  if (flags.github) put(path.join(root, '.github', 'workflows', 'devteam.yml'), WORKFLOW_YML);
   out(made.length ? `created:\n${made.map((m) => `  ${m}`).join('\n')}` : 'nothing to create');
   out('next: fill settings (components, agent_command, gates, worktree_files), write designs/architecture.md from the code, then start the supervisor (the upstream README, Setup)');
 }
@@ -6955,7 +6935,7 @@ function cmdInit() {
 const HELP = `devteam <command>   (positionals before flags; flags take the words after them)
 
 Setup and roles
-  init [--name n] [--upstream-base vX] [--github]   project folders, settings, .gitignore, the devteam section of AGENTS.md
+  init [--name n] [--upstream-base vX]   project folders, settings, .gitignore, the devteam section of AGENTS.md
   prompt supervisor | worker <id> | planner <feature>    the prompt a session starts with
   worker <ticket-id> [--resume] [--force] | planner <feature> [--goal <g-id>] [--resume] [--force] [--id-block <n>]   supervisor: a worktree, a tmux window and an agent for a ticket or a feature plan (a new planner names its goal and reserves n ticket numbers, default 20); refused while its goal is parked or let go, or draining for a session that hasn't run, unless --force (logged); --resume where no session exists starts fresh with the handoff note
   whoami | settings [--get key]
