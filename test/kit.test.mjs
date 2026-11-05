@@ -1651,6 +1651,11 @@ test('devteam kit', async (t) => {
     assert.deepEqual([dg.fail_rate, dg.preexisting_fails], [0, debt.length], "and not counted in the gate's fail rate");
     assert.ok(json(must(['log', '--type', 'act', '--json'])).some((a) => a.class === 'merge-word' && a.refs.includes('bill-01-card')));
     assert.match(must(['status']), /merged.*bill-01-card/);
+    // merging it again (a second run, a stale background job) lands nothing and logs nothing
+    const acts = () => json(must(['log', '--type', 'act', '--json'])).length;
+    const before = acts();
+    assert.match(must(['merge', 'bill-01-card'], { role: 'sup' }), /is already on main: nothing to merge, nothing logged/);
+    assert.equal(acts(), before, 'no second merge act');
     // its merge settles the worker's requests, replied to or not
     assert.ok(!json(must(['messages', '--to', 'supervisor', '--open', '--json'])).some((m) => m.created_by === 'bill-01-card'), 'a merged ticket asks nothing');
     assert.ok(!json(must(['dashboard-data'])).open_messages.some((m) => m.actor === 'bill-01-card'));
