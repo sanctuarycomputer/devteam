@@ -3115,6 +3115,10 @@ function ownerAnswer(qid, what) {
   const v = q?.type === 'question' ? questionView(q) : null;
   if (!v || v.status !== 'answered') die(`${what}: ${qid} is not a question the owner answered`);
   reviewApproves(v, what);
+  // An answer approves what it said yes to: the owner's answer must be the question's
+  // recommendation (a review, its verified result). Answered any other way, the owner declined or
+  // changed it, and the supervisor asks again; a secrets question approves by what was posted.
+  if (!(v.secrets ?? []).length && v.kind !== 'review' && !v.matched) die(`${what}: ${qid} was answered "${String(v.answer ?? '').slice(0, 80)}", not its recommendation${v.recommendation ? ` ("${v.recommendation}")` : ' (it has none)'}: that approves nothing; ask again for what the owner wants`);
   return v;
 }
 // A review approves something only through a result the owner gave that still verifies.
@@ -4546,15 +4550,29 @@ function decisionAuthorityGap(d) {
   const q = d.approved_by?.startsWith('q-') ? logGet(d.approved_by) : null;
   const v = q?.type === 'question' ? questionView(q) : null;
   const inClass = v && (v.class === d.class || (d.class === 'approve-plan' && v.kind === 'one-way-door'));
-  if (ownerOnly) return v && inClass && v.status === 'answered' ? null : `${d.class} is the owner's and needs the owner's answer in that class`;
+  if (ownerOnly) return v && inClass && v.status === 'answered' ? answerUseGap(d, v) : `${d.class} is the owner's and needs the owner's answer in that class`;
   switch (d.authority) {
-    case 'answer': return v && inClass && v.status === 'answered' ? null : `no answered ${d.class} question ${d.approved_by ?? ''}`.trim();
+    case 'answer': return v && inClass && v.status === 'answered' ? answerUseGap(d, v) : `no answered ${d.class} question ${d.approved_by ?? ''}`.trim();
     case 'default': return v && inClass && v.status === 'defaulted' ? null : `no defaulted ${d.class} question ${d.approved_by ?? ''}`.trim();
     case 'standing-rule': { const k = logGet(d.approved_by ?? ''); return k?.type === 'knowledge' && writerClass(k.created_by) === 'owner' && k.status === 'accepted' && k.scope === `class:${d.class}` ? null : `no accepted owner rule scoped class:${d.class}`; }
     case 'rung': return L.classes[d.class] && rungFor(d.class, d.scope ?? null) >= 3 ? null : `${d.class} is not on rung 3`;
     case 'constitution': return (L.constitutional ?? []).includes(d.class) || !L.classes[d.class] ? null : `${d.class} is on the ladder, not constitutional`;
     default: return `unknown authority ${d.authority}`;
   }
+}
+// An owner's answer approves one call, as decide and act enforce (or one per item it approves),
+// and the call is about what the question was: a decision line written by hand gets the same rule,
+// so it can't reuse an answer that already approved something, or carry one asked about another
+// ticket. The earliest call citing the answer (for that item) is the one it approved.
+function answerUseGap(d, v) {
+  const refs = (d.refs ?? []).flatMap((x) => String(x).split(','));
+  if (v.ticket && !refs.includes(v.ticket) && !(v.approves ?? []).some((a) => refs.includes(a))) return `${v.id} was asked about ${v.ticket}, not ${refs.join(', ') || 'nothing'}`;
+  if (d.class === 'approve-plan' && v.kind === 'one-way-door') return null; // a goal-level door covers each plan it names (approve-plan's own check)
+  const declared = v.approves ?? [];
+  const part = declared.length ? refs.find((r) => declared.includes(r)) : null;
+  if (declared.length && !part) return `${v.id} approves ${declared.join(', ')}, and this names none of them`;
+  const first = calls().filter((c) => c.approved_by === v.id && (!part || (c.refs ?? []).flatMap((x) => String(x).split(',')).includes(part))).sort(byTime)[0];
+  return first && first.id !== d.id ? `${v.id} already approved ${first.type === 'decision' ? 'a decision' : 'an act'}${part ? ` for ${part}` : ''} (${first.id})` : null;
 }
 // What a command's act would be about, for --decision: the act must be about something the decision named.
 function citeTargets() {
