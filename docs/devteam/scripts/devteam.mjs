@@ -142,10 +142,11 @@ function sh(cmd, args, opts = {}) {
 // (-c), so a window is ours when it started under this checkout's .worktrees/, whatever its name;
 // another project's window named like one of our tickets never counts.
 function ourWindows(session) {
-  const roots = [...new Set([mainRoot, fs.realpathSync(mainRoot)])].map((r) => `${path.join(r, '.worktrees')}${path.sep}`);
+  // Compared resolved: tmux keeps the path as it was given (on macOS /var is /private/var).
+  const roots = [`${path.join(fs.realpathSync(mainRoot), '.worktrees')}${path.sep}`];
   // Every pane, not only the active one: a worker window the owner split keeps counting.
   const panes = (sh('tmux', ['list-panes', '-s', '-t', `=${session}`, '-F', '#W\t#{pane_start_path}']) ?? '').split('\n').filter(Boolean)
-    .map((l) => { const i = l.indexOf('\t'); return { name: l.slice(0, i), start: `${l.slice(i + 1)}${path.sep}` }; });
+    .map((l) => { const i = l.indexOf('\t'); const p = l.slice(i + 1); let real = p; try { real = fs.realpathSync(p); } catch {} return { name: l.slice(0, i), start: `${real}${path.sep}` }; });
   return [...new Set(panes.filter((w) => roots.some((r) => w.start.startsWith(r))).map((w) => w.name))].map((name) => ({ name }));
 }
 let tmuxSessionName = null;
