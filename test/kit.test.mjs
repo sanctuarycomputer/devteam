@@ -3903,6 +3903,49 @@ test('the registry attestation is the owner\'s: registry-attest is never answere
   } finally { F.done(); }
 });
 
+test('a draft whose precondition reads as the registry being complete can\'t dodge the attestation by leaving registry_precondition unset; the dashboard and the approval show the field', () => {
+  const F = fleetFixture('regdodge');
+  const { old, ok, run } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  try {
+    const G = ok(old, ['goal', 'add', '--title', 'Floor', '--outcome', 'the floor holds', '--measure', 'floor gaps', '--target', '0', '--unit', 'gaps', '--direction', 'down', '--source', 'repo', '--check', 'echo 3', '--non-goals', 'new features', '--preconditions', 'format and lint', 'the Registry is Complete', '--priority', '1'], SUP);
+    const plain = ok(old, ['goal', 'add', '--title', 'Plain', '--outcome', 'it works', '--measure', 'gaps', '--target', '0', '--unit', 'gaps', '--direction', 'down', '--source', 'repo', '--check', 'echo 3', '--non-goals', 'none', '--preconditions', 'a registry exists', 'tests complete', '--priority', '2'], SUP);
+    for (const x of [G, plain]) {
+      ok(old, ['goal', 'reading', x, '--run'], SUP);
+      ok(old, ['goal', 'set', x, '--milestones', JSON.stringify([{ title: 'Floor', target: 0, preconditions: [1, 2], tickets: 2 }])], SUP);
+    }
+    const gap = new RegExp(`definition: precondition 2 \\("the Registry is Complete"\\) reads as the registry being complete, and ${G} has no registry_precondition: goal set ${G} --registry-precondition 2`);
+    assert.match(ok(old, ['goal', 'check', G]), gap, 'unset, the registry wording is a definition gap');
+    assert.equal(run(old, ['goal', 'check', G, '--strict']).status, 1);
+    // clearing the field is no way round it
+    ok(old, ['goal', 'set', G, '--registry-precondition', 'none'], SUP);
+    assert.match(ok(old, ['goal', 'check', G]), gap);
+    // the heuristic only flags: "registry" and "complete" in two different preconditions is not it
+    assert.match(ok(old, ['goal', 'check', plain]), /^ {2}ok$/m);
+    const design = [{ title: 'The approach', path: 'docs/devteam/project/designs/floor.md' }];
+    const approval = ['ask', '--kind', 'goal-approval', '--goal', G, '--question', 'Approve the floor?', '--links', JSON.stringify(design)];
+    assert.match(run(old, approval, SUP).err, new RegExp(`${G} is not fully defined yet[\\s\\S]*--registry-precondition 2`), 'the approval question waits for the field');
+    assert.match(run(old, ['goal', 'decide', G, 'approve']).err, new RegExp(`${G} is not fully defined[\\s\\S]*--registry-precondition 2`), 'and so does the owner\'s approve');
+    let dash = json(ok(old, ['dashboard-data'])).ooda.goals;
+    assert.equal(dash.find((x) => x.id === G).registry_attest, undefined, 'nothing on the card while unset');
+    // set, the gap is gone and the card shows the attestation's state
+    ok(old, ['goal', 'set', G, '--registry-precondition', '2'], SUP);
+    assert.match(ok(old, ['goal', 'check', G]), /^ {2}ok$/m);
+    dash = json(ok(old, ['dashboard-data'])).ooda.goals;
+    assert.deepEqual(dash.find((x) => x.id === G).registry_attest, { precondition: 2, status: 'not asked', question: null, answer: null });
+    // (the attestation is an open question about the goal, so an approval is asked before or after it)
+    const A = ok(old, approval, SUP);
+    assert.match(json(ok(old, ['questions', '--id', A, '--json']))[0].context, /Registry attestation: precondition 2 \("the Registry is Complete"\), not asked; goal-readiness waits for the owner's yes/, 'the approval\'s context names the field');
+    const Q = ok(old, ['ask', '--class', 'registry-attest', '--goal', G, '--question', 'Does the registry list every repo, design file and doc this project depends on?', '--recommendation', 'yes'], SUP);
+    dash = json(ok(old, ['dashboard-data'])).ooda.goals;
+    assert.deepEqual(dash.find((x) => x.id === G).registry_attest, { precondition: 2, status: 'open', question: Q, answer: null });
+    ok(old, ['answer', Q, 'yes']);
+    dash = json(ok(old, ['dashboard-data'])).ooda.goals;
+    assert.deepEqual(dash.find((x) => x.id === G).registry_attest, { precondition: 2, status: 'answered', question: Q, answer: 'yes' });
+    assert.equal(dash.find((x) => x.id === plain).registry_attest, undefined);
+  } finally { F.done(); }
+});
+
 test('link probes: four at a time inside a tick budget, never a prompt, and a page behind auth is a note', () => {
   const F = monoFixture('probes');
   const { old, ok, edit, g } = F;

@@ -3525,7 +3525,7 @@ function cmdAsk() {
   // an inline link is logged as given, so a credential in it would be in the log and every view of the question
   for (const l of jsonFlag('links') ?? []) if (hasCredentials(l?.url)) die(`--links: ${redactUrl(l.url)} carries credentials; ${CREDENTIALS_REFUSED}`);
   const line = appendLog({
-    type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), question: q, context: kind === 'goal-approval' ? [flagStr('context'), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal'))))].filter(Boolean).join('\n\n') : flagStr('context'),
+    type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), question: q, context: kind === 'goal-approval' ? [flagStr('context'), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal')))), registryAttestText(logGet(flagStr('goal')))].filter(Boolean).join('\n\n') : flagStr('context'),
     rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: goalChangeFlag(cls), options: asList(flags.options), choices: jsonFlag('choices'), links: jsonFlag('links'), recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined,
     deadline: def ? new Date(Date.now() + loadSettings().question_default_after_hours * 3600000).toISOString() : undefined,
     blocks, approves: approves.length ? approves : undefined, evidence, note: flagStr('note'), secrets, review,
@@ -4987,6 +4987,31 @@ function registryPreconditionCheck(name, g) {
   const count = (g.preconditions ?? []).length;
   if (n > count) die(`--registry-precondition ${n}: ${name} has ${count} precondition${count === 1 ? '' : 's'}; it numbers the one that is "the registry is complete"`);
 }
+// A goal with no registry_precondition whose precondition reads as the registry being complete
+// ("registry" and "complete" in the one precondition, any case): a definition gap, so leaving the
+// field unset (or clearing it) can't skip the attestation. The kit has no Baseline marker beyond the
+// field itself, so the wording is the only other sign. It only raises the gap; it never satisfies
+// the attestation, which stays keyed to the field.
+function registryWording(g) {
+  if (g.registry_precondition != null) return null;
+  const i = (g.preconditions ?? []).findIndex((t) => /registry/i.test(t) && /complete/i.test(t));
+  return i < 0 ? null : { n: i + 1, text: g.preconditions[i] };
+}
+// The attestation's state for a goal with a registry_precondition (the dashboard card, the approval
+// question): its latest registry-attest question, and the owner's answer once there is one.
+function registryAttestView(g) {
+  const n = g.registry_precondition;
+  if (n == null) return undefined;
+  const last = questions().filter((q) => q.class === 'registry-attest' && q.goal === g.id).sort((a, b) => (a.asked_at < b.asked_at ? -1 : 1)).pop();
+  if (!last) return { precondition: n, status: 'not asked', question: null, answer: null };
+  return { precondition: n, status: last.status === 'open' ? 'open' : 'answered', question: last.id, answer: last.status === 'open' ? null : last.answer ?? null };
+}
+function registryAttestText(g) {
+  const v = registryAttestView(g);
+  if (!v) return '';
+  const text = (g.preconditions ?? [])[v.precondition - 1];
+  return `Registry attestation: precondition ${v.precondition}${text ? ` ("${text}")` : ''}, ${v.status}${v.question ? ` (${v.question}${v.answer ? `: "${v.answer}"` : ''})` : ''}; goal-readiness waits for the owner's yes.`;
+}
 // A goal-readiness act or decision is about one goal, named by its id (planning.md §7).
 function readinessGoal(refs) {
   const g = refs.length === 1 ? logGet(refs[0]) : null;
@@ -5072,6 +5097,8 @@ function goalCheck(g) {
   const clash = logObjects('goal').filter((o) => o.id !== g.id && ['ready', 'draft'].includes(o.status ?? 'draft') && typeof g.priority === 'number' && o.priority === g.priority);
   if (clash.length) definition.push(`priority ${g.priority} is shared with ${clash.map((c) => c.id).join(', ')}`);
   if (m.source !== 'owner' && !goalReadings(g.id).length) definition.push(`no baseline reading (devteam.mjs goal reading <id> ${['repo', 'prod'].includes(m.source) ? '--run' : '--value v'})`);
+  const unmarked = registryWording(g);
+  if (unmarked) definition.push(`precondition ${unmarked.n} ("${unmarked.text}") reads as the registry being complete, and ${g.id} has no registry_precondition: goal set ${g.id} --registry-precondition ${unmarked.n} (goal-readiness then waits for the owner's registry-attest yes; planning.md §7)`);
   const approval = milestoneGaps(g);
   const feats = goalFeatures(g.id);
   const covered = new Set(feats.flatMap((f) => features().get(f).preconditions ?? []));
@@ -5199,7 +5226,7 @@ function goalView(g) {
   const mode = goalMode(g);
   const still = ['park', 'let-go'].includes(mode);
   const forecast = goalForecast(g);
-  return { ...g, ...(g.measure ? { measure: measureOf(g) } : {}), status: g.status ?? 'draft', readings: readings.map((r) => ({ at: r.created_at, value: r.measure.value, source: r.source, ...(r.sha ? { sha: r.sha } : {}), ...(r.approved ? { approved: r.approved } : {}) })), track: still ? null : track, check: goalCheck(g), forecast: forecast && still ? { ...forecast, eta: null, past_horizon: false } : forecast, hold_view: holdView(g) };
+  return { ...g, ...(g.measure ? { measure: measureOf(g) } : {}), status: g.status ?? 'draft', readings: readings.map((r) => ({ at: r.created_at, value: r.measure.value, source: r.source, ...(r.sha ? { sha: r.sha } : {}), ...(r.approved ? { approved: r.approved } : {}) })), track: still ? null : track, check: goalCheck(g), forecast: forecast && still ? { ...forecast, eta: null, past_horizon: false } : forecast, hold_view: holdView(g), registry_attest: registryAttestView(g) };
 }
 function cmdGoal() {
   const [sub, id] = positional;
