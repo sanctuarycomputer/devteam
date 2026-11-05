@@ -138,16 +138,21 @@ function sh(cmd, args, opts = {}) {
 // never share a session. A project whose live sessions already sit in a `devteam` session (the
 // default before) keeps it. Resolving writes nothing: the name is saved when the kit creates the
 // session (save), so a read-only command, or CI, never writes into run/.
+let tmuxSessionName = null;
 function tmuxSession({ save = false } = {}) {
   const s = loadSettings();
   if (s.tmux_session) return s.tmux_session;
+  if (tmuxSessionName && !save) return tmuxSessionName;
   const file = path.join(runDir, 'tmux-session');
   const saved = readText(file)?.trim();
-  if (saved) return saved;
-  const legacy = new Set((sh('tmux', ['list-windows', '-t', '=devteam', '-F', '#W']) ?? '').split('\n').filter(Boolean));
-  const name = legacy.size && liveSessions().some((x) => legacy.has(x.name)) ? 'devteam' : `devteam-${slug(s.project ?? path.basename(mainRoot))}`;
+  if (saved) return (tmuxSessionName = saved);
+  // Ours means a window named after one of this project's tickets or planners (plan-<feature>),
+  // from the log alone: liveSessions() lists windows, which asks this function, so it can't be used.
+  const legacy = (sh('tmux', ['list-windows', '-t', '=devteam', '-F', '#W']) ?? '').split('\n').filter(Boolean);
+  const ours = (w) => tickets().has(w) || (w.startsWith('plan-') && features().has(w.slice('plan-'.length)));
+  const name = legacy.some(ours) ? 'devteam' : `devteam-${slug(s.project ?? path.basename(mainRoot))}`;
   if (save) { fs.mkdirSync(runDir, { recursive: true }); fs.writeFileSync(file, `${name}\n`); }
-  return name;
+  return (tmuxSessionName = name);
 }
 // A window of this project's session, matched exactly: tmux would otherwise take a prefix, so
 // `devteam` would find `devteam-stacks`.
