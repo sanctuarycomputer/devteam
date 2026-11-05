@@ -8319,7 +8319,62 @@ The record is the log (\`node docs/devteam/scripts/devteam.mjs log | history | q
 Where rules conflict: the owner's explicit instruction, then enforcing configuration (lint, gates, branch protection), then \`project/settings.md\`, then \`governance/\`, then \`process/\`, then the framework's conventions and your judgment (\`constitution.md\` §6).
 `;
 
+// The forge check for a component repo (spec §5.4): the repo under test at $GITHUB_WORKSPACE, home
+// read-only inside it at .devteam-home (actions/checkout can only write under the workspace), and
+// home's kit run against the first. merge runs the same checks itself; this is defence in depth.
+// link is a link id and homeSpec an owner/name, both validated, so neither needs YAML quoting.
+const REPO_WORKFLOW_YML = (link, homeSpec) => `# devteam: an optional required check for a repo whose tickets live in ${homeSpec}'s fleet.
+name: devteam
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+permissions:
+  contents: read
+jobs:
+  check-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: \${{ github.event.pull_request.head.sha }}
+      - uses: actions/checkout@v4
+        with:
+          repository: ${homeSpec}
+          path: .devteam-home
+          fetch-depth: 0
+          # a private home needs a read-only token in this repo's secrets
+          token: \${{ secrets.DEVTEAM_HOME_TOKEN || github.token }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: git fetch --no-tags origin "+refs/heads/\${{ github.base_ref }}:refs/remotes/origin/\${{ github.base_ref }}"
+      - env:
+          DEVTEAM_HOME: \${{ github.workspace }}/.devteam-home
+          HEAD_REF: \${{ github.head_ref }}
+          HEAD_SHA: \${{ github.event.pull_request.head.sha }}
+          PR_TITLE: \${{ github.event.pull_request.title }}
+          PR_BODY: \${{ github.event.pull_request.body }}
+        run: |
+          printf '%s' "$PR_BODY" > "$RUNNER_TEMP/pr-body.md"
+          node .devteam-home/docs/devteam/scripts/devteam.mjs check-pr --repo ${link} --path "$GITHUB_WORKSPACE" --head-ref "$HEAD_REF" --sha "$HEAD_SHA" --title "$PR_TITLE" --body-file "$RUNNER_TEMP/pr-body.md"
+`;
+// init --github --repo <link>: that repo's check-pr workflow, written into its checkout.
+function initRepoWorkflow(id) {
+  const R = repo(id);
+  const homeSpec = ghSpec(git(['config', '--get', 'remote.origin.url'])) ?? die("init --github --repo: home's origin is not a GitHub repo the workflow can check out");
+  const wf = path.join(R.root, '.github', 'workflows', 'devteam.yml');
+  if (fs.existsSync(wf)) return out(`${wf} exists; nothing to create`);
+  fs.mkdirSync(path.dirname(wf), { recursive: true });
+  fs.writeFileSync(wf, REPO_WORKFLOW_YML(R.name, homeSpec));
+  out(`created:\n  ${wf}`);
+  // the workflow file is a tracked path like any other: once lines are declared it needs an owner
+  const s = committedComponents();
+  const owned = !linesDeclared(s) || ownersOf('.github/workflows/devteam.yml', componentsOn(s, R.name), R.devteamLine()).some((n) => n !== 'devteam');
+  out(`next: land it in ${R.name} as a chore ticket in its component${owned ? '' : `; first put .github/** inside one of ${R.name}'s component lines (settings components), or the new file is unowned and its PR is refused`}; if ${homeSpec} is private, add a read-only token for it to ${redactUrl(R.remote)}'s secrets as DEVTEAM_HOME_TOKEN; then make the devteam check required there`);
+}
 function cmdInit() {
+  if (flags.github && flagStr('repo')) return initRepoWorkflow(flagStr('repo'));
   const root = mainRoot;
   const made = [];
   const put = (p, text) => { if (!fs.existsSync(p)) { fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, text); made.push(path.relative(root, p)); } };
@@ -8347,7 +8402,7 @@ function cmdInit() {
 const HELP = `devteam <command>   (positionals before flags; flags take the words after them)
 
 Setup and roles
-  init [--name n] [--upstream-base vX] [--github]   project folders, settings, .gitignore, the devteam section of AGENTS.md
+  init [--name n] [--upstream-base vX] [--github [--repo <link>]]   project folders, settings, .gitignore, the devteam section of AGENTS.md; --github --repo writes the check-pr workflow into a component repo (its checkout and home's beside it)
   prompt supervisor | worker <id> | planner <feature>    the prompt a session starts with
   worker <ticket-id> [--resume] [--force] | planner <feature> [--goal <g-id>] [--resume] [--force] [--id-block <n>]   supervisor: a worktree, a tmux window and an agent for a ticket or a feature plan (a new planner names its goal and reserves n ticket numbers, default 20); refused while its goal is parked or let go, or draining for a session that hasn't run, unless --force (logged); --resume where no session exists starts fresh with the handoff note
   whoami | settings [--get key]

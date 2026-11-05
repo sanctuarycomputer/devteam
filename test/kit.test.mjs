@@ -4657,3 +4657,32 @@ test('the dashboard reads a sibling ticket\'s documents from its repo', async ()
     } finally { srv.kill(); }
   } finally { F.done(); }
 });
+
+test('init --github --repo writes a component repo\'s check-pr workflow: its checkout and home\'s, beside it', (t) => {
+  const F = multiFixture('init-repo');
+  try {
+    // home's origin written as GitHub's (the workflow checks it out by name); fetches stay local
+    F.g(['remote', 'set-url', 'origin', 'https://github.com/usbclub/home.git'], F.old);
+    F.g(['config', `url.${F.org}.insteadOf`, 'https://github.com/usbclub/home.git'], F.old);
+    const out = F.okIn(F.old, ['init', '--github', '--repo', 'console'], { DEVTEAM_ROLE: 'supervisor' });
+    const wf = path.join(F.console, '.github/workflows/devteam.yml');
+    assert.ok(fs.existsSync(wf), out);
+    assert.ok(!fs.existsSync(path.join(F.old, '.github/workflows/devteam.yml')), "home's own workflow is not this");
+    const y = fs.readFileSync(wf, 'utf8');
+    assert.doesNotMatch(y, /\{[^}\n]*\$\{\{/, 'no ${{ }} inside a flow mapping');
+    assert.match(y, /repository: usbclub\/home\n/);
+    assert.match(y, /path: \.devteam-home/);
+    assert.match(y, /token: \$\{\{ secrets\.DEVTEAM_HOME_TOKEN \|\| github\.token \}\}/);
+    assert.match(y, /DEVTEAM_HOME: \$\{\{ github\.workspace \}\}\/\.devteam-home/);
+    assert.match(y, /node \.devteam-home\/docs\/devteam\/scripts\/devteam\.mjs check-pr --repo console --path "\$GITHUB_WORKSPACE" --head-ref "\$HEAD_REF" --sha "\$HEAD_SHA"/);
+    assert.match(out, /DEVTEAM_HOME_TOKEN/, 'the setup checklist names the secret');
+    assert.match(F.okIn(F.old, ['init', '--github', '--repo', 'console'], { DEVTEAM_ROLE: 'supervisor' }), /exists; nothing to create/);
+    const ry = spawnSync('ruby', ['-ryaml', '-e', 'w = YAML.load_file(ARGV[0]); exit(w["jobs"]["check-pr"]["steps"].size >= 4 ? 0 : 2)', wf], { encoding: 'utf8' });
+    if (ry.error || /No version is set|command not found/.test(ry.stderr ?? '')) t.diagnostic('no runnable ruby: the workflow YAML was checked by pattern only');
+    else assert.equal(ry.status, 0, ry.stderr);
+    assert.match(F.runIn(F.old, ['init', '--github', '--repo', 'nope'], { DEVTEAM_ROLE: 'supervisor' }).err, /no repo link "nope"/);
+    // a home that GitHub can't name: refused, the workflow couldn't check it out
+    F.g(['remote', 'set-url', 'origin', F.org], F.old);
+    assert.match(F.runIn(F.old, ['init', '--github', '--repo', 'companion'], { DEVTEAM_ROLE: 'supervisor' }).err, /home's origin is not a GitHub repo/);
+  } finally { F.done(); }
+});
