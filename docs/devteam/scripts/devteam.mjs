@@ -407,20 +407,35 @@ function linkValue(field, vals) {
 const linkReachMemo = new Map();
 // The url probe: a child node does one HEAD request with a 10 s deadline and prints the status.
 const PROBE_JS = "fetch(process.argv[1],{method:'HEAD',redirect:'follow',signal:AbortSignal.timeout(10000)}).then((r)=>console.log(r.status)).catch(()=>console.log(0))";
-// Credentials in a URL or remote (O2): on http(s) any userinfo (a user:pass or a bare token), on any
-// other scheme a password (ssh://git@host/… names the ssh user, not a secret). settings.md, the
-// log and every prompt are shared and permanent, so a credential never goes in them.
+// Credentials in a URL or remote: on http(s) any userinfo (a user:pass or a bare token), on any
+// other scheme a password (ssh://git@host/… names the ssh user, not a secret); on any scheme a
+// query or fragment parameter named like a secret (?token=, #access_token=, an S3 presigned
+// X-Amz-Signature); and an scp-style user:password@host:path (git@host:path names the ssh user).
+// settings.md, the log and every prompt are shared and permanent, so a credential never goes in them.
+const CREDENTIAL_PARAM = /^(token|access_token|api_key|apikey|key|secret|client_secret|signature|sig|password|passwd|pw|auth|x-amz-.*)$/i;
+const SCP_PASSWORD = /^[^\s/:@]+:[^\s/]*@[^\s/:@]+:/;
+const paramNames = (part) => String(part ?? '').replace(/^[?#]/, '').split(/[&;]/).map((kv) => { try { return decodeURIComponent(kv.split('=')[0].replace(/\+/g, ' ')); } catch { return kv.split('=')[0]; } });
 function hasCredentials(u) {
-  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(String(u ?? ''))) return false;
+  const t = String(u ?? '');
+  if (SCP_PASSWORD.test(t)) return true;
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(t)) return false;
+  const q = t.search(/[?#]/);
+  if (q >= 0 && t.slice(q).split('#').some((part) => paramNames(part).some((n) => CREDENTIAL_PARAM.test(n)))) return true;
   let x;
-  try { x = new URL(u); } catch { return /^[a-z][a-z0-9+.-]*:\/\/[^/?#]*@/i.test(u); }
+  try { x = new URL(t); } catch { return /^[a-z][a-z0-9+.-]*:\/\/[^/?#]*@/i.test(t); }
   return /^https?:$/i.test(x.protocol) ? !!(x.username || x.password) : !!x.password;
 }
 const CREDENTIALS_REFUSED = 'credentials never go in settings or the log; use git\'s credential helper, or "check": false for a page behind auth';
 // A URL or remote as it may be echoed into a message, a log line or a prompt: credentials stripped.
 // Userinfo runs to the LAST @ before the host, as URL parsers and git split it, so a password
-// holding a raw @ goes too (round 2, N5); it never runs past the first / ? or #.
-const redactUrl = (text) => String(text ?? '').replace(/\b(https?:\/\/)[^/?#\s]*@/gi, '$1').replace(/\b([a-z][a-z0-9+.-]*:\/\/[^/?#\s:@]+):[^/?#\s]*@/gi, '$1@');
+// holding a raw @ goes too; it never runs past the first / ? or #. A secret-named query or
+// fragment parameter keeps its name and loses its value (token=REDACTED); an scp-style
+// user:password@host: keeps the user.
+const redactUrl = (text) => String(text ?? '')
+  .replace(/\b(https?:\/\/)[^/?#\s]*@/gi, '$1')
+  .replace(/\b([a-z][a-z0-9+.-]*:\/\/[^/?#\s:@]+):[^/?#\s]*@/gi, '$1@')
+  .replace(/(^|[\s'"(=])([^\s/:@'"(=]+):[^\s/'"]*@([^\s/:@'"]+:)/g, '$1$2@$3')
+  .replace(/([?#&;])([^=&#;\s]+)=([^&#;\s]*)/g, (m, sep, name, value) => (CREDENTIAL_PARAM.test(name) && value !== 'REDACTED' ? `${sep}${name}=REDACTED` : m));
 // A link entry as it may be shown (links, settings, a question's links): url and remote redacted.
 const redactLink = (l) => (isObj(l) ? { ...l, ...(typeof l.url === 'string' ? { url: redactUrl(l.url) } : {}), ...(typeof l.remote === 'string' ? { remote: redactUrl(l.remote) } : {}) } : l);
 // A local remote is a path, written so nobody mistakes it for owner/name: ./, ../ or absolute.

@@ -3710,6 +3710,50 @@ test('credentials never enter settings or the log: userinfo refused, and remotes
   } finally { F.done(); }
 });
 
+test('credentials in a query string, a fragment or an scp-style remote are refused, and redacted wherever one is echoed', () => {
+  const F = monoFixture('creds-params');
+  const { old, ok, run, edit, g } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const secret = /SECRET|hunter2|AKIAEXAMPLE|deadbeef/;
+  try {
+    const presigned = 'https://bucket.s3.amazonaws.com/k.pdf?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAEXAMPLE%2F20261104&X-Amz-Date=20261104T000000Z&X-Amz-Expires=3600&X-Amz-SignedHeaders=host&X-Amz-Signature=deadbeef';
+    for (const u of ['https://d.test/a?token=SECRET1', 'https://d.test/a?page=2&access_token=SECRET2', 'https://d.test/a#token=SECRET3', 'https://d.test/a?API_KEY=SECRET4', 'https://d.test/a?apikey=SECRET5', 'https://d.test/a?key=SECRET6', 'https://d.test/a?client_secret=SECRET7', 'https://d.test/a?sig=SECRET8', 'https://d.test/a?Signature=SECRET9', 'https://d.test/a?password=hunter2', 'https://d.test/a?passwd=hunter2', 'https://d.test/a?pw=hunter2', 'https://d.test/a?auth=SECRET0', 'https://d.test/a?secret=SECRET', presigned]) {
+      const r = run(old, ['link', 'add', 'doc', '--kind', 'url', '--url', u, '--title', 'D'], SUP);
+      assert.notEqual(r.status, 0, `${u} is refused`);
+      assert.match(r.err, /links\.doc: its url carries credentials; credentials never go in settings/, u);
+      assert.doesNotMatch(r.err, secret, `the refusal never echoes the secret: ${r.err}`);
+      const o = run(old, ['observe-link', '--url', u, '--title', 'D'], SUP);
+      assert.match(o.err, /--url carries credentials/, `observe-link: ${u}`);
+      assert.doesNotMatch(o.err, secret);
+      assert.match(run(old, ['ask', '--question', 'x?', '--links', JSON.stringify([{ title: 'y', url: u }])], SUP).err, /carries credentials/, `ask --links: ${u}`);
+    }
+    // a parameter that only starts like one of those names is not a credential
+    ok(old, ['link', 'add', 'doc', '--kind', 'url', '--url', 'https://d.test/a?keyword=x&key_id=7&tokens=3#section-2', '--title', 'D'], SUP);
+    g(['checkout', '-q', '--', 'docs/devteam/project/settings.md'], old);
+    // scp-style user:password@host:path is a credential; user@host:path is the ssh user
+    edit((j) => { j.links = { leak: { kind: 'repo', title: 'L', remote: 'bob:hunter2@github.com:me/leak.git' }, fine: { kind: 'repo', title: 'Fine', remote: 'git@github.com:me/fine.git' } }; });
+    g(['commit', '-qam', 'scp leak'], old); g(['push', '-q', 'origin', 'main'], old);
+    const v = run(old, ['validate']);
+    assert.match(v.out, /links\.leak: its remote carries credentials/);
+    assert.doesNotMatch(v.out, /links\.fine: .*credentials/);
+    assert.doesNotMatch(v.out + v.err, secret, 'validate never echoes the password');
+    edit((j) => { j.links = {}; });
+    g(['commit', '-qam', 'no links'], old); g(['push', '-q', 'origin', 'main'], old);
+    // echoed remotes: query parameters become name=REDACTED, an scp password goes
+    const origin0 = g(['config', '--get', 'remote.origin.url'], old);
+    try {
+      g(['config', 'remote.origin.url', 'https://github.com/me/home.git?token=SECRETQ&ref=main#sig=SECRETF'], old);
+      const l = ok(old, ['links']);
+      assert.match(l, /https:\/\/github\.com\/me\/home\.git\?token=REDACTED&ref=main#sig=REDACTED/);
+      assert.doesNotMatch(l, secret);
+      g(['config', 'remote.origin.url', 'bob:hunter2@github.com:me/home.git'], old);
+      const l2 = ok(old, ['links']);
+      assert.match(l2, /bob@github\.com:me\/home\.git/);
+      assert.doesNotMatch(l2, secret);
+    } finally { g(['config', 'remote.origin.url', origin0], old); }
+  } finally { F.done(); }
+});
+
 test('a credentialed url never reaches a question: orient redacts it in its proposal, ask --links refuses it (round 3 V4)', () => {
   const F = monoFixture('ask-creds');
   const { old, ok, run, g, edit } = F;
