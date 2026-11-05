@@ -52,7 +52,7 @@ docs/devteam/
 9. Start the supervisor. It is the owner's foreground session in the main checkout, never a background, headless or tmux-detached one. **If an agent session did this setup, that session becomes the supervisor:** it reads the prompt from `node docs/devteam/scripts/devteam.mjs prompt supervisor` and follows it in place; it does not launch a second agent. If the owner did the setup by hand, they start the agent in their terminal with `DEVTEAM_ROLE=supervisor` in its environment (`DEVTEAM_ROLE=supervisor claude "$(node docs/devteam/scripts/devteam.mjs prompt supervisor)"`), inside tmux if they want workers' messages typed into its pane as they happen. Agent CLIs such as Claude Code don't keep shell state between commands, so an `export` inside the session doesn't stick: a session already running prefixes each devteam command with `DEVTEAM_ROLE=supervisor`. Run the dashboard where it outlives the session (a tmux window, or another terminal): `node docs/devteam/scripts/devteam.mjs dashboard`, and open the address.
 10. The supervisor asks the owner for goals and the loop begins. To tell a session something from your own terminal as yourself, `node docs/devteam/scripts/devteam.mjs send <supervisor|ticket-id> "…" --owner`; answers to questions go through the inbox.
 
-Requirements: git, tmux (for the workers), Node 18+ (the project's own pinned Node is fine: asdf, nvm and the dashboard all run the script with it), the GitHub CLI, one agent CLI (Claude Code, Codex, OpenCode or similar) with superpowers installed.
+Requirements: git (2.38 or later once you draw component lines: coverage computes the tree a PR would land with `git merge-tree --write-tree`, and refuses to guess on an older git), tmux (for the workers), Node 18+ (the project's own pinned Node is fine: asdf, nvm and the dashboard all run the script with it), the GitHub CLI, one agent CLI (Claude Code, Codex, OpenCode or similar) with superpowers installed.
 
 ### Holding goals, and moving the fleet
 
@@ -107,7 +107,7 @@ Three shapes, from nothing to add upward.
 }
 ```
 
-`devteam.mjs components check` lists the gaps: unowned paths grouped by folder with a suggested owner, paths two lines claim, globs that match nothing, and paths that differ only by case. From then on `validate`, `check-pr` and `merge`, `observe-metrics` and `check-ticket` hold the lines, always by the settings committed on main. A ticket changes one component's line; a contract or integration ticket names the others it spans in `touches_components`.
+`devteam.mjs components check` lists the gaps, each with its fix: unowned paths grouped by folder with a suggested owner, paths two lines claim (with both globs), globs that match nothing, and paths that differ only by case. The kit's own files (`docs/devteam/**` and the project folder) are set aside before any line is asked, so `"docs": { "owns": ["docs/**"] }` owns the rest of `docs/` without contesting the kit. A glob that matches nothing (a typo, or a folder whose last file was deleted) is a `line-empty` warning, never a refusal. From then on `validate`, `check-pr` and `merge`, `observe-metrics` and `check-ticket` hold the lines, always by the settings committed on main. A ticket changes one component's line; a contract or integration ticket names the others it spans in `touches_components`.
 
 **Links to design files and docs.** `links` names what the fleet uses:
 
@@ -118,7 +118,7 @@ Three shapes, from nothing to add upward.
 }
 ```
 
-A link whose `for` matches a ticket (`all`, `component:<c>`, `feature:<f>`, `goal:<g>`), or that the ticket or its feature lists in its own `links`, is in that worker's prompt. Url links are the supervisor's: the loop proposes them when the owner or a worker mentions one (`observe-link`, then `orient`), and the supervisor applies them with `link add|set|rm`. `"check": false` keeps a page behind a login from being probed. `devteam.mjs links` prints the registry.
+A link whose `for` matches a ticket (`all`, `component:<c>`, `feature:<f>`, `goal:<g>`), or that the ticket or its feature lists in its own `links`, is in that worker's prompt. Url links are the supervisor's: the loop proposes them when the owner or a worker mentions one (`observe-link`, then `orient`), and the supervisor applies them with `link add|set|rm`, which logs a `registry-edit` act; `merge` refuses a url link edited by hand in `settings.md` with no such act. A URL or remote never carries credentials (`user:pass@` or a token): settings and the log refuse one. Each link is probed once a day (a `HEAD`, or `git ls-remote`), four at a time inside 20 s a tick; a page answering 401, 403 or 405 is noted as behind auth, not reported missing, and `"check": false` stops the probe. `devteam.mjs links` prints the registry.
 
 Sibling repos are `repo` links (`{ "kind": "repo", "title": "Console", "remote": "owner/console" }`, with an optional `path` and per-repo settings). They are accepted and validated now, and are the owner's like the settings they carry; they host components and tickets from the next release.
 
