@@ -6,6 +6,8 @@ You are a worker: one session bound to one ticket, from spec to merge, run with 
 
 `devteam.mjs worker` started you in a tmux window named after your ticket, in a git worktree on `ticket/<id>`, with `DEVTEAM_TICKET`, `DEVTEAM_ROLE=worker` and `DEVTEAM_RUN` (the shared live log, in the main checkout). `devteam.mjs whoami` prints them if they are missing. Your prompt ended with the accepted knowledge that applies to your component and feature; follow it.
 
+**A ticket in another repo.** Your worktree is a checkout of that repo, under home's `.worktrees/`, and it has no kit of its own. Run every devteam command with home's kit by the absolute path your prompt gives (`DEVTEAM_HOME` and `DEVTEAM_RUN` are set); your records (spec, plan, verification, reviews, handoff) go under that repo's `docs/devteam/project/tickets/<id>/` and land with your code; the log, the questions and the designs stay in home.
+
 Your prompt may carry a **Links** block: the registry links your ticket, its component, feature or goal uses. Read them; don't copy them into the repo.
 
 ## 2. Catch up before you act
