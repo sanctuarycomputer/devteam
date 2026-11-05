@@ -1865,6 +1865,7 @@ function graphEdit(type, idRe) {
     die(`not valid JSON: ${e.message}`);
   }
   if (sub === 'add' && logGet(id)) die(`${id} exists; use ${type} set`);
+  if (type === 'ticket' && body.superseded_by === id) die('a ticket is not superseded by itself');
   // a fix ticket carries out an incident-fix decision that names it
   if (type === 'ticket' && (body.kind === 'fix' || (sub === 'set' && logGet(id)?.kind !== 'fix' && body.kind === 'fix'))) {
     const d = flagStr('decision') ? decisionFor(flagStr('decision')) : null;
@@ -2763,6 +2764,7 @@ function cmdAsk() {
   // an incident-fix question is scoped by its incident's computed severity, and says when merging deploys
   let context = flagStr('context');
   if (cls === 'incident-fix' && !['trust', 'proposal'].includes(kind)) {
+    upkeepAllows('an incident fix');
     const incs = blocks.map((b) => logGet(b)).filter(isIncident);
     if (incs.length !== 1) die(`an incident-fix question names exactly one incident in --blocks <p-id>; it names ${incs.length}`);
     const inc = incs[0];
@@ -3858,6 +3860,8 @@ function cmdAct() {
   if (!cls || !what) die('usage: act --decision d-… -- "<what you did>"   |   act --class c [--scope s] [--approved qid|kid] [--refs ids] [--irreversible] -- "<what you did>"   (without --decision the act is its own decision)');
   supervisorOnly('act');
   if (cls === 'improvement-trial') upkeepAllows('a new trial');
+  // an incident fix is decided first (one incident, its computed scope, an answer about it)
+  if (cls === 'incident-fix' && !decision) die('an incident-fix act carries out a decision: decide --class incident-fix --refs <p-id> <ticket-id> …, then act --decision <d-id>');
   const scope = decision ? decision.scope ?? null : flagStr('scope') ?? null;
   const approved = decision ? decision.approved_by ?? null : flagStr('approved') ?? null;
   const refs = flags.refs !== undefined ? asList(flags.refs) : decision?.refs ?? [];
@@ -5432,7 +5436,7 @@ function collectOoda() {
     observations: recent(logObjects('observation').filter((o) => !['reading', 'retro', 'finding-ack'].includes(o.kind)), 40),
     clusters: orientClusters(),
     knowledge: recent(logObjects('knowledge').filter((k) => k.status !== 'retired'), 60),
-    problems: logObjects('problem').filter((p) => p.status !== 'resolved').sort((a, b) => b.severity - a.severity),
+    problems: logObjects('problem').filter((p) => p.status !== 'resolved').map((p) => (isIncident(p) ? { ...p, severity: incidentSeverity(p) } : p)).sort((a, b) => b.severity - a.severity),
     acts: recent(acts, 60),
     decisions: decisionRecords().slice(0, 200),
     trust: trustTable(),
@@ -6953,7 +6957,7 @@ async function pollProbe(m, st) {
   st.last_at = at;
   st.last = { ok: res.ok, error: res.error ?? null, ms: res.ms ?? null, events: res.events.length, invalid: res.invalid.length };
   if (res.costly) st.costly = { at, why: res.costly };
-  if (res.probe_sha) st.probe_sha = res.probe_sha;
+  try { st.probe_sha = crypto.createHash('sha1').update(probeSource(m).text).digest('hex').slice(0, 12); } catch {}
   // a stream's spooled events are real whatever the collector is doing now
   const alerts = res.ok || m.kind === 'stream' ? ingestEvents(m, res.events, st, at) : [];
   day.invalid += res.invalid.length;
@@ -7262,7 +7266,7 @@ async function runProbe(m, { since = null, working = false, credentials = true }
   if (r.over) return fail('printed over 2 MB in one run: it reads too much at once (a narrower window, or a page at a time)', { costly: 'over 2 MB', from: src.from });
   if (r.status !== 0) return fail(`exited ${r.status ?? 'abnormally'}${tail ? `: ${tail}` : ''}`, { from: src.from });
   const o = probeOutput(r.out, redact);
-  return { ok: true, error: null, ...o, ms: ms(), costly: o.truncated ? `over ${PROBE_MAX_EVENTS} events` : null, from: src.from, same: src.same, probe_sha: crypto.createHash('sha1').update(src.text).digest('hex').slice(0, 12) };
+  return { ok: true, error: null, ...o, ms: ms(), costly: o.truncated ? `over ${PROBE_MAX_EVENTS} events` : null, from: src.from, same: src.same };
 }
 
 // monitor stream <name>: run a stream probe while the supervisor runs. Its lines are spooled,
@@ -7593,10 +7597,10 @@ const TRIAGE_KINDS = ['exception', 'log-error', 'platform-error', 'spike'];
 // what each fingerprint raised, indexed once per process (and again after a poll appends)
 let FP_OBS = null;
 const fpObservations = (id) => {
-  if (!FP_OBS) {
+  if (!FP_OBS || FP_OBS.log !== readLog()) {
     const m = new Map();
     for (const o of logObjects('observation')) if (o.detector === 'monitor' && TRIAGE_KINDS.includes(o.kind)) { const k = fpIdOfObservation(o); if (k) (m.get(k) ?? m.set(k, []).get(k)).push(o); }
-    FP_OBS = { map: m };
+    FP_OBS = { log: readLog(), map: m };
   }
   return FP_OBS.map.get(id) ?? [];
 };
@@ -7668,12 +7672,12 @@ function triageItems({ all = false } = {}) {
     const inc = openIncidentOf(id);
     const frames = f.frames ?? [];
     return {
-      fingerprint: id, monitor: f.monitor, kind: f.kind ?? null, level: f.level ?? null, class: f.class ?? null, code: f.code ?? null, template: f.template ?? null,
+      fingerprint: id, monitor: f.monitor, kind: f.kind ?? null, level: f.level ?? null, class: f.class ?? null, code: f.code ?? null,
       total: f.total ?? null, users: f.users ?? null, last_24h: hours.reduce((s, h) => s + (c[h] ?? 0), 0), spark: hours.map((h) => c[h] ?? 0),
       first_seen: f.first_seen ?? null, last_seen: f.last_seen ?? null, release: f.release ?? null, url: f.url ?? null, frames, component: componentFor(frames.find((x) => x.in_repo)?.file),
       severity: Math.max(...obs.map((o) => o.severity ?? 0)), observations: obs.map((o) => ({ id: o.id, kind: o.kind, severity: o.severity })),
       incident: inc ? { id: inc.id, stage: incidentView(inc).stage } : null,
-      untrusted: { title: f.title ?? null, sample: f.kind === 'log' ? jsonOr(path.join(monitorDir(f.monitor), 'events', fpFile(f.key)), null)?.event?.sample ?? null : null },
+      untrusted: { title: f.title ?? null, template: f.kind === 'log' ? f.template ?? null : null, sample: f.kind === 'log' ? jsonOr(path.join(monitorDir(f.monitor), 'events', fpFile(f.key)), null)?.event?.sample ?? null : null },
     };
   }).sort((a, b) => b.severity - a.severity || String(b.last_seen).localeCompare(String(a.last_seen)));
 }
@@ -7700,7 +7704,7 @@ function cmdMonitorTriage() {
     out(`  ${x.component ? `component ${x.component}; ` : ''}${x.incident ? `incident ${x.incident.id} (${x.incident.stage})` : 'no incident'}; observed ${x.observations.map((o) => `${o.id} ${o.kind}`).join(', ')}`);
   }
   if (budget.over) out(`over today's incident budget (${budget.used} of ${budget.per_day} fix tickets): fold the rest into incidents and ask one incident-fix question for them`);
-  const text = items.filter((x) => x.untrusted.title || x.untrusted.sample || x.template).map((x) => `${x.fingerprint}: ${[x.kind === 'log' ? x.template : null, x.untrusted.title, x.untrusted.sample].filter(Boolean).join(' | ')}`);
+  const text = items.filter((x) => x.untrusted.title || x.untrusted.sample || x.untrusted.template).map((x) => `${x.fingerprint}: ${[x.untrusted.template, x.untrusted.title, x.untrusted.sample].filter(Boolean).join(' | ')}`);
   if (text.length) out(untrusted('the messages, redacted and scrubbed', text.join('\n')));
   out('then, for each: monitor ignore <fingerprint> --reason "…", monitor incident <fingerprints…> --title "…", or decide a fix (supervisor.md, Monitoring)');
 }
