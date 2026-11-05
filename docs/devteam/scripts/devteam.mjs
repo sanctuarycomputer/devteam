@@ -143,9 +143,10 @@ function sh(cmd, args, opts = {}) {
 // another project's window named like one of our tickets never counts.
 function ourWindows(session) {
   const roots = [...new Set([mainRoot, fs.realpathSync(mainRoot)])].map((r) => `${path.join(r, '.worktrees')}${path.sep}`);
-  return (sh('tmux', ['list-windows', '-t', `=${session}`, '-F', '#W\t#{pane_start_path}']) ?? '').split('\n').filter(Boolean)
-    .map((l) => { const i = l.indexOf('\t'); return { name: l.slice(0, i), start: `${l.slice(i + 1)}${path.sep}` }; })
-    .filter((w) => roots.some((r) => w.start.startsWith(r)));
+  // Every pane, not only the active one: a worker window the owner split keeps counting.
+  const panes = (sh('tmux', ['list-panes', '-s', '-t', `=${session}`, '-F', '#W\t#{pane_start_path}']) ?? '').split('\n').filter(Boolean)
+    .map((l) => { const i = l.indexOf('\t'); return { name: l.slice(0, i), start: `${l.slice(i + 1)}${path.sep}` }; });
+  return [...new Set(panes.filter((w) => roots.some((r) => w.start.startsWith(r))).map((w) => w.name))].map((name) => ({ name }));
 }
 let tmuxSessionName = null;
 function tmuxSession({ save = false } = {}) {
