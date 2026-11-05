@@ -132,6 +132,25 @@ function sh(cmd, args, opts = {}) {
     return null;
   }
 }
+// The tmux session that holds this project's workers and planners: settings.tmux_session when set;
+// else the name saved in run/tmux-session; else devteam-<project>, so two projects on one machine
+// never share a session. A project whose live sessions already sit in a `devteam` session (the
+// default before) keeps it. Resolving writes nothing: the name is saved when the kit creates the
+// session (save), so a read-only command, or CI, never writes into run/.
+function tmuxSession({ save = false } = {}) {
+  const s = loadSettings();
+  if (s.tmux_session) return s.tmux_session;
+  const file = path.join(runDir, 'tmux-session');
+  const saved = readText(file)?.trim();
+  if (saved) return saved;
+  const legacy = new Set((sh('tmux', ['list-windows', '-t', '=devteam', '-F', '#W']) ?? '').split('\n').filter(Boolean));
+  const name = legacy.size && liveSessions().some((x) => legacy.has(x.name)) ? 'devteam' : `devteam-${slug(s.project ?? path.basename(mainRoot))}`;
+  if (save) { fs.mkdirSync(runDir, { recursive: true }); fs.writeFileSync(file, `${name}\n`); }
+  return name;
+}
+// A window of this project's session, matched exactly: tmux would otherwise take a prefix, so
+// `devteam` would find `devteam-stacks`.
+const tmuxTarget = (window) => `=${tmuxSession()}:${window}`;
 
 const readJson = (p) => JSON.parse(fs.readFileSync(p, 'utf8'));
 const readText = (p) => (fs.existsSync(p) && fs.statSync(p).isFile() ? fs.readFileSync(p, 'utf8') : null);
@@ -171,7 +190,7 @@ const CHORES = 'chores';
 // Every setting has a default here; project/settings.md holds only what the project changes.
 const SETTINGS_DEFAULTS = {
   project: null,
-  tmux_session: 'devteam',
+  tmux_session: null,
   agent_command: 'claude --dangerously-skip-permissions',
   resume_command: 'claude --continue --dangerously-skip-permissions',
   main_branch: 'main',
@@ -1266,7 +1285,7 @@ const idleWithShell = (window) => { const l = paneTails.get(window) ?? []; retur
 function paneWaitingIn(window) {
   if (paneWaits.has(window)) return paneWaits.get(window);
   let found = null;
-  const { target, problem } = resolvePane(`${loadSettings().tmux_session}:${window}`);
+  const { target, problem } = resolvePane(tmuxTarget(window));
   paneGone.set(window, problem && /no agent is running|has exited/.test(problem) ? problem : null);
   const lines = target ? (sh('tmux', ['capture-pane', '-p', '-t', target]) ?? '').split('\n').map((l) => l.trim()).filter(Boolean).slice(-15) : [];
   // a busy agent is working, not stopped at a limit; what it shows (code, diffs) is never its banner
@@ -1277,7 +1296,7 @@ function paneWaitingIn(window) {
     if (hit) { found = { kind, line: hit.slice(0, 200) }; break; }
   }
   // Only the supervisor acts on a pane (its own tick); the dashboard, status and the owner only look.
-  if (target && !found && process.env.DEVTEAM_ROLE === 'supervisor') resendLostEnter(`${loadSettings().tmux_session}:${window}`, target, lines);
+  if (target && !found && process.env.DEVTEAM_ROLE === 'supervisor') resendLostEnter(tmuxTarget(window), target, lines);
   paneWaits.set(window, found);
   paneTails.set(window, lines);
   return found;
@@ -1340,7 +1359,7 @@ function plannersNow() {
       try { stamps.push(fs.statSync(p).mtime.toISOString()); } catch {}
     }
     const last = stamps.filter(Boolean).map((x) => new Date(x).toISOString()).sort().pop() ?? null;
-    const { target, problem } = resolvePane(`${s.tmux_session}:${by}`);
+    const { target, problem } = resolvePane(tmuxTarget(by));
     const msgs = lines.filter((l) => l.type === 'message');
     const replied = new Set(msgs.map((m) => m.re).filter(Boolean));
     const asking = msgs.filter((m) => m.by === by && !['info', 'ruling', 'answer'].includes(m.kind) && !replied.has(m.id));
@@ -1667,7 +1686,7 @@ function sendParkRulings({ goal = null, again = false } = {}) {
 }
 // The restart command for each parked session a release lets run again.
 function restartCommands(filter = () => true) {
-  const windows = new Set((sh('tmux', ['list-windows', '-t', loadSettings().tmux_session, '-F', '#W']) ?? '').split('\n').filter(Boolean));
+  const windows = new Set((sh('tmux', ['list-windows', '-t', `=${tmuxSession()}`, '-F', '#W']) ?? '').split('\n').filter(Boolean));
   return liveSessions().filter((s) => lastPhaseOf(s.name)?.to === 'parked' && ['run', 'drain'].includes(sessionMode(s.name)) && filter(s)).map((s) => ({ name: s.name, cmd: `${s.role} ${s.id}${windows.has(s.name) && fs.existsSync(s.wt) ? ' --resume' : ''}`, handoff: !!handoffFor(s.name) }));
 }
 // Write one goal's hold, creating Upkeep's line the first time it is held.
@@ -5042,13 +5061,13 @@ function collectMetrics(since) {
   // The tmux session's window names, once (null when tmux or the session isn't there: unknown).
   let windowNames;
   const windowGone = (name) => {
-    if (windowNames === undefined) { const l = sh('tmux', ['list-windows', '-t', settings.tmux_session, '-F', '#W']); windowNames = l === null ? null : new Set(l.split('\n').filter(Boolean)); }
+    if (windowNames === undefined) { const l = sh('tmux', ['list-windows', '-t', `=${tmuxSession()}`, '-F', '#W']); windowNames = l === null ? null : new Set(l.split('\n').filter(Boolean)); }
     return windowNames !== null && !windowNames.has(name);
   };
   for (const id of ts.keys()) {
     const w = workerState(id);
     const wait = paneWaiting(id);
-    if (wait) add('high', 'blocked-prompt', id, wait.kind === 'limit' ? `a usage-limit banner in its pane: "${wait.line}"` : `waiting on a prompt in its pane: "${wait.line}"`, `look (tmux select-window -t ${settings.tmux_session}:${id}) and clear it (supervisor.md §11); a permission prompt a worker should never see means agent_command or its deny rules need a fix`);
+    if (wait) add('high', 'blocked-prompt', id, wait.kind === 'limit' ? `a usage-limit banner in its pane: "${wait.line}"` : `waiting on a prompt in its pane: "${wait.line}"`, `look (tmux select-window -t ${tmuxTarget(id)}) and clear it (supervisor.md §11); a permission prompt a worker should never see means agent_command or its deny rules need a fix`);
     // waiting is not stale: an open owner question that blocks the ticket, or the worker's own
     // request to the supervisor still unanswered (the unanswered-message finding covers that)
     const waitingOnOwner = openQs.some((q) => (q.blocks ?? []).includes(id) || q.ticket === id);
@@ -5061,7 +5080,7 @@ function collectMetrics(since) {
     const who = `plan-${p.feature}`;
     // a planner parked by a drain stopped on purpose: not gone, exited or stale
     if (p.parked) continue;
-    if (p.waiting) add('high', 'blocked-prompt', who, p.waiting.kind === 'limit' ? `a usage-limit banner in its pane: "${p.waiting.line}"` : `waiting on a prompt in its pane: "${p.waiting.line}"`, `look (tmux select-window -t ${settings.tmux_session}:${who}) and clear it (supervisor.md §11)`);
+    if (p.waiting) add('high', 'blocked-prompt', who, p.waiting.kind === 'limit' ? `a usage-limit banner in its pane: "${p.waiting.line}"` : `waiting on a prompt in its pane: "${p.waiting.line}"`, `look (tmux select-window -t ${tmuxTarget(who)}) and clear it (supervisor.md §11)`);
     else if (/no agent is running|has exited/.test(p.problem ?? '')) add('high', 'agent-exited', who, p.problem.replace(/; resume it first$/, ''), `resume it: planner ${p.feature} --resume (supervisor.md §11)`);
     else if (!p.window) add('medium', 'planner-gone', who, `plan/${p.feature} isn't on main and its window is gone (${p.problem})`, `resume it (planner ${p.feature} --resume) or, if the plan was dropped, delete the branch`);
     else if (!p.waiting_on_supervisor.length && !p.waiting_on_owner.length && p.minutes_silent > settings.stale_after_minutes) add('high', 'stale-planner', who, `no sign of life for ${p.minutes_silent} min`, 'check its pane; message it or resume it (supervisor.md §11)');
@@ -5617,7 +5636,7 @@ function cmdSend() {
 // Log one message and type it into the recipient's pane. The log is the record; the pane is
 // delivery. A recipient whose pane is gone catches up with `messages`.
 function sendLine({ to, kind, text, re = null, sha = null, from, ticket = null }) {
-  const target = to === 'supervisor' ? supervisorTarget() : `${loadSettings().tmux_session}:${to}`;
+  const target = to === 'supervisor' ? supervisorTarget() : tmuxTarget(to);
   const { target: exact, problem } = resolvePane(target);
   const line = appendLog({ type: 'message', to, kind, text, re, sha, ticket: ticket ?? (tickets().has(to) ? to : null) }, from);
   if (problem || !typeInto(exact, `[devteam ${kind} ${line.id} from ${from}${re ? ` re ${re}` : ''}${sha ? ` @ ${sha}` : ''}] ${text}`)) warn(`${line.id} recorded but not delivered to "${to}": ${problem ?? `could not type into ${exact}`}; it shows in their \`messages\``);
@@ -5843,11 +5862,13 @@ function makeSession(role) {
   fs.writeFileSync(promptFile, `${text}${handoff ? `\n\n${handoff}` : ''}${knowledge ? `\n\n${knowledge}` : ''}\n`);
   // Workers live in detached tmux windows the owner can attach to; the supervisor is not one of them.
   let fresh = false;
-  if (!tmux(['has-session', '-t', s.tmux_session])) { fresh = tmux(['new-session', '-d', '-s', s.tmux_session, '-n', name, '-c', wt]); if (!fresh) die('could not start tmux'); }
-  const windows = (sh('tmux', ['list-windows', '-t', s.tmux_session, '-F', '#W']) ?? '').split('\n');
-  if (!fresh && windows.includes(name)) { if (!flags.resume) die(`window ${s.tmux_session}:${name} exists (use --resume to relaunch in it)`); }
-  else if (!fresh) tmux(['new-window', '-d', '-t', s.tmux_session, '-n', name, '-c', wt]);
-  const target = `${s.tmux_session}:${name}`;
+  const session = tmuxSession({ save: true });
+  if (!tmux(['has-session', '-t', `=${session}`])) { fresh = tmux(['new-session', '-d', '-s', session, '-n', name, '-c', wt]); if (!fresh) die('could not start tmux'); }
+  const windows = (sh('tmux', ['list-windows', '-t', `=${session}`, '-F', '#W']) ?? '').split('\n');
+  if (!fresh && windows.includes(name)) { if (!flags.resume) die(`window ${session}:${name} exists (use --resume to relaunch in it)`); }
+  else if (!fresh) tmux(['new-window', '-d', '-t', `=${session}`, '-n', name, '-c', wt]);
+  const target = `=${session}:${name}`;
+  const shown = `${session}:${name}`;
   const env = `export DEVTEAM_RUN='${runDir}' DEVTEAM_ROLE='${role}' ${role === 'worker' ? `DEVTEAM_TICKET='${id}'` : `DEVTEAM_FEATURE='${id}'`}`;
   typeInto(target, env);
   // Worker and planner policy travels with the launch, not the repo's agent config (which may be
@@ -5863,13 +5884,13 @@ function makeSession(role) {
   // every window that session's markers; a worker that inherits them runs as its child (Claude Code
   // then saves no transcript, so its spend goes unmeasured). Strip them for the agent, whatever the
   // window's shell is. Only per-session markers: settings an owner may export (CLAUDE_CONFIG_DIR) stay.
-  const markers = [...new Set([...Object.keys(process.env), ...(sh('tmux', ['show-environment', '-g']) ?? '').split('\n'), ...(sh('tmux', ['show-environment', '-t', s.tmux_session]) ?? '').split('\n')].map((l) => l.replace(/^-/, '').split('=')[0]).filter((k) => SESSION_MARKERS.test(k)))].sort();
+  const markers = [...new Set([...Object.keys(process.env), ...(sh('tmux', ['show-environment', '-g']) ?? '').split('\n'), ...(sh('tmux', ['show-environment', '-t', `=${tmuxSession()}`]) ?? '').split('\n')].map((l) => l.replace(/^-/, '').split('=')[0]).filter((k) => SESSION_MARKERS.test(k)))].sort();
   typeInto(target, `${markers.length ? `env ${markers.map((k) => `-u ${k}`).join(' ')} ` : ''}${cmd} "$(cat '${promptFile}')"`);
-  if (role === 'worker' && !resume) appendLog({ type: 'phase', from: null, to: 'starting', note: `started in ${target}` }, id);
+  if (role === 'worker' && !resume) appendLog({ type: 'phase', from: null, to: 'starting', note: `started in ${shown}` }, id);
   // a planner parked by a park is running again
-  if (role === 'planner' && lastPhaseOf(name)?.to === 'parked') appendLog({ type: 'phase', from: 'parked', to: 'starting', note: `started in ${target}` }, name);
-  appendLog({ type: 'act', decision: citing(), class: 'worker-slots', what: `${resume ? 'resumed' : 'made'} ${role} ${name} in ${target}${block ? `, ticket numbers ${padNN(block.from)}-${padNN(block.to)}` : ''}${refused ? ` while its goal is ${holdWords(mode)}, with --force` : ''}`, refs: role === 'worker' ? [id] : goalIds, reversible: true, id_block: block ?? undefined }, 'supervisor');
-  out(`${resume ? 'resumed' : 'made'} ${role} ${name} in ${target} at ${wt}${block ? `; ticket numbers ${padNN(block.from)}-${padNN(block.to)} reserved` : ''}`);
+  if (role === 'planner' && lastPhaseOf(name)?.to === 'parked') appendLog({ type: 'phase', from: 'parked', to: 'starting', note: `started in ${shown}` }, name);
+  appendLog({ type: 'act', decision: citing(), class: 'worker-slots', what: `${resume ? 'resumed' : 'made'} ${role} ${name} in ${shown}${block ? `, ticket numbers ${padNN(block.from)}-${padNN(block.to)}` : ''}${refused ? ` while its goal is ${holdWords(mode)}, with --force` : ''}`, refs: role === 'worker' ? [id] : goalIds, reversible: true, id_block: block ?? undefined }, 'supervisor');
+  out(`${resume ? 'resumed' : 'made'} ${role} ${name} in ${shown} at ${wt}${block ? `; ticket numbers ${padNN(block.from)}-${padNN(block.to)} reserved` : ''}`);
 }
 
 // --- moving the fleet: fleet park | drain, fleet status, fleet unpark | undrain (supervisor.md §12) ---
@@ -6017,7 +6038,7 @@ const supervisorHandoffOnMain = () => {
 };
 // What run/ holds that the kit made and rebuilds (or that is this machine's alone by nature); anything
 // else in it was put there by hand and doesn't move.
-const RUN_KNOWN = new Set(['log', 'prompts', 'questions', 'sent', 'cache', 'agent', 'pr', 'supervisor-pane', 'wait-since', 'dashboard.log', 'supervisor-prompt.txt', '.DS_Store']);
+const RUN_KNOWN = new Set(['log', 'prompts', 'questions', 'sent', 'cache', 'agent', 'pr', 'supervisor-pane', 'wait-since', 'tmux-session', 'dashboard-port', 'dashboard.log', 'supervisor-prompt.txt', '.DS_Store']);
 // An agent harness's own memory for this project, outside the repo (Claude Code keeps it per
 // checkout folder). It doesn't move; what the next session needs goes into knowledge or a handoff.
 function harnessMemoryFiles() {
@@ -6285,7 +6306,7 @@ function moveChecklist(s, memory = []) {
     `start the supervisor in the repo: open ${agent} there and say "Assume the role of the devteam supervisor and resume the fleet" (or step 9's command: DEVTEAM_ROLE=supervisor ${agent} "$(node docs/devteam/scripts/devteam.mjs prompt supervisor)"); tmux need only be installed: the workers get a tmux session of their own`,
     'the supervisor runs fleet unpark, or fleet undrain for a drained fleet (it rebuilds run/log from the landed log, prints the parity fingerprint, puts every goal back as it was) and restarts each parked session with the command it prints',
     'in the browser you use there: turn on "Notify me of new Inbox items" again (a browser setting)',
-    `restart the dashboard where it outlives the session: tmux new-window -d -t ${s.tmux_session} -n dashboard 'node docs/devteam/scripts/devteam.mjs dashboard' (or another terminal), then open http://127.0.0.1:${s.dashboard_port}`,
+    `restart the dashboard where it outlives the session: tmux new-window -d -t ${tmuxSession()} -n dashboard 'node docs/devteam/scripts/devteam.mjs dashboard' (or another terminal), then open http://127.0.0.1:${s.dashboard_port}`,
   ];
 }
 
@@ -6408,12 +6429,13 @@ function cmdWait() {
 function cmdWhoami() {
   const id = currentTicketId();
   const s = loadSettings();
-  out([`DEVTEAM_TICKET=${id ?? ''}`, `DEVTEAM_FEATURE=${process.env.DEVTEAM_FEATURE ?? ''}`, `DEVTEAM_ROLE=${process.env.DEVTEAM_ROLE ?? (id ? 'worker' : logWriter().startsWith('plan-') ? 'planner' : 'supervisor')}`, `DEVTEAM_RUN=${runDir}`, `DEVTEAM_SUPERVISOR=${supervisorTarget() ?? ''}`, `# writer=${logWriter()} repo=${repoRoot} main_checkout=${mainRoot} project=${projectDir} tmux_session=${s.tmux_session}`].join('\n'));
+  out([`DEVTEAM_TICKET=${id ?? ''}`, `DEVTEAM_FEATURE=${process.env.DEVTEAM_FEATURE ?? ''}`, `DEVTEAM_ROLE=${process.env.DEVTEAM_ROLE ?? (id ? 'worker' : logWriter().startsWith('plan-') ? 'planner' : 'supervisor')}`, `DEVTEAM_RUN=${runDir}`, `DEVTEAM_SUPERVISOR=${supervisorTarget() ?? ''}`, `# writer=${logWriter()} repo=${repoRoot} main_checkout=${mainRoot} project=${projectDir} tmux_session=${tmuxSession()}`].join('\n'));
 }
 function cmdSettings() {
   const s = loadSettings();
   const key = flagStr('get');
   if (!key) return json(s);
+  if (key === 'tmux_session') return out(tmuxSession());
   const v = s[key];
   out(v === null || v === undefined ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v));
 }

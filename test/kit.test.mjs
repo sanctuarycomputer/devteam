@@ -350,33 +350,33 @@ test('devteam kit', async (t) => {
     const staleF = () => json(must(['metrics', '--json'])).findings.find((f) => f.kind === 'stale-worker' && f.subject === 'bill-01-card');
     assert.doesNotMatch(staleF().detail, /window is gone/, 'no tmux session: nothing claimed about the window');
     if (hasTmux) {
-      spawnSync('tmux', ['new-session', '-d', '-s', 'devteam', '-n', 'someone-else', 'sleep 600']);
+      spawnSync('tmux', ['new-session', '-d', '-s', 'devteam-demo', '-n', 'someone-else', 'sleep 600']);
       try {
         assert.match(staleF().detail, /its tmux window is gone/);
         assert.match(staleF().suggestion, /worker bill-01-card --resume/);
-      } finally { spawnSync('tmux', ['kill-session', '-t', 'devteam']); }
+      } finally { spawnSync('tmux', ['kill-session', '-t', '=devteam-demo']); }
     }
     // idle at its prompt with its own background shell still running: say so, and suggest the nudge
     if (hasTmux) {
-      spawnSync('tmux', ['new-session', '-d', '-s', 'devteam', '-n', 'bill-01-card', 'sh -c \'printf "done 11:07 AM\\n> \\n  bypass permissions on \\302\\267 1 shell \\302\\267 to manage\\n"; exec sleep 600\'']);
+      spawnSync('tmux', ['new-session', '-d', '-s', 'devteam-demo', '-n', 'bill-01-card', 'sh -c \'printf "done 11:07 AM\\n> \\n  bypass permissions on \\302\\267 1 shell \\302\\267 to manage\\n"; exec sleep 600\'']);
       try {
-        for (let i = 0; i < 20 && !/1 shell/.test(spawnSync('tmux', ['capture-pane', '-p', '-t', 'devteam:bill-01-card'], { encoding: 'utf8' }).stdout ?? ''); i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+        for (let i = 0; i < 20 && !/1 shell/.test(spawnSync('tmux', ['capture-pane', '-p', '-t', '=devteam-demo:bill-01-card'], { encoding: 'utf8' }).stdout ?? ''); i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
         assert.match(staleF().detail, /idle at its prompt with a background shell still running/);
         assert.match(staleF().suggestion, /send bill-01-card "check your background shell's result/);
-      } finally { spawnSync('tmux', ['kill-session', '-t', 'devteam']); }
+      } finally { spawnSync('tmux', ['kill-session', '-t', '=devteam-demo']); }
     }
     // stopped on an API or network error: say so, and suggest the nudge
     if (hasTmux) {
-      spawnSync('tmux', ['new-session', '-d', '-s', 'devteam', '-n', 'bill-01-card', 'sh -c \'printf "API Error: Cannot reach the API server - check your internet or DNS (ENOTFOUND)\\ndone 9:19 PM\\n> \\n"; exec sleep 600\'']);
+      spawnSync('tmux', ['new-session', '-d', '-s', 'devteam-demo', '-n', 'bill-01-card', 'sh -c \'printf "API Error: Cannot reach the API server - check your internet or DNS (ENOTFOUND)\\ndone 9:19 PM\\n> \\n"; exec sleep 600\'']);
       try {
-        for (let i = 0; i < 20 && !/ENOTFOUND/.test(spawnSync('tmux', ['capture-pane', '-p', '-t', 'devteam:bill-01-card'], { encoding: 'utf8' }).stdout ?? ''); i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+        for (let i = 0; i < 20 && !/ENOTFOUND/.test(spawnSync('tmux', ['capture-pane', '-p', '-t', '=devteam-demo:bill-01-card'], { encoding: 'utf8' }).stdout ?? ''); i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
         assert.match(staleF().detail, /stopped on an API or network error/);
         assert.match(staleF().suggestion, /send bill-01-card "the network dropped/);
-      } finally { spawnSync('tmux', ['kill-session', '-t', 'devteam']); }
+      } finally { spawnSync('tmux', ['kill-session', '-t', '=devteam-demo']); }
     }
     // the agent quit and left its window at a shell prompt: agent-exited, with the resume, not stale
     if (hasTmux) {
-      spawnSync('tmux', ['new-session', '-d', '-s', 'devteam', '-n', 'bill-01-card', 'sh']);
+      spawnSync('tmux', ['new-session', '-d', '-s', 'devteam-demo', '-n', 'bill-01-card', 'sh']);
       try {
         const fs_ = json(must(['metrics', '--json'])).findings;
         const ex = fs_.find((f) => f.kind === 'agent-exited' && f.subject === 'bill-01-card');
@@ -384,7 +384,7 @@ test('devteam kit', async (t) => {
         assert.match(ex.detail, /no agent is running .*at a \w+ prompt/);
         assert.match(ex.suggestion, /worker bill-01-card --resume/);
         assert.ok(!fs_.some((f) => f.kind === 'stale-worker' && f.subject === 'bill-01-card'), 'one finding, not two');
-      } finally { spawnSync('tmux', ['kill-session', '-t', 'devteam']); }
+      } finally { spawnSync('tmux', ['kill-session', '-t', '=devteam-demo']); }
     }
     const Qb = must(['ask', '--question', 'Store card fingerprints?', '--blocks', 'bill-01-card', '--recommendation', 'no'], { role: 'sup' });
     assert.ok(!staleW(), 'a question blocking it means it waits on the owner');
@@ -392,8 +392,8 @@ test('devteam kit', async (t) => {
     fs.writeFileSync(sfile, sbefore);
     // a worker frozen on a permission prompt looks busy in the log; its pane says otherwise
     if (hasTmux) {
-      spawnSync('tmux', ['new-session', '-d', '-s', 'devteam', '-n', 'bill-01-card', 'sh -c \'printf "Bash command\\n  rm -rf build\\nDo you want to proceed?\\n> 1. Yes\\n  2. No\\n"; exec sleep 600\'']);
-      for (let i = 0; i < 20 && !/proceed/.test(spawnSync('tmux', ['capture-pane', '-p', '-t', 'devteam:bill-01-card'], { encoding: 'utf8' }).stdout ?? ''); i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+      spawnSync('tmux', ['new-session', '-d', '-s', 'devteam-demo', '-n', 'bill-01-card', 'sh -c \'printf "Bash command\\n  rm -rf build\\nDo you want to proceed?\\n> 1. Yes\\n  2. No\\n"; exec sleep 600\'']);
+      for (let i = 0; i < 20 && !/proceed/.test(spawnSync('tmux', ['capture-pane', '-p', '-t', '=devteam-demo:bill-01-card'], { encoding: 'utf8' }).stdout ?? ''); i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
       const f = json(must(['metrics', '--json'])).findings.find((x) => x.kind === 'blocked-prompt');
       assert.equal(f?.subject, 'bill-01-card', 'a blocked-prompt finding names the ticket');
       assert.match(f.detail, /Do you want to proceed\?/);
@@ -403,8 +403,8 @@ test('devteam kit', async (t) => {
       assert.ok(!json(must(['metrics', '--json'])).findings.some((x) => x.kind === 'blocked-prompt'), 'no pane, no finding');
       // a usage-limit banner, but not source code the pane shows that mentions a rate limit
       const limitPane = (text) => {
-        spawnSync('tmux', ['new-session', '-d', '-s', 'devteam', '-n', 'bill-01-card', `sh -c 'printf "${text}"; exec sleep 600'`]);
-        for (let i = 0; i < 20 && !/limit/.test(spawnSync('tmux', ['capture-pane', '-p', '-t', 'devteam:bill-01-card'], { encoding: 'utf8' }).stdout ?? ''); i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+        spawnSync('tmux', ['new-session', '-d', '-s', 'devteam-demo', '-n', 'bill-01-card', `sh -c 'printf "${text}"; exec sleep 600'`]);
+        for (let i = 0; i < 20 && !/limit/.test(spawnSync('tmux', ['capture-pane', '-p', '-t', '=devteam-demo:bill-01-card'], { encoding: 'utf8' }).stdout ?? ''); i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
         const hit = json(must(['metrics', '--json'])).findings.find((x) => x.kind === 'blocked-prompt');
         spawnSync('tmux', ['kill-server']);
         return hit;
@@ -1112,7 +1112,7 @@ test('devteam kit', async (t) => {
       execFileSync('git', ['commit', '-qm', 'plan'], { cwd: wt('plan-quiet'), env: { ...process.env, GIT_AUTHOR_DATE: old, GIT_COMMITTER_DATE: old } });
       const past = new Date(Date.now() - 2 * 3600000);
       fs.utimesSync(path.join(wt('plan-quiet'), 'docs/devteam/project/designs/quiet.md'), past, past);
-      spawnSync('tmux', ['new-session', '-d', '-s', 'devteam', '-n', 'plan-quiet', 'sleep 600']);
+      spawnSync('tmux', ['new-session', '-d', '-s', 'devteam-demo', '-n', 'plan-quiet', 'sleep 600']);
       const Qq = must(['ask', '--question', 'Which reports first?', '--goal', G, '--recommendation', 'monthly', '--links', JSON.stringify([{ title: 'design', path: 'docs/devteam/project/designs/quiet.md', ref: 'plan/quiet' }])], { role: 'sup' });
       const stale = () => json(must(['metrics', '--json'])).findings.some((f) => f.kind === 'stale-planner' && f.subject === 'plan-quiet');
       assert.ok(!stale(), 'waiting on the owner is not stale');
@@ -1199,7 +1199,7 @@ test('devteam kit', async (t) => {
     // A stand-in agent (not a shell): draws a screen, then logs every line of input it is sent.
     const agent = path.join(tmp, 'agent.mjs');
     write(agent, "import fs from 'node:fs';\nprocess.stdout.write(fs.readFileSync(process.argv[2], 'utf8'));\nprocess.stdin.on('data', (d) => fs.appendFileSync(process.argv[3], String(d)));\n");
-    const sent = path.join(repo, 'docs/devteam/run/sent', `${encodeURIComponent('devteam:plan-enter')}.json`);
+    const sent = path.join(repo, 'docs/devteam/run/sent', `${encodeURIComponent('=devteam-demo:plan-enter')}.json`);
     const enters = () => (fs.existsSync(keys) ? fs.readFileSync(keys, 'utf8').split('\n').length - 1 : 0);
     const resent = () => json(must(['log', '--type', 'observation', '--json'])).filter((o) => o.kind === 'resent-enter' && o.subject === 'plan-enter');
     const run = (screen, agoSec) => {
@@ -1209,7 +1209,7 @@ test('devteam kit', async (t) => {
       write(sf, screen);
       write(sent, JSON.stringify({ text, at: new Date(Date.now() - agoSec * 1000).toISOString() }));
       spawnSync('tmux', ['new-session', '-d', '-x', '80', '-y', '24', '-s', 'devteam', '-n', 'plan-enter', `${process.execPath} ${agent} ${sf} ${keys}`]);
-      for (let i = 0; i < 30 && !/approved|devteam|Done/.test(spawnSync('tmux', ['capture-pane', '-p', '-t', 'devteam:plan-enter'], { encoding: 'utf8' }).stdout ?? ''); i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+      for (let i = 0; i < 30 && !/approved|devteam|Done/.test(spawnSync('tmux', ['capture-pane', '-p', '-t', '=devteam-demo:plan-enter'], { encoding: 'utf8' }).stdout ?? ''); i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
       must(['metrics', '--json'], { role: 'sup' });
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
     };
@@ -1221,7 +1221,7 @@ test('devteam kit', async (t) => {
     write(path.join(tmp, 'screen.txt'), stuck);
     write(sent, JSON.stringify({ text, at: new Date(Date.now() - 3600 * 1000).toISOString() }));
     spawnSync('tmux', ['new-session', '-d', '-x', '80', '-y', '24', '-s', 'devteam', '-n', 'plan-enter', `${process.execPath} ${agent} ${path.join(tmp, 'screen.txt')} ${keys}`]);
-    for (let i = 0; i < 30 && !/approved|devteam/.test(spawnSync('tmux', ['capture-pane', '-p', '-t', 'devteam:plan-enter'], { encoding: 'utf8' }).stdout ?? ''); i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+    for (let i = 0; i < 30 && !/approved|devteam/.test(spawnSync('tmux', ['capture-pane', '-p', '-t', '=devteam-demo:plan-enter'], { encoding: 'utf8' }).stdout ?? ''); i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
     must(['dashboard-data']);
     must(['metrics', '--json']);
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
@@ -1540,6 +1540,24 @@ test('devteam kit', async (t) => {
     const logs = fs.readdirSync(path.join(repo, 'docs/devteam/run/log')).map((f) => fs.readFileSync(path.join(repo, 'docs/devteam/run/log', f), 'utf8')).join('');
     for (const form of [VALUE, JSON.stringify(VALUE).slice(1, -1), Buffer.from(VALUE).toString('base64'), 'MIIBszCCAVmgAwIBAgIUQ', 'tok-123456', 'pässwörd']) assert.ok(!logs.includes(form), `log holds ${form}`);
     for (const f of ['config/apns.key', 'config/uni.key', 'config/credentials/test.key']) fs.rmSync(path.join(repo, f), { force: true });
+  });
+
+  await t.test('the tmux session is per project: devteam-<project>, a legacy devteam session kept, read-only commands write nothing', () => {
+    const f = path.join(repo, 'docs/devteam/run/tmux-session');
+    const had = fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : null;
+    fs.rmSync(f, { force: true });
+    try {
+      assert.equal(must(['settings', '--get', 'tmux_session']), 'devteam-demo', 'the default names the project');
+      assert.ok(!fs.existsSync(f), 'resolving it writes nothing');
+      const live = json(must(['fleet', 'status', '--json', '--no-fetch'], { role: 'sup' })).sessions.map((x) => x.name)[0];
+      if (hasTmux && live) {
+        // a legacy `devteam` session holding one of this project's live windows keeps that name
+        spawnSync('tmux', ['new-session', '-d', '-s', 'devteam', '-n', live]);
+        try { assert.equal(must(['settings', '--get', 'tmux_session']), 'devteam'); } finally { spawnSync('tmux', ['kill-session', '-t', '=devteam']); }
+        spawnSync('tmux', ['new-session', '-d', '-s', 'devteam', '-n', 'someone-elses-ticket']);
+        try { assert.equal(must(['settings', '--get', 'tmux_session']), 'devteam-demo', "another project's devteam session is not ours"); } finally { spawnSync('tmux', ['kill-session', '-t', '=devteam']); }
+      }
+    } finally { if (had !== null) fs.writeFileSync(f, had); }
   });
 
   await t.test('computed views: metrics, roadmap, retro, dashboard data', () => {
@@ -2567,7 +2585,7 @@ test('fleet park: every session stops with a handoff, and a clone elsewhere pick
       // the supervisor runs inside an agent session: its markers must not reach the worker's agent
       const rs = spawnSync(process.execPath, [path.join(neu, 'docs/devteam/scripts/devteam.mjs'), 'worker', ID, '--resume'], { cwd: neu, env: env({ ...SUP, CLAUDECODE: '1', CLAUDE_CODE_CHILD_SESSION: '1', CLAUDE_CONFIG_DIR: path.join(home, 'claude') }), encoding: 'utf8' });
       let pane = '';
-      for (let i = 0; i < 150 && !/env -u/.test(pane); i++) { pane = spawnSync('tmux', ['capture-pane', '-p', '-J', '-t', `devteam:${ID}`], { env: env({}), encoding: 'utf8' }).stdout ?? ''; Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100); }
+      for (let i = 0; i < 150 && !/env -u/.test(pane); i++) { pane = spawnSync('tmux', ['capture-pane', '-p', '-J', '-t', `=devteam-park:${ID}`], { env: env({}), encoding: 'utf8' }).stdout ?? ''; Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100); }
       spawnSync('tmux', ['kill-server'], { env: env({}) });
       pane = pane.replace(/\n/g, ''); // the shell wraps a long command at the pane's width, even mid-word
       for (const k of ['CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION']) assert.match(pane, new RegExp(`env (-u \\w+ )*-u ${k} (-u \\w+ )*true `), `the agent starts without the supervisor's session marker ${k}`);
