@@ -1119,6 +1119,7 @@ function fetchMain(R = null) {
     logCache = null;
     mainLogCache = undefined;
     mergeShaCache.clear();
+    linkChangedCache.clear();
   }
   if (R && R.name !== 'home') fetchLinkMain(R);
 }
@@ -1299,7 +1300,7 @@ const questions = () => logObjects('question').map((q) => { const v = questionVi
 // is a goal-change question about that goal, answered by the owner with its recommendation (an
 // answer other than the recommendation declines or alters the change, so the supervisor asks again).
 // The goal fields a goal-change question may propose, and that its answer then authorises exactly.
-const GOAL_CHANGE_FIELDS = ['title', 'outcome', 'measure', 'horizon', 'non_goals', 'preconditions', 'priority', 'milestones', 'plan_after'];
+const GOAL_CHANGE_FIELDS = ['title', 'outcome', 'measure', 'horizon', 'non_goals', 'preconditions', 'registry_precondition', 'priority', 'milestones', 'plan_after'];
 const goalFieldsOf = (l) => Object.fromEntries(Object.entries(l).filter(([k]) => GOAL_CHANGE_FIELDS.includes(k)));
 function goalChangeProblem(q, goalId, qid, l = null) {
   const v = q?.type === 'question' ? questionView(q) : null;
@@ -3079,14 +3080,55 @@ function registryFails(base, sha, R = homeFacts) {
   if (J.problem) return [J.problem];
   return registryProblems(J.settings).errors.map((e) => `settings at landing: ${e}`);
 }
-// A url link lands only as a registry-edit act wrote it (link add|set|rm), matched by content:
-// each url link the merge would change on main, main's settings against the ones
-// that would land, needs an act naming it whose entry_hash is the entry that lands (null: removed).
-// No time window, so an unrelated settings landing expires nothing; a link already as main has it
-// needs nothing; an act for one value never covers another. A removal needs an rm act whose
-// prior_hash is main's entry, so an rm of an earlier entry never deletes a link added again
-// since. An act written before entry_hash (or, for a removal, prior_hash) existed
-// never matches. A landing that can't be computed is registryFails' to report.
+// The registry-edit acts that can carry link id from one entry to another: each records the entry
+// it replaced (prior_hash, null for an add) and the one it wrote (entry_hash, null for a removal).
+// An act without both (written before they existed) never counts.
+// Only acts logged since main last changed that link's entry count: an owner's hand-revert of
+// the link on main would otherwise let an old act, made from the entry main has again, carry its
+// entry back over the revert. Another link's change, or any other settings change, expires nothing.
+const linkActs = (id) => {
+  const since = linkChangedOnMain(id);
+  return logObjects('act').filter((a) => a.class === 'registry-edit' && Object.hasOwn(a, 'entry_hash') && Object.hasOwn(a, 'prior_hash') && (a.refs ?? []).includes(`link:${id}`) && (since === null || Date.parse(a.created_at) >= since)).sort(byTime);
+};
+// When main's first-parent line last changed links.<id>'s entry (ms; commit times are whole
+// seconds, so an act in that same second still counts), looking back over the last
+// LINK_HISTORY_DEPTH commits that touched settings.md; null when none of them changed it. Each
+// commit's entry is compared with its first parent's. Cached for the run (fetchMain clears it;
+// entries by sha never change).
+const LINK_HISTORY_DEPTH = 200;
+const linkChangedCache = new Map();
+const linkEntryAtCache = new Map();
+function linkChangedOnMain(id) {
+  if (linkChangedCache.has(id)) return linkChangedCache.get(id);
+  const ref = mainRef();
+  const rows = ref ? (git(['log', '--first-parent', '-n', String(LINK_HISTORY_DEPTH), '--format=%H %ct', ref, '--', `${projectRel}/settings.md`]) ?? '').split('\n').filter(Boolean) : [];
+  const entryAt = (rev) => {
+    if (!linkEntryAtCache.has(rev)) linkEntryAtCache.set(rev, settingsAt(rev, { orNull: true })?.links ?? {});
+    return linkEntryHash(ownEntry(linkEntryAtCache.get(rev), id));
+  };
+  let at = null;
+  for (const row of rows) {
+    const [sha, ct] = row.split(' ');
+    if (entryAt(sha) !== entryAt(`${sha}^`)) { at = Number(ct) * 1000; break; }
+  }
+  linkChangedCache.set(id, at);
+  return at;
+}
+// Whether link id's acts, in the order they were written, lead from entry hash `from` (main's) to
+// `to`: one act from main's entry, or a chain of them (link add, then link set, between landings).
+// An act whose prior_hash main no longer has leads nowhere, so an act for an older main never lands.
+function linkActsLead(id, from, to) {
+  const reached = new Set([from]);
+  for (const a of linkActs(id)) if (reached.has(a.prior_hash)) reached.add(a.entry_hash);
+  return reached.has(to);
+}
+// A url link lands only as registry-edit acts wrote it (link add|set|rm), matched by content:
+// each url link the merge would change on main, main's settings against the ones that would land,
+// needs acts naming it that lead from the entry main has (prior_hash) to the entry that lands
+// (entry_hash, null: removed). No time window, so an unrelated settings landing expires nothing; a
+// link already as main has it needs nothing; an act for one value never covers another, and an act
+// made from an entry main has since changed never matches, so neither a stale set nor an rm of an
+// earlier entry lands. A landing that can't be computed is registryFails' to report.
 function registryActFails(base, sha) {
   const S = settingsInForce(base, sha);
   if (!S.fromHead) return [];
@@ -3095,11 +3137,8 @@ function registryActFails(base, sha) {
   const lands = J.settings.links ?? {};
   const edits = linkOwnerChanges(S.sMain.links, lands).filter((c) => c.cls === 'registry-edit').map((c) => c.key.slice('links.'.length));
   if (!edits.length) return [];
-  const acts = logObjects('act').filter((a) => a.class === 'registry-edit' && Object.hasOwn(a, 'entry_hash'));
-  // a removal (entry_hash null) needs an act that removed the very entry main has (prior_hash)
-  const wrote = (a, l) => a.entry_hash === linkEntryHash(ownEntry(lands, l)) && (a.entry_hash !== null || a.prior_hash === linkEntryHash(ownEntry(S.sMain.links, l)));
-  const bare = edits.filter((l) => !acts.some((a) => (a.refs ?? []).includes(`link:${l}`) && wrote(a, l)));
-  return bare.length ? [`changes ${bare.map((l) => `links.${l}`).join(', ')} to an entry no registry-edit act wrote: make each change with link add|set|rm, which logs the act with the entry it wrote, rather than by hand in settings.md (an act for an earlier value of the link doesn't cover this one)`] : [];
+  const bare = edits.filter((l) => !linkActsLead(l, linkEntryHash(ownEntry(S.sMain.links, l)), linkEntryHash(ownEntry(lands, l))));
+  return bare.length ? [`changes ${bare.map((l) => `links.${l}`).join(', ')} to an entry no registry-edit act wrote: make each change with link add|set|rm, which logs the act with the entry it wrote and the one it replaced, rather than by hand in settings.md (an act for an earlier value of the link, or made from an entry main has since changed, doesn't cover this one)`] : [];
 }
 // What the forge's check (optional) and `merge` both check for a PR, by branch kind. Gates are not
 // run here. A chore PR may not touch the log (chore-log touches nothing else) or a ticket's folder.
@@ -3712,7 +3751,7 @@ function cmdAsk() {
   // project depends on (planning.md §7). Owner-only, like goal-met: never defaulted, never from chat.
   if (cls === 'registry-attest') {
     const g = logGet(flagStr('goal') ?? '');
-    if (g?.type !== 'goal') die('a registry-attest question needs --goal <g-id> (the goal whose preconditions include the registry is complete)');
+    if (g?.type !== 'goal') die('a registry-attest question needs --goal <g-id> (the goal with a --registry-precondition)');
     if (kind !== 'owner-decision') die('a registry-attest question is an owner-decision');
     if (flagStr('recommendation')?.trim().toLowerCase() !== 'yes') die('a registry-attest question recommends --recommendation yes (the owner says no when something is missing)');
     if (flagStr('default') !== undefined) die('a registry-attest question has no --default: only the owner knows what the registry is missing');
@@ -3780,7 +3819,7 @@ function cmdAsk() {
   // an inline link is logged as given, so a credential in it would be in the log and every view of the question
   for (const l of jsonFlag('links') ?? []) if (hasCredentials(l?.url)) die(`--links: ${redactUrl(l.url)} carries credentials; ${CREDENTIALS_REFUSED}`);
   const line = appendLog({
-    type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), question: q, context: kind === 'goal-approval' ? [flagStr('context'), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal'))))].filter(Boolean).join('\n\n') : flagStr('context'),
+    type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), question: q, context: kind === 'goal-approval' ? [flagStr('context'), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal')))), registryAttestText(logGet(flagStr('goal')))].filter(Boolean).join('\n\n') : flagStr('context'),
     rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: goalChangeFlag(cls), options: asList(flags.options), choices: jsonFlag('choices'), links: jsonFlag('links'), recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined,
     deadline: def ? new Date(Date.now() + loadSettings().question_default_after_hours * 3600000).toISOString() : undefined,
     blocks, approves: approves.length ? approves : undefined, evidence, note: flagStr('note'), secrets, review,
@@ -4810,6 +4849,7 @@ function cmdDecide() {
   const confidence = flagNum('confidence');
   if (confidence !== undefined && !(confidence >= 0 && confidence <= 1)) die('--confidence is a number from 0 to 1');
   if (['approve-spec', 'approve-plan'].includes(cls) && !tickets().has(refs[0])) die(`${cls} names the ticket first: --refs <ticket-id> [other ids]`);
+  if (cls === 'goal-readiness') readinessGoal(refs);
   const a = authorise(cls, scope, approved, refs, 'decide');
   if (a.doorCited && a.approval.ticket !== refs[0] && !(features().get(tickets().get(refs[0])?.feature)?.goals ?? []).includes(a.approval.goal)) die(`${approved} answered a one-way door for ${a.approval.ticket ?? a.approval.goal ?? 'something else'}, not for ${refs[0]} or a goal its feature serves`);
   const line = appendLog({
@@ -4877,9 +4917,10 @@ function cmdAct() {
       if (!latest.some((r) => r.doors.includes(goalDoor))) die(`${goalDoor} is a goal-level answer; the latest approving plan review (reviews/plan-<n>.md on ticket/${t.id}) must say "- Goal-level door: ${goalDoor} covers this plan" (quality.md §3)`);
     }
   }
-  if (cls === 'goal-readiness') for (const g of refs.map(logGet).filter((o) => o?.type === 'goal' && asList(o.preconditions).some((p) => REGISTRY_COMPLETE.test(p)))) {
-    const why = registryAttestGap(g.id);
-    if (why) die(`${g.id} lists "the registry is complete" among its preconditions, and has no owner's yes to a registry-attest question (${why}): ask --class registry-attest --goal ${g.id} --question "Does the registry list every repo, design file and doc this project depends on?" --recommendation yes, and log goal-readiness once the owner answers yes (planning.md §7)`);
+  if (cls === 'goal-readiness') {
+    const g = readinessGoal(refs);
+    const why = g.registry_precondition ? registryAttestGap(g.id) : null;
+    if (why) die(`${g.id} has precondition ${g.registry_precondition} marked "the registry is complete", and has no owner's yes to a registry-attest question (${why}): ask --class registry-attest --goal ${g.id} --question "Does the registry list every repo, design file and doc this project depends on?" --recommendation yes, and log goal-readiness once the owner answers yes (planning.md §7)`);
   }
   const line = appendLog({ type: 'act', class: cls, scope: scope ?? undefined, what, rung: auth.rung, refs, reversible: decision ? decision.reversible !== false && !flags.irreversible : !flags.irreversible, approved_by: decision ? undefined : approved ?? undefined, decision: decision?.id, repo: rid && rid !== 'home' ? rid : undefined }, 'supervisor');
   out(line.id);
@@ -5149,6 +5190,14 @@ function orientLinks() {
   const overlap = (a, b) => { const x = asList(a).length ? asList(a) : ['all'], y = asList(b).length ? asList(b) : ['all']; return x.includes('all') || y.includes('all') || x.some((s) => y.includes(s)); };
   const res = [];
   for (const o of logObjects('observation').filter((x) => x.kind === 'link' && (x.link?.url || x.link?.path) && !used.has(x.id)).sort(byTime)) {
+    // A line written by hand can hold text observe-link refuses (log-check flags it, link add refuses
+    // it). Nothing from it is proposed: one line says so, with the offending fields quoted as data.
+    const unsafe = [...['title', 'notes'].filter((f) => linkTextProblem(f, o.link[f])), ...['url', 'path'].filter((f) => unsafeLocator(o.link[f]))];
+    if (unsafe.length) {
+      const cut = (f) => { const v = [...String(o.link[f])]; const max = LINK_TEXT_MAX[f] ?? 200; return `${quoteData(v.slice(0, max).join(''))}${v.length > max ? '…' : ''}`; };
+      res.push({ key: `link-proposal:${o.id}`, proposal: 'not-proposed', observation: o.id, note: `observation ${o.id} has link text that isn't plain one-line text; not proposed: ${unsafe.map((f) => `${f} ${cut(f)}`).join(', ')}` });
+      continue;
+    }
     // A worker's or planner's observation is proposed as theirs, to be checked before it is
     // applied, and never for the whole project: all (or project) narrows to its ticket's component
     // or its plan's feature, and goes when there is neither.
@@ -5185,7 +5234,7 @@ function cmdOrient() {
   if (flags.json) return json([...cl, ...lk]);
   if (!cl.length && !lk.length) return out('nothing recurring that is unexplained');
   for (const c of cl) out(`${c.key}  x${c.count}  valence ${c.valence}\n  latest: ${c.latest}\n  evidence: ${c.ids.join(' ')}`);
-  if (lk.length) { out('link proposals:'); for (const p of lk) out(`  ${p.proposal} (${p.observation})${p.proposed_by ? `, proposed by ${p.proposed_by}; check before adding` : ''}: ${p.command}`); out('  (dismiss one: decide --class registry-edit --refs <observation> -- "<why the registry stays as it is>")'); }
+  if (lk.length) { out('link proposals:'); for (const p of lk) out(p.note ? `  ${p.note}` : `  ${p.proposal} (${p.observation})${p.proposed_by ? `, proposed by ${p.proposed_by}; check before adding` : ''}: ${p.command}`); out('  (dismiss one: decide --class registry-edit --refs <observation> -- "<why the registry stays as it is>")'); }
 }
 
 // ===== 9. goals, roadmap, retros, chore worktrees =====
@@ -5220,7 +5269,53 @@ function goalMetProblem(q, goalId, qid, at = null) {
 // is components check --count, with the gates; its other half is the owner's yes to a
 // registry-attest question about the goal, which goal-readiness waits for. Only the owner's own
 // answer counts (registry-attest is owner_only, so never a chat answer or a default), and only yes.
-const REGISTRY_COMPLETE = /\bthe registry is complete\b/i;
+// The goal carries it as a field, registry_precondition: the number of its precondition that is
+// "the registry is complete", set by goal add|set --registry-precondition n (none clears it). The
+// check is keyed to that field, never to a precondition's wording.
+function registryPreconditionFlag() {
+  const v = flagStr('registry-precondition');
+  if (v === undefined) return undefined;
+  if (v === 'none') return null;
+  if (!/^[1-9]\d*$/.test(v)) die('--registry-precondition is the number of the goal\'s "registry is complete" precondition (1-based), or none');
+  return Number(v);
+}
+function registryPreconditionCheck(name, g) {
+  const n = g.registry_precondition;
+  if (n === undefined || n === null) return;
+  const count = (g.preconditions ?? []).length;
+  if (n > count) die(`--registry-precondition ${n}: ${name} has ${count} precondition${count === 1 ? '' : 's'}; it numbers the one that is "the registry is complete"`);
+}
+// A goal with no registry_precondition whose precondition reads as the registry being complete
+// ("registry" and "complete" in the one precondition, any case): a definition gap, so leaving the
+// field unset (or clearing it) can't skip the attestation. The kit has no Baseline marker beyond the
+// field itself, so the wording is the only other sign. It only raises the gap; it never satisfies
+// the attestation, which stays keyed to the field.
+function registryWording(g) {
+  if (g.registry_precondition != null) return null;
+  const i = (g.preconditions ?? []).findIndex((t) => /registry/i.test(t) && /complete/i.test(t));
+  return i < 0 ? null : { n: i + 1, text: g.preconditions[i] };
+}
+// The attestation's state for a goal with a registry_precondition (the dashboard card, the approval
+// question): its latest registry-attest question, and the owner's answer once there is one.
+function registryAttestView(g) {
+  const n = g.registry_precondition;
+  if (n == null) return undefined;
+  const last = questions().filter((q) => q.class === 'registry-attest' && q.goal === g.id).sort((a, b) => (a.asked_at < b.asked_at ? -1 : 1)).pop();
+  if (!last) return { precondition: n, status: 'not asked', question: null, answer: null };
+  return { precondition: n, status: last.status === 'open' ? 'open' : 'answered', question: last.id, answer: last.status === 'open' ? null : last.answer ?? null };
+}
+function registryAttestText(g) {
+  const v = registryAttestView(g);
+  if (!v) return '';
+  const text = (g.preconditions ?? [])[v.precondition - 1];
+  return `Registry attestation: precondition ${v.precondition}${text ? ` ("${text}")` : ''}, ${v.status}${v.question ? ` (${v.question}${v.answer ? `: "${v.answer}"` : ''})` : ''}; goal-readiness waits for the owner's yes.`;
+}
+// A goal-readiness act or decision is about one goal, named by its id (planning.md §7).
+function readinessGoal(refs) {
+  const g = refs.length === 1 ? logGet(refs[0]) : null;
+  if (g?.type !== 'goal' || g.kind === 'upkeep') die(`goal-readiness names exactly one goal, an existing goal id: --refs <g-id>${refs.length ? ` (got ${refs.map((r) => JSON.stringify(r)).join(', ')})` : ''}`);
+  return g;
+}
 function registryAttestGap(goalId) {
   const qs = questions().filter((q) => q.class === 'registry-attest' && q.goal === goalId);
   if (qs.some((q) => q.status === 'answered' && q.channel !== 'chat' && q.matched && q.answer.trim().toLowerCase().split(' — ')[0] === 'yes')) return null;
@@ -5306,6 +5401,8 @@ function goalCheck(g) {
   const clash = logObjects('goal').filter((o) => o.id !== g.id && ['ready', 'draft'].includes(o.status ?? 'draft') && typeof g.priority === 'number' && o.priority === g.priority);
   if (clash.length) definition.push(`priority ${g.priority} is shared with ${clash.map((c) => c.id).join(', ')}`);
   if (m.source !== 'owner' && !goalReadings(g.id).length) definition.push(`no baseline reading (devteam.mjs goal reading <id> ${['repo', 'prod'].includes(m.source) ? '--run' : '--value v'})`);
+  const unmarked = registryWording(g);
+  if (unmarked) definition.push(`precondition ${unmarked.n} ("${unmarked.text}") reads as the registry being complete, and ${g.id} has no registry_precondition: goal set ${g.id} --registry-precondition ${unmarked.n} (goal-readiness then waits for the owner's registry-attest yes; planning.md §7)`);
   const approval = milestoneGaps(g);
   const feats = goalFeatures(g.id);
   const covered = new Set(feats.flatMap((f) => features().get(f).preconditions ?? []));
@@ -5433,7 +5530,7 @@ function goalView(g) {
   const mode = goalMode(g);
   const still = ['park', 'let-go'].includes(mode);
   const forecast = goalForecast(g);
-  return { ...g, ...(g.measure ? { measure: measureOf(g) } : {}), status: g.status ?? 'draft', readings: readings.map((r) => ({ at: r.created_at, value: r.measure.value, source: r.source, ...(r.sha ? { sha: r.sha } : {}), ...(r.approved ? { approved: r.approved } : {}) })), track: still ? null : track, check: goalCheck(g), forecast: forecast && still ? { ...forecast, eta: null, past_horizon: false } : forecast, hold_view: holdView(g) };
+  return { ...g, ...(g.measure ? { measure: measureOf(g) } : {}), status: g.status ?? 'draft', readings: readings.map((r) => ({ at: r.created_at, value: r.measure.value, source: r.source, ...(r.sha ? { sha: r.sha } : {}), ...(r.approved ? { approved: r.approved } : {}) })), track: still ? null : track, check: goalCheck(g), forecast: forecast && still ? { ...forecast, eta: null, past_horizon: false } : forecast, hold_view: holdView(g), registry_attest: registryAttestView(g) };
 }
 function cmdGoal() {
   const [sub, id] = positional;
@@ -5447,6 +5544,7 @@ function cmdGoal() {
     horizon: flagStr('horizon') === 'none' ? null : flagStr('horizon'),
     non_goals: flags['non-goals'] !== undefined ? listFlag('non-goals') : undefined,
     preconditions: flags.preconditions !== undefined ? listFlag('preconditions') : undefined,
+    registry_precondition: registryPreconditionFlag(),
     priority: flagNum('priority'),
     milestones: jsonFlag('milestones'),
     plan_after: flags['plan-after'] !== undefined ? listFlag('plan-after').map((goal) => ({ goal, reason: flagStr('reason') ?? die('--plan-after needs --reason: why this goal\'s design waits on that one') })) : undefined,
@@ -5455,10 +5553,11 @@ function cmdGoal() {
     const { by } = writer();
     const f = fields();
     if (!f.title) die('goal add needs --title');
+    registryPreconditionCheck(f.title, f);
     return out(appendLog({ type: 'goal', status: 'draft', ...f }, by).id);
   }
   if (sub === 'set') {
-    if (!id || logGet(id)?.type !== 'goal') die('usage: goal set <g-id> [--title …] [--outcome …] [--measure …] [--target n] [--unit u] [--direction up|down] [--source repo|prod|owner] [--check "cmd"] [--link <repo>] [--question "…"] [--horizon date] [--non-goals a b | \'["a","b"]\'] [--preconditions a b | \'["a","b"]\'] [--priority n] [--milestones \'[{"title","target","by","preconditions":[n],"tickets"}…]\'] [--plan-after <g-id>… --reason "…"] [--approved <qid>] [--owner]');
+    if (!id || logGet(id)?.type !== 'goal') die('usage: goal set <g-id> [--title …] [--outcome …] [--measure …] [--target n] [--unit u] [--direction up|down] [--source repo|prod|owner] [--check "cmd"] [--link <repo>] [--question "…"] [--horizon date] [--non-goals a b | \'["a","b"]\'] [--preconditions a b | \'["a","b"]\'] [--registry-precondition n|none] [--priority n] [--milestones \'[{"title","target","by","preconditions":[n],"tickets"}…]\'] [--plan-after <g-id>… --reason "…"] [--approved <qid>] [--owner]');
     const { by } = writer();
     const approved = flagStr('approved') ?? null;
     if (approved && by !== 'supervisor') die('the owner changes a goal directly; --approved is the supervisor applying an owner answer');
@@ -5483,7 +5582,9 @@ function cmdGoal() {
       appendLog({ type: 'act', class: 'carry-answer', what: `applied your earlier answer to ${approved} ("${qv.answer}") to ${id}: set ${Object.keys(carried).join(', ')}`, refs: [id, approved], reversible: true }, 'supervisor');
       return out(`updated ${id} (${line.id}), carrying ${approved} forward`);
     }
-    appendLog({ type: 'goal', op: 'set', id, ...fields() }, by);
+    const f = fields();
+    registryPreconditionCheck(id, { ...logGet(id), ...Object.fromEntries(Object.entries(f).filter(([, x]) => x !== undefined)) });
+    appendLog({ type: 'goal', op: 'set', id, ...f }, by);
     return out(`updated ${id}`);
   }
   // The owner's decision on a goal, made on its design: approve (ready; planning starts), refine
@@ -8282,6 +8383,9 @@ const LANDING_HINT = 'it applies here now; land it on main with the next chore P
 // A link of an owner's kind is carried only as the owner approved it: link add|set|rm --approved
 // logged an act naming the link with the entry it wrote (entry_hash); anything else of an owner's
 // kind is left alone, to land with the owner's answer.
+// A supervisor's entry is carried only when its acts lead from the chore's (main's) entry to this
+// one: when main's entry changed since the act was made, the act's parent state is gone, and the
+// entry is refused (the run exits 1, after carrying the others).
 // An entry of an owner's kind exactly as an answered question approved it (linkByOwner's act).
 const ownerApproved = (id, entry) => logObjects('act').some((a) => a.approved_by && ['governance-edit', 'gate-change'].includes(a.class) && (a.refs ?? []).includes(`link:${id}`) && Object.hasOwn(a, 'entry_hash') && a.entry_hash === linkEntryHash(entry));
 function linkLand(slugName) {
@@ -8297,20 +8401,29 @@ function linkLand(slugName) {
     const links = Object.assign(Object.create(null), there);
     const changed = [];
     const owners = [];
+    const refused = [];
     for (const id of [...new Set([...Object.keys(there), ...Object.keys(here)])].sort()) {
       const h = ownEntry(here, id), t = ownEntry(there, id);
       if (canonical(h) === canonical(t)) continue;
-      if ((ownersKind(h) || ownersKind(t)) && !ownerApproved(id, h)) { owners.push(`links.${id}`); continue; }
+      if (ownersKind(h) || ownersKind(t)) {
+        if (!ownerApproved(id, h)) { owners.push(`links.${id}`); continue; }
+      } else if (!linkActsLead(id, linkEntryHash(t), linkEntryHash(h))) {
+        const act = logObjects('act').filter((a) => a.class === 'registry-edit' && (a.refs ?? []).includes(`link:${id}`) && a.entry_hash === linkEntryHash(h)).sort(byTime).pop();
+        refused.push(act ? `main's links.${id} changed since ${act.id}; re-run link ${h === undefined ? 'rm' : 'set'} from main's entry (bring this checkout's settings.md up to date first)` : `links.${id} differs here from main and no registry-edit act wrote it from main's entry; make the change with link add|set|rm`);
+        continue;
+      }
       if (h === undefined) delete links[id]; else links[id] = h;
       changed.push(`links.${id} (${t === undefined ? 'added' : h === undefined ? 'removed' : 'changed'})`);
     }
-    return { links, changed, owners };
+    return { links, changed, owners, refused };
   };
-  const { changed, owners } = carry(linksIn(target));
+  const { changed, owners, refused } = carry(linksIn(target));
   const skipped = owners.length ? `; not carried, as the owner's (a repo link lands with its governance-edit answer): ${owners.join(', ')}` : '';
-  if (!changed.length) return out(`nothing to land: the chore's links are the ones here${skipped}`);
+  const refuse = () => { if (refused.length) { process.stderr.write(`devteam: not carried:\n  - ${refused.join('\n  - ')}\n`); process.exitCode = 1; } };
+  if (!changed.length) { out(`nothing to land: ${refused.length ? 'no entry here can be carried' : "the chore's links are the ones here"}${skipped}`); return refuse(); }
   editSettingsFile(target, (blk) => ({ ...blk, links: carry(blk.links ?? {}).links }));
   out(`landed into chore-${slugName}: ${changed.join(', ')}; nothing else in its settings.md changed${skipped}`);
+  refuse();
 }
 // link add|set|rm: a link of the supervisor's kind (url: LINK_KINDS[k].ownedByOwner false) is
 // written, then logged as registry-edit (constitutional), citing what it came from. A link of an
@@ -8366,8 +8479,9 @@ function cmdLink() {
     return b;
   });
   what = redactUrl(what);
-  // a removal also records the entry it removed, so it lands only while main still has that one
-  appendLog({ type: 'act', decision: citing(), class: 'registry-edit', what, refs: [`link:${id}`, ...(source ? [source] : [])], reversible: true, entry_hash: linkEntryHash(entry), ...(sub === 'rm' ? { prior_hash: linkEntryHash(cur) } : {}) }, 'supervisor');
+  // every edit also records the entry it replaced (null for an add), so it lands only while main
+  // still has that one
+  appendLog({ type: 'act', decision: citing(), class: 'registry-edit', what, refs: [`link:${id}`, ...(source ? [source] : [])], reversible: true, entry_hash: linkEntryHash(entry), prior_hash: linkEntryHash(cur) }, 'supervisor');
   out(`${what}; ${LANDING_HINT}`);
 }
 // The json devteam block of the main checkout's settings.md as written, not as loadSettings pins

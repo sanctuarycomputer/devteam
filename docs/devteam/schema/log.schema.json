@@ -149,6 +149,15 @@
               "type": "string"
             }
           },
+          "registry_precondition": {
+            "description": "The number (1-based) of the precondition that is \"the registry is complete\" (planning.md §7). goal-readiness for this goal waits for the owner's yes to a registry-attest question about it. Set by goal add|set --registry-precondition n; null clears it. The check reads this field, never a precondition's wording.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1,
+            "x-tip": "Which precondition is \"the registry is complete\": marking ready waits for your yes that the registry lists everything."
+          },
           "priority": {
             "description": "Its order among the goals: 1 comes first.",
             "type": "integer",
@@ -1697,10 +1706,13 @@
             "x-tip": "The link entry this act wrote."
           },
           "prior_hash": {
-            "description": "On a registry-edit act from link rm: the link entry it removed, as sha256:<hex> of its canonical JSON. merge lands a removal only when an act naming the link has entry_hash null and prior_hash equal to the entry main has, so an rm of an earlier entry never removes a link added again since. A removal act without it (written before it existed) never matches.",
-            "type": "string",
+            "description": "On a registry-edit act (link add|set|rm): the link entry it replaced, as sha256:<hex> of its canonical JSON, or null when it added the link. merge lands a change to a url link only when acts naming the link lead from the entry main has (prior_hash) to the one that lands (entry_hash), and link land carries an entry only on the same terms, so an act made from an entry main has since changed (a stale set, an rm of an earlier entry) never lands. An act without it (written before it existed) never matches.",
+            "type": [
+              "string",
+              "null"
+            ],
             "pattern": "^sha256:[0-9a-f]{64}$",
-            "x-tip": "The link entry this rm act removed."
+            "x-tip": "The link entry this act replaced."
           },
           "repo": {
             "description": "The repo link the act was about (a merge, a release), when not home.",
@@ -1875,6 +1887,7 @@
           "horizon",
           "non_goals",
           "preconditions",
+          "registry_precondition",
           "priority",
           "milestones",
           "plan_after",
@@ -1889,6 +1902,7 @@
           "horizon",
           "non_goals",
           "preconditions",
+          "registry_precondition",
           "priority",
           "milestones",
           "status",
