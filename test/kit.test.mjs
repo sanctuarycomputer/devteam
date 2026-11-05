@@ -2491,7 +2491,10 @@ function fleetFixture(name) {
 // links and component lines. The goldens were recorded once from the kit before the change
 // (DEVTEAM_G1_RECORD=1); never re-record them to make this pass.
 const G1_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'g1');
-const g1Norm = (s, base) => s.split(fs.realpathSync(base)).join('<tmp>').split(base).join('<tmp>').replace(/\b[0-9a-f]{7,40}\b/g, '<sha>').replace(/-\d{4}-\d{2}\.jsonl\b/g, '-<month>.jsonl');
+// The tmux session is named after a hash of the fixture's path and the hub port follows the
+// suite's pid, so both move between runs as <tmp> does.
+const g1Norm = (s, base) => s.split(fs.realpathSync(base)).join('<tmp>').split(base).join('<tmp>').replace(/\b[0-9a-f]{7,40}\b/g, '<sha>').replace(/-\d{4}-\d{2}\.jsonl\b/g, '-<month>.jsonl')
+  .replace(/\bdevteam-g1-[0-9a-f]{6}\b/g, 'devteam-g1-<hash>').split(`127.0.0.1:${process.env.DEVTEAM_HUB_PORT}`).join('127.0.0.1:<hub-port>');
 function g1Outputs(F) {
   const { old, ok, run, g } = F;
   const SUP = { DEVTEAM_ROLE: 'supervisor' };
