@@ -2739,3 +2739,36 @@ function statusWithHost(port, route, host, method = 'GET') {
   });
 }
 
+
+test('the hub: lists every instance on the machine, links to each one, moves when its dashboard stops, and does nothing else', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-hub-'));
+  const HUB = 47360;
+  const env = { ...process.env, DEVTEAM_HUB_PORT: String(HUB), DEVTEAM_PORT_BASE: '47361', DEVTEAM_HUB_RETRY_MS: '500' };
+  const list = async () => { try { return (await (await fetch(`http://127.0.0.1:${HUB}/instances.json`)).json()).instances; } catch { return null; } };
+  const A = bareProject(base, 'alpha');
+  const B = bareProject(base, 'beta');
+  for (const r of [A, B]) execFileSync('sh', ['-c', 'git add -A && git -c user.email=t@t -c user.name=t commit -qm init'], { cwd: r });
+  fs.appendFileSync(path.join(B, 'docs/devteam/scripts/devteam.mjs'), '\n// a local change\n');
+  const a = startDashboard(A, env);
+  let b;
+  try {
+    await until(() => /127\.0\.0\.1:47361/.test(a.out()), "alpha's dashboard");
+    b = startDashboard(B, env);
+    const both = await until(async () => { const l = await list(); return l?.length === 2 && l.every((x) => x.inbox !== null) && l; }, 'both instances listed with counts');
+    assert.deepEqual(both.map((x) => [x.name, x.port]), [['alpha', 47361], ['beta', 47362]], 'beta took the port after alpha: +1');
+    assert.doesNotMatch(both[0].kit, /\+local$/, "alpha runs the kit it committed");
+    assert.match(both[1].kit, /\+local$/, "beta's edited kit shows");
+    const page = await fetch(`http://127.0.0.1:${HUB}/`);
+    assert.match(await page.text(), /instances\.json/, 'the page reads the list from its own hub');
+    assert.match(page.headers.get('content-security-policy'), /connect-src 'self'/, 'and can talk to nothing else');
+    assert.equal(await statusWithHost(HUB, '/instances.json', 'rebound.example'), 403, 'its own Host only');
+    assert.equal(await statusWithHost(HUB, '/instances.json', `127.0.0.1:${HUB}`, 'POST'), 405, 'it only lists');
+    await a.stop();
+    const after = await until(async () => { const l = await list(); return l?.length === 1 && l; }, 'the hub, after alpha stops');
+    assert.deepEqual(after.map((x) => x.name), ['beta'], 'whichever dashboard is left serves the hub and lists what is left');
+  } finally {
+    await a.stop();
+    if (b) await b.stop();
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});

@@ -5371,6 +5371,40 @@ async function pickDashboardPort() {
   die(`every dashboard port in ${span} is taken: stop an instance, or pin one with "dashboard_port" in settings.md (the hub won't list a port outside ${span})`);
 }
 
+// The hub: every dashboard tries to serve 127.0.0.1:HUB_PORT, and the one that gets it lists every
+// instance in the block by asking each port /api/hello, linking to each one's own dashboard. It
+// owns no state and does nothing for the owner: GET only, no proxy, its own Host only, a page that
+// can talk only to itself. The others retry, so the hub moves when its dashboard stops. Something
+// that isn't a devteam hub on the port: logged once, and this dashboard stops trying.
+function startHub(log) {
+  const page = path.join(kitDir, 'dashboard', 'hub.html');
+  const retry = Number(process.env.DEVTEAM_HUB_RETRY_MS ?? 30000);
+  const ownHost = (h) => [`127.0.0.1:${HUB_PORT}`, `localhost:${HUB_PORT}`].includes(h ?? '');
+  const scan = async () => (await Promise.all(PORT_RANGE.map(async (p) => { const h = await probeHello(p); return h ? { ...h, port: p } : null; }))).filter(Boolean).sort((a, b) => String(a.root).localeCompare(String(b.root)));
+  const isHub = () => new Promise((resolve) => {
+    const r = http.get({ host: '127.0.0.1', port: HUB_PORT, path: '/instances.json', timeout: 2000, headers: { host: `127.0.0.1:${HUB_PORT}` } }, (res) => { let b = ''; res.on('data', (c) => { b += c; }); res.on('end', () => { try { resolve(JSON.parse(b)?.hub === 1); } catch { resolve(false); } }); });
+    r.on('timeout', () => { r.destroy(); resolve(false); });
+    r.on('error', () => resolve(false));
+  });
+  const tryListen = () => {
+    const hub = http.createServer(async (req, res) => {
+      const send = (code, type, body, extra = {}) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...extra }); res.end(body); };
+      if (!ownHost(req.headers.host)) return send(403, 'text/plain; charset=utf-8', 'the hub answers only on its own address');
+      if (req.method !== 'GET') return send(405, 'text/plain; charset=utf-8', 'the hub only lists', { allow: 'GET' });
+      if (req.url === '/') return send(200, 'text/html; charset=utf-8', fs.readFileSync(page), { 'content-security-policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'" });
+      if (req.url === '/instances.json') return send(200, 'application/json', JSON.stringify({ hub: 1, instances: await scan() }));
+      return send(404, 'text/plain; charset=utf-8', 'not found');
+    });
+    hub.once('error', async (e) => {
+      if (e.code !== 'EADDRINUSE') return log(`hub: ${e.message}`);
+      if (await isHub()) setTimeout(tryListen, retry).unref();
+      else log(`hub: port ${HUB_PORT} is held by something that isn't a devteam hub; this dashboard won't serve the hub`);
+    });
+    hub.listen(HUB_PORT, '127.0.0.1', () => log(`hub on http://127.0.0.1:${HUB_PORT}`));
+  };
+  tryListen();
+}
+
 async function cmdDashboard() {
   const picked = await pickDashboardPort();
   const port = picked.port;
@@ -5618,7 +5652,7 @@ async function cmdDashboard() {
     });
   });
   server.on('error', (e) => { log(`server error: ${e?.stack ?? e}`); process.stderr.write(`devteam dashboard: ${e.message}\n`); process.exit(1); });
-  server.listen(port, host, () => { log(`started on http://${host}:${port} (node ${process.version})`); out(`devteam dashboard on http://${host}:${port}`); });
+  server.listen(port, host, () => { log(`started on http://${host}:${port} (node ${process.version})`); out(`devteam dashboard on http://${host}:${port}`); startHub(log); });
 }
 
 // ===== 11. sessions: workers, planners, messages, phases, gates =====
