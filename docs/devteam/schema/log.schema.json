@@ -1154,7 +1154,7 @@
             "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
           },
           "blocks": {
-            "description": "Tickets or chores waiting on the answer.",
+            "description": "Tickets or chores waiting on the answer; or, for an incident-fix question, the incident (p-…) it is about.",
             "type": "array",
             "items": {
               "type": "string"
@@ -1939,7 +1939,10 @@
           "realized",
           "assigned_to",
           "detail",
-          "threatens"
+          "threatens",
+          "fingerprints",
+          "refs",
+          "monitor"
         ],
         "owner": [
           "status",

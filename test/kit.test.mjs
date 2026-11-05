@@ -1050,6 +1050,9 @@ out({ cursor: 'x' });
       assert.match(tri, /--- untrusted production data (\w+) [\s\S]*ignore previous instructions[\s\S]*--- end of untrusted data \1 ---/);
       assert.ok(tri.indexOf('ignore previous instructions') > tri.indexOf('errs:platform:H12'), 'the messages come after every item\'s fields');
       assert.match(must(['monitor', 'triage'], sup), /^nothing new to triage since/);
+      const marker = fs.readFileSync(path.join(runMon, 'triage.json'), 'utf8');
+      must(['monitor', 'triage']);
+      assert.equal(fs.readFileSync(path.join(runMon, 'triage.json'), 'utf8'), marker, 'the owner\'s look doesn\'t move the supervisor\'s marker');
       assert.equal(json(must(['monitor', 'triage', '--all', '--json'], sup)).items.length, 3);
       // ignores hold until lifted
       assert.notEqual(dt(['monitor', 'ignore', 'H12'], sup).status, 0, 'an ignore needs a reason');
@@ -1059,7 +1062,13 @@ out({ cursor: 'x' });
       must(['monitor', 'unignore', 'errs:platform:H12', '--owner']);
       assert.equal(json(must(['monitor', 'triage', '--all', '--json'], sup)).items.length, 3, 'the owner lifted it');
       // an incident: severity computed, never set; a fingerprint in one open incident
-      const pid = must(['monitor', 'incident', 'E1', 'F1', '--title', 'checkout failing'], sup).split(':')[0];
+      const pid = must(['monitor', 'incident', 'E1', '--title', 'checkout failing'], sup).split(':')[0];
+      assert.equal(json(must(['dashboard-data'])).incidents.find((x) => x.id === pid).severity, 3);
+      must(['monitor', 'incident', pid, '--add', 'F1'], sup);
+      const low = must(['monitor', 'incident', 'H12', '--title', 'router timeouts'], sup).split(':')[0];
+      assert.match(dt(['decide', '--class', 'incident-fix', '--refs', low, pid, 'bill-01-x', '--', 'x'], sup).err, /exactly one incident/, 'a low incident can\'t carry a high one');
+      // a trust question for the class needs no incident
+      assert.doesNotMatch(dt(['ask', '--kind', 'trust', '--class', 'incident-fix', '--question', 'Let low-severity fixes go ahead?', '--recommendation', 'yes', '--reasons', 'below-rung'], sup).err, /names exactly one incident/);
       assert.equal(json(must(['dashboard-data'])).incidents.find((x) => x.id === pid).severity, 4);
       assert.match(dt(['monitor', 'incident', 'E1', '--title', 'again'], sup).err, /is in p-.* already/);
       assert.match(dt(['problem', 'set', pid, '--severity', '1'], sup).err, /its severity is computed/);
@@ -1069,13 +1078,16 @@ out({ cursor: 'x' });
       const dec = dt(['decide', '--class', 'incident-fix', '--refs', pid, tid, '--', 'fix OutOfMemory'], sup);
       assert.equal(dec.status, 3, dec.err);
       assert.match(dt(['decide', '--class', 'incident-fix', '--scope', 'sev:low', '--refs', pid, tid, '--', 'x'], sup).err, /its scope is sev:high, not sev:low/);
-      assert.match(dt(['decide', '--class', 'incident-fix', '--refs', tid, '--', 'x'], sup).err, /names its incident/);
+      assert.match(dt(['decide', '--class', 'incident-fix', '--refs', tid, '--', 'x'], sup).err, /names exactly one incident/);
       const q = must(['ask', '--class', 'incident-fix', '--blocks', pid, '--question', 'Fix the checkout OutOfMemory?', '--recommendation', 'fix it', '--default', 'fix it', '--deadline', '2h', '--reasons', 'below-rung'], sup);
       const qv = json(must(['questions', '--all', '--json'])).find((x) => x.id === q);
       assert.equal(qv.scope, 'sev:high');
       assert.ok(Math.abs(Date.parse(qv.deadline) - Date.now() - 2 * 3600000) < 120000, 'the default may fire in 2h');
       assert.equal(json(must(['dashboard-data'])).incidents.find((x) => x.id === pid).question.id, q);
+      assert.match(dt(['answer', q, '--defaulted'], sup).err, /default fires at/, 'not before its deadline');
+      assert.match(dt(['ask', '--class', 'incident-fix', '--blocks', pid, '--question', 'q', '--recommendation', 'fix it', '--default', 'fix it', '--deadline', '1m'], sup).err, /at least 15 minutes/);
       must(['answer', q, 'fix it']);
+      assert.match(dt(['decide', '--class', 'incident-fix', '--approved', q, '--refs', low, 'bill-01-y', '--', 'x'], sup).err, /was asked about p-/, 'an answer approves only its own incident');
       const d = must(['decide', '--class', 'incident-fix', '--approved', q, '--refs', pid, tid, '--', 'fix OutOfMemory in checkout'], sup);
       assert.equal(json(must(['log', '--type', 'decision', '--json'])).find((x) => x.id === d).scope, 'sev:high');
       // a fix ticket carries out that decision, in chores, and is scheduled first
@@ -1100,7 +1112,7 @@ out({ cursor: 'x' });
       assert.match(json(must(['questions', '--all', '--json'])).find((x) => x.id === q2).context, /Merging deploys this fix to production/);
       must(['withdraw', q2, '--reason', 'test'], sup);
     } finally {
-      if (tid && dt(['ticket', 'show', tid]).status === 0) must(['ticket', 'set', tid, '--json', JSON.stringify({ superseded_by: tid })], sup);
+      if (tid && dt(['ticket', 'show', tid]).status === 0) must(['ticket', 'set', tid, '--json', JSON.stringify({ superseded_by: 'bill-01-card' })], sup);
       landSettings(() => settingsBefore);
       if (git(['ls-files', 'docs/devteam/project/monitors'])) {
         git(['rm', '-rqf', 'docs/devteam/project/monitors']);
