@@ -1,0 +1,10 @@
+exit 0
+--- stdout
+q-<sha>-<sha>-supervisor  [owner-decision, open]
+  Ship g1 behind a flag?
+  - yes (recommended): behind a flag
+  - no
+  see: The spec (ticket/g1-01-a:docs/devteam/project/tickets/g1-01-a/spec.md)
+  recommend: yes
+--- stderr
+
