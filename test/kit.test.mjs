@@ -3141,6 +3141,53 @@ test('observe-link records a resource; orient proposes adds, edits and source-of
   } finally { F.done(); }
 });
 
+test('link probes: four at a time inside a tick budget, never a prompt, and a page behind auth is a note (F10, O7)', () => {
+  const F = monoFixture('probes');
+  const { old, ok, edit, g } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const starts = path.join(F.base, 'starts.log');
+  const stub = path.join(F.base, 'probe.sh');
+  write(stub, `#!/bin/sh\necho "$1" >> "${starts}"\ncase "$1" in *slow*) sleep 3; echo 200 ;; *auth*) echo 403 ;; *gone*) echo 404 ;; *) echo 200 ;; esac\n`);
+  fs.chmodSync(stub, 0o755);
+  // ls-remote through a shim that records whether git could prompt, and says the remote is gone
+  const shim = path.join(F.base, 'shim');
+  write(path.join(shim, 'git'), `#!/bin/sh\nif [ "$1" = ls-remote ]; then echo "prompt=$GIT_TERMINAL_PROMPT askpass=[$GIT_ASKPASS]" >> "${path.join(F.base, 'lsremote.log')}"; exit 2; fi\nexec "${REAL_GIT}" "$@"\n`);
+  fs.chmodSync(path.join(shim, 'git'), 0o755);
+  const url = (id, host) => ({ kind: 'url', title: id, url: `https://${host}.test/${id}` });
+  const tick = (extra) => {
+    const t0 = Date.now();
+    const r = spawnSync(process.execPath, [path.join(old, 'docs/devteam/scripts/devteam.mjs'), 'observe-metrics'], { cwd: old, env: { ...F.env(SUP), DEVTEAM_URL_PROBE: stub, ...extra }, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    return { out: r.stdout, ms: Date.now() - t0 };
+  };
+  try {
+    const co = path.join(F.base, 'console');
+    g(['init', '-q', co], F.base);
+    g(['remote', 'add', 'origin', 'https://github.com/usbclub/console.git'], co);
+    edit((j) => { j.links = { fast1: url('fast1', 'fine'), fast2: url('fast2', 'fine'), ...Object.fromEntries([1, 2, 3, 4, 5].map((n) => [`slow${n}`, url(`slow${n}`, 'slow')])) }; });
+    g(['commit', '-qam', 'links'], old); g(['push', '-q', 'origin', 'main'], old);
+    const t = tick({ DEVTEAM_PROBE_BUDGET_MS: '1500' });
+    assert.ok(t.ms < 8000, `probes ran in parallel inside the budget (${t.ms} ms; one at a time is 15 s)`);
+    assert.match(t.out, /5 link\(s\) not probed this tick \(time budget\): slow1, slow2, slow3, slow4, slow5/);
+    const started = fs.readFileSync(starts, 'utf8').trim().split('\n');
+    assert.equal(started.length, 6, `four at a time: slow5 never started (${started.join(' ')})`);
+    assert.ok(!json(ok(old, ['metrics', '--json'])).findings.some((f) => f.kind === 'link-unreachable'), 'not probed is not a finding');
+    const cache = json(fs.readFileSync(path.join(old, 'docs/devteam/run/link-probes.json'), 'utf8'));
+    assert.deepEqual(Object.keys(cache).sort(), ['fast1', 'fast2'], 'the rest are probed next tick');
+    // 401/403/405 is a page behind auth: a low note, never a high finding that wakes wait
+    edit((j) => { j.links = { locked: url('locked', 'auth'), gone: url('gone', 'gone'), console: { kind: 'repo', title: 'Console', remote: 'usbclub/console', path: co } }; });
+    g(['commit', '-qam', 'links 2'], old); g(['push', '-q', 'origin', 'main'], old);
+    tick({ PATH: `${shim}${path.delimiter}${process.env.PATH}` });
+    const fs2 = json(ok(old, ['metrics', '--json'])).findings;
+    assert.equal(fs2.find((f) => f.subject === 'locked')?.kind, 'link-behind-auth');
+    assert.equal(fs2.find((f) => f.subject === 'locked').severity, 'low');
+    assert.equal(fs2.find((f) => f.subject === 'gone')?.kind, 'link-unreachable');
+    // the repo probe: ls-remote with no terminal prompt and no askpass, and its failure is a finding
+    assert.match(fs.readFileSync(path.join(F.base, 'lsremote.log'), 'utf8'), /prompt=0 askpass=\[\]/);
+    assert.match(fs2.find((f) => f.subject === 'console' && f.kind === 'link-unreachable')?.detail ?? '', /its remote usbclub\/console does not resolve/);
+  } finally { F.done(); }
+});
+
 test('credentials never enter settings or the log: userinfo refused, and remotes redacted wherever they are echoed (O2)', () => {
   const F = monoFixture('creds');
   const { old, ok, run, edit, g } = F;

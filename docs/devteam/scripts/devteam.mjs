@@ -402,10 +402,13 @@ const LINK_KINDS = {
     },
     // over the network, once a day (probeLinks): the remote still answers. Only asked once the
     // checkout is there, through its own origin, so a test's local bare repo is all it contacts.
+    // Never a prompt (O7): no terminal prompt, no askpass, and ssh in batch mode unless this
+    // machine already says how to run ssh.
     probe: (link, id) => {
       if (LINK_KINDS.repo.reachable(link, id)) return null;
-      const r = spawnSync('git', ['ls-remote', '--exit-code', '-q', 'origin', 'HEAD'], { cwd: linkLocation(id), stdio: 'ignore', timeout: 12000 });
-      return r.status === 0 ? null : `its remote ${link.remote} does not resolve`;
+      const at = linkLocation(id);
+      const ssh = process.env.GIT_SSH_COMMAND || git(['config', '--get', 'core.sshCommand'], at) ? {} : { GIT_SSH_COMMAND: 'ssh -o BatchMode=yes' };
+      return { cmd: 'git', args: ['ls-remote', '--exit-code', '-q', 'origin', 'HEAD'], cwd: at, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '', SSH_ASKPASS: '', ...ssh }, judge: (code) => (code === 0 ? {} : { problem: `its remote ${redactUrl(link.remote)} does not resolve` }) };
     },
     fixHint: (link, id) => `clone ${link.remote} at ${linkLocation(id)}, or set its path (run/links.local.json on this machine)`,
     // where it is, for a person, a question and the dashboard
@@ -426,12 +429,21 @@ const LINK_KINDS = {
       ...(l.check !== undefined && typeof l.check !== 'boolean' ? [`${at}: check is true or false`] : []),
     ],
     reachable: () => null,
-    // one HEAD request, 10 s, no body read (spec §7); DEVTEAM_URL_PROBE stands in for it in tests
+    // one HEAD request, 10 s, no body read (spec §7); DEVTEAM_URL_PROBE stands in for it in tests.
+    // 401, 403 and 405 mean the page is there behind auth (or refuses HEAD): a note, not a finding
+    // that wakes wait (O7).
     probe: (link) => {
       if (link.check === false) return null;
-      const r = process.env.DEVTEAM_URL_PROBE ? spawnSync(process.env.DEVTEAM_URL_PROBE, [link.url], { encoding: 'utf8', timeout: 12000 }) : spawnSync(process.execPath, ['-e', PROBE_JS, link.url], { encoding: 'utf8', timeout: 12000 });
-      const code = Number((r.stdout ?? '').trim());
-      return !code ? 'no answer to a HEAD request in 10 s' : code >= 400 ? `HEAD returned ${code}` : null;
+      const stub = process.env.DEVTEAM_URL_PROBE;
+      return {
+        cmd: stub ?? process.execPath, args: stub ? [link.url] : ['-e', PROBE_JS, link.url],
+        judge: (_, out) => {
+          const code = Number(out.trim());
+          if (!code) return { problem: 'no answer to a HEAD request in 10 s' };
+          if ([401, 403, 405].includes(code)) return { note: `HEAD returned ${code}: the page is there, behind auth the fleet can't pass` };
+          return code >= 400 ? { problem: `HEAD returned ${code}` } : {};
+        },
+      };
     },
     fixHint: () => 'fix or remove the link (link set|rm), or "check": false for a page behind auth',
     locator: (link) => ({ text: link.url, url: link.url }),
@@ -4483,28 +4495,60 @@ function observeFindings(m) {
   }
   return n;
 }
-function cmdObserveMetrics() {
+async function cmdObserveMetrics() {
   supervisorOnly('observe-metrics');
-  probeLinks();
+  const { skipped } = await probeLinks();
   const s = observeSpend();
-  out(`recorded ${s} spend line(s) and ${observeFindings(collectMetrics(0))} new observation(s)`);
+  out(`recorded ${s} spend line(s) and ${observeFindings(collectMetrics(0))} new observation(s)${skipped.length ? `; ${skipped.length} link(s) not probed this tick (time budget): ${skipped.join(', ')}` : ''}`);
 }
 // Whether each link still exists, at most once a day per link, by its kind's probe (one HEAD
 // request, one ls-remote); nothing is fetched (spec §2, non-goals). The result waits in run/ for
 // metrics to read, so metrics and the dashboard never touch the network. A link edited since its
 // last probe (any field) is probed again. DEVTEAM_URL_PROBE stands in for the HEAD request in tests.
 const PROBE_FILE = runPath('link-probes.json');
-function probeLinks() {
+// Probes run four at a time, each with its own 12 s deadline, inside a budget per tick (20 s;
+// DEVTEAM_PROBE_BUDGET_MS in tests): a probe the budget cuts short, or one never started, is "not
+// probed this tick", writes nothing, and is asked again next tick; it is never a finding (F10, O7).
+// A probe is a kind's { cmd, args, cwd?, env?, judge(code, stdout) → { problem?, note? } }, or null.
+const PROBE_AT_ONCE = 4;
+const PROBE_EACH_MS = 12000;
+function runProbe(spec, end) {
+  return new Promise((resolve) => {
+    const left = end - Date.now();
+    const cut = left < PROBE_EACH_MS;
+    let outText = '';
+    let done = false;
+    // its own process group, so a kill takes git's ssh with it, and no controlling terminal to prompt on
+    const child = spawn(spec.cmd, spec.args, { cwd: spec.cwd, env: spec.env ?? process.env, stdio: ['ignore', 'pipe', 'ignore'], detached: true });
+    const finish = (v) => { if (done) return; done = true; clearTimeout(timer); resolve(v); };
+    const timer = setTimeout(() => { try { process.kill(-child.pid, 'SIGKILL'); } catch {} finish(cut ? 'budget' : spec.judge(null, '')); }, Math.max(0, Math.min(left, PROBE_EACH_MS)));
+    child.stdout.on('data', (d) => { outText += d; });
+    child.on('error', () => finish(spec.judge(null, '')));
+    child.on('close', (code) => finish(spec.judge(code, outText)));
+  });
+}
+async function probeLinks() {
   const reg = loadSettings().links ?? {};
-  if (!Object.keys(reg).length) return;
+  if (!Object.keys(reg).length) return { skipped: [] };
   let cache = {};
   try { cache = readJson(PROBE_FILE); } catch {}
-  for (const [id, l] of Object.entries(reg)) {
-    const K = LINK_KINDS[l.kind];
-    if (!K || (cache[id] && Date.now() - Date.parse(cache[id].at) < DAY && cache[id].target === canonical(l))) continue;
-    cache[id] = { at: nowIso(), target: canonical(l), problem: K.probe(l, id) };
-  }
+  const due = Object.entries(reg).filter(([id, l]) => LINK_KINDS[l.kind] && !(cache[id] && Date.now() - Date.parse(cache[id].at) < DAY && cache[id].target === canonical(l)));
+  const end = Date.now() + (Number(process.env.DEVTEAM_PROBE_BUDGET_MS) || 20000);
+  const skipped = [];
+  const queue = [...due];
+  const one = async () => {
+    for (let next = queue.shift(); next; next = queue.shift()) {
+      const [id, l] = next;
+      if (Date.now() >= end) { skipped.push(id); continue; }
+      const spec = LINK_KINDS[l.kind].probe(l, id);
+      const r = spec ? await runProbe(spec, end) : {};
+      if (r === 'budget') skipped.push(id);
+      else cache[id] = { at: nowIso(), target: canonical(l), problem: r.problem ?? null, ...(r.note ? { note: r.note } : {}) };
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(PROBE_AT_ONCE, due.length) }, one));
   writeJson(PROBE_FILE, cache);
+  return { skipped: due.map(([id]) => id).filter((id) => skipped.includes(id)) };
 }
 // Accepted knowledge whose scope applies to a ticket, a feature, or a class (spec §7.1).
 function knowledgeFor(target) {
@@ -5867,8 +5911,10 @@ function collectMetrics(since) {
     for (const [id, l] of Object.entries(reg)) {
       const K = LINK_KINDS[l.kind];
       if (!K) continue;
-      const why = K.reachable(l, id) ?? (probes[id]?.target === canonical(l) ? probes[id].problem : null);
+      const fresh = probes[id]?.target === canonical(l) ? probes[id] : null;
+      const why = K.reachable(l, id) ?? fresh?.problem ?? null;
       if (why) add('high', 'link-unreachable', id, why, K.fixHint(l, id));
+      else if (fresh?.note) add('low', 'link-behind-auth', id, fresh.note, 'fine if the fleet needs no access to it; "check": false stops the daily probe');
     }
     if (linesDeclared(settings)) {
       const since14 = now - 14 * DAY;
@@ -7705,5 +7751,7 @@ else {
       if (!(d.refs ?? []).some((r) => targets.includes(r))) die(`${d.id} is about ${(d.refs ?? []).join(', ') || 'nothing in particular (it named no --refs)'}; this ${command} is about ${targets.slice(0, 4).join(', ')}${targets.length > 4 ? ', …' : ''}. Decide with --refs naming it, or act without --decision`);
     }
   }
-  COMMANDS[command]();
+  // a command may be async (observe-metrics waits on its probes); its failure exits 1 as a die would
+  const ran = COMMANDS[command]();
+  if (ran && typeof ran.then === 'function') ran.catch((e) => die(e?.stack ?? String(e)));
 }
