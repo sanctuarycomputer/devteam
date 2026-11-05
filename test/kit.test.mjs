@@ -5233,10 +5233,17 @@ test('a ticket merges only after its depends_on, in any repo; unreadable fails c
     write(path.join(old, 'docs/devteam/run/links.local.json'), JSON.stringify({ companion: { path: path.join(F.base, 'not-cloned') } }));
     assert.match(runIn(old, ['merge', 'console-02-e', '--dry-run'], SUP).out, /cannot confirm companion-01-p is merged: its checkout \S*not-cloned is missing/);
     fs.rmSync(path.join(old, 'docs/devteam/run/links.local.json'));
-    // console-02-e lands on console's trunk by hand (the forge's UI): a finding names it
+    // console-02-e lands on console's trunk by hand (the forge's UI): a finding names it. First, the
+    // same merge dated before the upgrade (before the kit that knows the finding reached home's main)
+    // raises nothing: merge didn't refuse it then.
     g(['checkout', '-q', 'trunk'], F.console);
-    g(['merge', '-q', '--no-ff', '-m', 'Merge ticket/console-02-e', 'ticket/console-02-e'], F.console);
+    execFileSync('git', ['merge', '-q', '--no-ff', '-m', 'Merge ticket/console-02-e', 'ticket/console-02-e'], { cwd: F.console, env: { ...process.env, GIT_COMMITTER_DATE: '2020-01-01T00:00:00Z', GIT_AUTHOR_DATE: '2020-01-01T00:00:00Z' } });
     g(['push', '-q', 'origin', 'trunk'], F.console);
+    assert.match(okIn(old, ['status']), /merged +console-02-e/, 'it reads merged');
+    assert.ok(!json(okIn(old, ['metrics', '--json'])).findings.some((x) => x.kind === 'merged-out-of-order'), 'an out-of-order merge from before the upgrade is no finding');
+    g(['reset', '-q', '--hard', 'HEAD^'], F.console);
+    g(['merge', '-q', '--no-ff', '-m', 'Merge ticket/console-02-e', 'ticket/console-02-e'], F.console);
+    g(['push', '-q', '-f', 'origin', 'trunk'], F.console);
     const m = json(okIn(old, ['metrics', '--json']));
     const f = m.findings.find((x) => x.kind === 'merged-out-of-order');
     assert.ok(f, `a merged-out-of-order finding: ${JSON.stringify(m.findings.map((x) => x.kind))}`);

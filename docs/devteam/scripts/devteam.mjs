@@ -6638,10 +6638,12 @@ function collectMetrics(since) {
   }
   // A ticket that reached its main before a ticket it depends on (merge refuses that, so this is a
   // merge by hand or in the forge's UI): its provider wasn't there when it landed. Read only where
-  // both repos can be read; link-unreachable covers the rest.
+  // both repos can be read; link-unreachable covers the rest. Only merges after this finding reached
+  // home's main: merge didn't refuse them before, so older history raises nothing.
+  const orderSince = upgradeAt('merged-out-of-order');
   for (const t of ts.values()) {
     const at = mergedAt(t.id);
-    if (!at) continue;
+    if (!at || orderSince === null || at < orderSince) continue;
     const early = (t.depends_on ?? []).filter((d) => ts.has(d) && factsRepo(d) && !(mergedAt(d) && mergedAt(d) <= at));
     const name = repoOfTicketLink(t);
     if (early.length) add('high', 'merged-out-of-order', t.id, `${t.id} reached ${name === 'home' ? '' : `${name}'s `}main before ${early.join(', ')}, which it depends on`, `check that ${t.id} works without ${early.length > 1 ? 'them' : 'it'}, and merge ${early.join(', ')} next; a revert is a ticket of its own`, { sev: 3 });
