@@ -7063,7 +7063,8 @@ const SCRUB_RULES = [
   // Bearer takes any value; Basic, Digest and Token only a token-shaped one (a digit, a symbol or
   // mixed case in it, as base64 has), so "Token validation failed" and "Basic authentication" stay
   [/\b([Bb]earer|BEARER)\s+[A-Za-z0-9._~+/=-]{8,}/g, '$1 [token]'],
-  [/\b((?:nonce|cnonce|response|opaque)\s*=\s*)"[^"]*"/gi, '$1"[redacted]"'],
+  // inside a Digest header: its nonce, response and opaque values, and the username
+  [/\bDigest\s+[^\n]*/gi, (h) => h.replace(/\b((?:nonce|cnonce|response|opaque|username)\s*=\s*)"[^"]*"/gi, '$1"[redacted]"')],
   [/\b([Bb]asic|BASIC|[Dd]igest|DIGEST|[Tt]oken|TOKEN)\s+(?=[A-Za-z0-9._~+/=-]*(?:[\d._~+/=-]|[a-z][A-Z]))[A-Za-z0-9._~+/=-]{8,}/g, '$1 [token]'],
   [/\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*/g, '[jwt]'],
   // a value under a key named like a secret or personal data: key=value, key: value, "key":"value"
@@ -7283,8 +7284,10 @@ const waitAliveFile = () => path.join(runDir, 'monitors', '.wait-alive');
 // its command line names monitor stream <name>, and its pid file is from this boot.
 function isCollector(pid, name) {
   if (fileAge(path.join(monitorDir(name), 'stream.pid')) > os.uptime() * 1000) return false;
-  const cmd = readText(`/proc/${pid}/cmdline`)?.split('\0').join(' ') ?? spawnSync('ps', ['-o', 'args=', '-p', String(pid)], { encoding: 'utf8' }).stdout ?? '';
-  return cmd.includes(`monitor stream ${name}`);
+  let args = null;
+  try { args = readText(`/proc/${pid}/cmdline`)?.split('\0').filter(Boolean) ?? null; } catch {}
+  args ??= (spawnSync('ps', ['-o', 'args=', '-p', String(pid)], { encoding: 'utf8' }).stdout ?? '').trim().split(/\s+/);
+  return args.slice(-3).join(' ') === `monitor stream ${name}`;
 }
 const collectorAlive = (name) => pidAlive(streamPid(name)) && Math.min(fileAge(path.join(monitorDir(name), 'stream.alive')), fileAge(path.join(monitorDir(name), 'stream.pid'))) < 60000;
 // A probe runs from a private copy outside the repo (no node_modules an agent can write sits on
