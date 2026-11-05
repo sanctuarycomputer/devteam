@@ -3852,6 +3852,57 @@ test('a link edit lands only from the entry main has: link land refuses an entry
   } finally { F.done(); }
 });
 
+test('an owner\'s hand-revert of a link on main expires the acts before it for that link only: an old act chain no longer carries its entry back, and another link\'s acts still land', () => {
+  const F = monoFixture('link-revert');
+  const { old, ok, run, g, edit } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const settingsRel = 'docs/devteam/project/settings.md';
+  const block = (f) => JSON.parse(fs.readFileSync(f, 'utf8').match(/```json devteam\s*\n([\s\S]*?)\n```/)[1]);
+  const pause = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1100); // commit times are whole seconds
+  try {
+    const x1 = { kind: 'url', title: 'X', url: 'https://x.test' };
+    const y1 = { kind: 'url', title: 'Y', url: 'https://y.test' };
+    edit((j) => { j.links = { x: x1, y: y1 }; });
+    g(['commit', '-qam', 'links'], old); g(['push', '-q', 'origin', 'main'], old);
+    pause();
+    // the supervisor's acts: x1 -> x2 and y1 -> y2 (this checkout's settings.md now has both)
+    ok(old, ['link', 'set', 'x', 'notes', 'x two'], SUP);
+    ok(old, ['link', 'set', 'y', 'notes', 'y two'], SUP);
+    pause();
+    // from another clone: x2 lands on main, then the owner hand-reverts x to x1
+    const other = path.join(F.base, 'other');
+    g(['clone', '-q', F.org, other], F.base);
+    for (const [k, v] of [['user.email', 'o@o'], ['user.name', 'o']]) g(['config', k, v], other);
+    edit((j) => { j.links.x.notes = 'x two'; }, other);
+    g(['commit', '-qam', 'land x two'], other);
+    edit((j) => { delete j.links.x.notes; }, other);
+    g(['commit', '-qam', 'owner: put x back'], other);
+    g(['push', '-q', 'origin', 'main'], other);
+    // link land: the old x act (x1 -> x2) leads from main's x1 again, but main changed x since it
+    const wt = ok(old, ['chore', 'start', 'revert'], SUP).trim();
+    const landed = run(old, ['link', 'land', 'revert'], SUP);
+    assert.notEqual(landed.status, 0, `an act from before main's last change to x carried x2 back: ${landed.out}`);
+    assert.match(landed.err, /main's links\.x changed since/);
+    assert.match(landed.out, /links\.y \(changed\)/, "y's act is untouched by x's revert");
+    const j = block(path.join(wt, settingsRel));
+    assert.equal(j.links.x.notes, undefined, "the owner's x stays");
+    assert.equal(j.links.y.notes, 'y two');
+    // merge: a chore carrying x2 by hand is refused for x alone
+    edit((x) => { x.links.x = { ...x1, notes: 'x two' }; }, wt);
+    g(['commit', '-qam', 'chore-revert: x'], wt); g(['push', '-q', 'origin', 'chore-revert'], wt);
+    write(path.join(old, 'docs/devteam/run/pr/chore-revert.md'), '# chore-revert: x\n\n## One-way doors\n\nNone.\n');
+    const m = run(old, ['merge', '--chore', 'revert', '--dry-run'], SUP);
+    assert.notEqual(m.status, 0, `the old x act landed over the owner's revert: ${m.out}`);
+    assert.match(m.out + m.err, /changes links\.x to an entry no registry-edit act wrote/);
+    assert.doesNotMatch(m.out + m.err, /links\.y/, "y's act still lands y2");
+    // a fresh act from main's entry lands x again
+    g(['checkout', '-q', '--', settingsRel], old);
+    g(['merge', '-q', '--ff-only', 'origin/main'], old);
+    ok(old, ['link', 'set', 'x', 'notes', 'x two'], SUP);
+    assert.equal(run(old, ['merge', '--chore', 'revert', '--dry-run'], SUP).status, 0);
+  } finally { F.done(); }
+});
+
 test('the registry attestation is the owner\'s: registry-attest is never answered from chat or defaulted, and a goal that needs the registry complete waits for the owner\'s yes', () => {
   const F = fleetFixture('attest');
   const { old, ok, run } = F;

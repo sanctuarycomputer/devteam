@@ -1060,6 +1060,7 @@ function fetchMain() {
   logCache = null;
   mainLogCache = undefined;
   mergeShaCache.clear();
+  linkChangedCache.clear();
 }
 // In a read-only command, full ref names resolve from one for-each-ref listing (a dashboard
 // refresh asked git about each ticket branch separately: ~90 processes). Anything else, and every
@@ -2856,7 +2857,37 @@ function registryFails(base, sha, R = homeFacts) {
 // The registry-edit acts that can carry link id from one entry to another: each records the entry
 // it replaced (prior_hash, null for an add) and the one it wrote (entry_hash, null for a removal).
 // An act without both (written before they existed) never counts.
-const linkActs = (id) => logObjects('act').filter((a) => a.class === 'registry-edit' && Object.hasOwn(a, 'entry_hash') && Object.hasOwn(a, 'prior_hash') && (a.refs ?? []).includes(`link:${id}`)).sort(byTime);
+// Only acts logged since main last changed that link's entry count: an owner's hand-revert of
+// the link on main would otherwise let an old act, made from the entry main has again, carry its
+// entry back over the revert. Another link's change, or any other settings change, expires nothing.
+const linkActs = (id) => {
+  const since = linkChangedOnMain(id);
+  return logObjects('act').filter((a) => a.class === 'registry-edit' && Object.hasOwn(a, 'entry_hash') && Object.hasOwn(a, 'prior_hash') && (a.refs ?? []).includes(`link:${id}`) && (since === null || Date.parse(a.created_at) >= since)).sort(byTime);
+};
+// When main's first-parent line last changed links.<id>'s entry (ms; commit times are whole
+// seconds, so an act in that same second still counts), looking back over the last
+// LINK_HISTORY_DEPTH commits that touched settings.md; null when none of them changed it. Each
+// commit's entry is compared with its first parent's. Cached for the run (fetchMain clears it;
+// entries by sha never change).
+const LINK_HISTORY_DEPTH = 200;
+const linkChangedCache = new Map();
+const linkEntryAtCache = new Map();
+function linkChangedOnMain(id) {
+  if (linkChangedCache.has(id)) return linkChangedCache.get(id);
+  const ref = mainRef();
+  const rows = ref ? (git(['log', '--first-parent', '-n', String(LINK_HISTORY_DEPTH), '--format=%H %ct', ref, '--', `${projectRel}/settings.md`]) ?? '').split('\n').filter(Boolean) : [];
+  const entryAt = (rev) => {
+    if (!linkEntryAtCache.has(rev)) linkEntryAtCache.set(rev, settingsAt(rev, { orNull: true })?.links ?? {});
+    return linkEntryHash(ownEntry(linkEntryAtCache.get(rev), id));
+  };
+  let at = null;
+  for (const row of rows) {
+    const [sha, ct] = row.split(' ');
+    if (entryAt(sha) !== entryAt(`${sha}^`)) { at = Number(ct) * 1000; break; }
+  }
+  linkChangedCache.set(id, at);
+  return at;
+}
 // Whether link id's acts, in the order they were written, lead from entry hash `from` (main's) to
 // `to`: one act from main's entry, or a chain of them (link add, then link set, between landings).
 // An act whose prior_hash main no longer has leads nowhere, so an act for an older main never lands.
