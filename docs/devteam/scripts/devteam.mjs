@@ -6732,9 +6732,15 @@ async function cmdDashboard() {
     // path outside the repo). HTML mocks are served sandboxed so they can't call the owner API.
     if (req.method === 'GET' && u.pathname === '/api/file') {
       const p = u.searchParams.get('path') ?? '';
-      const ref = u.searchParams.get('ref') || mainRef() || 'HEAD';
+      // repo=<link>: a file in another repo's checkout (a sibling ticket's records), read by name
+      // only when this machine can read that repo
+      const rid = u.searchParams.get('repo');
+      if (rid && rid !== 'home' && !LINK_ID.test(rid)) return send(res, 400, 'text/plain', 'bad repo');
+      const R = !rid || rid === 'home' ? repo('home') : repoReadable(rid) ? repo(rid) : null;
+      if (!R) return send(res, 404, 'text/plain', `no checkout of ${rid} here`);
+      const ref = u.searchParams.get('ref') || R.mainRef() || 'HEAD';
       if (!/^(?!\/)(?!.*\.\.)[^\s]+$/.test(p) || !/^[A-Za-z0-9._\/-]+$/.test(ref)) return send(res, 400, 'text/plain', 'bad path or ref');
-      const body = await new Promise((resolve) => execFile('git', ['show', `${ref}:${p}`], { cwd: mainRoot, encoding: 'buffer', maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => resolve(err ? null : stdout)));
+      const body = await new Promise((resolve) => execFile('git', ['show', `${ref}:${p}`], { cwd: R.root, encoding: 'buffer', maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => resolve(err ? null : stdout)));
       if (!body) return send(res, 404, 'text/plain', `not found: ${p} at ${ref}`);
       const ext = path.extname(p).toLowerCase();
       const type = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.pdf': 'application/pdf', '.html': 'text/html; charset=utf-8' }[ext] ?? 'text/plain; charset=utf-8';

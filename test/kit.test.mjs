@@ -4623,3 +4623,37 @@ test('fleet status checks a sibling session against its own remote and lists eve
     assert.equal(gh.repos.find((r) => r.id === 'companion').workflow, false);
   } finally { F.done(); }
 });
+
+test('the dashboard reads a sibling ticket\'s documents from its repo', async () => {
+  const F = multiFixture('dash-sibling');
+  const { old, g, okIn, ticket } = F;
+  try {
+    ticket('console-01-a');
+    const w = path.join(old, '.worktrees', 'console-01-a');
+    g(['worktree', 'add', '-q', '-b', 'ticket/console-01-a', w, 'origin/trunk'], F.console);
+    write(path.join(w, 'docs/devteam/project/tickets/console-01-a/spec.md'), '# console spec\n');
+    g(['add', '-A'], w); g(['commit', '-qm', 'spec'], w);
+    const spec = json(okIn(old, ['timeline', 'console-01-a', '--json'])).files.find((f) => f.title === 'spec');
+    assert.equal(spec.repo, 'console');
+    const port = await freePort();
+    const srv = spawn(process.execPath, [F.kitDT, 'dashboard', '--port', String(port)], { cwd: old, env: F.env({}), stdio: 'ignore' });
+    try {
+      await serverUp(`http://127.0.0.1:${port}/`);
+      const get = async (q) => { const r = await fetch(`http://127.0.0.1:${port}/api/file?${new URLSearchParams(q)}`); return [r.status, await r.text()]; };
+      assert.deepEqual(await get({ path: spec.path, ref: spec.ref, repo: 'console' }), [200, '# console spec\n']);
+      assert.equal((await get({ path: spec.path, ref: spec.ref }))[0], 404, "home has no such file: the repo must be named");
+      assert.equal((await get({ path: spec.path, repo: 'Not A Link' }))[0], 400);
+      // the drawer rebuilds the URL from the link's params: it must carry repo through
+      const html = fs.readFileSync(path.join(kit, 'dashboard/index.html'), 'utf8');
+      const of = html.slice(html.indexOf('function openFile(params)'), html.indexOf('DRAWER.url = url;', html.indexOf('function openFile(params)')));
+      assert.match(of, /repo = params\.get\('repo'\)/);
+      assert.match(of, /new URLSearchParams\(\{ path, \.\.\.\(ref \? \{ ref \} : \{\}\), \.\.\.\(repo \? \{ repo \} : \{\}\) \}\)/, 'openFile passes repo to /api/file');
+      assert.match(html, /const fileHref = \(l\) => [^\n]*\.\.\.\(l\.repo \? \{ repo: l\.repo \} : \{\}\)/, 'a file link carries its repo');
+      // no console checkout here: a 404 that says so, and the dashboard carries on
+      write(path.join(old, 'docs/devteam/run/links.local.json'), JSON.stringify({ console: { path: path.join(F.base, 'not-cloned') } }));
+      const [code, text] = await get({ path: spec.path, ref: spec.ref, repo: 'console' });
+      assert.deepEqual([code, text], [404, 'no checkout of console here']);
+      fs.rmSync(path.join(old, 'docs/devteam/run/links.local.json'));
+    } finally { srv.kill(); }
+  } finally { F.done(); }
+});

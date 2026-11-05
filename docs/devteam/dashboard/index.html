@@ -1028,7 +1028,7 @@ function cardHead(icon, label, { extra = '', id = null, rows = [] } = {}) {
   return `<div class="card-head"><i class="icon-${icon}" aria-hidden="true"></i>${label}<span class="grow">${extra}</span>${menu}</div>`;
 }
 const KIND_ICON = { 'owner-decision': 'scale', 'one-way-door': 'triangle-alert', clarification: 'circle-help', proposal: 'lightbulb', trust: 'users', 'goal-definition': 'target', 'goal-approval': 'flag', 'owner-action': 'zap', review: 'list-checks' };
-const fileHref = (l) => `#file?${new URLSearchParams({ path: l.path, ...(l.ref ? { ref: l.ref } : {}), title: l.title || l.path })}`;
+const fileHref = (l) => `#file?${new URLSearchParams({ path: l.path, ...(l.ref ? { ref: l.ref } : {}), ...(l.repo ? { repo: l.repo } : {}), title: l.title || l.path })}`;
 const linkOf = (l) => (l.url ? `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.title)}</a>` : l.path ? `<a href="${esc(fileHref(l))}">${esc(l.title)}</a>` : `<span>${esc(l.title)}${l.remote ? ` <span class="muted">(${esc(l.remote)})</span>` : ''}</span>`);
 function answeredCard(q) {
   const how = q.status === 'defaulted' ? 'went with the default; you didn’t answer in time' : q.status === 'withdrawn' ? 'withdrawn by the supervisor' : `answered ${CHANNEL_WORDS[q.channel] || ''}`;
@@ -2585,9 +2585,9 @@ function refetchFile(url) {
   return pr;
 }
 function openFile(params) {
-  const path = params.get('path'), title = params.get('title') || path, ref = params.get('ref');
+  const path = params.get('path'), title = params.get('title') || path, ref = params.get('ref'), repo = params.get('repo');
   drawerFor('file', path, params);
-  const url = `/api/file?${new URLSearchParams({ path, ...(ref ? { ref } : {}) })}`;
+  const url = `/api/file?${new URLSearchParams({ path, ...(ref ? { ref } : {}), ...(repo ? { repo } : {}) })}`;
   DRAWER.url = url;
   const ext = (path.split('.').pop() || '').toLowerCase();
   const p = peekOf('file', path, ref ? { ref } : {});
