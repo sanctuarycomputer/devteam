@@ -279,7 +279,7 @@ const OWNER_SETTINGS = {
   gates: 'gate-change', worktree_setup: 'gate-change', worktree_files: 'gate-change',
   autonomy_ceilings: 'governance-edit', agent_command: 'governance-edit', resume_command: 'governance-edit', worker_denied_commands: 'governance-edit',
   forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', upstream_repo: 'governance-edit',
-  release: 'governance-edit', secret_commands: 'governance-edit', monitors: 'monitor-change', monitor_defaults: 'monitor-change', monitor_scrub: 'monitor-change', incident_slots: 'governance-edit', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit',
+  release: 'governance-edit', secret_commands: 'governance-edit', monitors: 'monitor-change', monitor_defaults: 'monitor-change', monitor_scrub: 'monitor-change', incident_slots: 'governance-edit', remediations: 'governance-edit', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit',
 };
 const canonical = (v) => (Array.isArray(v) ? `[${v.map(canonical).join(',')}]` : v && typeof v === 'object' ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(',')}}` : JSON.stringify(v));
 function settingsAt(ref) {
@@ -2736,7 +2736,17 @@ function cmdAsk() {
   const known = L.reasons.map((r) => r.id);
   for (const r of reasons) if (known.length && !known.includes(r)) warn(`reason "${r}" is not in constitution.md's table`);
   const blocks = asList(flags.blocks);
-  for (const b of blocks) if (!tickets().has(b) && !isIncident(logGet(b))) die(`--blocks ${b}: no such ticket (or incident)`);
+  for (const b of blocks) if (!tickets().has(b) && !isIncident(logGet(b)) && !(cls === 'production-remediation' && /^(remediation|release):\S+$/.test(b))) die(`--blocks ${b}: no such ticket (or incident)`);
+  // a remediation question names the remediation (and a rollback its release), so the answer
+  // approves that and nothing else
+  if (cls === 'production-remediation' && !['trust', 'proposal'].includes(kind)) {
+    const rs = blocks.filter((b) => b.startsWith('remediation:'));
+    if (rs.length !== 1) die('a production-remediation question names its remediation in --blocks remediation:<action> (and, for a rollback, release:<version>)');
+    const r = remediationOf(rs[0].slice('remediation:'.length));
+    const rel = blocks.filter((b) => b.startsWith('release:'));
+    if (r.kind === 'rollback' && rel.length !== 1) die('a rollback question names its target in --blocks release:<version>');
+    if (r.kind !== 'rollback' && rel.length) die(`${r.name} is a ${r.kind}, not a rollback: it takes no release`);
+  }
   if (!flagStr('goal') && !flagStr('ticket') && !blocks.length && !['trust', 'proposal'].includes(kind)) warn('this question names no --goal, --ticket or --blocks: when it serves a goal, add --goal <g-id> so the goal shows it');
   // A question that asks about several acts names them up front; the owner's card lists them, and
   // the answer approves each once and nothing else (constitution.md §3, one answer, one act).
@@ -2818,7 +2828,7 @@ function cmdAnswer() {
     const v = openQuestion(id);
     if (!v.default) die(`${id} has no default to apply`);
     // an incident fix's default fires at its deadline, not before
-    if (v.class === 'incident-fix' && v.deadline && Date.now() < Date.parse(v.deadline)) die(`${id}'s default fires at ${v.deadline}; until then it is the owner's to answer`);
+    if (['incident-fix', 'production-remediation'].includes(v.class) && v.deadline && Date.now() < Date.parse(v.deadline)) die(`${id}'s default fires at ${v.deadline}; until then it is the owner's to answer`);
     appendLog({ type: 'question', op: 'set', id, status: 'defaulted' }, 'supervisor');
     appendLog({ type: 'act', class: 'apply-default', what: `applied the default to ${id}: ${v.default}`, refs: [id], reversible: true }, 'supervisor');
     return out(`defaulted ${id}: ${v.default}`);
@@ -3721,6 +3731,7 @@ function authorise(cls, scope, approved, refs, verb) {
     // guidance, never authority over every class on the ladder.
     if (rule.scope !== `class:${cls}`) die(`${approved} applies to ${rule.scope}; a standing rule authorises a call only when the owner scoped it to its class (answer … --rule "…" --rule-scope class:${cls})`);
     if (ownerOnly) die(`${cls} is the owner's (constitution.md); a standing rule never covers it: ask`);
+    if (cls === 'production-remediation') die('production-remediation tops out at ask with a default: a standing rule never covers it, so the owner sees each one coming');
   } else if (approved) {
     const q = logGet(approved);
     approval = q?.type === 'question' ? questionView(q) : null;
@@ -3807,6 +3818,7 @@ function citeTargets() {
     case 'worker': return [a, ...(features().get(tickets().get(a)?.feature)?.goals ?? [])];
     case 'planner': return [a, `plan-${a}`, ...asList(flags.goal)];
     case 'fleet': return ['fleet', ...logObjects('goal').map((g) => g.id)];
+    case 'remediate': return a ? [`remediation:${a}`] : null;
     default: return null;
   }
 }
@@ -3822,6 +3834,22 @@ function cmdDecide() {
   let scope = flagStr('scope') ?? null;
   const approved = flagStr('approved') ?? null;
   const refs = asList(flags.refs);
+  // a remediation decision names the remediation it runs
+  if (cls === 'production-remediation') {
+    upkeepAllows('a remediation');
+    const rs = refs.filter((r) => String(r).startsWith('remediation:'));
+    if (rs.length !== 1) die('a production-remediation decision names exactly one remediation:<action> in --refs (and the incident it is for)');
+    const r = remediationOf(rs[0].slice('remediation:'.length));
+    const rel = refs.filter((x) => String(x).startsWith('release:'));
+    if (r.kind === 'rollback' && rel.length !== 1) die('a rollback decision names its target in --refs release:<version>');
+    if (r.kind !== 'rollback' && rel.length) die(`${r.name} is a ${r.kind}, not a rollback: it takes no release`);
+    // the answer is about this remediation (and release), and went with the recommendation
+    if (approved?.startsWith('q-')) {
+      const q = questionView(logGet(approved) ?? die(`no question ${approved}`));
+      for (const ref of [rs[0], ...rel]) if (!(q.blocks ?? []).includes(ref)) die(`${approved} was asked about ${(q.blocks ?? []).join(', ') || 'nothing in particular'}, not ${ref}`);
+      if (q.status === 'answered' && !q.matched) die(`${approved}'s answer ("${q.answer}") isn't its recommendation ("${q.recommendation}"): a remediation runs only on a yes`);
+    }
+  }
   // an incident fix is scoped by the incident's computed severity, never by the caller
   // (one incident per decision, so a low one can't carry a high one past the ladder), and an answer
   // approves a decision only for the incident it was asked about, at the same scope
@@ -3861,6 +3889,7 @@ function cmdAct() {
   supervisorOnly('act');
   if (cls === 'improvement-trial') upkeepAllows('a new trial');
   // an incident fix is decided first (one incident, its computed scope, an answer about it)
+  if (cls === 'production-remediation') die('a remediation is run by remediate <action> --decision <d-…>, which logs its act');
   if (cls === 'incident-fix' && !decision) die('an incident-fix act carries out a decision: decide --class incident-fix --refs <p-id> <ticket-id> …, then act --decision <d-id>');
   const scope = decision ? decision.scope ?? null : flagStr('scope') ?? null;
   const approved = decision ? decision.approved_by ?? null : flagStr('approved') ?? null;
@@ -7161,13 +7190,13 @@ function cliReady(cli) {
   return why;
 }
 // The probe's file under project/, and its text: main's blob, or (monitor test) this checkout's.
-function probeRel(m) {
+function probeRel(m, dir = 'monitors') {
   const rel = String(m.probe ?? '').replace(/^project\//, '');
-  if (!/^monitors\/[A-Za-z0-9][A-Za-z0-9_.-]*\.m?js$/.test(rel)) throw new Error(`probe "${m.probe ?? ''}" is a file project/monitors/<name>.mjs`);
+  if (!new RegExp(`^${dir}/[A-Za-z0-9][A-Za-z0-9_.-]*\\.m?js$`).test(rel)) throw new Error(`${dir === 'monitors' ? 'probe' : 'script'} "${m.probe ?? ''}" is a file project/${dir}/<name>.mjs`);
   return rel;
 }
-function probeSource(m, { working = false } = {}) {
-  const rel = probeRel(m);
+function probeSource(m, { working = false, dir = 'monitors' } = {}) {
+  const rel = probeRel(m, dir);
   const main = projectInRepo ? mainRef() : null;
   const onMain = main ? git(['show', `${main}:${projectRel}/${rel}`], mainRoot) : null;
   if (working) {
@@ -7200,7 +7229,7 @@ function probeEnv(m, since, { credentials = true } = {}) {
 const killGroup = (ch, sig = 'SIGKILL') => { try { process.kill(-ch.pid, sig); } catch { try { ch.kill(sig); } catch {} } };
 // Run a command, its output capped and its time bounded; never throws. It resolves when the
 // process exits (output still arriving gets a moment), not when every pipe closes.
-function spawnCapped(cmd, args, { cwd, env, timeoutMs, maxBytes }) {
+function spawnCapped(cmd, args, { cwd, env, timeoutMs, maxBytes, keepRunning = false }) {
   return new Promise((resolve) => {
     let ch;
     try { ch = spawn(cmd, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true }); } catch (e) { return resolve({ status: null, out: '', err: e.message }); }
@@ -7208,7 +7237,7 @@ function spawnCapped(cmd, args, { cwd, env, timeoutMs, maxBytes }) {
     const finish = (extra = {}) => { if (done) return; done = true; clearTimeout(timer); killGroup(ch); resolve({ status, out, err, timedOut, over, ...extra }); };
     const timer = setTimeout(() => { timedOut = true; finish(); }, timeoutMs);
     ch.stdout.setEncoding('utf8');
-    ch.stdout.on('data', (d) => { if (over || done) return; bytes += Buffer.byteLength(d); if (bytes > maxBytes) { over = true; finish(); } else out += d; });
+    ch.stdout.on('data', (d) => { if (over || done) return; bytes += Buffer.byteLength(d); if (bytes > maxBytes) { over = true; if (!keepRunning) finish(); } else out += d; });
     ch.stderr.setEncoding('utf8');
     ch.stderr.on('data', (d) => { if (err.length < 8192) err += d; });
     ch.on('error', (e) => finish({ status: null, err: e.message }));
@@ -7922,6 +7951,94 @@ function suspectEscapes() {
   writeJsonAtomic(markFile, { at: obs.at(-1).created_at });
 }
 
+// ===== remediation: reviewed production actions, on the ladder =====
+// remediations (owner settings, governance-edit) name a reviewed script under
+// project/remediations/, pinned by its blob sha, its params, the access it uses (CLIs in uses,
+// credentials) and its undo. `remediate <action> --decision <d-…>` runs main's blob of it, once
+// per decision, within valid_minutes of the owner's answer, and logs an act in
+// production-remediation (start 1, ceiling 2, no standing rules: the owner always sees one
+// coming, or it runs at its default after its deadline). The question and the decision name the
+// remediation (and a rollback its release), and the answer is the recommendation. A rollback
+// across a production-migration act since its target release is a one-way door: it needs the
+// owner's own answer, not from chat, to a one-way-door question with no default.
+const REMEDIATION_KINDS = ['restart', 'scale', 'rollback', 'other'];
+function remediationOf(action) {
+  if (!MONITOR_NAME.test(String(action ?? ''))) die(`remediation "${action}": a name is letters, digits, dot, dash or underscore`);
+  const r = loadSettings().remediations?.[action];
+  if (!r || typeof r !== 'object' || Array.isArray(r)) die(`no remediation ${action} in settings (remediations)`);
+  const kind = r.kind ?? 'other';
+  if (!REMEDIATION_KINDS.includes(kind)) die(`remediation ${action}: kind is one of ${REMEDIATION_KINDS.join(', ')}`);
+  const timeout = Number(r.timeout_s ?? 300);
+  if (!(Number.isFinite(timeout) && timeout > 0 && timeout <= 3600)) die(`remediation ${action}: timeout_s is seconds, 1 to 3600`);
+  if (typeof r.script !== 'string') die(`remediation ${action}: script is project/remediations/<name>.mjs`);
+  if (r.params != null && (typeof r.params !== 'object' || Array.isArray(r.params))) die(`remediation ${action}: params is an object`);
+  if (typeof r.sha !== 'string' || !/^[0-9a-f]{7,40}$/.test(r.sha)) die(`remediation ${action}: sha pins the reviewed script (git rev-parse main:docs/devteam/${r.script}), so a change to it is a settings change the owner answers`);
+  const valid = Number(r.valid_minutes ?? 60);
+  return { name: action, kind, script: r.script, sha: r.sha, params: r.params ?? {}, uses: r.uses ?? [], credentials: r.credentials ?? {}, undo: r.undo ?? null, about: r.about ?? null, timeout_s: timeout, valid_minutes: Number.isFinite(valid) && valid > 0 ? valid : 60 };
+}
+const remediationRef = (action) => `remediation:${action}`;
+// The migrations a rollback to a release would cross: production-migration acts since that
+// release first went out, by a deploy a monitor's poll observed (its deploy line, at the
+// probe's own time when it gave one). Fails closed: null when no such deploy is known.
+function migrationsSince(release) {
+  const dep = logObjects('observation').filter((o) => o.detector === 'monitor' && o.kind === 'deploy' && o.created_by === 'supervisor' && o.source_key === `monitor:${o.source}:deploy:${release}`).sort((a, b) => deployAt(a) - deployAt(b))[0];
+  if (!dep) return null;
+  const at = deployAt(dep);
+  return logObjects('act').filter((a) => a.class === 'production-migration' && Date.parse(a.created_at) > at);
+}
+async function cmdRemediate() {
+  supervisorOnly('remediate');
+  upkeepAllows('a remediation');
+  const action = positional[0] ?? die('usage: remediate <action> --decision <d-…> [--to <release>]');
+  const r = remediationOf(action);
+  const d = flagStr('decision') ? decisionFor(flagStr('decision')) : die(`remediate needs --decision <d-…>: a production-remediation decision whose refs name ${remediationRef(action)}`);
+  if (d.class !== 'production-remediation') die(`${d.id} is in class ${d.class}, not production-remediation`);
+  if (!(d.refs ?? []).includes(remediationRef(action))) die(`${d.id} decides ${(d.refs ?? []).filter((x) => String(x).startsWith('remediation:')).join(', ') || 'no remediation'}, not ${remediationRef(action)}`);
+  const lockDir = path.join(runDir, 'remediations');
+  const lock = path.join(lockDir, `${d.id}.lock`);
+  const done = logObjects('act').find((a) => a.decision === d.id);
+  if (done || fs.existsSync(lock)) die(`${d.id} was carried out already${done ? ` (${done.id})` : ' (or is running now)'}: decide again to run it again`);
+  // an answer is for the outage it was given in
+  const q = d.approved_by?.startsWith('q-') ? questionView(logGet(d.approved_by)) : null;
+  const answeredAt = Date.parse(q?.answered_at ?? q?.deadline ?? d.created_at);
+  if (Date.now() - answeredAt > r.valid_minutes * 60000) die(`${d.id} rests on an answer from ${new Date(answeredAt).toISOString()}, over ${r.valid_minutes} min ago: ask again`);
+  const to = flagStr('to') ?? null;
+  const rel = (d.refs ?? []).find((x) => String(x).startsWith('release:'))?.slice('release:'.length) ?? null;
+  if (r.kind !== 'rollback' && to) die(`${action} is a ${r.kind}, not a rollback: it takes no --to`);
+  if (r.kind === 'rollback') {
+    if (!to) die('a rollback names its target: --to <release>');
+    if (to !== rel) die(`${d.id} decided a rollback to ${rel ?? 'no release'}, not ${to}`);
+    const crossed = migrationsSince(to);
+    if (!crossed) die(`no deploy of release ${to} was observed by a monitor: a rollback goes to a release the monitors saw`);
+    if (crossed.length && !(q && q.status === 'answered' && !q.default && q.channel !== 'chat' && (q.kind === 'one-way-door' || (q.why_asked?.reasons ?? []).includes('one-way-door')))) die(`rolling back to ${to} crosses ${crossed.map((a) => a.id).join(', ')} (production-migration): a one-way door, whatever reversible says. It needs the owner's own answer (not from chat) to an ask --kind one-way-door with no default (decide --approved <qid>)`);
+  }
+  const m = { name: `remediation-${action}`, kind: 'probe', probe: r.script, params: { ...r.params, ...(to ? { to } : {}) }, uses: r.uses, credentials: r.credentials };
+  let env, redact, src;
+  try {
+    for (const cli of r.uses) { const why = cliReady(cli); if (why) throw new Error(why); }
+    src = probeSource(m, { dir: 'remediations' });
+    const onMain = projectInRepo && mainRef() ? git(['rev-parse', `${mainRef()}:${projectRel}/${probeRel(m, 'remediations')}`], mainRoot) : null;
+    if (!(onMain ?? '').startsWith(r.sha)) throw new Error(`main's ${r.script} is not the reviewed one (sha ${r.sha}); a changed script needs the owner's settings answer`);
+    ({ env, redact } = probeEnv(m, null));
+  } catch (e) { die(`${action}: ${e.message}`); }
+  fs.mkdirSync(lockDir, { recursive: true });
+  try { fs.writeFileSync(lock, `${process.pid}\n`, { flag: 'wx' }); } catch { die(`${d.id} is being carried out now`); }
+  const copy = probeCopy(src.text);
+  const t0 = performance.now();
+  let res;
+  // a writing action isn't killed for printing too much; past the cap its output is dropped
+  try { res = await spawnCapped(process.execPath, [copy.file], { cwd: mainRoot, env, timeoutMs: r.timeout_s * 1000, maxBytes: 1024 * 1024, keepRunning: true }); } finally { copy.done(); }
+  const ok = res.status === 0 && !res.timedOut;
+  const why = res.timedOut ? `stopped after ${r.timeout_s}s: its effect is unknown, check production${r.undo ? ` (undo: ${r.undo})` : ''}` : res.status !== 0 ? `exited ${res.status ?? 'abnormally'}` : null;
+  const output = scrubText(redact(`${res.out}${res.err ? `\n${res.err}` : ''}`)).trim();
+  const act = appendLog({ type: 'act', decision: d.id, class: 'production-remediation', what: `ran ${action}${to ? ` to ${to}` : ''} (${r.kind}): ${ok ? 'ok' : `failed, ${why}`}${r.undo ? `; undo is ${r.undo}` : ''}`, refs: d.refs, reversible: !!r.undo && d.reversible !== false }, 'supervisor');
+  monitorObserve({ name: 'remediations' }, { subject: remediationRef(action), kind: ok ? 'remediation' : 'remediation-failed', detail: `${action}${to ? ` to ${to}` : ''}: ${ok ? 'ok' : why} in ${fmtMs(performance.now() - t0)}${output ? `; output: ${output.slice(-600)}` : ''}`.slice(0, 900), severity: ok ? 0 : 3, valence: ok ? 1 : -1, refs: [act.id, d.id], source_key: `remediation:${action}:${act.id}` });
+  fs.rmSync(lock, { force: true });
+  out(`${act.id}: ${action} ${ok ? 'ok' : `failed (${why})`}`);
+  if (output) out(untrusted(`what ${action} printed, redacted and scrubbed`, output.slice(-2000)));
+  if (!ok) process.exitCode = 1;
+}
+
 // A monitor as this checkout's settings have it (a chore ticket adding one tests it before it
 // lands), else as main has it.
 function monitorHere(name) {
@@ -8558,6 +8675,7 @@ The log
   monitor status [--json] | monitor test <name> [--since t] | monitor poll [--due] [--name n] [--rollup-day d] [--json] (supervisor; wait runs it) | monitor series <name> [--range 24h|7d]   production monitors from settings
   monitor show <fingerprint> | monitor discover [--record] [--json] | monitor stream <name> (wait runs it) | monitor scrub < text   a cached event (untrusted), what production is and can be seen, a stream's collector, the scrubber
   monitor triage [--all] [--peek] [--json] | monitor ignore|unignore <fingerprint> --reason r [--owner] | monitor incident <fingerprint…> --title t | monitor incident <p-id> --add <fingerprint…>   what changed since the last triage, ignores, incidents (supervisor)
+  remediate <action> --decision d-… [--to <release>]   run a reviewed remediation from settings (production-remediation; a rollback across a production migration needs the owner's own answer)
 
 Dashboard and releases
   dashboard [--port p] [--host h] | dashboard-data | notes <from-tag> [<to>]
@@ -8571,7 +8689,7 @@ const COMMANDS = {
   ask: cmdAsk, answer: cmdAnswer, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
   observe: cmdObserve, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, knowledge: cmdKnowledge, problem: cmdProblem,
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
-  log: cmdLog, record: cmdRecord, peek: cmdPeek, monitor: cmdMonitor, 'log-check': cmdLogCheck, 'log-sync': cmdLogSync, history: cmdHistory,
+  log: cmdLog, record: cmdRecord, peek: cmdPeek, monitor: cmdMonitor, remediate: cmdRemediate, 'log-check': cmdLogCheck, 'log-sync': cmdLogSync, history: cmdHistory,
   drain: cmdDrain, undrain: cmdUndrain, fleet: cmdFleet, handoff: cmdHandoff, wait: cmdWait,
   dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes,
 };
@@ -8583,7 +8701,7 @@ else {
     if (!flagStr('decision')) die('--decision needs a decision id (d-…)');
     if (command !== 'act') {
       const targets = citeTargets();
-      if (!targets) die(`${[command, positional[0]].filter(Boolean).join(' ')} logs no act; --decision is for act, merge, ticket add|set, withdraw, goal hold, worker, planner and fleet`);
+      if (!targets) die(`${[command, positional[0]].filter(Boolean).join(' ')} logs no act; --decision is for act, merge, ticket add|set, withdraw, goal hold, worker, planner, fleet and remediate`);
       supervisorOnly('--decision');
       const d = decisionFor(flagStr('decision'));
       if (!(d.refs ?? []).some((r) => targets.includes(r))) die(`${d.id} is about ${(d.refs ?? []).join(', ') || 'nothing in particular (it named no --refs)'}; this ${command} is about ${targets.slice(0, 4).join(', ')}${targets.length > 4 ? ', …' : ''}. Decide with --refs naming it, or act without --decision`);
