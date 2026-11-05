@@ -2714,7 +2714,9 @@ function render(d) {
   $('when').textContent = `updated ${new Date(d.generated_at).toLocaleTimeString()}`;
   const o = d.ooda;
   $('logline').textContent = `log ${o.log.lines} lines${o.log.errors || o.log.ignored ? ` · ${o.log.errors} invalid · ${o.log.ignored} ignored` : ''}`;
-  const active = d.tickets.filter((t) => t.phase && !['done', 'parked'].includes(t.phase)).length;
+  // A worker is active until its ticket merges, as the kit counts slots (activeWorker): a worker
+  // that never logged done (it stopped at awaiting-word or final-review) isn't working any more.
+  const active = d.tickets.filter((t) => t.phase && !['done', 'parked'].includes(t.phase) && !['merged', 'released'].includes(t.stage)).length;
   const count = (id, n, hot = false) => { const el = $(id); el.textContent = n || ''; el.classList.toggle('hot', hot && n > 0); };
   count('n-goals', o.goals.length);
   count('n-questions', d.questions.length + o.knowledge.filter((k) => k.status === 'candidate').length, true);
