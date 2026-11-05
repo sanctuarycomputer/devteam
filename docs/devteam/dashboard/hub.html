@@ -59,6 +59,7 @@ const empty = $('empty');
 const items = new Map(); // root -> { x, tab, frame, goneAt }
 const hex6 = new Map();  // root -> 6 hex of its sha1, for telling two same-named instances apart
 const lastInbox = new Map();
+const openedWith = new Set(); // roots already there when the page opened: their first count is a baseline
 let selected = null;
 let firstDraw = true;
 const GONE_MS = 30000;
@@ -168,8 +169,10 @@ async function draw() {
     it.x = x;
     it.goneAt = null;
     if (moved) it.frame.src = urlOf(x);
-    // an instance that turns up later with items already waiting counts them as new
-    if (!firstDraw) notifyFor(it, before ?? (typeof x.inbox === 'number' ? 0 : undefined));
+    // an instance that turns up later with items already waiting counts them as new; one that was
+    // there when the page opened (still starting) takes its first count as the baseline
+    if (firstDraw) openedWith.add(x.root);
+    else notifyFor(it, before ?? (typeof x.inbox === 'number' && !openedWith.has(x.root) ? 0 : undefined));
     if (typeof x.inbox === 'number') lastInbox.set(x.root, x.inbox);
   }
   for (const [root, it] of items) {
