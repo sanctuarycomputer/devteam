@@ -1204,7 +1204,7 @@ test('devteam kit', async (t) => {
     // A stand-in agent (not a shell): draws a screen, then logs every line of input it is sent.
     const agent = path.join(tmp, 'agent.mjs');
     write(agent, "import fs from 'node:fs';\nprocess.stdout.write(fs.readFileSync(process.argv[2], 'utf8'));\nprocess.stdin.on('data', (d) => fs.appendFileSync(process.argv[3], String(d)));\n");
-    const sent = path.join(repo, 'docs/devteam/run/sent', `${encodeURIComponent('=devteam-demo:plan-enter')}.json`);
+    const sent = path.join(repo, 'docs/devteam/run/sent', `${encodeURIComponent('devteam-demo:plan-enter')}.json`);
     const enters = () => (fs.existsSync(keys) ? fs.readFileSync(keys, 'utf8').split('\n').length - 1 : 0);
     const resent = () => json(must(['log', '--type', 'observation', '--json'])).filter((o) => o.kind === 'resent-enter' && o.subject === 'plan-enter');
     const run = (screen, agoSec) => {

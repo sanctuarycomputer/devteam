@@ -1303,7 +1303,8 @@ function paneWaitingIn(window) {
     if (hit) { found = { kind, line: hit.slice(0, 200) }; break; }
   }
   // Only the supervisor acts on a pane (its own tick); the dashboard, status and the owner only look.
-  if (target && !found && process.env.DEVTEAM_ROLE === 'supervisor') resendLostEnter(tmuxTarget(window), target, lines);
+  // keyed as recordSent wrote it: tmux's own #S:#W, without the exact-match =
+  if (target && !found && process.env.DEVTEAM_ROLE === 'supervisor') resendLostEnter(`${tmuxSession()}:${window}`, target, lines);
   paneWaits.set(window, found);
   paneTails.set(window, lines);
   return found;
