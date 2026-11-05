@@ -7028,12 +7028,13 @@ const PROMPTS = {
 // What a prompt says about a repo, from settings alone (a view: no checkout needed).
 const repoAbout = (name) => (name === 'home' ? repo('home') : { name, remote: ownEntry(loadSettings().links, name)?.remote, projectRel: projectRelOf(name) });
 // A role's opening prompt. A ticket in another repo has no kit of its own in its worktree: it runs
-// home's kit by absolute path and keeps its records in that repo's project folder (spec §5.2).
+// home's kit by absolute path and keeps its records in that repo's project folder. The remote and
+// the folder come from settings, so each is shown as one token (a hand edit on main is never validated).
 function promptFor(role, id, R = repo('home')) {
   const base = PROMPTS[role].replace(/\{\{ID\}\}/g, id);
   if (R.name === 'home') return base;
   const kitCmd = `node ${shq(path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs'))}`;
-  return `${base.replace(/node docs\/devteam\/scripts\/devteam\.mjs/g, kitCmd).replace('Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md', `Read ${path.join(mainRoot, 'docs', 'devteam', 'process', 'worker.md')}`)} This worktree is a checkout of ${R.name} (${redactUrl(R.remote)}); run every devteam command as ${kitCmd}, and keep this ticket's records under ${R.projectRel}/tickets/${id}/ in this repo.`;
+  return `${base.replace(/node docs\/devteam\/scripts\/devteam\.mjs/g, kitCmd).replace('Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md', `Read ${path.join(mainRoot, 'docs', 'devteam', 'process', 'worker.md')}`)} This worktree is a checkout of ${R.name} (${locatorForPrompt(R.remote)}); run every devteam command as ${kitCmd}, and keep this ticket's records under ${locatorForPrompt(R.projectRel)}/tickets/${id}/ in this repo.`;
 }
 function cmdPrompt() {
   const role = positional[0];
