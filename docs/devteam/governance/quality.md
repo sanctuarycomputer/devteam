@@ -89,6 +89,14 @@ A plan review for a ticket whose one-way door the owner answered at goal level (
 
 `check-ticket` fails when no final review was made at the head, the latest final review in any track says `CHANGES`, fewer named reviewers approved than the risk needs, or any Critical or Important finding lacks a disposition. `validate` fails a landed feature whose latest graph or design review is missing or not `APPROVE`.
 
+**A probe** (`project/monitors/<name>.mjs`, `supervisor.md` Monitoring) gets these on top:
+
+- **Reads only.** Every call it makes reads; a production write belongs in a remediation, on its own ladder class.
+- **No credential output.** It never prints, logs or echoes a credential, and doesn't pass one in argv to a CLI. The kit redacts what it knows, but a transformed value (reversed, split, hashed) gets past it.
+- **Fingerprints that group.** Fingerprints and templates leave out ids, numbers, emails and timestamps, so one cause is one fingerprint; the provider's own fingerprint where it has one.
+- **Bounded.** It reads from `DEVTEAM_SINCE`, pages within the 2 MB and 5,000-event caps, and prints a cursor last.
+- **Tested.** Its verification has a `monitor test <name>` run with no invalid lines; a revision's has the old and new probes against the same window (`--since`).
+
 **Measuring reviews.** `metrics` reports first-pass rejection per stage (a healthy fleet rejects 20 to 30% of first passes; near zero means the reviewer prompt went soft), the share of findings dispositioned `wrong` (high means taste, tighten the rules), and escaped defects (defects found after merge, logged as observations of kind `escaped-defect`). The supervisor proposes prompt or rule changes from these at retros.
 
 ## 4. Merging
@@ -103,7 +111,7 @@ merge --chore <slug>       a chore PR (log, retro, design, architecture): the lo
 
 `--dry-run` runs every check and gate and stops before the merge.
 
-Any of the three that changes a setting the owner owns needs `--approved <qid>`, an answered question of that class: `gates`, `worktree_setup` and `worktree_files` (`gate-change`: they decide what a gate run sees); `autonomy_ceilings`, `agent_command`, `resume_command`, `worker_denied_commands`, `forge`, `main_branch`, `merge_method`, `upstream_repo`, `release` and `secret_commands` (`governance-edit`). `monitors` and `monitor_defaults` are in `monitor-change`, a ladder class: an answered question, a decision in the class naming the PR (`--decision <d-id>`), or the class's rung 3 covers them, and the change is logged as an act of the class. The rest of `project/settings.md` (caps, timings, components) is the supervisor's.
+Any of the three that changes a setting the owner owns needs `--approved <qid>`, an answered question of that class: `gates`, `worktree_setup` and `worktree_files` (`gate-change`: they decide what a gate run sees); `autonomy_ceilings`, `agent_command`, `resume_command`, `worker_denied_commands`, `forge`, `main_branch`, `merge_method`, `upstream_repo`, `release` and `secret_commands` (`governance-edit`). `monitors`, `monitor_defaults` and `monitor_scrub` are in `monitor-change`, a ladder class: an answered question, a decision in the class naming the PR (`--decision <d-id>`), or the class's rung 3 covers them, and the change is logged as an act of the class. The rest of `project/settings.md` (caps, timings, components) is the supervisor's.
 
 With no forge CLI (no `gh`, a self-hosted git remote), set `forge: "git"`. the PR is a file, `run/pr/<branch>.md` (a `# <title>` line, then the body; or `--title` and `--body-file`). `merge` checks it as it would a PR, merges the exact verified sha onto origin's main with `--no-ff`, and pushes. If main moved, the push fails, which is the same guard as `--match-head-commit`.
 

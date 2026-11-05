@@ -53,6 +53,7 @@ const git = (args, cwd = repo) => execFileSync('git', args, { cwd, encoding: 'ut
 const write = (file, text) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, text); };
 const review = (reviewer, sha) => `- Reviewer: ${reviewer}\n\n| Id | Severity | Rule | Where | Finding | Disposition |\n|---|---|---|---|---|---|\n\nVerdict: APPROVE ${sha}\n`;
 const json = (s) => JSON.parse(s);
+const readOr = (p) => { try { return fs.readFileSync(p, 'utf8'); } catch { return null; } };
 // Owner settings apply as they are on main, so a test that changes them lands the change there.
 const landSettings = (edit) => {
   const f = path.join(repo, 'docs/devteam/project/settings.md');
@@ -828,6 +829,183 @@ http.createServer((req, res) => { const m = fs.readFileSync(${JSON.stringify(mod
       srv.kill();
       landSettings((txt) => txt.replace(/"monitors": \{[\s\S]*?\} \} \}, /, '').replace(/"monitors": \{ "api": [^\n]*?\} \}, /, ''));
       fs.rmSync(path.join(repo, 'docs/devteam/run/monitors'), { recursive: true, force: true });
+    }
+    assert.ok(!json(must(['monitor', 'status', '--json'])).length, 'cleaned up');
+  });
+
+  await t.test('the scrubber takes personal data and secrets out of production text and keeps the rest readable', () => {
+    const corpus = [
+      ['user=jane.doe+test@example.co.uk signed in', 'user=[email] signed in'],
+      ['from 203.0.113.45 and fe80::1ff:fe23:4567:890a', 'from [ip] and [ip]'],
+      ['Authorization: Bearer abcdEFGH1234ijkl5678', 'Authorization: [redacted] [token]'],
+      ['card 4242 4242 4242 4242 but order 4242424242424241', 'card [card] but order 4242424242424241'],
+      ['ssn 123-45-6789, call +1 415 555 0100 or (020) 7946 0958', 'ssn [ssn], call [phone] or [phone]'],
+      ['{"password":"hunter2","api_key": "k", "token_count": 5, "user_id": 123}', '{"password":"[redacted]","api_key": "[redacted]", "token_count": 5, "user_id": 123}'],
+      ['postgres://app:s3cretpw@db.internal:5432/prod', 'postgres://[credentials]@db.internal:5432/prod'],
+      ['jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U', 'jwt [jwt]'],
+      ['keys sk_live_51HxYzAbCdEfGhIjKlMn AKIAIOSFODNN7EXAMPLE ghp_abcdefghijklmnopqrstuvwxyz0123456789', 'keys [key] [key] [key]'],
+      ['random Xk9mP2qR7vT4wY6zB8nC1dF3gH5jK0lQ end', 'random [token] end'],
+      ['Cookie: _session=abc; theme=dark', 'Cookie: [redacted]'],
+      ['set address=12 Main St, then', 'set address=[redacted] Main St, then'],
+      // what stays: classes, paths, line numbers, timestamps, versions, ids, shas, hosts
+      ['ActiveRecord::RecordNotFound in Admin::UsersController#show at app/models/user.rb:42', null],
+      ['at 2026-11-05T12:34:56.789Z (12:30:00) v1.2.3 order 12345678 req 9f86d081-884c-4d63-a0e3-37b3f1d5e6a2', null],
+      ['sha 3f2a9c1e5b7d4f6a8c0e2b4d6f8a1c3e5b7d9f0a on web.1 at=error code=H12 desc="Request timeout" service=30001ms status=503', null],
+    ];
+    const outLines = must(['monitor', 'scrub'], { input: corpus.map(([a]) => a).join('\n') }).split('\n');
+    corpus.forEach(([input, want], i) => assert.equal(outLines[i], want ?? input, input));
+  });
+
+  await t.test('monitoring probes: run from main, credentials redacted, events scrubbed and observed once, spikes, back-off and drift findings, a stream spooled, and discovery', async () => {
+    const sup = { role: 'sup' };
+    const settingsBefore = fs.readFileSync(path.join(repo, 'docs/devteam/project/settings.md'), 'utf8');
+    const projDir = path.join(repo, 'docs/devteam/project');
+    const runMon = path.join(repo, 'docs/devteam/run/monitors');
+    const mode = path.join(tmp, 'probe-mode');
+    const sinceOut = path.join(tmp, 'probe-since');
+    const TOKEN = 'tok-Zq8vW3xY9kP2mN7r';
+    fs.appendFileSync(path.join(repo, '.git/info/exclude'), '\n/probe-token\n');
+    fs.writeFileSync(path.join(repo, 'probe-token'), `${TOKEN}\n`);
+    fs.writeFileSync(mode, 'ok');
+    const probe = `import fs from 'node:fs';
+const p = JSON.parse(process.env.DEVTEAM_PARAMS);
+fs.writeFileSync(p.since_out, process.env.DEVTEAM_SINCE);
+const mode = fs.readFileSync(p.mode, 'utf8').trim();
+const out = (o) => console.log(JSON.stringify(o));
+if (mode === 'fail') { console.error('auth failed for ' + process.env.FAKE_TOKEN); process.exit(2); }
+if (mode === 'spike') { out({ kind: 'log', fingerprint: 'S1', level: 'error', template: 'payment gateway timeout after <n>ms', sample: 'payment gateway timeout after 3000ms', count: 50 }); out({ cursor: 'c3' }); process.exit(0); }
+out({ kind: 'exception', fingerprint: 'E1', class: 'NoMethodError', level: 'error', count: 2, users: 1, title: 'undefined method name for nil (jane@example.com, ' + process.env.FAKE_TOKEN + ')', release: 'v42', url: 'https://sentry.example.com/issues/1', frames: [{ file: '/app/docs/devteam/scripts/devteam.mjs', line: 10, fn: 'charge', in_app: true }, { file: 'gems/rack.rb', line: 1, in_app: false }] });
+out({ kind: 'exception', fingerprint: 'F1', class: 'OutOfMemory', level: 'fatal', count: 1, title: 'worker killed' });
+out({ kind: 'log', fingerprint: 'W1', level: 'warning', template: 'slow query took <n>ms', sample: 'slow query took 812ms', count: 3 });
+out({ kind: 'platform', code: 'H12', count: 4 });
+out({ kind: 'metric', name: 'quota_remaining_pct', value: 80, unit: '%' });
+out({ kind: 'deploy', release: 'v42', commit: '0123456789abcdef0123456789abcdef01234567', at: new Date().toISOString() });
+if (mode === 'invalid') out({ kind: 'nope' });
+out({ cursor: 'c-' + mode });
+`;
+    write(path.join(projDir, 'monitors/fake.mjs'), probe);
+    landSettings((txt) => txt.replace('"gates": {', `"monitors": { "fake": { "kind": "probe", "probe": "project/monitors/fake.mjs", "every_minutes": 5, "credentials": { "FAKE_TOKEN": "file:probe-token" }, "params": { "mode": ${JSON.stringify(mode)}, "since_out": ${JSON.stringify(sinceOut)} } } }, "gates": {`));
+    const obs = () => json(must(['log', '--type', 'observation', '--json'])).filter((o) => o.subject === 'monitor:fake');
+    const status = () => json(must(['monitor', 'status', '--json'])).find((m) => m.name === 'fake');
+    try {
+      // not on main yet: poll refuses to run a working-tree probe; monitor test runs this checkout's
+      assert.match(must(['monitor', 'poll', '--name', 'fake'], sup), /not on origin\/main yet/);
+      const tested = must(['monitor', 'test', 'fake']);
+      assert.match(tested, /fake: ok, 6 event\(s\) \(exception 2, log 1, platform 1, metric 1, deploy 1\)[\s\S]*probe from this checkout/);
+      assert.match(tested, /--- untrusted production data/);
+      assert.ok(!tested.includes(TOKEN) && tested.includes('[secret:FAKE_TOKEN]') && tested.includes('[email]'), 'the credential is redacted and the email scrubbed in what test prints');
+      git(['add', 'docs/devteam/project/monitors/fake.mjs']);
+      git(['commit', '-qm', 'probe']);
+      git(['push', '-q', 'origin', 'HEAD:main']);
+      // the working tree is not what runs
+      write(path.join(projDir, 'monitors/fake.mjs'), 'console.log("not json"); process.exit(0);\n');
+      assert.match(must(['monitor', 'test', 'fake', '--json'], { role: 'worker' }), /"credentials": false/, "a worker tests an edited probe without the production credential");
+      const first = json(must(['monitor', 'poll', '--name', 'fake', '--json'], sup));
+      assert.match(first.alerts.join('\n'), /fake: OutOfMemory: worker killed/, 'a severity-4 event wakes wait');
+      assert.ok(fs.readFileSync(sinceOut, 'utf8'), 'the probe gets its window');
+      const kinds = obs().map((o) => o.kind).sort();
+      assert.deepEqual(kinds, ['deploy', 'exception', 'exception', 'platform-error'], 'each qualifying fingerprint is observed once; the warning is counted, not observed');
+      const e1 = obs().find((o) => o.source_key === 'monitor:fake:exception:E1');
+      assert.equal(e1.severity, 3);
+      assert.match(e1.detail, /NoMethodError: undefined method name for nil \(\[email\], \[secret:FAKE_TOKEN\]\) at docs\/devteam\/scripts\/devteam\.mjs:10 charge \(release v42\); 2 event\(s\), 1 user/);
+      assert.equal(e1.source_ref, 'https://sentry.example.com/issues/1');
+      assert.match(obs().find((o) => o.kind === 'deploy').detail, /release v42 \(commit 0123456789abcdef0123456789abcdef01234567\)/);
+      // nothing stored holds the credential: not the log, not the local state
+      const files = (d) => fs.readdirSync(d, { withFileTypes: true }).flatMap((x) => (x.isDirectory() ? files(path.join(d, x.name)) : [path.join(d, x.name)]));
+      for (const file of [...files(runMon), ...files(path.join(repo, 'docs/devteam/run/log'))]) assert.ok(!fs.readFileSync(file, 'utf8').includes(TOKEN), `${file} holds no credential`);
+      assert.equal(status().state, 'ok');
+      assert.equal(status().cursor, 'c-ok');
+      fs.writeFileSync(mode, 'ok');
+      must(['monitor', 'poll', '--name', 'fake'], sup);
+      assert.equal(obs().length, 4, 'a second read of the same fingerprints observes nothing new');
+      const show = must(['monitor', 'show', 'E1']);
+      assert.match(show, /fake exception:E1: error exception NoMethodError, 4 event\(s\)/);
+      assert.match(show, /docs\/devteam\/scripts\/devteam\.mjs:10 charge\n/);
+      assert.match(show, /--- untrusted production data[\s\S]*\[email\][\s\S]*--- end of untrusted data ---/);
+      const feed = json(must(['dashboard-data'])).monitor_feed;
+      assert.ok(feed.some((x) => x.key === 'exception:E1' && x.last_24h === 4 && x.spark.length === 24 && x.observed === e1.id));
+      assert.ok(json(must(['peek', 'monitor', 'fake', '--json'])).feed.length >= 4);
+      // drift: lines that don't validate, after clean runs
+      fs.writeFileSync(mode, 'invalid');
+      must(['monitor', 'poll', '--name', 'fake'], sup);
+      assert.ok(json(must(['metrics', '--json'])).findings.some((x) => x.kind === 'probe-drift' && x.subject === 'monitor:fake'));
+      // failing: backs off, and three in a row is a finding; the error is redacted
+      fs.writeFileSync(mode, 'fail');
+      for (let i = 0; i < 3; i++) must(['monitor', 'poll', '--name', 'fake'], sup);
+      const s = status();
+      assert.equal(s.state, 'failing');
+      assert.match(s.last_error, /exited 2: auth failed for \[secret:FAKE_TOKEN\]/);
+      assert.equal(s.backoff_minutes, 40);
+      assert.deepEqual(json(must(['monitor', 'poll', '--due', '--json'], sup)).polled.filter((n) => n === 'fake'), [], 'backing off: not due');
+      assert.ok(json(must(['metrics', '--json'])).findings.some((x) => x.kind === 'monitor-failing' && x.subject === 'monitor:fake'));
+      // a spike: a known fingerprint well over its hourly median
+      const fpsFile = path.join(runMon, 'fake/fingerprints.json');
+      const fps = json(fs.readFileSync(fpsFile, 'utf8'));
+      fps['log:S1'] = { kind: 'log', first_seen: new Date(Date.now() - 2 * 86400000).toISOString(), total: 40, users: 0, level: 'error', observed: true };
+      fs.writeFileSync(fpsFile, JSON.stringify(fps));
+      const counts = json(fs.readFileSync(path.join(runMon, 'fake/counts.json'), 'utf8'));
+      counts['log:S1'] = Object.fromEntries([...Array(40)].map((_, i) => [new Date(Date.now() - (i + 1) * 3600000).toISOString().slice(0, 13), 1]));
+      fs.writeFileSync(path.join(runMon, 'fake/counts.json'), JSON.stringify(counts));
+      fs.writeFileSync(mode, 'spike');
+      must(['monitor', 'poll', '--name', 'fake'], sup);
+      const spike = obs().find((o) => o.kind === 'spike');
+      assert.ok(spike && spike.severity === 4 && /payment gateway timeout after <n>ms is spiking: 50 this hour/.test(spike.detail), JSON.stringify(spike));
+      must(['monitor', 'poll', '--name', 'fake'], sup);
+      assert.equal(obs().filter((o) => o.kind === 'spike').length, 1, 'once per window');
+      assert.equal(status().state, 'ok', 'a clean run ends the failing');
+      // the day's rollup: what it read by level, the warnings as templates, how the probe did
+      must(['monitor', 'poll', '--name', 'fake', '--rollup-day', new Date().toISOString().slice(0, 10)], sup);
+      const roll = obs().find((o) => o.kind === 'reading');
+      assert.match(roll.detail, /event\(s\) \(fatal \d+, error \d+, warning 9\), 3 new for triage; 10 run\(s\), 4 failed, 1 invalid line\(s\)[\s\S]*warnings: slow query took <n>ms ×9/);
+      // a stream: its collector spools what it reads; poll drains the spool
+      write(path.join(projDir, 'monitors/tail.mjs'), `console.log(JSON.stringify({ kind: 'log', fingerprint: 'T1', level: 'error', template: 'boom at <id>', sample: 'boom at 42 for bob@example.com' }));\nconsole.log('garbage');\nsetTimeout(() => {}, 60000);\n`);
+      git(['add', 'docs/devteam/project/monitors/tail.mjs']);
+      git(['commit', '-qm', 'stream probe']);
+      git(['push', '-q', 'origin', 'HEAD:main']);
+      landSettings((txt) => txt.replace('"monitors": { ', '"monitors": { "tail": { "kind": "stream", "probe": "project/monitors/tail.mjs" }, '));
+      fs.mkdirSync(runMon, { recursive: true });
+      fs.writeFileSync(path.join(runMon, '.wait-alive'), new Date().toISOString());
+      const col = spawn(process.execPath, [DT, 'monitor', 'stream', 'tail'], { cwd: repo, env: { ...process.env, ...ROLE.sup }, stdio: 'ignore' });
+      try {
+        for (let i = 0; i < 100 && !(readOr(path.join(runMon, 'tail/stream.jsonl')) ?? '').includes('garbage'); i++) await new Promise((r) => setTimeout(r, 100));
+        must(['monitor', 'poll', '--name', 'tail'], sup);
+        const tailObs = json(must(['log', '--type', 'observation', '--json'])).filter((o) => o.subject === 'monitor:tail');
+        assert.ok(tailObs.some((o) => o.kind === 'log-error' && /boom at <id> \(e\.g\. "boom at 42 for \[email\]"\)/.test(o.detail)), JSON.stringify(tailObs));
+        const ts = json(must(['monitor', 'status', '--json'])).find((m) => m.name === 'tail');
+        assert.ok(ts.listening && ts.state === 'ok' && ts.today.invalid === 1, JSON.stringify(ts));
+      } finally { col.kill(); }
+      for (let i = 0; i < 50 && fs.existsSync(path.join(runMon, 'tail/stream.pid')); i++) await new Promise((r) => setTimeout(r, 100));
+      assert.match(must(['monitor', 'poll', '--name', 'tail'], sup), /tail: its collector is not running/);
+      // discovery: where it runs, the tracker, the health route; it proposes what isn't watched
+      write(path.join(repo, 'Procfile'), 'web: bin/rails server\n');
+      write(path.join(repo, 'Gemfile'), "source 'https://rubygems.org'\ngem 'sentry-ruby'\n");
+      write(path.join(repo, 'config/routes.rb'), 'Rails.application.routes.draw do\n  get "up" => "rails/health#show", as: :rails_health_check\nend\n');
+      git(['remote', 'add', 'heroku', 'https://git.heroku.com/demo-app.git']);
+      try {
+        const d = json(must(['monitor', 'discover', '--json']));
+        assert.ok(d.hosts.some((h) => h.host === 'heroku' && h.app === 'demo-app'), JSON.stringify(d.hosts));
+        assert.ok(d.trackers.some((x) => x.tracker === 'sentry') && d.health.some((h) => h.path === '/up'));
+        assert.ok(d.proposals.some((p) => p.name === 'sentry' && p.probe_to_write));
+        assert.ok(d.notes.some((n) => /Procfile/.test(n)));
+        assert.ok(json(must(['metrics', '--json'])).findings.some((x) => x.kind === 'monitor-discovery-due'));
+        assert.notEqual(dt(['monitor', 'discover', '--record'], { role: 'worker' }).status, 0, 'only the supervisor records a discovery');
+        must(['monitor', 'discover', '--record'], sup);
+        assert.ok(json(must(['log', '--type', 'observation', '--json'])).some((o) => o.kind === 'discovery' && o.subject === 'monitors' && /heroku demo-app/.test(o.detail)));
+        assert.ok(!json(must(['metrics', '--json'])).findings.some((x) => x.kind === 'monitor-discovery-due'), 'looked over this week');
+      } finally {
+        git(['remote', 'remove', 'heroku']);
+        for (const f of ['Procfile', 'Gemfile', 'config/routes.rb']) fs.rmSync(path.join(repo, f), { force: true });
+      }
+    } finally {
+      landSettings(() => settingsBefore);
+      if (git(['ls-files', 'docs/devteam/project/monitors'])) {
+        git(['rm', '-rqf', 'docs/devteam/project/monitors']);
+        git(['commit', '-qm', 'no probes']);
+        git(['push', '-q', 'origin', 'HEAD:main']);
+      }
+      fs.rmSync(path.join(projDir, 'monitors'), { recursive: true, force: true });
+      fs.rmSync(runMon, { recursive: true, force: true });
+      fs.rmSync(path.join(repo, 'probe-token'), { force: true });
     }
     assert.ok(!json(must(['monitor', 'status', '--json'])).length, 'cleaned up');
   });
