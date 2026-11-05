@@ -3687,6 +3687,42 @@ test('link text is data: one short line, refused otherwise everywhere it enters,
   } finally { F.done(); }
 });
 
+test('landing link edits: link land carries only the changed links entries into the chore, never a stale value of another key', () => {
+  const F = monoFixture('link-land');
+  const { old, ok, run, g, lines, edit } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const block = (f) => JSON.parse(fs.readFileSync(f, 'utf8').match(/```json devteam\s*\n([\s\S]*?)\n```/)[1]);
+  try {
+    lines(F.STD);
+    edit((j) => { j.links = { old: { kind: 'url', title: 'Old', url: 'https://old.test' }, keep: { kind: 'url', title: 'Keep', url: 'https://keep.test' } }; });
+    g(['commit', '-qam', 'links'], old); g(['push', '-q', 'origin', 'main'], old);
+    // the supervisor edits the registry in the main checkout
+    const hint = ok(old, ['link', 'add', 'figma', '--kind', 'url', '--url', 'https://figma.test/a', '--title', 'Designs'], SUP);
+    assert.match(hint, /chore start registry, link land registry \(it copies only the links entries changed here\), chore pr registry --title "registry", merge --chore registry/);
+    assert.doesNotMatch(hint, /copy docs\/devteam\/project\/settings\.md/);
+    ok(old, ['link', 'set', 'keep', 'notes', 'still used'], SUP);
+    ok(old, ['link', 'rm', 'old'], SUP);
+    // meanwhile main moves on from another clone: web's line widens. This checkout's settings.md is stale for components.
+    const other = path.join(F.base, 'other');
+    g(['clone', '-q', F.org, other], F.base);
+    for (const [k, v] of [['user.email', 'o@o'], ['user.name', 'o']]) g(['config', k, v], other);
+    edit((j) => { j.components.web.owns = ['web/**', 'webapp/**']; }, other);
+    g(['commit', '-qam', 'widen web'], other); g(['push', '-q', 'origin', 'main'], other);
+    assert.deepEqual(block(F.settingsFile).components.web.owns, ['web/**'], 'the main checkout is stale');
+    const wt = ok(old, ['chore', 'start', 'registry'], SUP).trim();
+    assert.match(run(old, ['link', 'land', 'nope'], SUP).err, /no worktree \.worktrees\/chore-nope; devteam\.mjs chore start nope/);
+    const landed = ok(old, ['link', 'land', 'registry'], SUP);
+    assert.match(landed, /links\.figma \(added\), links\.keep \(changed\), links\.old \(removed\)/);
+    const j = block(path.join(wt, 'docs/devteam/project/settings.md'));
+    assert.deepEqual(j.components.web.owns, ['web/**', 'webapp/**'], "main's newer components value is kept, not the stale checkout's");
+    assert.deepEqual(j.links, block(F.settingsFile).links, 'the links are the ones edited here');
+    assert.match(ok(old, ['link', 'land', 'registry'], SUP), /nothing to land/);
+    ok(old, ['chore', 'pr', 'registry', '--title', 'registry'], SUP);
+    const m = run(old, ['merge', '--chore', 'registry', '--dry-run'], SUP);
+    assert.equal(m.status, 0, `the landed links are the ones the acts wrote: ${m.out}${m.err}`);
+  } finally { F.done(); }
+});
+
 test('the registry attestation is the owner\'s: registry-attest is never answered from chat or defaulted, and a goal that needs the registry complete waits for the owner\'s yes', () => {
   const F = fleetFixture('attest');
   const { old, ok, run } = F;

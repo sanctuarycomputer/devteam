@@ -7870,7 +7870,9 @@ function cmdComponents() {
 // chore PR picks it up (spec §7, open issue 14).
 function editSettingsBlock(mutate) {
   if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
-  const f = path.join(projectDir, 'settings.md');
+  return editSettingsFile(path.join(projectDir, 'settings.md'), mutate);
+}
+function editSettingsFile(f, mutate) {
   const text = readText(f) ?? die(`no ${path.relative(mainRoot, f)} (devteam.mjs init)`);
   const m = text.match(/```json devteam\s*\n([\s\S]*?)\n```/) ?? die('settings.md has no ```json devteam block');
   let block;
@@ -7883,16 +7885,51 @@ function editSettingsBlock(mutate) {
   settingsCache = undefined;
   return next;
 }
-const LANDING_HINT = 'it applies here now; land it on main with the next chore PR: chore start registry, copy docs/devteam/project/settings.md into it, chore pr registry --title "registry", merge --chore registry';
+const LANDING_HINT = 'it applies here now; land it on main with the next chore PR: chore start registry, link land registry (it copies only the links entries changed here), chore pr registry --title "registry", merge --chore registry';
+// link land [<slug>]: the registry edits made here (link add|set|rm write the main checkout's
+// settings.md) carried into the chore worktree .worktrees/chore-<slug>, entry by entry. Each links
+// entry of the supervisor's kind that differs here from the chore's is set or removed there, and
+// nothing else in the chore's settings.md changes: this checkout's copy of every other key may be
+// older than main's (a components line widened since), and carrying the whole file would revert it.
+// A link of an owner's kind is left alone: it lands with the owner's governance-edit answer.
+function linkLand(slugName) {
+  choreSlug(slugName);
+  if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
+  const wt = path.join(mainRoot, '.worktrees', `chore-${slugName}`);
+  if (!fs.existsSync(wt)) die(`no worktree .worktrees/chore-${slugName}; devteam.mjs chore start ${slugName}`);
+  const linksIn = (f) => { const m = readText(f)?.match(/```json devteam\s*\n([\s\S]*?)\n```/); try { return m ? JSON.parse(m[1]).links ?? {} : {}; } catch (e) { return die(`${path.relative(mainRoot, f)}: the json devteam block is not valid JSON: ${e.message}`); } };
+  const here = linksIn(path.join(projectDir, 'settings.md'));
+  const target = path.join(wt, projectRel, 'settings.md');
+  // the chore's links with each supervisor's entry that differs here taken from here
+  const carry = (there) => {
+    const links = Object.assign(Object.create(null), there);
+    const changed = [];
+    const owners = [];
+    for (const id of [...new Set([...Object.keys(there), ...Object.keys(here)])].sort()) {
+      const h = ownEntry(here, id), t = ownEntry(there, id);
+      if (canonical(h) === canonical(t)) continue;
+      if (ownersKind(h) || ownersKind(t)) { owners.push(`links.${id}`); continue; }
+      if (h === undefined) delete links[id]; else links[id] = h;
+      changed.push(`links.${id} (${t === undefined ? 'added' : h === undefined ? 'removed' : 'changed'})`);
+    }
+    return { links, changed, owners };
+  };
+  const { changed, owners } = carry(linksIn(target));
+  const skipped = owners.length ? `; not carried, as the owner's (a repo link lands with its governance-edit answer): ${owners.join(', ')}` : '';
+  if (!changed.length) return out(`nothing to land: the chore's links are the ones here${skipped}`);
+  editSettingsFile(target, (blk) => ({ ...blk, links: carry(blk.links ?? {}).links }));
+  out(`landed into chore-${slugName}: ${changed.join(', ')}; nothing else in its settings.md changed${skipped}`);
+}
 // link add|set|rm: a link of the supervisor's kind (url: LINK_KINDS[k].ownedByOwner false) is
 // written, then logged as registry-edit (constitutional), citing what it came from. A link of an
 // owner's kind (repo) is the owner's: PR 2 drafts it as a question; until then it is refused.
 // Nothing here branches on a kind name: the table says whose it is and which fields it has.
 function cmdLink() {
   const [sub, id, field, ...given] = positional;
+  if (sub === 'land') { supervisorOnly('link'); return linkLand(id ?? 'registry'); }
   // a set value that starts with -- comes after a bare --: link set <id> <field> -- <value>
   const vals = [...given, ...(rest ?? [])];
-  if (!['add', 'set', 'rm'].includes(sub) || !id) die('usage: link add <id> --kind <kind> --title t [kind fields: --url u, --remote r …] [--for scope…] [--notes n] [--source id]   |   link set <id> <field> [--] <value>   |   link rm <id>');
+  if (!['add', 'set', 'rm'].includes(sub) || !id) die('usage: link add <id> --kind <kind> --title t [kind fields: --url u, --remote r …] [--for scope…] [--notes n] [--source id]   |   link set <id> <field> [--] <value>   |   link rm <id>   |   link land [<chore slug>]');
   supervisorOnly('link');
   if (!LINK_ID.test(id) || RESERVED_LINKS.includes(id)) die(`${id}: a link id is lowercase words joined by hyphens, and not ${RESERVED_LINKS.join(' or ')}`);
   const cur = ownEntry(loadSettings().links, id);
@@ -8134,6 +8171,7 @@ Sessions (worker.md)
 Decide and act (supervisor.md, constitution.md)
   links [--json]                  the registry: home and each link, each repo's effective settings, the component lines and their coverage
   link add <id> --kind url --url u --title t [--for scope…] [--notes n] [--source id] | link set <id> <field> [--] <value> | link rm <id>   supervisor: a url link, written to settings.md and logged as registry-edit; repo links are the owner's
+  link land [<chore slug>]   supervisor: copy only the links entries changed in this checkout's settings.md into .worktrees/chore-<slug> (default registry), leaving every other key as the chore has it
   ask --question q [--kind k] [--class c] [--reasons r…] [--recommendation r] [--confidence 0-1] [--default d] [--choices '[{"label","detail","effect"}…]'] [--rule-scope s] [--goal g-… (goal-approval)] [--links '[{"title","path","ref"}|{"title","url"}|{"title","link"}…]' (link: a registry id)] [--blocks ids] [--evidence ids] [--ticket id] [--re m-…] [--note path] [--secrets '[{"name","kind":"string|file","sink"}…]' (owner-action)]
   secret post <qid> [--file NAME=path] [--json]                          owner: post a question's secrets straight to their sinks; never logged (secret sinks lists them)
   ask --kind review --page <repo path> --ref <branch|sha> [--data <repo path>] [--result-schema <repo path>] [--allow-partial] --question q [--context c] [--class c] [--reasons r…] [--ticket id] [--blocks ids] [--re m-…]
