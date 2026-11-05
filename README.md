@@ -2,7 +2,7 @@
 
 A kit a project copies into `docs/devteam/` and owns. It runs a supervised fleet of coding-agent sessions that takes broad goals, turns them into a graph of tickets, and plows through it with [superpowers](https://github.com/obra/superpowers), under one owner, with adversarial review before every merge and a loop that keeps improving the fleet itself.
 
-Eleven files: three governance docs, three process docs, one schema, one script, one dashboard and its two helpers for review pages. Once adopted, agents are routed by a section `init` adds to the project's `AGENTS.md`; there is no second README.
+Twelve files: three governance docs, three process docs, one schema, one script, one dashboard and its two helpers for review pages, and the hub page that lists every instance on the machine. Once adopted, agents are routed by a section `init` adds to the project's `AGENTS.md`; there is no second README.
 
 ```
 docs/devteam/
@@ -17,6 +17,7 @@ docs/devteam/
   dashboard/index.html         the owner's page
   dashboard/devteam-ui.css     the dashboard's look, for an agent's review page (served to it, nothing else)
   dashboard/devteam-ui.js      a review page's bridge to the dashboard, and a few components
+  dashboard/hub.html           the machine's page listing every running instance (http://127.0.0.1:4320)
   project/                     this project's content; upstream never touches it
     settings.md                only what this project changes
     designs/architecture.md    the whole system now, updated by every plan PR
@@ -35,6 +36,8 @@ docs/devteam/
 
 **Two loops.** Goal → design → roadmap → graph → tickets: the supervisor interviews the owner until each goal is unambiguous, writes a design per goal (the spine that keeps many loops coherent), orders it into milestones, plans one milestone at a time into features with stories and releases, then into a graph of tickets, each one PR. Goals are meant to be large; the forecast says what one costs, and nothing splits it. Observe, orient, decide, act: every supervisor tick, what sessions report becomes observations; recurring observations become knowledge and problems; the supervisor decides what it may and asks the owner everything else through the questions inbox, saying why; a judgment call is a decision line that records what was weighed and the trust it rested on (its rung, the owner's answer, a default or a standing rule), and the acts that carry it out cite it; the dashboard's Decide view lists every call, the supervisor's and the owner's, and the Trust Ladder has its own page. The owner corrects a call, and a correction takes trust back and becomes a lesson. Retros gather the corrections and learnings across tickets and features.
 
+**Many projects, one machine.** Each project has its own tmux session (`devteam-<project>`, saved in `run/tmux-session`) and its own dashboard port: the next free one in 4321–4345, saved in `run/dashboard-port` and reused. Any running dashboard also serves the hub at http://127.0.0.1:4320, which lists every instance on the machine (its repo root, kit version, Inbox count and fleet state) and links to each one's own dashboard. The hub only lists: it keeps no state and takes no action. Each dashboard, served by its own repo's kit, stays on its own address.
+
 **One log.** Everything structured is a line in one append-only JSON Lines log, validated against `schema/log.schema.json` on write and folded by timestamp with authority rules (owner > supervisor > planner > worker). State is computed from the log plus git; nothing else is stored. One file per writer: planners write `project/log/plan-<feature>.jsonl` in their worktree, so a plan lands only through its reviewed PR; everyone else writes `run/log/<writer>.jsonl` live, and the supervisor mirrors those into `project/log/` with the `chore-log` PR.
 
 ## Setup
@@ -49,7 +52,7 @@ docs/devteam/
 6. Existing codebase: write `project/designs/architecture.md` from the code (components, contracts, persistence, dependencies, distance from the code rules, hotspots, tests, work in flight). New repo: leave the headings.
 7. **Propose the Baseline goal.** Draft the repo's first goal, **Baseline**: every gate in `quality.md` §2 and every Law in `code-style.md` enforced on main (lint, format, types, tests in CI, coverage, dead code, duplication, secrets, lockfile, and an encrypted secret store per `code-style.md` §10 if the repo has none), measured as the floor gaps left, target 0 (`process/planning.md` §7). The owner opts in through the regular flow; once approved, its features are the floor tickets, and gates that fail on existing code go on in **ratchet** mode (`quality.md` §2).
 8. Commit the kit, settings and architecture doc as one `chore-devteam-bootstrap` PR, then `devteam.mjs log-sync` for the Baseline goal draft.
-9. Start the supervisor. It is the owner's foreground session in the main checkout, never a background, headless or tmux-detached one. **If an agent session did this setup, that session becomes the supervisor:** it reads the prompt from `node docs/devteam/scripts/devteam.mjs prompt supervisor` and follows it in place; it does not launch a second agent. If the owner did the setup by hand, they start the agent in their terminal with `DEVTEAM_ROLE=supervisor` in its environment (`DEVTEAM_ROLE=supervisor claude "$(node docs/devteam/scripts/devteam.mjs prompt supervisor)"`), inside tmux if they want workers' messages typed into its pane as they happen. Agent CLIs such as Claude Code don't keep shell state between commands, so an `export` inside the session doesn't stick: a session already running prefixes each devteam command with `DEVTEAM_ROLE=supervisor`. Run the dashboard where it outlives the session (a tmux window, or another terminal): `node docs/devteam/scripts/devteam.mjs dashboard`, and open the address.
+9. Start the supervisor. It is the owner's foreground session in the main checkout, never a background, headless or tmux-detached one. **If an agent session did this setup, that session becomes the supervisor:** it reads the prompt from `node docs/devteam/scripts/devteam.mjs prompt supervisor` and follows it in place; it does not launch a second agent. If the owner did the setup by hand, they start the agent in their terminal with `DEVTEAM_ROLE=supervisor` in its environment (`DEVTEAM_ROLE=supervisor claude "$(node docs/devteam/scripts/devteam.mjs prompt supervisor)"`), inside tmux if they want workers' messages typed into its pane as they happen. Agent CLIs such as Claude Code don't keep shell state between commands, so an `export` inside the session doesn't stick: a session already running prefixes each devteam command with `DEVTEAM_ROLE=supervisor`. Run the dashboard where it outlives the session (a tmux window, or another terminal): `node docs/devteam/scripts/devteam.mjs dashboard`, and open the address it prints, or the hub at http://127.0.0.1:4320.
 10. The supervisor asks the owner for goals and the loop begins. To tell a session something from your own terminal as yourself, `node docs/devteam/scripts/devteam.mjs send <supervisor|ticket-id> "…" --owner`; answers to questions go through the inbox.
 
 Requirements: git, tmux (for the workers), Node 18+ (the project's own pinned Node is fine: asdf, nvm and the dashboard all run the script with it), the GitHub CLI, one agent CLI (Claude Code, Codex, OpenCode or similar) with superpowers installed.
@@ -87,7 +90,7 @@ The supervisor needn't run inside tmux: it puts the workers in a tmux session of
 That is step 9's start, unchanged: the supervisor's prompt sees the parked fleet and opens with what to do, so it runs `fleet unpark` (which rebuilds `run/log` from the landed log, prints the same parity fingerprint before writing anything, puts every goal back as it was and prints each parked session's restart command), restarts the parked workers and planners (each gets its handoff in its prompt), and then the dashboard is restarted where it outlives the session:
 
 ```
-tmux new-window -d -n dashboard 'node docs/devteam/scripts/devteam.mjs dashboard'
+tmux new-window -d -t "$(node docs/devteam/scripts/devteam.mjs settings --get tmux_session)" -n dashboard 'node docs/devteam/scripts/devteam.mjs dashboard'
 ```
 
 ## Upgrading a project
