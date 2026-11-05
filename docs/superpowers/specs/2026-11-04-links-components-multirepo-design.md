@@ -398,7 +398,7 @@ Tests go in `test/kit.test.mjs` with fixtures under `test/fixtures/`, run on Nod
   - a property test that generates random trees and random disjoint or overlapping line sets, and asserts the function reports a clean partition exactly when there is one.
 - **Settings:**
   - entry-level owner diff (repo-link field changes produce the right classes, url-link edits produce none);
-  - G1: a fixture single-repo project with no new settings gives byte-identical `validate`, `status` and `check-ticket` output before and after.
+  - G1: a fixture single-repo project with no new settings gives the same `validate`, `status`, `check-ticket` and other output before and after, checked against recorded goldens. The goldens were re-recorded twice, each for one line: a non-ASCII path printed raw rather than as git's quoted octal (check-ticket, merge --dry-run; a fix in this change), and the hub in fleet-status's move checklist (upstream).
 - **Monorepo fixture:**
   - a PR adding a new top-level folder fails `check-pr`;
   - a rename out of a line fails;
