@@ -16,6 +16,7 @@ import crypto from 'node:crypto';
 import os from 'node:os';
 import fs from 'node:fs';
 import http from 'node:http';
+import net from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -132,6 +133,42 @@ function sh(cmd, args, opts = {}) {
     return null;
   }
 }
+// The tmux session that holds this project's workers and planners: settings.tmux_session when set;
+// else the name saved in run/tmux-session; else devteam-<project>-<hash>, so two projects on one machine
+// never share a session. A project whose live sessions already sit in a `devteam` session (the
+// default before) keeps it. Resolving writes nothing, except to keep that legacy name: the name is
+// saved when the kit creates the session (save), so a read-only command, or CI, never writes run/.
+// This project's windows in a tmux session: the kit starts each worker or planner in its worktree
+// (-c), so a window is ours when it started under this checkout's .worktrees/, whatever its name;
+// another project's window named like one of our tickets never counts.
+function ourWindows(session) {
+  // Compared resolved: tmux keeps the path as it was given (on macOS /var is /private/var).
+  const roots = [`${path.join(fs.realpathSync(mainRoot), '.worktrees')}${path.sep}`];
+  // Every pane, not only the active one: a worker window the owner split keeps counting.
+  const panes = (sh('tmux', ['list-panes', '-s', '-t', `=${session}`, '-F', '#W\t#{pane_start_path}']) ?? '').split('\n').filter(Boolean)
+    .map((l) => { const i = l.indexOf('\t'); const p = l.slice(i + 1); let real = p; try { real = fs.realpathSync(p); } catch {} return { name: l.slice(0, i), start: `${real}${path.sep}` }; });
+  return [...new Set(panes.filter((w) => roots.some((r) => w.start.startsWith(r))).map((w) => w.name))].map((name) => ({ name }));
+}
+let tmuxSessionName = null;
+function tmuxSession({ save = false } = {}) {
+  const s = loadSettings();
+  if (s.tmux_session) return s.tmux_session;
+  if (tmuxSessionName && !save) return tmuxSessionName;
+  const file = path.join(runDir, 'tmux-session');
+  const saved = readText(file)?.trim();
+  if (saved) return (tmuxSessionName = saved);
+  // Not liveSessions(): it lists windows, which asks this function. Named after the project and
+  // this checkout's path, so two clones of one repo (or two repos with one name) never share either.
+  const keep = ourWindows('devteam').length > 0;
+  const name = keep ? 'devteam' : `devteam-${slug(s.project ?? path.basename(mainRoot))}-${crypto.createHash('sha1').update(fs.realpathSync(mainRoot)).digest('hex').slice(0, 6)}`;
+  // A legacy name is saved the moment it is found: once this project's last window there closes it
+  // could no longer be told apart, and the next session would start somewhere else.
+  if (save || keep) { fs.mkdirSync(runDir, { recursive: true }); fs.writeFileSync(file, `${name}\n`); }
+  return (tmuxSessionName = name);
+}
+// A window of this project's session, matched exactly: tmux would otherwise take a prefix, so
+// `devteam` would find `devteam-<another project>`.
+const tmuxTarget = (window) => `=${tmuxSession()}:${window}`;
 
 const readJson = (p) => JSON.parse(fs.readFileSync(p, 'utf8'));
 const readText = (p) => (fs.existsSync(p) && fs.statSync(p).isFile() ? fs.readFileSync(p, 'utf8') : null);
@@ -171,7 +208,7 @@ const CHORES = 'chores';
 // Every setting has a default here; project/settings.md holds only what the project changes.
 const SETTINGS_DEFAULTS = {
   project: null,
-  tmux_session: 'devteam',
+  tmux_session: null,
   agent_command: 'claude --dangerously-skip-permissions',
   resume_command: 'claude --continue --dangerously-skip-permissions',
   main_branch: 'main',
@@ -215,7 +252,7 @@ const SETTINGS_DEFAULTS = {
   // `chore start`, after worktree_files are copied (install dependencies, link env files). Empty for none.
   worktree_setup: '',
   worker_denied_commands: ['gh pr merge*', 'gh api*', 'git push*main*', 'git push*--force*', 'git push*-f *', 'git push*+*'],
-  dashboard_port: 4321,
+  dashboard_port: null,
   upstream_repo: 'sanctuarycomputer/devteam',
   upstream_base: null,
   upstream_check_hours: 24,
@@ -1266,7 +1303,7 @@ const idleWithShell = (window) => { const l = paneTails.get(window) ?? []; retur
 function paneWaitingIn(window) {
   if (paneWaits.has(window)) return paneWaits.get(window);
   let found = null;
-  const { target, problem } = resolvePane(`${loadSettings().tmux_session}:${window}`);
+  const { target, problem } = resolvePane(tmuxTarget(window));
   paneGone.set(window, problem && /no agent is running|has exited/.test(problem) ? problem : null);
   const lines = target ? (sh('tmux', ['capture-pane', '-p', '-t', target]) ?? '').split('\n').map((l) => l.trim()).filter(Boolean).slice(-15) : [];
   // a busy agent is working, not stopped at a limit; what it shows (code, diffs) is never its banner
@@ -1277,7 +1314,8 @@ function paneWaitingIn(window) {
     if (hit) { found = { kind, line: hit.slice(0, 200) }; break; }
   }
   // Only the supervisor acts on a pane (its own tick); the dashboard, status and the owner only look.
-  if (target && !found && process.env.DEVTEAM_ROLE === 'supervisor') resendLostEnter(`${loadSettings().tmux_session}:${window}`, target, lines);
+  // keyed as recordSent wrote it: tmux's own #S:#W, without the exact-match =
+  if (target && !found && process.env.DEVTEAM_ROLE === 'supervisor') resendLostEnter(`${tmuxSession()}:${window}`, target, lines);
   paneWaits.set(window, found);
   paneTails.set(window, lines);
   return found;
@@ -1340,7 +1378,7 @@ function plannersNow() {
       try { stamps.push(fs.statSync(p).mtime.toISOString()); } catch {}
     }
     const last = stamps.filter(Boolean).map((x) => new Date(x).toISOString()).sort().pop() ?? null;
-    const { target, problem } = resolvePane(`${s.tmux_session}:${by}`);
+    const { target, problem } = resolvePane(tmuxTarget(by));
     const msgs = lines.filter((l) => l.type === 'message');
     const replied = new Set(msgs.map((m) => m.re).filter(Boolean));
     const asking = msgs.filter((m) => m.by === by && !['info', 'ruling', 'answer'].includes(m.kind) && !replied.has(m.id));
@@ -1667,7 +1705,7 @@ function sendParkRulings({ goal = null, again = false } = {}) {
 }
 // The restart command for each parked session a release lets run again.
 function restartCommands(filter = () => true) {
-  const windows = new Set((sh('tmux', ['list-windows', '-t', loadSettings().tmux_session, '-F', '#W']) ?? '').split('\n').filter(Boolean));
+  const windows = new Set((sh('tmux', ['list-windows', '-t', `=${tmuxSession()}`, '-F', '#W']) ?? '').split('\n').filter(Boolean));
   return liveSessions().filter((s) => lastPhaseOf(s.name)?.to === 'parked' && ['run', 'drain'].includes(sessionMode(s.name)) && filter(s)).map((s) => ({ name: s.name, cmd: `${s.role} ${s.id}${windows.has(s.name) && fs.existsSync(s.wt) ? ' --resume' : ''}`, handoff: !!handoffFor(s.name) }));
 }
 // Write one goal's hold, creating Upkeep's line the first time it is held.
@@ -5042,13 +5080,13 @@ function collectMetrics(since) {
   // The tmux session's window names, once (null when tmux or the session isn't there: unknown).
   let windowNames;
   const windowGone = (name) => {
-    if (windowNames === undefined) { const l = sh('tmux', ['list-windows', '-t', settings.tmux_session, '-F', '#W']); windowNames = l === null ? null : new Set(l.split('\n').filter(Boolean)); }
+    if (windowNames === undefined) { const l = sh('tmux', ['list-windows', '-t', `=${tmuxSession()}`, '-F', '#W']); windowNames = l === null ? null : new Set(l.split('\n').filter(Boolean)); }
     return windowNames !== null && !windowNames.has(name);
   };
   for (const id of ts.keys()) {
     const w = workerState(id);
     const wait = paneWaiting(id);
-    if (wait) add('high', 'blocked-prompt', id, wait.kind === 'limit' ? `a usage-limit banner in its pane: "${wait.line}"` : `waiting on a prompt in its pane: "${wait.line}"`, `look (tmux select-window -t ${settings.tmux_session}:${id}) and clear it (supervisor.md §11); a permission prompt a worker should never see means agent_command or its deny rules need a fix`);
+    if (wait) add('high', 'blocked-prompt', id, wait.kind === 'limit' ? `a usage-limit banner in its pane: "${wait.line}"` : `waiting on a prompt in its pane: "${wait.line}"`, `look (tmux select-window -t '${tmuxTarget(id)}') and clear it (supervisor.md §11); a permission prompt a worker should never see means agent_command or its deny rules need a fix`);
     // waiting is not stale: an open owner question that blocks the ticket, or the worker's own
     // request to the supervisor still unanswered (the unanswered-message finding covers that)
     const waitingOnOwner = openQs.some((q) => (q.blocks ?? []).includes(id) || q.ticket === id);
@@ -5061,7 +5099,7 @@ function collectMetrics(since) {
     const who = `plan-${p.feature}`;
     // a planner parked by a drain stopped on purpose: not gone, exited or stale
     if (p.parked) continue;
-    if (p.waiting) add('high', 'blocked-prompt', who, p.waiting.kind === 'limit' ? `a usage-limit banner in its pane: "${p.waiting.line}"` : `waiting on a prompt in its pane: "${p.waiting.line}"`, `look (tmux select-window -t ${settings.tmux_session}:${who}) and clear it (supervisor.md §11)`);
+    if (p.waiting) add('high', 'blocked-prompt', who, p.waiting.kind === 'limit' ? `a usage-limit banner in its pane: "${p.waiting.line}"` : `waiting on a prompt in its pane: "${p.waiting.line}"`, `look (tmux select-window -t '${tmuxTarget(who)}') and clear it (supervisor.md §11)`);
     else if (/no agent is running|has exited/.test(p.problem ?? '')) add('high', 'agent-exited', who, p.problem.replace(/; resume it first$/, ''), `resume it: planner ${p.feature} --resume (supervisor.md §11)`);
     else if (!p.window) add('medium', 'planner-gone', who, `plan/${p.feature} isn't on main and its window is gone (${p.problem})`, `resume it (planner ${p.feature} --resume) or, if the plan was dropped, delete the branch`);
     else if (!p.waiting_on_supervisor.length && !p.waiting_on_owner.length && p.minutes_silent > settings.stale_after_minutes) add('high', 'stale-planner', who, `no sign of life for ${p.minutes_silent} min`, 'check its pane; message it or resume it (supervisor.md §11)');
@@ -5308,10 +5346,114 @@ function dashboardLogger() {
   try { if (fs.statSync(file).size > 1024 * 1024) fs.renameSync(file, `${file}.1`); } catch {}
   return (msg) => { try { fs.mkdirSync(runDir, { recursive: true }); fs.appendFileSync(file, `${nowIso()} [${process.pid}] ${msg}\n`); } catch {} };
 }
-function cmdDashboard() {
-  const port = Number(flagStr('port') ?? loadSettings().dashboard_port);
+// Every instance on a machine has its own dashboard port in one block, so the hub finds them all
+// by asking each port who it is (/api/hello). DEVTEAM_HUB_PORT and DEVTEAM_PORT_BASE are for tests.
+const HUB_PORT = Number(process.env.DEVTEAM_HUB_PORT ?? 4320);
+const PORT_BASE = Number(process.env.DEVTEAM_PORT_BASE ?? 4321);
+const PORT_RANGE = Array.from({ length: 25 }, (_, i) => PORT_BASE + i);
+// Who answers on a port: a devteam dashboard's /api/hello, or null (closed, slow, or not devteam).
+function probeHello(port, ms = 300) {
+  return new Promise((resolve) => {
+    const req = http.get({ host: '127.0.0.1', port, path: '/api/hello', timeout: ms, headers: { host: `127.0.0.1:${port}` } }, (res) => {
+      let b = '';
+      res.on('data', (c) => { b += c; if (b.length > 65536) req.destroy(); });
+      res.on('end', () => { try { const j = JSON.parse(b); resolve(res.statusCode === 200 && Number(j?.devteam) >= 1 ? j : null); } catch { resolve(null); } });
+    });
+    req.on('timeout', () => { req.destroy(); resolve(null); });
+    req.on('error', () => resolve(null));
+  });
+}
+// Free means nothing answers there and this process could bind it: a dev server on localhost (::1)
+// or on every interface would still pass a bind of 127.0.0.1 alone, then take the owner's
+// localhost:<port> while the dashboard holds 127.0.0.1:<port>.
+const answers = (port, host) => new Promise((resolve) => { const c = net.connect({ port, host, timeout: 300 }); c.once('connect', () => { c.destroy(); resolve(true); }); c.once('timeout', () => { c.destroy(); resolve(false); }); c.once('error', () => resolve(false)); });
+const binds = (port) => new Promise((resolve) => { const v = net.createServer(); v.once('error', () => resolve(false)); v.listen(port, '127.0.0.1', () => v.close(() => resolve(true))); });
+const portFree = async (port) => !(await answers(port, '127.0.0.1')) && !(await answers(port, '::1')) && (await binds(port));
+// The dashboard's port: the one pinned (settings or --port); else the one this checkout used last,
+// if it is free; else one past the highest instance answering in the block, skipping ports held by
+// anything else; else the lowest free one. Saved to run/dashboard-port.
+async function pickDashboardPort({ skip = [] } = {}) {
+  const pinned = flagStr('port') ?? loadSettings().dashboard_port;
+  const span = `${PORT_RANGE[0]}-${PORT_RANGE.at(-1)}`;
+  if (pinned != null) {
+    const port = Number(pinned);
+    return { port, pinned: true, warn: PORT_RANGE.includes(port) ? null : `port ${port} is outside ${span}: the hub won't list it` };
+  }
+  const file = path.join(runDir, 'dashboard-port');
+  const last = Number(readText(file)?.trim());
+  if (PORT_RANGE.includes(last) && !skip.includes(last) && (await portFree(last))) return { port: last, warn: null };
+  const hellos = await Promise.all(PORT_RANGE.map((p) => probeHello(p)));
+  const top = PORT_RANGE.filter((_, i) => hellos[i]).pop();
+  const order = top === undefined ? PORT_RANGE : [...PORT_RANGE.filter((p) => p > top), ...PORT_RANGE.filter((p) => p <= top)];
+  for (const p of order) {
+    if (skip.includes(p) || hellos[PORT_RANGE.indexOf(p)] || !(await portFree(p))) continue;
+    fs.mkdirSync(runDir, { recursive: true });
+    fs.writeFileSync(file, `${p}\n`);
+    return { port: p, warn: null };
+  }
+  die(`every dashboard port in ${span} is taken: stop an instance, or pin one with "dashboard_port" in settings.md (the hub won't list a port outside ${span})`);
+}
+
+// The hub: every dashboard tries to serve 127.0.0.1:HUB_PORT, and the one that gets it lists every
+// instance in the block by asking each port /api/hello, linking to each one's own dashboard. It
+// owns no state and does nothing for the owner: GET only, no proxy, its own Host only, a page that
+// can talk only to itself. The others retry, so the hub moves when its dashboard stops. Something
+// that isn't a devteam hub on the port: logged once, and this dashboard stops trying.
+function startHub(log) {
+  const page = path.join(kitDir, 'dashboard', 'hub.html');
+  const retry = Number(process.env.DEVTEAM_HUB_RETRY_MS ?? 30000);
+  const ownHost = (h) => [`127.0.0.1:${HUB_PORT}`, `localhost:${HUB_PORT}`].includes(h ?? '');
+  // One scan at a time, its answer kept for 2 s: however often pages ask, the block is probed at
+  // most every 2 s. An instance speaking a newer hello than this hub knows lists only root and port.
+  let scanning = null;
+  let scanned = { at: 0, list: [] };
+  const probeAll = async () => (await Promise.all(PORT_RANGE.map(async (p) => {
+    const h = await probeHello(p);
+    if (!h) return null;
+    return Number(h.devteam) === 1 ? { ...h, port: p } : { devteam: h.devteam, root: h.root, port: p };
+  }))).filter(Boolean).sort((a, b) => String(a.root).localeCompare(String(b.root)));
+  const scan = () => {
+    if (Date.now() - scanned.at < 2000) return Promise.resolve(scanned.list);
+    scanning ??= probeAll().then((list) => { scanned = { at: Date.now(), list }; return list; }).finally(() => { scanning = null; });
+    return scanning;
+  };
+  // What holds the hub port: 'hub', 'other' (a clean answer that isn't a hub), or 'unsure' (slow,
+  // or gone between the bind and the ask), which is no reason to stop trying.
+  const holder = () => new Promise((resolve) => {
+    const r = http.get({ host: '127.0.0.1', port: HUB_PORT, path: '/instances.json', timeout: 2000, headers: { host: `127.0.0.1:${HUB_PORT}`, 'sec-fetch-site': 'same-origin' } }, (res) => { let b = ''; res.on('data', (c) => { b += c; }); res.on('end', () => { try { resolve(JSON.parse(b)?.hub === 1 ? 'hub' : 'other'); } catch { resolve('other'); } }); });
+    r.on('timeout', () => { r.destroy(); resolve('unsure'); });
+    r.on('error', () => resolve('unsure'));
+  });
+  const tryListen = () => {
+    const hub = http.createServer(async (req, res) => {
+      const send = (code, type, body, extra = {}) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...extra }); res.end(body); };
+      if (!ownHost(req.headers.host)) return send(403, 'text/plain; charset=utf-8', 'the hub answers only on its own address');
+      if (req.method !== 'GET') return send(405, 'text/plain; charset=utf-8', 'the hub only lists', { allow: 'GET' });
+      if (req.url === '/') return send(200, 'text/html; charset=utf-8', fs.readFileSync(page), { 'content-security-policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'" });
+      // The list is for the hub's own page: another site's page doesn't get to make the hub probe
+      // the block (a browser always says where a request came from). The page itself opens from
+      // anywhere, a link in a README included.
+      const site = req.headers['sec-fetch-site'];
+      if (req.url === '/instances.json' && site && !['same-origin', 'none'].includes(site)) return send(403, 'text/plain; charset=utf-8', 'the list is for the hub\'s own page');
+      if (req.url === '/instances.json') return send(200, 'application/json', JSON.stringify({ hub: 1, instances: await scan() }));
+      return send(404, 'text/plain; charset=utf-8', 'not found');
+    });
+    hub.once('error', async (e) => {
+      if (e.code !== 'EADDRINUSE') return log(`hub: ${e.message}`);
+      if ((await holder()) !== 'other') setTimeout(tryListen, retry).unref();
+      else log(`hub: port ${HUB_PORT} is held by something that isn't a devteam hub; this dashboard won't serve the hub`);
+    });
+    hub.listen(HUB_PORT, '127.0.0.1', () => log(`hub on http://127.0.0.1:${HUB_PORT}`));
+  };
+  tryListen();
+}
+
+async function cmdDashboard() {
+  const picked = await pickDashboardPort();
+  let port = picked.port;
   const host = flagStr('host') ?? '127.0.0.1';
   const log = dashboardLogger();
+  if (picked.warn) { log(picked.warn); process.stderr.write(`devteam dashboard: ${picked.warn}\n`); }
   process.on('uncaughtException', (e) => { log(`crashed: ${e?.stack ?? e}`); process.stderr.write(`devteam dashboard crashed: ${e?.stack ?? e}\n`); process.exit(1); });
   process.on('unhandledRejection', (e) => { log(`crashed (unhandled rejection): ${e?.stack ?? e}`); process.stderr.write(`devteam dashboard crashed: ${e?.stack ?? e}\n`); process.exit(1); });
   for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(sig, () => { log(`stopped by ${sig}`); process.exit(0); });
@@ -5343,7 +5485,30 @@ function cmdDashboard() {
     ack: (b) => (/^[a-z][a-z-]*$/.test(b.kind ?? '') && text(b.subject, 200) && text(b.reason, 600) ? ['ack', b.kind, b.subject, '--reason', b.reason.trim(), '--owner'] : null),
   };
   const send = (res, code, type, body) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store' }); res.end(body); };
+  // /api/hello answers at once from the last `hello` run, which the dashboard refreshes every 30 s
+  // in the background: the hub probes every port with a 300 ms budget, and /api/data takes far longer.
+  // One run at a time, each given 20 s; the kit's version is read once, on the first run.
+  let hello = null;
+  let kit = null;
+  let helloRunning = false;
+  const refreshHello = () => {
+    if (helloRunning) return;
+    helloRunning = true;
+    execFile(process.execPath, [self, 'hello', '--json', ...(kit ? ['--no-kit'] : [])], { cwd: mainRoot, env: ownerEnv, timeout: 20000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
+      helloRunning = false;
+      if (err) return;
+      try { hello = JSON.parse(stdout); kit ??= hello.kit; } catch {}
+    });
+  };
+  refreshHello();
+  setInterval(refreshHello, 30000).unref();
+  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, inbox: hello?.inbox ?? null, fleet: hello?.fleet ?? null });
   const server = http.createServer(async (req, res) => {
+    // Every route answers only on the dashboard's own address: a page elsewhere that points its own
+    // name at 127.0.0.1 (DNS rebinding) sends its own Host, and gets nothing, not even a read.
+    const okHost = [`127.0.0.1:${port}`, `localhost:${port}`, `${host}:${port}`].includes(req.headers.host ?? '');
+    if (!okHost) return send(res, 403, 'text/plain; charset=utf-8', 'the dashboard answers only on its own address');
+    if (req.method === 'GET' && req.url === '/api/hello') return send(res, 200, 'application/json', helloBody());
     // frame-src 'self': a frame of this page (a review page, an HTML mock) may navigate itself, and
     // this keeps it on the dashboard; a sandbox alone would let it load any URL, query string and all.
     if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) {
@@ -5404,7 +5569,6 @@ function cmdDashboard() {
       res.writeHead(200, { 'content-type': type, 'cache-control': 'no-store', 'content-security-policy': 'sandbox', 'x-content-type-options': 'nosniff' });
       return res.end(body);
     }
-    const okHost = [`127.0.0.1:${port}`, `localhost:${port}`, `${host}:${port}`].includes(req.headers.host ?? '');
     // A review: what the dashboard's review view loads (the question, its verified files, the
     // owner's draft and stored result), or the result as TSV for the owner's own use.
     if (req.method === 'GET' && u.pathname === '/api/review') {
@@ -5541,8 +5705,18 @@ function cmdDashboard() {
       send(res, r.ok ? 200 : 400, 'application/json', JSON.stringify(r.ok ? { ok: true, out: r.stdout.trim() } : { error: r.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') }));
     });
   });
-  server.on('error', (e) => { log(`server error: ${e?.stack ?? e}`); process.stderr.write(`devteam dashboard: ${e.message}\n`); process.exit(1); });
-  server.listen(port, host, () => { log(`started on http://${host}:${port} (node ${process.version})`); out(`devteam dashboard on http://${host}:${port}`); });
+  // Two dashboards starting at once can pick the same free port: the one that loses picks again.
+  const tried = [];
+  server.on('error', async (e) => {
+    if (e.code === 'EADDRINUSE' && !picked.pinned && tried.length < PORT_RANGE.length) {
+      tried.push(port);
+      port = (await pickDashboardPort({ skip: tried })).port;
+      return server.listen(port, host);
+    }
+    log(`server error: ${e?.stack ?? e}`); process.stderr.write(`devteam dashboard: ${e.message}\n`); process.exit(1);
+  });
+  server.once('listening', () => { log(`started on http://${host}:${port} (node ${process.version})`); out(`devteam dashboard on http://${host}:${port}`); startHub(log); });
+  server.listen(port, host);
 }
 
 // ===== 11. sessions: workers, planners, messages, phases, gates =====
@@ -5617,7 +5791,7 @@ function cmdSend() {
 // Log one message and type it into the recipient's pane. The log is the record; the pane is
 // delivery. A recipient whose pane is gone catches up with `messages`.
 function sendLine({ to, kind, text, re = null, sha = null, from, ticket = null }) {
-  const target = to === 'supervisor' ? supervisorTarget() : `${loadSettings().tmux_session}:${to}`;
+  const target = to === 'supervisor' ? supervisorTarget() : tmuxTarget(to);
   const { target: exact, problem } = resolvePane(target);
   const line = appendLog({ type: 'message', to, kind, text, re, sha, ticket: ticket ?? (tickets().has(to) ? to : null) }, from);
   if (problem || !typeInto(exact, `[devteam ${kind} ${line.id} from ${from}${re ? ` re ${re}` : ''}${sha ? ` @ ${sha}` : ''}] ${text}`)) warn(`${line.id} recorded but not delivered to "${to}": ${problem ?? `could not type into ${exact}`}; it shows in their \`messages\``);
@@ -5843,11 +6017,13 @@ function makeSession(role) {
   fs.writeFileSync(promptFile, `${text}${handoff ? `\n\n${handoff}` : ''}${knowledge ? `\n\n${knowledge}` : ''}\n`);
   // Workers live in detached tmux windows the owner can attach to; the supervisor is not one of them.
   let fresh = false;
-  if (!tmux(['has-session', '-t', s.tmux_session])) { fresh = tmux(['new-session', '-d', '-s', s.tmux_session, '-n', name, '-c', wt]); if (!fresh) die('could not start tmux'); }
-  const windows = (sh('tmux', ['list-windows', '-t', s.tmux_session, '-F', '#W']) ?? '').split('\n');
-  if (!fresh && windows.includes(name)) { if (!flags.resume) die(`window ${s.tmux_session}:${name} exists (use --resume to relaunch in it)`); }
-  else if (!fresh) tmux(['new-window', '-d', '-t', s.tmux_session, '-n', name, '-c', wt]);
-  const target = `${s.tmux_session}:${name}`;
+  const session = tmuxSession({ save: true });
+  if (!tmux(['has-session', '-t', `=${session}`])) { fresh = tmux(['new-session', '-d', '-s', session, '-n', name, '-c', wt]); if (!fresh) die('could not start tmux'); }
+  const windows = (sh('tmux', ['list-windows', '-t', `=${session}`, '-F', '#W']) ?? '').split('\n');
+  if (!fresh && windows.includes(name)) { if (!flags.resume) die(`window ${session}:${name} exists (use --resume to relaunch in it)`); }
+  else if (!fresh) tmux(['new-window', '-d', '-t', `=${session}`, '-n', name, '-c', wt]);
+  const target = `=${session}:${name}`;
+  const shown = `${session}:${name}`;
   const env = `export DEVTEAM_RUN='${runDir}' DEVTEAM_ROLE='${role}' ${role === 'worker' ? `DEVTEAM_TICKET='${id}'` : `DEVTEAM_FEATURE='${id}'`}`;
   typeInto(target, env);
   // Worker and planner policy travels with the launch, not the repo's agent config (which may be
@@ -5863,13 +6039,13 @@ function makeSession(role) {
   // every window that session's markers; a worker that inherits them runs as its child (Claude Code
   // then saves no transcript, so its spend goes unmeasured). Strip them for the agent, whatever the
   // window's shell is. Only per-session markers: settings an owner may export (CLAUDE_CONFIG_DIR) stay.
-  const markers = [...new Set([...Object.keys(process.env), ...(sh('tmux', ['show-environment', '-g']) ?? '').split('\n'), ...(sh('tmux', ['show-environment', '-t', s.tmux_session]) ?? '').split('\n')].map((l) => l.replace(/^-/, '').split('=')[0]).filter((k) => SESSION_MARKERS.test(k)))].sort();
+  const markers = [...new Set([...Object.keys(process.env), ...(sh('tmux', ['show-environment', '-g']) ?? '').split('\n'), ...(sh('tmux', ['show-environment', '-t', `=${tmuxSession()}`]) ?? '').split('\n')].map((l) => l.replace(/^-/, '').split('=')[0]).filter((k) => SESSION_MARKERS.test(k)))].sort();
   typeInto(target, `${markers.length ? `env ${markers.map((k) => `-u ${k}`).join(' ')} ` : ''}${cmd} "$(cat '${promptFile}')"`);
-  if (role === 'worker' && !resume) appendLog({ type: 'phase', from: null, to: 'starting', note: `started in ${target}` }, id);
+  if (role === 'worker' && !resume) appendLog({ type: 'phase', from: null, to: 'starting', note: `started in ${shown}` }, id);
   // a planner parked by a park is running again
-  if (role === 'planner' && lastPhaseOf(name)?.to === 'parked') appendLog({ type: 'phase', from: 'parked', to: 'starting', note: `started in ${target}` }, name);
-  appendLog({ type: 'act', decision: citing(), class: 'worker-slots', what: `${resume ? 'resumed' : 'made'} ${role} ${name} in ${target}${block ? `, ticket numbers ${padNN(block.from)}-${padNN(block.to)}` : ''}${refused ? ` while its goal is ${holdWords(mode)}, with --force` : ''}`, refs: role === 'worker' ? [id] : goalIds, reversible: true, id_block: block ?? undefined }, 'supervisor');
-  out(`${resume ? 'resumed' : 'made'} ${role} ${name} in ${target} at ${wt}${block ? `; ticket numbers ${padNN(block.from)}-${padNN(block.to)} reserved` : ''}`);
+  if (role === 'planner' && lastPhaseOf(name)?.to === 'parked') appendLog({ type: 'phase', from: 'parked', to: 'starting', note: `started in ${shown}` }, name);
+  appendLog({ type: 'act', decision: citing(), class: 'worker-slots', what: `${resume ? 'resumed' : 'made'} ${role} ${name} in ${shown}${block ? `, ticket numbers ${padNN(block.from)}-${padNN(block.to)}` : ''}${refused ? ` while its goal is ${holdWords(mode)}, with --force` : ''}`, refs: role === 'worker' ? [id] : goalIds, reversible: true, id_block: block ?? undefined }, 'supervisor');
+  out(`${resume ? 'resumed' : 'made'} ${role} ${name} in ${shown} at ${wt}${block ? `; ticket numbers ${padNN(block.from)}-${padNN(block.to)} reserved` : ''}`);
 }
 
 // --- moving the fleet: fleet park | drain, fleet status, fleet unpark | undrain (supervisor.md §12) ---
@@ -6017,7 +6193,7 @@ const supervisorHandoffOnMain = () => {
 };
 // What run/ holds that the kit made and rebuilds (or that is this machine's alone by nature); anything
 // else in it was put there by hand and doesn't move.
-const RUN_KNOWN = new Set(['log', 'prompts', 'questions', 'sent', 'cache', 'agent', 'pr', 'supervisor-pane', 'wait-since', 'dashboard.log', 'supervisor-prompt.txt', '.DS_Store']);
+const RUN_KNOWN = new Set(['log', 'prompts', 'questions', 'sent', 'cache', 'agent', 'pr', 'supervisor-pane', 'wait-since', 'tmux-session', 'dashboard-port', 'dashboard.log', 'supervisor-prompt.txt', '.DS_Store']);
 // An agent harness's own memory for this project, outside the repo (Claude Code keeps it per
 // checkout folder). It doesn't move; what the next session needs goes into knowledge or a handoff.
 function harnessMemoryFiles() {
@@ -6285,7 +6461,7 @@ function moveChecklist(s, memory = []) {
     `start the supervisor in the repo: open ${agent} there and say "Assume the role of the devteam supervisor and resume the fleet" (or step 9's command: DEVTEAM_ROLE=supervisor ${agent} "$(node docs/devteam/scripts/devteam.mjs prompt supervisor)"); tmux need only be installed: the workers get a tmux session of their own`,
     'the supervisor runs fleet unpark, or fleet undrain for a drained fleet (it rebuilds run/log from the landed log, prints the parity fingerprint, puts every goal back as it was) and restarts each parked session with the command it prints',
     'in the browser you use there: turn on "Notify me of new Inbox items" again (a browser setting)',
-    `restart the dashboard where it outlives the session: tmux new-window -d -t ${s.tmux_session} -n dashboard 'node docs/devteam/scripts/devteam.mjs dashboard' (or another terminal), then open http://127.0.0.1:${s.dashboard_port}`,
+    `restart the dashboard where it outlives the session: tmux new-window -d -t '=${tmuxSession()}' -n dashboard 'node docs/devteam/scripts/devteam.mjs dashboard' (or another terminal), then open the hub, http://127.0.0.1:${HUB_PORT}, which lists every instance on the machine (or the address the dashboard prints)`,
   ];
 }
 
@@ -6405,15 +6581,45 @@ function cmdWait() {
   report(`nothing new in ${minutes} min: the tick is due`, []);
 }
 
+// hello: who this instance is, for the hub. A fold of the log and one tmux call (no metrics, no git
+// per session), so the dashboard can run it every 30 s; --no-kit skips the kit's file check, which
+// the dashboard does once. The hub reads it from /api/hello.
+function cmdHello() {
+  const s = loadSettings();
+  const inbox = questions().filter((q) => q.status === 'open').length;
+  const workers = ourWindows(tmuxSession()).length;
+  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, fleet: { mode: fleetMode() ?? 'run', workers } };
+  return flags.json ? json(r) : out(`${r.name} at ${r.root}: kit ${r.kit}, ${inbox} open question(s), fleet ${r.fleet.mode}, ${workers} session(s)`);
+}
+// The kit's release (settings.upstream_base), +local when the kit that is running differs from the
+// kit committed on main: its files outside project/ and run/, by blob. Offline, never upstream.
+function kitVersion() {
+  const tag = loadSettings().upstream_base ?? 'unreleased';
+  const main = mainRef();
+  const rel = path.relative(mainRoot, kitDir).split(path.sep).join('/');
+  if (!main || !rel || rel.startsWith('..')) return tag;
+  const committed = (git(['ls-tree', '-r', main, '--', rel], mainRoot) ?? '').split('\n').filter(Boolean).map((l) => { const [meta, f] = l.split('\t'); return [f, meta.split(' ')[2]]; }).filter(([f]) => !/^(project|run)\//.test(f.slice(rel.length + 1)));
+  if (!committed.length) return `${tag}+local`;
+  for (const [f, blob] of committed) {
+    const abs = path.join(mainRoot, f);
+    if (!fs.existsSync(abs) || git(['hash-object', abs], mainRoot) !== blob) return `${tag}+local`;
+  }
+  // a kit file main doesn't have counts too (one git ignores doesn't: an editor's swap file)
+  const known = new Set(committed.map(([f]) => f));
+  const extra = (git(['ls-files', '--others', '--exclude-standard', '--', rel], mainRoot) ?? '').split('\n').filter(Boolean);
+  if (extra.some((f) => !known.has(f) && !/^(project|run)\//.test(f.slice(rel.length + 1)))) return `${tag}+local`;
+  return tag;
+}
 function cmdWhoami() {
   const id = currentTicketId();
   const s = loadSettings();
-  out([`DEVTEAM_TICKET=${id ?? ''}`, `DEVTEAM_FEATURE=${process.env.DEVTEAM_FEATURE ?? ''}`, `DEVTEAM_ROLE=${process.env.DEVTEAM_ROLE ?? (id ? 'worker' : logWriter().startsWith('plan-') ? 'planner' : 'supervisor')}`, `DEVTEAM_RUN=${runDir}`, `DEVTEAM_SUPERVISOR=${supervisorTarget() ?? ''}`, `# writer=${logWriter()} repo=${repoRoot} main_checkout=${mainRoot} project=${projectDir} tmux_session=${s.tmux_session}`].join('\n'));
+  out([`DEVTEAM_TICKET=${id ?? ''}`, `DEVTEAM_FEATURE=${process.env.DEVTEAM_FEATURE ?? ''}`, `DEVTEAM_ROLE=${process.env.DEVTEAM_ROLE ?? (id ? 'worker' : logWriter().startsWith('plan-') ? 'planner' : 'supervisor')}`, `DEVTEAM_RUN=${runDir}`, `DEVTEAM_SUPERVISOR=${supervisorTarget() ?? ''}`, `# writer=${logWriter()} repo=${repoRoot} main_checkout=${mainRoot} project=${projectDir} tmux_session=${tmuxSession()}`].join('\n'));
 }
 function cmdSettings() {
   const s = loadSettings();
   const key = flagStr('get');
   if (!key) return json(s);
+  if (key === 'tmux_session') return out(tmuxSession());
   const v = s[key];
   out(v === null || v === undefined ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v));
 }
@@ -6739,6 +6945,7 @@ Setup and roles
   prompt supervisor | worker <id> | planner <feature>    the prompt a session starts with
   worker <ticket-id> [--resume] [--force] | planner <feature> [--goal <g-id>] [--resume] [--force] [--id-block <n>]   supervisor: a worktree, a tmux window and an agent for a ticket or a feature plan (a new planner names its goal and reserves n ticket numbers, default 20); refused while its goal is parked or let go, or draining for a session that hasn't run, unless --force (logged); --resume where no session exists starts fresh with the handoff note
   whoami | settings [--get key]
+  hello [--json]                   who this instance is (root, name, kit, open questions, fleet): what the hub lists
 
 Holds and the fleet (planning.md §1, holds; supervisor.md §12)
   goal hold <g-id|upkeep> run|drain|park [--reason r] [--owner]   a goal's toggle: drain starts nothing new and lets in-flight work finish; park stops its sessions (WIP commit, push, handoff). The supervisor drains a running goal (with --reason) and releases only its own drain
@@ -6813,7 +7020,7 @@ Dashboard and releases
 `;
 
 const COMMANDS = {
-  init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), whoami: cmdWhoami, settings: cmdSettings,
+  init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), whoami: cmdWhoami, hello: cmdHello, settings: cmdSettings,
   feature: cmdFeature, ticket: cmdTicket, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, roadmap: cmdRoadmap,
   'check-ticket': cmdCheckTicket, 'check-pr': cmdCheckPr, merge: cmdMerge, 'review-worktree': cmdReviewWorktree,
   phase: cmdPhase, gate: cmdGate, send: cmdSend, messages: cmdMessages, 'stop-ok': cmdStopOk,
@@ -6838,5 +7045,6 @@ else {
       if (!(d.refs ?? []).some((r) => targets.includes(r))) die(`${d.id} is about ${(d.refs ?? []).join(', ') || 'nothing in particular (it named no --refs)'}; this ${command} is about ${targets.slice(0, 4).join(', ')}${targets.length > 4 ? ', …' : ''}. Decide with --refs naming it, or act without --decision`);
     }
   }
-  COMMANDS[command]();
+  const r = COMMANDS[command]();
+  if (r && typeof r.catch === 'function') r.catch((e) => die(e?.message ?? String(e)));
 }
