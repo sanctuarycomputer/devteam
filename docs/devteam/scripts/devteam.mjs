@@ -2281,6 +2281,10 @@ function ownerAnswer(qid, what) {
   const v = q?.type === 'question' ? questionView(q) : null;
   if (!v || v.status !== 'answered') die(`${what}: ${qid} is not a question the owner answered`);
   reviewApproves(v, what);
+  // An answer approves what it said yes to: the owner's answer must be the question's
+  // recommendation (a review, its verified result). Answered any other way, the owner declined or
+  // changed it, and the supervisor asks again; a secrets question approves by what was posted.
+  if (!(v.secrets ?? []).length && v.kind !== 'review' && !v.matched) die(`${what}: ${qid} was answered "${String(v.answer ?? '').slice(0, 80)}", not its recommendation${v.recommendation ? ` ("${v.recommendation}")` : ' (it has none)'}: that approves nothing; ask again for what the owner wants`);
   return v;
 }
 // A review approves something only through a result the owner gave that still verifies.

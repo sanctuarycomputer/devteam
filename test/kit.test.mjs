@@ -958,6 +958,10 @@ test('devteam kit', async (t) => {
     const refused = dt(['merge', '--chore', 'rules', '--dry-run', '--title', 'chore-rules: tighten', '--body-file', body], { role: 'sup' });
     assert.notEqual(refused.status, 0);
     assert.match(refused.out, /outside project\//);
+    // the owner's "no" approves nothing: merge needs the answer to be the question's recommendation
+    const Qn = must(['ask', '--question', 'Add a different rule to quality.md?', '--class', 'governance-edit', '--reasons', 'owner-only', '--recommendation', 'yes'], { role: 'sup' });
+    must(['answer', Qn, 'no, leave quality.md alone']);
+    assert.match(dt(['merge', '--chore', 'rules', '--dry-run', '--approved', Qn, '--title', 'chore-rules: tighten', '--body-file', body], { role: 'sup' }).err, /was answered "no, leave quality\.md alone", not its recommendation \("yes"\): that approves nothing/);
     const Qg = must(['ask', '--question', 'Add the extra rule to quality.md?', '--class', 'governance-edit', '--reasons', 'owner-only', '--recommendation', 'yes'], { role: 'sup' });
     must(['answer', Qg, 'yes']);
     must(['merge', '--chore', 'rules', '--dry-run', '--approved', Qg, '--title', 'chore-rules: tighten', '--body-file', body], { role: 'sup' });
