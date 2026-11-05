@@ -4977,10 +4977,18 @@ test('the dashboard reads a sibling ticket\'s documents from its repo', async ()
       assert.match(of, /repo = params\.get\('repo'\)/);
       assert.match(of, /new URLSearchParams\(\{ path, \.\.\.\(ref \? \{ ref \} : \{\}\), \.\.\.\(repo \? \{ repo \} : \{\}\) \}\)/, 'openFile passes repo to /api/file');
       assert.match(html, /const fileHref = \(l\) => [^\n]*\.\.\.\(l\.repo \? \{ repo: l\.repo \} : \{\}\)/, 'a file link carries its repo');
+      // the drawer's Commits: the file's history from console's git, not home's
+      const peek = async (q) => { const r = await fetch(`http://127.0.0.1:${port}/api/peek?${new URLSearchParams({ kind: 'file', id: spec.path, ...q })}`); return [r.status, await r.json()]; };
+      const [ps, pj] = await peek({ ref: spec.ref, repo: 'console' });
+      assert.equal(ps, 200);
+      assert.deepEqual(pj.history.map((h) => h.subject), ['spec'], "the file's commits, read in console");
+      assert.equal((await peek({ repo: 'Not A Link' }))[0], 400);
+      assert.match(html.slice(html.indexOf('function openFile(params)')), /peekOf\('file', path, \{ \.\.\.\(ref \? \{ ref \} : \{\}\), \.\.\.\(repo \? \{ repo \} : \{\}\) \}\)/, 'openFile asks the peek in the same repo');
       // no console checkout here: a 404 that says so, and the dashboard carries on
       write(path.join(old, 'docs/devteam/run/links.local.json'), JSON.stringify({ console: { path: path.join(F.base, 'not-cloned') } }));
       const [code, text] = await get({ path: spec.path, ref: spec.ref, repo: 'console' });
       assert.deepEqual([code, text], [404, 'no checkout of console here']);
+      assert.deepEqual((await peek({ ref: spec.ref, repo: 'console' }))[1].history, [], 'no history, and no failure, without the checkout');
       fs.rmSync(path.join(old, 'docs/devteam/run/links.local.json'));
     } finally { srv.kill(); }
   } finally { F.done(); }

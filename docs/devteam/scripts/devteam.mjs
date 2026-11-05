@@ -6840,8 +6840,10 @@ async function cmdDashboard() {
       const rec = u.searchParams.get('rec') ?? '';
       const ref = u.searchParams.get('ref') ?? '';
       if (ref && !/^(?!-)[A-Za-z0-9._\/-]+$/.test(ref)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad ref' }));
+      const prepo = u.searchParams.get('repo') ?? '';
+      if (prepo && !LINK_ID.test(prepo)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad repo' }));
       if (!/^[a-z]+$/.test(kind) || !id || id.length > 400 || /[\0\n]/.test(id) || id.startsWith('-') || ts.some((x) => !/^[a-z0-9][a-z0-9-]*$/.test(x)) || (rec && !/^[a-z0-9][a-z0-9-]*$/.test(rec))) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad kind, id, rec or tickets' }));
-      const r = await run(['peek', kind, id, ...(ts.length ? ['--tickets', JSON.stringify(ts)] : []), ...(rec ? ['--rec', rec] : []), ...(ref ? ['--ref', ref] : []), '--json']);
+      const r = await run(['peek', kind, id, ...(ts.length ? ['--tickets', JSON.stringify(ts)] : []), ...(rec ? ['--rec', rec] : []), ...(ref ? ['--ref', ref] : []), ...(prepo ? ['--repo', prepo] : []), '--json']);
       return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 404, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
     }
     if (req.method === 'GET' && u.pathname === '/api/schema') return send(res, 200, 'application/json', JSON.stringify(schemaDocs()));
@@ -8068,7 +8070,10 @@ function historyOf(ids, { types = null, limit = 300 } = {}) {
   }
   return res.slice(-limit);
 }
-const fileHistory = (rel, ref = null) => (git(['log', '-n', '60', '--format=%H%x09%cI%x09%an%x09%s', ...(ref ? [ref] : []), '--', rel]) ?? '').split('\n').filter(Boolean).map((x) => { const [sha, at, author, subject] = x.split('\t'); return { sha, at, author, subject }; }).reverse();
+// A file's commits, from the git of the repo it is in: another repo's (read on its main by default)
+// only when this machine can read it, else none (a view never fails on a missing checkout).
+const fileHistory = (rel, ref = null, name = 'home') => { const R = name === 'home' ? repo('home') : repoReadable(name) ? repo(name) : null; return fileHistoryIn(R, rel, ref ?? (name === 'home' ? null : R?.mainRef())); };
+const fileHistoryIn = (R, rel, ref) => (!R ? '' : R.git(['log', '-n', '60', '--format=%H%x09%cI%x09%an%x09%s', ...(ref ? [ref] : []), '--', rel]) ?? '').split('\n').filter(Boolean).map((x) => { const [sha, at, author, subject] = x.split('\t'); return { sha, at, author, subject }; }).reverse();
 function peekView(kind, id) {
   // the stored record this object is, or lives in (a story in its feature, a milestone in its goal)
   const v = { kind, id, record: recordView(flagStr('rec') ?? (kind === 'planner' ? '' : id)) };
@@ -8116,7 +8121,7 @@ function peekView(kind, id) {
     const nums = (x) => { try { return JSON.parse((x?.source_ref ? projectFileText(x.source_ref.replace(/^project\//, '')) : '')?.match(RETRO_BLOCK)?.[1] ?? 'null'); } catch { return null; } };
     v.numbers = { now: nums(o), prev: nums(prev), prev_id: prev?.id ?? null };
   } else if (kind === 'file') {
-    v.history = fileHistory(id, flagStr('ref') ?? null);
+    v.history = fileHistory(id, flagStr('ref') ?? null, flagStr('repo') ?? 'home');
   } else if (['story', 'release', 'wave', 'milestone'].includes(kind)) {
     v.history = historyOf(listFlag('tickets'), { types: ['ticket', 'act', 'decision', 'question'] }).filter((l) => l.type !== 'ticket' || l.op === 'new');
     if (kind === 'release') {

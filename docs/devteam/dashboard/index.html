@@ -2591,7 +2591,7 @@ function openFile(params) {
   const url = `/api/file?${new URLSearchParams({ path, ...(ref ? { ref } : {}), ...(repo ? { repo } : {}) })}`;
   DRAWER.url = url;
   const ext = (path.split('.').pop() || '').toLowerCase();
-  const p = peekOf('file', path, ref ? { ref } : {});
+  const p = peekOf('file', path, { ...(ref ? { ref } : {}), ...(repo ? { repo } : {}) });
   const head = `<h2 id="drawer-title">${esc(title)}</h2>${attrs({ id: path, idTip: 'Its path in the repository.', peek: p, noRecord: true, computed: [['Version', `<code>${esc(ref || 'main')}</code>`, 'The branch or commit it is read from; committed content only.'], ['Commits', p?.history?.length ? esc(p.history.length) : '', 'Commits that changed it (the latest 60).']] })}`;
   const tail = historySection(p, path);
   if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext)) return showDrawer(`${head}<div class="viewer"><img src="${esc(url)}" alt="${esc(title)}"></div>${tail}`);
