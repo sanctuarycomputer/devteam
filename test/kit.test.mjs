@@ -2943,6 +2943,41 @@ test('coverage at landing: no lines, no tree work; every forge judges the merge;
   } finally { F.done(); }
 });
 
+test('merge and check-pr fetch main before judging: a push from another clone is in the tree they check (round 2 N1, N4)', () => {
+  const F = monoFixture('fresh-main');
+  const { old, run, g, lines, edit } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const body = path.join(F.base, 'body.md');
+  write(body, '## One-way doors\n\nNone.\n');
+  try {
+    lines(F.STD);
+    // a chore narrows web to the files it sees
+    const w = path.join(old, '.worktrees', 'chore-narrow');
+    g(['worktree', 'add', '-q', '-b', 'chore-narrow', w, 'origin/main'], old);
+    edit((j) => { j.components.web.owns = ['web/src/**', 'web/package.json']; }, w);
+    g(['commit', '-qam', 'chore-narrow: x'], w);
+    g(['push', '-q', 'origin', 'chore-narrow'], w);
+    const sha = g(['rev-parse', 'HEAD'], w);
+    write(path.join(old, 'docs/devteam/run/pr/chore-narrow.md'), '# chore-narrow: x\n\n## One-way doors\n\nNone.\n');
+    // someone pushes web/extra.js to main from another clone: this checkout's origin/main is stale
+    const other = path.join(F.base, 'other');
+    g(['clone', '-q', F.org, other], F.base);
+    for (const [k, v] of [['user.email', 'o@o'], ['user.name', 'o']]) g(['config', k, v], other);
+    write(path.join(other, 'web/extra.js'), 'x\n');
+    g(['add', '-A'], other); g(['commit', '-qm', 'web extra'], other); g(['push', '-q', 'origin', 'main'], other);
+    const m = run(old, ['merge', '--chore', 'narrow', '--dry-run'], SUP);
+    assert.notEqual(m.status, 0, `merge judged a stale main: ${m.out}`);
+    assert.match(m.out, /unowned: web\/ \(1\): web\/extra\.js/, 'merge: the landing tree is onto the main it would merge onto');
+    assert.notEqual(run(old, ['merge', '--chore', 'narrow'], SUP).status, 0, 'and the real merge is refused');
+    g(['fetch', '-q', 'origin'], old);
+    assert.doesNotMatch(g(['show', 'origin/main:docs/devteam/project/settings.md'], old), /web\/src\/\*\*/, 'nothing landed');
+    // check-pr, from a checkout that has not fetched since the push, too
+    g(['update-ref', 'refs/remotes/origin/main', g(['rev-parse', 'origin/main~1'], old)], old);
+    const c = run(old, ['check-pr', '--head-ref', 'chore-narrow', '--sha', sha, '--title', 'chore-narrow: x', '--body-file', body]);
+    assert.match(c.out, /unowned: web\/ \(1\): web\/extra\.js/, 'check-pr fetches main first');
+  } finally { F.done(); }
+});
+
 test('the registry at landing: checked whatever the PR, url edits tied to registry-edit acts, tickets judged by main (F3, F7, F8, O6)', () => {
   const F = monoFixture('registry-landing');
   const { old, ok, run, g, lines, edit } = F;

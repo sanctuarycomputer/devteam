@@ -957,6 +957,19 @@ function mainRef() {
   for (const r of [`origin/${b}`, b]) if (resolveCommit(r)) return (mainRefCache = r);
   return (mainRefCache = null);
 }
+// Before judging a PR (check-pr, merge): main as origin has it now, and nothing read from the old
+// one kept. A push to main from another clone since this checkout last fetched would otherwise be
+// left out of the landing tree, the settings in force and the registry acts (round 2, N1/N4).
+// Settings, the log's memos (landing, coverage), main's log and merge shas are all re-read.
+function fetchMain() {
+  if (!commonDir) return;
+  git(['fetch', '--quiet', 'origin', loadSettings().main_branch]);
+  mainRefCache = undefined;
+  settingsCache = undefined;
+  logCache = null;
+  mainLogCache = undefined;
+  mergeShaCache.clear();
+}
 // In a read-only command, full ref names resolve from one for-each-ref listing (a dashboard
 // refresh asked git about each ticket branch separately: ~90 processes). Anything else, and every
 // command that writes, asks git directly.
@@ -2841,6 +2854,7 @@ function cmdCheckPr() {
   const headRef = flagStr('head-ref') ?? die('check-pr needs --head-ref (and --sha, --title, --body-file)');
   const sha = resolveCommit(flagStr('sha') ?? 'HEAD') ?? die('cannot resolve the head');
   const body = flagStr('body-file') ? fs.readFileSync(flagStr('body-file'), 'utf8') : undefined;
+  fetchMain();
   report(checkPr({ headRef, sha, title: flagStr('title'), body, forge: true }), `${headRef} passes the checks at ${sha.slice(0, 12)} (gates and the supervisor's approval acts are merge's to check)`);
 }
 // An owner-answered question, for commands that need the owner's yes.
@@ -2947,6 +2961,7 @@ function cmdMerge() {
   const prJson = viaGit ? null : sh('gh', ['pr', 'view', branch, '--json', 'number,headRefOid,title,body,isDraft,mergeStateStatus,url,statusCheckRollup']);
   if (prJson === null && !dry && !viaGit) die(`no open PR from ${branch} (gh pr view failed; with no forge CLI set forge: "git")`);
   git(['fetch', '--quiet', 'origin', branch]);
+  fetchMain();
   const pr = prJson !== null ? JSON.parse(prJson) : { headRefOid: resolveCommit(`origin/${branch}`) ?? resolveCommit(branch) ?? die(`no branch ${branch}`), title: flagStr('title'), body: flagStr('body-file') ? fs.readFileSync(flagStr('body-file'), 'utf8') : undefined };
   if (pr.isDraft) die(`${pr.url} is a draft`);
   const sha = pr.headRefOid;
