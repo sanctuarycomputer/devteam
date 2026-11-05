@@ -993,6 +993,25 @@ test('devteam kit', async (t) => {
     }
     fs.writeFileSync(supFile, kept);
     must(mergeArgs, { role: 'sup' });
+    // an answer from before answers carried the hash still counts, unless a second line for the
+    // question exists: then nothing shows which one the owner saw
+    const ownFile = fs.readdirSync(logDir).filter((f) => f.startsWith('owner-')).map((f) => path.join(logDir, f)).find((f) => fs.readFileSync(f, 'utf8').includes(Qg));
+    const ownKept = fs.readFileSync(ownFile, 'utf8');
+    fs.writeFileSync(ownFile, ownKept.split('\n').map((l) => { if (!l) return l; const o = JSON.parse(l); if (o.id !== Qg || !o.question_hash) return l; delete o.question_hash; return JSON.stringify(o); }).join('\n'));
+    must(mergeArgs, { role: 'sup' });
+    fs.writeFileSync(supFile, rewrites['a backdated second line']);
+    assert.match(dt(mergeArgs, { role: 'sup' }).err, /is not a question the owner answered/, 'a legacy answer and a second line');
+    fs.writeFileSync(ownFile, ownKept);
+    fs.writeFileSync(supFile, kept);
+    // once the owner answers the question as it now reads, the leftover line only warns
+    fs.writeFileSync(supFile, rewrites['a backdated second line']);
+    must(['answer', Qg, 'yes']);
+    const after = dt(['log-check']);
+    assert.equal(after.status, 0, after.out + after.err);
+    assert.match(after.out, /warn: .*a second question line with this id/);
+    fs.writeFileSync(supFile, kept);
+    fs.writeFileSync(ownFile, ownKept);
+    must(mergeArgs, { role: 'sup' });
     // the dashboard sends the hash of the question it showed: an answer to one changed since is refused
     const Qs = must(['ask', '--question', 'Keep the extra rule?', '--class', 'governance-edit', '--reasons', 'owner-only', '--recommendation', 'yes'], { role: 'sup' });
     const seen = json(must(['questions', '--id', Qs, '--json']))[0].hash;

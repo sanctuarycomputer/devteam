@@ -850,6 +850,7 @@ function fold(all) {
     if (l.op !== 'new') continue;
     if (objects.has(l.id)) {
       ignored.push({ line: l, why: 'duplicate id' });
+      if (l.type === 'question') Object.defineProperty(objects.get(l.id), '__duplicate', { value: true }); // not copied into views or JSON
       continue;
     }
     const { v, op, __file, __line, at, by, ...body } = l;
@@ -1201,8 +1202,9 @@ const questionHash = (q) => crypto.createHash('sha256').update(canonical(Object.
 function questionView(q) {
   const hash = questionHash(q);
   const last = q.updates.filter((u) => u.answer !== undefined && writerClass(u.by) === 'owner').pop();
-  // An answer from before answers carried the hash (no question_hash) still counts.
-  const rewritten = !!last?.question_hash && last.question_hash !== hash;
+  // An answer from before answers carried the hash (no question_hash) still counts, unless a
+  // second line for the question exists: then nothing shows which one the owner saw.
+  const rewritten = !!last && (last.question_hash ? last.question_hash !== hash : !!q.__duplicate);
   const ans = rewritten ? null : last;
   const st = q.updates.filter((u) => u.status !== undefined).pop();
   let status = 'open';
@@ -1450,11 +1452,14 @@ function cmdLogSync() {
 // Validate every line (live and durable) and list what the fold ignored.
 // A second line for a question replaces it if backdated, and a question changed after the owner
 // answered it has lost that answer (questionView): both are the log being rewritten.
+// The rewritten question fails until the owner answers what it says now; the leftover line then
+// warns (the log is append-only, so it can't be removed).
 function questionRewrites() {
-  const r = [];
-  for (const i of readLog().ignored) if (i.line.type === 'question' && i.why === 'duplicate id') r.push(`${i.line.id}: a second question line with this id (${i.line.__file}:${i.line.__line}); a question is asked once, and the earliest line is the one the owner answers`);
-  for (const q of logObjects('question')) if (questionView(q).rewritten) r.push(`${q.id}: the question changed after the owner answered it, so that answer no longer counts and it is open again`);
-  return r;
+  const errors = [];
+  const warnings = [];
+  for (const q of logObjects('question')) if (questionView(q).rewritten) errors.push(`${q.id}: the question changed after the owner answered it, so that answer no longer counts and it is open again`);
+  for (const i of readLog().ignored) if (i.line.type === 'question' && i.why === 'duplicate id') warnings.push(`${i.line.id}: a second question line with this id (${i.line.__file}:${i.line.__line}); a question is asked once`);
+  return { errors, warnings };
 }
 function cmdLogCheck() {
   const names = new Set();
@@ -1467,7 +1472,9 @@ function cmdLogCheck() {
     n += r.lines.length;
   }
   for (const i of readLog().ignored) out(`ignored: ${i.line.__file}:${i.line.__line} ${i.line.id}: ${i.why}`);
-  fails.push(...questionRewrites());
+  const rw = questionRewrites();
+  for (const w of rw.warnings) out(`warn: ${w}`);
+  fails.push(...rw.errors);
   report(fails, `${n} log line(s)`);
 }
 
@@ -2137,7 +2144,7 @@ function cmdValidate() {
   }
 
   for (const e of readLog().errors) warnings.push(`log ${e}`);
-  errors.push(...questionRewrites());
+  { const r = questionRewrites(); errors.push(...r.errors); warnings.push(...r.warnings); }
   for (const i of readLog().ignored) if (['ticket', 'feature'].includes(i.line.type) && i.why === 'duplicate id') errors.push(`${i.line.id}: a second ${i.line.type} line with this id (${i.line.__file}:${i.line.__line}) was ignored; use ${i.line.type} set`);
   const raw = ladder().raw_ceilings;
   for (const [c, v] of Object.entries(loadSettings().autonomy_ceilings ?? {})) {
