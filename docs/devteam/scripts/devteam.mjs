@@ -110,8 +110,11 @@ const DAY = 864e5;
 // process: one refresh asked git the same questions hundreds of times. Commands that write never
 // turn this on, so they always read live.
 let gitReadCache = null;
+// Where a git call with no cwd runs: home's main checkout when this command runs outside home (a
+// worker in another repo's worktree), else undefined, the cwd, as always (set in section 2).
+let HOME_CWD;
 const GIT_READS = new Set(['rev-parse', 'show', 'ls-tree', 'tag', 'merge-base', 'cat-file', 'log', 'for-each-ref', 'symbolic-ref', 'diff', 'rev-list', 'status']);
-function git(args, cwd) {
+function git(args, cwd = HOME_CWD) {
   const key = gitReadCache && GIT_READS.has(args[0]) ? `${cwd ?? ''}\0${args.join('\0')}` : null;
   if (key && gitReadCache.has(key)) return gitReadCache.get(key);
   let r;
@@ -123,13 +126,17 @@ function git(args, cwd) {
   if (key) gitReadCache.set(key, r);
   return r;
 }
-function gitOrDie(args, cwd) {
+function gitOrDie(args, cwd = HOME_CWD) {
   try {
     return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   } catch (e) {
     die(`git ${args.join(' ')} failed: ${(e.stderr || e.message).toString().trim()}`);
   }
 }
+// This checkout's own HEAD, branch and working tree, wherever it is: a worker in another repo's
+// worktree records its own head, while every other read goes to home (HOME_CWD).
+const cwdGit = (args) => git(args, process.cwd());
+const cwdGitOrDie = (args) => gitOrDie(args, process.cwd());
 function sh(cmd, args, opts = {}) {
   try {
     return execFileSync(cmd, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], ...opts }).trim();
@@ -194,15 +201,68 @@ const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(
 // ===== 2. locations and settings =====
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const repoRoot = git(['rev-parse', '--show-toplevel']) ?? process.cwd();
-// The kit folder of the checkout you are in (a worktree has its own copy): its project/ is the
-// branch's tickets and plans. Its rules are not read from here (kitDir, below).
-const devteamDir = fs.existsSync(path.join(repoRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs')) ? path.join(repoRoot, 'docs', 'devteam') : path.resolve(here, '..');
+const repoRoot = git(['rev-parse', '--show-toplevel'], process.cwd()) ?? process.cwd();
+const commonOf = (dir) => git(['rev-parse', '--path-format=absolute', '--git-common-dir'], dir);
+// Paths compared as the filesystem has them (macOS's /var is /private/var; a symlinked checkout).
+const realPath = (p) => { try { return fs.realpathSync(p); } catch { return p; } };
+// A remote's identity: owner/name for GitHub, however written; anything else is a URL or a path
+// (resolved from base, the checkout that names it). Read a checkout's origin with `git config
+// --get remote.origin.url`, the URL as configured: `git remote get-url` expands
+// url.<base>.insteadOf, which would make a mirror look like another repo.
+function remoteKeyAt(r, base) {
+  const s = String(r ?? '').trim().replace(/\/+$/, '');
+  const gh = /^(?:https?:\/\/(?:[^@/]+@)?github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)?([\w.-]+\/[\w.-]+?)(?:\.git)?$/.exec(s);
+  if (gh && !/^[./]/.test(s)) return gh[1].toLowerCase();
+  return /^[a-z]+:\/\//i.test(s) ? s.replace(/\.git$/, '') : realPath(path.resolve(base, s)).replace(/\.git$/, '');
+}
+// Home is the repo that holds the kit, project/ and the live log. It comes from DEVTEAM_HOME, or
+// from the script that runs (the re-exec above makes that the main checkout's kit), never from the
+// cwd: a worker in another repo's worktree runs home's kit by absolute path (spec §5.1). Anything
+// that isn't a home is refused loudly, never followed, so nothing runs against the wrong live log:
+// a DEVTEAM_HOME that is no checkout, has no project settings, or is a repo link's checkout; another
+// repo's copy of the kit run with DEVTEAM_HOME; and a kit whose project folder holds a repo link's
+// tickets/ and no settings.md (a sibling's own copy).
+const cwdCommon = commonOf(process.cwd());
+const projectIn = (root) => path.resolve(flagStr('project') ?? process.env.DEVTEAM_PROJECT ?? path.join(root, 'docs', 'devteam', 'project'));
+// The repo links a settings.md names, as { id: remote } (read raw: settings aren't loaded yet).
+const repoLinksIn = (file) => { try { const m = readText(file)?.match(/```json devteam\s*\n([\s\S]*?)\n```/); return Object.entries(JSON.parse(m[1]).links ?? {}).filter(([, l]) => l?.kind === 'repo' && typeof l.remote === 'string'); } catch { return []; } };
+// { common, proj }: home's git common dir, and its project folder when DEVTEAM_HOME named it.
+const homeAt = (() => {
+  const env = process.env.DEVTEAM_HOME;
+  const scriptCommon = commonOf(here);
+  if (!env) {
+    const common = scriptCommon ?? cwdCommon;
+    const root = common ? path.dirname(common) : null;
+    const proj = root && path.join(root, 'docs', 'devteam', 'project');
+    if (proj && command !== 'help' && !process.env.DEVTEAM_PROJECT && !flagStr('project') && fs.existsSync(path.join(proj, 'tickets')) && !fs.existsSync(path.join(proj, 'settings.md'))) die(`${proj} holds tickets/ but no settings.md: it is a repo link's checkout, not a devteam home; run home's kit, node '<home>/docs/devteam/scripts/devteam.mjs', or set DEVTEAM_HOME to home's main checkout`);
+    return { common, proj: null };
+  }
+  const notHome = `DEVTEAM_HOME=${env} is not a devteam home (a checkout whose project folder has settings.md); unset it, or point it at home's main checkout`;
+  const c = fs.existsSync(env) ? commonOf(env) : null;
+  if (!c) die(notHome);
+  const root = path.dirname(c);
+  const proj = projectIn(root);
+  if (!fs.existsSync(path.join(proj, 'settings.md'))) die(notHome);
+  // a sibling with a stray settings.md is still a sibling: the running kit's home names it a link
+  const origin = git(['config', '--get', 'remote.origin.url'], root);
+  const sibling = scriptCommon && origin ? repoLinksIn(path.join(projectIn(path.dirname(scriptCommon)), 'settings.md')).find(([, l]) => remoteKeyAt(l.remote, path.dirname(scriptCommon)) === remoteKeyAt(origin, root)) : null;
+  if (sibling) die(`DEVTEAM_HOME=${env} is the checkout of repo link ${sibling[0]}, not a devteam home; point it at home's main checkout`);
+  // home's own kit runs against home; another repo's copy (a sibling's) would fold by other rules
+  if (scriptCommon && realPath(scriptCommon) !== realPath(c) && !process.env.DEVTEAM_OWN_KIT) die(`DEVTEAM_HOME=${env}, but this kit is ${fileURLToPath(import.meta.url)} (another repo's copy): run home's kit, node '${path.join(root, 'docs', 'devteam', 'scripts', 'devteam.mjs')}'`);
+  return { common: c, proj };
+})();
+const commonDir = homeAt.common;
+const mainRoot = commonDir ? path.dirname(commonDir) : repoRoot;
+// Whether this command runs in one of home's checkouts (its main checkout or a worktree of it).
+const cwdIsHome = !!cwdCommon && !!commonDir && realPath(cwdCommon) === realPath(commonDir);
+HOME_CWD = cwdIsHome || !commonDir ? undefined : mainRoot;
+// The kit folder of the checkout you are in when it is home's (a worktree has its own copy): its
+// project/ is the branch's tickets and plans. Elsewhere, home's main checkout's, so mainRoot and
+// projectDir both follow home (never the cwd's repo).
+const devteamDir = !cwdIsHome && commonDir ? path.join(mainRoot, 'docs', 'devteam') : fs.existsSync(path.join(repoRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs')) ? path.join(repoRoot, 'docs', 'devteam') : path.resolve(here, '..');
 // The rules (schema, constitution) and the dashboard come from the kit that is running: in a
 // project that is the main checkout's (the re-exec above), so every session folds by the same rules.
 const kitDir = path.resolve(here, '..');
-const commonDir = git(['rev-parse', '--path-format=absolute', '--git-common-dir']);
-const mainRoot = commonDir ? path.dirname(commonDir) : repoRoot;
 const projectDir = path.resolve(flagStr('project') ?? process.env.DEVTEAM_PROJECT ?? path.join(devteamDir, 'project'));
 const runDir = path.resolve(process.env.DEVTEAM_RUN ?? path.join(mainRoot, 'docs', 'devteam', 'run'));
 // What run/ holds that the kit made and rebuilds (or that is this machine's alone by nature);
@@ -212,7 +272,9 @@ const RUN_KNOWN = new Set(['log', 'prompts', 'questions', 'sent', 'cache', 'agen
 const runPath = (name) => { RUN_KNOWN.add(name); return path.join(runDir, name); };
 // Where this machine's checkouts of repo links are, when not where settings say (§3.5).
 const LINKS_LOCAL = runPath('links.local.json');
-const projectRel = path.relative(repoRoot, projectDir).split(path.sep).join('/');
+// relative to the checkout that holds it: this one in a home checkout, else home's main checkout
+const projectRoot = cwdIsHome || !commonDir ? repoRoot : mainRoot;
+const projectRel = path.relative(projectRoot, projectDir).split(path.sep).join('/');
 const projectInRepo = !!commonDir && projectRel !== '' && !projectRel.startsWith('..') && !path.isAbsolute(projectRel);
 const CHORES = 'chores';
 
@@ -523,15 +585,8 @@ const SUPERVISOR_LINK_CLASSES = ['registry-edit'];
 // supervisor's (url). Derived, so a new kind's entry says it once, in ownerClass.
 for (const K of Object.values(LINK_KINDS)) K.ownedByOwner = [...LINK_COMMON.filter((f) => f !== 'kind'), ...K.fields.required, ...K.fields.optional].some((f) => { const c = K.ownerClass(f); return !!c && !SUPERVISOR_LINK_CLASSES.includes(c); });
 const linkFields = (kind) => (LINK_KINDS[kind] ? [...LINK_COMMON, ...LINK_KINDS[kind].fields.required, ...LINK_KINDS[kind].fields.optional] : LINK_COMMON);
-// A remote's identity: owner/name for GitHub, however written; anything else is a URL or a path.
-// Read a checkout's origin with `git config --get remote.origin.url`, the URL as configured:
-// `git remote get-url` expands url.<base>.insteadOf, which would make a mirror look like another repo.
-const remoteKey = (r) => {
-  const s = String(r ?? '').trim().replace(/\/+$/, '');
-  const gh = /^(?:https?:\/\/(?:[^@/]+@)?github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)?([\w.-]+\/[\w.-]+?)(?:\.git)?$/.exec(s);
-  if (gh && !/^[./]/.test(s)) return gh[1].toLowerCase();
-  return /^[a-z]+:\/\//i.test(s) ? s.replace(/\.git$/, '') : realOrSelf(path.resolve(mainRoot, s)).replace(/\.git$/, '');
-};
+// A remote's identity (remoteKeyAt), a path resolved from home's main checkout.
+const remoteKey = (r) => remoteKeyAt(r, mainRoot);
 // Where a link's checkout is on this machine: run/links.local.json (untracked), the committed path,
 // or ../<id>, relative to home's main checkout (§3.5). PR 2 adds --path on the command line.
 function linkLocation(id) {
@@ -548,7 +603,7 @@ const componentLink = (name, s = loadSettings()) => (linesDeclared(s) ? s.compon
 const componentsOn = (s, link = 'home') => (linesDeclared(s) ? Object.entries(s.components).filter(([, c]) => (c?.link ?? 'home') === link).map(([name, c]) => ({ name, owns: Array.isArray(c.owns) ? c.owns.filter((g) => typeof g === 'string') : undefined, shared: !!c.shared })) : []);
 // The kit's own files: the kit folder and the project folder, wherever --project moved it.
 // (upstreamSyncApproval reads this one too, rather than computing its own.)
-const kitRel = path.relative(repoRoot, devteamDir).split(path.sep).join('/');
+const kitRel = path.relative(projectRoot, devteamDir).split(path.sep).join('/');
 const devteamLine = () => [...(kitRel && !kitRel.startsWith('..') ? [`${kitRel}/**`] : []), ...(projectInRepo ? [`${projectRel}/**`] : [])];
 // The kit's own repo has no lines: everything in it is the kit (§4, open issue 5).
 const kitsOwnRepo = () => { const o = git(['config', '--get', 'remote.origin.url']); return !!o && remoteKey(o) === remoteKey(loadSettings().upstream_repo ?? ''); };
@@ -938,7 +993,7 @@ const isPlanFile = (name) => name.startsWith('plan-') && !MONTHLY.test(name.repl
 
 function currentTicketId() {
   if (process.env.DEVTEAM_TICKET) return process.env.DEVTEAM_TICKET;
-  const b = git(['rev-parse', '--abbrev-ref', 'HEAD']);
+  const b = cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']);
   return b?.startsWith('ticket/') ? b.slice('ticket/'.length) : null;
 }
 // Who this process writes the log as: a ticket id, plan-<feature>, or supervisor. Never the owner.
@@ -946,7 +1001,7 @@ function logWriter() {
   const t = currentTicketId();
   if (t) return t;
   if (process.env.DEVTEAM_FEATURE) return `plan-${process.env.DEVTEAM_FEATURE}`;
-  const b = git(['rev-parse', '--abbrev-ref', 'HEAD']);
+  const b = cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']);
   if (b?.startsWith('plan/')) return `plan-${b.slice('plan/'.length)}`;
   return 'supervisor';
 }
@@ -1883,7 +1938,7 @@ function deriveStatus() {
   });
 }
 
-const onPlanBranch = () => (git(['rev-parse', '--abbrev-ref', 'HEAD']) ?? '').startsWith('plan/');
+const onPlanBranch = () => (cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']) ?? '').startsWith('plan/');
 
 function cmdValidate() {
   const ts = tickets();
@@ -1935,7 +1990,7 @@ function cmdValidate() {
   // On a plan branch, the feature's tickets number from its reserved block (a planner made before
   // blocks has none and is not checked).
   {
-    const pf = onPlanBranch() ? (git(['rev-parse', '--abbrev-ref', 'HEAD']) ?? '').slice('plan/'.length) : null;
+    const pf = onPlanBranch() ? (cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']) ?? '').slice('plan/'.length) : null;
     const b = pf ? idBlockFor(pf) : null;
     if (b) for (const t of ts.values()) {
       if (t.created_by !== `plan-${pf}`) continue;
@@ -2550,7 +2605,7 @@ const gitFacts = (gitFn, run) => ({
   },
 });
 // git with its exit status, for the reads whose failure means something (the tree reads above).
-function gitRun(args, cwd) {
+function gitRun(args, cwd = HOME_CWD) {
   const r = spawnSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 });
   return { status: r.status ?? -1, out: (r.stdout ?? '').replace(/\n$/, ''), err: r.stderr || r.error?.message || '' };
 }
@@ -3593,7 +3648,7 @@ const reviewResultPath = (f) => (projectInRepo ? new RegExp(`^${reReserved(proje
 // A blob's exact bytes at a commit (git() decodes and trims; a hash needs the bytes).
 function gitBlob(commit, p) {
   try {
-    return execFileSync('git', ['cat-file', 'blob', `${commit}:${p}`], { stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+    return execFileSync('git', ['cat-file', 'blob', `${commit}:${p}`], { cwd: HOME_CWD, stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
   } catch {
     return null;
   }
@@ -3984,7 +4039,7 @@ function cmdReview() {
       // The owner's bytes, verified, into the PR that asked; check-pr holds the copy to the hash on
       // the owner's line, so a copy changed by anyone never lands.
       if (!projectInRepo) die(`project/ is not inside this repo (${projectDir}); there is no PR to carry the result`);
-      const branch = git(['rev-parse', '--abbrev-ref', 'HEAD']);
+      const branch = cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']);
       if (branch && branch !== 'HEAD' && q.review.ref && !/^[0-9a-f]{40}$/.test(q.review.ref) && branch !== q.review.ref) warn(`${v.id} was asked on ${q.review.ref}, and this worktree is on ${branch}; its result belongs in the PR that asked it`);
       const rel = reviewResultRel(v.id, currentTicketId());
       const dest = path.join(repoRoot, ...rel.split('/'));
@@ -5625,7 +5680,7 @@ function recordUsd(r) {
   if (p.tier && r[2] + r[4] + r[5] + r[6] > p.tier.over) p = p.tier;
   return (r[2] * p.input + r[3] * p.output + r[4] * p.read + r[5] * p.write + r[6] * p.write1h) / 1e6;
 }
-const realOrSelf = (p) => { try { return fs.realpathSync(p); } catch { return p; } };
+const realOrSelf = realPath;
 // Whose work ran in a directory: a ticket's worktree, a planner's, a reviewer's (charged to its
 // ticket), and the main checkout or a chore's (the supervisor's).
 function spenderFor(cwd, ts) {
@@ -6705,7 +6760,7 @@ function cmdSend() {
   const from = flags.owner ? ownerWriter().by : myAddress();
   if (from === 'owner' && kind !== 'info') die('the owner sends info messages; answers go through answer <qid>, rulings come from the supervisor');
   if (['ruling', 'answer'].includes(kind) && from !== 'supervisor') die(`only the supervisor sends ${kind} messages`);
-  const sha = flagStr('sha') ?? (kind === 'merge-request' ? git(['rev-parse', 'HEAD']) : null);
+  const sha = flagStr('sha') ?? (kind === 'merge-request' ? cwdGit(['rev-parse', 'HEAD']) : null);
   const re = flagStr('re') ?? null;
   if (re && logGet(re)?.type !== 'message') warn(`--re ${re} matches no logged message`);
   out(sendLine({ to, kind, text, re, sha, from, ticket: flagStr('ticket') ?? (from === 'owner' ? null : currentTicketId()) }).id);
@@ -6770,7 +6825,7 @@ function cmdPhase() {
   const changed = !prev || prev.to !== to || prev.task !== task || (cost.usd !== undefined && cost.usd !== prev.usd) || flags.note !== undefined;
   const stale = !prev || Date.now() - Date.parse(prev.created_at) > Math.min(15, loadSettings().stale_after_minutes / 3) * 60000;
   if (!changed && !stale) return out(`phase ${to} (unchanged)`);
-  appendLog({ type: 'phase', from: prev?.to ?? null, to, task, note: flagStr('note')?.slice(0, 280), sha: git(['rev-parse', 'HEAD']) ?? undefined, ...cost }, id);
+  appendLog({ type: 'phase', from: prev?.to ?? null, to, task, note: flagStr('note')?.slice(0, 280), sha: cwdGit(['rev-parse', 'HEAD']) ?? undefined, ...cost }, id);
   out(`phase ${to}${task ? ` ${task}` : ''}`);
   // Waiting with nothing asked looks the same as waiting with a request answered: say so.
   if (['awaiting-word', 'blocked'].includes(to)) {
@@ -6797,7 +6852,7 @@ function cmdGate() {
     ok = false;
   }
   const tests = readJunit(flagStr('junit'));
-  appendLog({ type: 'gate', gate: name, ok, ms: Date.now() - started, sha: git(['rev-parse', 'HEAD']) ?? undefined, dirty: git(['status', '--porcelain']) ? true : undefined, tests_total: tests.length, tests: keepTests(tests) });
+  appendLog({ type: 'gate', gate: name, ok, ms: Date.now() - started, sha: cwdGit(['rev-parse', 'HEAD']) ?? undefined, dirty: cwdGit(['status', '--porcelain']) ? true : undefined, tests_total: tests.length, tests: keepTests(tests) });
   process.stderr.write(`devteam: gate ${name} ${ok ? 'passed' : 'FAILED'} in ${((Date.now() - started) / 1000).toFixed(1)}s\n`);
   process.exit(ok ? 0 : 1);
 }
@@ -6814,7 +6869,7 @@ function gateAll() {
     let ok = true;
     try { execFileSync('sh', ['-c', cmd], { stdio: ['ignore', 'ignore', 'inherit'], env: gateEnv() }); } catch { ok = false; }
     const ms = Date.now() - started;
-    appendLog({ type: 'gate', gate: name, ok, ms, sha: git(['rev-parse', 'HEAD']) ?? undefined, tests_total: 0, tests: [] });
+    appendLog({ type: 'gate', gate: name, ok, ms, sha: cwdGit(['rev-parse', 'HEAD']) ?? undefined, tests_total: 0, tests: [] });
     rows.push({ name, ok, ms, mode: spec.mode ?? 'enforced' });
     out(`${ok ? 'pass' : 'FAIL'}  ${name.padEnd(20)} ${(ms / 1000).toFixed(1)}s  ${spec.mode ?? 'enforced'}`);
   }
@@ -6827,7 +6882,7 @@ function cmdStopOk() {
   const id = currentTicketId();
   if (!id) process.exit(0);
   const last = logObjects('phase').filter((p) => p.created_by === id).sort(byTime).pop();
-  const commitAt = Date.parse(git(['log', '-1', '--format=%cI']) ?? '');
+  const commitAt = Date.parse(cwdGit(['log', '-1', '--format=%cI']) ?? '');
   if (last && !['done', 'parked'].includes(last.to) && commitAt > Date.parse(last.created_at) + 60000) {
     process.stderr.write(`devteam: your last commit is newer than your last phase line; run: devteam.mjs phase ${last.to} [--task …]\n`);
     process.exit(2);
@@ -7087,15 +7142,15 @@ function cmdHandoff() {
   if (!['worker', 'planner'].includes(role)) die('handoff: a worker or planner records its own (the supervisor adds --supervisor)');
   const name = role === 'worker' ? (process.env.DEVTEAM_TICKET ?? currentTicketId() ?? die('handoff: no ticket')) : `plan-${process.env.DEVTEAM_FEATURE ?? die('handoff: no feature')}`;
   const sess = sessionOf(name);
-  if (workLines(git(['status', '--porcelain'])).length) die('handoff: commit your work in progress first (a WIP commit is fine); the handoff commit holds only the note');
-  const branch = git(['rev-parse', '--abbrev-ref', 'HEAD']);
+  if (workLines(cwdGit(['status', '--porcelain'])).length) die('handoff: commit your work in progress first (a WIP commit is fine); the handoff commit holds only the note');
+  const branch = cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']);
   if (branch !== sess.branch) die(`handoff: you are on ${branch}, not ${sess.branch}`);
   withScratch((dir) => {
     const f = path.join(dir, 'msg');
     fs.writeFileSync(f, `${HANDOFF_SUBJECT(name)}\n\n${note}\n`);
-    gitOrDie(['commit', '--quiet', '--allow-empty', '-F', f]);
+    cwdGitOrDie(['commit', '--quiet', '--allow-empty', '-F', f]);
   });
-  gitOrDie(['push', '--quiet', 'origin', `HEAD:refs/heads/${sess.branch}`]);
+  cwdGitOrDie(['push', '--quiet', 'origin', `HEAD:refs/heads/${sess.branch}`]);
   out(`handoff committed on ${sess.branch} and pushed; now: devteam.mjs phase parked --note "parked", and stop`);
 }
 const causeWords = (c) => (c.kind === 'self' ? 'it was told to park' : c.kind === 'fleet' ? `the fleet was parked${c.host ? ` on ${c.host}` : ''}${c.reason ? ` (${c.reason})` : ''}` : c.kind === 'let-go' ? `the owner let go of "${c.title}"` : `"${c.title}" was parked${c.reason ? ` (${c.reason})` : ''}`);
@@ -7535,7 +7590,7 @@ function kitVersion() {
 function cmdWhoami() {
   const id = currentTicketId();
   const s = loadSettings();
-  out([`DEVTEAM_TICKET=${id ?? ''}`, `DEVTEAM_FEATURE=${process.env.DEVTEAM_FEATURE ?? ''}`, `DEVTEAM_ROLE=${process.env.DEVTEAM_ROLE ?? (id ? 'worker' : logWriter().startsWith('plan-') ? 'planner' : 'supervisor')}`, `DEVTEAM_RUN=${runDir}`, `DEVTEAM_SUPERVISOR=${supervisorTarget() ?? ''}`, `# writer=${logWriter()} repo=${repoRoot} main_checkout=${mainRoot} project=${projectDir} tmux_session=${tmuxSession()}`].join('\n'));
+  out([`DEVTEAM_TICKET=${id ?? ''}`, `DEVTEAM_FEATURE=${process.env.DEVTEAM_FEATURE ?? ''}`, `DEVTEAM_ROLE=${process.env.DEVTEAM_ROLE ?? (id ? 'worker' : logWriter().startsWith('plan-') ? 'planner' : 'supervisor')}`, `DEVTEAM_RUN=${runDir}`, `DEVTEAM_SUPERVISOR=${supervisorTarget() ?? ''}`, `# writer=${logWriter()} home=${mainRoot} repo=${repoRoot} main_checkout=${mainRoot} project=${projectDir} tmux_session=${tmuxSession()}`].join('\n'));
 }
 function cmdSettings() {
   const s = loadSettings();

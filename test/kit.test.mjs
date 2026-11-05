@@ -26,6 +26,8 @@ const line = (o) => `${JSON.stringify({ v: 1, ...o })}\n`;
 // tmux in this test talks to its own server, never the developer's (or a live fleet's) sessions.
 process.env.TMUX_TMPDIR = fs.mkdtempSync(path.join(os.tmpdir(), 'dt-tmux-'));
 delete process.env.TMUX;
+// a devteam session's own home never reaches the kits under test
+delete process.env.DEVTEAM_HOME;
 delete process.env.TMUX_PANE;
 // Dashboards started by tests never use the machine's real ports or become its hub: the hub and
 // the instance block move to ports the tests own.
@@ -4160,5 +4162,49 @@ test('three repos: the fixture validates, and links shows each', () => {
   try {
     const l = json(F.okIn(F.old, ['links', '--json']));
     assert.deepEqual(l.links.map((x) => [x.id, x.found]).sort(), [['companion', true], ['console', true]]);
+  } finally { F.done(); }
+});
+
+test('a worker in a sibling worktree runs home\'s kit: home\'s run directory and project (M6); a bad DEVTEAM_HOME, or a sibling\'s own kit, is refused', () => {
+  const F = multiFixture('m6');
+  const { old, g, runIn, okIn } = F;
+  try {
+    const w = path.join(old, '.worktrees', 'console-01-x');
+    g(['worktree', 'add', '-q', '-b', 'ticket/console-01-x', w, 'origin/trunk'], F.console);
+    const W = { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'console-01-x' };
+    const who = okIn(w, ['whoami'], W, { DEVTEAM_HOME: old });
+    assert.match(who, new RegExp(`DEVTEAM_RUN=(${fs.realpathSync(old)}|${old})/docs/devteam/run`));
+    assert.match(who, /project=.*\/old\/docs\/devteam\/project/);
+    assert.match(who, /writer=console-01-x/, 'its own branch names it');
+    assert.match(who, /home=.*\/old\b/, 'whoami names home');
+    okIn(w, ['phase', 'build', '--task', 'T1'], W, { DEVTEAM_HOME: old });
+    assert.ok(fs.readFileSync(path.join(old, 'docs/devteam/run/log/console-01-x.jsonl'), 'utf8').includes('"to":"build"'), "the phase line lands in home's live log");
+    assert.equal(json(okIn(old, ['log', '--type', 'phase', '--by', 'console-01-x', '--json']))[0].sha, g(['rev-parse', 'HEAD'], w), "the phase records the worktree's own head");
+    // the same from the worktree with no DEVTEAM_HOME: home is the running kit's repo, never the cwd's
+    assert.match(okIn(w, ['whoami'], W), /project=.*\/old\/docs\/devteam\/project/);
+    // DEVTEAM_HOME refused, never followed: a repo link's checkout, a missing directory, a non-project checkout
+    assert.match(runIn(w, ['whoami'], W, { DEVTEAM_HOME: F.console }).err, /DEVTEAM_HOME=.*console is not a devteam home/, "a repo link's checkout is refused");
+    assert.match(runIn(w, ['whoami'], W, { DEVTEAM_HOME: path.join(F.base, 'nowhere') }).err, /DEVTEAM_HOME=.*nowhere is not a devteam home/);
+    const plain = path.join(F.base, 'plain');
+    fs.mkdirSync(plain); g(['init', '-q'], plain);
+    assert.match(runIn(w, ['whoami'], W, { DEVTEAM_HOME: plain }).err, /DEVTEAM_HOME=.*plain is not a devteam home .*point it at home's main checkout/);
+    // a sibling that carries a stray settings.md is still a repo link's checkout, never a home
+    write(path.join(F.console, 'docs/devteam/project/settings.md'), '```json devteam\n{}\n```\n');
+    assert.match(runIn(w, ['whoami'], W, { DEVTEAM_HOME: F.console }).err, /DEVTEAM_HOME=.*console is the checkout of repo link console, not a devteam home/);
+    fs.rmSync(path.join(F.console, 'docs/devteam/project/settings.md'));
+    // a project moved with DEVTEAM_PROJECT is still a home
+    okIn(w, ['whoami'], W, { DEVTEAM_HOME: old, DEVTEAM_PROJECT: path.join(old, 'docs/devteam/project') });
+    // the kit's own line holds from a sibling worktree: validate doesn't read the kit as unowned
+    assert.doesNotMatch(runIn(w, ['validate'], W, { DEVTEAM_HOME: old }).out, /unowned: docs\/devteam/, "kitRel is relative to home's checkout, not the cwd's");
+    // a sibling's own copy of the kit (its project folder holds tickets/, never settings.md): refused, never run as a home
+    fs.cpSync(path.join(old, 'docs/devteam'), path.join(F.console, 'docs/devteam'), { recursive: true, filter: (x) => !/[\\/](project|run)([\\/]|$)/.test(x.slice(path.join(old, 'docs/devteam').length)) });
+    write(path.join(F.console, 'docs/devteam/project/tickets/console-01-x/spec.md'), '# spec\n');
+    const own = spawnSync(process.execPath, [path.join(F.console, 'docs/devteam/scripts/devteam.mjs'), 'status'], { cwd: F.console, env: F.env({}), encoding: 'utf8' });
+    assert.notEqual(own.status, 0);
+    assert.match(own.stderr, /holds tickets\/ but no settings\.md: it is a repo link's checkout, not a devteam home; run home's kit/);
+    // DEVTEAM_HOME names home, but the kit running is another repo's copy: refused, with the command to run
+    const other = spawnSync(process.execPath, [path.join(F.console, 'docs/devteam/scripts/devteam.mjs'), 'status'], { cwd: F.console, env: { ...F.env({}), DEVTEAM_HOME: old }, encoding: 'utf8' });
+    assert.notEqual(other.status, 0);
+    assert.match(other.stderr, /DEVTEAM_HOME=.*old, but this kit is .*console.*: run home's kit, node '.*\/old\/docs\/devteam\/scripts\/devteam\.mjs'/);
   } finally { F.done(); }
 });
