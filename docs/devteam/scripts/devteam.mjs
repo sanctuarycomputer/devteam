@@ -1538,17 +1538,14 @@ function homeMergedAt(id) {
   return mergedAtCache.get(id);
 }
 const homeReleasedIn = (sha, pattern) => releasedInWith((a) => git(a), sha, pattern);
-// Re-bound in the routers below (repo()) to the ticket's own repo.
-const mergeShaFor = (id) => homeMergeShaFor(id);
-const mergedAt = (id) => homeMergedAt(id);
-const ticketBranchRef = (id) => homeTicketBranchRef(id);
-const releasedIn = (sha, opts = {}) => homeReleasedIn(sha, opts.pattern);
 // Read a project file from a git ref (a ticket's branch, an exact head) or the working tree.
 function srcRead(src, rel) {
+  if (src.repo && src.repo.name !== 'home') return src.repo.srcRead(src.ref ?? null, rel);
   if (src.ref && projectInRepo) return git(['show', `${src.ref}:${projectRel}/${rel}`]);
   return readText(path.join(projectDir, rel));
 }
 function srcList(src, relDir) {
+  if (src.repo && src.repo.name !== 'home') return src.repo.srcList(src.ref ?? null, relDir);
   if (src.ref && projectInRepo) return (git(['ls-tree', '--name-only', `${src.ref}:${projectRel}/${relDir}`]) ?? '').split('\n').filter(Boolean);
   const p = path.join(projectDir, relDir);
   return fs.existsSync(p) ? fs.readdirSync(p) : [];
@@ -1636,6 +1633,18 @@ const repoReadable = (name) => { if (name === 'home') return true; const l = loa
 // By object, for acts on one ticket: fails fast with one message when the checkout is wrong.
 const repoOfTicket = (t) => repo(repoOfTicketLink(t));
 const repoOfTicketId = (id) => { const t = tickets().get(id); return t ? repoOfTicket(t) : repo('home'); };
+// A ticket's git facts come from its own repo (spec §5.1). Views ask by name, through factsRepo,
+// which is null for a repo this machine can't read: its tickets read as unmerged and branchless
+// while link-unreachable says why (open issue 8). Home's methods are today's functions.
+const factsRepo = (id) => { const t = tickets().get(id); const name = t ? repoOfTicketLink(t) : 'home'; return repoReadable(name) ? repo(name) : null; };
+const mergeShaFor = (id) => factsRepo(id)?.mergeShaFor(id) ?? null;
+const mergedAt = (id) => factsRepo(id)?.mergedAt(id) ?? null;
+const ticketBranchRef = (id) => factsRepo(id)?.ticketBranchRef(id) ?? null;
+// A release of a repo (§5.5): the component's tag pattern, else v*; home's by default.
+const releasedIn = (sha, { repo: R = repo('home'), pattern } = {}) => R.releasedIn(sha, pattern);
+// The head a check of R reads: --sha, else this checkout's HEAD when it is a checkout of R, else
+// R's main checkout's.
+const headIn = (R, shaArg) => (shaArg ? R.resolveCommit(shaArg) : cwdRepo() === R ? cwdGit(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}']) : R.resolveCommit('HEAD'));
 // The repo of the checkout this command runs in (home, or a repo link's), by its git common dir.
 function cwdRepo() {
   if (cwdIsHome) return repo('home');
@@ -2578,7 +2587,8 @@ function parseReview(file, text) {
   };
 }
 const reviewRecordsIn = (src, relDir) => srcList(src, relDir).filter((f) => f.endsWith('.md')).map((f) => parseReview(f, srcRead(src, `${relDir}/${f}`) ?? ''));
-const ticketReviews = (id, src) => reviewRecordsIn(src, `tickets/${id}/reviews`);
+// A ticket's review records, from its own repo: a sibling's WORKTREE reads that repo's main.
+const ticketReviews = (id, src) => { const R = src.repo ?? factsRepo(id); return R ? reviewRecordsIn(R.name === 'home' ? src : { ...src, repo: R }, `tickets/${id}/reviews`) : []; };
 const featureReviews = (feature) => reviewRecordsIn(WORKTREE, `reviews/${feature}`);
 function latestPerTrack(records, stage) {
   const latest = new Map();
@@ -2655,35 +2665,35 @@ function fillInOnly(before, after) {
   }
   return true;
 }
-function verdictHolds(v, head, dir) {
+function verdictHolds(v, head, dir, R = repo('home')) {
   if (!head || !v || !/^[0-9a-f]{40}$/.test(v)) return false;
   if (v === head) return true;
-  if (!dir || git(['merge-base', '--is-ancestor', v, head]) === null) return false;
-  const main = mainRef();
+  if (!dir || R.git(['merge-base', '--is-ancestor', v, head]) === null) return false;
+  const main = R.mainRef();
   // the branch's own commits since V: what a merge brought in from main is main's, not the branch's.
   // Each adds a review record, or fills one in mechanically (fillInOnly): an empty Disposition cell
   // filled, a missing "- Reviewer:" line added. Nothing else in a record may change.
   let commit = null;
   const isRecord = (file) => file?.startsWith(dir) && /^(?:[a-z0-9-]+\/)?[a-z]+-\d+[a-z]?\.md$/.test(file.slice(dir.length));
-  const onlyRecords = (git(['log', '--no-merges', '--no-renames', '--format=@%H', '--name-status', `${v}..${head}`, ...(main ? [`^${main}`] : [])]) ?? 'x').split('\n').filter(Boolean).every((l) => {
+  const onlyRecords = (R.git(['log', '--no-merges', '--no-renames', '--format=@%H', '--name-status', `${v}..${head}`, ...(main ? [`^${main}`] : [])]) ?? 'x').split('\n').filter(Boolean).every((l) => {
     if (l.startsWith('@')) { commit = l.slice(1); return true; }
     const [st, file] = l.split('\t');
     // a drained session's handoff note is prose about the session, not the work (supervisor.md, Moving the fleet)
     if (isHandoffFile(file)) return st === 'A' || st === 'M';
     if (!isRecord(file)) return false;
     if (st === 'A') return true;
-    return st === 'M' && !!commit && fillInOnly(git(['show', `${commit}^:${file}`]), git(['show', `${commit}:${file}`]));
+    return st === 'M' && !!commit && fillInOnly(R.git(['show', `${commit}^:${file}`]), R.git(['show', `${commit}:${file}`]));
   });
   if (!onlyRecords) return false;
-  const merges = (git(['rev-list', '--merges', `${v}..${head}`]) ?? 'x').split('\n').filter(Boolean);
+  const merges = (R.git(['rev-list', '--merges', `${v}..${head}`]) ?? 'x').split('\n').filter(Boolean);
   if (!merges.length) return true;
   if (!main) return false;
   for (const m of merges) {
-    const others = (git(['rev-list', '--parents', '-n', '1', m]) ?? '').split(' ').slice(2);
-    if (!others.length || others.some((p) => git(['merge-base', '--is-ancestor', p, main]) === null)) return false;
+    const others = (R.git(['rev-list', '--parents', '-n', '1', m]) ?? '').split(' ').slice(2);
+    if (!others.length || others.some((p) => R.git(['merge-base', '--is-ancestor', p, main]) === null)) return false;
   }
   const records = `:(exclude)${dir.replace(/\/$/, '')}`;
-  const own = (x) => git(['diff', '--binary', `${main}...${x}`, '--', '.', records]);
+  const own = (x) => R.git(['diff', '--binary', `${main}...${x}`, '--', '.', records]);
   const a = own(v), b = own(head);
   if (a !== null && a === b) return true;
   // When main also changed a file the work touches, that diff's text moves (blob ids, line
@@ -2691,10 +2701,10 @@ function verdictHolds(v, head, dir) {
   // its parents on its own: redo it and compare trees, records aside. A conflict, a resolution or
   // any hand edit in the merge differs from that, so it voids the verdict.
   return merges.every((m) => {
-    const parents = (git(['rev-list', '--parents', '-n', '1', m]) ?? '').split(' ').slice(1);
+    const parents = (R.git(['rev-list', '--parents', '-n', '1', m]) ?? '').split(' ').slice(1);
     if (parents.length !== 2) return false;
-    const tree = git(['merge-tree', '--write-tree', '--no-messages', parents[0], parents[1]])?.split('\n')[0];
-    return !!tree && /^[0-9a-f]{40}$/.test(tree) && git(['diff', '--quiet', tree, `${m}^{tree}`, '--', '.', records]) !== null;
+    const tree = R.git(['merge-tree', '--write-tree', '--no-messages', parents[0], parents[1]])?.split('\n')[0];
+    return !!tree && /^[0-9a-f]{40}$/.test(tree) && R.git(['diff', '--quiet', tree, `${m}^{tree}`, '--', '.', records]) !== null;
   });
 }
 // The three tree reads every repo needs, over one git function and runner (home's, or a repo link's bound to
@@ -2834,12 +2844,14 @@ function checkTicket(id, { sha: shaArg, title, body, approvals = true }) {
   if (!t) return [`no ticket ${id}`];
   const fails = [];
   if (t.superseded_by) fails.push(`ticket is superseded by ${t.superseded_by}`);
+  // the ticket's own repo (an act: fails fast on a missing or wrong checkout)
+  const R = repoOfTicketId(id);
   let sha = null;
   let src = WORKTREE;
-  if (commonDir) {
-    sha = resolveCommit(shaArg ?? 'HEAD');
-    if (!sha) return [`commit ${shaArg} not found locally (fetch it first)`];
-    if (projectInRepo) src = { ref: sha };
+  if (R.commonDir) {
+    sha = headIn(R, shaArg);
+    if (!sha) return [`commit ${shaArg} not found locally${R.name === 'home' ? '' : ` in ${R.name}`} (fetch it first)`];
+    if (R.projectInRepo) src = R.name === 'home' ? { ref: sha } : { ref: sha, repo: R };
   }
   const read = (rel) => srcRead(src, `tickets/${id}/${rel}`);
   if (read('spec.md') === null) fails.push('spec.md missing at this head');
@@ -2861,8 +2873,8 @@ function checkTicket(id, { sha: shaArg, title, body, approvals = true }) {
     if (r.verdict && !r.reviewer && !superseded(r)) fails.push(`${r.file}: no "- Reviewer:" line; an unnamed review does not count`);
   }
   // The latest record in every final track must say APPROVE at a commit that holds at this head.
-  const reviewsDir = projectInRepo ? `${projectRel}/tickets/${id}/reviews/` : null;
-  const holdsAt = (v) => (sha ? verdictHolds(v, sha, reviewsDir) : false);
+  const reviewsDir = R.projectInRepo ? `${R.projectRel}/tickets/${id}/reviews/` : null;
+  const holdsAt = (v) => (sha ? verdictHolds(v, sha, reviewsDir, R) : false);
   const latest = latestPerTrack(reviews, 'final');
   if (!latest.length) fails.push('no final review record (reviews/final-<n>.md)');
   for (const r of latest) {
@@ -2874,27 +2886,28 @@ function checkTicket(id, { sha: shaArg, title, body, approvals = true }) {
   const need = t.risk === 'high' ? 2 : 1;
   if (approvers.size < need) fails.push(`needs ${need} final APPROVE review(s) at this head from different named reviewers; found ${approvers.size}`);
   for (const r of reviews) for (const f of r.findings) if (blocking(f.severity) && !disposed(f.disposition)) fails.push(`${r.file} ${f.id} (${f.severity}) has no disposition`);
-  const base = mainRef() && sha ? git(['merge-base', mainRef(), sha]) : null;
-  if (commonDir && !base) fails.push(`cannot resolve main branch "${loadSettings().main_branch}"; footprint not checked`);
+  const base = R.mainRef() && sha ? R.git(['merge-base', R.mainRef(), sha]) : null;
+  if (R.commonDir && !base) fails.push(`cannot resolve main branch "${R.settings.main_branch}"${R.name === 'home' ? '' : ` in ${R.name}`}; footprint not checked`);
   if (base) {
-    const changed = changedFiles(base, sha);
-    const own = projectInRepo ? `${projectRel}/tickets/${id}/` : null;
+    const changed = R.changedFiles(base, sha);
+    const own = R.projectInRepo ? `${R.projectRel}/tickets/${id}/` : null;
     const mineOwn = (f) => !!own && f.startsWith(own);
     const outside = changed.filter((f) => !mineOwn(f) && !(t.touches ?? []).some((g) => pathMatches(g, f)));
     if (outside.length) fails.push(`changes files outside touches: ${outside.slice(0, 10).join(', ')}${outside.length > 10 ? ` (+${outside.length - 10} more)` : ''}`);
     // Component lines (§4, point 4): a changed file is also inside the ticket's component's line or
     // a touches_components member's; the kit's own line is closed but for the ticket's own folder.
     // Judged by main's committed settings, so neither a line widened in a working tree nor the
-    // ticket's own edit to settings.md changes anything (O6).
+    // ticket's own edit to settings.md changes anything (O6). Settings live in home, so another
+    // repo's ticket is judged by home main's lines for that repo (B1).
     const s = mainSettings();
     if (linesDeclared(s)) {
-      const comps = componentsOn(s, 'home');
+      const comps = componentsOn(s, R.name);
       // touches_components widens only a contract or integration ticket (spec §6.2, F4), as in validate
       const tc = t.touches_components ?? [];
       const wide = ['contract', 'integration'].includes(t.kind);
       if (tc.length && !wide) fails.push(`touches_components is for contract and integration tickets; this ${t.kind ?? ''} ticket's line is ${t.component}'s alone`);
       const names = [t.component, ...(wide ? tc : [])];
-      const L = compileLines(comps, devteamLine());
+      const L = compileLines(comps, R.devteamLine());
       const ownerOf = new Map(changed.map((f) => [f, ownersIn(f, L)]));
       const inLine = (f) => { const o = ownerOf.get(f); return o[0] !== 'devteam' && o.some((n) => names.includes(n)); };
       const off = changed.filter((f) => !mineOwn(f) && !outside.includes(f) && !inLine(f));
@@ -2920,13 +2933,14 @@ function cmdCheckTicket() {
   let title = flagStr('title');
   let body = flagStr('body-file') ? fs.readFileSync(flagStr('body-file'), 'utf8') : undefined;
   let sha = flagStr('sha');
+  const R = repoOfTicketId(id);
   if (flagStr('pr')) {
-    const pr = sh('gh', ['pr', 'view', flagStr('pr'), '--json', 'title,body,headRefOid']);
+    const pr = R.gh(['pr', 'view', flagStr('pr'), '--json', 'title,body,headRefOid']);
     if (!pr) die('gh pr view failed');
     const p = JSON.parse(pr);
     title ??= p.title; body ??= p.body; sha ??= p.headRefOid;
   }
-  report(checkTicket(id, { sha, title, body }), `${id} meets the definition of done at ${(resolveCommit(sha ?? 'HEAD') ?? '').slice(0, 12)}`);
+  report(checkTicket(id, { sha, title, body }), `${id} meets the definition of done at ${(headIn(R, sha) ?? '').slice(0, 12)}`);
 }
 
 
@@ -4718,14 +4732,15 @@ function cmdAct() {
       }
     } else if (doors.length && !questions().some((q) => q.kind === 'one-way-door' && q.ticket === t.id && q.status === 'answered')) die(`${t.id} lists one-way doors; the owner answers a one-way-door question (--ticket ${t.id}) before its plan is approved, or you cite the owner's answer to the goal's one-way-door question (--approved <qid>) and the plan review says it covers the plan (constitution.md §4)`);
     // The plan opens with its TL;DR, so a low-risk plan can be approved from it (quality.md §6).
-    const ref = [`ticket/${t.id}`, `origin/ticket/${t.id}`].find((r) => resolveCommit(r));
-    const plan = ref ? git(['show', `${ref}:${projectRel}/tickets/${t.id}/plan.md`]) : null;
+    const R = repoOfTicket(t); // an act: fails fast on a missing or wrong checkout
+    const ref = [`ticket/${t.id}`, `origin/ticket/${t.id}`].find((r) => R.resolveCommit(r));
+    const plan = ref ? R.git(['show', `${ref}:${R.projectRel}/tickets/${t.id}/plan.md`]) : null;
     if (plan === null) die(`no plan.md for ${t.id} on ticket/${t.id}; approve a plan once it is committed`);
     const tldr = tldrGap(plan);
     if (tldr) die(`${t.id}'s plan ${tldr}; send it back to the worker (quality.md §6)`);
     // A goal-level answer covers the plan only when its reviewer says the plan stays inside it.
     if (goalDoor) {
-      const latest = latestPerTrack(ticketReviews(t.id, { ref }), 'plan').filter((r) => r.verdict === 'APPROVE');
+      const latest = latestPerTrack(ticketReviews(t.id, R.name === 'home' ? { ref } : { ref, repo: R }), 'plan').filter((r) => r.verdict === 'APPROVE');
       if (!latest.some((r) => r.doors.includes(goalDoor))) die(`${goalDoor} is a goal-level answer; the latest approving plan review (reviews/plan-<n>.md on ticket/${t.id}) must say "- Goal-level door: ${goalDoor} covers this plan" (quality.md §3)`);
     }
   }

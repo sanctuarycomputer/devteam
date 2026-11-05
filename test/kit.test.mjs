@@ -4272,3 +4272,60 @@ test('lines on sibling repos: coverage per repo, project folder holds only ticke
     fs.rmSync(path.join(old, 'docs/devteam/run/links.local.json'));
   } finally { F.done(); }
 });
+
+test('a sibling ticket\'s records are read from its repo at the exact head', () => {
+  const F = multiFixture('sibling-records');
+  const { old, g, okIn, runIn, ticket } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const bodyF = path.join(F.base, 'body.md');
+  write(bodyF, '## One-way doors\n\nNone.\n');
+  try {
+    ticket('console-01-a');
+    const w = path.join(old, '.worktrees', 'console-01-a');
+    g(['worktree', 'add', '-q', '-b', 'ticket/console-01-a', w, 'origin/trunk'], F.console);
+    const tdir = path.join(w, 'docs/devteam/project/tickets/console-01-a');
+    write(path.join(tdir, 'spec.md'), '# spec\n');
+    write(path.join(tdir, 'plan.md'), '# plan\n\n## TL;DR\n\n- one change\n');
+    write(path.join(tdir, 'verification.md'), '| Done-when | Command | Result |\n|---|---|---|\n| suite | npm t | pass |\n');
+    write(path.join(w, 'src/main.js'), 'changed\n');
+    g(['add', '-A'], w); g(['commit', '-qm', 'console-01-a: work'], w);
+    const h1 = g(['rev-parse', 'HEAD'], w);
+    write(path.join(tdir, 'reviews/final-1.md'), review('reviewer-b', h1));
+    g(['add', '-A'], w); g(['commit', '-qm', 'review'], w);
+    const head = g(['rev-parse', 'HEAD'], w);
+    okIn(old, ['act', '--class', 'approve-spec', '--refs', 'console-01-a', '--', 'ok'], SUP);
+    okIn(old, ['act', '--class', 'approve-plan', '--refs', 'console-01-a', '--', 'ok'], SUP);
+    const r = runIn(old, ['check-ticket', 'console-01-a', '--sha', head, '--title', 'console-01-a: work', '--body-file', bodyF]);
+    assert.equal(r.status, 0, r.out + r.err);
+    assert.match(r.out, new RegExp(`meets the definition of done at ${head.slice(0, 12)}`), 'records come from console at the head');
+    // from the worktree itself, its own HEAD
+    assert.match(runIn(w, ['check-ticket', 'console-01-a', '--title', 'console-01-a: work', '--body-file', bodyF], { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'console-01-a' }).out, new RegExp(head.slice(0, 12)));
+    // a later code commit voids the verdict, in that repo's history
+    write(path.join(w, 'src/main.js'), 'changed again\n');
+    g(['commit', '-qam', 'more'], w);
+    assert.match(runIn(old, ['check-ticket', 'console-01-a', '--sha', g(['rev-parse', 'HEAD'], w), '--title', 'console-01-a: work', '--body-file', bodyF]).out, /does not hold/);
+    // a machine without the console checkout: acting on the ticket fails fast (views: Task 5b)
+    write(path.join(old, 'docs/devteam/run/links.local.json'), JSON.stringify({ console: { path: path.join(F.base, 'not-cloned') } }));
+    assert.match(runIn(old, ['check-ticket', 'console-01-a', '--sha', head]).err, /repo console: no checkout at .*not-cloned/);
+    fs.rmSync(path.join(old, 'docs/devteam/run/links.local.json'));
+  } finally { F.done(); }
+});
+
+test('B1: a sibling ticket\'s footprint is judged by home\'s committed lines', () => {
+  const F = multiFixture('sibling-footprint');
+  const { old, g, runIn, ticket } = F;
+  const bodyF = path.join(F.base, 'body.md');
+  write(bodyF, '## One-way doors\n\nNone.\n');
+  try {
+    // two lines in console: its UI and its build
+    F.lines({ ...F.STD, 'console-ui': { link: 'console', owns: ['src/**'] }, 'console-build': { link: 'console', owns: ['package.json', '.gitignore'] }, companion: { link: 'companion' } });
+    ticket('console-ui-01-a', { component: 'console-ui', touches: ['src/**', 'package.json'] });
+    const w = path.join(old, '.worktrees', 'console-ui-01-a');
+    g(['worktree', 'add', '-q', '-b', 'ticket/console-ui-01-a', w, 'origin/trunk'], F.console);
+    write(path.join(w, 'package.json'), '{"name":"edited by the ui"}\n');
+    g(['commit', '-qam', 'console-ui-01-a: build edit'], w);
+    g(['push', '-q', 'origin', 'ticket/console-ui-01-a'], w);
+    const r = runIn(old, ['check-ticket', 'console-ui-01-a', '--sha', g(['rev-parse', 'HEAD'], w), '--title', 'console-ui-01-a: x', '--body-file', bodyF]);
+    assert.match(r.out, /changes files outside the line of console-ui: package\.json \(console-build's line\)/, "home's lines judge the sibling's diff (not the defaults)");
+  } finally { F.done(); }
+});
