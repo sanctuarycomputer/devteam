@@ -80,14 +80,9 @@ test('devteam kit', async (t) => {
     git(['config', 'user.name', 't']);
     git(['remote', 'add', 'origin', origin]);
     fs.cpSync(kit, path.join(repo, 'docs', 'devteam'), { recursive: true, filter: (p) => !/[\\/](project|run)([\\/]|$)/.test(p.slice(kit.length)) });
-    must(['init', '--name', 'demo', '--upstream-base', 'v0.2.0', '--github']);
-    for (const f of ['docs/devteam/project/settings.md', 'docs/devteam/project/designs/architecture.md', '.github/workflows/devteam.yml']) assert.ok(fs.existsSync(path.join(repo, f)), f);
-    // the workflow is valid YAML: an expression inside a { … } flow mapping breaks it, and GitHub then runs no job at all
-    const wf = path.join(repo, '.github/workflows/devteam.yml');
-    assert.doesNotMatch(fs.readFileSync(wf, 'utf8'), /\{[^}\n]*\$\{\{/, 'no ${{ }} inside a flow mapping');
-    const ry = spawnSync('ruby', ['-ryaml', '-e', 'w = YAML.load_file(ARGV[0]); exit(w["jobs"]["check-pr"]["steps"].size >= 3 ? 0 : 2)', wf], { encoding: 'utf8' });
-    if (ry.error || /No version is set|command not found/.test(ry.stderr ?? '')) t.diagnostic('no runnable ruby: the workflow YAML was checked by pattern only');
-    else assert.equal(ry.status, 0, `the workflow parses as YAML: ${ry.stderr}`);
+    must(['init', '--name', 'demo', '--upstream-base', 'v0.2.0']);
+    for (const f of ['docs/devteam/project/settings.md', 'docs/devteam/project/designs/architecture.md']) assert.ok(fs.existsSync(path.join(repo, f)), f);
+    assert.ok(!fs.existsSync(path.join(repo, '.github/workflows/devteam.yml')), 'the kit installs no forge workflow');
     assert.match(fs.readFileSync(path.join(repo, '.gitignore'), 'utf8'), /docs\/devteam\/run\//);
     assert.match(fs.readFileSync(path.join(repo, 'AGENTS.md'), 'utf8'), /process\/supervisor\.md/, 'AGENTS.md routes agents to their doc');
     assert.match(fs.readFileSync(path.join(repo, 'CLAUDE.md'), 'utf8'), /@AGENTS\.md/, 'CLAUDE.md imports AGENTS.md');
@@ -1015,8 +1010,13 @@ test('devteam kit', async (t) => {
   });
 
   await t.test("the owner's CI-fix rule approves a workflow-only chore that keeps every job", () => {
+    // a project that kept the workflow earlier kits installed (devteam.yml with a check-pr job): its
+    // CI fixes may change it but never drop or gut devteam's own check
     const wf = '.github/workflows/devteam.yml';
-    assert.ok(git(['show', `origin/main:${wf}`]), 'init --github put the workflow on main');
+    write(path.join(repo, wf), 'name: devteam\non:\n  pull_request:\njobs:\n  check-pr:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: 22\n      - run: node docs/devteam/scripts/devteam.mjs check-pr --head-ref "$HEAD_REF"\n');
+    git(['add', wf]);
+    git(['commit', '-qm', 'the workflow an earlier kit installed']);
+    git(['push', '-q', 'origin', 'HEAD:main']);
     const branch = (slug, edit) => {
       git(['worktree', 'add', '-q', '-B', `chore-${slug}`, wt(slug), 'origin/main']);
       edit(wt(slug));
@@ -2483,6 +2483,7 @@ function fleetFixture(name) {
   // the log lands (as merge --chore log would put it on main)
   const land = () => {
     const live = path.join(old, 'docs/devteam/run/log');
+    fs.mkdirSync(path.join(old, 'docs/devteam/project/log'), { recursive: true }); // as log-sync makes it: init leaves no placeholder
     for (const f of fs.readdirSync(live).filter((x) => x.endsWith('.jsonl'))) fs.copyFileSync(path.join(live, f), path.join(old, 'docs/devteam/project/log', f));
     g(['add', '-A', 'docs/devteam/project/log'], old);
     g(['commit', '-qm', 'chore-log: log through now'], old);
@@ -2820,6 +2821,45 @@ test('the hub: lists every instance on the machine, links to each one, moves whe
   } finally {
     await a.stop();
     if (b) await b.stop();
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('init: from the main checkout only; main is the remote default branch, never the branch you are on; no placeholders the merge refuses', () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-init-'));
+  const g = (args, cwd) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  const run = (cwd, args) => spawnSync(process.execPath, [path.join(cwd, 'docs/devteam/scripts/devteam.mjs'), ...args], { cwd, encoding: 'utf8' });
+  try {
+    // a remote whose default branch is trunk, a repo made with git init (no origin/HEAD), on a feature branch
+    const org = path.join(base, 'origin.git');
+    g(['init', '-q', '--bare', '-b', 'trunk', org], base);
+    const r = path.join(base, 'repo');
+    fs.mkdirSync(r);
+    g(['init', '-q', '-b', 'trunk'], r);
+    for (const [k, v] of [['user.email', 't@t'], ['user.name', 't']]) g(['config', k, v], r);
+    g(['remote', 'add', 'origin', org], r);
+    fs.writeFileSync(path.join(r, 'README.md'), 'x\n');
+    g(['add', '-A'], r);
+    g(['commit', '-qm', 'first'], r);
+    g(['push', '-q', 'origin', 'trunk'], r);
+    g(['checkout', '-q', '-b', 'feature/adopt-devteam'], r);
+    fs.cpSync(kit, path.join(r, 'docs', 'devteam'), { recursive: true, filter: (p) => !/[\\/](project|run)([\\/]|$)/.test(p.slice(kit.length)) });
+    // from a worktree: refused, nothing written anywhere
+    g(['add', '-A'], r);
+    g(['commit', '-qm', 'kit'], r);
+    const w = path.join(base, 'wt');
+    g(['worktree', 'add', '-q', '--detach', w, 'HEAD'], r);
+    const fromWt = run(w, ['init', '--name', 'demo']);
+    assert.notEqual(fromWt.status, 0);
+    assert.match(fromWt.stderr, /run init from the main checkout/);
+    assert.ok(!fs.existsSync(path.join(r, 'AGENTS.md')) && !fs.existsSync(path.join(w, 'docs/devteam/project')), 'nothing written');
+    // from the main checkout
+    const ok = run(r, ['init', '--name', 'demo']);
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.match(fs.readFileSync(path.join(r, 'docs/devteam/project/settings.md'), 'utf8'), /"main_branch": "trunk"/, "the remote's default, not feature/adopt-devteam");
+    for (const d of ['log', 'tickets']) assert.ok(!fs.existsSync(path.join(r, 'docs/devteam/project', d, '.gitkeep')), `no ${d}/.gitkeep: merge refuses it`);
+    assert.ok(!fs.existsSync(path.join(r, '.github/workflows/devteam.yml')), 'no forge workflow');
+  } finally {
     fs.rmSync(base, { recursive: true, force: true });
   }
 });
