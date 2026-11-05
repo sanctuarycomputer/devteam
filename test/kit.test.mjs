@@ -31,7 +31,7 @@ delete process.env.TMUX_PANE;
 // the instance block move to ports the tests own.
 // Each run owns a block of 100 ports, so two suites on one machine don't collide either: the
 // file-wide hub and instance block at X, the ports test at X+30, the hub test at X+60.
-const PORTS = 30000 + (process.pid % 300) * 100;
+const PORTS = 20000 + (process.pid % 290) * 100; // below 49152, where the OS hands out ephemeral ports
 process.env.DEVTEAM_HUB_PORT = String(PORTS);
 process.env.DEVTEAM_PORT_BASE = String(PORTS + 1);
 const hasTmux = spawnSync('tmux', ['-V']).status === 0;
@@ -1562,14 +1562,23 @@ test('devteam kit', async (t) => {
       assert.ok(!fs.existsSync(f), 'resolving it writes nothing');
       const live = json(must(['fleet', 'status', '--json', '--no-fetch'], { role: 'sup' })).sessions.map((x) => x.name)[0];
       if (hasTmux && live) {
-        // a legacy `devteam` session holding one of this project's live windows keeps that name
-        spawnSync('tmux', ['new-session', '-d', '-s', 'devteam', '-n', live]);
+        const lw = wt(live);
+        const made = !fs.existsSync(lw);
+        if (made) fs.mkdirSync(lw, { recursive: true });
         try {
-          assert.equal(must(['settings', '--get', 'tmux_session']), 'devteam');
-          assert.equal(fs.readFileSync(f, 'utf8').trim(), 'devteam', 'a legacy name is saved the moment it is found, so it cannot flip');
-        } finally { spawnSync('tmux', ['kill-session', '-t', '=devteam']); fs.rmSync(f, { force: true }); }
-        spawnSync('tmux', ['new-session', '-d', '-s', 'devteam', '-n', 'someone-elses-ticket']);
-        try { assert.equal(must(['settings', '--get', 'tmux_session']), S(), "another project's devteam session is not ours"); } finally { spawnSync('tmux', ['kill-session', '-t', '=devteam']); }
+          // another project's window named like ours, started in its own checkout: not ours, nothing saved
+          spawnSync('tmux', ['new-session', '-d', '-s', 'devteam', '-n', live, '-c', tmp]);
+          try {
+            assert.equal(must(['settings', '--get', 'tmux_session']), S(), "a window named like ours that started elsewhere is someone else's");
+            assert.ok(!fs.existsSync(f), 'and nothing is saved');
+          } finally { spawnSync('tmux', ['kill-session', '-t', '=devteam']); }
+          // a legacy `devteam` session holding a window started in one of this checkout's worktrees keeps that name
+          spawnSync('tmux', ['new-session', '-d', '-s', 'devteam', '-n', live, '-c', lw]);
+          try {
+            assert.equal(must(['settings', '--get', 'tmux_session']), 'devteam');
+            assert.equal(fs.readFileSync(f, 'utf8').trim(), 'devteam', 'a legacy name is saved the moment it is found, so it cannot flip');
+          } finally { spawnSync('tmux', ['kill-session', '-t', '=devteam']); fs.rmSync(f, { force: true }); }
+        } finally { if (made) fs.rmSync(lw, { recursive: true, force: true }); }
       }
     } finally { if (had !== null) fs.writeFileSync(f, had); }
   });
@@ -2777,6 +2786,7 @@ test('the hub: lists every instance on the machine, links to each one, moves whe
     assert.equal(await statusWithHost(HUB, '/instances.json', 'rebound.example'), 403, 'its own Host only');
     assert.equal(await statusWithHost(HUB, '/instances.json', `127.0.0.1:${HUB}`, 'POST'), 405, 'it only lists');
     assert.equal(await statusWithHost(HUB, '/instances.json', `127.0.0.1:${HUB}`, 'GET', { 'sec-fetch-site': 'cross-site' }), 403, "another site's page can't make it probe");
+    assert.equal(await statusWithHost(HUB, '/', `127.0.0.1:${HUB}`, 'GET', { 'sec-fetch-site': 'cross-site' }), 200, 'the page itself opens from a link anywhere');
     await a.stop();
     const after = await until(async () => { const l = await list(); return l?.length === 1 && l; }, 'the hub, after alpha stops');
     assert.deepEqual(after.map((x) => x.name), ['beta'], 'whichever dashboard is left serves the hub and lists what is left');

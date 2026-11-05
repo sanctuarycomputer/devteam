@@ -134,10 +134,19 @@ function sh(cmd, args, opts = {}) {
   }
 }
 // The tmux session that holds this project's workers and planners: settings.tmux_session when set;
-// else the name saved in run/tmux-session; else devteam-<project>, so two projects on one machine
+// else the name saved in run/tmux-session; else devteam-<project>-<hash>, so two projects on one machine
 // never share a session. A project whose live sessions already sit in a `devteam` session (the
 // default before) keeps it. Resolving writes nothing, except to keep that legacy name: the name is
 // saved when the kit creates the session (save), so a read-only command, or CI, never writes run/.
+// This project's windows in a tmux session: the kit starts each worker or planner in its worktree
+// (-c), so a window is ours when it started under this checkout's .worktrees/, whatever its name;
+// another project's window named like one of our tickets never counts.
+function ourWindows(session) {
+  const roots = [...new Set([mainRoot, fs.realpathSync(mainRoot)])].map((r) => `${path.join(r, '.worktrees')}${path.sep}`);
+  return (sh('tmux', ['list-windows', '-t', `=${session}`, '-F', '#W\t#{pane_start_path}']) ?? '').split('\n').filter(Boolean)
+    .map((l) => { const i = l.indexOf('\t'); return { name: l.slice(0, i), start: `${l.slice(i + 1)}${path.sep}` }; })
+    .filter((w) => roots.some((r) => w.start.startsWith(r)));
+}
 let tmuxSessionName = null;
 function tmuxSession({ save = false } = {}) {
   const s = loadSettings();
@@ -146,14 +155,9 @@ function tmuxSession({ save = false } = {}) {
   const file = path.join(runDir, 'tmux-session');
   const saved = readText(file)?.trim();
   if (saved) return (tmuxSessionName = saved);
-  // Ours: a window named after one of this project's tickets, or after a worktree this checkout
-  // holds (a worker's ticket id, a planner's plan-<feature>, whose feature may not be in the log
-  // yet). Not liveSessions(): it lists windows, which asks this function.
-  const legacy = (sh('tmux', ['list-windows', '-t', '=devteam', '-F', '#W']) ?? '').split('\n').filter(Boolean);
-  const ours = (w) => tickets().has(w) || (/^[a-z0-9][a-z0-9-]*$/.test(w) && fs.existsSync(path.join(mainRoot, '.worktrees', w)));
-  // Named after the project and this checkout's path, so two clones of one repo (or two repos with
-  // one name) never share a session either.
-  const keep = legacy.some(ours);
+  // Not liveSessions(): it lists windows, which asks this function. Named after the project and
+  // this checkout's path, so two clones of one repo (or two repos with one name) never share either.
+  const keep = ourWindows('devteam').length > 0;
   const name = keep ? 'devteam' : `devteam-${slug(s.project ?? path.basename(mainRoot))}-${crypto.createHash('sha1').update(fs.realpathSync(mainRoot)).digest('hex').slice(0, 6)}`;
   // A legacy name is saved the moment it is found: once this project's last window there closes it
   // could no longer be told apart, and the next session would start somewhere else.
@@ -5423,11 +5427,12 @@ function startHub(log) {
       const send = (code, type, body, extra = {}) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...extra }); res.end(body); };
       if (!ownHost(req.headers.host)) return send(403, 'text/plain; charset=utf-8', 'the hub answers only on its own address');
       if (req.method !== 'GET') return send(405, 'text/plain; charset=utf-8', 'the hub only lists', { allow: 'GET' });
-      // The page asks from itself, and a person opens it directly; another site's page doesn't get to
-      // make the hub probe anything (a browser always says where a request came from).
-      const site = req.headers['sec-fetch-site'];
-      if (site && !['same-origin', 'none'].includes(site)) return send(403, 'text/plain; charset=utf-8', 'the hub answers only its own page');
       if (req.url === '/') return send(200, 'text/html; charset=utf-8', fs.readFileSync(page), { 'content-security-policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'" });
+      // The list is for the hub's own page: another site's page doesn't get to make the hub probe
+      // the block (a browser always says where a request came from). The page itself opens from
+      // anywhere, a link in a README included.
+      const site = req.headers['sec-fetch-site'];
+      if (req.url === '/instances.json' && site && !['same-origin', 'none'].includes(site)) return send(403, 'text/plain; charset=utf-8', 'the list is for the hub\'s own page');
       if (req.url === '/instances.json') return send(200, 'application/json', JSON.stringify({ hub: 1, instances: await scan() }));
       return send(404, 'text/plain; charset=utf-8', 'not found');
     });
@@ -6580,8 +6585,7 @@ function cmdWait() {
 function cmdHello() {
   const s = loadSettings();
   const inbox = questions().filter((q) => q.status === 'open').length;
-  const ours = (w) => tickets().has(w) || (/^[a-z0-9][a-z0-9-]*$/.test(w) && fs.existsSync(path.join(mainRoot, '.worktrees', w)));
-  const workers = (sh('tmux', ['list-windows', '-t', `=${tmuxSession()}`, '-F', '#W']) ?? '').split('\n').filter((w) => w && ours(w)).length;
+  const workers = ourWindows(tmuxSession()).length;
   const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, fleet: { mode: fleetMode() ?? 'run', workers } };
   return flags.json ? json(r) : out(`${r.name} at ${r.root}: kit ${r.kit}, ${inbox} open question(s), fleet ${r.fleet.mode}, ${workers} session(s)`);
 }
@@ -6598,10 +6602,10 @@ function kitVersion() {
     const abs = path.join(mainRoot, f);
     if (!fs.existsSync(abs) || git(['hash-object', abs], mainRoot) !== blob) return `${tag}+local`;
   }
-  // a kit file main doesn't have counts too
+  // a kit file main doesn't have counts too (one git ignores doesn't: an editor's swap file)
   const known = new Set(committed.map(([f]) => f));
-  const walk = (d) => fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => { const abs = path.join(d, e.name); const r = path.relative(mainRoot, abs).split(path.sep).join('/'); if (/^(project|run)(\/|$)/.test(r.slice(rel.length + 1))) return []; return e.isDirectory() ? walk(abs) : [r]; });
-  if (walk(kitDir).some((f) => !known.has(f) && !/(^|\/)\.DS_Store$/.test(f))) return `${tag}+local`;
+  const extra = (git(['ls-files', '--others', '--exclude-standard', '--', rel], mainRoot) ?? '').split('\n').filter(Boolean);
+  if (extra.some((f) => !known.has(f) && !/^(project|run)\//.test(f.slice(rel.length + 1)))) return `${tag}+local`;
   return tag;
 }
 function cmdWhoami() {
