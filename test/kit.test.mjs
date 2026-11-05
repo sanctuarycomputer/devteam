@@ -3760,12 +3760,28 @@ test('the registry attestation is the owner\'s: registry-attest is never answere
   const { old, ok, run } = F;
   const SUP = { DEVTEAM_ROLE: 'supervisor' };
   try {
-    const goal = (title, pre, prio) => ok(old, ['goal', 'add', '--title', title, '--outcome', 'the floor holds', '--measure', 'floor gaps', '--target', '0', '--unit', 'gaps', '--direction', 'down', '--source', 'repo', '--check', 'echo 3', '--non-goals', 'new features', '--preconditions', ...pre, '--priority', prio], SUP);
-    const G = goal('Baseline', ['format and lint', 'the registry is complete'], '1');
-    const other = goal('Other', ['format and lint'], '2');
-    const ready = (g) => run(old, ['act', '--class', 'goal-readiness', '--refs', g, '--', `${g} is ready`], SUP);
-    assert.match(ready(G).err, /the registry is complete.*no owner's yes to a registry-attest question .*ask --class registry-attest --goal/);
-    assert.equal(ready(other).status, 0, 'a goal without that precondition is not held');
+    const goal = (title, pre, prio, extra = []) => ok(old, ['goal', 'add', '--title', title, '--outcome', 'the floor holds', '--measure', 'floor gaps', '--target', '0', '--unit', 'gaps', '--direction', 'down', '--source', 'repo', '--check', 'echo 3', '--non-goals', 'new features', '--preconditions', ...pre, '--priority', prio, ...extra], SUP);
+    // the marker is the goal's own field, set by number; the precondition's wording is free
+    assert.match(run(old, ['goal', 'add', '--title', 'X', '--preconditions', 'a', '--registry-precondition', '2'], SUP).err, /--registry-precondition 2: X has 1 precondition/);
+    assert.match(run(old, ['goal', 'add', '--title', 'X', '--preconditions', 'a', '--registry-precondition', 'one'], SUP).err, /--registry-precondition is the number of the goal's "registry is complete" precondition \(1-based\), or none/);
+    const G = goal('Baseline', ['format and lint', 'every repo, design file and doc is listed'], '1', ['--registry-precondition', '2']);
+    // the phrase alone marks nothing: the check is keyed to the field, never the text
+    const other = goal('Other', ['format and lint', 'the registry is complete'], '2');
+    const third = goal('Third', ['format and lint'], '3');
+    const ready = (...refs) => run(old, ['act', '--class', 'goal-readiness', ...(refs.length ? ['--refs', ...refs] : []), '--', 'Baseline ready'], SUP);
+    // a goal-readiness act or decision names exactly one existing goal
+    for (const [refs, why] of [[[], 'no refs'], [['g-nope'], 'a bogus ref'], [['nonsense'], 'not a goal id'], [[G, third], 'two goals'], [[G, 'g-nope'], 'a goal and a bogus ref']]) {
+      const r = ready(...refs);
+      assert.notEqual(r.status, 0, `refused with ${why}`);
+      assert.match(r.err, /goal-readiness names exactly one goal, an existing goal id: --refs <g-id>/, why);
+    }
+    assert.match(run(old, ['decide', '--class', 'goal-readiness', '--', 'Baseline ready'], SUP).err, /goal-readiness names exactly one goal/);
+    assert.match(run(old, ['decide', '--class', 'goal-readiness', '--refs', G, third, '--', 'both ready'], SUP).err, /goal-readiness names exactly one goal/);
+    assert.match(ready(G).err, new RegExp(`${G} has precondition 2 marked "the registry is complete".*no owner's yes to a registry-attest question .*ask --class registry-attest --goal`));
+    assert.equal(ready(other).status, 0, 'a goal without the marker is not held, whatever its preconditions say');
+    // a decision names one goal; the act under it is held like any other
+    const D = ok(old, ['decide', '--class', 'goal-readiness', '--refs', G, '--', 'Baseline ready'], SUP);
+    assert.match(run(old, ['act', '--decision', D, '--', 'Baseline ready'], SUP).err, /no owner's yes to a registry-attest question/);
     const ask = ['ask', '--class', 'registry-attest', '--goal', G, '--question', 'Does the registry list every repo, design file and doc this project depends on?'];
     assert.match(run(old, [...ask, '--recommendation', 'yes', '--default', 'yes'], SUP).err, /registry-attest question has no --default/);
     assert.match(run(old, ask, SUP).err, /--recommendation yes/);
@@ -3781,6 +3797,12 @@ test('the registry attestation is the owner\'s: registry-attest is never answere
     const Q2 = ok(old, [...ask, '--recommendation', 'yes'], SUP);
     ok(old, ['answer', Q2, 'yes']);
     assert.equal(ready(G).status, 0, "the owner's yes is the attestation");
+    assert.equal(run(old, ['act', '--decision', D, '--', 'Baseline ready'], SUP).status, 0, 'and the act under the decision');
+    // the marker is a goal field: a draft's supervisor sets and clears it by number
+    ok(old, ['goal', 'set', third, '--registry-precondition', '1'], SUP);
+    assert.match(ready(third).err, /no owner's yes to a registry-attest question \(none asked yet\)/);
+    ok(old, ['goal', 'set', third, '--registry-precondition', 'none'], SUP);
+    assert.equal(ready(third).status, 0);
   } finally { F.done(); }
 });
 

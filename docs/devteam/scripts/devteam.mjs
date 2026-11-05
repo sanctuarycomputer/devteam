@@ -1228,7 +1228,7 @@ const questions = () => logObjects('question').map((q) => { const v = questionVi
 // is a goal-change question about that goal, answered by the owner with its recommendation (an
 // answer other than the recommendation declines or alters the change, so the supervisor asks again).
 // The goal fields a goal-change question may propose, and that its answer then authorises exactly.
-const GOAL_CHANGE_FIELDS = ['title', 'outcome', 'measure', 'horizon', 'non_goals', 'preconditions', 'priority', 'milestones', 'plan_after'];
+const GOAL_CHANGE_FIELDS = ['title', 'outcome', 'measure', 'horizon', 'non_goals', 'preconditions', 'registry_precondition', 'priority', 'milestones', 'plan_after'];
 const goalFieldsOf = (l) => Object.fromEntries(Object.entries(l).filter(([k]) => GOAL_CHANGE_FIELDS.includes(k)));
 function goalChangeProblem(q, goalId, qid, l = null) {
   const v = q?.type === 'question' ? questionView(q) : null;
@@ -3451,7 +3451,7 @@ function cmdAsk() {
   // project depends on (planning.md §7). Owner-only, like goal-met: never defaulted, never from chat.
   if (cls === 'registry-attest') {
     const g = logGet(flagStr('goal') ?? '');
-    if (g?.type !== 'goal') die('a registry-attest question needs --goal <g-id> (the goal whose preconditions include the registry is complete)');
+    if (g?.type !== 'goal') die('a registry-attest question needs --goal <g-id> (the goal with a --registry-precondition)');
     if (kind !== 'owner-decision') die('a registry-attest question is an owner-decision');
     if (flagStr('recommendation')?.trim().toLowerCase() !== 'yes') die('a registry-attest question recommends --recommendation yes (the owner says no when something is missing)');
     if (flagStr('default') !== undefined) die('a registry-attest question has no --default: only the owner knows what the registry is missing');
@@ -4547,6 +4547,7 @@ function cmdDecide() {
   const confidence = flagNum('confidence');
   if (confidence !== undefined && !(confidence >= 0 && confidence <= 1)) die('--confidence is a number from 0 to 1');
   if (['approve-spec', 'approve-plan'].includes(cls) && !tickets().has(refs[0])) die(`${cls} names the ticket first: --refs <ticket-id> [other ids]`);
+  if (cls === 'goal-readiness') readinessGoal(refs);
   const a = authorise(cls, scope, approved, refs, 'decide');
   if (a.doorCited && a.approval.ticket !== refs[0] && !(features().get(tickets().get(refs[0])?.feature)?.goals ?? []).includes(a.approval.goal)) die(`${approved} answered a one-way door for ${a.approval.ticket ?? a.approval.goal ?? 'something else'}, not for ${refs[0]} or a goal its feature serves`);
   const line = appendLog({
@@ -4610,9 +4611,10 @@ function cmdAct() {
       if (!latest.some((r) => r.doors.includes(goalDoor))) die(`${goalDoor} is a goal-level answer; the latest approving plan review (reviews/plan-<n>.md on ticket/${t.id}) must say "- Goal-level door: ${goalDoor} covers this plan" (quality.md §3)`);
     }
   }
-  if (cls === 'goal-readiness') for (const g of refs.map(logGet).filter((o) => o?.type === 'goal' && asList(o.preconditions).some((p) => REGISTRY_COMPLETE.test(p)))) {
-    const why = registryAttestGap(g.id);
-    if (why) die(`${g.id} lists "the registry is complete" among its preconditions, and has no owner's yes to a registry-attest question (${why}): ask --class registry-attest --goal ${g.id} --question "Does the registry list every repo, design file and doc this project depends on?" --recommendation yes, and log goal-readiness once the owner answers yes (planning.md §7)`);
+  if (cls === 'goal-readiness') {
+    const g = readinessGoal(refs);
+    const why = g.registry_precondition ? registryAttestGap(g.id) : null;
+    if (why) die(`${g.id} has precondition ${g.registry_precondition} marked "the registry is complete", and has no owner's yes to a registry-attest question (${why}): ask --class registry-attest --goal ${g.id} --question "Does the registry list every repo, design file and doc this project depends on?" --recommendation yes, and log goal-readiness once the owner answers yes (planning.md §7)`);
   }
   const line = appendLog({ type: 'act', class: cls, scope: scope ?? undefined, what, rung: auth.rung, refs, reversible: decision ? decision.reversible !== false && !flags.irreversible : !flags.irreversible, approved_by: decision ? undefined : approved ?? undefined, decision: decision?.id }, 'supervisor');
   out(line.id);
@@ -4953,7 +4955,28 @@ function goalMetProblem(q, goalId, qid, at = null) {
 // is components check --count, with the gates; its other half is the owner's yes to a
 // registry-attest question about the goal, which goal-readiness waits for. Only the owner's own
 // answer counts (registry-attest is owner_only, so never a chat answer or a default), and only yes.
-const REGISTRY_COMPLETE = /\bthe registry is complete\b/i;
+// The goal carries it as a field, registry_precondition: the number of its precondition that is
+// "the registry is complete", set by goal add|set --registry-precondition n (none clears it). The
+// check is keyed to that field, never to a precondition's wording.
+function registryPreconditionFlag() {
+  const v = flagStr('registry-precondition');
+  if (v === undefined) return undefined;
+  if (v === 'none') return null;
+  if (!/^[1-9]\d*$/.test(v)) die('--registry-precondition is the number of the goal\'s "registry is complete" precondition (1-based), or none');
+  return Number(v);
+}
+function registryPreconditionCheck(name, g) {
+  const n = g.registry_precondition;
+  if (n === undefined || n === null) return;
+  const count = (g.preconditions ?? []).length;
+  if (n > count) die(`--registry-precondition ${n}: ${name} has ${count} precondition${count === 1 ? '' : 's'}; it numbers the one that is "the registry is complete"`);
+}
+// A goal-readiness act or decision is about one goal, named by its id (planning.md §7).
+function readinessGoal(refs) {
+  const g = refs.length === 1 ? logGet(refs[0]) : null;
+  if (g?.type !== 'goal' || g.kind === 'upkeep') die(`goal-readiness names exactly one goal, an existing goal id: --refs <g-id>${refs.length ? ` (got ${refs.map((r) => JSON.stringify(r)).join(', ')})` : ''}`);
+  return g;
+}
 function registryAttestGap(goalId) {
   const qs = questions().filter((q) => q.class === 'registry-attest' && q.goal === goalId);
   if (qs.some((q) => q.status === 'answered' && q.channel !== 'chat' && q.matched && q.answer.trim().toLowerCase().split(' — ')[0] === 'yes')) return null;
@@ -5174,6 +5197,7 @@ function cmdGoal() {
     horizon: flagStr('horizon') === 'none' ? null : flagStr('horizon'),
     non_goals: flags['non-goals'] !== undefined ? listFlag('non-goals') : undefined,
     preconditions: flags.preconditions !== undefined ? listFlag('preconditions') : undefined,
+    registry_precondition: registryPreconditionFlag(),
     priority: flagNum('priority'),
     milestones: jsonFlag('milestones'),
     plan_after: flags['plan-after'] !== undefined ? listFlag('plan-after').map((goal) => ({ goal, reason: flagStr('reason') ?? die('--plan-after needs --reason: why this goal\'s design waits on that one') })) : undefined,
@@ -5182,10 +5206,11 @@ function cmdGoal() {
     const { by } = writer();
     const f = fields();
     if (!f.title) die('goal add needs --title');
+    registryPreconditionCheck(f.title, f);
     return out(appendLog({ type: 'goal', status: 'draft', ...f }, by).id);
   }
   if (sub === 'set') {
-    if (!id || logGet(id)?.type !== 'goal') die('usage: goal set <g-id> [--title …] [--outcome …] [--measure …] [--target n] [--unit u] [--direction up|down] [--source repo|prod|owner] [--check "cmd"] [--question "…"] [--horizon date] [--non-goals a b | \'["a","b"]\'] [--preconditions a b | \'["a","b"]\'] [--priority n] [--milestones \'[{"title","target","by","preconditions":[n],"tickets"}…]\'] [--plan-after <g-id>… --reason "…"] [--approved <qid>] [--owner]');
+    if (!id || logGet(id)?.type !== 'goal') die('usage: goal set <g-id> [--title …] [--outcome …] [--measure …] [--target n] [--unit u] [--direction up|down] [--source repo|prod|owner] [--check "cmd"] [--question "…"] [--horizon date] [--non-goals a b | \'["a","b"]\'] [--preconditions a b | \'["a","b"]\'] [--registry-precondition n|none] [--priority n] [--milestones \'[{"title","target","by","preconditions":[n],"tickets"}…]\'] [--plan-after <g-id>… --reason "…"] [--approved <qid>] [--owner]');
     const { by } = writer();
     const approved = flagStr('approved') ?? null;
     if (approved && by !== 'supervisor') die('the owner changes a goal directly; --approved is the supervisor applying an owner answer');
@@ -5210,7 +5235,9 @@ function cmdGoal() {
       appendLog({ type: 'act', class: 'carry-answer', what: `applied your earlier answer to ${approved} ("${qv.answer}") to ${id}: set ${Object.keys(carried).join(', ')}`, refs: [id, approved], reversible: true }, 'supervisor');
       return out(`updated ${id} (${line.id}), carrying ${approved} forward`);
     }
-    appendLog({ type: 'goal', op: 'set', id, ...fields() }, by);
+    const f = fields();
+    registryPreconditionCheck(id, { ...logGet(id), ...Object.fromEntries(Object.entries(f).filter(([, x]) => x !== undefined)) });
+    appendLog({ type: 'goal', op: 'set', id, ...f }, by);
     return out(`updated ${id}`);
   }
   // The owner's decision on a goal, made on its design: approve (ready; planning starts), refine

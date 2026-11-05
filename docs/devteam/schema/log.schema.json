@@ -144,6 +144,15 @@
               "type": "string"
             }
           },
+          "registry_precondition": {
+            "description": "The number (1-based) of the precondition that is \"the registry is complete\" (planning.md §7). goal-readiness for this goal waits for the owner's yes to a registry-attest question about it. Set by goal add|set --registry-precondition n; null clears it. The check reads this field, never a precondition's wording.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1,
+            "x-tip": "Which precondition is \"the registry is complete\": marking ready waits for your yes that the registry lists everything."
+          },
           "priority": {
             "description": "Its order among the goals: 1 comes first.",
             "type": "integer",
@@ -1858,6 +1867,7 @@
           "horizon",
           "non_goals",
           "preconditions",
+          "registry_precondition",
           "priority",
           "milestones",
           "plan_after",
@@ -1872,6 +1882,7 @@
           "horizon",
           "non_goals",
           "preconditions",
+          "registry_precondition",
           "priority",
           "milestones",
           "status",
