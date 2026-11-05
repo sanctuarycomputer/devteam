@@ -5142,6 +5142,60 @@ test('gate --all and gate <name> in a sibling worktree run that repo\'s gates an
   } finally { F.done(); }
 });
 
+// Across repos neither the branch nor the gates can see a provider that hasn't landed, so the
+// ticket that depends on it lands only after it, by merge or check-pr; a forge-UI merge that lands
+// it first is a finding.
+test('a ticket merges only after its depends_on, in any repo; unreadable fails closed; a merge out of order is a finding', () => {
+  const F = multiFixture('deps-order');
+  const { old, g, okIn, runIn, ticket } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  try {
+    ticket('companion-01-p', { touches: ['app/**'] });
+    ticket('console-02-e', { depends_on: ['companion-01-p'] });
+    const w = path.join(old, '.worktrees', 'console-02-e');
+    g(['worktree', 'add', '-q', '-b', 'ticket/console-02-e', w, 'origin/trunk'], F.console);
+    const tdir = path.join(w, 'docs/devteam/project/tickets/console-02-e');
+    write(path.join(tdir, 'spec.md'), '# spec\n');
+    write(path.join(tdir, 'plan.md'), '# plan\n\n## TL;DR\n\n- x\n');
+    write(path.join(tdir, 'verification.md'), '| Done-when | Command | Result |\n|---|---|---|\n| s | t | pass |\n');
+    write(path.join(w, 'src/main.js'), 'uses companion\n');
+    g(['add', '-A'], w); g(['commit', '-qm', 'console-02-e: work'], w);
+    write(path.join(tdir, 'reviews/final-1.md'), review('reviewer-b', g(['rev-parse', 'HEAD'], w)));
+    g(['add', '-A'], w); g(['commit', '-qm', 'review'], w); g(['push', '-q', 'origin', 'ticket/console-02-e'], w);
+    const head = g(['rev-parse', 'HEAD'], w);
+    okIn(old, ['act', '--class', 'approve-spec', '--refs', 'console-02-e', '--', 'ok'], SUP);
+    okIn(old, ['act', '--class', 'approve-plan', '--refs', 'console-02-e', '--', 'ok'], SUP);
+    write(path.join(old, 'docs/devteam/run/pr/ticket/console-02-e.md'), '# console-02-e: work\n\n## One-way doors\n\nNone.\n');
+    assert.match(okIn(old, ['ready']), /companion-01-p/);
+    const trunk = g(['rev-parse', 'origin/trunk'], F.console);
+    // merge (dry run or not) and check-pr refuse it while companion-01-p is unmerged
+    for (const args of [['merge', 'console-02-e', '--dry-run'], ['merge', 'console-02-e']]) {
+      const r = runIn(old, args, SUP);
+      assert.notEqual(r.status, 0, args.join(' '));
+      assert.match(r.out, /depends on companion-01-p, which is not merged in companion yet: merge it first/);
+    }
+    assert.match(runIn(old, ['check-pr', '--repo', 'console', '--head-ref', 'ticket/console-02-e', '--sha', head], SUP).out, /depends on companion-01-p, which is not merged in companion yet/);
+    assert.equal(g(['rev-parse', 'origin/trunk'], F.console), trunk, 'nothing landed');
+    assert.doesNotMatch(okIn(old, ['status']), /merged +console-02-e/);
+    // no companion checkout here: it can't be confirmed, so it is refused
+    write(path.join(old, 'docs/devteam/run/links.local.json'), JSON.stringify({ companion: { path: path.join(F.base, 'not-cloned') } }));
+    assert.match(runIn(old, ['merge', 'console-02-e', '--dry-run'], SUP).out, /cannot confirm companion-01-p is merged: its checkout \S*not-cloned is missing/);
+    fs.rmSync(path.join(old, 'docs/devteam/run/links.local.json'));
+    // console-02-e lands on console's trunk by hand (the forge's UI): a finding names it
+    g(['checkout', '-q', 'trunk'], F.console);
+    g(['merge', '-q', '--no-ff', '-m', 'Merge ticket/console-02-e', 'ticket/console-02-e'], F.console);
+    g(['push', '-q', 'origin', 'trunk'], F.console);
+    const m = json(okIn(old, ['metrics', '--json']));
+    const f = m.findings.find((x) => x.kind === 'merged-out-of-order');
+    assert.ok(f, `a merged-out-of-order finding: ${JSON.stringify(m.findings.map((x) => x.kind))}`);
+    assert.equal(f.subject, 'console-02-e');
+    assert.match(f.detail, /console-02-e reached console's main before companion-01-p/);
+    okIn(old, ['observe-metrics'], SUP);
+    const o = json(okIn(old, ['log', '--type', 'observation', '--json'])).find((x) => x.kind === 'merged-out-of-order');
+    assert.equal(o.severity, 3);
+  } finally { F.done(); }
+});
+
 test('a github-forge sibling: gh is asked about that repo', () => {
   const F = multiFixture('gh-r');
   const { old, g, okIn, runIn, ticket } = F;

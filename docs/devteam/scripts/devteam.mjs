@@ -3159,7 +3159,7 @@ function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('hom
   // validate, so an old graph error can't block a log PR.
   const base0 = R.mainRef() ? R.git(['merge-base', R.mainRef(), sha]) : null;
   fails.push(...coverageFails(base0, sha, R, { ticket: branch.startsWith('ticket/') }), ...registryFails(base0, sha, R));
-  if (branch.startsWith('ticket/')) return [...fails, ...checkTicket(branch.slice('ticket/'.length), { sha, title, body, approvals: !forge })];
+  if (branch.startsWith('ticket/')) return [...fails, ...checkTicket(branch.slice('ticket/'.length), { sha, title, body, approvals: !forge }), ...depsFails(branch.slice('ticket/'.length), R)];
   if (branch.startsWith('plan/')) {
     const feature = branch.slice('plan/'.length);
     if (title !== undefined && !title.startsWith(`plan-${feature}: `)) fails.push(`PR title must start with "plan-${feature}: "`);
@@ -3183,6 +3183,32 @@ function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('hom
   if (body !== undefined && !branch.startsWith('ticket/')) {
     const owd = oneWayDoorsSection(body);
     if (!owd.ok) fails.push(owd.why);
+  }
+  return fails;
+}
+// A ticket lands only after every ticket it depends on has, in whatever repo each is: across repos
+// neither the branch (cut from its own repo's main) nor its gates can see a provider that hasn't
+// landed. Home's main and R's are fetched by the caller; a third repo's main is fetched here. A
+// dependency this machine can't read, or whose main it can't fetch, fails closed.
+function depsFails(id, R) {
+  const t = tickets().get(id);
+  const fails = [];
+  const fetched = new Set(['home', R.name]);
+  for (const d of t?.depends_on ?? []) {
+    const dt = tickets().get(d);
+    if (!dt) { fails.push(`cannot confirm ${d} is merged: there is no such ticket`); continue; }
+    const name = repoOfTicketLink(dt);
+    if (!repoReadable(name)) { const l = ownEntry(loadSettings().links, name); fails.push(`cannot confirm ${d} is merged: ${(l && LINK_KINDS[l.kind]?.reachable(l, name)) ?? `${name} is no repo link here`}`); continue; }
+    const D = repo(name);
+    if (!fetched.has(name)) {
+      fetched.add(name);
+      if (D.git(['config', '--get', 'remote.origin.url'], D.root) !== null) {
+        const f = gitRun(['fetch', '--quiet', 'origin', D.settings.main_branch], D.root);
+        if (f.status !== 0) { fails.push(`cannot confirm ${d} is merged: could not fetch origin ${D.settings.main_branch} in ${name}: ${redactUrl(firstLine(f.err)) || `exit ${f.status}`}`); continue; }
+        D.resetCaches();
+      }
+    }
+    if (!D.mergeShaFor(d)) fails.push(`depends on ${d}, which is not merged${name === 'home' ? '' : ` in ${name}`} yet: merge it first`);
   }
   return fails;
 }
@@ -6537,6 +6563,16 @@ function collectMetrics(since) {
     const at = name === 'home' ? '' : ` --repo ${name}`;
     if (gap.empty?.length) add('low', 'line-empty', name, `${gap.empty.length} owns glob(s) on ${R.mainRef()} match nothing: ${gap.empty.slice(0, 5).map((x) => `"${x}"`).join(', ')}`, 'remove or fix the glob in a chore PR (settings components); an empty glob blocks nothing');
     if (gap.count) add('high', 'unowned-files', name, `${R.mainRef()}${name === 'home' ? '' : ` (${name})`} has coverage gaps: ${gap.words} (devteam.mjs components check${at} lists them); no new ticket starts in ${name} until they clear`, 'a chore PR that extends a line (settings components), or moves the files into one', { sev: 4 });
+  }
+  // A ticket that reached its main before a ticket it depends on (merge refuses that, so this is a
+  // merge by hand or in the forge's UI): its provider wasn't there when it landed. Read only where
+  // both repos can be read; link-unreachable covers the rest.
+  for (const t of ts.values()) {
+    const at = mergedAt(t.id);
+    if (!at) continue;
+    const early = (t.depends_on ?? []).filter((d) => ts.has(d) && factsRepo(d) && !(mergedAt(d) && mergedAt(d) <= at));
+    const name = repoOfTicketLink(t);
+    if (early.length) add('high', 'merged-out-of-order', t.id, `${t.id} reached ${name === 'home' ? '' : `${name}'s `}main before ${early.join(', ')}, which it depends on`, `check that ${t.id} works without ${early.length > 1 ? 'them' : 'it'}, and merge ${early.join(', ')} next; a revert is a ticket of its own`, { sev: 3 });
   }
   // The registry: a link that no longer resolves, and lines drawn in the wrong place.
   {
