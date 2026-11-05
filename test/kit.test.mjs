@@ -964,7 +964,41 @@ test('devteam kit', async (t) => {
     assert.match(dt(['merge', '--chore', 'rules', '--dry-run', '--approved', Qn, '--title', 'chore-rules: tighten', '--body-file', body], { role: 'sup' }).err, /was answered "no, leave quality\.md alone", not its recommendation \("yes"\): that approves nothing/);
     const Qg = must(['ask', '--question', 'Add the extra rule to quality.md?', '--class', 'governance-edit', '--reasons', 'owner-only', '--recommendation', 'yes'], { role: 'sup' });
     must(['answer', Qg, 'yes']);
-    must(['merge', '--chore', 'rules', '--dry-run', '--approved', Qg, '--title', 'chore-rules: tighten', '--body-file', body], { role: 'sup' });
+    const mergeArgs = ['merge', '--chore', 'rules', '--dry-run', '--approved', Qg, '--title', 'chore-rules: tighten', '--body-file', body];
+    must(mergeArgs, { role: 'sup' });
+    // The answer binds to the question as the owner saw it. The supervisor writes its own file, so it
+    // could put a backdated second line for that id (which the fold would take as the question) or
+    // edit the line in place: either way the answer no longer counts, the question is open again,
+    // and log-check fails.
+    const logDir = path.join(repo, 'docs/devteam/run/log');
+    const supFile = path.join(logDir, fs.readdirSync(logDir).find((f) => f.startsWith('supervisor-')));
+    const kept = fs.readFileSync(supFile, 'utf8');
+    const orig = kept.split('\n').filter(Boolean).map((l) => JSON.parse(l)).find((l) => l.id === Qg && l.op === 'new');
+    const wider = 'Add the extra rule to quality.md, and drop every gate?';
+    const rewrites = {
+      'a backdated second line': kept + line({ ...orig, at: new Date(Date.parse(orig.at) - 10).toISOString(), question: wider }),
+      'the line edited in place': kept.replace(JSON.stringify(orig.question), JSON.stringify(wider)),
+    };
+    for (const [how, text] of Object.entries(rewrites)) {
+      fs.writeFileSync(supFile, text);
+      assert.match(dt(mergeArgs, { role: 'sup' }).err, /is not a question the owner answered/, how);
+      const v = json(must(['questions', '--id', Qg, '--json']))[0];
+      assert.equal(v.status, 'open', how);
+      assert.equal(v.rewritten, true, how);
+      assert.equal(v.question, wider, how);
+      const lc = dt(['log-check']);
+      assert.notEqual(lc.status, 0, how);
+      assert.match(lc.out, /changed after the owner answered it/, how);
+      if (how === 'a backdated second line') assert.match(lc.out, /a second question line with this id/);
+    }
+    fs.writeFileSync(supFile, kept);
+    must(mergeArgs, { role: 'sup' });
+    // the dashboard sends the hash of the question it showed: an answer to one changed since is refused
+    const Qs = must(['ask', '--question', 'Keep the extra rule?', '--class', 'governance-edit', '--reasons', 'owner-only', '--recommendation', 'yes'], { role: 'sup' });
+    const seen = json(must(['questions', '--id', Qs, '--json']))[0].hash;
+    assert.match(seen, /^[0-9a-f]{16}$/);
+    assert.match(dt(['answer', Qs, 'yes', '--seen', '0000000000000000']).err, /changed since you saw it/);
+    must(['answer', Qs, 'yes', '--seen', seen]);
     git(['worktree', 'remove', '--force', wt('chore-rules')]);
   });
 

@@ -1469,6 +1469,12 @@
             "const": true,
             "description": "On the owner's answer to a review: sent back without a result; the answer says why.",
             "x-tip": "You sent the review back without a result."
+          },
+          "question_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{16}$",
+            "description": "On the owner's answer: the hash of the question as the owner saw it (every field it was asked with). An answer whose question no longer has this hash answers nothing: the question was changed after the owner answered it, so it is open again.",
+            "x-tip": "The question as you saw it when you answered."
           }
         },
         "additionalProperties": false,
@@ -1479,7 +1485,8 @@
         "x-set-only": [
           "secrets_posted",
           "result",
-          "declined"
+          "declined",
+          "question_hash"
         ]
       },
       "decision": {
@@ -1988,7 +1995,8 @@
           "standing_rule",
           "secrets_posted",
           "result",
-          "declined"
+          "declined",
+          "question_hash"
         ]
       },
       "knowledge": {

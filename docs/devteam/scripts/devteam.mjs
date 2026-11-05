@@ -1105,6 +1105,11 @@ function appendLog(fields, by = logWriter()) {
     const cur = logGet(fields.id);
     if (cur && (type === 'feature' ? cur.id : cur.feature) !== f) die(`${by} may only change the feature "${f}" and its tickets`);
   }
+  // The owner's answer binds to the question as it stands (questionView).
+  if (type === 'question' && fields.op === 'set' && writerClass(by) === 'owner' && fields.answer !== undefined) {
+    const q = logGet(fields.id);
+    if (q?.type === 'question') fields = { ...fields, question_hash: questionHash(q) };
+  }
   const file = logFileFor(by, type);
   const prefix = SCHEMA['x-id'].prefix[type];
   const build = (at) => {
@@ -1184,9 +1189,21 @@ const upkeepGoal = () => [...readLog().objects.values()].find((o) => o.type === 
 const logGet = (id) => readLog().objects.get(id) ?? null;
 const byTime = (a, b) => a.created_at.localeCompare(b.created_at);
 
+// What the owner saw: the question with every field it was asked with (later lines may only add
+// the supervisor's status and reason, and the owner's own fields). The owner's answer records this
+// hash, and an answer whose question no longer hashes the same answers nothing: the question was
+// rewritten after the owner answered it (its line edited, or a backdated duplicate taking its
+// place), so it is open again, and the owner answers what it says now.
+const QUESTION_LATER = ['status', 'reason', 'answer', 'said', 'autonomy', 'standing_rule', 'secrets_posted', 'result', 'declined', 'question_hash'];
+const questionHash = (q) => crypto.createHash('sha256').update(canonical(Object.fromEntries(Object.entries(q).filter(([k]) => !k.startsWith('__') && !['updates', 'created_at', 'created_by', 'channel', ...QUESTION_LATER].includes(k))))).digest('hex').slice(0, 16);
+
 // Folded questions in the shape the inbox uses.
 function questionView(q) {
-  const ans = q.updates.filter((u) => u.answer !== undefined && writerClass(u.by) === 'owner').pop();
+  const hash = questionHash(q);
+  const last = q.updates.filter((u) => u.answer !== undefined && writerClass(u.by) === 'owner').pop();
+  // An answer from before answers carried the hash (no question_hash) still counts.
+  const rewritten = !!last?.question_hash && last.question_hash !== hash;
+  const ans = rewritten ? null : last;
   const st = q.updates.filter((u) => u.status !== undefined).pop();
   let status = 'open';
   let answer = null;
@@ -1215,7 +1232,7 @@ function questionView(q) {
     question: q.question, context: q.context ?? '', options: q.options ?? [], choices: q.choices ?? [], links: q.links ?? [], goal: q.goal ?? null, change: q.change ?? null, rule_scope: q.rule_scope ?? null, recommendation: q.recommendation ?? '', confidence: q.confidence ?? null,
     default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], approves: q.approves ?? [], evidence: q.evidence ?? [], note: q.note ?? null, why_asked: q.why_asked ?? null,
     secrets: (q.secrets ?? []).map((x) => ({ ...x, to: sinkWords(x.sink), sink_type: SINK_RE.exec(x.sink ?? '')?.[1] ?? null, warning: sinkWarning(x.sink) })), secrets_posted: q.updates.filter((u) => u.secrets_posted !== undefined && writerClass(u.by) === 'owner').pop()?.secrets_posted ?? [],
-    status, answer, answered_by: answeredBy, answered_at: answeredAt, matched,
+    status, answer, answered_by: answeredBy, answered_at: answeredAt, matched, hash, rewritten,
     autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans?.channel ?? null, said: ans?.said ?? null,
     review: review?.review ?? null, result: review?.result ?? null, declined: review ? review.declined : null, allow_partial: review ? review.allow_partial : null, result_status: review?.result_status ?? null,
   };
@@ -1431,6 +1448,14 @@ function cmdLogSync() {
 }
 
 // Validate every line (live and durable) and list what the fold ignored.
+// A second line for a question replaces it if backdated, and a question changed after the owner
+// answered it has lost that answer (questionView): both are the log being rewritten.
+function questionRewrites() {
+  const r = [];
+  for (const i of readLog().ignored) if (i.line.type === 'question' && i.why === 'duplicate id') r.push(`${i.line.id}: a second question line with this id (${i.line.__file}:${i.line.__line}); a question is asked once, and the earliest line is the one the owner answers`);
+  for (const q of logObjects('question')) if (questionView(q).rewritten) r.push(`${q.id}: the question changed after the owner answered it, so that answer no longer counts and it is open again`);
+  return r;
+}
 function cmdLogCheck() {
   const names = new Set();
   for (const d of [liveLogDir(), durableLogDir()]) if (fs.existsSync(d)) for (const f of fs.readdirSync(d)) if (f.endsWith('.jsonl')) names.add(f);
@@ -1442,6 +1467,7 @@ function cmdLogCheck() {
     n += r.lines.length;
   }
   for (const i of readLog().ignored) out(`ignored: ${i.line.__file}:${i.line.__line} ${i.line.id}: ${i.why}`);
+  fails.push(...questionRewrites());
   report(fails, `${n} log line(s)`);
 }
 
@@ -2111,6 +2137,7 @@ function cmdValidate() {
   }
 
   for (const e of readLog().errors) warnings.push(`log ${e}`);
+  errors.push(...questionRewrites());
   for (const i of readLog().ignored) if (['ticket', 'feature'].includes(i.line.type) && i.why === 'duplicate id') errors.push(`${i.line.id}: a second ${i.line.type} line with this id (${i.line.__file}:${i.line.__line}) was ignored; use ${i.line.type} set`);
   const raw = ladder().raw_ceilings;
   for (const [c, v] of Object.entries(loadSettings().autonomy_ceilings ?? {})) {
@@ -3602,6 +3629,7 @@ function cmdAnswer() {
   }
   const { by } = fromChat ? { by: 'owner' } : ownerWriter();
   const v = openQuestion(id, ['open', 'defaulted']);
+  if (flagStr('seen') && flagStr('seen') !== v.hash) die(`${id} changed since you saw it; reload and read it again before you answer`);
   if (v.kind === 'goal-approval') die(`${id} approves a goal on its design: the owner answers it with goal decide ${v.goal} approve|refine|let-go [--notes "…"] (or on the dashboard)`);
   // A review is answered by the owner's own process with its result, or sent back with a reason;
   // never in free text, never from chat (a chat can't carry rows, and the supervisor must not
@@ -6605,7 +6633,7 @@ async function cmdDashboard() {
     answer: (b) => {
       if (!ID.test(b.id ?? '') || !text(b.answer)) return null;
       if (b.decline !== undefined && b.decline !== true) return null;
-      const args = ['answer', b.id, b.answer.trim(), ...autonomyArgs(b)];
+      const args = ['answer', b.id, b.answer.trim(), ...autonomyArgs(b), ...(/^[0-9a-f]{16}$/.test(b.seen ?? '') ? ['--seen', b.seen] : [])];
       // "Send it back" on a review: the owner's reason, no result
       if (b.decline === true) return [...args, '--decline'];
       if (text(b.rule, 600)) args.push('--rule', b.rule.trim());
