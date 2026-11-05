@@ -3156,6 +3156,11 @@ function cmdMerge() {
   if (pr.isDraft) die(`${pr.url} is a draft`);
   const sha = pr.headRefOid;
   if (!resolveCommit(sha)) die(`cannot find ${sha} locally after fetching ${branch}`);
+  // Merged already (a second run, a stale background job): nothing lands, nothing is logged. The
+  // forge still shows a merged PR, and its head is on main.
+  const mainBranch0 = loadSettings().main_branch;
+  git(['fetch', '--quiet', 'origin', mainBranch0]);
+  if (resolveCommit(`origin/${mainBranch0}`) && git(['merge-base', '--is-ancestor', sha, `origin/${mainBranch0}`]) !== null) return out(`${branch} at ${sha.slice(0, 12)} is already on ${mainBranch0}: nothing to merge, nothing logged`);
   const fails = checkPr({ headRef: branch, sha, title: pr.title, body: pr.body });
   // A refused footprint is a sign about the line (line-pressure): one observation per head.
   if (id && fails.some((x) => x.startsWith(OFF_LINE))) {
