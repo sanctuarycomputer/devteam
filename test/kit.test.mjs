@@ -2155,7 +2155,7 @@ test('devteam kit', async (t) => {
       assert.equal((await fetch(`${B}/review/preview/?${pv}`)).status, 403);
       assert.equal((await fetch(`${B}/review/preview/?path=../x.html&ref=review-dash`, { headers: frame })).status, 400);
       assert.equal((await fetch(`${B}/review/preview/?${new URLSearchParams({ path: `${rel}/data.json`, ref: 'review-dash' })}`, { headers: frame })).status, 400, 'only a page');
-      assert.equal((await fetch(`${B}/`)).headers.get('content-security-policy'), "frame-src 'self'", "the dashboard's frames stay on the dashboard, even when a frame navigates itself");
+      assert.equal((await fetch(`${B}/`)).headers.get('content-security-policy'), `frame-src 'self'; frame-ancestors 'self' http://127.0.0.1:${process.env.DEVTEAM_HUB_PORT}`, "the dashboard's frames stay on the dashboard, even when a frame navigates itself; only it and the hub may frame it");
 
       // what the review view loads
       r = await fetch(`${B}/api/review?id=${Qa}`);
