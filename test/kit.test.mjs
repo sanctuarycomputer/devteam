@@ -2545,6 +2545,31 @@ test('devteam kit', async (t) => {
     }
   });
 
+  await t.test('artifacts: check-pr and merge refuse a broken artifact, from the tree that would land', () => {
+    const cw = wt('chore-art');
+    git(['worktree', 'add', '-q', '-b', 'chore-art', cw, 'origin/main']);
+    try {
+      const A = path.join(cw, 'docs/devteam/project/artifacts/big-one');
+      write(path.join(A, 'index.html'), '<!doctype html><script src="https://evil.example/x.js"></script>');
+      write(path.join(A, 'artifact.json'), JSON.stringify({ v: 1, title: 'Big', summary: 's', by: 'supervisor' }));
+      fs.writeFileSync(path.join(A, 'huge.bin'), Buffer.alloc(8 * 1024 * 1024 + 1));
+      git(['add', '-A'], cw);
+      git(['commit', '-qm', 'an artifact'], cw);
+      const pr = () => dt(['check-pr', '--head-ref', 'chore-art', '--sha', git(['rev-parse', 'HEAD'], cw), '--title', 'chore-art: a mock', '--body-file', body], { role: 'sup', cwd: cw });
+      const r = pr();
+      assert.equal(r.status, 1);
+      assert.match(r.out, /fail: docs\/devteam\/project\/artifacts\/big-one\/huge\.bin: over 8 MB/);
+      git(['rm', '-q', 'docs/devteam/project/artifacts/big-one/huge.bin'], cw);
+      git(['commit', '-qm', 'smaller'], cw);
+      const ok = pr();
+      assert.equal(ok.status, 0, ok.out);
+      assert.doesNotMatch(ok.out, /artifacts\//, 'a warning (an off-list host) never blocks');
+    } finally {
+      git(['worktree', 'remove', '--force', cw]);
+      git(['branch', '-q', '-D', 'chore-art']);
+    }
+  });
+
 });
 
 // Moving the fleet: its own throwaway repo, an old machine and a fresh clone standing in for the new one.

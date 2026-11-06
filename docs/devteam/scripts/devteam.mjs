@@ -2918,9 +2918,25 @@ function registryActFails(base, sha) {
 }
 // What the forge's check (optional) and `merge` both check for a PR, by branch kind. Gates are not
 // run here. A chore PR may not touch the log (chore-log touches nothing else) or a ticket's folder.
+// Every artifact a PR adds or changes passes artifact check's refusals as the PR would land it
+// (read from the head's tree: there is no checkout of it). Warnings never block.
+function artifactRule(sha) {
+  if (!commonDir || !projectInRepo) return [];
+  const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
+  if (!base) return [];
+  const pre = `${ARTIFACTS_REL}/`;
+  const slugs = [...new Set(changedFiles(base, sha).filter((f) => f.startsWith(pre)).map((f) => f.slice(pre.length).split('/')[0]))];
+  const fails = [];
+  for (const s of slugs) {
+    const entries = treeEntries(sha, `${ARTIFACTS_REL}/${s}`);
+    if (!entries.length) continue; // removed: deleting an artifact is a PR that removes its folder
+    fails.push(...artifactProblems(s, entries).errors.map((e) => `${pre}${e}`));
+  }
+  return fails;
+}
 function checkPr({ headRef, sha, title, body, forge = false }) {
   const branch = headRef.replace(/^refs\/heads\//, '');
-  const fails = [...logRule(branch, sha), ...reviewRule(sha, { forge })];
+  const fails = [...logRule(branch, sha), ...reviewRule(sha, { forge }), ...artifactRule(sha)];
   // Every PR, every kind, ticket PRs included (they return on the next line): the tree that would
   // land keeps every path in exactly one line. A chore or settings PR gets this, never full
   // validate, so an old graph error can't block a log PR.
