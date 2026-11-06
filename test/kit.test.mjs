@@ -1095,6 +1095,15 @@ test('devteam kit', async (t) => {
     git(['commit', '-qam', 'and governance'], wt('caps'));
     git(['push', '-q', 'origin', 'chore-caps'], wt('caps'));
     assert.match(dt(['merge', '--chore', 'caps', '--dry-run', '--title', 'chore-caps: gates', '--body-file', body], { role: 'sup' }).out, /the owner's answer is needed/, 'the rule settles gate-change alone, never another owner class with it');
+    // and never the kit: a gate-change rule with a constitution edit in the same chore still needs an answer
+    setTo(wt('caps'), (j) => { delete j.upstream_repo; });
+    const con = path.join(wt('caps'), 'docs/devteam/governance/constitution.md');
+    fs.writeFileSync(con, fs.readFileSync(con, 'utf8').replace('"governance-edit", ', ''));
+    git(['commit', '-qam', 'gates, and the constitution'], wt('caps'));
+    git(['push', '-q', 'origin', 'chore-caps'], wt('caps'));
+    const kitByRule = dt(['merge', '--chore', 'caps', '--dry-run', '--title', 'chore-caps: gates', '--body-file', body], { role: 'sup' });
+    assert.notEqual(kitByRule.status, 0, 'a settings rule never approves kit files');
+    assert.match(kitByRule.out + kitByRule.err, /touches files outside project\/ \(docs\/devteam\/governance\/constitution\.md\)/);
     git(['worktree', 'remove', '--force', wt('caps')]);
   });
 
