@@ -153,7 +153,7 @@ Everything lives in the existing `json devteam` block in `project/settings.md`.
   4. `../<id>`.
 - **Verification:** `repo(id)` checks that the checkout's `origin` matches `remote`, and refuses with one clear message otherwise.
 - **Moving machines:** `fleet status` lists each repo link with its resolved path, and the move checklist names each one.
-- **In CI:** the workflow passes `--path "$GITHUB_WORKSPACE"` for the repo under test (§5.4).
+- **Elsewhere:** a run from another checkout of the repo (a CI job, say) passes `--path <checkout>` (§5.4).
 
 ## 4. Coverage: no part of a codebase can be left out
 
@@ -188,7 +188,7 @@ Everything lives in the existing `json devteam` block in `project/settings.md`.
      - With no lines declared on main or at the head, none of this runs: no tree is read and nothing is merged (G1).
    - **What fails:** a PR that adds an unowned path, renames files out of every line, or narrows a glob. Each refusal names its fix: unowned (extend a line), contested (both globs; narrow one), case (rename one), unlinked.
    - **Chore and settings PRs** get `coverage()` only, and only when components are declared. They never get full `validate`, so an unrelated pre-existing validate error can't block a log or retro PR in a single-repo project.
-   - **At the forge:** the workflow runs the same check, so a PR merged outside the supervisor is caught there too.
+   - **At the forge:** nothing. The kit installs no forge workflow (upstream #102); `merge` is where the check is enforced, and a PR merged with the forge's own button skips it until `observe-metrics` (point 3) finds the gap.
 3. **`observe-metrics`** checks every repo's main each tick. This covers commits that bypass devteam, such as a person pushing to main. A gap becomes an `unowned-files` finding at severity 4. `ready` and `worker` refuse new tickets in that repo until it clears, with a message pointing at the fix: a chore PR that extends a line.
 4. **Ticket footprint.** `check-ticket` refuses a changed file unless:
    - it matches the ticket's `touches`;
@@ -206,7 +206,7 @@ repo(name = 'home') → {
   name, root /* main checkout on this machine */, commonDir, remote, settings /* effective, §3.3 */,
   projectRel, projectInRepo,
   mainRef(), resolveCommit(ref), changedFiles(base, sha), treePaths(ref), mergeTree(base, sha),
-  git(args), gh(args) /* always -R <remote> */, caches /* per repo */
+  git(args), gh(args) /* -R <remote> for a repo link; home's as before */, caches /* per repo */
 }
 repoOfTicket(t) → repo(component(t.component).link)
 ```
@@ -219,7 +219,7 @@ repoOfTicket(t) → repo(component(t.component).link)
 | `mainRoot`, `commonDir`, `projectDir`, `projectRel`, `projectInRepo`, `runDir` | **home's**, resolved from `DEVTEAM_HOME`, else from the script's own location, never from the cwd; module aliases of `repo('home')` |
 | `repoRoot`, `devteamDir` | the checkout the command runs in. Used only to find "the ticket I'm in" (a worker's `ticket/<id>` worktree, from `git -C . rev-parse --git-common-dir` matched against the repo links). Records are read through `repoOfTicket`, never through `devteamDir` |
 
-- **`DEVTEAM_HOME` validation.** It must be a checkout with `docs/devteam/project`, and must not be a repo link's checkout. Anything else is refused loudly (devteam-ae's guard), never followed, so a stale env var can't run against the wrong live log.
+- **`DEVTEAM_HOME` validation.** It must be a checkout with `docs/devteam/project`, and must not be a repo link's checkout. Anything else is refused loudly (devteam-ae's guard), never followed, so a stale env var can't run against the wrong live log. Without `DEVTEAM_HOME`, a kit whose project folder has no `settings.md` runs only `init` and `help` (unless `--project`/`DEVTEAM_PROJECT` names the project); in the kit's own repo (a remote is `sanctuarycomputer/devteam`) its read-only views `status`, `whoami`, `validate` and `links` run too, as before this change.
 - **The re-exec is unchanged.** devteam-ae's top-of-file re-exec resolves from the script's own location, so it already does the right thing. Rev 1's claim that it needed `DEVTEAM_HOME` was wrong.
 - **Per-repo caches.** `mainRefCache`, `mergeShaCache`, `mergedAtCache`, `mergeParentsCache`, `mainLogCache` and the `refCommits` map move onto the repo object. Home's stay where they are, as home's.
 - **Single-repo projects.** Every module-level helper keeps its signature as `home.*`, so their call sites don't change.
@@ -234,7 +234,7 @@ repoOfTicket(t) → repo(component(t.component).link)
 - `checkTicket`, `checkPr` and `cmdCheckPr` (`--repo`);
 - `cmdMerge`: PR lookup, fetch, gates, landing, both forges;
 - `mergeShaFor`, `mergedAt`, `ticketBranchRef` and `releasedIn`;
-- every `gh` call, through `repo.gh`, which always passes `-R`;
+- every `gh` call, through `repo.gh`, which passes `-R` for a repo link (home's calls stay as they were, so gh resolves home as it always has);
 - `fleet status`, `unpushedBranches` and open-PR listing, per repo;
 - handoff files (in the ticket repo's project folder);
 - the dashboard's ticket views and review pages;
@@ -245,6 +245,7 @@ repoOfTicket(t) → repo(component(t.component).link)
 ### 5.2 Worktrees and the kit
 
 - **Worker, planner, review and gate worktrees all live at `home/.worktrees/<name>`,** made with `repo.git(['worktree', 'add', …])` from the ticket's repo. One directory holds every session.
+- **Where a sibling's worktrees are.** `merge`'s throwaway checkouts of another repo (gate, ratchet base, landing) and a sibling measure's are made in the OS temp folder (`devteam-<repo>-*`, as `secret post` makes its own), never under home's tree, so a gate can't pass on home's `node_modules`, `.tool-versions` or lint and ts configs found by walking up. Worker and review worktrees stay under home's `.worktrees/` (fleet status, strays, `worker --remove` and the prompts all find them there); the risk that a tool walking up finds home's copy there is the README's to state, and the gates at merge are the check.
 - **A worktree's repo is computed, not recorded:** `git -C <wt> rev-parse --git-common-dir`, matched to a repo link. Fleet park, status and unpark use it to check "pushed, clean, handoff" against the right remote.
 - **A worker in another repo's worktree runs home's kit by absolute path,** with `DEVTEAM_HOME` and `DEVTEAM_RUN` in its env, as `makeSession` already does for `DEVTEAM_RUN`.
 - **`seedWorktree` uses the ticket repo's settings:**
@@ -263,9 +264,7 @@ repoOfTicket(t) → repo(component(t.component).link)
 
 - **`merge <id>`** fetches the PR in the ticket's repo using that repo's forge. It runs `checkPr` there, runs the repo's gates (with their `paths` filters) in a detached worktree of that repo at the exact sha, and merges with that repo's `merge_method` and `--match-head-commit` (or the forge-`git` path). The `act` and `gate` lines land in home's live log as today, plus a `repo` field on gate lines.
 - **Plan and chore PRs are always home's.** A chore that must change another repo is a ticket of kind `chore` in that repo's component, under the Upkeep goal.
-- **`init --github` and a new `init --github --repo <link>`:**
-  - `--repo <link>` writes the one-job `check-pr` workflow into a component repo. That workflow makes two checkouts: the repo under test at `$GITHUB_WORKSPACE`, and home read-only beside it (with a `DEVTEAM_HOME_TOKEN` secret when home is private). It runs home's kit with `check-pr --repo <link> --path "$GITHUB_WORKSPACE"`. The setup checklist names that secret.
-  - `fleet status` lists any repo link whose workflow is missing, as a warning, not a block. `merge` runs the same checks itself, so the forge check is defence in depth.
+- **No forge workflow (upstream #102, the owner's decision).** The kit installs no workflow in home or in any repo link; `merge` runs the checks. `check-pr --repo <link> [--path <checkout>]` stays as a command: the same checks for a PR in another repo, minus the gates and the supervisor's approval acts, from that repo's checkout or the one `--path` names. (Rev 2 had `init --github --repo <link>` write a two-checkout workflow; dropped with #102.)
 
 ### 5.5 Releases
 
@@ -282,7 +281,7 @@ repoOfTicket(t) → repo(component(t.component).link)
 ### 6.2 Cross-component and cross-repo work
 
 - **Within one repo**, a `contract` or `integration` ticket may list `touches_components: [c1, c2]`, a new optional ticket field. Its `touches` may then fall in any of those components' lines. This replaces the doc's informal "contract tickets may span two". It is the only way to touch a `shared` component, besides that component's own tickets.
-- **Across repos**, there are no multi-repo tickets. A cross-repo contract is a `contract` ticket in the provider's repo (the definition, its version, and a fake or recorded fixtures), plus in each consumer repo a ticket that `depends_on` it and vendors the fake. `planning.md` D2 gains this rule. `validate --strict` errors on a story whose integration ticket would need two repos; it must be split per repo, with the end-to-end check in the ticket that lands last.
+- **Across repos**, there are no multi-repo tickets. A cross-repo contract is a `contract` ticket in the provider's repo (the definition, its version, and a fake or recorded fixtures), plus in each consumer repo a ticket that `depends_on` it and vendors the fake. `planning.md` D2 gains this rule. `merge` and `check-pr` refuse a ticket whose `depends_on` hasn't merged, in any repo; this applies to home's tickets too, so a single-repo project's merge now waits for its dependencies (before, a dependency only kept a ticket out of `ready`). `metrics` raises `merged-out-of-order` for a ticket that reached its main before a dependency, only for merges after the kit with that finding reached home's main (the first commit there whose kit script names it), so an existing project's history raises nothing. `validate --strict` errors on a story whose integration ticket would need two repos; it must be split per repo, with the end-to-end check in the ticket that lands last.
 - **Scheduling.** `max_active_per_component` keeps working per component. The overlap rule for `touches` in flight (`globsOverlap`) is checked only between tickets in the same repo.
 
 ### 6.3 Links in planning and prompts
@@ -333,11 +332,12 @@ Knowledge scopes (`project`, `component:`, `feature:`, `class:`) and link `for` 
 |---|---|
 | `links [--json]` | The registry, effective settings per repo, and the components on each, with their coverage state. |
 | `link add <id> --kind url --url … --title … [--for …] [--notes …] [--source …]` | Supervisor-only. Writes the working-tree settings, validates, logs `registry-edit`. |
-| `link add <id> --kind repo --path … --remote … [overrides]` | Drafts the entry and asks the owner the `governance-edit` question. It doesn't write settings until answered (`--approved <qid>` applies it). |
+| `link add <id> --kind repo --path … --remote … [overrides]` | Drafts the entry and asks the owner the `governance-edit` question. It doesn't write settings until answered (`--approved <qid>` applies it). The question carries the full settings diff it approves: every repo link entry `settings.md` here would land differently from main, this one included (one answer may approve a bundle). `--approved` logs one act per entry, with `entry_hash` (the entry that lands) and `prior_hash` (main's), and `merge --approved <qid>` binds every repo link entry the PR changes to such an act of that answer; any other is refused by name. |
 | `link set <id> <field> <value>` and `link rm <id>` | As above, with the class of the field changed. `link rm` refuses while a live ticket, a feature or a design cites the link, and names them (rev 2.2). |
+| `worker <id>` (deny rules) | The worker's policy file is per session; a push rule naming `main` also names the main branch of the ticket's repo. `metrics` raises `merged-without-merge` for a merge on any repo's main with no merge act, counted only after the upgrade. |
 | `components check [--repo <link>] [--ref <ref>]` | Runs `coverage()` and prints unowned, contested and empty-glob results. Exits 1 on any. |
 | `observe-link …` | §7. |
-| `init --github --repo <link>` | §5.4. |
+| `check-pr --repo <link> [--path <checkout>]` | §5.4. |
 
 Every existing command keeps its arguments. Where a ticket implies a repo, the command uses it. `--repo <link>` is accepted wherever a command takes a ref.
 
@@ -387,7 +387,7 @@ Two PRs, in order. Each is green on its own, and each gets its own release notes
   - §3, §4, §6.1, §6.3, §7, §8 (except `--repo` flags and repo-link adds), §9, and the matching docs;
   - repo links are accepted in settings and validated, but only `home` can host tickets.
   - Migration: none. A single repo is unchanged; a monorepo opts in by declaring components.
-- **PR 2, "Components in other repos":** §5, §6.2 (cross-repo), `--repo` flags, repo-link `link add`, `init --github --repo`, and the docs. Migration: none for existing projects.
+- **PR 2, "Components in other repos":** §5, §6.2 (cross-repo), `--repo` flags, repo-link `link add`, and the docs. Migration: none for existing projects.
 
 ## 12. Testing
 

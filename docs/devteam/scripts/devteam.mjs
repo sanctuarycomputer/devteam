@@ -110,8 +110,11 @@ const DAY = 864e5;
 // process: one refresh asked git the same questions hundreds of times. Commands that write never
 // turn this on, so they always read live.
 let gitReadCache = null;
+// Where a git call with no cwd runs: home's main checkout when this command runs outside home (a
+// worker in another repo's worktree), else undefined, the cwd, as always (set in section 2).
+let HOME_CWD;
 const GIT_READS = new Set(['rev-parse', 'show', 'ls-tree', 'tag', 'merge-base', 'cat-file', 'log', 'for-each-ref', 'symbolic-ref', 'diff', 'rev-list', 'status']);
-function git(args, cwd) {
+function git(args, cwd = HOME_CWD) {
   const key = gitReadCache && GIT_READS.has(args[0]) ? `${cwd ?? ''}\0${args.join('\0')}` : null;
   if (key && gitReadCache.has(key)) return gitReadCache.get(key);
   let r;
@@ -123,13 +126,17 @@ function git(args, cwd) {
   if (key) gitReadCache.set(key, r);
   return r;
 }
-function gitOrDie(args, cwd) {
+function gitOrDie(args, cwd = HOME_CWD) {
   try {
     return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   } catch (e) {
     die(`git ${args.join(' ')} failed: ${(e.stderr || e.message).toString().trim()}`);
   }
 }
+// This checkout's own HEAD, branch and working tree, wherever it is: a worker in another repo's
+// worktree records its own head, while every other read goes to home (HOME_CWD).
+const cwdGit = (args) => git(args, process.cwd());
+const cwdGitOrDie = (args) => gitOrDie(args, process.cwd());
 function sh(cmd, args, opts = {}) {
   try {
     return execFileSync(cmd, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], ...opts }).trim();
@@ -194,15 +201,74 @@ const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(
 // ===== 2. locations and settings =====
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const repoRoot = git(['rev-parse', '--show-toplevel']) ?? process.cwd();
-// The kit folder of the checkout you are in (a worktree has its own copy): its project/ is the
-// branch's tickets and plans. Its rules are not read from here (kitDir, below).
-const devteamDir = fs.existsSync(path.join(repoRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs')) ? path.join(repoRoot, 'docs', 'devteam') : path.resolve(here, '..');
+const repoRoot = git(['rev-parse', '--show-toplevel'], process.cwd()) ?? process.cwd();
+const commonOf = (dir) => git(['rev-parse', '--path-format=absolute', '--git-common-dir'], dir);
+// Paths compared as the filesystem has them (macOS's /var is /private/var; a symlinked checkout).
+const realPath = (p) => { try { return fs.realpathSync(p); } catch { return p; } };
+// A remote's identity: owner/name for GitHub, however written; anything else is a URL or a path
+// (resolved from base, the checkout that names it). Read a checkout's origin with `git config
+// --get remote.origin.url`, the URL as configured: `git remote get-url` expands
+// url.<base>.insteadOf, which would make a mirror look like another repo.
+function remoteKeyAt(r, base) {
+  const s = String(r ?? '').trim().replace(/\/+$/, '');
+  const gh = /^(?:https?:\/\/(?:[^@/]+@)?github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)?([\w.-]+\/[\w.-]+?)(?:\.git)?$/.exec(s);
+  if (gh && !/^[./]/.test(s)) return gh[1].toLowerCase();
+  return /^[a-z]+:\/\//i.test(s) ? s.replace(/\.git$/, '') : realPath(path.resolve(base, s)).replace(/\.git$/, '');
+}
+// Home is the repo that holds the kit, project/ and the live log. It comes from DEVTEAM_HOME, or
+// from the script that runs (the re-exec above makes that the main checkout's kit), never from the
+// cwd: a worker in another repo's worktree runs home's kit by absolute path. Anything
+// that isn't a home is refused loudly, never followed, so nothing runs against the wrong live log:
+// a DEVTEAM_HOME that is no checkout, has no project settings, or is a repo link's checkout; another
+// repo's copy of the kit run with DEVTEAM_HOME; and a kit whose project folder has no settings.md
+// (a sibling's own copy, with or without tickets/, or a repo not adopted yet), for every command but
+// init (which adopts) and help, and, in the kit's own repo, its read-only views (KIT_VIEWS).
+const cwdCommon = commonOf(process.cwd());
+// The kit's own repo (a remote of it is the kit's upstream) has no project of its own, but its
+// read-only views run there as they always did, over no tickets: nothing in them writes.
+const KIT_UPSTREAM = 'sanctuarycomputer/devteam';
+const KIT_VIEWS = ['status', 'whoami', 'validate', 'links'];
+const kitsOwnRepoAt = (root) => (git(['config', '--get-regexp', '^remote\\..*\\.url$'], root) ?? '').split('\n').some((l) => l && remoteKeyAt(l.slice(l.indexOf(' ') + 1), root) === KIT_UPSTREAM);
+const projectIn = (root) => path.resolve(flagStr('project') ?? process.env.DEVTEAM_PROJECT ?? path.join(root, 'docs', 'devteam', 'project'));
+// The repo links a settings.md names, as { id: remote } (read raw: settings aren't loaded yet).
+const repoLinksIn = (file) => { try { const m = readText(file)?.match(/```json devteam\s*\n([\s\S]*?)\n```/); return Object.entries(JSON.parse(m[1]).links ?? {}).filter(([, l]) => l?.kind === 'repo' && typeof l.remote === 'string'); } catch { return []; } };
+// { common, proj }: home's git common dir, and its project folder when DEVTEAM_HOME named it.
+const homeAt = (() => {
+  const env = process.env.DEVTEAM_HOME;
+  const scriptCommon = commonOf(here);
+  if (!env) {
+    const common = scriptCommon ?? cwdCommon;
+    const root = common ? path.dirname(common) : null;
+    const proj = root && path.join(root, 'docs', 'devteam', 'project');
+    if (proj && command && !['help', '--help', 'init'].includes(command) && !process.env.DEVTEAM_PROJECT && !flagStr('project') && !fs.existsSync(path.join(proj, 'settings.md')) && !(KIT_VIEWS.includes(command) && kitsOwnRepoAt(root))) die(`no ${path.relative(root, proj).split(path.sep).join('/')}/settings.md here (${root}): run init to adopt devteam in this repo, or run home's kit with DEVTEAM_HOME=<home>`);
+    return { common, proj: null };
+  }
+  const notHome = `DEVTEAM_HOME=${env} is not a devteam home (a checkout whose project folder has settings.md); unset it, or point it at home's main checkout`;
+  const c = fs.existsSync(env) ? commonOf(env) : null;
+  if (!c) die(notHome);
+  const root = path.dirname(c);
+  const proj = projectIn(root);
+  if (!fs.existsSync(path.join(proj, 'settings.md'))) die(notHome);
+  // a sibling with a stray settings.md is still a sibling: the running kit's home names it a link
+  const origin = git(['config', '--get', 'remote.origin.url'], root);
+  const sibling = scriptCommon && origin ? repoLinksIn(path.join(projectIn(path.dirname(scriptCommon)), 'settings.md')).find(([, l]) => remoteKeyAt(l.remote, path.dirname(scriptCommon)) === remoteKeyAt(origin, root)) : null;
+  if (sibling) die(`DEVTEAM_HOME=${env} is the checkout of repo link ${sibling[0]}, not a devteam home; point it at home's main checkout`);
+  // home's own kit runs against home; another repo's copy (a sibling's) would fold by other rules
+  if (scriptCommon && realPath(scriptCommon) !== realPath(c) && !process.env.DEVTEAM_OWN_KIT) die(`DEVTEAM_HOME=${env}, but this kit is ${fileURLToPath(import.meta.url)} (another repo's copy): run home's kit, node '${path.join(root, 'docs', 'devteam', 'scripts', 'devteam.mjs')}'`);
+  return { common: c, proj };
+})();
+const commonDir = homeAt.common;
+const mainRoot = commonDir ? path.dirname(commonDir) : repoRoot;
+// Whether this command runs in one of home's checkouts (its main checkout or a worktree of it).
+const cwdIsHome = !!cwdCommon && !!commonDir && realPath(cwdCommon) === realPath(commonDir);
+HOME_CWD = cwdIsHome || !commonDir ? undefined : mainRoot;
+// The kit folder of the checkout you are in when it is home's (a worktree has its own copy): its
+// project/ is the branch's tickets and plans. Elsewhere, home's main checkout's, so mainRoot and
+// projectDir both follow home (never the cwd's repo).
+const devteamDir = !cwdIsHome && commonDir ? path.join(mainRoot, 'docs', 'devteam') : fs.existsSync(path.join(repoRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs')) ? path.join(repoRoot, 'docs', 'devteam') : path.resolve(here, '..');
 // The rules (schema, constitution) and the dashboard come from the kit that is running: in a
 // project that is the main checkout's (the re-exec above), so every session folds by the same rules.
 const kitDir = path.resolve(here, '..');
-const commonDir = git(['rev-parse', '--path-format=absolute', '--git-common-dir']);
-const mainRoot = commonDir ? path.dirname(commonDir) : repoRoot;
 const projectDir = path.resolve(flagStr('project') ?? process.env.DEVTEAM_PROJECT ?? path.join(devteamDir, 'project'));
 const runDir = path.resolve(process.env.DEVTEAM_RUN ?? path.join(mainRoot, 'docs', 'devteam', 'run'));
 // What run/ holds that the kit made and rebuilds (or that is this machine's alone by nature);
@@ -212,7 +278,9 @@ const RUN_KNOWN = new Set(['log', 'prompts', 'questions', 'sent', 'cache', 'agen
 const runPath = (name) => { RUN_KNOWN.add(name); return path.join(runDir, name); };
 // Where this machine's checkouts of repo links are, when not where settings say.
 const LINKS_LOCAL = runPath('links.local.json');
-const projectRel = path.relative(repoRoot, projectDir).split(path.sep).join('/');
+// relative to the checkout that holds it: this one in a home checkout, else home's main checkout
+const projectRoot = cwdIsHome || !commonDir ? repoRoot : mainRoot;
+const projectRel = path.relative(projectRoot, projectDir).split(path.sep).join('/');
 const projectInRepo = !!commonDir && projectRel !== '' && !projectRel.startsWith('..') && !path.isAbsolute(projectRel);
 const CHORES = 'chores';
 
@@ -266,7 +334,7 @@ const SETTINGS_DEFAULTS = {
   worktree_setup: '',
   worker_denied_commands: ['gh pr merge*', 'gh api*', 'git push*main*', 'git push*--force*', 'git push*-f *', 'git push*+*'],
   dashboard_port: null,
-  upstream_repo: 'sanctuarycomputer/devteam',
+  upstream_repo: KIT_UPSTREAM,
   upstream_base: null,
   upstream_check_hours: 24,
   retro_every_days: 7,
@@ -556,18 +624,13 @@ const SUPERVISOR_LINK_CLASSES = ['registry-edit'];
 // supervisor's (url). Derived, so a new kind's entry says it once, in ownerClass.
 for (const K of Object.values(LINK_KINDS)) K.ownedByOwner = [...LINK_COMMON.filter((f) => f !== 'kind'), ...K.fields.required, ...K.fields.optional].some((f) => { const c = K.ownerClass(f); return !!c && !SUPERVISOR_LINK_CLASSES.includes(c); });
 const linkFields = (kind) => (LINK_KINDS[kind] ? [...LINK_COMMON, ...LINK_KINDS[kind].fields.required, ...LINK_KINDS[kind].fields.optional] : LINK_COMMON);
-// A remote's identity: owner/name for GitHub, however written; anything else is a URL or a path.
-// Read a checkout's origin with `git config --get remote.origin.url`, the URL as configured:
-// `git remote get-url` expands url.<base>.insteadOf, which would make a mirror look like another repo.
-const remoteKey = (r) => {
-  const s = String(r ?? '').trim().replace(/\/+$/, '');
-  const gh = /^(?:https?:\/\/(?:[^@/]+@)?github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)?([\w.-]+\/[\w.-]+?)(?:\.git)?$/.exec(s);
-  if (gh && !/^[./]/.test(s)) return gh[1].toLowerCase();
-  return /^[a-z]+:\/\//i.test(s) ? s.replace(/\.git$/, '') : realOrSelf(path.resolve(mainRoot, s)).replace(/\.git$/, '');
-};
+// A remote's identity (remoteKeyAt), a path resolved from home's main checkout.
+const remoteKey = (r) => remoteKeyAt(r, mainRoot);
 // Where a link's checkout is on this machine: run/links.local.json (untracked), the committed path,
-// or ../<id>, relative to home's main checkout.
+// or ../<id>, relative to home's main checkout; --path on a command about that repo first.
 function linkLocation(id) {
+  // --path <dir> on a command about this repo (--repo <id>): the checkout CI or a one-off run uses
+  if (flagStr('path') && flagStr('repo') === id) return path.resolve(flagStr('path'));
   let local = {};
   try { local = readJson(LINKS_LOCAL); } catch {}
   const at = ownEntry(local, id)?.path ?? ownEntry(loadSettings().links, id)?.path ?? `../${id}`;
@@ -583,11 +646,10 @@ const componentsOn = (s, link = 'home') => (linesDeclared(s) ? Object.entries(s.
 // (upstreamSyncApproval reads this one too, rather than computing its own.) init also writes into
 // .gitignore, AGENTS.md and CLAUDE.md, but each holds the project's own content beside the kit's,
 // so they are the project's files and a component owns them (the README says so); the workers'
-// harness policy is written per launch under run/, untracked.
-const kitRel = path.relative(repoRoot, devteamDir).split(path.sep).join('/');
+// harness policy is written per launch under run/, untracked. Relative to the checkout that holds
+// the project (home's, from a sibling's worktree), like projectRel.
+const kitRel = path.relative(projectRoot, devteamDir).split(path.sep).join('/');
 const devteamLine = () => [...(kitRel && !kitRel.startsWith('..') ? [`${kitRel}/**`] : []), ...(projectInRepo ? [`${projectRel}/**`] : [])];
-// The kit's own repo has no lines: everything in it is the kit.
-const kitsOwnRepo = () => { const o = git(['config', '--get', 'remote.origin.url']); return !!o && remoteKey(o) === remoteKey(loadSettings().upstream_repo ?? ''); };
 
 // One scope grammar for knowledge scopes and link `for` scopes: <kind> or <kind>:<id>.
 // all and project mean the whole project, and both stay accepted. A later scope kind is one entry.
@@ -647,7 +709,6 @@ function registryProblems(s) {
     errors.push(...K.validate(l, at, { ...ctx, id }));
   }
   if (!linesDeclared(s)) return { errors, warnings };
-  if (kitsOwnRepo()) errors.push("components: the kit's own repo draws no lines (every file in it is the kit's)");
   const byLink = new Map();
   for (const [name, c] of Object.entries(s.components)) {
     const at = `components.${name}`;
@@ -659,7 +720,6 @@ function registryProblems(s) {
     if (link !== 'home') {
       if (!ownEntry(links, link)) errors.push(`${at}: link "${link}" is not in links`);
       else if (!LINK_KINDS[links[link].kind]?.hostsComponents) errors.push(`${at}: link "${link}" is a ${links[link].kind} link, which holds no files`);
-      else errors.push(`${at}: link "${link}": only home holds components and tickets in this release (components on repo links come in a later one)`);
     }
     if (c.owns !== undefined && !Array.isArray(c.owns)) errors.push(`${at}.owns: a list of globs`);
     // an empty list is a line around nothing; leave owns out for the sole-component ** default
@@ -852,6 +912,7 @@ function fold(all) {
     if (l.op !== 'new') continue;
     if (objects.has(l.id)) {
       ignored.push({ line: l, why: 'duplicate id' });
+      if (l.type === 'question') Object.defineProperty(objects.get(l.id), '__duplicate', { value: true }); // not copied into views or JSON
       continue;
     }
     const { v, op, __file, __line, at, by, ...body } = l;
@@ -977,7 +1038,7 @@ const isPlanFile = (name) => name.startsWith('plan-') && !MONTHLY.test(name.repl
 
 function currentTicketId() {
   if (process.env.DEVTEAM_TICKET) return process.env.DEVTEAM_TICKET;
-  const b = git(['rev-parse', '--abbrev-ref', 'HEAD']);
+  const b = cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']);
   return b?.startsWith('ticket/') ? b.slice('ticket/'.length) : null;
 }
 // Who this process writes the log as: a ticket id, plan-<feature>, or supervisor. Never the owner.
@@ -985,7 +1046,7 @@ function logWriter() {
   const t = currentTicketId();
   if (t) return t;
   if (process.env.DEVTEAM_FEATURE) return `plan-${process.env.DEVTEAM_FEATURE}`;
-  const b = git(['rev-parse', '--abbrev-ref', 'HEAD']);
+  const b = cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']);
   if (b?.startsWith('plan/')) return `plan-${b.slice('plan/'.length)}`;
   return 'supervisor';
 }
@@ -1051,18 +1112,32 @@ function mainRef() {
 // A fetch that fails refuses the run, dry runs included: judging the last-fetched main would pass
 // a PR against a main that may have moved. A checkout with no origin remote has nowhere to fetch
 // from, so its own main is the one in force and nothing is fetched.
-function fetchMain() {
+// A PR in another repo (R) also needs that repo's main as its origin has it now: home's main
+// holds the settings and lines that judge it, R's the tree it lands on. Either fetch failing refuses.
+function fetchMain(R = null) {
   if (!commonDir) return;
-  if (git(['config', '--get', 'remote.origin.url']) === null) return;
-  const b = loadSettings().main_branch;
-  const f = gitRun(['fetch', '--quiet', 'origin', b]);
-  if (f.status !== 0) die(`could not fetch origin ${b}: ${redactUrl(firstLine(f.err)) || `exit ${f.status}`}; refusing to judge against a stale main`);
-  mainRefCache = undefined;
-  settingsCache = undefined;
-  logCache = null;
-  mainLogCache = undefined;
-  mergeShaCache.clear();
-  linkChangedCache.clear();
+  if (git(['config', '--get', 'remote.origin.url']) !== null) {
+    const b = loadSettings().main_branch;
+    const f = gitRun(['fetch', '--quiet', 'origin', b]);
+    if (f.status !== 0) die(`could not fetch origin ${b}: ${redactUrl(firstLine(f.err)) || `exit ${f.status}`}; refusing to judge against a stale main`);
+    mainRefCache = undefined;
+    settingsCache = undefined;
+    logCache = null;
+    mainLogCache = undefined;
+    mergeShaCache.clear();
+    linkChangedCache.clear();
+  }
+  if (R && R.name !== 'home') fetchLinkMain(R);
+}
+// Another repo's main, fetched into its checkout by the same rule as home's: skipped when the
+// checkout has no origin, refused when the fetch fails, so nothing is judged, read or started on a
+// stale main. (repo() matches a checkout to its link by origin, so the skip is home's rule kept.)
+function fetchLinkMain(R, refusing = 'refusing to judge against a stale main') {
+  if (R.git(['config', '--get', 'remote.origin.url'], R.root) === null) return;
+  const rb = R.settings.main_branch;
+  const fr = gitRun(['fetch', '--quiet', 'origin', rb], R.root);
+  if (fr.status !== 0) die(`could not fetch origin ${rb} in ${R.name}: ${redactUrl(firstLine(fr.err)) || `exit ${fr.status}`}; ${refusing}`);
+  R.resetCaches();
 }
 // In a read-only command, full ref names resolve from one for-each-ref listing (a dashboard
 // refresh asked git about each ticket branch separately: ~90 processes). Anything else, and every
@@ -1106,6 +1181,11 @@ function appendLog(fields, by = logWriter()) {
   if (f && fields.op === 'set' && ['feature', 'ticket'].includes(type)) {
     const cur = logGet(fields.id);
     if (cur && (type === 'feature' ? cur.id : cur.feature) !== f) die(`${by} may only change the feature "${f}" and its tickets`);
+  }
+  // The owner's answer binds to the question as it stands (questionView).
+  if (type === 'question' && fields.op === 'set' && writerClass(by) === 'owner' && fields.answer !== undefined) {
+    const q = logGet(fields.id);
+    if (q?.type === 'question') fields = { ...fields, question_hash: questionHash(q) };
   }
   const file = logFileFor(by, type);
   const prefix = SCHEMA['x-id'].prefix[type];
@@ -1186,9 +1266,22 @@ const upkeepGoal = () => [...readLog().objects.values()].find((o) => o.type === 
 const logGet = (id) => readLog().objects.get(id) ?? null;
 const byTime = (a, b) => a.created_at.localeCompare(b.created_at);
 
+// What the owner saw: the question with every field it was asked with (later lines may only add
+// the supervisor's status and reason, and the owner's own fields). The owner's answer records this
+// hash, and an answer whose question no longer hashes the same answers nothing: the question was
+// rewritten after the owner answered it (its line edited, or a backdated duplicate taking its
+// place), so it is open again, and the owner answers what it says now.
+const QUESTION_LATER = ['status', 'reason', 'answer', 'said', 'autonomy', 'standing_rule', 'secrets_posted', 'result', 'declined', 'question_hash'];
+const questionHash = (q) => crypto.createHash('sha256').update(canonical(Object.fromEntries(Object.entries(q).filter(([k]) => !k.startsWith('__') && !['updates', 'created_at', 'created_by', 'channel', ...QUESTION_LATER].includes(k))))).digest('hex').slice(0, 16);
+
 // Folded questions in the shape the inbox uses.
 function questionView(q) {
-  const ans = q.updates.filter((u) => u.answer !== undefined && writerClass(u.by) === 'owner').pop();
+  const hash = questionHash(q);
+  const last = q.updates.filter((u) => u.answer !== undefined && writerClass(u.by) === 'owner').pop();
+  // An answer from before answers carried the hash (no question_hash) still counts, unless a
+  // second line for the question exists: then nothing shows which one the owner saw.
+  const rewritten = !!last && (last.question_hash ? last.question_hash !== hash : !!q.__duplicate);
+  const ans = rewritten ? null : last;
   const st = q.updates.filter((u) => u.status !== undefined).pop();
   let status = 'open';
   let answer = null;
@@ -1217,7 +1310,7 @@ function questionView(q) {
     question: q.question, context: q.context ?? '', options: q.options ?? [], choices: q.choices ?? [], links: q.links ?? [], goal: q.goal ?? null, change: q.change ?? null, rule_scope: q.rule_scope ?? null, recommendation: q.recommendation ?? '', confidence: q.confidence ?? null,
     default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], approves: q.approves ?? [], evidence: q.evidence ?? [], note: q.note ?? null, why_asked: q.why_asked ?? null,
     secrets: (q.secrets ?? []).map((x) => ({ ...x, to: sinkWords(x.sink), sink_type: SINK_RE.exec(x.sink ?? '')?.[1] ?? null, warning: sinkWarning(x.sink) })), secrets_posted: q.updates.filter((u) => u.secrets_posted !== undefined && writerClass(u.by) === 'owner').pop()?.secrets_posted ?? [],
-    status, answer, answered_by: answeredBy, answered_at: answeredAt, matched,
+    status, answer, answered_by: answeredBy, answered_at: answeredAt, matched, hash, rewritten,
     autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans?.channel ?? null, said: ans?.said ?? null,
     review: review?.review ?? null, result: review?.result ?? null, declined: review ? review.declined : null, allow_partial: review ? review.allow_partial : null, result_status: review?.result_status ?? null,
   };
@@ -1262,6 +1355,9 @@ function goalChangeProblem(q, goalId, qid, l = null) {
   return null;
 }
 
+// The owner's own standing rule for a class (scope class:<cls>, accepted, written by the owner):
+// the latest one. A rule relayed from chat never exists (answer --from-chat takes no --rule).
+const ownerRuleFor = (cls) => logObjects('knowledge').filter((k) => writerClass(k.created_by) === 'owner' && k.scope === `class:${cls}` && k.status === 'accepted').sort(byTime).pop() ?? null;
 // The correction on an act, with who made it and when.
 // The supervisor's calls: its decisions, and the acts that are their own decision (no decision
 // field: mechanical acts, and acts logged before decisions existed). Trust is earned and lost on these.
@@ -1275,8 +1371,15 @@ const correctionOf = (a) => {
 // base..sha may change project/log/<X>.jsonl only if X is the branch's own planner file (plan/<f>)
 // or the branch is chore-log (any file but plan-*). Existing lines never change; new lines are
 // valid, in time order, in their month, and not in the future.
-function logRule(headRef, sha) {
-  if (!commonDir || !projectInRepo) return [];
+function logRule(headRef, sha, R = repo('home')) {
+  if (!commonDir) return [];
+  // another repo has no log: its project folder holds only tickets/ (the log lives in home)
+  if (R.name !== 'home') {
+    const base = R.mainRef() ? R.git(['merge-base', R.mainRef(), sha]) : null;
+    if (!base) return [`cannot resolve the merge base with ${R.name}'s main; its project folder not checked`];
+    return R.changedFiles(base, sha).filter((f) => f.startsWith(`${R.projectRel}/`) && !f.startsWith(`${R.projectRel}/tickets/`)).map((f) => `${f}: ${R.projectRel} in another repo holds only tickets/ (the log, settings and designs live in home)`);
+  }
+  if (!projectInRepo) return [];
   const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
   if (!base) return ['cannot resolve the merge base with main; log changes not checked'];
   const prefix = `${projectRel}/log/`;
@@ -1323,8 +1426,9 @@ function logRule(headRef, sha) {
 // its question line, while that question is open or answered (a page sent back or withdrawn may be
 // redrawn in place before it lands). Once a pinned file or a result is on main, as the merge base
 // holds it, it never changes and is never deleted, whatever its question's status.
-function reviewRule(sha, { forge = false } = {}) {
-  if (!commonDir || !projectInRepo) return [];
+function reviewRule(sha, { forge = false, repo: R = repo('home') } = {}) {
+  // review questions are home's: another repo's PR carries no review result
+  if (!commonDir || !projectInRepo || R.name !== 'home') return [];
   const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
   if (!base) return []; // logRule says so
   const changed = (git(['diff', '--name-status', '--no-renames', base, sha]) ?? '').split('\n').filter(Boolean).map((l) => l.split('\t'));
@@ -1374,7 +1478,7 @@ const LOG_BRANCH = 'chore-log';
 // log-only PR. Run it every tick (it pushes); merge it daily with `merge --chore log`.
 function logPrOpen(wt, main) {
   if (loadSettings().forge !== 'git') {
-    const open = sh('gh', ['pr', 'list', '--head', LOG_BRANCH, '--state', 'open', '--json', 'number', '--jq', 'length'], { cwd: wt });
+    const open = repo('home').gh(['pr', 'list', '--head', LOG_BRANCH, '--state', 'open', '--json', 'number', '--jq', 'length'], { cwd: wt });
     if (open !== null) return Number(open) > 0;
   }
   // forge git (merge lands a --no-ff merge) or no gh: open means not yet on main
@@ -1445,6 +1549,17 @@ function cmdLogSync() {
 }
 
 // Validate every line (live and durable) and list what the fold ignored.
+// A second line for a question replaces it if backdated, and a question changed after the owner
+// answered it has lost that answer (questionView): both are the log being rewritten.
+// The rewritten question fails until the owner answers what it says now; the leftover line then
+// warns (the log is append-only, so it can't be removed).
+function questionRewrites() {
+  const errors = [];
+  const warnings = [];
+  for (const q of logObjects('question')) if (questionView(q).rewritten) errors.push(`${q.id}: the question changed after the owner answered it, so that answer no longer counts and it is open again`);
+  for (const i of readLog().ignored) if (i.line.type === 'question' && i.why === 'duplicate id') warnings.push(`${i.line.id}: a second question line with this id (${i.line.__file}:${i.line.__line}); a question is asked once`);
+  return { errors, warnings };
+}
 function cmdLogCheck() {
   const names = new Set();
   for (const d of [liveLogDir(), durableLogDir()]) if (fs.existsSync(d)) for (const f of fs.readdirSync(d)) if (f.endsWith('.jsonl')) names.add(f);
@@ -1456,6 +1571,9 @@ function cmdLogCheck() {
     n += r.lines.length;
   }
   for (const i of readLog().ignored) out(`ignored: ${i.line.__file}:${i.line.__line} ${i.line.id}: ${i.why}`);
+  const rw = questionRewrites();
+  for (const w of rw.warnings) out(`warn: ${w}`);
+  fails.push(...rw.errors);
   report(fails, `${n} log line(s)`);
 }
 
@@ -1480,67 +1598,84 @@ function report(fails, okMsg) {
 }
 // ===== 4. facts from git =====
 
+// Pure readers of a repo's main, shared by home's functions below and each repo link's (repo()).
+const parseMainLog = (o) => (o ? o.split('\n') : []).filter(Boolean).map((l) => { const [sha, ...r] = l.split('\t'); return { sha, subject: r.join('\t') }; });
+const parseParents = (o) => (o ? o.split('\n') : []).filter(Boolean).map((l) => l.split(' '));
+// The commit on main that landed a ticket, for any repo: a merge from ticket/<id>, a squash titled
+// "<id>: …", or a merge whose second parent contains the branch tip and whose first parent does not.
+function findMergeSha(id, { log, parents, resolve, gitFn, ref }) {
+  const esc = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const fromBranch = new RegExp(`from \\S*ticket/${esc}$`);
+  for (const { sha, subject } of log()) if (fromBranch.test(subject) || subject.startsWith(`${id}:`)) return sha;
+  if (!ref) return null;
+  for (const r of [`refs/heads/ticket/${id}`, `refs/remotes/origin/ticket/${id}`]) {
+    const tip = resolve(r);
+    if (!tip || gitFn(['merge-base', '--is-ancestor', tip, ref]) === null) continue;
+    for (const [sha, p1, p2] of parents()) {
+      if (p2 && gitFn(['merge-base', '--is-ancestor', tip, p2]) !== null && gitFn(['merge-base', '--is-ancestor', tip, p1]) === null) return sha;
+    }
+  }
+  return null;
+}
+// The first tag matching pattern (default v*), not a release candidate, that contains sha.
+const releasedInWith = (gitFn, sha, pattern = 'v*') => (gitFn(['tag', '--contains', sha, '--list', pattern, '--sort=creatordate']) ?? '').split('\n').find((t) => t && !/-rc/.test(t)) ?? null;
+
 let mainLogCache;
 function mainLog() {
   if (mainLogCache) return mainLogCache;
   const ref = mainRef();
   // First-parent only: merge and squash commits are on it; a branch's own commits are not.
-  const o = ref ? git(['log', ref, '--first-parent', '--format=%H%x09%s']) : null;
-  return (mainLogCache = (o ? o.split('\n') : []).filter(Boolean).map((l) => {
-    const [sha, ...r] = l.split('\t');
-    return { sha, subject: r.join('\t') };
-  }));
+  return (mainLogCache = parseMainLog(ref ? git(['log', ref, '--first-parent', '--format=%H%x09%s']) : null));
 }
 let mergeParentsCache;
 function mergeParents() {
   if (mergeParentsCache) return mergeParentsCache;
   const ref = mainRef();
-  const o = ref ? git(['log', ref, '--merges', '--first-parent', '-n', '500', '--format=%H %P']) : null;
-  return (mergeParentsCache = (o ? o.split('\n') : []).filter(Boolean).map((l) => l.split(' ')));
+  return (mergeParentsCache = parseParents(ref ? git(['log', ref, '--merges', '--first-parent', '-n', '500', '--format=%H %P']) : null));
 }
-function ticketBranchRef(id) {
+function homeTicketBranchRef(id) {
   for (const r of [`refs/heads/ticket/${id}`, `refs/remotes/origin/ticket/${id}`]) if (resolveCommit(r)) return r;
   return null;
 }
-// The commit on main that landed a ticket: a merge from ticket/<id>, a squash titled "<id>: …", or
-// a merge whose second parent contains the branch tip and whose first parent does not.
 const mergeShaCache = new Map();
-function mergeShaFor(id) {
+function homeMergeShaFor(id) {
   if (mergeShaCache.has(id)) return mergeShaCache.get(id);
-  const done = (v) => (mergeShaCache.set(id, v), v);
-  const esc = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const fromBranch = new RegExp(`from \\S*ticket/${esc}$`);
-  for (const { sha, subject } of mainLog()) if (fromBranch.test(subject) || subject.startsWith(`${id}:`)) return done(sha);
+  const v = findMergeSha(id, { log: mainLog, parents: mergeParents, resolve: resolveCommit, gitFn: (a) => git(a), ref: mainRef() });
+  mergeShaCache.set(id, v);
+  return v;
+}
+// When a finding first reached home's main: the commit time of the first commit on main whose kit
+// script added its token (a sync chore's commit, in a project). A finding about merges reads only
+// merges after it, so an upgrade raises nothing for history the kit couldn't have refused. Null
+// when the kit isn't tracked on main.
+const upgradeAtCache = new Map();
+function upgradeAt(token) {
+  if (upgradeAtCache.has(token)) return upgradeAtCache.get(token);
   const ref = mainRef();
-  if (!ref) return done(null);
-  for (const r of [`refs/heads/ticket/${id}`, `refs/remotes/origin/ticket/${id}`]) {
-    const tip = resolveCommit(r);
-    if (!tip || git(['merge-base', '--is-ancestor', tip, ref]) === null) continue;
-    for (const [sha, p1, p2] of mergeParents()) {
-      if (p2 && git(['merge-base', '--is-ancestor', tip, p2]) !== null && git(['merge-base', '--is-ancestor', tip, p1]) === null) return done(sha);
-    }
-  }
-  return done(null);
+  const file = `${kitRel ? `${kitRel}/` : ''}scripts/devteam.mjs`;
+  const rows = ref && !kitRel.startsWith('..') ? (git(['log', '--reverse', '--format=%ct', `-S${token}`, ref, '--', file]) ?? '').split('\n').filter(Boolean) : [];
+  const at = rows.length ? Number(rows[0]) * 1000 : null;
+  upgradeAtCache.set(token, at);
+  return at;
 }
 const mergedAtCache = new Map();
-function mergedAt(id) {
+function homeMergedAt(id) {
   if (!mergedAtCache.has(id)) {
-    const sha = mergeShaFor(id);
+    const sha = homeMergeShaFor(id);
     const t = sha ? Date.parse(git(['show', '-s', '--format=%cI', sha]) ?? '') : NaN;
     mergedAtCache.set(id, Number.isNaN(t) ? null : t);
   }
   return mergedAtCache.get(id);
 }
-function releasedIn(sha) {
-  const tags = git(['tag', '--contains', sha, '--list', 'v*', '--sort=creatordate']);
-  return (tags ?? '').split('\n').find((t) => t && !/-rc/.test(t)) ?? null;
-}
+const homeReleasedIn = (sha, pattern) => releasedInWith((a) => git(a), sha, pattern);
 // Read a project file from a git ref (a ticket's branch, an exact head) or the working tree.
 function srcRead(src, rel) {
+  if (src.repo && src.repo.name !== 'home') return src.repo.srcRead(src.ref ?? null, rel);
   if (src.ref && projectInRepo) return git(['show', `${src.ref}:${projectRel}/${rel}`]);
   return readText(path.join(projectDir, rel));
 }
 function srcList(src, relDir) {
+  if (src.repo && src.repo.name !== 'home') return src.repo.srcList(src.ref ?? null, relDir);
   if (src.ref && projectInRepo) return (git(['ls-tree', '--name-only', `${src.ref}:${projectRel}/${relDir}`]) ?? '').split('\n').filter(Boolean);
   const p = path.join(projectDir, relDir);
   return fs.existsSync(p) ? fs.readdirSync(p) : [];
@@ -1548,6 +1683,114 @@ function srcList(src, relDir) {
 const WORKTREE = { ref: null };
 // A project file from this checkout, or main's copy when this checkout lacks it.
 const projectFileText = (rel) => readText(path.join(projectDir, rel)) ?? (projectInRepo && mainRef() ? git(['show', `${mainRef()}:${projectRel}/${rel}`]) : null);
+
+// ===== 4b. repos: home and each repo link, one object each =====
+
+// The repo a sibling's GitHub CLI call names (-R): owner/name, or host/owner/name on GitHub
+// Enterprise; null for a remote gh can't name (a path, a non-GitHub host), where gh then runs in
+// the checkout. Home's calls name none: gh resolves home as it always has (gh repo set-default,
+// else the only remote), which need not be origin.
+const ghSpec = (remote) => {
+  const k = remoteKey(remote ?? '');
+  if (/^[\w.-]+\/[\w.-]+$/.test(k)) return k;
+  const m = /^https:\/\/([^/@]+)\/([\w.-]+\/[\w.-]+?)(?:\.git)?$/.exec(String(remote ?? ''));
+  return m ? `${m[1]}/${m[2]}` : null;
+};
+// One object per repo, made once. Home's is the module's own helpers, so a single-repo project
+// runs exactly today's code; a link's binds git and gh to its checkout and keeps its own caches.
+const repoMemo = new Map();
+function repo(name = 'home') {
+  if (!repoMemo.has(name)) repoMemo.set(name, name === 'home' ? homeRepo() : linkRepo(name));
+  return repoMemo.get(name);
+}
+// Home's object is homeFacts (name, the three tree reads, mainRef, devteamLine, settings)
+// plus the rest, so every coverage helper that defaulted to homeFacts gets the same answers.
+function homeRepo() {
+  return Object.assign(Object.create(homeFacts), {
+    root: mainRoot, commonDir, projectRel, projectInRepo,
+    get remote() { return git(['config', '--get', 'remote.origin.url']); },
+    resolveCommit,
+    git: (args, cwd) => git(args, cwd),
+    gitOrDie: (args, cwd) => gitOrDie(args, cwd),
+    gh: (args, opts = {}) => sh('gh', args, opts),
+    mergeShaFor: homeMergeShaFor, mergedAt: homeMergedAt, ticketBranchRef: homeTicketBranchRef, releasedIn: homeReleasedIn,
+    srcRead: (ref, rel) => srcRead({ ref }, rel), srcList: (ref, relDir) => srcList({ ref }, relDir),
+    resetCaches: () => { mainRefCache = undefined; mainLogCache = undefined; mergeParentsCache = undefined; mergeShaCache.clear(); mergedAtCache.clear(); },
+  });
+}
+function linkRepo(id) {
+  const s = loadSettings();
+  const l = ownEntry(s.links, id);
+  if (!l || !LINK_KINDS[l.kind]?.hostsComponents) die(`no repo link "${id}" in settings links (devteam.mjs links)`);
+  const at = linkLocation(id);
+  if (!fs.existsSync(at)) die(`repo ${id}: no checkout at ${at}; clone ${redactUrl(l.remote)} there, set its path, or name this machine's in run/links.local.json`);
+  const origin = git(['config', '--get', 'remote.origin.url'], at);
+  if (!origin || remoteKey(origin) !== remoteKey(l.remote)) die(`repo ${id}: ${at} is a checkout of ${origin ? redactUrl(origin) : 'nothing'}, not ${redactUrl(l.remote)}`);
+  const common = commonOf(at);
+  const root = path.dirname(common);
+  const settings = LINK_KINDS[l.kind].effectiveSettings(l, s);
+  const rel = settings.project;
+  const g = (args, cwd = root) => git(args, cwd);
+  const c = { mainRef: undefined, log: null, parents: null, mergeSha: new Map(), mergedAt: new Map() };
+  const resolve = (ref) => g(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
+  const mainRefR = () => { if (c.mainRef === undefined) c.mainRef = [`origin/${settings.main_branch}`, settings.main_branch].find((r) => resolve(r)) ?? null; return c.mainRef; };
+  const log = () => (c.log ??= parseMainLog(mainRefR() ? g(['log', mainRefR(), '--first-parent', '--format=%H%x09%s']) : null));
+  const parents = () => (c.parents ??= parseParents(mainRefR() ? g(['log', mainRefR(), '--merges', '--first-parent', '-n', '500', '--format=%H %P']) : null));
+  const R = {
+    name: id, root, commonDir: common, remote: l.remote, settings, projectRel: rel, projectInRepo: true,
+    mainRef: mainRefR, resolveCommit: resolve,
+    // the same three tree reads home has (gitFacts), bound to this checkout
+    ...gitFacts(g, (args) => gitRun(args, root)),
+    git: g, gitOrDie: (args, cwd = root) => gitOrDie(args, cwd),
+    gh: (args, opts = {}) => { const spec = ghSpec(l.remote); return sh('gh', [...args, ...(spec ? ['-R', spec] : [])], { cwd: root, ...opts }); },
+    mergeShaFor: (tid) => { if (!c.mergeSha.has(tid)) c.mergeSha.set(tid, findMergeSha(tid, { log, parents, resolve, gitFn: g, ref: mainRefR() })); return c.mergeSha.get(tid); },
+    mergedAt: (tid) => { if (!c.mergedAt.has(tid)) { const sha = R.mergeShaFor(tid); const t = sha ? Date.parse(g(['show', '-s', '--format=%cI', sha]) ?? '') : NaN; c.mergedAt.set(tid, Number.isNaN(t) ? null : t); } return c.mergedAt.get(tid); },
+    ticketBranchRef: (tid) => [`refs/heads/ticket/${tid}`, `refs/remotes/origin/ticket/${tid}`].find((r) => resolve(r)) ?? null,
+    releasedIn: (sha, pattern) => releasedInWith(g, sha, pattern),
+    srcRead: (ref, relPath) => (ref ?? mainRefR() ? g(['show', `${ref ?? mainRefR()}:${rel}/${relPath}`]) : null),
+    srcList: (ref, relDir) => (ref ?? mainRefR() ? (g(['ls-tree', '--name-only', `${ref ?? mainRefR()}:${rel}/${relDir}`]) ?? '').split('\n').filter(Boolean) : []),
+    resetCaches: () => { c.mainRef = undefined; c.log = null; c.parents = null; c.mergeSha.clear(); c.mergedAt.clear(); },
+    // in another repo the kit's line is only its project folder, where tickets keep their records
+    devteamLine: () => [`${rel}/**`],
+  };
+  return R;
+}
+// The components that route a ticket to its repo: main's, committed.
+const committedComponents = () => memo('committedComponents', () => mainSettings(null) ?? loadSettings());
+// Two routers. By name, for views: never touches a checkout, never fails.
+const repoOfTicketLink = (t) => componentLink(t.component, committedComponents());
+// Whether a repo can be read on this machine, without failing: home always; a link when its
+// checkout is where it says and of its remote (the repo kind's reachable, memoized per process).
+const repoReadable = (name) => { if (name === 'home') return true; const l = ownEntry(loadSettings().links, name); return !!LINK_KINDS[l?.kind]?.hostsComponents && !LINK_KINDS[l.kind].reachable(l, name); };
+// By object, for acts on one ticket: fails fast with one message when the checkout is wrong.
+const repoOfTicket = (t) => repo(repoOfTicketLink(t));
+const repoOfTicketId = (id) => { const t = tickets().get(id); return t ? repoOfTicket(t) : repo('home'); };
+// A ticket's git facts come from its own repo. Views ask by name, through factsRepo,
+// which is null for a repo this machine can't read: its tickets read as unmerged and branchless
+// while link-unreachable says why. Home's methods are today's functions.
+const factsRepo = (id) => { const t = tickets().get(id); const name = t ? repoOfTicketLink(t) : 'home'; return repoReadable(name) ? repo(name) : null; };
+const mergeShaFor = (id) => factsRepo(id)?.mergeShaFor(id) ?? null;
+const mergedAt = (id) => factsRepo(id)?.mergedAt(id) ?? null;
+const ticketBranchRef = (id) => factsRepo(id)?.ticketBranchRef(id) ?? null;
+// A release of a repo: the component's tag pattern, else v*; home's by default.
+const releasedIn = (sha, { repo: R = repo('home'), pattern } = {}) => R.releasedIn(sha, pattern);
+// Where a ticket's release is read: its repo's tags, matching its component's pattern.
+// A merge sha is non-null only when factsRepo found the repo; undefined lets releasedIn's default
+// (home) apply rather than a null.
+const releaseOf = (t) => { const c = committedComponents().components?.[t.component]; return { repo: factsRepo(t.id) ?? undefined, pattern: isObj(c?.release) ? c.release.tag : undefined }; };
+// The head a check of R reads: --sha, else this checkout's HEAD when it is a checkout of R, else
+// R's main checkout's.
+const headIn = (R, shaArg) => (shaArg ? R.resolveCommit(shaArg) : cwdRepo() === R ? cwdGit(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}']) : R.resolveCommit('HEAD'));
+// The repo of the checkout this command runs in (home, or a repo link's), by its git common dir.
+function cwdRepo() {
+  if (cwdIsHome) return repo('home');
+  if (!cwdCommon) return null;
+  for (const [id, l] of Object.entries(loadSettings().links ?? {})) {
+    if (!LINK_KINDS[l.kind]?.hostsComponents || !repoReadable(id)) continue;
+    if (realPath(commonOf(linkLocation(id)) ?? '') === realPath(cwdCommon)) return repo(id);
+  }
+  return null;
+}
 
 // ===== 5. the graph (tickets and features, folded from the log) =====
 
@@ -1921,7 +2164,7 @@ function deriveStatus() {
     const depsMerged = (t.depends_on ?? []).every((d) => mergeShaFor(d));
     let stage = 'planned';
     if (t.superseded_by) stage = 'superseded';
-    else if (mergeSha) stage = releasedIn(mergeSha) ? 'released' : 'merged';
+    else if (mergeSha) stage = releasedIn(mergeSha, releaseOf(t)) ? 'released' : 'merged';
     else if (reviews.some((r) => r.stage === 'final')) stage = 'in-review';
     else if (branch && plan === 'approved' && depsMerged) stage = 'building';
     else if (plan === 'approved') stage = 'planned-in-detail';
@@ -1937,7 +2180,7 @@ function deriveStatus() {
   });
 }
 
-const onPlanBranch = () => (git(['rev-parse', '--abbrev-ref', 'HEAD']) ?? '').startsWith('plan/');
+const onPlanBranch = () => (cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']) ?? '').startsWith('plan/');
 
 function cmdValidate() {
   const ts = tickets();
@@ -1950,7 +2193,10 @@ function cmdValidate() {
   // working tree), so a component declared in a draft can be planned against before it lands.
   // They are advice for the graph, not one of the four enforcement points: check-ticket's footprint
   // and check-pr's coverage judge the same tickets by committed settings (settingsInForce) at merge.
-  const S0 = loadSettings(); const lined = linesDeclared(S0); const comps0 = componentsOn(S0, 'home'); const dev0 = devteamLine();
+  // Each ticket against its own repo's lines; another repo's kit line is its project folder, read
+  // from settings alone (no checkout needed, so a missing one never stops validate).
+  const S0 = loadSettings(); const lined = linesDeclared(S0);
+  const linesOf = (link) => ({ comps: componentsOn(S0, link), dev: link === 'home' ? devteamLine() : [`${projectRelOf(link)}/**`] });
   for (const [id, t] of ts) {
     if (!id.startsWith(`${t.component}-`)) err(id, `id must start with its component "${t.component}-"`);
     for (const g of t.touches ?? []) if (unbalanced(g)) err(id, `touches entry "${g}" has unbalanced braces`);
@@ -1964,8 +2210,9 @@ function cmdValidate() {
       for (const c of tc) if (!ownEntry(S0.components, c)) err(id, `touches_components "${c}" is not a declared component`);
       else if (componentLink(c, S0) !== componentLink(t.component, S0)) err(id, `touches_components "${c}" is in another repo; a ticket changes one repo (split it per repo)`);
       const mine = new Set([t.component, ...tc]);
+      const L0 = linesOf(componentLink(t.component, S0));
       for (const entry of t.touches ?? []) {
-        const owners = prefixOwners(entry, comps0, dev0);
+        const owners = prefixOwners(entry, L0.comps, L0.dev);
         if (owners === null) err(id, `touches "${entry}" has no static prefix, so it could be in any line; start it with a folder`);
         else if (owners.includes('devteam')) err(id, `touches "${entry}" lies in the kit's own line; only the ticket's own ${projectRel}/tickets/${id}/ is its to write, and kit upgrades are chores`);
         else if (!owners.length) err(id, `touches "${entry}" lies in no component's line`);
@@ -1989,7 +2236,7 @@ function cmdValidate() {
   // On a plan branch, the feature's tickets number from its reserved block (a planner made before
   // blocks has none and is not checked).
   {
-    const pf = onPlanBranch() ? (git(['rev-parse', '--abbrev-ref', 'HEAD']) ?? '').slice('plan/'.length) : null;
+    const pf = onPlanBranch() ? (cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']) ?? '').slice('plan/'.length) : null;
     const b = pf ? idBlockFor(pf) : null;
     if (b) for (const t of ts.values()) {
       if (t.created_by !== `plan-${pf}`) continue;
@@ -2013,6 +2260,14 @@ function cmdValidate() {
       const servers = mine.filter((t) => (t.serves ?? []).includes(s));
       const comps = new Set(servers.filter((t) => t.kind !== 'contract').map((t) => t.component));
       if (comps.size > 1 && !servers.some((t) => t.kind === 'integration')) warnings.push(`feature ${fid}: story ${s} spans ${[...comps].join(', ')} but has no integration ticket (D7)`);
+      // Across repos there are no multi-repo tickets: a story served in two repos is
+      // split per repo, with its end-to-end check in the ticket that lands last, one that depends
+      // (transitively) on every other ticket serving it.
+      if (flags.strict) {
+        const repos = [...new Set(servers.map(repoOfTicketLink))];
+        const clos = closures(ts);
+        if (repos.length > 1 && !servers.some((t) => servers.every((o) => o === t || clos.get(t.id)?.has(o.id)))) errors.push(`feature ${fid}: story ${s} is served in ${[...new Set(servers.map((t) => t.component))].join(', ')} (${repos.join(', ')}) and no ticket serving it depends on all the others; add the end-to-end ticket that lands last (planning.md D2, D7)`);
+      }
     }
     // A feature that has reached this checkout is landed (or being planned here): its design and
     // graph reviews must say APPROVE. On a plan/<feature> branch that is a warning until review.
@@ -2077,6 +2332,8 @@ function cmdValidate() {
     for (let i = 0; i < live.length; i++) for (let j = i + 1; j < live.length; j++) {
       const a = live[i], b = live[j];
       if (clos.get(a.id)?.has(b.id) || clos.get(b.id)?.has(a.id)) continue;
+      // the same path in two repos is two files (by name: validate never needs a checkout)
+      if (repoOfTicketLink(a) !== repoOfTicketLink(b)) continue;
       outer: for (const ga of a.touches ?? []) for (const gb of b.touches ?? []) if (globsOverlap(ga, gb)) { const m = `${a.id} and ${b.id} can run concurrently but both touch "${ga}" / "${gb}" (D4)`; if (scope && a.id !== scope && b.id !== scope) warnings.push(`${m}; not ${scope}'s to fix`); else errors.push(m); break outer; }
     }
   }
@@ -2114,6 +2371,20 @@ function cmdValidate() {
       if (read.error) (scope ? warnings : errors).push(`components: ${read.error}`);
       const cov = read.value;
       if (cov) for (const l of coverageReport({ ...coverageGaps(cov, sIn), ref }, sIn)) (scope || l.startsWith('line-empty:') ? warnings : errors).push(`components: ${l}${scope ? `; not ${scope}'s to fix` : ''}`);
+      // Every repo link with components: its main's tree under the same lines (settings live in
+      // home). A repo this machine can't read is skipped with a warning; link-unreachable says how
+      // to fix it at tick time. Its project folder holds only tickets/.
+      for (const [id, l] of Object.entries(sIn.links ?? {})) {
+        if (!LINK_KINDS[l?.kind]?.hostsComponents || !componentsOn(sIn, id).length) continue;
+        if (!repoReadable(id)) { warnings.push(`components (${id}): not checked, ${LINK_KINDS[l.kind].reachable(l, id)}`); continue; }
+        const R = repo(id);
+        const rm = R.mainRef();
+        if (!rm) { warnings.push(`components (${id}): not checked, its checkout has no ${R.settings.main_branch} (fetch it)`); continue; }
+        const rd = readCoverage(() => coverageAt(rm, sIn, R));
+        if (rd.error) (scope ? warnings : errors).push(`components (${id}): ${rd.error}`);
+        if (rd.value) for (const x of coverageReport({ ...coverageGaps(rd.value, sIn), ref: rm }, sIn, R)) (scope || x.startsWith('line-empty:') ? warnings : errors).push(`components (${id}): ${x}${scope ? `; not ${scope}'s to fix` : ''}`);
+        for (const p of readCoverage(() => treePathsMemo(rm, R)).value ?? []) if (p.startsWith(`${R.projectRel}/`) && !p.startsWith(`${R.projectRel}/tickets/`)) errors.push(`${id}: ${p} is in ${R.projectRel}, which holds only tickets/ (settings, the log and designs live in home)`);
+      }
     }
     // Designs cite links as link:<id>; checked only while the registry has links.
     if (Object.keys(s.links ?? {}).length) {
@@ -2125,6 +2396,7 @@ function cmdValidate() {
   }
 
   for (const e of readLog().errors) warnings.push(`log ${e}`);
+  { const r = questionRewrites(); errors.push(...r.errors); warnings.push(...r.warnings); }
   for (const i of readLog().ignored) if (['ticket', 'feature'].includes(i.line.type) && i.why === 'duplicate id') errors.push(`${i.line.id}: a second ${i.line.type} line with this id (${i.line.__file}:${i.line.__line}) was ignored; use ${i.line.type} set`);
   const raw = ladder().raw_ceilings;
   for (const [c, v] of Object.entries(loadSettings().autonomy_ceilings ?? {})) {
@@ -2294,12 +2566,14 @@ const holdWords = (m) => ({ run: 'running', drain: 'draining', park: 'parked', '
 const settledMemo = new Map();
 function sessionSettled(s) {
   if (settledMemo.has(s.name)) return settledMemo.get(s.name);
-  let ok = lastPhaseOf(s.name)?.to === 'parked';
+  // a session in a repo this machine can't read never reads as settled (fleet status says why)
+  let ok = lastPhaseOf(s.name)?.to === 'parked' && s.readable;
   if (ok) {
-    const local = resolveCommit(`refs/heads/${s.branch}`);
-    const remote = resolveCommit(`refs/remotes/origin/${s.branch}`);
+    const R = s.repo;
+    const local = R.resolveCommit(`refs/heads/${s.branch}`);
+    const remote = R.resolveCommit(`refs/remotes/origin/${s.branch}`);
     const dirty = fs.existsSync(s.wt) ? workLines(git(['status', '--porcelain'], s.wt)).join('\n') : '';
-    const handoff = remote && (handoffCommit(`refs/remotes/origin/${s.branch}`, s.name) || git(['cat-file', '-e', `${remote}:${s.handoff}`]) !== null);
+    const handoff = remote && (handoffCommit(`refs/remotes/origin/${s.branch}`, s.name, R) || R.git(['cat-file', '-e', `${remote}:${s.handoff}`]) !== null);
     ok = !!remote && (!local || local === remote) && !dirty && !!handoff;
   }
   settledMemo.set(s.name, ok);
@@ -2348,7 +2622,10 @@ function notSchedulable(t) {
   if (workerState(t.id)?.phase === 'parked') return 'parked';
   const b = ticketBranchRef(t.id);
   if (b && ticketReviews(t.id, { ref: b }).some((r) => r.stage === 'final')) return 'in review';
-  if (coverageGap()) return 'unowned files';
+  // a ticket in a repo this machine can't read waits; link-unreachable says how to fix it
+  const name = repoOfTicketLink(t);
+  if (!repoReadable(name)) return 'repo unreachable';
+  if (coverageGap(name, repo(name))) return 'unowned files';
   return null;
 }
 function cmdReady() {
@@ -2373,7 +2650,7 @@ function cmdReady() {
   if (flags.json) return json({ ready: rows, held, waiting, active, active_per_component: perComponent, caps: { max_active_tickets: s.max_active_tickets, max_active_per_component: s.max_active_per_component } });
   out(`active workers: ${active.length}/${s.max_active_tickets}`);
   for (const h of held) out(`held       ${h.id}  (${h.held})`);
-  for (const w of waiting) out(`${w.why.padEnd(10)} ${w.id}  (no new worker: ${w.why === 'parked' ? 'resume it with `worker <id> --resume` when its ruling and its goal allow' : w.why.startsWith('goal ') ? 'its goal is on hold (goal hold)' : w.why === 'unowned files' ? 'main has files no component line owns; a chore PR that extends a line clears it (components check)' : 'merge or answer its review'})`);
+  for (const w of waiting) out(`${w.why.padEnd(10)} ${w.id}  (no new worker: ${w.why === 'parked' ? 'resume it with `worker <id> --resume` when its ruling and its goal allow' : w.why.startsWith('goal ') ? 'its goal is on hold (goal hold)' : w.why === 'unowned files' ? 'main has files no component line owns; a chore PR that extends a line clears it (components check)' : w.why === 'repo unreachable' ? 'its repo has no checkout here, or the wrong one (links; link-unreachable)' : 'merge or answer its review'})`);
   if (!rows.length) return out('nothing ready');
   for (const r of rows) out(`${r.mode.padEnd(10)} ${r.id}  (${r.kind}, ${r.size}, ${r.risk})${(perComponent[r.component] ?? 0) >= s.max_active_per_component ? '  (component at cap)' : ''}`);
 }
@@ -2462,7 +2739,8 @@ function parseReview(file, text) {
   };
 }
 const reviewRecordsIn = (src, relDir) => srcList(src, relDir).filter((f) => f.endsWith('.md')).map((f) => parseReview(f, srcRead(src, `${relDir}/${f}`) ?? ''));
-const ticketReviews = (id, src) => reviewRecordsIn(src, `tickets/${id}/reviews`);
+// A ticket's review records, from its own repo: a sibling's WORKTREE reads that repo's main.
+const ticketReviews = (id, src) => { const R = src.repo ?? factsRepo(id); return R ? reviewRecordsIn(R.name === 'home' ? src : { ...src, repo: R }, `tickets/${id}/reviews`) : []; };
 const featureReviews = (feature) => reviewRecordsIn(WORKTREE, `reviews/${feature}`);
 function latestPerTrack(records, stage) {
   const latest = new Map();
@@ -2539,35 +2817,35 @@ function fillInOnly(before, after) {
   }
   return true;
 }
-function verdictHolds(v, head, dir) {
+function verdictHolds(v, head, dir, R = repo('home')) {
   if (!head || !v || !/^[0-9a-f]{40}$/.test(v)) return false;
   if (v === head) return true;
-  if (!dir || git(['merge-base', '--is-ancestor', v, head]) === null) return false;
-  const main = mainRef();
+  if (!dir || R.git(['merge-base', '--is-ancestor', v, head]) === null) return false;
+  const main = R.mainRef();
   // the branch's own commits since V: what a merge brought in from main is main's, not the branch's.
   // Each adds a review record, or fills one in mechanically (fillInOnly): an empty Disposition cell
   // filled, a missing "- Reviewer:" line added. Nothing else in a record may change.
   let commit = null;
   const isRecord = (file) => file?.startsWith(dir) && /^(?:[a-z0-9-]+\/)?[a-z]+-\d+[a-z]?\.md$/.test(file.slice(dir.length));
-  const onlyRecords = (git(['log', '--no-merges', '--no-renames', '--format=@%H', '--name-status', `${v}..${head}`, ...(main ? [`^${main}`] : [])]) ?? 'x').split('\n').filter(Boolean).every((l) => {
+  const onlyRecords = (R.git(['log', '--no-merges', '--no-renames', '--format=@%H', '--name-status', `${v}..${head}`, ...(main ? [`^${main}`] : [])]) ?? 'x').split('\n').filter(Boolean).every((l) => {
     if (l.startsWith('@')) { commit = l.slice(1); return true; }
     const [st, file] = l.split('\t');
     // a drained session's handoff note is prose about the session, not the work (supervisor.md, Moving the fleet)
     if (isHandoffFile(file)) return st === 'A' || st === 'M';
     if (!isRecord(file)) return false;
     if (st === 'A') return true;
-    return st === 'M' && !!commit && fillInOnly(git(['show', `${commit}^:${file}`]), git(['show', `${commit}:${file}`]));
+    return st === 'M' && !!commit && fillInOnly(R.git(['show', `${commit}^:${file}`]), R.git(['show', `${commit}:${file}`]));
   });
   if (!onlyRecords) return false;
-  const merges = (git(['rev-list', '--merges', `${v}..${head}`]) ?? 'x').split('\n').filter(Boolean);
+  const merges = (R.git(['rev-list', '--merges', `${v}..${head}`]) ?? 'x').split('\n').filter(Boolean);
   if (!merges.length) return true;
   if (!main) return false;
   for (const m of merges) {
-    const others = (git(['rev-list', '--parents', '-n', '1', m]) ?? '').split(' ').slice(2);
-    if (!others.length || others.some((p) => git(['merge-base', '--is-ancestor', p, main]) === null)) return false;
+    const others = (R.git(['rev-list', '--parents', '-n', '1', m]) ?? '').split(' ').slice(2);
+    if (!others.length || others.some((p) => R.git(['merge-base', '--is-ancestor', p, main]) === null)) return false;
   }
   const records = `:(exclude)${dir.replace(/\/$/, '')}`;
-  const own = (x) => git(['diff', '--binary', `${main}...${x}`, '--', '.', records]);
+  const own = (x) => R.git(['diff', '--binary', `${main}...${x}`, '--', '.', records]);
   const a = own(v), b = own(head);
   if (a !== null && a === b) return true;
   // When main also changed a file the work touches, that diff's text moves (blob ids, line
@@ -2575,10 +2853,10 @@ function verdictHolds(v, head, dir) {
   // its parents on its own: redo it and compare trees, records aside. A conflict, a resolution or
   // any hand edit in the merge differs from that, so it voids the verdict.
   return merges.every((m) => {
-    const parents = (git(['rev-list', '--parents', '-n', '1', m]) ?? '').split(' ').slice(1);
+    const parents = (R.git(['rev-list', '--parents', '-n', '1', m]) ?? '').split(' ').slice(1);
     if (parents.length !== 2) return false;
-    const tree = git(['merge-tree', '--write-tree', '--no-messages', parents[0], parents[1]])?.split('\n')[0];
-    return !!tree && /^[0-9a-f]{40}$/.test(tree) && git(['diff', '--quiet', tree, `${m}^{tree}`, '--', '.', records]) !== null;
+    const tree = R.git(['merge-tree', '--write-tree', '--no-messages', parents[0], parents[1]])?.split('\n')[0];
+    return !!tree && /^[0-9a-f]{40}$/.test(tree) && R.git(['diff', '--quiet', tree, `${m}^{tree}`, '--', '.', records]) !== null;
   });
 }
 // The three tree reads every repo needs, over one git function and runner (home's, or a repo link's bound to
@@ -2607,7 +2885,7 @@ const gitFacts = (gitFn, run) => ({
   },
 });
 // git with its exit status, for the reads whose failure means something (the tree reads above).
-function gitRun(args, cwd) {
+function gitRun(args, cwd = HOME_CWD) {
   const r = spawnSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 });
   return { status: r.status ?? -1, out: (r.stdout ?? '').replace(/\n$/, ''), err: r.stderr || r.error?.message || '' };
 }
@@ -2718,12 +2996,14 @@ function checkTicket(id, { sha: shaArg, title, body, approvals = true }) {
   if (!t) return [`no ticket ${id}`];
   const fails = [];
   if (t.superseded_by) fails.push(`ticket is superseded by ${t.superseded_by}`);
+  // the ticket's own repo (an act: fails fast on a missing or wrong checkout)
+  const R = repoOfTicketId(id);
   let sha = null;
   let src = WORKTREE;
-  if (commonDir) {
-    sha = resolveCommit(shaArg ?? 'HEAD');
-    if (!sha) return [`commit ${shaArg} not found locally (fetch it first)`];
-    if (projectInRepo) src = { ref: sha };
+  if (R.commonDir) {
+    sha = headIn(R, shaArg);
+    if (!sha) return [`commit ${shaArg} not found locally${R.name === 'home' ? '' : ` in ${R.name}`} (fetch it first)`];
+    if (R.projectInRepo) src = R.name === 'home' ? { ref: sha } : { ref: sha, repo: R };
   }
   const read = (rel) => srcRead(src, `tickets/${id}/${rel}`);
   if (read('spec.md') === null) fails.push('spec.md missing at this head');
@@ -2745,8 +3025,8 @@ function checkTicket(id, { sha: shaArg, title, body, approvals = true }) {
     if (r.verdict && !r.reviewer && !superseded(r)) fails.push(`${r.file}: no "- Reviewer:" line; an unnamed review does not count`);
   }
   // The latest record in every final track must say APPROVE at a commit that holds at this head.
-  const reviewsDir = projectInRepo ? `${projectRel}/tickets/${id}/reviews/` : null;
-  const holdsAt = (v) => (sha ? verdictHolds(v, sha, reviewsDir) : false);
+  const reviewsDir = R.projectInRepo ? `${R.projectRel}/tickets/${id}/reviews/` : null;
+  const holdsAt = (v) => (sha ? verdictHolds(v, sha, reviewsDir, R) : false);
   const latest = latestPerTrack(reviews, 'final');
   if (!latest.length) fails.push('no final review record (reviews/final-<n>.md)');
   for (const r of latest) {
@@ -2758,27 +3038,28 @@ function checkTicket(id, { sha: shaArg, title, body, approvals = true }) {
   const need = t.risk === 'high' ? 2 : 1;
   if (approvers.size < need) fails.push(`needs ${need} final APPROVE review(s) at this head from different named reviewers; found ${approvers.size}`);
   for (const r of reviews) for (const f of r.findings) if (blocking(f.severity) && !disposed(f.disposition)) fails.push(`${r.file} ${f.id} (${f.severity}) has no disposition`);
-  const base = mainRef() && sha ? git(['merge-base', mainRef(), sha]) : null;
-  if (commonDir && !base) fails.push(`cannot resolve main branch "${loadSettings().main_branch}"; footprint not checked`);
+  const base = R.mainRef() && sha ? R.git(['merge-base', R.mainRef(), sha]) : null;
+  if (R.commonDir && !base) fails.push(`cannot resolve main branch "${R.settings.main_branch}"${R.name === 'home' ? '' : ` in ${R.name}`}; footprint not checked`);
   if (base) {
-    const changed = changedFiles(base, sha);
-    const own = projectInRepo ? `${projectRel}/tickets/${id}/` : null;
+    const changed = R.changedFiles(base, sha);
+    const own = R.projectInRepo ? `${R.projectRel}/tickets/${id}/` : null;
     const mineOwn = (f) => !!own && f.startsWith(own);
     const outside = changed.filter((f) => !mineOwn(f) && !(t.touches ?? []).some((g) => pathMatches(g, f)));
     if (outside.length) fails.push(`changes files outside touches: ${outside.slice(0, 10).join(', ')}${outside.length > 10 ? ` (+${outside.length - 10} more)` : ''}`);
     // Component lines: a changed file is also inside the ticket's component's line or
     // a touches_components member's; the kit's own line is closed but for the ticket's own folder.
     // Judged by main's committed settings, so neither a line widened in a working tree nor the
-    // ticket's own edit to settings.md changes anything.
+    // ticket's own edit to settings.md changes anything. Settings live in home, so another
+    // repo's ticket is judged by home main's lines for that repo.
     const s = mainSettings();
     if (linesDeclared(s)) {
-      const comps = componentsOn(s, 'home');
+      const comps = componentsOn(s, R.name);
       // touches_components widens only a contract or integration ticket, as in validate
       const tc = t.touches_components ?? [];
       const wide = ['contract', 'integration'].includes(t.kind);
       if (tc.length && !wide) fails.push(`touches_components is for contract and integration tickets; this ${t.kind ?? ''} ticket's line is ${t.component}'s alone`);
       const names = [t.component, ...(wide ? tc : [])];
-      const L = compileLines(comps, devteamLine());
+      const L = compileLines(comps, R.devteamLine());
       const ownerOf = new Map(changed.map((f) => [f, ownersIn(f, L)]));
       const inLine = (f) => { const o = ownerOf.get(f); return o[0] !== 'devteam' && o.some((n) => names.includes(n)); };
       const off = changed.filter((f) => !mineOwn(f) && !outside.includes(f) && !inLine(f));
@@ -2804,13 +3085,14 @@ function cmdCheckTicket() {
   let title = flagStr('title');
   let body = flagStr('body-file') ? fs.readFileSync(flagStr('body-file'), 'utf8') : undefined;
   let sha = flagStr('sha');
+  const R = repoOfTicketId(id);
   if (flagStr('pr')) {
-    const pr = sh('gh', ['pr', 'view', flagStr('pr'), '--json', 'title,body,headRefOid']);
+    const pr = R.gh(['pr', 'view', flagStr('pr'), '--json', 'title,body,headRefOid']);
     if (!pr) die('gh pr view failed');
     const p = JSON.parse(pr);
     title ??= p.title; body ??= p.body; sha ??= p.headRefOid;
   }
-  report(checkTicket(id, { sha, title, body }), `${id} meets the definition of done at ${(resolveCommit(sha ?? 'HEAD') ?? '').slice(0, 12)}`);
+  report(checkTicket(id, { sha, title, body }), `${id} meets the definition of done at ${(headIn(R, sha) ?? '').slice(0, 12)}`);
 }
 
 
@@ -2928,6 +3210,29 @@ function registryActFails(base, sha) {
   const bare = edits.filter((l) => !linkActsLead(l, linkEntryHash(ownEntry(S.sMain.links, l)), linkEntryHash(ownEntry(lands, l))));
   return bare.length ? [`changes ${bare.map((l) => `links.${l}`).join(', ')} to an entry no registry-edit act wrote: make each change with link add|set|rm, which logs the act with the entry it wrote and the one it replaced, rather than by hand in settings.md (an act for an earlier value of the link, or made from an entry main has since changed, doesn't cover this one)`] : [];
 }
+// A link of an owner's kind lands only as the answer approved it: each one the merge changes
+// needs an act of that answer (linkByOwner's, approved_by) naming the link, written from the entry
+// main has (prior_hash) to the entry that lands (entry_hash). One answer may approve a bundle (its
+// question showed every entry), but an entry its question never showed, or a hand edit of one it
+// did, has no such act and is refused by name.
+// What the owner saw binds what lands: every changed owner-kind link entry must appear in the
+// answered question's settings diff exactly (main's entry then, and the entry that lands). Acts
+// are history only: a hand-written act line can't widen an answer. The question is read as it
+// stood when the owner answered; a context written after the answer approves nothing.
+function ownerLinkActFails(changed, sha, approved) {
+  const keys = changed.filter((c) => c.key.startsWith('links.'));
+  if (!keys.length) return [];
+  const q = logGet(approved);
+  const ups = q?.updates ?? [];
+  const ansAt = ups.findLastIndex((u) => u.answer !== undefined && writerClass(u.by) === 'owner');
+  if (ansAt >= 0 && ups.slice(ansAt + 1).some((u) => u.context !== undefined || u.question !== undefined)) return [`${approved}'s question was changed after the owner answered it: that answer approves only what it showed then; ask again`];
+  const shown = String(q?.context ?? '');
+  const lands = settingsAt(sha, { orNull: true })?.links ?? {};
+  const onMain = mainSettings(null)?.links ?? {};
+  const saw = (l) => shown.split('\n').includes(`links.${l}: main has ${canonical(ownEntry(onMain, l) ?? null)}; would be ${canonical(ownEntry(lands, l) ?? null)}`);
+  const bare = [...new Set(keys.map((c) => c.key.split('.')[1]))].filter((l) => !saw(l)).map((l) => keys.filter((c) => c.key.split('.')[1] === l).map((c) => c.key)).flat();
+  return bare.length ? [`changes ${bare.join(', ')}, which ${approved} did not approve: an answer lands only the entries its question showed, exactly as it showed them; ask the owner about ${bare.length > 1 ? 'these' : 'this one'} (link add|set|rm, whose question shows every repo link change waiting to land), or take ${bare.length > 1 ? 'them' : 'it'} out of this PR`] : [];
+}
 // What the forge's check (optional) and `merge` both check for a PR, by branch kind. Gates are not
 // run here. A chore PR may not touch the log (chore-log touches nothing else) or a ticket's folder.
 // Every artifact a PR adds or changes passes artifact check's refusals as the PR would land it
@@ -2946,15 +3251,21 @@ function artifactRule(sha) {
   }
   return fails;
 }
-function checkPr({ headRef, sha, title, body, forge = false }) {
+function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('home') }) {
   const branch = headRef.replace(/^refs\/heads\//, '');
-  const fails = [...logRule(branch, sha), ...reviewRule(sha, { forge }), ...artifactRule(sha)];
+  // A ticket's PR is in its own repo; plan and chore PRs are always home's.
+  if (R.name !== 'home' && !branch.startsWith('ticket/')) return ["plan and chore PRs are always home's; a chore in another repo is a ticket of kind chore in its component"];
+  if (branch.startsWith('ticket/') && tickets().has(branch.slice('ticket/'.length))) {
+    const own = repoOfTicketLink(tickets().get(branch.slice('ticket/'.length)));
+    if (own !== R.name) return [`${branch} is a ticket of ${own}, not ${R.name}`];
+  }
+  const fails = [...logRule(branch, sha, R), ...reviewRule(sha, { forge, repo: R }), ...(R.name === 'home' ? artifactRule(sha) : [])];
   // Every PR, every kind, ticket PRs included (they return on the next line): the tree that would
   // land keeps every path in exactly one line. A chore or settings PR gets this, never full
   // validate, so an old graph error can't block a log PR.
-  const base0 = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
-  fails.push(...coverageFails(base0, sha, homeFacts, { ticket: branch.startsWith('ticket/') }), ...registryFails(base0, sha));
-  if (branch.startsWith('ticket/')) return [...fails, ...checkTicket(branch.slice('ticket/'.length), { sha, title, body, approvals: !forge })];
+  const base0 = R.mainRef() ? R.git(['merge-base', R.mainRef(), sha]) : null;
+  fails.push(...coverageFails(base0, sha, R, { ticket: branch.startsWith('ticket/') }), ...registryFails(base0, sha, R));
+  if (branch.startsWith('ticket/')) return [...fails, ...checkTicket(branch.slice('ticket/'.length), { sha, title, body, approvals: !forge }), ...depsFails(branch.slice('ticket/'.length), R)];
   if (branch.startsWith('plan/')) {
     const feature = branch.slice('plan/'.length);
     if (title !== undefined && !title.startsWith(`plan-${feature}: `)) fails.push(`PR title must start with "plan-${feature}: "`);
@@ -2981,25 +3292,52 @@ function checkPr({ headRef, sha, title, body, forge = false }) {
   }
   return fails;
 }
-// Copy settings.worktree_files from the main checkout into a new worktree.
-// Then run settings.worktree_setup there (with DEVTEAM_MAIN set to the main checkout).
-// What every gate and worktree_setup command sees: the main checkout, and a gitignored cache dir
-// for build outputs and package caches shared across worktrees (quality.md §2).
+// A ticket lands only after every ticket it depends on has, in whatever repo each is: across repos
+// neither the branch (cut from its own repo's main) nor its gates can see a provider that hasn't
+// landed. Home's main and R's are fetched by the caller; a third repo's main is fetched here. A
+// dependency this machine can't read, or whose main it can't fetch, fails closed.
+function depsFails(id, R) {
+  const t = tickets().get(id);
+  const fails = [];
+  const fetched = new Set(['home', R.name]);
+  for (const d of t?.depends_on ?? []) {
+    const dt = tickets().get(d);
+    if (!dt) { fails.push(`cannot confirm ${d} is merged: there is no such ticket`); continue; }
+    const name = repoOfTicketLink(dt);
+    if (!repoReadable(name)) { const l = ownEntry(loadSettings().links, name); fails.push(`cannot confirm ${d} is merged: ${(l && LINK_KINDS[l.kind]?.reachable(l, name)) ?? `${name} is no repo link here`}`); continue; }
+    const D = repo(name);
+    if (!fetched.has(name)) {
+      fetched.add(name);
+      if (D.git(['config', '--get', 'remote.origin.url'], D.root) !== null) {
+        const f = gitRun(['fetch', '--quiet', 'origin', D.settings.main_branch], D.root);
+        if (f.status !== 0) { fails.push(`cannot confirm ${d} is merged: could not fetch origin ${D.settings.main_branch} in ${name}: ${redactUrl(firstLine(f.err)) || `exit ${f.status}`}`); continue; }
+        D.resetCaches();
+      }
+    }
+    if (!D.mergeShaFor(d)) fails.push(`depends on ${d}, which is not merged${name === 'home' ? '' : ` in ${name}`} yet: merge it first`);
+  }
+  return fails;
+}
+// Copy a repo's worktree_files from its main checkout into a new worktree.
+// Then run its worktree_setup there (with DEVTEAM_MAIN set to that main checkout).
+// What every gate and worktree_setup command sees: the main checkout of the repo it runs for
+// (DEVTEAM_MAIN), home's (DEVTEAM_HOME: the kit and the live log), and a gitignored cache dir for
+// build outputs and package caches shared across worktrees (quality.md §2).
 // A gate run for a ticket's merge knows which ticket it checks (DEVTEAM_GATE_TICKET), so validate
 // can fail it only for what is its own (D4 below).
-const gateEnv = (ticket) => { const cache = path.join(runDir, 'cache'); fs.mkdirSync(cache, { recursive: true }); return { ...process.env, DEVTEAM_MAIN: mainRoot, DEVTEAM_CACHE: cache, ...(ticket ? { DEVTEAM_GATE_TICKET: ticket } : {}) }; };
+const gateEnv = (ticket, R = repo('home')) => { const cache = path.join(runDir, 'cache'); fs.mkdirSync(cache, { recursive: true }); return { ...process.env, DEVTEAM_MAIN: R.root, DEVTEAM_HOME: mainRoot, DEVTEAM_CACHE: cache, ...(ticket ? { DEVTEAM_GATE_TICKET: ticket } : {}) }; };
 // The tools .tool-versions pins that this machine's asdf or mise hasn't installed. On a new machine
 // worktree_setup otherwise fails under whatever runtime the system has, which reads as a project bug.
 // Empty when there is no .tool-versions or neither manager is here (there is nothing to ask).
-function missingPins() {
-  const pins = (readText(path.join(mainRoot, '.tool-versions')) ?? '').split('\n').map((l) => l.replace(/#.*/, '').trim().split(/\s+/)).filter((p) => p[0] && p[1] && !['system', 'latest'].includes(p[1]));
+function missingPins(root = mainRoot) {
+  const pins = (readText(path.join(root, '.tool-versions')) ?? '').split('\n').map((l) => l.replace(/#.*/, '').trim().split(/\s+/)).filter((p) => p[0] && p[1] && !['system', 'latest'].includes(p[1]));
   // The first manager that is installed answers for every pin; one that isn't (ENOENT) passes to the
   // next. A probe that times out on a loaded machine proves nothing, so it counts as installed.
   for (const [bin, args] of [['asdf', (t, v) => ['where', t, v]], ['mise', (t, v) => ['where', `${t}@${v}`]]]) {
     const missing = [];
     let absent = false;
     for (const [t, v] of pins) {
-      const r = spawnSync(bin, args(t, v), { cwd: mainRoot, stdio: 'ignore', timeout: 60000 });
+      const r = spawnSync(bin, args(t, v), { cwd: root, stdio: 'ignore', timeout: 60000 });
       if (r.error?.code === 'ENOENT') { absent = true; break; }
       if (!r.error && r.status !== 0) missing.push(`${t} ${v}`);
     }
@@ -3007,31 +3345,50 @@ function missingPins() {
   }
   return [];
 }
-const pinsHint = (miss = missingPins()) => (miss.length ? `this machine lacks the tools .tool-versions pins (${miss.join(', ')}): run asdf install (or mise install) in ${mainRoot}, then try again` : null);
-function seedWorktree(wt, { setup = true } = {}) {
-  const s = loadSettings();
+const pinsHint = (miss = missingPins(), root = mainRoot) => (miss.length ? `this machine lacks the tools .tool-versions pins (${miss.join(', ')}): run asdf install (or mise install) in ${root}, then try again` : null);
+// A worktree of repo R is seeded from R's own settings and main checkout, never home's.
+function seedWorktree(wt, { setup = true, repo: R = repo('home') } = {}) {
+  const s = R.settings;
   for (const rel of s.worktree_files ?? []) {
-    const from = path.join(mainRoot, rel);
-    if (!fs.existsSync(from)) { warn(`worktree_files: ${rel} is not in the main checkout`); continue; }
+    const from = path.join(R.root, rel);
+    if (!fs.existsSync(from)) { warn(`worktree_files: ${rel} is not in ${R.name === 'home' ? 'the main checkout' : `${R.name}'s checkout (${R.root})`}`); continue; }
     fs.mkdirSync(path.dirname(path.join(wt, rel)), { recursive: true });
     fs.copyFileSync(from, path.join(wt, rel));
   }
   if (setup && s.worktree_setup) {
     try {
-      execFileSync('sh', ['-c', s.worktree_setup], { cwd: wt, stdio: ['ignore', 'inherit', 'inherit'], env: gateEnv() });
+      execFileSync('sh', ['-c', s.worktree_setup], { cwd: wt, stdio: ['ignore', 'inherit', 'inherit'], env: gateEnv(null, R) });
     } catch {
-      const hint = pinsHint();
+      const hint = pinsHint(missingPins(R.root), R.root);
       die(`worktree_setup failed in ${wt}${hint ? `; ${hint}` : ''}`);
     }
   }
 }
-// A throwaway checkout of one commit, removed when the process ends however it ends.
-function detachedWorktree(sha, name) {
-  const wt = path.join(mainRoot, '.worktrees', `tmp-${name}-${process.pid}`);
-  gitOrDie(['worktree', 'add', '--quiet', '--detach', wt, sha], mainRoot);
-  process.once('exit', () => { if (fs.existsSync(wt)) git(['worktree', 'remove', '--force', wt], mainRoot); });
-  seedWorktree(wt);
+// A throwaway checkout of one commit of a repo, under home's .worktrees, removed when the process
+// ends however it ends.
+// Another repo's lives in the OS temp folder (where secret post already makes its own), never under
+// home's tree: a gate there would otherwise pass on home's node_modules, .tool-versions and lint or
+// ts configs, found by walking up the directories. Home's stays under home's .worktrees, as before.
+function detachedWorktree(sha, name, R = repo('home')) {
+  const holder = R.name === 'home' ? null : fs.mkdtempSync(path.join(os.tmpdir(), `devteam-${R.name}-`));
+  const wt = holder ? path.join(holder, `tmp-${name}`) : path.join(mainRoot, '.worktrees', `tmp-${name}-${process.pid}`);
+  R.gitOrDie(['worktree', 'add', '--quiet', '--detach', wt, sha], R.root);
+  process.once('exit', () => {
+    if (fs.existsSync(wt)) R.git(['worktree', 'remove', '--force', wt], R.root);
+    // the empty holder only (rmdir refuses anything with files left in it)
+    if (holder) try { fs.rmdirSync(holder); } catch {}
+  });
+  seedWorktree(wt, { repo: R });
   return wt;
+}
+// The repo a worktree belongs to, computed from git, never recorded: null for a
+// worktree of no repo this machine can read.
+function worktreeRepo(wt) {
+  const c = fs.existsSync(wt) ? commonOf(wt) : null;
+  if (!c) return null;
+  if (commonDir && realPath(c) === realPath(commonDir)) return repo('home');
+  for (const [id, l] of Object.entries(loadSettings().links ?? {})) if (LINK_KINDS[l?.kind]?.hostsComponents && repoReadable(id) && realPath(repo(id).commonDir) === realPath(c)) return repo(id);
+  return null;
 }
 // review-worktree <ticket> <sha> [--name <suffix>] | review-worktree --remove <path>: a final
 // reviewer's checkout of exactly the commit it reviews, under .worktrees/ and seeded like a worker's
@@ -3046,15 +3403,19 @@ function cmdReviewWorktree() {
     const abs = path.resolve(target);
     const real = (p) => { try { return fs.realpathSync(p); } catch { return null; } };
     const at = real(abs);
-    const listed = (git(['worktree', 'list', '--porcelain'], mainRoot) ?? '').split('\n').filter((l) => l.startsWith('worktree ')).map((l) => real(l.slice(9)));
+    // removed through the repo it is a worktree of (home's, or a sibling's)
+    const R = at ? worktreeRepo(at) : null;
+    const listed = R ? (R.git(['worktree', 'list', '--porcelain'], R.root) ?? '').split('\n').filter((l) => l.startsWith('worktree ')).map((l) => real(l.slice(9))) : [];
     if (!at || path.dirname(at) !== real(root) || !path.basename(at).startsWith('review-') || !listed.includes(at)) die(`${target} is not a review worktree under ${root} (review-worktree removes only what it made)`);
-    gitOrDie(['worktree', 'remove', '--force', at], mainRoot);
+    R.gitOrDie(['worktree', 'remove', '--force', at], R.root);
     return out(`removed ${at}`);
   }
   const [id, ref] = positional;
   if (!id || !ref) die('usage: review-worktree <ticket-id> <sha> [--name <suffix>]   |   review-worktree --remove <path>');
   if (!tickets().has(id)) die(`no ticket ${id} (devteam.mjs ticket show ${id})`);
-  const sha = resolveCommit(ref) ?? die(`${ref} is not a commit here (git fetch first?)`);
+  // a checkout of the ticket's own repo (an act: fails fast on a missing or wrong checkout)
+  const R = repoOfTicketId(id);
+  const sha = R.resolveCommit(ref) ?? die(`${ref} is not a commit${R.name === 'home' ? '' : ` in ${R.name}`} here (git fetch first?)`);
   const suffix = flagStr('name');
   if (flags.name !== undefined && !REVIEW_SUFFIX.test(suffix ?? '')) die(`--name "${suffix ?? ''}" must be lowercase words joined by hyphens`);
   // Short enough to name things after (a database identifier is 63 bytes in Postgres): the ticket's
@@ -3062,16 +3423,18 @@ function cmdReviewWorktree() {
   const short = /^(.+?-\d+)(-|$)/.exec(id)?.[1] ?? id;
   const wt = path.join(root, `review-${short}-${sha.slice(0, 8)}${suffix ? `-${suffix}` : ''}`);
   if (fs.existsSync(wt)) die(`${wt} exists; give this reviewer its own --name, or remove it: devteam.mjs review-worktree --remove ${wt}`);
-  gitOrDie(['worktree', 'add', '--quiet', '--detach', wt, sha], mainRoot);
-  seedWorktree(wt);
+  R.gitOrDie(['worktree', 'add', '--quiet', '--detach', wt, sha], R.root);
+  seedWorktree(wt, { repo: R });
   out(wt);
 }
 function cmdCheckPr() {
   const headRef = flagStr('head-ref') ?? die('check-pr needs --head-ref (and --sha, --title, --body-file)');
-  const sha = resolveCommit(flagStr('sha') ?? 'HEAD') ?? die('cannot resolve the head');
+  // --repo: a PR in another repo, checked in its checkout (--path names another one, such as a CI run's)
+  const R = repo(flagStr('repo') ?? 'home');
+  const sha = R.resolveCommit(flagStr('sha') ?? 'HEAD') ?? die(`cannot resolve the head${R.name === 'home' ? '' : ` in ${R.name}`}`);
   const body = flagStr('body-file') ? fs.readFileSync(flagStr('body-file'), 'utf8') : undefined;
-  fetchMain();
-  report(checkPr({ headRef, sha, title: flagStr('title'), body, forge: true }), `${headRef} passes the checks at ${sha.slice(0, 12)} (gates and the supervisor's approval acts are merge's to check)`);
+  fetchMain(R);
+  report(checkPr({ headRef, sha, title: flagStr('title'), body, forge: true, repo: R }), `${headRef} passes the checks at ${sha.slice(0, 12)}${R.name === 'home' ? '' : ` in ${R.name}`} (gates and the supervisor's approval acts are merge's to check)`);
 }
 // An owner-answered question, for commands that need the owner's yes.
 // A standing approval for upstream syncs: an accepted owner rule scoped chore:devteam-sync
@@ -3168,9 +3531,16 @@ function cmdMerge() {
   const chore = flagStr('chore') !== undefined ? choreSlug(flagStr('chore')) : undefined;
   const dry = !!flags['dry-run'];
   const branch = plan ? `plan/${plan}` : chore ? `chore-${chore}` : id ? `ticket/${id}` : die('usage: merge <ticket-id> | merge --plan <feature> | merge --chore <slug>   [--approved <qid>] [--no-gates] [--dry-run [--title t] [--body-file f]]');
-  const viaGit = loadSettings().forge === 'git';
+  // A ticket merges in its own repo: its PR, gates, forge and merge method; plans and
+  // chores are always home's. For home R is today's functions and settings.
+  const R = id && tickets().has(id) ? repoOfTicket(tickets().get(id)) : repo('home');
+  const S = R.settings;
+  const onR = R.name === 'home' ? {} : { repo: R.name };
+  const inR = R.name === 'home' ? '' : ` in ${R.name}`;
+  const viaGit = S.forge === 'git';
   if (viaGit && !flagStr('title') && !flagStr('body-file')) {
-    // The PR, with no forge: run/pr/<branch>.md, a '# <title>' line then the body (worker.md §8).
+    // The PR, with no forge: run/pr/<branch>.md in home's run/ (ticket ids are unique across
+    // repos), a '# <title>' line then the body (worker.md §8).
     const f = path.join(runDir, 'pr', `${branch}.md`);
     if (fs.existsSync(f)) {
       const first = fs.readFileSync(f, 'utf8').split('\n')[0];
@@ -3178,20 +3548,21 @@ function cmdMerge() {
     }
   }
   if (viaGit && !dry && !(flagStr('title') && flagStr('body-file'))) die(`forge is git: merge needs the PR text, in ${path.relative(mainRoot, path.join(runDir, 'pr', `${branch}.md`))} ('# <title>' then the body) or as --title and --body-file`);
-  const prJson = viaGit ? null : sh('gh', ['pr', 'view', branch, '--json', 'number,headRefOid,title,body,isDraft,mergeStateStatus,url,statusCheckRollup']);
-  if (prJson === null && !dry && !viaGit) die(`no open PR from ${branch} (gh pr view failed; with no forge CLI set forge: "git")`);
-  git(['fetch', '--quiet', 'origin', branch]);
-  fetchMain();
-  const pr = prJson !== null ? JSON.parse(prJson) : { headRefOid: resolveCommit(`origin/${branch}`) ?? resolveCommit(branch) ?? die(`no branch ${branch}`), title: flagStr('title'), body: flagStr('body-file') ? fs.readFileSync(flagStr('body-file'), 'utf8') : undefined };
+  const prJson = viaGit ? null : R.gh(['pr', 'view', branch, '--json', 'number,headRefOid,title,body,isDraft,mergeStateStatus,url,statusCheckRollup']);
+  if (prJson === null && !dry && !viaGit) die(`no open PR from ${branch}${inR} (gh pr view failed; with no forge CLI set forge: "git")`);
+  R.git(['fetch', '--quiet', 'origin', branch]);
+  // main as each origin has it now: home's (the settings) and the ticket's repo's (what it lands on)
+  fetchMain(R);
+  const pr = prJson !== null ? JSON.parse(prJson) : { headRefOid: R.resolveCommit(`origin/${branch}`) ?? R.resolveCommit(branch) ?? die(`no branch ${branch}${inR}`), title: flagStr('title'), body: flagStr('body-file') ? fs.readFileSync(flagStr('body-file'), 'utf8') : undefined };
   if (pr.isDraft) die(`${pr.url} is a draft`);
   const sha = pr.headRefOid;
-  if (!resolveCommit(sha)) die(`cannot find ${sha} locally after fetching ${branch}`);
+  if (!R.resolveCommit(sha)) die(`cannot find ${sha} locally after fetching ${branch}${inR}`);
   // Merged already (a second run, a stale background job): nothing lands, nothing is logged. The
   // forge still shows a merged PR, and its head is on main.
-  const mainBranch0 = loadSettings().main_branch;
-  git(['fetch', '--quiet', 'origin', mainBranch0]);
-  if (resolveCommit(`origin/${mainBranch0}`) && git(['merge-base', '--is-ancestor', sha, `origin/${mainBranch0}`]) !== null) return out(`${branch} at ${sha.slice(0, 12)} is already on ${mainBranch0}: nothing to merge, nothing logged`);
-  const fails = checkPr({ headRef: branch, sha, title: pr.title, body: pr.body });
+  const mainBranch0 = S.main_branch;
+  R.git(['fetch', '--quiet', 'origin', mainBranch0]);
+  if (R.resolveCommit(`origin/${mainBranch0}`) && R.git(['merge-base', '--is-ancestor', sha, `origin/${mainBranch0}`]) !== null) return out(`${branch}${inR} at ${sha.slice(0, 12)} is already on ${mainBranch0}: nothing to merge, nothing logged`);
+  const fails = checkPr({ headRef: branch, sha, title: pr.title, body: pr.body, repo: R });
   // A refused footprint is a sign about the line (line-pressure): one observation per head.
   if (id && fails.some((x) => x.startsWith(OFF_LINE))) {
     const key = `footprint:${id}:${sha}`;
@@ -3215,7 +3586,7 @@ function cmdMerge() {
   // fails, whether or not branch protection marks them required. The owner can name checks to
   // skip (settings ignored_checks, gate-change).
   {
-    const ignored = new Set(loadSettings().ignored_checks ?? []);
+    const ignored = new Set(S.ignored_checks ?? []);
     const pending = [], failing = [];
     for (const c of pr.statusCheckRollup ?? []) {
       const name = c.name ?? c.context ?? '?';
@@ -3231,8 +3602,9 @@ function cmdMerge() {
   // (classes governance-edit, process-edit, gate-change); project/ files are the supervisor's.
   let approved = flagStr('approved') ?? null;
   let standing = null;
-  // Owner-only settings, on every kind of PR (a ticket, a plan or a chore).
-  {
+  // Owner-only settings, on every kind of PR (a ticket, a plan or a chore) in home, where
+  // settings.md is: another repo's PR can't change it.
+  if (R.name === 'home') {
     const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
     const classed = base ? ownerSettingsChanged(base, sha) : [];
     const changed = classed?.filter((c) => !SUPERVISOR_LINK_CLASSES.includes(c.cls)) ?? null;
@@ -3241,10 +3613,15 @@ function cmdMerge() {
     else if (changed.length) {
       const classes = [...new Set(changed.map((c) => c.cls))];
       const what = changed.map((c) => `${c.key} (${c.cls})`).join(', ');
-      if (!approved) fails.push(`changes owner settings: ${what}; the owner's answer is needed: --approved <qid> of class ${classes.join(' or ')}`);
+      // A standing rule the owner gave themselves settles a class in owner_rules (constitution.md):
+      // only when every changed setting is of such a class, and only the owner's own accepted rule.
+      const ruled = !approved && classes.every((c) => (ladder().owner_rules ?? []).includes(c)) && classes.map((c) => ownerRuleFor(c)).every(Boolean);
+      if (ruled) { const rs = classes.map((c) => ownerRuleFor(c)); standing = { rule: rs[0] }; out(`changes owner settings: ${what}; approved by the owner's standing rule${rs.length > 1 ? 's' : ''} ${rs.map((r) => `${r.id} ("${r.statement}")`).join(', ')}`); }
+      else if (!approved) fails.push(`changes owner settings: ${what}; the owner's answer is needed: --approved <qid> of class ${classes.join(' or ')}`);
       else {
         const q = ownerAnswer(approved, 'merge --approved');
         if (!classes.includes(q.class)) fails.push(`${approved} is a ${q.class ?? 'classless'} question; changing ${what} needs an answered ${classes.join(' or ')} question`);
+        fails.push(...ownerLinkActFails(changed, sha, approved));
       }
     }
   }
@@ -3276,28 +3653,31 @@ function cmdMerge() {
     // Every earlier use counts, merges that cited a decision included; only the decision this merge
     // carries out (--decision) is the call the answer approved, not a prior one.
     const prior = [...logObjects('decision'), ...logObjects('act')].filter((a) => a.approved_by === approved && mine(a) && a.id !== flagStr('decision'));
-    const landing = prior.length === 1 && prior[0].class === av.class && (prior[0].refs ?? []).includes(target);
+    // a bundle's link acts (one per entry its question showed) are one landing too
+    const linkAct = (a) => Object.hasOwn(a, 'entry_hash') && (a.refs ?? []).some((r) => r.startsWith('link:'));
+    const landing = prior.length >= 1 && (prior.length === 1 || prior.every(linkAct)) && prior.every((a) => a.class === av.class && (a.refs ?? []).includes(target));
     if (prior.length && !landing) fails.push(`${approved} already approved ${declared.length ? `an act for ${target}` : 'an act'}; ask again for this one`);
   }
-  // Gates: the project's own commands, at the exact head, in a detached worktree.
-  const gates = Object.entries(loadSettings().gates ?? {});
-  if (!gates.length && !flags['no-gates'] && !chore) fails.push('no gates in settings (gates: {name: command}); pass --no-gates to merge without running any');
+  // Gates: the repo's own commands (never inherited), at the exact head, in a detached
+  // worktree of that repo seeded from that repo's settings.
+  const gates = Object.entries(S.gates ?? {});
+  if (!gates.length && !flags['no-gates'] && !chore) fails.push(R.name === 'home' ? 'no gates in settings (gates: {name: command}); pass --no-gates to merge without running any' : `no gates in ${R.name}'s settings (links.${R.name}.gates); pass --no-gates to merge without running any`);
   if (!fails.length && gates.length && !chore && !flags['no-gates']) {
     // A gate with `paths` runs only when the PR changes a file matching one of them (a monorepo's
     // per-app gates); a gate without runs on every PR.
-    const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
-    const changed = base ? changedFiles(base, sha) : null;
+    const base = R.mainRef() ? R.git(['merge-base', R.mainRef(), sha]) : null;
+    const changed = base ? R.changedFiles(base, sha) : null;
     const applies = ([, spec]) => typeof spec === 'string' || !spec.paths || !changed || changed.some((f) => spec.paths.some((g) => pathMatches(g, f)));
     const skipped = gates.filter((g) => !applies(g)).map(([n]) => n);
     if (skipped.length) out(`gates not applicable to this PR: ${skipped.join(', ')}`);
-    const wt = detachedWorktree(sha, `merge-${slug(branch)}`);
+    const wt = detachedWorktree(sha, `merge-${slug(branch)}`, R);
     try {
       for (const [name, spec] of gates.filter(applies)) {
         const cmd = typeof spec === 'string' ? spec : spec.cmd;
         const started = Date.now();
         let ok = true;
         try {
-          execFileSync('sh', ['-c', cmd], { cwd: wt, stdio: 'inherit', env: gateEnv(!plan && !chore ? id : null) });
+          execFileSync('sh', ['-c', cmd], { cwd: wt, stdio: 'inherit', env: gateEnv(!plan && !chore ? id : null, R) });
         } catch {
           ok = false;
         }
@@ -3308,42 +3688,43 @@ function cmdMerge() {
         // gate's fail rate counts only failures that were the PR's.
         let preexisting = false;
         if (!ok && spec.mode === 'ratchet' && base) {
-          const bwt = detachedWorktree(base, `base-${slug(branch)}`);
+          const bwt = detachedWorktree(base, `base-${slug(branch)}`, R);
           let baseOk = true;
-          try { execFileSync('sh', ['-c', cmd], { cwd: bwt, stdio: 'ignore', env: gateEnv(!plan && !chore ? id : null) }); } catch { baseOk = false; } finally { git(['worktree', 'remove', '--force', bwt], mainRoot); }
+          try { execFileSync('sh', ['-c', cmd], { cwd: bwt, stdio: 'ignore', env: gateEnv(!plan && !chore ? id : null, R) }); } catch { baseOk = false; } finally { R.git(['worktree', 'remove', '--force', bwt], R.root); }
           preexisting = !baseOk;
         }
-        appendLog({ type: 'gate', gate: name, ok, ms, sha, tests_total: tests.length, tests: keepTests(tests), preexisting: preexisting || undefined }, 'supervisor');
+        // the gate line lands in home's live log, naming the repo it ran in when not home
+        appendLog({ type: 'gate', gate: name, ok, ms, sha, tests_total: tests.length, tests: keepTests(tests), preexisting: preexisting || undefined, ...onR }, 'supervisor');
         if (preexisting) { warn(`gate ${name} fails at the merge base ${base.slice(0, 12)} too: pre-existing, allowed by ratchet mode`); continue; }
         if (!ok) fails.push(`gate ${name} failed at ${sha.slice(0, 12)}`);
       }
     } finally {
-      git(['worktree', 'remove', '--force', wt], mainRoot);
+      R.git(['worktree', 'remove', '--force', wt], R.root);
     }
   }
   if (fails.length) report(fails, '');
-  if (dry) return out(`ok: ${branch} at ${sha.slice(0, 12)} would merge`);
-  const mainBranch = loadSettings().main_branch;
+  if (dry) return out(`ok: ${branch} at ${sha.slice(0, 12)} would merge${inR}`);
+  const mainBranch = S.main_branch;
   if (viaGit) {
     // Merge the exact verified sha (never the branch name, which may have moved) onto origin's main.
-    git(['fetch', '--quiet', 'origin', mainBranch]);
-    const wt = detachedWorktree(`origin/${mainBranch}`, `land-${slug(branch)}`);
+    R.git(['fetch', '--quiet', 'origin', mainBranch]);
+    const wt = detachedWorktree(`origin/${mainBranch}`, `land-${slug(branch)}`, R);
     try {
-      gitOrDie(['merge', '--no-ff', '--quiet', '-m', `${pr.title}\n\n${(pr.body ?? '').trim()}\n\nMerged ${branch} at ${sha}`, sha], wt);
-      if (git(['push', '--quiet', 'origin', `HEAD:refs/heads/${mainBranch}`], wt) === null) die(`push to ${mainBranch} refused (did main move?); verify from the start`);
+      R.gitOrDie(['merge', '--no-ff', '--quiet', '-m', `${pr.title}\n\n${(pr.body ?? '').trim()}\n\nMerged ${branch} at ${sha}`, sha], wt);
+      if (R.git(['push', '--quiet', 'origin', `HEAD:refs/heads/${mainBranch}`], wt) === null) die(`push to ${mainBranch}${inR} refused (did main move?); verify from the start`);
     } finally {
-      git(['worktree', 'remove', '--force', wt], mainRoot);
+      R.git(['worktree', 'remove', '--force', wt], R.root);
     }
   } else {
-    const merged = sh('gh', ['pr', 'merge', String(pr.number), `--${loadSettings().merge_method}`, '--match-head-commit', sha]);
+    const merged = R.gh(['pr', 'merge', String(pr.number), `--${S.merge_method}`, '--match-head-commit', sha]);
     if (merged === null) die(`gh pr merge refused (did the head move?); verify from the start`);
   }
-  git(['fetch', '--quiet', 'origin', mainBranch]);
-  mainLogCache = undefined;
-  mergeShaCache.clear();
+  R.git(['fetch', '--quiet', 'origin', mainBranch]);
+  // home resets exactly what it reset before (G1); another repo resets all of its own caches
+  if (R.name === 'home') { mainLogCache = undefined; mergeShaCache.clear(); } else R.resetCaches();
   const cls = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
-  const act = appendLog({ type: 'act', decision: citing(), class: cls, what: `merged ${branch} at ${sha}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag}, verbatim)` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [], reversible: false, approved_by: approved ?? standing?.rule.id ?? undefined }, 'supervisor');
-  out(`merged ${branch} at ${sha.slice(0, 12)} (${act.id})`);
+  const act = appendLog({ type: 'act', decision: citing(), class: cls, what: `merged ${branch} at ${sha}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag}, verbatim)` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [], reversible: false, approved_by: approved ?? standing?.rule.id ?? undefined, ...onR }, 'supervisor');
+  out(`merged ${branch} at ${sha.slice(0, 12)}${inR} (${act.id})`);
 }
 // ===== 7. trust =====
 
@@ -3540,6 +3921,8 @@ function cmdAsk() {
   if (kind === 'review') {
     const why = { default: 'a review is never defaulted; the owner answers it or sends it back', secrets: 'a review never carries a secret; ask for secrets with --secrets on an owner-action question', choices: "a review's choices are its page", options: "a review's choices are its page", recommendation: "a review's recommendation is the proposals in its data" };
     for (const [k, w] of Object.entries(why)) if (flags[k] !== undefined) die(`ask --kind review takes no --${k}: ${w}`);
+    // a review page is pinned to a commit of home; a ticket in another repo draws its page in a home chore
+    if (flagStr('ticket') && tickets().has(flagStr('ticket')) && repoOfTicketLink(tickets().get(flagStr('ticket'))) !== 'home') die(`${flagStr('ticket')} is a ticket in ${repoOfTicketLink(tickets().get(flagStr('ticket')))}: a review question pins a page committed in home, so draw the page in a home chore and ask it there`);
     review = pinReview();
   } else for (const k of ['page', 'ref', 'data', 'result-schema', 'allow-partial']) if (flags[k] !== undefined) die(`--${k} belongs on a review question (--kind review)`);
   const onLadder = cls && L.classes[cls];
@@ -3663,6 +4046,7 @@ function cmdAnswer() {
   }
   const { by } = fromChat ? { by: 'owner' } : ownerWriter();
   const v = openQuestion(id, ['open', 'defaulted']);
+  if (flagStr('seen') && flagStr('seen') !== v.hash) die(`${id} changed since you saw it; reload and read it again before you answer`);
   if (v.kind === 'goal-approval') die(`${id} approves a goal on its design: the owner answers it with goal decide ${v.goal} approve|refine|let-go [--notes "…"] (or on the dashboard)`);
   // A review is answered by the owner's own process with its result, or sent back with a reason;
   // never in free text, never from chat (a chat can't carry rows, and the supervisor must not
@@ -3767,7 +4151,7 @@ const reviewResultPath = (f) => (projectInRepo ? new RegExp(`^${reReserved(proje
 // A blob's exact bytes at a commit (git() decodes and trims; a hash needs the bytes).
 function gitBlob(commit, p) {
   try {
-    return execFileSync('git', ['cat-file', 'blob', `${commit}:${p}`], { stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+    return execFileSync('git', ['cat-file', 'blob', `${commit}:${p}`], { cwd: HOME_CWD, stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
   } catch {
     return null;
   }
@@ -4378,7 +4762,7 @@ function cmdReview() {
       // The owner's bytes, verified, into the PR that asked; check-pr holds the copy to the hash on
       // the owner's line, so a copy changed by anyone never lands.
       if (!projectInRepo) die(`project/ is not inside this repo (${projectDir}); there is no PR to carry the result`);
-      const branch = git(['rev-parse', '--abbrev-ref', 'HEAD']);
+      const branch = cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']);
       if (branch && branch !== 'HEAD' && q.review.ref && !/^[0-9a-f]{40}$/.test(q.review.ref) && branch !== q.review.ref) warn(`${v.id} was asked on ${q.review.ref}, and this worktree is on ${branch}; its result belongs in the PR that asked it`);
       const rel = reviewResultRel(v.id, currentTicketId());
       const dest = path.join(repoRoot, ...rel.split('/'));
@@ -4781,7 +5165,7 @@ function authorise(cls, scope, approved, refs, verb) {
     // Only a rule the owner scoped to this class: a project-wide preference ("flags first") is
     // guidance, never authority over every class on the ladder.
     if (rule.scope !== `class:${cls}`) die(`${approved} applies to ${rule.scope}; a standing rule authorises a call only when the owner scoped it to its class (answer … --rule "…" --rule-scope class:${cls})`);
-    if (ownerOnly) die(`${cls} is the owner's (constitution.md); a standing rule never covers it: ask`);
+    if (ownerOnly && !(L.owner_rules ?? []).includes(cls)) die(`${cls} is the owner's (constitution.md); a standing rule never covers it: ask`);
   } else if (approved) {
     const q = logGet(approved);
     approval = q?.type === 'question' ? questionView(q) : null;
@@ -4847,7 +5231,7 @@ function decisionAuthorityGap(d) {
   const q = d.approved_by?.startsWith('q-') ? logGet(d.approved_by) : null;
   const v = q?.type === 'question' ? questionView(q) : null;
   const inClass = v && (v.class === d.class || (d.class === 'approve-plan' && v.kind === 'one-way-door'));
-  if (ownerOnly) return v && inClass && v.status === 'answered' ? answerUseGap(d, v) : `${d.class} is the owner's and needs the owner's answer in that class`;
+  if (ownerOnly && !(d.authority === 'standing-rule' && (L.owner_rules ?? []).includes(d.class))) return v && inClass && v.status === 'answered' ? answerUseGap(d, v) : `${d.class} is the owner's and needs the owner's answer in that class`;
   switch (d.authority) {
     case 'answer': return v && inClass && v.status === 'answered' ? answerUseGap(d, v) : `no answered ${d.class} question ${d.approved_by ?? ''}`.trim();
     case 'default': return v && inClass && v.status === 'defaulted' ? null : `no defaulted ${d.class} question ${d.approved_by ?? ''}`.trim();
@@ -4919,6 +5303,9 @@ function cmdAct() {
   const cls = decision?.class ?? flagStr('class');
   if (!cls || !what) die('usage: act --decision d-… -- "<what you did>"   |   act --class c [--scope s] [--approved qid|kid] [--refs ids] [--irreversible] -- "<what you did>"   (without --decision the act is its own decision)');
   supervisorOnly('act');
+  // --repo: the repo link the act was about (a release, staging, production), when not home
+  const rid = flagStr('repo');
+  if (rid && rid !== 'home' && !LINK_KINDS[ownEntry(loadSettings().links, rid)?.kind]?.hostsComponents) die(`--repo ${rid}: not a repo link (devteam.mjs links)`);
   if (cls === 'improvement-trial') upkeepAllows('a new trial');
   const scope = decision ? decision.scope ?? null : flagStr('scope') ?? null;
   const approved = decision ? decision.approved_by ?? null : flagStr('approved') ?? null;
@@ -4954,14 +5341,15 @@ function cmdAct() {
       }
     } else if (doors.length && !questions().some((q) => q.kind === 'one-way-door' && q.ticket === t.id && q.status === 'answered')) die(`${t.id} lists one-way doors; the owner answers a one-way-door question (--ticket ${t.id}) before its plan is approved, or you cite the owner's answer to the goal's one-way-door question (--approved <qid>) and the plan review says it covers the plan (constitution.md §4)`);
     // The plan opens with its TL;DR, so a low-risk plan can be approved from it (quality.md §6).
-    const ref = [`ticket/${t.id}`, `origin/ticket/${t.id}`].find((r) => resolveCommit(r));
-    const plan = ref ? git(['show', `${ref}:${projectRel}/tickets/${t.id}/plan.md`]) : null;
+    const R = repoOfTicket(t); // an act: fails fast on a missing or wrong checkout
+    const ref = [`ticket/${t.id}`, `origin/ticket/${t.id}`].find((r) => R.resolveCommit(r));
+    const plan = ref ? R.git(['show', `${ref}:${R.projectRel}/tickets/${t.id}/plan.md`]) : null;
     if (plan === null) die(`no plan.md for ${t.id} on ticket/${t.id}; approve a plan once it is committed`);
     const tldr = tldrGap(plan);
     if (tldr) die(`${t.id}'s plan ${tldr}; send it back to the worker (quality.md §6)`);
     // A goal-level answer covers the plan only when its reviewer says the plan stays inside it.
     if (goalDoor) {
-      const latest = latestPerTrack(ticketReviews(t.id, { ref }), 'plan').filter((r) => r.verdict === 'APPROVE');
+      const latest = latestPerTrack(ticketReviews(t.id, R.name === 'home' ? { ref } : { ref, repo: R }), 'plan').filter((r) => r.verdict === 'APPROVE');
       if (!latest.some((r) => r.doors.includes(goalDoor))) die(`${goalDoor} is a goal-level answer; the latest approving plan review (reviews/plan-<n>.md on ticket/${t.id}) must say "- Goal-level door: ${goalDoor} covers this plan" (quality.md §3)`);
     }
   }
@@ -4970,7 +5358,7 @@ function cmdAct() {
     const why = g.registry_precondition ? registryAttestGap(g.id) : null;
     if (why) die(`${g.id} has precondition ${g.registry_precondition} marked "the registry is complete", and has no owner's yes to a registry-attest question (${why}): ask --class registry-attest --goal ${g.id} --question "Does the registry list every repo, design file and doc this project depends on?" --recommendation yes, and log goal-readiness once the owner answers yes (planning.md §7)`);
   }
-  const line = appendLog({ type: 'act', class: cls, scope: scope ?? undefined, what, rung: auth.rung, refs, reversible: decision ? decision.reversible !== false && !flags.irreversible : !flags.irreversible, approved_by: decision ? undefined : approved ?? undefined, decision: decision?.id }, 'supervisor');
+  const line = appendLog({ type: 'act', class: cls, scope: scope ?? undefined, what, rung: auth.rung, refs, reversible: decision ? decision.reversible !== false && !flags.irreversible : !flags.irreversible, approved_by: decision ? undefined : approved ?? undefined, decision: decision?.id, repo: rid && rid !== 'home' ? rid : undefined }, 'supervisor');
   out(line.id);
 }
 // A plan or design opens with '## TL;DR' and a few bullets: the approach, skimmable (quality.md §6).
@@ -5061,9 +5449,42 @@ function observeFindings(m) {
 }
 async function cmdObserveMetrics() {
   supervisorOnly('observe-metrics');
-  const { skipped } = await probeLinks();
+  // one budget for the tick's network: each repo link's main first (what the rest reads), then probes
+  const end = Date.now() + (Number(process.env.DEVTEAM_PROBE_BUDGET_MS) || 20000);
+  const unfetched = await fetchLinkMains(end);
+  const { skipped } = await probeLinks(end);
   const s = observeSpend();
-  out(`recorded ${s} spend line(s) and ${observeFindings(collectMetrics(0))} new observation(s)${skipped.length ? `; ${skipped.length} link(s) not probed this tick (time budget): ${skipped.join(', ')}` : ''}`);
+  out(`recorded ${s} spend line(s) and ${observeFindings(collectMetrics(0))} new observation(s)${unfetched.length ? `; ${unfetched.length} repo link(s) not fetched this tick (time budget): ${unfetched.join(', ')}` : ''}${skipped.length ? `; ${skipped.length} link(s) not probed this tick (time budget): ${skipped.join(', ')}` : ''}`);
+}
+// The tick's fetch of each repo link's main (home's is the tick's own git fetch), four at a time
+// inside the tick's budget, so status, metrics and the dashboard read every repo's main as its
+// origin has it now, not as some other command last fetched it. Never a prompt (as the probe), and
+// never a crash: a fetch that fails is recorded in run/ for metrics to raise as repo-unreachable,
+// until a later tick's fetch succeeds. A repo this machine can't read is link-unreachable's.
+const FETCH_FILE = runPath('repo-fetches.json');
+async function fetchLinkMains(end) {
+  const ids = Object.entries(loadSettings().links ?? {}).filter(([id, l]) => LINK_KINDS[l?.kind]?.hostsComponents && repoReadable(id)).map(([id]) => id);
+  if (!ids.length) return [];
+  let state = {};
+  try { state = readJson(FETCH_FILE); } catch {}
+  const skipped = [];
+  const queue = [...ids];
+  const one = async () => {
+    for (let id = queue.shift(); id; id = queue.shift()) {
+      if (Date.now() >= end) { skipped.push(id); continue; }
+      const R = repo(id);
+      const b = R.settings.main_branch;
+      const ssh = process.env.GIT_SSH_COMMAND || R.git(['config', '--get', 'core.sshCommand']) ? {} : { GIT_SSH_COMMAND: 'ssh -o BatchMode=yes' };
+      const r = await runProbe({ cmd: 'git', args: ['fetch', '--quiet', 'origin', b], cwd: R.root, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '', SSH_ASKPASS: '', ...ssh }, judge: (code) => (code === 0 ? {} : { problem: `could not fetch origin ${b} from ${redactUrl(R.remote)} in ${R.root}; its main here is as last fetched` }) }, end);
+      if (r === 'budget') { skipped.push(id); continue; }
+      state[id] = { at: nowIso(), problem: r.problem ?? null };
+      if (!r.problem) R.resetCaches();
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(PROBE_AT_ONCE, ids.length) }, one));
+  for (const id of Object.keys(state)) if (!ids.includes(id)) delete state[id];
+  writeJson(FETCH_FILE, state);
+  return skipped;
 }
 // Whether each link still exists, at most once a day per link, by its kind's probe (one HEAD
 // request, one ls-remote); nothing is fetched. The result waits in run/ for
@@ -5091,13 +5512,12 @@ function runProbe(spec, end) {
     child.on('close', (code) => finish(spec.judge(code, outText)));
   });
 }
-async function probeLinks() {
+async function probeLinks(end = Date.now() + (Number(process.env.DEVTEAM_PROBE_BUDGET_MS) || 20000)) {
   const reg = loadSettings().links ?? {};
   if (!Object.keys(reg).length) return { skipped: [] };
   let cache = {};
   try { cache = readJson(PROBE_FILE); } catch {}
   const due = Object.entries(reg).filter(([id, l]) => LINK_KINDS[l?.kind] && !(ownEntry(cache, id) && Date.now() - Date.parse(cache[id].at) < DAY && cache[id].target === canonical(l)));
-  const end = Date.now() + (Number(process.env.DEVTEAM_PROBE_BUDGET_MS) || 20000);
   const skipped = [];
   const queue = [...due];
   const one = async () => {
@@ -5120,9 +5540,11 @@ function knowledgeFor(target) {
   return logObjects('knowledge').filter((k) => k.status === 'accepted' && scopeMatches(k.scope, ctx));
 }
 // The block a prompt ends with: what applies to this ticket or feature.
+// The owner's note on a lesson, from the owner's own lines only: a note on any other line counts for nothing.
+const ownerNote = (id) => readLog().lines.filter((l) => l.id === id && l.by === 'owner' && typeof l.owner_note === 'string').pop()?.owner_note ?? null;
 const knowledgeBlock = (target) => {
   const ks = knowledgeFor(target);
-  return ks.length ? `What this project has learned that applies here (accepted knowledge):\n${ks.map((k) => `- [${k.kind}${k.valence < 0 ? ', avoid' : ''}] ${k.statement} (${k.id})`).join('\n')}` : '';
+  return ks.length ? `What this project has learned that applies here (accepted knowledge):\n${ks.map((k) => { const n = ownerNote(k.id); return `- [${k.kind}${k.valence < 0 ? ', avoid' : ''}] ${k.statement}${n ? ` The owner adds: ${n}` : ''} (${k.id})`; }).join('\n')}` : '';
 };
 // The block a prompt carries before its knowledge: the registry links this work uses.
 // Titles and notes are quoted data: whoever wrote them, they describe a link and instruct nobody.
@@ -5156,8 +5578,12 @@ function cmdKnowledge() {
     return out(line.id);
   }
   if (sub === 'set') {
-    if (!id || logGet(id)?.type !== 'knowledge') die('usage: knowledge set <k-id> [--status s] [--confidence c] [--statement s] [--scope s] [--owner]');
-    appendLog({ type: 'knowledge', op: 'set', id, status: flagStr('status'), confidence: flagNum('confidence'), statement: flagStr('statement'), scope: flagStr('scope') }, by());
+    if (!id || logGet(id)?.type !== 'knowledge') die('usage: knowledge set <k-id> [--status s] [--confidence c] [--statement s] [--scope s] [--note "the owner\'s refinement"] [--owner]');
+    const w = by();
+    const note = flagStr('note');
+    if (note !== undefined && w !== 'owner') die('--note is the owner\'s refinement of a lesson: only the owner adds one (--owner)');
+    if (note !== undefined && (!note.trim() || note.length > 600 || /[\r\n]/.test(note))) die('--note is one line of at most 600 characters');
+    appendLog({ type: 'knowledge', op: 'set', id, status: flagStr('status'), confidence: flagNum('confidence'), statement: flagStr('statement'), scope: flagStr('scope'), owner_note: note?.trim() }, w);
     return out(`updated ${id}`);
   }
   if (flagStr('for')) {
@@ -5390,8 +5816,11 @@ function goalReadings(gid) {
   const src = logGet(gid)?.measure?.source;
   if (!src) return all;
   const used = new Set();
+  // a view: another repo's main only when this machine can read it (else its readings can't be checked)
+  const link = logGet(gid)?.measure?.link ?? 'home';
+  const onMain = link === 'home' ? isOnMain : (sha) => { if (!repoReadable(link)) return false; const R = repo(link); return !!R.mainRef() && /^[0-9a-f]{7,40}$/.test(sha) && R.git(['merge-base', '--is-ancestor', sha, R.mainRef()]) !== null; };
   return all.filter((o) => {
-    if (src === 'repo') return o.source === 'repo' && typeof o.sha === 'string' && isOnMain(o.sha);
+    if (src === 'repo') return o.source === 'repo' && typeof o.sha === 'string' && onMain(o.sha);
     if (src === 'prod') return o.source === 'prod';
     if (o.created_by === 'owner') return o.channel !== 'chat';
     if (!o.approved || used.has(o.approved) || o.measure.value !== 1 || goalMetProblem(logGet(o.approved), gid, o.approved, o.created_at)) return false;
@@ -5404,27 +5833,28 @@ const goalFeatures = (gid) => [...features().values()].filter((f) => (f.goals ??
 // Run a repo or prod measure's check: repo on a throwaway checkout of main (so the number is main's,
 // with its sha), prod from the main checkout (it reads production, read-only by the owner's word).
 // The number is the last line of stdout.
+// A repo measure runs on the main of the repo its link names (measure.link, default home).
 function runMeasureCheck(g) {
   const m = measureOf(g);
   let cwd = mainRoot;
   let sha = null;
+  const R = repo(m.source === 'repo' ? m.link ?? 'home' : 'home'); // an act: fails fast on a missing checkout
   if (m.source === 'repo') {
-    git(['fetch', '--quiet', 'origin'], mainRoot);
-    mainRefCache = undefined;
-    sha = git(['rev-parse', `${mainRef() ?? die('no main branch to read the measure on')}^{commit}`], mainRoot) ?? die('cannot resolve main');
-    cwd = detachedWorktree(sha, 'reading');
+    if (R.name === 'home') { R.git(['fetch', '--quiet', 'origin'], R.root); mainRefCache = undefined; } else fetchLinkMain(R, 'refusing to read the measure on a stale main');
+    sha = R.git(['rev-parse', `${R.mainRef() ?? die(`no main branch${R.name === 'home' ? '' : ` in ${R.name}`} to read the measure on`)}^{commit}`], R.root) ?? die('cannot resolve main');
+    cwd = detachedWorktree(sha, 'reading', R);
   }
   // The check is the supervisor's command (it drafted the goal), and goal status met runs it from
   // the owner's terminal or the dashboard: it runs as the supervisor, never as the owner, so what it
   // writes is the supervisor's and owner commands refuse it.
-  const env = { ...gateEnv(), DEVTEAM_ROLE: 'supervisor' };
+  const env = { ...gateEnv(null, R), DEVTEAM_ROLE: 'supervisor' };
   for (const k of ['DEVTEAM_CHANNEL', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE']) delete env[k];
   const r = spawnSync('sh', ['-c', m.check], { cwd, env, encoding: 'utf8', timeout: 900000, maxBuffer: 16 * 1024 * 1024 });
   if (r.status !== 0) die(`${g.id}'s check failed (${r.error?.message ?? `exit ${r.status}`}): ${(r.stderr ?? '').trim().slice(-400)}`);
   const last = (r.stdout ?? '').trim().split('\n').pop().trim();
   const value = Number(last);
   if (last === '' || !Number.isFinite(value)) die(`${g.id}'s check printed "${last.slice(0, 80)}" last, not a number`);
-  return { value, sha, out: (r.stdout ?? '').trim() };
+  return { value, sha, out: (r.stdout ?? '').trim(), on: R.name === 'home' ? 'main' : `${R.name}'s main` };
 }
 
 // Mechanical readiness. Definition gaps block approval; coverage gaps are what planning closes.
@@ -5442,6 +5872,8 @@ function goalCheck(g) {
   if (!m.source) (draft ? definition : coverage).push('no source: how the fleet reads the measure (repo, prod or owner; planning.md §1)');
   else if (!MEASURE_SOURCES.includes(m.source)) definition.push(`source "${m.source}" is not repo, prod or owner`);
   else if (m.source === 'owner' ? !m.question : !m.check) definition.push(m.source === 'owner' ? 'no question: the yes/no the owner answers when it is met (measure.question)' : 'no check: the command whose last line is the number (measure.check)');
+  if (m.link !== undefined && m.source !== 'repo') definition.push('measure.link is for a repo measure: the repo whose main its check runs on');
+  else if (m.link !== undefined && m.link !== 'home' && !LINK_KINDS[ownEntry(loadSettings().links, m.link)?.kind]?.hostsComponents) definition.push(`measure.link "${m.link}" is not a repo link (devteam.mjs links)`);
   // A horizon is the owner's real deadline, when there is one; never required, never guessed. The
   // forecast says when, from the measured rate (planning.md §1).
   if (g.horizon && Number.isNaN(Date.parse(g.horizon))) definition.push(`horizon "${g.horizon}" is not a date`);
@@ -5587,8 +6019,8 @@ function cmdGoal() {
   const writer = () => (flags.owner ? ownerWriter() : (supervisorOnly('goal'), { by: 'supervisor' }));
   const fields = () => ({
     title: flagStr('title'), outcome: flagStr('outcome'),
-    measure: ['measure', 'target', 'unit', 'direction', 'source', 'check', 'question'].some((k) => flagStr(k) !== undefined)
-      ? { ...(id ? logGet(id)?.measure : {}), ...(flagStr('measure') ? { description: flagStr('measure') } : {}), ...(flagStr('target') ? { target: Number(flagStr('target')) } : {}), ...(flagStr('unit') ? { unit: flagStr('unit') } : {}), ...(flagStr('direction') ? { direction: flagStr('direction') } : {}), ...(flagStr('source') ? { source: MEASURE_SOURCES.includes(flagStr('source')) ? flagStr('source') : die('--source is repo, prod or owner (planning.md §1)') } : {}), ...(flagStr('check') ? { check: flagStr('check') } : {}), ...(flagStr('question') ? { question: flagStr('question') } : {}) }
+    measure: ['measure', 'target', 'unit', 'direction', 'source', 'check', 'question', 'link'].some((k) => flagStr(k) !== undefined)
+      ? { ...(id ? logGet(id)?.measure : {}), ...(flagStr('measure') ? { description: flagStr('measure') } : {}), ...(flagStr('target') ? { target: Number(flagStr('target')) } : {}), ...(flagStr('unit') ? { unit: flagStr('unit') } : {}), ...(flagStr('direction') ? { direction: flagStr('direction') } : {}), ...(flagStr('source') ? { source: MEASURE_SOURCES.includes(flagStr('source')) ? flagStr('source') : die('--source is repo, prod or owner (planning.md §1)') } : {}), ...(flagStr('check') ? { check: flagStr('check') } : {}), ...(flagStr('question') ? { question: flagStr('question') } : {}), ...(flagStr('link') ? { link: flagStr('link') } : {}) }
       : undefined,
     // `none` clears it: a horizon is the owner's real deadline or nothing (planning.md §1)
     horizon: flagStr('horizon') === 'none' ? null : flagStr('horizon'),
@@ -5607,7 +6039,7 @@ function cmdGoal() {
     return out(appendLog({ type: 'goal', status: 'draft', ...f }, by).id);
   }
   if (sub === 'set') {
-    if (!id || logGet(id)?.type !== 'goal') die('usage: goal set <g-id> [--title …] [--outcome …] [--measure …] [--target n] [--unit u] [--direction up|down] [--source repo|prod|owner] [--check "cmd"] [--question "…"] [--horizon date] [--non-goals a b | \'["a","b"]\'] [--preconditions a b | \'["a","b"]\'] [--registry-precondition n|none] [--priority n] [--milestones \'[{"title","target","by","preconditions":[n],"tickets"}…]\'] [--plan-after <g-id>… --reason "…"] [--approved <qid>] [--owner]');
+    if (!id || logGet(id)?.type !== 'goal') die('usage: goal set <g-id> [--title …] [--outcome …] [--measure …] [--target n] [--unit u] [--direction up|down] [--source repo|prod|owner] [--check "cmd"] [--link <repo>] [--question "…"] [--horizon date] [--non-goals a b | \'["a","b"]\'] [--preconditions a b | \'["a","b"]\'] [--registry-precondition n|none] [--priority n] [--milestones \'[{"title","target","by","preconditions":[n],"tickets"}…]\'] [--plan-after <g-id>… --reason "…"] [--approved <qid>] [--owner]');
     const { by } = writer();
     const approved = flagStr('approved') ?? null;
     if (approved && by !== 'supervisor') die('the owner changes a goal directly; --approved is the supervisor applying an owner answer');
@@ -5721,7 +6153,7 @@ function cmdGoal() {
     const m = measureOf(g);
     if (to === 'met' && !flags.force && m.source === 'repo' && m.check) {
       const r = runMeasureCheck(g);
-      if (!reached(g, m.target, r.value)) die(`${id}'s check reads ${r.value} on main (${r.sha.slice(0, 12)}), not its target ${m.target}; --force to set it met anyway`);
+      if (!reached(g, m.target, r.value)) die(`${id}'s check reads ${r.value} on ${r.on} (${r.sha.slice(0, 12)}), not its target ${m.target}; --force to set it met anyway`);
     }
     if (to === 'met' && !flags.force && m.source === 'owner' && !goalReadings(id).some((x) => x.measure.value >= 1)) die(`${id} is met when the owner says so: answer its goal-met question, or record it with goal reading ${id} --value 1 --owner; --force to set it met anyway`);
     appendLog({ type: 'goal', op: 'set', id, status: to }, by);
@@ -5743,8 +6175,8 @@ function cmdGoal() {
     if (flags.run) {
       if (!['repo', 'prod'].includes(m.source) || !m.check) die(`${id} is read ${m.source ? `from ${m.source}` : 'by hand (no measure source)'}; --run runs a repo or prod measure's check`);
       const r = runMeasureCheck(g);
-      appendLog({ type: 'observation', source: m.source, subject: id, kind: 'reading', detail: m.source === 'repo' ? `reading ${r.value}${unit ? ` ${unit}` : ''} on main at ${r.sha.slice(0, 12)}` : `reading ${r.value}${unit ? ` ${unit}` : ''} from ${m.check}: ${r.out.slice(-300)}`, measure: { value: r.value, unit }, ...(r.sha ? { sha: r.sha } : {}), refs: [id] }, by);
-      return out(`recorded ${r.value} for ${id}${r.sha ? ` (main at ${r.sha.slice(0, 12)})` : ''}`);
+      appendLog({ type: 'observation', source: m.source, subject: id, kind: 'reading', detail: m.source === 'repo' ? `reading ${r.value}${unit ? ` ${unit}` : ''} on ${r.on} at ${r.sha.slice(0, 12)}` : `reading ${r.value}${unit ? ` ${unit}` : ''} from ${m.check}: ${r.out.slice(-300)}`, measure: { value: r.value, unit }, ...(r.sha ? { sha: r.sha } : {}), refs: [id] }, by);
+      return out(`recorded ${r.value} for ${id}${r.sha ? ` (${r.on} at ${r.sha.slice(0, 12)})` : ''}`);
     }
     const approved = flagStr('approved');
     if (approved !== undefined) {
@@ -5902,9 +6334,9 @@ function openPr(wt, branch, title, bodyText) {
     fs.writeFileSync(f, `# ${title}\n\n${bodyText}\n\n## One-way doors\n\nNone.\n`);
     return `forge is git; PR text in ${path.relative(mainRoot, f)}; land it with: merge --chore ${branch.replace(/^chore-/, '')}`;
   }
-  let pr = sh('gh', ['pr', 'list', '--head', branch, '--state', 'open', '--json', 'url', '--jq', '.[0].url'], { cwd: wt });
+  let pr = repo('home').gh(['pr', 'list', '--head', branch, '--state', 'open', '--json', 'url', '--jq', '.[0].url'], { cwd: wt });
   if (pr === null) { warn('gh is not available; open the PR by hand'); return ''; }
-  if (!pr) pr = sh('gh', ['pr', 'create', '--head', branch, '--base', main, '--title', title, '--body', `${bodyText}\n\n## One-way doors\n\nNone.\n`], { cwd: wt }) ?? '';
+  if (!pr) pr = repo('home').gh(['pr', 'create', '--head', branch, '--base', main, '--title', title, '--body', `${bodyText}\n\n## One-way doors\n\nNone.\n`], { cwd: wt }) ?? '';
   return pr;
 }
 // The improvement loop is Upkeep's work: while Upkeep is drained or parked it starts nothing new
@@ -6131,7 +6563,7 @@ function recordUsd(r) {
   if (p.tier && r[2] + r[4] + r[5] + r[6] > p.tier.over) p = p.tier;
   return (r[2] * p.input + r[3] * p.output + r[4] * p.read + r[5] * p.write + r[6] * p.write1h) / 1e6;
 }
-const realOrSelf = (p) => { try { return fs.realpathSync(p); } catch { return p; } };
+const realOrSelf = realPath;
 // Whose work ran in a directory: a ticket's worktree, a planner's, a reviewer's (charged to its
 // ticket), and the main checkout or a chore's (the supervisor's).
 function spenderFor(cwd, ts) {
@@ -6576,22 +7008,73 @@ function collectMetrics(since) {
   if (unpriced.length) add('low', 'unpriced-model', unpriced.map(([k]) => k).join(', '), `${unpriced.map(([k, n]) => `${k}: ${(n / 1e6).toFixed(1)}M tokens`).join('; ')} with no price, so spend undercounts`, 'the owner adds them to settings.model_prices ($ per million tokens: input, output, cache_read, cache_write)');
   if (m.escaped_defects) add('high', 'escaped-defects', `${m.escaped_defects}`, 'defects found after merge', 'retro: which review or gate should have caught each one');
   // Component lines on main: a gap is a severity-4 observation.
+  // One per repo: home, then each repo link this machine can read (link-unreachable covers the rest).
+  for (const name of ['home', ...Object.entries(settings.links ?? {}).filter(([, l]) => LINK_KINDS[l?.kind]?.hostsComponents).map(([id]) => id)]) {
+    if (!repoReadable(name)) continue;
+    const R = repo(name);
+    const gap = coverageGapInfo(name, R);
+    const at = name === 'home' ? '' : ` --repo ${name}`;
+    if (gap.empty?.length) add('low', 'line-empty', name, `${gap.empty.length} owns glob(s) on ${R.mainRef()} match nothing: ${gap.empty.slice(0, 5).map((x) => `"${x}"`).join(', ')}`, 'remove or fix the glob in a chore PR (settings components); an empty glob blocks nothing');
+    if (gap.count) add('high', 'unowned-files', name, `${R.mainRef()}${name === 'home' ? '' : ` (${name})`} has coverage gaps: ${gap.words} (devteam.mjs components check${at} lists them); no new ticket starts in ${name} until they clear`, 'a chore PR that extends a line (settings components), or moves the files into one', { sev: 4 });
+  }
+  // A ticket that reached its main before a ticket it depends on (merge refuses that, so this is a
+  // merge by hand or in the forge's UI): its provider wasn't there when it landed. Read only where
+  // both repos can be read; link-unreachable covers the rest. Only merges after this finding reached
+  // home's main: merge didn't refuse them before, so older history raises nothing.
+  const orderSince = upgradeAt('merged-out-of-order');
+  for (const t of ts.values()) {
+    const at = mergedAt(t.id);
+    if (!at || orderSince === null || at < orderSince) continue;
+    const early = (t.depends_on ?? []).filter((d) => ts.has(d) && factsRepo(d) && !(mergedAt(d) && mergedAt(d) <= at));
+    const name = repoOfTicketLink(t);
+    if (early.length) add('high', 'merged-out-of-order', t.id, `${t.id} reached ${name === 'home' ? '' : `${name}'s `}main before ${early.join(', ')}, which it depends on`, `check that ${t.id} works without ${early.length > 1 ? 'them' : 'it'}, and merge ${early.join(', ')} next; a revert is a ticket of its own`, { sev: 3 });
+  }
+  // A merge on any repo's main that merge never made (a worker's push to its repo's main, a merge
+  // on the forge's button): no gates, reviews or checks ran on it. A ticket that reads merged with
+  // no merge-word act, and a merge commit whose branch head no merge act names. Only merges after
+  // this finding reached home's main, so an existing project's history raises nothing.
   {
-    const gap = coverageGapInfo();
-    if (gap.empty?.length) add('low', 'line-empty', 'home', `${gap.empty.length} owns glob(s) on ${mainRef()} match nothing: ${gap.empty.slice(0, 5).map((x) => `"${x}"`).join(', ')}`, 'remove or fix the glob in a chore PR (settings components); an empty glob blocks nothing');
-    if (gap.count) add('high', 'unowned-files', 'home', `${mainRef()} has coverage gaps: ${gap.words} (devteam.mjs components check lists them); no new ticket starts in home until they clear`, 'a chore PR that extends a line (settings components), or moves the files into one', { sev: 4 });
+    const since = upgradeAt('merged-without-merge');
+    if (since !== null) {
+      const acts = logObjects('act').filter((a) => ['merge-word', 'merge-chore', 'approve-feature-plan'].includes(a.class));
+      const heads = new Set(acts.map((a) => /\bat ([0-9a-f]{40})\b/.exec(a.what ?? '')?.[1]).filter(Boolean));
+      const worded = new Set(acts.filter((a) => a.class === 'merge-word').flatMap((a) => a.refs ?? []));
+      const seen = new Set();
+      for (const t of ts.values()) {
+        const at = mergedAt(t.id);
+        if (!at || at < since || worded.has(t.id)) continue;
+        const sha = mergeShaFor(t.id);
+        const name = repoOfTicketLink(t);
+        seen.add(sha);
+        add('high', 'merged-without-merge', t.id, `${t.id} reached ${name === 'home' ? '' : `${name}'s `}main at ${sha.slice(0, 12)} with no merge act: no gates, reviews or checks ran on it`, `check it now (check-pr${name === 'home' ? '' : ` --repo ${name}`} at that sha, its records, its gates); a revert is a ticket of its own; then find how it landed (a push to main, the forge's button) and close that path`, { sev: 3 });
+      }
+      for (const name of ['home', ...Object.entries(settings.links ?? {}).filter(([, l]) => LINK_KINDS[l?.kind]?.hostsComponents).map(([id]) => id)]) {
+        if (!repoReadable(name)) continue;
+        const R = repo(name);
+        const ref = R.mainRef();
+        if (!ref) continue;
+        for (const row of (R.git(['log', ref, '--first-parent', '--merges', `--since=${Math.floor(since / 1000)}`, '--format=%H %ct %P']) ?? '').split('\n').filter(Boolean)) {
+          const [sha, ct, , p2] = row.split(' ');
+          if (Number(ct) * 1000 < since || seen.has(sha) || heads.has(p2)) continue;
+          add('high', 'merged-without-merge', `${name}:${sha.slice(0, 12)}`, `${name === 'home' ? '' : `${name}'s `}main has merge ${sha.slice(0, 12)} (of ${p2.slice(0, 12)}) that no merge act made: no gates, reviews or checks ran on it`, 'find what it merged and check it now; merges go through devteam.mjs merge, never the forge\'s button or a push to main', { sev: 3 });
+        }
+      }
+    }
   }
   // The registry: a link that no longer resolves, and lines drawn in the wrong place.
   {
     const reg = settings.links ?? {};
     let probes = {};
     try { probes = readJson(PROBE_FILE); } catch {}
+    let fetches = {};
+    try { fetches = readJson(FETCH_FILE); } catch {}
     for (const [id, l] of Object.entries(reg)) {
       const K = LINK_KINDS[l.kind];
       if (!K) continue;
       const fresh = ownEntry(probes, id)?.target === canonical(l) ? probes[id] : null;
       const why = K.reachable(l, id) ?? fresh?.problem ?? null;
       if (why) add('high', 'link-unreachable', id, why, K.fixHint(l, id));
+      else if (K.hostsComponents && ownEntry(fetches, id)?.problem) add('high', 'repo-unreachable', id, fetches[id].problem, `check this machine can reach ${redactUrl(l.remote)} (credentials, network), then git -C ${shq(linkLocation(id))} fetch origin; the next tick fetches it again`);
       else if (fresh?.note) add('low', 'link-behind-auth', id, fresh.note, 'fine if the fleet needs no access to it; "check": false stops the daily probe');
     }
     if (linesDeclared(settings)) {
@@ -6668,7 +7151,7 @@ function collectProgress() {
     return {
       id: t.id, title: t.title, feature: t.feature, component: t.component, kind: t.kind, size: t.size, risk: t.risk, weight: weight(t), serves: t.serves ?? [], depends_on: t.depends_on ?? [],
       wave: level.has(t.id) ? level.get(t.id) + 1 : null, added_at: t.created_at,
-      merged_at: sha ? new Date(mergedAt(t.id)).toISOString() : null, released_in: sha ? releasedIn(sha) : null, target_release: targets[0] ?? null,
+      merged_at: sha ? new Date(mergedAt(t.id)).toISOString() : null, released_in: sha ? releasedIn(sha, releaseOf(t)) : null, target_release: targets[0] ?? null,
       stage: st?.stage ?? 'planned', phase: st?.phase ?? null, task: st?.task ?? null, held: isHeld(t) ? t.held : null, waiting: st?.waiting ?? null,
     };
   });
@@ -6757,9 +7240,11 @@ function timelineView(id) {
   const qids = new Set(lines.filter((l) => l.type === 'question').map((l) => l.id));
   const all = readLog().lines.filter((l) => touches(l) || (l.type === 'question' && qids.has(l.id))).sort((a, b) => a.at.localeCompare(b.at));
   const st = deriveStatus().find((r) => r.id === id);
+  // a view: the ticket's repo by name, and nothing read from one this machine can't read
+  const R = factsRepo(id);
   const branch = ticketBranchRef(id);
-  const ref = branch && !mergeShaFor(id) ? branch : mainRef();
-  const files = ['spec.md', 'plan.md', 'verification.md'].map((f) => `${projectRel}/tickets/${id}/${f}`).filter((f) => ref && git(['cat-file', '-e', `${ref}:${f}`]) !== null).map((f) => ({ title: path.basename(f, '.md'), path: f, ref }));
+  const ref = branch && !mergeShaFor(id) ? branch : R?.mainRef() ?? null;
+  const files = !R ? [] : ['spec.md', 'plan.md', 'verification.md'].map((f) => `${R.projectRel}/tickets/${id}/${f}`).filter((f) => ref && R.git(['cat-file', '-e', `${ref}:${f}`]) !== null).map((f) => ({ title: path.basename(f, '.md'), path: f, ref, ...(R.name === 'home' ? {} : { repo: R.name }) }));
   const reviews = ticketReviews(id, branch && !mergeShaFor(id) ? { ref: branch } : WORKTREE).map((r) => ({ file: r.file, stage: r.stage, pass: r.pass, verdict: r.verdict, reviewer: r.reviewer }));
   return { ticket: { ...t, ...st }, files, reviews, lines: all.map((l) => Object.fromEntries(Object.entries(l).filter(([k]) => !k.startsWith('__')))), st, all };
 }
@@ -6914,7 +7399,7 @@ async function cmdDashboard() {
     answer: (b) => {
       if (!ID.test(b.id ?? '') || !text(b.answer)) return null;
       if (b.decline !== undefined && b.decline !== true) return null;
-      const args = ['answer', b.id, b.answer.trim(), ...autonomyArgs(b)];
+      const args = ['answer', b.id, b.answer.trim(), ...autonomyArgs(b), ...(/^[0-9a-f]{16}$/.test(b.seen ?? '') ? ['--seen', b.seen] : [])];
       // "Send it back" on a review: the owner's reason, no result
       if (b.decline === true) return [...args, '--decline'];
       if (text(b.rule, 600)) args.push('--rule', b.rule.trim());
@@ -6924,7 +7409,7 @@ async function cmdDashboard() {
     'goal-hold': (b) => ((ID.test(b.id ?? '') || b.id === 'upkeep') && ['run', 'drain', 'park'].includes(b.mode) && (b.reason === undefined || b.reason === '' || text(b.reason, 300)) ? ['goal', 'hold', b.id, b.mode, '--owner', ...(b.reason ? ['--reason', b.reason.trim()] : [])] : null),
     fleet: (b) => (['drain', 'park', 'undrain', 'unpark', 'resume'].includes(b.op) && (b.reason === undefined || b.reason === '' || text(b.reason, 300)) ? ['fleet', b.op, '--owner', ...(b.reason && ['drain', 'park'].includes(b.op) ? ['--reason', b.reason.trim()] : [])] : null),
     'goal-decide': (b) => (ID.test(b.id ?? '') && ['approve', 'refine', 'let-go', 'restore'].includes(b.verdict) && (b.notes === undefined || text(b.notes, 4000)) ? ['goal', 'decide', b.id, b.verdict, ...(b.notes ? ['--notes', b.notes.trim()] : [])] : null),
-    knowledge: (b) => (ID.test(b.id ?? '') && ['accepted', 'retired', 'stale'].includes(b.status) ? ['knowledge', 'set', b.id, '--status', b.status, '--owner'] : null),
+    knowledge: (b) => (ID.test(b.id ?? '') && ['accepted', 'retired', 'stale'].includes(b.status) && (b.note === undefined || b.note === '' || (text(b.note, 600) && !/[\r\n]/.test(b.note))) ? ['knowledge', 'set', b.id, '--status', b.status, ...(b.note?.trim() ? ['--note', b.note.trim()] : []), '--owner'] : null),
     ack: (b) => (/^[a-z][a-z-]*$/.test(b.kind ?? '') && text(b.subject, 200) && text(b.reason, 600) ? ['ack', b.kind, b.subject, '--reason', b.reason.trim(), '--owner'] : null),
   };
   const send = (res, code, type, body) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store' }); res.end(body); };
@@ -7004,8 +7489,10 @@ async function cmdDashboard() {
       const rec = u.searchParams.get('rec') ?? '';
       const ref = u.searchParams.get('ref') ?? '';
       if (ref && !/^(?!-)[A-Za-z0-9._\/-]+$/.test(ref)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad ref' }));
+      const prepo = u.searchParams.get('repo') ?? '';
+      if (prepo && !LINK_ID.test(prepo)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad repo' }));
       if (!/^[a-z]+$/.test(kind) || !id || id.length > 400 || /[\0\n]/.test(id) || id.startsWith('-') || ts.some((x) => !/^[a-z0-9][a-z0-9-]*$/.test(x)) || (rec && !/^[a-z0-9][a-z0-9-]*$/.test(rec))) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad kind, id, rec or tickets' }));
-      const r = await run(['peek', kind, id, ...(ts.length ? ['--tickets', JSON.stringify(ts)] : []), ...(rec ? ['--rec', rec] : []), ...(ref ? ['--ref', ref] : []), '--json']);
+      const r = await run(['peek', kind, id, ...(ts.length ? ['--tickets', JSON.stringify(ts)] : []), ...(rec ? ['--rec', rec] : []), ...(ref ? ['--ref', ref] : []), ...(prepo ? ['--repo', prepo] : []), '--json']);
       return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 404, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
     }
     if (req.method === 'GET' && u.pathname === '/api/schema') return send(res, 200, 'application/json', JSON.stringify(schemaDocs()));
@@ -7019,9 +7506,15 @@ async function cmdDashboard() {
     // path outside the repo). HTML mocks are served sandboxed so they can't call the owner API.
     if (req.method === 'GET' && u.pathname === '/api/file') {
       const p = u.searchParams.get('path') ?? '';
-      const ref = u.searchParams.get('ref') || mainRef() || 'HEAD';
+      // repo=<link>: a file in another repo's checkout (a sibling ticket's records), read by name
+      // only when this machine can read that repo
+      const rid = u.searchParams.get('repo');
+      if (rid && rid !== 'home' && !LINK_ID.test(rid)) return send(res, 400, 'text/plain', 'bad repo');
+      const R = !rid || rid === 'home' ? repo('home') : repoReadable(rid) ? repo(rid) : null;
+      if (!R) return send(res, 404, 'text/plain', `no checkout of ${rid} here`);
+      const ref = u.searchParams.get('ref') || R.mainRef() || 'HEAD';
       if (!/^(?!\/)(?!.*\.\.)[^\s]+$/.test(p) || !/^[A-Za-z0-9._\/-]+$/.test(ref)) return send(res, 400, 'text/plain', 'bad path or ref');
-      const body = await new Promise((resolve) => execFile('git', ['show', `${ref}:${p}`], { cwd: mainRoot, encoding: 'buffer', maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => resolve(err ? null : stdout)));
+      const body = await new Promise((resolve) => execFile('git', ['show', `${ref}:${p}`], { cwd: R.root, encoding: 'buffer', maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => resolve(err ? null : stdout)));
       if (!body) return send(res, 404, 'text/plain', `not found: ${p} at ${ref}`);
       const ext = path.extname(p).toLowerCase();
       const type = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.pdf': 'application/pdf', '.html': 'text/html; charset=utf-8' }[ext] ?? 'text/plain; charset=utf-8';
@@ -7214,10 +7707,22 @@ const PROMPTS = {
   worker: 'You are the worker for ticket {{ID}}. Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md, and follow it from §1. Your ticket: node docs/devteam/scripts/devteam.mjs ticket show {{ID}}. Use superpowers for every step; devteam says where files go and what must be true before you ask for the merge.',
   planner: 'You are planning feature {{ID}} on branch plan/{{ID}}, in this worktree. Read the devteam section of AGENTS.md, then docs/devteam/process/planning.md, and run the pipeline from §2 for this feature. Your tickets and the feature line go to the log with devteam.mjs feature add / ticket add; commit everything as you go; message the supervisor (devteam.mjs send supervisor) when the graph review passes.',
 };
+// What a prompt says about a repo, from settings alone (a view: no checkout needed).
+const repoAbout = (name) => (name === 'home' ? repo('home') : { name, remote: ownEntry(loadSettings().links, name)?.remote, projectRel: projectRelOf(name) });
+// A role's opening prompt. A ticket in another repo has no kit of its own in its worktree: it runs
+// home's kit by absolute path and keeps its records in that repo's project folder. The remote and
+// the folder come from settings, so each is shown as one token (a hand edit on main is never validated).
+function promptFor(role, id, R = repo('home')) {
+  const base = PROMPTS[role].replace(/\{\{ID\}\}/g, id);
+  if (R.name === 'home') return base;
+  const kitCmd = `node ${shq(path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs'))}`;
+  return `${base.replace(/node docs\/devteam\/scripts\/devteam\.mjs/g, kitCmd).replace('Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md', `Read ${path.join(mainRoot, 'docs', 'devteam', 'process', 'worker.md')}`)} This worktree is a checkout of ${R.name} (${locatorForPrompt(R.remote)}); run every devteam command as ${kitCmd}, and keep this ticket's records under ${locatorForPrompt(R.projectRel)}/tickets/${id}/ in this repo.`;
+}
 function cmdPrompt() {
   const role = positional[0];
   if (!PROMPTS[role]) die('usage: prompt supervisor|worker <ticket-id>|planner <feature>');
-  const p = role === 'planner' && positional[1] ? plannerPrompt(positional[1]) : PROMPTS[role].replace(/\{\{ID\}\}/g, positional[1] ?? '');
+  const t = role === 'worker' && positional[1] ? tickets().get(positional[1]) : null;
+  const p = role === 'planner' && positional[1] ? plannerPrompt(positional[1]) : t ? promptFor('worker', t.id, repoAbout(repoOfTicketLink(t))) : PROMPTS[role].replace(/\{\{ID\}\}/g, positional[1] ?? '');
   if (role === 'supervisor') { const d = drainedPreface(); return out(d ? `${d}\n\n${p}` : p); }
   const handoff = positional[1] ? handoffBlock(role === 'worker' ? positional[1] : `plan-${positional[1]}`) : null;
   const links = linksBlock(positional[1]);
@@ -7290,7 +7795,7 @@ function cmdSend() {
   const from = flags.owner ? ownerWriter().by : myAddress();
   if (from === 'owner' && kind !== 'info') die('the owner sends info messages; answers go through answer <qid>, rulings come from the supervisor');
   if (['ruling', 'answer'].includes(kind) && from !== 'supervisor') die(`only the supervisor sends ${kind} messages`);
-  const sha = flagStr('sha') ?? (kind === 'merge-request' ? git(['rev-parse', 'HEAD']) : null);
+  const sha = flagStr('sha') ?? (kind === 'merge-request' ? cwdGit(['rev-parse', 'HEAD']) : null);
   const re = flagStr('re') ?? null;
   if (re && logGet(re)?.type !== 'message') warn(`--re ${re} matches no logged message`);
   out(sendLine({ to, kind, text, re, sha, from, ticket: flagStr('ticket') ?? (from === 'owner' ? null : currentTicketId()) }).id);
@@ -7355,7 +7860,7 @@ function cmdPhase() {
   const changed = !prev || prev.to !== to || prev.task !== task || (cost.usd !== undefined && cost.usd !== prev.usd) || flags.note !== undefined;
   const stale = !prev || Date.now() - Date.parse(prev.created_at) > Math.min(15, loadSettings().stale_after_minutes / 3) * 60000;
   if (!changed && !stale) return out(`phase ${to} (unchanged)`);
-  appendLog({ type: 'phase', from: prev?.to ?? null, to, task, note: flagStr('note')?.slice(0, 280), sha: git(['rev-parse', 'HEAD']) ?? undefined, ...cost }, id);
+  appendLog({ type: 'phase', from: prev?.to ?? null, to, task, note: flagStr('note')?.slice(0, 280), sha: cwdGit(['rev-parse', 'HEAD']) ?? undefined, ...cost }, id);
   out(`phase ${to}${task ? ` ${task}` : ''}`);
   // Waiting with nothing asked looks the same as waiting with a request answered: say so.
   if (['awaiting-word', 'blocked'].includes(to)) {
@@ -7382,24 +7887,29 @@ function cmdGate() {
     ok = false;
   }
   const tests = readJunit(flagStr('junit'));
-  appendLog({ type: 'gate', gate: name, ok, ms: Date.now() - started, sha: git(['rev-parse', 'HEAD']) ?? undefined, dirty: git(['status', '--porcelain']) ? true : undefined, tests_total: tests.length, tests: keepTests(tests) });
+  appendLog({ type: 'gate', gate: name, ok, ms: Date.now() - started, ...repoField(cwdRepo()), sha: cwdGit(['rev-parse', 'HEAD']) ?? undefined, dirty: cwdGit(['status', '--porcelain']) ? true : undefined, tests_total: tests.length, tests: keepTests(tests) });
   process.stderr.write(`devteam: gate ${name} ${ok ? 'passed' : 'FAILED'} in ${((Date.now() - started) / 1000).toFixed(1)}s\n`);
   process.exit(ok ? 0 : 1);
 }
 
+// A gate line run in a repo link's checkout names that repo; home's carry no field, as before.
+const repoField = (R) => (R && R.name !== 'home' ? { repo: R.name } : {});
 // Run every gate in the settings here, as merge would, and print which pass. Run once at adoption
 // on main: a gate that fails there goes on in ratchet mode or gets a chore ticket (quality.md §2).
+// "Here" is the repo of this checkout: in a repo link's, that repo's gates and DEVTEAM_MAIN, never
+// home's.
 function gateAll() {
-  const gates = Object.entries(loadSettings().gates ?? {});
-  if (!gates.length) die('no gates in settings');
+  const R = cwdRepo() ?? repo('home');
+  const gates = Object.entries(R.settings.gates ?? {});
+  if (!gates.length) die(R.name === 'home' ? 'no gates in settings' : `no gates for ${R.name} in settings (links.${R.name}.gates)`);
   const rows = [];
   for (const [name, spec] of gates) {
     const cmd = typeof spec === 'string' ? spec : spec.cmd;
     const started = Date.now();
     let ok = true;
-    try { execFileSync('sh', ['-c', cmd], { stdio: ['ignore', 'ignore', 'inherit'], env: gateEnv() }); } catch { ok = false; }
+    try { execFileSync('sh', ['-c', cmd], { stdio: ['ignore', 'ignore', 'inherit'], env: gateEnv(null, R) }); } catch { ok = false; }
     const ms = Date.now() - started;
-    appendLog({ type: 'gate', gate: name, ok, ms, sha: git(['rev-parse', 'HEAD']) ?? undefined, tests_total: 0, tests: [] });
+    appendLog({ type: 'gate', gate: name, ok, ms, ...repoField(R), sha: cwdGit(['rev-parse', 'HEAD']) ?? undefined, tests_total: 0, tests: [] });
     rows.push({ name, ok, ms, mode: spec.mode ?? 'enforced' });
     out(`${ok ? 'pass' : 'FAIL'}  ${name.padEnd(20)} ${(ms / 1000).toFixed(1)}s  ${spec.mode ?? 'enforced'}`);
   }
@@ -7412,7 +7922,7 @@ function cmdStopOk() {
   const id = currentTicketId();
   if (!id) process.exit(0);
   const last = logObjects('phase').filter((p) => p.created_by === id).sort(byTime).pop();
-  const commitAt = Date.parse(git(['log', '-1', '--format=%cI']) ?? '');
+  const commitAt = Date.parse(cwdGit(['log', '-1', '--format=%cI']) ?? '');
   if (last && !['done', 'parked'].includes(last.to) && commitAt > Date.parse(last.created_at) + 60000) {
     process.stderr.write(`devteam: your last commit is newer than your last phase line; run: devteam.mjs phase ${last.to} [--task …]\n`);
     process.exit(2);
@@ -7463,13 +7973,37 @@ const plannerPrompt = (feature) => {
 
 // worker <ticket-id> [--resume] | planner <feature> [--resume]: a git worktree, a tmux window, the
 // agent command from the settings, and the role's prompt (plus the knowledge that applies).
+// worker <id> --remove: after its merge, a worker's worktree removed through the repo it is a
+// worktree of (a sibling's can't be removed by home's git), and that repo's worktree list pruned, so
+// one removed by hand leaves no stale entry holding ticket/<id> checked out. Refused until the
+// ticket is merged and its worker has logged phase done (its final spend); --force removes it
+// anyway. The branch stays, so a reopened ticket's worker starts again from it.
+function removeWorkerWorktree(id) {
+  const wt = path.join(mainRoot, '.worktrees', id);
+  const T = repoOfTicket(tickets().get(id)); // an act: fails fast on a missing or wrong checkout
+  if (!flags.force) {
+    if (!T.mergeShaFor(id)) die(`${id} is not merged yet; --force removes its worktree anyway (uncommitted work in it is lost)`);
+    if (lastPhaseOf(id)?.to !== 'done') die(`${id}'s worker hasn't logged phase done (its final spend); wait for it, or --force removes its worktree anyway`);
+  }
+  const R = fs.existsSync(wt) ? worktreeRepo(wt) ?? die(`${wt} is a worktree of no repo this machine can read`) : T;
+  if (fs.existsSync(wt)) {
+    R.gitOrDie(['worktree', 'remove', ...(flags.force ? ['--force'] : []), wt], R.root);
+    out(`removed ${wt} (a worktree of ${R.name})`);
+  }
+  R.gitOrDie(['worktree', 'prune'], R.root);
+  out(`pruned ${R.name}'s worktree list; now close its window`);
+}
 function makeSession(role) {
   supervisorOnly(role);
   const id = positional[0] ?? die(`usage: ${role} <${role === 'worker' ? 'ticket-id' : 'feature'}> [--resume] [--force]`);
   if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
   if (role === 'worker' && !tickets().has(id)) die(`no ticket ${id} (devteam.mjs ticket show ${id})`);
+  if (role === 'worker' && flags.remove) return removeWorkerWorktree(id);
   // A repo with files no line owns starts no new ticket; a ticket already started carries on.
-  if (role === 'worker' && !lastPhaseOf(id) && coverageGap()) die(`home's main has coverage gaps (${coverageGapInfo().words}): no new ticket starts there until a chore PR fixes the lines (devteam.mjs components check)`);
+  if (role === 'worker' && !lastPhaseOf(id)) {
+    const R = repoOfTicket(tickets().get(id)); // an act: fails fast on a missing or wrong checkout
+    if (coverageGap(R.name, R)) die(`${R.name}'s main has coverage gaps (${coverageGapInfo(R.name, R).words}): no new ticket starts there until a chore PR fixes the lines (devteam.mjs components check${R.name === 'home' ? '' : ` --repo ${R.name}`})`);
+  }
   // Every session serves a goal, and the goal's hold says whether it may start (planning.md §1):
   // drain lets a session that already ran carry on but starts nothing new; park and let-go start
   // nothing. --force does anyway, and its act says so. A planner names its goal until its feature
@@ -7500,14 +8034,19 @@ function makeSession(role) {
   // it, and one that numbered tickets before blocks existed gets none (nothing to check it against).
   const block = role === 'planner' && !idBlockFor(id) && !inFlightPlanTickets(branch).length ? reserveIdBlock(id, blockSize) : null;
   let madeWorktree = false;
+  // A worker's worktree is a checkout of its ticket's repo, under home's .worktrees;
+  // a planner's is home's. s stays home's for the session, the agent and its policy.
+  const R = role === 'worker' ? repoOfTicket(tickets().get(id)) : repo('home');
+  const mb = R.settings.main_branch;
   if (!fs.existsSync(wt)) {
-    git(['fetch', '--quiet', 'origin', s.main_branch]);
+    if (R.name === 'home') R.git(['fetch', '--quiet', 'origin', mb]);
+    else fetchLinkMain(R, 'refusing to start a ticket on a stale main');
     // a branch pushed from another machine (a moved fleet) continues from origin, never from main
-    git(['fetch', '--quiet', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
-    const base = resolveCommit(`origin/${s.main_branch}`) ? `origin/${s.main_branch}` : s.main_branch;
-    if (resolveCommit(`refs/heads/${branch}`)) gitOrDie(['worktree', 'add', '--quiet', wt, branch], mainRoot);
-    else if (resolveCommit(`refs/remotes/origin/${branch}`)) gitOrDie(['worktree', 'add', '--quiet', '--track', '-b', branch, wt, `origin/${branch}`], mainRoot);
-    else gitOrDie(['worktree', 'add', '--quiet', '-b', branch, wt, base], mainRoot);
+    R.git(['fetch', '--quiet', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
+    const base = R.resolveCommit(`origin/${mb}`) ? `origin/${mb}` : mb;
+    if (R.resolveCommit(`refs/heads/${branch}`)) R.gitOrDie(['worktree', 'add', '--quiet', wt, branch], R.root);
+    else if (R.resolveCommit(`refs/remotes/origin/${branch}`)) R.gitOrDie(['worktree', 'add', '--quiet', '--track', '-b', branch, wt, `origin/${branch}`], R.root);
+    else R.gitOrDie(['worktree', 'add', '--quiet', '-b', branch, wt, base], R.root);
     madeWorktree = true;
   }
   // A harness keeps its sessions by directory on its own machine: a worktree made just now has no
@@ -7517,13 +8056,13 @@ function makeSession(role) {
     warn(`no ${role} session to resume for ${name}: its worktree was just made here, so the agent has no earlier session in it (a new machine, or the worktree was removed); starting it fresh with agent_command${handoffFor(name) ? ' and its handoff note' : ''} instead`);
     resume = false;
   }
-  seedWorktree(wt);
+  seedWorktree(wt, { repo: R });
   const promptFile = path.join(runDir, 'prompts', `${name}.txt`);
   const knowledge = knowledgeBlock(id);
   const links = linksBlock(id);
   const arts = artifactsBlock(id);
   const held = block ?? (role === 'planner' ? idBlockFor(id) : null);
-  const text = `${PROMPTS[role].replace(/\{\{ID\}\}/g, id)}${held ? ` ${idBlockText(held)}` : ''}`;
+  const text = `${promptFor(role, id, R)}${held ? ` ${idBlockText(held)}` : ''}`;
   const handoff = handoffBlock(name);
   fs.writeFileSync(promptFile, `${text}${handoff ? `\n\n${handoff}` : ''}${links ? `\n\n${links}` : ''}${arts ? `\n\n${arts}` : ''}${knowledge ? `\n\n${knowledge}` : ''}\n`);
   // Workers live in detached tmux windows the owner can attach to; the supervisor is not one of them.
@@ -7535,15 +8074,16 @@ function makeSession(role) {
   else if (!fresh) tmux(['new-window', '-d', '-t', `=${session}`, '-n', name, '-c', wt]);
   const target = `=${session}:${name}`;
   const shown = `${session}:${name}`;
-  const env = `export DEVTEAM_RUN='${runDir}' DEVTEAM_ROLE='${role}' ${role === 'worker' ? `DEVTEAM_TICKET='${id}'` : `DEVTEAM_FEATURE='${id}'`}`;
+  const env = `export DEVTEAM_HOME=${shq(mainRoot)} DEVTEAM_RUN='${runDir}' DEVTEAM_ROLE='${role}' ${role === 'worker' ? `DEVTEAM_TICKET='${id}'` : `DEVTEAM_FEATURE='${id}'`}`;
   typeInto(target, env);
   // Worker and planner policy travels with the launch, not the repo's agent config (which may be
   // gitignored, and would bind the supervisor too): for Claude Code, a --settings file in run/.
   let cmd = resume ? s.resume_command : s.agent_command;
   if (/^claude(\s|$)/.test(cmd)) {
-    const policy = path.join(runDir, 'agent', `${role}-claude.json`);
+    // per session: the deny rules name the main branch of the repo this session works in
+    const policy = path.join(runDir, 'agent', `${name}-claude.json`);
     fs.mkdirSync(path.dirname(policy), { recursive: true });
-    fs.writeFileSync(policy, `${JSON.stringify({ permissions: { deny: s.worker_denied_commands.map((c) => `Bash(${c})`) }, hooks: { Stop: [{ hooks: [{ type: 'command', command: `node '${path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs')}' stop-ok` }] }] } }, null, 2)}\n`);
+    fs.writeFileSync(policy, `${JSON.stringify({ permissions: { deny: deniedFor(s.worker_denied_commands, mb).map((c) => `Bash(${c})`) }, hooks: { Stop: [{ hooks: [{ type: 'command', command: `node '${path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs')}' stop-ok` }] }] } }, null, 2)}\n`);
     cmd = cmd.replace(/^claude/, `claude --settings '${policy}'`);
   }
   // A tmux server started from inside an agent session (the supervisor's, on a new machine) hands
@@ -7557,6 +8097,15 @@ function makeSession(role) {
   if (role === 'planner' && lastPhaseOf(name)?.to === 'parked') appendLog({ type: 'phase', from: 'parked', to: 'starting', note: `started in ${shown}` }, name);
   appendLog({ type: 'act', decision: citing(), class: 'worker-slots', what: `${resume ? 'resumed' : 'made'} ${role} ${name} in ${shown}${block ? `, ticket numbers ${padNN(block.from)}-${padNN(block.to)}` : ''}${refused ? ` while its goal is ${holdWords(mode)}, with --force` : ''}`, refs: role === 'worker' ? [id] : goalIds, reversible: true, id_block: block ?? undefined }, 'supervisor');
   out(`${resume ? 'resumed' : 'made'} ${role} ${name} in ${shown} at ${wt}${block ? `; ticket numbers ${padNN(block.from)}-${padNN(block.to)} reserved` : ''}`);
+}
+
+// A session's deny rules: the owner's worker_denied_commands, where a push rule that names the
+// literal branch main also names the main branch of the repo the session works in (a sibling on
+// trunk, or a home whose main_branch isn't main), so no worker pushes straight to its repo's main.
+function deniedFor(rules, mb) {
+  const out = [...rules];
+  if (mb && mb !== 'main') for (const c of rules) if (/^git push\b/.test(c) && /\bmain\b/.test(c)) out.push(c.replace(/\bmain\b/g, mb));
+  return [...new Set(out)];
 }
 
 // --- moving the fleet: fleet park | drain, fleet status, fleet unpark | undrain (supervisor.md §12) ---
@@ -7576,12 +8125,19 @@ const drainHost = (a) => DRAIN_WHAT.exec(a?.what ?? '')?.[1] ?? null;
 const drainReason = (a) => DRAIN_WHAT.exec(a?.what ?? '')?.[2] ?? a?.what ?? '';
 const lastPhaseOf = (who) => logObjects('phase').filter((p) => p.created_by === who).sort(byTime).pop() ?? null;
 // A session by its writer name: a ticket id, or plan-<feature>.
+// A session by its writer name: a ticket id, or plan-<feature>. Its repo by name; the object only
+// on use, so listing sessions never needs a checkout of every repo.
 function sessionOf(name) {
   const planner = writerClass(name) === 'planner';
   const id = planner ? name.slice('plan-'.length) : name;
-  return { name, role: planner ? 'planner' : 'worker', id, branch: planner ? `plan/${id}` : `ticket/${id}`, wt: path.join(mainRoot, '.worktrees', name), handoff: `${projectRel}/${planner ? `plans/${id}` : `tickets/${id}`}/handoff.md` };
+  const t = planner ? null : tickets().get(id);
+  const repoName = t ? repoOfTicketLink(t) : 'home';
+  return { name, role: planner ? 'planner' : 'worker', id, branch: planner ? `plan/${id}` : `ticket/${id}`, wt: path.join(mainRoot, '.worktrees', name), handoff: `${projectRelOf(repoName)}/${planner ? `plans/${id}` : `tickets/${id}`}/handoff.md`, repoName, readable: repoReadable(repoName), get repo() { return repo(repoName); } };
 }
-const isHandoffFile = (file) => !!file && new RegExp(`^${reReserved(projectRel)}/(tickets|plans)/[^/]+/handoff\\.md$`).test(file);
+// A repo's project folder by name, from settings alone (no checkout needed).
+const projectRelOf = (name) => { if (name === 'home') return projectRel; const s = loadSettings(); const l = ownEntry(s.links, name); return LINK_KINDS[l?.kind]?.effectiveSettings(l, s)?.project ?? REPO_OWN_DEFAULTS.project; };
+// A handoff note's old file form, under any repo's project folder.
+const isHandoffFile = (file) => !!file && [...new Set([projectRel, ...Object.keys(loadSettings().links ?? {}).filter((id) => LINK_KINDS[loadSettings().links[id]?.kind]?.hostsComponents).map(projectRelOf)])].some((rel) => new RegExp(`^${reReserved(rel)}/(tickets|plans)/[^/]+/handoff\\.md$`).test(file));
 // What parked a session at a time: an old fleet drain in force then, or the park or let-go of one
 // of its goals (a fleet park is one on every goal) in force then. A session parked for another
 // reason (a ruling about its ticket) has no cause, and so no handoff block.
@@ -7606,32 +8162,35 @@ function handoffFor(name) {
   const launch = (l) => l.type === 'phase' && ['parked', 'starting'].includes(l.to);
   if (mine.some((l) => l.at > parked.at && (planner || l.type === 'phase') && !launch(l))) return null;
   const s = sessionOf(name);
+  // its branch is in its own repo; one this machine can't read has no handoff here
+  if (!s.readable) return null;
+  const R = s.repo;
   // A hold released while the session was parking leaves no cause in force at its parked line;
   // a handoff commit it made for that park still counts.
   const prev = mine.filter((l) => l.type === 'phase' && l.at < parked.at && !launch(l)).pop();
-  const own = [`refs/heads/${s.branch}`, `refs/remotes/origin/${s.branch}`].map((r) => handoffCommit(r, name)).find((c) => c && (!prev || c.at >= prev.at));
+  const own = [`refs/heads/${s.branch}`, `refs/remotes/origin/${s.branch}`].map((r) => handoffCommit(r, name, R)).find((c) => c && (!prev || c.at >= prev.at));
   const cause = parkCauseAt(name, parked.at) ?? (own ? { kind: 'self', at: parked.at, marker: `self:${name}@${parked.at}`, reason: null } : null);
   if (!cause) return null;
   for (const r of [`refs/heads/${s.branch}`, `refs/remotes/origin/${s.branch}`]) {
-    const c = handoffCommit(r, name);
+    const c = handoffCommit(r, name, R);
     if (c) return { ...s, text: c.body, where: `the handoff commit ${c.sha.slice(0, 12)} on ${s.branch}, ${c.at}`, cause, parked_at: parked.at };
   }
   // the note used to be a file: read one a session parked by an old drain left
   const local = readText(path.join(s.wt, s.handoff));
   if (local !== null) return { ...s, text: local, where: `${s.handoff} in its worktree`, cause, parked_at: parked.at };
   for (const r of [`refs/heads/${s.branch}`, `refs/remotes/origin/${s.branch}`]) {
-    if (!resolveCommit(r)) continue;
-    const text = git(['show', `${r}:${s.handoff}`]);
-    if (text !== null) return { ...s, text, where: `${s.handoff} on ${s.branch}, committed ${git(['log', '-1', '--format=%cI', r, '--', s.handoff]) ?? '?'}`, cause, parked_at: parked.at };
+    if (!R.resolveCommit(r)) continue;
+    const text = R.git(['show', `${r}:${s.handoff}`]);
+    if (text !== null) return { ...s, text, where: `${s.handoff} on ${s.branch}, committed ${R.git(['log', '-1', '--format=%cI', r, '--', s.handoff]) ?? '?'}`, cause, parked_at: parked.at };
   }
   return null;
 }
 // A parked session's handoff is an empty commit on its own branch, titled "devteam handoff: <name>",
 // with the note as its body: nothing extra lands in the repo, and it travels with the branch.
 const HANDOFF_SUBJECT = (name) => `devteam handoff: ${name}`;
-function handoffCommit(ref, name) {
-  if (!resolveCommit(ref)) return null;
-  const raw = git(['log', '-1', '--format=%H%x00%cI%x00%B', `--grep=^${HANDOFF_SUBJECT(name).replace(/[.[\]*^$]/g, '\\$&')}$`, ref]);
+function handoffCommit(ref, name, R = repo('home')) {
+  if (!R.resolveCommit(ref)) return null;
+  const raw = R.git(['log', '-1', '--format=%H%x00%cI%x00%B', `--grep=^${HANDOFF_SUBJECT(name).replace(/[.[\]*^$]/g, '\\$&')}$`, ref]);
   if (!raw) return null;
   const [sha, at, msg] = raw.split('\0');
   return { sha, at, body: msg.split('\n').slice(1).join('\n').trim() };
@@ -7673,15 +8232,15 @@ function cmdHandoff() {
   if (!['worker', 'planner'].includes(role)) die('handoff: a worker or planner records its own (the supervisor adds --supervisor)');
   const name = role === 'worker' ? (process.env.DEVTEAM_TICKET ?? currentTicketId() ?? die('handoff: no ticket')) : `plan-${process.env.DEVTEAM_FEATURE ?? die('handoff: no feature')}`;
   const sess = sessionOf(name);
-  if (workLines(git(['status', '--porcelain'])).length) die('handoff: commit your work in progress first (a WIP commit is fine); the handoff commit holds only the note');
-  const branch = git(['rev-parse', '--abbrev-ref', 'HEAD']);
+  if (workLines(cwdGit(['status', '--porcelain'])).length) die('handoff: commit your work in progress first (a WIP commit is fine); the handoff commit holds only the note');
+  const branch = cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']);
   if (branch !== sess.branch) die(`handoff: you are on ${branch}, not ${sess.branch}`);
   withScratch((dir) => {
     const f = path.join(dir, 'msg');
     fs.writeFileSync(f, `${HANDOFF_SUBJECT(name)}\n\n${note}\n`);
-    gitOrDie(['commit', '--quiet', '--allow-empty', '-F', f]);
+    cwdGitOrDie(['commit', '--quiet', '--allow-empty', '-F', f]);
   });
-  gitOrDie(['push', '--quiet', 'origin', `HEAD:refs/heads/${sess.branch}`]);
+  cwdGitOrDie(['push', '--quiet', 'origin', `HEAD:refs/heads/${sess.branch}`]);
   out(`handoff committed on ${sess.branch} and pushed; now: devteam.mjs phase parked --note "parked", and stop`);
 }
 const causeWords = (c) => (c.kind === 'self' ? 'it was told to park' : c.kind === 'fleet' ? `the fleet was parked${c.host ? ` on ${c.host}` : ''}${c.reason ? ` (${c.reason})` : ''}` : c.kind === 'let-go' ? `the owner let go of "${c.title}"` : `"${c.title}" was parked${c.reason ? ` (${c.reason})` : ''}`);
@@ -7799,23 +8358,45 @@ function fleetStatus() {
   const op = fleetOpInForce();
   const since = legacy ? legacy.created_at : op ? fleetAt(op.fleet) : null;
   const d = fm ? { id: legacy?.id ?? op?.fleet ?? 'holds', created_at: since } : null;
-  if (!flags['no-fetch'] && commonDir) git(['fetch', '--quiet', 'origin']);
+  // Every repo link, and whether this machine can read it (a view: never fails on one it can't).
+  const repoLinks = Object.entries(s.links ?? {}).filter(([, l]) => LINK_KINDS[l?.kind]?.hostsComponents);
+  const readableLinks = repoLinks.filter(([id]) => repoReadable(id)).map(([id]) => repo(id));
+  // another repo's fetch failing is a blocker: its sessions' pushed state would be read from a stale origin
+  const fetchFails = [];
+  if (!flags['no-fetch'] && commonDir) {
+    git(['fetch', '--quiet', 'origin']);
+    for (const R of readableLinks) {
+      if (R.git(['config', '--get', 'remote.origin.url'], R.root) === null) continue;
+      const f = gitRun(['fetch', '--quiet', 'origin'], R.root);
+      if (f.status !== 0) fetchFails.push(`${R.name}: could not fetch origin: ${redactUrl(firstLine(f.err)) || `exit ${f.status}`}; what its sessions pushed is unchecked`);
+      R.resetCaches();
+    }
+  }
   mainRefCache = undefined;
   const main = mainRef();
-  const blockers = [];
+  const blockers = [...fetchFails];
   const warnings = [];
   if (!fm) blockers.push(`the fleet is neither parked nor drained (${holdableGoals().filter((g) => goalMode(g) === 'run').map((g) => (isUpkeep(g) ? 'Upkeep' : `"${g.title}"`)).join(', ')} still running): run fleet park or fleet drain first`);
 
   const sessions = liveSessions().map((x) => {
     const phase = lastPhaseOf(x.name);
+    // a session in a repo this machine can't read: one blocker that says what to clone where
+    if (!x.readable) {
+      const l = ownEntry(s.links, x.repoName);
+      const p = `its repo ${x.repoName} has no checkout here, or the wrong one: ${LINK_KINDS[l?.kind]?.fixHint(l, x.repoName) ?? `no repo link "${x.repoName}"`}`;
+      blockers.push(`${x.name}: ${p}`);
+      return { name: x.name, role: x.role, branch: x.branch, repo: x.repoName, readable: false, parked: phase?.to === 'parked', phase: phase?.to ?? null, problems: [p] };
+    }
+    // its branch, remote and handoff in its own repo (home's for a home ticket or a planner)
+    const R = x.repo;
     const cause = phase?.to === 'parked' ? parkCauseAt(x.name, phase.created_at) : null;
-    const local = resolveCommit(`refs/heads/${x.branch}`);
-    const remote = resolveCommit(`refs/remotes/origin/${x.branch}`);
+    const local = R.resolveCommit(`refs/heads/${x.branch}`);
+    const remote = R.resolveCommit(`refs/remotes/origin/${x.branch}`);
     const dirty = fs.existsSync(x.wt) ? workLines(git(['status', '--porcelain'], x.wt)) : [];
-    const hc = remote ? handoffCommit(`refs/remotes/origin/${x.branch}`, x.name) : null;
-    const handoffAt = hc ? hc.at : remote && git(['cat-file', '-e', `${remote}:${x.handoff}`]) !== null ? git(['log', '-1', '--format=%cI', remote, '--', x.handoff]) : null;
+    const hc = remote ? handoffCommit(`refs/remotes/origin/${x.branch}`, x.name, R) : null;
+    const handoffAt = hc ? hc.at : remote && R.git(['cat-file', '-e', `${remote}:${x.handoff}`]) !== null ? R.git(['log', '-1', '--format=%cI', remote, '--', x.handoff]) : null;
     const r = {
-      name: x.name, role: x.role, branch: x.branch,
+      name: x.name, role: x.role, branch: x.branch, ...(x.repoName === 'home' ? {} : { repo: x.repoName, readable: true }),
       parked: phase?.to === 'parked', phase: phase?.to ?? null,
       pushed: !!remote && (!local || local === remote), local, remote,
       clean: !dirty.length, uncommitted: dirty.slice(0, 20),
@@ -7899,8 +8480,10 @@ function fleetStatus() {
     if (dirty || unpushed) strays.push(`${n} (${[dirty && `${dirty} uncommitted`, unpushed && `${unpushed} commit(s) on no remote`].filter(Boolean).join(', ')})`);
   }
   if (strays.length) blockers.push(`worktrees holding work that isn't on the remote: ${strays.join('; ')}: push or land it, or remove the worktree`);
-  const unpushedBranches = (git(['for-each-ref', '--format=%(refname:short)', 'refs/heads']) ?? '').split('\n').filter(Boolean)
-    .filter((b) => Number(git(['rev-list', '--count', b, '--not', '--remotes']) ?? 0) > 0 && git(['cherry', mainRef() ?? 'HEAD', b])?.split('\n').some((l) => l.startsWith('+')));
+  // in every repo this machine can read: home's branches as before, another repo's named <repo>:<branch>
+  const unpushedIn = (R) => (R.git(['for-each-ref', '--format=%(refname:short)', 'refs/heads']) ?? '').split('\n').filter(Boolean)
+    .filter((b) => Number(R.git(['rev-list', '--count', b, '--not', '--remotes']) ?? 0) > 0 && R.git(['cherry', R.mainRef() ?? 'HEAD', b])?.split('\n').some((l) => l.startsWith('+')));
+  const unpushedBranches = [...unpushedIn(repo('home')), ...readableLinks.flatMap((R) => unpushedIn(R).map((b) => `${R.name}:${b}`))];
   if (unpushedBranches.length) warnings.push(`local branches with commits on no remote (squash-merged ones show here too): ${unpushedBranches.join(', ')}: push any that still matter`);
   if ((git(['stash', 'list']) ?? '').trim()) warnings.push('git stash has entries; they stay here: commit what matters to a branch and push it');
 
@@ -7908,7 +8491,7 @@ function fleetStatus() {
   const openQs = questions().filter((q) => q.status === 'open').map((q) => ({ id: q.id, question: q.question }));
   let prs = null;
   if (s.forge !== 'git') {
-    const raw = sh('gh', ['pr', 'list', '--state', 'open', '--json', 'number,title,headRefName,url']);
+    const raw = repo('home').gh(['pr', 'list', '--state', 'open', '--json', 'number,title,headRefName,url']);
     try { prs = raw === null ? null : JSON.parse(raw); } catch { prs = null; }
     if (prs === null) warnings.push('gh could not list the open PRs');
   } else {
@@ -7919,15 +8502,31 @@ function fleetStatus() {
     prs = texts.map((b) => ({ headRefName: b, title: (readText(path.join(dir, `${b}.md`)) ?? '').split('\n')[0].replace(/^# /, '') }));
     if (texts.length) warnings.push(`forge is git: the PR text for ${texts.join(', ')} is only in run/pr here; copy run/pr/ to the new machine`);
   }
+  // each repo link on GitHub lists its own (forge git PR text is in home's run/pr, above)
+  for (const R of readableLinks.filter((x) => x.settings.forge !== 'git')) {
+    let theirs = null;
+    try { theirs = JSON.parse(R.gh(['pr', 'list', '--state', 'open', '--json', 'number,title,headRefName,url']) ?? 'null'); } catch { theirs = null; }
+    if (theirs === null) warnings.push(`gh could not list ${R.name}'s open PRs`);
+    else prs = [...(prs ?? []), ...theirs.map((p) => ({ ...p, headRefName: `${R.name}:${p.headRefName}` }))];
+  }
 
+  // Every repo link: where its checkout is here. Only with repo links, so a single-repo
+  // project's JSON and text are as before.
+  const repos = repoLinks.map(([id, l]) => {
+    const at = linkLocation(id);
+    const readable = repoReadable(id);
+    if (!readable) blockers.push(`${id}: ${LINK_KINDS[l.kind].fixHint(l, id)}`);
+    return { id, remote: redactUrl(l.remote), path: at, found: fs.existsSync(at), readable };
+  });
   const checklist = moveChecklist(s, memory);
   const ready = !blockers.length;
   const parity = ready ? parityPrint() : null;
-  const r = { parity, supervisor_handoff: sh0 ? { at: sh0.at, current: handoffOk } : null, fleet: fm ? { mode: fm, op: op?.fleet ?? legacy?.id ?? null, at: since, host: legacy ? drainHost(legacy) : op?.host ?? null, reason: legacy ? drainReason(legacy) : op?.reason ?? null } : null, sessions, log: { landed: !unlanded.length, unlanded, left_behind: leftBehind }, spend: { unobserved: spendOthers, supervisor_usd: supUsd }, reviews: { uncommitted, drafts }, open_prs: prs ?? [], open_questions: openQs, blockers, warnings, ready, checklist };
+  const r = { parity, supervisor_handoff: sh0 ? { at: sh0.at, current: handoffOk } : null, fleet: fm ? { mode: fm, op: op?.fleet ?? legacy?.id ?? null, at: since, host: legacy ? drainHost(legacy) : op?.host ?? null, reason: legacy ? drainReason(legacy) : op?.reason ?? null } : null, sessions, log: { landed: !unlanded.length, unlanded, left_behind: leftBehind }, spend: { unobserved: spendOthers, supervisor_usd: supUsd }, reviews: { uncommitted, drafts }, open_prs: prs ?? [], open_questions: openQs, ...(repoLinks.length ? { repos } : {}), blockers, warnings, ready, checklist };
   if (flags.json) return json(r);
   out(fm ? `${fm === 'park' ? 'parked' : 'draining'}${since ? ` since ${since}` : ''} (${r.fleet.op ?? 'every goal held one by one'}${r.fleet.host ? `, on ${r.fleet.host}` : ''})${r.fleet.reason ? `: ${r.fleet.reason}` : ''}` : 'neither parked nor drained');
   out(`\nsessions:${sessions.length ? '' : ' none'}`);
-  for (const x of sessions) out(`  ${x.name.padEnd(28)} ${x.parked ? 'parked' : fm === 'drain' ? `STILL RUNNING (${x.phase ?? '-'})` : `NOT PARKED (${x.phase ?? '-'})`}  ${x.pushed ? 'pushed' : 'NOT PUSHED'}  ${x.clean ? 'clean' : 'UNCOMMITTED'}  ${x.handoff ? 'handoff' : 'NO HANDOFF'}`);
+  for (const x of sessions) out(x.readable === false ? `  ${x.name.padEnd(28)} ${x.parked ? 'parked' : `NOT PARKED (${x.phase ?? '-'})`}  ${x.repo}: NO CHECKOUT HERE` : `  ${x.name.padEnd(28)} ${x.parked ? 'parked' : fm === 'drain' ? `STILL RUNNING (${x.phase ?? '-'})` : `NOT PARKED (${x.phase ?? '-'})`}  ${x.pushed ? 'pushed' : 'NOT PUSHED'}  ${x.clean ? 'clean' : 'UNCOMMITTED'}  ${x.handoff ? 'handoff' : 'NO HANDOFF'}${x.repo ? `  (${x.repo})` : ''}`);
+  if (repoLinks.length) { out('\nrepos:'); for (const x of repos) out(`  ${x.id.padEnd(28)} ${x.remote} at ${x.path}  ${x.readable ? 'found' : x.found ? 'WRONG CHECKOUT' : 'MISSING'}`); }
   out(`\nlog: ${unlanded.length ? `not landed (${unlanded.map((u) => u.file).join(', ')}): run log-sync, then merge --chore log` : `on ${s.main_branch}`}${leftBehind ? " (the log's own merge act stays behind; git keeps the merge)" : ''}`);
   out(`spend: ${spendOthers.length ? `not yet observed for ${spendOthers.map((x) => `${x.who} $${x.usd}`).join(', ')}` : 'observed up to now'}${supUsd ? `; the supervisor's own $${supUsd} since its last observe-spend` : ''}`);
   out(`review results: ${uncommitted.length ? uncommitted.map((u) => `${u.id} not committed to ${u.ref}`).join('; ') : 'all in their PRs'}${drafts.length ? `; drafts that won't move: ${drafts.join(', ')}` : ''}`);
@@ -7957,8 +8556,15 @@ function moveChecklist(s, memory = []) {
     else if (k.type === 'stdin') commands.add(k.argv.slice(0, 2).join(' '));
   }
   const files = (s.worktree_files ?? []).filter((f) => !keys.has(f));
+  // each repo link cloned where its path says (its checkout's own origin when it is here)
+  const siblings = Object.entries(s.links ?? {}).filter(([, l]) => LINK_KINDS[l?.kind]?.hostsComponents).map(([id, l]) => {
+    const from = redactUrl((repoReadable(id) ? git(['config', '--get', 'remote.origin.url'], linkLocation(id)) : null) ?? l.remote);
+    return `clone ${redactUrl(l.remote)}: git clone ${shq(from)} ${shq(linkLocation(id))} (where settings path says)`;
+  });
   return [
     `clone the repo: git clone ${url}, and cd into it`,
+    ...siblings,
+    ...(fs.existsSync(LINKS_LOCAL) ? ['this machine kept its own checkout paths in run/links.local.json (it doesn\'t move): on the new machine, clone where settings say, or write run/links.local.json there with that machine\'s paths'] : []),
     pins.length ? `install the pinned tools from ${pins.join(', ')} (asdf: asdf install)` : 'install Node 18 or newer',
     `install git, tmux${s.forge === 'git' ? '' : ', the GitHub CLI'} and ${agent} with superpowers; log in to ${agent}${s.forge === 'git' ? '' : ' and gh (gh auth login)'}`,
     ...(files.length ? [`copy these gitignored files from the old checkout over a secure channel (never git, chat or the log): ${files.join(', ')}`] : []),
@@ -8122,7 +8728,7 @@ function kitVersion() {
 function cmdWhoami() {
   const id = currentTicketId();
   const s = loadSettings();
-  out([`DEVTEAM_TICKET=${id ?? ''}`, `DEVTEAM_FEATURE=${process.env.DEVTEAM_FEATURE ?? ''}`, `DEVTEAM_ROLE=${process.env.DEVTEAM_ROLE ?? (id ? 'worker' : logWriter().startsWith('plan-') ? 'planner' : 'supervisor')}`, `DEVTEAM_RUN=${runDir}`, `DEVTEAM_SUPERVISOR=${supervisorTarget() ?? ''}`, `# writer=${logWriter()} repo=${repoRoot} main_checkout=${mainRoot} project=${projectDir} tmux_session=${tmuxSession()}`].join('\n'));
+  out([`DEVTEAM_TICKET=${id ?? ''}`, `DEVTEAM_FEATURE=${process.env.DEVTEAM_FEATURE ?? ''}`, `DEVTEAM_ROLE=${process.env.DEVTEAM_ROLE ?? (id ? 'worker' : logWriter().startsWith('plan-') ? 'planner' : 'supervisor')}`, `DEVTEAM_RUN=${runDir}`, `DEVTEAM_SUPERVISOR=${supervisorTarget() ?? ''}`, `# writer=${logWriter()} home=${mainRoot} repo=${repoRoot} main_checkout=${mainRoot} project=${projectDir} tmux_session=${tmuxSession()}`].join('\n'));
 }
 function cmdSettings() {
   const s = loadSettings();
@@ -8197,7 +8803,10 @@ function historyOf(ids, { types = null, limit = 300 } = {}) {
   }
   return res.slice(-limit);
 }
-const fileHistory = (rel, ref = null) => (git(['log', '-n', '60', '--format=%H%x09%cI%x09%an%x09%s', ...(ref ? [ref] : []), '--', rel]) ?? '').split('\n').filter(Boolean).map((x) => { const [sha, at, author, subject] = x.split('\t'); return { sha, at, author, subject }; }).reverse();
+// A file's commits, from the git of the repo it is in: another repo's (read on its main by default)
+// only when this machine can read it, else none (a view never fails on a missing checkout).
+const fileHistory = (rel, ref = null, name = 'home') => { const R = name === 'home' ? repo('home') : repoReadable(name) ? repo(name) : null; return fileHistoryIn(R, rel, ref ?? (name === 'home' ? null : R?.mainRef())); };
+const fileHistoryIn = (R, rel, ref) => (!R ? '' : R.git(['log', '-n', '60', '--format=%H%x09%cI%x09%an%x09%s', ...(ref ? [ref] : []), '--', rel]) ?? '').split('\n').filter(Boolean).map((x) => { const [sha, at, author, subject] = x.split('\t'); return { sha, at, author, subject }; }).reverse();
 function peekView(kind, id) {
   // the stored record this object is, or lives in (a story in its feature, a milestone in its goal)
   const v = { kind, id, record: recordView(flagStr('rec') ?? (kind === 'planner' ? '' : id)) };
@@ -8245,7 +8854,7 @@ function peekView(kind, id) {
     const nums = (x) => { try { return JSON.parse((x?.source_ref ? projectFileText(x.source_ref.replace(/^project\//, '')) : '')?.match(RETRO_BLOCK)?.[1] ?? 'null'); } catch { return null; } };
     v.numbers = { now: nums(o), prev: nums(prev), prev_id: prev?.id ?? null };
   } else if (kind === 'file') {
-    v.history = fileHistory(id, flagStr('ref') ?? null);
+    v.history = fileHistory(id, flagStr('ref') ?? null, flagStr('repo') ?? 'home');
   } else if (['story', 'release', 'wave', 'milestone'].includes(kind)) {
     v.history = historyOf(listFlag('tickets'), { types: ['ticket', 'act', 'decision', 'question'] }).filter((l) => l.type !== 'ticket' || l.op === 'new');
     if (kind === 'release') {
@@ -8305,12 +8914,14 @@ function cmdHistory() {
 // Story-grouped release notes between two refs, from the fold.
 function cmdNotes() {
   const [from, to = 'HEAD'] = positional;
-  if (!from) die('usage: notes <from-tag> [<to-ref>]');
-  const log = git(['log', `${from}..${to}`, '--format=%s']) ?? die(`cannot read git log ${from}..${to}`);
-  const ts = tickets();
+  if (!from) die('usage: notes <from-tag> [<to-ref>] [--repo <link>]');
+  // another repo's release: its history, and only its tickets
+  const R = repo(flagStr('repo') ?? 'home');
+  const log = R.git(['log', `${from}..${to}`, '--format=%s']) ?? die(`cannot read git log ${from}..${to}${R.name === 'home' ? '' : ` in ${R.name}`}`);
+  const ts = new Map([...tickets()].filter(([, t]) => repoOfTicketLink(t) === R.name));
   const landed = new Set();
   for (const s of log.split('\n')) { const m = s.match(/from \S*ticket\/([a-z0-9-]+)$/) ?? s.match(/^([a-z][a-z0-9-]*-\d{2,}-[a-z0-9-]+):/); if (m && ts.has(m[1])) landed.add(m[1]); }
-  const landedBy = (id) => landed.has(id) || (!!mergeShaFor(id) && git(['merge-base', '--is-ancestor', mergeShaFor(id), to]) !== null);
+  const landedBy = (id) => landed.has(id) || (!!mergeShaFor(id) && R.git(['merge-base', '--is-ancestor', mergeShaFor(id), to]) !== null);
   const stories = new Map();
   for (const id of landed) for (const s of ts.get(id).serves ?? []) (stories.get(s) ?? stories.set(s, []).get(s)).push(id);
   const completed = [];
@@ -8352,11 +8963,13 @@ const treePathsMemo = (ref, R = homeFacts) => memo(`tree\0${R.name}\0${ref}`, ()
 // settings. Exits 1 on any problem; --count prints the Baseline's gap count.
 function cmdComponents() {
   const [sub] = positional;
-  if (sub !== 'check') die('usage: components check [--ref <ref>] [--count] [--json]');
-  const ref = flagStr('ref') ?? mainRef() ?? 'HEAD';
-  const sha = resolveCommit(ref) ?? die(`${ref} is not a commit here (git fetch first?)`);
-  const s = settingsAt(sha) ?? die(`${projectRel}/settings.md at ${ref}: the json devteam block is not valid JSON`);
-  const read = readCoverage(() => coverageAt(sha, s));
+  if (sub !== 'check') die('usage: components check [--ref <ref>] [--repo <link> [--path <checkout>]] [--count] [--json]');
+  // another repo's tree under home's committed lines (settings live in home); home's under its own
+  const R = repo(flagStr('repo') ?? 'home');
+  const ref = flagStr('ref') ?? R.mainRef() ?? 'HEAD';
+  const sha = R.resolveCommit(ref) ?? die(`${ref} is not a commit${R.name === 'home' ? '' : ` in ${R.name}`} here (git fetch first?)`);
+  const s = (R.name === 'home' ? settingsAt(sha) : mainSettings()) ?? die(`${projectRel}/settings.md at ${ref}: the json devteam block is not valid JSON`);
+  const read = readCoverage(() => coverageAt(sha, s, R));
   if (read.error) die(`components check: ${read.error}`);
   const cov = read.value;
   if (!cov) {
@@ -8368,8 +8981,8 @@ function cmdComponents() {
   const bad = gaps.count + gaps.case_collisions.length;
   if (flags.count) { out(String(gaps.count)); return void process.exit(bad ? 1 : 0); }
   if (flags.json) { json({ ref, declared: true, ...gaps }); return void process.exit(bad ? 1 : 0); }
-  for (const l of coverageReport(gaps, s)) out(l);
-  out(`${treePathsMemo(sha).length} tracked path(s) at ${ref}: ${gaps.unowned.length} unowned, ${gaps.contested.length} contested, ${gaps.empty.length} empty glob(s), ${gaps.unlinked.length} unlinked, ${gaps.case_collisions.length} case collision(s)`);
+  for (const l of coverageReport(gaps, s, R)) out(l);
+  out(`${treePathsMemo(sha, R).length} tracked path(s) at ${ref}: ${gaps.unowned.length} unowned, ${gaps.contested.length} contested, ${gaps.empty.length} empty glob(s), ${gaps.unlinked.length} unlinked, ${gaps.case_collisions.length} case collision(s)`);
   process.exit(bad ? 1 : 0);
 }
 
@@ -8399,10 +9012,14 @@ const LANDING_HINT = 'it applies here now; land it on main with the next chore P
 // entry of the supervisor's kind that differs here from the chore's is set or removed there, and
 // nothing else in the chore's settings.md changes: this checkout's copy of every other key may be
 // older than main's (a components line widened since), and carrying the whole file would revert it.
-// A link of an owner's kind is left alone: it lands with the owner's governance-edit answer.
-// An entry is carried only when its acts lead from the chore's (main's) entry to this one: when
-// main's entry changed since the act was made, the act's parent state is gone, and the entry is
-// refused (the run exits 1, after carrying the others).
+// A link of an owner's kind is carried only as the owner approved it: link add|set|rm --approved
+// logged an act naming the link with the entry it wrote (entry_hash); anything else of an owner's
+// kind is left alone, to land with the owner's answer.
+// A supervisor's entry is carried only when its acts lead from the chore's (main's) entry to this
+// one: when main's entry changed since the act was made, the act's parent state is gone, and the
+// entry is refused (the run exits 1, after carrying the others).
+// An entry of an owner's kind exactly as an answered question approved it (linkByOwner's act).
+const ownerApproved = (id, entry) => logObjects('act').some((a) => a.approved_by && ['governance-edit', 'gate-change'].includes(a.class) && (a.refs ?? []).includes(`link:${id}`) && Object.hasOwn(a, 'entry_hash') && a.entry_hash === linkEntryHash(entry));
 function linkLand(slugName) {
   choreSlug(slugName);
   if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
@@ -8420,8 +9037,9 @@ function linkLand(slugName) {
     for (const id of [...new Set([...Object.keys(there), ...Object.keys(here)])].sort()) {
       const h = ownEntry(here, id), t = ownEntry(there, id);
       if (canonical(h) === canonical(t)) continue;
-      if (ownersKind(h) || ownersKind(t)) { owners.push(`links.${id}`); continue; }
-      if (!linkActsLead(id, linkEntryHash(t), linkEntryHash(h))) {
+      if (ownersKind(h) || ownersKind(t)) {
+        if (!ownerApproved(id, h)) { owners.push(`links.${id}`); continue; }
+      } else if (!linkActsLead(id, linkEntryHash(t), linkEntryHash(h))) {
         const act = logObjects('act').filter((a) => a.class === 'registry-edit' && (a.refs ?? []).includes(`link:${id}`) && a.entry_hash === linkEntryHash(h)).sort(byTime).pop();
         refused.push(act ? `main's links.${id} changed since ${act.id}; re-run link ${h === undefined ? 'rm' : 'set'} from main's entry (bring this checkout's settings.md up to date first)` : `links.${id} differs here from main and no registry-edit act wrote it from main's entry; make the change with link add|set|rm`);
         continue;
@@ -8469,7 +9087,7 @@ function cmdLink() {
     ];
     if (citers.length) die(`${id} is cited by ${citers.join(', ')}; take it out of their links (ticket set, feature set) and their text first`);
   }
-  if (K.ownedByOwner) die(`a ${kind} link is the owner's (governance-edit): put the entry in settings.md on a chore branch and land it with merge --chore <slug> --approved <qid> (an answered governance-edit question)`);
+  if (K.ownedByOwner) return linkByOwner(sub, id, field, vals, kind);
   const source = flagStr('source');
   if (source && !logGet(source)) die(`--source ${source}: no such log entry`);
   // authority first, so a refusal writes nothing
@@ -8498,6 +9116,65 @@ function cmdLink() {
   appendLog({ type: 'act', decision: citing(), class: 'registry-edit', what, refs: [`link:${id}`, ...(source ? [source] : [])], reversible: true, entry_hash: linkEntryHash(entry), prior_hash: linkEntryHash(cur) }, 'supervisor');
   out(`${what}; ${LANDING_HINT}`);
 }
+// The json devteam block of the main checkout's settings.md as written, not as loadSettings pins
+// it: a repo link written by an earlier --approved run is here before it lands on main.
+const rawSettingsBlock = () => { const m = readText(path.join(projectDir, 'settings.md'))?.match(/```json devteam\s*\n([\s\S]*?)\n```/); try { return m ? JSON.parse(m[1]) : {}; } catch { return {}; } };
+// A link of an owner's kind: draft the change and ask a question in the class its
+// field takes (gate-change for a gate field, else governance-edit); with --approved <qid>, apply
+// exactly that change and log the act the chore-registry merge then lands under the same answer.
+// Asking twice for the same draft reuses the open question; applying a draft already written is a
+// no-op. Nothing here names a kind: the table gives fields and classes.
+function linkByOwner(sub, id, field, vals, kind) {
+  const K = LINK_KINDS[kind];
+  const raw = rawSettingsBlock().links ?? {};
+  const cur = ownEntry(raw, id) ?? ownEntry(loadSettings().links, id);
+  const pick = Object.fromEntries(linkFields(kind).filter((k) => k !== 'kind' && flags[k] !== undefined).map((k) => [k, k === 'for' ? listFlag('for') : linkValue(k, [flagStr(k)])]));
+  if (sub === 'set' && (!field || !vals.length)) die('usage: link set <id> <field> [--] <value> (a value that starts with -- goes after a bare --)');
+  const next = sub === 'rm' ? undefined : sub === 'add' ? { kind, ...pick } : { ...cur, [field]: linkValue(field, vals) };
+  if (sub === 'add') for (const f of ['title', ...K.fields.required]) if (next[f] === undefined) die(`link add --kind ${kind} needs --${f}`);
+  const cls = sub === 'set' ? K.ownerClass(field) : 'governance-edit';
+  // a field that is no one's (a repo link's path) is written like a url link's, as registry-edit
+  if (sub === 'set' && !cls) return editUnownedField(id, field, next[field]);
+  if (canonical(ownEntry(raw, id) ?? null) === canonical(next ?? null)) return out(`links.${id} is already ${next ? 'that' : 'gone'} in settings.md here; ${LANDING_HINT}`);
+  const { errors } = registryProblems({ ...loadSettings(), links: { ...Object.fromEntries(Object.entries(loadSettings().links ?? {}).filter(([k]) => k !== id)), ...(next ? { [id]: next } : {}) } });
+  if (errors.length) die(`not drafted:\n  - ${errors.join('\n  - ')}`);
+  // The bundle the answer covers: every link of an owner's kind that settings.md here, with this
+  // change, would land differently from main, this one included. One answer may approve a bundle,
+  // so the question shows all of it; merge then lands exactly these entries under that answer.
+  const mainLinks = mainSettings(null)?.links ?? {};
+  const after = Object.assign(Object.create(null), raw);
+  if (next) after[id] = next; else delete after[id];
+  const bundleIds = [...new Set(linkOwnerChanges(mainLinks, after).filter((c) => !SUPERVISOR_LINK_CLASSES.includes(c.cls)).map((c) => c.key.split('.')[1]))].sort();
+  if (!bundleIds.includes(id)) bundleIds.push(id);
+  const bundle = Object.fromEntries(bundleIds.map((l) => [l, ownEntry(after, l) ?? null]));
+  const draft = JSON.stringify(bundle, null, 2);
+  const diff = bundleIds.map((l) => `links.${l}: main has ${canonical(ownEntry(mainLinks, l) ?? null)}; would be ${canonical(ownEntry(after, l) ?? null)}`).join('\n');
+  const approved = flagStr('approved');
+  // the command to run once answered: this one, every value quoted, plus --approved
+  const again = (qid) => `node docs/devteam/scripts/devteam.mjs link ${argv.filter((a, i) => a !== '--approved' && argv[i - 1] !== '--approved').map(shq).join(' ')} --approved ${qid}`;
+  if (!approved) {
+    const open = questions().find((q) => q.status === 'open' && q.class === cls && (q.context ?? '').includes(draft));
+    if (open) return out(`${open.id}: already asked the owner about this exact change; once answered: ${again(open.id)}`);
+    const q = appendLog({ type: 'question', kind: 'owner-decision', class: cls, question: `${sub === 'add' ? 'Add' : sub === 'rm' ? 'Remove' : 'Change'} the ${kind} link ${id}${sub === 'set' ? ` (${field})` : ''}?`, context: `The settings diff this answer approves${bundleIds.length > 1 ? ` (this change and ${bundleIds.length - 1} other repo link change(s) waiting in settings.md to land with it)` : ''}, each links entry main has and what would land:\n${diff}\n\nThe registry entries, as they would be in settings.md links (merge lands exactly these under this answer, and no other):\n${draft}`, recommendation: 'yes', why_asked: { reasons: ['owner-only'] } }, 'supervisor');
+    return out(`${q.id}: asked the owner (${cls}); nothing is written until it is answered. Then: ${again(q.id)}`);
+  }
+  const v = ownerAnswer(approved, 'link --approved');
+  if (v.class !== cls) die(`${approved} was asked in class ${v.class ?? '(none)'}, not ${cls}`);
+  if (!(v.context ?? '').includes(draft)) die(`${approved} asked about another change; ask again for this one`);
+  editSettingsBlock((b) => { b.links ??= {}; if (next) b.links[id] = next; else delete b.links[id]; return b; });
+  // one act per entry of the bundle: the entry it lands (entry_hash) from the one main has
+  // (prior_hash), so merge binds each changed entry to this answer
+  for (const l of bundleIds) appendLog({ type: 'act', decision: citing(), class: cls, what: l === id ? `${sub === 'rm' ? 'removed' : sub === 'add' ? 'added' : `set ${field} on`} ${kind} link ${id}` : `links.${l} as ${approved} showed it, landing with ${id}`, refs: ['chore-registry', `link:${l}`], reversible: true, approved_by: approved, entry_hash: linkEntryHash(bundle[l]), prior_hash: linkEntryHash(ownEntry(mainLinks, l)) }, 'supervisor');
+  out(`applied ${approved}; ${LANDING_HINT} --approved ${approved}`);
+}
+// A field no owner class guards (a repo link's path: where its checkout is on this machine).
+function editUnownedField(id, field, value) {
+  authorise('registry-edit', null, null, [], 'link');
+  let entry;
+  editSettingsBlock((b) => { b.links ??= {}; b.links[id] = { ...(ownEntry(b.links, id) ?? ownEntry(loadSettings().links, id)), [field]: value }; entry = b.links[id]; return b; });
+  appendLog({ type: 'act', decision: citing(), class: 'registry-edit', what: redactUrl(`set ${field} on link ${id}`), refs: [`link:${id}`], reversible: true, entry_hash: linkEntryHash(entry) }, 'supervisor');
+  out(`set ${id}.${field}; ${LANDING_HINT}`);
+}
 // links [--json]: the registry, each repo's effective settings, and the lines on each with their state.
 function cmdLinks() {
   const s = loadSettings();
@@ -8507,12 +9184,14 @@ function cmdLinks() {
   const read = main ? readCoverage(() => coverageAt(main, sMain)) : {};
   const cov = read.value ?? null;
   const origin = git(['config', '--get', 'remote.origin.url']);
-  const home = { name: 'home', remote: origin === null ? null : redactUrl(origin), root: mainRoot, effective: Object.fromEntries(REPO_KEYS.map((k) => [k, k === 'project' ? projectRel : s[k] ?? null])), components: componentsOn(s, 'home'), lines: linesDeclared(s), coverage: cov ? coverageGaps(cov, sMain) : null, ...(read.error ? { coverage_error: read.error } : {}) };
+  // each readable repo's own main (a view: a link whose checkout is wrong or missing just has none)
+  const mains = (R) => ({ main_ref: R.mainRef(), main_sha: R.mainRef() ? R.resolveCommit(R.mainRef()) : null });
+  const home = { name: 'home', remote: origin === null ? null : redactUrl(origin), root: mainRoot, ...mains(repo('home')), effective: Object.fromEntries(REPO_KEYS.map((k) => [k, k === 'project' ? projectRel : s[k] ?? null])), components: componentsOn(s, 'home'), lines: linesDeclared(s), coverage: cov ? coverageGaps(cov, sMain) : null, ...(read.error ? { coverage_error: read.error } : {}) };
   const links = Object.entries(reg).map(([id, l]) => {
     const K = LINK_KINDS[l.kind];
     if (!K) return { id, ...redactLink(l) };
     const eff = K.effectiveSettings(l, s);
-    return { id, ...redactLink(l), locator: K.locator(l, id).text, ...(K.localOverrides.includes('path') ? { location: linkLocation(id), found: fs.existsSync(linkLocation(id)) } : {}), ...(eff ? { effective: eff } : {}), ...(K.hostsComponents ? { components: componentsOn(s, id) } : {}) };
+    return { id, ...redactLink(l), locator: K.locator(l, id).text, ...(K.localOverrides.includes('path') ? { location: linkLocation(id), found: fs.existsSync(linkLocation(id)) } : {}), ...(eff ? { effective: eff } : {}), ...(K.hostsComponents ? { components: componentsOn(s, id), ...(repoReadable(id) ? mains(repo(id)) : {}) } : {}) };
   });
   if (flags.json) return json({ home, links });
   const gates = (g) => Object.keys(g ?? {}).join(', ') || 'none';
@@ -8635,7 +9314,7 @@ const HELP = `devteam <command>   (positionals before flags; flags take the word
 Setup and roles
   init [--name n] [--upstream-base vX]   project folders, settings, .gitignore, the devteam section of AGENTS.md
   prompt supervisor | worker <id> | planner <feature>    the prompt a session starts with
-  worker <ticket-id> [--resume] [--force] | planner <feature> [--goal <g-id>] [--resume] [--force] [--id-block <n>]   supervisor: a worktree, a tmux window and an agent for a ticket or a feature plan (a new planner names its goal and reserves n ticket numbers, default 20); refused while its goal is parked or let go, or draining for a session that hasn't run, unless --force (logged); --resume where no session exists starts fresh with the handoff note
+  worker <ticket-id> [--resume] [--force] | worker <ticket-id> --remove [--force] | planner <feature> [--goal <g-id>] [--resume] [--force] [--id-block <n>]   supervisor: a worktree, a tmux window and an agent for a ticket or a feature plan (a new planner names its goal and reserves n ticket numbers, default 20); refused while its goal is parked or let go, or draining for a session that hasn't run, unless --force (logged); --resume where no session exists starts fresh with the handoff note; worker --remove, once the ticket is merged and its worker logged phase done (--force before that), removes its worktree through the repo it belongs to and prunes that repo's worktree list (the branch stays)
   whoami | settings [--get key]
   hello [--json]                   who this instance is (root, name, kit, open questions, fleet): what the hub lists
 
@@ -8654,11 +9333,11 @@ The graph (planning.md)
   ticket add|set|show <id> --json '{…}' | --file f       a ticket: one PR of work
   validate [--strict]            graph rules D1-D11, reviews, goals, log health
   waves [--feature f] | ready [--plan-ahead] | status [--json] | roadmap [--json]
-  components check [--ref r] [--count] [--json]   coverage: every tracked path at r (default main) owned by exactly one component line; exit 1 on any gap (--count: the Baseline's number)
+  components check [--ref r] [--repo <link> [--path <checkout>]] [--count] [--json]   coverage: every tracked path at r (default main) owned by exactly one component line; exit 1 on any gap (--count: the Baseline's number); --repo checks another repo's tree under home's lines
 
 Checks and merging (quality.md)
   check-ticket <id> [--sha s] [--title t] [--body-file f] [--pr n]   definition of done at an exact head
-  check-pr --head-ref r --sha s [--title t] [--body-file f]           what the forge's required check runs (optional; no gates, no approval acts)
+  check-pr --head-ref r --sha s [--title t] [--body-file f] [--repo <link> [--path <checkout>]]   what the forge's required check runs (optional; no gates, no approval acts); --repo checks a PR in another repo, in its checkout (--path names another one, such as a CI run's)
   merge <ticket-id> | merge --plan <feature> | merge --chore <slug> [--approved qid] [--no-gates] [--dry-run]   supervisor: verify, run gates at the head, merge, log the act
   review-worktree <ticket-id> <sha> [--name suffix] | review-worktree --remove <path>   a final reviewer's detached worktree at exactly that sha, seeded like a worker's
 
@@ -8670,7 +9349,8 @@ Sessions (worker.md)
 
 Decide and act (supervisor.md, constitution.md)
   links [--json]                  the registry: home and each link, each repo's effective settings, the component lines and their coverage
-  link add <id> --kind url --url u --title t [--for scope…] [--notes n] [--source id] | link set <id> <field> [--] <value> | link rm <id>   supervisor: a url link, written to settings.md and logged as registry-edit; repo links are the owner's
+  link add <id> --kind url --url u --title t [--for scope…] [--notes n] [--source id] | link set <id> <field> [--] <value> | link rm <id>   supervisor: a url link, written to settings.md and logged as registry-edit
+  link add <id> --kind repo --remote r --title t [--path p] [--main_branch b] [--forge f] [--gates '{…}'] … [--approved qid]   supervisor: drafts a repo link (or link set|rm on one) and asks the owner (governance-edit; gate-change for a gate field); with the answer, writes it for the chore-registry PR
   link land [<chore slug>]   supervisor: copy only the links entries changed in this checkout's settings.md into .worktrees/chore-<slug> (default registry), leaving every other key as the chore has it
   artifact new <slug> --title t --summary s [--for '["goal:g"]']   draw an artifact (a page that shows an idea) in this worktree, under project/artifacts/<slug>/
   artifact check [<slug>…]        the checks merge runs, on this checkout's artifacts
@@ -8689,7 +9369,7 @@ Decide and act (supervisor.md, constitution.md)
   withdraw <qid> [--reason r] | questions [--all] [--id q] [--json]
   decide --class c [--scope s] [--approved qid|kid] [--options a b] [--rationale r] [--confidence 0-1] [--refs ids] [--irreversible] -- "<what>"   a judgment call and the trust it rests on; prints d-…
   act --decision d-… -- "<what>"   carry out a decision (merge, ticket, withdraw, goal hold, worker, planner, fleet and link take --decision too)
-  act --class c [--scope s] [--approved qid|kid] [--refs ids] [--irreversible] -- "<what>"   an act that is its own decision
+  act --class c [--scope s] [--approved qid|kid] [--refs ids] [--irreversible] [--repo <link>] -- "<what>"   an act that is its own decision; --repo names the repo a release, staging or production act was in
   decisions [--who owner|supervisor] [--class c] [--corrected] [--tail n] [--json]   every call, who made it and under what
   correct <decision-or-act-id> --reason r [--severity n]   (owner; --retro for the supervisor) | repair <id> --how undo|fix-ticket|none
   trust [--json]                  the ladder: rung, ceiling, agreement, corrections per class
@@ -8716,7 +9396,7 @@ The log
   record <id> [--json]   one record's stored fields, who created it and who set each field | peek <kind> <id> --json   what a dashboard sidepeek shows beyond the data: history and its kind's details
 
 Dashboard and releases
-  dashboard [--port p] [--host h] | dashboard-data | notes <from-tag> [<to>]
+  dashboard [--port p] [--host h] | dashboard-data | notes <from-tag> [<to>] [--repo <link>]
 `;
 
 const COMMANDS = {

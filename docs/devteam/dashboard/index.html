@@ -191,7 +191,8 @@
 
   /* questions: the choices are one list; the recommended one is marked in place */
   .qcard h4 { font-size: 14px; font-weight: 600; margin: 8px 0 4px; line-height: 1.45; }
-  .qcard .ctx { color: var(--fg-2); margin: 4px 0 10px; }
+  .qcard .ctx { color: var(--fg-2); margin: 4px 0 10px; white-space: pre-wrap; }
+  .qcard .rewritten { color: var(--red-fg); font-weight: 600; margin: 0 0 8px; }
   .choices { display: grid; gap: 6px; margin: 10px 0 8px; }
   .choice { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 4px 10px; align-items: start; text-align: left; height: auto; margin: 0; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line-2); background: var(--surface); color: var(--fg); font-weight: 400; cursor: pointer; }
   .choice:hover { background: var(--hover); opacity: 1; }
@@ -1069,6 +1070,7 @@ function questionCard(q, o, reasonText) {
   return `
     <div class="card qcard ${kindCls}" id="q-${esc(q.id)}">
       ${cardHead(KIND_ICON[q.kind] || 'circle-help', `<span class="badge ${q.kind === 'one-way-door' ? 'high' : q.kind === 'trust' ? 'good' : q.kind === 'owner-action' ? 'low' : 'medium'}">${esc(KIND_WORDS[q.kind] || words(q.kind))}</span>${q.goal_hold === 'park' ? '<span class="badge">its goal is parked</span>' : ''}`, { extra: (q.blocks || []).length ? `holds up ${q.blocks.map(tlink).join(', ')}` : q.ticket ? `about ${tlink(q.ticket)}` : '', id: q.id, rows: [['Asked', esc(when(q.asked_at))], ...(q.class ? [['Kind', esc(q.class)]] : [])] })}
+      ${q.rewritten ? '<p class="rewritten">This question changed after you answered it, so that answer no longer counts. Read it again before you answer: the supervisor\'s log was rewritten, which it should never do.</p>' : ''}
       <h4>${qtext(q.question, q.links)}</h4>
       ${q.context ? `<p class="ctx">${qtext(q.context, q.links)}</p>` : ''}
       ${(q.links || []).length ? `<div class="links"><span class="muted small">Look at:</span>${q.links.map(linkOf).join('')}</div>` : ''}
@@ -1091,7 +1093,7 @@ function cardHead(icon, label, { extra = '', id = null, rows = [] } = {}) {
   return `<div class="card-head"><i class="icon-${icon}" aria-hidden="true"></i>${label}<span class="grow">${extra}</span>${menu}</div>`;
 }
 const KIND_ICON = { 'owner-decision': 'scale', 'one-way-door': 'triangle-alert', clarification: 'circle-help', proposal: 'lightbulb', trust: 'users', 'goal-definition': 'target', 'goal-approval': 'flag', 'owner-action': 'zap', review: 'list-checks' };
-const fileHref = (l) => `#file?${new URLSearchParams({ path: l.path, ...(l.ref ? { ref: l.ref } : {}), title: l.title || l.path })}`;
+const fileHref = (l) => `#file?${new URLSearchParams({ path: l.path, ...(l.ref ? { ref: l.ref } : {}), ...(l.repo ? { repo: l.repo } : {}), title: l.title || l.path })}`;
 // An artifact link opens the viewer. The server resolves an open question's links (href, changed,
 // gone); a link it didn't resolve (an answered question's) opens the artifact where it was asked.
 const artHref = (slug, at) => `#artifact/${at === 'main' ? 'main' : `wt/${encodeURIComponent(at)}`}/${encodeURIComponent(slug)}`;
@@ -1230,6 +1232,7 @@ function reviewCard(q, o, reasonText) {
   return `
     <div class="card qcard review" id="q-${esc(q.id)}">
       ${cardHead(KIND_ICON.review, '<span class="badge low">Review</span>', { extra: (q.blocks || []).length ? `holds up ${q.blocks.map(tlink).join(', ')}` : q.ticket ? `about ${tlink(q.ticket)}` : '', id: q.id, rows: [['Asked', esc(when(q.asked_at))], ...(q.class ? [['Kind', esc(q.class)]] : [])] })}
+      ${q.rewritten ? '<p class="rewritten">This question changed after you answered it, so that answer no longer counts. Read it again before you answer: the supervisor\'s log was rewritten, which it should never do.</p>' : ''}
       <h4>${qtext(q.question, q.links)}</h4>
       ${q.context ? `<p class="ctx">${qtext(q.context, q.links)}</p>` : ''}
       <div class="meta rv-pins">${rv.data ? `${esc(rv.data.rows)} rows${rv.data.proposals ? `, ${esc(rv.data.proposals)} with a proposal` : ''} · ` : ''}page <code>${esc(String(rv.page?.sha256 ?? '').slice(0, 12))}</code> ${ok ? '<span class="badge good">verified</span>' : `<span class="badge high">${esc(q.result_status || 'missing')}</span>`}${rv.allow_partial ? ' · partial answers allowed' : ''}${pr && pr.total ? ` · <span class="badge ${pr.done >= pr.total ? 'good' : 'medium'}">${esc(pr.done)} of ${esc(pr.total)} decided</span>` : ''}</div>
@@ -2041,21 +2044,24 @@ function attrs({ id, idTip, peek, type, docType, pick = null, prefix = '', compu
 }
 
 // ---- peeks: one fetch per object, kept, fetched again on each refresh ----
+/* peeks start */
 const PEEKS = new Map();
 const PEEK_FLIGHT = new Set();
 // A failure that isn't "no such object" (the server restarting, a spawn timing out) is not kept:
 // the drawer says it couldn't load and tries again on the next refresh or open.
 const PEEK_FAIL = new Map();
-const peekKey = (kind, id) => `${kind}:${id}`;
+// A file is one object per repo and ref (home's README.md is not a sibling's). NUL is in no path,
+// ref or repo id, so the parts can't run together.
+const peekKey = (kind, id, q = {}) => `${kind}:${id}${q.repo ? `\0repo=${q.repo}` : ''}${q.ref ? `\0ref=${q.ref}` : ''}`;
 function peekOf(kind, id, q = {}) {
-  const k = peekKey(kind, id);
+  const k = peekKey(kind, id, q);
   if (PEEKS.has(k)) return PEEKS.get(k);
   const fail = PEEK_FAIL.get(k);
   if (!fail || Date.now() - fail.at > 10000) fetchPeek(kind, id, q);
   return fail ? { error: fail.error, transient: true } : undefined;
 }
 async function fetchPeek(kind, id, q = {}) {
-  const k = peekKey(kind, id);
+  const k = peekKey(kind, id, q);
   if (PEEK_FLIGHT.has(k)) return;
   PEEK_FLIGHT.add(k);
   if (DRAWER.kind === kind && DRAWER.id === id) DRAWER.q = q;
@@ -2069,11 +2075,12 @@ async function fetchPeek(kind, id, q = {}) {
   // a drawer may draw another object's peek too (a thread its ticket's): redraw whatever is open
   redraw();
 }
+/* peeks end */
 // On each data refresh: the open object's peek again (not one that wasn't found), then a redraw.
 function refreshDrawer() {
   if (!DRAWER.kind || $('drawer').hidden) return;
   for (const [kind, id, q] of [[DRAWER.kind, DRAWER.id, DRAWER.q || {}], ...(DRAWER.deps || [])]) {
-    const p = PEEKS.get(peekKey(kind, id));
+    const p = PEEKS.get(peekKey(kind, id, q || {}));
     if (!p?.missing) fetchPeek(kind, id, q || {});
   }
   if (DRAWER.kind === 'file' && DRAWER.url) refetchFile(DRAWER.url);
@@ -2132,7 +2139,7 @@ function closeDrawer() {
 }
 // Each opener names the object (and how to draw it again), then draws it.
 const drawerFor = (kind, id, arg) => {
-  if (DRAWER.kind !== kind || DRAWER.id !== id) { LAST_HTML = ''; PEEK_FAIL.delete(peekKey(kind, id)); }
+  if (DRAWER.kind !== kind || DRAWER.id !== id) { LAST_HTML = ''; const k = peekKey(kind, id); for (const f of [...PEEK_FAIL.keys()]) if (f === k || f.startsWith(`${k}\0`)) PEEK_FAIL.delete(f); }
   const same = DRAWER.kind === kind && DRAWER.id === id;
   DRAWER = { kind, id, arg, q: same ? DRAWER.q : undefined, deps: same ? DRAWER.deps : undefined, url: same ? DRAWER.url : undefined };
 };
@@ -2675,12 +2682,12 @@ function refetchFile(url) {
   return pr;
 }
 function openFile(params) {
-  const path = params.get('path'), title = params.get('title') || path, ref = params.get('ref');
+  const path = params.get('path'), title = params.get('title') || path, ref = params.get('ref'), repo = params.get('repo');
   drawerFor('file', path, params);
-  const url = `/api/file?${new URLSearchParams({ path, ...(ref ? { ref } : {}) })}`;
+  const url = `/api/file?${new URLSearchParams({ path, ...(ref ? { ref } : {}), ...(repo ? { repo } : {}) })}`;
   DRAWER.url = url;
   const ext = (path.split('.').pop() || '').toLowerCase();
-  const p = peekOf('file', path, ref ? { ref } : {});
+  const p = peekOf('file', path, { ...(ref ? { ref } : {}), ...(repo ? { repo } : {}) });
   const head = `<h2 id="drawer-title">${esc(title)}</h2>${attrs({ id: path, idTip: 'Its path in the repository.', peek: p, noRecord: true, computed: [['Version', `<code>${esc(ref || 'main')}</code>`, 'The branch or commit it is read from; committed content only.'], ['Commits', p?.history?.length ? esc(p.history.length) : '', 'Commits that changed it (the latest 60).']] })}`;
   const tail = historySection(p, path);
   if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext)) return showDrawer(`${head}<div class="viewer"><img src="${esc(url)}" alt="${esc(title)}"></div>${tail}`);
@@ -2828,6 +2835,8 @@ $('loop-tabs').addEventListener('click', (e) => { const b = e.target.closest('[d
 showTab(TAB);
 
 async function post(action, body, errId) {
+  // An answer names the question as this page showed it; a question changed since is refused.
+  if (action === 'answer' && body.seen === undefined) body = { ...body, seen: (DATA.questions || []).find((x) => x.id === body.id)?.hash };
   const r = await fetch(`/api/${action}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
   const out = await r.json();
   if (!r.ok) {
@@ -2931,6 +2940,7 @@ function render(d) {
 
   // Keep anything half-typed or half-open across refreshes.
   document.querySelectorAll('textarea[data-q]').forEach((t) => { drafts[t.dataset.q] = t.value; });
+  document.querySelectorAll('textarea[data-know-note]').forEach((t) => { drafts[`know:${t.dataset.knowNote}`] = t.value; });
   keepSecretDrafts();
   const kept = [...document.querySelectorAll('input[data-reason], input[data-overrule]')].map((el) => [el.dataset.reason ? `input[data-reason="${el.dataset.reason}"]` : `input[data-overrule="${el.dataset.overrule}"]`, el.value]);
   const keptChecks = [...document.querySelectorAll('input[data-rulebox]:checked, input[data-auto]:checked')].map((el) => el.dataset.rulebox ? `input[data-rulebox="${el.dataset.rulebox}"]` : `input[data-auto="${el.dataset.auto}"][value="${el.value}"]`);
@@ -2942,6 +2952,7 @@ function render(d) {
       ${cardHead('lightbulb', '<span class="badge good">Lesson to keep?</span>', { extra: `applies to ${esc(scopeWords(k.scope))}`, id: k.id, rows: [['Proposed', esc(when(k.created_at))], ['By', esc(who(k.created_by))]] })}
       <h4>${linkify(k.statement)}</h4>
       <p class="ctx">${esc(cap(who(k.created_by)))} proposes this as a ${esc(k.kind)}${k.confidence != null ? `, ${Math.round(k.confidence * 100)}% sure` : ''}, ${(k.evidence || []).length ? `based on ${k.evidence.map((e) => linkify(e)).join(', ')}` : 'with no evidence recorded'}. Accepted lessons go into the instructions of every agent they apply to.</p>
+      <textarea data-know-note="${esc(k.id)}" rows="1" maxlength="600" placeholder="Add a note to refine it (optional): it goes with the lesson into every prompt">${esc(drafts[`know:${k.id}`] || '')}</textarea>
       <div class="row-inline"><button data-know="${esc(k.id)}" data-status="accepted">Keep it</button><button class="ghost" data-know="${esc(k.id)}" data-status="retired">Retire it</button><span class="err" id="e-${esc(k.id)}"></span></div>
     </div>`).join('');
   for (const qid of [...ANSWERED.keys()]) if (!d.questions.some((q) => q.id === qid)) ANSWERED.delete(qid);
@@ -3254,7 +3265,9 @@ document.addEventListener('click', async (ev) => {
     const row = know.closest('.row-inline');
     row?.querySelectorAll('button').forEach((b) => { b.disabled = true; });
     know.classList.add('busy');
-    if (await post('knowledge', { id: know.dataset.know, status: know.dataset.status }, know.dataset.know)) know.closest('.card')?.remove();
+    const noteEl = document.querySelector(`textarea[data-know-note="${CSS.escape(know.dataset.know)}"]`);
+    const note = know.dataset.status === 'accepted' ? (noteEl?.value ?? '').replace(/\s+/g, ' ').trim() : '';
+    if (await post('knowledge', { id: know.dataset.know, status: know.dataset.status, ...(note ? { note } : {}) }, know.dataset.know)) { delete drafts[`know:${know.dataset.know}`]; know.closest('.card')?.remove(); }
     else { know.classList.remove('busy'); row?.querySelectorAll('button').forEach((b) => { b.disabled = false; }); }
     return;
   }

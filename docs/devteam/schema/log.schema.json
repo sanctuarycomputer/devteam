@@ -119,6 +119,11 @@
               "question": {
                 "description": "For owner: the yes/no question that says it is met.",
                 "type": "string"
+              },
+              "link": {
+                "description": "For repo: the repo link whose main the check runs on (absent: home).",
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$"
               }
             },
             "additionalProperties": false
@@ -699,6 +704,12 @@
             "type": "boolean",
             "description": "A ratchet gate that failed here and at the merge base too: pre-existing debt, allowed; not counted in the gate's fail rate.",
             "x-tip": "It failed on main too: existing debt, allowed, not counted against the check."
+          },
+          "repo": {
+            "description": "The repo link the gate ran in, for a ticket outside home (absent: home).",
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+            "x-tip": "The repo this check ran in, when not this one."
           }
         },
         "additionalProperties": false,
@@ -937,6 +948,10 @@
             "items": {
               "type": "string"
             }
+          },
+          "owner_note": {
+            "description": "The owner's refinement of the lesson, given when they keep it: prompts show it with the statement. Only the owner's own lines carry it.",
+            "type": "string"
           }
         },
         "additionalProperties": false,
@@ -1489,6 +1504,12 @@
             "const": true,
             "description": "On the owner's answer to a review: sent back without a result; the answer says why.",
             "x-tip": "You sent the review back without a result."
+          },
+          "question_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{16}$",
+            "description": "On the owner's answer: the hash of the question as the owner saw it (every field it was asked with). An answer whose question no longer has this hash answers nothing: the question was changed after the owner answered it, so it is open again.",
+            "x-tip": "The question as you saw it when you answered."
           }
         },
         "additionalProperties": false,
@@ -1499,7 +1520,8 @@
         "x-set-only": [
           "secrets_posted",
           "result",
-          "declined"
+          "declined",
+          "question_hash"
         ]
       },
       "decision": {
@@ -1706,7 +1728,7 @@
             "x-tip": "The ticket numbers reserved for a planner's feature."
           },
           "entry_hash": {
-            "description": "On a registry-edit act (link add|set|rm): the link entry it wrote, as sha256:<hex> of its canonical JSON, or null when it removed the link. merge lands a change to a url link only when an act naming the link recorded exactly the entry that lands. An act without it (written before it existed) never matches.",
+            "description": "On a registry-edit act (link add|set|rm), or a governance-edit or gate-change act from link … --approved: the link entry it wrote, as sha256:<hex> of its canonical JSON, or null when it removed the link. merge lands a change to a url link only when an act naming the link recorded exactly the entry that lands, and a change to a repo link only when an act of the --approved answer naming the link did. An act without it (written before it existed) never matches.",
             "type": [
               "string",
               "null"
@@ -1715,13 +1737,19 @@
             "x-tip": "The link entry this act wrote."
           },
           "prior_hash": {
-            "description": "On a registry-edit act (link add|set|rm): the link entry it replaced, as sha256:<hex> of its canonical JSON, or null when it added the link. merge lands a change to a url link only when acts naming the link lead from the entry main has (prior_hash) to the one that lands (entry_hash), and link land carries an entry only on the same terms, so an act made from an entry main has since changed (a stale set, an rm of an earlier entry) never lands. An act without it (written before it existed) never matches.",
+            "description": "On a registry-edit act (link add|set|rm), or a governance-edit or gate-change act from link … --approved: the link entry it replaced (for an --approved act, the entry main had), as sha256:<hex> of its canonical JSON, or null when it added the link. merge lands a change to a url link only when acts naming the link lead from the entry main has (prior_hash) to the one that lands (entry_hash), and link land carries an entry only on the same terms, so an act made from an entry main has since changed (a stale set, an rm of an earlier entry) never lands. An act without it (written before it existed) never matches.",
             "type": [
               "string",
               "null"
             ],
             "pattern": "^sha256:[0-9a-f]{64}$",
             "x-tip": "The link entry this act replaced."
+          },
+          "repo": {
+            "description": "The repo link the act was about (a merge, a release), when not home.",
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+            "x-tip": "The repo this was in, when not this one."
           }
         },
         "additionalProperties": false,
@@ -2008,7 +2036,8 @@
           "standing_rule",
           "secrets_posted",
           "result",
-          "declined"
+          "declined",
+          "question_hash"
         ]
       },
       "knowledge": {
@@ -2022,7 +2051,8 @@
           "status",
           "confidence",
           "statement",
-          "scope"
+          "scope",
+          "owner_note"
         ]
       },
       "problem": {
