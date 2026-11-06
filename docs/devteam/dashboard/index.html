@@ -324,6 +324,9 @@
   .mon-card .mon-url { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; margin: 2px 0 8px; }
   .mon-stats { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12px; margin-bottom: 6px; }
   .mon-stats b { font-weight: 600; }
+  .fp-row { display: flex; align-items: center; gap: 12px; justify-content: space-between; }
+  .fp-row > div { min-width: 0; overflow-wrap: anywhere; }
+  .spark { flex: none; fill: var(--series-1); }
   .drawer dd { margin: 0; }
   .drawer ul { margin: 4px 0; padding-left: 18px; }
   .tl { list-style: none; padding: 0; margin: 8px 0; border-left: 1px solid var(--line-2); }
@@ -608,6 +611,8 @@
   <section id="monitoring">
     <h2>Monitoring <span class="sub">production, as the supervisor sees it: what's up, how fast, and what it noticed</span></h2>
     <div id="monitors"></div>
+    <h3 style="margin-top:14px">Exceptions and errors</h3>
+    <div id="monitor-exceptions"></div>
     <h3 style="margin-top:14px">What the monitors noticed</h3>
     <div class="feed" id="monitor-feed"></div>
   </section>
@@ -2028,7 +2033,7 @@ const ATTR = {
   knowledge: { order: ['statement', 'kind', 'status', 'scope', 'confidence', 'valence', 'evidence'], fmt: { valence: (v) => (v < 0 ? `${esc(v)} (something to avoid)` : esc(v)) } },
   problem: { order: ['title', 'status', 'severity', 'realized', 'threatens', 'assigned_to', 'detail', 'refs'], fmt: { realized: (v) => (v ? 'yes: an issue' : 'no: a risk'), assigned_to: (v) => linkify(v), severity: (v) => `<span class="badge ${sevBadge(v)}">${esc(v)}</span>` } },
   message: { fmt: { to: (v) => esc(who(v)), re: (v) => linkify(v) } },
-  observation: { order: ['kind', 'subject', 'detail', 'refs'], label: { source: 'Noticed by', source_ref: 'From file' }, fmt: { subject: (v) => subjectLink(v), source: (v) => esc(who(v)), source_ref: (v) => `<a class="linkish" href="${esc(fileHref({ title: v.split('/').pop(), path: `docs/devteam/${v}` }))}"><code>${esc(v)}</code></a>` } },
+  observation: { order: ['kind', 'subject', 'detail', 'refs'], label: { source: 'Noticed by', source_ref: 'From' }, fmt: { subject: (v) => subjectLink(v), source: (v) => esc(who(v)), source_ref: (v) => /^https:\/\//.test(v) ? `<a href="${esc(v)}" target="_blank" rel="noopener noreferrer">${esc(v)}</a>` : `<a class="linkish" href="${esc(fileHref({ title: v.split('/').pop(), path: `docs/devteam/${v}` }))}"><code>${esc(v)}</code></a>` } },
   story: { fmt: { release: (v) => rlink(v) } },
   milestone: { fmt: { by: fmtDay } },
 };
@@ -2346,8 +2351,19 @@ function spendChart(spend) {
 }
 
 // ---- monitoring ----
-const MON_STATE = { up: ['good', 'up'], down: ['high', 'down'], unknown: ['', 'not checked yet'] };
-const monState = (m) => (m.state === 'up' && m.slow ? ['medium', 'slow'] : MON_STATE[m.state] || ['', m.state]);
+const MON_STATE = { up: ['good', 'up'], down: ['high', 'down'], ok: ['good', 'reading'], failing: ['high', 'failing'], unknown: ['', 'not run yet'] };
+const monState = (m) => (m.state === 'up' && m.slow ? ['medium', 'slow'] : m.kind === 'stream' && m.state !== 'unknown' && m.listening === false ? ['medium', 'not listening'] : m.kind !== 'http' && m.state === 'ok' && m.fails ? ['medium', `${m.fails} failed`] : MON_STATE[m.state] || ['', m.state]);
+// 24 hourly counts as bars, oldest first.
+function sparkBars(xs, label) {
+  const max = Math.max(1, ...xs);
+  return `<svg class="spark" viewBox="0 0 ${xs.length * 4} 16" width="${xs.length * 4}" height="16" role="img" aria-label="${esc(label)}">${xs.map((x, i) => (x ? `<rect x="${i * 4}" y="${16 - Math.max(1.5, (14 * x) / max)}" width="3" height="${Math.max(1.5, (14 * x) / max)}" rx="1"></rect>` : '')).join('')}</svg>`;
+}
+const LEVEL_TONE = { fatal: 'high', error: 'high', warning: 'medium', info: '', debug: '' };
+const fpWhat = (f) => f.kind === 'exception' ? `${f.class || 'exception'}${f.title ? `: ${f.title}` : ''}` : f.kind === 'platform' ? `${f.code || ''} platform error` : f.template || f.title || f.key;
+// One fingerprint in the exception feed: level, what, where, counts, release, links.
+const fpRow = (f) => `<div class="card small fp-row"><div><div class="act-head"><span class="badge ${LEVEL_TONE[f.level] ?? ''}">${esc(f.level || '')}</span> ${esc(String(fpWhat(f)).slice(0, 200))}</div>
+  <div class="meta">${f.frames?.[0] ? `<code>${esc(`${f.frames[0].file}${f.frames[0].line != null ? `:${f.frames[0].line}` : ''}`)}</code> · ` : ''}${esc(f.last_24h)} in 24h · ${esc(f.total)} seen${f.users ? ` · ${esc(f.users)} user(s)` : ''}${f.release ? ` · release <code>${esc(String(f.release).slice(0, 12))}</code>` : ''} · last ${esc(when(f.last_seen))} · <a class="linkish" href="#monitor/${encodeURIComponent(f.monitor)}">${esc(f.monitor)}</a>${f.observed ? ` · ${linkify(f.observed)}` : ''}${/^https:\/\//.test(f.url || '') ? ` · <a href="${esc(f.url)}" target="_blank" rel="noopener noreferrer">provider</a>` : ''}</div></div>
+  ${sparkBars(f.spark || [], `${f.last_24h} in the last 24 hours, by hour`)}</div>`;
 const pctOr = (x) => (x == null ? '–' : `${x}%`);
 // A monitor's latency over a range, from its bucketed samples: p50 and p95, against its target.
 function monitorChart(series, m, compact = false) {
@@ -2381,6 +2397,12 @@ function renderMonitoring(d) {
   if ($('down-banner').innerHTML !== banner) { $('down-banner').innerHTML = banner; $('down-banner').hidden = !down.length; }
   $('monitors').innerHTML = ms.length ? `<div class="mon-grid">${ms.map((m) => {
     const [tone, label] = monState(m);
+    if (m.kind !== 'http') return `<div class="card mon-card">
+      <h4><a class="title-link" href="#monitor/${encodeURIComponent(m.name)}">${esc(m.name)}</a><span class="badge ${tone}">${esc(label)}</span></h4>
+      <div class="mon-url">${esc(m.kind)} · ${esc(m.probe || '')}${m.uses?.length ? ` · uses ${esc(m.uses.join(', '))}` : ''}</div>
+      <div class="mon-stats"><span>today <b>${esc(m.today.events)}</b> event(s)</span><span><b>${esc(m.today.qualified)}</b> new for triage</span><span><b>${esc(m.fingerprints)}</b> fingerprint(s)</span>${m.today.mean_ms != null ? `<span>run <b>${esc(m.today.mean_ms < 1000 ? `${m.today.mean_ms}ms` : `${(m.today.mean_ms / 1000).toFixed(1)}s`)}</b></span>` : ''}<span class="muted">${m.last_at ? `ran ${esc(when(m.last_at))}` : 'never run'}</span></div>
+      ${m.last && !m.last.ok ? `<p class="small">${esc(m.last_error || m.last.error || 'failed')}${m.backoff_minutes ? ` · trying again in ${esc(m.backoff_minutes)} min` : ''}</p>` : ''}
+    </div>`;
     return `<div class="card mon-card">
       <h4><a class="title-link" href="#monitor/${encodeURIComponent(m.name)}">${esc(m.name)}</a><span class="badge ${tone}">${esc(label)}</span></h4>
       <div class="mon-url">${esc(m.url || '')}</div>
@@ -2388,7 +2410,9 @@ function renderMonitoring(d) {
       <div data-mon-chart="${esc(m.name)}">${MON_SERIES.get(m.name)?.data ? monitorChart(MON_SERIES.get(m.name).data, m, true) : '<p class="muted small">Loading…</p>'}</div>
     </div>`;
   }).join('')}</div>` : empty('No monitors yet. They live in the owner settings (<code>monitors</code>); the supervisor proposes a URL check when it finds the production URL, and polls it while it runs.');
-  for (const m of ms) loadMonitorSeries(m.name);
+  for (const m of ms.filter((x) => x.kind === 'http')) loadMonitorSeries(m.name);
+  const feed = d.monitor_feed || [];
+  $('monitor-exceptions').innerHTML = feed.length ? `<div class="feed">${feed.map(fpRow).join('')}</div>` : empty(ms.some((m) => m.kind !== 'http') ? 'Nothing read yet. Exceptions, log errors and platform errors the probes read show here, newest first.' : 'No probes yet. Discovery proposes them when it finds an error tracker or a host whose logs the project can already read.');
   const obs = (d.ooda?.observations || []).filter((o) => /^monitor:/.test(o.subject || ''));
   $('monitor-feed').innerHTML = obs.length ? obs.map((o) => `<div class="card small${o.severity >= 3 ? ' corrected' : ''}"><div><div class="act-head">${o.severity != null ? `<span class="badge ${sevBadge(o.severity)}">${esc(words(o.kind))}</span> ` : ''}${linkify(o.detail)}</div><div class="meta">${esc(when(o.created_at))} · ${subjectLink(o.subject)}</div></div></div>`).join('') : empty('Nothing yet. Outages, slow spells and each day\'s rollup show here.');
 }
@@ -2399,6 +2423,18 @@ function openMonitor(name) {
   if (!m) return notFound('monitor', name, p, 'No monitor by that name in the settings.', { noRecord: true });
   const [tone, label] = monState(m);
   const fails = p?.failures || [];
+  if (m.kind !== 'http') return showDrawer(`<h2 id="drawer-title">${esc(name)}</h2>
+    ${attrs({ id: name, idTip: 'Its name in the owner settings (monitors).', peek: p, noRecord: true, computed: [
+      ['State', `<span class="badge ${tone}">${esc(label)}</span>`, 'Reading (its last run was clean), failing (three failed runs in a row; it backs off, doubling up to an hour), or not run yet. A stream is listening while its collector runs alongside the supervisor.'],
+      ['Reads', `${esc(m.kind)} <code>${esc(m.probe || '')}</code>${m.uses?.length ? ` · uses ${esc(m.uses.join(', '))}` : ''}${m.credentials?.length ? ` · credentials ${m.credentials.map((c) => `<code>${esc(c)}</code>`).join(', ')}` : ''} · every ${esc(m.every_minutes)} min`, 'A probe the supervisor wrote and a reviewer read, run from main. Credentials by name only: the values are decrypted for the probe and never shown.'],
+      ['Triage', m.triage ? esc(fmtObj(m.triage).replace(/<[^>]+>/g, '')) : 'error and above, from the first event', 'When a fingerprint is first observed: its level, its count and its users at these thresholds.'],
+      ['Last run', m.last_at ? `${esc(when(m.last_at))}: ${m.last?.ok ? `ok, ${esc(m.last.events)} event(s)` : esc(m.last_error || m.last?.error || 'failed')}${m.last?.ms != null ? `, ${esc(m.last.ms)}ms` : ''}${m.backoff_minutes ? ` · next in ${esc(m.backoff_minutes)} min` : ''}` : 'never', 'The supervisor runs it while it runs (wait polls it when due).'],
+      ['Today', `${esc(m.today.events)} event(s), ${esc(m.today.qualified)} new for triage, ${esc(m.today.runs)} run(s), ${esc(m.today.fails)} failed, ${esc(m.today.invalid)} invalid line(s)`, 'How the probe itself is doing: the day\'s rollup observes the same.'],
+      ['Invalid lines', m.invalid ? esc(m.invalid.lines.map((l) => l.why).join('; ')) : '', 'Lines its last run printed that are not events: the provider may have changed its API (probe-drift).'],
+    ] })}
+    <h3>What it read</h3>
+    ${(p?.feed || []).length ? `<div class="feed">${p.feed.map(fpRow).join('')}</div>` : '<p class="muted small">Nothing yet.</p>'}
+    ${historySection(p, `monitor:${name}`)}`);
   showDrawer(`<h2 id="drawer-title">${esc(name)}</h2>
     ${attrs({ id: name, idTip: 'Its name in the owner settings (monitors).', peek: p, noRecord: true, computed: [
       ['State', `<span class="badge ${tone}">${esc(label)}</span>${m.since ? ` since ${esc(when(m.since))}` : ''}`, 'Up, down (after its failed checks in a row) or slow (p95 over its target), from its checks.'],
