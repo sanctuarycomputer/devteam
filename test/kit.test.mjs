@@ -2570,6 +2570,51 @@ test('devteam kit', async (t) => {
     }
   });
 
+  await t.test('artifacts: the dashboard serves them sandboxed, from their own folder only', async () => {
+    const A = path.join(wt('bill-01-card'), 'docs/devteam/project/artifacts');
+    write(path.join(A, 'mock-one/app.js'), 'console.log(1)');
+    write(path.join(A, 'mock-one/sub/page2.html'), '<!doctype html><p>two');
+    fs.symlinkSync(path.join(repo, 'docs/devteam/project/settings.md'), path.join(A, 'mock-one/out.md'));
+    const port = await freePort();
+    const base = `http://127.0.0.1:${port}`;
+    const srv = spawn(process.execPath, [DT, 'dashboard', '--port', String(port)], { cwd: repo, env: { ...process.env, DEVTEAM_ROLE: '' }, stdio: 'ignore' });
+    const raw = (p) => new Promise((resolve, reject) => http.get({ host: '127.0.0.1', port, path: p }, (res) => { res.resume(); resolve(res.statusCode); }).on('error', reject));
+    try {
+      await serverUp(`${base}/`);
+      let r = await fetch(`${base}/artifact/wt/bill-01-card/mock-one/`, { headers: { 'sec-fetch-dest': 'document', 'sec-fetch-site': 'none' } });
+      assert.equal(r.status, 200);
+      assert.equal(await r.text(), fs.readFileSync(path.join(A, 'mock-one/index.html'), 'utf8'), 'the folder serves its index.html, uncommitted');
+      const csp = r.headers.get('content-security-policy');
+      const self = `${base}/artifact/wt/bill-01-card/mock-one/`;
+      for (const d of ["default-src 'none'", `script-src 'unsafe-inline' 'unsafe-eval' ${self} https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://unpkg.com`, `connect-src ${self} https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://unpkg.com`, `img-src ${self} data: blob:`, "form-action 'none'", "base-uri 'none'", "frame-src 'none'", `frame-ancestors ${base} http://127.0.0.1:${process.env.DEVTEAM_HUB_PORT}`, 'sandbox allow-scripts allow-forms allow-modals allow-pointer-lock']) assert.ok(csp.split('; ').includes(d), `the policy has ${d}: ${csp}`);
+      assert.doesNotMatch(csp, /allow-same-origin|allow-top-navigation|allow-popups|allow-downloads|\*/);
+      assert.equal(r.headers.get('referrer-policy'), 'no-referrer');
+      assert.equal(r.headers.get('x-content-type-options'), 'nosniff');
+      assert.equal(r.headers.get('cache-control'), 'no-store');
+      assert.match(r.headers.get('content-type'), /^text\/html/);
+      // a sandboxed page fetches its own files cross-site, framed or not
+      r = await fetch(`${base}/artifact/wt/bill-01-card/mock-one/app.js`, { headers: { 'sec-fetch-site': 'cross-site', 'sec-fetch-dest': 'script' } });
+      assert.equal(r.status, 200);
+      assert.match(r.headers.get('content-type'), /^text\/javascript/);
+      assert.equal((await fetch(`${base}/artifact/wt/bill-01-card/mock-one/sub/page2.html`, { headers: { 'sec-fetch-site': 'cross-site', 'sec-fetch-dest': 'iframe' } })).status, 200);
+      r = await fetch(`${base}/artifact/wt/bill-01-card/mock-one`, { redirect: 'manual' });
+      assert.equal(r.status, 301);
+      assert.equal(r.headers.get('location'), '/artifact/wt/bill-01-card/mock-one/');
+      for (const bad of ['/artifact/wt/bill-01-card/mock-one/.env', '/artifact/wt/bill-01-card/mock-one/out.md', '/artifact/wt/bill-01-card/mock-one/nope.js', '/artifact/main/mock-one/', '/artifact/wt/review-x/mock-one/', '/artifact/wt/nope/mock-one/', '/artifact/wt/bill-01-card/Bad_Slug/', '/artifact/wt/bill-01-card/mock-one/%2e%2e/artifact.json'])
+        assert.equal((await fetch(base + bad)).status, 404, bad);
+      // fetch folds ../ before sending; a raw request doesn't
+      for (const bad of ['/artifact/wt/bill-01-card/mock-one/../../../../settings.md', '/artifact/wt/bill-01-card/mock-one/sub/../artifact.json', '/artifact/wt/../mock-one/', '/artifact/wt/%2e%2e/mock-one/', '/artifact/wt/bill-01-card/%2e%2e/x'])
+        assert.equal(await raw(bad), 404, bad);
+      assert.equal(await statusWithHost(port, '/artifact/wt/bill-01-card/mock-one/', `rebound.example:${port}`), 403, 'its own Host only');
+      // an opaque-origin page can't act as the owner (the guard this rests on)
+      r = await fetch(`${base}/api/answer`, { method: 'POST', headers: { 'content-type': 'application/json', origin: 'null', 'sec-fetch-site': 'cross-site' }, body: '{}' });
+      assert.equal(r.status, 403);
+    } finally {
+      srv.kill();
+      for (const f of ['app.js', 'sub', 'out.md']) fs.rmSync(path.join(A, 'mock-one', f), { recursive: true });
+    }
+  });
+
 });
 
 // Moving the fleet: its own throwaway repo, an old machine and a fresh clone standing in for the new one.

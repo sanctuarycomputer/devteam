@@ -3699,6 +3699,20 @@ const reviewPageCsp = (origin) => [
   "connect-src 'none'", "font-src 'none'", "media-src 'none'", "object-src 'none'", "frame-src 'none'", "worker-src 'none'", "manifest-src 'none'",
   "form-action 'none'", "base-uri 'none'", `frame-ancestors ${origin} http://127.0.0.1:${HUB_PORT}`, 'sandbox allow-scripts',
 ].join('; ');
+// What an artifact may be served as, by extension; anything else is application/octet-stream.
+const ARTIFACT_TYPES = Object.assign(Object.create(null), { html: 'text/html; charset=utf-8', js: 'text/javascript; charset=utf-8', mjs: 'text/javascript; charset=utf-8', css: 'text/css; charset=utf-8', json: 'application/json', svg: 'image/svg+xml', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', avif: 'image/avif', ico: 'image/x-icon', glb: 'model/gltf-binary', gltf: 'model/gltf+json', bin: 'application/octet-stream', wasm: 'application/wasm', woff: 'font/woff', woff2: 'font/woff2', ttf: 'font/ttf', otf: 'font/otf', mp4: 'video/mp4', webm: 'video/webm', mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', txt: 'text/plain; charset=utf-8', md: 'text/plain; charset=utf-8', csv: 'text/plain; charset=utf-8' });
+// The policy an artifact is served under: its own folder (self) and the pinned CDNs, nothing else.
+// The sandbox makes its origin opaque even opened in its own tab, so it never acts as the dashboard
+// (Origin: null is refused on every owner action) and never reads the dashboard's storage. It
+// holds only what was committed with it, which is why a CDN's logs seeing a request is acceptable.
+const artifactCsp = (origin, self) => {
+  const cdns = ARTIFACT_CDNS.join(' ');
+  return [
+    "default-src 'none'", `script-src 'unsafe-inline' 'unsafe-eval' ${self} ${cdns}`, `style-src 'unsafe-inline' ${self} ${cdns} https://fonts.googleapis.com`, `font-src ${self} ${cdns} https://fonts.gstatic.com data:`,
+    `img-src ${self} data: blob:`, `media-src ${self} data: blob:`, `connect-src ${self} ${cdns}`, `worker-src ${self} blob:`, "frame-src 'none'", "form-action 'none'", "base-uri 'none'",
+    `frame-ancestors ${origin} http://127.0.0.1:${HUB_PORT}`, 'sandbox allow-scripts allow-forms allow-modals allow-pointer-lock',
+  ].join('; ');
+};
 const reviewResultFile = (qid) => path.join(reviewDir(qid), 'result.json');
 const reviewDraftFile = (qid) => path.join(reviewDir(qid), 'draft.json');
 // The permanent copy of the owner's result, in the PR that asked: project/questions/<qid>/, or
@@ -6965,6 +6979,34 @@ async function cmdDashboard() {
       }
       const r = await run(['review', 'show', id, '--json', '--contents']);
       return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 404, 'application/json', JSON.stringify({ error: r.stderr.trim().replace(/^devteam: /, '') }));
+    }
+    // An artifact's files: landed from main's tree, a draft off its worktree's disk. Matched on the
+    // raw path, before URL parsing folds ../ and %2e%2e into something that looks fine. Any
+    // sec-fetch-site: under its sandbox the page is an opaque origin, so its own loads say cross-site.
+    const rawPath = req.url.split('?')[0];
+    if (req.method === 'GET' && rawPath.startsWith('/artifact/')) {
+      const am = /^\/artifact\/(?:main|wt\/([^/]+))\/([^/]+)(\/.*)?$/.exec(rawPath);
+      const at = am ? am[1] ?? 'main' : null;
+      if (!am || (at !== 'main' && !draftWorktree(at)) || !LINK_ID.test(am[2])) return send(res, 404, 'text/plain', 'not found');
+      if (am[3] === undefined) { res.writeHead(301, { location: `${rawPath}/`, 'cache-control': 'no-store' }); return res.end(); }
+      const rel = am[3] === '/' ? 'index.html' : am[3].slice(1);
+      if (!artifactPathOk(rel)) return send(res, 404, 'text/plain', 'not found');
+      let bytes = null;
+      if (at === 'main') {
+        const ref = mainRef();
+        if (ref) bytes = await new Promise((resolve) => execFile('git', ['cat-file', 'blob', `${ref}:${ARTIFACTS_REL}/${am[2]}/${rel}`], { cwd: mainRoot, encoding: 'buffer', maxBuffer: 16 * 1024 * 1024 }, (err, so) => resolve(err ? null : so)));
+      } else {
+        // the real path stays inside the artifact's folder: a symlink out of it is not found
+        try {
+          const dir = fs.realpathSync(path.join(draftWorktree(at), ARTIFACTS_REL, am[2]));
+          const real = fs.realpathSync(path.join(dir, rel));
+          if (real.startsWith(dir + path.sep) && fs.statSync(real).isFile()) bytes = fs.readFileSync(real);
+        } catch {}
+      }
+      if (!bytes) return send(res, 404, 'text/plain', 'not found');
+      const base = `http://${req.headers.host}`;
+      res.writeHead(200, { 'content-type': ARTIFACT_TYPES[rel.split('.').pop().toLowerCase()] ?? 'application/octet-stream', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': artifactCsp(base, `${base}${rawPath.slice(0, rawPath.length - am[3].length)}/`) });
+      return res.end(bytes);
     }
     // A review page: the agent's bytes, verbatim, only into the dashboard's own sandboxed frame,
     // under a policy that allows no network (reviewPageCsp). Under a question's path the server
