@@ -1987,6 +1987,12 @@ const step = (name, fn) => { steps.push({ name, fn }); };
       const Mw = sent.stdout.trim();
       await done;
       assert.match(got, new RegExp(`^something needs you:\\n  message ${Mw} \\[blocked\\] from bill-03-a`), 'a worker\'s message wakes it');
+      // routed to the owner as a question that cites it (ask --re), it waits on the owner, not the supervisor
+      const openIds = () => json(must(['messages', '--to', 'supervisor', '--open', '--json'])).map((m) => m.id);
+      assert.ok(openIds().includes(Mw));
+      const Qr = must(['ask', '--ticket', 'bill-03-a', '--re', Mw, '--question', 'Which shared module name for bill-03-a?', '--recommendation', 'billing-shared'], sup);
+      assert.ok(!openIds().includes(Mw), 'a question that cites the message handles it');
+      must(['withdraw', Qr, '--reason', 'test'], sup);
     }
     {
       // a message that lands during the tick, before wait looks, still wakes it, and only once
