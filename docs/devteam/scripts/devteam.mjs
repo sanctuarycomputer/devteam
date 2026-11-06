@@ -600,8 +600,10 @@ const SCOPES = Object.assign(Object.create(null), {
   class: (v, c) => c.class === v,
   chore: (v, c) => c.chore === v,
   link: (v, c) => (c.links ?? []).includes(v),
+  ticket: (v, c) => c.ticket === v,
 });
-const SCOPE_WHERE = { for: ['all', 'project', 'component', 'feature', 'goal', 'link'], knowledge: ['all', 'project', 'component', 'feature', 'class', 'chore', 'link'] };
+// artifact: an artifact's for (artifact.json), which may also name the one ticket it was drawn for
+const SCOPE_WHERE = { for: ['all', 'project', 'component', 'feature', 'goal', 'link'], knowledge: ['all', 'project', 'component', 'feature', 'class', 'chore', 'link'], artifact: ['all', 'project', 'component', 'feature', 'goal', 'link', 'ticket'] };
 const SCOPE_HELP = Object.fromEntries(Object.entries(SCOPE_WHERE).map(([w, ks]) => [w, ks.map((k) => (['all', 'project'].includes(k) ? k : `${k}:<id>`)).join(', ')]));
 function scopeParts(scope) {
   const m = /^([a-z]+)(?::([a-z0-9][a-z0-9-]*))?$/.exec(String(scope ?? ''));
@@ -615,7 +617,7 @@ const scopeMatches = (scope, ctx) => { const p = scopeParts(scope); return !!p &
 function scopeContext(target) {
   const t = tickets().get(target);
   const f = t ? features().get(t.feature) : features().get(target);
-  const ctx = t ? { component: t.component, feature: t.feature, goals: f?.goals ?? [] } : f ? { feature: target, goals: f.goals ?? [] } : target ? { class: target } : {};
+  const ctx = t ? { ticket: target, component: t.component, feature: t.feature, goals: f?.goals ?? [] } : f ? { feature: target, goals: f.goals ?? [] } : target ? { class: target } : {};
   const reg = loadSettings().links ?? {};
   const own = [...(t?.links ?? []), ...(f?.links ?? [])];
   const shown = Object.keys(reg).filter((id) => own.includes(id) || asList(reg[id].for).some((sc) => scopeMatches(sc, ctx)));
@@ -3703,6 +3705,223 @@ function commitReachable(commit) {
   if (!reachMemo.has(commit)) reachMemo.set(commit, !!git(['for-each-ref', '--count=1', '--format=%(refname)', '--contains', commit]));
   return reachMemo.get(commit);
 }
+
+// ===== artifacts: pages a session draws to show an idea (a mock, a flow, a model) =====
+//
+// project/artifacts/<slug>/ holds index.html, artifact.json and whatever the page loads. They are
+// presentational: nothing comes back from one (a decision on one is an ordinary question linking
+// it). Landed is what main has, read from git; a draft is a session worktree's copy under
+// .worktrees/, read off disk as it is, so the owner sees it while it's drawn.
+const ARTIFACTS_REL = `${projectRel}/artifacts`;
+const ARTIFACT_FILE_MAX = 8 * 1024 * 1024;
+const ARTIFACT_MAX = 25 * 1024 * 1024;
+const ARTIFACT_KEYS = ['v', 'title', 'summary', 'by', 'for'];
+const artifactPathOk = (p) => /^[A-Za-z0-9._/-]+$/.test(p) && p.split('/').every((s) => s && !s.startsWith('.'));
+const ARTIFACT_CDNS = ['https://cdnjs.cloudflare.com', 'https://cdn.jsdelivr.net', 'https://unpkg.com'];
+const ARTIFACT_FONT_HOSTS = ['https://fonts.googleapis.com', 'https://fonts.gstatic.com'];
+// git's id of a blob, so a draft on disk and a landed tree fingerprint alike without reading main's files
+const blobOid = (buf) => crypto.createHash('sha1').update(`blob ${buf.length}\0`).update(buf).digest('hex');
+const fingerprint = (entries) => sha256([...entries].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)).map((e) => `${e.path}\0${e.oid ?? blobOid(e.read() ?? Buffer.alloc(0))}\n`).join(''));
+// A folder's entries as { path, mode, size, read }, by lstat: a symlink is listed (mode 120000),
+// never followed; a dot-folder is listed, never walked.
+function diskEntries(dir) {
+  const res = [];
+  const walk = (rel) => {
+    for (const d of fs.readdirSync(path.join(dir, rel), { withFileTypes: true })) {
+      const p = rel ? `${rel}/${d.name}` : d.name;
+      const abs = path.join(dir, p);
+      const st = fs.lstatSync(abs);
+      if (st.isSymbolicLink()) res.push({ path: p, mode: '120000', size: 0, read: () => null });
+      else if (st.isDirectory()) { if (d.name.startsWith('.')) res.push({ path: `${p}/`, mode: '040000', size: 0, read: () => null }); else walk(p); }
+      else res.push({ path: p, mode: '100644', size: st.size, mtime: st.mtimeMs, read: () => fs.readFileSync(abs) });
+    }
+  };
+  if (fs.existsSync(dir)) walk('');
+  return res;
+}
+// The same entries from a commit's tree: check-pr and merge judge a fetched head with no checkout of it.
+function treeEntries(ref, dir) {
+  const raw = git(['ls-tree', '-r', '-l', '-z', ref, '--', `${dir}/`], mainRoot) ?? '';
+  return raw.split('\0').filter(Boolean).map((l) => {
+    const tab = l.indexOf('\t');
+    const [mode, , oid, size] = l.slice(0, tab).trim().split(/\s+/);
+    return { path: l.slice(tab + 1).slice(dir.length + 1), mode, oid, size: Number(size) || 0, read: () => { try { return execFileSync('git', ['cat-file', 'blob', oid], { cwd: mainRoot, stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 }); } catch { return null; } } };
+  });
+}
+// The manifest's rules: the registry's one-line text, its scope language (plus ticket:<id>), no other keys.
+function parseArtifactManifest(buf) {
+  if (!buf) return { error: 'missing' };
+  let m;
+  try { m = JSON.parse(buf.toString('utf8')); } catch (e) { return { error: `not JSON (${e.message})` }; }
+  if (!isObj(m)) return { error: 'a JSON object' };
+  const errs = [];
+  for (const k of Object.keys(m)) if (!ARTIFACT_KEYS.includes(k)) errs.push(`unknown key "${k}" (${ARTIFACT_KEYS.join(', ')})`);
+  if (m.v !== 1) errs.push('v is 1');
+  for (const f of ['title', 'summary']) {
+    if (typeof m[f] !== 'string' || !m[f].trim()) { errs.push(`${f} is required`); continue; }
+    // linkTextProblem's caps are by field: a summary is held to a note's (500)
+    const p = linkTextProblem(f === 'summary' ? 'notes' : f, m[f]);
+    if (p) errs.push(p.replace(/^notes/, 'summary'));
+  }
+  if (typeof m.by !== 'string' || !/^[a-z0-9][a-z0-9-]*$/.test(m.by)) errs.push('by is who drew it: supervisor, a ticket id, or plan-<feature>');
+  if (m.for !== undefined && !(Array.isArray(m.for) && m.for.every((s) => scopeValid(s, 'artifact')))) errs.push(`for is a list of scopes (${SCOPE_HELP.artifact})`);
+  return errs.length ? { error: errs.join('; ') } : { manifest: { ...m, for: m.for ?? [] } };
+}
+// One artifact judged the same whether its entries come from disk or from a commit: errors refuse
+// (artifact check, check-pr, merge), warnings never block.
+function artifactProblems(slug, entries) {
+  const errors = [];
+  const warnings = [];
+  if (!LINK_ID.test(slug)) errors.push(`${slug}: the folder name is a slug (lowercase words joined by -)`);
+  const byPath = new Map(entries.map((e) => [e.path, e]));
+  let total = 0;
+  for (const e of entries) {
+    if (e.mode === '120000') { errors.push(`${slug}/${e.path}: a symlink; copy the file in instead`); continue; }
+    if (!artifactPathOk(e.path.replace(/\/$/, ''))) { errors.push(`${slug}/${e.path}: dotfiles and names outside A-Z a-z 0-9 . _ - / aren't served`); continue; }
+    if (e.size > ARTIFACT_FILE_MAX) errors.push(`${slug}/${e.path}: over 8 MB; put big media behind a url link instead`);
+    total += e.size;
+  }
+  if (total > ARTIFACT_MAX) errors.push(`${slug}: over 25 MB in all`);
+  if (!byPath.has('index.html')) errors.push(`${slug}: no index.html`);
+  const m = parseArtifactManifest(byPath.get('artifact.json')?.read());
+  if (m.error) errors.push(`${slug}/artifact.json: ${m.error}`);
+  const html = byPath.get('index.html')?.read()?.toString('utf8') ?? '';
+  // The page's policy lets it load only its own folder and these hosts; say so before the owner sees a blank page.
+  for (const [, url] of html.matchAll(/<(?:script|link)\b[^>]*?\b(?:src|href)\s*=\s*["']([^"']+)["']/gi)) {
+    if (!/^https?:/i.test(url)) continue;
+    const host = [...ARTIFACT_CDNS, ...ARTIFACT_FONT_HOSTS].find((h) => url.startsWith(`${h}/`));
+    if (!host) { warnings.push(`${slug}: ${redactUrl(url)} is not on an allowed CDN (${ARTIFACT_CDNS.join(', ')}); it won't load`); continue; }
+    if (ARTIFACT_CDNS.includes(host) && !/@\d+\.\d+\.\d+/.test(url) && !/\/ajax\/libs\/[^/]+\/\d+\.\d+\.\d+\//.test(url)) warnings.push(`${slug}: ${redactUrl(url)} has no exact version (name@x.y.z); pin it so the page renders the same tomorrow`);
+  }
+  if (/<meta\b[^>]*http-equiv\s*=\s*["']?refresh/i.test(html)) warnings.push(`${slug}: a meta refresh; an artifact doesn't navigate itself`);
+  return { errors, warnings, manifest: m.manifest ?? null };
+}
+const WT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+// A worktree a draft may come from: a session's own checkout directly under .worktrees/, never a
+// reviewer's (review-*) or a scratch one (tmp-*). Its real path, or null.
+function draftWorktree(name) {
+  if (!WT_NAME.test(name ?? '') || /^(review|tmp)-/.test(name)) return null;
+  try {
+    const root = fs.realpathSync(path.join(mainRoot, '.worktrees'));
+    const real = fs.realpathSync(path.join(root, name));
+    return path.dirname(real) === root && fs.statSync(real).isDirectory() ? real : null;
+  } catch { return null; }
+}
+// Where an artifact's files are: main's tree (at 'main') or a draft worktree's folder; null if none.
+// A worktree's project folder sits at the same path inside it as this checkout's.
+function artifactSource(at, slug) {
+  if (!LINK_ID.test(slug ?? '')) return null;
+  if (at === 'main') {
+    const ref = mainRef();
+    const entries = ref ? treeEntries(ref, `${ARTIFACTS_REL}/${slug}`) : [];
+    return entries.length ? { entries } : null;
+  }
+  const root = draftWorktree(at);
+  if (!root) return null;
+  const dir = path.join(root, ARTIFACTS_REL, slug);
+  if (!fs.existsSync(path.join(dir, 'artifact.json')) && !fs.existsSync(path.join(dir, 'index.html'))) return null;
+  return { entries: diskEntries(dir), dir };
+}
+// A broken manifest is listed by its slug and error, never its unvalidated title.
+function describeArtifact(slug, at, src) {
+  const p = artifactProblems(slug, src.entries);
+  const mtime = Math.max(0, ...src.entries.map((e) => e.mtime ?? 0));
+  const m = p.manifest;
+  return { slug, at, title: m?.title ?? null, summary: m?.summary ?? null, by: m?.by ?? null, for: m?.for ?? [], error: p.errors[0] ?? null, fp: fingerprint(src.entries), updated_at: mtime ? new Date(mtime).toISOString() : null };
+}
+function landedArtifacts() {
+  const ref = mainRef();
+  if (!ref) return [];
+  const names = (git(['ls-tree', '--name-only', `${ref}:${ARTIFACTS_REL}`], mainRoot) ?? '').split('\n').filter((s) => LINK_ID.test(s));
+  return names.map((s) => { const src = artifactSource('main', s); return src && describeArtifact(s, 'main', src); }).filter(Boolean);
+}
+// A worktree's copy identical to the landed one is not a draft: a merged branch's worktree not yet
+// removed shows nothing.
+function draftArtifacts(landed = landedArtifacts()) {
+  const fpOf = new Map(landed.map((a) => [a.slug, a.fp]));
+  const res = [];
+  let names = [];
+  try { names = fs.readdirSync(path.join(mainRoot, '.worktrees')); } catch { return res; }
+  for (const w of names.sort()) {
+    if (!draftWorktree(w)) continue;
+    let slugs = [];
+    try { slugs = fs.readdirSync(path.join(mainRoot, '.worktrees', w, ARTIFACTS_REL)); } catch { continue; }
+    for (const s of slugs.sort()) {
+      const src = artifactSource(w, s);
+      if (!src) continue;
+      const d = describeArtifact(s, w, src);
+      if (fpOf.get(s) !== d.fp) res.push(d);
+    }
+  }
+  return res;
+}
+const allArtifacts = () => { const l = landedArtifacts(); return [...l, ...draftArtifacts(l)]; };
+// artifact new <slug> --title --summary [--for '[…]']: scaffold a page in this worktree.
+// artifact check [<slug>…]: the checks merge runs, on this checkout's artifacts.
+function cmdArtifact() {
+  const [sub, ...args] = positional;
+  const here = path.join(repoRoot, ARTIFACTS_REL);
+  if (sub === 'new') {
+    const slugName = args[0] ?? die('usage: artifact new <slug> --title "…" --summary "…" [--for \'["goal:g"]\']');
+    if (!LINK_ID.test(slugName)) die(`${slugName}: a slug is lowercase words joined by - (mock-checkout)`);
+    if (!commonDir || fs.realpathSync(repoRoot) === fs.realpathSync(mainRoot)) die('artifact new: draw an artifact in a worktree (a ticket\'s, a plan\'s, or devteam.mjs chore start artifact-<slug>), never on the main checkout');
+    if (landedArtifacts().some((a) => a.slug === slugName)) die(`${slugName} has landed; edit ${ARTIFACTS_REL}/${slugName}/ in this worktree instead`);
+    if (fs.existsSync(path.join(here, slugName))) die(`${ARTIFACTS_REL}/${slugName} already exists here`);
+    const other = draftArtifacts().filter((a) => a.slug === slugName).map((a) => a.at);
+    if (other.length) warn(`${slugName} is also being drawn in ${other.join(', ')}`);
+    const by = process.env.DEVTEAM_ROLE === 'supervisor' ? 'supervisor' : process.env.DEVTEAM_TICKET || (process.env.DEVTEAM_FEATURE ? `plan-${process.env.DEVTEAM_FEATURE}` : 'owner');
+    const manifest = { v: 1, title: flagStr('title') ?? die('artifact new needs --title'), summary: flagStr('summary') ?? die('artifact new needs --summary'), by, for: jsonFlag('for') ?? [] };
+    const m = parseArtifactManifest(Buffer.from(JSON.stringify(manifest)));
+    if (m.error) die(`artifact new: ${m.error}`);
+    fs.mkdirSync(path.join(here, slugName), { recursive: true });
+    fs.writeFileSync(path.join(here, slugName, 'artifact.json'), `${JSON.stringify(manifest, null, 2)}\n`);
+    fs.writeFileSync(path.join(here, slugName, 'index.html'), artifactStarter(manifest.title));
+    return out(`${ARTIFACTS_REL}/${slugName}/: index.html and artifact.json; it's in the dashboard's Library now, as a draft`);
+  }
+  if (sub === 'check') {
+    let slugs = args;
+    if (!slugs.length) { try { slugs = fs.readdirSync(here).filter((s) => !s.startsWith('.')); } catch { slugs = []; } }
+    let bad = 0;
+    for (const s of slugs) {
+      const p = artifactProblems(s, diskEntries(path.join(here, s)));
+      for (const w of p.warnings) warn(w);
+      for (const e of p.errors) { process.stderr.write(`devteam: ${e}\n`); bad++; }
+    }
+    if (bad) process.exit(1);
+    return out(`${slugs.length} artifact${slugs.length === 1 ? '' : 's'} pass`);
+  }
+  die('usage: artifact new <slug> --title t --summary s [--for json] | artifact check [<slug>…]');
+}
+function cmdArtifacts() {
+  gitReadCache = new Map();
+  const all = allArtifacts();
+  if (flags.json) return json(all);
+  if (!all.length) return out('no artifacts');
+  for (const a of all) out(`${a.slug} [${a.at === 'main' ? 'landed' : `draft in ${a.at}`}] ${a.error ? `(broken: ${a.error})` : quoteData(a.title)}${a.for.length ? ` for ${a.for.join(', ')}` : ''}`);
+}
+// The starter page: the dashboard's light and dark tokens copied inline, since an artifact can't
+// load the dashboard's files.
+const escHtml = (s) => String(s).replace(/[<>&"]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' })[c]);
+const artifactStarter = (title) => `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escHtml(title)}</title>
+<style>
+  :root { color-scheme: light dark; --bg: #fafafa; --surface: #ffffff; --fg: #171717; --fg-2: #666666; --muted: #8f8f8f; --line: #ebebeb; --blue: #0070f3;
+    --sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; --mono: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #000000; --surface: #0a0a0a; --fg: #ededed; --fg-2: #a1a1a1; --muted: #7d7d7d; --line: #1f1f1f; --blue: #52a8ff; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 32px; background: var(--bg); color: var(--fg); font: 15px/1.5 var(--sans); }
+</style>
+</head>
+<body>
+<h1>${escHtml(title)}</h1>
+<!-- An artifact shows an idea. It loads its own files, and libraries pinned to an exact version (name@x.y.z) from cdnjs.cloudflare.com, cdn.jsdelivr.net or unpkg.com; nothing else. Never put owner data or secrets in it. -->
+</body>
+</html>
+`;
 
 // The JSON schema keywords schemaErrors checks; anything else in a result schema would be ignored
 // silently, so review check refuses it.
@@ -8333,6 +8552,9 @@ Decide and act (supervisor.md, constitution.md)
   links [--json]                  the registry: home and each link, each repo's effective settings, the component lines and their coverage
   link add <id> --kind url --url u --title t [--for scope…] [--notes n] [--source id] | link set <id> <field> [--] <value> | link rm <id>   supervisor: a url link, written to settings.md and logged as registry-edit; repo links are the owner's
   link land [<chore slug>]   supervisor: copy only the links entries changed in this checkout's settings.md into .worktrees/chore-<slug> (default registry), leaving every other key as the chore has it
+  artifact new <slug> --title t --summary s [--for '["goal:g"]']   draw an artifact (a page that shows an idea) in this worktree, under project/artifacts/<slug>/
+  artifact check [<slug>…]        the checks merge runs, on this checkout's artifacts
+  artifacts [--json]              landed artifacts, and drafts in session worktrees
   ask --question q [--kind k] [--class c] [--reasons r…] [--recommendation r] [--confidence 0-1] [--default d] [--choices '[{"label","detail","effect"}…]'] [--rule-scope s] [--goal g-… (goal-approval)] [--links '[{"title","path","ref"}|{"title","url"}|{"title","link"}…]' (link: a registry id)] [--blocks ids] [--evidence ids] [--ticket id] [--re m-…] [--note path] [--secrets '[{"name","kind":"string|file","sink"}…]' (owner-action)]
   secret post <qid> [--file NAME=path] [--json]                          owner: post a question's secrets straight to their sinks; never logged (secret sinks lists them)
   ask --kind review --page <repo path> --ref <branch|sha> [--data <repo path>] [--result-schema <repo path>] [--allow-partial] --question q [--context c] [--class c] [--reasons r…] [--ticket id] [--blocks ids] [--re m-…]
@@ -8379,7 +8601,7 @@ Dashboard and releases
 
 const COMMANDS = {
   init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), whoami: cmdWhoami, hello: cmdHello, settings: cmdSettings,
-  feature: cmdFeature, ticket: cmdTicket, components: cmdComponents, link: cmdLink, links: cmdLinks, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, roadmap: cmdRoadmap,
+  feature: cmdFeature, ticket: cmdTicket, components: cmdComponents, link: cmdLink, links: cmdLinks, artifact: cmdArtifact, artifacts: cmdArtifacts, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, roadmap: cmdRoadmap,
   'check-ticket': cmdCheckTicket, 'check-pr': cmdCheckPr, merge: cmdMerge, 'review-worktree': cmdReviewWorktree,
   phase: cmdPhase, gate: cmdGate, send: cmdSend, messages: cmdMessages, 'stop-ok': cmdStopOk,
   ask: cmdAsk, answer: cmdAnswer, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,

@@ -2481,6 +2481,70 @@ test('devteam kit', async (t) => {
     git(['worktree', 'remove', '--force', nw]);
     git(['branch', '-q', '-D', 'chore-after']);
   });
+
+  await t.test('artifacts: new, check, list, drafts from worktrees', () => {
+    const w = wt('bill-01-card');
+    const A = path.join(w, 'docs/devteam/project/artifacts');
+    const W = { cwd: w, role: 'worker' };
+    assert.match(dt(['artifact', 'new', 'mock-one', '--title', 'Mock', '--summary', 'One line'], { role: 'sup' }).err, /worktree/, 'never on the main checkout');
+    assert.match(dt(['artifact', 'new', 'Mock_One', '--title', 'Mock', '--summary', 'One line'], W).err, /slug/);
+    assert.match(dt(['artifact', 'new', 'mock-one', '--title', 'Mock', '--summary', 'One line', '--for', '["nope:x"]'], W).err, /for is a list of scopes/);
+    must(['artifact', 'new', 'mock-one', '--title', 'Mock', '--summary', 'One line', '--for', '["feature:billing"]'], W);
+    const man = json(fs.readFileSync(path.join(A, 'mock-one/artifact.json'), 'utf8'));
+    assert.deepEqual([man.v, man.by, man.for], [1, 'bill-01-card', ['feature:billing']]);
+    assert.match(fs.readFileSync(path.join(A, 'mock-one/index.html'), 'utf8'), /<!doctype html>[\s\S]*name="viewport"[\s\S]*prefers-color-scheme: dark/);
+    assert.match(must(['artifact', 'check'], W), /1 artifact pass/);
+    assert.match(dt(['artifact', 'new', 'mock-one', '--title', 'Mock', '--summary', 'One line'], W).err, /already exists/);
+    // refusals
+    write(path.join(A, 'bad-one/index.html'), '<!doctype html><p>x');
+    write(path.join(A, 'bad-one/artifact.json'), JSON.stringify({ v: 1, title: 'a\nb', summary: 's', by: 'x', extra: 1 }));
+    write(path.join(A, 'bad-one/.env'), 'SECRET=1');
+    write(path.join(A, 'bad-one/a b.png'), 'x');
+    const bad = dt(['artifact', 'check', 'bad-one'], W);
+    assert.notEqual(bad.status, 0);
+    assert.match(bad.err, /title is one line/);
+    assert.match(bad.err, /unknown key "extra"/);
+    assert.match(bad.err, /bad-one\/\.env: dotfiles/);
+    assert.match(bad.err, /bad-one\/a b\.png/);
+    fs.rmSync(path.join(A, 'bad-one'), { recursive: true });
+    write(path.join(A, 'no-index/artifact.json'), JSON.stringify({ v: 1, title: 'N', summary: 's', by: 'x' }));
+    assert.match(dt(['artifact', 'check', 'no-index'], W).err, /no-index: no index\.html/);
+    fs.rmSync(path.join(A, 'no-index'), { recursive: true });
+    write(path.join(A, 'Bad_Slug/index.html'), '<!doctype html>');
+    assert.match(dt(['artifact', 'check', 'Bad_Slug'], W).err, /a slug/);
+    fs.rmSync(path.join(A, 'Bad_Slug'), { recursive: true });
+    write(path.join(A, 'big-one/index.html'), '<!doctype html>');
+    write(path.join(A, 'big-one/artifact.json'), JSON.stringify({ v: 1, title: 'Big', summary: 's', by: 'x' }));
+    fs.writeFileSync(path.join(A, 'big-one/huge.bin'), Buffer.alloc(8 * 1024 * 1024 + 1));
+    assert.match(dt(['artifact', 'check', 'big-one'], W).err, /huge\.bin: over 8 MB/);
+    fs.rmSync(path.join(A, 'big-one'), { recursive: true });
+    fs.symlinkSync('/etc/hosts', path.join(A, 'mock-one/hosts'));
+    assert.match(dt(['artifact', 'check', 'mock-one'], W).err, /hosts: a symlink/);
+    fs.rmSync(path.join(A, 'mock-one/hosts'));
+    // warnings only
+    write(path.join(A, 'mock-one/index.html'), '<!doctype html><script src="https://cdn.jsdelivr.net/npm/three/build/three.module.js"></script><script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"></script><script src="https://evil.example/x.js"></script><meta http-equiv="refresh" content="0">');
+    const w1 = dt(['artifact', 'check', 'mock-one'], W);
+    assert.equal(w1.status, 0, w1.err);
+    assert.equal(w1.err.match(/no exact version/g)?.length, 1, 'three@0.160.0 is pinned; three is not');
+    assert.match(w1.err, /evil\.example\/x\.js is not on an allowed CDN/);
+    assert.match(w1.err, /meta refresh/);
+    write(path.join(A, 'mock-one/index.html'), '<!doctype html><p>v1');
+    // listed as a draft, uncommitted
+    const ls = json(must(['artifacts', '--json']));
+    const d = ls.find((a) => a.slug === 'mock-one');
+    assert.deepEqual([d.at, d.title, d.summary, d.by, d.for, d.error], ['bill-01-card', 'Mock', 'One line', 'bill-01-card', ['feature:billing'], null]);
+    assert.match(d.fp, /^[0-9a-f]{64}$/);
+    assert.ok(d.updated_at);
+    assert.match(must(['artifacts']), /mock-one \[draft in bill-01-card\] "Mock" for feature:billing/);
+    // reviewer and scratch checkouts are never read
+    for (const n of ['review-x-1', 'tmp-x']) {
+      const rv = path.join(repo, '.worktrees', n);
+      write(path.join(rv, 'docs/devteam/project/artifacts/ghost/artifact.json'), JSON.stringify({ v: 1, title: 'Ghost', summary: 's', by: 'x' }));
+      assert.ok(!json(must(['artifacts', '--json'])).some((a) => a.slug === 'ghost'), n);
+      fs.rmSync(rv, { recursive: true });
+    }
+  });
+
 });
 
 // Moving the fleet: its own throwaway repo, an old machine and a fresh clone standing in for the new one.
