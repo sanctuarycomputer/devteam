@@ -191,7 +191,8 @@
 
   /* questions: the choices are one list; the recommended one is marked in place */
   .qcard h4 { font-size: 14px; font-weight: 600; margin: 8px 0 4px; line-height: 1.45; }
-  .qcard .ctx { color: var(--fg-2); margin: 4px 0 10px; }
+  .qcard .ctx { color: var(--fg-2); margin: 4px 0 10px; white-space: pre-wrap; }
+  .qcard .rewritten { color: var(--red-fg); font-weight: 600; margin: 0 0 8px; }
   .choices { display: grid; gap: 6px; margin: 10px 0 8px; }
   .choice { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 4px 10px; align-items: start; text-align: left; height: auto; margin: 0; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line-2); background: var(--surface); color: var(--fg); font-weight: 400; cursor: pointer; }
   .choice:hover { background: var(--hover); opacity: 1; }
@@ -204,7 +205,7 @@
   .choice.picked { border-color: var(--blue); box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 15%, transparent); }
   .choice .tag { display: inline-flex; margin-left: 6px; font-size: 11px; font-weight: 500; color: var(--blue-fg); }
   .links { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
-  .links a, .linkish { color: var(--blue-fg); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+  .links a, .linkish, .qref a { color: var(--blue-fg); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
   .meta { font-size: 12px; color: var(--muted); margin-top: 8px; }
   details > summary { cursor: pointer; color: var(--fg-2); font-size: 12px; margin: 6px 0; }
 
@@ -425,6 +426,36 @@
   .rv-link button { margin: 0; height: 26px; }
   /* on a phone the panel follows the page instead of covering it */
   @media (max-width: 900px) { .rv-panel { position: static; grid-template-columns: minmax(0, 1fr); max-height: none; } #rv-preview { overflow: visible; } }
+
+  /* the Library: artifacts (a landed one with its drafts beneath it), drafts of new ones, the link registry */
+  #library h3 { margin: 18px 0 8px; }
+  #library h3:first-of-type { margin-top: 4px; }
+  .lib-list { max-width: var(--measure); }
+  .art-card .art-t { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+  .art-card .art-t a { font-weight: 600; color: var(--fg); }
+  .art-card .art-t a:hover { text-decoration: underline; text-underline-offset: 3px; }
+  .art-card .art-t .badge { margin-right: 0; }
+  .art-card .art-s { color: var(--fg-2); margin-top: 2px; }
+  .art-card .meta { margin-top: 4px; }
+  .art-card .meta a, .lib-link .meta a { color: var(--fg-2); text-decoration: underline; text-underline-offset: 2px; }
+  .art-card.draft { margin-left: 20px; background: var(--well); box-shadow: none; }
+  .art-wt { font-size: 12px; color: var(--fg-2); margin: 10px 0 6px; }
+  .lib-link .links { margin: 0; }
+  .lib-link .loc { font-family: var(--mono); font-size: 11.5px; overflow-wrap: anywhere; }
+
+  /* the artifact viewer: a page the fleet drew, centered over the scrim at 80% of the window */
+  #artifact-view:not([hidden]) { position: fixed; inset: 10%; z-index: 22; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line-2); border-radius: 10px; box-shadow: 0 20px 60px rgba(0,0,0,.35); overflow: hidden; }
+  .av-bar { display: flex; align-items: center; gap: 8px; padding: 8px 10px 8px 14px; border-bottom: 1px solid var(--line); min-width: 0; }
+  .av-bar > i { font-size: 15px; color: var(--muted); flex: none; }
+  .av-head { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; font-size: 12px; }
+  .av-head b { font-size: 13.5px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+  .av-head .badge { margin-right: 0; }
+  .av-bar button, .av-bar a.av-btn { flex: none; margin: 0; display: inline-flex; align-items: center; gap: 6px; }
+  .av-bar a.av-btn { height: 28px; padding: 0 10px; border-radius: 6px; font-size: 12px; font-weight: 500; background: var(--surface); color: var(--fg); border: 1px solid var(--line-2); }
+  .av-bar a.av-btn:hover { background: var(--hover); }
+  #av-frame { flex: 1 1 auto; min-height: 0; width: 100%; border: 0; background: #fff; display: block; }
+  @media (max-width: 900px) { #artifact-view:not([hidden]) { inset: 8px; } }
+  @media (max-width: 600px) { .av-bar .av-label { display: none; } .av-bar button:not(.icon-btn), .av-bar a.av-btn { padding: 0 8px; } }
 </style>
 </head>
 <body>
@@ -437,6 +468,7 @@
     <a href="#inbox"><span class="nl"><i class="icon-inbox" aria-hidden="true"></i>Inbox</span> <span class="count" id="n-questions"></span></a>
     <a href="#progress"><span class="nl"><i class="icon-chart-line" aria-hidden="true"></i>Progress</span> <span class="count" id="n-progress"></span></a>
     <a href="#board"><span class="nl"><i class="icon-kanban" aria-hidden="true"></i>Board</span> <span class="count" id="n-active"></span></a>
+    <a href="#library"><span class="nl"><i class="icon-library" aria-hidden="true"></i>Library</span> <span class="count" id="n-library"></span></a>
     <a href="#loop"><span class="nl"><i class="icon-repeat" aria-hidden="true"></i>Loop</span> <span class="count" id="n-knowledge"></span></a>
     <a href="#trust"><span class="nl"><i class="icon-shield-check" aria-hidden="true"></i>Trust Ladder</span> <span class="count" id="n-trust"></span></a>
     <a href="#retros"><span class="nl"><i class="icon-history" aria-hidden="true"></i>Retros</span> <span class="count" id="n-retros"></span></a>
@@ -496,6 +528,14 @@
     <h2>Board <span class="sub">tickets by stage; planners turning goals into tickets above</span> <span class="sub" id="board-scope"></span></h2>
     <div id="planners"></div>
     <div class="board" id="board-cols"></div>
+  </section>
+
+  <section id="library">
+    <h2>Library <span class="sub">pages the fleet drew to show an idea, and the links it works from</span></h2>
+    <h3>Artifacts</h3>
+    <div class="lib-list" id="artifacts"></div>
+    <h3>Links</h3>
+    <div class="lib-list" id="lib-links"></div>
   </section>
 
   <section id="loop">
@@ -589,6 +629,17 @@
   <div class="drawer-bar"><h2 id="drawer-bar-title"></h2><button class="ghost icon-btn" id="drawer-close" aria-label="Close"><i class="icon-x" aria-hidden="true"></i></button></div>
   <div id="drawer-body"></div>
 </aside>
+<div id="artifact-view" role="dialog" aria-modal="true" aria-labelledby="av-title" hidden>
+  <div class="av-bar">
+    <i class="icon-library" aria-hidden="true"></i>
+    <div class="av-head"><b id="av-title"></b><span id="av-where" class="muted"></span><span id="av-note" class="badge high" hidden></span></div>
+    <button class="ghost" id="av-reload" title="Load the page again" aria-label="Reload"><i class="icon-rotate-cw" aria-hidden="true"></i><span class="av-label">Reload</span></button>
+    <a class="av-btn" id="av-tab" target="_blank" rel="noopener noreferrer" title="Open in new tab" aria-label="Open in new tab"><i class="icon-external-link" aria-hidden="true"></i><span class="av-label">Open in new tab</span></a>
+    <button class="ghost icon-btn" id="av-close" aria-label="Close"><i class="icon-x" aria-hidden="true"></i></button>
+  </div>
+  <!-- the server's policy for these pages holds whatever the frame's attributes say; the frame never shares this origin -->
+  <iframe id="av-frame" title="Artifact" sandbox="allow-scripts allow-forms allow-modals allow-pointer-lock" allow="fullscreen" referrerpolicy="no-referrer"></iframe>
+</div>
 <script>
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -903,16 +954,29 @@ function actUnder(a) {
 const approvedBy = (id) => (id?.startsWith('q-') ? `with your answer to ${qlink(id)}` : id?.startsWith('k-') ? 'under a standing rule you gave' : `approved by ${esc(id)}`);
 // Escape, then turn ticket ids and question ids into links and full commit hashes into short ones.
 function linkify(text) {
-  let h = esc(text ?? '');
+  // One pass over the escaped text: each id becomes a link once, and nothing inside a link (its
+  // href, its text) is scanned again, so an id holding a planner's name (m-…-plan-x) stays whole.
+  const h = esc(text ?? '');
   const ids = [...ticketMap().keys()].sort((a, b) => b.length - a.length);
-  if (ids.length) h = h.replace(new RegExp(`\\b(${ids.map((x) => x.replace(/[-]/g, '\\-')).join('|')})\\b`, 'g'), (m) => tlink(m));
-  h = h.replace(/\bq-\d{8}-\d{9}-[a-z0-9-]+/g, (m) => qlink(m));
-  h = h.replace(/\b([gkapmod])-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*/g, (m, k) => idLink(k, m));
-  h = h.replace(/\bmonitor:([A-Za-z0-9][A-Za-z0-9_.-]*)/g, (m, n) => ((DATA?.monitors || []).some((x) => x.name === n) ? `<a class="linkish" href="#monitor/${encodeURIComponent(n)}">${esc(n)}</a>` : m));
-  h = h.replace(/\bplan-([a-z0-9]+(?:-[a-z0-9]+)*)\b/g, (m, f) => ((DATA?.planners || []).some((x) => x.feature === f) ? `<a class="linkish" href="#planner/${encodeURIComponent(f)}">${m}</a>` : m));
-  h = h.replace(/\b([0-9a-f]{12})[0-9a-f]{28}\b/g, '<code>$1</code>');
-  h = h.replace(/\b(sanctuarycomputer\/devteam)#(\d+)/g, '<a class="linkish" href="https://github.com/$1/pull/$2" target="_blank" rel="noopener">devteam #$2</a>');
-  return h;
+  const parts = [
+    String.raw`\bq-\d{8}-\d{9}-[a-z0-9-]+`,
+    String.raw`\b[gkapmod]-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*`,
+    ...(ids.length ? [String.raw`\b(?:${ids.map((x) => x.replace(/[-]/g, '\\-')).join('|')})\b`] : []),
+    String.raw`\bmonitor:[A-Za-z0-9][A-Za-z0-9_.-]*`,
+    String.raw`\bplan-[a-z0-9]+(?:-[a-z0-9]+)*\b`,
+    String.raw`\b[0-9a-f]{40}\b`,
+    String.raw`\bsanctuarycomputer\/devteam#\d+`,
+  ];
+  return h.replace(new RegExp(parts.join('|'), 'g'), (m) => {
+    if (/^q-\d{8}-\d{9}-/.test(m)) return qlink(m);
+    if (/^[gkapmod]-\d{8}-\d{9}-/.test(m)) return idLink(m[0], m);
+    if (ticketMap().has(m)) return tlink(m);
+    if (m.startsWith('monitor:')) { const n = m.slice('monitor:'.length); return (DATA?.monitors || []).some((x) => x.name === n) ? `<a class="linkish" href="#monitor/${encodeURIComponent(n)}">${esc(n)}</a>` : m; }
+    if (m.startsWith('plan-')) { const f = m.slice('plan-'.length); return (DATA?.planners || []).some((x) => x.feature === f) ? `<a class="linkish" href="#planner/${encodeURIComponent(f)}">${m}</a>` : m; }
+    if (/^[0-9a-f]{40}$/.test(m)) return `<code>${m.slice(0, 12)}</code>`;
+    const pr = m.split('#')[1];
+    return `<a class="linkish" href="https://github.com/sanctuarycomputer/devteam/pull/${pr}" target="_blank" rel="noopener">devteam #${pr}</a>`;
+  });
 }
 const FIELD_WORDS = { depends_on: 'what it waits on', touches: 'which files it may change', done_when: 'what “done” means', title: 'its title', held: 'whether it is on hold', superseded_by: 'what replaces it', serves: 'which stories it serves', risk: 'its risk', size: 'its size', kind: 'its kind', contracts: 'its contracts', one_way_doors: 'its hard-to-undo parts', notes: 'its notes' };
 const syncTag = (x) => x.replace(/^(v\d+)-(\d+)-(\d+)/, '$1.$2.$3');
@@ -1024,8 +1088,9 @@ function questionCard(q, o, reasonText) {
   return `
     <div class="card qcard ${kindCls}" id="q-${esc(q.id)}">
       ${cardHead(KIND_ICON[q.kind] || 'circle-help', `<span class="badge ${q.kind === 'one-way-door' ? 'high' : q.kind === 'trust' ? 'good' : q.kind === 'owner-action' ? 'low' : 'medium'}">${esc(KIND_WORDS[q.kind] || words(q.kind))}</span>${q.goal_hold === 'park' ? '<span class="badge">its goal is parked</span>' : ''}`, { extra: (q.blocks || []).length ? `holds up ${q.blocks.map(tlink).join(', ')}` : q.ticket ? `about ${tlink(q.ticket)}` : '', id: q.id, rows: [['Asked', esc(when(q.asked_at))], ...(q.class ? [['Kind', esc(q.class)]] : [])] })}
-      <h4>${linkify(q.question)}</h4>
-      ${q.context ? `<p class="ctx">${linkify(q.context)}</p>` : ''}
+      ${q.rewritten ? '<p class="rewritten">This question changed after you answered it, so that answer no longer counts. Read it again before you answer: the supervisor\'s log was rewritten, which it should never do.</p>' : ''}
+      <h4>${qtext(q.question, q.links)}</h4>
+      ${q.context ? `<p class="ctx">${qtext(q.context, q.links)}</p>` : ''}
       ${(q.links || []).length ? `<div class="links"><span class="muted small">Look at:</span>${q.links.map(linkOf).join('')}</div>` : ''}
       ${(q.approves || []).length ? `<div class="meta">Your answer approves each of these, once: ${q.approves.map((a) => !/^(chore|plan)-/.test(a) ? tlink(a) : `<code>${esc(a)}</code>`).join(', ')}</div>` : ''}
       ${q.change ? `<div class="meta">Approving sets on <a class="linkish" href="#goal/${encodeURIComponent(q.goal)}">${esc((DATA.ooda.goals.find((g) => g.id === q.goal) || {}).title || q.goal)}</a>:<ul>${Object.entries(q.change).map(([k, v]) => `<li><b>${esc(words(k))}</b>: ${Array.isArray(v) && v.length && typeof v[0] === 'object' ? `<ol>${v.map((m) => `<li>${esc(m.title || JSON.stringify(m))}${m.target != null ? ` → ${esc(m.target)}` : ''}</li>`).join('')}</ol>` : esc(typeof v === 'object' ? JSON.stringify(v) : v)}</li>`).join('')}</ul></div>` : ''}
@@ -1046,8 +1111,30 @@ function cardHead(icon, label, { extra = '', id = null, rows = [] } = {}) {
   return `<div class="card-head"><i class="icon-${icon}" aria-hidden="true"></i>${label}<span class="grow">${extra}</span>${menu}</div>`;
 }
 const KIND_ICON = { 'owner-decision': 'scale', 'one-way-door': 'triangle-alert', clarification: 'circle-help', proposal: 'lightbulb', trust: 'users', 'goal-definition': 'target', 'goal-approval': 'flag', 'owner-action': 'zap', review: 'list-checks' };
-const fileHref = (l) => `#file?${new URLSearchParams({ path: l.path, ...(l.ref ? { ref: l.ref } : {}), title: l.title || l.path })}`;
-const linkOf = (l) => (l.url ? `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.title)}</a>` : `<a href="${esc(fileHref(l))}">${esc(l.title)}</a>`);
+const fileHref = (l) => `#file?${new URLSearchParams({ path: l.path, ...(l.ref ? { ref: l.ref } : {}), ...(l.repo ? { repo: l.repo } : {}), title: l.title || l.path })}`;
+// An artifact link opens the viewer. The server resolves an open question's links (href, changed,
+// gone); a link it didn't resolve (an answered question's) opens the artifact where it was asked.
+const artHref = (slug, at) => `#artifact/${at === 'main' ? 'main' : `wt/${encodeURIComponent(at)}`}/${encodeURIComponent(slug)}`;
+const AV_CHANGED = 'Changed since this question was asked';
+const artLinkOf = (l, inline = false) => {
+  const href = l.href ?? (l.gone || !l.at ? null : artHref(l.artifact, l.at));
+  if (!href) return `<span>${esc(l.title)} <span class="muted">(no longer available)</span></span>`;
+  return `<a href="${esc(href)}" data-av-note="${l.changed ? AV_CHANGED : ''}"${l.changed ? ` title="${AV_CHANGED}"` : ''}>${esc(l.title)}</a>${l.changed && !inline ? ' <span class="badge high">changed since asked</span>' : ''}`;
+};
+const linkOf = (l) => (l.artifact ? artLinkOf(l) : l.url ? `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.title)}</a>` : l.path ? `<a href="${esc(fileHref(l))}">${esc(l.title)}</a>` : `<span>${esc(l.title)}${l.remote ? ` <span class="muted">(${esc(l.remote)})</span>` : ''}</span>`);
+// A question's text with each [[name]] drawn in place as that link (every link is still listed under
+// the question). The rest is linkified as before; a [[name]] that names no link stays as written.
+const NAME_REF = /\[\[([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\]\]/;
+function qtext(text, links) {
+  return String(text ?? '').split(new RegExp(NAME_REF.source, 'g')).map((part, i) => {
+    if (i % 2 === 0) return linkify(part);
+    const l = (links || []).find((x) => x.name === part);
+    // in the sentence the link alone; a changed artifact is flagged in the list below
+    return l ? `<span class="qref">${l.artifact ? artLinkOf(l, true) : linkOf(l)}</span>` : esc(`[[${part}]]`);
+  }).join('');
+}
+// the same as plain text, for a title attribute or a notification
+const qplain = (text, links) => String(text ?? '').replace(new RegExp(NAME_REF.source, 'g'), (all, n) => (links || []).find((x) => x.name === n)?.title ?? all);
 function answeredCard(q) {
   const how = q.status === 'defaulted' ? 'went with the default; you didn’t answer in time' : q.status === 'withdrawn' ? 'withdrawn by the supervisor' : `answered ${CHANNEL_WORDS[q.channel] || ''}`;
   return `<div class="card small">
@@ -1163,8 +1250,9 @@ function reviewCard(q, o, reasonText) {
   return `
     <div class="card qcard review" id="q-${esc(q.id)}">
       ${cardHead(KIND_ICON.review, '<span class="badge low">Review</span>', { extra: (q.blocks || []).length ? `holds up ${q.blocks.map(tlink).join(', ')}` : q.ticket ? `about ${tlink(q.ticket)}` : '', id: q.id, rows: [['Asked', esc(when(q.asked_at))], ...(q.class ? [['Kind', esc(q.class)]] : [])] })}
-      <h4>${linkify(q.question)}</h4>
-      ${q.context ? `<p class="ctx">${linkify(q.context)}</p>` : ''}
+      ${q.rewritten ? '<p class="rewritten">This question changed after you answered it, so that answer no longer counts. Read it again before you answer: the supervisor\'s log was rewritten, which it should never do.</p>' : ''}
+      <h4>${qtext(q.question, q.links)}</h4>
+      ${q.context ? `<p class="ctx">${qtext(q.context, q.links)}</p>` : ''}
       <div class="meta rv-pins">${rv.data ? `${esc(rv.data.rows)} rows${rv.data.proposals ? `, ${esc(rv.data.proposals)} with a proposal` : ''} · ` : ''}page <code>${esc(String(rv.page?.sha256 ?? '').slice(0, 12))}</code> ${ok ? '<span class="badge good">verified</span>' : `<span class="badge high">${esc(q.result_status || 'missing')}</span>`}${rv.allow_partial ? ' · partial answers allowed' : ''}${pr && pr.total ? ` · <span class="badge ${pr.done >= pr.total ? 'good' : 'medium'}">${esc(pr.done)} of ${esc(pr.total)} decided</span>` : ''}</div>
       ${ok ? '' : '<p class="err">The page or data changed since the supervisor asked, so it can’t be answered. Send it back, or tell the supervisor to ask again.</p>'}
       ${(q.links || []).length ? `<div class="links"><span class="muted small">Look at:</span>${q.links.map(linkOf).join('')}</div>` : ''}
@@ -1358,13 +1446,15 @@ function renderReviewHead(note = '') {
   const ok = pinsVerified(info);
   const pins = info.files.map((f) => `${PIN_WORDS[f.role] || f.role} <code>${esc(f.sha256.slice(0, 12))}</code>`).join(' · ');
   const state = info.declined ? '<span class="badge medium">sent back</span>' : info.status === 'answered' ? '<span class="badge good">answered</span>' : info.status !== 'open' ? `<span class="badge">${esc(info.status)}</span>` : '';
+  // the server resolves an open question's artifact links in the dashboard data, so use those when there
+  const links = (DATA?.questions || []).find((q) => q.id === RV.qid)?.links || info.links || [];
   // one line for the question, one for the facts; the rest folds away so the agent's page gets the height
   const more = [rv.title && rv.title !== info.question ? `<div class="rv-title">${esc(rv.title)}</div>` : '',
-    `<div>${linkify(info.question)}</div>`,
-    info.context ? `<p class="ctx">${linkify(info.context)}</p>` : '',
-    (info.links || []).length ? `<div class="links"><span class="muted small">Look at:</span>${info.links.map(linkOf).join('')}</div>` : '',
+    `<div>${qtext(info.question, links)}</div>`,
+    info.context ? `<p class="ctx">${qtext(info.context, links)}</p>` : '',
+    links.length ? `<div class="links"><span class="muted small">Look at:</span>${links.map(linkOf).join('')}</div>` : '',
     `<div class="meta rv-pins">Asked by ${esc(who(info.asked_by))} · ${esc(when(info.asked_at))} · ${pins} · pinned at <code>${esc(String(rv.commit).slice(0, 12))}</code> (${esc(rv.ref)})${rv.allow_partial ? ' · partial answers allowed' : ''}</div>`].join('');
-  $('rv-head').innerHTML = `<div class="rv-top"><i class="icon-${KIND_ICON.review}" aria-hidden="true"></i><span class="badge low">Review</span>${state}<h4 title="${esc(info.question)}">${esc(rv.title || info.question)}</h4>${CLOSE}</div>
+  $('rv-head').innerHTML = `<div class="rv-top"><i class="icon-${KIND_ICON.review}" aria-hidden="true"></i><span class="badge low">Review</span>${state}<h4 title="${esc(qplain(info.question, links))}">${esc(rv.title || qplain(info.question, links))}</h4>${CLOSE}</div>
     <div class="rv-sub">${(info.blocks || []).length ? `<span>holds up ${info.blocks.map(tlink).join(', ')}</span>` : info.ticket ? `<span>about ${tlink(info.ticket)}</span>` : ''}${rv.data ? `<span>${esc(rv.data.rows)} rows</span>` : ''}${ok ? '<span class="badge good">verified</span>' : `<span class="badge high">${esc(info.result_status)}</span>`}<span id="rv-progress"></span>
       <details><summary>The question in full</summary><div>${more}</div></details></div>
     ${ok ? '' : '<div class="banner"><b>The page or data changed since the supervisor asked.</b> Nothing can be answered here. Tell the supervisor to ask again.</div>'}`;
@@ -1705,10 +1795,13 @@ function goalCard(g, R, openQs, week) {
     ${g.outcome ? `<p class="ctx">${esc(g.outcome)}</p>` : ''}
     ${steps}
     ${s.next ? `<p class="goal-next">${s.next}</p>` : ''}
+    ${registryAttestLine(g)}
     ${holdControl(g.id, g.hold_view, { status: g.status })}
     <div class="meta"><a href="#goal/${encodeURIComponent(g.id)}">Open</a>${design ? ` · <a href="${esc(fileHref({ ...design, title: design.title || 'The design' }))}">Read the design</a>` : ''}${planningFor(g).length ? ` · ${planningFor(g).map((p) => `<a href="#planner/${encodeURIComponent(p.feature)}">planner on ${esc(p.title)}</a>${p.waiting ? ' <span class="badge high">stuck on a prompt</span>' : ''}`).join(', ')}` : ''}</div>
   </div>`;
 }
+// The goal's registry attestation (planning.md §7), when it marks a precondition as the registry being complete.
+const registryAttestLine = (g) => { const r = g.registry_attest; return r ? `<div class="meta">Registry attestation: precondition ${esc(r.precondition)}, ${esc(r.status)}${r.question ? ` (${qlink(r.question, r.answer ? `answered “${r.answer}”` : 'the question')})` : ''}</div>` : ''; };
 const planningFor = (g) => (DATA?.planners || []).filter((p) => p.goals.includes(g.id));
 const ago = (m) => (m == null ? 'no activity yet' : m < 1 ? 'active just now' : m < 60 ? `active ${m} min ago` : `active ${Math.round(m / 60)} h ago`);
 function plannerCards(ps) {
@@ -1969,21 +2062,24 @@ function attrs({ id, idTip, peek, type, docType, pick = null, prefix = '', compu
 }
 
 // ---- peeks: one fetch per object, kept, fetched again on each refresh ----
+/* peeks start */
 const PEEKS = new Map();
 const PEEK_FLIGHT = new Set();
 // A failure that isn't "no such object" (the server restarting, a spawn timing out) is not kept:
 // the drawer says it couldn't load and tries again on the next refresh or open.
 const PEEK_FAIL = new Map();
-const peekKey = (kind, id) => `${kind}:${id}`;
+// A file is one object per repo and ref (home's README.md is not a sibling's). NUL is in no path,
+// ref or repo id, so the parts can't run together.
+const peekKey = (kind, id, q = {}) => `${kind}:${id}${q.repo ? `\0repo=${q.repo}` : ''}${q.ref ? `\0ref=${q.ref}` : ''}`;
 function peekOf(kind, id, q = {}) {
-  const k = peekKey(kind, id);
+  const k = peekKey(kind, id, q);
   if (PEEKS.has(k)) return PEEKS.get(k);
   const fail = PEEK_FAIL.get(k);
   if (!fail || Date.now() - fail.at > 10000) fetchPeek(kind, id, q);
   return fail ? { error: fail.error, transient: true } : undefined;
 }
 async function fetchPeek(kind, id, q = {}) {
-  const k = peekKey(kind, id);
+  const k = peekKey(kind, id, q);
   if (PEEK_FLIGHT.has(k)) return;
   PEEK_FLIGHT.add(k);
   if (DRAWER.kind === kind && DRAWER.id === id) DRAWER.q = q;
@@ -1997,11 +2093,12 @@ async function fetchPeek(kind, id, q = {}) {
   // a drawer may draw another object's peek too (a thread its ticket's): redraw whatever is open
   redraw();
 }
+/* peeks end */
 // On each data refresh: the open object's peek again (not one that wasn't found), then a redraw.
 function refreshDrawer() {
   if (!DRAWER.kind || $('drawer').hidden) return;
   for (const [kind, id, q] of [[DRAWER.kind, DRAWER.id, DRAWER.q || {}], ...(DRAWER.deps || [])]) {
-    const p = PEEKS.get(peekKey(kind, id));
+    const p = PEEKS.get(peekKey(kind, id, q || {}));
     if (!p?.missing) fetchPeek(kind, id, q || {});
   }
   if (DRAWER.kind === 'file' && DRAWER.url) refetchFile(DRAWER.url);
@@ -2060,7 +2157,7 @@ function closeDrawer() {
 }
 // Each opener names the object (and how to draw it again), then draws it.
 const drawerFor = (kind, id, arg) => {
-  if (DRAWER.kind !== kind || DRAWER.id !== id) { LAST_HTML = ''; PEEK_FAIL.delete(peekKey(kind, id)); }
+  if (DRAWER.kind !== kind || DRAWER.id !== id) { LAST_HTML = ''; const k = peekKey(kind, id); for (const f of [...PEEK_FAIL.keys()]) if (f === k || f.startsWith(`${k}\0`)) PEEK_FAIL.delete(f); }
   const same = DRAWER.kind === kind && DRAWER.id === id;
   DRAWER = { kind, id, arg, q: same ? DRAWER.q : undefined, deps: same ? DRAWER.deps : undefined, url: same ? DRAWER.url : undefined };
 };
@@ -2644,14 +2741,14 @@ function openQuestion(id) {
   const used = (DATA.ooda.decisions || []).find((x) => x.kind === 'answer' && x.id === id)?.acts || [];
   const blocked = (q.blocks || []).map((b) => ticketMap().get(b) ? `${tlink(b)} <span class="muted">· ${esc(STAGE_WORDS[ticketMap().get(b).stage] || ticketMap().get(b).stage)}</span>` : linkify(b));
   const took = q.answered_at && q.asked_at ? Date.parse(q.answered_at) - Date.parse(q.asked_at) : null;
-  showDrawer(`<h2 id="drawer-title">${linkify(q.question)}</h2>
+  showDrawer(`<h2 id="drawer-title">${qtext(q.question, q.links)}</h2>
     ${attrs({ id, peek: p, type: 'question', computed: [
       ['Status', esc(q.status), 'open, answered, defaulted or withdrawn.'],
       ['Settled', q.answered_at ? `${esc(when(q.answered_at))}${q.answered_by ? ` by ${esc(q.answered_by === 'owner' ? 'you' : q.answered_by)}` : ''}` : '', 'When it was answered, defaulted or withdrawn, and by whom.'],
       ['Took', took != null && ['answered', 'defaulted'].includes(q.status) ? esc(took < 3600e3 ? `${Math.max(1, Math.round(took / 60e3))} minutes` : took < 2 * DAY ? `${(took / 3600e3).toFixed(1)} hours` : `${(took / DAY).toFixed(1)} days`) : '', 'From asking to the answer.'],
       ['Matched', q.matched == null ? '' : q.matched ? 'yes: you went with its recommendation' : 'no: you chose otherwise', 'Whether your answer was its recommendation; this is the evidence for more trust.'],
     ] })}
-    ${q.context ? `<p class="ctx measure">${linkify(q.context)}</p>` : ''}
+    ${q.context ? `<p class="ctx measure">${qtext(q.context, q.links)}</p>` : ''}
     ${list2.length ? `<ul class="measure">${list2.map((c) => `<li><b>${esc(c.label)}</b>${c.rec ? ' <span class="tag muted">(recommended)</span>' : ''}${c.detail ? ` · ${linkify(c.detail)}` : ''}${c.effect ? ` · For users: ${linkify(c.effect)}` : ''}</li>`).join('')}</ul>` : ''}
     ${(q.links || []).length ? `<div class="links">${q.links.map(linkOf).join('')}</div>` : ''}
     ${answeredCard(q)}
@@ -2675,12 +2772,12 @@ function refetchFile(url) {
   return pr;
 }
 function openFile(params) {
-  const path = params.get('path'), title = params.get('title') || path, ref = params.get('ref');
+  const path = params.get('path'), title = params.get('title') || path, ref = params.get('ref'), repo = params.get('repo');
   drawerFor('file', path, params);
-  const url = `/api/file?${new URLSearchParams({ path, ...(ref ? { ref } : {}) })}`;
+  const url = `/api/file?${new URLSearchParams({ path, ...(ref ? { ref } : {}), ...(repo ? { repo } : {}) })}`;
   DRAWER.url = url;
   const ext = (path.split('.').pop() || '').toLowerCase();
-  const p = peekOf('file', path, ref ? { ref } : {});
+  const p = peekOf('file', path, { ...(ref ? { ref } : {}), ...(repo ? { repo } : {}) });
   const head = `<h2 id="drawer-title">${esc(title)}</h2>${attrs({ id: path, idTip: 'Its path in the repository.', peek: p, noRecord: true, computed: [['Version', `<code>${esc(ref || 'main')}</code>`, 'The branch or commit it is read from; committed content only.'], ['Commits', p?.history?.length ? esc(p.history.length) : '', 'Commits that changed it (the latest 60).']] })}`;
   const tail = historySection(p, path);
   if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext)) return showDrawer(`${head}<div class="viewer"><img src="${esc(url)}" alt="${esc(title)}"></div>${tail}`);
@@ -2729,9 +2826,60 @@ async function renderMermaid(root) {
     }
   }
 }
+// ---- artifacts: a page the fleet drew, in a centered frame; the server's sandbox policy holds it ----
+let AV = null;
+// set by the question link that opens it, read once: the header's "Changed since this question was asked"
+let AV_NOTE = null;
+// a viewer opened from the dashboard closes back to it; one opened from a link goes to the Library
+let AV_FROM = false;
+let avFocus = null;
+function avHeader() {
+  const a = (DATA?.library?.artifacts ?? []).find((x) => x.slug === AV.slug && x.at === AV.at);
+  $('av-title').textContent = a && !a.error && a.title ? a.title : AV.slug;
+  $('av-where').innerHTML = AV.at === 'main' ? 'landed' : `draft in ${linkify(AV.at)}`;
+}
+function openArtifact(raw) {
+  const m = /^artifact\/(main|wt\/([^/]+))\/([^/]+)$/.exec(raw);
+  let at = null, slug = null;
+  if (m) try { at = m[1] === 'main' ? 'main' : decodeURIComponent(m[2]); slug = decodeURIComponent(m[3]); } catch {}
+  const note = AV_NOTE;
+  AV_NOTE = null;
+  if (!at || !/^[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(slug ?? '')) return void (location.hash = '#library');
+  const src = `/artifact/${at === 'main' ? 'main' : `wt/${encodeURIComponent(at)}`}/${slug}/`;
+  if (!AV) { AV_FROM = ROUTED; avFocus = document.activeElement; }
+  AV = { at, slug };
+  avHeader();
+  $('av-note').hidden = !note;
+  $('av-note').textContent = note ?? '';
+  $('av-tab').href = src;
+  if ($('av-frame').getAttribute('src') !== src) $('av-frame').src = src;
+  $('artifact-view').hidden = false;
+  $('scrim').hidden = false;
+  document.body.style.overflow = 'hidden';
+  $('av-close').focus();
+}
+function closeArtifact() {
+  if (!AV) return false;
+  AV = null;
+  $('artifact-view').hidden = true;
+  $('av-frame').removeAttribute('src');
+  // a drawer or a review it was opened over stays, with its scrim
+  if ($('drawer').hidden && !RV) { $('scrim').hidden = true; document.body.style.overflow = ''; }
+  avFocus?.focus?.();
+  return true;
+}
+function leaveArtifact() { if (AV_FROM) history.back(); else location.hash = '#library'; }
+$('av-close').addEventListener('click', leaveArtifact);
+$('av-reload').addEventListener('click', () => { const f = $('av-frame'), src = f.getAttribute('src'); if (!src) return; f.removeAttribute('src'); f.src = src; });
+// a question's link to a changed artifact says so in the viewer's header
+document.addEventListener('click', (e) => { const a = e.target.closest?.('a[data-av-note]'); if (a) AV_NOTE = a.dataset.avNote || null; });
+
 let ROUTED = false;
 function route() {
   const raw = location.hash.slice(1);
+  // before anything that hides the drawer, the scrim or a review: the viewer opens over them
+  if (raw.startsWith('artifact/')) { openArtifact(raw); ROUTED = true; return; }
+  if (closeArtifact() && /^[a-z]+$/.test(raw)) document.getElementById(raw)?.scrollIntoView();
   if (raw.startsWith('review/') || raw.startsWith('review-preview')) { if (!RV) RV_FROM = ROUTED ? raw : null; ROUTED = true; return void openReview(raw); }
   ROUTED = true; RV_FROM = null;
   // back from a review to a section: the section was hidden when the browser looked for it
@@ -2752,12 +2900,12 @@ function route() {
 }
 window.addEventListener('hashchange', () => { if (DATA) route(); });
 $('drawer-close').addEventListener('click', closeDrawer);
-$('scrim').addEventListener('click', () => (RV ? leaveReview() : closeDrawer()));
+$('scrim').addEventListener('click', () => (AV ? leaveArtifact() : RV ? leaveReview() : closeDrawer()));
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   // Escape on an attribute's key closes its tooltip, not the drawer
   if (document.activeElement?.classList?.contains('attr-k')) return void document.activeElement.blur();
-  if (RV) leaveReview(); else if (!$('drawer').hidden) closeDrawer();
+  if (AV) leaveArtifact(); else if (RV) leaveReview(); else if (!$('drawer').hidden) closeDrawer();
 });
 document.addEventListener('click', (e) => { if (e.target.closest('[data-rv-close]')) leaveReview(); });
 // a review opened from the dashboard closes back to it; one opened from a link goes to the Inbox
@@ -2777,6 +2925,8 @@ $('loop-tabs').addEventListener('click', (e) => { const b = e.target.closest('[d
 showTab(TAB);
 
 async function post(action, body, errId) {
+  // An answer names the question as this page showed it; a question changed since is refused.
+  if (action === 'answer' && body.seen === undefined) body = { ...body, seen: (DATA.questions || []).find((x) => x.id === body.id)?.hash };
   const r = await fetch(`/api/${action}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
   const out = await r.json();
   if (!r.ok) {
@@ -2796,6 +2946,42 @@ function markAnswered(id, text) {
   if (card) { card.classList.add('done'); card.innerHTML = `<div class="answered-note"><i class="icon-circle-check" aria-hidden="true"></i> Answered: <b>${esc(text)}</b></div>`; }
 }
 
+// The Library: each landed artifact with its drafts beneath it, then drafts of slugs that haven't
+// landed (by worktree), then the link registry. A manifest that broke the rules shows its slug and
+// the error, never its title.
+function renderLibrary(lib) {
+  const arts = lib?.artifacts ?? [];
+  const links = lib?.links ?? [];
+  $('n-library').textContent = arts.length || '';
+  const card = (a, draft) => {
+    const name = a.error ? a.slug : a.title || a.slug;
+    const meta = [a.by ? `drawn by ${esc(who(a.by))}` : '', a.for?.length ? `for ${a.for.map((f) => linkify(f)).join(', ')}` : '', a.updated_at ? esc(when(a.updated_at)) : ''].filter(Boolean).join(' · ');
+    return `<div class="card small art-card${draft ? ' draft' : ''}">
+      <div class="art-t">${a.error ? `<b>${esc(name)}</b>` : `<a href="${esc(artHref(a.slug, a.at))}">${esc(name)}</a>`}${a.at === 'main' ? '' : `<span class="badge medium">draft</span><span class="small muted">in ${linkify(a.at)}</span>`}${a.error ? '<span class="badge high">broken</span>' : ''}</div>
+      ${a.error ? `<div class="err">${esc(a.error)}</div>` : a.summary ? `<div class="art-s">${esc(a.summary)}</div>` : ''}
+      ${meta ? `<div class="meta">${meta}</div>` : ''}
+    </div>`;
+  };
+  const landed = arts.filter((a) => a.at === 'main');
+  const drafts = arts.filter((a) => a.at !== 'main');
+  const fresh = drafts.filter((d) => !landed.some((l) => l.slug === d.slug));
+  const byWt = new Map();
+  for (const d of fresh) byWt.set(d.at, [...(byWt.get(d.at) || []), d]);
+  $('artifacts').innerHTML = arts.length
+    ? landed.map((a) => card(a) + drafts.filter((d) => d.slug === a.slug).map((d) => card(d, true)).join('')).join('') +
+      (byWt.size ? `<h3>Drafts <span class="dim">not landed yet</span></h3>${[...byWt].map(([wt, ds]) => `<div class="art-wt">In ${linkify(wt)}</div>${ds.map((d) => card(d)).join('')}`).join('')}` : '')
+    : empty('No artifacts yet. Ask the supervisor to draw one (“draw me a mock of …”); it shows here as a draft, then lands.');
+  const loc = (l) => esc(l.url || (l.remote ? `${l.remote}${l.path ? `:${l.path}` : ''}` : l.path || ''));
+  $('lib-links').innerHTML = links.length
+    ? links.map((l) => `<div class="card small lib-link">
+      <div class="links">${linkOf({ title: l.title, url: l.url, path: l.remote ? null : l.path, remote: l.remote })}<span class="badge">${esc(l.kind)}</span></div>
+      ${l.notes ? `<div class="muted">${esc(l.notes)}</div>` : ''}
+      <div class="meta"><code>${esc(l.id)}</code>${loc(l) ? ` · <span class="loc">${loc(l)}</span>` : ''}${l.for?.length ? ` · for ${l.for.map((f) => linkify(f)).join(', ')}` : ''}</div>
+    </div>`).join('')
+    : empty('No links in the registry. The supervisor adds the docs, designs and dashboards the fleet works from.');
+  if (AV) avHeader();
+}
+
 function render(d) {
   DATA = d;
   const m = d.metrics, p = d.progress, now = Date.parse(p.now);
@@ -2803,7 +2989,9 @@ function render(d) {
   $('when').textContent = `updated ${new Date(d.generated_at).toLocaleTimeString()}`;
   const o = d.ooda;
   $('logline').textContent = `log ${o.log.lines} lines${o.log.errors || o.log.ignored ? ` · ${o.log.errors} invalid · ${o.log.ignored} ignored` : ''}`;
-  const active = d.tickets.filter((t) => t.phase && !['done', 'parked'].includes(t.phase)).length;
+  // A worker is active until its ticket merges, as the kit counts slots (activeWorker): a worker
+  // that never logged done (it stopped at awaiting-word or final-review) isn't working any more.
+  const active = d.tickets.filter((t) => t.phase && !['done', 'parked'].includes(t.phase) && !['merged', 'released'].includes(t.stage)).length;
   const count = (id, n, hot = false) => { const el = $(id); el.textContent = n || ''; el.classList.toggle('hot', hot && n > 0); };
   count('n-goals', o.goals.length);
   count('n-questions', d.questions.length + o.knowledge.filter((k) => k.status === 'candidate').length, true);
@@ -2816,6 +3004,7 @@ function render(d) {
     $('retro-due').innerHTML = rt.due ? `<div class="card"><span class="badge medium">due since ${esc((rt.due_since || '').slice(0, 10))}</span> <span class="small">${esc(rt.reasons.join('; '))}</span><p class="meta">The supervisor drafts it next (supervisor.md §10).</p></div>` : '';
     $('retro-list').innerHTML = all.length ? all.map((r) => `<a class="card retro-row" href="#retro/${encodeURIComponent(r.id)}"><b>${esc(retroDate(r))}</b><span>${esc(r.summary)}</span></a>`).join('') : '<p class="empty">No retro yet.</p>';
   }
+  renderLibrary(d.library);
   count('n-findings', m.findings.length, m.findings.some((f) => f.severity === 'high'));
   count('n-knowledge', o.knowledge.filter((k) => k.status === 'candidate').length);
   $('n-observe').textContent = o.observations.length || '';
@@ -2841,6 +3030,7 @@ function render(d) {
 
   // Keep anything half-typed or half-open across refreshes.
   document.querySelectorAll('textarea[data-q]').forEach((t) => { drafts[t.dataset.q] = t.value; });
+  document.querySelectorAll('textarea[data-know-note]').forEach((t) => { drafts[`know:${t.dataset.knowNote}`] = t.value; });
   keepSecretDrafts();
   const kept = [...document.querySelectorAll('input[data-reason], input[data-overrule]')].map((el) => [el.dataset.reason ? `input[data-reason="${el.dataset.reason}"]` : `input[data-overrule="${el.dataset.overrule}"]`, el.value]);
   const keptChecks = [...document.querySelectorAll('input[data-rulebox]:checked, input[data-auto]:checked')].map((el) => el.dataset.rulebox ? `input[data-rulebox="${el.dataset.rulebox}"]` : `input[data-auto="${el.dataset.auto}"][value="${el.value}"]`);
@@ -2852,6 +3042,7 @@ function render(d) {
       ${cardHead('lightbulb', '<span class="badge good">Lesson to keep?</span>', { extra: `applies to ${esc(scopeWords(k.scope))}`, id: k.id, rows: [['Proposed', esc(when(k.created_at))], ['By', esc(who(k.created_by))]] })}
       <h4>${linkify(k.statement)}</h4>
       <p class="ctx">${esc(cap(who(k.created_by)))} proposes this as a ${esc(k.kind)}${k.confidence != null ? `, ${Math.round(k.confidence * 100)}% sure` : ''}, ${(k.evidence || []).length ? `based on ${k.evidence.map((e) => linkify(e)).join(', ')}` : 'with no evidence recorded'}. Accepted lessons go into the instructions of every agent they apply to.</p>
+      <textarea data-know-note="${esc(k.id)}" rows="1" maxlength="600" placeholder="Add a note to refine it (optional): it goes with the lesson into every prompt">${esc(drafts[`know:${k.id}`] || '')}</textarea>
       <div class="row-inline"><button data-know="${esc(k.id)}" data-status="accepted">Keep it</button><button class="ghost" data-know="${esc(k.id)}" data-status="retired">Retire it</button><span class="err" id="e-${esc(k.id)}"></span></div>
     </div>`).join('');
   for (const qid of [...ANSWERED.keys()]) if (!d.questions.some((q) => q.id === qid)) ANSWERED.delete(qid);
@@ -2970,7 +3161,7 @@ const NOTIFY_OK = 'Notification' in window && window.isSecureContext && window.t
 let inboxSeen = null;
 function inboxItems(d) {
   return [
-    ...d.questions.map((q) => ({ id: q.id, text: q.question })),
+    ...d.questions.map((q) => ({ id: q.id, text: qplain(q.question, q.links) })),
     ...(d.ooda?.knowledge ?? []).filter((k) => k.status === 'candidate').map((k) => ({ id: k.id, text: `Keep this lesson? ${k.statement}` })),
   ];
 }
@@ -3161,7 +3352,16 @@ document.addEventListener('click', async (ev) => {
     return;
   }
   const know = ev.target.closest('[data-know]');
-  if (know) return void post('knowledge', { id: know.dataset.know, status: know.dataset.status }, know.dataset.know);
+  if (know) {
+    const row = know.closest('.row-inline');
+    row?.querySelectorAll('button').forEach((b) => { b.disabled = true; });
+    know.classList.add('busy');
+    const noteEl = document.querySelector(`textarea[data-know-note="${CSS.escape(know.dataset.know)}"]`);
+    const note = know.dataset.status === 'accepted' ? (noteEl?.value ?? '').replace(/\s+/g, ' ').trim() : '';
+    if (await post('knowledge', { id: know.dataset.know, status: know.dataset.status, ...(note ? { note } : {}) }, know.dataset.know)) { delete drafts[`know:${know.dataset.know}`]; know.closest('.card')?.remove(); }
+    else { know.classList.remove('busy'); row?.querySelectorAll('button').forEach((b) => { b.disabled = false; }); }
+    return;
+  }
   const corr = ev.target.closest('[data-correct]');
   if (corr) {
     const form = document.querySelector(`[data-correct-form="${corr.dataset.correct}"]`);
