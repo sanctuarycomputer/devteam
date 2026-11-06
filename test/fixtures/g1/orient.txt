@@ -1,0 +1,7 @@
+exit 0
+--- stdout
+slow:g1  x3  valence -1
+  latest: slow 3
+  evidence: o-<sha>-<sha>-supervisor o-<sha>-<sha>-supervisor o-<sha>-<sha>-owner
+--- stderr
+
