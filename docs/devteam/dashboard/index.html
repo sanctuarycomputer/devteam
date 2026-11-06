@@ -191,7 +191,8 @@
 
   /* questions: the choices are one list; the recommended one is marked in place */
   .qcard h4 { font-size: 14px; font-weight: 600; margin: 8px 0 4px; line-height: 1.45; }
-  .qcard .ctx { color: var(--fg-2); margin: 4px 0 10px; }
+  .qcard .ctx { color: var(--fg-2); margin: 4px 0 10px; white-space: pre-wrap; }
+  .qcard .rewritten { color: var(--red-fg); font-weight: 600; margin: 0 0 8px; }
   .choices { display: grid; gap: 6px; margin: 10px 0 8px; }
   .choice { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 4px 10px; align-items: start; text-align: left; height: auto; margin: 0; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line-2); background: var(--surface); color: var(--fg); font-weight: 400; cursor: pointer; }
   .choice:hover { background: var(--hover); opacity: 1; }
@@ -1019,6 +1020,7 @@ function questionCard(q, o, reasonText) {
   return `
     <div class="card qcard ${kindCls}" id="q-${esc(q.id)}">
       ${cardHead(KIND_ICON[q.kind] || 'circle-help', `<span class="badge ${q.kind === 'one-way-door' ? 'high' : q.kind === 'trust' ? 'good' : q.kind === 'owner-action' ? 'low' : 'medium'}">${esc(KIND_WORDS[q.kind] || words(q.kind))}</span>${q.goal_hold === 'park' ? '<span class="badge">its goal is parked</span>' : ''}`, { extra: (q.blocks || []).length ? `holds up ${q.blocks.map(tlink).join(', ')}` : q.ticket ? `about ${tlink(q.ticket)}` : '', id: q.id, rows: [['Asked', esc(when(q.asked_at))], ...(q.class ? [['Kind', esc(q.class)]] : [])] })}
+      ${q.rewritten ? '<p class="rewritten">This question changed after you answered it, so that answer no longer counts. Read it again before you answer: the supervisor\'s log was rewritten, which it should never do.</p>' : ''}
       <h4>${linkify(q.question)}</h4>
       ${q.context ? `<p class="ctx">${linkify(q.context)}</p>` : ''}
       ${(q.links || []).length ? `<div class="links"><span class="muted small">Look at:</span>${q.links.map(linkOf).join('')}</div>` : ''}
@@ -1158,6 +1160,7 @@ function reviewCard(q, o, reasonText) {
   return `
     <div class="card qcard review" id="q-${esc(q.id)}">
       ${cardHead(KIND_ICON.review, '<span class="badge low">Review</span>', { extra: (q.blocks || []).length ? `holds up ${q.blocks.map(tlink).join(', ')}` : q.ticket ? `about ${tlink(q.ticket)}` : '', id: q.id, rows: [['Asked', esc(when(q.asked_at))], ...(q.class ? [['Kind', esc(q.class)]] : [])] })}
+      ${q.rewritten ? '<p class="rewritten">This question changed after you answered it, so that answer no longer counts. Read it again before you answer: the supervisor\'s log was rewritten, which it should never do.</p>' : ''}
       <h4>${linkify(q.question)}</h4>
       ${q.context ? `<p class="ctx">${linkify(q.context)}</p>` : ''}
       <div class="meta rv-pins">${rv.data ? `${esc(rv.data.rows)} rows${rv.data.proposals ? `, ${esc(rv.data.proposals)} with a proposal` : ''} · ` : ''}page <code>${esc(String(rv.page?.sha256 ?? '').slice(0, 12))}</code> ${ok ? '<span class="badge good">verified</span>' : `<span class="badge high">${esc(q.result_status || 'missing')}</span>`}${rv.allow_partial ? ' · partial answers allowed' : ''}${pr && pr.total ? ` · <span class="badge ${pr.done >= pr.total ? 'good' : 'medium'}">${esc(pr.done)} of ${esc(pr.total)} decided</span>` : ''}</div>
@@ -2703,6 +2706,8 @@ $('loop-tabs').addEventListener('click', (e) => { const b = e.target.closest('[d
 showTab(TAB);
 
 async function post(action, body, errId) {
+  // An answer names the question as this page showed it; a question changed since is refused.
+  if (action === 'answer' && body.seen === undefined) body = { ...body, seen: (DATA.questions || []).find((x) => x.id === body.id)?.hash };
   const r = await fetch(`/api/${action}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
   const out = await r.json();
   if (!r.ok) {
