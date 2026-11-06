@@ -5284,7 +5284,15 @@ function decisionAuthorityGap(d) {
   if (ownerOnly && !(d.authority === 'standing-rule' && (L.owner_rules ?? []).includes(d.class))) return v && inClass && v.status === 'answered' ? answerUseGap(d, v) : `${d.class} is the owner's and needs the owner's answer in that class`;
   switch (d.authority) {
     case 'answer': return v && inClass && v.status === 'answered' ? answerUseGap(d, v) : `no answered ${d.class} question ${d.approved_by ?? ''}`.trim();
-    case 'default': return v && inClass && v.status === 'defaulted' ? null : `no defaulted ${d.class} question ${d.approved_by ?? ''}`.trim();
+    // A default stands in for the owner only where the owner put the class on rung 2 (ask with a
+    // default), only once the question's deadline passed with no answer, and once, as decide
+    // enforces: a decision line written by hand gets the same rule.
+    case 'default': {
+      if (!(v && inClass && v.status === 'defaulted' && v.default)) return `no defaulted ${d.class} question ${d.approved_by ?? ''}`.trim();
+      if (!L.classes[d.class] || rungFor(d.class, d.scope ?? null) < 2) return `${d.class} is not on rung 2 or above${d.scope ? ` for ${d.scope}` : ''}, so a default is not approval there`;
+      if (v.deadline && v.answered_at && v.answered_at < v.deadline) return `${v.id} was defaulted before its deadline (${v.deadline})`;
+      return answerUseGap(d, v);
+    }
     case 'standing-rule': { const k = logGet(d.approved_by ?? ''); return k?.type === 'knowledge' && writerClass(k.created_by) === 'owner' && k.status === 'accepted' && k.scope === `class:${d.class}` ? null : `no accepted owner rule scoped class:${d.class}`; }
     case 'rung': return L.classes[d.class] && rungFor(d.class, d.scope ?? null) >= 3 ? null : `${d.class} is not on rung 3`;
     case 'constitution': return (L.constitutional ?? []).includes(d.class) || !L.classes[d.class] ? null : `${d.class} is on the ladder, not constitutional`;
