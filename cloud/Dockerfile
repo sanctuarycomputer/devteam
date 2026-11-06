@@ -13,14 +13,18 @@
 #   sleeps, and sleeping stops every agent. Auto-Deploy: Off (a deploy restarts the box, which
 #   stops every agent; deploy when the fleet is parked). Disk: mounted at /data. Health check
 #   path: /healthz. Environment: DEVTEAM_PUBLIC_URL=https://box.example.com. Custom domains:
-#   box.example.com and *.box.example.com, with the DNS records Render shows. Then deploy: the log
-#   prints the claim link, <DEVTEAM_PUBLIC_URL>/auth/claim#<token>.
+#   box.example.com and *.box.example.com, with every DNS record Render lists for them (a wildcard
+#   needs its own name pointed at Render too, plus the _acme-challenge and _cf-custom-hostname
+#   CNAMEs; remove any AAAA records). If Render won't take a wildcard under a subdomain, give the
+#   box a domain of its own (example.com and *.example.com). The *.onrender.com address is refused:
+#   the box answers only on its own names. Then deploy: the log prints the claim link,
+#   https://auth.box.example.com/auth/claim#<token>.
 # fly.io: fly launch --no-deploy --dockerfile cloud/Dockerfile --internal-port 8080; in fly.toml
 #   set auto_stop_machines = "off", min_machines_running = 1, [env] DEVTEAM_PUBLIC_URL, and
 #   [mounts] source = "data", destination = "/data"; fly volumes create data; fly certs add for
 #   both names; fly deploy.
 # Lost every passkey: in a shell on the box as root (Render's Shell tab, fly ssh console), run
-#   devteam-reclaim, which prints a new claim link.
+#   devteam-reclaim, which prints a new claim link (as another user, setpriv fails: use root).
 FROM node:22-bookworm-slim
 
 ENV LANG=C.UTF-8 SHELL=/bin/bash DISABLE_AUTOUPDATER=1
@@ -42,10 +46,12 @@ RUN case "$(uname -m)" in \
  && echo "$sum  /usr/local/bin/ttyd" | sha256sum -c - && chmod 755 /usr/local/bin/ttyd
 
 # mise, for the toolchains a repo pins (.tool-versions, .mise.toml); its installs land in $HOME, on the volume
-RUN curl -fsSL https://mise.run | MISE_INSTALL_PATH=/usr/local/bin/mise sh
+ARG MISE_VERSION=v2026.10.17
+RUN curl -fsSL https://mise.run | MISE_VERSION=$MISE_VERSION MISE_INSTALL_PATH=/usr/local/bin/mise sh
 
-# Claude Code, updated by redeploying the image (its own updater can't write to /usr/local)
-RUN npm install -g @anthropic-ai/claude-code && npm cache clean --force
+# Claude Code, pinned, and updated by changing this and redeploying (its own updater can't write to /usr/local)
+ARG CLAUDE_CODE_VERSION=2.1.307
+RUN npm install -g @anthropic-ai/claude-code@$CLAUDE_CODE_VERSION && npm cache clean --force
 
 # Two users. dev is the owner at the terminal, and every agent: home on the volume. gw runs only
 # the gateway and alone can read its passkeys and sessions, so no agent can add itself a way in.
@@ -54,8 +60,10 @@ RUN usermod -l dev -d /data/home node && groupmod -n dev node \
 
 COPY --chmod=644 cloud/gateway.mjs /opt/devteam/gateway.mjs
 
-# Under tini, as root only to set up /data, then: dev's side, and the gateway (if it stops, the box
-# restarts). A stop (a deploy) closes the tmux server first, so agents get a hangup, not a kill.
+# Under tini, as root only to set up /data, then the gateway, and only once it holds the public
+# port, dev's side: dev's shells read files any agent can write, and nothing of dev's may get the
+# port first. If the gateway stops, the box restarts. A stop (a deploy) closes the tmux server
+# first, so agents get a hangup, not a kill.
 COPY --chmod=755 <<'EOF' /usr/local/bin/devteam-box
 #!/bin/sh
 set -eu
@@ -64,9 +72,13 @@ mkdir -p /data/home /data/gateway
 chown -R gw:gw /data/gateway
 chmod 700 /data/gateway
 as_dev() { setpriv --reuid=dev --regid=dev --init-groups env -u DEVTEAM_CLAIM_TOKEN HOME=/data/home "$@"; }
-as_dev /usr/local/bin/devteam-dev &
 setpriv --reuid=gw --regid=gw --init-groups env HOME=/data/gateway DEVTEAM_GATEWAY_DIR=/data/gateway /usr/local/bin/node /opt/devteam/gateway.mjs serve &
 gw=$!
+until curl -fsS -o /dev/null "http://127.0.0.1:${PORT:-8080}/healthz" 2>/dev/null; do
+  kill -0 "$gw" 2>/dev/null || exit 1
+  sleep 0.2
+done
+as_dev /usr/local/bin/devteam-dev &
 trap 'as_dev tmux kill-server 2>/dev/null; sleep 2; kill -TERM "$gw" 2>/dev/null; exit 0' TERM INT
 wait "$gw"
 EOF

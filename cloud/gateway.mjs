@@ -187,7 +187,8 @@ export function createGateway(opts = {}) {
   }
 
   // One use each, five minutes, bound to what they were issued for. Anyone may ask for a login
-  // challenge, so those are kept apart (and fewer), and asking for many evicts only those.
+  // challenge, so those are kept apart, and asking for many evicts only those: at worst a sign-in
+  // in progress has to be tried again.
   const pools = { login: new Map(), other: new Map() };
   const poolOf = (purpose) => (purpose === 'login' ? pools.login : pools.other);
   const issue = (purpose, extra = {}) => {
@@ -369,7 +370,7 @@ export function createGateway(opts = {}) {
     const dest = req.headers['sec-fetch-dest'];
     if (/^\/review\/[^/]+\/devteam-ui\.(js|css)$/.test(p)) return ['script', 'style'].includes(dest);
     if (p === '/api/file') return dest === 'image';
-    return p.startsWith('/artifact/');
+    return p.startsWith('/artifact/') && ['script', 'style', 'image', 'font', 'audio', 'video', 'track', 'empty'].includes(dest);
   };
   const loginAt = (next) => `${AUTH}/auth/login${next ? `?next=${encodeURIComponent(next)}` : ''}`;
 
@@ -383,7 +384,7 @@ export function createGateway(opts = {}) {
     const isBox = req.headers.host === pubUrl.host;
     const isAuth = req.headers.host === authHost;
     const port = isBox || isAuth ? null : instanceOf(req.headers.host);
-    if (!isBox && !isAuth && !port) return send(res, 421, 'text/plain; charset=utf-8', 'this gateway answers only on its own names');
+    if (!isBox && !isAuth && !port) return send(res, 421, 'text/plain; charset=utf-8', `this box answers only on its own names: open ${PUB}/`);
     const own = isBox ? PUB : isAuth ? AUTH : instanceOrigin(port);
     if (!['GET', 'HEAD'].includes(req.method) && req.headers.origin !== own) return send(res, 403, 'text/plain; charset=utf-8', 'only from this box\'s own pages');
     const p = url.pathname;

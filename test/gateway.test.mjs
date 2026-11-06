@@ -384,3 +384,31 @@ test('the hub on a laptop is unchanged: no box.json, instances on their own loop
   const hub = fs.readFileSync(path.join(kit, 'dashboard', 'hub.html'), 'utf8');
   assert.match(hub, /const urlOf = \(x\) => \(box \? box\.instance\.replace\('\{port\}', String\(Number\(x\.port\)\)\) : `http:\/\/127\.0\.0\.1:\$\{Number\(x\.port\)\}\/`\);/);
 });
+
+test('on https: the cookie is Secure and SameSite=None for every name, HSTS is sent, and an artifact\'s loads are typed', async () => {
+  // the gateway trusts its public URL's scheme (the platform terminates TLS), so plain http here
+  const port = await freePort();
+  const dir = path.join(tmp, 'https');
+  const logs = [];
+  const g = G.createGateway({ publicUrl: 'https://box.localhost', dir, ttydPort: await freePort(), log: (m) => logs.push(m) });
+  await new Promise((r) => g.server.listen(port, '127.0.0.1', r));
+  const token = /claim#([\w-]+)/.exec(logs.join(' '))[1];
+  const call = (host, method, route, body, headers = {}) => new Promise((resolve, reject) => {
+    const r = http.request({ host: '127.0.0.1', port, method, path: route, headers: { host, ...(method === 'POST' ? { origin: `https://${host}`, 'content-type': 'application/json' } : {}), ...headers } }, (res) => { let b = ''; res.on('data', (c) => { b += c; }); res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, json: (() => { try { return JSON.parse(b); } catch { return null; } })() })); });
+    r.on('error', reject);
+    r.end(body ? JSON.stringify(body) : undefined);
+  });
+  try {
+    const a = authenticator();
+    const o = await call('auth.box.localhost', 'POST', '/auth/claim/options', { token });
+    const ok = await call('auth.box.localhost', 'POST', '/auth/claim/verify', { token, ...a.create(o.json, 'https://auth.box.localhost') });
+    assert.equal(ok.status, 200, JSON.stringify(ok.json));
+    assert.match(ok.headers['set-cookie'][0], /^devteam_session=[\w-]+; Domain=box\.localhost; Path=\/; HttpOnly; Max-Age=1209600; Secure; SameSite=None$/);
+    assert.equal(ok.headers['strict-transport-security'], 'max-age=31536000');
+    const cookie = ok.headers['set-cookie'][0].split(';')[0];
+    assert.equal((await call('box.localhost', 'GET', '/term', null, { cookie })).headers.location, '/term/');
+    const art = (dest) => call(`${P}.box.localhost`, 'GET', '/artifact/main/x/', null, { cookie, 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'no-cors', 'sec-fetch-dest': dest });
+    assert.equal((await art('iframe')).status, 403, 'another site can\'t frame an artifact with the cookie');
+    assert.notEqual((await art('script')).status, 403, 'a sandboxed artifact still loads its own script');
+  } finally { await new Promise((r) => g.server.close(r)); }
+});
