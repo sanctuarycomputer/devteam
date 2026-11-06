@@ -2128,6 +2128,11 @@ function plannersNow() {
     const by = `plan-${feature}`;
     // landed once its plan file is on main (a fresh planner's branch sits at main's tip, uncommitted)
     if (main && git(['cat-file', '-e', `${main}:${projectRel}/log/${by}.jsonl`]) !== null) return null;
+    // or once its branch came into main by a merge (its tip in main, off main's own first-parent
+    // line): a design-change planner that wrote into another plan's file and merged through it.
+    // A fresh planner's branch sits on a first-parent commit of main, so it still shows.
+    const tip = git(['rev-parse', b]);
+    if (main && tip && git(['merge-base', '--is-ancestor', tip, main]) !== null && !mainLog().some((c) => c.sha === tip)) return null;
     const wt = path.join(mainRoot, '.worktrees', by);
     const planFile = path.join(wt, projectRel, 'log', `${by}.jsonl`);
     const graph = readText(planFile) ?? git(['show', `${b}:${projectRel}/log/${by}.jsonl`]) ?? '';
