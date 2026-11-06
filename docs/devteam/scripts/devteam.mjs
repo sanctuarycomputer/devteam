@@ -1334,6 +1334,18 @@ function artifactLinkNow(l) {
   const href = at === 'main' ? `#artifact/main/${l.artifact}` : at ? `#artifact/wt/${at}/${l.artifact}` : null;
   return { ...l, href, changed: !!at && !!l.sha256 && fp !== l.sha256, gone: !at };
 }
+// Why an answer to q can't bind to the artifacts it links (null when it can): a page that changed
+// since it was asked, or that is no longer there, is not what the owner was asked about, so the
+// owner's answer would approve something they didn't see. Checked when the owner answers and again
+// when an answer is used to approve something.
+function artifactLinksMoved(v) {
+  const now = (v.links ?? []).filter((l) => isObj(l) && l.artifact !== undefined && l.sha256).map(artifactLinkNow);
+  const changed = now.filter((l) => l.changed).map((l) => l.artifact);
+  const gone = now.filter((l) => l.gone).map((l) => l.artifact);
+  if (changed.length) return `${v.id} links the artifact ${changed.join(', ')}, which changed since it was asked; ask again about the page as it is now`;
+  if (gone.length) return `${v.id} links the artifact ${gone.join(', ')}, which is no longer available; ask again`;
+  return null;
+}
 const questions = () => logObjects('question').map((q) => { const v = questionView(q); return { ...v, links: resolveQuestionLinks(v.links, v.status === 'open'), goal_hold: questionHold(q) }; });
 
 // Why question q does not authorise the supervisor to change goal goalId (null when it does): it
@@ -1480,14 +1492,6 @@ const LOG_BRANCH = 'chore-log';
 
 // Mirror run/log into project/log on branch chore-log, in its own worktree, and open or update the
 // log-only PR. Run it every tick (it pushes); merge it daily with `merge --chore log`.
-function logPrOpen(wt, main) {
-  if (loadSettings().forge !== 'git') {
-    const open = repo('home').gh(['pr', 'list', '--head', LOG_BRANCH, '--state', 'open', '--json', 'number', '--jq', 'length'], { cwd: wt });
-    if (open !== null) return Number(open) > 0;
-  }
-  // forge git (merge lands a --no-ff merge) or no gh: open means not yet on main
-  return git(['merge-base', '--is-ancestor', `origin/${LOG_BRANCH}`, resolveCommit(`origin/${main}`) ? `origin/${main}` : main], wt) === null;
-}
 function cmdLogSync() {
   supervisorOnly('log-sync');
   if (!commonDir || !projectInRepo) die('log-sync needs a git checkout with the project folder inside it');
@@ -1496,14 +1500,15 @@ function cmdLogSync() {
   const files = fs.existsSync(live) ? fs.readdirSync(live).filter((f) => f.endsWith('.jsonl') && !isPlanFile(f)).sort() : [];
   if (!files.length) return out('nothing in run/log to sync');
   const wt = choreWorktree('log', { reset: true });
-  // A sync whose PR is still open is extended, not rebuilt, so every push fast-forwards: forges
-  // that refuse non-fast-forward pushes (branch rulesets, protected branches) accept it. The
-  // extended branch takes main in by a merge (still a fast-forward for the branch), so its PR is
-  // never behind. Whether the PR is open comes from the forge: after a squash or rebase merge the
-  // branch is never an ancestor of main, and a stale origin/chore-log outlives a deleted branch.
+  // An existing chore-log is extended, never rebuilt, so every push fast-forwards: forges that
+  // refuse non-fast-forward pushes or branch deletion (branch rulesets, protected branches) accept
+  // it, whether its PR is still open or was squash-merged and the branch kept. The extended branch
+  // takes main in by a merge (still a fast-forward for the branch), so its PR is never behind and
+  // carries only lines main doesn't have. A branch deleted on the forge leaves a stale
+  // origin/chore-log, dropped here, and the sync starts from main.
   const main = loadSettings().main_branch;
   if (!flags['dry-run'] && git(['fetch', '--quiet', 'origin', `+refs/heads/${LOG_BRANCH}:refs/remotes/origin/${LOG_BRANCH}`], wt) === null) git(['update-ref', '-d', `refs/remotes/origin/${LOG_BRANCH}`], wt);
-  if (resolveCommit(`origin/${LOG_BRANCH}`) && logPrOpen(wt, main)) {
+  if (resolveCommit(`origin/${LOG_BRANCH}`)) {
     gitOrDie(['checkout', '--quiet', '-B', LOG_BRANCH, `origin/${LOG_BRANCH}`], wt);
     const base = resolveCommit(`origin/${main}`) ? `origin/${main}` : main;
     if (git(['merge', '--quiet', '--no-edit', '-m', `chore-log: merge ${main}`, base], wt) === null) {
@@ -2803,8 +2808,9 @@ function oneWayDoorsSection(body) {
 // each merge is exactly git's own merge of its parents. A conflict fix that touched the work
 // changes both, so it voids the verdict; a clean merge of main does not.
 // A record edit that only fills in what the record lacked: a "- Reviewer:" line where there was
-// none, and Disposition cells that were empty. Verdicts, findings and dispositions already given
-// can't change this way, so a dissent still can't be edited away.
+// none, and Disposition cells that were empty or held no disposition yet, each given a disposition.
+// Verdicts, findings and dispositions already given can't change this way, so a dissent still
+// can't be edited away.
 function fillInOnly(before, after) {
   if (before === null || after === null) return false;
   // blank lines carry nothing in a record, so they're left out of the comparison
@@ -2822,7 +2828,8 @@ function fillInOnly(before, after) {
     if (a[k] === b[k]) continue;
     if (disp < 0 || !a[k].trim().startsWith('|') || !b[k].trim().startsWith('|')) return false;
     const x = tableCells(a[k]), y = tableCells(b[k]);
-    if (x.length !== y.length || x.some((c, j) => j !== disp && c !== y[j]) || x[disp] !== '' || !y[disp]) return false;
+    // an empty cell, or one that isn't a disposition yet (a reviewer's "Accepted; …"), may become one
+    if (x.length !== y.length || x.some((c, j) => j !== disp && c !== y[j]) || !(x[disp] === '' ? y[disp] : !disposed(x[disp]) && disposed(y[disp]))) return false;
   }
   return true;
 }
@@ -2835,7 +2842,8 @@ function verdictHolds(v, head, dir, R = repo('home')) {
   // Each adds a review record, or fills one in mechanically (fillInOnly): an empty Disposition cell
   // filled, a missing "- Reviewer:" line added. Nothing else in a record may change.
   let commit = null;
-  const isRecord = (file) => file?.startsWith(dir) && /^(?:[a-z0-9-]+\/)?[a-z]+-\d+[a-z]?\.md$/.test(file.slice(dir.length));
+  // <stage>-<pass>[<track>].md, or a task's later pass, task-<n>-<pass>[<track>].md
+  const isRecord = (file) => file?.startsWith(dir) && /^(?:[a-z0-9-]+\/)?[a-z]+-\d+(?:-\d+)?[a-z]?\.md$/.test(file.slice(dir.length));
   const onlyRecords = (R.git(['log', '--no-merges', '--no-renames', '--format=@%H', '--name-status', `${v}..${head}`, ...(main ? [`^${main}`] : [])]) ?? 'x').split('\n').filter(Boolean).every((l) => {
     if (l.startsWith('@')) { commit = l.slice(1); return true; }
     const [st, file] = l.split('\t');
@@ -3046,7 +3054,7 @@ function checkTicket(id, { sha: shaArg, title, body, approvals = true }) {
   const approvers = new Set(latest.filter((r) => r.verdict === 'APPROVE' && holdsAt(r.sha) && r.reviewer).map((r) => r.reviewer));
   const need = t.risk === 'high' ? 2 : 1;
   if (approvers.size < need) fails.push(`needs ${need} final APPROVE review(s) at this head from different named reviewers; found ${approvers.size}`);
-  for (const r of reviews) for (const f of r.findings) if (blocking(f.severity) && !disposed(f.disposition)) fails.push(`${r.file} ${f.id} (${f.severity}) has no disposition`);
+  for (const r of reviews) for (const f of r.findings) if (blocking(f.severity) && !disposed(f.disposition)) fails.push(`${r.file} ${f.id} (${f.severity}) has no disposition${f.disposition ? ` ("${f.disposition.slice(0, 40)}" isn't one)` : ''}: the author starts its Disposition cell with fixed, wont-fix <reason> or wrong <reason>`);
   const base = R.mainRef() && sha ? R.git(['merge-base', R.mainRef(), sha]) : null;
   if (R.commonDir && !base) fails.push(`cannot resolve main branch "${R.settings.main_branch}"${R.name === 'home' ? '' : ` in ${R.name}`}; footprint not checked`);
   if (base) {
@@ -3278,8 +3286,10 @@ function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('hom
   if (branch.startsWith('plan/')) {
     const feature = branch.slice('plan/'.length);
     if (title !== undefined && !title.startsWith(`plan-${feature}: `)) fails.push(`PR title must start with "plan-${feature}: "`);
-    // validate --strict at the exact head, in a detached worktree of that head.
-    const wt = detachedWorktree(sha, `check-${feature}`);
+    // validate --strict at the exact head, in a detached worktree of that head. It only reads the
+    // plan and the log, so the checkout is not seeded: no worktree_files, no worktree_setup (a CI
+    // runner has neither the project's untracked files nor its toolchain).
+    const wt = detachedWorktree(sha, `check-${feature}`, repo('home'), { seed: false });
     try {
       execFileSync(process.execPath, [path.join(wt, 'docs', 'devteam', 'scripts', 'devteam.mjs'), 'validate', '--strict'], { cwd: wt, stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (e) {
@@ -3378,7 +3388,7 @@ function seedWorktree(wt, { setup = true, repo: R = repo('home') } = {}) {
 // Another repo's lives in the OS temp folder (where secret post already makes its own), never under
 // home's tree: a gate there would otherwise pass on home's node_modules, .tool-versions and lint or
 // ts configs, found by walking up the directories. Home's stays under home's .worktrees, as before.
-function detachedWorktree(sha, name, R = repo('home')) {
+function detachedWorktree(sha, name, R = repo('home'), { seed = true } = {}) {
   const holder = R.name === 'home' ? null : fs.mkdtempSync(path.join(os.tmpdir(), `devteam-${R.name}-`));
   const wt = holder ? path.join(holder, `tmp-${name}`) : path.join(mainRoot, '.worktrees', `tmp-${name}-${process.pid}`);
   R.gitOrDie(['worktree', 'add', '--quiet', '--detach', wt, sha], R.root);
@@ -3387,7 +3397,7 @@ function detachedWorktree(sha, name, R = repo('home')) {
     // the empty holder only (rmdir refuses anything with files left in it)
     if (holder) try { fs.rmdirSync(holder); } catch {}
   });
-  seedWorktree(wt, { repo: R });
+  if (seed) seedWorktree(wt, { repo: R });
   return wt;
 }
 // The repo a worktree belongs to, computed from git, never recorded: null for a
@@ -3517,6 +3527,7 @@ function ownerAnswer(qid, what) {
   const v = q?.type === 'question' ? questionView(q) : null;
   if (!v || v.status !== 'answered') die(`${what}: ${qid} is not a question the owner answered`);
   reviewApproves(v, what);
+  { const moved = artifactLinksMoved(v); if (moved) die(`${what}: ${moved}`); }
   // An answer approves what it said yes to: the owner's answer must be the question's
   // recommendation (a review, its verified result). Answered any other way, the owner declined or
   // changed it, and the supervisor asks again; a secrets question approves by what was posted.
@@ -3700,15 +3711,18 @@ function cmdMerge() {
   if (chore) {
     const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
     const kit = base ? changedFiles(base, sha).filter((f) => !f.startsWith(`${projectRel}/`)) : [];
+    // Only these two standing rules approve kit files: an owner's rule that settles owner settings
+    // (a gate-change rule, owner_rules) says nothing about the kit's files.
+    let kitRule = null;
     if (kit.length && !approved && chore.startsWith('devteam-sync-')) {
       const r = upstreamSyncApproval(chore, sha, kit);
-      if (r.rule) { standing = r; out(`kit files match upstream ${r.tag} exactly; approved by the owner's standing rule ${r.rule.id}`); } else if (r.problem) fails.push(r.problem);
+      if (r.rule) { kitRule = standing = r; out(`kit files match upstream ${r.tag} exactly; approved by the owner's standing rule ${r.rule.id}`); } else if (r.problem) fails.push(r.problem);
     }
-    if (kit.length && !approved && !standing && base) {
+    if (kit.length && !approved && !kitRule && base) {
       const r = ciFixApproval(chore, sha, base, kit);
-      if (r.rule) { standing = r; out(`changes only workflow files and keeps every job; approved by the owner's standing rule ${r.rule.id} ("${r.rule.statement}")`); } else if (r.problem) fails.push(r.problem);
+      if (r.rule) { kitRule = standing = r; out(`changes only workflow files and keeps every job; approved by the owner's standing rule ${r.rule.id} ("${r.rule.statement}")`); } else if (r.problem) fails.push(r.problem);
     }
-    if (kit.length && !approved && !standing) fails.push(`touches files outside project/ (${kit.slice(0, 6).join(', ')}${kit.length > 6 ? ', …' : ''}); the owner's answer is needed: merge --chore ${chore} --approved <qid>`);
+    if (kit.length && !approved && !kitRule) fails.push(`touches files outside project/ (${kit.slice(0, 6).join(', ')}${kit.length > 6 ? ', …' : ''}); the owner's answer is needed: merge --chore ${chore} --approved <qid>`);
   }
   if (approved) {
     const av = ownerAnswer(approved, 'merge --approved');
@@ -4125,6 +4139,7 @@ function cmdAnswer() {
   const { by } = fromChat ? { by: 'owner' } : ownerWriter();
   const v = openQuestion(id, ['open', 'defaulted']);
   if (flagStr('seen') && flagStr('seen') !== v.hash) die(`${id} changed since you saw it; reload and read it again before you answer`);
+  { const moved = artifactLinksMoved(v); if (moved) die(moved); }
   if (v.kind === 'goal-approval') die(`${id} approves a goal on its design: the owner answers it with goal decide ${v.goal} approve|refine|let-go [--notes "…"] (or on the dashboard)`);
   // A review is answered by the owner's own process with its result, or sent back with a reason;
   // never in free text, never from chat (a chat can't carry rows, and the supervisor must not
@@ -7294,7 +7309,8 @@ function collectOoda() {
     retro: retroDue(),
     observations: recent(logObjects('observation').filter((o) => !['reading', 'retro', 'finding-ack'].includes(o.kind)), 40),
     clusters: orientClusters(),
-    knowledge: recent(logObjects('knowledge').filter((k) => k.status !== 'retired'), 60),
+    // every lesson waiting on the owner is in the Inbox, however many: only the rest are the recent 60
+    knowledge: [...recent(logObjects('knowledge').filter((k) => k.status === 'candidate'), Infinity), ...recent(logObjects('knowledge').filter((k) => !['retired', 'candidate'].includes(k.status)), 60)],
     problems: logObjects('problem').filter((p) => p.status !== 'resolved').sort((a, b) => b.severity - a.severity),
     acts: recent(acts, 60),
     decisions: decisionRecords().slice(0, 200),
