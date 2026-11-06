@@ -313,8 +313,16 @@ const SETTINGS_DEFAULTS = {
   components: {},
   // Named resources the fleet uses: { "<id>": { "kind": "repo"|"url", "title": …, … } }.
   links: {},
-  // How a tagged release reaches production: 'tag' (deploys from the tag) or { branch: 'production' }.
+  // How a release reaches production: 'tag' (deploys from the tag), { branch: 'production' }, or
+  // 'merge' (production deploys whenever main changes, e.g. Heroku's automatic deploys; also
+  // { on: 'merge', paths: ['app/**'] } when only some paths deploy). With 'merge', a merge that
+  // changes what deploys is a release (release-production).
   release: 'tag',
+  // Production monitors (process/supervisor.md, Monitoring): { name: { kind: 'http', url, expect:
+  // { status, contains }, slo: { uptime, p95_ms }, every_minutes, down_after, timeout_s } }; owner
+  // settings, class monitor-change. monitor_defaults overrides the built-in defaults for all of them.
+  monitors: {},
+  monitor_defaults: {},
   // Commands a stdin: secret sink may run (prefixes, e.g. "gh secret set"); they run as the owner.
   secret_commands: [],
   // The forge's checks merge doesn't wait for (names, e.g. a broken optional one); owner-only.
@@ -350,8 +358,10 @@ const OWNER_SETTINGS = {
   gates: 'gate-change', worktree_setup: 'gate-change', worktree_files: 'gate-change',
   autonomy_ceilings: 'governance-edit', agent_command: 'governance-edit', resume_command: 'governance-edit', worker_denied_commands: 'governance-edit',
   forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', upstream_repo: 'governance-edit',
-  release: 'governance-edit', secret_commands: 'governance-edit', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit',
+  release: 'governance-edit', secret_commands: 'governance-edit', monitors: 'monitor-change', monitor_defaults: 'monitor-change', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit',
 };
+// The classes whose owner answer approves a chore that changes the kit (files outside project/).
+const KIT_CLASSES = ['governance-edit', 'process-edit', 'gate-change'];
 const canonical = (v) => (Array.isArray(v) ? `[${v.map(canonical).join(',')}]` : v && typeof v === 'object' ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(',')}}` : JSON.stringify(v));
 function settingsAt(ref, { orNull = false } = {}) {
   const text = git(['show', `${ref}:${projectRel}/settings.md`]);
@@ -2354,7 +2364,7 @@ function cmdValidate() {
   {
     const s = loadSettings();
     const reg = registryProblems(s);
-    errors.push(...reg.errors);
+    errors.push(...reg.errors, ...monitorProblems(s));
     warnings.push(...reg.warnings);
     // With lines, check-pr and merge judge the tree a PR would land, which takes git 2.38; say so
     // here, in the words merge refuses with, before the first PR meets it.
@@ -3277,6 +3287,11 @@ function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('hom
   // validate, so an old graph error can't block a log PR.
   const base0 = R.mainRef() ? R.git(['merge-base', R.mainRef(), sha]) : null;
   fails.push(...coverageFails(base0, sha, R, { ticket: branch.startsWith('ticket/') }), ...registryFails(base0, sha, R));
+  // the monitors that would land: a changed monitors setting is checked as validate checks it
+  if (R.name === 'home' && base0) {
+    const [a, b] = [settingsAt(base0, { orNull: true }), settingsAt(sha, { orNull: true })];
+    if (a && b && ['monitors', 'monitor_defaults'].some((k) => canonical(a[k]) !== canonical(b[k]))) fails.push(...monitorProblems(b).map((e) => `settings at landing: ${e}`));
+  }
   if (branch.startsWith('ticket/')) return [...fails, ...checkTicket(branch.slice('ticket/'.length), { sha, title, body, approvals: !forge }), ...depsFails(branch.slice('ticket/'.length), R)];
   if (branch.startsWith('plan/')) {
     const feature = branch.slice('plan/'.length);
@@ -3536,6 +3551,18 @@ function reviewApproves(v, what) {
   if (v.result_status !== 'verified') die(`${what}: ${v.id} is a review whose result is ${v.result_status}; it approves nothing until it verifies (review show ${v.id})`);
 }
 
+// On a project that deploys when main changes, the files of a PR that deploy: those outside the kit
+// (or matching release.paths). Empty when merging deploys nothing.
+function deployingFiles(base, sha) {
+  const s = loadSettings();
+  const r = s.release;
+  const onMerge = r === 'merge' || r?.on === 'merge' || (r?.branch && r.branch === s.main_branch);
+  if (!onMerge || !base) return [];
+  const kitRel = path.relative(repoRoot, devteamDir).split(path.sep).join('/');
+  const files = changedFiles(base, sha) ?? [];
+  return Array.isArray(r?.paths) && r.paths.length ? files.filter((f) => r.paths.some((g) => pathMatches(g, f))) : files.filter((f) => !f.startsWith(`${kitRel}/`));
+}
+
 // The merge word, as a command: verify everything at the PR's exact head, run the project's gates
 // there, then merge refusing a moved head, then log the act. Only the supervisor runs it.
 // --dry-run runs every check and gate and stops; without a PR it checks the branch's local head.
@@ -3545,7 +3572,7 @@ function cmdMerge() {
   const plan = flagStr('plan');
   const chore = flagStr('chore') !== undefined ? choreSlug(flagStr('chore')) : undefined;
   const dry = !!flags['dry-run'];
-  const branch = plan ? `plan/${plan}` : chore ? `chore-${chore}` : id ? `ticket/${id}` : die('usage: merge <ticket-id> | merge --plan <feature> | merge --chore <slug>   [--approved <qid>] [--no-gates] [--dry-run [--title t] [--body-file f]]');
+  const branch = plan ? `plan/${plan}` : chore ? `chore-${chore}` : id ? `ticket/${id}` : die('usage: merge <ticket-id> | merge --plan <feature> | merge --chore <slug>   [--approved <qid> [<qid> …]] [--no-gates] [--dry-run [--title t] [--body-file f]]');
   // A ticket merges in its own repo: its PR, gates, forge and merge method; plans and
   // chores are always home's. For home R is today's functions and settings.
   const R = id && tickets().has(id) ? repoOfTicket(tickets().get(id)) : repo('home');
@@ -3615,8 +3642,20 @@ function cmdMerge() {
   }
   // A chore PR that touches the kit, the agent config or the forge config carries an owner answer
   // (classes governance-edit, process-edit, gate-change); project/ files are the supervisor's.
-  let approved = flagStr('approved') ?? null;
+  // --approved takes one answer or several (--approved q1 q2): one owner answer covers a settings
+  // bundle, and a ladder class's answer can sit beside it.
+  const approvedIds = [...new Set(asList(flags.approved).flatMap((x) => String(x).split(',')).map((x) => x.trim()).filter(Boolean))];
+  const approved = approvedIds[0] ?? null;
+  const answers = approvedIds.map((q) => ownerAnswer(q, 'merge --approved'));
   let standing = null;
+  let settingsActs = null;
+  const target = id ?? (chore ? `chore-${chore}` : plan);
+  // A decision this merge carries out is carried out once: an act already under it (a merge on
+  // another branch, an earlier landing) means it was used; decide again for this one.
+  if (flagStr('decision')) {
+    const used = logObjects('act').find((a) => a.decision === flagStr('decision'));
+    if (used) fails.push(`${flagStr('decision')} was already carried out (${used.id}: ${String(used.what ?? '').slice(0, 80)}); a decision is carried out once, so decide again for ${target}`);
+  }
   // Owner-only settings, on every kind of PR (a ticket, a plan or a chore) in home, where
   // settings.md is: another repo's PR can't change it.
   if (R.name === 'home') {
@@ -3626,20 +3665,70 @@ function cmdMerge() {
     fails.push(...registryActFails(base, sha));
     if (changed === null) fails.push(`${projectRel}/settings.md: the json devteam block is not valid JSON at the head`);
     else if (changed.length) {
+      const L = ladder();
       const classes = [...new Set(changed.map((c) => c.cls))];
       const what = changed.map((c) => `${c.key} (${c.cls})`).join(', ');
-      // A standing rule the owner gave themselves settles a class in owner_rules (constitution.md):
-      // only when every changed setting is of such a class, and only the owner's own accepted rule.
-      const ruled = !approved && classes.every((c) => (ladder().owner_rules ?? []).includes(c)) && classes.map((c) => ownerRuleFor(c)).every(Boolean);
-      if (ruled) { const rs = classes.map((c) => ownerRuleFor(c)); standing = { rule: rs[0] }; out(`changes owner settings: ${what}; approved by the owner's standing rule${rs.length > 1 ? 's' : ''} ${rs.map((r) => `${r.id} ("${r.statement}")`).join(', ')}`); }
-      else if (!approved) fails.push(`changes owner settings: ${what}; the owner's answer is needed: --approved <qid> of class ${classes.join(' or ')}`);
-      else {
-        const q = ownerAnswer(approved, 'merge --approved');
-        if (!classes.includes(q.class)) fails.push(`${approved} is a ${q.class ?? 'classless'} question; changing ${what} needs an answered ${classes.join(' or ')} question`);
-        fails.push(...ownerLinkActFails(changed, sha, approved));
+      // One owner answer covers the bundle (the owner's ruling): the owner's own answer, never one
+      // relayed from chat, in any one of the owner_only classes the PR changes, approves every owner
+      // setting it changes, of any class; or, where owner_rules allows, the owner's standing rules
+      // when every changed owner_only class has one. A ladder class's answer (monitor-change), a
+      // decision in it naming this PR, or its rung 3 covers only that ladder class's keys, never an
+      // owner_only key.
+      const d = flagStr('decision') ? decisionFor(flagStr('decision')) : null;
+      const covers = (cls) => d?.class === cls && (d.refs ?? []).some((r) => [target, `plan-${plan}`].includes(r));
+      const ownerOnly = (cls) => (L.owner_only ?? []).includes(cls) || !L.classes[cls];
+      const ownerClasses = classes.filter(ownerOnly);
+      const settled = new Map(); // class -> { answer } | { rule } | { decision } | { rung }
+      let bundle = null;
+      if (ownerClasses.length) {
+        const inBundle = answers.filter((v) => ownerClasses.includes(v.class));
+        const own = inBundle.find((v) => v.channel !== 'chat');
+        if (own) bundle = { answer: own.id };
+        else if (inBundle.length) fails.push(`${inBundle[0].id} was answered in chat; owner settings (${ownerClasses.join(', ')}) need the owner's own answer, from the dashboard or their terminal`);
+        else if (!approvedIds.length && ownerClasses.every((c) => (L.owner_rules ?? []).includes(c) && ownerRuleFor(c))) bundle = { rule: ownerRuleFor(ownerClasses[0]), rules: ownerClasses.map((c) => ownerRuleFor(c)) };
+        if (bundle) for (const c of ownerClasses) settled.set(c, bundle.answer ? { answer: bundle.answer } : { rule: ownerRuleFor(c) });
       }
+      for (const cls of classes.filter((c) => !ownerOnly(c))) {
+        const inClass = answers.find((v) => v.class === cls);
+        if (inClass) settled.set(cls, { answer: inClass.id });
+        else if (bundle?.answer) settled.set(cls, { answer: bundle.answer });
+        else if (covers(cls)) settled.set(cls, { decision: d.id });
+        else if (rungFor(cls) >= 3) settled.set(cls, { rung: rungFor(cls) });
+      }
+      const open = classes.filter((cls) => !settled.has(cls));
+      if (open.length) {
+        const keys = changed.filter((c) => open.includes(c.cls)).map((c) => `${c.key} (${c.cls})`).join(', ');
+        const ownerOpen = open.filter(ownerOnly);
+        const ladderOpen = open.filter((c) => !ownerOnly(c));
+        const given = approvedIds.length ? ` (${approvedIds.map((q, i) => `${q} is ${answers[i].class ?? 'classless'}${answers[i].channel === 'chat' ? ', answered in chat' : ''}`).join(', ')}${ownerOpen.length && answers.some((v) => !ownerOnly(v.class ?? '')) ? '; a ladder class\'s answer never covers an owner setting' : ''})` : '';
+        fails.push(`changes owner settings: ${keys}; the owner's answer is needed: --approved <qid>${ownerOpen.length ? ` of class ${ownerOpen.join(' or ')}` : ` of class ${ladderOpen.join(' or ')}`}${given}${ladderOpen.length ? ` (or, for ${ladderOpen.join(', ')}, a decision in that class: merge --decision <d-id>)` : ''}`);
+      }
+      if (bundle?.rule && !open.length) { standing = { rule: bundle.rule }; out(`changes owner settings: ${what}; approved by the owner's standing rule${bundle.rules.length > 1 ? 's' : ''} ${bundle.rules.map((r) => `${r.id} ("${r.statement}")`).join(', ')}`); }
+      // Each repo link entry lands only as the bundle's answer showed it.
+      if (bundle?.answer) fails.push(...ownerLinkActFails(changed.filter((c) => ownerOnly(c.cls)), sha, bundle.answer));
+      // Every settled class is logged as an act of that class, with what settled it.
+      settingsActs = classes.filter((c) => settled.has(c)).map((c) => ({ cls: c, ...settled.get(c), keys: changed.filter((x) => x.cls === c).map((x) => x.key) }));
     }
   }
+  // Deploys on merge: merging this is releasing it, so it needs release-production's authority: the
+  // class on rung 3, or a release-production decision this merge carries out (--decision).
+  let release = null;
+  {
+    const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
+    const deploys = deployingFiles(base, sha);
+    if (deploys.length) {
+      const target = id ?? (chore ? `chore-${chore}` : plan);
+      // the decision is checked like an act's: not corrected, not lapsed, and naming this target
+      const d = flagStr('decision') ? decisionFor(flagStr('decision')) : null;
+      const rung = rungFor('release-production');
+      if (d?.class === 'release-production' && !(d.refs ?? []).some((r) => [target, `plan-${plan}`].includes(r))) fails.push(`${d.id} releases ${(d.refs ?? []).join(', ') || 'nothing named'}, not ${target}; decide again for this one`);
+      else if (d?.class === 'release-production') release = { decision: d.id, target };
+      else if (rung >= 3) release = { rung, target };
+      else fails.push(`merging deploys to production (release: merge; it changes ${deploys.slice(0, 3).join(', ')}${deploys.length > 3 ? ', …' : ''}), and release-production is on rung ${rung} (${RUNG[rung]}): decide --class release-production --refs ${target} [--approved <qid>] -- "release …", then merge --decision <d-id>`);
+      if (release) out(`merging deploys to production: a release-production act will be logged (${release.decision ? `under ${release.decision}` : `rung ${rung}`})`);
+    }
+  }
+  let kitAnswer = null;
   if (chore) {
     const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
     const kit = base ? changedFiles(base, sha).filter((f) => !f.startsWith(`${projectRel}/`)) : [];
@@ -3652,9 +3741,13 @@ function cmdMerge() {
       if (r.rule) { standing = r; out(`changes only workflow files and keeps every job; approved by the owner's standing rule ${r.rule.id} ("${r.rule.statement}")`); } else if (r.problem) fails.push(r.problem);
     }
     if (kit.length && !approved && !standing) fails.push(`touches files outside project/ (${kit.slice(0, 6).join(', ')}${kit.length > 6 ? ', …' : ''}); the owner's answer is needed: merge --chore ${chore} --approved <qid>`);
+    // The kit is the owner's: only their own answer in a kit class approves it, never a ladder
+    // class's answer (monitor-change, say) or one relayed from chat.
+    else if (kit.length && approved && !answers.some((v) => KIT_CLASSES.includes(v.class) && v.channel !== 'chat')) fails.push(`touches files outside project/ (${kit.slice(0, 6).join(', ')}${kit.length > 6 ? ', …' : ''}); that needs the owner's own answer of class ${KIT_CLASSES.join(', ')} (${approvedIds.map((q, i) => `${q} is ${answers[i].class ?? 'classless'}${answers[i].channel === 'chat' ? ', answered in chat' : ''}`).join('; ')})`);
+    if (kit.length) kitAnswer = answers.find((v) => KIT_CLASSES.includes(v.class) && v.channel !== 'chat')?.id ?? null;
   }
-  if (approved) {
-    const av = ownerAnswer(approved, 'merge --approved');
+  for (const av of answers) {
+    const approved = av.id;
     // A secrets question approves landing only the stores it posted, and only once posted.
     if (av.secrets.length && (!chore?.startsWith('secret-') || !av.answer?.startsWith('Posted'))) fails.push(`${approved} asked for secrets; it approves only its own chore-secret PR, once the owner posted them (its answer: ${av.answer})`);
     // One answer approves one thing. The exception: one act of the answer's class that recorded the
@@ -3670,7 +3763,9 @@ function cmdMerge() {
     const prior = [...logObjects('decision'), ...logObjects('act')].filter((a) => a.approved_by === approved && mine(a) && a.id !== flagStr('decision'));
     // a bundle's link acts (one per entry its question showed) are one landing too
     const linkAct = (a) => Object.hasOwn(a, 'entry_hash') && (a.refs ?? []).some((r) => r.startsWith('link:'));
-    const landing = prior.length >= 1 && (prior.length === 1 || prior.every(linkAct)) && prior.every((a) => a.class === av.class && (a.refs ?? []).includes(target));
+    // an act a merge already logged (a settings class's act names the merge act) is that landing, done
+    const byMerge = (a) => (a.refs ?? []).some((r) => /^a-/.test(r) && ['merge-word', 'merge-chore', 'approve-feature-plan'].includes(logGet(r)?.class));
+    const landing = prior.length >= 1 && (prior.length === 1 || prior.every(linkAct)) && prior.every((a) => a.class === av.class && (a.refs ?? []).includes(target) && !byMerge(a));
     if (prior.length && !landing) fails.push(`${approved} already approved ${declared.length ? `an act for ${target}` : 'an act'}; ask again for this one`);
   }
   // Gates: the repo's own commands (never inherited), at the exact head, in a detached
@@ -3738,7 +3833,16 @@ function cmdMerge() {
   // home resets exactly what it reset before (G1); another repo resets all of its own caches
   if (R.name === 'home') { mainLogCache = undefined; mergeShaCache.clear(); } else R.resetCaches();
   const cls = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
-  const act = appendLog({ type: 'act', decision: citing(), class: cls, what: `merged ${branch} at ${sha}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag}, verbatim)` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [], reversible: false, approved_by: approved ?? standing?.rule.id ?? undefined, ...onR }, 'supervisor');
+  // a release or settings-class decision is carried out by its own act below, not by the merge's
+  const own = release?.decision || (settingsActs ?? []).some((x) => x.decision);
+  const act = appendLog({ type: 'act', decision: own ? undefined : citing(), class: cls, what: `merged ${branch} at ${sha}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag}, verbatim)` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [], reversible: false, approved_by: kitAnswer ?? approved ?? standing?.rule.id ?? undefined, ...onR }, 'supervisor');
+  // each owner setting class the merge changes is an act of that class, with what settled it: the
+  // owner's answer in it, their standing rule, a decision in it, or its rung
+  for (const x of settingsActs ?? []) appendLog({ type: 'act', class: x.cls, decision: x.decision, approved_by: x.answer ?? x.rule?.id, rung: x.rung, what: `changed ${x.keys.join(', ')} in settings by merging ${branch} at ${sha}`, refs: [target, act.id], reversible: true }, 'supervisor');
+  if (release) {
+    const rel = appendLog({ type: 'act', class: 'release-production', decision: release.decision, rung: release.rung, what: `released ${release.target} to production by merging ${branch} at ${sha} (release: merge)`, refs: [release.target, act.id], reversible: false }, 'supervisor');
+    out(`released ${release.target} to production (${rel.id})`);
+  }
   out(`merged ${branch} at ${sha.slice(0, 12)}${inR} (${act.id})`);
 }
 // ===== 7. trust =====
@@ -6931,6 +7035,13 @@ function collectMetrics(since) {
   // Findings: blockers and inefficiencies, each with a next step.
   const f = [];
   const add = (severity, kind, subject, detail, suggestion, extra = {}) => f.push({ severity, kind, subject, detail, suggestion, ...extra });
+  // Production monitors: a standing outage is medium (the down observation already woke the
+  // supervisor once), a certificate about to lapse, a week under the uptime target.
+  for (const m of monitorStatus()) {
+    if (m.state === 'down') add('medium', 'monitor-down', `monitor:${m.name}`, `${m.url} down since ${m.since}: ${m.last?.error ?? 'failing'}`, 'find why (the last deploy, the app logs), tell the owner, fix forward through a ticket (supervisor.md, Monitoring)');
+    if (m.tls_days != null && m.tls_days <= m.tls_warn_days) add(m.tls_days <= 3 ? 'high' : 'medium', 'cert-expiring', `monitor:${m.name}`, `the certificate for ${m.url} expires in ${m.tls_days} day(s)`, 'renew it, or check the auto-renewal; ask the owner if it needs their account');
+    if (m.slo?.uptime && m.uptime_7d != null && m.uptime_7d < 100 * m.slo.uptime) add('medium', 'slo-breach-week', `monitor:${m.name}`, `up ${m.uptime_7d}% over 7 days, under the ${100 * m.slo.uptime}% target`, 'read the down observations for a cause; a fix is a ticket, a target that is wrong is the owner\'s to change');
+  }
   for (const g of gates.flaky_gates) add('high', 'flaky-gate', g.gate, `failed then passed at the same commit ${g.commits} time(s)`, 'find the flaky tests (run with --junit) and fix or quarantine them');
   for (const t of gates.flaky_tests.slice(0, 10)) add('high', 'flaky-test', t.name, `failed then passed at the same commit ${t.times} time(s)`, 'make it deterministic (time, order, shared state, network) or quarantine it with a ticket');
   for (const g of gates.gates.filter((x) => x.median_seconds >= settings.slow_gate_minutes * 60)) add('medium', 'slow-gate', g.gate, `median ${(g.median_seconds / 60).toFixed(1)} min over ${g.runs} run(s)`, 'shard it, cache dependencies, or split fast checks from slow ones');
@@ -7266,6 +7377,7 @@ function dashboardData() {
     ooda: collectOoda(),
     // holds: Upkeep's, and the fleet's mode when every goal is held (fleet status gives readiness)
     upkeep: (() => { const u = upkeepOrVirtual(); const chores = deriveStatus().filter((r) => r.feature === CHORES && !r.merge_sha && r.stage !== 'superseded'); return { id: upkeepGoal()?.id ?? null, ...holdView(u), chores: chores.map((r) => ({ id: r.id, title: r.title, stage: r.stage, phase: r.phase })) }; })(),
+    monitors: monitorStatus(),
     fleet: { mode: draining() ? 'park' : fleetMode(), op: fleetOpInForce()?.fleet ?? draining()?.id ?? null, reason: fleetOpInForce()?.reason ?? (draining() ? drainReason(draining()) : null) },
     // the Library: artifacts landed and drafted, and the registry as it reads (locators redacted)
     library: {
@@ -7545,6 +7657,13 @@ async function cmdDashboard() {
       if (prepo && !LINK_ID.test(prepo)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad repo' }));
       if (!/^[a-z]+$/.test(kind) || !id || id.length > 400 || /[\0\n]/.test(id) || id.startsWith('-') || ts.some((x) => !/^[a-z0-9][a-z0-9-]*$/.test(x)) || (rec && !/^[a-z0-9][a-z0-9-]*$/.test(rec))) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad kind, id, rec or tickets' }));
       const r = await run(['peek', kind, id, ...(ts.length ? ['--tickets', JSON.stringify(ts)] : []), ...(rec ? ['--rec', rec] : []), ...(ref ? ['--ref', ref] : []), ...(prepo ? ['--repo', prepo] : []), '--json']);
+      return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 404, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
+    }
+    if (req.method === 'GET' && u.pathname === '/api/monitor') {
+      const name = u.searchParams.get('name') ?? '';
+      const range = u.searchParams.get('range') === '7d' ? '7d' : '24h';
+      if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(name)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad monitor name' }));
+      const r = await run(['monitor', 'series', name, '--range', range]);
       return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 404, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
     }
     if (req.method === 'GET' && u.pathname === '/api/schema') return send(res, 200, 'application/json', JSON.stringify(schemaDocs()));
@@ -8702,6 +8821,283 @@ function drainedPreface() {
     : `This looks like the machine it moved to. Before anything else: ${(() => { const h = pinsHint(); return h ? `(0) ${h}; ` : ''; })()}(1) DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs fleet unpark (it rebuilds run/log from the landed log, prints the parity fingerprint, puts every goal back as it was and prints the restart command for each parked session); (2) run each of those commands; (3) make sure the dashboard is running (supervisor.md §11) and tell the owner its address; then carry on from supervisor.md §1.`}`;
 }
 
+// ===== monitoring: production signals into the loop =====
+// Monitors are owner settings (`monitors`, class monitor-change). A URL check (kind http) runs on
+// every `wait` cycle when due: status, an optional body substring, latency, and TLS expiry. Samples
+// stay local in run/monitors/<name>/ (gitignored, not the record); only meaning reaches the log, as
+// observations on subject monitor:<name>: down and up on the transition, slow once per breach, and a
+// daily rollup (kind reading). `wait` returns once on a new down, never on a standing finding.
+const MONITOR_DEFAULTS = { every_minutes: 1, timeout_s: 10, down_after: 2, slow_after: 3, tls_warn_days: 14, sample_days: 30 };
+// A monitor's name is a folder under run/monitors: letters, digits, dot, dash, underscore only.
+const MONITOR_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
+// What is wrong with the monitors in settings, worded for validate and merge. A monitor's name is
+// its key and only its key (a name field could point its folder outside run/); its url is http(s)
+// and carries no credentials (settings.md and the log are shared and permanent).
+function monitorProblems(s) {
+  const errors = [];
+  const ms = s.monitors ?? {};
+  const defs = s.monitor_defaults ?? {};
+  if (!isObj(ms)) return ['settings monitors: an object of { "<name>": { kind: "http", url, … } }'];
+  if (!isObj(defs)) errors.push('settings monitor_defaults: an object');
+  else {
+    if (Object.hasOwn(defs, 'name')) errors.push('settings monitor_defaults: no "name" field (a monitor\'s name is its key)');
+    if (Object.hasOwn(defs, 'url')) errors.push('settings monitor_defaults: no "url" field (each monitor names its own)');
+  }
+  for (const [name, m] of Object.entries(ms)) {
+    const at = `settings monitors.${name}`;
+    if (!MONITOR_NAME.test(name)) { errors.push(`${at}: a name is letters, digits, dot, dash or underscore (at most 64)`); continue; }
+    if (!isObj(m)) { errors.push(`${at}: an object { kind: "http", url, … }`); continue; }
+    if (Object.hasOwn(m, 'name')) errors.push(`${at}: no "name" field (its name is its key)`);
+    if (typeof m.url !== 'string' || !/^https?:\/\/[^\s]+$/i.test(m.url)) errors.push(`${at}: url is an http(s) URL`);
+    else if (hasCredentials(m.url) || /^https?:\/\/[^/?#\s]*@/i.test(m.url)) errors.push(`${at}: its url ${monitorShown(m.url)} carries credentials; ${CREDENTIALS_REFUSED}`);
+  }
+  return errors;
+}
+// A monitor URL, or text that may hold one (a fetch error), as it may be shown or logged: no
+// userinfo and no query or fragment, whose values may be secrets whatever they are named.
+const monitorShown = (text) => redactUrl(text).replace(/\b(https?:\/\/[^\s?#]*)[?#][^\s'"<>)]*/gi, '$1?…');
+const monitorList = () => {
+  const s = loadSettings();
+  const defs = isObj(s.monitor_defaults) ? s.monitor_defaults : {};
+  // the name is set last, from the key, so neither a monitor nor the defaults can rename its folder;
+  // an entry validate refuses (a name field, credentials in its url) is never polled
+  return Object.entries(isObj(s.monitors) ? s.monitors : {}).filter(([name, m]) => {
+    const why = monitorProblems({ monitors: { [name]: m }, monitor_defaults: defs })[0];
+    return !why || (warn(`monitor "${monitorShown(name)}" ignored: ${why}`), false);
+  }).map(([name, m]) => ({ ...MONITOR_DEFAULTS, ...defs, ...m, name, shown_url: monitorShown(m.url) }));
+};
+const monitorOf = (name) => monitorList().find((m) => m.name === name) ?? die(`no monitor ${name} in settings (monitors)`);
+const monitorDir = (name) => path.join(runDir, 'monitors', name);
+const monitorState = (name) => { try { return JSON.parse(fs.readFileSync(path.join(monitorDir(name), 'state.json'), 'utf8')); } catch { return { state: 'unknown', fails: 0 }; } };
+const saveMonitorState = (name, st) => { fs.mkdirSync(monitorDir(name), { recursive: true }); fs.writeFileSync(path.join(monitorDir(name), 'state.json'), `${JSON.stringify(st, null, 2)}\n`); };
+// Samples are read once per process (the dashboard and metrics ask several times a refresh).
+const SAMPLES = new Map();
+function monitorSamples(name, sinceMs = 0) {
+  if (!SAMPLES.has(name)) {
+    const all = [];
+    for (const l of (readText(path.join(monitorDir(name), 'samples.jsonl')) ?? '').split('\n')) {
+      if (!l) continue;
+      try { const s = JSON.parse(l); s.t = Date.parse(s.at); all.push(s); } catch {}
+    }
+    SAMPLES.set(name, all);
+  }
+  return SAMPLES.get(name).filter((s) => s.t >= sinceMs);
+}
+// Nearest-rank quantile: the value at rank ceil(q n).
+const quantile = (xs, q) => { if (!xs.length) return null; const s = [...xs].sort((a, b) => a - b); return s[Math.max(0, Math.ceil(q * s.length) - 1)]; };
+const fmtMs = (ms) => (ms == null ? '-' : ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`);
+// One URL check. Never throws: a failure is a sample like any other.
+async function httpCheck(m) {
+  const t0 = performance.now();
+  try {
+    // A redirect is an answer, not up: a health URL that 302s to a login or maintenance page fails
+    // unless the monitor expects that status (or sets follow_redirects).
+    const r = await fetch(m.url, { signal: AbortSignal.timeout(m.timeout_s * 1000), redirect: m.follow_redirects ? 'follow' : 'manual', headers: { 'user-agent': 'devteam-monitor' } });
+    let body = '';
+    if (m.expect?.contains) {
+      // read at most 1 MB of the body, enough for a health page
+      const reader = r.body?.getReader();
+      const dec = new TextDecoder();
+      while (reader && body.length < 1048576) { const { done, value } = await reader.read(); if (done) break; body += dec.decode(value, { stream: true }); }
+      reader?.cancel().catch(() => {});
+    } else await r.body?.cancel().catch(() => {});
+    const ms = Math.round(performance.now() - t0);
+    const want = m.expect?.status;
+    // up is a 2xx (a 3xx is a redirect, not up, unless expected or followed to a 2xx)
+    const statusOk = want ? r.status === want : r.status >= 200 && r.status < 300;
+    const bodyOk = !m.expect?.contains || body.includes(m.expect.contains);
+    return { ok: statusOk && bodyOk, status: r.status, ms, error: statusOk ? (bodyOk ? null : `the body has no "${m.expect.contains}"`) : `HTTP ${r.status}` };
+  } catch (e) {
+    const code = e?.cause?.code;
+    const words = { ECONNREFUSED: 'connection refused', ENOTFOUND: 'no such host', EAI_AGAIN: 'DNS lookup failed', ECONNRESET: 'connection reset', ETIMEDOUT: 'connection timed out', EHOSTUNREACH: 'host unreachable', CERT_HAS_EXPIRED: 'certificate expired', DEPTH_ZERO_SELF_SIGNED_CERT: 'self-signed certificate', ERR_TLS_CERT_ALTNAME_INVALID: 'certificate does not match the host' };
+    // an error's text may quote the URL: never its userinfo or query
+    const err = e?.name === 'TimeoutError' ? `no answer in ${m.timeout_s}s` : words[code] ?? monitorShown(String(code ?? e?.cause?.message ?? e?.message ?? e).split(m.url).join(monitorShown(m.url))).slice(0, 160);
+    return { ok: false, status: null, ms: Math.round(performance.now() - t0), error: err };
+  }
+}
+// Days until the certificate of an https URL expires (null when it isn't https or can't be read).
+async function tlsDaysLeft(url) {
+  let u;
+  try { u = new URL(url); } catch { return null; }
+  if (u.protocol !== 'https:') return null;
+  const tls = await import('node:tls');
+  return new Promise((resolve) => {
+    const host = u.hostname.replace(/^\[|\]$/g, '');
+    // SNI names a host, never an IP address
+    const sock = tls.connect({ host, port: Number(u.port || 443), ...(net.isIP(host) ? {} : { servername: host }), timeout: 10000 }, () => {
+      const c = sock.getPeerCertificate();
+      sock.end();
+      resolve(c?.valid_to ? Math.floor((Date.parse(c.valid_to) - Date.now()) / 86400000) : null);
+    });
+    sock.on('error', () => resolve(null));
+    sock.on('timeout', () => { sock.destroy(); resolve(null); });
+  });
+}
+const monitorSubject = (name) => `monitor:${name}`;
+function monitorObserve(m, fields) {
+  return appendLog({ type: 'observation', source: m.name, subject: monitorSubject(m.name), detector: 'monitor', ...fields }, 'supervisor');
+}
+// A day's rollup from its samples: uptime, latency, outages.
+function monitorRollup(m, day) {
+  const from = Date.parse(`${day}T00:00:00.000Z`);
+  const xs = monitorSamples(m.name, from).filter((s) => s.t < from + 86400000);
+  if (!xs.length) return null;
+  const ok = xs.filter((s) => s.ok);
+  const uptime = +((100 * ok.length) / xs.length).toFixed(3);
+  const p50 = quantile(ok.map((s) => s.ms), 0.5), p95 = quantile(ok.map((s) => s.ms), 0.95);
+  const downs = logObjects('observation').filter((o) => o.subject === monitorSubject(m.name) && o.kind === 'down' && dateOnly(o.created_at) === day).length;
+  return monitorObserve(m, { kind: 'reading', detail: `${day} (UTC): up ${uptime}% of ${xs.length} checks, p50 ${fmtMs(p50)}, p95 ${fmtMs(p95)}${downs ? `, ${downs} outage${downs > 1 ? 's' : ''}` : ''}`, severity: 0, valence: 0, measure: { value: uptime, unit: '%' }, source_key: `monitor:${m.name}:rollup:${day}` });
+}
+// Poll one monitor: check, record the sample, append observations on change. Returns alert lines
+// (a new outage) for wait.
+async function pollMonitor(m, opts = {}) {
+  if (m.kind !== 'http') return { skipped: `kind ${m.kind} is not built in yet` };
+  // one poll of a monitor at a time (wait's and a manual one): the other skips it this round
+  fs.mkdirSync(monitorDir(m.name), { recursive: true });
+  const lock = path.join(monitorDir(m.name), 'poll.lock');
+  try { fs.writeFileSync(lock, `${process.pid}\n`, { flag: 'wx' }); } catch {
+    let age = Infinity;
+    try { age = Date.now() - fs.statSync(lock).mtimeMs; } catch {}
+    // a lock whose poll is gone (wait kills one at a minute) is stale at once; a live one after 2 min
+    let alive = false;
+    try { const pid = Number(fs.readFileSync(lock, 'utf8')); alive = pid > 0 && (process.kill(pid, 0), true); } catch (e) { alive = e?.code === 'EPERM'; }
+    if (alive && age < 120000) return { skipped: 'another poll of it is running' };
+    fs.writeFileSync(lock, `${process.pid}\n`);
+  }
+  try { return await pollMonitorLocked(m, opts); } finally { fs.rmSync(lock, { force: true }); }
+}
+// What the log says a monitor's state was: its latest down or up (a fresh host, or lost run/).
+function monitorStateFromLog(name) {
+  const last = logObjects('observation').filter((o) => o.subject === monitorSubject(name) && ['down', 'up'].includes(o.kind)).sort(byTime).pop();
+  return last?.kind === 'down' ? { state: 'down', since: last.created_at, down_id: last.id, fails: 0 } : { state: last ? 'up' : 'unknown', fails: 0 };
+}
+async function pollMonitorLocked(m, { rollupDay = null } = {}) {
+  // seeded from the log only when there is no state (a fresh host, a lost run/): while a new
+  // monitor is still unknown its failed checks keep counting toward down_after
+  const fresh = !fs.existsSync(path.join(monitorDir(m.name), 'state.json'));
+  let st = monitorState(m.name);
+  if (fresh) st = { ...st, ...monitorStateFromLog(m.name) };
+  const sample = { at: nowIso(), ...(await httpCheck(m)) };
+  fs.appendFileSync(path.join(monitorDir(m.name), 'samples.jsonl'), `${JSON.stringify(sample)}\n`);
+  SAMPLES.delete(m.name);
+  const alerts = [];
+  st.last = sample;
+  st.last_at = sample.at;
+  if (!sample.ok) {
+    st.fails = (st.fails ?? 0) + 1;
+    st.failing_since ??= sample.at;
+    if (st.fails >= m.down_after && st.state !== 'down') {
+      const o = monitorObserve(m, { kind: 'down', detail: `${m.name} is down: ${sample.error} (${st.fails} failed check${st.fails === 1 ? '' : 's'} in a row)`, severity: 4, valence: -2, measure: { value: st.fails, unit: 'checks' }, source_key: `monitor:${m.name}:down:${st.failing_since}` });
+      Object.assign(st, { state: 'down', since: st.failing_since, down_id: o.id });
+      alerts.push(`${m.name} is down: ${sample.error} (${monitorShown(m.url)}; ${o.id})`);
+    }
+  } else {
+    if (st.state === 'down') {
+      const mins = Math.max(1, Math.round((Date.parse(sample.at) - Date.parse(st.since)) / 60000));
+      monitorObserve(m, { kind: 'up', detail: `${m.name} is up again after ${mins} min down`, severity: 0, valence: 1, measure: { value: mins, unit: 'min' }, refs: st.down_id ? [st.down_id] : [], source_key: `monitor:${m.name}:up:${st.since}` });
+    }
+    if (st.state !== 'up') st.since = sample.at;
+    Object.assign(st, { state: 'up', fails: 0, failing_since: null, down_id: null });
+    // slow: the p95 of the last hour's good checks (at least 20 of them) over the target for
+    // slow_after checks in a row, once per breach; one slow answer among fast ones is not slow
+    if (m.slo?.p95_ms) {
+      const recent = monitorSamples(m.name, Date.now() - 3600000).filter((s) => s.ok).map((s) => s.ms);
+      const p95 = recent.length >= 20 ? quantile(recent, 0.95) : null;
+      st.slow_streak = p95 != null && p95 > m.slo.p95_ms ? (st.slow_streak ?? 0) + 1 : 0;
+      if (st.slow_streak >= m.slow_after && !st.slow) {
+        monitorObserve(m, { kind: 'slow', detail: `${m.name} is slow: p95 ${fmtMs(p95)} over the ${fmtMs(m.slo.p95_ms)} target for ${st.slow_streak} checks`, severity: 2, valence: -1, measure: { value: p95, unit: 'ms' }, source_key: `monitor:${m.name}:slow:${sample.at}` });
+        st.slow = true;
+      } else if (!st.slow_streak) st.slow = false;
+    }
+  }
+  // TLS, hourly
+  if (/^https:/i.test(m.url) && (!st.tls_at || Date.now() - Date.parse(st.tls_at) > 3600000)) { st.tls_days = await tlsDaysLeft(m.url); st.tls_at = nowIso(); }
+  // a rollup for each finished UTC day not rolled up yet (up to a week back), or the day asked for
+  const yesterday = dateOnly(new Date(Date.now() - 86400000).toISOString());
+  if (rollupDay || st.rollup_day !== yesterday) {
+    const days = rollupDay ? [rollupDay] : [6, 5, 4, 3, 2, 1].map((n) => dateOnly(new Date(Date.now() - n * 86400000).toISOString())).filter((d) => !st.rollup_day || d > st.rollup_day);
+    const done = new Set(logObjects('observation').filter((o) => o.subject === monitorSubject(m.name) && o.kind === 'reading').map((o) => o.source_key));
+    for (const day of days) if (!done.has(`monitor:${m.name}:rollup:${day}`)) monitorRollup(m, day);
+    if (!rollupDay) st.rollup_day = yesterday;
+  }
+  // samples past sample_days, pruned once a day (written aside, then renamed over)
+  if (st.pruned !== dateOnly(nowIso())) {
+    const keep = monitorSamples(m.name, Date.now() - m.sample_days * 86400000).map(({ t: _, ...s }) => `${JSON.stringify(s)}\n`).join('');
+    const file = path.join(monitorDir(m.name), 'samples.jsonl');
+    fs.writeFileSync(`${file}.tmp`, keep);
+    fs.renameSync(`${file}.tmp`, file);
+    SAMPLES.delete(m.name);
+    st.pruned = dateOnly(nowIso());
+  }
+  saveMonitorState(m.name, st);
+  return { sample, alerts };
+}
+const monitorDue = (m, st) => !st.last_at || Date.now() - Date.parse(st.last_at) >= m.every_minutes * 60000 - 5000;
+// What the dashboard and `monitor status` show: state, last check, uptime and latency over 24h and 7d.
+let STATUS_MEMO = null;
+function monitorStatus() {
+  if (STATUS_MEMO) return STATUS_MEMO;
+  return (STATUS_MEMO = monitorList().map((m) => {
+    const st = monitorState(m.name);
+    const week = monitorSamples(m.name, Date.now() - 7 * 86400000);
+    const day = week.filter((s) => s.t >= Date.now() - 86400000);
+    const up = (xs) => (xs.length ? +((100 * xs.filter((s) => s.ok).length) / xs.length).toFixed(2) : null);
+    const lat = (xs, q) => quantile(xs.filter((s) => s.ok).map((s) => s.ms), q);
+    return {
+      name: m.name, kind: m.kind, url: m.shown_url, every_minutes: m.every_minutes, slo: m.slo ?? null, expect: m.expect ?? null, down_after: m.down_after, component: m.component ?? null,
+      state: st.state ?? 'unknown', since: st.since ?? null, last_at: st.last_at ?? null, last: st.last ?? null, fails: st.fails ?? 0, slow: !!st.slow, tls_days: st.tls_days ?? null, tls_warn_days: m.tls_warn_days,
+      uptime_24h: up(day), uptime_7d: up(week), p50_24h: lat(day, 0.5), p95_24h: lat(day, 0.95), p95_7d: lat(week, 0.95), checks_24h: day.length,
+    };
+  }));
+}
+// A monitor's latency and uptime in buckets, for a chart: 24h in 5-minute buckets, 7d in hours.
+function monitorSeries(name, range) {
+  monitorOf(name);
+  const span = range === '7d' ? 7 * 86400000 : 86400000;
+  const step = range === '7d' ? 3600000 : 300000;
+  const from = Date.now() - span;
+  const buckets = new Map();
+  for (const s of monitorSamples(name, from)) {
+    const b = Math.floor(s.t / step) * step;
+    (buckets.get(b) ?? buckets.set(b, []).get(b)).push(s);
+  }
+  return { name, range: range === '7d' ? '7d' : '24h', step_ms: step, buckets: [...buckets].sort((a, b) => a[0] - b[0]).map(([t, xs]) => ({ t, n: xs.length, ok: xs.filter((s) => s.ok).length, p50: quantile(xs.filter((s) => s.ok).map((s) => s.ms), 0.5), p95: quantile(xs.filter((s) => s.ok).map((s) => s.ms), 0.95) })) };
+}
+async function cmdMonitor() {
+  const [sub, name] = positional;
+  if (sub === 'status') {
+    const rows = monitorStatus();
+    if (flags.json) return json(rows);
+    if (!rows.length) return out('no monitors (settings: monitors)');
+    for (const r of rows) out(`${r.name.padEnd(16)} ${r.state.padEnd(7)} ${r.url}  last ${r.last_at ? `${r.last_at.slice(0, 16)} ${r.last?.ok ? 'ok' : r.last?.error ?? 'failed'} ${fmtMs(r.last?.ms)}` : 'never'}  24h up ${r.uptime_24h ?? '-'}% p95 ${fmtMs(r.p95_24h)}${r.tls_days != null ? `  tls ${r.tls_days}d` : ''}`);
+    return;
+  }
+  if (sub === 'series') return json(monitorSeries(name ?? die('usage: monitor series <name> [--range 24h|7d]'), flagStr('range')));
+  if (sub === 'test') {
+    const m = monitorOf(name ?? die('usage: monitor test <name>'));
+    if (m.kind !== 'http') die(`kind ${m.kind} is not built in yet`);
+    const r = await httpCheck(m);
+    const tls = await tlsDaysLeft(m.url);
+    out(`${m.name}: ${r.ok ? 'ok' : `FAIL ${r.error}`} (HTTP ${r.status ?? '-'}, ${fmtMs(r.ms)})${tls != null ? `, certificate expires in ${tls} days` : ''}`);
+    if (!r.ok) process.exitCode = 1;
+    return;
+  }
+  if (sub === 'poll') {
+    supervisorOnly('monitor poll');
+    const all = monitorList().filter((m) => !name && !flagStr('name') ? true : m.name === (flagStr('name') ?? name));
+    if ((flagStr('name') ?? name) && !all.length) die(`no monitor ${flagStr('name') ?? name}`);
+    const due = flags.due ? all.filter((m) => monitorDue(m, monitorState(m.name))) : all;
+    const res = await Promise.all(due.map(async (m) => ({ name: m.name, ...(await pollMonitor(m, { rollupDay: flagStr('rollup-day') ?? null })) })));
+    const alerts = res.flatMap((r) => r.alerts ?? []);
+    if (flags.json) return json({ polled: res.map((r) => r.name), alerts });
+    if (!res.length) return out(all.length ? 'nothing due' : 'no monitors (settings: monitors)');
+    for (const r of res) out(r.skipped ? `${r.name}: skipped (${r.skipped})` : `${r.name}: ${r.sample.ok ? 'ok' : r.sample.error} ${fmtMs(r.sample.ms)}`);
+    for (const a of alerts) out(`ALERT ${a}`);
+    return;
+  }
+  die('usage: monitor status [--json] | monitor test <name> | monitor poll [--due] [--name n] [--rollup-day yyyy-mm-dd] [--json] | monitor series <name> [--range 24h|7d]');
+}
+
 // wait [--minutes n]: block between ticks until something needs the supervisor, then say what.
 // It wakes on a new open message to the supervisor, any new line from the owner (an answer, a goal
 // decision, an ack, a message), a new high finding (a worker that stopped on an API error sends no
@@ -8720,6 +9116,17 @@ function cmdWait() {
   // leaves open wakes it once, not every time.
   const sinceFile = path.join(runDir, 'wait-since');
   const since = Number(readText(sinceFile)) || null;
+  // Monitors are polled on every cycle when one is due (checked here, before spawning anything); a
+  // new outage wakes the supervisor once. A poll gets a minute; one that fails says so once.
+  let pollWarned = false;
+  const poll = () => {
+    if (!monitorList().some((m) => monitorDue(m, monitorState(m.name)))) return [];
+    const r = spawnSync(process.execPath, [self, 'monitor', 'poll', '--due', '--json'], { cwd: mainRoot, env: { ...process.env, NODE_USE_ENV_PROXY: '1' }, encoding: 'utf8', timeout: 60000, maxBuffer: 8 * 1024 * 1024 });
+    try { if (r.status === 0) return JSON.parse(r.stdout).alerts ?? []; } catch {}
+    if (!pollWarned) process.stderr.write(`devteam: monitor poll ${r.error?.code === 'ETIMEDOUT' ? 'took over a minute' : `failed: ${(r.stderr || '').trim().split('\n').pop()}`}; monitoring didn't run this cycle (monitor status)\n`);
+    pollWarned = true;
+    return [];
+  };
   const snap = () => {
     logCache = null;
     const owner = readLog().lines.filter((l) => l.by === 'owner').map((l) => ({ k: l.id, at: Date.parse(l.at) }));
@@ -8727,10 +9134,12 @@ function cmdWait() {
     const high = (sub(['metrics', '--json'])?.findings ?? []).filter((f) => f.severity === 'high').map((f) => `${f.kind} ${f.subject}: ${f.detail}`);
     return { owner, msgs, high };
   };
+  const firstAlerts = poll();
   const first = snap();
   const late = (xs) => (since ? xs.filter((x) => x.at > since) : []);
   const base = { owner: first.owner.filter((x) => !late(first.owner).includes(x)).map((x) => x.k), msgs: first.msgs.filter((x) => !late(first.msgs).includes(x)).map((x) => x.k), high: first.high };
   const report = (why, lines) => { fs.mkdirSync(runDir, { recursive: true }); fs.writeFileSync(sinceFile, `${Date.now()}\n`); out(why); for (const l of lines) out(`  ${l}`); out('then: the tick (supervisor.md §3), and wait again'); };
+  if (firstAlerts.length) return report('production needs you (monitor status; supervisor.md, Monitoring):', firstAlerts);
   if (base.high.length) return report('high findings are open; act on each, or ack it with a reason (ack <kind> <subject> --reason "…"):', base.high);
   const lateMsgs = late(first.msgs).map((x) => `message ${x.k}`);
   const lateOwner = late(first.owner).map((x) => x.k);
@@ -8739,6 +9148,8 @@ function cmdWait() {
   const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
   while (Date.now() < until) {
     sleep(Math.min(Math.max(2000, (minutes * 60000) / 10), 45000, Math.max(0, until - Date.now())));
+    const alerts = poll();
+    if (alerts.length) return report('production needs you (monitor status; supervisor.md, Monitoring):', alerts);
     const now = snap();
     const keys = { ...now, owner: now.owner.map((x) => x.k), msgs: now.msgs.map((x) => x.k) };
     const fresh = (k) => keys[k].filter((x) => !base[k].includes(x));
@@ -8787,7 +9198,7 @@ function cmdSettings() {
   const s = loadSettings();
   const key = flagStr('get');
   // the registry as shown: a credential that reached settings.md (validate refuses it) isn't echoed
-  const shown = { ...s, links: Object.fromEntries(Object.entries(s.links ?? {}).map(([id, l]) => [id, redactLink(l)])) };
+  const shown = { ...s, links: Object.fromEntries(Object.entries(s.links ?? {}).map(([id, l]) => [id, redactLink(l)])), ...(isObj(s.monitors) ? { monitors: Object.fromEntries(Object.entries(s.monitors).map(([n, m]) => [n, isObj(m) && typeof m.url === 'string' ? { ...m, url: monitorShown(m.url) } : m])) } : {}) };
   if (!key) return json(shown);
   if (key === 'tmux_session') return out(tmuxSession());
   const v = shown[key];
@@ -8906,6 +9317,12 @@ function peekView(kind, id) {
     const prev = all[all.findIndex((x) => x.id === id) - 1];
     const nums = (x) => { try { return JSON.parse((x?.source_ref ? projectFileText(x.source_ref.replace(/^project\//, '')) : '')?.match(RETRO_BLOCK)?.[1] ?? 'null'); } catch { return null; } };
     v.numbers = { now: nums(o), prev: nums(prev), prev_id: prev?.id ?? null };
+  } else if (kind === 'monitor') {
+    monitorOf(id);
+    v.history = historyOf([monitorSubject(id)]);
+    v.status = monitorStatus().find((m) => m.name === id) ?? null;
+    v.series = { '24h': monitorSeries(id, '24h'), '7d': monitorSeries(id, '7d') };
+    v.failures = monitorSamples(id, Date.now() - 7 * 86400000).filter((s) => !s.ok).slice(-20).reverse();
   } else if (kind === 'file') {
     v.history = fileHistory(id, flagStr('ref') ?? null, flagStr('repo') ?? 'home');
   } else if (['story', 'release', 'wave', 'milestone'].includes(kind)) {
@@ -9391,7 +9808,7 @@ The graph (planning.md)
 Checks and merging (quality.md)
   check-ticket <id> [--sha s] [--title t] [--body-file f] [--pr n]   definition of done at an exact head
   check-pr --head-ref r --sha s [--title t] [--body-file f] [--repo <link> [--path <checkout>]]   what the forge's required check runs (optional; no gates, no approval acts); --repo checks a PR in another repo, in its checkout (--path names another one, such as a CI run's)
-  merge <ticket-id> | merge --plan <feature> | merge --chore <slug> [--approved qid] [--no-gates] [--dry-run]   supervisor: verify, run gates at the head, merge, log the act
+  merge <ticket-id> | merge --plan <feature> | merge --chore <slug> [--approved qid [qid …]] [--decision d-id] [--no-gates] [--dry-run]   supervisor: verify, run gates at the head, merge, log the act
   review-worktree <ticket-id> <sha> [--name suffix] | review-worktree --remove <path>   a final reviewer's detached worktree at exactly that sha, seeded like a worker's
 
 Sessions (worker.md)
@@ -9447,6 +9864,7 @@ Goals and retros
 The log
   log [--type t] [--by w] [--id x] [--tail n] [--json] | log-check | log-sync [--dry-run] | history [<ticket-id>]
   record <id> [--json]   one record's stored fields, who created it and who set each field | peek <kind> <id> --json   what a dashboard sidepeek shows beyond the data: history and its kind's details
+  monitor status [--json] | monitor test <name> | monitor poll [--due] [--name n] [--rollup-day d] [--json] (supervisor; wait runs it) | monitor series <name> [--range 24h|7d]   production monitors from settings
 
 Dashboard and releases
   dashboard [--port p] [--host h] | dashboard-data | notes <from-tag> [<to>] [--repo <link>]
@@ -9460,7 +9878,7 @@ const COMMANDS = {
   ask: cmdAsk, answer: cmdAnswer, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
   observe: cmdObserve, 'observe-link': cmdObserveLink, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, knowledge: cmdKnowledge, problem: cmdProblem,
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
-  log: cmdLog, record: cmdRecord, peek: cmdPeek, 'log-check': cmdLogCheck, 'log-sync': cmdLogSync, history: cmdHistory,
+  log: cmdLog, record: cmdRecord, peek: cmdPeek, monitor: cmdMonitor, 'log-check': cmdLogCheck, 'log-sync': cmdLogSync, history: cmdHistory,
   drain: cmdDrain, undrain: cmdUndrain, fleet: cmdFleet, handoff: cmdHandoff, wait: cmdWait,
   dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes,
 };

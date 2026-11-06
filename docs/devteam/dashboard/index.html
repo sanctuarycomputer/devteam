@@ -317,6 +317,13 @@
   .status-trail { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
   .handoff pre { white-space: pre-wrap; margin: 0; font-size: 12px; }
   .tcard.inert { cursor: default; }
+  .down-banner { margin: 0 0 12px; padding: 10px 14px; border-radius: 8px; background: color-mix(in srgb, var(--red) 14%, var(--surface)); border: 1px solid color-mix(in srgb, var(--red) 45%, var(--line)); color: var(--red-fg); font-weight: 500; }
+  .down-banner a { color: inherit; }
+  .mon-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr)); gap: 12px; }
+  .mon-card h4 { margin: 0; display: flex; align-items: center; gap: 8px; }
+  .mon-card .mon-url { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; margin: 2px 0 8px; }
+  .mon-stats { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12px; margin-bottom: 6px; }
+  .mon-stats b { font-weight: 600; }
   .drawer dd { margin: 0; }
   .drawer ul { margin: 4px 0; padding-left: 18px; }
   .tl { list-style: none; padding: 0; margin: 8px 0; border-left: 1px solid var(--line-2); }
@@ -466,6 +473,7 @@
     <a href="#trust"><span class="nl"><i class="icon-shield-check" aria-hidden="true"></i>Trust Ladder</span> <span class="count" id="n-trust"></span></a>
     <a href="#retros"><span class="nl"><i class="icon-history" aria-hidden="true"></i>Retros</span> <span class="count" id="n-retros"></span></a>
     <a href="#health"><span class="nl"><i class="icon-heart-pulse" aria-hidden="true"></i>Health</span> <span class="count" id="n-findings"></span></a>
+    <a href="#monitoring"><span class="nl"><i class="icon-activity" aria-hidden="true"></i>Monitoring</span> <span class="count" id="n-monitors"></span></a>
   </nav>
   <div class="foot"><span id="when"></span><br><span id="logline"></span><br><span class="err" id="err"></span><br><span id="notify"></span></div>
 </aside>
@@ -475,6 +483,7 @@
   <p class="loading" id="loading">Loading…</p>
   <section id="overview">
     <div id="fleet-strip" class="fleet-strip"></div>
+    <div id="down-banner" class="down-banner" role="alert" hidden></div>
     <div class="grid" id="stats"></div>
   </section>
 
@@ -594,6 +603,13 @@
     <h3 style="margin-top:14px">Checks before merge <span class="sub">the automated checks every change must pass (settings <code>gates</code>)</span></h3>
     <div id="gates"></div>
     <div class="two" style="margin-top:14px" id="test-lists"></div>
+  </section>
+
+  <section id="monitoring">
+    <h2>Monitoring <span class="sub">production, as the supervisor sees it: what's up, how fast, and what it noticed</span></h2>
+    <div id="monitors"></div>
+    <h3 style="margin-top:14px">What the monitors noticed</h3>
+    <div class="feed" id="monitor-feed"></div>
   </section>
 
   <section id="review-view" hidden>
@@ -912,7 +928,7 @@ function idLink(k, id) {
   if (k === 'g' && goalOf(id)) return glink(id);
   return `<a class="linkish" href="#${href}/${encodeURIComponent(id)}"><code>${esc(id.slice(0, 22))}…</code></a>`;
 }
-const subjectLink = (subj) => (ticketMap().has(subj) ? tlink(subj) : /^[a-z]-\d{8}-\d{9}-/.test(subj ?? '') || /^plan-/.test(subj ?? '') ? linkify(subj) : subj ? `<code>${esc(subj)}</code>` : '');
+const subjectLink = (subj) => (ticketMap().has(subj) ? tlink(subj) : /^[a-z]-\d{8}-\d{9}-/.test(subj ?? '') || /^plan-/.test(subj ?? '') || /^monitor:/.test(subj ?? '') ? linkify(subj) : subj ? `<code>${esc(subj)}</code>` : '');
 const scopeWords = (sc) => (!sc || sc === 'project' ? 'the whole project' : sc.replace(/^component:/, 'component ').replace(/^feature:/, 'feature ').replace(/^class:/, 'decisions of kind ').replace(/^chore:devteam-sync/, 'devteam upgrades').replace(/^chore:/, 'chore '));
 // What a call rested on, in words: the supervisor's trust, your answer or a default, a standing rule.
 function authorityWords(u) {
@@ -946,6 +962,7 @@ function linkify(text) {
     String.raw`\bq-\d{8}-\d{9}-[a-z0-9-]+`,
     String.raw`\b[gkapmod]-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*`,
     ...(ids.length ? [String.raw`\b(?:${ids.map((x) => x.replace(/[-]/g, '\\-')).join('|')})\b`] : []),
+    String.raw`\bmonitor:[A-Za-z0-9][A-Za-z0-9_.-]*`,
     String.raw`\bplan-[a-z0-9]+(?:-[a-z0-9]+)*\b`,
     String.raw`\b[0-9a-f]{40}\b`,
     String.raw`\bsanctuarycomputer\/devteam#\d+`,
@@ -954,6 +971,7 @@ function linkify(text) {
     if (/^q-\d{8}-\d{9}-/.test(m)) return qlink(m);
     if (/^[gkapmod]-\d{8}-\d{9}-/.test(m)) return idLink(m[0], m);
     if (ticketMap().has(m)) return tlink(m);
+    if (m.startsWith('monitor:')) { const n = m.slice('monitor:'.length); return (DATA?.monitors || []).some((x) => x.name === n) ? `<a class="linkish" href="#monitor/${encodeURIComponent(n)}">${esc(n)}</a>` : m; }
     if (m.startsWith('plan-')) { const f = m.slice('plan-'.length); return (DATA?.planners || []).some((x) => x.feature === f) ? `<a class="linkish" href="#planner/${encodeURIComponent(f)}">${m}</a>` : m; }
     if (/^[0-9a-f]{40}$/.test(m)) return `<code>${m.slice(0, 12)}</code>`;
     const pr = m.split('#')[1];
@@ -1913,7 +1931,7 @@ const TYPE_META = {
   ticket: ['ticket', 'Ticket'], goal: ['target', 'Goal'], feature: ['layers', 'Feature'], story: ['book-open', 'Story'], release: ['tag', 'Release'],
   wave: ['waves', 'Wave'], milestone: ['milestone', 'Milestone'], act: ['zap', 'Act'], decision: ['scale', 'Decision'], retro: ['history', 'Retro'],
   lesson: ['lightbulb', 'Knowledge'], problem: ['triangle-alert', 'Problem'], thread: ['messages-square', 'Message'], planner: ['map', 'Planner'],
-  q: ['circle-help', 'Question'], file: ['file-text', 'File'],
+  q: ['circle-help', 'Question'], file: ['file-text', 'File'], monitor: ['activity', 'Monitor'],
 };
 let SCHEMA_DOCS = null;
 async function loadSchemaDocs() {
@@ -2092,7 +2110,7 @@ let DRAWER = { kind: null, id: null };
 let lastFocus = null;
 let LAST_HTML = '';
 let AFTER = [];
-const OPENERS = () => ({ ticket: openTicket, goal: openGoal, feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, planner: openPlanner, q: openQuestion, file: openFile });
+const OPENERS = () => ({ ticket: openTicket, goal: openGoal, feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, planner: openPlanner, q: openQuestion, file: openFile, monitor: openMonitor });
 // Not under someone mid-action: typing or choosing in the drawer, a confirm step showing, a request
 // in flight. The next refresh draws it.
 function busyDrawer() {
@@ -2233,19 +2251,22 @@ function designBlock(d, label = 'Design') {
 }
 const reviewList = (rs) => (rs?.length ? `<ul>${rs.map((r) => `<li>${esc(words(r.stage))} review, pass ${esc(r.pass)}: <b>${r.verdict === 'APPROVE' ? 'approved' : r.verdict === 'CHANGES' ? 'changes asked' : esc(r.verdict || 'not done')}</b>${r.reviewer ? ` by ${esc(r.reviewer)}` : ''}</li>`).join('')}</ul>` : '');
 // A small time chart: one line per series over time, optional horizontal marks (targets).
-function lineChart(series, { marks = [], unit = '', height = 160, yMin = 0 } = {}) {
+// span: [from, to] in ms to fix the x axis (a monitor's last 24h); width: the drawing's own width,
+// so a narrow card draws a narrow chart with readable text; a series may name its color.
+function lineChart(series, { marks = [], unit = '', height = 160, yMin = 0, span = null, width = 640 } = {}) {
   const pts = series.flatMap((s) => s.points);
   if (!pts.length) return '';
-  const W = 640, H = height, L = 40, R = 12, T = 12, B = 22;
+  const W = width, H = height, L = 40, R = 12, T = 12, B = 22;
   const xs = pts.map((p) => p[0]);
-  let t0 = Math.min(...xs), t1 = Math.max(...xs, Date.now());
-  if (t1 - t0 < DAY) t0 = t1 - DAY;
+  let t0 = span ? span[0] : Math.min(...xs), t1 = span ? span[1] : Math.max(...xs, Date.now());
+  if (!span && t1 - t0 < DAY) t0 = t1 - DAY;
   const yMax = Math.max(...pts.map((p) => p[1]), ...marks.map((m) => m.value), 1) * 1.1;
   const x = (ts) => L + ((ts - t0) / (t1 - t0)) * (W - L - R);
   const y = (v) => H - B - ((v - yMin) / (yMax - yMin)) * (H - T - B);
   let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(series.map((s) => s.name).join(', '))} over time">`;
   for (const v of [yMin, (yMin + yMax) / 2, yMax / 1.1]) svg += `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" stroke="var(--grid)"/><text x="${L - 6}" y="${y(v) + 4}" text-anchor="end" font-size="10" fill="var(--muted)">${esc(+v.toFixed(v < 10 ? 2 : 0))}${esc(unit)}</text>`;
-  svg += `<text x="${L}" y="${H - 6}" font-size="10" fill="var(--muted)">${esc(fmtDate(t0))}</text><text x="${W - R}" y="${H - 6}" text-anchor="end" font-size="10" fill="var(--muted)">${esc(fmtDate(t1))}</text>`;
+  const xl = (ts) => (t1 - t0 <= 2 * DAY ? new Date(ts).toLocaleString(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit' }) : fmtDate(ts));
+  svg += `<text x="${L}" y="${H - 6}" font-size="10" fill="var(--muted)">${esc(xl(t0))}</text><text x="${W - R}" y="${H - 6}" text-anchor="end" font-size="10" fill="var(--muted)">${esc(xl(t1))}</text>`;
   const merged = [];
   for (const m of marks) { const same = merged.find((x) => x.value === m.value); if (same) { same.label = `${same.label}; ${m.label}`; same.strong ||= m.strong; } else merged.push({ ...m }); }
   let lastY = Infinity;
@@ -2257,10 +2278,10 @@ function lineChart(series, { marks = [], unit = '', height = 160, yMin = 0 } = {
   }
   series.forEach((s, i) => {
     const ps = s.points.slice().sort((a, b) => a[0] - b[0]);
-    svg += `<polyline fill="none" stroke="var(--series-${(i % 4) + 1}, var(--blue))" stroke-width="2" points="${ps.map((p) => `${x(p[0]).toFixed(1)},${y(p[1]).toFixed(1)}`).join(' ')}"/>`;
-    for (const p of ps) svg += `<circle cx="${x(p[0]).toFixed(1)}" cy="${y(p[1]).toFixed(1)}" r="3" fill="var(--series-${(i % 4) + 1}, var(--blue))"><title>${esc(`${s.name}: ${p[1]}${unit} · ${fmtDate(p[0])}`)}</title></circle>`;
+    svg += `<polyline fill="none" stroke="${s.color || `var(--series-${(i % 4) + 1}, var(--blue))`}" stroke-width="2" points="${ps.map((p) => `${x(p[0]).toFixed(1)},${y(p[1]).toFixed(1)}`).join(' ')}"/>`;
+    if (ps.length <= 60) for (const p of ps) svg += `<circle cx="${x(p[0]).toFixed(1)}" cy="${y(p[1]).toFixed(1)}" r="3" fill="${s.color || `var(--series-${(i % 4) + 1}, var(--blue))`}"><title>${esc(`${s.name}: ${p[1]}${unit} · ${fmtDate(p[0])}`)}</title></circle>`;
   });
-  return `<div class="card chart mini-chart">${series.length > 1 ? `<div class="legend">${series.map((s, i) => `<span><i style="border-top-color:var(--series-${(i % 4) + 1}, var(--blue))"></i>${esc(s.name)}</span>`).join('')}</div>` : ''}${svg}</svg></div>`;
+  return `<div class="card chart mini-chart">${series.length > 1 ? `<div class="legend">${series.map((s, i) => `<span><i style="border-top-color:${s.color || `var(--series-${(i % 4) + 1}, var(--blue))`}"></i>${esc(s.name)}</span>`).join('')}</div>` : ''}${svg}</svg></div>`;
 }
 // A set's progress: its meter and forecast, its burn-up, then its tickets as the board.
 function progressBlock(items) {
@@ -2322,6 +2343,75 @@ function spendChart(spend) {
   const roles = uniq(spend.map((s) => s.role || 'agent'));
   const series = roles.map((r) => { let sum = 0; return { name: `${r} ($${spend.filter((s) => (s.role || 'agent') === r).reduce((a, s) => a + (s.usd || 0), 0).toFixed(2)})`, points: spend.filter((s) => (s.role || 'agent') === r).map((s) => [Date.parse(s.at), +(sum += s.usd || 0).toFixed(2)]) }; });
   return `<h3>Spend over time</h3>${lineChart(series, { unit: '', height: 140 })}<p class="small muted">Cumulative dollars by role, from the agents' session logs.</p>`;
+}
+
+// ---- monitoring ----
+const MON_STATE = { up: ['good', 'up'], down: ['high', 'down'], unknown: ['', 'not checked yet'] };
+const monState = (m) => (m.state === 'up' && m.slow ? ['medium', 'slow'] : MON_STATE[m.state] || ['', m.state]);
+const pctOr = (x) => (x == null ? '–' : `${x}%`);
+// A monitor's latency over a range, from its bucketed samples: p50 and p95, against its target.
+function monitorChart(series, m, compact = false) {
+  const bs = series?.buckets || [];
+  if (!bs.length) return '<p class="muted small">No checks in this range yet.</p>';
+  const p50 = bs.filter((b) => b.p50 != null).map((b) => [b.t, b.p50]);
+  const p95 = bs.filter((b) => b.p95 != null).map((b) => [b.t, b.p95]);
+  const down = bs.filter((b) => b.ok < b.n).length;
+  const span = [Date.now() - (series.range === '7d' ? 7 : 1) * DAY, Date.now()];
+  return `${lineChart([{ name: 'p50', points: p50, color: 'var(--series-1)' }, { name: 'p95', points: p95, color: 'var(--amber)' }], { unit: 'ms', height: 140, span, width: compact ? 360 : 640, marks: m.slo?.p95_ms ? [{ value: m.slo.p95_ms, label: `target p95 ${m.slo.p95_ms}ms`, strong: true }] : [] })}${down ? `<p class="small muted">${down} of ${bs.length} ${series.range === '7d' ? 'hours' : '5-minute spans'} had a failed check.</p>` : ''}`;
+}
+// Charts on the Monitoring section: each monitor's 24h series, fetched at most once a minute.
+const MON_SERIES = new Map();
+async function loadMonitorSeries(name) {
+  const c = MON_SERIES.get(name);
+  if (c && (c.pending || Date.now() - c.at < 60000)) return;
+  MON_SERIES.set(name, { ...(c || {}), pending: true });
+  try { const r = await fetch(`/api/monitor?${new URLSearchParams({ name, range: '24h' })}`); if (r.ok) MON_SERIES.set(name, { at: Date.now(), data: await r.json() }); else MON_SERIES.set(name, { at: Date.now(), data: null }); }
+  catch { MON_SERIES.set(name, { at: Date.now(), data: c?.data ?? null }); }
+  const el = document.querySelector(`[data-mon-chart="${CSS.escape(name)}"]`);
+  const m = (DATA.monitors || []).find((x) => x.name === name);
+  if (el && m) el.innerHTML = monitorChart(MON_SERIES.get(name).data, m, true);
+}
+function renderMonitoring(d) {
+  const ms = d.monitors || [];
+  const down = ms.filter((m) => m.state === 'down');
+  $('n-monitors').textContent = down.length ? `${down.length} down` : '';
+  $('n-monitors').classList.toggle('hot', down.length > 0);
+  const banner = down.length ? `<i class="icon-triangle-alert" aria-hidden="true"></i> ${down.map((m) => `<a href="#monitor/${encodeURIComponent(m.name)}">${esc(m.name)}</a> is down since ${esc(when(m.since))}${m.last?.error ? ` (${esc(m.last.error)})` : ''}`).join('; ')}` : '';
+  // only when it changes, so a screen reader announces an outage once
+  if ($('down-banner').innerHTML !== banner) { $('down-banner').innerHTML = banner; $('down-banner').hidden = !down.length; }
+  $('monitors').innerHTML = ms.length ? `<div class="mon-grid">${ms.map((m) => {
+    const [tone, label] = monState(m);
+    return `<div class="card mon-card">
+      <h4><a class="title-link" href="#monitor/${encodeURIComponent(m.name)}">${esc(m.name)}</a><span class="badge ${tone}">${esc(label)}</span></h4>
+      <div class="mon-url">${esc(m.url || '')}</div>
+      <div class="mon-stats"><span>24h <b>${esc(pctOr(m.uptime_24h))}</b> up</span><span>7d <b>${esc(pctOr(m.uptime_7d))}</b></span><span>p50 <b>${esc(m.p50_24h == null ? '–' : `${m.p50_24h}ms`)}</b></span><span>p95 <b>${esc(m.p95_24h == null ? '–' : `${m.p95_24h}ms`)}</b></span>${m.tls_days != null ? `<span>certificate <b>${esc(m.tls_days)}d</b></span>` : ''}<span class="muted">checked ${m.last_at ? esc(when(m.last_at)) : 'never'}</span></div>
+      <div data-mon-chart="${esc(m.name)}">${MON_SERIES.get(m.name)?.data ? monitorChart(MON_SERIES.get(m.name).data, m, true) : '<p class="muted small">Loading…</p>'}</div>
+    </div>`;
+  }).join('')}</div>` : empty('No monitors yet. They live in the owner settings (<code>monitors</code>); the supervisor proposes a URL check when it finds the production URL, and polls it while it runs.');
+  for (const m of ms) loadMonitorSeries(m.name);
+  const obs = (d.ooda?.observations || []).filter((o) => /^monitor:/.test(o.subject || ''));
+  $('monitor-feed').innerHTML = obs.length ? obs.map((o) => `<div class="card small${o.severity >= 3 ? ' corrected' : ''}"><div><div class="act-head">${o.severity != null ? `<span class="badge ${sevBadge(o.severity)}">${esc(words(o.kind))}</span> ` : ''}${linkify(o.detail)}</div><div class="meta">${esc(when(o.created_at))} · ${subjectLink(o.subject)}</div></div></div>`).join('') : empty('Nothing yet. Outages, slow spells and each day\'s rollup show here.');
+}
+function openMonitor(name) {
+  drawerFor('monitor', name);
+  const p = peekOf('monitor', name);
+  const m = (DATA.monitors || []).find((x) => x.name === name) || p?.status;
+  if (!m) return notFound('monitor', name, p, 'No monitor by that name in the settings.', { noRecord: true });
+  const [tone, label] = monState(m);
+  const fails = p?.failures || [];
+  showDrawer(`<h2 id="drawer-title">${esc(name)}</h2>
+    ${attrs({ id: name, idTip: 'Its name in the owner settings (monitors).', peek: p, noRecord: true, computed: [
+      ['State', `<span class="badge ${tone}">${esc(label)}</span>${m.since ? ` since ${esc(when(m.since))}` : ''}`, 'Up, down (after its failed checks in a row) or slow (p95 over its target), from its checks.'],
+      ['Checks', `<code>${esc(m.url || '')}</code>${m.expect ? ` · expects ${esc(fmtObj(m.expect).replace(/<[^>]+>/g, ''))}` : ''} · every ${esc(m.every_minutes)} min · down after ${esc(m.down_after)} failed`, 'What it requests and what counts as up; owner settings, class monitor-change.'],
+      ['Target', m.slo ? `${m.slo.uptime ? `${(100 * m.slo.uptime).toFixed(2)}% up` : ''}${m.slo.uptime && m.slo.p95_ms ? ' · ' : ''}${m.slo.p95_ms ? `p95 under ${esc(m.slo.p95_ms)}ms` : ''}` : '', 'Its service-level target: uptime over a week, and the p95 response time.'],
+      ['Uptime', `${esc(pctOr(m.uptime_24h))} over 24h · ${esc(pctOr(m.uptime_7d))} over 7d`, 'The share of checks that passed.'],
+      ['Response time', `p50 ${esc(m.p50_24h == null ? '–' : `${m.p50_24h}ms`)} · p95 ${esc(m.p95_24h == null ? '–' : `${m.p95_24h}ms`)} over 24h`, 'From checks that passed.'],
+      ['Last check', m.last_at ? `${esc(when(m.last_at))}: ${m.last?.ok ? 'ok' : esc(m.last?.error || 'failed')}${m.last?.ms != null ? `, ${esc(m.last.ms)}ms` : ''}` : 'never', 'The supervisor checks it while it runs (wait polls it when due).'],
+      ['Certificate', m.tls_days != null ? `expires in ${esc(m.tls_days)} days` : '', 'Days until the site\'s TLS certificate expires, checked hourly.'],
+    ] })}
+    ${p?.series ? `<h3>Last 24 hours</h3>${monitorChart(p.series['24h'], m)}<h3>Last 7 days</h3>${monitorChart(p.series['7d'], m)}` : '<p class="loading">Loading…</p>'}
+    ${fails.length ? `<h3>Failed checks</h3><ul>${fails.map((s) => `<li>${esc(when(s.at))}: ${esc(s.error || 'failed')}${s.ms != null ? ` <span class="muted">(${esc(s.ms)}ms)</span>` : ''}</li>`).join('')}</ul>` : ''}
+    ${historySection(p, `monitor:${name}`)}`);
 }
 
 // ---- the openers ----
@@ -2802,7 +2892,7 @@ function route() {
   if (h.startsWith('q/')) return void openQuestion(h.slice(2));
   if (h.startsWith('goal/')) return void openGoal(h.slice(5));
   if (h.startsWith('planner/')) return void openPlanner(h.slice(8));
-  const PEEKS = { feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread };
+  const PEEKS = { feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, monitor: openMonitor };
   const [kind, ...rest] = h.split('/');
   if (PEEKS[kind] && rest.length) return void PEEKS[kind](rest.join('/'));
   if (h.startsWith('file?')) return void openFile(new URLSearchParams(location.hash.slice(6)));
@@ -2962,6 +3052,7 @@ function render(d) {
   $('answered').innerHTML = o.answered.length ? o.answered.map(answeredCard).join('') : empty('Nothing answered yet.');
 
   renderOoda(o);
+  renderMonitoring(d);
   // readiness is costly (git, gh, harness logs): asked for only while the fleet is held, or on Check
   if (!$('fleet-strip').querySelector('.confirm')) $('fleet-strip').innerHTML = fleetStrip();
   if ((d.fleet?.mode || d.fleet?.op) && Date.now() - FLEET.at > (FLEET.data && FLEET.data.ready ? 600000 : 120000)) loadFleet();

@@ -799,6 +799,130 @@ test('devteam kit', async (t) => {
     assert.ok(r.fields.title && r.set_by && !('hold_by' in r.fields));
   });
 
+  await t.test('monitoring: a URL check goes down and up once each, is slow once per breach, rolls up a day, and wakes wait', async () => {
+    const sup = { role: 'sup' };
+    const port = await freePort();
+    const mode = path.join(tmp, 'mon-mode');
+    fs.writeFileSync(mode, 'ok');
+    const srvFile = path.join(tmp, 'mon-server.mjs');
+    fs.writeFileSync(srvFile, `import http from 'node:http'; import fs from 'node:fs';
+http.createServer((req, res) => { const m = fs.readFileSync(${JSON.stringify(mode)}, 'utf8').trim();
+  if (m === 'fail') { res.writeHead(500); return res.end('boom'); }
+  setTimeout(() => { res.writeHead(200); res.end('ok'); }, m === 'slow' ? 150 : 0); }).listen(${port}, '127.0.0.1');`);
+    const srv = spawn(process.execPath, [srvFile], { stdio: 'ignore' });
+    try {
+      await serverUp(`http://127.0.0.1:${port}/`);
+      landSettings((txt) => txt.replace('"gates": {', `"monitors": { "web": { "kind": "http", "url": "http://127.0.0.1:${port}/up", "expect": { "status": 200, "contains": "ok" }, "down_after": 2, "slo": { "uptime": 0.999, "p95_ms": 100 } } }, "gates": {`));
+      assert.notEqual(dt(['monitor', 'poll'], { role: 'worker' }).status, 0, 'a worker never polls production');
+      assert.match(must(['monitor', 'test', 'web']), /web: ok \(HTTP 200/);
+      must(['monitor', 'poll', '--name', 'web'], sup);
+      const status = () => json(must(['monitor', 'status', '--json'])).find((m) => m.name === 'web');
+      assert.equal(status().state, 'up');
+      const obs = () => json(must(['log', '--type', 'observation', '--json'])).filter((o) => o.subject === 'monitor:web');
+      fs.writeFileSync(mode, 'fail');
+      assert.deepEqual(json(must(['monitor', 'poll', '--name', 'web', '--json'], sup)).alerts, [], 'one failed check is not an outage');
+      assert.match(json(must(['monitor', 'poll', '--name', 'web', '--json'], sup)).alerts[0] ?? '', /web is down: HTTP 500/, 'down_after failed checks are');
+      const down = obs().find((o) => o.kind === 'down');
+      assert.ok(down && down.severity === 4 && down.detector === 'monitor');
+      must(['monitor', 'poll', '--name', 'web'], sup);
+      assert.equal(obs().filter((o) => o.kind === 'down').length, 1, 'an outage is observed once');
+      assert.ok(json(must(['metrics', '--json'])).findings.some((x) => x.kind === 'monitor-down' && x.severity === 'medium'), 'a standing outage is a medium finding, so wait does not loop on it');
+      fs.writeFileSync(mode, 'ok');
+      must(['monitor', 'poll', '--name', 'web'], sup);
+      assert.deepEqual(obs().find((o) => o.kind === 'up')?.refs, [down.id], 'up refers to the outage it ends');
+      assert.equal(status().state, 'up');
+      for (let i = 0; i < 20; i++) must(['monitor', 'poll', '--name', 'web'], sup);
+      fs.writeFileSync(mode, 'slow');
+      for (let i = 0; i < 3; i++) must(['monitor', 'poll', '--name', 'web'], sup);
+      assert.equal(obs().filter((o) => o.kind === 'slow').length, 0, 'a few slow answers among fast ones are not slow');
+      for (let i = 0; i < 24; i++) must(['monitor', 'poll', '--name', 'web'], sup);
+      assert.equal(obs().filter((o) => o.kind === 'slow').length, 1, 'slow once per breach');
+      must(['monitor', 'poll', '--name', 'web', '--rollup-day', new Date().toISOString().slice(0, 10)], sup);
+      const roll = obs().find((o) => o.kind === 'reading');
+      assert.ok(roll && roll.measure.unit === '%' && roll.measure.value < 100, 'the rollup counts the failed checks');
+      assert.deepEqual(json(must(['monitor', 'poll', '--due', '--json'], sup)).polled, [], 'just polled: nothing due');
+      const series = json(must(['monitor', 'series', 'web']));
+      assert.ok(series.buckets.some((b) => b.ok < b.n), 'the series shows the failed checks');
+      assert.ok(json(must(['dashboard-data'])).monitors.some((m) => m.name === 'web' && m.uptime_24h < 100));
+      const pk = json(must(['peek', 'monitor', 'web', '--json']));
+      assert.ok(pk.history.some((l) => l.kind === 'down') && pk.series['24h'].buckets.length && pk.failures.length);
+      // wait polls what is due and wakes once on a new outage
+      fs.writeFileSync(mode, 'fail');
+      landSettings((txt) => txt.replace('"monitors": { ', `"monitors": { "api": { "kind": "http", "url": "http://127.0.0.1:${port}/api", "down_after": 1 }, `));
+      assert.match(must(['wait', '--minutes', '1'], sup), /production needs you[\s\S]*api is down/);
+      // monitors are owner settings in a ladder class that starts at ask with a default
+      assert.equal(dt(['decide', '--class', 'monitor-change', '--refs', 'chore-monitors', '--', 'turn on the web check'], sup).status, 3);
+      assert.equal(json(must(['trust', '--json'])).find((r) => r.class === 'monitor-change').rung, 2);
+    } finally {
+      srv.kill();
+      landSettings((txt) => txt.replace(/"monitors": \{[\s\S]*?\} \} \}, /, '').replace(/"monitors": \{ "api": [^\n]*?\} \}, /, ''));
+      fs.rmSync(path.join(repo, 'docs/devteam/run/monitors'), { recursive: true, force: true });
+    }
+    assert.ok(!json(must(['monitor', 'status', '--json'])).length, 'cleaned up');
+  });
+
+  await t.test('monitors: a redirect is not up, a new monitor already down goes down, a name stays in run/, and a URL\'s secrets are never shown', async () => {
+    const sup = { role: 'sup' };
+    const port = await freePort();
+    const srvFile = path.join(tmp, 'mon2-server.mjs');
+    fs.writeFileSync(srvFile, `import http from 'node:http';
+http.createServer((req, res) => {
+  if (req.url.startsWith('/redir')) { res.writeHead(302, { location: '/login' }); return res.end(); }
+  if (req.url.startsWith('/login')) { res.writeHead(200); return res.end('log in'); }
+  res.writeHead(500); res.end('boom'); }).listen(${port}, '127.0.0.1');`);
+    const srv = spawn(process.execPath, [srvFile], { stdio: 'ignore' });
+    const before = fs.readFileSync(path.join(repo, 'docs/devteam/project/settings.md'), 'utf8');
+    const escaped = path.join(repo, 'docs/devteam/ESCAPED-MON');
+    try {
+      await serverUp(`http://127.0.0.1:${port}/login`);
+      const base = `http://127.0.0.1:${port}`;
+      const mons = {
+        redir: { kind: 'http', url: `${base}/redir` },
+        fresh: { kind: 'http', url: `${base}/down?q=s3cret-query`, down_after: 2 },
+        evil: { kind: 'http', url: `${base}/login`, name: '../../ESCAPED-MON' },
+        creds: { kind: 'http', url: `http://user:hunter2@127.0.0.1:${port}/login` },
+        tokened: { kind: 'http', url: `${base}/login?token=abc123` },
+      };
+      landSettings((txt) => txt.replace('"gates": {', `"monitors": ${JSON.stringify(mons)}, "monitor_defaults": { "name": "../../ESCAPED-MON" }, "gates": {`));
+      // validate refuses a name field and credentials in a url, and the monitor is never polled
+      const v = dt(['validate']);
+      assert.match(v.out + v.err, /monitors\.evil: no "name" field/);
+      assert.match(v.out + v.err, /monitor_defaults: no "name" field/);
+      assert.match(v.out + v.err, /monitors\.creds: its url http:\/\/127\.0\.0\.1:\d+\/login carries credentials/);
+      assert.match(v.out + v.err, /monitors\.tokened: its url [^\n]* carries credentials/);
+      assert.doesNotMatch(v.out + v.err, /hunter2|abc123/);
+      // the defaults' name field fails every monitor closed: put a clean default back
+      landSettings((txt) => txt.replace('"monitor_defaults": { "name": "../../ESCAPED-MON" }', '"monitor_defaults": {}'));
+      const names = json(must(['monitor', 'status', '--json'])).map((m) => m.name).sort();
+      assert.deepEqual(names, ['fresh', 'redir'], 'a monitor with a name field or credentials is ignored');
+      must(['monitor', 'poll'], sup);
+      assert.ok(!fs.existsSync(escaped), 'a poll never writes outside run/monitors');
+      // a 302 is not up (supervisor.md: a redirect to a login page is not "up")
+      const st = () => Object.fromEntries(json(must(['monitor', 'status', '--json'])).map((m) => [m.name, m]));
+      assert.equal(st().redir.last.ok, false);
+      assert.match(st().redir.last.error, /HTTP 302/);
+      // a new monitor whose site is already down still counts its failures while unknown
+      const r2 = json(must(['monitor', 'poll', '--name', 'fresh', '--json'], sup));
+      assert.match(r2.alerts.join('\n'), /fresh is down: HTTP 500/, 'down after down_after failed checks, from the first');
+      // the query never reaches the alert, the status, the observation or the finding
+      assert.doesNotMatch(r2.alerts.join('\n'), /s3cret/);
+      assert.match(r2.alerts.join('\n'), /\/down\?…/);
+      assert.doesNotMatch(must(['monitor', 'status']), /s3cret/);
+      assert.doesNotMatch(JSON.stringify(json(must(['log', '--type', 'observation', '--json'])).filter((o) => o.subject?.startsWith('monitor:'))), /s3cret/);
+      assert.doesNotMatch(JSON.stringify(json(must(['metrics', '--json'])).findings), /s3cret/);
+      assert.doesNotMatch(JSON.stringify(json(must(['dashboard-data'])).monitors), /s3cret/);
+      assert.doesNotMatch(must(['settings', '--get', 'monitors']), /s3cret|hunter2|abc123/);
+      assert.doesNotMatch(fs.readFileSync(path.join(repo, 'docs/devteam/run/monitors/fresh/state.json'), 'utf8'), /s3cret/);
+    } finally {
+      srv.kill();
+      const f = path.join(repo, 'docs/devteam/project/settings.md');
+      fs.writeFileSync(f, before);
+      landSettings((txt) => txt);
+      fs.rmSync(path.join(repo, 'docs/devteam/run/monitors'), { recursive: true, force: true });
+      fs.rmSync(escaped, { recursive: true, force: true });
+    }
+  });
+
   await t.test('an answer the owner gave in the supervisor chat: the owner\'s, quoted, listed for checking, never trust evidence', () => {
     const said = "you shouldn't need to ask me to submit those PRs";
     const Qc = must(['ask', '--question', 'Open upstream PRs without asking?', '--class', 'upstream-pr', '--reasons', 'below-rung', '--recommendation', 'yes'], { role: 'sup' });
@@ -1079,10 +1203,15 @@ test('devteam kit', async (t) => {
     assert.match(r.out + r.err, /changes owner settings: gates \(gate-change\), upstream_repo \(governance-edit\)/);
     const Qw = must(['ask', '--question', 'Fewer workers?', '--class', 'priority-change', '--reasons', 'below-rung', '--recommendation', 'yes'], { role: 'sup' });
     must(['answer', Qw, 'yes']);
-    assert.match(dt([...args, '--approved', Qw], { role: 'sup' }).out, /needs an answered gate-change or governance-edit question/, 'an answer of another class does not cover it');
-    const Qgate = must(['ask', '--question', 'Add a lint gate and move upstream?', '--class', 'governance-edit', '--reasons', 'owner-only', '--recommendation', 'yes'], { role: 'sup' });
+    assert.match(dt([...args, '--approved', Qw], { role: 'sup' }).out, /the owner's answer is needed: --approved <qid> of class gate-change or governance-edit \(q-[^ ]+ is priority-change; a ladder class's answer never covers an owner setting\)/, 'an answer of a ladder class does not cover it');
+    const Qgate = must(['ask', '--question', 'Move upstream?', '--class', 'governance-edit', '--reasons', 'owner-only', '--recommendation', 'yes'], { role: 'sup' });
     must(['answer', Qgate, 'yes']);
+    // one owner answer, in any one of the changed owner_only classes, covers the bundle (the owner's ruling)
     must([...args, '--approved', Qgate], { role: 'sup' });
+    // several answers are accepted too
+    const Qlint = must(['ask', '--question', 'Add a lint gate?', '--class', 'gate-change', '--reasons', 'owner-only', '--recommendation', 'yes'], { role: 'sup' });
+    must(['answer', Qlint, 'yes']);
+    must([...args, '--approved', Qgate, Qlint], { role: 'sup' });
     // a standing rule the owner gave themselves settles gate-change (constitution.md owner_rules), alone
     const Qr = must(['ask', '--question', 'May I add dev tooling gates without asking?', '--class', 'gate-change', '--reasons', 'owner-only', '--recommendation', 'yes', '--rule-scope', 'class:gate-change'], { role: 'sup' });
     assert.match(dt(['answer', Qr, 'yes', '--from-chat', '--said', 'sure', '--rule', 'add dev tooling without asking'], { role: 'sup' }).err, /takes no --rule/, 'a rule is never relayed from chat');
@@ -1096,6 +1225,55 @@ test('devteam kit', async (t) => {
     git(['push', '-q', 'origin', 'chore-caps'], wt('caps'));
     assert.match(dt(['merge', '--chore', 'caps', '--dry-run', '--title', 'chore-caps: gates', '--body-file', body], { role: 'sup' }).out, /the owner's answer is needed/, 'the rule settles gate-change alone, never another owner class with it');
     git(['worktree', 'remove', '--force', wt('caps')]);
+    // monitors are owner settings in a ladder class: a decision in the class naming the PR covers them
+    git(['worktree', 'add', '-q', '-b', 'chore-mon', wt('mon'), 'origin/main']);
+    setTo(wt('mon'), (j) => { j.monitors = { web: { kind: 'http', url: 'https://example.com/up' } }; });
+    git(['commit', '-qam', 'monitor'], wt('mon'));
+    git(['push', '-q', 'origin', 'chore-mon'], wt('mon'));
+    const margs = ['merge', '--chore', 'mon', '--dry-run', '--title', 'chore-mon: watch production', '--body-file', body];
+    const rm = dt(margs, { role: 'sup' });
+    assert.match(rm.out + rm.err, /monitors \(monitor-change\)[\s\S]*a decision in that class/);
+    const Qm = must(['ask', '--class', 'monitor-change', '--question', 'Watch https://example.com/up?', '--recommendation', 'yes', '--default', 'yes'], { role: 'sup' });
+    must(['answer', Qm, 'yes']);
+    const Dother = must(['decide', '--class', 'monitor-change', '--approved', Qm, '--refs', 'chore-elsewhere', '--', 'watch something else'], { role: 'sup' });
+    assert.match(dt([...margs, '--decision', Dother], { role: 'sup' }).err, /is about chore-elsewhere/, 'a decision for another PR does not cover this one');
+    const Qm2 = must(['ask', '--class', 'monitor-change', '--question', 'Watch https://example.com/up, really?', '--recommendation', 'yes', '--default', 'yes'], { role: 'sup' });
+    must(['answer', Qm2, 'yes']);
+    const Dm = must(['decide', '--class', 'monitor-change', '--approved', Qm2, '--refs', 'chore-mon', '--', 'watch the production health route'], { role: 'sup' });
+    assert.match(must([...margs, '--decision', Dm], { role: 'sup' }), /would merge/);
+    // a hand-written decision can't reuse the answer Dm already used (main's answerUseGap)
+    const logDir = path.join(repo, 'docs/devteam/run/log');
+    const supFile = path.join(logDir, fs.readdirSync(logDir).find((f) => f.startsWith('supervisor-')));
+    const supKept = fs.readFileSync(supFile, 'utf8');
+    const dLine = supKept.split('\n').filter(Boolean).map((l) => JSON.parse(l)).find((l) => l.id === Dm);
+    const Dcopy = Dm.replace(/-\d{9}-/, (x) => `-${String(Number(x.slice(1, -1)) + 1).padStart(9, '0')}-`);
+    fs.appendFileSync(supFile, line({ ...dLine, id: Dcopy, at: new Date(Date.parse(dLine.at) + 1).toISOString() }));
+    assert.match(dt([...margs, '--decision', Dcopy], { role: 'sup' }).err, /already approved a decision/, 'a used answer approves no second decision');
+    fs.writeFileSync(supFile, supKept);
+    // a decision is carried out once: an act already under it refuses a second merge on it
+    must(['act', '--decision', Dm, '--', 'merged the monitor on another branch'], { role: 'sup' });
+    assert.match(dt([...margs, '--decision', Dm], { role: 'sup' }).out, /was already carried out/);
+    // Blocker: a ladder-class answer, even relayed from chat, never covers owner_only keys or the kit
+    setTo(wt('mon'), (j) => { j.agent_command = 'claude --dangerously-skip-permissions'; j.gates = { evil: 'true' }; j.secret_commands = ['true']; });
+    fs.appendFileSync(path.join(wt('mon'), 'docs/devteam/governance/quality.md'), '\nNo rules.\n');
+    git(['commit', '-qam', 'and the rest'], wt('mon'));
+    git(['push', '-q', 'origin', 'chore-mon'], wt('mon'));
+    const Qchat = must(['ask', '--class', 'monitor-change', '--question', 'Watch the health route?', '--recommendation', 'yes', '--default', 'yes'], { role: 'sup' });
+    must(['answer', Qchat, 'yes', '--from-chat', '--said', 'yes watch it'], { role: 'sup' });
+    const wide = dt([...margs, '--approved', Qchat], { role: 'sup' });
+    assert.notEqual(wide.status, 0);
+    assert.match(wide.out, /changes owner settings: [^\n]*secret_commands \(governance-edit\)[^\n]*the owner's answer is needed: --approved <qid> of class (gate-change or governance-edit|governance-edit or gate-change)[^\n]*answered in chat; a ladder class's answer never covers an owner setting/);
+    assert.doesNotMatch(wide.out, /monitors \(monitor-change\)[^\n]*needed/, 'the monitor-change answer settles monitors alone');
+    assert.match(wide.out, /outside project\/[^\n]*needs the owner's own answer of class governance-edit, process-edit, gate-change[^\n]*answered in chat/, 'nor the kit');
+    // an owner_only answer that came through chat (a line written by hand: answer --from-chat refuses one) approves nothing
+    const Qgov = must(['ask', '--class', 'governance-edit', '--reasons', 'owner-only', '--question', 'Change the agent command and secret commands?', '--recommendation', 'yes'], { role: 'sup' });
+    assert.match(dt(['answer', Qgov, 'yes', '--from-chat', '--said', 'sure'], { role: 'sup' }).err, /reserved to the owner/);
+    const ownFile = fs.readdirSync(logDir).filter((f) => f.startsWith('owner-')).map((f) => path.join(logDir, f))[0];
+    const ownKept = fs.readFileSync(ownFile, 'utf8');
+    fs.appendFileSync(ownFile, line({ id: Qgov, type: 'question', op: 'set', at: new Date().toISOString(), by: 'owner', channel: 'chat', said: 'sure', answer: 'yes' }));
+    assert.match(dt([...margs, '--approved', Qchat, Qgov], { role: 'sup' }).out, new RegExp(`${Qgov} was answered in chat; owner settings \\([^)]*\\) need the owner's own answer`));
+    fs.writeFileSync(ownFile, ownKept);
+    git(['worktree', 'remove', '--force', wt('mon')]);
   });
 
   await t.test('an answer one act recorded can approve the merge that lands it, once', () => {
@@ -1754,7 +1932,18 @@ test('devteam kit', async (t) => {
     landSettings((txt) => txt.replace('"gates": {', '"gates": { "debt": { "cmd": "false", "mode": "ratchet" },'));
     assert.match(dt(['merge', 'bill-01-card'], { role: 'sup' }).err, /needs the PR text/);
     write(path.join(repo, 'docs/devteam/run/pr/ticket/bill-01-card.md'), `# bill-01-card: card capture\n\n${fs.readFileSync(body, 'utf8')}`);
-    must(['merge', 'bill-01-card'], { role: 'sup' });
+    // where production deploys whenever main changes, merging is releasing: release-production's authority
+    landSettings((txt) => txt.replace('"gates": {', '"release": "merge", "gates": {'));
+    const rung = json(must(['trust', '--json'])).find((r) => r.class === 'release-production').rung;
+    assert.ok(rung < 3, 'release-production is below rung 3 here');
+    const refused = dt(['merge', 'bill-01-card', '--dry-run'], { role: 'sup' });
+    assert.match(`${refused.out}\n${refused.err}`, /merging deploys to production \(release: merge; it changes billing/, 'a deploying merge needs a release decision');
+    const Qrel = must(['ask', '--class', 'release-production', '--reasons', 'below-rung', '--question', 'Release card capture with its merge?', '--recommendation', 'yes', '--ticket', 'bill-01-card'], { role: 'sup' });
+    must(['answer', Qrel, 'yes']);
+    const Drel = must(['decide', '--class', 'release-production', '--approved', Qrel, '--refs', 'bill-01-card', '--', 'release card capture by merging it'], { role: 'sup' });
+    must(['merge', 'bill-01-card', '--decision', Drel], { role: 'sup' });
+    const relAct = json(must(['log', '--type', 'act', '--json'])).find((a) => a.class === 'release-production' && a.refs.includes('bill-01-card'));
+    assert.ok(relAct && relAct.decision === Drel && relAct.reversible === false, 'the release is logged as an act under its decision');
     git(['fetch', '-q', 'origin', 'main']);
     assert.equal(git(['rev-parse', 'origin/main^2']), H2, 'main merges the verified head');
     const debt = json(must(['log', '--type', 'gate', '--json'])).filter((g) => g.gate === 'debt');
@@ -1776,6 +1965,8 @@ test('devteam kit', async (t) => {
     write(r3, review('reviewer-z', git(['rev-parse', 'HEAD'])));
     assert.ok(!json(must(['metrics', '--json'])).findings.some((f) => f.kind === 'review-churn' && f.subject === 'bill-01-card'));
     fs.rmSync(r3);
+    git(['pull', '-q', '--ff-only', 'origin', 'main']);
+    landSettings((txt) => txt.replace('"release": "merge", ', ''));
   });
 
   await t.test('goal list flags take separate values or one JSON array of strings, and refuse anything else that looks like JSON', () => {
