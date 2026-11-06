@@ -24,9 +24,23 @@ const S = () => sessionOf(repo, 'demo');
 const ROLE = { sup: { DEVTEAM_ROLE: 'supervisor' }, planner: { DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: 'billing' }, planner2: { DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: 'other' }, alpha: { DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: 'alpha' }, legacy: { DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: 'legacy' }, worker: { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'bill-01-card' }, owner: {} };
 const line = (o) => `${JSON.stringify({ v: 1, ...o })}\n`;
 // tmux in this test talks to its own server, never the developer's (or a live fleet's) sessions.
-process.env.TMUX_TMPDIR = fs.mkdtempSync(path.join(os.tmpdir(), 'dt-tmux-'));
+// tmux falls back to the machine's default server when TMUX_TMPDIR names a directory that is gone,
+// and a kill-server there takes down every live fleet on the machine. So a shim first on PATH runs
+// tmux only while TMUX_TMPDIR is an existing private dt-tmux-* directory, and this run's directory
+// is removed only as the process exits, after its server.
+const tmuxRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dt-tmux-'));
+process.env.TMUX_TMPDIR = tmuxRoot;
 delete process.env.TMUX;
 delete process.env.TMUX_PANE;
+const realTmux = spawnSync('sh', ['-c', 'command -v tmux'], { encoding: 'utf8' }).stdout?.trim();
+const tmuxShim = fs.mkdtempSync(path.join(os.tmpdir(), 'dt-tmuxshim-'));
+fs.writeFileSync(path.join(tmuxShim, 'tmux'), `#!/bin/sh\ncase "$TMUX_TMPDIR" in */dt-tmux-*) [ -d "$TMUX_TMPDIR" ] && exec ${JSON.stringify(realTmux || 'tmux-not-installed')} "$@" ;; esac\necho "tmux refused: TMUX_TMPDIR ($TMUX_TMPDIR) is not an existing private test directory" >&2\nexit 1\n`, { mode: 0o755 });
+process.env.PATH = `${tmuxShim}${path.delimiter}${process.env.PATH}`;
+process.on('exit', () => {
+  spawnSync('tmux', ['kill-server']);
+  fs.rmSync(tmuxRoot, { recursive: true, force: true });
+  fs.rmSync(tmuxShim, { recursive: true, force: true });
+});
 // Dashboards started by tests never use the machine's real ports or become its hub: the hub and
 // the instance block move to ports the tests own.
 // Each run owns a block of 100 ports, so two suites on one machine don't collide either: the
@@ -67,7 +81,6 @@ test('devteam kit', async (t) => {
   let G, Q, A, SHA1, H2;
   t.after(() => {
     spawnSync('tmux', ['kill-server']);
-    fs.rmSync(process.env.TMUX_TMPDIR, { recursive: true, force: true });
     if (!process.env.DEVTEAM_TEST_KEEP) fs.rmSync(tmp, { recursive: true, force: true }); else console.log(`fixture kept at ${tmp}`);
   });
 
@@ -2504,7 +2517,7 @@ function fleetFixture(name) {
     g(['commit', '-qm', 'chore-log: log through now'], old);
     g(['push', '-q', 'origin', 'main'], old);
   };
-  const done = () => { fs.rmSync(tmuxDir, { recursive: true, force: true }); if (!process.env.DEVTEAM_TEST_KEEP) fs.rmSync(base, { recursive: true, force: true }); else console.log(`${name} fixture kept at ${base}`); };
+  const done = () => { spawnSync('tmux', ['kill-server'], { env: { ...process.env, TMUX_TMPDIR: tmuxDir } }); fs.rmSync(tmuxDir, { recursive: true, force: true }); if (!process.env.DEVTEAM_TEST_KEEP) fs.rmSync(base, { recursive: true, force: true }); else console.log(`${name} fixture kept at ${base}`); };
   return { base, org, old, neu, home, env, run, ok, g, land, done };
 }
 
