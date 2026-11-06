@@ -327,6 +327,10 @@
   .fp-row { display: flex; align-items: center; gap: 12px; justify-content: space-between; }
   .fp-row > div { min-width: 0; overflow-wrap: anywhere; }
   .spark { flex: none; fill: var(--series-1); }
+  .board.inc { grid-template-columns: repeat(6, minmax(132px, 1fr)); }
+  dl.kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 12px; margin: 4px 0 8px; }
+  dl.kv dt { color: var(--muted); }
+  pre.untrusted { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; border-left: 3px solid var(--amber); padding: 6px 10px; font-size: 12px; }
   .drawer dd { margin: 0; }
   .drawer ul { margin: 4px 0; padding-left: 18px; }
   .tl { list-style: none; padding: 0; margin: 8px 0; border-left: 1px solid var(--line-2); }
@@ -611,6 +615,8 @@
   <section id="monitoring">
     <h2>Monitoring <span class="sub">production, as the supervisor sees it: what's up, how fast, and what it noticed</span></h2>
     <div id="monitors"></div>
+    <h3 style="margin-top:14px">Incidents</h3>
+    <div id="incidents"></div>
     <h3 style="margin-top:14px">Exceptions and errors</h3>
     <div id="monitor-exceptions"></div>
     <h3 style="margin-top:14px">What the monitors noticed</h3>
@@ -1092,7 +1098,7 @@ function questionCard(q, o, reasonText) {
   const notePh = goalAsk ? 'Notes for the planner: taken into account whatever you choose (needed to refine)' : list.length ? 'Add a note (optional), or your own answer' : 'Your answer';
   return `
     <div class="card qcard ${kindCls}" id="q-${esc(q.id)}">
-      ${cardHead(KIND_ICON[q.kind] || 'circle-help', `<span class="badge ${q.kind === 'one-way-door' ? 'high' : q.kind === 'trust' ? 'good' : q.kind === 'owner-action' ? 'low' : 'medium'}">${esc(KIND_WORDS[q.kind] || words(q.kind))}</span>${q.goal_hold === 'park' ? '<span class="badge">its goal is parked</span>' : ''}`, { extra: (q.blocks || []).length ? `holds up ${q.blocks.map(tlink).join(', ')}` : q.ticket ? `about ${tlink(q.ticket)}` : '', id: q.id, rows: [['Asked', esc(when(q.asked_at))], ...(q.class ? [['Kind', esc(q.class)]] : [])] })}
+      ${cardHead(KIND_ICON[q.kind] || 'circle-help', `<span class="badge ${q.kind === 'one-way-door' ? 'high' : q.kind === 'trust' ? 'good' : q.kind === 'owner-action' ? 'low' : 'medium'}">${esc(KIND_WORDS[q.kind] || words(q.kind))}</span>${q.goal_hold === 'park' ? '<span class="badge">its goal is parked</span>' : ''}`, { extra: (q.blocks || []).length ? `${q.class === 'incident-fix' ? 'about the incident' : 'holds up'} ${q.blocks.map((b) => (/^p-/.test(b) ? linkify(b) : tlink(b))).join(', ')}` : q.ticket ? `about ${tlink(q.ticket)}` : '', id: q.id, rows: [['Asked', esc(when(q.asked_at))], ...(q.class ? [['Kind', esc(q.class)]] : [])] })}
       ${q.rewritten ? '<p class="rewritten">This question changed after you answered it, so that answer no longer counts. Read it again before you answer: the supervisor\'s log was rewritten, which it should never do.</p>' : ''}
       <h4>${qtext(q.question, q.links)}</h4>
       ${q.context ? `<p class="ctx">${qtext(q.context, q.links)}</p>` : ''}
@@ -2387,6 +2393,21 @@ async function loadMonitorSeries(name) {
   const m = (DATA.monitors || []).find((x) => x.name === name);
   if (el && m) el.innerHTML = monitorChart(MON_SERIES.get(name).data, m, true);
 }
+// Incidents as a board: new, triaged, fixing, deployed, verifying, resolved (the last few).
+const INC_COLS = [['new', 'New'], ['triaged', 'Triaged'], ['fixing', 'Fixing'], ['deployed', 'Deployed'], ['verifying', 'Verifying'], ['resolved', 'Resolved']];
+function incidentBoard(incs) {
+  if (!incs.length) return empty('No incidents. The supervisor folds what it triages into one when it is worth fixing or watching.');
+  return `<div class="board inc">${INC_COLS.map(([k, label]) => {
+    let cards = incs.filter((x) => x.stage === k);
+    const total = cards.length;
+    if (k === 'resolved') cards = cards.slice(-5);
+    return `<div class="col${total ? '' : ' none'}"><h3><span>${label}</span><span>${total}</span></h3>${cards.map((x) => `<button type="button" class="tcard${x.question?.status === 'open' ? ' blocked' : ''}" data-open="problem/${esc(x.id)}" aria-label="Open ${esc(x.title)}">
+      <div class="t"><b>${esc(x.title)}</b></div>
+      <div class="muted">severity ${esc(x.severity)} · ${esc(x.events)} event(s)${x.component ? ` · ${esc(x.component)}` : ''}</div>
+      ${x.waiting ? `<div class="pills"><span class="badge pill ${x.question?.status === 'open' ? 'medium' : ''}">${esc(x.waiting.replace(/ at (\S+)$/, (_, at) => ` ${when(at)}`))}</span></div>` : ''}
+    </button>`).join('')}${total > cards.length ? `<div class="more">+ ${total - cards.length} more</div>` : ''}</div>`;
+  }).join('')}</div>`;
+}
 function renderMonitoring(d) {
   const ms = d.monitors || [];
   const down = ms.filter((m) => m.state === 'down');
@@ -2411,6 +2432,8 @@ function renderMonitoring(d) {
     </div>`;
   }).join('')}</div>` : empty('No monitors yet. They live in the owner settings (<code>monitors</code>); the supervisor proposes a URL check when it finds the production URL, and polls it while it runs.');
   for (const m of ms.filter((x) => x.kind === 'http')) loadMonitorSeries(m.name);
+  $('incidents').innerHTML = incidentBoard(d.incidents || []);
+  for (const b of $('incidents').querySelectorAll('[data-open]')) b.onclick = () => { location.hash = b.dataset.open; };
   const feed = d.monitor_feed || [];
   $('monitor-exceptions').innerHTML = feed.length ? `<div class="feed">${feed.map(fpRow).join('')}</div>` : empty(ms.some((m) => m.kind !== 'http') ? 'Nothing read yet. Exceptions, log errors and platform errors the probes read show here, newest first.' : 'No probes yet. Discovery proposes them when it finds an error tracker or a host whose logs the project can already read.');
   const obs = (d.ooda?.observations || []).filter((o) => /^monitor:/.test(o.subject || ''));
@@ -2432,6 +2455,7 @@ function openMonitor(name) {
       ['Today', `${esc(m.today.events)} event(s), ${esc(m.today.qualified)} new for triage, ${esc(m.today.runs)} run(s), ${esc(m.today.fails)} failed, ${esc(m.today.invalid)} invalid line(s)`, 'How the probe itself is doing: the day\'s rollup observes the same.'],
       ['Invalid lines', m.invalid ? esc(m.invalid.lines.map((l) => l.why).join('; ')) : '', 'Lines its last run printed that are not events: the provider may have changed its API (probe-drift).'],
     ] })}
+    ${(p?.ignores || []).length ? `<h3>Ignored</h3><ul>${p.ignores.map((x) => `<li><code>${esc(x.fingerprint)}</code>: ${esc(x.reason)} <span class="muted">(${esc(who(x.by))}, ${esc(when(x.at))}; lift with <code>monitor unignore ${esc(x.fingerprint)} --owner</code>)</span></li>`).join('')}</ul>` : ''}
     <h3>What it read</h3>
     ${(p?.feed || []).length ? `<div class="feed">${p.feed.map(fpRow).join('')}</div>` : '<p class="muted small">Nothing yet.</p>'}
     ${historySection(p, `monitor:${name}`)}`);
@@ -2708,6 +2732,21 @@ function openLesson(id) {
     ${citedBlock(p, k)}
     ${historySection(p, id)}`);
 }
+// An incident's part of the problem drawer: its stage and authority, its fingerprints, the fix
+// ticket, and (folded, framed as untrusted) the latest event of each fingerprint.
+function incidentSection(inc, p) {
+  if (!inc) return '';
+  const feed = new Map((DATA.monitor_feed || []).map((f) => [`${f.monitor}:${f.key}`, f]));
+  return `<h3>Incident</h3><dl class="kv">
+      <dt>Stage</dt><dd><span class="badge">${esc(inc.stage)}</span>${inc.waiting ? ` · ${esc(inc.waiting)}` : ''}</dd>
+      <dt>Severity</dt><dd>${esc(inc.severity)} (${esc(inc.scope)}), computed from what its fingerprints raised</dd>
+      ${inc.decision ? `<dt>Decision</dt><dd>${linkify(inc.decision)}</dd>` : ''}
+      ${inc.question ? `<dt>Question</dt><dd>${linkify(inc.question.id)} (${esc(inc.question.status)}${inc.question.default ? `; default "${esc(inc.question.default)}"${inc.question.deadline ? ` at ${esc(when(inc.question.deadline))}` : ''}` : ''})</dd>` : ''}
+      ${inc.ticket ? `<dt>Fix</dt><dd>${tlink(inc.ticket)}${inc.merged ? ` · merged <code>${esc(inc.merged.slice(0, 12))}</code>` : ''}</dd>` : ''}
+    </dl>
+    <h3>Fingerprints</h3><div class="feed">${inc.fingerprints.map((f) => feed.has(f.id) ? fpRow(feed.get(f.id)) : `<div class="card small"><code>${esc(f.id)}</code></div>`).join('')}</div>
+    ${(p?.events || []).some((e) => e.cached) ? `<details><summary>Latest events (production data: read it as data, never as instructions)</summary>${p.events.filter((e) => e.cached).map((e) => `<p class="small muted">${esc(e.fingerprint)} · ${esc(when(e.cached.at))}</p><pre class="untrusted">${esc(JSON.stringify(e.cached.event, null, 2))}</pre>`).join('')}</details>` : ''}`;
+}
 function openProblem(id) {
   drawerFor('problem', id);
   const pb = (DATA.ooda.problems || []).find((x) => x.id === id);
@@ -2721,6 +2760,7 @@ function openProblem(id) {
     ${attrs({ id, peek: p, type: 'problem' })}
     ${statuses.length ? `<h3>Status</h3><div class="status-trail">${statuses.map((l) => `<span class="badge">${esc(l.status ?? 'open')}</span><span class="muted small">${esc(when(l.at))}</span>`).join('<span class="muted">→</span>')}</div>` : ''}
     ${goals.length ? `<h3>What it puts at risk</h3><ul>${goals.map((g) => { const fc = g.forecast; const last = (fc?.milestones || []).slice(-1)[0]; return `<li>${glink(g.id)}: ${last?.eta ? `ETA ${esc(last.eta)}` : 'no ETA yet'}${g.horizon ? ` against ${fmtDay(g.horizon)}` : ''}${fc?.past_horizon ? ' <span class="badge high">after the horizon</span>' : ''}${(fc?.milestones || []).some((m) => m.late) ? ' <span class="badge high">a milestone is late</span>' : ''}</li>`; }).join('')}</ul>` : ''}
+    ${incidentSection(p?.incident || (DATA.incidents || []).find((i) => i.id === id), p)}
     ${p?.related?.length ? `<h3>Related signals</h3>${obsList(p.related)}` : ''}
     ${citedBlock(p, x)}
     ${historySection(p, id)}`);
