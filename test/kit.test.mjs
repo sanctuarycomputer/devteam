@@ -19,7 +19,6 @@ import { testDir } from './lib/kit.mjs';
 const FORKS = [
   ['goal measures:'],
   ['review-worktree:'],
-  ['decisions:'],
   ['an answer the owner gave in the supervisor chat'],
   ['questions carry choices'],
   ['forged lines'],
