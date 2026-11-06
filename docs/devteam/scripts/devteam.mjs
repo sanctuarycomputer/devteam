@@ -1269,6 +1269,9 @@ const logObjects = (type) => [...readLog().objects.values()].filter((o) => o.typ
 const upkeepGoal = () => [...readLog().objects.values()].find((o) => o.type === 'goal' && o.kind === 'upkeep') ?? null;
 const logGet = (id) => readLog().objects.get(id) ?? null;
 const byTime = (a, b) => a.created_at.localeCompare(b.created_at);
+// A message is handled when a reply cites it (--re), or when the supervisor routed it to the owner
+// as a question that cites it (ask --re): then it waits on the owner, which the question shows.
+const handledMessages = () => new Set([...logObjects('message'), ...logObjects('question')].map((x) => x.re).filter(Boolean));
 
 // What the owner saw: the question with every field it was asked with (later lines may only add
 // the supervisor's status and reason, and the owner's own fields). The owner's answer records this
@@ -2137,7 +2140,7 @@ function plannersNow() {
     const last = stamps.filter(Boolean).map((x) => new Date(x).toISOString()).sort().pop() ?? null;
     const { target, problem } = resolvePane(tmuxTarget(by));
     const msgs = lines.filter((l) => l.type === 'message');
-    const replied = new Set(msgs.map((m) => m.re).filter(Boolean));
+    const replied = handledMessages();
     const asking = msgs.filter((m) => m.by === by && !['info', 'ruling', 'answer'].includes(m.kind) && !replied.has(m.id));
     // Before its feature line exists (while designing), a planner's goal is the one its questions
     // name: a question whose links point at this plan branch.
@@ -7009,7 +7012,7 @@ function collectMetrics(since) {
 
   const msgs = logObjects('message').filter((m) => Date.parse(m.created_at) >= since).sort(byTime);
   const replies = new Map();
-  for (const m of msgs) if (m.re && !replies.has(m.re)) replies.set(m.re, Date.parse(m.created_at));
+  for (const m of [...msgs, ...logObjects('question')].sort(byTime)) if (m.re && !replies.has(m.re)) replies.set(m.re, Date.parse(m.created_at));
   const expecting = msgs.filter((m) => !['info', 'ruling', 'answer'].includes(m.kind));
   const openMsgs = expecting.filter((m) => !replies.has(m.id) && !settledByLanding(m));
   const msgWaits = expecting.filter((m) => replies.has(m.id)).map((m) => replies.get(m.id) - Date.parse(m.created_at));
@@ -7360,7 +7363,7 @@ function dashboardData() {
   const settings = loadSettings();
   const sub = activeTickets();
   const msgs = logObjects('message');
-  const replied = new Set(msgs.map((m) => m.re).filter(Boolean));
+  const replied = handledMessages();
   return {
     generated_at: nowIso(), project: settings.project,
     caps: { max_active_tickets: settings.max_active_tickets },
@@ -7989,7 +7992,7 @@ function settledByLanding(m) {
 function cmdMessages() {
   const me = flagStr('to') ?? myAddress();
   const all = logObjects('message').sort(byTime);
-  const replied = new Set(all.map((m) => m.re).filter(Boolean));
+  const replied = handledMessages();
   let mine = all.filter((m) => m.to === me);
   if (flags.open) mine = mine.filter((m) => !replied.has(m.id) && !['info', 'ruling', 'answer'].includes(m.kind) && !settledByLanding(m));
   mine = mine.slice(-Number(flagStr('tail') ?? 50));
@@ -8027,7 +8030,7 @@ function cmdPhase() {
   // Waiting with nothing asked looks the same as waiting with a request answered: say so.
   if (['awaiting-word', 'blocked'].includes(to)) {
     const msgs = logObjects('message');
-    const replied = new Set(msgs.map((m) => m.re).filter(Boolean));
+    const replied = handledMessages();
     if (!msgs.some((m) => m.created_by === id && m.to === 'supervisor' && !replied.has(m.id) && !['info', 'ruling', 'answer'].includes(m.kind)))
       warn(`${to} with no open request to the supervisor: send one (--kind review-request for approve-spec, approve-plan or the stage word; merge-request at the end; blocked), since info expects no reply`);
   }
