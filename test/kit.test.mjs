@@ -2183,6 +2183,21 @@ test('devteam kit', async (t) => {
     assert.equal(typeof h.inbox, 'number');
     const dd = json(must(['dashboard-data']));
     assert.equal(h.inbox, dd.questions.length + dd.ooda.knowledge.filter((k) => k.status === 'candidate').length, "the Inbox as the dashboard counts it: its questions and lessons to keep");
+    // every lesson waiting on the owner reaches the Inbox, however many (the dashboard showed only the
+    // recent 60 lessons, so older candidates never did, while the hub's badge counted them)
+    {
+      const logDir = path.join(repo, 'docs/devteam/run/log');
+      const supFile = path.join(logDir, fs.readdirSync(logDir).find((f) => f.startsWith('supervisor-')));
+      const keptLog = fs.readFileSync(supFile, 'utf8');
+      const at = (i) => new Date(Date.UTC(2020, 0, 1, 0, 0, i)).toISOString();
+      fs.appendFileSync(supFile, Array.from({ length: 65 }, (_, i) => line({ id: `k-20200101-0000${String(i).padStart(2, '0')}000-supervisor`, type: 'knowledge', op: 'new', at: at(i), by: 'supervisor', kind: 'fact', statement: `old candidate ${i}`, scope: 'project', status: 'candidate', confidence: 0.5 })).join(''));
+      try {
+        const many = json(must(['dashboard-data']));
+        const cands = many.ooda.knowledge.filter((k) => k.status === 'candidate');
+        assert.ok(cands.length >= 65, `all candidates reach the dashboard (${cands.length})`);
+        assert.equal(json(must(['hello', '--json'])).inbox, many.questions.length + cands.length, 'the hub badge and the Inbox count the same');
+      } finally { fs.writeFileSync(supFile, keptLog); }
+    }
     assert.ok(['run', 'drain', 'park'].includes(h.fleet.mode));
     assert.equal(typeof h.fleet.workers, 'number');
     assert.match(h.kit, /^(v\d+\.\d+\.\d+|unreleased)(\+local)?$/);
