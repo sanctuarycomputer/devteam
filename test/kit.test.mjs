@@ -2606,6 +2606,8 @@ test('devteam kit', async (t) => {
     write(path.join(A, 'big-one/artifact.json'), JSON.stringify({ v: 1, title: 'Big', summary: 's', by: 'x' }));
     fs.writeFileSync(path.join(A, 'big-one/huge.bin'), Buffer.alloc(8 * 1024 * 1024 + 1));
     assert.match(dt(['artifact', 'check', 'big-one'], W).err, /huge\.bin: over 8 MB/);
+    // a draft over the cap is listed as broken, never read whole (a stray 2 GB file can't take the dashboard down)
+    assert.match(json(must(['artifacts', '--json'])).find((a) => a.slug === 'big-one').error, /over 8 MB/);
     fs.rmSync(path.join(A, 'big-one'), { recursive: true });
     fs.symlinkSync('/etc/hosts', path.join(A, 'mock-one/hosts'));
     assert.match(dt(['artifact', 'check', 'mock-one'], W).err, /hosts: a symlink/);
@@ -2618,6 +2620,19 @@ test('devteam kit', async (t) => {
     assert.match(w1.err, /evil\.example\/x\.js is not on an allowed CDN/);
     assert.match(w1.err, /meta refresh/);
     write(path.join(A, 'mock-one/index.html'), '<!doctype html><p>v1');
+    // Finder's .DS_Store in a draft is not the artifact's
+    write(path.join(A, 'mock-one/.DS_Store'), 'x');
+    assert.match(must(['artifact', 'check', 'mock-one'], W), /1 artifact pass/);
+    const before = json(must(['artifacts', '--json'])).find((a) => a.slug === 'mock-one').fp;
+    fs.rmSync(path.join(A, 'mock-one/.DS_Store'));
+    assert.equal(json(must(['artifacts', '--json'])).find((a) => a.slug === 'mock-one').fp, before, 'nor part of its fingerprint');
+    // a slug folder that is a symlink elsewhere is no draft at all
+    const outside = path.join(tmp, 'outside-art');
+    write(path.join(outside, 'artifact.json'), JSON.stringify({ v: 1, title: 'Out', summary: 's', by: 'x' }));
+    write(path.join(outside, 'index.html'), '<!doctype html>');
+    fs.symlinkSync(outside, path.join(A, 'linked-one'));
+    assert.ok(!json(must(['artifacts', '--json'])).some((a) => a.slug === 'linked-one'));
+    fs.rmSync(path.join(A, 'linked-one'));
     // listed as a draft, uncommitted
     const ls = json(must(['artifacts', '--json']));
     const d = ls.find((a) => a.slug === 'mock-one');
@@ -2716,6 +2731,15 @@ test('devteam kit', async (t) => {
     assert.match(ask([{ name: 'flow', title: 'Mock', url: 'https://example.com', at: 'main' }]).err, /at belongs to an artifact link/);
     assert.match(ask([{ name: 'flow', title: 'Mock', artifact: 'no-such' }]).err, /no artifact "no-such"/);
     assert.match(ask([{ name: 'flow', title: 'Mock', artifact: 'mock-one', at: 'main' }]).err, /not at main; it is in bill-01-card/);
+    // only a slug-shaped [[name]] is a reference; template text in a question is just text
+    const qt = ask([], 'Should the docs keep the [[ title ]] placeholder?');
+    assert.equal(qt.status, 0, qt.err);
+    must(['withdraw', qt.out.trim()], { role: 'sup' });
+    // a broken draft is fixed before anyone is asked about it
+    write(path.join(A, 'broken-two/index.html'), '<!doctype html>');
+    write(path.join(A, 'broken-two/artifact.json'), '{');
+    assert.match(ask([{ name: 'flow', title: 'B', artifact: 'broken-two' }]).err, /is broken \(artifact\.json: not JSON/);
+    fs.rmSync(path.join(A, 'broken-two'), { recursive: true });
     const qa = ask([{ name: 'flow', title: 'Mock', artifact: 'mock-one' }]);
     assert.equal(qa.status, 0, qa.err);
     const QA = qa.out.trim();

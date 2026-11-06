@@ -4002,12 +4002,13 @@ function cmdAsk() {
       const cands = arts.filter((a) => a.slug === l.artifact);
       if (!cands.length) die(`--links: no artifact "${l.artifact}" (devteam.mjs artifacts)`);
       const pick = l.at !== undefined ? cands.find((a) => a.at === l.at) : cands.length === 1 ? cands[0] : null;
+      if (pick?.error) die(`--links: artifact "${l.artifact}" in ${pick.at} is broken (${pick.error}); fix it first (artifact check)`);
       if (!pick) die(`--links: artifact "${l.artifact}" is ${l.at !== undefined ? `not at ${l.at}; it is in ${cands.map((a) => a.at).join(' and ')}` : `in ${cands.map((a) => a.at).join(' and ')}`}; say which with "at"`);
       l.at = pick.at;
       l.sha256 = pick.fp;
     }
   }
-  for (const [, n] of `${q}\n${flagStr('context') ?? ''}`.matchAll(/\[\[([^\]]*)\]\]/g)) if (!names.has(n)) die(`--links: the text names [[${n}]] but no link has "name": "${n}"`);
+  for (const [, n] of `${q}\n${flagStr('context') ?? ''}`.matchAll(/\[\[([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\]\]/g)) if (!names.has(n)) die(`--links: the text names [[${n}]] but no link has "name": "${n}"`);
   const line = appendLog({
     type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), question: q, context: kind === 'goal-approval' ? [flagStr('context'), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal')))), registryAttestText(logGet(flagStr('goal')))].filter(Boolean).join('\n\n') : flagStr('context'),
     rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: goalChangeFlag(cls), options: asList(flags.options), choices: jsonFlag('choices'), links, recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined,
@@ -4178,19 +4179,37 @@ const ARTIFACT_CDNS = ['https://cdnjs.cloudflare.com', 'https://cdn.jsdelivr.net
 const ARTIFACT_FONT_HOSTS = ['https://fonts.googleapis.com', 'https://fonts.gstatic.com'];
 // git's id of a blob, so a draft on disk and a landed tree fingerprint alike without reading main's files
 const blobOid = (buf) => crypto.createHash('sha1').update(`blob ${buf.length}\0`).update(buf).digest('hex');
-const fingerprint = (entries) => sha256([...entries].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)).map((e) => `${e.path}\0${e.oid ?? blobOid(e.read() ?? Buffer.alloc(0))}\n`).join(''));
+// A draft's blob ids are kept in run/cache by path, size and mtime, so a refresh hashes only what
+// changed. A file over the cap (the artifact is broken anyway) or one that can't be read is never
+// read whole: it stands in by its size and mtime, so dashboard-data never dies on a stray 2 GB video.
+let oidCache = null;
+const OID_CACHE = () => path.join(runDir, 'cache', 'artifact-oids.json');
+function diskOid(e) {
+  if (e.size > ARTIFACT_FILE_MAX) return `big:${e.size}:${e.mtime}`;
+  if (!oidCache) { oidCache = { data: {}, dirty: false }; try { oidCache.data = JSON.parse(fs.readFileSync(OID_CACHE(), 'utf8')); } catch {} process.on('exit', () => { if (oidCache.dirty) try { fs.mkdirSync(path.dirname(OID_CACHE()), { recursive: true }); fs.writeFileSync(OID_CACHE(), JSON.stringify(oidCache.data)); } catch {} }); }
+  const key = `${e.abs}\0${e.size}\0${e.mtime}`;
+  if (oidCache.data[key]) return oidCache.data[key];
+  const buf = e.read();
+  if (!buf) return `unreadable:${e.size}:${e.mtime}`;
+  oidCache.data[key] = blobOid(buf);
+  oidCache.dirty = true;
+  return oidCache.data[key];
+}
+const fingerprint = (entries) => sha256([...entries].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)).map((e) => `${e.path}\0${e.oid ?? (e.abs ? diskOid(e) : blobOid(e.read() ?? Buffer.alloc(0)))}\n`).join(''));
 // A folder's entries as { path, mode, size, read }, by lstat: a symlink is listed (mode 120000),
 // never followed; a dot-folder is listed, never walked.
 function diskEntries(dir) {
   const res = [];
   const walk = (rel) => {
     for (const d of fs.readdirSync(path.join(dir, rel), { withFileTypes: true })) {
+      // Finder's litter in a draft is the machine's, not the artifact's (git would ignore it too)
+      if (d.name === '.DS_Store') continue;
       const p = rel ? `${rel}/${d.name}` : d.name;
       const abs = path.join(dir, p);
       const st = fs.lstatSync(abs);
       if (st.isSymbolicLink()) res.push({ path: p, mode: '120000', size: 0, read: () => null });
       else if (st.isDirectory()) { if (d.name.startsWith('.')) res.push({ path: `${p}/`, mode: '040000', size: 0, read: () => null }); else walk(p); }
-      else res.push({ path: p, mode: '100644', size: st.size, mtime: st.mtimeMs, read: () => fs.readFileSync(abs) });
+      else res.push({ path: p, abs, mode: '100644', size: st.size, mtime: st.mtimeMs, read: () => { if (st.size > ARTIFACT_FILE_MAX) return null; try { return fs.readFileSync(abs); } catch { return null; } } });
     }
   };
   if (fs.existsSync(dir)) walk('');
@@ -4264,6 +4283,9 @@ function draftWorktree(name) {
     return path.dirname(real) === root && fs.statSync(real).isDirectory() ? real : null;
   } catch { return null; }
 }
+// A draft's folder is where it says it is: no symlink on the way to it (the slug folder, artifacts/,
+// the project folder) carries the route or a fingerprint off somewhere else on the machine.
+const draftDirOk = (root, slug) => { const want = path.join(root, ARTIFACTS_REL, slug); try { return fs.realpathSync(want) === want; } catch { return false; } };
 // Where an artifact's files are: main's tree (at 'main') or a draft worktree's folder; null if none.
 // A worktree's project folder sits at the same path inside it as this checkout's.
 function artifactSource(at, slug) {
@@ -4276,6 +4298,7 @@ function artifactSource(at, slug) {
   const root = draftWorktree(at);
   if (!root) return null;
   const dir = path.join(root, ARTIFACTS_REL, slug);
+  if (!draftDirOk(root, slug)) return null;
   if (!fs.existsSync(path.join(dir, 'artifact.json')) && !fs.existsSync(path.join(dir, 'index.html'))) return null;
   return { entries: diskEntries(dir), dir };
 }
@@ -4289,8 +4312,20 @@ function describeArtifact(slug, at, src) {
 function landedArtifacts() {
   const ref = mainRef();
   if (!ref) return [];
-  const names = (git(['ls-tree', '--name-only', `${ref}:${ARTIFACTS_REL}`], mainRoot) ?? '').split('\n').filter((s) => LINK_ID.test(s));
-  return names.map((s) => { const src = artifactSource('main', s); return src && describeArtifact(s, 'main', src); }).filter(Boolean);
+  // one ls-tree for every slug's tree id; an artifact whose tree hasn't changed is described from
+  // run/cache instead of spawning git for its manifest and page on every refresh
+  const rows = (git(['ls-tree', `${ref}:${ARTIFACTS_REL}`], mainRoot) ?? '').split('\n').map((l) => /^040000 tree ([0-9a-f]+)\t(.+)$/.exec(l)).filter((m) => m && LINK_ID.test(m[2]));
+  const file = path.join(runDir, 'cache', 'artifacts-landed.json');
+  let cache = {};
+  try { cache = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
+  const next = {};
+  const res = rows.map(([, tree, slug]) => {
+    if (cache[tree]?.slug === slug) return (next[tree] = cache[tree]);
+    const src = artifactSource('main', slug);
+    return src ? (next[tree] = describeArtifact(slug, 'main', src)) : null;
+  }).filter(Boolean);
+  if (canonical(next) !== canonical(cache)) try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(next)); } catch {}
+  return res;
 }
 // A worktree's copy identical to the landed one is not a draft: a merged branch's worktree not yet
 // removed shows nothing.
@@ -7551,9 +7586,10 @@ async function cmdDashboard() {
       } else {
         // the real path stays inside the artifact's folder: a symlink out of it is not found
         try {
-          const dir = fs.realpathSync(path.join(draftWorktree(at), ARTIFACTS_REL, am[2]));
-          const real = fs.realpathSync(path.join(dir, rel));
-          if (real.startsWith(dir + path.sep) && fs.statSync(real).isFile()) bytes = fs.readFileSync(real);
+          const root = draftWorktree(at);
+          const dir = path.join(root, ARTIFACTS_REL, am[2]);
+          const real = draftDirOk(root, am[2]) ? fs.realpathSync(path.join(dir, rel)) : null;
+          if (real && real.startsWith(dir + path.sep) && fs.statSync(real).isFile()) bytes = fs.readFileSync(real);
         } catch {}
       }
       if (!bytes) return send(res, 404, 'text/plain', 'not found');
