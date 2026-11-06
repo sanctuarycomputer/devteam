@@ -24,5 +24,8 @@ jobs:
       # the files are named, never found: test/lib holds helpers, not tests
       - if: matrix.part == 'chain'
         run: node --test --test-concurrency=8 test/kit.test.mjs
+      # bounds.test.mjs times the kit's code against a bound: alone, so nothing else's load counts
       - if: matrix.part == 'rest'
-        run: node --test --test-concurrency=8 $(ls test/*.test.mjs | grep -v '/kit\.test\.mjs$')
+        run: node --test test/bounds.test.mjs
+      - if: matrix.part == 'rest'
+        run: node --test --test-concurrency=8 $(ls test/*.test.mjs | grep -v '/\(kit\|bounds\)\.test\.mjs$')
