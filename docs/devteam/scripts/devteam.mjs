@@ -1224,8 +1224,20 @@ function questionView(q) {
 }
 // The inbox's view: each question with its goal's hold (never inside questionView, which the fold uses).
 // A link item that names a registry link shows its kind's locator: a url link's url, a repo link's remote.
-const resolveQuestionLinks = (ls) => { const reg = loadSettings().links ?? {}; return (ls ?? []).map((l) => { const r = l?.link ? ownEntry(reg, l.link) : null; const K = r ? LINK_KINDS[r.kind] : null; if (!K) return redactLink(l); const { text, ...where } = K.locator(r, l.link); return redactLink({ ...l, ...where }); }); };
-const questions = () => logObjects('question').map((q) => { const v = questionView(q); return { ...v, links: resolveQuestionLinks(v.links), goal_hold: questionHold(q) }; });
+// An artifact link says where it opens now (an open question's only: each costs reads). Always on
+// a copy, never the folded question's own link: its hash covers the links as asked.
+const resolveQuestionLinks = (ls, open = false) => { const reg = loadSettings().links ?? {}; return (ls ?? []).map((l) => { if (isObj(l) && l.artifact !== undefined) return open ? artifactLinkNow(l) : { ...l, href: null, changed: false, gone: false }; const r = l?.link ? ownEntry(reg, l.link) : null; const K = r ? LINK_KINDS[r.kind] : null; if (!K) return redactLink(l); const { text, ...where } = K.locator(r, l.link); return redactLink({ ...l, ...where }); }); };
+// Where it was asked, while that source is there; else main, once it landed (with no notice if it
+// landed as asked); else gone. changed: its files no longer hash to what the owner was asked about.
+function artifactLinkNow(l) {
+  const src = artifactSource(l.at, l.artifact);
+  const landed = !src && l.at !== 'main' ? artifactSource('main', l.artifact) : null;
+  const at = src ? l.at : landed ? 'main' : null;
+  const fp = src ? fingerprint(src.entries) : landed ? fingerprint(landed.entries) : null;
+  const href = at === 'main' ? `#artifact/main/${l.artifact}` : at ? `#artifact/wt/${at}/${l.artifact}` : null;
+  return { ...l, href, changed: !!at && !!l.sha256 && fp !== l.sha256, gone: !at };
+}
+const questions = () => logObjects('question').map((q) => { const v = questionView(q); return { ...v, links: resolveQuestionLinks(v.links, v.status === 'open'), goal_hold: questionHold(q) }; });
 
 // Why question q does not authorise the supervisor to change goal goalId (null when it does): it
 // is a goal-change question about that goal, answered by the owner with its recommendation (an
@@ -3579,12 +3591,43 @@ function cmdAsk() {
       if (k.type === 'stdin' && !allowedCommand(k.argv)) die(`secret ${x.name}: \`${k.argv.join(' ')}\` is not in settings.secret_commands, the commands the owner lets a secret be piped to`);
     }
   }
-  for (const l of jsonFlag('links') ?? []) if (l?.link !== undefined && !ownEntry(loadSettings().links, l.link)) die(`--links: link "${l.link}" is not in settings links (devteam.mjs links)`);
-  // an inline link is logged as given, so a credential in it would be in the log and every view of the question
-  for (const l of jsonFlag('links') ?? []) if (hasCredentials(l?.url)) die(`--links: ${redactUrl(l.url)} carries credentials; ${CREDENTIALS_REFUSED}`);
+  // Each link is one thing to look at: a repo path, a url, a registry link or an artifact. A name
+  // lets the question's text point at it inline ([[name]]). An artifact is pinned to where it was
+  // and what it held when asked, in this one line: the question's hash covers its links, so
+  // nothing is added to them later.
+  const links = jsonFlag('links');
+  if (links !== undefined && !Array.isArray(links)) die('--links is a JSON array of objects');
+  const LINK_WAYS = ['path', 'url', 'link', 'artifact'];
+  const names = new Set();
+  let arts = null;
+  for (const l of links ?? []) {
+    if (!isObj(l)) die('--links: each item is an object');
+    const ways = LINK_WAYS.filter((k) => l[k] !== undefined);
+    if (ways.length !== 1) die(`--links: "${l.title ?? '?'}" has exactly one of ${LINK_WAYS.join(', ')} (it has ${ways.join(', ') || 'none'})`);
+    if (l.name !== undefined) {
+      if (typeof l.name !== 'string' || !LINK_ID.test(l.name)) die(`--links: a name is lowercase words joined by - ("${l.name}")`);
+      if (names.has(l.name)) die(`--links: the name "${l.name}" is used twice`);
+      names.add(l.name);
+    }
+    if (l.link !== undefined && !ownEntry(loadSettings().links, l.link)) die(`--links: link "${l.link}" is not in settings links (devteam.mjs links)`);
+    // an inline link is logged as given, so a credential in it would be in the log and every view of the question
+    if (hasCredentials(l.url)) die(`--links: ${redactUrl(l.url)} carries credentials; ${CREDENTIALS_REFUSED}`);
+    if (l.sha256 !== undefined) die('--links: sha256 is written by ask (the artifact as it is now), never given');
+    if (l.at !== undefined && l.artifact === undefined) die('--links: at belongs to an artifact link');
+    if (l.artifact !== undefined) {
+      arts ??= allArtifacts();
+      const cands = arts.filter((a) => a.slug === l.artifact);
+      if (!cands.length) die(`--links: no artifact "${l.artifact}" (devteam.mjs artifacts)`);
+      const pick = l.at !== undefined ? cands.find((a) => a.at === l.at) : cands.length === 1 ? cands[0] : null;
+      if (!pick) die(`--links: artifact "${l.artifact}" is ${l.at !== undefined ? `not at ${l.at}; it is in ${cands.map((a) => a.at).join(' and ')}` : `in ${cands.map((a) => a.at).join(' and ')}`}; say which with "at"`);
+      l.at = pick.at;
+      l.sha256 = pick.fp;
+    }
+  }
+  for (const [, n] of `${q}\n${flagStr('context') ?? ''}`.matchAll(/\[\[([^\]]*)\]\]/g)) if (!names.has(n)) die(`--links: the text names [[${n}]] but no link has "name": "${n}"`);
   const line = appendLog({
     type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), question: q, context: kind === 'goal-approval' ? [flagStr('context'), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal')))), registryAttestText(logGet(flagStr('goal')))].filter(Boolean).join('\n\n') : flagStr('context'),
-    rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: goalChangeFlag(cls), options: asList(flags.options), choices: jsonFlag('choices'), links: jsonFlag('links'), recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined,
+    rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: goalChangeFlag(cls), options: asList(flags.options), choices: jsonFlag('choices'), links, recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined,
     deadline: def ? new Date(Date.now() + loadSettings().question_default_after_hours * 3600000).toISOString() : undefined,
     blocks, approves: approves.length ? approves : undefined, evidence, note: flagStr('note'), secrets, review,
     why_asked: { rung: onLadder ? rungFor(cls, scope) : undefined, ceiling: onLadder ? L.classes[cls].ceiling : undefined, reasons },

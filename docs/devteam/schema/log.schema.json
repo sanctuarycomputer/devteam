@@ -1130,7 +1130,7 @@
           },
           "links": {
             "type": "array",
-            "description": "Artifacts the owner must look at to answer (a spec, a plan, a mock): a path in the repo at ref (default main), a URL, or a registry link by id.",
+            "description": "What the owner must look at to answer (a spec, a plan, a mock): a path in the repo at ref (default main), a URL, a registry link by id, or an artifact by slug.",
             "items": {
               "type": "object",
               "properties": {
@@ -1154,6 +1154,26 @@
                   "type": "string",
                   "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
                   "description": "A registry link's id (settings.md links); the inbox shows its locator."
+                },
+                "artifact": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+                  "description": "An artifact's slug (project/artifacts/<slug>/); the dashboard opens it in its viewer."
+                },
+                "at": {
+                  "type": "string",
+                  "pattern": "^(main|[A-Za-z0-9][A-Za-z0-9._-]*)$",
+                  "description": "Where the artifact was when asked: main (landed) or the worktree drawing it."
+                },
+                "sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$",
+                  "description": "The artifact's fingerprint when asked, written by ask; the dashboard says when it has changed since."
+                },
+                "name": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+                  "description": "A short key, unique in the question; its text and context name the link inline as [[name]]."
                 }
               },
               "required": [
@@ -1161,7 +1181,7 @@
               ],
               "additionalProperties": false
             },
-            "x-tip": "What to look at to answer: files in the repo or URLs."
+            "x-tip": "What to look at to answer: files in the repo, URLs, or artifacts."
           },
           "rule_scope": {
             "type": "string",

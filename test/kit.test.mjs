@@ -2615,6 +2615,50 @@ test('devteam kit', async (t) => {
     }
   });
 
+  await t.test('artifacts: a question links one by name, inline, pinned to where it was and what it held', () => {
+    const A = path.join(wt('bill-01-card'), 'docs/devteam/project/artifacts');
+    const ask = (links, q = 'Which layout? See [[flow]].', more = []) => dt(['ask', '--question', q, '--links', JSON.stringify(links), ...more], { role: 'sup' });
+    assert.match(ask([{ title: 'x', url: 'https://example.com', path: 'a.md' }]).err, /exactly one of path, url, link, artifact \(it has path, url\)/);
+    assert.match(ask([{ title: 'x' }]).err, /it has none/);
+    assert.match(ask([{ name: 'flow', title: 'a', url: 'https://example.com' }, { name: 'flow', title: 'b', url: 'https://example.org' }]).err, /"flow" is used twice/);
+    assert.match(ask([{ name: 'other', title: 'a', url: 'https://example.com' }]).err, /names \[\[flow\]\] but no link has "name": "flow"/);
+    assert.match(ask([{ name: 'other', title: 'a', url: 'https://example.com' }], 'Which?', ['--context', 'see [[flow]]']).err, /\[\[flow\]\]/, 'the context too');
+    assert.match(ask([{ name: 'flow', title: 'Mock', artifact: 'mock-one', sha256: 'a'.repeat(64) }]).err, /sha256 is written by ask/);
+    assert.match(ask([{ name: 'flow', title: 'Mock', url: 'https://example.com', at: 'main' }]).err, /at belongs to an artifact link/);
+    assert.match(ask([{ name: 'flow', title: 'Mock', artifact: 'no-such' }]).err, /no artifact "no-such"/);
+    assert.match(ask([{ name: 'flow', title: 'Mock', artifact: 'mock-one', at: 'main' }]).err, /not at main; it is in bill-01-card/);
+    const qa = ask([{ name: 'flow', title: 'Mock', artifact: 'mock-one' }]);
+    assert.equal(qa.status, 0, qa.err);
+    const QA = qa.out.trim();
+    const linkOf = () => json(must(['dashboard-data'])).questions.find((q) => q.id === QA).links[0];
+    let lk = linkOf();
+    assert.deepEqual([lk.name, lk.artifact, lk.at, lk.href, lk.changed, lk.gone], ['flow', 'mock-one', 'bill-01-card', '#artifact/wt/bill-01-card/mock-one', false, false]);
+    assert.equal(lk.sha256, json(must(['artifacts', '--json'])).find((a) => a.slug === 'mock-one').fp);
+    const asked = json(must(['log', '--id', QA, '--json']))[0].links[0];
+    assert.deepEqual(Object.keys(asked).sort(), ['artifact', 'at', 'name', 'sha256', 'title'], 'the line holds what ask resolved, and nothing the view adds');
+    write(path.join(A, 'mock-one/index.html'), '<!doctype html><p>v2');
+    lk = linkOf();
+    assert.equal(lk.changed, true, 'a file changed since it was asked');
+    assert.equal(lk.href, '#artifact/wt/bill-01-card/mock-one');
+    // a second draft of the same slug: ask needs at
+    const w2 = path.join(repo, '.worktrees', 'chore-artifact-mock-one');
+    write(path.join(w2, 'docs/devteam/project/artifacts/mock-one/index.html'), '<!doctype html><p>other');
+    write(path.join(w2, 'docs/devteam/project/artifacts/mock-one/artifact.json'), JSON.stringify({ v: 1, title: 'Mock', summary: 's', by: 'supervisor' }));
+    assert.match(ask([{ name: 'flow', title: 'Mock', artifact: 'mock-one' }]).err, /in bill-01-card and chore-artifact-mock-one; say which with "at"/);
+    const qb = ask([{ name: 'flow', title: 'Mock', artifact: 'mock-one', at: 'chore-artifact-mock-one' }]);
+    assert.equal(qb.status, 0, qb.err);
+    const QB = qb.out.trim();
+    // its source goes (the worktree removed) and it never landed: no longer available
+    fs.rmSync(w2, { recursive: true });
+    const gone = json(must(['dashboard-data'])).questions.find((q) => q.id === QB).links[0];
+    assert.deepEqual([gone.href, gone.gone, gone.changed], [null, true, false]);
+    // only open questions are resolved; an answered one keeps its link as asked
+    must(['withdraw', QA], { role: 'sup' });
+    must(['withdraw', QB], { role: 'sup' });
+    const done = json(must(['questions', '--id', QA, '--json']))[0].links[0];
+    assert.deepEqual([done.href, done.changed, done.gone], [null, false, false]);
+  });
+
 });
 
 // Moving the fleet: its own throwaway repo, an old machine and a fresh clone standing in for the new one.
