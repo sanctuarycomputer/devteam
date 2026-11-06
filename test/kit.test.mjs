@@ -1254,7 +1254,7 @@ http.createServer((req, res) => {
     must(['answer', Qchat, 'yes', '--from-chat', '--said', 'yes watch it'], { role: 'sup' });
     const wide = dt([...margs, '--approved', Qchat], { role: 'sup' });
     assert.notEqual(wide.status, 0);
-    assert.match(wide.out, /changes owner settings: [^\n]*agent_command \(governance-edit\)[^\n]*the owner's answer is needed in each class[^\n]*of class (gate-change and governance-edit|governance-edit and gate-change)/);
+    assert.match(wide.out, /changes owner settings: [^\n]*secret_commands \(governance-edit\)[^\n]*the owner's answer is needed in each class[^\n]*of class (gate-change and governance-edit|governance-edit and gate-change)/);
     assert.doesNotMatch(wide.out, /monitors \(monitor-change\)[^\n]*needed/, 'the monitor-change answer settles monitors alone');
     assert.match(wide.out, /outside project\/[^\n]*needs the owner's own answer of class governance-edit, process-edit, gate-change[^\n]*answered in chat/);
     // an owner_only answer that came through chat (a line written by hand: answer --from-chat refuses one) approves nothing
@@ -6235,7 +6235,8 @@ test('what the owner saw binds what lands: a hand-written act, or a question cha
     fs.appendFileSync(supFile, line({ id: 'a-20261105-120000001-supervisor', type: 'act', op: 'new', at: new Date().toISOString(), by: 'supervisor', class: 'governance-edit', what: 'links.console', refs: ['chore-registry', 'link:console'], reversible: true, approved_by: qid, entry_hash: hash(blk.links.console), prior_hash: hash(mainConsole) }));
     const forged = runIn(old, ['merge', '--chore', 'registry', '--dry-run', '--approved', qid], SUP);
     assert.notEqual(forged.status, 0);
-    assert.match(forged.out + forged.err, new RegExp(`changes links\\.console\\.gates, which ${qid} did not approve`));
+    // console's gates are gate-change: the governance-edit answer about docs doesn't settle them at all
+    assert.match(forged.out + forged.err, new RegExp(`changes links\\.console\\.gates, which ${qid} did not approve|links\\.console\\.gates \\(gate-change\\); the owner's answer is needed in each class`));
     fs.writeFileSync(supFile, before);
     // the question's context rewritten after the answer to show console too: widens nothing
     const shown = `links.console: main has ${canon(mainConsole)}; would be ${canon(blk.links.console)}`;
@@ -6245,7 +6246,7 @@ test('what the owner saw binds what lands: a hand-written act, or a question cha
     assert.match(runIn(old, ['log-check']).out, /may not set question\.context/);
     const widened = runIn(old, ['merge', '--chore', 'registry', '--dry-run', '--approved', qid], SUP);
     assert.notEqual(widened.status, 0);
-    assert.match(widened.out + widened.err, new RegExp(`changes links\\.console\\.gates, which ${qid} did not approve|question was changed after the owner answered it`));
+    assert.match(widened.out + widened.err, new RegExp(`changes links\\.console\\.gates, which ${qid} did not approve|question was changed after the owner answered it|links\\.console\\.gates \\(gate-change\\); the owner's answer is needed in each class`));
     fs.writeFileSync(supFile, before);
   } finally { F.done(); }
 });
@@ -6303,7 +6304,8 @@ test('merge --approved lands only the repo link entries the answer approved: a h
     write(path.join(old, 'docs/devteam/run/pr/chore-registry.md'), '# chore-registry: docs repo\n\n## One-way doors\n\nNone.\n');
     const dry = runIn(old, ['merge', '--chore', 'registry', '--dry-run', '--approved', qid], SUP);
     assert.notEqual(dry.status, 0);
-    assert.match(dry.out + dry.err, new RegExp(`changes links\\.companion\\.remote, links\\.console\\.gates, which ${qid} did not approve`));
+    assert.match(dry.out + dry.err, new RegExp(`changes links\\.companion\\.remote, which ${qid} did not approve`));
+    assert.match(dry.out + dry.err, /links\.console\.gates \(gate-change\); the owner's answer is needed in each class/, 'a gate field needs a gate-change answer of its own');
     assert.doesNotMatch(dry.out + dry.err, /links\.docs[,.]? .*did not approve|links\.docs, which/, 'the approved entry is bound');
     // without the hand edits, the same answer lands docs
     fs.writeFileSync(wf, text);
