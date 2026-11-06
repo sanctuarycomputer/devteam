@@ -45,6 +45,7 @@ RUN case "$(uname -m)" in \
  && curl -fsSL -o /usr/local/bin/ttyd "https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.$(uname -m)" \
  && echo "$sum  /usr/local/bin/ttyd" | sha256sum -c - && chmod 755 /usr/local/bin/ttyd
 
+# Both pins below are bumped by editing them here and redeploying.
 # mise, for the toolchains a repo pins (.tool-versions, .mise.toml); its installs land in $HOME, on the volume
 ARG MISE_VERSION=v2026.10.17
 RUN curl -fsSL https://mise.run | MISE_VERSION=$MISE_VERSION MISE_INSTALL_PATH=/usr/local/bin/mise sh

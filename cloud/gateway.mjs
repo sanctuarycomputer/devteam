@@ -370,7 +370,7 @@ export function createGateway(opts = {}) {
     const dest = req.headers['sec-fetch-dest'];
     if (/^\/review\/[^/]+\/devteam-ui\.(js|css)$/.test(p)) return ['script', 'style'].includes(dest);
     if (p === '/api/file') return dest === 'image';
-    return p.startsWith('/artifact/') && ['script', 'style', 'image', 'font', 'audio', 'video', 'track', 'empty'].includes(dest);
+    return p.startsWith('/artifact/') && ['script', 'style', 'image', 'font', 'audio', 'video', 'track', 'worker', 'empty'].includes(dest);
   };
   const loginAt = (next) => `${AUTH}/auth/login${next ? `?next=${encodeURIComponent(next)}` : ''}`;
 
