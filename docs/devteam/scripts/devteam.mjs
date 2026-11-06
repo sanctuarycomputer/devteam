@@ -5633,7 +5633,7 @@ function cmdRepair() {
 function cmdObserve() {
   const by = flags.owner ? ownerWriter().by : logWriter();
   // the monitors write their own lines; a hand-made one could fake an outage or hide an error
-  if (flagStr('detector') === 'monitor') die('observe --detector monitor: the monitors write their own observations (monitor poll)');
+  if (flagStr('detector') === 'monitor') die('observe --detector monitor: those lines come from the kit itself (monitor poll); use another detector name');
   const subject = flagStr('subject') ?? die('observe needs --subject (a ticket, component, feature, gate, goal, class or act id)');
   const line = appendLog({
     type: 'observation', source: flagStr('source') ?? writerClass(by), subject, kind: flagStr('kind') ?? die('observe needs --kind (a slug)'),
