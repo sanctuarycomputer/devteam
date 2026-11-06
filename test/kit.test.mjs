@@ -566,6 +566,8 @@ test('devteam kit', async (t) => {
     // the reviewer wrote in the Disposition cell, which isn't a disposition: the author's later
     // disposition replaces it without voiding the verdicts after it
     write(path.join(tdir, 'reviews/final-2.md'), changes(null, H2, 'Accepted; will fix'));
+    // a task's second review pass, task-<n>-<pass>.md, is a record like any other
+    write(path.join(tdir, 'reviews/task-1-2.md'), changes('reviewer-a', H2, ''));
     commitAll('an unnamed review asks for changes');
     fs.appendFileSync(path.join(wt('bill-01-card'), 'billing/card.js'), 'error handled\n');
     commitAll('fix');
@@ -576,7 +578,8 @@ test('devteam kit', async (t) => {
     assert.doesNotMatch(r3.out, /final-2\.md: no "- Reviewer:" line/, 'an unnamed record a later pass superseded does not fail the ticket');
     assert.match(r3.out, /final-2\.md F1 \(Important\) has no disposition \("Accepted; will fix" isn't one\): the author starts its Disposition cell with fixed, wont-fix <reason> or wrong <reason>/);
     write(path.join(tdir, 'reviews/final-2.md'), changes('reviewer-a', H2, 'fixed'));
-    commitAll('fill in final-2: its reviewer and the disposition');
+    write(path.join(tdir, 'reviews/task-1-2.md'), changes('reviewer-a', H2, 'fixed'));
+    commitAll('fill in final-2: its reviewer and the disposition; and task-1-2\'s disposition');
     must(['check-ticket', 'bill-01-card', '--sha', head(), ...pr]);
     // a row with a stray empty cell before its disposition still has that disposition
     const wide = git(['rev-parse', 'HEAD'], wt('bill-01-card'));
