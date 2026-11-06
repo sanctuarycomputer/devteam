@@ -2183,6 +2183,8 @@ const step = (name, fn) => { steps.push({ name, fn }); };
   });
 
   step('hello: who this instance is, light enough for the hub; /api/hello answers from the last run; every route checks Host', async () => {
+    // the inbox it counts holds at least this question (the steps that left others open run in forks)
+    must(['ask', '--question', 'Is this question counted in the inbox?', '--recommendation', 'yes'], { role: 'sup' });
     const h = json(must(['hello', '--json']));
     assert.equal(h.devteam, 1);
     assert.equal(h.root, fs.realpathSync(repo));

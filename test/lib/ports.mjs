@@ -1,5 +1,5 @@
-// Each test process owns a block of 100 ports between 20000 and 49099 (below 49152, where the OS
-// hands out ephemeral ports): the file-wide hub and instance block at PORTS, the ports test at
+// Each test process owns a block of 100 ports between 20000 and 32699 (below 32768, where Linux
+// starts handing out ephemeral ports; macOS starts at 49152): the file-wide hub and instance block at PORTS, the ports test at
 // PORTS+30, the hub test at PORTS+60. A block is claimed with a lock file in the temp dir, so the
 // suite's files running side by side, and another checkout's suite, never share one. The lock goes
 // when the process exits; one left by a process that died is cleared once it is an hour old.
@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 const dir = path.join(os.tmpdir(), 'devteam-kit-ports');
-const BLOCKS = 291;
+const BLOCKS = 127;
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
 function claim() {
   fs.mkdirSync(dir, { recursive: true });

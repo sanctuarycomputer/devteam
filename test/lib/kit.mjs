@@ -30,14 +30,24 @@ delete process.env.TMUX;
 // a devteam session's own home never reaches the kits under test
 delete process.env.DEVTEAM_HOME;
 delete process.env.TMUX_PANE;
-export const realTmux = spawnSync('sh', ['-c', 'command -v tmux'], { encoding: 'utf8' }).stdout?.trim();
-export const tmuxShim = fs.mkdtempSync(path.join(os.tmpdir(), 'dt-tmuxshim-'));
-fs.writeFileSync(path.join(tmuxShim, 'tmux'), `#!/bin/sh\ncase "$TMUX_TMPDIR" in */dt-tmux-*) [ -d "$TMUX_TMPDIR" ] && exec ${JSON.stringify(realTmux || 'tmux-not-installed')} "$@" ;; esac\necho "tmux refused: TMUX_TMPDIR ($TMUX_TMPDIR) is not an existing private test directory" >&2\nexit 1\n`, { mode: 0o755 });
+// The real tmux is the first one on PATH that isn't a shim: a fork or a warm CLI process inherits
+// its parent's PATH, shim first.
+const isShim = (f) => { try { return fs.readFileSync(f, 'utf8').includes('tmux refused: TMUX_TMPDIR'); } catch { return false; } };
+export const realTmux = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean).map((d) => path.join(d, 'tmux')).find((f) => { try { fs.accessSync(f, fs.constants.X_OK); return fs.statSync(f).isFile() && !isShim(f); } catch { return false; } }) ?? '';
+// The shim lives at a path named for what it runs, written whole and never removed, so a process
+// that outlives the one that made it (a fork's child, a dashboard) still finds it.
+const shimText = `#!/bin/sh\ncase "$TMUX_TMPDIR" in */dt-tmux-*) [ -d "$TMUX_TMPDIR" ] && exec ${JSON.stringify(realTmux || 'tmux-not-installed')} "$@" ;; esac\necho "tmux refused: TMUX_TMPDIR ($TMUX_TMPDIR) is not an existing private test directory" >&2\nexit 1\n`;
+export const tmuxShim = path.join(os.tmpdir(), `devteam-test-tmux-shim-${crypto.createHash('sha1').update(shimText).digest('hex').slice(0, 12)}`);
+if (!isShim(path.join(tmuxShim, 'tmux'))) {
+  fs.mkdirSync(tmuxShim, { recursive: true });
+  const t = path.join(tmuxShim, `tmux.${process.pid}`);
+  fs.writeFileSync(t, shimText, { mode: 0o755 });
+  fs.renameSync(t, path.join(tmuxShim, 'tmux'));
+}
 process.env.PATH = `${tmuxShim}${path.delimiter}${process.env.PATH}`;
 process.on('exit', () => {
   spawnSync('tmux', ['kill-server']);
   fs.rmSync(tmuxRoot, { recursive: true, force: true });
-  fs.rmSync(tmuxShim, { recursive: true, force: true });
 });
 // Dashboards started by tests never use the machine's real ports or become its hub: the hub and
 // the instance block move to ports the tests own.

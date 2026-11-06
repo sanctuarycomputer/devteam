@@ -19,7 +19,8 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ matrix.node }}
-      # the kit drives workers through tmux; the tests run it on servers of their own (test/lib/bin/tmux)
+      # the kit drives workers through tmux; the tests run it on servers of their own, through a shim
+      # that refuses the machine's default server (test/lib/kit.mjs)
       - run: command -v tmux || (sudo apt-get update -q && sudo apt-get install -yq tmux)
       # the files are named, never found: test/lib holds helpers, not tests
       - if: matrix.part == 'chain'
