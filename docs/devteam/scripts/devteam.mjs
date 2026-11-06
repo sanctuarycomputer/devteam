@@ -7233,7 +7233,8 @@ function collectOoda() {
     retro: retroDue(),
     observations: recent(logObjects('observation').filter((o) => !['reading', 'retro', 'finding-ack'].includes(o.kind)), 40),
     clusters: orientClusters(),
-    knowledge: recent(logObjects('knowledge').filter((k) => k.status !== 'retired'), 60),
+    // every lesson waiting on the owner is in the Inbox, however many: only the rest are the recent 60
+    knowledge: [...recent(logObjects('knowledge').filter((k) => k.status === 'candidate'), Infinity), ...recent(logObjects('knowledge').filter((k) => !['retired', 'candidate'].includes(k.status)), 60)],
     problems: logObjects('problem').filter((p) => p.status !== 'resolved').sort((a, b) => b.severity - a.severity),
     acts: recent(acts, 60),
     decisions: decisionRecords().slice(0, 200),
