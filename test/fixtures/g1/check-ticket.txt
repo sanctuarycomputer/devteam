@@ -1,0 +1,5 @@
+exit 1
+--- stdout
+fail: changes files outside touches: OUTSIDE.md
+--- stderr
+
