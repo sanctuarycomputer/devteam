@@ -3269,8 +3269,10 @@ function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('hom
   if (branch.startsWith('plan/')) {
     const feature = branch.slice('plan/'.length);
     if (title !== undefined && !title.startsWith(`plan-${feature}: `)) fails.push(`PR title must start with "plan-${feature}: "`);
-    // validate --strict at the exact head, in a detached worktree of that head.
-    const wt = detachedWorktree(sha, `check-${feature}`);
+    // validate --strict at the exact head, in a detached worktree of that head. It only reads the
+    // plan and the log, so the checkout is not seeded: no worktree_files, no worktree_setup (a CI
+    // runner has neither the project's untracked files nor its toolchain).
+    const wt = detachedWorktree(sha, `check-${feature}`, repo('home'), { seed: false });
     try {
       execFileSync(process.execPath, [path.join(wt, 'docs', 'devteam', 'scripts', 'devteam.mjs'), 'validate', '--strict'], { cwd: wt, stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (e) {
@@ -3369,7 +3371,7 @@ function seedWorktree(wt, { setup = true, repo: R = repo('home') } = {}) {
 // Another repo's lives in the OS temp folder (where secret post already makes its own), never under
 // home's tree: a gate there would otherwise pass on home's node_modules, .tool-versions and lint or
 // ts configs, found by walking up the directories. Home's stays under home's .worktrees, as before.
-function detachedWorktree(sha, name, R = repo('home')) {
+function detachedWorktree(sha, name, R = repo('home'), { seed = true } = {}) {
   const holder = R.name === 'home' ? null : fs.mkdtempSync(path.join(os.tmpdir(), `devteam-${R.name}-`));
   const wt = holder ? path.join(holder, `tmp-${name}`) : path.join(mainRoot, '.worktrees', `tmp-${name}-${process.pid}`);
   R.gitOrDie(['worktree', 'add', '--quiet', '--detach', wt, sha], R.root);
@@ -3378,7 +3380,7 @@ function detachedWorktree(sha, name, R = repo('home')) {
     // the empty holder only (rmdir refuses anything with files left in it)
     if (holder) try { fs.rmdirSync(holder); } catch {}
   });
-  seedWorktree(wt, { repo: R });
+  if (seed) seedWorktree(wt, { repo: R });
   return wt;
 }
 // The repo a worktree belongs to, computed from git, never recorded: null for a

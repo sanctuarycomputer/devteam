@@ -280,6 +280,15 @@ test('devteam kit', async (t) => {
     must(['validate', '--strict'], { cwd: wt('plan-billing') });
     git(['push', '-q', 'origin', 'plan/billing'], wt('plan-billing'));
     must(['check-pr', '--head-ref', 'plan/billing', '--sha', SHA1, '--title', 'plan-billing: billing'], { role: 'sup' });
+    // check-pr only reads the plan: its checkout runs no worktree_setup and copies no worktree_files,
+    // which a CI runner doesn't have (a plan PR's check-pr ran the project's setup, and failed, in CI)
+    const kept = fs.readFileSync(path.join(repo, 'docs/devteam/project/settings.md'), 'utf8');
+    landSettings((txt) => txt.replace(/```json devteam\s*\n([\s\S]*?)\n```/, (m, j) => m.replace(j, JSON.stringify({ ...JSON.parse(j), worktree_setup: 'echo setup-ran >&2; exit 1', worktree_files: ['no-such-file'] }, null, 2))));
+    try {
+      const r = dt(['check-pr', '--head-ref', 'plan/billing', '--sha', SHA1, '--title', 'plan-billing: billing'], { role: 'sup' });
+      assert.equal(r.status, 0, r.out + r.err);
+      assert.doesNotMatch(r.out + r.err, /setup-ran|no-such-file/);
+    } finally { landSettings(() => kept); }
     // a ticket changed after the graph review voids the verdict
     must(['ticket', 'set', 'bill-01-card', '--json', '{"risk":"high"}'], { cwd: wt('plan-billing'), role: 'planner' });
     git(['commit', '-qam', 'after review'], wt('plan-billing'));
