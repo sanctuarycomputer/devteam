@@ -79,6 +79,8 @@ Designs come at two levels.
 
 **A feature's design** is written when the feature is planned, at `project/designs/<feature>.md`, named in the feature's `design` field, and reviewed like any design. It links the spine by path (`validate` checks the citation) and works inside it: a feature design that needs to change a boundary, a contract or a decision the spine made is a design change (`approve-design-change`), or an owner question for a one-way door, never a quiet divergence. A feature small enough to need nothing beyond the spine may name the spine as its design.
 
+**Show what's easier seen than read.** When a goal or design has UI, a flow, or anything the owner would understand faster by looking, draw artifacts for it (`devteam.mjs artifact new <slug> --title "…" --summary "…" --for '["goal:<g>"]'` in the plan worktree; `supervisor.md` §9): mock the screens, click through the flow, render the model. Link each one from the design by its path and from the goal-approval question by name (`[[name]]`, `supervisor.md` §6), so the owner approves what they saw. They land with the plan PR, and every later worker on the goal sees them in its prompt.
+
 The design is shaped by the constitution and the code style: it chooses the option that keeps a rollback, that makes a gate possible, that fits the doctrine's structure. Research starts from `architecture.md` and the accepted knowledge (`devteam.mjs knowledge --for <feature>`), and cites file paths. The design is reviewed (`project/reviews/<goal-slug>/design-1.md`, `quality.md` §3) before any feature is written from it.
 
 ## 3. The roadmap: features, stories, releases
