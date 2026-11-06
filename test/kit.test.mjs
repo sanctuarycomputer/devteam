@@ -2316,6 +2316,25 @@ test('devteam kit', async (t) => {
     assert.doesNotThrow(() => new vm.Script(uiJs));
   });
 
+  await t.test('dashboard: Library and the artifact viewer', () => {
+    const html = fs.readFileSync(path.join(kit, 'dashboard/index.html'), 'utf8');
+    assert.match(html, /href="#library"/);
+    assert.match(html, /<section id="library">/);
+    assert.match(html, /id="artifact-view"/);
+    assert.match(html, /<iframe id="av-frame"[^>]* sandbox="allow-scripts allow-forms allow-modals allow-pointer-lock" allow="fullscreen" referrerpolicy="no-referrer">/);
+    assert.ok(!/artifact[^\n]*allow-same-origin/.test(html), 'the viewer never shares the dashboard origin');
+    assert.match(html, /id="av-tab" target="_blank" rel="noopener noreferrer"/);
+    // the viewer's route comes before route()'s line that hides the drawer and scrim for other hashes
+    const route = html.slice(html.indexOf('function route() {'), html.indexOf("window.addEventListener('hashchange'"));
+    assert.ok(route.indexOf("raw.startsWith('artifact/')") > 0 && route.indexOf("raw.startsWith('artifact/')") < route.indexOf("if (!$('drawer').hidden)"));
+    // Escape and the scrim close the viewer first
+    assert.match(html, /if \(AV\) leaveArtifact\(\); else if \(RV\)/);
+    assert.match(html, /\(AV \? leaveArtifact\(\) : RV \?/);
+    const hub = fs.readFileSync(path.join(kit, 'dashboard/hub.html'), 'utf8');
+    assert.match(hub, /setAttribute\('sandbox', '[^']*allow-modals allow-pointer-lock'\)/);
+    assert.match(hub, /setAttribute\('allow', '[^']*\bfullscreen\b[^']*'\)/);
+  });
+
   await t.test("review permanence: the owner's result lands in the PR that asked, by hash, and landed review files never change", async () => {
     const sha = (b) => crypto.createHash('sha256').update(b).digest('hex');
     const fx = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'review');
