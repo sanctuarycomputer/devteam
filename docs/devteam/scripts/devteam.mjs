@@ -1341,6 +1341,9 @@ function goalChangeProblem(q, goalId, qid, l = null) {
   return null;
 }
 
+// The owner's own standing rule for a class (scope class:<cls>, accepted, written by the owner):
+// the latest one. A rule relayed from chat never exists (answer --from-chat takes no --rule).
+const ownerRuleFor = (cls) => logObjects('knowledge').filter((k) => writerClass(k.created_by) === 'owner' && k.scope === `class:${cls}` && k.status === 'accepted').sort(byTime).pop() ?? null;
 // The correction on an act, with who made it and when.
 // The supervisor's calls: its decisions, and the acts that are their own decision (no decision
 // field: mechanical acts, and acts logged before decisions existed). Trust is earned and lost on these.
@@ -3580,7 +3583,11 @@ function cmdMerge() {
     else if (changed.length) {
       const classes = [...new Set(changed.map((c) => c.cls))];
       const what = changed.map((c) => `${c.key} (${c.cls})`).join(', ');
-      if (!approved) fails.push(`changes owner settings: ${what}; the owner's answer is needed: --approved <qid> of class ${classes.join(' or ')}`);
+      // A standing rule the owner gave themselves settles a class in owner_rules (constitution.md):
+      // only when every changed setting is of such a class, and only the owner's own accepted rule.
+      const ruled = !approved && classes.every((c) => (ladder().owner_rules ?? []).includes(c)) && classes.map((c) => ownerRuleFor(c)).every(Boolean);
+      if (ruled) { const rs = classes.map((c) => ownerRuleFor(c)); standing = { rule: rs[0] }; out(`changes owner settings: ${what}; approved by the owner's standing rule${rs.length > 1 ? 's' : ''} ${rs.map((r) => `${r.id} ("${r.statement}")`).join(', ')}`); }
+      else if (!approved) fails.push(`changes owner settings: ${what}; the owner's answer is needed: --approved <qid> of class ${classes.join(' or ')}`);
       else {
         const q = ownerAnswer(approved, 'merge --approved');
         if (!classes.includes(q.class)) fails.push(`${approved} is a ${q.class ?? 'classless'} question; changing ${what} needs an answered ${classes.join(' or ')} question`);
@@ -4866,7 +4873,7 @@ function authorise(cls, scope, approved, refs, verb) {
     // Only a rule the owner scoped to this class: a project-wide preference ("flags first") is
     // guidance, never authority over every class on the ladder.
     if (rule.scope !== `class:${cls}`) die(`${approved} applies to ${rule.scope}; a standing rule authorises a call only when the owner scoped it to its class (answer … --rule "…" --rule-scope class:${cls})`);
-    if (ownerOnly) die(`${cls} is the owner's (constitution.md); a standing rule never covers it: ask`);
+    if (ownerOnly && !(L.owner_rules ?? []).includes(cls)) die(`${cls} is the owner's (constitution.md); a standing rule never covers it: ask`);
   } else if (approved) {
     const q = logGet(approved);
     approval = q?.type === 'question' ? questionView(q) : null;
@@ -4932,7 +4939,7 @@ function decisionAuthorityGap(d) {
   const q = d.approved_by?.startsWith('q-') ? logGet(d.approved_by) : null;
   const v = q?.type === 'question' ? questionView(q) : null;
   const inClass = v && (v.class === d.class || (d.class === 'approve-plan' && v.kind === 'one-way-door'));
-  if (ownerOnly) return v && inClass && v.status === 'answered' ? answerUseGap(d, v) : `${d.class} is the owner's and needs the owner's answer in that class`;
+  if (ownerOnly && !(d.authority === 'standing-rule' && (L.owner_rules ?? []).includes(d.class))) return v && inClass && v.status === 'answered' ? answerUseGap(d, v) : `${d.class} is the owner's and needs the owner's answer in that class`;
   switch (d.authority) {
     case 'answer': return v && inClass && v.status === 'answered' ? answerUseGap(d, v) : `no answered ${d.class} question ${d.approved_by ?? ''}`.trim();
     case 'default': return v && inClass && v.status === 'defaulted' ? null : `no defaulted ${d.class} question ${d.approved_by ?? ''}`.trim();
