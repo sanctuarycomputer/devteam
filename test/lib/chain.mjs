@@ -525,7 +525,11 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     const changes = (reviewer, sha, disp) => `${reviewer ? `- Reviewer: ${reviewer}\n\n` : ''}| Id | Severity | Rule | Where | Finding | Disposition |\n|---|---|---|---|---|---|\n| F1 | Important | spec | billing/card.js:1 | handles no error | ${disp} |\n\nVerdict: CHANGES ${sha}\n`;
     const head = () => git(['rev-parse', 'HEAD'], wt('bill-01-card'));
     const commitAll = (msg) => { git(['add', '-A'], wt('bill-01-card')); git(['commit', '-qm', msg], wt('bill-01-card')); };
-    write(path.join(tdir, 'reviews/final-2.md'), changes(null, H2, ''));
+    // the reviewer wrote in the Disposition cell, which isn't a disposition: the author's later
+    // disposition replaces it without voiding the verdicts after it
+    write(path.join(tdir, 'reviews/final-2.md'), changes(null, H2, 'Accepted; will fix'));
+    // a task's second review pass, task-<n>-<pass>.md, is a record like any other
+    write(path.join(tdir, 'reviews/task-1-2.md'), changes('reviewer-a', H2, ''));
     commitAll('an unnamed review asks for changes');
     fs.appendFileSync(path.join(wt('bill-01-card'), 'billing/card.js'), 'error handled\n');
     commitAll('fix');
@@ -534,9 +538,10 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     commitAll('review 3');
     const r3 = dt(['check-ticket', 'bill-01-card', '--sha', head(), ...pr]);
     assert.doesNotMatch(r3.out, /final-2\.md: no "- Reviewer:" line/, 'an unnamed record a later pass superseded does not fail the ticket');
-    assert.match(r3.out, /final-2\.md F1 \(Important\) has no disposition/);
+    assert.match(r3.out, /final-2\.md F1 \(Important\) has no disposition \("Accepted; will fix" isn't one\): the author starts its Disposition cell with fixed, wont-fix <reason> or wrong <reason>/);
     write(path.join(tdir, 'reviews/final-2.md'), changes('reviewer-a', H2, 'fixed'));
-    commitAll('fill in final-2: its reviewer and the disposition');
+    write(path.join(tdir, 'reviews/task-1-2.md'), changes('reviewer-a', H2, 'fixed'));
+    commitAll('fill in final-2: its reviewer and the disposition; and task-1-2\'s disposition');
     must(['check-ticket', 'bill-01-card', '--sha', head(), ...pr]);
     // a row with a stray empty cell before its disposition still has that disposition
     const wide = git(['rev-parse', 'HEAD'], wt('bill-01-card'));
@@ -691,6 +696,13 @@ const step = (name, fn) => { steps.push({ name, fn }); };
       assert.match(dt(['act', '--decision', fid, '--', 'dropped it'], sup).err, /records authority it doesn't have \(gate-change is the owner's/);
       fs.appendFileSync(supFile, line({ id: 'd-20261101-235959001-supervisor', type: 'decision', op: 'new', at: new Date().toISOString(), by: 'supervisor', class: 'production-migration', what: 'migrate it', refs: ['bill-01-card'], authority: 'rung', reversible: true }));
       assert.match(dt(['act', '--decision', 'd-20261101-235959001-supervisor', '--', 'shipped'], sup).err, /production-migration is not on rung 3/);
+      // nor stand on a default the supervisor applied itself where the class isn't on rung 2: a question
+      // with a default, its own "defaulted" line and a decision, all by hand, approve nothing
+      const hq = 'q-20261101-235958000-supervisor';
+      fs.appendFileSync(supFile, line({ id: hq, type: 'question', op: 'new', at: new Date().toISOString(), by: 'supervisor', kind: 'owner-decision', class: 'production-migration', question: 'Migrate?', recommendation: 'yes', default: 'yes' }));
+      fs.appendFileSync(supFile, line({ id: hq, type: 'question', op: 'set', at: new Date().toISOString(), by: 'supervisor', status: 'defaulted' }));
+      fs.appendFileSync(supFile, line({ id: 'd-20261101-235959009-supervisor', type: 'decision', op: 'new', at: new Date().toISOString(), by: 'supervisor', class: 'production-migration', what: 'migrate it', refs: ['bill-01-card'], authority: 'default', approved_by: hq, rung: 2 }));
+      assert.match(dt(['act', '--decision', 'd-20261101-235959009-supervisor', '--', 'migrated'], sup).err, /records authority it doesn't have \(production-migration is not on rung 2 or above, so a default is not approval there/);
       // nor reuse an owner's answer that already approved a call (D used Qx): the earliest call is the one it approved
       const rid = 'd-20261101-235959002-supervisor';
       fs.appendFileSync(supFile, line({ id: rid, type: 'decision', op: 'new', at: new Date(Date.now() + 1000).toISOString(), by: 'supervisor', class: 'release-scope', what: 'ship something else', refs: ['bill-02-x'], authority: 'answer', approved_by: Qx }));
@@ -893,6 +905,22 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     const addedLines = git(['diff', '--unified=0', 'origin/main', 'origin/chore-log']).split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++'));
     assert.equal(addedLines.length, 1, 'and carries only the new line');
     assert.match(addedLines[0], /third sync/);
+    // squash-merged with the branch kept, on a forge that refuses non-fast-forward pushes: the next
+    // sync extends the old branch (taking main in) rather than rebuilding it, and carries only the new line
+    git(['worktree', 'add', '-q', '--detach', wt('squash2'), 'origin/main']);
+    git(['merge', '--squash', '-q', 'origin/chore-log'], wt('squash2'));
+    git(['commit', '-qm', 'chore-log: squashed again'], wt('squash2'));
+    git(['push', '-q', 'origin', 'HEAD:main'], wt('squash2'));
+    git(['worktree', 'remove', '--force', wt('squash2')]);
+    const kept = git(['rev-parse', 'origin/chore-log']);
+    git(['config', 'receive.denyNonFastForwards', 'true'], origin);
+    must(['observe', '--subject', 'bill-01-card', '--kind', 'note', '--detail', 'fourth sync'], { role: 'sup' });
+    must(['log-sync'], { role: 'sup' });
+    git(['fetch', '-q', 'origin']);
+    git(['merge-base', '--is-ancestor', kept, 'origin/chore-log']);
+    git(['merge-base', '--is-ancestor', 'origin/main', 'origin/chore-log']);
+    const added4 = git(['diff', '--unified=0', 'origin/main', 'origin/chore-log']).split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++'));
+    assert.deepEqual(added4.map((l) => /fourth sync/.test(l)), [true], 'the extended branch carries only the new line');
     git(['config', 'receive.denyNonFastForwards', 'false'], origin);
     const shaL = git(['rev-parse', 'HEAD'], wt('chore-log'));
     const syncWt = must(['chore', 'start', 'devteam-sync-v0.2.1'], { role: 'sup' }).trim();
@@ -1057,6 +1085,15 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     git(['commit', '-qam', 'and governance'], wt('caps'));
     git(['push', '-q', 'origin', 'chore-caps'], wt('caps'));
     assert.match(dt(['merge', '--chore', 'caps', '--dry-run', '--title', 'chore-caps: gates', '--body-file', body], { role: 'sup' }).out, /the owner's answer is needed/, 'the rule settles gate-change alone, never another owner class with it');
+    // and never the kit: a gate-change rule with a constitution edit in the same chore still needs an answer
+    setTo(wt('caps'), (j) => { delete j.upstream_repo; });
+    const con = path.join(wt('caps'), 'docs/devteam/governance/constitution.md');
+    fs.writeFileSync(con, fs.readFileSync(con, 'utf8').replace('"governance-edit", ', ''));
+    git(['commit', '-qam', 'gates, and the constitution'], wt('caps'));
+    git(['push', '-q', 'origin', 'chore-caps'], wt('caps'));
+    const kitByRule = dt(['merge', '--chore', 'caps', '--dry-run', '--title', 'chore-caps: gates', '--body-file', body], { role: 'sup' });
+    assert.notEqual(kitByRule.status, 0, 'a settings rule never approves kit files');
+    assert.match(kitByRule.out + kitByRule.err, /touches files outside project\/ \(docs\/devteam\/governance\/constitution\.md\)/);
     git(['worktree', 'remove', '--force', wt('caps')]);
   });
 
@@ -2153,6 +2190,21 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     assert.equal(typeof h.inbox, 'number');
     const dd = json(must(['dashboard-data']));
     assert.equal(h.inbox, dd.questions.length + dd.ooda.knowledge.filter((k) => k.status === 'candidate').length, "the Inbox as the dashboard counts it: its questions and lessons to keep");
+    // every lesson waiting on the owner reaches the Inbox, however many (the dashboard showed only the
+    // recent 60 lessons, so older candidates never did, while the hub's badge counted them)
+    {
+      const logDir = path.join(repo, 'docs/devteam/run/log');
+      const supFile = path.join(logDir, fs.readdirSync(logDir).find((f) => f.startsWith('supervisor-')));
+      const keptLog = fs.readFileSync(supFile, 'utf8');
+      const at = (i) => new Date(Date.UTC(2020, 0, 1, 0, 0, i)).toISOString();
+      fs.appendFileSync(supFile, Array.from({ length: 65 }, (_, i) => line({ id: `k-20200101-0000${String(i).padStart(2, '0')}000-supervisor`, type: 'knowledge', op: 'new', at: at(i), by: 'supervisor', kind: 'fact', statement: `old candidate ${i}`, scope: 'project', status: 'candidate', confidence: 0.5 })).join(''));
+      try {
+        const many = json(must(['dashboard-data']));
+        const cands = many.ooda.knowledge.filter((k) => k.status === 'candidate');
+        assert.ok(cands.length >= 65, `all candidates reach the dashboard (${cands.length})`);
+        assert.equal(json(must(['hello', '--json'])).inbox, many.questions.length + cands.length, 'the hub badge and the Inbox count the same');
+      } finally { fs.writeFileSync(supFile, keptLog); }
+    }
     assert.ok(['run', 'drain', 'park'].includes(h.fleet.mode));
     assert.equal(typeof h.fleet.workers, 'number');
     assert.match(h.kit, /^(v\d+\.\d+\.\d+|unreleased)(\+local)?$/);

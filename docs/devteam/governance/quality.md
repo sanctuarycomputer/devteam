@@ -67,11 +67,12 @@ Adversarial review is the main defect filter between an agent's first pass and `
 
 ```
 project/tickets/<id>/reviews/<stage>-<pass>[<track>].md     spec, plan, contract, task, final (on the ticket branch)
+project/tickets/<id>/reviews/task-<n>-<pass>[<track>].md     a later review pass on task <n>
 project/reviews/<feature>/graph-<pass>[<track>].md            graph (on the plan branch)
 project/reviews/<design-slug>/design-<pass>[<track>].md       design (on the plan branch)
 ```
 
-`<track>` is empty for the first independent review, `b`, `c` for further ones (`final-1.md`, `final-1b.md`). The file has a `- Reviewer:` line, a findings table with a `Disposition` column the author fills in (`fixed`, `wont-fix <reason>` with the reviewer's agreement, `disputed` goes to the supervisor, `wrong` means the reviewer agrees it was a false positive), and the verdict as its last line with the full 40-character SHA:
+`<track>` is empty for the first independent review, `b`, `c` for further ones (`final-1.md`, `final-1b.md`). The file has a `- Reviewer:` line, a findings table with a `Disposition` column the reviewer leaves empty and the author fills in (`fixed`, `wont-fix <reason>` with the reviewer's agreement, `disputed` goes to the supervisor, `wrong` means the reviewer agrees it was a false positive), and the verdict as its last line with the full 40-character SHA:
 
 ```markdown
 # Final review, pass 1

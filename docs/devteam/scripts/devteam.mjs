@@ -1488,14 +1488,6 @@ const LOG_BRANCH = 'chore-log';
 
 // Mirror run/log into project/log on branch chore-log, in its own worktree, and open or update the
 // log-only PR. Run it every tick (it pushes); merge it daily with `merge --chore log`.
-function logPrOpen(wt, main) {
-  if (loadSettings().forge !== 'git') {
-    const open = repo('home').gh(['pr', 'list', '--head', LOG_BRANCH, '--state', 'open', '--json', 'number', '--jq', 'length'], { cwd: wt });
-    if (open !== null) return Number(open) > 0;
-  }
-  // forge git (merge lands a --no-ff merge) or no gh: open means not yet on main
-  return git(['merge-base', '--is-ancestor', `origin/${LOG_BRANCH}`, resolveCommit(`origin/${main}`) ? `origin/${main}` : main], wt) === null;
-}
 function cmdLogSync() {
   supervisorOnly('log-sync');
   if (!commonDir || !projectInRepo) die('log-sync needs a git checkout with the project folder inside it');
@@ -1504,14 +1496,15 @@ function cmdLogSync() {
   const files = fs.existsSync(live) ? fs.readdirSync(live).filter((f) => f.endsWith('.jsonl') && !isPlanFile(f)).sort() : [];
   if (!files.length) return out('nothing in run/log to sync');
   const wt = choreWorktree('log', { reset: true });
-  // A sync whose PR is still open is extended, not rebuilt, so every push fast-forwards: forges
-  // that refuse non-fast-forward pushes (branch rulesets, protected branches) accept it. The
-  // extended branch takes main in by a merge (still a fast-forward for the branch), so its PR is
-  // never behind. Whether the PR is open comes from the forge: after a squash or rebase merge the
-  // branch is never an ancestor of main, and a stale origin/chore-log outlives a deleted branch.
+  // An existing chore-log is extended, never rebuilt, so every push fast-forwards: forges that
+  // refuse non-fast-forward pushes or branch deletion (branch rulesets, protected branches) accept
+  // it, whether its PR is still open or was squash-merged and the branch kept. The extended branch
+  // takes main in by a merge (still a fast-forward for the branch), so its PR is never behind and
+  // carries only lines main doesn't have. A branch deleted on the forge leaves a stale
+  // origin/chore-log, dropped here, and the sync starts from main.
   const main = loadSettings().main_branch;
   if (!flags['dry-run'] && git(['fetch', '--quiet', 'origin', `+refs/heads/${LOG_BRANCH}:refs/remotes/origin/${LOG_BRANCH}`], wt) === null) git(['update-ref', '-d', `refs/remotes/origin/${LOG_BRANCH}`], wt);
-  if (resolveCommit(`origin/${LOG_BRANCH}`) && logPrOpen(wt, main)) {
+  if (resolveCommit(`origin/${LOG_BRANCH}`)) {
     gitOrDie(['checkout', '--quiet', '-B', LOG_BRANCH, `origin/${LOG_BRANCH}`], wt);
     const base = resolveCommit(`origin/${main}`) ? `origin/${main}` : main;
     if (git(['merge', '--quiet', '--no-edit', '-m', `chore-log: merge ${main}`, base], wt) === null) {
@@ -2806,8 +2799,9 @@ function oneWayDoorsSection(body) {
 // each merge is exactly git's own merge of its parents. A conflict fix that touched the work
 // changes both, so it voids the verdict; a clean merge of main does not.
 // A record edit that only fills in what the record lacked: a "- Reviewer:" line where there was
-// none, and Disposition cells that were empty. Verdicts, findings and dispositions already given
-// can't change this way, so a dissent still can't be edited away.
+// none, and Disposition cells that were empty or held no disposition yet, each given a disposition.
+// Verdicts, findings and dispositions already given can't change this way, so a dissent still
+// can't be edited away.
 function fillInOnly(before, after) {
   if (before === null || after === null) return false;
   // blank lines carry nothing in a record, so they're left out of the comparison
@@ -2825,7 +2819,8 @@ function fillInOnly(before, after) {
     if (a[k] === b[k]) continue;
     if (disp < 0 || !a[k].trim().startsWith('|') || !b[k].trim().startsWith('|')) return false;
     const x = tableCells(a[k]), y = tableCells(b[k]);
-    if (x.length !== y.length || x.some((c, j) => j !== disp && c !== y[j]) || x[disp] !== '' || !y[disp]) return false;
+    // an empty cell, or one that isn't a disposition yet (a reviewer's "Accepted; …"), may become one
+    if (x.length !== y.length || x.some((c, j) => j !== disp && c !== y[j]) || !(x[disp] === '' ? y[disp] : !disposed(x[disp]) && disposed(y[disp]))) return false;
   }
   return true;
 }
@@ -2838,7 +2833,8 @@ function verdictHolds(v, head, dir, R = repo('home')) {
   // Each adds a review record, or fills one in mechanically (fillInOnly): an empty Disposition cell
   // filled, a missing "- Reviewer:" line added. Nothing else in a record may change.
   let commit = null;
-  const isRecord = (file) => file?.startsWith(dir) && /^(?:[a-z0-9-]+\/)?[a-z]+-\d+[a-z]?\.md$/.test(file.slice(dir.length));
+  // <stage>-<pass>[<track>].md, or a task's later pass, task-<n>-<pass>[<track>].md
+  const isRecord = (file) => file?.startsWith(dir) && /^(?:[a-z0-9-]+\/)?[a-z]+-\d+(?:-\d+)?[a-z]?\.md$/.test(file.slice(dir.length));
   const onlyRecords = (R.git(['log', '--no-merges', '--no-renames', '--format=@%H', '--name-status', `${v}..${head}`, ...(main ? [`^${main}`] : [])]) ?? 'x').split('\n').filter(Boolean).every((l) => {
     if (l.startsWith('@')) { commit = l.slice(1); return true; }
     const [st, file] = l.split('\t');
@@ -3049,7 +3045,7 @@ function checkTicket(id, { sha: shaArg, title, body, approvals = true }) {
   const approvers = new Set(latest.filter((r) => r.verdict === 'APPROVE' && holdsAt(r.sha) && r.reviewer).map((r) => r.reviewer));
   const need = t.risk === 'high' ? 2 : 1;
   if (approvers.size < need) fails.push(`needs ${need} final APPROVE review(s) at this head from different named reviewers; found ${approvers.size}`);
-  for (const r of reviews) for (const f of r.findings) if (blocking(f.severity) && !disposed(f.disposition)) fails.push(`${r.file} ${f.id} (${f.severity}) has no disposition`);
+  for (const r of reviews) for (const f of r.findings) if (blocking(f.severity) && !disposed(f.disposition)) fails.push(`${r.file} ${f.id} (${f.severity}) has no disposition${f.disposition ? ` ("${f.disposition.slice(0, 40)}" isn't one)` : ''}: the author starts its Disposition cell with fixed, wont-fix <reason> or wrong <reason>`);
   const base = R.mainRef() && sha ? R.git(['merge-base', R.mainRef(), sha]) : null;
   if (R.commonDir && !base) fails.push(`cannot resolve main branch "${R.settings.main_branch}"${R.name === 'home' ? '' : ` in ${R.name}`}; footprint not checked`);
   if (base) {
@@ -3643,15 +3639,18 @@ function cmdMerge() {
   if (chore) {
     const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
     const kit = base ? changedFiles(base, sha).filter((f) => !f.startsWith(`${projectRel}/`)) : [];
+    // Only these two standing rules approve kit files: an owner's rule that settles owner settings
+    // (a gate-change rule, owner_rules) says nothing about the kit's files.
+    let kitRule = null;
     if (kit.length && !approved && chore.startsWith('devteam-sync-')) {
       const r = upstreamSyncApproval(chore, sha, kit);
-      if (r.rule) { standing = r; out(`kit files match upstream ${r.tag} exactly; approved by the owner's standing rule ${r.rule.id}`); } else if (r.problem) fails.push(r.problem);
+      if (r.rule) { kitRule = standing = r; out(`kit files match upstream ${r.tag} exactly; approved by the owner's standing rule ${r.rule.id}`); } else if (r.problem) fails.push(r.problem);
     }
-    if (kit.length && !approved && !standing && base) {
+    if (kit.length && !approved && !kitRule && base) {
       const r = ciFixApproval(chore, sha, base, kit);
-      if (r.rule) { standing = r; out(`changes only workflow files and keeps every job; approved by the owner's standing rule ${r.rule.id} ("${r.rule.statement}")`); } else if (r.problem) fails.push(r.problem);
+      if (r.rule) { kitRule = standing = r; out(`changes only workflow files and keeps every job; approved by the owner's standing rule ${r.rule.id} ("${r.rule.statement}")`); } else if (r.problem) fails.push(r.problem);
     }
-    if (kit.length && !approved && !standing) fails.push(`touches files outside project/ (${kit.slice(0, 6).join(', ')}${kit.length > 6 ? ', …' : ''}); the owner's answer is needed: merge --chore ${chore} --approved <qid>`);
+    if (kit.length && !approved && !kitRule) fails.push(`touches files outside project/ (${kit.slice(0, 6).join(', ')}${kit.length > 6 ? ', …' : ''}); the owner's answer is needed: merge --chore ${chore} --approved <qid>`);
   }
   if (approved) {
     const av = ownerAnswer(approved, 'merge --approved');
@@ -5285,7 +5284,15 @@ function decisionAuthorityGap(d) {
   if (ownerOnly && !(d.authority === 'standing-rule' && (L.owner_rules ?? []).includes(d.class))) return v && inClass && v.status === 'answered' ? answerUseGap(d, v) : `${d.class} is the owner's and needs the owner's answer in that class`;
   switch (d.authority) {
     case 'answer': return v && inClass && v.status === 'answered' ? answerUseGap(d, v) : `no answered ${d.class} question ${d.approved_by ?? ''}`.trim();
-    case 'default': return v && inClass && v.status === 'defaulted' ? null : `no defaulted ${d.class} question ${d.approved_by ?? ''}`.trim();
+    // A default stands in for the owner only where the owner put the class on rung 2 (ask with a
+    // default), only once the question's deadline passed with no answer, and once, as decide
+    // enforces: a decision line written by hand gets the same rule.
+    case 'default': {
+      if (!(v && inClass && v.status === 'defaulted' && v.default)) return `no defaulted ${d.class} question ${d.approved_by ?? ''}`.trim();
+      if (!L.classes[d.class] || rungFor(d.class, d.scope ?? null) < 2) return `${d.class} is not on rung 2 or above${d.scope ? ` for ${d.scope}` : ''}, so a default is not approval there`;
+      if (v.deadline && v.answered_at && v.answered_at < v.deadline) return `${v.id} was defaulted before its deadline (${v.deadline})`;
+      return answerUseGap(d, v);
+    }
     case 'standing-rule': { const k = logGet(d.approved_by ?? ''); return k?.type === 'knowledge' && writerClass(k.created_by) === 'owner' && k.status === 'accepted' && k.scope === `class:${d.class}` ? null : `no accepted owner rule scoped class:${d.class}`; }
     case 'rung': return L.classes[d.class] && rungFor(d.class, d.scope ?? null) >= 3 ? null : `${d.class} is not on rung 3`;
     case 'constitution': return (L.constitutional ?? []).includes(d.class) || !L.classes[d.class] ? null : `${d.class} is on the ladder, not constitutional`;
@@ -7233,7 +7240,8 @@ function collectOoda() {
     retro: retroDue(),
     observations: recent(logObjects('observation').filter((o) => !['reading', 'retro', 'finding-ack'].includes(o.kind)), 40),
     clusters: orientClusters(),
-    knowledge: recent(logObjects('knowledge').filter((k) => k.status !== 'retired'), 60),
+    // every lesson waiting on the owner is in the Inbox, however many: only the rest are the recent 60
+    knowledge: [...recent(logObjects('knowledge').filter((k) => k.status === 'candidate'), Infinity), ...recent(logObjects('knowledge').filter((k) => !['retired', 'candidate'].includes(k.status)), 60)],
     problems: logObjects('problem').filter((p) => p.status !== 'resolved').sort((a, b) => b.severity - a.severity),
     acts: recent(acts, 60),
     decisions: decisionRecords().slice(0, 200),
