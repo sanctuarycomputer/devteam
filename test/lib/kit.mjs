@@ -11,6 +11,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { PORTS } from './ports.mjs';
+import { runNode } from './cli.mjs';
 
 export { PORTS };
 export const testDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -39,9 +40,9 @@ export const hasTmux = spawnSync('tmux', ['-V']).status === 0;
 // A port the OS says is free: a random one in a range can land on a machine's own listener (macOS's
 // AirPlay receiver holds 5000 and answers 403), which then passes the test's startup probe.
 export const freePort = () => new Promise((resolve, reject) => { const v = net.createServer(); v.on('error', reject); v.listen(0, '127.0.0.1', () => { const { port } = v.address(); v.close(() => resolve(port)); }); });
-// Wait for a server the test started to answer: up to 30s, since a loaded machine starts it slowly;
+// Wait for a server the test started to answer: up to 2 min, since a loaded machine starts it slowly;
 // a server that never answers fails here, not at the test's first real request.
-export const serverUp = async (url) => { for (let i = 0; i < 300; i++) { try { await fetch(url); return; } catch { await new Promise((r) => setTimeout(r, 100)); } } throw new Error(`no server at ${url} after 30s`); };
+export const serverUp = async (url) => { for (let i = 0; i < 1200; i++) { try { await fetch(url); return; } catch { await new Promise((r) => setTimeout(r, 100)); } } throw new Error(`no server at ${url} after 2 min`); };
 export const write = (file, text) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, text); };
 export const review = (reviewer, sha) => `- Reviewer: ${reviewer}\n\n| Id | Severity | Rule | Where | Finding | Disposition |\n|---|---|---|---|---|---|\n\nVerdict: APPROVE ${sha}\n`;
 export const json = (s) => JSON.parse(s);
@@ -60,7 +61,7 @@ export function fleetFixture(name) {
     for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'TMUX', 'TMUX_PANE']) delete e[k];
     return { ...e, ...role };
   };
-  const run = (cwd, args, role = {}, input) => { const r = spawnSync(process.execPath, [path.join(cwd, 'docs/devteam/scripts/devteam.mjs'), ...args], { cwd, env: env(role), encoding: 'utf8', input }); return { status: r.status, out: r.stdout.trim(), err: r.stderr.trim() }; };
+  const run = (cwd, args, role = {}, input) => { const r = runNode(path.join(cwd, 'docs/devteam/scripts/devteam.mjs'), args, { cwd, env: env(role), input }); return { status: r.status, out: r.stdout.trim(), err: r.stderr.trim() }; };
   const ok = (cwd, args, role, input) => { const r = run(cwd, args, role, input); assert.equal(r.status, 0, `${args.join(' ')}: ${r.err || r.out}`); return r.out; };
   const g = (args, cwd) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   g(['init', '-q', '--bare', '-b', 'main', org], base); // the clone checks out origin's HEAD; CI's git defaults to master
@@ -222,8 +223,10 @@ export function startDashboard(root, env, args = []) {
   p.stderr.on('data', (b) => { o += b; });
   return { p, out: () => o, stop: () => new Promise((r) => { if (p.exitCode !== null) return r(); p.on('close', r); p.kill(); }) };
 }
+// Up to 2 min: a dashboard's first background run (hello hashes every kit file) takes that long on
+// a loaded machine; a healthy one returns at once.
 export async function until(f, what = 'the condition') {
-  for (let i = 0; i < 300; i++) { const v = await f(); if (v) return v; await new Promise((r) => setTimeout(r, 100)); }
+  for (let i = 0; i < 1200; i++) { const v = await f(); if (v) return v; await new Promise((r) => setTimeout(r, 100)); }
   assert.fail(`timed out waiting for ${what}`);
 }
 

@@ -13,6 +13,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { kit, testDir, sessionOf, line, hasTmux, freePort, serverUp, write, review, json, until, statusWithHost } from './kit.mjs';
+import { runNode } from './cli.mjs';
 
 // The fixture: set by useFixture, so a fork can point every step at its own copy.
 export let tmp, origin, repo, DT, body;
@@ -30,7 +31,7 @@ const ROLE = { sup: { DEVTEAM_ROLE: 'supervisor' }, planner: { DEVTEAM_ROLE: 'pl
 function dt(args, { cwd = repo, role = 'owner', input } = {}) {
   const env = { ...process.env, ...ROLE[role] };
   for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE']) if (!(k in ROLE[role])) delete env[k];
-  const r = spawnSync(process.execPath, [DT, ...args], { cwd, env, encoding: 'utf8', input });
+  const r = runNode(DT, args, { cwd, env, input });
   return { status: r.status, out: r.stdout.trim(), err: r.stderr.trim() };
 }
 const must = (args, opts) => { const r = dt(args, opts); assert.equal(r.status, 0, `${args.join(' ')}: ${r.err || r.out}`); return r.out; };
