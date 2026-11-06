@@ -55,7 +55,8 @@ export function runNode(script, args, { cwd, env, input, cold } = {}) {
     if (i % 400 === 399 && !alive(s.child.pid) && !fs.existsSync(exit)) break;
     sleep(i < 200 ? 1 : 5);
   }
-  const status = fs.existsSync(exit) ? Number(fs.readFileSync(exit, 'utf8')) : null;
+  const code = fs.existsSync(exit) ? fs.readFileSync(exit, 'utf8') : '';
+  const status = /^\d+$/.test(code) ? Number(code) : null;
   const r = { status, stdout: fs.readFileSync(path.join(s.dir, 'stdout'), 'utf8'), stderr: fs.readFileSync(path.join(s.dir, 'stderr'), 'utf8') };
   fs.rmSync(s.dir, { recursive: true, force: true });
   return r;

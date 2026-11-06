@@ -25,7 +25,8 @@ process.chdir(r.cwd);
 for (const k of Object.keys(process.env)) delete process.env[k];
 Object.assign(process.env, r.env);
 process.argv = [process.execPath, r.script, ...r.args];
-process.on('exit', (code) => { fs.writeFileSync(path.join(slot, 'exit'), String(code)); });
+// written whole, then renamed: the test process reads the code the moment the file appears
+process.on('exit', (code) => { fs.writeFileSync(path.join(slot, 'exit.tmp'), String(code)); fs.renameSync(path.join(slot, 'exit.tmp'), path.join(slot, 'exit')); });
 // V8's code cache for the script (Node 22.1+): the same code, compiled once rather than on every call
 module.enableCompileCache?.(path.join(os.tmpdir(), 'devteam-kit-compile-cache'));
 await import(pathToFileURL(r.script).href);
