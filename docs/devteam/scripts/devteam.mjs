@@ -1330,6 +1330,18 @@ function artifactLinkNow(l) {
   const href = at === 'main' ? `#artifact/main/${l.artifact}` : at ? `#artifact/wt/${at}/${l.artifact}` : null;
   return { ...l, href, changed: !!at && !!l.sha256 && fp !== l.sha256, gone: !at };
 }
+// Why an answer to q can't bind to the artifacts it links (null when it can): a page that changed
+// since it was asked, or that is no longer there, is not what the owner was asked about, so the
+// owner's answer would approve something they didn't see. Checked when the owner answers and again
+// when an answer is used to approve something.
+function artifactLinksMoved(v) {
+  const now = (v.links ?? []).filter((l) => isObj(l) && l.artifact !== undefined && l.sha256).map(artifactLinkNow);
+  const changed = now.filter((l) => l.changed).map((l) => l.artifact);
+  const gone = now.filter((l) => l.gone).map((l) => l.artifact);
+  if (changed.length) return `${v.id} links the artifact ${changed.join(', ')}, which changed since it was asked; ask again about the page as it is now`;
+  if (gone.length) return `${v.id} links the artifact ${gone.join(', ')}, which is no longer available; ask again`;
+  return null;
+}
 const questions = () => logObjects('question').map((q) => { const v = questionView(q); return { ...v, links: resolveQuestionLinks(v.links, v.status === 'open'), goal_hold: questionHold(q) }; });
 
 // Why question q does not authorise the supervisor to change goal goalId (null when it does): it
@@ -3510,6 +3522,7 @@ function ownerAnswer(qid, what) {
   const v = q?.type === 'question' ? questionView(q) : null;
   if (!v || v.status !== 'answered') die(`${what}: ${qid} is not a question the owner answered`);
   reviewApproves(v, what);
+  { const moved = artifactLinksMoved(v); if (moved) die(`${what}: ${moved}`); }
   // An answer approves what it said yes to: the owner's answer must be the question's
   // recommendation (a review, its verified result). Answered any other way, the owner declined or
   // changed it, and the supervisor asks again; a secrets question approves by what was posted.
@@ -4050,6 +4063,7 @@ function cmdAnswer() {
   const { by } = fromChat ? { by: 'owner' } : ownerWriter();
   const v = openQuestion(id, ['open', 'defaulted']);
   if (flagStr('seen') && flagStr('seen') !== v.hash) die(`${id} changed since you saw it; reload and read it again before you answer`);
+  { const moved = artifactLinksMoved(v); if (moved) die(moved); }
   if (v.kind === 'goal-approval') die(`${id} approves a goal on its design: the owner answers it with goal decide ${v.goal} approve|refine|let-go [--notes "…"] (or on the dashboard)`);
   // A review is answered by the owner's own process with its result, or sent back with a reason;
   // never in free text, never from chat (a chat can't carry rows, and the supervisor must not
