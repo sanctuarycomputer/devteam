@@ -931,6 +931,22 @@ test('devteam kit', async (t) => {
     const addedLines = git(['diff', '--unified=0', 'origin/main', 'origin/chore-log']).split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++'));
     assert.equal(addedLines.length, 1, 'and carries only the new line');
     assert.match(addedLines[0], /third sync/);
+    // squash-merged with the branch kept, on a forge that refuses non-fast-forward pushes: the next
+    // sync extends the old branch (taking main in) rather than rebuilding it, and carries only the new line
+    git(['worktree', 'add', '-q', '--detach', wt('squash2'), 'origin/main']);
+    git(['merge', '--squash', '-q', 'origin/chore-log'], wt('squash2'));
+    git(['commit', '-qm', 'chore-log: squashed again'], wt('squash2'));
+    git(['push', '-q', 'origin', 'HEAD:main'], wt('squash2'));
+    git(['worktree', 'remove', '--force', wt('squash2')]);
+    const kept = git(['rev-parse', 'origin/chore-log']);
+    git(['config', 'receive.denyNonFastForwards', 'true'], origin);
+    must(['observe', '--subject', 'bill-01-card', '--kind', 'note', '--detail', 'fourth sync'], { role: 'sup' });
+    must(['log-sync'], { role: 'sup' });
+    git(['fetch', '-q', 'origin']);
+    git(['merge-base', '--is-ancestor', kept, 'origin/chore-log']);
+    git(['merge-base', '--is-ancestor', 'origin/main', 'origin/chore-log']);
+    const added4 = git(['diff', '--unified=0', 'origin/main', 'origin/chore-log']).split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++'));
+    assert.deepEqual(added4.map((l) => /fourth sync/.test(l)), [true], 'the extended branch carries only the new line');
     git(['config', 'receive.denyNonFastForwards', 'false'], origin);
     const shaL = git(['rev-parse', 'HEAD'], wt('chore-log'));
     const syncWt = must(['chore', 'start', 'devteam-sync-v0.2.1'], { role: 'sup' }).trim();
