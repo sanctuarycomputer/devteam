@@ -36,6 +36,8 @@
   /* as the dashboard's nav shows its Inbox count */
   .badge { font-size: 11px; color: var(--red-fg); font-variant-numeric: tabular-nums; }
   #notify { flex: 0 0 auto; padding-bottom: 7px; color: var(--muted); font-size: 12px; }
+  #box-links { flex: 0 0 auto; padding-bottom: 7px; font-size: 12px; }
+  #box-links a { color: var(--fg-2); }
   #notify button { font: inherit; color: var(--fg-2); background: none; border: 1px solid var(--line-2); border-radius: 6px; padding: 2px 8px; cursor: pointer; }
   main { flex: 1 1 auto; position: relative; }
   iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: var(--bg); }
@@ -47,6 +49,7 @@
 <header>
   <nav id="tabs" role="tablist" aria-label="devteam instances"></nav>
   <span id="notify"></span>
+  <span id="box-links" hidden></span>
 </header>
 <main id="frames"><p id="empty">Looking for devteam dashboards on this machine…</p></main>
 <script>
@@ -258,9 +261,17 @@ async function findBox() {
   try {
     const r = await fetch('box.json', { cache: 'no-store' });
     const b = r.ok ? await r.json() : null;
-    const origin = (u) => { try { return new URL(u.replace('{port}', '1'), location.href).protocol === 'https:'; } catch { return false; } };
-    if (b?.box !== 1 || typeof b.terminal !== 'string' || !/^[a-z]+\/$/.test(b.terminal) || typeof b.instance !== 'string' || !b.instance.includes('{port}') || !origin(b.instance)) return;
+    const secure = (u) => { try { return new URL(u.replace('{port}', '1')).protocol === 'https:'; } catch { return false; } };
+    if (b?.box !== 1 || typeof b.terminal !== 'string' || !/^[a-z]+\/$/.test(b.terminal) || typeof b.instance !== 'string' || !b.instance.includes('{port}') || !secure(b.instance)) return;
     box = { terminal: b.terminal, instance: b.instance };
+    // signing in and passkeys are on the gateway's own name, never in the hub's
+    if (typeof b.passkeys === 'string' && secure(b.passkeys)) {
+      const a = document.createElement('a');
+      a.href = b.passkeys;
+      a.textContent = 'Passkeys';
+      $('box-links').append(a);
+      $('box-links').hidden = false;
+    }
     const tab = document.createElement('button');
     tab.className = 'tab';
     tab.setAttribute('role', 'tab');

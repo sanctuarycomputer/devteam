@@ -70,6 +70,7 @@ async function gateway(name, extra = {}) {
   const port = await freePort();
   const publicUrl = `http://box.localhost:${port}`;
   const inst = (p) => `http://${p}.box.localhost:${port}`;
+  const auth = `http://auth.box.localhost:${port}`;
   const logs = [];
   const dir = path.join(tmp, name);
   const ttydPort = await freePort();
@@ -78,16 +79,16 @@ async function gateway(name, extra = {}) {
   const token = /claim#([A-Za-z0-9_-]+)/.exec(logs.join('\n'))?.[1];
   let jar = '';
   // on: an instance's port, for its subdomain; else the box's own name
-  const req = (method, route, { body, headers = {}, cookie = jar, on } = {}) => new Promise((resolve, reject) => {
-    const self = on ? inst(on) : publicUrl;
+  const req = (method, route, { body, headers = {}, cookie = jar, on = route.startsWith('/auth/') ? 'auth' : undefined } = {}) => new Promise((resolve, reject) => {
+    const self = on === 'auth' ? auth : on ? inst(on) : publicUrl;
     const h = { host: new URL(self).host, ...(method !== 'GET' ? { origin: self, 'content-type': 'application/json' } : {}), ...(cookie ? { cookie } : {}), ...headers };
     for (const k of Object.keys(h)) if (h[k] === undefined) delete h[k];
     const r = http.request({ host: '127.0.0.1', port, method, path: route, headers: h }, (res) => {
       let b = '';
       res.on('data', (c) => { b += c; });
       res.on('end', () => {
-        const sc = res.headers['set-cookie']?.[0];
-        if (sc && !cookie?.startsWith('keep:')) jar = sc.split(';')[0];
+        const sc = res.headers['set-cookie']?.find((c) => c.startsWith('devteam_session='));
+        if (sc) jar = sc.split(';')[0];
         let j = null;
         try { j = JSON.parse(b); } catch {}
         resolve({ status: res.statusCode, headers: res.headers, body: b, json: j });
@@ -97,15 +98,15 @@ async function gateway(name, extra = {}) {
     r.end(body === undefined ? undefined : JSON.stringify(body));
   });
   const claim = async (a, extraBody = {}) => {
-    const o = await req('POST', '/auth/claim/options', { body: { token } });
+    const o = await req('POST', '/auth/claim/options', { on: 'auth', body: { token } });
     assert.equal(o.status, 200, o.body);
-    return req('POST', '/auth/claim/verify', { body: { token, ...a.create(o.json, publicUrl), ...extraBody } });
+    return req('POST', '/auth/claim/verify', { on: 'auth', body: { token, ...a.create(o.json, auth), ...extraBody } });
   };
   const login = async (a, how) => {
-    const o = await req('POST', '/auth/login/options', { body: {}, cookie: '' });
-    return req('POST', '/auth/login/verify', { body: a.get(o.json, publicUrl, how), cookie: '' });
+    const o = await req('POST', '/auth/login/options', { on: 'auth', body: {}, cookie: '' });
+    return req('POST', '/auth/login/verify', { on: 'auth', body: a.get(o.json, auth, how), cookie: '' });
   };
-  return { g, port, publicUrl, inst, ttydPort, logs, token, req, claim, login, jar: () => jar, setJar: (v) => { jar = v; }, dir, close: () => new Promise((r) => g.server.close(r)) };
+  return { g, port, publicUrl, inst, auth, ttydPort, logs, token, req, claim, login, jar: () => jar, setJar: (v) => { jar = v; }, dir, close: () => new Promise((r) => g.server.close(r)) };
 }
 
 test('cbor and cose: what WebAuthn needs, nothing more', () => {
@@ -126,7 +127,10 @@ test('claim: only with the token, once; then only the passkey gets in', async ()
   const gw = await gateway('claim');
   try {
     assert.ok(gw.token, `the claim link is printed: ${gw.logs.join(' | ')}`);
-    assert.equal((await gw.req('GET', '/', { headers: { 'sec-fetch-mode': 'navigate' } })).headers.location, `${gw.publicUrl}/auth/login`, 'unclaimed: every page sends you to sign in');
+    assert.equal((await gw.req('GET', '/', { headers: { 'sec-fetch-mode': 'navigate' } })).headers.location, `${gw.auth}/auth/login`, 'unclaimed: every page sends you to sign in, on the auth name');
+    assert.ok(gw.logs.join('\n').includes(`${gw.auth}/auth/claim#`), 'the claim link is on the auth name');
+    assert.equal((await gw.req('GET', '/auth/claim?x=1', { on: null })).headers.location, `${gw.auth}/auth/claim?x=1`, 'the box sends its own /auth/ there (a link\'s #token goes along)');
+    assert.equal((await gw.req('GET', '/', { on: 'auth' })).headers.location, `${gw.publicUrl}/`, 'and the auth name serves nothing else');
     assert.match((await gw.req('GET', '/auth/login')).body, /unclaimed/);
     assert.equal((await gw.req('GET', '/box.json')).status, 403, 'nothing behind the gateway answers an unclaimed box');
     const a = authenticator();
@@ -138,12 +142,15 @@ test('claim: only with the token, once; then only the passkey gets in', async ()
     assert.equal(bad.status, 400);
     assert.match(bad.json.error, /origin/);
     o = await gw.req('POST', '/auth/claim/options', { body: { token: gw.token } });
-    bad = await gw.req('POST', '/auth/claim/verify', { body: { token: gw.token, ...a.create(o.json, gw.publicUrl, { flags: 0x41 }) } });
+    bad = await gw.req('POST', '/auth/claim/verify', { body: { token: gw.token, ...a.create(o.json, gw.publicUrl) } });
+    assert.match(bad.json.error, /origin/, 'a passkey made on the box\'s own name (the hub, the terminal: bytes an agent can change) is refused');
+    o = await gw.req('POST', '/auth/claim/options', { body: { token: gw.token } });
+    bad = await gw.req('POST', '/auth/claim/verify', { body: { token: gw.token, ...a.create(o.json, gw.auth, { flags: 0x41 }) } });
     assert.match(bad.json.error, /verification/, 'a passkey that skipped user verification is refused');
     o = await gw.req('POST', '/auth/claim/options', { body: { token: gw.token } });
-    bad = await gw.req('POST', '/auth/claim/verify', { body: { token: gw.token, ...a.create(o.json, gw.publicUrl, { rpId: 'evil.example' }) } });
+    bad = await gw.req('POST', '/auth/claim/verify', { body: { token: gw.token, ...a.create(o.json, gw.auth, { rpId: 'evil.example' }) } });
     assert.match(bad.json.error, /relying party/);
-    const reused = await gw.req('POST', '/auth/claim/verify', { body: { token: gw.token, ...a.create(o.json, gw.publicUrl) } });
+    const reused = await gw.req('POST', '/auth/claim/verify', { body: { token: gw.token, ...a.create(o.json, gw.auth) } });
     assert.match(reused.json.error, /challenge/, 'a challenge is good once');
     const ok = await gw.claim(a, { name: '1Password' });
     assert.equal(ok.status, 200, ok.body);
@@ -159,7 +166,7 @@ test('claim: only with the token, once; then only the passkey gets in', async ()
     // signing in: the passkey, verified; nothing else
     gw.setJar('');
     assert.equal((await gw.req('GET', '/box.json')).status, 401);
-    assert.equal((await gw.req('GET', '/x?y=1', { on: P, headers: { 'sec-fetch-mode': 'navigate' } })).headers.location, `${gw.publicUrl}/auth/login?next=${encodeURIComponent(`${gw.inst(P)}/x?y=1`)}`, 'an instance sends you to sign in on the box, and back');
+    assert.equal((await gw.req('GET', '/x?y=1', { on: P, headers: { 'sec-fetch-mode': 'navigate' } })).headers.location, `${gw.auth}/auth/login?next=${encodeURIComponent(`${gw.inst(P)}/x?y=1`)}`, 'an instance sends you to sign in, and back');
     assert.equal((await gw.req('GET', '/x', { on: P })).status, 401, 'a fetch gets a 401');
     // where signing in returns to: the box or an instance, never another site
     const nextOf = async (n) => /const next = ("[^"]*")/.exec((await gw.req('GET', `/auth/login?next=${encodeURIComponent(n)}`)).body)?.[1];
@@ -170,7 +177,7 @@ test('claim: only with the token, once; then only the passkey gets in', async ()
     assert.equal((await gw.req('GET', '/box.json')).status, 200);
     const other = authenticator();
     assert.match((await gw.login(other)).json.error, /unknown passkey/);
-    const forged = await (async () => { const o2 = await gw.req('POST', '/auth/login/options', { body: {}, cookie: '' }); const x = a.get(o2.json, gw.publicUrl, { key: crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' }).privateKey }); return gw.req('POST', '/auth/login/verify', { body: x, cookie: '' }); })();
+    const forged = await (async () => { const o2 = await gw.req('POST', '/auth/login/options', { body: {}, cookie: '' }); const x = a.get(o2.json, gw.auth, { key: crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' }).privateKey }); return gw.req('POST', '/auth/login/verify', { body: x, cookie: '' }); })();
     assert.match(forged.json.error, /signature/, 'a signature from another key is refused');
     assert.match((await gw.login(a, { flags: 0x01 })).json.error, /verification/);
     assert.match((await gw.login(a, { type: 'webauthn.create' })).json.error, /ceremony/);
@@ -183,10 +190,20 @@ test('claim: only with the token, once; then only the passkey gets in', async ()
     // a challenge for adding one is good only in the session it was issued to
     const elsewhere = await gw.req('POST', '/auth/passkeys/options', { body: {} });
     const sess2 = (await gw.login(a, { counter: 10 })).headers['set-cookie'][0].split(';')[0];
-    assert.match((await gw.req('POST', '/auth/passkeys/verify', { body: b.create(elsewhere.json, gw.publicUrl), cookie: sess2 })).json.error, /challenge/);
+    assert.match((await gw.req('POST', '/auth/passkeys/verify', { body: b.create(elsewhere.json, gw.auth), cookie: sess2 })).json.error, /challenge/);
+    // and only in a session signed in the last five minutes
+    const st = JSON.parse(fs.readFileSync(path.join(gw.dir, 'state.json'), 'utf8'));
+    const mine = st.sessions.find((x) => x.hash === u(sha(Buffer.from(gw.jar().split('=')[1], 'base64url'))));
+    const at = mine.at;
+    mine.at = Date.now() - 600000;
+    fs.writeFileSync(path.join(gw.dir, 'state.json'), JSON.stringify(st));
+    assert.match((await gw.req('POST', '/auth/passkeys/options', { body: {} })).json.error, /sign in again/);
+    assert.match((await gw.req('GET', '/auth/passkeys')).headers.location, /\/auth\/login\?next=/);
+    mine.at = at;
+    fs.writeFileSync(path.join(gw.dir, 'state.json'), JSON.stringify(st));
     const ao = await gw.req('POST', '/auth/passkeys/options', { body: {} });
     assert.deepEqual(ao.json.excludeCredentials.map((c) => c.id), [u(a.id)], 'the browser is told which passkeys are already here');
-    assert.equal((await gw.req('POST', '/auth/passkeys/verify', { body: { ...b.create(ao.json, gw.publicUrl), name: 'phone' } })).status, 200);
+    assert.equal((await gw.req('POST', '/auth/passkeys/verify', { body: { ...b.create(ao.json, gw.auth), name: 'phone' } })).status, 200);
     assert.equal((await gw.login(b)).status, 200, 'an Ed25519 passkey signs in too');
     assert.equal((await gw.req('POST', '/auth/passkeys/remove', { body: { id: u(a.id) } })).status, 200);
     assert.equal((await gw.req('GET', '/box.json', { cookie: sess2 })).status, 401, 'removing a passkey ends every other session');
@@ -211,6 +228,8 @@ test('reclaim, and the gateway\'s own names and origins', async () => {
     assert.equal((await gw.req('POST', '/auth/login/options', { body: {}, headers: { origin: undefined } })).status, 403, 'and so is one with no Origin');
     assert.equal((await gw.req('POST', '/auth/login/options', { body: {}, headers: { origin: gw.inst(P) } })).status, 403, 'and one from an instance\'s page: a dashboard can\'t act on the box');
     assert.equal((await gw.req('POST', '/api/fleet', { on: P, body: {}, headers: { origin: gw.publicUrl } })).status, 403, 'nor the box on an instance');
+    assert.equal((await gw.req('POST', '/auth/login/options', { body: {}, headers: { origin: gw.publicUrl } })).status, 403, 'nor the box\'s own pages on the auth name');
+    assert.equal((await gw.req('GET', 'http://evil.example/', { headers: { host: `box.localhost:${gw.port}` } })).status, 400, 'a request line with a full URL is refused');
   } finally { await gw.close(); }
   // reclaim: from a console on the box, every passkey and session forgotten, a new link printed
   const gw2 = await gateway('reclaim');
@@ -218,13 +237,26 @@ test('reclaim, and the gateway\'s own names and origins', async () => {
   try {
     assert.equal((await gw2.claim(a)).status, 200);
     const r = spawnSync(process.execPath, [path.join(here, '..', 'cloud', 'gateway.mjs'), 'reclaim'], { env: { ...process.env, DEVTEAM_PUBLIC_URL: gw2.publicUrl, DEVTEAM_GATEWAY_DIR: gw2.dir }, encoding: 'utf8' });
+    assert.ok(r.stdout.includes(`${gw2.auth}/auth/claim#`), r.stdout);
     assert.equal(r.status, 0, r.stderr);
     const token = /claim#([A-Za-z0-9_-]+)/.exec(r.stdout)?.[1];
     assert.ok(token, r.stdout);
     assert.equal((await gw2.req('GET', '/box.json')).status, 403, 'the running gateway sees it at once: unclaimed, the old session gone');
     const o = await gw2.req('POST', '/auth/claim/options', { body: { token } });
     assert.equal(o.status, 200, 'the new link claims it');
-  } finally { await gw2.close(); }
+    // a restart keeps that link, even with a claim token in the environment
+    process.env.DEVTEAM_CLAIM_TOKEN = 'x'.repeat(40);
+    const logs = [];
+    G.createGateway({ publicUrl: gw2.publicUrl, dir: gw2.dir, log: (m) => logs.push(m) });
+    assert.match(logs.join(' '), /printed earlier/);
+    assert.equal((await gw2.req('POST', '/auth/claim/options', { body: { token } })).status, 200);
+    assert.equal((await gw2.req('POST', '/auth/claim/options', { body: { token: 'x'.repeat(40) } })).status, 403);
+  } finally { delete process.env.DEVTEAM_CLAIM_TOKEN; await gw2.close(); }
+  // state it can't read is never taken for a new box
+  const broken = path.join(tmp, 'broken');
+  fs.mkdirSync(broken);
+  fs.writeFileSync(path.join(broken, 'state.json'), '{ not json');
+  assert.throws(() => G.createGateway({ publicUrl: 'http://box.localhost:1', dir: broken, log: () => {} }), /JSON/);
 });
 
 function bareProject(base, name) {
@@ -253,7 +285,7 @@ test('behind the gateway the kit runs as on a laptop: hub, dashboard, owner acti
   d.stderr.on('data', (b) => { out += b; });
   // a stand-in upstream on another block port that shows what the kit would receive
   const seen = [];
-  const echo = http.createServer((req, res) => { seen.push(req.headers); res.writeHead(200, { 'content-security-policy': `frame-ancestors http://127.0.0.1:${HUB}; img-src http://127.0.0.1:${P + 5}/api/file`, location: `http://127.0.0.1:${P + 5}/x` }); res.end('ok'); }).listen(P + 5, '127.0.0.1');
+  const echo = http.createServer((req, res) => { seen.push(req.headers); res.writeHead(200, { 'content-security-policy': `frame-ancestors http://127.0.0.1:${HUB}; img-src http://127.0.0.1:${P + 5}/api/file`, location: `http://127.0.0.1:${P + 5}/x`, 'set-cookie': ['devteam_session=x; Path=/auth', 'a=1; Domain=box.localhost', 'theme=light'] }); res.end('ok'); }).listen(P + 5, '127.0.0.1');
   // a stand-in ttyd on the gateway's port: a page, and an upgrade it answers and then echoes
   const upgrades = [];
   const ttyd = net.createServer((s) => {
@@ -283,7 +315,7 @@ test('behind the gateway the kit runs as on a laptop: hub, dashboard, owner acti
     assert.ok(!hcsp.includes('127.0.0.1'), hcsp);
     const list = (await gw.req('GET', '/instances.json', { headers: { 'sec-fetch-site': 'same-origin' } })).json.instances;
     assert.deepEqual(list.map((x) => [x.name, x.port]), [['alpha', P]]);
-    assert.deepEqual((await gw.req('GET', '/box.json')).json, { box: 1, terminal: 'term/', instance: `http://{port}.box.localhost:${gw.port}/` }, 'the hub learns where instances are');
+    assert.deepEqual((await gw.req('GET', '/box.json')).json, { box: 1, terminal: 'term/', instance: `http://{port}.box.localhost:${gw.port}/`, passkeys: `${gw.auth}/auth/passkeys` }, 'the hub learns where instances are');
 
     // a dashboard on its own subdomain, exactly as the kit serves it, its policy pointed at the box
     const dash = await gw.req('GET', '/', { on: P });
@@ -311,6 +343,16 @@ test('behind the gateway the kit runs as on a laptop: hub, dashboard, owner acti
     assert.equal(h.referer, undefined);
     assert.equal(r.headers['content-security-policy'], `frame-ancestors ${gw.publicUrl}; img-src ${gw.inst(P + 5)}/api/file`);
     assert.equal(r.headers.location, `${gw.inst(P + 5)}/x`);
+    assert.deepEqual(r.headers['set-cookie'], ['theme=light'], 'nothing behind the gateway sets a cookie for the box\'s names');
+
+    // another site's page can't use the cookie for a read; a sandboxed review page's loads can
+    const xs = (route, dest) => gw.req('GET', route, { on: P, headers: { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'no-cors', 'sec-fetch-dest': dest } });
+    assert.equal((await xs('/api/fleet?fetch=1', 'image')).status, 403);
+    assert.equal((await xs('/api/data', 'script')).status, 403);
+    assert.equal((await xs('/api/file?path=README.md', 'script')).status, 403);
+    assert.notEqual((await xs('/api/file?path=README.md', 'image')).status, 403);
+    assert.notEqual((await xs('/review/preview/devteam-ui.js', 'script')).status, 403);
+    assert.equal((await gw.req('GET', '/', { on: P, headers: { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' } })).status, 200, 'a link from anywhere still opens it');
 
     // the terminal: its page may be framed only by the box's own pages
     const tp = await gw.req('GET', '/term/');

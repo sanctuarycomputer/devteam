@@ -5,7 +5,8 @@
 # workers run), and each repo's dashboard on a subdomain of its own. What lasts lives on /data.
 #
 # It needs a name and a wildcard under it, e.g. box.example.com and *.box.example.com: each
-# dashboard keeps an origin of its own (4321.box.example.com), as on a laptop.
+# dashboard keeps an origin of its own (4321.box.example.com), as on a laptop, and signing in is on
+# auth.box.example.com, which serves nothing else.
 #
 # Render: New > Web Service > this repo (or a fork), Language: Docker, Dockerfile path:
 #   cloud/Dockerfile, build context: the repo root. Instance: Pro (4 GB) or larger; a free one
@@ -49,21 +50,25 @@ RUN npm install -g @anthropic-ai/claude-code && npm cache clean --force
 # Two users. dev is the owner at the terminal, and every agent: home on the volume. gw runs only
 # the gateway and alone can read its passkeys and sessions, so no agent can add itself a way in.
 RUN usermod -l dev -d /data/home node && groupmod -n dev node \
- && useradd --system --home-dir /data/gateway --shell /usr/sbin/nologin gw
+ && groupadd --system --gid 990 gw && useradd --system --uid 990 --gid 990 --home-dir /data/gateway --shell /usr/sbin/nologin gw
 
 COPY --chmod=644 cloud/gateway.mjs /opt/devteam/gateway.mjs
 
-# PID 1 (under tini), as root only to set up /data, then: dev's side in the background, and the
-# gateway in the foreground (if it stops, the box restarts).
+# Under tini, as root only to set up /data, then: dev's side, and the gateway (if it stops, the box
+# restarts). A stop (a deploy) closes the tmux server first, so agents get a hangup, not a kill.
 COPY --chmod=755 <<'EOF' /usr/local/bin/devteam-box
 #!/bin/sh
 set -eu
 mkdir -p /data/home /data/gateway
 [ "$(stat -c %U /data/home)" = dev ] || chown dev:dev /data/home
-[ "$(stat -c %U /data/gateway)" = gw ] || chown gw:gw /data/gateway
+chown -R gw:gw /data/gateway
 chmod 700 /data/gateway
-setpriv --reuid=dev --regid=dev --init-groups env -u DEVTEAM_CLAIM_TOKEN HOME=/data/home /usr/local/bin/devteam-dev &
-exec setpriv --reuid=gw --regid=gw --init-groups env HOME=/data/gateway DEVTEAM_GATEWAY_DIR=/data/gateway /usr/local/bin/node /opt/devteam/gateway.mjs serve
+as_dev() { setpriv --reuid=dev --regid=dev --init-groups env -u DEVTEAM_CLAIM_TOKEN HOME=/data/home "$@"; }
+as_dev /usr/local/bin/devteam-dev &
+setpriv --reuid=gw --regid=gw --init-groups env HOME=/data/gateway DEVTEAM_GATEWAY_DIR=/data/gateway /usr/local/bin/node /opt/devteam/gateway.mjs serve &
+gw=$!
+trap 'as_dev tmux kill-server 2>/dev/null; sleep 2; kill -TERM "$gw" 2>/dev/null; exit 0' TERM INT
+wait "$gw"
 EOF
 
 COPY --chmod=755 <<'EOF' /usr/local/bin/devteam-reclaim
