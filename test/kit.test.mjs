@@ -2738,7 +2738,7 @@ test('devteam kit', async (t) => {
     // a broken draft is fixed before anyone is asked about it
     write(path.join(A, 'broken-two/index.html'), '<!doctype html>');
     write(path.join(A, 'broken-two/artifact.json'), '{');
-    assert.match(ask([{ name: 'flow', title: 'B', artifact: 'broken-two' }]).err, /is broken \(artifact\.json: not JSON/);
+    assert.match(ask([{ name: 'flow', title: 'B', artifact: 'broken-two' }]).err, /is broken \(broken-two\/artifact\.json: not JSON/);
     fs.rmSync(path.join(A, 'broken-two'), { recursive: true });
     const qa = ask([{ name: 'flow', title: 'Mock', artifact: 'mock-one' }]);
     assert.equal(qa.status, 0, qa.err);
