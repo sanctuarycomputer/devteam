@@ -1,0 +1,6 @@
+exit 0
+--- stdout
+What this project has learned that applies here (accepted knowledge):
+- [fact] g1 builds with make (k-<sha>-<sha>-owner)
+--- stderr
+

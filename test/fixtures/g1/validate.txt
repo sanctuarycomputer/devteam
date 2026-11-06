@@ -1,0 +1,9 @@
+exit 1
+--- stdout
+error: g1-02-b: depends_on "g1-99-missing" does not exist (D3)
+error: feature g1-work: no graph review in project/reviews/g1-work/graph-<n>.md
+error: feature g1-work names no design (project/designs/<slug>.md)
+error: feature g1-work names goal g-<sha>-<sha>-supervisor, which is not in the log
+2 ticket(s), 1 feature(s), 4 error(s), 0 warning(s)
+--- stderr
+
