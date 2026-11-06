@@ -10,7 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
-import { kit, freePort, write, json, fleetFixture, bareProject, startDashboard, until, statusWithHost } from './lib/kit.mjs';
+import { PORTS, kit, freePort, write, json, fleetFixture, bareProject, startDashboard, until, statusWithHost } from './lib/kit.mjs';
 
 test('fleet drain: in-flight work finishes, nothing new starts, and a drained fleet moves with parity', () => {
   const F = fleetFixture('drain');
