@@ -313,7 +313,11 @@ const SETTINGS_DEFAULTS = {
   components: {},
   // Named resources the fleet uses: { "<id>": { "kind": "repo"|"url", "title": …, … } }.
   links: {},
-  // How a tagged release reaches production: 'tag' (deploys from the tag) or { branch: 'production' }.
+  // How a release reaches production: 'tag' (deploys from the tag), { branch: 'production' }, or
+  // 'merge' (production deploys whenever main changes, e.g. Heroku's automatic deploys; also
+  // { on: 'merge', paths: ['app/**'] } when only some paths deploy). With 'merge', a merge that
+  // changes what deploys is a release (release-production). Root build manifests (Procfile,
+  // package.json, Dockerfile, …) deploy even outside paths (deployingFiles).
   release: 'tag',
   // Commands a stdin: secret sink may run (prefixes, e.g. "gh secret set"); they run as the owner.
   secret_commands: [],
@@ -2408,6 +2412,12 @@ function cmdValidate() {
     if (raw[c] === undefined) errors.push(`settings autonomy_ceilings: "${c}" is not a ladder class in constitution.md`);
     else if (v > raw[c]) errors.push(`settings autonomy_ceilings: ${c} ${v} is above the constitution's ceiling ${raw[c]}; a project may only lower it`);
   }
+  {
+    const s = loadSettings();
+    // one that could mean deploy-on-merge is an error (merge fails closed on it); any other a warning
+    const rs = [[s.release, 'settings release'], ...Object.entries(s.links ?? {}).filter(([, l]) => isObj(l) && l.release !== undefined).map(([lid, l]) => [l.release, `settings links.${lid}.release`])];
+    for (const [r, at] of rs) { const bad = releaseProblem(r, at); if (bad) (releaseMayBeOnMerge(r) ? errors : warnings).push(releaseMayBeOnMerge(r) ? bad : `${bad}; read as not deploying on merge`); }
+  }
   const td = path.join(projectDir, 'tickets');
   if (fs.existsSync(td)) for (const f of fs.readdirSync(td)) if (!f.startsWith('.') && !ts.has(f)) errors.push(`project/tickets/${f}/ has no ticket`);
   // Checking one ticket, another ticket's own errors (D3 and the rest, written "<id>: …") come
@@ -3532,6 +3542,61 @@ function reviewApproves(v, what) {
   if (v.result_status !== 'verified') die(`${what}: ${v.id} is a review whose result is ${v.result_status}; it approves nothing until it verifies (review show ${v.id})`);
 }
 
+// settings release (home's, or a repo link's): 'tag', 'merge', { branch: '<name>' }, or
+// { on: 'merge', paths: [globs] }. Anything else is a problem. One that could mean deploy-on-merge
+// ("merge", or an object with on: "merge") fails closed at merge, since a misread shape would let a
+// release through unchecked; any other is a warning (it never meant merging deploys).
+const releaseMayBeOnMerge = (r) => r === 'merge' || (isObj(r) && r.on === 'merge');
+function releaseProblem(r, at = 'release') {
+  if (r === undefined || r === 'tag' || r === 'merge') return null;
+  const shapes = `"tag", "merge", { "branch": "<name>" } or { "on": "merge", "paths": ["<glob>", …] }`;
+  if (!isObj(r)) return `${at}: ${shapes}`;
+  const keys = Object.keys(r);
+  if (keys.includes('branch') && !keys.includes('on')) return keys.length === 1 && typeof r.branch === 'string' && r.branch ? null : `${at}: { "branch": "<name>" } takes nothing else (${shapes})`;
+  if (r.on !== 'merge') return `${at}: ${keys.includes('paths') ? 'paths needs "on": "merge" (without it nothing is checked as a release)' : `"on" is "merge"`}; ${shapes}`;
+  const extra = keys.filter((k) => !['on', 'paths'].includes(k));
+  if (extra.length) return `${at}: ${extra.join(', ')} is not a release field (on, paths)`;
+  if (r.paths !== undefined && !(Array.isArray(r.paths) && r.paths.length && r.paths.every((g) => typeof g === 'string' && g && !g.startsWith('!')))) return `${at}.paths: a non-empty list of globs, no negations (leave paths out when every merge deploys)`;
+  return null;
+}
+// Files that deploy whatever paths says: a platform rebuilds the app when its build setup changes.
+// A list with gaps by nature: the owner lists anything else that deploys in paths (quality.md §5).
+const DEPLOY_MANIFESTS = ['Procfile', 'app.json', 'heroku.yml', 'Aptfile', '.slugignore', '.buildpacks', '.profile.d/**', 'bin/pre_compile', 'bin/post_compile', 'Dockerfile', 'Dockerfile.*', '.dockerignore', 'docker-compose.yml', 'fly.toml', 'render.yaml', 'vercel.json', 'netlify.toml', 'nixpacks.toml', 'railway.json', 'package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', '.yarnrc', '.yarnrc.yml', '.yarn/**', '.npmrc', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'bun.lockb', 'bun.lock', 'tsconfig.json', 'next.config.*', 'vite.config.*', 'Gemfile', 'Gemfile.lock', 'requirements.txt', 'Pipfile', 'Pipfile.lock', 'pyproject.toml', 'poetry.lock', 'uv.lock', 'go.mod', 'go.sum', 'Cargo.toml', 'Cargo.lock', 'composer.json', 'composer.lock', 'runtime.txt', '.node-version', '.nvmrc', '.ruby-version', '.python-version', '.tool-versions'];
+// On a repo that deploys when main changes, the files of a PR that deploy: those outside the kit's
+// line, or with release.paths those matching it plus the build files above (never the kit's line:
+// the log and records don't deploy). { files: [] } when merging deploys nothing; { problem } when
+// it can't be told (fail closed); { warning } beside either.
+function deployingFiles(R, base, sha) {
+  const S = R.settings;
+  const r = S.release;
+  const bad = releaseProblem(r, R.name === 'home' ? 'settings release' : `links.${R.name}.release`);
+  if (bad && releaseMayBeOnMerge(r)) return { problem: `${bad}; merge can't tell what deploys` };
+  const warning = bad ? `${bad}; read as not deploying on merge` : undefined;
+  const onMerge = !bad && (r === 'merge' || r?.on === 'merge' || (r?.branch && r.branch === S.main_branch));
+  if (!onMerge) return { files: [], warning };
+  const where = R.name === 'home' ? '' : ` in ${R.name}`;
+  if (!base) return { problem: `release is on merge and there is no merge base with ${S.main_branch}${where}; merge can't tell what deploys` };
+  // the diff itself, not changedFiles (which reads a failed diff as no files)
+  const diff = R.git(['diff', '-z', '--name-only', '--no-renames', base, sha]);
+  if (diff === null) return { problem: `release is on merge and the diff ${base.slice(0, 12)}..${sha.slice(0, 12)}${where} failed; merge can't tell what deploys` };
+  const kit = R.devteamLine();
+  const files = diff.split('\0').filter(Boolean).filter((f) => !kit.some((g) => pathMatches(g, f)));
+  if (Array.isArray(r?.paths)) return { files: files.filter((f) => DEPLOY_MANIFESTS.some((g) => pathMatches(g, f)) || r.paths.some((g) => pathMatches(g, f))) };
+  return { files };
+}
+
+// A release decision made on the owner's answer (or a default) releases only what that question
+// named: its ticket, or the targets it approves (a batch: ask --approves). A question naming
+// neither releases nothing, so one yes can't be spread over tickets the owner never saw.
+function releaseAnswerGap(d, targets) {
+  if (!['answer', 'default'].includes(d.authority)) return null;
+  const q = d.approved_by?.startsWith('q-') ? logGet(d.approved_by) : null;
+  const v = q?.type === 'question' ? questionView(q) : null;
+  if (!v) return `rests on ${d.approved_by ?? 'no question'}, which is not a question`;
+  const named = [v.ticket, ...(v.approves ?? [])].filter(Boolean);
+  if (!named.length) return `rests on ${v.id}, which names no ticket or target (ask --ticket <id>, or --approves <ids> for a batch); a release answer releases only what it named`;
+  return targets.some((t) => named.includes(t)) ? null : `rests on ${v.id}, which was about ${named.join(', ')}, not ${targets[0]}; ask about this one`;
+}
 // The merge word, as a command: verify everything at the PR's exact head, run the project's gates
 // there, then merge refusing a moved head, then log the act. Only the supervisor runs it.
 // --dry-run runs every check and gate and stops; without a PR it checks the branch's local head.
@@ -3636,6 +3701,38 @@ function cmdMerge() {
       }
     }
   }
+  // Deploys on merge: merging this is releasing it, so it needs release-production's authority: the
+  // class on rung 3, or a release-production decision this merge carries out (--decision).
+  // In the ticket's own repo, under that repo's release setting (a link inherits home's).
+  let release = null;
+  // the decision is checked like an act's (decisionFor: not corrected, not lapsed, its recorded
+  // authority holds against the log, its owner answer not used for anything else)
+  const decided = flagStr('decision') ? decisionFor(flagStr('decision')) : null;
+  const releaseDecision = decided?.class === 'release-production' ? decided : null;
+  {
+    const base = R.mainRef() ? R.git(['merge-base', R.mainRef(), sha]) : null;
+    const dep = deployingFiles(R, base, sha);
+    const deploys = dep.files ?? [];
+    const target = id ?? (chore ? `chore-${chore}` : plan);
+    const targets = [target, plan ? `plan-${plan}` : null].filter(Boolean);
+    if (dep.warning) warn(dep.warning);
+    if (dep.problem) fails.push(dep.problem);
+    else if (deploys.length) {
+      const d = releaseDecision;
+      const rung = rungFor('release-production');
+      // One release decision is carried out once per target: a second merge of the same chore slug
+      // (or the same decision cited again) decides again.
+      const done = d && logObjects('act').find((a) => a.decision === d.id && a.class === 'release-production' && (a.refs ?? []).some((r) => targets.includes(r)));
+      const unbound = d && releaseAnswerGap(d, targets);
+      if (d && !(d.refs ?? []).some((r) => targets.includes(r))) fails.push(`${d.id} releases ${(d.refs ?? []).join(', ') || 'nothing named'}, not ${target}; decide again for this one`);
+      else if (unbound) fails.push(`${d.id} ${unbound}`);
+      else if (done) fails.push(`${d.id} was already carried out for ${target} (${done.id}); a release decision releases once: decide again for this one`);
+      else if (d) release = { decision: d.id, target };
+      else if (rung >= 3) release = { rung, target };
+      else fails.push(`merging deploys to production${inR} (release: merge; it changes ${deploys.slice(0, 3).join(', ')}${deploys.length > 3 ? ', …' : ''}), and release-production is on rung ${rung} (${RUNG[rung]}): ask --class release-production --ticket ${target} …, then decide --class release-production --refs ${target} --approved <qid> -- "release …", then merge --decision <d-id>`);
+      if (release) out(`merging deploys to production${inR}: a release-production act will be logged (${release.decision ? `under ${release.decision}` : `rung ${rung}`})`);
+    } else if (releaseDecision) out(`${releaseDecision.id} is a release-production decision, and this merge deploys nothing; it is not carried out`);
+  }
   if (chore) {
     const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
     const kit = base ? changedFiles(base, sha).filter((f) => !f.startsWith(`${projectRel}/`)) : [];
@@ -3737,7 +3834,12 @@ function cmdMerge() {
   // home resets exactly what it reset before (G1); another repo resets all of its own caches
   if (R.name === 'home') { mainLogCache = undefined; mergeShaCache.clear(); } else R.resetCaches();
   const cls = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
-  const act = appendLog({ type: 'act', decision: citing(), class: cls, what: `merged ${branch} at ${sha}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag}, verbatim)` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [], reversible: false, approved_by: approved ?? standing?.rule.id ?? undefined, ...onR }, 'supervisor');
+  // A release-production decision is carried out by the release act, never by the merge act.
+  const act = appendLog({ type: 'act', decision: releaseDecision ? undefined : citing(), class: cls, what: `merged ${branch} at ${sha}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag}, verbatim)` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [], reversible: false, approved_by: approved ?? standing?.rule.id ?? undefined, ...onR }, 'supervisor');
+  if (release) {
+    const rel = appendLog({ type: 'act', class: 'release-production', decision: release.decision, rung: release.rung, what: `released ${release.target}${inR} to production by merging ${branch} at ${sha} (release: merge)`, refs: [release.target, act.id], reversible: false, ...onR }, 'supervisor');
+    out(`released ${release.target}${inR} to production (${rel.id})`);
+  }
   out(`merged ${branch} at ${sha.slice(0, 12)}${inR} (${act.id})`);
 }
 // ===== 7. trust =====
