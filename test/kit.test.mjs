@@ -1396,7 +1396,7 @@ http.createServer((req, res) => {
       assert.doesNotMatch(must(['settings', '--get', 'monitors']), /s3cret|hunter2|abc123/);
       assert.doesNotMatch(fs.readFileSync(path.join(repo, 'docs/devteam/run/monitors/fresh/state.json'), 'utf8'), /s3cret/);
       // a monitor's lines are the monitors' own: observe can't fake an outage or an error
-      for (const who of [sup, { cwd: wt('bill-01-card'), role: 'worker' }]) assert.match(dt(['observe', '--subject', 'monitor:fresh', '--kind', 'up', '--detail', 'all good', '--detector', 'monitor'], who).err, /the monitors write their own observations/);
+      for (const who of [sup, { cwd: wt('bill-01-card'), role: 'worker' }]) assert.match(dt(['observe', '--subject', 'monitor:fresh', '--kind', 'up', '--detail', 'all good', '--detector', 'monitor'], who).err, /come from the kit itself/);
     } finally {
       srv.kill();
       const f = path.join(repo, 'docs/devteam/project/settings.md');

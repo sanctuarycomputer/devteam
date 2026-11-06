@@ -5669,7 +5669,7 @@ function cmdRepair() {
 function cmdObserve() {
   const by = flags.owner ? ownerWriter().by : logWriter();
   // the monitors write their own lines; a hand-made one could fake an outage or hide an error
-  if (flagStr('detector') === 'monitor') die('observe --detector monitor: the monitors write their own observations (monitor poll)');
+  if (flagStr('detector') === 'monitor') die('observe --detector monitor: those lines come from the kit itself (monitor poll); use another detector name');
   const subject = flagStr('subject') ?? die('observe needs --subject (a ticket, component, feature, gate, goal, class or act id)');
   // the kit's own detectors write their own lines: a hand-written one could pass for a poll's
   if (['monitor', 'metrics', 'pane'].includes(flagStr('detector'))) die(`observe --detector ${flagStr('detector')}: those lines come from the kit itself (monitor poll, observe-metrics, the pane check); use another detector name`);
@@ -10100,9 +10100,9 @@ const deployRelease = (o) => /: release (\S+)/.exec(o.detail ?? '')?.[1] ?? null
 // when a deploy went out: the time the probe gave (no later than the kit saw it), else when it was seen
 const deployAt = (o) => { const at = Date.parse(/ at (\S+)$/.exec(o.detail ?? '')?.[1] ?? ''); const seen = Date.parse(o.created_at); return Number.isNaN(at) ? seen : Math.min(at, seen); };
 const deploysSince = (ms) => logObjects('observation').filter((o) => fromMonitor(o) && o.kind === 'deploy' && Date.parse(o.created_at) >= ms).sort(byTime);
-// a window of at least an hour, and a lag that is never negative: a zero window would resolve a fix
+// a positive window (else the default), and a lag that is never negative: a zero or negative window would resolve a fix
 // on the next poll with nothing observed
-const verifyDefaults = () => { const d = { verify_hours: 24, deploy_lag_minutes: 15, ...(loadSettings().monitor_defaults ?? {}) }; return { ...d, verify_hours: Math.max(1, Number(d.verify_hours) || 24), deploy_lag_minutes: Math.max(0, Number(d.deploy_lag_minutes) || 0) }; };
+const verifyDefaults = () => { const d = { verify_hours: 24, deploy_lag_minutes: 15, ...(loadSettings().monitor_defaults ?? {}) }; return { ...d, verify_hours: Number(d.verify_hours) > 0 ? Number(d.verify_hours) : 24, deploy_lag_minutes: Math.max(0, Number(d.deploy_lag_minutes) || 0) }; };
 // When a fingerprint last happened: the provider's last_seen (the kit's ingest time when it
 // gave none), so an event from before the deploy fetched after it isn't a regression.
 const fpLastEvent = (id) => { const f = fpSummary(id); return Date.parse(f.last_seen ?? '') || Date.parse(f.ingested_at ?? '') || 0; };
