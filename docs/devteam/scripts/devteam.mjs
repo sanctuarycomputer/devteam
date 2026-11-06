@@ -2806,8 +2806,9 @@ function oneWayDoorsSection(body) {
 // each merge is exactly git's own merge of its parents. A conflict fix that touched the work
 // changes both, so it voids the verdict; a clean merge of main does not.
 // A record edit that only fills in what the record lacked: a "- Reviewer:" line where there was
-// none, and Disposition cells that were empty. Verdicts, findings and dispositions already given
-// can't change this way, so a dissent still can't be edited away.
+// none, and Disposition cells that were empty or held no disposition yet, each given a disposition.
+// Verdicts, findings and dispositions already given can't change this way, so a dissent still
+// can't be edited away.
 function fillInOnly(before, after) {
   if (before === null || after === null) return false;
   // blank lines carry nothing in a record, so they're left out of the comparison
@@ -2825,7 +2826,8 @@ function fillInOnly(before, after) {
     if (a[k] === b[k]) continue;
     if (disp < 0 || !a[k].trim().startsWith('|') || !b[k].trim().startsWith('|')) return false;
     const x = tableCells(a[k]), y = tableCells(b[k]);
-    if (x.length !== y.length || x.some((c, j) => j !== disp && c !== y[j]) || x[disp] !== '' || !y[disp]) return false;
+    // an empty cell, or one that isn't a disposition yet (a reviewer's "Accepted; …"), may become one
+    if (x.length !== y.length || x.some((c, j) => j !== disp && c !== y[j]) || !(x[disp] === '' ? y[disp] : !disposed(x[disp]) && disposed(y[disp]))) return false;
   }
   return true;
 }
@@ -3049,7 +3051,7 @@ function checkTicket(id, { sha: shaArg, title, body, approvals = true }) {
   const approvers = new Set(latest.filter((r) => r.verdict === 'APPROVE' && holdsAt(r.sha) && r.reviewer).map((r) => r.reviewer));
   const need = t.risk === 'high' ? 2 : 1;
   if (approvers.size < need) fails.push(`needs ${need} final APPROVE review(s) at this head from different named reviewers; found ${approvers.size}`);
-  for (const r of reviews) for (const f of r.findings) if (blocking(f.severity) && !disposed(f.disposition)) fails.push(`${r.file} ${f.id} (${f.severity}) has no disposition`);
+  for (const r of reviews) for (const f of r.findings) if (blocking(f.severity) && !disposed(f.disposition)) fails.push(`${r.file} ${f.id} (${f.severity}) has no disposition${f.disposition ? ` ("${f.disposition.slice(0, 40)}" isn't one)` : ''}: the author starts its Disposition cell with fixed, wont-fix <reason> or wrong <reason>`);
   const base = R.mainRef() && sha ? R.git(['merge-base', R.mainRef(), sha]) : null;
   if (R.commonDir && !base) fails.push(`cannot resolve main branch "${R.settings.main_branch}"${R.name === 'home' ? '' : ` in ${R.name}`}; footprint not checked`);
   if (base) {

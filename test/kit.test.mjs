@@ -563,7 +563,9 @@ test('devteam kit', async (t) => {
     const changes = (reviewer, sha, disp) => `${reviewer ? `- Reviewer: ${reviewer}\n\n` : ''}| Id | Severity | Rule | Where | Finding | Disposition |\n|---|---|---|---|---|---|\n| F1 | Important | spec | billing/card.js:1 | handles no error | ${disp} |\n\nVerdict: CHANGES ${sha}\n`;
     const head = () => git(['rev-parse', 'HEAD'], wt('bill-01-card'));
     const commitAll = (msg) => { git(['add', '-A'], wt('bill-01-card')); git(['commit', '-qm', msg], wt('bill-01-card')); };
-    write(path.join(tdir, 'reviews/final-2.md'), changes(null, H2, ''));
+    // the reviewer wrote in the Disposition cell, which isn't a disposition: the author's later
+    // disposition replaces it without voiding the verdicts after it
+    write(path.join(tdir, 'reviews/final-2.md'), changes(null, H2, 'Accepted; will fix'));
     commitAll('an unnamed review asks for changes');
     fs.appendFileSync(path.join(wt('bill-01-card'), 'billing/card.js'), 'error handled\n');
     commitAll('fix');
@@ -572,7 +574,7 @@ test('devteam kit', async (t) => {
     commitAll('review 3');
     const r3 = dt(['check-ticket', 'bill-01-card', '--sha', head(), ...pr]);
     assert.doesNotMatch(r3.out, /final-2\.md: no "- Reviewer:" line/, 'an unnamed record a later pass superseded does not fail the ticket');
-    assert.match(r3.out, /final-2\.md F1 \(Important\) has no disposition/);
+    assert.match(r3.out, /final-2\.md F1 \(Important\) has no disposition \("Accepted; will fix" isn't one\): the author starts its Disposition cell with fixed, wont-fix <reason> or wrong <reason>/);
     write(path.join(tdir, 'reviews/final-2.md'), changes('reviewer-a', H2, 'fixed'));
     commitAll('fill in final-2: its reviewer and the disposition');
     must(['check-ticket', 'bill-01-card', '--sha', head(), ...pr]);
