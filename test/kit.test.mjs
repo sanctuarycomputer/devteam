@@ -1842,9 +1842,17 @@ test('devteam kit', async (t) => {
       const dry = (...extra) => { const r = dt(['merge', '--chore', 'procfile', '--dry-run', ...extra], { role: 'sup' }); return `${r.out}\n${r.err}`; };
       landSettings((txt) => txt.replace('"release": "merge"', '"release": { "on": "merge", "paths": ["web/**"] }'));
       assert.match(dry(), /merging deploys to production \(release: merge; it changes Procfile\)/, 'a root manifest deploys whatever paths says');
+      // a release answer releases only what its question named: one naming nothing releases nothing
+      const relQ = (q, extra = []) => { const id = must(['ask', '--class', 'release-production', '--reasons', 'below-rung', '--question', q, '--recommendation', 'yes', ...extra], { role: 'sup' }); must(['answer', id, 'yes']); return id; };
+      const Qn = relQ('Release whatever is next?');
+      const Dn = must(['decide', '--class', 'release-production', '--approved', Qn, '--refs', 'chore-procfile', '--', 'release the Procfile'], { role: 'sup' });
+      assert.match(dry('--decision', Dn), new RegExp(`${Dn} rests on ${Qn}, which names no ticket or target`), 'a yes about nothing in particular releases nothing');
+      // and one asked about a ticket, decided for more, releases only that ticket
+      const Qb = relQ('Release card capture again?', ['--ticket', 'bill-01-card']);
+      const Db = must(['decide', '--class', 'release-production', '--approved', Qb, '--refs', 'bill-01-card', 'chore-procfile', '--', 'release both'], { role: 'sup' });
+      assert.match(dry('--decision', Db), new RegExp(`${Db} rests on ${Qb}, which was about bill-01-card, not chore-procfile`), 'a yes about one ticket releases no other');
       // one release decision is carried out once per target: a second merge under it decides again
-      const Qc = must(['ask', '--class', 'release-production', '--reasons', 'below-rung', '--question', 'Release the Procfile change?', '--recommendation', 'yes'], { role: 'sup' });
-      must(['answer', Qc, 'yes']);
+      const Qc = relQ('Release the Procfile change?', ['--ticket', 'chore-procfile']);
       const Dc = must(['decide', '--class', 'release-production', '--approved', Qc, '--refs', 'chore-procfile', '--', 'release the Procfile'], { role: 'sup' });
       assert.match(dry('--decision', Dc), /a release-production act will be logged \(under d-/);
       const logDir = path.join(repo, 'docs/devteam/run/log');
@@ -1853,12 +1861,31 @@ test('devteam kit', async (t) => {
       fs.appendFileSync(supFile, line({ id: 'a-20261101-235959012-supervisor', type: 'act', op: 'new', at: new Date().toISOString(), by: 'supervisor', class: 'release-production', decision: Dc, what: 'released chore-procfile', refs: ['chore-procfile'], reversible: false }));
       assert.match(dry('--decision', Dc), new RegExp(`${Dc} was already carried out for chore-procfile \\(a-20261101-235959012-supervisor\\)`), 'a release decision releases once');
       fs.writeFileSync(supFile, before);
-      // paths without on: "merge" is a shape that checks nothing: validate refuses it and merge fails closed
-      landSettings((txt) => txt.replace('"release": { "on": "merge", "paths": ["web/**"] }', '"release": { "paths": ["web/**"] }'));
-      const v = dt(['validate'], { role: 'sup' });
-      assert.match(`${v.out}\n${v.err}`, /settings release: paths needs "on": "merge"/);
-      assert.match(dry(), /settings release: paths needs "on": "merge" .*merge can't tell whether this deploys/);
-      landSettings((txt) => txt.replace('"release": { "paths": ["web/**"] }', '"release": "merge"'));
+      // a diff that fails is not "nothing deploys": the release check fails closed
+      {
+        const fake = path.join(tmp, 'fakegit');
+        const real = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
+        write(path.join(fake, 'git'), `#!/bin/sh\ncase " $* " in *" diff -z --name-only --no-renames "*) [ -n "$DT_FAIL_DIFF" ] && exit 128;; esac\nexec "${real}" "$@"\n`);
+        fs.chmodSync(path.join(fake, 'git'), 0o755);
+        const PATH0 = process.env.PATH;
+        process.env.PATH = `${fake}${path.delimiter}${PATH0}`;
+        process.env.DT_FAIL_DIFF = '1';
+        try { assert.match(dry(), /release is on merge and the diff [0-9a-f]+\.\.[0-9a-f]+ failed; merge can't tell what deploys/); } finally { process.env.PATH = PATH0; delete process.env.DT_FAIL_DIFF; }
+      }
+      // a release that could mean deploy-on-merge but is malformed fails validate, and merge fails closed
+      landSettings((txt) => txt.replace('"release": { "on": "merge", "paths": ["web/**"] }', '"release": { "on": "merge", "paths": "web/**" }'));
+      let v = dt(['validate'], { role: 'sup' });
+      assert.match(`${v.out}\n${v.err}`, /error: settings release\.paths: a non-empty list of globs/);
+      assert.match(dry(), /settings release\.paths: a non-empty list of globs.*merge can't tell what deploys/);
+      // any other malformed shape never meant merging deploys: a warning, and merges aren't blocked
+      landSettings((txt) => txt.replace('"release": { "on": "merge", "paths": "web/**" }', '"release": { "branch": "production", "when": "tagged" }'));
+      v = dt(['validate'], { role: 'sup' });
+      assert.match(`${v.out}\n${v.err}`, /warning: settings release: \{ "branch": "<name>" \} takes nothing else.*read as not deploying on merge/);
+      assert.doesNotMatch(`${v.out}\n${v.err}`, /error: settings release/);
+      const d2 = dry();
+      assert.match(d2, /warning: settings release: .*read as not deploying on merge/);
+      assert.doesNotMatch(d2, /merging deploys to production|can't tell what deploys/);
+      landSettings((txt) => txt.replace('"release": { "branch": "production", "when": "tagged" }', '"release": "merge"'));
       git(['worktree', 'remove', '--force', cw]);
       git(['push', '-q', 'origin', '--delete', 'chore-procfile']);
       git(['branch', '-q', '-D', 'chore-procfile']);
