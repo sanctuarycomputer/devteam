@@ -2778,6 +2778,7 @@ function render(d) {
 
   // Keep anything half-typed or half-open across refreshes.
   document.querySelectorAll('textarea[data-q]').forEach((t) => { drafts[t.dataset.q] = t.value; });
+  document.querySelectorAll('textarea[data-know-note]').forEach((t) => { drafts[`know:${t.dataset.knowNote}`] = t.value; });
   keepSecretDrafts();
   const kept = [...document.querySelectorAll('input[data-reason], input[data-overrule]')].map((el) => [el.dataset.reason ? `input[data-reason="${el.dataset.reason}"]` : `input[data-overrule="${el.dataset.overrule}"]`, el.value]);
   const keptChecks = [...document.querySelectorAll('input[data-rulebox]:checked, input[data-auto]:checked')].map((el) => el.dataset.rulebox ? `input[data-rulebox="${el.dataset.rulebox}"]` : `input[data-auto="${el.dataset.auto}"][value="${el.value}"]`);
@@ -2789,6 +2790,7 @@ function render(d) {
       ${cardHead('lightbulb', '<span class="badge good">Lesson to keep?</span>', { extra: `applies to ${esc(scopeWords(k.scope))}`, id: k.id, rows: [['Proposed', esc(when(k.created_at))], ['By', esc(who(k.created_by))]] })}
       <h4>${linkify(k.statement)}</h4>
       <p class="ctx">${esc(cap(who(k.created_by)))} proposes this as a ${esc(k.kind)}${k.confidence != null ? `, ${Math.round(k.confidence * 100)}% sure` : ''}, ${(k.evidence || []).length ? `based on ${k.evidence.map((e) => linkify(e)).join(', ')}` : 'with no evidence recorded'}. Accepted lessons go into the instructions of every agent they apply to.</p>
+      <textarea data-know-note="${esc(k.id)}" rows="1" maxlength="600" placeholder="Add a note to refine it (optional): it goes with the lesson into every prompt">${esc(drafts[`know:${k.id}`] || '')}</textarea>
       <div class="row-inline"><button data-know="${esc(k.id)}" data-status="accepted">Keep it</button><button class="ghost" data-know="${esc(k.id)}" data-status="retired">Retire it</button><span class="err" id="e-${esc(k.id)}"></span></div>
     </div>`).join('');
   for (const qid of [...ANSWERED.keys()]) if (!d.questions.some((q) => q.id === qid)) ANSWERED.delete(qid);
@@ -3101,7 +3103,9 @@ document.addEventListener('click', async (ev) => {
     const row = know.closest('.row-inline');
     row?.querySelectorAll('button').forEach((b) => { b.disabled = true; });
     know.classList.add('busy');
-    if (await post('knowledge', { id: know.dataset.know, status: know.dataset.status }, know.dataset.know)) know.closest('.card')?.remove();
+    const noteEl = document.querySelector(`textarea[data-know-note="${CSS.escape(know.dataset.know)}"]`);
+    const note = know.dataset.status === 'accepted' ? (noteEl?.value ?? '').replace(/\s+/g, ' ').trim() : '';
+    if (await post('knowledge', { id: know.dataset.know, status: know.dataset.status, ...(note ? { note } : {}) }, know.dataset.know)) { delete drafts[`know:${know.dataset.know}`]; know.closest('.card')?.remove(); }
     else { know.classList.remove('busy'); row?.querySelectorAll('button').forEach((b) => { b.disabled = false; }); }
     return;
   }

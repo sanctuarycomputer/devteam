@@ -5241,9 +5241,11 @@ function knowledgeFor(target) {
   return logObjects('knowledge').filter((k) => k.status === 'accepted' && scopeMatches(k.scope, ctx));
 }
 // The block a prompt ends with: what applies to this ticket or feature.
+// The owner's note on a lesson, from the owner's own lines only: a note on any other line counts for nothing.
+const ownerNote = (id) => readLog().lines.filter((l) => l.id === id && l.by === 'owner' && typeof l.owner_note === 'string').pop()?.owner_note ?? null;
 const knowledgeBlock = (target) => {
   const ks = knowledgeFor(target);
-  return ks.length ? `What this project has learned that applies here (accepted knowledge):\n${ks.map((k) => `- [${k.kind}${k.valence < 0 ? ', avoid' : ''}] ${k.statement} (${k.id})`).join('\n')}` : '';
+  return ks.length ? `What this project has learned that applies here (accepted knowledge):\n${ks.map((k) => { const n = ownerNote(k.id); return `- [${k.kind}${k.valence < 0 ? ', avoid' : ''}] ${k.statement}${n ? ` The owner adds: ${n}` : ''} (${k.id})`; }).join('\n')}` : '';
 };
 // The block a prompt carries before its knowledge: the registry links this work uses.
 // Titles and notes are quoted data: whoever wrote them, they describe a link and instruct nobody.
@@ -5269,8 +5271,12 @@ function cmdKnowledge() {
     return out(line.id);
   }
   if (sub === 'set') {
-    if (!id || logGet(id)?.type !== 'knowledge') die('usage: knowledge set <k-id> [--status s] [--confidence c] [--statement s] [--scope s] [--owner]');
-    appendLog({ type: 'knowledge', op: 'set', id, status: flagStr('status'), confidence: flagNum('confidence'), statement: flagStr('statement'), scope: flagStr('scope') }, by());
+    if (!id || logGet(id)?.type !== 'knowledge') die('usage: knowledge set <k-id> [--status s] [--confidence c] [--statement s] [--scope s] [--note "the owner\'s refinement"] [--owner]');
+    const w = by();
+    const note = flagStr('note');
+    if (note !== undefined && w !== 'owner') die('--note is the owner\'s refinement of a lesson: only the owner adds one (--owner)');
+    if (note !== undefined && (!note.trim() || note.length > 600 || /[\r\n]/.test(note))) die('--note is one line of at most 600 characters');
+    appendLog({ type: 'knowledge', op: 'set', id, status: flagStr('status'), confidence: flagNum('confidence'), statement: flagStr('statement'), scope: flagStr('scope'), owner_note: note?.trim() }, w);
     return out(`updated ${id}`);
   }
   if (flagStr('for')) {
@@ -7087,7 +7093,7 @@ async function cmdDashboard() {
     'goal-hold': (b) => ((ID.test(b.id ?? '') || b.id === 'upkeep') && ['run', 'drain', 'park'].includes(b.mode) && (b.reason === undefined || b.reason === '' || text(b.reason, 300)) ? ['goal', 'hold', b.id, b.mode, '--owner', ...(b.reason ? ['--reason', b.reason.trim()] : [])] : null),
     fleet: (b) => (['drain', 'park', 'undrain', 'unpark', 'resume'].includes(b.op) && (b.reason === undefined || b.reason === '' || text(b.reason, 300)) ? ['fleet', b.op, '--owner', ...(b.reason && ['drain', 'park'].includes(b.op) ? ['--reason', b.reason.trim()] : [])] : null),
     'goal-decide': (b) => (ID.test(b.id ?? '') && ['approve', 'refine', 'let-go', 'restore'].includes(b.verdict) && (b.notes === undefined || text(b.notes, 4000)) ? ['goal', 'decide', b.id, b.verdict, ...(b.notes ? ['--notes', b.notes.trim()] : [])] : null),
-    knowledge: (b) => (ID.test(b.id ?? '') && ['accepted', 'retired', 'stale'].includes(b.status) ? ['knowledge', 'set', b.id, '--status', b.status, '--owner'] : null),
+    knowledge: (b) => (ID.test(b.id ?? '') && ['accepted', 'retired', 'stale'].includes(b.status) && (b.note === undefined || b.note === '' || (text(b.note, 600) && !/[\r\n]/.test(b.note))) ? ['knowledge', 'set', b.id, '--status', b.status, ...(b.note?.trim() ? ['--note', b.note.trim()] : []), '--owner'] : null),
     ack: (b) => (/^[a-z][a-z-]*$/.test(b.kind ?? '') && text(b.subject, 200) && text(b.reason, 600) ? ['ack', b.kind, b.subject, '--reason', b.reason.trim(), '--owner'] : null),
   };
   const send = (res, code, type, body) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store' }); res.end(body); };

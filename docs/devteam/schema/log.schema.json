@@ -948,6 +948,10 @@
             "items": {
               "type": "string"
             }
+          },
+          "owner_note": {
+            "description": "The owner's refinement of the lesson, given when they keep it: prompts show it with the statement. Only the owner's own lines carry it.",
+            "type": "string"
           }
         },
         "additionalProperties": false,
@@ -2027,7 +2031,8 @@
           "status",
           "confidence",
           "statement",
-          "scope"
+          "scope",
+          "owner_note"
         ]
       },
       "problem": {
