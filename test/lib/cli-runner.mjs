@@ -10,6 +10,8 @@ import { pathToFileURL } from 'node:url';
 
 const slot = process.argv[2];
 const parent = Number(process.argv[3]);
+// run any other way (a bare `node --test` finds every file under test/), it does nothing
+if (!slot || !parent) process.exit(0);
 const req = path.join(slot, 'req.json');
 fs.writeFileSync(path.join(slot, 'ready'), '');
 const got = await new Promise((resolve) => {

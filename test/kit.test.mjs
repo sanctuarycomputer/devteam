@@ -1,6 +1,7 @@
 // End-to-end test of the kit against a throwaway repo: plan PR, worker lifecycle, questions,
 // trust, corrections, forgery, log-sync, and the computed views. The steps are in lib/chain.mjs.
-// Run the suite: node --test --test-concurrency=8 test/*.test.mjs  (DEVTEAM_TEST_KEEP=1 keeps the fixtures)
+// Run the suite: node --test --test-concurrency=8 test/*.test.mjs  (DEVTEAM_TEST_KEEP=1 keeps the fixtures;
+// DEVTEAM_TEST_COLD=1 spawns every CLI call fresh instead of through lib/cli.mjs)
 import { test } from 'node:test';
 import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
