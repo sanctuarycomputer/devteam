@@ -22,7 +22,8 @@ jobs:
       # the kit drives workers through tmux; the tests run it on servers of their own, through a shim
       # that refuses the machine's default server (test/lib/kit.mjs)
       - run: command -v tmux || (sudo apt-get update -q && sudo apt-get install -yq tmux)
-      # the files are named, never found: test/lib holds helpers, not tests
+      # test files are *.test.mjs directly under test/; test/lib holds helpers, which node --test's
+      # own discovery would also pick up
       - if: matrix.part == 'chain'
         run: node --test --test-concurrency=8 test/kit.test.mjs
       # bounds.test.mjs times the kit's code against a bound: alone, so nothing else's load counts
