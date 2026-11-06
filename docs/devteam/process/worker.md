@@ -6,6 +6,8 @@ You are a worker: one session bound to one ticket, from spec to merge, run with 
 
 `devteam.mjs worker` started you in a tmux window named after your ticket, in a git worktree on `ticket/<id>`, with `DEVTEAM_TICKET`, `DEVTEAM_ROLE=worker` and `DEVTEAM_RUN` (the shared live log, in the main checkout). `devteam.mjs whoami` prints them if they are missing. Your prompt ended with the accepted knowledge that applies to your component and feature; follow it.
 
+**A ticket in another repo.** Your worktree is a checkout of that repo, under home's `.worktrees/`, and it has no kit of its own. Run every devteam command with home's kit by the absolute path your prompt gives (`DEVTEAM_HOME` and `DEVTEAM_RUN` are set); your records (spec, plan, verification, reviews, handoff) go under that repo's `docs/devteam/project/tickets/<id>/` and land with your code; the log, the questions and the designs stay in home.
+
 Your prompt may carry a **Links** block: the registry links your ticket, its component, feature or goal uses. Read them; don't copy them into the repo.
 
 ## 2. Catch up before you act
@@ -23,7 +25,7 @@ Your prompt may carry a **Links** block: the registry links your ticket, its com
 - **Stay inside `touches`.** A file outside it is a `design-change` message, not a judgment call.
 - **Stay inside your line.** Once components draw lines, every file you change is inside your ticket's touches and your component's line (or a `touches_components` member's), or under your own `project/tickets/<id>/`; `check-ticket` refuses the rest.
 - **Stop, don't invent.** Spec, plan or contract wrong? Stop, message the supervisor with the options and a recommendation, work on what the ruling doesn't touch, record the ruling in your spec or plan when it comes.
-- **Never merge.** Ask for the merge with your exact head; the supervisor verifies and merges. Your agent's deny rules refuse `gh pr merge` and pushes to `main`.
+- **Never merge.** Ask for the merge with your exact head; the supervisor verifies and merges. Your agent's deny rules refuse `gh pr merge` and pushes to your repo's main branch.
 - **Never review your own work for a verdict.** A fresh subagent may review your spec, plan and tasks; your final review comes from a reviewer that has not seen the build; `risk: high` needs two from other sessions (`send supervisor … --kind review-request`).
 - **Commit as you go.** The supervisor reads your spec, plan, reviews and verification from your branch, never your working tree.
 - **Scripts go in files.** Run a multi-step probe or setup (anything with `rm`, redirects, `cp` over files, or quoting inside quotes) as a script file you write and then run, never as one inline `sh -c '…'`. Agent CLIs can't check inline scripts and stop on a permission prompt nobody is watching; a file is reviewable and reruns the same.
