@@ -360,8 +360,6 @@ const OWNER_SETTINGS = {
   forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', upstream_repo: 'governance-edit',
   release: 'governance-edit', secret_commands: 'governance-edit', monitors: 'monitor-change', monitor_defaults: 'monitor-change', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit',
 };
-// The classes whose owner answer approves a chore that changes the kit (files outside project/).
-const KIT_CLASSES = ['governance-edit', 'process-edit', 'gate-change'];
 const canonical = (v) => (Array.isArray(v) ? `[${v.map(canonical).join(',')}]` : v && typeof v === 'object' ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(',')}}` : JSON.stringify(v));
 function settingsAt(ref, { orNull = false } = {}) {
   const text = git(['show', `${ref}:${projectRel}/settings.md`]);
@@ -3627,8 +3625,8 @@ function cmdMerge() {
   }
   // A chore PR that touches the kit, the agent config or the forge config carries an owner answer
   // (classes governance-edit, process-edit, gate-change); project/ files are the supervisor's.
-  // --approved takes one answer or several (--approved q1 q2): a PR that changes settings of more
-  // than one owner class needs an answer in each, and one answer never stands in for another class.
+  // --approved takes one answer or several (--approved q1 q2): one owner answer covers a settings
+  // bundle, and a ladder class's answer can sit beside it.
   const approvedIds = [...new Set(asList(flags.approved).flatMap((x) => String(x).split(',')).map((x) => x.trim()).filter(Boolean))];
   const approved = approvedIds[0] ?? null;
   const answers = approvedIds.map((q) => ownerAnswer(q, 'merge --approved'));
@@ -3653,35 +3651,44 @@ function cmdMerge() {
       const L = ladder();
       const classes = [...new Set(changed.map((c) => c.cls))];
       const what = changed.map((c) => `${c.key} (${c.cls})`).join(', ');
-      // Each class is settled on its own: an owner_only class (gate-change, governance-edit) only by
-      // the owner's own answer in that class, never one relayed from chat, or (owner_rules) by their
-      // standing rule; a ladder class (monitor-change) by an answer in it, a decision in it naming
-      // this PR (--decision), or its rung 3. An answer in one class never settles another.
+      // One owner answer covers the bundle (the owner's ruling): the owner's own answer, never one
+      // relayed from chat, in any one of the owner_only classes the PR changes, approves every owner
+      // setting it changes, of any class; or, where owner_rules allows, the owner's standing rules
+      // when every changed owner_only class has one. A ladder class's answer (monitor-change), a
+      // decision in it naming this PR, or its rung 3 covers only that ladder class's keys, never an
+      // owner_only key.
       const d = flagStr('decision') ? decisionFor(flagStr('decision')) : null;
       const covers = (cls) => d?.class === cls && (d.refs ?? []).some((r) => [target, `plan-${plan}`].includes(r));
       const ownerOnly = (cls) => (L.owner_only ?? []).includes(cls) || !L.classes[cls];
+      const ownerClasses = classes.filter(ownerOnly);
       const settled = new Map(); // class -> { answer } | { rule } | { decision } | { rung }
-      for (const cls of classes) {
-        const inClass = answers.filter((v) => v.class === cls);
-        const own = inClass.filter((v) => v.channel !== 'chat');
-        if (ownerOnly(cls)) {
-          if (own.length) settled.set(cls, { answer: own[0].id });
-          else if (inClass.length) fails.push(`${inClass[0].id} was answered in chat; ${cls} is the owner's (owner_only), so they answer it from the dashboard or their terminal`);
-          else if (!approvedIds.length && (L.owner_rules ?? []).includes(cls) && ownerRuleFor(cls)) settled.set(cls, { rule: ownerRuleFor(cls) });
-        } else if (inClass.length) settled.set(cls, { answer: inClass[0].id });
+      let bundle = null;
+      if (ownerClasses.length) {
+        const inBundle = answers.filter((v) => ownerClasses.includes(v.class));
+        const own = inBundle.find((v) => v.channel !== 'chat');
+        if (own) bundle = { answer: own.id };
+        else if (inBundle.length) fails.push(`${inBundle[0].id} was answered in chat; owner settings (${ownerClasses.join(', ')}) need the owner's own answer, from the dashboard or their terminal`);
+        else if (!approvedIds.length && ownerClasses.every((c) => (L.owner_rules ?? []).includes(c) && ownerRuleFor(c))) bundle = { rule: ownerRuleFor(ownerClasses[0]), rules: ownerClasses.map((c) => ownerRuleFor(c)) };
+        if (bundle) for (const c of ownerClasses) settled.set(c, bundle.answer ? { answer: bundle.answer } : { rule: ownerRuleFor(c) });
+      }
+      for (const cls of classes.filter((c) => !ownerOnly(c))) {
+        const inClass = answers.find((v) => v.class === cls);
+        if (inClass) settled.set(cls, { answer: inClass.id });
+        else if (bundle?.answer) settled.set(cls, { answer: bundle.answer });
         else if (covers(cls)) settled.set(cls, { decision: d.id });
         else if (rungFor(cls) >= 3) settled.set(cls, { rung: rungFor(cls) });
       }
       const open = classes.filter((cls) => !settled.has(cls));
       if (open.length) {
         const keys = changed.filter((c) => open.includes(c.cls)).map((c) => `${c.key} (${c.cls})`).join(', ');
+        const ownerOpen = open.filter(ownerOnly);
         const ladderOpen = open.filter((c) => !ownerOnly(c));
-        fails.push(`changes owner settings: ${keys}; the owner's answer is needed in each class: --approved <qid>${open.length > 1 ? ' <qid> …' : ''} of class ${open.join(' and ')}${approvedIds.length ? ` (${approvedIds.map((q, i) => `${q} is ${answers[i].class ?? 'classless'}`).join(', ')})` : ''}${ladderOpen.length ? ` (or, for ${ladderOpen.join(', ')}, a decision in that class: merge --decision <d-id>)` : ''}`);
+        const given = approvedIds.length ? ` (${approvedIds.map((q, i) => `${q} is ${answers[i].class ?? 'classless'}${answers[i].channel === 'chat' ? ', answered in chat' : ''}`).join(', ')}${ownerOpen.length && answers.some((v) => !ownerOnly(v.class ?? '')) ? '; a ladder class\'s answer never covers an owner setting' : ''})` : '';
+        fails.push(`changes owner settings: ${keys}; the owner's answer is needed: --approved <qid>${ownerOpen.length ? ` of class ${ownerOpen.join(' or ')}` : ` of class ${ladderOpen.join(' or ')}`}${given}${ladderOpen.length ? ` (or, for ${ladderOpen.join(', ')}, a decision in that class: merge --decision <d-id>)` : ''}`);
       }
-      const rules = [...settled.values()].filter((x) => x.rule).map((x) => x.rule);
-      if (rules.length && !open.length) { standing = { rule: rules[0] }; out(`changes owner settings: ${what}; approved by the owner's standing rule${rules.length > 1 ? 's' : ''} ${rules.map((r) => `${r.id} ("${r.statement}")`).join(', ')}`); }
-      // Each repo link entry lands only as the answer that settled its class showed it.
-      for (const v of answers) fails.push(...ownerLinkActFails(changed.filter((c) => settled.get(c.cls)?.answer === v.id), sha, v.id));
+      if (bundle?.rule && !open.length) { standing = { rule: bundle.rule }; out(`changes owner settings: ${what}; approved by the owner's standing rule${bundle.rules.length > 1 ? 's' : ''} ${bundle.rules.map((r) => `${r.id} ("${r.statement}")`).join(', ')}`); }
+      // Each repo link entry lands only as the bundle's answer showed it.
+      if (bundle?.answer) fails.push(...ownerLinkActFails(changed.filter((c) => ownerOnly(c.cls)), sha, bundle.answer));
       // Every settled class is logged as an act of that class, with what settled it.
       settingsActs = classes.filter((c) => settled.has(c)).map((c) => ({ cls: c, ...settled.get(c), keys: changed.filter((x) => x.cls === c).map((x) => x.key) }));
     }
@@ -3704,7 +3711,6 @@ function cmdMerge() {
       if (release) out(`merging deploys to production: a release-production act will be logged (${release.decision ? `under ${release.decision}` : `rung ${rung}`})`);
     }
   }
-  let kitAnswer = null;
   if (chore) {
     const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
     const kit = base ? changedFiles(base, sha).filter((f) => !f.startsWith(`${projectRel}/`)) : [];
@@ -3717,10 +3723,6 @@ function cmdMerge() {
       if (r.rule) { standing = r; out(`changes only workflow files and keeps every job; approved by the owner's standing rule ${r.rule.id} ("${r.rule.statement}")`); } else if (r.problem) fails.push(r.problem);
     }
     if (kit.length && !approved && !standing) fails.push(`touches files outside project/ (${kit.slice(0, 6).join(', ')}${kit.length > 6 ? ', …' : ''}); the owner's answer is needed: merge --chore ${chore} --approved <qid>`);
-    // The kit is the owner's: only their own answer in a kit class approves it, never a ladder
-    // class's answer (monitor-change, say) or one relayed from chat.
-    else if (kit.length && approved && !answers.some((v) => KIT_CLASSES.includes(v.class) && v.channel !== 'chat')) fails.push(`touches files outside project/ (${kit.slice(0, 6).join(', ')}${kit.length > 6 ? ', …' : ''}); that needs the owner's own answer of class ${KIT_CLASSES.join(', ')} (${approvedIds.map((q, i) => `${q} is ${answers[i].class ?? 'classless'}${answers[i].channel === 'chat' ? ', answered in chat' : ''}`).join('; ')})`);
-    if (kit.length) kitAnswer = answers.find((v) => KIT_CLASSES.includes(v.class) && v.channel !== 'chat')?.id ?? null;
   }
   for (const av of answers) {
     const approved = av.id;
@@ -3811,7 +3813,7 @@ function cmdMerge() {
   const cls = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
   // a release or settings-class decision is carried out by its own act below, not by the merge's
   const own = release?.decision || (settingsActs ?? []).some((x) => x.decision);
-  const act = appendLog({ type: 'act', decision: own ? undefined : citing(), class: cls, what: `merged ${branch} at ${sha}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag}, verbatim)` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [], reversible: false, approved_by: kitAnswer ?? approved ?? standing?.rule.id ?? undefined, ...onR }, 'supervisor');
+  const act = appendLog({ type: 'act', decision: own ? undefined : citing(), class: cls, what: `merged ${branch} at ${sha}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag}, verbatim)` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [], reversible: false, approved_by: approved ?? standing?.rule.id ?? undefined, ...onR }, 'supervisor');
   // each owner setting class the merge changes is an act of that class, with what settled it: the
   // owner's answer in it, their standing rule, a decision in it, or its rung
   for (const x of settingsActs ?? []) appendLog({ type: 'act', class: x.cls, decision: x.decision, approved_by: x.answer ?? x.rule?.id, rung: x.rung, what: `changed ${x.keys.join(', ')} in settings by merging ${branch} at ${sha}`, refs: [target, act.id], reversible: true }, 'supervisor');
@@ -9782,7 +9784,7 @@ The graph (planning.md)
 Checks and merging (quality.md)
   check-ticket <id> [--sha s] [--title t] [--body-file f] [--pr n]   definition of done at an exact head
   check-pr --head-ref r --sha s [--title t] [--body-file f] [--repo <link> [--path <checkout>]]   what the forge's required check runs (optional; no gates, no approval acts); --repo checks a PR in another repo, in its checkout (--path names another one, such as a CI run's)
-  merge <ticket-id> | merge --plan <feature> | merge --chore <slug> [--approved qid [qid …: one per owner class it changes]] [--decision d-id] [--no-gates] [--dry-run]   supervisor: verify, run gates at the head, merge, log the act
+  merge <ticket-id> | merge --plan <feature> | merge --chore <slug> [--approved qid [qid …]] [--decision d-id] [--no-gates] [--dry-run]   supervisor: verify, run gates at the head, merge, log the act
   review-worktree <ticket-id> <sha> [--name suffix] | review-worktree --remove <path>   a final reviewer's detached worktree at exactly that sha, seeded like a worker's
 
 Sessions (worker.md)

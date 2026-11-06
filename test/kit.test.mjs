@@ -1194,13 +1194,12 @@ http.createServer((req, res) => {
     assert.match(r.out + r.err, /changes owner settings: gates \(gate-change\), upstream_repo \(governance-edit\)/);
     const Qw = must(['ask', '--question', 'Fewer workers?', '--class', 'priority-change', '--reasons', 'below-rung', '--recommendation', 'yes'], { role: 'sup' });
     must(['answer', Qw, 'yes']);
-    assert.match(dt([...args, '--approved', Qw], { role: 'sup' }).out, /the owner's answer is needed in each class: --approved <qid> <qid> … of class gate-change and governance-edit/, 'an answer of another class does not cover it');
+    assert.match(dt([...args, '--approved', Qw], { role: 'sup' }).out, /the owner's answer is needed: --approved <qid> of class gate-change or governance-edit \(q-[^ ]+ is priority-change; a ladder class's answer never covers an owner setting\)/, 'an answer of a ladder class does not cover it');
     const Qgate = must(['ask', '--question', 'Move upstream?', '--class', 'governance-edit', '--reasons', 'owner-only', '--recommendation', 'yes'], { role: 'sup' });
     must(['answer', Qgate, 'yes']);
-    // an answer in one owner class never approves another's keys: each changed class needs its own
-    const one = dt([...args, '--approved', Qgate], { role: 'sup' });
-    assert.notEqual(one.status, 0, 'a governance-edit answer does not cover a gate-change key');
-    assert.match(one.out, /changes owner settings: gates \(gate-change\); the owner's answer is needed in each class: --approved <qid> of class gate-change/);
+    // one owner answer, in any one of the changed owner_only classes, covers the bundle (the owner's ruling)
+    must([...args, '--approved', Qgate], { role: 'sup' });
+    // several answers are accepted too
     const Qlint = must(['ask', '--question', 'Add a lint gate?', '--class', 'gate-change', '--reasons', 'owner-only', '--recommendation', 'yes'], { role: 'sup' });
     must(['answer', Qlint, 'yes']);
     must([...args, '--approved', Qgate, Qlint], { role: 'sup' });
@@ -1254,16 +1253,15 @@ http.createServer((req, res) => {
     must(['answer', Qchat, 'yes', '--from-chat', '--said', 'yes watch it'], { role: 'sup' });
     const wide = dt([...margs, '--approved', Qchat], { role: 'sup' });
     assert.notEqual(wide.status, 0);
-    assert.match(wide.out, /changes owner settings: [^\n]*secret_commands \(governance-edit\)[^\n]*the owner's answer is needed in each class[^\n]*of class (gate-change and governance-edit|governance-edit and gate-change)/);
+    assert.match(wide.out, /changes owner settings: [^\n]*secret_commands \(governance-edit\)[^\n]*the owner's answer is needed: --approved <qid> of class (gate-change or governance-edit|governance-edit or gate-change)[^\n]*answered in chat; a ladder class's answer never covers an owner setting/);
     assert.doesNotMatch(wide.out, /monitors \(monitor-change\)[^\n]*needed/, 'the monitor-change answer settles monitors alone');
-    assert.match(wide.out, /outside project\/[^\n]*needs the owner's own answer of class governance-edit, process-edit, gate-change[^\n]*answered in chat/);
     // an owner_only answer that came through chat (a line written by hand: answer --from-chat refuses one) approves nothing
     const Qgov = must(['ask', '--class', 'governance-edit', '--reasons', 'owner-only', '--question', 'Change the agent command and secret commands?', '--recommendation', 'yes'], { role: 'sup' });
     assert.match(dt(['answer', Qgov, 'yes', '--from-chat', '--said', 'sure'], { role: 'sup' }).err, /reserved to the owner/);
     const ownFile = fs.readdirSync(logDir).filter((f) => f.startsWith('owner-')).map((f) => path.join(logDir, f))[0];
     const ownKept = fs.readFileSync(ownFile, 'utf8');
     fs.appendFileSync(ownFile, line({ id: Qgov, type: 'question', op: 'set', at: new Date().toISOString(), by: 'owner', channel: 'chat', said: 'sure', answer: 'yes' }));
-    assert.match(dt([...margs, '--approved', Qchat, Qgov], { role: 'sup' }).out, new RegExp(`${Qgov} was answered in chat; governance-edit is the owner's`));
+    assert.match(dt([...margs, '--approved', Qchat, Qgov], { role: 'sup' }).out, new RegExp(`${Qgov} was answered in chat; owner settings \\([^)]*\\) need the owner's own answer`));
     fs.writeFileSync(ownFile, ownKept);
     git(['worktree', 'remove', '--force', wt('mon')]);
   });
@@ -6235,8 +6233,7 @@ test('what the owner saw binds what lands: a hand-written act, or a question cha
     fs.appendFileSync(supFile, line({ id: 'a-20261105-120000001-supervisor', type: 'act', op: 'new', at: new Date().toISOString(), by: 'supervisor', class: 'governance-edit', what: 'links.console', refs: ['chore-registry', 'link:console'], reversible: true, approved_by: qid, entry_hash: hash(blk.links.console), prior_hash: hash(mainConsole) }));
     const forged = runIn(old, ['merge', '--chore', 'registry', '--dry-run', '--approved', qid], SUP);
     assert.notEqual(forged.status, 0);
-    // console's gates are gate-change: the governance-edit answer about docs doesn't settle them at all
-    assert.match(forged.out + forged.err, new RegExp(`changes links\\.console\\.gates, which ${qid} did not approve|links\\.console\\.gates \\(gate-change\\); the owner's answer is needed in each class`));
+    assert.match(forged.out + forged.err, new RegExp(`changes links\\.console\\.gates, which ${qid} did not approve`));
     fs.writeFileSync(supFile, before);
     // the question's context rewritten after the answer to show console too: widens nothing
     const shown = `links.console: main has ${canon(mainConsole)}; would be ${canon(blk.links.console)}`;
@@ -6246,7 +6243,7 @@ test('what the owner saw binds what lands: a hand-written act, or a question cha
     assert.match(runIn(old, ['log-check']).out, /may not set question\.context/);
     const widened = runIn(old, ['merge', '--chore', 'registry', '--dry-run', '--approved', qid], SUP);
     assert.notEqual(widened.status, 0);
-    assert.match(widened.out + widened.err, new RegExp(`changes links\\.console\\.gates, which ${qid} did not approve|question was changed after the owner answered it|links\\.console\\.gates \\(gate-change\\); the owner's answer is needed in each class`));
+    assert.match(widened.out + widened.err, new RegExp(`changes links\\.console\\.gates, which ${qid} did not approve|question was changed after the owner answered it`));
     fs.writeFileSync(supFile, before);
   } finally { F.done(); }
 });
@@ -6304,8 +6301,7 @@ test('merge --approved lands only the repo link entries the answer approved: a h
     write(path.join(old, 'docs/devteam/run/pr/chore-registry.md'), '# chore-registry: docs repo\n\n## One-way doors\n\nNone.\n');
     const dry = runIn(old, ['merge', '--chore', 'registry', '--dry-run', '--approved', qid], SUP);
     assert.notEqual(dry.status, 0);
-    assert.match(dry.out + dry.err, new RegExp(`changes links\\.companion\\.remote, which ${qid} did not approve`));
-    assert.match(dry.out + dry.err, /links\.console\.gates \(gate-change\); the owner's answer is needed in each class/, 'a gate field needs a gate-change answer of its own');
+    assert.match(dry.out + dry.err, new RegExp(`changes links\\.companion\\.remote, links\\.console\\.gates, which ${qid} did not approve`));
     assert.doesNotMatch(dry.out + dry.err, /links\.docs[,.]? .*did not approve|links\.docs, which/, 'the approved entry is bound');
     // without the hand edits, the same answer lands docs
     fs.writeFileSync(wf, text);
