@@ -2466,6 +2466,9 @@ export function restore(dir) {
   const f = JSON.parse(fs.readFileSync(path.join(dir, 'fork.json'), 'utf8'));
   const to = [dir, fs.realpathSync(dir)];
   const pairs = [[f.from[1], to[1]], [f.from[0], to[0]]].filter(([a]) => a);
+  // one pass, longest first, whole path segments only: the copy's own name extends the original's
+  const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const swap = new RegExp(`(${pairs.map(([a]) => a).sort((x, y) => y.length - x.length).map(esc).join('|')})(?=[\\\\/"'\\s]|$)`, 'gm');
   const ours = (p) => /[\\/]\.git([\\/]|$)/.test(p) || /[\\/]docs[\\/]devteam[\\/]run[\\/]/.test(p);
   const audit = [];
   const walk = (d) => {
@@ -2475,11 +2478,11 @@ export function restore(dir) {
       if (!e.isFile() || (e.name === 'index' && /\.git/.test(d))) continue;
       if (fs.statSync(p).size > 4 * 1024 * 1024) continue;
       const text = fs.readFileSync(p, 'latin1');
-      if (!pairs.some(([a]) => text.includes(a))) continue;
+      swap.lastIndex = 0;
+      if (!swap.test(text)) continue;
+      swap.lastIndex = 0;
       if (!ours(p) && path.dirname(p) !== dir) { audit.push(path.relative(dir, p)); continue; }
-      let out = text;
-      for (const [a, b] of pairs) out = out.split(a).join(b);
-      fs.writeFileSync(p, out, 'latin1');
+      fs.writeFileSync(p, text.replace(swap, (a) => pairs.find(([x]) => x === a)[1]), 'latin1');
     }
   };
   walk(dir);
