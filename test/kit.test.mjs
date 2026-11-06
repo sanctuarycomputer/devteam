@@ -2753,6 +2753,8 @@ test('devteam kit', async (t) => {
     lk = linkOf();
     assert.equal(lk.changed, true, 'a file changed since it was asked');
     assert.equal(lk.href, '#artifact/wt/bill-01-card/mock-one');
+    // the owner can't answer about a page that changed since it was asked
+    assert.match(dt(['answer', QA, 'yes']).err, /links the artifact mock-one, which changed since it was asked/);
     // a second draft of the same slug: ask needs at
     const w2 = path.join(repo, '.worktrees', 'chore-artifact-mock-one');
     write(path.join(w2, 'docs/devteam/project/artifacts/mock-one/index.html'), '<!doctype html><p>other');
@@ -2765,6 +2767,7 @@ test('devteam kit', async (t) => {
     fs.rmSync(w2, { recursive: true });
     const gone = json(must(['dashboard-data'])).questions.find((q) => q.id === QB).links[0];
     assert.deepEqual([gone.href, gone.gone, gone.changed], [null, true, false]);
+    assert.match(dt(['answer', QB, 'yes']).err, /links the artifact mock-one, which is no longer available/);
     // only open questions are resolved; an answered one keeps its link as asked
     must(['withdraw', QA], { role: 'sup' });
     must(['withdraw', QB], { role: 'sup' });
