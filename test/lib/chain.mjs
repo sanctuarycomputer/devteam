@@ -419,6 +419,23 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     must(['gate', 'tdd', '--', 'true'], w);
     fs.rmSync(path.join(wt('bill-01-card'), 'billing/wip.test.js'));
     assert.ok(!json(must(['metrics', '--json'])).gates.flaky_gates.some((g) => g.gate === 'tdd'), 'dirty runs are not flaky');
+    // a clean flip is flaky, and a finding while it's recent; the same flip a week old is history only
+    {
+      // the worker's log as it was, put back after: these runs are this check's only
+      const wf = path.join(repo, 'docs/devteam/run/log/bill-01-card.jsonl');
+      const keep = fs.readFileSync(wf, 'utf8');
+      dt(['gate', 'flip', '--', 'false'], w);
+      must(['gate', 'flip', '--', 'true'], w);
+      const flakyNow = () => json(must(['metrics', '--json']));
+      assert.ok(flakyNow().findings.some((f) => f.kind === 'flaky-gate' && f.subject === 'flip'), 'a fresh flake is a finding');
+      const now = fs.readFileSync(wf, 'utf8');
+      const flips = now.split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((o) => o.type === 'gate' && o.gate === 'flip');
+      fs.appendFileSync(wf, flips.map((o, i) => line({ ...o, gate: 'oldflip', id: o.id.replace(/-\d{8}-\d{9}-/, `-2020010${i + 1}-000000000-`), at: `2020-01-0${i + 1}T00:00:00.000Z` })).join(''));
+      const m = flakyNow();
+      assert.ok(m.gates.flaky_gates.some((g) => g.gate === 'oldflip'), 'its history is kept');
+      assert.ok(!m.findings.some((f) => f.kind === 'flaky-gate' && f.subject === 'oldflip'), 'a flake that has not flipped for a week raises nothing');
+      fs.writeFileSync(wf, keep);
+    }
     assert.notEqual(dt(['act', '--class', 'approve-spec', '--refs', 'm-20261101-000000000-bill-01-card', '--', 'spec ok'], { role: 'sup' }).status, 0, 'an approval names its ticket');
     const openReview = () => json(must(['messages', '--to', 'supervisor', '--open', '--json'])).some((m) => m.created_by === 'bill-01-card' && m.kind === 'review-request');
     assert.ok(openReview(), 'asked, not yet answered');

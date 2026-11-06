@@ -6683,19 +6683,22 @@ function gateStats(runs) {
   for (const [g, rs] of byGate) {
     const bySha = new Map();
     for (const r of rs.filter((x) => !x.dirty)) (bySha.get(r.sha) ?? bySha.set(r.sha, []).get(r.sha)).push(r);
-    const flaky = [...bySha.values()].filter((x) => x.some((r) => r.ok) && x.some((r) => !r.ok)).length;
-    if (flaky) flakyGates.push({ gate: g, commits: flaky });
+    const flips = [...bySha.values()].filter((x) => x.some((r) => r.ok) && x.some((r) => !r.ok));
+    if (flips.length) flakyGates.push({ gate: g, commits: flips.length, last_flip: flips.flat().map((r) => r.created_at).sort().pop() ?? null });
     gates.push({ gate: g, runs: rs.length, fail_rate: +(rs.filter((r) => !r.ok && !r.preexisting).length / rs.length).toFixed(2), preexisting_fails: rs.filter((r) => r.preexisting).length, median_seconds: +(median(rs.map((r) => r.ms)) / 1000).toFixed(1), max_seconds: +(Math.max(...rs.map((r) => r.ms)) / 1000).toFixed(1) });
   }
   const flakyTests = new Map();
   const testMs = new Map();
   for (const r of runs) for (const t of r.tests ?? []) {
     if (!t.failed) (testMs.get(t.name) ?? testMs.set(t.name, []).get(t.name)).push(t.ms);
-    if (t.failed && !r.dirty && runs.some((o) => o !== r && !o.dirty && o.gate === r.gate && o.sha === r.sha && o.ok && o.created_at >= r.created_at)) flakyTests.set(t.name, (flakyTests.get(t.name) ?? 0) + 1);
+    if (t.failed && !r.dirty && runs.some((o) => o !== r && !o.dirty && o.gate === r.gate && o.sha === r.sha && o.ok && o.created_at >= r.created_at)) {
+      const p = flakyTests.get(t.name) ?? { times: 0, last: '' };
+      flakyTests.set(t.name, { times: p.times + 1, last: r.created_at > p.last ? r.created_at : p.last });
+    }
   }
   return {
     gates: gates.sort((a, b) => b.median_seconds - a.median_seconds), flaky_gates: flakyGates,
-    flaky_tests: [...flakyTests.entries()].sort((a, b) => b[1] - a[1]).map(([name, times]) => ({ name, times })),
+    flaky_tests: [...flakyTests.entries()].sort((a, b) => b[1].times - a[1].times).map(([name, x]) => ({ name, times: x.times, last_flip: x.last || null })),
     slowest_tests: [...testMs.entries()].map(([name, xs]) => ({ name, median_seconds: +(median(xs) / 1000).toFixed(1) })).sort((a, b) => b.median_seconds - a.median_seconds).slice(0, 10),
   };
 }
@@ -7048,8 +7051,11 @@ function collectMetrics(since) {
   // Findings: blockers and inefficiencies, each with a next step.
   const f = [];
   const add = (severity, kind, subject, detail, suggestion, extra = {}) => f.push({ severity, kind, subject, detail, suggestion, ...extra });
-  for (const g of gates.flaky_gates) add('high', 'flaky-gate', g.gate, `failed then passed at the same commit ${g.commits} time(s)`, 'find the flaky tests (run with --junit) and fix or quarantine them');
-  for (const t of gates.flaky_tests.slice(0, 10)) add('high', 'flaky-test', t.name, `failed then passed at the same commit ${t.times} time(s)`, 'make it deterministic (time, order, shared state, network) or quarantine it with a ticket');
+  // A flake is a finding while it's recent: one that hasn't flipped for a week was fixed or
+  // explained, and its history stays in gates.flaky_gates without raising it again every day.
+  const flakyRecent = (at) => !!at && now - Date.parse(at) < 7 * 24 * 3600000;
+  for (const g of gates.flaky_gates.filter((x) => flakyRecent(x.last_flip))) add('high', 'flaky-gate', g.gate, `failed then passed at the same commit ${g.commits} time(s), last ${g.last_flip.slice(0, 10)}`, 'find the flaky tests (run with --junit) and fix or quarantine them');
+  for (const t of gates.flaky_tests.filter((x) => flakyRecent(x.last_flip)).slice(0, 10)) add('high', 'flaky-test', t.name, `failed then passed at the same commit ${t.times} time(s)`, 'make it deterministic (time, order, shared state, network) or quarantine it with a ticket');
   for (const g of gates.gates.filter((x) => x.median_seconds >= settings.slow_gate_minutes * 60)) add('medium', 'slow-gate', g.gate, `median ${(g.median_seconds / 60).toFixed(1)} min over ${g.runs} run(s)`, 'shard it, cache dependencies, or split fast checks from slow ones');
   for (const t of gates.slowest_tests.slice(0, 5).filter((x) => x.median_seconds >= 10)) add('low', 'slow-test', t.name, `median ${t.median_seconds}s`, 'mock the slow dependency or move it to an integration suite');
   // A share of almost nothing is noise: hotspots wait for a few hours of ticket time or a few dollars.
