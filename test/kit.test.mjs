@@ -1255,6 +1255,7 @@ http.createServer((req, res) => {
     assert.notEqual(wide.status, 0);
     assert.match(wide.out, /changes owner settings: [^\n]*secret_commands \(governance-edit\)[^\n]*the owner's answer is needed: --approved <qid> of class (gate-change or governance-edit|governance-edit or gate-change)[^\n]*answered in chat; a ladder class's answer never covers an owner setting/);
     assert.doesNotMatch(wide.out, /monitors \(monitor-change\)[^\n]*needed/, 'the monitor-change answer settles monitors alone');
+    assert.match(wide.out, /outside project\/[^\n]*needs the owner's own answer of class governance-edit, process-edit, gate-change[^\n]*answered in chat/, 'nor the kit');
     // an owner_only answer that came through chat (a line written by hand: answer --from-chat refuses one) approves nothing
     const Qgov = must(['ask', '--class', 'governance-edit', '--reasons', 'owner-only', '--question', 'Change the agent command and secret commands?', '--recommendation', 'yes'], { role: 'sup' });
     assert.match(dt(['answer', Qgov, 'yes', '--from-chat', '--said', 'sure'], { role: 'sup' }).err, /reserved to the owner/);

@@ -360,6 +360,8 @@ const OWNER_SETTINGS = {
   forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', upstream_repo: 'governance-edit',
   release: 'governance-edit', secret_commands: 'governance-edit', monitors: 'monitor-change', monitor_defaults: 'monitor-change', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit',
 };
+// The classes whose owner answer approves a chore that changes the kit (files outside project/).
+const KIT_CLASSES = ['governance-edit', 'process-edit', 'gate-change'];
 const canonical = (v) => (Array.isArray(v) ? `[${v.map(canonical).join(',')}]` : v && typeof v === 'object' ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(',')}}` : JSON.stringify(v));
 function settingsAt(ref, { orNull = false } = {}) {
   const text = git(['show', `${ref}:${projectRel}/settings.md`]);
@@ -3711,6 +3713,7 @@ function cmdMerge() {
       if (release) out(`merging deploys to production: a release-production act will be logged (${release.decision ? `under ${release.decision}` : `rung ${rung}`})`);
     }
   }
+  let kitAnswer = null;
   if (chore) {
     const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
     const kit = base ? changedFiles(base, sha).filter((f) => !f.startsWith(`${projectRel}/`)) : [];
@@ -3723,6 +3726,10 @@ function cmdMerge() {
       if (r.rule) { standing = r; out(`changes only workflow files and keeps every job; approved by the owner's standing rule ${r.rule.id} ("${r.rule.statement}")`); } else if (r.problem) fails.push(r.problem);
     }
     if (kit.length && !approved && !standing) fails.push(`touches files outside project/ (${kit.slice(0, 6).join(', ')}${kit.length > 6 ? ', …' : ''}); the owner's answer is needed: merge --chore ${chore} --approved <qid>`);
+    // The kit is the owner's: only their own answer in a kit class approves it, never a ladder
+    // class's answer (monitor-change, say) or one relayed from chat.
+    else if (kit.length && approved && !answers.some((v) => KIT_CLASSES.includes(v.class) && v.channel !== 'chat')) fails.push(`touches files outside project/ (${kit.slice(0, 6).join(', ')}${kit.length > 6 ? ', …' : ''}); that needs the owner's own answer of class ${KIT_CLASSES.join(', ')} (${approvedIds.map((q, i) => `${q} is ${answers[i].class ?? 'classless'}${answers[i].channel === 'chat' ? ', answered in chat' : ''}`).join('; ')})`);
+    if (kit.length) kitAnswer = answers.find((v) => KIT_CLASSES.includes(v.class) && v.channel !== 'chat')?.id ?? null;
   }
   for (const av of answers) {
     const approved = av.id;
@@ -3813,7 +3820,7 @@ function cmdMerge() {
   const cls = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
   // a release or settings-class decision is carried out by its own act below, not by the merge's
   const own = release?.decision || (settingsActs ?? []).some((x) => x.decision);
-  const act = appendLog({ type: 'act', decision: own ? undefined : citing(), class: cls, what: `merged ${branch} at ${sha}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag}, verbatim)` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [], reversible: false, approved_by: approved ?? standing?.rule.id ?? undefined, ...onR }, 'supervisor');
+  const act = appendLog({ type: 'act', decision: own ? undefined : citing(), class: cls, what: `merged ${branch} at ${sha}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag}, verbatim)` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [], reversible: false, approved_by: kitAnswer ?? approved ?? standing?.rule.id ?? undefined, ...onR }, 'supervisor');
   // each owner setting class the merge changes is an act of that class, with what settled it: the
   // owner's answer in it, their standing rule, a decision in it, or its rung
   for (const x of settingsActs ?? []) appendLog({ type: 'act', class: x.cls, decision: x.decision, approved_by: x.answer ?? x.rule?.id, rung: x.rung, what: `changed ${x.keys.join(', ')} in settings by merging ${branch} at ${sha}`, refs: [target, act.id], reversible: true }, 'supervisor');
