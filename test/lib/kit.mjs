@@ -1,5 +1,5 @@
 // Helpers the kit's test files share. Importing it gives the process its own tmux server and its
-// own block of ports (see ports.mjs), so test files can run side by side.
+// own block of ports (ports.mjs), so test files run side by side.
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
@@ -20,22 +20,29 @@ export const kit = path.resolve(testDir, '..', 'docs', 'devteam');
 export function sessionOf(root, name) { return `devteam-${name}-${crypto.createHash('sha1').update(fs.realpathSync(root)).digest('hex').slice(0, 6)}`; }
 export const line = (o) => `${JSON.stringify({ v: 1, ...o })}\n`;
 // tmux in this test talks to its own server, never the developer's (or a live fleet's) sessions.
-process.env.TMUX_TMPDIR = fs.mkdtempSync(path.join(os.tmpdir(), 'dt-tmux-'));
+// tmux falls back to the machine's default server when TMUX_TMPDIR names a directory that is gone,
+// and a kill-server there takes down every live fleet on the machine. So a shim first on PATH runs
+// tmux only while TMUX_TMPDIR is an existing private dt-tmux-* directory, and this run's directory
+// is removed only as the process exits, after its server.
+export const tmuxRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dt-tmux-'));
+process.env.TMUX_TMPDIR = tmuxRoot;
 delete process.env.TMUX;
+// a devteam session's own home never reaches the kits under test
+delete process.env.DEVTEAM_HOME;
 delete process.env.TMUX_PANE;
-// and never the machine's default server, which tmux falls back to when TMUX_TMPDIR is unset or
-// names a directory that is gone: every tmux a test or the kit runs is bin/tmux, which refuses then.
-const shims = path.join(testDir, 'lib', 'bin');
-const isShim = (f) => { try { return fs.readFileSync(f, 'utf8').includes('DEVTEAM_TEST_REAL_TMUX'); } catch { return false; } };
-process.env.DEVTEAM_TEST_REAL_TMUX = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean).map((d) => path.join(d, 'tmux')).find((f) => { try { fs.accessSync(f, fs.constants.X_OK); return fs.statSync(f).isFile() && !isShim(f); } catch { return false; } }) ?? '';
-process.env.PATH = `${shims}${path.delimiter}${process.env.PATH}`;
+export const realTmux = spawnSync('sh', ['-c', 'command -v tmux'], { encoding: 'utf8' }).stdout?.trim();
+export const tmuxShim = fs.mkdtempSync(path.join(os.tmpdir(), 'dt-tmuxshim-'));
+fs.writeFileSync(path.join(tmuxShim, 'tmux'), `#!/bin/sh\ncase "$TMUX_TMPDIR" in */dt-tmux-*) [ -d "$TMUX_TMPDIR" ] && exec ${JSON.stringify(realTmux || 'tmux-not-installed')} "$@" ;; esac\necho "tmux refused: TMUX_TMPDIR ($TMUX_TMPDIR) is not an existing private test directory" >&2\nexit 1\n`, { mode: 0o755 });
+process.env.PATH = `${tmuxShim}${path.delimiter}${process.env.PATH}`;
+process.on('exit', () => {
+  spawnSync('tmux', ['kill-server']);
+  fs.rmSync(tmuxRoot, { recursive: true, force: true });
+  fs.rmSync(tmuxShim, { recursive: true, force: true });
+});
 // Dashboards started by tests never use the machine's real ports or become its hub: the hub and
 // the instance block move to ports the tests own.
-// Each run owns a block of 100 ports, so two suites on one machine don't collide either: the
-// file-wide hub and instance block at X, the ports test at X+30, the hub test at X+60.
 process.env.DEVTEAM_HUB_PORT = String(PORTS);
 process.env.DEVTEAM_PORT_BASE = String(PORTS + 1);
-process.on('exit', () => { spawnSync('tmux', ['kill-server']); fs.rmSync(process.env.TMUX_TMPDIR, { recursive: true, force: true }); });
 export const hasTmux = spawnSync('tmux', ['-V']).status === 0;
 // A port the OS says is free: a random one in a range can land on a machine's own listener (macOS's
 // AirPlay receiver holds 5000 and answers 403), which then passes the test's startup probe.
@@ -87,7 +94,7 @@ export function fleetFixture(name) {
     g(['commit', '-qm', 'chore-log: log through now'], old);
     g(['push', '-q', 'origin', 'main'], old);
   };
-  const done = () => { spawnSync('tmux', ['kill-server'], { env: env({}) }); fs.rmSync(tmuxDir, { recursive: true, force: true }); if (!process.env.DEVTEAM_TEST_KEEP) fs.rmSync(base, { recursive: true, force: true }); else console.log(`${name} fixture kept at ${base}`); };
+  const done = () => { spawnSync('tmux', ['kill-server'], { env: { ...process.env, TMUX_TMPDIR: tmuxDir } }); fs.rmSync(tmuxDir, { recursive: true, force: true }); if (!process.env.DEVTEAM_TEST_KEEP) fs.rmSync(base, { recursive: true, force: true }); else console.log(`${name} fixture kept at ${base}`); };
   return { base, org, old, neu, home, env, run, ok, g, land, done };
 }
 
@@ -195,6 +202,43 @@ export function monoFixture(name) {
   return { ...F, settingsFile, edit, lines, STD };
 }
 
+// Three repos: home (the kit, project/, its log) and two siblings, each a bare remote plus a
+// checkout laid out where path says (../<id>), forge git so no GitHub is needed. Console's main
+// branch is trunk.
+export function multiFixture(name) {
+  const F = monoFixture(name);
+  const { base, g, old } = F;
+  const sibling = (id, branch, files) => {
+    const bare = path.join(base, `${id}.git`);
+    const co = path.join(base, id);
+    g(['init', '-q', '--bare', '-b', branch, bare], base);
+    fs.mkdirSync(co);
+    g(['init', '-q', '-b', branch], co);
+    for (const [k, v] of [['user.email', 't@t'], ['user.name', 't']]) g(['config', k, v], co);
+    g(['remote', 'add', 'origin', bare], co);
+    for (const [f, text] of Object.entries(files)) write(path.join(co, f), text);
+    g(['add', '-A'], co);
+    g(['commit', '-qm', 'init'], co);
+    g(['push', '-q', 'origin', branch], co);
+    g(['fetch', '-q', 'origin'], co);
+    return { bare, co };
+  };
+  const c = sibling('console', 'trunk', { 'src/main.js': 'console\n', 'package.json': '{}\n', '.gitignore': 'node_modules/\n' });
+  const p = sibling('companion', 'main', { 'app/index.js': 'companion\n', 'README.md': 'c\n' });
+  F.lines({ ...F.STD, console: { link: 'console' }, companion: { link: 'companion' } }, { links: {
+    console: { kind: 'repo', title: 'Electron console', remote: c.bare, main_branch: 'trunk', gates: { test: 'test -f src/main.js' } },
+    companion: { kind: 'repo', title: 'Companion app', remote: p.bare },
+  } });
+  // the kit is home's, run by absolute path from any checkout (a sibling worktree has no kit)
+  const kitDT = path.join(old, 'docs/devteam/scripts/devteam.mjs');
+  const runIn = (cwd, args, role = {}, extra = {}, input) => { const r = spawnSync(process.execPath, [kitDT, ...args], { cwd, env: { ...F.env(role), ...extra }, encoding: 'utf8', input }); return { status: r.status, out: r.stdout.trim(), err: r.stderr.trim() }; };
+  const okIn = (cwd, args, role, extra, input) => { const r = runIn(cwd, args, role, extra, input); assert.equal(r.status, 0, `${args.join(' ')}: ${r.err || r.out}`); return r.out; };
+  // git prints real paths (/private/var on macOS); compare paths through this
+  const real = (x) => fs.realpathSync(x);
+  const ticket = (id, extra = {}) => okIn(old, ['ticket', 'add', id, '--json', JSON.stringify({ title: id, feature: 'chores', component: id.split('-')[0], kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['src/**'], done_when: ['its suite passes in CI'], notes: 'n', ...extra })], { DEVTEAM_ROLE: 'supervisor' });
+  return { ...F, consoleOrigin: c.bare, console: c.co, companionOrigin: p.bare, companion: p.co, kitDT, runIn, okIn, ticket, real };
+}
+
 // A git on PATH ahead of the real one: it logs every call to GIT_SPY_LOG, and GIT_SHIM_MODE makes
 // it act out a git it isn't: "old" is 2.34 (no merge-tree --write-tree), "lstree" fails every ls-tree.
 export const REAL_GIT = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
@@ -238,3 +282,33 @@ export function statusWithHost(port, route, host, method = 'GET', headers = {}) 
     r.end();
   });
 }
+
+// ===== components in other repos =====
+
+// A copy of the kit in a repo with no project settings (a sibling the kit was copied into by
+// mistake, before it has any tickets/) is no home: nothing runs but init and help.
+
+// A sibling worker's worktree is its repo's, so home's git can't remove it: worker <id> --remove
+// does, through that repo, and prunes that repo's list, so a later worker <id> starts cleanly.
+
+// Views route by name (repoOfTicketLink, factsRepo, repoReadable), so a machine without one
+// sibling's checkout still shows status and metrics; acts route by object and fail fast.
+
+// Across repos neither the branch nor the gates can see a provider that hasn't landed, so the
+// ticket that depends on it lands only after it, by merge or check-pr; a forge-UI merge that lands
+// it first is a finding.
+
+// A worker's deny rules name its own repo's main, and a merge no merge act made, on any repo's
+// main, is a finding (a worker's push, the forge's button), counted only after the upgrade.
+
+// The tick reads every repo's main as its origin has it now: observe-metrics fetches each repo
+// link's main before it reads anything, so a push from another clone (or a forge-UI merge) shows.
+
+// gh resolves a single-repo project's base repo itself (gh repo set-default, else the only remote),
+// so home's gh calls name no repo, as before repo links; only a sibling's say -R.
+
+// The drawer's peek cache, loaded from index.html by itself: a file is one object per repo and ref,
+// so home's README.md and a sibling's README.md never share a cached Commits list.
+
+// One answer may approve a bundle of repo link changes, but only the bundle its question showed:
+// merge binds each changed owner-kind entry to an act of that answer with the entry that lands.

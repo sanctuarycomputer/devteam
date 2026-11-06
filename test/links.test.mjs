@@ -146,7 +146,10 @@ test('link add, set and rm for url links: the supervisor writes settings and log
     assert.match(run(old, ['link', 'set', 'figma', 'url', 'http://insecure.test'], SUP).err, /url must start with https:\/\//, 'validated before it is written');
     assert.match(run(old, ['link', 'set', 'figma', 'kind', 'repo'], SUP).err, /a link never changes kind in place/);
     assert.match(run(old, ['link', 'set', 'figma', 'colour', 'red'], SUP).err, /"colour" is not a field of a url link/);
-    assert.match(run(old, ['link', 'add', 'console', '--kind', 'repo', '--remote', 'usbclub/console', '--title', 'C'], SUP).err, /a repo link is the owner's \(governance-edit\)/);
+    // a repo link is the owner's: the supervisor drafts it as a question, and writes nothing
+    const sBefore = fs.readFileSync(path.join(old, 'docs/devteam/project/settings.md'), 'utf8');
+    assert.match(ok(old, ['link', 'add', 'console', '--kind', 'repo', '--remote', 'usbclub/console', '--title', 'C'], SUP), /asked the owner \(governance-edit\); nothing is written until it is answered/);
+    assert.equal(fs.readFileSync(path.join(old, 'docs/devteam/project/settings.md'), 'utf8'), sBefore);
     assert.match(run(old, ['link', 'add', 'x', '--kind', 'doc', '--title', 'X'], SUP).err, /--kind is one of: repo, url/);
     const l = json(ok(old, ['links', '--json']));
     assert.equal(l.home.name, 'home');

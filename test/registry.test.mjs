@@ -40,9 +40,9 @@ test('the registry at landing: checked whatever the PR, url edits tied to regist
     // a bad registry is refused at landing, whatever the PR
     const bad = chore('bad', (w) => edit((j) => { j.links.notes = { kind: 'doc', title: 'D' }; }, w));
     assert.match(run(old, ['check-pr', '--head-ref', 'chore-bad', '--sha', bad.sha, '--title', 'chore-bad: x', '--body-file', body]).out, /links\.notes: unknown kind "doc"/);
-    // a component on a repo link is refused at landing with the this-release note, not passed and then mis-reported
+    // a component on a repo link lands (components in other repos); its registry is still checked at landing
     const comp = chore('console-comp', (w) => edit((j) => { j.components.desktop = { link: 'console' }; }, w));
-    assert.match(run(old, ['check-pr', '--head-ref', 'chore-console-comp', '--sha', comp.sha, '--title', 'chore-console-comp: x', '--body-file', body]).out, /components\.desktop: link "console".*only home holds components and tickets in this release/);
+    assert.match(run(old, ['check-pr', '--head-ref', 'chore-console-comp', '--sha', comp.sha, '--title', 'chore-console-comp: x', '--body-file', body]).out, /^ok: chore-console-comp passes the checks/);
     // a ticket PR is judged by main's settings, so rewriting settings.md can't switch its footprint off
     ok(old, ['ticket', 'add', 'api-01-sneak', '--json', JSON.stringify({ title: 'x', feature: 'chores', component: 'api', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['api/**', 'docs/devteam/project/settings.md'], done_when: ['the api suite passes'], notes: 'n' })], SUP);
     const tw = path.join(old, '.worktrees', 'api-01-sneak');

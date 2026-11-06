@@ -39,7 +39,9 @@ const FORKS = [
   ['approve-plan accepts', "a ticket's merge gate", 'spend is measured'],
   ['review questions: a page'],
   ['review questions on the dashboard'],
+  ['dashboard: Library and the artifact viewer'],
   ['review permanence'],
+  ['artifacts: new, check, list', 'artifacts: check-pr and merge refuse', 'artifacts: the dashboard serves them', 'artifacts: a question links one', 'artifacts: the Library data'],
 ];
 
 const forked = new Map();
