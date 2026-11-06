@@ -33,7 +33,8 @@
   .tab:hover { color: var(--fg); background: var(--hover); }
   .tab[aria-selected="true"] { color: var(--fg); background: var(--bg); border-color: var(--line); }
   .tab.gone { opacity: .45; }
-  .badge { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; background: var(--amber); color: #000; font: 600 11px/18px var(--sans); text-align: center; }
+  /* as the dashboard's nav shows its Inbox count */
+  .badge { font-size: 11px; color: var(--red-fg); font-variant-numeric: tabular-nums; }
   #notify { flex: 0 0 auto; padding-bottom: 7px; color: var(--muted); font-size: 12px; }
   #notify button { font: inherit; color: var(--fg-2); background: none; border: 1px solid var(--line-2); border-radius: 6px; padding: 2px 8px; cursor: pointer; }
   main { flex: 1 1 auto; position: relative; }
@@ -88,9 +89,10 @@ function select(root) {
     it.frame = document.createElement('iframe');
     it.frame.title = String(it.x.name);
     // A dashboard runs scripts, fetches its own origin, posts forms and opens links in new tabs; it
-    // never navigates this page, whatever answers in the block.
-    it.frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads');
-    it.frame.setAttribute('allow', 'clipboard-write');
+    // never navigates this page, whatever answers in the block. A nested frame can't gain what this
+    // one lacks, so modals, pointer lock and fullscreen are here for the dashboard's artifact viewer.
+    it.frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals allow-pointer-lock');
+    it.frame.setAttribute('allow', 'clipboard-write; fullscreen');
     it.frame.src = urlOf(it.x);
     framesEl.append(it.frame);
   }

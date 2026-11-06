@@ -119,6 +119,11 @@
               "question": {
                 "description": "For owner: the yes/no question that says it is met.",
                 "type": "string"
+              },
+              "link": {
+                "description": "For repo: the repo link whose main the check runs on (absent: home).",
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$"
               }
             },
             "additionalProperties": false
@@ -143,6 +148,15 @@
             "items": {
               "type": "string"
             }
+          },
+          "registry_precondition": {
+            "description": "The number (1-based) of the precondition that is \"the registry is complete\" (planning.md §7). goal-readiness for this goal waits for the owner's yes to a registry-attest question about it. Set by goal add|set --registry-precondition n; null clears it. The check reads this field, never a precondition's wording.",
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1,
+            "x-tip": "Which precondition is \"the registry is complete\": marking ready waits for your yes that the registry lists everything."
           },
           "priority": {
             "description": "Its order among the goals: 1 comes first.",
@@ -394,6 +408,14 @@
             "description": "The design document it implements.",
             "type": "string"
           },
+          "links": {
+            "description": "Registry links (settings.md links) every ticket of this feature needs, by id.",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$"
+            }
+          },
           "notes": {
             "description": "Anything else the planner wanted on record.",
             "type": "string"
@@ -490,6 +512,22 @@
               "minLength": 1
             },
             "minItems": 1
+          },
+          "touches_components": {
+            "description": "On a contract or integration ticket: other components in the same repo whose lines its touches may fall in (planning.md D2, D7).",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$"
+            }
+          },
+          "links": {
+            "description": "Registry links (settings.md links) this ticket's worker needs, by id; they join its prompt's Links block.",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$"
+            }
           },
           "done_when": {
             "description": "What must be true for it to count as done.",
@@ -666,6 +704,12 @@
             "type": "boolean",
             "description": "A ratchet gate that failed here and at the merge base too: pre-existing debt, allowed; not counted in the gate's fail rate.",
             "x-tip": "It failed on main too: existing debt, allowed, not counted against the check."
+          },
+          "repo": {
+            "description": "The repo link the gate ran in, for a ticket outside home (absent: home).",
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+            "x-tip": "The repo this check ran in, when not this one."
           }
         },
         "additionalProperties": false,
@@ -807,6 +851,44 @@
               "value"
             ],
             "additionalProperties": false
+          },
+          "link": {
+            "description": "On a link observation: the resource the work depends on, as the owner or a worker gave it (the supervisor folds these into the registry, settings.md links).",
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string",
+                "description": "https only, and never with credentials (no user or token before an @ in the host)",
+                "pattern": "^https://[^/?#@\\s]+([/?#]\\S*)?$"
+              },
+              "path": {
+                "type": "string",
+                "pattern": "^(?!/)(?!.*\\.\\.)[^\\s]+$"
+              },
+              "title": {
+                "type": "string",
+                "description": "One line of plain text, at most 120 characters: no line breaks, tabs, or control or bidi characters (it reaches workers' prompts).",
+                "minLength": 1,
+                "maxLength": 120,
+                "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u061c\\u200e\\u200f\\u2028\\u2029\\u202a-\\u202e\\u2066-\\u2069]*$"
+              },
+              "for": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "notes": {
+                "type": "string",
+                "description": "One line of plain text, at most 500 characters, as the title.",
+                "maxLength": 500,
+                "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u061c\\u200e\\u200f\\u2028\\u2029\\u202a-\\u202e\\u2066-\\u2069]*$"
+              }
+            },
+            "required": [
+              "title"
+            ],
+            "additionalProperties": false
           }
         },
         "additionalProperties": false,
@@ -835,9 +917,9 @@
             "type": "string"
           },
           "scope": {
-            "description": "Where it applies: the whole project, a component, a feature, a kind of decision or a chore.",
+            "description": "Where it applies: the whole project, a component, a feature, a kind of decision, a chore, or a link (link:<id>: wherever that link is in the prompt).",
             "type": "string",
-            "pattern": "^(project|component:[a-z0-9-]+|feature:[a-z0-9-]+|class:[a-z0-9-]+|chore:[a-z0-9-]+)$"
+            "pattern": "^(all|project|component:[a-z0-9-]+|feature:[a-z0-9-]+|class:[a-z0-9-]+|chore:[a-z0-9-]+|link:[a-z0-9-]+)$"
           },
           "status": {
             "description": "candidate until you keep it; accepted ones go into the instructions of every agent they apply to; stale or retired ones no longer do.",
@@ -866,6 +948,10 @@
             "items": {
               "type": "string"
             }
+          },
+          "owner_note": {
+            "description": "The owner's refinement of the lesson, given when they keep it: prompts show it with the statement. Only the owner's own lines carry it.",
+            "type": "string"
           }
         },
         "additionalProperties": false,
@@ -1059,7 +1145,7 @@
           },
           "links": {
             "type": "array",
-            "description": "Artifacts the owner must look at to answer (a spec, a plan, a mock): a path in the repo at ref (default main), or a URL.",
+            "description": "What the owner must look at to answer (a spec, a plan, a mock): a path in the repo at ref (default main), a URL, a registry link by id, or an artifact by slug.",
             "items": {
               "type": "object",
               "properties": {
@@ -1078,6 +1164,31 @@
                 "url": {
                   "type": "string",
                   "pattern": "^https?://"
+                },
+                "link": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+                  "description": "A registry link's id (settings.md links); the inbox shows its locator."
+                },
+                "artifact": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+                  "description": "An artifact's slug (project/artifacts/<slug>/); the dashboard opens it in its viewer."
+                },
+                "at": {
+                  "type": "string",
+                  "pattern": "^(main|[A-Za-z0-9][A-Za-z0-9._-]*)$",
+                  "description": "Where the artifact was when asked: main (landed) or the worktree drawing it."
+                },
+                "sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$",
+                  "description": "The artifact's fingerprint when asked, written by ask; the dashboard says when it has changed since."
+                },
+                "name": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+                  "description": "A short key, unique in the question; its text and context name the link inline as [[name]]."
                 }
               },
               "required": [
@@ -1085,7 +1196,7 @@
               ],
               "additionalProperties": false
             },
-            "x-tip": "What to look at to answer: files in the repo or URLs."
+            "x-tip": "What to look at to answer: files in the repo, URLs, or artifacts."
           },
           "rule_scope": {
             "type": "string",
@@ -1393,6 +1504,12 @@
             "const": true,
             "description": "On the owner's answer to a review: sent back without a result; the answer says why.",
             "x-tip": "You sent the review back without a result."
+          },
+          "question_hash": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{16}$",
+            "description": "On the owner's answer: the hash of the question as the owner saw it (every field it was asked with). An answer whose question no longer has this hash answers nothing: the question was changed after the owner answered it, so it is open again.",
+            "x-tip": "The question as you saw it when you answered."
           }
         },
         "additionalProperties": false,
@@ -1403,7 +1520,8 @@
         "x-set-only": [
           "secrets_posted",
           "result",
-          "declined"
+          "declined",
+          "question_hash"
         ]
       },
       "decision": {
@@ -1608,6 +1726,30 @@
             ],
             "additionalProperties": false,
             "x-tip": "The ticket numbers reserved for a planner's feature."
+          },
+          "entry_hash": {
+            "description": "On a registry-edit act (link add|set|rm), or a governance-edit or gate-change act from link … --approved: the link entry it wrote, as sha256:<hex> of its canonical JSON, or null when it removed the link. merge lands a change to a url link only when an act naming the link recorded exactly the entry that lands, and a change to a repo link only when an act of the --approved answer naming the link did. An act without it (written before it existed) never matches.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "x-tip": "The link entry this act wrote."
+          },
+          "prior_hash": {
+            "description": "On a registry-edit act (link add|set|rm), or a governance-edit or gate-change act from link … --approved: the link entry it replaced (for an --approved act, the entry main had), as sha256:<hex> of its canonical JSON, or null when it added the link. merge lands a change to a url link only when acts naming the link lead from the entry main has (prior_hash) to the one that lands (entry_hash), and link land carries an entry only on the same terms, so an act made from an entry main has since changed (a stale set, an rm of an earlier entry) never lands. An act without it (written before it existed) never matches.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "x-tip": "The link entry this act replaced."
+          },
+          "repo": {
+            "description": "The repo link the act was about (a merge, a release), when not home.",
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+            "x-tip": "The repo this was in, when not this one."
           }
         },
         "additionalProperties": false,
@@ -1776,6 +1918,7 @@
           "horizon",
           "non_goals",
           "preconditions",
+          "registry_precondition",
           "priority",
           "milestones",
           "plan_after",
@@ -1790,6 +1933,7 @@
           "horizon",
           "non_goals",
           "preconditions",
+          "registry_precondition",
           "priority",
           "milestones",
           "status",
@@ -1805,6 +1949,7 @@
           "preconditions",
           "stories",
           "design",
+          "links",
           "notes"
         ],
         "supervisor": [
@@ -1813,6 +1958,7 @@
           "preconditions",
           "stories",
           "design",
+          "links",
           "notes"
         ],
         "owner": [
@@ -1821,6 +1967,7 @@
           "preconditions",
           "stories",
           "design",
+          "links",
           "notes"
         ]
       },
@@ -1834,6 +1981,8 @@
           "depends_on",
           "contracts",
           "touches",
+          "touches_components",
+          "links",
           "done_when",
           "one_way_doors",
           "superseded_by",
@@ -1849,6 +1998,8 @@
           "depends_on",
           "contracts",
           "touches",
+          "touches_components",
+          "links",
           "done_when",
           "one_way_doors",
           "superseded_by",
@@ -1864,6 +2015,8 @@
           "depends_on",
           "contracts",
           "touches",
+          "touches_components",
+          "links",
           "done_when",
           "one_way_doors",
           "superseded_by",
@@ -1883,7 +2036,8 @@
           "standing_rule",
           "secrets_posted",
           "result",
-          "declined"
+          "declined",
+          "question_hash"
         ]
       },
       "knowledge": {
@@ -1897,7 +2051,8 @@
           "status",
           "confidence",
           "statement",
-          "scope"
+          "scope",
+          "owner_note"
         ]
       },
       "problem": {
