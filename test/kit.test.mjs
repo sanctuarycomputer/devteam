@@ -734,6 +734,13 @@ test('devteam kit', async (t) => {
       assert.match(dt(['act', '--decision', fid, '--', 'dropped it'], sup).err, /records authority it doesn't have \(gate-change is the owner's/);
       fs.appendFileSync(supFile, line({ id: 'd-20261101-235959001-supervisor', type: 'decision', op: 'new', at: new Date().toISOString(), by: 'supervisor', class: 'production-migration', what: 'migrate it', refs: ['bill-01-card'], authority: 'rung', reversible: true }));
       assert.match(dt(['act', '--decision', 'd-20261101-235959001-supervisor', '--', 'shipped'], sup).err, /production-migration is not on rung 3/);
+      // nor stand on a default the supervisor applied itself where the class isn't on rung 2: a question
+      // with a default, its own "defaulted" line and a decision, all by hand, approve nothing
+      const hq = 'q-20261101-235958000-supervisor';
+      fs.appendFileSync(supFile, line({ id: hq, type: 'question', op: 'new', at: new Date().toISOString(), by: 'supervisor', kind: 'owner-decision', class: 'production-migration', question: 'Migrate?', recommendation: 'yes', default: 'yes' }));
+      fs.appendFileSync(supFile, line({ id: hq, type: 'question', op: 'set', at: new Date().toISOString(), by: 'supervisor', status: 'defaulted' }));
+      fs.appendFileSync(supFile, line({ id: 'd-20261101-235959009-supervisor', type: 'decision', op: 'new', at: new Date().toISOString(), by: 'supervisor', class: 'production-migration', what: 'migrate it', refs: ['bill-01-card'], authority: 'default', approved_by: hq, rung: 2 }));
+      assert.match(dt(['act', '--decision', 'd-20261101-235959009-supervisor', '--', 'migrated'], sup).err, /records authority it doesn't have \(production-migration is not on rung 2 or above, so a default is not approval there/);
       // nor reuse an owner's answer that already approved a call (D used Qx): the earliest call is the one it approved
       const rid = 'd-20261101-235959002-supervisor';
       fs.appendFileSync(supFile, line({ id: rid, type: 'decision', op: 'new', at: new Date(Date.now() + 1000).toISOString(), by: 'supervisor', class: 'release-scope', what: 'ship something else', refs: ['bill-02-x'], authority: 'answer', approved_by: Qx }));
