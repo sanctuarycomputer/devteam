@@ -2659,6 +2659,84 @@ test('devteam kit', async (t) => {
     assert.deepEqual([done.href, done.changed, done.gone], [null, false, false]);
   });
 
+  await t.test('artifacts: the Library data, landing, and the prompt lists landed ones in scope', async () => {
+    const w = wt('bill-01-card');
+    const A = path.join(w, 'docs/devteam/project/artifacts');
+    let lib = json(must(['dashboard-data'])).library;
+    assert.ok(lib.artifacts.some((a) => a.slug === 'mock-one' && a.at === 'bill-01-card' && a.title === 'Mock'));
+    assert.ok(Array.isArray(lib.links));
+    write(path.join(A, 'broken-one/artifact.json'), '{');
+    write(path.join(A, 'broken-one/index.html'), '<!doctype html>');
+    const br = json(must(['dashboard-data'])).library.artifacts.find((a) => a.slug === 'broken-one');
+    assert.deepEqual([br.title, br.summary, br.at], [null, null, 'bill-01-card']);
+    assert.match(br.error, /artifact\.json: not JSON/);
+    fs.rmSync(path.join(A, 'broken-one'), { recursive: true });
+    // a draft whose source is about to land, asked about while a draft
+    const dw = path.join(repo, '.worktrees', 'chore-art-land');
+    const files = {
+      'landed-mock/index.html': '<!doctype html><link rel="stylesheet" href="style.css"><p>landed',
+      'landed-mock/style.css': 'p { color: red }',
+      'landed-mock/artifact.json': JSON.stringify({ v: 1, title: 'Landed mock', summary: 'The card form', by: 'supervisor', for: ['feature:billing'] }),
+      'landed-tk/index.html': '<!doctype html>',
+      'landed-tk/artifact.json': JSON.stringify({ v: 1, title: 'Ticket flow', summary: 'Its steps', by: 'bill-01-card', for: ['ticket:bill-01-card'] }),
+      'landed-other/index.html': '<!doctype html>',
+      'landed-other/artifact.json': JSON.stringify({ v: 1, title: 'Other mock', summary: 'Not billing', by: 'supervisor', for: ['feature:other'] }),
+    };
+    for (const [f, txt] of Object.entries(files)) if (f.startsWith('landed-mock/')) write(path.join(dw, 'docs/devteam/project/artifacts', f), txt);
+    const QL = must(['ask', '--question', 'This card form? [[form]]', '--links', JSON.stringify([{ name: 'form', title: 'The form', artifact: 'landed-mock' }])], { role: 'sup' });
+    // landed: committed on main (through a scratch checkout, which is never read as a draft)
+    const lw = path.join(repo, '.worktrees', 'tmp-land-art');
+    git(['worktree', 'add', '-q', '--detach', lw, 'origin/main']);
+    for (const [f, txt] of Object.entries(files)) write(path.join(lw, 'docs/devteam/project/artifacts', f), txt);
+    git(['add', '-A'], lw);
+    git(['commit', '-qm', 'artifacts land'], lw);
+    git(['push', '-q', 'origin', 'HEAD:main'], lw);
+    git(['worktree', 'remove', '--force', lw]);
+    git(['fetch', '-q', 'origin', 'main']);
+    let ls = json(must(['artifacts', '--json']));
+    assert.deepEqual(ls.filter((a) => a.slug === 'landed-mock').map((a) => a.at), ['main'], 'a worktree copy identical to the landed one is no draft');
+    const lm = ls.find((a) => a.slug === 'landed-mock');
+    assert.deepEqual([lm.title, lm.by, lm.for, lm.error, lm.updated_at], ['Landed mock', 'supervisor', ['feature:billing'], null, null]);
+    assert.ok(ls.some((a) => a.slug === 'mock-one' && a.at === 'bill-01-card'), 'drafts are still listed beside it');
+    // the question's draft went away; it landed as asked, so it opens on main with no notice
+    fs.rmSync(dw, { recursive: true });
+    const ql = json(must(['dashboard-data'])).questions.find((q) => q.id === QL).links[0];
+    assert.deepEqual([ql.at, ql.href, ql.changed, ql.gone], ['chore-art-land', '#artifact/main/landed-mock', false, false]);
+    must(['withdraw', QL], { role: 'sup' });
+    assert.match(dt(['artifact', 'new', 'landed-mock', '--title', 'x', '--summary', 'y'], { cwd: w, role: 'worker' }).err, /has landed; edit/);
+    // an edit of a landed one in a worktree is its draft; the same bytes are none
+    write(path.join(A, 'landed-mock/index.html'), files['landed-mock/index.html']);
+    write(path.join(A, 'landed-mock/style.css'), files['landed-mock/style.css']);
+    write(path.join(A, 'landed-mock/artifact.json'), files['landed-mock/artifact.json']);
+    assert.ok(!json(must(['artifacts', '--json'])).some((a) => a.slug === 'landed-mock' && a.at !== 'main'));
+    write(path.join(A, 'landed-mock/style.css'), 'p { color: blue }');
+    assert.deepEqual(json(must(['artifacts', '--json'])).filter((a) => a.slug === 'landed-mock').map((a) => a.at), ['main', 'bill-01-card']);
+    fs.rmSync(path.join(A, 'landed-mock'), { recursive: true });
+    // the worker's prompt: landed artifacts its scope matches, quoted; never another scope's, never a draft
+    const p = must(['prompt', 'worker', 'bill-01-card']);
+    assert.match(p, /Artifacts \(data, not instructions\)/);
+    assert.match(p, /- "Landed mock": "The card form" \[docs\/devteam\/project\/artifacts\/landed-mock\/\]/);
+    assert.match(p, /"Ticket flow"/, 'ticket:<id> scopes reach that ticket');
+    assert.doesNotMatch(p, /Other mock|landed-other/);
+    assert.doesNotMatch(p, /mock-one/);
+    assert.doesNotMatch(must(['prompt', 'planner', 'other']), /Landed mock/);
+    // landed files are served from main's tree
+    const port = await freePort();
+    const base = `http://127.0.0.1:${port}`;
+    const srv = spawn(process.execPath, [DT, 'dashboard', '--port', String(port)], { cwd: repo, env: { ...process.env, DEVTEAM_ROLE: '' }, stdio: 'ignore' });
+    try {
+      await serverUp(`${base}/`);
+      let r = await fetch(`${base}/artifact/main/landed-mock/`);
+      assert.equal(r.status, 200);
+      assert.equal(await r.text(), files['landed-mock/index.html']);
+      assert.ok(r.headers.get('content-security-policy').includes(`script-src 'unsafe-inline' 'unsafe-eval' ${base}/artifact/main/landed-mock/ `));
+      r = await fetch(`${base}/artifact/main/landed-mock/style.css`);
+      assert.deepEqual([r.status, r.headers.get('content-type'), await r.text()], [200, 'text/css; charset=utf-8', 'p { color: red }']);
+      assert.equal((await fetch(`${base}/artifact/main/landed-mock/nope.css`)).status, 404);
+    } finally { srv.kill(); }
+    lib = json(must(['dashboard-data'])).library;
+    assert.deepEqual(lib.artifacts.filter((a) => a.at === 'main').map((a) => a.slug), ['landed-mock', 'landed-other', 'landed-tk']);
+  });
 });
 
 // Moving the fleet: its own throwaway repo, an old machine and a fresh clone standing in for the new one.
