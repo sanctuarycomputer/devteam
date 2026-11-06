@@ -3,7 +3,7 @@
 # test's own server. With TMUX_TMPDIR unset, or naming a directory that is gone, tmux falls back to
 # the machine's default server, where live fleets run: refuse instead.
 case "$TMUX_TMPDIR" in
-  */dt-tmux-*) if [ -d "$TMUX_TMPDIR" ] && [ -n "$DEVTEAM_TEST_REAL_TMUX" ]; then exec "$DEVTEAM_TEST_REAL_TMUX" "$@"; fi ;;
+  */dt-tmux-*) if [ -d "$TMUX_TMPDIR" ] && [ -x "$DEVTEAM_TEST_REAL_TMUX" ] && ! [ "$DEVTEAM_TEST_REAL_TMUX" -ef "$0" ]; then exec "$DEVTEAM_TEST_REAL_TMUX" "$@"; fi ;;
 esac
-echo "tests' tmux: refused, TMUX_TMPDIR is not a test's own existing directory (${TMUX_TMPDIR:-unset})" >&2
+echo "tests' tmux: refused: TMUX_TMPDIR is not a test's own existing directory (${TMUX_TMPDIR:-unset}), or DEVTEAM_TEST_REAL_TMUX is not a tmux (${DEVTEAM_TEST_REAL_TMUX:-unset})" >&2
 exit 1

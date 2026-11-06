@@ -24,8 +24,10 @@ delete process.env.TMUX;
 delete process.env.TMUX_PANE;
 // and never the machine's default server, which tmux falls back to when TMUX_TMPDIR is unset or
 // names a directory that is gone: every tmux a test or the kit runs is bin/tmux, which refuses then.
-if (!process.env.DEVTEAM_TEST_REAL_TMUX) process.env.DEVTEAM_TEST_REAL_TMUX = spawnSync('sh', ['-c', 'command -v tmux'], { encoding: 'utf8' }).stdout.trim();
-process.env.PATH = `${path.join(testDir, 'lib', 'bin')}${path.delimiter}${process.env.PATH}`;
+const shims = path.join(testDir, 'lib', 'bin');
+const isShim = (f) => { try { return fs.readFileSync(f, 'utf8').includes('DEVTEAM_TEST_REAL_TMUX'); } catch { return false; } };
+process.env.DEVTEAM_TEST_REAL_TMUX = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean).map((d) => path.join(d, 'tmux')).find((f) => { try { fs.accessSync(f, fs.constants.X_OK); return fs.statSync(f).isFile() && !isShim(f); } catch { return false; } }) ?? '';
+process.env.PATH = `${shims}${path.delimiter}${process.env.PATH}`;
 // Dashboards started by tests never use the machine's real ports or become its hub: the hub and
 // the instance block move to ports the tests own.
 // Each run owns a block of 100 ports, so two suites on one machine don't collide either: the
