@@ -67,6 +67,7 @@ Adversarial review is the main defect filter between an agent's first pass and `
 
 ```
 project/tickets/<id>/reviews/<stage>-<pass>[<track>].md     spec, plan, contract, task, final (on the ticket branch)
+project/tickets/<id>/reviews/task-<n>-<pass>[<track>].md     a later review pass on task <n>
 project/reviews/<feature>/graph-<pass>[<track>].md            graph (on the plan branch)
 project/reviews/<design-slug>/design-<pass>[<track>].md       design (on the plan branch)
 ```

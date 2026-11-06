@@ -2833,7 +2833,8 @@ function verdictHolds(v, head, dir, R = repo('home')) {
   // Each adds a review record, or fills one in mechanically (fillInOnly): an empty Disposition cell
   // filled, a missing "- Reviewer:" line added. Nothing else in a record may change.
   let commit = null;
-  const isRecord = (file) => file?.startsWith(dir) && /^(?:[a-z0-9-]+\/)?[a-z]+-\d+[a-z]?\.md$/.test(file.slice(dir.length));
+  // <stage>-<pass>[<track>].md, or a task's later pass, task-<n>-<pass>[<track>].md
+  const isRecord = (file) => file?.startsWith(dir) && /^(?:[a-z0-9-]+\/)?[a-z]+-\d+(?:-\d+)?[a-z]?\.md$/.test(file.slice(dir.length));
   const onlyRecords = (R.git(['log', '--no-merges', '--no-renames', '--format=@%H', '--name-status', `${v}..${head}`, ...(main ? [`^${main}`] : [])]) ?? 'x').split('\n').filter(Boolean).every((l) => {
     if (l.startsWith('@')) { commit = l.slice(1); return true; }
     const [st, file] = l.split('\t');
