@@ -1224,6 +1224,20 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     assert.deepEqual(p.waiting_on_owner, [], 'no goal, so nothing to wait on from the owner');
     git(['branch', '-D', 'plan/reports']);
     assert.ok(!json(must(['dashboard-data'])).planners.some((x) => x.feature === 'reports'));
+    // a plan branch that came into main by a merge (its work landed through another plan's file) is done
+    {
+      git(['worktree', 'add', '-q', '-b', 'plan/merged-in', wt('merged-in'), 'origin/main']);
+      git(['commit', '-q', '--allow-empty', '-m', 'merged-in: a design change'], wt('merged-in'));
+      git(['worktree', 'add', '-q', '--detach', wt('merger'), 'origin/main']);
+      git(['merge', '--no-ff', '-q', '-m', 'merge plan/merged-in', 'plan/merged-in'], wt('merger'));
+      git(['push', '-q', 'origin', 'HEAD:main'], wt('merger'));
+      git(['worktree', 'remove', '--force', wt('merger')]);
+      git(['worktree', 'remove', '--force', wt('merged-in')]);
+      git(['fetch', '-q', 'origin']);
+      assert.ok(!json(must(['dashboard-data'])).planners.some((x) => x.feature === 'merged-in'), 'merged into main: not a planner in flight');
+      assert.ok(!json(must(['metrics', '--json'])).findings.some((f) => f.kind === 'planner-gone' && f.subject === 'plan-merged-in'));
+      git(['branch', '-D', 'plan/merged-in']);
+    }
     // a planner silent for hours while its goal waits on the owner's answers is waiting, not stale
     if (hasTmux) {
       git(['worktree', 'add', '-q', '-b', 'plan/quiet', wt('plan-quiet'), 'origin/main']);
