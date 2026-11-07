@@ -560,6 +560,20 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     write(path.join(tdir, 'reviews/task-1-2.md'), changes('reviewer-a', H2, 'fixed'));
     commitAll('fill in final-2: its reviewer and the disposition; and task-1-2\'s disposition');
     must(['check-ticket', 'bill-01-card', '--sha', head(), ...pr]);
+    // dispose fills a Disposition cell in place, the row kept the header's width; never twice, never a non-disposition
+    {
+      const rec = path.join(tdir, 'reviews/task-9.md');
+      write(rec, changes('reviewer-a', H2, ''));
+      const wcwd = { cwd: wt('bill-01-card'), role: 'worker' };
+      assert.match(dt(['dispose', 'bill-01-card', 'task-9.md', 'F1', 'accepted'], wcwd).err, /isn't a disposition: start it with fixed/);
+      must(['dispose', 'bill-01-card', 'task-9.md', 'F1', 'fixed in the next commit'], wcwd);
+      const row = fs.readFileSync(rec, 'utf8').split('\n').find((l) => l.startsWith('| F1'));
+      assert.equal(row.split(/(?<!\\)\|/).length - 2, 6, 'the row keeps the header\'s six cells');
+      assert.match(row, /\| fixed in the next commit \|$/);
+      assert.match(dt(['dispose', 'bill-01-card', 'task-9.md', 'F1', 'wrong after all'], wcwd).err, /already has a disposition/);
+      assert.match(dt(['dispose', 'bill-01-card', 'task-9.md', 'F7', 'fixed'], wcwd).err, /has no finding F7/);
+      fs.rmSync(rec);
+    }
     // a row with a stray empty cell before its disposition still has that disposition
     const wide = git(['rev-parse', 'HEAD'], wt('bill-01-card'));
     write(path.join(tdir, 'reviews/final-2.md'), changes('reviewer-a', H2, 'fixed').replace('| fixed |', '|  | fixed |'));
