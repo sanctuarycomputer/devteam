@@ -572,7 +572,14 @@ const step = (name, fn) => { steps.push({ name, fn }); };
       assert.match(row, /\| fixed in the next commit \|$/);
       assert.match(dt(['dispose', 'bill-01-card', 'task-9.md', 'F1', 'wrong after all'], wcwd).err, /already has a disposition/);
       assert.match(dt(['dispose', 'bill-01-card', 'task-9.md', 'F7', 'fixed'], wcwd).err, /has no finding F7/);
-      fs.rmSync(rec);
+      // any capital-prefixed id is a finding: an Important R1 with no disposition fails check-ticket, and dispose fills it
+      const beforeR = head();
+      write(rec, changes('reviewer-a', H2, '').replace('| F1 |', '| R1 |'));
+      commitAll('a review with an R-prefixed finding');
+      assert.match(dt(['check-ticket', 'bill-01-card', '--sha', head(), ...pr]).out, /task-9\.md R1 \(Important\) has no disposition/);
+      must(['dispose', 'bill-01-card', 'task-9.md', 'R1', 'fixed'], wcwd);
+      assert.match(fs.readFileSync(rec, 'utf8'), /\| R1 \|.*\| fixed \|/);
+      git(['reset', '-q', '--hard', beforeR], wt('bill-01-card'));
     }
     // a row with a stray empty cell before its disposition still has that disposition
     const wide = git(['rev-parse', 'HEAD'], wt('bill-01-card'));
