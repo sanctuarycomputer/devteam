@@ -560,6 +560,8 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     write(path.join(tdir, 'reviews/task-1-2.md'), changes('reviewer-a', H2, 'fixed'));
     commitAll('fill in final-2: its reviewer and the disposition; and task-1-2\'s disposition');
     must(['check-ticket', 'bill-01-card', '--sha', head(), ...pr]);
+    // from the main checkout, with no --sha, the ticket's branch is judged, not main's head
+    assert.match(must(['check-ticket', 'bill-01-card', ...pr]), new RegExp(`checking ticket/bill-01-card at ${head().slice(0, 12)}[\\s\\S]*meets the definition of done at ${head().slice(0, 12)}`));
     // dispose fills a Disposition cell in place, the row kept the header's width; never twice, never a non-disposition
     {
       const rec = path.join(tdir, 'reviews/task-9.md');
