@@ -3157,6 +3157,12 @@ function cmdCheckTicket() {
     const p = JSON.parse(pr);
     title ??= p.title; body ??= p.body; sha ??= p.headRefOid;
   }
+  // Run anywhere but on the ticket's own branch (the supervisor's main checkout), with no head
+  // named: the ticket's branch is what's judged, not whatever this checkout has checked out.
+  if (!sha && R.commonDir && (cwdRepo() !== R || cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']) !== `ticket/${id}`)) {
+    sha = R.resolveCommit(`ticket/${id}`) ?? R.resolveCommit(`origin/ticket/${id}`) ?? undefined;
+    if (sha) out(`checking ticket/${id} at ${sha.slice(0, 12)} (no --sha given, and this checkout isn't on it)`);
+  }
   report(checkTicket(id, { sha, title, body }), `${id} meets the definition of done at ${(headIn(R, sha) ?? '').slice(0, 12)}`);
 }
 
