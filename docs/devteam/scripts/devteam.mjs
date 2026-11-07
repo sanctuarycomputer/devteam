@@ -1572,6 +1572,40 @@ function questionRewrites() {
   for (const i of readLog().ignored) if (i.line.type === 'question' && i.why === 'duplicate id') warnings.push(`${i.line.id}: a second question line with this id (${i.line.__file}:${i.line.__line}); a question is asked once`);
   return { errors, warnings };
 }
+// Fill a finding's Disposition cell in a review record, keeping the row the header's width: the
+// author's way to answer a finding without hand-editing the table (a hand-added cell makes a row a
+// reviewer reads as malformed). Only a cell that holds no disposition yet can be filled, as
+// fillInOnly allows, so a filled record still holds the verdicts after it.
+function cmdDispose() {
+  const [id, file, fid, ...rest] = positional;
+  const text = rest.join(' ').trim();
+  if (!id || !file || !/^F\d+$/.test(fid ?? '') || !text) die('usage: dispose <ticket> <record.md> <F-id> "fixed | wont-fix <reason> | wrong <reason>"');
+  if (!disposed(text)) die(`"${text}" isn't a disposition: start it with fixed, wont-fix <reason> or wrong <reason>`);
+  if (/[|\n]/.test(text)) die('a disposition is one line with no "|"');
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(id) || !/^[a-z0-9][a-z0-9-]*\.md$/.test(file)) die('dispose <ticket> <record.md>: a ticket id and a record file name');
+  const rel = path.join(projectRel, 'tickets', id, 'reviews', file);
+  const abs = path.join(repoRoot, rel);
+  const before = readText(abs);
+  if (before === null) die(`no review record ${rel} in this checkout`);
+  const lines = before.split('\n');
+  let disp = -1, width = 0, done = false;
+  for (let k = 0; k < lines.length; k++) {
+    if (!lines[k].trim().startsWith('|')) continue;
+    const cells = tableCells(lines[k]);
+    const lower = cells.map((c) => c.toLowerCase());
+    if (lower.includes('disposition')) { disp = lower.indexOf('disposition'); width = cells.length; continue; }
+    if (cells[0] !== fid || disp < 0) continue;
+    const cur = cells.length > width ? (cells.slice(disp).find((c) => c) ?? '') : (cells[disp] ?? '');
+    if (disposed(cur)) die(`${file} ${fid} already has a disposition ("${cur}"); a disposition given doesn't change`);
+    const row = Array.from({ length: width }, (_, j) => (j === disp ? text : (cells[j] ?? '')));
+    lines[k] = `| ${row.map((c) => c.replace(/\|/g, '\\|')).join(' | ')} |`;
+    done = true;
+    break;
+  }
+  if (!done) die(`${file} has no finding ${fid} under a table with a Disposition column`);
+  fs.writeFileSync(abs, lines.join('\n'));
+  out(`${rel} ${fid}: ${text}`);
+}
 function cmdLogCheck() {
   const names = new Set();
   for (const d of [liveLogDir(), durableLogDir()]) if (fs.existsSync(d)) for (const f of fs.readdirSync(d)) if (f.endsWith('.jsonl')) names.add(f);
@@ -2753,7 +2787,7 @@ function parseReview(file, text) {
     // A row wider than its header (a stray empty cell before the disposition) still has its
     // disposition: the first non-empty cell from the Disposition column on.
     const disposition = dispIdx < 0 ? '' : cells.length > width ? (cells.slice(dispIdx).find((c) => c) ?? '') : (cells[dispIdx] ?? '');
-    if (/^F\d+$/.test(cells[0] ?? '')) findings.push({ id: cells[0], severity: cells[sevIdx] ?? '', disposition });
+    if (/^F\d+$/.test(cells[0] ?? '')) findings.push({ id: cells[0], severity: cells[sevIdx] ?? '', disposition, ...(width && cells.length !== width ? { cells: cells.length, width } : {}) });
   }
   return {
     file, stage: m ? m[1] : file.replace(/\.md$/, ''), pass: m ? Number(m[2]) : 0, variant: m ? m[3] : '',
@@ -3064,6 +3098,8 @@ function checkTicket(id, { sha: shaArg, title, body, approvals = true }) {
   const need = t.risk === 'high' ? 2 : 1;
   if (approvers.size < need) fails.push(`needs ${need} final APPROVE review(s) at this head from different named reviewers; found ${approvers.size}`);
   for (const r of reviews) for (const f of r.findings) if (blocking(f.severity) && !disposed(f.disposition)) fails.push(`${r.file} ${f.id} (${f.severity}) has no disposition${f.disposition ? ` ("${f.disposition.slice(0, 40)}" isn't one)` : ''}: the author starts its Disposition cell with fixed, wont-fix <reason> or wrong <reason>`);
+  // a row whose cell count differs from its header reads fine here, but not to a reviewer: say how to fill one
+  for (const r of reviews) for (const f of r.findings) if (f.cells) warn(`${r.file} ${f.id}: its row has ${f.cells} cells and the header ${f.width}; fill a Disposition with devteam.mjs dispose ${'<ticket>'} ${r.file} ${f.id} "fixed", which keeps the row's shape`);
   const base = R.mainRef() && sha ? R.git(['merge-base', R.mainRef(), sha]) : null;
   if (R.commonDir && !base) fails.push(`cannot resolve main branch "${R.settings.main_branch}"${R.name === 'home' ? '' : ` in ${R.name}`}; footprint not checked`);
   if (base) {
@@ -9583,7 +9619,7 @@ const COMMANDS = {
   ask: cmdAsk, answer: cmdAnswer, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
   observe: cmdObserve, 'observe-link': cmdObserveLink, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, knowledge: cmdKnowledge, problem: cmdProblem,
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
-  log: cmdLog, record: cmdRecord, peek: cmdPeek, 'log-check': cmdLogCheck, 'log-sync': cmdLogSync, history: cmdHistory,
+  log: cmdLog, record: cmdRecord, peek: cmdPeek, 'log-check': cmdLogCheck, dispose: cmdDispose, 'log-sync': cmdLogSync, history: cmdHistory,
   drain: cmdDrain, undrain: cmdUndrain, fleet: cmdFleet, handoff: cmdHandoff, wait: cmdWait,
   dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes,
 };
