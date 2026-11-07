@@ -1579,7 +1579,7 @@ function questionRewrites() {
 function cmdDispose() {
   const [id, file, fid, ...rest] = positional;
   const text = rest.join(' ').trim();
-  if (!id || !file || !/^F\d+$/.test(fid ?? '') || !text) die('usage: dispose <ticket> <record.md> <F-id> "fixed | wont-fix <reason> | wrong <reason>"');
+  if (!id || !file || !FINDING_ID.test(fid ?? '') || !text) die('usage: dispose <ticket> <record.md> <finding id, e.g. F1 or R2> "fixed | wont-fix <reason> | wrong <reason>"');
   if (!disposed(text)) die(`"${text}" isn't a disposition: start it with fixed, wont-fix <reason> or wrong <reason>`);
   if (/[|\n]/.test(text)) die('a disposition is one line with no "|"');
   if (!/^[a-z0-9][a-z0-9-]*$/.test(id) || !/^[a-z0-9][a-z0-9-]*\.md$/.test(file)) die('dispose <ticket> <record.md>: a ticket id and a record file name');
@@ -2768,7 +2768,8 @@ function graphEdit(type, idRe) {
 const tableCells = (row) => row.trim().replace(/^\|/, '').replace(/(?<!\\)\|$/, '').split(/(?<!\\)\|/).map((c) => c.trim().replace(/\\\|/g, '|'));
 
 // A record is <stage>-<pass>[<track>].md with "- Reviewer: <name>" and a last line
-// "Verdict: APPROVE|CHANGES <full sha>"; findings are table rows F<n> with a Disposition column.
+// "Verdict: APPROVE|CHANGES <full sha>"; findings are table rows whose id is a capital prefix and a
+// number (F1, R2, CR3) under a header with a Disposition column.
 function parseReview(file, text) {
   const m = file.match(/^([a-z]+)-(\d+)([a-z]?)\.md$/);
   const verdict = [...text.matchAll(/^Verdict:[ \t]*(APPROVE|CHANGES)[ \t]+(\S+)[ \t]*$/gm)].pop();
@@ -2787,7 +2788,7 @@ function parseReview(file, text) {
     // A row wider than its header (a stray empty cell before the disposition) still has its
     // disposition: the first non-empty cell from the Disposition column on.
     const disposition = dispIdx < 0 ? '' : cells.length > width ? (cells.slice(dispIdx).find((c) => c) ?? '') : (cells[dispIdx] ?? '');
-    if (/^F\d+$/.test(cells[0] ?? '')) findings.push({ id: cells[0], severity: cells[sevIdx] ?? '', disposition, ...(width && cells.length !== width ? { cells: cells.length, width } : {}) });
+    if (FINDING_ID.test(cells[0] ?? '')) findings.push({ id: cells[0], severity: cells[sevIdx] ?? '', disposition, ...(width && cells.length !== width ? { cells: cells.length, width } : {}) });
   }
   return {
     file, stage: m ? m[1] : file.replace(/\.md$/, ''), pass: m ? Number(m[2]) : 0, variant: m ? m[3] : '',
@@ -2804,6 +2805,8 @@ function latestPerTrack(records, stage) {
   for (const r of records.filter((x) => x.stage === stage)) { const p = latest.get(r.variant); if (!p || r.pass > p.pass) latest.set(r.variant, r); }
   return [...latest.values()];
 }
+// A finding's id: a short capital prefix and a number (F1, R2, CR3, S1b): reviewers prefix by kind.
+const FINDING_ID = /^[A-Z]{1,4}\d+[a-z]?$/;
 const blocking = (sev) => /^(critical|important)$/i.test(sev);
 const disposed = (d) => /^(fixed|wrong|wont-fix\b|won't-fix\b)/i.test(d ?? '');
 
