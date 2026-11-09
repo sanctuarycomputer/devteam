@@ -1,0 +1,24 @@
+# Deploys the owner's cloud box (cloud/) at each release. Only on this repository, and only when
+# the RENDER_DEPLOY_HOOK secret holds the service's deploy hook (Render: the service's Settings,
+# Deploy Hook); a fork, or a repo without it, does nothing. The box resumes each supervisor on boot,
+# and the supervisors their fleets, so a release costs the fleet a few minutes, not its work.
+name: box-deploy
+on:
+  release:
+    types: [published]
+permissions: {}
+jobs:
+  deploy:
+    if: github.repository == 'sanctuarycomputer/devteam'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy the box at this release's commit
+        env:
+          HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+          SHA: ${{ github.sha }}
+        run: |
+          [ -n "$HOOK" ] || { echo "no RENDER_DEPLOY_HOOK secret: no box to deploy"; exit 0; }
+          case "$HOOK" in *\?*) url="$HOOK&ref=$SHA" ;; *) url="$HOOK?ref=$SHA" ;; esac
+          code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$url")
+          echo "Render answered $code for $SHA"
+          [ "$code" -lt 300 ]

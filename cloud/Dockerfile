@@ -10,8 +10,9 @@
 #
 # Render: New > Web Service > this repo (or a fork), Language: Docker, Dockerfile path:
 #   cloud/Dockerfile, build context: the repo root. Instance: Pro (4 GB) or larger; a free one
-#   sleeps, and sleeping stops every agent. Auto-Deploy: Off (a deploy restarts the box, which
-#   stops every agent; deploy when the fleet is parked). Disk: mounted at /data. Health check
+#   sleeps, and sleeping stops every agent. Auto-Deploy: Off; the box deploys at each release
+#   instead (.github/workflows/box-deploy.yml, with the service's Deploy Hook as the repo secret
+#   RENDER_DEPLOY_HOOK). A deploy restarts the box; every agent session resumes on boot. Disk: mounted at /data. Health check
 #   path: /healthz. Environment: DEVTEAM_PUBLIC_URL=https://box.example.com. Custom domains:
 #   box.example.com and *.box.example.com, with every DNS record Render lists for them (a wildcard
 #   needs its own name pointed at Render too, plus the _acme-challenge and _cf-custom-hostname
@@ -192,6 +193,20 @@ for k in "$HOME"/code/*/docs/devteam/scripts/devteam.mjs; do
   [ -f "$k" ] || continue
   r=${k%/docs/devteam/scripts/devteam.mjs}
   tmux new-window -d -t home -n "dash-$(basename "$r")" -c "$r" "while :; do /usr/local/bin/node docs/devteam/scripts/devteam.mjs dashboard; sleep 5; done"
+done
+# Nothing runs git yet, so a lock in a repo is one a process killed by the restart left.
+find "$HOME/code" -path '*/.git/*' -name '*.lock' -type f -delete 2>/dev/null
+# Each repo's supervisor, if one ran here (it notes its pane), back on its last conversation with
+# the repo's own resume_command. It brings back its fleet: a ticket whose window is gone but whose
+# work isn't done goes to recovery, `worker <id> --resume` (supervisor.md §4, §11).
+for k in "$HOME"/code/*/docs/devteam/scripts/devteam.mjs; do
+  r=${k%/docs/devteam/scripts/devteam.mjs}
+  [ -f "$r/docs/devteam/run/supervisor-pane" ] || continue
+  cmd=$(cd "$r" && /usr/local/bin/node "$k" settings --get resume_command 2>/dev/null) || continue
+  w="sup-$(basename "$r")"
+  tmux new-window -d -t home -n "$w" -c "$r"
+  tmux send-keys -t "home:$w" -l "export DEVTEAM_ROLE=supervisor; $cmd 'The box restarted (a deploy), and this is you, resumed. Follow supervisor.md §11, after your own restart: whatever was in flight did not finish, and every worker and planner window is gone; resume each one whose work is not done.'"
+  tmux send-keys -t "home:$w" Enter
 done
 while :; do ttyd -d 3 -i lo -p 7681 -W -t fontSize=14 -t titleFixed=devteam tmux new-session -A -s home; sleep 1; done
 EOF
