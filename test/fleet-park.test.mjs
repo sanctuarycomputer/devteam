@@ -175,6 +175,25 @@ test('fleet park: every session stops with a handoff, and a clone elsewhere pick
   }
 });
 
+test('fleet status: a superseded ticket with no window is not a session to park', () => {
+  const F = fleetFixture('sup');
+  const { old, ok, g } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const t = { title: 'tidy up', feature: 'chores', component: 'ch', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['tidy/**'], done_when: ['the tidy check passes'], notes: 'turns on tidy' };
+  const ID = 'ch-95-gone';
+  try {
+    ok(old, ['ticket', 'add', ID, '--json', JSON.stringify(t)], SUP);
+    ok(old, ['ticket', 'add', 'ch-96-next', '--json', JSON.stringify(t)], SUP);
+    const ww = path.join(old, '.worktrees', ID);
+    g(['worktree', 'add', '-q', '-b', `ticket/${ID}`, ww, 'origin/main'], old);
+    ok(ww, ['phase', 'spec'], { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: ID });
+    g(['worktree', 'remove', '--force', ww], old);
+    assert.match(ok(old, ['fleet', 'status', '--no-fetch'], SUP), new RegExp(`${ID}: not parked`), 'an active ticket still counts');
+    ok(old, ['ticket', 'set', ID, '--json', JSON.stringify({ superseded_by: 'ch-96-next' })], SUP);
+    assert.doesNotMatch(ok(old, ['fleet', 'status', '--no-fetch'], SUP), new RegExp(`${ID}: not parked`), 'superseded, and no window: nothing to park');
+  } finally { F.done(); }
+});
+
 test('a mistyped feature: refused at ticket add, and a superseded ticket with one no longer fails validate', () => {
   const F = fleetFixture('typo');
   const { old, run, ok } = F;
