@@ -1,0 +1,15 @@
+# The box's image is otherwise first built by a release, on the owner's live box. Build it on every
+# change to it first (cloud/, and the hub page it copies).
+name: box-image
+on:
+  pull_request:
+    paths: ['cloud/**', 'docs/devteam/dashboard/hub.html', '.github/workflows/box-image.yml']
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: docker build -f cloud/Dockerfile -t box .
+      - run: docker run --rm --entrypoint sh box -c 'box-supervisors --dry-run || true; box-pg nope 2>&1 | grep -q "no Postgres"; ffmpeg -version >/dev/null; chromium --version; test -f /opt/devteam/operator.md'

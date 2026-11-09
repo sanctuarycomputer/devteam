@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(gh pr merge*)", "Bash(gh pr review*)", "Bash(gh release*)", "Bash(gh api*)", "Bash(gh secret*)",
+      "Bash(git tag*)", "Bash(git push*main*)", "Bash(git push*--force*)", "Bash(git push*-f *)", "Bash(git push*+*)",
+      "Bash(*devteam.mjs merge*)", "Bash(*devteam.mjs answer*)", "Bash(*devteam.mjs fleet unpark*)", "Bash(*devteam.mjs fleet park*)", "Bash(*devteam.mjs fleet drain*)", "Bash(*devteam.mjs fleet resume*)"
+    ]
+  }
+}

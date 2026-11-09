@@ -191,6 +191,12 @@ EOF
 # box-pg [major]: this box's `brew services start postgresql@N`. One server per major version, on
 # the disk, trusting whoever is on the box: 17 on the default port (so postgres:/// just works),
 # the others on 5400 + major (5416, 5414). Safe to run again.
+COPY --chmod=644 cloud/operator.md cloud/operator-settings.json /opt/devteam/
+COPY --chmod=755 cloud/box-supervisors /usr/local/bin/box-supervisors
+COPY --chmod=755 <<'EOF' /usr/local/bin/box-status
+#!/bin/sh
+exec box-supervisors --status
+EOF
 COPY --chmod=755 <<'EOF' /usr/local/bin/box-pg
 #!/bin/sh
 set -eu
@@ -250,8 +256,8 @@ if [ ! -f .bashrc ]; then
   cat >> .bashrc <<'RC'
 eval "$(mise activate bash)"
 [ -f ~/.devteam-quiet ] || cat <<'MOTD'
-devteam box. First time here:
-  claude                                   # log in to Claude Code
+devteam box. Window 0 (operator) looks after the box: tell it what you want. First time here:
+  in window 0, log in to Claude Code
   claude plugin marketplace add obra/superpowers-marketplace && claude plugin install superpowers@superpowers-marketplace
   gh auth login && gh auth setup-git       # GitHub, and git over HTTPS with it
   git config --global user.name '…' && git config --global user.email '…'
@@ -262,7 +268,28 @@ tmux: C-b s lists every session (each repo's supervisor and its workers); C-b d 
 MOTD
 RC
 fi
-tmux has-session -t home 2>/dev/null || tmux new-session -d -s home -n shell -c "$HOME"
+# What was up before this boot, for the operator's box-supervisors. Only a list with something in it:
+# a boot that never got as far as bringing them back must not lose them to the next.
+up="$HOME/.devteam-supervisors"
+[ -s "$up" ] && mv "$up" "$up.boot"
+# Window 0 is the operator (operator.md): the first thing the Terminal shows, and what restores the fleet.
+mkdir -p operator
+if ! tmux has-session -t home 2>/dev/null; then
+  tmux new-session -d -s home -n operator -c "$HOME/operator"
+  tmux new-window -d -t home -n shell -c "$HOME"
+  if ls .claude/projects/-data-home-operator/*.jsonl >/dev/null 2>&1; then c='--continue'; m='The box restarted, and this is you, resumed. Read /opt/devteam/operator.md again, then do At boot.'; else c=''; m='Read /opt/devteam/operator.md and do what it says, starting with At boot.'; fi
+  tmux send-keys -t home:operator -l "export DEVTEAM_ROLE=operator; claude $c --dangerously-skip-permissions --settings /opt/devteam/operator-settings.json '$m'"
+  tmux send-keys -t home:operator Enter
+fi
+# The operator's tick: typed into its window every 30 minutes, unless a dialog or a tick already waits there.
+tick='Operator tick: run box-status and follow Each tick in operator.md.'
+( while :; do
+    sleep "${DEVTEAM_OPERATOR_TICK_SECONDS:-1800}"
+    screen=$(tmux capture-pane -p -t home:operator 2>/dev/null) || continue
+    case "$(tmux display-message -p -t home:operator '#{pane_current_command}' 2>/dev/null)" in ''|bash|-bash|sh|dash) continue ;; esac
+    printf '%s' "$screen" | grep -qE 'Do you (trust|want to)|Press Enter to continue|❯ *1\. *Yes|\[y/n\]|limit (reached|hit)|Operator tick: run box-status' && continue
+    tmux send-keys -t home:operator -l "$tick"; tmux send-keys -t home:operator Enter
+  done ) &
 # The box's global tools, on the disk: edit the file to change them, and they come back each boot.
 mkdir -p .box .config/mise
 [ -f .config/mise/config.toml ] || cat > .config/mise/config.toml <<'TOML'
@@ -293,33 +320,7 @@ for k in "$HOME"/code/*/docs/devteam/scripts/devteam.mjs; do
   r=${k%/docs/devteam/scripts/devteam.mjs}
   tmux new-window -d -t home -n "dash-$(basename "$r")" -c "$r" "while :; do /usr/local/bin/node docs/devteam/scripts/devteam.mjs dashboard; sleep 5; done"
 done
-# Each repo's supervisor that was running when the box stopped (the list below), on its own
-# conversation with the repo's resume_command, unless its fleet is parked or drained on purpose. It
-# brings back its fleet: §1.4 sends a ticket whose window is gone and whose phase isn't done or
-# parked to recovery, `worker <id> --resume` (supervisor.md §11). One try: what can't say which
-# conversation or whether it's held stays down, and says so.
-up="$HOME/.devteam-supervisors"
-for k in "$HOME"/code/*/docs/devteam/scripts/devteam.mjs; do
-  r=${k%/docs/devteam/scripts/devteam.mjs}
-  n=$(basename "$r")
-  grep -Fxq "$r" "$up" 2>/dev/null || continue
-  fm=$(cd "$r" && /usr/local/bin/node "$k" fleet status --json --no-fetch 2>/dev/null | jq -r '.fleet.mode // "run"')
-  case "$fm" in
-    run) ;;
-    park|drain) note "$n: the fleet is held ($fm), so its supervisor stays stopped"; continue ;;
-    *) down "$n" "could not read whether its fleet is held"; continue ;;
-  esac
-  id=$(cd "$r" && /usr/local/bin/node "$k" supervisor-session 2>/dev/null)
-  case "$id" in ''|*[!A-Za-z0-9_-]*) down "$n" "no conversation of its to resume (or a kit too old to say)"; continue ;; esac
-  cmd=$(cd "$r" && /usr/local/bin/node "$k" settings --get resume_command 2>/dev/null)
-  case " $cmd " in *" --continue "*) ;; *) down "$n" "its resume_command has no --continue to replace"; continue ;; esac
-  cmd=$(printf '%s' "$cmd" | sed "s/ --continue\( \|\$\)/ --resume $id\1/")
-  pane=$(tmux new-window -dP -F '#{pane_id}' -t home -n "sup-$n" -c "$r") || { down "$n" "tmux would not open its window"; continue; }
-  printf '%s' "$pane" > "$r/docs/devteam/run/supervisor-pane"
-  tmux send-keys -t "$pane" -l "export DEVTEAM_ROLE=supervisor; $cmd 'The box restarted, and this is you, resumed on your own conversation; what was in flight did not finish. Follow supervisor.md §11, after your own restart: §1 again. Every worker and planner window is gone, so §1.4 sends each ticket whose phase is not done or parked to recovery; a parked one stays parked.'"
-  tmux send-keys -t "$pane" Enter
-  note "$n: supervisor resumed on $id"
-done
+# The operator (window 0) is what brings the supervisors back: box-supervisors reads the list saved above.
 # Which supervisors are up, kept on the volume each minute: a machine that dies writes nothing at
 # the end, and one the owner stopped (its pane gone, or back at a shell) is off the list by then.
 # tmux not answering (the box stopping) leaves the list as it was.
