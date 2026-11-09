@@ -1234,6 +1234,7 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     assert.match(dt(args, { role: 'sup' }).out, /outside project\//, "the supervisor can't re-scope the owner's rule");
     must(['knowledge', 'set', Kp.id, '--scope', 'chore:devteam-sync', '--owner']);
     assert.match(must(args, { role: 'sup' }), /match upstream v0\.3\.0 exactly/, 'the owner can');
+    assert.equal(git(['for-each-ref', 'refs/devteam-upstream']), '', 'nothing of upstream stays in the host repo');
     must(['knowledge', 'set', Kp.id, '--status', 'retired', '--owner']);
     assert.match(dt(args, { role: 'sup' }).out, /outside project\//, 'retired, it approves nothing');
     // the sync question names the scope, so a rule from the dashboard (no scope of its own) lands there
