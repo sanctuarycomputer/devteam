@@ -191,5 +191,8 @@ test('a mistyped feature: refused at ticket add, and a superseded ticket with on
     assert.match(v(), /feature "nope" is not in the log/);
     ok(old, ['ticket', 'set', 'ch-99-typo', '--json', JSON.stringify({ superseded_by: 'ch-97-good' })], SUP);
     assert.doesNotMatch(v(), /feature "nope" is not in the log/);
+    // a stub feature whose only ticket is superseded needs no reviews of its own
+    ok(old, ['feature', 'add', 'nope', '--json', JSON.stringify({ title: 'a stub', goals: [], preconditions: [], stories: [], design: 'project/designs/nope.md' })], SUP);
+    assert.doesNotMatch(v(), /feature nope/);
   } finally { F.done(); }
 });
