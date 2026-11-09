@@ -4530,6 +4530,44 @@ function draftArtifacts(landed = landedArtifacts()) {
   return res;
 }
 const allArtifacts = () => { const l = landedArtifacts(); return [...l, ...draftArtifacts(l)]; };
+// ----- publishing: the owner makes a landed artifact readable by anyone, from the cloud box -----
+// The gateway does the publishing (its confirm page, its own copy of the bytes); the kit says what
+// main has, and records the owner's word as an owner act (docs/superpowers/specs/2026-11-09-public-artifacts-design.md).
+// The project's name is part of every public URL, so it is set explicitly: the folder-name fallback
+// helloBody uses would move every link on a re-clone.
+const PUBLIC_PROJECT = /^[a-z0-9][a-z0-9._-]{0,62}$/;
+// Every entry of a tree by its id, in treeEntries' shape: the manifest and its checks read one
+// tree, never a branch that may move between two reads.
+function treeIdEntries(tree) {
+  return (git(['ls-tree', '-r', '-l', '-z', tree], mainRoot) ?? '').split('\0').filter(Boolean).map((l) => {
+    const tab = l.indexOf('\t');
+    const [mode, type, oid, size] = l.slice(0, tab).trim().split(/\s+/);
+    return { path: l.slice(tab + 1), mode, type, oid, size: Number(size) || 0, read: () => { try { return execFileSync('git', ['cat-file', 'blob', oid], { cwd: mainRoot, stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 }); } catch { return null; } } };
+  });
+}
+// A landed artifact as publishing sees it: its tree on main, judged by the rules merge runs.
+// Exit 2 when it is the project's name that is missing (the manifest route answers 409: a setting
+// to fix, not a page that isn't there). It never fetches: the gateway is waiting on it.
+function publicArtifact(slug) {
+  const ref = mainRef();
+  const row = LINK_ID.test(slug ?? '') && ref ? /^040000 tree ([0-9a-f]+)\t/.exec(git(['ls-tree', ref, '--', `${ARTIFACTS_REL}/${slug}`], mainRoot) ?? '') : null;
+  if (!row) die(`${slug}: not an artifact landed on main (a draft is never public)`);
+  const tree = row[1];
+  const entries = treeIdEntries(tree);
+  const sub = entries.find((e) => e.type !== 'blob');
+  if (sub) die(`${slug}/${sub.path}: a submodule isn't served, so ${slug} can't be published`);
+  const p = artifactProblems(slug, entries);
+  if (p.errors.length) die(`${slug} is broken on main: ${p.errors[0]}`);
+  const project = loadSettings().project;
+  if (typeof project !== 'string' || !PUBLIC_PROJECT.test(project)) die(`publishing needs this project's name, since it is part of every public link: set "project" in settings.md (lowercase letters, digits, . _ -, at most 63; it is ${project == null ? 'unset' : quoteData(project)})`, 2);
+  return { project, slug, tree, entries, manifest: p.manifest };
+}
+// Each slug's newest owner artifact-publish act, in fold order (logObjects keeps it): its recorded state.
+function publishRecords() {
+  const m = new Map();
+  for (const a of logObjects('act')) if (a.created_by === 'owner' && a.class === 'artifact-publish' && typeof a.artifact === 'string') m.set(a.artifact, a);
+  return m;
+}
 // artifact new <slug> --title --summary [--for '[…]']: scaffold a page in this worktree.
 // artifact check [<slug>…]: the checks merge runs, on this checkout's artifacts.
 function cmdArtifact() {
@@ -4564,7 +4602,24 @@ function cmdArtifact() {
     if (bad) process.exit(1);
     return out(`${slugs.length} artifact${slugs.length === 1 ? '' : 's'} pass`);
   }
-  die('usage: artifact new <slug> --title t --summary s [--for json] | artifact check [<slug>…]');
+  // artifact publish|unpublish: the owner's record of what the gateway made public. The gateway's
+  // confirm page runs them through the dashboard; by hand they record intent only.
+  if (sub === 'publish' || sub === 'unpublish') {
+    const slugName = args[0];
+    if (!LINK_ID.test(slugName ?? '') || !flags.owner || (sub === 'publish' && !TREE_ID.test(flagStr('tree') ?? ''))) die('usage: artifact publish <slug> --owner --tree <tree-id> | artifact unpublish <slug> --owner   (the owner\'s; the cloud gateway\'s confirm page runs them)');
+    const { by } = ownerWriter();
+    if (sub === 'publish') {
+      const a = publicArtifact(slugName);
+      const tree = flagStr('tree');
+      if (tree !== a.tree) die(`${slugName}: --tree ${tree.slice(0, 12)} is not its tree on main (${a.tree.slice(0, 12)}); only what main has now is published`);
+      appendLog({ type: 'act', class: 'artifact-publish', what: 'publish', refs: [`artifact:${slugName}`], artifact: slugName, tree }, by);
+    } else {
+      if (publishRecords().get(slugName)?.what !== 'publish') die(`${slugName} is not published; there is nothing to unpublish`);
+      appendLog({ type: 'act', class: 'artifact-publish', what: 'unpublish', refs: [`artifact:${slugName}`], artifact: slugName }, by);
+    }
+    return out(`recorded: ${slugName} ${sub}ed${ownerChannel() === 'dashboard' ? '' : '. This records intent only: a page goes public, or comes down, only on the cloud gateway\'s confirm page (https://<box>/public/)'}`);
+  }
+  die('usage: artifact new <slug> --title t --summary s [--for json] | artifact check [<slug>…] | artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner');
 }
 function cmdArtifacts() {
   gitReadCache = new Map();
@@ -7894,7 +7949,9 @@ async function cmdDashboard() {
   delete ownerEnv.DEVTEAM_ROLE;
   delete ownerEnv.DEVTEAM_TICKET;
   delete ownerEnv.DEVTEAM_FEATURE;
-  const run = (args) => new Promise((resolve) => execFile(process.execPath, [self, ...args], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: ownerEnv }, (err, stdout, stderr) => resolve({ ok: !err, stdout, stderr })));
+  // A child run as the owner. timeout (ms) is for a caller that can't wait (the gateway's 15 s);
+  // code is the exit code, so a route can tell "not there" from "fix a setting" (2).
+  const run = (args, { timeout = 0 } = {}) => new Promise((resolve) => execFile(process.execPath, [self, ...args], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: ownerEnv, timeout, killSignal: 'SIGKILL' }, (err, stdout, stderr) => resolve({ ok: !err, code: err ? (typeof err.code === 'number' ? err.code : 1) : 0, stdout, stderr: err?.killed ? `devteam: ${args.slice(0, 2).join(' ')} took over ${timeout / 1000} s and was stopped` : stderr })));
   const ID = /^[a-z]-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
   const text = (x, max = 4000) => typeof x === 'string' && x.trim() && x.length <= max;
   const autonomyArgs = (b) => ([1, 2, 3].includes(b.autonomy) ? ['--autonomy', String(b.autonomy), ...(text(b.scope, 100) ? ['--scope', b.scope.trim()] : [])] : []);
@@ -7914,7 +7971,12 @@ async function cmdDashboard() {
     'goal-decide': (b) => (ID.test(b.id ?? '') && ['approve', 'refine', 'let-go', 'restore'].includes(b.verdict) && (b.notes === undefined || text(b.notes, 4000)) ? ['goal', 'decide', b.id, b.verdict, ...(b.notes ? ['--notes', b.notes.trim()] : [])] : null),
     knowledge: (b) => (ID.test(b.id ?? '') && ['accepted', 'retired', 'stale'].includes(b.status) && (b.note === undefined || b.note === '' || (text(b.note, 600) && !/[\r\n]/.test(b.note))) ? ['knowledge', 'set', b.id, '--status', b.status, ...(b.note?.trim() ? ['--note', b.note.trim()] : []), '--owner'] : null),
     ack: (b) => (/^[a-z][a-z-]*$/.test(b.kind ?? '') && text(b.subject, 200) && text(b.reason, 600) ? ['ack', b.kind, b.subject, '--reason', b.reason.trim(), '--owner'] : null),
+    // Only the cloud gateway calls it, after the owner confirmed on its own page (and the Library's
+    // Forget, for a record the owner doesn't want restored); the Library has no button that publishes.
+    'artifact-publish': (b) => (LINK_ID.test(b.slug ?? '') && (b.op === 'unpublish' || (b.op === 'publish' && TREE_ID.test(b.tree ?? ''))) ? ['artifact', b.op, b.slug, '--owner', ...(b.op === 'publish' ? ['--tree', b.tree] : [])] : null),
   };
+  // An action whose caller has a deadline of its own: the gateway gives the whole answer 15 s.
+  const ACTION_MS = { 'artifact-publish': 12000 };
   const send = (res, code, type, body) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store' }); res.end(body); };
   // /api/hello answers at once from the last `hello` run, which the dashboard refreshes every 30 s
   // in the background: the hub probes every port with a 300 ms budget, and /api/data takes far longer.
@@ -8202,7 +8264,7 @@ async function cmdDashboard() {
       try { parsed = JSON.parse(body || '{}'); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'bad json' })); }
       const args = action(parsed);
       if (!args) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
-      const r = await run(args);
+      const r = await run(args, { timeout: ACTION_MS[name] ?? 0 });
       send(res, r.ok ? 200 : 400, 'application/json', JSON.stringify(r.ok ? { ok: true, out: r.stdout.trim() } : { error: r.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') }));
     });
   });

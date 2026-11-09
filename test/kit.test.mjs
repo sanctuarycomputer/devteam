@@ -42,7 +42,7 @@ const FORKS = [
   ['review questions on the dashboard'],
   ['dashboard: Library and the artifact viewer'],
   ['review permanence'],
-  ['artifacts: new, check, list', 'artifacts: check-pr and merge refuse', 'artifacts: the dashboard serves them', 'artifacts: a question links one', 'artifacts: the Library data', 'public artifacts: an artifact-publish act', 'public artifacts: owner acts are records'],
+  ['artifacts: new, check, list', 'artifacts: check-pr and merge refuse', 'artifacts: the dashboard serves them', 'artifacts: a question links one', 'artifacts: the Library data', 'public artifacts: an artifact-publish act', 'public artifacts: owner acts are records', 'public artifacts: artifact publish and unpublish'],
 ];
 
 const forked = new Map();

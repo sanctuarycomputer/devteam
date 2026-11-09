@@ -3100,6 +3100,55 @@ const step = (name, fn) => { steps.push({ name, fn }); };
       if (kept === null) fs.rmSync(ownerFile, { force: true }); else fs.writeFileSync(ownerFile, kept);
     }
   });
+  step('public artifacts: artifact publish and unpublish, the owner\'s, against main as it is', async () => {
+    const tree = (slug) => git(['rev-parse', `origin/main:docs/devteam/project/artifacts/${slug}`]);
+    // a broken artifact on main, as a push that skipped merge would leave it
+    const lw = path.join(repo, '.worktrees', 'tmp-land-pub');
+    git(['worktree', 'add', '-q', '--detach', lw, 'origin/main']);
+    write(path.join(lw, 'docs/devteam/project/artifacts/landed-broken/index.html'), '<!doctype html>');
+    write(path.join(lw, 'docs/devteam/project/artifacts/landed-broken/artifact.json'), '{');
+    git(['add', '-A'], lw);
+    git(['commit', '-qm', 'a broken artifact lands'], lw);
+    git(['push', '-q', 'origin', 'HEAD:main'], lw);
+    git(['worktree', 'remove', '--force', lw]);
+    git(['fetch', '-q', 'origin', 'main']);
+    const T = tree('landed-other');
+    assert.match(dt(['artifact', 'publish', 'landed-other', '--tree', T]).err, /usage: artifact publish <slug> --owner --tree/, 'the owner says so');
+    assert.match(dt(['artifact', 'publish', 'landed-other', '--owner', '--tree', T], { role: 'sup' }).err, /owner commands don't run in an agent session/);
+    assert.match(dt(['artifact', 'publish', 'mock-one', '--owner', '--tree', T]).err, /mock-one: not an artifact landed on main \(a draft is never public\)/);
+    assert.match(dt(['artifact', 'publish', 'no-such', '--owner', '--tree', T]).err, /no-such: not an artifact landed on main/);
+    assert.match(dt(['artifact', 'publish', 'landed-broken', '--owner', '--tree', tree('landed-broken')]).err, /landed-broken is broken on main: landed-broken\/artifact\.json: not JSON/);
+    assert.match(dt(['artifact', 'publish', 'landed-other', '--owner', '--tree', tree('landed-tk')]).err, /landed-other: --tree [0-9a-f]{12} is not its tree on main \([0-9a-f]{12}\); only what main has now is published/);
+    assert.match(dt(['artifact', 'unpublish', 'landed-other', '--owner']).err, /landed-other is not published; there is nothing to unpublish/);
+    const mine = () => json(must(['log', '--type', 'act', '--by', 'owner', '--json']));
+    assert.match(must(['artifact', 'publish', 'landed-other', '--owner', '--tree', T]), /^recorded: landed-other published\. This records intent only: a page goes public, or comes down, only on the cloud gateway's confirm page/);
+    let last = mine().at(-1);
+    assert.deepEqual([last.class, last.what, last.artifact, last.tree, last.channel, last.refs], ['artifact-publish', 'publish', 'landed-other', T, 'cli', ['artifact:landed-other']]);
+    must(['log-check']);
+    must(['artifact', 'unpublish', 'landed-other', '--owner']);
+    last = mine().at(-1);
+    assert.deepEqual([last.what, last.tree], ['unpublish', undefined]);
+    assert.match(dt(['artifact', 'unpublish', 'landed-other', '--owner']).err, /is not published/, 'once');
+    // the dashboard's action: what the gateway calls, under the checks every owner action has
+    const port = await freePort();
+    const base = `http://127.0.0.1:${port}`;
+    const srv = spawn(process.execPath, [DT, 'dashboard', '--port', String(port)], { cwd: repo, env: { ...process.env, DEVTEAM_ROLE: '' }, stdio: 'ignore' });
+    const act = (body, headers = {}) => fetch(`${base}/api/artifact-publish`, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) });
+    try {
+      await serverUp(`${base}/`);
+      assert.equal((await act({ op: 'publish', slug: 'landed-tk' })).status, 400, 'a publish names its tree');
+      assert.equal((await act({ op: 'publish', slug: 'Landed', tree: tree('landed-tk') })).status, 400);
+      assert.equal((await act({ op: 'erase', slug: 'landed-tk' })).status, 400);
+      assert.equal((await act({ op: 'publish', slug: 'landed-tk', tree: tree('landed-tk') }, { origin: 'http://evil.example' })).status, 403);
+      let r = await act({ op: 'publish', slug: 'landed-tk', tree: tree('landed-tk') });
+      assert.equal(r.status, 200, await r.text());
+      assert.deepEqual([mine().at(-1).artifact, mine().at(-1).channel], ['landed-tk', 'dashboard']);
+      r = await act({ op: 'publish', slug: 'landed-tk', tree: T });
+      assert.equal(r.status, 400);
+      assert.match((await r.json()).error, /is not its tree on main/);
+      assert.equal((await act({ op: 'unpublish', slug: 'landed-tk' })).status, 200);
+    } finally { srv.kill(); }
+  });
 
 // Forks. A fork is a copy of the fixture as it stands between two steps, made by the run in
 // kit.test.mjs; a child process (fork.mjs) runs the steps given to it there. Those steps see
