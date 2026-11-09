@@ -15,10 +15,10 @@
 #   path: /healthz. Environment: DEVTEAM_PUBLIC_URL=https://box.example.com. Custom domains:
 #   box.example.com and *.box.example.com, with every DNS record Render lists for them (a wildcard
 #   needs its own name pointed at Render too, plus the _acme-challenge and _cf-custom-hostname
-#   CNAMEs; remove any AAAA records). If Render won't take a wildcard under a subdomain, give the
-#   box a domain of its own (example.com and *.example.com). The *.onrender.com address is refused:
+#   CNAMEs; remove any AAAA records). Best on a domain used for nothing else, or if Render won't
+#   take a wildcard under a subdomain: example.com and *.example.com. The *.onrender.com address is refused:
 #   the box answers only on its own names. Then deploy: the log prints the claim link,
-#   https://auth.box.example.com/auth/claim#<token>, good for a day (a restart prints a new one).
+#   https://auth.box.example.com/auth/claim#<token>, good for a day (after that, a restart prints a new one).
 # fly.io: fly launch --no-deploy --dockerfile cloud/Dockerfile --internal-port 8080; in fly.toml
 #   set auto_stop_machines = "off", min_machines_running = 1, [env] DEVTEAM_PUBLIC_URL, and
 #   [mounts] source = "data", destination = "/data"; fly volumes create data; fly certs add for

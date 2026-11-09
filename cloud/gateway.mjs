@@ -371,9 +371,8 @@ export function createGateway(opts = {}) {
       if (k === 'set-cookie') { const keep = [].concat(v).filter((c) => !/;\s*domain\s*=/i.test(c) && !new RegExp(`^\\s*${COOKIE}\\s*=`).test(c)); if (keep.length) out[k] = keep; continue; }
       out[k] = k === 'content-security-policy' || k === 'location' ? mapLoop(String(v)) : v;
     }
-    // an artifact under its capability: its policy and redirects stay under it too
+    // an artifact under its capability: its policy stays under it too
     if (cap && out['content-security-policy']) out['content-security-policy'] = out['content-security-policy'].split(`${own}/artifact/`).join(`${own}${cap}/artifact/`);
-    if (cap && out.location?.startsWith('/artifact/')) out.location = `${cap}${out.location}`;
     return { ...out, ...hsts };
   };
   const proxy = (req, res, { port, path: p, publicOrigin, cap }) => {
@@ -393,14 +392,19 @@ export function createGateway(opts = {}) {
   // The hub's list is the one thing the box's name takes from behind it, and only as data: whatever
   // holds the port, the page reads JSON and shows it as text. No hub yet is an empty list.
   const instances = (req, res) => {
-    const none = () => json(res, 200, { hub: 1, instances: [] });
+    let settled = false;
+    const reply = (body) => { if (settled) return; settled = true; send(res, 200, 'application/json', body); };
+    const none = () => reply(JSON.stringify({ hub: 1, instances: [] }));
     const up = http.get({ host: '127.0.0.1', port: HUB_PORT, path: '/instances.json', timeout: 10000, headers: { host: `127.0.0.1:${HUB_PORT}`, 'sec-fetch-site': 'same-origin' } }, (ur) => {
       if (ur.statusCode !== 200) { ur.resume(); return none(); }
-      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...hsts });
-      pipeline(ur, res, () => {});
+      const chunks = [];
+      let size = 0;
+      ur.on('data', (c) => { size += c.length; if (size > 1024 * 1024) { none(); up.destroy(); } else chunks.push(c); });
+      ur.on('end', () => reply(Buffer.concat(chunks)));
+      ur.on('error', none);
     });
     up.on('timeout', () => up.destroy());
-    up.on('error', () => { if (res.headersSent) res.destroy(); else none(); });
+    up.on('error', none);
   };
 
   const navigating = (req) => req.method === 'GET' && (req.headers['sec-fetch-mode'] === 'navigate' || (!req.headers['sec-fetch-mode'] && String(req.headers.accept ?? '').includes('text/html')));
@@ -661,8 +665,9 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === fs.realpathSync(proces
       const port = Number(env.PORT ?? 8080);
       // every address, IPv6 too: a port left open on either family is one an agent could take
       const up = () => process.stdout.write(`gateway: ${pub} on :${port}\n`);
-      server.once('error', (e) => { if (e.code !== 'EAFNOSUPPORT' && e.code !== 'EADDRNOTAVAIL') throw e; server.listen(port, '0.0.0.0', up); });
-      server.listen(port, '::', up);
+      const fallback = (e) => { if (e.code !== 'EAFNOSUPPORT' && e.code !== 'EADDRNOTAVAIL') throw e; server.listen(port, '0.0.0.0', up); };
+      server.once('error', fallback);
+      server.listen(port, '::', () => { server.off('error', fallback); up(); });
       for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => process.exit(0));
     } else if (cmd === 'reclaim') {
       // Lost every passkey: forget them and every session, and print a new claim link. Run it in a

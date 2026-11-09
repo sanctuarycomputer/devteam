@@ -446,7 +446,8 @@ test('behind the gateway the kit runs as on a laptop: hub, dashboard, owner acti
 
 test('whatever an agent binds to the hub\'s port, the box\'s name serves only the gateway\'s page, and only JSON from there', async () => {
   const gw = await gateway('squat');
-  const evil = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'text/html', 'set-cookie': 'a=1', 'content-security-policy': "frame-ancestors *" }); res.end(req.url === '/instances.json' ? '{"hub":1,"instances":[]}' : '<script>evil()</script>'); });
+  let huge = false;
+  const evil = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'text/html', 'set-cookie': 'a=1', 'content-security-policy': "frame-ancestors *" }); res.end(huge ? 'x'.repeat(2 * 1024 * 1024) : req.url === '/instances.json' ? '{"hub":1,"instances":[{"name":"x"}]}' : '<script>evil()</script>'); });
   await until(() => new Promise((r) => { evil.once('error', () => r(false)); evil.listen(HUB, '127.0.0.1', () => r(true)); }), 'the hub port');
   try {
     assert.equal((await gw.claim(authenticator())).status, 200);
@@ -457,6 +458,9 @@ test('whatever an agent binds to the hub\'s port, the box\'s name serves only th
     assert.equal(list.headers['content-type'], 'application/json');
     assert.equal(list.headers['x-content-type-options'], 'nosniff');
     assert.equal(list.headers['content-security-policy'], undefined);
+    assert.equal(list.body, '{"hub":1,"instances":[{"name":"x"}]}');
+    huge = true;
+    assert.equal((await gw.req('GET', '/instances.json')).body, '{"hub":1,"instances":[]}', 'and no more of it than a list could be');
     assert.equal((await gw.req('GET', '/anything')).status, 404);
   } finally { evil.close(); await gw.close(); }
   const gw2 = await gateway('nohub');
