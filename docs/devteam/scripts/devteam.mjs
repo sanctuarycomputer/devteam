@@ -9087,7 +9087,7 @@ function moveChecklist(s, memory = []) {
     ...(memory.length ? [`your agent's own memory for this project (${memory.length} file(s) under ${path.dirname(path.dirname(memory[0].path))}) isn't in the repo; the supervisor folded what the next session needs into knowledge and its handoff, so nothing to copy`] : []),
     `start the supervisor in the repo: open ${agent} there and say "Assume the role of the devteam supervisor and resume the fleet" (or step 9's command: DEVTEAM_ROLE=supervisor ${agent} "$(node docs/devteam/scripts/devteam.mjs prompt supervisor)"); tmux need only be installed: the workers get a tmux session of their own`,
     'the supervisor runs fleet unpark, or fleet undrain for a drained fleet (it rebuilds run/log from the landed log, prints the parity fingerprint, puts every goal back as it was) and restarts each parked session with the command it prints',
-    'in the browser you use there: turn on "Notify me of new Inbox items" again (a browser setting)',
+    'in the browser you use there: open the hub and turn on "Notify me of new Inbox items" again (a browser setting)',
     `restart the dashboard where it outlives the session: tmux new-window -d -t '=${tmuxSession()}' -n dashboard 'node docs/devteam/scripts/devteam.mjs dashboard' (or another terminal), then open the hub, http://127.0.0.1:${HUB_PORT}, which lists every instance on the machine (or the address the dashboard prints)`,
   ];
 }
