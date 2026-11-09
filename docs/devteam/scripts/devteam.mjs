@@ -7554,7 +7554,7 @@ async function pickDashboardPort({ skip = [] } = {}) {
 // owner: GET only, no proxy, its own Host only, a page that fetches only from itself and frames only
 // the block. The others retry, so the hub moves when its dashboard stops. Something
 // that isn't a devteam hub on the port: logged once, and this dashboard stops trying.
-function startHub(log, onHeld = () => {}) {
+function startHub(log) {
   const page = path.join(kitDir, 'dashboard', 'hub.html');
   const retry = Number(process.env.DEVTEAM_HUB_RETRY_MS ?? 30000);
   const ownHost = (h) => [`127.0.0.1:${HUB_PORT}`, `localhost:${HUB_PORT}`].includes(h ?? '');
@@ -7601,16 +7601,18 @@ function startHub(log, onHeld = () => {}) {
       if ((await holder()) !== 'other') setTimeout(tryListen, retry).unref();
       else log(`hub: port ${HUB_PORT} is held by something that isn't a devteam hub; this dashboard won't serve the hub`);
     });
-    keepAlive(hub).listen(HUB_PORT, '127.0.0.1', () => { log(`hub on http://127.0.0.1:${HUB_PORT}`); onHeld(); });
+    keepAlive(hub).listen(HUB_PORT, '127.0.0.1', () => { log(`hub on http://127.0.0.1:${HUB_PORT}`); });
   };
   tryListen();
 }
 
 // ===== account rotation: cswap (claude-swap), when it's installed =====
-// A machine has one active Claude account, so one dashboard drives the switch: the one holding the
-// hub port. Each dashboard then looks after its own instance's panes. Every dashboard runs this as
-// the supervisor, never as the owner (a cswap found on a path an agent can write gets no owner
-// identity), and only the supervisor acts on a pane, as everywhere else (supervisor.md §11).
+// A machine has one active Claude account, so one dashboard a minute drives the switch: whichever
+// takes the machine-wide claim first (claimRotation). The hub plays no part, so a dashboard on an
+// older kit, or a dead one, can't stop it. Each dashboard then looks after its own instance's panes.
+// Every dashboard runs this as the supervisor, never as the owner (a cswap found on a path an agent
+// can write gets no owner identity), and only the supervisor acts on a pane, as everywhere else
+// (supervisor.md §11).
 const ACCOUNTS_FILE = runPath('accounts.json');
 const ACCOUNTS_RESUMED = runPath('accounts-resumed.json');
 const ACCOUNTS_FRESH_MS = 10 * 60000;
@@ -7623,6 +7625,8 @@ const RESTART_MAX = 3;
 const RESTART_CHILD_MS = 100000;
 const RESTART_TICK_MS = 110000;
 const RESTART_MIN_MS = 30000;
+// The last moment a tick may start a cswap switch (its 45 s timeout, inside RESTART_TICK_MS).
+const SWITCH_LATEST_MS = RESTART_TICK_MS - 45000;
 // Claude Code's limit menu and banner, anchored: an agent's prose can quote either, and cswap only
 // rotates Claude accounts, so another harness's limit stop is not ours to restart. No key ever goes
 // to the menu: its third item spends money.
@@ -7651,6 +7655,48 @@ function rotateAccounts(bin) {
   const said = events.find((e) => e.event === 'error')?.message ?? r.stderr ?? '';
   return { ok: [0, 2, 3].includes(r.status), failure: `cswap auto: ${r.error?.message ?? `exit ${r.status}: ${String(said).trim().slice(0, 200)}`}`, switched: events.filter((e) => e.event === 'switch'), exhausted: events.some((e) => e.event === 'all-exhausted') };
 }
+const accountsEveryMs = () => { const n = Number(process.env.DEVTEAM_ACCOUNTS_MS ?? 60000); return n > 0 ? n : 60000; };
+// In the home directory, not the tmp dir: dashboards started from different shells can have different
+// TMPDIRs, and cswap's accounts are the user's. Named for the hub port, so a fixture has its own.
+const rotateClaimFile = () => path.join(os.homedir(), '.devteam', `accounts-rotate-${HUB_PORT}.json`);
+// Whose claim it is, if it's still good. It goes stale just under a tick so the dashboard that took it
+// can take it again on its next one, and a crash holds it for less than a minute. Dated in the
+// future (the clock moved back) or unreadable, it holds nothing.
+function rotateClaim(file) {
+  try {
+    const c = JSON.parse(readText(file));
+    const age = Date.now() - c.at;
+    return age >= 0 && age < accountsEveryMs() * 0.9 ? c : null;
+  } catch { return null; }
+}
+const writeRotateClaim = (file) => { fs.rmSync(file, { recursive: true, force: true }); fs.writeFileSync(file, JSON.stringify({ at: Date.now(), by: process.pid })); };
+// One dashboard per interval runs cswap's engine. withLock makes the look and the write one step,
+// and its own lock goes stale too. Failing to take it means no rotation this tick, said out loud.
+function claimRotation() {
+  try {
+    const file = rotateClaimFile();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    return withLock(file, () => {
+      if (rotateClaim(file)) return false;
+      writeRotateClaim(file);
+      return true;
+    });
+  } catch (e) { out(`cswap rotation claim: ${e.message}`); return false; }
+}
+// Before a switch, which can start a long way into the claim: still ours, or another dashboard has
+// taken over and this one leaves the accounts alone. Keeping it covers the switch's own 45 s.
+function renewRotation() {
+  try {
+    const file = rotateClaimFile();
+    return withLock(file, () => {
+      let c = null;
+      try { c = JSON.parse(readText(file)); } catch {}
+      if (c?.by !== process.pid) return false;
+      writeRotateClaim(file);
+      return true;
+    });
+  } catch { return false; }
+}
 function cswapAccounts(bin) {
   const r = runCswap(bin, ['list', '--json']);
   try { const a = JSON.parse(r.stdout).accounts; return Array.isArray(a) ? a : null; } catch { return null; }
@@ -7665,6 +7711,45 @@ function accountHasRoom(a) {
 }
 // Known to be full. An account whose usage can't be read right now (a 429, a timeout, an API key) isn't.
 const accountAtLimit = (a) => a?.usageStatus === 'ok' && mainWindows(a).some((x) => x.pct >= 100);
+// How long a full window can last, for a reading with no reset time on it.
+const WINDOW_MS = { fiveHour: 5 * 3600000, sevenDay: 7 * 86400000 };
+// An expired token hides an account's usage, but cswap keeps the last reading. Full counts while that
+// window can't have reset: by its reset time, or failing that by the reading's age. With neither it
+// isn't known, and neither is an account whose usage just can't be read.
+function lastReadingFull(a) {
+  if (a?.usageStatus !== 'token_expired') return false;
+  const age = typeof a.lastGoodAgeSeconds === 'number' ? a.lastGoodAgeSeconds * 1000 : Date.now() - Date.parse(a.lastGoodFetchedAt);
+  return Object.keys(WINDOW_MS).some((k) => {
+    const w = a.lastGoodUsage?.[k];
+    if (!(w?.pct >= 100)) return false;
+    const resets = Date.parse(w.resetsAt);
+    return Number.isFinite(resets) ? resets > Date.now() : age >= 0 && age < WINDOW_MS[k];
+  });
+}
+const accountKnownFull = (a) => accountAtLimit(a) || lastReadingFull(a);
+// One switch, and what it said, whatever the exit code: a switch that stays put is not a failure.
+function switchAccount(bin, args) {
+  const r = runCswap(bin, ['switch', ...args, '--json']);
+  let o = null;
+  try { o = JSON.parse(r.stdout); } catch {}
+  const failed = o?.error || (r.status !== 0 && !o);
+  return { failure: failed ? `cswap switch: ${o?.error?.message ?? r.error?.message ?? `exit ${r.status}: ${String(r.stderr ?? '').trim().slice(0, 200)}`}` : null, moved: !failed && o?.switched !== false, from: o?.from, to: o?.to, reason: o?.reason };
+}
+// cswap auto won't leave a full account whose token expired while idle: it holds, per process, and
+// --once never outlasts the hold. So switch from here, when another enabled account has room, and
+// only under a claim that's still ours, inside the tick. `best` needs the active account's usage to
+// compare with, so on an expired token it declines (usage-unavailable); the room is already proven
+// here, so name the account with the most.
+function leaveFullAccount(bin, active, rows, began) {
+  const room = rows.filter((a) => a !== active && !a.disabled && accountHasRoom(a));
+  if (!room.length) return null;
+  const go = (args) => (Date.now() - began < SWITCH_LATEST_MS && renewRotation() ? switchAccount(bin, args) : null);
+  const r = go(['--strategy', 'best']);
+  if (r?.moved || r?.failure || r?.reason !== 'usage-unavailable' || active.usageStatus !== 'token_expired') return r;
+  const free = (a) => Math.min(...mainWindows(a).map((x) => 100 - x.pct));
+  const target = room.filter((a) => Number.isInteger(a.number)).sort((a, b) => free(b) - free(a))[0];
+  return (target ? go([String(target.number)]) : null) ?? r;
+}
 // What a pane's bottom lines say about a limit stop. A banner counts only as the last thing the
 // agent said: nothing of its own after it, just the input box and status lines.
 function limitStop(rawLines) {
@@ -7814,7 +7899,8 @@ function cmdSupervisorSession() {
 function accountsState() {
   try {
     const s = JSON.parse(readText(ACCOUNTS_FILE));
-    return Date.now() - Date.parse(s.at) < ACCOUNTS_FRESH_MS ? { ...s, needs_login: Array.isArray(s.needs_login) ? s.needs_login.map(String) : [], restart_gave_up: Array.isArray(s.restart_gave_up) ? s.restart_gave_up.map(String) : [] } : null;
+    const age = Date.now() - Date.parse(s.at);
+    return age >= 0 && age < ACCOUNTS_FRESH_MS ? { ...s, active_no_room: s.active_no_room === true, needs_login: Array.isArray(s.needs_login) ? s.needs_login.map(String) : [], restart_gave_up: Array.isArray(s.restart_gave_up) ? s.restart_gave_up.map(String) : [] } : null;
   } catch { return null; }
 }
 // Not supervisorOnly: that records this process's pane as the supervisor's, and this runs under the dashboard.
@@ -7823,14 +7909,16 @@ function cmdAccountsTick() {
   if (logWriter() !== 'supervisor' || ['worker', 'planner'].includes(process.env.DEVTEAM_ROLE)) die('accounts-tick: the supervisor does this');
   const bin = findCswap();
   const before = accountsState();
-  const state = { at: nowIso(), cswap: !!bin, active: null, exhausted: false, needs_login: [], restart_gave_up: [], supervisor_limit: null, resumed: [] };
+  const state = { at: nowIso(), cswap: !!bin, active: null, active_no_room: false, exhausted: false, needs_login: [], restart_gave_up: [], supervisor_limit: null, resumed: [] };
   let switched = false;
   if (bin) {
-    if (flags.rotate) {
+    const who = (x) => (x && typeof x === 'object' ? x.email ?? x.alias ?? x.number ?? '?' : x ?? '?');
+    const saySwitched = (e) => out(`cswap switched account${e.from || e.to ? `: ${who(e.from)} -> ${who(e.to)}` : ''}`);
+    const claimed = !!flags.rotate && claimRotation();
+    if (claimed) {
       const r = rotateAccounts(bin);
       if (!r.ok) out(r.failure);
-      const who = (x) => (x && typeof x === 'object' ? x.email ?? x.alias ?? x.number ?? '?' : x ?? '?');
-      for (const e of r.switched) out(`cswap switched account${e.from || e.to ? `: ${who(e.from)} -> ${who(e.to)}` : ''}`);
+      r.switched.forEach(saySwitched);
       switched = r.switched.length > 0;
       state.exhausted = r.exhausted;
     }
@@ -7838,9 +7926,22 @@ function cmdAccountsTick() {
     if (rows) {
       state.needs_login = rows.filter((a) => a.usageStatus === 'relogin_required').map((a) => String(a.alias ?? a.email ?? a.number));
       const usable = rows.filter((a) => !a.disabled);
-      if (usable.length && usable.every(accountAtLimit)) state.exhausted = true;
+      if (usable.length && usable.every(accountKnownFull)) state.exhausted = true;
       const active = rows.find((a) => a.active);
       state.active = active ? String(active.email ?? active.number) : null;
+      // What a session started now would run into: known full, or stopped on a per-model limit.
+      state.active_no_room = !!active && (accountKnownFull(active) || (active.usageStatus === 'ok' && Array.isArray(active.usage?.scoped) && active.usage.scoped.some((x) => x?.pct >= 100)));
+      if (claimed && !switched && accountKnownFull(active)) {
+        const s = leaveFullAccount(bin, active, rows, began);
+        if (s?.failure) out(s.failure);
+        else if (s?.moved) {
+          saySwitched(s);
+          switched = true;
+          state.exhausted = false;
+          state.active = s.to ? String(s.to.email ?? s.to.number) : null;
+          state.active_no_room = false;
+        } else if (s) out(`cswap stayed on ${who(active)}: ${s.reason ?? 'no reason given'}`);
+      }
       // A session holds the old login for about 30 s after a switch (macOS), and any dashboard's
       // rotation can be the one that switched: resume only on an account this project's last tick saw too.
       if (!switched && state.active && before?.active === state.active && accountHasRoom(active)) {
@@ -7930,8 +8031,8 @@ async function cmdDashboard() {
   setInterval(refreshHello, 10000).unref();
   const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, inbox: hello?.inbox ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}) });
   // Account rotation and limit stops (accounts-tick), one run at a time, as the supervisor; a line
-  // it prints goes to the log once, however many ticks repeat it.
-  let holdsHub = false;
+  // it prints goes to the log once, however many ticks repeat it. Every dashboard asks to rotate,
+  // and the claim decides which one does.
   let accountsRunning = false;
   let accountsSaid = '';
   const accountsTick = () => {
@@ -7939,7 +8040,7 @@ async function cmdDashboard() {
     accountsRunning = true;
     const env = { ...process.env, DEVTEAM_ROLE: 'supervisor' };
     for (const k of ['DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_CHANNEL']) delete env[k];
-    execFile(process.execPath, [self, 'accounts-tick', ...(holdsHub ? ['--rotate'] : [])], { cwd: mainRoot, env, timeout: 120000, killSignal: 'SIGKILL', maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+    execFile(process.execPath, [self, 'accounts-tick', '--rotate'], { cwd: mainRoot, env, timeout: 120000, killSignal: 'SIGKILL', maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
       accountsRunning = false;
       const said = `${stdout}${err ? ` ${stderr || err.message}` : ''}`.trim();
       if (said && said !== accountsSaid) log(`accounts: ${said}`);
@@ -8208,7 +8309,7 @@ async function cmdDashboard() {
     log(`server error: ${e?.stack ?? e}`); process.stderr.write(`devteam dashboard: ${e.message}\n`); process.exit(1);
   });
   keepAlive(server);
-  server.once('listening', () => { log(`started on http://${host}:${port} (node ${process.version})`); out(`devteam dashboard on http://${host}:${port}`); startHub(log, () => { holdsHub = true; }); setInterval(accountsTick, Number(process.env.DEVTEAM_ACCOUNTS_MS ?? 60000)).unref(); });
+  server.once('listening', () => { log(`started on http://${host}:${port} (node ${process.version})`); out(`devteam dashboard on http://${host}:${port}`); startHub(log); setInterval(accountsTick, accountsEveryMs()).unref(); });
   server.listen(port, host);
 }
 
@@ -8537,6 +8638,9 @@ function makeSession(role) {
   const refused = ['park', 'let-go'].includes(mode) || (mode === 'drain' && !started);
   if (refused && !flags.force) die(legacyDrain ? `the fleet is drained by an old drain (${legacyDrain.id}): fleet unpark first (supervisor.md §12); to start this one anyway, add --force (it is logged)` : `its goal is ${holdWords(mode)}: ${mode === 'drain' ? 'a draining goal finishes what is running and starts nothing new' : 'nothing starts for it'} (planning.md §1, holds). To start it anyway, add --force (it is logged)`);
   if (!sh('tmux', ['-V'])) die('tmux not found');
+  // A warning only: the numbers can be 10 minutes old, and the supervisor may know better. Not for
+  // a relaunch at a limit: the tick starts that once there's room, and this file can lag it.
+  if (!replaceAgent && accountsState()?.active_no_room) warn(`the active Claude account (${accountsState().active ?? 'unknown'}) has no room left, so this ${role} may stop at its limit: wait for a reset or switch account (cswap)`);
   const s = loadSettings();
   let resume = !!flags.resume;
   const blockSize = flagNum('id-block') ?? ID_BLOCK_DEFAULT;
