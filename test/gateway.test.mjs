@@ -70,7 +70,7 @@ async function gateway(name, extra = {}) {
   const port = await freePort();
   const publicUrl = `http://box.localhost:${port}`;
   const inst = (p) => `http://${p}.box.localhost:${port}`;
-  const auth = `http://auth.box.localhost:${port}`;
+  const auth = publicUrl;
   const term = `http://term.box.localhost:${port}`;
   const ttydPage = path.join(tmp, `${name}-ttyd.html`);
   fs.writeFileSync(ttydPage, 'the gateway\'s copy of ttyd');
@@ -132,10 +132,10 @@ test('claim: only with the token, once; then only the passkey gets in', async ()
   const gw = await gateway('claim');
   try {
     assert.ok(gw.token, `the claim link is printed: ${gw.logs.join(' | ')}`);
-    assert.equal((await gw.req('GET', '/', { headers: { 'sec-fetch-mode': 'navigate' } })).headers.location, `${gw.auth}/auth/login`, 'unclaimed: every page sends you to sign in, on the auth name');
-    assert.ok(gw.logs.join('\n').includes(`${gw.auth}/auth/claim#`), 'the claim link is on the auth name');
-    assert.equal((await gw.req('GET', '/auth/claim?x=1', { on: null })).headers.location, `${gw.auth}/auth/claim?x=1`, 'the box sends its own /auth/ there (a link\'s #token goes along)');
-    assert.equal((await gw.req('GET', '/', { on: 'auth' })).headers.location, `${gw.publicUrl}/`, 'and the auth name serves nothing else');
+    assert.equal((await gw.req('GET', '/', { headers: { 'sec-fetch-mode': 'navigate' } })).headers.location, `${gw.auth}/auth/login`, 'unclaimed: every page sends you to sign in, on the box\'s own name');
+    assert.ok(gw.logs.join('\n').includes(`${gw.auth}/auth/claim#`), 'the claim link is on the box\'s own name');
+    assert.equal((await gw.req('GET', '/auth')).headers.location, '/auth/login', '/auth is the sign-in');
+    assert.equal((await gw.req('GET', '/', { headers: { host: `auth.box.localhost:${gw.port}` } })).status, 421, 'and there is no auth name any more');
     assert.match((await gw.req('GET', '/auth/login')).body, /unclaimed/);
     assert.equal((await gw.req('GET', '/box.json')).status, 403, 'nothing behind the gateway answers an unclaimed box');
     const a = authenticator();
@@ -147,7 +147,7 @@ test('claim: only with the token, once; then only the passkey gets in', async ()
     assert.equal(bad.status, 400);
     assert.match(bad.json.error, /origin/);
     o = await gw.req('POST', '/auth/claim/options', { body: { token: gw.token } });
-    bad = await gw.req('POST', '/auth/claim/verify', { body: { token: gw.token, ...a.create(o.json, gw.publicUrl) } });
+    bad = await gw.req('POST', '/auth/claim/verify', { body: { token: gw.token, ...a.create(o.json, gw.inst(P)) } });
     assert.match(bad.json.error, /origin/, 'a passkey made on the box\'s own name (the hub, the terminal: bytes an agent can change) is refused');
     o = await gw.req('POST', '/auth/claim/options', { body: { token: gw.token } });
     bad = await gw.req('POST', '/auth/claim/verify', { body: { token: gw.token, ...a.create(o.json, gw.auth, { flags: 0x41 }) } });
@@ -189,10 +189,11 @@ test('claim: only with the token, once; then only the passkey gets in', async ()
     assert.equal((await gw.login(a, { counter: 7 })).status, 200);
     assert.match((await gw.login(a, { counter: 7 })).json.error, /counter/, 'a counter that stops going up means a cloned key');
     assert.match((await gw.login(a, { counter: 9, userHandle: u(crypto.randomBytes(16)) })).json.error, /another account/);
-    // passkeys belong to the auth name, and a login challenge can't be flooded away or used twice
+    // passkeys belong to the box's name, and a login challenge can't be flooded away or used twice
     const flood = await gw.req('POST', '/auth/login/options', { body: {}, cookie: '' });
-    assert.equal(flood.json.rpId, 'auth.box.localhost');
+    assert.equal(flood.json.rpId, 'box.localhost');
     for (let i = 0; i < 300; i++) await gw.req('POST', '/auth/login/options', { body: {}, cookie: '' });
+    assert.match((await gw.req('POST', '/auth/login/verify', { body: a.get(flood.json, gw.inst(P), { counter: 19 }), cookie: '' })).json.error, /origin/, 'a dashboard\'s page may ask for the passkey, but its answer is no sign-in');
     const once = a.get(flood.json, gw.auth, { counter: 20 });
     assert.equal((await gw.req('POST', '/auth/login/verify', { body: once, cookie: '' })).status, 200, 'a pending sign-in survives anyone asking for challenges');
     assert.match((await gw.req('POST', '/auth/login/verify', { body: once, cookie: '' })).json.error, /challenge/, 'and is good once');
@@ -243,7 +244,7 @@ test('reclaim, and the gateway\'s own names and origins', async () => {
     assert.equal((await gw.req('POST', '/auth/login/options', { body: {}, headers: { origin: undefined } })).status, 403, 'and so is one with no Origin');
     assert.equal((await gw.req('POST', '/auth/login/options', { body: {}, headers: { origin: gw.inst(P) } })).status, 403, 'and one from an instance\'s page: a dashboard can\'t act on the box');
     assert.equal((await gw.req('POST', '/api/fleet', { on: P, body: {}, headers: { origin: gw.publicUrl } })).status, 403, 'nor the box on an instance');
-    assert.equal((await gw.req('POST', '/auth/login/options', { body: {}, headers: { origin: gw.publicUrl } })).status, 403, 'nor the box\'s own pages on the auth name');
+    assert.equal((await gw.req('POST', '/auth/login/options', { body: {}, headers: { origin: gw.term } })).status, 403, 'nor the terminal\'s');
     assert.equal((await gw.req('GET', 'http://evil.example/', { headers: { host: `box.localhost:${gw.port}` } })).status, 400, 'a request line with a full URL is refused');
   } finally { await gw.close(); }
   // reclaim: from a console on the box, every passkey and session forgotten, a new link printed
@@ -348,7 +349,9 @@ test('behind the gateway the kit runs as on a laptop: hub, dashboard, owner acti
     assert.ok(!hcsp.includes('127.0.0.1'), hcsp);
     const list = (await gw.req('GET', '/instances.json', { headers: { 'sec-fetch-site': 'same-origin' } })).json.instances;
     assert.deepEqual(list.map((x) => [x.name, x.port]), [['alpha', P]]);
-    assert.deepEqual((await gw.req('GET', '/box.json')).json, { box: 1, terminal: `${gw.term}/`, instance: `http://{port}.box.localhost:${gw.port}/`, passkeys: `${gw.auth}/auth/passkeys` }, 'the hub learns where instances are');
+    const boxJson = (await gw.req('GET', '/box.json')).json;
+    assert.deepEqual(boxJson, { box: 1, terminal: `${gw.term}/`, instance: `http://{port}.box.localhost:${gw.port}/`, passkeys: `${gw.auth}/auth/passkeys`, push: boxJson.push }, 'the hub learns where instances are');
+    assert.equal(Buffer.from(boxJson.push, 'base64url').length, 65, 'and the key that signs its notifications');
 
     // a dashboard on its own subdomain, exactly as the kit serves it, its policy pointed at the box
     const dash = await gw.req('GET', '/', { on: P });
@@ -507,12 +510,204 @@ test('on https: the cookie is Secure and SameSite=None for every name, and HSTS 
   });
   try {
     const a = authenticator();
-    const o = await call('auth.box.localhost', 'POST', '/auth/claim/options', { token });
-    const ok = await call('auth.box.localhost', 'POST', '/auth/claim/verify', { token, ...a.create(o.json, 'https://auth.box.localhost') });
+    const o = await call('box.localhost', 'POST', '/auth/claim/options', { token });
+    const ok = await call('box.localhost', 'POST', '/auth/claim/verify', { token, ...a.create(o.json, 'https://box.localhost') });
     assert.equal(ok.status, 200, JSON.stringify(ok.json));
     assert.match(ok.headers['set-cookie'][0], /^devteam_session=[\w-]+; Domain=box\.localhost; Path=\/; HttpOnly; Max-Age=1209600; Secure; SameSite=None$/);
     assert.equal(ok.headers['strict-transport-security'], 'max-age=31536000');
     const cookie = ok.headers['set-cookie'][0].split(';')[0];
     assert.equal((await call('box.localhost', 'GET', '/box.json', null, { cookie })).json.terminal, 'https://term.box.localhost/');
   } finally { await new Promise((r) => g.server.close(r)); }
+});
+
+// --- notifications -------------------------------------------------------------------------------
+function browserKeys() {
+  const ecdh = crypto.createECDH('prime256v1');
+  ecdh.generateKeys();
+  const auth = crypto.randomBytes(16);
+  return { ecdh, auth, keys: { p256dh: u(ecdh.getPublicKey()), auth: u(auth) } };
+}
+// What a browser does with a push (RFC 8291), written apart from the gateway's half.
+function openPush(body, { ecdh, auth }) {
+  const b = Buffer.from(body);
+  const idlen = b[20];
+  const salt = b.subarray(0, 16);
+  const as = b.subarray(21, 21 + idlen);
+  const hk = (i, sl, info, n) => Buffer.from(crypto.hkdfSync('sha256', i, sl, info, n));
+  const ikm = hk(ecdh.computeSecret(as), auth, Buffer.concat([Buffer.from('WebPush: info\0'), ecdh.getPublicKey(), as]), 32);
+  const text = b.subarray(21 + idlen);
+  const d = crypto.createDecipheriv('aes-128-gcm', hk(ikm, salt, 'Content-Encoding: aes128gcm\0', 16), hk(ikm, salt, 'Content-Encoding: nonce\0', 12));
+  d.setAuthTag(text.subarray(-16));
+  const plain = Buffer.concat([d.update(text.subarray(0, -16)), d.final()]);
+  assert.equal(plain.at(-1), 2, 'the last record says so');
+  return JSON.parse(plain.subarray(0, -1).toString('utf8'));
+}
+
+test('a push is encrypted as RFC 8291 says, and signed so a push service believes it', () => {
+  // RFC 8291, appendix A
+  const sender = crypto.createECDH('prime256v1');
+  sender.setPrivateKey(Buffer.from('yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw', 'base64url'));
+  const out = G.encryptPush({ p256dh: 'BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4', auth: 'BTBZMqHH6r4Tts7J_aSIgg' }, Buffer.from('When I grow up, I want to be a watermelon'), sender, Buffer.from('DGv6ra1nlYgDCS1FRnbzlw', 'base64url'));
+  assert.equal(u(out), 'DGv6ra1nlYgDCS1FRnbzlwAAEABBBP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A_yl95bQpu6cVPTpK4Mqgkf1CXztLVBSt2Ks3oZwbuwXPXLWyouBWLVWGNWQexSgSxsj_Qulcy4a-fN');
+
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  const now = 1_800_000_000_000;
+  const [head, claims, sig] = G.vapidToken(privateKey.export({ format: 'jwk' }), 'https://web.push.apple.com', 'https://box.example.com', now).split('.');
+  assert.deepEqual(JSON.parse(Buffer.from(head, 'base64url')), { typ: 'JWT', alg: 'ES256' });
+  const c = JSON.parse(Buffer.from(claims, 'base64url'));
+  assert.deepEqual([c.aud, c.sub], ['https://web.push.apple.com', 'https://box.example.com']);
+  assert.ok(c.exp > now / 1000 && c.exp <= now / 1000 + 3600, 'under an hour, as Apple requires');
+  assert.ok(crypto.verify('sha256', Buffer.from(`${head}.${claims}`), { key: publicKey, dsaEncoding: 'ieee-p1363' }, Buffer.from(sig, 'base64url')));
+});
+
+test('what counts as news is what the hub page notifies about', () => {
+  const ports = [P, P + 1];
+  const at = (inbox, extra = {}) => ({ root: '/r/a', name: 'a', port: P, inbox, ...extra });
+  assert.deepEqual(G.inboxNews({ '/r/a': 2 }, [at(2)], ports).messages, [], 'the same count is nothing');
+  assert.deepEqual(G.inboxNews({ '/r/a': 2 }, [at(1)], ports).messages, [], 'nor one that fell');
+  assert.deepEqual(G.inboxNews({ '/r/a': 2 }, [at(1)], ports).seen, { '/r/a': 1 }, 'but it is remembered');
+  assert.deepEqual(G.inboxNews({ '/r/a': 2 }, [at(5)], ports).messages, [{ title: 'a: 3 new in the Inbox', body: '/r/a', tag: 'devteam-/r/a', url: '/#a' }]);
+  assert.equal(G.inboxNews({}, [at(1)], ports).messages[0].title, 'a: 1 new in the Inbox', 'an instance that turns up with items counts them as new');
+  assert.deepEqual(G.inboxNews({ '/r/a': 2 }, [at(null)], ports), { seen: { '/r/a': 2 }, messages: [] }, 'one still starting says nothing');
+  assert.deepEqual(G.inboxNews({}, [at(9, { port: 80 })], ports).messages, [], 'a port outside the block is no instance');
+  assert.deepEqual(G.inboxNews({ constructor: 1 }, [at(1, { root: 'constructor' })], ports).messages, [], 'a root named like a property is still only a root');
+  const twins = G.inboxNews({}, [at(1), at(1, { root: '/r/b', port: P + 1 })], ports).messages;
+  const hex = crypto.createHash('sha1').update('/r/b').digest('hex').slice(0, 6);
+  assert.equal(twins[1].url, `/#a-${hex}`, 'two of one name are told apart as the hub tells them');
+  const many = Object.fromEntries(Array.from({ length: 400 }, (_, i) => [`/old/${i}`, 1]));
+  assert.equal(Object.keys(G.inboxNews(many, [at(1)], ports).seen).length, 200, 'and the record stays small, whatever claims to be an instance');
+});
+
+test('a subscription must name a browser\'s push service and real keys', () => {
+  const { keys } = browserKeys();
+  assert.ok(G.pushSubscription({ endpoint: 'https://web.push.apple.com/abc', keys }));
+  assert.ok(G.pushSubscription({ endpoint: 'https://fcm.googleapis.com/fcm/send/abc', keys }));
+  for (const endpoint of ['http://web.push.apple.com/a', 'https://127.0.0.1/a', 'https://web.push.apple.com:444/a', 'https://evil.example/a', 'https://push.apple.com.evil.example/a', 'nope']) assert.equal(G.pushSubscription({ endpoint, keys }), null, endpoint);
+  assert.equal(G.pushSubscription({ endpoint: 'https://web.push.apple.com/a', keys: { ...keys, auth: 'AAAA' } }), null);
+  assert.equal(G.pushSubscription({ endpoint: 'https://web.push.apple.com/a', keys: { ...keys, p256dh: u(Buffer.alloc(65, 4)) } }), null, 'a point off the curve');
+  assert.equal(G.pushSubscription(null), null);
+});
+
+test('installing the hub needs no sign-in, and the page may use what it installs', async () => {
+  const gw = await gateway('install');
+  try {
+    assert.equal((await gw.claim(authenticator())).status, 200);
+    const out = { cookie: '' };
+    const m = await gw.req('GET', '/manifest.webmanifest', out);
+    assert.equal(m.status, 200);
+    assert.deepEqual([m.json.display, m.json.scope, m.json.start_url], ['standalone', '/', '/']);
+    const sw = await gw.req('GET', '/sw.js', out);
+    assert.match(sw.headers['content-type'], /javascript/);
+    assert.match(sw.body, /showNotification/);
+    assert.doesNotMatch(sw.body, /'fetch'/, 'the worker stands between no page and the box');
+    assert.doesNotThrow(() => new Function(sw.body));
+    for (const icon of m.json.icons) {
+      const r = await new Promise((resolve) => http.get({ host: '127.0.0.1', port: gw.port, path: icon.src, headers: { host: `box.localhost:${gw.port}` } }, (res) => { const c = []; res.on('data', (x) => c.push(x)); res.on('end', () => resolve({ res, b: Buffer.concat(c) })); }));
+      assert.equal(r.res.statusCode, 200);
+      assert.equal(r.b.subarray(1, 4).toString(), 'PNG');
+      assert.equal(r.b.readUInt32BE(16), Number(icon.sizes.split('x')[0]));
+    }
+    const hub = await gw.req('GET', '/');
+    for (const d of ["worker-src 'self'", "manifest-src 'self'"]) assert.ok(hub.headers['content-security-policy'].split('; ').includes(d));
+    assert.match(hub.body, /<link rel="manifest" href="manifest\.webmanifest">/);
+    assert.doesNotMatch((await gw.req('GET', '/sw.js', { on: P })).body, /showNotification/, 'only the box\'s name serves it');
+    assert.equal((await gw.req('GET', '/sw.js', { on: P, headers: { 'sec-fetch-dest': 'serviceworker' } })).status, 403, 'and an instance still has no worker');
+  } finally { await gw.close(); }
+});
+
+test('the gateway tells every subscribed browser when an Inbox goes up, with no page open', async () => {
+  const sent = [];
+  let status = 201;
+  const pushFetch = async (endpoint, init) => { sent.push({ endpoint, init }); return { status }; };
+  const gw = await gateway('push', { pushFetch });
+  let list = [{ devteam: 1, root: '/r/stacks', name: 'stacks', port: P, inbox: 3 }];
+  const hub = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ hub: 1, instances: list })); });
+  await until(() => new Promise((r) => { hub.once('error', () => r(false)); hub.listen(HUB, '127.0.0.1', () => r(true)); }), 'the hub port');
+  try {
+    const a = authenticator();
+    assert.equal((await gw.claim(a)).status, 200);
+    const phone = browserKeys();
+    const desktop = browserKeys();
+    const sub = (b, endpoint) => ({ body: { endpoint, keys: b.keys } });
+    assert.equal((await gw.req('POST', '/push/subscribe', { ...sub(phone, 'https://web.push.apple.com/phone'), cookie: '' })).status, 401, 'only the owner subscribes');
+    assert.equal((await gw.req('POST', '/push/subscribe', { ...sub(phone, 'https://web.push.apple.com/phone'), headers: { origin: gw.inst(P) } })).status, 403, 'and not from a dashboard\'s page');
+    assert.equal((await gw.req('POST', '/push/subscribe', sub(phone, 'https://evil.example/x'))).status, 400);
+
+    await gw.g.pollPush();
+    assert.equal(sent.length, 0, 'nobody to tell yet, and the backlog is recorded');
+    assert.equal((await gw.req('POST', '/push/subscribe', sub(phone, 'https://web.push.apple.com/phone'))).status, 200);
+    assert.equal((await gw.req('POST', '/push/subscribe', sub(desktop, 'https://fcm.googleapis.com/fcm/send/desk'))).status, 200);
+    assert.equal((await gw.req('POST', '/push/subscribe', sub(desktop, 'https://fcm.googleapis.com/fcm/send/desk'))).status, 200, 'saying so twice is one device');
+
+    await gw.g.pollPush();
+    assert.equal(sent.length, 0, 'what was already there is not news to a new subscriber');
+    list = [{ ...list[0], inbox: 5 }];
+    await gw.g.pollPush();
+    assert.deepEqual(sent.map((x) => x.endpoint).sort(), ['https://fcm.googleapis.com/fcm/send/desk', 'https://web.push.apple.com/phone']);
+    const toPhone = sent.find((x) => x.endpoint.includes('apple'));
+    assert.deepEqual(openPush(toPhone.init.body, phone), { title: 'stacks: 2 new in the Inbox', body: '/r/stacks', tag: 'devteam-/r/stacks', url: '/#stacks' });
+    assert.equal(toPhone.init.headers['content-encoding'], 'aes128gcm');
+    assert.equal(toPhone.init.redirect, 'error');
+    const key = (await gw.req('GET', '/box.json')).json.push;
+    assert.ok(toPhone.init.headers.authorization.endsWith(`, k=${key}`));
+    const aud = JSON.parse(Buffer.from(toPhone.init.headers.authorization.split(' ')[1].slice(2).split('.')[1], 'base64url')).aud;
+    assert.equal(aud, 'https://web.push.apple.com');
+
+    // the hub's test: one push, to the device that asked, and only the owner may ask
+    sent.length = 0;
+    const phoneOnly = { body: { endpoint: 'https://web.push.apple.com/phone' } };
+    assert.equal((await gw.req('POST', '/push/test', phoneOnly)).status, 200);
+    assert.deepEqual(sent.map((x) => x.endpoint), ['https://web.push.apple.com/phone']);
+    assert.equal(openPush(sent[0].init.body, phone).title, 'devteam: test notification');
+    assert.equal((await gw.req('POST', '/push/test', { ...phoneOnly, cookie: '' })).status, 401);
+    assert.equal((await gw.req('POST', '/push/test', { ...phoneOnly, headers: { origin: gw.inst(P) } })).status, 403);
+    assert.equal((await gw.req('POST', '/push/test', { body: { endpoint: 'https://web.push.apple.com/nobody' } })).status, 404);
+    status = 403;
+    assert.match((await gw.req('POST', '/push/test', phoneOnly)).json.error, /403/, 'and a refusal is reported, not hidden');
+    status = 201;
+
+    // a restart: the same disk, and a dashboard coming back with its Inbox as it was
+    sent.length = 0;
+    const again = G.createGateway({ publicUrl: gw.publicUrl, dir: gw.dir, log: () => {}, pushFetch });
+    await again.pollPush();
+    assert.equal(sent.length, 0, 'a restart is not news');
+    list = [{ ...list[0], inbox: 6 }];
+    await again.pollPush();
+    assert.equal(sent.length, 2, 'and what arrives after it is');
+
+    // a browser that has dropped the subscription is forgotten, and a hub that's down changes nothing
+    sent.length = 0;
+    status = 410;
+    list = [{ ...list[0], inbox: 7 }];
+    await gw.g.pollPush();
+    assert.equal(sent.length, 2);
+    const state = () => JSON.parse(fs.readFileSync(path.join(gw.dir, 'state.json'), 'utf8'));
+    assert.deepEqual(state().pushSubs, []);
+    assert.equal(state().pushSeen['/r/stacks'], 7);
+    await new Promise((r) => hub.close(r));
+    await gw.g.pollPush();
+    assert.equal(state().pushSeen['/r/stacks'], 7);
+  } finally { hub.close(); await gw.close(); }
+});
+
+test('removing a passkey ends every device\'s notifications', async () => {
+  const gw = await gateway('pushrevoke');
+  try {
+    const a = authenticator();
+    const b = authenticator();
+    assert.equal((await gw.claim(a)).status, 200);
+    const ao = await gw.req('POST', '/auth/passkeys/options', { body: {} });
+    assert.equal((await gw.req('POST', '/auth/passkeys/verify', { body: b.create(ao.json, gw.auth) })).status, 200);
+    assert.equal((await gw.req('POST', '/push/subscribe', { body: { endpoint: 'https://web.push.apple.com/phone', keys: browserKeys().keys } })).status, 200);
+    assert.equal((await gw.req('POST', '/auth/passkeys/remove', { body: { id: u(b.id) } })).status, 200);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(gw.dir, 'state.json'), 'utf8')).pushSubs, []);
+  } finally { await gw.close(); }
+});
+
+test('the hub sends nothing itself on a box, and a dashboard notifies no one', () => {
+  const hub = fs.readFileSync(path.join(kit, 'dashboard', 'hub.html'), 'utf8');
+  assert.match(hub, /if \(box \|\| !NOTIFY_OK/);
+  const dash = fs.readFileSync(path.join(kit, 'dashboard', 'index.html'), 'utf8');
+  assert.doesNotMatch(dash, /new Notification|requestPermission/);
+  assert.match(dash, /function inboxTitle/, 'the tab title keeps its count');
 });
