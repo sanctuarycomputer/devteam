@@ -31,13 +31,34 @@
 #   devteam-reclaim, which prints a new claim link (as another user, setpriv fails: use root).
 FROM node:22-bookworm-slim@sha256:5ec23b7c622b00547753bc6ffd78085dd868a68aeb41c8e0a1418f033e13d96d
 
-ENV LANG=C.UTF-8 SHELL=/bin/bash DISABLE_AUTOUPDATER=1
+ENV LANG=C.UTF-8 SHELL=/bin/bash DISABLE_AUTOUPDATER=1 MISE_YES=1
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git tmux tini curl ca-certificates gnupg openssh-client procps less vim-tiny jq unzip build-essential python3 \
  && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
  && apt-get update && apt-get install -y --no-install-recommends gh \
+ && rm -rf /var/lib/apt/lists/*
+
+# A general-purpose dev machine, like the owner's Mac, without a container per project. Everything
+# outside /data resets on a deploy, so only what needs root lives here: system libraries, and things
+# worth having prebuilt. Languages and their versions are per project, with mise, on the disk.
+# Postgres 14, 16 and 17 with pgvector, as on the owner's Mac; `box-pg` runs a server of any of them.
+RUN curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /usr/share/keyrings/pgdg.asc \
+ && echo "deb [signed-by=/usr/share/keyrings/pgdg.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends postgresql-common \
+ && sed -i 's/^#\?create_main_cluster.*/create_main_cluster = false/' /etc/postgresql-common/createcluster.conf \
+ && apt-get install -y --no-install-recommends \
+      postgresql-14 postgresql-16 postgresql-17 postgresql-14-pgvector postgresql-16-pgvector postgresql-17-pgvector libpq-dev \
+      redis-server sqlite3 \
+      pkg-config autoconf automake libtool bison flex re2c cmake ninja-build \
+      libssl-dev libyaml-dev zlib1g-dev libffi-dev libreadline-dev libgmp-dev libncurses-dev libbz2-dev liblzma-dev \
+      libsqlite3-dev default-libmysqlclient-dev libxml2-dev libxslt1-dev libcurl4-openssl-dev uuid-dev libicu-dev \
+      libvips-dev libjpeg-dev libpng-dev libwebp-dev libcairo2-dev libpango1.0-dev libgif-dev librsvg2-dev libgomp1 libopenblas-dev \
+      ffmpeg imagemagick ghostscript poppler-utils tesseract-ocr pandoc \
+      chromium chromium-driver fonts-liberation libasound2 libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 libcups2 libdrm2 libgbm1 libnspr4 libnss3 libxcomposite1 libxdamage1 libxfixes3 libxkbcommon0 libxrandr2 \
+      watchman inotify-tools ripgrep fd-find tree htop file zip rsync wget lsof dnsutils netcat-openbsd iputils-ping nano \
  && rm -rf /var/lib/apt/lists/*
 
 # ttyd 1.7.7, the web terminal, checked against the release's published sums
@@ -134,7 +155,8 @@ mkdir -p /data/home /data/gateway
 chown -R gw:gw /data/gateway
 chmod 700 /data/gateway
 as_gw() { setpriv --reuid=gw --regid=gw --init-groups env HOME=/data/gateway DEVTEAM_GATEWAY_DIR=/data/gateway "$@"; }
-as_dev() { setpriv --reuid=dev --regid=dev --init-groups env -u DEVTEAM_CLAIM_TOKEN HOME=/data/home "$@"; }
+# mise's shims first for dev alone: root and gw must never search a folder an agent can write to
+as_dev() { setpriv --reuid=dev --regid=dev --init-groups env -u DEVTEAM_CLAIM_TOKEN HOME=/data/home PATH="/data/home/.local/share/mise/shims:$PATH" "$@"; }
 step='drop to gw'
 check 'as gw' as_gw id
 step='drop to dev'
@@ -156,6 +178,7 @@ done
 say "gateway answers; starting dev's side"
 # The boot is over, and so is the hold: agents would outlive the gateway, and one could take the port.
 trap - EXIT
+install -d -o dev -g dev -m 2775 /var/run/postgresql
 as_dev /usr/local/bin/devteam-dev >/dev/null 2>&1 &   # not the platform's log: no agent can write a fake claim link there
 # each user stops its own (root may not signal theirs)
 trap 'say "stopping"; as_dev tmux kill-server 2>/dev/null || true; sleep 2; as_gw kill -TERM "$gw" 2>/dev/null || true; exit 0' TERM INT
@@ -163,6 +186,37 @@ say "up"
 rc=0; wait "$gw" || rc=$?
 say "the gateway exited with $rc; the box stops"
 exit "$rc"
+EOF
+
+# box-pg [major]: this box's `brew services start postgresql@N`. One server per major version, on
+# the disk, trusting whoever is on the box: 17 on the default port (so postgres:/// just works),
+# the others on 5400 + major (5416, 5414). Safe to run again.
+COPY --chmod=755 <<'EOF' /usr/local/bin/box-pg
+#!/bin/sh
+set -eu
+v=${1:-17}
+bin=/usr/lib/postgresql/$v/bin
+[ -x "$bin/pg_ctl" ] || { echo "box-pg: no Postgres $v in this image (it has: $(ls /usr/lib/postgresql | tr '\n' ' '))" >&2; exit 2; }
+d="$HOME/.pg/$v"
+if [ "$v" = 17 ]; then port=5432; else port=$((5400 + v)); fi
+if [ ! -f "$d/PG_VERSION" ]; then
+  mkdir -p "$HOME/.pg"
+  "$bin/initdb" -D "$d" -U dev -A trust -E UTF8 --locale=C.UTF-8 >/dev/null
+  printf "port = %s\nlisten_addresses = '127.0.0.1'\nunix_socket_directories = '/var/run/postgresql'\nsynchronous_commit = off\n" "$port" >> "$d/postgresql.conf"
+  new=1
+fi
+"$bin/pg_ctl" -D "$d" status >/dev/null 2>&1 || "$bin/pg_ctl" -D "$d" -l "$d/server.log" -w start >/dev/null
+if [ "${new:-}" = 1 ]; then
+  "$bin/createdb" -h /var/run/postgresql -p "$port" dev
+  "$bin/createuser" -h /var/run/postgresql -p "$port" -s postgres
+fi
+echo "box-pg: Postgres $v on port $port"
+EOF
+
+# The checklists and habits that say asdf work here: mise reads the same .tool-versions.
+COPY --chmod=755 <<'EOF' /usr/local/bin/asdf
+#!/bin/sh
+exec mise "$@"
 EOF
 
 COPY --chmod=755 <<'EOF' /usr/local/bin/devteam-reclaim
@@ -189,6 +243,8 @@ rm -f "$HOME"/code/*/docs/devteam/run/supervisor-pane
 # tmux starts login shells, which read .profile, and Debian's reads .bashrc
 [ -f .profile ] || cp /etc/skel/.profile .profile
 [ -f .tmux.conf ] || printf 'set -g mouse on\nset -g history-limit 50000\nset -g default-terminal tmux-256color\nset -g default-shell /bin/bash\n' > .tmux.conf
+# copying in tmux, or in a program in it, reaches the browser's clipboard (the gateway's terminal page takes OSC 52)
+grep -q set-clipboard .tmux.conf || printf "set -g set-clipboard on\nset -as terminal-features ',xterm-256color:clipboard'\n" >> .tmux.conf
 if [ ! -f .bashrc ]; then
   cp /etc/skel/.bashrc .bashrc
   cat >> .bashrc <<'RC'
@@ -200,11 +256,38 @@ devteam box. First time here:
   gh auth login && gh auth setup-git       # GitHub, and git over HTTPS with it
   git config --global user.name '…' && git config --global user.email '…'
 Add a repo:  cd ~/code && gh repo clone <owner/repo> && cd <repo> && claude "Use github.com/sanctuarycomputer/devteam to set up a fleet in this repo"
+Tools: languages per project with mise (mise install; asdf works too). box-pg 16 starts another Postgres. ~/.box/boot.sh is what starts at boot.
+Expo: npx expo start --tunnel for your phone; eas build for builds.
 tmux: C-b s lists every session (each repo's supervisor and its workers); C-b d leaves one. touch ~/.devteam-quiet hides this.
 MOTD
 RC
 fi
 tmux has-session -t home 2>/dev/null || tmux new-session -d -s home -n shell -c "$HOME"
+# The box's global tools, on the disk: edit the file to change them, and they come back each boot.
+mkdir -p .box .config/mise
+[ -f .config/mise/config.toml ] || cat > .config/mise/config.toml <<'TOML'
+[tools]
+node = "22"
+python = "3.12"
+uv = "latest"
+pnpm = "latest"
+gitleaks = "latest"
+shellcheck = "latest"
+sops = "latest"
+age = "latest"
+"npm:eas-cli" = "latest"
+TOML
+( mise install ) >> .box/mise.log 2>&1 &
+# What this box starts at boot, before any supervisor comes back: its `brew services`, on the disk.
+[ -f .box/boot.sh ] || cat > .box/boot.sh <<'BOOT'
+#!/bin/sh
+# Runs at every boot, as dev, before the supervisors resume. Add what your projects need running.
+box-pg 17                  # the default Postgres, port 5432
+# box-pg 16                # port 5416
+# box-pg 14                # port 5414
+# redis-server --daemonize yes --bind 127.0.0.1 --dir "$HOME/.box"
+BOOT
+timeout 120 sh .box/boot.sh >> box.log 2>&1 || note "boot.sh failed (exit $?): see box.log"
 for k in "$HOME"/code/*/docs/devteam/scripts/devteam.mjs; do
   [ -f "$k" ] || continue
   r=${k%/docs/devteam/scripts/devteam.mjs}

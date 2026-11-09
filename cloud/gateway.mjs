@@ -655,6 +655,25 @@ export function createGateway(opts = {}) {
     return sameBytes(got, want) && store.load().sessions.some((x) => x.hash.startsWith(sid) && x.expires > Date.now());
   };
   const HUB_CSP = `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; worker-src 'self'; manifest-src 'self'; img-src 'self'; frame-src ${[TERM, ...BLOCK.map(instanceOrigin)].join(' ')}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
+  // ttyd's page has no OSC 52, how tmux and a program in it (Claude Code's fullscreen) put text on
+  // the clipboard. This adds it, to write only (a request to read is ignored), and only just after
+  // the owner clicked or typed here, so what an agent prints can't quietly replace the clipboard.
+  const TERM_CLIPBOARD = Buffer.from(`<script>(() => {
+  let at = 0;
+  for (const e of ['mouseup', 'keydown']) addEventListener(e, () => { at = Date.now(); }, true);
+  const hook = setInterval(() => {
+    const t = window.term;
+    if (!t || !t.parser) return;
+    clearInterval(hook);
+    t.parser.registerOscHandler(52, (d) => {
+      const b64 = d.slice(d.indexOf(';') + 1);
+      if (b64 && b64 !== '?' && Date.now() - at < 3000) {
+        try { navigator.clipboard.writeText(new TextDecoder().decode(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)))).catch(() => {}); } catch {}
+      }
+      return true;
+    });
+  }, 100);
+})();</script>`);
   const TERM_CSP = `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; font-src data:; img-src data:; connect-src 'self' ${TERM.replace(/^http/, 'ws')}; frame-ancestors ${PUB}; base-uri 'none'; form-action 'none'`;
   const loginAt = (next) => `${PUB}/auth/login${next ? `?next=${encodeURIComponent(next)}` : ''}`;
 
@@ -734,7 +753,7 @@ export function createGateway(opts = {}) {
       if (isTerm) {
         if (req.method === 'GET' && p === '/') {
           let body;
-          try { body = ttydPage(); } catch { return send(res, 502, 'text/plain; charset=utf-8', 'This image has no terminal page.'); }
+          try { body = Buffer.concat([ttydPage(), TERM_CLIPBOARD]); } catch { return send(res, 502, 'text/plain; charset=utf-8', 'This image has no terminal page.'); }
           return send(res, 200, 'text/html; charset=utf-8', body, { 'content-security-policy': TERM_CSP, 'referrer-policy': 'no-referrer' });
         }
         if (req.method === 'GET' && p === '/token') return json(res, 200, { token: '' });
