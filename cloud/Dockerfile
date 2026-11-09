@@ -15,8 +15,8 @@
 #   RENDER_DEPLOY_HOOK of the GitHub environment "box", never a repo secret, and that environment
 #   needing the owner's approval; the README's "deploy gate" says why. Agents share the owner's gh
 #   login, so this raises the bar and isn't a hard boundary). A deploy restarts the box; each
-#   supervisor that was running resumes on boot and brings back its fleet (~/box.log says which
-#   didn't). Disk: mounted at /data. Health check path: /healthz. Environment: DEVTEAM_PUBLIC_URL=https://box.example.com. Custom domains:
+#   supervisor that was running comes back through the operator (window 0), and brings back its
+#   fleet; what couldn't start is in ~/operator/NOTES.md. Disk: mounted at /data. Health check path: /healthz. Environment: DEVTEAM_PUBLIC_URL=https://box.example.com. Custom domains:
 #   box.example.com and *.box.example.com, with every DNS record Render lists for them (a wildcard
 #   needs its own name pointed at Render too, plus the _acme-challenge and _cf-custom-hostname
 #   CNAMEs; remove any AAAA records). Best on a domain used for nothing else, or if Render won't
@@ -233,15 +233,14 @@ EOF
 # macOptionClickForcesSelection: tmux owns the mouse, so scrolling works, and on a Mac the terminal
 # lets a selection past it only with Option held (Shift, elsewhere), and only with this set.
 # dev's side: the shell's first-run notes, the tmux session the terminal opens, every repo's
-# dashboard again after a restart, each supervisor that was running (it resumes its own fleet),
+# dashboard again after a restart, the operator in window 0 (which brings back the supervisors),
 # and ttyd on loopback. What it says goes to ~/box.log, on the volume: its output is kept off the
-# platform's log (devteam-box says why), so a window named sup-<repo>-down shows the owner the rest.
+# platform's log (devteam-box says why).
 COPY --chmod=755 <<'EOF' /usr/local/bin/devteam-dev
 #!/bin/sh
 cd "$HOME"
 mkdir -p code
 note() { echo "$(date -u +%FT%TZ) $*" >> "$HOME/box.log"; }
-down() { note "$1: supervisor NOT brought back: $2"; tmux new-window -d -t home -n "sup-$1-down" -c "$HOME/code/$1"; }
 # Nothing runs git yet, so a lock in a repo is one a process killed by the restart left. Pane ids
 # start again at %0, so one noted before this boot could be another program's by now.
 find "$HOME/code" -path '*/.git/*' -name '*.lock' -type f -delete 2>/dev/null
@@ -273,7 +272,8 @@ fi
 # What was up before this boot, for the operator's box-supervisors. Only a list with something in it:
 # a boot that never got as far as bringing them back must not lose them to the next.
 up="$HOME/.devteam-supervisors"
-[ -s "$up" ] && mv "$up" "$up.boot"
+# Added to what is there: a supervisor the last restore could not start stays listed.
+if [ -s "$up" ]; then cat "$up" >> "$up.boot"; sort -u -o "$up.boot" "$up.boot"; rm -f "$up"; fi
 # Window 0 is the operator (operator.md): the first thing the Terminal shows, and what restores the fleet.
 mkdir -p operator
 if ! tmux has-session -t home 2>/dev/null; then
@@ -283,13 +283,14 @@ if ! tmux has-session -t home 2>/dev/null; then
   tmux send-keys -t home:operator -l "export DEVTEAM_ROLE=operator; claude $c --dangerously-skip-permissions --settings /opt/devteam/operator-settings.json '$m'"
   tmux send-keys -t home:operator Enter
 fi
-# The operator's tick: typed into its window every 30 minutes, unless a dialog or a tick already waits there.
+# The operator's tick: typed into its window every 30 minutes, unless a dialog is up (Enter would answer it).
+# Claude Code queues what's typed during a turn, so a busy operator just gets it after.
 tick='Operator tick: run box-status and follow Each tick in operator.md.'
 ( while :; do
     sleep "${DEVTEAM_OPERATOR_TICK_SECONDS:-1800}"
     screen=$(tmux capture-pane -p -t home:operator 2>/dev/null) || continue
     case "$(tmux display-message -p -t home:operator '#{pane_current_command}' 2>/dev/null)" in ''|bash|-bash|sh|dash) continue ;; esac
-    printf '%s' "$screen" | grep -qE 'Do you (trust|want to)|Press Enter to continue|❯ *1\. *Yes|\[y/n\]|limit (reached|hit)|Operator tick: run box-status' && continue
+    printf '%s\n' "$screen" | grep -v '^[[:space:]]*$' | tail -15 | grep -qE 'Do you (trust|want to)|Press Enter to continue|❯ *1\. *Yes|Yes, I accept|No, exit|Select login method|Paste code|text style|\[y/n\]|limit (reached|hit)' && continue
     tmux send-keys -t home:operator -l "$tick"; tmux send-keys -t home:operator Enter
   done ) &
 # The box's global tools, on the disk: edit the file to change them, and they come back each boot.

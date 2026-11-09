@@ -21,7 +21,7 @@ dt() { (cd "$1" && shift && "$node" "$kit" "$@" 2>/dev/null); }
 norm() { printf '%s' "$1" | sed -E 's#^(ssh://)?git@github\.com[:/]#https://github.com/#; s#\.git/?$##; s#/$##' | tr '[:upper:]' '[:lower:]'; }
 origin() { norm "$(git -C "$1" remote get-url origin 2>/dev/null)"; }
 # A repo with the kit but no settings isn't adopted (a checkout of devteam itself, say).
-adopted() { for k in "$code"/*/$kit; do [ -f "$k" ] || continue; r=${k%/"$kit"}; [ -f "$r/docs/devteam/project/settings.md" ] && echo "$r"; done; }
+adopted() { for k in "$code"/*/"$kit"; do [ -f "$k" ] || continue; r=${k%/"$kit"}; [ -f "$r/docs/devteam/project/settings.md" ] && echo "$r"; done; }
 # Whether a supervisor is up here: the pane it noted, or anything agent-shaped started at the repo's root.
 panes() { tmux list-panes -a -F '#{pane_id}	#{window_name}	#{pane_start_path}	#{pane_current_command}' 2>/dev/null; }
 running() {
@@ -52,7 +52,7 @@ if [ -n "$status" ]; then
   echo "box: disk $(df -h "$HOME" | awk 'END { print $4 " free of " $2 }'); memory $(awk '/MemAvailable/ { a = $2 } /MemTotal/ { t = $2 } END { printf "%.1f GB free of %.1f GB", a / 1048576, t / 1048576 }' /proc/meminfo 2>/dev/null); load $(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)"
   while read -r r; do
     n=$(basename "$r")
-    h=$(dt "$r" hello --json)
+    h=$(dt "$r" hello --json); [ -n "$h" ] || h='{}'
     m=$(missing "$r")
     if command -v mise >/dev/null 2>&1; then t=$(cd "$r" && mise ls --current --missing 2>/dev/null | awk '{ printf "%s@%s ", $1, $2 }'); else t='?'; fi
     if running "$r"; then s=up; else s=down; fi

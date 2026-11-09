@@ -9,7 +9,7 @@
 **Tech Stack:** POSIX sh, jq, tmux, node (tests, the kit), Claude Code.
 
 ## Global Constraints
-- Nothing in `docs/devteam/` changes; the kit runs without the operator.
+- The kit runs without the operator; its one change is the `DEVTEAM_ROLE=operator` read-only guard.
 - Scripts run as `dev`. Installed root-owned, read-only, under `/usr/local/bin` and `/opt/devteam`.
 - Never unpark a fleet, answer a question, merge, tag or release.
 - Node 18 for tests (CI runs 18–24). No npm dependencies.

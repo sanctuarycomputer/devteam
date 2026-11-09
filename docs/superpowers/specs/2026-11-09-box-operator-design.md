@@ -22,8 +22,9 @@ moving. It exists only on a box: the kit runs without it, and adopting projects 
 It is an operator, not an authority. The chain stays owner > supervisor > planner > worker.
 No answering Inbox questions, approving, merging, tagging, releasing, or writing to any repo's
 devteam log. No instructions to workers; a supervisor directs its own. Enforced by:
-`DEVTEAM_ROLE=operator` (the kit's owner commands refuse any set role) and a `--settings` deny
-list (`gh pr merge`, `gh release`, `gh api`, `gh secret`, `git tag`, pushes to main). Those are
+`DEVTEAM_ROLE=operator`, for which the kit allows only a list of read commands (a kit change: it
+would otherwise take the role for the supervisor), and a `--settings` deny list (`gh pr merge`,
+`gh release`, `gh api`, `gh secret`, `git tag`, pushes to main, the kit's merge and fleet commands). Those are
 guard rails, not a sandbox: the operator is the same Unix user as every agent. The prompt says so.
 
 ## Boot
@@ -40,23 +41,24 @@ supervisors itself. It:
 5. Types a tick into window 0 every 30 minutes, only while Claude is running in it.
 
 ## box-supervisors [--all] [--dry-run]
-One line per folder in `~/code` with the kit, saying what it did and why. Default (restore): starts
-those in the boot list whose fleet isn't parked or drained. `--all`: every adopted repo, parked
+One line per adopted repo in `~/code`, saying what it did and why. Default (restore): starts those
+in the boot list whose fleet isn't parked or drained, whatever links to them. `--all`: every adopted repo, parked
 included (starting a supervisor never unparks). Skips: a repo with the kit but no
-`project/settings.md`; a **sibling** (its normalized origin is a `repo` link of another adopted
-repo, unless that link is mutual); a supervisor already running. Resumes the supervisor's own
+`project/settings.md`; under `--all`, a **sibling** (its normalized origin is a `repo` link of
+another adopted repo, unless that link is mutual); a supervisor already running. Resumes the supervisor's own
 conversation (`supervisor-session`, the repo's `resume_command`), else starts fresh with
 `agent_command` and `prompt supervisor`. Its first message names any `worktree_files` missing here,
 and tells the supervisor to ask for them in the Inbox with `--secrets` and `file:<path>` before
-starting a worker. The boot list is consumed when a restore has run. Safe to run again.
+starting a worker. A restore keeps only what it couldn't start in the boot list. Safe to run again.
 
 ## box-status
 A read-only digest for each tick. Box: disk, memory, load. Each adopted repo: supervisor up or
 down, fleet mode, kit version, Inbox count, missing `worktree_files`, tools `mise` lacks.
 
 ## Files
-`cloud/operator.md`, `cloud/operator-settings.json`, `cloud/box-supervisors`, `cloud/box-status`,
-all copied read-only into the image; `cloud/Dockerfile`; `README.md`; `test/box-supervisors.test.mjs`.
+`cloud/operator.md`, `cloud/operator-settings.json`, `cloud/box-supervisors` (`box-status` wraps its
+`--status`), copied read-only into the image; `cloud/Dockerfile`; `.github/workflows/box-image.yml`;
+`docs/devteam/scripts/devteam.mjs` (the role guard); `README.md`; `test/box-supervisors.test.mjs`.
 
 ## Not in this
 A box-level Inbox (the operator reports in its window and `~/operator/NOTES.md`).
