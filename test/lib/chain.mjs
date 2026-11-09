@@ -582,6 +582,13 @@ const step = (name, fn) => { steps.push({ name, fn }); };
       must(['dispose', 'bill-01-card', 'task-9.md', 'R1', 'fixed'], wcwd);
       assert.match(fs.readFileSync(rec, 'utf8'), /\| R1 \|.*\| fixed \|/);
       git(['reset', '-q', '--hard', beforeR], wt('bill-01-card'));
+      // and a reviewer numbering its findings per pass
+      write(rec, changes('reviewer-a', H2, '').replace('| F1 |', '| F4-1 |'));
+      commitAll('a review with a per-pass finding id');
+      assert.match(dt(['check-ticket', 'bill-01-card', '--sha', head(), ...pr]).out, /task-9\.md F4-1 \(Important\) has no disposition/);
+      must(['dispose', 'bill-01-card', 'task-9.md', 'F4-1', 'fixed'], wcwd);
+      assert.match(fs.readFileSync(rec, 'utf8'), /\| F4-1 \|.*\| fixed \|/);
+      git(['reset', '-q', '--hard', beforeR], wt('bill-01-card'));
     }
     // a row with a stray empty cell before its disposition still has that disposition
     const wide = git(['rev-parse', 'HEAD'], wt('bill-01-card'));
