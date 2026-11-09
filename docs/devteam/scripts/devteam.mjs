@@ -3520,7 +3520,14 @@ function cmdCheckPr() {
 // chore-devteam-sync-<tag> merge in place of a fresh answer, but only when every file the chore
 // changes outside project/ is inside the kit and byte-identical to that tag upstream. Anything the
 // supervisor wrote itself still needs the owner's answer.
+// What the check fetched from upstream goes when it's done: a ref left here is foreign history
+// in the host repo, for anything that walks every ref (a secrets scan with --all).
 function upstreamSyncApproval(chore, sha, changed) {
+  try { return upstreamSyncCheck(chore, sha, changed); } finally {
+    for (const r of (git(['for-each-ref', '--format=%(refname)', 'refs/devteam-upstream', 'refs/devteam-upstream-default'], mainRoot) ?? '').split('\n').filter(Boolean)) git(['update-ref', '-d', r], mainRoot);
+  }
+}
+function upstreamSyncCheck(chore, sha, changed) {
   const rule = logObjects('knowledge').filter((k) => k.created_by === 'owner' && k.scope === 'chore:devteam-sync' && k.status === 'accepted').sort(byTime).pop();
   if (!rule) return {};
   const s = loadSettings();
