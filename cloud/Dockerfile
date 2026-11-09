@@ -78,9 +78,13 @@ RUN usermod -l dev -d /data/home node && groupmod -n dev node \
  && groupadd --system --gid 990 gw && useradd --system --uid 990 --gid 990 --home-dir /data/gateway --shell /usr/sbin/nologin gw
 
 # What the gateway serves, root's and read-only: an agent can change a checkout or take a port, not these.
+# Its folder made first, and its modes set after: a builder may give a folder COPY creates the
+# file's own mode (Render's did, so the gateway's user couldn't reach its own file).
+RUN install -d -m 755 /opt/devteam
 COPY --chmod=644 cloud/gateway.mjs /opt/devteam/gateway.mjs
 COPY --chmod=644 docs/devteam/dashboard/hub.html /opt/devteam/hub.html
-RUN ttyd -d 0 -i lo -p 17681 true & p=$!; sleep 1; curl -fsS --compressed -o /opt/devteam/ttyd.html http://127.0.0.1:17681/; r=$?; kill $p; [ $r = 0 ] && chmod 644 /opt/devteam/ttyd.html && grep -q xterm /opt/devteam/ttyd.html
+RUN ttyd -d 0 -i lo -p 17681 true & p=$!; sleep 1; curl -fsS --compressed -o /opt/devteam/ttyd.html http://127.0.0.1:17681/; r=$?; kill $p; [ $r = 0 ] && grep -q xterm /opt/devteam/ttyd.html \
+ && chmod 755 /opt/devteam && chmod 644 /opt/devteam/*
 
 # Under tini, as root only to set up /data, then the gateway, and only once it holds the public
 # port, dev's side: dev's shells read files any agent can write, and nothing of dev's may get the
@@ -95,7 +99,7 @@ step=start
 say "boot: $(date -u +%FT%TZ) pid=$$"
 report() {
   rc=$?
-  [ "$rc" = 0 ] && exit 0
+  [ "$rc" = 0 ] || [ -n "${stopping:-}" ] && exit 0
   say "BOOT FAILED at step '$step' (exit $rc); holding ${DEVTEAM_BOX_HOLD_SECONDS:-900}s so a shell can look"
   diagnose
   sleep "${DEVTEAM_BOX_HOLD_SECONDS:-900}"
@@ -110,7 +114,11 @@ diagnose() {
   say "space: $(df -h /data 2>&1 | tail -1)"
   say "port: ${PORT:-unset}; public url: ${DEVTEAM_PUBLIC_URL:-unset}; node: $(/usr/local/bin/node --version 2>&1)"
   say "env names: $(env | cut -d= -f1 | sort | tr '\n' ' ')"
+  say "gateway files: $(ls -ld /opt/devteam /opt/devteam/* 2>&1 | tr '\n' ';')"
 }
+# Whether a process lives, without signalling it: a platform may give root no CAP_KILL (Render
+# doesn't), and then kill -0 on another user's process fails though it runs.
+alive() { [ -r "/proc/$1/status" ] && ! grep -q '^State:[[:space:]]*Z' "/proc/$1/status"; }
 trap report EXIT
 set -eu
 diagnose
@@ -127,11 +135,12 @@ step='drop to dev'
 say "as dev: $(as_dev id 2>&1)"
 step='start the gateway'
 say "starting the gateway on ${PORT:-8080}"
-as_gw /usr/local/bin/node /opt/devteam/gateway.mjs serve &
+# not through as_gw: a function sent to the background is a subshell, and $! would be root's
+setpriv --reuid=gw --regid=gw --init-groups env HOME=/data/gateway DEVTEAM_GATEWAY_DIR=/data/gateway /usr/local/bin/node /opt/devteam/gateway.mjs serve &
 gw=$!
 step='wait for the gateway'
 until curl -fsS -o /dev/null "http://127.0.0.1:${PORT:-8080}/healthz" 2>/dev/null; do
-  if ! kill -0 "$gw" 2>/dev/null; then
+  if ! alive "$gw"; then
     rc=0; wait "$gw" || rc=$?
     say "the gateway exited with $rc before answering"
     exit 1
@@ -140,7 +149,8 @@ until curl -fsS -o /dev/null "http://127.0.0.1:${PORT:-8080}/healthz" 2>/dev/nul
 done
 say "gateway answers; starting dev's side"
 as_dev /usr/local/bin/devteam-dev >/dev/null 2>&1 &   # not the platform's log: no agent can write a fake claim link there
-trap 'as_dev tmux kill-server 2>/dev/null; sleep 2; kill -TERM "$gw" 2>/dev/null; exit 0' TERM INT
+# each user stops its own (root may not signal theirs)
+trap 'stopping=1; say "stopping"; as_dev tmux kill-server 2>/dev/null; sleep 2; as_gw kill -TERM "$gw" 2>/dev/null; exit 0' TERM INT
 step='running'
 say "up"
 rc=0; wait "$gw" || rc=$?
