@@ -88,21 +88,64 @@ RUN ttyd -d 0 -i lo -p 17681 true & p=$!; sleep 1; curl -fsS --compressed -o /op
 # first, so agents get a hangup, not a kill.
 COPY --chmod=755 <<'EOF' /usr/local/bin/devteam-box
 #!/bin/sh
+# Every step says so, on both streams, so a boot that fails names where. A failed boot then waits
+# (DEVTEAM_BOX_HOLD_SECONDS) so the platform can still show its log and open a shell.
+say() { echo "box: $*"; echo "box(stderr): $*" >&2; }
+step=start
+say "boot: $(date -u +%FT%TZ) pid=$$"
+report() {
+  rc=$?
+  [ "$rc" = 0 ] && exit 0
+  say "BOOT FAILED at step '$step' (exit $rc); holding ${DEVTEAM_BOX_HOLD_SECONDS:-900}s so a shell can look"
+  diagnose
+  sleep "${DEVTEAM_BOX_HOLD_SECONDS:-900}"
+  exit "$rc"
+}
+diagnose() {
+  say "id: $(id 2>&1)"
+  say "kernel: $(uname -srm 2>&1)"
+  say "limits: $(grep -E '^(CapEff|CapBnd|NoNewPrivs|Seccomp):' /proc/self/status 2>&1 | tr -s '\t\n' ' ')"
+  say "data: $(ls -ld /data /data/home /data/gateway 2>&1 | tr '\n' ';')"
+  say "mount: $(grep ' /data ' /proc/mounts 2>&1)"
+  say "space: $(df -h /data 2>&1 | tail -1)"
+  say "port: ${PORT:-unset}; public url: ${DEVTEAM_PUBLIC_URL:-unset}; node: $(/usr/local/bin/node --version 2>&1)"
+  say "env names: $(env | cut -d= -f1 | sort | tr '\n' ' ')"
+}
+trap report EXIT
 set -eu
+diagnose
+step='make /data'
 mkdir -p /data/home /data/gateway
 [ "$(stat -c %U /data/home)" = dev ] || chown dev:dev /data/home
 chown -R gw:gw /data/gateway
 chmod 700 /data/gateway
+as_gw() { setpriv --reuid=gw --regid=gw --init-groups env HOME=/data/gateway DEVTEAM_GATEWAY_DIR=/data/gateway "$@"; }
 as_dev() { setpriv --reuid=dev --regid=dev --init-groups env -u DEVTEAM_CLAIM_TOKEN HOME=/data/home "$@"; }
-setpriv --reuid=gw --regid=gw --init-groups env HOME=/data/gateway DEVTEAM_GATEWAY_DIR=/data/gateway /usr/local/bin/node /opt/devteam/gateway.mjs serve &
+step='drop to gw'
+say "as gw: $(as_gw id 2>&1)"
+step='drop to dev'
+say "as dev: $(as_dev id 2>&1)"
+step='start the gateway'
+say "starting the gateway on ${PORT:-8080}"
+as_gw /usr/local/bin/node /opt/devteam/gateway.mjs serve &
 gw=$!
+step='wait for the gateway'
 until curl -fsS -o /dev/null "http://127.0.0.1:${PORT:-8080}/healthz" 2>/dev/null; do
-  kill -0 "$gw" 2>/dev/null || exit 1
+  if ! kill -0 "$gw" 2>/dev/null; then
+    rc=0; wait "$gw" || rc=$?
+    say "the gateway exited with $rc before answering"
+    exit 1
+  fi
   sleep 0.2
 done
+say "gateway answers; starting dev's side"
 as_dev /usr/local/bin/devteam-dev >/dev/null 2>&1 &   # not the platform's log: no agent can write a fake claim link there
 trap 'as_dev tmux kill-server 2>/dev/null; sleep 2; kill -TERM "$gw" 2>/dev/null; exit 0' TERM INT
-wait "$gw"
+step='running'
+say "up"
+rc=0; wait "$gw" || rc=$?
+say "the gateway exited with $rc"
+exit "$rc"
 EOF
 
 COPY --chmod=755 <<'EOF' /usr/local/bin/devteam-reclaim
