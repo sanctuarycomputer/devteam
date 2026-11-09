@@ -19,6 +19,8 @@ export const kit = path.resolve(testDir, '..', 'docs', 'devteam');
 // The tmux session a project's workers live in: devteam-<project>-<hash of the checkout's path>.
 export function sessionOf(root, name) { return `devteam-${name}-${crypto.createHash('sha1').update(fs.realpathSync(root)).digest('hex').slice(0, 6)}`; }
 export const line = (o) => `${JSON.stringify({ v: 1, ...o })}\n`;
+// A test never rotates the machine's real Claude accounts: a test that wants cswap sets a stand-in.
+process.env.DEVTEAM_CSWAP = 'off';
 // tmux in this test talks to its own server, never the developer's (or a live fleet's) sessions.
 // tmux falls back to the machine's default server when TMUX_TMPDIR names a directory that is gone,
 // and a kill-server there takes down every live fleet on the machine. So a shim first on PATH runs
