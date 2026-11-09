@@ -2287,7 +2287,7 @@ function cmdValidate() {
     if (isActive(t) && ['chore', 'spike'].includes(t.kind) && !(t.serves ?? []).length && !t.notes) err(id, `${t.kind} ticket serving no story must say why in notes (D6)`);
     if (isActive(t) && !['chore', 'spike'].includes(t.kind) && !(t.serves ?? []).length) err(id, 'must serve at least one story (D6)');
     if (t.kind === 'contract' && !(t.contracts?.provides ?? []).length) err(id, 'contract ticket must list contracts.provides (D2)');
-    if (t.feature !== CHORES && !fs_.has(t.feature)) err(id, `feature "${t.feature}" is not in the log (devteam.mjs feature add)`);
+    if (isActive(t) && t.feature !== CHORES && !fs_.has(t.feature)) err(id, `feature "${t.feature}" is not in the log (devteam.mjs feature add)`);
   }
   // On a plan branch, the feature's tickets number from its reserved block (a planner made before
   // blocks has none and is not checked).
@@ -2762,6 +2762,8 @@ function graphEdit(type, idRe) {
   if (sub === 'set' && logGet(id)?.type !== type) die(`no ${type} ${id}`);
   // home and devteam name the repo that holds the kit and the kit's own line
   if (type === 'ticket' && RESERVED_LINKS.includes(body.component)) die(`component "${body.component}" is reserved (reserved: ${RESERVED_LINKS.join(', ')}): home is the repo that holds the kit, devteam the kit's own files; plan the ticket under another component`);
+  // a mistyped feature can't be corrected afterwards (a ticket's feature is fixed), so it's caught here
+  if (type === 'ticket' && sub === 'add' && by === 'supervisor' && body.feature !== CHORES && logGet(body.feature)?.type !== 'feature') die(`no feature "${body.feature}" (devteam.mjs feature add, or the feature's id as the log has it)`);
   const line = appendLog({ ...body, type, id, op: sub === 'add' ? 'new' : 'set' }, by);
   if (by === 'supervisor') appendLog({ type: 'act', decision: citing(), class: sub === 'add' ? 'add-ticket' : 'replan-within-feature', what: `${sub === 'add' ? 'added' : 'changed'} ${type} ${id}${sub === 'set' ? ` (${Object.keys(body).join(', ')})` : ''}`, refs: [id], reversible: true }, 'supervisor');
   out(`${sub === 'add' ? 'added' : 'updated'} ${line.id}`);
