@@ -31,13 +31,13 @@ function fixture(name) {
   const session = run(['settings', '--get', 'tmux_session']).stdout.trim();
   // A stand-in agent in a real tmux pane: it shows what it's given and records every key. Escape
   // takes it back to its prompt, as the limit menu does.
-  const agent = (window, shown) => {
+  const agent = (window, shown, afterEscape = ['> ready']) => {
     const wt = path.join(root, '.worktrees', window);
     fs.mkdirSync(wt, { recursive: true });
     const keys = path.join(base, `${window}.keys`);
     const prog = path.join(base, `${window}.cjs`);
     write(keys, '');
-    write(prog, `const fs=require('fs');const shown=${JSON.stringify(shown)};console.log(shown.join('\\n'));process.stdin.setRawMode(true);process.stdin.on('data',(d)=>{fs.appendFileSync(${JSON.stringify(keys)},d);if(d.includes(0x1b)){console.clear();console.log('> ready')}});`);
+    write(prog, `const fs=require('fs');const shown=${JSON.stringify(shown)};const after=${JSON.stringify(afterEscape)};console.log(shown.join('\\n'));process.stdin.setRawMode(true);process.stdin.on('data',(d)=>{fs.appendFileSync(${JSON.stringify(keys)},d);if(d.includes(0x1b)&&after){console.clear();console.log(after.join('\\n'))}});`);
     const cmd = [process.execPath, prog].join(' ');
     // as the kit does: the session first, then a window started in the worktree
     if (spawnSync('tmux', ['has-session', '-t', `=${session}`]).status !== 0) execFileSync('tmux', ['new-session', '-d', '-s', session, '-n', 'dashboard', '-x', '120', '-y', '30', 'sleep 600']);
@@ -71,7 +71,7 @@ test('accounts-tick: off, or no cswap, touches nothing; a tick under tmux leaves
 test('rotation: runs cswap auto --once with no strategy of its own, reads its events whatever the exit code, and raises findings', () => {
   const F = fixture('rotate');
   try {
-    F.set(ROOM, `${JSON.stringify({ schemaVersion: 1, event: 'poll' })}\n${JSON.stringify({ schemaVersion: 1, event: 'switch', from: 'a@x', to: 'b@x' })}\nnot json\n`, 0);
+    F.set(ROOM, `${JSON.stringify({ schemaVersion: 1, event: 'poll' })}\n${JSON.stringify({ schemaVersion: 1, event: 'switch', from: { number: 1, email: 'a@x' }, to: { number: 2, email: 'b@x' } })}\nnot json\n`, 0);
     assert.match(F.tick('--rotate'), /cswap switched account: a@x -> b@x/);
     assert.deepEqual(F.called().filter((c) => c.startsWith('auto')), ['auto --once --json']);
     F.set(FULL, `${JSON.stringify({ event: 'all-exhausted' })}\n`, 3);
@@ -90,6 +90,8 @@ test('rotation: runs cswap auto --once with no strategy of its own, reads its ev
     write(path.join(F.base, 'auto.out'), 'garbage');
     write(path.join(F.base, 'auto.status'), '1');
     assert.match(F.tick('--rotate'), /cswap auto: exit 1/);
+    write(path.join(F.base, 'auto.out'), `${JSON.stringify({ event: 'error', message: 'keychain locked' })}\n`);
+    assert.match(F.tick('--rotate'), /cswap auto: exit 1: keychain locked/, 'an error event is still a failure');
   } finally { F.done(); }
 });
 
@@ -98,6 +100,8 @@ test('resuming: the limit menu gets Escape and never a choice, once, and only wh
   try {
     const a = F.agent('work-menu', MENU);
     await until(() => a.shows().includes('Esc to cancel'), 'the menu on screen');
+    F.tick();
+    assert.equal(a.keys(), '', "the first tick: this project hasn't seen the account settle");
     F.set(FULL);
     F.tick();
     assert.equal(a.keys(), '', 'no room: nothing is touched');
@@ -124,6 +128,8 @@ test('resuming: a banner alone, another prompt, a busy pane, a parked session, a
     await until(() => [banner, prompt, busy, parked].every((p) => p.shows().includes('limit')), 'the panes drawn');
     fs.mkdirSync(path.join(F.root, 'docs/devteam/run/log'), { recursive: true });
     fs.appendFileSync(path.join(F.root, 'docs/devteam/run/log/work-parked.jsonl'), `${JSON.stringify({ v: 1, id: 'h-20261101-000000000-work-parked', type: 'phase', op: 'new', at: '2026-11-01T00:00:00.000Z', by: 'work-parked', to: 'parked' })}\n`);
+    F.tick();
+    assert.equal(banner.keys(), '', 'not until a second tick sees the same account');
     assert.match(F.tick(), /resumed work-banner/);
     await until(() => banner.keys().endsWith('\r'), 'the banner pane told to carry on');
     assert.ok(!banner.keys().includes('\x1b'), 'no menu, no Escape');
@@ -141,14 +147,15 @@ test('a stopped supervisor: warned about outside tmux, with or without cswap; re
   try {
     const slug = fs.realpathSync(F.root).replace(/[^a-zA-Z0-9]/g, '-');
     const file = path.join(F.base, 'claude', 'projects', slug, 's.jsonl');
-    const rl = { type: 'assistant', timestamp: '2026-11-07T09:02:00.000Z', error: 'rate_limit', isApiErrorMessage: true, message: { content: [{ type: 'text', text: "You've hit your weekly limit" }] } };
+    const ago = (h) => new Date(Date.now() - h * 3600000).toISOString();
+    const rl = { type: 'assistant', timestamp: ago(2), error: 'rate_limit', isApiErrorMessage: true, message: { content: [{ type: 'text', text: "You've hit your weekly limit" }] } };
     write(file, `${JSON.stringify({ type: 'user', message: { content: 'You are the supervisor for this repository' } })}\n${JSON.stringify(rl)}\n`);
     F.run(['accounts-tick'], { DEVTEAM_CSWAP: 'off' });
     assert.match(F.state().supervisor_limit.text, /weekly limit/);
     assert.ok(findings(F).some((f) => f.kind === 'supervisor-at-limit' && f.severity === 'high'));
     assert.match(json(F.run(['hello', '--json'], { DEVTEAM_ROLE: '' }).stdout).alert, /supervisor stopped at a usage limit/);
     // it carried on: no longer stopped
-    fs.appendFileSync(file, `${JSON.stringify({ type: 'assistant', timestamp: '2026-11-07T10:00:00.000Z', message: { content: [{ type: 'text', text: 'carrying on' }] } })}\n`);
+    fs.appendFileSync(file, `${JSON.stringify({ type: 'assistant', timestamp: ago(1), message: { content: [{ type: 'text', text: 'carrying on' }] } })}\n`);
     F.tick();
     assert.equal(F.state().supervisor_limit, null);
     // in tmux: the recorded pane is resumed, and there's nothing to warn about
@@ -160,6 +167,106 @@ test('a stopped supervisor: warned about outside tmux, with or without cswap; re
     assert.match(F.tick(), /resumed/);
     await until(() => s.keys().endsWith('\r'), 'the supervisor told to carry on');
     assert.equal(F.state().supervisor_limit, null);
+    // no room to resume it, in tmux or not: still warned about
+    F.set(FULL);
+    F.tick();
+    assert.match(F.state().supervisor_limit.text, /weekly limit/);
+    // an old stop is not news; a limit lasts a week at most
+    write(file, `${JSON.stringify({ type: 'user', message: { content: 'You are the supervisor for this repository' } })}\n${JSON.stringify({ ...rl, timestamp: ago(24 * 8) })}\n`);
+    F.tick();
+    assert.equal(F.state().supervisor_limit, null);
+    // someone else's session at a limit isn't the supervisor's; one running supervisor commands is
+    const other = path.join(path.dirname(file), 'other.jsonl');
+    write(other, `${JSON.stringify({ type: 'user', message: { content: 'what does this do?' } })}\n${JSON.stringify(rl)}\n`);
+    write(file, `${JSON.stringify({ type: 'user', message: { content: 'fix the tests' } })}\n`);
+    F.tick();
+    assert.equal(F.state().supervisor_limit, null);
+    write(other, `${JSON.stringify({ type: 'user', message: { content: 'assume the role' } })}\n${JSON.stringify({ type: 'assistant', timestamp: ago(3), message: { content: [{ type: 'tool_use', input: { command: 'DEVTEAM_ROLE=supervisor node x fleet status' } }] } })}\n${JSON.stringify(rl)}\n`);
+    F.tick();
+    assert.match(F.state().supervisor_limit.text, /weekly limit/);
+  } finally { F.done(); }
+});
+
+const row = (usage, more = {}) => ({ number: 1, email: 'a@x', usageStatus: 'ok', usage, ...more });
+test('what the accounts say: only known-full accounts are exhausted, and room means every window it has', () => {
+  const F = fixture('rows');
+  const exhausted = (accounts) => { F.set({ accounts }); F.tick(); return F.state().exhausted; };
+  try {
+    assert.equal(exhausted([row({ fiveHour: { pct: 100 }, sevenDay: { pct: 1 } })]), true);
+    assert.equal(exhausted([row({ sevenDay: { pct: 100 } })]), true, 'an account with no 5-hour window');
+    assert.equal(exhausted([row({ sevenDay: { pct: 50 } })]), false);
+    assert.equal(exhausted([row({ fiveHour: { pct: null }, sevenDay: { pct: null } })]), false, 'unmeasured is not full');
+    for (const usageStatus of ['unavailable', 'token_expired', 'api_key']) assert.equal(exhausted([row(null, { usageStatus })]), false, usageStatus);
+    assert.equal(exhausted([row({ sevenDay: { pct: 50 }, scoped: [{ name: 'x', pct: 100 }] })]), false, 'one full model is not a full account');
+    assert.equal(exhausted([row({ fiveHour: { pct: 100 } }), row({ fiveHour: { pct: 2 } }, { disabled: true })]), true, 'a disabled account is no way out');
+  } finally { F.done(); }
+});
+
+test('resuming: never on text that only reads like a limit, another harness, a finished session, or a per-model limit', { skip: !hasTmux }, async () => {
+  const F = fixture('prose');
+  try {
+    const panes = [
+      ['⏺ CI hit the memory limit on the second run; moving on.', '> '],
+      ['⏺ The rate limit resets every 60s, so I added a backoff.', '> '],
+      ['⎿  limit=100 resets=0', '> '],
+      ['⏺ The menu says 1. Stop and wait for limit to reset', 'Enter to confirm is what it shows', '> '],
+      ["⏺ You've hit your weekly limit · resets Nov 12, the banner reads", '> '],
+      ["■ You've hit your usage limit. Try again in 2h 5m.", '> '],
+      [MENU[0], "⏺ Carried on after that: here's the summary", '> '],
+    ].map((shown, i) => F.agent(`work-text${i}`, shown));
+    const done = F.agent('work-done', [MENU[0], '> ']);
+    const scoped = F.agent('work-scoped', [MENU[0], '> ']);
+    await until(() => [...panes, done, scoped].every((p) => p.shows().includes('>')), 'the panes drawn');
+    fs.mkdirSync(path.join(F.root, 'docs/devteam/run/log'), { recursive: true });
+    fs.appendFileSync(path.join(F.root, 'docs/devteam/run/log/work-done.jsonl'), `${JSON.stringify({ v: 1, id: 'h-20261101-000000000-work-done', type: 'phase', op: 'new', at: '2026-11-01T00:00:00.000Z', by: 'work-done', to: 'done' })}\n`);
+    const full = { accounts: [{ ...ROOM.accounts[0], usage: { sevenDay: { pct: 30 }, scoped: [{ name: 'opus', pct: 100 }] } }] };
+    F.set(full);
+    F.tick();
+    F.tick();
+    assert.equal(scoped.keys(), '', 'a full per-model window is not room');
+    F.set(ROOM);
+    const out = F.tick();
+    assert.match(out, /resumed work-scoped/, 'the pane the others are measured against');
+    await until(() => scoped.keys().endsWith('\r'), 'the real banner resumed');
+    panes.forEach((p, i) => assert.equal(p.keys(), '', `text ${i} is left alone`));
+    assert.equal(done.keys(), '', 'a finished session is left alone');
+  } finally { F.done(); }
+});
+
+test('resuming: after Escape, a menu that stayed or a new prompt is left alone', { skip: !hasTmux }, async () => {
+  const F = fixture('escape');
+  try {
+    const stayed = F.agent('work-stayed', MENU, MENU);
+    const asked = F.agent('work-asked', MENU, ['Do you want to proceed?', '❯ 1. Yes', '  2. No']);
+    await until(() => [stayed, asked].every((p) => p.shows().includes('Esc to cancel')), 'the menus');
+    F.tick();
+    assert.doesNotMatch(F.tick(), /resumed/);
+    await until(() => stayed.keys() === '\x1b' && asked.keys() === '\x1b', 'one Escape each');
+    assert.equal(stayed.keys(), '\x1b', 'nothing typed at a menu that stayed');
+    assert.equal(asked.keys(), '\x1b', 'nothing typed at a new prompt');
+  } finally { F.done(); }
+});
+
+test('files any agent could write can stop nothing', { skip: !hasTmux }, async () => {
+  const F = fixture('files');
+  try {
+    const a = F.agent('work-a', [MENU[0], '> ']);
+    await until(() => a.shows().includes('limit'), 'the pane');
+    const resumed = path.join(F.root, 'docs/devteam/run/accounts-resumed.json');
+    F.tick();
+    write(resumed, 'null');
+    assert.match(F.tick(), /resumed work-a/, 'a null throttle file');
+    await until(() => a.keys().endsWith('\r'), 'typed');
+    write(resumed, JSON.stringify({ 'work-a': Date.now() + 365 * 86400000 }));
+    assert.match(F.tick(), /resumed work-a/, 'a date in the future holds nothing back');
+    fs.rmSync(resumed);
+    fs.mkdirSync(resumed);
+    const n = a.keys().length;
+    assert.doesNotMatch(F.tick(), /resumed/, "if the attempt can't be recorded nothing is typed");
+    assert.equal(a.keys().length, n);
+    fs.rmSync(resumed, { recursive: true });
+    write(path.join(F.root, 'docs/devteam/run/accounts.json'), JSON.stringify({ at: new Date().toISOString(), needs_login: 5 }));
+    assert.equal(F.run(['metrics', '--json']).status, 0, 'a mangled state file does not break metrics');
   } finally { F.done(); }
 });
 

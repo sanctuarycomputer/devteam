@@ -2078,7 +2078,7 @@ const activeWorker = (id) => { const w = workerState(id); return !!w && w.phase 
 const PANE_WAITS = [
   // a banner says the limit was reached or when it resets; "rate limit" on its own is too common in
   // code and prose the pane may be showing (see PANE_CODE)
-  ['limit', /\b(usage|rate|session|weekly|daily|hourly|\d+-hour) limit (reached|hit|exceeded)\b|\bhit (your|the) (\w+ )?limit\b|\blimit\b.*\bresets?\b|\bresets? (at|in) \d|^approaching (your )?usage limit/i],
+  ['limit', /\b(usage|rate|session|weekly|daily|hourly|\d+-hour) limit (reached|hit|exceeded)\b|^(?:[⎿■✖!]\s*)?you['’]ve hit your (\w+ )*limit\b|\bresets? (at|in) \d|^approaching (your )?usage limit/i],
   ['prompt', /Do you want to (proceed|make this edit|create|allow|run)|Do you trust the files|\[y\/n\]|\(y\/n\)|Press Enter to continue|❯\s*1\.\s*Yes/i],
 ];
 // A pane line that is content the agent is showing, not the agent's own UI: numbered source or diff
@@ -2145,7 +2145,7 @@ function resendLostEnter(key, target, lines) {
   const bottom = lines.slice(-8);
   const claim = () => { try { fs.unlinkSync(file); return true; } catch { return false; } };
   if (!squash(bottom.join('')).includes(tail)) return void claim(); // submitted: nothing left to press
-  if (bottom.some((l) => PANE_BUSY.test(l))) return;
+  if (bottom.some((l) => PANE_BUSY.test(l) || /Enter to confirm/i.test(l))) return; // a menu takes that Enter as its answer
   if (!claim() || !tmux(['send-keys', '-t', target, 'Enter'])) return;
   const hash = crypto.createHash('sha1').update(rec.text).digest('hex').slice(0, 12);
   appendLog({ type: 'observation', source: 'pane', kind: 'resent-enter', subject: key.slice(key.indexOf(':') + 1), detail: `pressed Enter once: text typed ${Math.round(age)}s ago was still unsubmitted in an idle pane ("${rec.text.slice(0, 60)}${rec.text.length > 60 ? '…' : ''}", sha1 ${hash})`, detector: 'pane', source_key: `resent-enter ${key} ${hash} ${rec.at}`, measure: { value: Math.round(age), unit: 's' } });
@@ -7613,8 +7613,11 @@ const ACCOUNTS_FILE = runPath('accounts.json');
 const ACCOUNTS_RESUMED = runPath('accounts-resumed.json');
 const ACCOUNTS_FRESH_MS = 10 * 60000;
 const RESUME_EVERY_MS = 10 * 60000;
-// Claude Code's limit menu. Only Escape ever goes to it: its third item spends money.
-const LIMIT_MENU = /Stop and wait for limit to reset/;
+// Claude Code's limit menu and banner, anchored: an agent's prose can quote either, and cswap only
+// rotates Claude accounts, so another harness's limit stop is not ours to resume. Only Escape ever
+// goes to the menu: its third item spends money.
+const LIMIT_MENU = /^(?:❯\s*)?1\.\s*Stop and wait for limit to reset$/;
+const LIMIT_BANNER = /^(?:⎿\s*)?You['’]ve hit your (?:\w+ )*limit · resets\b/;
 const RESUME_TEXT = '[devteam] the usage limit has cleared: another account is active. Carry on from where you stopped.';
 function findCswap() {
   const v = process.env.DEVTEAM_CSWAP;
@@ -7628,85 +7631,114 @@ function findCswap() {
   }
   return null;
 }
-const runCswap = (bin, args) => spawnSync(bin, args, { cwd: os.homedir(), encoding: 'utf8', timeout: 30000, killSignal: 'SIGKILL', maxBuffer: 4 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
+const runCswap = (bin, args) => spawnSync(bin, args, { cwd: os.homedir(), encoding: 'utf8', timeout: 45000, killSignal: 'SIGKILL', maxBuffer: 4 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
 // One pass of cswap's own engine. It exits 2 (nothing to do) and 3 (no viable account) as a matter
 // of course, so what it said is read whatever the exit code.
 function rotateAccounts(bin) {
   const r = runCswap(bin, ['auto', '--once', '--json']);
   const events = (r.stdout ?? '').split('\n').flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } }).filter((e) => typeof e?.event === 'string');
-  return { ok: events.length > 0 || [0, 2, 3].includes(r.status), failure: `cswap auto: ${r.error?.message ?? `exit ${r.status}: ${(r.stderr ?? '').trim().slice(0, 200)}`}`, switched: events.filter((e) => e.event === 'switch'), exhausted: events.some((e) => e.event === 'all-exhausted') };
+  const said = events.find((e) => e.event === 'error')?.message ?? r.stderr ?? '';
+  return { ok: [0, 2, 3].includes(r.status), failure: `cswap auto: ${r.error?.message ?? `exit ${r.status}: ${String(said).trim().slice(0, 200)}`}`, switched: events.filter((e) => e.event === 'switch'), exhausted: events.some((e) => e.event === 'all-exhausted') };
 }
 function cswapAccounts(bin) {
   const r = runCswap(bin, ['list', '--json']);
   try { const a = JSON.parse(r.stdout).accounts; return Array.isArray(a) ? a : null; } catch { return null; }
 }
-// Room to work: its usage reads ok, and both windows it has are measured and under 100.
+const mainWindows = (a) => [a?.usage?.fiveHour, a?.usage?.sevenDay].filter(Boolean);
+// Room to work: its usage reads ok, both windows it has are measured and under 100, and no per-model
+// window is full (a session stopped on one would only stop again).
 function accountHasRoom(a) {
-  const w = [a?.usage?.fiveHour, a?.usage?.sevenDay].filter(Boolean);
-  return a?.usageStatus === 'ok' && w.length > 0 && w.every((x) => typeof x.pct === 'number' && x.pct < 100);
+  const w = mainWindows(a);
+  const scoped = Array.isArray(a?.usage?.scoped) ? a.usage.scoped : [];
+  return a?.usageStatus === 'ok' && w.length > 0 && w.every((x) => typeof x.pct === 'number' && x.pct < 100) && !scoped.some((x) => x?.pct >= 100);
 }
-// What a pane's bottom lines say about a limit stop.
+// Known to be full. An account whose usage can't be read right now (a 429, a timeout, an API key) isn't.
+const accountAtLimit = (a) => a?.usageStatus === 'ok' && mainWindows(a).some((x) => x.pct >= 100);
+// What a pane's bottom lines say about a limit stop. A banner counts only as the last thing the
+// agent said: nothing of its own after it, just the input box and status lines.
 function limitStop(lines) {
   const own = lines.filter((l) => !PANE_CODE.test(l));
-  const menu = own.some((l) => LIMIT_MENU.test(l));
-  const [, limitRe] = PANE_WAITS.find(([k]) => k === 'limit');
+  const at = own.findIndex((l) => LIMIT_MENU.test(l));
+  const menu = at !== -1 && own.slice(at + 1).some((l) => /^Enter to confirm/.test(l));
+  const banner = own.findLastIndex((l) => LIMIT_BANNER.test(l));
+  const after = banner === -1 ? [] : own.slice(banner + 1);
   const [, promptRe] = PANE_WAITS.find(([k]) => k === 'prompt');
-  return { menu, limit: menu || own.some((l) => limitRe.test(l)), otherPrompt: !menu && own.some((l) => promptRe.test(l) || /Enter to confirm/.test(l)), busy: lines.some((l) => PANE_BUSY.test(l)) };
+  return { menu, limit: menu || (banner !== -1 && after.length <= 6 && !after.some((l) => /^[⏺⎿]/.test(l))), otherPrompt: !menu && own.some((l) => promptRe.test(l) || /Enter to confirm/.test(l)), busy: lines.some((l) => PANE_BUSY.test(l)) };
 }
 const paneBottom = (target) => (sh('tmux', ['capture-pane', '-p', '-t', target]) ?? '').split('\n').map((l) => l.trim()).filter(Boolean).slice(-15);
+function resumedAt() {
+  try { const o = JSON.parse(readText(ACCOUNTS_RESUMED) ?? '{}'); return o && typeof o === 'object' && !Array.isArray(o) ? o : {}; } catch { return {}; }
+}
 // Resume one pane stopped at a limit; true when it was. The attempt is recorded before anything is
-// typed, so a tick killed halfway can't type it twice.
-function resumePane(key, paneTarget) {
+// typed, so a tick killed halfway can't type it twice: if it can't be recorded, nothing is typed.
+function resumePane(key, paneTarget, leaveAlone = () => false) {
   const { target, problem } = resolvePane(paneTarget);
   if (problem || !target) return false;
   const st = limitStop(paneBottom(target));
-  if (!st.limit || st.busy || st.otherPrompt) return false;
-  let done = {};
-  try { done = JSON.parse(readText(ACCOUNTS_RESUMED) ?? '{}'); } catch {}
-  if (Date.now() - (done[key] ?? 0) < RESUME_EVERY_MS) return false;
-  done[key] = Date.now();
-  fs.mkdirSync(runDir, { recursive: true });
-  fs.writeFileSync(ACCOUNTS_RESUMED, JSON.stringify(done));
+  if (!st.limit || st.busy || st.otherPrompt || leaveAlone()) return false;
+  const done = resumedAt();
+  const now = Date.now();
+  const last = Number(done[key]);
+  if (last <= now && now - last < RESUME_EVERY_MS) return false;
+  done[key] = now;
+  try {
+    fs.mkdirSync(runDir, { recursive: true });
+    fs.writeFileSync(`${ACCOUNTS_RESUMED}.${process.pid}`, JSON.stringify(done));
+    fs.renameSync(`${ACCOUNTS_RESUMED}.${process.pid}`, ACCOUNTS_RESUMED);
+  } catch { return false; }
   if (st.menu) {
     if (!tmux(['send-keys', '-t', target, 'Escape'])) return false;
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
-    if (limitStop(paneBottom(target)).menu) return false;
+    const then = limitStop(paneBottom(target));
+    if (then.menu || then.otherPrompt || then.busy) return false;
   }
   if (!typeInto(target, RESUME_TEXT)) return false;
-  appendLog({ type: 'observation', source: 'pane', kind: 'limit-resumed', subject: key, detail: 'a pane stopped at a usage limit was told to carry on: the active account has room', detector: 'pane', source_key: `limit-resumed ${key} ${done[key]}` });
+  appendLog({ type: 'observation', source: 'pane', kind: 'limit-resumed', subject: key, detail: 'a pane stopped at a usage limit was told to carry on: the active account has room', detector: 'pane', source_key: `limit-resumed ${key} ${now}` });
   return true;
 }
-// A supervisor outside tmux can only be reported: its newest transcript (one that was started as
-// the supervisor, if any of the latest are) ending on a rate-limit error means it has stopped.
+// The supervisor's transcript ending on a rate-limit error means it has stopped. Which one is the
+// supervisor's: of the newest few in the main checkout, the one the kit started as the supervisor or
+// that runs supervisor commands. Nothing else is taken for it, and a limit lasts a week at most.
+const SUPERVISOR_LIMIT_MAX_MS = 7 * 24 * 3600000;
 function supervisorLimit() {
   const dir = path.join(process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), '.claude'), 'projects', realOrSelf(mainRoot).replace(/[^a-zA-Z0-9]/g, '-'));
   let files = [];
   try { files = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')).map((f) => ({ f: path.join(dir, f), m: fs.statSync(path.join(dir, f)).mtimeMs })).sort((a, b) => b.m - a.m).slice(0, 5); } catch { return null; }
-  const head = (f) => { const fd = fs.openSync(f, 'r'); try { const b = Buffer.alloc(65536); return b.toString('utf8', 0, fs.readSync(fd, b, 0, b.length, 0)); } finally { fs.closeSync(fd); } };
-  const pick = (files.find(({ f }) => { try { return head(f).includes('You are the supervisor') || head(f).includes('DEVTEAM_ROLE=supervisor'); } catch { return false; } }) ?? files[0])?.f;
-  if (!pick) return null;
-  const fd = fs.openSync(pick, 'r');
-  let text;
-  try { const size = fs.fstatSync(fd).size; const n = Math.min(size, 256 * 1024); const b = Buffer.alloc(n); fs.readSync(fd, b, 0, n, size - n); text = b.toString('utf8'); } finally { fs.closeSync(fd); }
-  const last = text.split('\n').flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } }).filter((o) => o?.type === 'assistant').pop();
-  if (last?.error !== 'rate_limit') return null;
+  const read = (f, tail) => { const fd = fs.openSync(f, 'r'); try { const size = fs.fstatSync(fd).size; const n = Math.min(size, tail ? 1024 * 1024 : 65536); const b = Buffer.alloc(n); return b.toString('utf8', 0, fs.readSync(fd, b, 0, n, tail ? size - n : 0)); } finally { fs.closeSync(fd); } };
+  const lines = (t) => t.split('\n').flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } });
+  let text = null;
+  for (const { f } of files) {
+    try {
+      const end = read(f, true);
+      const first = lines(read(f, false)).find((o) => o?.type === 'user');
+      if (end.includes('DEVTEAM_ROLE=supervisor') || JSON.stringify(first?.message ?? '').includes('You are the supervisor for this repository')) { text = end; break; }
+    } catch {}
+  }
+  if (!text) return null;
+  const last = lines(text).filter((o) => o?.type === 'assistant').pop();
+  if (last?.error !== 'rate_limit' || !(Date.now() - Date.parse(last.timestamp) < SUPERVISOR_LIMIT_MAX_MS)) return null;
   const c = last.message?.content;
-  return { at: last.timestamp ?? null, text: String((Array.isArray(c) ? c[0]?.text : c) ?? 'usage limit').slice(0, 200) };
+  return { at: last.timestamp, text: String((Array.isArray(c) ? c[0]?.text : c) ?? 'usage limit').slice(0, 200) };
 }
 function accountsState() {
-  try { const s = JSON.parse(readText(ACCOUNTS_FILE)); return Date.now() - Date.parse(s.at) < ACCOUNTS_FRESH_MS ? s : null; } catch { return null; }
+  try {
+    const s = JSON.parse(readText(ACCOUNTS_FILE));
+    return Date.now() - Date.parse(s.at) < ACCOUNTS_FRESH_MS ? { ...s, needs_login: Array.isArray(s.needs_login) ? s.needs_login.map(String) : [] } : null;
+  } catch { return null; }
 }
 // Not supervisorOnly: that records this process's pane as the supervisor's, and this runs under the dashboard.
 function cmdAccountsTick() {
   if (logWriter() !== 'supervisor' || ['worker', 'planner'].includes(process.env.DEVTEAM_ROLE)) die('accounts-tick: the supervisor does this');
   const bin = findCswap();
-  const state = { at: nowIso(), cswap: !!bin, exhausted: false, needs_login: [], supervisor_limit: null, resumed: [] };
+  const before = accountsState();
+  const state = { at: nowIso(), cswap: !!bin, active: null, exhausted: false, needs_login: [], supervisor_limit: null, resumed: [] };
   let switched = false;
   if (bin) {
     if (flags.rotate) {
       const r = rotateAccounts(bin);
       if (!r.ok) out(r.failure);
-      for (const e of r.switched) out(`cswap switched account${e.from || e.to ? `: ${e.from ?? '?'} -> ${e.to ?? '?'}` : ''}`);
+      const who = (x) => (x && typeof x === 'object' ? x.email ?? x.alias ?? x.number ?? '?' : x ?? '?');
+      for (const e of r.switched) out(`cswap switched account${e.from || e.to ? `: ${who(e.from)} -> ${who(e.to)}` : ''}`);
       switched = r.switched.length > 0;
       state.exhausted = r.exhausted;
     }
@@ -7714,19 +7746,21 @@ function cmdAccountsTick() {
     if (rows) {
       state.needs_login = rows.filter((a) => a.usageStatus === 'relogin_required').map((a) => String(a.alias ?? a.email ?? a.number));
       const usable = rows.filter((a) => !a.disabled);
-      if (usable.length && !usable.some(accountHasRoom)) state.exhausted = true;
-      // A session still holds the old login for about 30 s after a switch (macOS): the next tick resumes.
-      if (!switched && accountHasRoom(rows.find((a) => a.active))) {
-        const phases = readLog().lines.filter((l) => l.type === 'phase').sort((a, b) => a.at.localeCompare(b.at));
-        const parked = (w) => phases.filter((l) => l.by === w).pop()?.to === 'parked';
-        for (const { name } of ourWindows(tmuxSession())) if (!parked(name) && resumePane(name, tmuxTarget(name))) state.resumed.push(name);
+      if (usable.length && usable.every(accountAtLimit)) state.exhausted = true;
+      const active = rows.find((a) => a.active);
+      state.active = active ? String(active.email ?? active.number) : null;
+      // A session holds the old login for about 30 s after a switch (macOS), and any dashboard's
+      // rotation can be the one that switched: resume only on an account this project's last tick saw too.
+      if (!switched && state.active && before?.active === state.active && accountHasRoom(active)) {
+        const finished = (name) => ['done', 'parked'].includes(workerState(name)?.phase) || !!mergeShaFor(name) || sessionMode(name) === 'let-go';
+        for (const { name } of ourWindows(tmuxSession())) if (resumePane(name, tmuxTarget(name), () => finished(name))) state.resumed.push(name);
         if (supervisorTarget() && resumePane('supervisor', supervisorTarget())) state.resumed.push('supervisor');
       }
       for (const w of state.resumed) out(`resumed ${w}: it had stopped at a usage limit`);
     }
   }
-  const sup = supervisorTarget();
-  if (!sup || resolvePane(sup).problem) state.supervisor_limit = supervisorLimit();
+  // Whatever the recorded pane says, and with or without cswap: a supervisor told to carry on just now is the only exception.
+  if (!state.resumed.includes('supervisor')) state.supervisor_limit = supervisorLimit();
   fs.mkdirSync(runDir, { recursive: true });
   const tmp = `${ACCOUNTS_FILE}.${process.pid}`;
   fs.writeFileSync(tmp, JSON.stringify(state));

@@ -17,12 +17,12 @@ When `cswap` (claude-swap) is installed, on a Mac or on a cloud Linux box, devte
 **Resuming a stopped session.** Needs cswap. `cswap list --json`: the row with `active: true` has room when `usageStatus` is `ok` and every window in `usage` has a numeric `pct` below 100. Without room, nothing is touched. With room, in a tick that didn't just switch (a macOS session holds the old login for about 30 s), for each of this project's windows (`ourWindows`; a worker or planner whose last phase is `parked` is left alone), and for the supervisor when it has a recorded pane:
 
 - the pane has a live agent (`resolvePane`) and is not busy;
-- its last 15 lines (code-like lines excepted, `PANE_CODE`) match the `limit` pattern, or show the limit menu; a `prompt` match leaves it alone;
+- its last 15 lines (code-like lines excepted, `PANE_CODE`) end on Claude Code's own limit banner (anchored: `You've hit your … limit · resets`, nothing the agent said after it) or show the limit menu in its real layout; prose quoting either, and another harness's limit message, do not count; a `prompt` match leaves it alone;
 - no resume of that pane in the last 10 minutes (`run/accounts-resumed.json`, written before anything is typed);
 - if the limit menu shows (`Stop and wait for limit to reset`), send `Escape`, wait 1 s, capture again, and go on only if the menu is gone. **Enter or a digit is never sent to the menu: its third item is "Switch to usage credits", which spends money.** Any other menu is left alone;
 - type a one-line continue message with `typeInto`.
 
-**A supervisor stopped at a limit.** Works with or without cswap. A supervisor with a recorded pane that resolves is handled as above. Otherwise the newest top-level transcript of the main checkout (`CLAUDE_CONFIG_DIR` or `~/.claude`, `projects/<slug>/*.jsonl`, the last 256 KB; the newest of the last five that was started as the supervisor, else the newest) is read: if its last assistant line has `error: "rate_limit"`, `supervisor_limit` holds that line's time and message.
+**A supervisor stopped at a limit.** Works with or without cswap. A supervisor with a recorded pane that resolves is resumed as above. Unless it was resumed in this tick, the supervisor's transcript in the main checkout (`CLAUDE_CONFIG_DIR` or `~/.claude`, `projects/<slug>/*.jsonl`, the last 1 MB) is read: the newest of the last five that the kit started as the supervisor or that runs `DEVTEAM_ROLE=supervisor` commands, and no other. If its last assistant line has `error: "rate_limit"` and is under seven days old (the longest a limit lasts), `supervisor_limit` holds that line's time and message.
 
 **Visibility.** Each tick writes `run/accounts.json`: `{ at, cswap, exhausted, needs_login, supervisor_limit, resumed }`. Read only when `at` is under 10 minutes old:
 - metrics findings: `accounts-exhausted` (high), `account-needs-login` (medium, one per account), `supervisor-at-limit` (high);
@@ -39,7 +39,7 @@ When `cswap` (claude-swap) is installed, on a Mac or on a cloud Linux box, devte
 
 ## Tests
 
-A stand-in `cswap` script, on a test's own hub port, in `test/dashboard.test.mjs`:
+A stand-in `cswap` script, on a test's own hub port, in `test/accounts.test.mjs`:
 - the hub holder calls `auto --once --json`, a second dashboard doesn't, and `off` calls nothing;
 - `switch`, `all-exhausted` and `account-quarantined` reach `run/accounts.json` and findings, and old data is ignored;
 - no room leaves a stopped pane alone; room resumes it once inside 10 minutes; the menu gets Escape and never Enter or a digit; a pane with another prompt is left alone;
