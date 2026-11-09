@@ -2078,7 +2078,7 @@ const activeWorker = (id) => { const w = workerState(id); return !!w && w.phase 
 const PANE_WAITS = [
   // a banner says the limit was reached or when it resets; "rate limit" on its own is too common in
   // code and prose the pane may be showing (see PANE_CODE)
-  ['limit', /\b(usage|rate|session|weekly|daily|hourly|\d+-hour) limit (reached|hit|exceeded)\b|^(?:[⎿■✖!]\s*)?you['’]ve hit your (\w+ )*limit\b|\bresets? (at|in) \d|^approaching (your )?usage limit/i],
+  ['limit', /\b(usage|rate|session|weekly|daily|hourly|\d+-hour) limit (reached|hit|exceeded)\b|^(?:[⎿■✖!]\s*)?you(?:['’]ve| have) hit your (\w+ )*limit\b|\bresets? (at|in) \d|^approaching (your )?usage limit/i],
   ['prompt', /Do you want to (proceed|make this edit|create|allow|run)|Do you trust the files|\[y\/n\]|\(y\/n\)|Press Enter to continue|❯\s*1\.\s*Yes/i],
 ];
 // A pane line that is content the agent is showing, not the agent's own UI: numbered source or diff

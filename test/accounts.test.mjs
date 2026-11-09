@@ -31,8 +31,8 @@ function fixture(name) {
   const session = run(['settings', '--get', 'tmux_session']).stdout.trim();
   // A stand-in agent in a real tmux pane: it shows what it's given and records every key. Escape
   // takes it back to its prompt, as the limit menu does.
-  const agent = (window, shown, afterEscape = ['> ready']) => {
-    const wt = path.join(root, '.worktrees', window);
+  const agent = (window, shown, afterEscape = ['> ready'], cwd = null) => {
+    const wt = cwd ?? path.join(root, '.worktrees', window);
     fs.mkdirSync(wt, { recursive: true });
     const keys = path.join(base, `${window}.keys`);
     const prog = path.join(base, `${window}.cjs`);
@@ -159,10 +159,9 @@ test('a stopped supervisor: warned about outside tmux, with or without cswap; re
     F.tick();
     assert.equal(F.state().supervisor_limit, null);
     // in tmux: the recorded pane is resumed, and there's nothing to warn about
-    const s = F.agent('sup-pane', MENU);
+    const s = F.agent('sup-pane', MENU, undefined, F.root);
     await until(() => s.shows().includes('Esc to cancel'), 'the menu');
     write(path.join(F.root, 'docs/devteam/run/supervisor-pane'), `=${F.session}:sup-pane`);
-    fs.rmSync(path.join(F.root, '.worktrees/sup-pane'), { recursive: true });
     fs.appendFileSync(file, `${JSON.stringify(rl)}\n`);
     assert.match(F.tick(), /resumed/);
     await until(() => s.keys().endsWith('\r'), 'the supervisor told to carry on');
