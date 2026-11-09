@@ -3,10 +3,11 @@
 // passkey registered when the box was claimed, and passes the owner through to the machine's hub
 // (box.example.com), a web terminal on the box's tmux server (term.box.example.com), and each
 // instance's dashboard on a subdomain of its own (4321.box.example.com). Signing in and passkeys
-// are on auth.box.example.com. Every agent runs as the box's user and can change files and take
-// ports, so the box, term and auth names serve only bytes the gateway holds: its own copy of the
-// hub page and of ttyd's page, and its own pages. Only the hub's JSON list and the terminal's
-// socket come from behind it. An agent's page can exist only on an instance's name.
+// are under /auth on the box's name, so an installed hub signs in without leaving its own scope.
+// Every agent runs as the box's user and can change files and take ports, so the box and term names
+// serve only bytes the gateway holds: its own copy of the hub page and of ttyd's page, and its own
+// pages. Only the hub's JSON list and the terminal's socket come from behind it. An agent's page
+// can exist only on an instance's name. The gateway also sends the hub's notifications, by Web Push.
 // Behind it the kit runs unchanged: every proxied request looks to the kit like a local browser's,
 // and the kit's loopback origins in its response headers are mapped to the public ones.
 // Node only, no dependencies. Usage: node gateway.mjs [serve | reclaim]
@@ -17,6 +18,7 @@ import net from 'node:net';
 import path from 'node:path';
 import { pipeline } from 'node:stream';
 import { fileURLToPath } from 'node:url';
+import zlib from 'node:zlib';
 
 const env = process.env;
 const HUB_PORT = Number(env.DEVTEAM_HUB_PORT ?? 4320);
@@ -149,14 +151,164 @@ function publicUrl(raw = env.DEVTEAM_PUBLIC_URL) {
 }
 const gatewayDir = () => env.DEVTEAM_GATEWAY_DIR ?? path.join(env.HOME ?? '.', '.devteam-gateway');
 
-const authOrigin = (pub) => { const u = new URL(pub); return `${u.protocol}//auth.${u.host}`; };
 const claimLive = (s) => Boolean(s.claimHash) && (s.claimExpires ?? 0) > Date.now();
-const claimUrl = (pub, token) => `${authOrigin(pub)}/auth/claim#${token}`;
+const claimUrl = (pub, token) => `${pub}/auth/claim#${token}`;
 function newClaim(store) {
   const token = b64u(crypto.randomBytes(32));
   store.save({ ...store.load(), claimHash: b64u(sha256(token)), claimExpires: Date.now() + CLAIM_MS });
   return token;
 }
+
+// --- Web Push: encrypted to the browser that subscribed (RFC 8291), signed by the box (RFC 8292) ---
+const PUSH_POLL_MS = 10000;
+const PUSH_DEVICES = 20;
+const PUSH_SEEN_MAX = 200;
+const PUSH_BURST = 3;
+const PUSH_REST_MS = 60000;
+const PUSH_SENDS = 6;
+const PUSH_URL_MAX = 1024;
+const PUSH_TEST = { title: 'devteam: test notification', body: 'Push is working on this device.', tag: 'devteam-test', url: '/' };
+const hkdf = (ikm, salt, info, n) => Buffer.from(crypto.hkdfSync('sha256', ikm, salt, info, n));
+export function encryptPush({ p256dh, auth }, plain, sender = null, salt = crypto.randomBytes(16)) {
+  const ua = unb64u(p256dh);
+  const ecdh = sender ?? crypto.createECDH('prime256v1');
+  if (!sender) ecdh.generateKeys();
+  const as = ecdh.getPublicKey();
+  const ikm = hkdf(ecdh.computeSecret(ua), unb64u(auth), Buffer.concat([Buffer.from('WebPush: info\0'), ua, as]), 32);
+  const cipher = crypto.createCipheriv('aes-128-gcm', hkdf(ikm, salt, 'Content-Encoding: aes128gcm\0', 16), hkdf(ikm, salt, 'Content-Encoding: nonce\0', 12));
+  const text = Buffer.concat([cipher.update(plain), cipher.update(Buffer.from([2])), cipher.final(), cipher.getAuthTag()]);
+  const head = Buffer.alloc(21);
+  salt.copy(head);
+  head.writeUInt32BE(4096, 16);
+  head[20] = as.length;
+  return Buffer.concat([head, as, text]);
+}
+// Apple refuses a token good for more than an hour.
+export function vapidToken(jwk, audience, subject, now = Date.now()) {
+  const part = (o) => b64u(JSON.stringify(o));
+  const head = `${part({ typ: 'JWT', alg: 'ES256' })}.${part({ aud: audience, exp: Math.floor(now / 1000) + 1800, sub: subject })}`;
+  return `${head}.${b64u(crypto.sign('sha256', Buffer.from(head), { key: crypto.createPrivateKey({ key: jwk, format: 'jwk' }), dsaEncoding: 'ieee-p1363' }))}`;
+}
+// Only the browsers' own push services: the gateway posts to whatever a subscription names.
+const PUSH_HOSTS = /^(?:[\w-]+\.push\.apple\.com|fcm\.googleapis\.com|[\w.-]+\.push\.services\.mozilla\.com|[\w.-]+\.notify\.windows\.com)$/;
+export function pushSubscription(b) {
+  try {
+    const u = new URL(b.endpoint);
+    if (u.protocol !== 'https:' || u.port || u.username || u.password || !PUSH_HOSTS.test(u.hostname) || b.endpoint.length > 1024) return null;
+    const p256dh = unb64u(b.keys.p256dh);
+    const auth = unb64u(b.keys.auth);
+    if (auth?.length !== 16 || p256dh?.length !== 65) return null;
+    crypto.ECDH.convertKey(p256dh, 'prime256v1'); // throws if it isn't a point on the curve
+    return { endpoint: b.endpoint, p256dh: b.keys.p256dh, auth: b.keys.auth, at: new Date().toISOString() };
+  } catch { return null; }
+}
+// The list can hold any string JSON can, and encodeURIComponent throws on half a surrogate pair (a
+// cut can make one out of an emoji, so this goes after the cut). With u, \p{Cs} only matches an
+// unpaired half; Node 18, which the tests still run on, has no toWellFormed.
+const wellFormed = (s) => s.replace(/\p{Cs}/gu, '\ufffd');
+// What the hub page would notify about, from two reads of the list: an Inbox that went up (an
+// instance not seen before counts from nothing). Whatever holds the hub's port wrote this list, so
+// it is checked as the page checks it, and kept short.
+export function inboxNews(seen, instances, ports, resting = new Set()) {
+  // one entry a port, so whatever the list's length, what follows is bounded by the block
+  const perPort = new Map();
+  for (const x of instances) {
+    try {
+      if (!x || typeof x.root !== 'string' || x.root.length > 1024 || x.root === '__proto__') continue;
+      const port = Number(x.port);
+      if (ports.includes(port) && !perPort.has(port)) perPort.set(port, x);
+    } catch {}
+  }
+  const perRoot = new Map();
+  for (const x of perPort.values()) if (!perRoot.has(x.root) || Number(x.port) < Number(perRoot.get(x.root).port)) perRoot.set(x.root, x);
+  const list = [...perRoot.values()];
+  const named = new Map();
+  for (const x of list) named.set(x.name, (named.get(x.name) ?? 0) + 1);
+  const next = { ...seen };
+  let messages = [];
+  const roots = [];
+  const names = [];
+  for (const x of list) {
+    try {
+      // a root that just notified is left as it was, rises and falls alike, until it has rested
+      if (!Number.isInteger(x.inbox) || x.inbox < 0 || resting.has(x.root)) continue;
+      const before = Object.hasOwn(seen, x.root) ? seen[x.root] : 0;
+      next[x.root] = x.inbox;
+      if (x.inbox <= before) continue;
+      const name = wellFormed(String(x.name ?? x.root).slice(0, 80));
+      // the hub page's address for this tab (its keyOf): two of one name are told apart by their root
+      const key = named.get(x.name) > 1 ? `${String(x.name)}-${crypto.createHash('sha1').update(x.root).digest('hex').slice(0, 6)}` : String(x.name);
+      const url = `/#${encodeURIComponent(wellFormed(key))}`;
+      messages.push({ title: `${name}: ${x.inbox - before} new in the Inbox`, body: wellFormed(x.root.slice(0, 200)), tag: wellFormed(`devteam-${x.root}`.slice(0, 256)), url: url.length > PUSH_URL_MAX ? '/' : url });
+      roots.push(x.root);
+      names.push(name);
+    } catch {}
+  }
+  if (messages.length > PUSH_BURST) messages = [{ title: `${messages.length} instances have new Inbox items`, body: wellFormed(names.join(', ').slice(0, 200)), tag: 'devteam-inbox', url: '/' }];
+  // only what's no longer listed is forgotten, oldest first: a live root forgotten would be all news again
+  const live = new Set(list.map((x) => x.root));
+  let over = Object.keys(next).length - PUSH_SEEN_MAX;
+  for (const k of Object.keys(next)) {
+    if (over <= 0) break;
+    if (!live.has(k)) { delete next[k]; over -= 1; }
+  }
+  return { seen: next, messages, roots };
+}
+
+// --- installing the hub: its manifest, icons and service worker ----------------------------------
+const crcTable = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
+const crc = (b) => { let c = 0xffffffff; for (const x of b) c = crcTable[(c ^ x) & 255] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+// A white "d" on black: drawn here so the image needs no file of its own.
+export function iconPng(size) {
+  const lit = (x, y) => { const d = Math.hypot(x - 0.46, y - 0.6); return (d <= 0.22 && d >= 0.12) || (x >= 0.58 && x <= 0.68 && y >= 0.2 && y <= 0.8); };
+  const raw = Buffer.alloc((size * 3 + 1) * size);
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    let on = 0;
+    for (const i of [1, 3, 5]) for (const j of [1, 3, 5]) if (lit((x + i / 6) / size, (y + j / 6) / size)) on++;
+    raw.fill(Math.round((on / 9) * 255), y * (size * 3 + 1) + 1 + x * 3, y * (size * 3 + 1) + 4 + x * 3);
+  }
+  const chunk = (type, data) => {
+    const body = Buffer.concat([Buffer.from(type), data]);
+    const out = Buffer.alloc(body.length + 8);
+    out.writeUInt32BE(data.length);
+    body.copy(out, 4);
+    out.writeUInt32BE(crc(body), body.length + 4);
+    return out;
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(size, 0);
+  ihdr.writeUInt32BE(size, 4);
+  ihdr.set([8, 2, 0, 0, 0], 8);
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
+}
+const ICON_SIZES = [180, 192, 512];
+const MANIFEST = JSON.stringify({ name: 'devteam', short_name: 'devteam', start_url: '/', scope: '/', display: 'standalone', background_color: '#000000', theme_color: '#000000', icons: ICON_SIZES.map((n) => ({ src: `/icon-${n}.png`, sizes: `${n}x${n}`, type: 'image/png' })) });
+// It shows every push (iOS ends a subscription that pushes without showing) and opens the tab the
+// notification names. It has no fetch handler, so it never stands between a page and the box.
+const SERVICE_WORKER = `self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
+self.addEventListener('push', (e) => {
+  let d = {};
+  try { d = e.data.json(); } catch {}
+  e.waitUntil(self.registration.showNotification(d.title || 'devteam: new in the Inbox', { body: d.body, tag: d.tag, data: { url: d.url || '/' } }));
+});
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+  const url = new URL(e.notification.data.url, self.location.origin);
+  e.waitUntil((async () => {
+    const hub = (await self.clients.matchAll({ type: 'window', includeUncontrolled: true })).find((c) => ['/', '/index.html'].includes(new URL(c.url).pathname));
+    if (!hub) return self.clients.openWindow(url.href);
+    try { await hub.focus(); } catch {}
+    hub.postMessage({ hash: url.hash });
+  })());
+});
+`;
+const iconCache = new Map();
+const INSTALL = Object.assign(Object.create(null), {
+  '/manifest.webmanifest': { type: 'application/manifest+json', body: () => MANIFEST },
+  '/sw.js': { type: 'text/javascript; charset=utf-8', body: () => SERVICE_WORKER },
+  ...Object.fromEntries(ICON_SIZES.map((n) => [`/icon-${n}.png`, { type: 'image/png', body: () => { if (!iconCache.has(n)) iconCache.set(n, iconPng(n)); return iconCache.get(n); } }])),
+});
 
 // --- the server ---------------------------------------------------------------------------------
 export function createGateway(opts = {}) {
@@ -171,10 +323,9 @@ export function createGateway(opts = {}) {
     const port = m && m[2] === `${NAME}${SUFFIX}` && String(Number(m[1])) === m[1] ? Number(m[1]) : null;
     return BLOCK.includes(port) ? port : null;
   };
-  const AUTH = authOrigin(PUB);
-  const authHost = new URL(AUTH).host;
-  // passkeys belong to the auth name alone: no agent's page, on any other name, can even ask for one
-  const RP_ID = new URL(AUTH).hostname;
+  // Passkeys belong to the box's name. A page on an instance's subdomain may ask for one, but its
+  // answer names that page's origin, and only an answer from the box's own origin is accepted.
+  const RP_ID = NAME;
   const TERM = `${pubUrl.protocol}//term.${pubUrl.host}`;
   const termHost = new URL(TERM).host;
   const COOKIE = 'devteam_session';
@@ -190,11 +341,13 @@ export function createGateway(opts = {}) {
   // reads the platform's logs can already open a shell on the box, the root of trust anyway).
   try {
     const s = store.load();
+    // made before sign-in moved under /auth (or for another name): the browser won't offer them here
+    if (s.passkeys.some((x) => x.rp !== RP_ID)) log(`passkeys made before sign-in moved to ${PUB}/auth (or for another name) can't sign in here: run devteam-reclaim in a shell on the box for a claim link, and claim it again`);
     if (!s.passkeys.length) {
       const given = env.DEVTEAM_CLAIM_TOKEN;
       // a link `reclaim` printed outlives a restart, for its day; the environment's token is only the first
-      if (claimLive(s)) log(`unclaimed: open the claim link printed earlier (${AUTH}/auth/claim#…), or run devteam-reclaim for a new one`);
-      else if (given && given.length >= 32) { store.save({ ...s, claimHash: b64u(sha256(given)), claimExpires: Date.now() + CLAIM_MS }); log(`unclaimed: open ${AUTH}/auth/claim#<DEVTEAM_CLAIM_TOKEN> within a day to claim this box with a passkey`); }
+      if (claimLive(s)) log(`unclaimed: open the claim link printed earlier (${PUB}/auth/claim#…), or run devteam-reclaim for a new one`);
+      else if (given && given.length >= 32) { store.save({ ...s, claimHash: b64u(sha256(given)), claimExpires: Date.now() + CLAIM_MS }); log(`unclaimed: open ${PUB}/auth/claim#<DEVTEAM_CLAIM_TOKEN> within a day to claim this box with a passkey`); }
       else { if (given) log('DEVTEAM_CLAIM_TOKEN is shorter than 32 characters; ignored'); log(`unclaimed: open ${claimUrl(PUB, newClaim(store))} within a day to claim this box with a passkey`); }
     }
   } catch (e) {
@@ -284,7 +437,7 @@ export function createGateway(opts = {}) {
   const safeNext = (n) => {
     try {
       const u = new URL(String(n ?? '/'), PUB);
-      if (u.origin === PUB || u.origin === AUTH || u.origin === TERM || (u.protocol === pubUrl.protocol && instanceOf(u.host) && u.origin === instanceOrigin(instanceOf(u.host)))) return u.href;
+      if (u.origin === PUB || u.origin === TERM || (u.protocol === pubUrl.protocol && instanceOf(u.host) && u.origin === instanceOrigin(instanceOf(u.host)))) return u.href;
     } catch {}
     return `${PUB}/`;
   };
@@ -304,7 +457,7 @@ export function createGateway(opts = {}) {
     if (!raw) throw new Error('no clientDataJSON');
     const c = JSON.parse(raw.toString('utf8'));
     if (c.type !== type) throw new Error('wrong ceremony');
-    if (c.origin !== AUTH || c.crossOrigin === true) throw new Error('wrong origin');
+    if (c.origin !== PUB || c.crossOrigin === true) throw new Error('wrong origin');
     const issued = purpose === 'login' ? loginChallengeOk(c.challenge) : redeem(c.challenge, purpose);
     if (!issued) throw new Error('unknown or expired challenge');
     return { raw, issued, challenge: c.challenge };
@@ -330,7 +483,7 @@ export function createGateway(opts = {}) {
     const s = store.load();
     if (s.passkeys.some((p) => p.id === b64u(rawId))) throw new Error('that passkey is already registered');
     const name = typeof body?.name === 'string' && body.name.trim() ? body.name.trim().slice(0, 60) : `passkey ${s.passkeys.length + 1}`;
-    return { id: b64u(rawId), userId: issued.userId, jwk, alg, signCount: ad.signCount, name, createdAt: new Date().toISOString() };
+    return { id: b64u(rawId), userId: issued.userId, jwk, alg, signCount: ad.signCount, name, rp: RP_ID, createdAt: new Date().toISOString() };
   };
   const verifyAssertion = (body) => {
     const s = store.load();
@@ -393,20 +546,80 @@ export function createGateway(opts = {}) {
   };
   // The hub's list is the one thing the box's name takes from behind it, and only as data: whatever
   // holds the port, the page reads JSON and shows it as text. No hub yet is an empty list.
-  const instances = (req, res) => {
-    let settled = false;
-    const reply = (body) => { if (settled) return; settled = true; send(res, 200, 'application/json', body); };
-    const none = () => reply(JSON.stringify({ hub: 1, instances: [] }));
+  const hubList = () => new Promise((settle) => {
+    let deadline = null;
+    const resolve = (v) => { clearTimeout(deadline); settle(v); };
+    const none = () => resolve(null);
     const up = http.get({ host: '127.0.0.1', port: HUB_PORT, path: '/instances.json', timeout: 10000, headers: { host: `127.0.0.1:${HUB_PORT}`, 'sec-fetch-site': 'same-origin' } }, (ur) => {
       if (ur.statusCode !== 200) { ur.resume(); return none(); }
       const chunks = [];
       let size = 0;
       ur.on('data', (c) => { size += c.length; if (size > 1024 * 1024) { none(); up.destroy(); } else chunks.push(c); });
-      ur.on('end', () => reply(Buffer.concat(chunks)));
+      ur.on('end', () => resolve(Buffer.concat(chunks)));
       ur.on('error', none);
+      ur.on('close', none);
     });
     up.on('timeout', () => up.destroy());
     up.on('error', none);
+    // the whole answer, not only each pause in it: one sent a byte at a time would hold the poller
+    deadline = setTimeout(() => { up.destroy(); none(); }, opts.hubDeadlineMs ?? 15000);
+  });
+  const instances = async (req, res) => send(res, 200, 'application/json', (await hubList()) ?? JSON.stringify({ hub: 1, instances: [] }));
+
+  // --- notifications: the gateway reads the hub's list itself, so they need no page open ----------
+  // The signing key sits with the passkeys, where no agent can read it. Made the first time it's asked for.
+  const vapid = () => {
+    const now = store.load();
+    if (now.vapid) return now.vapid;
+    const jwk = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' }).privateKey.export({ format: 'jwk' });
+    const made = { jwk, publicKey: b64u(Buffer.concat([Buffer.from([4]), unb64u(jwk.x), unb64u(jwk.y)])) };
+    store.save({ ...now, vapid: made });
+    return made;
+  };
+  const pushFetch = opts.pushFetch ?? fetch;
+  const sendPush = async (sub, message) => {
+    const { jwk, publicKey } = vapid();
+    const r = await pushFetch(sub.endpoint, {
+      method: 'POST', redirect: 'error', signal: AbortSignal.timeout(15000),
+      headers: { authorization: `vapid t=${vapidToken(jwk, new URL(sub.endpoint).origin, PUB)}, k=${publicKey}`, 'content-encoding': 'aes128gcm', 'content-type': 'application/octet-stream', ttl: '86400', urgency: 'high' },
+      body: encryptPush(sub, Buffer.from(JSON.stringify(message))),
+    });
+    return r.status;
+  };
+  // Counts are kept on the disk, so a restart, when every dashboard comes back with its Inbox as it
+  // was, is not news. Only a read that worked counts: a hub that's down changes nothing.
+  let polling = false;
+  const lastSent = new Map();
+  const pollPush = async () => {
+    if (polling) return;
+    polling = true;
+    try {
+      const body = await hubList();
+      let list = null;
+      try { list = JSON.parse(body).instances; } catch {}
+      if (!Array.isArray(list)) return;
+      const before = store.load();
+      const now = Date.now();
+      for (const [r, t] of lastSent) if (now - t >= PUSH_REST_MS) lastSent.delete(r);
+      const { seen, messages, roots } = inboxNews(before.pushSeen ?? {}, list, BLOCK, new Set(lastSent.keys()));
+      if (before.pushSubs?.length) for (const r of roots) lastSent.set(r, now);
+      if (JSON.stringify(seen) !== JSON.stringify(before.pushSeen ?? {})) store.save({ ...before, pushSeen: seen });
+      const subs = before.pushSubs ?? [];
+      const dead = new Set();
+      const jobs = subs.flatMap((sub) => messages.map((message) => ({ sub, message })));
+      const worker = async () => {
+        for (let job = jobs.shift(); job; job = jobs.shift()) {
+          try {
+            const status = await sendPush(job.sub, job.message);
+            // the browser dropped it (uninstalled, or notifications turned off)
+            if (status === 404 || status === 410) dead.add(job.sub.endpoint);
+            else if (status >= 300) log(`a push to ${new URL(job.sub.endpoint).host} was refused (${status})`);
+          } catch (e) { log(`a push to ${new URL(job.sub.endpoint).host} failed: ${e.message}`); }
+        }
+      };
+      await Promise.all(Array.from({ length: PUSH_SENDS }, worker));
+      if (dead.size) { const now = store.load(); store.save({ ...now, pushSubs: (now.pushSubs ?? []).filter((x) => !dead.has(x.endpoint)) }); }
+    } finally { polling = false; }
   };
 
   const navigating = (req) => req.method === 'GET' && (req.headers['sec-fetch-mode'] === 'navigate' || (!req.headers['sec-fetch-mode'] && String(req.headers.accept ?? '').includes('text/html')));
@@ -441,9 +654,9 @@ export function createGateway(opts = {}) {
     const got = Buffer.from(given);
     return sameBytes(got, want) && store.load().sessions.some((x) => x.hash.startsWith(sid) && x.expires > Date.now());
   };
-  const HUB_CSP = `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-src ${[TERM, ...BLOCK.map(instanceOrigin)].join(' ')}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
+  const HUB_CSP = `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; worker-src 'self'; manifest-src 'self'; img-src 'self'; frame-src ${[TERM, ...BLOCK.map(instanceOrigin)].join(' ')}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
   const TERM_CSP = `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; font-src data:; img-src data:; connect-src 'self' ${TERM.replace(/^http/, 'ws')}; frame-ancestors ${PUB}; base-uri 'none'; form-action 'none'`;
-  const loginAt = (next) => `${AUTH}/auth/login${next ? `?next=${encodeURIComponent(next)}` : ''}`;
+  const loginAt = (next) => `${PUB}/auth/login${next ? `?next=${encodeURIComponent(next)}` : ''}`;
 
   // Room for a jar a page has stuffed; past it, see clientError below.
   const server = http.createServer({ maxHeaderSize: 64 * 1024 }, async (req, res) => {
@@ -454,16 +667,16 @@ export function createGateway(opts = {}) {
     if (url.pathname === '/healthz') return send(res, 200, 'text/plain', 'ok');
     // Our own names only; and anything but a read must come from a page on the same name.
     const isBox = req.headers.host === pubUrl.host;
-    const isAuth = req.headers.host === authHost;
     const isTerm = req.headers.host === termHost;
-    const port = isBox || isAuth || isTerm ? null : instanceOf(req.headers.host);
-    if (!isBox && !isAuth && !isTerm && !port) return send(res, 421, 'text/plain; charset=utf-8', `this box answers only on its own names: open ${PUB}/`);
-    const own = isBox ? PUB : isAuth ? AUTH : isTerm ? TERM : instanceOrigin(port);
+    const port = isBox || isTerm ? null : instanceOf(req.headers.host);
+    if (!isBox && !isTerm && !port) return send(res, 421, 'text/plain; charset=utf-8', `this box answers only on its own names: open ${PUB}/`);
+    const own = isBox ? PUB : isTerm ? TERM : instanceOrigin(port);
     if (!['GET', 'HEAD'].includes(req.method) && req.headers.origin !== own) return send(res, 403, 'text/plain; charset=utf-8', 'only from this box\'s own pages');
     // The kit has no service workers. One an agent's page registers on an instance's name would
     // outlive its server, and run as that name's real dashboard once one takes the port.
     if (port && (req.headers['service-worker'] || req.headers['sec-fetch-dest'] === 'serviceworker')) return send(res, 403, 'text/plain; charset=utf-8', 'no service workers on this box');
     const p = url.pathname;
+    const isAuth = isBox && (p === '/auth' || p.startsWith('/auth/'));
     const rawPath = req.url.split('?')[0];
     try {
       const cm = port ? /^\/c\/(\d+)\.([\w-]+)\.([\w-]+)(\/artifact\/.*)$/.exec(rawPath) : null;
@@ -474,10 +687,8 @@ export function createGateway(opts = {}) {
       if (!crossSiteOk(req, p, url)) return send(res, 403, 'text/plain; charset=utf-8', 'not for another site\'s page');
       const s = store.load();
       const claimed = s.passkeys.length > 0;
-      // the auth name serves the gateway's own pages and nothing else; the others never serve them
-      if (isBox && p.startsWith('/auth/')) return redirect(res, `${AUTH}${p}${url.search}`);
-      if (isAuth && !p.startsWith('/auth/')) return redirect(res, `${PUB}/`);
       if (isAuth) {
+        if (p === '/auth' && req.method === 'GET') return redirect(res, '/auth/login');
         if (p === '/auth/claim' && req.method === 'GET') return claimed ? redirect(res, '/auth/login') : page(res, PAGES.claim(PUB));
         if (p === '/auth/claim/options' || p === '/auth/claim/verify') {
           if (req.method !== 'POST') return send(res, 405, 'text/plain', 'POST only');
@@ -504,6 +715,10 @@ export function createGateway(opts = {}) {
           return json(res, 200, { ok: true }, { 'set-cookie': newSession() });
         }
       }
+      // What installing the hub fetches. Public: a browser asks for the manifest without the cookie, and
+      // refreshes the worker after a session has ended. Nothing here says anything about the box.
+      const installed = isBox && req.method === 'GET' ? INSTALL[p] : null;
+      if (installed) return send(res, 200, installed.type, installed.body());
       const session = claimed ? sessionOf(req) : null;
       if (!session) {
         if (navigating(req)) return redirect(res, claimed ? loginAt(`${own}${req.url}`) : loginAt());
@@ -531,7 +746,7 @@ export function createGateway(opts = {}) {
           store.save({ ...now, sessions: now.sessions.filter((x) => x.hash !== session.hash) });
           return json(res, 200, { ok: true }, { 'set-cookie': cookie('', 0) });
         }
-        if (p === '/auth/passkeys' && req.method === 'GET') return fresh(session) ? page(res, PAGES.passkeys(store.load().passkeys, PUB)) : redirect(res, loginAt(`${AUTH}/auth/passkeys`));
+        if (p === '/auth/passkeys' && req.method === 'GET') return fresh(session) ? page(res, PAGES.passkeys(store.load().passkeys, PUB)) : redirect(res, loginAt(`${PUB}/auth/passkeys`));
         if (p.startsWith('/auth/passkeys/') && !fresh(session)) return json(res, 403, { error: 'sign in again to change passkeys (reload this page)' });
         if (p === '/auth/passkeys/options' && req.method === 'POST') return json(res, 200, creationOptions(`add:${session.hash}`));
         if (p === '/auth/passkeys/verify' && req.method === 'POST') {
@@ -546,8 +761,9 @@ export function createGateway(opts = {}) {
           const now = store.load();
           if (now.passkeys.length < 2) return json(res, 400, { error: 'the last passkey can\'t be removed; add another first' });
           if (!now.passkeys.some((x) => x.id === body?.id)) return json(res, 404, { error: 'no such passkey' });
-          // whoever held it may hold a session too: every other session ends
-          store.save({ ...now, passkeys: now.passkeys.filter((x) => x.id !== body.id), sessions: now.sessions.filter((x) => x.hash === session.hash) });
+          // whoever held it may hold a session too: every other session ends, and every device's notifications
+          // (this one's subscribes again when its hub next opens)
+          store.save({ ...now, passkeys: now.passkeys.filter((x) => x.id !== body.id), sessions: now.sessions.filter((x) => x.hash === session.hash), pushSubs: [] });
           log('a passkey was removed; every other session ended');
           return json(res, 200, { ok: true });
         }
@@ -555,8 +771,24 @@ export function createGateway(opts = {}) {
       }
       // The box's own name: the gateway's copy of the hub page, what it needs to know, and the list.
       if (req.method === 'GET' && (p === '/' || p === '/index.html')) return send(res, 200, 'text/html; charset=utf-8', hubPage, { 'content-security-policy': HUB_CSP, 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer' });
-      if (req.method === 'GET' && p === '/box.json') return json(res, 200, { box: 1, terminal: `${TERM}/`, instance: `${pubUrl.protocol}//{port}.${NAME}${SUFFIX}/`, passkeys: `${AUTH}/auth/passkeys` });
+      if (req.method === 'GET' && p === '/box.json') return json(res, 200, { box: 1, terminal: `${TERM}/`, instance: `${pubUrl.protocol}//{port}.${NAME}${SUFFIX}/`, passkeys: `${PUB}/auth/passkeys`, push: vapid().publicKey });
       if (req.method === 'GET' && p === '/instances.json') return instances(req, res);
+      if (req.method === 'POST' && p === '/push/subscribe') {
+        const sub = pushSubscription(await readJson(req));
+        if (!sub) return json(res, 400, { error: 'that is not a push subscription this box can send to' });
+        const now = store.load();
+        store.save({ ...now, pushSubs: [...(now.pushSubs ?? []).filter((x) => x.endpoint !== sub.endpoint), sub].slice(-PUSH_DEVICES) });
+        return json(res, 200, { ok: true });
+      }
+      // The hub's "is this working?": one push, to the device that asked.
+      if (req.method === 'POST' && p === '/push/test') {
+        const body = await readJson(req);
+        const sub = (store.load().pushSubs ?? []).find((x) => x.endpoint === body?.endpoint);
+        if (!sub) return json(res, 404, { error: 'this device is not subscribed: reload the hub' });
+        let status;
+        try { status = await sendPush(sub, PUSH_TEST); } catch (e) { return json(res, 502, { error: e.message }); }
+        return status < 300 ? json(res, 200, { ok: true }) : json(res, 502, { error: `the push service answered ${status}` });
+      }
       return send(res, 404, 'text/plain', 'not found');
     } catch (e) {
       if (res.headersSent) return res.destroy();
@@ -600,7 +832,7 @@ export function createGateway(opts = {}) {
   });
   server.keepAliveTimeout = 65000;
   server.headersTimeout = 66000;
-  return { server, publicUrl: PUB };
+  return { server, publicUrl: PUB, pollPush };
 }
 
 // --- the gateway's own pages -------------------------------------------------------------------
@@ -666,7 +898,8 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === fs.realpathSync(proces
   const cmd = process.argv[2] ?? 'serve';
   try {
     if (cmd === 'serve') {
-      const { server, publicUrl: pub } = createGateway();
+      const { server, publicUrl: pub, pollPush } = createGateway();
+      setInterval(() => pollPush().catch((e) => process.stdout.write(`gateway: notifications: ${e.message}\n`)), PUSH_POLL_MS);
       const port = Number(env.PORT ?? 8080);
       // every address, IPv6 too: a port left open on either family is one an agent could take
       const up = () => process.stdout.write(`gateway: ${pub} on :${port}\n`);
@@ -679,7 +912,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === fs.realpathSync(proces
       // shell on the box (Render's Shell tab, fly ssh console): that access is the root of trust.
       const pub = publicUrl();
       const store = stateStore(gatewayDir());
-      store.save({ ...store.load(), passkeys: [], sessions: [] });
+      store.save({ ...store.load(), passkeys: [], sessions: [], pushSubs: [] });
       process.stdout.write(`every passkey and session is forgotten. Claim the box again: ${claimUrl(pub, newClaim(store))}\n`);
     } else {
       process.stderr.write('usage: node gateway.mjs [serve | reclaim]\n');

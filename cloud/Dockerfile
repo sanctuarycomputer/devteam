@@ -5,8 +5,8 @@
 # workers run), and each repo's dashboard on a subdomain of its own. What lasts lives on /data.
 #
 # It needs a name and a wildcard under it, e.g. box.example.com and *.box.example.com: each
-# dashboard keeps an origin of its own (4321.box.example.com), as on a laptop, and signing in and
-# the terminal have theirs (auth.box.example.com, term.box.example.com).
+# dashboard keeps an origin of its own (4321.box.example.com), as on a laptop, and the terminal has
+# its own too (term.box.example.com). Signing in is at box.example.com/auth.
 #
 # Render: New > Web Service > this repo (or a fork), Language: Docker, Dockerfile path:
 #   cloud/Dockerfile, build context: the repo root. Instance: Pro (4 GB) or larger; a free one
@@ -18,7 +18,7 @@
 #   CNAMEs; remove any AAAA records). Best on a domain used for nothing else, or if Render won't
 #   take a wildcard under a subdomain: example.com and *.example.com. The *.onrender.com address is refused:
 #   the box answers only on its own names. Then deploy: the log prints the claim link,
-#   https://auth.box.example.com/auth/claim#<token>, good for a day (after that, a restart prints a new one).
+#   https://box.example.com/auth/claim#<token>, good for a day (after that, a restart prints a new one).
 # fly.io: fly launch --no-deploy --dockerfile cloud/Dockerfile --internal-port 8080; in fly.toml
 #   set auto_stop_machines = "off", min_machines_running = 1, [env] DEVTEAM_PUBLIC_URL, and
 #   [mounts] source = "data", destination = "/data"; fly volumes create data; fly certs add for
