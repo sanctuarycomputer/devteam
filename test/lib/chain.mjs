@@ -63,6 +63,7 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     assert.match(fs.readFileSync(path.join(repo, '.gitignore'), 'utf8'), /docs\/devteam\/run\//);
     assert.match(fs.readFileSync(path.join(repo, 'AGENTS.md'), 'utf8'), /process\/supervisor\.md/, 'AGENTS.md routes agents to their doc');
     assert.match(fs.readFileSync(path.join(repo, 'CLAUDE.md'), 'utf8'), /@AGENTS\.md/, 'CLAUDE.md imports AGENTS.md');
+    assert.equal(json(must(['settings'])).upstream_sync, 'adopt', 'a new project adopts verbatim upstream releases without asking, from the start');
     git(['add', '-A']);
     git(['commit', '-qm', 'init']);
     git(['push', '-q', 'origin', 'main']);
@@ -1211,7 +1212,21 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     git(['commit', '-qam', 'sync'], wt('sync'));
     git(['push', '-q', 'origin', 'chore-devteam-sync-v0-3-0'], wt('sync'));
     const args = ['merge', '--chore', 'devteam-sync-v0-3-0', '--dry-run', '--title', 'chore-devteam-sync-v0-3-0: adopt', '--body-file', body];
-    assert.match(dt(args, { role: 'sup' }).out, /outside project\//, 'no standing rule yet: the owner answers each sync');
+    // init wrote upstream_sync "adopt": a verbatim sync needs no question from the start
+    assert.match(must(args, { role: 'sup' }), /match upstream v0\.3\.0 exactly; approved by settings\.upstream_sync "adopt"/);
+    // a sync PR can't grant itself the setting: it is read from main, and changing it is the owner's
+    landSettings((txt) => txt.replace('"upstream_sync": "adopt"', '"upstream_sync": "ask"'));
+    git(['merge', '-q', '--no-edit', 'origin/main'], wt('sync'));
+    const sf0 = path.join(wt('sync'), 'docs/devteam/project/settings.md');
+    fs.writeFileSync(sf0, fs.readFileSync(sf0, 'utf8').replace('"upstream_sync": "ask"', '"upstream_sync": "adopt"'));
+    git(['commit', '-qam', 'grant itself'], wt('sync'));
+    git(['push', '-q', 'origin', 'chore-devteam-sync-v0-3-0'], wt('sync'));
+    const self = dt(args, { role: 'sup' });
+    assert.match(self.out + self.err, /upstream_sync \(governance-edit\)/, 'changing upstream_sync needs the owner');
+    assert.match(self.out, /outside project\//, "the PR's own setting approves nothing");
+    git(['reset', '-q', '--hard', 'HEAD~1'], wt('sync'));
+    git(['push', '-q', '--force', 'origin', 'chore-devteam-sync-v0-3-0'], wt('sync'));
+    assert.match(dt(args, { role: 'sup' }).out, /outside project\//, 'with "ask" and no standing rule: the owner answers each sync');
     // a rule the supervisor wrote and accepted itself doesn't count, only the owner's
     const Ks = must(['knowledge', 'add', '--kind', 'preference', '--statement', 'adopt upstream', '--scope', 'chore:devteam-sync'], { role: 'sup' });
     must(['knowledge', 'set', Ks, '--status', 'accepted'], { role: 'sup' });

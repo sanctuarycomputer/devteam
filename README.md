@@ -162,7 +162,7 @@ Setting up a fleet needs none of this, and a project never copies it: `cloud/` s
 
 ## Upgrading a project
 
-`settings.upstream_base` records the release a project materialized from. On its improvement loop the project's supervisor lists newer releases, reads each release's What, Why and Migration, and asks the owner per release whether to adopt, adapt or skip each change (`process/supervisor.md` §9). Changes land as a `chore-devteam-sync-<tag>` PR that never touches `project/` or `run/`. Improvements a project makes to the kit that other projects would want come back here as PRs (`upstream-pr` on the trust ladder), written generically, with nothing from `project/` or `run/`.
+`settings.upstream_base` records the release a project materialized from. On its improvement loop the project's supervisor lists newer releases, reads each release's What, Why and Migration, and adopts it: `init` writes `"upstream_sync": "adopt"`, so a release copied verbatim merges without asking the owner from the moment a project adopts devteam, and only an adaptation, a skip or a Migration step that needs the owner is asked. A project set to `"ask"` (the default where the setting is absent, as in projects adopted before it) asks per release, or follows a standing rule the owner scoped `chore:devteam-sync` (`process/supervisor.md` §9). `upstream_sync` is the owner's to change (`governance-edit`). Changes land as a `chore-devteam-sync-<tag>` PR that never touches `project/` or `run/`. Improvements a project makes to the kit that other projects would want come back here as PRs (`upstream-pr` on the trust ladder), written generically, with nothing from `project/` or `run/`.
 
 ## Contributing
 
