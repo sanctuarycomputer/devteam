@@ -7765,9 +7765,9 @@ function replacePaneProcess(target, wt) {
   const pid = Number(sh('tmux', ['display-message', '-p', '-t', target, '#{pane_pid}']));
   if (!Number.isInteger(pid) || pid <= 1) die(`could not read the process of ${target}: left as it was`);
   const pids = [pid, ...(sh('pgrep', ['-P', String(pid)]) ?? '').split('\n').map(Number).filter((p) => Number.isInteger(p) && p > 1)];
-  // a shell, not the pane's first command (respawn-pane's default), which may be the agent itself
+  // a login shell, as a new window gets, not the pane's first command (respawn-pane's default), which may be the agent itself
   const shell = sh('tmux', ['show-options', '-gv', 'default-shell'])?.trim() || process.env.SHELL || '/bin/sh';
-  if (!tmux(['respawn-pane', '-k', '-c', wt, '-t', target, shell])) die(`could not replace the process in ${target}`);
+  if (!tmux(['respawn-pane', '-k', '-c', wt, '-t', target, `${shell} -l`])) die(`could not replace the process in ${target}`);
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
   for (const p of pids) {
     try { process.kill(p, 0); process.kill(p, 'SIGTERM'); } catch {}
@@ -8593,7 +8593,8 @@ function makeSession(role) {
   const shown = `${session}:${name}`;
   const env = `export DEVTEAM_HOME=${shq(mainRoot)} DEVTEAM_RUN='${runDir}' DEVTEAM_ROLE='${role}' ${role === 'worker' ? `DEVTEAM_TICKET='${id}'` : `DEVTEAM_FEATURE='${id}'`}`;
   if (replaceAgent) {
-    if (!paneStoppedAtLimit(target)) die(`--replace-agent: ${shown} no longer shows a limit stop; left as it is`);
+    // worktree_setup can take minutes: the owner may have quit the agent and started something since
+    if (resolvePane(target).problem || !paneStoppedAtLimit(target)) die(`--replace-agent: ${shown} no longer shows a limit stop; left as it is`);
     replacePaneProcess(target, wt);
   }
   // Past the replacement nothing is left running there, so a failure has to surface, not log success.
