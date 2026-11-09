@@ -36,6 +36,8 @@
   /* as the dashboard's nav shows its Inbox count */
   .badge { font-size: 11px; color: var(--red-fg); font-variant-numeric: tabular-nums; }
   #notify { flex: 0 0 auto; padding-bottom: 7px; color: var(--muted); font-size: 12px; }
+  #box-links { flex: 0 0 auto; padding-bottom: 7px; font-size: 12px; }
+  #box-links a { color: var(--fg-2); }
   #notify button { font: inherit; color: var(--fg-2); background: none; border: 1px solid var(--line-2); border-radius: 6px; padding: 2px 8px; cursor: pointer; }
   main { flex: 1 1 auto; position: relative; }
   iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: var(--bg); }
@@ -47,6 +49,7 @@
 <header>
   <nav id="tabs" role="tablist" aria-label="devteam instances"></nav>
   <span id="notify"></span>
+  <span id="box-links" hidden></span>
 </header>
 <main id="frames"><p id="empty">Looking for devteam dashboards on this machine…</p></main>
 <script>
@@ -76,15 +79,45 @@ function keyOf(it) {
   const twins = [...items.values()].filter((o) => o.x.name === it.x.name).length > 1;
   return twins ? `${it.x.name}-${hex6.get(it.x.root)}` : String(it.x.name);
 }
-const urlOf = (x) => `http://127.0.0.1:${Number(x.port)}/`;
+// Each dashboard is on its own address: on the machine, its own port on 127.0.0.1. On a cloud box
+// behind a devteam gateway (cloud/gateway.mjs), box.json says where instead (its own subdomain, so
+// still an origin of its own), and adds the box's terminal as the first tab.
+let box = null; // { terminal, instance } when the gateway answers box.json
+const urlOf = (x) => (box ? box.instance.replace('{port}', String(Number(x.port))) : `http://127.0.0.1:${Number(x.port)}/`);
+const TERM = '\u0000terminal';
+let term = null; // { tab, frame }
 const byRoot = (a, b) => String(a).localeCompare(String(b));
 const wanted = () => { try { return decodeURIComponent(location.hash.slice(1)); } catch { return ''; } };
 
+function selectTerminal() {
+  if (!term) return;
+  selected = TERM;
+  history.replaceState(null, '', '#terminal');
+  if (!term.frame) {
+    term.frame = document.createElement('iframe');
+    term.frame.title = 'Terminal';
+    term.frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals allow-pointer-lock');
+    term.frame.setAttribute('allow', 'clipboard-read; clipboard-write');
+    term.frame.src = box.terminal;
+    framesEl.append(term.frame);
+  }
+  term.tab.setAttribute('aria-selected', 'true');
+  term.tab.tabIndex = 0;
+  term.frame.hidden = false;
+  for (const o of items.values()) {
+    o.tab.setAttribute('aria-selected', 'false');
+    o.tab.tabIndex = -1;
+    if (o.frame) o.frame.hidden = true;
+  }
+  term.frame.focus();
+}
 function select(root) {
+  if (root === TERM) return selectTerminal();
   const it = items.get(root);
   if (!it) return;
   selected = root;
   history.replaceState(null, '', `#${encodeURIComponent(keyOf(it))}`);
+  if (term) { term.tab.setAttribute('aria-selected', 'false'); term.tab.tabIndex = -1; if (term.frame) term.frame.hidden = true; }
   if (!it.frame) {
     it.frame = document.createElement('iframe');
     it.frame.title = String(it.x.name);
@@ -141,7 +174,12 @@ function notifyControl() {
 
 async function draw() {
   let data;
-  try { data = await (await fetch('instances.json', { cache: 'no-store' })).json(); } catch { return; }
+  try {
+    const r = await fetch('instances.json', { cache: 'no-store' });
+    // behind a gateway, a session that ended: load the page again, which signs in first
+    if (r.status === 401) return location.reload();
+    data = await r.json();
+  } catch { return; }
   const now = Date.now();
   const seen = new Set();
   // One tab per root: if two answers claim one root (a second dashboard of one repo, or something
@@ -189,31 +227,62 @@ async function draw() {
   }
   // tabs in the hub's order (by root)
   for (const root of [...items.keys()].sort(byRoot)) tabsEl.append(items.get(root).tab);
+  if (term) tabsEl.prepend(term.tab);
   for (const it of items.values()) paintTab(it);
-  empty.hidden = items.size > 0;
+  empty.hidden = items.size > 0 || Boolean(term);
   if (!items.size) empty.textContent = 'No devteam dashboards are running on this machine.';
-  if (!selected || !items.has(selected)) {
+  if (!selected || (selected !== TERM && !items.has(selected))) {
     const want = wanted();
     const ordered = [...items.values()].sort((a, b) => byRoot(a.x.root, b.x.root));
-    const pick = ordered.find((it) => keyOf(it) === want) ?? ordered.find((it) => it.x.inbox > 0) ?? ordered[0];
+    // on a box the terminal is the first tab, and chosen unless the address names an instance or
+    // one has something in its Inbox
+    const pick = ordered.find((it) => keyOf(it) === want) ?? (term && want === 'terminal' ? null : ordered.find((it) => it.x.inbox > 0)) ?? (term ? null : ordered[0]);
     if (pick) select(pick.x.root);
+    else if (term) selectTerminal();
   }
   firstDraw = false;
 }
 window.addEventListener('hashchange', () => {
   const want = wanted();
+  if (want === 'terminal' && term) return void (selected !== TERM && selectTerminal());
   const it = [...items.values()].find((o) => keyOf(o) === want);
   if (it && it.x.root !== selected) select(it.x.root);
 });
 tabsEl.addEventListener('keydown', (e) => {
   if (!['ArrowLeft', 'ArrowRight'].includes(e.key)) return;
-  const roots = [...items.keys()].sort(byRoot);
+  const roots = [...(term ? [TERM] : []), ...[...items.keys()].sort(byRoot)];
   const i = roots.indexOf(selected);
   const next = roots[(i + (e.key === 'ArrowRight' ? 1 : roots.length - 1)) % roots.length];
-  if (next) { select(next); items.get(next).tab.focus(); }
+  if (next) { select(next); (next === TERM ? term : items.get(next)).tab.focus(); }
 });
+// The hub on a laptop has no box.json (404); a devteam gateway answers it.
+async function findBox() {
+  try {
+    const r = await fetch('box.json', { cache: 'no-store' });
+    const b = r.ok ? await r.json() : null;
+    const secure = (u) => { try { return new URL(u.replace('{port}', '1')).protocol === 'https:'; } catch { return false; } };
+    if (b?.box !== 1 || typeof b.terminal !== 'string' || !secure(b.terminal) || typeof b.instance !== 'string' || !b.instance.includes('{port}') || !secure(b.instance)) return;
+    box = { terminal: b.terminal, instance: b.instance };
+    // signing in and passkeys are on the gateway's own name, never in the hub's
+    if (typeof b.passkeys === 'string' && secure(b.passkeys)) {
+      const a = document.createElement('a');
+      a.href = b.passkeys;
+      a.textContent = 'Passkeys';
+      $('box-links').append(a);
+      $('box-links').hidden = false;
+    }
+    const tab = document.createElement('button');
+    tab.className = 'tab';
+    tab.setAttribute('role', 'tab');
+    tab.textContent = 'Terminal';
+    tab.title = 'The box\'s tmux sessions: supervisors, workers, logins';
+    tab.onclick = selectTerminal;
+    tabsEl.prepend(tab);
+    term = { tab, frame: null };
+  } catch {}
+}
 notifyControl();
-draw();
+findBox().then(draw);
 setInterval(draw, 10000);
 </script>
 </body>
