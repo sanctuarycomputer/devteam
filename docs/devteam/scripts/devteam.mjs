@@ -2327,7 +2327,9 @@ function cmdValidate() {
     }
     // A feature that has reached this checkout is landed (or being planned here): its design and
     // graph reviews must say APPROVE. On a plan/<feature> branch that is a warning until review.
-    {
+    // A feature all of whose tickets are superseded has no work left for a review to approve.
+    const own = [...ts.values()].filter((t) => t.feature === fid);
+    if (!own.length || own.some(isActive)) {
       const sink = onPlanBranch() && !flags.strict ? warnings : errors;
       const reviews = featureReviews(fid);
       const designSlug = f.design ? path.basename(f.design, '.md') : null;
