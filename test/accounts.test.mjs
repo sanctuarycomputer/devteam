@@ -18,7 +18,9 @@ function fixture(name) {
   // a relaunch runs this in the pane, as it would claude --continue: it records which session came back
   const launched = path.join(base, 'launched.log');
   const relaunch = path.join(base, 'relaunch.cjs');
-  write(relaunch, `require('fs').appendFileSync(${JSON.stringify(launched)}, require('path').basename(process.cwd()) + '\\n'); setInterval(() => {}, 1000);`);
+  // a session that stops again once relaunched shows the menu, when the test has asked for that
+  const again = path.join(base, 'stops-again');
+  write(relaunch, `const fs = require('fs'); fs.appendFileSync(${JSON.stringify(launched)}, require('path').basename(process.cwd()) + '\\n'); if (fs.existsSync(${JSON.stringify(again)})) console.log(${JSON.stringify(MENU.join('\n'))}); setInterval(() => {}, 1000);`);
   const sf = path.join(root, 'docs/devteam/project/settings.md');
   fs.writeFileSync(sf, fs.readFileSync(sf, 'utf8').replace('"project":', `"resume_command": ${JSON.stringify(`${process.execPath} ${relaunch}`)},\n  "project":`));
   execFileSync('sh', ['-c', 'git add -A && git -c user.email=t@t -c user.name=t commit -qm init'], { cwd: root });
@@ -36,24 +38,37 @@ function fixture(name) {
   const called = () => (fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8').trim().split('\n').filter(Boolean) : []);
   const session = run(['settings', '--get', 'tmux_session']).stdout.trim();
   // A stand-in agent in a real tmux pane: it shows what it's given and records every key.
-  const agent = (window, shown, cwd = null) => {
+  const agent = (window, shown, cwd = null, more = '') => {
     const wt = cwd ?? path.join(root, '.worktrees', window);
     fs.mkdirSync(wt, { recursive: true });
     const keys = path.join(base, `${window}.keys`);
     const prog = path.join(base, `${window}.cjs`);
     write(keys, '');
-    write(prog, `const fs=require('fs');const shown=${JSON.stringify(shown)};console.log(shown.join('\\n'));process.stdin.setRawMode(true);process.stdin.on('data',(d)=>fs.appendFileSync(${JSON.stringify(keys)},d));`);
+    write(prog, `const fs=require('fs');const shown=${JSON.stringify(shown)};console.log(shown.join('\\n'));process.stdin.setRawMode(true);process.stdin.on('data',(d)=>fs.appendFileSync(${JSON.stringify(keys)},d));${more}`);
     const cmd = [process.execPath, prog].join(' ');
     // as the kit does: the session first, then a window started in the worktree
     if (spawnSync('tmux', ['has-session', '-t', `=${session}`]).status !== 0) execFileSync('tmux', ['new-session', '-d', '-s', session, '-n', 'dashboard', '-x', '120', '-y', '30', 'sleep 600']);
     execFileSync('tmux', ['new-window', '-d', '-t', `=${session}:`, '-n', window, '-c', wt, cmd]);
     return { keys: () => fs.readFileSync(keys, 'utf8'), shows: () => spawnSync('tmux', ['capture-pane', '-p', '-t', `=${session}:${window}`], { encoding: 'utf8' }).stdout };
   };
+  // Lines of the log, as the kit writes them: what proves a session is one the supervisor launched.
+  let lines = 0;
+  const logLine = (by, body) => { fs.mkdirSync(path.join(root, 'docs/devteam/run/log'), { recursive: true }); fs.appendFileSync(path.join(root, `docs/devteam/run/log/${by === 'supervisor' ? 'supervisor-2026-11' : by}.jsonl`), `${JSON.stringify({ v: 1, id: `${body.type === 'act' ? 'a' : 'h'}-20261101-${String(++lines).padStart(9, '0')}-${by}`, op: 'new', at: '2026-11-01T00:00:00.000Z', by, ...body })}\n`); };
+  const launchAct = (role, name) => logLine('supervisor', { type: 'act', class: 'worker-slots', what: `made ${role} ${name} in ${session}:${name}`, refs: [], reversible: true });
   // a planner's session: the kit relaunches it as planner <feature> --resume
-  const planner = (feature, shown) => { execFileSync('git', ['branch', `plan/${feature}`], { cwd: root }); return agent(`plan-${feature}`, shown); };
+  const planner = (feature, shown, { launched = true, more = '' } = {}) => { execFileSync('git', ['branch', `plan/${feature}`], { cwd: root }); if (launched) launchAct('planner', `plan-${feature}`); return agent(`plan-${feature}`, shown, null, more); };
+  // a worker's session: the ticket exists; started and launched are what the kit would have logged
+  const worker = (id, shown, { started = true, launched = true } = {}) => {
+    logLine('supervisor', { type: 'ticket', id, title: id, feature: 'demo' });
+    if (started) logLine(id, { type: 'phase', from: null, to: 'starting' });
+    if (launched) launchAct('worker', id);
+    return agent(id, shown);
+  };
   const relaunched = () => (fs.existsSync(launched) ? fs.readFileSync(launched, 'utf8').trim().split('\n').filter(Boolean) : []);
   const done = () => { spawnSync('tmux', ['kill-session', '-t', `=${session}`]); fs.rmSync(base, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); }; // a tick the dashboard started can outlive it by a moment
-  return { base, root, env, run, tick, state, called, set, agent, planner, relaunched, session, done };
+  const restartsFile = path.join(root, 'docs/devteam/run/accounts-resumed.json');
+  const stopsAgain = () => write(again, '');
+  return { base, root, env, run, tick, state, called, set, agent, planner, worker, launchAct, logLine, relaunched, session, restartsFile, stopsAgain, done };
 }
 const row = (usage, more = {}) => ({ number: 1, email: 'a@x', usageStatus: 'ok', usage, ...more });
 const findings = (F) => json(F.run(['metrics', '--json']).stdout).findings;
@@ -119,7 +134,11 @@ test('restarting: a session at the limit menu is relaunched on the active accoun
     F.tick('--rotate');
     assert.deepEqual(F.relaunched(), [], 'not in the tick that switched');
     F.set(ROOM);
-    assert.match(F.tick(), /restarted plan-menu/);
+    // as under a dashboard started in tmux: the relaunch must stay on this server, and not take a pane
+    const server = execFileSync('tmux', ['display-message', '-p', '-t', `=${F.session}:`, '#{socket_path}'], { encoding: 'utf8' }).trim();
+    const under = F.run(['accounts-tick'], { TMUX: `${server},0,0`, TMUX_PANE: '%77' });
+    assert.equal(under.status, 0, under.stderr);
+    assert.match(under.stdout, /restarted plan-menu/);
     await until(() => F.relaunched().includes('plan-menu'), 'the session relaunched in its worktree');
     assert.equal(a.keys(), '', 'not a key to the old process: Enter or a digit on the menu could spend money');
     assert.deepEqual(F.state().resumed, ['plan-menu']);
@@ -147,6 +166,139 @@ test('restarting: a banner alone; never another prompt, a busy pane, a parked se
     F.tick();
     assert.deepEqual(F.relaunched(), ['plan-banner'], 'nothing else, and once per 10 minutes');
     for (const p of [banner, prompt, busy, parked, notes]) assert.equal(p.keys(), '');
+  } finally { F.done(); }
+});
+
+test('restarting: a refusal or a failing worktree_setup leaves the old session running', { skip: !hasTmux }, async () => {
+  const F = fixture('refuse');
+  try {
+    const a = F.planner('stays', MENU);
+    await until(() => a.shows().includes('Esc to cancel'), 'the menu on screen');
+    const sf = path.join(F.root, 'docs/devteam/project/settings.md');
+    fs.writeFileSync(sf, fs.readFileSync(sf, 'utf8').replace('"project":', '"worktree_setup": "exit 1",\n  "project":'));
+    execFileSync('sh', ['-c', 'git add -A && git -c user.email=t@t -c user.name=t commit -qm setup'], { cwd: F.root });
+    F.tick();
+    const out = F.tick();
+    assert.match(out, /could not restart plan-stays/);
+    assert.doesNotMatch(out, /restarted/);
+    assert.equal(a.keys(), '', 'not a key to the old process');
+    assert.deepEqual(F.relaunched(), []);
+    assert.match(a.shows(), /Esc to cancel/, 'still on the menu: the process was never replaced');
+    assert.ok(json(F.run(['log', '--json']).stdout).some((o) => o.kind === 'limit-restarted' && /could not be restarted/.test(o.detail)));
+    assert.match(F.run(['planner', 'stays', '--resume', '--replace-agent'], { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'x-01-a' }).stderr, /the supervisor does this/, 'an agent cannot ask for the replacement');
+    assert.match(a.shows(), /Esc to cancel/);
+  } finally { F.done(); }
+});
+
+test('restarting: only a session the supervisor launched, in its own worktree, in one pane, with no background shells', { skip: !hasTmux }, async () => {
+  const F = fixture('prove');
+  try {
+    const unstarted = F.worker('demo-01-unstarted', [MENU[0], '> '], { started: false });
+    const noAct = F.planner('noact', [MENU[0], '> '], { launched: false });
+    F.launchAct('planner', 'plan-elsewhere');
+    const elsewhere = F.agent('plan-elsewhere', [MENU[0], '> '], path.join(F.root, '.worktrees', 'other'));
+    const split = F.planner('split', [MENU[0], '> ']);
+    const shells = F.planner('shells', [MENU[0], '⏵⏵ bypass permissions on · 2 background shells', '> ']);
+    const started = F.worker('demo-02-started', [MENU[0], '> ']);
+    const all = [unstarted, noAct, elsewhere, split, shells, started];
+    await until(() => all.every((p) => p.shows().includes('limit')), 'the panes drawn');
+    execFileSync('tmux', ['split-window', '-d', '-t', `=${F.session}:plan-split`, 'sleep 600']);
+    F.tick();
+    assert.match(F.tick(), /restarted demo-02-started/, 'a worker the supervisor launched, as the control');
+    await until(() => F.relaunched().includes('demo-02-started'), 'the started worker relaunched');
+    F.tick();
+    assert.deepEqual(F.relaunched(), ['demo-02-started'], 'nothing else');
+    for (const p of [unstarted, noAct, elsewhere, split, shells]) { assert.equal(p.keys(), ''); assert.match(p.shows(), /limit/); }
+    assert.ok(!json(F.run(['log', '--json']).stdout).some((o) => o.type === 'act' && /^resumed .*(unstarted|noact|elsewhere|split|shells)/.test(o.what)));
+  } finally { F.done(); }
+});
+
+test('restarting: a process that ignores the hangup gets a SIGTERM, and only it', { skip: !hasTmux }, async () => {
+  const F = fixture('term');
+  try {
+    const termed = path.join(F.base, 'termed');
+    // the stand-in holds on past the hangup, and says so when told to stop
+    const a = F.planner('hup', MENU, { more: `process.on('SIGHUP',()=>{});process.stdin.on('error',()=>{});setInterval(()=>{},1000);process.on('SIGTERM',()=>{fs.writeFileSync(${JSON.stringify(termed)},'x');process.exit(0);});` });
+    await until(() => a.shows().includes('Esc to cancel'), 'the menu on screen');
+    F.tick();
+    assert.match(F.tick(), /restarted plan-hup/);
+    await until(() => fs.existsSync(termed), 'the SIGTERM');
+    await until(() => F.relaunched().includes('plan-hup'), 'the relaunch');
+    assert.equal(a.keys(), '');
+  } finally { F.done(); }
+});
+
+test('restarting: 3 times in 6 hours at most, then left alone and reported, until the attempts age out', { skip: !hasTmux }, async () => {
+  const F = fixture('cap');
+  const rewind = (ms) => write(F.restartsFile, JSON.stringify(Object.fromEntries(Object.entries(json(fs.readFileSync(F.restartsFile, 'utf8'))).map(([k, v]) => [k, v.map((t) => t - ms)]))));
+  const menu = (n) => until(() => F.relaunched().length === n && spawnSync('tmux', ['capture-pane', '-p', '-t', `=${F.session}:plan-cap`], { encoding: 'utf8' }).stdout.includes('Esc to cancel'), `relaunch ${n} stopped again`);
+  try {
+    F.stopsAgain();
+    const a = F.planner('cap', MENU);
+    await until(() => a.shows().includes('Esc to cancel'), 'the menu');
+    F.tick();
+    assert.match(F.tick(), /restarted plan-cap/);
+    await menu(1);
+    assert.doesNotMatch(F.tick(), /restarted/, 'once in 10 minutes');
+    assert.deepEqual(F.state().restart_gave_up, [], "waiting isn't giving up");
+    rewind(15 * 60000);
+    assert.match(F.tick(), /restarted plan-cap/, 'a restarted session still counts as launched in its worktree');
+    await menu(2);
+    rewind(15 * 60000);
+    assert.match(F.tick(), /restarted plan-cap/);
+    await menu(3);
+    rewind(15 * 60000);
+    assert.doesNotMatch(F.tick(), /restarted/, 'three in 6 hours is the most');
+    assert.deepEqual(F.state().restart_gave_up, ['plan-cap']);
+    assert.deepEqual(F.relaunched().length, 3);
+    const f = findings(F).find((x) => x.kind === 'restart-gave-up');
+    assert.equal(f?.severity, 'high');
+    assert.equal(f.subject, 'plan-cap');
+    assert.match(f.suggestion, /capture-pane/, 'tells the owner how to look at it');
+    // the oldest ages out: it recovers without a person
+    const times = json(fs.readFileSync(F.restartsFile, 'utf8'))['plan-cap'];
+    write(F.restartsFile, JSON.stringify({ 'plan-cap': [Date.now() - 7 * 3600000, times[1], times[2]] }));
+    assert.match(F.tick(), /restarted plan-cap/);
+    assert.deepEqual(F.state().restart_gave_up, []);
+    assert.ok(!findings(F).some((x) => x.kind === 'restart-gave-up'));
+    // a mangled list reads as none, and doesn't break metrics
+    const file = path.join(F.root, 'docs/devteam/run/accounts.json');
+    write(file, JSON.stringify({ at: new Date().toISOString(), restart_gave_up: 5 }));
+    assert.equal(F.run(['metrics', '--json']).status, 0);
+  } finally { F.done(); }
+});
+
+test("the restart record is untrusted, and a crash's lock can't wedge it", { skip: !hasTmux }, async () => {
+  const F = fixture('record');
+  const lock = `${F.restartsFile}.lock`;
+  const again = async (n) => { await until(() => F.relaunched().length === n, `relaunch ${n}`); await until(() => spawnSync('tmux', ['capture-pane', '-p', '-t', `=${F.session}:plan-r`], { encoding: 'utf8' }).stdout.includes('Esc to cancel'), 'the menu again'); };
+  try {
+    F.stopsAgain();
+    const a = F.planner('r', MENU);
+    await until(() => a.shows().includes('Esc to cancel'), 'the menu');
+    F.tick();
+    // the old form: a lone number
+    write(F.restartsFile, JSON.stringify({ 'plan-r': Date.now() - 1000 }));
+    assert.doesNotMatch(F.tick(), /restarted/, 'the old number form still throttles');
+    write(F.restartsFile, JSON.stringify({ 'plan-r': Date.now() + 3600000 }));
+    assert.match(F.tick(), /restarted plan-r/, 'a time in the future is ignored');
+    await again(1);
+    for (const junk of ['{"plan-r":[null,"x",{},-1]}', '[1,2]', 'not json', '"str"']) {
+      write(F.restartsFile, junk);
+      assert.match(F.tick(), /restarted plan-r/, junk);
+      await again(F.relaunched().length);
+    }
+    assert.ok(Array.isArray(json(fs.readFileSync(F.restartsFile, 'utf8'))['plan-r']));
+    // a lock left by a crash, old or dated ahead, doesn't hold the tick
+    for (const when of [Date.now() - 60000, Date.now() + 3600000]) {
+      write(F.restartsFile, '{}');
+      fs.mkdirSync(lock, { recursive: true });
+      fs.utimesSync(lock, new Date(when), new Date(when));
+      const n = F.relaunched().length;
+      assert.match(F.tick(), /restarted plan-r/);
+      await until(() => F.relaunched().length === n + 1, 'relaunched despite the lock');
+      await until(() => !fs.existsSync(lock), 'the lock cleared');
+    }
   } finally { F.done(); }
 });
 
@@ -220,11 +372,13 @@ test('restarting: never on text that only reads like a limit, another harness, a
       ["⏺ You've hit your weekly limit · resets Nov 12, the banner reads", '> '],
       ["■ You've hit your usage limit. Try again in 2h 5m.", '> '],
       [MENU[0], "⏺ Carried on after that: here's the summary", '> '],
+      ["  You've hit your weekly limit · resets Nov 12, the banner read, so I stopped there.", '> '],
     ].map((shown, i) => F.planner(`text${i}`, shown));
     const done = F.planner('done', [MENU[0], '> ']);
     const scoped = F.planner('scoped', [MENU[0], '> ']);
     const later = F.planner('later', ['❯ 1. Upgrade your plan', '  2. Stop and wait for limit to reset', 'Enter to confirm · Esc to cancel']);
     const tasks = F.planner('tasks', [MENU[0], '◻ one', '◻ two', '◻ three', '◻ four', '╭──╮', '│ > │', '╰──╯', '⏵⏵ bypass permissions on']);
+    const indented = F.planner('indented', [`  ⎿  ${MENU[0]}`, '> ']);
     await until(() => [...panes, done, scoped].every((p) => p.shows().includes('>')), 'the panes drawn');
     await until(() => later.shows().includes('Esc to cancel') && tasks.shows().includes('bypass'), 'the menu and the task list drawn');
     fs.mkdirSync(path.join(F.root, 'docs/devteam/run/log'), { recursive: true });
@@ -234,13 +388,16 @@ test('restarting: never on text that only reads like a limit, another harness, a
     F.tick();
     assert.deepEqual(F.relaunched(), [], 'a full per-model window is not room');
     F.set(ROOM);
-    const out = F.tick();
+    const first = F.tick();
+    assert.equal(first.match(/restarted/g)?.length, 1, 'one relaunch a tick');
+    const out = [first, F.tick(), F.tick(), F.tick()].join('');
     assert.match(out, /restarted plan-scoped/, 'the pane the others are measured against');
     assert.match(out, /restarted plan-later/, 'the menu in any position');
     assert.match(out, /restarted plan-tasks/, 'a banner over a task list and input box');
-    await until(() => ['plan-scoped', 'plan-later', 'plan-tasks'].every((n) => F.relaunched().includes(n)), 'the three relaunched');
-    assert.deepEqual(F.relaunched().sort(), ['plan-later', 'plan-scoped', 'plan-tasks'], 'nothing else');
-    for (const p of [...panes, done, scoped, later, tasks]) assert.equal(p.keys(), '');
+    assert.match(out, /restarted plan-indented/, "⎿ at any indent; a bare banner only at column 0");
+    await until(() => ['plan-scoped', 'plan-later', 'plan-tasks', 'plan-indented'].every((n) => F.relaunched().includes(n)), 'the four relaunched');
+    assert.deepEqual(F.relaunched().sort(), ['plan-indented', 'plan-later', 'plan-scoped', 'plan-tasks'], 'nothing else');
+    for (const p of [...panes, done, scoped, later, tasks, indented]) assert.equal(p.keys(), '');
   } finally { F.done(); }
 });
 
