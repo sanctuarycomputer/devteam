@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 // devteam's gateway: the one public listener on a cloud box. It lets in only the owner, by a
 // passkey registered when the box was claimed, and passes the owner through to the machine's hub
-// and a web terminal on the box's tmux server (on the box's own address, say box.example.com), and
-// to each instance's dashboard on a subdomain of its own (4321.box.example.com). So every dashboard
-// keeps an origin of its own, as on a laptop, and nothing a dashboard runs can reach the terminal.
-// Signing in and passkeys live on one more name, auth.box.example.com, that serves nothing but the
-// gateway's own pages: the hub and the terminal are bytes the box's user (every agent) can change,
-// and no page they serve may add a passkey.
+// (box.example.com), a web terminal on the box's tmux server (term.box.example.com), and each
+// instance's dashboard on a subdomain of its own (4321.box.example.com). Signing in and passkeys
+// are on auth.box.example.com. Every agent runs as the box's user and can change files and take
+// ports, so the box, term and auth names serve only bytes the gateway holds: its own copy of the
+// hub page and of ttyd's page, and its own pages. Only the hub's JSON list and the terminal's
+// socket come from behind it. An agent's page can exist only on an instance's name.
 // Behind it the kit runs unchanged: every proxied request looks to the kit like a local browser's,
 // and the kit's loopback origins in its response headers are mapped to the public ones.
 // Node only, no dependencies. Usage: node gateway.mjs [serve | reclaim]
@@ -24,6 +24,9 @@ const PORT_BASE = Number(env.DEVTEAM_PORT_BASE ?? 4321);
 const BLOCK = Array.from({ length: 25 }, (_, i) => PORT_BASE + i);
 const SESSION_MS = 14 * 24 * 3600 * 1000;
 const CHALLENGE_MS = 5 * 60 * 1000;
+const CLAIM_MS = 24 * 3600 * 1000;
+const CAPABILITY_MS = 12 * 3600 * 1000;
+const here = path.dirname(fileURLToPath(import.meta.url));
 const b64u = (b) => Buffer.from(b).toString('base64url');
 const unb64u = (s) => (typeof s === 'string' && /^[A-Za-z0-9_-]*$/.test(s) ? Buffer.from(s, 'base64url') : null);
 const sha256 = (b) => crypto.createHash('sha256').update(b).digest();
@@ -75,7 +78,7 @@ export function coseToJwk(m) {
   else if (kty === 3 && alg === -257) jwk = { kty: 'RSA', n: bytes(-1), e: bytes(-2) };
   else throw new Error('cose: unsupported key type or algorithm');
   const key = crypto.createPublicKey({ key: jwk, format: 'jwk' });
-  if (kty === 3 && key.asymmetricKeyDetails.modulusLength < 2048) throw new Error('cose: RSA key under 2048 bits');
+  if (kty === 3 && (key.asymmetricKeyDetails.modulusLength < 2048 || jwk.e !== 'AQAB')) throw new Error('cose: RSA key under 2048 bits or with an unusual exponent');
   return { jwk, alg };
 }
 
@@ -114,8 +117,10 @@ function stateStore(dir) {
     if (now !== at || !cache) {
       // only a missing file is a new box: one that can't be read must not read as unclaimed
       let text = null;
-      try { text = fs.readFileSync(file, 'utf8'); } catch (e) { if (e.code !== 'ENOENT') throw e; }
-      cache = text === null ? empty() : { ...empty(), ...JSON.parse(text) };
+      try {
+        try { text = fs.readFileSync(file, 'utf8'); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+        cache = text === null ? empty() : { ...empty(), ...JSON.parse(text) };
+      } catch (e) { cache = null; throw Object.assign(new Error(`the gateway's state can't be read: ${e.message}`), { unreadable: true }); }
       at = now;
     }
     return cache;
@@ -145,10 +150,11 @@ function publicUrl(raw = env.DEVTEAM_PUBLIC_URL) {
 const gatewayDir = () => env.DEVTEAM_GATEWAY_DIR ?? path.join(env.HOME ?? '.', '.devteam-gateway');
 
 const authOrigin = (pub) => { const u = new URL(pub); return `${u.protocol}//auth.${u.host}`; };
+const claimLive = (s) => Boolean(s.claimHash) && (s.claimExpires ?? 0) > Date.now();
 const claimUrl = (pub, token) => `${authOrigin(pub)}/auth/claim#${token}`;
 function newClaim(store) {
   const token = b64u(crypto.randomBytes(32));
-  store.save({ ...store.load(), claimHash: b64u(sha256(token)) });
+  store.save({ ...store.load(), claimHash: b64u(sha256(token)), claimExpires: Date.now() + CLAIM_MS });
   return token;
 }
 
@@ -156,54 +162,81 @@ function newClaim(store) {
 export function createGateway(opts = {}) {
   const PUB = publicUrl(opts.publicUrl);
   const pubUrl = new URL(PUB);
-  const RP_ID = pubUrl.hostname;
+  const NAME = pubUrl.hostname;
   const SECURE = pubUrl.protocol === 'https:';
   const SUFFIX = pubUrl.port ? `:${pubUrl.port}` : '';
-  const instanceOrigin = (port) => `${pubUrl.protocol}//${port}.${RP_ID}${SUFFIX}`;
+  const instanceOrigin = (port) => `${pubUrl.protocol}//${port}.${NAME}${SUFFIX}`;
   const instanceOf = (host) => {
     const m = /^(\d{1,5})\.(.+)$/.exec(String(host ?? ''));
-    const port = m && m[2] === `${RP_ID}${SUFFIX}` && String(Number(m[1])) === m[1] ? Number(m[1]) : null;
+    const port = m && m[2] === `${NAME}${SUFFIX}` && String(Number(m[1])) === m[1] ? Number(m[1]) : null;
     return BLOCK.includes(port) ? port : null;
   };
   const AUTH = authOrigin(PUB);
   const authHost = new URL(AUTH).host;
+  // passkeys belong to the auth name alone: no agent's page, on any other name, can even ask for one
+  const RP_ID = new URL(AUTH).hostname;
+  const TERM = `${pubUrl.protocol}//term.${pubUrl.host}`;
+  const termHost = new URL(TERM).host;
   const COOKIE = 'devteam_session';
   const dir = opts.dir ?? gatewayDir();
   const ttydPort = Number(opts.ttydPort ?? env.DEVTEAM_TTYD_PORT ?? 7681);
   const store = stateStore(dir);
+  const firstFile = (...c) => c.find((f) => f && fs.existsSync(f));
+  const hubPage = fs.readFileSync(firstFile(opts.hubPage, env.DEVTEAM_HUB_PAGE, path.join(here, 'hub.html'), path.join(here, '..', 'docs', 'devteam', 'dashboard', 'hub.html')));
+  const ttydPage = () => fs.readFileSync(opts.ttydPage ?? env.DEVTEAM_TTYD_PAGE ?? path.join(here, 'ttyd.html'));
   const log = opts.log ?? ((m) => process.stdout.write(`gateway: ${m}\n`));
 
   // Unclaimed: the token named in the environment, else one made now and printed once (whoever
   // reads the platform's logs can already open a shell on the box, the root of trust anyway).
-  {
+  try {
     const s = store.load();
     if (!s.passkeys.length) {
       const given = env.DEVTEAM_CLAIM_TOKEN;
-      // a link `reclaim` printed outlives a restart; the environment's token is only the first
-      if (s.claimHash) log(`unclaimed: open the claim link printed earlier (${AUTH}/auth/claim#…), or run devteam-reclaim for a new one`);
-      else if (given && given.length >= 32) { store.save({ ...s, claimHash: b64u(sha256(given)) }); log(`unclaimed: open ${AUTH}/auth/claim#<DEVTEAM_CLAIM_TOKEN> to claim this box with a passkey`); }
-      else { if (given) log('DEVTEAM_CLAIM_TOKEN is shorter than 32 characters; ignored'); log(`unclaimed: open ${claimUrl(PUB, newClaim(store))} to claim this box with a passkey`); }
+      // a link `reclaim` printed outlives a restart, for its day; the environment's token is only the first
+      if (claimLive(s)) log(`unclaimed: open the claim link printed earlier (${AUTH}/auth/claim#…), or run devteam-reclaim for a new one`);
+      else if (given && given.length >= 32) { store.save({ ...s, claimHash: b64u(sha256(given)), claimExpires: Date.now() + CLAIM_MS }); log(`unclaimed: open ${AUTH}/auth/claim#<DEVTEAM_CLAIM_TOKEN> within a day to claim this box with a passkey`); }
+      else { if (given) log('DEVTEAM_CLAIM_TOKEN is shorter than 32 characters; ignored'); log(`unclaimed: open ${claimUrl(PUB, newClaim(store))} within a day to claim this box with a passkey`); }
     }
+  } catch (e) {
+    // never taken for a new box, never overwritten: every request answers 503 until it is mended
+    if (!e.unreadable) throw e;
+    log(e.message);
   }
 
-  // One use each, five minutes, bound to what they were issued for. Anyone may ask for a login
-  // challenge, so those are kept apart, and asking for many evicts only those: at worst a sign-in
-  // in progress has to be tried again.
-  const pools = { login: new Map(), other: new Map() };
-  const poolOf = (purpose) => (purpose === 'login' ? pools.login : pools.other);
+  const secret = crypto.randomBytes(32);
+  const mac = (...parts) => crypto.createHmac('sha256', secret).update(parts.join('|')).digest().subarray(0, 16);
+  // A claim's or an added passkey's challenge: one use, five minutes, bound to what it was issued for.
+  const challenges = new Map();
   const issue = (purpose, extra = {}) => {
     const c = b64u(crypto.randomBytes(32));
-    const pool = poolOf(purpose);
-    pool.set(c, { purpose, expires: Date.now() + CHALLENGE_MS, ...extra });
-    while (pool.size > 100) pool.delete(pool.keys().next().value);
+    challenges.set(c, { purpose, expires: Date.now() + CHALLENGE_MS, ...extra });
+    while (challenges.size > 100) challenges.delete(challenges.keys().next().value);
     return c;
   };
   const redeem = (c, purpose) => {
-    const pool = poolOf(purpose);
-    const x = typeof c === 'string' ? pool.get(c) : null;
+    const x = typeof c === 'string' ? challenges.get(c) : null;
     if (!x) return null;
-    pool.delete(c);
+    challenges.delete(c);
     return x.purpose === purpose && x.expires > Date.now() ? x : null;
+  };
+  // Anyone may ask for a login challenge, so asking stores nothing: each carries its own expiry and
+  // MAC, and only a verified signature spends one, so no flood of requests can evict the owner's.
+  const spent = new Map();
+  const loginChallenge = () => {
+    const head = Buffer.alloc(24);
+    crypto.randomFillSync(head, 0, 16);
+    head.writeBigUInt64BE(BigInt(Date.now() + CHALLENGE_MS), 16);
+    return b64u(Buffer.concat([head, mac('login', head.toString('hex'))]));
+  };
+  const loginChallengeOk = (c) => {
+    const b = typeof c === 'string' ? unb64u(c) : null;
+    if (!b || b.length !== 40 || spent.has(c)) return false;
+    const head = b.subarray(0, 24);
+    return sameBytes(b.subarray(24), mac('login', head.toString('hex'))) && Number(head.readBigUInt64BE(16)) > Date.now();
+  };
+  const spend = (c) => {
+    for (const [k, t] of spent) if (t < Date.now()) spent.delete(k);
+    spent.set(c, Date.now() + CHALLENGE_MS);
   };
 
   // Every devteam_session the browser sends: one set by something else can't shadow the real one.
@@ -226,7 +259,7 @@ export function createGateway(opts = {}) {
   // artifact runs in a sandboxed frame with an opaque origin, and a browser treats its requests
   // (the kit's helpers, committed images) as cross-site, so a Lax cookie would not go with them.
   // Cross-site requests are refused below by their Origin, and by the kit's own checks.
-  const cookie = (value, maxAge) => `${COOKIE}=${value}; Domain=${RP_ID}; Path=/; HttpOnly; Max-Age=${maxAge}${SECURE ? '; Secure; SameSite=None' : '; SameSite=Lax'}`;
+  const cookie = (value, maxAge) => `${COOKIE}=${value}; Domain=${NAME}; Path=/; HttpOnly; Max-Age=${maxAge}${SECURE ? '; Secure; SameSite=None' : '; SameSite=Lax'}`;
   const newSession = () => {
     const tok = crypto.randomBytes(32);
     const s = store.load();
@@ -251,7 +284,7 @@ export function createGateway(opts = {}) {
   const safeNext = (n) => {
     try {
       const u = new URL(String(n ?? '/'), PUB);
-      if (u.origin === PUB || u.origin === AUTH || (u.protocol === pubUrl.protocol && instanceOf(u.host) && u.origin === instanceOrigin(instanceOf(u.host)))) return u.href;
+      if (u.origin === PUB || u.origin === AUTH || u.origin === TERM || (u.protocol === pubUrl.protocol && instanceOf(u.host) && u.origin === instanceOrigin(instanceOf(u.host)))) return u.href;
     } catch {}
     return `${PUB}/`;
   };
@@ -272,9 +305,9 @@ export function createGateway(opts = {}) {
     const c = JSON.parse(raw.toString('utf8'));
     if (c.type !== type) throw new Error('wrong ceremony');
     if (c.origin !== AUTH || c.crossOrigin === true) throw new Error('wrong origin');
-    const issued = redeem(c.challenge, purpose);
+    const issued = purpose === 'login' ? loginChallengeOk(c.challenge) : redeem(c.challenge, purpose);
     if (!issued) throw new Error('unknown or expired challenge');
-    return { raw, issued };
+    return { raw, issued, challenge: c.challenge };
   };
   const checkAuthData = (ad) => {
     if (!sameBytes(Buffer.from(ad.rpIdHash), sha256(RP_ID))) throw new Error('wrong relying party');
@@ -303,7 +336,7 @@ export function createGateway(opts = {}) {
     const s = store.load();
     const pk = s.passkeys.find((p) => p.id === body?.rawId);
     if (!pk) throw new Error('unknown passkey');
-    const { raw } = clientData(body?.clientDataJSON, 'webauthn.get', 'login');
+    const { raw, challenge } = clientData(body?.clientDataJSON, 'webauthn.get', 'login');
     const adBytes = unb64u(body?.authenticatorData);
     const sig = unb64u(body?.signature);
     if (!adBytes || !sig) throw new Error('bad assertion');
@@ -313,6 +346,7 @@ export function createGateway(opts = {}) {
     if (!verifySignature(pk, Buffer.concat([adBytes, sha256(raw)]), sig)) throw new Error('bad signature');
     // A counter that stopped going up means a cloned authenticator; synced passkeys keep it at 0.
     if ((ad.signCount || pk.signCount) && ad.signCount <= pk.signCount) throw new Error('the passkey\'s counter went backwards');
+    spend(challenge);
     store.save({ ...s, passkeys: s.passkeys.map((p) => (p.id === pk.id ? { ...p, signCount: ad.signCount, usedAt: new Date().toISOString() } : p)) });
   };
 
@@ -329,52 +363,84 @@ export function createGateway(opts = {}) {
   };
   const LOOP = /http:\/\/(?:127\.0\.0\.1|localhost):(\d+)/g;
   const mapLoop = (s) => s.replace(LOOP, (all, p) => (Number(p) === HUB_PORT ? PUB : BLOCK.includes(Number(p)) ? instanceOrigin(Number(p)) : all));
-  const downstreamHeaders = (h, kind) => {
+  const downstreamHeaders = (h, cap, own) => {
     const out = {};
     for (const [k, v] of Object.entries(h)) {
-      if (['connection', 'keep-alive', 'transfer-encoding', 'strict-transport-security'].includes(k)) continue;
+      if (['connection', 'keep-alive', 'transfer-encoding', 'strict-transport-security', 'clear-site-data'].includes(k)) continue;
       // nothing behind the gateway sets a cookie for the box's names (the kit sets none at all)
-      if (k === 'set-cookie') { const keep = [].concat(v).filter((c) => !/;\s*domain=/i.test(c) && !new RegExp(`^\\s*${COOKIE}=`).test(c)); if (keep.length) out[k] = keep; continue; }
+      if (k === 'set-cookie') { const keep = [].concat(v).filter((c) => !/;\s*domain\s*=/i.test(c) && !new RegExp(`^\\s*${COOKIE}\\s*=`).test(c)); if (keep.length) out[k] = keep; continue; }
       out[k] = k === 'content-security-policy' || k === 'location' ? mapLoop(String(v)) : v;
     }
-    // the hub also frames the terminal, which is the box's own
-    if (kind === 'hub' && out['content-security-policy']) out['content-security-policy'] = out['content-security-policy'].replace(/(^|;\s*)frame-src /, "$1frame-src 'self' ");
-    // ttyd sets no framing policy: only the box's own pages (the hub) may frame the terminal
-    if (kind === 'term') { out['content-security-policy'] = "frame-ancestors 'self'"; out['x-frame-options'] = 'SAMEORIGIN'; }
+    // an artifact under its capability: its policy and redirects stay under it too
+    if (cap && out['content-security-policy']) out['content-security-policy'] = out['content-security-policy'].split(`${own}/artifact/`).join(`${own}${cap}/artifact/`);
+    if (cap && out.location?.startsWith('/artifact/')) out.location = `${cap}${out.location}`;
     return { ...out, ...hsts };
   };
-  const proxy = (req, res, { port, path: p, kind, publicOrigin }) => {
+  const proxy = (req, res, { port, path: p, publicOrigin, cap }) => {
     const up = http.request({ host: '127.0.0.1', port, method: req.method, path: p, headers: upstreamHeaders(req, port, publicOrigin) }, (ur) => {
-      res.writeHead(ur.statusCode, downstreamHeaders(ur.headers, kind));
+      res.writeHead(ur.statusCode, downstreamHeaders(ur.headers, cap, publicOrigin));
       // an upstream cut off mid-body cuts the browser's response too, rather than leaving it open
       pipeline(ur, res, () => {});
     });
     // and a browser that goes away stops the kit's work for it
     res.on('close', () => { if (!res.writableFinished) up.destroy(); });
-    up.on('error', (e) => {
+    up.on('error', () => {
       if (res.headersSent) return res.destroy();
-      // first boot: no dashboard yet, so no hub; the terminal is where a repo gets added
-      if (kind === 'hub' && p === '/' && e.code === 'ECONNREFUSED') return redirect(res, '/term/');
-      send(res, 502, 'text/plain; charset=utf-8', kind === 'hub' ? 'No devteam dashboard is running on this box. Open /term/ to start one or add a repo.' : kind === 'term' ? 'The terminal (ttyd) is not running.' : `Nothing answers on instance ${port}.`);
+      send(res, 502, 'text/plain; charset=utf-8', `Nothing answers on instance ${port}.`);
     });
     pipeline(req, up, () => {});
   };
+  // The hub's list is the one thing the box's name takes from behind it, and only as data: whatever
+  // holds the port, the page reads JSON and shows it as text. No hub yet is an empty list.
+  const instances = (req, res) => {
+    const none = () => json(res, 200, { hub: 1, instances: [] });
+    const up = http.get({ host: '127.0.0.1', port: HUB_PORT, path: '/instances.json', timeout: 10000, headers: { host: `127.0.0.1:${HUB_PORT}`, 'sec-fetch-site': 'same-origin' } }, (ur) => {
+      if (ur.statusCode !== 200) { ur.resume(); return none(); }
+      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...hsts });
+      pipeline(ur, res, () => {});
+    });
+    up.on('timeout', () => up.destroy());
+    up.on('error', () => { if (res.headersSent) res.destroy(); else none(); });
+  };
 
   const navigating = (req) => req.method === 'GET' && (req.headers['sec-fetch-mode'] === 'navigate' || (!req.headers['sec-fetch-mode'] && String(req.headers.accept ?? '').includes('text/html')));
-  // The cookie is SameSite=None, so a page on another site could make the browser send it with an
-  // <img> or <script>. A request another site's page makes is refused, but for what a sandboxed
-  // review page or artifact loads (its opaque origin makes those cross-site too): the kit's two
-  // helpers, a committed image, and an artifact's own files.
-  const crossSiteOk = (req, p) => {
-    if (req.headers['sec-fetch-site'] !== 'cross-site' || navigating(req)) return true;
+  // The cookie is SameSite=None, so a page elsewhere (another site, or another name of the box)
+  // could make the browser send it with an <img> or <script>, or navigate a frame to the API. Such
+  // a request is refused, but for a link to a page and for what a sandboxed review page loads (its
+  // opaque origin makes those cross-site too): the kit's two helpers and a committed image. An
+  // artifact's files don't need this: they load under a capability in the path (below).
+  const IMAGE = /\.(png|jpe?g|gif|webp|avif|svg|ico)$/i;
+  const crossSiteOk = (req, p, url) => {
+    const site = req.headers['sec-fetch-site'];
+    if (!site || site === 'same-origin' || site === 'none') return true;
+    if (req.headers['sec-fetch-mode'] === 'navigate') return !p.startsWith('/api/');
     const dest = req.headers['sec-fetch-dest'];
     if (/^\/review\/[^/]+\/devteam-ui\.(js|css)$/.test(p)) return ['script', 'style'].includes(dest);
-    if (p === '/api/file') return dest === 'image';
-    return p.startsWith('/artifact/') && ['script', 'style', 'image', 'font', 'audio', 'video', 'track', 'worker', 'empty'].includes(dest);
+    return p === '/api/file' && dest === 'image' && IMAGE.test(url.searchParams.get('path') ?? '');
   };
+  // A sandboxed artifact can't be told from another site's page by its headers, and its bytes use
+  // relative URLs. So the frame's first load (same-origin, with the session) is redirected under
+  // /c/<expiry>.<session>.<mac>/, good for that one artifact folder, and its files need no cookie.
+  const ARTIFACT = /^\/artifact\/(?:main|wt\/[^/]+)\/[^/]+\//;
+  const capMac = (port, prefix, exp, sid) => b64u(mac('artifact', port, prefix, exp, sid));
+  const capFor = (port, prefix, session) => {
+    const exp = Date.now() + CAPABILITY_MS;
+    const sid = session.hash.slice(0, 16);
+    return `/c/${exp}.${sid}.${capMac(port, prefix, exp, sid)}`;
+  };
+  const capOk = (port, inner, exp, sid, given) => {
+    const prefix = ARTIFACT.exec(inner)?.[0];
+    if (!prefix || /\.\.|%2e|%5c|\\/i.test(inner) || Number(exp) < Date.now()) return false;
+    const want = Buffer.from(capMac(port, prefix, exp, sid));
+    const got = Buffer.from(given);
+    return sameBytes(got, want) && store.load().sessions.some((x) => x.hash.startsWith(sid) && x.expires > Date.now());
+  };
+  const HUB_CSP = `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-src ${[TERM, ...BLOCK.map(instanceOrigin)].join(' ')}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
+  const TERM_CSP = `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; font-src data:; img-src data:; connect-src 'self' ${TERM.replace(/^http/, 'ws')}; frame-ancestors ${PUB}; base-uri 'none'; form-action 'none'`;
   const loginAt = (next) => `${AUTH}/auth/login${next ? `?next=${encodeURIComponent(next)}` : ''}`;
 
-  const server = http.createServer(async (req, res) => {
+  // Room for a jar a page has stuffed; past it, see clientError below.
+  const server = http.createServer({ maxHeaderSize: 64 * 1024 }, async (req, res) => {
     // origin-form only: a request line with a full URL, or *, is refused
     if (!req.url.startsWith('/') || req.url.startsWith('//')) return send(res, 400, 'text/plain', 'bad request');
     let url;
@@ -383,15 +449,22 @@ export function createGateway(opts = {}) {
     // Our own names only; and anything but a read must come from a page on the same name.
     const isBox = req.headers.host === pubUrl.host;
     const isAuth = req.headers.host === authHost;
-    const port = isBox || isAuth ? null : instanceOf(req.headers.host);
-    if (!isBox && !isAuth && !port) return send(res, 421, 'text/plain; charset=utf-8', `this box answers only on its own names: open ${PUB}/`);
-    const own = isBox ? PUB : isAuth ? AUTH : instanceOrigin(port);
+    const isTerm = req.headers.host === termHost;
+    const port = isBox || isAuth || isTerm ? null : instanceOf(req.headers.host);
+    if (!isBox && !isAuth && !isTerm && !port) return send(res, 421, 'text/plain; charset=utf-8', `this box answers only on its own names: open ${PUB}/`);
+    const own = isBox ? PUB : isAuth ? AUTH : isTerm ? TERM : instanceOrigin(port);
     if (!['GET', 'HEAD'].includes(req.method) && req.headers.origin !== own) return send(res, 403, 'text/plain; charset=utf-8', 'only from this box\'s own pages');
     const p = url.pathname;
-    if (!crossSiteOk(req, p)) return send(res, 403, 'text/plain; charset=utf-8', 'not for another site\'s page');
-    const s = store.load();
-    const claimed = s.passkeys.length > 0;
+    const rawPath = req.url.split('?')[0];
     try {
+      const cm = port ? /^\/c\/(\d+)\.([\w-]+)\.([\w-]+)(\/artifact\/.*)$/.exec(rawPath) : null;
+      if (cm) {
+        if (!['GET', 'HEAD'].includes(req.method) || !capOk(port, cm[4], cm[1], cm[2], cm[3])) return send(res, 403, 'text/plain; charset=utf-8', 'that artifact link has expired: open it again from the dashboard');
+        return proxy(req, res, { port, path: cm[4] + url.search, publicOrigin: own, cap: `/c/${cm[1]}.${cm[2]}.${cm[3]}` });
+      }
+      if (!crossSiteOk(req, p, url)) return send(res, 403, 'text/plain; charset=utf-8', 'not for another site\'s page');
+      const s = store.load();
+      const claimed = s.passkeys.length > 0;
       // the auth name serves the gateway's own pages and nothing else; the others never serve them
       if (isBox && p.startsWith('/auth/')) return redirect(res, `${AUTH}${p}${url.search}`);
       if (isAuth && !p.startsWith('/auth/')) return redirect(res, `${PUB}/`);
@@ -401,19 +474,21 @@ export function createGateway(opts = {}) {
           if (req.method !== 'POST') return send(res, 405, 'text/plain', 'POST only');
           if (claimed) return json(res, 409, { error: 'this box is already claimed' });
           const body = await readJson(req);
-          const want = unb64u(store.load().claimHash ?? '');
+          const live = store.load();
+          if (live.claimHash && !claimLive(live)) return json(res, 403, { error: 'this claim link has expired: restart the box, or run devteam-reclaim in a shell on it, for a new one' });
+          const want = unb64u(live.claimHash ?? '');
           if (!want || !sameBytes(sha256(typeof body?.token === 'string' ? body.token : ''), want)) return json(res, 403, { error: 'that is not this box\'s claim token' });
           if (p === '/auth/claim/options') return json(res, 200, creationOptions('claim'));
           const pk = register(body, 'claim');
           if (store.load().passkeys.length) return json(res, 409, { error: 'this box is already claimed' });
-          store.save({ ...store.load(), passkeys: [pk], claimHash: null, sessions: [] });
+          store.save({ ...store.load(), passkeys: [pk], claimHash: null, claimExpires: null, sessions: [] });
           log(`claimed with passkey "${pk.name}"`);
           return json(res, 200, { ok: true }, { 'set-cookie': newSession() });
         }
         if (p === '/auth/login' && req.method === 'GET') return page(res, claimed ? PAGES.login(safeNext(url.searchParams.get('next'))) : PAGES.unclaimed());
         if (p === '/auth/login/options' && req.method === 'POST') {
           if (!claimed) return json(res, 409, { error: 'this box is not claimed yet' });
-          return json(res, 200, { challenge: issue('login'), rpId: RP_ID, userVerification: 'required', timeout: CHALLENGE_MS, allowCredentials: [] });
+          return json(res, 200, { challenge: loginChallenge(), rpId: RP_ID, userVerification: 'required', timeout: CHALLENGE_MS, allowCredentials: [] });
         }
         if (p === '/auth/login/verify' && req.method === 'POST') {
           verifyAssertion(await readJson(req));
@@ -426,7 +501,21 @@ export function createGateway(opts = {}) {
         return send(res, claimed ? 401 : 403, 'text/plain; charset=utf-8', claimed ? 'sign in with your passkey' : 'this box is unclaimed');
       }
       // An instance's dashboard, on its own subdomain: the request exactly as the browser sent it.
-      if (port) return proxy(req, res, { port, path: req.url, kind: 'instance', publicOrigin: own });
+      if (port) {
+        const prefix = req.method === 'GET' && ['iframe', 'document'].includes(req.headers['sec-fetch-dest']) && ['same-origin', 'none'].includes(req.headers['sec-fetch-site']) ? ARTIFACT.exec(rawPath)?.[0] : null;
+        if (prefix) return redirect(res, `${capFor(port, prefix, session)}${req.url}`);
+        return proxy(req, res, { port, path: req.url, publicOrigin: own });
+      }
+      // The terminal: the gateway's copy of ttyd's page. Only its socket reaches ttyd (see upgrade).
+      if (isTerm) {
+        if (req.method === 'GET' && p === '/') {
+          let body;
+          try { body = ttydPage(); } catch { return send(res, 502, 'text/plain; charset=utf-8', 'This image has no terminal page.'); }
+          return send(res, 200, 'text/html; charset=utf-8', body, { 'content-security-policy': TERM_CSP, 'referrer-policy': 'no-referrer' });
+        }
+        if (req.method === 'GET' && p === '/token') return json(res, 200, { token: '' });
+        return send(res, 404, 'text/plain', 'not found');
+      }
       if (isAuth) {
         if (p === '/auth/logout' && req.method === 'POST') {
           const now = store.load();
@@ -434,7 +523,7 @@ export function createGateway(opts = {}) {
           return json(res, 200, { ok: true }, { 'set-cookie': cookie('', 0) });
         }
         if (p === '/auth/passkeys' && req.method === 'GET') return fresh(session) ? page(res, PAGES.passkeys(store.load().passkeys, PUB)) : redirect(res, loginAt(`${AUTH}/auth/passkeys`));
-        if ((p === '/auth/passkeys/options' || p === '/auth/passkeys/verify') && !fresh(session)) return json(res, 403, { error: 'sign in again to add a passkey (reload this page)' });
+        if (p.startsWith('/auth/passkeys/') && !fresh(session)) return json(res, 403, { error: 'sign in again to change passkeys (reload this page)' });
         if (p === '/auth/passkeys/options' && req.method === 'POST') return json(res, 200, creationOptions(`add:${session.hash}`));
         if (p === '/auth/passkeys/verify' && req.method === 'POST') {
           const pk = register(await readJson(req), `add:${session.hash}`);
@@ -455,24 +544,34 @@ export function createGateway(opts = {}) {
         }
         return send(res, 404, 'text/plain', 'not found');
       }
-      if (p === '/box.json') return json(res, 200, { box: 1, terminal: 'term/', instance: `${pubUrl.protocol}//{port}.${RP_ID}${SUFFIX}/`, passkeys: `${AUTH}/auth/passkeys` });
-      if (p === '/term') return redirect(res, '/term/');
-      if (p.startsWith('/term/')) return proxy(req, res, { port: ttydPort, path: p + url.search, kind: 'term', publicOrigin: null });
-      return proxy(req, res, { port: HUB_PORT, path: p + url.search, kind: 'hub', publicOrigin: PUB });
+      // The box's own name: the gateway's copy of the hub page, what it needs to know, and the list.
+      if (req.method === 'GET' && (p === '/' || p === '/index.html')) return send(res, 200, 'text/html; charset=utf-8', hubPage, { 'content-security-policy': HUB_CSP, 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer' });
+      if (req.method === 'GET' && p === '/box.json') return json(res, 200, { box: 1, terminal: `${TERM}/`, instance: `${pubUrl.protocol}//{port}.${NAME}${SUFFIX}/`, passkeys: `${AUTH}/auth/passkeys` });
+      if (req.method === 'GET' && p === '/instances.json') return instances(req, res);
+      return send(res, 404, 'text/plain', 'not found');
     } catch (e) {
-      return json(res, 400, { error: String(e?.message ?? e) });
+      if (res.headersSent) return res.destroy();
+      return json(res, e?.unreadable ? 503 : 400, { error: String(e?.message ?? e) });
     }
   });
 
-  // The terminal's WebSocket, the one upgrade there is: the box's name, its Origin, a session.
+  // A stuffed cookie jar (any page on an instance's name can write cookies for the whole box) would
+  // otherwise answer 431 on every name, sign-in included, for good. Clearing the jar costs a sign-in.
+  server.on('clientError', (e, socket) => {
+    if (e.code !== 'HPE_HEADER_OVERFLOW') return socket.destroy();
+    const body = 'Too many cookies; cleared. Reload to sign in.';
+    socket.end(`HTTP/1.1 431 Request Header Fields Too Large\r\nclear-site-data: "cookies"\r\ncontent-type: text/plain\r\nconnection: close\r\ncontent-length: ${body.length}\r\n\r\n${body}`);
+  });
+
+  // The terminal's WebSocket, the one upgrade there is: the terminal's name, its Origin, a session.
   server.on('upgrade', (req, socket, head) => {
     const refuse = (code, msg) => { socket.end(`HTTP/1.1 ${code} ${msg}\r\nconnection: close\r\ncontent-length: 0\r\n\r\n`); };
-    if (req.headers.host !== pubUrl.host) return refuse(421, 'Misdirected Request');
-    if (req.headers.origin !== PUB) return refuse(403, 'Forbidden');
-    if (!store.load().passkeys.length || !sessionOf(req)) return refuse(401, 'Unauthorized');
+    if (req.headers.host !== termHost) return refuse(421, 'Misdirected Request');
+    if (req.headers.origin !== TERM) return refuse(403, 'Forbidden');
+    try { if (!store.load().passkeys.length || !sessionOf(req)) return refuse(401, 'Unauthorized'); } catch { return refuse(503, 'Service Unavailable'); }
     let p;
     try { p = new URL(req.url, PUB); } catch { return refuse(400, 'Bad Request'); }
-    if (!req.url.startsWith('/') || p.pathname !== '/term/ws') return refuse(404, 'Not Found');
+    if (!req.url.startsWith('/') || p.pathname !== '/ws') return refuse(404, 'Not Found');
     const up = net.connect(ttydPort, '127.0.0.1');
     up.on('error', () => socket.destroy());
     socket.on('error', () => up.destroy());
@@ -560,7 +659,10 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === fs.realpathSync(proces
     if (cmd === 'serve') {
       const { server, publicUrl: pub } = createGateway();
       const port = Number(env.PORT ?? 8080);
-      server.listen(port, '0.0.0.0', () => process.stdout.write(`gateway: ${pub} on :${port}\n`));
+      // every address, IPv6 too: a port left open on either family is one an agent could take
+      const up = () => process.stdout.write(`gateway: ${pub} on :${port}\n`);
+      server.once('error', (e) => { if (e.code !== 'EAFNOSUPPORT' && e.code !== 'EADDRNOTAVAIL') throw e; server.listen(port, '0.0.0.0', up); });
+      server.listen(port, '::', up);
       for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => process.exit(0));
     } else if (cmd === 'reclaim') {
       // Lost every passkey: forget them and every session, and print a new claim link. Run it in a

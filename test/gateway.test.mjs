@@ -71,16 +71,19 @@ async function gateway(name, extra = {}) {
   const publicUrl = `http://box.localhost:${port}`;
   const inst = (p) => `http://${p}.box.localhost:${port}`;
   const auth = `http://auth.box.localhost:${port}`;
+  const term = `http://term.box.localhost:${port}`;
+  const ttydPage = path.join(tmp, `${name}-ttyd.html`);
+  fs.writeFileSync(ttydPage, 'the gateway\'s copy of ttyd');
   const logs = [];
   const dir = path.join(tmp, name);
   const ttydPort = await freePort();
-  const g = G.createGateway({ publicUrl, dir, ttydPort, log: (m) => logs.push(m), ...extra });
+  const g = G.createGateway({ publicUrl, dir, ttydPort, ttydPage, log: (m) => logs.push(m), ...extra });
   await new Promise((r) => g.server.listen(port, '127.0.0.1', r));
   const token = /claim#([A-Za-z0-9_-]+)/.exec(logs.join('\n'))?.[1];
   let jar = '';
   // on: an instance's port, for its subdomain; else the box's own name
   const req = (method, route, { body, headers = {}, cookie = jar, on = route.startsWith('/auth/') ? 'auth' : undefined } = {}) => new Promise((resolve, reject) => {
-    const self = on === 'auth' ? auth : on ? inst(on) : publicUrl;
+    const self = on === 'auth' ? auth : on === 'term' ? term : on ? inst(on) : publicUrl;
     const h = { host: new URL(self).host, ...(method !== 'GET' ? { origin: self, 'content-type': 'application/json' } : {}), ...(cookie ? { cookie } : {}), ...headers };
     for (const k of Object.keys(h)) if (h[k] === undefined) delete h[k];
     const r = http.request({ host: '127.0.0.1', port, method, path: route, headers: h }, (res) => {
@@ -106,7 +109,7 @@ async function gateway(name, extra = {}) {
     const o = await req('POST', '/auth/login/options', { on: 'auth', body: {}, cookie: '' });
     return req('POST', '/auth/login/verify', { on: 'auth', body: a.get(o.json, auth, how), cookie: '' });
   };
-  return { g, port, publicUrl, inst, auth, ttydPort, logs, token, req, claim, login, jar: () => jar, setJar: (v) => { jar = v; }, dir, close: () => new Promise((r) => g.server.close(r)) };
+  return { g, port, publicUrl, inst, auth, term, ttydPort, logs, token, req, claim, login, jar: () => jar, setJar: (v) => { jar = v; }, dir, close: () => new Promise((r) => g.server.close(r)) };
 }
 
 test('cbor and cose: what WebAuthn needs, nothing more', () => {
@@ -121,6 +124,8 @@ test('cbor and cose: what WebAuthn needs, nothing more', () => {
   assert.throws(() => G.cborDecode(deep), /too deep/);
   assert.throws(() => G.coseToJwk(new Map([[1, 2], [3, -7], [-1, 1], [-2, Buffer.alloc(32)], [-3, Buffer.alloc(32)]])), 'a point not on the curve is refused');
   assert.throws(() => G.coseToJwk(new Map([[1, 2], [3, -35], [-1, 2]])), /unsupported/, 'only ES256, EdDSA and RS256');
+  const weak = crypto.generateKeyPairSync('rsa', { modulusLength: 2048, publicExponent: 3 }).publicKey.export({ format: 'jwk' });
+  assert.throws(() => G.coseToJwk(new Map([[1, 3], [3, -257], [-1, Buffer.from(weak.n, 'base64url')], [-2, Buffer.from(weak.e, 'base64url')]])), /exponent/);
 });
 
 test('claim: only with the token, once; then only the passkey gets in', async () => {
@@ -155,7 +160,7 @@ test('claim: only with the token, once; then only the passkey gets in', async ()
     const ok = await gw.claim(a, { name: '1Password' });
     assert.equal(ok.status, 200, ok.body);
     assert.match(ok.headers['set-cookie'][0], /^devteam_session=[\w-]+; Domain=box\.localhost; Path=\/; HttpOnly; Max-Age=1209600; SameSite=Lax$/, 'one cookie for the box and its instances (SameSite=None; Secure on https)');
-    assert.equal((await gw.req('GET', '/box.json')).json.terminal, 'term/', 'claiming signs you in');
+    assert.equal((await gw.req('GET', '/box.json')).json.terminal, `${gw.term}/`, 'claiming signs you in');
     assert.equal((await gw.req('POST', '/auth/claim/options', { body: { token: gw.token } })).status, 409, 'a claimed box takes no claim, the old token included');
     const state = JSON.parse(fs.readFileSync(path.join(gw.dir, 'state.json'), 'utf8'));
     assert.equal(state.claimHash, null, 'the token is gone');
@@ -171,7 +176,7 @@ test('claim: only with the token, once; then only the passkey gets in', async ()
     // where signing in returns to: the box or an instance, never another site
     const nextOf = async (n) => /const next = ("[^"]*")/.exec((await gw.req('GET', `/auth/login?next=${encodeURIComponent(n)}`)).body)?.[1];
     assert.equal(await nextOf(`${gw.inst(P)}/a`), JSON.stringify(`${gw.inst(P)}/a`));
-    assert.equal(await nextOf('/term/'), JSON.stringify(`${gw.publicUrl}/term/`));
+    assert.equal(await nextOf(`${gw.term}/`), JSON.stringify(`${gw.term}/`));
     for (const n of ['/\\evil.example', '//evil.example/', 'https://evil.example/', `http://${P + 25}.box.localhost:${gw.port}/`, 'javascript:alert(1)']) assert.equal(await nextOf(n), JSON.stringify(`${gw.publicUrl}/`), n);
     assert.equal((await gw.login(a)).status, 200);
     assert.equal((await gw.req('GET', '/box.json')).status, 200);
@@ -184,12 +189,21 @@ test('claim: only with the token, once; then only the passkey gets in', async ()
     assert.equal((await gw.login(a, { counter: 7 })).status, 200);
     assert.match((await gw.login(a, { counter: 7 })).json.error, /counter/, 'a counter that stops going up means a cloned key');
     assert.match((await gw.login(a, { counter: 9, userHandle: u(crypto.randomBytes(16)) })).json.error, /another account/);
+    // passkeys belong to the auth name, and a login challenge can't be flooded away or used twice
+    const flood = await gw.req('POST', '/auth/login/options', { body: {}, cookie: '' });
+    assert.equal(flood.json.rpId, 'auth.box.localhost');
+    for (let i = 0; i < 300; i++) await gw.req('POST', '/auth/login/options', { body: {}, cookie: '' });
+    const once = a.get(flood.json, gw.auth, { counter: 20 });
+    assert.equal((await gw.req('POST', '/auth/login/verify', { body: once, cookie: '' })).status, 200, 'a pending sign-in survives anyone asking for challenges');
+    assert.match((await gw.req('POST', '/auth/login/verify', { body: once, cookie: '' })).json.error, /challenge/, 'and is good once');
+    const forgedChallenge = { ...flood.json, challenge: u(crypto.randomBytes(40)) };
+    assert.match((await gw.req('POST', '/auth/login/verify', { body: a.get(forgedChallenge, gw.auth, { counter: 21 }), cookie: '' })).json.error, /challenge/, 'a challenge the gateway didn\'t issue is refused');
 
     // a second passkey, and the last one can't be removed
     const b = authenticator('ed25519');
     // a challenge for adding one is good only in the session it was issued to
     const elsewhere = await gw.req('POST', '/auth/passkeys/options', { body: {} });
-    const sess2 = (await gw.login(a, { counter: 10 })).headers['set-cookie'][0].split(';')[0];
+    const sess2 = (await gw.login(a, { counter: 30 })).headers['set-cookie'][0].split(';')[0];
     assert.match((await gw.req('POST', '/auth/passkeys/verify', { body: b.create(elsewhere.json, gw.auth), cookie: sess2 })).json.error, /challenge/);
     // and only in a session signed in the last five minutes
     const st = JSON.parse(fs.readFileSync(path.join(gw.dir, 'state.json'), 'utf8'));
@@ -199,6 +213,7 @@ test('claim: only with the token, once; then only the passkey gets in', async ()
     fs.writeFileSync(path.join(gw.dir, 'state.json'), JSON.stringify(st));
     assert.match((await gw.req('POST', '/auth/passkeys/options', { body: {} })).json.error, /sign in again/);
     assert.match((await gw.req('GET', '/auth/passkeys')).headers.location, /\/auth\/login\?next=/);
+    assert.match((await gw.req('POST', '/auth/passkeys/remove', { body: { id: u(a.id) } })).json.error, /sign in again/, 'nor removed without one');
     mine.at = at;
     fs.writeFileSync(path.join(gw.dir, 'state.json'), JSON.stringify(st));
     const ao = await gw.req('POST', '/auth/passkeys/options', { body: {} });
@@ -256,7 +271,24 @@ test('reclaim, and the gateway\'s own names and origins', async () => {
   const broken = path.join(tmp, 'broken');
   fs.mkdirSync(broken);
   fs.writeFileSync(path.join(broken, 'state.json'), '{ not json');
-  assert.throws(() => G.createGateway({ publicUrl: 'http://box.localhost:1', dir: broken, log: () => {} }), /JSON/);
+  const gw3 = await gateway('broken2', { dir: broken });
+  try {
+    assert.match(gw3.logs.join(' '), /can't be read/);
+    assert.equal(gw3.token, undefined, 'no claim link for a box whose state is unreadable');
+    assert.equal((await gw3.req('GET', '/')).status, 503);
+    assert.equal((await gw3.req('GET', '/auth/login')).status, 503);
+    assert.equal(fs.readFileSync(path.join(broken, 'state.json'), 'utf8'), '{ not json', 'and the file is left alone');
+  } finally { await gw3.close(); }
+  // a claim link lasts a day
+  const gw4 = await gateway('expiry');
+  try {
+    const f = path.join(gw4.dir, 'state.json');
+    fs.writeFileSync(f, JSON.stringify({ ...JSON.parse(fs.readFileSync(f, 'utf8')), claimExpires: Date.now() - 1 }));
+    assert.match((await gw4.req('POST', '/auth/claim/options', { body: { token: gw4.token } })).json.error, /expired/);
+    const logs = [];
+    G.createGateway({ publicUrl: gw4.publicUrl, dir: gw4.dir, log: (m) => logs.push(m) });
+    assert.match(logs.join(' '), /claim#[\w-]+ within a day/, 'a restart prints a new one');
+  } finally { await gw4.close(); }
 });
 
 function bareProject(base, name) {
@@ -285,8 +317,9 @@ test('behind the gateway the kit runs as on a laptop: hub, dashboard, owner acti
   d.stderr.on('data', (b) => { out += b; });
   // a stand-in upstream on another block port that shows what the kit would receive
   const seen = [];
-  const echo = http.createServer((req, res) => { seen.push(req.headers); res.writeHead(200, { 'content-security-policy': `frame-ancestors http://127.0.0.1:${HUB}; img-src http://127.0.0.1:${P + 5}/api/file`, location: `http://127.0.0.1:${P + 5}/x`, 'set-cookie': ['devteam_session=x; Path=/auth', 'a=1; Domain=box.localhost', 'theme=light'] }); res.end('ok'); }).listen(P + 5, '127.0.0.1');
-  // a stand-in ttyd on the gateway's port: a page, and an upgrade it answers and then echoes
+  const seenUrls = [];
+  const echo = http.createServer((req, res) => { seen.push(req.headers); res.writeHead(200, { 'content-security-policy': `frame-ancestors http://127.0.0.1:${HUB}; img-src http://127.0.0.1:${P + 5}/api/file`, location: `http://127.0.0.1:${P + 5}/x`, 'clear-site-data': '"cookies"', 'set-cookie': ['devteam_session=x; Path=/auth', 'devteam_session =y', 'a=1; Domain=box.localhost', 'b=1; domain = box.localhost', 'theme=light'] }); seenUrls.push(req.url); res.end('ok'); }).listen(P + 5, '127.0.0.1');
+  // a stand-in ttyd on the gateway's port: answers the upgrade, then echoes
   const upgrades = [];
   const ttyd = net.createServer((s) => {
     let buf = '';
@@ -294,9 +327,7 @@ test('behind the gateway the kit runs as on a laptop: hub, dashboard, owner acti
       buf += c;
       if (!buf.includes('\r\n\r\n')) return;
       s.off('data', first);
-      const head = buf.split('\r\n\r\n')[0];
-      if (!/^GET \/term\/ws /.test(head)) return void s.end('HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: 4\r\nconnection: close\r\n\r\nttyd');
-      upgrades.push(head);
+      upgrades.push(buf.split('\r\n\r\n')[0]);
       s.write('HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\n\r\n');
       s.on('data', (x) => s.write(x));
     });
@@ -311,11 +342,13 @@ test('behind the gateway the kit runs as on a laptop: hub, dashboard, owner acti
     const hub = await gw.req('GET', '/');
     assert.equal(hub.status, 200);
     const hcsp = hub.headers['content-security-policy'];
-    assert.ok(hcsp.split('; ').includes(`frame-src 'self' ${Array.from({ length: 25 }, (_, i) => gw.inst(P + i)).join(' ')}`), hcsp);
+    assert.ok(hcsp.split('; ').includes(`frame-src ${gw.term} ${Array.from({ length: 25 }, (_, i) => gw.inst(P + i)).join(' ')}`), hcsp);
+    assert.ok(hcsp.split('; ').includes("frame-ancestors 'none'"), hcsp);
+    assert.equal(hub.body, fs.readFileSync(path.join(kit, 'dashboard', 'hub.html'), 'utf8'), 'the gateway\'s own copy of the page');
     assert.ok(!hcsp.includes('127.0.0.1'), hcsp);
     const list = (await gw.req('GET', '/instances.json', { headers: { 'sec-fetch-site': 'same-origin' } })).json.instances;
     assert.deepEqual(list.map((x) => [x.name, x.port]), [['alpha', P]]);
-    assert.deepEqual((await gw.req('GET', '/box.json')).json, { box: 1, terminal: 'term/', instance: `http://{port}.box.localhost:${gw.port}/`, passkeys: `${gw.auth}/auth/passkeys` }, 'the hub learns where instances are');
+    assert.deepEqual((await gw.req('GET', '/box.json')).json, { box: 1, terminal: `${gw.term}/`, instance: `http://{port}.box.localhost:${gw.port}/`, passkeys: `${gw.auth}/auth/passkeys` }, 'the hub learns where instances are');
 
     // a dashboard on its own subdomain, exactly as the kit serves it, its policy pointed at the box
     const dash = await gw.req('GET', '/', { on: P });
@@ -344,40 +377,94 @@ test('behind the gateway the kit runs as on a laptop: hub, dashboard, owner acti
     assert.equal(r.headers['content-security-policy'], `frame-ancestors ${gw.publicUrl}; img-src ${gw.inst(P + 5)}/api/file`);
     assert.equal(r.headers.location, `${gw.inst(P + 5)}/x`);
     assert.deepEqual(r.headers['set-cookie'], ['theme=light'], 'nothing behind the gateway sets a cookie for the box\'s names');
+    assert.equal(r.headers['clear-site-data'], undefined, 'or clears the owner\'s');
 
     // another site's page can't use the cookie for a read; a sandboxed review page's loads can
     const xs = (route, dest) => gw.req('GET', route, { on: P, headers: { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'no-cors', 'sec-fetch-dest': dest } });
     assert.equal((await xs('/api/fleet?fetch=1', 'image')).status, 403);
     assert.equal((await xs('/api/data', 'script')).status, 403);
     assert.equal((await xs('/api/file?path=README.md', 'script')).status, 403);
-    assert.notEqual((await xs('/api/file?path=README.md', 'image')).status, 403);
+    assert.equal((await xs('/api/file?path=README.md', 'image')).status, 403, 'only an image file, as an image');
+    assert.notEqual((await xs('/api/file?path=a/b.png', 'image')).status, 403);
+    assert.equal((await gw.req('GET', '/api/data', { on: P, headers: { 'sec-fetch-site': 'same-site', 'sec-fetch-mode': 'no-cors', 'sec-fetch-dest': 'image' } })).status, 403, 'another name of the box is no different');
+    assert.equal((await gw.req('GET', '/api/fleet?fetch=1', { on: P, headers: { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'iframe' } })).status, 403, 'nor can a frame or a link reach the API');
+    assert.equal((await xs('/artifact/main/x/a.js', 'script')).status, 403, 'an artifact\'s files, without its capability');
+    // an artifact: its frame's first load goes under a capability, and its files need no cookie
+    const af = await gw.req('GET', '/artifact/main/x/?v=1', { on: P + 5, headers: { 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'iframe' } });
+    assert.equal(af.status, 302);
+    const cap = /^(\/c\/[^/]+)\/artifact\/main\/x\/\?v=1$/.exec(af.headers.location)?.[1];
+    assert.ok(cap, af.headers.location);
+    const opaque = { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'no-cors', 'sec-fetch-dest': 'script' };
+    const capped = await gw.req('GET', `${cap}/artifact/main/x/a.js?q=1`, { on: P + 5, cookie: '', headers: opaque });
+    assert.equal(capped.status, 200, capped.body);
+    assert.equal(seenUrls.at(-1), '/artifact/main/x/a.js?q=1', 'the kit sees the plain path');
+    assert.equal(seen.at(-1).cookie, undefined);
+    assert.equal((await gw.req('GET', `${cap}/artifact/main/other/a.js`, { on: P + 5, cookie: '', headers: opaque })).status, 403, 'that folder only');
+    assert.equal((await gw.req('GET', `${cap}/artifact/main/x/../../../api/data`, { on: P + 5, cookie: '', headers: opaque })).status, 403, 'and no way out of it');
+    assert.equal((await gw.req('GET', `${cap}/artifact/main/x/a.js`, { on: P + 6, cookie: '', headers: opaque })).status, 403, 'on that instance only');
+    assert.equal((await gw.req('POST', `${cap}/artifact/main/x/a.js`, { on: P + 5, cookie: '', body: {} })).status, 403, 'reads only');
     assert.notEqual((await xs('/review/preview/devteam-ui.js', 'script')).status, 403);
     assert.equal((await gw.req('GET', '/', { on: P, headers: { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' } })).status, 200, 'a link from anywhere still opens it');
 
-    // the terminal: its page may be framed only by the box's own pages
-    const tp = await gw.req('GET', '/term/');
-    assert.equal(tp.body, 'ttyd');
-    assert.equal(tp.headers['content-security-policy'], "frame-ancestors 'self'");
-    assert.equal((await gw.req('GET', '/term/', { on: P })).status, 404, 'an instance\'s subdomain is only that dashboard');
-    // its WebSocket: the session and the box's Origin, to ttyd with no cookie
-    const ws = (headers, route = '/term/ws') => new Promise((resolve) => {
-      const s = net.connect(gw.port, '127.0.0.1', () => s.write(`GET ${route} HTTP/1.1\r\n${Object.entries({ host: `box.localhost:${gw.port}`, upgrade: 'websocket', connection: 'Upgrade', 'sec-websocket-key': 'x', 'sec-websocket-version': '13', 'sec-websocket-protocol': 'tty', ...headers }).filter(([, v]) => v !== undefined).map(([k, v]) => `${k}: ${v}`).join('\r\n')}\r\n\r\n`));
+    // the terminal, on its own name: the gateway's copy of the page, framed only by the hub
+    const tp = await gw.req('GET', '/', { on: 'term' });
+    assert.equal(tp.body, 'the gateway\'s copy of ttyd');
+    assert.ok(tp.headers['content-security-policy'].split('; ').includes(`frame-ancestors ${gw.publicUrl}`), tp.headers['content-security-policy']);
+    assert.deepEqual((await gw.req('GET', '/token', { on: 'term' })).json, { token: '' });
+    assert.equal((await gw.req('GET', '/term/')).status, 404, 'the box\'s name has no terminal');
+    assert.equal((await gw.req('GET', '/ws', { on: 'term' })).status, 404);
+    // its WebSocket: the session and the terminal's Origin, to ttyd with no cookie
+    const ws = (headers, route = '/ws', host = `term.box.localhost:${gw.port}`) => new Promise((resolve) => {
+      const s = net.connect(gw.port, '127.0.0.1', () => s.write(`GET ${route} HTTP/1.1\r\n${Object.entries({ host, upgrade: 'websocket', connection: 'Upgrade', 'sec-websocket-key': 'x', 'sec-websocket-version': '13', 'sec-websocket-protocol': 'tty', ...headers }).filter(([, v]) => v !== undefined).map(([k, v]) => `${k}: ${v}`).join('\r\n')}\r\n\r\n`));
       let b = '';
       s.on('data', (c) => { b += c; if (b.includes('\r\n\r\n')) { if (b.startsWith('HTTP/1.1 101')) { s.write('ping'); s.once('data', (e) => { resolve([101, String(e)]); s.destroy(); }); } else { resolve([Number(b.split(' ')[1]), '']); s.destroy(); } } });
     });
-    assert.deepEqual(await ws({ origin: gw.publicUrl, cookie: gw.jar() }), [101, 'ping']);
+    assert.deepEqual(await ws({ origin: gw.term, cookie: gw.jar() }), [101, 'ping']);
+    assert.match(upgrades.at(-1), /^GET \/ws /);
     assert.match(upgrades.at(-1), /\r\nsec-websocket-protocol: tty(\r\n|$)/);
     assert.doesNotMatch(upgrades.at(-1), /cookie|origin/i);
-    assert.equal((await ws({ origin: 'https://evil.example', cookie: gw.jar() }))[0], 403, 'another site can\'t open the terminal, even with the cookie');
+    assert.equal((await ws({ origin: gw.publicUrl, cookie: gw.jar() }))[0], 403, 'a page on the box\'s own name can\'t open it');
+    assert.equal((await ws({ origin: 'https://evil.example', cookie: gw.jar() }))[0], 403, 'nor another site, even with the cookie');
     assert.equal((await ws({ origin: gw.inst(P), cookie: gw.jar() }))[0], 403, 'nor a dashboard\'s page');
-    assert.equal((await ws({ origin: gw.publicUrl }))[0], 401, 'nor anyone without a session');
-    assert.equal((await ws({ origin: gw.publicUrl, cookie: gw.jar() }, '/i/x'))[0], 404, 'and the terminal is the only upgrade');
+    assert.equal((await ws({ origin: gw.term }))[0], 401, 'nor anyone without a session');
+    assert.equal((await ws({ origin: gw.term, cookie: gw.jar() }, '/x'))[0], 404, 'and it is the only upgrade');
+    assert.equal((await ws({ origin: gw.publicUrl, cookie: gw.jar() }, '/ws', `box.localhost:${gw.port}`))[0], 421, 'on the terminal\'s name only');
+    // a jar stuffed with cookies clears itself rather than locking the owner out of every name
+    const flooded = await new Promise((resolve) => { const c = net.connect(gw.port, '127.0.0.1', () => c.write(`GET / HTTP/1.1\r\nhost: box.localhost:${gw.port}\r\ncookie: x=${'a'.repeat(70000)}\r\n\r\n`)); let b = ''; c.on('data', (d) => { b += d; }); c.on('close', () => resolve(b)); });
+    assert.match(flooded, /^HTTP\/1\.1 431/);
+    assert.match(flooded, /clear-site-data: "cookies"/);
+    // signing out ends that session's artifact capabilities
+    assert.equal((await gw.req('POST', '/auth/logout', { body: {} })).status, 200);
+    assert.equal((await gw.req('GET', `${cap}/artifact/main/x/a.js`, { on: P + 5, cookie: '', headers: opaque })).status, 403, 'a capability ends with its session');
   } finally {
-    d.kill();
+    await new Promise((r) => { d.on('close', r); d.kill(); });
     echo.close();
     ttyd.close();
     await gw.close();
   }
+});
+
+test('whatever an agent binds to the hub\'s port, the box\'s name serves only the gateway\'s page, and only JSON from there', async () => {
+  const gw = await gateway('squat');
+  const evil = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'text/html', 'set-cookie': 'a=1', 'content-security-policy': "frame-ancestors *" }); res.end(req.url === '/instances.json' ? '{"hub":1,"instances":[]}' : '<script>evil()</script>'); });
+  await until(() => new Promise((r) => { evil.once('error', () => r(false)); evil.listen(HUB, '127.0.0.1', () => r(true)); }), 'the hub port');
+  try {
+    assert.equal((await gw.claim(authenticator())).status, 200);
+    const page = await gw.req('GET', '/');
+    assert.doesNotMatch(page.body, /evil\(\)/);
+    assert.equal(page.headers['set-cookie']?.length ?? 0, 0);
+    const list = await gw.req('GET', '/instances.json');
+    assert.equal(list.headers['content-type'], 'application/json');
+    assert.equal(list.headers['x-content-type-options'], 'nosniff');
+    assert.equal(list.headers['content-security-policy'], undefined);
+    assert.equal((await gw.req('GET', '/anything')).status, 404);
+  } finally { evil.close(); await gw.close(); }
+  const gw2 = await gateway('nohub');
+  try {
+    assert.equal((await gw2.claim(authenticator())).status, 200);
+    await until(async () => (await gw2.req('GET', '/instances.json')).body === '{"hub":1,"instances":[]}', 'an empty list when nothing holds the port');
+    assert.equal((await gw2.req('GET', '/')).status, 200, 'and the page, with its Terminal tab, on first boot');
+  } finally { await gw2.close(); }
 });
 
 test('the hub on a laptop is unchanged: no box.json, instances on their own loopback ports', () => {
@@ -385,7 +472,7 @@ test('the hub on a laptop is unchanged: no box.json, instances on their own loop
   assert.match(hub, /const urlOf = \(x\) => \(box \? box\.instance\.replace\('\{port\}', String\(Number\(x\.port\)\)\) : `http:\/\/127\.0\.0\.1:\$\{Number\(x\.port\)\}\/`\);/);
 });
 
-test('on https: the cookie is Secure and SameSite=None for every name, HSTS is sent, and an artifact\'s loads are typed', async () => {
+test('on https: the cookie is Secure and SameSite=None for every name, and HSTS is sent', async () => {
   // the gateway trusts its public URL's scheme (the platform terminates TLS), so plain http here
   const port = await freePort();
   const dir = path.join(tmp, 'https');
@@ -406,9 +493,6 @@ test('on https: the cookie is Secure and SameSite=None for every name, HSTS is s
     assert.match(ok.headers['set-cookie'][0], /^devteam_session=[\w-]+; Domain=box\.localhost; Path=\/; HttpOnly; Max-Age=1209600; Secure; SameSite=None$/);
     assert.equal(ok.headers['strict-transport-security'], 'max-age=31536000');
     const cookie = ok.headers['set-cookie'][0].split(';')[0];
-    assert.equal((await call('box.localhost', 'GET', '/term', null, { cookie })).headers.location, '/term/');
-    const art = (dest) => call(`${P}.box.localhost`, 'GET', '/artifact/main/x/', null, { cookie, 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'no-cors', 'sec-fetch-dest': dest });
-    assert.equal((await art('iframe')).status, 403, 'another site can\'t frame an artifact with the cookie');
-    assert.notEqual((await art('script')).status, 403, 'a sandboxed artifact still loads its own script');
+    assert.equal((await call('box.localhost', 'GET', '/box.json', null, { cookie })).json.terminal, 'https://term.box.localhost/');
   } finally { await new Promise((r) => g.server.close(r)); }
 });

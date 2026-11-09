@@ -5,8 +5,8 @@
 # workers run), and each repo's dashboard on a subdomain of its own. What lasts lives on /data.
 #
 # It needs a name and a wildcard under it, e.g. box.example.com and *.box.example.com: each
-# dashboard keeps an origin of its own (4321.box.example.com), as on a laptop, and signing in is on
-# auth.box.example.com, which serves nothing else.
+# dashboard keeps an origin of its own (4321.box.example.com), as on a laptop, and signing in and
+# the terminal have theirs (auth.box.example.com, term.box.example.com).
 #
 # Render: New > Web Service > this repo (or a fork), Language: Docker, Dockerfile path:
 #   cloud/Dockerfile, build context: the repo root. Instance: Pro (4 GB) or larger; a free one
@@ -18,14 +18,14 @@
 #   CNAMEs; remove any AAAA records). If Render won't take a wildcard under a subdomain, give the
 #   box a domain of its own (example.com and *.example.com). The *.onrender.com address is refused:
 #   the box answers only on its own names. Then deploy: the log prints the claim link,
-#   https://auth.box.example.com/auth/claim#<token>.
+#   https://auth.box.example.com/auth/claim#<token>, good for a day (a restart prints a new one).
 # fly.io: fly launch --no-deploy --dockerfile cloud/Dockerfile --internal-port 8080; in fly.toml
 #   set auto_stop_machines = "off", min_machines_running = 1, [env] DEVTEAM_PUBLIC_URL, and
 #   [mounts] source = "data", destination = "/data"; fly volumes create data; fly certs add for
 #   both names; fly deploy.
 # Lost every passkey: in a shell on the box as root (Render's Shell tab, fly ssh console), run
 #   devteam-reclaim, which prints a new claim link (as another user, setpriv fails: use root).
-FROM node:22-bookworm-slim
+FROM node:22-bookworm-slim@sha256:5ec23b7c622b00547753bc6ffd78085dd868a68aeb41c8e0a1418f033e13d96d
 
 ENV LANG=C.UTF-8 SHELL=/bin/bash DISABLE_AUTOUPDATER=1
 
@@ -45,10 +45,15 @@ RUN case "$(uname -m)" in \
  && curl -fsSL -o /usr/local/bin/ttyd "https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.$(uname -m)" \
  && echo "$sum  /usr/local/bin/ttyd" | sha256sum -c - && chmod 755 /usr/local/bin/ttyd
 
-# Both pins below are bumped by editing them here and redeploying.
+# These pins are bumped by editing them here and redeploying.
 # mise, for the toolchains a repo pins (.tool-versions, .mise.toml); its installs land in $HOME, on the volume
-ARG MISE_VERSION=v2026.10.17
-RUN curl -fsSL https://mise.run | MISE_VERSION=$MISE_VERSION MISE_INSTALL_PATH=/usr/local/bin/mise sh
+RUN case "$(uname -m)" in \
+      x86_64) arch=x64; sum=fe6dd17e68e09682b31d2e7bb7bb755d22636ac1af5d94621e300f2ca9e9fe8a ;; \
+      aarch64) arch=arm64; sum=e90904144ba4377c5fbe385f429830282c68f3b4f9c690bf6c5a2ae9b74a809b ;; \
+      *) echo "no mise for $(uname -m)" >&2; exit 1 ;; \
+    esac \
+ && curl -fsSL -o /usr/local/bin/mise "https://github.com/jdx/mise/releases/download/v2026.10.17/mise-v2026.10.17-linux-$arch" \
+ && echo "$sum  /usr/local/bin/mise" | sha256sum -c - && chmod 755 /usr/local/bin/mise
 
 # Claude Code, pinned, and updated by changing this and redeploying (its own updater can't write to /usr/local)
 ARG CLAUDE_CODE_VERSION=2.1.307
@@ -59,7 +64,10 @@ RUN npm install -g @anthropic-ai/claude-code@$CLAUDE_CODE_VERSION && npm cache c
 RUN usermod -l dev -d /data/home node && groupmod -n dev node \
  && groupadd --system --gid 990 gw && useradd --system --uid 990 --gid 990 --home-dir /data/gateway --shell /usr/sbin/nologin gw
 
+# What the gateway serves, root's and read-only: an agent can change a checkout or take a port, not these.
 COPY --chmod=644 cloud/gateway.mjs /opt/devteam/gateway.mjs
+COPY --chmod=644 docs/devteam/dashboard/hub.html /opt/devteam/hub.html
+RUN ttyd -d 0 -i lo -p 17681 true & p=$!; sleep 1; curl -fsS --compressed -o /opt/devteam/ttyd.html http://127.0.0.1:17681/; r=$?; kill $p; [ $r = 0 ] && chmod 644 /opt/devteam/ttyd.html && grep -q xterm /opt/devteam/ttyd.html
 
 # Under tini, as root only to set up /data, then the gateway, and only once it holds the public
 # port, dev's side: dev's shells read files any agent can write, and nothing of dev's may get the
@@ -79,7 +87,7 @@ until curl -fsS -o /dev/null "http://127.0.0.1:${PORT:-8080}/healthz" 2>/dev/nul
   kill -0 "$gw" 2>/dev/null || exit 1
   sleep 0.2
 done
-as_dev /usr/local/bin/devteam-dev &
+as_dev /usr/local/bin/devteam-dev >/dev/null 2>&1 &   # not the platform's log: no agent can write a fake claim link there
 trap 'as_dev tmux kill-server 2>/dev/null; sleep 2; kill -TERM "$gw" 2>/dev/null; exit 0' TERM INT
 wait "$gw"
 EOF
@@ -119,7 +127,7 @@ for k in "$HOME"/code/*/docs/devteam/scripts/devteam.mjs; do
   r=${k%/docs/devteam/scripts/devteam.mjs}
   tmux new-window -d -t home -n "dash-$(basename "$r")" -c "$r" "while :; do /usr/local/bin/node docs/devteam/scripts/devteam.mjs dashboard; sleep 5; done"
 done
-while :; do ttyd -d 3 -i lo -p 7681 -b /term -W -t fontSize=14 -t titleFixed=devteam tmux new-session -A -s home; sleep 1; done
+while :; do ttyd -d 3 -i lo -p 7681 -W -t fontSize=14 -t titleFixed=devteam tmux new-session -A -s home; sleep 1; done
 EOF
 
 VOLUME /data

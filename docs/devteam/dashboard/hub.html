@@ -261,7 +261,7 @@ async function findBox() {
     const r = await fetch('box.json', { cache: 'no-store' });
     const b = r.ok ? await r.json() : null;
     const secure = (u) => { try { return new URL(u.replace('{port}', '1')).protocol === 'https:'; } catch { return false; } };
-    if (b?.box !== 1 || typeof b.terminal !== 'string' || !/^[a-z]+\/$/.test(b.terminal) || typeof b.instance !== 'string' || !b.instance.includes('{port}') || !secure(b.instance)) return;
+    if (b?.box !== 1 || typeof b.terminal !== 'string' || !secure(b.terminal) || typeof b.instance !== 'string' || !b.instance.includes('{port}') || !secure(b.instance)) return;
     box = { terminal: b.terminal, instance: b.instance };
     // signing in and passkeys are on the gateway's own name, never in the hub's
     if (typeof b.passkeys === 'string' && secure(b.passkeys)) {
