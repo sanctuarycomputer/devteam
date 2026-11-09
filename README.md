@@ -160,7 +160,7 @@ Setting up a fleet needs none of this, and a project never copies it: `cloud/` s
 
 ## Contributing
 
-Changes land on `main` through PRs. `node --test` (the kit test in `test/`) must pass. A release is a `vX.Y.Z` tag on `main` with a GitHub Release whose notes have three sections, because projects' supervisors read them to decide what to fold in:
+Changes land on `main` through PRs. `node --test --test-concurrency=8 test/*.test.mjs` (the kit's tests in `test/`; the files run side by side; `test/bounds.test.mjs` times code against a bound, so CI runs it alone first) must pass. A release is a `vX.Y.Z` tag on `main` with a GitHub Release whose notes have three sections, because projects' supervisors read them to decide what to fold in:
 
 - **What** changed, by file or area;
 - **Why**, the reason a project would want it (a change without a why gets skipped);

@@ -313,7 +313,11 @@ const SETTINGS_DEFAULTS = {
   components: {},
   // Named resources the fleet uses: { "<id>": { "kind": "repo"|"url", "title": …, … } }.
   links: {},
-  // How a tagged release reaches production: 'tag' (deploys from the tag) or { branch: 'production' }.
+  // How a release reaches production: 'tag' (deploys from the tag), { branch: 'production' }, or
+  // 'merge' (production deploys whenever main changes, e.g. Heroku's automatic deploys; also
+  // { on: 'merge', paths: ['app/**'] } when only some paths deploy). With 'merge', a merge that
+  // changes what deploys is a release (release-production). Root build manifests (Procfile,
+  // package.json, Dockerfile, …) deploy even outside paths (deployingFiles).
   release: 'tag',
   // Commands a stdin: secret sink may run (prefixes, e.g. "gh secret set"); they run as the owner.
   secret_commands: [],
@@ -1265,6 +1269,9 @@ const logObjects = (type) => [...readLog().objects.values()].filter((o) => o.typ
 const upkeepGoal = () => [...readLog().objects.values()].find((o) => o.type === 'goal' && o.kind === 'upkeep') ?? null;
 const logGet = (id) => readLog().objects.get(id) ?? null;
 const byTime = (a, b) => a.created_at.localeCompare(b.created_at);
+// A message is handled when a reply cites it (--re), or when the supervisor routed it to the owner
+// as a question that cites it (ask --re): then it waits on the owner, which the question shows.
+const handledMessages = () => new Set([...logObjects('message'), ...logObjects('question')].map((x) => x.re).filter(Boolean));
 
 // What the owner saw: the question with every field it was asked with (later lines may only add
 // the supervisor's status and reason, and the owner's own fields). The owner's answer records this
@@ -1329,6 +1336,18 @@ function artifactLinkNow(l) {
   const fp = src ? fingerprint(src.entries) : landed ? fingerprint(landed.entries) : null;
   const href = at === 'main' ? `#artifact/main/${l.artifact}` : at ? `#artifact/wt/${at}/${l.artifact}` : null;
   return { ...l, href, changed: !!at && !!l.sha256 && fp !== l.sha256, gone: !at };
+}
+// Why an answer to q can't bind to the artifacts it links (null when it can): a page that changed
+// since it was asked, or that is no longer there, is not what the owner was asked about, so the
+// owner's answer would approve something they didn't see. Checked when the owner answers and again
+// when an answer is used to approve something.
+function artifactLinksMoved(v) {
+  const now = (v.links ?? []).filter((l) => isObj(l) && l.artifact !== undefined && l.sha256).map(artifactLinkNow);
+  const changed = now.filter((l) => l.changed).map((l) => l.artifact);
+  const gone = now.filter((l) => l.gone).map((l) => l.artifact);
+  if (changed.length) return `${v.id} links the artifact ${changed.join(', ')}, which changed since it was asked; ask again about the page as it is now`;
+  if (gone.length) return `${v.id} links the artifact ${gone.join(', ')}, which is no longer available; ask again`;
+  return null;
 }
 const questions = () => logObjects('question').map((q) => { const v = questionView(q); return { ...v, links: resolveQuestionLinks(v.links, v.status === 'open'), goal_hold: questionHold(q) }; });
 
@@ -1476,14 +1495,6 @@ const LOG_BRANCH = 'chore-log';
 
 // Mirror run/log into project/log on branch chore-log, in its own worktree, and open or update the
 // log-only PR. Run it every tick (it pushes); merge it daily with `merge --chore log`.
-function logPrOpen(wt, main) {
-  if (loadSettings().forge !== 'git') {
-    const open = repo('home').gh(['pr', 'list', '--head', LOG_BRANCH, '--state', 'open', '--json', 'number', '--jq', 'length'], { cwd: wt });
-    if (open !== null) return Number(open) > 0;
-  }
-  // forge git (merge lands a --no-ff merge) or no gh: open means not yet on main
-  return git(['merge-base', '--is-ancestor', `origin/${LOG_BRANCH}`, resolveCommit(`origin/${main}`) ? `origin/${main}` : main], wt) === null;
-}
 function cmdLogSync() {
   supervisorOnly('log-sync');
   if (!commonDir || !projectInRepo) die('log-sync needs a git checkout with the project folder inside it');
@@ -1492,14 +1503,15 @@ function cmdLogSync() {
   const files = fs.existsSync(live) ? fs.readdirSync(live).filter((f) => f.endsWith('.jsonl') && !isPlanFile(f)).sort() : [];
   if (!files.length) return out('nothing in run/log to sync');
   const wt = choreWorktree('log', { reset: true });
-  // A sync whose PR is still open is extended, not rebuilt, so every push fast-forwards: forges
-  // that refuse non-fast-forward pushes (branch rulesets, protected branches) accept it. The
-  // extended branch takes main in by a merge (still a fast-forward for the branch), so its PR is
-  // never behind. Whether the PR is open comes from the forge: after a squash or rebase merge the
-  // branch is never an ancestor of main, and a stale origin/chore-log outlives a deleted branch.
+  // An existing chore-log is extended, never rebuilt, so every push fast-forwards: forges that
+  // refuse non-fast-forward pushes or branch deletion (branch rulesets, protected branches) accept
+  // it, whether its PR is still open or was squash-merged and the branch kept. The extended branch
+  // takes main in by a merge (still a fast-forward for the branch), so its PR is never behind and
+  // carries only lines main doesn't have. A branch deleted on the forge leaves a stale
+  // origin/chore-log, dropped here, and the sync starts from main.
   const main = loadSettings().main_branch;
   if (!flags['dry-run'] && git(['fetch', '--quiet', 'origin', `+refs/heads/${LOG_BRANCH}:refs/remotes/origin/${LOG_BRANCH}`], wt) === null) git(['update-ref', '-d', `refs/remotes/origin/${LOG_BRANCH}`], wt);
-  if (resolveCommit(`origin/${LOG_BRANCH}`) && logPrOpen(wt, main)) {
+  if (resolveCommit(`origin/${LOG_BRANCH}`)) {
     gitOrDie(['checkout', '--quiet', '-B', LOG_BRANCH, `origin/${LOG_BRANCH}`], wt);
     const base = resolveCommit(`origin/${main}`) ? `origin/${main}` : main;
     if (git(['merge', '--quiet', '--no-edit', '-m', `chore-log: merge ${main}`, base], wt) === null) {
@@ -1559,6 +1571,40 @@ function questionRewrites() {
   for (const q of logObjects('question')) if (questionView(q).rewritten) errors.push(`${q.id}: the question changed after the owner answered it, so that answer no longer counts and it is open again`);
   for (const i of readLog().ignored) if (i.line.type === 'question' && i.why === 'duplicate id') warnings.push(`${i.line.id}: a second question line with this id (${i.line.__file}:${i.line.__line}); a question is asked once`);
   return { errors, warnings };
+}
+// Fill a finding's Disposition cell in a review record, keeping the row the header's width: the
+// author's way to answer a finding without hand-editing the table (a hand-added cell makes a row a
+// reviewer reads as malformed). Only a cell that holds no disposition yet can be filled, as
+// fillInOnly allows, so a filled record still holds the verdicts after it.
+function cmdDispose() {
+  const [id, file, fid, ...rest] = positional;
+  const text = rest.join(' ').trim();
+  if (!id || !file || !FINDING_ID.test(fid ?? '') || !text) die('usage: dispose <ticket> <record.md> <finding id, e.g. F1 or R2> "fixed | wont-fix <reason> | wrong <reason>"');
+  if (!disposed(text)) die(`"${text}" isn't a disposition: start it with fixed, wont-fix <reason> or wrong <reason>`);
+  if (/[|\n]/.test(text)) die('a disposition is one line with no "|"');
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(id) || !/^[a-z0-9][a-z0-9-]*\.md$/.test(file)) die('dispose <ticket> <record.md>: a ticket id and a record file name');
+  const rel = path.join(projectRel, 'tickets', id, 'reviews', file);
+  const abs = path.join(repoRoot, rel);
+  const before = readText(abs);
+  if (before === null) die(`no review record ${rel} in this checkout`);
+  const lines = before.split('\n');
+  let disp = -1, width = 0, done = false;
+  for (let k = 0; k < lines.length; k++) {
+    if (!lines[k].trim().startsWith('|')) continue;
+    const cells = tableCells(lines[k]);
+    const lower = cells.map((c) => c.toLowerCase());
+    if (lower.includes('disposition')) { disp = lower.indexOf('disposition'); width = cells.length; continue; }
+    if (cells[0] !== fid || disp < 0) continue;
+    const cur = cells.length > width ? (cells.slice(disp).find((c) => c) ?? '') : (cells[disp] ?? '');
+    if (disposed(cur)) die(`${file} ${fid} already has a disposition ("${cur}"); a disposition given doesn't change`);
+    const row = Array.from({ length: width }, (_, j) => (j === disp ? text : (cells[j] ?? '')));
+    lines[k] = `| ${row.map((c) => c.replace(/\|/g, '\\|')).join(' | ')} |`;
+    done = true;
+    break;
+  }
+  if (!done) die(`${file} has no finding ${fid} under a table with a Disposition column`);
+  fs.writeFileSync(abs, lines.join('\n'));
+  out(`${rel} ${fid}: ${text}`);
 }
 function cmdLogCheck() {
   const names = new Set();
@@ -2116,6 +2162,11 @@ function plannersNow() {
     const by = `plan-${feature}`;
     // landed once its plan file is on main (a fresh planner's branch sits at main's tip, uncommitted)
     if (main && git(['cat-file', '-e', `${main}:${projectRel}/log/${by}.jsonl`]) !== null) return null;
+    // or once its branch came into main by a merge (its tip in main, off main's own first-parent
+    // line): a design-change planner that wrote into another plan's file and merged through it.
+    // A fresh planner's branch sits on a first-parent commit of main, so it still shows.
+    const tip = git(['rev-parse', b]);
+    if (main && tip && git(['merge-base', '--is-ancestor', tip, main]) !== null && !mainLog().some((c) => c.sha === tip)) return null;
     const wt = path.join(mainRoot, '.worktrees', by);
     const planFile = path.join(wt, projectRel, 'log', `${by}.jsonl`);
     const graph = readText(planFile) ?? git(['show', `${b}:${projectRel}/log/${by}.jsonl`]) ?? '';
@@ -2128,7 +2179,7 @@ function plannersNow() {
     const last = stamps.filter(Boolean).map((x) => new Date(x).toISOString()).sort().pop() ?? null;
     const { target, problem } = resolvePane(tmuxTarget(by));
     const msgs = lines.filter((l) => l.type === 'message');
-    const replied = new Set(msgs.map((m) => m.re).filter(Boolean));
+    const replied = handledMessages();
     const asking = msgs.filter((m) => m.by === by && !['info', 'ruling', 'answer'].includes(m.kind) && !replied.has(m.id));
     // Before its feature line exists (while designing), a planner's goal is the one its questions
     // name: a question whose links point at this plan branch.
@@ -2402,6 +2453,12 @@ function cmdValidate() {
   for (const [c, v] of Object.entries(loadSettings().autonomy_ceilings ?? {})) {
     if (raw[c] === undefined) errors.push(`settings autonomy_ceilings: "${c}" is not a ladder class in constitution.md`);
     else if (v > raw[c]) errors.push(`settings autonomy_ceilings: ${c} ${v} is above the constitution's ceiling ${raw[c]}; a project may only lower it`);
+  }
+  {
+    const s = loadSettings();
+    // one that could mean deploy-on-merge is an error (merge fails closed on it); any other a warning
+    const rs = [[s.release, 'settings release'], ...Object.entries(s.links ?? {}).filter(([, l]) => isObj(l) && l.release !== undefined).map(([lid, l]) => [l.release, `settings links.${lid}.release`])];
+    for (const [r, at] of rs) { const bad = releaseProblem(r, at); if (bad) (releaseMayBeOnMerge(r) ? errors : warnings).push(releaseMayBeOnMerge(r) ? bad : `${bad}; read as not deploying on merge`); }
   }
   const td = path.join(projectDir, 'tickets');
   if (fs.existsSync(td)) for (const f of fs.readdirSync(td)) if (!f.startsWith('.') && !ts.has(f)) errors.push(`project/tickets/${f}/ has no ticket`);
@@ -2711,7 +2768,8 @@ function graphEdit(type, idRe) {
 const tableCells = (row) => row.trim().replace(/^\|/, '').replace(/(?<!\\)\|$/, '').split(/(?<!\\)\|/).map((c) => c.trim().replace(/\\\|/g, '|'));
 
 // A record is <stage>-<pass>[<track>].md with "- Reviewer: <name>" and a last line
-// "Verdict: APPROVE|CHANGES <full sha>"; findings are table rows F<n> with a Disposition column.
+// "Verdict: APPROVE|CHANGES <full sha>"; findings are table rows whose id is a capital prefix and a
+// number (F1, R2, CR3) under a header with a Disposition column.
 function parseReview(file, text) {
   const m = file.match(/^([a-z]+)-(\d+)([a-z]?)\.md$/);
   const verdict = [...text.matchAll(/^Verdict:[ \t]*(APPROVE|CHANGES)[ \t]+(\S+)[ \t]*$/gm)].pop();
@@ -2730,7 +2788,7 @@ function parseReview(file, text) {
     // A row wider than its header (a stray empty cell before the disposition) still has its
     // disposition: the first non-empty cell from the Disposition column on.
     const disposition = dispIdx < 0 ? '' : cells.length > width ? (cells.slice(dispIdx).find((c) => c) ?? '') : (cells[dispIdx] ?? '');
-    if (/^F\d+$/.test(cells[0] ?? '')) findings.push({ id: cells[0], severity: cells[sevIdx] ?? '', disposition });
+    if (FINDING_ID.test(cells[0] ?? '')) findings.push({ id: cells[0], severity: cells[sevIdx] ?? '', disposition, ...(width && cells.length !== width ? { cells: cells.length, width } : {}) });
   }
   return {
     file, stage: m ? m[1] : file.replace(/\.md$/, ''), pass: m ? Number(m[2]) : 0, variant: m ? m[3] : '',
@@ -2747,6 +2805,8 @@ function latestPerTrack(records, stage) {
   for (const r of records.filter((x) => x.stage === stage)) { const p = latest.get(r.variant); if (!p || r.pass > p.pass) latest.set(r.variant, r); }
   return [...latest.values()];
 }
+// A finding's id: a short capital prefix and a number (F1, R2, CR3, S1b): reviewers prefix by kind.
+const FINDING_ID = /^[A-Z]{1,4}\d+[a-z]?$/;
 const blocking = (sev) => /^(critical|important)$/i.test(sev);
 const disposed = (d) => /^(fixed|wrong|wont-fix\b|won't-fix\b)/i.test(d ?? '');
 
@@ -2794,8 +2854,9 @@ function oneWayDoorsSection(body) {
 // each merge is exactly git's own merge of its parents. A conflict fix that touched the work
 // changes both, so it voids the verdict; a clean merge of main does not.
 // A record edit that only fills in what the record lacked: a "- Reviewer:" line where there was
-// none, and Disposition cells that were empty. Verdicts, findings and dispositions already given
-// can't change this way, so a dissent still can't be edited away.
+// none, and Disposition cells that were empty or held no disposition yet, each given a disposition.
+// Verdicts, findings and dispositions already given can't change this way, so a dissent still
+// can't be edited away.
 function fillInOnly(before, after) {
   if (before === null || after === null) return false;
   // blank lines carry nothing in a record, so they're left out of the comparison
@@ -2813,7 +2874,8 @@ function fillInOnly(before, after) {
     if (a[k] === b[k]) continue;
     if (disp < 0 || !a[k].trim().startsWith('|') || !b[k].trim().startsWith('|')) return false;
     const x = tableCells(a[k]), y = tableCells(b[k]);
-    if (x.length !== y.length || x.some((c, j) => j !== disp && c !== y[j]) || x[disp] !== '' || !y[disp]) return false;
+    // an empty cell, or one that isn't a disposition yet (a reviewer's "Accepted; …"), may become one
+    if (x.length !== y.length || x.some((c, j) => j !== disp && c !== y[j]) || !(x[disp] === '' ? y[disp] : !disposed(x[disp]) && disposed(y[disp]))) return false;
   }
   return true;
 }
@@ -2826,7 +2888,8 @@ function verdictHolds(v, head, dir, R = repo('home')) {
   // Each adds a review record, or fills one in mechanically (fillInOnly): an empty Disposition cell
   // filled, a missing "- Reviewer:" line added. Nothing else in a record may change.
   let commit = null;
-  const isRecord = (file) => file?.startsWith(dir) && /^(?:[a-z0-9-]+\/)?[a-z]+-\d+[a-z]?\.md$/.test(file.slice(dir.length));
+  // <stage>-<pass>[<track>].md, or a task's later pass, task-<n>-<pass>[<track>].md
+  const isRecord = (file) => file?.startsWith(dir) && /^(?:[a-z0-9-]+\/)?[a-z]+-\d+(?:-\d+)?[a-z]?\.md$/.test(file.slice(dir.length));
   const onlyRecords = (R.git(['log', '--no-merges', '--no-renames', '--format=@%H', '--name-status', `${v}..${head}`, ...(main ? [`^${main}`] : [])]) ?? 'x').split('\n').filter(Boolean).every((l) => {
     if (l.startsWith('@')) { commit = l.slice(1); return true; }
     const [st, file] = l.split('\t');
@@ -3037,7 +3100,9 @@ function checkTicket(id, { sha: shaArg, title, body, approvals = true }) {
   const approvers = new Set(latest.filter((r) => r.verdict === 'APPROVE' && holdsAt(r.sha) && r.reviewer).map((r) => r.reviewer));
   const need = t.risk === 'high' ? 2 : 1;
   if (approvers.size < need) fails.push(`needs ${need} final APPROVE review(s) at this head from different named reviewers; found ${approvers.size}`);
-  for (const r of reviews) for (const f of r.findings) if (blocking(f.severity) && !disposed(f.disposition)) fails.push(`${r.file} ${f.id} (${f.severity}) has no disposition`);
+  for (const r of reviews) for (const f of r.findings) if (blocking(f.severity) && !disposed(f.disposition)) fails.push(`${r.file} ${f.id} (${f.severity}) has no disposition${f.disposition ? ` ("${f.disposition.slice(0, 40)}" isn't one)` : ''}: the author starts its Disposition cell with fixed, wont-fix <reason> or wrong <reason>`);
+  // a row whose cell count differs from its header reads fine here, but not to a reviewer: say how to fill one
+  for (const r of reviews) for (const f of r.findings) if (f.cells) warn(`${r.file} ${f.id}: its row has ${f.cells} cells and the header ${f.width}; fill a Disposition with devteam.mjs dispose ${'<ticket>'} ${r.file} ${f.id} "fixed", which keeps the row's shape`);
   const base = R.mainRef() && sha ? R.git(['merge-base', R.mainRef(), sha]) : null;
   if (R.commonDir && !base) fails.push(`cannot resolve main branch "${R.settings.main_branch}"${R.name === 'home' ? '' : ` in ${R.name}`}; footprint not checked`);
   if (base) {
@@ -3091,6 +3156,12 @@ function cmdCheckTicket() {
     if (!pr) die('gh pr view failed');
     const p = JSON.parse(pr);
     title ??= p.title; body ??= p.body; sha ??= p.headRefOid;
+  }
+  // Run anywhere but on the ticket's own branch (the supervisor's main checkout), with no head
+  // named: the ticket's branch is what's judged, not whatever this checkout has checked out.
+  if (!sha && R.commonDir && (cwdRepo() !== R || cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']) !== `ticket/${id}`)) {
+    sha = R.resolveCommit(`ticket/${id}`) ?? R.resolveCommit(`origin/ticket/${id}`) ?? undefined;
+    if (sha) out(`checking ticket/${id} at ${sha.slice(0, 12)} (no --sha given, and this checkout isn't on it)`);
   }
   report(checkTicket(id, { sha, title, body }), `${id} meets the definition of done at ${(headIn(R, sha) ?? '').slice(0, 12)}`);
 }
@@ -3269,8 +3340,10 @@ function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('hom
   if (branch.startsWith('plan/')) {
     const feature = branch.slice('plan/'.length);
     if (title !== undefined && !title.startsWith(`plan-${feature}: `)) fails.push(`PR title must start with "plan-${feature}: "`);
-    // validate --strict at the exact head, in a detached worktree of that head.
-    const wt = detachedWorktree(sha, `check-${feature}`);
+    // validate --strict at the exact head, in a detached worktree of that head. It only reads the
+    // plan and the log, so the checkout is not seeded: no worktree_files, no worktree_setup (a CI
+    // runner has neither the project's untracked files nor its toolchain).
+    const wt = detachedWorktree(sha, `check-${feature}`, repo('home'), { seed: false });
     try {
       execFileSync(process.execPath, [path.join(wt, 'docs', 'devteam', 'scripts', 'devteam.mjs'), 'validate', '--strict'], { cwd: wt, stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (e) {
@@ -3369,7 +3442,7 @@ function seedWorktree(wt, { setup = true, repo: R = repo('home') } = {}) {
 // Another repo's lives in the OS temp folder (where secret post already makes its own), never under
 // home's tree: a gate there would otherwise pass on home's node_modules, .tool-versions and lint or
 // ts configs, found by walking up the directories. Home's stays under home's .worktrees, as before.
-function detachedWorktree(sha, name, R = repo('home')) {
+function detachedWorktree(sha, name, R = repo('home'), { seed = true } = {}) {
   const holder = R.name === 'home' ? null : fs.mkdtempSync(path.join(os.tmpdir(), `devteam-${R.name}-`));
   const wt = holder ? path.join(holder, `tmp-${name}`) : path.join(mainRoot, '.worktrees', `tmp-${name}-${process.pid}`);
   R.gitOrDie(['worktree', 'add', '--quiet', '--detach', wt, sha], R.root);
@@ -3378,7 +3451,7 @@ function detachedWorktree(sha, name, R = repo('home')) {
     // the empty holder only (rmdir refuses anything with files left in it)
     if (holder) try { fs.rmdirSync(holder); } catch {}
   });
-  seedWorktree(wt, { repo: R });
+  if (seed) seedWorktree(wt, { repo: R });
   return wt;
 }
 // The repo a worktree belongs to, computed from git, never recorded: null for a
@@ -3508,6 +3581,7 @@ function ownerAnswer(qid, what) {
   const v = q?.type === 'question' ? questionView(q) : null;
   if (!v || v.status !== 'answered') die(`${what}: ${qid} is not a question the owner answered`);
   reviewApproves(v, what);
+  { const moved = artifactLinksMoved(v); if (moved) die(`${what}: ${moved}`); }
   // An answer approves what it said yes to: the owner's answer must be the question's
   // recommendation (a review, its verified result). Answered any other way, the owner declined or
   // changed it, and the supervisor asks again; a secrets question approves by what was posted.
@@ -3521,6 +3595,61 @@ function reviewApproves(v, what) {
   if (v.result_status !== 'verified') die(`${what}: ${v.id} is a review whose result is ${v.result_status}; it approves nothing until it verifies (review show ${v.id})`);
 }
 
+// settings release (home's, or a repo link's): 'tag', 'merge', { branch: '<name>' }, or
+// { on: 'merge', paths: [globs] }. Anything else is a problem. One that could mean deploy-on-merge
+// ("merge", or an object with on: "merge") fails closed at merge, since a misread shape would let a
+// release through unchecked; any other is a warning (it never meant merging deploys).
+const releaseMayBeOnMerge = (r) => r === 'merge' || (isObj(r) && r.on === 'merge');
+function releaseProblem(r, at = 'release') {
+  if (r === undefined || r === 'tag' || r === 'merge') return null;
+  const shapes = `"tag", "merge", { "branch": "<name>" } or { "on": "merge", "paths": ["<glob>", …] }`;
+  if (!isObj(r)) return `${at}: ${shapes}`;
+  const keys = Object.keys(r);
+  if (keys.includes('branch') && !keys.includes('on')) return keys.length === 1 && typeof r.branch === 'string' && r.branch ? null : `${at}: { "branch": "<name>" } takes nothing else (${shapes})`;
+  if (r.on !== 'merge') return `${at}: ${keys.includes('paths') ? 'paths needs "on": "merge" (without it nothing is checked as a release)' : `"on" is "merge"`}; ${shapes}`;
+  const extra = keys.filter((k) => !['on', 'paths'].includes(k));
+  if (extra.length) return `${at}: ${extra.join(', ')} is not a release field (on, paths)`;
+  if (r.paths !== undefined && !(Array.isArray(r.paths) && r.paths.length && r.paths.every((g) => typeof g === 'string' && g && !g.startsWith('!')))) return `${at}.paths: a non-empty list of globs, no negations (leave paths out when every merge deploys)`;
+  return null;
+}
+// Files that deploy whatever paths says: a platform rebuilds the app when its build setup changes.
+// A list with gaps by nature: the owner lists anything else that deploys in paths (quality.md §5).
+const DEPLOY_MANIFESTS = ['Procfile', 'app.json', 'heroku.yml', 'Aptfile', '.slugignore', '.buildpacks', '.profile.d/**', 'bin/pre_compile', 'bin/post_compile', 'Dockerfile', 'Dockerfile.*', '.dockerignore', 'docker-compose.yml', 'fly.toml', 'render.yaml', 'vercel.json', 'netlify.toml', 'nixpacks.toml', 'railway.json', 'package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', '.yarnrc', '.yarnrc.yml', '.yarn/**', '.npmrc', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'bun.lockb', 'bun.lock', 'tsconfig.json', 'next.config.*', 'vite.config.*', 'Gemfile', 'Gemfile.lock', 'requirements.txt', 'Pipfile', 'Pipfile.lock', 'pyproject.toml', 'poetry.lock', 'uv.lock', 'go.mod', 'go.sum', 'Cargo.toml', 'Cargo.lock', 'composer.json', 'composer.lock', 'runtime.txt', '.node-version', '.nvmrc', '.ruby-version', '.python-version', '.tool-versions'];
+// On a repo that deploys when main changes, the files of a PR that deploy: those outside the kit's
+// line, or with release.paths those matching it plus the build files above (never the kit's line:
+// the log and records don't deploy). { files: [] } when merging deploys nothing; { problem } when
+// it can't be told (fail closed); { warning } beside either.
+function deployingFiles(R, base, sha) {
+  const S = R.settings;
+  const r = S.release;
+  const bad = releaseProblem(r, R.name === 'home' ? 'settings release' : `links.${R.name}.release`);
+  if (bad && releaseMayBeOnMerge(r)) return { problem: `${bad}; merge can't tell what deploys` };
+  const warning = bad ? `${bad}; read as not deploying on merge` : undefined;
+  const onMerge = !bad && (r === 'merge' || r?.on === 'merge' || (r?.branch && r.branch === S.main_branch));
+  if (!onMerge) return { files: [], warning };
+  const where = R.name === 'home' ? '' : ` in ${R.name}`;
+  if (!base) return { problem: `release is on merge and there is no merge base with ${S.main_branch}${where}; merge can't tell what deploys` };
+  // the diff itself, not changedFiles (which reads a failed diff as no files)
+  const diff = R.git(['diff', '-z', '--name-only', '--no-renames', base, sha]);
+  if (diff === null) return { problem: `release is on merge and the diff ${base.slice(0, 12)}..${sha.slice(0, 12)}${where} failed; merge can't tell what deploys` };
+  const kit = R.devteamLine();
+  const files = diff.split('\0').filter(Boolean).filter((f) => !kit.some((g) => pathMatches(g, f)));
+  if (Array.isArray(r?.paths)) return { files: files.filter((f) => DEPLOY_MANIFESTS.some((g) => pathMatches(g, f)) || r.paths.some((g) => pathMatches(g, f))) };
+  return { files };
+}
+
+// A release decision made on the owner's answer (or a default) releases only what that question
+// named: its ticket, or the targets it approves (a batch: ask --approves). A question naming
+// neither releases nothing, so one yes can't be spread over tickets the owner never saw.
+function releaseAnswerGap(d, targets) {
+  if (!['answer', 'default'].includes(d.authority)) return null;
+  const q = d.approved_by?.startsWith('q-') ? logGet(d.approved_by) : null;
+  const v = q?.type === 'question' ? questionView(q) : null;
+  if (!v) return `rests on ${d.approved_by ?? 'no question'}, which is not a question`;
+  const named = [v.ticket, ...(v.approves ?? [])].filter(Boolean);
+  if (!named.length) return `rests on ${v.id}, which names no ticket or target (ask --ticket <id>, or --approves <ids> for a batch); a release answer releases only what it named`;
+  return targets.some((t) => named.includes(t)) ? null : `rests on ${v.id}, which was about ${named.join(', ')}, not ${targets[0]}; ask about this one`;
+}
 // The merge word, as a command: verify everything at the PR's exact head, run the project's gates
 // there, then merge refusing a moved head, then log the act. Only the supervisor runs it.
 // --dry-run runs every check and gate and stops; without a PR it checks the branch's local head.
@@ -3625,18 +3754,53 @@ function cmdMerge() {
       }
     }
   }
+  // Deploys on merge: merging this is releasing it, so it needs release-production's authority: the
+  // class on rung 3, or a release-production decision this merge carries out (--decision).
+  // In the ticket's own repo, under that repo's release setting (a link inherits home's).
+  let release = null;
+  // the decision is checked like an act's (decisionFor: not corrected, not lapsed, its recorded
+  // authority holds against the log, its owner answer not used for anything else)
+  const decided = flagStr('decision') ? decisionFor(flagStr('decision')) : null;
+  const releaseDecision = decided?.class === 'release-production' ? decided : null;
+  {
+    const base = R.mainRef() ? R.git(['merge-base', R.mainRef(), sha]) : null;
+    const dep = deployingFiles(R, base, sha);
+    const deploys = dep.files ?? [];
+    const target = id ?? (chore ? `chore-${chore}` : plan);
+    const targets = [target, plan ? `plan-${plan}` : null].filter(Boolean);
+    if (dep.warning) warn(dep.warning);
+    if (dep.problem) fails.push(dep.problem);
+    else if (deploys.length) {
+      const d = releaseDecision;
+      const rung = rungFor('release-production');
+      // One release decision is carried out once per target: a second merge of the same chore slug
+      // (or the same decision cited again) decides again.
+      const done = d && logObjects('act').find((a) => a.decision === d.id && a.class === 'release-production' && (a.refs ?? []).some((r) => targets.includes(r)));
+      const unbound = d && releaseAnswerGap(d, targets);
+      if (d && !(d.refs ?? []).some((r) => targets.includes(r))) fails.push(`${d.id} releases ${(d.refs ?? []).join(', ') || 'nothing named'}, not ${target}; decide again for this one`);
+      else if (unbound) fails.push(`${d.id} ${unbound}`);
+      else if (done) fails.push(`${d.id} was already carried out for ${target} (${done.id}); a release decision releases once: decide again for this one`);
+      else if (d) release = { decision: d.id, target };
+      else if (rung >= 3) release = { rung, target };
+      else fails.push(`merging deploys to production${inR} (release: merge; it changes ${deploys.slice(0, 3).join(', ')}${deploys.length > 3 ? ', …' : ''}), and release-production is on rung ${rung} (${RUNG[rung]}): ask --class release-production --ticket ${target} …, then decide --class release-production --refs ${target} --approved <qid> -- "release …", then merge --decision <d-id>`);
+      if (release) out(`merging deploys to production${inR}: a release-production act will be logged (${release.decision ? `under ${release.decision}` : `rung ${rung}`})`);
+    } else if (releaseDecision) out(`${releaseDecision.id} is a release-production decision, and this merge deploys nothing; it is not carried out`);
+  }
   if (chore) {
     const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
     const kit = base ? changedFiles(base, sha).filter((f) => !f.startsWith(`${projectRel}/`)) : [];
+    // Only these two standing rules approve kit files: an owner's rule that settles owner settings
+    // (a gate-change rule, owner_rules) says nothing about the kit's files.
+    let kitRule = null;
     if (kit.length && !approved && chore.startsWith('devteam-sync-')) {
       const r = upstreamSyncApproval(chore, sha, kit);
-      if (r.rule) { standing = r; out(`kit files match upstream ${r.tag} exactly; approved by the owner's standing rule ${r.rule.id}`); } else if (r.problem) fails.push(r.problem);
+      if (r.rule) { kitRule = standing = r; out(`kit files match upstream ${r.tag} exactly; approved by the owner's standing rule ${r.rule.id}`); } else if (r.problem) fails.push(r.problem);
     }
-    if (kit.length && !approved && !standing && base) {
+    if (kit.length && !approved && !kitRule && base) {
       const r = ciFixApproval(chore, sha, base, kit);
-      if (r.rule) { standing = r; out(`changes only workflow files and keeps every job; approved by the owner's standing rule ${r.rule.id} ("${r.rule.statement}")`); } else if (r.problem) fails.push(r.problem);
+      if (r.rule) { kitRule = standing = r; out(`changes only workflow files and keeps every job; approved by the owner's standing rule ${r.rule.id} ("${r.rule.statement}")`); } else if (r.problem) fails.push(r.problem);
     }
-    if (kit.length && !approved && !standing) fails.push(`touches files outside project/ (${kit.slice(0, 6).join(', ')}${kit.length > 6 ? ', …' : ''}); the owner's answer is needed: merge --chore ${chore} --approved <qid>`);
+    if (kit.length && !approved && !kitRule) fails.push(`touches files outside project/ (${kit.slice(0, 6).join(', ')}${kit.length > 6 ? ', …' : ''}); the owner's answer is needed: merge --chore ${chore} --approved <qid>`);
   }
   if (approved) {
     const av = ownerAnswer(approved, 'merge --approved');
@@ -3723,7 +3887,12 @@ function cmdMerge() {
   // home resets exactly what it reset before (G1); another repo resets all of its own caches
   if (R.name === 'home') { mainLogCache = undefined; mergeShaCache.clear(); } else R.resetCaches();
   const cls = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
-  const act = appendLog({ type: 'act', decision: citing(), class: cls, what: `merged ${branch} at ${sha}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag}, verbatim)` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [], reversible: false, approved_by: approved ?? standing?.rule.id ?? undefined, ...onR }, 'supervisor');
+  // A release-production decision is carried out by the release act, never by the merge act.
+  const act = appendLog({ type: 'act', decision: releaseDecision ? undefined : citing(), class: cls, what: `merged ${branch} at ${sha}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag}, verbatim)` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [], reversible: false, approved_by: approved ?? standing?.rule.id ?? undefined, ...onR }, 'supervisor');
+  if (release) {
+    const rel = appendLog({ type: 'act', class: 'release-production', decision: release.decision, rung: release.rung, what: `released ${release.target}${inR} to production by merging ${branch} at ${sha} (release: merge)`, refs: [release.target, act.id], reversible: false, ...onR }, 'supervisor');
+    out(`released ${release.target}${inR} to production (${rel.id})`);
+  }
   out(`merged ${branch} at ${sha.slice(0, 12)}${inR} (${act.id})`);
 }
 // ===== 7. trust =====
@@ -4048,6 +4217,7 @@ function cmdAnswer() {
   const { by } = fromChat ? { by: 'owner' } : ownerWriter();
   const v = openQuestion(id, ['open', 'defaulted']);
   if (flagStr('seen') && flagStr('seen') !== v.hash) die(`${id} changed since you saw it; reload and read it again before you answer`);
+  { const moved = artifactLinksMoved(v); if (moved) die(moved); }
   if (v.kind === 'goal-approval') die(`${id} approves a goal on its design: the owner answers it with goal decide ${v.goal} approve|refine|let-go [--notes "…"] (or on the dashboard)`);
   // A review is answered by the owner's own process with its result, or sent back with a reason;
   // never in free text, never from chat (a chat can't carry rows, and the supervisor must not
@@ -5269,7 +5439,15 @@ function decisionAuthorityGap(d) {
   if (ownerOnly && !(d.authority === 'standing-rule' && (L.owner_rules ?? []).includes(d.class))) return v && inClass && v.status === 'answered' ? answerUseGap(d, v) : `${d.class} is the owner's and needs the owner's answer in that class`;
   switch (d.authority) {
     case 'answer': return v && inClass && v.status === 'answered' ? answerUseGap(d, v) : `no answered ${d.class} question ${d.approved_by ?? ''}`.trim();
-    case 'default': return v && inClass && v.status === 'defaulted' ? null : `no defaulted ${d.class} question ${d.approved_by ?? ''}`.trim();
+    // A default stands in for the owner only where the owner put the class on rung 2 (ask with a
+    // default), only once the question's deadline passed with no answer, and once, as decide
+    // enforces: a decision line written by hand gets the same rule.
+    case 'default': {
+      if (!(v && inClass && v.status === 'defaulted' && v.default)) return `no defaulted ${d.class} question ${d.approved_by ?? ''}`.trim();
+      if (!L.classes[d.class] || rungFor(d.class, d.scope ?? null) < 2) return `${d.class} is not on rung 2 or above${d.scope ? ` for ${d.scope}` : ''}, so a default is not approval there`;
+      if (v.deadline && v.answered_at && v.answered_at < v.deadline) return `${v.id} was defaulted before its deadline (${v.deadline})`;
+      return answerUseGap(d, v);
+    }
     case 'standing-rule': { const k = logGet(d.approved_by ?? ''); return k?.type === 'knowledge' && writerClass(k.created_by) === 'owner' && k.status === 'accepted' && k.scope === `class:${d.class}` ? null : `no accepted owner rule scoped class:${d.class}`; }
     case 'rung': return L.classes[d.class] && rungFor(d.class, d.scope ?? null) >= 3 ? null : `${d.class} is not on rung 3`;
     case 'constitution': return (L.constitutional ?? []).includes(d.class) || !L.classes[d.class] ? null : `${d.class} is on the ladder, not constitutional`;
@@ -6550,19 +6728,22 @@ function gateStats(runs) {
   for (const [g, rs] of byGate) {
     const bySha = new Map();
     for (const r of rs.filter((x) => !x.dirty)) (bySha.get(r.sha) ?? bySha.set(r.sha, []).get(r.sha)).push(r);
-    const flaky = [...bySha.values()].filter((x) => x.some((r) => r.ok) && x.some((r) => !r.ok)).length;
-    if (flaky) flakyGates.push({ gate: g, commits: flaky });
+    const flips = [...bySha.values()].filter((x) => x.some((r) => r.ok) && x.some((r) => !r.ok));
+    if (flips.length) flakyGates.push({ gate: g, commits: flips.length, last_flip: flips.flat().map((r) => r.created_at).sort().pop() ?? null });
     gates.push({ gate: g, runs: rs.length, fail_rate: +(rs.filter((r) => !r.ok && !r.preexisting).length / rs.length).toFixed(2), preexisting_fails: rs.filter((r) => r.preexisting).length, median_seconds: +(median(rs.map((r) => r.ms)) / 1000).toFixed(1), max_seconds: +(Math.max(...rs.map((r) => r.ms)) / 1000).toFixed(1) });
   }
   const flakyTests = new Map();
   const testMs = new Map();
   for (const r of runs) for (const t of r.tests ?? []) {
     if (!t.failed) (testMs.get(t.name) ?? testMs.set(t.name, []).get(t.name)).push(t.ms);
-    if (t.failed && !r.dirty && runs.some((o) => o !== r && !o.dirty && o.gate === r.gate && o.sha === r.sha && o.ok && o.created_at >= r.created_at)) flakyTests.set(t.name, (flakyTests.get(t.name) ?? 0) + 1);
+    if (t.failed && !r.dirty && runs.some((o) => o !== r && !o.dirty && o.gate === r.gate && o.sha === r.sha && o.ok && o.created_at >= r.created_at)) {
+      const p = flakyTests.get(t.name) ?? { times: 0, last: '' };
+      flakyTests.set(t.name, { times: p.times + 1, last: r.created_at > p.last ? r.created_at : p.last });
+    }
   }
   return {
     gates: gates.sort((a, b) => b.median_seconds - a.median_seconds), flaky_gates: flakyGates,
-    flaky_tests: [...flakyTests.entries()].sort((a, b) => b[1] - a[1]).map(([name, times]) => ({ name, times })),
+    flaky_tests: [...flakyTests.entries()].sort((a, b) => b[1].times - a[1].times).map(([name, x]) => ({ name, times: x.times, last_flip: x.last || null })),
     slowest_tests: [...testMs.entries()].map(([name, xs]) => ({ name, median_seconds: +(median(xs) / 1000).toFixed(1) })).sort((a, b) => b.median_seconds - a.median_seconds).slice(0, 10),
   };
 }
@@ -6884,7 +7065,7 @@ function collectMetrics(since) {
 
   const msgs = logObjects('message').filter((m) => Date.parse(m.created_at) >= since).sort(byTime);
   const replies = new Map();
-  for (const m of msgs) if (m.re && !replies.has(m.re)) replies.set(m.re, Date.parse(m.created_at));
+  for (const m of [...msgs, ...logObjects('question')].sort(byTime)) if (m.re && !replies.has(m.re)) replies.set(m.re, Date.parse(m.created_at));
   const expecting = msgs.filter((m) => !['info', 'ruling', 'answer'].includes(m.kind));
   const openMsgs = expecting.filter((m) => !replies.has(m.id) && !settledByLanding(m));
   const msgWaits = expecting.filter((m) => replies.has(m.id)).map((m) => replies.get(m.id) - Date.parse(m.created_at));
@@ -6915,8 +7096,11 @@ function collectMetrics(since) {
   // Findings: blockers and inefficiencies, each with a next step.
   const f = [];
   const add = (severity, kind, subject, detail, suggestion, extra = {}) => f.push({ severity, kind, subject, detail, suggestion, ...extra });
-  for (const g of gates.flaky_gates) add('high', 'flaky-gate', g.gate, `failed then passed at the same commit ${g.commits} time(s)`, 'find the flaky tests (run with --junit) and fix or quarantine them');
-  for (const t of gates.flaky_tests.slice(0, 10)) add('high', 'flaky-test', t.name, `failed then passed at the same commit ${t.times} time(s)`, 'make it deterministic (time, order, shared state, network) or quarantine it with a ticket');
+  // A flake is a finding while it's recent: one that hasn't flipped for a week was fixed or
+  // explained, and its history stays in gates.flaky_gates without raising it again every day.
+  const flakyRecent = (at) => !!at && now - Date.parse(at) < 7 * 24 * 3600000;
+  for (const g of gates.flaky_gates.filter((x) => flakyRecent(x.last_flip))) add('high', 'flaky-gate', g.gate, `failed then passed at the same commit ${g.commits} time(s), last ${g.last_flip.slice(0, 10)}`, 'find the flaky tests (run with --junit) and fix or quarantine them');
+  for (const t of gates.flaky_tests.filter((x) => flakyRecent(x.last_flip)).slice(0, 10)) add('high', 'flaky-test', t.name, `failed then passed at the same commit ${t.times} time(s)`, 'make it deterministic (time, order, shared state, network) or quarantine it with a ticket');
   for (const g of gates.gates.filter((x) => x.median_seconds >= settings.slow_gate_minutes * 60)) add('medium', 'slow-gate', g.gate, `median ${(g.median_seconds / 60).toFixed(1)} min over ${g.runs} run(s)`, 'shard it, cache dependencies, or split fast checks from slow ones');
   for (const t of gates.slowest_tests.slice(0, 5).filter((x) => x.median_seconds >= 10)) add('low', 'slow-test', t.name, `median ${t.median_seconds}s`, 'mock the slow dependency or move it to an integration suite');
   // A share of almost nothing is noise: hotspots wait for a few hours of ticket time or a few dollars.
@@ -7217,7 +7401,8 @@ function collectOoda() {
     retro: retroDue(),
     observations: recent(logObjects('observation').filter((o) => !['reading', 'retro', 'finding-ack'].includes(o.kind)), 40),
     clusters: orientClusters(),
-    knowledge: recent(logObjects('knowledge').filter((k) => k.status !== 'retired'), 60),
+    // every lesson waiting on the owner is in the Inbox, however many: only the rest are the recent 60
+    knowledge: [...recent(logObjects('knowledge').filter((k) => k.status === 'candidate'), Infinity), ...recent(logObjects('knowledge').filter((k) => !['retired', 'candidate'].includes(k.status)), 60)],
     problems: logObjects('problem').filter((p) => p.status !== 'resolved').sort((a, b) => b.severity - a.severity),
     acts: recent(acts, 60),
     decisions: decisionRecords().slice(0, 200),
@@ -7234,7 +7419,7 @@ function dashboardData() {
   const settings = loadSettings();
   const sub = activeTickets();
   const msgs = logObjects('message');
-  const replied = new Set(msgs.map((m) => m.re).filter(Boolean));
+  const replied = handledMessages();
   return {
     generated_at: nowIso(), project: settings.project,
     caps: { max_active_tickets: settings.max_active_tickets },
@@ -7863,7 +8048,7 @@ function settledByLanding(m) {
 function cmdMessages() {
   const me = flagStr('to') ?? myAddress();
   const all = logObjects('message').sort(byTime);
-  const replied = new Set(all.map((m) => m.re).filter(Boolean));
+  const replied = handledMessages();
   let mine = all.filter((m) => m.to === me);
   if (flags.open) mine = mine.filter((m) => !replied.has(m.id) && !['info', 'ruling', 'answer'].includes(m.kind) && !settledByLanding(m));
   mine = mine.slice(-Number(flagStr('tail') ?? 50));
@@ -7901,7 +8086,7 @@ function cmdPhase() {
   // Waiting with nothing asked looks the same as waiting with a request answered: say so.
   if (['awaiting-word', 'blocked'].includes(to)) {
     const msgs = logObjects('message');
-    const replied = new Set(msgs.map((m) => m.re).filter(Boolean));
+    const replied = handledMessages();
     if (!msgs.some((m) => m.created_by === id && m.to === 'supervisor' && !replied.has(m.id) && !['info', 'ruling', 'answer'].includes(m.kind)))
       warn(`${to} with no open request to the supervisor: send one (--kind review-request for approve-spec, approve-plan or the stage word; merge-request at the end; blocked), since info expects no reply`);
   }
@@ -9443,7 +9628,7 @@ const COMMANDS = {
   ask: cmdAsk, answer: cmdAnswer, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
   observe: cmdObserve, 'observe-link': cmdObserveLink, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, knowledge: cmdKnowledge, problem: cmdProblem,
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
-  log: cmdLog, record: cmdRecord, peek: cmdPeek, 'log-check': cmdLogCheck, 'log-sync': cmdLogSync, history: cmdHistory,
+  log: cmdLog, record: cmdRecord, peek: cmdPeek, 'log-check': cmdLogCheck, dispose: cmdDispose, 'log-sync': cmdLogSync, history: cmdHistory,
   drain: cmdDrain, undrain: cmdUndrain, fleet: cmdFleet, handoff: cmdHandoff, wait: cmdWait,
   dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes,
 };
