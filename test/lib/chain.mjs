@@ -3034,6 +3034,52 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     assert.deepEqual(lib.artifacts.filter((a) => a.at === 'main').map((a) => a.slug), ['landed-mock', 'landed-other', 'landed-tk']);
   });
 
+  // Public artifacts: the owner's own act records what the owner made public from the cloud box.
+  step("public artifacts: an artifact-publish act is the owner's, and the owner's only act", () => {
+    const S = JSON.parse(fs.readFileSync(path.join(kit, 'schema/log.schema.json'), 'utf8'));
+    assert.ok(S['x-authority'].new.owner.includes('act'));
+    assert.deepEqual([S.$defs.types.act.properties.artifact.pattern, S.$defs.types.act.properties.tree.pattern], ['^[a-z][a-z0-9]*(-[a-z0-9]+)*$', '^[0-9a-f]{40}([0-9a-f]{24})?$']);
+    const L = JSON.parse(/`{3}json devteam\s*\n([\s\S]*?)\n`{3}/.exec(fs.readFileSync(path.join(kit, 'governance/constitution.md'), 'utf8'))[1]);
+    assert.ok(L.owner_only.includes('artifact-publish'), 'owner_only in the constitution');
+    const month = new Date().toISOString().slice(0, 7);
+    const ownerFile = path.join(repo, 'docs/devteam/run/log', `owner-${month}.jsonl`);
+    const supFile = path.join(repo, 'docs/devteam/run/log', `supervisor-${month}.jsonl`);
+    const kept = [ownerFile, supFile].map((f) => [f, fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : null]);
+    const tree = git(['rev-parse', 'origin/main:docs/devteam/project/artifacts/landed-other']);
+    let n = 0;
+    const act = (by, body) => {
+      const at = new Date(Date.now() + n++).toISOString();
+      return line({ id: `a-${at.slice(0, 10).replace(/-/g, '')}-${at.slice(11, 23).replace(/[:.]/g, '')}-${by}`, type: 'act', op: 'new', at, by, ...(by === 'owner' ? { channel: 'cli' } : {}), ...body });
+    };
+    const pub = { class: 'artifact-publish', what: 'publish', refs: ['artifact:landed-other'], artifact: 'landed-other', tree };
+    try {
+      fs.appendFileSync(ownerFile, act('owner', pub));
+      must(['log-check']);
+      for (const [by, body, re] of [
+        ['owner', { ...pub, class: 'merge-word' }, /the owner's acts are artifact-publish only/],
+        ['owner', { ...pub, tree: undefined }, /publish with its tree or unpublish without one/],
+        ['owner', { ...pub, what: 'unpublish' }, /publish with its tree or unpublish without one/],
+        ['owner', { ...pub, what: 'shout', tree: undefined }, /publish with its tree or unpublish without one/],
+        ['supervisor', pub, /artifact-publish is the owner's/],
+      ]) {
+        const f = by === 'owner' ? ownerFile : supFile;
+        const before = fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : '';
+        fs.appendFileSync(f, act(by, body));
+        const r = dt(['log-check']);
+        assert.notEqual(r.status, 0, `${by} ${JSON.stringify(body)}`);
+        assert.match(r.out, re);
+        fs.writeFileSync(f, before);
+      }
+      // the supervisor can't write one either: authorise() refuses an owner-only class (the forged lines above exercise integrity())
+      const r = dt(['act', '--class', 'artifact-publish', '--refs', 'artifact:landed-other', '--', 'publish'], { role: 'sup' });
+      assert.notEqual(r.status, 0);
+      assert.match(r.err, /artifact-publish is the owner's/);
+    } finally {
+      for (const [f, text] of kept) if (text === null) fs.rmSync(f, { force: true }); else fs.writeFileSync(f, text);
+    }
+    must(['log-check']);
+  });
+
 // Forks. A fork is a copy of the fixture as it stands between two steps, made by the run in
 // kit.test.mjs; a child process (fork.mjs) runs the steps given to it there. Those steps see
 // exactly the state they would have seen in line, and the steps after them go on without them, so

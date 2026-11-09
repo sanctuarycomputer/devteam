@@ -1635,7 +1635,7 @@
         ]
       },
       "act": {
-        "description": "Something the supervisor did (incl. approve-spec, approve-plan, merge-word, and worker-slots, whose planner acts carry the feature's id_block). An act that carries decision did what that decision line decided, and the decision answers for it: the owner corrects the decision, not the act. An act without decision is its own decision (mechanical acts, and every act written before decisions existed). The owner, or the supervisor at a retro, sets corrected; the supervisor then sets repaired.",
+        "description": "Something the supervisor did (incl. approve-spec, approve-plan, merge-word, and worker-slots, whose planner acts carry the feature's id_block). An act that carries decision did what that decision line decided, and the decision answers for it: the owner corrects the decision, not the act. An act without decision is its own decision (mechanical acts, and every act written before decisions existed). The owner, or the supervisor at a retro, sets corrected; the supervisor then sets repaired. The owner writes acts of one class only, artifact-publish (devteam.mjs artifact publish|unpublish, which the cloud gateway's confirm page runs): the record of what the owner made public, with artifact and, for a publish, tree. It is a record, never a call: trust, decisions and corrections leave it out, and only the owner writes that class.",
         "type": "object",
         "properties": {
           "class": {
@@ -1750,6 +1750,18 @@
             "type": "string",
             "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
             "x-tip": "The repo this was in, when not this one."
+          },
+          "artifact": {
+            "description": "On the owner's artifact-publish act: the slug of the landed artifact (project/artifacts/<slug>/) published or taken down.",
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+            "x-tip": "The artifact you published or took down."
+          },
+          "tree": {
+            "description": "On the owner's artifact-publish act with what publish: the git tree id of the artifact's folder on main that the gateway checked byte for byte and serves. Absent on an unpublish.",
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$",
+            "x-tip": "The version you published."
           }
         },
         "additionalProperties": false,
@@ -1878,7 +1890,8 @@
         "knowledge",
         "observation",
         "problem",
-        "message"
+        "message",
+        "act"
       ],
       "supervisor": [
         "goal",

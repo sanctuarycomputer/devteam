@@ -448,6 +448,8 @@ function pinOwnedLinks(local = {}, main = {}) {
 // kit and project/, never declared; devteam is the kit's own line, computed.
 const RESERVED_LINKS = ['home', 'devteam'];
 const LINK_ID = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
+// A git tree (or blob) id: sha1, or sha256 in a repo that uses it.
+const TREE_ID = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 // The settings a repo link may carry for itself. The first four default to the
 // project's; every other key is never inherited, so a repo with no gates is refused by merge like
 // home with none, and a per-repo key added later gets the no-inherit rule by default.
@@ -845,6 +847,10 @@ function integrity(o, file) {
       if (!o.id.endsWith(`-${o.by}`)) return `a new id ends with its writer, "-${o.by}"`;
     }
     if (!auth.new[cls].includes(o.type)) return `${cls} may not create ${o.type} lines`;
+    // The owner's only acts are the record of publishing an artifact (artifact publish|unpublish),
+    // and nobody else writes that class: an agent can't make the Library say the owner published.
+    if (o.type === 'act' && (cls === 'owner') !== (o.class === 'artifact-publish')) return cls === 'owner' ? 'the owner\'s acts are artifact-publish only' : 'artifact-publish is the owner\'s';
+    if (o.type === 'act' && cls === 'owner' && (!['publish', 'unpublish'].includes(o.what) || typeof o.artifact !== 'string' || !LINK_ID.test(o.artifact) || (o.what === 'publish' ? !(typeof o.tree === 'string' && TREE_ID.test(o.tree)) : o.tree !== undefined))) return 'an artifact-publish act names its artifact, and is what: publish with its tree or unpublish without one';
     if (cls === 'planner' && file && ['feature', 'ticket'].includes(o.type) && !isPlanFile(file)) return `a planner's ${o.type} lines belong in its plan file, ${o.by}.jsonl`;
     if (o.type === 'goal' && o.status && o.status !== 'draft' && cls !== 'owner') return 'only the owner creates a goal past draft';
     const f = planFeature(o.by);
