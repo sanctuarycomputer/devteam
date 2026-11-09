@@ -1,24 +1,61 @@
 # Deploys the owner's cloud box (cloud/) at each release. Only on this repository, and only when
 # the RENDER_DEPLOY_HOOK secret holds the service's deploy hook (Render: the service's Settings,
-# Deploy Hook); a fork, or a repo without it, does nothing. The box resumes each supervisor on boot,
-# and the supervisors their fleets, so a release costs the fleet a few minutes, not its work.
+# Deploy Hook); a fork, or a repo without it, does nothing. The box resumes each supervisor that was
+# running on boot, and the supervisors their fleets, so a release costs the fleet a few minutes,
+# not its work.
+#
+# The gate: the job runs in the GitHub environment "box", holds the hook there, and deploys only a
+# full release whose commit is on main and that changed something the image is built from. A
+# release runs this file as of its own commit, so only the environment is out of that commit's
+# reach; the README's "deploy gate" says what the rest relies on.
 name: box-deploy
 on:
   release:
     types: [published]
 permissions: {}
+concurrency:
+  group: box-deploy
+  cancel-in-progress: false
 jobs:
   deploy:
-    if: github.repository == 'sanctuarycomputer/devteam'
+    if: github.repository == 'sanctuarycomputer/devteam' && !github.event.release.prerelease
     runs-on: ubuntu-latest
+    environment: box
+    permissions:
+      contents: read
     steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - name: Deploy the box at this release's commit
+        shell: bash
         env:
           HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
           SHA: ${{ github.sha }}
+          PUBLISHED: ${{ github.event.release.published_at }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           [ -n "$HOOK" ] || { echo "no RENDER_DEPLOY_HOOK secret: no box to deploy"; exit 0; }
+          # git answers 1 for "not on main" and 128 for "can't tell": either refuses
+          git merge-base --is-ancestor "$SHA" origin/main || { echo "refusing $SHA: it isn't on main"; exit 1; }
+          # What the image is built from: cloud/Dockerfile's COPY sources, and the Dockerfile itself.
+          inputs=(cloud docs/devteam/dashboard/hub.html)
+          # The release before this one, of those this gate would have let through: one off main
+          # never deployed, so it can't stand for what the box is running.
+          tags=$(gh release list --exclude-drafts --exclude-pre-releases -L 100 --json tagName,publishedAt \
+            | jq -r --arg at "$PUBLISHED" '[.[] | select(.publishedAt < $at)] | sort_by(.publishedAt) | reverse | .[].tagName')
+          prev=
+          for t in $tags; do
+            if git merge-base --is-ancestor "refs/tags/$t^{commit}" origin/main 2>/dev/null; then prev=$t; break; fi
+          done
+          # No previous release, or a diff that fails, can't show nothing changed: those deploy.
+          if [ -n "$prev" ] && git diff --quiet "refs/tags/$prev" "$SHA" -- "${inputs[@]}"; then
+            echo "nothing the image is built from changed since $prev: not deploying"
+            exit 0
+          fi
           case "$HOOK" in *\?*) url="$HOOK&ref=$SHA" ;; *) url="$HOOK?ref=$SHA" ;; esac
-          code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$url")
+          code=$(curl -sS --max-time 60 -o /dev/null -w '%{http_code}' -X POST "$url")
           echo "Render answered $code for $SHA"
           [ "$code" -lt 300 ]

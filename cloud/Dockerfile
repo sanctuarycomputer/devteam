@@ -11,9 +11,12 @@
 # Render: New > Web Service > this repo (or a fork), Language: Docker, Dockerfile path:
 #   cloud/Dockerfile, build context: the repo root. Instance: Pro (4 GB) or larger; a free one
 #   sleeps, and sleeping stops every agent. Auto-Deploy: Off; the box deploys at each release
-#   instead (.github/workflows/box-deploy.yml, with the service's Deploy Hook as the repo secret
-#   RENDER_DEPLOY_HOOK). A deploy restarts the box; every agent session resumes on boot. Disk: mounted at /data. Health check
-#   path: /healthz. Environment: DEVTEAM_PUBLIC_URL=https://box.example.com. Custom domains:
+#   instead (.github/workflows/box-deploy.yml, with the service's Deploy Hook as the secret
+#   RENDER_DEPLOY_HOOK of the GitHub environment "box", never a repo secret, and that environment
+#   needing the owner's approval; the README's "deploy gate" says why. Agents share the owner's gh
+#   login, so this raises the bar and isn't a hard boundary). A deploy restarts the box; each
+#   supervisor that was running resumes on boot and brings back its fleet (~/box.log says which
+#   didn't). Disk: mounted at /data. Health check path: /healthz. Environment: DEVTEAM_PUBLIC_URL=https://box.example.com. Custom domains:
 #   box.example.com and *.box.example.com, with every DNS record Render lists for them (a wildcard
 #   needs its own name pointed at Render too, plus the _acme-challenge and _cf-custom-hostname
 #   CNAMEs; remove any AAAA records). Best on a domain used for nothing else, or if Render won't
@@ -165,11 +168,19 @@ exec setpriv --reuid=gw --regid=gw --init-groups env HOME=/data/gateway DEVTEAM_
 EOF
 
 # dev's side: the shell's first-run notes, the tmux session the terminal opens, every repo's
-# dashboard again after a restart (each supervisor resumes its own fleet), and ttyd on loopback.
+# dashboard again after a restart, each supervisor that was running (it resumes its own fleet),
+# and ttyd on loopback. What it says goes to ~/box.log, on the volume: its output is kept off the
+# platform's log (devteam-box says why), so a window named sup-<repo>-down shows the owner the rest.
 COPY --chmod=755 <<'EOF' /usr/local/bin/devteam-dev
 #!/bin/sh
 cd "$HOME"
 mkdir -p code
+note() { echo "$(date -u +%FT%TZ) $*" >> "$HOME/box.log"; }
+down() { note "$1: supervisor NOT brought back: $2"; tmux new-window -d -t home -n "sup-$1-down" -c "$HOME/code/$1"; }
+# Nothing runs git yet, so a lock in a repo is one a process killed by the restart left. Pane ids
+# start again at %0, so one noted before this boot could be another program's by now.
+find "$HOME/code" -path '*/.git/*' -name '*.lock' -type f -delete 2>/dev/null
+rm -f "$HOME"/code/*/docs/devteam/run/supervisor-pane
 # tmux starts login shells, which read .profile, and Debian's reads .bashrc
 [ -f .profile ] || cp /etc/skel/.profile .profile
 [ -f .tmux.conf ] || printf 'set -g mouse on\nset -g history-limit 50000\nset -g default-terminal tmux-256color\nset -g default-shell /bin/bash\n' > .tmux.conf
@@ -194,20 +205,48 @@ for k in "$HOME"/code/*/docs/devteam/scripts/devteam.mjs; do
   r=${k%/docs/devteam/scripts/devteam.mjs}
   tmux new-window -d -t home -n "dash-$(basename "$r")" -c "$r" "while :; do /usr/local/bin/node docs/devteam/scripts/devteam.mjs dashboard; sleep 5; done"
 done
-# Nothing runs git yet, so a lock in a repo is one a process killed by the restart left.
-find "$HOME/code" -path '*/.git/*' -name '*.lock' -type f -delete 2>/dev/null
-# Each repo's supervisor, if one ran here (it notes its pane), back on its last conversation with
-# the repo's own resume_command. It brings back its fleet: a ticket whose window is gone but whose
-# work isn't done goes to recovery, `worker <id> --resume` (supervisor.md §4, §11).
+# Each repo's supervisor that was running when the box stopped (the list below), on its own
+# conversation with the repo's resume_command, unless its fleet is parked or drained on purpose. It
+# brings back its fleet: §1.4 sends a ticket whose window is gone and whose phase isn't done or
+# parked to recovery, `worker <id> --resume` (supervisor.md §11). One try: what can't say which
+# conversation or whether it's held stays down, and says so.
+up="$HOME/.devteam-supervisors"
 for k in "$HOME"/code/*/docs/devteam/scripts/devteam.mjs; do
   r=${k%/docs/devteam/scripts/devteam.mjs}
-  [ -f "$r/docs/devteam/run/supervisor-pane" ] || continue
-  cmd=$(cd "$r" && /usr/local/bin/node "$k" settings --get resume_command 2>/dev/null) || continue
-  w="sup-$(basename "$r")"
-  tmux new-window -d -t home -n "$w" -c "$r"
-  tmux send-keys -t "home:$w" -l "export DEVTEAM_ROLE=supervisor; $cmd 'The box restarted (a deploy), and this is you, resumed. Follow supervisor.md §11, after your own restart: whatever was in flight did not finish, and every worker and planner window is gone; resume each one whose work is not done.'"
-  tmux send-keys -t "home:$w" Enter
+  n=$(basename "$r")
+  grep -Fxq "$r" "$up" 2>/dev/null || continue
+  fm=$(cd "$r" && /usr/local/bin/node "$k" fleet status --json --no-fetch 2>/dev/null | jq -r '.fleet.mode // "run"')
+  case "$fm" in
+    run) ;;
+    park|drain) note "$n: the fleet is held ($fm), so its supervisor stays stopped"; continue ;;
+    *) down "$n" "could not read whether its fleet is held"; continue ;;
+  esac
+  id=$(cd "$r" && /usr/local/bin/node "$k" supervisor-session 2>/dev/null)
+  case "$id" in ''|*[!A-Za-z0-9_-]*) down "$n" "no conversation of its to resume (or a kit too old to say)"; continue ;; esac
+  cmd=$(cd "$r" && /usr/local/bin/node "$k" settings --get resume_command 2>/dev/null)
+  case " $cmd " in *" --continue "*) ;; *) down "$n" "its resume_command has no --continue to replace"; continue ;; esac
+  cmd=$(printf '%s' "$cmd" | sed "s/ --continue\( \|\$\)/ --resume $id\1/")
+  pane=$(tmux new-window -dP -F '#{pane_id}' -t home -n "sup-$n" -c "$r") || { down "$n" "tmux would not open its window"; continue; }
+  printf '%s' "$pane" > "$r/docs/devteam/run/supervisor-pane"
+  tmux send-keys -t "$pane" -l "export DEVTEAM_ROLE=supervisor; $cmd 'The box restarted, and this is you, resumed on your own conversation; what was in flight did not finish. Follow supervisor.md §11, after your own restart: §1 again. Every worker and planner window is gone, so §1.4 sends each ticket whose phase is not done or parked to recovery; a parked one stays parked.'"
+  tmux send-keys -t "$pane" Enter
+  note "$n: supervisor resumed on $id"
 done
+# Which supervisors are up, kept on the volume each minute: a machine that dies writes nothing at
+# the end, and one the owner stopped (its pane gone, or back at a shell) is off the list by then.
+# tmux not answering (the box stopping) leaves the list as it was.
+while :; do
+  sleep 60
+  panes=$(tmux list-panes -a -F '#{pane_id} #{pane_current_command}' 2>/dev/null) || continue
+  for k in "$HOME"/code/*/docs/devteam/scripts/devteam.mjs; do
+    r=${k%/docs/devteam/scripts/devteam.mjs}
+    p=$(cat "$r/docs/devteam/run/supervisor-pane" 2>/dev/null) || continue
+    case "$(printf '%s\n' "$panes" | awk -v p="$p" '$1 == p { print $2 }')" in
+      ''|bash|-bash|sh|dash|zsh|fish) ;;
+      *) echo "$r" ;;
+    esac
+  done > "$up.new" && mv "$up.new" "$up"
+done &
 while :; do ttyd -d 3 -i lo -p 7681 -W -t fontSize=14 -t titleFixed=devteam tmux new-session -A -s home; sleep 1; done
 EOF
 
