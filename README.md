@@ -146,7 +146,7 @@ A link whose `for` matches a ticket (`all`, `component:<c>`, `feature:<f>`, `goa
 
 ### Several Claude accounts
 
-Install [claude-swap](https://github.com/realiti4/claude-swap) and add your accounts (`uv tool install claude-swap`, then `cswap add` after logging in to each). devteam finds it on its own, on a Mac or a Linux box: the dashboard holding the hub rotates accounts before a limit stops the fleet, using your `cswap config`, and sessions that did stop are told to carry on once an account has room. `DEVTEAM_CSWAP=off` turns this off. A supervisor outside tmux can't be resumed; the hub flags it.
+Install [claude-swap](https://github.com/realiti4/claude-swap) and add your accounts (`uv tool install claude-swap`, then `cswap add` after logging in to each). devteam finds it on its own, on a Mac or a Linux box: the dashboard holding the hub rotates accounts before a limit stops the fleet, using your `cswap config`, and a worker or planner that did stop is restarted (`--resume`, the same conversation in a fresh process) once an account has room: a running session keeps its limit even after the login moves. `DEVTEAM_CSWAP=off` turns this off. The supervisor is your own session, so it is never restarted for you: the hub flags it, and you resume it.
 
 ## Optional: running it in the cloud
 

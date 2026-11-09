@@ -7211,7 +7211,7 @@ function collectMetrics(since) {
   const accounts = accountsState();
   if (accounts?.exhausted) add('high', 'accounts-exhausted', 'cswap', 'every cswap account is at a usage limit', 'wait for a reset or add an account (cswap add)');
   for (const a of accounts?.needs_login ?? []) add('medium', 'account-needs-login', a, 'cswap can no longer refresh this account', 'log in with it in Claude Code, then cswap add');
-  if (accounts?.supervisor_limit) add('high', 'supervisor-at-limit', 'supervisor', `the supervisor stopped at a usage limit: "${accounts.supervisor_limit.text}"`, 'type "continue" in its terminal once an account has room (outside tmux the kit cannot reach it)');
+  if (accounts?.supervisor_limit) add('high', 'supervisor-at-limit', 'supervisor', `the supervisor stopped at a usage limit: "${accounts.supervisor_limit.text}"`, 'once an account has room, exit it and resume its session (Claude Code: /exit, then claude --resume): a running session keeps the limit even after the login changes');
   if (prodKey && (settings.worktree_files ?? []).includes(prodKey)) add('high', 'production-key-in-worktrees', prodKey, `settings.worktree_files copies ${prodKey}, which decrypts production's credentials, into every worker's worktree`, `the owner's change (settings, gate-change): give agents only development and test keys. ${prodKey === 'config/master.key' ? 'Move production secrets to config/credentials/production.yml.enc with its own production.key, kept only on the platform and in the owner\'s shell, then' : 'Then'} drop ${prodKey} from worktree_files (code-style.md §10)`);
   // Spend, for the improvement loop (supervisor.md §9): what costs more than it should.
   if (m.cost.source === 'measured') {
@@ -7614,11 +7614,10 @@ const ACCOUNTS_RESUMED = runPath('accounts-resumed.json');
 const ACCOUNTS_FRESH_MS = 10 * 60000;
 const RESUME_EVERY_MS = 10 * 60000;
 // Claude Code's limit menu and banner, anchored: an agent's prose can quote either, and cswap only
-// rotates Claude accounts, so another harness's limit stop is not ours to resume. Only Escape ever
-// goes to the menu: its third item spends money.
+// rotates Claude accounts, so another harness's limit stop is not ours to restart. No key ever goes
+// to the menu: its third item spends money.
 const LIMIT_MENU = /^(?:❯\s*)?\d+\.\s*Stop and wait for limit to reset$/;
 const LIMIT_BANNER = /^(?:⎿\s*)?You['’]ve hit your (?:\w+ )*limit · resets\b/;
-const RESUME_TEXT = '[devteam] the usage limit has cleared: another account is active. Carry on from where you stopped.';
 function findCswap() {
   const v = process.env.DEVTEAM_CSWAP;
   if (v === 'off') return null;
@@ -7669,34 +7668,41 @@ const paneBottom = (target) => (sh('tmux', ['capture-pane', '-p', '-t', target])
 function resumedAt() {
   try { const o = JSON.parse(readText(ACCOUNTS_RESUMED) ?? '{}'); return o && typeof o === 'object' && !Array.isArray(o) ? o : {}; } catch { return {}; }
 }
-// Resume one pane stopped at a limit; true when it was. The attempt is recorded before anything is
-// typed, so a tick killed halfway can't type it twice: if it can't be recorded, nothing is typed.
-function resumePane(key, paneTarget, leaveAlone = () => false) {
-  const { target, problem } = resolvePane(paneTarget);
+// Restart one session stopped at a limit; true when it was. A running Claude Code session keeps
+// the limit it hit even after the machine's login moves to an account with room (typing "carry on"
+// into it meets the same banner), so the pane's process is replaced and the session relaunched as
+// `worker|planner <id> --resume` would: a fresh process on the active account, continuing the same
+// conversation. No key is sent to the old one. The attempt is recorded before anything happens, so a
+// tick killed halfway can't restart it twice: if it can't be recorded, nothing is done.
+function restartPane(name, launch) {
+  const { target, problem } = resolvePane(tmuxTarget(name));
   if (problem || !target) return false;
   const st = limitStop(paneBottom(target));
-  if (!st.limit || st.busy || st.otherPrompt || leaveAlone()) return false;
+  if (!st.limit || st.busy || st.otherPrompt) return false;
   const done = resumedAt();
   const now = Date.now();
-  const last = Number(done[key]);
+  const last = Number(done[name]);
   if (last <= now && now - last < RESUME_EVERY_MS) return false;
-  done[key] = now;
+  done[name] = now;
   try {
     fs.mkdirSync(runDir, { recursive: true });
     fs.writeFileSync(`${ACCOUNTS_RESUMED}.${process.pid}`, JSON.stringify(done));
     fs.renameSync(`${ACCOUNTS_RESUMED}.${process.pid}`, ACCOUNTS_RESUMED);
   } catch { return false; }
-  if (st.menu) {
-    if (!tmux(['send-keys', '-t', target, 'Escape'])) return false;
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
-    const then = limitStop(paneBottom(target));
-    if (then.menu || then.otherPrompt || then.busy) return false;
-  }
-  if (!typeInto(target, RESUME_TEXT)) return false;
-  appendLog({ type: 'observation', source: 'pane', kind: 'limit-resumed', subject: key, detail: 'a pane stopped at a usage limit was told to carry on: the active account has room', detector: 'pane', source_key: `limit-resumed ${key} ${now}` });
-  return true;
+  // a shell, not the pane's first command (respawn-pane's default), which may be the agent itself
+  const shell = sh('tmux', ['show-options', '-gv', 'default-shell'])?.trim() || process.env.SHELL || '/bin/sh';
+  if (!tmux(['respawn-pane', '-k', '-t', target, shell])) return false;
+  // as the supervisor, but not from its pane: tmux's markers would record this one as the supervisor's
+  const env = { ...process.env, DEVTEAM_ROLE: 'supervisor' };
+  for (const k of ['TMUX', 'TMUX_PANE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE']) delete env[k];
+  const r = spawnSync(process.execPath, [process.argv[1], ...launch, '--resume'], { cwd: mainRoot, env, encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'pipe'] });
+  const ok = r.status === 0;
+  appendLog({ type: 'observation', source: 'pane', kind: 'limit-restarted', subject: name, detail: ok ? 'a session stopped at a usage limit was restarted on the active account, which has room' : `a session stopped at a usage limit could not be relaunched after its process was stopped: ${(r.stderr || r.error?.message || `exit ${r.status}`).trim().slice(0, 200)}`, detector: 'pane', source_key: `limit-restarted ${name} ${now}` });
+  if (!ok) out(`could not relaunch ${name}: ${(r.stderr ?? '').trim().slice(0, 200)}`);
+  return ok;
 }
-// The supervisor's transcript ending on a rate-limit error means it has stopped. Which one is the
+// The supervisor's transcript ending on a rate-limit error means it has stopped. It is the owner's
+// session, started their way, so it is reported, never restarted. Which one is the
 // supervisor's: of the newest few in the main checkout, the one the kit started as the supervisor or
 // that ran supervisor commands (a command it ran: reading or quoting the words is not enough).
 // Nothing else is taken for it, and a limit lasts a week at most.
@@ -7755,15 +7761,19 @@ function cmdAccountsTick() {
       // A session holds the old login for about 30 s after a switch (macOS), and any dashboard's
       // rotation can be the one that switched: resume only on an account this project's last tick saw too.
       if (!switched && state.active && before?.active === state.active && accountHasRoom(active)) {
-        const finished = (name) => ['done', 'parked'].includes(workerState(name)?.phase) || !!mergeShaFor(name) || sessionMode(name) === 'let-go';
-        for (const { name } of ourWindows(tmuxSession())) if (resumePane(name, tmuxTarget(name), () => finished(name))) state.resumed.push(name);
-        if (supervisorTarget() && resumePane('supervisor', supervisorTarget())) state.resumed.push('supervisor');
+        // only the kit's own sessions, and only those it would launch now: a held one stays as it is
+        const launchOf = (name) => (name.startsWith('plan-') ? ['planner', name.slice('plan-'.length)] : tickets().has(name) ? ['worker', name] : null);
+        const held = (name) => ['done', 'parked'].includes(workerState(name)?.phase) || !!mergeShaFor(name) || ['park', 'let-go'].includes(sessionMode(name)) || !!draining();
+        for (const { name } of ourWindows(tmuxSession())) {
+          const launch = launchOf(name);
+          if (launch && !held(name) && restartPane(name, launch)) state.resumed.push(name);
+        }
       }
-      for (const w of state.resumed) out(`resumed ${w}: it had stopped at a usage limit`);
+      for (const w of state.resumed) out(`restarted ${w}: it had stopped at a usage limit`);
     }
   }
-  // Whatever the recorded pane says, and with or without cswap: a supervisor told to carry on just now is the only exception.
-  if (!state.resumed.includes('supervisor')) state.supervisor_limit = supervisorLimit();
+  // in tmux or not, with or without cswap
+  state.supervisor_limit = supervisorLimit();
   fs.mkdirSync(runDir, { recursive: true });
   const tmp = `${ACCOUNTS_FILE}.${process.pid}`;
   fs.writeFileSync(tmp, JSON.stringify(state));
