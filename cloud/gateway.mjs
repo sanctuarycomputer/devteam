@@ -165,6 +165,8 @@ const PUSH_DEVICES = 20;
 const PUSH_SEEN_MAX = 200;
 const PUSH_BURST = 3;
 const PUSH_REST_MS = 60000;
+const PUSH_SENDS = 6;
+const PUSH_URL_MAX = 1024;
 const PUSH_TEST = { title: 'devteam: test notification', body: 'Push is working on this device.', tag: 'devteam-test', url: '/' };
 const hkdf = (ikm, salt, info, n) => Buffer.from(crypto.hkdfSync('sha256', ikm, salt, info, n));
 export function encryptPush({ p256dh, auth }, plain, sender = null, salt = crypto.randomBytes(16)) {
@@ -200,37 +202,56 @@ export function pushSubscription(b) {
     return { endpoint: b.endpoint, p256dh: b.keys.p256dh, auth: b.keys.auth, at: new Date().toISOString() };
   } catch { return null; }
 }
+// The list can hold any string JSON can, and encodeURIComponent throws on half a surrogate pair (a
+// cut can make one out of an emoji, so this goes after the cut). With u, \p{Cs} only matches an
+// unpaired half; Node 18, which the tests still run on, has no toWellFormed.
+const wellFormed = (s) => s.replace(/\p{Cs}/gu, '\ufffd');
 // What the hub page would notify about, from two reads of the list: an Inbox that went up (an
 // instance not seen before counts from nothing). Whatever holds the hub's port wrote this list, so
 // it is checked as the page checks it, and kept short.
 export function inboxNews(seen, instances, ports, resting = new Set()) {
-  const perRoot = new Map();
+  // one entry a port, so whatever the list's length, what follows is bounded by the block
+  const perPort = new Map();
   for (const x of instances) {
-    if (!x || typeof x.root !== 'string' || x.root.length > 1024 || !ports.includes(Number(x.port))) continue;
-    if (!perRoot.has(x.root) || Number(x.port) < Number(perRoot.get(x.root).port)) perRoot.set(x.root, x);
+    try {
+      if (!x || typeof x.root !== 'string' || x.root.length > 1024 || x.root === '__proto__') continue;
+      const port = Number(x.port);
+      if (ports.includes(port) && !perPort.has(port)) perPort.set(port, x);
+    } catch {}
   }
+  const perRoot = new Map();
+  for (const x of perPort.values()) if (!perRoot.has(x.root) || Number(x.port) < Number(perRoot.get(x.root).port)) perRoot.set(x.root, x);
   const list = [...perRoot.values()];
+  const named = new Map();
+  for (const x of list) named.set(x.name, (named.get(x.name) ?? 0) + 1);
   const next = { ...seen };
   let messages = [];
   const roots = [];
   const names = [];
   for (const x of list) {
-    // a root that just notified is left as it was, rises and falls alike, until it has rested
-    if (!Number.isInteger(x.inbox) || x.inbox < 0 || resting.has(x.root)) continue;
-    const before = Object.hasOwn(seen, x.root) ? seen[x.root] : 0;
-    next[x.root] = x.inbox;
-    if (x.inbox <= before) continue;
-    const name = String(x.name ?? x.root).slice(0, 80);
-    // the hub page's address for this tab (its keyOf): two of one name are told apart by their root
-    const twins = list.filter((o) => String(o.name) === String(x.name)).length > 1;
-    const key = twins ? `${String(x.name)}-${crypto.createHash('sha1').update(x.root).digest('hex').slice(0, 6)}` : String(x.name);
-    roots.push(x.root);
-    names.push(name);
-    messages.push({ title: `${name}: ${x.inbox - before} new in the Inbox`, body: x.root.slice(0, 200), tag: `devteam-${x.root}`.slice(0, 256), url: `/#${encodeURIComponent(key)}` });
+    try {
+      // a root that just notified is left as it was, rises and falls alike, until it has rested
+      if (!Number.isInteger(x.inbox) || x.inbox < 0 || resting.has(x.root)) continue;
+      const before = Object.hasOwn(seen, x.root) ? seen[x.root] : 0;
+      next[x.root] = x.inbox;
+      if (x.inbox <= before) continue;
+      const name = wellFormed(String(x.name ?? x.root).slice(0, 80));
+      // the hub page's address for this tab (its keyOf): two of one name are told apart by their root
+      const key = named.get(x.name) > 1 ? `${String(x.name)}-${crypto.createHash('sha1').update(x.root).digest('hex').slice(0, 6)}` : String(x.name);
+      const url = `/#${encodeURIComponent(wellFormed(key))}`;
+      messages.push({ title: `${name}: ${x.inbox - before} new in the Inbox`, body: wellFormed(x.root.slice(0, 200)), tag: wellFormed(`devteam-${x.root}`.slice(0, 256)), url: url.length > PUSH_URL_MAX ? '/' : url });
+      roots.push(x.root);
+      names.push(name);
+    } catch {}
   }
-  if (messages.length > PUSH_BURST) messages = [{ title: `${messages.length} instances have new Inbox items`, body: names.join(', ').slice(0, 200), tag: 'devteam-inbox', url: '/' }];
-  const keys = Object.keys(next);
-  for (const k of keys.slice(0, Math.max(0, keys.length - PUSH_SEEN_MAX))) delete next[k];
+  if (messages.length > PUSH_BURST) messages = [{ title: `${messages.length} instances have new Inbox items`, body: wellFormed(names.join(', ').slice(0, 200)), tag: 'devteam-inbox', url: '/' }];
+  // only what's no longer listed is forgotten, oldest first: a live root forgotten would be all news again
+  const live = new Set(list.map((x) => x.root));
+  let over = Object.keys(next).length - PUSH_SEEN_MAX;
+  for (const k of Object.keys(next)) {
+    if (over <= 0) break;
+    if (!live.has(k)) { delete next[k]; over -= 1; }
+  }
   return { seen: next, messages, roots };
 }
 
@@ -585,14 +606,18 @@ export function createGateway(opts = {}) {
       if (JSON.stringify(seen) !== JSON.stringify(before.pushSeen ?? {})) store.save({ ...before, pushSeen: seen });
       const subs = before.pushSubs ?? [];
       const dead = new Set();
-      await Promise.all(subs.flatMap((sub) => messages.map(async (message) => {
-        try {
-          const status = await sendPush(sub, message);
-          // the browser dropped it (uninstalled, or notifications turned off)
-          if (status === 404 || status === 410) dead.add(sub.endpoint);
-          else if (status >= 300) log(`a push to ${new URL(sub.endpoint).host} was refused (${status})`);
-        } catch (e) { log(`a push to ${new URL(sub.endpoint).host} failed: ${e.message}`); }
-      })));
+      const jobs = subs.flatMap((sub) => messages.map((message) => ({ sub, message })));
+      const worker = async () => {
+        for (let job = jobs.shift(); job; job = jobs.shift()) {
+          try {
+            const status = await sendPush(job.sub, job.message);
+            // the browser dropped it (uninstalled, or notifications turned off)
+            if (status === 404 || status === 410) dead.add(job.sub.endpoint);
+            else if (status >= 300) log(`a push to ${new URL(job.sub.endpoint).host} was refused (${status})`);
+          } catch (e) { log(`a push to ${new URL(job.sub.endpoint).host} failed: ${e.message}`); }
+        }
+      };
+      await Promise.all(Array.from({ length: PUSH_SENDS }, worker));
       if (dead.size) { const now = store.load(); store.save({ ...now, pushSubs: (now.pushSubs ?? []).filter((x) => !dead.has(x.endpoint)) }); }
     } finally { polling = false; }
   };

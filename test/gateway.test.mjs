@@ -732,6 +732,85 @@ test('a list sent a byte at a time can\'t hold the poller', async () => {
   } finally { hub.closeAllConnections?.(); hub.close(); await gw.close(); }
 });
 
+test('one malformed entry costs only itself, and what a tap opens is the hub\'s tab', () => {
+  const ports = Array.from({ length: 25 }, (_, i) => P + i);
+  const good = { root: '/r/real', name: 'real', port: P, inbox: 2 };
+  const lone = G.inboxNews({}, [{ root: '/r/lone', name: '\ud800', port: P + 1, inbox: 1 }, good], ports).messages;
+  assert.deepEqual(lone.map((m) => m.title), ['�: 1 new in the Inbox', 'real: 2 new in the Inbox']);
+  assert.equal(lone[0].url, '/#%EF%BF%BD');
+  assert.equal(G.inboxNews({}, [{ root: '/r/\udc00', name: 'x', port: P, inbox: 1 }], ports).messages[0].body, '/r/�', 'a root is text too');
+  const emoji = `${'a'.repeat(79)}\u{1F600}`;
+  const split = G.inboxNews({}, [{ root: '/r/e', name: emoji, port: P, inbox: 1 }], ports).messages[0];
+  assert.equal(split.title, `${'a'.repeat(79)}�: 1 new in the Inbox`, 'a cut through an emoji is well-formed too');
+  assert.equal(split.url, `/#${encodeURIComponent(emoji)}`, 'and the address is the whole name, as the hub\'s keyOf has it');
+  assert.equal(G.inboxNews({}, [{ root: '/r/l', name: 'n'.repeat(5000), port: P, inbox: 1 }], ports).messages[0].url, '/', 'one too long to send opens the hub');
+  let deep = [];
+  for (let i = 0; i < 200000; i++) deep = [deep];
+  const hostile = [{ root: '/r/deep', name: deep, port: P + 1, inbox: 1 }, { root: '/r/port', port: deep, inbox: 1 }, 7, null, good];
+  assert.deepEqual(G.inboxNews({}, hostile, ports).messages.map((m) => m.title), ['real: 2 new in the Inbox'], 'one String() can\'t even turn into text');
+  const proto = { root: '__proto__', name: 'p', port: P, inbox: 3 };
+  assert.deepEqual(G.inboxNews({}, [proto], ports).messages, [], 'a root that can\'t be remembered would be news every poll');
+});
+
+test('a poll is bounded, whatever the list claims', () => {
+  const ports = Array.from({ length: 25 }, (_, i) => P + i);
+  const list = Array.from({ length: 20000 }, (_, i) => ({ root: `/${i}`, name: 'n', port: P + (i % 25), inbox: 1 }));
+  const t0 = Date.now();
+  const first = G.inboxNews({}, list, ports);
+  assert.ok(Date.now() - t0 < 2000, 'a large list is one pass (it was 6.4 s)');
+  assert.equal(first.roots.length, 25, 'one entry a port');
+  assert.equal(first.messages.length, 1, 'and one notification');
+  assert.equal(Object.keys(first.seen).length, 25);
+  assert.deepEqual(G.inboxNews(first.seen, list, ports).messages, [], 'the same list is no news the next time');
+  const old = Object.fromEntries([['/r/live', 2], ...Array.from({ length: 199 }, (_, i) => [`/old/${i}`, 1])]);
+  const at = (root, port, inbox) => ({ root, name: root, port, inbox });
+  const live = [at('/r/live', P, 2), at('/r/new', P + 1, 1)];
+  const once = G.inboxNews(old, live, ports);
+  assert.equal(Object.keys(once.seen).length, 200, 'the record stays at its size');
+  assert.equal(once.seen['/r/live'], 2, 'by forgetting what isn\'t listed, however old a live root\'s entry is');
+  assert.deepEqual(G.inboxNews(once.seen, live, ports).messages, [], 'so a live root isn\'t reported again and again');
+});
+
+test('a bad name doesn\'t stop notifications, and a poll sends only so many at once', async () => {
+  const sent = [];
+  let flying = 0;
+  let most = 0;
+  const pushFetch = async (endpoint, init) => { sent.push({ endpoint, init }); most = Math.max(most, ++flying); await new Promise((r) => setTimeout(r, 5)); flying--; return { status: 201 }; };
+  const gw = await gateway('badname', { pushFetch });
+  let body = '';
+  const hub = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(body); });
+  const say = (instances) => { body = JSON.stringify({ hub: 1, instances }); };
+  await until(() => new Promise((r) => { hub.once('error', () => r(false)); hub.listen(HUB, '127.0.0.1', () => r(true)); }), 'the hub port');
+  try {
+    assert.equal((await gw.claim(authenticator())).status, 200);
+    const phone = browserKeys();
+    assert.equal((await gw.req('POST', '/push/subscribe', { body: { endpoint: 'https://web.push.apple.com/phone', keys: phone.keys } })).status, 200);
+    const real = { root: '/r/real', name: 'real', port: P, inbox: 0 };
+    const bad = { root: '/r/bad', name: '\ud800', port: P + 1, inbox: 0 };
+    say([real, bad]);
+    await gw.g.pollPush();
+    assert.equal(sent.length, 0);
+    say([{ ...real, inbox: 2 }, { ...bad, inbox: 1 }]);
+    await gw.g.pollPush();
+    assert.deepEqual(sent.map((x) => openPush(x.init.body, phone).title).sort(), ['real: 2 new in the Inbox', '�: 1 new in the Inbox'].sort());
+
+    // the review's other shape, through the real poller: 20k roots, under the 1 MB the hub's answer may be
+    for (let i = 0; i < 19; i++) await gw.req('POST', '/push/subscribe', { body: { endpoint: `https://web.push.apple.com/d${i}`, keys: browserKeys().keys } });
+    sent.length = 0;
+    say(Array.from({ length: 20000 }, (_, i) => ({ root: `/${i}`, name: 'n', port: P + (i % 25), inbox: 1 })));
+    assert.ok(body.length < 1024 * 1024, 'the list fits what the hub may answer');
+    const t0 = Date.now();
+    await gw.g.pollPush();
+    assert.ok(Date.now() - t0 < 5000, 'it isn\'t held up');
+    assert.equal(sent.length, 20, 'one notification, to each device');
+    assert.equal(openPush(sent[0].init.body, phone).title.endsWith('have new Inbox items'), true);
+    assert.ok(most > 1 && most <= 6, `at most 6 at a time (saw ${most})`);
+    const before = sent.length;
+    await gw.g.pollPush();
+    assert.equal(sent.length, before, 'and not the same news again');
+  } finally { hub.closeAllConnections?.(); hub.close(); await gw.close(); }
+});
+
 test('a passkey made for another name says how to get back in', async () => {
   const dir = path.join(tmp, 'oldrp');
   fs.mkdirSync(dir, { recursive: true });
