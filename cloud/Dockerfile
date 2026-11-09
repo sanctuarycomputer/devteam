@@ -170,6 +170,8 @@ COPY --chmod=755 <<'EOF' /usr/local/bin/devteam-reclaim
 exec setpriv --reuid=gw --regid=gw --init-groups env HOME=/data/gateway DEVTEAM_GATEWAY_DIR=/data/gateway /usr/local/bin/node /opt/devteam/gateway.mjs reclaim
 EOF
 
+# macOptionClickForcesSelection: tmux owns the mouse, so scrolling works, and on a Mac the terminal
+# lets a selection past it only with Option held (Shift, elsewhere), and only with this set.
 # dev's side: the shell's first-run notes, the tmux session the terminal opens, every repo's
 # dashboard again after a restart, each supervisor that was running (it resumes its own fleet),
 # and ttyd on loopback. What it says goes to ~/box.log, on the volume: its output is kept off the
@@ -250,7 +252,7 @@ while :; do
     esac
   done > "$up.new" && mv "$up.new" "$up"
 done &
-while :; do ttyd -d 3 -i lo -p 7681 -W -t fontSize=14 -t titleFixed=devteam tmux new-session -A -s home; sleep 1; done
+while :; do ttyd -d 3 -i lo -p 7681 -W -t macOptionClickForcesSelection=true -t fontSize=14 -t titleFixed=devteam tmux new-session -A -s home; sleep 1; done
 EOF
 
 VOLUME /data
