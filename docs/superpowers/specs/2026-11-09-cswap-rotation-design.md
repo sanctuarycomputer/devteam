@@ -8,21 +8,21 @@ When `cswap` (claude-swap) is installed, on a Mac or on a cloud Linux box, devte
 
 ## Behaviour
 
-**A command does the work.** `devteam.mjs accounts-tick [--rotate]` is supervisor-only. Every dashboard runs it every 60 s (`DEVTEAM_ACCOUNTS_MS`), one run at a time, with `DEVTEAM_ROLE=supervisor` in its environment, never as the owner. That keeps the kit's rule that only the supervisor acts on a pane, and a fake `cswap` dropped in `~/.local/bin` by an agent gets no owner identity. The dashboard passes `--rotate` only while it holds the hub port.
+**A command does the work.** `devteam.mjs accounts-tick [--rotate]` is supervisor-only, by an inline check: `supervisorOnly` would record the dashboard's pane as the supervisor's. Every dashboard runs it every 60 s (`DEVTEAM_ACCOUNTS_MS`), one run at a time, with `DEVTEAM_ROLE=supervisor` in its environment, never as the owner. That keeps the kit's rule that only the supervisor acts on a pane, and a fake `cswap` dropped in `~/.local/bin` by an agent gets no owner identity. The dashboard passes `--rotate` only while it holds the hub port.
 
 **Detection, every tick.** `DEVTEAM_CSWAP=off`: none. Another value: that path or command. Unset: `cswap` on PATH, then `~/.local/bin/cswap`, and only when the hub port is the default 4320, so a test or fixture dashboard on its own hub port can never touch real accounts. The test library also sets `DEVTEAM_CSWAP=off`.
 
-**Rotation (`--rotate`).** Runs `cswap auto --once --json`, with no strategy flags, so the owner's `cswap config` applies (default `best` at 90%). 45 s timeout. Stdout is one JSON event per line; unknown events are ignored. `switch` is logged. `all-exhausted` sets `exhausted`. `account-quarantined` adds to `needs_login`. A failure changes nothing and is logged.
+**Rotation (`--rotate`).** Runs `cswap auto --once --json`, with no strategy flags, so the owner's `cswap config` applies (default `best` at 90%). 45 s timeout. Stdout is one JSON event per line; unknown events are ignored. `switch` is logged. `all-exhausted` sets `exhausted`. Exit codes 2 and 3 are normal, so events are read whatever the status; a failure changes nothing and is logged once. `needs_login` (rows with `usageStatus: relogin_required`) and `exhausted` (no enabled account has room) are read from `cswap list --json` every tick, because cswap reports a quarantine only once.
 
-**Resuming a stopped session.** Needs cswap. `cswap list --json`: the row with `active: true` has room when `usageStatus` is `ok` and every window in `usage` has a numeric `pct` below 100. Without room, nothing is touched. With room, for each window of this project's tmux session except `dashboard` (a worker or planner whose last phase is `parked` is left alone), and for the supervisor when it has a recorded pane:
+**Resuming a stopped session.** Needs cswap. `cswap list --json`: the row with `active: true` has room when `usageStatus` is `ok` and every window in `usage` has a numeric `pct` below 100. Without room, nothing is touched. With room, in a tick that didn't just switch (a macOS session holds the old login for about 30 s), for each of this project's windows (`ourWindows`; a worker or planner whose last phase is `parked` is left alone), and for the supervisor when it has a recorded pane:
 
 - the pane has a live agent (`resolvePane`) and is not busy;
 - its last 15 lines (code-like lines excepted, `PANE_CODE`) match the `limit` pattern, or show the limit menu; a `prompt` match leaves it alone;
-- no resume of that pane in the last 10 minutes (`run/accounts-resumed.json`);
+- no resume of that pane in the last 10 minutes (`run/accounts-resumed.json`, written before anything is typed);
 - if the limit menu shows (`Stop and wait for limit to reset`), send `Escape`, wait 1 s, capture again, and go on only if the menu is gone. **Enter or a digit is never sent to the menu: its third item is "Switch to usage credits", which spends money.** Any other menu is left alone;
 - type a one-line continue message with `typeInto`.
 
-**A supervisor stopped at a limit.** Works with or without cswap. A supervisor with a recorded pane that resolves is handled as above. Otherwise the newest top-level transcript of the main checkout (`CLAUDE_CONFIG_DIR` or `~/.claude`, `projects/<slug>/*.jsonl`, the last 256 KB) is read: if its last assistant line has `error: "rate_limit"`, `supervisor_limit` holds that line's time and message.
+**A supervisor stopped at a limit.** Works with or without cswap. A supervisor with a recorded pane that resolves is handled as above. Otherwise the newest top-level transcript of the main checkout (`CLAUDE_CONFIG_DIR` or `~/.claude`, `projects/<slug>/*.jsonl`, the last 256 KB; the newest of the last five that was started as the supervisor, else the newest) is read: if its last assistant line has `error: "rate_limit"`, `supervisor_limit` holds that line's time and message.
 
 **Visibility.** Each tick writes `run/accounts.json`: `{ at, cswap, exhausted, needs_login, supervisor_limit, resumed }`. Read only when `at` is under 10 minutes old:
 - metrics findings: `accounts-exhausted` (high), `account-needs-login` (medium, one per account), `supervisor-at-limit` (high);

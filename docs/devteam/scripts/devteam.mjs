@@ -153,6 +153,9 @@ function sh(cmd, args, opts = {}) {
 // (-c), so a window is ours when it started under this checkout's .worktrees/, whatever its name;
 // another project's window named like one of our tickets never counts.
 function ourWindows(session) {
+  // list-panes -s answers for another session when this one doesn't exist, so a project with no
+  // legacy `devteam` session (a new box) would find its own windows there and take that name.
+  if (sh('tmux', ['has-session', '-t', `=${session}`]) === null) return [];
   // Compared resolved: tmux keeps the path as it was given (on macOS /var is /private/var).
   const roots = [`${path.join(fs.realpathSync(mainRoot), '.worktrees')}${path.sep}`];
   // Every pane, not only the active one: a worker window the owner split keeps counting.
@@ -2070,11 +2073,12 @@ const activeWorker = (id) => { const w = workerState(id); return !!w && w.phase 
 // What a worker's pane is stuck on, if anything: a question the agent CLI put up (a permission or
 // trust prompt, a y/n) or a usage-limit banner. The log can't show these (the worker is frozen
 // mid-phase, so it isn't stale yet); the pane can. Only the bottom of the visible pane is read and
-// nothing is typed: clearing it is the supervisor's call (supervisor.md §11). Once per process.
+// nothing is typed here: clearing it is the supervisor's call (supervisor.md §11), and accounts-tick's
+// for a limit stop. Once per process.
 const PANE_WAITS = [
   // a banner says the limit was reached or when it resets; "rate limit" on its own is too common in
   // code and prose the pane may be showing (see PANE_CODE)
-  ['limit', /\b(usage|rate|session|weekly|daily|hourly|\d+-hour) limit (reached|hit|exceeded)\b|\bhit (your|the) (usage |rate )?limit\b|\blimit (will )?resets?\b|\bresets? (at|in) \d|^approaching (your )?usage limit/i],
+  ['limit', /\b(usage|rate|session|weekly|daily|hourly|\d+-hour) limit (reached|hit|exceeded)\b|\bhit (your|the) (\w+ )?limit\b|\blimit\b.*\bresets?\b|\bresets? (at|in) \d|^approaching (your )?usage limit/i],
   ['prompt', /Do you want to (proceed|make this edit|create|allow|run)|Do you trust the files|\[y\/n\]|\(y\/n\)|Press Enter to continue|❯\s*1\.\s*Yes/i],
 ];
 // A pane line that is content the agent is showing, not the agent's own UI: numbered source or diff
@@ -2122,7 +2126,7 @@ function paneWaitingIn(window) {
 // Enter once and log it. The text is never retyped; the record is claimed (deleted) before the key,
 // so a delivery gets at most one Enter however many passes or processes look.
 const LOST_ENTER_SECONDS = 30;
-const PANE_BUSY = /esc to (interrupt|cancel)|ctrl\+c to (interrupt|cancel)|press esc to stop/i;
+const PANE_BUSY = /esc to interrupt|(?<!Enter to confirm · )esc to cancel|ctrl\+c to (interrupt|cancel)|press esc to stop/i;
 const sentFile = (key) => path.join(runDir, 'sent', `${encodeURIComponent(key)}.json`);
 // Agent-agnostic: no prompt glyphs. Whitespace (wrapping, padding) and box-drawing borders drop out.
 const squash = (t) => t.replace(/[\s\u2500-\u257f]+/g, '');
@@ -7204,6 +7208,10 @@ function collectMetrics(since) {
   // A key that decrypts production, copied into every worktree, is readable by every agent
   // (code-style.md §10): production decrypts its own file, or the default one when it has none.
   const prodKey = fs.existsSync(path.join(mainRoot, 'config/credentials/production.yml.enc')) ? 'config/credentials/production.key' : fs.existsSync(path.join(mainRoot, 'config/credentials.yml.enc')) ? 'config/master.key' : null;
+  const accounts = accountsState();
+  if (accounts?.exhausted) add('high', 'accounts-exhausted', 'cswap', 'every cswap account is at a usage limit', 'wait for a reset or add an account (cswap add)');
+  for (const a of accounts?.needs_login ?? []) add('medium', 'account-needs-login', a, 'cswap can no longer refresh this account', 'log in with it in Claude Code, then cswap add');
+  if (accounts?.supervisor_limit) add('high', 'supervisor-at-limit', 'supervisor', `the supervisor stopped at a usage limit: "${accounts.supervisor_limit.text}"`, 'type "continue" in its terminal once an account has room (outside tmux the kit cannot reach it)');
   if (prodKey && (settings.worktree_files ?? []).includes(prodKey)) add('high', 'production-key-in-worktrees', prodKey, `settings.worktree_files copies ${prodKey}, which decrypts production's credentials, into every worker's worktree`, `the owner's change (settings, gate-change): give agents only development and test keys. ${prodKey === 'config/master.key' ? 'Move production secrets to config/credentials/production.yml.enc with its own production.key, kept only on the platform and in the owner\'s shell, then' : 'Then'} drop ${prodKey} from worktree_files (code-style.md §10)`);
   // Spend, for the improvement loop (supervisor.md §9): what costs more than it should.
   if (m.cost.source === 'measured') {
@@ -7544,7 +7552,7 @@ async function pickDashboardPort({ skip = [] } = {}) {
 // owner: GET only, no proxy, its own Host only, a page that fetches only from itself and frames only
 // the block. The others retry, so the hub moves when its dashboard stops. Something
 // that isn't a devteam hub on the port: logged once, and this dashboard stops trying.
-function startHub(log) {
+function startHub(log, onHeld = () => {}) {
   const page = path.join(kitDir, 'dashboard', 'hub.html');
   const retry = Number(process.env.DEVTEAM_HUB_RETRY_MS ?? 30000);
   const ownHost = (h) => [`127.0.0.1:${HUB_PORT}`, `localhost:${HUB_PORT}`].includes(h ?? '');
@@ -7591,9 +7599,138 @@ function startHub(log) {
       if ((await holder()) !== 'other') setTimeout(tryListen, retry).unref();
       else log(`hub: port ${HUB_PORT} is held by something that isn't a devteam hub; this dashboard won't serve the hub`);
     });
-    keepAlive(hub).listen(HUB_PORT, '127.0.0.1', () => log(`hub on http://127.0.0.1:${HUB_PORT}`));
+    keepAlive(hub).listen(HUB_PORT, '127.0.0.1', () => { log(`hub on http://127.0.0.1:${HUB_PORT}`); onHeld(); });
   };
   tryListen();
+}
+
+// ===== account rotation: cswap (claude-swap), when it's installed =====
+// A machine has one active Claude account, so one dashboard drives the switch: the one holding the
+// hub port. Each dashboard then looks after its own instance's panes. Every dashboard runs this as
+// the supervisor, never as the owner (a cswap found on a path an agent can write gets no owner
+// identity), and only the supervisor acts on a pane, as everywhere else (supervisor.md §11).
+const ACCOUNTS_FILE = runPath('accounts.json');
+const ACCOUNTS_RESUMED = runPath('accounts-resumed.json');
+const ACCOUNTS_FRESH_MS = 10 * 60000;
+const RESUME_EVERY_MS = 10 * 60000;
+// Claude Code's limit menu. Only Escape ever goes to it: its third item spends money.
+const LIMIT_MENU = /Stop and wait for limit to reset/;
+const RESUME_TEXT = '[devteam] the usage limit has cleared: another account is active. Carry on from where you stopped.';
+function findCswap() {
+  const v = process.env.DEVTEAM_CSWAP;
+  if (v === 'off') return null;
+  if (v?.includes('/')) return fs.existsSync(v) ? v : null;
+  // a fixture dashboard on its own hub port never finds the machine's real accounts
+  if (!v && HUB_PORT !== 4320) return null;
+  for (const d of [...(process.env.PATH ?? '').split(path.delimiter).filter(Boolean), path.join(os.homedir(), '.local', 'bin')]) {
+    const f = path.join(d, v || 'cswap');
+    try { fs.accessSync(f, fs.constants.X_OK); if (fs.statSync(f).isFile()) return f; } catch {}
+  }
+  return null;
+}
+const runCswap = (bin, args) => spawnSync(bin, args, { cwd: os.homedir(), encoding: 'utf8', timeout: 30000, killSignal: 'SIGKILL', maxBuffer: 4 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
+// One pass of cswap's own engine. It exits 2 (nothing to do) and 3 (no viable account) as a matter
+// of course, so what it said is read whatever the exit code.
+function rotateAccounts(bin) {
+  const r = runCswap(bin, ['auto', '--once', '--json']);
+  const events = (r.stdout ?? '').split('\n').flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } }).filter((e) => typeof e?.event === 'string');
+  return { ok: events.length > 0 || [0, 2, 3].includes(r.status), failure: `cswap auto: ${r.error?.message ?? `exit ${r.status}: ${(r.stderr ?? '').trim().slice(0, 200)}`}`, switched: events.filter((e) => e.event === 'switch'), exhausted: events.some((e) => e.event === 'all-exhausted') };
+}
+function cswapAccounts(bin) {
+  const r = runCswap(bin, ['list', '--json']);
+  try { const a = JSON.parse(r.stdout).accounts; return Array.isArray(a) ? a : null; } catch { return null; }
+}
+// Room to work: its usage reads ok, and both windows it has are measured and under 100.
+function accountHasRoom(a) {
+  const w = [a?.usage?.fiveHour, a?.usage?.sevenDay].filter(Boolean);
+  return a?.usageStatus === 'ok' && w.length > 0 && w.every((x) => typeof x.pct === 'number' && x.pct < 100);
+}
+// What a pane's bottom lines say about a limit stop.
+function limitStop(lines) {
+  const own = lines.filter((l) => !PANE_CODE.test(l));
+  const menu = own.some((l) => LIMIT_MENU.test(l));
+  const [, limitRe] = PANE_WAITS.find(([k]) => k === 'limit');
+  const [, promptRe] = PANE_WAITS.find(([k]) => k === 'prompt');
+  return { menu, limit: menu || own.some((l) => limitRe.test(l)), otherPrompt: !menu && own.some((l) => promptRe.test(l) || /Enter to confirm/.test(l)), busy: lines.some((l) => PANE_BUSY.test(l)) };
+}
+const paneBottom = (target) => (sh('tmux', ['capture-pane', '-p', '-t', target]) ?? '').split('\n').map((l) => l.trim()).filter(Boolean).slice(-15);
+// Resume one pane stopped at a limit; true when it was. The attempt is recorded before anything is
+// typed, so a tick killed halfway can't type it twice.
+function resumePane(key, paneTarget) {
+  const { target, problem } = resolvePane(paneTarget);
+  if (problem || !target) return false;
+  const st = limitStop(paneBottom(target));
+  if (!st.limit || st.busy || st.otherPrompt) return false;
+  let done = {};
+  try { done = JSON.parse(readText(ACCOUNTS_RESUMED) ?? '{}'); } catch {}
+  if (Date.now() - (done[key] ?? 0) < RESUME_EVERY_MS) return false;
+  done[key] = Date.now();
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.writeFileSync(ACCOUNTS_RESUMED, JSON.stringify(done));
+  if (st.menu) {
+    if (!tmux(['send-keys', '-t', target, 'Escape'])) return false;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
+    if (limitStop(paneBottom(target)).menu) return false;
+  }
+  if (!typeInto(target, RESUME_TEXT)) return false;
+  appendLog({ type: 'observation', source: 'pane', kind: 'limit-resumed', subject: key, detail: 'a pane stopped at a usage limit was told to carry on: the active account has room', detector: 'pane', source_key: `limit-resumed ${key} ${done[key]}` });
+  return true;
+}
+// A supervisor outside tmux can only be reported: its newest transcript (one that was started as
+// the supervisor, if any of the latest are) ending on a rate-limit error means it has stopped.
+function supervisorLimit() {
+  const dir = path.join(process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), '.claude'), 'projects', realOrSelf(mainRoot).replace(/[^a-zA-Z0-9]/g, '-'));
+  let files = [];
+  try { files = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')).map((f) => ({ f: path.join(dir, f), m: fs.statSync(path.join(dir, f)).mtimeMs })).sort((a, b) => b.m - a.m).slice(0, 5); } catch { return null; }
+  const head = (f) => { const fd = fs.openSync(f, 'r'); try { const b = Buffer.alloc(65536); return b.toString('utf8', 0, fs.readSync(fd, b, 0, b.length, 0)); } finally { fs.closeSync(fd); } };
+  const pick = (files.find(({ f }) => { try { return head(f).includes('You are the supervisor') || head(f).includes('DEVTEAM_ROLE=supervisor'); } catch { return false; } }) ?? files[0])?.f;
+  if (!pick) return null;
+  const fd = fs.openSync(pick, 'r');
+  let text;
+  try { const size = fs.fstatSync(fd).size; const n = Math.min(size, 256 * 1024); const b = Buffer.alloc(n); fs.readSync(fd, b, 0, n, size - n); text = b.toString('utf8'); } finally { fs.closeSync(fd); }
+  const last = text.split('\n').flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } }).filter((o) => o?.type === 'assistant').pop();
+  if (last?.error !== 'rate_limit') return null;
+  const c = last.message?.content;
+  return { at: last.timestamp ?? null, text: String((Array.isArray(c) ? c[0]?.text : c) ?? 'usage limit').slice(0, 200) };
+}
+function accountsState() {
+  try { const s = JSON.parse(readText(ACCOUNTS_FILE)); return Date.now() - Date.parse(s.at) < ACCOUNTS_FRESH_MS ? s : null; } catch { return null; }
+}
+// Not supervisorOnly: that records this process's pane as the supervisor's, and this runs under the dashboard.
+function cmdAccountsTick() {
+  if (logWriter() !== 'supervisor' || ['worker', 'planner'].includes(process.env.DEVTEAM_ROLE)) die('accounts-tick: the supervisor does this');
+  const bin = findCswap();
+  const state = { at: nowIso(), cswap: !!bin, exhausted: false, needs_login: [], supervisor_limit: null, resumed: [] };
+  let switched = false;
+  if (bin) {
+    if (flags.rotate) {
+      const r = rotateAccounts(bin);
+      if (!r.ok) out(r.failure);
+      for (const e of r.switched) out(`cswap switched account${e.from || e.to ? `: ${e.from ?? '?'} -> ${e.to ?? '?'}` : ''}`);
+      switched = r.switched.length > 0;
+      state.exhausted = r.exhausted;
+    }
+    const rows = cswapAccounts(bin);
+    if (rows) {
+      state.needs_login = rows.filter((a) => a.usageStatus === 'relogin_required').map((a) => String(a.alias ?? a.email ?? a.number));
+      const usable = rows.filter((a) => !a.disabled);
+      if (usable.length && !usable.some(accountHasRoom)) state.exhausted = true;
+      // A session still holds the old login for about 30 s after a switch (macOS): the next tick resumes.
+      if (!switched && accountHasRoom(rows.find((a) => a.active))) {
+        const phases = readLog().lines.filter((l) => l.type === 'phase').sort((a, b) => a.at.localeCompare(b.at));
+        const parked = (w) => phases.filter((l) => l.by === w).pop()?.to === 'parked';
+        for (const { name } of ourWindows(tmuxSession())) if (!parked(name) && resumePane(name, tmuxTarget(name))) state.resumed.push(name);
+        if (supervisorTarget() && resumePane('supervisor', supervisorTarget())) state.resumed.push('supervisor');
+      }
+      for (const w of state.resumed) out(`resumed ${w}: it had stopped at a usage limit`);
+    }
+  }
+  const sup = supervisorTarget();
+  if (!sup || resolvePane(sup).problem) state.supervisor_limit = supervisorLimit();
+  fs.mkdirSync(runDir, { recursive: true });
+  const tmp = `${ACCOUNTS_FILE}.${process.pid}`;
+  fs.writeFileSync(tmp, JSON.stringify(state));
+  fs.renameSync(tmp, ACCOUNTS_FILE);
 }
 
 async function cmdDashboard() {
@@ -7654,7 +7791,24 @@ async function cmdDashboard() {
   };
   refreshHello();
   setInterval(refreshHello, 10000).unref();
-  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, inbox: hello?.inbox ?? null, fleet: hello?.fleet ?? null });
+  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, inbox: hello?.inbox ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}) });
+  // Account rotation and limit stops (accounts-tick), one run at a time, as the supervisor; a line
+  // it prints goes to the log once, however many ticks repeat it.
+  let holdsHub = false;
+  let accountsRunning = false;
+  let accountsSaid = '';
+  const accountsTick = () => {
+    if (accountsRunning) return;
+    accountsRunning = true;
+    const env = { ...process.env, DEVTEAM_ROLE: 'supervisor' };
+    for (const k of ['DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_CHANNEL']) delete env[k];
+    execFile(process.execPath, [self, 'accounts-tick', ...(holdsHub ? ['--rotate'] : [])], { cwd: mainRoot, env, timeout: 120000, killSignal: 'SIGKILL', maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+      accountsRunning = false;
+      const said = `${stdout}${err ? ` ${stderr || err.message}` : ''}`.trim();
+      if (said && said !== accountsSaid) log(`accounts: ${said}`);
+      accountsSaid = said;
+    });
+  };
   // One dashboard-data run at a time, shared by every page waiting on it, given 2 minutes: each
   // refresh used to start its own, and on a slow machine they piled up (one ran for an hour).
   let dataRun = null;
@@ -7917,7 +8071,7 @@ async function cmdDashboard() {
     log(`server error: ${e?.stack ?? e}`); process.stderr.write(`devteam dashboard: ${e.message}\n`); process.exit(1);
   });
   keepAlive(server);
-  server.once('listening', () => { log(`started on http://${host}:${port} (node ${process.version})`); out(`devteam dashboard on http://${host}:${port}`); startHub(log); });
+  server.once('listening', () => { log(`started on http://${host}:${port} (node ${process.version})`); out(`devteam dashboard on http://${host}:${port}`); startHub(log, () => { holdsHub = true; }); setInterval(accountsTick, Number(process.env.DEVTEAM_ACCOUNTS_MS ?? 60000)).unref(); });
   server.listen(port, host);
 }
 
@@ -8924,7 +9078,7 @@ function cmdHello() {
   // the Inbox as the dashboard counts it: open questions and lessons waiting to be kept
   const inbox = questions().filter((q) => q.status === 'open' && q.goal_hold !== 'let-go').length + logObjects('knowledge').filter((k) => k.status === 'candidate').length;
   const workers = ourWindows(tmuxSession()).length;
-  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, fleet: { mode: fleetMode() ?? 'run', workers } };
+  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, fleet: { mode: fleetMode() ?? 'run', workers }, ...(accountsState()?.supervisor_limit ? { alert: 'The supervisor stopped at a usage limit: type "continue" in its terminal' } : {}) };
   return flags.json ? json(r) : out(`${r.name} at ${r.root}: kit ${r.kit}, ${inbox} open question(s), fleet ${r.fleet.mode}, ${workers} session(s)`);
 }
 // The kit's release (settings.upstream_base), +local when the kit that is running differs from the
@@ -9628,7 +9782,7 @@ const COMMANDS = {
   ask: cmdAsk, answer: cmdAnswer, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
   observe: cmdObserve, 'observe-link': cmdObserveLink, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, knowledge: cmdKnowledge, problem: cmdProblem,
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
-  log: cmdLog, record: cmdRecord, peek: cmdPeek, 'log-check': cmdLogCheck, dispose: cmdDispose, 'log-sync': cmdLogSync, history: cmdHistory,
+  log: cmdLog, record: cmdRecord, peek: cmdPeek, 'log-check': cmdLogCheck, 'accounts-tick': cmdAccountsTick, dispose: cmdDispose, 'log-sync': cmdLogSync, history: cmdHistory,
   drain: cmdDrain, undrain: cmdUndrain, fleet: cmdFleet, handoff: cmdHandoff, wait: cmdWait,
   dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes,
 };
