@@ -59,6 +59,19 @@ RUN case "$(uname -m)" in \
 ARG CLAUDE_CODE_VERSION=2.1.307
 RUN npm install -g @anthropic-ai/claude-code@$CLAUDE_CODE_VERSION && npm cache clean --force
 
+# claude-swap, pinned: with it devteam rotates this box's Claude accounts on its own. uv brings the
+# Python 3.12 it needs (Debian's is older); its logins land in $HOME, on the volume.
+ARG CLAUDE_SWAP_VERSION=1.0.0
+RUN case "$(uname -m)" in \
+      x86_64) sum=c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83 ;; \
+      aarch64) sum=71279f8d3c67241e807b9d8db872d1bf541579fb9f08b7d1eb1682196d1e57dc ;; \
+      *) echo "no uv for $(uname -m)" >&2; exit 1 ;; \
+    esac \
+ && curl -fsSL -o /tmp/uv.tgz "https://github.com/astral-sh/uv/releases/download/0.13.7/uv-$(uname -m)-unknown-linux-gnu.tar.gz" \
+ && echo "$sum  /tmp/uv.tgz" | sha256sum -c - && tar -xzf /tmp/uv.tgz -C /usr/local/bin --strip-components=1 && rm /tmp/uv.tgz \
+ && UV_PYTHON_INSTALL_DIR=/opt/uv/python UV_TOOL_DIR=/opt/uv/tools UV_TOOL_BIN_DIR=/usr/local/bin uv tool install --python 3.12 "claude-swap==$CLAUDE_SWAP_VERSION" \
+ && chmod -R a+rX /opt/uv
+
 # Two users. dev is the owner at the terminal, and every agent: home on the volume. gw runs only
 # the gateway and alone can read its passkeys and sessions, so no agent can add itself a way in.
 RUN usermod -l dev -d /data/home node && groupmod -n dev node \

@@ -471,6 +471,22 @@ test('whatever an agent binds to the hub\'s port, the box\'s name serves only th
   } finally { await gw2.close(); }
 });
 
+test('what an agent serves on an instance\'s name doesn\'t outlive its server: no service worker, nothing cached', async () => {
+  const gw = await gateway('nokeep');
+  const seen = [];
+  const evil = http.createServer((req, res) => { seen.push(req.url); res.writeHead(200, { 'content-type': 'text/javascript', 'cache-control': 'max-age=31536000, immutable' }); res.end('//'); });
+  await new Promise((r) => evil.listen(P, '127.0.0.1', r));
+  try {
+    assert.equal((await gw.claim(authenticator())).status, 200);
+    const page = await gw.req('GET', '/page.js', { on: P });
+    assert.equal(page.status, 200);
+    assert.equal(page.headers['cache-control'], 'no-store', 'its own cache-control is replaced');
+    assert.equal((await gw.req('GET', '/sw.js', { on: P, headers: { 'service-worker': 'script' } })).status, 403);
+    assert.equal((await gw.req('GET', '/sw.js', { on: P, headers: { 'sec-fetch-dest': 'serviceworker' } })).status, 403);
+    assert.deepEqual(seen, ['/page.js'], 'and the registration never reaches it');
+  } finally { evil.close(); await gw.close(); }
+});
+
 test('the hub on a laptop is unchanged: no box.json, instances on their own loopback ports', () => {
   const hub = fs.readFileSync(path.join(kit, 'dashboard', 'hub.html'), 'utf8');
   assert.match(hub, /const urlOf = \(x\) => \(box \? box\.instance\.replace\('\{port\}', String\(Number\(x\.port\)\)\) : `http:\/\/127\.0\.0\.1:\$\{Number\(x\.port\)\}\/`\);/);

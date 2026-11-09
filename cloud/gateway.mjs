@@ -377,7 +377,9 @@ export function createGateway(opts = {}) {
   };
   const proxy = (req, res, { port, path: p, publicOrigin, cap }) => {
     const up = http.request({ host: '127.0.0.1', port, method: req.method, path: p, headers: upstreamHeaders(req, port, publicOrigin) }, (ur) => {
-      res.writeHead(ur.statusCode, downstreamHeaders(ur.headers, cap, publicOrigin));
+      // Never kept: a page an agent served once on this name must not come back from the browser's
+      // cache after a real dashboard has taken its port.
+      res.writeHead(ur.statusCode, { ...downstreamHeaders(ur.headers, cap, publicOrigin), 'cache-control': 'no-store' });
       // an upstream cut off mid-body cuts the browser's response too, rather than leaving it open
       pipeline(ur, res, () => {});
     });
@@ -458,6 +460,9 @@ export function createGateway(opts = {}) {
     if (!isBox && !isAuth && !isTerm && !port) return send(res, 421, 'text/plain; charset=utf-8', `this box answers only on its own names: open ${PUB}/`);
     const own = isBox ? PUB : isAuth ? AUTH : isTerm ? TERM : instanceOrigin(port);
     if (!['GET', 'HEAD'].includes(req.method) && req.headers.origin !== own) return send(res, 403, 'text/plain; charset=utf-8', 'only from this box\'s own pages');
+    // The kit has no service workers. One an agent's page registers on an instance's name would
+    // outlive its server, and run as that name's real dashboard once one takes the port.
+    if (port && (req.headers['service-worker'] || req.headers['sec-fetch-dest'] === 'serviceworker')) return send(res, 403, 'text/plain; charset=utf-8', 'no service workers on this box');
     const p = url.pathname;
     const rawPath = req.url.split('?')[0];
     try {
