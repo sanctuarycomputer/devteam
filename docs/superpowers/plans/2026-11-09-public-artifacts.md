@@ -103,7 +103,7 @@ Append this step to `test/lib/chain.mjs` directly after the `step('artifacts: th
         assert.match(r.out, re);
         fs.writeFileSync(f, before);
       }
-      // the supervisor can't write one either, with or without an answer to cite
+      // the supervisor can't write one either: authorise() refuses an owner-only class (the forged lines above exercise integrity())
       const r = dt(['act', '--class', 'artifact-publish', '--refs', 'artifact:landed-other', '--', 'publish'], { role: 'sup' });
       assert.notEqual(r.status, 0);
       assert.match(r.err, /artifact-publish is the owner's/);
@@ -712,7 +712,7 @@ with:
 
 - [ ] **Step 4: The record beside each row**
 
-Directly after `publishRecords()` add:
+Directly after `publicManifest()` (Task 4, which itself sits directly after `publishRecords()`) add:
 
 ```js
 // A slug's recorded state as the Library shows it: published at a tree (with the line's date and
@@ -1523,7 +1523,7 @@ In `createGateway`, after `servePublic` (Task 6) add:
     if (total > PUBLIC_MAX) throw new Error(`publishing it would hold ${total} bytes, over the box's public cap of ${PUBLIC_MAX} bytes (DEVTEAM_PUBLIC_MAX)`);
     const algo = m.tree.length === 40 ? 'sha1' : 'sha256';
     const bytes = new Map();
-    const ids = {};
+    const ids = Object.create(null);   // a file may be named __proto__
     for (const [rel, f] of Object.entries(m.files)) {
       const r = await loopback(port, 'GET', `/artifact/main/${m.slug}/${rel}`, { cap: f.size });
       if (r.status !== 200 || r.body.length !== f.size || hex256(r.body) !== f.sha256) throw new Error(`${rel} is not the file the manifest names (its bytes differ); nothing was published`);
@@ -1539,7 +1539,7 @@ In `createGateway`, after `servePublic` (Task 6) add:
     const pub = { ...(now.public ?? {}) };
     const prev = Object.hasOwn(pub, m.project) ? pub[m.project] : null;
     const update = !!prev && Object.hasOwn(prev.artifacts ?? {}, m.slug);
-    pub[m.project] = { root: m.root, port, artifacts: { ...(prev?.artifacts ?? {}), [m.slug]: { tree: m.tree, title: m.title, at: new Date().toISOString(), files: Object.fromEntries(Object.entries(m.files).map(([rel, f]) => [rel, { sha256: f.sha256, size: f.size }])) } } };
+    pub[m.project] = { root: m.root, port, artifacts: { ...(prev && prev.root === m.root ? prev.artifacts : {}), [m.slug]: { tree: m.tree, title: m.title, at: new Date().toISOString(), files: Object.fromEntries(Object.entries(m.files).map(([rel, f]) => [rel, { sha256: f.sha256, size: f.size }])) } } };
     store.save({ ...now, public: pub });
     return { url: `${PUBLIC}/${m.project}/${m.slug}/`, update };
   };
@@ -1557,14 +1557,15 @@ In the request handler's box section, directly before its final `return send(res
         const slugs = [...new Set(url.searchParams.getAll('slug'))];
         if (!BLOCK.includes(port) || !slugs.length || slugs.length > 50 || !slugs.every((x) => LINK_ID.test(x))) return send(res, 400, 'text/plain; charset=utf-8', 'publish?port=<an instance of this box>&slug=<slug>[&slug=…], at most 50');
         const pub = store.load().public ?? {};
-        const rows = await Promise.all(slugs.map(async (slug) => {
+        // at most four manifests at a time: each is a node child on the instance, and Restore all asks for up to 50
+        const rows = await mapPool(slugs, 4, async (slug) => {
           try {
             const m = await fetchManifest(port, slug);
             const bound = Object.hasOwn(pub, m.project) ? pub[m.project] : null;
             const now = bound && Object.hasOwn(bound.artifacts ?? {}, slug) ? bound.artifacts[slug] : null;
             return { slug, m, hash: manifestHash(m), url: `${PUBLIC}/${m.project}/${slug}/`, state: !now ? 'new on this box' : now.tree === m.tree ? 'already public at this version' : 'an update', movedFrom: bound && bound.root !== m.root ? bound.root : null };
           } catch (e) { return { slug, error: e.message }; }
-        }));
+        });
         return page(res, PAGES.publish(port, rows));
       }
       if (req.method === 'POST' && p === '/public/publish') {
@@ -1574,7 +1575,7 @@ In the request handler's box section, directly before its final `return send(res
         if (!BLOCK.includes(port) || !items.length || items.length > 50 || !items.every((x) => x && typeof x.slug === 'string' && LINK_ID.test(x.slug) && typeof x.manifest === 'string' && /^[0-9a-f]{64}$/.test(x.manifest))) return json(res, 400, { error: 'publish takes { port, items: [{ slug, manifest, move }] }, 1 to 50 items' });
         const results = [];
         for (const it of items) {
-          try { results.push({ slug: it.slug, ok: true, ...(await pstore.serial(() => publishItem(port, it).finally(() => pstore.sweep(store.load().public)))) }); }
+          try { results.push({ slug: it.slug, ok: true, ...(await pstore.serial(() => publishItem(port, it).finally(() => { try { pstore.sweep(store.load().public); } catch {} }))) }); }
           catch (e) { results.push({ slug: it.slug, ok: false, error: e.message }); }
         }
         log(`public: ${results.map((x) => `${x.slug} ${x.ok ? 'published' : 'refused'}`).join(', ')} from instance ${port}`);
@@ -1824,7 +1825,7 @@ At module level, after `fmtSize` (Task 8), add:
 
 ```js
 // JSON as a header value: a header carries only Latin-1, so everything past ~ is escaped.
-const asciiJson = (v) => JSON.stringify(v).replace(/[\u007f-￿]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+const asciiJson = (v) => JSON.stringify(v).replace(/[\u007f-\uffff]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
 ```
 
 In `downstreamHeaders`, replace the skip list line with:
@@ -2096,7 +2097,7 @@ In the delegated click handler (`document.addEventListener('click', async (ev) =
 Run: `~/.asdf/installs/nodejs/18.20.4/bin/node --test --test-name-pattern "publish state" test/dashboard.test.mjs`
 Expected: PASS.
 
-Then the kit's page checks (the chain loads index.html and runs its marked blocks): `~/.asdf/installs/nodejs/18.20.4/bin/node --test --test-concurrency=8 test/kit.test.mjs`
+Then the kit's page checks (the suite, which loads the dashboard): `~/.asdf/installs/nodejs/18.20.4/bin/node --test --test-concurrency=8 test/kit.test.mjs`
 Expected: PASS, `# fail 0`.
 
 - [ ] **Step 8: Commit**
@@ -2260,3 +2261,9 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - **Spec coverage.** §1 record and schema: Task 1; consumers and `correct`: Task 2. §2 commands and the action: Task 3; `/public-manifest`: Task 4; Library `tree`/`published`: Task 5; the card table, Restore all, Forget, the laptop note, the header read, the links: Task 11. §3 names and serving: Task 6; store and queue: Task 7; confirm page and POST (all five steps, binding, cap, deadline, validation): Task 8; unpublish and `/public/`: Task 9; the header: Task 10. Testing list: kit items in Tasks 1-5; gateway items in Tasks 6-10 (session, escaping, instance-origin POST, anonymous read with CSP/etag/no cookie, HEAD, 304, 405, cookie ignored, the owner act, wrong bytes stored nothing, kill and impostor, changed manifest, tree mismatch, concurrent publishes, unpublish racing publish, move and port, unpublish then 404 and blobs gone, `/` and `/<project>/` 404 and the redirect, the header and the dropped upstream copy, the cap, the parity test). Docs: Task 12.
 - **Placeholders.** None: every code step carries its code, every run its command and expected result.
 - **Names.** `TREE_ID`, `PUBLIC_PROJECT`, `treeIdEntries`, `publicArtifact`, `publicManifest`, `publishRecords`, `publishedView`, `ACTION_MS`, `run(args, { timeout })` with `code` (kit); `PUBLIC_TYPES`, `PUBLIC_CDNS`, `publicPathOk`, `publicCsp`, `canonicalJson`, `manifestProblem`, `gitBlobId`, `gitTreeId`, `publicStore` (`blobs`, `blobPath`, `serial`, `referenced`, `write`, `sweep`), `asciiJson`, `fmtSize`, `PUBLIC`, `publicHost`, `servePublic`, `pstore`, `PUBLIC_MAX`, `LOOP_MS`, `loopback`, `errorOf`, `fetchManifest`, `manifestHash`, `publishItem`, `recordUnpublish`, `publicMap`, `PAGES.publish|unpublish|publicList` (gateway); `PUBLIC`, `publicHere`, `publicState`, `publicLinks` (page); `seedPublic`, `standIn`, `confirmAndPublish`, `blobsOf`, `landedProject`, `startKit`, `kitUp`, `HELLO`, `gw.site` (tests). Each is defined in the task that first uses it and used with the same name and shape after.
+
+## Review fixes (Fable, plan review)
+
+- **`mapPool(items, n, fn)`** goes in `cloud/gateway.mjs` beside the other small helpers (Task 8): `async function mapPool(items, n, fn) { const out = new Array(items.length); let i = 0; await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => { while (i < items.length) { const k = i++; out[k] = await fn(items[k], k); } })); return out; }`. The confirm page fetches manifests four at a time.
+- **"Move it" keeps only the slug being published.** A move rebinds the project to the new root with just that slug; the old root's other slugs are dropped (and their blobs swept), so a checkout never shows as public what it never published. Task 8's move test asserts the old root's other slug is 404 after a move.
+
