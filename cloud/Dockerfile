@@ -99,7 +99,7 @@ step=start
 say "boot: $(date -u +%FT%TZ) pid=$$"
 report() {
   rc=$?
-  [ "$rc" = 0 ] || [ -n "${stopping:-}" ] && exit 0
+  [ "$rc" != 0 ] || exit 0
   say "BOOT FAILED at step '$step' (exit $rc); holding ${DEVTEAM_BOX_HOLD_SECONDS:-900}s so a shell can look"
   diagnose
   sleep "${DEVTEAM_BOX_HOLD_SECONDS:-900}"
@@ -113,12 +113,14 @@ diagnose() {
   say "mount: $(grep ' /data ' /proc/mounts 2>&1)"
   say "space: $(df -h /data 2>&1 | tail -1)"
   say "port: ${PORT:-unset}; public url: ${DEVTEAM_PUBLIC_URL:-unset}; node: $(/usr/local/bin/node --version 2>&1)"
-  say "env names: $(env | cut -d= -f1 | sort | tr '\n' ' ')"
+  say "env names: $(awk 'BEGIN{for(k in ENVIRON)print k}' | sort | tr '\n' ' ')"   # a value can run over lines, and env would print them
   say "gateway files: $(ls -ld /opt/devteam /opt/devteam/* 2>&1 | tr '\n' ';')"
 }
 # Whether a process lives, without signalling it: a platform may give root no CAP_KILL (Render
 # doesn't), and then kill -0 on another user's process fails though it runs.
 alive() { [ -r "/proc/$1/status" ] && ! grep -q '^State:[[:space:]]*Z' "/proc/$1/status"; }
+# Says what a step's check printed, and fails the step if the check did.
+check() { what=$1; shift; rc=0; out=$("$@" 2>&1) || rc=$?; say "$what: $out"; return "$rc"; }
 trap report EXIT
 set -eu
 diagnose
@@ -130,9 +132,9 @@ chmod 700 /data/gateway
 as_gw() { setpriv --reuid=gw --regid=gw --init-groups env HOME=/data/gateway DEVTEAM_GATEWAY_DIR=/data/gateway "$@"; }
 as_dev() { setpriv --reuid=dev --regid=dev --init-groups env -u DEVTEAM_CLAIM_TOKEN HOME=/data/home "$@"; }
 step='drop to gw'
-say "as gw: $(as_gw id 2>&1)"
+check 'as gw' as_gw id
 step='drop to dev'
-say "as dev: $(as_dev id 2>&1)"
+check 'as dev' as_dev id
 step='start the gateway'
 say "starting the gateway on ${PORT:-8080}"
 # not through as_gw: a function sent to the background is a subshell, and $! would be root's
@@ -148,13 +150,14 @@ until curl -fsS -o /dev/null "http://127.0.0.1:${PORT:-8080}/healthz" 2>/dev/nul
   sleep 0.2
 done
 say "gateway answers; starting dev's side"
+# The boot is over, and so is the hold: agents would outlive the gateway, and one could take the port.
+trap - EXIT
 as_dev /usr/local/bin/devteam-dev >/dev/null 2>&1 &   # not the platform's log: no agent can write a fake claim link there
 # each user stops its own (root may not signal theirs)
-trap 'stopping=1; say "stopping"; as_dev tmux kill-server 2>/dev/null; sleep 2; as_gw kill -TERM "$gw" 2>/dev/null; exit 0' TERM INT
-step='running'
+trap 'say "stopping"; as_dev tmux kill-server 2>/dev/null || true; sleep 2; as_gw kill -TERM "$gw" 2>/dev/null || true; exit 0' TERM INT
 say "up"
 rc=0; wait "$gw" || rc=$?
-say "the gateway exited with $rc"
+say "the gateway exited with $rc; the box stops"
 exit "$rc"
 EOF
 
