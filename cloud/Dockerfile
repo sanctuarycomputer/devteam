@@ -5,8 +5,8 @@
 # workers run), and each repo's dashboard on a subdomain of its own. What lasts lives on /data.
 #
 # It needs a name and a wildcard under it, e.g. box.example.com and *.box.example.com: each
-# dashboard keeps an origin of its own (4321.box.example.com), as on a laptop, and signing in and
-# the terminal have theirs (auth.box.example.com, term.box.example.com).
+# dashboard keeps an origin of its own (4321.box.example.com), as on a laptop, and the terminal has
+# its own too (term.box.example.com). Signing in is at box.example.com/auth.
 #
 # Render: New > Web Service > this repo (or a fork), Language: Docker, Dockerfile path:
 #   cloud/Dockerfile, build context: the repo root. Instance: Pro (4 GB) or larger; a free one
@@ -18,7 +18,7 @@
 #   CNAMEs; remove any AAAA records). Best on a domain used for nothing else, or if Render won't
 #   take a wildcard under a subdomain: example.com and *.example.com. The *.onrender.com address is refused:
 #   the box answers only on its own names. Then deploy: the log prints the claim link,
-#   https://auth.box.example.com/auth/claim#<token>, good for a day (after that, a restart prints a new one).
+#   https://box.example.com/auth/claim#<token>, good for a day (after that, a restart prints a new one).
 # fly.io: fly launch --no-deploy --dockerfile cloud/Dockerfile --internal-port 8080; in fly.toml
 #   set auto_stop_machines = "off", min_machines_running = 1, [env] DEVTEAM_PUBLIC_URL, and
 #   [mounts] source = "data", destination = "/data"; fly volumes create data; fly certs add for
@@ -78,9 +78,13 @@ RUN usermod -l dev -d /data/home node && groupmod -n dev node \
  && groupadd --system --gid 990 gw && useradd --system --uid 990 --gid 990 --home-dir /data/gateway --shell /usr/sbin/nologin gw
 
 # What the gateway serves, root's and read-only: an agent can change a checkout or take a port, not these.
+# Its folder made first, and its modes set after: a builder may give a folder COPY creates the
+# file's own mode (Render's did, so the gateway's user couldn't reach its own file).
+RUN install -d -m 755 /opt/devteam
 COPY --chmod=644 cloud/gateway.mjs /opt/devteam/gateway.mjs
 COPY --chmod=644 docs/devteam/dashboard/hub.html /opt/devteam/hub.html
-RUN ttyd -d 0 -i lo -p 17681 true & p=$!; sleep 1; curl -fsS --compressed -o /opt/devteam/ttyd.html http://127.0.0.1:17681/; r=$?; kill $p; [ $r = 0 ] && chmod 644 /opt/devteam/ttyd.html && grep -q xterm /opt/devteam/ttyd.html
+RUN ttyd -d 0 -i lo -p 17681 true & p=$!; sleep 1; curl -fsS --compressed -o /opt/devteam/ttyd.html http://127.0.0.1:17681/; r=$?; kill $p; [ $r = 0 ] && grep -q xterm /opt/devteam/ttyd.html \
+ && chmod 755 /opt/devteam && chmod 644 /opt/devteam/*
 
 # Under tini, as root only to set up /data, then the gateway, and only once it holds the public
 # port, dev's side: dev's shells read files any agent can write, and nothing of dev's may get the
@@ -88,21 +92,73 @@ RUN ttyd -d 0 -i lo -p 17681 true & p=$!; sleep 1; curl -fsS --compressed -o /op
 # first, so agents get a hangup, not a kill.
 COPY --chmod=755 <<'EOF' /usr/local/bin/devteam-box
 #!/bin/sh
+# Every step says so, on both streams, so a boot that fails names where. A failed boot then waits
+# (DEVTEAM_BOX_HOLD_SECONDS) so the platform can still show its log and open a shell.
+say() { echo "box: $*"; echo "box(stderr): $*" >&2; }
+step=start
+say "boot: $(date -u +%FT%TZ) pid=$$"
+report() {
+  rc=$?
+  [ "$rc" != 0 ] || exit 0
+  say "BOOT FAILED at step '$step' (exit $rc); holding ${DEVTEAM_BOX_HOLD_SECONDS:-900}s so a shell can look"
+  diagnose
+  sleep "${DEVTEAM_BOX_HOLD_SECONDS:-900}"
+  exit "$rc"
+}
+diagnose() {
+  say "id: $(id 2>&1)"
+  say "kernel: $(uname -srm 2>&1)"
+  say "limits: $(grep -E '^(CapEff|CapBnd|NoNewPrivs|Seccomp):' /proc/self/status 2>&1 | tr -s '\t\n' ' ')"
+  say "data: $(ls -ld /data /data/home /data/gateway 2>&1 | tr '\n' ';')"
+  say "mount: $(grep ' /data ' /proc/mounts 2>&1)"
+  say "space: $(df -h /data 2>&1 | tail -1)"
+  say "port: ${PORT:-unset}; public url: ${DEVTEAM_PUBLIC_URL:-unset}; node: $(/usr/local/bin/node --version 2>&1)"
+  say "env names: $(awk 'BEGIN{for(k in ENVIRON)print k}' | sort | tr '\n' ' ')"   # a value can run over lines, and env would print them
+  say "gateway files: $(ls -ld /opt/devteam /opt/devteam/* 2>&1 | tr '\n' ';')"
+}
+# Whether a process lives, without signalling it: a platform may give root no CAP_KILL (Render
+# doesn't), and then kill -0 on another user's process fails though it runs.
+alive() { [ -r "/proc/$1/status" ] && ! grep -q '^State:[[:space:]]*Z' "/proc/$1/status"; }
+# Says what a step's check printed, and fails the step if the check did.
+check() { what=$1; shift; rc=0; out=$("$@" 2>&1) || rc=$?; say "$what: $out"; return "$rc"; }
+trap report EXIT
 set -eu
+diagnose
+step='make /data'
 mkdir -p /data/home /data/gateway
 [ "$(stat -c %U /data/home)" = dev ] || chown dev:dev /data/home
 chown -R gw:gw /data/gateway
 chmod 700 /data/gateway
+as_gw() { setpriv --reuid=gw --regid=gw --init-groups env HOME=/data/gateway DEVTEAM_GATEWAY_DIR=/data/gateway "$@"; }
 as_dev() { setpriv --reuid=dev --regid=dev --init-groups env -u DEVTEAM_CLAIM_TOKEN HOME=/data/home "$@"; }
+step='drop to gw'
+check 'as gw' as_gw id
+step='drop to dev'
+check 'as dev' as_dev id
+step='start the gateway'
+say "starting the gateway on ${PORT:-8080}"
+# not through as_gw: a function sent to the background is a subshell, and $! would be root's
 setpriv --reuid=gw --regid=gw --init-groups env HOME=/data/gateway DEVTEAM_GATEWAY_DIR=/data/gateway /usr/local/bin/node /opt/devteam/gateway.mjs serve &
 gw=$!
+step='wait for the gateway'
 until curl -fsS -o /dev/null "http://127.0.0.1:${PORT:-8080}/healthz" 2>/dev/null; do
-  kill -0 "$gw" 2>/dev/null || exit 1
+  if ! alive "$gw"; then
+    rc=0; wait "$gw" || rc=$?
+    say "the gateway exited with $rc before answering"
+    exit 1
+  fi
   sleep 0.2
 done
+say "gateway answers; starting dev's side"
+# The boot is over, and so is the hold: agents would outlive the gateway, and one could take the port.
+trap - EXIT
 as_dev /usr/local/bin/devteam-dev >/dev/null 2>&1 &   # not the platform's log: no agent can write a fake claim link there
-trap 'as_dev tmux kill-server 2>/dev/null; sleep 2; kill -TERM "$gw" 2>/dev/null; exit 0' TERM INT
-wait "$gw"
+# each user stops its own (root may not signal theirs)
+trap 'say "stopping"; as_dev tmux kill-server 2>/dev/null || true; sleep 2; as_gw kill -TERM "$gw" 2>/dev/null || true; exit 0' TERM INT
+say "up"
+rc=0; wait "$gw" || rc=$?
+say "the gateway exited with $rc; the box stops"
+exit "$rc"
 EOF
 
 COPY --chmod=755 <<'EOF' /usr/local/bin/devteam-reclaim
