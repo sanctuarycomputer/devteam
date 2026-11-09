@@ -11,11 +11,12 @@ import { steps, snapshot, useFixture, tmp } from './lib/chain.mjs';
 import { testDir } from './lib/kit.mjs';
 
 // Steps that run in a fork of the fixture, beside the rest. A fork is copied at the step's place,
-// so it starts from exactly what the step saw in line; the steps after it go on without it. So a
-// step is here only if no later step reads what it leaves: it puts back what it changes, or what
-// it changes (its own questions, branches, worktrees, goals) is something no later step looks at.
-// Consecutive steps in one entry run in one fork, in order, when a later one reads an earlier one's
-// work. Every assertion runs with the same values as in line (compared run against run).
+// so it starts from what the in-line steps before it left, without what earlier forks did; the
+// steps after it go on without it. So a step is here only if no later assertion needs what it
+// leaves: it puts back what it changes, or what it changes (its own questions, branches, worktrees,
+// goals) only changes what a later listing or count holds. Consecutive steps in one entry run in
+// one fork, in order, when a later one reads an earlier one's work. Every assertion still runs, but
+// some see other values than they would in line: a listing without another fork's lines.
 const FORKS = [
   ['goal measures:'],
   ['review-worktree:'],
