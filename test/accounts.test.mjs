@@ -174,7 +174,8 @@ test('a stopped supervisor: warned about outside tmux, with or without cswap; re
     write(file, `${JSON.stringify({ type: 'user', message: { content: 'You are the supervisor for this repository' } })}\n${JSON.stringify({ ...rl, timestamp: ago(24 * 8) })}\n`);
     F.tick();
     assert.equal(F.state().supervisor_limit, null);
-    // someone else's session at a limit isn't the supervisor's; one running supervisor commands is
+    // someone else's session at a limit isn't the supervisor's, even one quoting its commands; one running them is
+    write(path.join(path.dirname(file), 'quoted.jsonl'), `${JSON.stringify({ type: 'user', message: { content: 'review this' } })}\n${JSON.stringify({ type: 'assistant', timestamp: ago(3), message: { content: [{ type: 'text', text: 'it runs DEVTEAM_ROLE=supervisor node x' }, { type: 'tool_use', input: { command: "grep -n 'DEVTEAM_ROLE=supervisor node' README.md" } }] } })}\n${JSON.stringify(rl)}\n`);
     const other = path.join(path.dirname(file), 'other.jsonl');
     write(other, `${JSON.stringify({ type: 'user', message: { content: 'what does this do?' } })}\n${JSON.stringify(rl)}\n`);
     write(file, `${JSON.stringify({ type: 'user', message: { content: 'fix the tests' } })}\n`);
@@ -208,6 +209,7 @@ test('resuming: never on text that only reads like a limit, another harness, a f
       ['⏺ CI hit the memory limit on the second run; moving on.', '> '],
       ['⏺ The rate limit resets every 60s, so I added a backoff.', '> '],
       ['⎿  limit=100 resets=0', '> '],
+      [MENU[0], '● Carried on, on Linux', '> '],
       ['⏺ The menu says 1. Stop and wait for limit to reset', 'Enter to confirm is what it shows', '> '],
       ["⏺ You've hit your weekly limit · resets Nov 12, the banner reads", '> '],
       ["■ You've hit your usage limit. Try again in 2h 5m.", '> '],
@@ -215,7 +217,10 @@ test('resuming: never on text that only reads like a limit, another harness, a f
     ].map((shown, i) => F.agent(`work-text${i}`, shown));
     const done = F.agent('work-done', [MENU[0], '> ']);
     const scoped = F.agent('work-scoped', [MENU[0], '> ']);
+    const later = F.agent('work-later', ['❯ 1. Upgrade your plan', '  2. Stop and wait for limit to reset', 'Enter to confirm · Esc to cancel']);
+    const tasks = F.agent('work-tasks', [MENU[0], '◻ one', '◻ two', '◻ three', '◻ four', '╭──╮', '│ > │', '╰──╯', '⏵⏵ bypass permissions on']);
     await until(() => [...panes, done, scoped].every((p) => p.shows().includes('>')), 'the panes drawn');
+    await until(() => later.shows().includes('Esc to cancel') && tasks.shows().includes('bypass'), 'the menu and the task list drawn');
     fs.mkdirSync(path.join(F.root, 'docs/devteam/run/log'), { recursive: true });
     fs.appendFileSync(path.join(F.root, 'docs/devteam/run/log/work-done.jsonl'), `${JSON.stringify({ v: 1, id: 'h-20261101-000000000-work-done', type: 'phase', op: 'new', at: '2026-11-01T00:00:00.000Z', by: 'work-done', to: 'done' })}\n`);
     const full = { accounts: [{ ...ROOM.accounts[0], usage: { sevenDay: { pct: 30 }, scoped: [{ name: 'opus', pct: 100 }] } }] };
@@ -226,6 +231,8 @@ test('resuming: never on text that only reads like a limit, another harness, a f
     F.set(ROOM);
     const out = F.tick();
     assert.match(out, /resumed work-scoped/, 'the pane the others are measured against');
+    assert.match(out, /resumed work-later/, 'the menu in any position');
+    assert.match(out, /resumed work-tasks/, 'a banner over a task list and input box');
     await until(() => scoped.keys().endsWith('\r'), 'the real banner resumed');
     panes.forEach((p, i) => assert.equal(p.keys(), '', `text ${i} is left alone`));
     assert.equal(done.keys(), '', 'a finished session is left alone');

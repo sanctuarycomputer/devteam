@@ -7616,7 +7616,7 @@ const RESUME_EVERY_MS = 10 * 60000;
 // Claude Code's limit menu and banner, anchored: an agent's prose can quote either, and cswap only
 // rotates Claude accounts, so another harness's limit stop is not ours to resume. Only Escape ever
 // goes to the menu: its third item spends money.
-const LIMIT_MENU = /^(?:❯\s*)?1\.\s*Stop and wait for limit to reset$/;
+const LIMIT_MENU = /^(?:❯\s*)?\d+\.\s*Stop and wait for limit to reset$/;
 const LIMIT_BANNER = /^(?:⎿\s*)?You['’]ve hit your (?:\w+ )*limit · resets\b/;
 const RESUME_TEXT = '[devteam] the usage limit has cleared: another account is active. Carry on from where you stopped.';
 function findCswap() {
@@ -7663,7 +7663,7 @@ function limitStop(lines) {
   const banner = own.findLastIndex((l) => LIMIT_BANNER.test(l));
   const after = banner === -1 ? [] : own.slice(banner + 1);
   const [, promptRe] = PANE_WAITS.find(([k]) => k === 'prompt');
-  return { menu, limit: menu || (banner !== -1 && after.length <= 6 && !after.some((l) => /^[⏺⎿]/.test(l))), otherPrompt: !menu && own.some((l) => promptRe.test(l) || /Enter to confirm/.test(l)), busy: lines.some((l) => PANE_BUSY.test(l)) };
+  return { menu, limit: menu || (banner !== -1 && !after.some((l) => /^[⏺●⎿]/.test(l))), otherPrompt: !menu && own.some((l) => promptRe.test(l) || /Enter to confirm/.test(l)), busy: lines.some((l) => PANE_BUSY.test(l)) };
 }
 const paneBottom = (target) => (sh('tmux', ['capture-pane', '-p', '-t', target]) ?? '').split('\n').map((l) => l.trim()).filter(Boolean).slice(-15);
 function resumedAt() {
@@ -7698,7 +7698,9 @@ function resumePane(key, paneTarget, leaveAlone = () => false) {
 }
 // The supervisor's transcript ending on a rate-limit error means it has stopped. Which one is the
 // supervisor's: of the newest few in the main checkout, the one the kit started as the supervisor or
-// that runs supervisor commands. Nothing else is taken for it, and a limit lasts a week at most.
+// that ran supervisor commands (a command it ran: reading or quoting the words is not enough).
+// Nothing else is taken for it, and a limit lasts a week at most.
+const SUPERVISOR_COMMAND = /^\s*(?:cd \S+ && )?DEVTEAM_ROLE=supervisor node /;
 const SUPERVISOR_LIMIT_MAX_MS = 7 * 24 * 3600000;
 function supervisorLimit() {
   const dir = path.join(process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), '.claude'), 'projects', realOrSelf(mainRoot).replace(/[^a-zA-Z0-9]/g, '-'));
@@ -7711,7 +7713,8 @@ function supervisorLimit() {
     try {
       const end = read(f, true);
       const first = lines(read(f, false)).find((o) => o?.type === 'user');
-      if (end.includes('DEVTEAM_ROLE=supervisor') || JSON.stringify(first?.message ?? '').includes('You are the supervisor for this repository')) { text = end; break; }
+      const ran = lines(end).some((o) => o?.type === 'assistant' && Array.isArray(o.message?.content) && o.message.content.some((c) => c?.type === 'tool_use' && SUPERVISOR_COMMAND.test(String(c.input?.command ?? ''))));
+      if (ran || JSON.stringify(first?.message ?? '').includes('You are the supervisor for this repository')) { text = end; break; }
     } catch {}
   }
   if (!text) return null;
