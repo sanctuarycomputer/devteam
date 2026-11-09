@@ -3080,6 +3080,27 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     must(['log-check']);
   });
 
+  step('public artifacts: owner acts are records, not calls', () => {
+    const month = new Date().toISOString().slice(0, 7);
+    const ownerFile = path.join(repo, 'docs/devteam/run/log', `owner-${month}.jsonl`);
+    const kept = fs.existsSync(ownerFile) ? fs.readFileSync(ownerFile, 'utf8') : null;
+    const at = new Date().toISOString();
+    const X = `a-${at.slice(0, 10).replace(/-/g, '')}-${at.slice(11, 23).replace(/[:.]/g, '')}-owner`;
+    const tree = git(['rev-parse', 'origin/main:docs/devteam/project/artifacts/landed-other']);
+    try {
+      fs.appendFileSync(ownerFile, line({ id: X, type: 'act', op: 'new', at, by: 'owner', channel: 'cli', class: 'artifact-publish', what: 'publish', refs: ['artifact:landed-other'], artifact: 'landed-other', tree }));
+      must(['log-check']);
+      const d = json(must(['dashboard-data']));
+      assert.ok(!d.ooda.acts.some((a) => a.id === X), 'not in the act feed');
+      assert.ok(!d.ooda.decisions.some((r) => r.id === X || (r.refs ?? []).includes(X)), 'nor among the calls');
+      const r = dt(['correct', X, '--reason', 'I did not mean it']);
+      assert.notEqual(r.status, 0);
+      assert.match(r.err, new RegExp(`${X} is the owner's own record \\(artifact-publish\\), not a call; nothing to correct`));
+    } finally {
+      if (kept === null) fs.rmSync(ownerFile, { force: true }); else fs.writeFileSync(ownerFile, kept);
+    }
+  });
+
 // Forks. A fork is a copy of the fixture as it stands between two steps, made by the run in
 // kit.test.mjs; a child process (fork.mjs) runs the steps given to it there. Those steps see
 // exactly the state they would have seen in line, and the steps after them go on without them, so

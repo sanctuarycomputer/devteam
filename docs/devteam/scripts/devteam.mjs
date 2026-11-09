@@ -1389,8 +1389,9 @@ function goalChangeProblem(q, goalId, qid, l = null) {
 const ownerRuleFor = (cls) => logObjects('knowledge').filter((k) => writerClass(k.created_by) === 'owner' && k.scope === `class:${cls}` && k.status === 'accepted').sort(byTime).pop() ?? null;
 // The correction on an act, with who made it and when.
 // The supervisor's calls: its decisions, and the acts that are their own decision (no decision
-// field: mechanical acts, and acts logged before decisions existed). Trust is earned and lost on these.
-const calls = () => [...logObjects('decision'), ...logObjects('act').filter((a) => !a.decision)];
+// field: mechanical acts, and acts logged before decisions existed). Trust is earned and lost on
+// these. An owner's act (artifact-publish) is a record of what the owner did, never a call.
+const calls = () => [...logObjects('decision'), ...logObjects('act').filter((a) => !a.decision && a.created_by !== 'owner')];
 const correctionOf = (a) => {
   const u = a.updates.filter((x) => x.corrected !== undefined).pop();
   return u ? { ...u.corrected, by: u.by, at: u.at, repaired: a.repaired ?? null } : null;
@@ -3963,7 +3964,7 @@ function actAuthority(a) {
 // verdicts and holds, standing rules, corrections), shown as they are and never rewritten as
 // decision lines. Newest first.
 function decisionRecords() {
-  const acts = logObjects('act');
+  const acts = logObjects('act').filter((a) => a.created_by !== 'owner');
   const carried = new Map();
   for (const a of acts) if (a.decision) (carried.get(a.decision) ?? carried.set(a.decision, []).get(a.decision)).push(a.id);
   const rows = [];
@@ -5608,6 +5609,7 @@ function cmdCorrect() {
   const by = flags.retro ? (supervisorOnly('correct --retro'), 'supervisor') : ownerWriter().by;
   const act = logGet(actId);
   if (!['act', 'decision'].includes(act?.type)) die(`no decision or act ${actId}`);
+  if (act.type === 'act' && act.created_by === 'owner') die(`${actId} is the owner's own record (${act.class}), not a call; nothing to correct`);
   if (act.type === 'act' && act.decision) die(`${actId} carried out ${act.decision}. If the decision was wrong: correct ${act.decision} --reason "…". If it was sound and the act went wrong: problem add --title "…" --severity 0-4 --refs ${actId}${by === 'owner' ? ' --owner' : ''} (a problem, not a trust drop; constitution.md §2)`);
   if (correctionOf(act)) die(`${actId} is already corrected`);
   appendLog({ type: act.type, op: 'set', id: actId, corrected: { reason: flagStr('reason') ?? die('correct needs --reason'), severity: flagNum('severity') } }, by);
@@ -7407,7 +7409,8 @@ function collectOoda() {
   };
   // Each act says what it carried out: a decision (whose correction is the one that counts), an
   // owner's answer or a standing rule, or its own call.
-  const acts = logObjects('act').map((a) => {
+  // the owner's own acts (artifact-publish) are the Library's to show, not the supervisor's feed
+  const acts = logObjects('act').filter((a) => a.created_by !== 'owner').map((a) => {
     const d = a.decision ? logGet(a.decision) : null;
     return { ...a, correction: correctionOf(a), ladder: !!L.classes[a.class], change: changeOf(a), under: a.decision ? { decision: a.decision, what: d?.what ?? null, authority: d?.authority ?? null, corrected: d ? !!correctionOf(d) : false } : { authority: actAuthority(a), approved_by: a.approved_by ?? null, own: true } };
   });
