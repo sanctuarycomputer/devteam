@@ -174,3 +174,22 @@ test('fleet park: every session stops with a handoff, and a clone elsewhere pick
     F.done();
   }
 });
+
+test('a mistyped feature: refused at ticket add, and a superseded ticket with one no longer fails validate', () => {
+  const F = fleetFixture('typo');
+  const { old, run, ok } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const t = { title: 'tidy up', feature: 'nope', component: 'ch', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['tidy/**'], done_when: ['the tidy check passes'], notes: 'turns on tidy' };
+  try {
+    assert.match(run(old, ['ticket', 'add', 'ch-98-typo', '--json', JSON.stringify(t)], SUP).err, /no feature "nope"/);
+    ok(old, ['ticket', 'add', 'ch-97-good', '--json', JSON.stringify({ ...t, feature: 'chores' })], SUP);
+    // one that got in before the check: a line the kit wrote earlier
+    const log = path.join(old, 'docs/devteam/run/log', `supervisor-${new Date().toISOString().slice(0, 7)}.jsonl`);
+    fs.mkdirSync(path.dirname(log), { recursive: true });
+    fs.appendFileSync(log, `${JSON.stringify({ v: 1, id: 'ch-99-typo', type: 'ticket', op: 'new', at: new Date().toISOString(), by: 'supervisor', ...t })}\n`);
+    const v = () => { const r = run(old, ['validate'], SUP); return `${r.out ?? ''}${r.err ?? ''}`; };
+    assert.match(v(), /feature "nope" is not in the log/);
+    ok(old, ['ticket', 'set', 'ch-99-typo', '--json', JSON.stringify({ superseded_by: 'ch-97-good' })], SUP);
+    assert.doesNotMatch(v(), /feature "nope" is not in the log/);
+  } finally { F.done(); }
+});
