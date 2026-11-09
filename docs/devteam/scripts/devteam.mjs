@@ -7744,20 +7744,31 @@ function switchAccount(bin, args) {
   const failed = o?.error || (r.status !== 0 && !o);
   return { failure: failed ? `cswap switch: ${o?.error?.message ?? r.error?.message ?? `exit ${r.status}: ${String(r.stderr ?? '').trim().slice(0, 200)}`}` : null, moved: !failed && o?.switched !== false, from: o?.from, to: o?.to, reason: o?.reason };
 }
-// cswap auto won't leave a full account whose token expired while idle: it holds, per process, and
-// --once never outlasts the hold. So switch from here, when another enabled account has room, and
-// only under a claim that's still ours, inside the tick. `best` needs the active account's usage to
-// compare with, so on an expired token it declines (usage-unavailable); the room is already proven
-// here, so name the account with the most.
+// Where cswap keeps its files, by its own rule (paths.py): XDG on Linux, its value ignored unless absolute.
+function cswapBackupRoot() {
+  if (process.platform !== 'linux') return path.join(os.homedir(), '.claude-swap-backup');
+  const xdg = (process.env.XDG_DATA_HOME ?? '').replace(/^~(?=\/|$)/, os.homedir());
+  return path.isAbsolute(xdg) ? path.join(xdg, 'claude-swap') : path.join(os.homedir(), '.local', 'share', 'claude-swap');
+}
+// The slots auto has quarantined, which it never activates: its state file is the only place that says
+// (`list --json` doesn't). A map keyed by slot number; a file that can't be read means none.
+function cswapQuarantined() {
+  try {
+    const q = JSON.parse(readText(path.join(cswapBackupRoot(), 'autoswitch_state.json')))?.quarantine;
+    return new Set(q && typeof q === 'object' && !Array.isArray(q) ? Object.keys(q) : []);
+  } catch { return new Set(); }
+}
+// cswap auto is slow to leave a full account whose token expired while idle: it holds for 30 minutes
+// (idleHoldSince is persisted, so --once counts them too), then waits out unhealthy_ticks before it
+// fails over. So switch from here, when auto has stayed on any known-full account and another enabled
+// one has room, which cuts a stall of over 30 minutes to about a minute; only under a claim that's
+// still ours, inside the tick. Always by number: `best` declines on an expired token (it needs the
+// active account's usage), and neither it nor `switch <n>` checks quarantine, so the pick is made here.
 function leaveFullAccount(bin, active, rows, began) {
-  const room = rows.filter((a) => a !== active && !a.disabled && accountHasRoom(a));
-  if (!room.length) return null;
-  const go = (args) => (Date.now() - began < SWITCH_LATEST_MS && renewRotation() ? switchAccount(bin, args) : null);
-  const r = go(['--strategy', 'best']);
-  if (r?.moved || r?.failure || r?.reason !== 'usage-unavailable' || active.usageStatus !== 'token_expired') return r;
+  const quarantined = cswapQuarantined();
   const free = (a) => Math.min(...mainWindows(a).map((x) => 100 - x.pct));
-  const target = room.filter((a) => Number.isInteger(a.number)).sort((a, b) => free(b) - free(a))[0];
-  return (target ? go([String(target.number)]) : null) ?? r;
+  const [target] = rows.filter((a) => a !== active && !a.disabled && Number.isInteger(a.number) && !quarantined.has(String(a.number)) && accountHasRoom(a)).sort((a, b) => free(b) - free(a));
+  return target && Date.now() - began < SWITCH_LATEST_MS && renewRotation() ? switchAccount(bin, [String(target.number)]) : null;
 }
 // What a pane's bottom lines say about a limit stop. A banner counts only as the last thing the
 // agent said: nothing of its own after it, just the input box and status lines.
@@ -8649,7 +8660,7 @@ function makeSession(role) {
   if (!sh('tmux', ['-V'])) die('tmux not found');
   // A warning only: the numbers can be 10 minutes old, and the supervisor may know better. Not for
   // a relaunch at a limit: the tick starts that once there's room, and this file can lag it.
-  if (!replaceAgent && accountsState()?.active_no_room) warn(`the active Claude account (${accountsState().active ?? 'unknown'}) has no room left, so this ${role} may stop at its limit: wait for a reset or switch account (cswap)`);
+  if (!replaceAgent && accountsState()?.active_no_room) warn(`the active Claude account (${String(accountsState().active ?? 'unknown').slice(0, 80)}) has no room left, so this ${role} may stop at its limit: wait for a reset or switch account (cswap)`);
   const s = loadSettings();
   let resume = !!flags.resume;
   const blockSize = flagNum('id-block') ?? ID_BLOCK_DEFAULT;

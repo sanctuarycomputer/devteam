@@ -12,8 +12,11 @@ import { PORTS, bareProject, hasTmux, json, startDashboard, until, write } from 
 const MENU = ["You've hit your weekly limit · resets Nov 12 at 12am (America/New_York)", 'What do you want to do?', '❯ 1. Stop and wait for limit to reset', '  2. Wait here, then continue automatically at Nov 12 at 12am', '  3. Switch to usage credits', 'Enter to confirm · Esc to cancel'];
 const ROOM = { schemaVersion: 1, accounts: [{ number: 1, email: 'a@x', active: true, usageStatus: 'ok', usage: { fiveHour: { pct: 20 }, sevenDay: { pct: 30 } } }] };
 const FULL = { schemaVersion: 1, accounts: [{ number: 1, email: 'a@x', active: true, usageStatus: 'ok', usage: { fiveHour: { pct: 100 }, sevenDay: { pct: 30 } } }] };
+// A home of this file's own, so nothing lands in the real ~/.devteam or reads the machine's cswap state.
+const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-acct-home-'));
+process.on('exit', () => fs.rmSync(HOME, { recursive: true, force: true }));
 // The machine-wide claim, by hub port: every fixture's tick is on the test file's own hub port.
-const claimFile = (port = PORTS) => path.join(os.homedir(), '.devteam', `accounts-rotate-${port}.json`);
+const claimFile = (port = PORTS) => path.join(HOME, '.devteam', `accounts-rotate-${port}.json`);
 const clearClaims = () => { for (const p of [PORTS, PORTS + 70]) for (const f of [claimFile(p), `${claimFile(p)}.lock`]) fs.rmSync(f, { recursive: true, force: true }); };
 
 function fixture(name) {
@@ -30,14 +33,14 @@ function fixture(name) {
   execFileSync('sh', ['-c', 'git add -A && git -c user.email=t@t -c user.name=t commit -qm init'], { cwd: root });
   const calls = path.join(base, 'calls.log');
   const stub = path.join(base, 'cswap');
-  write(stub, `#!/bin/sh\necho "$*" >> ${JSON.stringify(calls)}\ncase "$1" in\n  list) [ -f ${JSON.stringify(path.join(base, 'list.hook'))} ] && sh ${JSON.stringify(path.join(base, 'list.hook'))}; cat ${JSON.stringify(path.join(base, 'list.json'))} ;;\n  auto) cat ${JSON.stringify(path.join(base, 'auto.out'))}; exit $(cat ${JSON.stringify(path.join(base, 'auto.status'))}) ;;\n  switch) case "$2" in --strategy) cat ${JSON.stringify(path.join(base, 'best.out'))} ;; *) cat ${JSON.stringify(path.join(base, 'named.out'))} ;; esac ;;\nesac\n`);
+  write(stub, `#!/bin/sh\necho "$*" >> ${JSON.stringify(calls)}\ncase "$1" in\n  list) [ -f ${JSON.stringify(path.join(base, 'list.hook'))} ] && sh ${JSON.stringify(path.join(base, 'list.hook'))}; cat ${JSON.stringify(path.join(base, 'list.json'))} ;;\n  auto) cat ${JSON.stringify(path.join(base, 'auto.out'))}; exit $(cat ${JSON.stringify(path.join(base, 'auto.status'))}) ;;\n  switch) cat ${JSON.stringify(path.join(base, 'switch.out'))} ;;\nesac\n`);
   fs.chmodSync(stub, 0o755);
   const set = (list, auto = '', status = 2) => { write(path.join(base, 'list.json'), JSON.stringify(list)); write(path.join(base, 'auto.out'), auto); write(path.join(base, 'auto.status'), String(status)); };
   set(ROOM);
-  const switches = (best, named = MOVED) => { write(path.join(base, 'best.out'), JSON.stringify(best)); write(path.join(base, 'named.out'), JSON.stringify(named)); };
+  const switches = (said) => write(path.join(base, 'switch.out'), JSON.stringify(said));
   switches(MOVED);
   const dt = path.join(root, 'docs/devteam/scripts/devteam.mjs');
-  const env = (extra = {}) => { const e = { ...process.env, CLAUDE_CONFIG_DIR: path.join(base, 'claude'), DEVTEAM_CSWAP: stub, DEVTEAM_ROLE: 'supervisor', DEVTEAM_ACCOUNTS_MS: '1', ...extra }; delete e.DEVTEAM_TICKET; delete e.DEVTEAM_FEATURE; return e; };
+  const env = (extra = {}) => { const e = { ...process.env, HOME, XDG_DATA_HOME: '', CLAUDE_CONFIG_DIR: path.join(base, 'claude'), DEVTEAM_CSWAP: stub, DEVTEAM_ROLE: 'supervisor', DEVTEAM_ACCOUNTS_MS: '1', ...extra }; delete e.DEVTEAM_TICKET; delete e.DEVTEAM_FEATURE; return e; };
   const run = (args, extra) => spawnSync(process.execPath, [dt, ...args], { cwd: root, encoding: 'utf8', env: env(extra) });
   const tick = (...a) => { const r = run(['accounts-tick', ...a]); assert.equal(r.status, 0, r.stderr); return r.stdout; };
   const state = () => json(fs.readFileSync(path.join(root, 'docs/devteam/run/accounts.json'), 'utf8'));
@@ -471,6 +474,10 @@ const expired = (over) => ({ number: 1, email: 'a@x', active: true, usageStatus:
 const FULL_READING = { lastGoodUsage: { fiveHour: { pct: 40 }, sevenDay: { pct: 100, resetsAt: SOON } }, lastGoodAgeSeconds: 7200 };
 const OTHER = { number: 2, email: 'b@x', usageStatus: 'ok', usage: { fiveHour: { pct: 10 }, sevenDay: { pct: 20 } } };
 const OTHER_FULL = { ...OTHER, usage: { fiveHour: { pct: 100 }, sevenDay: { pct: 20 } } };
+const ROOMIEST = { ...OTHER, number: 3, email: 'c@x', usage: { fiveHour: { pct: 5 }, sevenDay: { pct: 6 } } };
+// cswap's own state, where cswap keeps it in this test file's home (paths.py; env() clears XDG_DATA_HOME)
+const CSWAP_STATE = path.join(HOME, ...(process.platform === 'linux' ? ['.local', 'share', 'claude-swap'] : ['.claude-swap-backup']), 'autoswitch_state.json');
+const quarantine = (slot, file = CSWAP_STATE) => write(file, JSON.stringify({ schemaVersion: 1, quarantine: { [slot]: { email: 'c@x', reason: 'invalid_grant', at: '2026-11-01T00:00:00+00:00', refreshTokenFingerprint: null } } }));
 
 test('the claim: of several ticks at once only one rotates, and the rest of the interval stays quiet', async () => {
   const F = fixture('claim');
@@ -514,7 +521,7 @@ test('leaving a full account: on an expired token with a full last reading, and 
   try {
     F.set({ accounts: [expired(FULL_READING), OTHER] });
     assert.match(F.tick('--rotate'), /cswap switched account: a@x -> b@x/);
-    assert.deepEqual(switchCalls(F), ['switch --strategy best --json'], 'best, once');
+    assert.deepEqual(switchCalls(F), ['switch 2 --json'], 'by number, once');
     assert.equal(F.state().active, 'b@x');
     assert.equal(F.state().active_no_room, false);
     assert.equal(F.state().exhausted, false);
@@ -524,20 +531,66 @@ test('leaving a full account: on an expired token with a full last reading, and 
   } finally { F.done(); }
 });
 
-test('leaving a full account: when best declines an expired token, the account with the most room is named', () => {
+test('leaving a full account: the enabled account with the most room is named, and staying put is reported', () => {
   const F = fixture('fallback-named');
   try {
-    F.switches({ schemaVersion: 1, switched: false, reason: 'usage-unavailable', message: 'staying' }, { ...MOVED, to: { number: 3, email: 'c@x' } });
-    F.set({ accounts: [expired(FULL_READING), OTHER, { ...OTHER, number: 3, email: 'c@x', usage: { fiveHour: { pct: 5 }, sevenDay: { pct: 6 } } }, { ...OTHER, number: 4, email: 'd@x', disabled: true, usage: { fiveHour: { pct: 1 }, sevenDay: { pct: 1 } } }] });
+    F.switches({ ...MOVED, to: { number: 3, email: 'c@x' } });
+    F.set({ accounts: [expired(FULL_READING), OTHER, ROOMIEST, { ...OTHER, number: 4, email: 'd@x', disabled: true, usage: { fiveHour: { pct: 1 }, sevenDay: { pct: 1 } } }] });
     assert.match(F.tick('--rotate'), /cswap switched account: a@x -> c@x/);
-    assert.deepEqual(switchCalls(F), ['switch --strategy best --json', 'switch 3 --json']);
+    assert.deepEqual(switchCalls(F), ['switch 3 --json']);
     assert.equal(F.state().active, 'c@x');
-    // best declining an account it can measure is its call to make
-    F.switches({ schemaVersion: 1, switched: false, reason: 'already-best' });
+    F.switches({ schemaVersion: 1, switched: false, reason: 'already-active' });
     F.set({ accounts: [{ ...FULL.accounts[0] }, OTHER] });
-    assert.match(F.tick('--rotate'), /cswap stayed on a@x: already-best/);
-    assert.equal(switchCalls(F).length, 3, 'nothing named');
+    assert.match(F.tick('--rotate'), /cswap stayed on a@x: already-active/);
+    assert.equal(switchCalls(F).length, 2, 'one switch a tick');
   } finally { F.done(); }
+});
+
+test('leaving a full account: never onto a slot auto has quarantined, and a state file that makes no sense quarantines nothing', () => {
+  const F = fixture('fallback-quarantine');
+  const lastSwitch = () => switchCalls(F).at(-1);
+  try {
+    quarantine('3');
+    F.set({ accounts: [expired(FULL_READING), OTHER, ROOMIEST] });
+    F.tick('--rotate');
+    assert.deepEqual(switchCalls(F), ['switch 2 --json'], 'the most room that is not quarantined');
+    F.set({ accounts: [expired(FULL_READING), ROOMIEST] });
+    F.tick('--rotate');
+    assert.equal(switchCalls(F).length, 1, 'the only room is quarantined');
+    F.set({ accounts: [expired(FULL_READING), OTHER, ROOMIEST] });
+    for (const text of ['not json', 'null', '[]', '{}', '{"quarantine":null}', '{"quarantine":"abcd"}', '{"quarantine":["a","b","c","d"]}']) {
+      write(CSWAP_STATE, text);
+      const n = switchCalls(F).length;
+      F.tick('--rotate');
+      assert.equal(switchCalls(F).length, n + 1, text);
+      assert.equal(lastSwitch(), 'switch 3 --json', text);
+    }
+    fs.rmSync(CSWAP_STATE);
+    fs.mkdirSync(CSWAP_STATE);
+    F.tick('--rotate');
+    assert.equal(lastSwitch(), 'switch 3 --json', 'a directory');
+    fs.rmSync(CSWAP_STATE, { recursive: true });
+    F.tick('--rotate');
+    assert.equal(lastSwitch(), 'switch 3 --json', 'no file');
+  } finally { fs.rmSync(CSWAP_STATE, { recursive: true, force: true }); F.done(); }
+});
+
+test("leaving a full account: cswap's state is read from where cswap keeps it on this platform", () => {
+  const F = fixture('fallback-xdg');
+  const pick = (XDG_DATA_HOME) => { const r = F.run(['accounts-tick', '--rotate'], { XDG_DATA_HOME }); assert.equal(r.status, 0, r.stderr); return switchCalls(F).at(-1); };
+  const inXdg = path.join(F.base, 'xdg', 'claude-swap', 'autoswitch_state.json');
+  const inHome = path.join(HOME, 'xdg-tilde', 'claude-swap', 'autoswitch_state.json');
+  try {
+    F.set({ accounts: [expired(FULL_READING), OTHER, ROOMIEST] });
+    quarantine('3', inXdg);
+    quarantine('3', inHome);
+    // Linux follows XDG_DATA_HOME, expanding a leading ~; macOS never looks at it
+    assert.equal(pick(path.join(F.base, 'xdg')), process.platform === 'linux' ? 'switch 2 --json' : 'switch 3 --json');
+    assert.equal(pick('~/xdg-tilde'), process.platform === 'linux' ? 'switch 2 --json' : 'switch 3 --json');
+    // not absolute: ignored, as cswap ignores it, so the default place is the one that counts
+    quarantine('3');
+    assert.equal(pick('relative/xdg'), 'switch 2 --json');
+  } finally { fs.rmSync(path.join(HOME, 'xdg-tilde'), { recursive: true, force: true }); fs.rmSync(CSWAP_STATE, { force: true }); F.done(); }
 });
 
 test('leaving a full account: not on unknown usage, an old reading, no room, no claim, or after cswap moved', () => {
@@ -610,6 +663,8 @@ test('starting a session: a warning on a full active account, never a refusal, a
     assert.doesNotMatch(start().stderr, /no room left/, 'dated in the future');
     write(accounts, JSON.stringify({ ...stale, at: new Date().toISOString(), active_no_room: 'yes' }));
     assert.doesNotMatch(start().stderr, /no room left/, 'not a true');
+    write(accounts, JSON.stringify({ ...stale, at: new Date().toISOString(), active: 'x'.repeat(200) }));
+    assert.match(start().stderr, /account \(x{80}\) has no room left/, 'a long name is cut short');
     F.set(ROOM);
     F.tick();
     assert.doesNotMatch(start().stderr, /no room left/, 'room');
