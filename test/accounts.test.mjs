@@ -346,6 +346,36 @@ test('a stopped supervisor: reported, in tmux or not, with or without cswap, and
   } finally { F.done(); }
 });
 
+test('supervisor-session: the supervisor\'s own conversation, read from disk, and nothing rather than a guess', () => {
+  const F = fixture('sid');
+  const id = () => { const r = F.run(['supervisor-session'], { DEVTEAM_ROLE: '' }); assert.equal(r.status, 0, r.stderr); return r.stdout; };
+  // the fixture's resume_command is a stand-in; this command only answers for Claude Code's
+  const sf = path.join(F.root, 'docs/devteam/project/settings.md');
+  const resumeWith = (cmd) => { fs.writeFileSync(sf, fs.readFileSync(sf, 'utf8').replace(/"resume_command": ".*?"/, `"resume_command": ${JSON.stringify(cmd)}`)); execFileSync('sh', ['-c', `git add -A && git -c user.email=t@t -c user.name=t commit -qm resume`], { cwd: F.root }); }; // owner settings count as committed on main
+  try {
+    resumeWith('claude --continue --dangerously-skip-permissions');
+    assert.equal(id(), '', 'no transcripts yet');
+    const dir = path.join(F.base, 'claude', 'projects', fs.realpathSync(F.root).replace(/[^a-zA-Z0-9]/g, '-'));
+    const user = (content) => JSON.stringify({ type: 'user', message: { content } });
+    const ran = (command) => JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', input: { command } }] } });
+    let at = Date.now() / 1000 - 100;
+    const save = (name, text) => { const f = path.join(dir, `${name}.jsonl`); write(f, `${text}\n`); fs.utimesSync(f, at, at); at += 1; };
+    save('owner', user('fix the typo'));
+    assert.equal(id(), '', "the owner's own conversation isn't the supervisor's");
+    save('started', user('You are the supervisor for this repository'));
+    assert.equal(id(), 'started\n');
+    save('quoting', `${user('what does DEVTEAM_ROLE=supervisor node x do?')}\n${ran('grep "DEVTEAM_ROLE=supervisor node" README.md')}`);
+    assert.equal(id(), 'started\n', 'quoting the commands is not running them');
+    save('adopted', `${user('be the supervisor')}\n${ran('DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs status')}`);
+    assert.equal(id(), 'adopted\n', 'the newest that ran them');
+    for (const n of ['a', 'b', 'c', 'd', 'e']) save(n, user('something else'));
+    assert.equal(id(), '', 'past the newest five');
+    save('started', user('You are the supervisor for this repository'));
+    resumeWith('codex resume --last');
+    assert.equal(id(), '', 'another harness');
+  } finally { F.done(); }
+});
+
 test('what the accounts say: only known-full accounts are exhausted, and room means every window it has', () => {
   const F = fixture('rows');
   const exhausted = (accounts) => { F.set({ accounts }); F.tick(); return F.state().exhausted; };

@@ -7780,26 +7780,36 @@ function replacePaneProcess(target, wt) {
 // Nothing else is taken for it, and a limit lasts a week at most.
 const SUPERVISOR_COMMAND = /^\s*(?:cd \S+ && )?DEVTEAM_ROLE=supervisor node /;
 const SUPERVISOR_LIMIT_MAX_MS = 7 * 24 * 3600000;
-function supervisorLimit() {
+function supervisorTranscript() {
   const dir = path.join(process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), '.claude'), 'projects', realOrSelf(mainRoot).replace(/[^a-zA-Z0-9]/g, '-'));
   let files = [];
   try { files = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')).map((f) => ({ f: path.join(dir, f), m: fs.statSync(path.join(dir, f)).mtimeMs })).sort((a, b) => b.m - a.m).slice(0, 5); } catch { return null; }
   const read = (f, tail) => { const fd = fs.openSync(f, 'r'); try { const size = fs.fstatSync(fd).size; const n = Math.min(size, tail ? 1024 * 1024 : 65536); const b = Buffer.alloc(n); return b.toString('utf8', 0, fs.readSync(fd, b, 0, n, tail ? size - n : 0)); } finally { fs.closeSync(fd); } };
   const lines = (t) => t.split('\n').flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } });
-  let text = null;
   for (const { f } of files) {
     try {
       const end = read(f, true);
       const first = lines(read(f, false)).find((o) => o?.type === 'user');
       const ran = lines(end).some((o) => o?.type === 'assistant' && Array.isArray(o.message?.content) && o.message.content.some((c) => c?.type === 'tool_use' && SUPERVISOR_COMMAND.test(String(c.input?.command ?? ''))));
-      if (ran || JSON.stringify(first?.message ?? '').includes('You are the supervisor for this repository')) { text = end; break; }
+      if (ran || JSON.stringify(first?.message ?? '').includes('You are the supervisor for this repository')) return { file: f, entries: lines(end) };
     } catch {}
   }
-  if (!text) return null;
-  const last = lines(text).filter((o) => o?.type === 'assistant').pop();
+  return null;
+}
+function supervisorLimit() {
+  const last = supervisorTranscript()?.entries.filter((o) => o?.type === 'assistant').pop();
+  if (!last) return null;
   if (last?.error !== 'rate_limit' || !(Date.now() - Date.parse(last.timestamp) < SUPERVISOR_LIMIT_MAX_MS)) return null;
   const c = last.message?.content;
   return { at: last.timestamp, text: String((Array.isArray(c) ? c[0]?.text : c) ?? 'usage limit').slice(0, 200) };
+}
+// supervisor-session: the id of the supervisor's conversation, for resuming it after the machine
+// died: it reads only what's on disk. Claude Code's alone; another harness, or none found, prints
+// nothing, so nobody resumes a guess.
+function cmdSupervisorSession() {
+  if (!/^claude(\s|$)/.test(loadSettings().resume_command)) return;
+  const t = supervisorTranscript();
+  if (t) out(path.basename(t.file, '.jsonl'));
 }
 function accountsState() {
   try {
@@ -9827,6 +9837,7 @@ const HELP = `devteam <command>   (positionals before flags; flags take the word
 Setup and roles
   init [--name n] [--upstream-base vX]   project folders, settings, .gitignore, the devteam section of AGENTS.md
   prompt supervisor | worker <id> | planner <feature>    the prompt a session starts with
+  supervisor-session                 the id of the supervisor's Claude Code conversation (claude --resume <id>); nothing if there's none, or another harness
   worker <ticket-id> [--resume] [--force] | worker <ticket-id> --remove [--force] | planner <feature> [--goal <g-id>] [--resume] [--force] [--id-block <n>]   supervisor: a worktree, a tmux window and an agent for a ticket or a feature plan (a new planner names its goal and reserves n ticket numbers, default 20); refused while its goal is parked or let go, or draining for a session that hasn't run, unless --force (logged); --resume where no session exists starts fresh with the handoff note; worker --remove, once the ticket is merged and its worker logged phase done (--force before that), removes its worktree through the repo it belongs to and prunes that repo's worktree list (the branch stays)
   whoami | settings [--get key]
   hello [--json]                   who this instance is (root, name, kit, open questions, fleet): what the hub lists
@@ -9920,7 +9931,7 @@ const COMMANDS = {
   ask: cmdAsk, answer: cmdAnswer, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
   observe: cmdObserve, 'observe-link': cmdObserveLink, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, knowledge: cmdKnowledge, problem: cmdProblem,
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
-  log: cmdLog, record: cmdRecord, peek: cmdPeek, 'log-check': cmdLogCheck, 'accounts-tick': cmdAccountsTick, dispose: cmdDispose, 'log-sync': cmdLogSync, history: cmdHistory,
+  log: cmdLog, record: cmdRecord, peek: cmdPeek, 'log-check': cmdLogCheck, 'accounts-tick': cmdAccountsTick, 'supervisor-session': cmdSupervisorSession, dispose: cmdDispose, 'log-sync': cmdLogSync, history: cmdHistory,
   drain: cmdDrain, undrain: cmdUndrain, fleet: cmdFleet, handoff: cmdHandoff, wait: cmdWait,
   dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes,
 };
