@@ -148,8 +148,15 @@ function paintTab(it) {
     b.setAttribute('aria-label', `${x.inbox} in the Inbox`);
     tab.append(b);
   }
+  if (x.alert) {
+    const a = document.createElement('span');
+    a.className = 'badge';
+    a.textContent = '!';
+    a.setAttribute('aria-label', String(x.alert));
+    tab.append(a);
+  }
   const state = x.inbox === null || x.inbox === undefined ? 'starting' : `${x.inbox} in the Inbox; ${x.fleet ? `${x.fleet.mode}, ${x.fleet.workers} session${x.fleet.workers === 1 ? '' : 's'}` : ''}`;
-  tab.title = `${x.root}\nport ${Number(x.port)} · kit ${x.kit ?? '?'}\n${state}${it.goneAt ? '\nnot answering' : ''}`;
+  tab.title = `${x.root}\nport ${Number(x.port)} · kit ${x.kit ?? '?'}\n${state}${x.alert ? `\n${x.alert}` : ''}${it.goneAt ? '\nnot answering' : ''}`;
   if (it.frame) it.frame.title = String(x.name);
   tab.classList.toggle('gone', Boolean(it.goneAt));
 }

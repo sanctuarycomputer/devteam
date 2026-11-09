@@ -1421,6 +1421,8 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     assert.equal(enters(), 1, 'a second pass presses nothing');
     assert.equal(resent().length, 1);
     run(`❯ ${text}\nDo you want to proceed?\n❯ 1. Yes\n  2. No`, 3600);
+    assert.equal(enters(), 0, 'never into a prompt');
+    run(`❯ ${text}\nPick one\n❯ 1. First\n  2. Second\nEnter to confirm · Esc to cancel`, 3600);
     assert.equal(enters(), 0, 'never into a permission prompt');
     run(`❯ ${text}\n\n⏺ Done.\n${'line\n'.repeat(12)}❯ \n  ⏵⏵ bypass permissions on`, 3600);
     assert.equal(enters(), 0, 'submitted text: nothing to press');
