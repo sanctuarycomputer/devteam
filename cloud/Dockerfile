@@ -239,6 +239,8 @@ down() { note "$1: supervisor NOT brought back: $2"; tmux new-window -d -t home 
 # Nothing runs git yet, so a lock in a repo is one a process killed by the restart left. Pane ids
 # start again at %0, so one noted before this boot could be another program's by now.
 find "$HOME/code" -path '*/.git/*' -name '*.lock' -type f -delete 2>/dev/null
+# so is a Postgres pid file: its old pid is often held by another process by now, and it wouldn't start
+rm -f "$HOME"/.pg/*/postmaster.pid
 rm -f "$HOME"/code/*/docs/devteam/run/supervisor-pane
 # tmux starts login shells, which read .profile, and Debian's reads .bashrc
 [ -f .profile ] || cp /etc/skel/.profile .profile
