@@ -1583,7 +1583,7 @@ function questionRewrites() {
 function cmdDispose() {
   const [id, file, fid, ...rest] = positional;
   const text = rest.join(' ').trim();
-  if (!id || !file || !FINDING_ID.test(fid ?? '') || !text) die('usage: dispose <ticket> <record.md> <finding id, e.g. F1 or R2> "fixed | wont-fix <reason> | wrong <reason>"');
+  if (!id || !file || !FINDING_ID.test(fid ?? '') || !text) die('usage: dispose <ticket> <record.md> <finding id, e.g. F1, R2 or F4-1> "fixed | wont-fix <reason> | wrong <reason>"');
   if (!disposed(text)) die(`"${text}" isn't a disposition: start it with fixed, wont-fix <reason> or wrong <reason>`);
   if (/[|\n]/.test(text)) die('a disposition is one line with no "|"');
   if (!/^[a-z0-9][a-z0-9-]*$/.test(id) || !/^[a-z0-9][a-z0-9-]*\.md$/.test(file)) die('dispose <ticket> <record.md>: a ticket id and a record file name');
@@ -2811,7 +2811,7 @@ function latestPerTrack(records, stage) {
   return [...latest.values()];
 }
 // A finding's id: a short capital prefix and a number (F1, R2, CR3, S1b): reviewers prefix by kind.
-const FINDING_ID = /^[A-Z]{1,4}\d+[a-z]?$/;
+const FINDING_ID = /^[A-Z]{1,4}\d+(?:-\d+)?[a-z]?$/;
 const blocking = (sev) => /^(critical|important)$/i.test(sev);
 const disposed = (d) => /^(fixed|wrong|wont-fix\b|won't-fix\b)/i.test(d ?? '');
 
