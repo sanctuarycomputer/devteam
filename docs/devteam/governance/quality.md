@@ -101,7 +101,7 @@ Only the supervisor merges, and only with `devteam.mjs merge`:
 ```
 merge <ticket-id>          a ticket PR: check-ticket at the exact head, the log rule, every gate in a clean worktree at that head, then gh pr merge --match-head-commit, then the act
 merge --plan <feature>     a plan PR: validate --strict at the head, design and graph reviews holding, the log rule
-merge --chore <slug>       a chore PR (log, retro, design, architecture): the log rule; nothing under project/log (chore-log: nothing else) or project/tickets; anything outside project/ needs --approved <qid>, an owner answer
+merge --chore <slug>       a chore PR (log, retro, design, architecture): the log rule; nothing under project/log (chore-log: nothing else) or project/tickets; anything outside project/ needs --approved <qid>, an owner answer, except a chore-devteam-sync-<tag> under settings.upstream_sync "adopt": a whole upstream release newer than main's upstream_base, at main's tip, its tag on upstream's default branch, each kit file byte-identical to the tag and exactly the kit files that release changed (or under an owner's standing rule scoped chore:devteam-sync, every changed kit file byte-identical to the tag, on upstream's default branch)
 ```
 
 `--dry-run` runs every check and gate and stops before the merge.

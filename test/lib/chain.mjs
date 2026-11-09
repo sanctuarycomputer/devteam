@@ -1201,19 +1201,89 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     git(['config', 'user.email', 't@t'], up);
     git(['config', 'user.name', 't'], up);
     fs.cpSync(path.join(repo, 'docs/devteam'), path.join(up, 'docs/devteam'), { recursive: true, filter: (p) => !/[\\/](project|run)([\\/]|$)/.test(p.slice(path.join(repo, 'docs/devteam').length)) });
+    // v0.1.0 had an older script, v0.2.0 is what this project materialized from, v0.3.0 changes two files
+    const script = path.join(up, 'docs/devteam/scripts/devteam.mjs');
+    const current = fs.readFileSync(script, 'utf8');
+    fs.writeFileSync(script, `${current}\n// an older enforcing script\n`);
+    git(['add', '-A'], up);
+    git(['commit', '-qm', 'older release'], up);
+    git(['tag', 'v0.1.0'], up);
+    fs.writeFileSync(script, current);
+    git(['commit', '-qam', 'the release this project is on'], up);
+    git(['tag', 'v0.2.0'], up);
     fs.appendFileSync(path.join(up, 'docs/devteam/governance/quality.md'), '\nUpstream rule.\n');
+    fs.appendFileSync(path.join(up, 'docs/devteam/process/worker.md'), '\nUpstream worker rule.\n');
     git(['add', '-A'], up);
     git(['commit', '-qm', 'release'], up);
     git(['tag', 'v0.3.0'], up);
     landSettings((txt) => txt.replace('"gates": {', `"upstream_repo": ${JSON.stringify(up)}, "gates": {`));
+    const upFile = (tag, f) => execFileSync('git', ['show', `${tag}:docs/devteam/${f}`], { cwd: up });
+    const settingsIn = (w) => path.join(w, 'docs/devteam/project/settings.md');
+    const setBase = (w, to) => fs.writeFileSync(settingsIn(w), fs.readFileSync(settingsIn(w), 'utf8').replace(/"upstream_base": ("[^"]*"|null)/, `"upstream_base": ${JSON.stringify(to)}`));
+    const refused = (a) => { const r = dt(a, { role: 'sup' }); assert.notEqual(r.status, 0, r.out); return r.out + r.err; };
+    // a sync PR off main: these kit files from this tag, and the upstream_base it sets (undefined leaves it alone)
+    const made = [];
+    const syncPr = (slug, tag, files, base) => {
+      const w = wt(`sync-${slug}`);
+      git(['worktree', 'add', '-q', '-b', `chore-devteam-sync-${slug}`, w, 'origin/main']);
+      for (const f of files) fs.writeFileSync(path.join(w, 'docs/devteam', f), upFile(tag, f));
+      if (base !== undefined) setBase(w, base);
+      git(['commit', '-qam', 'sync'], w);
+      git(['push', '-q', 'origin', `chore-devteam-sync-${slug}`], w);
+      made.push(w);
+      return ['merge', '--chore', `devteam-sync-${slug}`, '--dry-run', '--title', `chore-devteam-sync-${slug}: adopt`, '--body-file', body];
+    };
+    const whole = ['governance/quality.md', 'process/worker.md'];
+    // "adopt": a whole release, strictly newer than main's upstream_base, upstream_base set to it
+    const genuine = must(syncPr('whole', 'v0.3.0', whole, 'v0.3.0'), { role: 'sup' });
+    assert.match(genuine, /match upstream v0\.3\.0 exactly; approved by settings\.upstream_sync "adopt"; v0\.3\.0 is [0-9a-f]{40}/, 'a full, genuine sync merges without asking');
+    // a downgrade: the review's repro, an older tag's script and nothing else
+    const down = refused(syncPr('v0-1-0', 'v0.1.0', ['scripts/devteam.mjs']));
+    assert.match(down, /adopt.*v0\.1\.0 is not newer than main's upstream_base v0\.2\.0/s, 'a downgrade is refused');
+    assert.doesNotMatch(down, /approved by/);
+    // a partial release: one of the two files v0.3.0 changed
+    assert.match(refused(syncPr('partial', 'v0.3.0', ['governance/quality.md'], 'v0.3.0')), /aren't exactly what upstream changed from v0\.2\.0 to v0\.3\.0; missing .*worker\.md/, 'a partial release is refused');
+    // and a file the release didn't change, or an upstream_base that can't be compared
+    const extra = syncPr('extra', 'v0.3.0', whole, 'v0.3.0');
+    fs.writeFileSync(path.join(wt('sync-extra'), 'docs/devteam/scripts/devteam.mjs'), upFile('v0.1.0', 'scripts/devteam.mjs'));
+    git(['commit', '-qam', 'and a file the release did not change'], wt('sync-extra'));
+    git(['push', '-q', 'origin', 'chore-devteam-sync-extra'], wt('sync-extra'));
+    assert.match(refused(extra), /; extra .*devteam\.mjs/, 'a file the release did not change is refused');
+    for (const bad of [null, 'nightly']) {
+      landSettings((txt) => txt.replace(/"upstream_base": ("[^"]*"|null)/, `"upstream_base": ${JSON.stringify(bad)}`));
+      assert.match(refused(syncPr(`base-${bad}`, 'v0.3.0', whole, 'v0.3.0')), /main's upstream_base \(.*\) isn't a release to compare with/, 'an upstream_base that can\'t be compared refuses');
+    }
+    landSettings((txt) => txt.replace(/"upstream_base": ("[^"]*"|null)/, '"upstream_base": "v0.2.0"'));
+    // a tag off upstream's default branch is not a release
+    git(['checkout', '-q', '-b', 'side'], up);
+    fs.appendFileSync(path.join(up, 'docs/devteam/governance/quality.md'), '\nA side branch.\n');
+    git(['commit', '-qam', 'side'], up);
+    git(['tag', 'v0.9.0'], up);
+    git(['checkout', '-q', 'main'], up);
+    assert.match(refused(syncPr('v0-9-0', 'v0.9.0', ['governance/quality.md'], 'v0.9.0')), /tag "v0\.9\.0" is not on the default branch/);
+    // a value that isn't one of the two reads as "ask", with a warning
+    landSettings((txt) => txt.replace('"upstream_sync": "adopt"', '"upstream_sync": "yes"'));
+    const typo = dt(['merge', '--chore', 'devteam-sync-whole', '--dry-run', '--title', 'chore-devteam-sync-whole: adopt', '--body-file', body], { role: 'sup' });
+    assert.match(typo.out, /outside project\//, 'not "adopt": the owner is asked');
+    assert.match(typo.err, /settings\.upstream_sync is "yes"; only "ask" and "adopt" are valid/);
+    landSettings((txt) => txt.replace('"upstream_sync": "yes"', '"upstream_sync": "adopt"'));
+    // a stale branch can't come in on an older main's settings, or an older main's files
+    const stale = syncPr('stale', 'v0.3.0', whole, 'v0.3.0');
+    landSettings((txt) => txt.replace('"gates": {', '"retro_every_days": 7, "gates": {'));
+    assert.match(refused(stale), /adopt.*behind/s, 'behind main, what lands is not the files compared');
+    landSettings((txt) => txt.replace('"upstream_sync": "adopt"', '"upstream_sync": "ask"'));
+    assert.match(refused(stale), /outside project\//, 'a branch cut under "adopt" is refused once the owner set main to "ask"');
+    landSettings((txt) => txt.replace('"upstream_sync": "ask"', '"upstream_sync": "adopt"'));
+    for (const w of made) git(['worktree', 'remove', '--force', w]);
     // the sync chore copies that file verbatim (the dashed slug older kits needed resolves to the tag)
     git(['worktree', 'add', '-q', '-b', 'chore-devteam-sync-v0-3-0', wt('sync'), 'origin/main']);
     fs.copyFileSync(path.join(up, 'docs/devteam/governance/quality.md'), path.join(wt('sync'), 'docs/devteam/governance/quality.md'));
     git(['commit', '-qam', 'sync'], wt('sync'));
     git(['push', '-q', 'origin', 'chore-devteam-sync-v0-3-0'], wt('sync'));
     const args = ['merge', '--chore', 'devteam-sync-v0-3-0', '--dry-run', '--title', 'chore-devteam-sync-v0-3-0: adopt', '--body-file', body];
-    // init wrote upstream_sync "adopt": a verbatim sync needs no question from the start
-    assert.match(must(args, { role: 'sup' }), /match upstream v0\.3\.0 exactly; approved by settings\.upstream_sync "adopt"/);
+    // init wrote upstream_sync "adopt", but it covers only a whole release: this one is partial, and
+    // leaves upstream_base where it was
+    assert.match(refused(args), /adopt.*sets upstream_base to "v0\.2\.0", not v0\.3\.0/s, 'a sync that leaves upstream_base where it was is refused');
     // a sync PR can't grant itself the setting: it is read from main, and changing it is the owner's
     landSettings((txt) => txt.replace('"upstream_sync": "adopt"', '"upstream_sync": "ask"'));
     git(['merge', '-q', '--no-edit', 'origin/main'], wt('sync'));
