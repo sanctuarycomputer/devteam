@@ -568,9 +568,13 @@ test('what counts as news is what the hub page notifies about', () => {
   assert.deepEqual(G.inboxNews({ '/r/a': 2 }, [at(1)], ports).seen, { '/r/a': 1 }, 'but it is remembered');
   assert.deepEqual(G.inboxNews({ '/r/a': 2 }, [at(5)], ports).messages, [{ title: 'a: 3 new in the Inbox', body: '/r/a', tag: 'devteam-/r/a', url: '/#a' }]);
   assert.equal(G.inboxNews({}, [at(1)], ports).messages[0].title, 'a: 1 new in the Inbox', 'an instance that turns up with items counts them as new');
-  assert.deepEqual(G.inboxNews({ '/r/a': 2 }, [at(null)], ports), { seen: { '/r/a': 2 }, messages: [] }, 'one still starting says nothing');
+  assert.deepEqual(G.inboxNews({ '/r/a': 2 }, [at(null)], ports), { seen: { '/r/a': 2 }, messages: [], roots: [] }, 'one still starting says nothing');
   assert.deepEqual(G.inboxNews({}, [at(9, { port: 80 })], ports).messages, [], 'a port outside the block is no instance');
   assert.deepEqual(G.inboxNews({ constructor: 1 }, [at(1, { root: 'constructor' })], ports).messages, [], 'a root named like a property is still only a root');
+  assert.deepEqual(G.inboxNews({ '/r/a': 2 }, [at(5)], ports, new Set(['/r/a'])), { seen: { '/r/a': 2 }, messages: [], roots: [] }, 'a root that just notified rests, and its count waits');
+  const four = G.inboxNews({}, [0, 1, 2, 3].map((i) => ({ root: `/r/${i}`, name: `n${i}`, port: P + i, inbox: 1 })), [P, P + 1, P + 2, P + 3]);
+  assert.deepEqual(four.messages, [{ title: '4 instances have new Inbox items', body: 'n0, n1, n2, n3', tag: 'devteam-inbox', url: '/' }], 'a burst is one notification');
+  assert.equal(G.inboxNews({}, [at(1, { name: undefined })], ports).messages[0].url, '/#undefined', 'the tab the hub page calls it');
   const twins = G.inboxNews({}, [at(1), at(1, { root: '/r/b', port: P + 1 })], ports).messages;
   const hex = crypto.createHash('sha1').update('/r/b').digest('hex').slice(0, 6);
   assert.equal(twins[1].url, `/#a-${hex}`, 'two of one name are told apart as the hub tells them');
@@ -582,6 +586,7 @@ test('a subscription must name a browser\'s push service and real keys', () => {
   const { keys } = browserKeys();
   assert.ok(G.pushSubscription({ endpoint: 'https://web.push.apple.com/abc', keys }));
   assert.ok(G.pushSubscription({ endpoint: 'https://fcm.googleapis.com/fcm/send/abc', keys }));
+  assert.equal(G.pushSubscription({ endpoint: 'https://accounts.google.com/x', keys }), null, 'only the push services themselves');
   for (const endpoint of ['http://web.push.apple.com/a', 'https://127.0.0.1/a', 'https://web.push.apple.com:444/a', 'https://evil.example/a', 'https://push.apple.com.evil.example/a', 'nope']) assert.equal(G.pushSubscription({ endpoint, keys }), null, endpoint);
   assert.equal(G.pushSubscription({ endpoint: 'https://web.push.apple.com/a', keys: { ...keys, auth: 'AAAA' } }), null);
   assert.equal(G.pushSubscription({ endpoint: 'https://web.push.apple.com/a', keys: { ...keys, p256dh: u(Buffer.alloc(65, 4)) } }), null, 'a point off the curve');
@@ -679,13 +684,16 @@ test('the gateway tells every subscribed browser when an Inbox goes up, with no 
     sent.length = 0;
     status = 410;
     list = [{ ...list[0], inbox: 7 }];
-    await gw.g.pollPush();
+    await again.pollPush();
+    assert.equal(sent.length, 0, 'a root that just notified rests a minute');
+    const third = G.createGateway({ publicUrl: gw.publicUrl, dir: gw.dir, log: () => {}, pushFetch });
+    await third.pollPush();
     assert.equal(sent.length, 2);
     const state = () => JSON.parse(fs.readFileSync(path.join(gw.dir, 'state.json'), 'utf8'));
     assert.deepEqual(state().pushSubs, []);
     assert.equal(state().pushSeen['/r/stacks'], 7);
     await new Promise((r) => hub.close(r));
-    await gw.g.pollPush();
+    await third.pollPush();
     assert.equal(state().pushSeen['/r/stacks'], 7);
   } finally { hub.close(); await gw.close(); }
 });
@@ -710,4 +718,25 @@ test('the hub sends nothing itself on a box, and a dashboard notifies no one', (
   const dash = fs.readFileSync(path.join(kit, 'dashboard', 'index.html'), 'utf8');
   assert.doesNotMatch(dash, /new Notification|requestPermission/);
   assert.match(dash, /function inboxTitle/, 'the tab title keeps its count');
+});
+
+test('a list sent a byte at a time can\'t hold the poller', async () => {
+  const gw = await gateway('slowhub', { hubDeadlineMs: 300 });
+  const hub = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.write('{'); const t = setInterval(() => res.write(' '), 50); res.on('close', () => clearInterval(t)); });
+  await until(() => new Promise((r) => { hub.once('error', () => r(false)); hub.listen(HUB, '127.0.0.1', () => r(true)); }), 'the hub port');
+  try {
+    const t0 = Date.now();
+    await gw.g.pollPush();
+    assert.ok(Date.now() - t0 < 3000, 'it gives up');
+    await gw.g.pollPush();
+  } finally { hub.closeAllConnections?.(); hub.close(); await gw.close(); }
+});
+
+test('a passkey made for another name says how to get back in', async () => {
+  const dir = path.join(tmp, 'oldrp');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({ passkeys: [{ id: 'x', name: 'old', createdAt: '2026-01-01' }], sessions: [] }));
+  const logs = [];
+  G.createGateway({ publicUrl: 'http://box.localhost:1', dir, log: (m) => logs.push(m) });
+  assert.match(logs.join('\n'), /devteam-reclaim/);
 });

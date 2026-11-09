@@ -163,6 +163,8 @@ function newClaim(store) {
 const PUSH_POLL_MS = 10000;
 const PUSH_DEVICES = 20;
 const PUSH_SEEN_MAX = 200;
+const PUSH_BURST = 3;
+const PUSH_REST_MS = 60000;
 const PUSH_TEST = { title: 'devteam: test notification', body: 'Push is working on this device.', tag: 'devteam-test', url: '/' };
 const hkdf = (ikm, salt, info, n) => Buffer.from(crypto.hkdfSync('sha256', ikm, salt, info, n));
 export function encryptPush({ p256dh, auth }, plain, sender = null, salt = crypto.randomBytes(16)) {
@@ -186,7 +188,7 @@ export function vapidToken(jwk, audience, subject, now = Date.now()) {
   return `${head}.${b64u(crypto.sign('sha256', Buffer.from(head), { key: crypto.createPrivateKey({ key: jwk, format: 'jwk' }), dsaEncoding: 'ieee-p1363' }))}`;
 }
 // Only the browsers' own push services: the gateway posts to whatever a subscription names.
-const PUSH_HOSTS = /^(?:[\w-]+\.push\.apple\.com|fcm\.googleapis\.com|[\w-]+\.google\.com|[\w.-]+\.push\.services\.mozilla\.com|[\w.-]+\.notify\.windows\.com)$/;
+const PUSH_HOSTS = /^(?:[\w-]+\.push\.apple\.com|fcm\.googleapis\.com|[\w.-]+\.push\.services\.mozilla\.com|[\w.-]+\.notify\.windows\.com)$/;
 export function pushSubscription(b) {
   try {
     const u = new URL(b.endpoint);
@@ -201,7 +203,7 @@ export function pushSubscription(b) {
 // What the hub page would notify about, from two reads of the list: an Inbox that went up (an
 // instance not seen before counts from nothing). Whatever holds the hub's port wrote this list, so
 // it is checked as the page checks it, and kept short.
-export function inboxNews(seen, instances, ports) {
+export function inboxNews(seen, instances, ports, resting = new Set()) {
   const perRoot = new Map();
   for (const x of instances) {
     if (!x || typeof x.root !== 'string' || x.root.length > 1024 || !ports.includes(Number(x.port))) continue;
@@ -209,21 +211,27 @@ export function inboxNews(seen, instances, ports) {
   }
   const list = [...perRoot.values()];
   const next = { ...seen };
-  const messages = [];
+  let messages = [];
+  const roots = [];
+  const names = [];
   for (const x of list) {
-    if (!Number.isInteger(x.inbox) || x.inbox < 0) continue;
+    // a root that just notified is left as it was, rises and falls alike, until it has rested
+    if (!Number.isInteger(x.inbox) || x.inbox < 0 || resting.has(x.root)) continue;
     const before = Object.hasOwn(seen, x.root) ? seen[x.root] : 0;
     next[x.root] = x.inbox;
     if (x.inbox <= before) continue;
     const name = String(x.name ?? x.root).slice(0, 80);
-    // the hub page's address for this tab: two instances of one name are told apart by their root
-    const twins = list.filter((o) => String(o.name ?? o.root).slice(0, 80) === name).length > 1;
-    const key = twins ? `${name}-${crypto.createHash('sha1').update(x.root).digest('hex').slice(0, 6)}` : name;
+    // the hub page's address for this tab (its keyOf): two of one name are told apart by their root
+    const twins = list.filter((o) => String(o.name) === String(x.name)).length > 1;
+    const key = twins ? `${String(x.name)}-${crypto.createHash('sha1').update(x.root).digest('hex').slice(0, 6)}` : String(x.name);
+    roots.push(x.root);
+    names.push(name);
     messages.push({ title: `${name}: ${x.inbox - before} new in the Inbox`, body: x.root.slice(0, 200), tag: `devteam-${x.root}`.slice(0, 256), url: `/#${encodeURIComponent(key)}` });
   }
+  if (messages.length > PUSH_BURST) messages = [{ title: `${messages.length} instances have new Inbox items`, body: names.join(', ').slice(0, 200), tag: 'devteam-inbox', url: '/' }];
   const keys = Object.keys(next);
   for (const k of keys.slice(0, Math.max(0, keys.length - PUSH_SEEN_MAX))) delete next[k];
-  return { seen: next, messages };
+  return { seen: next, messages, roots };
 }
 
 // --- installing the hub: its manifest, icons and service worker ----------------------------------
@@ -267,10 +275,10 @@ self.addEventListener('notificationclick', (e) => {
   e.notification.close();
   const url = new URL(e.notification.data.url, self.location.origin);
   e.waitUntil((async () => {
-    const open = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-    if (!open.length) return self.clients.openWindow(url.href);
-    await open[0].focus();
-    open[0].postMessage({ hash: url.hash });
+    const hub = (await self.clients.matchAll({ type: 'window', includeUncontrolled: true })).find((c) => ['/', '/index.html'].includes(new URL(c.url).pathname));
+    if (!hub) return self.clients.openWindow(url.href);
+    try { await hub.focus(); } catch {}
+    hub.postMessage({ hash: url.hash });
   })());
 });
 `;
@@ -312,6 +320,8 @@ export function createGateway(opts = {}) {
   // reads the platform's logs can already open a shell on the box, the root of trust anyway).
   try {
     const s = store.load();
+    // made before sign-in moved under /auth (or for another name): the browser won't offer them here
+    if (s.passkeys.some((x) => x.rp !== RP_ID)) log(`passkeys made before sign-in moved to ${PUB}/auth (or for another name) can't sign in here: run devteam-reclaim in a shell on the box for a claim link, and claim it again`);
     if (!s.passkeys.length) {
       const given = env.DEVTEAM_CLAIM_TOKEN;
       // a link `reclaim` printed outlives a restart, for its day; the environment's token is only the first
@@ -452,7 +462,7 @@ export function createGateway(opts = {}) {
     const s = store.load();
     if (s.passkeys.some((p) => p.id === b64u(rawId))) throw new Error('that passkey is already registered');
     const name = typeof body?.name === 'string' && body.name.trim() ? body.name.trim().slice(0, 60) : `passkey ${s.passkeys.length + 1}`;
-    return { id: b64u(rawId), userId: issued.userId, jwk, alg, signCount: ad.signCount, name, createdAt: new Date().toISOString() };
+    return { id: b64u(rawId), userId: issued.userId, jwk, alg, signCount: ad.signCount, name, rp: RP_ID, createdAt: new Date().toISOString() };
   };
   const verifyAssertion = (body) => {
     const s = store.load();
@@ -515,7 +525,9 @@ export function createGateway(opts = {}) {
   };
   // The hub's list is the one thing the box's name takes from behind it, and only as data: whatever
   // holds the port, the page reads JSON and shows it as text. No hub yet is an empty list.
-  const hubList = () => new Promise((resolve) => {
+  const hubList = () => new Promise((settle) => {
+    let deadline = null;
+    const resolve = (v) => { clearTimeout(deadline); settle(v); };
     const none = () => resolve(null);
     const up = http.get({ host: '127.0.0.1', port: HUB_PORT, path: '/instances.json', timeout: 10000, headers: { host: `127.0.0.1:${HUB_PORT}`, 'sec-fetch-site': 'same-origin' } }, (ur) => {
       if (ur.statusCode !== 200) { ur.resume(); return none(); }
@@ -524,9 +536,12 @@ export function createGateway(opts = {}) {
       ur.on('data', (c) => { size += c.length; if (size > 1024 * 1024) { none(); up.destroy(); } else chunks.push(c); });
       ur.on('end', () => resolve(Buffer.concat(chunks)));
       ur.on('error', none);
+      ur.on('close', none);
     });
     up.on('timeout', () => up.destroy());
     up.on('error', none);
+    // the whole answer, not only each pause in it: one sent a byte at a time would hold the poller
+    deadline = setTimeout(() => { up.destroy(); none(); }, opts.hubDeadlineMs ?? 15000);
   });
   const instances = async (req, res) => send(res, 200, 'application/json', (await hubList()) ?? JSON.stringify({ hub: 1, instances: [] }));
 
@@ -553,6 +568,7 @@ export function createGateway(opts = {}) {
   // Counts are kept on the disk, so a restart, when every dashboard comes back with its Inbox as it
   // was, is not news. Only a read that worked counts: a hub that's down changes nothing.
   let polling = false;
+  const lastSent = new Map();
   const pollPush = async () => {
     if (polling) return;
     polling = true;
@@ -562,7 +578,10 @@ export function createGateway(opts = {}) {
       try { list = JSON.parse(body).instances; } catch {}
       if (!Array.isArray(list)) return;
       const before = store.load();
-      const { seen, messages } = inboxNews(before.pushSeen ?? {}, list, BLOCK);
+      const now = Date.now();
+      for (const [r, t] of lastSent) if (now - t >= PUSH_REST_MS) lastSent.delete(r);
+      const { seen, messages, roots } = inboxNews(before.pushSeen ?? {}, list, BLOCK, new Set(lastSent.keys()));
+      if (before.pushSubs?.length) for (const r of roots) lastSent.set(r, now);
       if (JSON.stringify(seen) !== JSON.stringify(before.pushSeen ?? {})) store.save({ ...before, pushSeen: seen });
       const subs = before.pushSubs ?? [];
       const dead = new Set();
