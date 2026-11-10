@@ -239,7 +239,7 @@ EOF
 # macOptionClickForcesSelection: tmux owns the mouse, so scrolling works, and on a Mac the terminal
 # lets a selection past it only with Option held (Shift, elsewhere), and only with this set.
 # dev's side: the shell's first-run notes, the tmux session the terminal opens, every repo's
-# dashboard again after a restart, the operator in window 0 (which brings back the supervisors),
+# dashboard again after a restart (in that repo's own tmux session), the operator in window 0 (which brings back the supervisors),
 # and ttyd on loopback. What it says goes to ~/box.log, on the volume: its output is kept off the
 # platform's log (devteam-box says why).
 COPY --chmod=755 <<'EOF' /usr/local/bin/devteam-dev
@@ -329,7 +329,21 @@ timeout 120 sh .box/boot.sh >> box.log 2>&1 || note "boot.sh failed (exit $?): s
 for k in "$HOME"/code/*/docs/devteam/scripts/devteam.mjs; do
   [ -f "$k" ] || continue
   r=${k%/docs/devteam/scripts/devteam.mjs}
-  tmux new-window -d -t home -n "dash-$(basename "$r")" -c "$r" "while :; do /usr/local/bin/node docs/devteam/scripts/devteam.mjs dashboard; sleep 5; done"
+  # adopted repos only, as box-supervisors counts them: a checkout of devteam itself has the kit but
+  # no settings, and its dashboard would only fail every 5s in a window of its own
+  [ -f "$r/docs/devteam/project/settings.md" ] || continue
+  # In the project's own tmux session, as the window named dashboard: where the kit keeps it
+  # (supervisor.md, the dashboard), so a supervisor that resumes finds it there and starts no
+  # second one on another port. A kit too old to name its session keeps it in home.
+  c="while :; do /usr/local/bin/node docs/devteam/scripts/devteam.mjs dashboard; sleep 5; done"
+  s=$(cd "$r" && /usr/local/bin/node docs/devteam/scripts/devteam.mjs settings --get tmux_session 2>/dev/null) || s=
+  if [ -z "$s" ] || [ "$s" = null ]; then
+    tmux new-window -d -t home -n "dash-$(basename "$r")" -c "$r" "$c"
+  elif tmux has-session -t "=$s" 2>/dev/null; then
+    tmux new-window -d -t "=$s" -n dashboard -c "$r" "$c"
+  else
+    tmux new-session -d -s "$s" -n dashboard -c "$r" "$c"
+  fi
 done
 # The operator (window 0) is what brings the supervisors back: box-supervisors reads the list saved above.
 # Which supervisors are up, kept on the volume each minute: a machine that dies writes nothing at

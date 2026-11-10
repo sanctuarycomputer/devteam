@@ -27,7 +27,7 @@ panes() { tmux list-panes -a -F '#{pane_id}	#{window_name}	#{pane_start_path}	#{
 running() {
   p=$(cat "$1/docs/devteam/run/supervisor-pane" 2>/dev/null)
   panes | awk -F'\t' -v p="$p" -v r="$1" '
-    $4 ~ /^-?(bash|sh|dash|zsh|fish)$/ || $2 ~ /^dash-/ { next }
+    $4 ~ /^-?(bash|sh|dash|zsh|fish)$/ || $2 ~ /^dash-/ || $2 == "dashboard" { next }
     ($1 == p && p != "") || ($3 == r && $4 ~ /claude|node/) { found = 1 }
     END { exit found ? 0 : 1 }'
 }
