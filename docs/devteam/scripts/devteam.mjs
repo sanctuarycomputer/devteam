@@ -893,12 +893,15 @@ function checkLine(o, file) {
   const errs = schemaErrors({ ...SCHEMA, $defs: undefined }, envelope, 'line').map((e) => e.replace(/^line\./, ''));
   if (errs.length) return errs;
   if ((o.channel !== undefined) !== (o.by === 'owner')) errs.push('channel is on every owner line and no other');
-  // A chat line is an answer, with the owner's words in said, or what that answer carried: its
-  // standing rule (knowledge citing the question), or its verdict on a goal (goal decide).
-  if (o.channel === 'chat' && !((o.type === 'question' && o.op === 'set' && typeof o.answer === 'string' && typeof o.said === 'string') || (o.type === 'knowledge' && o.op === 'new' && o.evidence?.length) || (o.type === 'goal' && o.op === 'set' && o.decision))) errs.push('a chat line is an answer to a question with the owner\'s words in said, or the standing rule or goal verdict that answer carried');
+  // A chat or thread line is an answer, with the owner's words in said, or what that answer
+  // carried: its standing rule (knowledge citing the question), or its verdict on a goal (goal
+  // decide). A thread answer names the owner's turn its words come from (answer --from-turn).
+  if (['chat', 'thread'].includes(o.channel) && !((o.type === 'question' && o.op === 'set' && typeof o.answer === 'string' && typeof o.said === 'string') || (o.type === 'knowledge' && o.op === 'new' && o.evidence?.length) || (o.type === 'goal' && o.op === 'set' && o.decision))) errs.push(`a ${o.channel} line is an answer to a question with the owner's words in said, or the standing rule or goal verdict that answer carried`);
+  if (o.type === 'question' && (o.channel === 'thread') !== (o.turn !== undefined)) errs.push(o.turn === undefined ? "a thread answer names the owner's turn its words come from (turn)" : 'turn is on an answer recorded from a thread (channel thread) only');
   const t = SCHEMA.$defs.types[o.type];
   const body = Object.fromEntries(Object.entries(o).filter(([k]) => !ENVELOPE.includes(k)));
   errs.push(...schemaErrors(t, body, o.type));
+  if (o.type === 'thread' || o.type === 'turn') errs.push(...threadLineProblems(o));
   if (o.op === 'new') {
     for (const k of t['x-required-new'] ?? []) if (!(k in body)) errs.push(`${o.type}.${k} is required`);
     for (const k of t['x-set-only'] ?? []) if (k in body) errs.push(`${o.type}.${k} is set later, not at creation`);
@@ -4676,6 +4679,101 @@ function cmdRate() {
   ratingWarnings({ stake, urgency: r.urgency, blocks: v.blocks, def: v.default });
   const rank = inboxRanks(questions().filter((q) => q.status === 'open' && q.goal_hold !== 'let-go')).get(id);
   out(`rated ${id}${rank ? `: ${rank.position} of ${rank.of} in the Inbox, score ${rank.score}${rank.reason ? ` (${rank.reason})` : ''}` : ''}`);
+}
+
+// ===== threads: the owner and the supervisor, about one thing the owner pointed at =====
+//
+// The owner holds Shift on the dashboard and clicks a goal, a question, a spot on a page: a thread
+// starts with that thing as its subject and the owner's first words as its first turn. Every thread
+// is with the supervisor. An owner turn is the owner speaking to the supervisor, as in its session,
+// already verbatim in the log; the supervisor replies with turns, asks with Inbox questions linked to
+// the thread, and may propose resolving it, which only the owner does. A subject is data: for item
+// and page subjects the kit's rendering of log content (itself agent-written), for artifact and
+// preview subjects (a later kit's viewers) everything in it is page-written. It is shown escaped,
+// given to the supervisor only inside a data frame, and never typed into a pane.
+const THREAD_OPEN_MAX = 200;
+const TURN_MAX = 2000; // bytes
+// A turn as the line holds it, JSON-escaped (a quotation mark is two bytes there, a control character
+// six): within this, a turn's line always fits the log's 4,096 bytes with its envelope.
+const TURN_ENCODED_MAX = 3800;
+const encodedBytes = (s) => Buffer.byteLength(JSON.stringify(String(s))) - 2;
+const SUBJECT_MAX = 2500; // bytes, as encoded in the line
+const OUTCOME_MAX = 300; // bytes
+const THREAD_TITLE_MAX = 120; // characters
+const THREAD_WAIT_MS = 10 * 60000;
+const THREAD_ID = /^t-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
+const TURN_ID = /^u-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
+// What the dashboard can point at (data-subject="<type>:<id>"); index.html's T_TYPES is the same list.
+const SUBJECT_TYPES = ['goal', 'observation', 'question', 'ticket', 'planner', 'decision', 'lesson', 'problem', 'act', 'preview', 'artifact'];
+const SUBJECT_REF = new RegExp(`^(${SUBJECT_TYPES.join('|')}):[a-z0-9][a-z0-9-]{0,110}$`);
+const TURN_REF = /^[a-z]+:[A-Za-z0-9][A-Za-z0-9._/-]*$/;
+// Each kind's keys, what it must have, and each string's cap in bytes. artifact and preview subjects
+// come from a later kit's viewers; their shapes are accepted now so the log needn't change for them.
+const SUBJECT_KEYS = { item: ['ref', 'quote'], page: ['view', 'at', 'quote'], artifact: ['slug', 'at', 'fp', 'path', 'anchor', 'point'], preview: ['name', 'route', 'viewport', 'anchor', 'point', 'errors'] };
+const SUBJECT_NEEDS = { item: ['ref'], page: ['view'], artifact: ['slug', 'at'], preview: ['name'] };
+const SUBJECT_CAPS = { ref: 120, quote: 300, view: 200, slug: 63, fp: 64, path: 300, name: 63, route: 300 };
+const ANCHOR_CAPS = { selector: 200, tag: 40, role: 40, text: 80, name: 80, html: 1024 };
+// Why a subject can't be recorded (null when it can): the size first, so a refusal says how big.
+function subjectProblem(s) {
+  if (!isObj(s)) return 'a subject is a JSON object with a kind';
+  const keys = SUBJECT_KEYS[s.kind];
+  if (!keys) return `a subject's kind is one of ${Object.keys(SUBJECT_KEYS).join(', ')}`;
+  const bytes = Buffer.byteLength(JSON.stringify(s));
+  if (bytes > SUBJECT_MAX) return `the subject is ${bytes} bytes encoded; at most ${SUBJECT_MAX}`;
+  const extra = Object.keys(s).filter((k) => k !== 'kind' && !keys.includes(k));
+  if (extra.length) return `${s.kind === 'item' ? 'an' : 'a'} ${s.kind} subject has no ${extra.join(', ')}`;
+  const missing = SUBJECT_NEEDS[s.kind].filter((k) => s[k] === undefined);
+  if (missing.length) return `${s.kind === 'item' ? 'an' : 'a'} ${s.kind} subject needs ${missing.join(', ')}`;
+  const text = (k, v, max) => (typeof v !== 'string' ? `${k} is text` : Buffer.byteLength(v) > max ? `${k} is ${Buffer.byteLength(v)} bytes; at most ${max}` : null);
+  const box = (k, v, names, unit = false) => (isObj(v) && Object.keys(v).length === names.length && names.every((n) => Number.isFinite(v[n]) && (!unit || (v[n] >= 0 && v[n] <= 1))) ? null : `${k} is {${names.join(', ')}}, each ${unit ? 'a fraction from 0 to 1' : 'a number'}`);
+  for (const [k, v] of Object.entries(s)) {
+    if (k === 'kind') continue;
+    let p;
+    if (k === 'at') p = s.kind === 'page' ? box('at', v, ['x', 'y'], true) : text('at', v, 100) ?? (/^(main|tree:[0-9a-f]{40}|[a-z0-9][a-z0-9._-]*)$/.test(v) ? null : 'at is main, a worktree name, or tree:<id>');
+    else if (k === 'point') p = box('point', v, ['x', 'y']);
+    else if (k === 'viewport') p = box('viewport', v, ['w', 'h']);
+    else if (k === 'errors') p = !Array.isArray(v) || v.length > 3 ? 'errors is a list of at most 3' : v.map((e, i) => text(`errors[${i}]`, e, 200)).find(Boolean) ?? null;
+    else if (k === 'anchor') p = anchorProblem(v);
+    else p = text(k, v, SUBJECT_CAPS[k]);
+    if (!p && k === 'ref' && !SUBJECT_REF.test(v)) p = `ref is <type>:<id>, the type one of ${SUBJECT_TYPES.join(', ')}`;
+    if (!p && k === 'slug' && !LINK_ID.test(v)) p = 'slug is an artifact slug';
+    if (!p && k === 'name' && !PREVIEW_NAME.test(v)) p = 'name is a preview name';
+    if (!p && k === 'fp' && !/^[0-9a-f]{12,64}$/.test(v)) p = 'fp is a fingerprint, in hex';
+    if (p) return p;
+  }
+  return null;
+}
+function anchorProblem(a) {
+  if (!isObj(a)) return 'anchor is an object';
+  for (const [k, v] of Object.entries(a)) {
+    if (k === 'rect' || k === 'point') {
+      const names = k === 'rect' ? ['x', 'y', 'w', 'h'] : ['x', 'y'];
+      if (!(isObj(v) && Object.keys(v).length === names.length && names.every((n) => Number.isFinite(v[n])))) return `anchor.${k} is {${names.join(', ')}}`;
+      continue;
+    }
+    if (!ANCHOR_CAPS[k]) return `anchor has no ${k}`;
+    if (typeof v !== 'string') return `anchor.${k} is text`;
+    if (Buffer.byteLength(v) > ANCHOR_CAPS[k]) return `anchor.${k} is ${Buffer.byteLength(v)} bytes; at most ${ANCHOR_CAPS[k]}`;
+  }
+  return null;
+}
+// What a thread or turn line holds beyond what the schema's walk can say: sizes in bytes, a title
+// of one line, a subject with only its kind's keys, and the supervisor's fields on its own turns.
+function threadLineProblems(o) {
+  const errs = [];
+  const over = (k, v, max) => { if (typeof v === 'string' && Buffer.byteLength(v) > max) errs.push(`${o.type}.${k} is ${Buffer.byteLength(v)} bytes; at most ${max}`); };
+  if (o.type === 'thread') {
+    if (typeof o.title === 'string' && UNSAFE_TEXT.test(o.title)) errs.push('thread.title is one line of plain text');
+    if (o.subject !== undefined) { const p = subjectProblem(o.subject); if (p) errs.push(`thread.subject: ${p}`); }
+    over('outcome', o.outcome, OUTCOME_MAX);
+    if (isObj(o.ready)) over('ready.outcome', o.ready.outcome, OUTCOME_MAX);
+  } else {
+    over('text', o.text, TURN_MAX);
+    if (typeof o.text === 'string' && encodedBytes(o.text) > TURN_ENCODED_MAX) errs.push(`turn.text is ${encodedBytes(o.text)} bytes as the log holds it; at most ${TURN_ENCODED_MAX}`);
+    for (const r of Array.isArray(o.refs) ? o.refs : []) over('refs[]', r, 120);
+    if (o.by === 'owner' && (o.refs !== undefined || o.question !== undefined)) errs.push("refs and question are on the supervisor's turns");
+  }
+  return errs;
 }
 
 // ===== review questions: an agent-drawn page the owner answers with a result =====
