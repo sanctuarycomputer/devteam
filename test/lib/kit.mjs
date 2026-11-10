@@ -108,7 +108,8 @@ export function fleetFixture(name) {
     g(['commit', '-qm', 'chore-log: log through now'], old);
     g(['push', '-q', 'origin', 'main'], old);
   };
-  const done = () => { spawnSync('tmux', ['kill-server'], { env: { ...process.env, TMUX_TMPDIR: tmuxDir } }); fs.rmSync(tmuxDir, { recursive: true, force: true }); if (!process.env.DEVTEAM_TEST_KEEP) fs.rmSync(base, { recursive: true, force: true }); else console.log(`${name} fixture kept at ${base}`); };
+  // retried: a dashboard's child can still be writing its cache (run/cache) a moment after it stopped
+  const done = () => { spawnSync('tmux', ['kill-server'], { env: { ...process.env, TMUX_TMPDIR: tmuxDir } }); fs.rmSync(tmuxDir, { recursive: true, force: true }); if (!process.env.DEVTEAM_TEST_KEEP) fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); else console.log(`${name} fixture kept at ${base}`); };
   return { base, org, old, neu, home, env, run, ok, g, land, done };
 }
 

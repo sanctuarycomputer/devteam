@@ -481,6 +481,15 @@
   #av-frame { flex: 1 1 auto; min-height: 0; width: 100%; border: 0; background: #fff; display: block; }
   @media (max-width: 900px) { #artifact-view:not([hidden]) { inset: 8px; } }
   @media (max-width: 600px) { .av-bar .av-label { display: none; } .av-bar button:not(.icon-btn), .av-bar a.av-btn { padding: 0 8px; } }
+  /* threads: the layer over the page (Shift and point at anything), outside <main> */
+  .tl-aiming, .tl-aiming * { cursor: none !important; }
+  .tl-pinning { touch-action: none; }
+  .tl-cursor { position: fixed; left: 0; top: 0; z-index: 60; pointer-events: none; filter: drop-shadow(0 1px 2px rgba(0,0,0,.35)); }
+  .tl-cursor path { fill: var(--blue); stroke: #fff; stroke-width: 2; }
+  .tl-cursor circle { fill: #fff; }
+  .tl-hl { position: fixed; z-index: 58; pointer-events: none; border: 2px solid var(--blue); border-radius: 8px; background: color-mix(in srgb, var(--blue) 8%, transparent); }
+  .tl-hl.spot { border-radius: 50%; }
+  .tl-chip { position: fixed; z-index: 59; pointer-events: none; max-width: 260px; padding: 2px 8px; border-radius: 6px; background: var(--fg); color: var(--bg); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 </style>
 </head>
 <body>
@@ -670,6 +679,12 @@
   </div>
   <!-- the server's policy for these pages holds whatever the frame's attributes say; the frame never shares this origin -->
   <iframe id="av-frame" title="Artifact" sandbox="allow-scripts allow-forms allow-modals allow-pointer-lock" allow="fullscreen" referrerpolicy="no-referrer"></iframe>
+</div>
+<!-- the thread layer: outside <main>, which the 10 s refresh rebuilds -->
+<div id="tl" class="tl">
+  <div id="tl-hl" class="tl-hl" hidden></div>
+  <div id="tl-chip" class="tl-chip" hidden></div>
+  <div id="tl-cursor" class="tl-cursor" hidden aria-hidden="true"><svg viewBox="0 0 28 36" width="28" height="36"><path d="M14 35C14 35 2 21 2 13a12 12 0 0 1 24 0c0 8-12 22-12 22z"/><circle cx="14" cy="13" r="4.5"/></svg></div>
 </div>
 <script>
 const $ = (id) => document.getElementById(id);
@@ -3397,7 +3412,10 @@ function showFailure(message) {
 // What the page can point at: the kit's SUBJECT_TYPES (a test holds the two lists equal).
 const T_TYPES = ['goal', 'observation', 'question', 'ticket', 'planner', 'decision', 'lesson', 'problem', 'act', 'preview', 'artifact'];
 // The kit's SUBJECT_REF, the same way (a test holds the two equal): the page never sends a ref the log refuses.
-const T_REF = new RegExp(`^(${T_TYPES.join('|')}):[a-z0-9][a-z0-9-]{0,110}$`);
+// T_REF_MAX: the kit's SUBJECT_CAPS.ref, in bytes; the pattern alone lets a long kind's ref past it.
+const T_REF = new RegExp(`^(${T_TYPES.join('|')}):[a-z0-9][a-z0-9-]{0,110}$`), T_REF_MAX = 120;
+// What each kind is called where an item has no name of its own (the owner never reads a ref).
+const T_KIND = { goal: 'a goal', observation: 'an observation', question: 'a question', ticket: 'a ticket', planner: 'a planning session', decision: 'a decision', lesson: 'a lesson', problem: 'a problem', act: 'an action', preview: 'a preview', artifact: 'an artifact' };
 // Where each kind of item lives: an item drawn in two places (an observation also in the Sensors
 // feed, a question in a Decide row) is pinned in its home section.
 const T_HOME = { goal: 'goals', question: 'inbox', ticket: 'board', planner: 'board', observation: 'loop', problem: 'loop', lesson: 'loop', decision: 'loop', act: 'loop', preview: 'library', artifact: 'library' };
@@ -3418,11 +3436,12 @@ const tLine = (s, n) => { const x = String(s ?? '').replace(/[\u0000-\u001f\u007
 // labels are no part of what the owner pointed at); its whole text only when it has neither.
 function tSubjectAt(el, x, y, sec) {
   const item = el?.closest?.('[data-subject]');
-  if (item && T_REF.test(item.dataset.subject ?? '')) {
+  const ref = item?.dataset?.subject ?? '';
+  if (item && T_REF.test(ref) && tBytes(ref) <= T_REF_MAX) {
     const title = tLine(item.dataset.title, T_TITLE_MAX);
     const head = tLine(item.querySelector?.('h4, .t, b')?.textContent, 300);
     const said = [title, head && head !== title ? head : ''].filter(Boolean).join(' · ') || tLine(item.innerText ?? item.textContent, 2000);
-    return { subject: { kind: 'item', ref: item.dataset.subject, quote: tCut(said, 300) }, title: title || item.dataset.subject, el: item };
+    return { subject: { kind: 'item', ref, quote: tCut(said, 300) }, title: title || T_KIND[ref.split(':')[0]], el: item };
   }
   const s = sec(el);
   if (!s) return null;
@@ -3486,6 +3505,98 @@ function tPins(threads) {
 const tUnread = (t, seenAt) => t.turns.some((u) => u.by === 'supervisor' && (!seenAt || u.at > seenAt));
 /* threads-core end */
 
+/* threads-layer start */
+// The thread layer: hold Shift and point at anything on the dashboard to talk to the supervisor
+// about it. It lives in #tl, outside <main>, which the 10 s refresh rebuilds, so a card, its draft and
+// the dock keep their state. Its window listeners in the capture phase are registered here, before
+// the page's own (PRESSED below), so a click it takes reaches nothing else.
+const TL = { threads: [], pane: false, open: null, draft: null, hit: null, pin: false, via: null, swallowUntil: 0, typed: {}, sig: '', polling: null, busy: false, resolving: false, readyKey: '', pill: '' };
+const tlEl = (id) => document.getElementById(id);
+const tlOwn = (el) => !!el?.closest?.('#tl');
+const tlShowing = () => !tlEl('tl-cursor').hidden;
+// The section a point is in: its hash route (the Loop's with its tab), its box and its heading.
+function tlSection(el) {
+  const sec = el?.closest?.('main > section[id]');
+  if (!sec) return null;
+  const h = sec.querySelector('h2');
+  return { el: sec, view: `#${sec.id}${sec.id === 'loop' ? `/${TAB}` : ''}`, box: sec.getBoundingClientRect(), heading: (h?.firstChild?.textContent || h?.textContent || sec.id).trim() };
+}
+function tlHitAt(x, y) {
+  const el = document.elementsFromPoint(x, y).find((e) => !tlOwn(e));
+  return el ? tSubjectAt(el, x, y, tlSection) : null;
+}
+// The pin cursor at the point, what is under it outlined, and a chip with its name.
+function tlShow(x, y) {
+  const hit = tlHitAt(x, y);
+  TL.hit = hit ? { ...hit, x, y } : null;
+  document.documentElement.classList.add('tl-aiming');
+  const cur = tlEl('tl-cursor'), hl = tlEl('tl-hl'), chip = tlEl('tl-chip');
+  cur.hidden = false;
+  cur.style.transform = `translate(${Math.round(x - 14)}px, ${Math.round(y - 35)}px)`;
+  if (!hit) { hl.hidden = true; chip.hidden = true; return; }
+  const r = hit.subject.kind === 'item' ? hit.el.getBoundingClientRect() : { left: x - 12, top: y - 12, width: 24, height: 24 };
+  Object.assign(hl.style, { left: `${r.left - 3}px`, top: `${r.top - 3}px`, width: `${r.width + 6}px`, height: `${r.height + 6}px` });
+  hl.classList.toggle('spot', hit.subject.kind !== 'item');
+  hl.hidden = false;
+  chip.textContent = hit.title;
+  Object.assign(chip.style, { left: `${Math.round(Math.min(x + 18, innerWidth - 270))}px`, top: `${Math.round(Math.max(8, y - 36))}px` });
+  chip.hidden = false;
+}
+function tlHide() {
+  TL.hit = null;
+  document.documentElement.classList.remove('tl-aiming');
+  for (const id of ['tl-cursor', 'tl-hl', 'tl-chip']) tlEl(id).hidden = true;
+}
+// Pin mode: pointing without Shift, for a finger or a long look around, until Esc or the dock's Pin
+// button again.
+function tlPinMode(on) {
+  TL.pin = on;
+  tlEl('tl-pinbtn')?.setAttribute('aria-pressed', String(on));
+  document.documentElement.classList.toggle('tl-pinning', on);
+  if (!on) tlHide();
+}
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && (tlShowing() || TL.pin)) { e.stopImmediatePropagation(); tlHide(); if (TL.pin) tlPinMode(false); }
+}, true);
+window.addEventListener('keyup', (e) => { if (e.key === 'Shift' && !TL.pin) tlHide(); }, true);
+window.addEventListener('blur', () => { if (!TL.pin) tlHide(); });
+// Shift shows the pin only once the pointer moves, and never over a field being typed in, so a
+// capital typed in a field doesn't summon it.
+window.addEventListener('pointermove', (e) => {
+  if (!(e.shiftKey || TL.pin) || (e.pointerType === 'touch' && !TL.pin)) { if (tlShowing() && !TL.pin) tlHide(); return; }
+  const over = document.elementFromPoint(e.clientX, e.clientY);
+  if (tlOwn(over) || typingIn(over)) { tlHide(); return; }
+  tlShow(e.clientX, e.clientY);
+}, true);
+// A click while the pin shows starts a thread and is the layer's alone: neither the browser's own
+// Shift+click (a new window, a longer selection) nor the page's handlers (the press that holds a
+// redraw among them) see it. A mouse starts on its click; a finger or a pen on lifting, and the
+// click the browser makes of that lift is swallowed.
+for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click', 'auxclick', 'dblclick', 'contextmenu']) window.addEventListener(type, (e) => {
+  if (tlOwn(e.target)) return;
+  if (type === 'pointerdown') { TL.via = e.pointerType; if (TL.pin && e.pointerType !== 'mouse') tlShow(e.clientX, e.clientY); }
+  const swallow = Date.now() < TL.swallowUntil && type !== 'pointerdown' && type !== 'pointerup';
+  if (!tlShowing() && !swallow) return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  if (!tlShowing()) return;
+  const lift = type === 'pointerup' && e.pointerType !== 'mouse';
+  if (!lift && !(type === 'click' && TL.via === 'mouse')) return;
+  const at = tlHitAt(e.clientX, e.clientY);
+  const hit = TL.hit ?? (at && { ...at, x: e.clientX, y: e.clientY });
+  if (lift) TL.swallowUntil = Date.now() + 700;
+  tlHide();
+  if (hit) tlStart(hit);
+}, true);
+// A thread about to start: its subject fitted to the log's cap; nothing is written until the owner
+// sends the first words.
+function tlStart(hit) {
+  TL.open = null;
+  TL.resolving = false;
+  TL.draft = { subject: tFit(hit.subject), title: hit.title, el: hit.subject.kind === 'item' ? hit.el : null, px: hit.x + scrollX, py: hit.y + scrollY };
+}
+/* threads-layer end */
+
 // Not under someone mid-action: a redraw replaces the controls it draws, so typing, an IME
 // composition, an open select or file picker, a press not yet released (the click would land on
 // nothing) or an answer on its way would be lost. The data still comes in: the tab title and the
@@ -3496,9 +3607,10 @@ const typingIn = (el) => !!el && (el.tagName === 'TEXTAREA' || el.isContentEdita
 const PICK_HOLD = 60000, PRESS_HOLD = 3000;
 const HINT_AFTER = 30000;
 let HELD = null, HELD_SINCE = 0, COMPOSING = false, PRESSED = 0, PICKING = 0, SENDING = 0;
+// A field in the thread layer holds nothing: the layer is outside what a redraw rebuilds, so the page refreshes under a half-written turn.
 function holding() {
   const ae = document.activeElement;
-  return COMPOSING || SENDING > 0 || typingIn(ae) || Date.now() - PRESSED < PRESS_HOLD
+  return COMPOSING || SENDING > 0 || (typingIn(ae) && !ae.closest('#tl')) || Date.now() - PRESSED < PRESS_HOLD
     || (!!ae?.matches?.('select, input[type=file]') && Date.now() - PICKING < PICK_HOLD);
 }
 async function sending(f) { SENDING++; try { return await f(); } finally { SENDING--; } }

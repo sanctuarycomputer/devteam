@@ -633,14 +633,18 @@ test("the thread layer's rules: what the pointer is on, a subject that fits, whe
   const src = html.slice(html.indexOf('/* threads-core start */'), html.indexOf('/* threads-core end */'));
   assert.ok(src.length > 500, 'the threads-core block is marked in index.html');
   const ctx = vm.createContext({ TextEncoder });
-  vm.runInContext(`${src}\n;globalThis.api = { T_TYPES, T_REF, T_HOME, tBytes, tCut, tLine, tSubjectAt, tFit, tCardState, tPlace, tWhere, tPins, tUnread };`, ctx);
+  vm.runInContext(`${src}\n;globalThis.api = { T_TYPES, T_REF, T_REF_MAX, T_KIND, T_HOME, T_WAIT_MS, T_TURN_MAX, T_ENCODED_MAX, T_SUBJECT_MAX, T_TITLE_MAX, tBytes, tCut, tLine, tSubjectAt, tFit, tCardState, tPlace, tWhere, tPins, tUnread };`, ctx);
   const A = ctx.api;
   const plain = (x) => JSON.parse(JSON.stringify(x));
   // the page and the kit name the same things, and the page sends no ref the log refuses
   const kitSrc = fs.readFileSync(path.join(kit, 'scripts/devteam.mjs'), 'utf8');
-  const kitLog = vm.runInContext(`${/^const SUBJECT_TYPES = .*$/m.exec(kitSrc)[0]}\n${/^const SUBJECT_REF = .*$/m.exec(kitSrc)[0]}\n;({ types: SUBJECT_TYPES, ref: SUBJECT_REF })`, vm.createContext({}));
-  assert.deepEqual(plain(A.T_TYPES), plain(kitLog.types));
-  assert.equal(A.T_REF.source, kitLog.ref.source);
+  const kitLine = (name) => new RegExp(`^const ${name} = .*$`, 'm').exec(kitSrc)[0];
+  const kitNames = ['SUBJECT_TYPES', 'SUBJECT_REF', 'SUBJECT_CAPS', 'THREAD_WAIT_MS', 'TURN_MAX', 'TURN_ENCODED_MAX', 'SUBJECT_MAX', 'THREAD_TITLE_MAX'];
+  const kitLog = vm.runInContext(`${kitNames.map(kitLine).join('\n')}\n;({ ${kitNames.join(', ')} })`, vm.createContext({}));
+  assert.deepEqual(plain(A.T_TYPES), plain(kitLog.SUBJECT_TYPES));
+  assert.equal(A.T_REF.source, kitLog.SUBJECT_REF.source);
+  assert.deepEqual([A.T_REF_MAX, A.T_WAIT_MS, A.T_TURN_MAX, A.T_ENCODED_MAX, A.T_SUBJECT_MAX, A.T_TITLE_MAX], [kitLog.SUBJECT_CAPS.ref, kitLog.THREAD_WAIT_MS, kitLog.TURN_MAX, kitLog.TURN_ENCODED_MAX, kitLog.SUBJECT_MAX, kitLog.THREAD_TITLE_MAX], "the page's caps are the kit's");
+  assert.deepEqual(Object.keys(A.T_KIND).sort(), [...plain(A.T_TYPES)].sort(), 'every kind of item has a name the owner reads');
   assert.deepEqual(Object.keys(A.T_HOME).sort(), [...plain(A.T_TYPES)].sort(), 'every kind of item has a home section');
   // sizes in bytes; one line; never half a surrogate pair
   assert.equal(A.tBytes('héllo'), 6);
@@ -657,8 +661,15 @@ test("the thread layer's rules: what the pointer is on, a subject that fits, whe
   assert.equal(hit.title, 'Launch checkout');
   const card = { dataset: { subject: 'question:q-20261110-101500123-supervisor', title: 'Narrow it?' }, innerText: 'x', querySelector: () => ({ textContent: 'Narrow the goal to EU orders?' }) };
   assert.equal(A.tSubjectAt(on(card), 0, 0, () => null).subject.quote, 'Narrow it? · Narrow the goal to EU orders?');
-  assert.equal(A.tSubjectAt(on({ dataset: { subject: `goal:${G}` }, innerText: 'Only\ntext', querySelector: () => null }), 0, 0, () => null).subject.quote, 'Only text', 'its text only when it has no name or heading');
+  const untitled = A.tSubjectAt(on({ dataset: { subject: `goal:${G}` }, innerText: 'Only\ntext', querySelector: () => null }), 0, 0, () => null);
+  assert.equal(untitled.subject.quote, 'Only text', 'its text only when it has no name or heading');
+  assert.equal(untitled.title, 'a goal', 'no ref in what the owner reads');
+  assert.equal(A.tSubjectAt(on({ dataset: { subject: 'act:a-1' }, innerText: 'x', querySelector: () => null }), 0, 0, () => null).title, 'an action');
   assert.equal(A.tSubjectAt(on({ dataset: { subject: 'secret:x', title: 'x' }, innerText: 'x' }), 0, 0, () => null), null, 'a ref the log would refuse is no item');
+  const longRef = `observation:${'a'.repeat(109)}`;
+  assert.ok(A.T_REF.test(longRef) && longRef.length === 121);
+  assert.equal(A.tSubjectAt(on({ dataset: { subject: longRef, title: 'x' }, innerText: 'x' }), 0, 0, () => null), null, 'nor one over the log\'s 120 bytes');
+  assert.ok(A.tSubjectAt(on({ dataset: { subject: longRef.slice(0, 120), title: 'x' }, innerText: 'x', querySelector: () => null }), 0, 0, () => null));
   const sec = { el: {}, view: '#loop/observe', box: { left: 100, top: 200, width: 400, height: 100 }, heading: 'Loop' };
   const spot = A.tSubjectAt({ closest: () => null }, 200, 250, () => sec);
   assert.deepEqual(plain(spot.subject), { kind: 'page', view: '#loop/observe', at: { x: 0.25, y: 0.5 }, quote: 'Loop' });
@@ -709,4 +720,74 @@ test("the thread layer's rules: what the pointer is on, a subject that fits, whe
   assert.equal(A.tUnread(reply, '2026-11-10T10:05:00.000Z'), false);
   assert.equal(A.tUnread(reply, null), true);
   assert.equal(A.tUnread({ turns: [{ by: 'owner', at: '2026-11-10T10:00:00.000Z' }] }, null), false);
+});
+// The thread layer in Chrome, on a project of its own: aiming (this task), the card (Task 11), the
+// pins and the dock (Task 12), questions and resolving (Task 13). One page; the subtests run in order.
+test('threads on the dashboard page: Shift and point, the card, the pins and the dock', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 300000 }, async (t) => {
+  // stopped last-in first-out, each whatever the one before did: the fixture's files go only once the
+  // dashboard writing into them has stopped, and one cleanup that throws leaves no Chrome running
+  const undo = [];
+  t.after(async () => { let err = null; for (const f of undo.reverse()) { try { await f(); } catch (e) { err ??= e; } } if (err) throw err; });
+  const F = threadsFixture('threads-page');
+  undo.push(() => F.done());
+  const Q0 = F.sup(['ask', '--question', 'Which way?', '--choices', '[{"label":"Left"},{"label":"Right"}]', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
+  const port = await freePort();
+  const dash = startDashboard(F.old, F.env({}), ['--port', String(port)]);
+  undo.push(() => dash.stop());
+  const chrome = await openChrome();
+  undo.push(() => chrome.close());
+  const p = await chrome.newPage();
+  undo.push(() => p.close());
+  await until(() => /dashboard on http/.test(dash.out()), 'the dashboard');
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  await p.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
+  await p.send('Page.addScriptToEvaluateOnNewDocument', { source: POLL_FAST });
+  await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#goals` });
+  const soon = async (expr, what) => { for (let i = 0; i < 300; i++) { const v = await p.ev(expr); if (v) return v; await new Promise((r) => setTimeout(r, 50)); } assert.fail(`timed out: ${what}`); };
+  const goalSel = `#goals-list [data-subject="goal:${F.goal}"]`;
+  const shown = (id) => `!document.getElementById('${id}').hidden`;
+  await soon(`!!document.querySelector('${goalSel}')`, 'the goal card');
+  const threads = () => JSON.parse(F.owner(['thread', 'list', '--all', '--json']));
+  let T;
+
+  await t.test('Shift and point: the pin cursor, the goal outlined, a chip naming it; Shift up, the cursor back', async () => {
+    const at = await p.at(`${goalSel} h4`);
+    await p.hold('Shift', true);
+    await p.move(at.x, at.y, 8);
+    await soon(`${shown('tl-cursor')} && ${shown('tl-hl')}`, 'the pin and the highlight');
+    assert.equal(await p.ev(`document.getElementById('tl-chip').textContent`), 'Launch checkout');
+    assert.equal(await p.ev(`document.documentElement.classList.contains('tl-aiming')`), true);
+    await p.hold('Shift', false);
+    await soon(`document.getElementById('tl-cursor').hidden && !document.documentElement.classList.contains('tl-aiming')`, 'the normal cursor back');
+  });
+
+  await t.test('Shift held while typing in a field shows nothing until the pointer leaves the field', async () => {
+    const box = `textarea[data-q="${Q0}"]`;
+    await p.click(box);
+    await p.hold('Shift', true);
+    await p.key('A', 8);
+    assert.equal(await p.ev(`document.getElementById('tl-cursor').hidden`), true, 'a capital is just a capital');
+    const over = await p.at(box);
+    await p.move(over.x, over.y, 8);
+    assert.equal(await p.ev(`document.getElementById('tl-cursor').hidden`), true, 'not over the field');
+    const g = await p.at(`${goalSel} h4`);
+    await p.move(g.x, g.y, 8);
+    await soon(shown('tl-cursor'), 'the pin once outside it');
+    await p.hold('Shift', false);
+    assert.match(await p.ev(`document.querySelector('${box}').value`), /A$/);
+    await p.ev(`document.querySelector('${box}').value = ''; document.activeElement.blur()`);
+  });
+
+  await t.test("a Shift+click is the layer's alone: it starts a thread on the goal, and the title link under it isn't followed", async () => {
+    const at = await p.at(`${goalSel} a.title-link`);
+    await p.hold('Shift', true);
+    await p.clickAt(at.x, at.y, 8);
+    await p.hold('Shift', false);
+    await soon(`TL.draft?.subject?.ref === 'goal:${F.goal}'`, 'a thread about to start, on the goal');
+    assert.equal(await p.ev('TL.draft.title'), 'Launch checkout');
+    assert.equal(await p.ev('location.hash'), '#goals', 'the link was not followed');
+    assert.equal(await p.ev(`document.getElementById('drawer').hidden`), true, 'no sidepeek opened');
+    assert.equal(threads().length, 0, 'nothing is written until the owner writes');
+  });
 });
