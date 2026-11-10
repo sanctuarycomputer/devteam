@@ -79,8 +79,18 @@ pane_state() {
   [ -z "$typed" ] || { echo typing; return; }
   case $ui in *'esc to interrupt'*) echo busy ;; *) echo ready ;; esac
 }
-# Cut a line to n bytes, not leaving half a UTF-8 character at the end.
-cap() { cut -b "1-$1" | iconv -c -f UTF-8 -t UTF-8 2>/dev/null; }
+# Cut a line to n bytes, not leaving half a UTF-8 character at the end: bytes in the C locale, the
+# same in mawk and BSD awk, and no iconv (whether it exits 0 after dropping a byte varies by glibc).
+cap() {
+  LC_ALL=C awk -v n="$1" '{
+    s = substr($0, 1, n)
+    if (length($0) > n && match(s, /[\300-\377][\200-\277]*$/)) {
+      b = substr(s, RSTART, 1)
+      if (RLENGTH < (b ~ /[\300-\337]/ ? 2 : b ~ /[\340-\357]/ ? 3 : 4)) s = substr(s, 1, RSTART - 1)
+    }
+    print s
+  }'
+}
 if [ -n "$pane_q" ]; then pane_state "$pane_q"; exit 0; fi
 # Each restore-list entry's age counts from when it was first listed, kept beside the list because
 # the list's own mtime moves with every rewrite. An entry up just before this boot is new again.

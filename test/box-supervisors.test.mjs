@@ -240,6 +240,12 @@ test('--alert reaches the hub, by hello, and clears', () => {
   const long = `${'x'.repeat(199)}é and more`;
   run(['--alert', long]);
   assert.equal(fs.readFileSync(alert, 'utf8'), `${'x'.repeat(199)}\n`, 'cut at 200 bytes, never half a character');
+  run(['--alert', `${'x'.repeat(198)}€ and more`]);
+  assert.equal(fs.readFileSync(alert, 'utf8'), `${'x'.repeat(198)}\n`, 'nor a third of one');
+  run(['--alert', `${'x'.repeat(198)}é and more`]);
+  assert.equal(fs.readFileSync(alert, 'utf8'), `${'x'.repeat(198)}é\n`, 'a whole character that fits stays');
+  run(['--alert', 'short é']);
+  assert.equal(fs.readFileSync(alert, 'utf8'), 'short é\n', 'and a line under the limit is left alone');
   run(['--alert', 'again']);
   assert.match(run(['--alert', '--clear']).stdout, /alert cleared/);
   assert.ok(!fs.existsSync(alert));
