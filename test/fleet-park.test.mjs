@@ -219,3 +219,66 @@ test('a mistyped feature: refused at ticket add, and a superseded ticket with on
     assert.doesNotMatch(v(), /feature nope/);
   } finally { F.done(); }
 });
+
+test('a preview is gone with the worktree, stopped but kept on park, listed in the handoff, named in the resumed prompt', { skip: !hasTmux && 'no tmux' }, () => {
+  const F = fleetFixture('previews');
+  const { old, run, ok, g, env } = F;
+  const ID = 'ch-01-tidy';
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const WRK = { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: ID };
+  const SERVER = 'node -e "require(\'http\').createServer((q,s)=>s.end(\'ok\')).listen(process.env.PORT)"';
+  const dir = path.join(old, 'docs/devteam/run/previews');
+  const rec = (name) => JSON.parse(fs.readFileSync(path.join(dir, `${name}.json`), 'utf8'));
+  const has = (name) => fs.existsSync(path.join(dir, `${name}.json`));
+  const windows = () => (spawnSync('tmux', ['list-windows', '-a', '-F', '#{window_id} #{window_name}'], { env: env(), encoding: 'utf8' }).stdout ?? '').split('\n').filter(Boolean).map((l) => l.split(' ')[1]);
+  const up = (name) => { const r = spawnSync('tmux', ['list-windows', '-a', '-F', '#{window_name}'], { env: env(), encoding: 'utf8' }); return (r.stdout ?? '').split('\n').includes(`dev~${name}`); };
+  const prompt = () => fs.readFileSync(path.join(old, 'docs/devteam/run/prompts', `${ID}.txt`), 'utf8');
+  try {
+    ok(old, ['ticket', 'add', ID, '--json', JSON.stringify({ title: 'tidy up', feature: 'chores', component: 'ch', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['tidy/**'], done_when: ['the tidy check passes in CI'] })], SUP);
+    const ww = path.join(old, '.worktrees', ID);
+    g(['worktree', 'add', '-q', '-b', `ticket/${ID}`, ww, 'origin/main'], old);
+    ok(ww, ['phase', 'build', '--task', 'T1'], WRK);
+    const mine = /preview (\S+) /.exec(ok(ww, ['preview', '--run', SERVER], WRK))[1];
+    const theirs = /preview (\S+) /.exec(ok(old, ['preview', '--run', SERVER], SUP))[1];
+    const session = rec(mine).session;
+    assert.equal(session, ID, 'the worker\'s preview names the worker');
+    assert.ok(up(mine) && up(theirs));
+    // a record of a server the agent runs itself, by this worker, listed too
+    const agentRun = /preview (\S+) /.exec(ok(ww, ['preview', '65030', '--label', 'mine'], WRK))[1];
+
+    // handoff lists them, before anything is stopped
+    const said = ok(ww, ['handoff'], WRK, 'where I got to\n');
+    assert.match(said, /handoff committed/);
+    const msg = g(['log', '-1', '--format=%B'], ww);
+    assert.match(msg, /## Previews running/);
+    assert.ok(msg.includes(`"name": "${mine}"`) && !msg.includes(`"name": "${theirs}"`), 'only this session\'s');
+    assert.ok(up(mine), 'handoff stops nothing');
+
+    // parked: this worker's kit-started window stops, the records stay, another writer's is left
+    ok(ww, ['phase', 'parked', '--note', 'parked'], WRK);
+    assert.ok(!up(mine), 'its window stopped');
+    assert.ok(up(theirs), 'another session\'s is left alone');
+    assert.ok(has(mine) && rec(mine).run && has(agentRun), 'the records stay');
+
+    // a resumed worker's prompt names what is not running
+    ok(old, ['worker', ID, '--resume'], SUP);
+    assert.ok(prompt().includes(`your preview ${mine} (${SERVER}, port ${rec(mine).port}) is not running; devteam.mjs preview start ${mine} brings it back`), prompt());
+    assert.ok(!prompt().includes(agentRun), 'only what the kit can start');
+    // start brings it back on the same name and port
+    const port = rec(mine).port;
+    ok(ww, ['preview', 'start', mine], WRK);
+    assert.equal(rec(mine).port, port);
+    assert.ok(up(mine));
+    // with nothing down, the prompt says nothing of it
+    ok(old, ['worker', ID, '--resume', '--force'], SUP);
+    assert.ok(!prompt().includes('is not running; devteam.mjs preview start'), 'none down, nothing said');
+
+    // the worktree goes: its window and its records go; another writer's stay
+    ok(old, ['worker', ID, '--remove', '--force'], SUP);
+    assert.ok(!up(mine), 'the window closes with the worktree');
+    assert.ok(!has(mine) && !has(agentRun), 'and every record of that writer goes');
+    assert.ok(has(theirs) && up(theirs));
+    ok(old, ['preview', 'stop', theirs], SUP);
+    assert.ok(!windows().some((n) => n?.startsWith('dev~')));
+  } finally { F.done(); }
+});

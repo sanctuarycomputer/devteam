@@ -4750,6 +4750,22 @@ async function previewTick() {
   // a write that died between its temp file and the rename
   try { for (const f of fs.readdirSync(previewsDir())) if (f.endsWith('.tmp') && now - fs.statSync(path.join(previewsDir(), f)).mtimeMs > 3600000) fs.rmSync(path.join(previewsDir(), f), { force: true }); } catch {}
 }
+// A writer's previews when its session ends or parks. The worktree going takes the records too; a
+// park keeps them, so the resumed session brings each back on the same name and port.
+function stopPreviewsOf(writer, { keepRecords }) {
+  for (const r of readPreviews().filter((x) => x.session === writer)) {
+    killPreviewWindow(r);
+    if (!keepRecords) removePreview(r.name);
+  }
+}
+// What a resumed session is told: each of its kit-started previews whose window is gone. The
+// command is the session's own text, but a line in a prompt is one line.
+function previewsBlock(name) {
+  const panes = previewPanes();
+  const down = readPreviews().filter((r) => r.session === name && r.run && !UNSAFE_TEXT.test(`${r.run.cmd ?? ''}`) && !previewWindow(r, panes));
+  if (!down.length) return null;
+  return `## Previews\n\n${down.map((r) => `your preview ${r.name} (${r.run.cmd}, port ${r.port}) is not running; devteam.mjs preview start ${r.name} brings it back`).join('\n')}`;
+}
 async function cmdPreview() {
   const [sub, arg] = positional;
   const listing = ['list', 'url', 'stop', 'start'].includes(sub);
@@ -9201,7 +9217,8 @@ function cmdPrompt() {
   const links = linksBlock(positional[1]);
   const arts = artifactsBlock(positional[1]);
   const block = knowledgeBlock(positional[1]);
-  out([p, handoff, links, arts, block].filter(Boolean).join('\n\n'));
+  const previews = positional[1] ? previewsBlock(role === 'worker' ? positional[1] : `plan-${positional[1]}`) : null;
+  out([p, handoff, previews, links, arts, block].filter(Boolean).join('\n\n'));
 }
 
 const tmux = (args) => sh('tmux', args) !== null;
@@ -9345,6 +9362,8 @@ function cmdPhase() {
   const task = flagStr('task') ?? prev?.task;
   const changed = !prev || prev.to !== to || prev.task !== task || (cost.usd !== undefined && cost.usd !== prev.usd) || flags.note !== undefined;
   const stale = !prev || Date.now() - Date.parse(prev.created_at) > Math.min(15, loadSettings().stale_after_minutes / 3) * 60000;
+  // Parking stops the session's own servers; the records stay for preview start after a resume.
+  if (to === 'parked') stopPreviewsOf(id, { keepRecords: true });
   if (!changed && !stale) return out(`phase ${to} (unchanged)`);
   appendLog({ type: 'phase', from: prev?.to ?? null, to, task, note: flagStr('note')?.slice(0, 280), sha: cwdGit(['rev-parse', 'HEAD']) ?? undefined, ...cost }, id);
   out(`phase ${to}${task ? ` ${task}` : ''}`);
@@ -9471,6 +9490,7 @@ function removeWorkerWorktree(id) {
     if (!T.mergeShaFor(id)) die(`${id} is not merged yet; --force removes its worktree anyway (uncommitted work in it is lost)`);
     if (lastPhaseOf(id)?.to !== 'done') die(`${id}'s worker hasn't logged phase done (its final spend); wait for it, or --force removes its worktree anyway`);
   }
+  stopPreviewsOf(id, { keepRecords: false });
   const R = fs.existsSync(wt) ? worktreeRepo(wt) ?? die(`${wt} is a worktree of no repo this machine can read`) : T;
   if (fs.existsSync(wt)) {
     R.gitOrDie(['worktree', 'remove', ...(flags.force ? ['--force'] : []), wt], R.root);
@@ -9562,7 +9582,8 @@ function makeSession(role) {
   const held = block ?? (role === 'planner' ? idBlockFor(id) : null);
   const text = `${promptFor(role, id, R)}${held ? ` ${idBlockText(held)}` : ''}`;
   const handoff = handoffBlock(name);
-  fs.writeFileSync(promptFile, `${text}${handoff ? `\n\n${handoff}` : ''}${links ? `\n\n${links}` : ''}${arts ? `\n\n${arts}` : ''}${knowledge ? `\n\n${knowledge}` : ''}\n`);
+  const previews = previewsBlock(name);
+  fs.writeFileSync(promptFile, `${text}${handoff ? `\n\n${handoff}` : ''}${previews ? `\n\n${previews}` : ''}${links ? `\n\n${links}` : ''}${arts ? `\n\n${arts}` : ''}${knowledge ? `\n\n${knowledge}` : ''}\n`);
   // One step under a lock per session, the look at the window through the act that records the
   // launch, so two launches of one session at the same moment can't both type into it: whichever
   // comes second finds the first's window and leaves it alone. withLock clears a lock older than
@@ -9761,9 +9782,12 @@ function cmdHandoff() {
   if (workLines(cwdGit(['status', '--porcelain'])).length) die('handoff: commit your work in progress first (a WIP commit is fine); the handoff commit holds only the note');
   const branch = cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']);
   if (branch !== sess.branch) die(`handoff: you are on ${branch}, not ${sess.branch}`);
+  // what was running, for the session that picks this up (phase parked stops it next)
+  const running = readPreviews().filter((r) => r.session === name).map(({ mtimeMs, ...r }) => r);
+  const previews = running.length ? `\n\n## Previews running\n\n${JSON.stringify(running, null, 2)}` : '';
   withScratch((dir) => {
     const f = path.join(dir, 'msg');
-    fs.writeFileSync(f, `${HANDOFF_SUBJECT(name)}\n\n${note}\n`);
+    fs.writeFileSync(f, `${HANDOFF_SUBJECT(name)}\n\n${note}${previews}\n`);
     cwdGitOrDie(['commit', '--quiet', '--allow-empty', '-F', f]);
   });
   cwdGitOrDie(['push', '--quiet', 'origin', `HEAD:refs/heads/${sess.branch}`]);
