@@ -298,6 +298,11 @@ tick='Check on the box and your supervisors.'
 # The box's global tools, on the disk: edit the file to change them, and they come back each boot.
 mkdir -p .box .config/mise
 [ -f .config/mise/config.toml ] || cat > .config/mise/config.toml <<'TOML'
+# .ruby-version, .python-version and .nvmrc pin a repo's versions as they do with asdf or rbenv; mise
+# ignores them unless told, and then a repo gets no Ruby at all and box-status still says tools=ok
+[settings]
+idiomatic_version_file_enable_tools = ["ruby", "python", "node"]
+
 [tools]
 node = "22"
 python = "3.12"
