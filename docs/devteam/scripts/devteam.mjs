@@ -9964,7 +9964,9 @@ async function machineStatus() {
     const kit = typeof hello.kit === 'string' ? hello.kit : '?';
     // the newest release of the project's own upstream, asked once per upstream
     const upstream = (projectKit(root, ['settings', '--get', 'upstream_repo']) ?? '').trim();
-    if (upstream && !latest.has(upstream)) latest.set(upstream, sh('gh', ['release', 'list', '-R', upstream, '--limit', '1', '--json', 'tagName', '-q', '.[0].tagName'], { timeout: 8000 }) || null);
+    // named by -R: another project's upstream, which none of this kit's repos' gh speaks for
+    const ask = ['release', 'list', '-R', upstream, '--limit', '1', '--json', 'tagName', '-q', '.[0].tagName'];
+    if (upstream && !latest.has(upstream)) latest.set(upstream, sh('gh', ask, { timeout: 8000 }) || null);
     const newest = latest.get(upstream);
     const base = kit.split('+')[0];
     const behind = newest && base !== newest && /^v\d/.test(base) && versionBefore(base, newest) ? ` behind=${newest}` : '';
