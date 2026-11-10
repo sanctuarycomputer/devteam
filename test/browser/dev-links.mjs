@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// The dev links chain in a real browser: Chrome over the DevTools protocol against a real dashboard
-// and a real Vite app, by hand (needs Chrome and npm's network once; not in CI). Node 22+.
+// The dev links chain in a real browser: Chrome over the DevTools protocol against a real dashboard,
+// a real Vite app and (the second half) a real gateway on *.localhost, by hand (needs Chrome and
+// npm's network once; not in CI). Node 22+.
 //   node test/browser/dev-links.mjs
 // A synthetic test can't show what a popup, the hub's sandboxed frame, a clipboard or an HMR socket
 // does: this drives them with real input events.
@@ -90,11 +91,12 @@ class Browser {
     if (m.method === 'Network.webSocketHandshakeResponseReceived') { const w = s.sockets.find((x) => x.requestId === m.params.requestId); if (w) w.status = m.params.response.status; }
     if (m.method === 'Network.webSocketFrameReceived') { const w = s.sockets.find((x) => x.requestId === m.params.requestId); if (w) w.frames.push(m.params.response.payloadData); }
     if (m.method === 'Network.requestWillBeSent') s.requests.push(m.params.request.url);
+    if (m.method === 'Network.loadingFinished') s.bytes += m.params.encodedDataLength;
     if (m.method === 'Page.frameNavigated' && !m.params.frame.parentId) { s.url = m.params.frame.url; s.navigations += 1; }
     return undefined;
   }
   async attached({ sessionId, targetInfo, waitingForDebugger }) {
-    const s = { sessionId, targetId: targetInfo.targetId, type: targetInfo.type, url: targetInfo.url, sockets: [], requests: [], navigations: 0 };
+    const s = { sessionId, targetId: targetInfo.targetId, type: targetInfo.type, url: targetInfo.url, sockets: [], requests: [], navigations: 0, bytes: 0 };
     this.sessions.set(sessionId, s);
     const c = this.cdp;
     if (['page', 'iframe'].includes(targetInfo.type)) {
@@ -216,6 +218,35 @@ function startDashboard(port) {
   procs.push(p);
 }
 
+// ===== the card, the same on a laptop and through the gateway =====
+// The framed Library shows the card live; Copy and Open from it; the page, its HMR socket, an edit.
+async function throughCard({ hubUrl, dashUrl, name, previewUrl, socketPrefix, app }) {
+  await browser.evalIn(dashUrl, `location.hash = '#library'`);
+  const card = `[data-preview="${name}"]`;
+  await until(() => browser.evalIn(dashUrl, `!!document.querySelector('${card} .badge.good')`), 'the Previews card to read live', 60000);
+  stepOk('the framed Library shows the card as live');
+  await browser.click(hubUrl, dashUrl, `${card} [data-copy]`);
+  await until(() => browser.evalIn(dashUrl, `document.querySelector('${card} [data-copy]').textContent === 'Copied'`), 'Copy link to say Copied');
+  const clip = await browser.readClipboard(dashUrl);
+  assert.equal(clip, previewUrl);
+  stepOk(`Copy link put ${clip} on the clipboard, from the hub's frame`);
+  const before = new Set(browser.pages().map((s) => s.targetId));
+  await browser.click(hubUrl, dashUrl, `${card} a[target=_blank]`);
+  const tab = await until(() => browser.pages().find((s) => !before.has(s.targetId) && (s.url ?? '').startsWith(previewUrl)), 'Open to make a new tab at the preview');
+  stepOk(`Open made a new tab at ${tab.url}`);
+  await until(() => browser.evalIn(previewUrl, `document.getElementById('app')?.textContent === 'hello one'`), 'the Vite page to render');
+  stepOk('the new tab shows the Vite page');
+  const hmr = await until(() => tab.sockets.find((w) => w.url.startsWith(socketPrefix) && w.status === 101), 'the HMR socket to open');
+  stepOk(`the HMR socket opened: ${hmr.url.split('?')[0]} (101)`);
+  const boot = await browser.evalIn(previewUrl, 'document.documentElement.dataset.boot');
+  writeMain(app, 'hello two');
+  await until(() => hmr.frames.some((f) => /"type":"update"/.test(f)), 'an update frame on the socket');
+  await until(() => browser.evalIn(previewUrl, `document.getElementById('app').textContent === 'hello two'`), 'the page to change');
+  assert.equal(await browser.evalIn(previewUrl, 'document.documentElement.dataset.boot'), boot, 'no navigation');
+  stepOk('an edit hot-reloaded: update frame, the DOM changed, no navigation');
+  return tab;
+}
+
 // ===== the laptop half =====
 async function laptop({ HUB, DASH, app }) {
   const hubUrl = `http://127.0.0.1:${HUB}/`;
@@ -230,39 +261,90 @@ async function laptop({ HUB, DASH, app }) {
   const hub = await browser.newPage(hubUrl);
   await until(() => browser.frameWhere(dashUrl), 'the dashboard frame inside the hub');
   stepOk('the hub frames the dashboard');
-  await browser.evalIn(dashUrl, `location.hash = '#library'`);
-  const card = `[data-preview="${name}"]`;
-  await until(() => browser.evalIn(dashUrl, `!!document.querySelector('${card} .badge.good')`), 'the Previews card to read live', 60000);
-  stepOk('the framed Library shows the card as live');
-
-  // Copy first, while the dashboard's page has the focus
   await browser.cdp.send('Browser.grantPermissions', { origin: `http://127.0.0.1:${DASH}`, permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'] });
-  await browser.click(hubUrl, dashUrl, `${card} [data-copy]`);
-  await until(() => browser.evalIn(dashUrl, `document.querySelector('${card} [data-copy]').textContent === 'Copied'`), 'Copy link to say Copied');
-  const clip = await browser.readClipboard(dashUrl);
-  assert.equal(clip, previewUrl);
-  stepOk(`Copy link put ${clip} on the clipboard, from the hub's frame`);
+  await throughCard({ hubUrl, dashUrl, name, previewUrl, socketPrefix: `ws://127.0.0.1:${previewPort}/?token=`, app });
+  return { name, previewPort, hub };
+}
 
-  const before = new Set(browser.pages().map((s) => s.targetId));
-  await browser.click(hubUrl, dashUrl, `${card} a[target=_blank]`);
-  const tab = await until(() => browser.pages().find((s) => !before.has(s.targetId) && (s.url ?? '').startsWith(previewUrl)), 'Open to make a new tab at the preview');
-  stepOk(`Open made a new tab at ${tab.url}`);
-  await until(() => browser.evalIn(previewUrl, `document.getElementById('app')?.textContent === 'hello one'`), 'the Vite page to render');
-  stepOk('the new tab shows the Vite page');
-  const hmr = await until(() => tab.sockets.find((w) => w.url.startsWith(`ws://127.0.0.1:${previewPort}/?token=`) && w.status === 101), 'the HMR socket to open');
-  stepOk(`the HMR socket opened: ${hmr.url.split('?')[0]} (101)`);
-  const boot = await browser.evalIn(previewUrl, 'document.documentElement.dataset.boot');
-  writeMain(app, 'hello two');
-  await until(() => hmr.frames.some((f) => /"type":"update"/.test(f)), 'an update frame on the socket');
-  await until(() => browser.evalIn(previewUrl, `document.getElementById('app').textContent === 'hello two'`), 'the page to change');
-  assert.equal(await browser.evalIn(previewUrl, 'document.documentElement.dataset.boot'), boot, 'no navigation');
-  stepOk('an edit hot-reloaded: update frame, the DOM changed, no navigation');
-  void hub;
-  return { name, previewPort };
+// ===== the gateway half: a real gateway on box.localhost, a real passkey (a virtual authenticator) =====
+async function viaGateway({ DASH, HUB, app, G }) {
+  const pub = `http://box.localhost:${G}`;
+  const hubUrl = `${pub}/`;
+  const dashUrl = `http://${DASH}.box.localhost:${G}/`;
+  const gwEnv = { ...env, DEVTEAM_PUBLIC_URL: pub, PORT: String(G), DEVTEAM_GATEWAY_DIR: path.join(base, 'gateway'), DEVTEAM_TTYD_PORT: String(G + 2) };
+  const gwProc = spawn(process.execPath, [path.resolve(here, '..', '..', 'cloud', 'gateway.mjs'), 'serve'], { cwd: base, env: gwEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+  procs.push(gwProc);
+  let logs = '';
+  gwProc.stdout.on('data', (b) => { logs += b; });
+  gwProc.stderr.on('data', (b) => { logs += b; });
+  const claim = await until(() => /(http:\/\/box\.localhost:\d+\/auth\/claim#\S+)/.exec(logs)?.[1], `the claim link (gateway said: ${logs})`, 15000);
+  stepOk(`the gateway is up on ${pub}, unclaimed`);
+
+  // offered again, now as the box's: same name, a link through the gateway
+  writeMain(app, 'hello one');
+  const said = dt(['preview', '--run', 'node_modules/.bin/vite --port {port} --strictPort --host 127.0.0.1'], { ...WORKER, DEVTEAM_PUBLIC_URL: pub, DEVTEAM_PREVIEWS: '1' }, app);
+  const name = /preview (\S+) /.exec(said)[1];
+  const previewUrl = `http://${name}.box.localhost:${G}/`;
+  assert.ok(said.includes(`is live at http://${name}.box.localhost:${G}`), said);
+  stepOk(`preview printed the link through the gateway: ${previewUrl}`);
+
+  const tab = await browser.newPage();
+  await browser.cdp.send('WebAuthn.enable', { enableUI: false }, tab.sessionId);
+  await browser.cdp.send('WebAuthn.addVirtualAuthenticator', { options: { protocol: 'ctap2', transport: 'internal', hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true } }, tab.sessionId);
+  await browser.navigate(tab, claim);
+  await until(() => browser.evalIn(`${pub}/auth/claim`, `!!document.getElementById('go')`), 'the claim page');
+  await browser.click(`${pub}/auth/claim`, `${pub}/auth/claim`, '#go');
+  await until(() => (tab.url ?? '').startsWith(hubUrl) && !(tab.url ?? '').includes('/auth/'), 'the claim to finish and land on the hub');
+  stepOk('claimed the box with a passkey (Chrome\'s virtual authenticator)');
+  await until(() => browser.evalIn(hubUrl, `[...document.querySelectorAll('[role=tab]')].some((t) => t.textContent.includes('Terminal')) && [...document.querySelectorAll('[role=tab]')].some((t) => t.textContent.includes('demo'))`), 'the Terminal tab and the dashboard tab');
+  await browser.evalIn(hubUrl, `[...document.querySelectorAll('[role=tab]')].find((t) => t.textContent.includes('demo')).click()`);
+  await until(() => browser.frameWhere(dashUrl), 'the dashboard frame inside the hub');
+  stepOk('the hub shows the Terminal tab and the framed dashboard, on the gateway');
+  await browser.cdp.send('Browser.grantPermissions', { origin: `http://${DASH}.box.localhost:${G}`, permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'] });
+  const appTab = await throughCard({ hubUrl, dashUrl, name, previewUrl, socketPrefix: `ws://${name}.box.localhost:${G}/?token=`, app });
+  void appTab;
+
+  // the hub's Previews link, and the box's list page
+  await browser.click(hubUrl, hubUrl, '#box-links a');
+  await until(() => (tab.url ?? '').startsWith(`${pub}/dev/`), 'the Previews link to open /dev/');
+  await until(() => browser.evalIn(`${pub}/dev/`, `document.body.textContent.includes(${JSON.stringify(name)}) && document.body.textContent.includes('answers')`), 'the list page to show the preview');
+  stepOk('the hub\'s Previews link opens /dev/, which lists the preview as answering');
+
+  // signing out, then signing in, lands back on the preview
+  await browser.navigate(tab, hubUrl);
+  const status = await until(() => browser.evalIn(hubUrl, `fetch('/auth/logout', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }).then((r) => r.status)`), 'sign-out');
+  assert.equal(status, 200, 'sign-out');
+  await browser.navigate(tab, previewUrl);
+  await until(() => (tab.url ?? '').startsWith(`${pub}/auth/login`), 'the preview to send a signed-out owner to sign-in');
+  assert.ok(tab.url.includes(encodeURIComponent(previewUrl.slice(0, -1))), `sign-in remembers the preview: ${tab.url}`);
+  stepOk(`signed out: the preview sends the owner to sign-in (${tab.url.split('?')[0]})`);
+  await browser.click(`${pub}/auth/login`, `${pub}/auth/login`, '#go');
+  await until(() => (tab.url ?? '').startsWith(previewUrl), 'sign-in to land back on the preview');
+  await until(() => browser.evalIn(previewUrl, `document.getElementById('app')?.textContent === 'hello two'`), 'the preview after sign-in');
+  stepOk('signed in with the passkey again: landed back on the preview');
+
+  // what no-store costs: a second load through the gateway, against one straight to the server
+  // in this tab's own frame: another tab can sit at the same address
+  const inTab = async (expression) => browser.evalFrame({ session: tab, frameId: (await browser.cdp.send('Page.getFrameTree', {}, tab.sessionId)).frameTree.frame.id }, expression);
+  const loadTwice = async (url) => {
+    await browser.navigate(tab, url);
+    await until(() => inTab(`document.getElementById('app')?.textContent === 'hello two'`), `the page at ${url}`);
+    await sleep(800);
+    tab.bytes = 0;
+    await browser.navigate(tab, url);
+    await until(() => inTab(`document.getElementById('app')?.textContent === 'hello two'`), `the page at ${url}`);
+    await sleep(800);
+    const ms = await inTab(`(() => { const n = performance.getEntriesByType('navigation')[0]; return Math.round(n.loadEventEnd - n.startTime); })()`);
+    return { bytes: tab.bytes, ms };
+  };
+  const direct = `http://127.0.0.1:${JSON.parse(dt(['preview', 'list', '--json'], WORKER, app))[0].port}/`;
+  const viaGw = await loadTwice(previewUrl);
+  const straight = await loadTwice(direct);
+  say(`measure  no-store: second load through the gateway ${viaGw.bytes} bytes in ${viaGw.ms} ms; straight to the server ${straight.bytes} bytes in ${straight.ms} ms`);
 }
 
 async function main() {
-  const block = await portBlock(26);
+  const block = await portBlock(34);
   const HUB = block;
   const DASH = block + 1;
   env = { ...process.env, TMUX_TMPDIR: tmuxDir, DEVTEAM_HUB_PORT: String(HUB), DEVTEAM_PORT_BASE: String(block + 1), DEVTEAM_CSWAP: 'off', PATH: `${nodeBin}${path.delimiter}${process.env.PATH}`, DEVTEAM_PREVIEW_TICK_MS: '1000', DEVTEAM_OWN_KIT: '1' };
@@ -272,6 +354,7 @@ async function main() {
   startDashboard(DASH);
   browser = await new Browser().start(path.join(base, 'chrome'));
   await laptop({ HUB, DASH, app });
+  await viaGateway({ HUB, DASH, app, G: block + 30 });
   say('all steps passed');
 }
 
