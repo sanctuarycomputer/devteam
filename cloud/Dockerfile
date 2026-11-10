@@ -329,6 +329,9 @@ timeout 120 sh .box/boot.sh >> box.log 2>&1 || note "boot.sh failed (exit $?): s
 for k in "$HOME"/code/*/docs/devteam/scripts/devteam.mjs; do
   [ -f "$k" ] || continue
   r=${k%/docs/devteam/scripts/devteam.mjs}
+  # adopted repos only, as box-supervisors counts them: a checkout of devteam itself has the kit but
+  # no settings, and its dashboard would only fail every 5s in a window of its own
+  [ -f "$r/docs/devteam/project/settings.md" ] || continue
   tmux new-window -d -t home -n "dash-$(basename "$r")" -c "$r" "while :; do /usr/local/bin/node docs/devteam/scripts/devteam.mjs dashboard; sleep 5; done"
 done
 # The operator (window 0) is what brings the supervisors back: box-supervisors reads the list saved above.
