@@ -1197,3 +1197,55 @@ test('public artifacts: a move keeps only the slug moved; the old checkout\'s ot
     assert.deepEqual(blobsOf(gw), [crypto.createHash('sha256').update('<p>two a').digest('hex')], 'and its blobs swept');
   } finally { await one.close(); await two.close(); await gw.close(); }
 });
+
+test('public artifacts: unpublish takes a page down at once, and records it only where that project is', async () => {
+  const gw = await gateway('public-down');
+  const S = standIn(P + 15, { a: { 'index.html': '<p>a' }, b: { 'index.html': '<p>b' }, c: { 'index.html': '<p>c' } });
+  const other = standIn(P + 16, {}, { root: '/srv/elsewhere' });
+  const pubStatus = async (route) => (await gw.req('GET', route, { on: 'public', cookie: '' })).status;
+  const down = (body, opts = {}) => gw.req('POST', '/public/unpublish', { body, ...opts });
+  try {
+    assert.equal((await gw.claim(authenticator())).status, 200);
+    for (const s of ['a', 'b']) assert.ok((await confirmAndPublish(gw, P + 15, [s])).results[0].ok);
+    // the confirm page names it from the gateway's own state
+    const pg = await gw.req('GET', `/public/unpublish?port=${P + 15}&project=beta&slug=a`);
+    assert.equal(pg.status, 200);
+    assert.match(pg.body, /The a/);
+    assert.ok(pg.body.includes(`${gw.site}/beta/a/`));
+    assert.equal((await gw.req('GET', `/public/unpublish?port=${P + 15}&slug=a`)).status, 200, 'the project from the port it was last seen on');
+    assert.equal((await gw.req('GET', '/public/unpublish?project=beta&slug=zzz')).status, 404);
+    assert.equal((await gw.req('GET', `/public/unpublish?project=beta&slug=a`, { cookie: '' })).status, 401);
+    assert.equal((await down({ project: 'beta', slug: 'a', port: P + 15 }, { headers: { origin: gw.inst(P + 15) } })).status, 403, 'not from an instance\'s name');
+    assert.equal((await down({ project: 'beta', slug: 'a' }, { cookie: '' })).status, 401);
+    let r = await down({ project: 'beta', slug: 'a', port: P + 15 });
+    assert.deepEqual([r.status, r.json.recorded], [200, true], r.body);
+    assert.deepEqual([S.recorded.at(-1).op, S.recorded.at(-1).slug, S.recorded.at(-1).headers.origin], ['unpublish', 'a', undefined]);
+    assert.equal(await pubStatus('/beta/a/'), 404);
+    assert.equal(await pubStatus('/beta/a'), 404, 'no redirect once it is down');
+    assert.equal((await down({ project: 'beta', slug: 'a', port: P + 15 })).status, 404, 'once');
+    const pubState = () => JSON.parse(fs.readFileSync(path.join(gw.dir, 'state.json'), 'utf8')).public;
+    assert.deepEqual(blobsOf(gw), [...new Set(Object.values(pubState().beta.artifacts).flatMap((x) => Object.values(x.files).map((f) => f.sha256)))].sort(), 'its blobs are gone');
+    // an instance that isn't beta at /srv/beta: the page comes down, the record isn't written there
+    r = await down({ project: 'beta', slug: 'b', port: P + 16 });
+    assert.deepEqual([r.status, r.json.recorded], [200, false]);
+    assert.match(r.json.note, /instance \d+ is not beta at \/srv\/beta, so the record wasn't written there; the Library's Forget clears it/);
+    assert.equal(other.recorded.length, 0);
+    assert.equal(await pubStatus('/beta/b/'), 404);
+    assert.equal(pubState().beta.root, '/srv/beta', 'the project stays bound to its checkout');
+    // the gateway's list
+    assert.ok((await confirmAndPublish(gw, P + 15, ['c'])).results[0].ok);
+    const list = await gw.req('GET', '/public/');
+    assert.equal(list.status, 200);
+    assert.ok(list.body.includes(`${gw.site}/beta/c/`));
+    assert.ok(list.body.includes('/public/unpublish?project=beta&#38;slug=c'));
+    assert.ok(!list.body.includes('/beta/a/'));
+    r = await down({ project: 'beta', slug: 'c' });
+    assert.deepEqual([r.json.recorded, r.json.note], [false, 'no instance was named, so the record wasn\'t written; the Library\'s Forget clears it']);
+    // an unpublish racing a publish leaves no dangling blob and no missing one
+    assert.ok((await confirmAndPublish(gw, P + 15, ['c'])).results[0].ok);
+    await Promise.all([confirmAndPublish(gw, P + 15, ['a']), down({ project: 'beta', slug: 'c' })]);
+    const want = [...new Set(Object.values(pubState().beta.artifacts).flatMap((x) => Object.values(x.files).map((f) => f.sha256)))].sort();
+    assert.deepEqual(blobsOf(gw), want);
+    assert.deepEqual([await pubStatus('/beta/a/'), await pubStatus('/beta/c/')], [200, 404]);
+  } finally { await S.close(); await other.close(); await gw.close(); }
+});

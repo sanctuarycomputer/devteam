@@ -877,6 +877,18 @@ export function createGateway(opts = {}) {
     return { url: `${PUBLIC}/${m.project}/${m.slug}/`, update };
   };
 
+  // An unpublish is recorded on the instance only when it is that project, at that checkout: its
+  // manifest says so, or its hello for a slug no longer on main. Otherwise the Library's Forget does it.
+  const recordUnpublish = async (port, project, root, slug) => {
+    const r = await loopback(port, 'GET', `/public-manifest/${slug}`);
+    let says = null;
+    if (r.status === 200) { try { says = JSON.parse(r.body.toString('utf8')); } catch {} }
+    else { const h = await loopback(port, 'GET', '/api/hello'); try { const x = JSON.parse(h.body.toString('utf8')); says = { project: x.name, root: x.root }; } catch {} }
+    if (says?.project !== project || says?.root !== root) throw new Error(`instance ${port} is not ${project} at ${root}, so the record wasn't written there`);
+    const k = await loopback(port, 'POST', '/api/artifact-publish', { body: JSON.stringify({ op: 'unpublish', slug }) });
+    if (k.status !== 200) throw new Error(`instance ${port} didn't record it (${errorOf(k)})`);
+  };
+
   // Room for a jar a page has stuffed; past it, see clientError below.
   const server = http.createServer({ maxHeaderSize: 64 * 1024 }, async (req, res) => {
     // origin-form only: a request line with a full URL, or *, is refused
@@ -1044,6 +1056,47 @@ export function createGateway(opts = {}) {
         log(`public: ${results.map((x) => `${x.slug} ${x.ok ? 'published' : 'refused'}`).join(', ')} from instance ${port}`);
         return json(res, 200, { results });
       }
+      // Taking a page down never waits on an instance: the gateway's copy goes first, then the record.
+      if (req.method === 'GET' && p === '/public/unpublish') {
+        const pub = store.load().public ?? {};
+        const slug = url.searchParams.get('slug') ?? '';
+        const port = url.searchParams.has('port') ? Number(url.searchParams.get('port')) : null;
+        let project = url.searchParams.get('project');
+        if (project === null && port !== null) {
+          const named = Object.keys(pub).filter((n) => pub[n].port === port && Object.hasOwn(pub[n].artifacts ?? {}, slug));
+          project = named.length === 1 ? named[0] : null;
+        }
+        if (!LINK_ID.test(slug) || (port !== null && !BLOCK.includes(port)) || !PROJECT.test(project ?? '')) return send(res, 400, 'text/plain; charset=utf-8', 'unpublish?project=<project>&slug=<slug>[&port=<instance>]');
+        const a = Object.hasOwn(pub, project) && Object.hasOwn(pub[project].artifacts ?? {}, slug) ? pub[project].artifacts[slug] : null;
+        if (!a) return send(res, 404, 'text/plain; charset=utf-8', `${project}/${slug} is not public on this box`);
+        return page(res, PAGES.unpublish({ project, slug, port, title: a.title, url: `${PUBLIC}/${project}/${slug}/` }));
+      }
+      if (req.method === 'POST' && p === '/public/unpublish') {
+        const body = await readJson(req);
+        const project = String(body?.project ?? '');
+        const slug = String(body?.slug ?? '');
+        const port = body?.port === undefined || body?.port === null ? null : Number(body.port);
+        if (!PROJECT.test(project) || !LINK_ID.test(slug) || (port !== null && !BLOCK.includes(port))) return json(res, 400, { error: 'unpublish takes { project, slug, port? }' });
+        const root = await pstore.serial(() => {
+          const now = store.load();
+          const pub = { ...(now.public ?? {}) };
+          const x = Object.hasOwn(pub, project) ? pub[project] : null;
+          if (!x || !Object.hasOwn(x.artifacts ?? {}, slug)) return null;
+          const artifacts = { ...x.artifacts };
+          delete artifacts[slug];
+          // the binding stays: another checkout of this name still needs "move it"
+          pub[project] = { ...x, artifacts };
+          store.save({ ...now, public: pub });
+          pstore.sweep(pub);
+          return x.root;
+        });
+        if (root === null) return json(res, 404, { error: `${project}/${slug} is not public on this box` });
+        log(`public: ${project}/${slug} unpublished`);
+        if (port === null) return json(res, 200, { ok: true, recorded: false, note: 'no instance was named, so the record wasn\'t written; the Library\'s Forget clears it' });
+        try { await recordUnpublish(port, project, root, slug); return json(res, 200, { ok: true, recorded: true, note: null }); }
+        catch (e) { return json(res, 200, { ok: true, recorded: false, note: `${e.message}; the Library's Forget clears it` }); }
+      }
+      if (req.method === 'GET' && (p === '/public' || p === '/public/')) return page(res, PAGES.publicList(store.load().public ?? {}, PUBLIC));
       return send(res, 404, 'text/plain', 'not found');
     } catch (e) {
       if (res.headersSent) return res.destroy();
@@ -1172,6 +1225,20 @@ if (go) go.onclick = run(async () => {
   } finally { go.disabled = false; }
 });
 </script></body></html>`,
+  unpublish: (x) => `${doc('Unpublish', `<h1>Take this page down</h1><p><b>${esc(x.title)}</b> (${esc(x.project)} · ${esc(x.slug)}) stops answering at once, for everyone:</p><p><code>${esc(x.url)}</code></p><p><button id="go">Unpublish</button></p><p id="err"></p><p id="out"></p>`)}
+<script>
+const ITEM = ${jsonIn({ project: x.project, slug: x.slug, ...(x.port ? { port: x.port } : {}) })};
+const go = document.getElementById('go');
+go.onclick = run(async () => {
+  const r = await post('/public/unpublish', ITEM);
+  go.disabled = true;
+  document.getElementById('out').textContent = 'Taken down.' + (r.recorded ? ' The Library shows it.' : ' ' + (r.note || ''));
+});
+</script></body></html>`,
+  publicList: (pub, site) => {
+    const rows = Object.entries(pub).flatMap(([n, x]) => Object.entries(x.artifacts ?? {}).map(([s, a]) => ({ n, s, a, root: x.root, link: `${site}/${n}/${s}/` })));
+    return `${doc('Public', `<h1>Public on this box</h1><p>Anyone can read these, with no sign-in. Each is the box's own copy of what you published.</p>${rows.length ? `<ul>${rows.map((r) => `<li class="pub"><b>${esc(r.a.title)}</b><small>${esc(r.n)} · ${esc(r.s)} · published ${esc(String(r.a.at).slice(0, 10))} from ${esc(r.root)}</small><code><a href="${esc(r.link)}" target="_blank" rel="noopener noreferrer">${esc(r.link)}</a></code><a href="${esc(`/public/unpublish?project=${r.n}&slug=${r.s}`)}">Unpublish</a></li>`).join('')}</ul>` : '<p>Nothing is public.</p>'}`)}</body></html>`;
+  },
 };
 
 // --- command line ------------------------------------------------------------------------------
