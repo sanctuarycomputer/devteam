@@ -12,6 +12,9 @@
 // and the kit's loopback origins in its response headers are mapped to the public ones.
 // A file the owner drops on the terminal is the one thing it stores for the agents' side: under a
 // folder only it writes, and handed over as a path pasted into the terminal.
+// A session's running dev server gets a name of its own too (cool-tiger.box.example.com), behind the
+// owner's session like an instance, from the hub's list; the gateway holds nothing about them, never
+// picks between two claimants of one name, and box.example.com/dev/ lists them.
 // Node only, no dependencies. Usage: node gateway.mjs [serve | reclaim]
 import crypto from 'node:crypto';
 import fs from 'node:fs';
