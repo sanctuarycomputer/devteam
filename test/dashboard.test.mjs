@@ -543,10 +543,27 @@ test("threads on the dashboard's server: owner actions checked before anything r
     ['thread-say', { id: T }, 'no words'],
     ['thread-resolve', { id: T, outcome: 'two\nlines' }, 'an outcome of two lines'],
     ['thread-accept', { id: 'q-20261110-101500123-supervisor' }, 'a question id'],
+    ['thread-say', { id: [T], text: 'x' }, 'an id sent as a one-element array'],
+    ['thread-resolve', { id: [T] }, 'a resolve id sent as an array'],
+    ['thread-accept', { id: [T] }, 'an accept id sent as an array'],
   ];
   const n = (await list()).length;
+  const turnsOf = async () => (await list()).find((x) => x.id === T).turns;
+  const before = (await turnsOf()).length;
   for (const [name, body, why] of bad) assert.equal((await post(name, body)).status, 400, why);
   assert.equal((await list()).length, n, 'nothing was written');
+  assert.equal((await turnsOf()).length, before, 'no stray turn was written to the thread');
+  // words and titles that look like flags arrive as words, verbatim
+  assert.equal((await post('thread-say', { id: T, text: '--accept' })).status, 200);
+  assert.equal((await turnsOf()).at(-1).text, '--accept', 'a turn that is a flag is stored as sent');
+  assert.equal((await turnsOf()).length, before + 1);
+  const flagTitle = '--subject={"kind":"page"}';
+  r = await post('thread-new', { title: flagTitle, text: 'x' });
+  assert.equal(r.status, 200, await r.clone().text());
+  const T2 = (await r.json()).out.split('\n')[0];
+  th = (await list()).find((x) => x.id === T2);
+  assert.deepEqual([th.title, th.subject ?? null], [flagTitle, null], 'a title that looks like a flag is a title, and sets no subject');
+  assert.equal((await post('thread-resolve', { id: T2 })).status, 200);
   assert.equal((await post('thread-say', { id: T, text: 'x' }, { origin: 'https://evil.example' })).status, 403, 'another origin');
   // resolve, a turn on a resolved thread, reopen, a proposal accepted
   assert.equal((await post('thread-accept', { id: T })).status, 400, 'no proposal to accept');

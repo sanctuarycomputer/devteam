@@ -1276,14 +1276,18 @@ function appendLog(fields, by = logWriter()) {
   return result.parsed;
 }
 
-function logFileText(file) {
-  const live = isPlanFile(file) ? null : readText(path.join(liveLogDir(), file));
-  const durable = durableText(file);
+// The live file and the durable copy of one log file as one text: whichever extends the other, else
+// the durable one with the live lines it lacks.
+function mergeLogText(live, durable) {
   if (live === null) return durable ?? '';
   if (durable === null || live.startsWith(durable)) return live;
   if (durable.startsWith(live)) return durable;
   const have = new Set(durable.split('\n'));
   return durable + live.split('\n').filter((l) => l && !have.has(l)).map((l) => `${l}\n`).join('');
+}
+
+function logFileText(file) {
+  return mergeLogText(isPlanFile(file) ? null : readText(path.join(liveLogDir(), file)), durableText(file));
 }
 
 let logCache = null;
@@ -10164,10 +10168,10 @@ async function cmdDashboard() {
     // points at items and spots on its own pages only; a later kit's viewers add artifact and preview
     // subjects here (the log takes all four already).
     'thread-new': (b) => (lineOk(b.title, THREAD_TITLE_MAX) && turnOk(b.text) && (b.subject == null || (['item', 'page'].includes(b.subject?.kind) && !subjectProblem(b.subject))) ? ['thread', 'new', `--title=${b.title.trim()}`, ...(b.subject ? [`--subject=${JSON.stringify(b.subject)}`] : []), '--', b.text.trim()] : null),
-    'thread-say': (b) => (THREAD_ID.test(b.id ?? '') && turnOk(b.text) ? ['thread', 'say', b.id, '--', b.text.trim()] : null),
-    'thread-resolve': (b) => (THREAD_ID.test(b.id ?? '') && (b.outcome === undefined || b.outcome === '' || lineOk(b.outcome, OUTCOME_MAX, true)) ? ['thread', 'resolve', b.id, ...(b.outcome?.trim() ? [`--outcome=${b.outcome.trim()}`] : [])] : null),
-    'thread-reopen': (b) => (THREAD_ID.test(b.id ?? '') && (b.text === undefined || b.text === '' || turnOk(b.text)) ? ['thread', 'reopen', b.id, ...(b.text?.trim() ? ['--', b.text.trim()] : [])] : null),
-    'thread-accept': (b) => (THREAD_ID.test(b.id ?? '') ? ['thread', 'resolve', b.id, '--accept'] : null),
+    'thread-say': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && turnOk(b.text) ? ['thread', 'say', b.id, '--', b.text.trim()] : null),
+    'thread-resolve': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && (b.outcome === undefined || b.outcome === '' || lineOk(b.outcome, OUTCOME_MAX, true)) ? ['thread', 'resolve', b.id, ...(b.outcome?.trim() ? [`--outcome=${b.outcome.trim()}`] : [])] : null),
+    'thread-reopen': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && (b.text === undefined || b.text === '' || turnOk(b.text)) ? ['thread', 'reopen', b.id, ...(b.text?.trim() ? ['--', b.text.trim()] : [])] : null),
+    'thread-accept': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) ? ['thread', 'resolve', b.id, '--accept'] : null),
   };
   // An action whose caller has a deadline of its own: the gateway gives the whole answer 15 s.
   const ACTION_MS = { 'artifact-publish': 12000 };
@@ -10253,8 +10257,7 @@ async function cmdDashboard() {
       if (threadFiles.get(f)?.k === k) continue;
       const live = readText(path.join(liveLogDir(), f));
       const durable = readText(path.join(durableLogDir(), f));
-      const have = new Set((durable ?? '').split('\n'));
-      const text = live === null ? durable ?? '' : durable === null || live.startsWith(durable) ? live : durable.startsWith(live) ? durable : durable + live.split('\n').filter((l) => l && !have.has(l)).map((l) => `${l}\n`).join('');
+      const text = mergeLogText(live, durable);
       threadFiles.set(f, { k, lines: parseLines(text, f, { validate: false }).lines.filter((l) => ['thread', 'turn', 'question'].includes(l.type)) });
     }
     const all = [...threadFiles.values()].flatMap((x) => x.lines);
