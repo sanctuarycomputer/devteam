@@ -265,6 +265,7 @@ devteam box. Window 0 (operator) looks after the box: tell it what you want. Fir
 Add a repo:  cd ~/code && gh repo clone <owner/repo> && cd <repo> && claude "Use github.com/sanctuarycomputer/devteam to set up a fleet in this repo"
 Tools: languages per project with mise (mise install; asdf works too). box-pg 16 starts another Postgres. ~/.box/boot.sh is what starts at boot.
 Expo: npx expo start --tunnel for your phone; eas build for builds.
+Heroku: heroku login -i, with a token from heroku authorizations:create on your laptop as the password (the browser login is refused from another IP).
 tmux: C-b s lists every session (each repo's supervisor and its workers); C-b d leaves one. touch ~/.devteam-quiet hides this.
 MOTD
 RC
@@ -308,6 +309,8 @@ shellcheck = "latest"
 sops = "latest"
 age = "latest"
 "npm:eas-cli" = "latest"
+# the standalone Heroku CLI brings its own Node: the npm one runs on a repo's pinned Node, and refuses one older than 20
+"http:heroku" = { version = "stable", url = "https://cli-assets.heroku.com/channels/stable/heroku-linux-x64.tar.gz", bin_path = "bin", strip_components = 1 }
 TOML
 ( mise install ) >> .box/mise.log 2>&1 &
 # What this box starts at boot, before any supervisor comes back: its `brew services`, on the disk.
