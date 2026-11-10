@@ -63,7 +63,7 @@
         "dashboard",
         "chat"
       ],
-      "description": "on owner lines only: where the owner typed it. chat: the owner said it in the supervisor's session and the supervisor recorded it (answers only, with the owner's words in said)",
+      "description": "on owner lines only: where the owner typed it. chat: the owner said it in the supervisor's session and the supervisor recorded it (an answer with the owner's words in said, or the standing rule or goal verdict it carried)",
       "x-tip": "Where you gave it: the dashboard, your terminal, or the supervisor's chat (recorded with your words)."
     }
   },
@@ -1379,7 +1379,7 @@
             "x-tip": "The exact change to the goal it proposed; your answer authorised that and nothing else."
           },
           "review": {
-            "description": "A review question's pinned files (process/supervisor.md): the agent's page, its optional data and the result's optional schema, read at one commit, each with its sha256 and size; data counts its rows and the rows with a proposal. The owner's process re-hashes them before it accepts a result. A review is answered with its result (answer --review-result) or sent back (answer --decline), never with free text, a default or from chat.",
+            "description": "A review question's pinned files (process/supervisor.md): the agent's page, its optional data and the result's optional schema, read at one commit, each with its sha256 and size; data counts its rows and the rows with a proposal. The owner's process re-hashes them before it accepts a result. A review is answered with its result (answer --review-result) or sent back (answer --decline), never with free text or a default.",
             "type": "object",
             "properties": {
               "title": {
