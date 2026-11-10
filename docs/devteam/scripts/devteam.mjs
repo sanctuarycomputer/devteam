@@ -8375,10 +8375,10 @@ function collectMetrics(since) {
     const goals = logObjects('goal');
     const live = goals.filter((g) => g.status === 'ready');
     const sState = strategyState();
-    // Every project has one, an older one too: high (wait stops for it) until the supervisor has a
+    // Every project has one, an older one too: high (wait keeps raising it, and nothing is held back) until the supervisor has a
     // draft in front of the owner, then medium while the owner reads it.
     const strategyAsked = questions().some((q) => q.status === 'open' && q.class === 'strategy-change');
-    if (live.length && sState !== 'written') add(strategyAsked ? 'medium' : 'high', 'strategy-unwritten', strategyRel, sState === 'missing' ? `${plural(live.length, 'goal')} running and no strategy on ${settings.main_branch}` : `${plural(live.length, 'goal')} running and the strategy is still the template`, `draft it in a chore from what you can read, then ask the owner to approve it (ask --class strategy-change; supervisor.md §1)${sState === 'missing' ? '; init writes the template' : ''}`);
+    if (live.length && sState !== 'written') add(strategyAsked ? 'medium' : 'high', 'strategy-unwritten', strategyRel, sState === 'missing' ? `${plural(live.length, 'goal')} running and no strategy on ${settings.main_branch}` : `${plural(live.length, 'goal')} running and the strategy is still the template`, `draft it next, while work carries on, in a chore from what you can read, then ask the owner to approve it (ask --class strategy-change; supervisor.md §1)${sState === 'missing' ? '; init writes the template' : ''}`);
     const all = questions();
     const open = all.filter((q) => q.status === 'open' && q.goal_hold !== 'let-go');
     for (const g of goals.filter((x) => x.status === 'ready' || ((x.status ?? 'draft') === 'draft' && open.some((q) => q.goal === x.id)))) {
