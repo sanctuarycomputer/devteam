@@ -753,25 +753,28 @@ export function createGateway(opts = {}) {
 
   // --- requests that look local to the kit, and its headers mapped back to the public names ---
   const HOP = new Set(['connection', 'keep-alive', 'proxy-connection', 'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'referer', 'forwarded', 'x-real-ip', 'true-client-ip', 'cf-connecting-ip']);
-  const upstreamHeaders = (req, port, publicOrigin) => {
+  const upstreamHeaders = (req, port, publicOrigin, { loopbackHost = '127.0.0.1' } = {}) => {
     const h = {};
     for (const [k, v] of Object.entries(req.headers)) if (!HOP.has(k) && !k.startsWith('x-forwarded-') && !k.startsWith('fly-') && !k.startsWith('rndr-') && !k.startsWith('render-')) h[k] = v;
-    h.host = `127.0.0.1:${port}`;
-    if (req.headers.origin === publicOrigin) h.origin = `http://127.0.0.1:${port}`;
+    h.host = `${loopbackHost}:${port}`;
+    if (req.headers.origin === publicOrigin) h.origin = `http://${loopbackHost}:${port}`;
     const rest = String(req.headers.cookie ?? '').split(';').map((p) => p.trim()).filter((p) => p && p.split('=')[0] !== COOKIE).join('; ');
     if (rest) h.cookie = rest; else delete h.cookie;
     return h;
   };
   const LOOP = /http:\/\/(?:127\.0\.0\.1|localhost):(\d+)/g;
   const mapLoop = (s) => s.replace(LOOP, (all, p) => (Number(p) === HUB_PORT ? PUB : BLOCK.includes(Number(p)) ? instanceOrigin(Number(p)) : all));
-  const downstreamHeaders = (h, cap, own) => {
+  // A preview's own headers: only this link's port, http and ws forms, to its own origin.
+  const PREVIEW_LOOP = /\b(http|ws):\/\/(?:127\.0\.0\.1|localhost):(\d+)/g;
+  const mapPreview = (s, port, own) => s.replace(PREVIEW_LOOP, (all, scheme, p) => (Number(p) !== port ? all : scheme === 'ws' ? own.replace(/^http/, 'ws') : own));
+  const downstreamHeaders = (h, cap, own, previewPort = null) => {
     const out = {};
     for (const [k, v] of Object.entries(h)) {
       // x-devteam-public is the gateway's to say (what the box serves); an upstream's copy never passes
-      if (['connection', 'keep-alive', 'transfer-encoding', 'strict-transport-security', 'clear-site-data', 'x-devteam-public'].includes(k)) continue;
+      if (['connection', 'keep-alive', 'transfer-encoding', 'strict-transport-security', 'clear-site-data', 'x-devteam-public', 'x-devteam-previews'].includes(k)) continue;
       // nothing behind the gateway sets a cookie for the box's names (the kit sets none at all)
       if (k === 'set-cookie') { const keep = [].concat(v).filter((c) => !/;\s*domain\s*=/i.test(c) && !new RegExp(`^\\s*${COOKIE}\\s*=`).test(c)); if (keep.length) out[k] = keep; continue; }
-      out[k] = k === 'content-security-policy' || k === 'location' ? mapLoop(String(v)) : v;
+      out[k] = k !== 'content-security-policy' && k !== 'location' ? v : previewPort ? mapPreview(String(v), previewPort, own) : mapLoop(String(v));
     }
     // an artifact under its capability: its policy stays under it too
     if (cap && out['content-security-policy']) out['content-security-policy'] = out['content-security-policy'].split(`${own}/artifact/`).join(`${own}${cap}/artifact/`);
@@ -792,6 +795,41 @@ export function createGateway(opts = {}) {
       send(res, 502, 'text/plain; charset=utf-8', `Nothing answers on instance ${port}.`);
     });
     pipeline(req, up, () => {});
+  };
+  // Where a preview's server is listening: a dev server bound to localhost may sit on either family.
+  const previewHost = (port) => new Promise((resolve) => {
+    const next = (hosts) => {
+      if (!hosts.length) return resolve(null);
+      const c = net.connect({ port, host: hosts[0], timeout: 300 });
+      c.once('connect', () => { c.destroy(); resolve(hosts[0]); });
+      c.once('timeout', () => { c.destroy(); next(hosts.slice(1)); });
+      c.once('error', () => next(hosts.slice(1)));
+    };
+    next(['127.0.0.1', '::1']);
+  });
+  // Never HTML to a fetch or an asset: a dev client must see a failure, not a page it takes for its own.
+  const previewUnavailable = (req, res, html) => (navigating(req)
+    ? send(res, 503, 'text/html; charset=utf-8', html(), { 'content-security-policy': PAGE_CSP, 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer' })
+    : send(res, 503, 'text/plain; charset=utf-8', 'this preview is not available right now', { 'retry-after': '5' }));
+  const proxyPreview = async (req, res, name, link, own) => {
+    const host = await previewHost(link.port);
+    if (!host) return previewUnavailable(req, res, () => PAGES.previewDown(name, link));
+    const up = http.request({ host, port: link.port, method: req.method, path: req.url, headers: upstreamHeaders(req, link.port, own, { loopbackHost: 'localhost' }) }, (ur) => {
+      res.writeHead(ur.statusCode, { ...downstreamHeaders(ur.headers, null, own, link.port), 'cache-control': 'no-store' });
+      pipeline(ur, res, () => {});
+    });
+    res.on('close', () => { if (!res.writableFinished) up.destroy(); });
+    up.on('error', () => { if (res.headersSent) return res.destroy(); send(res, 502, 'text/plain; charset=utf-8', 'that preview\'s server stopped answering'); });
+    pipeline(req, up, () => {});
+    return undefined;
+  };
+  // After the session check, and no sooner: a name not in the map asks the hub once more, once.
+  const servePreview = async (req, res, name, own) => {
+    let link = previews.get(name);
+    if (!link) { await refreshPreviews(); link = previews.get(name); }
+    if (!link) return previewUnavailable(req, res, () => PAGES.previewUnknown(name, [...previews.keys()].sort(), previewOrigin));
+    if (link.ambiguous) return previewUnavailable(req, res, () => PAGES.previewAmbiguous(name, link.ambiguous));
+    return proxyPreview(req, res, name, link, own);
   };
   // The hub's list is the one thing the box's name takes from behind it, and only as data: whatever
   // holds the port, the page reads JSON and shows it as text. No hub yet is an empty list.
@@ -891,6 +929,7 @@ export function createGateway(opts = {}) {
   // opaque origin makes those cross-site too): the kit's two helpers and a committed image. An
   // artifact's files don't need this: they load under a capability in the path (below).
   const IMAGE = /\.(png|jpe?g|gif|webp|avif|svg|ico)$/i;
+  const PREVIEW_FRAMED = ['iframe', 'frame', 'object', 'embed', 'fencedframe'];
   const crossSiteOk = (req, p, url) => {
     const site = req.headers['sec-fetch-site'];
     if (!site || site === 'same-origin' || site === 'none') return true;
@@ -1383,22 +1422,24 @@ export function createGateway(opts = {}) {
     if (!req.url.startsWith('/') || req.url.startsWith('//')) return send(res, 400, 'text/plain', 'bad request');
     let url;
     try { url = new URL(req.url, PUB); } catch { return send(res, 400, 'text/plain', 'bad request'); }
-    if (url.pathname === '/healthz') return send(res, 200, 'text/plain', 'ok');
+    // an app's own /healthz is reachable through its link; the platform's probe is on the service's name
+    if (url.pathname === '/healthz' && !previewOf(req.headers.host)) return send(res, 200, 'text/plain', 'ok');
     // Our own names only; and anything but a read must come from a page on the same name.
     const isBox = req.headers.host === pubUrl.host;
     const isTerm = req.headers.host === termHost;
     const isPublic = req.headers.host === publicHost;
-    const port = isBox || isTerm || isPublic ? null : instanceOf(req.headers.host);
-    if (!isBox && !isTerm && !isPublic && !port) return send(res, 421, 'text/plain; charset=utf-8', `this box answers only on its own names: open ${PUB}/`);
+    const pv = previewOf(req.headers.host);
+    const port = isBox || isTerm || isPublic || pv ? null : instanceOf(req.headers.host);
+    if (!isBox && !isTerm && !isPublic && !port && !pv) return send(res, 421, 'text/plain; charset=utf-8', `this box answers only on its own names: open ${PUB}/`);
     // Anyone's, so before every check that is about the owner (Origin, cookie, session).
     if (isPublic) {
       try { return servePublic(req, res); } catch (e) { return send(res, e?.unreadable ? 503 : 500, 'text/plain; charset=utf-8', 'this page can\'t be served just now'); }
     }
-    const own = isBox ? PUB : isTerm ? TERM : instanceOrigin(port);
+    const own = isBox ? PUB : isTerm ? TERM : pv ? previewOrigin(pv) : instanceOrigin(port);
     if (!['GET', 'HEAD'].includes(req.method) && req.headers.origin !== own) return send(res, 403, 'text/plain; charset=utf-8', 'only from this box\'s own pages');
     // The kit has no service workers. One an agent's page registers on an instance's name would
     // outlive its server, and run as that name's real dashboard once one takes the port.
-    if (port && (req.headers['service-worker'] || req.headers['sec-fetch-dest'] === 'serviceworker')) return send(res, 403, 'text/plain; charset=utf-8', 'no service workers on this box');
+    if ((port || pv) && (req.headers['service-worker'] || req.headers['sec-fetch-dest'] === 'serviceworker')) return send(res, 403, 'text/plain; charset=utf-8', 'no service workers on this box');
     const p = url.pathname;
     const isAuth = isBox && (p === '/auth' || p.startsWith('/auth/'));
     const rawPath = req.url.split('?')[0];
@@ -1408,6 +1449,9 @@ export function createGateway(opts = {}) {
         if (!['GET', 'HEAD'].includes(req.method) || !capOk(port, cm[4], cm[1], cm[2], cm[3])) return send(res, 403, 'text/plain; charset=utf-8', 'that artifact link has expired: open it again from the dashboard');
         return proxy(req, res, { port, path: cm[4] + url.search, publicOrigin: own, cap: `/c/${cm[1]}.${cm[2]}.${cm[3]}` });
       }
+      // A preview may be framed only by a page of this box (the dashboard's viewer, in time), so no
+      // other site can lay it under its own page with the owner's session in it.
+      if (pv && PREVIEW_FRAMED.includes(req.headers['sec-fetch-dest']) && !['same-origin', 'same-site'].includes(req.headers['sec-fetch-site'])) return send(res, 403, 'text/plain; charset=utf-8', 'not in another site\'s frame');
       if (!crossSiteOk(req, p, url)) return send(res, 403, 'text/plain; charset=utf-8', 'not for another site\'s page');
       const s = store.load();
       const claimed = s.passkeys.length > 0;
@@ -1448,11 +1492,12 @@ export function createGateway(opts = {}) {
         if (navigating(req)) return redirect(res, claimed ? loginAt(`${own}${req.url}`) : loginAt());
         return send(res, claimed ? 401 : 403, 'text/plain; charset=utf-8', claimed ? 'sign in with your passkey' : 'this box is unclaimed');
       }
+      if (pv) return servePreview(req, res, pv, own);
       // An instance's dashboard, on its own subdomain: the request exactly as the browser sent it.
       if (port) {
         const prefix = req.method === 'GET' && ['iframe', 'document'].includes(req.headers['sec-fetch-dest']) && ['same-origin', 'none'].includes(req.headers['sec-fetch-site']) ? ARTIFACT.exec(rawPath)?.[0] : null;
         if (prefix) return redirect(res, `${capFor(port, prefix, session)}${req.url}`);
-        return proxy(req, res, { port, path: req.url, publicOrigin: own, extra: req.method === 'GET' && p === '/api/data' ? { 'x-devteam-public': publicMap(port) } : null });
+        return proxy(req, res, { port, path: req.url, publicOrigin: own, extra: req.method === 'GET' && p === '/api/data' ? { 'x-devteam-public': publicMap(port), 'x-devteam-previews': '1' } : null });
       }
       // The terminal: the gateway's copy of ttyd's page. Only its socket reaches ttyd (see upgrade).
       if (isTerm) {
@@ -1718,7 +1763,12 @@ const publishNote = (r) => {
   return `Not ticked, because ${r.movedFrom ? 'this box\'s copy of it came from another checkout' : 'this box holds no copy of it'}. ${why} Tick it to make this version public.`;
 };
 const doc = (title, body) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title>${STYLE}</head><body><main>${body}</main>${CLIENT}`;
+const PREVIEW_REFRESH = '<meta http-equiv="refresh" content="5">';
 const PAGES = {
+  previewDown: (name, l) => `${doc('Preview', `${PREVIEW_REFRESH}<h1>Preview ${esc(l.label || name)} isn't answering</h1><p>Offered by ${esc(l.session)} of ${esc(l.project)}, instance ${esc(l.root)}: nothing answers on port ${esc(l.port)}. Its server may be starting, or stopped. This page retries every 5 s.</p>`)}`,
+  previewAmbiguous: (name, cs) => `${doc('Preview', `${PREVIEW_REFRESH}<h1>Two instances offer a preview named ${esc(name)}</h1><p>${cs.map((c) => `${esc(c.project)} at ${esc(c.root)} (port ${esc(c.port)})`).join(' and ')}. The box serves neither until one stops; run <code>devteam.mjs preview stop ${esc(name)}</code> in the one that shouldn't. This page retries every 5 s.</p>`)}`,
+  // A preview command can be a second behind the link: the page retries for a few minutes, not forever.
+  previewUnknown: (name, names, originOf) => `${doc('Preview', `<noscript>${PREVIEW_REFRESH}</noscript><script>{const k='dt-preview-tries',n=Number(sessionStorage.getItem(k)||0);if(n<36){sessionStorage.setItem(k,String(n+1));setTimeout(()=>location.reload(),5000)}}</script><h1>No preview named ${esc(name)} on this box</h1><p>${names.length ? `Offered now: ${names.map((n) => `<a href="${esc(originOf(n))}/">${esc(n)}</a>`).join(', ')}.` : 'Nothing is offered right now.'} This page retries for a few minutes; a <code>preview</code> command takes a moment to show up.</p>`)}`,
   claim: (box) => `${doc('Claim this box', `<h1>Claim this devteam box</h1><p>Make a passkey for this box. Your password manager (1Password, iCloud Keychain…) saves it; from then on only a passkey made here opens the box.</p><input id="name" placeholder="Name this passkey (optional)" maxlength="60"><p><button id="go">Create passkey and claim</button></p><p id="err"></p>`)}
 <script>
 const token = decodeURIComponent(location.hash.slice(1));
