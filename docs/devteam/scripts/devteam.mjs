@@ -277,7 +277,7 @@ const runDir = path.resolve(process.env.DEVTEAM_RUN ?? path.join(mainRoot, 'docs
 // What run/ holds that the kit made and rebuilds (or that is this machine's alone by nature);
 // anything else in it was put there by hand and doesn't move. A writer names its file through
 // runPath where it defines the path, so the list can't fall behind the files.
-const RUN_KNOWN = new Set(['log', 'prompts', 'questions', 'sent', 'cache', 'agent', 'pr', 'supervisor-pane', 'wait-since', 'tmux-session', 'dashboard-port', 'dashboard.log', 'supervisor-prompt.txt', '.DS_Store']);
+const RUN_KNOWN = new Set(['log', 'prompts', 'questions', 'sent', 'cache', 'agent', 'pr', 'supervisor-pane', 'wait-since', 'tmux-session', 'dashboard-port', 'dashboard.log', 'supervisor-prompt.txt', 'previews', '.DS_Store']);
 const runPath = (name) => { RUN_KNOWN.add(name); return path.join(runDir, name); };
 // Where this machine's checkouts of repo links are, when not where settings say.
 const LINKS_LOCAL = runPath('links.local.json');
@@ -4426,6 +4426,139 @@ const reachMemo = new Map();
 function commitReachable(commit) {
   if (!reachMemo.has(commit)) reachMemo.set(commit, !!git(['for-each-ref', '--count=1', '--format=%(refname)', '--contains', commit]));
   return reachMemo.get(commit);
+}
+
+// ===== previews: a session's running dev server, behind a name the owner can open =====
+//
+// A preview is a name bound to a port on this machine, offered by a session. Unlike an artifact it
+// is run state: run/previews/<name>.json, machine-local, never a log line; what it shows can change
+// from one look to the next, so it approves nothing. The name is two words from a hash of the
+// project, the session and the label, so it is the same after a restart and on a new box with
+// nothing remembered. One hyphen between two letter-only words can never be a reserved name.
+const PREVIEW_ADJECTIVES = [
+  'able', 'agile', 'airy', 'alert', 'amber', 'ample', 'apt', 'aqua', 'arched', 'ashen', 'azure', 'balmy', 'bold', 'brave', 'breezy', 'brief',
+  'bright', 'brisk', 'broad', 'bronze', 'brown', 'bubbly', 'busy', 'calm', 'candid', 'careful', 'cedar', 'cheery', 'chief', 'chilly', 'civic', 'classy',
+  'clean', 'clear', 'clever', 'cloudy', 'coastal', 'cobalt', 'cool', 'copper', 'coral', 'cosmic', 'cozy', 'crafty', 'crimson', 'crisp', 'curly', 'daily',
+  'dainty', 'dapper', 'daring', 'dawning', 'deft', 'dewy', 'direct', 'dreamy', 'dusky', 'dusty', 'eager', 'early', 'earnest', 'earthy', 'easy', 'elated',
+  'elder', 'even', 'exact', 'fair', 'famous', 'fancy', 'feisty', 'fine', 'firm', 'first', 'fleet', 'fluffy', 'flying', 'fresh', 'frosty', 'frugal',
+  'fuzzy', 'gentle', 'giddy', 'gilded', 'glad', 'gleamy', 'glossy', 'golden', 'good', 'grand', 'grassy', 'great', 'green', 'grey', 'hale', 'handy',
+  'happy', 'hardy', 'hazel', 'hearty', 'honest', 'humble', 'husky', 'ideal', 'indigo', 'inky', 'ivory', 'jade', 'jaunty', 'jazzy', 'jolly', 'jovial',
+  'joyful', 'keen', 'kind', 'lavish', 'leafy', 'level', 'light', 'lilac', 'limber', 'linen', 'lively', 'loyal', 'lucid', 'lucky', 'lunar', 'lush',
+  'main', 'major', 'maple', 'marine', 'mellow', 'merry', 'mighty', 'mild', 'minty', 'misty', 'modern', 'modest', 'mossy', 'nearby', 'neat', 'nifty',
+  'nimble', 'noble', 'north', 'oaken', 'olive', 'open', 'orange', 'orchid', 'outer', 'pale', 'peachy', 'pearly', 'perky', 'pink', 'placid', 'plucky',
+  'plum', 'plush', 'polar', 'polite', 'prime', 'proud', 'pure', 'purple', 'quaint', 'quick', 'quiet', 'quirky', 'radiant', 'rapid', 'ready', 'regal',
+  'rich', 'rocky', 'rosy', 'round', 'ruby', 'rustic', 'safe', 'sage', 'salty', 'sandy', 'savvy', 'scarlet', 'scenic', 'serene', 'shady', 'sharp',
+  'shiny', 'silent', 'silky', 'silver', 'simple', 'sleek', 'slim', 'smart', 'smooth', 'snappy', 'snowy', 'snug', 'soft', 'solid', 'sonic', 'spare',
+  'speedy', 'spicy', 'spry', 'stable', 'starry', 'steady', 'steely', 'still', 'stout', 'sturdy', 'suave', 'sunny', 'super', 'sure', 'swift', 'tall',
+  'tawny', 'teal', 'tender', 'thrifty', 'tidy', 'timely', 'tiny', 'trim', 'true', 'trusty', 'twin', 'upbeat', 'urban', 'useful', 'valiant', 'velvet',
+  'verdant', 'violet', 'vivid', 'warm', 'wavy', 'wealthy', 'west', 'windy', 'winged', 'wintry', 'wise', 'witty', 'wooden', 'woolly', 'worthy', 'zany',
+];
+const PREVIEW_NOUNS = [
+  'acorn', 'alder', 'alpaca', 'anchor', 'antler', 'apple', 'apricot', 'arbor', 'arch', 'aspen', 'atlas', 'aurora', 'badger', 'bagel', 'bamboo', 'banjo',
+  'barley', 'basil', 'basin', 'bass', 'beacon', 'beaver', 'beech', 'bell', 'berry', 'birch', 'biscuit', 'bison', 'bluff', 'bobcat', 'bonsai', 'boulder',
+  'branch', 'breeze', 'brook', 'bumble', 'bunny', 'button', 'cactus', 'camel', 'canoe', 'canyon', 'cape', 'cashew', 'castle', 'chalk', 'cheetah', 'cherry',
+  'chime', 'cider', 'clam', 'cloud', 'clover', 'cobra', 'comet', 'compass', 'condor', 'cookie', 'cornet', 'cosmos', 'cottage', 'cougar', 'coyote', 'crane',
+  'creek', 'cricket', 'crocus', 'crow', 'cypress', 'dahlia', 'daisy', 'dale', 'dawn', 'deer', 'delta', 'dingo', 'dolphin', 'dove', 'dragon', 'drum',
+  'dune', 'eagle', 'ember', 'falcon', 'fawn', 'fern', 'ferret', 'fiddle', 'field', 'finch', 'fjord', 'flute', 'forest', 'fossil', 'fox', 'gazelle',
+  'gecko', 'geyser', 'ginger', 'glacier', 'glade', 'goose', 'gopher', 'grape', 'grove', 'gull', 'harbor', 'hare', 'harp', 'hawk', 'heron', 'hill',
+  'hippo', 'holly', 'honey', 'hornet', 'horse', 'iris', 'island', 'jaguar', 'jasmine', 'jay', 'juniper', 'kale', 'kayak', 'kelp', 'kestrel', 'kite',
+  'kiwi', 'koala', 'lagoon', 'lake', 'lantern', 'lark', 'laurel', 'lemon', 'lemur', 'leopard', 'lichen', 'lily', 'linden', 'lion', 'llama', 'lobster',
+  'locust', 'lotus', 'lynx', 'magpie', 'manatee', 'mango', 'mantis', 'marble', 'meadow', 'melon', 'meteor', 'mink', 'moose', 'moth', 'mule', 'nectar',
+  'newt', 'nutmeg', 'oasis', 'ocean', 'octopus', 'orca', 'oriole', 'osprey', 'otter', 'owl', 'oyster', 'panda', 'panther', 'papaya', 'parrot', 'peach',
+  'peacock', 'peak', 'pear', 'pebble', 'pelican', 'penguin', 'pepper', 'perch', 'petal', 'pigeon', 'pine', 'piper', 'plover', 'pond', 'poppy', 'prairie',
+  'puffin', 'puma', 'quail', 'quartz', 'quince', 'rabbit', 'raccoon', 'radish', 'rain', 'raven', 'reef', 'ridge', 'river', 'robin', 'rocket', 'rose',
+  'rowan', 'saddle', 'salmon', 'sapling', 'seal', 'sequoia', 'shark', 'shell', 'shrew', 'sierra', 'skylark', 'sloth', 'sparrow', 'spruce', 'squid', 'stag',
+  'star', 'stork', 'stream', 'summit', 'swan', 'tamarin', 'tapir', 'teapot', 'tern', 'thistle', 'thrush', 'tiger', 'toucan', 'trail', 'trout', 'tulip',
+  'tundra', 'turnip', 'turtle', 'valley', 'vine', 'viola', 'vole', 'walnut', 'walrus', 'weasel', 'whale', 'willow', 'wombat', 'wren', 'yak', 'zebra',
+];
+const PREVIEW_NAME = /^[a-z]{3,7}-[a-z]{3,7}(?:-[1-9]\d?)?$/;
+const PREVIEW_MAX = 20;
+const PREVIEW_LABEL_MAX = 40;
+const PREVIEW_TTL = 7 * DAY;
+const TTYD_PORT = 7681;
+function previewName(project, session, label) {
+  const h = crypto.createHash('sha256').update(`${project}\0${session}\0${label}`).digest();
+  return `${PREVIEW_ADJECTIVES[h[0]]}-${PREVIEW_NOUNS[h[1]]}`;
+}
+// true, or why not. A dashboard's or the hub's port has a name of its own, and a link to the
+// gateway's or the terminal's would have the gateway relay itself. own: the gateway's port, which
+// a box's agents see as the platform's PORT.
+function previewPortOk(port, own = process.env.DEVTEAM_PUBLIC_URL ? Number(process.env.PORT) : null) {
+  if (!Number.isInteger(port)) return 'a port is an integer';
+  if (port < 1024) return 'ports below 1024 are not offered';
+  if (port > 65535) return 'a port is at most 65535';
+  if (port === HUB_PORT) return `${port} is the hub's`;
+  if (PORT_RANGE.includes(port)) return `${port} is in the instance block (${PORT_RANGE[0]}-${PORT_RANGE.at(-1)}): those are dashboards, each with a name of its own`;
+  if (port === TTYD_PORT) return `${port} is the box's terminal`;
+  if (port === own) return `${port} is the gateway's own port on this box`;
+  return true;
+}
+const previewsDir = () => path.join(runDir, 'previews');
+const previewFile = (name) => path.join(previewsDir(), `${name}.json`);
+// Told once per file by the dashboard's log; anywhere else a bad file is simply not a preview.
+let previewBad = null;
+// Every record on disk that holds together, by name, each with its file's mtime (the tick compares
+// it before writing). Anything else in the folder is skipped: a file an agent can write is data.
+function readPreviews() {
+  let files;
+  try { files = fs.readdirSync(previewsDir()); } catch { return []; }
+  const recs = [];
+  for (const f of files.filter((x) => x.endsWith('.json')).sort()) {
+    const stem = f.slice(0, -'.json'.length);
+    try {
+      const st = fs.lstatSync(path.join(previewsDir(), f));
+      if (!st.isFile() || st.size > 65536) throw new Error('not a small file');
+      const r = JSON.parse(fs.readFileSync(path.join(previewsDir(), f), 'utf8'));
+      if (!isObj(r) || r.name !== stem || !PREVIEW_NAME.test(stem) || !Number.isInteger(r.port) || !['project', 'session', 'label', 'cwd', 'at', 'expires'].every((k) => typeof r[k] === 'string')) throw new Error('not a preview');
+      recs.push({ ...r, mtimeMs: st.mtimeMs });
+    } catch (e) { previewBad?.(f, e); }
+  }
+  return recs;
+}
+function writePreview(rec) {
+  const { mtimeMs, ...r } = rec;
+  fs.mkdirSync(previewsDir(), { recursive: true });
+  const tmp = `${previewFile(r.name)}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(r, null, 2)}\n`);
+  fs.renameSync(tmp, previewFile(r.name));
+}
+const removePreview = (name) => fs.rmSync(previewFile(name), { force: true });
+// What this project calls itself, and who is asking.
+const previewProject = () => loadSettings().project ?? path.basename(mainRoot);
+function previewLabel() {
+  const label = flags.label === undefined ? '' : (flagStr('label') ?? '');
+  if (UNSAFE_TEXT.test(label)) die('preview --label is one line of plain text');
+  if (label.length > PREVIEW_LABEL_MAX) die(`preview --label is at most ${PREVIEW_LABEL_MAX} characters`);
+  return label.trim();
+}
+function previewPort(v) {
+  const port = /^\d+$/.test(String(v)) ? Number(v) : NaN;
+  const ok = previewPortOk(port);
+  if (ok !== true) die(`preview: ${v}: ${ok}`);
+  return port;
+}
+// The name this (project, session, label) goes by here, and the record it already has.
+function previewClaim(session, label) {
+  const project = previewProject();
+  const recs = readPreviews();
+  const base = previewName(project, session, label);
+  const mine = recs.find((r) => r.project === project && r.session === session && r.label === label && (r.name === base || r.name.startsWith(`${base}-`)));
+  if (mine) return { name: mine.name, had: mine, recs };
+  if (recs.length >= PREVIEW_MAX) die(`preview: at most ${PREVIEW_MAX} previews on an instance; stop one first (devteam.mjs preview list)`);
+  return { name: base, had: null, recs };
+}
+function cmdPreview() {
+  const [sub] = positional;
+  if (/^\d|^[a-z]+$/i.test(sub ?? '') && !['list', 'url', 'stop', 'start'].includes(sub)) {
+    const port = previewPort(sub);
+    const session = logWriter();
+    const label = previewLabel();
+    const { name } = previewClaim(session, label);
+    const at = nowIso();
+    writePreview({ v: 1, name, project: previewProject(), session, label, port, cwd: process.cwd(), at, expires: new Date(Date.parse(at) + PREVIEW_TTL).toISOString() });
+    return out(`preview ${name} on port ${port}`);
+  }
+  die('usage: preview <port> [--label "<one line>"]');
 }
 
 // ===== artifacts: pages a session draws to show an idea (a mock, a flow, a model) =====
@@ -10539,7 +10672,7 @@ const OPERATOR_READS = new Set(['status', 'ready', 'metrics', 'hello', 'settings
 const OPERATOR_SUBCOMMANDED = new Set(['fleet', 'goal', 'knowledge']);
 const COMMANDS = {
   init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), whoami: cmdWhoami, hello: cmdHello, settings: cmdSettings,
-  feature: cmdFeature, ticket: cmdTicket, components: cmdComponents, link: cmdLink, links: cmdLinks, artifact: cmdArtifact, artifacts: cmdArtifacts, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, roadmap: cmdRoadmap,
+  feature: cmdFeature, ticket: cmdTicket, components: cmdComponents, link: cmdLink, links: cmdLinks, artifact: cmdArtifact, artifacts: cmdArtifacts, preview: cmdPreview, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, roadmap: cmdRoadmap,
   'check-ticket': cmdCheckTicket, 'check-pr': cmdCheckPr, merge: cmdMerge, 'review-worktree': cmdReviewWorktree,
   phase: cmdPhase, gate: cmdGate, send: cmdSend, messages: cmdMessages, 'stop-ok': cmdStopOk,
   ask: cmdAsk, answer: cmdAnswer, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,

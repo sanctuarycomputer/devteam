@@ -3321,6 +3321,63 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     assert.equal(row().published, null, 'the cache kept by tree id never hides the record');
   });
 
+  // ===== previews: a running dev server, behind a derived name (forked: its tmux windows and
+  // listeners are nobody else's business) =====
+  const pv = (args, env = {}, { cwd = repo, role = 'sup' } = {}) => {
+    const e = { ...process.env, ...ROLE[role], ...env };
+    for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE']) if (!(k in ROLE[role]) && !(k in env)) delete e[k];
+    if (!('DEVTEAM_PUBLIC_URL' in env)) delete e.DEVTEAM_PUBLIC_URL;
+    if (!('DEVTEAM_PREVIEWS' in env)) delete e.DEVTEAM_PREVIEWS;
+    const r = runNode(DT, args, { cwd, env: e });
+    return { status: r.status, out: r.stdout.trim(), err: r.stderr.trim() };
+  };
+  const pvOk = (...a) => { const r = pv(...a); assert.equal(r.status, 0, `preview ${a[0].join(' ')}: ${r.err || r.out}`); return r.out; };
+  const PV_DIR = () => path.join(repo, 'docs/devteam/run/previews');
+  const PV_SHAPE = /^[a-z]{3,7}-[a-z]{3,7}(?:-[1-9]\d?)?$/;
+  const pvFiles = () => (fs.existsSync(PV_DIR()) ? fs.readdirSync(PV_DIR()).filter((f) => f.endsWith('.json')).sort() : []);
+  const pvRec = (name) => JSON.parse(fs.readFileSync(path.join(PV_DIR(), `${name}.json`), 'utf8'));
+  const pvName = (out) => /preview (\S+) /.exec(out)[1];
+  const pvClear = () => fs.rmSync(PV_DIR(), { recursive: true, force: true });
+
+  step('previews: a derived name, the record, the port rules', () => {
+    pvClear();
+    const src = fs.readFileSync(path.join(kit, 'scripts/devteam.mjs'), 'utf8');
+    const list = (n) => [...src.match(new RegExp(`const ${n} = \\[([\\s\\S]*?)\\];`))[1].matchAll(/'([^']*)'/g)].map((m) => m[1]);
+    const ADJ = list('PREVIEW_ADJECTIVES');
+    const NOUN = list('PREVIEW_NOUNS');
+    assert.equal(ADJ.length, 256);
+    assert.equal(NOUN.length, 256);
+    for (const w of [...ADJ, ...NOUN]) assert.match(w, /^[a-z]{3,7}$/);
+    assert.equal(new Set([...ADJ, ...NOUN]).size, 512, 'no duplicates within or across the lists');
+    const derive = (project, session, label) => { const h = crypto.createHash('sha256').update(`${project}\0${session}\0${label}`).digest(); return `${ADJ[h[0]]}-${NOUN[h[1]]}`; };
+    const first = pvOk(['preview', '65000']);
+    const name = pvName(first);
+    assert.match(name, PV_SHAPE);
+    assert.equal(name, derive('demo', 'supervisor', ''), 'two words from the hash of project, session and label');
+    const before = pvRec(name);
+    assert.deepEqual([before.v, before.name, before.project, before.session, before.label, before.port], [1, name, 'demo', 'supervisor', '', 65000]);
+    assert.equal(Date.parse(before.expires) - Date.parse(before.at), 7 * 864e5, 'a week from the last preview command');
+    assert.equal(fs.realpathSync(before.cwd), fs.realpathSync(repo));
+    assert.equal(pvName(pvOk(['preview', '65000'])), name, 'the same inputs give the same name');
+    const admin = pvName(pvOk(['preview', '65000', '--label', 'admin']));
+    assert.notEqual(admin, name, 'a label is another link');
+    assert.equal(admin, derive('demo', 'supervisor', 'admin'));
+    const hub = process.env.DEVTEAM_HUB_PORT;
+    const block = process.env.DEVTEAM_PORT_BASE;
+    for (const [p, why] of [[hub, /the hub/], [block, /instance block/], ['80', /1024/], ['70000', /65535/], ['abc', /integer|number/], ['7681', /terminal/]]) {
+      const r = pv(['preview', p]);
+      assert.notEqual(r.status, 0, `port ${p} is refused`);
+      assert.match(r.err, why);
+    }
+    assert.match(pv(['preview', '65000'], { DEVTEAM_PUBLIC_URL: 'https://box.example.com', PORT: '65000' }).err, /gateway's own/, "on a box the platform's PORT is the gateway's");
+    assert.match(pv(['preview', '65000', '--label', 'two\nlines']).err, /one line/);
+    assert.match(pv(['preview', '65000', '--label', 'x'.repeat(41)]).err, /at most 40/);
+    for (let i = 0; pvFiles().length < 20; i++) pvOk(['preview', String(64000 + i), '--label', `l${i}`]);
+    assert.match(pv(['preview', '65000', '--label', 'one more']).err, /at most 20 previews/);
+    assert.equal(pvName(pvOk(['preview', '65000'])), name, 'the cap counts new links only: a known one is still renewed');
+    pvClear();
+  });
+
 // Forks. A fork is a copy of the fixture as it stands between two steps, made by the run in
 // kit.test.mjs; a child process (fork.mjs) runs the steps given to it there. Those steps see
 // exactly the state they would have seen in line, and the steps after them go on without them, so
