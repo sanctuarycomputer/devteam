@@ -263,7 +263,7 @@ test('a preview is gone with the worktree, stopped but kept on park, listed in t
     // a resumed worker's prompt names what is not running
     ok(old, ['worker', ID, '--resume'], SUP);
     assert.ok(prompt().includes(`your preview ${mine} (${SERVER}, port ${rec(mine).port}) is not running; devteam.mjs preview start ${mine} brings it back`), prompt());
-    assert.ok(!prompt().includes(agentRun), 'only what the kit can start');
+    assert.ok(!prompt().includes(`your preview ${agentRun} `), 'only what the kit can start (its record can still be in the handoff)');
     // start brings it back on the same name and port
     const port = rec(mine).port;
     ok(ww, ['preview', 'start', mine], WRK);
