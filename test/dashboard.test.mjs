@@ -956,4 +956,45 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await p.key('Escape');
     await soon(`document.getElementById('tl-cursor').hidden && document.getElementById('tl-pinbtn').getAttribute('aria-pressed') === 'false'`, 'out of pin mode');
   });
+
+  await t.test("a dock row keeps the keyboard's focus through reads that change the list", async () => {
+    if (await p.ev(`document.getElementById('tl-panel').hidden`)) await p.click('#tl-pill');
+    await soon(`!!document.querySelector('#tl-list [data-tl-open="${T}"]')`, 'its row');
+    await p.ev(`window.__row = document.querySelector('#tl-list [data-tl-open="${T}"]'); window.__row.focus(); void 0`);
+    F.sup(['thread', 'say', T, 'One more thing.']);
+    await p.ev('tlRefresh()');
+    await p.ev('tlRefresh()');
+    assert.ok(await p.ev(`TL.threads.find((x) => x.id === '${T}').turns.some((u) => u.text === 'One more thing.')`), 'the reads brought the reply in');
+    assert.ok(await p.ev('document.activeElement === window.__row && window.__row.isConnected'), 'focus still on the same row');
+    await p.ev('window.__row.blur()');
+    await p.ev('tlRefresh()');
+    assert.ok(await p.ev(`!!document.querySelector('#tl-list [data-tl-open="${T}"] .tl-dot[role="img"][aria-label]')`), 'drawn once focus left, its dot named');
+  });
+
+  await t.test('a press on a pin across a read that adds a pin still opens its card', async () => {
+    await p.click('#tl-pill');
+    await soon(`document.getElementById('tl-panel').hidden`, 'the panel closed');
+    const at = await p.at('.tl-pin');
+    await p.ev(`window.__pin = document.querySelector('.tl-pin'); void 0`);
+    await p.move(at.x, at.y);
+    await p.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...at, button: 'left', buttons: 1, clickCount: 1 });
+    F.owner(['thread', 'new', 'About this spot', '--subject', JSON.stringify({ kind: 'page', view: '#goals', at: { x: 0.5, y: 0.9 } })]);
+    await p.ev('tlRefresh()');
+    assert.equal(await p.ev(`document.querySelectorAll('.tl-pin').length`), 2, 'the new pin drawn');
+    assert.ok(await p.ev('window.__pin.isConnected'), 'the pressed pin kept, not drawn again');
+    await p.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...at, button: 'left', buttons: 0, clickCount: 1 });
+    await soon(`${shown('tl-card')} && document.getElementById('tl-card').dataset.key === '${T}'`, 'the card from the pressed pin');
+    await p.click('[data-tl-close]');
+  });
+
+  await t.test('pins stay under the drawer and its scrim', async () => {
+    await p.ev('document.activeElement?.blur()');
+    const at = await p.at('.tl-pin');
+    await p.ev(`location.hash = '#goal/${F.goal}'`);
+    await soon(shown('drawer'), 'the drawer');
+    assert.equal(await p.ev(`!!document.elementFromPoint(${at.x}, ${at.y})?.closest('#tl-pins')`), false, 'no pin hit over the drawer');
+    assert.equal(await p.ev(`[...document.querySelectorAll('.tl-pin')].some((b) => { const r = b.getBoundingClientRect(); return document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)?.closest('.tl-pin') === b; })`), false, 'none on top anywhere');
+    await p.key('Escape');
+    await soon(`document.getElementById('drawer').hidden`, 'the drawer closed');
+  });
 });

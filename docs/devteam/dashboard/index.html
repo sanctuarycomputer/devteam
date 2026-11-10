@@ -507,7 +507,8 @@
   .tl-compose textarea { margin-top: 6px; }
   .tl-compose .row-inline { align-items: center; }
   @media (max-width: 640px) { .tl-card:not(.sheet) { width: calc(100vw - 32px); } }
-  .tl-pins { position: absolute; left: 0; top: 0; width: 0; height: 0; z-index: 40; }
+  /* under the scrim (20) and what opens over it (the drawer, a review, an artifact), over the page's own (at most 6) */
+  .tl-pins { position: absolute; left: 0; top: 0; width: 0; height: 0; z-index: 10; }
   .tl-pin { position: absolute; width: 22px; height: 22px; padding: 0; margin: 0; border-radius: 50%; border: 2px solid #fff; background: var(--blue); color: #fff; font: 600 11px/18px var(--sans); text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,.3); }
   .tl-pin.on { outline: 2px solid var(--blue); outline-offset: 2px; }
   .tl-pin sup { font-size: 9px; margin-left: 1px; }
@@ -715,7 +716,7 @@
   <iframe id="av-frame" title="Artifact" sandbox="allow-scripts allow-forms allow-modals allow-pointer-lock" allow="fullscreen" referrerpolicy="no-referrer"></iframe>
 </div>
 <!-- the thread layer: outside <main>, which the 10 s refresh rebuilds -->
-<div id="tl" class="tl">
+<div id="tl">
   <div id="tl-pins" class="tl-pins"></div>
   <div id="tl-hl" class="tl-hl" hidden></div>
   <div id="tl-chip" class="tl-chip" hidden></div>
@@ -3555,7 +3556,7 @@ const tUnread = (t, seenAt) => t.turns.some((u) => u.by === 'supervisor' && (!se
 // about it. It lives in #tl, outside <main>, which the 10 s refresh rebuilds, so a card, its draft and
 // the dock keep their state. Its window listeners in the capture phase are registered here, before
 // the page's own (PRESSED below), so a click it takes reaches nothing else.
-const TL = { threads: [], pane: false, open: null, draft: null, hit: null, pin: false, via: null, swallowUntil: 0, typed: {}, sig: '', polling: null, seq: 0, have: 0, openAt: -1, polled: false, busy: false, resolving: false, readyKey: '', pill: '' };
+const TL = { threads: [], pane: false, open: null, draft: null, hit: null, pin: false, via: null, swallowUntil: 0, typed: {}, sig: '', polling: null, seq: 0, have: 0, openAt: -1, polled: false, busy: false, resolving: false, readyKey: '', pill: '', list: '', pressed: null };
 const tlEl = (id) => document.getElementById(id);
 const tlOwn = (el) => !!el?.closest?.('#tl');
 const tlShowing = () => !tlEl('tl-cursor').hidden;
@@ -3861,6 +3862,15 @@ document.addEventListener('click', (e) => {
   if (e.target.closest('[data-tl-send]')) return void tlSend();
 });
 addEventListener('resize', () => tlDraw());
+// A dot for a reply not seen, named for a screen reader.
+const TL_DOT = '<span class="tl-dot" role="img" aria-label="a reply you haven&#39;t seen"></span>';
+// The dock's list is rewritten, and a pin taken away, only when nothing in it is focused or pressed:
+// a rewrite would drop the focus, or the click a press is half of.
+const tlHeld = (el) => el.contains(document.activeElement) || (!!TL.pressed && el.contains(TL.pressed));
+window.addEventListener('pointerdown', (e) => { TL.pressed = tlOwn(e.target) ? e.target : null; }, true);
+// after the click this release makes; then what the press held back is drawn
+for (const up of ['pointerup', 'pointercancel']) window.addEventListener(up, () => setTimeout(() => { if (!TL.pressed) return; TL.pressed = null; tlDock(); tlPins(); }, 0), true);
+document.addEventListener('focusout', (e) => { if (tlOwn(e.target)) setTimeout(() => { tlDock(); tlPins(); }, 0); }, true);
 // When the owner last looked at each thread, in this browser only: the dock's dot is a reply since.
 const TL_SEEN = 'devteam.thread.seen';
 const tlSeenAt = (id) => (lsGet(TL_SEEN) || {})[id] || null;
@@ -3869,13 +3879,26 @@ function tlSeen(t) { const m = lsGet(TL_SEEN) || {}; const last = t.turns[t.turn
 // on its section, for open threads only, in page coordinates. Placed again after every redraw, when
 // the threads change and on a resize; a subject that isn't drawn gets none (the dock still lists it).
 function tlPins() {
-  tlEl('tl-pins').innerHTML = tPins(TL.threads).map((g) => {
+  const box = tlEl('tl-pins');
+  const pins = tPins(TL.threads).map((g) => {
     const r = tlTargetRect(g.subject);
-    if (!r) return '';
+    if (!r) return null;
     const x = (g.subject.kind === 'item' ? r.right - 10 : r.left + 1) + scrollX, y = (g.subject.kind === 'item' ? r.top - 10 : r.top + 1) + scrollY;
-    const newest = g.ids[g.ids.length - 1];
-    return `<button type="button" class="tl-pin${g.ids.includes(TL.open) ? ' on' : ''}" data-tl-pin="${esc(newest)}" style="left:${Math.round(x)}px;top:${Math.round(y)}px" aria-label="${esc(`Thread ${g.n}${g.ids.length > 1 ? `, and ${g.ids.length - 1} more on this` : ''}`)}">${g.n}${g.ids.length > 1 ? `<sup>${g.ids.length}</sup>` : ''}</button>`;
-  }).join('');
+    return { id: g.ids[g.ids.length - 1], cls: `tl-pin${g.ids.includes(TL.open) ? ' on' : ''}`, left: `${Math.round(x)}px`, top: `${Math.round(y)}px`, label: `Thread ${g.n}${g.ids.length > 1 ? `, and ${g.ids.length - 1} more on this` : ''}`, html: `${g.n}${g.ids.length > 1 ? `<sup>${g.ids.length}</sup>` : ''}` };
+  }).filter(Boolean);
+  // each pin kept by its thread and changed in place, never taken out and put back, so a press or the
+  // focus on one survives; one gone stays while it is pressed or focused (the next draw takes it)
+  const have = new Map([...box.children].map((b) => [b.dataset.tlPin, b]));
+  for (const [id, b] of have) if (!pins.some((x) => x.id === id) && !tlHeld(b)) b.remove();
+  for (const x of pins) {
+    let b = have.get(x.id);
+    if (!b) { b = document.createElement('button'); b.type = 'button'; b.dataset.tlPin = x.id; box.append(b); }
+    if (b.className !== x.cls) b.className = x.cls;
+    if (b.style.left !== x.left) b.style.left = x.left;
+    if (b.style.top !== x.top) b.style.top = x.top;
+    if (b.getAttribute('aria-label') !== x.label) b.setAttribute('aria-label', x.label);
+    if (b.innerHTML !== x.html) b.innerHTML = x.html;
+  }
 }
 // The dock: a pill with the open threads' count and a dot for a reply not seen; opened, every open
 // thread, newest activity first, numbered as its pin, with where its subject is; then the last 50
@@ -3885,14 +3908,16 @@ function tlDock() {
   const nums = new Map([...open].sort((a, b) => a.created_at.localeCompare(b.created_at)).map((t, i) => [t.id, i + 1]));
   const unread = open.some((t) => tUnread(t, tlSeenAt(t.id)));
   // set only when it changed: a pill rewritten on every poll would drop a press on it
-  const pill = `<i class="icon-messages-square" aria-hidden="true"></i> Threads${open.length ? ` · ${open.length}` : ''}${unread ? ' <span class="tl-dot" aria-label="a reply you haven\'t seen"></span>' : ''}`;
+  const pill = `<i class="icon-messages-square" aria-hidden="true"></i> Threads${open.length ? ` · ${open.length}` : ''}${unread ? ` ${TL_DOT}` : ''}`;
   if (pill !== TL.pill) { TL.pill = pill; tlEl('tl-pill').innerHTML = pill; }
   if (tlEl('tl-panel').hidden) return;
   const gone = (t) => t.subject?.kind === 'item' && !tlHome(t.subject);
-  const row = (t) => `<button type="button" class="tl-row" data-tl-open="${esc(t.id)}">${t.status === 'open' ? `<span class="tl-n">${nums.get(t.id)}</span>` : ''}<span class="tl-r"><b>${esc(t.title)}</b><span class="small muted">${esc(tWhere(t.subject))}${gone(t) ? ' · subject gone' : ''}</span></span>${t.status === 'open' && tUnread(t, tlSeenAt(t.id)) ? '<span class="tl-dot"></span>' : ''}${t.ready ? '<span class="badge good">ready</span>' : ''}</button>`;
+  const row = (t) => `<button type="button" class="tl-row" data-tl-open="${esc(t.id)}">${t.status === 'open' ? `<span class="tl-n">${nums.get(t.id)}</span>` : ''}<span class="tl-r"><b>${esc(t.title)}</b><span class="small muted">${esc(tWhere(t.subject))}${gone(t) ? ' · subject gone' : ''}</span></span>${t.status === 'open' && tUnread(t, tlSeenAt(t.id)) ? TL_DOT : ''}${t.ready ? '<span class="badge good">ready</span>' : ''}</button>`;
   const resolved = TL.threads.filter((t) => t.status === 'resolved').sort((a, b) => (b.resolved_at || '').localeCompare(a.resolved_at || '')).slice(0, 50);
-  tlEl('tl-list').innerHTML = (open.length ? [...open].sort((a, b) => b.activity_at.localeCompare(a.activity_at)).map(row).join('') : '<p class="empty">No open threads. Hold Shift and click anything on the page, or start one here.</p>')
+  const list = (open.length ? [...open].sort((a, b) => b.activity_at.localeCompare(a.activity_at)).map(row).join('') : '<p class="empty">No open threads. Hold Shift and click anything on the page, or start one here.</p>')
     + (resolved.length ? `<details class="tl-resolved"${tlEl('tl-list').querySelector('.tl-resolved')?.open ? ' open' : ''}><summary>Resolved (${resolved.length})</summary>${resolved.map(row).join('')}</details>` : '');
+  // only when it changed, and not under a press or the focus on a row (the next draw does it)
+  if (list !== TL.list && !tlHeld(tlEl('tl-list'))) { TL.list = list; tlEl('tl-list').innerHTML = list; }
 }
 // a section opened or closed, or the Loop's tab changed, moves what the pins sit on
 document.addEventListener('toggle', () => tlPins(), true);
