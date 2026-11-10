@@ -354,7 +354,7 @@ test('behind the gateway the kit runs as on a laptop: hub, dashboard, owner acti
     const list = (await gw.req('GET', '/instances.json', { headers: { 'sec-fetch-site': 'same-origin' } })).json.instances;
     assert.deepEqual(list.map((x) => [x.name, x.port]), [['alpha', P]]);
     const boxJson = (await gw.req('GET', '/box.json')).json;
-    assert.deepEqual(boxJson, { box: 1, terminal: `${gw.term}/`, instance: `http://{port}.box.localhost:${gw.port}/`, passkeys: `${gw.auth}/auth/passkeys`, push: boxJson.push }, 'the hub learns where instances are');
+    assert.deepEqual(boxJson, { box: 1, terminal: `${gw.term}/`, instance: `http://{port}.box.localhost:${gw.port}/`, passkeys: `${gw.auth}/auth/passkeys`, previews: `${gw.auth}/dev/`, push: boxJson.push }, 'the hub learns where instances are');
     assert.equal(Buffer.from(boxJson.push, 'base64url').length, 65, 'and the key that signs its notifications');
 
     // a dashboard on its own subdomain, exactly as the kit serves it, its policy pointed at the box
