@@ -1050,6 +1050,8 @@ out({ cursor: 'c-' + mode });
         assert.ok(json(must(['metrics', '--json'])).findings.some((x) => x.kind === 'sensor-discovery-due'));
         assert.notEqual(dt(['sensor', 'discover', '--record'], { role: 'worker' }).status, 0, 'only the supervisor records a discovery');
         must(['sensor', 'discover', '--record'], sup);
+        // where no CLI can read sentry, that record asked for its token: not this step's concern
+        for (const q of json(must(['questions', '--json'])).filter((x) => x.sensor === 'sentry' && x.status === 'open')) must(['withdraw', q.id, '--reason', 'test'], sup);
         assert.ok(json(must(['log', '--type', 'observation', '--json'])).some((o) => o.kind === 'discovery' && o.subject === 'sensors' && /heroku demo-app/.test(o.detail)));
         assert.ok(!json(must(['metrics', '--json'])).findings.some((x) => x.kind === 'sensor-discovery-due'), 'looked over this week');
       } finally {
@@ -1069,6 +1071,54 @@ out({ cursor: 'c-' + mode });
     }
     assert.ok(!json(must(['sensor', 'status', '--json'])).length, 'cleaned up');
   });
+
+  step('sensor credentials: a tracker in the code with no token asks once, a no stops it for good until reversed, and a posted token makes the sensor ready', () => {
+    const sup = { role: 'sup' };
+    write(path.join(repo, 'config/honeybadger.js'), 'module.exports = { apiKey: process.env.HONEYBADGER_API_KEY };\n');
+    git(['add', 'config/honeybadger.js']);
+    git(['commit', '-qm', 'honeybadger']);
+    git(['push', '-q', 'origin', 'HEAD:main']);
+    const discover = () => json(must(['sensor', 'discover', '--record', '--json'], sup));
+    const ofTracker = () => json(must(['questions', '--all', '--json'])).filter((q) => q.sensor === 'honeybadger');
+    // an API key in the code implies a sensor nothing here can read (honeybadger: no CLI can stand in for the token, on any machine): one owner-action question, the value to a sink
+    let d = discover();
+    assert.ok(d.missing.some((m) => m.name === 'honeybadger' && m.scope.includes('read')), 'no token, so it is missing');
+    assert.equal(d.asked.length, 1);
+    const first = ofTracker();
+    assert.equal(first.length, 1, 'one question');
+    assert.equal(first[0].kind, 'owner-action');
+    assert.equal(first[0].secrets[0].name, 'HONEYBADGER_TOKEN');
+    assert.match(first[0].secrets[0].sink, /^file:\.devteam-secrets\//);
+    assert.doesNotMatch(first[0].question + first[0].context, /tok-/, 'never a value');
+    assert.equal(discover().asked.length, 0, 'a second discovery does not ask again');
+    assert.equal(ofTracker().length, 1);
+    // the owner says no: never asked again, and it leaves the proposals
+    must(['answer', first[0].id, "Don't use this sensor"]);
+    d = discover();
+    assert.deepEqual(d.declined.map((x) => x.name), ['honeybadger']);
+    assert.ok(!d.proposals.some((p) => p.name === 'honeybadger') && !d.missing.some((m) => m.name === 'honeybadger') && d.asked.length === 0);
+    // only the owner's word reverses it, and then the next discovery asks once more
+    assert.notEqual(dt(['sensor', 'reconsider', 'honeybadger'], { cwd: wt('bill-01-card'), role: 'worker' }).status, 0, 'not a worker');
+    must(['sensor', 'reconsider', 'honeybadger']);
+    assert.equal(discover().asked.length, 1, 'reversed: asked again');
+    const q2 = ofTracker().find((q) => q.status === 'open');
+    assert.ok(q2, 'one open question');
+    assert.equal(discover().asked.length, 0);
+    // the token arrives: no more asking, the sensor is ready, and it starts with its credential
+    must(['secret', 'post', q2.id, '--json'], { input: JSON.stringify({ HONEYBADGER_TOKEN: 'tok-sensor-1234' }) });
+    d = discover();
+    assert.equal(d.asked.length, 0, 'answered: not asked again');
+    assert.ok(!d.missing.some((m) => m.name === 'honeybadger'));
+    const p = d.proposals.find((x) => x.name === 'honeybadger');
+    assert.ok(p?.ready && p.sensor.credentials.HONEYBADGER_TOKEN.startsWith('file:'), 'ready, with the credential in place');
+    assert.ok(json(must(['metrics', '--json'])).findings.some((f) => f.kind === 'sensor-credential-ready'), 'and the supervisor is told to start it');
+    write(path.join(repo, 'docs/devteam/project/sensors/honeybadger.mjs'), "if (!process.env.HONEYBADGER_TOKEN) process.exit(1);\nconsole.log(JSON.stringify({ cursor: 'x' }));\n");
+    git(['add', 'docs/devteam/project/sensors/honeybadger.mjs']);
+    git(['commit', '-qm', 'honeybadger probe']);
+    git(['push', '-q', 'origin', 'HEAD:main']);
+    landSettings((txt) => txt.replace('"gates": {', `"sensors": { "honeybadger": ${JSON.stringify(p.sensor)} }, "gates": {`));
+    assert.match(must(['sensor', 'poll', '--name', 'honeybadger'], sup), /honeybadger: ok/);
+    assert.ok(!json(must(['metrics', '--json'])).findings.some((f) => f.kind === 'sensor-credential-ready'), 'started: the finding clears');
 
   step('incidents: triage lists what changed, ignores hold, an incident computes its severity, a fix is decided on the ladder, scoped by it, capped by releases, and scheduled first', async () => {
     const sup = { role: 'sup' };

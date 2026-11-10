@@ -1368,6 +1368,10 @@
             "description": "A rule you gave with the answer, kept as knowledge.",
             "type": "string"
           },
+          "sensor": {
+            "type": "string",
+            "description": "the sensor this owner-action question asks a credential for, so discovery asks once"
+          },
           "re": {
             "type": "string",
             "description": "the worker message this question escalates",

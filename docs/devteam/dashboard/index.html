@@ -1116,7 +1116,7 @@ function questionCard(q, o, reasonText) {
       ${goalAsk || ['owner-action', 'goal-definition'].includes(q.kind) ? '' : `<label class="rulebox"><input type="checkbox" data-rulebox="${esc(q.id)}"> Keep this answer as a standing rule for ${esc(scopeWords(q.rule_scope))}</label>`}
       ${next}
       ${q.default ? `<p class="meta">If you don’t answer${q.deadline ? ` by ${when(q.deadline)}` : ''}, the supervisor goes with: <b>${esc(q.default)}</b></p>` : ''}
-      <div class="row-inline">${(q.secrets || []).length ? `<button data-post-secrets="${esc(q.id)}">Post</button><button class="ghost" data-reply="${esc(q.id)}">Reply</button><button class="ghost" data-cant="${esc(q.id)}">Can’t right now</button>` : `<button data-answer="${esc(q.id)}" ${goalAsk ? `data-goal-ask="${esc(q.goal)}"` : ''}>${q.kind === 'owner-action' || goalAsk ? 'Send' : 'Answer'}</button>`}<span class="err" id="e-${esc(q.id)}"></span></div>
+      <div class="row-inline">${(q.secrets || []).length ? `<button data-post-secrets="${esc(q.id)}">Post</button><button class="ghost" data-reply="${esc(q.id)}">Reply</button><button class="ghost" data-cant="${esc(q.id)}">Can’t right now</button>${q.sensor ? `<button class="ghost" data-dontuse="${esc(q.id)}">Don’t use this sensor</button>` : ''}` : `<button data-answer="${esc(q.id)}" ${goalAsk ? `data-goal-ask="${esc(q.goal)}"` : ''}>${q.kind === 'owner-action' || goalAsk ? 'Send' : 'Answer'}</button>`}<span class="err" id="e-${esc(q.id)}"></span></div>
       ${why ? `<div class="meta">${why}</div>` : ''}
     </div>`;
 }
@@ -3358,12 +3358,12 @@ document.addEventListener('click', async (ev) => {
   if (rvd && RV?.qid) return void reviewDecline(RV.qid, $('rv-decline-note').value.trim(), 'rv', rvd);
   // A secret's card can be answered without posting anything: a note (Reply), or Can't right now
   // with the note if there is one. Either is an answer the supervisor reads; no value moves.
-  const cant = ev.target.closest('[data-cant], [data-reply]');
+  const cant = ev.target.closest('[data-cant], [data-reply], [data-dontuse]');
   if (cant) {
-    const id = cant.dataset.cant ?? cant.dataset.reply;
+    const id = cant.dataset.cant ?? cant.dataset.reply ?? cant.dataset.dontuse;
     const note = (document.querySelector(`textarea[data-q="${CSS.escape(id)}"]`)?.value ?? '').trim();
     if (cant.dataset.reply !== undefined && !note) { const e = $(`e-${id}`); if (e) e.textContent = 'Write the note first.'; return; }
-    const answer = cant.dataset.reply !== undefined ? note : note ? `Can’t right now: ${note}` : 'Can’t right now';
+    const answer = cant.dataset.dontuse !== undefined ? "Don't use this sensor" : cant.dataset.reply !== undefined ? note : note ? `Can’t right now: ${note}` : 'Can’t right now';
     cant.disabled = true;
     if (await post('answer', { id, answer }, id)) { [...SECRET_DRAFTS.keys()].filter((k) => k.startsWith(`${id}:`)).forEach((k) => SECRET_DRAFTS.delete(k)); delete drafts[id]; markAnswered(id, answer); }
     else cant.disabled = false;
