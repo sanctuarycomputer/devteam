@@ -1436,6 +1436,16 @@ process.exit(${code});
       const qc = must(['ask', '--class', 'production-remediation', '--blocks', 'remediation:restart-web', '--question', 'Run restart again?', '--recommendation', 'do it', '--reasons', 'below-rung', '--owner-said', 'yes, restart it after the deploy'], sup);
       must(['answer', qc, 'do it']);
       assert.match(dt(['remediate', 'restart-web', '--decision', decide(qc, ['remediation:restart-web']).out], sup).err, /is not the reviewed one/);
+      assert.equal(json(must(['log', '--type', 'question', '--json'])).find((x) => x.id === qc).owner_said, 'yes, restart it after the deploy', 'the owner\'s words are recorded');
+      // --owner-said never brings a default back after a no
+      assert.match(dt(['ask', '--class', 'production-remediation', '--blocks', 'remediation:restart-web', '--question', 'x?', '--recommendation', 'do it', '--default', 'do it', '--owner-said', 'sure'], sup).err, /--owner-said goes without --default/);
+      // after the question was asked, the entry changed on main: the answer no longer covers it
+      const q4 = must(['ask', '--class', 'production-remediation', '--blocks', 'remediation:restart-web', '--question', 'Restart once more?', '--recommendation', 'do it', '--reasons', 'below-rung', '--owner-said', 'yes again'], sup);
+      must(['answer', q4, 'do it']);
+      const d4 = decide(q4, ['remediation:restart-web']).out;
+      landSettings((txt) => txt.replace(`"sha": "${sha('restart.mjs')}"`, `"sha": "${'b'.repeat(40)}"`));
+      assert.match(dt(['remediate', 'restart-web', '--decision', d4], sup).err, /changed since/);
+      landSettings((txt) => txt.replace(`"sha": "${'b'.repeat(40)}"`, `"sha": "${sha('restart.mjs')}"`));
       // a rollback to a release the sensors saw, across a production migration since it
       const rel = json(must(['log', '--type', 'observation', '--json'])).filter((o) => o.kind === 'deploy' && /^sensor:[^:]+:deploy:/.test(o.source_key ?? '')).map((o) => /: release (\S+)/.exec(o.detail)?.[1]).find(Boolean);
       assert.ok(rel, 'an earlier test observed a deploy');
@@ -1979,6 +1989,18 @@ http.createServer((req, res) => {
     const rem = dt(margs, { role: 'sup' });
     assert.notEqual(rem.status, 0, 'a remediation lands only with the owner\'s answer');
     assert.match(rem.out + rem.err, /changes owner settings: remediations \(governance-edit\)/);
+    // the answer must name the entry: an unrelated question approves nothing here
+    const Qother = must(['ask', '--class', 'governance-edit', '--ticket', 'chore-other', '--reasons', 'owner-only', '--question', 'Set merge_method to squash?', '--recommendation', 'yes'], { role: 'sup' });
+    must(['answer', Qother, 'yes']);
+    assert.match(dt([...margs, '--approved', Qother], { role: 'sup' }).out, /doesn't name the remediations this changes \(restart-web at a{12}\)/);
+    const entry = { kind: 'restart', script: 'project/remediations/restart-web.mjs', sha: 'a'.repeat(40) };
+    const Qright = must(['ask', '--class', 'governance-edit', '--reasons', 'owner-only', '--remediations', JSON.stringify({ 'restart-web': entry }), '--question', 'Add restart-web at aaaa?', '--recommendation', 'yes'], { role: 'sup' });
+    must(['answer', Qright, 'yes']);
+    assert.match(must([...margs, '--approved', Qright], { role: 'sup' }), /would merge/, 'the question naming this entry approves it');
+    // a question that named a different script for it doesn't
+    const Qold = must(['ask', '--class', 'governance-edit', '--reasons', 'owner-only', '--remediations', JSON.stringify({ 'restart-web': { ...entry, sha: 'c'.repeat(40) } }), '--question', 'Add restart-web at cccc?', '--recommendation', 'yes'], { role: 'sup' });
+    must(['answer', Qold, 'yes']);
+    assert.match(dt([...margs, '--approved', Qold], { role: 'sup' }).out, /isn't what q-\S+ showed the owner/);
     git(['worktree', 'remove', '--force', wt('mon')]);
   });
 

@@ -126,5 +126,14 @@ test('metrics records a chat quote that is not in an owner-typed line of the sup
     assert.equal(findings().length, 1, "a peer's queued message is not the owner's");
     queued('human');
     assert.deepEqual(findings(), [], 'found once the owner typed it');
+    // a re-ask after the owner's no, quoting them, is checked the same way
+    fs.writeFileSync(sf, fs.readFileSync(sf, 'utf8').replace('"resume_command":', '"remediations": { "restart-web": { "kind": "restart", "script": "project/remediations/restart.mjs", "sha": "' + 'a'.repeat(40) + '" } }, "resume_command":'));
+    F.g(['add', '-A'], old);
+    F.g(['commit', '-qm', 'a remediation'], old);
+    F.g(['push', '-q', 'origin', 'main'], old);
+    const qno = ok(old, ['ask', '--class', 'production-remediation', '--blocks', 'remediation:restart-web', '--question', 'Restart?', '--recommendation', 'restart it'], SUP);
+    ok(old, ['answer', qno, 'no']);
+    const again = ok(old, ['ask', '--class', 'production-remediation', '--blocks', 'remediation:restart-web', '--question', 'Restart again?', '--recommendation', 'restart it', '--owner-said', 'please restart it now'], SUP);
+    assert.ok(findings().some((f) => f.subject === again), '--owner-said is checked against what the owner typed');
   } finally { F.done(); }
 });
