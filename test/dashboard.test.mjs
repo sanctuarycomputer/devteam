@@ -467,3 +467,10 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
     fs.rmSync(base, { recursive: true, force: true });
   }
 });
+
+test('the dashboard page parses: one stray quote and no tab shows anything at all', () => {
+  const html = fs.readFileSync(path.join(kit, 'dashboard/index.html'), 'utf8');
+  const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+  assert.ok(scripts.length >= 1);
+  for (const s of scripts) new vm.Script(s, { filename: 'index.html' });
+});
