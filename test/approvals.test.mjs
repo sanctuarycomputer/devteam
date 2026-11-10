@@ -52,7 +52,7 @@ test('a secret chore is not a kit change: the answer that posted it is enough', 
   const F = fleetFixture('secret-chore');
   const { old, ok } = F;
   try {
-    const post = (sink) => { const q = ok(old, ['ask', '--kind', 'owner-action', '--question', 'Post the key', '--secrets', JSON.stringify([{ name: 'KEY', sink }])], SUP); ok(old, ['answer', q, 'Posted 1 secret']); return q; };
+    const post = (sink, posted = true) => { const q = ok(old, ['ask', '--kind', 'owner-action', '--question', 'Post the key', '--secrets', JSON.stringify([{ name: 'KEY', sink }])], SUP); ok(old, ['answer', q, 'Posted 1 secret']); if (posted) fs.appendFileSync(path.join(old, 'docs/devteam/run/log', `owner-${new Date().toISOString().slice(0, 7)}.jsonl`), `${JSON.stringify({ v: 1, id: q, type: 'question', op: 'set', at: new Date().toISOString(), by: 'owner', secrets_posted: [{ name: 'KEY' }] })}\n`); return q; };
     const outsideKit = post('sops:config/secrets.enc.yaml:api.token');
     assert.equal(choreOf(F, 'secret-1', { 'config/secrets.enc.yaml': 'enc\n' })('--approved', outsideKit).status, 0, 'an encrypted store outside the kit');
     const inKit = post('sops:docs/devteam/secrets.enc.yaml:api.token');
@@ -60,6 +60,9 @@ test('a secret chore is not a kit change: the answer that posted it is enough', 
     const r = choreOf(F, 'secret-3', { 'docs/devteam/secrets.enc.yaml': 'enc\n', 'docs/devteam/governance/quality.md': 'A changed rule.\n' })('--approved', inKit);
     assert.notEqual(r.status, 0, 'a real kit file in the same chore still needs a kit-class answer');
     assert.match(r.text, /changes kit files \(docs\/devteam\/governance\/quality\.md\)/);
+    // "Posted" with nothing posted is no exemption, whatever the sink names
+    const none = post('sops:docs/devteam/scripts/devteam.mjs:a.b', false);
+    assert.notEqual(choreOf(F, 'secret-4', { 'docs/devteam/scripts/devteam.mjs': 'replaced\n' })('--approved', none).status, 0, 'an answer that posted nothing');
   } finally { F.done(); }
 });
 
@@ -117,8 +120,11 @@ test('metrics records a chat quote that is not in an owner-typed line of the sup
     const found = findings();
     assert.deepEqual(found.map((f) => [f.subject, f.severity]), [[made, 'medium']], 'only the quote the owner never typed; tool results and the agent\'s own words are not the owner\'s');
     assert.match(found[0].detail, /sure, drop the column/);
-    // the owner did say it, in a line the transcript shows: the record clears
-    fs.appendFileSync(path.join(dir, 'session.jsonl'), `${JSON.stringify({ type: 'user', userType: 'external', timestamp: ts, message: { role: 'user', content: 'yes — "sure, drop the column"' } })}\n`);
+    // a queued message from another agent isn't the owner's; one the owner typed mid-turn is
+    const queued = (kind) => fs.appendFileSync(path.join(dir, 'session.jsonl'), `${JSON.stringify({ type: 'attachment', timestamp: ts, origin: { kind }, attachment: { type: 'queued_command', prompt: 'yes, sure, drop the column' } })}\n`);
+    queued('peer');
+    assert.equal(findings().length, 1, "a peer's queued message is not the owner's");
+    queued('human');
     assert.deepEqual(findings(), [], 'found once the owner typed it');
   } finally { F.done(); }
 });

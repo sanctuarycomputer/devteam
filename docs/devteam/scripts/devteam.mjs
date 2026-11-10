@@ -3872,7 +3872,7 @@ function cmdMerge() {
     const kitAnswer = approved && kitFiles.length ? ownerAnswer(approved, 'merge --approved') : null;
     // A secret chore isn't a kit change: the encrypted stores its answer posted (a sops file can
     // sit under the kit) need only that answer, held to its own chore below.
-    const secretChore = kitAnswer?.secrets.length && chore.startsWith('secret-') && kitAnswer.answer?.startsWith('Posted');
+    const secretChore = kitAnswer?.secrets.length && kitAnswer.secrets_posted?.length && chore.startsWith('secret-') && kitAnswer.answer?.startsWith('Posted');
     const kit = secretChore ? kitFiles.filter((f) => !secretStores(kitAnswer).includes(f)) : kitFiles;
     const kitApproved = !kit.length || KIT_CLASSES.includes(kitAnswer?.class);
     // Only these two standing rules approve kit files: an owner's rule that settles owner settings
@@ -7088,6 +7088,8 @@ function chatQuotesNotFound() {
   const from = Date.parse(t.entries.find((o) => o?.timestamp)?.timestamp);
   const norm = (x) => x.toLowerCase().replace(/[\u2018\u2019]/g, "'").replace(/[\u201c\u201d]/g, '"').replace(/\s+/g, ' ').trim();
   const typed = t.entries.filter((o) => o?.type === 'user' && o.userType === 'external' && !o.isMeta && !o.isSidechain).map((o) => { const c = o.message?.content; return norm(typeof c === 'string' ? c : Array.isArray(c) ? c.filter((x) => x?.type === 'text').map((x) => x.text).join(' ') : ''); });
+  // typed while the agent was mid-turn: the transcript has these as queued attachments
+  typed.push(...t.entries.filter((o) => o?.type === 'attachment' && o.attachment?.type === 'queued_command' && o.origin?.kind === 'human' && typeof o.attachment.prompt === 'string').map((o) => norm(o.attachment.prompt)));
   return recent.filter((q) => { const said = norm(q.said).replace(/^["'\s]+|["'.!?\s]+$/g, ''); return Date.parse(q.answered_at) >= from && !typed.some((x) => x.includes(said)); });
 }
 function collectMetrics(since) {
