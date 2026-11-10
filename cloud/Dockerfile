@@ -7,6 +7,8 @@
 # It needs a name and a wildcard under it, e.g. box.example.com and *.box.example.com: each
 # dashboard keeps an origin of its own (4321.box.example.com), as on a laptop, and the terminal has
 # its own too (term.box.example.com). Signing in is at box.example.com/auth.
+# public.box.example.com, under the same wildcard, serves the artifacts the owner published, to
+# anyone, from the gateway's own copy (DEVTEAM_PUBLIC_MAX caps it, in bytes; 500 MB by default).
 #
 # Render: New > Web Service > this repo (or a fork), Language: Docker, Dockerfile path:
 #   cloud/Dockerfile, build context: the repo root. Instance: Pro (4 GB) or larger; a free one
@@ -239,7 +241,7 @@ EOF
 # macOptionClickForcesSelection: tmux owns the mouse, so scrolling works, and on a Mac the terminal
 # lets a selection past it only with Option held (Shift, elsewhere), and only with this set.
 # dev's side: the shell's first-run notes, the tmux session the terminal opens, every repo's
-# dashboard again after a restart, the operator in window 0 (which brings back the supervisors),
+# dashboard again after a restart (in that repo's own tmux session), the operator in window 0 (which brings back the supervisors),
 # and ttyd on loopback. What it says goes to ~/box.log, on the volume: its output is kept off the
 # platform's log (devteam-box says why).
 COPY --chmod=755 <<'EOF' /usr/local/bin/devteam-dev
@@ -258,6 +260,8 @@ rm -f "$HOME"/code/*/docs/devteam/run/supervisor-pane
 [ -f .tmux.conf ] || printf 'set -g mouse on\nset -g history-limit 50000\nset -g default-terminal tmux-256color\nset -g default-shell /bin/bash\n' > .tmux.conf
 # copying in tmux, or in a program in it, reaches the browser's clipboard (the gateway's terminal page takes OSC 52)
 grep -q set-clipboard .tmux.conf || printf "set -g set-clipboard on\nset -as terminal-features ',xterm-256color:clipboard'\n" >> .tmux.conf
+# Claude Code asks for it in every pane: without it, it can't tell when its pane gains or loses focus
+grep -q focus-events .tmux.conf || echo 'set -g focus-events on' >> .tmux.conf
 if [ ! -f .bashrc ]; then
   cp /etc/skel/.bashrc .bashrc
   cat >> .bashrc <<'RC'
@@ -304,6 +308,11 @@ tick='Check on the box and your supervisors.'
 # The box's global tools, on the disk: edit the file to change them, and they come back each boot.
 mkdir -p .box .config/mise
 [ -f .config/mise/config.toml ] || cat > .config/mise/config.toml <<'TOML'
+# .ruby-version, .python-version and .nvmrc pin a repo's versions as they do with asdf or rbenv; mise
+# ignores them unless told, and then a repo gets no Ruby at all and box-status still says tools=ok
+[settings]
+idiomatic_version_file_enable_tools = ["ruby", "python", "node"]
+
 [tools]
 node = "22"
 python = "3.12"
@@ -329,7 +338,21 @@ timeout 120 sh .box/boot.sh >> box.log 2>&1 || note "boot.sh failed (exit $?): s
 for k in "$HOME"/code/*/docs/devteam/scripts/devteam.mjs; do
   [ -f "$k" ] || continue
   r=${k%/docs/devteam/scripts/devteam.mjs}
-  tmux new-window -d -t home -n "dash-$(basename "$r")" -c "$r" "while :; do /usr/local/bin/node docs/devteam/scripts/devteam.mjs dashboard; sleep 5; done"
+  # adopted repos only, as box-supervisors counts them: a checkout of devteam itself has the kit but
+  # no settings, and its dashboard would only fail every 5s in a window of its own
+  [ -f "$r/docs/devteam/project/settings.md" ] || continue
+  # In the project's own tmux session, as the window named dashboard: where the kit keeps it
+  # (supervisor.md, the dashboard), so a supervisor that resumes finds it there and starts no
+  # second one on another port. A kit too old to name its session keeps it in home.
+  c="while :; do /usr/local/bin/node docs/devteam/scripts/devteam.mjs dashboard; sleep 5; done"
+  s=$(cd "$r" && /usr/local/bin/node docs/devteam/scripts/devteam.mjs settings --get tmux_session 2>/dev/null) || s=
+  if [ -z "$s" ] || [ "$s" = null ]; then
+    tmux new-window -d -t home -n "dash-$(basename "$r")" -c "$r" "$c"
+  elif tmux has-session -t "=$s" 2>/dev/null; then
+    tmux new-window -d -t "=$s" -n dashboard -c "$r" "$c"
+  else
+    tmux new-session -d -s "$s" -n dashboard -c "$r" "$c"
+  fi
 done
 # The operator (window 0) is what brings the supervisors back: box-supervisors reads the list saved above.
 # Which supervisors are up, kept on the volume each minute: a machine that dies writes nothing at
