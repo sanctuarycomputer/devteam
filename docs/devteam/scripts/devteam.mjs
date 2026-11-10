@@ -1110,7 +1110,7 @@ function rememberSupervisorPane() {
   fs.writeFileSync(supervisorPaneFile(), pane);
 }
 
-function withLock(file, fn) {
+function withLock(file, fn, { staleMs = 10000, waitMs = 15000 } = {}) {
   const lock = `${file}.lock`;
   const start = Date.now();
   for (;;) {
@@ -1121,11 +1121,11 @@ function withLock(file, fn) {
       if (e.code !== 'EEXIST') throw e;
       const age = Date.now() - (fs.statSync(lock, { throwIfNoEntry: false })?.mtimeMs ?? Date.now());
       // either way: a lock dated in the future (the clock moved back) must not hold forever
-      if (Math.abs(age) > 10000) {
+      if (Math.abs(age) > staleMs) {
         fs.rmSync(lock, { recursive: true, force: true });
         continue;
       }
-      if (Date.now() - start > 15000) die(`timed out waiting for ${lock}`);
+      if (Date.now() - start > waitMs) die(`timed out waiting for ${lock}`);
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
     }
   }
@@ -9351,13 +9351,19 @@ const SUPERVISOR_UP_EVERY_MS = 60000;
 const SUPERVISOR_UP_MAX_MS = 3 * 24 * 3600000;
 // Long enough for a window to open and the agent's process to appear; a second recover meanwhile is a no-op.
 const RECOVER_STARTING_MS = 3 * 60000;
+// A recover has claimed this start and the agent may not have exec'd yet. Dated in the future, or past the window, it counts for nothing.
+const recoverStarting = (rec) => { const t = rec?.starting ? Date.now() - rec.starting : Infinity; return t >= 0 && t < RECOVER_STARTING_MS; };
 const supervisorUpRecord = () => { try { const r = readJson(SUPERVISOR_UP_FILE); return r && typeof r === 'object' ? r : null; } catch { return null; } };
 const writeSupervisorUp = (r) => { writeJson(SUPERVISOR_UP_FILE, { at: nowIso(), ...r }); registerOnMachine(); };
-// When this machine's init started: a reboot or a new container changes it, and nothing else does.
-// A container's boot id is the host's and outlives a redeploy, so it won't do. Null if it can't be
-// read; DEVTEAM_MACHINE_EPOCH is a test's stand-in for a boot.
+// Which boot this is: a reboot or a new container changes it, and nothing else does. On Linux both
+// halves are needed: init's start time counts ticks since boot, so it's near the same on every boot
+// of a bare host, and btime is the host's, so it outlives a container's redeploy. Elsewhere, when
+// init started. Null if it can't be read; DEVTEAM_MACHINE_EPOCH is a test's stand-in for a boot.
 function machineEpoch() {
-  return process.env.DEVTEAM_MACHINE_EPOCH || processStart(1);
+  if (process.env.DEVTEAM_MACHINE_EPOCH) return process.env.DEVTEAM_MACHINE_EPOCH;
+  const init = processStart(1);
+  if (process.platform !== 'linux' || !init) return init;
+  try { const btime = /^btime (\d+)$/m.exec(fs.readFileSync('/proc/stat', 'utf8'))?.[1]; return btime ? `${btime}:${init}` : null; } catch { return null; }
 }
 // When a pid's process started, so a pid the OS has reused is told from the one that was recorded.
 function processStart(pid) {
@@ -9432,9 +9438,15 @@ function noteSupervisorFromTick() {
     const pane = supervisorPaneNow(rec, { notedOnly: true });
     if (pane) {
       const agent = paneAgentProcess(pane);
-      return writeSupervisorUp({ up: true, kind: 'tmux', pane, server: tmuxServerPid(), machine, skip: agent ? isSupervisorProcess(agent) && startedSkippingPermissions(agent.args) : rec?.pane === pane ? !!rec.skip : false });
+      // Only what the process's own arguments say: unreadable, or with the flag but not running as
+      // the supervisor, it says nothing new. Left undefined, it says nothing at all.
+      const prev = rec?.pane === pane ? rec.skip : undefined;
+      const skip = !agent ? prev : !startedSkippingPermissions(agent.args) ? false : isSupervisorProcess(agent) ? true : prev;
+      return writeSupervisorUp({ up: true, kind: 'tmux', pane, server: tmuxServerPid(), machine, skip });
     }
     if (!rec?.up) return;
+    // the window is open and the agent hasn't exec'd yet: not a supervisor someone closed
+    if (recoverStarting(rec)) return;
     if (rec.kind === 'foreground') {
       if (rec.pid && processStart(rec.pid) === rec.start) return writeSupervisorUp({ ...rec, at: nowIso() });
       if (rec.machine === machine) writeSupervisorUp({ ...rec, up: false });
@@ -9457,21 +9469,21 @@ function noteSupervisorSelf() {
     if (!machine) return;
     // TMUX with no pane is the dashboard's tick relaunching a session, not the supervisor's own command
     if (process.env.TMUX && !process.env.TMUX_PANE) return;
-    const pane = process.env.TMUX_PANE;
-    if (pane) {
-      const agent = paneAgentProcess(pane);
-      const rec = supervisorUpRecord();
-      return writeSupervisorUp({ up: true, kind: 'tmux', pane, server: tmuxServerPid(), machine, skip: agent ? startedSkippingPermissions(agent.args) : rec?.pane === pane ? !!rec.skip : false });
-    }
+    // Its own ancestors, not the pane's children: BSD pgrep leaves out the caller's ancestors, so on
+    // macOS a command run under the agent can't find it that way. A command typed at a shell, role
+    // or no role, has no agent above it and says nothing.
     const agent = agentAncestor();
-    if (agent) writeSupervisorUp({ up: true, kind: 'foreground', pid: agent.pid, start: processStart(agent.pid), machine, skip: startedSkippingPermissions(agent.args) });
+    if (!agent) return;
+    const skip = startedSkippingPermissions(agent.args);
+    const pane = process.env.TMUX_PANE;
+    writeSupervisorUp(pane ? { up: true, kind: 'tmux', pane, server: tmuxServerPid(), machine, skip } : { up: true, kind: 'foreground', pid: agent.pid, start: processStart(agent.pid), machine, skip });
   } catch {}
 }
 // Why the supervisor shouldn't come back, or null if it should: the record never says more than
 // "it was up, on a machine that has since restarted". It is never read from the log: a line there can
 // be written by hand, and only a process the OS was asked about, by the kit, counts here.
 function recoverRefusal(rec) {
-  if (!rec) return 'left stopped (not running before the restart; --force starts it)';
+  if (!rec || rec.up === undefined) return 'left stopped (not running before the restart; --force starts it)';
   if (rec.up === false) return 'left stopped (stopped before the restart; --force starts it)';
   const age = Date.now() - Date.parse(rec.at);
   if (!Number.isFinite(age) || age < 0) return 'left stopped (its record of being up is dated in the future; --force starts it)';
@@ -9496,8 +9508,7 @@ function recoverOne() {
   const rec = supervisorUpRecord();
   // never two: first, under any flag
   if (supervisorRunningNow(rec)) return { say: 'already running' };
-  const startingFor = rec?.starting ? Date.now() - rec.starting : Infinity;
-  if (startingFor >= 0 && startingFor < RECOVER_STARTING_MS) return { say: 'already running (brought back moments ago)' };
+  if (recoverStarting(rec)) return { say: 'already running (brought back moments ago)' };
   const s = loadSettings();
   // A fleet whose hold can't be read is not started.
   let held;
@@ -9513,16 +9524,20 @@ function recoverOne() {
   const how = id ? `resume session ${id}` : 'start fresh';
   let cmd = id ? supervisorResumeCommand(id) : s.agent_command;
   if (id && !cmd) return { say: 'NOT started (its resume_command has no --continue to replace)' };
-  // It keeps the permissions it had. Only the OS's word on its own process can say it had the flag
-  // (run/supervisor-up.json holds that, read from the process's arguments); no record means leave it
-  // off a resume, as the printed recovery line does. A fresh start from agent_command is the start the
-  // owner configured, unless the record says this supervisor ran without it.
-  const dropFlag = id ? rec?.skip !== true : rec?.skip === false;
+  // An unattended restore (the box's --session or --was-up) and --force use the owner's command as
+  // configured: no one is there to answer a prompt, and a dropped flag must not perpetuate itself
+  // through the record. Someone at a laptop with evidence the supervisor ran without the flag (the
+  // OS's word on its own process, never the log) gets it left off.
+  const dropFlag = !sessionFlag && !flags['was-up'] && !force && rec?.skip === false;
   const notes = [];
   if (missing.length) notes.push(`${dry ? 'missing here' : 'asked to get'}: ${missing.join(' ')}`);
-  if (dropFlag && cmd.includes(SKIP_PERMISSIONS)) { cmd = withoutSkipPermissions(cmd); notes.push(`without ${SKIP_PERMISSIONS}: nothing recorded that it had it`); }
+  if (dropFlag && cmd.includes(SKIP_PERMISSIONS)) { cmd = withoutSkipPermissions(cmd); notes.push(`without ${SKIP_PERMISSIONS}: it ran without it`); }
   const tail = `${notes.length ? ` (${notes.join('; ')})` : ''}${!id && !exact ? ` ${NO_EXACT_RESUME}` : ''}`;
   if (dry) return { say: `would ${how}${tail}` };
+  // Claimed before a window opens: a shell pane says nothing, so anyone who gets past the lock must
+  // find this. Taken back on any exit that started nothing, so the next try doesn't wait it out.
+  writeJson(SUPERVISOR_UP_FILE, { ...(rec ?? {}), starting: Date.now() });
+  const notStarted = (say) => { if (rec) writeJson(SUPERVISOR_UP_FILE, rec); else fs.rmSync(SUPERVISOR_UP_FILE, { force: true }); return { say }; };
   let msg = id ? RECOVER_MESSAGE : supervisorOpeningPrompt();
   if (missing.length) msg = `${msg}\n\nThis machine is missing: ${missing.join(' ')} (worktree_files). Before unparking or starting any worker, ask the owner for each in the Inbox: an owner-action question with --secrets and the sink file:<path>. Never in chat.`;
   fs.mkdirSync(runDir, { recursive: true });
@@ -9538,26 +9553,28 @@ function recoverOne() {
     writeSupervisorUp({ up: true, kind: 'foreground', pid: null, start: null, machine, skip: !dropFlag && cmd.includes(SKIP_PERMISSIONS), starting: Date.now() });
     return { say: `${didHow} in this terminal${tail}`, run: line };
   }
-  if (sh('tmux', ['-V']) === null) return { say: `NOT started (no tmux here: run this in a terminal: DEVTEAM_ROLE=supervisor ${cmd})` };
+  if (sh('tmux', ['-V']) === null) return notStarted(`NOT started (no tmux here: run this in a terminal: DEVTEAM_ROLE=supervisor ${cmd})`);
   const session = sessionFlag ?? tmuxSession({ save: true });
   const target = sessionFlag ?? `=${session}`;
   const window = windowFlag ?? 'supervisor';
   let pane;
   if (tmux(['has-session', '-t', target])) pane = sh('tmux', ['new-window', '-dP', '-F', '#{pane_id}', '-t', target, '-n', window, '-c', mainRoot]);
-  else if (sessionFlag) return { say: `NOT started (no tmux session ${sessionFlag})` };
+  else if (sessionFlag) return notStarted(`NOT started (no tmux session ${sessionFlag})`);
   else pane = sh('tmux', ['new-session', '-d', '-P', '-F', '#{pane_id}', '-s', session, '-n', window, '-c', mainRoot], { env: tmuxServerEnv() });
-  if (!pane) return { say: 'NOT started (tmux would not open its window)' };
+  if (!pane) return notStarted('NOT started (tmux would not open its window)');
   fs.writeFileSync(supervisorPaneFile(), pane);
-  if (!typeInto(pane, line)) return { say: `NOT started (its window opened but could not be typed into: pane ${pane})` };
+  if (!typeInto(pane, line)) return notStarted(`NOT started (its window opened but could not be typed into: pane ${pane})`);
   writeSupervisorUp({ up: true, kind: 'tmux', pane, server: tmuxServerPid(), machine, skip: !dropFlag && cmd.includes(SKIP_PERMISSIONS), starting: Date.now() });
   return { say: `${didHow}${rec?.kind === 'foreground' ? ' in tmux, where it ran in a terminal before' : ''}${tail}` };
 }
 function cmdRecover() {
-  if (logWriter() !== 'supervisor' || ['worker', 'planner'].includes(process.env.DEVTEAM_ROLE)) die('recover: the owner, the operator or the supervisor does this, in the main checkout');
+  const writer = logWriter();
+  if (writer !== 'supervisor' || ['worker', 'planner'].includes(process.env.DEVTEAM_ROLE)) die(`recover: not from here: ${writer !== 'supervisor' ? `this session or checkout is ${writer}'s (a ticket or plan branch)` : `this session is a ${process.env.DEVTEAM_ROLE}`}. The owner, the operator or the supervisor runs it, from the main checkout (${mainRoot})`);
   if (flags.machine) return recoverMachine();
   if (!flags['dry-run']) fs.mkdirSync(runDir, { recursive: true });
-  // one recover at a time: withLock's lock goes stale in 10 s, so a crash halfway can't wedge the next
-  const { say, run } = flags['dry-run'] ? recoverOne() : withLock(path.join(runDir, 'recover'), recoverOne);
+  // One recover at a time, for longer than the usual lock: on a loaded box tmux alone can take most
+  // of 10 s. Still stale in the end, so a crash halfway can't wedge the next one.
+  const { say, run } = flags['dry-run'] ? recoverOne() : withLock(path.join(runDir, 'recover'), recoverOne, { staleMs: 90000, waitMs: 100000 });
   out(say);
   if (say.startsWith('NOT started')) process.exitCode = 1;
   if (run) { const r = spawnSync(process.env.SHELL || '/bin/sh', ['-c', run], { cwd: mainRoot, stdio: 'inherit' }); process.exitCode = r.status ?? 1; }

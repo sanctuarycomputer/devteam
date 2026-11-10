@@ -73,8 +73,8 @@ test('which supervisors come back, and which are left alone', () => {
   assert.equal(pk.status, 0, pk.stderr + pk.stdout);
   repo('kit-only', { adopt: false });
   session(h);
-  // what the dashboard's tick noted while it ran: the flag it had, read from the process
-  wasUp(h, { skip: true });
+  // a resume on the box is the owner's resume_command as configured, even after a flagless one
+  wasUp(h, { skip: false });
   fs.writeFileSync(boot, `${sib}\n${h}\n${parked}\n`);
 
   const dflt = lines(run(['--dry-run']));
