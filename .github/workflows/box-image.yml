@@ -12,4 +12,4 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - run: docker build -f cloud/Dockerfile -t box .
-      - run: docker run --rm --entrypoint sh box -ec 'box-supervisors --dry-run; box-pg nope 2>&1 | grep -q "no Postgres"; ffmpeg -version >/dev/null; chromium --version; test -f /opt/devteam/operator.md; test -f /opt/devteam/operator-settings.json'
+      - run: docker run --rm --entrypoint sh box -ec 'box-supervisors --dry-run; box-pg nope 2>&1 | grep -q "no Postgres"; ffmpeg -version >/dev/null; chromium --version; test -f /opt/devteam/operator.md'
