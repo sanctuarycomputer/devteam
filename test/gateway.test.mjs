@@ -1877,9 +1877,17 @@ test('previewLinks: names from the hub\'s list, checked, ambiguous when two inst
   assert.equal(m.get('other-only').session.length, 80);
   assert.equal(G.previewLinks(many, ports, own).size, 20, 'at most 20 per instance');
   assert.equal(G.previewLinks('nope', ports, own).size, 0, 'a list that isn\'t an array is empty');
-  // an instance outside the block, or listed twice with one root, counts once at most
   assert.equal(G.previewLinks([inst('/x', 99, [row('xx-yyy', 30007)])], ports, own).size, 0, 'only instances on the block');
-  assert.equal(G.previewLinks([inst('/a', P, [row('one-name', 30008)]), inst('/a', P, [row('one-name', 30009)])], ports, own).get('one-name').port, 30008, 'one root counts once');
+  // a root is agent-written: two ports claiming one root don't collapse into one, and the lower can't repoint the link
+  const hijack = G.previewLinks([inst('/data/home/code/acme', P + 1, [row('cool-tiger', 30008, { project: 'acme' })]), inst('/data/home/code/acme', P, [row('cool-tiger', 6666 + 30000, { project: 'evil' })])], ports, own).get('cool-tiger');
+  assert.equal(hijack.port, undefined, 'never served');
+  assert.deepEqual(hijack.ambiguous.map((c) => c.port).sort(), [30008, 36666], 'two ports listing one name are ambiguous, whatever root they claim');
+  assert.equal(G.previewLinks([inst('/a', P, [row('one-name', 30008)]), { ...inst('/a', P, [row('one-name', 30009)]) }], ports, own).get('one-name').port, 30008, 'one port counts once: its first answer');
+  // the terminal's real port, whatever it is here
+  const ttydList = [inst('/a', P, [row('term-real', 7700), row('term-default', 7681)])];
+  assert.equal(G.previewLinks(ttydList, ports, own, 7700).has('term-real'), false);
+  assert.equal(G.previewLinks(ttydList, ports, own, 7700).has('term-default'), true, '7681 is nobody\'s when the terminal is elsewhere');
+  assert.equal(G.previewLinks(ttydList, ports, own).has('term-default'), false, 'by default it is');
 });
 
 test('preview names: only the box\'s, one label, and safeNext sends sign-in back to one', async () => {
@@ -1971,6 +1979,18 @@ test('a preview: the owner reaches the dev server on its own name, with localhos
     assert.equal((await req('cool-tiger', 'POST', '/s', { headers: { origin: site }, body: {} })).status, 200, 'the app\'s own POST');
     assert.equal(seen.at(-1).h.origin, `http://localhost:${devPort}`);
     assert.equal((await req('cool-tiger', 'GET', '/sw.js', { headers: { 'service-worker': 'script' } })).status, 403);
+    // a server bound to ::1 alone answers too, a body surviving the retry
+    const v6 = http.createServer((q, s) => { let b = ''; q.on('data', (c) => { b += c; }); q.on('end', () => s.end(`v6:${b}`)); });
+    const v6Port = await freePort();
+    const onV6 = await new Promise((resolve) => { v6.once('error', () => resolve(false)); v6.listen(v6Port, '::1', () => resolve(true)); });
+    if (onV6) {
+      hub.list = [instance('/srv/alpha', P, [previewRow('cool-tiger', devPort), previewRow('cool-owl', v6Port)])];
+      await gw.g.pollPush();
+      assert.equal((await req('cool-owl', 'POST', '/s', { headers: { origin: origin('cool-owl') }, body: { a: 1 } })).body, 'v6:{"a":1}');
+      v6.close();
+      hub.list = [instance('/srv/alpha', P, [previewRow('cool-tiger', devPort)])];
+      await gw.g.pollPush();
+    }
     // the box's own names are unchanged
     r = await gw.req('GET', '/api/data', { on: P + 2 });
     assert.equal(r.headers['x-devteam-previews'], '1', 'a dashboard learns the box serves previews');
@@ -2003,7 +2023,8 @@ test('a preview that is down, ambiguous or unknown answers 503, a page only to a
     assert.equal(r.status, 503);
     assert.match(r.body, /No preview named/);
     assert.match(r.body, /cool-tiger/, 'the current names');
-    assert.match(r.body, /refresh/, 'and it retries');
+    assert.match(r.body, /location\.reload/, 'it retries');
+    assert.doesNotMatch(r.body, /<noscript>/, 'for a few minutes, never forever');
     await new Promise((res) => dev.close(res));
     r = await req('cool-tiger', 'GET', '/', { headers: NAV });
     assert.equal(r.status, 503);
@@ -2096,7 +2117,7 @@ test('a preview\'s WebSocket is relayed, with the link\'s Origin mapped, and cap
   dev.on('upgrade', (q, sock) => {
     seen.push({ url: q.url, h: q.headers });
     const accept = crypto.createHash('sha1').update(`${q.headers['sec-websocket-key']}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
-    sock.write(`HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-accept: ${accept}\r\n\r\n`);
+    sock.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\nSet-Cookie: bad=1; Domain=box.localhost\r\nSet-Cookie: devteam_session=shadow\r\nSet-Cookie: ok=1\r\nStrict-Transport-Security: max-age=9\r\nX-Other: kept\r\n\r\n`);
     sock.on('error', () => {});
     sock.on('end', () => sock.end()); // an http server's socket is half-open until told
     sock.on('close', () => { upstreamClosed++; });
@@ -2116,6 +2137,11 @@ test('a preview\'s WebSocket is relayed, with the link\'s Origin mapped, and cap
     await gw.g.pollPush();
     let c = await wsClient(gw.port, on('cool-tiger'), { origin: site, cookie: gw.jar() });
     assert.equal(c.status, 101);
+    assert.doesNotMatch(c.head, /bad=1|devteam_session/i, 'the handshake\'s cookies get the same rule as any response');
+    assert.match(c.head, /set-cookie: ok=1/i, 'a host-only cookie still passes');
+    assert.doesNotMatch(c.head, /max-age=9/, 'and so do the other headers');
+    assert.match(c.head, /sec-websocket-accept: /i);
+    assert.match(c.head, /x-other: kept/i);
     assert.equal(seen.at(-1).url, '/hmr?token=abc', 'the query passes untouched');
     assert.equal(seen.at(-1).h.host, `localhost:${devPort}`);
     assert.equal(seen.at(-1).h.origin, `http://localhost:${devPort}`);

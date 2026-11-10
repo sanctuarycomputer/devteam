@@ -29,8 +29,6 @@ const env = process.env;
 const HUB_PORT = Number(env.DEVTEAM_HUB_PORT ?? 4320);
 const PORT_BASE = Number(env.DEVTEAM_PORT_BASE ?? 4321);
 const BLOCK = Array.from({ length: 25 }, (_, i) => PORT_BASE + i);
-// ttyd, whatever its port on this box; never a preview's port
-const TTYD = 7681;
 const SESSION_MS = 14 * 24 * 3600 * 1000;
 const CHALLENGE_MS = 5 * 60 * 1000;
 const CLAIM_MS = 24 * 3600 * 1000;
@@ -215,7 +213,7 @@ export function pushSubscription(b) {
 const wellFormed = (s) => s.replace(/\p{Cs}/gu, '\ufffd');
 // One entry per root, from what the hub's list says; whatever holds the hub's port wrote it, so each
 // field is checked before it is used, and the list's length can't reach beyond the port block.
-function listedByRoot(instances, ports) {
+function listedByPort(instances, ports) {
   const perPort = new Map();
   for (const x of instances) {
     try {
@@ -224,6 +222,10 @@ function listedByRoot(instances, ports) {
       if (ports.includes(port) && !perPort.has(port)) perPort.set(port, x);
     } catch {}
   }
+  return perPort;
+}
+function listedByRoot(instances, ports) {
+  const perPort = listedByPort(instances, ports);
   const perRoot = new Map();
   for (const x of perPort.values()) if (!perRoot.has(x.root) || Number(x.port) < Number(perRoot.get(x.root).port)) perRoot.set(x.root, x);
   return [...perRoot.values()];
@@ -236,26 +238,27 @@ const PREVIEW_CAPS = { project: 63, session: 80, label: 40 };
 const previewCap = (v, n) => (typeof v === 'string' ? v.slice(0, n) : '');
 // The previews the hub's list names, as the Inbox counts are read: it is agent-written, so each
 // entry is checked and capped, and a port outside the allowed set is dropped (a link must never
-// put a dashboard, the hub, the terminal or the gateway behind a second name). A name two instances
+// put a dashboard, the hub, the terminal or the gateway behind a second name). A name two ports
 // list is ambiguous: the gateway never picks, or one hostile hello could repoint the owner's link.
-export function previewLinks(list, ports, ownPort) {
+// Every port counts, whatever root each claims: a root is agent-written too.
+export function previewLinks(list, ports, ownPort, ttydPort = 7681) {
   const links = new Map();
   if (!Array.isArray(list)) return links;
-  for (const x of listedByRoot(list, ports)) {
+  for (const x of listedByPort(list, ports).values()) {
     if (!Array.isArray(x.previews)) continue;
     const seen = new Set();
     for (const p of x.previews.slice(0, PREVIEW_MAX)) {
       try {
         if (!p || typeof p.name !== 'string' || !PREVIEW_NAME.test(p.name) || seen.has(p.name)) continue;
         const port = p.port;
-        if (!Number.isInteger(port) || port < 1024 || port > 65535 || port === HUB_PORT || ports.includes(port) || port === TTYD || port === ownPort) continue;
+        if (!Number.isInteger(port) || port < 1024 || port > 65535 || port === HUB_PORT || ports.includes(port) || port === ttydPort || port === ownPort) continue;
         if (typeof p.label === 'string' && p.label.length > PREVIEW_CAPS.label) continue;
         seen.add(p.name);
         const row = { port, root: x.root, project: previewCap(p.project, PREVIEW_CAPS.project), session: previewCap(p.session, PREVIEW_CAPS.session), label: previewCap(p.label, PREVIEW_CAPS.label), run: p.run === true };
         const had = links.get(p.name);
         if (!had) links.set(p.name, row);
         else {
-          const claimants = (had.ambiguous ?? [{ root: had.root, project: had.project, port: had.port }]).concat({ root: row.root, project: row.project, port: row.port }).sort((a, b) => a.root.localeCompare(b.root));
+          const claimants = (had.ambiguous ?? [{ root: had.root, project: had.project, port: had.port }]).concat({ root: row.root, project: row.project, port: row.port }).sort((a, b) => a.root.localeCompare(b.root) || a.port - b.port);
           links.set(p.name, { ambiguous: claimants });
         }
       } catch {}
@@ -814,17 +817,29 @@ export function createGateway(opts = {}) {
   const previewUnavailable = (req, res, html) => (navigating(req)
     ? send(res, 503, 'text/html; charset=utf-8', html(), { 'content-security-policy': PAGE_CSP, 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer' })
     : send(res, 503, 'text/plain; charset=utf-8', 'this preview is not available right now', { 'retry-after': '5' }));
-  const proxyPreview = async (req, res, name, link, own) => {
-    const host = await previewHost(link.port);
-    if (!host) return previewUnavailable(req, res, () => PAGES.previewDown(name, link));
-    const up = http.request({ host, port: link.port, method: req.method, path: req.url, headers: upstreamHeaders(req, link.port, own, { loopbackHost: 'localhost' }) }, (ur) => {
-      res.writeHead(ur.statusCode, { ...downstreamHeaders(ur.headers, null, own, link.port), 'cache-control': 'no-store' });
-      pipeline(ur, res, () => {});
-    });
-    res.on('close', () => { if (!res.writableFinished) up.destroy(); });
-    up.on('error', () => { if (res.headersSent) return res.destroy(); send(res, 502, 'text/plain; charset=utf-8', 'that preview\'s server stopped answering'); });
-    pipeline(req, up, () => {});
-    return undefined;
+  // The server is tried on 127.0.0.1, then ::1 when that's refused. The body starts only once a
+  // connection is up, so a refused attempt has taken none of it and the retry sends all of it.
+  const proxyPreview = (req, res, name, link, own) => {
+    let current = null;
+    res.on('close', () => { if (!res.writableFinished) current?.destroy(); });
+    const attempt = (hosts) => {
+      let connected = false;
+      const up = http.request({ host: hosts[0], port: link.port, method: req.method, path: req.url, headers: upstreamHeaders(req, link.port, own, { loopbackHost: 'localhost' }) }, (ur) => {
+        res.writeHead(ur.statusCode, { ...downstreamHeaders(ur.headers, null, own, link.port), 'cache-control': 'no-store' });
+        pipeline(ur, res, () => {});
+      });
+      current = up;
+      const relay = () => { connected = true; pipeline(req, up, () => {}); };
+      up.on('socket', (s) => { if (s.connecting) s.once('connect', relay); else relay(); });
+      up.on('error', (e) => {
+        if (!connected && e.code === 'ECONNREFUSED' && hosts.length > 1) return attempt(hosts.slice(1));
+        if (res.headersSent) return res.destroy();
+        if (res.destroyed) return undefined;
+        if (!connected) return previewUnavailable(req, res, () => PAGES.previewDown(name, link));
+        return send(res, 502, 'text/plain; charset=utf-8', 'that preview\'s server stopped answering');
+      });
+    };
+    attempt(['127.0.0.1', '::1']);
   };
   // After the session check, and no sooner: a name not in the map asks the hub once more, once.
   const servePreview = async (req, res, name, own) => {
@@ -862,7 +877,7 @@ export function createGateway(opts = {}) {
   // hub once more, with every waiter sharing one read, so no anonymous request can make it poll.
   const ownPort = opts.port ?? null;
   let previews = new Map();
-  const takePreviews = (body) => { let list = null; try { list = JSON.parse(body).instances; } catch {} previews = previewLinks(Array.isArray(list) ? list : [], BLOCK, ownPort); };
+  const takePreviews = (body) => { let list = null; try { list = JSON.parse(body).instances; } catch {} previews = previewLinks(Array.isArray(list) ? list : [], BLOCK, ownPort, ttydPort); };
   let previewRefresh = null;
   const refreshPreviews = () => (previewRefresh ??= hubList().then(takePreviews).finally(() => { previewRefresh = null; }));
 
@@ -1669,6 +1684,31 @@ export function createGateway(opts = {}) {
     socket.end(`HTTP/1.1 431 Request Header Fields Too Large\r\nclear-site-data: "cookies"\r\ncontent-type: text/plain\r\nconnection: close\r\ncontent-length: ${body.length}\r\n\r\n${body}`);
   });
 
+  // The head of an upstream's answer to an upgrade, its headers under the same rules as any response.
+  // A lone CR is refused: a browser may read it as a line break where this parse didn't.
+  const previewHandshake = (head, own, port) => {
+    if (/\r(?!\n)/.test(head)) return null;
+    const [status, ...rows] = head.split(/\r?\n/);
+    if (!/^HTTP\/1\.[01] \d{3}/.test(status)) return null;
+    const parsed = {};
+    let last = null;
+    for (const row of rows) {
+      // a folded continuation belongs to the header it follows, dropped with it if that is
+      if (/^[ \t]/.test(row)) { if (last) parsed[last] = [].concat(parsed[last]).map((v, i, all) => (i === all.length - 1 ? `${v} ${row.trim()}` : v)); continue; }
+      const i = row.indexOf(':');
+      if (i < 1) { last = null; continue; }
+      const k = row.slice(0, i).trim().toLowerCase();
+      const v = row.slice(i + 1).trim();
+      last = k;
+      if (k === 'set-cookie') (parsed[k] ??= []).push(v);
+      else parsed[k] = parsed[k] === undefined ? v : `${parsed[k]}, ${v}`;
+    }
+    const out = downstreamHeaders(parsed, null, own, port);
+    const is101 = / 101\b/.test(status);
+    const lines = [status, `connection: ${is101 ? 'Upgrade' : 'close'}`];
+    for (const [k, v] of Object.entries(out)) for (const one of [].concat(v)) lines.push(`${k}: ${one}`);
+    return lines.join('\r\n');
+  };
   // A preview's sockets (HMR, mostly): the checks an instance's request gets, a cap per name so a
   // client's reconnect loop can't exhaust the gateway, and the terminal's raw relay. No hub refresh on
   // a miss: the page that opened the socket already made one.
@@ -1695,6 +1735,7 @@ export function createGateway(opts = {}) {
     up.on('error', () => socket.destroy());
     socket.on('error', () => up.destroy());
     socket.on('close', () => up.destroy());
+    up.once('close', () => socket.destroy());
     up.on('connect', () => {
       if (socket.destroyed) return up.destroy();
       const h = upstreamHeaders(req, link.port, own, { loopbackHost: 'localhost' });
@@ -1703,8 +1744,24 @@ export function createGateway(opts = {}) {
       const lines = [`GET ${req.url} HTTP/1.1`, ...Object.entries(h).map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : v}`)];
       up.write(`${lines.join('\r\n')}\r\n\r\n`);
       if (head?.length) up.write(head);
-      pipeline(up, socket, () => {});
-      pipeline(socket, up, () => {});
+      // The handshake's answer gets the rules any response does (cookies above all): held until its
+      // headers are whole, then relayed, so a Set-Cookie on a 101 can't shadow anything either.
+      let held = Buffer.alloc(0);
+      const onHead = (chunk) => {
+        held = Buffer.concat([held, chunk]);
+        const text = held.toString('latin1');
+        const end = /\r?\n\r?\n/.exec(text);
+        if (!end) { if (held.length > 64 * 1024) { up.destroy(); socket.destroy(); } return; }
+        up.off('data', onHead);
+        const filtered = previewHandshake(text.slice(0, end.index), own, link.port);
+        if (!filtered) { up.destroy(); socket.destroy(); return; }
+        socket.write(Buffer.from(`${filtered}\r\n\r\n`, 'latin1'));
+        const rest = held.subarray(end.index + end[0].length);
+        if (rest.length) socket.write(rest);
+        pipeline(up, socket, () => {});
+        pipeline(socket, up, () => {});
+      };
+      up.on('data', onHead);
       return undefined;
     });
     return undefined;
@@ -1825,7 +1882,7 @@ const PAGES = {
   previewDown: (name, l) => `${doc('Preview', `${PREVIEW_REFRESH}<h1>Preview ${esc(l.label || name)} isn't answering</h1><p>Offered by ${esc(l.session)} of ${esc(l.project)}, instance ${esc(l.root)}: nothing answers on port ${esc(l.port)}. Its server may be starting, or stopped. This page retries every 5 s.</p>`)}`,
   previewAmbiguous: (name, cs) => `${doc('Preview', `${PREVIEW_REFRESH}<h1>Two instances offer a preview named ${esc(name)}</h1><p>${cs.map((c) => `${esc(c.project)} at ${esc(c.root)} (port ${esc(c.port)})`).join(' and ')}. The box serves neither until one stops; run <code>devteam.mjs preview stop ${esc(name)}</code> in the one that shouldn't. This page retries every 5 s.</p>`)}`,
   // A preview command can be a second behind the link: the page retries for a few minutes, not forever.
-  previewUnknown: (name, names, originOf) => `${doc('Preview', `<noscript>${PREVIEW_REFRESH}</noscript><script>{const k='dt-preview-tries',n=Number(sessionStorage.getItem(k)||0);if(n<36){sessionStorage.setItem(k,String(n+1));setTimeout(()=>location.reload(),5000)}}</script><h1>No preview named ${esc(name)} on this box</h1><p>${names.length ? `Offered now: ${names.map((n) => `<a href="${esc(originOf(n))}/">${esc(n)}</a>`).join(', ')}.` : 'Nothing is offered right now.'} This page retries for a few minutes; a <code>preview</code> command takes a moment to show up.</p>`)}`,
+  previewUnknown: (name, names, originOf) => `${doc('Preview', `<script>try{const k='dt-preview-since',t=Date.now();let s=Number(sessionStorage.getItem(k)||0);if(!s||t-s>600000){s=t;sessionStorage.setItem(k,String(s))}if(t-s<180000)setTimeout(()=>location.reload(),5000)}catch{}</script><h1>No preview named ${esc(name)} on this box</h1><p>${names.length ? `Offered now: ${names.map((n) => `<a href="${esc(originOf(n))}/">${esc(n)}</a>`).join(', ')}.` : 'Nothing is offered right now.'} This page retries for a few minutes; a <code>preview</code> command takes a moment to show up.</p>`)}`,
   claim: (box) => `${doc('Claim this box', `<h1>Claim this devteam box</h1><p>Make a passkey for this box. Your password manager (1Password, iCloud Keychain…) saves it; from then on only a passkey made here opens the box.</p><input id="name" placeholder="Name this passkey (optional)" maxlength="60"><p><button id="go">Create passkey and claim</button></p><p id="err"></p>`)}
 <script>
 const token = decodeURIComponent(location.hash.slice(1));
