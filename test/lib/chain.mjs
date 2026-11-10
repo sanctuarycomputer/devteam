@@ -3188,6 +3188,23 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     } finally { srv.kill(); }
   });
 
+  step('public artifacts: the Library says what the log records, beside each landed tree', () => {
+    const T = git(['rev-parse', 'origin/main:docs/devteam/project/artifacts/landed-other']);
+    const lib = () => json(must(['dashboard-data'])).library;
+    const row = () => lib().artifacts.find((a) => a.slug === 'landed-other' && a.at === 'main');
+    assert.deepEqual(lib().public, { project: 'demo', root: fs.realpathSync(repo) });
+    assert.equal(row().tree, T);
+    assert.equal(json(must(['artifacts', '--json'])).find((a) => a.slug === 'landed-other').tree, T);
+    assert.equal(row().published, null, 'unpublished by the step before');
+    assert.ok(lib().artifacts.filter((a) => a.at !== 'main').every((a) => a.tree === undefined && a.published === undefined), 'a draft has neither');
+    must(['artifact', 'publish', 'landed-other', '--owner', '--tree', T]);
+    const p = row().published;
+    assert.deepEqual([p.tree, p.channel], [T, 'cli']);
+    assert.ok(Date.parse(p.at) > Date.now() - 600000);
+    must(['artifact', 'unpublish', 'landed-other', '--owner']);
+    assert.equal(row().published, null, 'the cache kept by tree id never hides the record');
+  });
+
 // Forks. A fork is a copy of the fixture as it stands between two steps, made by the run in
 // kit.test.mjs; a child process (fork.mjs) runs the steps given to it there. Those steps see
 // exactly the state they would have seen in line, and the steps after them go on without them, so

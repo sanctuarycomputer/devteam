@@ -4501,10 +4501,14 @@ function landedArtifacts() {
   let cache = {};
   try { cache = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
   const next = {};
+  // the cache holds what the tree says (describeArtifact); the row adds the tree id itself, for
+  // publishing, and nothing that changes without the tree changing goes in the cache
   const res = rows.map(([, tree, slug]) => {
-    if (cache[tree]?.slug === slug) return (next[tree] = cache[tree]);
-    const src = artifactSource('main', slug);
-    return src ? (next[tree] = describeArtifact(slug, 'main', src)) : null;
+    let d = cache[tree]?.slug === slug ? cache[tree] : null;
+    if (!d) { const src = artifactSource('main', slug); d = src ? describeArtifact(slug, 'main', src) : null; }
+    if (!d) return null;
+    next[tree] = d;
+    return { ...d, tree };
   }).filter(Boolean);
   if (canonical(next) !== canonical(cache)) try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(next)); } catch {}
   return res;
@@ -4586,6 +4590,9 @@ function publicManifest(slug) {
   }
   return { public: 1, project: a.project, slug, title: a.manifest.title, summary: a.manifest.summary, root: fs.realpathSync(mainRoot), tree: a.tree, files };
 }
+// A slug's recorded state as the Library shows it: published at a tree (with the line's date and
+// channel, so a line the owner never wrote is visible), or null.
+const publishedView = (a) => (a?.what === 'publish' ? { tree: a.tree, at: a.created_at, channel: a.channel ?? null } : null);
 // artifact new <slug> --title --summary [--for '[…]']: scaffold a page in this worktree.
 // artifact check [<slug>…]: the checks merge runs, on this checkout's artifacts.
 function cmdArtifact() {
@@ -7536,7 +7543,11 @@ function dashboardData() {
     fleet: { mode: draining() ? 'park' : fleetMode(), op: fleetOpInForce()?.fleet ?? draining()?.id ?? null, reason: fleetOpInForce()?.reason ?? (draining() ? drainReason(draining()) : null) },
     // the Library: artifacts landed and drafted, and the registry as it reads (locators redacted)
     library: {
-      artifacts: allArtifacts(),
+      // publish state is the log's, read here and never in describeArtifact's tree-keyed cache:
+      // a publish changes no byte of the artifact
+      artifacts: (() => { const rec = publishRecords(); return allArtifacts().map((a) => (a.at === 'main' ? { ...a, published: publishedView(rec.get(a.slug)) } : a)); })(),
+      // what the Library matches the gateway's header on (x-devteam-public): this project and checkout
+      public: { project: typeof settings.project === 'string' && PUBLIC_PROJECT.test(settings.project) ? settings.project : null, root: fs.realpathSync(mainRoot) },
       links: Object.entries(isObj(settings.links) ? settings.links : {}).filter(([, l]) => isObj(l)).map(([id, l]) => {
         const K = LINK_KINDS[l.kind];
         const loc = K ? K.locator(l, id) : {};
