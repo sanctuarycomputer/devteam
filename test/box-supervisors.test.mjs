@@ -81,10 +81,11 @@ test('which supervisors come back, and which are left alone', () => {
   assert.ok(fs.existsSync(boot), 'a dry run changes nothing');
 
   // already up: a pane at the repo's root, or the pane it noted; never a second one
-  fs.writeFileSync(panesFile, `%1\tmine\t${h}\tclaude\n%2\tdash-lone\t${path.join(code, 'lone')}\tnode\n`);
+  fs.writeFileSync(panesFile, `%1\tmine\t${h}\tclaude\n%2\tdash-lone\t${path.join(code, 'lone')}\tnode\n%3\tdashboard\t${path.join(code, 'parked')}\tnode\n`);
   const up = lines(run(['--all', '--dry-run']));
   assert.match(up['home-repo'], /already running/);
   assert.match(up.lone, /^would start fresh/, 'a dashboard is not a supervisor');
+  assert.match(up.parked, /^would start fresh/, 'nor is one in its own session, where the kit keeps it');
   fs.rmSync(panesFile);
 
   // a real restore: the window, the noted pane, the first message, the list used up

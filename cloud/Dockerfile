@@ -134,7 +134,7 @@ diagnose() {
   say "id: $(id 2>&1)"
   say "kernel: $(uname -srm 2>&1)"
   say "limits: $(grep -E '^(CapEff|CapBnd|NoNewPrivs|Seccomp):' /proc/self/status 2>&1 | tr -s '\t\n' ' ')"
-  say "data: $(ls -ld /data /data/home /data/gateway 2>&1 | tr '\n' ';')"
+  say "data: $(ls -ld /data /data/home /data/gateway /data/uploads 2>&1 | tr '\n' ';')"
   say "mount: $(grep ' /data ' /proc/mounts 2>&1)"
   say "space: $(df -h /data 2>&1 | tail -1)"
   say "port: ${PORT:-unset}; public url: ${DEVTEAM_PUBLIC_URL:-unset}; node: $(/usr/local/bin/node --version 2>&1)"
@@ -154,6 +154,12 @@ mkdir -p /data/home /data/gateway
 [ "$(stat -c %U /data/home)" = dev ] || chown dev:dev /data/home
 chown -R gw:gw /data/gateway
 chmod 700 /data/gateway
+# Files the owner drops on the terminal: the gateway writes them, dev (the owner's shells and every
+# agent) can only read. setgid, so what gw makes in here is dev's group without gw being in it.
+[ ! -L /data/uploads ] || rm -f /data/uploads
+mkdir -p /data/uploads
+chown gw:dev /data/uploads
+chmod 2750 /data/uploads
 as_gw() { setpriv --reuid=gw --regid=gw --init-groups env HOME=/data/gateway DEVTEAM_GATEWAY_DIR=/data/gateway "$@"; }
 # mise's shims first for dev alone: root and gw must never search a folder an agent can write to
 as_dev() { setpriv --reuid=dev --regid=dev --init-groups env -u DEVTEAM_CLAIM_TOKEN HOME=/data/home PATH="/data/home/.local/share/mise/shims:$PATH" "$@"; }
@@ -233,7 +239,7 @@ EOF
 # macOptionClickForcesSelection: tmux owns the mouse, so scrolling works, and on a Mac the terminal
 # lets a selection past it only with Option held (Shift, elsewhere), and only with this set.
 # dev's side: the shell's first-run notes, the tmux session the terminal opens, every repo's
-# dashboard again after a restart, the operator in window 0 (which brings back the supervisors),
+# dashboard again after a restart (in that repo's own tmux session), the operator in window 0 (which brings back the supervisors),
 # and ttyd on loopback. What it says goes to ~/box.log, on the volume: its output is kept off the
 # platform's log (devteam-box says why).
 COPY --chmod=755 <<'EOF' /usr/local/bin/devteam-dev
@@ -252,6 +258,8 @@ rm -f "$HOME"/code/*/docs/devteam/run/supervisor-pane
 [ -f .tmux.conf ] || printf 'set -g mouse on\nset -g history-limit 50000\nset -g default-terminal tmux-256color\nset -g default-shell /bin/bash\n' > .tmux.conf
 # copying in tmux, or in a program in it, reaches the browser's clipboard (the gateway's terminal page takes OSC 52)
 grep -q set-clipboard .tmux.conf || printf "set -g set-clipboard on\nset -as terminal-features ',xterm-256color:clipboard'\n" >> .tmux.conf
+# Claude Code asks for it in every pane: without it, it can't tell when its pane gains or loses focus
+grep -q focus-events .tmux.conf || echo 'set -g focus-events on' >> .tmux.conf
 if [ ! -f .bashrc ]; then
   cp /etc/skel/.bashrc .bashrc
   cat >> .bashrc <<'RC'
@@ -328,7 +336,21 @@ timeout 120 sh .box/boot.sh >> box.log 2>&1 || note "boot.sh failed (exit $?): s
 for k in "$HOME"/code/*/docs/devteam/scripts/devteam.mjs; do
   [ -f "$k" ] || continue
   r=${k%/docs/devteam/scripts/devteam.mjs}
-  tmux new-window -d -t home -n "dash-$(basename "$r")" -c "$r" "while :; do /usr/local/bin/node docs/devteam/scripts/devteam.mjs dashboard; sleep 5; done"
+  # adopted repos only, as box-supervisors counts them: a checkout of devteam itself has the kit but
+  # no settings, and its dashboard would only fail every 5s in a window of its own
+  [ -f "$r/docs/devteam/project/settings.md" ] || continue
+  # In the project's own tmux session, as the window named dashboard: where the kit keeps it
+  # (supervisor.md, the dashboard), so a supervisor that resumes finds it there and starts no
+  # second one on another port. A kit too old to name its session keeps it in home.
+  c="while :; do /usr/local/bin/node docs/devteam/scripts/devteam.mjs dashboard; sleep 5; done"
+  s=$(cd "$r" && /usr/local/bin/node docs/devteam/scripts/devteam.mjs settings --get tmux_session 2>/dev/null) || s=
+  if [ -z "$s" ] || [ "$s" = null ]; then
+    tmux new-window -d -t home -n "dash-$(basename "$r")" -c "$r" "$c"
+  elif tmux has-session -t "=$s" 2>/dev/null; then
+    tmux new-window -d -t "=$s" -n dashboard -c "$r" "$c"
+  else
+    tmux new-session -d -s "$s" -n dashboard -c "$r" "$c"
+  fi
 done
 # The operator (window 0) is what brings the supervisors back: box-supervisors reads the list saved above.
 # Which supervisors are up, kept on the volume each minute: a machine that dies writes nothing at

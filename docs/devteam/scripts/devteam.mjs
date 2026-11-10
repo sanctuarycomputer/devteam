@@ -347,7 +347,7 @@ const SETTINGS_DEFAULTS = {
   // kit verbatim from that tag without asking the owner (init writes it for every new project);
   // "ask" asks the owner per release, unless they gave a standing rule scoped chore:devteam-sync.
   // The default is "ask" so a project adopted before this setting keeps asking. The owner's.
-  upstream_sync: 'ask',
+  upstream_sync: 'adopt',
   upstream_check_hours: 24,
   retro_every_days: 7,
   research_every_days: 7,
@@ -365,6 +365,8 @@ const OWNER_SETTINGS = {
   forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', upstream_repo: 'governance-edit', upstream_sync: 'governance-edit',
   release: 'governance-edit', secret_commands: 'governance-edit', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit',
 };
+// The classes whose owner answer approves a chore that changes real kit files (isKitFile).
+const KIT_CLASSES = ['governance-edit', 'process-edit', 'gate-change'];
 const canonical = (v) => (Array.isArray(v) ? `[${v.map(canonical).join(',')}]` : v && typeof v === 'object' ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(',')}}` : JSON.stringify(v));
 function settingsAt(ref, { orNull = false } = {}) {
   const text = git(['show', `${ref}:${projectRel}/settings.md`]);
@@ -663,6 +665,9 @@ const componentsOn = (s, link = 'home') => (linesDeclared(s) ? Object.entries(s.
 // the project (home's, from a sibling's worktree), like projectRel.
 const kitRel = path.relative(projectRoot, devteamDir).split(path.sep).join('/');
 const devteamLine = () => [...(kitRel && !kitRel.startsWith('..') ? [`${kitRel}/**`] : []), ...(projectInRepo ? [`${projectRel}/**`] : [])];
+// A real kit file: under the kit's own path, other than project/ and run/ (a project's own files, and
+// its machine state). Everything else a chore changes is the project's.
+const isKitFile = (f) => { if (kitRel.startsWith('..')) return false; const rel = kitRel ? (f.startsWith(`${kitRel}/`) ? f.slice(kitRel.length + 1) : null) : f; return rel !== null && !/^(project|run)\//.test(rel); };
 
 // One scope grammar for knowledge scopes and link `for` scopes: <kind> or <kind>:<id>.
 // all and project mean the whole project, and both stay accepted. A later scope kind is one entry.
@@ -874,7 +879,9 @@ function checkLine(o, file) {
   const errs = schemaErrors({ ...SCHEMA, $defs: undefined }, envelope, 'line').map((e) => e.replace(/^line\./, ''));
   if (errs.length) return errs;
   if ((o.channel !== undefined) !== (o.by === 'owner')) errs.push('channel is on every owner line and no other');
-  if (o.channel === 'chat' && !(o.type === 'question' && o.op === 'set' && typeof o.answer === 'string' && typeof o.said === 'string')) errs.push('a chat line is an answer to a question, with the owner\'s words in said');
+  // A chat line is an answer, with the owner's words in said, or what that answer carried: its
+  // standing rule (knowledge citing the question), or its verdict on a goal (goal decide).
+  if (o.channel === 'chat' && !((o.type === 'question' && o.op === 'set' && typeof o.answer === 'string' && typeof o.said === 'string') || (o.type === 'knowledge' && o.op === 'new' && o.evidence?.length) || (o.type === 'goal' && o.op === 'set' && o.decision))) errs.push('a chat line is an answer to a question with the owner\'s words in said, or the standing rule or goal verdict that answer carried');
   const t = SCHEMA.$defs.types[o.type];
   const body = Object.fromEntries(Object.entries(o).filter(([k]) => !ENVELOPE.includes(k)));
   errs.push(...schemaErrors(t, body, o.type));
@@ -1385,7 +1392,7 @@ function goalChangeProblem(q, goalId, qid, l = null) {
 }
 
 // The owner's own standing rule for a class (scope class:<cls>, accepted, written by the owner):
-// the latest one. A rule relayed from chat never exists (answer --from-chat takes no --rule).
+// the latest one, from the Inbox, a terminal or chat alike (answer --from-chat --rule).
 const ownerRuleFor = (cls) => logObjects('knowledge').filter((k) => writerClass(k.created_by) === 'owner' && k.scope === `class:${cls}` && k.status === 'accepted').sort(byTime).pop() ?? null;
 // The correction on an act, with who made it and when.
 // The supervisor's calls: its decisions, and the acts that are their own decision (no decision
@@ -3604,9 +3611,12 @@ function adoptProblem({ tag, sha, mb, main, changed, src }) {
   if (missing.length || extra.length) return `its kit files aren't exactly what upstream changed from ${base} to ${tag}${missing.length ? `; missing ${some(missing)}` : ''}${extra.length ? `; extra ${some(extra)}` : ''}`;
   return null;
 }
-// settings.upstream_sync as given, failing closed: anything but the two values is "ask", with a warning.
+// settings.upstream_sync as given, "adopt" where it's absent. Unreadable settings, or anything but the
+// two values, fail closed to "ask" (the latter with a warning).
 function upstreamSyncMode(s) {
-  if (!s || s.upstream_sync === 'ask' || s.upstream_sync === 'adopt') return s?.upstream_sync ?? 'ask';
+  if (!s) return 'ask';
+  if (s.upstream_sync === undefined) return 'adopt';
+  if (s.upstream_sync === 'ask' || s.upstream_sync === 'adopt') return s.upstream_sync;
   warn(`settings.upstream_sync is ${JSON.stringify(s.upstream_sync)}; only "ask" and "adopt" are valid, so it is read as "ask"`);
   return 'ask';
 }
@@ -3799,8 +3809,8 @@ function cmdMerge() {
     if (pending.length) fails.push(`the forge's checks are still running at ${sha.slice(0, 12)}: ${pending.join(', ')}; wait for them, then merge`);
     if (failing.length) fails.push(`the forge's checks failed at ${sha.slice(0, 12)}: ${failing.join(', ')}`);
   }
-  // A chore PR that touches the kit, the agent config or the forge config carries an owner answer
-  // (classes governance-edit, process-edit, gate-change); project/ files are the supervisor's.
+  // A chore PR that changes files outside project/ (the agent config, the forge config) carries an
+  // owner answer; real kit files need it in a kit class (KIT_CLASSES). project/ files are the supervisor's.
   let approved = flagStr('approved') ?? null;
   let standing = null;
   // Owner-only settings, on every kind of PR (a ticket, a plan or a chore) in home, where
@@ -3860,19 +3870,28 @@ function cmdMerge() {
   }
   if (chore) {
     const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
-    const kit = base ? changedFiles(base, sha).filter((f) => !f.startsWith(`${projectRel}/`)) : [];
+    const outside = base ? changedFiles(base, sha).filter((f) => !f.startsWith(`${projectRel}/`)) : [];
+    const kitFiles = outside.filter(isKitFile);
+    const kitAnswer = approved && kitFiles.length ? ownerAnswer(approved, 'merge --approved') : null;
+    // A secret chore isn't a kit change: the encrypted stores its answer posted (a sops file can
+    // sit under the kit) need only that answer, held to its own chore below.
+    const secretChore = kitAnswer?.secrets.length && kitAnswer.secrets_posted?.length && chore.startsWith('secret-') && kitAnswer.answer?.startsWith('Posted');
+    const kit = secretChore ? kitFiles.filter((f) => !secretStores(kitAnswer).includes(f)) : kitFiles;
+    const kitApproved = !kit.length || KIT_CLASSES.includes(kitAnswer?.class);
     // Only these two standing rules approve kit files: an owner's rule that settles owner settings
-    // (a gate-change rule, owner_rules) says nothing about the kit's files.
+    // (a gate-change rule, owner_rules) says nothing about the kit's files. Files verbatim from
+    // upstream need no question, so an --approved answer outside the kit classes doesn't stop this.
     let kitRule = null;
-    if (kit.length && !approved && chore.startsWith('devteam-sync-')) {
-      const r = upstreamSyncApproval(chore, sha, kit);
-      if (r.rule || r.policy) { kitRule = standing = r; out(`kit files match upstream ${r.tag} exactly; approved by ${r.rule ? `the owner's standing rule ${r.rule.id}` : 'settings.upstream_sync "adopt"'}; ${r.tag} is ${r.tagSha}`); } else if (r.problem) fails.push(r.problem);
+    if (outside.length && (!approved || !kitApproved) && chore.startsWith('devteam-sync-')) {
+      const r = upstreamSyncApproval(chore, sha, outside);
+      if (r.rule || r.policy) { kitRule = standing = r; out(`kit files match upstream ${r.tag} exactly; approved by ${r.rule ? `the owner's standing rule ${r.rule.id}` : 'settings.upstream_sync "adopt"'}; ${r.tag} is ${r.tagSha}`); } else if (r.problem && !approved) fails.push(r.problem);
     }
-    if (kit.length && !approved && !kitRule && base) {
-      const r = ciFixApproval(chore, sha, base, kit);
+    if (outside.length && !approved && !kitRule && base) {
+      const r = ciFixApproval(chore, sha, base, outside);
       if (r.rule) { kitRule = standing = r; out(`changes only workflow files and keeps every job; approved by the owner's standing rule ${r.rule.id} ("${r.rule.statement}")`); } else if (r.problem) fails.push(r.problem);
     }
-    if (kit.length && !approved && !kitRule) fails.push(`touches files outside project/ (${kit.slice(0, 6).join(', ')}${kit.length > 6 ? ', …' : ''}); the owner's answer is needed: merge --chore ${chore} --approved <qid>`);
+    if (outside.length && !approved && !kitRule) fails.push(`touches files outside project/ (${outside.slice(0, 6).join(', ')}${outside.length > 6 ? ', …' : ''}); the owner's answer is needed: merge --chore ${chore} --approved <qid>`);
+    else if (approved && !kitRule && !kitApproved) fails.push(`changes kit files (${kit.slice(0, 6).join(', ')}${kit.length > 6 ? ', …' : ''}); that needs the owner's answer in a ${KIT_CLASSES.join(', ')} question, and ${approved} is ${kitAnswer.class ?? 'classless'}`);
   }
   if (approved) {
     const av = ownerAnswer(approved, 'merge --approved');
@@ -3995,7 +4014,7 @@ function trustEvidence(cls) {
   const drops = acts.map(correctionOf).filter(Boolean).map((c) => c.at).sort();
   const since = drops[drops.length - 1] ?? '';
   const after = acts.filter((a) => a.created_at > since);
-  const answered = questions().filter((q) => q.class === cls && q.status === 'answered' && (q.recommendation || (q.kind === 'review' && (q.review?.data?.proposals ?? 0) > 0)) && q.channel !== 'chat').sort((a, b) => a.answered_at.localeCompare(b.answered_at)).slice(-promo.agreement_window);
+  const answered = questions().filter((q) => q.class === cls && q.status === 'answered' && (q.recommendation || (q.kind === 'review' && (q.review?.data?.proposals ?? 0) > 0))).sort((a, b) => a.answered_at.localeCompare(b.answered_at)).slice(-promo.agreement_window);
   const agree = answered.filter((q) => q.matched).length;
   return {
     acts_since_drop: after.length, uncorrected_acts: after.filter((a) => !correctionOf(a)).map((a) => a.id), corrections: drops.length,
@@ -4148,7 +4167,7 @@ function cmdAsk() {
     if (flagStr('default') !== undefined) die('a goal-met question has no --default: only the owner says a goal is met');
   }
   // registry-attest: the owner's yes that the registry lists every repo, design file and doc the
-  // project depends on (planning.md §7). Owner-only, like goal-met: never defaulted, never from chat.
+  // project depends on (planning.md §7). Owner-only, like goal-met: never defaulted.
   if (cls === 'registry-attest') {
     const g = logGet(flagStr('goal') ?? '');
     if (g?.type !== 'goal') die('a registry-attest question needs --goal <g-id> (the goal with a --registry-precondition)');
@@ -4260,13 +4279,21 @@ function cmdAsk() {
   out(line.id);
 }
 
-// The owner answers (terminal or dashboard). The supervisor may only apply a default or withdraw.
+// The checks every record of the owner's word in chat shares: only the supervisor records it, and
+// only with the owner's words verbatim. What they said, ready for the line.
+function chatAnswer(what) {
+  if (process.env.DEVTEAM_ROLE !== 'supervisor' || logWriter() !== 'supervisor') die(`${what} --from-chat: the supervisor records what the owner said in its session; in your own terminal, answer directly`);
+  if (!flagStr('said')?.trim()) die(`${what} --from-chat needs --said "<the owner's words, verbatim>"`);
+  return flagStr('said').trim();
+}
+// The owner answers (terminal, dashboard or, through the supervisor, chat). The supervisor may only
+// apply a default or withdraw.
 function cmdAnswer() {
   const [id, ...restWords] = positional;
   const reviewResult = flagStr('review-result');
   const decline = !!flags.decline;
   if (flags['review-result'] === true) die('answer <qid> --review-result <file|->: the result file, or - for stdin');
-  if (!id || (!restWords.length && !flags.defaulted && !reviewResult && !decline)) die('usage: answer <qid> "<answer>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>" [--rule-scope s]]   |   answer <qid> --review-result <file|->   |   answer <qid> "<why>" --decline   |   answer <qid> "<answer>" --from-chat --said "<owner\'s words>" [--autonomy n]   |   answer <qid> --defaulted   (supervisor)');
+  if (!id || (!restWords.length && !flags.defaulted && !reviewResult && !decline)) die('usage: answer <qid> "<answer>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>" [--rule-scope s]]   |   answer <qid> --review-result <file|->   |   answer <qid> "<why>" --decline   |   answer <qid> "<answer>" --from-chat --said "<owner\'s words>" [--autonomy n] [--rule "<standing rule>"]   |   answer <qid> --defaulted   (supervisor)');
   if (flags.defaulted) {
     supervisorOnly('answer --defaulted');
     const v = openQuestion(id);
@@ -4275,37 +4302,26 @@ function cmdAnswer() {
     appendLog({ type: 'act', class: 'apply-default', what: `applied the default to ${id}: ${v.default}`, refs: [id], reversible: true }, 'supervisor');
     return out(`defaulted ${id}: ${v.default}`);
   }
-  // --from-chat: the owner said it in the supervisor's own session. The supervisor records it as the
-  // owner's answer with their words verbatim; the dashboard lists it for the owner to check, and it
-  // never counts as agreement evidence for the trust ladder. The supervisor is the party the ladder
-  // governs, so its say-so never decides what is reserved to the owner (one-way doors, trust, the
-  // owner_only classes) and never raises its own rung; it may only record a lower one.
+  // --from-chat: the owner said it in the supervisor's own session, and that carries the same
+  // weight as answering in the Inbox, for every question and everything that reads an answer. The
+  // supervisor records it as the owner's answer with their words verbatim; the dashboard lists it
+  // for the owner to check, and metrics flags a quote the transcript doesn't show them typing.
   const fromChat = !!flags['from-chat'];
-  if (fromChat) {
-    if (process.env.DEVTEAM_ROLE !== 'supervisor' || logWriter() !== 'supervisor') die('answer --from-chat: the supervisor records what the owner said in its session; in your own terminal, answer directly');
-    if (!flagStr('said')?.trim()) die('answer --from-chat needs --said "<the owner\'s words, verbatim>"');
-    if (flagStr('rule')) die('answer --from-chat takes no --rule: a standing rule binds the whole project, so the owner gives it from the dashboard or their terminal');
-  }
+  if (fromChat) chatAnswer('answer');
   const { by } = fromChat ? { by: 'owner' } : ownerWriter();
   const v = openQuestion(id, ['open', 'defaulted']);
   if (flagStr('seen') && flagStr('seen') !== v.hash) die(`${id} changed since you saw it; reload and read it again before you answer`);
   { const moved = artifactLinksMoved(v); if (moved) die(moved); }
-  if (v.kind === 'goal-approval') die(`${id} approves a goal on its design: the owner answers it with goal decide ${v.goal} approve|refine|let-go [--notes "…"] (or on the dashboard)`);
+  if (v.kind === 'goal-approval') die(`${id} approves a goal on its design: the owner answers it with goal decide ${v.goal} approve|refine|let-go [--notes "…"] (or on the dashboard)${fromChat ? `; from chat, goal decide ${v.goal} <verdict> --from-chat --said "<the owner's words>"` : ''}`);
   // A review is answered by the owner's own process with its result, or sent back with a reason;
-  // never in free text, never from chat (a chat can't carry rows, and the supervisor must not
-  // compose the owner's answer to its own proposals).
+  // never in free text, wherever it comes from (a result file carries the rows, and chat can't).
   if (v.kind === 'review' || reviewResult || decline) {
     if (v.kind !== 'review') die(`--review-result and --decline answer a review question; ${id} is ${v.kind}`);
-    if (fromChat) die(`answer --from-chat: ${id} is a review; the owner answers it from their own process (answer ${id} --review-result <file> in their terminal)`);
     if (v.status !== 'open') die(`${id} is already ${v.status}`);
     if (reviewResult && decline) die('a review is answered with --review-result or sent back with --decline, not both');
     if (!reviewResult && !decline) die(`${id} is a review: answer it with its result (answer ${id} --review-result <file|->) or send it back (answer ${id} "<why>" --decline)`);
     if (reviewResult && restWords.length) die('answer --review-result takes no text: the result is the answer');
     if (decline && !restWords.join(' ').trim()) die(`answer ${id} "<why>" --decline: say why it goes back`);
-  }
-  if (fromChat) {
-    const reserved = ['one-way-door', 'trust'].includes(v.kind) || (ladder().owner_only ?? []).includes(v.class) || (v.why_asked?.reasons ?? []).includes('one-way-door');
-    if (reserved) die(`answer --from-chat: ${id} is reserved to the owner (${v.kind}${v.class ? `, ${v.class}` : ''}); ask them to answer it from the dashboard or their terminal`);
   }
   const answer = restWords.join(' ').trim();
   let autonomy;
@@ -4315,16 +4331,15 @@ function cmdAnswer() {
     const rung = flagNum('autonomy');
     if (![1, 2, 3].includes(rung)) die('--autonomy is 1 (ask), 2 (ask with a default) or 3 (act and report)');
     if (rung > def.ceiling) die(`${v.class} has a ceiling of rung ${def.ceiling} (constitution.md)`);
-    if (fromChat && rung > rungFor(v.class, flagStr('scope') ?? null)) die(`answer --from-chat can lower ${v.class}'s rung but not raise it (now ${rungFor(v.class, flagStr('scope') ?? null)}): the owner raises a rung from the dashboard or their terminal`);
     autonomy = { class: v.class, rung, scope: flagStr('scope') ?? null };
   }
-  const reviewFields = reviewResult ? acceptReviewResult(v, reviewResult) : decline ? { answer: `Sent back: ${answer}`, declined: true } : {};
+  const reviewFields = reviewResult ? acceptReviewResult(v, reviewResult, fromChat ? 'chat' : ownerChannel()) : decline ? { answer: `Sent back: ${answer}`, declined: true } : {};
   appendLog({ type: 'question', op: 'set', id, answer, autonomy, standing_rule: flagStr('rule'), ...reviewFields, ...(fromChat ? { channel: 'chat', said: flagStr('said').trim() } : {}) }, by);
   if (v.kind === 'review') fs.rmSync(reviewDraftFile(id), { force: true });
   // A standing rule applies where the owner says (--rule-scope), else where the question says its
   // rule would apply (ask --rule-scope; the dashboard shows it next to the rule field), else the
   // whole project.
-  if (flagStr('rule')) appendLog({ type: 'knowledge', kind: 'preference', statement: flagStr('rule'), scope: flagStr('rule-scope') ?? v.rule_scope ?? 'project', status: 'accepted', confidence: 1, evidence: [id] }, by);
+  if (flagStr('rule')) appendLog({ type: 'knowledge', kind: 'preference', statement: flagStr('rule'), scope: flagStr('rule-scope') ?? v.rule_scope ?? 'project', status: 'accepted', confidence: 1, evidence: [id], channel: fromChat ? 'chat' : undefined }, by);
   if (!fromChat) nudgeSupervisor(`[devteam answer ${id} from owner] read it with: devteam.mjs questions --id ${id}`);
   out(`${decline ? 'sent back' : 'answered'} ${id}${fromChat ? ' (from chat; listed on the dashboard for the owner to check)' : reviewFields.result ? `: ${reviewFields.answer} (result sha256 ${reviewFields.result.sha256.slice(0, 12)})` : ''}`);
 }
@@ -4898,7 +4913,7 @@ const ownEntry = (o, k) => (o !== null && typeof o === 'object' && Object.hasOwn
 // result rows), answers only known rows, each once, leaving rows undecided only when the question
 // allows it. kept and the counts are recomputed here, never taken from the page. Returns the
 // fields of the owner's answer line, after writing run/questions/<qid>/result.json.
-function acceptReviewResult(v, src) {
+function acceptReviewResult(v, src, channel) {
   const rv = v.review;
   const pins = reviewPins(rv);
   if (pins.status === 'missing') die(`${v.id}: the page's commit ${rv.commit.slice(0, 12)} (${rv.ref}) is gone or on no branch, and its files are not on main, so nothing can be answered on it; tell the supervisor to ask again`);
@@ -4953,7 +4968,7 @@ function acceptReviewResult(v, src) {
     stored.summary = c;
   }
   stored.answered_at = nowIso();
-  stored.channel = ownerChannel();
+  stored.channel = channel;
   const text = `${JSON.stringify(stored, null, 2)}\n`;
   const file = reviewResultFile(v.id);
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -5161,6 +5176,8 @@ function parseSink(sink, { soft = false } = {}) {
   if (!argv[0]) fail(`sink "${sink}": stdin:<command> <args…> (arguments can't contain spaces)`);
   return { type, argv };
 }
+// The files a secrets question's sinks write: what its chore lands.
+const secretStores = (v) => (v.secrets ?? []).flatMap((x) => { try { const f = parseSink(x.sink, { soft: true }).file; return f ? [f] : []; } catch { return []; } });
 // A stdin sink runs as the owner, so it must start with a command the owner allowed in settings.
 function allowedCommand(argv) {
   const line = argv.join(' ');
@@ -6025,9 +6042,6 @@ function goalMetProblem(q, goalId, qid, at = null) {
   if (v.class !== 'goal-met') return `${v.id} was asked in class ${v.class ?? '(none)'}, not goal-met`;
   if (v.goal !== goalId) return `${v.id} is about ${v.goal ?? 'no goal'}, not ${goalId} (ask with --goal ${goalId})`;
   if (v.status !== 'answered') return `${v.id} is not answered by the owner (${v.status})`;
-  // goal-met is owner_only: the supervisor can't record a chat answer to it, so a line that says so
-  // was written by hand.
-  if (v.channel === 'chat') return `${v.id} was answered in chat; the owner answers a goal-met question from the dashboard or their terminal`;
   if (!v.matched) return `${v.id} was answered "${v.answer}", not its recommendation${v.recommendation ? ` ("${v.recommendation}")` : ''}`;
   if (at && at < v.answered_at) return `the reading was written before ${v.id} was answered`;
   return null;
@@ -6035,7 +6049,7 @@ function goalMetProblem(q, goalId, qid, at = null) {
 // The registry is complete (planning.md §7), the precondition the Baseline carries: its count half
 // is components check --count, with the gates; its other half is the owner's yes to a
 // registry-attest question about the goal, which goal-readiness waits for. Only the owner's own
-// answer counts (registry-attest is owner_only, so never a chat answer or a default), and only yes.
+// answer counts (registry-attest is owner_only, so never a default; chat counts), and only yes.
 // The goal carries it as a field, registry_precondition: the number of its precondition that is
 // "the registry is complete", set by goal add|set --registry-precondition n (none clears it). The
 // check is keyed to that field, never to a precondition's wording.
@@ -6085,11 +6099,10 @@ function readinessGoal(refs) {
 }
 function registryAttestGap(goalId) {
   const qs = questions().filter((q) => q.class === 'registry-attest' && q.goal === goalId);
-  if (qs.some((q) => q.status === 'answered' && q.channel !== 'chat' && q.matched && q.answer.trim().toLowerCase().split(' — ')[0] === 'yes')) return null;
+  if (qs.some((q) => q.status === 'answered' && q.matched && q.answer.trim().toLowerCase().split(' — ')[0] === 'yes')) return null;
   const last = qs.sort((a, b) => (a.asked_at < b.asked_at ? -1 : 1)).pop();
   if (!last) return 'none asked yet';
   if (last.status !== 'answered') return `${last.id} is not answered by the owner (${last.status})`;
-  if (last.channel === 'chat') return `${last.id} was answered in chat; the owner answers it from the dashboard or their terminal`;
   return `${last.id} was answered "${last.answer}", not yes`;
 }
 // The readings that count. Each must match how the goal is read, whoever wrote the line: a repo
@@ -6107,7 +6120,7 @@ function goalReadings(gid) {
   return all.filter((o) => {
     if (src === 'repo') return o.source === 'repo' && typeof o.sha === 'string' && onMain(o.sha);
     if (src === 'prod') return o.source === 'prod';
-    if (o.created_by === 'owner') return o.channel !== 'chat';
+    if (o.created_by === 'owner') return true;
     if (!o.approved || used.has(o.approved) || o.measure.value !== 1 || goalMetProblem(logGet(o.approved), gid, o.approved, o.created_at)) return false;
     used.add(o.approved);
     return true;
@@ -6358,11 +6371,14 @@ function cmdGoal() {
   // (notes the planner must take into account; the supervisor reworks the design and asks again),
   // or let go (abandoned). It answers the open goal-approval question for the goal.
   if (sub === 'approve' || sub === 'decide') {
-    const { by } = ownerWriter();
+    const said = flags['from-chat'] ? chatAnswer('goal decide') : null;
+    const { by } = said ? { by: 'owner' } : ownerWriter();
+    const chat = said ? { channel: 'chat' } : {};
     const g = logGet(id);
     if (g?.type !== 'goal') die(`no goal ${id}`);
     const verdict = sub === 'approve' ? 'approve' : positional[2];
-    if (!['approve', 'refine', 'let-go', 'restore'].includes(verdict)) die('usage: goal decide <g-id> approve|refine|let-go|restore [--notes "…"] [--question q-…]');
+    if (!['approve', 'refine', 'let-go', 'restore'].includes(verdict)) die('usage: goal decide <g-id> approve|refine|let-go|restore [--notes "…"] [--question q-…] [--from-chat --said "…"]');
+    if (said && verdict === 'restore') die('goal decide restore is the owner\'s undo of a let go, not an answer to a question; it doesn\'t come from chat');
     // Restore undoes a let go: the goal gets back the status it had, parked, and its questions return.
     if (verdict === 'restore') {
       if (g.status !== 'abandoned') die(`${id} is ${g.status ?? 'draft'}, not let go; nothing to restore`);
@@ -6378,15 +6394,16 @@ function cmdGoal() {
     if (verdict === 'refine' && !notes) die('refine needs --notes: what the planner should change');
     const ask = flagStr('question') ? questions().find((q) => q.id === flagStr('question')) : questions().find((q) => q.kind === 'goal-approval' && q.goal === id && q.status === 'open');
     if (flagStr('question') && (!ask || ask.kind !== 'goal-approval' || ask.goal !== id)) die(`${flagStr('question')} is not a goal-approval question for ${id}`);
+    if (said && ask?.status !== 'open') die(`goal decide --from-chat answers ${id}'s open goal-approval question, and there is none`);
     if (verdict === 'approve') {
       const c = goalCheck(g);
       if (c.definition.length && !flags.force) die(`${id} is not fully defined:\n  - ${c.definition.join('\n  - ')}\n(--force to approve anyway)`);
       if (!ask && !flags.force) die(`${id} has no design up for approval: the supervisor writes and reviews the design first, then asks (ask --kind goal-approval --goal ${id}); --force to approve without one`);
     }
     const status = { approve: 'ready', refine: undefined, 'let-go': 'abandoned' }[verdict];
-    appendLog({ type: 'goal', op: 'set', id, status, decision: { verdict, notes, question: ask?.id } }, by);
-    if (ask?.status === 'open') appendLog({ type: 'question', op: 'set', id: ask.id, answer: `${{ approve: 'Approve', refine: 'Refine', 'let-go': 'Let go' }[verdict]}${notes ? ` — ${notes}` : ''}` }, by);
-    nudgeSupervisor(`[devteam goal ${verdict} ${id} from owner] read it with: devteam.mjs goal show ${id}${verdict === 'let-go' ? `; its sessions park: goal park-sessions ${id}` : ''}`);
+    appendLog({ type: 'goal', op: 'set', id, status, decision: { verdict, notes, question: ask?.id }, ...chat }, by);
+    if (ask?.status === 'open') appendLog({ type: 'question', op: 'set', id: ask.id, answer: `${{ approve: 'Approve', refine: 'Refine', 'let-go': 'Let go' }[verdict]}${notes ? ` — ${notes}` : ''}`, ...chat, ...(said ? { said } : {}) }, by);
+    if (!said) nudgeSupervisor(`[devteam goal ${verdict} ${id} from owner] read it with: devteam.mjs goal show ${id}${verdict === 'let-go' ? `; its sessions park: goal park-sessions ${id}` : ''}`);
     return out(`${id}: ${verdict}${status ? ` (${status})` : ''}${verdict === 'let-go' ? '; its sessions park and its questions leave the inbox (goal decide restore undoes it)' : ''}`);
   }
   // The goal's toggle (planning.md §1, holds): run, drain or park. The owner sets any; the
@@ -7062,6 +7079,22 @@ function cmdObserveSpend() {
 let spendWhoMemo = null;
 const spendByWho = () => { if (spendWhoMemo) return spendWhoMemo; const m = new Map(); for (const r of spendItems()) { const x = m.get(r.who) ?? { usd: 0, input_tokens: 0, output_tokens: 0 }; x.usd += r.usd; x.input_tokens += r.input + r.cache_read + r.cache_write; x.output_tokens += r.output; m.set(r.who, x); } return (spendWhoMemo = m); };
 
+// Chat answers of the last week whose quoted words aren't in an owner-typed line of the supervisor's
+// own transcript (Claude Code's only; real owner lines are userType "external"). Only what the tail
+// read by supervisorTranscript covers is checked: no transcript, or an older answer, says nothing.
+const CHAT_QUOTE_WINDOW_MS = 7 * 24 * 3600000;
+function chatQuotesNotFound() {
+  if (!/^claude(\s|$)/.test(loadSettings().resume_command)) return [];
+  const recent = questions().filter((q) => q.channel === 'chat' && q.said && Date.now() - Date.parse(q.answered_at) < CHAT_QUOTE_WINDOW_MS);
+  const t = recent.length ? supervisorTranscript() : null;
+  if (!t) return [];
+  const from = Date.parse(t.entries.find((o) => o?.timestamp)?.timestamp);
+  const norm = (x) => x.toLowerCase().replace(/[\u2018\u2019]/g, "'").replace(/[\u201c\u201d]/g, '"').replace(/\s+/g, ' ').trim();
+  const typed = t.entries.filter((o) => o?.type === 'user' && o.userType === 'external' && !o.isMeta && !o.isSidechain).map((o) => { const c = o.message?.content; return norm(typeof c === 'string' ? c : Array.isArray(c) ? c.filter((x) => x?.type === 'text').map((x) => x.text).join(' ') : ''); });
+  // typed while the agent was mid-turn: the transcript has these as queued attachments
+  typed.push(...t.entries.filter((o) => o?.type === 'attachment' && o.attachment?.type === 'queued_command' && o.origin?.kind === 'human' && typeof o.attachment.prompt === 'string').map((o) => norm(o.attachment.prompt)));
+  return recent.filter((q) => { const said = norm(q.said).replace(/^["'\s]+|["'.!?\s]+$/g, ''); return Date.parse(q.answered_at) >= from && !typed.some((x) => x.includes(said)); });
+}
 function collectMetrics(since) {
   const settings = loadSettings();
   const now = Date.now();
@@ -7270,6 +7303,9 @@ function collectMetrics(since) {
     if (!drained && waiting.length && (cap == null || ps.length < cap)) add('medium', 'idle-planning', `${waiting.length} goal${waiting.length > 1 ? 's' : ''}`, `${ps.length}${cap == null ? '' : `/${cap}`} planner${ps.length === 1 ? '' : 's'} active; nobody is planning ${waiting.map((g) => `"${g.title}"`).join(', ')}`, `start a planner for each (goals plan in parallel), or record why one waits on another's design (goal set <id> --plan-after <g-id> --reason "…"): ${waiting.slice(0, cap == null ? waiting.length : Math.max(1, cap - ps.length)).map((g) => g.id).join(', ')}`);
   }
   if (!drained && ready.length && active < settings.max_active_tickets) add('medium', 'idle-capacity', `${ready.length} ready`, `${active}/${settings.max_active_tickets} workers active`, `make workers for: ${ready.slice(0, 5).map((t) => t.id).join(', ')}`);
+  // A chat answer's quote that the supervisor's transcript doesn't show the owner typing: a record
+  // for the owner to look at, never a block.
+  for (const q of chatQuotesNotFound()) add('medium', 'chat-quote-not-found', q.id, `recorded from chat as the owner's words, "${q.said.slice(0, 120)}", and the supervisor's transcript has no owner message with them`, 'check it on the dashboard; if the owner never said it, correct the answer');
   // A harness's runtime file committed by accident: it churns in every worktree and means nothing elsewhere.
   const trackedRuntime = (git(['ls-files'], mainRoot) ?? '').split('\n').filter((f) => f && isHarnessRuntime(f));
   if (trackedRuntime.length) add('medium', 'tracked-runtime-file', trackedRuntime.slice(0, 3).join(', '), `${trackedRuntime.length} agent-harness runtime file(s) are tracked in git (${trackedRuntime.slice(0, 5).join(', ')}): machine-local state that changes in every worktree`, `a chore (it changes .gitignore, so it needs the owner's answer): git rm --cached ${trackedRuntime.map((f) => `'${f}'`).join(' ')}, and add ${RUNTIME_RES.filter(([, re]) => trackedRuntime.some((f) => re.test(f))).map(([pat]) => pat).join(' ')} to .gitignore`);
@@ -10317,7 +10353,7 @@ Decide and act (supervisor.md, constitution.md)
   review verify <qid> --applied <file>   rows applied ([{ "id", "values", "evidence" }]) vs rows the owner decided; exit 1 on any difference
   review draft <qid> [<file|->]   owner: save partial progress; without a file, print it (a draft is never an answer)
   answer <qid> --review-result <file|-> | answer <qid> "<why>" --decline   (owner) a review: validate and hash its result, or send it back
-  answer <qid> "<text>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> "<text>" --from-chat --said "<owner's words>" | answer <qid> --defaulted   (supervisor)
+  answer <qid> "<text>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> "<text>" --from-chat --said "<owner's words>" [--autonomy n] [--rule "…"] | answer <qid> --defaulted   (supervisor)
   withdraw <qid> [--reason r] | questions [--all] [--id q] [--json]
   decide --class c [--scope s] [--approved qid|kid] [--options a b] [--rationale r] [--confidence 0-1] [--refs ids] [--irreversible] -- "<what>"   a judgment call and the trust it rests on; prints d-…
   act --decision d-… -- "<what>"   carry out a decision (merge, ticket, withdraw, goal hold, worker, planner, fleet and link take --decision too)

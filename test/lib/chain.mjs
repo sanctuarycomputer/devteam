@@ -175,7 +175,6 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     assert.match(dt(['goal', 'reading', Go, '--approved', Qwrong], { role: 'sup' }).err, /class release-scope, not goal-met/);
     const Qm = must(metQ(['--recommendation', 'yes']), { role: 'sup' });
     assert.match(dt(['goal', 'reading', Go, '--approved', Qm], { role: 'sup' }).err, /not answered by the owner \(open\)/);
-    assert.notEqual(dt(['answer', Qm, 'yes', '--from-chat', '--said', 'yes'], { role: 'sup' }).status, 0, 'goal-met is owner-only: never answered from chat');
     hand('supervisor', { type: 'observation', source: 'owner', subject: Go, kind: 'reading', detail: 'typed', measure: { value: 1, unit: 'attested' } });
     hand('supervisor', { type: 'observation', source: 'owner', subject: Go, kind: 'reading', detail: 'typed', measure: { value: 1, unit: 'attested' }, approved: Qm });
     assert.deepEqual(readings(Go), [], 'a hand-written reading attests nothing: not alone, not with an unanswered question');
@@ -183,11 +182,6 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     const Qno = must(metQ(['--recommendation', 'yes']), { role: 'sup' });
     must(['answer', Qno, 'not yet']);
     assert.match(dt(['goal', 'reading', Go, '--approved', Qno], { role: 'sup' }).err, /answered "not yet", not its recommendation/);
-    const Qchat = must(metQ(['--recommendation', 'yes']), { role: 'sup' });
-    hand('owner', { type: 'question', op: 'set', id: Qchat, channel: 'chat', answer: 'yes', said: 'yes' });
-    assert.match(dt(['goal', 'reading', Go, '--approved', Qchat], { role: 'sup' }).err, /answered in chat/);
-    hand('supervisor', { type: 'observation', source: 'owner', subject: Go, kind: 'reading', detail: 'typed', measure: { value: 1, unit: 'attested' }, approved: Qchat });
-    assert.deepEqual(readings(Go), [], 'a chat answer written by hand attests nothing');
     // the hand-written line above cited Qm before the owner answered: it still counts for nothing
     must(['answer', Qm, 'yes']);
     assert.deepEqual(readings(Go), [], 'a reading written before the answer never counts');
@@ -195,6 +189,11 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     assert.match(dt(['goal', 'reading', Go, '--approved', Qm], { role: 'sup' }).err, /one answer, one reading/);
     hand('supervisor', { type: 'observation', source: 'owner', subject: Go, kind: 'reading', detail: 'again', measure: { value: 1, unit: 'attested' }, approved: Qm });
     assert.deepEqual(readings(Go).map((r) => [r.value, r.approved]), [[1, Qm]], 'each answer authorises one reading');
+    // an answer the owner gave in chat attests like any other
+    const Qchat = must(metQ(['--recommendation', 'yes']), { role: 'sup' });
+    must(['answer', Qchat, 'yes', '--from-chat', '--said', 'yes, validated'], { role: 'sup' });
+    must(['goal', 'reading', Go, '--approved', Qchat], { role: 'sup' });
+    assert.deepEqual(readings(Go).map((r) => [r.value, r.approved]), [[1, Qm], [1, Qchat]], 'a chat answer is an answer');
     must(['goal', 'status', Go, 'met']);
   });
 
@@ -821,24 +820,29 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     assert.ok(r.fields.title && r.set_by && !('hold_by' in r.fields));
   });
 
-  step('an answer the owner gave in the supervisor chat: the owner\'s, quoted, listed for checking, never trust evidence', () => {
+  step('an answer the owner gave in the supervisor chat: the owner\'s, quoted, listed for checking, the same weight as the Inbox', () => {
     const said = "you shouldn't need to ask me to submit those PRs";
     const Qc = must(['ask', '--question', 'Open upstream PRs without asking?', '--class', 'upstream-pr', '--reasons', 'below-rung', '--recommendation', 'yes'], { role: 'sup' });
     assert.notEqual(dt(['answer', Qc, 'yes', '--from-chat'], { role: 'sup' }).status, 0, "the owner's words are required");
     assert.notEqual(dt(['answer', Qc, 'yes', '--from-chat', '--said', said], { role: 'worker' }).status, 0, 'only the supervisor records a chat answer');
     assert.notEqual(dt(['answer', Qc, 'yes', '--from-chat', '--said', said]).status, 0, 'in their own terminal the owner answers directly');
-    assert.match(dt(['answer', Qc, 'yes', '--autonomy', '3', '--from-chat', '--said', said], { role: 'sup' }).err, /not raise/, 'the supervisor cannot raise its own rung from chat');
     const Qd = must(['ask', '--question', 'Ship the schema migration?', '--kind', 'one-way-door', '--class', 'one-way-door', '--reasons', 'one-way-door', '--recommendation', 'yes'], { role: 'sup' });
-    assert.match(dt(['answer', Qd, 'yes', '--from-chat', '--said', 'sure'], { role: 'sup' }).err, /reserved to the owner/, 'a one-way door is never answered from chat');
-    must(['withdraw', Qd, '--reason', 'test'], { role: 'sup' });
+    must(['answer', Qd, 'yes', '--from-chat', '--said', 'sure'], { role: 'sup' });
+    assert.equal(json(must(['questions', '--id', Qd, '--json']))[0].channel, 'chat', 'a one-way door answers from chat');
+    const Qo = must(['ask', '--question', 'Edit the process docs?', '--class', 'process-edit', '--reasons', 'owner-only', '--recommendation', 'yes'], { role: 'sup' });
+    must(['answer', Qo, 'yes', '--from-chat', '--said', 'yes, edit them'], { role: 'sup' });
     must(['answer', Qc, 'yes', '--from-chat', '--said', said], { role: 'sup' });
     const q = json(must(['questions', '--id', Qc, '--json']))[0];
     assert.equal(q.answered_by, 'owner');
     assert.equal(q.channel, 'chat');
     assert.equal(q.said, said);
     const tr = json(must(['trust', '--json'])).find((r) => r.class === 'upstream-pr');
-    assert.equal(tr.rung, 1, 'a chat answer leaves the rung where the owner put it');
-    assert.ok(!tr.agreement_questions.includes(Qc), 'a chat answer is not agreement evidence');
+    assert.equal(tr.rung, 1, 'a chat answer with no autonomy leaves the rung where it was');
+    assert.ok(tr.agreement_questions.includes(Qc), 'a chat answer is agreement evidence, like any other');
+    // the rung moves from chat in both directions, up to the class's ceiling
+    const Qup = must(['ask', '--question', 'Open them without asking from now on?', '--class', 'upstream-pr', '--reasons', 'below-rung', '--recommendation', 'yes'], { role: 'sup' });
+    must(['answer', Qup, 'yes', '--autonomy', '3', '--from-chat', '--said', 'yes, just open them'], { role: 'sup' });
+    assert.equal(json(must(['trust', '--json'])).find((r) => r.class === 'upstream-pr').rung, 3, 'a chat answer raises the rung like an Inbox answer');
     const listed = json(must(["dashboard-data"])).ooda.answered.find((x) => x.id === Qc);
     assert.equal(listed?.channel, 'chat', 'the dashboard lists it for the owner to check');
     assert.equal(listed.said, said);
@@ -1123,8 +1127,7 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     must([...args, '--approved', Qgate], { role: 'sup' });
     // a standing rule the owner gave themselves settles gate-change (constitution.md owner_rules), alone
     const Qr = must(['ask', '--question', 'May I add dev tooling gates without asking?', '--class', 'gate-change', '--reasons', 'owner-only', '--recommendation', 'yes', '--rule-scope', 'class:gate-change'], { role: 'sup' });
-    assert.match(dt(['answer', Qr, 'yes', '--from-chat', '--said', 'sure', '--rule', 'add dev tooling without asking'], { role: 'sup' }).err, /takes no --rule/, 'a rule is never relayed from chat');
-    must(['answer', Qr, 'yes', '--rule', 'Dev tooling and gates need no question', '--rule-scope', 'class:gate-change']);
+    must(['answer', Qr, 'yes', '--from-chat', '--said', 'sure, dev tooling and gates need no question', '--rule', 'Dev tooling and gates need no question', '--rule-scope', 'class:gate-change'], { role: 'sup' });
     setTo(wt('caps'), (j) => { j.upstream_repo = undefined; delete j.upstream_repo; });
     git(['commit', '-qam', 'gates only'], wt('caps'));
     git(['push', '-q', 'origin', 'chore-caps'], wt('caps'));
@@ -1244,6 +1247,10 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     // "adopt": a whole release, strictly newer than main's upstream_base, upstream_base set to it
     const genuine = must(syncPr('whole', 'v0.3.0', whole, 'v0.3.0'), { role: 'sup' });
     assert.match(genuine, /match upstream v0\.3\.0 exactly; approved by settings\.upstream_sync "adopt"; v0\.3\.0 is [0-9a-f]{40}/, 'a full, genuine sync merges without asking');
+    // an answer outside the kit classes doesn't get in the way of a sync "adopt" covers
+    const Qsync = must(['ask', '--question', 'Adopt v0.3.0?', '--recommendation', 'yes'], { role: 'sup' });
+    must(['answer', Qsync, 'yes']);
+    assert.match(must([...syncPr('answered', 'v0.3.0', whole, 'v0.3.0'), '--approved', Qsync], { role: 'sup' }), /approved by settings\.upstream_sync "adopt"/, 'the sync path, whatever was answered');
     // a downgrade: the review's repro, an older tag's script and nothing else
     const down = refused(syncPr('v0-1-0', 'v0.1.0', ['scripts/devteam.mjs']));
     assert.match(down, /adopt.*v0\.1\.0 is not newer than main's upstream_base v0\.2\.0/s, 'a downgrade is refused');
@@ -1280,7 +1287,9 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     assert.match(refused(stale), /adopt.*behind/s, 'behind main, what lands is not the files compared');
     landSettings((txt) => txt.replace('"upstream_sync": "adopt"', '"upstream_sync": "ask"'));
     assert.match(refused(stale), /outside project\//, 'a branch cut under "adopt" is refused once the owner set main to "ask"');
-    landSettings((txt) => txt.replace('"upstream_sync": "ask"', '"upstream_sync": "adopt"'));
+    landSettings((txt) => txt.replace('"upstream_sync": "ask",', ''));
+    assert.equal(json(must(['settings'])).upstream_sync, 'adopt', 'a project with no setting adopts verbatim releases too');
+    landSettings((txt) => txt.replace('"gates": {', '"upstream_sync": "adopt", "gates": {'));
     for (const w of made) git(['worktree', 'remove', '--force', w]);
     // the sync chore copies that file verbatim (the dashed slug older kits needed resolves to the tag)
     git(['worktree', 'add', '-q', '-b', 'chore-devteam-sync-v0-3-0', wt('sync'), 'origin/main']);
@@ -1304,6 +1313,13 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     git(['reset', '-q', '--hard', 'HEAD~1'], wt('sync'));
     git(['push', '-q', '--force', 'origin', 'chore-devteam-sync-v0-3-0'], wt('sync'));
     assert.match(dt(args, { role: 'sup' }).out, /outside project\//, 'with "ask" and no standing rule: the owner answers each sync');
+    // with "ask" and no standing rule, the answer that approves a sync's kit files is a kit-class one
+    const QaskSync = must(['ask', '--question', 'Adopt v0.3.0?', '--recommendation', 'yes'], { role: 'sup' });
+    must(['answer', QaskSync, 'yes']);
+    assert.match(dt([...args, '--approved', QaskSync], { role: 'sup' }).out, /changes kit files .*that needs the owner's answer in a governance-edit, process-edit, gate-change question, and .* is classless/, 'a classless answer is not a kit-class one');
+    const QkitSync = must(['ask', '--question', 'Adopt v0.3.0?', '--class', 'governance-edit', '--reasons', 'owner-only', '--recommendation', 'yes'], { role: 'sup' });
+    must(['answer', QkitSync, 'yes', '--from-chat', '--said', 'yes, adopt it'], { role: 'sup' });
+    must([...args, '--approved', QkitSync], { role: 'sup' });
     // a rule the supervisor wrote and accepted itself doesn't count, only the owner's
     const Ks = must(['knowledge', 'add', '--kind', 'preference', '--statement', 'adopt upstream', '--scope', 'chore:devteam-sync'], { role: 'sup' });
     must(['knowledge', 'set', Ks, '--status', 'accepted'], { role: 'sup' });
@@ -2301,7 +2317,8 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     const ok = [{ id: 'g1', decided: true, values: { items: ['a', 'b'] } }, { id: 'g2', decided: true, values: { items: ['b', 'c'] }, kept: true, note: 'c belongs here too' }, { id: 'g3', decided: true, values: { items: [] } }];
     assert.match(answer(Q1, res(Q1, ok), 'sup').err, /owner commands don't run in an agent session/, 'an agent never answers a review');
     assert.match(dt(['answer', Q1, 'looks good']).err, /is a review: answer it with its result/, 'never in free text');
-    assert.match(dt(['answer', Q1, 'looks good', '--from-chat', '--said', 'looks good'], { role: 'sup' }).err, /answer --from-chat: .* is a review/, 'never from chat');
+    assert.match(dt(['answer', Q1, 'looks good', '--from-chat', '--said', 'looks good'], { role: 'sup' }).err, /is a review: answer it with its result/, 'never in free text, from chat as from anywhere');
+    assert.match(dt(['answer', Q1, '--review-result', '-', '--from-chat', '--said', 'here is my result'], { role: 'sup', input: res(Q1, ok, { review_sha256: sha('another page') }) }).err, /names page .*, not the page asked/, 'a result file from chat is checked like any other');
     assert.match(answer(Q1, res(Q1, ok, { review_sha256: sha('another page') })).err, /names page .*, not the page asked/);
     assert.match(answer(Q1, res(Q1, ok, { data_sha256: sha('other data') })).err, /names data .*, not the data asked/);
     assert.match(answer(Q1, res('q-20260101-000000000-supervisor', ok)).err, /is for q-20260101-000000000-supervisor, not/);
@@ -2387,9 +2404,10 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     assert.match(dt(['answer', Qo, 'no', '--decline']).err, /--decline answer a review question/);
     assert.match(dt(['answer', Qo, '--review-result', '-'], { input: '{}' }).err, /--review-result and --decline answer a review question/);
     must(['withdraw', Qo, '--reason', 'test'], { role: 'sup' });
-    must(['answer', Q5, 'Group the items by site first', '--decline']);
+    must(['answer', Q5, 'Group the items by site first', '--decline', '--from-chat', '--said', 'send it back, group by site'], { role: 'sup' });
     q = view(Q5);
-    assert.deepEqual([q.status, q.declined, q.result_status, q.answer, q.matched], ['answered', true, 'declined', 'Sent back: Group the items by site first', false]);
+    assert.deepEqual([q.status, q.declined, q.result_status, q.answer, q.matched], ['answered', true, 'declined', 'Sent back: Group the items by site first', false], 'a review goes back from chat like from the Inbox');
+    assert.equal(q.channel, 'chat');
     assert.match(dt(['review', 'result', Q5], { role: 'sup' }).err, /was sent back/);
 
     // tamper: the question pins a commit, so a later commit on the branch changes nothing
