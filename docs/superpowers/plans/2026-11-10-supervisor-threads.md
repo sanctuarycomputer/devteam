@@ -19,13 +19,13 @@ These settle what the spec leaves open or what the code makes impossible as writ
 
 1. **Words before flags, or after `--`.** The kit's parser (`parseArgs`, line 64) reads positionals before flags and lets a flag take every word after it, so `thread new --title "T" "first words"` would make the words part of the title. The command is `thread new "<first words>" [--title "<line>"] [--subject '<json>']`, and every `thread` command also takes its words after `--`. The dashboard always passes the owner's words after `--` and the title, subject and outcome as `--key=value`, so words or titles that start with `--` stay whole.
 2. **The kit's thread tests run on a project of their own** (`threadsFixture` in `test/lib/kit.mjs`), not as chain steps: by the end of the chain the supervisor's log file is dated past 2099 (hand-written lines), so every supervisor line written there is stamped 2100, and a thread's rules (an owner turn newer than a proposal, a turn newer than a question) would read backwards.
-3. **`/api/threads` reads `run/log/<f>` and the checkout's own `project/log/<f>`**, merged as `logFileText` merges them but without `git show`, all keyed on size and mtime. The spec says `run/log` only; after a dead laptop or a box move `run/log` is empty until each file's next write, and every thread would vanish from the dock.
+3. **`/api/threads` reads `run/log/<f>` and the checkout's own `project/log/<f>`, as the spec says**, merged as `logFileText` merges them but without `git show`, all keyed on size and mtime: after a dead laptop or a box move `run/log` is empty until each file's next write. It also says whether the supervisor has a pane (`resolvePane`, asked at most every 10 s), for the card's 10-minute line.
 4. **Coordinates without an anchor go in `point: {x, y}`** on `artifact` and `preview` subjects. The spec's §4 step 3 puts them in `at`, but §5 makes an artifact's `at` its location (`main`, a worktree, `tree:<id>`). `page.at` stays `{x, y}` as fractions.
 5. **Console errors: at most three of 200 bytes** (§5's caps), not "the last five" (§5's table).
 6. **A proposal is cleared by an owner line newer than the supervisor's `ready` set line**, compared on that line's own `at` (the fold's update), not the `at` the supervisor wrote inside `ready`.
-7. **`thread ready` refuses while a proposal stands** ("the owner's next turn clears it"), so "propose again after Not yet" is a real rule, not a no-op.
+7. **`thread ready` replaces a standing proposal**: a new ready line, the newest wins. "Propose again after Not yet" is the same command after the owner's turn cleared the old one. With no `DEVTEAM_ROLE`, the main checkout's supervisor commands (`ask`, `thread ready`, `thread ask`) are the supervisor's, as every supervisor command already is (`logWriter`); "refuse any other role" means a worker or planner role.
 8. **`thread resolve` always writes `outcome`** (`null` when none), so a reopened thread resolved again doesn't keep its old outcome through the fold.
-9. **The card's 10-minute line ("the supervisor hasn't replied yet") doesn't check that the supervisor is running.** The page knows only what `/api/threads` says; whether a turn was typed into a pane it learns from the POST that sent it (the action's output says so).
+9. **The card's state line, as spec §3's table:** "Sent." when the POST that sent the turn says a pane took it; "Sent; the supervisor will read it when it next checks." when none did or the page doesn't know (after a reload); after 10 minutes, "the supervisor hasn't replied yet" only while `/api/threads` says the supervisor has a pane, else the "next checks" line.
 10. **Answer handlers find their card through `closest('[data-qcard]')`**, a new attribute on every question card, not `closest('[data-q]')`: `data-q` is on the textareas (not ancestors of the buttons), and `render()`'s draft capture reads `textarea[data-q]`.
 11. **A review question or one with secrets shows in a thread card as a link to the Inbox**, not a second copy of its form: a review is answered in its own view, and two forms that post values is one too many.
 12. **`metrics --json` carries `threads` only when the log has a thread**, so a project without threads prints what it printed before (the G1 goldens in `test/fixtures/g1/metrics.txt` must not change).
@@ -41,6 +41,12 @@ These settle what the spec leaves open or what the code makes impossible as writ
 22. **The `thread-waiting` finding names the thread by id only**: a title can be page-written (PR 3), and findings reach the supervisor's prompt.
 23. **The dashboard's "New data" hint moves up to `bottom: 64px`** so the dock's pill can sit at the bottom right.
 24. **`supervisor.md` §7 (relaying dev-link threads) waits for PR 3**, with the dev-link subjects it describes.
+25. **A field inside the thread layer holds no redraw** (`holding()` ignores focus in `#tl`): the layer is outside what the 10 s refresh rebuilds, so the page stays fresh while the owner writes a turn.
+26. **A turn is also capped as the log line holds it** (3,800 bytes JSON-escaped): 2,000 bytes of quotation marks or control characters escape past the 4,096-byte line. Every check runs before anything is written, so a refused first turn leaves no thread.
+27. **An item drawn in two places is pinned in its home section** (`T_HOME`: an observation in the Loop, not the Sensors feed; a question in the Inbox, not a Decide row), one lookup (`tlHome`) for the pin, the card and "changed since". "Changed since" compares the two names as the dock shows them (`tLine`, 120).
+28. **An item's quote is its name and its heading**, not its whole text (a goal card's text includes its Run/Drain/Park buttons); its text only when it has neither. The page checks a ref against `T_REF`, the kit's `SUBJECT_REF` (a test holds them equal).
+29. **The dashboard's `thread-new` action takes `item` and `page` subjects only** in PR 1; PR 3's viewers add `artifact` and `preview` there. The log and `thread new` take all four now.
+30. **A page subject's place in owner text is the section's name** ("Loop, Observe"), never the hash route.
 
 ## Global Constraints
 
@@ -64,13 +70,13 @@ These settle what the spec leaves open or what the code makes impossible as writ
 |---|---|---|
 | `docs/devteam/schema/log.schema.json` | types `thread`, `turn`; `question.thread`, `question.turn`; channel `thread`; `x-id` prefixes `t`, `u`; `x-authority` new and set | 1 |
 | `docs/devteam/scripts/devteam.mjs` | threads block after `cmdRate` (~4680): `THREAD_*`, `TURN_*`, `SUBJECT_*`, `subjectProblem`, `anchorProblem`, `threadLineProblems`, `capBytes`, `threadTitle`, `threadViews`, `threadView`, `threadQuestion`, `subjectWords`, `subjectIds`, `deliverOwnerTurn`, `threadDataFrame`, `cmdThread`; `checkLine` (890); `QUESTION_LATER` (1330); `questionView` (1334); `questions` (1408); `askLine`/`cmdAsk` (4330); `turnAnswer`, `cmdAnswer` (4575); `goal decide` (7381); `collectMetrics` (8130); `cmdDashboard` (9730: `ACTIONS`, `/api/threads`); `cmdWait` (12812); `HELP` (13551); `COMMANDS` (13665) | 1-7 |
-| `docs/devteam/dashboard/index.html` | `subj`; `data-subject` in every renderer; `CHANNEL_WORDS`; `decisionUnder`; `idLink`, `linkify`, `subjectLink`; `questionCard(…, copy)`, `reviewCard`, `nextTime`; `qcardOf`, `markAnswered`, the answer/pick/cant handlers; `route()` `talk/`; `/* threads-core */`; `/* threads-layer */`; `#tl` markup; CSS; the `drawOrHold` hook | 8-11 |
-| `test/lib/kit.mjs` | `threadsFixture` (a project, a goal, owner and supervisor runners, a stand-in supervisor pane, lines by hand, a goal up for approval) | 1, 5 |
+| `docs/devteam/dashboard/index.html` | `subj`, `decSubject`; `data-subject` in every renderer; `CHANNEL_WORDS`; `decisionUnder`; `idLink`, `linkify`, `subjectLink`; `questionCard(…, copy)`, `reviewCard`, `nextTime`; `qcardOf`, `markAnswered`, the answer/pick/cant handlers; `route()` `talk/`; `/* threads-core */`; `/* threads-layer */`; `#tl` markup; CSS; `holding()`; the `drawOrHold` hook | 8-13 |
+| `test/lib/kit.mjs` | `threadsFixture` (a project, a goal, owner and supervisor runners without the machine's `DEVTEAM_SUPERVISOR`, a stand-in supervisor pane, lines by hand, a goal up for approval) | 1 |
 | `test/lib/chrome.mjs` | `hold`, `at`, `move`, `clickAt` (modifiers) | 10 |
 | `test/kit.test.mjs` | `threads: records, commands, delivery, the Inbox and the loop` (one fixture, subtests in order) | 1-6 |
-| `test/dashboard.test.mjs` | the server test, the items test, the core block test, the Chrome layer test | 7-11 |
-| `test/browser/dev-links.mjs` | `threads()` with a stand-in pane, `--only threads` | 13 |
-| `docs/devteam/process/supervisor.md`, `docs/devteam/governance/constitution.md`, `README.md` | docs | 12 |
+| `test/dashboard.test.mjs` | the server test, the items test, the core block test, the Chrome layer test (one page, its subtests added by Tasks 10-13) | 7-13 |
+| `test/browser/dev-links.mjs` | `threads()` with a stand-in pane, `--only threads` | 15 |
+| `docs/devteam/process/supervisor.md`, `docs/devteam/governance/constitution.md`, `README.md` | docs | 14 |
 
 ---
 
@@ -91,9 +97,15 @@ These settle what the spec leaves open or what the code makes impossible as writ
 export function threadsFixture(name = 'threads') {
   const F = fleetFixture(name);
   const SUP = { DEVTEAM_ROLE: 'supervisor' };
-  const owner = (args, extra = {}) => F.ok(F.old, args, extra);
-  const sup = (args, extra = {}) => F.ok(F.old, args, { ...SUP, ...extra });
-  const fails = (args, role = {}) => { const r = F.run(F.old, args, role); assert.notEqual(r.status, 0, `${args.join(' ')} should fail: ${r.out}`); return `${r.err}\n${r.out}`; };
+  const DT = path.join(F.old, 'docs/devteam/scripts/devteam.mjs');
+  // The supervisor's pane is only ever the one a test names: a DEVTEAM_SUPERVISOR from the session
+  // running the tests would have the fixture type into a real supervisor.
+  const env = (role = {}) => { const e = F.env(role); if (!('DEVTEAM_SUPERVISOR' in role)) delete e.DEVTEAM_SUPERVISOR; return e; };
+  const run = (args, role = {}) => { const r = runNode(DT, args, { cwd: F.old, env: env(role) }); return { status: r.status, out: r.stdout.trim(), err: r.stderr.trim() }; };
+  const ok = (args, role = {}) => { const r = run(args, role); assert.equal(r.status, 0, `${args.join(' ')}: ${r.err || r.out}`); return r.out; };
+  const owner = (args, extra = {}) => ok(args, extra);
+  const sup = (args, extra = {}) => ok(args, { ...SUP, ...extra });
+  const fails = (args, role = {}) => { const r = run(args, role); assert.notEqual(r.status, 0, `${args.join(' ')} should fail: ${r.out}`); return `${r.err}\n${r.out}`; };
   const goalArgs = (title, priority) => ['goal', 'add', '--title', title, '--outcome', 'admins pay alone', '--measure', 'self-serve share', '--target', '80', '--unit', '%', '--direction', 'up', '--source', 'prod', '--check', 'echo 5', '--horizon', '2027-03-31', '--non-goals', 'enterprise invoicing', '--preconditions', 'cards work', 'prices defined', '--priority', String(priority)];
   const goal = sup(goalArgs('Launch checkout', 1));
   const logDir = path.join(F.old, 'docs/devteam/run/log');
@@ -113,19 +125,21 @@ export function threadsFixture(name = 'threads') {
   // log-check on the log with these lines in it, which are then taken out again
   const checkWith = (...lines) => {
     const snap = snapLog();
-    try { lines.forEach(([by, o, file], i) => hand(by, o, 60000 - i, file)); const r = F.run(F.old, ['log-check']); return { status: r.status, said: `${r.out}\n${r.err}` }; } finally { restoreLog(snap); }
+    try { lines.forEach(([by, o, file], i) => hand(by, o, 60000 - i, file)); const r = run(['log-check']); return { status: r.status, said: `${r.out}\n${r.err}` }; } finally { restoreLog(snap); }
   };
   // A stand-in for the supervisor's agent (not a shell, which the kit never types into): it draws a
-  // line and logs what it is sent, so a test reads exactly what the kit typed.
+  // line and logs what it is sent, so a test reads exactly what the kit typed. A pty takes at most
+  // MAX_INPUT bytes of one unfinished line (1,024 on macOS); the kit's pane line stays under it, its
+  // words cut at 300 bytes and the rest kind, ids and the show command.
   const standIn = () => {
     const dir = fs.mkdtempSync(path.join(F.base, 'pane-'));
     const agent = path.join(dir, 'agent.mjs');
     const keys = path.join(dir, 'keys.txt');
     write(agent, "import fs from 'node:fs';\nprocess.stdout.write('stand-in supervisor\\n');\nprocess.stdin.on('data', (d) => fs.appendFileSync(process.argv[2], String(d)));\n");
     const s = `sup-${path.basename(dir).slice(5)}`;
-    const env = F.env({});
-    spawnSync('tmux', ['new-session', '-d', '-x', '220', '-y', '50', '-s', s, '-n', 'main', `${process.execPath} ${agent} ${keys}`], { env });
-    for (let i = 0; i < 300 && !/stand-in/.test(spawnSync('tmux', ['capture-pane', '-p', '-t', `=${s}:main`], { env, encoding: 'utf8' }).stdout ?? ''); i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+    const e = env();
+    spawnSync('tmux', ['new-session', '-d', '-x', '220', '-y', '50', '-s', s, '-n', 'main', `${process.execPath} ${agent} ${keys}`], { env: e });
+    for (let i = 0; i < 300 && !/stand-in/.test(spawnSync('tmux', ['capture-pane', '-p', '-t', `=${s}:main`], { env: e, encoding: 'utf8' }).stdout ?? ''); i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
     return { target: `${s}:main`, typed: () => (fs.existsSync(keys) ? fs.readFileSync(keys, 'utf8') : '') };
   };
   // A goal up for approval: fully defined, read, its milestones set, a design linked (planning.md §1).
@@ -136,7 +150,8 @@ export function threadsFixture(name = 'threads') {
     const q = sup(['ask', '--kind', 'goal-approval', '--goal', g, '--question', 'Approve self-serve billing, built as the design describes?', '--links', JSON.stringify([{ title: 'The approach', path: 'docs/devteam/project/designs/self-serve-billing.md', ref: 'main' }])]);
     return { goal: g, question: q };
   };
-  return { ...F, SUP, owner, sup, fails, goal, hand, snapLog, restoreLog, checkWith, standIn, approval, logDir };
+  // env replaces fleetFixture's, so a dashboard a test starts (startDashboard(F.old, F.env({}))) gets the same
+  return { ...F, env, SUP, owner, sup, fails, goal, hand, snapLog, restoreLog, checkWith, standIn, approval, logDir };
 }
 ```
 
@@ -165,6 +180,7 @@ test('threads: records, commands, delivery, the Inbox and the loop', async (t) =
     refused(/may not change turn lines/, thread, ['owner', { type: 'turn', op: 'set', id: 'u-20261110-100000000-owner', text: 'edited' }]);
     refused(/refs and question are on the supervisor's turns/, ['owner', { type: 'turn', thread: T, text: 'x', refs: ['goal:x'] }]);
     refused(/turn\.text is 2002 bytes; at most 2000/, ['owner', { type: 'turn', thread: T, text: 'é'.repeat(1001) }]);
+    refused(/turn\.text is \d+ bytes as the log holds it; at most 3800/, ['owner', { type: 'turn', thread: T, text: '"'.repeat(1950) }]);
     refused(/thread\.title is one line/, ['owner', { type: 'thread', title: 'two\nlines' }]);
     refused(/thread\.outcome is \d+ bytes; at most 300/, thread, ['owner', { type: 'thread', op: 'set', id: T, status: 'resolved', outcome: 'o'.repeat(301) }]);
     // a subject: one of four kinds, only its own keys, each within its cap, 2,500 bytes in all
@@ -174,6 +190,9 @@ test('threads: records, commands, delivery, the Inbox and the loop', async (t) =
     refused(/ref is <type>:<id>/, sub({ kind: 'item', ref: 'secret:x' }));
     refused(/the subject is \d+ bytes encoded; at most 2500/, sub({ kind: 'item', ref: `goal:${F.goal}`, quote: 'q'.repeat(2600) }));
     refused(/quote is 301 bytes; at most 300/, sub({ kind: 'item', ref: `goal:${F.goal}`, quote: 'q'.repeat(301) }));
+    // bytes, not characters: 200 é are 200 characters (the schema's count passes them) and 400 bytes
+    refused(/quote is 400 bytes; at most 300/, sub({ kind: 'item', ref: `goal:${F.goal}`, quote: 'é'.repeat(200) }));
+    refused(/anchor\.html is 1200 bytes; at most 1024/, sub({ kind: 'preview', name: 'cool-tiger', anchor: { html: 'é'.repeat(600) } }));
     refused(/at is \{x, y\}, each a fraction/, sub({ kind: 'page', view: '#goals', at: { x: 1.5, y: 0 } }));
     ok(sub({ kind: 'page', view: '#loop/observe', at: { x: 0.25, y: 0.5 }, quote: 'Loop' }));
     // the shapes a later kit's viewers write: accepted now, so the log needn't change for them
@@ -392,6 +411,10 @@ After `cmdRate` (ending at line 4679) and before `// ===== review questions`, ad
 // given to the supervisor only inside a data frame, and never typed into a pane.
 const THREAD_OPEN_MAX = 200;
 const TURN_MAX = 2000; // bytes
+// A turn as the line holds it, JSON-escaped (a quotation mark is two bytes there, a control character
+// six): within this, a turn's line always fits the log's 4,096 bytes with its envelope.
+const TURN_ENCODED_MAX = 3800;
+const encodedBytes = (s) => Buffer.byteLength(JSON.stringify(String(s))) - 2;
 const SUBJECT_MAX = 2500; // bytes, as encoded in the line
 const OUTCOME_MAX = 300; // bytes
 const THREAD_TITLE_MAX = 120; // characters
@@ -464,6 +487,7 @@ function threadLineProblems(o) {
     if (isObj(o.ready)) over('ready.outcome', o.ready.outcome, OUTCOME_MAX);
   } else {
     over('text', o.text, TURN_MAX);
+    if (typeof o.text === 'string' && encodedBytes(o.text) > TURN_ENCODED_MAX) errs.push(`turn.text is ${encodedBytes(o.text)} bytes as the log holds it; at most ${TURN_ENCODED_MAX}`);
     for (const r of Array.isArray(o.refs) ? o.refs : []) over('refs[]', r, 120);
     if (o.by === 'owner' && (o.refs !== undefined || o.question !== undefined)) errs.push("refs and question are on the supervisor's turns");
   }
@@ -515,6 +539,9 @@ function threadLineProblems(o) {
     assert.match(F.fails(['thread', 'new', 'é'.repeat(2000)]), /at most 2000 bytes of UTF-8; this one is 4000/);
     F.owner(['thread', 'new', 'é'.repeat(1000)]);
     F.owner(['thread', 'new', '--title', 'Long', '--', 'a'.repeat(2000)]);
+    const before = JSON.parse(F.owner(['thread', 'list', '--json'])).length;
+    assert.match(F.fails(['thread', 'new', '"'.repeat(1950)]), /too many quotation marks, backslashes or control characters/, '1,950 bytes, but 3,900 as the log holds them');
+    assert.equal(JSON.parse(F.owner(['thread', 'list', '--json'])).length, before, 'a refused first turn leaves no thread');
     assert.match(F.fails(['thread', 'new', 'x', '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}`, quote: 'q'.repeat(2600) })]), /--subject: the subject is \d+ bytes encoded; at most 2500/);
     assert.match(F.fails(['thread', 'new', 'x', '--subject', '{not json']), /--subject is JSON/);
     assert.match(F.fails(['thread', 'new', 'x', '--title', 'a'.repeat(121)]), /--title is at most 120 characters/);
@@ -548,13 +575,18 @@ function threadLineProblems(o) {
 
   await t.test('a turn wakes wait, which says to read the threads waiting on the supervisor', async () => {
     const T = F.owner(['thread', 'new', 'Wake up']).split('\n')[0];
-    fs.writeFileSync(path.join(F.old, 'docs/devteam/run/wait-since'), `${Date.now() - 1000}\n`);
+    // since after the thread and its first turn, so only the turn below is new to wait
+    await new Promise((r) => setTimeout(r, 50));
+    fs.writeFileSync(path.join(F.old, 'docs/devteam/run/wait-since'), `${Date.now()}\n`);
+    await new Promise((r) => setTimeout(r, 50));
     const w = spawn(process.execPath, [path.join(F.old, 'docs/devteam/scripts/devteam.mjs'), 'wait', '--minutes', '1'], { cwd: F.old, env: F.env(F.SUP), stdio: ['ignore', 'pipe', 'pipe'] });
     let o = '';
     w.stdout.on('data', (b) => { o += b; });
-    F.owner(['thread', 'say', T, 'Are you there?']);
+    const U = F.owner(['thread', 'say', T, 'Are you there?']).split('\n')[0];
     await new Promise((r) => w.on('close', r));
-    assert.match(o, /something needs you:[\s\S]*new line\(s\) from the owner: [\s\S]*u-\d{8}-\d{9}-owner[\s\S]*a thread: thread list --waiting/);
+    assert.match(o, /something needs you:/);
+    assert.ok(o.includes(`new line(s) from the owner: ${U} (questions --all, history --tail 20; a thread: thread list --waiting)`), `the turn woke it, with the pointer: ${o}`);
+    assert.ok(!o.includes(T), 'the thread from before is not new');
   });
 ```
 
@@ -645,10 +677,13 @@ function threadDataFrame(v) {
 // The words a thread command takes: those after --, or the rest of the positionals. The dashboard
 // always passes the owner's words after --, so words that start with -- stay words.
 const wordsFrom = (i) => (rest ?? positional.slice(i)).join(' ').trim();
+// Every check a turn's words get, before anything is written: a thread new that refuses its first
+// words leaves no thread behind.
 const turnText = (words) => {
   if (!words) die('say something: the words go after the thread id (or after --)');
   const n = Buffer.byteLength(words);
   if (n > TURN_MAX) die(`a turn is at most ${TURN_MAX} bytes of UTF-8; this one is ${n} (a character outside ASCII takes 2 to 4)`);
+  if (encodedBytes(words) > TURN_ENCODED_MAX) die('this has too many quotation marks, backslashes or control characters to keep in one log line; say it with fewer');
   return words;
 };
 // Who is speaking: the supervisor in its own session, else the owner (ownerWriter refuses any other role).
@@ -660,6 +695,8 @@ function threadOpen(id, by) {
   return t;
 }
 const openThreadCount = () => threadViews(readLog().objects).filter((x) => x.status === 'open').length;
+// The first line new, say and ask print is the id (the dashboard reads it); for an owner turn a
+// second says whether it was typed into the supervisor's pane.
 function cmdThread() {
   const [sub, id] = positional;
   if (sub === 'new') {
@@ -723,7 +760,7 @@ function cmdThread() {
     for (const x of vs) out(`${x.id} [${x.status}${x.status === 'open' ? `, ${x.waiting === 'supervisor' ? 'waiting on the supervisor' : "the owner's move"}` : ''}] ${quoteData(x.title)}${x.subject ? ` (${(subjectWords(x.subject) || ` a ${x.subject.kind}`).trim()})` : ''} · ${plural(x.turns.length, 'turn')}${x.ready ? ' · proposed for resolving' : ''}`);
     return;
   }
-  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\']   |   thread say <t-id> "<words>" [--refs <type>:<id>…]   |   thread ask <t-id> --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept]   |   thread reopen <t-id> ["<words>"]   |   thread show <t-id> [--json]   |   thread list [--waiting | --open | --all] [--json]   (words may also follow --)');
+  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\']   |   thread say <t-id> "<words>"   (the owner\'s; with DEVTEAM_ROLE=supervisor the supervisor\'s, which may add --refs <type>:<id>…)   |   thread ask <t-id> --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept]   |   thread reopen <t-id> ["<words>"]   |   thread show <t-id> [--json]   |   thread list [--waiting | --open | --all] [--json]   (words may also follow --)');
 }
 ```
 
@@ -739,7 +776,7 @@ and replace both `` `${lateOwner.length} new line(s) from the owner: ${lateOwner
 In `COMMANDS` add `thread: cmdThread,` beside `answer`. In `HELP`, after the `answer <qid> "<text>" [--autonomy …` line (13617), add:
 
 ```
-  thread new "<first words>" [--title "<line>"] [--subject '<json>'] | thread say <t-id> "<words>" | thread resolve <t-id> [--outcome "<line>" | --accept] | thread reopen <t-id> ["<words>"]   (owner; the dashboard's Shift+click)   a thread with the supervisor about one thing; words may follow --
+  thread new "<first words>" [--title "<line>"] [--subject '<json>'] | thread say <t-id> "<words>" | thread resolve <t-id> [--outcome "<line>" | --accept] | thread reopen <t-id> ["<words>"]   (owner; the dashboard's Shift+click)   a thread with the supervisor about one thing; words may follow --; say is the owner's unless DEVTEAM_ROLE=supervisor
   thread say <t-id> "<words>" [--refs <type>:<id>…] | thread ask <t-id> --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>"   (supervisor)   reply, ask an Inbox question in it, propose resolving it
   thread show <t-id> [--json] | thread list [--waiting | --open | --all] [--json]   the thread, its subject framed as data; --waiting: open threads where the supervisor owes a reply
 ```
@@ -849,9 +886,15 @@ return { ...v, links: resolveQuestionLinks(v.links, v.status === 'open'), goal_h
     F.sup(['thread', 'say', T, 'Done: the goal says EU orders now.', '--refs', `goal:${F.goal}`]);
     assert.match(F.sup(['thread', 'ready', T, '--outcome', 'Goal narrowed to EU orders']), /proposed resolving/);
     assert.equal(show(T).ready.outcome, 'Goal narrowed to EU orders');
-    assert.match(F.fails(['thread', 'ready', T, '--outcome', 'again'], F.SUP), /already has your proposal/);
+    F.sup(['thread', 'ready', T, '--outcome', 'Goal narrowed to EU orders, the US later']);
+    assert.equal(show(T).ready.outcome, 'Goal narrowed to EU orders, the US later', 'a new proposal replaces the standing one');
     assert.match(F.fails(['thread', 'ready', T, '--outcome', 'x'], { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'demo-01-x' }), /the supervisor does this/);
     assert.match(F.fails(['thread', 'ready', T], F.SUP), /needs --outcome/);
+    // with no role, in the main checkout, a supervisor command is the supervisor's (as ask is)
+    const R = F.owner(['thread', 'new', 'A quick one']).split('\n')[0];
+    F.owner(['thread', 'ready', R, '--outcome', 'done']);
+    assert.deepEqual([show(R).ready.outcome, JSON.parse(F.owner(['log', '--id', R, '--json']))[0].updates.pop().by], ['done', 'supervisor']);
+    F.owner(['thread', 'resolve', R, '--accept']);
     assert.match(F.fails(['thread', 'resolve', T], F.SUP), /owner commands don't run in an agent session/);
     F.owner(['thread', 'say', T, 'Not yet']);
     assert.equal(show(T).ready, null, "the owner's newer turn clears it");
@@ -892,15 +935,15 @@ return { ...v, links: resolveQuestionLinks(v.links, v.status === 'open'), goal_h
 - [ ] **Step 3: Implement.** In `cmdThread`, before `if (sub === 'show')`, add:
 
 ```js
-  // The supervisor's proposal, for a one-click accept; the owner's next turn, resolve or reopen clears it.
+  // The supervisor's proposal, for a one-click accept; the owner's next turn, resolve or reopen clears
+  // it. With no DEVTEAM_ROLE this checkout's commands are the supervisor's (logWriter), as ask's are.
   if (sub === 'ready') {
     supervisorOnly('thread ready');
     const t = threadOpen(id, 'supervisor');
     const outcome = (flagStr('outcome') ?? '').replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim();
     if (!outcome) die('thread ready needs --outcome "<one line: how it ended>"');
     if (Buffer.byteLength(outcome) > OUTCOME_MAX) die(`--outcome is at most ${OUTCOME_MAX} bytes`);
-    const v = threadViewOf(t.id);
-    if (v.ready) die(`${t.id} already has your proposal (${quoteData(v.ready.outcome)}); the owner's next turn clears it`);
+    // a new proposal replaces a standing one: the newest ready line is the one the card shows
     appendLog({ type: 'thread', op: 'set', id: t.id, ready: { outcome, at: nowIso() } }, 'supervisor');
     return out(`proposed resolving ${t.id}: ${outcome}`);
   }
@@ -1166,7 +1209,7 @@ After the `chat-quote-not-found` loop (line 8429) add:
 - Modify: `docs/devteam/scripts/devteam.mjs` (`cmdDashboard` at 9730: `ACTIONS` at 9751-9774, a reader beside `dashboardData` at 9833, the route after `const u = new URL(req.url, 'http://x');` at 9863)
 - Test: `test/dashboard.test.mjs`
 
-- [ ] **Step 1: Test.** In `test/dashboard.test.mjs`, add `threadsFixture` to the `./lib/kit.mjs` import, and append:
+- [ ] **Step 1: Test.** In `test/dashboard.test.mjs`, add `threadsFixture` and `hasTmux` to the `./lib/kit.mjs` import, and append:
 
 ```js
 test("threads on the dashboard's server: owner actions checked before anything runs, /api/threads read from the log's files, cached, same-origin only", async (t) => {
@@ -1182,11 +1225,16 @@ test("threads on the dashboard's server: owner actions checked before anything r
   const list = async () => (await (await get()).json()).threads;
   const subject = { kind: 'item', ref: `goal:${F.goal}`, quote: 'Launch checkout' };
 
+  // the dashboard's own first runs (hello, dashboard-data, the accounts tick) can write to run/ as it
+  // starts: read once it has served data, and of a run of reads with nothing written one is cached
+  await until(async () => (await fetch(`${B}/api/data`)).ok, 'a first dashboard-data');
   let r = await get();
   assert.equal(r.status, 200);
-  assert.deepEqual((await r.json()).threads, []);
-  r = await get();
-  assert.equal(r.headers.get('x-devteam-threads'), 'cached', 'a read with no file changed is served from the cache');
+  let j = await r.json();
+  assert.deepEqual([j.threads, j.supervisor], [[], { pane: false }], 'no threads, and no supervisor pane');
+  const heads = [];
+  for (let i = 0; i < 3; i++) heads.push((await get()).headers.get('x-devteam-threads'));
+  assert.ok(heads.includes('cached'), `a read with no file changed is served from the cache: ${heads}`);
   r = await post('thread-new', { title: 'Launch checkout', subject, text: 'Narrow this to the EU launch' });
   assert.equal(r.status, 200, await r.clone().text());
   const T = (await r.json()).out.split('\n')[0];
@@ -1211,6 +1259,8 @@ test("threads on the dashboard's server: owner actions checked before anything r
     ['thread-new', { title: 'a'.repeat(121), text: 'x' }, 'a title over 120 characters'],
     ['thread-new', { title: 't', text: ' ' }, 'no words'],
     ['thread-new', { title: 't', text: 'é'.repeat(1001) }, 'a turn over 2,000 bytes'],
+    ['thread-new', { title: 't', text: '"'.repeat(1950) }, 'a turn over 3,800 bytes as the log holds it'],
+    ['thread-new', { title: 't', text: 'x', subject: { kind: 'artifact', slug: 'pricing-mock', at: 'main' } }, 'an artifact subject: the viewers come later'],
     ['thread-new', { title: 't', text: 'x', subject: { kind: 'lens' } }, 'an unknown kind'],
     ['thread-new', { title: 't', text: 'x', subject: { ...subject, view: '#goals' } }, "another kind's key"],
     ['thread-new', { title: 't', text: 'x', subject: { kind: 'item', ref: `goal:${F.goal}`, quote: 'q'.repeat(2600) } }, 'a subject over 2,500 bytes'],
@@ -1235,6 +1285,12 @@ test("threads on the dashboard's server: owner actions checked before anything r
   assert.equal((await post('thread-accept', { id: T })).status, 200);
   th = (await list()).find((x) => x.id === T);
   assert.deepEqual([th.status, th.outcome], ['resolved', 'EU only']);
+  // a supervisor with a pane: said within the 10 s the answer is kept
+  if (hasTmux) {
+    const pane = F.standIn();
+    fs.writeFileSync(path.join(F.old, 'docs/devteam/run/supervisor-pane'), pane.target);
+    await until(async () => (await (await get()).json()).supervisor.pane === true, 'the pane seen');
+  }
   // after a move run/log is empty until each file's next write: the checkout's project/log copy counts
   const durable = path.join(F.old, 'docs/devteam/project/log');
   fs.mkdirSync(durable, { recursive: true });
@@ -1251,7 +1307,7 @@ test("threads on the dashboard's server: owner actions checked before anything r
 - [ ] **Step 3: Implement.** In `cmdDashboard`, after `const autonomyArgs = …` (line 9750) add:
 
 ```js
-  const turnOk = (x) => typeof x === 'string' && !!x.trim() && Buffer.byteLength(x.trim()) <= TURN_MAX;
+  const turnOk = (x) => typeof x === 'string' && !!x.trim() && Buffer.byteLength(x.trim()) <= TURN_MAX && encodedBytes(x.trim()) <= TURN_ENCODED_MAX;
   const lineOk = (x, max, bytes = false) => typeof x === 'string' && !!x.trim() && !UNSAFE_TEXT.test(x) && (bytes ? Buffer.byteLength(x.trim()) : x.trim().length) <= max;
 ```
 
@@ -1260,8 +1316,10 @@ In `ACTIONS`, after `'preview-start'`, add:
 ```js
     // Threads, from the layer. The owner's words always go after --, so words that start with -- stay
     // words; the title, subject and outcome as --key=value, kept whole whatever they hold. A subject
-    // is checked here before anything is spawned, and thread new checks it again.
-    'thread-new': (b) => (lineOk(b.title, THREAD_TITLE_MAX) && turnOk(b.text) && (b.subject == null || !subjectProblem(b.subject)) ? ['thread', 'new', `--title=${b.title.trim()}`, ...(b.subject ? [`--subject=${JSON.stringify(b.subject)}`] : []), '--', b.text.trim()] : null),
+    // is checked here before anything is spawned, and thread new checks it again. The dashboard
+    // points at items and spots on its own pages only; a later kit's viewers add artifact and preview
+    // subjects here (the log takes all four already).
+    'thread-new': (b) => (lineOk(b.title, THREAD_TITLE_MAX) && turnOk(b.text) && (b.subject == null || (['item', 'page'].includes(b.subject?.kind) && !subjectProblem(b.subject))) ? ['thread', 'new', `--title=${b.title.trim()}`, ...(b.subject ? [`--subject=${JSON.stringify(b.subject)}`] : []), '--', b.text.trim()] : null),
     'thread-say': (b) => (THREAD_ID.test(b.id ?? '') && turnOk(b.text) ? ['thread', 'say', b.id, '--', b.text.trim()] : null),
     'thread-resolve': (b) => (THREAD_ID.test(b.id ?? '') && (b.outcome === undefined || b.outcome === '' || lineOk(b.outcome, OUTCOME_MAX, true)) ? ['thread', 'resolve', b.id, ...(b.outcome?.trim() ? [`--outcome=${b.outcome.trim()}`] : [])] : null),
     'thread-reopen': (b) => (THREAD_ID.test(b.id ?? '') && (b.text === undefined || b.text === '' || turnOk(b.text)) ? ['thread', 'reopen', b.id, ...(b.text?.trim() ? ['--', b.text.trim()] : [])] : null),
@@ -1298,10 +1356,14 @@ After the `dashboardData` runner (ending at line 9837) add:
     }
     const all = [...threadFiles.values()].flatMap((x) => x.lines);
     const asked = new Set(all.filter((l) => l.type === 'question' && l.op === 'new' && typeof l.thread === 'string').map((l) => l.id));
-    const body = JSON.stringify({ threads: threadViews(fold(all.filter((l) => l.type !== 'question' || asked.has(l.id))).objects) });
+    const body = JSON.stringify(threadViews(fold(all.filter((l) => l.type !== 'question' || asked.has(l.id))).objects));
     threadsMemo = { key, body };
     return { body, cached: false };
   };
+  // Whether the supervisor has a pane the kit can type into, for the card's "hasn't replied yet": asked
+  // of tmux at most every 10 s (resolvePane's calls are synchronous), never on every poll.
+  let paneSeen = { at: 0, pane: false };
+  const supervisorPane = () => { if (Date.now() - paneSeen.at > 10000) paneSeen = { at: Date.now(), pane: !resolvePane(supervisorTarget()).problem }; return paneSeen.pane; };
 ```
 
 After `const u = new URL(req.url, 'http://x');` (line 9863) add:
@@ -1315,7 +1377,7 @@ After `const u = new URL(req.url, 'http://x');` (line 9863) add:
       let r;
       try { r = threadsRead(); } catch (e) { return send(res, 500, 'application/json', JSON.stringify({ error: e.message })); }
       res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', ...(r.cached ? { 'x-devteam-threads': 'cached' } : {}) });
-      return res.end(r.body);
+      return res.end(`{"supervisor":${JSON.stringify({ pane: supervisorPane() })},"threads":${r.body}}`);
     }
 ```
 
@@ -1485,12 +1547,15 @@ test("the thread layer's rules: what the pointer is on, a subject that fits, whe
   const src = html.slice(html.indexOf('/* threads-core start */'), html.indexOf('/* threads-core end */'));
   assert.ok(src.length > 500, 'the threads-core block is marked in index.html');
   const ctx = vm.createContext({ TextEncoder });
-  vm.runInContext(`${src}\n;globalThis.api = { T_TYPES, tBytes, tCut, tLine, tSubjectAt, tFit, tCardState, tPlace, tWhere, tPins, tUnread };`, ctx);
+  vm.runInContext(`${src}\n;globalThis.api = { T_TYPES, T_REF, T_HOME, tBytes, tCut, tLine, tSubjectAt, tFit, tCardState, tPlace, tWhere, tPins, tUnread };`, ctx);
   const A = ctx.api;
   const plain = (x) => JSON.parse(JSON.stringify(x));
-  // the page and the kit name the same things
-  const kitTypes = JSON.parse(/const SUBJECT_TYPES = (\[[^\]]*\]);/.exec(fs.readFileSync(path.join(kit, 'scripts/devteam.mjs'), 'utf8'))[1].replace(/'/g, '"'));
-  assert.deepEqual(plain(A.T_TYPES), kitTypes);
+  // the page and the kit name the same things, and the page sends no ref the log refuses
+  const kitSrc = fs.readFileSync(path.join(kit, 'scripts/devteam.mjs'), 'utf8');
+  const kitLog = vm.runInContext(`${/^const SUBJECT_TYPES = .*$/m.exec(kitSrc)[0]}\n${/^const SUBJECT_REF = .*$/m.exec(kitSrc)[0]}\n;({ types: SUBJECT_TYPES, ref: SUBJECT_REF })`, vm.createContext({}));
+  assert.deepEqual(plain(A.T_TYPES), plain(kitLog.types));
+  assert.equal(A.T_REF.source, kitLog.ref.source);
+  assert.deepEqual(Object.keys(A.T_HOME).sort(), [...plain(A.T_TYPES)].sort(), 'every kind of item has a home section');
   // sizes in bytes; one line; never half a surrogate pair
   assert.equal(A.tBytes('héllo'), 6);
   assert.equal(A.tCut('日本語', 7), '日本');
@@ -1499,10 +1564,15 @@ test("the thread layer's rules: what the pointer is on, a subject that fits, whe
   assert.equal(A.tLine(`${'x'.repeat(119)}😀`, 120).length, 119);
   // an item under the pointer, a spot in a section, nothing
   const G = 'g-20261110-101500123-supervisor';
-  const item = { dataset: { subject: `goal:${G}`, title: 'Launch checkout' }, innerText: 'Launch checkout\n  admins pay alone' };
-  const hit = A.tSubjectAt({ closest: (s) => (s === '[data-subject]' ? item : null) }, 10, 10, () => null);
-  assert.deepEqual(plain(hit.subject), { kind: 'item', ref: `goal:${G}`, quote: 'Launch checkout admins pay alone' });
+  const on = (item) => ({ closest: (s) => (s === '[data-subject]' ? item : null) });
+  const item = { dataset: { subject: `goal:${G}`, title: 'Launch checkout' }, innerText: 'Launch checkout\n  admins pay alone\nRun Drain Park Let go', querySelector: () => ({ textContent: 'Launch checkout' }) };
+  const hit = A.tSubjectAt(on(item), 10, 10, () => null);
+  assert.deepEqual(plain(hit.subject), { kind: 'item', ref: `goal:${G}`, quote: 'Launch checkout' }, "its name, not its buttons' labels");
   assert.equal(hit.title, 'Launch checkout');
+  const card = { dataset: { subject: 'question:q-20261110-101500123-supervisor', title: 'Narrow it?' }, innerText: 'x', querySelector: () => ({ textContent: 'Narrow the goal to EU orders?' }) };
+  assert.equal(A.tSubjectAt(on(card), 0, 0, () => null).subject.quote, 'Narrow it? · Narrow the goal to EU orders?');
+  assert.equal(A.tSubjectAt(on({ dataset: { subject: `goal:${G}` }, innerText: 'Only\ntext', querySelector: () => null }), 0, 0, () => null).subject.quote, 'Only text', 'its text only when it has no name or heading');
+  assert.equal(A.tSubjectAt(on({ dataset: { subject: 'secret:x', title: 'x' }, innerText: 'x' }), 0, 0, () => null), null, 'a ref the log would refuse is no item');
   const sec = { el: {}, view: '#loop/observe', box: { left: 100, top: 200, width: 400, height: 100 }, heading: 'Loop' };
   const spot = A.tSubjectAt({ closest: () => null }, 200, 250, () => sec);
   assert.deepEqual(plain(spot.subject), { kind: 'page', view: '#loop/observe', at: { x: 0.25, y: 0.5 }, quote: 'Loop' });
@@ -1521,11 +1591,14 @@ test("the thread layer's rules: what the pointer is on, a subject that fits, whe
   // the card's state line
   const now = Date.parse('2026-11-10T12:00:00Z');
   const th = (...turns) => ({ turns: turns.map(([by, min]) => ({ by, at: new Date(now - min * 60000).toISOString() })) });
-  assert.equal(A.tCardState(th(['owner', 5], ['supervisor', 1]), now), null, 'the reply is the state');
-  assert.equal(A.tCardState(th(['owner', 1]), now, true), 'Sent.');
-  assert.equal(A.tCardState(th(['owner', 1]), now, false), 'Sent; the supervisor will read it when it next checks.');
-  assert.equal(A.tCardState(th(['owner', 11]), now, true), "The supervisor hasn't replied yet.");
-  assert.equal(A.tCardState(th(), now), null);
+  const later = 'Sent; the supervisor will read it when it next checks.';
+  assert.equal(A.tCardState(th(['owner', 5], ['supervisor', 1]), now, true, true), null, 'the reply is the state');
+  assert.equal(A.tCardState(th(['owner', 1]), now, true, true), 'Sent.');
+  assert.equal(A.tCardState(th(['owner', 1]), now, false, false), later);
+  assert.equal(A.tCardState(th(['owner', 1]), now, undefined, true), later, 'after a reload nobody knows: when it next checks');
+  assert.equal(A.tCardState(th(['owner', 11]), now, true, true), "The supervisor hasn't replied yet.");
+  assert.equal(A.tCardState(th(['owner', 11]), now, true, false), later, 'not running: it will read it later');
+  assert.equal(A.tCardState(th(), now, true, true), null);
   // where a card opens: beside the pin, flipped to stay on screen; a sheet on a narrow screen
   assert.deepEqual(plain(A.tPlace({ left: 100, right: 300, top: 100, bottom: 150 }, 360, 400, 1200, 800)), { sheet: false, left: 310, top: 100 });
   assert.deepEqual(plain(A.tPlace({ left: 800, right: 1000, top: 700, bottom: 750 }, 360, 400, 1200, 800)), { sheet: false, left: 430, top: 392 });
@@ -1533,14 +1606,16 @@ test("the thread layer's rules: what the pointer is on, a subject that fits, whe
   // the dock's words for where a subject is
   assert.equal(A.tWhere({ kind: 'item', ref: `goal:${G}` }), 'Goals');
   assert.equal(A.tWhere({ kind: 'item', ref: 'ticket:checkout-04' }), 'Board');
-  assert.equal(A.tWhere({ kind: 'page', view: '#loop/observe' }), 'the dashboard, #loop/observe');
+  assert.equal(A.tWhere({ kind: 'page', view: '#loop/observe' }), 'Loop, Observe');
+  assert.equal(A.tWhere({ kind: 'page', view: '#goals' }), 'Goals');
+  assert.equal(A.tWhere({ kind: 'page', view: '#nowhere' }), 'the dashboard', 'no hash route in what the owner reads');
   assert.equal(A.tWhere({ kind: 'artifact', slug: 'pricing-mock' }), 'pricing-mock');
   assert.equal(A.tWhere({ kind: 'preview', name: 'cool-tiger', route: '/checkout' }), 'cool-tiger /checkout');
   assert.equal(A.tWhere(null), 'no subject');
   // one pin per subject, numbered by when its first open thread began; resolved and no-subject threads get none
-  const on = { kind: 'item', ref: `goal:${G}` };
+  const onGoal = { kind: 'item', ref: `goal:${G}` };
   const t = (id, created, subject, status = 'open') => ({ id, created_at: created, subject, status, turns: [] });
-  const pins = A.tPins([t('a', '1', on), t('c', '2', { kind: 'page', view: '#goals', at: { x: 0.1, y: 0.2 } }), t('b', '3', on), t('d', '0', on, 'resolved'), t('e', '4', null)]);
+  const pins = A.tPins([t('a', '1', onGoal), t('c', '2', { kind: 'page', view: '#goals', at: { x: 0.1, y: 0.2 } }), t('b', '3', onGoal), t('d', '0', onGoal, 'resolved'), t('e', '4', null)]);
   assert.deepEqual(plain(pins).map((g) => [g.n, g.ids]), [[1, ['a', 'b']], [2, ['c']]]);
   // a dot when the supervisor spoke after the owner last looked
   const reply = { turns: [{ by: 'owner', at: '2026-11-10T10:00:00.000Z' }, { by: 'supervisor', at: '2026-11-10T10:05:00.000Z' }] };
@@ -1562,18 +1637,34 @@ test("the thread layer's rules: what the pointer is on, a subject that fits, whe
 // The kit's test loads this block by itself.
 // What the page can point at: the kit's SUBJECT_TYPES (a test holds the two lists equal).
 const T_TYPES = ['goal', 'observation', 'question', 'ticket', 'planner', 'decision', 'lesson', 'problem', 'act', 'preview', 'artifact'];
-const T_TURN_MAX = 2000, T_SUBJECT_MAX = 2500, T_TITLE_MAX = 120, T_WAIT_MS = 10 * 60000;
+// The kit's SUBJECT_REF, the same way (a test holds the two equal): the page never sends a ref the log refuses.
+const T_REF = new RegExp(`^(${T_TYPES.join('|')}):[a-z0-9][a-z0-9-]{0,110}$`);
+// Where each kind of item lives: an item drawn in two places (an observation also in the Sensors
+// feed, a question in a Decide row) is pinned in its home section.
+const T_HOME = { goal: 'goals', question: 'inbox', ticket: 'board', planner: 'board', observation: 'loop', problem: 'loop', lesson: 'loop', decision: 'loop', act: 'loop', preview: 'library', artifact: 'library' };
+// The sections' names, as the sidebar shows them.
+const T_SECTIONS = { overview: 'Overview', goals: 'Goals', inbox: 'Inbox', progress: 'Progress', board: 'Board', library: 'Library', loop: 'Loop', trust: 'Trust Ladder', retros: 'Retros', health: 'Health', monitoring: 'Sensors' };
+// T_ENCODED_MAX: a turn as the log line holds it, JSON-escaped (a quotation mark is two bytes there,
+// a control character six), so a line of 4,096 bytes always has room for it.
+const T_TURN_MAX = 2000, T_ENCODED_MAX = 3800, T_SUBJECT_MAX = 2500, T_TITLE_MAX = 120, T_WAIT_MS = 10 * 60000;
 const T_ENC = new TextEncoder();
 // Sizes are the log's, in bytes of UTF-8: a CJK character is three, an emoji four.
 const tBytes = (s) => T_ENC.encode(String(s ?? '')).length;
 const tCut = (s, n) => { let o = '', b = 0; for (const c of String(s ?? '')) { const k = T_ENC.encode(c).length; if (b + k > n) break; o += c; b += k; } return o; };
 // One line of plain text, at most n UTF-16 units (what the log's schema counts), never half a pair.
 const tLine = (s, n) => { const x = String(s ?? '').replace(/[\u0000-\u001f\u007f-\u009f؜‎‏  ‪-‮⁦-⁩]/g, ' ').replace(/\s+/g, ' ').trim(); const c = x.slice(0, n); return /[\ud800-\udbff]$/.test(c) ? c.slice(0, -1) : c; };
-// What a point is on: the nearest item the dashboard drew (data-subject), else a spot in its section,
-// as fractions of the section's box. sec(el) gives the section: { el, view, box, heading }.
+// What a point is on: the nearest item the dashboard drew (data-subject, a ref the log takes), else
+// a spot in its section, as fractions of the section's box. sec(el) gives the section: { el, view,
+// box, heading }. An item's quote is its name and its heading, not every word in it (the buttons'
+// labels are no part of what the owner pointed at); its whole text only when it has neither.
 function tSubjectAt(el, x, y, sec) {
   const item = el?.closest?.('[data-subject]');
-  if (item) return { subject: { kind: 'item', ref: item.dataset.subject, quote: tCut(tLine(item.innerText ?? item.textContent, 2000), 300) }, title: tLine(item.dataset.title || item.dataset.subject, T_TITLE_MAX), el: item };
+  if (item && T_REF.test(item.dataset.subject ?? '')) {
+    const title = tLine(item.dataset.title, T_TITLE_MAX);
+    const head = tLine(item.querySelector?.('h4, .t, b')?.textContent, 300);
+    const said = [title, head && head !== title ? head : ''].filter(Boolean).join(' · ') || tLine(item.innerText ?? item.textContent, 2000);
+    return { subject: { kind: 'item', ref: item.dataset.subject, quote: tCut(said, 300) }, title: title || item.dataset.subject, el: item };
+  }
   const s = sec(el);
   if (!s) return null;
   const f = (n, a, w) => (w ? Math.min(1, Math.max(0, Math.round(((n - a) / w) * 1000) / 1000)) : 0);
@@ -1594,13 +1685,15 @@ function tFit(s) {
   }
   return x;
 }
-// The line under the turns: nothing once the supervisor has the last word (its reply is the state);
-// else what happened to the owner's turn, typed into its pane or not (as the POST that sent it said).
-function tCardState(t, now, typed) {
+// The line under the turns: nothing once the supervisor has the last word (its reply is the state).
+// Else: "Sent." when the POST that sent it said a pane took it; "will read it when it next checks"
+// when none did, or nobody knows (a reload); after 10 minutes with the supervisor running (a pane, as
+// /api/threads says), that it hasn't replied.
+function tCardState(t, now, typed, pane) {
   const last = t.turns[t.turns.length - 1];
   if (!last || last.by !== 'owner') return null;
-  if (now - Date.parse(last.at) > T_WAIT_MS) return "The supervisor hasn't replied yet.";
-  return typed === false ? 'Sent; the supervisor will read it when it next checks.' : 'Sent.';
+  if (now - Date.parse(last.at) > T_WAIT_MS) return pane ? "The supervisor hasn't replied yet." : 'Sent; the supervisor will read it when it next checks.';
+  return typed === true ? 'Sent.' : 'Sent; the supervisor will read it when it next checks.';
 }
 // Where a card opens: beside its pin (r, the pin's or subject's box), on whichever side keeps it on
 // screen, its top kept inside the window; a bottom sheet under 640 px.
@@ -1616,7 +1709,7 @@ const T_WHERE = { goal: 'Goals', question: 'Inbox', ticket: 'Board', planner: 'B
 function tWhere(s) {
   if (!s) return 'no subject';
   if (s.kind === 'item') return T_WHERE[String(s.ref).split(':')[0]] || 'the dashboard';
-  if (s.kind === 'page') return `the dashboard, ${s.view}`;
+  if (s.kind === 'page') { const [sec, tab] = String(s.view).slice(1).split('/'); return T_SECTIONS[sec] ? `${T_SECTIONS[sec]}${tab ? `, ${tab.charAt(0).toUpperCase()}${tab.slice(1)}` : ''}` : 'the dashboard'; }
   if (s.kind === 'artifact') return s.slug;
   if (s.kind === 'preview') return `${s.name}${s.route ? ` ${s.route}` : ''}`;
   return 'no subject';
@@ -1637,10 +1730,10 @@ const tUnread = (t, seenAt) => t.turns.some((u) => u.by === 'supervisor' && (!se
 
 - [ ] **Step 4:** Run the test, then the parse test (`$NODE --test --test-name-pattern "pages parse" test/dashboard.test.mjs`). Expect green. Commit: `dashboard: the thread layer's rules, apart from the page`.
 
-### Task 10: The layer: Shift and point, the highlight and chip, a Shift+click taken whole, the card and its composer
+### Task 10: The layer, aiming: Shift and point, the highlight and chip, a Shift+click taken whole
 
 **Files:**
-- Modify: `docs/devteam/dashboard/index.html` (CSS before `</style>`; the `#tl` markup after line 673, before `<script>`; a `/* threads-layer start */ … end */` block after `/* threads-core end */`; `route()` at 3030; `drawOrHold` at 3411)
+- Modify: `docs/devteam/dashboard/index.html` (CSS before `</style>`; the `#tl` markup after line 673, before `<script>`; a `/* threads-layer start */ … end */` block after `/* threads-core end */`; `holding()` at 3390)
 - Modify: `test/lib/chrome.mjs` (`newPage`: `hold`, `at`, `move`, `clickAt`)
 - Test: `test/dashboard.test.mjs`
 
@@ -1661,11 +1754,11 @@ const tUnread = (t, seenAt) => t.turns.some((u) => u.by === 'supervisor' && (!se
 
 and change the return to `return { send, ev, key, type, click, hold, at, move, clickAt, close: () => ws.close() };`.
 
-- [ ] **Step 2: Test.** Append to `test/dashboard.test.mjs` (after the typing test, so `POLL_FAST` is defined):
+- [ ] **Step 2: Test.** Append to `test/dashboard.test.mjs` (after the typing test, so `POLL_FAST` is defined). Tasks 11 to 13 append their subtests to this test, in order:
 
 ```js
-// The thread layer in Chrome, on a project of its own: Shift and point, the card, then (the next
-// task) the pins, the dock and the questions. One page; the subtests run in order.
+// The thread layer in Chrome, on a project of its own: aiming (this task), the card (Task 11), the
+// pins and the dock (Task 12), questions and resolving (Task 13). One page; the subtests run in order.
 test('threads on the dashboard page: Shift and point, the card, the pins and the dock', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 300000 }, async (t) => {
   const F = threadsFixture('threads-page');
   t.after(() => F.done());
@@ -1718,47 +1811,21 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await p.ev(`document.querySelector('${box}').value = ''; document.activeElement.blur()`);
   });
 
-  await t.test("a Shift+click is the layer's alone: the card opens on the goal, and the title link under it isn't followed", async () => {
+  await t.test("a Shift+click is the layer's alone: it starts a thread on the goal, and the title link under it isn't followed", async () => {
     const at = await p.at(`${goalSel} a.title-link`);
     await p.hold('Shift', true);
     await p.clickAt(at.x, at.y, 8);
     await p.hold('Shift', false);
-    await soon(shown('tl-card'), 'the card');
+    await soon(`TL.draft?.subject?.ref === 'goal:${F.goal}'`, 'a thread about to start, on the goal');
+    assert.equal(await p.ev('TL.draft.title'), 'Launch checkout');
     assert.equal(await p.ev('location.hash'), '#goals', 'the link was not followed');
     assert.equal(await p.ev(`document.getElementById('drawer').hidden`), true, 'no sidepeek opened');
-    assert.match(await p.ev(`document.querySelector('#tl-card .tl-ctx summary').textContent`), /Launch checkout[\s\S]*Goals/);
     assert.equal(threads().length, 0, 'nothing is written until the owner writes');
-  });
-
-  await t.test('Enter sends the first words: a thread on the goal, its turn in the card, the draft cleared', async () => {
-    await p.click('#tl-c-text');
-    await p.type('Narrow this to the EU launch');
-    await p.key('Enter');
-    const th = await until(() => threads().find((x) => x.turns[0]?.text === 'Narrow this to the EU launch'), 'the thread in the log');
-    T = th.id;
-    assert.deepEqual([th.subject.kind, th.subject.ref, th.title], ['item', `goal:${F.goal}`, 'Launch checkout']);
-    await soon(`document.querySelector('#tl-c-turns .tl-turn.owner')?.textContent.includes('Narrow this to the EU launch')`, 'the turn in the card');
-    assert.equal(await p.ev(`document.getElementById('tl-c-text').value`), '');
-    assert.match(await p.ev(`document.getElementById('tl-c-state').textContent`), /^Sent/);
-  });
-
-  await t.test("the supervisor's reply shows in the open card within 3 s", async () => {
-    F.sup(['thread', 'say', T, 'That drops the measure to EU orders; want me to propose the change?']);
-    const t0 = Date.now();
-    await soon(`document.querySelector('#tl-c-turns .tl-turn.supervisor')?.textContent.includes('drops the measure')`, 'the reply');
-    assert.ok(Date.now() - t0 < 3500, `took ${Date.now() - t0} ms`);
-    assert.equal(await p.ev(`document.getElementById('tl-c-state').textContent`), '', 'the reply is the state');
-  });
-
-  await t.test('a turn over 2,000 bytes is refused in the card, counted in bytes', async () => {
-    await p.ev(`(() => { const ta = document.getElementById('tl-c-text'); ta.focus(); ta.value = '日'.repeat(700); ta.dispatchEvent(new Event('input', { bubbles: true })); })()`);
-    assert.match(await p.ev(`document.getElementById('tl-c-bytes').textContent`), /2100 \/ 2000 bytes/);
-    await p.key('Enter');
-    await soon(`/At most 2000 bytes/.test(document.getElementById('e-tl').textContent)`, 'the refusal');
-    await p.ev(`(() => { const ta = document.getElementById('tl-c-text'); ta.value = ''; ta.dispatchEvent(new Event('input', { bubbles: true })); ta.blur(); })()`);
   });
 });
 ```
+
+(`TL` is a top-level `const` of the page's script: `Runtime.evaluate` sees it, as the console does.)
 
 - [ ] **Step 3:** Run `$NODE --test --test-name-pattern "threads on the dashboard page" test/dashboard.test.mjs`. Expect red: no `#tl-cursor`.
 
@@ -1770,7 +1837,6 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
   <div id="tl-hl" class="tl-hl" hidden></div>
   <div id="tl-chip" class="tl-chip" hidden></div>
   <div id="tl-cursor" class="tl-cursor" hidden aria-hidden="true"><svg viewBox="0 0 28 36" width="28" height="36"><path d="M14 35C14 35 2 21 2 13a12 12 0 0 1 24 0c0 8-12 22-12 22z"/><circle cx="14" cy="13" r="4.5"/></svg></div>
-  <div id="tl-card" class="tl-card" role="dialog" aria-label="A thread with the supervisor" hidden></div>
 </div>
 ```
 
@@ -1786,23 +1852,6 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
   .tl-hl { position: fixed; z-index: 58; pointer-events: none; border: 2px solid var(--blue); border-radius: 8px; background: color-mix(in srgb, var(--blue) 8%, transparent); }
   .tl-hl.spot { border-radius: 50%; }
   .tl-chip { position: fixed; z-index: 59; pointer-events: none; max-width: 260px; padding: 2px 8px; border-radius: 6px; background: var(--fg); color: var(--bg); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .tl-card { position: absolute; z-index: 50; width: 360px; max-height: min(560px, 80vh); display: flex; flex-direction: column; background: var(--raised); border: 1px solid var(--line-2); border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.18); padding: 10px 12px; }
-  .tl-card.in-dock { position: fixed; right: 16px; bottom: 64px; }
-  .tl-card.sheet { position: fixed; left: 0; right: 0; bottom: 0; width: auto; max-height: 75vh; border-radius: 12px 12px 0 0; }
-  .tl-head { display: flex; align-items: center; gap: 6px; }
-  .tl-head .tl-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .tl-head button { margin-top: 0; }
-  .tl-ctx { margin: 6px 0; border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; background: var(--well); font-size: 12px; }
-  .tl-ctx summary { display: flex; gap: 6px; align-items: center; cursor: pointer; list-style: none; }
-  .tl-ctx summary b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
-  .tl-ctx .kv code { overflow-wrap: anywhere; }
-  .tl-turns { overflow-y: auto; flex: 1; min-height: 60px; display: flex; flex-direction: column; gap: 8px; padding: 4px 0; }
-  .tl-turn .tl-text { white-space: pre-wrap; overflow-wrap: anywhere; }
-  .tl-turn.owner { align-self: flex-end; max-width: 88%; background: color-mix(in srgb, var(--blue) 10%, var(--surface)); border-radius: 8px; padding: 6px 8px; }
-  .tl-refs { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 2px; font-size: 12px; }
-  .tl-compose textarea { margin-top: 6px; }
-  .tl-compose .row-inline { align-items: center; }
-  @media (max-width: 640px) { .tl-card:not(.sheet) { width: calc(100vw - 32px); } }
 ```
 
 - [ ] **Step 6: The layer.** After `/* threads-core end */`, add:
@@ -1811,10 +1860,9 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
 /* threads-layer start */
 // The thread layer: hold Shift and point at anything on the dashboard to talk to the supervisor
 // about it. It lives in #tl, outside <main>, which the 10 s refresh rebuilds, so a card, its draft and
-// the dock keep their state; drawOrHold has it refresh after every redraw, and an open card polls
-// /api/threads every 2 s while the tab is visible. Its window listeners in the capture phase are
-// registered here, before the page's own (PRESSED below), so a click it takes reaches nothing else.
-const TL = { threads: [], open: null, draft: null, hit: null, pin: false, via: null, swallowUntil: 0, typed: {}, sig: '', polling: null, busy: false, resolving: false, readyKey: '' };
+// the dock keep their state. Its window listeners in the capture phase are registered here, before
+// the page's own (PRESSED below), so a click it takes reaches nothing else.
+const TL = { threads: [], pane: false, open: null, draft: null, hit: null, pin: false, via: null, swallowUntil: 0, typed: {}, sig: '', polling: null, busy: false, resolving: false, readyKey: '', pill: '' };
 const tlEl = (id) => document.getElementById(id);
 const tlOwn = (el) => !!el?.closest?.('#tl');
 const tlShowing = () => !tlEl('tl-cursor').hidden;
@@ -1851,7 +1899,8 @@ function tlHide() {
   document.documentElement.classList.remove('tl-aiming');
   for (const id of ['tl-cursor', 'tl-hl', 'tl-chip']) tlEl(id).hidden = true;
 }
-// Pin mode: pointing without Shift, for a finger or a long look around, until Esc or the button again.
+// Pin mode: pointing without Shift, for a finger or a long look around, until Esc or the dock's Pin
+// button again.
 function tlPinMode(on) {
   TL.pin = on;
   tlEl('tl-pinbtn')?.setAttribute('aria-pressed', String(on));
@@ -1859,9 +1908,7 @@ function tlPinMode(on) {
   if (!on) tlHide();
 }
 window.addEventListener('keydown', (e) => {
-  if (e.key !== 'Escape') return;
-  if (tlShowing() || TL.pin) { e.stopImmediatePropagation(); tlHide(); if (TL.pin) tlPinMode(false); return; }
-  if (tlOwn(document.activeElement) && !tlEl('tl-card').hidden) { e.stopImmediatePropagation(); TL.open = null; TL.draft = null; tlDraw(); }
+  if (e.key === 'Escape' && (tlShowing() || TL.pin)) { e.stopImmediatePropagation(); tlHide(); if (TL.pin) tlPinMode(false); }
 }, true);
 window.addEventListener('keyup', (e) => { if (e.key === 'Shift' && !TL.pin) tlHide(); }, true);
 window.addEventListener('blur', () => { if (!TL.pin) tlHide(); });
@@ -1893,6 +1940,113 @@ for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click',
   tlHide();
   if (hit) tlStart(hit);
 }, true);
+// A thread about to start: its subject fitted to the log's cap; nothing is written until the owner
+// sends the first words.
+function tlStart(hit) {
+  TL.open = null;
+  TL.resolving = false;
+  TL.draft = { subject: tFit(hit.subject), title: hit.title, el: hit.subject.kind === 'item' ? hit.el : null, px: hit.x + scrollX, py: hit.y + scrollY };
+}
+/* threads-layer end */
+```
+
+In `holding()` (line 3392), replace `typingIn(ae)` with `(typingIn(ae) && !ae.closest('#tl'))`, and add above the function: `// A field in the thread layer holds nothing: the layer is outside what a redraw rebuilds, so the page refreshes under a half-written turn.`
+
+- [ ] **Step 7:** Run the Chrome test, then `$NODE --test test/dashboard.test.mjs` (the typing test checks that a press in the page still holds a redraw). Expect green. Commit: `dashboard: Shift and point at anything; the click is the layer's alone`.
+
+### Task 11: The layer, the card: its context card, the turns, the composer, `#talk/`, and the redraw hook
+
+**Files:**
+- Modify: `docs/devteam/dashboard/index.html` (`#tl` markup; CSS; the threads-layer block; `route()` at 3030; `drawOrHold` at 3411)
+- Test: `test/dashboard.test.mjs` (subtests appended in the page test)
+
+- [ ] **Step 1: Tests.** Append inside `threads on the dashboard page`, after its last subtest:
+
+```js
+  await t.test('the card opens beside the goal, with the goal as its context, and nothing written yet', async () => {
+    await soon(shown('tl-card'), 'the card');
+    assert.match(await p.ev(`document.querySelector('#tl-card .tl-ctx summary').textContent`), /Launch checkout[\s\S]*Goals/);
+    assert.equal(await p.ev(`document.activeElement.id`), 'tl-c-text', 'ready to write');
+    assert.equal(threads().length, 0);
+  });
+
+  await t.test('Enter sends the first words: a thread on the goal, its turn in the card, the draft cleared', async () => {
+    await p.type('Narrow this to the EU launch');
+    await p.key('Enter');
+    const th = await until(() => threads().find((x) => x.turns[0]?.text === 'Narrow this to the EU launch'), 'the thread in the log');
+    T = th.id;
+    assert.deepEqual([th.subject.kind, th.subject.ref, th.title], ['item', `goal:${F.goal}`, 'Launch checkout']);
+    await soon(`document.querySelector('#tl-c-turns .tl-turn.owner')?.textContent.includes('Narrow this to the EU launch')`, 'the turn in the card');
+    assert.equal(await p.ev(`document.getElementById('tl-c-text').value`), '');
+    assert.equal(await p.ev(`document.activeElement.id`), 'tl-c-text', 'still in the composer after the card became the thread');
+    assert.equal(await p.ev(`document.getElementById('tl-c-state').textContent`), 'Sent; the supervisor will read it when it next checks.', 'no pane here');
+  });
+
+  await t.test('the page refreshes while the owner writes in the card: the layer holds no redraw', async () => {
+    await p.click('#tl-c-text');
+    await p.type('half a thought');
+    const polls = await p.ev('window.__polls');
+    await p.ev(`window.__g = document.querySelector('${goalSel}'); void 0`);
+    await soon(`window.__polls >= ${polls + 2} && !window.__g.isConnected`, 'polls landing and the goal card redrawn');
+    assert.equal(await p.ev(`document.activeElement.id`), 'tl-c-text');
+    assert.equal(await p.ev(`document.getElementById('tl-c-text').value`), 'half a thought', 'the draft untouched');
+    await p.ev(`(() => { const ta = document.getElementById('tl-c-text'); ta.value = ''; ta.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  });
+
+  await t.test("the supervisor's reply shows in the open card within two polls", async () => {
+    F.sup(['thread', 'say', T, 'That drops the measure to EU orders; want me to propose the change?']);
+    const t0 = Date.now();
+    await soon(`document.querySelector('#tl-c-turns .tl-turn.supervisor')?.textContent.includes('drops the measure')`, 'the reply');
+    // the card polls every 2 s: two polls and a margin for a loaded machine
+    assert.ok(Date.now() - t0 < 2 * 2000 + 1500, `took ${Date.now() - t0} ms`);
+    assert.equal(await p.ev(`document.getElementById('tl-c-state').textContent`), '', 'the reply is the state');
+  });
+
+  await t.test('a turn over 2,000 bytes is refused in the card, counted in bytes', async () => {
+    await p.ev(`(() => { const ta = document.getElementById('tl-c-text'); ta.focus(); ta.value = '日'.repeat(700); ta.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+    assert.match(await p.ev(`document.getElementById('tl-c-bytes').textContent`), /2100 \/ 2000 bytes/);
+    await p.key('Enter');
+    await soon(`/At most 2000 bytes/.test(document.getElementById('e-tl').textContent)`, 'the refusal');
+    await p.ev(`(() => { const ta = document.getElementById('tl-c-text'); ta.value = ''; ta.dispatchEvent(new Event('input', { bubbles: true })); ta.blur(); })()`);
+  });
+
+  await t.test('#talk/<id> opens the thread beside its subject', async () => {
+    await p.click('[data-tl-close]');
+    await soon(`document.getElementById('tl-card').hidden`, 'closed');
+    await p.ev(`location.hash = '#talk/${T}'`);
+    await soon(`${shown('tl-card')} && document.getElementById('tl-card').dataset.key === '${T}'`, 'the card from the link');
+  });
+```
+
+- [ ] **Step 2:** Run the page test. Expect red at the first new subtest: no `#tl-card`.
+
+- [ ] **Step 3: The markup.** In `#tl`, after `#tl-cursor`, add `<div id="tl-card" class="tl-card" role="dialog" aria-label="A thread with the supervisor" hidden></div>`.
+
+- [ ] **Step 4: The CSS.** After the Task 10 rules, add:
+
+```css
+  .tl-card { position: absolute; z-index: 50; width: 360px; max-height: min(560px, 80vh); display: flex; flex-direction: column; background: var(--raised); border: 1px solid var(--line-2); border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.18); padding: 10px 12px; }
+  .tl-card.in-dock { position: fixed; right: 16px; bottom: 64px; }
+  .tl-card.sheet { position: fixed; left: 0; right: 0; bottom: 0; width: auto; max-height: 75vh; border-radius: 12px 12px 0 0; }
+  .tl-head { display: flex; align-items: center; gap: 6px; }
+  .tl-head .tl-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tl-head button { margin-top: 0; }
+  .tl-ctx { margin: 6px 0; border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; background: var(--well); font-size: 12px; }
+  .tl-ctx summary { display: flex; gap: 6px; align-items: center; cursor: pointer; list-style: none; }
+  .tl-ctx summary b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+  .tl-ctx .kv code { overflow-wrap: anywhere; }
+  .tl-turns { overflow-y: auto; flex: 1; min-height: 60px; display: flex; flex-direction: column; gap: 8px; padding: 4px 0; }
+  .tl-turn .tl-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .tl-turn.owner { align-self: flex-end; max-width: 88%; background: color-mix(in srgb, var(--blue) 10%, var(--surface)); border-radius: 8px; padding: 6px 8px; }
+  .tl-refs { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 2px; font-size: 12px; }
+  .tl-compose textarea { margin-top: 6px; }
+  .tl-compose .row-inline { align-items: center; }
+  @media (max-width: 640px) { .tl-card:not(.sheet) { width: calc(100vw - 32px); } }
+```
+
+- [ ] **Step 5: The layer.** In the threads-layer block, replace `tlStart`'s comment and body with:
+
+```js
 // A card for a thread about to start: its subject fitted to the log's cap; nothing is written until
 // the owner sends the first words.
 function tlStart(hit) {
@@ -1902,14 +2056,30 @@ function tlStart(hit) {
   tlDraw();
   tlEl('tl-c-text')?.focus();
 }
-// Where a subject is now: the first drawn and visible element that names it, or none.
-const tlItems = (s) => (s?.kind === 'item' ? [...document.querySelectorAll(`main [data-subject="${CSS.escape(s.ref)}"]`)] : []);
-const tlFind = (s) => tlItems(s).find((el) => el.getClientRects().length) ?? null;
+```
+
+In its Escape `keydown` listener, after the first `if`, add:
+
+```js
+  else if (e.key === 'Escape' && tlOwn(document.activeElement) && !tlEl('tl-card').hidden) { e.stopImmediatePropagation(); TL.open = null; TL.draft = null; tlDraw(); }
+```
+
+and before `/* threads-layer end */` add:
+
+```js
+// The one element a subject's pin and card follow: the one in its home section (an observation is
+// also in the Sensors feed, a question in a Decide row), else wherever it is drawn.
+function tlHome(s) {
+  if (s?.kind !== 'item') return null;
+  const sel = `[data-subject="${CSS.escape(s.ref)}"]`;
+  return document.querySelector(`main #${T_HOME[s.ref.split(':')[0]] || 'overview'} ${sel}`) ?? document.querySelector(`main ${sel}`);
+}
+const tlVisible = (el) => !!el && el.getClientRects().length > 0;
 function tlTargetRect(s) {
-  if (s?.kind === 'item') return tlFind(s)?.getBoundingClientRect() ?? null;
+  if (s?.kind === 'item') { const el = tlHome(s); return tlVisible(el) ? el.getBoundingClientRect() : null; }
   if (s?.kind === 'page') {
     const sec = document.getElementById(String(s.view).slice(1).split('/')[0]);
-    if (!sec || !sec.getClientRects().length) return null;
+    if (!tlVisible(sec)) return null;
     const b = sec.getBoundingClientRect();
     const x = b.left + (s.at?.x ?? 0) * b.width, y = b.top + (s.at?.y ?? 0) * b.height;
     return { left: x - 12, right: x + 12, top: y - 12, bottom: y + 12, width: 24, height: 24 };
@@ -1919,7 +2089,7 @@ function tlTargetRect(s) {
 // Bring a subject into view: the Loop's tab it is on, the <details> it is in, then scroll to it.
 function tlGoTo(s) {
   if (s?.kind === 'item') {
-    const el = tlItems(s)[0];
+    const el = tlHome(s);
     if (!el) return;
     const panel = el.closest('.loop-panel');
     if (panel?.hidden) showTab(panel.dataset.panel);
@@ -1938,30 +2108,17 @@ function tlCtx(s, title, note) {
   const rows = s ? Object.entries(s).filter(([k]) => k !== 'kind').map(([k, v]) => `<span>${esc(words(k))}</span><code>${esc(typeof v === 'string' ? v : JSON.stringify(v))}</code>`).join('') : '';
   return `<details class="tl-ctx"><summary><i class="icon-${icon}" aria-hidden="true"></i><b>${esc(title)}</b><span class="muted small">${esc(tWhere(s))}${note ? ` · ${esc(note)}` : ''}</span></summary>${rows ? `<div class="kv">${rows}</div>` : '<p class="small muted">Started from the dock, about nothing on the page.</p>'}</details>`;
 }
-// What a supervisor turn did, as links: "Goal Launch checkout", "Ticket …", "Act".
+// What a supervisor turn did, as links: "Goal Launch checkout", "Ticket …", "Act open it".
 function tlRef(r) {
   const i = r.indexOf(':');
   const k = r.slice(0, i), id = r.slice(i + 1);
   const a = { goal: () => glink(id), ticket: () => tlink(id), question: () => qlink(id), decision: () => dlink(id), act: () => `<a class="linkish" href="#act/${encodeURIComponent(id)}">open it</a>`, problem: () => `<a class="linkish" href="#problem/${encodeURIComponent(id)}">open it</a>`, lesson: () => `<a class="linkish" href="#lesson/${encodeURIComponent(id)}">open it</a>`, artifact: () => `<a class="linkish" href="#artifact/main/${encodeURIComponent(id)}">${esc(id)}</a>` }[k];
   return `<span class="tl-ref"><span class="muted">${esc(words(k))}</span> ${a ? a() : `<code>${esc(id)}</code>`}</span>`;
 }
-// A question asked in the thread: the Inbox's own card while it is open there (from /api/data),
-// answered from either place once; once it isn't open, its answer. A review or a secret is answered
-// in the Inbox, where its page or its form is: two forms that post values is one too many.
-function tlQuestion(q, reasonText) {
-  if (ANSWERED.has(q.id)) return `<div class="card small tl-q done"><div class="answered-note"><i class="icon-circle-check" aria-hidden="true"></i> Answered: <b>${esc(ANSWERED.get(q.id))}</b></div></div>`;
-  const open = (DATA?.questions || []).find((x) => x.id === q.id);
-  if (q.status === 'open' && open && open.kind !== 'review' && !(open.secrets || []).length) return questionCard(open, DATA.ooda, reasonText, true);
-  if (q.status === 'open') return `<div class="card small tl-q"><b>${esc(q.question)}</b><div class="meta"><a class="linkish" href="#q/${encodeURIComponent(q.id)}">Answer it in the Inbox</a></div></div>`;
-  return `<div class="card small tl-q"><div>${esc(q.question)}</div>${q.answer ? `<div><b>${esc(q.answer)}</b></div>` : ''}<div class="meta">${esc(q.status === 'answered' ? `answered ${CHANNEL_WORDS[q.channel] || ''}` : q.status)}</div></div>`;
-}
+// A turn's words.
+const tlTurnBody = (u) => `<div class="tl-text">${linkify(u.text)}</div>`;
 function tlTurns(t) {
-  const qs = new Map(t.questions.map((q) => [q.id, q]));
-  const reasonText = Object.fromEntries((DATA?.ooda?.reasons || []).map((r) => [r.id, r.means]));
-  return t.turns.map((u) => {
-    const q = u.question ? qs.get(u.question) : null;
-    return `<div class="tl-turn ${u.by}"><div class="meta">${u.by === 'owner' ? 'You' : 'The supervisor'} · ${esc(when(u.at))}</div>${q ? tlQuestion(q, reasonText) : `<div class="tl-text">${linkify(u.text)}</div>`}${u.refs.length ? `<div class="tl-refs">${u.refs.map(tlRef).join('')}</div>` : ''}</div>`;
-  }).join('');
+  return t.turns.map((u) => `<div class="tl-turn ${u.by}"><div class="meta">${u.by === 'owner' ? 'You' : 'The supervisor'} · ${esc(when(u.at))}</div>${tlTurnBody(u, t)}${u.refs.length ? `<div class="tl-refs">${u.refs.map(tlRef).join('')}</div>` : ''}</div>`).join('');
 }
 // The card's body, redrawn only when what it shows changed and never under the owner's hands (a
 // focused control in its turns, a question card mid-answer), so a pick or a note survives a poll.
@@ -1973,15 +2130,16 @@ function tlCardBody(t) {
   const sig = JSON.stringify([t, s, title, (t?.questions || []).map((q) => [q.id, (DATA?.questions || []).some((x) => x.id === q.id), ANSWERED.has(q.id)])]);
   if (sig !== TL.sig && !turns.contains(document.activeElement)) {
     TL.sig = sig;
-    const now = t && s?.kind === 'item' ? tlItems(s)[0] : null;
-    const note = !t ? '' : s?.kind === 'item' && !now ? 'not on the page now' : now && now.dataset.title !== t.title ? 'changed since' : '';
+    const now = t ? tlHome(s) : null;
+    // the names as the dock shows them, so a title the log cut at 120 isn't "changed"
+    const note = !t ? '' : s?.kind === 'item' && !now ? 'not on the page now' : now && tLine(now.dataset.title, T_TITLE_MAX) !== tLine(t.title, T_TITLE_MAX) ? 'changed since' : '';
     const was = tlEl('tl-c-ctx').querySelector('details')?.open;
     tlEl('tl-c-ctx').innerHTML = tlCtx(s, title, note);
     if (was) tlEl('tl-c-ctx').querySelector('details').open = true;
     turns.innerHTML = t ? tlTurns(t) : '<p class="small muted">Say what you want done about it. Nothing is sent until you do.</p>';
     turns.scrollTop = turns.scrollHeight;
   }
-  tlEl('tl-c-state').textContent = !t ? '' : t.status === 'resolved' ? `Resolved${t.outcome ? `: ${t.outcome}` : ''}. Writing reopens it.` : tCardState(t, Date.now(), TL.typed[t.id]) ?? '';
+  tlEl('tl-c-state').textContent = !t ? '' : t.status === 'resolved' ? `Resolved${t.outcome ? `: ${t.outcome}` : ''}. Writing reopens it.` : tCardState(t, Date.now(), TL.typed[t.id], TL.pane) ?? '';
 }
 // Beside its pin, in page coordinates so it scrolls with the page; in the dock when its subject isn't
 // on the page (or it has none); a bottom sheet on a narrow screen.
@@ -2006,7 +2164,17 @@ function tlCard() {
   if (TL.open && !t) TL.open = null;
   if (!t && !TL.draft) { card.hidden = true; card.dataset.key = ''; clearInterval(TL.polling); TL.polling = null; return; }
   const key = t ? t.id : 'new';
-  if (card.dataset.key !== key) { card.dataset.key = key; card.innerHTML = tlCardFrame(); tlEl('tl-c-text').value = lsGet(tlDraftKey(key)) || ''; tlBytes(); TL.sig = ''; TL.readyKey = ''; }
+  if (card.dataset.key !== key) {
+    // the first words make the draft a thread, and the card its own: the composer keeps the focus
+    const writing = document.activeElement?.id === 'tl-c-text';
+    card.dataset.key = key;
+    card.innerHTML = tlCardFrame();
+    tlEl('tl-c-text').value = lsGet(tlDraftKey(key)) || '';
+    tlBytes();
+    TL.sig = '';
+    TL.readyKey = '';
+    if (writing) tlEl('tl-c-text').focus();
+  }
   card.hidden = false;
   tlCardBody(t);
   tlPlaceCard(t);
@@ -2017,7 +2185,9 @@ async function tlRefresh() {
   try {
     const r = await fetch('/api/threads');
     if (!r.ok) return;
-    TL.threads = (await r.json()).threads || [];
+    const j = await r.json();
+    TL.threads = j.threads || [];
+    TL.pane = !!j.supervisor?.pane;
   } catch { return; }
   tlDraw();
 }
@@ -2039,6 +2209,7 @@ async function tlSend() {
   const err = tlEl('e-tl');
   if (!text || TL.busy) return;
   if (tBytes(text) > T_TURN_MAX) { err.textContent = `At most ${T_TURN_MAX} bytes; this is ${tBytes(text)}. Characters outside plain English take two to four each.`; return; }
+  if (tBytes(JSON.stringify(text)) - 2 > T_ENCODED_MAX) { err.textContent = 'This has too many quotation marks, backslashes or control characters to keep; shorten it.'; return; }
   const key = tlEl('tl-card').dataset.key;
   const t = TL.open ? TL.threads.find((x) => x.id === TL.open) : null;
   const [action, body] = !t ? ['thread-new', { title: TL.draft.title || tLine(text, T_TITLE_MAX), subject: TL.draft.subject || undefined, text }] : t.status === 'resolved' ? ['thread-reopen', { id: t.id, text }] : ['thread-say', { id: t.id, text }];
@@ -2048,6 +2219,7 @@ async function tlSend() {
     const r = await sending(() => fetch(`/api/${action}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }));
     const out = await r.json();
     if (!r.ok) { err.textContent = out.error || 'failed'; return; }
+    // the first line of a thread command's output is the id; the second says whether a pane took it
     const id = action === 'thread-new' ? String(out.out || '').split('\n')[0].trim() : t.id;
     TL.typed[id] = /supervisor's pane/.test(out.out || '');
     lsDel(tlDraftKey(key));
@@ -2064,7 +2236,6 @@ document.addEventListener('click', (e) => {
   if (e.target.closest('[data-tl-send]')) return void tlSend();
 });
 addEventListener('resize', () => tlDraw());
-/* threads-layer end */
 ```
 
 In `route()` (line 3047, before `const PEEKS`), add:
@@ -2074,20 +2245,20 @@ In `route()` (line 3047, before `const PEEKS`), add:
   if (h.startsWith('talk/')) return void tlOpen(h.slice(5));
 ```
 
-In `drawOrHold` (line 3426), after `inboxTitle(d);` add:
+In `drawOrHold`, `inboxTitle(d)` appears twice: at line 3417 in the held branch and at line 3426 after `render(d)`. After the one at 3426 (following `render(d); if (first) route();`), add:
 
 ```js
-    // the thread layer, which the redraw doesn't touch: its threads again, and its card and pins
+    // the thread layer, which the redraw doesn't touch: its threads again, and its card
     tlRefresh();
 ```
 
-- [ ] **Step 7:** Run the Chrome test, then `$NODE --test test/dashboard.test.mjs` (the typing test checks that a press still holds a redraw). Expect green. Commit: `dashboard: Shift and point at anything; the card with its context, the turns and a composer`.
+- [ ] **Step 6:** Run the page test, then `$NODE --test test/dashboard.test.mjs`. Expect green. Commit: `dashboard: the thread card, with its context, the turns and a composer`.
 
-### Task 11: Pins, the dock, the pin button, questions in the card, Ready and Resolve
+### Task 12: Pins on what threads are about, the dock, the pin button
 
 **Files:**
-- Modify: `docs/devteam/dashboard/index.html` (the `#tl` markup; CSS; `.held` at line 49; the threads-layer block; `drawOrHold`)
-- Test: `test/dashboard.test.mjs` (subtests appended in the page test from Task 10)
+- Modify: `docs/devteam/dashboard/index.html` (the `#tl` markup; CSS, and `.held` at line 49; the threads-layer block; `drawOrHold`)
+- Test: `test/dashboard.test.mjs` (subtests appended in the page test)
 
 - [ ] **Step 1: Tests.** Append inside `threads on the dashboard page`, after its last subtest:
 
@@ -2108,41 +2279,12 @@ In `drawOrHold` (line 3426), after `inboxTitle(d);` add:
     await soon(`${shown('tl-card')} && document.getElementById('tl-card').dataset.key === '${T}'`, 'the card from its pin');
   });
 
-  await t.test("a question asked in the thread: the Inbox's card in the card (t-q-), answered there once, answered in the Inbox too", async () => {
-    const Q = F.sup(['thread', 'ask', T, '--question', 'Narrow the goal to EU orders?', '--choices', '[{"label":"Yes"},{"label":"Not yet"}]', '--recommendation', 'Yes', '--goal', F.goal, '--stake', '2', '--urgency', '1']);
-    await soon(`!!document.getElementById('t-q-${Q}') && !!document.getElementById('q-${Q}')`, 'both copies');
-    assert.equal(await p.ev(`document.getElementById('t-q-${Q}').querySelector('input[data-pick]').name`), `t-pick-${Q}`, 'its own radio group');
-    await p.click(`#t-q-${Q} input[data-pick="${Q}"][value="Yes"]`);
-    await p.click(`#t-q-${Q} button[data-answer="${Q}"]`);
-    const q = await until(() => { const x = JSON.parse(F.owner(['questions', '--id', Q, '--json']))[0]; return x.status === 'answered' && x; }, 'the answer');
-    assert.deepEqual([q.answer, q.channel], ['Yes', 'dashboard']);
-    await soon(`!document.getElementById('q-${Q}') || document.getElementById('q-${Q}').classList.contains('done')`, 'the Inbox copy answered');
-  });
-
-  await t.test('Ready to resolve: Not yet is a turn that clears it; Resolve takes the proposal, unpins it and moves it to Resolved', async () => {
-    F.sup(['thread', 'ready', T, '--outcome', 'Goal narrowed to EU orders']);
-    await soon(`document.querySelector('#tl-c-ready .tl-ready')?.textContent.includes('Goal narrowed to EU orders')`, 'the banner');
-    await p.click('[data-tl-notyet]');
-    await until(() => threads().find((x) => x.id === T).ready === null, "cleared by the owner's Not yet");
-    const th = threads().find((x) => x.id === T);
-    assert.deepEqual([th.turns[th.turns.length - 1].by, th.turns[th.turns.length - 1].text], ['owner', 'Not yet']);
-    await soon(`!document.querySelector('#tl-c-ready .tl-ready')`, 'the banner gone');
-    F.sup(['thread', 'ready', T, '--outcome', 'EU only']);
-    await soon(`document.querySelector('#tl-c-ready .tl-ready')?.textContent.includes('EU only')`, 'proposed again');
-    await p.click('[data-tl-accept]');
-    await until(() => threads().find((x) => x.id === T).status === 'resolved', 'resolved');
-    await soon(`!document.querySelector('.tl-pin') && document.getElementById('tl-card').hidden`, 'unpinned, the card closed');
-    if (await p.ev(`document.getElementById('tl-panel').hidden`)) await p.click('#tl-pill');
-    await soon(`!!document.querySelector('.tl-resolved [data-tl-open="${T}"]')`, 'listed under Resolved');
-    assert.ok(JSON.parse(F.owner(['log', '--type', 'observation', '--json'])).some((o) => o.kind === 'thread-resolved' && o.subject === `thread:${T}` && o.detail === 'EU only'));
-  });
-
-  await t.test('the dock: the pill and its count, open threads with where each is, New thread with no subject', async () => {
-    const S = F.owner(['thread', 'new', 'This one is about the goal too', '--title', 'Launch checkout', '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}` })]).split('\n')[0];
-    F.sup(['thread', 'say', S, 'Noted.']);
+  await t.test('the dock: the pill with its count and a dot for a reply not seen, where each subject is, New thread with no subject', async () => {
+    await p.click('[data-tl-close]');
+    F.sup(['thread', 'say', T, 'Noted.']);
     await soon(`/Threads · 1/.test(document.getElementById('tl-pill').textContent) && !!document.querySelector('#tl-pill .tl-dot')`, 'the count, and a dot for the reply');
-    if (await p.ev(`document.getElementById('tl-panel').hidden`)) await p.click('#tl-pill');
-    await soon(`document.querySelector('#tl-list [data-tl-open="${S}"]')?.textContent.includes('Goals')`, 'where its subject is');
+    await p.click('#tl-pill');
+    await soon(`document.querySelector('#tl-list [data-tl-open="${T}"]')?.textContent.includes('Goals')`, 'where its subject is');
     await p.click('[data-tl-new]');
     await soon(`${shown('tl-card')} && document.getElementById('tl-card').classList.contains('in-dock')`, 'a card in the dock');
     await p.click('#tl-c-text');
@@ -2150,7 +2292,9 @@ In `drawOrHold` (line 3426), after `inboxTitle(d);` add:
     await p.key('Enter');
     const n = await until(() => threads().find((x) => x.title === 'What about onboarding?'), 'the thread with no subject');
     assert.equal(n.subject, null);
+    await soon(`/Threads · 2/.test(document.getElementById('tl-pill').textContent)`, 'two open');
     await p.ev('document.activeElement?.blur()');
+    await p.click('[data-tl-close]');
   });
 
   await t.test('the pin button: pointing without Shift, until Esc', async () => {
@@ -2179,7 +2323,7 @@ In `drawOrHold` (line 3426), after `inboxTitle(d);` add:
   </div>
 ```
 
-- [ ] **Step 4: The CSS.** Change `.held`'s `bottom: 16px` (line 49) to `bottom: 64px`, and add after the Task 10 block:
+- [ ] **Step 4: The CSS.** Change `.held`'s `bottom: 16px` (line 49) to `bottom: 64px`, so the dock's pill has the corner, and add after the Task 11 rules:
 
 ```css
   .tl-pins { position: absolute; left: 0; top: 0; width: 0; height: 0; z-index: 40; }
@@ -2198,37 +2342,24 @@ In `drawOrHold` (line 3426), after `inboxTitle(d);` add:
   .tl-row .tl-r b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
   .tl-n { flex: none; width: 20px; height: 20px; border-radius: 50%; background: var(--blue); color: #fff; font-size: 11px; line-height: 20px; text-align: center; }
   .tl-resolved summary { cursor: pointer; font-size: 12px; color: var(--fg-2); padding: 6px; }
-  .tl-ready { margin: 6px 0; padding: 6px 8px; border-radius: 6px; border: 1px solid color-mix(in srgb, var(--green) 45%, var(--line)); background: color-mix(in srgb, var(--green) 8%, var(--surface)); font-size: 12px; }
-  .tl-ready input { width: 100%; padding: 4px 8px; margin-top: 4px; }
   @media (pointer: coarse) { #tl-pinbtn { height: 36px; padding: 0 14px; } }
 ```
 
-- [ ] **Step 5: The layer.** In the threads-layer block, replace `function tlDraw() { tlCard(); }` with:
+- [ ] **Step 5: The layer.** Replace `function tlDraw() { tlCard(); }` with `function tlDraw() { tlCard(); tlDock(); tlPins(); }`. In `tlCardBody`, after `tlEl('tl-c-title').textContent = title;`, add `if (t) tlSeen(t);`. In the Task 11 `click` listener, before `if (e.target.closest('[data-tl-close]'))`, add:
 
 ```js
-function tlDraw() { tlCard(); tlDock(); tlPins(); }
-```
-
-In `tlCardBody`, after `tlEl('tl-c-title').textContent = title;`, add:
-
-```js
-  tlEl('tl-c-acts').innerHTML = t ? (t.status === 'resolved' ? '<button type="button" class="ghost" data-tl-reopen>Reopen</button>' : '<button type="button" class="ghost" data-tl-resolve>Resolve</button>') : '';
-  // the banner or the resolve form, redrawn only when it changes, so a half-typed outcome stays
-  const rk = !t ? '' : TL.resolving ? `form:${t.id}` : t.ready ? `ready:${t.id}:${t.ready.at}` : '';
-  if (rk !== TL.readyKey) { TL.readyKey = rk; tlEl('tl-c-ready').innerHTML = !rk ? '' : TL.resolving ? tlResolveForm(t) : tlReady(t); }
-  if (t) tlSeen(t);
+  const pin = e.target.closest('[data-tl-pin]');
+  if (pin) return void tlOpen(pin.dataset.tlPin, false);
+  const row = e.target.closest('[data-tl-open]');
+  if (row) { tlEl('tl-panel').hidden = true; tlEl('tl-pill').setAttribute('aria-expanded', 'false'); return void tlOpen(row.dataset.tlOpen); }
+  if (e.target.closest('#tl-pill')) { const panel = tlEl('tl-panel'); panel.hidden = !panel.hidden; tlEl('tl-pill').setAttribute('aria-expanded', String(!panel.hidden)); return void tlDock(); }
+  if (e.target.closest('[data-tl-new]')) { tlEl('tl-panel').hidden = true; TL.open = null; TL.draft = { subject: null, title: '', el: null }; tlDraw(); return void tlEl('tl-c-text')?.focus(); }
+  if (e.target.closest('#tl-pinbtn')) return void tlPinMode(!TL.pin);
 ```
 
 and before `/* threads-layer end */` add:
 
 ```js
-// The supervisor's proposal: one click accepts it; Not yet is a turn, which clears it.
-const tlReady = (t) => `<div class="tl-ready">Ready to resolve: <b>${esc(t.ready.outcome)}</b><div class="row-inline"><button type="button" data-tl-accept>Resolve</button><button type="button" class="ghost" data-tl-notyet>Not yet</button></div></div>`;
-// Resolving: an optional line for how it ended, and a word about questions asked in it still open.
-function tlResolveForm(t) {
-  const n = t.questions.filter((q) => q.status === 'open').length;
-  return `<div class="tl-ready"><input type="text" id="tl-outcome" maxlength="300" placeholder="How it ended, in a line (optional)">${n ? `<div class="small err">${n} question${n > 1 ? 's' : ''} asked here ${n > 1 ? 'are' : 'is'} still open; ${n > 1 ? 'they stay' : 'it stays'} in the Inbox.</div>` : ''}<div class="row-inline"><button type="button" data-tl-resolve-go>Resolve</button><button type="button" class="ghost" data-tl-resolve-cancel>Cancel</button></div></div>`;
-}
 // When the owner last looked at each thread, in this browser only: the dock's dot is a reply since.
 const TL_SEEN = 'devteam.thread.seen';
 const tlSeenAt = (id) => (lsGet(TL_SEEN) || {})[id] || null;
@@ -2240,7 +2371,7 @@ function tlPins() {
   tlEl('tl-pins').innerHTML = tPins(TL.threads).map((g) => {
     const r = tlTargetRect(g.subject);
     if (!r) return '';
-    const x = (g.subject.kind === 'item' ? r.right - 11 + 1 : r.left + 1) + scrollX, y = (g.subject.kind === 'item' ? r.top - 11 + 1 : r.top + 1) + scrollY;
+    const x = (g.subject.kind === 'item' ? r.right - 10 : r.left + 1) + scrollX, y = (g.subject.kind === 'item' ? r.top - 10 : r.top + 1) + scrollY;
     const newest = g.ids[g.ids.length - 1];
     return `<button type="button" class="tl-pin${g.ids.includes(TL.open) ? ' on' : ''}" data-tl-pin="${esc(newest)}" style="left:${Math.round(x)}px;top:${Math.round(y)}px" aria-label="${esc(`Thread ${g.n}${g.ids.length > 1 ? `, and ${g.ids.length - 1} more on this` : ''}`)}">${g.n}${g.ids.length > 1 ? `<sup>${g.ids.length}</sup>` : ''}</button>`;
   }).join('');
@@ -2252,14 +2383,143 @@ function tlDock() {
   const open = TL.threads.filter((t) => t.status === 'open');
   const nums = new Map([...open].sort((a, b) => a.created_at.localeCompare(b.created_at)).map((t, i) => [t.id, i + 1]));
   const unread = open.some((t) => tUnread(t, tlSeenAt(t.id)));
-  tlEl('tl-pill').innerHTML = `<i class="icon-messages-square" aria-hidden="true"></i> Threads${open.length ? ` · ${open.length}` : ''}${unread ? ' <span class="tl-dot" aria-label="a reply you haven\'t seen"></span>' : ''}`;
+  // set only when it changed: a pill rewritten on every poll would drop a press on it
+  const pill = `<i class="icon-messages-square" aria-hidden="true"></i> Threads${open.length ? ` · ${open.length}` : ''}${unread ? ' <span class="tl-dot" aria-label="a reply you haven\'t seen"></span>' : ''}`;
+  if (pill !== TL.pill) { TL.pill = pill; tlEl('tl-pill').innerHTML = pill; }
   if (tlEl('tl-panel').hidden) return;
-  const gone = (t) => t.subject?.kind === 'item' && !tlItems(t.subject).length;
+  const gone = (t) => t.subject?.kind === 'item' && !tlHome(t.subject);
   const row = (t) => `<button type="button" class="tl-row" data-tl-open="${esc(t.id)}">${t.status === 'open' ? `<span class="tl-n">${nums.get(t.id)}</span>` : ''}<span class="tl-r"><b>${esc(t.title)}</b><span class="small muted">${esc(tWhere(t.subject))}${gone(t) ? ' · subject gone' : ''}</span></span>${t.status === 'open' && tUnread(t, tlSeenAt(t.id)) ? '<span class="tl-dot"></span>' : ''}${t.ready ? '<span class="badge good">ready</span>' : ''}</button>`;
   const resolved = TL.threads.filter((t) => t.status === 'resolved').sort((a, b) => (b.resolved_at || '').localeCompare(a.resolved_at || '')).slice(0, 50);
   tlEl('tl-list').innerHTML = (open.length ? [...open].sort((a, b) => b.activity_at.localeCompare(a.activity_at)).map(row).join('') : '<p class="empty">No open threads. Hold Shift and click anything on the page, or start one here.</p>')
     + (resolved.length ? `<details class="tl-resolved"${tlEl('tl-list').querySelector('.tl-resolved')?.open ? ' open' : ''}><summary>Resolved (${resolved.length})</summary>${resolved.map(row).join('')}</details>` : '');
 }
+// a section opened or closed, or the Loop's tab changed, moves what the pins sit on
+document.addEventListener('toggle', () => tlPins(), true);
+$('loop-tabs').addEventListener('click', () => setTimeout(tlPins, 0));
+```
+
+In `drawOrHold`, change the Task 11 lines (after the `inboxTitle(d)` at line 3426) to:
+
+```js
+    // the thread layer, which the redraw doesn't touch: its pins on what was just drawn, then its threads again
+    tlPins();
+    tlRefresh();
+```
+
+- [ ] **Step 6:** Run the page test, then `$NODE --test test/dashboard.test.mjs`. Expect green. Commit: `dashboard: pins on what threads are about, the dock, the pin button`.
+
+### Task 13: Questions in the card, Ready and Resolve
+
+**Files:**
+- Modify: `docs/devteam/dashboard/index.html` (CSS; the threads-layer block)
+- Test: `test/dashboard.test.mjs` (subtests appended in the page test)
+
+- [ ] **Step 1: Tests.** Append inside `threads on the dashboard page`, after its last subtest:
+
+```js
+  await t.test("a question asked in the thread: the Inbox's card in the card (t-q-), answered there once, answered in the Inbox too", async () => {
+    await p.click('.tl-pin');
+    await soon(`document.getElementById('tl-card').dataset.key === '${T}'`, 'its card');
+    const Q = F.sup(['thread', 'ask', T, '--question', 'Narrow the goal to EU orders?', '--choices', '[{"label":"Yes"},{"label":"Not yet"}]', '--recommendation', 'Yes', '--goal', F.goal, '--stake', '2', '--urgency', '1']);
+    await soon(`!!document.getElementById('t-q-${Q}') && !!document.getElementById('q-${Q}')`, 'both copies');
+    assert.equal(await p.ev(`document.getElementById('t-q-${Q}').querySelector('input[data-pick]').name`), `t-pick-${Q}`, 'its own radio group');
+    await p.click(`#t-q-${Q} input[data-pick="${Q}"][value="Yes"]`);
+    await p.click(`#t-q-${Q} button[data-answer="${Q}"]`);
+    const q = await until(() => { const x = JSON.parse(F.owner(['questions', '--id', Q, '--json']))[0]; return x.status === 'answered' && x; }, 'the answer');
+    assert.deepEqual([q.answer, q.channel], ['Yes', 'dashboard']);
+    await soon(`!document.getElementById('q-${Q}') || document.getElementById('q-${Q}').classList.contains('done')`, 'the Inbox copy answered');
+  });
+
+  await t.test('Ready to resolve: it warns of an open question, Not yet clears it, Resolve takes the proposal, unpins it and moves it to Resolved', async () => {
+    const Q2 = F.sup(['thread', 'ask', T, '--question', 'Tell the US team?', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
+    F.sup(['thread', 'ready', T, '--outcome', 'Goal narrowed to EU orders']);
+    await soon(`document.querySelector('#tl-c-ready .tl-ready')?.textContent.includes('Goal narrowed to EU orders')`, 'the banner');
+    assert.match(await p.ev(`document.querySelector('#tl-c-ready .tl-ready').textContent`), /1 question asked here is still open; it stays in the Inbox/);
+    await p.click('[data-tl-notyet]');
+    await until(() => threads().find((x) => x.id === T).ready === null, "cleared by the owner's Not yet");
+    const th = threads().find((x) => x.id === T);
+    assert.deepEqual([th.turns[th.turns.length - 1].by, th.turns[th.turns.length - 1].text], ['owner', 'Not yet']);
+    await soon(`!document.querySelector('#tl-c-ready .tl-ready')`, 'the banner gone');
+    F.sup(['thread', 'ready', T, '--outcome', 'EU only']);
+    await soon(`document.querySelector('#tl-c-ready .tl-ready')?.textContent.includes('EU only')`, 'proposed again');
+    await p.click('[data-tl-accept]');
+    await until(() => threads().find((x) => x.id === T).status === 'resolved', 'resolved');
+    await soon(`!document.querySelector('.tl-pin') && document.getElementById('tl-card').hidden`, 'unpinned, the card closed');
+    if (await p.ev(`document.getElementById('tl-panel').hidden`)) await p.click('#tl-pill');
+    await soon(`!!document.querySelector('.tl-resolved [data-tl-open="${T}"]')`, 'listed under Resolved');
+    assert.ok(JSON.parse(F.owner(['log', '--type', 'observation', '--json'])).some((o) => o.kind === 'thread-resolved' && o.subject === `thread:${T}` && o.detail === 'EU only'));
+    assert.equal(JSON.parse(F.owner(['questions', '--id', Q2, '--json']))[0].status, 'open', 'its question stays in the Inbox');
+  });
+
+  await t.test('a resolved thread reopens from its card', async () => {
+    await p.ev(`document.querySelector('.tl-resolved').open = true`);
+    await p.click(`.tl-resolved [data-tl-open="${T}"]`);
+    await soon(`!!document.querySelector('[data-tl-reopen]')`, 'Reopen in its header');
+    await p.click('[data-tl-reopen]');
+    await until(() => threads().find((x) => x.id === T).status === 'open', 'reopened');
+    await soon(`!!document.querySelector('.tl-pin')`, 'its pin back');
+  });
+```
+
+- [ ] **Step 2:** Run the page test. Expect red at the first new subtest: the card shows the question's words, not its card.
+
+- [ ] **Step 3: The CSS.** After the Task 12 rules, add:
+
+```css
+  .tl-ready { margin: 6px 0; padding: 6px 8px; border-radius: 6px; border: 1px solid color-mix(in srgb, var(--green) 45%, var(--line)); background: color-mix(in srgb, var(--green) 8%, var(--surface)); font-size: 12px; }
+  .tl-ready input { width: 100%; padding: 4px 8px; margin-top: 4px; }
+```
+
+- [ ] **Step 4: The layer.** Replace `const tlTurnBody = …` (and its comment) with:
+
+```js
+// A question asked in the thread: the Inbox's own card while it is open there (from /api/data),
+// answered from either place once; once it isn't open, its answer. A review or a secret is answered
+// in the Inbox, where its page or its form is: two forms that post values is one too many.
+function tlQuestion(q, reasonText) {
+  if (ANSWERED.has(q.id)) return `<div class="card small tl-q done"><div class="answered-note"><i class="icon-circle-check" aria-hidden="true"></i> Answered: <b>${esc(ANSWERED.get(q.id))}</b></div></div>`;
+  const open = (DATA?.questions || []).find((x) => x.id === q.id);
+  if (q.status === 'open' && open && open.kind !== 'review' && !(open.secrets || []).length) return questionCard(open, DATA.ooda, reasonText, true);
+  if (q.status === 'open') return `<div class="card small tl-q"><b>${esc(q.question)}</b><div class="meta"><a class="linkish" href="#q/${encodeURIComponent(q.id)}">Answer it in the Inbox</a></div></div>`;
+  return `<div class="card small tl-q"><div>${esc(q.question)}</div>${q.answer ? `<div><b>${esc(q.answer)}</b></div>` : ''}<div class="meta">${esc(q.status === 'answered' ? `answered ${CHANNEL_WORDS[q.channel] || ''}` : q.status)}</div></div>`;
+}
+// A turn's words, or the question it asks.
+function tlTurnBody(u, t) {
+  const q = u.question ? t.questions.find((x) => x.id === u.question) : null;
+  return q ? tlQuestion(q, Object.fromEntries((DATA?.ooda?.reasons || []).map((r) => [r.id, r.means]))) : `<div class="tl-text">${linkify(u.text)}</div>`;
+}
+```
+
+In `tlCardBody`, after `tlEl('tl-c-title').textContent = title;`, add:
+
+```js
+  tlEl('tl-c-acts').innerHTML = t ? (t.status === 'resolved' ? '<button type="button" class="ghost" data-tl-reopen>Reopen</button>' : '<button type="button" class="ghost" data-tl-resolve>Resolve</button>') : '';
+  // the banner or the resolve form, redrawn only when it changes, so a half-typed outcome stays
+  const rk = !t ? '' : TL.resolving ? `form:${t.id}:${t.questions.filter((q) => q.status === 'open').length}` : t.ready ? `ready:${t.id}:${t.ready.at}:${t.questions.filter((q) => q.status === 'open').length}` : '';
+  if (rk !== TL.readyKey) { TL.readyKey = rk; tlEl('tl-c-ready').innerHTML = !rk ? '' : TL.resolving ? tlResolveForm(t) : tlReady(t); }
+```
+
+In the `click` listener, before the `[data-tl-pin]` line, add:
+
+```js
+  const t = TL.open ? TL.threads.find((x) => x.id === TL.open) : null;
+  if (e.target.closest('[data-tl-resolve]')) { TL.resolving = true; return void tlDraw(); }
+  if (e.target.closest('[data-tl-resolve-cancel]')) { TL.resolving = false; return void tlDraw(); }
+  if (t && e.target.closest('[data-tl-resolve-go]')) return void tlAct('thread-resolve', { id: t.id, outcome: tlEl('tl-outcome')?.value.trim() || undefined });
+  if (t && e.target.closest('[data-tl-accept]')) return void tlAct('thread-accept', { id: t.id });
+  if (t && e.target.closest('[data-tl-notyet]')) return void tlAct('thread-say', { id: t.id, text: 'Not yet' });
+  if (t && e.target.closest('[data-tl-reopen]')) return void tlAct('thread-reopen', { id: t.id });
+```
+
+and before `/* threads-layer end */` add:
+
+```js
+// Before resolving, by either button: a question asked in the thread and still open stays in the Inbox (§10).
+const tlOpenWarn = (t) => { const n = t.questions.filter((q) => q.status === 'open').length; return n ? `<div class="small err">${n} question${n > 1 ? 's' : ''} asked here ${n > 1 ? 'are' : 'is'} still open; ${n > 1 ? 'they stay' : 'it stays'} in the Inbox.</div>` : ''; };
+// The supervisor's proposal: one click accepts it; Not yet is a turn, which clears it.
+const tlReady = (t) => `<div class="tl-ready">Ready to resolve: <b>${esc(t.ready.outcome)}</b>${tlOpenWarn(t)}<div class="row-inline"><button type="button" data-tl-accept>Resolve</button><button type="button" class="ghost" data-tl-notyet>Not yet</button></div></div>`;
+// Resolving: an optional line for how it ended.
+const tlResolveForm = (t) => `<div class="tl-ready"><input type="text" id="tl-outcome" maxlength="300" placeholder="How it ended, in a line (optional)">${tlOpenWarn(t)}<div class="row-inline"><button type="button" data-tl-resolve-go>Resolve</button><button type="button" class="ghost" data-tl-resolve-cancel>Cancel</button></div></div>`;
 async function tlAct(action, body) {
   const err = tlEl('e-tl');
   try {
@@ -2274,38 +2534,11 @@ async function tlAct(action, body) {
   load({ force: true });
   return true;
 }
-document.addEventListener('click', (e) => {
-  const t = TL.open ? TL.threads.find((x) => x.id === TL.open) : null;
-  if (e.target.closest('[data-tl-resolve]')) { TL.resolving = true; return void tlDraw(); }
-  if (e.target.closest('[data-tl-resolve-cancel]')) { TL.resolving = false; return void tlDraw(); }
-  if (t && e.target.closest('[data-tl-resolve-go]')) return void tlAct('thread-resolve', { id: t.id, outcome: tlEl('tl-outcome')?.value.trim() || undefined });
-  if (t && e.target.closest('[data-tl-accept]')) return void tlAct('thread-accept', { id: t.id });
-  if (t && e.target.closest('[data-tl-notyet]')) return void tlAct('thread-say', { id: t.id, text: 'Not yet' });
-  if (t && e.target.closest('[data-tl-reopen]')) return void tlAct('thread-reopen', { id: t.id });
-  const pin = e.target.closest('[data-tl-pin]');
-  if (pin) return void tlOpen(pin.dataset.tlPin, false);
-  const row = e.target.closest('[data-tl-open]');
-  if (row) { tlEl('tl-panel').hidden = true; tlEl('tl-pill').setAttribute('aria-expanded', 'false'); return void tlOpen(row.dataset.tlOpen); }
-  if (e.target.closest('#tl-pill')) { const panel = tlEl('tl-panel'); panel.hidden = !panel.hidden; tlEl('tl-pill').setAttribute('aria-expanded', String(!panel.hidden)); return void tlDock(); }
-  if (e.target.closest('[data-tl-new]')) { tlEl('tl-panel').hidden = true; TL.open = null; TL.draft = { subject: null, title: '', el: null }; tlDraw(); return void tlEl('tl-c-text')?.focus(); }
-  if (e.target.closest('#tl-pinbtn')) return void tlPinMode(!TL.pin);
-});
-// a section opened or closed, or the Loop's tab changed, moves what the pins sit on
-document.addEventListener('toggle', () => tlPins(), true);
-$('loop-tabs').addEventListener('click', () => setTimeout(tlPins, 0));
 ```
 
-In `drawOrHold`, change the Task 10 lines to:
+- [ ] **Step 5:** Run the page test, then `$NODE --test test/dashboard.test.mjs`. Expect green. Commit: `dashboard: a thread's questions with the Inbox's own card, Ready to resolve, Resolve and Reopen`.
 
-```js
-    // the thread layer, which the redraw doesn't touch: its pins on what was just drawn, then its threads again
-    tlPins();
-    tlRefresh();
-```
-
-- [ ] **Step 6:** Run the page test, then `$NODE --test test/dashboard.test.mjs`. Expect green. Commit: `dashboard: pins on what threads are about, the dock, the pin button, questions in the card, Ready and Resolve`.
-
-### Task 12: Docs: the supervisor, the constitution, the README
+### Task 14: Docs: the supervisor, the constitution, the README
 
 **Files:**
 - Modify: `docs/devteam/process/supervisor.md` (§1 step 2 at line 10; §3 steps 4 and 5 at lines 34 and 38; §6 after "When the owner tells you in your own session" at line 209)
@@ -2332,9 +2565,9 @@ In `drawOrHold`, change the Task 10 lines to:
 **Threads.** On the dashboard, hold Shift and point: the cursor becomes a pin and what's under it lights up with its name (a goal, a question, a ticket, a spot on a page). Click, and a small card opens beside it with that thing at the top; what you type there goes to the supervisor as your own words, and its replies show in the card. It may ask you an Inbox question in the thread (answered in either place, once), and propose resolving it; only you resolve, and your resolution is an observation the supervisor's loop reads. Pins mark the threads on the page, and the dock at the bottom right lists every open one, with **New thread** for one about nothing in particular and **Resolved** for the last 50. On a phone, the dock's **Pin** button points without Shift. Threads and their turns are log lines, so they survive a restart and move with the project.
 ```
 
-- [ ] **Step 4:** Read the three edits once against the spec's §3, §9 and §10 and the "Docs" list (§7 waits for PR 3). Run `$NODE --test --test-name-pattern "threads: records" test/kit.test.mjs` (the help text's command names). Commit: `docs: threads, for the supervisor, the constitution and the README`.
+- [ ] **Step 4:** Read the three edits once against the spec's §3, §9 and §10 and the "Docs" list (§7 waits for PR 3). PR 1 adds no files, so the README's tree stays as it is (threads and turns are lines in the log files it already lists). Run `$NODE --test --test-name-pattern "threads: records" test/kit.test.mjs` (the help text's command names). Commit: `docs: threads, for the supervisor, the constitution and the README`.
 
-### Task 13: The browser script, and the whole suite
+### Task 15: The browser script, and the whole suite
 
 **Files:**
 - Modify: `test/browser/dev-links.mjs` (`Browser` gains `mouseAt`, `shift`, `typeIn`, `enter`; `standIn`; `threads`; `main` takes `--only threads`)
@@ -2393,7 +2626,8 @@ async function threads({ DASH, pane }) {
   const t0 = Date.now();
   await until(() => browser.evalIn(dash, `document.querySelector('#tl-c-turns .tl-turn.supervisor')?.textContent.includes('drops the measure')`), 'the reply in the card', 10000);
   const ms = Date.now() - t0;
-  assert.ok(ms < 3500, `the reply took ${ms} ms`);
+  // the card polls every 2 s: two polls and a margin for a loaded machine
+  assert.ok(ms < 2 * 2000 + 1500, `the reply took ${ms} ms`);
   stepOk(`the supervisor's turn showed in the card after ${ms} ms`);
   const Q = dt(['thread', 'ask', T, '--question', 'Narrow the goal to EU orders?', '--choices', '[{"label":"Yes"},{"label":"Not yet"}]', '--recommendation', 'Yes', '--goal', G, '--stake', '2', '--urgency', '1'], SUP);
   await until(() => browser.evalIn(dash, `!!document.getElementById('t-q-${Q}')`), 'the question in the card', 30000);
@@ -2458,6 +2692,7 @@ and update the header comment's usage line to `//   node test/browser/dev-links.
 
 ## Self-review
 
-- **Spec coverage (PR 1 only).** §1 records: `thread`, `turn`, their `x-id` prefixes and authority, `question.thread`, the `thread` channel and its chat-shape rule, `said`, a resolution's observation, ids as `<type>:<id>` and bare refs, `threadView` with `waiting` and `ready` cleared by a newer owner line: Tasks 1, 2, 4. Caps (turn 2,000 bytes, subject 2,500 bytes, title 120, outcome 300, refs 8 of 120, §5's per-string caps) and the `artifact`/`preview` shapes accepted now: Task 1. §2 commands, `ownerWriter`/`supervisorOnly`, `askLine`, `thread show`'s data frame, the dashboard `ACTIONS` and the subject validator before spawning, the 20,000-byte cap (unchanged route): Tasks 2, 3, 4, 7. §3 delivery (kind and id only, whitespace collapsed, 300 bytes then …), `wait`'s hint, the card's four states, `thread-waiting`, `/api/threads` with its stat-keyed reader, `sec-fetch-site`, the 2 s poll and the redraw hook: Tasks 2, 6, 7, 9, 10. §4 the layer (Shift and point, the text-field rule, the capture-phase consumption past `PRESSED`, Esc, the pin button, the card with its context card, turns, `t-q-` questions with handlers from the target, composer and drafts, the ready banner and Not yet, Resolve with the open-questions warning, one card at a time, the dock with New thread and Resolved, pins re-placed from `drawOrHold`, "subject gone", `data-subject` on every item): Tasks 8, 9, 10, 11. §5 `item` and `page` subjects, "changed since" for an item: Tasks 9, 10. §9 asking, answering in either place, `--from-turn` with its three refusals, the dashboard listing, `chatQuotesNotFound` left `chat`-only: Tasks 3, 5, 8, 11. §10 resolve, reopen, the observation, open questions staying in the Inbox, `metrics.threads`: Tasks 4, 6. §11 who writes, who reads, page-written content, pane lines, one turn one question, sizes, 200 open: Tasks 1, 2, 4, 5, 7. "Docs": supervisor.md §1, §3, §6 (§7 with PR 3), the constitution's sentence, the README's paragraph: Task 12. "Testing", kit items: Tasks 1 to 7; browser items for PR 1 (Shift+move, the card, a turn into a fake pane, a reply within 3 s, a thread question answered in the card, resolve unpins and the dock moves it, a pin surviving the rebuild): Tasks 10, 11, 13. The artifact-lens, `/artifact/tree/`, `/view/…`, relay and gateway items are PRs 2 and 3.
+- **Spec coverage (PR 1 only).** §1 records: `thread`, `turn`, their `x-id` prefixes and authority, `question.thread`, the `thread` channel and its chat-shape rule, `said`, a resolution's observation, ids as `<type>:<id>` and bare refs, `threadView` with `waiting` and `ready` cleared by a newer owner line: Tasks 1, 2, 4. Caps (turn 2,000 bytes and 3,800 as the log holds it, subject 2,500 bytes, title 120, outcome 300, refs 8 of 120, §5's per-string caps in bytes) and the `artifact`/`preview` shapes accepted now: Task 1. §2 commands, `ownerWriter`/`supervisorOnly`, `askLine`, `thread show`'s data frame, the dashboard `ACTIONS` and the subject validator before spawning (item and page only from the dashboard), the 20,000-byte cap (unchanged route): Tasks 2, 3, 4, 7. §3 delivery (kind and id only, whitespace and control characters collapsed, 300 bytes then …), `wait`'s hint, the card's four states with the supervisor's pane from `/api/threads`, `thread-waiting`, `/api/threads` with its stat-keyed reader over both log copies, `sec-fetch-site`, the 2 s poll and the redraw hook after `render(d)`: Tasks 2, 6, 7, 9, 11. §4 the layer: Shift and point, the text-field rule, the capture-phase consumption past `PRESSED`, Esc (Task 10); the card with its context card, turns, composer, drafts, one card at a time, a refresh not held by the composer (Task 11); the pin button, the dock with New thread and Resolved, pins re-placed from `drawOrHold` in the home section, "subject gone" (Task 12); `t-q-` questions with handlers from the target, the ready banner and Not yet, Resolve and accept both warning of open questions, Reopen (Tasks 8, 13); `data-subject` on every item (Task 8). §5 `item` and `page` subjects, "changed since" for an item: Tasks 9, 11. §9 asking, answering in either place, `--from-turn` with its three refusals, the dashboard listing, `chatQuotesNotFound` left `chat`-only: Tasks 3, 5, 8, 13. §10 resolve, reopen, the observation, open questions staying in the Inbox, `metrics.threads`: Tasks 4, 6, 13. §11 who writes, who reads, page-written content, pane lines, one turn one question, sizes, 200 open: Tasks 1, 2, 4, 5, 7. "Docs": supervisor.md §1, §3, §6 (§7 with PR 3), the constitution's sentence, the README's paragraph, its tree unchanged: Task 14. "Testing", kit items: Tasks 1 to 7; browser items for PR 1 (Shift+move, the card, a turn into a fake pane, a reply within two polls, a thread question answered in the card, resolve unpins and the dock moves it, a pin surviving the rebuild): Tasks 10 to 13 and 15. The artifact-lens, `/artifact/tree/`, `/view/…`, relay and gateway items are PRs 2 and 3.
+- **Each task stands alone.** Task 10's `tlStart` only sets the draft (its test reads `TL.draft`); Task 11 gives it the card. Task 11's `tlTurns` draws a question's words, and Task 13 swaps in `tlTurnBody`'s question card. Task 11's `drawOrHold` hook calls `tlRefresh()`; Task 12 adds `tlPins()` before it. `tlDraw` grows from `tlCard()` (Task 11) to `tlCard(); tlDock(); tlPins();` (Task 12).
 - **Placeholders.** None: every step names its file, its anchor, its code and its command.
-- **Names.** Kit: `THREAD_OPEN_MAX`, `TURN_MAX`, `SUBJECT_MAX`, `OUTCOME_MAX`, `THREAD_TITLE_MAX`, `THREAD_WAIT_MS`, `THREAD_ID`, `TURN_ID`, `SUBJECT_TYPES`, `SUBJECT_REF`, `TURN_REF`, `SUBJECT_KEYS`, `SUBJECT_NEEDS`, `SUBJECT_CAPS`, `ANCHOR_CAPS`, `subjectProblem`, `anchorProblem`, `threadLineProblems`, `capBytes`, `threadTitle`, `threadQuestion`, `threadViews`, `threadView`, `threadViewOf`, `subjectWords`, `subjectIds`, `deliverOwnerTurn`, `deliveredWords`, `threadDataFrame`, `wordsFrom`, `turnText`, `threadSpeaker`, `threadOpen`, `openThreadCount`, `cmdThread`, `askLine`, `turnAnswer`, `ownerSaid` (in `cmdWait`), `turnOk`, `lineOk`, `threadFiles`, `threadsMemo`, `threadsRead` (in `cmdDashboard`), `ACTIONS['thread-new'|'thread-say'|'thread-resolve'|'thread-reopen'|'thread-accept']`. Page: `subj`, `decSubject`, `qcardOf`, `T_TYPES`, `T_TURN_MAX`, `T_SUBJECT_MAX`, `T_TITLE_MAX`, `T_WAIT_MS`, `tBytes`, `tCut`, `tLine`, `tSubjectAt`, `tFit`, `tCardState`, `tPlace`, `tWhere`, `tKey`, `tPins`, `tUnread`, `TL`, `tlEl`, `tlOwn`, `tlShowing`, `tlSection`, `tlHitAt`, `tlShow`, `tlHide`, `tlPinMode`, `tlStart`, `tlItems`, `tlFind`, `tlTargetRect`, `tlGoTo`, `tlCardFrame`, `tlCtx`, `tlRef`, `tlQuestion`, `tlTurns`, `tlCardBody`, `tlPlaceCard`, `tlDraftKey`, `tlBytes`, `tlCard`, `tlDraw`, `tlRefresh`, `tlOpen`, `tlSend`, `tlReady`, `tlResolveForm`, `tlSeenAt`, `tlSeen`, `tlPins`, `tlDock`, `tlAct`; ids `tl`, `tl-hl`, `tl-chip`, `tl-cursor`, `tl-card`, `tl-pins`, `tl-dock`, `tl-panel`, `tl-pill`, `tl-pinbtn`, `tl-list`, `tl-c-title`, `tl-c-acts`, `tl-c-ready`, `tl-c-ctx`, `tl-c-turns`, `tl-c-state`, `tl-c-text`, `tl-c-bytes`, `e-tl`, `tl-outcome`; attributes `data-subject`, `data-title`, `data-qcard`, `data-tl-*`. Tests: `threadsFixture` (`owner`, `sup`, `fails`, `goal`, `hand`, `snapLog`, `restoreLog`, `checkWith`, `standIn`, `approval`, `logDir`, `SUP`), Chrome `hold`, `at`, `move`, `clickAt`, the script's `mouseAt`, `shift`, `typeIn`, `enter`, `standIn`, `threads`. Each is defined in the task that first uses it and used with the same name after.
+- **Names.** Kit: `THREAD_OPEN_MAX`, `TURN_MAX`, `TURN_ENCODED_MAX`, `encodedBytes`, `SUBJECT_MAX`, `OUTCOME_MAX`, `THREAD_TITLE_MAX`, `THREAD_WAIT_MS`, `THREAD_ID`, `TURN_ID`, `SUBJECT_TYPES`, `SUBJECT_REF`, `TURN_REF`, `SUBJECT_KEYS`, `SUBJECT_NEEDS`, `SUBJECT_CAPS`, `ANCHOR_CAPS`, `subjectProblem`, `anchorProblem`, `threadLineProblems`, `capBytes`, `threadTitle`, `threadQuestion`, `threadViews`, `threadView`, `threadViewOf`, `subjectWords`, `subjectIds`, `deliverOwnerTurn`, `deliveredWords`, `threadDataFrame`, `wordsFrom`, `turnText`, `threadSpeaker`, `threadOpen`, `openThreadCount`, `cmdThread`, `askLine`, `turnAnswer`, `ownerSaid` (in `cmdWait`), `turnOk`, `lineOk`, `threadFiles`, `threadsMemo`, `threadsRead`, `paneSeen`, `supervisorPane` (in `cmdDashboard`), `ACTIONS['thread-new'|'thread-say'|'thread-resolve'|'thread-reopen'|'thread-accept']`. Page: `subj`, `decSubject`, `qcardOf`, `T_TYPES`, `T_REF`, `T_HOME`, `T_SECTIONS`, `T_TURN_MAX`, `T_ENCODED_MAX`, `T_SUBJECT_MAX`, `T_TITLE_MAX`, `T_WAIT_MS`, `tBytes`, `tCut`, `tLine`, `tSubjectAt`, `tFit`, `tCardState`, `tPlace`, `tWhere`, `tKey`, `tPins`, `tUnread`, `TL`, `tlEl`, `tlOwn`, `tlShowing`, `tlSection`, `tlHitAt`, `tlShow`, `tlHide`, `tlPinMode`, `tlStart`, `tlHome`, `tlVisible`, `tlTargetRect`, `tlGoTo`, `tlCardFrame`, `tlCtx`, `tlRef`, `tlTurnBody`, `tlTurns`, `tlCardBody`, `tlPlaceCard`, `tlDraftKey`, `tlBytes`, `tlCard`, `tlDraw`, `tlRefresh`, `tlOpen`, `tlSend`, `tlSeenAt`, `tlSeen`, `tlPins`, `tlDock`, `tlQuestion`, `tlOpenWarn`, `tlReady`, `tlResolveForm`, `tlAct`; ids `tl`, `tl-hl`, `tl-chip`, `tl-cursor`, `tl-card`, `tl-pins`, `tl-dock`, `tl-panel`, `tl-pill`, `tl-pinbtn`, `tl-list`, `tl-c-title`, `tl-c-acts`, `tl-c-ready`, `tl-c-ctx`, `tl-c-turns`, `tl-c-state`, `tl-c-text`, `tl-c-bytes`, `e-tl`, `tl-outcome`; attributes `data-subject`, `data-title`, `data-qcard`, `data-tl-*`. Tests: `threadsFixture` (`env`, `owner`, `sup`, `fails`, `goal`, `hand`, `snapLog`, `restoreLog`, `checkWith`, `standIn`, `approval`, `logDir`, `SUP`), Chrome `hold`, `at`, `move`, `clickAt`, the script's `mouseAt`, `shift`, `typeIn`, `enter`, `standIn`, `threads`. Each is defined in the task that first uses it and used with the same name after.
