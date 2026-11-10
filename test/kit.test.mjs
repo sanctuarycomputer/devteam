@@ -312,4 +312,53 @@ test('threads: records, commands, delivery, the Inbox and the loop', async (t) =
     assert.match(F.fails(['thread', 'ask', R2, '--question', 'Still there?', '--goal', F.goal, '--stake', '1', '--urgency', '1'], F.SUP), /resolved: the owner closed it/);
     F.sup(['withdraw', Q, '--reason', 'test']);
   });
+  await t.test("answer --from-turn: the owner's words from their turn, channel thread, one turn for one question bound to it", () => {
+    const T = F.owner(['thread', 'new', 'Narrow this?', '--title', 'Launch checkout', '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}` })]).split('\n')[0];
+    const T2 = F.owner(['thread', 'new', 'Something else']).split('\n')[0];
+    const before = show(T).turns[0].id;
+    const Q = F.sup(['thread', 'ask', T, '--question', 'Narrow the goal to EU orders?', '--recommendation', 'Yes', '--goal', F.goal, '--stake', '2', '--urgency', '1']);
+    const U = F.owner(['thread', 'say', T, 'yes, go ahead']).split('\n')[0];
+    const S = F.sup(['thread', 'say', T, 'On it.']);
+    const elsewhere = F.owner(['thread', 'say', T2, 'yes']).split('\n')[0];
+    assert.match(F.fails(['answer', Q, 'Yes', '--from-turn', U]), /the supervisor records what the owner said in a thread/);
+    assert.match(F.fails(['answer', Q, 'Yes', '--from-turn', U], { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'demo-01-x' }), /the supervisor records/);
+    assert.match(F.fails(['answer', Q, 'Yes', '--from-turn', S], F.SUP), /that turn is the supervisor's/);
+    assert.match(F.fails(['answer', Q, 'Yes', '--from-turn', before], F.SUP), /older than/);
+    assert.match(F.fails(['answer', Q, 'Yes', '--from-turn', elsewhere], F.SUP), new RegExp(`was asked in ${T}, and that turn is in ${T2}`));
+    assert.match(F.fails(['answer', Q, 'Yes', '--from-turn', 'u-20990101-000000000-owner'], F.SUP), /no such turn/);
+    assert.match(F.fails(['answer', Q, 'Yes', '--from-turn', U, '--from-chat', '--said', 'x'], F.SUP), /not both/);
+    assert.match(F.sup(['answer', Q, 'Yes', '--from-turn', U]), new RegExp(`answered ${Q} \\(from ${U}; listed on the dashboard for the owner to check\\)`));
+    const q = JSON.parse(F.owner(['questions', '--id', Q, '--json']))[0];
+    assert.deepEqual([q.status, q.answered_by, q.channel, q.said, q.turn, q.matched], ['answered', 'owner', 'thread', 'yes, go ahead', U, true]);
+    assert.equal(show(T).questions[0].status, 'answered');
+    // one turn settles one question
+    const Q3 = F.sup(['thread', 'ask', T, '--question', 'And tell the US team?', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
+    const later = F.owner(['thread', 'say', T, 'yes to that too']).split('\n')[0];
+    assert.match(F.fails(['answer', Q3, 'yes', '--from-turn', U], F.SUP), new RegExp(`already settled ${Q}`));
+    F.sup(['answer', Q3, 'yes', '--from-turn', later]);
+    // a decision raised in the Inbox, settled in a thread: the turn must be newer than the question
+    const UO = F.owner(['thread', 'say', T2, 'said before the question']).split('\n')[0];
+    const QI = F.sup(['ask', '--question', 'Ship the EU banner?', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
+    assert.match(F.fails(['answer', QI, 'yes', '--from-turn', UO], F.SUP), /older than/);
+    const U2 = F.owner(['thread', 'say', T2, 'ship the banner']).split('\n')[0];
+    F.sup(['answer', QI, 'yes', '--from-turn', U2, '--rule', 'Ship banners without asking']);
+    const rule = JSON.parse(F.owner(['log', '--type', 'knowledge', '--json'])).find((k) => k.statement === 'Ship banners without asking');
+    assert.deepEqual([rule.channel, rule.evidence], ['thread', [QI]], 'the rule names the question, which names the turn');
+    const listed = JSON.parse(F.owner(['dashboard-data'])).ooda.answered.find((x) => x.id === QI);
+    assert.deepEqual([listed.channel, listed.said], ['thread', 'ship the banner'], 'listed for the owner to check, as chat answers are');
+    // a goal verdict, from a turn
+    const A = F.approval();
+    const UA = F.owner(['thread', 'say', T2, 'approve it']).split('\n')[0];
+    assert.match(F.fails(['answer', A.question, 'Approve', '--from-turn', UA], F.SUP), /goal decide .* --from-turn/);
+    // goal decide takes the same refusals: the owner's turn only, one turn for one question, newer than it
+    assert.match(F.fails(['goal', 'decide', A.goal, 'approve', '--from-turn', U], F.SUP), /already settled/);
+    assert.match(F.fails(['goal', 'decide', A.goal, 'approve', '--from-turn', S], F.SUP), /that turn is the supervisor's/);
+    assert.match(F.fails(['goal', 'decide', A.goal, 'approve', '--from-turn', UA]), /the supervisor records/);
+    assert.match(F.fails(['goal', 'decide', A.goal, 'approve', '--from-turn', before], F.SUP), /older than/);
+    F.sup(['goal', 'decide', A.goal, 'approve', '--from-turn', UA]);
+    assert.equal(JSON.parse(F.owner(['goal', 'show', A.goal, '--json'])).status, 'ready');
+    const qa = JSON.parse(F.owner(['questions', '--id', A.question, '--json']))[0];
+    assert.deepEqual([qa.status, qa.channel, qa.said, qa.turn], ['answered', 'thread', 'approve it', UA]);
+    assert.match(F.fails(['goal', 'decide', A.goal, 'restore', '--from-turn', UA], F.SUP), /doesn't come from a thread/);
+  });
 });

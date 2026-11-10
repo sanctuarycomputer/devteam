@@ -1330,7 +1330,7 @@ function ratingHistory(q) {
   const has = (e) => e.stake || e.urgency || e.settles !== undefined;
   return [{ ...entry(q.created_at, q.created_by, asked), asked: true }, ...q.updates.map((u) => entry(u.at, u.by, u))].filter(has);
 }
-const QUESTION_LATER = ['status', 'reason', ...QUESTION_RATING, 'answer', 'said', 'autonomy', 'standing_rule', 'secrets_posted', 'result', 'declined', 'question_hash'];
+const QUESTION_LATER = ['status', 'reason', ...QUESTION_RATING, 'answer', 'said', 'turn', 'autonomy', 'standing_rule', 'secrets_posted', 'result', 'declined', 'question_hash'];
 const questionHash = (q) => crypto.createHash('sha256').update(canonical(Object.fromEntries(Object.entries(q).filter(([k]) => !k.startsWith('__') && !['updates', 'created_at', 'created_by', 'channel', ...QUESTION_LATER].includes(k))))).digest('hex').slice(0, 16);
 
 // Folded questions in the shape the inbox uses.
@@ -1370,7 +1370,7 @@ function questionView(q) {
     default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], stake: ratingOf(q.stake), urgency: ratingOf(q.urgency), settles: Array.isArray(q.settles) ? q.settles.filter((x) => typeof x === 'string') : [], settles_if: typeof q.settles_if === 'string' ? q.settles_if : null, settles_label: [...(q.choices ?? []).map((c) => c?.label), ...(q.options ?? [])].find((l) => sameAnswer(l, q.settles_if)) ?? null, rating_history: ratingHistory(q), approves: q.approves ?? [], evidence: q.evidence ?? [], note: q.note ?? null, why_asked: q.why_asked ?? null,
     secrets: (q.secrets ?? []).map((x) => ({ ...x, to: sinkWords(x.sink), sink_type: SINK_RE.exec(x.sink ?? '')?.[1] ?? null, warning: sinkWarning(x.sink) })), secrets_posted: q.updates.filter((u) => u.secrets_posted !== undefined && writerClass(u.by) === 'owner').pop()?.secrets_posted ?? [],
     status, answer, answered_by: answeredBy, answered_at: answeredAt, matched, hash, rewritten,
-    autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans?.channel ?? null, said: ans?.said ?? null,
+    autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans?.channel ?? null, said: ans?.said ?? null, turn: ans?.turn ?? null,
     review: review?.review ?? null, result: review?.result ?? null, declined: review ? review.declined : null, allow_partial: review ? review.allow_partial : null, result_status: review?.result_status ?? null,
   };
 }
@@ -4575,6 +4575,24 @@ function chatAnswer(what) {
   if (!flagStr('said')?.trim()) die(`${what} --from-chat needs --said "<the owner's words, verbatim>"`);
   return flagStr('said').trim();
 }
+// --from-turn: the owner said it in a thread, in a turn already verbatim in the log, and the supervisor
+// records the decision it settles, as from chat but with the turn in place of a quote, so no
+// transcript check is needed. One turn settles one question, and only one it is bound to: asked in
+// the turn's own thread before it, or asked with no thread (in the Inbox) before it.
+function turnAnswer(what, v) {
+  if (process.env.DEVTEAM_ROLE !== 'supervisor' || logWriter() !== 'supervisor') die(`${what} --from-turn: the supervisor records what the owner said in a thread; in your own terminal, answer directly`);
+  if (flags['from-chat']) die(`${what}: --from-turn or --from-chat, not both`);
+  const uid = flagStr('from-turn');
+  if (!TURN_ID.test(uid ?? '')) die(`${what} --from-turn <u-id>: the owner's turn whose words settle it`);
+  const u = logGet(uid);
+  if (u?.type !== 'turn') die(`--from-turn ${uid}: no such turn`);
+  if (u.created_by !== 'owner') die(`--from-turn ${uid}: that turn is the supervisor's; only the owner's words settle a question`);
+  const used = readLog().lines.find((l) => l.type === 'question' && l.op === 'set' && l.turn === uid);
+  if (used) die(`--from-turn ${uid}: that turn already settled ${used.id}; one turn settles one question (the owner answers the other in the card, or says it again)`);
+  if (v.thread && u.thread !== v.thread) die(`--from-turn ${uid}: ${v.id} was asked in ${v.thread}, and that turn is in ${u.thread}`);
+  if (u.created_at <= v.asked_at) die(`--from-turn ${uid}: the turn is older than ${v.id}; words said before the question was asked don't answer it`);
+  return { said: String(u.text), turn: uid };
+}
 // The owner answers (terminal, dashboard or, through the supervisor, chat). The supervisor may only
 // apply a default or withdraw.
 function cmdAnswer() {
@@ -4582,7 +4600,7 @@ function cmdAnswer() {
   const reviewResult = flagStr('review-result');
   const decline = !!flags.decline;
   if (flags['review-result'] === true) die('answer <qid> --review-result <file|->: the result file, or - for stdin');
-  if (!id || (!restWords.length && !flags.defaulted && !reviewResult && !decline)) die('usage: answer <qid> "<answer>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>" [--rule-scope s]]   |   answer <qid> --review-result <file|->   |   answer <qid> "<why>" --decline   |   answer <qid> "<answer>" --from-chat --said "<owner\'s words>" [--autonomy n] [--rule "<standing rule>"]   |   answer <qid> --defaulted   (supervisor)');
+  if (!id || (!restWords.length && !flags.defaulted && !reviewResult && !decline)) die('usage: answer <qid> "<answer>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>" [--rule-scope s]]   |   answer <qid> --review-result <file|->   |   answer <qid> "<why>" --decline   |   answer <qid> "<answer>" --from-chat --said "<owner\'s words>" [--autonomy n] [--rule "<standing rule>"]   |   answer <qid> "<answer>" --from-turn <u-id> [--autonomy n] [--rule "<standing rule>"]   |   answer <qid> --defaulted   (supervisor)');
   if (flags.defaulted) {
     supervisorOnly('answer --defaulted');
     const v = openQuestion(id);
@@ -4606,13 +4624,16 @@ function cmdAnswer() {
   // for the owner to check, and metrics flags a quote the transcript doesn't show them typing.
   const fromChat = !!flags['from-chat'];
   if (fromChat) chatAnswer('answer');
-  const { by } = fromChat ? { by: 'owner' } : ownerWriter();
+  const fromTurn = flags['from-turn'] !== undefined;
+  const { by } = fromChat || fromTurn ? { by: 'owner' } : ownerWriter();
   const v = openQuestion(id, ['open', 'defaulted']);
+  if (fromTurn && v.kind === 'review') die(`${id} is a review: its answer is the owner's result, which a turn can't carry`);
+  const turn = fromTurn ? turnAnswer('answer', v) : null;
   // a credential question has two answers: the token posted, or don't use this sensor
   if (v.sensor && !/^don['’]?t use this sensor\s*$/i.test(restWords.join(' ').trim())) die(`${id} asks for a sensor's token: post it (dashboard, or devteam.mjs secret post ${id}), or answer "Don't use this sensor". Any other answer would close it with neither`);
   if (flagStr('seen') && flagStr('seen') !== v.hash) die(`${id} changed since you saw it; reload and read it again before you answer`);
   { const moved = artifactLinksMoved(v); if (moved) die(moved); }
-  if (v.kind === 'goal-approval') die(`${id} approves a goal on its design: the owner answers it with goal decide ${v.goal} approve|refine|let-go [--notes "…"] (or on the dashboard)${fromChat ? `; from chat, goal decide ${v.goal} <verdict> --from-chat --said "<the owner's words>"` : ''}`);
+  if (v.kind === 'goal-approval') die(`${id} approves a goal on its design: the owner answers it with goal decide ${v.goal} approve|refine|let-go [--notes "…"] (or on the dashboard)${fromChat ? `; from chat, goal decide ${v.goal} <verdict> --from-chat --said "<the owner's words>"` : fromTurn ? `; from a thread, goal decide ${v.goal} <verdict> --from-turn <u-id>` : ''}`);
   // A review is answered by the owner's own process with its result, or sent back with a reason;
   // never in free text, wherever it comes from (a result file carries the rows, and chat can't).
   if (v.kind === 'review' || reviewResult || decline) {
@@ -4634,18 +4655,18 @@ function cmdAnswer() {
     autonomy = { class: v.class, rung, scope: flagStr('scope') ?? null };
   }
   const reviewFields = reviewResult ? acceptReviewResult(v, reviewResult, fromChat ? 'chat' : ownerChannel()) : decline ? { answer: `Sent back: ${answer}`, declined: true } : {};
-  appendLog({ type: 'question', op: 'set', id, answer, autonomy, standing_rule: flagStr('rule'), ...reviewFields, ...(fromChat ? { channel: 'chat', said: flagStr('said').trim() } : {}) }, by);
+  appendLog({ type: 'question', op: 'set', id, answer, autonomy, standing_rule: flagStr('rule'), ...reviewFields, ...(fromChat ? { channel: 'chat', said: flagStr('said').trim() } : turn ? { channel: 'thread', said: turn.said, turn: turn.turn } : {}) }, by);
   if (v.kind === 'review') fs.rmSync(reviewDraftFile(id), { force: true });
   // A standing rule applies where the owner says (--rule-scope), else where the question says its
   // rule would apply (ask --rule-scope; the dashboard shows it next to the rule field), else the
   // whole project.
-  if (flagStr('rule')) appendLog({ type: 'knowledge', kind: 'preference', statement: flagStr('rule'), scope: flagStr('rule-scope') ?? v.rule_scope ?? 'project', status: 'accepted', confidence: 1, evidence: [id], channel: fromChat ? 'chat' : undefined }, by);
+  if (flagStr('rule')) appendLog({ type: 'knowledge', kind: 'preference', statement: flagStr('rule'), scope: flagStr('rule-scope') ?? v.rule_scope ?? 'project', status: 'accepted', confidence: 1, evidence: [id], channel: fromChat ? 'chat' : turn ? 'thread' : undefined }, by);
   // The answer this question said would settle others: the supervisor withdraws each (its own act).
   const settled = sameAnswer(answer, v.settles_if) ? v.settles.filter((s) => { const x = logGet(s); return x?.type === 'question' && questionView(x).status === 'open'; }) : [];
   const settledNote = settled.length ? `it settles ${plural(settled.length, 'open question')} (${settled.join(', ')}): withdraw each with withdraw <qid> --reason "settled by the owner's answer to ${id}"` : '';
-  if (!fromChat) nudgeSupervisor(`[devteam answer ${id} from owner] read it with: devteam.mjs questions --id ${id}${settledNote ? `; ${settledNote}` : ''}`);
-  out(`${decline ? 'sent back' : 'answered'} ${id}${fromChat ? ' (from chat; listed on the dashboard for the owner to check)' : reviewFields.result ? `: ${reviewFields.answer} (result sha256 ${reviewFields.result.sha256.slice(0, 12)})` : ''}`);
-  if (settledNote && fromChat) out(settledNote);
+  if (!fromChat && !turn) nudgeSupervisor(`[devteam answer ${id} from owner] read it with: devteam.mjs questions --id ${id}${settledNote ? `; ${settledNote}` : ''}`);
+  out(`${decline ? 'sent back' : 'answered'} ${id}${fromChat ? ' (from chat; listed on the dashboard for the owner to check)' : turn ? ` (from ${turn.turn}; listed on the dashboard for the owner to check)` : reviewFields.result ? `: ${reviewFields.answer} (result sha256 ${reviewFields.result.sha256.slice(0, 12)})` : ''}`);
+  if (settledNote && (fromChat || turn)) out(settledNote);
 }
 function cmdWithdraw() {
   const [id] = positional;
@@ -7704,13 +7725,15 @@ function cmdGoal() {
   // or let go (abandoned). It answers the open goal-approval question for the goal.
   if (sub === 'approve' || sub === 'decide') {
     const said = flags['from-chat'] ? chatAnswer('goal decide') : null;
-    const { by } = said ? { by: 'owner' } : ownerWriter();
-    const chat = said ? { channel: 'chat' } : {};
+    const fromTurn = flags['from-turn'] !== undefined;
+    const { by } = said || fromTurn ? { by: 'owner' } : ownerWriter();
+    const chat = said ? { channel: 'chat' } : fromTurn ? { channel: 'thread' } : {};
     const g = logGet(id);
     if (g?.type !== 'goal') die(`no goal ${id}`);
     const verdict = sub === 'approve' ? 'approve' : positional[2];
-    if (!['approve', 'refine', 'let-go', 'restore'].includes(verdict)) die('usage: goal decide <g-id> approve|refine|let-go|restore [--notes "…"] [--question q-…] [--from-chat --said "…"]');
+    if (!['approve', 'refine', 'let-go', 'restore'].includes(verdict)) die('usage: goal decide <g-id> approve|refine|let-go|restore [--notes "…"] [--question q-…] [--from-chat --said "…" | --from-turn <u-id>]');
     if (said && verdict === 'restore') die('goal decide restore is the owner\'s undo of a let go, not an answer to a question; it doesn\'t come from chat');
+    if (fromTurn && verdict === 'restore') die("goal decide restore is the owner's undo of a let go, not an answer to a question; it doesn't come from a thread");
     // Restore undoes a let go: the goal gets back the status it had, parked, and its questions return.
     if (verdict === 'restore') {
       if (g.status !== 'abandoned') die(`${id} is ${g.status ?? 'draft'}, not let go; nothing to restore`);
@@ -7726,7 +7749,8 @@ function cmdGoal() {
     if (verdict === 'refine' && !notes) die('refine needs --notes: what the planner should change');
     const ask = flagStr('question') ? questions().find((q) => q.id === flagStr('question')) : questions().find((q) => q.kind === 'goal-approval' && q.goal === id && q.status === 'open');
     if (flagStr('question') && (!ask || ask.kind !== 'goal-approval' || ask.goal !== id)) die(`${flagStr('question')} is not a goal-approval question for ${id}`);
-    if (said && ask?.status !== 'open') die(`goal decide --from-chat answers ${id}'s open goal-approval question, and there is none`);
+    if ((said || fromTurn) && ask?.status !== 'open') die(`goal decide --from-${said ? 'chat' : 'turn'} answers ${id}'s open goal-approval question, and there is none`);
+    const turn = fromTurn ? turnAnswer('goal decide', ask) : null;
     if (verdict === 'approve') {
       const c = goalCheck(g);
       if (c.definition.length && !flags.force) die(`${id} is not fully defined:\n  - ${c.definition.join('\n  - ')}\n(--force to approve anyway)`);
@@ -7734,8 +7758,8 @@ function cmdGoal() {
     }
     const status = { approve: 'ready', refine: undefined, 'let-go': 'abandoned' }[verdict];
     appendLog({ type: 'goal', op: 'set', id, status, decision: { verdict, notes, question: ask?.id }, ...chat }, by);
-    if (ask?.status === 'open') appendLog({ type: 'question', op: 'set', id: ask.id, answer: `${{ approve: 'Approve', refine: 'Refine', 'let-go': 'Let go' }[verdict]}${notes ? ` — ${notes}` : ''}`, ...chat, ...(said ? { said } : {}) }, by);
-    if (!said) nudgeSupervisor(`[devteam goal ${verdict} ${id} from owner] read it with: devteam.mjs goal show ${id}${verdict === 'let-go' ? `; its sessions park: goal park-sessions ${id}` : ''}`);
+    if (ask?.status === 'open') appendLog({ type: 'question', op: 'set', id: ask.id, answer: `${{ approve: 'Approve', refine: 'Refine', 'let-go': 'Let go' }[verdict]}${notes ? ` — ${notes}` : ''}`, ...chat, ...(said ? { said } : turn ? { said: turn.said, turn: turn.turn } : {}) }, by);
+    if (!said && !turn) nudgeSupervisor(`[devteam goal ${verdict} ${id} from owner] read it with: devteam.mjs goal show ${id}${verdict === 'let-go' ? `; its sessions park: goal park-sessions ${id}` : ''}`);
     return out(`${id}: ${verdict}${status ? ` (${status})` : ''}${verdict === 'let-go' ? '; its sessions park and its questions leave the inbox (goal decide restore undoes it)' : ''}`);
   }
   // The goal's toggle (planning.md §1, holds): run, drain or park. The owner sets any; the
@@ -13940,7 +13964,7 @@ Decide and act (supervisor.md, constitution.md)
   review verify <qid> --applied <file>   rows applied ([{ "id", "values", "evidence" }]) vs rows the owner decided; exit 1 on any difference
   review draft <qid> [<file|->]   owner: save partial progress; without a file, print it (a draft is never an answer)
   answer <qid> --review-result <file|-> | answer <qid> "<why>" --decline   (owner) a review: validate and hash its result, or send it back
-  answer <qid> "<text>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> "<text>" --from-chat --said "<owner's words>" [--autonomy n] [--rule "…"] | answer <qid> --defaulted   (supervisor)
+  answer <qid> "<text>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> "<text>" --from-chat --said "<owner's words>" [--autonomy n] [--rule "…"] | answer <qid> "<text>" --from-turn <u-id> [--autonomy n] [--rule "…"] | answer <qid> --defaulted   (supervisor)
   thread new "<first words>" [--title "<line>"] [--subject '<json>'] | thread say <t-id> "<words>" | thread resolve <t-id> [--outcome "<line>" | --accept] | thread reopen <t-id> ["<words>"]   (owner; the dashboard's Shift+click)   a thread with the supervisor about one thing; words may follow --; say is the owner's unless DEVTEAM_ROLE=supervisor
   thread say <t-id> "<words>" [--refs <type>:<id>…] | thread ask <t-id> --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>"   (supervisor)   reply, ask an Inbox question in it, propose resolving it
   thread show <t-id> [--json] | thread list [--waiting | --open | --all] [--json]   the thread, its subject framed as data; --waiting: open threads where the supervisor owes a reply
