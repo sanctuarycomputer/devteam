@@ -20,8 +20,8 @@
 #   RENDER_DEPLOY_HOOK of the GitHub environment "box", never a repo secret, and that environment
 #   needing the owner's approval; the README's "deploy gate" says why. Agents share the owner's gh
 #   login, so this raises the bar and isn't a hard boundary). A deploy restarts the box; each
-#   supervisor that was running comes back through the operator (window 0), and brings back its
-#   fleet; what couldn't start is in ~/operator/NOTES.md. Disk: mounted at /data. Health check path: /healthz. Environment: DEVTEAM_PUBLIC_URL=https://box.example.com. Custom domains:
+#   supervisor that was running comes back at boot (box-recover, ~/.box/recover.log), and brings back its
+#   fleet; the operator (window 0) checks it, and notes what couldn't start in ~/operator/NOTES.md. Disk: mounted at /data. Health check path: /healthz. Environment: DEVTEAM_PUBLIC_URL=https://box.example.com. Custom domains:
 #   box.example.com and *.box.example.com, with every DNS record Render lists for them (a wildcard
 #   needs its own name pointed at Render too, plus the _acme-challenge and _cf-custom-hostname
 #   CNAMEs; remove any AAAA records). Best on a domain used for nothing else, or if Render won't
@@ -319,12 +319,12 @@ if [ -f "$up.boot.at" ]; then [ -f "$up.boot" ] && awk 'NR == FNR { r = $0; sub(
 # recover --machine leaves it out, and drops it from the list.
 if [ -s "$up" ]; then now=$(date +%s); sed "s/^/$now /" "$up" >> "$up.boot"; fi
 rm -f "$up"
-# Window 0 is the operator (operator.md): the first thing the Terminal shows, and what restores the fleet.
+# Window 0 is the operator (operator.md): the first thing the Terminal shows, and what checks the restore.
 mkdir -p operator
 if ! tmux has-session -t home 2>/dev/null; then
   tmux new-session -d -s home -n operator -c "$HOME/operator"
   tmux new-window -d -t home -n shell -c "$HOME"
-  ask='You are the sanctuarycomputer/devteam operator for this box. Ensure your supervisors are all up and running.'
+  ask='You are the sanctuarycomputer/devteam operator for this box. The boot has run box-recover, and what it printed is in ~/.box/recover.log: read it, sort out anything NOT started, and make sure your supervisors are all up and running.'
   if ls .claude/projects/-data-home-operator/*.jsonl >/dev/null 2>&1; then c='--continue'; ask="The box restarted. $ask"; else c=''; fi
   # its job is in its system prompt, so what it's told, and what the owner tells it, stays plain English
   tmux send-keys -t home:operator -l "export DEVTEAM_ROLE=operator; claude $c --dangerously-skip-permissions --append-system-prompt \"\$(cat /opt/devteam/operator.md)\" '$ask'"
@@ -424,7 +424,11 @@ for k in "$HOME"/code/*/docs/devteam/scripts/devteam.mjs; do
     tmux new-session -d -s "$s" -n dashboard -c "$r" "$c"
   fi
 done
-# The operator (window 0) is what brings the supervisors back: box-recover reads the list saved above.
+# The restore runs here, after boot.sh and the dashboards, not by the operator's hand: an operator
+# resumed on its old conversation can reach for a command from before the deploy, and every supervisor
+# waits on it. Safe to run again, so the operator running it too changes nothing. In the background:
+# the terminal comes up meanwhile. It reads the list saved above; the loop below keeps it current.
+mkdir -p "$HOME/.box"; ( /usr/local/bin/box-recover > "$HOME/.box/recover.log" 2>&1 ) &
 # Which supervisors are up, kept on the volume each minute: a machine that dies writes nothing at
 # the end, and one the owner stopped (its pane gone, or back at a shell) is off the list by then.
 # tmux not answering (the box stopping) leaves the list as it was.
