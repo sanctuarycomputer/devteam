@@ -3575,13 +3575,28 @@ function seedWorktree(wt, { setup = true, repo: R = repo('home') } = {}) {
     }
   }
 }
+// What a killed process left behind: its exit hook never ran (a restart, a timeout, a kill), so its
+// temp checkouts stay under home's .worktrees and pile up. Only ones that are ours: on git's own
+// list, directly under .worktrees, named tmp-<name>-<pid>, and that pid gone. A pid reused since
+// keeps one a while longer; nothing else is touched.
+function sweepDeadTempWorktrees(R) {
+  const root = realPath(path.join(mainRoot, '.worktrees'));
+  const listed = (R.git(['worktree', 'list', '--porcelain'], R.root) ?? '').split('\n').filter((l) => l.startsWith('worktree ')).map((l) => l.slice(9));
+  for (const wt of listed) {
+    const pid = Number(/^tmp-.+-(\d+)$/.exec(path.basename(wt))?.[1]);
+    if (!pid || pid === process.pid || realPath(path.dirname(wt)) !== root || pidAlive(pid)) continue;
+    R.git(['worktree', 'remove', '--force', wt], R.root);
+  }
+}
 // A throwaway checkout of one commit of a repo, under home's .worktrees, removed when the process
-// ends however it ends.
+// ends however it ends. One a killed
+// process left is swept the next time one is made.
 // Another repo's lives in the OS temp folder (where secret post already makes its own), never under
 // home's tree: a gate there would otherwise pass on home's node_modules, .tool-versions and lint or
 // ts configs, found by walking up the directories. Home's stays under home's .worktrees, as before.
 function detachedWorktree(sha, name, R = repo('home'), { seed = true } = {}) {
   const holder = R.name === 'home' ? null : fs.mkdtempSync(path.join(os.tmpdir(), `devteam-${R.name}-`));
+  if (!holder) sweepDeadTempWorktrees(R);
   const wt = holder ? path.join(holder, `tmp-${name}`) : path.join(mainRoot, '.worktrees', `tmp-${name}-${process.pid}`);
   R.gitOrDie(['worktree', 'add', '--quiet', '--detach', wt, sha], R.root);
   process.once('exit', () => {
