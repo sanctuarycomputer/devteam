@@ -1070,6 +1070,55 @@ out({ cursor: 'c-' + mode });
     assert.ok(!json(must(['sensor', 'status', '--json'])).length, 'cleaned up');
   });
 
+  step('sensor credentials: a DSN with no token asks once, a no stops it for good until reversed, and a posted token makes the sensor ready', () => {
+    const sup = { role: 'sup' };
+    write(path.join(repo, 'config/sentry.js'), 'module.exports = { dsn: process.env.SENTRY_DSN };\n');
+    git(['add', 'config/sentry.js']);
+    git(['commit', '-qm', 'sentry']);
+    git(['push', '-q', 'origin', 'HEAD:main']);
+    const discover = () => json(must(['sensor', 'discover', '--record', '--json'], sup));
+    const ofSentry = () => json(must(['questions', '--all', '--json'])).filter((q) => q.sensor === 'sentry');
+    // the DSN implies a sensor nothing here can read: one owner-action question, the value to a sink
+    let d = discover();
+    assert.ok(d.missing.some((m) => m.name === 'sentry' && m.scope.includes('read')), 'no token, so it is missing');
+    assert.equal(d.asked.length, 1);
+    const first = ofSentry();
+    assert.equal(first.length, 1, 'one question');
+    assert.equal(first[0].kind, 'owner-action');
+    assert.equal(first[0].secrets[0].name, 'SENTRY_TOKEN');
+    assert.match(first[0].secrets[0].sink, /^file:\.devteam-secrets\//);
+    assert.doesNotMatch(first[0].question + first[0].context, /tok-/, 'never a value');
+    assert.equal(discover().asked.length, 0, 'a second discovery does not ask again');
+    assert.equal(ofSentry().length, 1);
+    // the owner says no: never asked again, and it leaves the proposals
+    must(['answer', first[0].id, "Don't use this sensor"]);
+    d = discover();
+    assert.deepEqual(d.declined.map((x) => x.name), ['sentry']);
+    assert.ok(!d.proposals.some((p) => p.name === 'sentry') && !d.missing.some((m) => m.name === 'sentry') && d.asked.length === 0);
+    // only the owner's word reverses it, and then the next discovery asks once more
+    assert.notEqual(dt(['sensor', 'reconsider', 'sentry'], { cwd: wt('bill-01-card'), role: 'worker' }).status, 0, 'not a worker');
+    must(['sensor', 'reconsider', 'sentry']);
+    assert.equal(discover().asked.length, 1, 'reversed: asked again');
+    const q2 = ofSentry().find((q) => q.status === 'open');
+    assert.ok(q2, 'one open question');
+    assert.equal(discover().asked.length, 0);
+    // the token arrives: no more asking, the sensor is ready, and it starts with its credential
+    must(['secret', 'post', q2.id, '--json'], { input: JSON.stringify({ SENTRY_TOKEN: 'tok-sensor-1234' }) });
+    d = discover();
+    assert.equal(d.asked.length, 0, 'answered: not asked again');
+    assert.ok(!d.missing.some((m) => m.name === 'sentry'));
+    const p = d.proposals.find((x) => x.name === 'sentry');
+    assert.ok(p?.ready && p.sensor.credentials.SENTRY_TOKEN.startsWith('file:'), 'ready, with the credential in place');
+    assert.ok(json(must(['metrics', '--json'])).findings.some((f) => f.kind === 'sensor-credential-ready'), 'and the supervisor is told to start it');
+    write(path.join(repo, 'docs/devteam/project/sensors/sentry.mjs'), "if (!process.env.SENTRY_TOKEN) process.exit(1);\nconsole.log(JSON.stringify({ cursor: 'x' }));\n");
+    git(['add', 'docs/devteam/project/sensors/sentry.mjs']);
+    git(['commit', '-qm', 'sentry probe']);
+    git(['push', '-q', 'origin', 'HEAD:main']);
+    landSettings((txt) => txt.replace('"gates": {', `"sensors": { "sentry": ${JSON.stringify(p.sensor)} }, "gates": {`));
+    assert.match(must(['sensor', 'poll', '--name', 'sentry'], sup), /sentry: ok/);
+    assert.ok(!json(must(['metrics', '--json'])).findings.some((f) => f.kind === 'sensor-credential-ready'), 'started: the finding clears');
+  });
+
   step('sensors: a redirect is not up, a new sensor already down goes down, a name stays in run/, and a URL\'s secrets are never shown', async () => {
     const sup = { role: 'sup' };
     const port = await freePort();
