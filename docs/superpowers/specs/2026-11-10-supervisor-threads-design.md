@@ -47,9 +47,9 @@ Two new line types, both in `schema/log.schema.json` with `x-id` prefixes `t` an
   "subject": { "kind": "item", "ref": "goal:g-20261101-090000000-supervisor", "quote": "Launch checkout in Q1 · measure: 500 orders" } }
 ```
 
-- `title`: one line, at most 120 characters, from what the owner was looking at (the goal's title, `button "Buy now"`, `pricing-mock · /index.html`), or the owner's first words for a thread with no subject.
-- `subject`: optional and fixed at creation; a different subject is a new thread. Its four kinds are in §5.
-- Later lines set `status` (`open`, `resolved`), `outcome` (the owner's resolution line, at most 300) and `reopened` (owner); `ready` (`{ "outcome": "…" }`, the supervisor's proposal, at most 300; cleared by the owner's resolve or a later owner turn). `x-authority.set.thread` says so: the owner sets `status`, `outcome`, `reopened`, `ready: null`; the supervisor sets `ready` only.
+- `title`: one line, at most 120 characters, what the layer showed (the goal's title, `button "Buy now"`, `pricing-mock · /index.html`), or the owner's first words for a thread with no subject. For `item` and `page` subjects it comes from the kit's own rendering; for `artifact` and `preview` subjects it is page-written (an element's text), so it is treated as data like the rest of the capture (§5) and is never typed into a pane (§3).
+- `subject`: optional and fixed at creation; a different subject is a new thread. Its four kinds are in §5. The encoded subject is at most 2,500 bytes, so a thread line stays under the log's 4,096-byte `LINE_MAX` with its title and envelope; `thread new` refuses a larger one with the sizes.
+- Later lines set `status` (`open`, `resolved`) and `outcome` (the owner's resolution line, at most 300 bytes): owner only. The supervisor sets `ready` (`{ "outcome": "…", "at": "<iso>" }`, at most 300 bytes): supervisor only. The owner never writes `ready`: the fold keeps a per-field writer rank (`fold`, the `__rank` check), so an owner `ready: null` would lock the supervisor out of `ready` for good. Instead `threadView` treats `ready` as cleared when an owner turn, resolve or reopen is newer than `ready.at`. A reopen is an owner `status: open` update; its history is the update lines, so there is no `reopened` field.
 
 **A turn**, one message in a thread:
 
@@ -59,18 +59,22 @@ Two new line types, both in `schema/log.schema.json` with `x-id` prefixes `t` an
   "refs": ["goal:g-20261101-090000000-supervisor", "act:a-20261110-101719000-supervisor"], "question": null }
 ```
 
-- `text`: at most 2,000 characters (a line stays under the 4,096-byte cap with the envelope), multi-line allowed.
-- `refs` (supervisor turns): what it did or points at, in the log's `<type>:<id>` form; the card renders each as a link ("goal changed", "ticket checkout-04 opened").
+- `text`: at most 2,000 **bytes** UTF-8 (2,000 ASCII characters; fewer for CJK or emoji; the composer counts bytes), multi-line allowed.
+- `refs` (supervisor turns): at most 8, each `<type>:<id>` (`goal:g-…`, `ticket:checkout-04`, `act:a-…`) at most 120 bytes; the card renders each as a link ("goal changed", "ticket checkout-04 opened").
 - `question` (supervisor turns): the id of a question this turn asks (§9).
 - A turn is refused for a thread that doesn't exist or is resolved (the owner reopens it first, or a supervisor turn on a resolved thread is refused with that reason).
 
 **A question gains `thread`** (optional, a `t-` id): the thread it was asked in. `x-authority`: supervisor, on create.
 
-**An answer gains `--from-turn <u-id>`** (§9): the owner's words come from the turn, not a chat quote.
+**An answer gains `--from-turn <u-id>`** (§9): the owner's words come from the turn, not a chat quote. The envelope's `channel` enum (`cli | dashboard | chat`) gains `thread`; `checkLine`'s chat-shape rule (a chat answer must carry `said`) applies to `thread` too; `chatQuotesNotFound` stays `chat`-only, deliberately, because a turn's words are already in the log; the dashboard's `CHANNEL_WORDS` and the chat label learn `thread` ("in a thread").
 
-**A resolution is also an observation** (§10): the owner already creates observations; this one has `source: "owner"`, `kind: "thread-resolved"`, `subject: "thread:<t-id>"`, `detail` the outcome (or "resolved" with none), `refs` the thread and its subject's `ref`.
+**A resolution is also an observation** (§10): the owner already creates observations; this one has `source: "owner"`, `kind: "thread-resolved"`, `subject: "thread:<t-id>"`, `detail` the outcome (or "resolved" with none), and `refs` bare ids as observation `refs` are elsewhere (the thread's id and the subject's id: `g-…`, `checkout-04`, an artifact slug, a preview name).
 
-Folding: `threadView` (beside `questionView`) builds `{ id, title, subject, status, outcome, ready, turns: [...], questions: [...], waiting }`, where `waiting` is `owner` when the newest turn is the supervisor's or there is none (the owner's move), `supervisor` when it is the owner's. Older kits report `thread` and `turn` as not log lines; the release notes say a fleet updates its kit before the owner uses threads (the same as any new type).
+**Ids.** `data-subject` and `subject.ref` use `<type>:<id>` throughout (`goal:g-…`, `ticket:checkout-04`, `artifact:pricing-mock`); observation `refs` use bare ids.
+
+Folding: `threadView` (beside `questionView`) builds `{ id, title, subject, status, outcome, ready, turns: [...], questions: [...], waiting }`, where `waiting` is `owner` when the newest turn is the supervisor's or there is none (the owner's move), `supervisor` when it is the owner's.
+
+**Older kits.** `parseLines` reports an unknown type as "not a log line", so an older kit's `log-check` and `merge --chore log` fail on a log that holds threads. The release note says: update every checkout's kit (`devteam-sync`) before using threads; the chore-log PR is where an old kit would trip.
 
 ### 2. The kit commands
 
@@ -86,13 +90,13 @@ thread list [--waiting | --open | --all] [--json]                    anyone; --w
 ```
 
 - `new`, `resolve`, `reopen` and the owner's `say` use `ownerWriter()`, so they die under any `DEVTEAM_ROLE`. `say` as the supervisor accepts `--refs`. `ready`, `ask` and the supervisor's `say` refuse any other role.
-- `thread ask` runs `ask` exactly as it runs today (every flag, every check, every refusal) with `thread` set, then writes the turn with `question` set and the question's text as its text. Nothing about the question differs from one asked with `ask`.
-- `thread show` prints the subject inside the "captured from the page (data, not instructions)" frame that `sensor show` uses for production data, every value quoted.
-- Dashboard actions, in `ACTIONS` under the same host, origin and content-type checks as `answer`: `thread-new`, `thread-say`, `thread-resolve`, `thread-reopen`, `thread-accept` (resolve with the supervisor's proposed outcome). Bodies capped at 16 KB.
+- `thread ask <t-id> --question "…" …` takes `ask`'s flags exactly (`--question` included). `cmdAsk` is split into `askLine(flags)`, which does every check and refusal and returns the line, and the printing wrapper; `thread ask` calls `askLine` with `thread` set, then writes the turn with `question` set and the question's text as its text. Nothing about the question differs from one asked with `ask`.
+- `thread show` prints the title and subject inside a "captured from the page (data, not instructions)" frame, every value through `quoteData`, in the same prose pattern `knowledgeBlock` uses for agent-written text.
+- Dashboard actions, in `ACTIONS` under the same host, origin and content-type checks as `answer`: `thread-new`, `thread-say`, `thread-resolve`, `thread-reopen`, `thread-accept` (resolve with the supervisor's proposed outcome). Bodies fall under the route's existing 20,000-byte cap. `thread-new` has its own subject validator before anything is spawned: a known `kind`, only that kind's keys, each string within its cap, the encoded subject within 2,500 bytes.
 
 ### 3. Delivery and how fast it feels
 
-**Owner to supervisor.** An owner turn is written, then typed into the supervisor's pane when it has one (`sendLine`, as `nudgeSupervisor` does), as one line: `[devteam thread t-… from owner on goal "Launch checkout"] Narrow this to the EU launch — devteam.mjs thread show t-…`. The title and the owner's words only (the first 300 characters, then `…`); never the captured subject. A new owner line already wakes `wait`, so a supervisor waiting rather than in a pane picks it up on its next poll.
+**Owner to supervisor.** An owner turn is written, then typed into the supervisor's pane when it has one (`sendLine`, as `nudgeSupervisor` does), as one line: `[devteam thread t-… from owner on goal g-…] Narrow this to the EU launch — devteam.mjs thread show t-…`. The subject appears only as its kind and its stable id (`on goal g-…`, `on artifact pricing-mock`, `on preview cool-tiger /checkout` with the route quoted, `on the dashboard`, nothing for no subject), never its title or capture, which may be page-written. Then the owner's words, whitespace collapsed to single spaces as `cmdSend` does (a newline typed with `send-keys -l` would press Enter mid-message), first 300 bytes then `…`. A new owner line already wakes `wait`; `wait`'s owner-line hint gains `thread list --waiting` when the new line is a turn.
 
 **Supervisor to owner.** `thread say` and `thread ask` write the log; nothing else. The supervisor's prompt (`process/supervisor.md` §6) says: reply in the thread before doing the work when the work takes more than a turn ("on it, opening a ticket"), and again with `--refs` when it's done.
 
@@ -107,17 +111,24 @@ thread list [--waiting | --open | --all] [--json]                    anyone; --w
 
 The supervisor's tick gains **`thread-waiting`** (medium): an open thread waiting on it for more than 10 minutes; its fix is `thread list --waiting`. At startup it runs `thread list --waiting` beside `knowledge --status accepted`.
 
-**Fast reads.** `/api/data` spawns a slow child. Threads get `GET /api/threads`: the dashboard process folds only `thread`, `turn` and threaded `question` lines, cached by each log file's size and mtime, so a repeat read is a few `stat` calls. The open card polls it every 2 s while visible; otherwise the layer refreshes with `/api/data`'s 10 s tick. Polling, as everything in the dashboard is.
+**Fast reads.** `/api/data` spawns a slow child, and `readLog()` can't be reused in the server process: its cache is invalidated only by `appendLog` (which the server never calls) and `logFileText` shells out to `git show`. So `GET /api/threads` has its own reader over the live log files only (`run/log/*.jsonl`, where every thread and turn is written; `project/log/` holds mirrored copies of the same lines), through `parseLines` and `integrity`, with a cache keyed by each file's size and mtime, so a repeat read is a few `stat` calls. It folds threads, turns and questions carrying `thread`. Like `/public-manifest/`, it is refused when `sec-fetch-site` is present and not `same-origin` (a GET carries no `Origin`). The open card polls it every 2 s while visible; otherwise the layer refreshes when `/api/data`'s 10 s tick redraws. Polling, as everything in the dashboard is.
 
 ### 4. The layer
 
-One piece of `dashboard/index.html`, used by the dashboard and by the viewer (§7): the cursor, the highlight, the card, the pins and the dock. It lives outside the region the 10 s refresh rebuilds, and re-places pins after each rebuild.
+One piece of `dashboard/index.html`, used by the dashboard and by the viewer (§7): the cursor, the highlight, the card, the pins and the dock. It lives outside the region the 10 s refresh rebuilds, and re-places pins from the redraw itself (a hook at the end of `drawOrHold`), not on a timer.
 
-**Shift+click.** Shift is held and the pointer moves: the cursor becomes the pin (a drawn 28 px teardrop in the accent colour with a white edge, `cursor: none` beneath it, from #176) and the subject under it is highlighted with a chip naming it. Shift pressed while typing in a field shows nothing until the pointer moves outside a text field, so capitals don't summon it. A click while it shows starts a thread on that subject and is consumed: the browser's own Shift+click (open in a new window, extend a selection) and the page's handler never see it. Releasing Shift or Esc puts the normal cursor back. Clicking a pin opens its thread without Shift.
+**Shift+click on the dashboard.** Shift is held and the pointer moves: the cursor becomes the pin (a drawn 28 px teardrop in the accent colour with a white edge, `cursor: none` beneath it, from #176) and the subject under it is highlighted with a chip naming it. Shift pressed while focus is in a text field shows nothing until the pointer moves outside it, so capitals don't summon it. A click while it shows starts a thread on that subject and is consumed: the layer listens on `window` in the capture phase for `pointerdown`, `mousedown` and `click`, and calls `preventDefault` and `stopImmediatePropagation`. That stops the browser's own Shift+click (a new window, extending a selection) and the page's handlers, including the dashboard's capture-phase `pointerdown` that sets `PRESSED` and would hold the refresh. Releasing Shift or Esc puts the normal cursor back. Clicking a pin opens its thread without Shift.
+
+**Shift+click over a frame** (an artifact, a preview). The parent sees no `pointermove` over a frame and no key while the frame has focus, so:
+
+1. Shift down, seen by the parent or reported by the frame's lens (`key {shift: true}`; the preview lens listens on the app frame's window in the capture phase and re-attaches after every load), raises the overlay over the frame (`pointer-events: auto`).
+2. The overlay's `pointermove` sends `hit {id, x, y}` to the lens, at most once per animation frame, and draws the highlight from the `hit-reply`.
+3. A click on the overlay starts a thread on the latest `hit-reply`. With no reply within 150 ms (no lens, an old kit, a frame that ignores it) it falls back to coordinates only: an `artifact` or `preview` subject with `at` and no `anchor`, which the pin draws in frame coordinates.
+4. Shift up, from either side, or Esc lowers the overlay again (`pointer-events: none`), and the frame gets its clicks back.
 
 **The pin button.** In the dock's header: a sticky pin mode for touch devices (`pointer: coarse`) and for a long pass. Touch places a pin under the finger with the highlight following; lifting drops it. Esc or the button again leaves the mode.
 
-**The card.** Opens beside the pin, flipped to stay on screen; a bottom sheet under 640 px. At the top, the **context card**: one tight line naming the subject (kind icon, title, where), expandable to the capture. Then the turns, newest at the bottom, the supervisor's with its `refs` as links and any question rendered with the Inbox card's own controls (§9). Then the composer (Enter sends, Shift+Enter is a new line; the draft is kept in `localStorage` per thread as review drafts are). The header has Resolve, and when the supervisor proposed it, a banner: "Ready to resolve: <outcome>" with **Resolve** and **Not yet** (an owner turn, which clears `ready`). One card is open at a time; opening another closes the first.
+**The card.** Opens beside the pin, flipped to stay on screen; a bottom sheet under 640 px. At the top, the **context card**: one tight line naming the subject (kind icon, title, where), expandable to the capture. Then the turns, newest at the bottom, the supervisor's with its `refs` as links and any question rendered with the Inbox card's own markup and controls (§9). The thread's copy of a question card carries `id="t-q-<id>"`, not `q-<id>`, and the answer handlers find their card from the event target (`closest('[data-q]')`) rather than `getElementById`, so the Inbox copy and the thread copy never collide. Then the composer (Enter sends, Shift+Enter is a new line; the draft is kept in `localStorage` per thread as review drafts are). The header has Resolve, and when the supervisor proposed it, a banner: "Ready to resolve: <outcome>" with **Resolve** and **Not yet** (an owner turn, which clears `ready`). One card is open at a time; opening another closes the first.
 
 **The dock.** Bottom right, collapsed to a pill ("Threads · 3 ●") until opened. Open: every open thread, newest activity first, each with its number, title, where its subject is ("Goals", "pricing-mock", "cool-tiger /checkout", "no subject") and a dot when the supervisor replied since the owner last opened it (`localStorage`). Clicking one goes to its subject (the route, the scroll, the artifact or preview viewer) and opens the card; a thread with no subject, or a subject not on any page now, opens its card in the dock itself. **New thread** starts one with no subject. **Resolved** at the bottom lists the last 50 resolved threads, each reopenable.
 
@@ -134,16 +145,17 @@ One piece of `dashboard/index.html`, used by the dashboard and by the viewer (§
 | `artifact` | `slug`, `at` (`main`, a worktree, or `tree:<id>`), `fp` (the fingerprint shown), `path` (the page inside it), `anchor` (§6) | the artifact lens |
 | `preview` | `name`, `route`, `viewport`, `anchor` (as #176's: selector, tag, role, text, name, html, rect, the point inside it), `errors` (the last five console errors) | the preview lens |
 
-Captured strings are capped on write (selector 300, text and name 80, html 2,048, route 500, errors five of 300). Everything in a subject but the owner's own `title` is page-written: shown escaped, given to the supervisor only inside the data frame, and never typed into a pane.
+Captured strings are capped on write in bytes (selector 200, text and name 80, html 1,024 with children past the first level collapsed to `…`, route 300, errors three of 200, quote 300), and the whole encoded subject at 2,500 bytes (§1). The layer trims to fit before sending (html first, then errors). For `artifact` and `preview` subjects everything, the title included, is page-written; for `item` and `page` subjects the title and quote are the kit's own rendering of log content, which is itself agent-written. So every subject is shown escaped, given to the supervisor only inside the data frame, and never typed into a pane.
 
-When a subject has changed since the thread began (a goal edited, an artifact at a new fingerprint, a lost element), the context card says so beside the quote ("changed since"; `artifactLinkNow` already computes this for artifacts).
+When a subject has changed since the thread began (a goal edited, an artifact at a new fingerprint, a lost element), the context card says so beside the quote ("changed since"). `artifactLinkNow` computes this for `main` and `wt/`; it is extended to `tree:<id>` (a published version never changes, so "changed since" there means main has moved on from it).
 
 ### 6. Artifacts: a lens inside the frame
 
 An artifact runs in an opaque origin (the CSP `sandbox` without `allow-same-origin`), so nothing outside it can read its document, and the artifacts spec ruled out a bridge back. Coordinates alone don't survive scrolling (the viewer can't see the artifact's scroll). So the kit adds a narrow, read-only bridge:
 
-- When the kit serves an HTML document under `/artifact/` **and the request says `sec-fetch-dest: iframe`**, it appends one `<script>` (the **artifact lens**) to the body and adds its `sha256-` to the response's `script-src`. Any other request (a top-level load, the gateway's loopback fetch for a publish, `curl`) gets the bytes unchanged, so publishing, `artifact check` and hashes are untouched.
-- The lens answers the parent only: `hit {id, x, y}` → `hit-reply {id, anchor, rect}` (anchor as for previews, `elementFromPoint` on its own document); `resolve {anchors}` → `rects`; `scroll-to {anchor}`; and it reports `ready {path, size}`, `scroll {x, y}` and `key {shift}` (Shift seen with focus inside the artifact). It sends nothing else and acts on nothing else.
+- When the kit serves an HTML document under `/artifact/` **and the request says `sec-fetch-dest: iframe`**, it appends one `<script>` (the **artifact lens**) to the body. The response's CSP is **not** changed: the artifact policy's `script-src` already has `'unsafe-inline'`, which admits it, and adding a hash would make browsers ignore `'unsafe-inline'` and block every artifact's own inline scripts. Any other request (a top-level load, the gateway's loopback fetch for a publish, `curl`) gets the bytes unchanged, so publishing, `artifact check` and hashes are untouched.
+- The lens takes four messages from the parent: `hit {id, x, y}` → `hit-reply {id, anchor, rect}` (anchor as for previews, `elementFromPoint` on its own document); `resolve {id, anchors}` → `rects`; `scroll-by {dx, dy}` (wheel events from the overlay in pin mode); `scroll-to {anchor}`. It reports `ready {path, size}`, `scroll {x, y}` and `key {shift}` (Shift seen with focus inside the artifact). It sends nothing else and acts on nothing else.
+- The parent posts to an opaque-origin frame with target origin `'*'`, so the artifact's own scripts can see those messages too. They carry only coordinates, anchors and ids, never the owner's words.
 - The viewer accepts a message only when `event.source` is that frame's `contentWindow` (an opaque origin's `origin` is `"null"`, so `source` is the check) and only as a reply to an id it minted for a real pointer event, or as a position update for pins.
 - An artifact can rewrite the lens (it's its own document) and lie about itself. That is agent content describing itself to the supervisor as data; it can't create a thread, a turn or anything else, because only the layer's own owner events do.
 
@@ -151,7 +163,7 @@ In the dashboard's artifact viewer the overlay sits over the existing frame (z-i
 
 ### 7. Dev links and the viewer page
 
-**The viewer** is the dashboard page in a viewer mode: `index.html` served at `/view/artifact/<slug>[?at=<main|wt-name|tree:id>]` and `/view/preview/<name>`. A one-line bar (name, project, session or version, route, live or not), the stage, the layer and the dock; no navigation. The Library's **Open**, a question's `[[name]]` and Pop out open it in a new tab. The dashboard's in-page artifact viewer gains the same layer, and previews get the same in-page viewer beside artifacts.
+**The viewer** is the dashboard page in a viewer mode: `index.html` served at `/view/artifact/<slug>[?at=<main|wt-name|tree:id>]` and `/view/preview/<name>`. A one-line bar (name, project, session or version, route, live or not), the stage, the layer and the dock; no navigation. Viewer mode skips `route()`, the tab memory and `render()`, and never polls `/api/data`. It polls `/api/threads` (§3) and `/api/hello` (for the preview's state) only, so a dozen open viewer tabs cost a dozen cheap reads. The Library's **Open**, a question's `[[name]]` and Pop out open it in a new tab. The dashboard's in-page artifact viewer gains the same layer, and previews get the same in-page viewer beside artifacts.
 
 **Previews use #176's lens and relay**, unchanged in substance:
 
@@ -160,16 +172,18 @@ In the dashboard's artifact viewer the overlay sits over the existing frame (z-i
 - The lens's source lives once in `devteam.mjs` and once in `cloud/gateway.mjs`; a test asserts they are byte-identical, as the CDN list and type map are.
 - In the dashboard, the viewer shows previews in the in-page stage too, framing the same lens.
 
-**The viewer's own headers**: `frame-src` the preview origin (or relay) and `'self'`; `frame-ancestors 'self'`, the hub, and on a box `https://public.<box>` (for §8); `referrer-policy: no-referrer`.
+**The viewer's own headers**: `frame-src` the preview origin (or relay) and `'self'`; `frame-ancestors 'self'` and the hub; `referrer-policy: no-referrer`. The kit doesn't know the public host; the gateway adds it (§8, §12).
 
 **Routing a dev-link thread.** The supervisor reads the thread, relays the change to the offering session (`send <session> "<what to do>" --kind answer`, citing the thread and the anchor), and reports back with `refs`. A preview whose session is gone keeps its threads; the supervisor folds them into a follow-up ticket as it would any request.
 
 ### 8. Published artifacts, for the owner
 
-`https://public.<box>/<project>/<slug>/` serves exactly today's bytes and headers to anyone without a session. For a **document navigation** carrying a valid owner session, the gateway serves the **owner wrapper** instead: its own small page (`PAGE_CSP`, `cache-control: no-store, private`) that frames `https://<port>.<box>/view/artifact/<slug>?at=tree:<the published tree>` from the instance it holds the project's binding for, full size, under a one-line bar ("Public · <project>/<slug> · open as the public sees it"). That link adds `?plain` and gets the public bytes, also for the owner.
+`https://public.<box>/<project>/<slug>/` serves exactly today's bytes and headers to anyone without a session. For a request with **`sec-fetch-dest: document`** (a top-level navigation; `navigating()`'s `sec-fetch-mode: navigate` would also match frame loads) carrying a valid owner session, the gateway serves the **owner wrapper** instead. It is its own small page: `PAGE_CSP` plus `frame-src https://<port>.<box>` (`PAGE_CSP` alone has `default-src 'none'` and could frame nothing), and `cache-control: no-store, private`. It frames `https://<port>.<box>/view/artifact/<slug>?at=tree:<the published tree>` from the instance it holds the project's binding for, full size, under a one-line bar ("Public · <project>/<slug> · open as the public sees it"). That link adds `?plain` and gets the public bytes, also for the owner. Without fetch metadata (an old browser), the plain bytes.
 
-- The kit serves `/artifact/tree/<tree>/<slug>/<rel>` from git (`git ls-tree` and `cat-file`, as the manifest already does), so the viewer shows exactly the published version. A tree that isn't in the repository answers 404, and the viewer falls back to main with a "not the published version" bar.
-- When the instance doesn't answer, the wrapper says "Threads need <project>'s dashboard, which isn't running" with the plain link.
+- **Failure falls back to plain.** `servePublic` runs today before any session code, inside a branch that turns errors into a 5xx. The session check is a separate step that can only choose the wrapper: a bad cookie, a session store read failure or a missing binding all serve the plain bytes.
+- **The kit serves `/artifact/tree/<tree>/<slug>/<rel>` from git** (`git ls-tree` and `cat-file`, as the manifest already does), so the viewer shows exactly the published version. A tree that isn't in the repository answers 404, and the viewer falls back to main with a "not the published version" bar. The kit's artifact path pattern gains the `tree/<sha>` form, and so does the gateway's `ARTIFACT` pattern, which drives its capability redirect and CSP mapping. Without that, an artifact's relative subresources would fail `crossSiteOk` from the opaque origin.
+- **Every ancestor must allow the frame.** `frame-ancestors` is checked against every ancestor, so in wrapper → viewer → artifact the artifact itself must allow the public host. The gateway appends `https://public.<box>` to `frame-ancestors` on an instance's `/view/` and `/artifact/tree/` responses, and on nothing else. Opening those two to the public host is safe because the public host serves only the wrapper (the gateway's own page) and opaque-sandboxed artifacts (`publicCsp` keeps `sandbox` without `allow-same-origin`), so nothing that can run script there can drive the viewer.
+- **When the instance doesn't answer, or its hello doesn't list `viewer: 1`** (a kit from before the viewers), the wrapper says "Threads need <project>'s dashboard, which isn't running here (or needs a newer kit)" with the plain link.
 - The public host's rule "the incoming cookie header is ignored" becomes: read only to choose the wrapper, never forwarded, never set. Plain responses on document paths gain `vary: cookie`.
 
 ### 9. Questions, the Inbox and standing rules
@@ -177,12 +191,17 @@ In the dashboard's artifact viewer the overlay sits over the existing frame (z-i
 - **Asking.** `thread ask t-… --kind … "<question>" …` is `ask` with `thread` set, plus a turn. It is an Inbox question in every respect: kinds, choices, defaults, `rule_scope`, stake and urgency, order, push, `goal-approval` going through `goal decide`, `review` needing its result. The Inbox card says "from a thread: <title>" and links to it.
 - **Answering.** In the card, the question renders with the Inbox card's own markup and handlers: the same choices, the same "make this a standing rule" checkbox, posting to the same `/api/answer`. Answering in either place answers it once; the other shows it answered. The supervisor's pane gets the question id as it does now.
 - **Standing rules** apply as they do today: they guide the supervisor and authorise what they authorise. A thread changes none of that.
-- **"Go ahead" in a turn.** The owner's turn is their words to the supervisor, the same as in its session (§6 of `supervisor.md`), already recorded verbatim. When it settles a decision, the supervisor records it as it records chat, with the turn instead of a quote: `answer <qid> "<answer>" --from-turn <u-id>` (and `goal decide … --from-turn <u-id>`). The kit copies the turn's text into `said`, sets channel `thread`, and refuses unless the turn exists, is the owner's and is in a thread. No transcript check is needed: the words are in the log. The dashboard lists these answers as it lists chat answers, for the owner to check.
+- **"Go ahead" in a turn.** The owner's turn is their words to the supervisor, the same as in its session (§6 of `supervisor.md`), already recorded verbatim. When it settles a decision, the supervisor records it as it records chat, with the turn instead of a quote: `answer <qid> "<answer>" --from-turn <u-id>` (and `goal decide … --from-turn <u-id>`). The kit copies the turn's text into `said`, sets channel `thread`, and refuses unless:
+  - the turn exists and is the owner's;
+  - it is bound to the question: either the question carries `thread` and the turn is in that thread and newer than the question, or the question has no `thread` and the turn is newer than it (a decision raised in the Inbox, settled in a thread);
+  - no other answer already cites that turn (one turn settles one question; "yes to both" is two questions answered in the card, or two turns).
+
+  No transcript check is needed: the words are in the log. The dashboard lists these answers as it lists chat answers, for the owner to check.
 
 ### 10. Resolving, and the loop
 
 - **Resolve** (the card's header, or accept the supervisor's proposal): the owner's `status: resolved` with an optional outcome, and the `thread-resolved` observation. The pin goes, the dock entry moves to Resolved. Open questions in the thread stay in the Inbox; the card warned "1 question still open" before resolving.
-- **Reopen**: `status: open`, `reopened`, and optionally a turn. The pin returns.
+- **Reopen**: an owner `status: open` update, and optionally a turn. The pin returns.
 - **The loop.** The observation is in Observe like any other (subject `thread:<id>`, linked to the thread). The supervisor's Orient reads it with the rest: what the owner keeps raising, about which goals and artifacts, and what was resolved without a change. `process/supervisor.md` §3 says to read recent `thread-resolved` observations at each tick and to look for repeats (three threads on one goal is a signal about the goal). `observe-metrics` counts open threads, threads waiting on the supervisor, and median time to first reply.
 
 ### 11. Security
@@ -193,25 +212,28 @@ What holds, and what each addition can and can't do:
 - **Who can read.** The dashboard (local, or behind the passkey on a box); nothing on `public.<box>` reads a thread. The wrapper is the gateway's own page and holds no thread content.
 - **Page-written content.** A subject's capture (element text, HTML, routes, console errors, artifact text) is agent-written. It is shown escaped, given to the supervisor only inside the data frame, and never typed into a pane. A pane line carries the owner's words and the title they saw.
 - **Lens messages.** Accepted only from the frame they belong to (`source`), and only as replies to ids the layer minted, or as position updates. A frame can lie about itself; it can't start, write or resolve anything.
-- **The artifact lens** is added only on framed loads, so published and fetched bytes are untouched, and it is allowed by its own hash only.
+- **The artifact lens** is added only on framed loads, so published and fetched bytes are untouched. It runs under the artifact's own `'unsafe-inline'` policy and has no more power than the artifact's own scripts: both run in the same opaque origin.
 - **The preview lens and framing relaxation** are #176's: framing headers relaxed only for the app framed by its own origin, the lens framable only by instance origins, the app sandboxed against navigating the viewer.
 - **The owner wrapper** is served only for a document navigation with a valid session, never cached (`no-store, private`), and frames only an instance origin the gateway already binds the project to. The plain public response stays exactly as it was, plus `vary: cookie`.
-- **The viewer** is framable by itself, the hub and the public host only.
-- **Sizes.** Turns 2,000 characters; captures capped (§5); bodies 16 KB; at most 200 open threads per project (`thread new` refuses a 201st: resolve some).
+- **The viewer** is framable by itself, the hub and (through the gateway's header) the public host only.
+- **Pane lines** carry the owner's words and stable ids only (§3), never a title or capture, so a page can't type into the supervisor's session.
+- **One turn settles one question**, bound to it (§9), so an old "yes" can't be replayed onto a new decision.
+- **Sizes.** Turns 2,000 bytes; subjects 2,500 bytes (§5); bodies under the route's 20,000-byte cap; at most 200 open threads per project (`thread new` refuses a 201st: resolve some).
 
 ### 12. The gateway
 
 - `GET /.devteam/lens` on a preview host after the session check; never proxied. The one framing relaxation in `downstreamHeaders` for preview responses. The lens's `frame-ancestors` from the instance origins.
-- The owner wrapper on `public.<box>` (§8), and `vary: cookie` on plain document responses.
+- `ARTIFACT` gains `tree/<sha>`; `frame-ancestors` gains `https://public.<box>` on an instance's `/view/` and `/artifact/tree/` responses only.
+- The owner wrapper on `public.<box>` (§8): `sec-fetch-dest: document` plus a valid session, its own CSP with `frame-src` the bound instance, falling back to plain on any failure or a kit without `viewer: 1`; and `vary: cookie` on plain document responses.
 - Nothing persisted, no new polling.
 
 ## Scope and sequence
 
-Three PRs, one release, in this order:
+Three PRs. The gateway deploys separately from the kit, so each PR works on its own whatever the other side runs:
 
-1. **Kit: threads** — the records, `thread` commands, `answer --from-turn`, `ACTIONS`, `/api/threads`, delivery, `thread-waiting`, the layer (Shift+click, pin button, card, dock, pins), `data-subject` throughout the dashboard, Inbox mirroring, resolution observations, `supervisor.md` and the constitution sentence. Works on dashboard items and page subjects, on a laptop and a box.
-2. **Kit: viewers** — the artifact lens and its framed-only injection, `/artifact/tree/`, the viewer mode at `/view/…`, the preview lens and the laptop relay, the in-page preview stage, Library Open and `[[name]]` to the viewer.
-3. **Gateway** — the lens on preview hosts, the framing relaxation, the owner wrapper on the public host.
+1. **Kit: threads** — the records, `thread` commands, `askLine`, `answer --from-turn` and the `thread` channel, `ACTIONS`, `/api/threads`, delivery, `thread-waiting`, the layer (Shift+click, pin button, card, dock, pins), `data-subject` throughout the dashboard, Inbox mirroring, resolution observations, `supervisor.md` and the constitution sentence. Works on dashboard items and page subjects, on a laptop and a box. Needs nothing from the gateway.
+2. **Gateway** — the lens on preview hosts, the framing relaxation, `ARTIFACT` with `tree/`, `frame-ancestors` for `/view/` and `/artifact/tree/`, the owner wrapper. Dormant until a kit says `viewer: 1` in its hello; until then the wrapper serves plain bytes.
+3. **Kit: viewers** — the artifact lens and its framed-only injection, `/artifact/tree/`, the viewer mode at `/view/…`, `viewer: 1` in hello, the preview lens and the laptop relay, the in-page preview stage, Library Open and `[[name]]` to the viewer. On a box whose gateway predates PR 2, a viewer in a new tab works for artifacts at `main`/`wt` (the old `ARTIFACT` covers those), and dev-link pins fall back to coordinates (no lens on the preview host).
 
 No new files outside tests and docs: the layer and the viewer are `index.html`, the commands `devteam.mjs`, the lens a string in each of `devteam.mjs` and `gateway.mjs`.
 
@@ -226,8 +248,29 @@ No new files outside tests and docs: the layer and the viewer are `index.html`, 
 
 ## Testing
 
-- **Kit (`test/kit.test.mjs`, `test/dashboard.test.mjs`):** schema accepts `thread` and `turn` and refuses them from the wrong writer; `thread new|say|ask|ready|resolve|reopen|show|list` with their refusals (resolved thread, wrong role, 201st open thread, caps); `thread ask` produces a question identical to `ask`'s plus `thread`, and a turn; `answer --from-turn` copies the words, sets channel `thread`, refuses a supervisor's turn; resolving writes the observation; `threadView` and `waiting`; the pane line carries no capture; `thread-waiting` after 10 minutes; `/api/threads` is cached by file stat and refuses a wrong origin; `ACTIONS` refuse bad bodies; the artifact lens is injected only for `sec-fetch-dest: iframe` and its hash is in `script-src`; the publish manifest's hashes are unchanged; `/artifact/tree/` serves a landed tree and 404s an unknown one; `/view/…` headers; the relay as #176's tests; the lens string equals the gateway's.
-- **Gateway (`test/gateway.test.mjs`):** the lens on a preview host needs a session and is never proxied; the framing relaxation only on `iframe` + `same-origin`; the public host serves the wrapper for a signed-in document navigation, the plain bytes (with `vary: cookie`) otherwise and for `?plain`, and the wrapper never caches.
+- **Kit (`test/kit.test.mjs`, `test/dashboard.test.mjs`):**
+  - The schema accepts `thread` and `turn` and refuses them from the wrong writer.
+  - `thread new|say|ask|ready|resolve|reopen|show|list`, with their refusals: a resolved thread, the wrong role, a 201st open thread, a subject over 2,500 bytes, a turn over 2,000 bytes (a 2,000-character non-ASCII turn is refused, a 2,000-byte one written).
+  - `thread ask` produces a question identical to `ask`'s plus `thread`, and a turn.
+  - `ready`: the supervisor can propose again after an owner "Not yet" turn, and `threadView` shows `ready` cleared by a newer owner line.
+  - `answer --from-turn`: copies the words and sets channel `thread`. It refuses a supervisor's turn, a turn from another thread, a turn older than the question, and a turn already cited.
+  - Resolving writes the observation. `threadView` and `waiting` are right.
+  - The pane line carries the kind and id but no title, element text or capture, with newlines collapsed.
+  - `thread-waiting` appears after 10 minutes.
+  - `/api/threads` sees a line appended by another process, is served from cache when no file changed, and refuses `sec-fetch-site: cross-site`.
+  - `ACTIONS` refuse bad bodies and bad subjects.
+  - The artifact lens is injected only for `sec-fetch-dest: iframe`, the CSP is unchanged, and an artifact's own inline script still runs alongside it (browser).
+  - The publish manifest's hashes are unchanged.
+  - `/artifact/tree/` serves a landed tree and 404s an unknown one.
+  - `/view/…` headers. The relay, as #176's tests. The lens string equals the gateway's.
+- **Gateway (`test/gateway.test.mjs`):**
+  - The lens on a preview host needs a session and is never proxied.
+  - The framing relaxation applies only on `iframe` + `same-origin`.
+  - `tree/` artifact subresources get the capability redirect.
+  - `frame-ancestors` gains the public host on `/view/` and `/artifact/tree/` responses and nowhere else.
+  - The public host serves the wrapper only for a signed-in `sec-fetch-dest: document` request. It serves the plain bytes (with `vary: cookie`) otherwise: for `?plain`, a frame load, a bad cookie, a hello without `viewer: 1`, and an instance that's down. The wrapper never caches.
+  - `publicCsp` still carries `sandbox` without `allow-same-origin`.
+  - The three-level chain (wrapper → viewer → artifact) loads in Chrome.
 - **Browser (`test/browser/dev-links.mjs`, extended):** Shift+move shows the pin and highlights a goal card; a click opens the card with the context card; a turn reaches a fake supervisor pane; a supervisor turn appears within 3 s; a thread question answered in the card shows answered in the Inbox; resolve unpins and the dock moves it; a pin survives the 10 s rebuild; on an artifact the pin follows a scroll; on a Vite preview through the relay the pin follows hot reload.
 
 ## Docs
