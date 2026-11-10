@@ -7229,7 +7229,7 @@ function collectMetrics(since) {
   if (accounts?.supervisor_limit) {
     // the id is read back from a file any agent could write: only one that could be an id is shown
     const id = SESSION_ID.test(accounts.supervisor_limit.session ?? '') ? accounts.supervisor_limit.session : null;
-    add('high', 'supervisor-at-limit', 'supervisor', `the supervisor stopped at a usage limit: "${accounts.supervisor_limit.text}"`, `once an account has room, exit it and resume its session (Claude Code: /exit, then ${id ? supervisorRecovery(id) : 'claude --resume, choosing its conversation'}): a running session keeps the limit even after the login changes`);
+    add('high', 'supervisor-at-limit', 'supervisor', `the supervisor stopped at a usage limit: "${accounts.supervisor_limit.text}"${accounts.supervisor_limit.refused ? `; not restarted: ${String(accounts.supervisor_limit.refused).slice(0, 200)}` : ''}`, `once an account has room, exit it and resume its session (Claude Code: /exit, then ${id ? supervisorRecovery(id) : 'claude --resume, choosing its conversation'}): a running session keeps the limit even after the login changes`);
   }
   if (prodKey && (settings.worktree_files ?? []).includes(prodKey)) add('high', 'production-key-in-worktrees', prodKey, `settings.worktree_files copies ${prodKey}, which decrypts production's credentials, into every worker's worktree`, `the owner's change (settings, gate-change): give agents only development and test keys. ${prodKey === 'config/master.key' ? 'Move production secrets to config/credentials/production.yml.enc with its own production.key, kept only on the platform and in the owner\'s shell, then' : 'Then'} drop ${prodKey} from worktree_files (code-style.md §10)`);
   // Spend, for the improvement loop (supervisor.md §9): what costs more than it should.
@@ -7782,6 +7782,7 @@ function leaveFullAccount(bin, active, rows, began) {
 }
 // What a pane's bottom lines say about a limit stop. A banner counts only as the last thing the
 // agent said: nothing of its own after it, just the input box and status lines.
+const INPUT_LINE = /^[│┃|]?\s*[>❯](?:\s+(.*?))?\s*[│┃|]?$/;
 function limitStop(rawLines) {
   const lines = rawLines.map((l) => l.trim());
   const raw = rawLines.filter((l) => !PANE_CODE.test(l.trim()));
@@ -7791,7 +7792,9 @@ function limitStop(rawLines) {
   const banner = raw.findLastIndex((l) => LIMIT_BANNER.test(l));
   const after = banner === -1 ? [] : own.slice(banner + 1);
   const [, promptRe] = PANE_WAITS.find(([k]) => k === 'prompt');
-  return { menu, limit: menu || (banner !== -1 && !after.some((l) => /^[⏺●⎿]/.test(l))), otherPrompt: !menu && own.some((l) => promptRe.test(l) || /Enter to confirm/.test(l)), busy: lines.some((l) => PANE_BUSY.test(l)), shells: lines.some((l) => PANE_SHELL.test(l)) };
+  // the input line under a banner, from the unfiltered lines (PANE_CODE takes "> text" for code)
+  const input = banner === -1 ? null : rawLines.slice(rawLines.findLastIndex((l) => LIMIT_BANNER.test(l)) + 1).map((l) => INPUT_LINE.exec(l.trim())).filter(Boolean).pop();
+  return { menu, draft: !menu && !!input?.[1], limit: menu || (banner !== -1 && !after.some((l) => /^[⏺●⎿]/.test(l))), otherPrompt: !menu && own.some((l) => promptRe.test(l) || /Enter to confirm/.test(l)), busy: lines.some((l) => PANE_BUSY.test(l)), shells: lines.some((l) => PANE_SHELL.test(l)) };
 }
 // Not sh(): it trims the output, which would put the pane's first line at column 0.
 function paneBottom(target) {
@@ -7802,11 +7805,19 @@ function paneBottom(target) {
 // A window that is one pane, stopped at a limit with nothing else going on: the tick asks before it
 // starts a relaunch, and makeSession again right before it replaces the process (worktree_setup may
 // have run for a while in between). A split window could lose the wrong pane; a background shell's
-// work would die with the session.
+// work would die with the session. Nor is it replaced with a person at it: a half-typed line under
+// the banner, or a client on that pane that pressed a key lately (read from tmux each time, so it
+// can't outlive the client).
 function paneStoppedAtLimit(target) {
   if ((sh('tmux', ['list-panes', '-t', target, '-F', '#{pane_id}']) ?? '').split('\n').filter(Boolean).length !== 1) return false;
   const st = limitStop(paneBottom(target));
-  return st.limit && !st.busy && !st.otherPrompt && !st.shells;
+  return st.limit && !st.busy && !st.otherPrompt && !st.shells && !st.draft && !clientActiveOn(target);
+}
+function clientActiveOn(target) {
+  const [active, session] = (sh('tmux', ['display-message', '-p', '-t', target, '#{window_active}#{pane_active}\t#{session_name}']) ?? '').split('\t');
+  if (active !== '11') return false;
+  const now = Date.now() / 1000;
+  return (sh('tmux', ['list-clients', '-t', `=${session}`, '-F', '#{client_activity}']) ?? '').split('\n').map(Number).some((t) => t > 0 && now - t < SETTLED_MS / 1000);
 }
 // Did this pane start in that directory? Compared resolved: tmux keeps the path as it was given.
 function paneStartedIn(target, dir) {
@@ -7839,8 +7850,16 @@ function restartTimes(now) {
 // or no budget). Recorded before anything is done, under the lock, so a tick killed halfway can't
 // restart it twice and a session that keeps stopping runs into the cap: if it can't be recorded,
 // nothing is done. A budget of 0 only looks.
-function claimRestart(name, budget) {
-  const now = Date.now();
+// Gives back a claim nothing was done with, so a pane that turned out fine costs no attempt. Best
+// effort: a crash before this leaves the attempt counted, and it ages out with the others.
+function releaseRestart(name, at) {
+  try { withLock(ACCOUNTS_RESUMED, () => { const live = restartTimes(Date.now()); const left = (live[name] ?? []).filter((t) => t !== at); if (left.length) live[name] = left; else delete live[name]; writeRestarts(live); }); } catch {}
+}
+function writeRestarts(live) {
+  fs.writeFileSync(`${ACCOUNTS_RESUMED}.${process.pid}`, JSON.stringify(live));
+  fs.renameSync(`${ACCOUNTS_RESUMED}.${process.pid}`, ACCOUNTS_RESUMED);
+}
+function claimRestart(name, budget, now = Date.now()) {
   try {
     fs.mkdirSync(runDir, { recursive: true });
     // withLock clears a lock older than 10 s, so one left by a crash costs one wait
@@ -7850,8 +7869,7 @@ function claimRestart(name, budget) {
       if (times.length >= RESTART_MAX) return 'gave-up';
       if (!budget || (times.length && now - times.at(-1) < RESTART_EVERY_MS)) return null;
       live[name] = [...times, now];
-      fs.writeFileSync(`${ACCOUNTS_RESUMED}.${process.pid}`, JSON.stringify(live));
-      fs.renameSync(`${ACCOUNTS_RESUMED}.${process.pid}`, ACCOUNTS_RESUMED);
+      writeRestarts(live);
       return 'go';
     });
   } catch { return null; }
@@ -8005,28 +8023,84 @@ function supervisorResumeCommand(id) {
   const cmd = loadSettings().resume_command;
   return /\s--continue(\s|$)/.test(cmd) ? cmd.replace(/(\s)--continue(?=\s|$)/, `$1--resume ${id}`) : null;
 }
+// A process's arguments and environment, from the OS, or null if they can't be read; a caller that
+// needs the environment checks it isn't empty. Linux keeps them exact; ps runs each together with
+// spaces, so the environment is what `ps e` adds to the arguments (nothing, on macOS, for a shell in
+// /bin), and the arguments are only words.
+function processInfo(pid) {
+  if (process.platform === 'linux') {
+    const read = (f) => fs.readFileSync(`/proc/${pid}/${f}`, 'utf8').split('\0').filter(Boolean);
+    try { return { args: read('cmdline'), env: read('environ') }; } catch { return null; }
+  }
+  const args = sh('ps', ['-ww', '-o', 'command=', '-p', String(pid)]);
+  const both = sh('ps', ['eww', '-o', 'command=', '-p', String(pid)]);
+  if (!args || !both?.startsWith(args)) return null;
+  return { args: args.split(/\s+/), env: both.slice(args.length).trim().split(/\s+/).filter(Boolean) };
+}
+// The agent in a pane: the pane's own process, or the one child of its shell. Null when that can't
+// be said for sure, and a caller deciding on it refuses.
+function paneAgentProcess(target) {
+  const pid = Number(sh('tmux', ['display-message', '-p', '-t', target, '#{pane_pid}']));
+  if (!Number.isInteger(pid) || pid <= 1) return null;
+  const own = processInfo(pid);
+  if (!own || !SHELLS.has(path.basename(own.args[0] ?? '').replace(/^-/, ''))) return own;
+  const kids = (sh('pgrep', ['-P', String(pid)]) ?? '').split('\n').filter(Boolean);
+  return kids.length === 1 ? processInfo(Number(kids[0])) : null;
+}
+// Was it started with the flag? Only among the options before its first plain argument: the prompt
+// is an argument too, and can mention the flag. Not knowing reads as no.
+const SKIP_PERMISSIONS = '--dangerously-skip-permissions';
+function startedSkippingPermissions(args) {
+  for (let i = /^(node|bun)$/.test(path.basename(args[0] ?? '')) ? 2 : 1; args[i]?.startsWith('-'); i++) {
+    if (args[i] === SKIP_PERMISSIONS) return true;
+    if (args[i + 1] && !args[i + 1].startsWith('-')) i++;
+  }
+  return false;
+}
+const withoutSkipPermissions = (cmd) => cmd.replace(new RegExp(`\\s${SKIP_PERMISSIONS}(?=\\s|$)`, 'g'), '');
+const isSupervisorProcess = (p) => !!p && p.env.includes('DEVTEAM_ROLE=supervisor');
 // The line that brings the supervisor back by hand (in a terminal, after a dead machine or a refused
 // restart): DEVTEAM_ROLE first, as its own start has it. Null without a conversation to resume.
+// Permission prompts stay on unless the supervisor running now was started without them.
 function supervisorRecovery(id) {
   if (!id) return null;
-  return `DEVTEAM_ROLE=supervisor ${supervisorResumeCommand(id) ?? loadSettings().resume_command.replace(/^claude(?=\s|$)/, `claude --resume ${id}`)}`;
+  const cmd = supervisorResumeCommand(id) ?? loadSettings().resume_command.replace(/^claude(?=\s|$)/, `claude --resume ${id}`);
+  const { target } = resolvePane(supervisorTarget());
+  const agent = target ? paneAgentProcess(target) : null;
+  return `DEVTEAM_ROLE=supervisor ${isSupervisorProcess(agent) && startedSkippingPermissions(agent.args) ? cmd : withoutSkipPermissions(cmd)}`;
 }
 // A supervisor in tmux stopped at a limit, on its exact conversation: claude --resume <id> from
 // resume_command, in place of the pane's process, after the same refusals as a worker. Claude Code
 // only; without an id, or for anything else, it isn't guessed at, and the finding says how to resume
-// by hand. The same record and caps as restartPane, under the name "supervisor".
+// by hand. The same record and caps as restartPane, under the name "supervisor". A parked or drained
+// fleet's supervisor stays stopped, as box-supervisors leaves it.
 const SUPERVISOR_RESTART_PROMPT = 'You were restarted after a usage limit, on this same conversation. Carry on from where you were.';
-function restartSupervisor(budget) {
+// What to restart, null if it isn't due, or { refused } if the process can't be read. A banner in the
+// recorded pane says nothing about whose conversation it is, so the id comes from a transcript that
+// itself ends on a limit, and the pane's process must be running as the supervisor. It keeps the
+// permissions it had: a supervisor started by hand without the flag is not given it.
+function supervisorToRestart() {
   const { target, problem } = resolvePane(supervisorTarget());
   if (problem || !target || !paneStoppedAtLimit(target) || !paneStartedIn(target, fs.realpathSync(mainRoot))) return null;
-  const id = supervisorSessionId();
+  const id = supervisorLimit()?.session;
   const cmd = id ? supervisorResumeCommand(id) : null;
   if (!cmd) return null;
+  const agent = paneAgentProcess(target);
+  if (!agent?.env.length) return { refused: `could not read the environment of the process in ${target}` };
+  if (!isSupervisorProcess(agent)) return null;
+  return { target, id, cmd: startedSkippingPermissions(agent.args) ? cmd : withoutSkipPermissions(cmd) };
+}
+function restartSupervisor(budget) {
+  if (draining() || fleetMode()) return null;
+  const found = supervisorToRestart();
+  if (!found || found.refused) return found;
+  const { target, id, cmd } = found;
   const now = Date.now();
-  const verdict = claimRestart('supervisor', budget);
+  const verdict = claimRestart('supervisor', budget, now);
   if (verdict !== 'go') return verdict;
-  // the same order as --replace-agent: the pane is checked once more, right before it is replaced
-  if (resolvePane(target).problem || !paneStoppedAtLimit(target)) return null;
+  // the same order as --replace-agent: everything is checked once more, right before it is replaced
+  const again = supervisorToRestart();
+  if (again?.target !== target || again.id !== id) { releaseRestart('supervisor', now); return null; }
   let failed = replacePaneProcess(target, mainRoot);
   if (!failed && !typeInto(target, `export DEVTEAM_ROLE=supervisor; ${sessionMarkerPrefix()}${cmd} '${SUPERVISOR_RESTART_PROMPT}'`)) failed = `could not type into ${target}; run ${cmd} there`;
   appendLog({ type: 'observation', source: 'pane', kind: 'limit-restarted', subject: 'supervisor', detail: failed ? `the supervisor, stopped at a usage limit, could not be restarted: ${failed}` : `the supervisor, stopped at a usage limit, was restarted on conversation ${id}`, detector: 'pane', source_key: `limit-restarted supervisor ${now}` });
@@ -8049,6 +8123,7 @@ function cmdAccountsTick() {
   const state = { at: nowIso(), cswap: !!bin, active: null, active_no_room: false, exhausted: false, needs_login: [], restart_gave_up: [], supervisor_limit: null, resumed: [], relaunched: [] };
   let switched = false;
   let supervisorRestarted = false;
+  let supervisorRefused = null;
   // only the kit's own sessions, and only those it would launch now: a held one stays as it is
   const launchOf = (name) => (name.startsWith('plan-') ? ['planner', name.slice('plan-'.length)] : tickets().has(name) ? ['worker', name] : null);
   const held = (name) => ['done', 'parked'].includes(workerState(name)?.phase) || !!mergeShaFor(name) || ['park', 'let-go'].includes(sessionMode(name)) || !!draining();
@@ -8090,7 +8165,8 @@ function cmdAccountsTick() {
       // rotation can be the one that switched: resume only on an account this project's last tick saw too.
       if (!switched && state.active && before?.active === state.active && accountHasRoom(active)) {
         const sup = restartSupervisor(budget());
-        if (sup === 'gave-up') state.restart_gave_up.push('supervisor');
+        if (sup?.refused) { supervisorRefused = sup.refused; out(`the supervisor is stopped at a usage limit and was not restarted: ${sup.refused}`); }
+        else if (sup === 'gave-up') state.restart_gave_up.push('supervisor');
         else if (sup) tried = true;
         if (sup === 'restarted') { supervisorRestarted = true; out('restarted the supervisor: it had stopped at a usage limit'); }
         for (const { name } of ourWindows(tmuxSession())) {
@@ -8117,6 +8193,7 @@ function cmdAccountsTick() {
   }
   // in tmux or not, with or without cswap; just restarted, it hasn't stopped
   state.supervisor_limit = supervisorRestarted ? null : supervisorLimit();
+  if (state.supervisor_limit && supervisorRefused) state.supervisor_limit.refused = supervisorRefused;
   fs.mkdirSync(runDir, { recursive: true });
   const tmp = `${ACCOUNTS_FILE}.${process.pid}`;
   fs.writeFileSync(tmp, JSON.stringify(state));
@@ -8504,6 +8581,14 @@ function sessionMarkerPrefix() {
   const markers = [...new Set([...Object.keys(process.env), ...(sh('tmux', ['show-environment', '-g']) ?? '').split('\n'), ...(sh('tmux', ['show-environment', '-t', `=${tmuxSession()}`]) ?? '').split('\n')].map((l) => l.replace(/^-/, '').split('=')[0]).filter((k) => SESSION_MARKERS.test(k)))].sort();
   return markers.length ? `env ${markers.map((k) => `-u ${k}`).join(' ')} ` : '';
 }
+// What a tmux server started here keeps in its global environment for every window it ever opens:
+// nothing that says which session started it (the tick's relaunch is the supervisor, and a window
+// the owner opens there would have owner commands refused).
+function tmuxServerEnv() {
+  const env = ownerProcessEnv();
+  for (const k of Object.keys(env)) if (k === 'DEVTEAM_CHANNEL' || k === 'TMUX_PANE' || SESSION_MARKERS.test(k)) delete env[k];
+  return env;
+}
 // The session:window running this command. TMUX_PANE pins it to our own pane.
 const tmuxHere = () => (process.env.TMUX && process.env.TMUX_PANE ? sh('tmux', ['display-message', '-p', '-t', process.env.TMUX_PANE, '#S:#W']) : null);
 const supervisorTarget = () => process.env.DEVTEAM_SUPERVISOR ?? readText(supervisorPaneFile())?.trim() ?? null;
@@ -8859,7 +8944,7 @@ function makeSession(role) {
     let fresh = false;
     const session = tmuxSession({ save: true });
     if (replaceAgent && !(sh('tmux', ['list-windows', '-t', `=${session}`, '-F', '#W']) ?? '').split('\n').includes(name)) refuse(`--replace-agent: no window ${session}:${name} to restart in`);
-    if (!tmux(['has-session', '-t', `=${session}`])) { fresh = tmux(['new-session', '-d', '-s', session, '-n', name, '-c', wt]); if (!fresh) refuse('could not start tmux'); }
+    if (!tmux(['has-session', '-t', `=${session}`])) { fresh = sh('tmux', ['new-session', '-d', '-s', session, '-n', name, '-c', wt], { env: tmuxServerEnv() }) !== null; if (!fresh) refuse('could not start tmux'); }
     const windows = (sh('tmux', ['list-windows', '-t', `=${session}`, '-F', '#W']) ?? '').split('\n');
     if (!fresh && windows.includes(name)) {
       if (ifGone) refuse(`--if-gone: window ${session}:${name} exists; left as it is`, IF_GONE_LEFT);
@@ -8868,6 +8953,8 @@ function makeSession(role) {
       // coming up, so its window is left alone. The record ages out, so this can't wedge a real resume.
       const t = restartTimes(Date.now())[name]?.at(-1);
       if (!replaceAgent && t && Date.now() - t < SETTLED_MS) refuse(`window ${session}:${name} was relaunched by the dashboard moments ago; left as it is`, 0);
+      // a resume is typed into the pane: with an agent running there it would land in that agent's input
+      if (!replaceAgent && !resolvePane(`=${session}:${name}`).problem) refuse(`window ${session}:${name} has a live agent; quit it or close the window first, then --resume`);
     } else if (!fresh) tmux(['new-window', '-d', '-t', `=${session}`, '-n', name, '-c', wt]);
     const target = `=${session}:${name}`;
     const shown = `${session}:${name}`;
@@ -8879,7 +8966,7 @@ function makeSession(role) {
       if (failed) refuse(failed);
     }
     // Past the replacement nothing is left running there, so a failure has to surface, not log success.
-    const type = (line) => { if (!typeInto(target, line) && (replaceAgent || ifGone)) refuse(`could not type into ${shown}: its old process is gone and the new one did not start; ${role} ${id} --resume starts it`); };
+    const type = (line) => { if (!typeInto(target, line) && (replaceAgent || ifGone)) refuse(`could not type into ${shown}: ${replaceAgent ? 'its old process is gone and the new one did not start' : 'its new window has no agent in it'}; ${role} ${id} --resume starts it`); };
     type(env);
     // Worker and planner policy travels with the launch, not the repo's agent config (which may be
     // gitignored, and would bind the supervisor too): for Claude Code, a --settings file in run/.

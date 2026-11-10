@@ -648,6 +648,8 @@ test('starting a session: a warning on a full active account, never a refusal, a
   const F = fixture('prelaunch');
   try {
     F.worker('x-01-a', ['> ']);
+    // its agent has exited, so the window is back at a shell and --resume starts it
+    execFileSync('tmux', ['respawn-pane', '-k', '-t', `=${F.session}:x-01-a`, 'sh']);
     const accounts = path.join(F.root, 'docs/devteam/run/accounts.json');
     const start = () => F.run(['worker', 'x-01-a', '--resume']);
     F.set(FULL);
