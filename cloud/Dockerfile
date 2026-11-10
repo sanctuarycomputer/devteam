@@ -258,6 +258,8 @@ rm -f "$HOME"/code/*/docs/devteam/run/supervisor-pane
 [ -f .tmux.conf ] || printf 'set -g mouse on\nset -g history-limit 50000\nset -g default-terminal tmux-256color\nset -g default-shell /bin/bash\n' > .tmux.conf
 # copying in tmux, or in a program in it, reaches the browser's clipboard (the gateway's terminal page takes OSC 52)
 grep -q set-clipboard .tmux.conf || printf "set -g set-clipboard on\nset -as terminal-features ',xterm-256color:clipboard'\n" >> .tmux.conf
+# Claude Code asks for it in every pane: without it, it can't tell when its pane gains or loses focus
+grep -q focus-events .tmux.conf || echo 'set -g focus-events on' >> .tmux.conf
 if [ ! -f .bashrc ]; then
   cp /etc/skel/.bashrc .bashrc
   cat >> .bashrc <<'RC'
