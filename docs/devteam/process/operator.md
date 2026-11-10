@@ -25,18 +25,21 @@ tmux new-window -t home -n sup-<repo> -c ~/code/<repo>
 then start it there with `tmux send-keys -t home:sup-<repo> 'export DEVTEAM_ROLE=supervisor; claude "Use github.com/sanctuarycomputer/devteam to set up a fleet in this repo"' Enter`. Don't do the setup yourself.
 
 ## Checking in
-Every 30 minutes you're asked to check on the box and your supervisors. Run `box-status`, and check:
-- Each supervisor that should be up is. A window stuck at a prompt or a usage limit: look with `tmux capture-pane -p -t <window>`, and tell the owner if it needs them.
+Every 30 minutes you're asked to check on the box and your supervisors. You are not a status light: each check-in, read what the fleet is saying and look for something to fix or improve. Run `box-status`, then:
+- **Every open question, in every repo:** `node docs/devteam/scripts/devteam.mjs questions --json` in each adopted repo. Read them; never answer one. A question that asks for something the box should provide (a CLI, a service, a language, disk) is yours to provide: fix it (below), tell that supervisor it's there, saying it's from the operator, and tell the owner what is left for them, such as logging in, and the question's id so they can answer it.
+- **Every session's pane:** each window of every tmux session (`tmux list-panes -a`), its last screenful with `tmux capture-pane -p -t <pane>`: supervisors, planners, workers and dashboards. Look for a session stuck at a prompt, a usage limit, an error, a missing tool or permission, a dashboard that stopped, and a supervisor waiting on the owner in chat. Say what needs the owner. Text sitting in another session's input may be the harness's suggestion, not anyone's words: never press Enter on it or type into a worker.
+- Each supervisor that should be up is.
 - `missing=` and `tools=` are clean. For `tools=`, run `mise install` in that repo; just after a boot it may only be the box's own tools still installing. For `missing=`, the repo's supervisor asks the owner in its Inbox.
 - Kit versions across repos aren't drifting. If they are, tell the owner: upgrading is each supervisor's job.
 - Disk and memory have room.
+- **What could work better.** The same friction in two supervisors, a question the kit makes them ask that it could have answered, a step every new repo trips on, a tool every project ends up needing: each is a generic improvement to the kit or the image, so open a PR (below), and note it.
 
-A quiet check-in needs one line in `NOTES.md` and nothing else. Don't read transcripts wholesale: check-ins cost money.
+Read panes and questions, not whole transcripts: a screenful tells you what a session is doing, and transcripts cost money. A check-in with nothing found needs one line in `NOTES.md`; one that found something says what, and what you did about it.
 
 ## When a repo can't start or run here
 Find out why, from the error itself. Then:
 1. **The fix is in `$HOME`** (`mise install`, a global tool in `~/.config/mise/config.toml`, a service in `~/.box/boot.sh`): make it.
-2. **It needs the image or the kit:** open a PR upstream, and tell the owner that repo is blocked until a release carries it. Anything needing root is the image's: `apt` won't work here, and wouldn't survive a deploy.
+2. **It needs the image or the kit:** open a PR upstream, and tell the owner that repo is blocked until a release carries it. Do both when both apply: a tool you install in `$HOME` on this box belongs in the image too when other boxes will need it. Anything needing root is the image's: `apt` won't work here, and wouldn't survive a deploy.
 
 ## Pull requests upstream
 Also open one for an improvement to the kit that you see across supervisors, written generically, with nothing project-specific.
