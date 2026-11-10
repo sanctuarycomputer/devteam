@@ -781,13 +781,71 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
 
   await t.test("a Shift+click is the layer's alone: it starts a thread on the goal, and the title link under it isn't followed", async () => {
     const at = await p.at(`${goalSel} a.title-link`);
+    const pages = async () => (await p.send('Target.getTargets')).targetInfos.filter((x) => x.type === 'page').length;
+    const before = await pages();
     await p.hold('Shift', true);
     await p.clickAt(at.x, at.y, 8);
     await p.hold('Shift', false);
     await soon(`TL.draft?.subject?.ref === 'goal:${F.goal}'`, 'a thread about to start, on the goal');
+    assert.equal(await p.ev('PRESSED'), 0, 'the press that holds a redraw never saw it');
+    assert.equal(await pages(), before, "no new window: the browser's own Shift+click never ran");
     assert.equal(await p.ev('TL.draft.title'), 'Launch checkout');
     assert.equal(await p.ev('location.hash'), '#goals', 'the link was not followed');
     assert.equal(await p.ev(`document.getElementById('drawer').hidden`), true, 'no sidepeek opened');
     assert.equal(threads().length, 0, 'nothing is written until the owner writes');
+  });
+
+  await t.test('the card opens beside the goal, with the goal as its context, and nothing written yet', async () => {
+    await soon(shown('tl-card'), 'the card');
+    assert.match(await p.ev(`document.querySelector('#tl-card .tl-ctx summary').textContent`), /Launch checkout[\s\S]*Goals/);
+    assert.equal(await p.ev(`document.activeElement.id`), 'tl-c-text', 'ready to write');
+    assert.equal(threads().length, 0);
+  });
+
+  await t.test('Enter sends the first words: a thread on the goal, its turn in the card, the draft cleared', async () => {
+    await p.type('Narrow this to the EU launch');
+    await p.key('Enter');
+    const th = await until(() => threads().find((x) => x.turns[0]?.text === 'Narrow this to the EU launch'), 'the thread in the log');
+    T = th.id;
+    assert.deepEqual([th.subject.kind, th.subject.ref, th.title], ['item', `goal:${F.goal}`, 'Launch checkout']);
+    await soon(`document.querySelector('#tl-c-turns .tl-turn.owner')?.textContent.includes('Narrow this to the EU launch')`, 'the turn in the card');
+    assert.equal(await p.ev(`document.getElementById('tl-c-text').value`), '');
+    assert.equal(await p.ev(`document.activeElement.id`), 'tl-c-text', 'still in the composer after the card became the thread');
+    assert.equal(await p.ev(`document.getElementById('tl-c-state').textContent`), 'Sent; the supervisor will read it when it next checks.', 'no pane here');
+  });
+
+  await t.test('the page refreshes while the owner writes in the card: the layer holds no redraw', async () => {
+    await p.click('#tl-c-text');
+    await p.type('half a thought');
+    const polls = await p.ev('window.__polls');
+    await p.ev(`window.__g = document.querySelector('${goalSel}'); void 0`);
+    await soon(`window.__polls >= ${polls + 2} && !window.__g.isConnected`, 'polls landing and the goal card redrawn');
+    assert.equal(await p.ev(`document.activeElement.id`), 'tl-c-text');
+    assert.equal(await p.ev(`document.getElementById('tl-c-text').value`), 'half a thought', 'the draft untouched');
+    await p.ev(`(() => { const ta = document.getElementById('tl-c-text'); ta.value = ''; ta.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  });
+
+  await t.test("the supervisor's reply shows in the open card within two polls", async () => {
+    F.sup(['thread', 'say', T, 'That drops the measure to EU orders; want me to propose the change?']);
+    const t0 = Date.now();
+    await soon(`document.querySelector('#tl-c-turns .tl-turn.supervisor')?.textContent.includes('drops the measure')`, 'the reply');
+    // the card polls every 2 s: two polls and a margin for a loaded machine
+    assert.ok(Date.now() - t0 < 2 * 2000 + 1500, `took ${Date.now() - t0} ms`);
+    assert.equal(await p.ev(`document.getElementById('tl-c-state').textContent`), '', 'the reply is the state');
+  });
+
+  await t.test('a turn over 2,000 bytes is refused in the card, counted in bytes', async () => {
+    await p.ev(`(() => { const ta = document.getElementById('tl-c-text'); ta.focus(); ta.value = '日'.repeat(700); ta.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+    assert.match(await p.ev(`document.getElementById('tl-c-bytes').textContent`), /2100 \/ 2000 bytes/);
+    await p.key('Enter');
+    await soon(`/At most 2000 bytes/.test(document.getElementById('e-tl').textContent)`, 'the refusal');
+    await p.ev(`(() => { const ta = document.getElementById('tl-c-text'); ta.value = ''; ta.dispatchEvent(new Event('input', { bubbles: true })); ta.blur(); })()`);
+  });
+
+  await t.test('#talk/<id> opens the thread beside its subject', async () => {
+    await p.click('[data-tl-close]');
+    await soon(`document.getElementById('tl-card').hidden`, 'closed');
+    await p.ev(`location.hash = '#talk/${T}'`);
+    await soon(`${shown('tl-card')} && document.getElementById('tl-card').dataset.key === '${T}'`, 'the card from the link');
   });
 });

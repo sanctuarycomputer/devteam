@@ -490,6 +490,23 @@
   .tl-hl { position: fixed; z-index: 58; pointer-events: none; border: 2px solid var(--blue); border-radius: 8px; background: color-mix(in srgb, var(--blue) 8%, transparent); }
   .tl-hl.spot { border-radius: 50%; }
   .tl-chip { position: fixed; z-index: 59; pointer-events: none; max-width: 260px; padding: 2px 8px; border-radius: 6px; background: var(--fg); color: var(--bg); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tl-card { position: absolute; z-index: 50; width: 360px; max-height: min(560px, 80vh); display: flex; flex-direction: column; background: var(--raised); border: 1px solid var(--line-2); border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.18); padding: 10px 12px; }
+  .tl-card.in-dock { position: fixed; right: 16px; bottom: 64px; }
+  .tl-card.sheet { position: fixed; left: 0; right: 0; bottom: 0; width: auto; max-height: 75vh; border-radius: 12px 12px 0 0; }
+  .tl-head { display: flex; align-items: center; gap: 6px; }
+  .tl-head .tl-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tl-head button { margin-top: 0; }
+  .tl-ctx { margin: 6px 0; border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; background: var(--well); font-size: 12px; }
+  .tl-ctx summary { display: flex; gap: 6px; align-items: center; cursor: pointer; list-style: none; }
+  .tl-ctx summary b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+  .tl-ctx .kv code { overflow-wrap: anywhere; }
+  .tl-turns { overflow-y: auto; flex: 1; min-height: 60px; display: flex; flex-direction: column; gap: 8px; padding: 4px 0; }
+  .tl-turn .tl-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .tl-turn.owner { align-self: flex-end; max-width: 88%; background: color-mix(in srgb, var(--blue) 10%, var(--surface)); border-radius: 8px; padding: 6px 8px; }
+  .tl-refs { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 2px; font-size: 12px; }
+  .tl-compose textarea { margin-top: 6px; }
+  .tl-compose .row-inline { align-items: center; }
+  @media (max-width: 640px) { .tl-card:not(.sheet) { width: calc(100vw - 32px); } }
 </style>
 </head>
 <body>
@@ -685,6 +702,7 @@
   <div id="tl-hl" class="tl-hl" hidden></div>
   <div id="tl-chip" class="tl-chip" hidden></div>
   <div id="tl-cursor" class="tl-cursor" hidden aria-hidden="true"><svg viewBox="0 0 28 36" width="28" height="36"><path d="M14 35C14 35 2 21 2 13a12 12 0 0 1 24 0c0 8-12 22-12 22z"/><circle cx="14" cy="13" r="4.5"/></svg></div>
+  <div id="tl-card" class="tl-card" role="dialog" aria-label="A thread with the supervisor" hidden></div>
 </div>
 <script>
 const $ = (id) => document.getElementById(id);
@@ -3069,6 +3087,8 @@ function route() {
   if (h.startsWith('q/')) return void openQuestion(h.slice(2));
   if (h.startsWith('goal/')) return void openGoal(h.slice(5));
   if (h.startsWith('planner/')) return void openPlanner(h.slice(8));
+  // a thread: its card, beside its subject (#thread/ is a message's thread, in the sidepeek)
+  if (h.startsWith('talk/')) return void tlOpen(h.slice(5));
   const PEEKS = { feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, sensor: openSensor };
   const [kind, ...rest] = h.split('/');
   if (PEEKS[kind] && rest.length) return void PEEKS[kind](rest.join('/'));
@@ -3519,7 +3539,7 @@ function tlSection(el) {
   const sec = el?.closest?.('main > section[id]');
   if (!sec) return null;
   const h = sec.querySelector('h2');
-  return { el: sec, view: `#${sec.id}${sec.id === 'loop' ? `/${TAB}` : ''}`, box: sec.getBoundingClientRect(), heading: (h?.firstChild?.textContent || h?.textContent || sec.id).trim() };
+  return { el: sec, view: `#${sec.id}${sec.id === 'loop' ? `/${TAB}` : ''}`, box: sec.getBoundingClientRect(), heading: (h?.firstChild?.textContent || h?.textContent || T_SECTIONS[sec.id] || '').trim() };
 }
 function tlHitAt(x, y) {
   const el = document.elementsFromPoint(x, y).find((e) => !tlOwn(e));
@@ -3539,7 +3559,7 @@ function tlShow(x, y) {
   hl.classList.toggle('spot', hit.subject.kind !== 'item');
   hl.hidden = false;
   chip.textContent = hit.title;
-  Object.assign(chip.style, { left: `${Math.round(Math.min(x + 18, innerWidth - 270))}px`, top: `${Math.round(Math.max(8, y - 36))}px` });
+  Object.assign(chip.style, { left: `${Math.round(Math.max(8, Math.min(x + 18, innerWidth - 270)))}px`, top: `${Math.round(Math.max(8, y - 36))}px` });
   chip.hidden = false;
 }
 function tlHide() {
@@ -3557,6 +3577,7 @@ function tlPinMode(on) {
 }
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && (tlShowing() || TL.pin)) { e.stopImmediatePropagation(); tlHide(); if (TL.pin) tlPinMode(false); }
+  else if (e.key === 'Escape' && tlOwn(document.activeElement) && !tlEl('tl-card').hidden) { e.stopImmediatePropagation(); TL.open = null; TL.draft = null; tlDraw(); }
 }, true);
 window.addEventListener('keyup', (e) => { if (e.key === 'Shift' && !TL.pin) tlHide(); }, true);
 window.addEventListener('blur', () => { if (!TL.pin) tlHide(); });
@@ -3588,13 +3609,184 @@ for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click',
   tlHide();
   if (hit) tlStart(hit);
 }, true);
-// A thread about to start: its subject fitted to the log's cap; nothing is written until the owner
-// sends the first words.
+// A card for a thread about to start: its subject fitted to the log's cap; nothing is written until
+// the owner sends the first words.
 function tlStart(hit) {
   TL.open = null;
   TL.resolving = false;
   TL.draft = { subject: tFit(hit.subject), title: hit.title, el: hit.subject.kind === 'item' ? hit.el : null, px: hit.x + scrollX, py: hit.y + scrollY };
+  tlDraw();
+  tlEl('tl-c-text')?.focus();
 }
+// The one element a subject's pin and card follow: the one in its home section (an observation is
+// also in the Sensors feed, a question in a Decide row), else wherever it is drawn.
+function tlHome(s) {
+  if (s?.kind !== 'item') return null;
+  const sel = `[data-subject="${CSS.escape(s.ref)}"]`;
+  return document.querySelector(`main #${T_HOME[s.ref.split(':')[0]] || 'overview'} ${sel}`) ?? document.querySelector(`main ${sel}`);
+}
+const tlVisible = (el) => !!el && el.getClientRects().length > 0;
+function tlTargetRect(s) {
+  if (s?.kind === 'item') { const el = tlHome(s); return tlVisible(el) ? el.getBoundingClientRect() : null; }
+  if (s?.kind === 'page') {
+    const sec = document.getElementById(String(s.view).slice(1).split('/')[0]);
+    if (!tlVisible(sec)) return null;
+    const b = sec.getBoundingClientRect();
+    const x = b.left + (s.at?.x ?? 0) * b.width, y = b.top + (s.at?.y ?? 0) * b.height;
+    return { left: x - 12, right: x + 12, top: y - 12, bottom: y + 12, width: 24, height: 24 };
+  }
+  return null;
+}
+// Bring a subject into view: the Loop's tab it is on, the <details> it is in, then scroll to it.
+function tlGoTo(s) {
+  if (s?.kind === 'item') {
+    const el = tlHome(s);
+    if (!el) return;
+    const panel = el.closest('.loop-panel');
+    if (panel?.hidden) showTab(panel.dataset.panel);
+    const det = el.closest('details');
+    if (det && !det.open) det.open = true;
+    el.scrollIntoView({ block: 'center' });
+  } else if (s?.kind === 'page') document.getElementById(String(s.view).slice(1).split('/')[0])?.scrollIntoView();
+}
+const tlCardFrame = () => `<div class="tl-head"><span class="tl-title" id="tl-c-title"></span><span class="grow"></span><span id="tl-c-acts"></span><button type="button" class="ghost" data-tl-close aria-label="Close">×</button></div>
+  <div id="tl-c-ready"></div><div id="tl-c-ctx"></div><div class="tl-turns" id="tl-c-turns"></div><div class="small muted" id="tl-c-state"></div>
+  <div class="tl-compose"><textarea id="tl-c-text" rows="2" placeholder="Write to the supervisor. Enter sends; Shift+Enter is a new line."></textarea><div class="row-inline"><span class="small dim" id="tl-c-bytes"></span><span class="grow"></span><span class="err" id="e-tl"></span><button type="button" data-tl-send>Send</button></div></div>`;
+// The subject as one tight line (an icon, its name, where it is), opening to what was captured.
+// Every value escaped: a subject's text is data, the log's (or, in a later kit's viewers, the page's).
+function tlCtx(s, title, note) {
+  const icon = !s ? 'message-circle' : s.kind === 'item' ? 'mouse-pointer-click' : 'map-pin';
+  const rows = s ? Object.entries(s).filter(([k]) => k !== 'kind').map(([k, v]) => `<span>${esc(words(k))}</span><code>${esc(typeof v === 'string' ? v : JSON.stringify(v))}</code>`).join('') : '';
+  return `<details class="tl-ctx"><summary><i class="icon-${icon}" aria-hidden="true"></i><b>${esc(title)}</b><span class="muted small">${esc(tWhere(s))}${note ? ` · ${esc(note)}` : ''}</span></summary>${rows ? `<div class="kv">${rows}</div>` : '<p class="small muted">Started from the dock, about nothing on the page.</p>'}</details>`;
+}
+// What a supervisor turn did, as links: "Goal Launch checkout", "Ticket …", "Act open it".
+function tlRef(r) {
+  const i = r.indexOf(':');
+  const k = r.slice(0, i), id = r.slice(i + 1);
+  const a = { goal: () => glink(id), ticket: () => tlink(id), question: () => qlink(id), decision: () => dlink(id), act: () => `<a class="linkish" href="#act/${encodeURIComponent(id)}">open it</a>`, problem: () => `<a class="linkish" href="#problem/${encodeURIComponent(id)}">open it</a>`, lesson: () => `<a class="linkish" href="#lesson/${encodeURIComponent(id)}">open it</a>`, artifact: () => `<a class="linkish" href="#artifact/main/${encodeURIComponent(id)}">${esc(id)}</a>` }[k];
+  return `<span class="tl-ref"><span class="muted">${esc(words(k))}</span> ${a ? a() : `<code>${esc(id)}</code>`}</span>`;
+}
+// A turn's words.
+const tlTurnBody = (u) => `<div class="tl-text">${linkify(u.text)}</div>`;
+function tlTurns(t) {
+  return t.turns.map((u) => `<div class="tl-turn ${u.by}"><div class="meta">${u.by === 'owner' ? 'You' : 'The supervisor'} · ${esc(when(u.at))}</div>${tlTurnBody(u, t)}${u.refs.length ? `<div class="tl-refs">${u.refs.map(tlRef).join('')}</div>` : ''}</div>`).join('');
+}
+// The card's body, redrawn only when what it shows changed and never under the owner's hands (a
+// focused control in its turns, a question card mid-answer), so a pick or a note survives a poll.
+function tlCardBody(t) {
+  const s = t ? t.subject : TL.draft.subject;
+  const title = t ? t.title : TL.draft.title || 'A new thread';
+  tlEl('tl-c-title').textContent = title;
+  const turns = tlEl('tl-c-turns');
+  const sig = JSON.stringify([t, s, title, (t?.questions || []).map((q) => [q.id, (DATA?.questions || []).some((x) => x.id === q.id), ANSWERED.has(q.id)])]);
+  if (sig !== TL.sig && !turns.contains(document.activeElement)) {
+    TL.sig = sig;
+    const now = t ? tlHome(s) : null;
+    // the names as the dock shows them, so a title the log cut at 120 isn't "changed"
+    const note = !t ? '' : s?.kind === 'item' && !now ? 'not on the page now' : now && tLine(now.dataset.title, T_TITLE_MAX) !== tLine(t.title, T_TITLE_MAX) ? 'changed since' : '';
+    const was = tlEl('tl-c-ctx').querySelector('details')?.open;
+    tlEl('tl-c-ctx').innerHTML = tlCtx(s, title, note);
+    if (was) tlEl('tl-c-ctx').querySelector('details').open = true;
+    turns.innerHTML = t ? tlTurns(t) : '<p class="small muted">Say what you want done about it. Nothing is sent until you do.</p>';
+    turns.scrollTop = turns.scrollHeight;
+  }
+  tlEl('tl-c-state').textContent = !t ? '' : t.status === 'resolved' ? `Resolved${t.outcome ? `: ${t.outcome}` : ''}. Writing reopens it.` : tCardState(t, Date.now(), TL.typed[t.id], TL.pane) ?? '';
+}
+// Beside its pin, in page coordinates so it scrolls with the page; in the dock when its subject isn't
+// on the page (or it has none); a bottom sheet on a narrow screen.
+function tlPlaceCard(t) {
+  const card = tlEl('tl-card');
+  let r = null;
+  if (t) r = tlTargetRect(t.subject);
+  else if (TL.draft.el?.isConnected) r = TL.draft.el.getBoundingClientRect();
+  else if (TL.draft.subject) { const x = TL.draft.px - scrollX, y = TL.draft.py - scrollY; r = { left: x - 12, right: x + 12, top: y - 12, bottom: y + 12 }; }
+  const p = r ? tPlace(r, card.offsetWidth || 360, card.offsetHeight || 420, innerWidth, innerHeight) : { sheet: innerWidth < 640, dock: true };
+  card.classList.toggle('sheet', !!p.sheet);
+  card.classList.toggle('in-dock', !p.sheet && !!p.dock);
+  card.style.left = p.sheet || p.dock ? '' : `${p.left + scrollX}px`;
+  card.style.top = p.sheet || p.dock ? '' : `${p.top + scrollY}px`;
+}
+// The draft is kept in this browser per thread, as review drafts are, so a reload or another card keeps it.
+const tlDraftKey = (key) => `devteam.thread.draft.${key}`;
+function tlBytes() { const n = tBytes(tlEl('tl-c-text').value.trim()); const el = tlEl('tl-c-bytes'); el.textContent = n > T_TURN_MAX * 0.8 ? `${n} / ${T_TURN_MAX} bytes` : ''; el.classList.toggle('err', n > T_TURN_MAX); }
+function tlCard() {
+  const card = tlEl('tl-card');
+  const t = TL.open ? TL.threads.find((x) => x.id === TL.open) : null;
+  if (TL.open && !t) TL.open = null;
+  if (!t && !TL.draft) { card.hidden = true; card.dataset.key = ''; clearInterval(TL.polling); TL.polling = null; return; }
+  const key = t ? t.id : 'new';
+  if (card.dataset.key !== key) {
+    // the first words make the draft a thread, and the card its own: the composer keeps the focus
+    const writing = document.activeElement?.id === 'tl-c-text';
+    card.dataset.key = key;
+    card.innerHTML = tlCardFrame();
+    tlEl('tl-c-text').value = lsGet(tlDraftKey(key)) || '';
+    tlBytes();
+    TL.sig = '';
+    TL.readyKey = '';
+    if (writing) tlEl('tl-c-text').focus();
+  }
+  card.hidden = false;
+  tlCardBody(t);
+  tlPlaceCard(t);
+  if (t && !TL.polling) TL.polling = setInterval(() => { if (document.visibilityState === 'visible' && TL.open) tlRefresh(); }, 2000);
+}
+function tlDraw() { tlCard(); }
+async function tlRefresh() {
+  try {
+    const r = await fetch('/api/threads');
+    if (!r.ok) return;
+    const j = await r.json();
+    TL.threads = j.threads || [];
+    TL.pane = !!j.supervisor?.pane;
+  } catch { return; }
+  tlDraw();
+}
+async function tlOpen(id, go = true) {
+  if (!TL.threads.some((x) => x.id === id)) await tlRefresh();
+  const t = TL.threads.find((x) => x.id === id);
+  if (!t) return;
+  TL.draft = null;
+  TL.open = id;
+  TL.resolving = false;
+  if (go) tlGoTo(t.subject);
+  tlDraw();
+}
+// Send: the first words start the thread (its title what the layer showed, or the words themselves
+// from the dock), a word on a resolved thread reopens it, anything else is a turn.
+async function tlSend() {
+  const ta = tlEl('tl-c-text');
+  const text = ta.value.trim();
+  const err = tlEl('e-tl');
+  if (!text || TL.busy) return;
+  if (tBytes(text) > T_TURN_MAX) { err.textContent = `At most ${T_TURN_MAX} bytes; this is ${tBytes(text)}. Characters outside plain English take two to four each.`; return; }
+  if (tBytes(JSON.stringify(text)) - 2 > T_ENCODED_MAX) { err.textContent = 'This has too many quotation marks, backslashes or control characters to keep; shorten it.'; return; }
+  const key = tlEl('tl-card').dataset.key;
+  const t = TL.open ? TL.threads.find((x) => x.id === TL.open) : null;
+  const [action, body] = !t ? ['thread-new', { title: TL.draft.title || tLine(text, T_TITLE_MAX), subject: TL.draft.subject || undefined, text }] : t.status === 'resolved' ? ['thread-reopen', { id: t.id, text }] : ['thread-say', { id: t.id, text }];
+  TL.busy = true;
+  err.textContent = '';
+  try {
+    const r = await sending(() => fetch(`/api/${action}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }));
+    const out = await r.json();
+    if (!r.ok) { err.textContent = out.error || 'failed'; return; }
+    // the first line of a thread command's output is the id; the second says whether a pane took it
+    const id = action === 'thread-new' ? String(out.out || '').split('\n')[0].trim() : t.id;
+    TL.typed[id] = /supervisor's pane/.test(out.out || '');
+    lsDel(tlDraftKey(key));
+    ta.value = '';
+    tlBytes();
+    if (action === 'thread-new') { TL.draft = null; TL.open = id; }
+    await tlRefresh();
+  } catch (e2) { err.textContent = `Could not send: ${e2.message}`; } finally { TL.busy = false; }
+}
+document.addEventListener('input', (e) => { if (e.target.id !== 'tl-c-text') return; lsSet(tlDraftKey(tlEl('tl-card').dataset.key), e.target.value); tlBytes(); });
+document.addEventListener('keydown', (e) => { if (e.target.id === 'tl-c-text' && e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); tlSend(); } });
+document.addEventListener('click', (e) => {
+  if (e.target.closest('[data-tl-close]')) { TL.open = null; TL.draft = null; TL.resolving = false; return void tlDraw(); }
+  if (e.target.closest('[data-tl-send]')) return void tlSend();
+});
+addEventListener('resize', () => tlDraw());
 /* threads-layer end */
 
 // Not under someone mid-action: a redraw replaces the controls it draws, so typing, an IME
@@ -3645,6 +3837,8 @@ function drawOrHold(d, force = false) {
     render(d);
     if (first) route();
     inboxTitle(d);
+    // the thread layer, which the redraw doesn't touch: its threads again, and its card
+    tlRefresh();
   } catch (e) {
     $('err').textContent = 'could not draw (see the top of the page)';
     const b = $('banner');
