@@ -3745,6 +3745,10 @@ function strategyFails(base, sha, approved) {
   // by the file's blob at each end, never a diff (a failed diff reads as no files)
   const before = git(['rev-parse', '--verify', '--quiet', `${base}:${strategyRel}`]);
   const after = git(['rev-parse', '--verify', '--quiet', `${sha}:${strategyRel}`]);
+  // A second file whose path differs from the strategy's only by case: on a disk that ignores case
+  // (macOS, Windows) the two are one file, and a checkout may leave this one where the strategy is read.
+  const twins = (git(['ls-tree', '-r', '-z', '--name-only', sha]) ?? '').split('\0').filter((f) => f !== strategyRel && f.toLowerCase() === strategyRel.toLowerCase() && git(['rev-parse', '--verify', '--quiet', `${base}:${f}`]) === null);
+  if (twins.length) return [`adds ${twins.join(', ')}, which a disk that ignores case can't tell from ${strategyRel}: the strategy is one file, and the owner's; remove it`];
   if (before === after) return [];
   if (before === null && (git(['show', `${sha}:${strategyRel}`]) ?? '').trim() === STRATEGY_MD.trim()) return [];
   if (!approved) return [`changes ${strategyRel}: the strategy is the owner's, so the owner's answer is needed: ask --class strategy-change --reasons owner-only --recommendation "…" with a link to the draft, then --approved <qid>`];

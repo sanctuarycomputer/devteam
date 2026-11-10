@@ -404,6 +404,8 @@ test('the strategy is the owner\'s: no PR changes project/strategy.md without an
     // the same change hidden among other project files, under another name: the same rule
     const mixed = choreOf('notes', (w) => { write(path.join(w, 'docs/devteam/project/designs/notes.md'), 'n\n'); fs.appendFileSync(path.join(w, REL), '\n- **W9** Whatever pays\n'); });
     assert.match(mixed().text, /the strategy is the owner's/);
+    // a file whose path differs only by case is the same file on a disk that ignores case: refused
+    assert.match(choreOf('twin', (w) => write(path.join(w, 'docs/devteam/project/STRATEGY.md'), '# Strategy\n\nWhatever pays.\n'))().text, /adds docs\/devteam\/project\/STRATEGY\.md, which a disk that ignores case can't tell from docs\/devteam\/project\/strategy\.md|the strategy is the owner's/); // the second where the test's own disk ignores case
     // project/ files beside it still need no question
     assert.equal(choreOf('only-notes', (w) => write(path.join(w, 'docs/devteam/project/designs/notes.md'), 'n\n'))().status, 0);
 
