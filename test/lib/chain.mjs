@@ -1362,12 +1362,9 @@ process.exit(${code});
       assert.match(dt(['remediate', 'rollback-web', '--decision', rb(rel), '--to', 'v-other'], sup).err, /decided a rollback to .*, not v-other/);
       assert.match(dt(['ask', '--class', 'production-remediation', '--blocks', 'remediation:rollback-web', 'release:v-never', '--question', 'roll back?', '--recommendation', 'roll back'], sup).err, /no deploy of v-never was observed/, 'the owner is never asked about a rollback the kit would refuse');
       assert.match(dt(['remediate', 'rollback-web', '--decision', rb(rel), '--to', rel], sup).err, /crosses a-\S+ \(production-migration\): a one-way door/, 'an ordinary question is not enough');
-      // the same one-way-door question, answered in chat, counts like the Inbox: remediate adds no chat
-      // refusal (written by hand here: main's answer --from-chat still refuses a one-way door for now)
+      // the same one-way-door question, answered in chat, counts like the Inbox: remediate adds no chat refusal
       const qchat = ask(['remediation:rollback-web', `release:${rel}`], { kind: 'one-way-door', rec: 'roll back' });
-      const logDir2 = path.join(repo, 'docs/devteam/run/log');
-      const ownFile2 = path.join(logDir2, fs.readdirSync(logDir2).find((f) => f.startsWith('owner-')));
-      fs.appendFileSync(ownFile2, line({ id: qchat, type: 'question', op: 'set', at: new Date().toISOString(), by: 'owner', channel: 'chat', said: 'roll back', answer: 'roll back' }));
+      must(['answer', qchat, 'roll back', '--from-chat', '--said', 'roll back'], sup);
       assert.match(must(['remediate', 'rollback-web', '--decision', decide(qchat, ['remediation:rollback-web', `release:${rel}`]).out, '--to', rel], sup), /rollback-web ok/);
       assert.equal(fs.readFileSync(outFile, 'utf8'), `rolled back ${rel} none`);
     } finally {
