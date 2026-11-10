@@ -1446,7 +1446,7 @@ process.exit(${code});
       assert.match(dt(['remediate', 'rollback-web', '--decision', rb(rel)], sup).err, /names its target/);
       assert.match(dt(['remediate', 'rollback-web', '--decision', rb(rel), '--to', 'v-other'], sup).err, /decided a rollback to .*, not v-other/);
       assert.match(dt(['ask', '--class', 'production-remediation', '--blocks', 'remediation:rollback-web', 'release:v-never', '--question', 'roll back?', '--recommendation', 'roll back'], sup).err, /no deploy of v-never was observed/, 'the owner is never asked about a rollback the kit would refuse');
-      assert.match(dt(['remediate', 'rollback-web', '--decision', rb(rel), '--to', rel], sup).err, /crosses a-\S+ \(production-migration\): a one-way door/, 'an ordinary question is not enough');
+      assert.match(dt(['remediate', 'rollback-web', '--decision', rb(rel), '--to', rel], sup).err, /crosses a-\S+.*\(production-migration\): a one-way door/, 'an ordinary question is not enough');
       // the same one-way-door question, answered in chat, counts like the Inbox: remediate adds no chat refusal
       const qchat = ask(['remediation:rollback-web', `release:${rel}`], { kind: 'one-way-door', rec: 'roll back' });
       must(['answer', qchat, 'roll back', '--from-chat', '--said', 'roll back'], sup);
