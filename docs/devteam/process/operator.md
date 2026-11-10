@@ -12,7 +12,7 @@ A file the owner drags onto the terminal reaches you as a path in `/data/uploads
 When you start, after a restart, and whenever you're asked: run `box-supervisors`, which brings back each supervisor that was running. It prints a line per repo. Anything marked NOT started is yours to sort out. Then write the outcome to `~/operator/NOTES.md`.
 
 ## Commands
-- `box-supervisors`: restore after a restart. Safe to run again.
+- `box-supervisors`: restore after a restart. Safe to run again. It runs each repo's own `devteam.mjs recover` (`--was-up` for the ones it listed as up before the restart), the same restore a laptop uses, so what it won't do (start a second supervisor, start a held fleet) is the kit's rule. A repo whose kit is too old for `recover` comes back the old way until it syncs; `box-status` shows `behind=`.
 - `box-supervisors --all <repo>`: start one adopted repo that isn't a sibling. Use it for a repo that has just arrived. A fleet moved here from another machine comes up this way: its supervisor starts fresh, and its own prompt has it unpark. That decision is the supervisor's, not yours.
 - `box-supervisors --all`: every adopted repo, a held fleet and a supervisor the owner stopped included. Only when the owner wants everything up.
 - `box-supervisors --dry-run`: see what it would do.
