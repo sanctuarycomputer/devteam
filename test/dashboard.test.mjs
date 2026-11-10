@@ -312,6 +312,8 @@ const POLL_FAST = `(() => {
     if (String(u).startsWith('/api/data')) { window.__polls++; if (window.__gate) await window.__gate; return rf(u, o); }
     if (String(u).startsWith('/api/answer') && window.__answerHold) await window.__answerHold;
     // a test can let the next /api/threads read through but hold its answer back: read now, landing later
+    // and can slow every /api/threads answer, as a loaded box would
+    if (String(u).startsWith('/api/threads') && window.__threadsDelay) await new Promise((r) => setTimeout(r, window.__threadsDelay));
     if (String(u).startsWith('/api/threads') && window.__threadsHold) { const h = window.__threadsHold; window.__threadsHold = null; const r = await rf(u, o); window.__threadsRead = true; await h; setTimeout(() => { window.__threadsLanded = true; }, 0); return r; }
     return rf(u, o);
   };
@@ -807,11 +809,16 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
   await t.test("a draft left on one subject stays with it: another subject's card starts empty; Escape closes the card", async () => {
     const shiftClick = async (sel) => { const at = await p.at(sel); await p.hold('Shift', true); await p.move(at.x, at.y, 8); await soon(shown('tl-cursor'), 'the pin'); await p.clickAt(at.x, at.y, 8); await p.hold('Shift', false); };
     await p.type('draft for the goal');
+    // an unsent draft is let go after 7 days; one of a day ago stays
+    const old = (days, at = Date.now() - days * 86400000) => JSON.stringify(JSON.stringify({ text: 'x', at }));
+    await p.ev(`localStorage.setItem('devteam.thread.draft.new:item:goal:gone', ${old(8)}); localStorage.setItem('devteam.thread.draft.new:item:goal:kept', ${old(1)}); void 0`);
     await p.key('Escape');
     await soon(`document.getElementById('tl-card').hidden`, 'Escape closed the card');
     await shiftClick('#goals h2');
     await soon(`${shown('tl-card')} && TL.draft?.subject?.kind === 'page'`, 'a card on a spot in Goals');
     assert.equal(await p.ev(`document.getElementById('tl-c-text').value`), '', "the goal's draft isn't here");
+    assert.deepEqual(await p.ev(`['gone', 'kept'].map((k) => localStorage.getItem('devteam.thread.draft.new:item:goal:' + k) !== null)`), [false, true], 'the week-old draft pruned');
+    await p.ev(`localStorage.removeItem('devteam.thread.draft.new:item:goal:kept'); void 0`);
     await p.key('Escape');
     await soon(`document.getElementById('tl-card').hidden`, 'closed');
     await shiftClick(`${goalSel} h4`);
@@ -871,6 +878,22 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await p.ev(`(() => { const ta = document.getElementById('tl-c-text'); ta.value = ''; ta.dispatchEvent(new Event('input', { bubbles: true })); ta.blur(); })()`);
   });
 
+  await t.test('reads of the threads slower than the 2 s poll: a reply still shows, and the owner can still send twice', async () => {
+    await p.ev('window.__threadsDelay = 2500');
+    try {
+      F.sup(['thread', 'say', T, 'Slow box: still here.']);
+      await soon(`[...document.querySelectorAll('#tl-c-turns .tl-turn.supervisor')].some((e) => e.textContent.includes('Slow box'))`, 'the reply through slow reads');
+      for (const w of ['First on a slow box', 'Second on a slow box']) {
+        await p.click('#tl-c-text');
+        await p.type(w);
+        await p.key('Enter');
+        await until(() => threads().find((x) => x.id === T)?.turns.some((u) => u.text === w), `"${w}" in the log`);
+        await soon(`[...document.querySelectorAll('#tl-c-turns .tl-turn.owner')].some((e) => e.textContent.includes(${JSON.stringify(w)})) && document.getElementById('tl-c-text').value === '' && !TL.busy`, `"${w}" in the card, the composer free`);
+      }
+    } finally { await p.ev('window.__threadsDelay = 0'); }
+    await p.ev('document.activeElement.blur()');
+  });
+
   await t.test('#talk/<id> opens the thread beside its subject', async () => {
     await p.click('[data-tl-close]');
     await soon(`document.getElementById('tl-card').hidden`, 'closed');
@@ -878,12 +901,12 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await soon(`${shown('tl-card')} && document.getElementById('tl-card').dataset.key === '${T}'`, 'the card from the link');
     // closed either way, the same link opens it again
     await p.click('[data-tl-close]');
-    await soon(`document.getElementById('tl-card').hidden && !location.hash.startsWith('#talk/')`, 'closed, the link let go');
+    await soon(`document.getElementById('tl-card').hidden && location.hash === '#goals'`, 'closed, the link let go for its subject\'s section');
     await p.ev(`location.hash = '#talk/${T}'`);
     await soon(`${shown('tl-card')} && document.getElementById('tl-card').dataset.key === '${T}'`, 'the same link again');
     await p.click('#tl-c-text');
     await p.key('Escape');
-    await soon(`document.getElementById('tl-card').hidden && !location.hash.startsWith('#talk/')`, 'Escape closed it');
+    await soon(`document.getElementById('tl-card').hidden && location.hash === '#goals'`, 'Escape closed it');
     await soon('TL.polling === null', 'no poll with no thread open');
     await p.ev(`location.hash = '#talk/${T}'`);
     await soon(`${shown('tl-card')} && document.getElementById('tl-card').dataset.key === '${T}'`, 'and again after Escape');

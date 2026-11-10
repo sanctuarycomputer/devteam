@@ -3530,7 +3530,7 @@ const tUnread = (t, seenAt) => t.turns.some((u) => u.by === 'supervisor' && (!se
 // about it. It lives in #tl, outside <main>, which the 10 s refresh rebuilds, so a card, its draft and
 // the dock keep their state. Its window listeners in the capture phase are registered here, before
 // the page's own (PRESSED below), so a click it takes reaches nothing else.
-const TL = { threads: [], pane: false, open: null, draft: null, hit: null, pin: false, via: null, swallowUntil: 0, typed: {}, sig: '', polling: null, seq: 0, have: 0, openAt: -1, latest: null, busy: false, resolving: false, readyKey: '', pill: '' };
+const TL = { threads: [], pane: false, open: null, draft: null, hit: null, pin: false, via: null, swallowUntil: 0, typed: {}, sig: '', polling: null, seq: 0, have: 0, openAt: -1, polled: false, busy: false, resolving: false, readyKey: '', pill: '' };
 const tlEl = (id) => document.getElementById(id);
 const tlOwn = (el) => !!el?.closest?.('#tl');
 const tlShowing = () => !tlEl('tl-cursor').hidden;
@@ -3615,6 +3615,7 @@ function tlStart(hit) {
   TL.open = null;
   TL.resolving = false;
   TL.draft = { subject: tFit(hit.subject), title: hit.title, el: hit.subject.kind === 'item' ? hit.el : null, px: hit.x + scrollX, py: hit.y + scrollY };
+  tlDraftPrune();
   tlDraw();
   tlEl('tl-c-text')?.focus();
 }
@@ -3711,6 +3712,15 @@ function tlPlaceCard(t) {
 }
 // The draft is kept in this browser per thread, as review drafts are, so a reload or another card keeps it.
 const tlDraftKey = (key) => `devteam.thread.draft.${key}`;
+// Each draft with when it was last written; one for a thread never started is let go after 7 days.
+const tlDraftGet = (key) => { const d = lsGet(tlDraftKey(key)); return typeof d === 'string' ? d : typeof d?.text === 'string' ? d.text : ''; };
+const tlDraftSet = (key, text) => (text ? lsSet(tlDraftKey(key), { text, at: Date.now() }) : lsDel(tlDraftKey(key)));
+function tlDraftPrune() {
+  try {
+    const pre = tlDraftKey('new:');
+    for (const k of Object.keys(localStorage)) if (k.startsWith(pre) && !(Date.now() - (lsGet(k)?.at ?? 0) < 7 * 86400000)) lsDel(k);
+  } catch {}
+}
 function tlBytes() { const n = tBytes(tlEl('tl-c-text').value.trim()); const el = tlEl('tl-c-bytes'); el.textContent = n > T_TURN_MAX * 0.8 ? `${n} / ${T_TURN_MAX} bytes` : ''; el.classList.toggle('err', n > T_TURN_MAX); }
 function tlCard() {
   const card = tlEl('tl-card');
@@ -3727,7 +3737,7 @@ function tlCard() {
     const writing = document.activeElement?.id === 'tl-c-text';
     card.dataset.key = key;
     card.innerHTML = tlCardFrame();
-    tlEl('tl-c-text').value = lsGet(tlDraftKey(key)) || '';
+    tlEl('tl-c-text').value = tlDraftGet(key);
     tlBytes();
     TL.sig = '';
     TL.readyKey = '';
@@ -3736,35 +3746,38 @@ function tlCard() {
   card.hidden = false;
   tlCardBody(t);
   tlPlaceCard(t);
-  if (t && !TL.polling) TL.polling = setInterval(() => { if (document.visibilityState === 'visible' && TL.open) tlRefresh(); }, 2000);
+  // one card poll at a time: reads slower than 2 s don't pile up
+  if (t && !TL.polling) TL.polling = setInterval(() => { if (document.visibilityState !== 'visible' || !TL.open || TL.polled) return; TL.polled = true; tlRefresh().finally(() => { TL.polled = false; }); }, 2000);
 }
 function tlDraw() { tlCard(); }
-// Only the newest read is applied: a poll begun before a send can land after it, and would put back
-// the threads as they were. A caller whose read was overtaken waits for the newest one.
+// A read lands only if none begun after it has landed already: a poll begun before a send can
+// answer after the send's own read, and would put back the threads as they were. Any newer answer
+// lands, so reads slower than the polls still bring the threads in.
 async function tlRefresh() {
   const n = ++TL.seq;
-  let run = (async () => {
-    try {
-      const r = await fetch('/api/threads');
-      if (!r.ok || n !== TL.seq) return;
-      const j = await r.json();
-      if (n !== TL.seq) return;
-      TL.threads = j.threads || [];
-      TL.pane = !!j.supervisor?.pane;
-      TL.have = n;
-    } catch { return; }
-    tlDraw();
-  })();
-  TL.latest = run;
-  await run;
-  while (TL.latest !== run) { run = TL.latest; await run; }
+  try {
+    const r = await fetch('/api/threads');
+    if (!r.ok) return;
+    const j = await r.json();
+    if (n <= TL.have) return;
+    TL.threads = j.threads || [];
+    TL.pane = !!j.supervisor?.pane;
+    TL.have = n;
+  } catch { return; }
+  tlDraw();
 }
-// Closed: and a #talk/ link that opened it is let go, so the same link opens it again.
+// Closed: and a #talk/ link that opened it is let go (back to its subject's section, when it has one),
+// so the same link opens it again.
 function tlClose() {
+  const s = TL.open ? TL.threads.find((x) => x.id === TL.open)?.subject : null;
   TL.open = null;
   TL.draft = null;
   TL.resolving = false;
-  if (location.hash.startsWith('#talk/')) history.replaceState(null, '', location.pathname + location.search);
+  if (location.hash.startsWith('#talk/')) {
+    const k = s?.kind === 'item' ? String(s.ref).split(':')[0] : null;
+    const sec = k ? (Object.hasOwn(T_HOME, k) ? T_HOME[k] : null) : s?.kind === 'page' ? String(s.view).slice(1).split('/')[0] : null;
+    history.replaceState(null, '', `${location.pathname}${location.search}${sec && Object.hasOwn(T_SECTIONS, sec) ? `#${sec}` : ''}`);
+  }
   tlDraw();
 }
 async function tlOpen(id, go = true) {
@@ -3806,7 +3819,7 @@ async function tlSend() {
     await tlRefresh();
   } catch (e2) { err.textContent = `Could not send: ${e2.message}`; } finally { TL.busy = false; }
 }
-document.addEventListener('input', (e) => { if (e.target.id !== 'tl-c-text') return; lsSet(tlDraftKey(tlEl('tl-card').dataset.key), e.target.value); tlBytes(); });
+document.addEventListener('input', (e) => { if (e.target.id !== 'tl-c-text') return; tlDraftSet(tlEl('tl-card').dataset.key, e.target.value); tlBytes(); });
 document.addEventListener('keydown', (e) => { if (e.target.id === 'tl-c-text' && e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); tlSend(); } });
 document.addEventListener('click', (e) => {
   if (e.target.closest('[data-tl-close]')) return void tlClose();
