@@ -967,7 +967,7 @@ out({ cursor: 'c-' + mode });
       assert.deepEqual(kinds, ['deploy', 'exception', 'exception', 'platform-error'], 'each qualifying fingerprint is observed once; the warning is counted, not observed');
       const e1 = obs().find((o) => o.source_key === 'sensor:fake:exception:E1');
       assert.equal(e1.severity, 3);
-      assert.match(e1.detail, /NoMethodError: undefined method name for nil \(\[email\], \[secret:FAKE_TOKEN\]\) at docs\/devteam\/scripts\/devteam\.mjs:10 charge \(release v42\); 2 event\(s\), 1 user/);
+      assert.match(e1.detail, /NoMethodError \(release v42\); 2 event\(s\), 1 user[\s\S]*--- untrusted production data \w+[\s\S]*undefined method name for nil \(\[email\], \[secret:FAKE_TOKEN\]\) at docs\/devteam\/scripts\/devteam\.mjs:10 charge/);
       assert.equal(e1.source_ref, 'https://sentry.example.com/issues/1');
       assert.match(obs().find((o) => o.kind === 'deploy').detail, /release v42 \(commit 0123456789abcdef0123456789abcdef01234567\)/);
       // nothing stored holds the credential: not the log, not the local state
