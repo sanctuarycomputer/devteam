@@ -10138,7 +10138,7 @@ function probeRollup(m, day, st) {
   const lv = [...LEVELS].reverse().filter((l) => d.by_level[l]).map((l) => `${l} ${d.by_level[l]}`).join(', ');
   const warns = Object.entries(d.warnings ?? {}).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([t, n]) => `${t.slice(0, 120)} ×${n}`).join('; ');
   const listened = m.kind === 'stream' ? `, listening ${Math.min(100, +((100 * d.listen_ms) / 86400000).toFixed(1))}% of the day` : '';
-  return sensorObserve(m, { kind: 'reading', detail: `${day} (UTC): ${d.events} event(s)${lv ? ` (${lv})` : ''}, ${d.qualified} new for triage; ${d.runs} run(s), ${d.fails} failed, ${d.invalid} invalid line(s)${d.runs ? `, mean run ${fmtMs(d.ms_sum / d.runs)}` : ''}${listened}${warns ? `; warnings: ${warns}` : ''}`, severity: 0, valence: 0, measure: { value: d.events, unit: 'events' }, source_key: `sensor:${m.name}:rollup:${day}` });
+  return sensorObserve(m, { kind: 'reading', detail: `${day} (UTC): ${d.events} event(s)${lv ? ` (${lv})` : ''}, ${d.qualified} new for triage; ${d.runs} run(s), ${d.fails} failed, ${d.invalid} invalid line(s)${d.runs ? `, mean run ${fmtMs(d.ms_sum / d.runs)}` : ''}${listened}${warns ? `\n${untrusted('its warnings', warns)}` : ''}`, severity: 0, valence: 0, measure: { value: d.events, unit: 'events' }, source_key: `sensor:${m.name}:rollup:${day}` });
 }
 // Poll one sensor: check, record the sample, append observations on change. Returns alert lines
 // (a new outage, a severity-4 event) for wait.
