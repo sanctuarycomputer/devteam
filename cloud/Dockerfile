@@ -136,7 +136,7 @@ diagnose() {
   say "id: $(id 2>&1)"
   say "kernel: $(uname -srm 2>&1)"
   say "limits: $(grep -E '^(CapEff|CapBnd|NoNewPrivs|Seccomp):' /proc/self/status 2>&1 | tr -s '\t\n' ' ')"
-  say "data: $(ls -ld /data /data/home /data/gateway 2>&1 | tr '\n' ';')"
+  say "data: $(ls -ld /data /data/home /data/gateway /data/uploads 2>&1 | tr '\n' ';')"
   say "mount: $(grep ' /data ' /proc/mounts 2>&1)"
   say "space: $(df -h /data 2>&1 | tail -1)"
   say "port: ${PORT:-unset}; public url: ${DEVTEAM_PUBLIC_URL:-unset}; node: $(/usr/local/bin/node --version 2>&1)"
@@ -156,6 +156,12 @@ mkdir -p /data/home /data/gateway
 [ "$(stat -c %U /data/home)" = dev ] || chown dev:dev /data/home
 chown -R gw:gw /data/gateway
 chmod 700 /data/gateway
+# Files the owner drops on the terminal: the gateway writes them, dev (the owner's shells and every
+# agent) can only read. setgid, so what gw makes in here is dev's group without gw being in it.
+[ ! -L /data/uploads ] || rm -f /data/uploads
+mkdir -p /data/uploads
+chown gw:dev /data/uploads
+chmod 2750 /data/uploads
 as_gw() { setpriv --reuid=gw --regid=gw --init-groups env HOME=/data/gateway DEVTEAM_GATEWAY_DIR=/data/gateway "$@"; }
 # mise's shims first for dev alone: root and gw must never search a folder an agent can write to
 as_dev() { setpriv --reuid=dev --regid=dev --init-groups env -u DEVTEAM_CLAIM_TOKEN HOME=/data/home PATH="/data/home/.local/share/mise/shims:$PATH" "$@"; }
