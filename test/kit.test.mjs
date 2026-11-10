@@ -396,4 +396,27 @@ test('threads: records, commands, delivery, the Inbox and the loop', async (t) =
     assert.deepEqual([qa.status, qa.channel, qa.said, qa.turn], ['answered', 'thread', 'approve it', UA]);
     assert.match(F.fails(['goal', 'decide', A.goal, 'restore', '--from-turn', UA], F.SUP), /doesn't come from a thread/);
   });
+
+  await t.test('the tick: thread-waiting after 10 minutes, and metrics counts open threads, those waiting and the first reply', () => {
+    const snap = F.snapLog();
+    try {
+      const old = F.hand('owner', { type: 'thread', title: 'An old one' }, 16 * 60000);
+      F.hand('owner', { type: 'turn', thread: old, text: 'Anyone?' }, 15 * 60000);
+      const fresh = F.hand('owner', { type: 'thread', title: 'A new one' }, 6 * 60000);
+      F.hand('owner', { type: 'turn', thread: fresh, text: 'Hello' }, 5 * 60000);
+      const m = JSON.parse(F.owner(['metrics', '--json']));
+      // (threads from the subtests before may be waiting too, on a slow machine: only these two count here)
+      const waiting = m.findings.filter((f) => f.kind === 'thread-waiting' && [old, fresh].includes(f.subject));
+      assert.deepEqual(waiting.map((f) => [f.severity, f.subject]), [['medium', old]], 'only the one past 10 minutes');
+      assert.match(waiting[0].detail, /^the owner wrote in this thread \d+ min ago and has no reply$/, 'by id only: no title');
+      assert.match(waiting[0].suggestion, /thread list --waiting/);
+      const open = JSON.parse(F.owner(['thread', 'list', '--json']));
+      assert.deepEqual([m.threads.open, m.threads.waiting_on_supervisor], [open.length, open.filter((x) => x.waiting === 'supervisor').length]);
+      assert.equal(typeof m.threads.median_first_reply_minutes, 'number');
+      F.sup(['observe-metrics']);
+      assert.ok(JSON.parse(F.owner(['log', '--type', 'observation', '--json'])).some((o) => o.kind === 'thread-waiting' && o.subject === old));
+      F.sup(['thread', 'say', old, 'Sorry, here now.']);
+      assert.ok(!JSON.parse(F.owner(['metrics', '--json'])).findings.some((f) => f.kind === 'thread-waiting' && f.subject === old), 'a reply settles it');
+    } finally { F.restoreLog(snap); }
+  });
 });

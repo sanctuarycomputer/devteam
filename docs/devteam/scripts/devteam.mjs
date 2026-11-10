@@ -8598,6 +8598,14 @@ function collectMetrics(since) {
     owner_questions: { asked: qs.length, open: openQs.length, median_answer_hours: hours(median(qWaits)), oldest_open_hours: openQs.length ? hours(now - Math.min(...openQs.map((q) => Date.parse(q.asked_at)))) : null, answer_rate_14d: recentQs.length ? +(answeredRecent / recentQs.length).toFixed(2) : null },
     escaped_defects: logObjects('observation').filter((o) => o.kind === 'escaped-defect' && Date.parse(o.created_at) >= since).length,
   };
+  // Threads (supervisor.md §3): how many are open, how many wait on the supervisor, how long a first
+  // reply takes. Only once there is one, so a project without threads reads as it did before.
+  const threadsNow = threadViews(readLog().objects);
+  if (threadsNow.length) {
+    const open = threadsNow.filter((x) => x.status === 'open');
+    const replies = threadsNow.map((x) => x.first_reply_ms).filter((x) => x !== null);
+    m.threads = { open: open.length, waiting_on_supervisor: open.filter((x) => x.waiting === 'supervisor').length, median_first_reply_minutes: replies.length ? +(median(replies) / 60000).toFixed(1) : null };
+  }
 
   // Findings: blockers and inefficiencies, each with a next step.
   const f = [];
@@ -8798,6 +8806,12 @@ function collectMetrics(since) {
   for (const q of chatQuotesNotFound()) add('medium', 'chat-quote-not-found', q.id, `recorded from chat as the owner's words, "${q.said.slice(0, 120)}", and the supervisor's transcript has no owner message with them`, 'check it on the dashboard; if the owner never said it, correct the answer');
   // A thread answer whose cited turn doesn't bear it out: a record for the owner to look at, never a block.
   for (const x of threadAnswersUnbound()) add('medium', 'thread-answer-unbound', x.id, `recorded from a thread as the owner's words, but it ${x.why}`, 'check it on the dashboard; if the owner never said it, correct the answer');
+  // A thread the owner wrote in that has waited over 10 minutes for the supervisor: a reply dropped,
+  // or the supervisor busier than it said. By id only: a subject's title may be page-written.
+  for (const x of threadsNow.filter((y) => y.status === 'open' && y.waiting === 'supervisor')) {
+    const ago = now - Date.parse(x.turns[x.turns.length - 1].at);
+    if (ago > THREAD_WAIT_MS) add('medium', 'thread-waiting', x.id, `the owner wrote in this thread ${Math.round(ago / 60000)} min ago and has no reply`, `thread list --waiting, then thread show ${x.id} and reply with thread say (first, when the work takes more than a turn)`);
+  }
   // A harness's runtime file committed by accident: it churns in every worktree and means nothing elsewhere.
   const trackedRuntime = (git(['ls-files'], mainRoot) ?? '').split('\n').filter((f) => f && isHarnessRuntime(f));
   if (trackedRuntime.length) add('medium', 'tracked-runtime-file', trackedRuntime.slice(0, 3).join(', '), `${trackedRuntime.length} agent-harness runtime file(s) are tracked in git (${trackedRuntime.slice(0, 5).join(', ')}): machine-local state that changes in every worktree`, `a chore (it changes .gitignore, so it needs the owner's answer): git rm --cached ${trackedRuntime.map((f) => `'${f}'`).join(' ')}, and add ${RUNTIME_RES.filter(([, re]) => trackedRuntime.some((f) => re.test(f))).map(([pat]) => pat).join(' ')} to .gitignore`);
