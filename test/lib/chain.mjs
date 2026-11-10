@@ -3473,6 +3473,92 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     pvClear();
   });
 
+  const pvWindows = () => (spawnSync('tmux', ['list-windows', '-a', '-F', '#{window_id} #{window_name}'], { encoding: 'utf8' }).stdout ?? '').split('\n').filter(Boolean).map((l) => { const i = l.indexOf(' '); return { id: l.slice(0, i), name: l.slice(i + 1) }; });
+  const pvGet = (port) => new Promise((resolve) => http.get({ host: '127.0.0.1', port, path: '/' }, (res) => { let b = ''; res.on('data', (c) => { b += c; }); res.on('end', () => resolve(b)); }).on('error', () => resolve(null)));
+  const PV_SERVER = 'node -e "require(\\"http\\").createServer((q,s)=>s.end(String(process.env.PORT))).listen(process.env.PORT)"';
+
+  step('previews: the kit runs the server in a dev~ window by id, picks a port, restarts and stops it', async (t) => {
+    if (!hasTmux) return t.skip('no tmux');
+    pvClear();
+    // a session that outlives the windows below: a tmux server with none left exits, and ids start over
+    spawnSync('tmux', ['new-session', '-d', '-s', 'pv-keep']);
+    t.after(() => spawnSync('tmux', ['kill-session', '-t', '=pv-keep']));
+    assert.match(pv(['preview', '65010', '--run', 'x']).err, /either/, 'a port or a command, not both');
+    assert.match(pv(['preview', '--run', 'a\nb']).err, /one line/);
+    const said = await pvAsyncOk(['preview', '--run', PV_SERVER]);
+    const name = pvName(said);
+    assert.match(said, /running in tmux window .*dev~/);
+    const rec = pvRec(name);
+    assert.ok(rec.port >= 4400 && rec.port <= 4499, 'the kit picks from 4400-4499');
+    assert.equal(rec.run.cmd, PV_SERVER, 'the command as given');
+    const win = () => pvWindows().filter((w) => w.name === `dev~${name}`);
+    assert.deepEqual(win().map((w) => w.id), [rec.run.window], 'the window is known by its id');
+    assert.equal(await pvGet(rec.port), String(rec.port), 'PORT reached the command, with no -e');
+    // {port} is filled in; a second label is a second window and a second port
+    const said2 = await pvAsyncOk(['preview', '--run', 'node -e "require(\\"http\\").createServer((q,s)=>s.end(process.argv[1])).listen(+process.argv[1])" {port}', '--label', 'two']);
+    const two = pvRec(pvName(said2));
+    assert.notEqual(two.port, rec.port);
+    assert.equal(await pvGet(two.port), String(two.port), '{port} substituted');
+    // a dev~ window is not a session
+    const workers = () => json(must(['hello', '--json'])).fleet.workers;
+    const wtFixture = wt('plan-billing');
+    const inWt = await pvAsyncOk(['preview', '--run', PV_SERVER, '--label', 'in worktree'], {}, { cwd: wtFixture });
+    assert.equal(workers(), 0, 'ourWindows skips dev~ windows, even one started under .worktrees/');
+    pvOk(['preview', 'stop', pvName(inWt)]);
+    pvOk(['preview', 'stop', pvName(said2)]);
+    // two windows of one name don't confuse stop: only the recorded id is killed
+    const S = sessionOf(repo, 'demo');
+    assert.equal(spawnSync('tmux', ['new-window', '-d', '-t', `=${S}`, '-n', `dev~${name}`, '-c', repo]).status, 0);
+    assert.equal(win().length, 2);
+    const handMade = win().find((w) => w.id !== rec.run.window).id;
+    pvOk(['preview', 'stop', name]);
+    assert.deepEqual(win().map((w) => w.id), [handMade], 'stop kills by id');
+    assert.equal(pvFiles().length, 0);
+    spawnSync('tmux', ['kill-window', '-t', handMade]);
+    // start: on a stopped record it opens a window on the same port; on a live one it replaces it
+    const again = pvName(await pvAsyncOk(['preview', '--run', PV_SERVER, '--port', String(rec.port)]));
+    assert.equal(again, name);
+    assert.equal(spawnSync('tmux', ['kill-window', '-t', pvRec(name).run.window]).status, 0);
+    await until(async () => (await pvGet(rec.port)) === null, 'the server to stop with its window');
+    const started = await pvAsyncOk(['preview', 'start', name]);
+    assert.match(started, new RegExp(`preview ${name} `));
+    assert.equal(pvRec(name).port, rec.port);
+    assert.deepEqual(win().map((w) => w.id), [pvRec(name).run.window]);
+    assert.equal(await pvGet(rec.port), String(rec.port));
+    const oldId = pvRec(name).run.window;
+    await pvAsyncOk(['preview', 'start', name]);
+    assert.notEqual(pvRec(name).run.window, oldId, 'a live window is killed first');
+    assert.equal(win().length, 1, 'never a second');
+    // a stale id: the id now belongs to a window of another name, and is left alone
+    const r = pvRec(name);
+    const other = spawnSync('tmux', ['new-window', '-d', '-P', '-F', '#{window_id}', '-t', `=${S}`, '-n', 'not-a-preview', '-c', repo], { encoding: 'utf8' }).stdout.trim();
+    spawnSync('tmux', ['kill-window', '-t', r.run.window]);
+    write(path.join(PV_DIR(), `${name}.json`), JSON.stringify({ ...r, run: { ...r.run, window: other } }));
+    pvOk(['preview', 'stop', name]);
+    assert.ok(pvWindows().some((w) => w.id === other), 'an id is trusted only with its name and start path');
+    assert.equal(pvFiles().length, 0);
+    spawnSync('tmux', ['kill-window', '-t', other]);
+    // a command that exits before it answers: said, with what it printed, and the record is kept
+    const bad = await pvAsync(['preview', '--run', 'echo the-reason-it-failed; false', '--label', 'bad']);
+    assert.notEqual(bad.status, 0);
+    assert.match(bad.err, /exited before port \d+ answered/);
+    assert.match(bad.err, /the-reason-it-failed/, 'its last lines are in the report');
+    assert.equal(JSON.parse(pvOk(['preview', 'list', '--json'])).length, 1, 'the record is kept for preview start');
+    assert.match(pv(['preview', 'start', 'no-such']).err, /no preview/);
+    const self = pvName(pvOk(['preview', '65011', '--label', 'mine']));
+    assert.match(pv(['preview', 'start', self]).err, /no command/, 'start is for a server the kit runs');
+    // preview <port> over a kit-started record: the same port keeps the window; another drops it
+    const k = pvName(await pvAsyncOk(['preview', '--run', PV_SERVER, '--label', 'kept']));
+    const kept = pvRec(k);
+    pvOk(['preview', String(kept.port), '--label', 'kept']);
+    assert.equal(pvRec(k).run.window, kept.run.window, 'same port: still the kit\'s window');
+    pvOk(['preview', '65012', '--label', 'kept']);
+    assert.equal(pvRec(k).run, undefined, 'another port: the agent runs it now');
+    assert.ok(!pvWindows().some((w) => w.id === kept.run.window), 'and the old window is closed, not left running with no record');
+    pvClear();
+    for (const w of pvWindows().filter((x) => x.name.startsWith('dev~'))) spawnSync('tmux', ['kill-window', '-t', w.id]);
+  });
+
 // Forks. A fork is a copy of the fixture as it stands between two steps, made by the run in
 // kit.test.mjs; a child process (fork.mjs) runs the steps given to it there. Those steps see
 // exactly the state they would have seen in line, and the steps after them go on without them, so

@@ -161,7 +161,8 @@ function ourWindows(session) {
   // Every pane, not only the active one: a worker window the owner split keeps counting.
   const panes = (sh('tmux', ['list-panes', '-s', '-t', `=${session}`, '-F', '#W\t#{pane_start_path}']) ?? '').split('\n').filter(Boolean)
     .map((l) => { const i = l.indexOf('\t'); const p = l.slice(i + 1); let real = p; try { real = fs.realpathSync(p); } catch {} return { name: l.slice(0, i), start: `${real}${path.sep}` }; });
-  return [...new Set(panes.filter((w) => roots.some((r) => w.start.startsWith(r))).map((w) => w.name))].map((name) => ({ name }));
+  // A dev~ window is a preview's server (cmdPreview), not a session.
+  return [...new Set(panes.filter((w) => !w.name.startsWith('dev~') && roots.some((r) => w.start.startsWith(r))).map((w) => w.name))].map((name) => ({ name }));
 }
 let tmuxSessionName = null;
 function tmuxSession({ save = false } = {}) {
@@ -4598,8 +4599,89 @@ function previewSay(r, up) {
 }
 const previewNamed = (name) => readPreviews().find((r) => r.name === name) ?? die(`no preview "${name}" on this instance (devteam.mjs preview list)`);
 const previewFresh = (rec) => { const at = nowIso(); return { ...rec, at, expires: new Date(Date.parse(at) + PREVIEW_TTL).toISOString() }; };
+// The windows of this project's tmux session. A window id is unique only within one server's life
+// (a box reboot starts again at @0), so a stored id is trusted only with its name and start path.
+const PREVIEW_PANES = ['-F', '#{window_id}\t#{window_name}\t#{pane_start_path}'];
+const previewPaneRows = (text) => (text ?? '').split('\n').filter(Boolean).map((l) => { const [id, name, start] = l.split('\t'); return { id, name, start }; });
+function previewPanes() {
+  const session = tmuxSession();
+  // list-panes -s answers for another session when this one doesn't exist (ourWindows)
+  if (sh('tmux', ['has-session', '-t', `=${session}`]) === null) return [];
+  return previewPaneRows(sh('tmux', ['list-panes', '-s', '-t', `=${session}`, ...PREVIEW_PANES]));
+}
+function previewWindow(rec, panes = previewPanes()) {
+  const id = rec.run?.window;
+  if (typeof id !== 'string' || !/^@\d+$/.test(id)) return null;
+  return panes.find((p) => p.id === id && p.name === `dev~${rec.name}` && realPath(p.start) === realPath(rec.cwd)) ?? null;
+}
+function killPreviewWindow(rec, panes) {
+  const w = previewWindow(rec, panes);
+  if (w) tmux(['kill-window', '-t', w.id]);
+  return !!w;
+}
+// The kit's own line, printed when the command ends: a window closes with its process, and what
+// the command printed is the whole point of reporting that it failed. It stays half a minute.
+const PREVIEW_EXITED = '[devteam] the command exited with status';
+// In a window of its own, with PORT on the command line (a new window doesn't inherit this shell's
+// environment, and -e needs tmux 3.2), and this shell's PATH, or a project's pinned tools aren't
+// found. Written with window null first, so a tick that sees the new window doesn't take it for
+// an orphan, and the id after.
+function launchPreviewWindow(rec) {
+  const cmd = rec.run.cmd.split('{port}').join(String(rec.port));
+  const argv = ['env', `PORT=${rec.port}`, `PATH=${process.env.PATH ?? ''}`, 'sh', '-c', `sh -c "$1"; s=$?; printf '\\n${PREVIEW_EXITED} %s\\n' "$s"; sleep 30`, 'sh', cmd];
+  writePreview({ ...rec, run: { ...rec.run, window: null } });
+  const session = tmuxSession({ save: true });
+  const name = `dev~${rec.name}`;
+  const open = ['-d', '-P', '-F', '#{window_id}', '-n', name, '-c', rec.cwd, ...argv];
+  const id = sh('tmux', tmux(['has-session', '-t', `=${session}`]) ? ['new-window', '-t', `=${session}:`, ...open] : ['new-session', '-s', session, ...open], { env: tmuxServerEnv() });
+  if (!id) return null;
+  const r = { ...rec, run: { ...rec.run, window: id } };
+  writePreview(r);
+  return r;
+}
+// Up to 60 s for the port to answer, watching the window: gone, or its last line the kit's, means
+// the command ended.
+async function previewAwait(rec) {
+  const end = Date.now() + 60000;
+  for (;;) {
+    if (await probePort(rec.port)) return { up: true };
+    const text = sh('tmux', ['capture-pane', '-p', '-t', rec.run.window]);
+    if (text === null || text.includes(PREVIEW_EXITED)) return { up: false, exited: true, text: text ?? '' };
+    if (Date.now() > end) return { up: false, exited: false };
+    await new Promise((r) => setTimeout(r, 250));
+  }
+}
+// A port just given up takes a moment to answer no more.
+async function previewPortQuiet(port, ms = 3000) {
+  const end = Date.now() + ms;
+  while (await probePort(port)) { if (Date.now() > end) return false; await new Promise((r) => setTimeout(r, 100)); }
+  return true;
+}
+const PREVIEW_PICK = Array.from({ length: 100 }, (_, i) => 4400 + i);
+async function previewPickPort(name) {
+  const held = new Set(readPreviews().filter((r) => r.name !== name).map((r) => r.port));
+  for (const p of PREVIEW_PICK) if (!held.has(p) && previewPortOk(p) === true && (await portFree(p))) return p;
+  die(`preview: no free port in ${PREVIEW_PICK[0]}-${PREVIEW_PICK.at(-1)}; pass --port`);
+}
+// Launch, wait, and say how it went; a command that ended before answering keeps its record, so
+// the agent fixes it and runs preview start.
+async function previewRunIt(rec) {
+  const r = launchPreviewWindow(rec);
+  if (!r) die('preview: could not open a tmux window for it (is tmux installed?)');
+  const w = await previewAwait(r);
+  if (w.exited) {
+    const tail = w.text.split('\n').filter((l) => !l.includes(PREVIEW_EXITED)).join('\n').trimEnd().split('\n').slice(-20).join('\n');
+    process.stderr.write(`devteam: preview ${r.name}: the command exited before port ${r.port} answered; the record is kept, fix it and run devteam.mjs preview start ${r.name}\n${tail}\n`);
+    process.exitCode = 1;
+    return;
+  }
+  previewSay(r, w.up);
+  out(`running in tmux window ${tmuxSession()}:dev~${r.name}; its output is there`);
+}
 async function cmdPreview() {
   const [sub, arg] = positional;
+  const listing = ['list', 'url', 'stop', 'start'].includes(sub);
+  if (flags.run !== undefined && sub !== undefined) die('preview takes either a port or --run "<command>"');
   if (sub === 'list') {
     const recs = readPreviews();
     const rows = await Promise.all(recs.map(async ({ mtimeMs, ...r }) => ({ ...r, up: await probePort(r.port) })));
@@ -4619,23 +4701,52 @@ async function cmdPreview() {
     if (flags.all) {
       const session = logWriter();
       const mine = readPreviews().filter((r) => r.session === session);
-      for (const r of mine) removePreview(r.name);
+      for (const r of mine) { killPreviewWindow(r); removePreview(r.name); }
       return out(`stopped ${mine.length} preview${mine.length === 1 ? '' : 's'}`);
     }
     const r = previewNamed(arg ?? die('usage: preview stop <name> | --all'));
+    const killed = killPreviewWindow(r);
     removePreview(r.name);
-    return out(`preview ${r.name} stopped`);
+    return out(`preview ${r.name} stopped${killed ? ' and its server shut down' : r.run ? '' : ' (unregistered; the server is yours to stop)'}`);
   }
-  if (sub !== undefined && sub !== 'start') {
+  if (sub === 'start') {
+    const r = previewNamed(arg ?? die('usage: preview start <name>'));
+    if (!r.run) die(`preview ${r.name} has no command to run: it is a server you run yourself. Start it, then devteam.mjs preview ${r.port}${r.label ? ` --label "${r.label}"` : ''}`);
+    if (!fs.existsSync(r.cwd)) die(`preview ${r.name}: its folder ${r.cwd} is gone`);
+    killPreviewWindow(r);
+    if (!(await previewPortQuiet(r.port))) die(`preview ${r.name}: something else answers on port ${r.port}; stop it first`);
+    return previewRunIt(previewFresh(r));
+  }
+  if (flags.run !== undefined) {
+    const cmd = flagStr('run') ?? '';
+    if (!cmd.trim()) die('preview --run needs a command');
+    if (/[\r\n\0]/.test(cmd)) die('preview --run is one line');
+    const session = logWriter();
+    const label = previewLabel();
+    const { name, had } = await previewClaim(session, label);
+    if (had?.run) killPreviewWindow(had);
+    let port;
+    if (flags.port !== undefined) {
+      port = previewPort(flagStr('port'));
+      if (!(await previewPortQuiet(port))) die(`preview: something already answers on port ${port}; stop it, or leave out --port and the kit picks one`);
+    } else if (had?.run && PREVIEW_PICK.includes(had.port) && (await previewPortQuiet(had.port))) port = had.port;
+    else port = await previewPickPort(name);
+    return previewRunIt(previewFresh({ v: 1, name, project: previewProject(), session, label, port, cwd: process.cwd(), run: { cmd, window: null } }));
+  }
+  if (sub !== undefined && !listing) {
     const port = previewPort(sub);
     const session = logWriter();
     const label = previewLabel();
     const { name, had } = await previewClaim(session, label);
-    const r = previewFresh({ v: 1, name, project: previewProject(), session, label, port, cwd: process.cwd() });
+    // The kit's own window stays only while it is what's on this port; a window with no record
+    // to answer for it would be swept by the next tick anyway.
+    const keep = had?.run && had.port === port && previewWindow(had) ? { run: had.run } : {};
+    if (had?.run && !keep.run) killPreviewWindow(had);
+    const r = previewFresh({ v: 1, name, project: previewProject(), session, label, port, cwd: keep.run ? had.cwd : process.cwd(), ...keep });
     writePreview(r);
     return previewSay(r, await probePort(port));
   }
-  die('usage: preview <port> [--label "<one line>"] | preview list [--json] | preview url [<name>] | preview stop <name> | --all');
+  die('usage: preview <port> [--label "<one line>"] | preview --run "<command>" [--port <p>] [--label …] | preview list [--json] | preview url [<name>] | preview stop <name> | --all | preview start <name>');
 }
 
 // ===== artifacts: pages a session draws to show an idea (a mock, a flow, a model) =====

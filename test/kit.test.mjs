@@ -44,7 +44,7 @@ const FORKS = [
   ['review permanence'],
   ['artifacts: new, check, list', 'artifacts: check-pr and merge refuse', 'artifacts: the dashboard serves them', 'artifacts: a question links one', 'artifacts: the Library data', 'public artifacts: an artifact-publish act', 'public artifacts: owner acts are records', 'public artifacts: artifact publish and unpublish', 'public artifacts: /public-manifest', 'public artifacts: the Library'],
   // its own group: tmux windows and listeners the other steps must not count as sessions
-  ['previews: a derived name', 'previews: the link for here'],
+  ['previews: a derived name', 'previews: the link for here', 'previews: the kit runs the server'],
 ];
 
 const forked = new Map();
