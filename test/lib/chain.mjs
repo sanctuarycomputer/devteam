@@ -1009,14 +1009,14 @@ out({ cursor: 'c-' + mode });
       fs.writeFileSync(mode, 'spike');
       must(['sensor', 'poll', '--name', 'fake'], sup);
       const spike = obs().find((o) => o.kind === 'spike');
-      assert.ok(spike && spike.severity === 4 && /payment gateway timeout after <n>ms is spiking: 50 this hour/.test(spike.detail), JSON.stringify(spike));
+      assert.ok(spike && spike.severity === 4 && /a log line is spiking: 50 this hour/.test(spike.detail), JSON.stringify(spike));
       must(['sensor', 'poll', '--name', 'fake'], sup);
       assert.equal(obs().filter((o) => o.kind === 'spike').length, 1, 'once per window');
       assert.equal(status().state, 'ok', 'a clean run ends the failing');
       // the day's rollup: what it read by level, the warnings as templates, how the probe did
       must(['sensor', 'poll', '--name', 'fake', '--rollup-day', new Date().toISOString().slice(0, 10)], sup);
       const roll = obs().find((o) => o.kind === 'reading');
-      assert.match(roll.detail, /event\(s\) \(fatal \d+, error \d+, warning 9\), 3 new for triage; 10 run\(s\), 4 failed, 1 invalid line\(s\)[\s\S]*warnings: slow query took <n>ms ×9/);
+      assert.match(roll.detail, /event\(s\) \(fatal \d+, error \d+, warning 9\), 3 new for triage; 10 run\(s\), 4 failed, 1 invalid line\(s\)[\s\S]*--- untrusted production data[\s\S]*slow query took <n>ms ×9/);
       // a stream: its collector spools what it reads; poll drains the spool
       write(path.join(projDir, 'sensors/tail.mjs'), `console.log(JSON.stringify({ kind: 'log', fingerprint: 'T1', level: 'error', template: 'boom at <id>', sample: 'boom at 42 for bob@example.com' }));\nconsole.log('garbage');\nsetTimeout(() => {}, 60000);\n`);
       git(['add', 'docs/devteam/project/sensors/tail.mjs']);
