@@ -868,6 +868,11 @@ test('public.<box>: anyone reads a published artifact, from the gateway\'s own c
     assert.equal((await get('/alpha/hello/', { 'if-none-match': `"x", ${etag}` })).status, 304);
     assert.equal((await get('/alpha/hello/', { 'if-none-match': '*' })).status, 304);
     assert.equal((await get('/alpha/hello/', { 'if-none-match': `W/${etag}` })).status, 200, 'a weak tag is no match');
+    // a lost blob: HEAD and GET agree
+    const lost = path.join(gw.dir, 'public', 'blobs', crypto.createHash('sha256').update('w').digest('hex'));
+    fs.renameSync(lost, `${lost}.away`);
+    assert.deepEqual([(await get('/alpha/hello/data.weird', {}, 'HEAD')).status, (await get('/alpha/hello/data.weird')).status], [500, 500]);
+    fs.renameSync(`${lost}.away`, lost);
     // reads only, and no service workers
     r = await gw.req('POST', '/alpha/hello/', { on: 'public', cookie: '', body: {} });
     assert.deepEqual([r.status, r.headers.allow], [405, 'GET, HEAD']);
@@ -973,11 +978,12 @@ test('the public store: content-addressed blobs, one change at a time, swept to 
 
 // A stand-in instance on a block port: the manifest and files it is given, and what the gateway
 // asked it to record. lie serves other bytes for a file than its manifest names; tree and title
-// override what the manifest says; reset puts back what it was made with.
+// override what the manifest says; trickle sends a file a byte every that many ms; asked lists
+// every request; reset puts back what it was made with.
 function standIn(port, arts, { project = 'beta', root = '/srv/beta' } = {}) {
   const made = JSON.stringify({ arts, project, root });
   const S = { recorded: [] };
-  S.reset = () => Object.assign(S, JSON.parse(made), { lie: {}, tree: {}, title: {} });
+  S.reset = () => Object.assign(S, JSON.parse(made), { lie: {}, tree: {}, title: {}, trickle: {}, asked: [] });
   S.reset();
   const hex = (t) => crypto.createHash('sha256').update(t).digest('hex');
   S.manifest = (slug) => {
@@ -988,8 +994,17 @@ function standIn(port, arts, { project = 'beta', root = '/srv/beta' } = {}) {
   const srv = http.createServer((req, res) => {
     const reply = (code, body, type = 'application/json') => { res.writeHead(code, { 'content-type': type }); res.end(body); };
     let m;
+    S.asked.push(req.url);
     if (req.method === 'GET' && (m = /^\/public-manifest\/([a-z0-9-]+)$/.exec(req.url))) return Object.hasOwn(S.arts, m[1]) ? reply(200, JSON.stringify(S.manifest(m[1]))) : reply(404, '{"error":"not an artifact landed on main"}');
-    if (req.method === 'GET' && (m = /^\/artifact\/main\/([a-z0-9-]+)\/(.+)$/.exec(req.url)) && Object.hasOwn(S.arts, m[1]) && Object.hasOwn(S.arts[m[1]], m[2])) return reply(200, S.lie[`${m[1]}/${m[2]}`] ?? S.arts[m[1]][m[2]], 'text/plain');
+    if (req.method === 'GET' && (m = /^\/artifact\/main\/([a-z0-9-]+)\/(.+)$/.exec(req.url)) && Object.hasOwn(S.arts, m[1]) && Object.hasOwn(S.arts[m[1]], m[2])) {
+      const text = S.lie[`${m[1]}/${m[2]}`] ?? S.arts[m[1]][m[2]];
+      const every = S.trickle[`${m[1]}/${m[2]}`];
+      if (!every) return reply(200, text, 'text/plain');
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      let i = 0;
+      const t = setInterval(() => { if (res.destroyed || i >= text.length) { clearInterval(t); return res.end(); } res.write(text[i++]); }, every);
+      return;
+    }
     if (req.method === 'GET' && req.url === '/api/hello') return reply(200, JSON.stringify({ devteam: 1, name: S.project, root: S.root, port }));
     if (req.method === 'POST' && req.url === '/api/artifact-publish') {
       let b = '';
@@ -1006,7 +1021,9 @@ function standIn(port, arts, { project = 'beta', root = '/srv/beta' } = {}) {
 async function confirmAndPublish(gw, port, slugs, { move = false, before = async () => {} } = {}) {
   const page = await gw.req('GET', `/public/publish?port=${port}&${slugs.map((s) => `slug=${s}`).join('&')}`);
   assert.equal(page.status, 200, page.body);
-  const items = [...page.body.matchAll(/data-slug="([^"]+)" data-manifest="([0-9a-f]{64})"/g)].map(([, slug, manifest]) => ({ slug, manifest, move }));
+  // "move it" carries the root the page showed, as the page's own script posts it
+  const from = Object.fromEntries([...page.body.matchAll(/data-move="([^"]+)" data-moved-from="([^"]*)"/g)].map(([, s, r]) => [s, r.replace(/&#(\d+);/g, (_, n) => String.fromCharCode(n))]));
+  const items = [...page.body.matchAll(/data-slug="([^"]+)" data-manifest="([0-9a-f]{64})"/g)].map(([, slug, manifest]) => ({ slug, manifest, move, ...(move && Object.hasOwn(from, slug) ? { movedFrom: from[slug] } : {}) }));
   await before();
   const r = await gw.req('POST', '/public/publish', { body: { port, items } });
   assert.equal(r.status, 200, r.body);
@@ -1154,7 +1171,7 @@ test('public artifacts: a project stays with its checkout unless the owner moves
     assert.ok((await confirmAndPublish(gw, P + 11, ['a'])).results[0].ok);
     const moved = await confirmAndPublish(gw, P + 12, ['a']);
     assert.ok(moved.page.body.includes('beta is published from /srv/one; this instance is /srv/two'), moved.page.body);
-    assert.match(moved.page.body, /<input type="checkbox" data-move="a"> move it/, '"move it" is unchecked');
+    assert.match(moved.page.body, /<input type="checkbox" data-move="a" data-moved-from="\/srv\/one"> move it</, '"move it" is unchecked, and nothing else comes down');
     assert.match(moved.results[0].error, /beta is published from \/srv\/one; this instance is \/srv\/two: tick "move it"/);
     assert.equal(await served(), '<p>one');
     assert.equal(two.recorded.length, 0);
@@ -1190,7 +1207,9 @@ test('public artifacts: a move keeps only the slug moved; the old checkout\'s ot
     assert.equal((await gw.claim(authenticator())).status, 200);
     assert.ok((await confirmAndPublish(gw, P + 15, ['a', 'b'])).results.every((r) => r.ok));
     assert.equal(blobsOf(gw).length, 2);
-    assert.ok((await confirmAndPublish(gw, P + 16, ['a'], { move: true })).results[0].ok);
+    const mv = await confirmAndPublish(gw, P + 16, ['a'], { move: true });
+    assert.ok(mv.page.body.includes('move it (its 1 other page from /srv/one comes down: b)'), mv.page.body);
+    assert.deepEqual([mv.results[0].ok, mv.results[0].update], [true, false], 'a move is a new binding, not an update');
     assert.equal((await pubGet('/beta/a/')).body, '<p>two a');
     assert.equal((await pubGet('/beta/b/')).status, 404, 'the old root\'s other slug is dropped');
     assert.deepEqual(Object.keys(JSON.parse(fs.readFileSync(path.join(gw.dir, 'state.json'), 'utf8')).public.beta.artifacts), ['a']);
@@ -1248,6 +1267,96 @@ test('public artifacts: unpublish takes a page down at once, and records it only
     assert.deepEqual(blobsOf(gw), want);
     assert.deepEqual([await pubStatus('/beta/a/'), await pubStatus('/beta/c/')], [200, 404]);
   } finally { await S.close(); await other.close(); await gw.close(); }
+});
+
+test('public artifacts: a slow instance holds up no other change, and its item runs out of time', async () => {
+  const gw = await gateway('public-slow', { publicItemMs: 1500, publicDeadlineMs: 10000 });
+  const S = standIn(P + 22, { a: { 'index.html': 'x'.repeat(20) } });
+  try {
+    assert.equal((await gw.claim(authenticator())).status, 200);
+    seedPublic(gw.dir, 'alpha', 'other', { 'index.html': 'o' });
+    S.trickle['a/index.html'] = 200; // 4 s in all, each byte well inside the per-request deadline
+    const page = await gw.req('GET', `/public/publish?port=${P + 22}&slug=a`);
+    const items = [...page.body.matchAll(/data-slug="([^"]+)" data-manifest="([0-9a-f]{64})"/g)].map(([, slug, manifest]) => ({ slug, manifest }));
+    const publishing = gw.req('POST', '/public/publish', { body: { port: P + 22, items } });
+    await until(() => S.asked.includes('/artifact/main/a/index.html'), 'the slow file asked for');
+    const t0 = Date.now();
+    const r = await gw.req('POST', '/public/unpublish', { body: { project: 'alpha', slug: 'other' } });
+    const took = Date.now() - t0;
+    assert.equal(r.status, 200, r.body);
+    assert.ok(took < 800, `the unpublish waited ${took} ms on another instance's publish`);
+    assert.equal((await gw.req('GET', '/alpha/other/', { on: 'public', cookie: '' })).status, 404);
+    const done = await publishing;
+    assert.match(done.json.results[0].error, /took over 1\.5 s for this item; nothing was published/);
+    assert.ok(Date.now() - t0 < 3000, 'refused by the item\'s budget, not after the whole trickle');
+    assert.equal(S.recorded.length, 0);
+    assert.deepEqual(blobsOf(gw), []);
+  } finally { await S.close(); await gw.close(); }
+});
+
+test('DEVTEAM_PUBLIC_MAX: anything but a positive number of bytes stops the gateway at startup', async () => {
+  const make = (extra) => G.createGateway({ publicUrl: 'http://box.localhost:1', dir: fs.mkdtempSync(path.join(tmp, 'pmax-')), log: () => {}, ...extra });
+  for (const v of ['abc', '0', '-5', 'Infinity', '', 'NaN']) assert.throws(() => make({ publicMax: v }), /DEVTEAM_PUBLIC_MAX must be a positive number of bytes/, JSON.stringify(v));
+  process.env.DEVTEAM_PUBLIC_MAX = 'lots';
+  try { assert.throws(() => make({}), /DEVTEAM_PUBLIC_MAX must be a positive number of bytes/, 'from the environment too'); } finally { delete process.env.DEVTEAM_PUBLIC_MAX; }
+  make({});
+  const gw = await gateway('public-max1', { publicMax: '1' });
+  const S = standIn(P + 23, { a: { 'index.html': '<p>a' } });
+  try {
+    assert.equal((await gw.claim(authenticator())).status, 200);
+    const { results } = await confirmAndPublish(gw, P + 23, ['a']);
+    assert.match(results[0].error, /over the box's public cap of 1 bytes/);
+    assert.deepEqual(blobsOf(gw), []);
+  } finally { await S.close(); await gw.close(); }
+});
+
+test('public artifacts: "move it" moves from the root the page showed, and says what comes down', async () => {
+  const gw = await gateway('public-rebind');
+  const one = standIn(P + 18, { a: { 'index.html': '<p>one' }, m2: { 'index.html': '<p>m2' } }, { root: '/srv/one' });
+  const two = standIn(P + 19, { a: { 'index.html': '<p>two' } }, { root: '/srv/two' });
+  const three = standIn(P + 21, { a: { 'index.html': '<p>three' } }, { root: '/srv/three' });
+  try {
+    assert.equal((await gw.claim(authenticator())).status, 200);
+    assert.ok((await confirmAndPublish(gw, P + 18, ['a', 'm2'])).results.every((x) => x.ok));
+    // two's page shows a move from /srv/one; before its POST, three moves the project
+    const r = await confirmAndPublish(gw, P + 19, ['a'], { move: true, before: async () => { assert.ok((await confirmAndPublish(gw, P + 21, ['a'], { move: true })).results[0].ok); } });
+    assert.ok(r.page.body.includes('data-moved-from="/srv/one"'), r.page.body);
+    assert.ok(r.page.body.includes('move it (its 1 other page from /srv/one comes down: m2)'), r.page.body);
+    assert.match(r.results[0].error, /this project moved since you looked; reload/);
+    assert.equal((await gw.req('GET', '/beta/a/', { on: 'public', cookie: '' })).body, '<p>three');
+    assert.equal(two.recorded.length, 0);
+  } finally { await one.close(); await two.close(); await three.close(); await gw.close(); }
+});
+
+test('public artifacts: a sweep that fails after an unpublish still takes the page down', async () => {
+  const gw = await gateway('public-sweepfail');
+  const S = standIn(P + 15, { a: { 'index.html': '<p>a' } });
+  try {
+    assert.equal((await gw.claim(authenticator())).status, 200);
+    assert.ok((await confirmAndPublish(gw, P + 15, ['a'])).results[0].ok);
+    // a name in the blob folder the sweep can't remove
+    fs.mkdirSync(path.join(gw.dir, 'public', 'blobs', 'stuck'));
+    const r = await gw.req('POST', '/public/unpublish', { body: { project: 'beta', slug: 'a', port: P + 15 } });
+    assert.deepEqual([r.status, r.json?.ok, r.json?.recorded], [200, true, true], r.body);
+    assert.equal(S.recorded.at(-1).op, 'unpublish');
+    assert.equal((await gw.req('GET', '/beta/a/', { on: 'public', cookie: '' })).status, 404);
+  } finally { await S.close(); await gw.close(); }
+});
+
+test('public artifacts: the gateway\'s /public pages load only as a document, never in another site\'s frame', async () => {
+  const gw = await gateway('public-frame');
+  const S = standIn(P + 15, { a: { 'index.html': '<p>a' } });
+  try {
+    assert.equal((await gw.claim(authenticator())).status, 200);
+    assert.ok((await confirmAndPublish(gw, P + 15, ['a'])).results[0].ok);
+    S.asked.length = 0;
+    const framed = { 'sec-fetch-dest': 'iframe', 'sec-fetch-mode': 'navigate', 'sec-fetch-site': 'cross-site' };
+    for (const at of [`/public/publish?port=${P + 15}&slug=a`, '/public/unpublish?project=beta&slug=a', '/public/', '/public']) {
+      assert.equal((await gw.req('GET', at, { headers: framed })).status, 403, at);
+      assert.equal((await gw.req('GET', at, { headers: { ...framed, 'sec-fetch-dest': 'document' } })).status, 200, `${at} as a page`);
+    }
+    assert.equal(S.asked.filter((u) => u.startsWith('/public-manifest/')).length, 1, 'a frame made the gateway ask the instance nothing');
+  } finally { await S.close(); await gw.close(); }
 });
 
 test('x-devteam-public: a dashboard learns what the box serves, from the gateway alone', async () => {

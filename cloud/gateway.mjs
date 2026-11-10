@@ -442,6 +442,11 @@ export function createGateway(opts = {}) {
   // instance's: those are all digits.
   const PUBLIC = `${pubUrl.protocol}//public.${pubUrl.host}`;
   const publicHost = new URL(PUBLIC).host;
+  // Parsed once, before anything else starts: a cap that isn't a number would compare false
+  // against every total and publish without limit, so a bad one stops the gateway instead.
+  const maxSet = opts.publicMax ?? env.DEVTEAM_PUBLIC_MAX;
+  const PUBLIC_MAX = maxSet === undefined ? 500 * 1024 * 1024 : Number(maxSet);
+  if (!Number.isFinite(PUBLIC_MAX) || PUBLIC_MAX <= 0) throw new Error('DEVTEAM_PUBLIC_MAX must be a positive number of bytes');
   const COOKIE = 'devteam_session';
   const dir = opts.dir ?? gatewayDir();
   const ttydPort = Number(opts.ttydPort ?? env.DEVTEAM_TTYD_PORT ?? 7681);
@@ -796,22 +801,25 @@ export function createGateway(opts = {}) {
     if (asked.includes('*') || asked.includes(tag)) { res.writeHead(304, head); return res.end(); }
     // no range requests, as in the kit: the whole file or its headers
     const all = { ...head, 'content-type': PUBLIC_TYPES[rel.split('.').pop().toLowerCase()] ?? 'application/octet-stream', 'content-length': f.size };
-    if (req.method === 'HEAD') { res.writeHead(200, all); return res.end(); }
+    // a stat, never a read, so a HEAD says what a GET would
     const file = path.join(dir, 'public', 'blobs', f.sha256);
     const st = fs.statSync(file, { throwIfNoEntry: false });
     if (!st || st.size !== f.size) return send(res, 500, 'text/plain; charset=utf-8', 'the box has lost its copy of this page: publish it again');
     res.writeHead(200, all);
+    if (req.method === 'HEAD') return res.end();
     pipeline(fs.createReadStream(file), res, () => {});
   };
 
   // --- publishing: only from the gateway's own page on the box's name, of bytes it checked itself ---
   const pstore = publicStore(dir);
-  const PUBLIC_MAX = Number(opts.publicMax ?? env.DEVTEAM_PUBLIC_MAX ?? 500 * 1024 * 1024);
   const LOOP_MS = opts.publicDeadlineMs ?? 15000;
+  // One publish item's whole time on its instance (manifest, files, record): an instance that
+  // answers slowly but within each request's deadline still runs out.
+  const ITEM_MS = opts.publicItemMs ?? 120000;
   // A request to an instance as a loopback client: its own Host, and no Origin, sec-fetch-* or
   // cookie, so it never passes for the owner's browser. One deadline for the whole answer, and a
   // cap on its size: whatever holds the port wrote it.
-  const loopback = (port, method, p, { body = null, cap = 2 * 1024 * 1024 } = {}) => new Promise((resolve, reject) => {
+  const loopback = (port, method, p, { body = null, cap = 2 * 1024 * 1024, ms = LOOP_MS } = {}) => new Promise((resolve, reject) => {
     let deadline = null;
     let settled = false;
     const finish = (err, v) => { if (settled) return; settled = true; clearTimeout(deadline); if (err) reject(err); else resolve(v); };
@@ -825,12 +833,12 @@ export function createGateway(opts = {}) {
       ur.on('close', () => finish(new Error(`instance ${port} broke off its answer to ${p}`)));
     });
     up.on('error', () => finish(new Error(`nothing answers on instance ${port}`)));
-    deadline = setTimeout(() => { up.destroy(); finish(new Error(`instance ${port} took over ${LOOP_MS / 1000} s to answer ${p}`)); }, LOOP_MS);
+    deadline = setTimeout(() => { up.destroy(); finish(new Error(`instance ${port} took over ${ms / 1000} s to answer ${p}`)); }, ms);
     up.end(body ?? undefined);
   });
   const errorOf = (r) => { try { return String(JSON.parse(r.body.toString('utf8')).error ?? `HTTP ${r.status}`).slice(0, 300); } catch { return `HTTP ${r.status}`; } };
-  const fetchManifest = async (port, slug) => {
-    const r = await loopback(port, 'GET', `/public-manifest/${slug}`);
+  const fetchManifest = async (port, slug, ms = LOOP_MS) => {
+    const r = await loopback(port, 'GET', `/public-manifest/${slug}`, { ms });
     if (r.status !== 200) throw new Error(`instance ${port}: ${errorOf(r)}`);
     let m;
     try { m = JSON.parse(r.body.toString('utf8')); } catch { throw new Error(`instance ${port} sent a manifest that isn't JSON`); }
@@ -839,43 +847,68 @@ export function createGateway(opts = {}) {
     return m;
   };
   const manifestHash = (m) => hex256(canonicalJson(m));
-  // One confirmed item, inside the queue. Bound to the manifest the owner saw (its sha256), every
-  // file to the manifest, the tree id to the bytes; anything off refuses this item, and the sweep
-  // after it drops whatever it wrote.
-  const publishItem = async (port, item) => {
-    const m = await fetchManifest(port, item.slug);
-    if (manifestHash(m) !== item.manifest) throw new Error('this changed since you looked; reload the page');
-    const before = store.load().public ?? {};
-    const bound = Object.hasOwn(before, m.project) ? before[m.project] : null;
-    if (bound && bound.root !== m.root && item.move !== true) throw new Error(`${m.project} is published from ${bound.root}; this instance is ${m.root}: tick "move it" to publish it from here`);
-    // the cap, on what the box would hold after this item (its old version aside)
-    const after = { ...before, [m.project]: { ...(bound ?? {}), artifacts: { ...(bound?.artifacts ?? {}) } } };
+  // Whether this item may go on the box as it stands: bound to the root the owner saw, and under
+  // the cap with this item's files in place of its old version. Checked before the slow work, and
+  // again in the queue against the state it will change.
+  const publishProblem = (pubNow, m, item) => {
+    const bound = Object.hasOwn(pubNow, m.project) ? pubNow[m.project] : null;
+    if (bound && bound.root !== m.root) {
+      if (item.move !== true) return `${m.project} is published from ${bound.root}; this instance is ${m.root}: tick "move it" to publish it from here`;
+      // "move it" is consent to take down what the page showed, so only from that root
+      if (bound.root !== item.movedFrom) return 'this project moved since you looked; reload the page';
+    }
+    const after = { ...pubNow, [m.project]: { ...(bound ?? {}), artifacts: { ...(bound && bound.root === m.root ? bound.artifacts ?? {} : {}) } } };
     delete after[m.project].artifacts[m.slug];
     const sizes = pstore.referenced(after);
     for (const f of Object.values(m.files)) sizes.set(f.sha256, f.size);
     const total = [...sizes.values()].reduce((n, s) => n + s, 0);
-    if (total > PUBLIC_MAX) throw new Error(`publishing it would hold ${total} bytes, over the box's public cap of ${PUBLIC_MAX} bytes (DEVTEAM_PUBLIC_MAX)`);
+    if (total > PUBLIC_MAX) return `publishing it would hold ${total} bytes, over the box's public cap of ${PUBLIC_MAX} bytes (DEVTEAM_PUBLIC_MAX)`;
+    return null;
+  };
+  // One confirmed item. Bound to the manifest the owner saw (its sha256), every file to the
+  // manifest, the tree id to the bytes; anything off refuses this item. Everything that waits on
+  // the instance runs before the queue, within one budget, so a slow instance holds up no one
+  // else's change (an unpublish least of all); the queue holds only the writes, the record and
+  // the save, and the sweep after them drops whatever a refused item wrote.
+  const publishItem = async (port, item) => {
+    const t0 = Date.now();
+    const late = () => new Error(`instance ${port} took over ${ITEM_MS / 1000} s for this item; nothing was published`);
+    const left = () => { const n = ITEM_MS - (Date.now() - t0); if (n <= 0) throw late(); return Math.min(LOOP_MS, n); };
+    const ask = async (f) => { const ms = left(); try { return await f(ms); } catch (e) { throw Date.now() - t0 >= ITEM_MS ? late() : e; } };
+    const m = await ask((ms) => fetchManifest(port, item.slug, ms));
+    if (manifestHash(m) !== item.manifest) throw new Error('this changed since you looked; reload the page');
+    let why = publishProblem(store.load().public ?? {}, m, item);
+    if (why) throw new Error(why);
     const algo = m.tree.length === 40 ? 'sha1' : 'sha256';
     const bytes = new Map();
     const ids = Object.create(null);   // a file may be named __proto__
     for (const [rel, f] of Object.entries(m.files)) {
-      const r = await loopback(port, 'GET', `/artifact/main/${m.slug}/${rel}`, { cap: f.size });
+      const r = await ask((ms) => loopback(port, 'GET', `/artifact/main/${m.slug}/${rel}`, { cap: f.size, ms }));
       if (r.status !== 200 || r.body.length !== f.size || hex256(r.body) !== f.sha256) throw new Error(`${rel} is not the file the manifest names (its bytes differ); nothing was published`);
       bytes.set(f.sha256, r.body);
       ids[rel] = { oid: gitBlobId(r.body, algo), mode: f.mode };
     }
     if (gitTreeId(ids, algo) !== m.tree) throw new Error(`the files don't make the tree ${m.tree.slice(0, 12)} the manifest names; nothing was published`);
-    for (const [sha, buf] of bytes) pstore.write(sha, buf);
-    const k = await loopback(port, 'POST', '/api/artifact-publish', { body: JSON.stringify({ op: 'publish', slug: m.slug, tree: m.tree }) });
-    if (k.status !== 200) throw new Error(`the kit didn't record it, so it wasn't published: ${errorOf(k)}`);
-    // load, change and save with nothing awaited in between
-    const now = store.load();
-    const pub = { ...(now.public ?? {}) };
-    const prev = Object.hasOwn(pub, m.project) ? pub[m.project] : null;
-    const update = !!prev && Object.hasOwn(prev.artifacts ?? {}, m.slug);
-    pub[m.project] = { root: m.root, port, artifacts: { ...(prev && prev.root === m.root ? prev.artifacts : {}), [m.slug]: { tree: m.tree, title: m.title, at: new Date().toISOString(), files: Object.fromEntries(Object.entries(m.files).map(([rel, f]) => [rel, { sha256: f.sha256, size: f.size }])) } } };
-    store.save({ ...now, public: pub });
-    return { url: `${PUBLIC}/${m.project}/${m.slug}/`, update };
+    return pstore.serial(async () => {
+      try {
+        // the state may have changed while this item waited: a move, another publish, the cap
+        why = publishProblem(store.load().public ?? {}, m, item);
+        if (why) throw new Error(why);
+        for (const [sha, buf] of bytes) pstore.write(sha, buf);
+        const k = await ask((ms) => loopback(port, 'POST', '/api/artifact-publish', { body: JSON.stringify({ op: 'publish', slug: m.slug, tree: m.tree }), ms }));
+        if (k.status !== 200) throw new Error(`the kit didn't record it, so it wasn't published: ${errorOf(k)}`);
+        // load, change and save with nothing awaited in between
+        const now = store.load();
+        const pub = { ...(now.public ?? {}) };
+        const prev = Object.hasOwn(pub, m.project) ? pub[m.project] : null;
+        const kept = prev && prev.root === m.root ? prev.artifacts ?? {} : {};
+        // a move is a new binding, so never an update
+        const update = Object.hasOwn(kept, m.slug);
+        pub[m.project] = { root: m.root, port, artifacts: { ...kept, [m.slug]: { tree: m.tree, title: m.title, at: new Date().toISOString(), files: Object.fromEntries(Object.entries(m.files).map(([rel, f]) => [rel, { sha256: f.sha256, size: f.size }])) } } };
+        store.save({ ...now, public: pub });
+        return { url: `${PUBLIC}/${m.project}/${m.slug}/`, update };
+      } finally { try { pstore.sweep(store.load().public); } catch {} }
+    });
   };
 
   // An unpublish is recorded on the instance only when it is that project, at that checkout: its
@@ -1037,6 +1070,9 @@ export function createGateway(opts = {}) {
       }
       // Publishing: the gateway's own page, from the manifest it fetched itself, then a POST of what
       // that page showed (only from this page: the Origin rule above refuses any other).
+      // Its pages open as a page only: another site's frame navigated here carries the cookie, and
+      // would have the gateway ask an instance for up to 50 manifests each time.
+      if (req.method === 'GET' && (p === '/public' || p.startsWith('/public/')) && req.headers['sec-fetch-dest'] !== undefined && req.headers['sec-fetch-dest'] !== 'document') return send(res, 403, 'text/plain; charset=utf-8', 'open this page on its own, not in a frame');
       if (req.method === 'GET' && p === '/public/publish') {
         const port = Number(url.searchParams.get('port'));
         const slugs = [...new Set(url.searchParams.getAll('slug'))];
@@ -1048,7 +1084,9 @@ export function createGateway(opts = {}) {
             const m = await fetchManifest(port, slug);
             const bound = Object.hasOwn(pub, m.project) ? pub[m.project] : null;
             const now = bound && Object.hasOwn(bound.artifacts ?? {}, slug) ? bound.artifacts[slug] : null;
-            return { slug, m, hash: manifestHash(m), url: `${PUBLIC}/${m.project}/${slug}/`, state: !now ? 'new on this box' : now.tree === m.tree ? 'already public at this version' : 'an update', movedFrom: bound && bound.root !== m.root ? bound.root : null };
+            const moving = bound && bound.root !== m.root;
+            // a move takes down every other page of the old checkout: the page names them
+            return { slug, m, hash: manifestHash(m), url: `${PUBLIC}/${m.project}/${slug}/`, state: !now || moving ? 'new on this box' : now.tree === m.tree ? 'already public at this version' : 'an update', movedFrom: moving ? bound.root : null, others: moving ? Object.keys(bound.artifacts ?? {}).filter((x) => x !== slug).sort() : [] };
           } catch (e) { return { slug, error: e.message }; }
         });
         return page(res, PAGES.publish(port, rows));
@@ -1057,10 +1095,10 @@ export function createGateway(opts = {}) {
         const body = await readJson(req);
         const port = Number(body?.port);
         const items = Array.isArray(body?.items) ? body.items : [];
-        if (!BLOCK.includes(port) || !items.length || items.length > 50 || !items.every((x) => x && typeof x.slug === 'string' && LINK_ID.test(x.slug) && typeof x.manifest === 'string' && /^[0-9a-f]{64}$/.test(x.manifest))) return json(res, 400, { error: 'publish takes { port, items: [{ slug, manifest, move }] }, 1 to 50 items' });
+        if (!BLOCK.includes(port) || !items.length || items.length > 50 || !items.every((x) => x && typeof x.slug === 'string' && LINK_ID.test(x.slug) && typeof x.manifest === 'string' && /^[0-9a-f]{64}$/.test(x.manifest))) return json(res, 400, { error: 'publish takes { port, items: [{ slug, manifest, move, movedFrom }] }, 1 to 50 items' });
         const results = [];
         for (const it of items) {
-          try { results.push({ slug: it.slug, ok: true, ...(await pstore.serial(() => publishItem(port, it).finally(() => { try { pstore.sweep(store.load().public); } catch {} }))) }); }
+          try { results.push({ slug: it.slug, ok: true, ...(await publishItem(port, it)) }); }
           catch (e) { results.push({ slug: it.slug, ok: false, error: e.message }); }
         }
         log(`public: ${results.map((x) => `${x.slug} ${x.ok ? 'published' : 'refused'}`).join(', ')} from instance ${port}`);
@@ -1097,7 +1135,8 @@ export function createGateway(opts = {}) {
           // the binding stays: another checkout of this name still needs "move it"
           pub[project] = { ...x, artifacts };
           store.save({ ...now, public: pub });
-          pstore.sweep(pub);
+          // the page is down once saved; a blob the sweep can't drop is the next sweep's
+          try { pstore.sweep(pub); } catch {}
           return x.root;
         });
         if (root === null) return json(res, 404, { error: `${project}/${slug} is not public on this box` });
@@ -1215,13 +1254,13 @@ for (const x of document.querySelectorAll('button[data-id]')) x.onclick = run(as
 </script></body></html>`,
   // Each item from the manifest the gateway fetched itself, escaped; its state from the gateway's
   // own copy; ticked by default, except "move it". The POST binds each item to the manifest shown.
-  publish: (port, rows) => `${doc('Publish', `<h1>Publish to anyone</h1><p>Anyone with a link below can read that page, with no sign-in. The box keeps its own copy of exactly what is listed here; a later change on main reaches the public only when you publish again. From instance ${esc(port)}.</p><ul>${rows.map((r) => (r.error ? `<li class="pub"><b>${esc(r.slug)}</b><span>${esc(r.error)}</span></li>` : `<li class="pub"><label><input type="checkbox" data-slug="${esc(r.slug)}" data-manifest="${esc(r.hash)}" checked> <b>${esc(r.m.title)}</b></label><small>${esc(r.m.project)} · ${esc(r.slug)} · ${esc(Object.keys(r.m.files).length)} files, ${esc(fmtSize(Object.values(r.m.files).reduce((n, f) => n + f.size, 0)))} · ${esc(r.state)}</small><code>${esc(r.url)}</code>${r.movedFrom ? `<span>${esc(r.m.project)} is published from ${esc(r.movedFrom)}; this instance is ${esc(r.m.root)}. <label><input type="checkbox" data-move="${esc(r.slug)}"> move it</label></span>` : ''}</li>`)).join('')}</ul>${rows.some((r) => !r.error) ? '<p><button id="go">Publish</button></p>' : ''}<p id="err"></p><ul id="out"></ul>`)}
+  publish: (port, rows) => `${doc('Publish', `<h1>Publish to anyone</h1><p>Anyone with a link below can read that page, with no sign-in. The box keeps its own copy of exactly what is listed here; a later change on main reaches the public only when you publish again. From instance ${esc(port)}.</p><ul>${rows.map((r) => (r.error ? `<li class="pub"><b>${esc(r.slug)}</b><span>${esc(r.error)}</span></li>` : `<li class="pub"><label><input type="checkbox" data-slug="${esc(r.slug)}" data-manifest="${esc(r.hash)}" checked> <b>${esc(r.m.title)}</b></label><small>${esc(r.m.project)} · ${esc(r.slug)} · ${esc(Object.keys(r.m.files).length)} files, ${esc(fmtSize(Object.values(r.m.files).reduce((n, f) => n + f.size, 0)))} · ${esc(r.state)}</small><code>${esc(r.url)}</code>${r.movedFrom ? `<span>${esc(r.m.project)} is published from ${esc(r.movedFrom)}; this instance is ${esc(r.m.root)}. <label><input type="checkbox" data-move="${esc(r.slug)}" data-moved-from="${esc(r.movedFrom)}"> move it${r.others.length ? ` (its ${r.others.length} other page${r.others.length === 1 ? '' : 's'} from ${esc(r.movedFrom)} come${r.others.length === 1 ? 's' : ''} down: ${r.others.map(esc).join(', ')})` : ''}</label></span>` : ''}</li>`)).join('')}</ul>${rows.some((r) => !r.error) ? '<p><button id="go">Publish</button></p>' : ''}<p id="err"></p><ul id="out"></ul>`)}
 <script>
 const PORT = ${jsonIn(port)};
 const go = document.getElementById('go');
 if (go) go.onclick = run(async () => {
   const moves = [...document.querySelectorAll('input[data-move]')];
-  const items = [...document.querySelectorAll('input[data-manifest]')].filter((x) => x.checked).map((x) => ({ slug: x.dataset.slug, manifest: x.dataset.manifest, move: moves.some((m) => m.dataset.move === x.dataset.slug && m.checked) }));
+  const items = [...document.querySelectorAll('input[data-manifest]')].filter((x) => x.checked).map((x) => { const m = moves.find((y) => y.dataset.move === x.dataset.slug && y.checked); return { slug: x.dataset.slug, manifest: x.dataset.manifest, move: !!m, ...(m ? { movedFrom: m.dataset.movedFrom } : {}) }; });
   if (!items.length) return err('Nothing is ticked.');
   go.disabled = true;
   try {
