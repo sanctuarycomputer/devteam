@@ -358,6 +358,9 @@ shellcheck = "latest"
 sops = "latest"
 age = "latest"
 "npm:eas-cli" = "latest"
+# the CLIs production sensors read through (CLI_LOGIN in devteam.mjs), besides heroku below
+sentry-cli = "latest"
+vercel = { version = "latest", allow_builds = ["esbuild"], trust_policy_excludes = ["undici"] }
 
 # Heroku's standalone CLI brings its own Node (the npm one runs on a repo's pinned Node, and refuses
 # one older than 20). Only heroku is exposed: bin/ also holds that node, which must not stand in for a repo's.
