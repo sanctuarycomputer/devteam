@@ -1,15 +1,27 @@
 #!/bin/sh
-# box-supervisors [--all] [--dry-run] | --status: the mechanical half of the box's operator
-# (operator.md). One line per adopted repo in ~/code, saying what it did and why.
-#   (default)  after a restart: each supervisor that was running, unless its fleet is held.
-#   --all      every adopted repo that isn't a sibling, a parked one too: its supervisor decides.
-#   --status   a read-only digest of the box, for the operator's tick.
+# box-supervisors [--all [<repo>]] [--dry-run] | --status [--questions] | --tell <repo> <message> | --alert <text>|--clear | --pane-state <pane>:
+# the mechanical half of the box's operator (operator.md). One line per adopted repo in ~/code,
+# saying what it did and why.
+#   (default)      after a restart: each supervisor that was running, unless its fleet is held.
+#   --all          every adopted repo that isn't a sibling, a parked one too: its supervisor decides.
+#                  --all <repo> does that for one repo, leaving every other fleet as it is.
+#   --status       a read-only digest of the box, for the operator's check-in. It only keeps a note of
+#                  the disk and of each pane, in ~/.box/status-last, to say what changed since.
+#   --status --questions   open questions no one has noted in ~/operator/NOTES.md, one line each.
+#   --tell         type a message from the operator into a repo's supervisor, if its pane can take it.
+#   --alert        put a line on the hub and push it to the owner's devices (--clear takes it down).
+#   --pane-state   what a pane is at, by its pane id: ready, busy, dialog, limit, typing, shell, other, gone.
 set -u
-all=; dry=; status=
-for a in "$@"; do case $a in
-  --all) all=1 ;; --dry-run) dry=1 ;; --status) status=1 ;;
-  *) echo 'usage: box-supervisors [--all] [--dry-run] | --status' >&2; exit 2 ;;
-esac; done
+all=; dry=; status=; questions=; target=; tell=; message=; alert=; alert_text=; pane_q=
+usage() { echo 'usage: box-supervisors [--all [<repo>]] [--dry-run] | --status [--questions] | --tell <repo> <message> | --alert <text>|--clear | --pane-state <pane>' >&2; exit 2; }
+while [ $# -gt 0 ]; do case $1 in
+  --all) all=1; case ${2:-} in ''|-*) ;; *) target=$2; shift ;; esac ;;
+  --dry-run) dry=1 ;; --status) status=1 ;; --questions) questions=1 ;;
+  --tell) [ $# -ge 3 ] || usage; tell=$2; shift 2; message=$*; set -- x ;;
+  --alert) alert=1; [ $# -ge 2 ] || usage; shift; alert_text=$*; set -- x ;;
+  --pane-state) [ $# -eq 2 ] || usage; pane_q=$2; shift ;;
+  *) usage ;;
+esac; shift; done
 code=$HOME/code
 boot=$HOME/.devteam-supervisors.boot
 node=${DEVTEAM_NODE:-/usr/local/bin/node}
@@ -22,15 +34,67 @@ norm() { printf '%s' "$1" | sed -E 's#^(ssh://)?git@github\.com[:/]#https://gith
 origin() { norm "$(git -C "$1" remote get-url origin 2>/dev/null)"; }
 # A repo with the kit but no settings isn't adopted (a checkout of devteam itself, say).
 adopted() { for k in "$code"/*/"$kit"; do [ -f "$k" ] || continue; r=${k%/"$kit"}; [ -f "$r/docs/devteam/project/settings.md" ] && echo "$r"; done; }
-# Whether a supervisor is up here: the pane it noted, or anything agent-shaped started at the repo's root.
-panes() { tmux list-panes -a -F '#{pane_id}	#{window_name}	#{pane_start_path}	#{pane_current_command}' 2>/dev/null; }
-running() {
+# Pane id, window, the path it started at, what's running in it, its session. Tab-separated.
+panes() { tmux list-panes -a -F '#{pane_id}	#{window_name}	#{pane_start_path}	#{pane_current_command}	#{session_name}' 2>/dev/null; }
+# A supervisor's pane: the one it noted, or else anything agent-shaped started at the repo's root.
+sup_pane() {
   p=$(cat "$1/docs/devteam/run/supervisor-pane" 2>/dev/null)
   panes | awk -F'\t' -v p="$p" -v r="$1" '
     $4 ~ /^-?(bash|sh|dash|zsh|fish)$/ || $2 ~ /^dash-/ || $2 == "dashboard" { next }
-    ($1 == p && p != "") || ($3 == r && $4 ~ /claude|node/) { found = 1 }
-    END { exit found ? 0 : 1 }'
+    $1 == p && p != "" { noted = $1 } $3 == r && $4 ~ /claude|node/ && !other { other = $1 }
+    END { print noted ? noted : other }'
 }
+running() { [ -n "$(sup_pane "$1")" ]; }
+# What a pane is at, from what is on it. Nothing is typed here. The agent's input box is the
+# last box drawn at the bottom; text in it is someone's unless it's dim, which is the harness's
+# own suggestion (never the owner's words). A pane whose screen shows no box says "unknown".
+strip_sgr() { awk '{ gsub(/\033\[[0-9;]*m/, ""); print }'; }
+pane_state() {
+  c=$(panes | awk -F'\t' -v p="$1" '$1 == p { print $4; exit }')
+  [ -n "$c" ] || { echo gone; return; }
+  case $c in -bash|bash|sh|dash|zsh|fish) echo shell; return ;; *claude*|*node*|[0-9]*.[0-9]*) ;; *) echo other; return ;; esac
+  raw=$(tmux capture-pane -e -p -t "$1" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -20)
+  plain=$(printf '%s\n' "$raw" | strip_sgr)
+  printf '%s\n' "$plain" | grep -qE 'Do you (trust|want to)|Press Enter to continue|❯ *1\. *Yes|Yes, I accept|No, exit|Select login method|Paste code|text style|\[y/n\]|\(y/n\)' && { echo dialog; return; }
+  # the kit's words for a limit banner (PANE_WAITS); a busy agent is working, whatever it shows
+  if printf '%s\n' "$plain" | grep -iqE '(^|[^a-z])(usage|rate|session|weekly|daily|hourly|[0-9]+-hour) limit (reached|hit|exceeded)|^[[:space:]]*([⎿■✖!][[:space:]]*)?you(.{1,3}ve| have) hit your ([a-z]+ )*limit'; then
+    case $plain in *'esc to interrupt'*) ;; *) echo limit; return ;; esac
+  fi
+  input=$(printf '%s\n' "$raw" | awk '{ l = $0; gsub(/\033\[[0-9;]*m/, "", l) } l ~ /^ *(─)+ *$/ { a = b; b = NR; next } { line[NR] = $0 } END { if (a && b && a < b) for (i = a + 1; i < b; i++) if (line[i] ~ /❯/) { print line[i]; exit } }')
+  [ -n "$input" ] || { echo unknown; return; }
+  text=$(printf '%s\n' "$input" | awk '{ sub(/^.*❯/, ""); print }')
+  # up to any dim text: what was really typed, if anything
+  typed=$(printf '%s' "$text" | awk -v d="$(printf '\033')[2m" '{ i = index($0, d); print i ? substr($0, 1, i - 1) : $0 }' | strip_sgr | tr -d ' ')
+  [ -z "$typed" ] || { echo typing; return; }
+  case $plain in *'esc to interrupt'*) echo busy ;; *) echo ready ;; esac
+}
+if [ -n "$pane_q" ]; then pane_state "$pane_q"; exit 0; fi
+# The operator's word to the owner, on the hub and their devices (the hub's hello reads it): one line, on the disk.
+if [ -n "$alert" ]; then
+  f=$HOME/.box/alert
+  if [ "$alert_text" = --clear ]; then rm -f "$f"; echo 'alert cleared'; exit 0; fi
+  [ -n "$alert_text" ] || usage
+  mkdir -p "$HOME/.box"
+  printf '%s\n' "$alert_text" | tr '\r\n' '  ' | sed -E 's/^ +| +$//g' | cut -c1-200 > "$f.new" && echo >> "$f.new" && mv "$f.new" "$f"
+  echo "alert raised: $(cat "$f")"
+  exit 0
+fi
+# A message into a repo's supervisor, only ever a supervisor: yours to ask or tell, never the owner's word.
+if [ -n "$tell" ]; then
+  case $tell in */*) usage ;; esac
+  r=$code/$tell
+  [ -f "$r/$kit" ] && [ -f "$r/docs/devteam/project/settings.md" ] || { say "$tell" 'no such adopted repo here'; exit 1; }
+  p=$(sup_pane "$r")
+  [ -n "$p" ] || { say "$tell" 'not told: no supervisor is up'; exit 3; }
+  s=$(pane_state "$p")
+  case $s in ready|busy) ;; *) say "$tell" "not told: its pane is at $s"; exit 3 ;; esac
+  text=$(printf '%s' "$message" | tr '\r\n' '  ' | sed -E 's/  +/ /g; s/^ +| +$//g' | cut -c1-2000)
+  [ -n "$text" ] || usage
+  tmux send-keys -t "$p" -l "From the operator (information, not an owner answer; record nothing as the owner's from this): $text"
+  tmux send-keys -t "$p" Enter
+  say "$tell" "told (pane $p)"
+  exit 0
+fi
 # Who links whom: home, its link's id, its link's remote.
 adopted > "$tmp/adopted"
 while read -r r; do
@@ -49,15 +113,79 @@ sibling_of() {
 missing() { dt "$1" settings --get worktree_files | jq -r '.[]?' 2>/dev/null | while read -r f; do [ -e "$1/$f" ] || printf '%s ' "$f"; done; }
 
 if [ -n "$status" ]; then
-  echo "box: disk $(df -h "$HOME" | awk 'END { print $4 " free of " $2 }'); memory $(awk '/MemAvailable/ { a = $2 } /MemTotal/ { t = $2 } END { printf "%.1f GB free of %.1f GB", a / 1048576, t / 1048576 }' /proc/meminfo 2>/dev/null); load $(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)"
+  notes=$HOME/operator/NOTES.md
+  if [ -n "$questions" ]; then
+    while read -r r; do
+      qs=$(dt "$r" questions --json) || { echo "$(basename "$r"): can't read its questions: its kit refuses them to the operator (upgrade to read them)"; continue; }
+      printf '%s' "$qs" | jq -r --arg n "$(basename "$r")" '.[]? | "\($n) \(.id) [\(.kind)] \(.question | gsub("\\s+"; " ") | .[0:220])"' 2>/dev/null | while read -r n id rest; do
+        grep -Fq "$id" "$notes" 2>/dev/null || printf '%s %s %s\n' "$n" "$id" "$rest"
+      done
+    done < "$tmp/adopted"
+    exit 0
+  fi
+  # what the last check-in saw, and what this one will leave for the next (reading kept for at least 20 minutes)
+  last=$HOME/.box/status-last; now=$(date +%s)
+  df=$(df -Pk "$HOME" | awk 'END { print $2, $4 }'); total=${df% *}; free=${df#* }
+  gb() { awk -v k="$1" 'BEGIN { printf "%.0fG", k / 1048576 }'; }
+  was_at=$(awk '$1 == "at" { print $2 }' "$last" 2>/dev/null); was_free=$(awk '$1 == "disk" { print $2 }' "$last" 2>/dev/null)
+  trend=
+  [ -z "$was_free" ] || [ "$(( (free - was_free) / 1048576 ))" -eq 0 ] || trend=" ($(awk -v f="$free" -v w="$was_free" 'BEGIN { d = (f - w) / 1048576; printf "%+.0fG", d }') in $(( (now - ${was_at:-$now}) / 60 ))m)"
+  low=; if [ "$free" -lt 20971520 ] || [ $((free * 100 / (total + 1))) -lt 15 ]; then low=' LOW'; fi
+  echo "box: disk $(gb "$free") free of $(gb "$total")$low$trend; memory $(awk '/MemAvailable/ { a = $2 } /MemTotal/ { t = $2 } END { printf "%.1f GB free of %.1f GB", a / 1048576, t / 1048576 }' /proc/meminfo 2>/dev/null); load $(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)"
+  # the freshest of each repo's record of its accounts (accounts-tick writes it each minute); read, cswap itself is never run here
+  acc=$(while read -r r; do jq -r 'select(.at) | [.at, (if .cswap then "cswap" else "no-cswap" end), (.active // "?"), (.exhausted // false), (.active_no_room // false), ((.needs_login // []) | join(","))] | @tsv' "$r/docs/devteam/run/accounts.json" 2>/dev/null; done < "$tmp/adopted" | sort -r | head -1)
+  if [ -n "$acc" ]; then
+    printf 'box: accounts %s\n' "$(printf '%s\n' "$acc" | awk -F'\t' '{ printf "%s active=%s exhausted=%s no-room=%s needs-login=%s as of %s", $2, $3, $4, $5, ($6 == "" ? "-" : $6), $1 }')"
+  else
+    echo 'box: accounts ? (no dashboard has recorded any)'
+  fi
+  # a hub that doesn't answer and each repo's dashboard: nothing else says they went down
+  up() { curl -s -o /dev/null --max-time 3 "http://127.0.0.1:$1/" && echo up || echo DOWN; }
+  hub=${DEVTEAM_HUB_PORT:-4320}
+  alert=$(cat "$HOME/.box/alert" 2>/dev/null)
+  echo "box: hub $hub $(up "$hub")${alert:+; alert: $alert}"
+  : > "$tmp/flags"; : > "$tmp/panes"
   while read -r r; do
     n=$(basename "$r")
     h=$(dt "$r" hello --json); [ -n "$h" ] || h='{}'
     m=$(missing "$r")
     if command -v mise >/dev/null 2>&1; then t=$(cd "$r" && mise ls --current --missing 2>/dev/null | awk '{ printf "%s@%s ", $1, $2 }'); else t='?'; fi
-    if running "$r"; then s=up; else s=down; fi
-    echo "$n sup=$s fleet=$(printf '%s' "$h" | jq -r '.fleet.mode // "?"' 2>/dev/null) kit=$(printf '%s' "$h" | jq -r '.kit // "?"' 2>/dev/null) inbox=$(printf '%s' "$h" | jq -r '.inbox // "?"' 2>/dev/null) missing=${m:--} tools=${t:-ok}$(s=$(sibling_of "$r"); [ -n "$s" ] && echo " sibling-of=$(basename "$s")")"
+    p=$(sup_pane "$r")
+    if [ -n "$p" ]; then s=up; else s=down; fi
+    k=$(printf '%s' "$h" | jq -r '.kit // "?"' 2>/dev/null)
+    # newest release of the repo's own upstream, asked once per upstream
+    u=$(dt "$r" settings --get upstream_repo); up_f=$tmp/latest-$(printf '%s' "$u" | tr '/:.' '___')
+    [ -f "$up_f" ] || { if command -v timeout >/dev/null 2>&1; then to='timeout 8'; else to=; fi; $to gh release list -R "$u" --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null > "$up_f"; }
+    latest=$(cat "$up_f"); base=${k%%+*}
+    behind=; if [ -n "$latest" ] && [ "$base" != "$latest" ] && case $base in v[0-9]*) true ;; *) false ;; esac && [ "$(printf '%s\n%s\n' "$base" "$latest" | sort -V | tail -1)" = "$latest" ]; then behind=" behind=$latest"; fi
+    d=$(cat "$r/docs/devteam/run/dashboard-port" 2>/dev/null) || d=
+    [ -n "$d" ] || d=$(grep -o 'started on http://127.0.0.1:[0-9]*' "$r/docs/devteam/run/dashboard.log" 2>/dev/null | tail -1 | sed 's/.*://')
+    if [ -n "$d" ]; then dash="$d/$(up "$d")"; else dash=-; fi
+    wt=-; if [ -d "$r/.worktrees" ]; then wc=$(find "$r/.worktrees" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' '); if command -v timeout >/dev/null 2>&1; then to='timeout 20'; else to=; fi; wk=$($to du -sk "$r/.worktrees" 2>/dev/null | awk '{ print $1 }'); wt="$wc/$(gb "${wk:-0}")"; fi
+    # a kit between the operator role and this list refuses `questions`: unknown, not zero
+    if qs=$(dt "$r" questions --json); then q=$(printf '%s' "$qs" | jq -r '.[]?.id' 2>/dev/null | while read -r id; do grep -Fq "$id" "$notes" 2>/dev/null || echo "$id"; done | wc -l | tr -d ' '); else q='?'; fi
+    a=$(printf '%s' "$h" | jq -r '.alert // empty' 2>/dev/null)
+    st=; if [ -n "$p" ]; then st=" pane=$p state=$(pane_state "$p")"; fi
+    [ -z "$a" ] || echo "attention: $n: $a" >> "$tmp/flags"
+    echo "$n sup=$s fleet=$(printf '%s' "$h" | jq -r '.fleet.mode // "?"' 2>/dev/null) kit=$k inbox=$(printf '%s' "$h" | jq -r '.inbox // "?"' 2>/dev/null) missing=${m:--} tools=${t:-ok}$behind$st dash=$dash wt=$wt new-questions=$q$(s=$(sibling_of "$r"); [ -n "$s" ] && echo " sibling-of=$(basename "$s")")"
   done < "$tmp/adopted"
+  # every agent's pane (never the owner's shell): those stuck, and those that moved since the last reading
+  panes | awk -F'\t' '$2 != "shell" && $2 != "operator" && $2 != "dashboard" && $2 !~ /^dash-/' | while IFS='	' read -r id win _start _cmd sess; do
+    case $(pane_state "$id") in
+      dialog|limit) echo "attention: $id $sess:$win $(pane_state "$id")" >> "$tmp/flags" ;;
+      shell|other|gone) continue ;;
+    esac
+    # the spinner and its counters change by the second; the rest is the agent's work
+    sum=$(tmux capture-pane -p -t "$id" 2>/dev/null | grep -v 'tokens\|esc to\|^[[:space:]]*$' | awk 'NR > 3 { print h[NR % 3] } { h[NR % 3] = $0 }' | cksum | cut -d' ' -f1)
+    printf 'pane %s %s\n' "$id" "$sum" >> "$tmp/panes"
+    grep -q "^pane $id $sum\$" "$last" 2>/dev/null || printf '%s ' "$id" >> "$tmp/changed"
+  done
+  cat "$tmp/flags"
+  echo "changed since last reading: $(cat "$tmp/changed" 2>/dev/null)"
+  if [ $(( now - ${was_at:-0} )) -ge "${DEVTEAM_STATUS_SECONDS:-1200}" ]; then
+    mkdir -p "$HOME/.box"
+    { echo "at $now"; echo "disk $free"; cat "$tmp/panes"; } > "$last.new" && mv "$last.new" "$last"
+  fi
   exit 0
 fi
 
@@ -65,9 +193,14 @@ if [ -z "$dry" ] && ! tmux has-session -t home 2>/dev/null; then
   echo 'box-supervisors: no tmux session "home" on this box; starting one from here would hand every window this session'"'"'s markers' >&2
   exit 1
 fi
+if [ -n "$target" ] && ! grep -Fxq "$code/$target" "$tmp/adopted"; then
+  echo "box-supervisors: no adopted repo \"$target\" in ~/code" >&2
+  exit 1
+fi
 : > "$tmp/keep"
 while read -r r; do
   n=$(basename "$r")
+  [ -z "$target" ] || [ "$n" = "$target" ] || continue
   if [ -z "$all" ]; then
     # a supervisor ran here before the restart, so it is a home whatever links to it
     grep -Fxq "$r" "$boot" 2>/dev/null || { say "$n" "left stopped (not running before the restart; --all starts it)"; continue; }
@@ -91,7 +224,7 @@ while read -r r; do
     cmd=$(dt "$r" settings --get resume_command)
     case " $cmd " in *" --continue "*) ;; *) say "$n" "NOT started (its resume_command has no --continue to replace)"; echo "$r" >> "$tmp/keep"; continue ;; esac
     cmd=$(printf '%s' "$cmd" | sed -E "s/ --continue( |\$)/ --resume $id\1/")
-    msg='The box restarted, and this is you, resumed on your own conversation; what was in flight did not finish. Follow supervisor.md §11, after your own restart: §1 again. Every worker and planner window is gone, so §1.4 sends each ticket whose phase is not done or parked to recovery.'
+    msg='The box restarted, and this is you, resumed on your own conversation; what was in flight did not finish. Follow supervisor.md §11, after your own restart: §1 again. Every worker and planner window went with the restart; accounts-tick relaunches each one the kit launched, one per tick (§11), so give it those first. §1.4 sends to recovery only the tickets still without a window after it has caught up, or all of them on a kit too old to relaunch.'
   else
     cmd=$(dt "$r" settings --get agent_command)
     msg=$(dt "$r" prompt supervisor)

@@ -566,6 +566,31 @@ test('a push is encrypted as RFC 8291 says, and signed so a push service believe
   assert.ok(crypto.verify('sha256', Buffer.from(`${head}.${claims}`), { key: publicKey, dsaEncoding: 'ieee-p1363' }, Buffer.from(sig, 'base64url')));
 });
 
+test('an alert on the hub is pushed once, when it turns up or changes', () => {
+  const ports = [P, P + 1];
+  const r = (root, name, port, alert) => ({ root, name, port, ...(alert === undefined ? {} : { alert }) });
+  assert.deepEqual(G.alertNews({}, [r('/a', 'a', P)], ports).messages, [], 'no alert, no news');
+  const one = G.alertNews({}, [r('/a', 'a', P, 'disk is full')], ports);
+  assert.equal(one.messages.length, 1);
+  assert.equal(one.messages[0].title, 'Box alert (a)');
+  assert.equal(one.messages[0].body, 'disk is full');
+  assert.deepEqual(one.seen, { '/a': 'disk is full' });
+  assert.deepEqual(G.alertNews(one.seen, [r('/a', 'a', P, 'disk is full')], ports).messages, [], 'the same alert is not news twice');
+  assert.equal(G.alertNews(one.seen, [r('/a', 'a', P)], ports).seen['/a'], undefined, 'gone, it is forgotten and can come back');
+  assert.equal(G.alertNews({}, [r('/a', 'a', P, 'x')], [P + 5]).messages.length, 0, 'a port outside the block is ignored');
+  // one box-wide alert across every repo's tab is one push, however many tabs carry it
+  const both = G.alertNews({}, [r('/a', 'a', P, 'same'), r('/b', 'b', P + 1, 'same')], ports);
+  assert.equal(both.messages.length, 1);
+  assert.equal(both.messages[0].title, 'Box alert (a, b)');
+  assert.deepEqual(both.keys, ['alert:same'], 'resting is by text');
+  assert.equal(G.alertNews({}, [r('/a', 'a', P, 'same')], ports, new Set(['alert:same'])).messages.length, 0, 'at rest it waits');
+  const long = G.alertNews({}, [r('/a', 'a', P, 'x'.repeat(500))], ports);
+  assert.equal(long.messages[0].body.length, 200);
+  assert.equal(G.alertNews({}, [r('/a', 'a', P, 42)], ports).messages.length, 0, 'whatever holds the hub\'s port wrote the list: only a string counts');
+  const many = G.alertNews({}, [r('/1', 'a', P, 'one'), r('/2', 'b', P + 1, 'two')], ports);
+  assert.equal(many.messages.length, 2, 'distinct alerts each get a push');
+});
+
 test('what counts as news is what the hub page notifies about', () => {
   const ports = [P, P + 1];
   const at = (inbox, extra = {}) => ({ root: '/r/a', name: 'a', port: P, inbox, ...extra });
