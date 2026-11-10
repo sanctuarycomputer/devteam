@@ -372,6 +372,8 @@ const OWNER_SETTINGS = {
   forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', upstream_repo: 'governance-edit', upstream_sync: 'governance-edit',
   release: 'governance-edit', secret_commands: 'governance-edit', incident_slots: 'governance-edit', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit',
 };
+// The classes whose owner answer approves a chore that changes real kit files (isKitFile).
+const KIT_CLASSES = ['governance-edit', 'process-edit', 'gate-change'];
 const canonical = (v) => (Array.isArray(v) ? `[${v.map(canonical).join(',')}]` : v && typeof v === 'object' ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(',')}}` : JSON.stringify(v));
 function settingsAt(ref, { orNull = false } = {}) {
   const text = git(['show', `${ref}:${projectRel}/settings.md`]);
@@ -670,6 +672,9 @@ const componentsOn = (s, link = 'home') => (linesDeclared(s) ? Object.entries(s.
 // the project (home's, from a sibling's worktree), like projectRel.
 const kitRel = path.relative(projectRoot, devteamDir).split(path.sep).join('/');
 const devteamLine = () => [...(kitRel && !kitRel.startsWith('..') ? [`${kitRel}/**`] : []), ...(projectInRepo ? [`${projectRel}/**`] : [])];
+// A real kit file: under the kit's own path, other than project/ and run/ (a project's own files, and
+// its machine state). Everything else a chore changes is the project's.
+const isKitFile = (f) => { if (kitRel.startsWith('..')) return false; const rel = kitRel ? (f.startsWith(`${kitRel}/`) ? f.slice(kitRel.length + 1) : null) : f; return rel !== null && !/^(project|run)\//.test(rel); };
 
 // One scope grammar for knowledge scopes and link `for` scopes: <kind> or <kind>:<id>.
 // all and project mean the whole project, and both stay accepted. A later scope kind is one entry.
@@ -881,7 +886,9 @@ function checkLine(o, file) {
   const errs = schemaErrors({ ...SCHEMA, $defs: undefined }, envelope, 'line').map((e) => e.replace(/^line\./, ''));
   if (errs.length) return errs;
   if ((o.channel !== undefined) !== (o.by === 'owner')) errs.push('channel is on every owner line and no other');
-  if (o.channel === 'chat' && !(o.type === 'question' && o.op === 'set' && typeof o.answer === 'string' && typeof o.said === 'string')) errs.push('a chat line is an answer to a question, with the owner\'s words in said');
+  // A chat line is an answer, with the owner's words in said, or what that answer carried: its
+  // standing rule (knowledge citing the question), or its verdict on a goal (goal decide).
+  if (o.channel === 'chat' && !((o.type === 'question' && o.op === 'set' && typeof o.answer === 'string' && typeof o.said === 'string') || (o.type === 'knowledge' && o.op === 'new' && o.evidence?.length) || (o.type === 'goal' && o.op === 'set' && o.decision))) errs.push('a chat line is an answer to a question with the owner\'s words in said, or the standing rule or goal verdict that answer carried');
   const t = SCHEMA.$defs.types[o.type];
   const body = Object.fromEntries(Object.entries(o).filter(([k]) => !ENVELOPE.includes(k)));
   errs.push(...schemaErrors(t, body, o.type));
@@ -1392,7 +1399,7 @@ function goalChangeProblem(q, goalId, qid, l = null) {
 }
 
 // The owner's own standing rule for a class (scope class:<cls>, accepted, written by the owner):
-// the latest one. A rule relayed from chat never exists (answer --from-chat takes no --rule).
+// the latest one, from the Inbox, a terminal or chat alike (answer --from-chat --rule).
 const ownerRuleFor = (cls) => logObjects('knowledge').filter((k) => writerClass(k.created_by) === 'owner' && k.scope === `class:${cls}` && k.status === 'accepted').sort(byTime).pop() ?? null;
 // The correction on an act, with who made it and when.
 // The supervisor's calls: its decisions, and the acts that are their own decision (no decision
@@ -3829,8 +3836,8 @@ function cmdMerge() {
     if (pending.length) fails.push(`the forge's checks are still running at ${sha.slice(0, 12)}: ${pending.join(', ')}; wait for them, then merge`);
     if (failing.length) fails.push(`the forge's checks failed at ${sha.slice(0, 12)}: ${failing.join(', ')}`);
   }
-  // A chore PR that touches the kit, the agent config or the forge config carries an owner answer
-  // (classes governance-edit, process-edit, gate-change); project/ files are the supervisor's.
+  // A chore PR that changes files outside project/ (the agent config, the forge config) carries an
+  // owner answer; real kit files need it in a kit class (KIT_CLASSES). project/ files are the supervisor's.
   let approved = flagStr('approved') ?? null;
   let standing = null;
   // Owner-only settings, on every kind of PR (a ticket, a plan or a chore) in home, where
@@ -3896,19 +3903,28 @@ function cmdMerge() {
   }
   if (chore) {
     const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
-    const kit = base ? changedFiles(base, sha).filter((f) => !f.startsWith(`${projectRel}/`)) : [];
+    const outside = base ? changedFiles(base, sha).filter((f) => !f.startsWith(`${projectRel}/`)) : [];
+    const kitFiles = outside.filter(isKitFile);
+    const kitAnswer = approved && kitFiles.length ? ownerAnswer(approved, 'merge --approved') : null;
+    // A secret chore isn't a kit change: the encrypted stores its answer posted (a sops file can
+    // sit under the kit) need only that answer, held to its own chore below.
+    const secretChore = kitAnswer?.secrets.length && kitAnswer.secrets_posted?.length && chore.startsWith('secret-') && kitAnswer.answer?.startsWith('Posted');
+    const kit = secretChore ? kitFiles.filter((f) => !secretStores(kitAnswer).includes(f)) : kitFiles;
+    const kitApproved = !kit.length || KIT_CLASSES.includes(kitAnswer?.class);
     // Only these two standing rules approve kit files: an owner's rule that settles owner settings
-    // (a gate-change rule, owner_rules) says nothing about the kit's files.
+    // (a gate-change rule, owner_rules) says nothing about the kit's files. Files verbatim from
+    // upstream need no question, so an --approved answer outside the kit classes doesn't stop this.
     let kitRule = null;
-    if (kit.length && !approved && chore.startsWith('devteam-sync-')) {
-      const r = upstreamSyncApproval(chore, sha, kit);
-      if (r.rule || r.policy) { kitRule = standing = r; out(`kit files match upstream ${r.tag} exactly; approved by ${r.rule ? `the owner's standing rule ${r.rule.id}` : 'settings.upstream_sync "adopt"'}; ${r.tag} is ${r.tagSha}`); } else if (r.problem) fails.push(r.problem);
+    if (outside.length && (!approved || !kitApproved) && chore.startsWith('devteam-sync-')) {
+      const r = upstreamSyncApproval(chore, sha, outside);
+      if (r.rule || r.policy) { kitRule = standing = r; out(`kit files match upstream ${r.tag} exactly; approved by ${r.rule ? `the owner's standing rule ${r.rule.id}` : 'settings.upstream_sync "adopt"'}; ${r.tag} is ${r.tagSha}`); } else if (r.problem && !approved) fails.push(r.problem);
     }
-    if (kit.length && !approved && !kitRule && base) {
-      const r = ciFixApproval(chore, sha, base, kit);
+    if (outside.length && !approved && !kitRule && base) {
+      const r = ciFixApproval(chore, sha, base, outside);
       if (r.rule) { kitRule = standing = r; out(`changes only workflow files and keeps every job; approved by the owner's standing rule ${r.rule.id} ("${r.rule.statement}")`); } else if (r.problem) fails.push(r.problem);
     }
-    if (kit.length && !approved && !kitRule) fails.push(`touches files outside project/ (${kit.slice(0, 6).join(', ')}${kit.length > 6 ? ', …' : ''}); the owner's answer is needed: merge --chore ${chore} --approved <qid>`);
+    if (outside.length && !approved && !kitRule) fails.push(`touches files outside project/ (${outside.slice(0, 6).join(', ')}${outside.length > 6 ? ', …' : ''}); the owner's answer is needed: merge --chore ${chore} --approved <qid>`);
+    else if (approved && !kitRule && !kitApproved) fails.push(`changes kit files (${kit.slice(0, 6).join(', ')}${kit.length > 6 ? ', …' : ''}); that needs the owner's answer in a ${KIT_CLASSES.join(', ')} question, and ${approved} is ${kitAnswer.class ?? 'classless'}`);
   }
   if (approved) {
     const av = ownerAnswer(approved, 'merge --approved');
@@ -4036,7 +4052,7 @@ function trustEvidence(cls) {
   const drops = acts.map(correctionOf).filter(Boolean).map((c) => c.at).sort();
   const since = drops[drops.length - 1] ?? '';
   const after = acts.filter((a) => a.created_at > since);
-  const answered = questions().filter((q) => q.class === cls && q.status === 'answered' && (q.recommendation || (q.kind === 'review' && (q.review?.data?.proposals ?? 0) > 0)) && q.channel !== 'chat').sort((a, b) => a.answered_at.localeCompare(b.answered_at)).slice(-promo.agreement_window);
+  const answered = questions().filter((q) => q.class === cls && q.status === 'answered' && (q.recommendation || (q.kind === 'review' && (q.review?.data?.proposals ?? 0) > 0))).sort((a, b) => a.answered_at.localeCompare(b.answered_at)).slice(-promo.agreement_window);
   const agree = answered.filter((q) => q.matched).length;
   return {
     acts_since_drop: after.length, uncorrected_acts: after.filter((a) => !correctionOf(a)).map((a) => a.id), corrections: drops.length,
@@ -4189,7 +4205,7 @@ function cmdAsk() {
     if (flagStr('default') !== undefined) die('a goal-met question has no --default: only the owner says a goal is met');
   }
   // registry-attest: the owner's yes that the registry lists every repo, design file and doc the
-  // project depends on (planning.md §7). Owner-only, like goal-met: never defaulted, never from chat.
+  // project depends on (planning.md §7). Owner-only, like goal-met: never defaulted.
   if (cls === 'registry-attest') {
     const g = logGet(flagStr('goal') ?? '');
     if (g?.type !== 'goal') die('a registry-attest question needs --goal <g-id> (the goal with a --registry-precondition)');
@@ -4337,13 +4353,21 @@ function cmdAsk() {
   out(line.id);
 }
 
-// The owner answers (terminal or dashboard). The supervisor may only apply a default or withdraw.
+// The checks every record of the owner's word in chat shares: only the supervisor records it, and
+// only with the owner's words verbatim. What they said, ready for the line.
+function chatAnswer(what) {
+  if (process.env.DEVTEAM_ROLE !== 'supervisor' || logWriter() !== 'supervisor') die(`${what} --from-chat: the supervisor records what the owner said in its session; in your own terminal, answer directly`);
+  if (!flagStr('said')?.trim()) die(`${what} --from-chat needs --said "<the owner's words, verbatim>"`);
+  return flagStr('said').trim();
+}
+// The owner answers (terminal, dashboard or, through the supervisor, chat). The supervisor may only
+// apply a default or withdraw.
 function cmdAnswer() {
   const [id, ...restWords] = positional;
   const reviewResult = flagStr('review-result');
   const decline = !!flags.decline;
   if (flags['review-result'] === true) die('answer <qid> --review-result <file|->: the result file, or - for stdin');
-  if (!id || (!restWords.length && !flags.defaulted && !reviewResult && !decline)) die('usage: answer <qid> "<answer>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>" [--rule-scope s]]   |   answer <qid> --review-result <file|->   |   answer <qid> "<why>" --decline   |   answer <qid> "<answer>" --from-chat --said "<owner\'s words>" [--autonomy n]   |   answer <qid> --defaulted   (supervisor)');
+  if (!id || (!restWords.length && !flags.defaulted && !reviewResult && !decline)) die('usage: answer <qid> "<answer>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>" [--rule-scope s]]   |   answer <qid> --review-result <file|->   |   answer <qid> "<why>" --decline   |   answer <qid> "<answer>" --from-chat --said "<owner\'s words>" [--autonomy n] [--rule "<standing rule>"]   |   answer <qid> --defaulted   (supervisor)');
   if (flags.defaulted) {
     supervisorOnly('answer --defaulted');
     const v = openQuestion(id);
@@ -4354,37 +4378,26 @@ function cmdAnswer() {
     appendLog({ type: 'act', class: 'apply-default', what: `applied the default to ${id}: ${v.default}`, refs: [id], reversible: true }, 'supervisor');
     return out(`defaulted ${id}: ${v.default}`);
   }
-  // --from-chat: the owner said it in the supervisor's own session. The supervisor records it as the
-  // owner's answer with their words verbatim; the dashboard lists it for the owner to check, and it
-  // never counts as agreement evidence for the trust ladder. The supervisor is the party the ladder
-  // governs, so its say-so never decides what is reserved to the owner (one-way doors, trust, the
-  // owner_only classes) and never raises its own rung; it may only record a lower one.
+  // --from-chat: the owner said it in the supervisor's own session, and that carries the same
+  // weight as answering in the Inbox, for every question and everything that reads an answer. The
+  // supervisor records it as the owner's answer with their words verbatim; the dashboard lists it
+  // for the owner to check, and metrics flags a quote the transcript doesn't show them typing.
   const fromChat = !!flags['from-chat'];
-  if (fromChat) {
-    if (process.env.DEVTEAM_ROLE !== 'supervisor' || logWriter() !== 'supervisor') die('answer --from-chat: the supervisor records what the owner said in its session; in your own terminal, answer directly');
-    if (!flagStr('said')?.trim()) die('answer --from-chat needs --said "<the owner\'s words, verbatim>"');
-    if (flagStr('rule')) die('answer --from-chat takes no --rule: a standing rule binds the whole project, so the owner gives it from the dashboard or their terminal');
-  }
+  if (fromChat) chatAnswer('answer');
   const { by } = fromChat ? { by: 'owner' } : ownerWriter();
   const v = openQuestion(id, ['open', 'defaulted']);
   if (flagStr('seen') && flagStr('seen') !== v.hash) die(`${id} changed since you saw it; reload and read it again before you answer`);
   { const moved = artifactLinksMoved(v); if (moved) die(moved); }
-  if (v.kind === 'goal-approval') die(`${id} approves a goal on its design: the owner answers it with goal decide ${v.goal} approve|refine|let-go [--notes "…"] (or on the dashboard)`);
+  if (v.kind === 'goal-approval') die(`${id} approves a goal on its design: the owner answers it with goal decide ${v.goal} approve|refine|let-go [--notes "…"] (or on the dashboard)${fromChat ? `; from chat, goal decide ${v.goal} <verdict> --from-chat --said "<the owner's words>"` : ''}`);
   // A review is answered by the owner's own process with its result, or sent back with a reason;
-  // never in free text, never from chat (a chat can't carry rows, and the supervisor must not
-  // compose the owner's answer to its own proposals).
+  // never in free text, wherever it comes from (a result file carries the rows, and chat can't).
   if (v.kind === 'review' || reviewResult || decline) {
     if (v.kind !== 'review') die(`--review-result and --decline answer a review question; ${id} is ${v.kind}`);
-    if (fromChat) die(`answer --from-chat: ${id} is a review; the owner answers it from their own process (answer ${id} --review-result <file> in their terminal)`);
     if (v.status !== 'open') die(`${id} is already ${v.status}`);
     if (reviewResult && decline) die('a review is answered with --review-result or sent back with --decline, not both');
     if (!reviewResult && !decline) die(`${id} is a review: answer it with its result (answer ${id} --review-result <file|->) or send it back (answer ${id} "<why>" --decline)`);
     if (reviewResult && restWords.length) die('answer --review-result takes no text: the result is the answer');
     if (decline && !restWords.join(' ').trim()) die(`answer ${id} "<why>" --decline: say why it goes back`);
-  }
-  if (fromChat) {
-    const reserved = ['one-way-door', 'trust'].includes(v.kind) || (ladder().owner_only ?? []).includes(v.class) || (v.why_asked?.reasons ?? []).includes('one-way-door');
-    if (reserved) die(`answer --from-chat: ${id} is reserved to the owner (${v.kind}${v.class ? `, ${v.class}` : ''}); ask them to answer it from the dashboard or their terminal`);
   }
   const answer = restWords.join(' ').trim();
   let autonomy;
@@ -4394,16 +4407,15 @@ function cmdAnswer() {
     const rung = flagNum('autonomy');
     if (![1, 2, 3].includes(rung)) die('--autonomy is 1 (ask), 2 (ask with a default) or 3 (act and report)');
     if (rung > def.ceiling) die(`${v.class} has a ceiling of rung ${def.ceiling} (constitution.md)`);
-    if (fromChat && rung > rungFor(v.class, flagStr('scope') ?? null)) die(`answer --from-chat can lower ${v.class}'s rung but not raise it (now ${rungFor(v.class, flagStr('scope') ?? null)}): the owner raises a rung from the dashboard or their terminal`);
     autonomy = { class: v.class, rung, scope: flagStr('scope') ?? null };
   }
-  const reviewFields = reviewResult ? acceptReviewResult(v, reviewResult) : decline ? { answer: `Sent back: ${answer}`, declined: true } : {};
+  const reviewFields = reviewResult ? acceptReviewResult(v, reviewResult, fromChat ? 'chat' : ownerChannel()) : decline ? { answer: `Sent back: ${answer}`, declined: true } : {};
   appendLog({ type: 'question', op: 'set', id, answer, autonomy, standing_rule: flagStr('rule'), ...reviewFields, ...(fromChat ? { channel: 'chat', said: flagStr('said').trim() } : {}) }, by);
   if (v.kind === 'review') fs.rmSync(reviewDraftFile(id), { force: true });
   // A standing rule applies where the owner says (--rule-scope), else where the question says its
   // rule would apply (ask --rule-scope; the dashboard shows it next to the rule field), else the
   // whole project.
-  if (flagStr('rule')) appendLog({ type: 'knowledge', kind: 'preference', statement: flagStr('rule'), scope: flagStr('rule-scope') ?? v.rule_scope ?? 'project', status: 'accepted', confidence: 1, evidence: [id] }, by);
+  if (flagStr('rule')) appendLog({ type: 'knowledge', kind: 'preference', statement: flagStr('rule'), scope: flagStr('rule-scope') ?? v.rule_scope ?? 'project', status: 'accepted', confidence: 1, evidence: [id], channel: fromChat ? 'chat' : undefined }, by);
   if (!fromChat) nudgeSupervisor(`[devteam answer ${id} from owner] read it with: devteam.mjs questions --id ${id}`);
   out(`${decline ? 'sent back' : 'answered'} ${id}${fromChat ? ' (from chat; listed on the dashboard for the owner to check)' : reviewFields.result ? `: ${reviewFields.answer} (result sha256 ${reviewFields.result.sha256.slice(0, 12)})` : ''}`);
 }
@@ -4977,7 +4989,7 @@ const ownEntry = (o, k) => (o !== null && typeof o === 'object' && Object.hasOwn
 // result rows), answers only known rows, each once, leaving rows undecided only when the question
 // allows it. kept and the counts are recomputed here, never taken from the page. Returns the
 // fields of the owner's answer line, after writing run/questions/<qid>/result.json.
-function acceptReviewResult(v, src) {
+function acceptReviewResult(v, src, channel) {
   const rv = v.review;
   const pins = reviewPins(rv);
   if (pins.status === 'missing') die(`${v.id}: the page's commit ${rv.commit.slice(0, 12)} (${rv.ref}) is gone or on no branch, and its files are not on main, so nothing can be answered on it; tell the supervisor to ask again`);
@@ -5032,7 +5044,7 @@ function acceptReviewResult(v, src) {
     stored.summary = c;
   }
   stored.answered_at = nowIso();
-  stored.channel = ownerChannel();
+  stored.channel = channel;
   const text = `${JSON.stringify(stored, null, 2)}\n`;
   const file = reviewResultFile(v.id);
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -5240,6 +5252,8 @@ function parseSink(sink, { soft = false } = {}) {
   if (!argv[0]) fail(`sink "${sink}": stdin:<command> <args…> (arguments can't contain spaces)`);
   return { type, argv };
 }
+// The files a secrets question's sinks write: what its chore lands.
+const secretStores = (v) => (v.secrets ?? []).flatMap((x) => { try { const f = parseSink(x.sink, { soft: true }).file; return f ? [f] : []; } catch { return []; } });
 // A stdin sink runs as the owner, so it must start with a command the owner allowed in settings.
 function allowedCommand(argv) {
   const line = argv.join(' ');
@@ -6149,9 +6163,6 @@ function goalMetProblem(q, goalId, qid, at = null) {
   if (v.class !== 'goal-met') return `${v.id} was asked in class ${v.class ?? '(none)'}, not goal-met`;
   if (v.goal !== goalId) return `${v.id} is about ${v.goal ?? 'no goal'}, not ${goalId} (ask with --goal ${goalId})`;
   if (v.status !== 'answered') return `${v.id} is not answered by the owner (${v.status})`;
-  // goal-met is owner_only: the supervisor can't record a chat answer to it, so a line that says so
-  // was written by hand.
-  if (v.channel === 'chat') return `${v.id} was answered in chat; the owner answers a goal-met question from the dashboard or their terminal`;
   if (!v.matched) return `${v.id} was answered "${v.answer}", not its recommendation${v.recommendation ? ` ("${v.recommendation}")` : ''}`;
   if (at && at < v.answered_at) return `the reading was written before ${v.id} was answered`;
   return null;
@@ -6159,7 +6170,7 @@ function goalMetProblem(q, goalId, qid, at = null) {
 // The registry is complete (planning.md §7), the precondition the Baseline carries: its count half
 // is components check --count, with the gates; its other half is the owner's yes to a
 // registry-attest question about the goal, which goal-readiness waits for. Only the owner's own
-// answer counts (registry-attest is owner_only, so never a chat answer or a default), and only yes.
+// answer counts (registry-attest is owner_only, so never a default; chat counts), and only yes.
 // The goal carries it as a field, registry_precondition: the number of its precondition that is
 // "the registry is complete", set by goal add|set --registry-precondition n (none clears it). The
 // check is keyed to that field, never to a precondition's wording.
@@ -6209,11 +6220,10 @@ function readinessGoal(refs) {
 }
 function registryAttestGap(goalId) {
   const qs = questions().filter((q) => q.class === 'registry-attest' && q.goal === goalId);
-  if (qs.some((q) => q.status === 'answered' && q.channel !== 'chat' && q.matched && q.answer.trim().toLowerCase().split(' — ')[0] === 'yes')) return null;
+  if (qs.some((q) => q.status === 'answered' && q.matched && q.answer.trim().toLowerCase().split(' — ')[0] === 'yes')) return null;
   const last = qs.sort((a, b) => (a.asked_at < b.asked_at ? -1 : 1)).pop();
   if (!last) return 'none asked yet';
   if (last.status !== 'answered') return `${last.id} is not answered by the owner (${last.status})`;
-  if (last.channel === 'chat') return `${last.id} was answered in chat; the owner answers it from the dashboard or their terminal`;
   return `${last.id} was answered "${last.answer}", not yes`;
 }
 // The readings that count. Each must match how the goal is read, whoever wrote the line: a repo
@@ -6231,7 +6241,7 @@ function goalReadings(gid) {
   return all.filter((o) => {
     if (src === 'repo') return o.source === 'repo' && typeof o.sha === 'string' && onMain(o.sha);
     if (src === 'prod') return o.source === 'prod';
-    if (o.created_by === 'owner') return o.channel !== 'chat';
+    if (o.created_by === 'owner') return true;
     if (!o.approved || used.has(o.approved) || o.measure.value !== 1 || goalMetProblem(logGet(o.approved), gid, o.approved, o.created_at)) return false;
     used.add(o.approved);
     return true;
@@ -6482,11 +6492,14 @@ function cmdGoal() {
   // (notes the planner must take into account; the supervisor reworks the design and asks again),
   // or let go (abandoned). It answers the open goal-approval question for the goal.
   if (sub === 'approve' || sub === 'decide') {
-    const { by } = ownerWriter();
+    const said = flags['from-chat'] ? chatAnswer('goal decide') : null;
+    const { by } = said ? { by: 'owner' } : ownerWriter();
+    const chat = said ? { channel: 'chat' } : {};
     const g = logGet(id);
     if (g?.type !== 'goal') die(`no goal ${id}`);
     const verdict = sub === 'approve' ? 'approve' : positional[2];
-    if (!['approve', 'refine', 'let-go', 'restore'].includes(verdict)) die('usage: goal decide <g-id> approve|refine|let-go|restore [--notes "…"] [--question q-…]');
+    if (!['approve', 'refine', 'let-go', 'restore'].includes(verdict)) die('usage: goal decide <g-id> approve|refine|let-go|restore [--notes "…"] [--question q-…] [--from-chat --said "…"]');
+    if (said && verdict === 'restore') die('goal decide restore is the owner\'s undo of a let go, not an answer to a question; it doesn\'t come from chat');
     // Restore undoes a let go: the goal gets back the status it had, parked, and its questions return.
     if (verdict === 'restore') {
       if (g.status !== 'abandoned') die(`${id} is ${g.status ?? 'draft'}, not let go; nothing to restore`);
@@ -6502,15 +6515,16 @@ function cmdGoal() {
     if (verdict === 'refine' && !notes) die('refine needs --notes: what the planner should change');
     const ask = flagStr('question') ? questions().find((q) => q.id === flagStr('question')) : questions().find((q) => q.kind === 'goal-approval' && q.goal === id && q.status === 'open');
     if (flagStr('question') && (!ask || ask.kind !== 'goal-approval' || ask.goal !== id)) die(`${flagStr('question')} is not a goal-approval question for ${id}`);
+    if (said && ask?.status !== 'open') die(`goal decide --from-chat answers ${id}'s open goal-approval question, and there is none`);
     if (verdict === 'approve') {
       const c = goalCheck(g);
       if (c.definition.length && !flags.force) die(`${id} is not fully defined:\n  - ${c.definition.join('\n  - ')}\n(--force to approve anyway)`);
       if (!ask && !flags.force) die(`${id} has no design up for approval: the supervisor writes and reviews the design first, then asks (ask --kind goal-approval --goal ${id}); --force to approve without one`);
     }
     const status = { approve: 'ready', refine: undefined, 'let-go': 'abandoned' }[verdict];
-    appendLog({ type: 'goal', op: 'set', id, status, decision: { verdict, notes, question: ask?.id } }, by);
-    if (ask?.status === 'open') appendLog({ type: 'question', op: 'set', id: ask.id, answer: `${{ approve: 'Approve', refine: 'Refine', 'let-go': 'Let go' }[verdict]}${notes ? ` — ${notes}` : ''}` }, by);
-    nudgeSupervisor(`[devteam goal ${verdict} ${id} from owner] read it with: devteam.mjs goal show ${id}${verdict === 'let-go' ? `; its sessions park: goal park-sessions ${id}` : ''}`);
+    appendLog({ type: 'goal', op: 'set', id, status, decision: { verdict, notes, question: ask?.id }, ...chat }, by);
+    if (ask?.status === 'open') appendLog({ type: 'question', op: 'set', id: ask.id, answer: `${{ approve: 'Approve', refine: 'Refine', 'let-go': 'Let go' }[verdict]}${notes ? ` — ${notes}` : ''}`, ...chat, ...(said ? { said } : {}) }, by);
+    if (!said) nudgeSupervisor(`[devteam goal ${verdict} ${id} from owner] read it with: devteam.mjs goal show ${id}${verdict === 'let-go' ? `; its sessions park: goal park-sessions ${id}` : ''}`);
     return out(`${id}: ${verdict}${status ? ` (${status})` : ''}${verdict === 'let-go' ? '; its sessions park and its questions leave the inbox (goal decide restore undoes it)' : ''}`);
   }
   // The goal's toggle (planning.md §1, holds): run, drain or park. The owner sets any; the
@@ -7187,6 +7201,22 @@ function cmdObserveSpend() {
 let spendWhoMemo = null;
 const spendByWho = () => { if (spendWhoMemo) return spendWhoMemo; const m = new Map(); for (const r of spendItems()) { const x = m.get(r.who) ?? { usd: 0, input_tokens: 0, output_tokens: 0 }; x.usd += r.usd; x.input_tokens += r.input + r.cache_read + r.cache_write; x.output_tokens += r.output; m.set(r.who, x); } return (spendWhoMemo = m); };
 
+// Chat answers of the last week whose quoted words aren't in an owner-typed line of the supervisor's
+// own transcript (Claude Code's only; real owner lines are userType "external"). Only what the tail
+// read by supervisorTranscript covers is checked: no transcript, or an older answer, says nothing.
+const CHAT_QUOTE_WINDOW_MS = 7 * 24 * 3600000;
+function chatQuotesNotFound() {
+  if (!/^claude(\s|$)/.test(loadSettings().resume_command)) return [];
+  const recent = questions().filter((q) => q.channel === 'chat' && q.said && Date.now() - Date.parse(q.answered_at) < CHAT_QUOTE_WINDOW_MS);
+  const t = recent.length ? supervisorTranscript() : null;
+  if (!t) return [];
+  const from = Date.parse(t.entries.find((o) => o?.timestamp)?.timestamp);
+  const norm = (x) => x.toLowerCase().replace(/[\u2018\u2019]/g, "'").replace(/[\u201c\u201d]/g, '"').replace(/\s+/g, ' ').trim();
+  const typed = t.entries.filter((o) => o?.type === 'user' && o.userType === 'external' && !o.isMeta && !o.isSidechain).map((o) => { const c = o.message?.content; return norm(typeof c === 'string' ? c : Array.isArray(c) ? c.filter((x) => x?.type === 'text').map((x) => x.text).join(' ') : ''); });
+  // typed while the agent was mid-turn: the transcript has these as queued attachments
+  typed.push(...t.entries.filter((o) => o?.type === 'attachment' && o.attachment?.type === 'queued_command' && o.origin?.kind === 'human' && typeof o.attachment.prompt === 'string').map((o) => norm(o.attachment.prompt)));
+  return recent.filter((q) => { const said = norm(q.said).replace(/^["'\s]+|["'.!?\s]+$/g, ''); return Date.parse(q.answered_at) >= from && !typed.some((x) => x.includes(said)); });
+}
 function collectMetrics(since) {
   const settings = loadSettings();
   const now = Date.now();
@@ -7453,6 +7483,9 @@ function collectMetrics(since) {
   const readyFix = ready.filter((t) => t.kind === 'fix').map((t) => ({ ...t, sev: incidentSeverity(incidentOfTicket(t.id) ?? { fingerprints: [] }) })).sort((a, b) => b.sev - a.sev);
   if (!drained && readyFix.length && active >= settings.max_active_tickets && active < settings.max_active_tickets + (settings.incident_slots ?? 0)) add('medium', 'idle-capacity', `${readyFix.length} fix ready`, `${active}/${settings.max_active_tickets} workers active, and an incident slot is free`, `make a worker for: ${readyFix[0].id}`);
   if (!drained && ready.length && active < settings.max_active_tickets) add('medium', 'idle-capacity', `${ready.length} ready`, `${active}/${settings.max_active_tickets} workers active`, `make workers for: ${ready.slice(0, 5).map((t) => t.id).join(', ')}`);
+  // A chat answer's quote that the supervisor's transcript doesn't show the owner typing: a record
+  // for the owner to look at, never a block.
+  for (const q of chatQuotesNotFound()) add('medium', 'chat-quote-not-found', q.id, `recorded from chat as the owner's words, "${q.said.slice(0, 120)}", and the supervisor's transcript has no owner message with them`, 'check it on the dashboard; if the owner never said it, correct the answer');
   // A harness's runtime file committed by accident: it churns in every worktree and means nothing elsewhere.
   const trackedRuntime = (git(['ls-files'], mainRoot) ?? '').split('\n').filter((f) => f && isHarnessRuntime(f));
   if (trackedRuntime.length) add('medium', 'tracked-runtime-file', trackedRuntime.slice(0, 3).join(', '), `${trackedRuntime.length} agent-harness runtime file(s) are tracked in git (${trackedRuntime.slice(0, 5).join(', ')}): machine-local state that changes in every worktree`, `a chore (it changes .gitignore, so it needs the owner's answer): git rm --cached ${trackedRuntime.map((f) => `'${f}'`).join(' ')}, and add ${RUNTIME_RES.filter(([, re]) => trackedRuntime.some((f) => re.test(f))).map(([pat]) => pat).join(' ')} to .gitignore`);
@@ -7462,8 +7495,12 @@ function collectMetrics(since) {
   const accounts = accountsState();
   if (accounts?.exhausted) add('high', 'accounts-exhausted', 'cswap', 'every cswap account is at a usage limit', 'wait for a reset or add an account (cswap add)');
   for (const a of accounts?.needs_login ?? []) add('medium', 'account-needs-login', a, 'cswap can no longer refresh this account', 'log in with it in Claude Code, then cswap add');
-  for (const a of accounts?.restart_gave_up ?? []) add('high', 'restart-gave-up', a, `this session keeps stopping at a usage limit: restarted ${RESTART_MAX} times in 6 hours, so it is left alone until those attempts age out`, `look at why: tmux capture-pane -p -t '${tmuxTarget(a)}', its account's usage (cswap list) and what it was doing. It is retried by itself once an attempt is 6 hours old`);
-  if (accounts?.supervisor_limit) add('high', 'supervisor-at-limit', 'supervisor', `the supervisor stopped at a usage limit: "${accounts.supervisor_limit.text}"`, 'once an account has room, exit it and resume its session (Claude Code: /exit, then claude --resume): a running session keeps the limit even after the login changes');
+  for (const a of accounts?.restart_gave_up ?? []) add('high', 'restart-gave-up', a, `this session keeps needing a restart (a usage limit, or its window gone after the machine stopped): restarted ${RESTART_MAX} times in 6 hours, so it is left alone until those attempts age out`, `look at why: ${a === 'supervisor' ? 'its pane' : `tmux capture-pane -p -t '${tmuxTarget(a)}'`}, its account's usage (cswap list) and what it was doing. It is retried by itself once an attempt is 6 hours old`);
+  if (accounts?.supervisor_limit) {
+    // the id is read back from a file any agent could write: only one that could be an id is shown
+    const id = SESSION_ID.test(accounts.supervisor_limit.session ?? '') ? accounts.supervisor_limit.session : null;
+    add('high', 'supervisor-at-limit', 'supervisor', `the supervisor stopped at a usage limit: "${accounts.supervisor_limit.text}"${accounts.supervisor_limit.refused ? `; not restarted: ${String(accounts.supervisor_limit.refused).slice(0, 200)}` : ''}`, `once an account has room, exit it and resume its session (Claude Code: /exit, then ${id ? supervisorRecovery(id) : 'claude --resume, choosing its conversation'}): a running session keeps the limit even after the login changes`);
+  }
   if (prodKey && (settings.worktree_files ?? []).includes(prodKey)) add('high', 'production-key-in-worktrees', prodKey, `settings.worktree_files copies ${prodKey}, which decrypts production's credentials, into every worker's worktree`, `the owner's change (settings, gate-change): give agents only development and test keys. ${prodKey === 'config/master.key' ? 'Move production secrets to config/credentials/production.yml.enc with its own production.key, kept only on the platform and in the owner\'s shell, then' : 'Then'} drop ${prodKey} from worktree_files (code-style.md §10)`);
   // Spend, for the improvement loop (supervisor.md §9): what costs more than it should.
   if (m.cost.source === 'measured') {
@@ -7879,6 +7916,8 @@ const RESTART_MAX = 3;
 const RESTART_CHILD_MS = 100000;
 const RESTART_TICK_MS = 110000;
 const RESTART_MIN_MS = 30000;
+// makeSession --if-gone found the window there after all (it never types into one): not a failure.
+const IF_GONE_LEFT = 3;
 // The last moment a tick may start a cswap switch (its 45 s timeout, inside RESTART_TICK_MS).
 const SWITCH_LATEST_MS = RESTART_TICK_MS - 45000;
 // Claude Code's limit menu and banner, anchored: an agent's prose can quote either, and cswap only
@@ -8017,6 +8056,7 @@ function leaveFullAccount(bin, active, rows, began) {
 }
 // What a pane's bottom lines say about a limit stop. A banner counts only as the last thing the
 // agent said: nothing of its own after it, just the input box and status lines.
+const INPUT_LINE = /^[│┃|]?\s*[>❯](?:\s+(.*?))?\s*[│┃|]?$/;
 function limitStop(rawLines) {
   const lines = rawLines.map((l) => l.trim());
   const raw = rawLines.filter((l) => !PANE_CODE.test(l.trim()));
@@ -8026,7 +8066,9 @@ function limitStop(rawLines) {
   const banner = raw.findLastIndex((l) => LIMIT_BANNER.test(l));
   const after = banner === -1 ? [] : own.slice(banner + 1);
   const [, promptRe] = PANE_WAITS.find(([k]) => k === 'prompt');
-  return { menu, limit: menu || (banner !== -1 && !after.some((l) => /^[⏺●⎿]/.test(l))), otherPrompt: !menu && own.some((l) => promptRe.test(l) || /Enter to confirm/.test(l)), busy: lines.some((l) => PANE_BUSY.test(l)), shells: lines.some((l) => PANE_SHELL.test(l)) };
+  // the input line under a banner, from the unfiltered lines (PANE_CODE takes "> text" for code)
+  const input = banner === -1 ? null : rawLines.slice(rawLines.findLastIndex((l) => LIMIT_BANNER.test(l)) + 1).map((l) => INPUT_LINE.exec(l.trim())).filter(Boolean).pop();
+  return { menu, draft: !menu && !!input?.[1], limit: menu || (banner !== -1 && !after.some((l) => /^[⏺●⎿]/.test(l))), otherPrompt: !menu && own.some((l) => promptRe.test(l) || /Enter to confirm/.test(l)), busy: lines.some((l) => PANE_BUSY.test(l)), shells: lines.some((l) => PANE_SHELL.test(l)) };
 }
 // Not sh(): it trims the output, which would put the pane's first line at column 0.
 function paneBottom(target) {
@@ -8037,20 +8079,30 @@ function paneBottom(target) {
 // A window that is one pane, stopped at a limit with nothing else going on: the tick asks before it
 // starts a relaunch, and makeSession again right before it replaces the process (worktree_setup may
 // have run for a while in between). A split window could lose the wrong pane; a background shell's
-// work would die with the session.
+// work would die with the session. Nor is it replaced with a person at it: a half-typed line under
+// the banner, or a client on that pane that pressed a key lately (read from tmux each time, so it
+// can't outlive the client).
 function paneStoppedAtLimit(target) {
   if ((sh('tmux', ['list-panes', '-t', target, '-F', '#{pane_id}']) ?? '').split('\n').filter(Boolean).length !== 1) return false;
   const st = limitStop(paneBottom(target));
-  return st.limit && !st.busy && !st.otherPrompt && !st.shells;
+  return st.limit && !st.busy && !st.otherPrompt && !st.shells && !st.draft && !clientActiveOn(target);
+}
+function clientActiveOn(target) {
+  const [active, session] = (sh('tmux', ['display-message', '-p', '-t', target, '#{window_active}#{pane_active}\t#{session_name}']) ?? '').split('\t');
+  if (active !== '11') return false;
+  const now = Date.now() / 1000;
+  return (sh('tmux', ['list-clients', '-t', `=${session}`, '-F', '#{client_activity}']) ?? '').split('\n').map(Number).some((t) => t > 0 && now - t < SETTLED_MS / 1000);
+}
+// Did this pane start in that directory? Compared resolved: tmux keeps the path as it was given.
+function paneStartedIn(target, dir) {
+  try { return fs.realpathSync(sh('tmux', ['display-message', '-p', '-t', target, '#{pane_start_path}'])) === dir; } catch { return false; }
 }
 // Is this window a session the supervisor launched? A name and a banner are not enough: an agent can
 // open a window called anything showing anything, and the relaunch runs as the supervisor. It must
 // have started in that session's own worktree under the main checkout, the supervisor's log must
 // show the launch, and a worker's ticket must have started.
 function launchedByKit(target, name, role) {
-  try {
-    if (fs.realpathSync(sh('tmux', ['display-message', '-p', '-t', target, '#{pane_start_path}'])) !== path.join(fs.realpathSync(mainRoot), '.worktrees', name)) return false;
-  } catch { return false; }
+  if (!paneStartedIn(target, path.join(fs.realpathSync(mainRoot), '.worktrees', name))) return false;
   if (role === 'worker' && !lastPhaseOf(name)) return false;
   const said = [`made ${role} ${name} in `, `resumed ${role} ${name} in `];
   return logObjects('act').some((a) => a.class === 'worker-slots' && a.created_by === 'supervisor' && said.some((p) => String(a.what).startsWith(p)));
@@ -8068,64 +8120,134 @@ function restartTimes(now) {
   }
   return live;
 }
-// Restart one session stopped at a limit: 'restarted', 'failed' (tried, and it may not be running),
-// 'gave-up' (stopped again, past the cap), or null when there is nothing to do. A running Claude Code
-// session keeps the limit it hit even after the machine's login moves to an account with room (typing
-// "carry on" into it meets the same banner), so it is relaunched as `worker|planner <id> --resume`
-// would, in a fresh process on the active account, continuing the same conversation. makeSession
-// replaces the old process itself, after everything that can refuse, and no key is sent to it. The
-// attempt is recorded first, under the lock, so a tick killed halfway can't restart it twice and a
-// session that keeps stopping runs into the cap: if it can't be recorded, nothing is done. A budget
-// of 0 only looks: no relaunch, but a session past the cap is still reported.
-function restartPane(name, launch, budget) {
-  const { target, problem } = resolvePane(tmuxTarget(name));
-  if (problem || !target || !paneStoppedAtLimit(target) || !launchedByKit(target, name, launch[0])) return null;
-  const now = Date.now();
-  let verdict;
+// Takes this session's next restart from the record: 'go', 'gave-up' (past the cap) or null (not due,
+// or no budget). Recorded before anything is done, under the lock, so a tick killed halfway can't
+// restart it twice and a session that keeps stopping runs into the cap: if it can't be recorded,
+// nothing is done. A budget of 0 only looks.
+// Gives back a claim nothing was done with, so a pane that turned out fine costs no attempt. Best
+// effort: a crash before this leaves the attempt counted, and it ages out with the others.
+function releaseRestart(name, at) {
+  try { withLock(ACCOUNTS_RESUMED, () => { const live = restartTimes(Date.now()); const left = (live[name] ?? []).filter((t) => t !== at); if (left.length) live[name] = left; else delete live[name]; writeRestarts(live); }); } catch {}
+}
+function writeRestarts(live) {
+  fs.writeFileSync(`${ACCOUNTS_RESUMED}.${process.pid}`, JSON.stringify(live));
+  fs.renameSync(`${ACCOUNTS_RESUMED}.${process.pid}`, ACCOUNTS_RESUMED);
+}
+function claimRestart(name, budget, now = Date.now()) {
   try {
     fs.mkdirSync(runDir, { recursive: true });
     // withLock clears a lock older than 10 s, so one left by a crash costs one wait
-    verdict = withLock(ACCOUNTS_RESUMED, () => {
+    return withLock(ACCOUNTS_RESUMED, () => {
       const live = restartTimes(now);
       const times = live[name] ?? [];
       if (times.length >= RESTART_MAX) return 'gave-up';
       if (!budget || (times.length && now - times.at(-1) < RESTART_EVERY_MS)) return null;
       live[name] = [...times, now];
-      fs.writeFileSync(`${ACCOUNTS_RESUMED}.${process.pid}`, JSON.stringify(live));
-      fs.renameSync(`${ACCOUNTS_RESUMED}.${process.pid}`, ACCOUNTS_RESUMED);
+      writeRestarts(live);
       return 'go';
     });
   } catch { return null; }
-  if (verdict !== 'go') return verdict;
-  // as the supervisor, but not from its pane: rememberSupervisorPane needs both markers, and TMUX
-  // stays so the child talks to this tmux server
+}
+// `worker|planner <id> --resume <flag>`, as the supervisor, but not from its pane: rememberSupervisorPane
+// needs both markers, and TMUX stays so the child talks to this tmux server
+function relaunchChild(launch, flag, budget) {
   const env = { ...process.env, DEVTEAM_ROLE: 'supervisor' };
   for (const k of ['TMUX_PANE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE']) delete env[k];
-  const r = spawnSync(process.execPath, [process.argv[1], ...launch, '--resume', '--replace-agent'], { cwd: mainRoot, env, encoding: 'utf8', timeout: budget, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'pipe'] });
+  return spawnSync(process.execPath, [process.argv[1], ...launch, '--resume', flag], { cwd: mainRoot, env, encoding: 'utf8', timeout: budget, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'pipe'] });
+}
+// Restart one session stopped at a limit: 'restarted', 'failed' (tried, and it may not be running),
+// 'gave-up' (stopped again, past the cap), or null when there is nothing to do. A running Claude Code
+// session keeps the limit it hit even after the machine's login moves to an account with room (typing
+// "carry on" into it meets the same banner), so it is relaunched as `worker|planner <id> --resume`
+// would, in a fresh process on the active account, continuing the same conversation. makeSession
+// replaces the old process itself, after everything that can refuse, and no key is sent to it.
+function restartPane(name, launch, budget) {
+  const { target, problem } = resolvePane(tmuxTarget(name));
+  if (problem || !target || !paneStoppedAtLimit(target) || !launchedByKit(target, name, launch[0])) return null;
+  const now = Date.now();
+  const verdict = claimRestart(name, budget);
+  if (verdict !== 'go') return verdict;
+  const r = relaunchChild(launch, '--replace-agent', budget);
   const ok = r.status === 0;
   const why = (r.stderr || r.error?.message || `exit ${r.status}`).trim().slice(0, 200);
   appendLog({ type: 'observation', source: 'pane', kind: 'limit-restarted', subject: name, detail: ok ? 'a session stopped at a usage limit was restarted on the active account, which has room' : `a session stopped at a usage limit could not be restarted: ${why}`, detector: 'pane', source_key: `limit-restarted ${name} ${now}` });
   if (!ok) out(`could not restart ${name}: ${why}`);
   return ok ? 'restarted' : 'failed';
 }
+// A machine that died (a dead battery, a redeploy) took the tmux server with it, and what survives
+// on disk says which sessions to bring back: every worker and planner the kit launched, not held
+// or finished, whose worktree still exists and whose window doesn't. Only when the tmux session is
+// gone, or was created after that session's last launch: a window closed in a session older than
+// its launch was closed on purpose, and stays closed (the findings report it).
+const LAUNCH_ACT = /^(?:made|resumed) (worker|planner) (\S+) in /;
+const SETTLED_MS = 2 * 60000;
+function lastLaunches() {
+  const last = new Map();
+  for (const a of logObjects('act')) {
+    const m = a.class === 'worker-slots' && a.created_by === 'supervisor' ? LAUNCH_ACT.exec(String(a.what)) : null;
+    const at = m ? Date.parse(a.created_at) : NaN;
+    if (Number.isFinite(at) && !(last.get(m[2])?.at > at)) last.set(m[2], { role: m[1], at });
+  }
+  return last;
+}
+// When this project's tmux session was created, { missing: true } if there's none (no server at all,
+// after a reboot), or null if tmux didn't answer: not knowing is not a reason to start anything.
+function tmuxSessionAge(session) {
+  const r = spawnSync('tmux', ['list-sessions', '-F', '#{session_name}\t#{session_created}'], { encoding: 'utf8', timeout: 30000, stdio: ['ignore', 'pipe', 'pipe'] });
+  if (r.status !== 0) return /no server running|no sessions|error connecting|no such file/i.test(r.stderr ?? '') ? { missing: true } : null;
+  const row = r.stdout.split('\n').map((l) => l.split('\t')).find(([n]) => n === session);
+  if (!row) return { missing: true };
+  const created = Number(row[1]) * 1000;
+  return Number.isFinite(created) && created > 0 ? { created } : null;
+}
+function sessionsToRelaunch(launchOf, held) {
+  const session = tmuxSession();
+  const age = tmuxSessionAge(session);
+  if (!age) return [];
+  const windows = new Set(age.missing ? [] : (sh('tmux', ['list-windows', '-t', `=${session}`, '-F', '#W']) ?? '').split('\n'));
+  const found = [];
+  for (const [name, { role, at }] of lastLaunches()) {
+    const launch = launchOf(name);
+    if (!launch || launch[0] !== role || windows.has(name) || !(age.missing || age.created > at)) continue;
+    if (!fs.existsSync(path.join(mainRoot, '.worktrees', name)) || !sessionOf(name).readable || held(name)) continue;
+    if (role === 'worker' ? !lastPhaseOf(name) || tickets().get(name)?.superseded_by : !planners().some((p) => p.feature === launch[1])) continue;
+    found.push({ name, launch });
+  }
+  return found;
+}
+// Bring one back in a new window: 'relaunched', 'failed', 'gave-up', or null when not due. --if-gone
+// refuses if the window has appeared meanwhile, which is not a failure: someone else got there first.
+function relaunchGone(name, launch, budget) {
+  const now = Date.now();
+  const verdict = claimRestart(name, budget);
+  if (verdict !== 'go') return verdict;
+  const r = relaunchChild(launch, '--if-gone', budget);
+  if (r.status === IF_GONE_LEFT) return 'left';
+  const ok = r.status === 0;
+  const why = (r.stderr || r.error?.message || `exit ${r.status}`).trim().slice(0, 200);
+  appendLog({ type: 'observation', source: 'pane', kind: 'session-relaunched', subject: name, detail: ok ? 'a session whose window was gone after the machine stopped was relaunched' : `a session whose window was gone could not be relaunched: ${why}`, detector: 'pane', source_key: `session-relaunched ${name} ${now}` });
+  if (!ok) out(`could not relaunch ${name}: ${why}`);
+  return ok ? 'relaunched' : 'failed';
+}
 // makeSession --replace-agent: the pane's process becomes a shell in the worktree. respawn-pane -k
 // only sends SIGHUP, so the process and its direct children (the agent, under the pane's shell) are
 // noted first, and any still alive a moment later get a SIGTERM. Only those pids.
 function replacePaneProcess(target, wt) {
   const pid = Number(sh('tmux', ['display-message', '-p', '-t', target, '#{pane_pid}']));
-  if (!Number.isInteger(pid) || pid <= 1) die(`could not read the process of ${target}: left as it was`);
+  if (!Number.isInteger(pid) || pid <= 1) return `could not read the process of ${target}: left as it was`;
   const pids = [pid, ...(sh('pgrep', ['-P', String(pid)]) ?? '').split('\n').map(Number).filter((p) => Number.isInteger(p) && p > 1)];
   // a login shell, as a new window gets, not the pane's first command (respawn-pane's default), which may be the agent itself
   const shell = sh('tmux', ['show-options', '-gv', 'default-shell'])?.trim() || process.env.SHELL || '/bin/sh';
-  if (!tmux(['respawn-pane', '-k', '-c', wt, '-t', target, `${shell} -l`])) die(`could not replace the process in ${target}`);
+  if (!tmux(['respawn-pane', '-k', '-c', wt, '-t', target, `${shell} -l`])) return `could not replace the process in ${target}`;
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
   for (const p of pids) {
     try { process.kill(p, 0); process.kill(p, 'SIGTERM'); } catch {}
   }
+  return null;
 }
-// The supervisor's transcript ending on a rate-limit error means it has stopped. It is the owner's
-// session, started their way, so it is reported, never restarted. Which one is the
-// supervisor's: of the newest few in the main checkout, the one the kit started as the supervisor or
+// The supervisor's transcript ending on a rate-limit error means it has stopped: reported, and when
+// it runs in tmux and can be restarted on that exact conversation, restarted (restartSupervisor).
+// Which one is the supervisor's: of the newest few in the main checkout, the one the kit started as the supervisor or
 // that ran supervisor commands (a command it ran: reading or quoting the words is not enough).
 // Nothing else is taken for it, and a limit lasts a week at most.
 const SUPERVISOR_COMMAND = /^\s*(?:cd \S+ && )?DEVTEAM_ROLE=supervisor node /;
@@ -8147,19 +8269,117 @@ function supervisorTranscript() {
   return null;
 }
 function supervisorLimit() {
-  const last = supervisorTranscript()?.entries.filter((o) => o?.type === 'assistant').pop();
+  const t = supervisorTranscript();
+  const last = t?.entries.filter((o) => o?.type === 'assistant').pop();
   if (!last) return null;
   if (last?.error !== 'rate_limit' || !(Date.now() - Date.parse(last.timestamp) < SUPERVISOR_LIMIT_MAX_MS)) return null;
   const c = last.message?.content;
-  return { at: last.timestamp, text: String((Array.isArray(c) ? c[0]?.text : c) ?? 'usage limit').slice(0, 200) };
+  return { at: last.timestamp, text: String((Array.isArray(c) ? c[0]?.text : c) ?? 'usage limit').slice(0, 200), session: supervisorSessionId(t) };
 }
 // supervisor-session: the id of the supervisor's conversation, for resuming it after the machine
 // died: it reads only what's on disk. Claude Code's alone; another harness, or none found, prints
 // nothing, so nobody resumes a guess.
 function cmdSupervisorSession() {
-  if (!/^claude(\s|$)/.test(loadSettings().resume_command)) return;
-  const t = supervisorTranscript();
-  if (t) out(path.basename(t.file, '.jsonl'));
+  const id = supervisorSessionId();
+  if (id) out(id);
+}
+// The conversation's id, only for Claude Code and only in the characters an id has: it goes on a
+// command line. Null means nothing to resume rather than a guess.
+const SESSION_ID = /^[A-Za-z0-9_-]+$/;
+function supervisorSessionId(t = supervisorTranscript()) {
+  if (!/^claude(\s|$)/.test(loadSettings().resume_command) || !t) return null;
+  const id = path.basename(t.file, '.jsonl');
+  return SESSION_ID.test(id) ? id : null;
+}
+// The repo's resume_command on this exact conversation (--continue replaced, as the box's boot
+// does), or null when it has no --continue to replace.
+function supervisorResumeCommand(id) {
+  const cmd = loadSettings().resume_command;
+  return /\s--continue(\s|$)/.test(cmd) ? cmd.replace(/(\s)--continue(?=\s|$)/, `$1--resume ${id}`) : null;
+}
+// A process's arguments and environment, from the OS, or null if they can't be read; a caller that
+// needs the environment checks it isn't empty. Linux keeps them exact; ps runs each together with
+// spaces, so the environment is what `ps e` adds to the arguments (nothing, on macOS, for a shell in
+// /bin), and the arguments are only words.
+function processInfo(pid) {
+  if (process.platform === 'linux') {
+    const read = (f) => fs.readFileSync(`/proc/${pid}/${f}`, 'utf8').split('\0').filter(Boolean);
+    try { return { args: read('cmdline'), env: read('environ') }; } catch { return null; }
+  }
+  const args = sh('ps', ['-ww', '-o', 'command=', '-p', String(pid)]);
+  const both = sh('ps', ['eww', '-o', 'command=', '-p', String(pid)]);
+  if (!args || !both?.startsWith(args)) return null;
+  return { args: args.split(/\s+/), env: both.slice(args.length).trim().split(/\s+/).filter(Boolean) };
+}
+// The agent in a pane: the pane's own process, or the one child of its shell. Null when that can't
+// be said for sure, and a caller deciding on it refuses.
+function paneAgentProcess(target) {
+  const pid = Number(sh('tmux', ['display-message', '-p', '-t', target, '#{pane_pid}']));
+  if (!Number.isInteger(pid) || pid <= 1) return null;
+  const own = processInfo(pid);
+  if (!own || !SHELLS.has(path.basename(own.args[0] ?? '').replace(/^-/, ''))) return own;
+  const kids = (sh('pgrep', ['-P', String(pid)]) ?? '').split('\n').filter(Boolean);
+  return kids.length === 1 ? processInfo(Number(kids[0])) : null;
+}
+// Was it started with the flag? Only among the options before its first plain argument: the prompt
+// is an argument too, and can mention the flag. Not knowing reads as no.
+const SKIP_PERMISSIONS = '--dangerously-skip-permissions';
+function startedSkippingPermissions(args) {
+  for (let i = /^(node|bun)$/.test(path.basename(args[0] ?? '')) ? 2 : 1; args[i]?.startsWith('-'); i++) {
+    if (args[i] === SKIP_PERMISSIONS) return true;
+    if (args[i + 1] && !args[i + 1].startsWith('-')) i++;
+  }
+  return false;
+}
+const withoutSkipPermissions = (cmd) => cmd.replace(new RegExp(`\\s${SKIP_PERMISSIONS}(?=\\s|$)`, 'g'), '');
+const isSupervisorProcess = (p) => !!p && p.env.includes('DEVTEAM_ROLE=supervisor');
+// The line that brings the supervisor back by hand (in a terminal, after a dead machine or a refused
+// restart): DEVTEAM_ROLE first, as its own start has it. Null without a conversation to resume.
+// Permission prompts stay on unless the supervisor running now was started without them.
+function supervisorRecovery(id) {
+  if (!id) return null;
+  const cmd = supervisorResumeCommand(id) ?? loadSettings().resume_command.replace(/^claude(?=\s|$)/, `claude --resume ${id}`);
+  const { target } = resolvePane(supervisorTarget());
+  const agent = target ? paneAgentProcess(target) : null;
+  return `DEVTEAM_ROLE=supervisor ${isSupervisorProcess(agent) && startedSkippingPermissions(agent.args) ? cmd : withoutSkipPermissions(cmd)}`;
+}
+// A supervisor in tmux stopped at a limit, on its exact conversation: claude --resume <id> from
+// resume_command, in place of the pane's process, after the same refusals as a worker. Claude Code
+// only; without an id, or for anything else, it isn't guessed at, and the finding says how to resume
+// by hand. The same record and caps as restartPane, under the name "supervisor". A parked or drained
+// fleet's supervisor stays stopped, as box-supervisors leaves it.
+const SUPERVISOR_RESTART_PROMPT = 'You were restarted after a usage limit, on this same conversation. Carry on from where you were.';
+// What to restart, null if it isn't due, or { refused } if the process can't be read. A banner in the
+// recorded pane says nothing about whose conversation it is, so the id comes from a transcript that
+// itself ends on a limit, and the pane's process must be running as the supervisor. It keeps the
+// permissions it had: a supervisor started by hand without the flag is not given it.
+function supervisorToRestart() {
+  const { target, problem } = resolvePane(supervisorTarget());
+  if (problem || !target || !paneStoppedAtLimit(target) || !paneStartedIn(target, fs.realpathSync(mainRoot))) return null;
+  const id = supervisorLimit()?.session;
+  const cmd = id ? supervisorResumeCommand(id) : null;
+  if (!cmd) return null;
+  const agent = paneAgentProcess(target);
+  if (!agent?.env.length) return { refused: `could not read the environment of the process in ${target}` };
+  if (!isSupervisorProcess(agent)) return null;
+  return { target, id, cmd: startedSkippingPermissions(agent.args) ? cmd : withoutSkipPermissions(cmd) };
+}
+function restartSupervisor(budget) {
+  if (draining() || fleetMode()) return null;
+  const found = supervisorToRestart();
+  if (!found || found.refused) return found;
+  const { target, id, cmd } = found;
+  const now = Date.now();
+  const verdict = claimRestart('supervisor', budget, now);
+  if (verdict !== 'go') return verdict;
+  // the same order as --replace-agent: everything is checked once more, right before it is replaced
+  const again = supervisorToRestart();
+  if (again?.target !== target || again.id !== id) { releaseRestart('supervisor', now); return null; }
+  let failed = replacePaneProcess(target, mainRoot);
+  if (!failed && !typeInto(target, `export DEVTEAM_ROLE=supervisor; ${sessionMarkerPrefix()}${cmd} '${SUPERVISOR_RESTART_PROMPT}'`)) failed = `could not type into ${target}; run ${cmd} there`;
+  appendLog({ type: 'observation', source: 'pane', kind: 'limit-restarted', subject: 'supervisor', detail: failed ? `the supervisor, stopped at a usage limit, could not be restarted: ${failed}` : `the supervisor, stopped at a usage limit, was restarted on conversation ${id}`, detector: 'pane', source_key: `limit-restarted supervisor ${now}` });
+  if (failed) out(`could not restart the supervisor: ${failed}`);
+  return failed ? 'failed' : 'restarted';
 }
 function accountsState() {
   try {
@@ -8174,8 +8394,16 @@ function cmdAccountsTick() {
   if (logWriter() !== 'supervisor' || ['worker', 'planner'].includes(process.env.DEVTEAM_ROLE)) die('accounts-tick: the supervisor does this');
   const bin = findCswap();
   const before = accountsState();
-  const state = { at: nowIso(), cswap: !!bin, active: null, active_no_room: false, exhausted: false, needs_login: [], restart_gave_up: [], supervisor_limit: null, resumed: [] };
+  const state = { at: nowIso(), cswap: !!bin, active: null, active_no_room: false, exhausted: false, needs_login: [], restart_gave_up: [], supervisor_limit: null, resumed: [], relaunched: [] };
   let switched = false;
+  let supervisorRestarted = false;
+  let supervisorRefused = null;
+  // only the kit's own sessions, and only those it would launch now: a held one stays as it is
+  const launchOf = (name) => (name.startsWith('plan-') ? ['planner', name.slice('plan-'.length)] : tickets().has(name) ? ['worker', name] : null);
+  const held = (name) => ['done', 'parked'].includes(workerState(name)?.phase) || !!mergeShaFor(name) || ['park', 'let-go'].includes(sessionMode(name)) || !!draining();
+  // one relaunch a tick, in what's left of it; the rest still report if they've given up
+  let tried = false;
+  const budget = () => { const left = RESTART_TICK_MS - (Date.now() - began); return tried || left < RESTART_MIN_MS ? 0 : Math.min(RESTART_CHILD_MS, left); };
   if (bin) {
     const who = (x) => (x && typeof x === 'object' ? x.email ?? x.alias ?? x.number ?? '?' : x ?? '?');
     const saySwitched = (e) => out(`cswap switched account${e.from || e.to ? `: ${who(e.from)} -> ${who(e.to)}` : ''}`);
@@ -8210,16 +8438,15 @@ function cmdAccountsTick() {
       // A session holds the old login for about 30 s after a switch (macOS), and any dashboard's
       // rotation can be the one that switched: resume only on an account this project's last tick saw too.
       if (!switched && state.active && before?.active === state.active && accountHasRoom(active)) {
-        // only the kit's own sessions, and only those it would launch now: a held one stays as it is
-        const launchOf = (name) => (name.startsWith('plan-') ? ['planner', name.slice('plan-'.length)] : tickets().has(name) ? ['worker', name] : null);
-        const held = (name) => ['done', 'parked'].includes(workerState(name)?.phase) || !!mergeShaFor(name) || ['park', 'let-go'].includes(sessionMode(name)) || !!draining();
-        // one relaunch a tick, in what's left of it; the rest still report if they've given up
-        let tried = false;
+        const sup = restartSupervisor(budget());
+        if (sup?.refused) { supervisorRefused = sup.refused; out(`the supervisor is stopped at a usage limit and was not restarted: ${sup.refused}`); }
+        else if (sup === 'gave-up') state.restart_gave_up.push('supervisor');
+        else if (sup) tried = true;
+        if (sup === 'restarted') { supervisorRestarted = true; out('restarted the supervisor: it had stopped at a usage limit'); }
         for (const { name } of ourWindows(tmuxSession())) {
           const launch = launchOf(name);
           if (!launch || held(name)) continue;
-          const left = RESTART_TICK_MS - (Date.now() - began);
-          const did = restartPane(name, launch, tried || left < RESTART_MIN_MS ? 0 : Math.min(RESTART_CHILD_MS, left));
+          const did = restartPane(name, launch, budget());
           if (did === 'gave-up') state.restart_gave_up.push(name);
           else if (did) tried = true;
           if (did === 'restarted') state.resumed.push(name);
@@ -8228,8 +8455,19 @@ function cmdAccountsTick() {
       for (const w of state.resumed) out(`restarted ${w}: it had stopped at a usage limit`);
     }
   }
-  // in tmux or not, with or without cswap
-  state.supervisor_limit = supervisorLimit();
+  // After a dead machine, with or without cswap. Not onto an account known to be full: the session
+  // would only stop again, and it is still there for a later tick.
+  if (!state.active_no_room) {
+    for (const { name, launch } of sessionsToRelaunch(launchOf, held)) {
+      const did = relaunchGone(name, launch, budget());
+      if (did === 'gave-up') state.restart_gave_up.push(name);
+      else if (did) tried = true;
+      if (did === 'relaunched') { state.relaunched.push(name); out(`relaunched ${name}: its window was gone`); }
+    }
+  }
+  // in tmux or not, with or without cswap; just restarted, it hasn't stopped
+  state.supervisor_limit = supervisorRestarted ? null : supervisorLimit();
+  if (state.supervisor_limit && supervisorRefused) state.supervisor_limit.refused = supervisorRefused;
   fs.mkdirSync(runDir, { recursive: true });
   const tmp = `${ACCOUNTS_FILE}.${process.pid}`;
   fs.writeFileSync(tmp, JSON.stringify(state));
@@ -8623,6 +8861,19 @@ function cmdPrompt() {
 const tmux = (args) => sh('tmux', args) !== null;
 // Environment variables that mark a process as inside one running agent session (Claude Code's).
 const SESSION_MARKERS = /^(CLAUDECODE|CLAUDE_CODE_[A-Z0-9_]+|CLAUDE_PID)$/;
+// `env -u` for the session markers this process or the tmux server carries; empty when there are none.
+function sessionMarkerPrefix() {
+  const markers = [...new Set([...Object.keys(process.env), ...(sh('tmux', ['show-environment', '-g']) ?? '').split('\n'), ...(sh('tmux', ['show-environment', '-t', `=${tmuxSession()}`]) ?? '').split('\n')].map((l) => l.replace(/^-/, '').split('=')[0]).filter((k) => SESSION_MARKERS.test(k)))].sort();
+  return markers.length ? `env ${markers.map((k) => `-u ${k}`).join(' ')} ` : '';
+}
+// What a tmux server started here keeps in its global environment for every window it ever opens:
+// nothing that says which session started it (the tick's relaunch is the supervisor, and a window
+// the owner opens there would have owner commands refused).
+function tmuxServerEnv() {
+  const env = ownerProcessEnv();
+  for (const k of Object.keys(env)) if (k === 'DEVTEAM_CHANNEL' || k === 'TMUX_PANE' || SESSION_MARKERS.test(k)) delete env[k];
+  return env;
+}
 // The session:window running this command. TMUX_PANE pins it to our own pane.
 const tmuxHere = () => (process.env.TMUX && process.env.TMUX_PANE ? sh('tmux', ['display-message', '-p', '-t', process.env.TMUX_PANE, '#S:#W']) : null);
 const supervisorTarget = () => process.env.DEVTEAM_SUPERVISOR ?? readText(supervisorPaneFile())?.trim() ?? null;
@@ -8887,6 +9138,10 @@ function makeSession(role) {
   // accounts-tick's relaunch of a session stopped at a limit: the pane's process is replaced here,
   // after every refusal and after seedWorktree, so a refusal or a failing setup leaves it running.
   const replaceAgent = !!flags['replace-agent'] && !!flags.resume;
+  // accounts-tick's relaunch of a session whose window is gone: refused if the window is there after
+  // all, so it can never type into a live agent. Decided under the launch lock below.
+  const ifGone = !!flags['if-gone'] && !!flags.resume;
+  if (flags['if-gone'] && !flags.resume) die('--if-gone goes with --resume');
   const id = positional[0] ?? die(`usage: ${role} <${role === 'worker' ? 'ticket-id' : 'feature'}> [--resume] [--force]`);
   if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
   if (role === 'worker' && !tickets().has(id)) die(`no ticket ${id} (devteam.mjs ticket show ${id})`);
@@ -8916,7 +9171,7 @@ function makeSession(role) {
   if (!sh('tmux', ['-V'])) die('tmux not found');
   // A warning only: the numbers can be 10 minutes old, and the supervisor may know better. Not for
   // a relaunch at a limit: the tick starts that once there's room, and this file can lag it.
-  if (!replaceAgent && accountsState()?.active_no_room) warn(`the active Claude account (${String(accountsState().active ?? 'unknown').slice(0, 80)}) has no room left, so this ${role} may stop at its limit: wait for a reset or switch account (cswap)`);
+  if (!replaceAgent && !ifGone && accountsState()?.active_no_room) warn(`the active Claude account (${String(accountsState().active ?? 'unknown').slice(0, 80)}) has no room left, so this ${role} may stop at its limit: wait for a reset or switch account (cswap)`);
   const s = loadSettings();
   let resume = !!flags.resume;
   const blockSize = flagNum('id-block') ?? ID_BLOCK_DEFAULT;
@@ -8925,6 +9180,7 @@ function makeSession(role) {
   const branch = role === 'worker' ? `ticket/${id}` : `plan/${id}`;
   const wt = path.join(mainRoot, '.worktrees', name);
   if (replaceAgent && !fs.existsSync(wt)) die(`--replace-agent: ${name} has no worktree at ${wt}; nothing to resume, and its process is left as it is`);
+  if (ifGone && !fs.existsSync(wt)) die(`--if-gone: ${name} has no worktree at ${wt}; nothing to resume`, IF_GONE_LEFT);
   fs.mkdirSync(path.join(runDir, 'prompts'), { recursive: true });
   // A planner gets a block of ticket numbers before it numbers anything; one that has a block keeps
   // it, and one that numbered tickets before blocks existed gets none (nothing to check it against).
@@ -8961,47 +9217,67 @@ function makeSession(role) {
   const text = `${promptFor(role, id, R)}${held ? ` ${idBlockText(held)}` : ''}`;
   const handoff = handoffBlock(name);
   fs.writeFileSync(promptFile, `${text}${handoff ? `\n\n${handoff}` : ''}${links ? `\n\n${links}` : ''}${arts ? `\n\n${arts}` : ''}${knowledge ? `\n\n${knowledge}` : ''}\n`);
-  // Workers live in detached tmux windows the owner can attach to; the supervisor is not one of them.
-  let fresh = false;
-  const session = tmuxSession({ save: true });
-  if (replaceAgent && !(sh('tmux', ['list-windows', '-t', `=${session}`, '-F', '#W']) ?? '').split('\n').includes(name)) die(`--replace-agent: no window ${session}:${name} to restart in`);
-  if (!tmux(['has-session', '-t', `=${session}`])) { fresh = tmux(['new-session', '-d', '-s', session, '-n', name, '-c', wt]); if (!fresh) die('could not start tmux'); }
-  const windows = (sh('tmux', ['list-windows', '-t', `=${session}`, '-F', '#W']) ?? '').split('\n');
-  if (!fresh && windows.includes(name)) { if (!flags.resume) die(`window ${session}:${name} exists (use --resume to relaunch in it)`); }
-  else if (!fresh) tmux(['new-window', '-d', '-t', `=${session}`, '-n', name, '-c', wt]);
-  const target = `=${session}:${name}`;
-  const shown = `${session}:${name}`;
-  const env = `export DEVTEAM_HOME=${shq(mainRoot)} DEVTEAM_RUN='${runDir}' DEVTEAM_ROLE='${role}' ${role === 'worker' ? `DEVTEAM_TICKET='${id}'` : `DEVTEAM_FEATURE='${id}'`}`;
-  if (replaceAgent) {
-    // worktree_setup can take minutes: the owner may have quit the agent and started something since
-    if (resolvePane(target).problem || !paneStoppedAtLimit(target)) die(`--replace-agent: ${shown} no longer shows a limit stop; left as it is`);
-    replacePaneProcess(target, wt);
-  }
-  // Past the replacement nothing is left running there, so a failure has to surface, not log success.
-  const type = (line) => { if (!typeInto(target, line) && replaceAgent) die(`could not type into ${shown}: its old process is gone and the new one did not start; ${role} ${id} --resume starts it`); };
-  type(env);
-  // Worker and planner policy travels with the launch, not the repo's agent config (which may be
-  // gitignored, and would bind the supervisor too): for Claude Code, a --settings file in run/.
-  let cmd = resume ? s.resume_command : s.agent_command;
-  if (/^claude(\s|$)/.test(cmd)) {
-    // per session: the deny rules name the main branch of the repo this session works in
-    const policy = path.join(runDir, 'agent', `${name}-claude.json`);
-    fs.mkdirSync(path.dirname(policy), { recursive: true });
-    fs.writeFileSync(policy, `${JSON.stringify({ permissions: { deny: deniedFor(s.worker_denied_commands, mb).map((c) => `Bash(${c})`) }, hooks: { Stop: [{ hooks: [{ type: 'command', command: `node '${path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs')}' stop-ok` }] }] } }, null, 2)}\n`);
-    cmd = cmd.replace(/^claude/, `claude --settings '${policy}'`);
-  }
-  // A tmux server started from inside an agent session (the supervisor's, on a new machine) hands
-  // every window that session's markers; a worker that inherits them runs as its child (Claude Code
-  // then saves no transcript, so its spend goes unmeasured). Strip them for the agent, whatever the
-  // window's shell is. Only per-session markers: settings an owner may export (CLAUDE_CONFIG_DIR) stay.
-  const markers = [...new Set([...Object.keys(process.env), ...(sh('tmux', ['show-environment', '-g']) ?? '').split('\n'), ...(sh('tmux', ['show-environment', '-t', `=${tmuxSession()}`]) ?? '').split('\n')].map((l) => l.replace(/^-/, '').split('=')[0]).filter((k) => SESSION_MARKERS.test(k)))].sort();
-  type(`${markers.length ? `env ${markers.map((k) => `-u ${k}`).join(' ')} ` : ''}${cmd} "$(cat '${promptFile}')"`);
-  if (role === 'worker' && !resume) appendLog({ type: 'phase', from: null, to: 'starting', note: `started in ${shown}` }, id);
-  // a planner parked by a park is running again
-  if (role === 'planner' && lastPhaseOf(name)?.to === 'parked') appendLog({ type: 'phase', from: 'parked', to: 'starting', note: `started in ${shown}` }, name);
-  appendLog({ type: 'act', decision: citing(), class: 'worker-slots', what: `${resume ? 'resumed' : 'made'} ${role} ${name} in ${shown}${block ? `, ticket numbers ${padNN(block.from)}-${padNN(block.to)}` : ''}${refused ? ` while its goal is ${holdWords(mode)}, with --force` : ''}`, refs: role === 'worker' ? [id] : goalIds, reversible: true, id_block: block ?? undefined }, 'supervisor');
-  out(`${resume ? 'resumed' : 'made'} ${role} ${name} in ${shown} at ${wt}${block ? `; ticket numbers ${padNN(block.from)}-${padNN(block.to)} reserved` : ''}`);
-}
+  // One step under a lock per session, the look at the window through the act that records the
+  // launch, so two launches of one session at the same moment can't both type into it: whichever
+  // comes second finds the first's window and leaves it alone. withLock clears a lock older than
+  // 10 s, so a launch that crashed halfway costs the next one a wait, never a wedge.
+  class LaunchRefused extends Error { constructor(m, code) { super(m); this.code = code; } }
+  const refuse = (m, code = 1) => { throw new LaunchRefused(m, code); };
+  try {
+    withLock(path.join(runDir, `launch-${name}`), () => {
+    // Workers live in detached tmux windows the owner can attach to; the supervisor is not one of them.
+    let fresh = false;
+    const session = tmuxSession({ save: true });
+    if (replaceAgent && !(sh('tmux', ['list-windows', '-t', `=${session}`, '-F', '#W']) ?? '').split('\n').includes(name)) refuse(`--replace-agent: no window ${session}:${name} to restart in`);
+    if (!tmux(['has-session', '-t', `=${session}`])) { fresh = sh('tmux', ['new-session', '-d', '-s', session, '-n', name, '-c', wt], { env: tmuxServerEnv() }) !== null; if (!fresh) refuse('could not start tmux'); }
+    const windows = (sh('tmux', ['list-windows', '-t', `=${session}`, '-F', '#W']) ?? '').split('\n');
+    if (!fresh && windows.includes(name)) {
+      if (ifGone) refuse(`--if-gone: window ${session}:${name} exists; left as it is`, IF_GONE_LEFT);
+      if (!flags.resume) refuse(`window ${session}:${name} exists (use --resume to relaunch in it)`);
+      // the race with the tick's relaunch: it recorded this session a moment ago and its agent is still
+      // coming up, so its window is left alone. The record ages out, so this can't wedge a real resume.
+      const t = restartTimes(Date.now())[name]?.at(-1);
+      if (!replaceAgent && t && Date.now() - t < SETTLED_MS) refuse(`window ${session}:${name} was relaunched by the dashboard moments ago; left as it is`, 0);
+      // a resume is typed into the pane: with an agent running there it would land in that agent's input
+      if (!replaceAgent && !resolvePane(`=${session}:${name}`).problem) refuse(`window ${session}:${name} has a live agent; quit it or close the window first, then --resume`);
+    } else if (!fresh) tmux(['new-window', '-d', '-t', `=${session}`, '-n', name, '-c', wt]);
+    const target = `=${session}:${name}`;
+    const shown = `${session}:${name}`;
+    const env = `export DEVTEAM_HOME=${shq(mainRoot)} DEVTEAM_RUN='${runDir}' DEVTEAM_ROLE='${role}' ${role === 'worker' ? `DEVTEAM_TICKET='${id}'` : `DEVTEAM_FEATURE='${id}'`}`;
+    if (replaceAgent) {
+      // worktree_setup can take minutes: the owner may have quit the agent and started something since
+      if (resolvePane(target).problem || !paneStoppedAtLimit(target)) refuse(`--replace-agent: ${shown} no longer shows a limit stop; left as it is`);
+      const failed = replacePaneProcess(target, wt);
+      if (failed) refuse(failed);
+    }
+    // Past the replacement nothing is left running there, so a failure has to surface, not log success.
+    const type = (line) => { if (!typeInto(target, line) && (replaceAgent || ifGone)) refuse(`could not type into ${shown}: ${replaceAgent ? 'its old process is gone and the new one did not start' : 'its new window has no agent in it'}; ${role} ${id} --resume starts it`); };
+    type(env);
+    // Worker and planner policy travels with the launch, not the repo's agent config (which may be
+    // gitignored, and would bind the supervisor too): for Claude Code, a --settings file in run/.
+    let cmd = resume ? s.resume_command : s.agent_command;
+    if (/^claude(\s|$)/.test(cmd)) {
+      // per session: the deny rules name the main branch of the repo this session works in
+      const policy = path.join(runDir, 'agent', `${name}-claude.json`);
+      fs.mkdirSync(path.dirname(policy), { recursive: true });
+      fs.writeFileSync(policy, `${JSON.stringify({ permissions: { deny: deniedFor(s.worker_denied_commands, mb).map((c) => `Bash(${c})`) }, hooks: { Stop: [{ hooks: [{ type: 'command', command: `node '${path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs')}' stop-ok` }] }] } }, null, 2)}\n`);
+      cmd = cmd.replace(/^claude/, `claude --settings '${policy}'`);
+    }
+    // A tmux server started from inside an agent session (the supervisor's, on a new machine) hands
+    // every window that session's markers; a worker that inherits them runs as its child (Claude Code
+    // then saves no transcript, so its spend goes unmeasured). Strip them for the agent, whatever the
+    // window's shell is. Only per-session markers: settings an owner may export (CLAUDE_CONFIG_DIR) stay.
+    type(`${sessionMarkerPrefix()}${cmd} "$(cat '${promptFile}')"`);
+    if (role === 'worker' && !resume) appendLog({ type: 'phase', from: null, to: 'starting', note: `started in ${shown}` }, id);
+    // a planner parked by a park is running again
+    if (role === 'planner' && lastPhaseOf(name)?.to === 'parked') appendLog({ type: 'phase', from: 'parked', to: 'starting', note: `started in ${shown}` }, name);
+    appendLog({ type: 'act', decision: citing(), class: 'worker-slots', what: `${resume ? 'resumed' : 'made'} ${role} ${name} in ${shown}${block ? `, ticket numbers ${padNN(block.from)}-${padNN(block.to)}` : ''}${refused ? ` while its goal is ${holdWords(mode)}, with --force` : ''}`, refs: role === 'worker' ? [id] : goalIds, reversible: true, id_block: block ?? undefined }, 'supervisor');
+    out(`${resume ? 'resumed' : 'made'} ${role} ${name} in ${shown} at ${wt}${block ? `; ticket numbers ${padNN(block.from)}-${padNN(block.to)} reserved` : ''}`);
+    });
+  } catch (e) {
+    if (e instanceof LaunchRefused) die(e.message, e.code);
+    throw e;
+  }}
 
 // A session's deny rules: the owner's worker_denied_commands, where a push rule that names the
 // literal branch main also names the main branch of the repo the session works in (a sibling on
@@ -9425,8 +9701,10 @@ function fleetStatus() {
   const checklist = moveChecklist(s, memory);
   const ready = !blockers.length;
   const parity = ready ? parityPrint() : null;
-  const r = { parity, supervisor_handoff: sh0 ? { at: sh0.at, current: handoffOk } : null, fleet: fm ? { mode: fm, op: op?.fleet ?? legacy?.id ?? null, at: since, host: legacy ? drainHost(legacy) : op?.host ?? null, reason: legacy ? drainReason(legacy) : op?.reason ?? null } : null, sessions, log: { landed: !unlanded.length, unlanded, left_behind: leftBehind }, spend: { unobserved: spendOthers, supervisor_usd: supUsd }, reviews: { uncommitted, drafts }, open_prs: prs ?? [], open_questions: openQs, ...(repoLinks.length ? { repos } : {}), blockers, warnings, ready, checklist };
+  const recovery = supervisorRecovery(supervisorSessionId());
+  const r = { parity, supervisor_handoff: sh0 ? { at: sh0.at, current: handoffOk } : null, fleet: fm ? { mode: fm, op: op?.fleet ?? legacy?.id ?? null, at: since, host: legacy ? drainHost(legacy) : op?.host ?? null, reason: legacy ? drainReason(legacy) : op?.reason ?? null } : null, sessions, log: { landed: !unlanded.length, unlanded, left_behind: leftBehind }, spend: { unobserved: spendOthers, supervisor_usd: supUsd }, reviews: { uncommitted, drafts }, open_prs: prs ?? [], open_questions: openQs, ...(repoLinks.length ? { repos } : {}), blockers, warnings, ready, checklist, ...(recovery ? { recovery } : {}) };
   if (flags.json) return json(r);
+  if (r.recovery) out(`recovery (to bring the supervisor back, from the main checkout): ${r.recovery}`);
   out(fm ? `${fm === 'park' ? 'parked' : 'draining'}${since ? ` since ${since}` : ''} (${r.fleet.op ?? 'every goal held one by one'}${r.fleet.host ? `, on ${r.fleet.host}` : ''})${r.fleet.reason ? `: ${r.fleet.reason}` : ''}` : 'neither parked nor drained');
   out(`\nsessions:${sessions.length ? '' : ' none'}`);
   for (const x of sessions) out(x.readable === false ? `  ${x.name.padEnd(28)} ${x.parked ? 'parked' : `NOT PARKED (${x.phase ?? '-'})`}  ${x.repo}: NO CHECKOUT HERE` : `  ${x.name.padEnd(28)} ${x.parked ? 'parked' : fm === 'drain' ? `STILL RUNNING (${x.phase ?? '-'})` : `NOT PARKED (${x.phase ?? '-'})`}  ${x.pushed ? 'pushed' : 'NOT PUSHED'}  ${x.clean ? 'clean' : 'UNCOMMITTED'}  ${x.handoff ? 'handoff' : 'NO HANDOFF'}${x.repo ? `  (${x.repo})` : ''}`);
@@ -11756,7 +12034,7 @@ Setup and roles
   init [--name n] [--upstream-base vX]   project folders, settings, .gitignore, the devteam section of AGENTS.md
   prompt supervisor | worker <id> | planner <feature>    the prompt a session starts with
   supervisor-session                 the id of the supervisor's Claude Code conversation (claude --resume <id>); nothing if there's none, or another harness
-  worker <ticket-id> [--resume] [--force] | worker <ticket-id> --remove [--force] | planner <feature> [--goal <g-id>] [--resume] [--force] [--id-block <n>]   supervisor: a worktree, a tmux window and an agent for a ticket or a feature plan (a new planner names its goal and reserves n ticket numbers, default 20); refused while its goal is parked or let go, or draining for a session that hasn't run, unless --force (logged); --resume where no session exists starts fresh with the handoff note; worker --remove, once the ticket is merged and its worker logged phase done (--force before that), removes its worktree through the repo it belongs to and prunes that repo's worktree list (the branch stays)
+  worker <ticket-id> [--resume [--if-gone]] [--force] | worker <ticket-id> --remove [--force] | planner <feature> [--goal <g-id>] [--resume] [--force] [--id-block <n>]   supervisor: a worktree, a tmux window and an agent for a ticket or a feature plan (a new planner names its goal and reserves n ticket numbers, default 20); refused while its goal is parked or let go, or draining for a session that hasn't run, unless --force (logged); --resume where no session exists starts fresh with the handoff note; worker --remove, once the ticket is merged and its worker logged phase done (--force before that), removes its worktree through the repo it belongs to and prunes that repo's worktree list (the branch stays)
   whoami | settings [--get key]
   hello [--json]                   who this instance is (root, name, kit, open questions, fleet): what the hub lists
 
@@ -11807,7 +12085,7 @@ Decide and act (supervisor.md, constitution.md)
   review verify <qid> --applied <file>   rows applied ([{ "id", "values", "evidence" }]) vs rows the owner decided; exit 1 on any difference
   review draft <qid> [<file|->]   owner: save partial progress; without a file, print it (a draft is never an answer)
   answer <qid> --review-result <file|-> | answer <qid> "<why>" --decline   (owner) a review: validate and hash its result, or send it back
-  answer <qid> "<text>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> "<text>" --from-chat --said "<owner's words>" | answer <qid> --defaulted   (supervisor)
+  answer <qid> "<text>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> "<text>" --from-chat --said "<owner's words>" [--autonomy n] [--rule "…"] | answer <qid> --defaulted   (supervisor)
   withdraw <qid> [--reason r] | questions [--all] [--id q] [--json]
   decide --class c [--scope s] [--approved qid|kid] [--options a b] [--rationale r] [--confidence 0-1] [--refs ids] [--irreversible] -- "<what>"   a judgment call and the trust it rests on; prints d-…
   act --decision d-… -- "<what>"   carry out a decision (merge, ticket, withdraw, goal hold, worker, planner, fleet and link take --decision too)

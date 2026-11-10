@@ -12,7 +12,7 @@ import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { write, json, fleetFixture, monoFixture, REAL_GIT } from './lib/kit.mjs';
 
-test('the registry attestation is the owner\'s: registry-attest is never answered from chat or defaulted, and a goal that needs the registry complete waits for the owner\'s yes', () => {
+test('the registry attestation is the owner\'s: registry-attest is never defaulted, a chat answer counts, and a goal that needs the registry complete waits for the owner\'s yes', () => {
   const F = fleetFixture('attest');
   const { old, ok, run } = F;
   const SUP = { DEVTEAM_ROLE: 'supervisor' };
@@ -44,9 +44,6 @@ test('the registry attestation is the owner\'s: registry-attest is never answere
     assert.match(run(old, ask, SUP).err, /--recommendation yes/);
     assert.match(run(old, ['ask', '--class', 'registry-attest', '--question', 'Complete?', '--recommendation', 'yes'], SUP).err, /registry-attest question needs --goal/);
     const Q = ok(old, [...ask, '--recommendation', 'yes'], SUP);
-    const chat = run(old, ['answer', Q, 'yes', '--from-chat', '--said', 'yes, that is everything'], SUP);
-    assert.notEqual(chat.status, 0, 'never answered from chat');
-    assert.match(chat.err, /reserved to the owner \(owner-decision, registry-attest\)/);
     assert.match(run(old, ['answer', Q, '--defaulted'], SUP).err, /no default to apply/, 'never defaulted');
     assert.match(ready(G).err, new RegExp(`${Q} is not answered by the owner`), 'readiness waits while the question is open');
     ok(old, ['answer', Q, 'no, the designs are missing']);
@@ -58,8 +55,9 @@ test('the registry attestation is the owner\'s: registry-attest is never answere
     // the marker is a goal field: a draft's supervisor sets and clears it by number
     ok(old, ['goal', 'set', third, '--registry-precondition', '1'], SUP);
     assert.match(ready(third).err, /no owner's yes to a registry-attest question \(none asked yet\)/);
-    ok(old, ['goal', 'set', third, '--registry-precondition', 'none'], SUP);
-    assert.equal(ready(third).status, 0);
+    const Qc = ok(old, ['ask', '--class', 'registry-attest', '--goal', third, '--question', 'Does the registry list every repo, design file and doc this project depends on?', '--recommendation', 'yes'], SUP);
+    ok(old, ['answer', Qc, 'yes', '--from-chat', '--said', 'yes, that is everything'], SUP);
+    assert.equal(ready(third).status, 0, "the owner's yes in chat attests like any other");
   } finally { F.done(); }
 });
 
