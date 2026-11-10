@@ -1074,7 +1074,7 @@ const supervisorOnly = (what) => {
 const supervisorPaneFile = () => path.join(runDir, 'supervisor-pane');
 function rememberSupervisorPane() {
   const pane = process.env.TMUX_PANE;
-  if (!pane || !process.env.TMUX) return;
+  if (!pane || !process.env.TMUX || (process.env.DEVTEAM_ROLE && process.env.DEVTEAM_ROLE !== 'supervisor')) return;
   if (readText(supervisorPaneFile()) === pane) return;
   fs.mkdirSync(runDir, { recursive: true });
   fs.writeFileSync(supervisorPaneFile(), pane);
@@ -2593,7 +2593,9 @@ const parkRulingSent = (name, marker) => logObjects('message').some((m) => m.to 
 function liveSessions() { return memo('liveSessions', liveSessionsNow); }
 function liveSessionsNow() {
   const names = new Set();
-  for (const t of tickets().values()) if (activeWorker(t.id) || (workerState(t.id)?.phase === 'parked' && !mergeShaFor(t.id) && isActive(t))) names.add(t.id);
+  // a superseded ticket is a session only while something still runs in its window
+  const windowUp = (id) => !/^no tmux (session|window)/.test(resolvePane(tmuxTarget(id)).problem ?? '');
+  for (const t of tickets().values()) if ((activeWorker(t.id) && (isActive(t) || windowUp(t.id))) || (workerState(t.id)?.phase === 'parked' && !mergeShaFor(t.id) && isActive(t))) names.add(t.id);
   for (const p of planners()) names.add(`plan-${p.feature}`);
   return [...names].sort().map(sessionOf);
 }
@@ -10208,6 +10210,7 @@ Dashboard and releases
   dashboard [--port p] [--host h] | dashboard-data | notes <from-tag> [<to>] [--repo <link>]
 `;
 
+const OPERATOR_READS = new Set(['status', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'fleet status']);
 const COMMANDS = {
   init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), whoami: cmdWhoami, hello: cmdHello, settings: cmdSettings,
   feature: cmdFeature, ticket: cmdTicket, components: cmdComponents, link: cmdLink, links: cmdLinks, artifact: cmdArtifact, artifacts: cmdArtifacts, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, roadmap: cmdRoadmap,
@@ -10222,6 +10225,9 @@ const COMMANDS = {
 };
 if (!command || command === 'help' || command === '--help') out(HELP);
 else if (!COMMANDS[command]) die(`unknown command "${command}"\n${HELP}`);
+// A cloud box's operator (process/operator.md) looks after the machine and reads every repo. Any other
+// role the kit doesn't know reads as the supervisor, so this one may only look.
+else if (process.env.DEVTEAM_ROLE === 'operator' && !OPERATOR_READS.has(command === 'fleet' ? `fleet ${positional[0]}` : command)) die(`${command}: the operator only reads; this is for the repo's supervisor or its owner`);
 else {
   // --decision names the decision a command's act carries out; check it before the command does anything.
   if (flags.decision !== undefined) {
