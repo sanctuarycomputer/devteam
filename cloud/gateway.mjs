@@ -330,6 +330,93 @@ export const publicCsp = (self) => {
 const LINK_ID = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
 // a project's name, as the kit requires it for publishing: part of every public URL
 const PROJECT = /^[a-z0-9][a-z0-9._-]{0,62}$/;
+const TREE = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
+const FILE_MAX = 8 * 1024 * 1024;
+const ARTIFACT_MAX = 25 * 1024 * 1024;
+const MANIFEST_KEYS = ['public', 'project', 'slug', 'title', 'summary', 'root', 'tree', 'files'];
+const hex256 = (b) => crypto.createHash('sha256').update(b).digest('hex');
+// The kit's canonical JSON: the owner confirms a manifest by its sha256, so both sides hash one text.
+export const canonicalJson = (v) => (Array.isArray(v) ? `[${v.map(canonicalJson).join(',')}]` : v && typeof v === 'object' ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(v[k])}`).join(',')}}` : JSON.stringify(v));
+// Whatever holds an instance's port wrote this, so it is checked as untrusted data, and only then
+// shown (escaped) or followed: every path the kit would serve, every size within the kit's limits.
+export function manifestProblem(m, slug) {
+  if (!m || typeof m !== 'object' || Array.isArray(m) || m.public !== 1) return 'not a manifest';
+  const extra = Object.keys(m).find((k) => !MANIFEST_KEYS.includes(k));
+  if (extra) return `unknown key "${extra.slice(0, 40)}"`;
+  if (typeof m.project !== 'string' || !PROJECT.test(m.project)) return 'the project name is not one a public link can carry';
+  if (typeof m.root !== 'string' || !m.root.startsWith('/') || m.root.length > 1024 || /[\u0000-\u001f\u007f]/.test(m.root)) return 'root is not an absolute path';
+  if (m.slug !== slug) return `the manifest is for ${String(m.slug).slice(0, 80)}, not ${slug}`;
+  if (typeof m.tree !== 'string' || !TREE.test(m.tree)) return 'tree is not a git tree id';
+  if (typeof m.title !== 'string' || m.title.length > 120 || typeof m.summary !== 'string' || m.summary.length > 500) return 'title or summary is not the kit\'s one line of text';
+  const files = m.files && typeof m.files === 'object' && !Array.isArray(m.files) ? Object.entries(m.files) : [];
+  if (!files.length || files.length > 2000) return 'a manifest lists 1 to 2000 files';
+  let total = 0;
+  for (const [rel, f] of files) {
+    if (!publicPathOk(rel)) return `${rel.slice(0, 120)}: not a path the kit serves`;
+    if (!f || typeof f !== 'object' || typeof f.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(f.sha256) || !Number.isInteger(f.size) || f.size < 0 || f.size > FILE_MAX || !['100644', '100755'].includes(f.mode)) return `${rel}: a bad entry (sha256, a size up to 8 MB, mode 100644 or 100755)`;
+    total += f.size;
+  }
+  if (total > ARTIFACT_MAX) return 'over 25 MB in all';
+  if (!Object.hasOwn(m.files, 'index.html')) return 'no index.html';
+  return null;
+}
+// git's own object ids, from the bytes: the record then names a tree git can check against main.
+export const gitBlobId = (buf, algo = 'sha1') => crypto.createHash(algo).update(`blob ${buf.length}\0`).update(buf).digest('hex');
+export function gitTreeId(files, algo = 'sha1') {
+  const root = new Map();
+  for (const [rel, f] of Object.entries(files)) {
+    const parts = rel.split('/');
+    let node = root;
+    for (let i = 0; i < parts.length - 1; i++) {
+      if (!node.has(parts[i])) node.set(parts[i], new Map());
+      node = node.get(parts[i]);
+      if (!(node instanceof Map)) throw new Error(`${parts.slice(0, i + 1).join('/')} is both a file and a folder`);
+    }
+    if (node.get(parts.at(-1)) instanceof Map) throw new Error(`${rel} is both a file and a folder`);
+    node.set(parts.at(-1), f);
+  }
+  // git sorts a tree's entries by name, a folder's name as if it ended in "/"
+  const write = (node) => {
+    const entries = [...node].map(([name, v]) => (v instanceof Map ? { name, key: `${name}/`, mode: '40000', oid: write(v) } : { name, key: name, mode: v.mode, oid: v.oid }));
+    entries.sort((a, b) => Buffer.compare(Buffer.from(a.key), Buffer.from(b.key)));
+    const body = Buffer.concat(entries.flatMap((e) => [Buffer.from(`${e.mode} ${e.name}\0`), Buffer.from(e.oid, 'hex')]));
+    return crypto.createHash(algo).update(`tree ${body.length}\0`).update(body).digest('hex');
+  };
+  return write(root);
+}
+// The published bytes, content-addressed under the gateway's own directory (no agent can write
+// there), and the one queue every change to them and to state.json's public map runs through.
+export function publicStore(dir) {
+  const blobs = path.join(dir, 'public', 'blobs');
+  const blobPath = (sha) => path.join(blobs, sha);
+  let queue = Promise.resolve();
+  const referenced = (pub) => {
+    const m = new Map();
+    for (const p of Object.values(pub ?? {})) for (const a of Object.values(p?.artifacts ?? {})) for (const f of Object.values(a?.files ?? {})) m.set(f.sha256, f.size);
+    return m;
+  };
+  return {
+    blobs,
+    blobPath,
+    serial: (fn) => { const run = queue.then(() => fn()); queue = run.catch(() => {}); return run; },
+    referenced,
+    write: (sha, buf) => {
+      if (fs.existsSync(blobPath(sha))) return false;
+      fs.mkdirSync(blobs, { recursive: true, mode: 0o700 });
+      const tmpFile = `${blobPath(sha)}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+      fs.writeFileSync(tmpFile, buf, { mode: 0o600 });
+      fs.renameSync(tmpFile, blobPath(sha));
+      return true;
+    },
+    // only ever inside the queue, so no temp file is still being written
+    sweep: (pub) => {
+      const keep = referenced(pub);
+      let names = [];
+      try { names = fs.readdirSync(blobs); } catch { return; }
+      for (const n of names) if (!keep.has(n)) fs.rmSync(path.join(blobs, n), { force: true });
+    },
+  };
+}
 
 // --- the server ---------------------------------------------------------------------------------
 export function createGateway(opts = {}) {

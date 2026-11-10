@@ -905,3 +905,68 @@ test('public.<box> serves artifacts with the kit\'s own type map, CDN list and p
   const kitOk = vm.runInContext(`(${pathOk})`, vm.createContext({}));
   for (const p of ['index.html', 'a/b.js', '.env', 'a/.git/x', 'a//b', 'a/../b', 'a%2eb', 'é.png', '__proto__']) assert.equal(G.publicPathOk(p), kitOk(p), p);
 });
+
+test('the gateway computes git\'s blob and tree ids from bytes, sha1 and sha256', () => {
+  const files = { 'index.html': '<!doctype html>', 'a/b.js': 'b', 'a/c/d.css': 'd', 'a-b.txt': 'x', 'a.txt': 'y', 'run.sh': 'echo' };
+  for (const fmt of ['sha1', 'sha256']) {
+    const d = fs.mkdtempSync(path.join(tmp, `tree-${fmt}-`));
+    if (spawnSync('git', ['init', '-q', `--object-format=${fmt}`, d]).status !== 0) { assert.equal(fmt, 'sha256', 'every git makes a sha1 repo'); continue; }
+    for (const [rel, text] of Object.entries(files)) { fs.mkdirSync(path.dirname(path.join(d, rel)), { recursive: true }); fs.writeFileSync(path.join(d, rel), text); }
+    fs.chmodSync(path.join(d, 'run.sh'), 0o755);
+    execFileSync('git', ['-c', 'core.fileMode=true', 'add', '-A'], { cwd: d });
+    const want = execFileSync('git', ['write-tree'], { cwd: d, encoding: 'utf8' }).trim();
+    const ids = Object.fromEntries(Object.entries(files).map(([rel, text]) => [rel, { oid: G.gitBlobId(Buffer.from(text), fmt), mode: rel === 'run.sh' ? '100755' : '100644' }]));
+    assert.equal(ids['a/b.js'].oid, execFileSync('git', ['hash-object', 'a/b.js'], { cwd: d, encoding: 'utf8' }).trim(), `${fmt} blob`);
+    assert.equal(G.gitTreeId(ids, fmt), want, `${fmt} tree, sorted as git sorts (a-b.txt, a.txt, a/)`);
+  }
+  assert.throws(() => G.gitTreeId({ a: { oid: 'a'.repeat(40), mode: '100644' }, 'a/b': { oid: 'a'.repeat(40), mode: '100644' } }), /a is both a file and a folder/);
+});
+
+test('a manifest from an instance is checked before anything of it is shown or fetched', () => {
+  const entry = { sha256: 'b'.repeat(64), size: 3, mode: '100644' };
+  const good = { public: 1, project: 'alpha', slug: 'hello', title: 'Hi', summary: 's', root: '/srv/alpha', tree: 'a'.repeat(40), files: { 'index.html': entry } };
+  assert.equal(G.manifestProblem(good, 'hello'), null);
+  assert.equal(G.manifestProblem({ ...good, tree: 'a'.repeat(64) }, 'hello'), null, 'a sha256 repo');
+  const bad = (over, re, slug = 'hello') => assert.match(String(G.manifestProblem({ ...good, ...over }, slug)), re, JSON.stringify(over).slice(0, 80));
+  bad({ public: 2 }, /not a manifest/);
+  bad({ project: 'Alpha' }, /project/);
+  bad({ project: `a${'b'.repeat(63)}` }, /project/);
+  bad({ root: 'srv/alpha' }, /root is not an absolute path/);
+  bad({ root: '/srv/\nalpha' }, /root is not an absolute path/);
+  bad({}, /the manifest is for hello, not other/, 'other');
+  bad({ tree: 'a'.repeat(41) }, /tree/);
+  bad({ title: 'x'.repeat(121) }, /title/);
+  bad({ extra: 1 }, /unknown key "extra"/);
+  bad({ files: {} }, /1 to 2000 files/);
+  bad({ files: Object.fromEntries(Array.from({ length: 2001 }, (_, i) => [i ? `f${i}.txt` : 'index.html', entry])) }, /1 to 2000 files/);
+  bad({ files: { 'index.html': entry, '.env': entry } }, /\.env: not a path the kit serves/);
+  bad({ files: { 'index.html': entry, 'a/../b': entry } }, /not a path the kit serves/);
+  bad({ files: { 'index.html': { ...entry, sha256: 'B'.repeat(64) } } }, /index\.html: a bad entry/);
+  bad({ files: { 'index.html': { ...entry, size: 8 * 1024 * 1024 + 1 } } }, /a bad entry/);
+  bad({ files: { 'index.html': { ...entry, mode: '120000' } } }, /a bad entry/);
+  bad({ files: { 'a.js': entry } }, /no index\.html/);
+  bad({ files: Object.fromEntries(Array.from({ length: 4 }, (_, i) => [i ? `f${i}.bin` : 'index.html', { ...entry, size: 7 * 1024 * 1024 }])) }, /over 25 MB/);
+  assert.equal(G.canonicalJson({ b: 1, a: [2, { d: 3, c: 4 }] }), '{"a":[2,{"c":4,"d":3}],"b":1}');
+});
+
+test('the public store: content-addressed blobs, one change at a time, swept to what state.json names', async () => {
+  const S = G.publicStore(fs.mkdtempSync(path.join(tmp, 'pstore-')));
+  const h = (t) => crypto.createHash('sha256').update(t).digest('hex');
+  assert.equal(S.write(h('a'), Buffer.from('a')), true);
+  assert.equal(S.write(h('a'), Buffer.from('a')), false, 'a blob is written once');
+  S.write(h('b'), Buffer.from('b'));
+  fs.writeFileSync(path.join(S.blobs, `${h('c')}.1.abc.tmp`), 'c');
+  const pub = { alpha: { root: '/r', port: 1, artifacts: { x: { tree: 't', files: { 'index.html': { sha256: h('a'), size: 1 }, 'copy.html': { sha256: h('a'), size: 1 } } } } } };
+  assert.deepEqual([...S.referenced(pub)], [[h('a'), 1]], 'each blob counts once');
+  S.sweep(pub);
+  assert.deepEqual(fs.readdirSync(S.blobs), [h('a')], 'unreferenced blobs and stray temp files go');
+  assert.equal(fs.readFileSync(S.blobPath(h('a')), 'utf8'), 'a');
+  const order = [];
+  const slow = S.serial(async () => { await new Promise((r) => setTimeout(r, 50)); order.push(1); });
+  const failing = S.serial(async () => { order.push(2); throw new Error('no'); });
+  const after = S.serial(() => { order.push(3); return 'ok'; });
+  await slow;
+  await assert.rejects(failing, /no/);
+  assert.equal(await after, 'ok', 'a failed change doesn\'t stop the next');
+  assert.deepEqual(order, [1, 2, 3]);
+});
