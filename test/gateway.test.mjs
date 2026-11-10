@@ -354,7 +354,7 @@ test('behind the gateway the kit runs as on a laptop: hub, dashboard, owner acti
     const list = (await gw.req('GET', '/instances.json', { headers: { 'sec-fetch-site': 'same-origin' } })).json.instances;
     assert.deepEqual(list.map((x) => [x.name, x.port]), [['alpha', P]]);
     const boxJson = (await gw.req('GET', '/box.json')).json;
-    assert.deepEqual(boxJson, { box: 1, terminal: `${gw.term}/`, instance: `http://{port}.box.localhost:${gw.port}/`, passkeys: `${gw.auth}/auth/passkeys`, push: boxJson.push }, 'the hub learns where instances are');
+    assert.deepEqual(boxJson, { box: 1, terminal: `${gw.term}/`, instance: `http://{port}.box.localhost:${gw.port}/`, passkeys: `${gw.auth}/auth/passkeys`, previews: `${gw.auth}/dev/`, push: boxJson.push }, 'the hub learns where instances are');
     assert.equal(Buffer.from(boxJson.push, 'base64url').length, 65, 'and the key that signs its notifications');
 
     // a dashboard on its own subdomain, exactly as the kit serves it, its policy pointed at the box
@@ -1840,4 +1840,371 @@ test('a body is bounded to its five minutes unless it is an upload that has pass
     assert.equal(slow.status, 200, slow.body);
     assert.equal(fs.readFileSync(JSON.parse(slow.body).path, 'utf8'), 'ab');
   } finally { await gw.close(); }
+});
+
+// --- dev links: a preview on a name of its own ---------------------------------------------------
+test('previewLinks: names from the hub\'s list, checked, ambiguous when two instances claim one', () => {
+  const inst = (root, port, previews) => ({ devteam: 1, root, port, name: root.split('/').pop(), previews });
+  const row = (name, port, over = {}) => ({ name, port, project: 'p', session: 's', label: 'l', at: 'now', up: true, run: false, ...over });
+  const ports = [P, P + 1];
+  const own = 30003;
+  const list = [
+    inst('/a', P, [
+      row('cool-tiger', 30001),
+      row('cool-tiger-2', 30002),
+      row('NOT-valid', 30002),
+      row('blocked-port', P + 1), // the block
+      row('hub-port', HUB),
+      row('term-port', 7681),
+      row('own-port', own),
+      row('string-port', '30002'),
+      row('label-long', 30002, { label: 'x'.repeat(41) }),
+      row('low-port', 80),
+    ]),
+    inst('/b', P + 1, [row('both-have', 30004, { project: 'b', label: '' }), row('other-only', 30005, { project: 'b'.repeat(100), session: 's'.repeat(100) })]),
+  ];
+  // a 21st entry is dropped: 20 are kept per instance
+  list[0].previews.push(row('both-have', 30006, { project: 'a' }));
+  const many = [inst('/many', P, Array.from({ length: 25 }, (_, i) => row(`many-${String.fromCharCode(97 + i)}${String.fromCharCode(97 + i)}x`, 31000 + i)))];
+  const m = G.previewLinks(list, ports, own);
+  assert.deepEqual({ ...m.get('cool-tiger') }, { port: 30001, root: '/a', project: 'p', session: 's', label: 'l', run: false });
+  assert.equal(m.get('cool-tiger-2').port, 30002, 'name and name-2 are two names');
+  for (const bad of ['NOT-valid', 'blocked-port', 'hub-port', 'term-port', 'own-port', 'string-port', 'label-long', 'low-port']) assert.equal(m.has(bad), false, `${bad} is dropped`);
+  assert.deepEqual(m.get('both-have').ambiguous.map((c) => ({ ...c })), [{ root: '/a', project: 'a', port: 30006 }, { root: '/b', project: 'b', port: 30004 }]);
+  const swapped = G.previewLinks([list[1], list[0]], ports, own);
+  assert.deepEqual(swapped.get('both-have').ambiguous.map((c) => c.root), ['/a', '/b'], 'whatever the roots\' order');
+  assert.equal(m.get('other-only').project.length, 63, 'strings are capped');
+  assert.equal(m.get('other-only').session.length, 80);
+  assert.equal(G.previewLinks(many, ports, own).size, 20, 'at most 20 per instance');
+  assert.equal(G.previewLinks('nope', ports, own).size, 0, 'a list that isn\'t an array is empty');
+  assert.equal(G.previewLinks([inst('/x', 99, [row('xx-yyy', 30007)])], ports, own).size, 0, 'only instances on the block');
+  // a root is agent-written: two ports claiming one root don't collapse into one, and the lower can't repoint the link
+  const hijack = G.previewLinks([inst('/data/home/code/acme', P + 1, [row('cool-tiger', 30008, { project: 'acme' })]), inst('/data/home/code/acme', P, [row('cool-tiger', 6666 + 30000, { project: 'evil' })])], ports, own).get('cool-tiger');
+  assert.equal(hijack.port, undefined, 'never served');
+  assert.deepEqual(hijack.ambiguous.map((c) => c.port).sort(), [30008, 36666], 'two ports listing one name are ambiguous, whatever root they claim');
+  assert.equal(G.previewLinks([inst('/a', P, [row('one-name', 30008)]), { ...inst('/a', P, [row('one-name', 30009)]) }], ports, own).get('one-name').port, 30008, 'one port counts once: its first answer');
+  // the terminal's real port, whatever it is here
+  const ttydList = [inst('/a', P, [row('term-real', 7700), row('term-default', 7681)])];
+  assert.equal(G.previewLinks(ttydList, ports, own, 7700).has('term-real'), false);
+  assert.equal(G.previewLinks(ttydList, ports, own, 7700).has('term-default'), true, '7681 is nobody\'s when the terminal is elsewhere');
+  assert.equal(G.previewLinks(ttydList, ports, own).has('term-default'), false, 'by default it is');
+});
+
+test('preview names: only the box\'s, one label, and safeNext sends sign-in back to one', async () => {
+  const gw = await gateway('preview-names');
+  try {
+    const box = `box.localhost:${gw.port}`;
+    assert.equal(gw.g.previewOf(`cool-tiger.${box}`), 'cool-tiger');
+    assert.equal(gw.g.previewOf(`cool-tiger-2.${box}`), 'cool-tiger-2');
+    for (const h of [`term.${box}`, `public.${box}`, `${P}.${box}`, `cooltiger.${box}`, `a-b.${box}`, `cool-tiger.other.example`, `sub.cool-tiger.${box}`, box]) assert.equal(gw.g.previewOf(h), null, h);
+    assert.equal(gw.g.safeNext(`http://cool-tiger.${box}/x`), `http://cool-tiger.${box}/x`);
+    assert.equal(gw.g.safeNext('https://cool-tiger.evil.example/x'), `${gw.publicUrl}/`);
+    assert.equal(gw.g.safeNext(`https://${'a'.repeat(8)}-tiger.${box}/x`), `${gw.publicUrl}/`, 'not this shape');
+  } finally { await gw.close(); }
+});
+
+// A fake hub listing what the test sets, and counting its reads; a gateway claimed by an owner.
+async function previewSetup(name, { hubDelay = 0 } = {}) {
+  const hub = { list: [], hits: 0 };
+  hub.srv = http.createServer((req, res) => { hub.hits++; setTimeout(() => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ hub: 1, instances: hub.list })); }, hubDelay); });
+  await new Promise((r) => hub.srv.listen(HUB, '127.0.0.1', r));
+  const gw = await gateway(name);
+  assert.equal((await gw.claim(authenticator())).status, 200);
+  const instance = (root, port, previews) => ({ devteam: 1, root, port, name: root.split('/').pop(), previews });
+  const box = `box.localhost:${gw.port}`;
+  const on = (preview) => `${preview}.${box}`;
+  const origin = (preview) => `http://${on(preview)}`;
+  const req = (preview, method, route, o = {}) => gw.req(method, route, { ...o, headers: { host: on(preview), ...o.headers } });
+  const close = async () => { await gw.close(); await new Promise((r) => hub.srv.close(r)); };
+  return { gw, hub, instance, box, on, origin, req, close };
+}
+const NAV = { 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document', 'sec-fetch-site': 'none', accept: 'text/html' };
+const previewRow = (name, port, over = {}) => ({ name, port, project: 'alpha', session: 'api-01-x', label: 'admin', at: '2026-11-10', up: true, run: false, ...over });
+
+test('a preview: the owner reaches the dev server on its own name, with localhost headers and nothing of the owner\'s', async () => {
+  const S = await previewSetup('preview-proxy');
+  const { gw, hub, instance, req, origin } = S;
+  const seen = [];
+  const devPort = await freePort();
+  const dev = http.createServer((q, s) => {
+    seen.push({ url: q.url, method: q.method, h: q.headers });
+    const headers = { 'content-type': 'text/plain', 'x-frame-options': 'DENY', 'content-security-policy': `default-src http://127.0.0.1:${devPort}; connect-src ws://localhost:${devPort}`, 'set-cookie': ['a=1; Domain=box.localhost', 'b=2', `devteam_session=evil`] };
+    if (q.url === '/go') headers.location = `http://localhost:${devPort}/next`;
+    if (q.url === '/healthz') return s.end('app ok');
+    s.writeHead(q.url === '/go' ? 302 : 200, headers);
+    s.end('hello from the app');
+  });
+  await new Promise((r) => dev.listen(devPort, '127.0.0.1', r));
+  // an upstream instance, for the header on /api/data
+  const inst = http.createServer((q, s) => { s.writeHead(200, { 'content-type': 'application/json' }); s.end('{}'); });
+  await new Promise((r) => inst.listen(P + 2, '127.0.0.1', r));
+  const site = origin('cool-tiger');
+  try {
+    hub.list = [instance('/srv/alpha', P, [previewRow('cool-tiger', devPort)])];
+    // no cookie: sign-in, back to the link; and the hub was not asked for an unknown name
+    const before = hub.hits;
+    let r = await req('cool-tiger', 'GET', '/x?y=1', { cookie: '', headers: NAV });
+    assert.equal(r.status, 302);
+    assert.equal(r.headers.location, `/auth/login?next=${encodeURIComponent(`${site}/x?y=1`)}`.replace('/auth', `${gw.auth}/auth`), 'sign-in comes back to the preview');
+    assert.equal((await req('never-heard', 'GET', '/', { cookie: '', headers: NAV })).status, 302);
+    assert.equal((await req('never-heard', 'GET', '/x.js', { cookie: '', headers: { 'sec-fetch-mode': 'cors' } })).status, 401);
+    assert.equal(hub.hits, before, 'no anonymous request makes the gateway poll the hub');
+    // with the session
+    r = await req('cool-tiger', 'GET', '/page', { headers: { ...NAV, referer: `${site}/old`, 'x-forwarded-host': 'evil' }, cookie: `${gw.jar()}; app=1` });
+    assert.equal(r.status, 200, r.body);
+    assert.equal(r.body, 'hello from the app');
+    const up = seen.at(-1).h;
+    assert.equal(up.host, `localhost:${devPort}`);
+    assert.equal(up.cookie, 'app=1', 'the session cookie is stripped, the app\'s own passes');
+    assert.equal(up.referer, undefined);
+    assert.equal(up['x-forwarded-host'], undefined);
+    assert.equal(r.headers['cache-control'], 'no-store');
+    assert.deepEqual(r.headers['set-cookie'], ['b=2'], 'a Domain= cookie and the session\'s own name are dropped');
+    assert.equal(r.headers['x-frame-options'], 'DENY', 'the app\'s framing headers pass through');
+    assert.match(r.headers['content-security-policy'], new RegExp(`default-src ${site}; connect-src ws://${S.on('cool-tiger')}`.replace(/\./g, '\\.')));
+    // Origin: mapped only when it is the link's own
+    await req('cool-tiger', 'GET', '/o', { headers: { origin: site } });
+    assert.equal(seen.at(-1).h.origin, `http://localhost:${devPort}`);
+    await req('cool-tiger', 'GET', '/o2', { headers: { origin: 'https://other.example' } });
+    assert.equal(seen.at(-1).h.origin, 'https://other.example', 'another origin passes as is');
+    r = await req('cool-tiger', 'GET', '/go');
+    assert.equal(r.headers.location, `${site}/next`, 'a redirect to itself lands on the link');
+    assert.equal((await req('cool-tiger', 'GET', '/healthz')).body, 'app ok', 'the app\'s own /healthz');
+    // the framing rule and the other refusals
+    for (const dest of ['iframe', 'frame', 'object', 'embed', 'fencedframe']) {
+      assert.equal((await req('cool-tiger', 'GET', '/f', { headers: { 'sec-fetch-dest': dest, 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate' } })).status, 403, `${dest} from another site`);
+      assert.equal((await req('cool-tiger', 'GET', '/f', { headers: { 'sec-fetch-dest': dest, 'sec-fetch-site': 'same-site', 'sec-fetch-mode': 'navigate' } })).status, 200, `${dest} from this box`);
+    }
+    assert.equal((await req('cool-tiger', 'POST', '/s', { headers: { origin: 'https://other.example' }, body: {} })).status, 403);
+    assert.equal((await req('cool-tiger', 'POST', '/s', { headers: { origin: site }, body: {} })).status, 200, 'the app\'s own POST');
+    assert.equal(seen.at(-1).h.origin, `http://localhost:${devPort}`);
+    assert.equal((await req('cool-tiger', 'GET', '/sw.js', { headers: { 'service-worker': 'script' } })).status, 403);
+    // a server bound to ::1 alone answers too, a body surviving the retry
+    const v6 = http.createServer((q, s) => { let b = ''; q.on('data', (c) => { b += c; }); q.on('end', () => s.end(`v6:${b}`)); });
+    const v6Port = await freePort();
+    const onV6 = await new Promise((resolve) => { v6.once('error', () => resolve(false)); v6.listen(v6Port, '::1', () => resolve(true)); });
+    if (onV6) {
+      hub.list = [instance('/srv/alpha', P, [previewRow('cool-tiger', devPort), previewRow('cool-owl', v6Port)])];
+      await gw.g.pollPush();
+      assert.equal((await req('cool-owl', 'POST', '/s', { headers: { origin: origin('cool-owl') }, body: { a: 1 } })).body, 'v6:{"a":1}');
+      v6.close();
+      hub.list = [instance('/srv/alpha', P, [previewRow('cool-tiger', devPort)])];
+      await gw.g.pollPush();
+    }
+    // the box's own names are unchanged
+    r = await gw.req('GET', '/api/data', { on: P + 2 });
+    assert.equal(r.headers['x-devteam-previews'], '1', 'a dashboard learns the box serves previews');
+    assert.equal((await gw.req('GET', '/x', { headers: { host: `x-y.${S.box}` } })).status, 421, 'a shape that matches nothing is still another name');
+    assert.equal((await gw.req('GET', '/box.json')).headers['x-devteam-previews'], undefined);
+    assert.equal((await gw.req('GET', '/healthz', { headers: { host: S.box } })).body, 'ok', 'the platform\'s check comes in on the service\'s name');
+  } finally { await S.close(); dev.close(); inst.close(); }
+});
+
+test('a preview that is down, ambiguous or unknown answers 503, a page only to a navigation, and only to the owner', async () => {
+  const S = await previewSetup('preview-503', { hubDelay: 80 });
+  const { gw, hub, instance, req } = S;
+  const seen = [];
+  const devPort = await freePort();
+  const dev = http.createServer((q, s) => { seen.push(q.url); s.end('app'); });
+  await new Promise((r) => dev.listen(devPort, '127.0.0.1', r));
+  try {
+    hub.list = [instance('/srv/alpha', P, [previewRow('cool-tiger', devPort, { project: 'al<pha', label: '<b>x</b>' })])];
+    assert.equal((await req('cool-tiger', 'GET', '/', { headers: NAV })).status, 200);
+    // ten concurrent misses, one hub read
+    const before = hub.hits;
+    const replies = await Promise.all(Array.from({ length: 10 }, () => req('never-heard', 'GET', '/x.js', { headers: { 'sec-fetch-mode': 'cors', accept: '*/*' } })));
+    assert.ok(replies.every((r) => r.status === 503));
+    assert.equal(hub.hits, before + 1, 'ten misses share one read');
+    let r = replies[0];
+    assert.match(r.headers['content-type'], /text\/plain/);
+    assert.equal(r.headers['retry-after'], '5');
+    assert.doesNotMatch(r.body, /<html/i, 'never a page to a fetch');
+    r = await req('never-heard', 'GET', '/', { headers: NAV });
+    assert.equal(r.status, 503);
+    assert.match(r.body, /No preview named/);
+    assert.match(r.body, /cool-tiger/, 'the current names');
+    assert.match(r.body, /location\.reload/, 'it retries');
+    assert.doesNotMatch(r.body, /<noscript>/, 'for a few minutes, never forever');
+    await new Promise((res) => dev.close(res));
+    r = await req('cool-tiger', 'GET', '/', { headers: NAV });
+    assert.equal(r.status, 503);
+    assert.match(r.body, /content="5"/, 'retries every 5 s');
+    assert.ok(r.body.includes(String(devPort)), 'names the port');
+    assert.match(r.body, /api-01-x/, 'and the session');
+    assert.match(r.body, /&#60;b&#62;x/, 'a label is escaped');
+    assert.doesNotMatch(r.body, /<b>x/);
+    assert.match(r.headers['content-security-policy'], /default-src 'none'/, 'the gateway\'s own page');
+    r = await req('cool-tiger', 'GET', '/api/x', { headers: { 'sec-fetch-mode': 'cors', accept: '*/*' } });
+    assert.equal(r.status, 503);
+    assert.match(r.headers['content-type'], /text\/plain/);
+    await new Promise((res) => dev.listen(devPort, '127.0.0.1', res));
+    // two instances claim it: neither is served, and the page names both
+    hub.list = [instance('/srv/alpha', P, [previewRow('cool-tiger', devPort)]), instance('/srv/beta', P + 1, [previewRow('cool-tiger', devPort, { project: 'beta' })])];
+    await gw.g.pollPush();
+    const count = seen.length;
+    r = await req('cool-tiger', 'GET', '/', { headers: NAV });
+    assert.equal(r.status, 503);
+    assert.match(r.body, /Two instances offer/);
+    assert.ok(r.body.includes('/srv/alpha') && r.body.includes('/srv/beta'), 'names both roots');
+    assert.equal(seen.length, count, 'the dev server sees no request');
+    assert.equal((await req('cool-tiger', 'GET', '/x', { headers: { 'sec-fetch-mode': 'cors' } })).status, 503);
+    // one stops listing it: the other is served again after the next poll
+    hub.list = [instance('/srv/alpha', P, [previewRow('cool-tiger', devPort)])];
+    await gw.g.pollPush();
+    assert.equal((await req('cool-tiger', 'GET', '/', { headers: NAV })).status, 200);
+    // a name the next list drops is gone
+    hub.list = [];
+    await gw.g.pollPush();
+    r = await req('cool-tiger', 'GET', '/', { headers: NAV });
+    assert.equal(r.status, 503);
+    assert.match(r.body, /No preview named/);
+    // a hub that doesn't answer lists nothing: a stale name can't keep a port
+    hub.list = [instance('/srv/alpha', P, [previewRow('cool-tiger', devPort)])];
+    await gw.g.pollPush();
+    assert.equal((await req('cool-tiger', 'GET', '/', { headers: NAV })).status, 200);
+    hub.srv.close();
+    await gw.g.pollPush();
+    r = await req('cool-tiger', 'GET', '/', { headers: NAV });
+    assert.equal(r.status, 503, 'the map is what the list said last; no list, no names');
+    await new Promise((res) => hub.srv.listen(HUB, '127.0.0.1', res));
+  } finally { await gw.close(); await new Promise((res) => hub.srv.close(res)); dev.close(); }
+});
+
+// A WebSocket by hand: the handshake with the headers a browser sends, then masked text frames.
+function wsClient(gwPort, host, { origin, cookie, path: route = '/hmr?token=abc', key = 'dGhlIHNhbXBsZSBub25jZQ==' } = {}) {
+  return new Promise((resolve) => {
+    const sock = net.connect(gwPort, '127.0.0.1');
+    let buf = Buffer.alloc(0);
+    let handshaken = false;
+    const frames = [];
+    const waiters = [];
+    sock.on('connect', () => sock.write(`GET ${route} HTTP/1.1\r\nhost: ${host}\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-version: 13\r\nsec-websocket-key: ${key}\r\n${origin ? `origin: ${origin}\r\n` : ''}${cookie ? `cookie: ${cookie}\r\n` : ''}\r\n`));
+    const parse = () => {
+      while (buf.length >= 2) {
+        const len = buf[1] & 127;
+        if (buf.length < 2 + len) return;
+        frames.push(buf.subarray(2, 2 + len).toString());
+        buf = buf.subarray(2 + len);
+        for (const w of waiters.splice(0)) w();
+      }
+    };
+    sock.on('data', (d) => {
+      buf = Buffer.concat([buf, d]);
+      if (!handshaken) {
+        const i = buf.indexOf('\r\n\r\n');
+        if (i < 0) return;
+        const head = buf.subarray(0, i).toString();
+        buf = buf.subarray(i + 4);
+        handshaken = true;
+        resolve({ status: Number(/HTTP\/1\.1 (\d+)/.exec(head)[1]), head, sock, frames, send, next, close: () => sock.destroy() });
+      }
+      parse();
+    });
+    const send = (text) => { const mask = Buffer.from([1, 2, 3, 4]); const body = Buffer.from(text).map((b, i) => b ^ mask[i % 4]); sock.write(Buffer.concat([Buffer.from([0x81, 0x80 | body.length]), mask, body])); };
+    const next = () => new Promise((r) => { if (frames.length) return r(frames.shift()); waiters.push(() => r(frames.shift())); });
+    sock.on('error', () => {});
+    sock.on('close', () => { if (!handshaken) resolve({ status: 0 }); });
+  });
+}
+
+test('a preview\'s WebSocket is relayed, with the link\'s Origin mapped, and capped', async () => {
+  const S = await previewSetup('preview-ws');
+  const { gw, hub, instance, origin, on } = S;
+  const seen = [];
+  let upstreamClosed = 0;
+  const devPort = await freePort();
+  const dev = http.createServer((q, s) => s.end('page'));
+  dev.on('upgrade', (q, sock) => {
+    seen.push({ url: q.url, h: q.headers });
+    const accept = crypto.createHash('sha1').update(`${q.headers['sec-websocket-key']}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
+    sock.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\nSet-Cookie: bad=1; Domain=box.localhost\r\nSet-Cookie: devteam_session=shadow\r\nSet-Cookie: ok=1\r\nStrict-Transport-Security: max-age=9\r\nX-Other: kept\r\n\r\n`);
+    sock.on('error', () => {});
+    sock.on('end', () => sock.end()); // an http server's socket is half-open until told
+    sock.on('close', () => { upstreamClosed++; });
+    sock.on('data', (d) => {
+      // a masked client frame back unmasked
+      const len = d[1] & 127;
+      const mask = d.subarray(2, 6);
+      const body = Buffer.from(d.subarray(6, 6 + len)).map((b, i) => b ^ mask[i % 4]);
+      sock.write(Buffer.concat([Buffer.from([0x81, len]), body]));
+    });
+  });
+  await new Promise((r) => dev.listen(devPort, '127.0.0.1', r));
+  const site = origin('cool-tiger');
+  const sockets = [];
+  try {
+    hub.list = [instance('/srv/alpha', P, [previewRow('cool-tiger', devPort)])];
+    await gw.g.pollPush();
+    let c = await wsClient(gw.port, on('cool-tiger'), { origin: site, cookie: gw.jar() });
+    assert.equal(c.status, 101);
+    assert.doesNotMatch(c.head, /bad=1|devteam_session/i, 'the handshake\'s cookies get the same rule as any response');
+    assert.match(c.head, /set-cookie: ok=1/i, 'a host-only cookie still passes');
+    assert.doesNotMatch(c.head, /max-age=9/, 'and so do the other headers');
+    assert.match(c.head, /sec-websocket-accept: /i);
+    assert.match(c.head, /x-other: kept/i);
+    assert.equal(seen.at(-1).url, '/hmr?token=abc', 'the query passes untouched');
+    assert.equal(seen.at(-1).h.host, `localhost:${devPort}`);
+    assert.equal(seen.at(-1).h.origin, `http://localhost:${devPort}`);
+    assert.doesNotMatch(String(seen.at(-1).h.cookie ?? ''), /devteam_session/);
+    c.send('hello socket');
+    assert.equal(await c.next(), 'hello socket', 'a frame comes back through the relay');
+    const count = upstreamClosed;
+    c.close();
+    await until(() => upstreamClosed > count, 'the upstream socket to close when the client goes');
+    assert.equal((await wsClient(gw.port, on('cool-tiger'), { origin: site })).status, 401, 'no session');
+    assert.equal((await wsClient(gw.port, on('cool-tiger'), { origin: 'https://other.example', cookie: gw.jar() })).status, 403, 'another Origin');
+    assert.equal((await wsClient(gw.port, on('never-heard'), { origin: origin('never-heard'), cookie: gw.jar() })).status, 503, 'no refresh on an upgrade: unknown is unknown');
+    // the cap: 32 open, the 33rd refused, and none of the others closed
+    for (let i = 0; i < 32; i++) { const w = await wsClient(gw.port, on('cool-tiger'), { origin: site, cookie: gw.jar() }); assert.equal(w.status, 101, `socket ${i}`); sockets.push(w); }
+    assert.equal((await wsClient(gw.port, on('cool-tiger'), { origin: site, cookie: gw.jar() })).status, 429, 'the 33rd is refused');
+    sockets[0].send('still here');
+    assert.equal(await sockets[0].next(), 'still here');
+    // two instances claim it: neither is relayed
+    hub.list = [instance('/srv/alpha', P, [previewRow('cool-tiger', devPort)]), instance('/srv/beta', P + 1, [previewRow('cool-tiger', devPort)])];
+    await gw.g.pollPush();
+    assert.equal((await wsClient(gw.port, on('cool-tiger'), { origin: site, cookie: gw.jar() })).status, 503, 'ambiguous');
+    // the terminal's socket is unchanged
+    assert.equal((await wsClient(gw.port, `term.${S.box}`, { origin: gw.term, path: '/nope', cookie: gw.jar() })).status, 404);
+  } finally { for (const w of sockets) w.close?.(); await S.close(); dev.closeAllConnections?.(); dev.close(); }
+});
+
+test('/dev/ lists every preview on the box with its state, for the owner only, as a document', async () => {
+  const S = await previewSetup('preview-list');
+  const { gw, hub, instance } = S;
+  const devPort = await freePort();
+  const dev = http.createServer((q, s) => s.end('app'));
+  await new Promise((r) => dev.listen(devPort, '127.0.0.1', r));
+  const down = await freePort();
+  try {
+    assert.match((await gw.req('GET', '/box.json')).json.previews, /\/dev\/$/, 'box.json names the page');
+    hub.list = [
+      instance('/srv/alpha', P, [previewRow('cool-tiger', devPort, { label: '<b>evil</b>', project: 'alpha', session: 'api-01-x' }), previewRow('calm-otter', down, { project: 'alpha', session: 'api-02-y', label: '' }), previewRow('shared-name', devPort, { project: 'alpha' })]),
+      instance('/srv/beta', P + 1, [previewRow('shared-name', devPort, { project: 'beta' })]),
+    ];
+    assert.match((await gw.req('GET', '/dev/', { cookie: '', headers: NAV })).headers.location, /\/auth\/login\?next=/, 'no session, sign-in');
+    assert.equal((await gw.req('GET', '/dev/', { cookie: '', headers: { 'sec-fetch-mode': 'cors' } })).status, 401);
+    const r = await gw.req('GET', '/dev/', { headers: NAV });
+    assert.equal(r.status, 200);
+    assert.match(r.headers['content-security-policy'], /default-src 'none'/);
+    const body = r.body;
+    for (const t of ['/srv/alpha', '/srv/beta', 'cool-tiger', 'calm-otter', 'api-01-x', 'api-02-y']) assert.ok(body.includes(t), t);
+    assert.match(body, /&#60;b&#62;evil/, 'a label is escaped');
+    assert.doesNotMatch(body, /<b>evil/);
+    assert.ok(body.includes(`href="${S.origin('cool-tiger')}/"`), 'Open goes to the preview\'s own name');
+    assert.match(body, /answers/);
+    assert.match(body, /not answering/);
+    assert.match(body, /ambiguous \(two instances\)/);
+    assert.doesNotMatch(body, new RegExp(`href="${S.origin('shared-name')}`.replace(/\./g, '\\.')), 'nothing to open for an ambiguous name');
+    assert.equal((await gw.req('GET', '/dev/', { headers: { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'navigate' } })).status, 403, 'never in a frame');
+    assert.equal((await gw.req('GET', '/dev', { headers: NAV })).status, 200);
+    hub.list = [];
+    await gw.g.pollPush();
+    assert.match((await gw.req('GET', '/dev/', { headers: NAV })).body, /Nothing/);
+  } finally { await S.close(); dev.close(); }
+});
+
+test('the hub links the box\'s previews beside Passkeys', () => {
+  const hub = fs.readFileSync(path.join(kit, 'dashboard', 'hub.html'), 'utf8');
+  assert.match(hub, /typeof b\.previews === 'string' && secure\(b\.previews\)/, 'only a URL the page would trust');
+  assert.match(hub, /a\.textContent = 'Previews'/);
 });

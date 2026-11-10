@@ -161,7 +161,8 @@ function ourWindows(session) {
   // Every pane, not only the active one: a worker window the owner split keeps counting.
   const panes = (sh('tmux', ['list-panes', '-s', '-t', `=${session}`, '-F', '#W\t#{pane_start_path}']) ?? '').split('\n').filter(Boolean)
     .map((l) => { const i = l.indexOf('\t'); const p = l.slice(i + 1); let real = p; try { real = fs.realpathSync(p); } catch {} return { name: l.slice(0, i), start: `${real}${path.sep}` }; });
-  return [...new Set(panes.filter((w) => roots.some((r) => w.start.startsWith(r))).map((w) => w.name))].map((name) => ({ name }));
+  // A dev~ window is a preview's server (cmdPreview), not a session.
+  return [...new Set(panes.filter((w) => !w.name.startsWith('dev~') && roots.some((r) => w.start.startsWith(r))).map((w) => w.name))].map((name) => ({ name }));
 }
 let tmuxSessionName = null;
 function tmuxSession({ save = false } = {}) {
@@ -277,7 +278,7 @@ const runDir = path.resolve(process.env.DEVTEAM_RUN ?? path.join(mainRoot, 'docs
 // What run/ holds that the kit made and rebuilds (or that is this machine's alone by nature);
 // anything else in it was put there by hand and doesn't move. A writer names its file through
 // runPath where it defines the path, so the list can't fall behind the files.
-const RUN_KNOWN = new Set(['log', 'prompts', 'questions', 'sent', 'cache', 'agent', 'pr', 'supervisor-pane', 'wait-since', 'tmux-session', 'dashboard-port', 'dashboard.log', 'supervisor-prompt.txt', '.DS_Store']);
+const RUN_KNOWN = new Set(['log', 'prompts', 'questions', 'sent', 'cache', 'agent', 'pr', 'supervisor-pane', 'wait-since', 'tmux-session', 'dashboard-port', 'dashboard.log', 'supervisor-prompt.txt', 'previews', '.DS_Store']);
 const runPath = (name) => { RUN_KNOWN.add(name); return path.join(runDir, name); };
 // Where this machine's checkouts of repo links are, when not where settings say.
 const LINKS_LOCAL = runPath('links.local.json');
@@ -1018,6 +1019,8 @@ function fold(all) {
     for (const [k, val] of Object.entries(l)) {
       if (ENVELOPE.includes(k) || k.startsWith('__') || k === 'hold') continue;
       if ((obj.__rank[k] ?? -1) > rank) continue;
+      // a question's rating as first asked, so its history can show what a later rate replaced
+      if (obj.type === 'question' && QUESTION_RATING.includes(k) && !(k in (obj.__asked ??= {}))) obj.__asked[k] = obj[k];
       obj[k] = val;
       obj.__rank[k] = rank;
       changed[k] = val;
@@ -1304,11 +1307,26 @@ const byTime = (a, b) => a.created_at.localeCompare(b.created_at);
 const handledMessages = () => new Set([...logObjects('message'), ...logObjects('question')].map((x) => x.re).filter(Boolean));
 
 // What the owner saw: the question with every field it was asked with (later lines may only add
-// the supervisor's status and reason, and the owner's own fields). The owner's answer records this
+// the supervisor's status, reason and rating, and the owner's own fields). The rating (stake,
+// urgency, settles, settles_if) orders the Inbox and is no part of what the owner decides, so the
+// supervisor may rate again without reopening an answered question. The owner's answer records this
 // hash, and an answer whose question no longer hashes the same answers nothing: the question was
 // rewritten after the owner answered it (its line edited, or a backdated duplicate taking its
 // place), so it is open again, and the owner answers what it says now.
-const QUESTION_LATER = ['status', 'reason', 'answer', 'said', 'autonomy', 'standing_rule', 'secrets_posted', 'result', 'declined', 'question_hash'];
+const QUESTION_RATING = ['stake', 'urgency', 'settles', 'settles_if'];
+// A rating as the views and the order count it: 1, 2 or 3, else not rated. The log is checked in
+// full only on write and in log-check, so a line written by hand could carry any number here, and
+// the order multiplies what it reads: a stake of 99 would take the top of the Inbox.
+const ratingOf = (x) => ([1, 2, 3].includes(x) ? x : null);
+// Every rating the question has carried: as asked, then each later rate. The fold keeps only the
+// latest, and a rate can lower a question, so the card's ⋯ menu shows the trail.
+function ratingHistory(q) {
+  const asked = Object.fromEntries(QUESTION_RATING.slice(0, 3).map((k) => [k, q.__asked && k in q.__asked ? q.__asked[k] : q[k]]));
+  const entry = (at, by, r) => ({ at, by, ...(ratingOf(r.stake) ? { stake: r.stake } : {}), ...(ratingOf(r.urgency) ? { urgency: r.urgency } : {}), ...(Array.isArray(r.settles) ? { settles: r.settles.length } : {}) });
+  const has = (e) => e.stake || e.urgency || e.settles !== undefined;
+  return [{ ...entry(q.created_at, q.created_by, asked), asked: true }, ...q.updates.map((u) => entry(u.at, u.by, u))].filter(has);
+}
+const QUESTION_LATER = ['status', 'reason', ...QUESTION_RATING, 'answer', 'said', 'autonomy', 'standing_rule', 'secrets_posted', 'result', 'declined', 'question_hash'];
 const questionHash = (q) => crypto.createHash('sha256').update(canonical(Object.fromEntries(Object.entries(q).filter(([k]) => !k.startsWith('__') && !['updates', 'created_at', 'created_by', 'channel', ...QUESTION_LATER].includes(k))))).digest('hex').slice(0, 16);
 
 // Folded questions in the shape the inbox uses.
@@ -1345,7 +1363,7 @@ function questionView(q) {
   return {
     id: q.id, kind: q.kind, class: q.class ?? null, scope: q.scope ?? null, ticket: q.ticket ?? null, re: q.re ?? null, sensor: q.sensor ?? null, asked_at: q.created_at,
     question: q.question, context: q.context ?? '', options: q.options ?? [], choices: q.choices ?? [], links: q.links ?? [], goal: q.goal ?? null, change: q.change ?? null, rule_scope: q.rule_scope ?? null, recommendation: q.recommendation ?? '', confidence: q.confidence ?? null,
-    default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], approves: q.approves ?? [], evidence: q.evidence ?? [], note: q.note ?? null, why_asked: q.why_asked ?? null,
+    default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], stake: ratingOf(q.stake), urgency: ratingOf(q.urgency), settles: Array.isArray(q.settles) ? q.settles.filter((x) => typeof x === 'string') : [], settles_if: typeof q.settles_if === 'string' ? q.settles_if : null, settles_label: [...(q.choices ?? []).map((c) => c?.label), ...(q.options ?? [])].find((l) => sameAnswer(l, q.settles_if)) ?? null, rating_history: ratingHistory(q), approves: q.approves ?? [], evidence: q.evidence ?? [], note: q.note ?? null, why_asked: q.why_asked ?? null,
     secrets: (q.secrets ?? []).map((x) => ({ ...x, to: sinkWords(x.sink), sink_type: SINK_RE.exec(x.sink ?? '')?.[1] ?? null, warning: sinkWarning(x.sink) })), secrets_posted: q.updates.filter((u) => u.secrets_posted !== undefined && writerClass(u.by) === 'owner').pop()?.secrets_posted ?? [],
     status, answer, answered_by: answeredBy, answered_at: answeredAt, matched, hash, rewritten,
     autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans?.channel ?? null, said: ans?.said ?? null,
@@ -1356,7 +1374,14 @@ function questionView(q) {
 // A link item that names a registry link shows its kind's locator: a url link's url, a repo link's remote.
 // An artifact link says where it opens now (an open question's only: each costs reads). Always on
 // a copy, never the folded question's own link: its hash covers the links as asked.
-const resolveQuestionLinks = (ls, open = false) => { const reg = loadSettings().links ?? {}; return (ls ?? []).map((l) => { if (isObj(l) && l.artifact !== undefined) return open ? artifactLinkNow(l) : { ...l, href: null, changed: false, gone: false }; const r = l?.link ? ownEntry(reg, l.link) : null; const K = r ? LINK_KINDS[r.kind] : null; if (!K) return redactLink(l); const { text, ...where } = K.locator(r, l.link); return redactLink({ ...l, ...where }); }); };
+const resolveQuestionLinks = (ls, open = false) => { const reg = loadSettings().links ?? {}; return (ls ?? []).map((l) => { if (isObj(l) && l.preview !== undefined) return previewLinkNow(l); if (isObj(l) && l.artifact !== undefined) return open ? artifactLinkNow(l) : { ...l, href: null, changed: false, gone: false }; const r = l?.link ? ownEntry(reg, l.link) : null; const K = r ? LINK_KINDS[r.kind] : null; if (!K) return redactLink(l); const { text, ...where } = K.locator(r, l.link); return redactLink({ ...l, ...where }); }); };
+// A preview link as this machine has it now: its port and state, never stored in the question.
+function previewLinkNow(l) {
+  const r = readPreviews().find((x) => x.name === l.preview);
+  if (!r) return { ...l, port: null, state: 'gone' };
+  const up = previewUpHere()[r.name] ?? null;
+  return { ...l, port: r.port, state: up === null ? 'checking' : up ? 'live' : 'down' };
+}
 // Where it was asked, while that source is there; else main, once it landed (with no notice if it
 // landed as asked); else gone. changed: its files no longer hash to what the owner was asked about.
 function artifactLinkNow(l) {
@@ -1416,6 +1441,29 @@ const correctionOf = (a) => {
   const u = a.updates.filter((x) => x.corrected !== undefined).pop();
   return u ? { ...u.corrected, by: u.by, at: u.at, repaired: a.repaired ?? null } : null;
 };
+// How much a goal matters to the project, 1 to 4: the supervisor's judgment against
+// project/strategy.md (a goal-impact decision whose first ref is the goal; the latest one), or the
+// value the owner gave when correcting one, which stands until the owner gives another. Computed
+// here, never stored on the goal. A decision corrected with no value (a retro's) keeps its level
+// until the supervisor judges again: a correction never drops a goal back to the unjudged 2.
+const IMPACT_WORDS = { 4: 'the project depends on it', 3: 'moves a number the project watches', 2: 'worth having', 1: 'housekeeping' };
+// 1 to 4, else no impact: a line written by hand could carry any value, and "constructor" is a key of every object.
+const impactOf = (x) => ([1, 2, 3, 4].includes(x) ? x : null);
+const goalImpacts = () => memo('goalImpacts', () => {
+  const by = new Map();
+  for (const d of logObjects('decision').filter((x) => x.class === 'goal-impact' && impactOf(x.impact) && x.refs?.[0]).sort(byTime)) (by.get(d.refs[0]) ?? by.set(d.refs[0], []).get(d.refs[0])).push(d);
+  const res = new Map();
+  for (const [goal, ds] of by) {
+    const o = ds.map((d) => ({ d, c: correctionOf(d) })).filter((x) => x.c && writerClass(x.c.by) === 'owner' && impactOf(x.c.impact)).sort((a, b) => a.c.at.localeCompare(b.c.at)).pop();
+    const last = ds[ds.length - 1];
+    const c = correctionOf(last);
+    res.set(goal, o
+      ? { level: o.c.impact, words: IMPACT_WORDS[o.c.impact], by: 'owner', rationale: o.c.reason, decision: o.d.id, at: o.c.at, rejudge: false }
+      : { level: last.impact, words: IMPACT_WORDS[last.impact], by: 'supervisor', rationale: last.rationale ?? null, decision: last.id, at: last.created_at, rejudge: !!c, ...(c ? { correction: c.reason } : {}) });
+  }
+  return res;
+});
+const goalImpact = (id) => goalImpacts().get(id) ?? null;
 
 // --- the log rule for a PR: which log files it may touch, and only by appending valid lines ---
 // base..sha may change project/log/<X>.jsonl only if X is the branch's own planner file (plan/<f>)
@@ -3718,6 +3766,38 @@ function ciFixApproval(chore, sha, base, changed) {
   }
   return { rule, what: 'CI fix' };
 }
+// project/strategy.md, the owner's. As main has it: missing, the template init wrote (by a marker
+// line it carries, so a later edit of the kit's template doesn't make an untouched file read as
+// written), or written.
+const strategyRel = `${projectRel}/strategy.md`;
+function strategyState() {
+  const text = projectInRepo && mainRef() ? git(['show', `${mainRef()}:${strategyRel}`]) : readText(path.join(projectDir, 'strategy.md'));
+  return text === null ? 'missing' : text.includes(STRATEGY_TEMPLATE_MARK) ? 'template' : 'written';
+}
+// A PR that changes the strategy (any PR: a chore, a plan, a ticket) lands only under the owner's
+// answered strategy-change question. The one change that needs none is init's untouched template
+// arriving where main has no strategy file: once a file is there, emptying it, resetting it to the
+// template or deleting it is a change like any other.
+function strategyFails(base, sha, approved) {
+  if (!base || !projectInRepo) return [];
+  // by the file's blob at each end, never a diff (a failed diff reads as no files)
+  const before = git(['rev-parse', '--verify', '--quiet', `${base}:${strategyRel}`]);
+  const after = git(['rev-parse', '--verify', '--quiet', `${sha}:${strategyRel}`]);
+  // A second file whose path differs from the strategy's only by case: on a disk that ignores case
+  // (macOS, Windows) the two are one file, and a checkout may leave this one where the strategy is read.
+  const twins = (git(['ls-tree', '-r', '-z', '--name-only', sha]) ?? '').split('\0').filter((f) => f !== strategyRel && f.toLowerCase() === strategyRel.toLowerCase() && git(['rev-parse', '--verify', '--quiet', `${base}:${f}`]) === null);
+  if (twins.length) return [`adds ${twins.join(', ')}, which a disk that ignores case can't tell from ${strategyRel}: the strategy is one file, and the owner's; remove it`];
+  if (before === after) return [];
+  if (before === null && (git(['show', `${sha}:${strategyRel}`]) ?? '').trim() === STRATEGY_MD.trim()) return [];
+  if (!approved) return [`changes ${strategyRel}: the strategy is the owner's, so the owner's answer is needed: ask --class strategy-change --reasons owner-only --recommendation "…" with a link to the draft, then --approved <qid>`];
+  const q = ownerAnswer(approved, 'merge --approved');
+  if (q.class !== 'strategy-change') return [`${approved} is a ${q.class ?? 'classless'} question; changing ${strategyRel} needs an answered strategy-change question`];
+  // The answer approves the text the question pinned when asked, and no other: a branch amended
+  // since lands words the owner never saw. The pin must also be what its link shows.
+  const pin = (q.links ?? []).find((l) => isObj(l) && l.path === strategyRel && l.blob);
+  if (!pin || git(['rev-parse', '--verify', '--quiet', `${pin.ref}:${strategyRel}`]) !== pin.blob) return [`${approved} pins no draft of ${strategyRel} that this repo can show: ask again with a link to the draft on its branch`];
+  return after === pin.blob ? [] : [`${strategyRel} at the head is not the text ${approved} asked the owner about (${after ? after.slice(0, 12) : 'no file'}, not ${pin.blob.slice(0, 12)}); ask again about the text as it is now`];
+}
 function ownerAnswer(qid, what) {
   const q = logGet(qid);
   const v = q?.type === 'question' ? questionView(q) : null;
@@ -3880,6 +3960,7 @@ function cmdMerge() {
     const classed = base ? ownerSettingsChanged(base, sha) : [];
     const changed = classed?.filter((c) => !SUPERVISOR_LINK_CLASSES.includes(c.cls)) ?? null;
     fails.push(...registryActFails(base, sha));
+    fails.push(...strategyFails(base, sha, approved));
     if (changed === null) fails.push(`${projectRel}/settings.md: the json devteam block is not valid JSON at the head`);
     else if (changed.length) {
       const classes = [...new Set(changed.map((c) => c.cls))];
@@ -4206,6 +4287,45 @@ function goalChangeFlag(cls) {
   if (!Object.keys(c).length || bad.length) die(`--change sets goal fields (${GOAL_CHANGE_FIELDS.join(', ')})${bad.length ? `; not ${bad.join(', ')}` : ''}`);
   return c;
 }
+// --stake and --urgency on ask and rate: 1, 2 or 3 each; undefined when not given.
+function ratingFlags() {
+  const r = {};
+  for (const k of ['stake', 'urgency']) {
+    if (flags[k] === undefined) continue;
+    r[k] = flagNum(k);
+    if (![1, 2, 3].includes(r[k])) die(`--${k} is 1, 2 or 3 (supervisor.md §6)`);
+  }
+  return r;
+}
+const idsFlag = (k) => [...new Set(asList(flags[k]).flatMap((x) => String(x).split(',')).map((x) => x.trim()).filter(Boolean))];
+// What ask and rate check before a question says it settles others. settles is the whole list it
+// would carry, added the ids new on this line, self the question's own id (null when new).
+function settleChecks({ self, kind, stake, settles, added, settlesIf, choices, about }) {
+  if (!settles.length) return;
+  if (['review', 'owner-action', 'goal-approval', 'trust'].includes(kind)) die(`a ${kind} question settles no others: --settles is for a decision whose answer makes other questions unnecessary`);
+  if (stake !== 3) die('a question that settles others is one the work turns on: --stake 3 (supervisor.md §6)');
+  if (!settlesIf) die('--settles needs --settles-if "<the answer that settles them>"');
+  if ((choices ?? []).length && !choices.some((c) => sameAnswer(c.label, settlesIf))) die(`--settles-if "${settlesIf}" is none of the choices (${choices.map((c) => c.label).join(', ')})`);
+  if (settles.length > 20) die('--settles names at most 20 questions');
+  const all = new Map(logObjects('question').map((x) => [x.id, x]));
+  for (const id of added) {
+    if (id === self) die(`--settles ${id}: a question can't settle itself`);
+    const x = all.get(id);
+    if (!x) die(`--settles ${id}: no such question`);
+    const v = questionView(x);
+    if (v.status !== 'open') die(`--settles ${id}: it is already ${v.status}`);
+    if (!sharesWork(about, questionAbout(v))) die(`--settles ${id}: it is about another goal or feature; a question settles only questions about its own (name the goal on both with --goal, or the ticket)`);
+    // a cycle: the question it would settle already settles this one, directly or through others
+    const seen = new Set();
+    const reaches = (y) => y === self || (!seen.has(y) && (seen.add(y), (all.get(y)?.settles ?? []).some(reaches)));
+    if (self && reaches(id)) die(`--settles ${id}: ${id} already settles ${self}; two questions can't settle each other`);
+  }
+}
+// A rating the kit will count for less than it says, or that contradicts the question: said once, on stderr.
+function ratingWarnings({ stake, urgency, blocks, def }) {
+  if (urgency === 3 && !def && !(blocks ?? []).some((b) => activeTickets().has(b) && !mergeShaFor(b)) && !blocksOpenIncident(blocks)) warn('urgency 3 says work is stopped on it now: it counts as 3 only while --blocks names a ticket that is waiting or an open incident, or the question has a default; this one counts as 2');
+  if (stake === 3 && def) warn('a question the work turns on (stake 3) shouldn\'t go ahead by default');
+}
 function cmdAsk() {
   supervisorOnly('ask');
   const q = flagStr('question') ?? die('ask needs --question');
@@ -4378,7 +4498,7 @@ function cmdAsk() {
   // nothing is added to them later.
   const links = jsonFlag('links');
   if (links !== undefined && !Array.isArray(links)) die('--links is a JSON array of objects');
-  const LINK_WAYS = ['path', 'url', 'link', 'artifact'];
+  const LINK_WAYS = ['path', 'url', 'link', 'artifact', 'preview'];
   const names = new Set();
   let arts = null;
   for (const l of links ?? []) {
@@ -4391,9 +4511,12 @@ function cmdAsk() {
       names.add(l.name);
     }
     if (l.link !== undefined && !ownEntry(loadSettings().links, l.link)) die(`--links: link "${l.link}" is not in settings links (devteam.mjs links)`);
+    // a preview is named, never addressed: the question reads right on a laptop and on the box
+    if (l.preview !== undefined && !(typeof l.preview === 'string' && PREVIEW_NAME.test(l.preview) && readPreviews().some((r) => r.name === l.preview))) die(`--links: no preview "${l.preview}" on this instance (devteam.mjs preview list)`);
     // an inline link is logged as given, so a credential in it would be in the log and every view of the question
     if (hasCredentials(l.url)) die(`--links: ${redactUrl(l.url)} carries credentials; ${CREDENTIALS_REFUSED}`);
     if (l.sha256 !== undefined) die('--links: sha256 is written by ask (the artifact as it is now), never given');
+    if (l.blob !== undefined) die('--links: blob is written by ask (the draft as it is now), never given');
     if (l.at !== undefined && l.artifact === undefined) die('--links: at belongs to an artifact link');
     if (l.artifact !== undefined) {
       arts ??= allArtifacts();
@@ -4407,11 +4530,33 @@ function cmdAsk() {
     }
   }
   for (const [, n] of `${q}\n${flagStr('context') ?? ''}`.matchAll(/\[\[([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\]\]/g)) if (!names.has(n)) die(`--links: the text names [[${n}]] but no link has "name": "${n}"`);
+  // A strategy change is asked about one text: the draft's blob and commit are pinned here, in this
+  // one line the question's hash covers. merge lands that blob and no other, and the link shows the
+  // owner that commit's text however the branch moves after.
+  if (cls === 'strategy-change' && projectInRepo) {
+    const l = (links ?? []).find((x) => isObj(x) && x.path === strategyRel);
+    if (!l?.ref) die(`--links: a strategy-change question links the draft it asks about, on its branch: {"title":"The strategy","path":"${strategyRel}","ref":"<the chore's branch>"}`);
+    const commit = /^-/.test(l.ref) ? null : git(['rev-parse', '--verify', '--quiet', `${l.ref}^{commit}`]);
+    const blob = commit && git(['rev-parse', '--verify', '--quiet', `${commit}:${strategyRel}`]);
+    if (!blob) die(`--links: no ${strategyRel} at ${l.ref}; commit the draft to its branch first`);
+    l.ref = commit;
+    l.blob = blob;
+  }
+  // The rating: how much rides on the answer and how soon, and the open questions one answer
+  // would settle. The kit orders the Inbox from it (inboxRanks); it is never part of what the
+  // owner's answer covers.
+  const rating = ratingFlags();
+  const settles = idsFlag('settles');
+  if (flags['settles-if'] !== undefined && !settles.length) die('--settles-if needs --settles <qid>…: the questions that answer settles');
+  settleChecks({ self: null, kind, stake: rating.stake, settles, added: settles, settlesIf: flagStr('settles-if'), choices: jsonFlag('choices'), about: questionAbout({ goal: flagStr('goal'), ticket: flagStr('ticket'), blocks }) });
+  if (rating.stake === undefined || rating.urgency === undefined) warn('rate it: --stake 1-3 --urgency 1-3, so the Inbox can put the most valuable question first (supervisor.md §6)');
+  ratingWarnings({ ...rating, blocks, def });
   const line = appendLog({
     type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), sensor: flagStr('sensor'), remediation: remediationPin ?? undefined, remediation_entries: remediationEntries, owner_said: ownerSaid ?? undefined, question: q, context: kind === 'goal-approval' ? [flagStr('context'), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal')))), registryAttestText(logGet(flagStr('goal')))].filter(Boolean).join('\n\n') : context,
     rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: goalChangeFlag(cls), options: asList(flags.options), choices: jsonFlag('choices'), links, recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined,
     deadline: def ? deadlineAt ?? new Date(Date.now() + loadSettings().question_default_after_hours * 3600000).toISOString() : undefined,
-    blocks, approves: approves.length ? approves : undefined, evidence, note: flagStr('note'), secrets, review,
+    blocks, ...rating, settles: settles.length ? settles : undefined, settles_if: settles.length ? flagStr('settles-if') : undefined,
+    approves: approves.length ? approves : undefined, evidence, note: flagStr('note'), secrets, review,
     why_asked: { rung: onLadder ? rungFor(cls, scope) : undefined, ceiling: onLadder ? L.classes[cls].ceiling : undefined, reasons },
   }, 'supervisor');
   out(line.id);
@@ -4489,8 +4634,12 @@ function cmdAnswer() {
   // rule would apply (ask --rule-scope; the dashboard shows it next to the rule field), else the
   // whole project.
   if (flagStr('rule')) appendLog({ type: 'knowledge', kind: 'preference', statement: flagStr('rule'), scope: flagStr('rule-scope') ?? v.rule_scope ?? 'project', status: 'accepted', confidence: 1, evidence: [id], channel: fromChat ? 'chat' : undefined }, by);
-  if (!fromChat) nudgeSupervisor(`[devteam answer ${id} from owner] read it with: devteam.mjs questions --id ${id}`);
+  // The answer this question said would settle others: the supervisor withdraws each (its own act).
+  const settled = sameAnswer(answer, v.settles_if) ? v.settles.filter((s) => { const x = logGet(s); return x?.type === 'question' && questionView(x).status === 'open'; }) : [];
+  const settledNote = settled.length ? `it settles ${plural(settled.length, 'open question')} (${settled.join(', ')}): withdraw each with withdraw <qid> --reason "settled by the owner's answer to ${id}"` : '';
+  if (!fromChat) nudgeSupervisor(`[devteam answer ${id} from owner] read it with: devteam.mjs questions --id ${id}${settledNote ? `; ${settledNote}` : ''}`);
   out(`${decline ? 'sent back' : 'answered'} ${id}${fromChat ? ' (from chat; listed on the dashboard for the owner to check)' : reviewFields.result ? `: ${reviewFields.answer} (result sha256 ${reviewFields.result.sha256.slice(0, 12)})` : ''}`);
+  if (settledNote && fromChat) out(settledNote);
 }
 function cmdWithdraw() {
   const [id] = positional;
@@ -4500,6 +4649,32 @@ function cmdWithdraw() {
   appendLog({ type: 'question', op: 'set', id, status: 'withdrawn', reason: flagStr('reason') }, 'supervisor');
   appendLog({ type: 'act', decision: citing(), class: 'withdraw-question', what: `withdrew ${id}${flagStr('reason') ? `: ${flagStr('reason')}` : ''}`, refs: [id], reversible: true }, 'supervisor');
   out(`withdrew ${id}`);
+}
+// rate: the supervisor rates an open question again (its stake, its urgency, what it settles). One
+// set line; the order is computed from it on the next read. --settles adds to what it settles.
+function cmdRate() {
+  const [id] = positional;
+  const usage = 'usage: rate <qid> [--stake 1-3] [--urgency 1-3] [--settles <qid>… | --settles none] [--unsettles <qid>…] [--settles-if "<the answer that settles them>"]';
+  if (!id) die(usage);
+  supervisorOnly('rate');
+  const v = openQuestion(id);
+  const r = ratingFlags();
+  const clear = flagStr('settles') === 'none';
+  const added = clear ? [] : idsFlag('settles').filter((x) => !v.settles.includes(x));
+  const drop = idsFlag('unsettles');
+  if (flags.settles === true || flags.unsettles === true) die(usage);
+  if (r.stake === undefined && r.urgency === undefined && flags.settles === undefined && !drop.length && flags['settles-if'] === undefined) die(usage);
+  for (const d of drop) if (!v.settles.includes(d)) die(`${id} doesn't settle ${d}`);
+  const settles = clear ? [] : [...v.settles, ...added].filter((x) => !drop.includes(x));
+  const stake = r.stake ?? v.stake ?? undefined;
+  const settlesIf = flagStr('settles-if') ?? v.settles_if ?? undefined;
+  if (flags['settles-if'] !== undefined && !settles.length) die('--settles-if needs --settles <qid>…: the questions that answer settles');
+  settleChecks({ self: id, kind: v.kind, stake, settles, added, settlesIf, choices: v.choices, about: questionAbout(v) });
+  const changed = clear || added.length || drop.length;
+  appendLog({ type: 'question', op: 'set', id, ...r, settles: changed ? settles : undefined, settles_if: flagStr('settles-if') }, 'supervisor');
+  ratingWarnings({ stake, urgency: r.urgency, blocks: v.blocks, def: v.default });
+  const rank = inboxRanks(questions().filter((q) => q.status === 'open' && q.goal_hold !== 'let-go')).get(id);
+  out(`rated ${id}${rank ? `: ${rank.position} of ${rank.of} in the Inbox, score ${rank.score}${rank.reason ? ` (${rank.reason})` : ''}` : ''}`);
 }
 
 // ===== review questions: an agent-drawn page the owner answers with a result =====
@@ -4568,6 +4743,411 @@ const reachMemo = new Map();
 function commitReachable(commit) {
   if (!reachMemo.has(commit)) reachMemo.set(commit, !!git(['for-each-ref', '--count=1', '--format=%(refname)', '--contains', commit]));
   return reachMemo.get(commit);
+}
+
+// ===== previews: a session's running dev server, behind a name the owner can open =====
+//
+// A preview is a name bound to a port on this machine, offered by a session. Unlike an artifact it
+// is run state: run/previews/<name>.json, machine-local, never a log line; what it shows can change
+// from one look to the next, so it approves nothing. The name is two words from a hash of the
+// project, the session and the label, so it is the same after a restart and on a new box with
+// nothing remembered. One hyphen between two letter-only words can never be a reserved name.
+const PREVIEW_ADJECTIVES = [
+  'able', 'agile', 'airy', 'alert', 'amber', 'ample', 'apt', 'aqua', 'arched', 'ashen', 'azure', 'balmy', 'bold', 'brave', 'breezy', 'brief',
+  'bright', 'brisk', 'broad', 'bronze', 'brown', 'bubbly', 'busy', 'calm', 'candid', 'careful', 'cedar', 'cheery', 'chief', 'chilly', 'civic', 'classy',
+  'clean', 'clear', 'clever', 'cloudy', 'coastal', 'cobalt', 'cool', 'copper', 'coral', 'cosmic', 'cozy', 'crafty', 'crimson', 'crisp', 'curly', 'daily',
+  'dainty', 'dapper', 'daring', 'dawning', 'deft', 'dewy', 'direct', 'dreamy', 'dusky', 'dusty', 'eager', 'early', 'earnest', 'earthy', 'easy', 'elated',
+  'elder', 'even', 'exact', 'fair', 'famous', 'fancy', 'feisty', 'fine', 'firm', 'first', 'fleet', 'fluffy', 'flying', 'fresh', 'frosty', 'frugal',
+  'fuzzy', 'gentle', 'giddy', 'gilded', 'glad', 'gleamy', 'glossy', 'golden', 'good', 'grand', 'grassy', 'great', 'green', 'grey', 'hale', 'handy',
+  'happy', 'hardy', 'hazel', 'hearty', 'honest', 'humble', 'husky', 'ideal', 'indigo', 'inky', 'ivory', 'jade', 'jaunty', 'jazzy', 'jolly', 'jovial',
+  'joyful', 'keen', 'kind', 'lavish', 'leafy', 'level', 'light', 'lilac', 'limber', 'linen', 'lively', 'loyal', 'lucid', 'lucky', 'lunar', 'lush',
+  'main', 'major', 'maple', 'marine', 'mellow', 'merry', 'mighty', 'mild', 'minty', 'misty', 'modern', 'modest', 'mossy', 'nearby', 'neat', 'nifty',
+  'nimble', 'noble', 'north', 'oaken', 'olive', 'open', 'orange', 'orchid', 'outer', 'pale', 'peachy', 'pearly', 'perky', 'pink', 'placid', 'plucky',
+  'plum', 'plush', 'polar', 'polite', 'prime', 'proud', 'pure', 'purple', 'quaint', 'quick', 'quiet', 'quirky', 'radiant', 'rapid', 'ready', 'regal',
+  'rich', 'rocky', 'rosy', 'round', 'ruby', 'rustic', 'safe', 'sage', 'salty', 'sandy', 'savvy', 'scarlet', 'scenic', 'serene', 'shady', 'sharp',
+  'shiny', 'silent', 'silky', 'silver', 'simple', 'sleek', 'slim', 'smart', 'smooth', 'snappy', 'snowy', 'snug', 'soft', 'solid', 'sonic', 'spare',
+  'speedy', 'spicy', 'spry', 'stable', 'starry', 'steady', 'steely', 'still', 'stout', 'sturdy', 'suave', 'sunny', 'super', 'sure', 'swift', 'tall',
+  'tawny', 'teal', 'tender', 'thrifty', 'tidy', 'timely', 'tiny', 'trim', 'true', 'trusty', 'twin', 'upbeat', 'urban', 'useful', 'valiant', 'velvet',
+  'verdant', 'violet', 'vivid', 'warm', 'wavy', 'wealthy', 'west', 'windy', 'winged', 'wintry', 'wise', 'witty', 'wooden', 'woolly', 'worthy', 'zany',
+];
+const PREVIEW_NOUNS = [
+  'acorn', 'alder', 'alpaca', 'anchor', 'antler', 'apple', 'apricot', 'arbor', 'arch', 'aspen', 'atlas', 'aurora', 'badger', 'bagel', 'bamboo', 'banjo',
+  'barley', 'basil', 'basin', 'bass', 'beacon', 'beaver', 'beech', 'bell', 'berry', 'birch', 'biscuit', 'bison', 'bluff', 'bobcat', 'bonsai', 'boulder',
+  'branch', 'breeze', 'brook', 'bumble', 'bunny', 'button', 'cactus', 'camel', 'canoe', 'canyon', 'cape', 'cashew', 'castle', 'chalk', 'cheetah', 'cherry',
+  'chime', 'cider', 'clam', 'cloud', 'clover', 'cobra', 'comet', 'compass', 'condor', 'cookie', 'cornet', 'cosmos', 'cottage', 'cougar', 'coyote', 'crane',
+  'creek', 'cricket', 'crocus', 'crow', 'cypress', 'dahlia', 'daisy', 'dale', 'dawn', 'deer', 'delta', 'dingo', 'dolphin', 'dove', 'dragon', 'drum',
+  'dune', 'eagle', 'ember', 'falcon', 'fawn', 'fern', 'ferret', 'fiddle', 'field', 'finch', 'fjord', 'flute', 'forest', 'fossil', 'fox', 'gazelle',
+  'gecko', 'geyser', 'ginger', 'glacier', 'glade', 'goose', 'gopher', 'grape', 'grove', 'gull', 'harbor', 'hare', 'harp', 'hawk', 'heron', 'hill',
+  'hippo', 'holly', 'honey', 'hornet', 'horse', 'iris', 'island', 'jaguar', 'jasmine', 'jay', 'juniper', 'kale', 'kayak', 'kelp', 'kestrel', 'kite',
+  'kiwi', 'koala', 'lagoon', 'lake', 'lantern', 'lark', 'laurel', 'lemon', 'lemur', 'leopard', 'lichen', 'lily', 'linden', 'lion', 'llama', 'lobster',
+  'locust', 'lotus', 'lynx', 'magpie', 'manatee', 'mango', 'mantis', 'marble', 'meadow', 'melon', 'meteor', 'mink', 'moose', 'moth', 'mule', 'nectar',
+  'newt', 'nutmeg', 'oasis', 'ocean', 'octopus', 'orca', 'oriole', 'osprey', 'otter', 'owl', 'oyster', 'panda', 'panther', 'papaya', 'parrot', 'peach',
+  'peacock', 'peak', 'pear', 'pebble', 'pelican', 'penguin', 'pepper', 'perch', 'petal', 'pigeon', 'pine', 'piper', 'plover', 'pond', 'poppy', 'prairie',
+  'puffin', 'puma', 'quail', 'quartz', 'quince', 'rabbit', 'raccoon', 'radish', 'rain', 'raven', 'reef', 'ridge', 'river', 'robin', 'rocket', 'rose',
+  'rowan', 'saddle', 'salmon', 'sapling', 'seal', 'sequoia', 'shark', 'shell', 'shrew', 'sierra', 'skylark', 'sloth', 'sparrow', 'spruce', 'squid', 'stag',
+  'star', 'stork', 'stream', 'summit', 'swan', 'tamarin', 'tapir', 'teapot', 'tern', 'thistle', 'thrush', 'tiger', 'toucan', 'trail', 'trout', 'tulip',
+  'tundra', 'turnip', 'turtle', 'valley', 'vine', 'viola', 'vole', 'walnut', 'walrus', 'weasel', 'whale', 'willow', 'wombat', 'wren', 'yak', 'zebra',
+];
+const PREVIEW_NAME = /^[a-z]{3,7}-[a-z]{3,7}(?:-[1-9]\d?)?$/;
+const PREVIEW_MAX = 20;
+const PREVIEW_LABEL_MAX = 40;
+const PREVIEW_TTL = 7 * DAY;
+const TTYD_PORT = Number(process.env.DEVTEAM_TTYD_PORT ?? 7681);
+function previewName(project, session, label) {
+  const h = crypto.createHash('sha256').update(`${project}\0${session}\0${label}`).digest();
+  return `${PREVIEW_ADJECTIVES[h[0]]}-${PREVIEW_NOUNS[h[1]]}`;
+}
+// true, or why not. A dashboard's or the hub's port has a name of its own, and a link to the
+// gateway's or the terminal's would have the gateway relay itself. own: the gateway's port, which
+// a box's agents see as the platform's PORT.
+function previewPortOk(port, own = process.env.DEVTEAM_PUBLIC_URL ? Number(process.env.PORT) : null) {
+  if (!Number.isInteger(port)) return 'a port is an integer';
+  if (port < 1024) return 'ports below 1024 are not offered';
+  if (port > 65535) return 'a port is at most 65535';
+  if (port === HUB_PORT) return `${port} is the hub's`;
+  if (PORT_RANGE.includes(port)) return `${port} is in the instance block (${PORT_RANGE[0]}-${PORT_RANGE.at(-1)}): those are dashboards, each with a name of its own`;
+  if (port === TTYD_PORT) return `${port} is the box's terminal`;
+  if (port === own) return `${port} is the gateway's own port on this box`;
+  return true;
+}
+const previewsDir = () => path.join(runDir, 'previews');
+const previewFile = (name) => path.join(previewsDir(), `${name}.json`);
+// Told once per file by the dashboard's log; anywhere else a bad file is simply not a preview.
+let previewBad = null;
+// Every record on disk that holds together, by name, at most 20 of them, each with its file's mtime
+// (the tick compares it before writing). Anything else in the folder is skipped: a file an agent can
+// write is data, and however many are planted the reads, the probes and the environment handed to
+// dashboard-data stay small.
+function readPreviews() {
+  let files;
+  try { files = fs.readdirSync(previewsDir()); } catch { return []; }
+  const recs = [];
+  for (const f of files.filter((x) => x.endsWith('.json')).sort().slice(0, 256)) {
+    if (recs.length >= PREVIEW_MAX) break;
+    const stem = f.slice(0, -'.json'.length);
+    try {
+      const st = fs.lstatSync(path.join(previewsDir(), f));
+      if (!st.isFile() || st.size > 65536) throw new Error('not a small file');
+      const r = JSON.parse(fs.readFileSync(path.join(previewsDir(), f), 'utf8'));
+      if (!isObj(r) || r.name !== stem || !PREVIEW_NAME.test(stem) || previewPortOk(r.port) !== true || !['project', 'session', 'label', 'cwd', 'at', 'expires'].every((k) => typeof r[k] === 'string')) throw new Error('not a preview');
+      if (r.run !== undefined && !(isObj(r.run) && typeof r.run.cmd === 'string' && (r.run.window === null || typeof r.run.window === 'string'))) throw new Error('not a preview: its run');
+      if (r.down_since !== undefined && typeof r.down_since !== 'string') throw new Error('not a preview: its down_since');
+      recs.push({ ...r, mtimeMs: st.mtimeMs });
+    } catch (e) { previewBad?.(f, e); }
+  }
+  return recs;
+}
+function writePreview(rec) {
+  const { mtimeMs, ...r } = rec;
+  fs.mkdirSync(previewsDir(), { recursive: true });
+  const tmp = `${previewFile(r.name)}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(r, null, 2)}\n`);
+  fs.renameSync(tmp, previewFile(r.name));
+}
+const removePreview = (name) => fs.rmSync(previewFile(name), { force: true });
+// What this project calls itself, and who is asking.
+const previewProject = () => loadSettings().project ?? path.basename(mainRoot);
+function previewLabel() {
+  const label = flags.label === undefined ? '' : (flagStr('label') ?? '');
+  if (UNSAFE_TEXT.test(label)) die('preview --label is one line of plain text');
+  if (label.length > PREVIEW_LABEL_MAX) die(`preview --label is at most ${PREVIEW_LABEL_MAX} characters`);
+  return label.trim();
+}
+function previewPort(v) {
+  const port = /^\d+$/.test(String(v)) ? Number(v) : NaN;
+  const ok = previewPortOk(port);
+  if (ok !== true) die(`preview: ${v}: ${ok}`);
+  return port;
+}
+// What other instances on this machine list, from the hub (one agent-written list among others,
+// used only to pick a clear name). Two seconds at most: no hub, or a slow one, means no clash.
+function previewNamesElsewhere() {
+  return new Promise((resolve) => {
+    const none = new Set();
+    let root;
+    try { root = fs.realpathSync(mainRoot); } catch { return resolve(none); }
+    const req = http.get({ host: '127.0.0.1', port: HUB_PORT, path: '/instances.json', timeout: 2000, headers: { host: `127.0.0.1:${HUB_PORT}`, 'sec-fetch-site': 'same-origin' } }, (res) => {
+      let b = '';
+      res.on('data', (c) => { b += c; if (b.length > 1024 * 1024) req.destroy(); });
+      res.on('end', () => {
+        try {
+          const names = new Set();
+          for (const i of JSON.parse(b)?.instances ?? []) if (i?.root !== root && Array.isArray(i?.previews)) for (const p of i.previews) if (typeof p?.name === 'string' && p.name.length <= 63) names.add(p.name);
+          resolve(names);
+        } catch { resolve(none); }
+      });
+    });
+    const budget = setTimeout(() => { req.destroy(); resolve(none); }, 2000);
+    req.on('timeout', () => { req.destroy(); resolve(none); });
+    req.on('error', () => resolve(none));
+    req.on('close', () => clearTimeout(budget));
+  });
+}
+// The name this (project, session, label) goes by here, and the record it already has. A clash
+// with another instance, or with another session's record here, takes the lowest free number; the
+// suffix is the one thing about a name that is remembered, and only in the record that needs it.
+async function previewClaim(session, label) {
+  const project = previewProject();
+  const recs = readPreviews();
+  const base = previewName(project, session, label);
+  const mine = recs.find((r) => r.project === project && r.session === session && r.label === label && (r.name === base || r.name.startsWith(`${base}-`)));
+  if (mine) return { name: mine.name, had: mine };
+  if (recs.length >= PREVIEW_MAX) die(`preview: at most ${PREVIEW_MAX} previews on an instance; stop one first (devteam.mjs preview list)`);
+  const taken = new Set([...recs.map((r) => r.name), ...await previewNamesElsewhere()]);
+  if (!taken.has(base)) return { name: base, had: null };
+  for (let n = 2; n < 100; n++) if (!taken.has(`${base}-${n}`)) return { name: `${base}-${n}`, had: null };
+  die(`preview: ${base} and every numbered name after it are taken on this box`);
+}
+// Never rejects: a port net.connect won't take (a record planted by hand) is just nobody answering.
+const probePort = async (port) => { try { return (await answers(port, '127.0.0.1')) || (await answers(port, '::1')); } catch { return false; } };
+// The box's address when this machine has one, and whether its gateway serves previews: only the
+// release that does sets DEVTEAM_PREVIEWS, so the kit never prints a link that would answer 421.
+function previewBox() {
+  try { return process.env.DEVTEAM_PUBLIC_URL ? new URL(process.env.DEVTEAM_PUBLIC_URL) : null; } catch { return null; }
+}
+const previewServed = () => !!previewBox() && process.env.DEVTEAM_PREVIEWS === '1';
+const previewLink = (r) => { const b = previewBox(); return previewServed() ? `${b.protocol}//${r.name}.${b.host}` : `http://127.0.0.1:${r.port}`; };
+function previewSay(r, up) {
+  if (previewServed()) {
+    out(`preview ${r.name} is live at ${previewLink(r)} (${up ? `port ${r.port} answers` : `nothing answers on port ${r.port} yet; the link works once it does`})`);
+    out('Only the signed-in owner can open it. Name it in your review request; it is in the owner\'s Library too.');
+  } else {
+    out(`preview ${r.name} is at ${previewLink(r)} (open it on this machine; there is no gateway here)`);
+    if (previewBox()) out('this box\'s gateway doesn\'t serve previews yet: it needs the release that does');
+    if (!up) out(`Nothing answers on port ${r.port} yet; the link works once it does.`);
+    out('Name it in your review request; it is in the owner\'s Library too.');
+  }
+  out(`Stop it: devteam.mjs preview stop ${r.name}`);
+}
+const previewNamed = (name) => readPreviews().find((r) => r.name === name) ?? die(`no preview "${name}" on this instance (devteam.mjs preview list)`);
+const previewFresh = (rec) => { const at = nowIso(); return { ...rec, at, expires: new Date(Date.parse(at) + PREVIEW_TTL).toISOString() }; };
+// The windows of this project's tmux session. A window id is unique only within one server's life
+// (a box reboot starts again at @0), so a stored id is trusted only with its name and start path.
+const PREVIEW_PANES = ['-F', '#{window_id}\t#{window_name}\t#{pane_start_path}'];
+const previewPaneRows = (text) => (text ?? '').split('\n').filter(Boolean).map((l) => { const [id, name, start] = l.split('\t'); return { id, name, start }; });
+function previewPanes() {
+  const session = tmuxSession();
+  // list-panes -s answers for another session when this one doesn't exist (ourWindows)
+  if (sh('tmux', ['has-session', '-t', `=${session}`]) === null) return [];
+  return previewPaneRows(sh('tmux', ['list-panes', '-s', '-t', `=${session}`, ...PREVIEW_PANES]));
+}
+function previewWindow(rec, panes = previewPanes()) {
+  const id = rec.run?.window;
+  if (typeof id !== 'string' || !/^@\d+$/.test(id)) return null;
+  return panes.find((p) => p.id === id && p.name === `dev~${rec.name}` && realPath(p.start) === realPath(rec.cwd)) ?? null;
+}
+function killPreviewWindow(rec, panes) {
+  const w = previewWindow(rec, panes);
+  if (w) tmux(['kill-window', '-t', w.id]);
+  return !!w;
+}
+// The kit's own line, printed when the command ends: a window closes with its process, and what
+// the command printed is the whole point of reporting that it failed. It stays half a minute.
+const PREVIEW_EXITED = '[devteam] the command exited with status';
+// In a window of its own, with PORT on the command line (a new window doesn't inherit this shell's
+// environment, and -e needs tmux 3.2), and this shell's PATH, or a project's pinned tools aren't
+// found. Written with window null first, so a tick that sees the new window doesn't take it for
+// an orphan, and the id after.
+function launchPreviewWindow(rec) {
+  const cmd = rec.run.cmd.split('{port}').join(String(rec.port));
+  const argv = ['env', `PORT=${rec.port}`, `PATH=${process.env.PATH ?? ''}`, 'sh', '-c', `sh -c "$1"; s=$?; printf '\\n${PREVIEW_EXITED} %s\\n' "$s"; sleep 30`, 'sh', cmd];
+  writePreview({ ...rec, run: { ...rec.run, window: null } });
+  const session = tmuxSession({ save: true });
+  const name = `dev~${rec.name}`;
+  const open = ['-d', '-P', '-F', '#{window_id}', '-n', name, '-c', rec.cwd, ...argv];
+  const id = sh('tmux', tmux(['has-session', '-t', `=${session}`]) ? ['new-window', '-t', `=${session}:`, ...open] : ['new-session', '-s', session, ...open], { env: tmuxServerEnv() });
+  if (!id) return null;
+  const r = { ...rec, run: { ...rec.run, window: id } };
+  writePreview(r);
+  return r;
+}
+// Up to 60 s for the port to answer, watching the window: gone, or its last line the kit's, means
+// the command ended.
+async function previewAwait(rec) {
+  const end = Date.now() + 60000;
+  for (;;) {
+    if (await probePort(rec.port)) return { up: true };
+    const text = sh('tmux', ['capture-pane', '-p', '-t', rec.run.window]);
+    if (text === null || text.includes(PREVIEW_EXITED)) return { up: false, exited: true, text: text ?? '' };
+    if (Date.now() > end) return { up: false, exited: false };
+    await new Promise((r) => setTimeout(r, 250));
+  }
+}
+// A port just given up takes a moment to answer no more.
+async function previewPortQuiet(port, ms = 3000) {
+  const end = Date.now() + ms;
+  while (await probePort(port)) { if (Date.now() > end) return false; await new Promise((r) => setTimeout(r, 100)); }
+  return true;
+}
+const PREVIEW_PICK = Array.from({ length: 100 }, (_, i) => 4400 + i);
+async function previewPickPort(name) {
+  const held = new Set(readPreviews().filter((r) => r.name !== name).map((r) => r.port));
+  for (const p of PREVIEW_PICK) if (!held.has(p) && previewPortOk(p) === true && (await portFree(p))) return p;
+  die(`preview: no free port in ${PREVIEW_PICK[0]}-${PREVIEW_PICK.at(-1)}; pass --port`);
+}
+// Launch, wait, and say how it went; a command that ended before answering keeps its record, so
+// the agent fixes it and runs preview start.
+async function previewRunIt(rec) {
+  const r = launchPreviewWindow(rec);
+  if (!r) die('preview: could not open a tmux window for it (is tmux installed?)');
+  const w = await previewAwait(r);
+  if (w.exited) {
+    const tail = w.text.split('\n').filter((l) => !l.includes(PREVIEW_EXITED)).join('\n').trimEnd().split('\n').slice(-20).join('\n');
+    process.stderr.write(`devteam: preview ${r.name}: the command exited before port ${r.port} answered; the record is kept, fix it and run devteam.mjs preview start ${r.name}\n${tail}\n`);
+    process.exitCode = 1;
+    return;
+  }
+  previewSay(r, w.up);
+  out(`running in tmux window ${tmuxSession()}:dev~${r.name}; its output is there`);
+}
+// What hello and the Library say of one preview, every string capped: this goes into the hub's list.
+const previewCap = (v, n) => (typeof v === 'string' ? v.slice(0, n) : '');
+const previewHelloRow = (r, up) => ({ name: previewCap(r.name, 63), port: r.port, project: previewCap(r.project, 63), session: previewCap(r.session, 80), label: previewCap(r.label, PREVIEW_LABEL_MAX), at: previewCap(r.at, 40), up, run: !!r.run });
+// The dashboard's own: the last probe of each name. A preview command has no tick to ask, and
+// dashboard-data is a child process, so the dashboard hands it over in the environment.
+const previewUp = new Map();
+const previewUpHere = () => { if (previewUpHere.seen === undefined) { try { previewUpHere.seen = JSON.parse(process.env.DEVTEAM_PREVIEW_UP ?? '{}'); } catch { previewUpHere.seen = {}; } } return previewUpHere.seen; };
+const tmuxAsync = (args) => new Promise((resolve) => execFile('tmux', args, { encoding: 'utf8', timeout: 10000, killSignal: 'SIGKILL' }, (err, stdout) => resolve(err ? null : stdout)));
+const previewAsIRead = (r) => { try { return fs.statSync(previewFile(r.name)).mtimeMs === r.mtimeMs; } catch { return false; } };
+// The dashboard's housekeeping, every 10 s, and nowhere else (hello is a read: the operator runs
+// it). Probes each port, keeps the answers for hello and the Library, and finishes what any crash
+// left: expiry, a server gone for a day, a dev~ window with no record. It writes a record only when
+// the file is as it read it, so a preview command that ran in between always wins; a skipped write
+// happens next tick. No tmux call here blocks the process: the hub gives hello 300 ms.
+async function previewTick() {
+  const recs = readPreviews();
+  const ups = await Promise.all(recs.map((r) => probePort(r.port)));
+  const delay = Number(process.env.DEVTEAM_PREVIEW_TICK_DELAY_MS ?? 0);
+  if (delay) await new Promise((r) => setTimeout(r, delay));
+  const session = tmuxSession();
+  const panes = (await tmuxAsync(['has-session', '-t', `=${session}`])) === null ? [] : previewPaneRows(await tmuxAsync(['list-panes', '-s', '-t', `=${session}`, ...PREVIEW_PANES]));
+  const kill = async (r) => { const w = previewWindow(r, panes); if (w) await tmuxAsync(['kill-window', '-t', w.id]); };
+  const now = Date.now();
+  const names = new Set();
+  await Promise.all(recs.map(async (r, i) => {
+    const up = ups[i];
+    names.add(r.name);
+    previewUp.set(r.name, up);
+    const since = Date.parse(r.down_since ?? '');
+    // an expiry that doesn't parse is past: a file nobody wrote through the kit never lives forever
+    if (!(Date.parse(r.expires) > now) || (!r.run && !up && since && now - since > DAY)) {
+      if (!previewAsIRead(r)) return;
+      await kill(r);
+      removePreview(r.name);
+      previewUp.delete(r.name);
+      return;
+    }
+    const want = up ? null : (Number.isNaN(since) ? nowIso() : r.down_since);
+    if ((r.down_since ?? null) === want || !previewAsIRead(r)) return;
+    const { down_since, ...rest } = r;
+    writePreview(want ? { ...rest, down_since: want } : rest);
+  }));
+  for (const n of previewUp.keys()) if (!names.has(n)) previewUp.delete(n);
+  // The windows were listed before these records are read, so a window opened since has its id in
+  // a record, or a record still saying window null (the launch's first write).
+  const live = new Map(readPreviews().map((r) => [r.name, r]));
+  // On a shared tmux session (a legacy `devteam`, or tmux_session set) another project's windows
+  // sit beside ours: only one started under this checkout is ours to judge.
+  const shared = session === 'devteam' || !!loadSettings().tmux_session;
+  const mine = `${realPath(mainRoot)}${path.sep}`;
+  const seen = new Set();
+  for (const w of panes) {
+    if (!w.name.startsWith('dev~') || seen.has(w.id)) continue;
+    seen.add(w.id);
+    const r = live.get(w.name.slice(4));
+    if (r?.run?.window === w.id) continue;
+    if (r?.run && r.run.window === null && now - r.mtimeMs < 120000) continue;
+    if (shared && !`${realPath(w.start)}${path.sep}`.startsWith(mine)) continue;
+    await tmuxAsync(['kill-window', '-t', w.id]);
+  }
+  // a write that died between its temp file and the rename
+  try { for (const f of fs.readdirSync(previewsDir())) if (f.endsWith('.tmp') && now - fs.statSync(path.join(previewsDir(), f)).mtimeMs > 3600000) fs.rmSync(path.join(previewsDir(), f), { force: true }); } catch {}
+}
+// A writer's previews when its session ends or parks. The worktree going takes the records too; a
+// park keeps them, so the resumed session brings each back on the same name and port.
+function stopPreviewsOf(writer, { keepRecords }) {
+  for (const r of readPreviews().filter((x) => x.session === writer)) {
+    killPreviewWindow(r);
+    if (!keepRecords) removePreview(r.name);
+  }
+}
+// What a resumed session is told: each of its kit-started previews whose window is gone. The
+// command is the session's own text, but a line in a prompt is one line.
+function previewsBlock(name) {
+  const panes = previewPanes();
+  const down = readPreviews().filter((r) => r.session === name && r.run && !UNSAFE_TEXT.test(`${r.run.cmd ?? ''}`) && !previewWindow(r, panes));
+  if (!down.length) return null;
+  return `## Previews\n\n${down.map((r) => `your preview ${r.name} (${r.run.cmd}, port ${r.port}) is not running; devteam.mjs preview start ${r.name} brings it back`).join('\n')}`;
+}
+async function cmdPreview() {
+  const [sub, arg] = positional;
+  const listing = ['list', 'url', 'stop', 'start'].includes(sub);
+  if (flags.run !== undefined && sub !== undefined) die('preview takes either a port or --run "<command>"');
+  if (sub === 'list') {
+    const recs = readPreviews();
+    const rows = await Promise.all(recs.map(async ({ mtimeMs, ...r }) => ({ ...r, up: await probePort(r.port) })));
+    if (flags.json) return json(rows);
+    if (!rows.length) return out('no previews');
+    for (const r of rows) out(`${r.name}  port ${r.port}  ${r.up ? 'answers' : 'not answering'}  ${r.session}${r.label ? ` (${r.label})` : ''}  ${previewLink(r)}`);
+    return undefined;
+  }
+  if (sub === 'url') {
+    if (arg) return out(previewLink(previewNamed(arg)));
+    const session = logWriter();
+    const mine = readPreviews().filter((r) => r.session === session);
+    if (mine.length !== 1) die(mine.length ? `preview url: you have ${mine.length} previews; name one (${mine.map((r) => r.name).join(', ')})` : 'preview url: you have no preview here (devteam.mjs preview <port>)');
+    return out(previewLink(mine[0]));
+  }
+  if (sub === 'stop') {
+    if (flags.all) {
+      const session = logWriter();
+      const mine = readPreviews().filter((r) => r.session === session);
+      for (const r of mine) { killPreviewWindow(r); removePreview(r.name); }
+      return out(`stopped ${mine.length} preview${mine.length === 1 ? '' : 's'}`);
+    }
+    const r = previewNamed(arg ?? die('usage: preview stop <name> | --all'));
+    const killed = killPreviewWindow(r);
+    removePreview(r.name);
+    return out(`preview ${r.name} stopped${killed ? ' and its server shut down' : r.run ? '' : ' (unregistered; the server is yours to stop)'}`);
+  }
+  if (sub === 'start') {
+    const r = previewNamed(arg ?? die('usage: preview start <name>'));
+    if (!r.run) die(`preview ${r.name} has no command to run: it is a server you run yourself. Start it, then devteam.mjs preview ${r.port}${r.label ? ` --label "${r.label}"` : ''}`);
+    if (!fs.existsSync(r.cwd)) die(`preview ${r.name}: its folder ${r.cwd} is gone`);
+    killPreviewWindow(r);
+    if (!(await previewPortQuiet(r.port))) die(`preview ${r.name}: something else answers on port ${r.port}; stop it first`);
+    return previewRunIt(previewFresh(r));
+  }
+  if (flags.run !== undefined) {
+    const cmd = flagStr('run') ?? '';
+    if (!cmd.trim()) die('preview --run needs a command');
+    if (/[\r\n\0]/.test(cmd)) die('preview --run is one line');
+    const session = logWriter();
+    const label = previewLabel();
+    const { name, had } = await previewClaim(session, label);
+    if (had?.run) killPreviewWindow(had);
+    let port;
+    if (flags.port !== undefined) {
+      port = previewPort(flagStr('port'));
+      if (!(await previewPortQuiet(port))) die(`preview: something already answers on port ${port}; stop it, or leave out --port and the kit picks one`);
+    } else if (had?.run && PREVIEW_PICK.includes(had.port) && (await previewPortQuiet(had.port))) port = had.port;
+    else port = await previewPickPort(name);
+    return previewRunIt(previewFresh({ v: 1, name, project: previewProject(), session, label, port, cwd: process.cwd(), run: { cmd, window: null } }));
+  }
+  if (sub !== undefined && !listing) {
+    const port = previewPort(sub);
+    const session = logWriter();
+    const label = previewLabel();
+    const { name, had } = await previewClaim(session, label);
+    // The kit's own window stays only while it is what's on this port; a window with no record
+    // to answer for it would be swept by the next tick anyway.
+    const keep = had?.run && had.port === port && previewWindow(had) ? { run: had.run } : {};
+    if (had?.run && !keep.run) killPreviewWindow(had);
+    const r = previewFresh({ v: 1, name, project: previewProject(), session, label, port, cwd: keep.run ? had.cwd : process.cwd(), ...keep });
+    writePreview(r);
+    return previewSay(r, await probePort(port));
+  }
+  die('usage: preview <port> [--label "<one line>"] | preview --run "<command>" [--port <p>] [--label …] | preview list [--json] | preview url [<name>] | preview stop <name> | --all | preview start <name>');
 }
 
 // ===== artifacts: pages a session draws to show an idea (a mock, a flow, a model) =====
@@ -5654,17 +6234,130 @@ function questionHold(q) {
   const m = modeOf(goals);
   return ['park', 'let-go'].includes(m) ? m : null;
 }
-function rankQuestions(qs) {
+// ---- the order of the Inbox: computed on every read, never stored ----
+// The supervisor rates: each goal's impact (1 to 4, against the strategy), and on every question
+// its stake and urgency (1 to 3 each) and the open questions one of its answers would settle. The
+// kit counts what it can (tickets held up, tickets behind them, a default) and orders:
+//   own   = impact × stake × urgency + unblock        unblock = min(12, 2 per ticket held up on
+//           the critical path + 1 per ticket held up off it + 1 per ticket behind them)
+//   own   = ceil(own / 2) when the question has a default (the fleet goes on at the deadline),
+//           unless that default fires within DEFAULT_SOON_HOURS
+//   score = own + the own of every open question it settles, through other settling questions too
+// Unrated counts as stake 2 and urgency 2 with blocks, else 1; no goal or an unjudged one as
+// impact 2. Urgency 3 counts as 3 only while the question holds up a waiting ticket, is about an
+// open incident, or has a default, else as 2. settles counts only for a stake-3 question that shares a goal or feature
+// with what it settles. A parked goal's question: urgency 1, no unblock.
+// The order is by score within two bands. Above the rest, however they are rated (a low score
+// must not bury them): one-way doors, what only the owner can do, goal approvals, a question
+// holding up a waiting ticket or an open incident, a default about to fire, and a question that
+// would settle any of those. Not while the question's goal is parked. Ties: more settled, then
+// older, then id.
+const STAKE_WORDS = { 3: 'decides whether the work goes ahead', 2: 'changes the design or the plan', 1: 'a detail' };
+const STAKE_ACTION_WORDS = { 3: 'a goal or milestone waits on it', 2: 'a feature waits on it', 1: 'one ticket waits on it' };
+const FLOOR_KINDS = { 'one-way-door': 'a one-way door', 'owner-action': 'only you can do it', 'goal-approval': 'a goal waits on your approval' };
+const DEFAULT_SOON_HOURS = 4;
+const URGENCY_WORDS = { 3: 'work is stopped on it now', 2: 'work will stop on it before this milestone is done', 1: 'nothing waits on it yet' };
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+// An answer is a choice when it is that label, with or without a note after " — ".
+const sameAnswer = (answer, label) => { const norm = (x) => String(x ?? '').trim().toLowerCase(); return !!label && [norm(answer), norm(String(answer ?? '').split(' — ')[0])].includes(norm(label)); };
+// The goals and features a question is about: its goal, else its tickets' (the one it is about and
+// those it blocks). Upkeep is no goal here: nobody judges its impact.
+function questionAbout(q) {
+  const ts = tickets();
+  const about = [...new Set([q.ticket, ...(q.blocks ?? [])].filter((id) => ts.has(id)))];
+  const goals = (q.goal ? [logGet(q.goal)] : about.flatMap((id) => ticketGoals(ts.get(id)))).filter((g) => g?.type === 'goal' && !isUpkeep(g));
+  return { goals: [...new Map(goals.map((g) => [g.id, g])).values()], features: [...new Set(about.map((id) => ts.get(id).feature).filter((f) => f && f !== CHORES))] };
+}
+// An incident-fix question's blocks names its incident (p-…): one still open backs an urgency of 3
+// as a waiting ticket does.
+const blocksOpenIncident = (blocks) => (blocks ?? []).some((b) => { const p = logGet(b); return isIncident(p) && p.status !== 'resolved'; });
+const sharesWork = (a, b) => a.goals.some((g) => b.goals.some((h) => h.id === g.id)) || a.features.some((f) => b.features.includes(f));
+// The rank of every question in the Inbox (the open ones whose goal is not let go: a question
+// outside that list adds nothing to another's score), by id.
+function inboxRanks(inbox) {
   const sub = activeTickets();
   const crit = findCycle(sub) ? new Set() : new Set(criticalPath(sub).path);
-  const score = (q) => (['one-way-door', 'owner-decision', 'goal-approval', 'owner-action'].includes(q.kind) ? 1000 : 0) + q.blocks.reduce((s, id) => s + (crit.has(id) ? 3 : 1), 0) * 10;
-  return [...qs].sort((a, b) => score(b) - score(a) || a.asked_at.localeCompare(b.asked_at));
+  const waiting = (id) => sub.has(id) && !mergeShaFor(id);
+  const dependents = new Map();
+  for (const [id, t] of sub) for (const d of t.depends_on ?? []) (dependents.get(d) ?? dependents.set(d, []).get(d)).push(id);
+  const byId = new Map(inbox.map((q) => [q.id, q]));
+  const about = new Map(inbox.map((q) => [q.id, questionAbout(q)]));
+  const now = Date.now();
+  const facts = new Map();
+  for (const q of inbox) {
+    const a = about.get(q.id);
+    const judged = a.goals.map((g) => ({ g, i: goalImpact(g.id) })).filter((x) => x.i).sort((x, y) => y.i.level - x.i.level)[0] ?? null;
+    const goal = judged?.g ?? a.goals[0] ?? null;
+    const parked = q.goal_hold === 'park';
+    const held = [...new Set(q.blocks)].filter(waiting);
+    const onPath = held.filter((id) => crit.has(id)).length;
+    const after = new Set();
+    const walk = (id) => { for (const d of dependents.get(id) ?? []) if (!after.has(d)) { after.add(d); walk(d); } };
+    held.forEach(walk);
+    const behind = [...after].filter((id) => waiting(id) && !held.includes(id)).length;
+    const given = q.urgency ?? (q.blocks.length ? 2 : 1);
+    const incident = blocksOpenIncident(q.blocks);
+    const clamped = given === 3 && !parked && !held.length && !q.default && !incident;
+    const soon = !!q.default && Date.parse(q.deadline) - now <= DEFAULT_SOON_HOURS * 3600000;
+    const floor = parked ? null : soon ? 'its default is about to fire' : FLOOR_KINDS[q.kind] ?? (held.length ? 'work is waiting on it' : incident ? 'an open incident waits on it' : null);
+    const parts = {
+      goal: goal?.id ?? null, goal_title: goal?.title ?? null, goal_impact: judged?.i.level ?? 2, judged: !!judged, impact_by: judged?.i.by ?? null,
+      stake: q.stake ?? 2, urgency: parked ? 1 : clamped ? 2 : given, urgency_given: q.urgency ?? null, rated: q.stake != null || q.urgency != null,
+      held_up: held.length, on_path: onPath, behind, unblock: parked ? 0 : Math.min(12, 2 * onPath + (held.length - onPath) + behind),
+      default: !!q.default, default_soon: soon, parked, floor, age_days: Math.floor((now - Date.parse(q.asked_at)) / DAY),
+      settles: q.stake === 3 ? [...new Set(q.settles)].filter((id) => id !== q.id && byId.has(id) && sharesWork(a, about.get(id))) : [], settled_by: [],
+    };
+    const full = parts.goal_impact * parts.stake * parts.urgency + parts.unblock;
+    facts.set(q.id, { q, parts, own: parts.default && !soon ? Math.ceil(full / 2) : full });
+  }
+  for (const [id, f] of facts) for (const m of f.parts.settles) facts.get(m).parts.settled_by.push(id);
+  for (const [id, f] of facts) {
+    const seen = new Set([id]);
+    const walk = (x) => { for (const m of facts.get(x).parts.settles) if (!seen.has(m)) { seen.add(m); walk(m); } };
+    walk(id);
+    seen.delete(id);
+    f.all = [...seen];
+    f.score = f.own + f.all.reduce((s, m) => s + facts.get(m).own, 0);
+    // keeps "a question ranks above everything it settles" true across the bands
+    f.floor = f.parts.floor ?? (!f.parts.parked && f.all.some((m) => facts.get(m).parts.floor) ? 'it would settle one that is' : null);
+  }
+  const order = [...facts.values()].sort((x, y) => (y.floor ? 1 : 0) - (x.floor ? 1 : 0) || y.score - x.score || y.all.length - x.all.length || x.q.asked_at.localeCompare(y.q.asked_at) || x.q.id.localeCompare(y.q.id));
+  const ranks = new Map();
+  order.forEach((f, i) => {
+    const { q, parts: p } = f;
+    const chips = [];
+    if (f.all.length) chips.push(`would settle ${f.all.length} other question${f.all.length > 1 ? 's' : ''}`);
+    if (p.held_up) chips.push(`holds up ${plural(p.held_up, 'ticket')}${p.on_path ? `, ${p.on_path} on the critical path` : ''}${p.behind ? `, ${p.behind} more behind ${p.held_up > 1 ? 'them' : 'it'}` : ''}`);
+    if (p.default) chips.push(`goes ahead with the default${q.deadline ? ` at ${q.deadline.slice(0, 16).replace('T', ' ')} UTC` : ''}`);
+    // what the supervisor judged says so: the owner reads a rating as a rating, not a fact
+    if (p.goal) chips.push(p.judged ? `for ${p.goal_title} (${p.impact_by === 'owner' ? 'your rating' : 'the supervisor\'s rating'}): ${IMPACT_WORDS[p.goal_impact]}` : `for ${p.goal_title}: its impact is not judged yet`);
+    if (q.stake != null) { const w = q.kind === 'owner-action' ? (q.stake > 1 ? STAKE_ACTION_WORDS[q.stake] : null) : q.stake !== 2 ? STAKE_WORDS[q.stake] : null; if (w) chips.push(`the supervisor's rating: ${w}`); }
+    if (p.urgency === 3 && p.held_up) chips.push(URGENCY_WORDS[3]);
+    if (p.parked) chips.push('its goal is parked');
+    if (p.age_days >= 3) chips.push(`waiting ${p.age_days} days`);
+    const sum = [
+      `impact ${p.goal_impact} (${p.judged ? IMPACT_WORDS[p.goal_impact] : p.goal ? 'not judged yet, counted as 2' : 'no goal, counted as 2'})`,
+      `× stake ${p.stake} (${q.stake != null ? (q.kind === 'owner-action' ? STAKE_ACTION_WORDS : STAKE_WORDS)[p.stake] : 'not rated, counted as 2'})`,
+      `× urgency ${p.urgency} (${p.parked ? 'its goal is parked' : p.urgency_given === 3 && p.urgency === 2 ? 'rated 3, counted as 2: it holds up no waiting ticket or open incident and has no default' : p.urgency === 3 && !p.held_up ? `rated 3, backed by ${p.default ? 'its default' : 'an open incident'}` : p.urgency_given != null ? URGENCY_WORDS[p.urgency] : `not rated, counted as ${p.urgency}`})`,
+      ...(p.unblock ? [`+ ${p.unblock} for the tickets it holds up`] : []), ...(p.default && !p.default_soon ? ['halved for its default'] : []),
+      ...(f.all.length ? [`+ ${f.score - f.own} from the ${plural(f.all.length, 'question')} it would settle`] : []),
+    ].join(' ');
+    ranks.set(q.id, { score: f.score, own: f.own, position: i + 1, of: order.length, top: i === 0 && q.stake != null && q.urgency != null, floor: f.floor, chips, reason: [...chips, ...(p.settled_by.length ? [`may be settled by ${p.settled_by.join(', ')}`] : [])].join('; '), sum: `score ${f.score}: ${sum}`, parts: { ...p, settles: f.all } });
+  });
+  return ranks;
+}
+// Questions in Inbox order, each with its rank (null for one outside the Inbox: closed, or its
+// goal let go; those follow, oldest first).
+function rankQuestions(qs, inbox = qs) {
+  const ranks = inboxRanks(inbox);
+  return qs.map((q) => ({ ...q, rank: ranks.get(q.id) ?? null })).sort((a, b) => (a.rank?.position ?? Infinity) - (b.rank?.position ?? Infinity) || a.asked_at.localeCompare(b.asked_at));
 }
 function cmdQuestions() {
   let qs = questions();
+  const inbox = qs.filter((q) => q.status === 'open' && q.goal_hold !== 'let-go');
   if (flagStr('id')) qs = qs.filter((q) => q.id === flagStr('id'));
-  else if (!flags.all) qs = qs.filter((q) => q.status === 'open' && q.goal_hold !== 'let-go');
-  qs = rankQuestions(qs);
+  else if (!flags.all) qs = inbox;
+  qs = rankQuestions(qs, inbox);
   if (flags.json) return json(qs);
   if (!qs.length) return out('no questions');
   for (const q of qs) {
@@ -5677,7 +6370,24 @@ function cmdQuestions() {
     if (q.answer) out(`  answer (${q.answered_by}): ${q.answer}`);
     if (q.autonomy) out(`  next time: ${q.autonomy.class} at rung ${q.autonomy.rung} (${RUNG[q.autonomy.rung]})${q.autonomy.scope ? ` for ${q.autonomy.scope}` : ''}`);
     if (q.standing_rule) out(`  standing rule: ${q.standing_rule}`);
+    if (q.settles.length && q.status === 'open') out(`  settles, if answered "${q.settles_if}": ${q.settles.join(', ')}`);
+    // only a rated question prints its rank: an unrated one prints as it always did
+    if (q.rank?.parts.rated) out(`  rank: ${q.rank.score}${q.rank.reason ? ` (${q.rank.reason})` : ''}`);
   }
+}
+// next: the owner's next best step, the top of the Inbox, and why it is there. (What the fleet
+// starts next is still `ready`, in the owner's priority order.)
+function cmdNext() {
+  const qs = rankQuestions(questions().filter((q) => q.status === 'open' && q.goal_hold !== 'let-go'));
+  const [top, ...then] = qs;
+  const owner = top ? { id: top.id, kind: top.kind, question: top.question, rank: top.rank, then: then.map((q) => ({ id: q.id, question: q.question, score: q.rank.score })) } : null;
+  if (flags.json) return json({ owner });
+  if (!owner) return out('you    nothing: the Inbox is empty');
+  out(`you    ${top.id}  ${top.question}`);
+  if (top.rank.reason) out(`       ${top.rank.reason}`);
+  if (top.rank.floor) out(`       above the ordinary questions: ${top.rank.floor}`);
+  out(`       ${top.rank.sum}`);
+  if (then.length) out(`       then: ${then.slice(0, 3).map((q) => `${q.id} (score ${q.rank.score})`).join(', ')}${then.length > 3 ? `, ${then.length - 3} more` : ''}`);
 }
 
 // An act: a decision the supervisor made. For a ladder class it checks the rung first and refuses
@@ -5964,14 +6674,23 @@ function tldrGap(text) {
 // act went wrong, that is a problem (or an escaped defect), not a trust drop (constitution.md §2).
 function cmdCorrect() {
   const [actId] = positional;
-  if (!actId) die('usage: correct <decision-or-act-id> --reason r [--severity 0-4]   (owner; the supervisor at a retro adds --retro)');
+  if (!actId) die('usage: correct <decision-or-act-id> --reason r [--severity 0-4] [--impact 1-4 (a goal-impact decision: the impact you give the goal)]   (owner; the supervisor at a retro adds --retro)');
   const by = flags.retro ? (supervisorOnly('correct --retro'), 'supervisor') : ownerWriter().by;
   const act = logGet(actId);
   if (!['act', 'decision'].includes(act?.type)) die(`no decision or act ${actId}`);
   if (act.type === 'act' && act.created_by === 'owner') die(`${actId} is the owner's own record (${act.class}), not a call; nothing to correct`);
   if (act.type === 'act' && act.decision) die(`${actId} carried out ${act.decision}. If the decision was wrong: correct ${act.decision} --reason "…". If it was sound and the act went wrong: problem add --title "…" --severity 0-4 --refs ${actId}${by === 'owner' ? ' --owner' : ''} (a problem, not a trust drop; constitution.md §2)`);
-  if (correctionOf(act)) die(`${actId} is already corrected`);
-  appendLog({ type: act.type, op: 'set', id: actId, corrected: { reason: flagStr('reason') ?? die('correct needs --reason'), severity: flagNum('severity') } }, by);
+  // On a goal-impact decision the owner gives the goal's impact themselves (--impact): it stands,
+  // and they may give another later, so one already corrected takes a new value.
+  const impact = flags.impact !== undefined ? flagNum('impact') : undefined;
+  if (impact !== undefined) {
+    if (act.type !== 'decision' || act.class !== 'goal-impact') die('--impact goes with the correction of a goal-impact decision');
+    if (by !== 'owner') die('--impact is the owner\'s: only the owner sets a goal\'s impact when correcting it');
+    if (!impactOf(impact)) die('--impact is 1 (housekeeping), 2 (worth having), 3 (moves a number the project watches) or 4 (the project depends on it)');
+  }
+  if (correctionOf(act) && impact === undefined) die(`${actId} is already corrected`);
+  appendLog({ type: act.type, op: 'set', id: actId, corrected: { reason: flagStr('reason') ?? die('correct needs --reason'), severity: flagNum('severity'), impact } }, by);
+  if (impact !== undefined) out(`${logGet(act.refs?.[0])?.title ?? act.refs?.[0]}: impact ${impact} (${IMPACT_WORDS[impact]}), set by the owner; it stands until the owner changes it`);
   if (ladder().classes[act.class]) out(`${act.class} drops to rung 1 (ask)`);
   if (by === 'owner') nudgeSupervisor(`[devteam correction from owner] on ${actId}; read it with: devteam.mjs log --id ${actId}`);
   out(`corrected ${actId}`);
@@ -6598,7 +7317,7 @@ function goalView(g) {
   const mode = goalMode(g);
   const still = ['park', 'let-go'].includes(mode);
   const forecast = goalForecast(g);
-  return { ...g, ...(g.measure ? { measure: measureOf(g) } : {}), status: g.status ?? 'draft', readings: readings.map((r) => ({ at: r.created_at, value: r.measure.value, source: r.source, ...(r.sha ? { sha: r.sha } : {}), ...(r.approved ? { approved: r.approved } : {}) })), track: still ? null : track, check: goalCheck(g), forecast: forecast && still ? { ...forecast, eta: null, past_horizon: false } : forecast, hold_view: holdView(g), registry_attest: registryAttestView(g) };
+  return { ...g, ...(g.measure ? { measure: measureOf(g) } : {}), status: g.status ?? 'draft', readings: readings.map((r) => ({ at: r.created_at, value: r.measure.value, source: r.source, ...(r.sha ? { sha: r.sha } : {}), ...(r.approved ? { approved: r.approved } : {}) })), track: still ? null : track, check: goalCheck(g), forecast: forecast && still ? { ...forecast, eta: null, past_horizon: false } : forecast, hold_view: holdView(g), registry_attest: registryAttestView(g), impact: goalImpact(g.id) };
 }
 function cmdGoal() {
   const [sub, id] = positional;
@@ -6756,6 +7475,26 @@ function cmdGoal() {
     return out(f ? forecastText(g, f) : `${id} has no milestones yet`);
   }
   if (sub === 'show') { const g = goalArg(id) ?? die(`no goal ${id}`); return json(isUpkeep(g) ? { ...g, hold_view: holdView(g) } : goalView(g)); }
+  // goal impact: the supervisor's judgment of how much a goal matters to the project, against
+  // project/strategy.md. A constitutional decision (no rung, no --approved): the owner sees it on
+  // the goal and corrects it with the value they give (correct <d-id> --impact n), which stands.
+  if (sub === 'impact') {
+    const usage = 'usage: goal impact <g-id> <1-4> --rationale "<why, citing the strategy>" [--confidence 0-1]   (4 the project depends on it, 3 moves a number the project watches, 2 worth having, 1 housekeeping)';
+    supervisorOnly('goal impact');
+    const g = logGet(id ?? '');
+    const level = Number(positional[2]);
+    if (g?.type !== 'goal' || isUpkeep(g) || !impactOf(level)) die(usage);
+    if (['met', 'abandoned'].includes(g.status)) die(`${id} is ${g.status === 'met' ? 'met' : 'let go'}; its impact orders nothing now`);
+    const rationale = flagStr('rationale')?.trim() || die(`goal impact needs --rationale: why, against the strategy (${strategyRel})`);
+    const confidence = flagNum('confidence');
+    if (confidence !== undefined && !(confidence >= 0 && confidence <= 1)) die('--confidence is a number from 0 to 1');
+    const now = goalImpact(id);
+    if (now?.by === 'owner') die(`the owner set ${id}'s impact to ${now.level} (${now.words}) when correcting ${now.decision}, and that stands. If you think it is wrong now, ask them; they change it with: correct ${now.decision} --impact <1-4> --reason "…"`);
+    if (strategyState() !== 'written') warn(`${strategyRel} is ${strategyState() === 'missing' ? 'not on main yet' : 'still the template'}: an impact is judged against the strategy, so draft it and ask the owner to approve it (supervisor.md §1)`);
+    const a = authorise('goal-impact', null, null, [id], 'goal impact');
+    const line = appendLog({ type: 'decision', class: 'goal-impact', what: `${g.title}: ${IMPACT_WORDS[level]} (impact ${level} of 4)`, rationale, confidence, refs: [id], impact: level, reversible: true, rung: a.rung, ceiling: a.ceiling, authority: a.authority }, 'supervisor');
+    return out(line.id);
+  }
   if (sub === 'reading') {
     if (!id || logGet(id)?.type !== 'goal') die('usage: goal reading <g-id> --run | --approved <goal-met qid> | --value n [--source s] [--detail d]');
     const by = flags.owner ? ownerWriter().by : (supervisorOnly('goal reading'), 'supervisor');
@@ -6808,7 +7547,7 @@ function cmdGoal() {
   if (!gs.length) return out('no goals (the owner states them; planning.md §1)');
   for (const g of gs) {
     const last = g.readings[g.readings.length - 1];
-    out(`${g.id} [${g.status}${g.priority ? `, p${g.priority}` : ''}${g.hold_view.mode !== 'run' ? `, ${g.hold_view.state}` : ''}] ${g.title}\n  ${g.measure?.description ?? '-'}: ${last ? last.value : '?'} -> ${g.measure?.target ?? '?'} ${g.measure?.unit ?? ''} by ${g.horizon ?? '?'}${g.track ? ` (${g.track})` : ''}; features: ${g.check.features.join(', ') || 'none'}`);
+    out(`${g.id} [${g.status}${g.priority ? `, p${g.priority}` : ''}${g.impact ? `, impact ${g.impact.level}` : ''}${g.hold_view.mode !== 'run' ? `, ${g.hold_view.state}` : ''}] ${g.title}\n  ${g.measure?.description ?? '-'}: ${last ? last.value : '?'} -> ${g.measure?.target ?? '?'} ${g.measure?.unit ?? ''} by ${g.horizon ?? '?'}${g.track ? ` (${g.track})` : ''}; features: ${g.check.features.join(', ') || 'none'}`);
   }
 }
 
@@ -7631,6 +8370,32 @@ function collectMetrics(since) {
   const drained = !!draining();
   const ready = [...ts.values()].filter((t) => isActive(t) && !isHeld(t) && !mergeShaFor(t.id) && !activeWorker(t.id) && (t.depends_on ?? []).every((d) => mergeShaFor(d)) && !notSchedulable(t) && ticketMode(t) === 'run');
   holdFindings(add, settings);
+  // What matters most: the strategy, each goal's impact, and the ratings the Inbox is ordered by.
+  {
+    const goals = logObjects('goal');
+    const live = goals.filter((g) => g.status === 'ready');
+    const sState = strategyState();
+    if (live.length && sState !== 'written') add('medium', 'strategy-unwritten', strategyRel, sState === 'missing' ? `${plural(live.length, 'goal')} running and no strategy on ${settings.main_branch}` : `${plural(live.length, 'goal')} running and the strategy is still the template`, `draft it in a chore from what you can read, then ask the owner to approve it (ask --class strategy-change; supervisor.md §1)${sState === 'missing' ? '; init writes the template' : ''}`);
+    const all = questions();
+    const open = all.filter((q) => q.status === 'open' && q.goal_hold !== 'let-go');
+    for (const g of goals.filter((x) => x.status === 'ready' || ((x.status ?? 'draft') === 'draft' && open.some((q) => q.goal === x.id)))) {
+      const i = goalImpact(g.id);
+      if (!i) add('medium', 'goal-unjudged', g.id, `"${g.title}" has no impact, so its questions are ordered as if it were worth having (2)`, `judge it against the strategy: goal impact ${g.id} <1-4> --rationale "…" (planning.md §1)`);
+      else if (i.rejudge) add('medium', 'goal-unjudged', g.id, `the impact of "${g.title}" (${i.level}) was corrected: ${i.correction}`, `judge it again, saying what the correction changed: goal impact ${g.id} <1-4> --rationale "…"`);
+    }
+    // only once the supervisor has rated one: a project that hasn't taken up the rating sees nothing
+    const firstRated = all.filter((q) => q.stake != null || q.urgency != null).map((q) => q.asked_at).sort()[0];
+    if (firstRated) for (const q of open.filter((x) => (x.stake == null || x.urgency == null) && x.asked_at > firstRated)) add('medium', 'question-unrated', q.id, q.question.slice(0, 120), `rate it: rate ${q.id} --stake 1-3 --urgency 1-3 (supervisor.md §6)`);
+    const rated = open.filter((q) => q.stake != null && q.urgency != null);
+    for (const k of ['stake', 'urgency']) {
+      const top = rated.filter((q) => q[k] === 3).length;
+      if (rated.length >= 5 && top * 2 > rated.length) add('medium', 'rating-inflated', k, `${top} of ${rated.length} open questions are ${k} 3`, `a rating that is always 3 orders nothing: read the ${k} test again (supervisor.md §6) and rate the ones that aren't 3 (rate <qid> --${k} n)`);
+    }
+    for (const q of all.filter((x) => x.status === 'answered' && x.settles.length && sameAnswer(x.answer, x.settles_if))) {
+      const left = q.settles.filter((s) => open.some((o) => o.id === s));
+      if (left.length) add('medium', 'settled-not-withdrawn', q.id, `the owner answered "${String(q.answer).slice(0, 60)}", which settles ${left.join(', ')}; ${left.length > 1 ? 'they are' : 'it is'} still in the Inbox`, `withdraw ${left.length > 1 ? 'each' : 'it'}: withdraw <qid> --reason "settled by the owner's answer to ${q.id}"`);
+    }
+  }
   const active = [...ts.keys()].filter(activeWorker).length;
   // Goals that need planning with nobody planning them: a fully defined draft goal with no design up
   // for approval, or a ready goal whose current milestone has unplanned preconditions, and no
@@ -7878,6 +8643,7 @@ function collectOoda() {
     decisions: decisionRecords().slice(0, 200),
     trust: trustTable(),
     classes: Object.fromEntries(Object.entries(L.classes).map(([k, v]) => [k, { ...v, rung: rungFor(k) }])),
+    impact_words: IMPACT_WORDS,
     reasons: L.reasons,
     // every settled question, newest first, wherever it was answered (dashboard, terminal, chat) or
     // whether it was defaulted or withdrawn; defaulted ones can still be overruled
@@ -7914,6 +8680,8 @@ function dashboardData() {
       // publish state is the log's, read here and never in describeArtifact's tree-keyed cache:
       // a publish changes no byte of the artifact
       artifacts: (() => { const rec = publishRecords(); return allArtifacts().map((a) => (a.at === 'main' ? { ...a, published: publishedView(rec.get(a.slug)) } : a)); })(),
+      // the running servers sessions have offered; run state, read here on every request
+      previews: readPreviews().map((r) => ({ ...previewHelloRow(r, previewUpHere()[r.name] ?? null), expires: r.expires, down_since: r.down_since ?? null })),
       // what the Library matches the gateway's header on (x-devteam-public): this project and checkout
       public: { project: typeof settings.project === 'string' && PUBLIC_PROJECT.test(settings.project) ? settings.project : null, root: fs.realpathSync(mainRoot) },
       links: Object.entries(isObj(settings.links) ? settings.links : {}).filter(([, l]) => isObj(l)).map(([id, l]) => {
@@ -8689,7 +9457,7 @@ async function cmdDashboard() {
       if (text(b.rule, 600)) args.push('--rule', b.rule.trim());
       return args;
     },
-    correct: (b) => (ID.test(b.id ?? '') && text(b.reason, 600) ? ['correct', b.id, '--reason', b.reason.trim()] : null),
+    correct: (b) => (ID.test(b.id ?? '') && text(b.reason, 600) && (b.impact === undefined || [1, 2, 3, 4].includes(b.impact)) ? ['correct', b.id, '--reason', b.reason.trim(), ...(b.impact !== undefined ? ['--impact', String(b.impact)] : [])] : null),
     'goal-hold': (b) => ((ID.test(b.id ?? '') || b.id === 'upkeep') && ['run', 'drain', 'park'].includes(b.mode) && (b.reason === undefined || b.reason === '' || text(b.reason, 300)) ? ['goal', 'hold', b.id, b.mode, '--owner', ...(b.reason ? ['--reason', b.reason.trim()] : [])] : null),
     fleet: (b) => (['drain', 'park', 'undrain', 'unpark', 'resume'].includes(b.op) && (b.reason === undefined || b.reason === '' || text(b.reason, 300)) ? ['fleet', b.op, '--owner', ...(b.reason && ['drain', 'park'].includes(b.op) ? ['--reason', b.reason.trim()] : [])] : null),
     'goal-decide': (b) => (ID.test(b.id ?? '') && ['approve', 'refine', 'let-go', 'restore'].includes(b.verdict) && (b.notes === undefined || text(b.notes, 4000)) ? ['goal', 'decide', b.id, b.verdict, ...(b.notes ? ['--notes', b.notes.trim()] : [])] : null),
@@ -8700,6 +9468,8 @@ async function cmdDashboard() {
     // Like every owner action here it can't tell who asks: anything on the box can reach it, so a
     // line it writes is a claim, and the gateway's confirm page never takes it for the owner's click.
     'artifact-publish': (b) => (LINK_ID.test(b.slug ?? '') && (b.op === 'unpublish' || (b.op === 'publish' && TREE_ID.test(b.tree ?? ''))) ? ['artifact', b.op, b.slug, '--owner', ...(b.op === 'publish' ? ['--tree', b.tree] : [])] : null),
+    'preview-stop': (b) => (typeof b.name === 'string' && PREVIEW_NAME.test(b.name) ? ['preview', 'stop', b.name] : null),
+    'preview-start': (b) => (typeof b.name === 'string' && PREVIEW_NAME.test(b.name) ? ['preview', 'start', b.name] : null),
   };
   // An action whose caller has a deadline of its own: the gateway gives the whole answer 15 s.
   const ACTION_MS = { 'artifact-publish': 12000 };
@@ -8725,7 +9495,19 @@ async function cmdDashboard() {
   };
   refreshHello();
   setInterval(refreshHello, 10000).unref();
-  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, inbox: hello?.inbox ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}) });
+  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, inbox: hello?.inbox ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}), previews: readPreviews().slice(0, PREVIEW_MAX).map((r) => previewHelloRow(r, previewUp.get(r.name) ?? null)) });
+  // Previews: the tick's probes feed hello and the Library, one run at a time so a tmux that has
+  // stalled never stacks them up. A file in run/previews that isn't a preview is named once.
+  const previewsNamedBad = new Set();
+  previewBad = (f, e) => { if (!previewsNamedBad.has(f)) { previewsNamedBad.add(f); log(`previews: skipped ${f}: ${e?.message ?? e}`); } };
+  let previewTicking = false;
+  const runPreviewTick = () => {
+    if (previewTicking) return;
+    previewTicking = true;
+    previewTick().catch((e) => log(`previews: tick failed: ${e?.stack ?? e}`)).finally(() => { previewTicking = false; });
+  };
+  runPreviewTick();
+  setInterval(runPreviewTick, Number(process.env.DEVTEAM_PREVIEW_TICK_MS ?? 10000)).unref();
   // Account rotation and limit stops (accounts-tick), one run at a time, as the supervisor; a line
   // it prints goes to the log once, however many ticks repeat it. Every dashboard asks to rotate,
   // and the claim decides which one does.
@@ -8747,7 +9529,7 @@ async function cmdDashboard() {
   // refresh used to start its own, and on a slow machine they piled up (one ran for an hour).
   let dataRun = null;
   let lastData = null;
-  const dashboardData = () => (dataRun ??= new Promise((resolve) => execFile(process.execPath, [self, 'dashboard-data'], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: ownerEnv, timeout: 120000, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
+  const dashboardData = () => (dataRun ??= new Promise((resolve) => execFile(process.execPath, [self, 'dashboard-data'], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: { ...ownerEnv, DEVTEAM_PREVIEW_UP: JSON.stringify(Object.fromEntries(previewUp)) }, timeout: 120000, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
     dataRun = null;
     if (!err) lastData = stdout;
     resolve({ ok: !err, stdout, stderr: err?.killed ? 'dashboard-data took over 2 minutes and was stopped' : String(stderr ?? '') });
@@ -9058,7 +9840,8 @@ function cmdPrompt() {
   const links = linksBlock(positional[1]);
   const arts = artifactsBlock(positional[1]);
   const block = knowledgeBlock(positional[1]);
-  out([p, handoff, links, arts, block].filter(Boolean).join('\n\n'));
+  const previews = positional[1] ? previewsBlock(role === 'worker' ? positional[1] : `plan-${positional[1]}`) : null;
+  out([p, handoff, previews, links, arts, block].filter(Boolean).join('\n\n'));
 }
 
 const tmux = (args) => sh('tmux', args) !== null;
@@ -9202,6 +9985,8 @@ function cmdPhase() {
   const task = flagStr('task') ?? prev?.task;
   const changed = !prev || prev.to !== to || prev.task !== task || (cost.usd !== undefined && cost.usd !== prev.usd) || flags.note !== undefined;
   const stale = !prev || Date.now() - Date.parse(prev.created_at) > Math.min(15, loadSettings().stale_after_minutes / 3) * 60000;
+  // Parking stops the session's own servers; the records stay for preview start after a resume.
+  if (to === 'parked') stopPreviewsOf(id, { keepRecords: true });
   if (!changed && !stale) return out(`phase ${to} (unchanged)`);
   appendLog({ type: 'phase', from: prev?.to ?? null, to, task, note: flagStr('note')?.slice(0, 280), sha: cwdGit(['rev-parse', 'HEAD']) ?? undefined, ...cost }, id);
   out(`phase ${to}${task ? ` ${task}` : ''}`);
@@ -9328,6 +10113,7 @@ function removeWorkerWorktree(id) {
     if (!T.mergeShaFor(id)) die(`${id} is not merged yet; --force removes its worktree anyway (uncommitted work in it is lost)`);
     if (lastPhaseOf(id)?.to !== 'done') die(`${id}'s worker hasn't logged phase done (its final spend); wait for it, or --force removes its worktree anyway`);
   }
+  stopPreviewsOf(id, { keepRecords: false });
   const R = fs.existsSync(wt) ? worktreeRepo(wt) ?? die(`${wt} is a worktree of no repo this machine can read`) : T;
   if (fs.existsSync(wt)) {
     R.gitOrDie(['worktree', 'remove', ...(flags.force ? ['--force'] : []), wt], R.root);
@@ -9419,7 +10205,8 @@ function makeSession(role) {
   const held = block ?? (role === 'planner' ? idBlockFor(id) : null);
   const text = `${promptFor(role, id, R)}${held ? ` ${idBlockText(held)}` : ''}`;
   const handoff = handoffBlock(name);
-  fs.writeFileSync(promptFile, `${text}${handoff ? `\n\n${handoff}` : ''}${links ? `\n\n${links}` : ''}${arts ? `\n\n${arts}` : ''}${knowledge ? `\n\n${knowledge}` : ''}\n`);
+  const previews = previewsBlock(name);
+  fs.writeFileSync(promptFile, `${text}${handoff ? `\n\n${handoff}` : ''}${previews ? `\n\n${previews}` : ''}${links ? `\n\n${links}` : ''}${arts ? `\n\n${arts}` : ''}${knowledge ? `\n\n${knowledge}` : ''}\n`);
   // One step under a lock per session, the look at the window through the act that records the
   // launch, so two launches of one session at the same moment can't both type into it: whichever
   // comes second finds the first's window and leaves it alone. withLock clears a lock older than
@@ -9618,9 +10405,14 @@ function cmdHandoff() {
   if (workLines(cwdGit(['status', '--porcelain'])).length) die('handoff: commit your work in progress first (a WIP commit is fine); the handoff commit holds only the note');
   const branch = cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']);
   if (branch !== sess.branch) die(`handoff: you are on ${branch}, not ${sess.branch}`);
+  // what was running, for the session that picks this up (phase parked stops it next)
+  const listed = spawnSync(process.execPath, [fileURLToPath(import.meta.url), 'preview', 'list', '--json'], { cwd: process.cwd(), encoding: 'utf8' });
+  let running = [];
+  try { running = JSON.parse(listed.stdout).filter((r) => r.session === name); } catch {}
+  const previews = running.length ? `\n\n## Previews running\n\n${JSON.stringify(running, null, 2)}` : '';
   withScratch((dir) => {
     const f = path.join(dir, 'msg');
-    fs.writeFileSync(f, `${HANDOFF_SUBJECT(name)}\n\n${note}\n`);
+    fs.writeFileSync(f, `${HANDOFF_SUBJECT(name)}\n\n${note}${previews}\n`);
     cwdGitOrDie(['commit', '--quiet', '--allow-empty', '-F', f]);
   });
   cwdGitOrDie(['push', '--quiet', 'origin', `HEAD:refs/heads/${sess.branch}`]);
@@ -10975,7 +11767,7 @@ function askSensorCredentials(missing) {
       fs.mkdirSync(path.dirname(exclude), { recursive: true });
       if (!(readText(exclude) ?? '').split('\n').includes('.devteam-secrets/')) fs.appendFileSync(exclude, '.devteam-secrets/\n');
     }
-    const r = spawnSync(process.execPath, [self, 'ask', '--kind', 'owner-action', '--sensor', m.name, '--question', `Post a read-only ${m.name} token so a sensor can watch it`, '--context', `${m.name} is set up in this code, but the project has no way to read it. With a token I can start a sensor that watches ${m.reads}. Create ${m.scope}; read-only is preferred. It goes straight to ${sinkWords(m.secret.sink)} and never through chat or the log. Or answer "Don't use this sensor": I won't ask again unless you say so.`, '--secrets', JSON.stringify([m.secret])], { cwd: mainRoot, env: { ...process.env, DEVTEAM_ROLE: 'supervisor' }, encoding: 'utf8' });
+    const r = spawnSync(process.execPath, [self, 'ask', '--kind', 'owner-action', '--sensor', m.name, '--question', `Post a read-only ${m.name} token so a sensor can watch it`, '--context', `${m.name} is set up in this code, but the project has no way to read it. With a token I can start a sensor that watches ${m.reads}. Create ${m.scope}; read-only is preferred. It goes straight to ${sinkWords(m.secret.sink)} and never through chat or the log. Or answer "Don't use this sensor": I won't ask again unless you say so.`, '--secrets', JSON.stringify([m.secret]), '--stake', '1', '--urgency', '1'], { cwd: mainRoot, env: { ...process.env, DEVTEAM_ROLE: 'supervisor' }, encoding: 'utf8' }); // rated 1 and 1: a sensor only reads, and no work waits on one
     if (r.status === 0) asked.push({ name: m.name, question: r.stdout.trim() });
     else warn(`could not ask for the ${m.name} token: ${(r.stderr || '').trim().split('\n').pop()}`);
   }
@@ -11359,7 +12151,7 @@ function verifyIncidents() {
         type: 'question', kind: 'owner-decision', question: `The fix for "${p.title}" didn't hold (${t.id}). Was deciding it a wrong call, or a sound call whose fix failed?`,
         context: `${recurred.join(', ')} recurred after the deploy. A wrong call is a correction you make (correct ${dec?.id ?? '<decision>'} --reason "…"), and incident-fix drops to rung 1. A sound call that failed is a problem (${prob.id}) and changes no trust. Recurrence has innocent causes: stale dynos, cached client bundles, replayed jobs, a second cause sharing the frame.`,
         recommendation: 'Sound call, failed fix', choices: [{ label: 'Sound call, failed fix', detail: `keep ${prob.id} open, fix forward`, effect: 'no trust change' }, { label: 'Wrong call', detail: `correct ${dec?.id ?? 'the decision'} yourself`, effect: 'incident-fix drops to rung 1' }],
-        blocks: [p.id], evidence: [o.id, prob.id], why_asked: { reasons: ['owner-only'] },
+        blocks: [p.id], stake: 1, urgency: 2, evidence: [o.id, prob.id], why_asked: { reasons: ['owner-only'] },
       }, 'supervisor');
       setIncident(p, { status: 'open', verify: { commit: v.commit, regressed: [...(v.regressed ?? []), v.commit] } });
       alerts.push(`the fix for ${p.id} didn't hold (${o.id}; question ${q.id})`);
@@ -12261,7 +13053,7 @@ function linkByOwner(sub, id, field, vals, kind) {
   if (!approved) {
     const open = questions().find((q) => q.status === 'open' && q.class === cls && (q.context ?? '').includes(draft));
     if (open) return out(`${open.id}: already asked the owner about this exact change; once answered: ${again(open.id)}`);
-    const q = appendLog({ type: 'question', kind: 'owner-decision', class: cls, question: `${sub === 'add' ? 'Add' : sub === 'rm' ? 'Remove' : 'Change'} the ${kind} link ${id}${sub === 'set' ? ` (${field})` : ''}?`, context: `The settings diff this answer approves${bundleIds.length > 1 ? ` (this change and ${bundleIds.length - 1} other repo link change(s) waiting in settings.md to land with it)` : ''}, each links entry main has and what would land:\n${diff}\n\nThe registry entries, as they would be in settings.md links (merge lands exactly these under this answer, and no other):\n${draft}`, recommendation: 'yes', why_asked: { reasons: ['owner-only'] } }, 'supervisor');
+    const q = appendLog({ type: 'question', kind: 'owner-decision', class: cls, question: `${sub === 'add' ? 'Add' : sub === 'rm' ? 'Remove' : 'Change'} the ${kind} link ${id}${sub === 'set' ? ` (${field})` : ''}?`, context: `The settings diff this answer approves${bundleIds.length > 1 ? ` (this change and ${bundleIds.length - 1} other repo link change(s) waiting in settings.md to land with it)` : ''}, each links entry main has and what would land:\n${diff}\n\nThe registry entries, as they would be in settings.md links (merge lands exactly these under this answer, and no other):\n${draft}`, recommendation: 'yes', stake: 1, urgency: 2, why_asked: { reasons: ['owner-only'] } }, 'supervisor');
     return out(`${q.id}: asked the owner (${cls}); nothing is written until it is answered. Then: ${again(q.id)}`);
   }
   const v = ownerAnswer(approved, 'link --approved');
@@ -12360,6 +13152,40 @@ The whole system as planned now: the sum of every design so far. Written at boot
 |---|---|---|---|
 `;
 
+// project/strategy.md as init makes it: why the project exists and how it wins, the owner's. The
+// supervisor drafts it at adoption and judges each goal's impact against it; the kit never parses
+// it (it only knows missing, this template, or written).
+const STRATEGY_TEMPLATE_MARK = 'devteam:strategy-template';
+const STRATEGY_MD = `# Strategy
+
+<!-- ${STRATEGY_TEMPLATE_MARK}: delete this line when you write the strategy -->
+
+Why this project exists and how it wins. The supervisor drafts it; only the owner approves a change (class strategy-change).
+Goals are judged against it (planning.md §1). Keep it to one page.
+
+## Why it exists
+<two or three sentences: the problem, and what is true in the world if this works>
+
+## Who it serves
+<the people who use it and the people who pay, and the job each hires it for>
+
+## How it wins, in order
+<two to four lines, ranked: when two pull apart, the higher one wins>
+- **W1** <e.g. People adopt it without help> : <how this project moves it, and the number that shows it>
+- **W2** <e.g. It earns money> : <how, and the number>
+
+## Values
+<at most seven; each a rule and a yes/no check a reviewer can answer from a design or a spec>
+- **V1** <rule>. Check: <question>
+
+## Refusals
+<what we won't do whatever it pays; each one checkable>
+- **R1** <refusal>. Check: <question>
+
+## Not known yet
+<what the supervisor could not work out; each becomes a question to the owner>
+`;
+
 // init [--name project] [--upstream-base vX.Y.Z]: the project folders,
 // settings, .gitignore entries, the AGENTS.md pointer; optionally the GitHub check and agent config.
 // The section init adds to the project's AGENTS.md: every agent reads this first, then its doc.
@@ -12397,6 +13223,7 @@ function cmdInit() {
   const block = { project: flagStr('name') ?? path.basename(root), upstream_base: flagStr('upstream-base') ?? null, upstream_sync: 'adopt', ...(remoteHead && remoteHead !== 'main' && remoteHead !== 'HEAD' ? { main_branch: remoteHead } : {}), components: {}, gates: {} };
   put(path.join(projectDir, 'settings.md'), `# Project settings\n\nOnly what this project changes; every setting has a default in scripts/devteam.mjs (\`devteam.mjs settings\` shows the result). Below the block, record project-specific answers to the decisions the governance docs leave open (components and stacks, persistence tiers, one-way doors, release tags, how to notify the owner), each with its date.\n\n\`\`\`json devteam\n${JSON.stringify(block, null, 2)}\n\`\`\`\n`);
   put(path.join(projectDir, 'designs', 'architecture.md'), ARCHITECTURE_MD);
+  put(path.join(projectDir, 'strategy.md'), STRATEGY_MD);
   // retros/ and reviews/ hold placeholders; log/ and tickets/ fill as the fleet writes, and merge
   // refuses anything in them that isn't the fleet's (a .gitkeep included).
   for (const d of ['retros', 'reviews']) put(path.join(projectDir, d, '.gitkeep'), '');
@@ -12412,7 +13239,7 @@ function cmdInit() {
   const claude = path.join(root, 'CLAUDE.md');
   if (fs.existsSync(claude) && !/@AGENTS\.md\b/.test(readText(claude))) { fs.appendFileSync(claude, `\n## devteam\n\n@AGENTS.md\n`); made.push('CLAUDE.md'); }
   out(made.length ? `created:\n${made.map((m) => `  ${m}`).join('\n')}` : 'nothing to create');
-  out('next: fill settings (components and their owns, links to sibling repos and design files, agent_command, gates, worktree_files), write designs/architecture.md from the code, then start the supervisor (the upstream README, Setup)');
+  out('next: fill settings (components and their owns, links to sibling repos and design files, agent_command, gates, worktree_files), write designs/architecture.md from the code, then start the supervisor: it drafts strategy.md with you before the first goal (the upstream README, Setup)');
 }
 
 const HELP = `devteam <command>   (positionals before flags; flags take the words after them)
@@ -12464,6 +13291,12 @@ Decide and act (supervisor.md, constitution.md)
   artifact manifest <slug> [--json]   what publishing a landed artifact would put up: main's tree, each file's sha256 (the cloud gateway's confirm page reads it)
   artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner   the owner's record that a landed artifact went public or came down (the gateway's confirm page runs these; by hand they record intent only)
   artifacts [--json]              landed artifacts, and drafts in session worktrees
+  preview <port> [--label "<one line>"]   register a server you are running; prints the link for this machine (a name derived from project, session and label)
+  preview --run "<command>" [--port <p>] [--label …]   the kit runs it in a tmux window beside yours; PORT is set, {port} in the command is filled in, a free port in 4400-4499 is picked without --port
+  preview list [--json]           this instance's previews, with whether each answers
+  preview url [<name>]            the link, as the owner will open it
+  preview stop <name> | --all     unregister (--all: your own; a name is any session's, there is no ownership check); stops the server if the kit started it
+  preview start <name>            run a kit-started preview again, on its name and port
   ask --question q [--kind k] [--class c] [--reasons r…] [--recommendation r] [--confidence 0-1] [--default d [--deadline 15m|2h|<time> (incident-fix)]] [--choices '[{"label","detail","effect"}…]'] [--rule-scope s] [--goal g-… (goal-approval)] [--links '[{"title","path","ref"}|{"title","url"}|{"title","link"}…]' (link: a registry id)] [--blocks ids] [--evidence ids] [--ticket id] [--re m-…] [--note path] [--secrets '[{"name","kind":"string|file","sink"}…]' (owner-action)]
   secret post <qid> [--file NAME=path] [--json]                          owner: post a question's secrets straight to their sinks; never logged (secret sinks lists them)
   ask --kind review --page <repo path> --ref <branch|sha> [--data <repo path>] [--result-schema <repo path>] [--allow-partial] --question q [--context c] [--class c] [--reasons r…] [--ticket id] [--blocks ids] [--re m-…]
@@ -12475,12 +13308,16 @@ Decide and act (supervisor.md, constitution.md)
   review draft <qid> [<file|->]   owner: save partial progress; without a file, print it (a draft is never an answer)
   answer <qid> --review-result <file|-> | answer <qid> "<why>" --decline   (owner) a review: validate and hash its result, or send it back
   answer <qid> "<text>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> "<text>" --from-chat --said "<owner's words>" [--autonomy n] [--rule "…"] | answer <qid> --defaulted   (supervisor)
-  withdraw <qid> [--reason r] | questions [--all] [--id q] [--json]
+  withdraw <qid> [--reason r] | questions [--all] [--id q] [--json]   questions print in Inbox order: the most valuable first
+  ask … --stake 1-3 --urgency 1-3 [--settles <qid>… --settles-if "<answer>"]   rate every question: how much of what the fleet does next rides on the answer, how soon waiting costs, and the open questions one answer would settle (stake 3, same goal or feature)
+  rate <qid> [--stake 1-3] [--urgency 1-3] [--settles <qid>… | --settles none] [--unsettles <qid>…] [--settles-if "<answer>"]   supervisor: rate an open question again; --settles adds to what it settles
+  next [--json]   the owner's next best step: the top of the Inbox, and why it is there
   decide --class c [--scope s] [--approved qid|kid] [--options a b] [--rationale r] [--confidence 0-1] [--refs ids] [--irreversible] -- "<what>"   a judgment call and the trust it rests on; prints d-…
   act --decision d-… -- "<what>"   carry out a decision (merge, ticket, withdraw, goal hold, worker, planner, fleet and link take --decision too)
   act --class c [--scope s] [--approved qid|kid] [--refs ids] [--irreversible] [--repo <link>] -- "<what>"   an act that is its own decision; --repo names the repo a release, staging or production act was in
   decisions [--who owner|supervisor] [--class c] [--corrected] [--tail n] [--json]   every call, who made it and under what
   correct <decision-or-act-id> --reason r [--severity n]   (owner; --retro for the supervisor) | repair <id> --how undo|fix-ticket|none
+  correct <goal-impact d-id> --reason r --impact 1-4   (owner) give the goal's impact yourself; it stands until you give another
   trust [--json]                  the ladder: rung, ceiling, agreement, corrections per class
 
 Observe and orient
@@ -12494,7 +13331,8 @@ Observe and orient
   problem [--all] | problem add --title t --severity n [--risk] [--threatens g…] | problem set <id> …
 
 Goals and retros
-  goal [list|check|show|forecast|add|set|decide|approve|status|reading|hold|park-sessions] …
+  goal [list|check|show|forecast|add|set|decide|approve|status|reading|hold|park-sessions|impact] …
+  goal impact <g-id> <1-4> --rationale "…" [--confidence 0-1]   supervisor: how much the goal matters to the project, judged against project/strategy.md (4 the project depends on it, 3 moves a number the project watches, 2 worth having, 1 housekeeping); orders the Inbox, never the work
   goal set <g-id> --approved <qid> …   supervisor: apply an answered goal-change question to a goal past draft (one set per answer)
   goal reading <g-id> --run | --approved <qid> | --value n   a reading by the measure's source: --run runs a repo check on main or a prod check; --approved records an owner goal's yes from its answered goal-met question; --value only for a goal with no source, or the owner's own (--owner)
   retro [--due | --print | close <date> --summary s --refs ids]
@@ -12514,14 +13352,14 @@ Dashboard and releases
 
 // What the box's operator may run: reads only (a test runs each and diffs the log and git status). A
 // command that also writes is listed by its read forms, so `knowledge add` is refused like any write.
-const OPERATOR_READS = new Set(['status', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'log', 'messages', 'knowledge', 'goal', 'goal list', 'goal show', 'fleet status']);
+const OPERATOR_READS = new Set(['status', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'next', 'log', 'messages', 'knowledge', 'goal', 'goal list', 'goal show', 'fleet status']);
 const OPERATOR_SUBCOMMANDED = new Set(['fleet', 'goal', 'knowledge']);
 const COMMANDS = {
   init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), whoami: cmdWhoami, hello: cmdHello, settings: cmdSettings,
-  feature: cmdFeature, ticket: cmdTicket, components: cmdComponents, link: cmdLink, links: cmdLinks, artifact: cmdArtifact, artifacts: cmdArtifacts, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, roadmap: cmdRoadmap,
+  feature: cmdFeature, ticket: cmdTicket, components: cmdComponents, link: cmdLink, links: cmdLinks, artifact: cmdArtifact, artifacts: cmdArtifacts, preview: cmdPreview, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, roadmap: cmdRoadmap,
   'check-ticket': cmdCheckTicket, 'check-pr': cmdCheckPr, merge: cmdMerge, 'review-worktree': cmdReviewWorktree,
   phase: cmdPhase, gate: cmdGate, send: cmdSend, messages: cmdMessages, 'stop-ok': cmdStopOk,
-  ask: cmdAsk, answer: cmdAnswer, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
+  ask: cmdAsk, answer: cmdAnswer, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, rate: cmdRate, next: cmdNext, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
   observe: cmdObserve, 'observe-link': cmdObserveLink, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, knowledge: cmdKnowledge, problem: cmdProblem,
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
   log: cmdLog, record: cmdRecord, peek: cmdPeek, sensor: cmdSensor, 'log-check': cmdLogCheck, remediate: cmdRemediate, 'accounts-tick': cmdAccountsTick, 'supervisor-session': cmdSupervisorSession, dispose: cmdDispose, 'log-sync': cmdLogSync, history: cmdHistory,
