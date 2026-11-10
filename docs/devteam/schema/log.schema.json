@@ -1025,7 +1025,7 @@
             "type": "string"
           },
           "verify": {
-            "description": "An incident's fix in production: the commit, the end of its verify window, and whether the deploy was matched or assumed.",
+            "description": "An incident's fix in production: the merge commit, its verify window (from, until), whether the deploy was matched or assumed, whether it resolved unverified, and the commits whose fix regressed.",
             "type": "object",
             "properties": {
               "commit": {
@@ -1039,6 +1039,25 @@
               "assumed": {
                 "type": "boolean",
                 "description": "true when no deploy event matched the commit and the window started deploy_lag_minutes after the merge."
+              },
+              "from": {
+                "type": "string",
+                "description": "When the verify window started: the deploy, or deploy_lag_minutes after the merge."
+              },
+              "unverified": {
+                "type": "boolean",
+                "description": "true when it resolved with its fingerprints seen fewer than 3 times."
+              },
+              "regressed": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Merge commits whose fix didn't hold."
+              },
+              "seen": {
+                "type": "integer",
+                "description": "How many times its fingerprints had been seen when the window started."
               }
             },
             "additionalProperties": false
@@ -1177,7 +1196,7 @@
           },
           "links": {
             "type": "array",
-            "description": "What the owner must look at to answer (a spec, a plan, a mock): a path in the repo at ref (default main), a URL, a registry link by id, or an artifact by slug.",
+            "description": "What the owner must look at to answer (a spec, a plan, a mock): a path in the repo at ref (default main), a URL, a registry link by id, an artifact by slug, or a preview by name.",
             "items": {
               "type": "object",
               "properties": {
@@ -1206,6 +1225,11 @@
                   "type": "string",
                   "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
                   "description": "An artifact's slug (project/artifacts/<slug>/); the dashboard opens it in its viewer."
+                },
+                "preview": {
+                  "type": "string",
+                  "pattern": "^[a-z]{3,7}-[a-z]{3,7}(?:-[1-9]\\d?)?$",
+                  "description": "A preview's name (devteam.mjs preview list); the dashboard links it for this machine and shows whether it is up."
                 },
                 "at": {
                   "type": "string",
@@ -2114,7 +2138,8 @@
           "threatens",
           "fingerprints",
           "refs",
-          "sensor"
+          "sensor",
+          "verify"
         ],
         "owner": [
           "status",
