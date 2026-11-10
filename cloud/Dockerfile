@@ -279,13 +279,15 @@ mkdir -p operator
 if ! tmux has-session -t home 2>/dev/null; then
   tmux new-session -d -s home -n operator -c "$HOME/operator"
   tmux new-window -d -t home -n shell -c "$HOME"
-  if ls .claude/projects/-data-home-operator/*.jsonl >/dev/null 2>&1; then c='--continue'; m='The box restarted, and this is you, resumed. Read /opt/devteam/operator.md again, then do At boot.'; else c=''; m='Read /opt/devteam/operator.md and do what it says, starting with At boot.'; fi
-  tmux send-keys -t home:operator -l "export DEVTEAM_ROLE=operator; claude $c --dangerously-skip-permissions --settings /opt/devteam/operator-settings.json '$m'"
+  ask='You are the sanctuarycomputer/devteam operator for this box. Ensure your supervisors are all up and running.'
+  if ls .claude/projects/-data-home-operator/*.jsonl >/dev/null 2>&1; then c='--continue'; ask="The box restarted. $ask"; else c=''; fi
+  # its job is in its system prompt, so what it's told, and what the owner tells it, stays plain English
+  tmux send-keys -t home:operator -l "export DEVTEAM_ROLE=operator; claude $c --dangerously-skip-permissions --settings /opt/devteam/operator-settings.json --append-system-prompt \"\$(cat /opt/devteam/operator.md)\" '$ask'"
   tmux send-keys -t home:operator Enter
 fi
 # The operator's tick: typed into its window every 30 minutes, unless a dialog is up (Enter would answer it).
 # Claude Code queues what's typed during a turn, so a busy operator just gets it after.
-tick='Operator tick: run box-status and follow Each tick in operator.md.'
+tick='Check on the box and your supervisors.'
 ( while :; do
     sleep "${DEVTEAM_OPERATOR_TICK_SECONDS:-1800}"
     screen=$(tmux capture-pane -p -t home:operator 2>/dev/null) || continue
