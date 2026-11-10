@@ -1365,7 +1365,7 @@ function questionView(q) {
     if (ans) matched = !review.declined && resultStatus === 'verified' && (result?.proposed ?? 0) > 0 && result.kept === result.proposed && result.undecided === 0;
   }
   return {
-    id: q.id, kind: q.kind, class: q.class ?? null, scope: q.scope ?? null, ticket: q.ticket ?? null, re: q.re ?? null, sensor: q.sensor ?? null, asked_at: q.created_at,
+    id: q.id, kind: q.kind, class: q.class ?? null, scope: q.scope ?? null, ticket: q.ticket ?? null, re: q.re ?? null, sensor: q.sensor ?? null, thread: q.thread ?? null, asked_at: q.created_at,
     question: q.question, context: q.context ?? '', options: q.options ?? [], choices: q.choices ?? [], links: q.links ?? [], goal: q.goal ?? null, change: q.change ?? null, rule_scope: q.rule_scope ?? null, recommendation: q.recommendation ?? '', confidence: q.confidence ?? null,
     default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], stake: ratingOf(q.stake), urgency: ratingOf(q.urgency), settles: Array.isArray(q.settles) ? q.settles.filter((x) => typeof x === 'string') : [], settles_if: typeof q.settles_if === 'string' ? q.settles_if : null, settles_label: [...(q.choices ?? []).map((c) => c?.label), ...(q.options ?? [])].find((l) => sameAnswer(l, q.settles_if)) ?? null, rating_history: ratingHistory(q), approves: q.approves ?? [], evidence: q.evidence ?? [], note: q.note ?? null, why_asked: q.why_asked ?? null,
     secrets: (q.secrets ?? []).map((x) => ({ ...x, to: sinkWords(x.sink), sink_type: SINK_RE.exec(x.sink ?? '')?.[1] ?? null, warning: sinkWarning(x.sink) })), secrets_posted: q.updates.filter((u) => u.secrets_posted !== undefined && writerClass(u.by) === 'owner').pop()?.secrets_posted ?? [],
@@ -1408,7 +1408,7 @@ function artifactLinksMoved(v) {
   if (gone.length) return `${v.id} links the artifact ${gone.join(', ')}, which is no longer available; ask again`;
   return null;
 }
-const questions = () => logObjects('question').map((q) => { const v = questionView(q); return { ...v, links: resolveQuestionLinks(v.links, v.status === 'open'), goal_hold: questionHold(q) }; });
+const questions = () => logObjects('question').map((q) => { const v = questionView(q); return { ...v, links: resolveQuestionLinks(v.links, v.status === 'open'), goal_hold: questionHold(q), ...(v.thread ? { thread_title: logGet(v.thread)?.title ?? null } : {}) }; });
 
 // Why question q does not authorise the supervisor to change goal goalId (null when it does): it
 // is a goal-change question about that goal, answered by the owner with its recommendation (an
@@ -4330,7 +4330,10 @@ function ratingWarnings({ stake, urgency, blocks, def }) {
   if (urgency === 3 && !def && !(blocks ?? []).some((b) => activeTickets().has(b) && !mergeShaFor(b)) && !blocksOpenIncident(blocks)) warn('urgency 3 says work is stopped on it now: it counts as 3 only while --blocks names a ticket that is waiting or an open incident, or the question has a default; this one counts as 2');
   if (stake === 3 && def) warn('a question the work turns on (stake 3) shouldn\'t go ahead by default');
 }
-function cmdAsk() {
+function cmdAsk() { out(askLine().id); }
+// Every check and refusal ask makes, and the line it writes. thread ask calls it with the thread the
+// question is asked in; nothing else about the question differs.
+function askLine({ thread } = {}) {
   supervisorOnly('ask');
   const q = flagStr('question') ?? die('ask needs --question');
   const kind = flagStr('kind') ?? 'owner-decision';
@@ -4555,15 +4558,14 @@ function cmdAsk() {
   settleChecks({ self: null, kind, stake: rating.stake, settles, added: settles, settlesIf: flagStr('settles-if'), choices: jsonFlag('choices'), about: questionAbout({ goal: flagStr('goal'), ticket: flagStr('ticket'), blocks }) });
   if (rating.stake === undefined || rating.urgency === undefined) warn('rate it: --stake 1-3 --urgency 1-3, so the Inbox can put the most valuable question first (supervisor.md §6)');
   ratingWarnings({ ...rating, blocks, def });
-  const line = appendLog({
+  return appendLog({
     type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), sensor: flagStr('sensor'), remediation: remediationPin ?? undefined, remediation_entries: remediationEntries, owner_said: ownerSaid ?? undefined, question: q, context: kind === 'goal-approval' ? [flagStr('context'), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal')))), registryAttestText(logGet(flagStr('goal')))].filter(Boolean).join('\n\n') : context,
     rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: goalChangeFlag(cls), options: asList(flags.options), choices: jsonFlag('choices'), links, recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined,
     deadline: def ? deadlineAt ?? new Date(Date.now() + loadSettings().question_default_after_hours * 3600000).toISOString() : undefined,
     blocks, ...rating, settles: settles.length ? settles : undefined, settles_if: settles.length ? flagStr('settles-if') : undefined,
-    approves: approves.length ? approves : undefined, evidence, note: flagStr('note'), secrets, review,
+    approves: approves.length ? approves : undefined, evidence, note: flagStr('note'), secrets, review, thread,
     why_asked: { rung: onLadder ? rungFor(cls, scope) : undefined, ceiling: onLadder ? L.classes[cls].ceiling : undefined, reasons },
   }, 'supervisor');
-  out(line.id);
 }
 
 // The checks every record of the owner's word in chat shares: only the supervisor records it, and
@@ -4910,6 +4912,15 @@ function cmdThread() {
     out(u.id);
     if (by === 'owner') out(deliveredWords(deliverOwnerTurn(t, words)));
     return;
+  }
+  // an Inbox question in every respect (ask's flags, checks and refusals), asked in this thread, and
+  // a turn that names it: the card shows the question with the Inbox's own controls
+  if (sub === 'ask') {
+    supervisorOnly('thread ask');
+    const t = threadOpen(id, 'supervisor');
+    const q = askLine({ thread: t.id });
+    appendLog({ type: 'turn', thread: t.id, text: capBytes(q.question, TURN_MAX), question: q.id }, 'supervisor');
+    return out(q.id);
   }
   if (sub === 'show') {
     const t = logGet(id ?? '');

@@ -235,4 +235,27 @@ test('threads: records, commands, delivery, the Inbox and the loop', async (t) =
     assert.ok(o.includes(`new line(s) from the owner: ${U} (questions --all, history --tail 20; a thread: thread list --waiting)`), `the turn woke it, with the pointer: ${o}`);
     assert.ok(!o.includes(T), 'the thread from before is not new');
   });
+
+  await t.test("thread ask asks an Inbox question exactly as ask does, plus its thread, and a turn naming it", () => {
+    const T = F.owner(['thread', 'new', 'Should we narrow this?', '--title', 'Launch checkout', '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}` })]).split('\n')[0];
+    const ask = ['--question', 'Narrow the goal to EU orders?', '--choices', JSON.stringify([{ label: 'Yes' }, { label: 'Not yet' }]), '--recommendation', 'Yes', '--goal', F.goal, '--stake', '2', '--urgency', '1'];
+    const Q1 = F.sup(['thread', 'ask', T, ...ask]);
+    const Q2 = F.sup(['ask', ...ask]);
+    assert.match(Q1, /^q-\d{8}-\d{9}-supervisor$/, 'the question id alone, as ask prints it');
+    const raw = (id) => { const { id: _, created_at, updates, ...o } = JSON.parse(F.owner(['log', '--id', id, '--json']))[0]; return o; };
+    assert.deepEqual(raw(Q1), { ...raw(Q2), thread: T }, "nothing about the question differs from ask's but its thread");
+    const v = show(T);
+    const last = v.turns[v.turns.length - 1];
+    assert.deepEqual([last.by, last.question, last.text, v.questions.map((q) => [q.id, q.status])], ['supervisor', Q1, 'Narrow the goal to EU orders?', [[Q1, 'open']]]);
+    const inbox = JSON.parse(F.owner(['dashboard-data'])).questions.find((q) => q.id === Q1);
+    assert.deepEqual([inbox.thread, inbox.thread_title], [T, 'Launch checkout'], 'the Inbox says which thread asked it');
+    assert.equal(JSON.parse(F.owner(['dashboard-data'])).questions.find((q) => q.id === Q2).thread, null);
+    // ask's refusals are thread ask's, and a refused question leaves no turn
+    const turns = v.turns.length;
+    assert.match(F.fails(['thread', 'ask', T, '--choices', '[]'], F.SUP), /ask needs --question/);
+    assert.match(F.fails(['thread', 'ask', T, ...ask], { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'demo-01-x' }), /the supervisor does this/);
+    assert.equal(show(T).turns.length, turns);
+    assert.match(F.fails(['thread', 'ask', 't-20990101-000000000-owner', ...ask], F.SUP), /no thread/);
+    F.sup(['withdraw', Q2, '--reason', 'asked twice in a test']);
+  });
 });
