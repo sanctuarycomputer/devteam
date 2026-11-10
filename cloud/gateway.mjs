@@ -322,9 +322,11 @@ const UPLOAD_SWEEP_MS = 3600 * 1000;
 const UPLOAD_NAME = 200;
 const UPLOAD_PART = '.part';
 const UPLOAD_FOLDER = /^\d{4}-\d{2}-\d{2}-[0-9a-f]{24}$/;
-// Node's limit on a whole request is five minutes, too short for a big file on a slow line. A
-// stalled upload is cut off much sooner (UPLOAD_STALL_MS); this bounds a slow one.
+// Node's limit on a whole request is five minutes, too short for a big file on a slow line, and it
+// is one setting for the server. So the server's is the upload's, and every other body keeps those
+// five minutes by a timer of its own (BODY_MS). A stalled upload goes sooner (UPLOAD_STALL_MS).
 const REQUEST_MS = 3600 * 1000;
+const BODY_MS = 5 * 60 * 1000;
 // The name a dropped file is stored under: its own, reduced to letters, digits, '.', '-' and '_',
 // so its path needs no quoting wherever it's pasted, and a program that recognises an image by its
 // path (Claude Code, which attaches it) sees a plain one. It can't leave its folder, or be hidden.
@@ -337,7 +339,7 @@ export function safeUploadName(raw) {
   const stem = (ext ? plain.slice(0, dot) : plain).replace(/^[._-]+/, '').slice(0, UPLOAD_NAME).replace(/[.-]+$/, '');
   return `${stem || 'file'}${ext.length > 1 ? ext : ''}`;
 }
-// These three run in the terminal's page too (TERM_DROP has their source), and are tested here.
+// These run in the terminal's page too (TERM_DROP has their source), and are tested here.
 // A stored path never needs the quotes; they're for whatever else this is ever handed.
 export function shellQuote(s) {
   return /^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
@@ -347,8 +349,17 @@ export function dropPaste(paths) {
 }
 // What follows the paste: a space, so what the owner types next doesn't run into a path. Not after
 // images alone: Claude Code turns those into attachments, and it has no path left to separate.
+export function isDropImage(p) {
+  return /\.(png|jpe?g|gif|webp)$/i.test(p);
+}
 export function dropSpace(paths) {
-  return paths.some((p) => !/\.(png|jpe?g|gif|webp)$/i.test(p));
+  return paths.some((p) => !isDropImage(p));
+}
+// What the owner is told after a drop. The paths stay on screen: a paste can still go astray.
+export function dropNote(paths) {
+  const images = paths.filter(isDropImage).length;
+  const how = images === paths.length ? 'images arrive as attachments' : images ? 'images arrive as attachments, PDFs and other files as a path' : 'PDFs and other files arrive as a path';
+  return `Sent to the focused pane. In Claude Code, ${how}.\n${paths.join('\n')}`;
 }
 
 // --- the server ---------------------------------------------------------------------------------
@@ -383,6 +394,7 @@ export function createGateway(opts = {}) {
   const uploadFree = opts.uploadFree ?? UPLOAD_FREE;
   const uploadKeepMs = opts.uploadKeepMs ?? UPLOAD_KEEP_MS;
   const uploadStallMs = opts.uploadStallMs ?? UPLOAD_STALL_MS;
+  const bodyMs = opts.bodyMs ?? BODY_MS;
 
   // Unclaimed: the token named in the environment, else one made now and printed once (whoever
   // reads the platform's logs can already open a shell on the box, the root of trust anyway).
@@ -721,6 +733,21 @@ export function createGateway(opts = {}) {
     });
   }, 100);
 })();</script>`);
+  // ttyd's page drops what's typed or pasted while its socket is down, and gives no sign. So this
+  // goes in ahead of its bundle, to note the socket it opens; a paste then waits for a live one.
+  const TERM_SOCKET = Buffer.from(`<script>(() => {
+  window.WebSocket = new Proxy(window.WebSocket, { construct(T, args, nt) {
+    const socket = Reflect.construct(T, args, nt);
+    const live = { socket, at: 0 };
+    window.devteamTermSocket = live;
+    socket.addEventListener('open', () => { live.at = Date.now(); });
+    return socket;
+  } });
+})();</script>`);
+  const withSocketWatch = (html) => {
+    const at = html.indexOf('<head>');
+    return at < 0 ? html : Buffer.concat([html.subarray(0, at + 6), TERM_SOCKET, html.subarray(at + 6)]);
+  };
   // A native terminal pastes the path of a file dropped on it, and Claude Code picks it up from
   // there. So does this: each file goes to the box first, and then its path goes in by term.paste,
   // bracketed like any paste when the program in the pane has asked for that, to the focused pane.
@@ -729,7 +756,11 @@ export function createGateway(opts = {}) {
   const MAX = ${uploadMax};
   const shellQuote = ${shellQuote};
   const dropPaste = ${dropPaste};
+  const isDropImage = ${isDropImage};
   const dropSpace = ${dropSpace};
+  const dropNote = ${dropNote};
+  // ttyd is attached and tmux has redrawn (bracketed paste back on) a moment after a socket opens
+  const SETTLE_MS = 1500;
   const box = (css) => { const d = document.createElement('div'); d.style.cssText = 'position:fixed;z-index:10000;font:14px system-ui,sans-serif;display:none;' + css; document.documentElement.appendChild(d); return d; };
   const veil = box('inset:0;align-items:center;justify-content:center;background:rgba(0,0,0,.6);color:#fff;border:2px dashed #fff;box-sizing:border-box;pointer-events:none');
   veil.id = 'devteam-drop-veil';
@@ -737,13 +768,10 @@ export function createGateway(opts = {}) {
   const note = box('right:12px;bottom:12px;max-width:70%;padding:8px 12px;border-radius:6px;background:#222;color:#eee;white-space:pre-wrap;cursor:pointer');
   note.id = 'devteam-drop-note';
   note.onclick = () => { note.style.display = 'none'; };
-  let fade = 0;
   const say = (text, bad) => {
-    clearTimeout(fade);
     note.textContent = text;
     note.style.background = bad ? '#b3261e' : '#222';
     note.style.display = 'block';
-    if (!bad) fade = setTimeout(() => { note.style.display = 'none'; }, 4000);
   };
   const send = (file, label) => new Promise((done, fail) => {
     const x = new XMLHttpRequest();
@@ -758,6 +786,40 @@ export function createGateway(opts = {}) {
     x.onerror = () => fail(new Error('the upload was refused or cut off'));
     x.send(file);
   });
+  // Safari reads HEIC, so an iPhone photo can go as a JPEG, which Claude Code attaches. Elsewhere
+  // (Chrome can't decode it) the original goes, and arrives as a path.
+  const toJpeg = async (file) => {
+    if (!/\\.hei[cf]$/i.test(file.name) && !/^image\\/hei[cf]/i.test(file.type)) return file;
+    try {
+      const bitmap = await createImageBitmap(file);
+      const canvas = document.createElement('canvas');
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      canvas.getContext('2d').drawImage(bitmap, 0, 0);
+      bitmap.close();
+      const blob = await new Promise((r) => canvas.toBlob(r, 'image/jpeg', 0.9));
+      return blob ? new File([blob], file.name.replace(/\\.[^.]*$/, '') + '.jpg', { type: 'image/jpeg' }) : file;
+    } catch { return file; }
+  };
+  // Stored but not yet pasted. Tried again until the terminal is back, and on screen until then.
+  let waiting = [];
+  let trouble = [];
+  const ready = () => {
+    const live = window.devteamTermSocket;
+    return Boolean(window.term && window.term.paste && live && live.socket.readyState === 1 && live.at && Date.now() - live.at >= SETTLE_MS);
+  };
+  const flush = () => {
+    if (!waiting.length || !ready()) return false;
+    const paths = waiting;
+    waiting = [];
+    window.term.paste(dropPaste(paths));
+    if (dropSpace(paths)) window.term.input(' ');
+    window.term.focus();
+    say(trouble.concat(dropNote(paths)).join('\\n'), trouble.length > 0);
+    trouble = [];
+    return true;
+  };
+  setInterval(flush, 500);
   const take = async (picks) => {
     const paths = [];
     const failed = [];
@@ -768,17 +830,14 @@ export function createGateway(opts = {}) {
         if (p.file.size > MAX) throw new Error('is over the ' + Math.floor(MAX / 1048576) + ' MB limit');
         const label = (picks.length > 1 ? (i + 1) + '/' + picks.length + ' ' : '') + name;
         say(label + ' 0%');
-        paths.push(await send(p.file, label));
+        paths.push(await send(await toJpeg(p.file), label));
       } catch (e) { failed.push(name + ': ' + e.message); }
     }
-    const term = window.term;
-    if (paths.length && (!term || !term.paste)) failed.push('the terminal is not ready; stored at ' + dropPaste(paths));
-    else if (paths.length) {
-      term.paste(dropPaste(paths));
-      if (dropSpace(paths)) term.input(' ');
-      term.focus();
-    }
-    if (failed.length) say(failed.join('\\n'), true); else say(paths.length + (paths.length > 1 ? ' files' : ' file') + ' sent');
+    trouble = failed;
+    waiting.push(...paths);
+    if (flush()) return;
+    if (waiting.length) say(trouble.concat('terminal not connected: stored at ' + dropPaste(waiting) + '\\nIt pastes when the terminal reconnects.').join('\\n'), true);
+    else if (trouble.length) { say(trouble.join('\\n'), true); trouble = []; }
   };
   const hasFiles = (e) => e.dataTransfer && Array.from(e.dataTransfer.types).includes('Files');
   let hide = 0;
@@ -824,12 +883,17 @@ export function createGateway(opts = {}) {
       for (const e of await fs.promises.readdir(uploadsRoot, { withFileTypes: true })) {
         if (!e.isDirectory() || !UPLOAD_FOLDER.test(e.name)) continue;
         const folder = path.join(uploadsRoot, e.name);
-        const names = await fs.promises.readdir(folder);
-        // a restart cut this one off: nothing is receiving yet, the scan comes first
-        if (!names.length || names.includes(UPLOAD_PART)) { await fs.promises.rm(folder, { recursive: true, force: true }); continue; }
-        let bytes = 0;
-        for (const n of names) bytes += (await fs.promises.lstat(path.join(folder, n))).size;
-        kept.set(e.name, { bytes, at: (await fs.promises.lstat(folder)).mtimeMs });
+        // one that can't be read or removed costs only itself; one not made by this user isn't ours
+        try {
+          const st = await fs.promises.lstat(folder);
+          if (st.uid !== process.getuid()) continue;
+          const names = await fs.promises.readdir(folder);
+          // a restart cut this one off: nothing is receiving yet, the scan comes first
+          if (!names.length || names.includes(UPLOAD_PART)) { await fs.promises.rm(folder, { recursive: true, force: true }); continue; }
+          let bytes = 0;
+          for (const n of names) bytes += (await fs.promises.lstat(path.join(folder, n))).size;
+          kept.set(e.name, { bytes, at: st.mtimeMs });
+        } catch (err) { log(`dropped files: skipping ${e.name}: ${err.message}`); }
       }
     })().catch((e) => { scan = null; throw e; });
     return scan;
@@ -840,8 +904,10 @@ export function createGateway(opts = {}) {
     await scanUploads();
     for (const [name, u] of kept) {
       if (now - u.at <= uploadKeepMs) continue;
-      await fs.promises.rm(path.join(uploadsRoot, name), { recursive: true, force: true });
-      kept.delete(name);
+      try {
+        await fs.promises.rm(path.join(uploadsRoot, name), { recursive: true, force: true });
+        kept.delete(name);
+      } catch (err) { log(`dropped files: could not remove ${name}: ${err.message}`); }
     }
   };
   const receiveUpload = async (req, res, rawName) => {
@@ -852,7 +918,8 @@ export function createGateway(opts = {}) {
     const declared = req.headers['content-length'] === undefined ? null : Number(req.headers['content-length']);
     if (declared !== null && declared > uploadMax) return tooBig();
     const want = declared ?? uploadMax;
-    await sweepUploads();
+    // housekeeping: whatever goes wrong with it, the owner's file still goes in
+    await sweepUploads().catch((e) => log(`dropped files: ${e.message}`));
     const pending = sum(receiving.values());
     if (sum([...kept.values()].map((u) => u.bytes)) + pending + want > uploadTotal) return refuse(507, `the box already holds as many dropped files as it keeps (${Math.floor(uploadTotal / 1048576)} MB); they go after ${Math.round(uploadKeepMs / 86400000)} days`);
     const id = `${new Date().toISOString().slice(0, 10)}-${crypto.randomBytes(12).toString('hex')}`;
@@ -897,6 +964,10 @@ export function createGateway(opts = {}) {
 
   // Room for a jar a page has stuffed; past it, see clientError below.
   const server = http.createServer({ maxHeaderSize: 64 * 1024 }, async (req, res) => {
+    // Node's five minutes for a body, for all but an upload that has passed its checks (REQUEST_MS)
+    const bodyTimer = setTimeout(() => { if (!req.complete) req.destroy(); }, bodyMs);
+    bodyTimer.unref();
+    req.once('close', () => clearTimeout(bodyTimer));
     // origin-form only: a request line with a full URL, or *, is refused
     if (!req.url.startsWith('/') || req.url.startsWith('//')) return send(res, 400, 'text/plain', 'bad request');
     let url;
@@ -971,12 +1042,12 @@ export function createGateway(opts = {}) {
       if (isTerm) {
         if (req.method === 'GET' && p === '/') {
           let body;
-          try { body = Buffer.concat([ttydPage(), TERM_CLIPBOARD, TERM_DROP]); } catch { return send(res, 502, 'text/plain; charset=utf-8', 'This image has no terminal page.'); }
+          try { body = Buffer.concat([withSocketWatch(ttydPage()), TERM_CLIPBOARD, TERM_DROP]); } catch { return send(res, 502, 'text/plain; charset=utf-8', 'This image has no terminal page.'); }
           return send(res, 200, 'text/html; charset=utf-8', body, { 'content-security-policy': TERM_CSP, 'referrer-policy': 'no-referrer' });
         }
         if (req.method === 'GET' && p === '/token') return json(res, 200, { token: '' });
         // a session, and (like every POST, above) this page's own Origin: an agent's page has neither
-        if (req.method === 'POST' && p === '/upload') return await receiveUpload(req, res, url.searchParams.get('name'));
+        if (req.method === 'POST' && p === '/upload') { clearTimeout(bodyTimer); return await receiveUpload(req, res, url.searchParams.get('name')); }
         return send(res, 404, 'text/plain', 'not found');
       }
       if (isAuth) {

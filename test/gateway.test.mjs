@@ -1000,9 +1000,109 @@ test('the terminal\'s page takes a drop, and pastes what a shell reads back unch
   try {
     const tp = await gw.req('GET', '/', { on: 'term' });
     assert.equal(tp.status, 200);
-    for (const piece of ["addEventListener('dragover'", "addEventListener('drop'", 'devteam-drop-veil', 'upload.onprogress', "x.open('POST', '/upload?name='", 'term.paste(dropPaste(paths))', G.shellQuote.toString(), G.dropPaste.toString(), G.dropSpace.toString()]) assert.ok(tp.body.includes(piece), piece);
+    for (const piece of ["addEventListener('dragover'", "addEventListener('drop'", 'devteam-drop-veil', 'upload.onprogress', "x.open('POST', '/upload?name='", 'window.term.paste(dropPaste(paths))', 'readyState === 1', 'terminal not connected: stored at ', 'createImageBitmap', G.shellQuote.toString(), G.dropPaste.toString(), G.dropSpace.toString(), G.isDropImage.toString(), G.dropNote.toString()]) assert.ok(tp.body.includes(piece), piece);
     assert.ok(!/\.send\(.*(?:\\r|Enter)/.test(tp.body), 'it never presses Enter');
     const script = tp.body.slice(tp.body.lastIndexOf('<script>') + 8, tp.body.lastIndexOf('</script>'));
     assert.doesNotThrow(() => new Function(script), 'and what it serves parses');
+    assert.ok(!tp.body.includes('devteamTermSocket = live'), 'a page with no <head> is left as it is');
+    // ttyd's own page opens its socket from its bundle: the watcher has to be there first
+    fs.writeFileSync(path.join(tmp, 'up-page-ttyd.html'), '<!DOCTYPE html><html><head><title>t</title></head><body><script>BUNDLE</script></body></html>');
+    const real = (await gw.req('GET', '/', { on: 'term' })).body;
+    assert.ok(real.startsWith('<!DOCTYPE html><html><head><script>'), real.slice(0, 60));
+    assert.ok(real.indexOf('devteamTermSocket = live') < real.indexOf('BUNDLE'));
+    const made = [];
+    class Fake { constructor(url) { this.url = url; this.readyState = 0; made.push(this); } addEventListener(ev, f) { this.onopen = f; } }
+    const win = { WebSocket: Fake };
+    new Function('window', real.slice(real.indexOf('<script>') + 8, real.indexOf('</script>')))(win);
+    const sock = new win.WebSocket('ws://x');
+    assert.ok(sock instanceof Fake, 'ttyd still gets a real socket');
+    assert.equal(win.devteamTermSocket.socket, sock);
+    assert.equal(win.devteamTermSocket.at, 0, 'not live until it opens');
+    sock.onopen();
+    assert.ok(win.devteamTermSocket.at > 0);
+  } finally { await gw.close(); }
+});
+
+test('the note after a drop says how each kind arrives, and always names the paths', () => {
+  const png = '/data/uploads/d/a.png';
+  const pdf = '/data/uploads/d/b.pdf';
+  assert.match(G.dropNote([png]), /images arrive as attachments\.\n\/data\/uploads\/d\/a\.png$/);
+  assert.match(G.dropNote([pdf]), /PDFs and other files arrive as a path\.\n\/data\/uploads\/d\/b\.pdf$/);
+  const both = G.dropNote([png, pdf]);
+  assert.match(both, /images arrive as attachments, PDFs and other files as a path/);
+  assert.ok(both.includes(png) && both.includes(pdf));
+  assert.equal(G.isDropImage('/x/a.heic'), false, 'a HEIC that stayed one arrives as a path');
+});
+
+test('dropped files: a folder the scan can\'t handle costs only itself, and a sweep can\'t refuse a drop', async (t) => {
+  const gw = await signedIn('up-scan');
+  const f = (n) => path.join(gw.uploadsDir, `2020-02-0${n}-${String(n).repeat(24)}`);
+  try {
+    // not this user's, and left half-written: it must neither be removed nor stop the drop
+    fs.mkdirSync(f(1));
+    fs.writeFileSync(path.join(f(1), '.part'), 'theirs');
+    // one that can't be read
+    fs.mkdirSync(f(2));
+    fs.writeFileSync(path.join(f(2), 'x'), 'x');
+    fs.chmodSync(f(2), 0);
+    // one that can't be removed
+    fs.mkdirSync(f(3));
+    fs.writeFileSync(path.join(f(3), '.part'), 'stuck');
+    const lstat = fs.promises.lstat;
+    const rm = fs.promises.rm;
+    t.mock.method(fs.promises, 'lstat', async (p, ...a) => {
+      const st = await lstat(p, ...a);
+      if (p === f(1)) st.uid += 1;
+      return st;
+    });
+    t.mock.method(fs.promises, 'rm', async (p, ...a) => {
+      if (p === f(3)) throw Object.assign(new Error('EACCES: stuck'), { code: 'EACCES' });
+      return rm(p, ...a);
+    });
+    const r = await upload(gw, 'a.txt', Buffer.from('x'));
+    assert.equal(r.status, 200, r.body);
+    assert.ok(fs.existsSync(path.join(f(1), '.part')), 'another user\'s folder is left alone');
+    assert.ok(fs.existsSync(f(3)));
+    assert.ok(gw.logs.some((m) => m.includes('skipping')), gw.logs.join('|'));
+    // and a sweep that fails outright is housekeeping, not a refusal
+    t.mock.method(fs.promises, 'readdir', async () => { throw new Error('EIO'); });
+    const gw2 = await signedIn('up-scan2');
+    try {
+      const r2 = await upload(gw2, 'b.txt', Buffer.from('y'));
+      assert.equal(r2.status, 200, r2.body);
+      assert.ok(gw2.logs.some((m) => m.includes('EIO')), gw2.logs.join('|'));
+    } finally { await gw2.close(); }
+  } finally { t.mock.restoreAll(); fs.chmodSync(f(2), 0o750); await gw.close(); }
+});
+
+test('a body is bounded to its five minutes unless it is an upload that has passed its checks', async () => {
+  const gw = await signedIn('up-body', { bodyMs: 60 });
+  // sends the head and part of a body, then nothing: what happens to the connection?
+  const hang = (route, headers, on = gw.term) => new Promise((resolve) => {
+    let status = 0;
+    const r = http.request({ host: '127.0.0.1', port: gw.port, method: 'POST', path: route, headers: { host: new URL(on).host, origin: on, 'content-length': 1000, ...headers } }, (res) => { status = res.statusCode; res.resume(); });
+    const started = Date.now();
+    r.on('error', () => {});
+    r.on('close', () => resolve({ status, ms: Date.now() - started }));
+    r.write('x');
+  });
+  try {
+    // answered without reading the body, and read in full: both cut off
+    const answered = await hang('/auth/login/options', {}, gw.auth);
+    assert.ok(answered.ms < 3000, `${answered.ms} ms`);
+    const reading = await hang('/auth/claim/options', {}, gw.auth);
+    assert.ok(reading.ms < 3000, `${reading.ms} ms`);
+    const noSession = await hang('/upload?name=a.txt', {});
+    assert.equal(noSession.status, 401);
+    assert.ok(noSession.ms < 3000, 'no session, no long limit');
+    // the owner's slow upload outlasts the bound, and arrives
+    const slow = await new Promise((resolve, reject) => {
+      const r = http.request({ host: '127.0.0.1', port: gw.port, method: 'POST', path: '/upload?name=slow.txt', headers: { host: new URL(gw.term).host, origin: gw.term, cookie: gw.jar(), 'content-length': 2 } }, (res) => { let b = ''; res.on('data', (c) => { b += c; }); res.on('end', () => resolve({ status: res.statusCode, body: b })); });
+      r.on('error', reject);
+      r.write('a');
+      setTimeout(() => r.end('b'), 300);
+    });
+    assert.equal(slow.status, 200, slow.body);
+    assert.equal(fs.readFileSync(JSON.parse(slow.body).path, 'utf8'), 'ab');
   } finally { await gw.close(); }
 });
