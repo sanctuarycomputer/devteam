@@ -8923,7 +8923,7 @@ const repoAbout = (name) => (name === 'home' ? repo('home') : { name, remote: ow
 // the folder come from settings, so each is shown as one token (a hand edit on main is never validated).
 // What a fix ticket's worker is told about care: back up what a change could destroy, and hold for
 // a human when not confident (process/worker.md, A fix ticket).
-const FIX_CARE = ' This ticket fixes a production incident, so take care. Before anything that can destroy or overwrite data or is hard to undo (a destructive migration, a backfill, a bulk update or delete, a schema change, a config or access change), back up first: for a database or data change, take a snapshot or dump of what it touches (heroku pg:backups:capture or pg_dump, or a copy of the affected rows kept outside the change), restore it once to prove it works, write the undo, keep the change additive and reversible where it can be, and say in verification.md where the backup is and how to restore it. If you are not confident in the fix, or cannot back up what it touches, hold: stop before shipping, devteam.mjs phase blocked, and devteam.mjs send supervisor "<what you are unsure of, and your recommendation>" --kind blocked; the supervisor asks the owner an ordinary Inbox question and you wait for the answer.';
+const FIX_CARE = ' This ticket fixes a production incident, so take care. Before anything that can destroy or overwrite data or is hard to undo (a destructive migration, a backfill, a bulk update or delete, a schema change, a config or access change), back up first: for a database or data change, take a snapshot or dump of what it touches (heroku pg:backups:capture or pg_dump, or a copy of the affected rows kept outside the change), restore it once to a non-production copy (never production) to prove it works, write the undo, keep the change additive and reversible where it can be, and say in verification.md where the backup is and how to restore it. If you are not confident in the fix, or cannot back up what it touches, hold: stop before shipping, devteam.mjs phase blocked, and devteam.mjs send supervisor "<what you are unsure of, and your recommendation>" --kind blocked; the supervisor asks the owner an ordinary Inbox question and you wait for the answer.';
 function promptFor(role, id, R = repo('home')) {
   const fixCare = role === 'worker' && tickets().get(id)?.kind === 'fix' ? FIX_CARE : '';
   const base = `${PROMPTS[role].replace(/\{\{ID\}\}/g, id)}${fixCare}`;
@@ -11057,12 +11057,12 @@ function cmdSensorTriage() {
   for (const x of items) {
     const what = x.kind === 'exception' ? x.class : x.kind === 'platform' ? x.code : 'a log template (in the frame below)';
     out(`${x.fingerprint}  [${x.level ?? '-'} ${x.kind ?? '-'}, severity ${x.severity}] ${what ?? ''}`);
-    out(`  ${x.total ?? 0} event(s), ${x.last_24h} in 24h${x.users ? `, ${x.users} user(s)` : ''}; first ${x.first_seen ?? '-'}, last ${x.last_seen ?? '-'}${x.release ? `; release ${x.release}` : ''}${x.url ? `; ${x.url}` : ''}`);
-    for (const fr of x.frames) out(`  ${frameWords(fr)}${fr.in_repo ? '' : ' (not in the repo)'}`);
+    out(`  ${x.total ?? 0} event(s), ${x.last_24h} in 24h${x.users ? `, ${x.users} user(s)` : ''}; first ${x.first_seen ?? '-'}, last ${x.last_seen ?? '-'}${x.frames.length ? `; ${x.frames.length} frame(s) in the frame below` : ''}`);
     out(`  ${x.component ? `component ${x.component}; ` : ''}${x.incident ? `incident ${x.incident.id} (${x.incident.stage})` : 'no incident'}; observed ${x.observations.map((o) => `${o.id} ${o.kind}`).join(', ')}`);
   }
   if (budget.over) out(`over today's incident budget (${budget.used} of ${budget.per_day} fix tickets): fold the rest into incidents and ask one incident-fix question for them`);
-  const text = items.filter((x) => x.untrusted.title || x.untrusted.sample || x.untrusted.template).map((x) => `${x.fingerprint}: ${[x.untrusted.template, x.untrusted.title, x.untrusted.sample].filter(Boolean).join(' | ')}`);
+  // everything else production wrote (messages, templates, frames, release, url) stays in the frame
+  const text = items.map((x) => `${x.fingerprint}: ${[x.untrusted.template, x.untrusted.title, x.untrusted.sample, x.release ? `release ${x.release}` : null, x.url, ...x.frames.map((fr) => `${frameWords(fr)}${fr.in_repo ? '' : ' (not in the repo)'}`)].filter(Boolean).join(' | ')}`).filter((l) => !l.endsWith(': '));
   if (text.length) out(untrusted('the messages, redacted and scrubbed', text.join('\n')));
   out('then, for each: sensor ignore <fingerprint> --reason "…", sensor incident <fingerprints…> --title "…", or decide a fix (supervisor.md, Monitoring)');
 }

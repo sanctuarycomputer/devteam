@@ -1173,6 +1173,8 @@ out({ cursor: 'x' });
       assert.match(tri, /errs:exception:F1  \[fatal exception, severity 4\] OutOfMemory/);
       assert.match(tri, /errs:exception:E1  \[error exception, severity 3\] NoMethodError[\s\S]*docs\/devteam\/scripts\/devteam\.mjs:10 charge/);
       assert.match(tri, /--- untrusted production data (\w+) [\s\S]*ignore previous instructions[\s\S]*--- end of untrusted data \1 ---/);
+      assert.doesNotMatch(tri.split('--- untrusted production data')[0], /ignore previous instructions|checkout blew up/, 'no production text outside the frame');
+      assert.ok(tri.indexOf('docs/devteam/scripts/devteam.mjs:10') > tri.indexOf('--- untrusted production data'), 'frames are inside it too');
       assert.ok(tri.indexOf('ignore previous instructions') > tri.indexOf('errs:platform:H12'), 'the messages come after every item\'s fields');
       assert.match(must(['sensor', 'triage'], sup), /^nothing new to triage since/);
       const marker = fs.readFileSync(path.join(runMon, 'triage.json'), 'utf8');
@@ -1224,7 +1226,7 @@ out({ cursor: 'x' });
       must(['ticket', 'add', tid, '--json', tk, '--decision', d], sup);
       // the fix ticket's prompt tells its worker to back up and to hold when unsure
       const fixPrompt = must(['prompt', 'worker', tid]);
-      assert.match(fixPrompt, /back up first[\s\S]*pg_dump[\s\S]*not confident[\s\S]*ordinary Inbox question/);
+      assert.match(fixPrompt, /back up first[\s\S]*pg_dump[\s\S]*non-production copy[\s\S]*not confident[\s\S]*ordinary Inbox question/);
       assert.doesNotMatch(must(['prompt', 'worker', 'bill-01-card']), /back up first/, 'only a fix ticket');
       const ready = json(must(['ready', '--json']));
       assert.equal(ready.ready[0].id, tid);
