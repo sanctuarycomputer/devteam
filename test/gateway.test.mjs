@@ -10,6 +10,7 @@ import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -72,6 +73,7 @@ async function gateway(name, extra = {}) {
   const inst = (p) => `http://${p}.box.localhost:${port}`;
   const auth = publicUrl;
   const term = `http://term.box.localhost:${port}`;
+  const site = `http://public.box.localhost:${port}`;
   const ttydPage = path.join(tmp, `${name}-ttyd.html`);
   fs.writeFileSync(ttydPage, 'the gateway\'s copy of ttyd');
   const logs = [];
@@ -85,7 +87,7 @@ async function gateway(name, extra = {}) {
   let jar = '';
   // on: an instance's port, for its subdomain; else the box's own name
   const req = (method, route, { body, headers = {}, cookie = jar, on = route.startsWith('/auth/') ? 'auth' : undefined } = {}) => new Promise((resolve, reject) => {
-    const self = on === 'auth' ? auth : on === 'term' ? term : on ? inst(on) : publicUrl;
+    const self = on === 'auth' ? auth : on === 'term' ? term : on === 'public' ? site : on ? inst(on) : publicUrl;
     const h = { host: new URL(self).host, ...(method !== 'GET' ? { origin: self, 'content-type': 'application/json' } : {}), ...(cookie ? { cookie } : {}), ...headers };
     for (const k of Object.keys(h)) if (h[k] === undefined) delete h[k];
     const r = http.request({ host: '127.0.0.1', port, method, path: route, headers: h }, (res) => {
@@ -111,7 +113,7 @@ async function gateway(name, extra = {}) {
     const o = await req('POST', '/auth/login/options', { on: 'auth', body: {}, cookie: '' });
     return req('POST', '/auth/login/verify', { on: 'auth', body: a.get(o.json, auth, how), cookie: '' });
   };
-  return { g, port, publicUrl, inst, auth, term, ttydPort, logs, token, req, claim, login, jar: () => jar, setJar: (v) => { jar = v; }, dir, uploadsDir, close: () => new Promise((r) => g.server.close(r)) };
+  return { g, port, publicUrl, inst, auth, term, site, ttydPort, logs, token, req, claim, login, jar: () => jar, setJar: (v) => { jar = v; }, dir, uploadsDir, close: () => new Promise((r) => g.server.close(r)) };
 }
 
 test('cbor and cose: what WebAuthn needs, nothing more', () => {
@@ -822,6 +824,631 @@ test('a passkey made for another name says how to get back in', async () => {
   const logs = [];
   G.createGateway({ publicUrl: 'http://box.localhost:1', dir, log: (m) => logs.push(m) });
   assert.match(logs.join('\n'), /devteam-reclaim/);
+});
+
+// ===== public artifacts: what the owner published, to anyone, from the gateway's own copy =====
+
+// A published artifact as the gateway keeps it: its blobs, and its entry in state.json.
+function seedPublic(dir, project, slug, files, { root = '/srv/x', port = P } = {}) {
+  const blobs = path.join(dir, 'public', 'blobs');
+  fs.mkdirSync(blobs, { recursive: true });
+  const f = path.join(dir, 'state.json');
+  const s = JSON.parse(fs.readFileSync(f, 'utf8'));
+  const entry = {};
+  for (const [rel, text] of Object.entries(files)) {
+    const b = Buffer.from(text);
+    const h = crypto.createHash('sha256').update(b).digest('hex');
+    fs.writeFileSync(path.join(blobs, h), b);
+    entry[rel] = { sha256: h, size: b.length };
+  }
+  const pub = s.public ?? {};
+  pub[project] = { root, port, artifacts: { ...(pub[project]?.artifacts ?? {}), [slug]: { tree: 'a'.repeat(40), title: slug, at: new Date().toISOString(), files: entry } } };
+  fs.writeFileSync(f, JSON.stringify({ ...s, public: pub }));
+}
+
+test('public.<box>: anyone reads a published artifact, from the gateway\'s own copy, under its own headers', async () => {
+  const gw = await gateway('public-serve');
+  try {
+    assert.equal((await gw.claim(authenticator())).status, 200);
+    const page = '<!doctype html><p>hi';
+    seedPublic(gw.dir, 'alpha', 'hello', { 'index.html': page, 'app.js': 'x()', 'img/a.png': 'png', 'data.weird': 'w' });
+    const get = (route, headers = {}, method = 'GET') => gw.req(method, route, { on: 'public', cookie: '', headers });
+    let r = await get('/alpha/hello/');
+    assert.equal(r.status, 200);
+    assert.equal(r.body, page);
+    const etag = `"${crypto.createHash('sha256').update(page).digest('hex')}"`;
+    assert.deepEqual([r.headers['content-type'], r.headers['content-length'], r.headers.etag, r.headers['cache-control'], r.headers['x-content-type-options'], r.headers['referrer-policy']], ['text/html; charset=utf-8', String(Buffer.byteLength(page)), etag, 'public, max-age=60', 'nosniff', 'no-referrer']);
+    assert.equal(r.headers['set-cookie'], undefined);
+    const self = `${gw.site}/alpha/hello/`;
+    const csp = r.headers['content-security-policy'].split('; ');
+    for (const d of ["default-src 'none'", `script-src 'unsafe-inline' 'unsafe-eval' ${self} https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://unpkg.com`, `connect-src ${self} https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://unpkg.com`, `img-src ${self} data: blob:`, "form-action 'none'", "frame-ancestors 'none'", 'sandbox allow-scripts allow-forms allow-modals allow-pointer-lock']) assert.ok(csp.includes(d), `the policy has ${d}: ${csp.join('; ')}`);
+    assert.doesNotMatch(r.headers['content-security-policy'], /allow-same-origin|127\.0\.0\.1/);
+    assert.equal((await get('/alpha/hello/app.js')).headers['content-type'], 'text/javascript; charset=utf-8');
+    assert.equal((await get('/alpha/hello/img/a.png')).headers['content-type'], 'image/png');
+    assert.equal((await get('/alpha/hello/data.weird')).headers['content-type'], 'application/octet-stream');
+    // HEAD: the headers and no body; a strong tag that matches, or *, is a 304
+    r = await get('/alpha/hello/', {}, 'HEAD');
+    assert.deepEqual([r.status, r.body, r.headers['content-length'], r.headers.etag], [200, '', String(Buffer.byteLength(page)), etag]);
+    assert.equal((await get('/alpha/hello/', { 'if-none-match': `"x", ${etag}` })).status, 304);
+    assert.equal((await get('/alpha/hello/', { 'if-none-match': '*' })).status, 304);
+    assert.equal((await get('/alpha/hello/', { 'if-none-match': `W/${etag}` })).status, 200, 'a weak tag is no match');
+    // a lost blob: HEAD and GET agree
+    const lost = path.join(gw.dir, 'public', 'blobs', crypto.createHash('sha256').update('w').digest('hex'));
+    fs.renameSync(lost, `${lost}.away`);
+    assert.deepEqual([(await get('/alpha/hello/data.weird', {}, 'HEAD')).status, (await get('/alpha/hello/data.weird')).status], [500, 500]);
+    fs.renameSync(`${lost}.away`, lost);
+    // reads only, and no service workers
+    r = await gw.req('POST', '/alpha/hello/', { on: 'public', cookie: '', body: {} });
+    assert.deepEqual([r.status, r.headers.allow], [405, 'GET, HEAD']);
+    assert.equal((await get('/alpha/hello/app.js', { 'service-worker': 'script' })).status, 403);
+    assert.equal((await get('/alpha/hello/app.js', { 'sec-fetch-dest': 'serviceworker' })).status, 403);
+    // signed in or not, the same answer: the cookie is never read on this name, and none is set
+    r = await gw.req('GET', '/alpha/hello/', { on: 'public' });
+    assert.deepEqual([r.status, r.body, r.headers['set-cookie']], [200, page, undefined]);
+    // nothing is listed, nothing unpublished is there, and the raw path is matched before decoding
+    for (const bad of ['/', '/alpha/', '/alpha/nope/', '/beta/hello/', '/alpha/hello/nope.js', '/alpha/hello/.env', '/alpha/hello/%2e%2e/x', '/alpha/hello/../hello/app.js', '/Alpha/hello/', '/alpha/hello//app.js', '/box.json', '/auth/login'])
+      assert.equal((await get(bad)).status, 404, bad);
+    r = await get('/alpha/hello');
+    assert.deepEqual([r.status, r.headers.location, r.headers['cache-control']], [302, '/alpha/hello/', 'no-store'], 'to the trailing slash, when published');
+    assert.equal((await get('/alpha/nope')).status, 404, 'and only then');
+    assert.equal((await gw.req('GET', '/', { headers: { host: `pub.box.localhost:${gw.port}` } })).status, 421, 'the box still answers only on its own names');
+  } finally { await gw.close(); }
+});
+
+test('public.<box> serves artifacts with the kit\'s own type map, CDN list and policy, kept in the gateway', () => {
+  const src = fs.readFileSync(path.join(kit, 'scripts', 'devteam.mjs'), 'utf8');
+  const one = (name) => { const m = new RegExp(`^const ${name} = (.+);$`, 'm').exec(src); assert.ok(m, `the kit defines ${name} on one line`); return m[1]; };
+  const at = src.indexOf('const artifactCsp = ');
+  assert.ok(at > 0, 'the kit defines artifactCsp');
+  const cspSrc = src.slice(at, src.indexOf('\n};\n', at) + 3);
+  const ctx = vm.createContext({ HUB_PORT: 4320 });
+  vm.runInContext(`ARTIFACT_TYPES = ${one('ARTIFACT_TYPES')}; ARTIFACT_CDNS = ${one('ARTIFACT_CDNS')};\n${cspSrc}\nglobalThis.artifactCsp = artifactCsp;`, ctx);
+  assert.deepEqual({ ...G.PUBLIC_TYPES }, { ...ctx.ARTIFACT_TYPES }, 'the type map');
+  assert.deepEqual([...G.PUBLIC_CDNS], [...ctx.ARTIFACT_CDNS], 'the CDN list');
+  const self = 'https://public.box.example.com/alpha/hello/';
+  const kitCsp = ctx.artifactCsp('http://127.0.0.1:4321', self).split('; ');
+  const gwCsp = G.publicCsp(self).split('; ');
+  assert.deepEqual(gwCsp.filter((d) => !d.startsWith('frame-ancestors ')), kitCsp.filter((d) => !d.startsWith('frame-ancestors ')), 'the same policy');
+  assert.ok(gwCsp.includes("frame-ancestors 'none'"), 'framed by nothing');
+  // the names and limits a manifest is checked against
+  const kitOf = (name) => vm.runInContext(`(${one(name)})`, vm.createContext({}));
+  for (const [gw, name] of [['LINK_ID', 'LINK_ID'], ['TREE', 'TREE_ID'], ['PROJECT', 'PUBLIC_PROJECT']]) assert.equal(String(G[gw]), String(kitOf(name)), name);
+  assert.equal(G.FILE_MAX, kitOf('ARTIFACT_FILE_MAX'), 'the size of a file');
+  assert.equal(G.ARTIFACT_MAX, kitOf('ARTIFACT_MAX'), 'the size of an artifact');
+  const pathOk = /^const artifactPathOk = (.+);$/m.exec(src)[1];
+  const kitOk = vm.runInContext(`(${pathOk})`, vm.createContext({}));
+  for (const p of ['index.html', 'a/b.js', '.env', 'a/.git/x', 'a//b', 'a/../b', 'a%2eb', 'é.png', '__proto__']) assert.equal(G.publicPathOk(p), kitOk(p), p);
+});
+
+test('the gateway computes git\'s blob and tree ids from bytes, sha1 and sha256', () => {
+  const files = { 'index.html': '<!doctype html>', 'a/b.js': 'b', 'a/c/d.css': 'd', 'a-b.txt': 'x', 'a.txt': 'y', 'run.sh': 'echo' };
+  for (const fmt of ['sha1', 'sha256']) {
+    const d = fs.mkdtempSync(path.join(tmp, `tree-${fmt}-`));
+    if (spawnSync('git', ['init', '-q', `--object-format=${fmt}`, d]).status !== 0) { assert.equal(fmt, 'sha256', 'every git makes a sha1 repo'); continue; }
+    for (const [rel, text] of Object.entries(files)) { fs.mkdirSync(path.dirname(path.join(d, rel)), { recursive: true }); fs.writeFileSync(path.join(d, rel), text); }
+    fs.chmodSync(path.join(d, 'run.sh'), 0o755);
+    execFileSync('git', ['-c', 'core.fileMode=true', 'add', '-A'], { cwd: d });
+    const want = execFileSync('git', ['write-tree'], { cwd: d, encoding: 'utf8' }).trim();
+    const ids = Object.fromEntries(Object.entries(files).map(([rel, text]) => [rel, { oid: G.gitBlobId(Buffer.from(text), fmt), mode: rel === 'run.sh' ? '100755' : '100644' }]));
+    assert.equal(ids['a/b.js'].oid, execFileSync('git', ['hash-object', 'a/b.js'], { cwd: d, encoding: 'utf8' }).trim(), `${fmt} blob`);
+    assert.equal(G.gitTreeId(ids, fmt), want, `${fmt} tree, sorted as git sorts (a-b.txt, a.txt, a/)`);
+  }
+  assert.throws(() => G.gitTreeId({ a: { oid: 'a'.repeat(40), mode: '100644' }, 'a/b': { oid: 'a'.repeat(40), mode: '100644' } }), /a is both a file and a folder/);
+});
+
+test('a manifest from an instance is checked before anything of it is shown or fetched', () => {
+  const entry = { sha256: 'b'.repeat(64), size: 3, mode: '100644' };
+  const good = { public: 1, project: 'alpha', slug: 'hello', title: 'Hi', summary: 's', root: '/srv/alpha', tree: 'a'.repeat(40), files: { 'index.html': entry } };
+  assert.equal(G.manifestProblem(good, 'hello'), null);
+  assert.equal(G.manifestProblem({ ...good, tree: 'a'.repeat(64) }, 'hello'), null, 'a sha256 repo');
+  const bad = (over, re, slug = 'hello') => assert.match(String(G.manifestProblem({ ...good, ...over }, slug)), re, JSON.stringify(over).slice(0, 80));
+  bad({ public: 2 }, /not a manifest/);
+  bad({ project: 'Alpha' }, /project/);
+  bad({ project: `a${'b'.repeat(63)}` }, /project/);
+  bad({ root: 'srv/alpha' }, /root is not an absolute path/);
+  bad({ root: '/srv/\nalpha' }, /root is not an absolute path/);
+  bad({}, /the manifest is for hello, not other/, 'other');
+  bad({ tree: 'a'.repeat(41) }, /tree/);
+  bad({ title: 'x'.repeat(121) }, /title/);
+  bad({ extra: 1 }, /unknown key "extra"/);
+  bad({ files: {} }, /1 to 2000 files/);
+  bad({ files: Object.fromEntries(Array.from({ length: 2001 }, (_, i) => [i ? `f${i}.txt` : 'index.html', entry])) }, /1 to 2000 files/);
+  bad({ files: { 'index.html': entry, '.env': entry } }, /\.env: not a path the kit serves/);
+  bad({ files: { 'index.html': entry, 'a/../b': entry } }, /not a path the kit serves/);
+  bad({ files: { 'index.html': { ...entry, sha256: 'B'.repeat(64) } } }, /index\.html: a bad entry/);
+  bad({ files: { 'index.html': { ...entry, size: 8 * 1024 * 1024 + 1 } } }, /a bad entry/);
+  bad({ files: { 'index.html': { ...entry, mode: '120000' } } }, /a bad entry/);
+  bad({ files: { 'a.js': entry } }, /no index\.html/);
+  bad({ files: Object.fromEntries(Array.from({ length: 4 }, (_, i) => [i ? `f${i}.bin` : 'index.html', { ...entry, size: 7 * 1024 * 1024 }])) }, /over 25 MB/);
+  assert.equal(G.canonicalJson({ b: 1, a: [2, { d: 3, c: 4 }] }), '{"a":[2,{"c":4,"d":3}],"b":1}');
+});
+
+test('the public store: content-addressed blobs, one change at a time, swept to what state.json names', async () => {
+  const S = G.publicStore(fs.mkdtempSync(path.join(tmp, 'pstore-')));
+  const h = (t) => crypto.createHash('sha256').update(t).digest('hex');
+  assert.equal(S.write(h('a'), Buffer.from('a')), true);
+  assert.equal(S.write(h('a'), Buffer.from('a')), false, 'a blob is written once');
+  S.write(h('b'), Buffer.from('b'));
+  fs.writeFileSync(path.join(S.blobs, `${h('c')}.1.abc.tmp`), 'c');
+  const pub = { alpha: { root: '/r', port: 1, artifacts: { x: { tree: 't', files: { 'index.html': { sha256: h('a'), size: 1 }, 'copy.html': { sha256: h('a'), size: 1 } } } } } };
+  assert.deepEqual([...S.referenced(pub)], [[h('a'), 1]], 'each blob counts once');
+  S.sweep(pub);
+  assert.deepEqual(fs.readdirSync(S.blobs), [h('a')], 'unreferenced blobs and stray temp files go');
+  assert.equal(fs.readFileSync(S.blobPath(h('a')), 'utf8'), 'a');
+  const order = [];
+  const slow = S.serial(async () => { await new Promise((r) => setTimeout(r, 50)); order.push(1); });
+  const failing = S.serial(async () => { order.push(2); throw new Error('no'); });
+  const after = S.serial(() => { order.push(3); return 'ok'; });
+  await slow;
+  await assert.rejects(failing, /no/);
+  assert.equal(await after, 'ok', 'a failed change doesn\'t stop the next');
+  assert.deepEqual(order, [1, 2, 3]);
+});
+
+// A stand-in instance on a block port: the manifest and files it is given, and what the gateway
+// asked it to record. lie serves other bytes for a file than its manifest names; tree and title
+// override what the manifest says; trickle sends a file a byte every that many ms; asked lists
+// every request; reset puts back what it was made with.
+function standIn(port, arts, { project = 'beta', root = '/srv/beta' } = {}) {
+  const made = JSON.stringify({ arts, project, root });
+  const S = { recorded: [] };
+  S.reset = () => Object.assign(S, JSON.parse(made), { lie: {}, tree: {}, title: {}, trickle: {}, asked: [] });
+  S.reset();
+  const hex = (t) => crypto.createHash('sha256').update(t).digest('hex');
+  S.manifest = (slug) => {
+    const files = Object.fromEntries(Object.entries(S.arts[slug]).map(([rel, t]) => [rel, { sha256: hex(Buffer.from(t)), size: Buffer.byteLength(t), mode: '100644' }]));
+    const tree = G.gitTreeId(Object.fromEntries(Object.entries(S.arts[slug]).map(([rel, t]) => [rel, { oid: G.gitBlobId(Buffer.from(t)), mode: '100644' }])));
+    return { public: 1, project: S.project, slug, title: S.title[slug] ?? `The ${slug}`, summary: 's', root: S.root, tree: S.tree[slug] ?? tree, files };
+  };
+  const srv = http.createServer((req, res) => {
+    const reply = (code, body, type = 'application/json') => { res.writeHead(code, { 'content-type': type }); res.end(body); };
+    let m;
+    S.asked.push(req.url);
+    if (req.method === 'GET' && (m = /^\/public-manifest\/([a-z0-9-]+)$/.exec(req.url))) return Object.hasOwn(S.arts, m[1]) ? reply(200, JSON.stringify(S.manifest(m[1]))) : reply(404, '{"error":"not an artifact landed on main"}');
+    if (req.method === 'GET' && (m = /^\/artifact\/main\/([a-z0-9-]+)\/(.+)$/.exec(req.url)) && Object.hasOwn(S.arts, m[1]) && Object.hasOwn(S.arts[m[1]], m[2])) {
+      const text = S.lie[`${m[1]}/${m[2]}`] ?? S.arts[m[1]][m[2]];
+      const every = S.trickle[`${m[1]}/${m[2]}`];
+      if (!every) return reply(200, text, 'text/plain');
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      let i = 0;
+      const t = setInterval(() => { if (res.destroyed || i >= text.length) { clearInterval(t); return res.end(); } res.write(text[i++]); }, every);
+      return;
+    }
+    if (req.method === 'GET' && req.url === '/api/hello') return reply(200, JSON.stringify({ devteam: 1, name: S.project, root: S.root, port }));
+    if (req.method === 'POST' && req.url === '/api/artifact-publish') {
+      let b = '';
+      req.on('data', (c) => { b += c; });
+      req.on('end', () => { S.recorded.push({ ...JSON.parse(b), headers: req.headers }); reply(200, '{"ok":true}'); });
+      return;
+    }
+    reply(404, '{"error":"not found"}');
+  }).listen(port, '127.0.0.1');
+  S.close = () => new Promise((r) => srv.close(r));
+  return S;
+}
+// The owner's two steps: the gateway's confirm page, then its POST of what the page showed.
+async function confirmAndPublish(gw, port, slugs, { move = false, before = async () => {} } = {}) {
+  const page = await gw.req('GET', `/public/publish?port=${port}&${slugs.map((s) => `slug=${s}`).join('&')}`);
+  assert.equal(page.status, 200, page.body);
+  // "move it" carries the root the page showed, as the page's own script posts it
+  const from = Object.fromEntries([...page.body.matchAll(/data-move="([^"]+)" data-moved-from="([^"]*)"/g)].map(([, s, r]) => [s, r.replace(/&#(\d+);/g, (_, n) => String.fromCharCode(n))]));
+  const items = [...page.body.matchAll(/data-slug="([^"]+)" data-manifest="([0-9a-f]{64})"/g)].map(([, slug, manifest]) => ({ slug, manifest, move, ...(move && Object.hasOwn(from, slug) ? { movedFrom: from[slug] } : {}) }));
+  await before();
+  const r = await gw.req('POST', '/public/publish', { body: { port, items } });
+  assert.equal(r.status, 200, r.body);
+  return { page, results: r.json.results };
+}
+const esc = (x) => String(x).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+const blobsOf = (gw) => { try { return fs.readdirSync(path.join(gw.dir, 'public', 'blobs')).sort(); } catch { return []; } };
+// A project with artifacts landed on its main, as merge would leave them, and its dashboard.
+function landedProject(base, name, artifacts) {
+  const r = bareProject(base, name);
+  for (const [slug, files] of Object.entries(artifacts)) for (const [rel, text] of Object.entries(files)) {
+    const f = path.join(r, 'docs/devteam/project/artifacts', slug, rel);
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(f, text);
+  }
+  execFileSync('git', ['add', '-A'], { cwd: r });
+  execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'land'], { cwd: r });
+  return r;
+}
+function startKit(root, port) {
+  const env = { ...process.env };
+  delete env.DEVTEAM_ROLE;
+  const d = spawn(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), 'dashboard', '--port', String(port)], { cwd: root, env, stdio: 'ignore' });
+  return { d, stop: () => new Promise((r) => { if (d.exitCode !== null) return r(); d.on('close', r); d.kill(); }) };
+}
+const kitUp = (port) => until(async () => { try { return (await fetch(`http://127.0.0.1:${port}/api/hello`)).ok; } catch { return false; } }, `the dashboard on ${port}`);
+const HELLO = { 'index.html': '<!doctype html><link rel="stylesheet" href="s.css"><p>hello', 's.css': 'p { color: red }', 'artifact.json': JSON.stringify({ v: 1, title: 'A <b>mock</b> & more', summary: 'For anyone', by: 'supervisor' }) };
+
+test('public artifacts: the owner confirms on the box\'s own page, and anyone reads the gateway\'s copy', async () => {
+  const gw = await gateway('public-kit');
+  const A = landedProject(fs.mkdtempSync(path.join(tmp, 'pub-')), 'alpha', { hello: HELLO });
+  const kitA = startKit(A, P + 1);
+  try {
+    assert.equal((await gw.claim(authenticator())).status, 200);
+    await kitUp(P + 1);
+    const at = `/public/publish?port=${P + 1}&slug=hello`;
+    // the confirm page is the gateway's, for the signed-in owner, on the box's own name
+    assert.equal((await gw.req('GET', at, { cookie: '' })).status, 401);
+    assert.equal((await gw.req('GET', `/public/publish?port=${P + 99}&slug=hello`)).status, 400, 'an instance of this box');
+    assert.equal((await gw.req('GET', `/public/publish?port=${P + 1}&slug=Hello`)).status, 400, 'a slug');
+    const conf = await gw.req('GET', at);
+    assert.equal(conf.status, 200, conf.body);
+    assert.ok(conf.headers['content-security-policy'].split('; ').includes("form-action 'none'"));
+    assert.match(conf.body, /alpha · hello · 3 files/);
+    assert.ok(conf.body.includes('A &#60;b&#62;mock&#60;/b&#62; &#38; more'), 'the title, escaped');
+    assert.ok(!conf.body.includes('<b>mock</b>'));
+    assert.ok(conf.body.includes(`${gw.site}/alpha/hello/`), 'the link it will have');
+    assert.match(conf.body, /not on this box/);
+    assert.match(conf.body, /Not ticked, because this box holds no copy of it\. This instance's log records no publish of it/);
+    assert.doesNotMatch(conf.body, /data-manifest="[0-9a-f]{64}" checked/, 'what the box has no copy of starts unticked');
+    assert.ok(conf.body.includes(`from the checkout ${esc(fs.realpathSync(A))}, as this instance reports it`), 'the root, as reported');
+    for (const f of ['index.html', 's.css', 'artifact.json']) assert.match(conf.body, new RegExp(`<div>${f.replace('.', '\\.')} <small>`), `${f} is named`);
+    assert.doesNotMatch(conf.body, /autofocus/, 'the Publish button never has focus waiting');
+    const items = [...conf.body.matchAll(/data-slug="([^"]+)" data-manifest="([0-9a-f]{64})"/g)].map(([, slug, manifest]) => ({ slug, manifest }));
+    assert.equal(items.length, 1);
+    // only from the box's own page, and only signed in
+    assert.equal((await gw.req('POST', '/public/publish', { body: { port: P + 1, items }, headers: { origin: gw.inst(P + 1) } })).status, 403, 'not from an instance\'s name');
+    assert.equal((await gw.req('POST', '/public/publish', { body: { port: P + 1, items }, cookie: '' })).status, 401);
+    assert.equal((await gw.req('POST', '/public/publish', { body: { port: P + 1, items: [{ slug: 'hello', manifest: 'x' }] } })).status, 400);
+    const r = await gw.req('POST', '/public/publish', { body: { port: P + 1, items } });
+    assert.equal(r.status, 200, r.body);
+    assert.deepEqual(r.json.results, [{ slug: 'hello', ok: true, url: `${gw.site}/alpha/hello/`, update: false }]);
+    // anyone reads it, under the gateway's own headers
+    const pubGet = (route, opts = {}) => gw.req('GET', route, { on: 'public', cookie: '', ...opts });
+    let p = await pubGet('/alpha/hello/');
+    assert.deepEqual([p.status, p.body, p.headers['set-cookie']], [200, HELLO['index.html'], undefined]);
+    assert.ok(p.headers['content-security-policy'].includes(`script-src 'unsafe-inline' 'unsafe-eval' ${gw.site}/alpha/hello/ `));
+    assert.equal(p.headers.etag, `"${crypto.createHash('sha256').update(HELLO['index.html']).digest('hex')}"`);
+    assert.equal((await pubGet('/alpha/hello/s.css')).body, HELLO['s.css']);
+    assert.equal((await pubGet('/alpha/hello/', { headers: { 'if-none-match': p.headers.etag } })).status, 304);
+    assert.equal((await gw.req('HEAD', '/alpha/hello/', { on: 'public', cookie: '' })).body, '');
+    assert.equal((await gw.req('POST', '/alpha/hello/', { on: 'public', body: {} })).status, 405);
+    // the kit has the owner's act for it, from the dashboard, naming main's tree
+    const env = { ...process.env };
+    delete env.DEVTEAM_ROLE;
+    const acts = JSON.parse(execFileSync(process.execPath, [path.join(A, 'docs/devteam/scripts/devteam.mjs'), 'log', '--type', 'act', '--by', 'owner', '--json'], { cwd: A, env, encoding: 'utf8' }));
+    const T = execFileSync('git', ['rev-parse', 'main:docs/devteam/project/artifacts/hello'], { cwd: A, encoding: 'utf8' }).trim();
+    assert.deepEqual(acts.map((a) => [a.class, a.what, a.artifact, a.tree, a.channel]), [['artifact-publish', 'publish', 'hello', T, 'dashboard']]);
+    // after a publish nothing on the box is trusted again: the kit gone, an impostor on its port
+    await kitA.stop();
+    const impostor = http.createServer((q, s) => s.end('evil')).listen(P + 1, '127.0.0.1');
+    try {
+      p = await pubGet('/alpha/hello/');
+      assert.deepEqual([p.status, p.body], [200, HELLO['index.html']]);
+    } finally { await new Promise((res) => impostor.close(res)); }
+    assert.match(gw.logs.join('\n'), /public: hello published from instance/);
+  } finally { await kitA.stop(); await gw.close(); }
+});
+
+test('public artifacts: a publish is refused unless every byte, the tree and the manifest are what the owner confirmed', async () => {
+  const gw = await gateway('public-refuse');
+  const S = standIn(P + 10, { a: { 'index.html': '<p>a', 'x/y.js': 'y()' }, b: { 'index.html': '<p>b' } });
+  const pubGet = (route) => gw.req('GET', route, { on: 'public', cookie: '' });
+  try {
+    assert.equal((await gw.claim(authenticator())).status, 200);
+    // an instance that serves other bytes than its manifest names
+    S.lie['a/x/y.js'] = 'z()'; // as long as the real one, so only its hash tells
+    let { results } = await confirmAndPublish(gw, P + 10, ['a']);
+    assert.match(results[0].error, /x\/y\.js is not the file the manifest names/);
+    assert.deepEqual(blobsOf(gw), [], 'nothing of it is kept');
+    assert.equal((await pubGet('/beta/a/')).status, 404);
+    S.reset();
+    // a manifest whose tree the bytes don't make
+    S.tree.a = 'c'.repeat(40);
+    ({ results } = await confirmAndPublish(gw, P + 10, ['a']));
+    assert.match(results[0].error, /the files don't make the tree cccccccccccc/);
+    S.reset();
+    // a manifest that changed between the page and the POST: its title, its project, a file
+    for (const change of [() => { S.title.a = 'Another title'; }, () => { S.project = 'gamma'; }, () => { S.arts.a['index.html'] = '<p>a2'; }]) {
+      ({ results } = await confirmAndPublish(gw, P + 10, ['a'], { before: async () => change() }));
+      assert.match(results[0].error, /this changed since you looked; reload the page/);
+      S.reset();
+    }
+    assert.deepEqual(blobsOf(gw), []);
+    assert.equal(S.recorded.length, 0, 'the kit was never asked to record any of them');
+    // a manifest that breaks the rules is never offered
+    S.arts.a['.env'] = 'secret';
+    const bad = await gw.req('GET', `/public/publish?port=${P + 10}&slug=a`);
+    assert.match(bad.body, /\.env: not a path the kit serves/);
+    assert.doesNotMatch(bad.body, /data-manifest=/);
+    S.reset();
+    // two publishes at once, of different slugs: both end up served
+    const [x, y] = await Promise.all([confirmAndPublish(gw, P + 10, ['a']), confirmAndPublish(gw, P + 10, ['b'])]);
+    assert.ok(x.results[0].ok && y.results[0].ok, JSON.stringify([x.results, y.results]));
+    assert.equal((await pubGet('/beta/a/x/y.js')).body, 'y()');
+    assert.equal((await pubGet('/beta/b/')).body, '<p>b');
+    assert.deepEqual(S.recorded.map((r) => [r.op, r.slug, r.tree.length, r.headers.origin, r.headers['sec-fetch-site'], r.headers.cookie]).sort(), [['publish', 'a', 40, undefined, undefined, undefined], ['publish', 'b', 40, undefined, undefined, undefined]], 'recorded through a loopback request');
+    assert.equal(blobsOf(gw).length, 3);
+    // the same tree again is no change; another tree is an update
+    let again = await confirmAndPublish(gw, P + 10, ['b']);
+    assert.match(again.page.body, /already public at this version/);
+    S.arts.b['index.html'] = '<p>b2';
+    again = await confirmAndPublish(gw, P + 10, ['b']);
+    assert.match(again.page.body, /an update/);
+    assert.match(again.page.body, /data-manifest="[0-9a-f]{64}" checked/, 'the box holds what the owner approved');
+    assert.match(again.page.body, /1 changed, 0 new, 0 removed/);
+    assert.match(again.page.body, /<b>changed<\/b> index\.html/);
+    assert.equal(again.results[0].update, true);
+    assert.equal((await pubGet('/beta/b/')).body, '<p>b2');
+    assert.equal(blobsOf(gw).length, 3, 'the old version\'s blob is swept');
+  } finally { await S.close(); await gw.close(); }
+});
+
+test('public artifacts: a project stays with its checkout unless the owner moves it; a new port is no move', async () => {
+  const gw = await gateway('public-bind');
+  const one = standIn(P + 11, { a: { 'index.html': '<p>one' } }, { root: '/srv/one' });
+  const two = standIn(P + 12, { a: { 'index.html': '<p>two' } }, { root: '/srv/two' });
+  const twoAgain = standIn(P + 13, { a: { 'index.html': '<p>two' } }, { root: '/srv/two' });
+  const served = async () => (await gw.req('GET', '/beta/a/', { on: 'public', cookie: '' })).body;
+  const bound = () => JSON.parse(fs.readFileSync(path.join(gw.dir, 'state.json'), 'utf8')).public.beta;
+  try {
+    assert.equal((await gw.claim(authenticator())).status, 200);
+    assert.ok((await confirmAndPublish(gw, P + 11, ['a'])).results[0].ok);
+    const moved = await confirmAndPublish(gw, P + 12, ['a']);
+    assert.ok(moved.page.body.includes('beta is published from /srv/one; this instance is /srv/two'), moved.page.body);
+    assert.match(moved.page.body, /<input type="checkbox" data-move="a" data-moved-from="\/srv\/one"> move it</, '"move it" is unchecked, and nothing else comes down');
+    assert.match(moved.results[0].error, /beta is published from \/srv\/one; this instance is \/srv\/two: tick "move it"/);
+    assert.equal(await served(), '<p>one');
+    assert.equal(two.recorded.length, 0);
+    assert.ok((await confirmAndPublish(gw, P + 12, ['a'], { move: true })).results[0].ok);
+    assert.equal(await served(), '<p>two');
+    assert.deepEqual([bound().root, bound().port], ['/srv/two', P + 12]);
+    const port = await confirmAndPublish(gw, P + 13, ['a']);
+    assert.doesNotMatch(port.page.body, /data-move="/, 'the same checkout on another port');
+    assert.ok(port.results[0].ok);
+    assert.deepEqual([bound().root, bound().port], ['/srv/two', P + 13]);
+  } finally { await one.close(); await two.close(); await twoAgain.close(); await gw.close(); }
+});
+
+test('public artifacts: the box holds at most DEVTEAM_PUBLIC_MAX bytes for the public', async () => {
+  const gw = await gateway('public-cap', { publicMax: 10 });
+  const S = standIn(P + 14, { small: { 'index.html': '<p>12345' }, big: { 'index.html': '<p>more than ten bytes' } });
+  try {
+    assert.equal((await gw.claim(authenticator())).status, 200);
+    assert.ok((await confirmAndPublish(gw, P + 14, ['small'])).results[0].ok);
+    const { results } = await confirmAndPublish(gw, P + 14, ['big']);
+    assert.match(results[0].error, /over the box's public cap of 10 bytes \(DEVTEAM_PUBLIC_MAX\)/);
+    assert.equal(blobsOf(gw).length, 1, 'refused before anything is written');
+    assert.deepEqual(S.recorded.map((r) => r.slug), ['small']);
+  } finally { await S.close(); await gw.close(); }
+});
+
+test('public artifacts: a move keeps only the slug moved; the old checkout\'s others are no longer public', async () => {
+  const gw = await gateway('public-move');
+  const one = standIn(P + 15, { a: { 'index.html': '<p>one a' }, b: { 'index.html': '<p>one b' } }, { root: '/srv/one' });
+  const two = standIn(P + 16, { a: { 'index.html': '<p>two a' } }, { root: '/srv/two' });
+  const pubGet = (route) => gw.req('GET', route, { on: 'public', cookie: '' });
+  try {
+    assert.equal((await gw.claim(authenticator())).status, 200);
+    assert.ok((await confirmAndPublish(gw, P + 15, ['a', 'b'])).results.every((r) => r.ok));
+    assert.equal(blobsOf(gw).length, 2);
+    const mv = await confirmAndPublish(gw, P + 16, ['a'], { move: true });
+    assert.ok(mv.page.body.includes('move it (its 1 other page from /srv/one comes down: b)'), mv.page.body);
+    assert.deepEqual([mv.results[0].ok, mv.results[0].update], [true, false], 'a move is a new binding, not an update');
+    assert.equal((await pubGet('/beta/a/')).body, '<p>two a');
+    assert.equal((await pubGet('/beta/b/')).status, 404, 'the old root\'s other slug is dropped');
+    assert.deepEqual(Object.keys(JSON.parse(fs.readFileSync(path.join(gw.dir, 'state.json'), 'utf8')).public.beta.artifacts), ['a']);
+    assert.deepEqual(blobsOf(gw), [crypto.createHash('sha256').update('<p>two a').digest('hex')], 'and its blobs swept');
+  } finally { await one.close(); await two.close(); await gw.close(); }
+});
+
+// The review's repro: the owner publishes hello at T1, main moves on, and something on the box has
+// the kit write a publish line for an artifact the owner never published. The route can't tell who
+// is asking (a dashboard's owner actions never could), so the line lands; what matters is what it
+// leads to on a new box, where the gateway holds no copy of anything.
+test('public artifacts: on a new box a forged record leads to an unticked, explained item, never a silent publish', async () => {
+  const WEEKLY = { 'index.html': '<p>weekly', 'raw-export.json': '{"secret":1}', 'artifact.json': JSON.stringify({ v: 1, title: 'Weekly', summary: 'Numbers', by: 'supervisor' }) };
+  const A = landedProject(fs.mkdtempSync(path.join(tmp, 'pub-')), 'alpha', { hello: HELLO, weekly: WEEKLY });
+  const treeOf = (slug) => execFileSync('git', ['rev-parse', `main:docs/devteam/project/artifacts/${slug}`], { cwd: A, encoding: 'utf8' }).trim();
+  const kitA = startKit(A, P + 24);
+  const first = await gateway('public-repro-first');
+  let box = null;
+  try {
+    await kitUp(P + 24);
+    assert.equal((await first.claim(authenticator())).status, 200);
+    const T1 = treeOf('hello');
+    assert.ok((await confirmAndPublish(first, P + 24, ['hello'])).results[0].ok);
+    // main moves on: the box that holds T1 can say what changed, and ticks it
+    fs.writeFileSync(path.join(A, 'docs/devteam/project/artifacts/hello/index.html'), '<p>changed');
+    fs.writeFileSync(path.join(A, 'docs/devteam/project/artifacts/hello/extra.txt'), 'more');
+    execFileSync('git', ['add', '-A'], { cwd: A });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'main moves on'], { cwd: A });
+    const T2 = treeOf('hello');
+    assert.notEqual(T2, T1);
+    const held = await first.req('GET', `/public/publish?port=${P + 24}&slug=hello`);
+    assert.match(held.body, /an update/);
+    assert.match(held.body, /data-slug="hello" data-manifest="[0-9a-f]{64}" checked/);
+    assert.match(held.body, /1 changed, 1 new, 0 removed/);
+    assert.match(held.body, /<b>changed<\/b> index\.html/);
+    assert.match(held.body, /<b>new<\/b> extra\.txt/);
+    await first.close();
+    // a local process, as a worker could be: no Origin, no sec-fetch-*, the same as the gateway's own call
+    const forged = await fetch(`http://127.0.0.1:${P + 24}/api/artifact-publish`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ op: 'publish', slug: 'weekly', tree: treeOf('weekly') }) });
+    assert.equal(forged.status, 200, 'what the route can\'t refuse');
+    // a new box: the log moved, the gateway's copy didn't
+    box = await gateway('public-repro-new');
+    assert.equal((await box.claim(authenticator())).status, 200);
+    const page = await box.req('GET', `/public/publish?port=${P + 24}&slug=hello&slug=weekly`);
+    assert.equal(page.status, 200, page.body);
+    assert.equal([...page.body.matchAll(/data-slug="[^"]+" data-manifest="[0-9a-f]{64}"/g)].length, 2);
+    assert.doesNotMatch(page.body, /data-manifest="[0-9a-f]{64}" checked/, 'nothing goes up without a tick');
+    assert.doesNotMatch(page.body, /restore/i, 'what goes up is main\'s version, so it is not a restore');
+    assert.ok(page.body.includes(`at tree ${T1.slice(0, 12)}. This is tree ${T2.slice(0, 12)}, what main holds now, so it is not that version`), 'hello says it is not what was published');
+    assert.match(page.body, /published on \d{4}-\d{2}-\d{2} at this same version; a log can be forged/, 'a record that matches isn\'t taken as proof');
+    assert.match(page.body, /<div>raw-export\.json <small>/, 'the file nobody meant to publish is named');
+    assert.ok(page.body.includes(`from the checkout ${esc(fs.realpathSync(A))}, as this instance reports it`));
+    for (const s of ['hello', 'weekly']) assert.equal((await box.req('GET', `/alpha/${s}/`, { on: 'public', cookie: '' })).status, 404, `${s} isn't public until the owner ticks it`);
+    // the Library has the two trees to compare
+    const env = { ...process.env };
+    delete env.DEVTEAM_ROLE;
+    const lib = JSON.parse(execFileSync(process.execPath, [path.join(A, 'docs/devteam/scripts/devteam.mjs'), 'dashboard-data'], { cwd: A, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })).library;
+    const row = lib.artifacts.find((a) => a.slug === 'hello' && a.at === 'main');
+    assert.deepEqual([row.published.tree, row.tree], [T1, T2]);
+  } finally { await kitA.stop(); await first.close().catch(() => {}); await box?.close(); }
+});
+
+test('public artifacts: unpublish takes a page down, and records it only where that project is', async () => {
+  const gw = await gateway('public-down');
+  const S = standIn(P + 15, { a: { 'index.html': '<p>a' }, b: { 'index.html': '<p>b' }, c: { 'index.html': '<p>c' } });
+  const other = standIn(P + 16, {}, { root: '/srv/elsewhere' });
+  const pubStatus = async (route) => (await gw.req('GET', route, { on: 'public', cookie: '' })).status;
+  const down = (body, opts = {}) => gw.req('POST', '/public/unpublish', { body, ...opts });
+  try {
+    assert.equal((await gw.claim(authenticator())).status, 200);
+    for (const s of ['a', 'b']) assert.ok((await confirmAndPublish(gw, P + 15, [s])).results[0].ok);
+    // the confirm page names it from the gateway's own state
+    const pg = await gw.req('GET', `/public/unpublish?port=${P + 15}&project=beta&slug=a`);
+    assert.equal(pg.status, 200);
+    assert.match(pg.body, /The a/);
+    assert.ok(pg.body.includes(`${gw.site}/beta/a/`));
+    assert.equal((await gw.req('GET', `/public/unpublish?port=${P + 15}&slug=a`)).status, 200, 'the project from the port it was last seen on');
+    assert.equal((await gw.req('GET', '/public/unpublish?project=beta&slug=zzz')).status, 404);
+    assert.equal((await gw.req('GET', `/public/unpublish?project=beta&slug=a`, { cookie: '' })).status, 401);
+    assert.equal((await down({ project: 'beta', slug: 'a', port: P + 15 }, { headers: { origin: gw.inst(P + 15) } })).status, 403, 'not from an instance\'s name');
+    assert.equal((await down({ project: 'beta', slug: 'a' }, { cookie: '' })).status, 401);
+    let r = await down({ project: 'beta', slug: 'a', port: P + 15 });
+    assert.deepEqual([r.status, r.json.recorded], [200, true], r.body);
+    assert.deepEqual([S.recorded.at(-1).op, S.recorded.at(-1).slug, S.recorded.at(-1).headers.origin], ['unpublish', 'a', undefined]);
+    assert.equal(await pubStatus('/beta/a/'), 404);
+    assert.equal(await pubStatus('/beta/a'), 404, 'no redirect once it is down');
+    assert.equal((await down({ project: 'beta', slug: 'a', port: P + 15 })).status, 404, 'once');
+    const pubState = () => JSON.parse(fs.readFileSync(path.join(gw.dir, 'state.json'), 'utf8')).public;
+    assert.deepEqual(blobsOf(gw), [...new Set(Object.values(pubState().beta.artifacts).flatMap((x) => Object.values(x.files).map((f) => f.sha256)))].sort(), 'its blobs are gone');
+    // an instance that isn't beta at /srv/beta: the page comes down, the record isn't written there
+    r = await down({ project: 'beta', slug: 'b', port: P + 16 });
+    assert.deepEqual([r.status, r.json.recorded], [200, false]);
+    assert.match(r.json.note, /instance \d+ is not beta at \/srv\/beta, so the record wasn't written there; the Library's Forget clears it/);
+    assert.equal(other.recorded.length, 0);
+    assert.equal(await pubStatus('/beta/b/'), 404);
+    assert.equal(pubState().beta.root, '/srv/beta', 'the project stays bound to its checkout');
+    // the gateway's list
+    assert.ok((await confirmAndPublish(gw, P + 15, ['c'])).results[0].ok);
+    const list = await gw.req('GET', '/public/');
+    assert.equal(list.status, 200);
+    assert.ok(list.body.includes(`${gw.site}/beta/c/`));
+    assert.ok(list.body.includes('/public/unpublish?project=beta&#38;slug=c'));
+    assert.ok(!list.body.includes('/beta/a/'));
+    r = await down({ project: 'beta', slug: 'c' });
+    assert.deepEqual([r.json.recorded, r.json.note], [false, 'no instance was named, so the record wasn\'t written; the Library\'s Forget clears it']);
+    // an unpublish racing a publish leaves no dangling blob and no missing one
+    assert.ok((await confirmAndPublish(gw, P + 15, ['c'])).results[0].ok);
+    await Promise.all([confirmAndPublish(gw, P + 15, ['a']), down({ project: 'beta', slug: 'c' })]);
+    const want = [...new Set(Object.values(pubState().beta.artifacts).flatMap((x) => Object.values(x.files).map((f) => f.sha256)))].sort();
+    assert.deepEqual(blobsOf(gw), want);
+    assert.deepEqual([await pubStatus('/beta/a/'), await pubStatus('/beta/c/')], [200, 404]);
+  } finally { await S.close(); await other.close(); await gw.close(); }
+});
+
+test('public artifacts: a slow instance holds up no other change, and its item runs out of time', async () => {
+  const gw = await gateway('public-slow', { publicItemMs: 1500, publicDeadlineMs: 10000 });
+  const S = standIn(P + 22, { a: { 'index.html': 'x'.repeat(20) } });
+  try {
+    assert.equal((await gw.claim(authenticator())).status, 200);
+    seedPublic(gw.dir, 'alpha', 'other', { 'index.html': 'o' });
+    S.trickle['a/index.html'] = 200; // 4 s in all, each byte well inside the per-request deadline
+    const page = await gw.req('GET', `/public/publish?port=${P + 22}&slug=a`);
+    const items = [...page.body.matchAll(/data-slug="([^"]+)" data-manifest="([0-9a-f]{64})"/g)].map(([, slug, manifest]) => ({ slug, manifest }));
+    const publishing = gw.req('POST', '/public/publish', { body: { port: P + 22, items } });
+    await until(() => S.asked.includes('/artifact/main/a/index.html'), 'the slow file asked for');
+    const t0 = Date.now();
+    const r = await gw.req('POST', '/public/unpublish', { body: { project: 'alpha', slug: 'other' } });
+    const took = Date.now() - t0;
+    assert.equal(r.status, 200, r.body);
+    assert.ok(took < 800, `the unpublish waited ${took} ms on another instance's publish`);
+    assert.equal((await gw.req('GET', '/alpha/other/', { on: 'public', cookie: '' })).status, 404);
+    const done = await publishing;
+    assert.match(done.json.results[0].error, /took over 1\.5 s for this item; nothing was published/);
+    assert.ok(Date.now() - t0 < 3000, 'refused by the item\'s budget, not after the whole trickle');
+    assert.equal(S.recorded.length, 0);
+    assert.deepEqual(blobsOf(gw), []);
+  } finally { await S.close(); await gw.close(); }
+});
+
+test('DEVTEAM_PUBLIC_MAX: anything but a positive number of bytes stops the gateway at startup', async () => {
+  const make = (extra) => G.createGateway({ publicUrl: 'http://box.localhost:1', dir: fs.mkdtempSync(path.join(tmp, 'pmax-')), log: () => {}, ...extra });
+  for (const v of ['abc', '0', '-5', 'Infinity', '', 'NaN']) assert.throws(() => make({ publicMax: v }), /DEVTEAM_PUBLIC_MAX must be a positive number of bytes/, JSON.stringify(v));
+  process.env.DEVTEAM_PUBLIC_MAX = 'lots';
+  try { assert.throws(() => make({}), /DEVTEAM_PUBLIC_MAX must be a positive number of bytes/, 'from the environment too'); } finally { delete process.env.DEVTEAM_PUBLIC_MAX; }
+  make({});
+  const gw = await gateway('public-max1', { publicMax: '1' });
+  const S = standIn(P + 23, { a: { 'index.html': '<p>a' } });
+  try {
+    assert.equal((await gw.claim(authenticator())).status, 200);
+    const { results } = await confirmAndPublish(gw, P + 23, ['a']);
+    assert.match(results[0].error, /over the box's public cap of 1 bytes/);
+    assert.deepEqual(blobsOf(gw), []);
+  } finally { await S.close(); await gw.close(); }
+});
+
+test('public artifacts: "move it" moves from the root the page showed, and says what comes down', async () => {
+  const gw = await gateway('public-rebind');
+  const one = standIn(P + 18, { a: { 'index.html': '<p>one' }, m2: { 'index.html': '<p>m2' } }, { root: '/srv/one' });
+  const two = standIn(P + 19, { a: { 'index.html': '<p>two' } }, { root: '/srv/two' });
+  const three = standIn(P + 21, { a: { 'index.html': '<p>three' } }, { root: '/srv/three' });
+  try {
+    assert.equal((await gw.claim(authenticator())).status, 200);
+    assert.ok((await confirmAndPublish(gw, P + 18, ['a', 'm2'])).results.every((x) => x.ok));
+    // two's page shows a move from /srv/one; before its POST, three moves the project
+    const r = await confirmAndPublish(gw, P + 19, ['a'], { move: true, before: async () => { assert.ok((await confirmAndPublish(gw, P + 21, ['a'], { move: true })).results[0].ok); } });
+    assert.ok(r.page.body.includes('data-moved-from="/srv/one"'), r.page.body);
+    assert.ok(r.page.body.includes('move it (its 1 other page from /srv/one comes down: m2)'), r.page.body);
+    assert.match(r.results[0].error, /this project moved since you looked; reload/);
+    assert.equal((await gw.req('GET', '/beta/a/', { on: 'public', cookie: '' })).body, '<p>three');
+    assert.equal(two.recorded.length, 0);
+  } finally { await one.close(); await two.close(); await three.close(); await gw.close(); }
+});
+
+test('public artifacts: a sweep that fails after an unpublish still takes the page down', async () => {
+  const gw = await gateway('public-sweepfail');
+  const S = standIn(P + 15, { a: { 'index.html': '<p>a' } });
+  try {
+    assert.equal((await gw.claim(authenticator())).status, 200);
+    assert.ok((await confirmAndPublish(gw, P + 15, ['a'])).results[0].ok);
+    // a name in the blob folder the sweep can't remove
+    fs.mkdirSync(path.join(gw.dir, 'public', 'blobs', 'stuck'));
+    const r = await gw.req('POST', '/public/unpublish', { body: { project: 'beta', slug: 'a', port: P + 15 } });
+    assert.deepEqual([r.status, r.json?.ok, r.json?.recorded], [200, true, true], r.body);
+    assert.equal(S.recorded.at(-1).op, 'unpublish');
+    assert.equal((await gw.req('GET', '/beta/a/', { on: 'public', cookie: '' })).status, 404);
+  } finally { await S.close(); await gw.close(); }
+});
+
+test('public artifacts: the gateway\'s /public pages load only as a document, never in another site\'s frame', async () => {
+  const gw = await gateway('public-frame');
+  const S = standIn(P + 15, { a: { 'index.html': '<p>a' } });
+  try {
+    assert.equal((await gw.claim(authenticator())).status, 200);
+    assert.ok((await confirmAndPublish(gw, P + 15, ['a'])).results[0].ok);
+    S.asked.length = 0;
+    const framed = { 'sec-fetch-dest': 'iframe', 'sec-fetch-mode': 'navigate', 'sec-fetch-site': 'cross-site' };
+    for (const at of [`/public/publish?port=${P + 15}&slug=a`, '/public/unpublish?project=beta&slug=a', '/public/', '/public']) {
+      assert.equal((await gw.req('GET', at, { headers: framed })).status, 403, at);
+      assert.equal((await gw.req('GET', at, { headers: { ...framed, 'sec-fetch-dest': 'document' } })).status, 200, `${at} as a page`);
+    }
+    assert.equal(S.asked.filter((u) => u.startsWith('/public-manifest/')).length, 1, 'a frame made the gateway ask the instance nothing');
+  } finally { await S.close(); await gw.close(); }
+});
+
+test('x-devteam-public: a dashboard learns what the box serves, from the gateway alone', async () => {
+  const gw = await gateway('public-header');
+  const up = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'application/json', 'x-devteam-public': '{"forged":1}' }); res.end('{}'); }).listen(P + 17, '127.0.0.1');
+  try {
+    assert.equal((await gw.claim(authenticator())).status, 200);
+    seedPublic(gw.dir, 'alpha', 'hello', { 'index.html': 'x' }, { root: '/srv/alpha', port: P + 17 });
+    seedPublic(gw.dir, 'zeta', 'z', { 'index.html': 'z' }, { root: '/srv/zéta', port: P + 3 });
+    let r = await gw.req('GET', '/api/data', { on: P + 17 });
+    assert.equal(r.status, 200);
+    assert.match(r.headers['x-devteam-public'], /^[\x20-\x7e]+$/, 'ASCII, whatever a root holds');
+    assert.deepEqual(JSON.parse(r.headers['x-devteam-public']), { alpha: { port: P + 17, root: '/srv/alpha', artifacts: { hello: 'a'.repeat(40) } }, zeta: { port: P + 3, root: '/srv/zéta', artifacts: { z: 'a'.repeat(40) } } });
+    assert.equal((await gw.req('GET', '/api/fleet', { on: P + 17 })).headers['x-devteam-public'], undefined, 'an upstream\'s own copy is dropped');
+    assert.equal((await gw.req('GET', '/api/data', { on: P + 17, cookie: '' })).status, 401, 'signed in only');
+    // past 32 KB, only the asking instance's own projects
+    for (let i = 0; i < 200; i++) seedPublic(gw.dir, `p${i}`, 'x', { 'index.html': `${i}` }, { root: `/srv/${'r'.repeat(200)}${i}`, port: P + 20 });
+    r = await gw.req('GET', '/api/data', { on: P + 17 });
+    assert.deepEqual(Object.keys(JSON.parse(r.headers['x-devteam-public'])), ['alpha']);
+  } finally { await new Promise((res) => up.close(res)); await gw.close(); }
 });
 
 // --- files dropped on the terminal --------------------------------------------------------------
