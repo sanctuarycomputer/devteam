@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // The dev links chain in a real browser: Chrome over the DevTools protocol against a real dashboard,
-// a real Vite app and (the second half) a real gateway on *.localhost, by hand (needs Chrome and
-// npm's network once; not in CI). Node 22+.
-//   node test/browser/dev-links.mjs
+// a real Vite app, (between them) the thread layer, and (the second half) a real gateway on
+// *.localhost, by hand (needs Chrome and npm's network once; not in CI). Node 22+.
+//   node test/browser/dev-links.mjs [--only threads]
 // A synthetic test can't show what a popup, the hub's sandboxed frame, a clipboard or an HMR socket
 // does: this drives them with real input events.
 import assert from 'node:assert/strict';
@@ -167,6 +167,13 @@ class Browser {
     await this.cdp.send('Target.closeTarget', { targetId: tab.targetId });
     return text;
   }
+  // Real input on a tab, at a point in its main frame, with modifiers (8 is Shift).
+  async mouseAt(page, x, y, modifiers = 0, click = false) {
+    for (const type of click ? ['mouseMoved', 'mousePressed', 'mouseReleased'] : ['mouseMoved']) await this.cdp.send('Input.dispatchMouseEvent', { type, x, y, modifiers, button: type === 'mouseMoved' ? 'none' : 'left', buttons: type === 'mousePressed' ? 1 : 0, clickCount: 1 }, page.sessionId);
+  }
+  async shift(page, down) { await this.cdp.send('Input.dispatchKeyEvent', { type: down ? 'rawKeyDown' : 'keyUp', key: 'Shift', code: 'ShiftLeft', windowsVirtualKeyCode: 16, modifiers: down ? 8 : 0 }, page.sessionId); }
+  async typeIn(page, text) { await this.cdp.send('Input.insertText', { text }, page.sessionId); }
+  async enter(page) { for (const type of ['keyDown', 'keyUp']) await this.cdp.send('Input.dispatchKeyEvent', { type, key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, ...(type === 'keyDown' ? { text: '\r' } : {}) }, page.sessionId); }
   async kill() { try { this.proc?.kill('SIGKILL'); } catch {} }
 }
 
@@ -343,18 +350,91 @@ async function viaGateway({ DASH, HUB, app, G }) {
   say(`measure  no-store: second load through the gateway ${viaGw.bytes} bytes in ${viaGw.ms} ms; straight to the server ${straight.bytes} bytes in ${straight.ms} ms`);
 }
 
+// ===== threads: Shift and point on the dashboard, a turn typed into a stand-in supervisor's pane =====
+// A stand-in for the supervisor's agent (not a shell, which the kit never types into): it draws a
+// line and logs what it is sent, so the step reads the exact line the kit typed.
+function standIn() {
+  const agent = path.join(base, 'stand-in.mjs');
+  const keys = path.join(base, 'typed.txt');
+  fs.writeFileSync(agent, "import fs from 'node:fs';\nprocess.stdout.write('stand-in supervisor\\n');\nprocess.stdin.on('data', (d) => fs.appendFileSync(process.argv[2], String(d)));\n");
+  spawnSync('tmux', ['new-session', '-d', '-x', '220', '-y', '50', '-s', 'dt-sup', '-n', 'main', `${process.execPath} ${agent} ${keys}`], { env });
+  return { target: 'dt-sup:main', typed: () => (fs.existsSync(keys) ? fs.readFileSync(keys, 'utf8') : '') };
+}
+async function threads({ DASH, pane }) {
+  const dash = `http://127.0.0.1:${DASH}/`;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const G = dt(['goal', 'add', '--title', 'Launch checkout', '--outcome', 'people can pay', '--measure', 'orders', '--target', '500', '--unit', 'orders', '--direction', 'up', '--source', 'prod', '--check', 'echo 5', '--non-goals', 'invoices', '--preconditions', 'cards work', '--priority', '1'], SUP);
+  const tab = await browser.newPage(`${dash}#goals`);
+  const card = `#goals-list [data-subject="goal:${G}"]`;
+  await until(() => browser.evalIn(dash, `!!document.querySelector('${card}')`), 'the goal card', 60000);
+  const center = (sel) => browser.evalIn(dash, `(() => { const e = document.querySelector(${JSON.stringify(sel)}); e.scrollIntoView({ block: 'center' }); const r = e.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
+  const at = await center(`${card} h4`);
+  await browser.cdp.send('Page.bringToFront', {}, tab.sessionId).catch(() => {});
+  await browser.shift(tab, true);
+  await browser.mouseAt(tab, at.x, at.y, 8);
+  await until(() => browser.evalIn(dash, `!document.getElementById('tl-cursor').hidden && document.getElementById('tl-chip').textContent === 'Launch checkout'`), 'the pin cursor and the chip');
+  stepOk('Shift and point: the pin cursor, the goal outlined, a chip naming it');
+  await browser.mouseAt(tab, at.x, at.y, 8, true);
+  await browser.shift(tab, false);
+  await until(() => browser.evalIn(dash, `!document.getElementById('tl-card').hidden && location.hash === '#goals'`), 'the card, the link under it not followed');
+  stepOk('Shift+click opened the card with the goal as its context, and nothing else');
+  await browser.evalIn(dash, `document.getElementById('tl-c-text').focus()`);
+  await browser.typeIn(tab, 'Narrow this to the EU launch');
+  await browser.enter(tab);
+  const T = await until(() => JSON.parse(dt(['thread', 'list', '--json'])).find((x) => x.turns[0]?.text === 'Narrow this to the EU launch')?.id, 'the thread in the log');
+  const typed = await until(() => pane.typed().includes(T) && pane.typed(), "the turn in the supervisor's pane");
+  assert.ok(typed.includes(`[devteam thread ${T} from owner on goal ${G}] Narrow this to the EU launch — devteam.mjs thread show ${T}`), typed);
+  stepOk(`the turn reached the supervisor's pane as one line: ${typed.trim().split('\n').pop()}`);
+  dt(['thread', 'say', T, 'That drops the measure to EU orders; want me to propose the change?'], SUP);
+  const t0 = Date.now();
+  await until(() => browser.evalIn(dash, `document.querySelector('#tl-c-turns .tl-turn.supervisor')?.textContent.includes('drops the measure')`), 'the reply in the card', 10000);
+  const ms = Date.now() - t0;
+  // the card polls every 2 s: two polls and a margin for a loaded machine
+  assert.ok(ms < 2 * 2000 + 1500, `the reply took ${ms} ms`);
+  stepOk(`the supervisor's turn showed in the card after ${ms} ms`);
+  const Q = dt(['thread', 'ask', T, '--question', 'Narrow the goal to EU orders?', '--choices', '[{"label":"Yes"},{"label":"Not yet"}]', '--recommendation', 'Yes', '--goal', G, '--stake', '2', '--urgency', '1'], SUP);
+  await until(() => browser.evalIn(dash, `!!document.getElementById('t-q-${Q}')`), 'the question in the card', 30000);
+  await browser.click(dash, dash, `#t-q-${Q} input[value="Yes"]`);
+  await browser.click(dash, dash, `#t-q-${Q} button[data-answer="${Q}"]`);
+  await until(() => JSON.parse(dt(['questions', '--id', Q, '--json']))[0].status === 'answered', 'the answer in the log');
+  await until(() => browser.evalIn(dash, `!document.getElementById('q-${Q}') || document.getElementById('q-${Q}').classList.contains('done')`), 'the Inbox copy answered', 20000);
+  stepOk('a question asked in the thread, answered in the card, is answered in the Inbox');
+  const pinAt = () => browser.evalIn(dash, `(() => { const p = document.querySelector('.tl-pin'), g = document.querySelector('${card}'); if (!p || !g) return null; const a = p.getBoundingClientRect(), b = g.getBoundingClientRect(); return Math.round(a.left + a.width / 2 - b.right) + ',' + Math.round(a.top + a.height / 2 - b.top); })()`);
+  await browser.evalIn(dash, 'document.activeElement?.blur()');
+  const before = await until(pinAt, 'the pin on the goal');
+  await browser.evalIn(dash, `document.querySelector('${card}').dataset.mark = 'old'`);
+  await until(() => browser.evalIn(dash, `!!document.querySelector('${card}') && !document.querySelector('${card}[data-mark]')`), 'the 10 s rebuild', 25000);
+  assert.equal(await pinAt(), before);
+  stepOk('the pin is on the goal again after the 10 s rebuild');
+  dt(['thread', 'ready', T, '--outcome', 'Goal narrowed to EU orders'], SUP);
+  await until(() => browser.evalIn(dash, `!!document.querySelector('[data-tl-accept]')`), 'the ready banner', 10000);
+  await browser.click(dash, dash, '[data-tl-accept]');
+  await until(() => JSON.parse(dt(['thread', 'show', T, '--json'])).status === 'resolved', 'resolved');
+  await until(() => browser.evalIn(dash, `!document.querySelector('.tl-pin')`), 'the pin gone');
+  await browser.click(dash, dash, '#tl-pill');
+  await until(() => browser.evalIn(dash, `!!document.querySelector('.tl-resolved [data-tl-open="${T}"]')`), 'listed under Resolved');
+  stepOk('accepting the proposal resolved it: the pin went, and the dock lists it under Resolved');
+}
+
 async function main() {
+  // --only threads: the thread layer alone (no Vite, no npm, no gateway)
+  const only = process.argv.includes('--only') ? process.argv[process.argv.indexOf('--only') + 1] : null;
+  if (only && only !== 'threads') throw new Error(`--only takes threads, not ${only}`);
   const block = await portBlock(34);
   const HUB = block;
   const DASH = block + 1;
   env = { ...process.env, TMUX_TMPDIR: tmuxDir, DEVTEAM_HUB_PORT: String(HUB), DEVTEAM_PORT_BASE: String(block + 1), DEVTEAM_CSWAP: 'off', PATH: `${nodeBin}${path.delimiter}${process.env.PATH}`, DEVTEAM_PREVIEW_TICK_MS: '1000', DEVTEAM_OWN_KIT: '1' };
-  for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_HOME', 'TMUX', 'TMUX_PANE', 'DEVTEAM_PUBLIC_URL', 'DEVTEAM_PREVIEWS', 'PORT']) delete env[k];
+  for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_HOME', 'TMUX', 'TMUX_PANE', 'DEVTEAM_PUBLIC_URL', 'DEVTEAM_PREVIEWS', 'PORT', 'DEVTEAM_SUPERVISOR']) delete env[k];
   makeRepo();
-  const app = makeApp();
+  const app = only ? null : makeApp();
+  const pane = standIn();
+  env.DEVTEAM_SUPERVISOR = pane.target;
   startDashboard(DASH);
   browser = await new Browser().start(path.join(base, 'chrome'));
-  await laptop({ HUB, DASH, app });
-  await viaGateway({ HUB, DASH, app, G: block + 30 });
+  // the laptop half leaves the hub open, framing this same dashboard: closed, so a step here reads the thread tab's page
+  if (!only) { const lap = await laptop({ HUB, DASH, app }); await browser.cdp.send('Target.closeTarget', { targetId: lap.hub.targetId }); }
+  await threads({ DASH, pane });
+  if (!only) await viaGateway({ HUB, DASH, app, G: block + 30 });
   say('all steps passed');
 }
 
