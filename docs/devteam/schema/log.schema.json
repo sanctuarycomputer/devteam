@@ -1241,6 +1241,11 @@
                   "pattern": "^[0-9a-f]{64}$",
                   "description": "The artifact's fingerprint when asked, written by ask; the dashboard says when it has changed since."
                 },
+                "blob": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{40,64}$",
+                  "description": "On a strategy-change question's link to project/strategy.md: the git blob of the draft when asked, written by ask (which also resolves ref to that commit). merge lands exactly this text under the owner's answer."
+                },
                 "name": {
                   "type": "string",
                   "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",

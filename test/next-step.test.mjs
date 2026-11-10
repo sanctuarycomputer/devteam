@@ -47,18 +47,18 @@ test('the formula: impact × stake × urgency, plus the tickets held up; the rea
     const blocker = ask('Which tax table?', '--stake', '1', '--urgency', '3', '--blocks', 'bill-01-a');
     const off = ask('Which font on the receipt?', '--stake', '1', '--urgency', '3', '--blocks', 'bill-04-d');
     const order = inbox();
-    assert.deepEqual(order.map((q) => q.id), [blocker, design, off, detail], 'by score, highest first');
-    const [b, d, o, e] = order.map((q) => q.rank);
+    assert.deepEqual(order.map((q) => q.id), [blocker, off, design, detail], 'by score within each band: what holds up a waiting ticket comes first');
+    const [b, o, d, e] = order.map((q) => q.rank);
     // 3 × 1 × 3, + 2 for a critical-path ticket + 2 behind it
     assert.deepEqual([b.score, b.own, b.position, b.top], [13, 13, 1, true]);
-    assert.equal(b.reason, 'holds up 1 ticket, 1 on the critical path, 2 more behind it; for Team billing: moves a number the project watches; a detail; work is stopped on it now');
+    assert.equal(b.reason, 'holds up 1 ticket, 1 on the critical path, 2 more behind it; for Team billing (the supervisor\'s rating): moves a number the project watches; the supervisor\'s rating: a detail; work is stopped on it now');
     assert.equal(b.sum, 'score 13: impact 3 (moves a number the project watches) × stake 1 (a detail) × urgency 3 (work is stopped on it now) + 4 for the tickets it holds up');
-    assert.deepEqual([d.score, d.reason], [12, 'for Team billing: moves a number the project watches']);
+    assert.deepEqual([d.score, d.reason], [12, 'for Team billing (the supervisor\'s rating): moves a number the project watches']);
     assert.deepEqual([o.score, o.parts.held_up, o.parts.on_path, o.parts.behind], [10, 1, 0, 0], '3 × 1 × 3 + 1 off the path');
-    assert.deepEqual([e.score, e.reason], [6, 'for Team billing: moves a number the project watches; a detail']);
+    assert.deepEqual([e.score, e.reason], [6, 'for Team billing (the supervisor\'s rating): moves a number the project watches; the supervisor\'s rating: a detail']);
     // the text view: the same order, and a rank line on each rated question
     const text = ok(old, ['questions']);
-    assert.ok(text.indexOf(blocker) < text.indexOf(design) && text.indexOf(design) < text.indexOf(off));
+    assert.ok(text.indexOf(blocker) < text.indexOf(off) && text.indexOf(off) < text.indexOf(design));
     assert.match(text, /\n {2}rank: 13 \(holds up 1 ticket, 1 on the critical path, 2 more behind it; /);
     // the unblock is capped: it lifts a question a few places, never a detail over a turning point
     for (let i = 5; i < 20; i++) ticket(`bill-${String(i).padStart(2, '0')}-x`, 'bill', ['bill-03-c']);
@@ -101,7 +101,7 @@ test('a question that settles others ranks above them: stake 3, same goal or fea
     assert.equal(order[0].id, gate);
     // own 3 × 3 × 1 = 9; the details 6 + 6 + 6, and 3 × 1 × 3 + 2 = 11 for the one holding the only ticket
     assert.deepEqual([order[0].rank.own, order[0].rank.score], [9, 38]);
-    assert.match(order[0].rank.reason, /^would settle 4 other questions; for Team billing: moves a number the project watches; decides whether the work goes ahead$/);
+    assert.match(order[0].rank.reason, /^would settle 4 other questions; for Team billing \(the supervisor's rating\): moves a number the project watches; the supervisor's rating: decides whether the work goes ahead$/);
     assert.match(order[0].rank.sum, /\+ 29 from the 4 questions it would settle$/);
     assert.deepEqual(rank(details[0]).parts.settled_by, [gate]);
     assert.match(rank(details[0]).reason, new RegExp(`may be settled by ${gate}$`));
@@ -209,7 +209,8 @@ test('the order is computed: a goal judged again, a ticket merged, a goal parked
     assert.match(rank(unjudged).reason, /for Team billing: its impact is not judged yet/);
     const onb = ask('Which welcome mail?', '--goal', H, '--stake', '2', '--urgency', '2');
     impact(H, 4);
-    assert.deepEqual(inbox().map((q) => q.id), [onb, unjudged], '4 × 2 × 2 = 16 over 15');
+    assert.deepEqual(inbox().map((q) => q.rank.score), [15, 16], 'it holds up a ticket, so it stays above a higher score nothing waits on');
+    assert.deepEqual(inbox().map((q) => q.id), [unjudged, onb]);
     const lines = () => fs.readdirSync(path.join(old, 'docs/devteam/run/log')).map((f) => fs.readFileSync(path.join(old, 'docs/devteam/run/log', f), 'utf8')).join('').split('\n').filter((l) => l.includes('"type":"question"')).length;
     const before = lines();
     impact(G, 4);
@@ -269,7 +270,7 @@ test('owner-actions: stake is what cannot go ahead without it, so the ones that 
     assert.deepEqual(order.map((q) => q.id), [A1, ...As, D1, D2]);
     // A1: 4 × 2 × 3 + 2 (on the path) + 5 behind; A2..A5: 4 × 1 × 3 + 1; D1: 4 × 2 × 1; D2: 3 × 2 × 1
     assert.deepEqual(order.map((q) => q.rank.score), [31, 13, 13, 13, 13, 8, 6]);
-    assert.match(order[0].rank.reason, /^holds up 1 ticket, 1 on the critical path, 5 more behind it; for Onboarding: the project depends on it; a feature waits on it; work is stopped on it now$/);
+    assert.match(order[0].rank.reason, /^holds up 1 ticket, 1 on the critical path, 5 more behind it; for Onboarding \(the supervisor's rating\): the project depends on it; the supervisor's rating: a feature waits on it; work is stopped on it now$/);
     assert.match(order[1].rank.sum, /× stake 1 \(one ticket waits on it\)/);
   } finally { F.done(); }
 });
@@ -347,6 +348,12 @@ test('findings: no strategy, an unrated question once rating has begun, ratings 
     assert.deepEqual(findings('strategy-unwritten'), [], 'no running goal: nothing yet');
     const G = goal('Team billing', 1);
     assert.match(findings('strategy-unwritten')[0].detail, /still the template/);
+    // the marker, not the kit's current words: a project on an older wording of the template is still the template
+    write(path.join(old, REL_STRATEGY), fs.readFileSync(path.join(old, REL_STRATEGY), 'utf8').replace('Keep it to one page.', 'One page, please.'));
+    g(['add', '-A'], old);
+    g(['commit', '-qm', 'an older wording of the template'], old);
+    g(['push', '-q', 'origin', 'main'], old);
+    assert.match(findings('strategy-unwritten')[0].detail, /still the template/);
     const first = ask('An old question?', '--goal', G);
     assert.deepEqual(findings('question-unrated'), [], 'a project that has not begun rating sees nothing');
     ask('Rated?', '--goal', G, '--stake', '1', '--urgency', '1');
@@ -371,6 +378,162 @@ test('findings: no strategy, an unrated question once rating has begun, ratings 
   } finally { F.done(); }
 });
 
+const REL_STRATEGY = 'docs/devteam/project/strategy.md';
+
+test('the strategy answer is bound to the text: ask pins the draft, merge refuses any other', () => {
+  const F = fixture('nbs-strategy-pin');
+  const { old, ok, run, g } = F;
+  const chore = 'chore-a';
+  const wt = path.join(old, '.worktrees', chore);
+  const commit = (text, ...commitArgs) => { write(path.join(wt, REL_STRATEGY), text); g(['add', '-A'], wt); g(['commit', '-qm', 'draft', ...commitArgs], wt); g(['push', '-qf', 'origin', chore], wt); };
+  const ask = (ref, extra = []) => run(old, ['ask', '--class', 'strategy-change', '--reasons', 'owner-only', '--question', 'Approve the strategy?', '--recommendation', 'yes', '--stake', '3', '--urgency', '2', '--links', JSON.stringify([{ title: 'The strategy', path: REL_STRATEGY, ref, ...extra[0] }])], SUP);
+  const merge = (q) => { const r = run(old, ['merge', '--chore', 'a', '--dry-run', '--approved', q], SUP); return { status: r.status, text: r.out + r.err }; };
+  try {
+    g(['worktree', 'add', '-q', '-b', chore, wt, 'origin/main'], old);
+    const A = '# Strategy\n\n## Why it exists\nDraft A.\n';
+    commit(A);
+    write(path.join(old, `docs/devteam/run/pr/${chore}.md`), `# ${chore}: x\n\n## One-way doors\n\nNone.\n`);
+    // no link, a link with no ref, a ref with no file, a pin given by hand: all refused
+    assert.match(run(old, ['ask', '--class', 'strategy-change', '--reasons', 'owner-only', '--question', 'x?', '--recommendation', 'yes'], SUP).err, /links the draft it asks about/);
+    assert.match(run(old, ['ask', '--class', 'strategy-change', '--reasons', 'owner-only', '--question', 'x?', '--recommendation', 'yes', '--links', JSON.stringify([{ title: 'S', path: REL_STRATEGY }])], SUP).err, /links the draft it asks about/);
+    assert.match(ask('no-such-branch').err, /commit the draft to its branch first/);
+    assert.match(ask(chore, [{ blob: 'a'.repeat(40) }]).err, /blob is written by ask/);
+
+    const q = ask(chore);
+    assert.equal(q.status, 0, q.err);
+    const id = q.out.trim();
+    const blobA = g(['rev-parse', `${chore}:${REL_STRATEGY}`], old).trim();
+    const link = json(ok(old, ['questions', '--id', id, '--json']))[0].links[0];
+    assert.equal(link.blob, blobA, 'pinned at ask');
+    assert.equal(g(['rev-parse', chore], old).trim(), link.ref, 'the link names the commit, so it shows this text however the branch moves');
+    ok(old, ['answer', id, 'yes']);
+    assert.equal(merge(id).status, 0, 'the text the owner saw lands');
+
+    // the review's repro: answered yes, the branch amended after, the answer must not carry
+    commit('# Strategy\n\n## Why it exists\nDraft B, never seen.\n', '--amend');
+    const r = merge(id);
+    assert.notEqual(r.status, 0, 'a text the owner never saw does not land under that answer');
+    assert.match(r.text, /is not the text .* asked the owner about/);
+    assert.equal(g(['show', `${link.ref}:${REL_STRATEGY}`], old), A.trimEnd(), 'the owner\'s link still shows Draft A');
+
+    // asked again about the text as it is now, it lands
+    const q2 = ask(chore).out.trim();
+    ok(old, ['answer', q2, 'yes']);
+    assert.equal(merge(q2).status, 0);
+
+    // a deletion: nothing to pin, so no answer can approve it
+    fs.rmSync(path.join(wt, REL_STRATEGY));
+    g(['add', '-A'], wt);
+    g(['commit', '-qm', 'no strategy', '--amend'], wt);
+    g(['push', '-qf', 'origin', chore], wt);
+    assert.match(ask(chore).err, /commit the draft to its branch first/);
+    assert.match(merge(q2).text, /is not the text .* asked the owner about \(no file,/);
+  } finally { F.done(); }
+});
+
+// A question written straight to the log: for a fixture of a hundred, and the shapes ask refuses.
+let rawN = 0;
+const raw = (F) => {
+  const lines = [];
+  const add = (o, i) => { const id = `q-20260105-${String(++rawN).padStart(9, '0')}-supervisor`; lines.push(line({ id, type: 'question', op: 'new', at: new Date(Date.UTC(2026, 0, 5, 0, i ?? rawN)).toISOString(), by: 'supervisor', kind: 'owner-decision', question: `Q ${id}?`, ...o })); return id; };
+  return { add, flush: () => fs.appendFileSync(path.join(F.old, 'docs/devteam/run/log', `supervisor-${new Date().toISOString().slice(0, 7)}.jsonl`), lines.join('')) };
+};
+
+test('the floor: 170 unrated questions bury no one-way door, owner action or blocking question, and an unrated top is no "next best step"', () => {
+  const F = fixture('nbs-floor');
+  const { goal, feature, ticket, inbox } = F;
+  try {
+    const G = goal('Team billing', 1);
+    feature('bill', G);
+    ticket('bill-01-a', 'bill');
+    const R = raw(F);
+    // the review's fixture: 170 unrated, old proposals first, the ones that matter asked last
+    const ordinary = Array.from({ length: 166 }, () => R.add({}));
+    const approval = R.add({ kind: 'goal-approval', goal: G }, 300);
+    const blocking = R.add({ blocks: ['bill-01-a'] }, 400);
+    const door = R.add({ kind: 'one-way-door' }, 500);
+    const secret = R.add({ kind: 'owner-action', secrets: [{ name: 'KEY', sink: 'file:.env.test' }] }, 600);
+    R.flush();
+    const qs = inbox();
+    assert.equal(qs.length, 170);
+    assert.deepEqual(qs.slice(0, 4).map((q) => q.id).sort(), [approval, blocking, door, secret].sort(), 'all four above every ordinary question');
+    assert.equal(qs[0].id, blocking, 'the highest score leads the band');
+    assert.deepEqual(qs.slice(4).map((q) => q.id), ordinary, 'the ordinary ones in their existing order: by score, then age');
+    assert.ok(qs.every((q) => q.rank.top === false), 'nothing is "the next best step" when nothing is rated');
+    assert.equal(qs.find((q) => q.id === door).rank.floor, 'a one-way door');
+    // the ordinary ones rated high: the floor holds whatever the score
+    const rated = raw(F);
+    const high = Array.from({ length: 40 }, () => rated.add({ stake: 3, urgency: 2 }, 700));
+    const lowDoor = rated.add({ kind: 'one-way-door', stake: 1, urgency: 1 }, 800);
+    const lowBlock = rated.add({ stake: 1, urgency: 1, blocks: ['bill-01-a'] }, 801);
+    rated.flush();
+    const after = inbox();
+    const at = (id) => after.findIndex((q) => q.id === id);
+    assert.ok(at(lowDoor) < at(high[0]) && at(lowBlock) < at(high[0]) && at(secret) < at(high[0]), 'a low score does not bury them');
+  } finally { F.done(); }
+});
+
+test('a default about to fire keeps its place: not halved, above the ordinary questions, and it says so', () => {
+  const F = fixture('nbs-default-soon');
+  const { goal, inbox, rank } = F;
+  try {
+    const G = goal('Team billing', 1);
+    const R = raw(F);
+    const ordinary = Array.from({ length: 44 }, () => R.add({ goal: G, stake: 3, urgency: 2 }));
+    const soon = R.add({ goal: G, stake: 2, urgency: 3, default: 'yes', recommendation: 'yes', deadline: new Date(Date.now() + 5 * 60000).toISOString() });
+    const later = R.add({ goal: G, stake: 2, urgency: 3, default: 'yes', recommendation: 'yes', deadline: new Date(Date.now() + 48 * 3600000).toISOString() });
+    R.flush();
+    const qs = inbox();
+    assert.equal(qs[0].id, soon, `first of 46 (it came ${qs.findIndex((q) => q.id === soon) + 1})`);
+    assert.deepEqual([rank(soon).own, rank(soon).floor], [12, 'its default is about to fire'], '2 × 2 × 3, not halved');
+    assert.doesNotMatch(rank(soon).sum, /halved/);
+    assert.equal(rank(later).own, 6, 'a default a long way off is still halved');
+    assert.match(rank(later).sum, /halved for its default/);
+    assert.ok(qs.findIndex((q) => q.id === later) > ordinary.length - 1, 'and stays with the ordinary questions');
+    assert.ok(!rank(soon).reason.includes('work is stopped'), 'a default holds up no work');
+    assert.match(rank(soon).sum, /urgency 3 \(rated 3, backed by its default\)/);
+  } finally { F.done(); }
+});
+
+test('ratings are said to be the supervisor\'s, an impact that isn\'t a level is none, and the history shows a re-rate', () => {
+  const F = fixture('nbs-attrib');
+  const { old, ok, goal, ask, impact, rank, inbox } = F;
+  try {
+    const G = goal('Team billing', 1);
+    const q = ask('Monthly or yearly?', '--goal', G, '--stake', '3', '--urgency', '2');
+    impact(G, 4);
+    assert.match(rank(q).reason, /^for Team billing \(the supervisor's rating\): the project depends on it; the supervisor's rating: decides whether the work goes ahead$/);
+    assert.equal(rank(q).top, true, 'rated: it may be called the next best step');
+    // the owner's own value is theirs
+    const d = json(ok(old, ['goal', 'show', G])).impact.decision;
+    ok(old, ['correct', d, '--reason', 'it does', '--impact', '3']);
+    assert.match(rank(q).reason, /for Team billing \(your rating\): moves a number/);
+    // a re-rate leaves a trail, down as well as up
+    ok(old, ['rate', q, '--stake', '1'], SUP);
+    const hist = inbox().find((x) => x.id === q).rating_history;
+    assert.deepEqual(hist.map(({ at, ...h }) => h), [{ by: 'supervisor', stake: 3, urgency: 2, asked: true }, { by: 'supervisor', stake: 1 }]);
+    // a value that is no level is no impact: not even one every object has a key for
+    const R = raw(F);
+    R.flush();
+    fs.appendFileSync(path.join(old, 'docs/devteam/run/log', `supervisor-${new Date().toISOString().slice(0, 7)}.jsonl`), line({ id: 'd-20260105-000000001-supervisor', type: 'decision', op: 'new', at: new Date().toISOString(), by: 'supervisor', class: 'goal-impact', what: 'x', refs: [G], impact: 'constructor' }));
+    assert.equal(json(ok(old, ['goal', 'show', G])).impact.level, 3, 'the owner\'s value stands and the odd line changes nothing');
+    const H = goal('Onboarding', 2);
+    fs.appendFileSync(path.join(old, 'docs/devteam/run/log', `supervisor-${new Date().toISOString().slice(0, 7)}.jsonl`), line({ id: 'd-20260105-000000002-supervisor', type: 'decision', op: 'new', at: new Date().toISOString(), by: 'supervisor', class: 'goal-impact', what: 'x', refs: [H], impact: 'constructor' }));
+    assert.equal(json(ok(old, ['goal', 'show', H])).impact, null);
+  } finally { F.done(); }
+});
+
+test('settles-if names a choice however it is cased, as an answer does', () => {
+  const F = fixture('nbs-settles-if');
+  const { goal, ask, inbox } = F;
+  try {
+    const G = goal('Team billing', 1);
+    const detail = ask('Round to cents?', '--goal', G, '--stake', '1', '--urgency', '2');
+    const gate = ask('Build it?', '--goal', G, ...yesNo, '--stake', '3', '--urgency', '1', '--settles', detail, '--settles-if', "don't BUILD it");
+    assert.equal(inbox().find((q) => q.id === gate).settles_label, "Don't build it");
+  } finally { F.done(); }
+});
+
 test('the strategy is the owner\'s: no PR changes project/strategy.md without an answered strategy-change question', () => {
   const F = fixture('nbs-strategy');
   const { old, ok, run, g } = F;
@@ -386,7 +549,8 @@ test('the strategy is the owner\'s: no PR changes project/strategy.md without an
     write(path.join(old, `docs/devteam/run/pr/chore-${slug}.md`), `# chore-${slug}: x\n\n## One-way doors\n\nNone.\n`);
     return (...extra) => { const r = run(old, ['merge', '--chore', slug, '--dry-run', ...extra], SUP); return { status: r.status, text: r.out + r.err }; };
   };
-  const answered = (cls, answer = 'yes') => { const q = ok(old, ['ask', '--question', 'Approve this?', '--recommendation', 'yes', '--stake', '3', '--urgency', '2', ...(cls ? ['--class', cls, '--reasons', cls === 'release-scope' ? 'below-rung' : 'owner-only'] : [])], SUP); ok(old, ['answer', q, answer]); return q; };
+  const linked = (ref) => ['--links', JSON.stringify([{ title: 'The strategy', path: REL, ref }])];
+  const answered = (cls, answer = 'yes') => { const q = ok(old, ['ask', '--question', 'Approve this?', '--recommendation', 'yes', '--stake', '3', '--urgency', '2', ...(cls ? ['--class', cls, '--reasons', cls === 'release-scope' ? 'below-rung' : 'owner-only'] : []), ...(cls === 'strategy-change' ? linked('chore-strategy-first') : [])], SUP); ok(old, ['answer', q, answer]); return q; };
   try {
     assert.match(template, /^# Strategy\n/, 'init wrote the template');
     assert.match(template, /## How it wins, in order\n[\s\S]*## Values\n[\s\S]*## Refusals\n[\s\S]*## Not known yet\n/);
@@ -451,7 +615,7 @@ test('next prints the top of the Inbox and why; an unrated project prints as it 
     assert.deepEqual([n.id, n.question, n.rank.score, n.rank.top], [top, 'Should we build it at all?', 24, true]);
     assert.deepEqual(n.then.map((x) => x.id), [b, a, c], 'the judged goal\'s question (4 × 2 × 1), then the rest by age');
     const text = ok(old, ['next']);
-    assert.match(text, new RegExp(`^you {4}${top} {2}Should we build it at all\\?\\n {7}for Team billing: the project depends on it; decides whether the work goes ahead\\n {7}score 24: impact 4 `));
+    assert.match(text, new RegExp(`^you {4}${top} {2}Should we build it at all\\?\\n {7}for Team billing \\(the supervisor's rating\\): the project depends on it; the supervisor's rating: decides whether the work goes ahead\\n {7}score 24: impact 4 `));
     assert.match(text, /\n {7}then: q-\S+ \(score 8\), q-\S+ \(score 4\), q-\S+ \(score 4\)$/);
     // the operator may read it; a closed question has no rank
     assert.equal(F.run(old, ['next'], { DEVTEAM_ROLE: 'operator' }).status, 0);
@@ -485,12 +649,13 @@ test('the Inbox shows the order: the next best step on top with its reason, what
     const cards = await p.ev(`[...document.querySelectorAll('#questions > .card')].map((c) => ({ id: c.id.slice(2), top: c.classList.contains('top'), lead: c.querySelector('.top-why')?.textContent ?? null, why: [...c.querySelectorAll('.why span')].map((s) => s.textContent), closes: c.querySelector('.closes')?.textContent ?? null, lesson: /Lesson to keep/.test(c.textContent) }))`);
     assert.deepEqual(cards.map((c) => c.id), [gate, detail, unrated, ''], 'the kit\'s order, and the lesson to keep after the questions');
     assert.deepEqual(cards.map((c) => c.top), [true, false, false, false]);
-    assert.equal(cards[0].lead, 'Next best step. Would settle 1 other question; for Team billing: moves a number the project watches; decides whether the work goes ahead.');
-    assert.equal(cards[0].closes, 'Closes 1 other question: Round to cents?', 'on the choice that settles it');
-    assert.deepEqual(cards[1].why, ['for Team billing: moves a number the project watches', 'a detail', 'may be settled by Should we build it at all?']);
+    assert.equal(cards[0].lead, 'Next best step. Would settle 1 other question; for Team billing (the supervisor\'s rating): moves a number the project watches; the supervisor\'s rating: decides whether the work goes ahead.');
+    assert.equal(cards[0].closes, 'Would close 1 other question: Round to cents?', 'on the choice that settles it');
+    assert.deepEqual(cards[1].why, ['for Team billing (the supervisor\'s rating): moves a number the project watches', 'the supervisor\'s rating: a detail', 'may be settled by Should we build it at all?']);
     assert.deepEqual(cards[2].why, ['not rated']);
     assert.ok(cards[3].lesson);
     assert.match(await p.ev(`document.querySelector('[id="q-${detail}"] .kv').textContent`), /Order2 of 3\. Score 6: impact 3 \(moves a number the project watches\) × stake 1 \(a detail\) × urgency 2 /);
+    assert.match(await p.ev(`document.querySelector('[id="q-${gate}"] .kv').textContent`), /RatedWhen asked: stake 3, urgency 1, settles 1/);
     assert.equal(await p.ev(`document.querySelector('#inbox h2 .sub').textContent`), 'decisions only you can make, the most valuable first');
     assert.match(await p.ev(`document.querySelector('#strategy-link').getAttribute('href')`), /^#file\?path=docs%2Fdevteam%2Fproject%2Fstrategy\.md/);
     // the goal: its impact beside its priority, why, and Wrong? sends the owner's own value

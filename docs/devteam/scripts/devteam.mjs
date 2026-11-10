@@ -1019,6 +1019,8 @@ function fold(all) {
     for (const [k, val] of Object.entries(l)) {
       if (ENVELOPE.includes(k) || k.startsWith('__') || k === 'hold') continue;
       if ((obj.__rank[k] ?? -1) > rank) continue;
+      // a question's rating as first asked, so its history can show what a later rate replaced
+      if (obj.type === 'question' && QUESTION_RATING.includes(k) && !(k in (obj.__asked ??= {}))) obj.__asked[k] = obj[k];
       obj[k] = val;
       obj.__rank[k] = rank;
       changed[k] = val;
@@ -1316,6 +1318,14 @@ const QUESTION_RATING = ['stake', 'urgency', 'settles', 'settles_if'];
 // full only on write and in log-check, so a line written by hand could carry any number here, and
 // the order multiplies what it reads: a stake of 99 would take the top of the Inbox.
 const ratingOf = (x) => ([1, 2, 3].includes(x) ? x : null);
+// Every rating the question has carried: as asked, then each later rate. The fold keeps only the
+// latest, and a rate can lower a question, so the card's ⋯ menu shows the trail.
+function ratingHistory(q) {
+  const asked = Object.fromEntries(QUESTION_RATING.slice(0, 3).map((k) => [k, q.__asked && k in q.__asked ? q.__asked[k] : q[k]]));
+  const entry = (at, by, r) => ({ at, by, ...(ratingOf(r.stake) ? { stake: r.stake } : {}), ...(ratingOf(r.urgency) ? { urgency: r.urgency } : {}), ...(Array.isArray(r.settles) ? { settles: r.settles.length } : {}) });
+  const has = (e) => e.stake || e.urgency || e.settles !== undefined;
+  return [{ ...entry(q.created_at, q.created_by, asked), asked: true }, ...q.updates.map((u) => entry(u.at, u.by, u))].filter(has);
+}
 const QUESTION_LATER = ['status', 'reason', ...QUESTION_RATING, 'answer', 'said', 'autonomy', 'standing_rule', 'secrets_posted', 'result', 'declined', 'question_hash'];
 const questionHash = (q) => crypto.createHash('sha256').update(canonical(Object.fromEntries(Object.entries(q).filter(([k]) => !k.startsWith('__') && !['updates', 'created_at', 'created_by', 'channel', ...QUESTION_LATER].includes(k))))).digest('hex').slice(0, 16);
 
@@ -1353,7 +1363,7 @@ function questionView(q) {
   return {
     id: q.id, kind: q.kind, class: q.class ?? null, scope: q.scope ?? null, ticket: q.ticket ?? null, re: q.re ?? null, sensor: q.sensor ?? null, asked_at: q.created_at,
     question: q.question, context: q.context ?? '', options: q.options ?? [], choices: q.choices ?? [], links: q.links ?? [], goal: q.goal ?? null, change: q.change ?? null, rule_scope: q.rule_scope ?? null, recommendation: q.recommendation ?? '', confidence: q.confidence ?? null,
-    default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], stake: ratingOf(q.stake), urgency: ratingOf(q.urgency), settles: Array.isArray(q.settles) ? q.settles.filter((x) => typeof x === 'string') : [], settles_if: typeof q.settles_if === 'string' ? q.settles_if : null, approves: q.approves ?? [], evidence: q.evidence ?? [], note: q.note ?? null, why_asked: q.why_asked ?? null,
+    default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], stake: ratingOf(q.stake), urgency: ratingOf(q.urgency), settles: Array.isArray(q.settles) ? q.settles.filter((x) => typeof x === 'string') : [], settles_if: typeof q.settles_if === 'string' ? q.settles_if : null, settles_label: [...(q.choices ?? []).map((c) => c?.label), ...(q.options ?? [])].find((l) => sameAnswer(l, q.settles_if)) ?? null, rating_history: ratingHistory(q), approves: q.approves ?? [], evidence: q.evidence ?? [], note: q.note ?? null, why_asked: q.why_asked ?? null,
     secrets: (q.secrets ?? []).map((x) => ({ ...x, to: sinkWords(x.sink), sink_type: SINK_RE.exec(x.sink ?? '')?.[1] ?? null, warning: sinkWarning(x.sink) })), secrets_posted: q.updates.filter((u) => u.secrets_posted !== undefined && writerClass(u.by) === 'owner').pop()?.secrets_posted ?? [],
     status, answer, answered_by: answeredBy, answered_at: answeredAt, matched, hash, rewritten,
     autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans?.channel ?? null, said: ans?.said ?? null,
@@ -1437,12 +1447,14 @@ const correctionOf = (a) => {
 // here, never stored on the goal. A decision corrected with no value (a retro's) keeps its level
 // until the supervisor judges again: a correction never drops a goal back to the unjudged 2.
 const IMPACT_WORDS = { 4: 'the project depends on it', 3: 'moves a number the project watches', 2: 'worth having', 1: 'housekeeping' };
+// 1 to 4, else no impact: a line written by hand could carry any value, and "constructor" is a key of every object.
+const impactOf = (x) => ([1, 2, 3, 4].includes(x) ? x : null);
 const goalImpacts = () => memo('goalImpacts', () => {
   const by = new Map();
-  for (const d of logObjects('decision').filter((x) => x.class === 'goal-impact' && IMPACT_WORDS[x.impact] && x.refs?.[0]).sort(byTime)) (by.get(d.refs[0]) ?? by.set(d.refs[0], []).get(d.refs[0])).push(d);
+  for (const d of logObjects('decision').filter((x) => x.class === 'goal-impact' && impactOf(x.impact) && x.refs?.[0]).sort(byTime)) (by.get(d.refs[0]) ?? by.set(d.refs[0], []).get(d.refs[0])).push(d);
   const res = new Map();
   for (const [goal, ds] of by) {
-    const o = ds.map((d) => ({ d, c: correctionOf(d) })).filter((x) => x.c && writerClass(x.c.by) === 'owner' && IMPACT_WORDS[x.c.impact]).sort((a, b) => a.c.at.localeCompare(b.c.at)).pop();
+    const o = ds.map((d) => ({ d, c: correctionOf(d) })).filter((x) => x.c && writerClass(x.c.by) === 'owner' && impactOf(x.c.impact)).sort((a, b) => a.c.at.localeCompare(b.c.at)).pop();
     const last = ds[ds.length - 1];
     const c = correctionOf(last);
     res.set(goal, o
@@ -3738,11 +3750,13 @@ function ciFixApproval(chore, sha, base, changed) {
   }
   return { rule, what: 'CI fix' };
 }
-// project/strategy.md, the owner's. As main has it: missing, the template init wrote, or written.
+// project/strategy.md, the owner's. As main has it: missing, the template init wrote (by a marker
+// line it carries, so a later edit of the kit's template doesn't make an untouched file read as
+// written), or written.
 const strategyRel = `${projectRel}/strategy.md`;
 function strategyState() {
   const text = projectInRepo && mainRef() ? git(['show', `${mainRef()}:${strategyRel}`]) : readText(path.join(projectDir, 'strategy.md'));
-  return text === null ? 'missing' : text.trim() === STRATEGY_MD.trim() ? 'template' : 'written';
+  return text === null ? 'missing' : text.includes(STRATEGY_TEMPLATE_MARK) ? 'template' : 'written';
 }
 // A PR that changes the strategy (any PR: a chore, a plan, a ticket) lands only under the owner's
 // answered strategy-change question. The one change that needs none is init's untouched template
@@ -3761,7 +3775,12 @@ function strategyFails(base, sha, approved) {
   if (before === null && (git(['show', `${sha}:${strategyRel}`]) ?? '').trim() === STRATEGY_MD.trim()) return [];
   if (!approved) return [`changes ${strategyRel}: the strategy is the owner's, so the owner's answer is needed: ask --class strategy-change --reasons owner-only --recommendation "…" with a link to the draft, then --approved <qid>`];
   const q = ownerAnswer(approved, 'merge --approved');
-  return q.class === 'strategy-change' ? [] : [`${approved} is a ${q.class ?? 'classless'} question; changing ${strategyRel} needs an answered strategy-change question`];
+  if (q.class !== 'strategy-change') return [`${approved} is a ${q.class ?? 'classless'} question; changing ${strategyRel} needs an answered strategy-change question`];
+  // The answer approves the text the question pinned when asked, and no other: a branch amended
+  // since lands words the owner never saw. The pin must also be what its link shows.
+  const pin = (q.links ?? []).find((l) => isObj(l) && l.path === strategyRel && l.blob);
+  if (!pin || git(['rev-parse', '--verify', '--quiet', `${pin.ref}:${strategyRel}`]) !== pin.blob) return [`${approved} pins no draft of ${strategyRel} that this repo can show: ask again with a link to the draft on its branch`];
+  return after === pin.blob ? [] : [`${strategyRel} at the head is not the text ${approved} asked the owner about (${after ? after.slice(0, 12) : 'no file'}, not ${pin.blob.slice(0, 12)}); ask again about the text as it is now`];
 }
 function ownerAnswer(qid, what) {
   const q = logGet(qid);
@@ -4269,7 +4288,7 @@ function settleChecks({ self, kind, stake, settles, added, settlesIf, choices, a
   if (['review', 'owner-action', 'goal-approval', 'trust'].includes(kind)) die(`a ${kind} question settles no others: --settles is for a decision whose answer makes other questions unnecessary`);
   if (stake !== 3) die('a question that settles others is one the work turns on: --stake 3 (supervisor.md §6)');
   if (!settlesIf) die('--settles needs --settles-if "<the answer that settles them>"');
-  if ((choices ?? []).length && !choices.some((c) => c.label === settlesIf)) die(`--settles-if "${settlesIf}" is none of the choices (${choices.map((c) => c.label).join(', ')})`);
+  if ((choices ?? []).length && !choices.some((c) => sameAnswer(c.label, settlesIf))) die(`--settles-if "${settlesIf}" is none of the choices (${choices.map((c) => c.label).join(', ')})`);
   if (settles.length > 20) die('--settles names at most 20 questions');
   const all = new Map(logObjects('question').map((x) => [x.id, x]));
   for (const id of added) {
@@ -4436,6 +4455,7 @@ function cmdAsk() {
     // an inline link is logged as given, so a credential in it would be in the log and every view of the question
     if (hasCredentials(l.url)) die(`--links: ${redactUrl(l.url)} carries credentials; ${CREDENTIALS_REFUSED}`);
     if (l.sha256 !== undefined) die('--links: sha256 is written by ask (the artifact as it is now), never given');
+    if (l.blob !== undefined) die('--links: blob is written by ask (the draft as it is now), never given');
     if (l.at !== undefined && l.artifact === undefined) die('--links: at belongs to an artifact link');
     if (l.artifact !== undefined) {
       arts ??= allArtifacts();
@@ -4449,6 +4469,18 @@ function cmdAsk() {
     }
   }
   for (const [, n] of `${q}\n${flagStr('context') ?? ''}`.matchAll(/\[\[([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\]\]/g)) if (!names.has(n)) die(`--links: the text names [[${n}]] but no link has "name": "${n}"`);
+  // A strategy change is asked about one text: the draft's blob and commit are pinned here, in this
+  // one line the question's hash covers. merge lands that blob and no other, and the link shows the
+  // owner that commit's text however the branch moves after.
+  if (cls === 'strategy-change' && projectInRepo) {
+    const l = (links ?? []).find((x) => isObj(x) && x.path === strategyRel);
+    if (!l?.ref) die(`--links: a strategy-change question links the draft it asks about, on its branch: {"title":"The strategy","path":"${strategyRel}","ref":"<the chore's branch>"}`);
+    const commit = /^-/.test(l.ref) ? null : git(['rev-parse', '--verify', '--quiet', `${l.ref}^{commit}`]);
+    const blob = commit && git(['rev-parse', '--verify', '--quiet', `${commit}:${strategyRel}`]);
+    if (!blob) die(`--links: no ${strategyRel} at ${l.ref}; commit the draft to its branch first`);
+    l.ref = commit;
+    l.blob = blob;
+  }
   // The rating: how much rides on the answer and how soon, and the open questions one answer
   // would settle. The kit orders the Inbox from it (inboxRanks); it is never part of what the
   // owner's answer covers.
@@ -6140,15 +6172,22 @@ function questionHold(q) {
 // kit counts what it can (tickets held up, tickets behind them, a default) and orders:
 //   own   = impact × stake × urgency + unblock        unblock = min(12, 2 per ticket held up on
 //           the critical path + 1 per ticket held up off it + 1 per ticket behind them)
-//   own   = ceil(own / 2) when the question has a default (the fleet goes on at the deadline)
+//   own   = ceil(own / 2) when the question has a default (the fleet goes on at the deadline),
+//           unless that default fires within DEFAULT_SOON_HOURS
 //   score = own + the own of every open question it settles, through other settling questions too
 // Unrated counts as stake 2 and urgency 2 with blocks, else 1; no goal or an unjudged one as
 // impact 2. Urgency 3 counts as 3 only while the question holds up a waiting ticket, is about an
 // open incident, or has a default, else as 2. settles counts only for a stake-3 question that shares a goal or feature
-// with what it settles. A parked goal's question: urgency 1, no unblock. Ties: more settled, then
+// with what it settles. A parked goal's question: urgency 1, no unblock.
+// The order is by score within two bands. Above the rest, however they are rated (a low score
+// must not bury them): one-way doors, what only the owner can do, goal approvals, a question
+// holding up a waiting ticket or an open incident, a default about to fire, and a question that
+// would settle any of those. Not while the question's goal is parked. Ties: more settled, then
 // older, then id.
 const STAKE_WORDS = { 3: 'decides whether the work goes ahead', 2: 'changes the design or the plan', 1: 'a detail' };
 const STAKE_ACTION_WORDS = { 3: 'a goal or milestone waits on it', 2: 'a feature waits on it', 1: 'one ticket waits on it' };
+const FLOOR_KINDS = { 'one-way-door': 'a one-way door', 'owner-action': 'only you can do it', 'goal-approval': 'a goal waits on your approval' };
+const DEFAULT_SOON_HOURS = 4;
 const URGENCY_WORDS = { 3: 'work is stopped on it now', 2: 'work will stop on it before this milestone is done', 1: 'nothing waits on it yet' };
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 // An answer is a choice when it is that label, with or without a note after " — ".
@@ -6189,16 +6228,19 @@ function inboxRanks(inbox) {
     held.forEach(walk);
     const behind = [...after].filter((id) => waiting(id) && !held.includes(id)).length;
     const given = q.urgency ?? (q.blocks.length ? 2 : 1);
-    const clamped = given === 3 && !parked && !held.length && !q.default && !blocksOpenIncident(q.blocks);
+    const incident = blocksOpenIncident(q.blocks);
+    const clamped = given === 3 && !parked && !held.length && !q.default && !incident;
+    const soon = !!q.default && Date.parse(q.deadline) - now <= DEFAULT_SOON_HOURS * 3600000;
+    const floor = parked ? null : soon ? 'its default is about to fire' : FLOOR_KINDS[q.kind] ?? (held.length ? 'work is waiting on it' : incident ? 'an open incident waits on it' : null);
     const parts = {
-      goal: goal?.id ?? null, goal_title: goal?.title ?? null, goal_impact: judged?.i.level ?? 2, judged: !!judged,
+      goal: goal?.id ?? null, goal_title: goal?.title ?? null, goal_impact: judged?.i.level ?? 2, judged: !!judged, impact_by: judged?.i.by ?? null,
       stake: q.stake ?? 2, urgency: parked ? 1 : clamped ? 2 : given, urgency_given: q.urgency ?? null, rated: q.stake != null || q.urgency != null,
       held_up: held.length, on_path: onPath, behind, unblock: parked ? 0 : Math.min(12, 2 * onPath + (held.length - onPath) + behind),
-      default: !!q.default, parked, age_days: Math.floor((now - Date.parse(q.asked_at)) / DAY),
+      default: !!q.default, default_soon: soon, parked, floor, age_days: Math.floor((now - Date.parse(q.asked_at)) / DAY),
       settles: q.stake === 3 ? [...new Set(q.settles)].filter((id) => id !== q.id && byId.has(id) && sharesWork(a, about.get(id))) : [], settled_by: [],
     };
     const full = parts.goal_impact * parts.stake * parts.urgency + parts.unblock;
-    facts.set(q.id, { q, parts, own: parts.default ? Math.ceil(full / 2) : full });
+    facts.set(q.id, { q, parts, own: parts.default && !soon ? Math.ceil(full / 2) : full });
   }
   for (const [id, f] of facts) for (const m of f.parts.settles) facts.get(m).parts.settled_by.push(id);
   for (const [id, f] of facts) {
@@ -6208,8 +6250,10 @@ function inboxRanks(inbox) {
     seen.delete(id);
     f.all = [...seen];
     f.score = f.own + f.all.reduce((s, m) => s + facts.get(m).own, 0);
+    // keeps "a question ranks above everything it settles" true across the bands
+    f.floor = f.parts.floor ?? (!f.parts.parked && f.all.some((m) => facts.get(m).parts.floor) ? 'it would settle one that is' : null);
   }
-  const order = [...facts.values()].sort((x, y) => y.score - x.score || y.all.length - x.all.length || x.q.asked_at.localeCompare(y.q.asked_at) || x.q.id.localeCompare(y.q.id));
+  const order = [...facts.values()].sort((x, y) => (y.floor ? 1 : 0) - (x.floor ? 1 : 0) || y.score - x.score || y.all.length - x.all.length || x.q.asked_at.localeCompare(y.q.asked_at) || x.q.id.localeCompare(y.q.id));
   const ranks = new Map();
   order.forEach((f, i) => {
     const { q, parts: p } = f;
@@ -6217,19 +6261,20 @@ function inboxRanks(inbox) {
     if (f.all.length) chips.push(`would settle ${f.all.length} other question${f.all.length > 1 ? 's' : ''}`);
     if (p.held_up) chips.push(`holds up ${plural(p.held_up, 'ticket')}${p.on_path ? `, ${p.on_path} on the critical path` : ''}${p.behind ? `, ${p.behind} more behind ${p.held_up > 1 ? 'them' : 'it'}` : ''}`);
     if (p.default) chips.push(`goes ahead with the default${q.deadline ? ` at ${q.deadline.slice(0, 16).replace('T', ' ')} UTC` : ''}`);
-    if (p.goal) chips.push(`for ${p.goal_title}: ${p.judged ? IMPACT_WORDS[p.goal_impact] : 'its impact is not judged yet'}`);
-    if (q.stake != null) { const w = q.kind === 'owner-action' ? (q.stake > 1 ? STAKE_ACTION_WORDS[q.stake] : null) : q.stake !== 2 ? STAKE_WORDS[q.stake] : null; if (w) chips.push(w); }
-    if (p.urgency === 3) chips.push(URGENCY_WORDS[3]);
+    // what the supervisor judged says so: the owner reads a rating as a rating, not a fact
+    if (p.goal) chips.push(p.judged ? `for ${p.goal_title} (${p.impact_by === 'owner' ? 'your rating' : 'the supervisor\'s rating'}): ${IMPACT_WORDS[p.goal_impact]}` : `for ${p.goal_title}: its impact is not judged yet`);
+    if (q.stake != null) { const w = q.kind === 'owner-action' ? (q.stake > 1 ? STAKE_ACTION_WORDS[q.stake] : null) : q.stake !== 2 ? STAKE_WORDS[q.stake] : null; if (w) chips.push(`the supervisor's rating: ${w}`); }
+    if (p.urgency === 3 && p.held_up) chips.push(URGENCY_WORDS[3]);
     if (p.parked) chips.push('its goal is parked');
     if (p.age_days >= 3) chips.push(`waiting ${p.age_days} days`);
     const sum = [
       `impact ${p.goal_impact} (${p.judged ? IMPACT_WORDS[p.goal_impact] : p.goal ? 'not judged yet, counted as 2' : 'no goal, counted as 2'})`,
       `× stake ${p.stake} (${q.stake != null ? (q.kind === 'owner-action' ? STAKE_ACTION_WORDS : STAKE_WORDS)[p.stake] : 'not rated, counted as 2'})`,
-      `× urgency ${p.urgency} (${p.parked ? 'its goal is parked' : p.urgency_given === 3 && p.urgency === 2 ? 'rated 3, counted as 2: it holds up no waiting ticket or open incident and has no default' : p.urgency_given != null ? URGENCY_WORDS[p.urgency] : `not rated, counted as ${p.urgency}`})`,
-      ...(p.unblock ? [`+ ${p.unblock} for the tickets it holds up`] : []), ...(p.default ? ['halved for its default'] : []),
+      `× urgency ${p.urgency} (${p.parked ? 'its goal is parked' : p.urgency_given === 3 && p.urgency === 2 ? 'rated 3, counted as 2: it holds up no waiting ticket or open incident and has no default' : p.urgency === 3 && !p.held_up ? `rated 3, backed by ${p.default ? 'its default' : 'an open incident'}` : p.urgency_given != null ? URGENCY_WORDS[p.urgency] : `not rated, counted as ${p.urgency}`})`,
+      ...(p.unblock ? [`+ ${p.unblock} for the tickets it holds up`] : []), ...(p.default && !p.default_soon ? ['halved for its default'] : []),
       ...(f.all.length ? [`+ ${f.score - f.own} from the ${plural(f.all.length, 'question')} it would settle`] : []),
     ].join(' ');
-    ranks.set(q.id, { score: f.score, own: f.own, position: i + 1, of: order.length, top: i === 0, chips, reason: [...chips, ...(p.settled_by.length ? [`may be settled by ${p.settled_by.join(', ')}`] : [])].join('; '), sum: `score ${f.score}: ${sum}`, parts: { ...p, settles: f.all } });
+    ranks.set(q.id, { score: f.score, own: f.own, position: i + 1, of: order.length, top: i === 0 && q.stake != null && q.urgency != null, floor: f.floor, chips, reason: [...chips, ...(p.settled_by.length ? [`may be settled by ${p.settled_by.join(', ')}`] : [])].join('; '), sum: `score ${f.score}: ${sum}`, parts: { ...p, settles: f.all } });
   });
   return ranks;
 }
@@ -6272,6 +6317,7 @@ function cmdNext() {
   if (!owner) return out('you    nothing: the Inbox is empty');
   out(`you    ${top.id}  ${top.question}`);
   if (top.rank.reason) out(`       ${top.rank.reason}`);
+  if (top.rank.floor) out(`       above the ordinary questions: ${top.rank.floor}`);
   out(`       ${top.rank.sum}`);
   if (then.length) out(`       then: ${then.slice(0, 3).map((q) => `${q.id} (score ${q.rank.score})`).join(', ')}${then.length > 3 ? `, ${then.length - 3} more` : ''}`);
 }
@@ -6549,7 +6595,7 @@ function cmdCorrect() {
   if (impact !== undefined) {
     if (act.type !== 'decision' || act.class !== 'goal-impact') die('--impact goes with the correction of a goal-impact decision');
     if (by !== 'owner') die('--impact is the owner\'s: only the owner sets a goal\'s impact when correcting it');
-    if (!IMPACT_WORDS[impact]) die('--impact is 1 (housekeeping), 2 (worth having), 3 (moves a number the project watches) or 4 (the project depends on it)');
+    if (!impactOf(impact)) die('--impact is 1 (housekeeping), 2 (worth having), 3 (moves a number the project watches) or 4 (the project depends on it)');
   }
   if (correctionOf(act) && impact === undefined) die(`${actId} is already corrected`);
   appendLog({ type: act.type, op: 'set', id: actId, corrected: { reason: flagStr('reason') ?? die('correct needs --reason'), severity: flagNum('severity'), impact } }, by);
@@ -7344,7 +7390,7 @@ function cmdGoal() {
     supervisorOnly('goal impact');
     const g = logGet(id ?? '');
     const level = Number(positional[2]);
-    if (g?.type !== 'goal' || isUpkeep(g) || !IMPACT_WORDS[level]) die(usage);
+    if (g?.type !== 'goal' || isUpkeep(g) || !impactOf(level)) die(usage);
     if (['met', 'abandoned'].includes(g.status)) die(`${id} is ${g.status === 'met' ? 'met' : 'let go'}; its impact orders nothing now`);
     const rationale = flagStr('rationale')?.trim() || die(`goal impact needs --rationale: why, against the strategy (${strategyRel})`);
     const confidence = flagNum('confidence');
@@ -8504,6 +8550,7 @@ function collectOoda() {
     decisions: decisionRecords().slice(0, 200),
     trust: trustTable(),
     classes: Object.fromEntries(Object.entries(L.classes).map(([k, v]) => [k, { ...v, rung: rungFor(k) }])),
+    impact_words: IMPACT_WORDS,
     reasons: L.reasons,
     // every settled question, newest first, wherever it was answered (dashboard, terminal, chat) or
     // whether it was defaulted or withdrawn; defaulted ones can still be overruled
@@ -12851,7 +12898,10 @@ The whole system as planned now: the sum of every design so far. Written at boot
 // project/strategy.md as init makes it: why the project exists and how it wins, the owner's. The
 // supervisor drafts it at adoption and judges each goal's impact against it; the kit never parses
 // it (it only knows missing, this template, or written).
+const STRATEGY_TEMPLATE_MARK = 'devteam:strategy-template';
 const STRATEGY_MD = `# Strategy
+
+<!-- ${STRATEGY_TEMPLATE_MARK}: delete this line when you write the strategy -->
 
 Why this project exists and how it wins. The supervisor drafts it; only the owner approves a change (class strategy-change).
 Goals are judged against it (planning.md §1). Keep it to one page.

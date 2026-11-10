@@ -1116,7 +1116,11 @@ function rankWhy(q) {
   return chips ? `<div class="why">${chips}</div>` : '';
 }
 // The ⋯ menu's row: the arithmetic, with each judged number in words, so a wrong rating shows.
-const rankRow = (q) => (q.rank ? [['Order', esc(`${q.rank.position} of ${q.rank.of}. ${cap(q.rank.sum)}`)]] : []);
+const rankRow = (q) => [
+  ...(q.rank ? [['Order', esc(`${q.rank.position} of ${q.rank.of}. ${cap(q.rank.sum)}${q.rank.floor ? `. Above the ordinary questions: ${q.rank.floor}` : ''}`)]] : []),
+  // every rating it has carried, so a question quietly rated down leaves a trail
+  ...((q.rating_history || []).length ? [['Rated', q.rating_history.map((h) => esc(`${h.asked ? 'When asked' : `${when(h.at)}, ${who(h.by)}`}: ${[h.stake ? `stake ${h.stake}` : '', h.urgency ? `urgency ${h.urgency}` : '', h.settles !== undefined ? `settles ${h.settles}` : ''].filter(Boolean).join(', ')}`)).join('<br>')]] : []),
+];
 function questionCard(q, o, reasonText) {
   if (q.kind === 'review') return reviewCard(q, o, reasonText);
   const cls = q.class && o.classes[q.class];
@@ -1125,11 +1129,11 @@ function questionCard(q, o, reasonText) {
   const name = `pick-${q.id}`;
   const sure = q.confidence != null ? ` · ${Math.round(q.confidence * 100)}% sure` : '';
   // the answer the supervisor said would settle other open questions: say which, on that choice
-  const closes = (q.rank?.parts.settles || []).length ? `<div class="closes">Closes ${q.rank.parts.settles.length} other question${q.rank.parts.settles.length > 1 ? 's' : ''}: ${q.rank.parts.settles.map((id) => qlink(id)).join('; ')}</div>` : '';
+  const closes = (q.rank?.parts.settles || []).length ? `<div class="closes">Would close ${q.rank.parts.settles.length} other question${q.rank.parts.settles.length > 1 ? 's' : ''}: ${q.rank.parts.settles.map((id) => qlink(id)).join('; ')}</div>` : '';
   const choiceHtml = list.map((c) => `
       <label class="choice${c.rec ? ' rec' : ''}${picks[q.id] === c.label ? ' picked' : ''}">
         <input type="radio" name="${esc(name)}" value="${esc(c.label)}" data-pick="${esc(q.id)}" ${picks[q.id] === c.label ? 'checked' : ''}>
-        <span><b>${esc(c.label)}</b>${c.rec ? `<span class="tag">Recommended${sure}</span>` : ''}${c.detail ? `<div class="d">${linkify(c.detail)}</div>` : ''}${c.effect ? `<div class="e">${linkify(c.effect)}</div>` : ''}${c.then ? `<div class="d">${esc(c.then)}</div>` : ''}${closes && c.label === q.settles_if ? closes : ''}</span>
+        <span><b>${esc(c.label)}</b>${c.rec ? `<span class="tag">Recommended${sure}</span>` : ''}${c.detail ? `<div class="d">${linkify(c.detail)}</div>` : ''}${c.effect ? `<div class="e">${linkify(c.effect)}</div>` : ''}${c.then ? `<div class="d">${esc(c.then)}</div>` : ''}${closes && c.label === q.settles_label ? closes : ''}</span>
       </label>`).join('') + (list.length && !['owner-action', 'goal-approval'].includes(q.kind) ? `
       <label class="choice${picks[q.id] === '__other' ? ' picked' : ''}"><input type="radio" name="${esc(name)}" value="__other" data-pick="${esc(q.id)}" ${picks[q.id] === '__other' ? 'checked' : ''}><span><b>Something else</b><div class="d">Write your own answer in the box below.</div></span></label>` : '');
   const why = q.why_asked?.reasons?.length ? `Why you: ${q.why_asked.reasons.map((r) => esc(reasonText[r] || r)).join('; ')}.` : '';
@@ -2562,7 +2566,6 @@ async function openTicket(id) {
 }
 // A goal's impact: the words, why, who said so, and the owner's way to give it another value (a
 // correction of the goal-impact decision that carries the impact the owner gives; it stands).
-const IMPACT_LEVELS = { 4: 'the project depends on it', 3: 'moves a number the project watches', 2: 'worth having', 1: 'housekeeping' };
 function impactBlock(g) {
   const i = g.impact;
   if (!i) return ['ready', 'draft'].includes(g.status) ? '<span class="muted">Not judged yet. Its questions are ordered as if it were worth having.</span>' : '';
@@ -2570,7 +2573,7 @@ function impactBlock(g) {
   return `<b>${esc(cap(i.words))}</b> <span class="muted">(${esc(i.level)} of 4)</span>${i.rationale ? `<div>${linkify(i.rationale)}</div>` : ''}
     <div class="muted">${i.by === 'owner' ? 'You set it' : 'Judged by the supervisor'} ${esc(when(i.at))} · ${dlink(i.decision, 'the decision')} · <a class="linkish" href="#file?path=docs%2Fdevteam%2Fproject%2Fstrategy.md&amp;title=Strategy">the strategy</a>${i.rejudge ? ` · corrected (${esc(i.correction)}); the supervisor is judging it again` : ''}</div>
     <button class="ghost" data-correct="${esc(key)}">${i.by === 'owner' ? 'Change it' : 'Wrong?'}</button>
-    <div class="row-inline" hidden data-correct-form="${esc(key)}"><select data-impact="${esc(key)}" aria-label="What it is">${[4, 3, 2, 1].map((n) => `<option value="${n}"${n === i.level ? ' selected' : ''}>${n}: ${esc(IMPACT_LEVELS[n])}</option>`).join('')}</select><input type="text" data-reason="${esc(key)}" placeholder="Why (the supervisor keeps it as a lesson)"><button class="ghost" data-correct-send="${esc(key)}">Send</button><span class="err" id="e-${esc(key)}"></span></div>`;
+    <div class="row-inline" hidden data-correct-form="${esc(key)}"><select data-impact="${esc(key)}" aria-label="What it is">${[4, 3, 2, 1].map((n) => `<option value="${n}"${n === i.level ? ' selected' : ''}>${n}: ${esc(DATA.ooda.impact_words[n])}</option>`).join('')}</select><input type="text" data-reason="${esc(key)}" placeholder="Why (the supervisor keeps it as a lesson)"><button class="ghost" data-correct-send="${esc(key)}">Send</button><span class="err" id="e-${esc(key)}"></span></div>`;
 }
 function openGoal(id) {
   drawerFor('goal', id);
