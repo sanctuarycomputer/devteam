@@ -834,53 +834,53 @@ http.createServer((req, res) => { const m = fs.readFileSync(${JSON.stringify(mod
     const srv = spawn(process.execPath, [srvFile], { stdio: 'ignore' });
     try {
       await serverUp(`http://127.0.0.1:${port}/`);
-      landSettings((txt) => txt.replace('"gates": {', `"monitors": { "web": { "kind": "http", "url": "http://127.0.0.1:${port}/up", "expect": { "status": 200, "contains": "ok" }, "down_after": 2, "slo": { "uptime": 0.999, "p95_ms": 100 } } }, "gates": {`));
-      assert.notEqual(dt(['monitor', 'poll'], { role: 'worker' }).status, 0, 'a worker never polls production');
-      assert.match(must(['monitor', 'test', 'web']), /web: ok \(HTTP 200/);
-      must(['monitor', 'poll', '--name', 'web'], sup);
-      const status = () => json(must(['monitor', 'status', '--json'])).find((m) => m.name === 'web');
+      landSettings((txt) => txt.replace('"gates": {', `"sensors": { "web": { "kind": "http", "url": "http://127.0.0.1:${port}/up", "expect": { "status": 200, "contains": "ok" }, "down_after": 2, "slo": { "uptime": 0.999, "p95_ms": 100 } } }, "gates": {`));
+      assert.notEqual(dt(['sensor', 'poll'], { role: 'worker' }).status, 0, 'a worker never polls production');
+      assert.match(must(['sensor', 'test', 'web']), /web: ok \(HTTP 200/);
+      must(['sensor', 'poll', '--name', 'web'], sup);
+      const status = () => json(must(['sensor', 'status', '--json'])).find((m) => m.name === 'web');
       assert.equal(status().state, 'up');
-      const obs = () => json(must(['log', '--type', 'observation', '--json'])).filter((o) => o.subject === 'monitor:web');
+      const obs = () => json(must(['log', '--type', 'observation', '--json'])).filter((o) => o.subject === 'sensor:web');
       fs.writeFileSync(mode, 'fail');
-      assert.deepEqual(json(must(['monitor', 'poll', '--name', 'web', '--json'], sup)).alerts, [], 'one failed check is not an outage');
-      assert.match(json(must(['monitor', 'poll', '--name', 'web', '--json'], sup)).alerts[0] ?? '', /web is down: HTTP 500/, 'down_after failed checks are');
+      assert.deepEqual(json(must(['sensor', 'poll', '--name', 'web', '--json'], sup)).alerts, [], 'one failed check is not an outage');
+      assert.match(json(must(['sensor', 'poll', '--name', 'web', '--json'], sup)).alerts[0] ?? '', /web is down: HTTP 500/, 'down_after failed checks are');
       const down = obs().find((o) => o.kind === 'down');
-      assert.ok(down && down.severity === 4 && down.detector === 'monitor');
-      must(['monitor', 'poll', '--name', 'web'], sup);
+      assert.ok(down && down.severity === 4 && down.detector === 'sensor');
+      must(['sensor', 'poll', '--name', 'web'], sup);
       assert.equal(obs().filter((o) => o.kind === 'down').length, 1, 'an outage is observed once');
-      assert.ok(json(must(['metrics', '--json'])).findings.some((x) => x.kind === 'monitor-down' && x.severity === 'medium'), 'a standing outage is a medium finding, so wait does not loop on it');
+      assert.ok(json(must(['metrics', '--json'])).findings.some((x) => x.kind === 'sensor-down' && x.severity === 'medium'), 'a standing outage is a medium finding, so wait does not loop on it');
       fs.writeFileSync(mode, 'ok');
-      must(['monitor', 'poll', '--name', 'web'], sup);
+      must(['sensor', 'poll', '--name', 'web'], sup);
       assert.deepEqual(obs().find((o) => o.kind === 'up')?.refs, [down.id], 'up refers to the outage it ends');
       assert.equal(status().state, 'up');
-      for (let i = 0; i < 20; i++) must(['monitor', 'poll', '--name', 'web'], sup);
+      for (let i = 0; i < 20; i++) must(['sensor', 'poll', '--name', 'web'], sup);
       fs.writeFileSync(mode, 'slow');
-      for (let i = 0; i < 3; i++) must(['monitor', 'poll', '--name', 'web'], sup);
+      for (let i = 0; i < 3; i++) must(['sensor', 'poll', '--name', 'web'], sup);
       assert.equal(obs().filter((o) => o.kind === 'slow').length, 0, 'a few slow answers among fast ones are not slow');
-      for (let i = 0; i < 24; i++) must(['monitor', 'poll', '--name', 'web'], sup);
+      for (let i = 0; i < 24; i++) must(['sensor', 'poll', '--name', 'web'], sup);
       assert.equal(obs().filter((o) => o.kind === 'slow').length, 1, 'slow once per breach');
-      must(['monitor', 'poll', '--name', 'web', '--rollup-day', new Date().toISOString().slice(0, 10)], sup);
+      must(['sensor', 'poll', '--name', 'web', '--rollup-day', new Date().toISOString().slice(0, 10)], sup);
       const roll = obs().find((o) => o.kind === 'reading');
       assert.ok(roll && roll.measure.unit === '%' && roll.measure.value < 100, 'the rollup counts the failed checks');
-      assert.deepEqual(json(must(['monitor', 'poll', '--due', '--json'], sup)).polled, [], 'just polled: nothing due');
-      const series = json(must(['monitor', 'series', 'web']));
+      assert.deepEqual(json(must(['sensor', 'poll', '--due', '--json'], sup)).polled, [], 'just polled: nothing due');
+      const series = json(must(['sensor', 'series', 'web']));
       assert.ok(series.buckets.some((b) => b.ok < b.n), 'the series shows the failed checks');
-      assert.ok(json(must(['dashboard-data'])).monitors.some((m) => m.name === 'web' && m.uptime_24h < 100));
-      const pk = json(must(['peek', 'monitor', 'web', '--json']));
+      assert.ok(json(must(['dashboard-data'])).sensors.some((m) => m.name === 'web' && m.uptime_24h < 100));
+      const pk = json(must(['peek', 'sensor', 'web', '--json']));
       assert.ok(pk.history.some((l) => l.kind === 'down') && pk.series['24h'].buckets.length && pk.failures.length);
       // wait polls what is due and wakes once on a new outage
       fs.writeFileSync(mode, 'fail');
-      landSettings((txt) => txt.replace('"monitors": { ', `"monitors": { "api": { "kind": "http", "url": "http://127.0.0.1:${port}/api", "down_after": 1 }, `));
+      landSettings((txt) => txt.replace('"sensors": { ', `"sensors": { "api": { "kind": "http", "url": "http://127.0.0.1:${port}/api", "down_after": 1 }, `));
       assert.match(must(['wait', '--minutes', '1'], sup), /production needs you[\s\S]*api is down/);
     } finally {
       srv.kill();
-      landSettings((txt) => txt.replace(/"monitors": \{[\s\S]*?\} \} \}, /, '').replace(/"monitors": \{ "api": [^\n]*?\} \}, /, ''));
-      fs.rmSync(path.join(repo, 'docs/devteam/run/monitors'), { recursive: true, force: true });
+      landSettings((txt) => txt.replace(/"sensors": \{[\s\S]*?\} \} \}, /, '').replace(/"sensors": \{ "api": [^\n]*?\} \}, /, ''));
+      fs.rmSync(path.join(repo, 'docs/devteam/run/sensors'), { recursive: true, force: true });
     }
-    assert.ok(!json(must(['monitor', 'status', '--json'])).length, 'cleaned up');
+    assert.ok(!json(must(['sensor', 'status', '--json'])).length, 'cleaned up');
   });
 
-  step('monitors: a redirect is not up, a new monitor already down goes down, a name stays in run/, and a URL\'s secrets are never shown', async () => {
+  step('sensors: a redirect is not up, a new sensor already down goes down, a name stays in run/, and a URL\'s secrets are never shown', async () => {
     const sup = { role: 'sup' };
     const port = await freePort();
     const srvFile = path.join(tmp, 'mon2-server.mjs');
@@ -902,42 +902,42 @@ http.createServer((req, res) => {
         creds: { kind: 'http', url: `http://user:hunter2@127.0.0.1:${port}/login` },
         tokened: { kind: 'http', url: `${base}/login?token=abc123` },
       };
-      landSettings((txt) => txt.replace('"gates": {', `"monitors": ${JSON.stringify(mons)}, "monitor_defaults": { "name": "../../ESCAPED-MON" }, "gates": {`));
-      // validate refuses a name field and credentials in a url, and the monitor is never polled
+      landSettings((txt) => txt.replace('"gates": {', `"sensors": ${JSON.stringify(mons)}, "sensor_defaults": { "name": "../../ESCAPED-MON" }, "gates": {`));
+      // validate refuses a name field and credentials in a url, and the sensor is never polled
       const v = dt(['validate']);
-      assert.match(v.out + v.err, /monitors\.evil: no "name" field/);
-      assert.match(v.out + v.err, /monitor_defaults: no "name" field/);
-      assert.match(v.out + v.err, /monitors\.creds: its url http:\/\/127\.0\.0\.1:\d+\/login carries credentials/);
-      assert.match(v.out + v.err, /monitors\.tokened: its url [^\n]* carries credentials/);
+      assert.match(v.out + v.err, /sensors\.evil: no "name" field/);
+      assert.match(v.out + v.err, /sensor_defaults: no "name" field/);
+      assert.match(v.out + v.err, /sensors\.creds: its url http:\/\/127\.0\.0\.1:\d+\/login carries credentials/);
+      assert.match(v.out + v.err, /sensors\.tokened: its url [^\n]* carries credentials/);
       assert.doesNotMatch(v.out + v.err, /hunter2|abc123/);
-      // the defaults' name field fails every monitor closed: put a clean default back
-      landSettings((txt) => txt.replace('"monitor_defaults": { "name": "../../ESCAPED-MON" }', '"monitor_defaults": {}'));
-      const names = json(must(['monitor', 'status', '--json'])).map((m) => m.name).sort();
-      assert.deepEqual(names, ['fresh', 'redir'], 'a monitor with a name field or credentials is ignored');
-      must(['monitor', 'poll'], sup);
-      assert.ok(!fs.existsSync(escaped), 'a poll never writes outside run/monitors');
+      // the defaults' name field fails every sensor closed: put a clean default back
+      landSettings((txt) => txt.replace('"sensor_defaults": { "name": "../../ESCAPED-MON" }', '"sensor_defaults": {}'));
+      const names = json(must(['sensor', 'status', '--json'])).map((m) => m.name).sort();
+      assert.deepEqual(names, ['fresh', 'redir'], 'a sensor with a name field or credentials is ignored');
+      must(['sensor', 'poll'], sup);
+      assert.ok(!fs.existsSync(escaped), 'a poll never writes outside run/sensors');
       // a 302 is not up (supervisor.md: a redirect to a login page is not "up")
-      const st = () => Object.fromEntries(json(must(['monitor', 'status', '--json'])).map((m) => [m.name, m]));
+      const st = () => Object.fromEntries(json(must(['sensor', 'status', '--json'])).map((m) => [m.name, m]));
       assert.equal(st().redir.last.ok, false);
       assert.match(st().redir.last.error, /HTTP 302/);
-      // a new monitor whose site is already down still counts its failures while unknown
-      const r2 = json(must(['monitor', 'poll', '--name', 'fresh', '--json'], sup));
+      // a new sensor whose site is already down still counts its failures while unknown
+      const r2 = json(must(['sensor', 'poll', '--name', 'fresh', '--json'], sup));
       assert.match(r2.alerts.join('\n'), /fresh is down: HTTP 500/, 'down after down_after failed checks, from the first');
       // the query never reaches the alert, the status, the observation or the finding
       assert.doesNotMatch(r2.alerts.join('\n'), /s3cret/);
       assert.match(r2.alerts.join('\n'), /\/down\?…/);
-      assert.doesNotMatch(must(['monitor', 'status']), /s3cret/);
-      assert.doesNotMatch(JSON.stringify(json(must(['log', '--type', 'observation', '--json'])).filter((o) => o.subject?.startsWith('monitor:'))), /s3cret/);
+      assert.doesNotMatch(must(['sensor', 'status']), /s3cret/);
+      assert.doesNotMatch(JSON.stringify(json(must(['log', '--type', 'observation', '--json'])).filter((o) => o.subject?.startsWith('sensor:'))), /s3cret/);
       assert.doesNotMatch(JSON.stringify(json(must(['metrics', '--json'])).findings), /s3cret/);
-      assert.doesNotMatch(JSON.stringify(json(must(['dashboard-data'])).monitors), /s3cret/);
-      assert.doesNotMatch(must(['settings', '--get', 'monitors']), /s3cret|hunter2|abc123/);
-      assert.doesNotMatch(fs.readFileSync(path.join(repo, 'docs/devteam/run/monitors/fresh/state.json'), 'utf8'), /s3cret/);
+      assert.doesNotMatch(JSON.stringify(json(must(['dashboard-data'])).sensors), /s3cret/);
+      assert.doesNotMatch(must(['settings', '--get', 'sensors']), /s3cret|hunter2|abc123/);
+      assert.doesNotMatch(fs.readFileSync(path.join(repo, 'docs/devteam/run/sensors/fresh/state.json'), 'utf8'), /s3cret/);
     } finally {
       srv.kill();
       const f = path.join(repo, 'docs/devteam/project/settings.md');
       fs.writeFileSync(f, before);
       landSettings((txt) => txt);
-      fs.rmSync(path.join(repo, 'docs/devteam/run/monitors'), { recursive: true, force: true });
+      fs.rmSync(path.join(repo, 'docs/devteam/run/sensors'), { recursive: true, force: true });
       fs.rmSync(escaped, { recursive: true, force: true });
     }
   });
@@ -1266,8 +1266,8 @@ http.createServer((req, res) => {
     git(['worktree', 'remove', '--force', wt('caps')]);
     // sensors are the supervisor's: a chore that changes them merges with no owner answer
     git(['worktree', 'add', '-q', '-b', 'chore-mon', wt('mon'), 'origin/main']);
-    setTo(wt('mon'), (j) => { j.monitors = { web: { kind: 'http', url: 'https://example.com/up' } }; });
-    git(['commit', '-qam', 'monitor'], wt('mon'));
+    setTo(wt('mon'), (j) => { j.sensors = { web: { kind: 'http', url: 'https://example.com/up' } }; });
+    git(['commit', '-qam', 'sensor'], wt('mon'));
     git(['push', '-q', 'origin', 'chore-mon'], wt('mon'));
     const margs = ['merge', '--chore', 'mon', '--dry-run', '--title', 'chore-mon: watch production', '--body-file', body];
     const rm = dt(margs, { role: 'sup' });
