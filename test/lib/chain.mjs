@@ -1499,12 +1499,12 @@ process.exit(${code});
       // (b) with an incident on both: once it resolves, the older default still doesn't count
       const pOf = (title) => { const pid = must(['problem', 'add', '--title', title, '--severity', '1', '--detail', 'x'], sup).split(/[\s:]/)[0]; fs.appendFileSync(supFile3, line({ id: pid, type: 'problem', op: 'set', at: new Date().toISOString(), by: 'supervisor', fingerprints: ['x:exception:X'] })); return pid; };
       const pb = pOf('b');
-      const qb0 = must(['ask', '--class', 'production-remediation', '--blocks', 'remediation:restart-web', pb, '--question', 'B default?', '--recommendation', 'do it', '--default', 'do it', '--deadline', '15m', '--reasons', 'below-rung', '--owner-said', 'fine'], sup).trim();
-      const qb1 = must(['ask', '--class', 'production-remediation', '--blocks', 'remediation:restart-web', pb, '--question', 'B?', '--recommendation', 'do it', '--reasons', 'below-rung', '--owner-said', 'fine'], sup);
+      const qb0 = must(['ask', '--class', 'production-remediation', '--blocks', 'remediation:broken', pb, '--question', 'B default?', '--recommendation', 'do it', '--default', 'do it', '--deadline', '15m', '--reasons', 'below-rung'], sup).trim();
+      const qb1 = must(['ask', '--class', 'production-remediation', '--blocks', 'remediation:broken', pb, '--question', 'B?', '--recommendation', 'do it', '--reasons', 'below-rung'], sup);
       must(['answer', qb1, 'no, leave it']);
       must(['problem', 'set', pb, '--status', 'resolved'], sup);
       fs.writeFileSync(supFile3, fs.readFileSync(supFile3, 'utf8').split('\n').map((l) => (l.includes(`"id":"${qb0}"`) && l.includes('"deadline"') ? JSON.stringify({ ...JSON.parse(l), deadline: at(60000) }) : l)).join('\n'));
-      assert.match(dt(['answer', qb0, '--defaulted'], sup).err, /said no to restart-web/, 'the incident resolving doesn\'t bring it back');
+      assert.match(dt(['answer', qb0, '--defaulted'], sup).err, /said no to broken/, 'the incident resolving doesn\'t bring it back');
       // (c) Y said yes, then N said no; after N's incident resolves Y still doesn't count
       const pc = pOf('c');
       const qy = must(['ask', '--class', 'production-remediation', '--blocks', 'remediation:restart-web', '--question', 'Y?', '--recommendation', 'do it', '--reasons', 'below-rung', '--owner-said', 'yes'], sup);
