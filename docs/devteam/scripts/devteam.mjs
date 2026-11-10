@@ -4270,6 +4270,7 @@ function cmdAsk() {
   let ownerSaid = null;
   let remediationPin = null;
   // the owner's own words, recorded like a chat answer's --said; never a way to bring back a default
+  if (flagStr('owner-said') !== undefined && !flagStr('owner-said').trim()) die('--owner-said is the owner\'s words, verbatim; it can\'t be blank');
   if (flagStr('owner-said') && def) die('--owner-said goes without --default: after the owner\'s no, only their answer can start this again');
   if (cls === 'production-remediation' && !['trust', 'proposal'].includes(kind)) {
     const rs = blocks.filter((b) => b.startsWith('remediation:'));
@@ -4288,12 +4289,10 @@ function cmdAsk() {
     if (def && def.trim().toLowerCase() !== rec.trim().toLowerCase()) die('a production-remediation default is its recommendation (or there is none): silence never runs anything else');
     // at rung 1 a default can never fire, so it would only be a promise the kit can't keep
     if (def && rungFor('production-remediation') < 2) die(`production-remediation is on rung ${rungFor('production-remediation')}: no --default until it's on rung 2`);
-    // after the owner's no, not again for the same remediation and target, whichever incident is
-    // named: until that incident resolves, or for its valid_minutes when none was named
-    const heldBy = questions().filter((x) => x.class === 'production-remediation' && (x.blocks ?? []).includes(rs[0]) && ((x.blocks ?? []).find((b) => b.startsWith('release:')) ?? null) === (rel[0] ?? null) && x.status === 'answered' && !x.matched).sort((a, b) => String(a.answered_at).localeCompare(String(b.answered_at))).pop();
-    const heldIncident = heldBy ? (heldBy.blocks ?? []).find((b) => isIncident(logGet(b))) ?? null : null;
-    if (heldBy && !flagStr('owner-said') && (heldIncident ? logGet(heldIncident)?.status !== 'resolved' : Date.now() - Date.parse(heldBy.answered_at) < r.valid_minutes * 60000)) die(`the owner said no to ${r.name}${rel[0] ? ` (${rel[0]})` : ''} (${heldBy.id}: "${String(heldBy.answer ?? '').slice(0, 80)}"): don't ask it again${heldIncident ? ` while ${heldIncident} is open` : ` for ${r.valid_minutes} min`}. If they tell you otherwise, ask again with --owner-said "<their words, verbatim>"`);
-    ownerSaid = heldBy ? flagStr('owner-said') ?? null : null;
+    // after the owner's no, not again for the same remediation and target, whichever incident is named
+    const hold = remediationHold(rs[0], rel[0] ?? null, r.valid_minutes);
+    if (hold && !flagStr('owner-said')) die(remediationHoldWords(r.name, rel[0] ?? null, hold, r.valid_minutes));
+    ownerSaid = flagStr('owner-said')?.trim() || null;
   }
   if (!flagStr('goal') && !flagStr('ticket') && !blocks.length && !['trust', 'proposal'].includes(kind)) warn('this question names no --goal, --ticket or --blocks: when it serves a goal, add --goal <g-id> so the goal shows it');
   // A question that asks about several acts names them up front; the owner's card lists them, and
@@ -4352,6 +4351,8 @@ function cmdAsk() {
       if (e !== null && !(isObj(e) && typeof e.script === 'string' && /^[0-9a-f]{40}$/.test(e.sha ?? ''))) die(`--remediations ${name}: an entry has its script and its 40-character sha, or null to remove it`);
       return { name, script: e?.script ?? null, sha: e?.sha ?? null, entry_hash: remediationEntryHash(e) };
     });
+    // what the owner reads in the Inbox says exactly what approving this lands
+    context = [context, `Approving this lands: ${remediationEntries.map((e) => (e.sha ? `${e.name} (${e.script} at blob ${e.sha})` : `the removal of ${e.name}`)).join('; ')}`].filter(Boolean).join('\n\n');
   }
   const secrets = jsonFlag('secrets');
   if (secrets !== undefined) {
@@ -4436,6 +4437,14 @@ function cmdAnswer() {
     if (!v.default) die(`${id} has no default to apply`);
     // an incident fix's default fires at its deadline, not before
     if (['incident-fix', 'production-remediation'].includes(v.class) && v.deadline && Date.now() < Date.parse(v.deadline)) die(`${id}'s default fires at ${v.deadline}; until then it is the owner's to answer`);
+    // a default never overrides the owner's later no on the same remediation and target
+    if (v.class === 'production-remediation') {
+      const rem = (v.blocks ?? []).find((b) => b.startsWith('remediation:'));
+      const rel = (v.blocks ?? []).find((b) => b.startsWith('release:')) ?? null;
+      const r = rem ? remediationOf(rem.slice('remediation:'.length)) : null;
+      const hold = r ? remediationHold(rem, rel, r.valid_minutes) : null;
+      if (hold) die(remediationHoldWords(r.name, rel, hold, r.valid_minutes));
+    }
     appendLog({ type: 'question', op: 'set', id, status: 'defaulted' }, 'supervisor');
     appendLog({ type: 'act', class: 'apply-default', what: `applied the default to ${id}: ${v.default}`, refs: [id], reversible: true }, 'supervisor');
     return out(`defaulted ${id}: ${v.default}`);
@@ -5830,6 +5839,8 @@ function cmdDecide() {
       const q = questionView(logGet(approved) ?? die(`no question ${approved}`));
       for (const ref of [rs[0], ...rel]) if (!(q.blocks ?? []).includes(ref)) die(`${approved} was asked about ${(q.blocks ?? []).join(', ') || 'nothing in particular'}, not ${ref}`);
       if (q.status === 'answered' && !q.matched) die(`${approved}'s answer ("${q.answer}") isn't its recommendation ("${q.recommendation}"): a remediation runs only on a yes`);
+      const held = remediationHold(rs[0], rel[0] ?? null, r.valid_minutes);
+      if (held) die(remediationHoldWords(r.name, rel[0] ?? null, held, r.valid_minutes));
       if (q.status === 'defaulted' && String(q.default ?? '').trim().toLowerCase() !== String(q.recommendation ?? '').trim().toLowerCase()) die(`${approved} defaulted to "${q.default}", not its recommendation: a remediation runs only on a yes`);
     }
   }
@@ -11375,7 +11386,7 @@ function suspectEscapes() {
   let merged = null;
   for (const o of obs) {
     const id = fpIdOfObservation(o);
-    const release = /\(release (\S+?)\)/.exec(o.detail ?? '')?.[1];
+    const release = /\(release (\S+?)\)/.exec(String(o.detail ?? '').split('\n')[0])?.[1];
     const top = fpSummary(id ?? '').frames?.find((fr) => fr.in_repo)?.file;
     const i = release ? deploys.findIndex((x) => deployRelease(x) === release) : -1;
     // the release before it: the latest earlier deploy from the same sensor whose commit this repo
@@ -11428,6 +11439,17 @@ const remediationRef = (action) => `remediation:${action}`;
 // probe's own time when it gave one). Fails closed: null when no such deploy is known.
 // A remediation entry, for a question and a merge to compare: name, script, sha, and the rest.
 const remediationEntryHash = (e) => crypto.createHash('sha256').update(canonical(e ?? null)).digest('hex').slice(0, 16);
+// The owner's latest answer on this remediation and target, when it was a no that still holds: until
+// that incident resolves, or for valid_minutes when it named none. A default, or a yes before it,
+// doesn't get past it; a later yes does, since the latest answer wins. Applied wherever a remediation
+// moves on: asking again, applying a default, deciding and running.
+function remediationHold(rem, release, validMinutes) {
+  const latest = questions().filter((x) => x.class === 'production-remediation' && (x.blocks ?? []).includes(rem) && ((x.blocks ?? []).find((b) => b.startsWith('release:')) ?? null) === (release ?? null) && x.status === 'answered').sort((a, b) => String(a.answered_at).localeCompare(String(b.answered_at))).pop();
+  if (!latest || latest.matched) return null;
+  const incident = (latest.blocks ?? []).find((b) => isIncident(logGet(b))) ?? null;
+  return (incident ? logGet(incident)?.status !== 'resolved' : Date.now() - Date.parse(latest.answered_at) < validMinutes * 60000) ? { question: latest, incident } : null;
+}
+const remediationHoldWords = (name, rel, h, m) => `the owner said no to ${name}${rel ? ` (${rel})` : ''} (${h.question.id}: "${String(h.question.answer ?? '').slice(0, 80)}"): it stays held${h.incident ? ` while ${h.incident} is open` : ` for ${m} min`}. If they tell you otherwise, ask again with --owner-said "<their words, verbatim>", and get their answer`;
 function migrationsSince(release) {
   // A line the supervisor wrote into its own log looks the same as a sensor's, so a deploy line
   // alone can't be proven the sensors': the owner's answer naming the release is the check, and a
@@ -11477,6 +11499,8 @@ async function cmdRemediate() {
     if (!q.deadline || !st || Date.parse(st.at) < Date.parse(q.deadline)) die(`${q.id}'s default was applied before its deadline (${q.deadline ?? 'none'}): it approves nothing; ask again`);
   }
   if (!['answered', 'defaulted'].includes(q.status)) die(`${q.id} is ${q.status}: ask, and wait for the answer or the deadline`);
+  const held = remediationHold(remediationRef(action), qrel, r.valid_minutes);
+  if (held) die(remediationHoldWords(action, qrel, held, r.valid_minutes));
   const answeredAt = Date.parse(q?.answered_at ?? q?.deadline ?? d.created_at);
   if (Date.now() - answeredAt > r.valid_minutes * 60000) die(`${d.id} rests on an answer from ${new Date(answeredAt).toISOString()}, over ${r.valid_minutes} min ago: ask again`);
   const to = flagStr('to') ?? null;
