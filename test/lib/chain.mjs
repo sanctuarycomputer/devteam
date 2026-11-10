@@ -3145,6 +3145,182 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     assert.deepEqual(lib.artifacts.filter((a) => a.at === 'main').map((a) => a.slug), ['landed-mock', 'landed-other', 'landed-tk']);
   });
 
+  // Public artifacts: the owner's own act records what the owner made public from the cloud box.
+  step("public artifacts: an artifact-publish act is the owner's, and the owner's only act", () => {
+    const S = JSON.parse(fs.readFileSync(path.join(kit, 'schema/log.schema.json'), 'utf8'));
+    assert.ok(S['x-authority'].new.owner.includes('act'));
+    assert.deepEqual([S.$defs.types.act.properties.artifact.pattern, S.$defs.types.act.properties.tree.pattern], ['^[a-z][a-z0-9]*(-[a-z0-9]+)*$', '^[0-9a-f]{40}([0-9a-f]{24})?$']);
+    const L = JSON.parse(/`{3}json devteam\s*\n([\s\S]*?)\n`{3}/.exec(fs.readFileSync(path.join(kit, 'governance/constitution.md'), 'utf8'))[1]);
+    assert.ok(L.owner_only.includes('artifact-publish'), 'owner_only in the constitution');
+    const month = new Date().toISOString().slice(0, 7);
+    const ownerFile = path.join(repo, 'docs/devteam/run/log', `owner-${month}.jsonl`);
+    const supFile = path.join(repo, 'docs/devteam/run/log', `supervisor-${month}.jsonl`);
+    const kept = [ownerFile, supFile].map((f) => [f, fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : null]);
+    const tree = git(['rev-parse', 'origin/main:docs/devteam/project/artifacts/landed-other']);
+    let n = 0;
+    const act = (by, body) => {
+      const at = new Date(Date.now() + n++).toISOString();
+      return line({ id: `a-${at.slice(0, 10).replace(/-/g, '')}-${at.slice(11, 23).replace(/[:.]/g, '')}-${by}`, type: 'act', op: 'new', at, by, ...(by === 'owner' ? { channel: 'cli' } : {}), ...body });
+    };
+    const pub = { class: 'artifact-publish', what: 'publish', refs: ['artifact:landed-other'], artifact: 'landed-other', tree };
+    try {
+      fs.appendFileSync(ownerFile, act('owner', pub));
+      must(['log-check']);
+      for (const [by, body, re] of [
+        ['owner', { ...pub, class: 'merge-word' }, /the owner's acts are artifact-publish only/],
+        ['owner', { ...pub, tree: undefined }, /publish with its tree or unpublish without one/],
+        ['owner', { ...pub, what: 'unpublish' }, /publish with its tree or unpublish without one/],
+        ['owner', { ...pub, what: 'shout', tree: undefined }, /publish with its tree or unpublish without one/],
+        ['supervisor', pub, /artifact-publish is the owner's/],
+      ]) {
+        const f = by === 'owner' ? ownerFile : supFile;
+        const before = fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : '';
+        fs.appendFileSync(f, act(by, body));
+        const r = dt(['log-check']);
+        assert.notEqual(r.status, 0, `${by} ${JSON.stringify(body)}`);
+        assert.match(r.out, re);
+        fs.writeFileSync(f, before);
+      }
+      // the supervisor can't write one either: authorise() refuses an owner-only class (the forged lines above exercise integrity())
+      const r = dt(['act', '--class', 'artifact-publish', '--refs', 'artifact:landed-other', '--', 'publish'], { role: 'sup' });
+      assert.notEqual(r.status, 0);
+      assert.match(r.err, /artifact-publish is the owner's/);
+    } finally {
+      for (const [f, text] of kept) if (text === null) fs.rmSync(f, { force: true }); else fs.writeFileSync(f, text);
+    }
+    must(['log-check']);
+  });
+
+  step('public artifacts: owner acts are records, not calls', () => {
+    const month = new Date().toISOString().slice(0, 7);
+    const ownerFile = path.join(repo, 'docs/devteam/run/log', `owner-${month}.jsonl`);
+    const kept = fs.existsSync(ownerFile) ? fs.readFileSync(ownerFile, 'utf8') : null;
+    const at = new Date().toISOString();
+    const X = `a-${at.slice(0, 10).replace(/-/g, '')}-${at.slice(11, 23).replace(/[:.]/g, '')}-owner`;
+    const tree = git(['rev-parse', 'origin/main:docs/devteam/project/artifacts/landed-other']);
+    try {
+      fs.appendFileSync(ownerFile, line({ id: X, type: 'act', op: 'new', at, by: 'owner', channel: 'cli', class: 'artifact-publish', what: 'publish', refs: ['artifact:landed-other'], artifact: 'landed-other', tree }));
+      must(['log-check']);
+      const d = json(must(['dashboard-data']));
+      assert.ok(!d.ooda.acts.some((a) => a.id === X), 'not in the act feed');
+      assert.ok(!d.ooda.decisions.some((r) => r.id === X || (r.refs ?? []).includes(X)), 'nor among the calls');
+      const r = dt(['correct', X, '--reason', 'I did not mean it']);
+      assert.notEqual(r.status, 0);
+      assert.match(r.err, new RegExp(`${X} is the owner's own record \\(artifact-publish\\), not a call; nothing to correct`));
+    } finally {
+      if (kept === null) fs.rmSync(ownerFile, { force: true }); else fs.writeFileSync(ownerFile, kept);
+    }
+  });
+  step('public artifacts: artifact publish and unpublish, the owner\'s, against main as it is', async () => {
+    const tree = (slug) => git(['rev-parse', `origin/main:docs/devteam/project/artifacts/${slug}`]);
+    // a broken artifact on main, as a push that skipped merge would leave it
+    const lw = path.join(repo, '.worktrees', 'tmp-land-pub');
+    git(['worktree', 'add', '-q', '--detach', lw, 'origin/main']);
+    write(path.join(lw, 'docs/devteam/project/artifacts/landed-broken/index.html'), '<!doctype html>');
+    write(path.join(lw, 'docs/devteam/project/artifacts/landed-broken/artifact.json'), '{');
+    git(['add', '-A'], lw);
+    git(['commit', '-qm', 'a broken artifact lands'], lw);
+    git(['push', '-q', 'origin', 'HEAD:main'], lw);
+    git(['worktree', 'remove', '--force', lw]);
+    git(['fetch', '-q', 'origin', 'main']);
+    const T = tree('landed-other');
+    assert.match(dt(['artifact', 'publish', 'landed-other', '--tree', T]).err, /usage: artifact publish <slug> --owner --tree/, 'the owner says so');
+    assert.match(dt(['artifact', 'publish', 'landed-other', '--owner', '--tree', T], { role: 'sup' }).err, /owner commands don't run in an agent session/);
+    assert.match(dt(['artifact', 'publish', 'mock-one', '--owner', '--tree', T]).err, /mock-one: not an artifact landed on main \(a draft is never public\)/);
+    assert.match(dt(['artifact', 'publish', 'no-such', '--owner', '--tree', T]).err, /no-such: not an artifact landed on main/);
+    assert.match(dt(['artifact', 'publish', 'landed-broken', '--owner', '--tree', tree('landed-broken')]).err, /landed-broken is broken on main: landed-broken\/artifact\.json: not JSON/);
+    assert.match(dt(['artifact', 'publish', 'landed-other', '--owner', '--tree', tree('landed-tk')]).err, /landed-other: --tree [0-9a-f]{12} is not its tree on main \([0-9a-f]{12}\); only what main has now is published/);
+    assert.match(dt(['artifact', 'unpublish', 'landed-other', '--owner']).err, /landed-other is not published; there is nothing to unpublish/);
+    const mine = () => json(must(['log', '--type', 'act', '--by', 'owner', '--json']));
+    assert.match(must(['artifact', 'publish', 'landed-other', '--owner', '--tree', T]), /^recorded: landed-other published\. This records intent only: a page goes public, or comes down, only on the cloud gateway's confirm page/);
+    let last = mine().at(-1);
+    assert.deepEqual([last.class, last.what, last.artifact, last.tree, last.channel, last.refs], ['artifact-publish', 'publish', 'landed-other', T, 'cli', ['artifact:landed-other']]);
+    must(['log-check']);
+    must(['artifact', 'unpublish', 'landed-other', '--owner']);
+    last = mine().at(-1);
+    assert.deepEqual([last.what, last.tree], ['unpublish', undefined]);
+    assert.match(dt(['artifact', 'unpublish', 'landed-other', '--owner']).err, /is not published/, 'once');
+    // the dashboard's action: what the gateway calls, under the checks every owner action has
+    const port = await freePort();
+    const base = `http://127.0.0.1:${port}`;
+    const srv = spawn(process.execPath, [DT, 'dashboard', '--port', String(port)], { cwd: repo, env: { ...process.env, DEVTEAM_ROLE: '' }, stdio: 'ignore' });
+    const act = (body, headers = {}) => fetch(`${base}/api/artifact-publish`, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) });
+    try {
+      await serverUp(`${base}/`);
+      assert.equal((await act({ op: 'publish', slug: 'landed-tk' })).status, 400, 'a publish names its tree');
+      assert.equal((await act({ op: 'publish', slug: 'Landed', tree: tree('landed-tk') })).status, 400);
+      assert.equal((await act({ op: 'erase', slug: 'landed-tk' })).status, 400);
+      assert.equal((await act({ op: 'publish', slug: 'landed-tk', tree: tree('landed-tk') }, { origin: 'http://evil.example' })).status, 403);
+      let r = await act({ op: 'publish', slug: 'landed-tk', tree: tree('landed-tk') });
+      assert.equal(r.status, 200, await r.text());
+      assert.deepEqual([mine().at(-1).artifact, mine().at(-1).channel], ['landed-tk', 'dashboard']);
+      r = await act({ op: 'publish', slug: 'landed-tk', tree: T });
+      assert.equal(r.status, 400);
+      assert.match((await r.json()).error, /is not its tree on main/);
+      assert.equal((await act({ op: 'unpublish', slug: 'landed-tk' })).status, 200);
+    } finally { srv.kill(); }
+  });
+  step('public artifacts: /public-manifest says what publishing would put up, byte for byte', async () => {
+    const port = await freePort();
+    const base = `http://127.0.0.1:${port}`;
+    const srv = spawn(process.execPath, [DT, 'dashboard', '--port', String(port)], { cwd: repo, env: { ...process.env, DEVTEAM_ROLE: '' }, stdio: 'ignore' });
+    try {
+      await serverUp(`${base}/`);
+      const r = await fetch(`${base}/public-manifest/landed-mock`);
+      assert.equal(r.status, 200);
+      const m = await r.json();
+      const T = git(['rev-parse', 'origin/main:docs/devteam/project/artifacts/landed-mock']);
+      assert.deepEqual([m.public, m.project, m.slug, m.title, m.summary, m.root, m.tree], [1, 'demo', 'landed-mock', 'Landed mock', 'The card form', fs.realpathSync(repo), T]);
+      assert.deepEqual(Object.keys(m).sort(), ['files', 'project', 'public', 'root', 'slug', 'summary', 'title', 'tree']);
+      assert.deepEqual(Object.keys(m.files).sort(), ['artifact.json', 'index.html', 'style.css']);
+      for (const [rel, f] of Object.entries(m.files)) {
+        const bytes = Buffer.from(await (await fetch(`${base}/artifact/main/landed-mock/${rel}`)).arrayBuffer());
+        assert.deepEqual([f.sha256, f.size, f.mode], [crypto.createHash('sha256').update(bytes).digest('hex'), bytes.length, '100644'], rel);
+      }
+      assert.ok(fs.existsSync(path.join(repo, 'docs/devteam/run/cache/public-manifests', `${T}.json`)), 'kept by tree id');
+      assert.deepEqual(json(must(['artifact', 'manifest', 'landed-mock', '--json'])), m, 'the command says the same');
+      for (const s of ['mock-one', 'no-such', 'landed-broken', 'Bad_Slug']) assert.equal((await fetch(`${base}/public-manifest/${s}`)).status, 404, s);
+      assert.match((await (await fetch(`${base}/public-manifest/mock-one`)).json()).error, /a draft is never public/);
+      assert.equal((await fetch(`${base}/public-manifest/landed-mock`, { headers: { 'sec-fetch-site': 'cross-site' } })).status, 403);
+      assert.equal((await fetch(`${base}/public-manifest/landed-mock`, { headers: { 'sec-fetch-site': 'same-site' } })).status, 403);
+      assert.equal((await fetch(`${base}/public-manifest/landed-mock`, { headers: { 'sec-fetch-site': 'same-origin' } })).status, 200);
+      assert.equal(await statusWithHost(port, '/public-manifest/landed-mock', `rebound.example:${port}`), 403, 'its own Host only');
+      // the project's name is in every public link, so it is set, and link-shaped
+      const sf = path.join(repo, 'docs/devteam/project/settings.md');
+      const keep = fs.readFileSync(sf, 'utf8');
+      const bad = keep.replace(/"project":\s*"demo"/, '"project": "Demo Project"');
+      assert.notEqual(bad, keep);
+      // an owner setting: an edit in the checkout changes nothing until it lands on main
+      fs.writeFileSync(sf, bad);
+      try { assert.equal((await fetch(`${base}/public-manifest/landed-mock`)).status, 200, 'main\'s name still counts'); } finally { fs.writeFileSync(sf, keep); }
+      // this checkout is behind main here: steps before this one land through worktrees
+      git(['pull', '-q', '--ff-only', 'origin', 'main']);
+      landSettings(() => bad);
+      try {
+        const r9 = await fetch(`${base}/public-manifest/landed-mock`);
+        assert.equal(r9.status, 409);
+        assert.match((await r9.json()).error, /set "project" in settings\.md/);
+      } finally { landSettings(() => keep); }
+    } finally { srv.kill(); }
+  });
+
+  step('public artifacts: the Library says what the log records, beside each landed tree', () => {
+    const T = git(['rev-parse', 'origin/main:docs/devteam/project/artifacts/landed-other']);
+    const lib = () => json(must(['dashboard-data'])).library;
+    const row = () => lib().artifacts.find((a) => a.slug === 'landed-other' && a.at === 'main');
+    assert.deepEqual(lib().public, { project: 'demo', root: fs.realpathSync(repo) });
+    assert.equal(row().tree, T);
+    assert.equal(json(must(['artifacts', '--json'])).find((a) => a.slug === 'landed-other').tree, T);
+    assert.equal(row().published, null, 'unpublished by the step before');
+    assert.ok(lib().artifacts.filter((a) => a.at !== 'main').every((a) => a.tree === undefined && a.published === undefined), 'a draft has neither');
+    must(['artifact', 'publish', 'landed-other', '--owner', '--tree', T]);
+    const p = row().published;
+    assert.deepEqual([p.tree, p.channel], [T, 'cli']);
+    assert.ok(Date.parse(p.at) > Date.now() - 600000);
+    must(['artifact', 'unpublish', 'landed-other', '--owner']);
+    assert.equal(row().published, null, 'the cache kept by tree id never hides the record');
+  });
+
 // Forks. A fork is a copy of the fixture as it stands between two steps, made by the run in
 // kit.test.mjs; a child process (fork.mjs) runs the steps given to it there. Those steps see
 // exactly the state they would have seen in line, and the steps after them go on without them, so

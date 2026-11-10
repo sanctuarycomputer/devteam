@@ -7,6 +7,8 @@
 # It needs a name and a wildcard under it, e.g. box.example.com and *.box.example.com: each
 # dashboard keeps an origin of its own (4321.box.example.com), as on a laptop, and the terminal has
 # its own too (term.box.example.com). Signing in is at box.example.com/auth.
+# public.box.example.com, under the same wildcard, serves the artifacts the owner published, to
+# anyone, from the gateway's own copy (DEVTEAM_PUBLIC_MAX caps it, in bytes; 500 MB by default).
 #
 # Render: New > Web Service > this repo (or a fork), Language: Docker, Dockerfile path:
 #   cloud/Dockerfile, build context: the repo root. Instance: Pro (4 GB) or larger; a free one
