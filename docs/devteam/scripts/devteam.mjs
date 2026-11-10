@@ -343,6 +343,11 @@ const SETTINGS_DEFAULTS = {
   dashboard_port: null,
   upstream_repo: KIT_UPSTREAM,
   upstream_base: null,
+  // How a release reaches this project: "adopt" merges a chore-devteam-sync-<tag> PR that copies the
+  // kit verbatim from that tag without asking the owner (init writes it for every new project);
+  // "ask" asks the owner per release, unless they gave a standing rule scoped chore:devteam-sync.
+  // The default is "ask" so a project adopted before this setting keeps asking. The owner's.
+  upstream_sync: 'ask',
   upstream_check_hours: 24,
   retro_every_days: 7,
   research_every_days: 7,
@@ -351,12 +356,13 @@ const SETTINGS_DEFAULTS = {
 // Settings that are the owner's to change (constitution.md, owner_only): a PR of any kind that
 // changes one merges only with --approved naming an answered question of that class. Gate
 // commands and what every gate checkout is seeded with decide what "passes"; the agent command
-// and deny rules decide what workers may do; upstream_repo is what a standing sync approval trusts;
+// and deny rules decide what workers may do; upstream_repo is what a standing sync approval trusts,
+// upstream_sync whether syncs need the owner at all;
 // release is how a tag reaches production.
 const OWNER_SETTINGS = {
   gates: 'gate-change', worktree_setup: 'gate-change', worktree_files: 'gate-change',
   autonomy_ceilings: 'governance-edit', agent_command: 'governance-edit', resume_command: 'governance-edit', worker_denied_commands: 'governance-edit',
-  forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', upstream_repo: 'governance-edit',
+  forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', upstream_repo: 'governance-edit', upstream_sync: 'governance-edit',
   release: 'governance-edit', secret_commands: 'governance-edit', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit',
 };
 const canonical = (v) => (Array.isArray(v) ? `[${v.map(canonical).join(',')}]` : v && typeof v === 'object' ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(',')}}` : JSON.stringify(v));
@@ -2404,6 +2410,7 @@ function cmdValidate() {
     warnings.push(...reg.warnings);
     // With lines, check-pr and merge judge the tree a PR would land, which takes git 2.38; say so
     // here, in the words merge refuses with, before the first PR meets it.
+    if (!['ask', 'adopt'].includes(s.upstream_sync)) warnings.push(`settings.upstream_sync is ${JSON.stringify(s.upstream_sync)}; only "ask" and "adopt" are valid, so it is read as "ask"`);
     if (linesDeclared(s) && gitTooOld()) warnings.push(`components: ${gitTooOld()}; coverage fails closed until it can`);
     // A reserved slug as a component prefix: the one G1 exception, only for a project already using it.
     // Only live tickets: a superseded or merged one is history, so the prescribed fix clears it.
@@ -3525,7 +3532,11 @@ function cmdCheckPr() {
 // (`answer <qid> "…" --rule "<rule>" --rule-scope chore:devteam-sync`) approves a
 // chore-devteam-sync-<tag> merge in place of a fresh answer, but only when every file the chore
 // changes outside project/ is inside the kit and byte-identical to that tag upstream. Anything the
-// supervisor wrote itself still needs the owner's answer.
+// supervisor wrote itself still needs the owner's answer. Either way the tag must be on upstream's
+// default branch, so a tag pushed off to the side isn't a release. settings.upstream_sync "adopt"
+// (what init writes) is the same approval from the moment devteam is adopted, read from main's tip
+// so a PR can't grant it to itself and a branch cut before the owner went back to "ask" doesn't keep
+// it. Nobody chose the release it adopts, so it also needs adoptProblem to find nothing.
 // What the check fetched from upstream goes when it's done: a ref left here is foreign history
 // in the host repo, for anything that walks every ref (a secrets scan with --all).
 function upstreamSyncApproval(chore, sha, changed) {
@@ -3534,14 +3545,16 @@ function upstreamSyncApproval(chore, sha, changed) {
   }
 }
 function upstreamSyncCheck(chore, sha, changed) {
-  const rule = logObjects('knowledge').filter((k) => k.created_by === 'owner' && k.scope === 'chore:devteam-sync' && k.status === 'accepted').sort(byTime).pop();
-  if (!rule) return {};
+  const rule = logObjects('knowledge').filter((k) => k.created_by === 'owner' && k.scope === 'chore:devteam-sync' && k.status === 'accepted').sort(byTime).pop() ?? null;
+  const main = mainRef();
+  const mb = main ? git(['merge-base', main, sha]) : null;
+  const policy = !rule && !!mb && upstreamSyncMode(settingsAt(main)) === 'adopt';
+  if (!rule && !policy) return {};
   const s = loadSettings();
   const src = /^[\w.-]+\/[\w.-]+$/.test(s.upstream_repo ?? '') ? `https://github.com/${s.upstream_repo}.git` : s.upstream_repo;
   // The release the PR adopts: the upstream_base it sets in settings.md (so a sync PR that folded in
   // a later release is checked against that one), else the tag in its slug. Either way the files
   // are compared with that tag fetched from upstream_repo as it is on main.
-  const mb = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
   const setBase = settingsAt(sha)?.upstream_base;
   const raw = setBase && setBase !== (mb ? settingsAt(mb)?.upstream_base : null) ? setBase : chore.slice('devteam-sync-'.length);
   let tag = null;
@@ -3549,6 +3562,15 @@ function upstreamSyncCheck(chore, sha, changed) {
     if (git(['fetch', '--quiet', '--no-tags', src, `+refs/tags/${t}:refs/devteam-upstream/${t}`], mainRoot) !== null) { tag = t; break; }
   }
   if (!tag) return { problem: `standing approval for upstream syncs: no tag "${raw}" at ${redactUrl(s.upstream_repo)}` };
+  // The default branch as upstream has it now: forced, like the tag, since only this run's view counts.
+  const tagSha = git(['rev-parse', '--verify', '--quiet', `refs/devteam-upstream/${tag}^{commit}`], mainRoot);
+  const onDefault = tagSha && git(['fetch', '--quiet', '--no-tags', src, '+HEAD:refs/devteam-upstream-default/HEAD'], mainRoot) !== null
+    && git(['merge-base', '--is-ancestor', tagSha, 'refs/devteam-upstream-default/HEAD'], mainRoot) !== null;
+  if (!onDefault) return { problem: `standing approval for upstream syncs: tag "${tag}" is not on the default branch of ${redactUrl(s.upstream_repo)}, or that can't be confirmed. The owner's answer is needed: --approved <qid>` };
+  if (policy) {
+    const problem = adoptProblem({ tag, sha, mb, main, changed, src });
+    if (problem) return { problem: `settings.upstream_sync "adopt" covers only a whole newer release: ${problem}. The owner's answer is needed: --approved <qid>` };
+  }
   const blob = (ref, f) => git(['rev-parse', '--verify', '--quiet', `${ref}:${f}`], mainRoot);
   const differ = [];
   for (const f of changed) {
@@ -3556,8 +3578,40 @@ function upstreamSyncCheck(chore, sha, changed) {
     if (blob(sha, f) !== blob(`refs/devteam-upstream/${tag}`, `docs/devteam/${f.slice(kitRel.length + 1)}`)) differ.push(f);
   }
   if (differ.length) return { problem: `standing approval covers only files copied verbatim from upstream ${tag}; these differ: ${differ.slice(0, 6).join(', ')}${differ.length > 6 ? ', …' : ''}. The owner's answer is needed: --approved <qid>` };
-  return { rule, tag };
+  return { rule, policy, tag, tagSha };
 }
+// What "adopt" needs beyond the standing rule; the reason it isn't met, else null. The PR starts at
+// main's tip, or the merge's 3-way result needn't be the files compared here. The tag is strictly
+// newer than main's upstream_base, so the kit never goes back. The PR sets upstream_base to the tag,
+// or a later sync would measure from a release main no longer has. The kit files it changes are
+// exactly those upstream changed between the two, so no release lands in part. Only for "adopt": an
+// owner's standing rule has always covered a PR that leaves upstream_base alone or takes part of a
+// release, and a project on one can rely on that.
+function adoptProblem({ tag, sha, mb, main, changed, src }) {
+  if (mb !== resolveCommit(main)) return `the PR is behind ${main}; merge it in and ask again`;
+  const base = settingsAt(main)?.upstream_base;
+  const from = releaseParts(base), to = releaseParts(tag);
+  if (!from) return `main's upstream_base (${JSON.stringify(base ?? null)}) isn't a release to compare with`;
+  if (!to) return `"${tag}" isn't a release version (vX.Y.Z)`;
+  if (!(compareRelease(to, from) > 0)) return `${tag} is not newer than main's upstream_base ${base}`;
+  const set = settingsAt(sha)?.upstream_base;
+  if (set !== tag) return `the PR sets upstream_base to ${JSON.stringify(set ?? null)}, not ${tag}`;
+  if (git(['fetch', '--quiet', '--no-tags', src, `+refs/tags/${base}:refs/devteam-upstream/${base}`], mainRoot) === null) return `can't fetch main's upstream_base ${base} from upstream`;
+  const released = changedFiles(`refs/devteam-upstream/${base}`, `refs/devteam-upstream/${tag}`).filter((f) => f.startsWith('docs/devteam/') && !/^docs\/devteam\/(project|run)\//.test(f)).map((f) => `${kitRel}/${f.slice('docs/devteam/'.length)}`);
+  const unlike = (a, b) => a.filter((f) => !b.includes(f));
+  const missing = unlike(released, changed), extra = unlike(changed, released);
+  const some = (l) => `${l.slice(0, 6).join(', ')}${l.length > 6 ? ', …' : ''}`;
+  if (missing.length || extra.length) return `its kit files aren't exactly what upstream changed from ${base} to ${tag}${missing.length ? `; missing ${some(missing)}` : ''}${extra.length ? `; extra ${some(extra)}` : ''}`;
+  return null;
+}
+// settings.upstream_sync as given, failing closed: anything but the two values is "ask", with a warning.
+function upstreamSyncMode(s) {
+  if (!s || s.upstream_sync === 'ask' || s.upstream_sync === 'adopt') return s?.upstream_sync ?? 'ask';
+  warn(`settings.upstream_sync is ${JSON.stringify(s.upstream_sync)}; only "ask" and "adopt" are valid, so it is read as "ask"`);
+  return 'ask';
+}
+const releaseParts = (t) => /^v(\d+)\.(\d+)\.(\d+)$/.exec(String(t ?? ''))?.slice(1).map(Number) ?? null;
+const compareRelease = (a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
 // A standing approval for CI fixes: an accepted owner rule scoped chore:ci-fix (or
 // chore:devteam-workflow, as Stacks' owner first gave it) lets the supervisor merge a ci-fix-* chore
 // without asking, when it changes only workflow files, deletes none, and keeps every job each had
@@ -3812,7 +3866,7 @@ function cmdMerge() {
     let kitRule = null;
     if (kit.length && !approved && chore.startsWith('devteam-sync-')) {
       const r = upstreamSyncApproval(chore, sha, kit);
-      if (r.rule) { kitRule = standing = r; out(`kit files match upstream ${r.tag} exactly; approved by the owner's standing rule ${r.rule.id}`); } else if (r.problem) fails.push(r.problem);
+      if (r.rule || r.policy) { kitRule = standing = r; out(`kit files match upstream ${r.tag} exactly; approved by ${r.rule ? `the owner's standing rule ${r.rule.id}` : 'settings.upstream_sync "adopt"'}; ${r.tag} is ${r.tagSha}`); } else if (r.problem) fails.push(r.problem);
     }
     if (kit.length && !approved && !kitRule && base) {
       const r = ciFixApproval(chore, sha, base, kit);
@@ -3906,7 +3960,7 @@ function cmdMerge() {
   if (R.name === 'home') { mainLogCache = undefined; mergeShaCache.clear(); } else R.resetCaches();
   const cls = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
   // A release-production decision is carried out by the release act, never by the merge act.
-  const act = appendLog({ type: 'act', decision: releaseDecision ? undefined : citing(), class: cls, what: `merged ${branch} at ${sha}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag}, verbatim)` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [], reversible: false, approved_by: approved ?? standing?.rule.id ?? undefined, ...onR }, 'supervisor');
+  const act = appendLog({ type: 'act', decision: releaseDecision ? undefined : citing(), class: cls, what: `merged ${branch} at ${sha}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag} at ${standing.tagSha}, verbatim${standing.policy ? ', under settings.upstream_sync "adopt"' : ''})` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [], reversible: false, approved_by: approved ?? standing?.rule?.id ?? undefined, ...onR }, 'supervisor');
   if (release) {
     const rel = appendLog({ type: 'act', class: 'release-production', decision: release.decision, rung: release.rung, what: `released ${release.target}${inR} to production by merging ${branch} at ${sha} (release: merge)`, refs: [release.target, act.id], reversible: false, ...onR }, 'supervisor');
     out(`released ${release.target}${inR} to production (${rel.id})`);
@@ -9940,7 +9994,7 @@ function cmdInit() {
   const remoteHead = git(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'])?.replace(/^origin\//, '')
     ?? (git(['ls-remote', '--symref', 'origin', 'HEAD']) ?? '').match(/^ref: refs\/heads\/(\S+)\s+HEAD/m)?.[1]
     ?? null;
-  const block = { project: flagStr('name') ?? path.basename(root), upstream_base: flagStr('upstream-base') ?? null, ...(remoteHead && remoteHead !== 'main' && remoteHead !== 'HEAD' ? { main_branch: remoteHead } : {}), components: {}, gates: {} };
+  const block = { project: flagStr('name') ?? path.basename(root), upstream_base: flagStr('upstream-base') ?? null, upstream_sync: 'adopt', ...(remoteHead && remoteHead !== 'main' && remoteHead !== 'HEAD' ? { main_branch: remoteHead } : {}), components: {}, gates: {} };
   put(path.join(projectDir, 'settings.md'), `# Project settings\n\nOnly what this project changes; every setting has a default in scripts/devteam.mjs (\`devteam.mjs settings\` shows the result). Below the block, record project-specific answers to the decisions the governance docs leave open (components and stacks, persistence tiers, one-way doors, release tags, how to notify the owner), each with its date.\n\n\`\`\`json devteam\n${JSON.stringify(block, null, 2)}\n\`\`\`\n`);
   put(path.join(projectDir, 'designs', 'architecture.md'), ARCHITECTURE_MD);
   // retros/ and reviews/ hold placeholders; log/ and tickets/ fill as the fleet writes, and merge
