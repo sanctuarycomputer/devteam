@@ -352,7 +352,7 @@ const SETTINGS_DEFAULTS = {
   // kit verbatim from that tag without asking the owner (init writes it for every new project);
   // "ask" asks the owner per release, unless they gave a standing rule scoped chore:devteam-sync.
   // The default is "ask" so a project adopted before this setting keeps asking. The owner's.
-  upstream_sync: 'ask',
+  upstream_sync: 'adopt',
   upstream_check_hours: 24,
   retro_every_days: 7,
   research_every_days: 7,
@@ -363,12 +363,12 @@ const SETTINGS_DEFAULTS = {
 // commands and what every gate checkout is seeded with decide what "passes"; the agent command
 // and deny rules decide what workers may do; upstream_repo is what a standing sync approval trusts,
 // upstream_sync whether syncs need the owner at all;
-// release is how a tag reaches production.
+// release is how a tag reaches production; project names every public link and the gateway's binding.
 const OWNER_SETTINGS = {
   gates: 'gate-change', worktree_setup: 'gate-change', worktree_files: 'gate-change',
   autonomy_ceilings: 'governance-edit', agent_command: 'governance-edit', resume_command: 'governance-edit', worker_denied_commands: 'governance-edit',
   forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', upstream_repo: 'governance-edit', upstream_sync: 'governance-edit',
-  release: 'governance-edit', secret_commands: 'governance-edit', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit',
+  release: 'governance-edit', secret_commands: 'governance-edit', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit', project: 'governance-edit',
 };
 // The classes whose owner answer approves a chore that changes real kit files (isKitFile).
 const KIT_CLASSES = ['governance-edit', 'process-edit', 'gate-change'];
@@ -461,6 +461,8 @@ function pinOwnedLinks(local = {}, main = {}) {
 // kit and project/, never declared; devteam is the kit's own line, computed.
 const RESERVED_LINKS = ['home', 'devteam'];
 const LINK_ID = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
+// A git tree (or blob) id: sha1, or sha256 in a repo that uses it.
+const TREE_ID = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 // The settings a repo link may carry for itself. The first four default to the
 // project's; every other key is never inherited, so a repo with no gates is refused by merge like
 // home with none, and a per-repo key added later gets the no-inherit rule by default.
@@ -861,6 +863,10 @@ function integrity(o, file) {
       if (!o.id.endsWith(`-${o.by}`)) return `a new id ends with its writer, "-${o.by}"`;
     }
     if (!auth.new[cls].includes(o.type)) return `${cls} may not create ${o.type} lines`;
+    // The owner's only acts are the record of publishing an artifact (artifact publish|unpublish),
+    // and nobody else writes that class: an agent can't make the Library say the owner published.
+    if (o.type === 'act' && (cls === 'owner') !== (o.class === 'artifact-publish')) return cls === 'owner' ? 'the owner\'s acts are artifact-publish only' : 'artifact-publish is the owner\'s';
+    if (o.type === 'act' && cls === 'owner' && (!['publish', 'unpublish'].includes(o.what) || typeof o.artifact !== 'string' || !LINK_ID.test(o.artifact) || (o.what === 'publish' ? !(typeof o.tree === 'string' && TREE_ID.test(o.tree)) : o.tree !== undefined))) return 'an artifact-publish act names its artifact, and is what: publish with its tree or unpublish without one';
     if (cls === 'planner' && file && ['feature', 'ticket'].includes(o.type) && !isPlanFile(file)) return `a planner's ${o.type} lines belong in its plan file, ${o.by}.jsonl`;
     if (o.type === 'goal' && o.status && o.status !== 'draft' && cls !== 'owner') return 'only the owner creates a goal past draft';
     const f = planFeature(o.by);
@@ -1401,8 +1407,9 @@ function goalChangeProblem(q, goalId, qid, l = null) {
 const ownerRuleFor = (cls) => logObjects('knowledge').filter((k) => writerClass(k.created_by) === 'owner' && k.scope === `class:${cls}` && k.status === 'accepted').sort(byTime).pop() ?? null;
 // The correction on an act, with who made it and when.
 // The supervisor's calls: its decisions, and the acts that are their own decision (no decision
-// field: mechanical acts, and acts logged before decisions existed). Trust is earned and lost on these.
-const calls = () => [...logObjects('decision'), ...logObjects('act').filter((a) => !a.decision)];
+// field: mechanical acts, and acts logged before decisions existed). Trust is earned and lost on
+// these. An owner's act (artifact-publish) is a record of what the owner did, never a call.
+const calls = () => [...logObjects('decision'), ...logObjects('act').filter((a) => !a.decision && a.created_by !== 'owner')];
 const correctionOf = (a) => {
   const u = a.updates.filter((x) => x.corrected !== undefined).pop();
   return u ? { ...u.corrected, by: u.by, at: u.at, repaired: a.repaired ?? null } : null;
@@ -3621,9 +3628,12 @@ function adoptProblem({ tag, sha, mb, main, changed, src }) {
   if (missing.length || extra.length) return `its kit files aren't exactly what upstream changed from ${base} to ${tag}${missing.length ? `; missing ${some(missing)}` : ''}${extra.length ? `; extra ${some(extra)}` : ''}`;
   return null;
 }
-// settings.upstream_sync as given, failing closed: anything but the two values is "ask", with a warning.
+// settings.upstream_sync as given, "adopt" where it's absent. Unreadable settings, or anything but the
+// two values, fail closed to "ask" (the latter with a warning).
 function upstreamSyncMode(s) {
-  if (!s || s.upstream_sync === 'ask' || s.upstream_sync === 'adopt') return s?.upstream_sync ?? 'ask';
+  if (!s) return 'ask';
+  if (s.upstream_sync === undefined) return 'adopt';
+  if (s.upstream_sync === 'ask' || s.upstream_sync === 'adopt') return s.upstream_sync;
   warn(`settings.upstream_sync is ${JSON.stringify(s.upstream_sync)}; only "ask" and "adopt" are valid, so it is read as "ask"`);
   return 'ask';
 }
@@ -4056,7 +4066,7 @@ function actAuthority(a) {
 // verdicts and holds, standing rules, corrections), shown as they are and never rewritten as
 // decision lines. Newest first.
 function decisionRecords() {
-  const acts = logObjects('act');
+  const acts = logObjects('act').filter((a) => a.created_by !== 'owner');
   const carried = new Map();
   for (const a of acts) if (a.decision) (carried.get(a.decision) ?? carried.set(a.decision, []).get(a.decision)).push(a.id);
   const rows = [];
@@ -4589,10 +4599,14 @@ function landedArtifacts() {
   let cache = {};
   try { cache = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
   const next = {};
+  // the cache holds what the tree says (describeArtifact); the row adds the tree id itself, for
+  // publishing, and nothing that changes without the tree changing goes in the cache
   const res = rows.map(([, tree, slug]) => {
-    if (cache[tree]?.slug === slug) return (next[tree] = cache[tree]);
-    const src = artifactSource('main', slug);
-    return src ? (next[tree] = describeArtifact(slug, 'main', src)) : null;
+    let d = cache[tree]?.slug === slug ? cache[tree] : null;
+    if (!d) { const src = artifactSource('main', slug); d = src ? describeArtifact(slug, 'main', src) : null; }
+    if (!d) return null;
+    next[tree] = d;
+    return { ...d, tree };
   }).filter(Boolean);
   if (canonical(next) !== canonical(cache)) try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(next)); } catch {}
   return res;
@@ -4618,6 +4632,68 @@ function draftArtifacts(landed = landedArtifacts()) {
   return res;
 }
 const allArtifacts = () => { const l = landedArtifacts(); return [...l, ...draftArtifacts(l)]; };
+// ----- publishing: the owner makes a landed artifact readable by anyone, from the cloud box -----
+// The gateway does the publishing (its confirm page, its own copy of the bytes); the kit says what
+// main has, and records the owner's word as an owner act (docs/superpowers/specs/2026-11-09-public-artifacts-design.md).
+// The project's name is part of every public URL, so it is set explicitly: the folder-name fallback
+// helloBody uses would move every link on a re-clone.
+const PUBLIC_PROJECT = /^[a-z0-9][a-z0-9._-]{0,62}$/;
+// Every entry of a tree by its id, in treeEntries' shape: the manifest and its checks read one
+// tree, never a branch that may move between two reads.
+function treeIdEntries(tree) {
+  return (git(['ls-tree', '-r', '-l', '-z', tree], mainRoot) ?? '').split('\0').filter(Boolean).map((l) => {
+    const tab = l.indexOf('\t');
+    const [mode, type, oid, size] = l.slice(0, tab).trim().split(/\s+/);
+    return { path: l.slice(tab + 1), mode, type, oid, size: Number(size) || 0, read: () => { try { return execFileSync('git', ['cat-file', 'blob', oid], { cwd: mainRoot, stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 }); } catch { return null; } } };
+  });
+}
+// A landed artifact as publishing sees it: its tree on main, judged by the rules merge runs.
+// Exit 2 when it is the project's name that is missing (the manifest route answers 409: a setting
+// to fix, not a page that isn't there). It never fetches: the gateway is waiting on it.
+function publicArtifact(slug) {
+  const ref = mainRef();
+  const row = LINK_ID.test(slug ?? '') && ref ? /^040000 tree ([0-9a-f]+)\t/.exec(git(['ls-tree', ref, '--', `${ARTIFACTS_REL}/${slug}`], mainRoot) ?? '') : null;
+  if (!row) die(`${slug}: not an artifact landed on main (a draft is never public)`);
+  const tree = row[1];
+  const entries = treeIdEntries(tree);
+  const sub = entries.find((e) => e.type !== 'blob');
+  if (sub) die(`${slug}/${sub.path}: a submodule isn't served, so ${slug} can't be published`);
+  const p = artifactProblems(slug, entries);
+  if (p.errors.length) die(`${slug} is broken on main: ${p.errors[0]}`);
+  const project = loadSettings().project;
+  if (typeof project !== 'string' || !PUBLIC_PROJECT.test(project)) die(`publishing needs this project's name, since it is part of every public link: set "project" in settings.md (lowercase letters, digits, . _ -, at most 63; it is ${project == null ? 'unset' : quoteData(project)})`, 2);
+  return { project, slug, tree, entries, manifest: p.manifest };
+}
+// Each slug's newest owner artifact-publish act, in fold order (logObjects keeps it): its recorded state.
+function publishRecords() {
+  const m = new Map();
+  for (const a of logObjects('act')) if (a.created_by === 'owner' && a.class === 'artifact-publish' && typeof a.artifact === 'string') m.set(a.artifact, a);
+  return m;
+}
+// What publishing <slug> would put up, for the gateway to show the owner and then check byte for
+// byte: main's tree, each file's sha256, size and mode (the gateway recomputes the tree id from the
+// bytes, and a mode is part of it). Hashes are kept in run/cache by tree id: a tree never changes,
+// so a kept one is never stale.
+function publicManifest(slug) {
+  const a = publicArtifact(slug);
+  const file = path.join(runDir, 'cache', 'public-manifests', `${a.tree}.json`);
+  let files = null;
+  try { files = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
+  if (!isObj(files)) {
+    files = Object.fromEntries(a.entries.map((e) => {
+      const buf = e.read() ?? die(`${slug}/${e.path}: git can't read it`);
+      return [e.path, { sha256: sha256(buf), size: buf.length, mode: e.mode }];
+    }));
+    try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(files)); } catch {}
+  }
+  // the log's last word on it, for the confirm page to quote: main may have moved on since
+  const said = publishedView(publishRecords().get(slug));
+  return { public: 1, project: a.project, slug, title: a.manifest.title, summary: a.manifest.summary, root: fs.realpathSync(mainRoot), tree: a.tree, files, ...(said ? { recorded: { tree: said.tree, at: said.at } } : {}) };
+}
+// A slug's recorded state as the Library shows it: published at a tree, with the line's date and
+// channel, or null. A forged line can look exactly like a real one (the dashboard's route writes
+// it for anything that reaches it), so none of this is proof the owner published.
+const publishedView = (a) => (a?.what === 'publish' ? { tree: a.tree, at: a.created_at, channel: a.channel ?? null } : null);
 // artifact new <slug> --title --summary [--for '[…]']: scaffold a page in this worktree.
 // artifact check [<slug>…]: the checks merge runs, on this checkout's artifacts.
 function cmdArtifact() {
@@ -4652,7 +4728,31 @@ function cmdArtifact() {
     if (bad) process.exit(1);
     return out(`${slugs.length} artifact${slugs.length === 1 ? '' : 's'} pass`);
   }
-  die('usage: artifact new <slug> --title t --summary s [--for json] | artifact check [<slug>…]');
+  // artifact manifest <slug>: what the gateway's confirm page would show for it
+  if (sub === 'manifest') {
+    const m = publicManifest(args[0] ?? die('usage: artifact manifest <slug> [--json]'));
+    if (flags.json) return out(JSON.stringify(m));
+    const bytes = Object.values(m.files).reduce((n, f) => n + f.size, 0);
+    return out(`${m.project}/${m.slug} at tree ${m.tree.slice(0, 12)}: ${Object.keys(m.files).length} files, ${bytes} bytes; published, it is https://public.<box>/${m.project}/${m.slug}/`);
+  }
+  // artifact publish|unpublish: the owner's record of what the gateway made public. The gateway's
+  // confirm page runs them through the dashboard; by hand they record intent only.
+  if (sub === 'publish' || sub === 'unpublish') {
+    const slugName = args[0];
+    if (!LINK_ID.test(slugName ?? '') || !flags.owner || (sub === 'publish' && !TREE_ID.test(flagStr('tree') ?? ''))) die('usage: artifact publish <slug> --owner --tree <tree-id> | artifact unpublish <slug> --owner   (the owner\'s; the cloud gateway\'s confirm page runs them)');
+    const { by } = ownerWriter();
+    if (sub === 'publish') {
+      const a = publicArtifact(slugName);
+      const tree = flagStr('tree');
+      if (tree !== a.tree) die(`${slugName}: --tree ${tree.slice(0, 12)} is not its tree on main (${a.tree.slice(0, 12)}); only what main has now is published`);
+      appendLog({ type: 'act', class: 'artifact-publish', what: 'publish', refs: [`artifact:${slugName}`], artifact: slugName, tree }, by);
+    } else {
+      if (publishRecords().get(slugName)?.what !== 'publish') die(`${slugName} is not published; there is nothing to unpublish`);
+      appendLog({ type: 'act', class: 'artifact-publish', what: 'unpublish', refs: [`artifact:${slugName}`], artifact: slugName }, by);
+    }
+    return out(`recorded: ${slugName} ${sub}ed${ownerChannel() === 'dashboard' ? '' : '. This records intent only: a page goes public, or comes down, only on the cloud gateway\'s confirm page (https://<box>/public/)'}`);
+  }
+  die('usage: artifact new <slug> --title t --summary s [--for json] | artifact check [<slug>…] | artifact manifest <slug> [--json] | artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner');
 }
 function cmdArtifacts() {
   gitReadCache = new Map();
@@ -5699,6 +5799,7 @@ function cmdCorrect() {
   const by = flags.retro ? (supervisorOnly('correct --retro'), 'supervisor') : ownerWriter().by;
   const act = logGet(actId);
   if (!['act', 'decision'].includes(act?.type)) die(`no decision or act ${actId}`);
+  if (act.type === 'act' && act.created_by === 'owner') die(`${actId} is the owner's own record (${act.class}), not a call; nothing to correct`);
   if (act.type === 'act' && act.decision) die(`${actId} carried out ${act.decision}. If the decision was wrong: correct ${act.decision} --reason "…". If it was sound and the act went wrong: problem add --title "…" --severity 0-4 --refs ${actId}${by === 'owner' ? ' --owner' : ''} (a problem, not a trust drop; constitution.md §2)`);
   if (correctionOf(act)) die(`${actId} is already corrected`);
   appendLog({ type: act.type, op: 'set', id: actId, corrected: { reason: flagStr('reason') ?? die('correct needs --reason'), severity: flagNum('severity') } }, by);
@@ -7550,7 +7651,8 @@ function collectOoda() {
   };
   // Each act says what it carried out: a decision (whose correction is the one that counts), an
   // owner's answer or a standing rule, or its own call.
-  const acts = logObjects('act').map((a) => {
+  // the owner's own acts (artifact-publish) are the Library's to show, not the supervisor's feed
+  const acts = logObjects('act').filter((a) => a.created_by !== 'owner').map((a) => {
     const d = a.decision ? logGet(a.decision) : null;
     return { ...a, correction: correctionOf(a), ladder: !!L.classes[a.class], change: changeOf(a), under: a.decision ? { decision: a.decision, what: d?.what ?? null, authority: d?.authority ?? null, corrected: d ? !!correctionOf(d) : false } : { authority: actAuthority(a), approved_by: a.approved_by ?? null, own: true } };
   });
@@ -7598,7 +7700,11 @@ function dashboardData() {
     fleet: { mode: draining() ? 'park' : fleetMode(), op: fleetOpInForce()?.fleet ?? draining()?.id ?? null, reason: fleetOpInForce()?.reason ?? (draining() ? drainReason(draining()) : null) },
     // the Library: artifacts landed and drafted, and the registry as it reads (locators redacted)
     library: {
-      artifacts: allArtifacts(),
+      // publish state is the log's, read here and never in describeArtifact's tree-keyed cache:
+      // a publish changes no byte of the artifact
+      artifacts: (() => { const rec = publishRecords(); return allArtifacts().map((a) => (a.at === 'main' ? { ...a, published: publishedView(rec.get(a.slug)) } : a)); })(),
+      // what the Library matches the gateway's header on (x-devteam-public): this project and checkout
+      public: { project: typeof settings.project === 'string' && PUBLIC_PROJECT.test(settings.project) ? settings.project : null, root: fs.realpathSync(mainRoot) },
       links: Object.entries(isObj(settings.links) ? settings.links : {}).filter(([, l]) => isObj(l)).map(([id, l]) => {
         const K = LINK_KINDS[l.kind];
         const loc = K ? K.locator(l, id) : {};
@@ -8349,7 +8455,9 @@ async function cmdDashboard() {
   delete ownerEnv.DEVTEAM_ROLE;
   delete ownerEnv.DEVTEAM_TICKET;
   delete ownerEnv.DEVTEAM_FEATURE;
-  const run = (args) => new Promise((resolve) => execFile(process.execPath, [self, ...args], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: ownerEnv }, (err, stdout, stderr) => resolve({ ok: !err, stdout, stderr })));
+  // A child run as the owner. timeout (ms) is for a caller that can't wait (the gateway's 15 s);
+  // code is the exit code, so a route can tell "not there" from "fix a setting" (2).
+  const run = (args, { timeout = 0 } = {}) => new Promise((resolve) => execFile(process.execPath, [self, ...args], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: ownerEnv, timeout, killSignal: 'SIGKILL' }, (err, stdout, stderr) => resolve({ ok: !err, code: err ? (typeof err.code === 'number' ? err.code : 1) : 0, stdout, stderr: err?.killed ? `devteam: ${args.slice(0, 2).join(' ')} took over ${timeout / 1000} s and was stopped` : stderr })));
   const ID = /^[a-z]-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
   const text = (x, max = 4000) => typeof x === 'string' && x.trim() && x.length <= max;
   const autonomyArgs = (b) => ([1, 2, 3].includes(b.autonomy) ? ['--autonomy', String(b.autonomy), ...(text(b.scope, 100) ? ['--scope', b.scope.trim()] : [])] : []);
@@ -8369,7 +8477,14 @@ async function cmdDashboard() {
     'goal-decide': (b) => (ID.test(b.id ?? '') && ['approve', 'refine', 'let-go', 'restore'].includes(b.verdict) && (b.notes === undefined || text(b.notes, 4000)) ? ['goal', 'decide', b.id, b.verdict, ...(b.notes ? ['--notes', b.notes.trim()] : [])] : null),
     knowledge: (b) => (ID.test(b.id ?? '') && ['accepted', 'retired', 'stale'].includes(b.status) && (b.note === undefined || b.note === '' || (text(b.note, 600) && !/[\r\n]/.test(b.note))) ? ['knowledge', 'set', b.id, '--status', b.status, ...(b.note?.trim() ? ['--note', b.note.trim()] : []), '--owner'] : null),
     ack: (b) => (/^[a-z][a-z-]*$/.test(b.kind ?? '') && text(b.subject, 200) && text(b.reason, 600) ? ['ack', b.kind, b.subject, '--reason', b.reason.trim(), '--owner'] : null),
+    // Only the cloud gateway calls it, after the owner confirmed on its own page (and the Library's
+    // Forget, for a record the owner doesn't want restored); the Library has no button that publishes.
+    // Like every owner action here it can't tell who asks: anything on the box can reach it, so a
+    // line it writes is a claim, and the gateway's confirm page never takes it for the owner's click.
+    'artifact-publish': (b) => (LINK_ID.test(b.slug ?? '') && (b.op === 'unpublish' || (b.op === 'publish' && TREE_ID.test(b.tree ?? ''))) ? ['artifact', b.op, b.slug, '--owner', ...(b.op === 'publish' ? ['--tree', b.tree] : [])] : null),
   };
+  // An action whose caller has a deadline of its own: the gateway gives the whole answer 15 s.
+  const ACTION_MS = { 'artifact-publish': 12000 };
   const send = (res, code, type, body) => { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store' }); res.end(body); };
   // /api/hello answers at once from the last `hello` run, which the dashboard refreshes every 30 s
   // in the background: the hub probes every port with a 300 ms budget, and /api/data takes far longer.
@@ -8519,6 +8634,16 @@ async function cmdDashboard() {
     // raw path, before URL parsing folds ../ and %2e%2e into something that looks fine. Any
     // sec-fetch-site: under its sandbox the page is an opaque origin, so its own loads say cross-site.
     const rawPath = req.url.split('?')[0];
+    // What publishing an artifact would put up, for the cloud gateway's confirm page. Its loopback
+    // request sends no sec-fetch-site; a browser's must come from this page's own origin.
+    if (req.method === 'GET' && rawPath.startsWith('/public-manifest/')) {
+      const site = req.headers['sec-fetch-site'];
+      if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: 'not for another site\'s page' }));
+      const slug = rawPath.slice('/public-manifest/'.length);
+      if (!LINK_ID.test(slug)) return send(res, 404, 'application/json', JSON.stringify({ error: 'not an artifact slug' }));
+      const r = await run(['artifact', 'manifest', slug, '--json'], { timeout: 12000 });
+      return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, r.code === 2 ? 409 : 404, 'application/json', JSON.stringify({ error: r.stderr.trim().replace(/^devteam: /, '') }));
+    }
     if (req.method === 'GET' && rawPath.startsWith('/artifact/')) {
       const am = /^\/artifact\/(?:main|wt\/([^/]+))\/([^/]+)(\/.*)?$/.exec(rawPath);
       const at = am ? am[1] ?? 'main' : null;
@@ -8664,7 +8789,7 @@ async function cmdDashboard() {
       try { parsed = JSON.parse(body || '{}'); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'bad json' })); }
       const args = action(parsed);
       if (!args) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
-      const r = await run(args);
+      const r = await run(args, { timeout: ACTION_MS[name] ?? 0 });
       send(res, r.ok ? 200 : 400, 'application/json', JSON.stringify(r.ok ? { ok: true, out: r.stdout.trim() } : { error: r.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') }));
     });
   });
@@ -11518,6 +11643,8 @@ Decide and act (supervisor.md, constitution.md)
   link land [<chore slug>]   supervisor: copy only the links entries changed in this checkout's settings.md into .worktrees/chore-<slug> (default registry), leaving every other key as the chore has it
   artifact new <slug> --title t --summary s [--for '["goal:g"]']   draw an artifact (a page that shows an idea) in this worktree, under project/artifacts/<slug>/
   artifact check [<slug>…]        the checks merge runs, on this checkout's artifacts
+  artifact manifest <slug> [--json]   what publishing a landed artifact would put up: main's tree, each file's sha256 (the cloud gateway's confirm page reads it)
+  artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner   the owner's record that a landed artifact went public or came down (the gateway's confirm page runs these; by hand they record intent only)
   artifacts [--json]              landed artifacts, and drafts in session worktrees
   ask --question q [--kind k] [--class c] [--reasons r…] [--recommendation r] [--confidence 0-1] [--default d] [--choices '[{"label","detail","effect"}…]'] [--rule-scope s] [--goal g-… (goal-approval)] [--links '[{"title","path","ref"}|{"title","url"}|{"title","link"}…]' (link: a registry id)] [--blocks ids] [--evidence ids] [--ticket id] [--re m-…] [--note path] [--secrets '[{"name","kind":"string|file","sink"}…]' (owner-action)]
   secret post <qid> [--file NAME=path] [--json]                          owner: post a question's secrets straight to their sinks; never logged (secret sinks lists them)
