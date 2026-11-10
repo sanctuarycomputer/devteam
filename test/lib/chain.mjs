@@ -1444,9 +1444,10 @@ process.exit(${code});
       const q4 = must(['ask', '--class', 'production-remediation', '--blocks', 'remediation:restart-web', '--question', 'Restart once more?', '--recommendation', 'do it', '--reasons', 'below-rung', '--owner-said', 'yes again'], sup);
       must(['answer', q4, 'do it']);
       const d4 = decide(q4, ['remediation:restart-web']).out;
-      landSettings((txt) => txt.replace(`"sha": "${sha('restart.mjs')}"`, `"sha": "${'b'.repeat(40)}"`));
+      const pinned = fs.readFileSync(path.join(repo, 'docs/devteam/project/settings.md'), 'utf8');
+      landSettings((txt) => txt.replace(/("restart-web": \{[^}]*?"sha": ")[0-9a-f]{40}/, `$1${'b'.repeat(40)}`));
       assert.match(dt(['remediate', 'restart-web', '--decision', d4], sup).err, /changed since/);
-      landSettings((txt) => txt.replace(`"sha": "${'b'.repeat(40)}"`, `"sha": "${sha('restart.mjs')}"`));
+      landSettings(() => pinned);
       // a rollback to a release the sensors saw, across a production migration since it
       const rel = json(must(['log', '--type', 'observation', '--json'])).filter((o) => o.kind === 'deploy' && /^sensor:[^:]+:deploy:/.test(o.source_key ?? '')).map((o) => /: release (\S+)/.exec(o.detail)?.[1]).find(Boolean);
       assert.ok(rel, 'an earlier test observed a deploy');
