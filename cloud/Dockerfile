@@ -203,7 +203,15 @@ COPY --chmod=644 docs/devteam/process/operator.md /opt/devteam/
 COPY --chmod=755 cloud/box-supervisors /usr/local/bin/box-supervisors
 COPY --chmod=755 <<'EOF' /usr/local/bin/box-status
 #!/bin/sh
-exec box-supervisors --status
+exec box-supervisors --status "$@"
+EOF
+COPY --chmod=755 <<'EOF' /usr/local/bin/box-tell
+#!/bin/sh
+exec box-supervisors --tell "$@"
+EOF
+COPY --chmod=755 <<'EOF' /usr/local/bin/box-alert
+#!/bin/sh
+exec box-supervisors --alert "$@"
 EOF
 COPY --chmod=755 <<'EOF' /usr/local/bin/box-pg
 #!/bin/sh
@@ -275,6 +283,7 @@ devteam box. Window 0 (operator) looks after the box: tell it what you want. Fir
 Add a repo:  cd ~/code && gh repo clone <owner/repo> && cd <repo> && claude "Use github.com/sanctuarycomputer/devteam to set up a fleet in this repo"
 Tools: languages per project with mise (mise install; asdf works too). box-pg 16 starts another Postgres. ~/.box/boot.sh is what starts at boot.
 Expo: npx expo start --tunnel for your phone; eas build for builds.
+Heroku: heroku login -i, with a token from heroku authorizations:create --expires-in <seconds> --scope <scopes> on your laptop as the password. It lands in ~/.netrc, readable by every agent here, so keep it narrow and short. (The browser login is refused from another IP.)
 tmux: C-b s lists every session (each repo's supervisor and its workers); C-b d leaves one. touch ~/.devteam-quiet hides this.
 MOTD
 RC
@@ -283,7 +292,10 @@ fi
 # a boot that never got as far as bringing them back must not lose them to the next.
 up="$HOME/.devteam-supervisors"
 # Added to what is there: a supervisor the last restore could not start stays listed.
-if [ -s "$up" ]; then cat "$up" >> "$up.boot"; sort -u -o "$up.boot" "$up.boot"; rm -f "$up"; fi
+if [ -s "$up" ]; then cat "$up" >> "$up.boot"; sort -u -o "$up.boot" "$up.boot"; fi
+# An entry no restore has used for days is out of date: whoever it held has been stopped or restarted since.
+box-supervisors --age-boot
+rm -f "$up"
 # Window 0 is the operator (operator.md): the first thing the Terminal shows, and what restores the fleet.
 mkdir -p operator
 if ! tmux has-session -t home 2>/dev/null; then
@@ -295,15 +307,35 @@ if ! tmux has-session -t home 2>/dev/null; then
   tmux send-keys -t home:operator -l "export DEVTEAM_ROLE=operator; claude $c --dangerously-skip-permissions --append-system-prompt \"\$(cat /opt/devteam/operator.md)\" '$ask'"
   tmux send-keys -t home:operator Enter
 fi
-# The operator's tick: typed into its window every 30 minutes, unless a dialog is up (Enter would answer it).
+# The operator's tick: typed into its window every 30 minutes. Never over someone's half-typed line, a
+# dialog (Enter would answer it), a usage limit, or into whatever else has the pane (a shell, vim, psql:
+# box-supervisors --pane-state says which). Held back, it tries again each minute for 10 minutes, then
+# waits for the next one, and after three in a row it raises an alert (one, however long it lasts), so a held
+# operator can't go quiet.
 # Claude Code queues what's typed during a turn, so a busy operator just gets it after.
 tick='Check on the box and your supervisors.'
-( while :; do
+( held=0; raised=
+  while :; do
     sleep "${DEVTEAM_OPERATOR_TICK_SECONDS:-1800}"
-    screen=$(tmux capture-pane -p -t home:operator 2>/dev/null) || continue
-    case "$(tmux display-message -p -t home:operator '#{pane_current_command}' 2>/dev/null)" in ''|bash|-bash|sh|dash) continue ;; esac
-    printf '%s\n' "$screen" | grep -v '^[[:space:]]*$' | tail -15 | grep -qE 'Do you (trust|want to)|Press Enter to continue|❯ *1\. *Yes|Yes, I accept|No, exit|Select login method|Paste code|text style|\[y/n\]|limit (reached|hit)' && continue
-    tmux send-keys -t home:operator -l "$tick"; tmux send-keys -t home:operator Enter
+    n=0; s=
+    while [ "$n" -lt "${DEVTEAM_OPERATOR_TICK_RETRIES:-10}" ]; do
+      p=$(tmux display-message -p -t home:operator '#{pane_id}' 2>/dev/null) && s=$(box-supervisors --pane-state "$p" 2>/dev/null) || s=gone
+      case $s in ready|busy) tmux send-keys -t "$p" -l "$tick"; tmux send-keys -t "$p" Enter; s=; break ;; esac
+      n=$((n + 1))
+      sleep "${DEVTEAM_OPERATOR_TICK_RETRY_SECONDS:-60}"
+    done
+    if [ -z "$s" ]; then
+      # only what this loop raised: the operator's own alert is the operator's to clear
+      if [ -n "$raised" ] && [ "$(cat "$HOME/.box/alert" 2>/dev/null)" = "$raised" ]; then box-supervisors --alert --clear >/dev/null; fi
+      held=0; raised=
+    else
+      held=$((held + 1))
+      note "the operator's check-in was held back: its pane is at $s ($held in a row)"
+      if [ "$held" -ge "${DEVTEAM_OPERATOR_TICK_ALERT_AFTER:-3}" ]; then
+        raised="The operator's check-ins are being held back: its pane is at $s. Look at window 0 of the terminal."
+        box-supervisors --alert "$raised" >/dev/null
+      fi
+    fi
   done ) &
 # The box's global tools, on the disk: edit the file to change them, and they come back each boot.
 mkdir -p .box .config/mise
@@ -323,6 +355,18 @@ shellcheck = "latest"
 sops = "latest"
 age = "latest"
 "npm:eas-cli" = "latest"
+
+# Heroku's standalone CLI brings its own Node (the npm one runs on a repo's pinned Node, and refuses
+# one older than 20). Only heroku is exposed: bin/ also holds that node, which must not stand in for a repo's.
+[tools."http:heroku"]
+version = "11.12.1"
+bin_path = "exposed"
+strip_components = 1
+postinstall = "mkdir -p \"$MISE_TOOL_INSTALL_PATH/exposed\" && ln -sf ../bin/heroku \"$MISE_TOOL_INSTALL_PATH/exposed/heroku\""
+
+[tools."http:heroku".platforms]
+linux-x64 = { url = "https://cli-assets.heroku.com/versions/11.12.1/41f59c1/heroku-v11.12.1-41f59c1-linux-x64.tar.gz", checksum = "sha256:84bde36a3fa91df7832e2af5308591571d9d2a2efd80d6c7031aaf36bd2b4af7" }
+linux-arm64 = { url = "https://cli-assets.heroku.com/versions/11.12.1/41f59c1/heroku-v11.12.1-41f59c1-linux-arm64.tar.gz", checksum = "sha256:ea38ad6e5bbe90380cf9b8e3ad8f6cf6bc23b913008814432902e9d26ce8786e" }
 TOML
 ( mise install ) >> .box/mise.log 2>&1 &
 # What this box starts at boot, before any supervisor comes back: its `brew services`, on the disk.
@@ -369,6 +413,11 @@ while :; do
       *) echo "$r" ;;
     esac
   done > "$up.new" && mv "$up.new" "$up"
+  # A supervisor back up is settled: it comes off the restore list, so stopping it later keeps it stopped.
+  [ -s "$up" ] && [ -f "$up.boot" ] && {
+    grep -Fxvf "$up" "$up.boot" > "$up.left" 2>/dev/null
+    if [ -s "$up.left" ]; then mv "$up.left" "$up.boot"; else rm -f "$up.boot" "$up.left"; fi
+  }
 done &
 while :; do ttyd -d 3 -i lo -p 7681 -W -t macOptionClickForcesSelection=true -t fontSize=14 -t titleFixed=devteam tmux new-session -A -s home; sleep 1; done
 EOF
