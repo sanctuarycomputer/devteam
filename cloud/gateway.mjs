@@ -310,6 +310,27 @@ const INSTALL = Object.assign(Object.create(null), {
   ...Object.fromEntries(ICON_SIZES.map((n) => [`/icon-${n}.png`, { type: 'image/png', body: () => { if (!iconCache.has(n)) iconCache.set(n, iconPng(n)); return iconCache.get(n); } }])),
 });
 
+// --- public artifacts: what the owner published, served to anyone from the gateway's own copy ---
+// The kit's rules for serving an artifact, kept here because the gateway runs apart from any
+// checkout: its type map, its CDN list, its path rule and its policy. A test compares each with the
+// kit's, so a change there fails until it is made here too (and the box deploys with it).
+export const PUBLIC_TYPES = Object.assign(Object.create(null), { html: 'text/html; charset=utf-8', js: 'text/javascript; charset=utf-8', mjs: 'text/javascript; charset=utf-8', css: 'text/css; charset=utf-8', json: 'application/json', svg: 'image/svg+xml', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', avif: 'image/avif', ico: 'image/x-icon', glb: 'model/gltf-binary', gltf: 'model/gltf+json', bin: 'application/octet-stream', wasm: 'application/wasm', woff: 'font/woff', woff2: 'font/woff2', ttf: 'font/ttf', otf: 'font/otf', mp4: 'video/mp4', webm: 'video/webm', mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', txt: 'text/plain; charset=utf-8', md: 'text/plain; charset=utf-8', csv: 'text/plain; charset=utf-8' });
+export const PUBLIC_CDNS = ['https://cdnjs.cloudflare.com', 'https://cdn.jsdelivr.net', 'https://unpkg.com'];
+export const publicPathOk = (p) => /^[A-Za-z0-9._/-]+$/.test(p) && p.split('/').every((s) => s && !s.startsWith('.'));
+// The kit's artifact policy, its own folder as self, framed by nothing. The sandbox (no
+// allow-same-origin) makes the page an opaque origin, so it can't read or write the box's cookies.
+export const publicCsp = (self) => {
+  const cdns = PUBLIC_CDNS.join(' ');
+  return [
+    "default-src 'none'", `script-src 'unsafe-inline' 'unsafe-eval' ${self} ${cdns}`, `style-src 'unsafe-inline' ${self} ${cdns} https://fonts.googleapis.com`, `font-src ${self} ${cdns} https://fonts.gstatic.com data:`,
+    `img-src ${self} data: blob:`, `media-src ${self} data: blob:`, `connect-src ${self} ${cdns}`, `worker-src ${self} blob:`, "frame-src 'none'", "form-action 'none'", "base-uri 'none'",
+    "frame-ancestors 'none'", 'sandbox allow-scripts allow-forms allow-modals allow-pointer-lock',
+  ].join('; ');
+};
+const LINK_ID = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
+// a project's name, as the kit requires it for publishing: part of every public URL
+const PROJECT = /^[a-z0-9][a-z0-9._-]{0,62}$/;
+
 // --- the server ---------------------------------------------------------------------------------
 export function createGateway(opts = {}) {
   const PUB = publicUrl(opts.publicUrl);
@@ -328,6 +349,10 @@ export function createGateway(opts = {}) {
   const RP_ID = NAME;
   const TERM = `${pubUrl.protocol}//term.${pubUrl.host}`;
   const termHost = new URL(TERM).host;
+  // What the owner published, to anyone. Under the box's wildcard name like term., and never an
+  // instance's: those are all digits.
+  const PUBLIC = `${pubUrl.protocol}//public.${pubUrl.host}`;
+  const publicHost = new URL(PUBLIC).host;
   const COOKIE = 'devteam_session';
   const dir = opts.dir ?? gatewayDir();
   const ttydPort = Number(opts.ttydPort ?? env.DEVTEAM_TTYD_PORT ?? 7681);
@@ -658,6 +683,37 @@ export function createGateway(opts = {}) {
   const TERM_CSP = `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; font-src data:; img-src data:; connect-src 'self' ${TERM.replace(/^http/, 'ws')}; frame-ancestors ${PUB}; base-uri 'none'; form-action 'none'`;
   const loginAt = (next) => `${PUB}/auth/login${next ? `?next=${encodeURIComponent(next)}` : ''}`;
 
+  // A published artifact, from the gateway's own copy alone: reads only, the raw path matched
+  // before any decoding, the gateway's own headers. Nothing here reads the cookie, sets one, or
+  // talks to an instance, so taking a port, rewriting main or forging log lines changes nothing.
+  const servePublic = (req, res) => {
+    if (!['GET', 'HEAD'].includes(req.method)) return send(res, 405, 'text/plain; charset=utf-8', 'GET or HEAD only', { allow: 'GET, HEAD' });
+    if (req.headers['service-worker'] || req.headers['sec-fetch-dest'] === 'serviceworker') return send(res, 403, 'text/plain; charset=utf-8', 'no service workers on this box');
+    const notFound = () => send(res, 404, 'text/plain; charset=utf-8', 'not found');
+    const m = /^\/([^/]+)\/([^/]+)(\/.*)?$/.exec(req.url.split('?')[0]);
+    if (!m || !PROJECT.test(m[1]) || !LINK_ID.test(m[2])) return notFound();
+    const pub = store.load().public ?? {};
+    const proj = Object.hasOwn(pub, m[1]) ? pub[m[1]] : null;
+    const art = proj && Object.hasOwn(proj.artifacts ?? {}, m[2]) ? proj.artifacts[m[2]] : null;
+    if (!art) return notFound();
+    if (m[3] === undefined) { res.writeHead(302, { location: `/${m[1]}/${m[2]}/`, 'cache-control': 'no-store', ...hsts }); return res.end(); }
+    const rel = m[3] === '/' ? 'index.html' : m[3].slice(1);
+    const f = publicPathOk(rel) && Object.hasOwn(art.files ?? {}, rel) ? art.files[rel] : null;
+    if (!f || !/^[0-9a-f]{64}$/.test(f.sha256 ?? '')) return notFound();
+    const tag = `"${f.sha256}"`;
+    const head = { etag: tag, 'cache-control': 'public, max-age=60', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': publicCsp(`${PUBLIC}/${m[1]}/${m[2]}/`), ...hsts };
+    const asked = String(req.headers['if-none-match'] ?? '').split(',').map((t) => t.trim());
+    if (asked.includes('*') || asked.includes(tag)) { res.writeHead(304, head); return res.end(); }
+    // no range requests, as in the kit: the whole file or its headers
+    const all = { ...head, 'content-type': PUBLIC_TYPES[rel.split('.').pop().toLowerCase()] ?? 'application/octet-stream', 'content-length': f.size };
+    if (req.method === 'HEAD') { res.writeHead(200, all); return res.end(); }
+    const file = path.join(dir, 'public', 'blobs', f.sha256);
+    const st = fs.statSync(file, { throwIfNoEntry: false });
+    if (!st || st.size !== f.size) return send(res, 500, 'text/plain; charset=utf-8', 'the box has lost its copy of this page: publish it again');
+    res.writeHead(200, all);
+    pipeline(fs.createReadStream(file), res, () => {});
+  };
+
   // Room for a jar a page has stuffed; past it, see clientError below.
   const server = http.createServer({ maxHeaderSize: 64 * 1024 }, async (req, res) => {
     // origin-form only: a request line with a full URL, or *, is refused
@@ -668,8 +724,13 @@ export function createGateway(opts = {}) {
     // Our own names only; and anything but a read must come from a page on the same name.
     const isBox = req.headers.host === pubUrl.host;
     const isTerm = req.headers.host === termHost;
-    const port = isBox || isTerm ? null : instanceOf(req.headers.host);
-    if (!isBox && !isTerm && !port) return send(res, 421, 'text/plain; charset=utf-8', `this box answers only on its own names: open ${PUB}/`);
+    const isPublic = req.headers.host === publicHost;
+    const port = isBox || isTerm || isPublic ? null : instanceOf(req.headers.host);
+    if (!isBox && !isTerm && !isPublic && !port) return send(res, 421, 'text/plain; charset=utf-8', `this box answers only on its own names: open ${PUB}/`);
+    // Anyone's, so before every check that is about the owner (Origin, cookie, session).
+    if (isPublic) {
+      try { return servePublic(req, res); } catch (e) { return send(res, e?.unreadable ? 503 : 500, 'text/plain; charset=utf-8', 'this page can\'t be served just now'); }
+    }
     const own = isBox ? PUB : isTerm ? TERM : instanceOrigin(port);
     if (!['GET', 'HEAD'].includes(req.method) && req.headers.origin !== own) return send(res, 403, 'text/plain; charset=utf-8', 'only from this box\'s own pages');
     // The kit has no service workers. One an agent's page registers on an instance's name would

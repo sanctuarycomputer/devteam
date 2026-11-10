@@ -10,6 +10,7 @@ import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -72,6 +73,7 @@ async function gateway(name, extra = {}) {
   const inst = (p) => `http://${p}.box.localhost:${port}`;
   const auth = publicUrl;
   const term = `http://term.box.localhost:${port}`;
+  const site = `http://public.box.localhost:${port}`;
   const ttydPage = path.join(tmp, `${name}-ttyd.html`);
   fs.writeFileSync(ttydPage, 'the gateway\'s copy of ttyd');
   const logs = [];
@@ -83,7 +85,7 @@ async function gateway(name, extra = {}) {
   let jar = '';
   // on: an instance's port, for its subdomain; else the box's own name
   const req = (method, route, { body, headers = {}, cookie = jar, on = route.startsWith('/auth/') ? 'auth' : undefined } = {}) => new Promise((resolve, reject) => {
-    const self = on === 'auth' ? auth : on === 'term' ? term : on ? inst(on) : publicUrl;
+    const self = on === 'auth' ? auth : on === 'term' ? term : on === 'public' ? site : on ? inst(on) : publicUrl;
     const h = { host: new URL(self).host, ...(method !== 'GET' ? { origin: self, 'content-type': 'application/json' } : {}), ...(cookie ? { cookie } : {}), ...headers };
     for (const k of Object.keys(h)) if (h[k] === undefined) delete h[k];
     const r = http.request({ host: '127.0.0.1', port, method, path: route, headers: h }, (res) => {
@@ -109,7 +111,7 @@ async function gateway(name, extra = {}) {
     const o = await req('POST', '/auth/login/options', { on: 'auth', body: {}, cookie: '' });
     return req('POST', '/auth/login/verify', { on: 'auth', body: a.get(o.json, auth, how), cookie: '' });
   };
-  return { g, port, publicUrl, inst, auth, term, ttydPort, logs, token, req, claim, login, jar: () => jar, setJar: (v) => { jar = v; }, dir, close: () => new Promise((r) => g.server.close(r)) };
+  return { g, port, publicUrl, inst, auth, term, site, ttydPort, logs, token, req, claim, login, jar: () => jar, setJar: (v) => { jar = v; }, dir, close: () => new Promise((r) => g.server.close(r)) };
 }
 
 test('cbor and cose: what WebAuthn needs, nothing more', () => {
@@ -818,4 +820,88 @@ test('a passkey made for another name says how to get back in', async () => {
   const logs = [];
   G.createGateway({ publicUrl: 'http://box.localhost:1', dir, log: (m) => logs.push(m) });
   assert.match(logs.join('\n'), /devteam-reclaim/);
+});
+
+// ===== public artifacts: what the owner published, to anyone, from the gateway's own copy =====
+
+// A published artifact as the gateway keeps it: its blobs, and its entry in state.json.
+function seedPublic(dir, project, slug, files, { root = '/srv/x', port = P } = {}) {
+  const blobs = path.join(dir, 'public', 'blobs');
+  fs.mkdirSync(blobs, { recursive: true });
+  const f = path.join(dir, 'state.json');
+  const s = JSON.parse(fs.readFileSync(f, 'utf8'));
+  const entry = {};
+  for (const [rel, text] of Object.entries(files)) {
+    const b = Buffer.from(text);
+    const h = crypto.createHash('sha256').update(b).digest('hex');
+    fs.writeFileSync(path.join(blobs, h), b);
+    entry[rel] = { sha256: h, size: b.length };
+  }
+  const pub = s.public ?? {};
+  pub[project] = { root, port, artifacts: { ...(pub[project]?.artifacts ?? {}), [slug]: { tree: 'a'.repeat(40), title: slug, at: new Date().toISOString(), files: entry } } };
+  fs.writeFileSync(f, JSON.stringify({ ...s, public: pub }));
+}
+
+test('public.<box>: anyone reads a published artifact, from the gateway\'s own copy, under its own headers', async () => {
+  const gw = await gateway('public-serve');
+  try {
+    assert.equal((await gw.claim(authenticator())).status, 200);
+    const page = '<!doctype html><p>hi';
+    seedPublic(gw.dir, 'alpha', 'hello', { 'index.html': page, 'app.js': 'x()', 'img/a.png': 'png', 'data.weird': 'w' });
+    const get = (route, headers = {}, method = 'GET') => gw.req(method, route, { on: 'public', cookie: '', headers });
+    let r = await get('/alpha/hello/');
+    assert.equal(r.status, 200);
+    assert.equal(r.body, page);
+    const etag = `"${crypto.createHash('sha256').update(page).digest('hex')}"`;
+    assert.deepEqual([r.headers['content-type'], r.headers['content-length'], r.headers.etag, r.headers['cache-control'], r.headers['x-content-type-options'], r.headers['referrer-policy']], ['text/html; charset=utf-8', String(Buffer.byteLength(page)), etag, 'public, max-age=60', 'nosniff', 'no-referrer']);
+    assert.equal(r.headers['set-cookie'], undefined);
+    const self = `${gw.site}/alpha/hello/`;
+    const csp = r.headers['content-security-policy'].split('; ');
+    for (const d of ["default-src 'none'", `script-src 'unsafe-inline' 'unsafe-eval' ${self} https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://unpkg.com`, `connect-src ${self} https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://unpkg.com`, `img-src ${self} data: blob:`, "form-action 'none'", "frame-ancestors 'none'", 'sandbox allow-scripts allow-forms allow-modals allow-pointer-lock']) assert.ok(csp.includes(d), `the policy has ${d}: ${csp.join('; ')}`);
+    assert.doesNotMatch(r.headers['content-security-policy'], /allow-same-origin|127\.0\.0\.1/);
+    assert.equal((await get('/alpha/hello/app.js')).headers['content-type'], 'text/javascript; charset=utf-8');
+    assert.equal((await get('/alpha/hello/img/a.png')).headers['content-type'], 'image/png');
+    assert.equal((await get('/alpha/hello/data.weird')).headers['content-type'], 'application/octet-stream');
+    // HEAD: the headers and no body; a strong tag that matches, or *, is a 304
+    r = await get('/alpha/hello/', {}, 'HEAD');
+    assert.deepEqual([r.status, r.body, r.headers['content-length'], r.headers.etag], [200, '', String(Buffer.byteLength(page)), etag]);
+    assert.equal((await get('/alpha/hello/', { 'if-none-match': `"x", ${etag}` })).status, 304);
+    assert.equal((await get('/alpha/hello/', { 'if-none-match': '*' })).status, 304);
+    assert.equal((await get('/alpha/hello/', { 'if-none-match': `W/${etag}` })).status, 200, 'a weak tag is no match');
+    // reads only, and no service workers
+    r = await gw.req('POST', '/alpha/hello/', { on: 'public', cookie: '', body: {} });
+    assert.deepEqual([r.status, r.headers.allow], [405, 'GET, HEAD']);
+    assert.equal((await get('/alpha/hello/app.js', { 'service-worker': 'script' })).status, 403);
+    assert.equal((await get('/alpha/hello/app.js', { 'sec-fetch-dest': 'serviceworker' })).status, 403);
+    // signed in or not, the same answer: the cookie is never read on this name, and none is set
+    r = await gw.req('GET', '/alpha/hello/', { on: 'public' });
+    assert.deepEqual([r.status, r.body, r.headers['set-cookie']], [200, page, undefined]);
+    // nothing is listed, nothing unpublished is there, and the raw path is matched before decoding
+    for (const bad of ['/', '/alpha/', '/alpha/nope/', '/beta/hello/', '/alpha/hello/nope.js', '/alpha/hello/.env', '/alpha/hello/%2e%2e/x', '/alpha/hello/../hello/app.js', '/Alpha/hello/', '/alpha/hello//app.js', '/box.json', '/auth/login'])
+      assert.equal((await get(bad)).status, 404, bad);
+    r = await get('/alpha/hello');
+    assert.deepEqual([r.status, r.headers.location, r.headers['cache-control']], [302, '/alpha/hello/', 'no-store'], 'to the trailing slash, when published');
+    assert.equal((await get('/alpha/nope')).status, 404, 'and only then');
+    assert.equal((await gw.req('GET', '/', { headers: { host: `pub.box.localhost:${gw.port}` } })).status, 421, 'the box still answers only on its own names');
+  } finally { await gw.close(); }
+});
+
+test('public.<box> serves artifacts with the kit\'s own type map, CDN list and policy, kept in the gateway', () => {
+  const src = fs.readFileSync(path.join(kit, 'scripts', 'devteam.mjs'), 'utf8');
+  const one = (name) => { const m = new RegExp(`^const ${name} = (.+);$`, 'm').exec(src); assert.ok(m, `the kit defines ${name} on one line`); return m[1]; };
+  const at = src.indexOf('const artifactCsp = ');
+  assert.ok(at > 0, 'the kit defines artifactCsp');
+  const cspSrc = src.slice(at, src.indexOf('\n};\n', at) + 3);
+  const ctx = vm.createContext({ HUB_PORT: 4320 });
+  vm.runInContext(`ARTIFACT_TYPES = ${one('ARTIFACT_TYPES')}; ARTIFACT_CDNS = ${one('ARTIFACT_CDNS')};\n${cspSrc}\nglobalThis.artifactCsp = artifactCsp;`, ctx);
+  assert.deepEqual({ ...G.PUBLIC_TYPES }, { ...ctx.ARTIFACT_TYPES }, 'the type map');
+  assert.deepEqual([...G.PUBLIC_CDNS], [...ctx.ARTIFACT_CDNS], 'the CDN list');
+  const self = 'https://public.box.example.com/alpha/hello/';
+  const kitCsp = ctx.artifactCsp('http://127.0.0.1:4321', self).split('; ');
+  const gwCsp = G.publicCsp(self).split('; ');
+  assert.deepEqual(gwCsp.filter((d) => !d.startsWith('frame-ancestors ')), kitCsp.filter((d) => !d.startsWith('frame-ancestors ')), 'the same policy');
+  assert.ok(gwCsp.includes("frame-ancestors 'none'"), 'framed by nothing');
+  const pathOk = /^const artifactPathOk = (.+);$/m.exec(src)[1];
+  const kitOk = vm.runInContext(`(${pathOk})`, vm.createContext({}));
+  for (const p of ['index.html', 'a/b.js', '.env', 'a/.git/x', 'a//b', 'a/../b', 'a%2eb', 'é.png', '__proto__']) assert.equal(G.publicPathOk(p), kitOk(p), p);
 });
