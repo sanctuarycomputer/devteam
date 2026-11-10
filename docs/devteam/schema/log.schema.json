@@ -1196,7 +1196,7 @@
           },
           "links": {
             "type": "array",
-            "description": "What the owner must look at to answer (a spec, a plan, a mock): a path in the repo at ref (default main), a URL, a registry link by id, or an artifact by slug.",
+            "description": "What the owner must look at to answer (a spec, a plan, a mock): a path in the repo at ref (default main), a URL, a registry link by id, an artifact by slug, or a preview by name.",
             "items": {
               "type": "object",
               "properties": {
@@ -1225,6 +1225,11 @@
                   "type": "string",
                   "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
                   "description": "An artifact's slug (project/artifacts/<slug>/); the dashboard opens it in its viewer."
+                },
+                "preview": {
+                  "type": "string",
+                  "pattern": "^[a-z]{3,7}-[a-z]{3,7}(?:-[1-9]\\d?)?$",
+                  "description": "A preview's name (devteam.mjs preview list); the dashboard links it for this machine and shows whether it is up."
                 },
                 "at": {
                   "type": "string",

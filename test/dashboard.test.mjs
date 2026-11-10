@@ -242,6 +242,56 @@ test('the Library shows each landed artifact\'s publish state, from the log and 
   assert.match(html, /Publishing happens on the cloud box/);
 });
 
+test('the Library lists previews with the link for where the page is', () => {
+  const html = fs.readFileSync(path.join(kit, 'dashboard/index.html'), 'utf8');
+  const src = html.slice(html.indexOf('/* preview-cards start */'), html.indexOf('/* preview-cards end */'));
+  assert.ok(src.length > 200, 'the preview-cards block is marked in index.html');
+  const ctx = vm.createContext({});
+  vm.runInContext(`${src}\n;globalThis.api = { previewHere, previewUrl, previewState };`, ctx);
+  const { previewHere, previewUrl, previewState } = ctx.api;
+  const box = { protocol: 'https:', host: '4321.box.example.com' };
+  const me = previewHere(box, true);
+  assert.deepEqual({ ...me }, { proto: 'https:', box: 'box.example.com' });
+  assert.equal(previewHere({ protocol: 'http:', host: '127.0.0.1:4321' }, true), null, 'a laptop');
+  assert.equal(previewHere(box, false), null, 'a box whose gateway has no previews header');
+  assert.equal(previewHere({ protocol: 'https:', host: 'box.example.com' }, true), null, 'not an instance name');
+  assert.equal(previewUrl(me, { name: 'cool-tiger', port: 5173 }), 'https://cool-tiger.box.example.com/');
+  assert.equal(previewUrl(null, { name: 'cool-tiger', port: 5173 }), 'http://127.0.0.1:5173/');
+  assert.equal(previewUrl(previewHere({ protocol: 'http:', host: '4321.box.localhost:8123' }, true), { name: 'cool-tiger', port: 5173 }), 'http://cool-tiger.box.localhost:8123/', 'a local gateway keeps its port');
+  const now = Date.parse('2026-11-10T12:00:00Z');
+  const future = '2026-11-12T00:00:00Z';
+  const S = (p) => { const r = previewState({ expires: future, ...p }, now); return [r.state, [...r.actions]]; };
+  // the spec's table, row by row
+  assert.deepEqual(S({ up: null }), ['checking', ['open', 'copy', 'stop']]);
+  assert.deepEqual(S({ up: true }), ['live', ['open', 'copy', 'stop']]);
+  assert.deepEqual(S({ up: true, run: true }), ['live', ['open', 'copy', 'stop']]);
+  assert.deepEqual(S({ up: false, run: true }), ['not-running', ['start', 'open', 'stop']]);
+  assert.deepEqual(S({ up: false, run: false }), ['not-answering', ['open', 'stop']]);
+  assert.equal(previewState({ up: false, run: false, expires: future, down_since: '2026-11-10T11:00:00Z' }, now).since, '2026-11-10T11:00:00Z');
+  assert.deepEqual(S({ up: true, expires: '2026-11-01T00:00:00Z' }), ['expired', ['stop']]);
+  assert.deepEqual(S({ up: false, run: true, expires: '2026-11-01T00:00:00Z' }), ['expired', ['stop']]);
+});
+
+test('a question links a preview: the link for this page, with its state, and nothing to open when it is gone', () => {
+  const html = fs.readFileSync(path.join(kit, 'dashboard/index.html'), 'utf8');
+  const src = html.slice(html.indexOf('/* preview-cards start */'), html.indexOf('/* preview-cards end */'));
+  const ctx = vm.createContext({});
+  vm.runInContext(`${src}\n;globalThis.api = { previewHere, previewLinkHtml };`, ctx);
+  const { previewHere, previewLinkHtml } = ctx.api;
+  const esc = (x) => String(x).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const me = previewHere({ protocol: 'https:', host: '4321.box.example.com' }, true);
+  const row = (state, port = 5173) => ({ preview: 'cool-tiger', title: 'The <b>flow</b>', port, state });
+  const live = previewLinkHtml(row('live'), me, esc);
+  assert.match(live, /<a href="https:\/\/cool-tiger\.box\.example\.com\/" target="_blank" rel="noopener noreferrer">The &lt;b&gt;flow&lt;\/b&gt;<\/a>/);
+  assert.match(live, /live/);
+  assert.match(previewLinkHtml(row('live'), null, esc), /href="http:\/\/127\.0\.0\.1:5173\/"/);
+  assert.match(previewLinkHtml(row('down'), me, esc), /not answering/);
+  assert.match(previewLinkHtml(row('checking'), me, esc), /checking/);
+  const gone = previewLinkHtml(row('gone', null), me, esc);
+  assert.doesNotMatch(gone, /<a /);
+  assert.match(gone, /no longer offered/);
+});
+
 // The page polls every 10s here; the fixture polls every 300ms, and a test can stop /api/data
 // answering to catch a refresh in flight (the fetch outlasts the moment focus arrives).
 const POLL_FAST = `(() => {
@@ -250,16 +300,18 @@ const POLL_FAST = `(() => {
   const rf = window.fetch;
   window.__polls = 0;
   window.__gate = null;
-  window.__answerDelay = 0;
+  window.__answerHold = null;
   window.fetch = async (u, o) => {
     if (String(u).startsWith('/api/data')) { window.__polls++; if (window.__gate) await window.__gate; return rf(u, o); }
-    if (String(u).startsWith('/api/answer') && window.__answerDelay) await new Promise((r) => setTimeout(r, window.__answerDelay));
+    if (String(u).startsWith('/api/answer') && window.__answerHold) await window.__answerHold;
     return rf(u, o);
   };
 })()`;
 
-test('typing in the dashboard: a refresh never takes the field, the caret or the scroll, and holding it can\'t wedge', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
+test('typing in the dashboard: a refresh never takes the field, the caret or the scroll, and holding it can\'t wedge', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-focus-'));
+  // in t.after, each as it starts: they run on a failure and a timeout, where a finally may never be reached
+  t.after(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const env = { ...process.env, DEVTEAM_HUB_PORT: String(PORTS + 80), DEVTEAM_PORT_BASE: String(PORTS + 81), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
   for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'TMUX', 'TMUX_PANE']) delete env[k];
   const root = bareProject(base, 'focus');
@@ -272,9 +324,12 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
   for (let i = 0; i < 12; i++) ask(`Filler ${i}?`); // enough cards that the page scrolls
   const port = await freePort();
   const dash = startDashboard(root, env, ['--port', String(port)]);
+  t.after(() => dash.stop());
   const chrome = await openChrome();
+  t.after(() => chrome.close());
   const p = await chrome.newPage();
-  try {
+  t.after(() => p.close());
+  {
     await until(() => /dashboard on http/.test(dash.out()), 'the dashboard');
     await p.send('Page.enable');
     await p.send('Runtime.enable');
@@ -401,19 +456,25 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
     await t.test('Answer still works with a draft and held data, and isn\'t redrawn while it posts', async () => {
       await p.click(box);
       await newQuestion('Before the answer?');
-      await p.ev('window.__answerDelay = 900');
+      // held by the test, not by a clock: on a loaded runner the polls below can outlast any fixed delay
+      await p.ev('window.__answerHold = new Promise((r) => { window.__answerGo = r; }); void 0');
       await p.click(`button[data-answer="${Q}"]`);
       await soon(`document.querySelector('button[data-answer="${Q}"]')?.textContent === 'Posting…'`, 'the button posting');
       await polls();
       assert.equal(await p.ev(`document.querySelector('button[data-answer="${Q}"]')?.getAttribute('aria-busy')`), 'true', 'not redrawn mid-post');
+      await p.ev('window.__answerGo(); void 0');
       await soon(`!document.querySelector('${box}')`, 'the card answered and gone');
       const listed = spawnSync(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), 'questions', '--all', '--json'], { cwd: root, env, encoding: 'utf8' });
       assert.equal(JSON.parse(listed.stdout).find((x) => x.id === Q)?.status, 'answered', listed.stderr);
     });
-  } finally {
-    p.close();
-    await chrome.close();
-    await dash.stop();
-    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('the dashboard and hub pages parse: one stray quote and nothing shows at all', () => {
+  for (const page of ['index.html', 'hub.html']) {
+    const html = fs.readFileSync(path.join(kit, 'dashboard', page), 'utf8');
+    const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+    assert.ok(scripts.length >= 1, page);
+    for (const s of scripts) new vm.Script(s, { filename: page });
   }
 });

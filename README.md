@@ -28,7 +28,7 @@ docs/devteam/
     questions/<slug>/, questions/<qid>/   review pages the supervisor drew, and the owner's result.json for each, copied in by review result --commit; never changed once landed
     reviews/<feature>/, reviews/<design>/   graph and design review records
     retros/<date>.md
-  run/                         gitignored: the live log, prompts
+  run/                         gitignored: the live log, prompts, previews/ (a running dev server the owner can open)
 ```
 
 ## How it runs
@@ -40,6 +40,8 @@ docs/devteam/
 **Many projects, one machine.** Each project has its own tmux session (`devteam-<project>-<6 hex of its path>`, saved in `run/tmux-session`) and its own dashboard port: the next free one in 4321–4345, saved in `run/dashboard-port` and reused. Any running dashboard also serves the hub at http://127.0.0.1:4320: a tab per instance on the machine (its name, with a badge when its Inbox has something), that instance's own dashboard under the selected tab, and one "Notify me" for new Inbox items across all of them. The hub keeps no state and takes no action: each dashboard, served by its own repo's kit, stays on its own address inside the hub's frame, and may be framed only by itself and the hub. A dashboard answers only on the address it serves (`127.0.0.1` and `localhost`, or the `--host` it was started with), and the hub only on its own: a page elsewhere gets nothing, not even a read.
 
 **Artifacts.** Any session can draw an artifact, a page that shows the owner an idea instead of describing it: a UI mock, a flow, a mock docs site, a 3D model. It lives in `project/artifacts/<slug>/` and lands with the PR it was drawn in; the dashboard's **Library** lists landed ones and live drafts from every worktree beside the link registry, and opens each in a centered viewer or its own tab. An artifact loads its own files and pinned libraries from cdnjs, jsdelivr and unpkg, runs sandboxed with no other network and no reach into the dashboard, and sends nothing back: a decision on one is a question that links it, by name and inline (`[[name]]`). The owner can ask for one ("draw me a mock docs site"), and planners draw them for any goal with UI or a flow. `devteam.mjs artifact new|check`, `artifacts`. On a cloud box the owner can also publish a landed artifact to anyone, at `public.box.example.com/<project>/<slug>/` (below).
+
+**Previews.** Any session can show the owner a running dev server, before anything is committed: `devteam.mjs preview --run '<dev command>'` (or `preview <port>` for one it already runs). The name is two words derived from the project, the session and a label, so a link outlives a restart. The Library lists it above the artifacts, a question can cite it as `[[name]]`, and everything the kit started is stopped when the session goes. On a laptop the link is `http://127.0.0.1:<port>`. A preview is run state: seeing one approves nothing, and nothing of it is logged.
 
 **One log.** Everything structured is a line in one append-only JSON Lines log, validated against `schema/log.schema.json` on write and folded by timestamp with authority rules (owner > supervisor > planner > worker). State is computed from the log plus git; nothing else is stored. One file per writer: planners write `project/log/plan-<feature>.jsonl` in their worktree, so a plan lands only through its reviewed PR; everyone else writes `run/log/<writer>.jsonl` live, and the supervisor mirrors those into `project/log/` with the `chore-log` PR.
 
