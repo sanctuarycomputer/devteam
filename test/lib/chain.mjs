@@ -1353,6 +1353,7 @@ out({ cursor: 'x' });
   });
 
   step('remediation: a listed, pinned script runs once per decision on the ladder, from main, redacted; the answer names it; a rollback across a migration needs the owner\'s own one-way-door answer', async () => {
+    const supKeptObs = (file, id) => fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).find((l) => l.id === id);
     const sup = { role: 'sup' };
     const settingsBefore = fs.readFileSync(path.join(repo, 'docs/devteam/project/settings.md'), 'utf8');
     const excludeBefore = fs.readFileSync(path.join(repo, '.git/info/exclude'), 'utf8');
@@ -1393,6 +1394,14 @@ process.exit(${code});
       const qn = ask(['remediation:restart-web'], { rec: 'restart it' });
       must(['answer', qn, 'no, leave it alone']);
       assert.match(decide(qn, ['remediation:restart-web']).err, /runs only on a yes/);
+      // after the no, not again for this outage unless the owner says otherwise
+      assert.match(dt(['ask', '--class', 'production-remediation', '--blocks', 'remediation:restart-web', '--question', 'again?', '--recommendation', 'restart it'], sup).err, /said no to restart-web/);
+      // a default needs rung 2; at rung 1 it could never fire
+      assert.match(dt(['ask', '--class', 'production-remediation', '--blocks', 'remediation:broken', '--question', 'x?', '--recommendation', 'do it', '--default', 'do it', '--deadline', '15m'], sup).err, /no --default until it's on rung 2/);
+      // parked Upkeep holds a production write, and --force doesn't reach it
+      must(['goal', 'hold', 'upkeep', 'park', '--owner']);
+      assert.match(dt(['ask', '--class', 'production-remediation', '--blocks', 'remediation:broken', '--question', 'x?', '--recommendation', 'do it', '--force'], sup).err, /does not reach a production write/);
+      must(['goal', 'hold', 'upkeep', 'run', '--owner']);
       const d = decide(q, ['remediation:restart-web']).out;
       assert.match(dt(['remediate', 'restart-web', '--decision', d, '--to', 'v1'], sup).err, /takes no --to/);
       const ran = must(['remediate', 'restart-web', '--decision', d], sup);
@@ -1423,7 +1432,7 @@ process.exit(${code});
       write(path.join(projDir, 'remediations/restart.mjs'), script('restarted twice'));
       git(['commit', '-qam', 'restart changed']);
       git(['push', '-q', 'origin', 'HEAD:main']);
-      const qc = ask(['remediation:restart-web']);
+      const qc = must(['ask', '--class', 'production-remediation', '--blocks', 'remediation:restart-web', '--question', 'Run restart again?', '--recommendation', 'do it', '--reasons', 'below-rung', '--owner-said', 'yes, restart it after the deploy'], sup);
       must(['answer', qc, 'do it']);
       assert.match(dt(['remediate', 'restart-web', '--decision', decide(qc, ['remediation:restart-web']).out], sup).err, /is not the reviewed one/);
       // a rollback to a release the sensors saw, across a production migration since it
@@ -1443,6 +1452,21 @@ process.exit(${code});
       must(['answer', qchat, 'roll back', '--from-chat', '--said', 'roll back'], sup);
       assert.match(must(['remediate', 'rollback-web', '--decision', decide(qchat, ['remediation:rollback-web', `release:${rel}`]).out, '--to', rel], sup), /rollback-web ok/);
       assert.equal(fs.readFileSync(outFile, 'utf8'), `rolled back ${rel} none`);
+      // a migration a release phase ran is in no act: the release's range in git makes it a one-way door too
+      const headBefore = git(['rev-parse', 'HEAD']);
+      write(path.join(repo, 'db/migrate/20260101_add.rb'), 'class Add; end\n');
+      git(['add', 'db/migrate/20260101_add.rb']);
+      git(['commit', '-qm', 'a migration']);
+      git(['push', '-q', 'origin', 'HEAD:main']);
+      const tmplObs = json(must(['log', '--type', 'observation', '--json'])).find((o) => o.kind === 'deploy' && o.source_key === `sensor:${o.source}:deploy:${rel}`);
+      const logDir2 = path.join(repo, 'docs/devteam/run/log');
+      const supFile2 = path.join(logDir2, fs.readdirSync(logDir2).find((f) => f.startsWith('supervisor-')));
+      const deployLine = (release, detail, n) => line({ ...supKeptObs(supFile2, tmplObs.id), id: tmplObs.id.replace(/-(\d{9})-/, (x, d) => `-${String(Number(d) + n).padStart(9, '0')}-`), at: new Date().toISOString(), detail, source_key: `sensor:${tmplObs.source}:deploy:${release}` });
+      fs.appendFileSync(supFile2, deployLine('v-mig', `${tmplObs.source}: release v-mig (commit ${headBefore})`, 1));
+      assert.match(dt(['remediate', 'rollback-web', '--decision', rb('v-mig'), '--to', 'v-mig'], sup).err, /migration file\(s\) since [^:]*: a one-way door/, 'a migration file in the range counts');
+      // a release with no commit to read fails closed
+      fs.appendFileSync(supFile2, deployLine('v-blind', `${tmplObs.source}: release v-blind`, 2));
+      assert.match(dt(['remediate', 'rollback-web', '--decision', rb('v-blind'), '--to', 'v-blind'], sup).err, /commit is unknown/, 'no commit: fails closed');
     } finally {
       landSettings(() => settingsBefore);
       if (git(['ls-files', 'docs/devteam/project/remediations'])) { git(['rm', '-rqf', 'docs/devteam/project/remediations']); git(['commit', '-qm', 'no remediations']); git(['push', '-q', 'origin', 'HEAD:main']); }
@@ -1925,6 +1949,14 @@ http.createServer((req, res) => {
     const probeOut = must(margs, { role: 'sup' });
     assert.match(probeOut, /would merge/, 'no owner answer for a sensor, even one with credentials');
     assert.doesNotMatch(probeOut, /owner settings/);
+    // a remediation is a production write: unlike a sensor, adding one is the owner's
+    git(['reset', '-q', '--hard', 'origin/main'], wt('mon'));
+    setTo(wt('mon'), (j) => { j.remediations = { 'restart-web': { kind: 'restart', script: 'project/remediations/restart-web.mjs', sha: 'a'.repeat(40) } }; });
+    git(['commit', '-qam', 'a remediation'], wt('mon'));
+    git(['push', '-q', '-f', 'origin', 'chore-mon'], wt('mon'));
+    const rem = dt(margs, { role: 'sup' });
+    assert.notEqual(rem.status, 0, 'a remediation lands only with the owner\'s answer');
+    assert.match(rem.out + rem.err, /changes owner settings: remediations \(governance-edit\)/);
     git(['worktree', 'remove', '--force', wt('mon')]);
   });
 

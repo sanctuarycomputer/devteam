@@ -370,7 +370,7 @@ const OWNER_SETTINGS = {
   gates: 'gate-change', worktree_setup: 'gate-change', worktree_files: 'gate-change',
   autonomy_ceilings: 'governance-edit', agent_command: 'governance-edit', resume_command: 'governance-edit', worker_denied_commands: 'governance-edit',
   forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', upstream_repo: 'governance-edit', upstream_sync: 'governance-edit',
-  release: 'governance-edit', secret_commands: 'governance-edit', incident_slots: 'governance-edit', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit', project: 'governance-edit',
+  release: 'governance-edit', secret_commands: 'governance-edit', incident_slots: 'governance-edit', remediations: 'governance-edit', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit', project: 'governance-edit',
 };
 // The classes whose owner answer approves a chore that changes real kit files (isKitFile).
 const KIT_CLASSES = ['governance-edit', 'process-edit', 'gate-change'];
@@ -4250,6 +4250,7 @@ function cmdAsk() {
   for (const b of blocks) if (!tickets().has(b) && !isIncident(logGet(b)) && !(cls === 'production-remediation' && /^(remediation|release):\S+$/.test(b))) die(`--blocks ${b}: no such ticket (or incident)`);
   // a remediation question names the remediation (and a rollback its release), so the answer
   // approves that and nothing else
+  let ownerSaid = null;
   if (cls === 'production-remediation' && !['trust', 'proposal'].includes(kind)) {
     const rs = blocks.filter((b) => b.startsWith('remediation:'));
     if (rs.length !== 1) die('a production-remediation question names its remediation in --blocks remediation:<action> (and, for a rollback, release:<version>)');
@@ -4258,11 +4259,18 @@ function cmdAsk() {
     if (r.kind === 'rollback' && rel.length !== 1) die('a rollback question names its target in --blocks release:<version>');
     if (r.kind !== 'rollback' && rel.length) die(`${r.name} is a ${r.kind}, not a rollback: it takes no release`);
     if (rel.length && !migrationsSince(rel[0].slice('release:'.length))) die(`no deploy of ${rel[0].slice('release:'.length)} was observed by a sensor: a rollback goes to a release the sensors saw`);
-    upkeepAllows('a remediation');
+    upkeepAllows('a remediation', { noForce: true });
     // a default is the recommendation or nothing: silence never runs something the owner wasn't recommended
     const rec = flagStr('recommendation');
     if (!rec) die('a production-remediation question needs --recommendation');
     if (def && def.trim().toLowerCase() !== rec.trim().toLowerCase()) die('a production-remediation default is its recommendation (or there is none): silence never runs anything else');
+    // at rung 1 a default can never fire, so it would only be a promise the kit can't keep
+    if (def && rungFor('production-remediation') < 2) die(`production-remediation is on rung ${rungFor('production-remediation')}: no --default until it's on rung 2`);
+    // after the owner's no, not again for the same incident (with none named, for its valid_minutes)
+    const incident = blocks.find((b) => isIncident(logGet(b))) ?? null;
+    const heldBy = questions().filter((x) => x.class === 'production-remediation' && (x.blocks ?? []).includes(rs[0]) && (incident ? (x.blocks ?? []).includes(incident) : !(x.blocks ?? []).some((b) => b.startsWith('p-'))) && x.status === 'answered' && !x.matched).sort((a, b) => String(a.answered_at).localeCompare(String(b.answered_at))).pop();
+    if (heldBy && !flagStr('owner-said') && (!incident ? Date.now() - Date.parse(heldBy.answered_at) < r.valid_minutes * 60000 : logGet(incident)?.status !== 'resolved')) die(`the owner said no to ${r.name} for ${incident ?? 'this outage'} (${heldBy.id}: "${String(heldBy.answer ?? '').slice(0, 80)}"): don't ask it again${incident ? ' for this incident' : ` for ${r.valid_minutes} min`}. If they tell you otherwise, ask again with --owner-said "<their words>"`);
+    ownerSaid = heldBy ? flagStr('owner-said') ?? null : null;
   }
   if (!flagStr('goal') && !flagStr('ticket') && !blocks.length && !['trust', 'proposal'].includes(kind)) warn('this question names no --goal, --ticket or --blocks: when it serves a goal, add --goal <g-id> so the goal shows it');
   // A question that asks about several acts names them up front; the owner's card lists them, and
@@ -4292,6 +4300,7 @@ function cmdAsk() {
   if (flagStr('sensor') && declinedSensors().has(flagStr('sensor'))) die(`the owner said not to use the sensor ${flagStr('sensor')}: it isn't asked about again until sensor reconsider ${flagStr('sensor')}`);
   // an incident-fix question is scoped by its incident's computed severity, and says when merging deploys
   let context = flagStr('context');
+  if (ownerSaid) context = [context, `The owner said: ${ownerSaid}`].filter(Boolean).join('\n\n');
   if (cls === 'incident-fix' && !['trust', 'proposal'].includes(kind)) {
     upkeepAllows('an incident fix');
     const incs = blocks.map((b) => logGet(b)).filter(isIncident);
@@ -5773,7 +5782,7 @@ function cmdDecide() {
   const refs = asList(flags.refs);
   // a remediation decision names the remediation it runs
   if (cls === 'production-remediation') {
-    upkeepAllows('a remediation');
+    upkeepAllows('a remediation', { noForce: true });
     const rs = refs.filter((r) => String(r).startsWith('remediation:'));
     if (rs.length !== 1) die('a production-remediation decision names exactly one remediation:<action> in --refs (and, if there is one, the incident it is for)');
     const r = remediationOf(rs[0].slice('remediation:'.length));
@@ -6875,10 +6884,10 @@ function openPr(wt, branch, title, bodyText) {
 // The improvement loop is Upkeep's work: while Upkeep is drained or parked it starts nothing new
 // (a trial, a proposal, a trust question, a proposed lesson, a retro); --force does, logged by
 // the act or line itself. Observing (metrics, findings, readings) and the record never stop.
-function upkeepAllows(what) {
+function upkeepAllows(what, { noForce = false } = {}) {
   const m = goalMode(upkeepOrVirtual());
-  if (m === 'run' || flags.force) return;
-  die(`Upkeep is ${holdWords(m)}: ${what} waits until it runs (goal hold upkeep run --owner), or --force`);
+  if (m === 'run' || (flags.force && !noForce)) return;
+  die(`Upkeep is ${holdWords(m)}: ${what} waits until it runs (goal hold upkeep run --owner)${noForce ? ' (--force does not reach a production write)' : ', or --force'}`);
 }
 // Chores that keep the record rather than do upkeep: never held.
 // Files agent harnesses write into a checkout while they run: machine-local state, never the
@@ -11358,14 +11367,24 @@ const remediationRef = (action) => `remediation:${action}`;
 // release first went out, by a deploy a sensor's poll observed (its deploy line, at the
 // probe's own time when it gave one). Fails closed: null when no such deploy is known.
 function migrationsSince(release) {
+  // A line the supervisor wrote into its own log looks the same as a sensor's, so a deploy line
+  // alone can't be proven the sensors': the owner's answer naming the release is the check, and a
+  // release the repo can't anchor (below) fails closed to the one-way door.
   const dep = logObjects('observation').filter((o) => fromSensor(o) && o.kind === 'deploy' && o.created_by === 'supervisor' && o.source_key === `sensor:${o.source}:deploy:${release}`).sort((a, b) => deployAt(a) - deployAt(b))[0];
   if (!dep) return null;
   const at = deployAt(dep);
-  return logObjects('act').filter((a) => a.class === 'production-migration' && Date.parse(a.created_at) > at);
+  const acts = logObjects('act').filter((a) => a.class === 'production-migration' && Date.parse(a.created_at) > at);
+  // a migration a release phase ran is in no act: read the range in git, and without a commit to
+  // read it from, treat the range as crossing one
+  const commit = deployCommit(dep);
+  const head = mainRef();
+  if (!commit || !knownCommit(commit) || !head) return [...acts, { id: `release ${release}'s commit is unknown, so its range can't be read for migrations` }];
+  const files = (git(['diff', '--name-only', `${commit}..${head}`], mainRoot) ?? '').split('\n').filter((x) => /(^|\/)(db\/migrate|migrations?|alembic|prisma\/migrations)\//.test(x));
+  return files.length ? [...acts, { id: `${files.length} migration file(s) since ${commit.slice(0, 12)} (${files.slice(0, 2).join(', ')})` }] : acts;
 }
 async function cmdRemediate() {
   supervisorOnly('remediate');
-  upkeepAllows('a remediation');
+  upkeepAllows('a remediation', { noForce: true });
   const action = positional[0] ?? die('usage: remediate <action> --decision <d-…> [--to <release>]');
   const r = remediationOf(action);
   const d = flagStr('decision') ? decisionFor(flagStr('decision')) : die(`remediate needs --decision <d-…>: a production-remediation decision whose refs name ${remediationRef(action)}`);
@@ -11421,6 +11440,10 @@ async function cmdRemediate() {
   const copy = probeCopy(src.text);
   fs.mkdirSync(lockDir, { recursive: true });
   try { fs.writeFileSync(lock, `${process.pid}\n`, { flag: 'wx' }); } catch { copy.done(); die(`${d.id} is being carried out now (or a run died after it started: check production, then remove ${lock})`); }
+  // the first check ran before the lock: another run may have finished between them
+  logCache = null;
+  const doneNow = logObjects('act').find((a) => a.decision === d.id);
+  if (doneNow) { fs.rmSync(lock, { force: true }); copy.done(); die(`${d.id} was carried out already (${doneNow.id}): decide again to run it again`); }
   const t0 = performance.now();
   let res;
   // a writing action isn't killed for printing too much; past the cap its output is dropped
