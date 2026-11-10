@@ -174,3 +174,44 @@ test('fleet park: every session stops with a handoff, and a clone elsewhere pick
     F.done();
   }
 });
+
+test('fleet status: a superseded ticket with no window is not a session to park', () => {
+  const F = fleetFixture('sup');
+  const { old, ok, g } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const t = { title: 'tidy up', feature: 'chores', component: 'ch', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['tidy/**'], done_when: ['the tidy check passes'], notes: 'turns on tidy' };
+  const ID = 'ch-95-gone';
+  try {
+    ok(old, ['ticket', 'add', ID, '--json', JSON.stringify(t)], SUP);
+    ok(old, ['ticket', 'add', 'ch-96-next', '--json', JSON.stringify(t)], SUP);
+    const ww = path.join(old, '.worktrees', ID);
+    g(['worktree', 'add', '-q', '-b', `ticket/${ID}`, ww, 'origin/main'], old);
+    ok(ww, ['phase', 'spec'], { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: ID });
+    g(['worktree', 'remove', '--force', ww], old);
+    assert.match(ok(old, ['fleet', 'status', '--no-fetch'], SUP), new RegExp(`${ID}: not parked`), 'an active ticket still counts');
+    ok(old, ['ticket', 'set', ID, '--json', JSON.stringify({ superseded_by: 'ch-96-next' })], SUP);
+    assert.doesNotMatch(ok(old, ['fleet', 'status', '--no-fetch'], SUP), new RegExp(`${ID}: not parked`), 'superseded, and no window: nothing to park');
+  } finally { F.done(); }
+});
+
+test('a mistyped feature: refused at ticket add, and a superseded ticket with one no longer fails validate', () => {
+  const F = fleetFixture('typo');
+  const { old, run, ok } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const t = { title: 'tidy up', feature: 'nope', component: 'ch', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: ['tidy/**'], done_when: ['the tidy check passes'], notes: 'turns on tidy' };
+  try {
+    assert.match(run(old, ['ticket', 'add', 'ch-98-typo', '--json', JSON.stringify(t)], SUP).err, /no feature "nope"/);
+    ok(old, ['ticket', 'add', 'ch-97-good', '--json', JSON.stringify({ ...t, feature: 'chores' })], SUP);
+    // one that got in before the check: a line the kit wrote earlier
+    const log = path.join(old, 'docs/devteam/run/log', `supervisor-${new Date().toISOString().slice(0, 7)}.jsonl`);
+    fs.mkdirSync(path.dirname(log), { recursive: true });
+    fs.appendFileSync(log, `${JSON.stringify({ v: 1, id: 'ch-99-typo', type: 'ticket', op: 'new', at: new Date().toISOString(), by: 'supervisor', ...t })}\n`);
+    const v = () => { const r = run(old, ['validate'], SUP); return `${r.out ?? ''}${r.err ?? ''}`; };
+    assert.match(v(), /feature "nope" is not in the log/);
+    ok(old, ['ticket', 'set', 'ch-99-typo', '--json', JSON.stringify({ superseded_by: 'ch-97-good' })], SUP);
+    assert.doesNotMatch(v(), /feature "nope" is not in the log/);
+    // a stub feature whose only ticket is superseded needs no reviews of its own
+    ok(old, ['feature', 'add', 'nope', '--json', JSON.stringify({ title: 'a stub', goals: [], preconditions: [], stories: [], design: 'project/designs/nope.md' })], SUP);
+    assert.doesNotMatch(v(), /feature nope/);
+  } finally { F.done(); }
+});

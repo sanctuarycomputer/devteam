@@ -72,7 +72,7 @@ project/reviews/<feature>/graph-<pass>[<track>].md            graph (on the plan
 project/reviews/<design-slug>/design-<pass>[<track>].md       design (on the plan branch)
 ```
 
-`<track>` is empty for the first independent review, `b`, `c` for further ones (`final-1.md`, `final-1b.md`). The file has a `- Reviewer:` line, a findings table (each finding's id a capital prefix and a number: `F1`, `R2`, `CR3`) with a `Disposition` column the reviewer leaves empty and the author fills in with `devteam.mjs dispose <ticket> <record.md> <F-id> "<disposition>"`, which keeps the row's shape (`fixed`, `wont-fix <reason>` with the reviewer's agreement, `disputed` goes to the supervisor, `wrong` means the reviewer agrees it was a false positive), and the verdict as its last line with the full 40-character SHA:
+`<track>` is empty for the first independent review, `b`, `c` for further ones (`final-1.md`, `final-1b.md`). The file has a `- Reviewer:` line, a findings table (each finding's id a capital prefix and a number: `F1`, `R2`, `CR3`, or per pass, `F4-1`) with a `Disposition` column the reviewer leaves empty and the author fills in with `devteam.mjs dispose <ticket> <record.md> <F-id> "<disposition>"`, which keeps the row's shape (`fixed`, `wont-fix <reason>` with the reviewer's agreement, `disputed` goes to the supervisor, `wrong` means the reviewer agrees it was a false positive), and the verdict as its last line with the full 40-character SHA:
 
 ```markdown
 # Final review, pass 1

@@ -10,9 +10,13 @@
 #
 # Render: New > Web Service > this repo (or a fork), Language: Docker, Dockerfile path:
 #   cloud/Dockerfile, build context: the repo root. Instance: Pro (4 GB) or larger; a free one
-#   sleeps, and sleeping stops every agent. Auto-Deploy: Off (a deploy restarts the box, which
-#   stops every agent; deploy when the fleet is parked). Disk: mounted at /data. Health check
-#   path: /healthz. Environment: DEVTEAM_PUBLIC_URL=https://box.example.com. Custom domains:
+#   sleeps, and sleeping stops every agent. Auto-Deploy: Off; the box deploys at each release
+#   instead (.github/workflows/box-deploy.yml, with the service's Deploy Hook as the secret
+#   RENDER_DEPLOY_HOOK of the GitHub environment "box", never a repo secret, and that environment
+#   needing the owner's approval; the README's "deploy gate" says why. Agents share the owner's gh
+#   login, so this raises the bar and isn't a hard boundary). A deploy restarts the box; each
+#   supervisor that was running comes back through the operator (window 0), and brings back its
+#   fleet; what couldn't start is in ~/operator/NOTES.md. Disk: mounted at /data. Health check path: /healthz. Environment: DEVTEAM_PUBLIC_URL=https://box.example.com. Custom domains:
 #   box.example.com and *.box.example.com, with every DNS record Render lists for them (a wildcard
 #   needs its own name pointed at Render too, plus the _acme-challenge and _cf-custom-hostname
 #   CNAMEs; remove any AAAA records). Best on a domain used for nothing else, or if Render won't
@@ -27,13 +31,34 @@
 #   devteam-reclaim, which prints a new claim link (as another user, setpriv fails: use root).
 FROM node:22-bookworm-slim@sha256:5ec23b7c622b00547753bc6ffd78085dd868a68aeb41c8e0a1418f033e13d96d
 
-ENV LANG=C.UTF-8 SHELL=/bin/bash DISABLE_AUTOUPDATER=1
+ENV LANG=C.UTF-8 SHELL=/bin/bash DISABLE_AUTOUPDATER=1 MISE_YES=1
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git tmux tini curl ca-certificates gnupg openssh-client procps less vim-tiny jq unzip build-essential python3 \
  && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
  && apt-get update && apt-get install -y --no-install-recommends gh \
+ && rm -rf /var/lib/apt/lists/*
+
+# A general-purpose dev machine, like the owner's Mac, without a container per project. Everything
+# outside /data resets on a deploy, so only what needs root lives here: system libraries, and things
+# worth having prebuilt. Languages and their versions are per project, with mise, on the disk.
+# Postgres 14, 16 and 17 with pgvector, as on the owner's Mac; `box-pg` runs a server of any of them.
+RUN curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /usr/share/keyrings/pgdg.asc \
+ && echo "deb [signed-by=/usr/share/keyrings/pgdg.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends postgresql-common \
+ && sed -i 's/^#\?create_main_cluster.*/create_main_cluster = false/' /etc/postgresql-common/createcluster.conf \
+ && apt-get install -y --no-install-recommends \
+      postgresql-14 postgresql-16 postgresql-17 postgresql-14-pgvector postgresql-16-pgvector postgresql-17-pgvector libpq-dev \
+      redis-server sqlite3 \
+      pkg-config autoconf automake libtool bison flex re2c cmake ninja-build \
+      libssl-dev libyaml-dev zlib1g-dev libffi-dev libreadline-dev libgmp-dev libncurses-dev libbz2-dev liblzma-dev \
+      libsqlite3-dev default-libmysqlclient-dev libxml2-dev libxslt1-dev libcurl4-openssl-dev uuid-dev libicu-dev \
+      libvips-dev libjpeg-dev libpng-dev libwebp-dev libcairo2-dev libpango1.0-dev libgif-dev librsvg2-dev libgomp1 libopenblas-dev \
+      ffmpeg imagemagick ghostscript poppler-utils tesseract-ocr pandoc \
+      chromium chromium-driver fonts-liberation libasound2 libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 libcups2 libdrm2 libgbm1 libnspr4 libnss3 libxcomposite1 libxdamage1 libxfixes3 libxkbcommon0 libxrandr2 \
+      watchman inotify-tools ripgrep fd-find tree htop file zip rsync wget lsof dnsutils netcat-openbsd iputils-ping nano \
  && rm -rf /var/lib/apt/lists/*
 
 # ttyd 1.7.7, the web terminal, checked against the release's published sums
@@ -130,7 +155,8 @@ mkdir -p /data/home /data/gateway
 chown -R gw:gw /data/gateway
 chmod 700 /data/gateway
 as_gw() { setpriv --reuid=gw --regid=gw --init-groups env HOME=/data/gateway DEVTEAM_GATEWAY_DIR=/data/gateway "$@"; }
-as_dev() { setpriv --reuid=dev --regid=dev --init-groups env -u DEVTEAM_CLAIM_TOKEN HOME=/data/home "$@"; }
+# mise's shims first for dev alone: root and gw must never search a folder an agent can write to
+as_dev() { setpriv --reuid=dev --regid=dev --init-groups env -u DEVTEAM_CLAIM_TOKEN HOME=/data/home PATH="/data/home/.local/share/mise/shims:$PATH" "$@"; }
 step='drop to gw'
 check 'as gw' as_gw id
 step='drop to dev'
@@ -152,6 +178,7 @@ done
 say "gateway answers; starting dev's side"
 # The boot is over, and so is the hold: agents would outlive the gateway, and one could take the port.
 trap - EXIT
+install -d -o dev -g dev -m 2775 /var/run/postgresql
 as_dev /usr/local/bin/devteam-dev >/dev/null 2>&1 &   # not the platform's log: no agent can write a fake claim link there
 # each user stops its own (root may not signal theirs)
 trap 'say "stopping"; as_dev tmux kill-server 2>/dev/null || true; sleep 2; as_gw kill -TERM "$gw" 2>/dev/null || true; exit 0' TERM INT
@@ -161,42 +188,160 @@ say "the gateway exited with $rc; the box stops"
 exit "$rc"
 EOF
 
+# box-pg [major]: this box's `brew services start postgresql@N`. One server per major version, on
+# the disk, trusting whoever is on the box: 17 on the default port (so postgres:/// just works),
+# the others on 5400 + major (5416, 5414). Safe to run again.
+COPY --chmod=644 docs/devteam/process/operator.md /opt/devteam/
+COPY --chmod=755 cloud/box-supervisors /usr/local/bin/box-supervisors
+COPY --chmod=755 <<'EOF' /usr/local/bin/box-status
+#!/bin/sh
+exec box-supervisors --status
+EOF
+COPY --chmod=755 <<'EOF' /usr/local/bin/box-pg
+#!/bin/sh
+set -eu
+v=${1:-17}
+bin=/usr/lib/postgresql/$v/bin
+[ -x "$bin/pg_ctl" ] || { echo "box-pg: no Postgres $v in this image (it has: $(ls /usr/lib/postgresql | tr '\n' ' '))" >&2; exit 2; }
+d="$HOME/.pg/$v"
+if [ "$v" = 17 ]; then port=5432; else port=$((5400 + v)); fi
+if [ ! -f "$d/PG_VERSION" ]; then
+  mkdir -p "$HOME/.pg"
+  "$bin/initdb" -D "$d" -U dev -A trust -E UTF8 --locale=C.UTF-8 >/dev/null
+  printf "port = %s\nlisten_addresses = '127.0.0.1'\nunix_socket_directories = '/var/run/postgresql'\nsynchronous_commit = off\n" "$port" >> "$d/postgresql.conf"
+  new=1
+fi
+"$bin/pg_ctl" -D "$d" status >/dev/null 2>&1 || "$bin/pg_ctl" -D "$d" -l "$d/server.log" -w start >/dev/null
+if [ "${new:-}" = 1 ]; then
+  "$bin/createdb" -h /var/run/postgresql -p "$port" dev
+  "$bin/createuser" -h /var/run/postgresql -p "$port" -s postgres
+fi
+echo "box-pg: Postgres $v on port $port"
+EOF
+
+# The checklists and habits that say asdf work here: mise reads the same .tool-versions.
+COPY --chmod=755 <<'EOF' /usr/local/bin/asdf
+#!/bin/sh
+exec mise "$@"
+EOF
+
 COPY --chmod=755 <<'EOF' /usr/local/bin/devteam-reclaim
 #!/bin/sh
 exec setpriv --reuid=gw --regid=gw --init-groups env HOME=/data/gateway DEVTEAM_GATEWAY_DIR=/data/gateway /usr/local/bin/node /opt/devteam/gateway.mjs reclaim
 EOF
 
+# macOptionClickForcesSelection: tmux owns the mouse, so scrolling works, and on a Mac the terminal
+# lets a selection past it only with Option held (Shift, elsewhere), and only with this set.
 # dev's side: the shell's first-run notes, the tmux session the terminal opens, every repo's
-# dashboard again after a restart (each supervisor resumes its own fleet), and ttyd on loopback.
+# dashboard again after a restart, the operator in window 0 (which brings back the supervisors),
+# and ttyd on loopback. What it says goes to ~/box.log, on the volume: its output is kept off the
+# platform's log (devteam-box says why).
 COPY --chmod=755 <<'EOF' /usr/local/bin/devteam-dev
 #!/bin/sh
 cd "$HOME"
 mkdir -p code
+note() { echo "$(date -u +%FT%TZ) $*" >> "$HOME/box.log"; }
+# Nothing runs git yet, so a lock in a repo is one a process killed by the restart left. Pane ids
+# start again at %0, so one noted before this boot could be another program's by now.
+find "$HOME/code" -path '*/.git/*' -name '*.lock' -type f -delete 2>/dev/null
+# so is a Postgres pid file: its old pid is often held by another process by now, and it wouldn't start
+rm -f "$HOME"/.pg/*/postmaster.pid
+rm -f "$HOME"/code/*/docs/devteam/run/supervisor-pane
 # tmux starts login shells, which read .profile, and Debian's reads .bashrc
 [ -f .profile ] || cp /etc/skel/.profile .profile
 [ -f .tmux.conf ] || printf 'set -g mouse on\nset -g history-limit 50000\nset -g default-terminal tmux-256color\nset -g default-shell /bin/bash\n' > .tmux.conf
+# copying in tmux, or in a program in it, reaches the browser's clipboard (the gateway's terminal page takes OSC 52)
+grep -q set-clipboard .tmux.conf || printf "set -g set-clipboard on\nset -as terminal-features ',xterm-256color:clipboard'\n" >> .tmux.conf
 if [ ! -f .bashrc ]; then
   cp /etc/skel/.bashrc .bashrc
   cat >> .bashrc <<'RC'
 eval "$(mise activate bash)"
 [ -f ~/.devteam-quiet ] || cat <<'MOTD'
-devteam box. First time here:
-  claude                                   # log in to Claude Code
+devteam box. Window 0 (operator) looks after the box: tell it what you want. First time here:
+  in window 0, log in to Claude Code
   claude plugin marketplace add obra/superpowers-marketplace && claude plugin install superpowers@superpowers-marketplace
   gh auth login && gh auth setup-git       # GitHub, and git over HTTPS with it
   git config --global user.name '…' && git config --global user.email '…'
 Add a repo:  cd ~/code && gh repo clone <owner/repo> && cd <repo> && claude "Use github.com/sanctuarycomputer/devteam to set up a fleet in this repo"
+Tools: languages per project with mise (mise install; asdf works too). box-pg 16 starts another Postgres. ~/.box/boot.sh is what starts at boot.
+Expo: npx expo start --tunnel for your phone; eas build for builds.
 tmux: C-b s lists every session (each repo's supervisor and its workers); C-b d leaves one. touch ~/.devteam-quiet hides this.
 MOTD
 RC
 fi
-tmux has-session -t home 2>/dev/null || tmux new-session -d -s home -n shell -c "$HOME"
+# What was up before this boot, for the operator's box-supervisors. Only a list with something in it:
+# a boot that never got as far as bringing them back must not lose them to the next.
+up="$HOME/.devteam-supervisors"
+# Added to what is there: a supervisor the last restore could not start stays listed.
+if [ -s "$up" ]; then cat "$up" >> "$up.boot"; sort -u -o "$up.boot" "$up.boot"; rm -f "$up"; fi
+# Window 0 is the operator (operator.md): the first thing the Terminal shows, and what restores the fleet.
+mkdir -p operator
+if ! tmux has-session -t home 2>/dev/null; then
+  tmux new-session -d -s home -n operator -c "$HOME/operator"
+  tmux new-window -d -t home -n shell -c "$HOME"
+  ask='You are the sanctuarycomputer/devteam operator for this box. Ensure your supervisors are all up and running.'
+  if ls .claude/projects/-data-home-operator/*.jsonl >/dev/null 2>&1; then c='--continue'; ask="The box restarted. $ask"; else c=''; fi
+  # its job is in its system prompt, so what it's told, and what the owner tells it, stays plain English
+  tmux send-keys -t home:operator -l "export DEVTEAM_ROLE=operator; claude $c --dangerously-skip-permissions --append-system-prompt \"\$(cat /opt/devteam/operator.md)\" '$ask'"
+  tmux send-keys -t home:operator Enter
+fi
+# The operator's tick: typed into its window every 30 minutes, unless a dialog is up (Enter would answer it).
+# Claude Code queues what's typed during a turn, so a busy operator just gets it after.
+tick='Check on the box and your supervisors.'
+( while :; do
+    sleep "${DEVTEAM_OPERATOR_TICK_SECONDS:-1800}"
+    screen=$(tmux capture-pane -p -t home:operator 2>/dev/null) || continue
+    case "$(tmux display-message -p -t home:operator '#{pane_current_command}' 2>/dev/null)" in ''|bash|-bash|sh|dash) continue ;; esac
+    printf '%s\n' "$screen" | grep -v '^[[:space:]]*$' | tail -15 | grep -qE 'Do you (trust|want to)|Press Enter to continue|❯ *1\. *Yes|Yes, I accept|No, exit|Select login method|Paste code|text style|\[y/n\]|limit (reached|hit)' && continue
+    tmux send-keys -t home:operator -l "$tick"; tmux send-keys -t home:operator Enter
+  done ) &
+# The box's global tools, on the disk: edit the file to change them, and they come back each boot.
+mkdir -p .box .config/mise
+[ -f .config/mise/config.toml ] || cat > .config/mise/config.toml <<'TOML'
+[tools]
+node = "22"
+python = "3.12"
+uv = "latest"
+pnpm = "latest"
+gitleaks = "latest"
+shellcheck = "latest"
+sops = "latest"
+age = "latest"
+"npm:eas-cli" = "latest"
+TOML
+( mise install ) >> .box/mise.log 2>&1 &
+# What this box starts at boot, before any supervisor comes back: its `brew services`, on the disk.
+[ -f .box/boot.sh ] || cat > .box/boot.sh <<'BOOT'
+#!/bin/sh
+# Runs at every boot, as dev, before the supervisors resume. Add what your projects need running.
+box-pg 17                  # the default Postgres, port 5432
+# box-pg 16                # port 5416
+# box-pg 14                # port 5414
+# redis-server --daemonize yes --bind 127.0.0.1 --dir "$HOME/.box"
+BOOT
+timeout 120 sh .box/boot.sh >> box.log 2>&1 || note "boot.sh failed (exit $?): see box.log"
 for k in "$HOME"/code/*/docs/devteam/scripts/devteam.mjs; do
   [ -f "$k" ] || continue
   r=${k%/docs/devteam/scripts/devteam.mjs}
   tmux new-window -d -t home -n "dash-$(basename "$r")" -c "$r" "while :; do /usr/local/bin/node docs/devteam/scripts/devteam.mjs dashboard; sleep 5; done"
 done
-while :; do ttyd -d 3 -i lo -p 7681 -W -t fontSize=14 -t titleFixed=devteam tmux new-session -A -s home; sleep 1; done
+# The operator (window 0) is what brings the supervisors back: box-supervisors reads the list saved above.
+# Which supervisors are up, kept on the volume each minute: a machine that dies writes nothing at
+# the end, and one the owner stopped (its pane gone, or back at a shell) is off the list by then.
+# tmux not answering (the box stopping) leaves the list as it was.
+while :; do
+  sleep 60
+  panes=$(tmux list-panes -a -F '#{pane_id} #{pane_current_command}' 2>/dev/null) || continue
+  for k in "$HOME"/code/*/docs/devteam/scripts/devteam.mjs; do
+    r=${k%/docs/devteam/scripts/devteam.mjs}
+    p=$(cat "$r/docs/devteam/run/supervisor-pane" 2>/dev/null) || continue
+    case "$(printf '%s\n' "$panes" | awk -v p="$p" '$1 == p { print $2 }')" in
+      ''|bash|-bash|sh|dash|zsh|fish) ;;
+      *) echo "$r" ;;
+    esac
+  done > "$up.new" && mv "$up.new" "$up"
+done &
+while :; do ttyd -d 3 -i lo -p 7681 -W -t macOptionClickForcesSelection=true -t fontSize=14 -t titleFixed=devteam tmux new-session -A -s home; sleep 1; done
 EOF
 
 VOLUME /data
