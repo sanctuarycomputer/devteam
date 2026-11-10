@@ -26,6 +26,8 @@ const env = process.env;
 const HUB_PORT = Number(env.DEVTEAM_HUB_PORT ?? 4320);
 const PORT_BASE = Number(env.DEVTEAM_PORT_BASE ?? 4321);
 const BLOCK = Array.from({ length: 25 }, (_, i) => PORT_BASE + i);
+// ttyd, whatever its port on this box; never a preview's port
+const TTYD = 7681;
 const SESSION_MS = 14 * 24 * 3600 * 1000;
 const CHALLENGE_MS = 5 * 60 * 1000;
 const CLAIM_MS = 24 * 3600 * 1000;
@@ -222,6 +224,41 @@ function listedByRoot(instances, ports) {
   const perRoot = new Map();
   for (const x of perPort.values()) if (!perRoot.has(x.root) || Number(x.port) < Number(perRoot.get(x.root).port)) perRoot.set(x.root, x);
   return [...perRoot.values()];
+}
+// A preview's host name: two letter-only words and an optional number, which no reserved name of
+// the box can be. A word list would say nothing more; the map says whether it is live.
+export const PREVIEW_NAME = /^[a-z]{3,7}-[a-z]{3,7}(?:-[1-9]\d?)?$/;
+const PREVIEW_MAX = 20;
+const PREVIEW_CAPS = { project: 63, session: 80, label: 40 };
+const previewCap = (v, n) => (typeof v === 'string' ? v.slice(0, n) : '');
+// The previews the hub's list names, as the Inbox counts are read: it is agent-written, so each
+// entry is checked and capped, and a port outside the allowed set is dropped (a link must never
+// put a dashboard, the hub, the terminal or the gateway behind a second name). A name two instances
+// list is ambiguous: the gateway never picks, or one hostile hello could repoint the owner's link.
+export function previewLinks(list, ports, ownPort) {
+  const links = new Map();
+  if (!Array.isArray(list)) return links;
+  for (const x of listedByRoot(list, ports)) {
+    if (!Array.isArray(x.previews)) continue;
+    const seen = new Set();
+    for (const p of x.previews.slice(0, PREVIEW_MAX)) {
+      try {
+        if (!p || typeof p.name !== 'string' || !PREVIEW_NAME.test(p.name) || seen.has(p.name)) continue;
+        const port = p.port;
+        if (!Number.isInteger(port) || port < 1024 || port > 65535 || port === HUB_PORT || ports.includes(port) || port === TTYD || port === ownPort) continue;
+        if (typeof p.label === 'string' && p.label.length > PREVIEW_CAPS.label) continue;
+        seen.add(p.name);
+        const row = { port, root: x.root, project: previewCap(p.project, PREVIEW_CAPS.project), session: previewCap(p.session, PREVIEW_CAPS.session), label: previewCap(p.label, PREVIEW_CAPS.label), run: p.run === true };
+        const had = links.get(p.name);
+        if (!had) links.set(p.name, row);
+        else {
+          const claimants = (had.ambiguous ?? [{ root: had.root, project: had.project, port: had.port }]).concat({ root: row.root, project: row.project, port: row.port }).sort((a, b) => a.root.localeCompare(b.root));
+          links.set(p.name, { ambiguous: claimants });
+        }
+      } catch {}
+    }
+  }
+  return links;
 }
 // What the hub page marks with "!" (a supervisor at a usage limit, the operator's box-alert), pushed
 // when it turns up or changes, so it needs no page open. The list is checked as the Inbox counts are,
@@ -512,6 +549,12 @@ export function createGateway(opts = {}) {
     const port = m && m[2] === `${NAME}${SUFFIX}` && String(Number(m[1])) === m[1] ? Number(m[1]) : null;
     return BLOCK.includes(port) ? port : null;
   };
+  // A preview's name, one label directly under the box's, on the wildcard DNS and certificate it has.
+  const previewOf = (host) => {
+    const m = /^([a-z0-9-]+)\.(.+)$/.exec(String(host ?? ''));
+    return m && m[2] === `${NAME}${SUFFIX}` && PREVIEW_NAME.test(m[1]) ? m[1] : null;
+  };
+  const previewOrigin = (name) => `${pubUrl.protocol}//${name}.${NAME}${SUFFIX}`;
   // Passkeys belong to the box's name. A page on an instance's subdomain may ask for one, but its
   // answer names that page's origin, and only an answer from the box's own origin is accepted.
   const RP_ID = NAME;
@@ -642,7 +685,7 @@ export function createGateway(opts = {}) {
   const safeNext = (n) => {
     try {
       const u = new URL(String(n ?? '/'), PUB);
-      if (u.origin === PUB || u.origin === TERM || (u.protocol === pubUrl.protocol && instanceOf(u.host) && u.origin === instanceOrigin(instanceOf(u.host)))) return u.href;
+      if (u.origin === PUB || u.origin === TERM || (u.protocol === pubUrl.protocol && instanceOf(u.host) && u.origin === instanceOrigin(instanceOf(u.host))) || (u.protocol === pubUrl.protocol && previewOf(u.host) && u.origin === previewOrigin(previewOf(u.host)))) return u.href;
     } catch {}
     return `${PUB}/`;
   };
@@ -772,6 +815,16 @@ export function createGateway(opts = {}) {
   });
   const instances = async (req, res) => send(res, 200, 'application/json', (await hubList()) ?? JSON.stringify({ hub: 1, instances: [] }));
 
+  // --- previews: the name-to-port map, from the same list ---------------------------------------
+  // Nothing is stored: the map is whatever the list said last, and a hub that doesn't answer lists
+  // nothing, so a stale name can't keep pointing at a port. A miss after the session check asks the
+  // hub once more, with every waiter sharing one read, so no anonymous request can make it poll.
+  const ownPort = opts.port ?? null;
+  let previews = new Map();
+  const takePreviews = (body) => { let list = null; try { list = JSON.parse(body).instances; } catch {} previews = previewLinks(Array.isArray(list) ? list : [], BLOCK, ownPort); };
+  let previewRefresh = null;
+  const refreshPreviews = () => (previewRefresh ??= hubList().then(takePreviews).finally(() => { previewRefresh = null; }));
+
   // --- notifications: the gateway reads the hub's list itself, so they need no page open ----------
   // The signing key sits with the passkeys, where no agent can read it. Made the first time it's asked for.
   const vapid = () => {
@@ -801,6 +854,7 @@ export function createGateway(opts = {}) {
     polling = true;
     try {
       const body = await hubList();
+      takePreviews(body);
       let list = null;
       try { list = JSON.parse(body).instances; } catch {}
       if (!Array.isArray(list)) return;
@@ -1586,7 +1640,7 @@ export function createGateway(opts = {}) {
   server.keepAliveTimeout = 65000;
   server.headersTimeout = 66000;
   server.requestTimeout = REQUEST_MS;
-  return { server, publicUrl: PUB, pollPush, sweepUploads };
+  return { server, publicUrl: PUB, pollPush, sweepUploads, previewOf, safeNext };
 }
 
 // --- the gateway's own pages -------------------------------------------------------------------
@@ -1727,7 +1781,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === fs.realpathSync(proces
   const cmd = process.argv[2] ?? 'serve';
   try {
     if (cmd === 'serve') {
-      const { server, publicUrl: pub, pollPush, sweepUploads } = createGateway();
+      const { server, publicUrl: pub, pollPush, sweepUploads } = createGateway({ port: Number(env.PORT ?? 8080) });
       setInterval(() => pollPush().catch((e) => process.stdout.write(`gateway: notifications: ${e.message}\n`)), PUSH_POLL_MS);
       const sweep = () => sweepUploads().catch((e) => process.stdout.write(`gateway: dropped files: ${e.message}\n`));
       sweep();

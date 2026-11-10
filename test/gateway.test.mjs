@@ -1841,3 +1841,56 @@ test('a body is bounded to its five minutes unless it is an upload that has pass
     assert.equal(fs.readFileSync(JSON.parse(slow.body).path, 'utf8'), 'ab');
   } finally { await gw.close(); }
 });
+
+// --- dev links: a preview on a name of its own ---------------------------------------------------
+test('previewLinks: names from the hub\'s list, checked, ambiguous when two instances claim one', () => {
+  const inst = (root, port, previews) => ({ devteam: 1, root, port, name: root.split('/').pop(), previews });
+  const row = (name, port, over = {}) => ({ name, port, project: 'p', session: 's', label: 'l', at: 'now', up: true, run: false, ...over });
+  const ports = [P, P + 1];
+  const own = 30003;
+  const list = [
+    inst('/a', P, [
+      row('cool-tiger', 30001),
+      row('cool-tiger-2', 30002),
+      row('NOT-valid', 30002),
+      row('blocked-port', P + 1), // the block
+      row('hub-port', HUB),
+      row('term-port', 7681),
+      row('own-port', own),
+      row('string-port', '30002'),
+      row('label-long', 30002, { label: 'x'.repeat(41) }),
+      row('low-port', 80),
+    ]),
+    inst('/b', P + 1, [row('both-have', 30004, { project: 'b', label: '' }), row('other-only', 30005, { project: 'b'.repeat(100), session: 's'.repeat(100) })]),
+  ];
+  // a 21st entry is dropped: 20 are kept per instance
+  list[0].previews.push(row('both-have', 30006, { project: 'a' }));
+  const many = [inst('/many', P, Array.from({ length: 25 }, (_, i) => row(`many-${String.fromCharCode(97 + i)}${String.fromCharCode(97 + i)}x`, 31000 + i)))];
+  const m = G.previewLinks(list, ports, own);
+  assert.deepEqual({ ...m.get('cool-tiger') }, { port: 30001, root: '/a', project: 'p', session: 's', label: 'l', run: false });
+  assert.equal(m.get('cool-tiger-2').port, 30002, 'name and name-2 are two names');
+  for (const bad of ['NOT-valid', 'blocked-port', 'hub-port', 'term-port', 'own-port', 'string-port', 'label-long', 'low-port']) assert.equal(m.has(bad), false, `${bad} is dropped`);
+  assert.deepEqual(m.get('both-have').ambiguous.map((c) => ({ ...c })), [{ root: '/a', project: 'a', port: 30006 }, { root: '/b', project: 'b', port: 30004 }]);
+  const swapped = G.previewLinks([list[1], list[0]], ports, own);
+  assert.deepEqual(swapped.get('both-have').ambiguous.map((c) => c.root), ['/a', '/b'], 'whatever the roots\' order');
+  assert.equal(m.get('other-only').project.length, 63, 'strings are capped');
+  assert.equal(m.get('other-only').session.length, 80);
+  assert.equal(G.previewLinks(many, ports, own).size, 20, 'at most 20 per instance');
+  assert.equal(G.previewLinks('nope', ports, own).size, 0, 'a list that isn\'t an array is empty');
+  // an instance outside the block, or listed twice with one root, counts once at most
+  assert.equal(G.previewLinks([inst('/x', 99, [row('xx-yyy', 30007)])], ports, own).size, 0, 'only instances on the block');
+  assert.equal(G.previewLinks([inst('/a', P, [row('one-name', 30008)]), inst('/a', P, [row('one-name', 30009)])], ports, own).get('one-name').port, 30008, 'one root counts once');
+});
+
+test('preview names: only the box\'s, one label, and safeNext sends sign-in back to one', async () => {
+  const gw = await gateway('preview-names');
+  try {
+    const box = `box.localhost:${gw.port}`;
+    assert.equal(gw.g.previewOf(`cool-tiger.${box}`), 'cool-tiger');
+    assert.equal(gw.g.previewOf(`cool-tiger-2.${box}`), 'cool-tiger-2');
+    for (const h of [`term.${box}`, `public.${box}`, `${P}.${box}`, `cooltiger.${box}`, `a-b.${box}`, `cool-tiger.other.example`, `sub.cool-tiger.${box}`, box]) assert.equal(gw.g.previewOf(h), null, h);
+    assert.equal(gw.g.safeNext(`http://cool-tiger.${box}/x`), `http://cool-tiger.${box}/x`);
+    assert.equal(gw.g.safeNext('https://cool-tiger.evil.example/x'), `${gw.publicUrl}/`);
+    assert.equal(gw.g.safeNext(`https://${'a'.repeat(8)}-tiger.${box}/x`), `${gw.publicUrl}/`, 'not this shape');
+  } finally { await gw.close(); }
+});
