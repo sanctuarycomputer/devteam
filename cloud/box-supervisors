@@ -1,7 +1,7 @@
 #!/bin/sh
 # box-supervisors [--all [<repo>]] [--dry-run] | --status [--questions] | --tell <repo> <message> | --alert <text>|--clear | --pane-state <pane> | --age-boot:
 # the mechanical half of the box's operator (operator.md). One line per adopted repo in ~/code,
-# saying what it did and why.
+# saying what it did and why. The restoring itself is the kit's `recover`, the same on a laptop.
 #   (default)      after a restart: each supervisor that was running, unless its fleet is held.
 #   --all          every adopted repo that isn't a sibling, a parked one too: its supervisor decides.
 #                  --all <repo> does that for one repo, leaving every other fleet as it is.
@@ -244,6 +244,44 @@ if [ -n "$status" ]; then
   exit 0
 fi
 
+# A repo's kit can be older than this image: until each has synced to a kit with recover, it is
+# brought back the way it always was. Delete this function when none is left (operator.md: behind=).
+legacy_restore() {
+  r=$1; n=$2
+  if running "$r"; then say "$n" "already running"; return; fi
+  fm=$(dt "$r" fleet status --json --no-fetch | jq -r '.fleet.mode // "run"' 2>/dev/null)
+  case "$fm" in
+    run) ;;
+    park|drain) [ -n "$all" ] || { say "$n" "left stopped (its fleet is held: $fm)"; return; } ;;
+    *) say "$n" "NOT started (could not read whether its fleet is held)"; echo "$r" >> "$tmp/keep"; return ;;
+  esac
+  id=$(dt "$r" supervisor-session)
+  case "$id" in *[!A-Za-z0-9_-]*) id= ;; esac
+  miss=$(missing "$r")
+  if [ -n "$id" ]; then how="resume session $id"; else how="start fresh"; fi
+  if [ -n "$dry" ]; then say "$n" "would $how${miss:+ (missing here: $miss)}"; return; fi
+  if [ -n "$id" ]; then
+    cmd=$(dt "$r" settings --get resume_command)
+    case " $cmd " in *" --continue "*) ;; *) say "$n" "NOT started (its resume_command has no --continue to replace)"; echo "$r" >> "$tmp/keep"; return ;; esac
+    cmd=$(printf '%s' "$cmd" | sed -E "s/ --continue( |\$)/ --resume $id\1/")
+    msg='The box restarted, and this is you, resumed on your own conversation; what was in flight did not finish. Follow supervisor.md §11, after your own restart: §1 again. Every worker and planner window went with the restart; accounts-tick relaunches each one the kit launched, one per tick (§11), so give it those first. §1.4 sends to recovery only the tickets still without a window after it has caught up, or all of them on a kit too old to relaunch.'
+  else
+    cmd=$(dt "$r" settings --get agent_command)
+    msg=$(dt "$r" prompt supervisor)
+  fi
+  [ -n "$miss" ] && msg="$msg
+
+This machine is missing: $miss(worktree_files). Before unparking or starting any worker, ask the owner for each in the Inbox: an owner-action question with --secrets and the sink file:<path>. Never in chat."
+  mkdir -p "$r/docs/devteam/run"
+  f="$r/docs/devteam/run/supervisor-prompt.txt"
+  printf '%s\n' "$msg" > "$f"
+  pane=$(tmux new-window -dP -F '#{pane_id}' -t home -n "sup-$n" -c "$r") || { say "$n" "NOT started (tmux would not open its window)"; echo "$r" >> "$tmp/keep"; return; }
+  printf '%s' "$pane" > "$r/docs/devteam/run/supervisor-pane"
+  tmux send-keys -t "$pane" -l "export DEVTEAM_ROLE=supervisor; $cmd \"\$(cat '$f')\""
+  tmux send-keys -t "$pane" Enter
+  if [ -n "$id" ]; then did="resumed session $id"; else did="started fresh"; fi
+  say "$n" "$did${miss:+ (asked to get: $miss)}"
+}
 if [ -z "$dry" ] && ! tmux has-session -t home 2>/dev/null; then
   echo 'box-supervisors: no tmux session "home" on this box; starting one from here would hand every window this session'"'"'s markers' >&2
   exit 1
@@ -263,39 +301,16 @@ while read -r r; do
     s=$(sibling_of "$r")
     [ -n "$s" ] && { say "$n" "skipped (a sibling of $(basename "$s"))"; continue; }
   fi
-  if running "$r"; then say "$n" "already running"; continue; fi
-  fm=$(dt "$r" fleet status --json --no-fetch | jq -r '.fleet.mode // "run"' 2>/dev/null)
-  case "$fm" in
-    run) ;;
-    park|drain) [ -n "$all" ] || { say "$n" "left stopped (its fleet is held: $fm)"; continue; } ;;
-    *) say "$n" "NOT started (could not read whether its fleet is held)"; echo "$r" >> "$tmp/keep"; continue ;;
-  esac
-  id=$(dt "$r" supervisor-session)
-  case "$id" in *[!A-Za-z0-9_-]*) id= ;; esac
-  miss=$(missing "$r")
-  if [ -n "$id" ]; then how="resume session $id"; else how="start fresh"; fi
-  if [ -n "$dry" ]; then say "$n" "would $how${miss:+ (missing here: $miss)}"; continue; fi
-  if [ -n "$id" ]; then
-    cmd=$(dt "$r" settings --get resume_command)
-    case " $cmd " in *" --continue "*) ;; *) say "$n" "NOT started (its resume_command has no --continue to replace)"; echo "$r" >> "$tmp/keep"; continue ;; esac
-    cmd=$(printf '%s' "$cmd" | sed -E "s/ --continue( |\$)/ --resume $id\1/")
-    msg='The box restarted, and this is you, resumed on your own conversation; what was in flight did not finish. Follow supervisor.md §11, after your own restart: §1 again. Every worker and planner window went with the restart; accounts-tick relaunches each one the kit launched, one per tick (§11), so give it those first. §1.4 sends to recovery only the tickets still without a window after it has caught up, or all of them on a kit too old to relaunch.'
-  else
-    cmd=$(dt "$r" settings --get agent_command)
-    msg=$(dt "$r" prompt supervisor)
-  fi
-  [ -n "$miss" ] && msg="$msg
-
-This machine is missing: $miss(worktree_files). Before unparking or starting any worker, ask the owner for each in the Inbox: an owner-action question with --secrets and the sink file:<path>. Never in chat."
-  mkdir -p "$r/docs/devteam/run"
-  f="$r/docs/devteam/run/supervisor-prompt.txt"
-  printf '%s\n' "$msg" > "$f"
-  pane=$(tmux new-window -dP -F '#{pane_id}' -t home -n "sup-$n" -c "$r") || { say "$n" "NOT started (tmux would not open its window)"; echo "$r" >> "$tmp/keep"; continue; }
-  printf '%s' "$pane" > "$r/docs/devteam/run/supervisor-pane"
-  tmux send-keys -t "$pane" -l "export DEVTEAM_ROLE=supervisor; $cmd \"\$(cat '$f')\""
-  tmux send-keys -t "$pane" Enter
-  if [ -n "$id" ]; then did="resumed session $id"; else did="started fresh"; fi
-  say "$n" "$did${miss:+ (asked to get: $miss)}"
+  if ! grep -q 'recover: cmdRecover' "$r/$kit"; then legacy_restore "$r" "$n"; continue; fi
+  # The kit's own recover does the rest, the same code as on a laptop. What the restore list knows
+  # it says with --was-up; the rest (a second supervisor, a held fleet) recover checks itself.
+  set -- --session home --window "sup-$n"
+  if [ -n "$all" ]; then set -- "$@" --force; else set -- "$@" --was-up; fi
+  [ -z "$dry" ] || set -- "$@" --dry-run
+  said=$(cd "$r" && "$node" "$kit" recover "$@" 2>"$tmp/err") || true
+  [ -n "$said" ] || said="NOT started ($(head -1 "$tmp/err" 2>/dev/null))"
+  say "$n" "$said"
+  case $said in 'NOT started'*) echo "$r" >> "$tmp/keep" ;; esac
 done < "$tmp/adopted"
 # what a restore couldn't start stays listed for the next try
 if [ -z "$dry" ] && [ -z "$all" ] && [ -f "$boot" ]; then

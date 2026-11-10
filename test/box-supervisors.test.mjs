@@ -31,8 +31,9 @@ fs.writeFileSync(path.join(shim, 'tmux'), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${
 const latestRelease = path.join(tmp, 'latest');
 fs.writeFileSync(path.join(shim, 'gh'), `#!/bin/sh\n[ "$1" = release ] && cat '${latestRelease}' 2>/dev/null\nexit 0\n`, { mode: 0o755 });
 fs.writeFileSync(latestRelease, 'v9.9.9\n');
-const baseEnv = { ...process.env, HOME: home, PATH: `${shim}${path.delimiter}${process.env.PATH}`, DEVTEAM_NODE: process.execPath, DEVTEAM_HUB_PORT: '9', DEVTEAM_TELL_SETTLE_SECONDS: '0' };
-for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_HOME', 'TMUX', 'TMUX_PANE', 'CLAUDE_CONFIG_DIR']) delete baseEnv[k];
+const baseEnv = { ...process.env, HOME: home, PATH: `${shim}${path.delimiter}${process.env.PATH}`, DEVTEAM_NODE: process.execPath, DEVTEAM_HUB_PORT: '9', DEVTEAM_TELL_SETTLE_SECONDS: '0', DEVTEAM_SUPERVISOR_UP: 'off' };
+for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_HOME', 'TMUX', 'TMUX_PANE', 'CLAUDE_CONFIG_DIR', 'CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_PID']) delete baseEnv[k];
+for (const k of Object.keys(baseEnv)) if (/^CLAUDE_CODE_/.test(k)) delete baseEnv[k];
 
 function repo(name, { links, settings, adopt = true } = {}) {
   const r = path.join(code, name);
@@ -57,6 +58,8 @@ const link = (name) => ({ kind: 'repo', remote: `https://github.com/acme/${name}
 const run = (args = [], env = {}) => spawnSync('sh', [script, ...args], { encoding: 'utf8', env: { ...baseEnv, ...env } });
 const lines = (r) => Object.fromEntries(r.stdout.trim().split('\n').filter(Boolean).map((l) => { const i = l.indexOf(': '); return [l.slice(0, i), l.slice(i + 2)]; }));
 const boot = path.join(home, '.devteam-supervisors.boot');
+// run/supervisor-up.json as a tick writes it while the supervisor is up
+const wasUp = (r, f = {}) => { fs.mkdirSync(path.join(r, 'docs/devteam/run'), { recursive: true }); fs.writeFileSync(path.join(r, 'docs/devteam/run/supervisor-up.json'), JSON.stringify({ at: new Date().toISOString(), up: true, kind: 'tmux', pane: '%1', server: null, machine: 'before', skip: false, ...f })); };
 const session = (r) => { const d = path.join(home, '.claude/projects', r.replace(/[^a-zA-Z0-9]/g, '-')); fs.mkdirSync(d, { recursive: true }); fs.writeFileSync(path.join(d, '11111111-2222-3333-4444-555555555555.jsonl'), `${JSON.stringify({ type: 'user', message: { content: 'You are the supervisor for this repository' } })}\n`); };
 
 test('which supervisors come back, and which are left alone', () => {
@@ -70,6 +73,8 @@ test('which supervisors come back, and which are left alone', () => {
   assert.equal(pk.status, 0, pk.stderr + pk.stdout);
   repo('kit-only', { adopt: false });
   session(h);
+  // what the dashboard's tick noted while it ran: the flag it had, read from the process
+  wasUp(h, { skip: true });
   fs.writeFileSync(boot, `${sib}\n${h}\n${parked}\n`);
 
   const dflt = lines(run(['--dry-run']));
@@ -405,4 +410,28 @@ test('the kit lets a box operator look, and nothing else', () => {
   for (const c of [['status'], ['fleet', 'status', '--json', '--no-fetch'], ['settings', '--get', 'main_branch'], ['supervisor-session'], ['questions', '--json'], ['log', '--json'], ['messages', '--to', 'supervisor', '--open'], ['knowledge'], ['knowledge', '--kind', 'fact'], ['goal'], ['goal', 'list']]) assert.equal(dtIn(r, c, op).status, 0, c.join(' '));
   for (const c of [['merge', 't-1'], ['fleet', 'park', '--reason', 'x'], ['fleet', 'unpark'], ['answer', 'q', 'yes'], ['send', 'supervisor', 'hi'], ['knowledge', 'add', '--kind', 'fact', '--statement', 'x'], ['knowledge', 'set', 'k-1'], ['goal', 'add', '--title', 'x'], ['goal', 'set', 'g-1'], ['goal', 'status', 'g-1', 'met'], ['goal', 'hold', 'g-1', 'park'], ['goal', 'reading', 'g-1', '--run'], ['ticket', 'show', 't-1'], ['dashboard-data'], ['ask', '--question', 'q', '--kind', 'x']]) { const x = dtIn(r, c, op); assert.notEqual(x.status, 0, c.join(' ')); assert.match(x.stderr, /only reads|owner commands/, c.join(' ')); }
   assert.ok(!fs.existsSync(path.join(r, 'docs/devteam/run/supervisor-pane')), 'and it is never taken for the supervisor\'s pane');
+  // the one write the operator has: bringing a supervisor back (operator.md)
+  const dry = dtIn(r, ['recover', '--dry-run'], op);
+  assert.equal(dry.status, 0, dry.stderr);
+  assert.match(dry.stdout, /left stopped/);
+  const worker = dtIn(r, ['recover', '--dry-run'], { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'x-1' });
+  assert.notEqual(worker.status, 0);
+  assert.match(worker.stderr, /recover: /);
+});
+
+test('a kit from before recover is brought back the way it always was', () => {
+  const r = repo('oldkit');
+  session(r);
+  // no recover in this kit: as a repo that hasn't synced yet
+  const k = path.join(r, 'docs/devteam/scripts/devteam.mjs');
+  fs.writeFileSync(k, fs.readFileSync(k, 'utf8').replace('recover: cmdRecover,', ''));
+  fs.writeFileSync(boot, `${r}\n`);
+  fs.writeFileSync(panesFile, '');
+  const dry = lines(run(['--dry-run']));
+  assert.match(dry.oldkit, /^would resume session 11111111-/, 'the old path, whose flag was whatever resume_command says');
+  fs.writeFileSync(tmuxLog, '');
+  const real = lines(run());
+  assert.match(real.oldkit, /^resumed session 11111111-/);
+  assert.match(fs.readFileSync(tmuxLog, 'utf8'), /send-keys -t %9 -l export DEVTEAM_ROLE=supervisor; claude --resume 11111111-2222-3333-4444-555555555555 --dangerously-skip-permissions/);
+  assert.ok(!fs.existsSync(boot), 'and the list is used up the same way');
 });

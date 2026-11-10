@@ -1096,6 +1096,7 @@ const ownerChannel = () => (process.env.DEVTEAM_CHANNEL === 'dashboard' ? 'dashb
 const supervisorOnly = (what) => {
   if (logWriter() !== 'supervisor' || ['worker', 'planner'].includes(process.env.DEVTEAM_ROLE)) die(`${what}: the supervisor does this`);
   rememberSupervisorPane();
+  noteSupervisorSelf();
 };
 // The supervisor is the owner's foreground agent session. When it runs inside tmux, its pane is
 // recorded so workers' messages and the owner's answers can be typed into it; otherwise they wait
@@ -9336,6 +9337,285 @@ function restartSupervisor(budget) {
   if (failed) out(`could not restart the supervisor: ${failed}`);
   return failed ? 'failed' : 'restarted';
 }
+// ===== recover: the supervisor back after a restart =====
+//
+// A dead machine writes nothing at the end, so whether the supervisor was up has to be noted while it
+// is: run/supervisor-up.json, by each dashboard's minute tick (what it can see of the pane or the
+// process) and by the supervisor's own commands (the only way to know one in a plain terminal). It
+// holds a boot's identity, so a supervisor that went with the machine reads differently from one the
+// owner closed while the machine stayed up, and what the OS said about the process's own flags.
+const SUPERVISOR_UP_FILE = runPath('supervisor-up.json');
+const SUPERVISOR_UP_CHECK = runPath('supervisor-up.checked');
+const SUPERVISOR_UP_EVERY_MS = 60000;
+// A record this old says nothing about the machine that wrote it. The same age as the box's restore list.
+const SUPERVISOR_UP_MAX_MS = 3 * 24 * 3600000;
+// Long enough for a window to open and the agent's process to appear; a second recover meanwhile is a no-op.
+const RECOVER_STARTING_MS = 3 * 60000;
+const supervisorUpRecord = () => { try { const r = readJson(SUPERVISOR_UP_FILE); return r && typeof r === 'object' ? r : null; } catch { return null; } };
+const writeSupervisorUp = (r) => { writeJson(SUPERVISOR_UP_FILE, { at: nowIso(), ...r }); registerOnMachine(); };
+// When this machine's init started: a reboot or a new container changes it, and nothing else does.
+// A container's boot id is the host's and outlives a redeploy, so it won't do. Null if it can't be
+// read; DEVTEAM_MACHINE_EPOCH is a test's stand-in for a boot.
+function machineEpoch() {
+  return process.env.DEVTEAM_MACHINE_EPOCH || processStart(1);
+}
+// When a pid's process started, so a pid the OS has reused is told from the one that was recorded.
+function processStart(pid) {
+  if (process.platform === 'linux') {
+    try {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+      return stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19] ?? null;
+    } catch { return null; }
+  }
+  return sh('ps', ['-o', 'lstart=', '-p', String(pid)]) || null;
+}
+function parentPid(pid) {
+  if (process.platform === 'linux') {
+    try { const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8'); return Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]); } catch { return 0; }
+  }
+  return Number(sh('ps', ['-o', 'ppid=', '-p', String(pid)])) || 0;
+}
+const isAgentArgs = (args) => args.slice(0, 2).some((a) => /(^|\/)(claude|codex|opencode)(\.[cm]?js)?$/.test(a) || a.includes('/claude-code/') || a.includes('/claude/versions/'));
+// The agent this process runs under, in a plain terminal: the nearest ancestor that is one, or null.
+function agentAncestor() {
+  let pid = process.ppid;
+  for (let i = 0; i < 12 && pid > 1; i++) {
+    const info = processInfo(pid);
+    if (!info) return null;
+    if (isAgentArgs(info.args)) return { pid, args: info.args };
+    pid = parentPid(pid);
+  }
+  return null;
+}
+// The tmux server's pid, or null with none running (or none answering).
+const tmuxServerPid = () => sh('tmux', ['list-sessions', '-F', '#{pid}'])?.split('\n')[0] || null;
+// The supervisor's pane now, or null: the one it noted, or else anything agent-shaped started at the
+// repo's root. Never a preview, a dashboard or the operator's window, and never a pane started in a
+// worktree: pane ids restart at %0 with the tmux server, so a noted id can be anyone's by now.
+const SUPERVISOR_NOT_WINDOW = /^(dev~|dash-|dashboard$|operator$)/;
+function supervisorPaneNow(rec = supervisorUpRecord(), { notedOnly = false } = {}) {
+  const listed = sh('tmux', ['list-panes', '-a', '-F', '#{pane_id}\t#{window_name}\t#{pane_start_path}\t#{pane_current_command}']);
+  if (listed === null) return null;
+  let noted = readText(supervisorPaneFile())?.trim() || null;
+  if (noted && !noted.startsWith('%')) noted = sh('tmux', ['display-message', '-p', '-t', noted, '#{pane_id}']);
+  const root = realPath(mainRoot);
+  const server = tmuxServerPid();
+  let other = null;
+  for (const l of listed.split('\n').filter(Boolean)) {
+    const [id, win, start, cmd] = l.split('\t');
+    if (SUPERVISOR_NOT_WINDOW.test(win) || SHELLS.has(cmd.replace(/^-/, ''))) continue;
+    const at = realPath(start);
+    if (at === path.join(root, '.worktrees') || at.startsWith(path.join(root, '.worktrees') + path.sep)) continue;
+    // a noted id is only as good as the server it was noted on; with nothing to say so, it must be
+    // started at the root, or a restored fleet's panes %0, %1… would read as this repo's own
+    if (id === noted && (rec?.server ? rec.server === server : at === root)) return id;
+    if (at === root && /claude|node|codex|opencode|bun|^\d+\.\d+/.test(cmd) && !other) other = id;
+  }
+  return notedOnly ? null : other;
+}
+// Is the supervisor running right now? Its pane, or a recorded foreground process still alive.
+function supervisorRunningNow(rec) {
+  if (supervisorPaneNow(rec)) return true;
+  return rec?.kind === 'foreground' && !!rec.pid && !!rec.start && processStart(rec.pid) === rec.start;
+}
+// From the dashboard's minute tick. It doesn't touch a record once the machine or the tmux server has
+// changed under it, so a dashboard that comes up after a restart, before recover has run, can't erase
+// what recover needs. Nor does it say "stopped" when tmux doesn't answer: not knowing isn't a stop.
+function noteSupervisorFromTick() {
+  try {
+    registerOnMachine();
+    const rec = supervisorUpRecord();
+    const machine = machineEpoch();
+    if (!machine) return;
+    // only the pane the supervisor noted: an ad-hoc agent at the repo's root isn't it, though it's
+    // reason enough not to start a second one (supervisorRunningNow)
+    const pane = supervisorPaneNow(rec, { notedOnly: true });
+    if (pane) {
+      const agent = paneAgentProcess(pane);
+      return writeSupervisorUp({ up: true, kind: 'tmux', pane, server: tmuxServerPid(), machine, skip: agent ? isSupervisorProcess(agent) && startedSkippingPermissions(agent.args) : rec?.pane === pane ? !!rec.skip : false });
+    }
+    if (!rec?.up) return;
+    if (rec.kind === 'foreground') {
+      if (rec.pid && processStart(rec.pid) === rec.start) return writeSupervisorUp({ ...rec, at: nowIso() });
+      if (rec.machine === machine) writeSupervisorUp({ ...rec, up: false });
+      return;
+    }
+    if (rec.machine === machine && rec.server && tmuxServerPid() === rec.server) writeSupervisorUp({ ...rec, up: false });
+  } catch {}
+}
+// From the supervisor's own commands, at most once a minute: the only record of one in a plain
+// terminal, where no pane says what it is. Only under DEVTEAM_ROLE=supervisor and only an agent's
+// process, so the owner running a command by hand is never taken for it.
+// DEVTEAM_SUPERVISOR_UP=off: a test's stand-in supervisor, under whatever agent runs the tests, isn't it.
+function noteSupervisorSelf() {
+  if (process.env.DEVTEAM_ROLE !== 'supervisor' || process.env.DEVTEAM_SUPERVISOR_UP === 'off') return;
+  try {
+    if (fileAge(SUPERVISOR_UP_CHECK) < SUPERVISOR_UP_EVERY_MS) return;
+    fs.mkdirSync(runDir, { recursive: true });
+    fs.writeFileSync(SUPERVISOR_UP_CHECK, '');
+    const machine = machineEpoch();
+    if (!machine) return;
+    // TMUX with no pane is the dashboard's tick relaunching a session, not the supervisor's own command
+    if (process.env.TMUX && !process.env.TMUX_PANE) return;
+    const pane = process.env.TMUX_PANE;
+    if (pane) {
+      const agent = paneAgentProcess(pane);
+      const rec = supervisorUpRecord();
+      return writeSupervisorUp({ up: true, kind: 'tmux', pane, server: tmuxServerPid(), machine, skip: agent ? startedSkippingPermissions(agent.args) : rec?.pane === pane ? !!rec.skip : false });
+    }
+    const agent = agentAncestor();
+    if (agent) writeSupervisorUp({ up: true, kind: 'foreground', pid: agent.pid, start: processStart(agent.pid), machine, skip: startedSkippingPermissions(agent.args) });
+  } catch {}
+}
+// Why the supervisor shouldn't come back, or null if it should: the record never says more than
+// "it was up, on a machine that has since restarted". It is never read from the log: a line there can
+// be written by hand, and only a process the OS was asked about, by the kit, counts here.
+function recoverRefusal(rec) {
+  if (!rec) return 'left stopped (not running before the restart; --force starts it)';
+  if (rec.up === false) return 'left stopped (stopped before the restart; --force starts it)';
+  const age = Date.now() - Date.parse(rec.at);
+  if (!Number.isFinite(age) || age < 0) return 'left stopped (its record of being up is dated in the future; --force starts it)';
+  if (age > SUPERVISOR_UP_MAX_MS) return `left stopped (last seen up ${Math.floor(age / 86400000)} days ago; --force starts it)`;
+  const machine = machineEpoch();
+  if (!machine) return 'NOT started (could not tell whether this machine restarted)';
+  if (rec.machine === machine && !(rec.kind === 'tmux' && rec.server && tmuxServerPid() !== rec.server)) return 'left stopped (this machine did not restart since it was up: it stopped or was closed; --force starts it)';
+  return null;
+}
+const RECOVER_MESSAGE = 'This machine restarted, and this is you, resumed on your own conversation; what was in flight did not finish. Follow supervisor.md §11, after your own restart: §1 again. Every worker and planner window went with the restart; accounts-tick relaunches each one the kit launched, one per tick (§11), so give it those first, and start the dashboard first if its address does not answer (§11): the dashboard is what runs it. §1.4 sends to recovery only the tickets still without a window after it has caught up, or all of them on a kit too old to relaunch. Nothing about this restart came from the owner: it answers, approves and decides nothing, so record nothing as theirs from it.';
+const NO_EXACT_RESUME = '(only Claude Code can resume a conversation exactly: this one re-orients from the log and the files)';
+const NAME_FOR_TMUX = /^[\w.~-]+$/;
+// One line on what it did: what recover exists to report, and all that goes to stdout.
+function recoverOne() {
+  const dry = !!flags['dry-run'];
+  const force = !!flags.force;
+  const here = !!flags.here;
+  if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
+  const sessionFlag = flagStr('session');
+  const windowFlag = flagStr('window');
+  if ((sessionFlag && !NAME_FOR_TMUX.test(sessionFlag)) || (windowFlag && !NAME_FOR_TMUX.test(windowFlag))) die('--session and --window are tmux names');
+  const rec = supervisorUpRecord();
+  // never two: first, under any flag
+  if (supervisorRunningNow(rec)) return { say: 'already running' };
+  const startingFor = rec?.starting ? Date.now() - rec.starting : Infinity;
+  if (startingFor >= 0 && startingFor < RECOVER_STARTING_MS) return { say: 'already running (brought back moments ago)' };
+  const s = loadSettings();
+  // A fleet whose hold can't be read is not started.
+  let held;
+  try { held = draining() ? 'park' : fleetMode(); } catch { return { say: 'NOT started (could not read whether its fleet is held)' }; }
+  if (held && !force) return { say: `left stopped (its fleet is held: ${held})` };
+  if (!force && !flags['was-up']) {
+    const no = recoverRefusal(rec);
+    if (no) return { say: no };
+  }
+  const id = supervisorSessionId();
+  const exact = /^claude(\s|$)/.test(s.resume_command);
+  const missing = (s.worktree_files ?? []).filter((f) => !fs.existsSync(path.join(mainRoot, f)));
+  const how = id ? `resume session ${id}` : 'start fresh';
+  let cmd = id ? supervisorResumeCommand(id) : s.agent_command;
+  if (id && !cmd) return { say: 'NOT started (its resume_command has no --continue to replace)' };
+  // It keeps the permissions it had. Only the OS's word on its own process can say it had the flag
+  // (run/supervisor-up.json holds that, read from the process's arguments); no record means leave it
+  // off a resume, as the printed recovery line does. A fresh start from agent_command is the start the
+  // owner configured, unless the record says this supervisor ran without it.
+  const dropFlag = id ? rec?.skip !== true : rec?.skip === false;
+  const notes = [];
+  if (missing.length) notes.push(`${dry ? 'missing here' : 'asked to get'}: ${missing.join(' ')}`);
+  if (dropFlag && cmd.includes(SKIP_PERMISSIONS)) { cmd = withoutSkipPermissions(cmd); notes.push(`without ${SKIP_PERMISSIONS}: nothing recorded that it had it`); }
+  const tail = `${notes.length ? ` (${notes.join('; ')})` : ''}${!id && !exact ? ` ${NO_EXACT_RESUME}` : ''}`;
+  if (dry) return { say: `would ${how}${tail}` };
+  let msg = id ? RECOVER_MESSAGE : supervisorOpeningPrompt();
+  if (missing.length) msg = `${msg}\n\nThis machine is missing: ${missing.join(' ')} (worktree_files). Before unparking or starting any worker, ask the owner for each in the Inbox: an owner-action question with --secrets and the sink file:<path>. Never in chat.`;
+  fs.mkdirSync(runDir, { recursive: true });
+  const promptFile = path.join(runDir, 'supervisor-prompt.txt');
+  fs.writeFileSync(promptFile, `${msg}\n`);
+  const didHow = id ? `resumed session ${id}` : 'started fresh';
+  const machine = machineEpoch();
+  // A supervisor that ran in a plain terminal comes back in one, when there's one to take; otherwise
+  // in tmux, as any unattended restore (a box, --machine) must.
+  const inPlace = here || (rec?.kind === 'foreground' && !sessionFlag && process.stdin.isTTY && process.stdout.isTTY && !process.env.TMUX);
+  const line = `export DEVTEAM_ROLE=supervisor; ${sessionMarkerPrefix()}${cmd} "$(cat '${promptFile}')"`;
+  if (inPlace) {
+    writeSupervisorUp({ up: true, kind: 'foreground', pid: null, start: null, machine, skip: !dropFlag && cmd.includes(SKIP_PERMISSIONS), starting: Date.now() });
+    return { say: `${didHow} in this terminal${tail}`, run: line };
+  }
+  if (sh('tmux', ['-V']) === null) return { say: `NOT started (no tmux here: run this in a terminal: DEVTEAM_ROLE=supervisor ${cmd})` };
+  const session = sessionFlag ?? tmuxSession({ save: true });
+  const target = sessionFlag ?? `=${session}`;
+  const window = windowFlag ?? 'supervisor';
+  let pane;
+  if (tmux(['has-session', '-t', target])) pane = sh('tmux', ['new-window', '-dP', '-F', '#{pane_id}', '-t', target, '-n', window, '-c', mainRoot]);
+  else if (sessionFlag) return { say: `NOT started (no tmux session ${sessionFlag})` };
+  else pane = sh('tmux', ['new-session', '-d', '-P', '-F', '#{pane_id}', '-s', session, '-n', window, '-c', mainRoot], { env: tmuxServerEnv() });
+  if (!pane) return { say: 'NOT started (tmux would not open its window)' };
+  fs.writeFileSync(supervisorPaneFile(), pane);
+  if (!typeInto(pane, line)) return { say: `NOT started (its window opened but could not be typed into: pane ${pane})` };
+  writeSupervisorUp({ up: true, kind: 'tmux', pane, server: tmuxServerPid(), machine, skip: !dropFlag && cmd.includes(SKIP_PERMISSIONS), starting: Date.now() });
+  return { say: `${didHow}${rec?.kind === 'foreground' ? ' in tmux, where it ran in a terminal before' : ''}${tail}` };
+}
+function cmdRecover() {
+  if (logWriter() !== 'supervisor' || ['worker', 'planner'].includes(process.env.DEVTEAM_ROLE)) die('recover: the owner, the operator or the supervisor does this, in the main checkout');
+  if (flags.machine) return recoverMachine();
+  if (!flags['dry-run']) fs.mkdirSync(runDir, { recursive: true });
+  // one recover at a time: withLock's lock goes stale in 10 s, so a crash halfway can't wedge the next
+  const { say, run } = flags['dry-run'] ? recoverOne() : withLock(path.join(runDir, 'recover'), recoverOne);
+  out(say);
+  if (say.startsWith('NOT started')) process.exitCode = 1;
+  if (run) { const r = spawnSync(process.env.SHELL || '/bin/sh', ['-c', run], { cwd: mainRoot, stdio: 'inherit' }); process.exitCode = r.status ?? 1; }
+}
+// Every repo on this machine, for `recover --machine`: a file each in ~/.devteam, written by each
+// dashboard's tick and the supervisor's own commands. The hub won't do: it lists what answers on the
+// dashboard ports, and after a dead machine none does, which is exactly when this is needed.
+// Named for the hub port, so a fixture has its own. One file each, so nothing there is shared.
+const machineRepoDir = () => path.join(os.homedir(), '.devteam', `repos-${HUB_PORT}`);
+function registerOnMachine() {
+  try {
+    const root = realPath(mainRoot);
+    writeJson(path.join(machineRepoDir(), `${crypto.createHash('sha1').update(root).digest('hex').slice(0, 16)}.json`), { root, at: nowIso() });
+  } catch {}
+}
+function machineRepos() {
+  let files = [];
+  try { files = fs.readdirSync(machineRepoDir()).filter((f) => f.endsWith('.json')); } catch { return []; }
+  const roots = files.flatMap((f) => { try { const r = readJson(path.join(machineRepoDir(), f)).root; return typeof r === 'string' && path.isAbsolute(r) ? [r] : []; } catch { return []; } });
+  return [...new Set(roots)].sort();
+}
+const kitAt = (root) => path.join(root, 'docs', 'devteam', 'scripts', 'devteam.mjs');
+// A sibling is started by the home that links it, unless the two link each other. Only for --force,
+// where nothing says it was up: a repo that ran its own supervisor is a home whatever links to it.
+function siblingOf(root, repos) {
+  const ownKey = remoteKeyAt(git(['config', '--get', 'remote.origin.url'], root) ?? root, root);
+  const linksOf = (r) => repoLinksIn(path.join(r, 'docs', 'devteam', 'project', 'settings.md'));
+  const links = (from, key) => linksOf(from).some(([, l]) => remoteKeyAt(l.remote, from) === key);
+  return repos.find((h) => {
+    if (h === root) return false;
+    const homeKey = remoteKeyAt(git(['config', '--get', 'remote.origin.url'], h) ?? h, h);
+    return links(h, ownKey) && !links(root, homeKey);
+  }) ?? null;
+}
+function recoverMachine() {
+  const dry = !!flags['dry-run'];
+  const force = !!flags.force;
+  const known = machineRepos();
+  if (!known.length) return out('no repos recorded on this machine yet: run recover in each repo, or start its dashboard so it is recorded');
+  const adopted = known.filter((r) => fs.existsSync(kitAt(r)) && fs.existsSync(path.join(r, 'docs', 'devteam', 'project', 'settings.md')));
+  let failed = false;
+  for (const root of known) {
+    const name = path.basename(root);
+    if (!adopted.includes(root)) { out(`${name}: skipped (not an adopted repo here any more: ${root})`); continue; }
+    const sib = force ? siblingOf(root, adopted) : null;
+    if (sib) { out(`${name}: skipped (a sibling of ${path.basename(sib)})`); continue; }
+    // Each repo's own kit: a repo's kit can be another version, and its log and rules are its own.
+    const env = { ...process.env };
+    for (const k of ['DEVTEAM_HOME', 'DEVTEAM_RUN', 'DEVTEAM_PROJECT', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE']) delete env[k];
+    const r = spawnSync(process.execPath, [kitAt(root), 'recover', ...(dry ? ['--dry-run'] : []), ...(force ? ['--force'] : [])], { cwd: root, env, encoding: 'utf8', timeout: 120000, stdio: ['ignore', 'pipe', 'pipe'] });
+    const said = (r.stdout ?? '').trim();
+    if (said) out(`${name}: ${said}`);
+    else if (/unknown command/.test(r.stderr ?? '')) out(`${name}: NOT started (its kit is older than recover: upgrade it, or use its fleet status recovery line)`);
+    else out(`${name}: NOT started (${(r.stderr || r.error?.message || `exit ${r.status}`).trim().slice(0, 200)})`);
+    if (r.status !== 0) failed = true;
+  }
+  if (failed) process.exitCode = 1;
+}
 function accountsState() {
   try {
     const s = JSON.parse(readText(ACCOUNTS_FILE));
@@ -9347,6 +9627,7 @@ function accountsState() {
 function cmdAccountsTick() {
   const began = Date.now();
   if (logWriter() !== 'supervisor' || ['worker', 'planner'].includes(process.env.DEVTEAM_ROLE)) die('accounts-tick: the supervisor does this');
+  noteSupervisorFromTick();
   const bin = findCswap();
   const before = accountsState();
   const state = { at: nowIso(), cswap: !!bin, active: null, active_no_room: false, exhausted: false, needs_login: [], restart_gave_up: [], supervisor_limit: null, resumed: [], relaunched: [] };
@@ -9833,12 +10114,17 @@ function promptFor(role, id, R = repo('home')) {
   const kitCmd = `node ${shq(path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs'))}`;
   return `${base.replace(/node docs\/devteam\/scripts\/devteam\.mjs/g, kitCmd).replace('Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md', `Read ${path.join(mainRoot, 'docs', 'devteam', 'process', 'worker.md')}`)} This worktree is a checkout of ${R.name} (${locatorForPrompt(R.remote)}); run every devteam command as ${kitCmd}, and keep this ticket's records under ${locatorForPrompt(R.projectRel)}/tickets/${id}/ in this repo.`;
 }
+// The supervisor's opening prompt: the drained or parked preface first, when there is one.
+function supervisorOpeningPrompt(p = PROMPTS.supervisor) {
+  const d = drainedPreface();
+  return d ? `${d}\n\n${p}` : p;
+}
 function cmdPrompt() {
   const role = positional[0];
   if (!PROMPTS[role]) die('usage: prompt supervisor|worker <ticket-id>|planner <feature>');
   const t = role === 'worker' && positional[1] ? tickets().get(positional[1]) : null;
   const p = role === 'planner' && positional[1] ? plannerPrompt(positional[1]) : t ? promptFor('worker', t.id, repoAbout(repoOfTicketLink(t))) : PROMPTS[role].replace(/\{\{ID\}\}/g, positional[1] ?? '');
-  if (role === 'supervisor') { const d = drainedPreface(); return out(d ? `${d}\n\n${p}` : p); }
+  if (role === 'supervisor') return out(supervisorOpeningPrompt(p));
   const handoff = positional[1] ? handoffBlock(role === 'worker' ? positional[1] : `plan-${positional[1]}`) : null;
   const links = linksBlock(positional[1]);
   const arts = artifactsBlock(positional[1]);
@@ -13251,6 +13537,7 @@ Setup and roles
   init [--name n] [--upstream-base vX]   project folders, settings, .gitignore, the devteam section of AGENTS.md
   prompt supervisor | worker <id> | planner <feature>    the prompt a session starts with
   supervisor-session                 the id of the supervisor's Claude Code conversation (claude --resume <id>); nothing if there's none, or another harness
+  recover [--dry-run] [--force] [--here] | recover --machine [--dry-run] [--force]   after a restart (a dead laptop, a redeploy): bring back this repo's supervisor, or every repo's on this machine, if it was up and its fleet isn't held, on its exact conversation where the harness can (Claude Code); --force also starts one the owner stopped or whose fleet is held; --here runs it in this terminal; safe to run twice
   worker <ticket-id> [--resume [--if-gone]] [--force] | worker <ticket-id> --remove [--force] | planner <feature> [--goal <g-id>] [--resume] [--force] [--id-block <n>]   supervisor: a worktree, a tmux window and an agent for a ticket or a feature plan (a new planner names its goal and reserves n ticket numbers, default 20); refused while its goal is parked or let go, or draining for a session that hasn't run, unless --force (logged); --resume where no session exists starts fresh with the handoff note; worker --remove, once the ticket is merged and its worker logged phase done (--force before that), removes its worktree through the repo it belongs to and prunes that repo's worktree list (the branch stays)
   whoami | settings [--get key]
   hello [--json]                   who this instance is (root, name, kit, open questions, fleet): what the hub lists
@@ -13355,6 +13642,7 @@ Dashboard and releases
 
 // What the box's operator may run: reads only (a test runs each and diffs the log and git status). A
 // command that also writes is listed by its read forms, so `knowledge add` is refused like any write.
+// recover writes, and is allowed by name below: bringing a supervisor back is what the operator's for.
 const OPERATOR_READS = new Set(['status', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'next', 'log', 'messages', 'knowledge', 'goal', 'goal list', 'goal show', 'fleet status']);
 const OPERATOR_SUBCOMMANDED = new Set(['fleet', 'goal', 'knowledge']);
 const COMMANDS = {
@@ -13365,7 +13653,7 @@ const COMMANDS = {
   ask: cmdAsk, answer: cmdAnswer, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, rate: cmdRate, next: cmdNext, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
   observe: cmdObserve, 'observe-link': cmdObserveLink, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, knowledge: cmdKnowledge, problem: cmdProblem,
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
-  log: cmdLog, record: cmdRecord, peek: cmdPeek, sensor: cmdSensor, 'log-check': cmdLogCheck, remediate: cmdRemediate, 'accounts-tick': cmdAccountsTick, 'supervisor-session': cmdSupervisorSession, dispose: cmdDispose, 'log-sync': cmdLogSync, history: cmdHistory,
+  log: cmdLog, record: cmdRecord, peek: cmdPeek, sensor: cmdSensor, 'log-check': cmdLogCheck, remediate: cmdRemediate, 'accounts-tick': cmdAccountsTick, 'supervisor-session': cmdSupervisorSession, recover: cmdRecover, dispose: cmdDispose, 'log-sync': cmdLogSync, history: cmdHistory,
   drain: cmdDrain, undrain: cmdUndrain, fleet: cmdFleet, handoff: cmdHandoff, wait: cmdWait,
   dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes,
 };
@@ -13373,7 +13661,7 @@ if (!command || command === 'help' || command === '--help') out(HELP);
 else if (!COMMANDS[command]) die(`unknown command "${command}"\n${HELP}`);
 // A cloud box's operator (process/operator.md) looks after the machine and reads every repo. Any other
 // role the kit doesn't know reads as the supervisor, so this one may only look.
-else if (process.env.DEVTEAM_ROLE === 'operator' && !OPERATOR_READS.has(OPERATOR_SUBCOMMANDED.has(command) && positional[0] ? `${command} ${positional[0]}` : command)) die(`${command}: the operator only reads; this is for the repo's supervisor or its owner`);
+else if (process.env.DEVTEAM_ROLE === 'operator' && command !== 'recover' && !OPERATOR_READS.has(OPERATOR_SUBCOMMANDED.has(command) && positional[0] ? `${command} ${positional[0]}` : command)) die(`${command}: the operator only reads; this is for the repo's supervisor or its owner`);
 else {
   // --decision names the decision a command's act carries out; check it before the command does anything.
   if (flags.decision !== undefined) {

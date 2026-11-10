@@ -2143,7 +2143,7 @@ http.createServer((req, res) => {
     git(['commit', '-qm', 'release'], up);
     git(['tag', 'v0.3.0'], up);
     landSettings((txt) => txt.replace('"gates": {', `"upstream_repo": ${JSON.stringify(up)}, "gates": {`));
-    const upFile = (tag, f) => execFileSync('git', ['show', `${tag}:docs/devteam/${f}`], { cwd: up });
+    const upFile = (tag, f) => execFileSync('git', ['show', `${tag}:docs/devteam/${f}`], { cwd: up, maxBuffer: 64 * 1024 * 1024 });
     const settingsIn = (w) => path.join(w, 'docs/devteam/project/settings.md');
     const setBase = (w, to) => fs.writeFileSync(settingsIn(w), fs.readFileSync(settingsIn(w), 'utf8').replace(/"upstream_base": ("[^"]*"|null)/, `"upstream_base": ${JSON.stringify(to)}`));
     const refused = (a) => { const r = dt(a, { role: 'sup' }); assert.notEqual(r.status, 0, r.out); return r.out + r.err; };

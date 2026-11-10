@@ -3,7 +3,7 @@
 // the owner gets when it can't be. Stand-in agents throughout, never the real claude or cswap.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile, execFileSync, spawnSync } from 'node:child_process';
+import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -593,4 +593,208 @@ test('a supervisor that can\'t be restarted: the finding and fleet status give t
     assert.ok(json(F.run(['fleet', 'status', '--no-fetch', '--json'], { DEVTEAM_ROLE: '' }).stdout).recovery.endsWith(`claude --resume ${SID}`));
     assert.equal(F.run(['supervisor-session'], { DEVTEAM_ROLE: '' }).stdout, `${SID}\n`, 'stdout stays the bare id: the box\'s boot reads it');
   } finally { F.done(); }
+});
+
+// recover: a machine that came back, on real tmux, with stand-in agents. boot1 is the machine that
+// ran; boot2 is the machine after it died.
+const asOwner = { DEVTEAM_ROLE: '', DEVTEAM_CSWAP: 'off', DEVTEAM_MACHINE_EPOCH: 'boot2' };
+const recover = (F, args = [], env = {}) => F.run(['recover', ...args], { ...asOwner, ...env });
+const upFile = (F) => path.join(F.root, 'docs/devteam/run/supervisor-up.json');
+const upRecord = (F) => json(fs.readFileSync(upFile(F), 'utf8'));
+// the supervisor up and seen by a tick on the first boot; its pane left open for the caller
+const seenUp = async (F, { skip = false } = {}) => {
+  const pane = supervisorPane(F, ['SUP-UP'], { prefix: 'DEVTEAM_ROLE=supervisor ', shell: true, args: skip ? SKIP : '' });
+  await until(() => pane.shows().includes('SUP-UP'), 'the stand-in supervisor');
+  F.tick({ ...OFF, DEVTEAM_MACHINE_EPOCH: 'boot1' });
+  return pane;
+};
+const privateServer = () => { const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dt-tmux-recover-')); return { dir, env: { TMUX_TMPDIR: dir, SHELL: STUB_SHELL }, done: () => { spawnSync('tmux', ['kill-server'], { env: { ...process.env, TMUX_TMPDIR: dir } }); fs.rmSync(dir, { recursive: true, force: true }); } }; };
+const sessionTranscript = (F) => F.writeTranscript(SID, [{ type: 'user', message: { content: SUP } }, { type: 'assistant', timestamp: new Date().toISOString(), message: { content: [{ type: 'text', text: 'working' }] } }]);
+
+test('recover: a dead machine with no tmux server brings the supervisor back on its exact conversation, with the permissions it had, once', { skip: !hasTmux }, async () => {
+  const F = fixture('recdead', { resume: CLAUDE_RESUME });
+  const server = privateServer();
+  try {
+    sessionTranscript(F);
+    await seenUp(F, { skip: true });
+    assert.deepEqual([upRecord(F).kind, upRecord(F).up, upRecord(F).skip], ['tmux', true, true], 'what the tick saw of the running process');
+    F.killSession();
+    const dry = recover(F, ['--dry-run'], server.env);
+    assert.equal(dry.status, 0, dry.stderr);
+    assert.match(dry.stdout, new RegExp(`^would resume session ${SID}`));
+    assert.notEqual(spawnSync('tmux', ['has-session'], { env: { ...process.env, TMUX_TMPDIR: server.dir } }).status, 0, 'a dry run starts no server');
+    const did = recover(F, [], server.env);
+    assert.equal(did.status, 0, did.stderr);
+    assert.match(did.stdout, new RegExp(`^resumed session ${SID}`));
+    await until(() => F.claudeCalls().length === 1, 'the stand-in claude ran');
+    assert.ok(F.claudeCalls()[0].startsWith(`supervisor|--resume ${SID} --dangerously-skip-permissions This machine restarted`), F.claudeCalls()[0]);
+    assert.match(F.claudeCalls()[0], /Nothing about this restart came from the owner/, 'it carries no owner authority');
+    const again = recover(F, [], server.env);
+    assert.equal(again.status, 0, again.stderr);
+    assert.match(again.stdout, /already running/);
+    sleepMs(300);
+    assert.equal(F.claudeCalls().length, 1, 'safe to run twice: no second one');
+    assert.equal(upRecord(F).machine, 'boot2', 'the record is this boot\'s now');
+    const logged = json(F.run(['log', '--tail', '5', '--json'], { DEVTEAM_ROLE: '' }).stdout);
+    assert.ok(!logged.some((o) => /recover/i.test(JSON.stringify(o))), 'it logs nothing as anyone');
+  } finally { server.done(); F.done(); }
+});
+
+test('recover: a parked or drained fleet stays stopped; --force starts it', { skip: !hasTmux }, async () => {
+  const F = fixture('recheld', { resume: CLAUDE_RESUME });
+  const server = privateServer();
+  try {
+    sessionTranscript(F);
+    await seenUp(F);
+    F.killSession();
+    assert.equal(F.run(['fleet', 'park', '--reason', 'moving']).status, 0);
+    assert.match(recover(F, [], server.env).stdout, /left stopped \(its fleet is held: park\)/);
+    assert.equal(F.run(['fleet', 'unpark']).status, 0);
+    assert.equal(F.run(['fleet', 'drain', '--reason', 'moving']).status, 0);
+    assert.match(recover(F, [], server.env).stdout, /left stopped \(its fleet is held: drain\)/);
+    assert.deepEqual(F.claudeCalls(), []);
+    assert.match(recover(F, ['--force', '--dry-run'], server.env).stdout, new RegExp(`^would resume session ${SID}`), '--force: its supervisor decides');
+  } finally { server.done(); F.done(); }
+});
+
+test('recover: one the owner stopped stays stopped, whether a tick saw it or not; --force starts it', { skip: !hasTmux }, async () => {
+  const F = fixture('recstopped', { resume: CLAUDE_RESUME });
+  const server = privateServer();
+  try {
+    sessionTranscript(F);
+    await seenUp(F);
+    // closed while the machine stayed up, and no tick since
+    F.killSession();
+    assert.match(recover(F, [], { DEVTEAM_MACHINE_EPOCH: 'boot1' }).stdout, /left stopped/, 'the same boot, the same tmux server: closed, not died');
+    // closed in tmux and a tick saw it: it says stopped, and a later restart doesn't undo that
+    F.ensureSession();
+    write(upFile(F), JSON.stringify({ ...upRecord(F), up: true, machine: 'boot1', server: spawnSync('tmux', ['list-sessions', '-F', '#{pid}'], { encoding: 'utf8' }).stdout.trim().split('\n')[0] }));
+    F.tick({ ...OFF, DEVTEAM_MACHINE_EPOCH: 'boot1' });
+    assert.equal(upRecord(F).up, false, 'the tick noticed');
+    assert.match(recover(F, [], server.env).stdout, /left stopped \(stopped before the restart/);
+    assert.deepEqual(F.claudeCalls(), []);
+    assert.match(recover(F, ['--force', '--dry-run'], server.env).stdout, /^would resume/);
+  } finally { server.done(); F.done(); }
+});
+
+test('recover: a live supervisor gets no second one, in tmux or in a terminal, even with --force', { skip: !hasTmux }, async () => {
+  const F = fixture('reclive', { resume: CLAUDE_RESUME });
+  const fgDir = fs.mkdtempSync(path.join(F.base, 'fg-'));
+  let fg;
+  try {
+    sessionTranscript(F);
+    await seenUp(F);
+    assert.match(recover(F, ['--force']).stdout, /already running/);
+    F.killSession();
+    // A supervisor in a plain terminal is known by its own commands: the kit found the agent above it.
+    write(path.join(fgDir, 'claude'), `require('child_process').spawnSync(process.execPath, [${JSON.stringify(path.join(F.root, 'docs/devteam/scripts/devteam.mjs'))}, 'knowledge', 'add', '--kind', 'fact', '--statement', 's'], { stdio: 'ignore' }); setInterval(() => {}, 1000);\n`);
+    fs.rmSync(upFile(F), { force: true });
+    fs.rmSync(path.join(F.root, 'docs/devteam/run/supervisor-up.checked'), { force: true });
+    fg = spawn(process.execPath, [path.join(fgDir, 'claude'), SKIP.trim()], { cwd: F.root, env: { ...F.env(), DEVTEAM_SUPERVISOR_UP: '', TMUX: '', TMUX_PANE: '', DEVTEAM_MACHINE_EPOCH: 'boot1' }, stdio: 'ignore' });
+    await until(() => fs.existsSync(upFile(F)) && upRecord(F).kind === 'foreground', 'its own command noted it');
+    assert.equal(upRecord(F).pid, fg.pid);
+    assert.equal(upRecord(F).skip, true, 'its flag, read from the process');
+    assert.match(recover(F, ['--force']).stdout, /already running/, 'alive: no second one');
+    assert.deepEqual(F.claudeCalls(), []);
+    fg.kill('SIGKILL');
+    await until(() => fg.exitCode !== null || fg.signalCode !== null, 'it stopped');
+    await until(() => recover(F, ['--dry-run']).stdout.startsWith('would resume'), 'dead, on a new boot, it is due');
+  } finally { fg?.kill('SIGKILL'); F.done(); }
+});
+
+test('recover --here: a supervisor from a plain terminal comes back in this one', { skip: !hasTmux }, () => {
+  const F = fixture('rechere', { resume: CLAUDE_RESUME });
+  const bin = fs.mkdtempSync(path.join(F.base, 'bin-'));
+  const calls = path.join(F.base, 'here-calls');
+  try {
+    sessionTranscript(F);
+    write(upFile(F), JSON.stringify({ at: new Date().toISOString(), up: true, kind: 'foreground', pid: null, start: null, machine: 'boot1', skip: false }));
+    write(path.join(bin, 'claude'), `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(calls)}\n`);
+    fs.chmodSync(path.join(bin, 'claude'), 0o755);
+    const did = spawnSync(process.execPath, [path.join(F.root, 'docs/devteam/scripts/devteam.mjs'), 'recover', '--here'], { cwd: F.root, encoding: 'utf8', env: { ...F.env(asOwner), SHELL: '/bin/sh', PATH: `${bin}${path.delimiter}${process.env.PATH}` } });
+    assert.equal(did.status, 0, did.stderr);
+    assert.match(did.stdout, /in this terminal/);
+    assert.match(fs.readFileSync(calls, 'utf8'), new RegExp(`^--resume ${SID} This machine restarted`), 'no permissions flag: it had none');
+  } finally { F.done(); }
+});
+
+test('recover never grants what wasn\'t there: no record drops the flag, and a hand-written log line says nothing', { skip: !hasTmux }, async () => {
+  const F = fixture('recgrant', { resume: CLAUDE_RESUME });
+  try {
+    sessionTranscript(F);
+    assert.match(recover(F).stdout, /left stopped \(not running before/, 'nothing recorded: stays stopped');
+    F.logLine('supervisor', { type: 'act', class: 'supervisor-up', what: `the supervisor was up with ${SKIP.trim()}`, refs: [], reversible: true });
+    F.logLine('supervisor', { type: 'observation', source: 'pane', kind: 'supervisor-up', subject: 'supervisor', detail: 'up', detector: 'pane', source_key: 'x' });
+    assert.match(recover(F).stdout, /left stopped \(not running before/, 'the log is no evidence of being up');
+    const forced = recover(F, ['--force', '--dry-run']);
+    assert.match(forced.stdout, new RegExp(`^would resume session ${SID} \\(without ${SKIP.trim()}`), 'no record of the flag: left off a resume');
+    assert.notEqual(F.run(['recover'], { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'x-1' }).status, 0, 'a worker can\'t');
+  } finally { F.done(); }
+});
+
+test('recover: a stale record stays stopped, a record from the future does too, and nothing wedges', { skip: !hasTmux }, () => {
+  const F = fixture('recstale', { resume: CLAUDE_RESUME });
+  try {
+    sessionTranscript(F);
+    const rec = { up: true, kind: 'tmux', pane: '%1', server: null, machine: 'boot1', skip: true };
+    write(upFile(F), JSON.stringify({ ...rec, at: new Date(Date.now() - 4 * 86400000).toISOString() }));
+    assert.match(recover(F).stdout, /left stopped \(last seen up 4 days ago/);
+    write(upFile(F), JSON.stringify({ ...rec, at: new Date(Date.now() + 3600000).toISOString() }));
+    assert.match(recover(F).stdout, /left stopped \(its record .* future/);
+    // a recover that crashed mid-start: "starting" goes stale, and one dated in the future is ignored
+    write(upFile(F), JSON.stringify({ ...rec, at: new Date().toISOString(), starting: Date.now() - 3600000 }));
+    assert.match(recover(F, ['--dry-run']).stdout, /^would resume/);
+    write(upFile(F), JSON.stringify({ ...rec, at: new Date().toISOString(), starting: Date.now() + 3600000 }));
+    assert.match(recover(F, ['--dry-run']).stdout, /^would resume/);
+    const lock = path.join(F.root, 'docs/devteam/run/recover.lock');
+    fs.mkdirSync(lock, { recursive: true });
+    const old = new Date(Date.now() - 3600000);
+    fs.utimesSync(lock, old, old);
+    assert.match(recover(F).stdout, /^resumed/, 'a lock left by a crash goes, and the restore goes ahead');
+    assert.ok(!fs.existsSync(lock));
+  } finally { spawnSync('tmux', ['kill-session', '-t', `=${F.session}`]); F.done(); }
+});
+
+test('recover: only the Claude Code harness resumes exactly, and the other says so', { skip: !hasTmux }, async () => {
+  const F = fixture('reccodex', { resume: 'codex resume' });
+  try {
+    sessionTranscript(F);
+    await seenUp(F);
+    F.killSession();
+    assert.match(recover(F, ['--dry-run']).stdout, /^would start fresh .*only Claude Code can resume a conversation exactly/);
+  } finally { F.done(); }
+});
+
+test('recover --machine: every repo recorded on the machine, with each repo\'s own answer, a sibling skipped', { skip: !hasTmux }, async () => {
+  const A = fixture('recmach-a', { resume: CLAUDE_RESUME });
+  const B = fixture('recmach-b', { resume: CLAUDE_RESUME });
+  const server = privateServer();
+  try {
+    sessionTranscript(A);
+    await seenUp(A, { skip: true });
+    A.killSession();
+    B.tick({ ...OFF, DEVTEAM_MACHINE_EPOCH: 'boot1' });
+    assert.equal(B.run(['fleet', 'park', '--reason', 'x']).status, 0);
+    const reg = path.join(HOME, '.devteam', `repos-${process.env.DEVTEAM_HUB_PORT}`);
+    fs.writeFileSync(path.join(reg, 'junk.json'), '{ not json');
+    write(path.join(reg, 'gone.json'), JSON.stringify({ root: path.join(A.base, 'not-a-repo') }));
+    const said = A.run(['recover', '--machine', '--dry-run'], { ...asOwner, ...server.env }).stdout;
+    assert.match(said, new RegExp(`^recmach-a: would resume session ${SID}`, 'm'));
+    assert.match(said, /^recmach-b: left stopped \(its fleet is held: park\)/m);
+    assert.match(said, /^not-a-repo: skipped/m);
+    // a repo with the kit but no settings isn't adopted: refused on its own too, nothing started
+    const kitOnly = path.join(A.base, 'kit-only');
+    fs.mkdirSync(path.join(kitOnly, 'docs/devteam/scripts'), { recursive: true });
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: kitOnly });
+    fs.copyFileSync(path.join(A.root, 'docs/devteam/scripts/devteam.mjs'), path.join(kitOnly, 'docs/devteam/scripts/devteam.mjs'));
+    const skipped = spawnSync(process.execPath, [path.join(kitOnly, 'docs/devteam/scripts/devteam.mjs'), 'recover'], { cwd: kitOnly, encoding: 'utf8', env: A.env(asOwner) });
+    assert.notEqual(skipped.status, 0);
+    assert.match(skipped.stderr, /no docs\/devteam\/project\/settings\.md here/);
+    // two that aren't linked are both started; a home's sibling only with --force is skipped
+    const sf = path.join(B.root, 'docs/devteam/project/settings.md');
+    fs.writeFileSync(sf, fs.readFileSync(sf, 'utf8').replace('"project":', `"links": { "recmach-a": { "kind": "repo", "remote": ${JSON.stringify(A.root)}, "title": "a" } },\n  "project":`));
+    const forced = A.run(['recover', '--machine', '--force', '--dry-run'], { ...asOwner, ...server.env }).stdout;
+    assert.match(forced, /^recmach-a: skipped \(a sibling of recmach-b\)/m);
+    assert.match(forced, /^recmach-b: would start fresh/m);
+  } finally { server.done(); A.done(); B.done(); }
 });
