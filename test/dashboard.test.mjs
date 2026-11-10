@@ -300,10 +300,10 @@ const POLL_FAST = `(() => {
   const rf = window.fetch;
   window.__polls = 0;
   window.__gate = null;
-  window.__answerDelay = 0;
+  window.__answerHold = null;
   window.fetch = async (u, o) => {
     if (String(u).startsWith('/api/data')) { window.__polls++; if (window.__gate) await window.__gate; return rf(u, o); }
-    if (String(u).startsWith('/api/answer') && window.__answerDelay) await new Promise((r) => setTimeout(r, window.__answerDelay));
+    if (String(u).startsWith('/api/answer') && window.__answerHold) await window.__answerHold;
     return rf(u, o);
   };
 })()`;
@@ -456,11 +456,13 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
     await t.test('Answer still works with a draft and held data, and isn\'t redrawn while it posts', async () => {
       await p.click(box);
       await newQuestion('Before the answer?');
-      await p.ev('window.__answerDelay = 900');
+      // held by the test, not by a clock: on a loaded runner the polls below can outlast any fixed delay
+      await p.ev('window.__answerHold = new Promise((r) => { window.__answerGo = r; }); void 0');
       await p.click(`button[data-answer="${Q}"]`);
       await soon(`document.querySelector('button[data-answer="${Q}"]')?.textContent === 'Posting…'`, 'the button posting');
       await polls();
       assert.equal(await p.ev(`document.querySelector('button[data-answer="${Q}"]')?.getAttribute('aria-busy')`), 'true', 'not redrawn mid-post');
+      await p.ev('window.__answerGo(); void 0');
       await soon(`!document.querySelector('${box}')`, 'the card answered and gone');
       const listed = spawnSync(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), 'questions', '--all', '--json'], { cwd: root, env, encoding: 'utf8' });
       assert.equal(JSON.parse(listed.stdout).find((x) => x.id === Q)?.status, 'answered', listed.stderr);
