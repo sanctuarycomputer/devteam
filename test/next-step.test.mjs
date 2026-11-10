@@ -5,7 +5,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fleetFixture, kit, write, json, line } from './lib/kit.mjs';
+import { fleetFixture, kit, write, json, line, startDashboard, until, freePort, PORTS } from './lib/kit.mjs';
+import { canDrive, openChrome } from './lib/chrome.mjs';
 
 const SUP = { DEVTEAM_ROLE: 'supervisor' };
 
@@ -212,7 +213,7 @@ test('the order is computed: a goal judged again, a ticket merged, a goal parked
     // urgency 3 counts as 3 only while it holds up a waiting ticket, or has a default
     const claimed = ask('Urgent, it says?', '--goal', G, '--stake', '1', '--urgency', '3');
     assert.deepEqual([rank(claimed).parts.urgency, rank(claimed).parts.urgency_given, rank(claimed).score], [2, 3, 8]);
-    assert.match(rank(claimed).sum, /urgency 2 \(rated 3, counted as 2: it holds up no waiting ticket and has no default\)/);
+    assert.match(rank(claimed).sum, /urgency 2 \(rated 3, counted as 2: it holds up no waiting ticket or open incident and has no default\)/);
     assert.match(run(old, ['ask', '--question', 'x?', '--goal', G, '--stake', '1', '--urgency', '3'], SUP).err, /urgency 3 says work is stopped on it now: it counts as 3 only while --blocks names a ticket that is waiting/);
     // a default: the fleet goes on at the deadline, so half; and the chip says so before the goal's
     const defaulted = ask('Ship behind a flag?', '--goal', G, '--recommendation', 'yes', '--default', 'yes', '--stake', '2', '--urgency', '3');
@@ -451,4 +452,54 @@ test('next prints the top of the Inbox and why; an unrated project prints as it 
     const all = json(ok(old, ['questions', '--all', '--json']));
     assert.equal(all[all.length - 1].id, a, 'closed questions follow the Inbox');
   } finally { F.done(); }
+});
+
+test('the Inbox shows the order: the next best step on top with its reason, what an answer closes, and the owner\'s own value for a goal', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async () => {
+  const F = fixture('nbs-page');
+  const { old, ok, goal, ask, impact } = F;
+  const G = goal('Team billing', 1);
+  const D = impact(G, 3, 'W2 is revenue.');
+  const detail = ask('Round to cents?', '--goal', G, '--stake', '1', '--urgency', '2');
+  const unrated = ask('Unrated one?');
+  const gate = ask('Should we build it at all?', '--goal', G, ...yesNo, '--stake', '3', '--urgency', '1', '--settles', detail, '--settles-if', "Don't build it");
+  ok(old, ['knowledge', 'add', '--kind', 'lesson', '--statement', 'a lesson to keep', '--scope', 'project', '--evidence', detail], SUP);
+  const port = await freePort();
+  const dash = startDashboard(old, F.env({ DEVTEAM_HUB_PORT: String(PORTS + 10), DEVTEAM_PORT_BASE: String(PORTS + 11) }), ['--port', String(port)]);
+  const chrome = await openChrome();
+  const p = await chrome.newPage();
+  try {
+    await until(() => /dashboard on http/.test(dash.out()), 'the dashboard');
+    await p.send('Page.enable');
+    await p.send('Runtime.enable');
+    await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#questions` });
+    const soon = (expr, what) => until(() => p.ev(expr), what);
+    await soon(`!!document.querySelector('[id="q-${gate}"]')`, 'the question cards');
+    const cards = await p.ev(`[...document.querySelectorAll('#questions > .card')].map((c) => ({ id: c.id.slice(2), top: c.classList.contains('top'), lead: c.querySelector('.top-why')?.textContent ?? null, why: [...c.querySelectorAll('.why span')].map((s) => s.textContent), closes: c.querySelector('.closes')?.textContent ?? null, lesson: /Lesson to keep/.test(c.textContent) }))`);
+    assert.deepEqual(cards.map((c) => c.id), [gate, detail, unrated, ''], 'the kit\'s order, and the lesson to keep after the questions');
+    assert.deepEqual(cards.map((c) => c.top), [true, false, false, false]);
+    assert.equal(cards[0].lead, 'Next best step. Would settle 1 other question; for Team billing: moves a number the project watches; decides whether the work goes ahead.');
+    assert.equal(cards[0].closes, 'Closes 1 other question: Round to cents?', 'on the choice that settles it');
+    assert.deepEqual(cards[1].why, ['for Team billing: moves a number the project watches', 'a detail', 'may be settled by Should we build it at all?']);
+    assert.deepEqual(cards[2].why, ['not rated']);
+    assert.ok(cards[3].lesson);
+    assert.match(await p.ev(`document.querySelector('[id="q-${detail}"] .kv').textContent`), /Order2 of 3\. Score 6: impact 3 \(moves a number the project watches\) × stake 1 \(a detail\) × urgency 2 /);
+    assert.equal(await p.ev(`document.querySelector('#inbox h2 .sub').textContent`), 'decisions only you can make, the most valuable first');
+    assert.match(await p.ev(`document.querySelector('#strategy-link').getAttribute('href')`), /^#file\?path=docs%2Fdevteam%2Fproject%2Fstrategy\.md/);
+    // the goal: its impact beside its priority, why, and Wrong? sends the owner's own value
+    assert.match(await p.ev(`document.querySelector('#goals-list a.title-link[href="#goal/${G}"]').closest('.card').querySelector('.card-head').textContent`), /priority 1 · moves a number the project watches/);
+    await p.ev(`void (location.hash = '#goal/${G}')`);
+    const key = `imp:${D}`;
+    await soon(`!!document.querySelector('[data-correct="${key}"]')`, 'the goal drawer');
+    assert.match(await p.ev(`document.querySelector('[data-correct="${key}"]').parentElement.textContent`), /Moves a number the project watches \(3 of 4\)W2 is revenue\.\s+Judged by the supervisor [\s\S]* · the decision · the strategy\s+Wrong\?/);
+    await p.click(`[data-correct="${key}"]`);
+    await p.ev(`(() => { document.querySelector('select[data-impact="${key}"]').value = '4'; document.querySelector('input[data-reason="${key}"]').value = 'the launch blocker'; })()`);
+    await p.click(`[data-correct-send="${key}"]`);
+    await until(() => json(ok(old, ['goal', 'show', G])).impact.level === 4, 'the owner\'s value');
+    assert.deepEqual([json(ok(old, ['goal', 'show', G])).impact.by, json(ok(old, ['goal', 'show', G])).impact.rationale], ['owner', 'the launch blocker']);
+  } finally {
+    p.close();
+    await chrome.close();
+    await dash.stop();
+    F.done();
+  }
 });

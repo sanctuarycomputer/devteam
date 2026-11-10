@@ -1301,7 +1301,7 @@
             "type": "integer",
             "minimum": 1,
             "maximum": 3,
-            "description": "How soon waiting costs: 3 work is stopped on it now; 2 work will stop on it before the current milestone is done; 1 nothing waits yet. A 3 counts as 3 only while blocks names a ticket that is waiting or the question has a default; otherwise it counts as 2.",
+            "description": "How soon waiting costs: 3 work is stopped on it now; 2 work will stop on it before the current milestone is done; 1 nothing waits yet. A 3 counts as 3 only while blocks names a ticket that is waiting or an open incident, or the question has a default; otherwise it counts as 2.",
             "x-tip": "How soon it matters: 3 work is stopped now, 2 soon, 1 nothing waits yet."
           },
           "settles": {

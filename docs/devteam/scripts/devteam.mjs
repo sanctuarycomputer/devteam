@@ -4271,7 +4271,7 @@ function settleChecks({ self, kind, stake, settles, added, settlesIf, choices, a
 }
 // A rating the kit will count for less than it says, or that contradicts the question: said once, on stderr.
 function ratingWarnings({ stake, urgency, blocks, def }) {
-  if (urgency === 3 && !def && !(blocks ?? []).some((b) => activeTickets().has(b) && !mergeShaFor(b))) warn('urgency 3 says work is stopped on it now: it counts as 3 only while --blocks names a ticket that is waiting, or the question has a default; this one counts as 2');
+  if (urgency === 3 && !def && !(blocks ?? []).some((b) => activeTickets().has(b) && !mergeShaFor(b)) && !blocksOpenIncident(blocks)) warn('urgency 3 says work is stopped on it now: it counts as 3 only while --blocks names a ticket that is waiting or an open incident, or the question has a default; this one counts as 2');
   if (stake === 3 && def) warn('a question the work turns on (stake 3) shouldn\'t go ahead by default');
 }
 function cmdAsk() {
@@ -5720,8 +5720,8 @@ function questionHold(q) {
 //   own   = ceil(own / 2) when the question has a default (the fleet goes on at the deadline)
 //   score = own + the own of every open question it settles, through other settling questions too
 // Unrated counts as stake 2 and urgency 2 with blocks, else 1; no goal or an unjudged one as
-// impact 2. Urgency 3 counts as 3 only while the question holds up a waiting ticket or has a
-// default, else as 2. settles counts only for a stake-3 question that shares a goal or feature
+// impact 2. Urgency 3 counts as 3 only while the question holds up a waiting ticket, is about an
+// open incident, or has a default, else as 2. settles counts only for a stake-3 question that shares a goal or feature
 // with what it settles. A parked goal's question: urgency 1, no unblock. Ties: more settled, then
 // older, then id.
 const STAKE_WORDS = { 3: 'decides whether the work goes ahead', 2: 'changes the design or the plan', 1: 'a detail' };
@@ -5738,6 +5738,9 @@ function questionAbout(q) {
   const goals = (q.goal ? [logGet(q.goal)] : about.flatMap((id) => ticketGoals(ts.get(id)))).filter((g) => g?.type === 'goal' && !isUpkeep(g));
   return { goals: [...new Map(goals.map((g) => [g.id, g])).values()], features: [...new Set(about.map((id) => ts.get(id).feature).filter((f) => f && f !== CHORES))] };
 }
+// An incident-fix question's blocks names its incident (p-…): one still open backs an urgency of 3
+// as a waiting ticket does.
+const blocksOpenIncident = (blocks) => (blocks ?? []).some((b) => { const p = logGet(b); return isIncident(p) && p.status !== 'resolved'; });
 const sharesWork = (a, b) => a.goals.some((g) => b.goals.some((h) => h.id === g.id)) || a.features.some((f) => b.features.includes(f));
 // The rank of every question in the Inbox (the open ones whose goal is not let go: a question
 // outside that list adds nothing to another's score), by id.
@@ -5763,7 +5766,7 @@ function inboxRanks(inbox) {
     held.forEach(walk);
     const behind = [...after].filter((id) => waiting(id) && !held.includes(id)).length;
     const given = q.urgency ?? (q.blocks.length ? 2 : 1);
-    const clamped = given === 3 && !parked && !held.length && !q.default;
+    const clamped = given === 3 && !parked && !held.length && !q.default && !blocksOpenIncident(q.blocks);
     const parts = {
       goal: goal?.id ?? null, goal_title: goal?.title ?? null, goal_impact: judged?.i.level ?? 2, judged: !!judged,
       stake: q.stake ?? 2, urgency: parked ? 1 : clamped ? 2 : given, urgency_given: q.urgency ?? null, rated: q.stake != null || q.urgency != null,
@@ -5799,7 +5802,7 @@ function inboxRanks(inbox) {
     const sum = [
       `impact ${p.goal_impact} (${p.judged ? IMPACT_WORDS[p.goal_impact] : p.goal ? 'not judged yet, counted as 2' : 'no goal, counted as 2'})`,
       `× stake ${p.stake} (${q.stake != null ? (q.kind === 'owner-action' ? STAKE_ACTION_WORDS : STAKE_WORDS)[p.stake] : 'not rated, counted as 2'})`,
-      `× urgency ${p.urgency} (${p.parked ? 'its goal is parked' : p.urgency_given === 3 && p.urgency === 2 ? 'rated 3, counted as 2: it holds up no waiting ticket and has no default' : p.urgency_given != null ? URGENCY_WORDS[p.urgency] : `not rated, counted as ${p.urgency}`})`,
+      `× urgency ${p.urgency} (${p.parked ? 'its goal is parked' : p.urgency_given === 3 && p.urgency === 2 ? 'rated 3, counted as 2: it holds up no waiting ticket or open incident and has no default' : p.urgency_given != null ? URGENCY_WORDS[p.urgency] : `not rated, counted as ${p.urgency}`})`,
       ...(p.unblock ? [`+ ${p.unblock} for the tickets it holds up`] : []), ...(p.default ? ['halved for its default'] : []),
       ...(f.all.length ? [`+ ${f.score - f.own} from the ${plural(f.all.length, 'question')} it would settle`] : []),
     ].join(' ');
@@ -11559,7 +11562,7 @@ function verifyIncidents() {
         type: 'question', kind: 'owner-decision', question: `The fix for "${p.title}" didn't hold (${t.id}). Was deciding it a wrong call, or a sound call whose fix failed?`,
         context: `${recurred.join(', ')} recurred after the deploy. A wrong call is a correction you make (correct ${dec?.id ?? '<decision>'} --reason "…"), and incident-fix drops to rung 1. A sound call that failed is a problem (${prob.id}) and changes no trust. Recurrence has innocent causes: stale dynos, cached client bundles, replayed jobs, a second cause sharing the frame.`,
         recommendation: 'Sound call, failed fix', choices: [{ label: 'Sound call, failed fix', detail: `keep ${prob.id} open, fix forward`, effect: 'no trust change' }, { label: 'Wrong call', detail: `correct ${dec?.id ?? 'the decision'} yourself`, effect: 'incident-fix drops to rung 1' }],
-        blocks: [p.id], evidence: [o.id, prob.id], why_asked: { reasons: ['owner-only'] },
+        blocks: [p.id], stake: 1, urgency: 2, evidence: [o.id, prob.id], why_asked: { reasons: ['owner-only'] },
       }, 'supervisor');
       setIncident(p, { status: 'open', verify: { commit: v.commit, regressed: [...(v.regressed ?? []), v.commit] } });
       alerts.push(`the fix for ${p.id} didn't hold (${o.id}; question ${q.id})`);
