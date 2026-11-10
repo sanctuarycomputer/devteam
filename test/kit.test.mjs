@@ -350,6 +350,41 @@ test('threads: records, commands, delivery, the Inbox and the loop', async (t) =
     const A = F.approval();
     const UA = F.owner(['thread', 'say', T2, 'approve it']).split('\n')[0];
     assert.match(F.fails(['answer', A.question, 'Approve', '--from-turn', UA], F.SUP), /goal decide .* --from-turn/);
+    // the read side: a real --from-turn answer raises nothing; a hand-written line breaking a binding rule does
+    const unbound = () => JSON.parse(F.owner(['metrics', '--json'])).findings.filter((f) => f.kind === 'thread-answer-unbound');
+    assert.deepEqual(unbound(), []);
+    const set = (id, o) => ['owner', { type: 'question', op: 'set', id, answer: 'yes', channel: 'thread', ...o }];
+    const Q4 = F.sup(['thread', 'ask', T, '--question', 'Tell the UK team?', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
+    const U4 = F.owner(['thread', 'say', T, 'tell them']).split('\n')[0];
+    const Q5 = F.sup(['thread', 'ask', T, '--question', 'And the AU team?', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
+    const U5 = F.owner(['thread', 'say', T, 'them too']).split('\n')[0];
+    F.sup(['answer', Q5, 'yes', '--from-turn', U5]);
+    const cases = [
+      [/names no turn/, { turn: 'u-20990101-000000000-owner', said: 'x' }],
+      [/supervisor's/, { turn: S, said: 'On it.' }],
+      [/aren't what the turn says/, { turn: U4, said: 'something else' }],
+      [/another thread/, { turn: elsewhere, said: 'yes' }],
+      [/before the question/, { turn: before, said: show(T).turns[0].text }],
+      [/already settled/, { turn: U5, said: 'them too' }],
+    ];
+    for (const [why, o] of cases) {
+      const snap = F.snapLog();
+      try {
+        F.hand(...set(Q4, o), 0);
+        const found = unbound();
+        assert.deepEqual(found.map((f) => f.subject), [Q4], String(why));
+        assert.match(found[0].detail, why);
+        assert.equal(found[0].severity, 'medium');
+      } finally { F.restoreLog(snap); }
+    }
+    // a review takes no turn; a missing or malformed id is refused
+    const snapRV = F.snapLog();
+    try {
+      const RV = F.hand('supervisor', { type: 'question', kind: 'review', question: 'Does it look right?', stake: 1, urgency: 1 }, 500);
+      assert.match(F.fails(['answer', RV, 'x', '--from-turn', U4], F.SUP), /is a review/);
+    } finally { F.restoreLog(snapRV); }
+    assert.match(F.fails(['answer', Q4, 'yes', '--from-turn', 'nonsense'], F.SUP), /--from-turn <u-id>/);
+    assert.match(F.fails(['answer', Q4, 'yes', '--from-turn'], F.SUP), /--from-turn <u-id>/);
     // goal decide takes the same refusals: the owner's turn only, one turn for one question, newer than it
     assert.match(F.fails(['goal', 'decide', A.goal, 'approve', '--from-turn', U], F.SUP), /already settled/);
     assert.match(F.fails(['goal', 'decide', A.goal, 'approve', '--from-turn', S], F.SUP), /that turn is the supervisor's/);

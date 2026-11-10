@@ -8475,6 +8475,27 @@ function chatQuotesNotFound() {
   const owners = typed.filter((x) => !x.startsWith('from the operator ('));
   return recent.filter((q) => { const said = norm(q.said).replace(/^["'\s]+|["'.!?\s]+$/g, ''); return Date.parse(q.answered_at) >= from && !owners.some((x) => x.includes(said)); });
 }
+// A thread answer (answer --from-turn) cites the owner's turn it was recorded from. checkLine only
+// checks its shape, so this checks the binding turnAnswer enforced, for lines written some other
+// way: the turn is the owner's, its words are what the line says, it is in the question's thread,
+// it is newer than the question, and no other question line cites it. One reason per answer.
+function threadAnswersUnbound() {
+  const lines = readLog().lines.filter((l) => l.type === 'question' && l.op === 'set' && l.channel === 'thread').sort((a, b) => String(a.at).localeCompare(String(b.at)));
+  const first = new Map();
+  return lines.map((l) => {
+    const u = typeof l.turn === 'string' ? logGet(l.turn) : null;
+    const q = logGet(l.id);
+    const firstId = first.get(l.turn);
+    if (l.turn !== undefined && !firstId) first.set(l.turn, l.id);
+    const why = u?.type !== 'turn' ? `names no turn that exists (${l.turn ?? 'none'})`
+      : u.created_by !== 'owner' ? "cites a turn that is the supervisor's, not the owner's"
+      : l.said !== u.text ? "gives words that aren't what the turn says"
+      : q?.thread && u.thread !== q.thread ? 'cites a turn from another thread than the one the question was asked in'
+      : q && u.created_at <= q.created_at ? 'cites a turn from before the question was asked'
+      : firstId ? `cites a turn that already settled ${firstId}` : null;
+    return why ? { id: l.id, why } : null;
+  }).filter(Boolean);
+}
 function collectMetrics(since) {
   const settings = loadSettings();
   const now = Date.now();
@@ -8775,6 +8796,8 @@ function collectMetrics(since) {
   // A chat answer's quote that the supervisor's transcript doesn't show the owner typing: a record
   // for the owner to look at, never a block.
   for (const q of chatQuotesNotFound()) add('medium', 'chat-quote-not-found', q.id, `recorded from chat as the owner's words, "${q.said.slice(0, 120)}", and the supervisor's transcript has no owner message with them`, 'check it on the dashboard; if the owner never said it, correct the answer');
+  // A thread answer whose cited turn doesn't bear it out: a record for the owner to look at, never a block.
+  for (const x of threadAnswersUnbound()) add('medium', 'thread-answer-unbound', x.id, `recorded from a thread as the owner's words, but it ${x.why}`, 'check it on the dashboard; if the owner never said it, correct the answer');
   // A harness's runtime file committed by accident: it churns in every worktree and means nothing elsewhere.
   const trackedRuntime = (git(['ls-files'], mainRoot) ?? '').split('\n').filter((f) => f && isHarnessRuntime(f));
   if (trackedRuntime.length) add('medium', 'tracked-runtime-file', trackedRuntime.slice(0, 3).join(', '), `${trackedRuntime.length} agent-harness runtime file(s) are tracked in git (${trackedRuntime.slice(0, 5).join(', ')}): machine-local state that changes in every worktree`, `a chore (it changes .gitignore, so it needs the owner's answer): git rm --cached ${trackedRuntime.map((f) => `'${f}'`).join(' ')}, and add ${RUNTIME_RES.filter(([, re]) => trackedRuntime.some((f) => re.test(f))).map(([pat]) => pat).join(' ')} to .gitignore`);
