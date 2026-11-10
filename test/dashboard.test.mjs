@@ -10,7 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
-import { PORTS, kit, freePort, write, json, fleetFixture, bareProject, startDashboard, until, statusWithHost } from './lib/kit.mjs';
+import { PORTS, kit, freePort, write, json, fleetFixture, bareProject, startDashboard, until, statusWithHost, threadsFixture, hasTmux } from './lib/kit.mjs';
 import { canDrive, openChrome } from './lib/chrome.mjs';
 
 test('fleet drain: in-flight work finishes, nothing new starts, and a drained fleet moves with parity', () => {
@@ -484,4 +484,93 @@ test('the dashboard and hub pages parse: one stray quote and nothing shows at al
     assert.ok(scripts.length >= 1, page);
     for (const s of scripts) new vm.Script(s, { filename: page });
   }
+});
+
+test("threads on the dashboard's server: owner actions checked before anything runs, /api/threads read from the log's files, cached, same-origin only", async (t) => {
+  const F = threadsFixture('threads-api');
+  t.after(() => F.done());
+  const port = await freePort();
+  const B = `http://127.0.0.1:${port}`;
+  const d = startDashboard(F.old, F.env({}), ['--port', String(port)]);
+  t.after(() => d.stop());
+  await until(() => new RegExp(`dashboard on http://127\\.0\\.0\\.1:${port}\\b`).test(d.out()), 'the dashboard');
+  const post = (name, body, headers = {}) => fetch(`${B}/api/${name}`, { method: 'POST', headers: { 'content-type': 'application/json', origin: B, 'sec-fetch-site': 'same-origin', ...headers }, body: JSON.stringify(body) });
+  const get = (headers = {}) => fetch(`${B}/api/threads`, { headers });
+  const list = async () => (await (await get()).json()).threads;
+  const subject = { kind: 'item', ref: `goal:${F.goal}`, quote: 'Launch checkout' };
+
+  // the dashboard's own first runs (hello, dashboard-data, the accounts tick) can write to run/ as it
+  // starts: read once it has served data, and of a run of reads with nothing written one is cached
+  await until(async () => (await fetch(`${B}/api/data`)).ok, 'a first dashboard-data');
+  let r = await get();
+  assert.equal(r.status, 200);
+  let j = await r.json();
+  assert.deepEqual([j.threads, j.supervisor], [[], { pane: false }], 'no threads, and no supervisor pane');
+  const heads = [];
+  for (let i = 0; i < 3; i++) heads.push((await get()).headers.get('x-devteam-threads'));
+  assert.ok(heads.includes('cached'), `a read with no file changed is served from the cache: ${heads}`);
+  r = await post('thread-new', { title: 'Launch checkout', subject, text: 'Narrow this to the EU launch' });
+  assert.equal(r.status, 200, await r.clone().text());
+  const T = (await r.json()).out.split('\n')[0];
+  assert.match(T, /^t-\d{8}-\d{9}-owner$/);
+  r = await get();
+  assert.equal(r.headers.get('x-devteam-threads'), null, 'a changed file is read again');
+  let th = (await r.json()).threads.find((x) => x.id === T);
+  assert.deepEqual([th.title, th.subject, th.waiting, th.turns.length], ['Launch checkout', subject, 'supervisor', 1]);
+  assert.equal(JSON.parse(F.owner(['log', '--id', th.turns[0].id, '--json']))[0].channel, 'dashboard', "the owner's, from the dashboard");
+  // a line another process appends is there at the next read
+  F.sup(['thread', 'say', T, 'On it.']);
+  th = (await list()).find((x) => x.id === T);
+  assert.deepEqual([th.turns.length, th.turns[1].by, th.waiting], [2, 'supervisor', 'owner']);
+  // a GET carries no Origin: same-origin only, as /public-manifest/ is, and only on its own Host
+  for (const site of ['cross-site', 'same-site']) assert.equal((await get({ 'sec-fetch-site': site })).status, 403, site);
+  assert.equal((await get({ 'sec-fetch-site': 'same-origin' })).status, 200);
+  assert.equal(await statusWithHost(port, '/api/threads', `rebound.example:${port}`), 403);
+  // bad bodies and bad subjects are refused before anything is spawned
+  const bad = [
+    ['thread-new', { subject, text: 'x' }, 'no title'],
+    ['thread-new', { title: 'two\nlines', text: 'x' }, 'a title of two lines'],
+    ['thread-new', { title: 'a'.repeat(121), text: 'x' }, 'a title over 120 characters'],
+    ['thread-new', { title: 't', text: ' ' }, 'no words'],
+    ['thread-new', { title: 't', text: 'é'.repeat(1001) }, 'a turn over 2,000 bytes'],
+    ['thread-new', { title: 't', text: '"'.repeat(1950) }, 'a turn over 3,800 bytes as the log holds it'],
+    ['thread-new', { title: 't', text: 'x', subject: { kind: 'artifact', slug: 'pricing-mock', at: 'main' } }, 'an artifact subject: the viewers come later'],
+    ['thread-new', { title: 't', text: 'x', subject: { kind: 'lens' } }, 'an unknown kind'],
+    ['thread-new', { title: 't', text: 'x', subject: { ...subject, view: '#goals' } }, "another kind's key"],
+    ['thread-new', { title: 't', text: 'x', subject: { kind: 'item', ref: `goal:${F.goal}`, quote: 'q'.repeat(2600) } }, 'a subject over 2,500 bytes'],
+    ['thread-new', { title: 't', text: 'x', subject: { kind: 'item', ref: 'secret:x' } }, 'a ref of no known type'],
+    ['thread-say', { id: 'nope', text: 'x' }, 'not a thread id'],
+    ['thread-say', { id: T }, 'no words'],
+    ['thread-resolve', { id: T, outcome: 'two\nlines' }, 'an outcome of two lines'],
+    ['thread-accept', { id: 'q-20261110-101500123-supervisor' }, 'a question id'],
+  ];
+  const n = (await list()).length;
+  for (const [name, body, why] of bad) assert.equal((await post(name, body)).status, 400, why);
+  assert.equal((await list()).length, n, 'nothing was written');
+  assert.equal((await post('thread-say', { id: T, text: 'x' }, { origin: 'https://evil.example' })).status, 403, 'another origin');
+  // resolve, a turn on a resolved thread, reopen, a proposal accepted
+  assert.equal((await post('thread-accept', { id: T })).status, 400, 'no proposal to accept');
+  assert.equal((await post('thread-resolve', { id: T, outcome: 'Narrowed to the EU' })).status, 200);
+  r = await post('thread-say', { id: T, text: 'one more thing' });
+  assert.equal(r.status, 400);
+  assert.match((await r.json()).error, /reopen it first/);
+  assert.equal((await post('thread-reopen', { id: T, text: 'One more thing' })).status, 200);
+  F.sup(['thread', 'ready', T, '--outcome', 'EU only']);
+  assert.equal((await post('thread-accept', { id: T })).status, 200);
+  th = (await list()).find((x) => x.id === T);
+  assert.deepEqual([th.status, th.outcome], ['resolved', 'EU only']);
+  // a supervisor with a pane: said within the 10 s the answer is kept
+  if (hasTmux) {
+    const pane = F.standIn();
+    fs.writeFileSync(path.join(F.old, 'docs/devteam/run/supervisor-pane'), pane.target);
+    await until(async () => (await (await get()).json()).supervisor.pane === true, 'the pane seen');
+  }
+  // after a move run/log is empty until each file's next write: the checkout's project/log copy counts
+  const durable = path.join(F.old, 'docs/devteam/project/log');
+  fs.mkdirSync(durable, { recursive: true });
+  const ownerFile = fs.readdirSync(F.logDir).find((f) => f.startsWith('owner-'));
+  const kept = fs.readFileSync(path.join(F.logDir, ownerFile));
+  fs.copyFileSync(path.join(F.logDir, ownerFile), path.join(durable, ownerFile));
+  fs.rmSync(path.join(F.logDir, ownerFile));
+  try { assert.ok((await list()).some((x) => x.id === T), 'read from project/log'); } finally { fs.writeFileSync(path.join(F.logDir, ownerFile), kept); fs.rmSync(path.join(durable, ownerFile)); }
 });

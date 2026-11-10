@@ -10133,6 +10133,8 @@ async function cmdDashboard() {
   const ID = /^[a-z]-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
   const text = (x, max = 4000) => typeof x === 'string' && x.trim() && x.length <= max;
   const autonomyArgs = (b) => ([1, 2, 3].includes(b.autonomy) ? ['--autonomy', String(b.autonomy), ...(text(b.scope, 100) ? ['--scope', b.scope.trim()] : [])] : []);
+  const turnOk = (x) => typeof x === 'string' && !!x.trim() && Buffer.byteLength(x.trim()) <= TURN_MAX && encodedBytes(x.trim()) <= TURN_ENCODED_MAX;
+  const lineOk = (x, max, bytes = false) => typeof x === 'string' && !!x.trim() && !UNSAFE_TEXT.test(x) && (bytes ? Buffer.byteLength(x.trim()) : x.trim().length) <= max;
   const ACTIONS = {
     answer: (b) => {
       if (!ID.test(b.id ?? '') || !text(b.answer)) return null;
@@ -10156,6 +10158,16 @@ async function cmdDashboard() {
     'artifact-publish': (b) => (LINK_ID.test(b.slug ?? '') && (b.op === 'unpublish' || (b.op === 'publish' && TREE_ID.test(b.tree ?? ''))) ? ['artifact', b.op, b.slug, '--owner', ...(b.op === 'publish' ? ['--tree', b.tree] : [])] : null),
     'preview-stop': (b) => (typeof b.name === 'string' && PREVIEW_NAME.test(b.name) ? ['preview', 'stop', b.name] : null),
     'preview-start': (b) => (typeof b.name === 'string' && PREVIEW_NAME.test(b.name) ? ['preview', 'start', b.name] : null),
+    // Threads, from the layer. The owner's words always go after --, so words that start with -- stay
+    // words; the title, subject and outcome as --key=value, kept whole whatever they hold. A subject
+    // is checked here before anything is spawned, and thread new checks it again. The dashboard
+    // points at items and spots on its own pages only; a later kit's viewers add artifact and preview
+    // subjects here (the log takes all four already).
+    'thread-new': (b) => (lineOk(b.title, THREAD_TITLE_MAX) && turnOk(b.text) && (b.subject == null || (['item', 'page'].includes(b.subject?.kind) && !subjectProblem(b.subject))) ? ['thread', 'new', `--title=${b.title.trim()}`, ...(b.subject ? [`--subject=${JSON.stringify(b.subject)}`] : []), '--', b.text.trim()] : null),
+    'thread-say': (b) => (THREAD_ID.test(b.id ?? '') && turnOk(b.text) ? ['thread', 'say', b.id, '--', b.text.trim()] : null),
+    'thread-resolve': (b) => (THREAD_ID.test(b.id ?? '') && (b.outcome === undefined || b.outcome === '' || lineOk(b.outcome, OUTCOME_MAX, true)) ? ['thread', 'resolve', b.id, ...(b.outcome?.trim() ? [`--outcome=${b.outcome.trim()}`] : [])] : null),
+    'thread-reopen': (b) => (THREAD_ID.test(b.id ?? '') && (b.text === undefined || b.text === '' || turnOk(b.text)) ? ['thread', 'reopen', b.id, ...(b.text?.trim() ? ['--', b.text.trim()] : [])] : null),
+    'thread-accept': (b) => (THREAD_ID.test(b.id ?? '') ? ['thread', 'resolve', b.id, '--accept'] : null),
   };
   // An action whose caller has a deadline of its own: the gateway gives the whole answer 15 s.
   const ACTION_MS = { 'artifact-publish': 12000 };
@@ -10220,6 +10232,41 @@ async function cmdDashboard() {
     if (!err) lastData = stdout;
     resolve({ ok: !err, stdout, stderr: err?.killed ? 'dashboard-data took over 2 minutes and was stopped' : String(stderr ?? '') });
   })));
+  // /api/threads: every thread, its turns and the questions asked in it, for the open card's 2 s poll
+  // and the dock. dashboard-data is a slow child, and readLog() can't serve here: its cache is cleared
+  // only by appendLog, which this process never calls, and it reads main's log through git. So this
+  // reads each log file itself, run/log's and the checkout's project/log copy (after a move run/log
+  // is empty until a file's next write), merged as logFileText merges them, parsed with the
+  // integrity checks, and kept by each file's size and mtime: a read with nothing changed is a stat
+  // per file. Planners write no threads, so their plan files are left out.
+  const threadFiles = new Map();
+  let threadsMemo = { key: null, body: null };
+  const threadsRead = () => {
+    const names = new Set();
+    for (const dir of [liveLogDir(), durableLogDir()]) { try { for (const f of fs.readdirSync(dir)) if (f.endsWith('.jsonl') && !isPlanFile(f)) names.add(f); } catch {} }
+    const stat = (p) => { try { const s = fs.statSync(p); return `${s.size}:${s.mtimeMs}`; } catch { return '-'; } };
+    const keyed = [...names].sort().map((f) => [f, `${stat(path.join(liveLogDir(), f))}/${stat(path.join(durableLogDir(), f))}`]);
+    const key = keyed.map(([f, k]) => `${f}=${k}`).join('|');
+    if (threadsMemo.key === key) return { body: threadsMemo.body, cached: true };
+    for (const f of [...threadFiles.keys()]) if (!names.has(f)) threadFiles.delete(f);
+    for (const [f, k] of keyed) {
+      if (threadFiles.get(f)?.k === k) continue;
+      const live = readText(path.join(liveLogDir(), f));
+      const durable = readText(path.join(durableLogDir(), f));
+      const have = new Set((durable ?? '').split('\n'));
+      const text = live === null ? durable ?? '' : durable === null || live.startsWith(durable) ? live : durable.startsWith(live) ? durable : durable + live.split('\n').filter((l) => l && !have.has(l)).map((l) => `${l}\n`).join('');
+      threadFiles.set(f, { k, lines: parseLines(text, f, { validate: false }).lines.filter((l) => ['thread', 'turn', 'question'].includes(l.type)) });
+    }
+    const all = [...threadFiles.values()].flatMap((x) => x.lines);
+    const asked = new Set(all.filter((l) => l.type === 'question' && l.op === 'new' && typeof l.thread === 'string').map((l) => l.id));
+    const body = JSON.stringify(threadViews(fold(all.filter((l) => l.type !== 'question' || asked.has(l.id))).objects));
+    threadsMemo = { key, body };
+    return { body, cached: false };
+  };
+  // Whether the supervisor has a pane the kit can type into, for the card's "hasn't replied yet": asked
+  // of tmux at most every 10 s (resolvePane's calls are synchronous), never on every poll.
+  let paneSeen = { at: 0, pane: false };
+  const supervisorPane = () => { if (Date.now() - paneSeen.at > 10000) paneSeen = { at: Date.now(), pane: !resolvePane(supervisorTarget()).problem }; return paneSeen.pane; };
   const server = http.createServer(async (req, res) => {
     // Every route answers only on the dashboard's own address: a page elsewhere that points its own
     // name at 127.0.0.1 (DNS rebinding) sends its own Host, and gets nothing, not even a read.
@@ -10246,6 +10293,16 @@ async function cmdDashboard() {
       return res.end(r.ok ? r.stdout : lastData);
     }
     const u = new URL(req.url, 'http://x');
+    // Threads for the layer: a GET carries no Origin, so like /public-manifest/ it is refused when the
+    // browser says another site's page asks.
+    if (req.method === 'GET' && u.pathname === '/api/threads') {
+      const site = req.headers['sec-fetch-site'];
+      if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: "not for another site's page" }));
+      let r;
+      try { r = threadsRead(); } catch (e) { return send(res, 500, 'application/json', JSON.stringify({ error: e.message })); }
+      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', ...(r.cached ? { 'x-devteam-threads': 'cached' } : {}) });
+      return res.end(`{"supervisor":${JSON.stringify({ pane: supervisorPane() })},"threads":${r.body}}`);
+    }
     // Whether the fleet can move now: fleet status, without fetching (the strip at the top asks).
     if (req.method === 'GET' && u.pathname === '/api/fleet') {
       const r = await run(['fleet', 'status', '--json', ...(u.searchParams.get('fetch') === '1' ? [] : ['--no-fetch'])]);
