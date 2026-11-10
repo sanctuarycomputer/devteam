@@ -3559,6 +3559,126 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     for (const w of pvWindows().filter((x) => x.name.startsWith('dev~'))) spawnSync('tmux', ['kill-window', '-t', w.id]);
   });
 
+  const pvMake = (name, over = {}) => { const at = new Date().toISOString(); const r = { v: 1, name, project: 'demo', session: 'supervisor', label: '', port: 65020, cwd: fs.realpathSync(repo), at, expires: new Date(Date.now() + 7 * 864e5).toISOString(), ...over }; write(path.join(PV_DIR(), `${name}.json`), JSON.stringify(r)); return r; };
+  const pvWindow = (name) => { const S = sessionOf(repo, 'demo'); const has = spawnSync('tmux', ['has-session', '-t', `=${S}`]).status === 0; return spawnSync('tmux', [...(has ? ['new-window', '-t', `=${S}:`] : ['new-session', '-s', S]), '-d', '-P', '-F', '#{window_id}', '-n', name, '-c', fs.realpathSync(repo)], { encoding: 'utf8' }).stdout.trim(); };
+  const pvDashboard = async (extraEnv = {}) => {
+    const port = await freePort();
+    const srv = spawn(process.execPath, [DT, 'dashboard', '--port', String(port)], { cwd: repo, env: { ...process.env, DEVTEAM_ROLE: '', DEVTEAM_PREVIEW_TICK_MS: '150', ...extraEnv }, stdio: 'ignore' });
+    const base = `http://127.0.0.1:${port}`;
+    await serverUp(`${base}/`);
+    return { base, port, stop: () => new Promise((r) => { if (srv.exitCode !== null) return r(); srv.on('close', r); srv.kill(); }) };
+  };
+  const pvHello = async (base) => (await (await fetch(`${base}/api/hello`)).json()).previews;
+
+  step('previews: hello lists them without probing, the tick probes and sweeps, the Library data, Stop and Start from the dashboard', async (t) => {
+    if (!hasTmux) return t.skip('no tmux');
+    pvClear();
+    spawnSync('tmux', ['new-session', '-d', '-s', 'pv-keep']);
+    t.after(() => spawnSync('tmux', ['kill-session', '-t', '=pv-keep']));
+    // a read reads: as the operator, nothing is swept or written
+    const stale = pvMake('old-stale', { expires: '2020-01-01T00:00:00.000Z' });
+    const beforeOp = fs.statSync(path.join(PV_DIR(), 'old-stale.json')).mtimeMs;
+    pvOk(['hello', '--json'], { DEVTEAM_ROLE: 'operator' });
+    assert.equal(fs.statSync(path.join(PV_DIR(), 'old-stale.json')).mtimeMs, beforeOp, 'hello writes nothing, and sweeps nothing');
+    assert.deepEqual(pvFiles(), ['old-stale.json']);
+    pvClear();
+    const P = await freePort();
+    const lst = await pvListen(P);
+    pvMake('cool-tiger', { port: P, label: 'L'.repeat(60), session: 's'.repeat(100), project: 'p'.repeat(100) });
+    let d = await pvDashboard({ DEVTEAM_PREVIEW_TICK_MS: '86400000' });
+    try {
+      await until(async () => (await pvHello(d.base))?.length === 1 && (await pvHello(d.base)), 'hello to list the record');
+      const [h] = await pvHello(d.base);
+      assert.deepEqual([h.name, h.port, h.run], ['cool-tiger', P, false]);
+      assert.equal(h.label.length, 40, 'strings are capped');
+      assert.equal(h.session.length, 80);
+      assert.equal(h.project.length, 63);
+      assert.equal(typeof h.at, 'string');
+    } finally { await d.stop(); }
+    pvClear();
+    d = await pvDashboard();
+    try {
+      // up: null before a first probe, then what the probe found
+      pvMake('cool-tiger', { port: P });
+      assert.ok([null, true].includes((await pvHello(d.base))[0].up), 'never a false before a probe that says so');
+      await until(async () => (await pvHello(d.base))[0]?.up === true, 'the tick to find the listener');
+      const lib = await (await fetch(`${d.base}/api/data`)).json();
+      const row = lib.library.previews.find((p) => p.name === 'cool-tiger');
+      assert.deepEqual([row.port, row.project, row.session, row.up, row.run], [P, 'demo', 'supervisor', true, false]);
+      assert.ok(row.expires, 'the Library data carries expires too');
+      await pvClose(lst);
+      await until(async () => (await pvHello(d.base))[0]?.up === false, 'the tick to see the port stop');
+      await until(() => pvRec('cool-tiger').down_since, 'down_since on a down record');
+      const again = await pvListen(P);
+      await until(() => !pvRec('cool-tiger').down_since, 'down_since cleared when it answers again');
+      await pvClose(again);
+      pvClear();
+      // the list cap and the speed: 20 listed, the 21st not, and nothing in hello waits on a socket
+      for (let i = 0; i < 21; i++) pvMake(`aaa-${String.fromCharCode(97 + i)}${String.fromCharCode(97 + i)}x`, { port: 61000 + i });
+      await until(async () => (await pvHello(d.base)).length === 20, 'hello to cap at 20');
+      const times = [];
+      for (let i = 0; i < 5; i++) { const t0 = performance.now(); await fetch(`${d.base}/api/hello`); times.push(performance.now() - t0); }
+      assert.ok(Math.min(...times) < 50, `hello answers at once (${times.map(Math.round).join(', ')} ms)`);
+      pvClear();
+      // a preview command between the tick's read and its write wins: a change made under it stays
+      await d.stop();
+      d = await pvDashboard({ DEVTEAM_PREVIEW_TICK_DELAY_MS: '500' });
+      const raced = await freePort();
+      for (let i = 0; i < 12; i++) {
+        pvMake('race-tiger', { port: raced, label: `l${i}` });
+        await new Promise((r) => setTimeout(r, 120));
+        assert.equal(pvRec('race-tiger').label, `l${i}`, 'the tick never puts back what it read over a newer write');
+      }
+      assert.equal(pvRec('race-tiger').down_since, undefined, 'its write waits for a tick in which the file held still');
+      await until(() => pvRec('race-tiger').down_since, 'the write to land once the file holds still');
+      assert.equal(pvRec('race-tiger').label, 'l11');
+      await d.stop();
+      d = await pvDashboard();
+      pvClear();
+      // sweeps: expiry, 24 h dead, orphans
+      const wExp = pvWindow('dev~gone-exp');
+      pvMake('gone-exp', { expires: '2020-01-01T00:00:00.000Z', run: { cmd: 'x', window: wExp } });
+      pvMake('dead-agent', { port: await freePort(), down_since: new Date(Date.now() - 25 * 3600e3).toISOString() });
+      pvMake('dead-kitrun', { port: await freePort(), down_since: new Date(Date.now() - 25 * 3600e3).toISOString(), run: { cmd: 'x', window: null } });
+      pvMake('bad-expires', { expires: 'not a date' });
+      const orphan = pvWindow('dev~no-record');
+      await until(() => !fs.existsSync(path.join(PV_DIR(), 'gone-exp.json')), 'the expired record to go');
+      await until(() => !pvWindows().some((w) => w.id === wExp), 'its window to go');
+      await until(() => !fs.existsSync(path.join(PV_DIR(), 'dead-agent.json')), 'a server gone 24 h to be dropped');
+      await until(() => !fs.existsSync(path.join(PV_DIR(), 'bad-expires.json')), 'an expiry that does not parse counts as past');
+      assert.ok(fs.existsSync(path.join(PV_DIR(), 'dead-kitrun.json')), 'a kit-started record waits for Start or expiry');
+      await until(() => !pvWindows().some((w) => w.id === orphan), 'a dev~ window with no record to be closed');
+      // a launch in flight (window null, the id not written yet) is not an orphan
+      pvMake('launch-now', { run: { cmd: 'x', window: null } });
+      const launching = pvWindow('dev~launch-now');
+      await new Promise((r) => setTimeout(r, 600));
+      assert.ok(pvWindows().some((w) => w.id === launching), 'a launch that has not written its id yet is left alone');
+      spawnSync('tmux', ['kill-window', '-t', launching]);
+      pvClear();
+      // a record whose window is gone reads down
+      pvMake('wind-gone', { port: await freePort(), run: { cmd: 'x', window: '@999' } });
+      await until(async () => (await pvHello(d.base)).find((p) => p.name === 'wind-gone')?.up === false, 'a gone window to read down');
+      pvClear();
+      // the owner's Stop and Start
+      const post = (action, body, headers = {}) => fetch(`${d.base}/api/${action}`, { method: 'POST', headers: { 'content-type': 'application/json', origin: d.base, ...headers }, body: JSON.stringify(body) });
+      pvMake('stop-mine');
+      assert.equal((await post('preview-stop', { name: 'stop-mine' }, { origin: 'https://evil.example' })).status, 403, 'a wrong Origin is refused');
+      assert.ok(fs.existsSync(path.join(PV_DIR(), 'stop-mine.json')));
+      assert.equal((await post('preview-stop', { name: 'not a name' })).status, 400);
+      assert.equal((await post('preview-stop', { name: ['stop-mine'] })).status, 400);
+      assert.equal((await post('preview-stop', { name: 'stop-mine' })).status, 200);
+      assert.deepEqual(pvFiles(), []);
+      const PS = await freePort();
+      pvMake('start-mine', { port: PS, run: { cmd: PV_SERVER, window: null } });
+      assert.equal((await post('preview-start', { name: 'start-mine' })).status, 200);
+      assert.deepEqual(pvWindows().filter((w) => w.name === 'dev~start-mine').map((w) => w.id), [pvRec('start-mine').run.window]);
+      assert.equal((await pvGet(PS)), String(PS));
+      assert.equal((await post('preview-stop', { name: 'start-mine' })).status, 200);
+      assert.ok(!pvWindows().some((w) => w.name === 'dev~start-mine'), 'Stop on a kit-started server closes its window');
+    } finally { await d.stop(); for (const w of pvWindows().filter((x) => x.name.startsWith('dev~'))) spawnSync('tmux', ['kill-window', '-t', w.id]); pvClear(); }
+    assert.ok(stale);
+  });
+
 // Forks. A fork is a copy of the fixture as it stands between two steps, made by the run in
 // kit.test.mjs; a child process (fork.mjs) runs the steps given to it there. Those steps see
 // exactly the state they would have seen in line, and the steps after them go on without them, so

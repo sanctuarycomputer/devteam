@@ -4678,6 +4678,69 @@ async function previewRunIt(rec) {
   previewSay(r, w.up);
   out(`running in tmux window ${tmuxSession()}:dev~${r.name}; its output is there`);
 }
+// What hello and the Library say of one preview, every string capped: this goes into the hub's list.
+const previewCap = (v, n) => (typeof v === 'string' ? v.slice(0, n) : '');
+const previewHelloRow = (r, up) => ({ name: previewCap(r.name, 63), port: r.port, project: previewCap(r.project, 63), session: previewCap(r.session, 80), label: previewCap(r.label, PREVIEW_LABEL_MAX), at: previewCap(r.at, 40), up, run: !!r.run });
+// The dashboard's own: the last probe of each name. A preview command has no tick to ask, and
+// dashboard-data is a child process, so the dashboard hands it over in the environment.
+const previewUp = new Map();
+const previewUpHere = () => { if (previewUpHere.seen === undefined) { try { previewUpHere.seen = JSON.parse(process.env.DEVTEAM_PREVIEW_UP ?? '{}'); } catch { previewUpHere.seen = {}; } } return previewUpHere.seen; };
+const tmuxAsync = (args) => new Promise((resolve) => execFile('tmux', args, { encoding: 'utf8', timeout: 10000, killSignal: 'SIGKILL' }, (err, stdout) => resolve(err ? null : stdout)));
+const previewAsIRead = (r) => { try { return fs.statSync(previewFile(r.name)).mtimeMs === r.mtimeMs; } catch { return false; } };
+// The dashboard's housekeeping, every 10 s, and nowhere else (hello is a read: the operator runs
+// it). Probes each port, keeps the answers for hello and the Library, and finishes what any crash
+// left: expiry, a server gone for a day, a dev~ window with no record. It writes a record only when
+// the file is as it read it, so a preview command that ran in between always wins; a skipped write
+// happens next tick. No tmux call here blocks the process: the hub gives hello 300 ms.
+async function previewTick() {
+  const recs = readPreviews();
+  const ups = await Promise.all(recs.map((r) => probePort(r.port)));
+  const delay = Number(process.env.DEVTEAM_PREVIEW_TICK_DELAY_MS ?? 0);
+  if (delay) await new Promise((r) => setTimeout(r, delay));
+  const session = tmuxSession();
+  const panes = (await tmuxAsync(['has-session', '-t', `=${session}`])) === null ? [] : previewPaneRows(await tmuxAsync(['list-panes', '-s', '-t', `=${session}`, ...PREVIEW_PANES]));
+  const kill = async (r) => { const w = previewWindow(r, panes); if (w) await tmuxAsync(['kill-window', '-t', w.id]); };
+  const now = Date.now();
+  const names = new Set();
+  await Promise.all(recs.map(async (r, i) => {
+    const up = ups[i];
+    names.add(r.name);
+    previewUp.set(r.name, up);
+    const since = Date.parse(r.down_since ?? '');
+    // an expiry that doesn't parse is past: a file nobody wrote through the kit never lives forever
+    if (!(Date.parse(r.expires) > now) || (!r.run && !up && since && now - since > DAY)) {
+      if (!previewAsIRead(r)) return;
+      await kill(r);
+      removePreview(r.name);
+      previewUp.delete(r.name);
+      return;
+    }
+    const want = up ? null : (Number.isNaN(since) ? nowIso() : r.down_since);
+    if ((r.down_since ?? null) === want || !previewAsIRead(r)) return;
+    const { down_since, ...rest } = r;
+    writePreview(want ? { ...rest, down_since: want } : rest);
+  }));
+  for (const n of previewUp.keys()) if (!names.has(n)) previewUp.delete(n);
+  // The windows were listed before these records are read, so a window opened since has its id in
+  // a record, or a record still saying window null (the launch's first write).
+  const live = new Map(readPreviews().map((r) => [r.name, r]));
+  // On a shared tmux session (a legacy `devteam`, or tmux_session set) another project's windows
+  // sit beside ours: only one started under this checkout is ours to judge.
+  const shared = session === 'devteam' || !!loadSettings().tmux_session;
+  const mine = `${realPath(mainRoot)}${path.sep}`;
+  const seen = new Set();
+  for (const w of panes) {
+    if (!w.name.startsWith('dev~') || seen.has(w.id)) continue;
+    seen.add(w.id);
+    const r = live.get(w.name.slice(4));
+    if (r?.run?.window === w.id) continue;
+    if (r?.run && r.run.window === null && now - r.mtimeMs < 120000) continue;
+    if (shared && !`${realPath(w.start)}${path.sep}`.startsWith(mine)) continue;
+    await tmuxAsync(['kill-window', '-t', w.id]);
+  }
+  // a write that died between its temp file and the rename
+  try { for (const f of fs.readdirSync(previewsDir())) if (f.endsWith('.tmp') && now - fs.statSync(path.join(previewsDir(), f)).mtimeMs > 3600000) fs.rmSync(path.join(previewsDir(), f), { force: true }); } catch {}
+}
 async function cmdPreview() {
   const [sub, arg] = positional;
   const listing = ['list', 'url', 'stop', 'start'].includes(sub);
@@ -7980,6 +8043,8 @@ function dashboardData() {
       // publish state is the log's, read here and never in describeArtifact's tree-keyed cache:
       // a publish changes no byte of the artifact
       artifacts: (() => { const rec = publishRecords(); return allArtifacts().map((a) => (a.at === 'main' ? { ...a, published: publishedView(rec.get(a.slug)) } : a)); })(),
+      // the running servers sessions have offered; run state, read here on every request
+      previews: readPreviews().map((r) => ({ ...previewHelloRow(r, previewUpHere()[r.name] ?? null), expires: r.expires, down_since: r.down_since ?? null })),
       // what the Library matches the gateway's header on (x-devteam-public): this project and checkout
       public: { project: typeof settings.project === 'string' && PUBLIC_PROJECT.test(settings.project) ? settings.project : null, root: fs.realpathSync(mainRoot) },
       links: Object.entries(isObj(settings.links) ? settings.links : {}).filter(([, l]) => isObj(l)).map(([id, l]) => {
@@ -8766,6 +8831,8 @@ async function cmdDashboard() {
     // Like every owner action here it can't tell who asks: anything on the box can reach it, so a
     // line it writes is a claim, and the gateway's confirm page never takes it for the owner's click.
     'artifact-publish': (b) => (LINK_ID.test(b.slug ?? '') && (b.op === 'unpublish' || (b.op === 'publish' && TREE_ID.test(b.tree ?? ''))) ? ['artifact', b.op, b.slug, '--owner', ...(b.op === 'publish' ? ['--tree', b.tree] : [])] : null),
+    'preview-stop': (b) => (typeof b.name === 'string' && PREVIEW_NAME.test(b.name) ? ['preview', 'stop', b.name] : null),
+    'preview-start': (b) => (typeof b.name === 'string' && PREVIEW_NAME.test(b.name) ? ['preview', 'start', b.name] : null),
   };
   // An action whose caller has a deadline of its own: the gateway gives the whole answer 15 s.
   const ACTION_MS = { 'artifact-publish': 12000 };
@@ -8791,7 +8858,19 @@ async function cmdDashboard() {
   };
   refreshHello();
   setInterval(refreshHello, 10000).unref();
-  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, inbox: hello?.inbox ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}) });
+  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, inbox: hello?.inbox ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}), previews: readPreviews().slice(0, PREVIEW_MAX).map((r) => previewHelloRow(r, previewUp.get(r.name) ?? null)) });
+  // Previews: the tick's probes feed hello and the Library, one run at a time so a tmux that has
+  // stalled never stacks them up. A file in run/previews that isn't a preview is named once.
+  const previewsNamedBad = new Set();
+  previewBad = (f, e) => { if (!previewsNamedBad.has(f)) { previewsNamedBad.add(f); log(`previews: skipped ${f}: ${e?.message ?? e}`); } };
+  let previewTicking = false;
+  const runPreviewTick = () => {
+    if (previewTicking) return;
+    previewTicking = true;
+    previewTick().catch((e) => log(`previews: tick failed: ${e?.stack ?? e}`)).finally(() => { previewTicking = false; });
+  };
+  runPreviewTick();
+  setInterval(runPreviewTick, Number(process.env.DEVTEAM_PREVIEW_TICK_MS ?? 10000)).unref();
   // Account rotation and limit stops (accounts-tick), one run at a time, as the supervisor; a line
   // it prints goes to the log once, however many ticks repeat it. Every dashboard asks to rotate,
   // and the claim decides which one does.
@@ -8813,7 +8892,7 @@ async function cmdDashboard() {
   // refresh used to start its own, and on a slow machine they piled up (one ran for an hour).
   let dataRun = null;
   let lastData = null;
-  const dashboardData = () => (dataRun ??= new Promise((resolve) => execFile(process.execPath, [self, 'dashboard-data'], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: ownerEnv, timeout: 120000, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
+  const dashboardData = () => (dataRun ??= new Promise((resolve) => execFile(process.execPath, [self, 'dashboard-data'], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: { ...ownerEnv, DEVTEAM_PREVIEW_UP: JSON.stringify(Object.fromEntries(previewUp)) }, timeout: 120000, killSignal: 'SIGKILL' }, (err, stdout, stderr) => {
     dataRun = null;
     if (!err) lastData = stdout;
     resolve({ ok: !err, stdout, stderr: err?.killed ? 'dashboard-data took over 2 minutes and was stopped' : String(stderr ?? '') });
