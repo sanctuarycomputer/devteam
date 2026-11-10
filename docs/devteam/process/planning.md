@@ -14,6 +14,8 @@ When its goal is parked, let go, or the fleet is parked (`supervisor.md` §12), 
 
 ## 1. Goals
 
+**Goals serve the strategy.** `project/strategy.md` says why the project exists, who it serves, how it wins (in order), its values and its refusals. It is the owner's: the supervisor drafts it at adoption by reading the repo and interviewing the owner, and proposes changes (`strategy-change`, owner-only; `supervisor.md` §1). A goal or feature that serves none of its "How it wins" lines, or whose point the supervisor doubts, gets a stake-3 question to the owner ("should we build this at all?") before any design question is asked (`supervisor.md` §6).
+
 The owner states the goals, in whatever words. The supervisor drafts them (`devteam.mjs goal add --title … --outcome …`), interviews until each is fully defined, has its design written and reviewed (§2), and then asks the owner to approve the goal **on its design**. Only the owner decides. Keep three to five active.
 
 **Goals are meant to be ambitious.** A goal is the unit the fleet stays aligned on across many loops and PRs: weeks or months of work, many features, many workers. Never split a goal to make it fit one loop; a goal one loop could meet is a ticket or a feature. What keeps a large goal workable is its spine (§2), its milestones, and planning one milestone at a time.
@@ -21,6 +23,8 @@ The owner states the goals, in whatever words. The supervisor drafts them (`devt
 A goal moves through (its toggle, below, is separate): **defining** (gaps, `goal-definition` questions) → **designing** (fully defined; the spine is written and reviewed and its milestones are on the goal) → **awaiting approval** (a `goal-approval` question in the inbox, the design linked) → **ready** (approved; the current milestone's features and tickets are planned from the design) → **met**, or **abandoned** if the owner lets it go.
 
 A goal is **fully defined** when it has: an outcome (what is true for users or the business when it's met), a measure with a numeric target, unit, direction and source (below), at least one non-goal, the preconditions that must hold for the outcome, a priority distinct from the other goals, and a baseline reading (`goal reading <id> --run`; an owner-read goal starts at 0). `devteam.mjs goal check` lists what's missing.
+
+**How much a goal matters.** Apart from its priority (the owner's order of work), the supervisor judges each goal's impact on the project, 1 to 4, against the strategy: `goal impact <g-id> <1-4> --rationale "<why, naming the strategy's lines>"`. 4: the project depends on it (it serves the first "How it wins" line, or a dated commitment). 3: it moves a number the project watches. 2: worth having. 1: housekeeping. It is a decision of yours (`goal-impact`, constitutional) that the owner sees on the goal and corrects with the value they give it (`correct <d-id> --impact n`, or Wrong? on the goal); their value stands, you never judge over it, and what the correction teaches is a lesson (`knowledge add --kind lesson --scope class:goal-impact --evidence <d-id>`). Impact orders the owner's Inbox, never the work: priority still orders scheduling. Judge it when the goal is fully defined, and again when the strategy changes.
 
 **The measure is what the fleet can move and read.** A goal is met in the dev cycle: by merging PRs, read without waiting on anyone outside it. The business result the goal is for (fewer manual fixes a month, a backlog another team works through) stays in the outcome, as the reason, and never gates met. Test each measure: can the fleet move this number by merging PRs, and read it without a human outside the dev cycle doing their job? If the number depends on another team's work, or on production time passing, the measure is an owner question instead. Each measure names its **source**:
 
@@ -71,6 +75,7 @@ Designs come at two levels.
 - components and boundaries, and every contract that crosses one (each becomes a contract ticket). Draw component lines in `architecture.md` §1 and in `settings.components`: every tracked file in exactly one line; generated and vendored folders belong to a line like anything else;
 - data: new or changed persistence with its tier (`code-style.md` §4), migrations and rollback safety;
 - failure modes, security and PII;
+- values and refusals: for each value (`V<n>`) and refusal (`R<n>`) in `project/strategy.md` that this goal touches, how the design keeps it;
 - one-way doors, each an owner question before any plan is approved (one answered here, with `--goal`, can approve a ticket's plan when its plan review says the plan stays inside it; constitution.md §4);
 - **Owner decisions**: each decision the owner made for this design, with the question id that settled it (§1); none may be left open when approval is asked;
 - risks and unknowns that survive, each a spike ticket or a question;
@@ -81,7 +86,7 @@ Designs come at two levels.
 
 **Show what's easier seen than read.** When a goal or design has UI, a flow, or anything the owner would understand faster by looking, draw artifacts for it (`devteam.mjs artifact new <slug> --title "…" --summary "…" --for '["goal:<g>"]'` in the plan worktree; `supervisor.md` §9): mock the screens, click through the flow, render the model. Link each one from the design by its path and from the goal-approval question by name (`[[name]]`, `supervisor.md` §6), so the owner approves what they saw. They land with the plan PR, and every later worker on the goal sees them in its prompt.
 
-The design is shaped by the constitution and the code style: it chooses the option that keeps a rollback, that makes a gate possible, that fits the doctrine's structure. Research starts from `architecture.md` and the accepted knowledge (`devteam.mjs knowledge --for <feature>`), and cites file paths. The design is reviewed (`project/reviews/<goal-slug>/design-1.md`, `quality.md` §3) before any feature is written from it.
+The design is shaped by the constitution and the code style: it chooses the option that keeps a rollback, that makes a gate possible, that fits the doctrine's structure. Research starts from `architecture.md` and the accepted knowledge (`devteam.mjs knowledge --for <feature>`), and cites file paths. The design is reviewed (`project/reviews/<goal-slug>/design-1.md`, `quality.md` §3) before any feature is written from it. The reviewer reads `project/strategy.md` with the design and checks it against every value and refusal there; so do the graph and spec reviews (§5).
 
 ## 3. The roadmap: features, stories, releases
 
