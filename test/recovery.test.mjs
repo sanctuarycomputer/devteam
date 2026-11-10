@@ -884,12 +884,12 @@ test('the supervisor\'s own command in a tmux pane counts only under an agent, n
   } finally { F.done(); }
 });
 
-test('on Linux a boot is named by btime and init\'s start, so neither a reboot nor a redeploy is missed', { skip: !hasTmux || process.platform !== 'linux' }, async () => {
+test('on Linux a boot is named by the kernel\'s boot id and init\'s start, so neither a reboot nor a redeploy is missed', { skip: !hasTmux || process.platform !== 'linux' }, async () => {
   const F = fixture('recboot', { resume: CLAUDE_RESUME });
   try {
     await seenUp(F, { skip: false });
     assert.match(upRecord(F).machine ?? '', /^boot1$/, 'the stand-in wins');
     F.tick(OFF);
-    assert.match(upRecord(F).machine, /^\d+:\d+$/);
+    assert.match(upRecord(F).machine, /^[0-9a-f-]{36}:\d+$/);
   } finally { F.done(); }
 });

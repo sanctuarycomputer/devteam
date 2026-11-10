@@ -9357,13 +9357,13 @@ const supervisorUpRecord = () => { try { const r = readJson(SUPERVISOR_UP_FILE);
 const writeSupervisorUp = (r) => { writeJson(SUPERVISOR_UP_FILE, { at: nowIso(), ...r }); registerOnMachine(); };
 // Which boot this is: a reboot or a new container changes it, and nothing else does. On Linux both
 // halves are needed: init's start time counts ticks since boot, so it's near the same on every boot
-// of a bare host, and btime is the host's, so it outlives a container's redeploy. Elsewhere, when
+// of a bare host, and the kernel's boot id is the host's, so it outlives a container's redeploy. Elsewhere, when
 // init started. Null if it can't be read; DEVTEAM_MACHINE_EPOCH is a test's stand-in for a boot.
 function machineEpoch() {
   if (process.env.DEVTEAM_MACHINE_EPOCH) return process.env.DEVTEAM_MACHINE_EPOCH;
   const init = processStart(1);
   if (process.platform !== 'linux' || !init) return init;
-  try { const btime = /^btime (\d+)$/m.exec(fs.readFileSync('/proc/stat', 'utf8'))?.[1]; return btime ? `${btime}:${init}` : null; } catch { return null; }
+  try { const boot = fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim(); return boot ? `${boot}:${init}` : null; } catch { return null; }
 }
 // When a pid's process started, so a pid the OS has reused is told from the one that was recorded.
 function processStart(pid) {
