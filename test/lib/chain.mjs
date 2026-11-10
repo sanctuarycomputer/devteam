@@ -1287,7 +1287,9 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     assert.match(refused(stale), /adopt.*behind/s, 'behind main, what lands is not the files compared');
     landSettings((txt) => txt.replace('"upstream_sync": "adopt"', '"upstream_sync": "ask"'));
     assert.match(refused(stale), /outside project\//, 'a branch cut under "adopt" is refused once the owner set main to "ask"');
-    landSettings((txt) => txt.replace('"upstream_sync": "ask"', '"upstream_sync": "adopt"'));
+    landSettings((txt) => txt.replace('"upstream_sync": "ask",', ''));
+    assert.equal(json(must(['settings'])).upstream_sync, 'adopt', 'a project with no setting adopts verbatim releases too');
+    landSettings((txt) => txt.replace('"gates": {', '"upstream_sync": "adopt", "gates": {'));
     for (const w of made) git(['worktree', 'remove', '--force', w]);
     // the sync chore copies that file verbatim (the dashed slug older kits needed resolves to the tag)
     git(['worktree', 'add', '-q', '-b', 'chore-devteam-sync-v0-3-0', wt('sync'), 'origin/main']);
