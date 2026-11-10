@@ -10,6 +10,8 @@
 // can exist only on an instance's name. The gateway also sends the hub's notifications, by Web Push.
 // Behind it the kit runs unchanged: every proxied request looks to the kit like a local browser's,
 // and the kit's loopback origins in its response headers are mapped to the public ones.
+// A file the owner drops on the terminal is the one thing it stores for the agents' side: under a
+// folder only it writes, and handed over as a path pasted into the terminal.
 // Node only, no dependencies. Usage: node gateway.mjs [serve | reclaim]
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -310,6 +312,45 @@ const INSTALL = Object.assign(Object.create(null), {
   ...Object.fromEntries(ICON_SIZES.map((n) => [`/icon-${n}.png`, { type: 'image/png', body: () => { if (!iconCache.has(n)) iconCache.set(n, iconPng(n)); return iconCache.get(n); } }])),
 });
 
+// --- files dropped on the terminal ---------------------------------------------------------------
+const UPLOAD_MAX = 512 * 1024 * 1024; // a file, and so a request: each file is a request of its own
+const UPLOAD_TOTAL = 4 * 1024 * 1024 * 1024;
+const UPLOAD_FREE = 1024 * 1024 * 1024; // left on the disk for the agents, whatever is dropped
+const UPLOAD_KEEP_MS = 7 * 24 * 3600 * 1000;
+const UPLOAD_STALL_MS = 60 * 1000;
+const UPLOAD_SWEEP_MS = 3600 * 1000;
+const UPLOAD_NAME = 200;
+const UPLOAD_PART = '.part';
+const UPLOAD_FOLDER = /^\d{4}-\d{2}-\d{2}-[0-9a-f]{24}$/;
+// Node's limit on a whole request is five minutes, too short for a big file on a slow line. A
+// stalled upload is cut off much sooner (UPLOAD_STALL_MS); this bounds a slow one.
+const REQUEST_MS = 3600 * 1000;
+// The name a dropped file is stored under: its own, reduced to letters, digits, '.', '-' and '_',
+// so its path needs no quoting wherever it's pasted, and a program that recognises an image by its
+// path (Claude Code, which attaches it) sees a plain one. It can't leave its folder, or be hidden.
+export function safeUploadName(raw) {
+  const base = String(raw ?? '').split(/[/\\]/).pop().normalize('NFD').replace(/[\p{M}\p{Cc}\p{Cf}]/gu, '');
+  const plain = base.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^\.+|[.-]+$/g, '');
+  const dot = plain.lastIndexOf('.');
+  const ext = dot >= 0 && plain.length - dot <= 17 ? plain.slice(dot).toLowerCase().replace(/[^.a-z0-9]/g, '') : '';
+  // the extension first: a name that's all replaced characters still comes out an image
+  const stem = (ext ? plain.slice(0, dot) : plain).replace(/^[._-]+/, '').slice(0, UPLOAD_NAME).replace(/[.-]+$/, '');
+  return `${stem || 'file'}${ext.length > 1 ? ext : ''}`;
+}
+// These three run in the terminal's page too (TERM_DROP has their source), and are tested here.
+// A stored path never needs the quotes; they're for whatever else this is ever handed.
+export function shellQuote(s) {
+  return /^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
+}
+export function dropPaste(paths) {
+  return paths.map(shellQuote).join(' ');
+}
+// What follows the paste: a space, so what the owner types next doesn't run into a path. Not after
+// images alone: Claude Code turns those into attachments, and it has no path left to separate.
+export function dropSpace(paths) {
+  return paths.some((p) => !/\.(png|jpe?g|gif|webp)$/i.test(p));
+}
+
 // --- the server ---------------------------------------------------------------------------------
 export function createGateway(opts = {}) {
   const PUB = publicUrl(opts.publicUrl);
@@ -336,6 +377,12 @@ export function createGateway(opts = {}) {
   const hubPage = fs.readFileSync(firstFile(opts.hubPage, env.DEVTEAM_HUB_PAGE, path.join(here, 'hub.html'), path.join(here, '..', 'docs', 'devteam', 'dashboard', 'hub.html')));
   const ttydPage = () => fs.readFileSync(opts.ttydPage ?? env.DEVTEAM_TTYD_PAGE ?? path.join(here, 'ttyd.html'));
   const log = opts.log ?? ((m) => process.stdout.write(`gateway: ${m}\n`));
+  const uploadsRoot = opts.uploadsDir ?? env.DEVTEAM_UPLOADS_DIR ?? '/data/uploads';
+  const uploadMax = opts.uploadMax ?? UPLOAD_MAX;
+  const uploadTotal = opts.uploadTotal ?? UPLOAD_TOTAL;
+  const uploadFree = opts.uploadFree ?? UPLOAD_FREE;
+  const uploadKeepMs = opts.uploadKeepMs ?? UPLOAD_KEEP_MS;
+  const uploadStallMs = opts.uploadStallMs ?? UPLOAD_STALL_MS;
 
   // Unclaimed: the token named in the environment, else one made now and printed once (whoever
   // reads the platform's logs can already open a shell on the box, the root of trust anyway).
@@ -674,8 +721,179 @@ export function createGateway(opts = {}) {
     });
   }, 100);
 })();</script>`);
+  // A native terminal pastes the path of a file dropped on it, and Claude Code picks it up from
+  // there. So does this: each file goes to the box first, and then its path goes in by term.paste,
+  // bracketed like any paste when the program in the pane has asked for that, to the focused pane.
+  // No Enter, so the owner can add to the message. The drop is the owner's own act, on their page.
+  const TERM_DROP = Buffer.from(`<script>(() => {
+  const MAX = ${uploadMax};
+  const shellQuote = ${shellQuote};
+  const dropPaste = ${dropPaste};
+  const dropSpace = ${dropSpace};
+  const box = (css) => { const d = document.createElement('div'); d.style.cssText = 'position:fixed;z-index:10000;font:14px system-ui,sans-serif;display:none;' + css; document.documentElement.appendChild(d); return d; };
+  const veil = box('inset:0;align-items:center;justify-content:center;background:rgba(0,0,0,.6);color:#fff;border:2px dashed #fff;box-sizing:border-box;pointer-events:none');
+  veil.id = 'devteam-drop-veil';
+  veil.textContent = 'Drop to send to the box';
+  const note = box('right:12px;bottom:12px;max-width:70%;padding:8px 12px;border-radius:6px;background:#222;color:#eee;white-space:pre-wrap;cursor:pointer');
+  note.id = 'devteam-drop-note';
+  note.onclick = () => { note.style.display = 'none'; };
+  let fade = 0;
+  const say = (text, bad) => {
+    clearTimeout(fade);
+    note.textContent = text;
+    note.style.background = bad ? '#b3261e' : '#222';
+    note.style.display = 'block';
+    if (!bad) fade = setTimeout(() => { note.style.display = 'none'; }, 4000);
+  };
+  const send = (file, label) => new Promise((done, fail) => {
+    const x = new XMLHttpRequest();
+    x.open('POST', '/upload?name=' + encodeURIComponent(file.name));
+    x.setRequestHeader('content-type', 'application/octet-stream');
+    x.upload.onprogress = (e) => { if (e.lengthComputable) say(label + ' ' + Math.round(100 * e.loaded / (e.total || 1)) + '%'); };
+    x.onload = () => {
+      let j = {};
+      try { j = JSON.parse(x.responseText); } catch {}
+      if (x.status === 200 && j.path) done(j.path); else fail(new Error(j.error || x.responseText || 'the box answered ' + x.status));
+    };
+    x.onerror = () => fail(new Error('the upload was refused or cut off'));
+    x.send(file);
+  });
+  const take = async (picks) => {
+    const paths = [];
+    const failed = [];
+    for (const [i, p] of picks.entries()) {
+      const name = p.file ? p.file.name : 'that item';
+      try {
+        if (!p.file || p.dir) throw new Error('is a folder: zip it and drop that');
+        if (p.file.size > MAX) throw new Error('is over the ' + Math.floor(MAX / 1048576) + ' MB limit');
+        const label = (picks.length > 1 ? (i + 1) + '/' + picks.length + ' ' : '') + name;
+        say(label + ' 0%');
+        paths.push(await send(p.file, label));
+      } catch (e) { failed.push(name + ': ' + e.message); }
+    }
+    const term = window.term;
+    if (paths.length && (!term || !term.paste)) failed.push('the terminal is not ready; stored at ' + dropPaste(paths));
+    else if (paths.length) {
+      term.paste(dropPaste(paths));
+      if (dropSpace(paths)) term.input(' ');
+      term.focus();
+    }
+    if (failed.length) say(failed.join('\\n'), true); else say(paths.length + (paths.length > 1 ? ' files' : ' file') + ' sent');
+  };
+  const hasFiles = (e) => e.dataTransfer && Array.from(e.dataTransfer.types).includes('Files');
+  let hide = 0;
+  let queue = Promise.resolve();
+  addEventListener('dragover', (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    veil.style.display = 'flex';
+    clearTimeout(hide);
+    hide = setTimeout(() => { veil.style.display = 'none'; }, 500);
+  }, true);
+  addEventListener('drop', (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    clearTimeout(hide);
+    veil.style.display = 'none';
+    // only while the event lasts: the list is empty afterwards
+    const picks = Array.from(e.dataTransfer.items).filter((i) => i.kind === 'file').map((i) => { const entry = i.webkitGetAsEntry && i.webkitGetAsEntry(); return { file: i.getAsFile(), dir: Boolean(entry && entry.isDirectory) }; });
+    queue = queue.then(() => take(picks)).catch((err) => say(String(err && err.message || err), true));
+  }, true);
+})();</script>`);
   const TERM_CSP = `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; font-src data:; img-src data:; connect-src 'self' ${TERM.replace(/^http/, 'ws')}; frame-ancestors ${PUB}; base-uri 'none'; form-action 'none'`;
   const loginAt = (next) => `${PUB}/auth/login${next ? `?next=${encodeURIComponent(next)}` : ''}`;
+
+  // --- a file dropped on the terminal: streamed to a folder of its own, never read back or run ---
+  // The root is made at boot, by root, for gw to write and dev to read. It is checked here, not
+  // assumed, so the gateway never writes through something an agent could have put in its place.
+  const uploadsRootOk = async () => {
+    try {
+      const st = await fs.promises.lstat(uploadsRoot);
+      return st.isDirectory() && st.uid === process.getuid() && !(st.mode & 0o022);
+    } catch { return false; }
+  };
+  // What's there, from the disk once, and kept up to date here: only this process writes the root.
+  const kept = new Map(); // folder -> { bytes, at }
+  const receiving = new Map(); // folder -> the most it may yet take
+  const sum = (ns) => { let t = 0; for (const n of ns) t += n; return t; };
+  let scan = null;
+  const scanUploads = () => {
+    scan ??= (async () => {
+      for (const e of await fs.promises.readdir(uploadsRoot, { withFileTypes: true })) {
+        if (!e.isDirectory() || !UPLOAD_FOLDER.test(e.name)) continue;
+        const folder = path.join(uploadsRoot, e.name);
+        const names = await fs.promises.readdir(folder);
+        // a restart cut this one off: nothing is receiving yet, the scan comes first
+        if (!names.length || names.includes(UPLOAD_PART)) { await fs.promises.rm(folder, { recursive: true, force: true }); continue; }
+        let bytes = 0;
+        for (const n of names) bytes += (await fs.promises.lstat(path.join(folder, n))).size;
+        kept.set(e.name, { bytes, at: (await fs.promises.lstat(folder)).mtimeMs });
+      }
+    })().catch((e) => { scan = null; throw e; });
+    return scan;
+  };
+  // Removes only what the scan or an upload recorded: a folder named as ours, made by this process's user.
+  const sweepUploads = async (now = Date.now()) => {
+    if (!(await uploadsRootOk())) return;
+    await scanUploads();
+    for (const [name, u] of kept) {
+      if (now - u.at <= uploadKeepMs) continue;
+      await fs.promises.rm(path.join(uploadsRoot, name), { recursive: true, force: true });
+      kept.delete(name);
+    }
+  };
+  const receiveUpload = async (req, res, rawName) => {
+    const refuse = (code, error, extra) => json(res, code, { error }, extra);
+    // closes, so what's still being sent is dropped with the connection, not read
+    const tooBig = () => refuse(413, `over the ${Math.floor(uploadMax / 1048576)} MB limit for a file`, { connection: 'close' });
+    if (!(await uploadsRootOk())) return refuse(503, 'this box has no folder for dropped files');
+    const declared = req.headers['content-length'] === undefined ? null : Number(req.headers['content-length']);
+    if (declared !== null && declared > uploadMax) return tooBig();
+    const want = declared ?? uploadMax;
+    await sweepUploads();
+    const pending = sum(receiving.values());
+    if (sum([...kept.values()].map((u) => u.bytes)) + pending + want > uploadTotal) return refuse(507, `the box already holds as many dropped files as it keeps (${Math.floor(uploadTotal / 1048576)} MB); they go after ${Math.round(uploadKeepMs / 86400000)} days`);
+    const id = `${new Date().toISOString().slice(0, 10)}-${crypto.randomBytes(12).toString('hex')}`;
+    const folder = path.join(uploadsRoot, id);
+    const part = path.join(folder, UPLOAD_PART);
+    const stored = path.join(folder, safeUploadName(rawName));
+    receiving.set(id, want);
+    let fh = null;
+    let size = 0;
+    const stall = setTimeout(() => req.destroy(new Error('stalled')), uploadStallMs);
+    try {
+      const { bavail, bsize } = await fs.promises.statfs(uploadsRoot);
+      if (bavail * bsize - pending - want < uploadFree) throw Object.assign(new Error('full'), { code: 'ENOSPC' });
+      // a new folder of a random name, then a new file in it: neither can be anything already there
+      await fs.promises.mkdir(folder, { mode: 0o750 });
+      fh = await fs.promises.open(part, 'wx', 0o600);
+      // one chunk at a time, each written before the next is read: a big body waits, in the socket
+      for await (const chunk of req.iterator({ destroyOnReturn: false })) {
+        size += chunk.length;
+        if (size > uploadMax) throw Object.assign(new Error('too big'), { tooBig: true });
+        await fh.writeFile(chunk);
+        stall.refresh();
+      }
+      await fh.chmod(0o640);
+      await fh.close();
+      await fs.promises.rename(part, stored);
+      kept.set(id, { bytes: size, at: Date.now() });
+      return json(res, 200, { path: stored, size });
+    } catch (e) {
+      await fh?.close().catch(() => {});
+      await fs.promises.rm(folder, { recursive: true, force: true }).catch(() => {});
+      if (e.tooBig) return tooBig();
+      if (req.destroyed || res.destroyed) return;
+      if (e.code === 'ENOSPC') return refuse(507, 'the box\'s disk is too full for this file', { connection: 'close' });
+      log(`a dropped file could not be stored: ${e.message}`);
+      return refuse(500, 'the box could not store this file', { connection: 'close' });
+    } finally {
+      clearTimeout(stall);
+      receiving.delete(id);
+    }
+  };
 
   // Room for a jar a page has stuffed; past it, see clientError below.
   const server = http.createServer({ maxHeaderSize: 64 * 1024 }, async (req, res) => {
@@ -753,10 +971,12 @@ export function createGateway(opts = {}) {
       if (isTerm) {
         if (req.method === 'GET' && p === '/') {
           let body;
-          try { body = Buffer.concat([ttydPage(), TERM_CLIPBOARD]); } catch { return send(res, 502, 'text/plain; charset=utf-8', 'This image has no terminal page.'); }
+          try { body = Buffer.concat([ttydPage(), TERM_CLIPBOARD, TERM_DROP]); } catch { return send(res, 502, 'text/plain; charset=utf-8', 'This image has no terminal page.'); }
           return send(res, 200, 'text/html; charset=utf-8', body, { 'content-security-policy': TERM_CSP, 'referrer-policy': 'no-referrer' });
         }
         if (req.method === 'GET' && p === '/token') return json(res, 200, { token: '' });
+        // a session, and (like every POST, above) this page's own Origin: an agent's page has neither
+        if (req.method === 'POST' && p === '/upload') return await receiveUpload(req, res, url.searchParams.get('name'));
         return send(res, 404, 'text/plain', 'not found');
       }
       if (isAuth) {
@@ -851,7 +1071,8 @@ export function createGateway(opts = {}) {
   });
   server.keepAliveTimeout = 65000;
   server.headersTimeout = 66000;
-  return { server, publicUrl: PUB, pollPush };
+  server.requestTimeout = REQUEST_MS;
+  return { server, publicUrl: PUB, pollPush, sweepUploads };
 }
 
 // --- the gateway's own pages -------------------------------------------------------------------
@@ -917,8 +1138,11 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === fs.realpathSync(proces
   const cmd = process.argv[2] ?? 'serve';
   try {
     if (cmd === 'serve') {
-      const { server, publicUrl: pub, pollPush } = createGateway();
+      const { server, publicUrl: pub, pollPush, sweepUploads } = createGateway();
       setInterval(() => pollPush().catch((e) => process.stdout.write(`gateway: notifications: ${e.message}\n`)), PUSH_POLL_MS);
+      const sweep = () => sweepUploads().catch((e) => process.stdout.write(`gateway: dropped files: ${e.message}\n`));
+      sweep();
+      setInterval(sweep, UPLOAD_SWEEP_MS);
       const port = Number(env.PORT ?? 8080);
       // every address, IPv6 too: a port left open on either family is one an agent could take
       const up = () => process.stdout.write(`gateway: ${pub} on :${port}\n`);
