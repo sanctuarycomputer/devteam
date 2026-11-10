@@ -833,7 +833,7 @@ export function createGateway(opts = {}) {
       ur.on('close', () => finish(new Error(`instance ${port} broke off its answer to ${p}`)));
     });
     up.on('error', () => finish(new Error(`nothing answers on instance ${port}`)));
-    deadline = setTimeout(() => { up.destroy(); finish(new Error(`instance ${port} took over ${ms / 1000} s to answer ${p}`)); }, ms);
+    deadline = setTimeout(() => { up.destroy(); finish(Object.assign(new Error(`instance ${port} took over ${ms / 1000} s to answer ${p}`), { deadline: true })); }, ms);
     up.end(body ?? undefined);
   });
   const errorOf = (r) => { try { return String(JSON.parse(r.body.toString('utf8')).error ?? `HTTP ${r.status}`).slice(0, 300); } catch { return `HTTP ${r.status}`; } };
@@ -874,7 +874,9 @@ export function createGateway(opts = {}) {
     const t0 = Date.now();
     const late = () => new Error(`instance ${port} took over ${ITEM_MS / 1000} s for this item; nothing was published`);
     const left = () => { const n = ITEM_MS - (Date.now() - t0); if (n <= 0) throw late(); return Math.min(LOOP_MS, n); };
-    const ask = async (f) => { const ms = left(); try { return await f(ms); } catch (e) { throw Date.now() - t0 >= ITEM_MS ? late() : e; } };
+    // decided by cause, not by the clock: a timer may fire a millisecond early, and a deadline
+    // shorter than LOOP_MS can only be the item's budget running out
+    const ask = async (f) => { const ms = left(); try { return await f(ms); } catch (e) { throw e.deadline && ms < LOOP_MS ? late() : e; } };
     const m = await ask((ms) => fetchManifest(port, item.slug, ms));
     if (manifestHash(m) !== item.manifest) throw new Error('this changed since you looked; reload the page');
     let why = publishProblem(store.load().public ?? {}, m, item);
@@ -891,11 +893,14 @@ export function createGateway(opts = {}) {
     if (gitTreeId(ids, algo) !== m.tree) throw new Error(`the files don't make the tree ${m.tree.slice(0, 12)} the manifest names; nothing was published`);
     return pstore.serial(async () => {
       try {
+        // the budget may have run out while this item queued: refuse before any blob is written
+        left();
         // the state may have changed while this item waited: a move, another publish, the cap
         why = publishProblem(store.load().public ?? {}, m, item);
         if (why) throw new Error(why);
         for (const [sha, buf] of bytes) pstore.write(sha, buf);
-        const k = await ask((ms) => loopback(port, 'POST', '/api/artifact-publish', { body: JSON.stringify({ op: 'publish', slug: m.slug, tree: m.tree }), ms }));
+        // the record gets the full deadline, whatever is left of the budget: cutting it short would leave a recorded-but-unsaved publish
+        const k = await loopback(port, 'POST', '/api/artifact-publish', { body: JSON.stringify({ op: 'publish', slug: m.slug, tree: m.tree }), ms: LOOP_MS });
         if (k.status !== 200) throw new Error(`the kit didn't record it, so it wasn't published: ${errorOf(k)}`);
         // load, change and save with nothing awaited in between
         const now = store.load();
