@@ -1,0 +1,115 @@
+#!/bin/sh
+# box-supervisors [--all] [--dry-run] | --status: the mechanical half of the box's operator
+# (operator.md). One line per adopted repo in ~/code, saying what it did and why.
+#   (default)  after a restart: each supervisor that was running, unless its fleet is held.
+#   --all      every adopted repo that isn't a sibling, a parked one too: its supervisor decides.
+#   --status   a read-only digest of the box, for the operator's tick.
+set -u
+all=; dry=; status=
+for a in "$@"; do case $a in
+  --all) all=1 ;; --dry-run) dry=1 ;; --status) status=1 ;;
+  *) echo 'usage: box-supervisors [--all] [--dry-run] | --status' >&2; exit 2 ;;
+esac; done
+code=$HOME/code
+boot=$HOME/.devteam-supervisors.boot
+node=${DEVTEAM_NODE:-/usr/local/bin/node}
+kit=docs/devteam/scripts/devteam.mjs
+tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+say() { printf '%s: %s\n' "$1" "$2"; }
+dt() { (cd "$1" && shift && "$node" "$kit" "$@" 2>/dev/null); }
+# one form for a remote, as the kit compares them: GitHub's two spellings, no .git, any case
+norm() { printf '%s' "$1" | sed -E 's#^(ssh://)?git@github\.com[:/]#https://github.com/#; s#\.git/?$##; s#/$##' | tr '[:upper:]' '[:lower:]'; }
+origin() { norm "$(git -C "$1" remote get-url origin 2>/dev/null)"; }
+# A repo with the kit but no settings isn't adopted (a checkout of devteam itself, say).
+adopted() { for k in "$code"/*/"$kit"; do [ -f "$k" ] || continue; r=${k%/"$kit"}; [ -f "$r/docs/devteam/project/settings.md" ] && echo "$r"; done; }
+# Whether a supervisor is up here: the pane it noted, or anything agent-shaped started at the repo's root.
+panes() { tmux list-panes -a -F '#{pane_id}	#{window_name}	#{pane_start_path}	#{pane_current_command}' 2>/dev/null; }
+running() {
+  p=$(cat "$1/docs/devteam/run/supervisor-pane" 2>/dev/null)
+  panes | awk -F'\t' -v p="$p" -v r="$1" '
+    $4 ~ /^-?(bash|sh|dash|zsh|fish)$/ || $2 ~ /^dash-/ { next }
+    ($1 == p && p != "") || ($3 == r && $4 ~ /claude|node/) { found = 1 }
+    END { exit found ? 0 : 1 }'
+}
+# Who links whom: home, its link's id, its link's remote.
+adopted > "$tmp/adopted"
+while read -r r; do
+  dt "$r" settings --get links | jq -r 'to_entries[]? | select(.value.kind == "repo") | "\(.key)\t\(.value.remote)"' 2>/dev/null | while IFS='	' read -r id rem; do
+    printf '%s\t%s\t%s\n' "$r" "$id" "$(norm "$rem")"
+  done
+done < "$tmp/adopted" > "$tmp/links"
+# The home that links this repo, if any. Two that link each other are both homes.
+sibling_of() {
+  o=$(origin "$1"); n=$(basename "$1")
+  awk -F'\t' -v r="$1" -v o="$o" -v n="$n" '$1 != r && (($3 == o && o != "") || ($3 ~ /^\./ && $2 == n)) { print $1 }' "$tmp/links" | while read -r h; do
+    ho=$(origin "$h")
+    awk -F'\t' -v r="$1" -v ho="$ho" '$1 == r && $3 == ho && ho != "" { m = 1 } END { exit m ? 0 : 1 }' "$tmp/links" || { echo "$h"; break; }
+  done | head -1
+}
+missing() { dt "$1" settings --get worktree_files | jq -r '.[]?' 2>/dev/null | while read -r f; do [ -e "$1/$f" ] || printf '%s ' "$f"; done; }
+
+if [ -n "$status" ]; then
+  echo "box: disk $(df -h "$HOME" | awk 'END { print $4 " free of " $2 }'); memory $(awk '/MemAvailable/ { a = $2 } /MemTotal/ { t = $2 } END { printf "%.1f GB free of %.1f GB", a / 1048576, t / 1048576 }' /proc/meminfo 2>/dev/null); load $(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)"
+  while read -r r; do
+    n=$(basename "$r")
+    h=$(dt "$r" hello --json); [ -n "$h" ] || h='{}'
+    m=$(missing "$r")
+    if command -v mise >/dev/null 2>&1; then t=$(cd "$r" && mise ls --current --missing 2>/dev/null | awk '{ printf "%s@%s ", $1, $2 }'); else t='?'; fi
+    if running "$r"; then s=up; else s=down; fi
+    echo "$n sup=$s fleet=$(printf '%s' "$h" | jq -r '.fleet.mode // "?"' 2>/dev/null) kit=$(printf '%s' "$h" | jq -r '.kit // "?"' 2>/dev/null) inbox=$(printf '%s' "$h" | jq -r '.inbox // "?"' 2>/dev/null) missing=${m:--} tools=${t:-ok}$(s=$(sibling_of "$r"); [ -n "$s" ] && echo " sibling-of=$(basename "$s")")"
+  done < "$tmp/adopted"
+  exit 0
+fi
+
+if [ -z "$dry" ] && ! tmux has-session -t home 2>/dev/null; then
+  echo 'box-supervisors: no tmux session "home" on this box; starting one from here would hand every window this session'"'"'s markers' >&2
+  exit 1
+fi
+: > "$tmp/keep"
+while read -r r; do
+  n=$(basename "$r")
+  if [ -z "$all" ]; then
+    # a supervisor ran here before the restart, so it is a home whatever links to it
+    grep -Fxq "$r" "$boot" 2>/dev/null || { say "$n" "left stopped (not running before the restart; --all starts it)"; continue; }
+  else
+    s=$(sibling_of "$r")
+    [ -n "$s" ] && { say "$n" "skipped (a sibling of $(basename "$s"))"; continue; }
+  fi
+  if running "$r"; then say "$n" "already running"; continue; fi
+  fm=$(dt "$r" fleet status --json --no-fetch | jq -r '.fleet.mode // "run"' 2>/dev/null)
+  case "$fm" in
+    run) ;;
+    park|drain) [ -n "$all" ] || { say "$n" "left stopped (its fleet is held: $fm)"; continue; } ;;
+    *) say "$n" "NOT started (could not read whether its fleet is held)"; echo "$r" >> "$tmp/keep"; continue ;;
+  esac
+  id=$(dt "$r" supervisor-session)
+  case "$id" in *[!A-Za-z0-9_-]*) id= ;; esac
+  miss=$(missing "$r")
+  if [ -n "$id" ]; then how="resume session $id"; else how="start fresh"; fi
+  if [ -n "$dry" ]; then say "$n" "would $how${miss:+ (missing here: $miss)}"; continue; fi
+  if [ -n "$id" ]; then
+    cmd=$(dt "$r" settings --get resume_command)
+    case " $cmd " in *" --continue "*) ;; *) say "$n" "NOT started (its resume_command has no --continue to replace)"; echo "$r" >> "$tmp/keep"; continue ;; esac
+    cmd=$(printf '%s' "$cmd" | sed -E "s/ --continue( |\$)/ --resume $id\1/")
+    msg='The box restarted, and this is you, resumed on your own conversation; what was in flight did not finish. Follow supervisor.md §11, after your own restart: §1 again. Every worker and planner window is gone, so §1.4 sends each ticket whose phase is not done or parked to recovery.'
+  else
+    cmd=$(dt "$r" settings --get agent_command)
+    msg=$(dt "$r" prompt supervisor)
+  fi
+  [ -n "$miss" ] && msg="$msg
+
+This machine is missing: $miss(worktree_files). Before unparking or starting any worker, ask the owner for each in the Inbox: an owner-action question with --secrets and the sink file:<path>. Never in chat."
+  mkdir -p "$r/docs/devteam/run"
+  f="$r/docs/devteam/run/supervisor-prompt.txt"
+  printf '%s\n' "$msg" > "$f"
+  pane=$(tmux new-window -dP -F '#{pane_id}' -t home -n "sup-$n" -c "$r") || { say "$n" "NOT started (tmux would not open its window)"; echo "$r" >> "$tmp/keep"; continue; }
+  printf '%s' "$pane" > "$r/docs/devteam/run/supervisor-pane"
+  tmux send-keys -t "$pane" -l "export DEVTEAM_ROLE=supervisor; $cmd \"\$(cat '$f')\""
+  tmux send-keys -t "$pane" Enter
+  if [ -n "$id" ]; then did="resumed session $id"; else did="started fresh"; fi
+  say "$n" "$did${miss:+ (asked to get: $miss)}"
+done < "$tmp/adopted"
+# what a restore couldn't start stays listed for the next try
+if [ -z "$dry" ] && [ -z "$all" ] && [ -f "$boot" ]; then
+  if [ -s "$tmp/keep" ]; then cp "$tmp/keep" "$boot"; else rm -f "$boot"; fi
+fi
