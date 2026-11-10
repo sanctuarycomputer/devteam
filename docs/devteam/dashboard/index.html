@@ -46,7 +46,7 @@
   .banner { border: 1px solid color-mix(in srgb, var(--red) 45%, var(--line)); background: color-mix(in srgb, var(--red) 7%, var(--surface)); border-radius: 8px; padding: 10px 14px; margin-bottom: 20px; font-size: 12px; }
   .banner.updated { border-color: color-mix(in srgb, var(--blue-fg, var(--fg-2)) 45%, var(--line)); background: color-mix(in srgb, var(--blue-fg, var(--fg-2)) 7%, var(--surface)); }
   .banner.updated button { margin: 0 0 0 8px; }
-  .held { position: fixed; right: 16px; bottom: 16px; z-index: 30; margin: 0; box-shadow: var(--shadow); }
+  .held { position: fixed; right: 16px; bottom: 64px; z-index: 30; margin: 0; box-shadow: var(--shadow); }
   .banner b { color: var(--red-fg); }
   .banner pre { margin: 6px 0 0; max-height: 9em; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.5 var(--mono); color: var(--fg-2); }
   .banner.stale { border-color: color-mix(in srgb, var(--amber) 45%, var(--line)); background: color-mix(in srgb, var(--amber) 7%, var(--surface)); }
@@ -507,6 +507,23 @@
   .tl-compose textarea { margin-top: 6px; }
   .tl-compose .row-inline { align-items: center; }
   @media (max-width: 640px) { .tl-card:not(.sheet) { width: calc(100vw - 32px); } }
+  .tl-pins { position: absolute; left: 0; top: 0; width: 0; height: 0; z-index: 40; }
+  .tl-pin { position: absolute; width: 22px; height: 22px; padding: 0; margin: 0; border-radius: 50%; border: 2px solid #fff; background: var(--blue); color: #fff; font: 600 11px/18px var(--sans); text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,.3); }
+  .tl-pin.on { outline: 2px solid var(--blue); outline-offset: 2px; }
+  .tl-pin sup { font-size: 9px; margin-left: 1px; }
+  .tl-dock { position: fixed; right: 16px; bottom: 16px; z-index: 45; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+  .tl-pill { border-radius: 999px; box-shadow: 0 2px 8px rgba(0,0,0,.12); }
+  .tl-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--blue); vertical-align: middle; }
+  .tl-panel { width: 320px; max-height: 60vh; overflow-y: auto; background: var(--raised); border: 1px solid var(--line-2); border-radius: 10px; padding: 8px; box-shadow: 0 8px 28px rgba(0,0,0,.18); }
+  .tl-dock-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+  .tl-dock-head button { margin-top: 0; }
+  button.tl-row { display: flex; align-items: center; gap: 8px; width: 100%; height: auto; margin: 0; text-align: left; background: none; border: 0; border-radius: 6px; padding: 6px; color: var(--fg); font-weight: 400; }
+  button.tl-row:hover { background: var(--hover); opacity: 1; }
+  .tl-row .tl-r { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+  .tl-row .tl-r b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+  .tl-n { flex: none; width: 20px; height: 20px; border-radius: 50%; background: var(--blue); color: #fff; font-size: 11px; line-height: 20px; text-align: center; }
+  .tl-resolved summary { cursor: pointer; font-size: 12px; color: var(--fg-2); padding: 6px; }
+  @media (pointer: coarse) { #tl-pinbtn { height: 36px; padding: 0 14px; } }
 </style>
 </head>
 <body>
@@ -699,10 +716,18 @@
 </div>
 <!-- the thread layer: outside <main>, which the 10 s refresh rebuilds -->
 <div id="tl" class="tl">
+  <div id="tl-pins" class="tl-pins"></div>
   <div id="tl-hl" class="tl-hl" hidden></div>
   <div id="tl-chip" class="tl-chip" hidden></div>
   <div id="tl-cursor" class="tl-cursor" hidden aria-hidden="true"><svg viewBox="0 0 28 36" width="28" height="36"><path d="M14 35C14 35 2 21 2 13a12 12 0 0 1 24 0c0 8-12 22-12 22z"/><circle cx="14" cy="13" r="4.5"/></svg></div>
   <div id="tl-card" class="tl-card" role="dialog" aria-label="A thread with the supervisor" hidden></div>
+  <div id="tl-dock" class="tl-dock">
+    <div id="tl-panel" class="tl-panel" hidden>
+      <div class="tl-dock-head"><b>Threads</b><span class="grow"></span><button type="button" class="ghost" id="tl-pinbtn" aria-pressed="false" title="Point at something to start a thread: for a phone, or for a long look around">Pin</button><button type="button" class="ghost" data-tl-new>New thread</button></div>
+      <div id="tl-list"></div>
+    </div>
+    <button type="button" id="tl-pill" class="ghost tl-pill" aria-expanded="false"><i class="icon-messages-square" aria-hidden="true"></i> Threads</button>
+  </div>
 </div>
 <script>
 const $ = (id) => document.getElementById(id);
@@ -3681,6 +3706,7 @@ function tlCardBody(t) {
   const s = t ? t.subject : TL.draft.subject;
   const title = t ? t.title : TL.draft.title || 'A new thread';
   tlEl('tl-c-title').textContent = title;
+  if (t) tlSeen(t);
   const turns = tlEl('tl-c-turns');
   const sig = JSON.stringify([t, s, title, (t?.questions || []).map((q) => [q.id, (DATA?.questions || []).some((x) => x.id === q.id), ANSWERED.has(q.id)])]);
   if (sig !== TL.sig && !turns.contains(document.activeElement)) {
@@ -3710,7 +3736,8 @@ function tlPlaceCard(t) {
   card.style.left = p.sheet || p.dock ? '' : `${p.left + scrollX}px`;
   card.style.top = p.sheet || p.dock ? '' : `${p.top + scrollY}px`;
 }
-// The draft is kept in this browser per thread, as review drafts are, so a reload or another card keeps it.
+// The draft is kept in this browser, as review drafts are, so a reload or another card keeps it: per
+// thread, and for a thread not yet started per subject, let go after 7 days.
 const tlDraftKey = (key) => `devteam.thread.draft.${key}`;
 // Each draft with when it was last written; one for a thread never started is let go after 7 days.
 const tlDraftGet = (key) => { const d = lsGet(tlDraftKey(key)); return typeof d === 'string' ? d : typeof d?.text === 'string' ? d.text : ''; };
@@ -3749,14 +3776,15 @@ function tlCard() {
   // one card poll at a time: reads slower than 2 s don't pile up
   if (t && !TL.polling) TL.polling = setInterval(() => { if (document.visibilityState !== 'visible' || !TL.open || TL.polled) return; TL.polled = true; tlRefresh().finally(() => { TL.polled = false; }); }, 2000);
 }
-function tlDraw() { tlCard(); }
+function tlDraw() { tlCard(); tlDock(); tlPins(); }
 // A read lands only if none begun after it has landed already: a poll begun before a send can
 // answer after the send's own read, and would put back the threads as they were. Any newer answer
 // lands, so reads slower than the polls still bring the threads in.
 async function tlRefresh() {
   const n = ++TL.seq;
   try {
-    const r = await fetch('/api/threads');
+    // a request that hangs gives up, so the card's poll (one at a time) isn't stopped for good
+    const r = await fetch('/api/threads', { signal: AbortSignal.timeout(10000) });
     if (!r.ok) return;
     const j = await r.json();
     if (n <= TL.have) return;
@@ -3822,10 +3850,53 @@ async function tlSend() {
 document.addEventListener('input', (e) => { if (e.target.id !== 'tl-c-text') return; tlDraftSet(tlEl('tl-card').dataset.key, e.target.value); tlBytes(); });
 document.addEventListener('keydown', (e) => { if (e.target.id === 'tl-c-text' && e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); tlSend(); } });
 document.addEventListener('click', (e) => {
+  const pin = e.target.closest('[data-tl-pin]');
+  if (pin) return void tlOpen(pin.dataset.tlPin, false);
+  const row = e.target.closest('[data-tl-open]');
+  if (row) { tlEl('tl-panel').hidden = true; tlEl('tl-pill').setAttribute('aria-expanded', 'false'); return void tlOpen(row.dataset.tlOpen); }
+  if (e.target.closest('#tl-pill')) { const panel = tlEl('tl-panel'); panel.hidden = !panel.hidden; tlEl('tl-pill').setAttribute('aria-expanded', String(!panel.hidden)); return void tlDock(); }
+  if (e.target.closest('[data-tl-new]')) { tlEl('tl-panel').hidden = true; TL.open = null; TL.draft = { subject: null, title: '', el: null }; tlDraw(); return void tlEl('tl-c-text')?.focus(); }
+  if (e.target.closest('#tl-pinbtn')) return void tlPinMode(!TL.pin);
   if (e.target.closest('[data-tl-close]')) return void tlClose();
   if (e.target.closest('[data-tl-send]')) return void tlSend();
 });
 addEventListener('resize', () => tlDraw());
+// When the owner last looked at each thread, in this browser only: the dock's dot is a reply since.
+const TL_SEEN = 'devteam.thread.seen';
+const tlSeenAt = (id) => (lsGet(TL_SEEN) || {})[id] || null;
+function tlSeen(t) { const m = lsGet(TL_SEEN) || {}; const last = t.turns[t.turns.length - 1]?.at; if (last && m[t.id] !== last) { m[t.id] = last; lsSet(TL_SEEN, m); } }
+// The pins: one numbered disc per subject on the page, at an item's top right corner or at the spot
+// on its section, for open threads only, in page coordinates. Placed again after every redraw, when
+// the threads change and on a resize; a subject that isn't drawn gets none (the dock still lists it).
+function tlPins() {
+  tlEl('tl-pins').innerHTML = tPins(TL.threads).map((g) => {
+    const r = tlTargetRect(g.subject);
+    if (!r) return '';
+    const x = (g.subject.kind === 'item' ? r.right - 10 : r.left + 1) + scrollX, y = (g.subject.kind === 'item' ? r.top - 10 : r.top + 1) + scrollY;
+    const newest = g.ids[g.ids.length - 1];
+    return `<button type="button" class="tl-pin${g.ids.includes(TL.open) ? ' on' : ''}" data-tl-pin="${esc(newest)}" style="left:${Math.round(x)}px;top:${Math.round(y)}px" aria-label="${esc(`Thread ${g.n}${g.ids.length > 1 ? `, and ${g.ids.length - 1} more on this` : ''}`)}">${g.n}${g.ids.length > 1 ? `<sup>${g.ids.length}</sup>` : ''}</button>`;
+  }).join('');
+}
+// The dock: a pill with the open threads' count and a dot for a reply not seen; opened, every open
+// thread, newest activity first, numbered as its pin, with where its subject is; then the last 50
+// resolved, each reopenable from its card.
+function tlDock() {
+  const open = TL.threads.filter((t) => t.status === 'open');
+  const nums = new Map([...open].sort((a, b) => a.created_at.localeCompare(b.created_at)).map((t, i) => [t.id, i + 1]));
+  const unread = open.some((t) => tUnread(t, tlSeenAt(t.id)));
+  // set only when it changed: a pill rewritten on every poll would drop a press on it
+  const pill = `<i class="icon-messages-square" aria-hidden="true"></i> Threads${open.length ? ` · ${open.length}` : ''}${unread ? ' <span class="tl-dot" aria-label="a reply you haven\'t seen"></span>' : ''}`;
+  if (pill !== TL.pill) { TL.pill = pill; tlEl('tl-pill').innerHTML = pill; }
+  if (tlEl('tl-panel').hidden) return;
+  const gone = (t) => t.subject?.kind === 'item' && !tlHome(t.subject);
+  const row = (t) => `<button type="button" class="tl-row" data-tl-open="${esc(t.id)}">${t.status === 'open' ? `<span class="tl-n">${nums.get(t.id)}</span>` : ''}<span class="tl-r"><b>${esc(t.title)}</b><span class="small muted">${esc(tWhere(t.subject))}${gone(t) ? ' · subject gone' : ''}</span></span>${t.status === 'open' && tUnread(t, tlSeenAt(t.id)) ? '<span class="tl-dot"></span>' : ''}${t.ready ? '<span class="badge good">ready</span>' : ''}</button>`;
+  const resolved = TL.threads.filter((t) => t.status === 'resolved').sort((a, b) => (b.resolved_at || '').localeCompare(a.resolved_at || '')).slice(0, 50);
+  tlEl('tl-list').innerHTML = (open.length ? [...open].sort((a, b) => b.activity_at.localeCompare(a.activity_at)).map(row).join('') : '<p class="empty">No open threads. Hold Shift and click anything on the page, or start one here.</p>')
+    + (resolved.length ? `<details class="tl-resolved"${tlEl('tl-list').querySelector('.tl-resolved')?.open ? ' open' : ''}><summary>Resolved (${resolved.length})</summary>${resolved.map(row).join('')}</details>` : '');
+}
+// a section opened or closed, or the Loop's tab changed, moves what the pins sit on
+document.addEventListener('toggle', () => tlPins(), true);
+$('loop-tabs').addEventListener('click', () => setTimeout(tlPins, 0));
 /* threads-layer end */
 
 // Not under someone mid-action: a redraw replaces the controls it draws, so typing, an IME
@@ -3876,7 +3947,8 @@ function drawOrHold(d, force = false) {
     render(d);
     if (first) route();
     inboxTitle(d);
-    // the thread layer, which the redraw doesn't touch: its threads again, and its card
+    // the thread layer, which the redraw doesn't touch: its pins on what was just drawn, then its threads again
+    tlPins();
     tlRefresh();
   } catch (e) {
     $('err').textContent = 'could not draw (see the top of the page)';

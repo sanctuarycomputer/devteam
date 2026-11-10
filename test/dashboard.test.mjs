@@ -851,7 +851,7 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
   });
 
   await t.test('the page refreshes while the owner writes in the card: the layer holds no redraw', async () => {
-    await p.click('#tl-c-text');
+    await p.ev("document.getElementById('tl-c-text').focus()");
     await p.type('half a thought');
     const polls = await p.ev('window.__polls');
     await p.ev(`window.__g = document.querySelector('${goalSel}'); void 0`);
@@ -884,7 +884,7 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
       F.sup(['thread', 'say', T, 'Slow box: still here.']);
       await soon(`[...document.querySelectorAll('#tl-c-turns .tl-turn.supervisor')].some((e) => e.textContent.includes('Slow box'))`, 'the reply through slow reads');
       for (const w of ['First on a slow box', 'Second on a slow box']) {
-        await p.click('#tl-c-text');
+        await p.ev("document.getElementById('tl-c-text').focus()");
         await p.type(w);
         await p.key('Enter');
         await until(() => threads().find((x) => x.id === T)?.turns.some((u) => u.text === w), `"${w}" in the log`);
@@ -904,11 +904,56 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await soon(`document.getElementById('tl-card').hidden && location.hash === '#goals'`, 'closed, the link let go for its subject\'s section');
     await p.ev(`location.hash = '#talk/${T}'`);
     await soon(`${shown('tl-card')} && document.getElementById('tl-card').dataset.key === '${T}'`, 'the same link again');
-    await p.click('#tl-c-text');
+    await p.ev("document.getElementById('tl-c-text').focus()");
     await p.key('Escape');
     await soon(`document.getElementById('tl-card').hidden && location.hash === '#goals'`, 'Escape closed it');
     await soon('TL.polling === null', 'no poll with no thread open');
     await p.ev(`location.hash = '#talk/${T}'`);
     await soon(`${shown('tl-card')} && document.getElementById('tl-card').dataset.key === '${T}'`, 'and again after Escape');
+  });
+
+  await t.test('a numbered pin on the goal, placed again after the 10 s rebuild, opening the thread without Shift', async () => {
+    await p.ev('document.activeElement?.blur()');
+    await soon(`!!document.querySelector('.tl-pin')`, 'a pin');
+    const pin = () => p.ev(`(() => { const r = document.querySelector('.tl-pin').getBoundingClientRect(), g = document.querySelector('${goalSel}').getBoundingClientRect(); return { dx: Math.round(r.left + r.width / 2 - g.right), dy: Math.round(r.top + r.height / 2 - g.top), n: document.querySelector('.tl-pin').textContent }; })()`);
+    const before = await pin();
+    assert.equal(before.n, '1');
+    assert.ok(Math.abs(before.dx) <= 2 && Math.abs(before.dy) <= 2, `at the goal's top right corner: ${JSON.stringify(before)}`);
+    await p.ev(`window.__g = document.querySelector('${goalSel}'); void 0`);
+    await soon('!window.__g.isConnected', 'the goal card redrawn');
+    assert.deepEqual(await pin(), before, 'placed again after the rebuild');
+    await p.click('[data-tl-close]');
+    await soon(`document.getElementById('tl-card').hidden`, 'closed');
+    await p.click('.tl-pin');
+    await soon(`${shown('tl-card')} && document.getElementById('tl-card').dataset.key === '${T}'`, 'the card from its pin');
+  });
+
+  await t.test('the dock: the pill with its count and a dot for a reply not seen, where each subject is, New thread with no subject', async () => {
+    await p.click('[data-tl-close]');
+    F.sup(['thread', 'say', T, 'Noted.']);
+    await soon(`/Threads · 1/.test(document.getElementById('tl-pill').textContent) && !!document.querySelector('#tl-pill .tl-dot')`, 'the count, and a dot for the reply');
+    await p.click('#tl-pill');
+    await soon(`document.querySelector('#tl-list [data-tl-open="${T}"]')?.textContent.includes('Goals')`, 'where its subject is');
+    await p.click('[data-tl-new]');
+    await soon(`${shown('tl-card')} && document.getElementById('tl-card').classList.contains('in-dock')`, 'a card in the dock');
+    await p.ev("document.getElementById('tl-c-text').focus()");
+    await p.type('What about onboarding?');
+    await p.key('Enter');
+    const n = await until(() => threads().find((x) => x.title === 'What about onboarding?'), 'the thread with no subject');
+    assert.equal(n.subject, null);
+    await soon(`/Threads · 2/.test(document.getElementById('tl-pill').textContent)`, 'two open');
+    await p.ev('document.activeElement?.blur()');
+    await p.click('[data-tl-close]');
+  });
+
+  await t.test('the pin button: pointing without Shift, until Esc', async () => {
+    if (await p.ev(`document.getElementById('tl-panel').hidden`)) await p.click('#tl-pill');
+    await p.click('#tl-pinbtn');
+    assert.equal(await p.ev(`document.getElementById('tl-pinbtn').getAttribute('aria-pressed')`), 'true');
+    const at = await p.at(`${goalSel} h4`);
+    await p.move(at.x, at.y, 0);
+    await soon(shown('tl-cursor'), 'the pin without Shift');
+    await p.key('Escape');
+    await soon(`document.getElementById('tl-cursor').hidden && document.getElementById('tl-pinbtn').getAttribute('aria-pressed') === 'false'`, 'out of pin mode');
   });
 });
