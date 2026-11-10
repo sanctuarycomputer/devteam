@@ -633,7 +633,8 @@ export function createGateway(opts = {}) {
   const downstreamHeaders = (h, cap, own) => {
     const out = {};
     for (const [k, v] of Object.entries(h)) {
-      if (['connection', 'keep-alive', 'transfer-encoding', 'strict-transport-security', 'clear-site-data'].includes(k)) continue;
+      // x-devteam-public is the gateway's to say (what the box serves); an upstream's copy never passes
+      if (['connection', 'keep-alive', 'transfer-encoding', 'strict-transport-security', 'clear-site-data', 'x-devteam-public'].includes(k)) continue;
       // nothing behind the gateway sets a cookie for the box's names (the kit sets none at all)
       if (k === 'set-cookie') { const keep = [].concat(v).filter((c) => !/;\s*domain\s*=/i.test(c) && !new RegExp(`^\\s*${COOKIE}\\s*=`).test(c)); if (keep.length) out[k] = keep; continue; }
       out[k] = k === 'content-security-policy' || k === 'location' ? mapLoop(String(v)) : v;
@@ -642,11 +643,11 @@ export function createGateway(opts = {}) {
     if (cap && out['content-security-policy']) out['content-security-policy'] = out['content-security-policy'].split(`${own}/artifact/`).join(`${own}${cap}/artifact/`);
     return { ...out, ...hsts };
   };
-  const proxy = (req, res, { port, path: p, publicOrigin, cap }) => {
+  const proxy = (req, res, { port, path: p, publicOrigin, cap, extra = null }) => {
     const up = http.request({ host: '127.0.0.1', port, method: req.method, path: p, headers: upstreamHeaders(req, port, publicOrigin) }, (ur) => {
       // Never kept: a page an agent served once on this name must not come back from the browser's
       // cache after a real dashboard has taken its port.
-      res.writeHead(ur.statusCode, { ...downstreamHeaders(ur.headers, cap, publicOrigin), 'cache-control': 'no-store' });
+      res.writeHead(ur.statusCode, { ...downstreamHeaders(ur.headers, cap, publicOrigin), 'cache-control': 'no-store', ...(extra ?? {}) });
       // an upstream cut off mid-body cuts the browser's response too, rather than leaving it open
       pipeline(ur, res, () => {});
     });
@@ -889,6 +890,15 @@ export function createGateway(opts = {}) {
     if (k.status !== 200) throw new Error(`instance ${port} didn't record it (${errorOf(k)})`);
   };
 
+  // What the box serves, for the Library: each project's checkout, last port and slug -> tree. At
+  // most 32 KB; past that, only the projects last seen on the asking instance.
+  const publicMap = (port) => {
+    const pub = store.load().public ?? {};
+    const all = Object.fromEntries(Object.entries(pub).map(([n, x]) => [n, { port: x.port, root: x.root, artifacts: Object.fromEntries(Object.entries(x.artifacts ?? {}).map(([s, a]) => [s, a.tree])) }]));
+    const text = asciiJson(all);
+    return text.length <= 32 * 1024 ? text : asciiJson(Object.fromEntries(Object.entries(all).filter(([, x]) => x.port === port)));
+  };
+
   // Room for a jar a page has stuffed; past it, see clientError below.
   const server = http.createServer({ maxHeaderSize: 64 * 1024 }, async (req, res) => {
     // origin-form only: a request line with a full URL, or *, is refused
@@ -964,7 +974,7 @@ export function createGateway(opts = {}) {
       if (port) {
         const prefix = req.method === 'GET' && ['iframe', 'document'].includes(req.headers['sec-fetch-dest']) && ['same-origin', 'none'].includes(req.headers['sec-fetch-site']) ? ARTIFACT.exec(rawPath)?.[0] : null;
         if (prefix) return redirect(res, `${capFor(port, prefix, session)}${req.url}`);
-        return proxy(req, res, { port, path: req.url, publicOrigin: own });
+        return proxy(req, res, { port, path: req.url, publicOrigin: own, extra: req.method === 'GET' && p === '/api/data' ? { 'x-devteam-public': publicMap(port) } : null });
       }
       // The terminal: the gateway's copy of ttyd's page. Only its socket reaches ttyd (see upgrade).
       if (isTerm) {
@@ -1183,6 +1193,8 @@ const run = (f) => async () => { err(); try { await f(); } catch (e) { err(e.nam
 const esc = (x) => String(x).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 const jsonIn = (x) => JSON.stringify(x).replace(/</g, '\\u003c');
 const fmtSize = (n) => (n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`);
+// JSON as a header value: a header carries only Latin-1, so everything past ~ is escaped.
+const asciiJson = (v) => JSON.stringify(v).replace(/[\u007f-\uffff]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
 const doc = (title, body) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title>${STYLE}</head><body><main>${body}</main>${CLIENT}`;
 const PAGES = {
   claim: (box) => `${doc('Claim this box', `<h1>Claim this devteam box</h1><p>Make a passkey for this box. Your password manager (1Password, iCloud Keychain…) saves it; from then on only a passkey made here opens the box.</p><input id="name" placeholder="Name this passkey (optional)" maxlength="60"><p><button id="go">Create passkey and claim</button></p><p id="err"></p>`)}

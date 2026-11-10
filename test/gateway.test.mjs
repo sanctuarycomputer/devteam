@@ -1249,3 +1249,23 @@ test('public artifacts: unpublish takes a page down at once, and records it only
     assert.deepEqual([await pubStatus('/beta/a/'), await pubStatus('/beta/c/')], [200, 404]);
   } finally { await S.close(); await other.close(); await gw.close(); }
 });
+
+test('x-devteam-public: a dashboard learns what the box serves, from the gateway alone', async () => {
+  const gw = await gateway('public-header');
+  const up = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'application/json', 'x-devteam-public': '{"forged":1}' }); res.end('{}'); }).listen(P + 17, '127.0.0.1');
+  try {
+    assert.equal((await gw.claim(authenticator())).status, 200);
+    seedPublic(gw.dir, 'alpha', 'hello', { 'index.html': 'x' }, { root: '/srv/alpha', port: P + 17 });
+    seedPublic(gw.dir, 'zeta', 'z', { 'index.html': 'z' }, { root: '/srv/zéta', port: P + 3 });
+    let r = await gw.req('GET', '/api/data', { on: P + 17 });
+    assert.equal(r.status, 200);
+    assert.match(r.headers['x-devteam-public'], /^[\x20-\x7e]+$/, 'ASCII, whatever a root holds');
+    assert.deepEqual(JSON.parse(r.headers['x-devteam-public']), { alpha: { port: P + 17, root: '/srv/alpha', artifacts: { hello: 'a'.repeat(40) } }, zeta: { port: P + 3, root: '/srv/zéta', artifacts: { z: 'a'.repeat(40) } } });
+    assert.equal((await gw.req('GET', '/api/fleet', { on: P + 17 })).headers['x-devteam-public'], undefined, 'an upstream\'s own copy is dropped');
+    assert.equal((await gw.req('GET', '/api/data', { on: P + 17, cookie: '' })).status, 401, 'signed in only');
+    // past 32 KB, only the asking instance's own projects
+    for (let i = 0; i < 200; i++) seedPublic(gw.dir, `p${i}`, 'x', { 'index.html': `${i}` }, { root: `/srv/${'r'.repeat(200)}${i}`, port: P + 20 });
+    r = await gw.req('GET', '/api/data', { on: P + 17 });
+    assert.deepEqual(Object.keys(JSON.parse(r.headers['x-devteam-public'])), ['alpha']);
+  } finally { await new Promise((res) => up.close(res)); await gw.close(); }
+});
