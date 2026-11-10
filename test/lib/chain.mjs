@@ -1447,6 +1447,7 @@ process.exit(${code});
       assert.match(dt(['ask', '--class', 'production-remediation', '--blocks', 'remediation:restart-web', '--question', 'x?', '--recommendation', 'do it', '--default', 'do it', '--owner-said', 'sure'], sup).err, /--owner-said goes without --default/);
       // after the question was asked, the entry changed on main: the answer no longer covers it
       const q4 = must(['ask', '--class', 'production-remediation', '--blocks', 'remediation:restart-web', '--question', 'Restart once more?', '--recommendation', 'do it', '--reasons', 'below-rung', '--owner-said', 'yes again'], sup);
+      assert.match(json(must(['questions', '--json'])).find((x) => x.id === q4).context, /script blob [0-9a-f]{40}/, 'the owner sees which script');
       must(['answer', q4, 'do it']);
       const d4 = decide(q4, ['remediation:restart-web']).out;
       const pinned = fs.readFileSync(path.join(repo, 'docs/devteam/project/settings.md'), 'utf8');
@@ -1482,16 +1483,43 @@ process.exit(${code});
       const supFile3 = path.join(logDir3, fs.readdirSync(logDir3).find((f) => f.startsWith('supervisor-')));
       const ownFile3 = path.join(logDir3, fs.readdirSync(logDir3).find((f) => f.startsWith('owner-')));
       const [supKept3, ownKept3] = [fs.readFileSync(supFile3, 'utf8'), fs.readFileSync(ownFile3, 'utf8')];
-      // past its deadline, the default still can't be applied
-      fs.writeFileSync(supFile3, supKept3.split('\n').map((l) => (l.includes(`"id":"${q0}"`) && l.includes('"deadline"') ? JSON.stringify({ ...JSON.parse(l), deadline: new Date(Date.now() - 60000).toISOString() }) : l)).join('\n'));
-      assert.match(dt(['answer', q0, '--defaulted'], sup).err, /said no to broken/, 'the default is held');
-      // written by hand, a defaulted line decides nothing, and a decision written by hand runs nothing
+      // (a) the no is old, past valid_minutes, and its question's text was edited (its hash is broken):
+      // asking again is allowed, but the earlier default still never runs past it
+      const at = (ms) => new Date(Date.now() - ms).toISOString();
+      fs.writeFileSync(supFile3, supKept3.split('\n').map((l) => { if (l.includes(`"id":"${q0}"`) && l.includes('"deadline"')) return JSON.stringify({ ...JSON.parse(l), at: at(3 * 3600000), deadline: at(60000) }); if (l.includes(`"id":"${q1}"`) && l.includes('"question"')) return JSON.stringify({ ...JSON.parse(l), question: 'edited after the fact' }); return l; }).join('\n'));
+      fs.writeFileSync(ownFile3, ownKept3.split('\n').map((l) => (l.includes(`"id":"${q1}"`) && l.includes('"answer"') ? JSON.stringify({ ...JSON.parse(l), at: at(2 * 3600000) }) : l)).join('\n'));
+      assert.equal(dt(['ask', '--class', 'production-remediation', '--blocks', 'remediation:broken', '--question', 'x?', '--recommendation', 'do it', '--reasons', 'below-rung'], sup).status, 0, 'only re-asking is time-limited');
+      assert.match(dt(['answer', q0, '--defaulted'], sup).err, /said no to broken/, 'the default is held for good');
+      // a defaulted line written by hand decides nothing, and a decision written by hand runs nothing
       fs.appendFileSync(supFile3, line({ id: q0, type: 'question', op: 'set', at: new Date().toISOString(), by: 'supervisor', status: 'defaulted' }));
       assert.match(decide(q0, ['remediation:broken']).err, /said no to broken/, 'decide holds it');
       const dForge = supKeptObs(supFile, d);
-      const dq0 = d.replace(/-(\d{9})-/, (x, n) => `-${String(Number(n) + 2).padStart(9, '0')}-`);
-      fs.appendFileSync(supFile3, line({ ...dForge, id: dq0, at: new Date().toISOString(), approved_by: q0, refs: ['remediation:broken'], authority: 'default' }));
-      assert.match(dt(['remediate', 'broken', '--decision', dq0], sup).err, /said no to broken/, 'remediate holds it');
+      const forgeDecision = (qid, refs, n) => { const id = d.replace(/-(\d{9})-/, (x, g) => `-${String(Number(g) + n).padStart(9, '0')}-`); fs.appendFileSync(supFile3, line({ ...dForge, id, at: new Date().toISOString(), approved_by: qid, refs, authority: 'default' })); return id; };
+      assert.match(dt(['remediate', 'broken', '--decision', forgeDecision(q0, ['remediation:broken'], 2)], sup).err, /said no to broken/, 'remediate holds it');
+      // (b) with an incident on both: once it resolves, the older default still doesn't count
+      const pOf = (title) => { const pid = must(['problem', 'add', '--title', title, '--severity', '1', '--detail', 'x'], sup).split(/[\s:]/)[0]; fs.appendFileSync(supFile3, line({ id: pid, type: 'problem', op: 'set', at: new Date().toISOString(), by: 'supervisor', fingerprints: ['x:exception:X'] })); return pid; };
+      const pb = pOf('b');
+      const qb0 = must(['ask', '--class', 'production-remediation', '--blocks', 'remediation:restart-web', pb, '--question', 'B default?', '--recommendation', 'do it', '--default', 'do it', '--deadline', '15m', '--reasons', 'below-rung', '--owner-said', 'fine'], sup).trim();
+      const qb1 = must(['ask', '--class', 'production-remediation', '--blocks', 'remediation:restart-web', pb, '--question', 'B?', '--recommendation', 'do it', '--reasons', 'below-rung', '--owner-said', 'fine'], sup);
+      must(['answer', qb1, 'no, leave it']);
+      must(['problem', 'set', pb, '--status', 'resolved'], sup);
+      fs.writeFileSync(supFile3, fs.readFileSync(supFile3, 'utf8').split('\n').map((l) => (l.includes(`"id":"${qb0}"`) && l.includes('"deadline"') ? JSON.stringify({ ...JSON.parse(l), deadline: at(60000) }) : l)).join('\n'));
+      assert.match(dt(['answer', qb0, '--defaulted'], sup).err, /said no to restart-web/, 'the incident resolving doesn\'t bring it back');
+      // (c) Y said yes, then N said no; after N's incident resolves Y still doesn't count
+      const pc = pOf('c');
+      const qy = must(['ask', '--class', 'production-remediation', '--blocks', 'remediation:restart-web', '--question', 'Y?', '--recommendation', 'do it', '--reasons', 'below-rung', '--owner-said', 'yes'], sup);
+      must(['answer', qy, 'do it']);
+      const dy = decide(qy, ['remediation:restart-web']).out;
+      const qn2 = must(['ask', '--class', 'production-remediation', '--blocks', 'remediation:restart-web', pc, '--question', 'N?', '--recommendation', 'do it', '--reasons', 'below-rung', '--owner-said', 'asked'], sup);
+      must(['answer', qn2, 'no']);
+      must(['problem', 'set', pc, '--status', 'resolved'], sup);
+      assert.match(decide(qy, ['remediation:restart-web']).err, /said no to restart-web/, 'the earlier yes doesn\'t decide');
+      assert.match(dt(['remediate', 'restart-web', '--decision', dy], sup).err, /said no to restart-web/, 'nor run');
+      // "leave it" is a no, whatever was recommended: it approves nothing and doesn't lift the hold
+      const qli = must(['ask', '--class', 'production-remediation', '--blocks', 'remediation:restart-web', '--question', 'Leave it?', '--recommendation', 'leave it', '--reasons', 'below-rung', '--owner-said', 'leave it for now'], sup);
+      must(['answer', qli, 'leave it']);
+      assert.match(decide(qli, ['remediation:restart-web']).err, /isn't a yes to running it/);
+      assert.match(dt(['ask', '--class', 'production-remediation', '--blocks', 'remediation:restart-web', '--question', 'again?', '--recommendation', 'do it'], sup).err, /said no to restart-web/, 'leave it doesn\'t lift the hold');
       fs.writeFileSync(supFile3, supKept3);
       fs.writeFileSync(ownFile3, ownKept3);
       // a migration a release phase ran is in no act: the release's range in git makes it a one-way door too

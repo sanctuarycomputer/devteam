@@ -4322,6 +4322,7 @@ function cmdAsk() {
   if (flagStr('sensor') && declinedSensors().has(flagStr('sensor'))) die(`the owner said not to use the sensor ${flagStr('sensor')}: it isn't asked about again until sensor reconsider ${flagStr('sensor')}`);
   // an incident-fix question is scoped by its incident's computed severity, and says when merging deploys
   let context = flagStr('context');
+  if (remediationPin) context = [context, `This runs ${remediationPin.name} at script blob ${remediationPin.sha}.`].filter(Boolean).join('\n\n');
   if (ownerSaid) context = [context, `The owner said: ${ownerSaid}`].filter(Boolean).join('\n\n');
   if (cls === 'incident-fix' && !['trust', 'proposal'].includes(kind)) {
     upkeepAllows('an incident fix');
@@ -4441,9 +4442,8 @@ function cmdAnswer() {
     if (v.class === 'production-remediation') {
       const rem = (v.blocks ?? []).find((b) => b.startsWith('remediation:'));
       const rel = (v.blocks ?? []).find((b) => b.startsWith('release:')) ?? null;
-      const r = rem ? remediationOf(rem.slice('remediation:'.length)) : null;
-      const hold = r ? remediationHold(rem, rel, r.valid_minutes) : null;
-      if (hold) die(remediationHoldWords(r.name, rel, hold, r.valid_minutes));
+      const denied = rem ? remediationDenied(v, rem, rel) : null;
+      if (denied) die(remediationDeniedWords(rem.slice('remediation:'.length), rel, denied));
     }
     appendLog({ type: 'question', op: 'set', id, status: 'defaulted' }, 'supervisor');
     appendLog({ type: 'act', class: 'apply-default', what: `applied the default to ${id}: ${v.default}`, refs: [id], reversible: true }, 'supervisor');
@@ -5838,9 +5838,10 @@ function cmdDecide() {
     if (approved?.startsWith('q-')) {
       const q = questionView(logGet(approved) ?? die(`no question ${approved}`));
       for (const ref of [rs[0], ...rel]) if (!(q.blocks ?? []).includes(ref)) die(`${approved} was asked about ${(q.blocks ?? []).join(', ') || 'nothing in particular'}, not ${ref}`);
-      if (q.status === 'answered' && !q.matched) die(`${approved}'s answer ("${q.answer}") isn't its recommendation ("${q.recommendation}"): a remediation runs only on a yes`);
-      const held = remediationHold(rs[0], rel[0] ?? null, r.valid_minutes);
-      if (held) die(remediationHoldWords(r.name, rel[0] ?? null, held, r.valid_minutes));
+      if (q.status === 'answered' && (!q.matched || !answerIsRun(logGet(approved), q.answer))) die(`${approved}'s answer ("${q.answer}") isn't a yes to running it (recommended: "${q.recommendation}"): a remediation runs only on a yes`);
+      if (q.status === 'defaulted' && !saysRun(q.default)) die(`${approved} defaulted to "${q.default}": a remediation runs only on a yes`);
+      const denied = remediationDenied(q, rs[0], rel[0] ?? null);
+      if (denied) die(remediationDeniedWords(r.name, rel[0] ?? null, denied));
       if (q.status === 'defaulted' && String(q.default ?? '').trim().toLowerCase() !== String(q.recommendation ?? '').trim().toLowerCase()) die(`${approved} defaulted to "${q.default}", not its recommendation: a remediation runs only on a yes`);
     }
   }
@@ -10869,7 +10870,7 @@ function ingestEvents(m, events, st, at = nowIso()) {
       const what = e.kind === 'exception' ? f.class : e.kind === 'platform' ? `${e.code} ${PLATFORM_WORDS[e.code] ?? 'platform error'}` : `a ${level} log line`;
       const free = e.kind === 'exception' ? `${f.title ?? ''}${where}` : e.kind === 'log' ? `${f.template}${isStr(e.sample) ? ` (e.g. "${e.sample.slice(0, 200)}")` : ''}` : '';
       const framed = free.trim() ? `\n${untrusted('the message', free.slice(0, 500))}` : '';
-      const o = sensorObserveOnce(m, { kind: e.kind === 'exception' ? 'exception' : e.kind === 'platform' ? 'platform-error' : 'log-error', detail: `${m.name}: ${what}${f.release ? ` (release ${f.release})` : ''}; ${f.total} event(s)${f.users ? `, ${f.users} user(s)` : ''}${framed}`.slice(0, 1200), severity: sev, valence: -1, measure: { value: f.total, unit: 'events' }, source_key: `sensor:${m.name}:${fp}`, ...(isStr(f.url) ? { source_ref: sensorShown(f.url) } : {}) });
+      const o = sensorObserveOnce(m, { kind: e.kind === 'exception' ? 'exception' : e.kind === 'platform' ? 'platform-error' : 'log-error', detail: `${m.name}: ${what}${f.release ? ` (release ${f.release})` : ''}; ${f.total} event(s)${f.users ? `, ${f.users} user(s)` : ''}${framed}`.slice(0, 1200), severity: sev, valence: -1, measure: { value: f.total, unit: 'events' }, source_key: `sensor:${m.name}:${fp}`, ...(isStr(f.release) ? { release: f.release } : {}), ...(isStr(f.url) ? { source_ref: sensorShown(f.url) } : {}) });
       f.observed = o?.id ?? true;
       day.qualified++;
       // the wake-up line names the class or code and the observation; the text is for sensor show
@@ -11389,7 +11390,7 @@ function suspectEscapes() {
   let merged = null;
   for (const o of obs) {
     const id = fpIdOfObservation(o);
-    const release = /\(release (\S+?)\)/.exec(String(o.detail ?? '').split('\n')[0])?.[1];
+    const release = o.release;
     const top = fpSummary(id ?? '').frames?.find((fr) => fr.in_repo)?.file;
     const i = release ? deploys.findIndex((x) => deployRelease(x) === release) : -1;
     // the release before it: the latest earlier deploy from the same sensor whose commit this repo
@@ -11442,17 +11443,35 @@ const remediationRef = (action) => `remediation:${action}`;
 // probe's own time when it gave one). Fails closed: null when no such deploy is known.
 // A remediation entry, for a question and a merge to compare: name, script, sha, and the rest.
 const remediationEntryHash = (e) => crypto.createHash('sha256').update(canonical(e ?? null)).digest('hex').slice(0, 16);
-// The owner's latest answer on this remediation and target, when it was a no that still holds: until
-// that incident resolves, or for valid_minutes when it named none. A default, or a yes before it,
-// doesn't get past it; a later yes does, since the latest answer wins. Applied wherever a remediation
-// moves on: asking again, applying a default, deciding and running.
+// What the owner's answer on a remediation question says about running it. A yes is an answer that
+// agrees with a recommendation to run. Everything else is a no: an answer or recommendation that
+// says not to (no, don't, leave it, hold, skip, wait, not, never, cancel, decline, stop), or one
+// that doesn't agree with the recommendation.
+const REMEDIATION_NO_WORDS = /^\s*(no\b|nope\b|don['’]?t\b|do not\b|leave\b|skip\b|hold\b|wait\b|not\b|never\b|cancel|decline|refuse|stop\b)/i;
+const saysRun = (text) => !REMEDIATION_NO_WORDS.test(String(text ?? ''));
+const answerIsRun = (q, answer) => { const norm = (s) => String(s ?? '').trim().toLowerCase(); return !!q?.recommendation && saysRun(answer) && saysRun(q.recommendation) && [norm(answer), norm(String(answer).split(' — ')[0])].includes(norm(q.recommendation)); };
+// Every answer the owner gave on this remediation and target, oldest first, from their raw lines:
+// what a question's hash says about them doesn't change what they said.
+const remediationAnswers = (rem, release) => readLog().lines.filter((l) => l.type === 'question' && l.op === 'set' && typeof l.answer === 'string' && writerClass(l.by) === 'owner').map((l) => ({ line: l, q: logGet(l.id) })).filter(({ q }) => q?.class === 'production-remediation' && (q.blocks ?? []).includes(rem) && ((q.blocks ?? []).find((b) => b.startsWith('release:')) ?? null) === (release ?? null)).map(({ line, q }) => ({ id: q.id, at: line.at, answer: line.answer, blocks: q.blocks ?? [], run: answerIsRun(q, line.answer) })).sort((a, b) => String(a.at).localeCompare(String(b.at)));
+// Re-asking after a no waits: until the no's incident resolves, or valid_minutes. Only re-asking
+// has a time limit; see remediationDenied for what a no does to anything given before it.
 function remediationHold(rem, release, validMinutes) {
-  const latest = questions().filter((x) => x.class === 'production-remediation' && (x.blocks ?? []).includes(rem) && ((x.blocks ?? []).find((b) => b.startsWith('release:')) ?? null) === (release ?? null) && x.status === 'answered').sort((a, b) => String(a.answered_at).localeCompare(String(b.answered_at))).pop();
-  if (!latest || latest.matched) return null;
-  const incident = (latest.blocks ?? []).find((b) => isIncident(logGet(b))) ?? null;
-  return (incident ? logGet(incident)?.status !== 'resolved' : Date.now() - Date.parse(latest.answered_at) < validMinutes * 60000) ? { question: latest, incident } : null;
+  const latest = remediationAnswers(rem, release).pop();
+  if (!latest || latest.run) return null;
+  const incident = latest.blocks.find((b) => isIncident(logGet(b))) ?? null;
+  return (incident ? logGet(incident)?.status !== 'resolved' : Date.now() - Date.parse(latest.at) < validMinutes * 60000) ? { question: { id: latest.id, answer: latest.answer }, incident } : null;
 }
 const remediationHoldWords = (name, rel, h, m) => `the owner said no to ${name}${rel ? ` (${rel})` : ''} (${h.question.id}: "${String(h.question.answer ?? '').slice(0, 80)}"): it stays held${h.incident ? ` while ${h.incident} is open` : ` for ${m} min`}. If they tell you otherwise, ask again with --owner-said "<their words, verbatim>", and get their answer`;
+// A default or a yes given before the owner's latest no on this remediation and target never counts
+// again, with no expiry. Only a later yes from the owner lifts it; a default's time is when it was asked.
+function remediationDenied(q, rem, release) {
+  const answers = remediationAnswers(rem, release);
+  const no = answers.filter((a) => !a.run).pop();
+  if (!no) return null;
+  const mine = answers.filter((a) => a.id === q.id && a.run).pop();
+  return String(mine?.at ?? q.asked_at) < String(no.at) ? no : null;
+}
+const remediationDeniedWords = (name, rel, no) => `the owner said no to ${name}${rel ? ` (${rel})` : ''} (${no.id}: "${String(no.answer ?? '').slice(0, 80)}") after this: a default or an earlier yes never runs past it. Only a later yes from the owner lifts it: ask again with --owner-said "<their words, verbatim>", and get their answer`;
 function migrationsSince(release) {
   // A line the supervisor wrote into its own log looks the same as a sensor's, so a deploy line
   // alone can't be proven the sensors': the owner's answer naming the release is the check, and a
@@ -11502,8 +11521,10 @@ async function cmdRemediate() {
     if (!q.deadline || !st || Date.parse(st.at) < Date.parse(q.deadline)) die(`${q.id}'s default was applied before its deadline (${q.deadline ?? 'none'}): it approves nothing; ask again`);
   }
   if (!['answered', 'defaulted'].includes(q.status)) die(`${q.id} is ${q.status}: ask, and wait for the answer or the deadline`);
-  const held = remediationHold(remediationRef(action), qrel, r.valid_minutes);
-  if (held) die(remediationHoldWords(action, qrel, held, r.valid_minutes));
+  if (q.status === 'answered' && !answerIsRun(logGet(q.id), q.answer)) die(`${q.id}'s answer ("${String(q.answer ?? '').slice(0, 80)}") isn't a yes to running it: a remediation runs only on a yes`);
+  if (q.status === 'defaulted' && !saysRun(q.default)) die(`${q.id} defaulted to "${q.default}": a remediation runs only on a yes`);
+  const denied = remediationDenied(q, remediationRef(action), qrel);
+  if (denied) die(remediationDeniedWords(action, qrel, denied));
   const answeredAt = Date.parse(q?.answered_at ?? q?.deadline ?? d.created_at);
   if (Date.now() - answeredAt > r.valid_minutes * 60000) die(`${d.id} rests on an answer from ${new Date(answeredAt).toISOString()}, over ${r.valid_minutes} min ago: ask again`);
   const to = flagStr('to') ?? null;
