@@ -348,6 +348,7 @@ test('findings: no strategy, an unrated question once rating has begun, ratings 
     assert.deepEqual(findings('strategy-unwritten'), [], 'no running goal: nothing yet');
     const G = goal('Team billing', 1);
     assert.match(findings('strategy-unwritten')[0].detail, /still the template/);
+    assert.equal(findings('strategy-unwritten')[0].severity, 'high', 'goals running and no strategy: the supervisor stops for it');
     // the marker, not the kit's current words: a project on an older wording of the template is still the template
     write(path.join(old, REL_STRATEGY), fs.readFileSync(path.join(old, REL_STRATEGY), 'utf8').replace('Keep it to one page.', 'One page, please.'));
     g(['add', '-A'], old);
@@ -368,6 +369,15 @@ test('findings: no strategy, an unrated question once rating has begun, ratings 
     assert.deepEqual(findings('rating-inflated'), []);
     for (let i = 0; i < 4; i++) ask(`Everything is a turning point ${i}?`, '--goal', G, '--stake', '3', '--urgency', '1');
     assert.deepEqual(findings('rating-inflated').map((f) => [f.subject, f.detail]), [['stake', '4 of 7 open questions are stake 3']]);
+    // a draft in front of the owner: medium while they read it, so wait doesn't stop for it
+    const wt = path.join(old, '.worktrees', 'chore-strategy-first');
+    g(['worktree', 'add', '-q', '-b', 'chore-strategy-first', wt, 'origin/main'], old);
+    write(path.join(wt, REL_STRATEGY), '# Strategy\n\n## Why it exists\nDraft.\n');
+    g(['add', '-A'], wt);
+    g(['commit', '-qm', 'draft'], wt);
+    g(['push', '-q', 'origin', 'chore-strategy-first'], wt);
+    ok(old, ['ask', '--class', 'strategy-change', '--reasons', 'owner-only', '--question', 'Approve the strategy?', '--recommendation', 'yes', '--stake', '2', '--urgency', '2', '--links', JSON.stringify([{ title: 'The strategy', path: REL_STRATEGY, ref: 'chore-strategy-first' }])], SUP);
+    assert.equal(findings('strategy-unwritten')[0].severity, 'medium');
     // the strategy written and on main: the finding goes
     write(path.join(old, 'docs/devteam/project/strategy.md'), '# Strategy\n\n## Why it exists\nTeams split bills by hand.\n\n## How it wins, in order\n- **W1** Teams adopt it without help\n');
     g(['add', '-A'], old);
