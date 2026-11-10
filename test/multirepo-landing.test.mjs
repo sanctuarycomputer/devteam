@@ -124,7 +124,8 @@ test('merge runs a sibling ticket\'s gates in its repo and lands it on that repo
 
 test('every gh call goes through its repo\'s gh', () => {
   const src = fs.readFileSync(path.join(kit, 'scripts', 'devteam.mjs'), 'utf8');
-  const direct = src.split('\n').map((l, i) => [i + 1, l]).filter(([, l]) => /sh\('gh', \[/.test(l) && !/sh\('gh', \[\.\.\.args/.test(l));
+  // every call, whatever its arguments are; one that isn't a repo's says why, with // gh-direct:
+  const direct = src.split('\n').map((l, i) => [i + 1, l]).filter(([, l]) => /sh\('gh',/.test(l) && !/sh\('gh', (\[\.\.\.args|args, opts\))/.test(l) && !/\/\/ gh-direct: \S/.test(l));
   assert.deepEqual(direct.map(([n]) => n), [], `gh called outside repo.gh at lines ${direct.map(([n]) => n).join(', ')}`);
 });
 
