@@ -55,10 +55,11 @@ Schema and authority:
 
 ```json
 { "public": 1, "project": "stacksbot", "slug": "index-greenpoint", "title": "…", "summary": "…",
-  "tree": "<tree id>", "files": { "index.html": { "sha256": "…", "size": 51234 } } }
+  "root": "/srv/stacksbot", "tree": "<tree id>",
+  "files": { "index.html": { "sha256": "…", "size": 51234, "mode": "100644" } } }
 ```
 
-- `files` comes from `git ls-tree -r -l <tree>` and `git cat-file blob` of each, hashed with sha256, cached by tree id under `run/cache/`.
+- `files` comes from `git ls-tree -r -l <tree>` and `git cat-file blob` of each, hashed with sha256, cached by tree id under `run/cache/`. Each file carries its git `mode`, `100644` or `100755` (the gateway recomputes the tree id, and a mode is part of it); any other mode is refused. A tree holding a submodule is refused ("a submodule isn't served").
 - `project` is `settings.project`. Publishing needs it set explicitly (the folder-name fallback `helloBody()` uses would change every public URL on a re-clone): the kit refuses with 409 and the fix ("set project in settings.md") when it is unset or doesn't match `^[a-z0-9][a-z0-9._-]{0,62}$`.
 - `root` is the main checkout's realpath, the same value the hub lists; the gateway binds a project to it.
 - 404 for a draft, an unknown slug or a broken artifact (with the reason).
@@ -91,8 +92,8 @@ The page also reads `x-devteam-public` from the `/api/data` response: the gatewa
 ```
 
 - A project is bound to its instance's `root`; `port` is where it was last seen.
-- **One writer at a time.** Every `/public/*` mutation runs through one in-process queue (a promise chain). Inside it: fetch and verify, write blobs as `<sha256>.<pid>.<random>.tmp` then rename, then load, mutate and save `state.json` with no `await` in between, then garbage-collect blobs that the just-saved state doesn't reference.
-- Total public bytes (the sum of unique blob sizes) are capped by `DEVTEAM_PUBLIC_MAX` (default 500 MB); a publish that would pass it is refused before anything is written.
+- **One writer at a time.** Every `/public/*` mutation runs through one in-process queue (a promise chain). Nothing that waits on an instance's bytes runs inside it: a publish item fetches its manifest and files and verifies them first, within one budget for the whole item (120 s; each request gets the lesser of its 15 s deadline and what is left), and is refused when that runs out. Inside the queue: check the binding and the cap again against fresh state, write blobs as `<sha256>.<pid>.<random>.tmp` then rename, then load, mutate and save `state.json` with no `await` in between, then garbage-collect blobs that the just-saved state doesn't reference.
+- Total public bytes (the sum of unique blob sizes) are capped by `DEVTEAM_PUBLIC_MAX` (default 500 MB; a value that isn't a positive number stops the gateway at startup); a publish that would pass it is refused before anything is written.
 
 **`GET https://<box>/public/publish?port=<p>&slug=<s>[&slug=…]`** (box name, signed-in owner, `PAGE_CSP`, the gateway's own page):
 
@@ -100,7 +101,8 @@ The page also reads `x-devteam-public` from the `/api/data` response: the gatewa
 - The gateway fetches `http://127.0.0.1:<p>/public-manifest/<slug>` as a loopback request with no `origin` or `sec-fetch-*` headers (as `hubList` does), with a 15 s deadline for the whole response, and validates it: size cap 2 MB, `project` pattern, `root` an absolute path, slug equal to the one asked, `tree` 40 or 64 hex, at most 2000 files, each rel passing the kit's `artifactPathOk`, `sha256` 64 hex, sizes within the artifact limits (8 MB a file, 25 MB an artifact).
 - It renders, per slug: a checkbox (checked), the project, the slug, the title, the file count and total size, the public URL it will have, and whether it is **new on this box** or an **update** (the gateway serves this slug with another tree). Labels come only from the gateway's own state, never from the query string. Every value is HTML-escaped. The Publish button has no autofocus.
 - **Project binding.** When the project is bound to a different `root`, the page says so ("<project> is published from <old root>; this instance is <root>") and the item carries an explicit "move it" checkbox, unchecked. Without it, that item is refused. A different port with the same `root` is not a move; the gateway just updates `port`.
-- Each item carries `manifest: <sha256 of the canonical JSON of the manifest it rendered>`. The Publish button posts the checked items, `{ port, items: [{ slug, manifest, move }] }`, with `fetch` (the page's own script; `form-action 'none'` stays).
+- A "move it" names the other pages of the old checkout that come down with it ("move it (its 1 other page from /srv/one comes down: m2)"), and carries the old root it showed as `movedFrom`; the POST refuses a move when the project is now bound to any other root ("this project moved since you looked; reload the page"). A move's result is never an update.
+- Each item carries `manifest: <sha256 of the canonical JSON of the manifest it rendered>`. The Publish button posts the checked items, `{ port, items: [{ slug, manifest, move, movedFrom }] }`, with `fetch` (the page's own script; `form-action 'none'` stays).
 
 **`POST https://<box>/public/publish`.** The existing rule already refuses any non-GET whose `Origin` isn't the box. Signed-in owner only. For each item:
 
@@ -116,7 +118,7 @@ The response lists each item's result and public URL; the page shows them.
 
 **`GET /public/unpublish?port=<p>&slug=<s>` (or `?project=<n>&slug=<s>` from the gateway's own list) and `POST /public/unpublish`.** Same shape: a gateway page that confirms, then a POST that removes the slug from `state.json` and garbage-collects. Taking a page down never waits on an instance. When the request named a port, the gateway also records the unpublish there, but only after that port's `/public-manifest` (or, for a slug no longer on main, its hello) names the same project and root; otherwise it says the record wasn't written and the Library's **Forget** clears it.
 
-**`GET https://<box>/public/`.** A gateway page listing what is public on this box, per project, with each URL and an Unpublish link.
+**`GET https://<box>/public/`.** A gateway page listing what is public on this box, per project, with each URL and an Unpublish link. Every `/public/*` page refuses a `sec-fetch-dest` other than `document`, so another site's frame can't make the gateway fetch manifests.
 
 **`x-devteam-public`.** When the gateway proxies a signed-in `GET /api/data` on an instance, it adds this header with its whole public map (`{ project: { port, root, artifacts: { slug: tree } } }`, at most 32 KB; past that, only the requesting project's entry). The gateway removes any such header the upstream sent.
 
