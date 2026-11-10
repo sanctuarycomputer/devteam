@@ -323,8 +323,8 @@ const SETTINGS_DEFAULTS = {
   // package.json, Dockerfile, …) deploy even outside paths (deployingFiles).
   release: 'tag',
   // Production monitors (process/supervisor.md, Monitoring): { name: { kind: 'http', url, expect:
-  // { status, contains }, slo: { uptime, p95_ms }, every_minutes, down_after, timeout_s } }; owner
-  // settings, class monitor-change. monitor_defaults overrides the built-in defaults for all of them.
+  // { status, contains }, slo: { uptime, p95_ms }, every_minutes, down_after, timeout_s } }; the
+  // supervisor's own, like caps and timings. monitor_defaults overrides the built-in defaults for all of them.
   monitors: {},
   monitor_defaults: {},
   // Commands a stdin: secret sink may run (prefixes, e.g. "gh secret set"); they run as the owner.
@@ -368,7 +368,7 @@ const OWNER_SETTINGS = {
   gates: 'gate-change', worktree_setup: 'gate-change', worktree_files: 'gate-change',
   autonomy_ceilings: 'governance-edit', agent_command: 'governance-edit', resume_command: 'governance-edit', worker_denied_commands: 'governance-edit',
   forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', upstream_repo: 'governance-edit', upstream_sync: 'governance-edit',
-  release: 'governance-edit', secret_commands: 'governance-edit', monitors: 'monitor-change', monitor_defaults: 'monitor-change', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit',
+  release: 'governance-edit', secret_commands: 'governance-edit', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit',
 };
 const canonical = (v) => (Array.isArray(v) ? `[${v.map(canonical).join(',')}]` : v && typeof v === 'object' ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(',')}}` : JSON.stringify(v));
 function settingsAt(ref, { orNull = false } = {}) {
@@ -3741,7 +3741,7 @@ function cmdMerge() {
   const plan = flagStr('plan');
   const chore = flagStr('chore') !== undefined ? choreSlug(flagStr('chore')) : undefined;
   const dry = !!flags['dry-run'];
-  const branch = plan ? `plan/${plan}` : chore ? `chore-${chore}` : id ? `ticket/${id}` : die('usage: merge <ticket-id> | merge --plan <feature> | merge --chore <slug>   [--approved <qid> [<qid> …]] [--no-gates] [--dry-run [--title t] [--body-file f]]');
+  const branch = plan ? `plan/${plan}` : chore ? `chore-${chore}` : id ? `ticket/${id}` : die('usage: merge <ticket-id> | merge --plan <feature> | merge --chore <slug>   [--approved <qid>] [--no-gates] [--dry-run [--title t] [--body-file f]]');
   // A ticket merges in its own repo: its PR, gates, forge and merge method; plans and
   // chores are always home's. For home R is today's functions and settings.
   const R = id && tickets().has(id) ? repoOfTicket(tickets().get(id)) : repo('home');
@@ -3811,20 +3811,8 @@ function cmdMerge() {
   }
   // A chore PR that touches the kit, the agent config or the forge config carries an owner answer
   // (classes governance-edit, process-edit, gate-change); project/ files are the supervisor's.
-  // --approved takes one answer or several (--approved q1 q2): one owner answer covers a settings
-  // bundle, and a ladder class's answer can sit beside it.
-  const approvedIds = [...new Set(asList(flags.approved).flatMap((x) => String(x).split(',')).map((x) => x.trim()).filter(Boolean))];
-  const approved = approvedIds[0] ?? null;
-  const answers = approvedIds.map((q) => ownerAnswer(q, 'merge --approved'));
+  let approved = flagStr('approved') ?? null;
   let standing = null;
-  let settingsActs = null;
-  const target = id ?? (chore ? `chore-${chore}` : plan);
-  // A decision this merge carries out is carried out once: an act already under it (a merge on
-  // another branch, an earlier landing) means it was used; decide again for this one.
-  if (flagStr('decision')) {
-    const used = logObjects('act').find((a) => a.decision === flagStr('decision'));
-    if (used) fails.push(`${flagStr('decision')} was already carried out (${used.id}: ${String(used.what ?? '').slice(0, 80)}); a decision is carried out once, so decide again for ${target}`);
-  }
   // Owner-only settings, on every kind of PR (a ticket, a plan or a chore) in home, where
   // settings.md is: another repo's PR can't change it.
   if (R.name === 'home') {
@@ -3834,49 +3822,18 @@ function cmdMerge() {
     fails.push(...registryActFails(base, sha));
     if (changed === null) fails.push(`${projectRel}/settings.md: the json devteam block is not valid JSON at the head`);
     else if (changed.length) {
-      const L = ladder();
       const classes = [...new Set(changed.map((c) => c.cls))];
       const what = changed.map((c) => `${c.key} (${c.cls})`).join(', ');
-      // One owner answer covers the bundle (the owner's ruling): the owner's own answer, never one
-      // relayed from chat, in any one of the owner_only classes the PR changes, approves every owner
-      // setting it changes, of any class; or, where owner_rules allows, the owner's standing rules
-      // when every changed owner_only class has one. A ladder class's answer (monitor-change), a
-      // decision in it naming this PR, or its rung 3 covers only that ladder class's keys, never an
-      // owner_only key.
-      const d = flagStr('decision') ? decisionFor(flagStr('decision')) : null;
-      const covers = (cls) => d?.class === cls && (d.refs ?? []).some((r) => [target, `plan-${plan}`].includes(r));
-      const ownerOnly = (cls) => (L.owner_only ?? []).includes(cls) || !L.classes[cls];
-      const ownerClasses = classes.filter(ownerOnly);
-      const settled = new Map(); // class -> { answer } | { rule } | { decision } | { rung }
-      let bundle = null;
-      if (ownerClasses.length) {
-        const inBundle = answers.filter((v) => ownerClasses.includes(v.class));
-        const own = inBundle.find((v) => v.channel !== 'chat');
-        if (own) bundle = { answer: own.id };
-        else if (inBundle.length) fails.push(`${inBundle[0].id} was answered in chat; owner settings (${ownerClasses.join(', ')}) need the owner's own answer, from the dashboard or their terminal`);
-        else if (!approvedIds.length && ownerClasses.every((c) => (L.owner_rules ?? []).includes(c) && ownerRuleFor(c))) bundle = { rule: ownerRuleFor(ownerClasses[0]), rules: ownerClasses.map((c) => ownerRuleFor(c)) };
-        if (bundle) for (const c of ownerClasses) settled.set(c, bundle.answer ? { answer: bundle.answer } : { rule: ownerRuleFor(c) });
+      // A standing rule the owner gave themselves settles a class in owner_rules (constitution.md):
+      // only when every changed setting is of such a class, and only the owner's own accepted rule.
+      const ruled = !approved && classes.every((c) => (ladder().owner_rules ?? []).includes(c)) && classes.map((c) => ownerRuleFor(c)).every(Boolean);
+      if (ruled) { const rs = classes.map((c) => ownerRuleFor(c)); standing = { rule: rs[0] }; out(`changes owner settings: ${what}; approved by the owner's standing rule${rs.length > 1 ? 's' : ''} ${rs.map((r) => `${r.id} ("${r.statement}")`).join(', ')}`); }
+      else if (!approved) fails.push(`changes owner settings: ${what}; the owner's answer is needed: --approved <qid> of class ${classes.join(' or ')}`);
+      else {
+        const q = ownerAnswer(approved, 'merge --approved');
+        if (!classes.includes(q.class)) fails.push(`${approved} is a ${q.class ?? 'classless'} question; changing ${what} needs an answered ${classes.join(' or ')} question`);
+        fails.push(...ownerLinkActFails(changed, sha, approved));
       }
-      for (const cls of classes.filter((c) => !ownerOnly(c))) {
-        const inClass = answers.find((v) => v.class === cls);
-        if (inClass) settled.set(cls, { answer: inClass.id });
-        else if (bundle?.answer) settled.set(cls, { answer: bundle.answer });
-        else if (covers(cls)) settled.set(cls, { decision: d.id });
-        else if (rungFor(cls) >= 3) settled.set(cls, { rung: rungFor(cls) });
-      }
-      const open = classes.filter((cls) => !settled.has(cls));
-      if (open.length) {
-        const keys = changed.filter((c) => open.includes(c.cls)).map((c) => `${c.key} (${c.cls})`).join(', ');
-        const ownerOpen = open.filter(ownerOnly);
-        const ladderOpen = open.filter((c) => !ownerOnly(c));
-        const given = approvedIds.length ? ` (${approvedIds.map((q, i) => `${q} is ${answers[i].class ?? 'classless'}${answers[i].channel === 'chat' ? ', answered in chat' : ''}`).join(', ')}${ownerOpen.length && answers.some((v) => !ownerOnly(v.class ?? '')) ? '; a ladder class\'s answer never covers an owner setting' : ''})` : '';
-        fails.push(`changes owner settings: ${keys}; the owner's answer is needed: --approved <qid>${ownerOpen.length ? ` of class ${ownerOpen.join(' or ')}` : ` of class ${ladderOpen.join(' or ')}`}${given}${ladderOpen.length ? ` (or, for ${ladderOpen.join(', ')}, a decision in that class: merge --decision <d-id>)` : ''}`);
-      }
-      if (bundle?.rule && !open.length) { standing = { rule: bundle.rule }; out(`changes owner settings: ${what}; approved by the owner's standing rule${bundle.rules.length > 1 ? 's' : ''} ${bundle.rules.map((r) => `${r.id} ("${r.statement}")`).join(', ')}`); }
-      // Each repo link entry lands only as the bundle's answer showed it.
-      if (bundle?.answer) fails.push(...ownerLinkActFails(changed.filter((c) => ownerOnly(c.cls)), sha, bundle.answer));
-      // Every settled class is logged as an act of that class, with what settled it.
-      settingsActs = classes.filter((c) => settled.has(c)).map((c) => ({ cls: c, ...settled.get(c), keys: changed.filter((x) => x.cls === c).map((x) => x.key) }));
     }
   }
   // Deploys on merge: merging this is releasing it, so it needs release-production's authority: the
@@ -3887,6 +3844,12 @@ function cmdMerge() {
   // authority holds against the log, its owner answer not used for anything else)
   const decided = flagStr('decision') ? decisionFor(flagStr('decision')) : null;
   const releaseDecision = decided?.class === 'release-production' ? decided : null;
+  // A decision is carried out once per target: an act already under it for this PR (a merge on
+  // another branch, an earlier landing) means it was used, so decide again. One decision naming
+  // several targets (a batch) carries out each once; a release decision has its own check below.
+  const targetsNow = [id ?? (chore ? `chore-${chore}` : plan), plan ? `plan-${plan}` : null].filter(Boolean);
+  const carriedOut = decided && !releaseDecision ? logObjects('act').find((a) => a.decision === decided.id && (!(a.refs ?? []).length || a.refs.some((r) => targetsNow.includes(r)))) : null;
+  if (carriedOut) fails.push(`${decided.id} was already carried out for ${targetsNow[0]} (${carriedOut.id}: ${String(carriedOut.what ?? '').slice(0, 80)}); a decision is carried out once per target, so decide again for this one`);
   {
     const base = R.mainRef() ? R.git(['merge-base', R.mainRef(), sha]) : null;
     const dep = deployingFiles(R, base, sha);
@@ -3927,8 +3890,8 @@ function cmdMerge() {
     }
     if (kit.length && !approved && !kitRule) fails.push(`touches files outside project/ (${kit.slice(0, 6).join(', ')}${kit.length > 6 ? ', …' : ''}); the owner's answer is needed: merge --chore ${chore} --approved <qid>`);
   }
-  for (const av of answers) {
-    const approved = av.id;
+  if (approved) {
+    const av = ownerAnswer(approved, 'merge --approved');
     // A secrets question approves landing only the stores it posted, and only once posted.
     if (av.secrets.length && (!chore?.startsWith('secret-') || !av.answer?.startsWith('Posted'))) fails.push(`${approved} asked for secrets; it approves only its own chore-secret PR, once the owner posted them (its answer: ${av.answer})`);
     // One answer approves one thing. The exception: one act of the answer's class that recorded the
@@ -3944,9 +3907,7 @@ function cmdMerge() {
     const prior = [...logObjects('decision'), ...logObjects('act')].filter((a) => a.approved_by === approved && mine(a) && a.id !== flagStr('decision'));
     // a bundle's link acts (one per entry its question showed) are one landing too
     const linkAct = (a) => Object.hasOwn(a, 'entry_hash') && (a.refs ?? []).some((r) => r.startsWith('link:'));
-    // an act a merge already logged (a settings class's act names the merge act) is that landing, done
-    const byMerge = (a) => (a.refs ?? []).some((r) => /^a-/.test(r) && ['merge-word', 'merge-chore', 'approve-feature-plan'].includes(logGet(r)?.class));
-    const landing = prior.length >= 1 && (prior.length === 1 || prior.every(linkAct)) && prior.every((a) => a.class === av.class && (a.refs ?? []).includes(target) && !byMerge(a));
+    const landing = prior.length >= 1 && (prior.length === 1 || prior.every(linkAct)) && prior.every((a) => a.class === av.class && (a.refs ?? []).includes(target));
     if (prior.length && !landing) fails.push(`${approved} already approved ${declared.length ? `an act for ${target}` : 'an act'}; ask again for this one`);
   }
   // Gates: the repo's own commands (never inherited), at the exact head, in a detached
@@ -4014,12 +3975,8 @@ function cmdMerge() {
   // home resets exactly what it reset before (G1); another repo resets all of its own caches
   if (R.name === 'home') { mainLogCache = undefined; mergeShaCache.clear(); } else R.resetCaches();
   const cls = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
-  // a release or settings-class decision is carried out by its own act below, not by the merge's
-  const own = releaseDecision || (settingsActs ?? []).some((x) => x.decision);
-  const act = appendLog({ type: 'act', decision: own ? undefined : citing(), class: cls, what: `merged ${branch} at ${sha}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag} at ${standing.tagSha}, verbatim${standing.policy ? ', under settings.upstream_sync "adopt"' : ''})` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [], reversible: false, approved_by: approved ?? standing?.rule?.id ?? undefined, ...onR }, 'supervisor');
-  // each owner setting class the merge changes is an act of that class, with what settled it: the
-  // owner's answer in it, their standing rule, a decision in it, or its rung
-  for (const x of settingsActs ?? []) appendLog({ type: 'act', class: x.cls, decision: x.decision, approved_by: x.answer ?? x.rule?.id, rung: x.rung, what: `changed ${x.keys.join(', ')} in settings by merging ${branch} at ${sha}`, refs: [target, act.id], reversible: true }, 'supervisor');
+  // A release-production decision is carried out by the release act, never by the merge act.
+  const act = appendLog({ type: 'act', decision: releaseDecision ? undefined : citing(), class: cls, what: `merged ${branch} at ${sha}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag} at ${standing.tagSha}, verbatim${standing.policy ? ', under settings.upstream_sync "adopt"' : ''})` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [`chore-${chore}`], reversible: false, approved_by: approved ?? standing?.rule?.id ?? undefined, ...onR }, 'supervisor');
   if (release) {
     const rel = appendLog({ type: 'act', class: 'release-production', decision: release.decision, rung: release.rung, what: `released ${release.target}${inR} to production by merging ${branch} at ${sha} (release: merge)`, refs: [release.target, act.id], reversible: false, ...onR }, 'supervisor');
     out(`released ${release.target}${inR} to production (${rel.id})`);
@@ -9429,12 +9386,14 @@ function drainedPreface() {
     : `This looks like the machine it moved to. Before anything else: ${(() => { const h = pinsHint(); return h ? `(0) ${h}; ` : ''; })()}(1) DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs fleet unpark (it rebuilds run/log from the landed log, prints the parity fingerprint, puts every goal back as it was and prints the restart command for each parked session); (2) run each of those commands; (3) make sure the dashboard is running (supervisor.md §11) and tell the owner its address; then carry on from supervisor.md §1.`}`;
 }
 
-// ===== monitoring: production signals into the loop =====
-// Monitors are owner settings (`monitors`, class monitor-change). A URL check (kind http) runs on
-// every `wait` cycle when due: status, an optional body substring, latency, and TLS expiry. Samples
-// stay local in run/monitors/<name>/ (gitignored, not the record); only meaning reaches the log, as
-// observations on subject monitor:<name>: down and up on the transition, slow once per breach, and a
-// daily rollup (kind reading). `wait` returns once on a new down, never on a standing finding.
+// ===== sensors: production signals into the loop =====
+// A sensor takes samples; samples stay local in run/monitors/<name>/ (gitignored, not the record).
+// A meaningful change becomes an observation in the log on subject monitor:<name>, and the
+// supervisor's OODA loop and the Health section act on those. A sensor is the supervisor's own
+// (settings `monitors`, no owner answer): it only reads. A URL check (kind http) runs on every
+// `wait` cycle when due: status, an optional body substring, latency, and TLS expiry; down and up
+// on the transition, slow once per breach, and a daily rollup (kind reading) reach the log. `wait`
+// returns once on a new down, never on a standing finding.
 const MONITOR_DEFAULTS = { every_minutes: 1, timeout_s: 10, down_after: 2, slow_after: 3, tls_warn_days: 14, sample_days: 30 };
 // A monitor's name is a folder under run/monitors: letters, digits, dot, dash, underscore only.
 const MONITOR_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;

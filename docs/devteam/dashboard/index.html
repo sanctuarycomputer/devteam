@@ -477,7 +477,7 @@
     <a href="#trust"><span class="nl"><i class="icon-shield-check" aria-hidden="true"></i>Trust Ladder</span> <span class="count" id="n-trust"></span></a>
     <a href="#retros"><span class="nl"><i class="icon-history" aria-hidden="true"></i>Retros</span> <span class="count" id="n-retros"></span></a>
     <a href="#health"><span class="nl"><i class="icon-heart-pulse" aria-hidden="true"></i>Health</span> <span class="count" id="n-findings"></span></a>
-    <a href="#monitoring"><span class="nl"><i class="icon-activity" aria-hidden="true"></i>Monitoring</span> <span class="count" id="n-monitors"></span></a>
+    <a href="#monitoring"><span class="nl"><i class="icon-activity" aria-hidden="true"></i>Sensors</span> <span class="count" id="n-monitors"></span></a>
   </nav>
   <div class="foot"><span id="when"></span><br><span id="logline"></span><br><span class="err" id="err"></span></div>
 </aside>
@@ -610,9 +610,9 @@
   </section>
 
   <section id="monitoring">
-    <h2>Monitoring <span class="sub">production, as the supervisor sees it: what's up, how fast, and what it noticed</span></h2>
+    <h2>Sensors <span class="sub">each one takes samples of production, kept here; a meaningful change becomes an observation in the log, for the supervisor's loop and Health to act on</span></h2>
     <div id="monitors"></div>
-    <h3 style="margin-top:14px">What the monitors noticed</h3>
+    <h3 style="margin-top:14px">Observations</h3>
     <div class="feed" id="monitor-feed"></div>
   </section>
 
@@ -2391,7 +2391,7 @@ function renderMonitoring(d) {
       <div class="mon-stats"><span>24h <b>${esc(pctOr(m.uptime_24h))}</b> up</span><span>7d <b>${esc(pctOr(m.uptime_7d))}</b></span><span>p50 <b>${esc(m.p50_24h == null ? '–' : `${m.p50_24h}ms`)}</b></span><span>p95 <b>${esc(m.p95_24h == null ? '–' : `${m.p95_24h}ms`)}</b></span>${m.tls_days != null ? `<span>certificate <b>${esc(m.tls_days)}d</b></span>` : ''}<span class="muted">checked ${m.last_at ? esc(when(m.last_at)) : 'never'}</span></div>
       <div data-mon-chart="${esc(m.name)}">${MON_SERIES.get(m.name)?.data ? monitorChart(MON_SERIES.get(m.name).data, m, true) : '<p class="muted small">Loading…</p>'}</div>
     </div>`;
-  }).join('')}</div>` : empty('No monitors yet. They live in the owner settings (<code>monitors</code>); the supervisor proposes a URL check when it finds the production URL, and polls it while it runs.');
+  }).join('')}</div>` : empty('No sensors yet. The supervisor starts one for each production URL it finds (settings <code>monitors</code>), and polls them while it runs.');
   for (const m of ms) loadMonitorSeries(m.name);
   const obs = (d.ooda?.observations || []).filter((o) => /^monitor:/.test(o.subject || ''));
   $('monitor-feed').innerHTML = obs.length ? obs.map((o) => `<div class="card small${o.severity >= 3 ? ' corrected' : ''}"><div><div class="act-head">${o.severity != null ? `<span class="badge ${sevBadge(o.severity)}">${esc(words(o.kind))}</span> ` : ''}${linkify(o.detail)}</div><div class="meta">${esc(when(o.created_at))} · ${subjectLink(o.subject)}</div></div></div>`).join('') : empty('Nothing yet. Outages, slow spells and each day\'s rollup show here.');
@@ -2404,9 +2404,9 @@ function openMonitor(name) {
   const [tone, label] = monState(m);
   const fails = p?.failures || [];
   showDrawer(`<h2 id="drawer-title">${esc(name)}</h2>
-    ${attrs({ id: name, idTip: 'Its name in the owner settings (monitors).', peek: p, noRecord: true, computed: [
+    ${attrs({ id: name, idTip: 'Its name in the settings (monitors).', peek: p, noRecord: true, computed: [
       ['State', `<span class="badge ${tone}">${esc(label)}</span>${m.since ? ` since ${esc(when(m.since))}` : ''}`, 'Up, down (after its failed checks in a row) or slow (p95 over its target), from its checks.'],
-      ['Checks', `<code>${esc(m.url || '')}</code>${m.expect ? ` · expects ${esc(fmtObj(m.expect).replace(/<[^>]+>/g, ''))}` : ''} · every ${esc(m.every_minutes)} min · down after ${esc(m.down_after)} failed`, 'What it requests and what counts as up; owner settings, class monitor-change.'],
+      ['Checks', `<code>${esc(m.url || '')}</code>${m.expect ? ` · expects ${esc(fmtObj(m.expect).replace(/<[^>]+>/g, ''))}` : ''} · every ${esc(m.every_minutes)} min · down after ${esc(m.down_after)} failed`, 'What it requests and what counts as up; the supervisor's settings; it needs no owner answer.'],
       ['Target', m.slo ? `${m.slo.uptime ? `${(100 * m.slo.uptime).toFixed(2)}% up` : ''}${m.slo.uptime && m.slo.p95_ms ? ' · ' : ''}${m.slo.p95_ms ? `p95 under ${esc(m.slo.p95_ms)}ms` : ''}` : '', 'Its service-level target: uptime over a week, and the p95 response time.'],
       ['Uptime', `${esc(pctOr(m.uptime_24h))} over 24h · ${esc(pctOr(m.uptime_7d))} over 7d`, 'The share of checks that passed.'],
       ['Response time', `p50 ${esc(m.p50_24h == null ? '–' : `${m.p50_24h}ms`)} · p95 ${esc(m.p95_24h == null ? '–' : `${m.p95_24h}ms`)} over 24h`, 'From checks that passed.'],

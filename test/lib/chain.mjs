@@ -872,9 +872,6 @@ http.createServer((req, res) => { const m = fs.readFileSync(${JSON.stringify(mod
       fs.writeFileSync(mode, 'fail');
       landSettings((txt) => txt.replace('"monitors": { ', `"monitors": { "api": { "kind": "http", "url": "http://127.0.0.1:${port}/api", "down_after": 1 }, `));
       assert.match(must(['wait', '--minutes', '1'], sup), /production needs you[\s\S]*api is down/);
-      // monitors are owner settings in a ladder class that starts at ask with a default
-      assert.equal(dt(['decide', '--class', 'monitor-change', '--refs', 'chore-monitors', '--', 'turn on the web check'], sup).status, 3);
-      assert.equal(json(must(['trust', '--json'])).find((r) => r.class === 'monitor-change').rung, 2);
     } finally {
       srv.kill();
       landSettings((txt) => txt.replace(/"monitors": \{[\s\S]*?\} \} \}, /, '').replace(/"monitors": \{ "api": [^\n]*?\} \}, /, ''));
@@ -1241,15 +1238,10 @@ http.createServer((req, res) => {
     assert.match(r.out + r.err, /changes owner settings: gates \(gate-change\), upstream_repo \(governance-edit\)/);
     const Qw = must(['ask', '--question', 'Fewer workers?', '--class', 'priority-change', '--reasons', 'below-rung', '--recommendation', 'yes'], { role: 'sup' });
     must(['answer', Qw, 'yes']);
-    assert.match(dt([...args, '--approved', Qw], { role: 'sup' }).out, /the owner's answer is needed: --approved <qid> of class gate-change or governance-edit \(q-[^ ]+ is priority-change; a ladder class's answer never covers an owner setting\)/, 'an answer of a ladder class does not cover it');
-    const Qgate = must(['ask', '--question', 'Move upstream?', '--class', 'governance-edit', '--reasons', 'owner-only', '--recommendation', 'yes'], { role: 'sup' });
+    assert.match(dt([...args, '--approved', Qw], { role: 'sup' }).out, /needs an answered gate-change or governance-edit question/, 'an answer of another class does not cover it');
+    const Qgate = must(['ask', '--question', 'Add a lint gate and move upstream?', '--class', 'governance-edit', '--reasons', 'owner-only', '--recommendation', 'yes'], { role: 'sup' });
     must(['answer', Qgate, 'yes']);
-    // one owner answer, in any one of the changed owner_only classes, covers the bundle (the owner's ruling)
     must([...args, '--approved', Qgate], { role: 'sup' });
-    // several answers are accepted too
-    const Qlint = must(['ask', '--question', 'Add a lint gate?', '--class', 'gate-change', '--reasons', 'owner-only', '--recommendation', 'yes'], { role: 'sup' });
-    must(['answer', Qlint, 'yes']);
-    must([...args, '--approved', Qgate, Qlint], { role: 'sup' });
     // a standing rule the owner gave themselves settles gate-change (constitution.md owner_rules), alone
     const Qr = must(['ask', '--question', 'May I add dev tooling gates without asking?', '--class', 'gate-change', '--reasons', 'owner-only', '--recommendation', 'yes', '--rule-scope', 'class:gate-change'], { role: 'sup' });
     assert.match(dt(['answer', Qr, 'yes', '--from-chat', '--said', 'sure', '--rule', 'add dev tooling without asking'], { role: 'sup' }).err, /takes no --rule/, 'a rule is never relayed from chat');
@@ -1272,21 +1264,20 @@ http.createServer((req, res) => {
     assert.notEqual(kitByRule.status, 0, 'a settings rule never approves kit files');
     assert.match(kitByRule.out + kitByRule.err, /touches files outside project\/ \(docs\/devteam\/governance\/constitution\.md\)/);
     git(['worktree', 'remove', '--force', wt('caps')]);
-    // monitors are owner settings in a ladder class: a decision in the class naming the PR covers them
+    // sensors are the supervisor's: a chore that changes them merges with no owner answer
     git(['worktree', 'add', '-q', '-b', 'chore-mon', wt('mon'), 'origin/main']);
     setTo(wt('mon'), (j) => { j.monitors = { web: { kind: 'http', url: 'https://example.com/up' } }; });
     git(['commit', '-qam', 'monitor'], wt('mon'));
     git(['push', '-q', 'origin', 'chore-mon'], wt('mon'));
     const margs = ['merge', '--chore', 'mon', '--dry-run', '--title', 'chore-mon: watch production', '--body-file', body];
     const rm = dt(margs, { role: 'sup' });
-    assert.match(rm.out + rm.err, /monitors \(monitor-change\)[\s\S]*a decision in that class/);
-    const Qm = must(['ask', '--class', 'monitor-change', '--question', 'Watch https://example.com/up?', '--recommendation', 'yes', '--default', 'yes'], { role: 'sup' });
+    assert.equal(rm.status, 0, `${rm.out}\n${rm.err}`);
+    assert.match(rm.out, /would merge/);
+    assert.doesNotMatch(rm.out, /owner settings/, 'nothing to approve');
+    // a decision is carried out once per target: one naming a batch carries out each once
+    const Qm = must(['ask', '--class', 'priority-change', '--reasons', 'below-rung', '--question', 'Land these two chores first?', '--recommendation', 'yes'], { role: 'sup' });
     must(['answer', Qm, 'yes']);
-    const Dother = must(['decide', '--class', 'monitor-change', '--approved', Qm, '--refs', 'chore-elsewhere', '--', 'watch something else'], { role: 'sup' });
-    assert.match(dt([...margs, '--decision', Dother], { role: 'sup' }).err, /is about chore-elsewhere/, 'a decision for another PR does not cover this one');
-    const Qm2 = must(['ask', '--class', 'monitor-change', '--question', 'Watch https://example.com/up, really?', '--recommendation', 'yes', '--default', 'yes'], { role: 'sup' });
-    must(['answer', Qm2, 'yes']);
-    const Dm = must(['decide', '--class', 'monitor-change', '--approved', Qm2, '--refs', 'chore-mon', '--', 'watch the production health route'], { role: 'sup' });
+    const Dm = must(['decide', '--class', 'priority-change', '--approved', Qm, '--refs', 'chore-mon', 'chore-elsewhere', '--', 'land them first'], { role: 'sup' });
     assert.match(must([...margs, '--decision', Dm], { role: 'sup' }), /would merge/);
     // a hand-written decision can't reuse the answer Dm already used (main's answerUseGap)
     const logDir = path.join(repo, 'docs/devteam/run/log');
@@ -1297,28 +1288,10 @@ http.createServer((req, res) => {
     fs.appendFileSync(supFile, line({ ...dLine, id: Dcopy, at: new Date(Date.parse(dLine.at) + 1).toISOString() }));
     assert.match(dt([...margs, '--decision', Dcopy], { role: 'sup' }).err, /already approved a decision/, 'a used answer approves no second decision');
     fs.writeFileSync(supFile, supKept);
-    // a decision is carried out once: an act already under it refuses a second merge on it
-    must(['act', '--decision', Dm, '--', 'merged the monitor on another branch'], { role: 'sup' });
-    assert.match(dt([...margs, '--decision', Dm], { role: 'sup' }).out, /was already carried out/);
-    // Blocker: a ladder-class answer, even relayed from chat, never covers owner_only keys or the kit
-    setTo(wt('mon'), (j) => { j.agent_command = 'claude --dangerously-skip-permissions'; j.gates = { evil: 'true' }; j.secret_commands = ['true']; });
-    fs.appendFileSync(path.join(wt('mon'), 'docs/devteam/governance/quality.md'), '\nNo rules.\n');
-    git(['commit', '-qam', 'and the rest'], wt('mon'));
-    git(['push', '-q', 'origin', 'chore-mon'], wt('mon'));
-    const Qchat = must(['ask', '--class', 'monitor-change', '--question', 'Watch the health route?', '--recommendation', 'yes', '--default', 'yes'], { role: 'sup' });
-    must(['answer', Qchat, 'yes', '--from-chat', '--said', 'yes watch it'], { role: 'sup' });
-    const wide = dt([...margs, '--approved', Qchat], { role: 'sup' });
-    assert.notEqual(wide.status, 0);
-    assert.match(wide.out, /changes owner settings: [^\n]*secret_commands \(governance-edit\)[^\n]*the owner's answer is needed: --approved <qid> of class (gate-change or governance-edit|governance-edit or gate-change)[^\n]*answered in chat; a ladder class's answer never covers an owner setting/);
-    assert.doesNotMatch(wide.out, /monitors \(monitor-change\)[^\n]*needed/, 'the monitor-change answer settles monitors alone');
-    // an owner_only answer that came through chat (a line written by hand: answer --from-chat refuses one) approves nothing
-    const Qgov = must(['ask', '--class', 'governance-edit', '--reasons', 'owner-only', '--question', 'Change the agent command and secret commands?', '--recommendation', 'yes'], { role: 'sup' });
-    assert.match(dt(['answer', Qgov, 'yes', '--from-chat', '--said', 'sure'], { role: 'sup' }).err, /reserved to the owner/);
-    const ownFile = fs.readdirSync(logDir).filter((f) => f.startsWith('owner-')).map((f) => path.join(logDir, f))[0];
-    const ownKept = fs.readFileSync(ownFile, 'utf8');
-    fs.appendFileSync(ownFile, line({ id: Qgov, type: 'question', op: 'set', at: new Date().toISOString(), by: 'owner', channel: 'chat', said: 'sure', answer: 'yes' }));
-    assert.match(dt([...margs, '--approved', Qchat, Qgov], { role: 'sup' }).out, new RegExp(`${Qgov} was answered in chat; owner settings \\([^)]*\\) need the owner's own answer`));
-    fs.writeFileSync(ownFile, ownKept);
+    must(['act', '--decision', Dm, '--refs', 'chore-elsewhere', '--', 'landed the other one'], { role: 'sup' });
+    assert.match(must([...margs, '--decision', Dm], { role: 'sup' }), /would merge/, 'an act for the other target does not use it for this one');
+    must(['act', '--decision', Dm, '--refs', 'chore-mon', '--', 'landed it on another branch'], { role: 'sup' });
+    assert.match(dt([...margs, '--decision', Dm], { role: 'sup' }).out, /was already carried out for chore-mon/, 'an act for this target does');
     git(['worktree', 'remove', '--force', wt('mon')]);
   });
 

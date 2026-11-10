@@ -10,7 +10,7 @@ Who decides what, how the supervisor earns the right to decide more, and the pri
 | Product direction, what a feature is for | owner | The supervisor proposes; it never decides alone unless the owner delegated that class on the ladder (§2). |
 | One-way doors (§4) | owner | Asked with a recommendation; never a default. |
 | Releasing to production | owner, delegable | On the ladder (§2) as `release-production`, and rollback-safe migrations as `production-migration`. Where production deploys whenever `main` changes (settings `release: "merge"`), a merge that changes what deploys is a release and needs this class's authority: the supervisor asks first, then asks with a default, then releases and reports, as far as the owner moves it. A migration that can't be rolled back stays a one-way door (§4). |
-| Production monitors | owner, delegable | On the ladder as `monitor-change`, starting at "ask with a default" (the owner's choice: watching production is cheap to undo and costly to lack). Monitors are owner settings (`monitors`); a change merges under the owner's answer, a decision in the class, or on its rung 3. What a monitor finds is an observation; acting on it is each act's own class. |
+| Production sensors | supervisor | The supervisor starts, changes and stops sensors itself, with no owner answer (`process/supervisor.md`, Monitoring): a sensor only reads. A sensor's samples stay local, a meaningful change in them is an observation, and acting on it is each act's own class. |
 | Allowing anything when a check fails | owner | The default is to deny. |
 | A rule, gate or review standard; anything in `governance/` or `process/` | owner | The supervisor proposes with evidence. |
 | Approving a design, a feature's graph, a ticket's spec and plan | supervisor | Each is an act in the log (`approve-spec`, `approve-plan`, `approve-feature-plan`). |
@@ -40,8 +40,7 @@ Some owner decisions can be handed to the supervisor a step at a time, as eviden
     "release-scope": { "ceiling": 3, "start": 1, "about": "move a story to a later release to ship the rest on time" },
     "upstream-pr": { "ceiling": 3, "start": 1, "about": "open a PR on upstream devteam with a general improvement" },
     "release-production": { "ceiling": 3, "start": 1, "about": "ship a tagged release to production, with every gate passing at the tagged commit" },
-    "production-migration": { "ceiling": 3, "start": 1, "about": "run a rollback-safe migration against production data" },
-    "monitor-change": { "ceiling": 3, "start": 2, "about": "turn on, change or remove a production monitor (what it watches, how often, its thresholds)" }
+    "production-migration": { "ceiling": 3, "start": 1, "about": "run a rollback-safe migration against production data" }
   },
   "constitutional": ["merge-word", "approve-feature-plan", "merge-chore", "worker-slots", "replan-within-feature", "add-ticket", "approve-spec", "approve-plan", "approve-design-change", "contract-ruling", "improvement-trial", "release-staging", "goal-readiness", "apply-default", "withdraw-question", "recovery", "carry-answer", "drain", "undrain", "goal-hold", "fleet-drain", "fleet-park", "fleet-undrain", "fleet-unpark", "registry-edit"],
   "owner_only": ["one-way-door", "check-override", "governance-edit", "process-edit", "gate-change", "goal-change", "goal-met", "registry-attest", "new-dependency"],
