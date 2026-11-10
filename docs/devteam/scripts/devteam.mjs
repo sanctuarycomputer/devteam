@@ -244,7 +244,9 @@ const homeAt = (() => {
     const common = scriptCommon ?? cwdCommon;
     const root = common ? path.dirname(common) : null;
     const proj = root && path.join(root, 'docs', 'devteam', 'project');
-    if (proj && command && !['help', '--help', 'init'].includes(command) && !process.env.DEVTEAM_PROJECT && !flagStr('project') && !fs.existsSync(path.join(proj, 'settings.md')) && !(KIT_VIEWS.includes(command) && kitsOwnRepoAt(root))) die(`no ${path.relative(root, proj).split(path.sep).join('/')}/settings.md here (${root}): run init to adopt devteam in this repo, or run home's kit with DEVTEAM_HOME=<home>`);
+    // the machine's commands look after every project from anywhere, a folder that is no project included
+    const machineWide = command === 'machine' || (command === 'recover' && flags.machine);
+    if (proj && command && !machineWide && !['help', '--help', 'init'].includes(command) && !process.env.DEVTEAM_PROJECT && !flagStr('project') && !fs.existsSync(path.join(proj, 'settings.md')) && !(KIT_VIEWS.includes(command) && kitsOwnRepoAt(root))) die(`no ${path.relative(root, proj).split(path.sep).join('/')}/settings.md here (${root}): run init to adopt devteam in this repo, or run home's kit with DEVTEAM_HOME=<home>`);
     return { common, proj: null };
   }
   const notHome = `DEVTEAM_HOME=${env} is not a devteam home (a checkout whose project folder has settings.md); unset it, or point it at home's main checkout`;
@@ -2152,10 +2154,12 @@ const activeWorker = (id) => { const w = workerState(id); return !!w && w.phase 
 // mid-phase, so it isn't stale yet); the pane can. Only the bottom of the visible pane is read and
 // nothing is typed here: clearing it is the supervisor's call (supervisor.md §11), and accounts-tick's
 // for a limit stop. Once per process.
+const LIMIT_REACHED = '(usage|rate|session|weekly|daily|hourly|\\d+-hour) limit (reached|hit|exceeded)';
+const LIMIT_HIT = "^(?:[⎿■✖!]\\s*)?you(?:['’]ve| have) hit your (\\w+ )*limit";
 const PANE_WAITS = [
   // a banner says the limit was reached or when it resets; "rate limit" on its own is too common in
   // code and prose the pane may be showing (see PANE_CODE)
-  ['limit', /\b(usage|rate|session|weekly|daily|hourly|\d+-hour) limit (reached|hit|exceeded)\b|^(?:[⎿■✖!]\s*)?you(?:['’]ve| have) hit your (\w+ )*limit\b|\bresets? (at|in) \d|^approaching (your )?usage limit/i],
+  ['limit', new RegExp(`\\b${LIMIT_REACHED}\\b|${LIMIT_HIT}\\b|\\bresets? (at|in) \\d|^approaching (your )?usage limit`, 'i')],
   ['prompt', /Do you want to (proceed|make this edit|create|allow|run)|Do you trust the files|\[y\/n\]|\(y\/n\)|Press Enter to continue|❯\s*1\.\s*Yes/i],
 ];
 // A pane line that is content the agent is showing, not the agent's own UI: numbered source or diff
@@ -9303,7 +9307,7 @@ function supervisorRecovery(id) {
 // resume_command, in place of the pane's process, after the same refusals as a worker. Claude Code
 // only; without an id, or for anything else, it isn't guessed at, and the finding says how to resume
 // by hand. The same record and caps as restartPane, under the name "supervisor". A parked or drained
-// fleet's supervisor stays stopped, as box-supervisors leaves it.
+// fleet's supervisor stays stopped, as recover leaves it.
 const SUPERVISOR_RESTART_PROMPT = 'You were restarted after a usage limit, on this same conversation. Carry on from where you were.';
 // What to restart, null if it isn't due, or { refused } if the process can't be read. A banner in the
 // recorded pane says nothing about whose conversation it is, so the id comes from a transcript that
@@ -9399,12 +9403,17 @@ const tmuxServerPid = () => sh('tmux', ['list-sessions', '-F', '#{pid}'])?.split
 // repo's root. Never a preview, a dashboard or the operator's window, and never a pane started in a
 // worktree: pane ids restart at %0 with the tmux server, so a noted id can be anyone's by now.
 const SUPERVISOR_NOT_WINDOW = /^(dev~|dash-|dashboard$|operator$)/;
-function supervisorPaneNow(rec = supervisorUpRecord(), { notedOnly = false } = {}) {
+// What an agent's process is called in tmux: Claude Code shows as its version (2.1.307).
+const AGENT_PANE_CMD = /claude|node|codex|opencode|bun|^\d+\.\d+/;
+function supervisorPaneNow(rec = supervisorUpRecord(), opts = {}) { return supervisorPaneIn(mainRoot, readText(supervisorPaneFile())?.trim() || null, rec, opts); }
+// Any repo's, for the machine's commands: its root, the pane it noted, its supervisor-up record.
+// strict, for typing into it: started at the root whatever the record says, and never a window
+// named shell (the owner's).
+function supervisorPaneIn(repo, noted, rec, { notedOnly = false, strict = false } = {}) {
   const listed = sh('tmux', ['list-panes', '-a', '-F', '#{pane_id}\t#{window_name}\t#{pane_start_path}\t#{pane_current_command}']);
   if (listed === null) return null;
-  let noted = readText(supervisorPaneFile())?.trim() || null;
   if (noted && !noted.startsWith('%')) noted = sh('tmux', ['display-message', '-p', '-t', noted, '#{pane_id}']);
-  const root = realPath(mainRoot);
+  const root = realPath(repo);
   const server = tmuxServerPid();
   let other = null;
   for (const l of listed.split('\n').filter(Boolean)) {
@@ -9412,10 +9421,11 @@ function supervisorPaneNow(rec = supervisorUpRecord(), { notedOnly = false } = {
     if (SUPERVISOR_NOT_WINDOW.test(win) || SHELLS.has(cmd.replace(/^-/, ''))) continue;
     const at = realPath(start);
     if (at === path.join(root, '.worktrees') || at.startsWith(path.join(root, '.worktrees') + path.sep)) continue;
+    if (strict && (at !== root || win === 'shell')) continue;
     // a noted id is only as good as the server it was noted on; with nothing to say so, it must be
     // started at the root, or a restored fleet's panes %0, %1… would read as this repo's own
     if (id === noted && (rec?.server ? rec.server === server : at === root)) return id;
-    if (at === root && /claude|node|codex|opencode|bun|^\d+\.\d+/.test(cmd) && !other) other = id;
+    if (at === root && AGENT_PANE_CMD.test(cmd) && !other) other = id;
   }
   return notedOnly ? null : other;
 }
@@ -9609,29 +9619,389 @@ function siblingOf(root, repos) {
     return links(h, ownKey) && !links(root, homeKey);
   }) ?? null;
 }
+// The projects this machine knows: the ones recorded in ~/.devteam, each adopted repo directly under
+// an --in folder (a box keeps them in ~/code, and a kit older than the record never wrote one), and
+// any the caller names. Resolved, so one checkout counts once however it was reached.
+// Whole or not at all: a reader never sees half a file.
+function writeText(p, text) {
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  const tmp = `${p}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, text);
+  fs.renameSync(tmp, p);
+}
+const isAdopted = (root) => fs.existsSync(kitAt(root)) && fs.existsSync(path.join(root, 'docs', 'devteam', 'project', 'settings.md'));
+function machineProjects(extra = []) {
+  const under = listFlag('in').flatMap((d) => { try { return fs.readdirSync(path.resolve(d)).map((n) => path.join(path.resolve(d), n)).filter(isAdopted); } catch { return []; } });
+  return [...new Set([...machineRepos(), ...under, ...extra].map(realPath))].sort();
+}
+// Another project's kit, for what it says about itself: never this kit folding its files by this
+// kit's rules, since it can be older. As the operator, so a kit that has the role only reads; with
+// nothing of this session's own home, ticket or pane, so nothing it runs is taken for ours.
+function projectKit(root, args, { timeout = 60000 } = {}) {
+  const env = { ...process.env, DEVTEAM_ROLE: 'operator' };
+  for (const k of ['DEVTEAM_HOME', 'DEVTEAM_RUN', 'DEVTEAM_PROJECT', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'TMUX_PANE']) delete env[k];
+  const r = spawnSync(process.execPath, [kitAt(root), ...args], { cwd: root, env, encoding: 'utf8', timeout, stdio: ['ignore', 'pipe', 'pipe'] });
+  return r.status === 0 ? r.stdout : null;
+}
+const projectJson = (root, args) => { try { return JSON.parse(projectKit(root, args) ?? 'null'); } catch { return null; } };
+// What a repo's kit can do, read from its source: running it to find out would run it.
+const kitHasRecover = (root) => /\brecover: cmdRecover\b/.test(readText(kitAt(root)) ?? '');
+// A window name tmux takes as it is: a dot or a colon in a target means a pane or a window.
+const tmuxName = (s) => s.replace(/[^\w.~-]/g, '-');
+// The box's list of what was up before a restart (cloud/Dockerfile keeps it from what it saw each
+// minute): `<seconds> <root>` a line, when it was first listed. A root alone is an older box's line,
+// listed now. Past SUPERVISOR_UP_MAX_MS an entry says nothing any more, as a supervisor-up record.
+function readUpList(file) {
+  const at = new Map();
+  for (const l of (readText(file) ?? '').split('\n')) {
+    const m = /^(?:(\d+) )?(\/.*)$/.exec(l.trim());
+    if (!m) continue;
+    const root = realPath(m[2]);
+    const t = m[1] ? Number(m[1]) * 1000 : null;
+    if (!at.has(root) || (t !== null && (at.get(root) === null || t > at.get(root)))) at.set(root, t);
+  }
+  return new Map([...at].map(([r, t]) => [r, t ?? Date.now()]).filter(([, t]) => Date.now() - t < SUPERVISOR_UP_MAX_MS));
+}
+// recover --machine [--was-up <list>] [--session s] [--in <dir>…] [--only <repo>]: each repo's own
+// recover, one line each. --was-up: the roots listed were up before the restart (the box's list);
+// a repo not listed has only its own record to go on. --session: every supervisor in that tmux
+// session, in a window sup-<repo> (the box's home). Without --dry-run or --force, what couldn't
+// start stays listed for the next try and the rest comes off.
 function recoverMachine() {
   const dry = !!flags['dry-run'];
   const force = !!flags.force;
-  const known = machineRepos();
+  if (flags['was-up'] === true) die('recover --machine --was-up <file>: the list of roots that were up before the restart');
+  const listFile = flagStr('was-up') ? path.resolve(flagStr('was-up')) : null;
+  const session = flagStr('session');
+  if (session && !NAME_FOR_TMUX.test(session)) die('--session is a tmux name');
+  const only = flagStr('only');
+  const listed = listFile ? readUpList(listFile) : new Map();
+  const known = machineProjects([...listed.keys()]);
+  if (only && !known.some((r) => path.basename(r) === only && isAdopted(r))) die(`no adopted repo "${only}" on this machine`);
   if (!known.length) return out('no repos recorded on this machine yet: run recover in each repo, or start its dashboard so it is recorded');
-  const adopted = known.filter((r) => fs.existsSync(kitAt(r)) && fs.existsSync(path.join(r, 'docs', 'devteam', 'project', 'settings.md')));
+  const adopted = known.filter(isAdopted);
+  const keep = new Set();
   let failed = false;
   for (const root of known) {
     const name = path.basename(root);
+    if (only && name !== only) continue;
     if (!adopted.includes(root)) { out(`${name}: skipped (not an adopted repo here any more: ${root})`); continue; }
     const sib = force ? siblingOf(root, adopted) : null;
     if (sib) { out(`${name}: skipped (a sibling of ${path.basename(sib)})`); continue; }
-    // Each repo's own kit: a repo's kit can be another version, and its log and rules are its own.
-    const env = { ...process.env };
-    for (const k of ['DEVTEAM_HOME', 'DEVTEAM_RUN', 'DEVTEAM_PROJECT', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE']) delete env[k];
-    const r = spawnSync(process.execPath, [kitAt(root), 'recover', ...(dry ? ['--dry-run'] : []), ...(force ? ['--force'] : [])], { cwd: root, env, encoding: 'utf8', timeout: 120000, stdio: ['ignore', 'pipe', 'pipe'] });
-    const said = (r.stdout ?? '').trim();
-    if (said) out(`${name}: ${said}`);
-    else if (/unknown command/.test(r.stderr ?? '')) out(`${name}: NOT started (its kit is older than recover: upgrade it, or use its fleet status recovery line)`);
-    else out(`${name}: NOT started (${(r.stderr || r.error?.message || `exit ${r.status}`).trim().slice(0, 200)})`);
-    if (r.status !== 0) failed = true;
+    const wasUp = listed.has(root);
+    const where = session ? { session, window: tmuxName(`sup-${name}`) } : null;
+    let said;
+    if (!kitHasRecover(root)) {
+      // A kit older than recover has no record of being up: only the box's list, or --force, says so.
+      if (listFile && !wasUp && !force) said = 'left stopped (not running before the restart; --force starts it)';
+      else if (!where || !(wasUp || force)) said = 'NOT started (its kit is older than recover: upgrade it, or use its fleet status recovery line)';
+      else said = legacyRecover(root, name, { dry, force, ...where });
+    } else {
+      // Each repo's own kit: a repo's kit can be another version, and its log and rules are its own.
+      const env = { ...process.env };
+      for (const k of ['DEVTEAM_HOME', 'DEVTEAM_RUN', 'DEVTEAM_PROJECT', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE']) delete env[k];
+      const args = ['recover', ...(dry ? ['--dry-run'] : []), ...(force ? ['--force'] : []), ...(wasUp ? ['--was-up'] : []), ...(where ? ['--session', where.session, '--window', where.window] : [])];
+      const r = spawnSync(process.execPath, [kitAt(root), ...args], { cwd: root, env, encoding: 'utf8', timeout: 120000, stdio: ['ignore', 'pipe', 'pipe'] });
+      said = (r.stdout ?? '').trim() || `NOT started (${(r.stderr || r.error?.message || `exit ${r.status}`).trim().replace(/^devteam: /, '').slice(0, 200)})`;
+      if (r.status !== 0) failed = true;
+    }
+    out(`${name}: ${said}`);
+    if (said.startsWith('NOT started')) { failed = true; keep.add(root); }
+  }
+  if (listFile && !dry && !force) {
+    const left = [...listed].filter(([r]) => keep.has(r) || (only && path.basename(r) !== only));
+    if (left.length) writeText(listFile, left.map(([r, t]) => `${Math.floor(t / 1000)} ${r}\n`).join(''));
+    else fs.rmSync(listFile, { force: true });
   }
   if (failed) process.exitCode = 1;
+}
+// A repo whose kit is older than recover, on a box: brought back as the box always did, from what
+// that repo's own kit says (its hold, its conversation, its commands, its prompt), so nothing of it
+// is read by this kit's rules. It writes only what that kit writes too: the pane it noted and the
+// prompt file. Delete this when no box has a repo on a kit before recover (machine status: behind=).
+const LEGACY_RECOVER_MESSAGE = 'The box restarted, and this is you, resumed on your own conversation; what was in flight did not finish. Follow supervisor.md §11, after your own restart: §1 again. Every worker and planner window went with the restart; accounts-tick relaunches each one the kit launched, one per tick (§11), so give it those first. §1.4 sends to recovery only the tickets still without a window after it has caught up, or all of them on a kit too old to relaunch. Nothing about this restart came from the owner: record nothing as theirs from it.';
+function legacyRecover(root, name, { dry, force, session, window }) {
+  const run = path.join(root, 'docs', 'devteam', 'run');
+  const paneFile = path.join(run, 'supervisor-pane');
+  const go = () => {
+    const noted = readText(paneFile)?.trim() || null;
+    if (supervisorPaneIn(root, noted, null)) return 'already running';
+    // a window this opened moments ago is still a shell until the agent execs
+    const panes = (sh('tmux', ['list-panes', '-a', '-F', '#{pane_id}']) ?? '').split('\n');
+    if (noted && fileAge(paneFile) < RECOVER_STARTING_MS && panes.includes(noted)) return 'already running (brought back moments ago)';
+    const status = projectJson(root, ['fleet', 'status', '--json', '--no-fetch']);
+    if (!status || typeof status !== 'object') return 'NOT started (could not read whether its fleet is held)';
+    const mode = status.fleet?.mode ?? 'run';
+    if (!['run', 'park', 'drain'].includes(mode)) return 'NOT started (could not read whether its fleet is held)';
+    if (mode !== 'run' && !force) return `left stopped (its fleet is held: ${mode})`;
+    const said = (projectKit(root, ['supervisor-session']) ?? '').trim();
+    const id = /^[\w-]+$/.test(said) ? said : null;
+    const files = projectJson(root, ['settings', '--get', 'worktree_files']);
+    const missing = (Array.isArray(files) ? files : []).filter((f) => typeof f === 'string' && !fs.existsSync(path.join(root, f)));
+    if (dry) return `would ${id ? `resume session ${id}` : 'start fresh'}${missing.length ? ` (missing here: ${missing.join(' ')})` : ''}`;
+    let cmd;
+    let msg;
+    if (id) {
+      cmd = (projectKit(root, ['settings', '--get', 'resume_command']) ?? '').trim();
+      if (!` ${cmd} `.includes(' --continue ')) return 'NOT started (its resume_command has no --continue to replace)';
+      cmd = ` ${cmd} `.replace(' --continue ', ` --resume ${id} `).trim();
+      msg = LEGACY_RECOVER_MESSAGE;
+    } else {
+      cmd = (projectKit(root, ['settings', '--get', 'agent_command']) ?? '').trim();
+      msg = (projectKit(root, ['prompt', 'supervisor']) ?? '').trim();
+      if (!cmd || !msg) return 'NOT started (its kit gave no agent_command or supervisor prompt)';
+    }
+    if (missing.length) msg = `${msg}\n\nThis machine is missing: ${missing.join(' ')} (worktree_files). Before unparking or starting any worker, ask the owner for each in the Inbox: an owner-action question with --secrets and the sink file:<path>. Never in chat.`;
+    if (!tmux(['has-session', '-t', `=${session}`])) return `NOT started (no tmux session ${session})`;
+    const promptFile = path.join(run, 'supervisor-prompt.txt');
+    fs.writeFileSync(promptFile, `${msg}\n`);
+    const pane = sh('tmux', ['new-window', '-dP', '-F', '#{pane_id}', '-t', `=${session}:`, '-n', window, '-c', root]);
+    if (!pane) return 'NOT started (tmux would not open its window)';
+    fs.writeFileSync(paneFile, pane);
+    // by pane id: a dot in a window name reads as a pane to tmux
+    if (!tmux(['send-keys', '-t', pane, '-l', `export DEVTEAM_ROLE=supervisor; ${sessionMarkerPrefix(session)}${cmd} "$(cat '${promptFile}')"`]) || !tmux(['send-keys', '-t', pane, 'Enter'])) return `NOT started (its window opened but could not be typed into: pane ${pane})`;
+    return `${id ? `resumed session ${id}` : 'started fresh'}${missing.length ? ` (asked to get: ${missing.join(' ')})` : ''}`;
+  };
+  if (dry) return go();
+  fs.mkdirSync(run, { recursive: true });
+  return withLock(path.join(run, 'recover'), go, { staleMs: 90000, waitMs: 100000 });
+}
+
+// ===== machine: every project on this machine, for whoever looks after it =====
+//
+// What a box's operator works from (process/operator.md), and the owner can run on a laptop: a digest
+// of the machine and each project, a message into a project's supervisor, a line on the hub, and
+// what a pane is at. Each runs from any directory, with this kit or a newer one than the projects':
+// what a project says about itself comes from its own kit, and only plain files of its are read here.
+
+// What a pane is at, from what is on it. Nothing is typed here. The agent's input box is the last box
+// drawn at the bottom (between two rules); text in it is someone's unless it's dim, the harness's own
+// suggestion, never the owner's words. A screen that shows no box is unknown.
+const PANE_DIALOG = /^(do you (trust|want to)|quick safety check|❯ *(yes|no)([, ]|$)|yes, i accept|no, exit|select login method|paste code|.*text style)/i;
+// A limit banner, whole and at the start of its line: the agent's prose can name a limit anywhere.
+const PANE_LIMIT_LINE = new RegExp(`^(?:[⎿■✖!]\\s*)?(?:claude\\s+)?${LIMIT_REACHED}|${LIMIT_HIT}`, 'i');
+const plainText = (s) => s.replace(/\x1b\[[0-9;]*m/g, '').replace(/ /g, ' ');
+function paneState(pane, cmd = (sh('tmux', ['list-panes', '-a', '-F', '#{pane_id}\t#{pane_current_command}']) ?? '').split('\n').map((l) => l.split('\t')).find(([id]) => id === pane)?.[1]) {
+  if (cmd === undefined) return 'gone';
+  if (SHELLS.has(cmd.replace(/^-/, ''))) return 'shell';
+  if (!AGENT_PANE_CMD.test(cmd)) return 'other';
+  const raw = (sh('tmux', ['capture-pane', '-e', '-p', '-t', pane]) ?? '').split('\n').filter((l) => l.trim()).slice(-20);
+  // what the agent itself drew, as the kit reads a pane: a line of code, a diff or a quote never is
+  const ui = raw.map((l) => plainText(l).trimStart()).filter((l) => !PANE_CODE.test(l));
+  if (ui.some((l) => /^❯ *\d+\. /.test(l))) return 'dialog';
+  const rules = raw.map((l, i) => (/^ *─+ *$/.test(plainText(l)) ? i : -1)).filter((i) => i !== -1);
+  const [a, b] = rules.slice(-2);
+  const input = rules.length >= 2 ? raw.slice(a + 1, b).find((l) => l.includes('❯')) ?? null : null;
+  // With an input box up, the words of a dialog above it are only something the agent said.
+  const [, promptRe] = PANE_WAITS.find(([k]) => k === 'prompt');
+  if (!input && ui.some((l) => promptRe.test(l) || PANE_DIALOG.test(l))) return 'dialog';
+  const busy = ui.some((l) => PANE_BUSY.test(l));
+  if (!busy && ui.some((l) => LIMIT_BANNER.test(l) || PANE_LIMIT_LINE.test(l))) return 'limit';
+  if (input === null) return 'unknown';
+  // up to any dim text: what was really typed, if anything
+  const text = input.slice(input.lastIndexOf('❯') + 1);
+  const dim = text.indexOf('\x1b[2m');
+  if (plainText(dim === -1 ? text : text.slice(0, dim)).trim()) return 'typing';
+  return busy ? 'busy' : 'ready';
+}
+// Cut to n bytes of UTF-8, never half a character.
+function capBytes(s, n) {
+  let used = 0;
+  let outText = '';
+  for (const ch of s) { used += Buffer.byteLength(ch); if (used > n) break; outText += ch; }
+  return outText;
+}
+const machineUsage = 'usage: machine status [--questions] [--in <dir>…] [--notes <file>] | machine tell <repo> <message> | machine alert <text> | machine alert --clear | machine pane-state <pane>';
+// tell and alert speak on the machine: the operator's, or the owner's at a terminal; never a session
+// in a fleet, which would be speaking as someone else.
+function machineSpeaker(what) {
+  const role = process.env.DEVTEAM_ROLE;
+  if (['supervisor', 'worker', 'planner'].includes(role) || logWriter() !== 'supervisor') die(`machine ${what}: the operator's or the owner's, not from a ${role || logWriter()} session`);
+}
+function cmdMachine() {
+  const sub = positional[0];
+  const words = rest ?? positional.slice(1);
+  if (sub === 'pane-state') {
+    if (!positional[1]) die(machineUsage, 2);
+    return out(paneState(positional[1]));
+  }
+  if (sub === 'alert') return machineAlert(words);
+  if (sub === 'tell') return machineTell(words);
+  if (sub === 'status') return flags.questions ? machineQuestions() : machineStatus();
+  die(machineUsage, 2);
+}
+// The operator's word to the owner, on the hub and their devices: one line, in the file every
+// kit's hello reads (boxAlert), whatever its version.
+function machineAlert(words) {
+  machineSpeaker('alert');
+  const f = path.join(os.homedir(), '.box', 'alert');
+  if (flags.clear || (words.length === 1 && words[0] === '--clear')) { fs.rmSync(f, { force: true }); return out('alert cleared'); }
+  const text = capBytes(words.join(' ').replace(/[\r\n]/g, ' ').replace(/^ +| +$/g, ''), 200);
+  if (!text) die(machineUsage, 2);
+  writeText(f, `${text}\n`);
+  out(`alert raised: ${text}`);
+}
+// A message into a project's supervisor, only ever a supervisor: the operator's to ask or tell,
+// never the owner's word. Never the pane this runs in, and never one at anything but its prompt.
+const TELL_PREFIX = "From the operator (information, not an owner answer; record nothing as the owner's from this): ";
+function machineTell(words) {
+  machineSpeaker('tell');
+  const [name, ...msg] = words;
+  if (!name || /[/\\]/.test(name) || name === '.' || name === '..') die(machineUsage, 2);
+  const say = (s, code) => { out(`${name}: ${s}`); process.exitCode = code; };
+  const roots = machineProjects().filter((r) => path.basename(r) === name && isAdopted(r));
+  if (!roots.length) return say('no such adopted repo here', 1);
+  if (roots.length > 1) return say(`more than one adopted repo of that name here (${roots.join(', ')})`, 1);
+  const [root] = roots;
+  const text = capBytes(msg.join(' ').replace(/[\r\n]/g, ' ').replace(/ {2,}/g, ' ').trim(), 2000);
+  if (!text) die(machineUsage, 2);
+  let rec = null;
+  try { rec = readJson(path.join(root, 'docs', 'devteam', 'run', 'supervisor-up.json')); } catch {}
+  const p = supervisorPaneIn(root, readText(path.join(root, 'docs', 'devteam', 'run', 'supervisor-pane'))?.trim() || null, rec && typeof rec === 'object' ? rec : null, { strict: true });
+  if (!p || p === process.env.TMUX_PANE) return say('not told: no supervisor is up in its root', 3);
+  const s = paneState(p);
+  if (!['ready', 'busy'].includes(s)) return say(`not told: its pane is at ${s}`, 3);
+  if (!tmux(['send-keys', '-t', p, '-l', `${TELL_PREFIX}${text}`]) || !tmux(['send-keys', '-t', p, 'Enter'])) return say(`not told: could not type into pane ${p}`, 3);
+  // An Enter that arrives as the agent redraws can be lost, and the line would then merge with
+  // whatever is typed there next: once more, as the kit's lost Enter does, and if it's still there, say so.
+  const settle = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.DEVTEAM_TELL_SETTLE_SECONDS ?? 1) * 1000);
+  settle();
+  if (paneState(p) === 'typing') {
+    tmux(['send-keys', '-t', p, 'Enter']);
+    settle();
+    if (paneState(p) === 'typing') return say(`not delivered: the message is still in its input (pane ${p}); clear it before anyone types there`, 3);
+  }
+  say(`told (pane ${p})`, 0);
+}
+// Question ids already written in the notes file (the operator's ~/operator/NOTES.md) count as read.
+const notedIn = () => { const f = flagStr('notes'); return f ? readText(path.resolve(f)) ?? '' : ''; };
+// A kit between the operator role and the questions read refuses them: unknown, not none.
+const openQuestionsOf = (root) => { const q = projectJson(root, ['questions', '--json']); return Array.isArray(q) ? q : null; };
+function machineQuestions() {
+  const notes = notedIn();
+  for (const root of machineProjects().filter(isAdopted)) {
+    const n = path.basename(root);
+    const qs = openQuestionsOf(root);
+    if (!qs) { out(`${n}: can't read its questions: its kit refuses them to the operator (upgrade to read them)`); continue; }
+    for (const q of qs) if (q?.id && !(notes && notes.includes(q.id))) out(`${n} ${q.id} [${q.kind}] ${String(q.question ?? '').replace(/\s+/g, ' ').slice(0, 220)}`);
+  }
+}
+const vParts = (v) => v.replace(/^v/, '').split(/[.-]/).map((x) => (/^\d+$/.test(x) ? Number(x) : x));
+function versionBefore(a, b) {
+  const [x, y] = [vParts(a), vParts(b)];
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    if (x[i] === y[i]) continue;
+    if (x[i] === undefined) return true;
+    if (y[i] === undefined) return false;
+    return typeof x[i] === 'number' && typeof y[i] === 'number' ? x[i] < y[i] : String(x[i]) < String(y[i]);
+  }
+  return false;
+}
+const portAnswers = async (port) => { try { await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(3000) }); return 'up'; } catch { return 'DOWN'; } };
+const gb = (k) => `${Math.round(k / 1048576)}G`;
+const readNum = (f) => { const t = readText(f)?.trim(); return t && /^\d+$/.test(t) ? Number(t) : null; };
+// The machine's own caps, not the host's: a platform caps CPU and memory in the cgroup, while
+// /proc/meminfo and the CPU count say what the whole host has (a 4-CPU, 16 GB box reads 32 CPUs, 123 GB).
+function machineLine(last) {
+  const [, total, , free] = (sh('df', ['-Pk', os.homedir()]) ?? '').split('\n').pop().trim().split(/\s+/).map(Number);
+  const now = Math.floor(Date.now() / 1000);
+  const wasFree = last.disk;
+  const moved = wasFree === undefined ? 0 : Math.trunc((free - wasFree) / 1048576);
+  const d = (free - wasFree) / 1048576;
+  const trend = moved ? ` (${d > 0 ? '+' : ''}${Math.round(d)}G in ${Math.trunc((now - (last.at ?? now)) / 60)}m)` : '';
+  const low = free < 20971520 || Math.floor((free * 100) / (total + 1)) < 15 ? ' LOW' : '';
+  const cg = process.env.DEVTEAM_CGROUP ?? '/sys/fs/cgroup';
+  const max = readText(path.join(cg, 'memory.max'))?.trim();
+  let mem;
+  if (max && max !== 'max') {
+    // in use: what the kernel can't drop (the page cache it can), against the cap
+    const file = Number(/^file (\d+)$/m.exec(readText(path.join(cg, 'memory.stat')) ?? '')?.[1] ?? 0);
+    mem = `${(Math.max(0, (readNum(path.join(cg, 'memory.current')) ?? 0) - file) / 1073741824).toFixed(1)} GB in use of ${(Number(max) / 1073741824).toFixed(1)} GB`;
+  } else {
+    const info = readText('/proc/meminfo');
+    const kb = (k) => Number(new RegExp(`^${k}:\\s+(\\d+)`, 'm').exec(info ?? '')?.[1] ?? NaN);
+    mem = info ? `${(kb('MemAvailable') / 1048576).toFixed(1)} GB free of ${(kb('MemTotal') / 1048576).toFixed(1)} GB` : `${(os.freemem() / 1073741824).toFixed(1)} GB free of ${(os.totalmem() / 1073741824).toFixed(1)} GB`;
+  }
+  // the CPUs it may use, and how much of the last minute every task stood waiting for one
+  const [quota, period] = (readText(path.join(cg, 'cpu.max')) ?? '').trim().split(/\s+/);
+  const cpus = quota && quota !== 'max' && Number(period) > 0 ? String(Number((Number(quota) / Number(period)).toPrecision(6))) : String(os.cpus().length || '?');
+  const stall = /^full .*\bavg60=([\d.]+)/m.exec(readText(path.join(cg, 'cpu.pressure')) ?? '')?.[1];
+  return { free, line: `machine: disk ${gb(free)} free of ${gb(total)}${low}${trend}; memory ${mem}; cpus ${cpus}${stall ? ` (all waiting ${Math.round(Number(stall))}% of the last minute)` : ''}; load ${os.loadavg().map((x) => x.toFixed(2)).join(' ')}` };
+}
+// What the last check-in saw, and what this one leaves for the next: kept at least DEVTEAM_STATUS_SECONDS
+// (20 minutes), so a run by hand in between doesn't hide a change from the next check-in.
+const statusLastFile = () => path.join(os.homedir(), '.devteam', `status-last-${HUB_PORT}`);
+async function machineStatus() {
+  const lastText = readText(statusLastFile()) ?? '';
+  const last = { at: Number(/^at (\d+)$/m.exec(lastText)?.[1] ?? NaN), disk: /^disk (\d+)$/m.test(lastText) ? Number(/^disk (\d+)$/m.exec(lastText)[1]) : undefined };
+  if (!Number.isFinite(last.at)) last.at = undefined;
+  const { free, line } = machineLine(last);
+  out(line);
+  const roots = machineProjects().filter(isAdopted);
+  // the freshest of each project's record of its accounts (accounts-tick writes it each minute); cswap itself is never run here
+  const acc = roots.map((r) => { try { const a = readJson(path.join(r, 'docs', 'devteam', 'run', 'accounts.json')); return a && typeof a.at === 'string' ? a : null; } catch { return null; } }).filter(Boolean).sort((x, y) => y.at.localeCompare(x.at))[0];
+  out(acc ? `machine: accounts ${acc.cswap ? 'cswap' : 'no-cswap'} active=${acc.active ?? '?'} exhausted=${acc.exhausted ?? false} no-room=${acc.active_no_room ?? false} needs-login=${(Array.isArray(acc.needs_login) ? acc.needs_login.join(',') : '') || '-'} as of ${acc.at}` : 'machine: accounts ? (no dashboard has recorded any)');
+  // a hub that doesn't answer and each project's dashboard: nothing else says they went down
+  const alert = readText(path.join(os.homedir(), '.box', 'alert'))?.trim();
+  out(`machine: hub ${HUB_PORT} ${await portAnswers(HUB_PORT)}${alert ? `; alert: ${alert}` : ''}`);
+  const notes = notedIn();
+  const flagged = [];
+  const latest = new Map();
+  for (const root of roots) {
+    const n = path.basename(root);
+    const runAt = (f) => path.join(root, 'docs', 'devteam', 'run', f);
+    const hello = projectJson(root, ['hello', '--json']) ?? {};
+    const files = projectJson(root, ['settings', '--get', 'worktree_files']);
+    const missing = (Array.isArray(files) ? files : []).filter((f) => typeof f === 'string' && !fs.existsSync(path.join(root, f)));
+    const mise = spawnSync('mise', ['ls', '--current', '--missing'], { cwd: root, encoding: 'utf8', timeout: 20000, stdio: ['ignore', 'pipe', 'ignore'] });
+    const tools = mise.error ? '?' : mise.stdout.split('\n').map((l) => l.trim().split(/\s+/)).filter(([t, v]) => t && v).map(([t, v]) => `${t}@${v}`).join(',') || 'ok';
+    let rec = null;
+    try { rec = readJson(runAt('supervisor-up.json')); } catch {}
+    if (!rec || typeof rec !== 'object') rec = null;
+    const noted = readText(runAt('supervisor-pane'))?.trim() || null;
+    const sup = supervisorPaneIn(root, noted, rec) ? 'up' : 'down';
+    const p = supervisorPaneIn(root, noted, rec, { strict: true });
+    const kit = typeof hello.kit === 'string' ? hello.kit : '?';
+    // the newest release of the project's own upstream, asked once per upstream
+    const upstream = (projectKit(root, ['settings', '--get', 'upstream_repo']) ?? '').trim();
+    if (upstream && !latest.has(upstream)) latest.set(upstream, sh('gh', ['release', 'list', '-R', upstream, '--limit', '1', '--json', 'tagName', '-q', '.[0].tagName'], { timeout: 8000 }) || null);
+    const newest = latest.get(upstream);
+    const base = kit.split('+')[0];
+    const behind = newest && base !== newest && /^v\d/.test(base) && versionBefore(base, newest) ? ` behind=${newest}` : '';
+    const port = readNum(runAt('dashboard-port')) ?? [...(readText(runAt('dashboard.log')) ?? '').matchAll(/started on http:\/\/127\.0\.0\.1:(\d+)/g)].pop()?.[1];
+    const dash = port ? `${port}/${await portAnswers(port)}` : '-';
+    let wt = '-';
+    const wtDir = path.join(root, '.worktrees');
+    if (fs.existsSync(wtDir)) {
+      const du = spawnSync('du', ['-sk', wtDir], { encoding: 'utf8', timeout: 20000, stdio: ['ignore', 'pipe', 'ignore'] });
+      const k = Number(du.stdout?.split(/\s/)[0]);
+      wt = `${fs.readdirSync(wtDir).length}/${du.status === 0 && Number.isFinite(k) ? gb(k) : '?'}`;
+    }
+    const qs = openQuestionsOf(root);
+    const q = qs ? qs.filter((x) => x?.id && !(notes && notes.includes(x.id))).length : '?';
+    if (hello.alert) flagged.push(`attention: ${n}: ${hello.alert}`);
+    const sib = siblingOf(root, roots);
+    out(`${n} sup=${sup} fleet=${hello.fleet?.mode ?? '?'} kit=${kit} inbox=${hello.inbox ?? '?'} missing=${missing.join(',') || '-'} tools=${tools}${behind}${p ? ` pane=${p} state=${paneState(p)}` : ''} dash=${dash} wt=${wt} new-questions=${q}${sib ? ` sibling-of=${path.basename(sib)}` : ''}`);
+  }
+  // every agent's pane (never the owner's shell, never read): those stuck, and those that moved since the last reading
+  const panes = (sh('tmux', ['list-panes', '-a', '-F', '#{pane_id}\t#{window_name}\t#{pane_current_command}\t#{session_name}']) ?? '').split('\n').filter(Boolean).map((l) => l.split('\t'));
+  const seen = [];
+  const changed = [];
+  for (const [id, win, cmd, sess] of panes) {
+    if (['shell', 'operator', 'dashboard'].includes(win) || win.startsWith('dash-')) continue;
+    const s = paneState(id, cmd ?? '');
+    if (['shell', 'other', 'gone'].includes(s)) continue;
+    if (['dialog', 'limit'].includes(s)) flagged.push(`attention: ${id} ${sess}:${win} ${s}`);
+    // the spinner and its counters change by the second; the rest is the agent's work
+    const shown = (sh('tmux', ['capture-pane', '-p', '-t', id]) ?? '').split('\n').filter((l) => l.trim() && !/tokens|esc to/.test(l)).slice(0, -3);
+    const sum = crypto.createHash('sha1').update(shown.join('\n')).digest('hex').slice(0, 12);
+    seen.push(`pane ${id} ${sum}`);
+    if (!lastText.split('\n').includes(`pane ${id} ${sum}`)) changed.push(id);
+  }
+  for (const f of flagged) out(f);
+  out(`changed since last reading: ${changed.join(' ')}`);
+  const now = Math.floor(Date.now() / 1000);
+  if (now - (last.at ?? 0) >= Number(process.env.DEVTEAM_STATUS_SECONDS ?? 1200)) writeText(statusLastFile(), [`at ${now}`, `disk ${free}`, ...seen].map((l) => `${l}\n`).join(''));
 }
 function accountsState() {
   try {
@@ -10154,8 +10524,8 @@ const tmux = (args) => sh('tmux', args) !== null;
 // Environment variables that mark a process as inside one running agent session (Claude Code's).
 const SESSION_MARKERS = /^(CLAUDECODE|CLAUDE_CODE_[A-Z0-9_]+|CLAUDE_PID)$/;
 // `env -u` for the session markers this process or the tmux server carries; empty when there are none.
-function sessionMarkerPrefix() {
-  const markers = [...new Set([...Object.keys(process.env), ...(sh('tmux', ['show-environment', '-g']) ?? '').split('\n'), ...(sh('tmux', ['show-environment', '-t', `=${tmuxSession()}`]) ?? '').split('\n')].map((l) => l.replace(/^-/, '').split('=')[0]).filter((k) => SESSION_MARKERS.test(k)))].sort();
+function sessionMarkerPrefix(session = tmuxSession()) {
+  const markers = [...new Set([...Object.keys(process.env), ...(sh('tmux', ['show-environment', '-g']) ?? '').split('\n'), ...(sh('tmux', ['show-environment', '-t', `=${session}`]) ?? '').split('\n')].map((l) => l.replace(/^-/, '').split('=')[0]).filter((k) => SESSION_MARKERS.test(k)))].sort();
   return markers.length ? `env ${markers.map((k) => `-u ${k}`).join(' ')} ` : '';
 }
 // What a tmux server started here keeps in its global environment for every window it ever opens:
@@ -13554,7 +13924,8 @@ Setup and roles
   init [--name n] [--upstream-base vX]   project folders, settings, .gitignore, the devteam section of AGENTS.md
   prompt supervisor | worker <id> | planner <feature>    the prompt a session starts with
   supervisor-session                 the id of the supervisor's Claude Code conversation (claude --resume <id>); nothing if there's none, or another harness
-  recover [--dry-run] [--force] [--here] | recover --machine [--dry-run] [--force]   after a restart (a dead laptop, a redeploy): bring back this repo's supervisor, or every repo's on this machine, if it was up and its fleet isn't held, on its exact conversation where the harness can (Claude Code); --force also starts one the owner stopped or whose fleet is held; --here runs it in this terminal; safe to run twice
+  recover [--dry-run] [--force] [--here] | recover --machine [--dry-run] [--force] [--in <dir>…] [--was-up <list>] [--session s] [--only <repo>]   after a restart (a dead laptop, a redeploy): bring back this repo's supervisor, or every repo's on this machine, if it was up and its fleet isn't held, on its exact conversation where the harness can (Claude Code); --force also starts one the owner stopped or whose fleet is held; --here runs it in this terminal; safe to run twice. --in adds every adopted repo in a folder; --was-up names a list of roots that were up (a box's), used up as they come back; --session puts each in that tmux session as sup-<repo>
+  machine status [--questions] [--in <dir>…] [--notes <file>] | machine tell <repo> <message> | machine alert <text>|--clear | machine pane-state <pane>   every project on this machine (recorded in ~/.devteam, and under --in): a read-only digest, or the open questions not in --notes; a message into a repo's supervisor, marked as not the owner's, only when its pane is at its prompt; a line on the hub and the owner's devices; what a pane is at (ready busy dialog limit typing shell other unknown gone). tell and alert are the operator's or the owner's
   worker <ticket-id> [--resume [--if-gone]] [--force] | worker <ticket-id> --remove [--force] | planner <feature> [--goal <g-id>] [--resume] [--force] [--id-block <n>]   supervisor: a worktree, a tmux window and an agent for a ticket or a feature plan (a new planner names its goal and reserves n ticket numbers, default 20); refused while its goal is parked or let go, or draining for a session that hasn't run, unless --force (logged); --resume where no session exists starts fresh with the handoff note; worker --remove, once the ticket is merged and its worker logged phase done (--force before that), removes its worktree through the repo it belongs to and prunes that repo's worktree list (the branch stays)
   whoami | settings [--get key]
   hello [--json]                   who this instance is (root, name, kit, open questions, fleet): what the hub lists
@@ -13659,7 +14030,8 @@ Dashboard and releases
 
 // What the box's operator may run: reads only (a test runs each and diffs the log and git status). A
 // command that also writes is listed by its read forms, so `knowledge add` is refused like any write.
-// recover writes, and is allowed by name below: bringing a supervisor back is what the operator's for.
+// recover and machine write, and are allowed by name below: bringing a supervisor back, and the
+// machine's digest, word to a supervisor and alert, are what the operator's for.
 const OPERATOR_READS = new Set(['status', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'next', 'log', 'messages', 'knowledge', 'goal', 'goal list', 'goal show', 'fleet status']);
 const OPERATOR_SUBCOMMANDED = new Set(['fleet', 'goal', 'knowledge']);
 const COMMANDS = {
@@ -13670,7 +14042,7 @@ const COMMANDS = {
   ask: cmdAsk, answer: cmdAnswer, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, rate: cmdRate, next: cmdNext, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
   observe: cmdObserve, 'observe-link': cmdObserveLink, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, knowledge: cmdKnowledge, problem: cmdProblem,
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
-  log: cmdLog, record: cmdRecord, peek: cmdPeek, sensor: cmdSensor, 'log-check': cmdLogCheck, remediate: cmdRemediate, 'accounts-tick': cmdAccountsTick, 'supervisor-session': cmdSupervisorSession, recover: cmdRecover, dispose: cmdDispose, 'log-sync': cmdLogSync, history: cmdHistory,
+  log: cmdLog, record: cmdRecord, peek: cmdPeek, sensor: cmdSensor, 'log-check': cmdLogCheck, remediate: cmdRemediate, 'accounts-tick': cmdAccountsTick, 'supervisor-session': cmdSupervisorSession, recover: cmdRecover, machine: cmdMachine, dispose: cmdDispose, 'log-sync': cmdLogSync, history: cmdHistory,
   drain: cmdDrain, undrain: cmdUndrain, fleet: cmdFleet, handoff: cmdHandoff, wait: cmdWait,
   dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes,
 };
@@ -13678,7 +14050,7 @@ if (!command || command === 'help' || command === '--help') out(HELP);
 else if (!COMMANDS[command]) die(`unknown command "${command}"\n${HELP}`);
 // A cloud box's operator (process/operator.md) looks after the machine and reads every repo. Any other
 // role the kit doesn't know reads as the supervisor, so this one may only look.
-else if (process.env.DEVTEAM_ROLE === 'operator' && command !== 'recover' && !OPERATOR_READS.has(OPERATOR_SUBCOMMANDED.has(command) && positional[0] ? `${command} ${positional[0]}` : command)) die(`${command}: the operator only reads; this is for the repo's supervisor or its owner`);
+else if (process.env.DEVTEAM_ROLE === 'operator' && !['recover', 'machine'].includes(command) && !OPERATOR_READS.has(OPERATOR_SUBCOMMANDED.has(command) && positional[0] ? `${command} ${positional[0]}` : command)) die(`${command}: the operator only reads; this is for the repo's supervisor or its owner`);
 else {
   // --decision names the decision a command's act carries out; check it before the command does anything.
   if (flags.decision !== undefined) {

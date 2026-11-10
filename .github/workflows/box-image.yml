@@ -1,9 +1,10 @@
 # The box's image is otherwise first built by a release, on the owner's live box. Build it on every
-# change to it first (cloud/, and the hub page it copies).
+# change to it first (cloud/, and what it copies: the hub page, the operator's prompt, and the kit
+# its own commands run).
 name: box-image
 on:
   pull_request:
-    paths: ['cloud/**', 'docs/devteam/dashboard/hub.html', 'docs/devteam/process/operator.md', '.github/workflows/box-image.yml']
+    paths: ['cloud/**', 'docs/devteam/dashboard/hub.html', 'docs/devteam/process/operator.md', 'docs/devteam/scripts/**', 'docs/devteam/schema/**', '.github/workflows/box-image.yml']
 permissions:
   contents: read
 jobs:
@@ -12,4 +13,4 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - run: docker build -f cloud/Dockerfile -t box .
-      - run: docker run --rm --entrypoint sh box -ec 'box-supervisors --dry-run; box-pg nope 2>&1 | grep -q "no Postgres"; ffmpeg -version >/dev/null; chromium --version; test -f /opt/devteam/operator.md'
+      - run: docker run --rm --entrypoint sh box -ec 'box-recover --dry-run; box-status | grep -q "^machine: disk "; test "$(node /opt/devteam/kit/scripts/devteam.mjs machine pane-state %0)" = gone; ! command -v box-supervisors; box-pg nope 2>&1 | grep -q "no Postgres"; ffmpeg -version >/dev/null; chromium --version; test -f /opt/devteam/operator.md'
