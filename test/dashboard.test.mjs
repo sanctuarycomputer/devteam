@@ -11,6 +11,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { PORTS, kit, freePort, write, json, fleetFixture, bareProject, startDashboard, until, statusWithHost } from './lib/kit.mjs';
+import { canDrive, openChrome } from './lib/chrome.mjs';
 
 test('fleet drain: in-flight work finishes, nothing new starts, and a drained fleet moves with parity', () => {
   const F = fleetFixture('drain');
@@ -289,4 +290,180 @@ test('a question links a preview: the link for this page, with its state, and no
   const gone = previewLinkHtml(row('gone', null), me, esc);
   assert.doesNotMatch(gone, /<a /);
   assert.match(gone, /no longer offered/);
+});
+
+// The page polls every 10s here; the fixture polls every 300ms, and a test can stop /api/data
+// answering to catch a refresh in flight (the fetch outlasts the moment focus arrives).
+const POLL_FAST = `(() => {
+  const si = window.setInterval;
+  window.setInterval = (f, ms, ...a) => si(f, ms === 10000 ? 300 : ms, ...a);
+  const rf = window.fetch;
+  window.__polls = 0;
+  window.__gate = null;
+  window.__answerDelay = 0;
+  window.fetch = async (u, o) => {
+    if (String(u).startsWith('/api/data')) { window.__polls++; if (window.__gate) await window.__gate; return rf(u, o); }
+    if (String(u).startsWith('/api/answer') && window.__answerDelay) await new Promise((r) => setTimeout(r, window.__answerDelay));
+    return rf(u, o);
+  };
+})()`;
+
+test('typing in the dashboard: a refresh never takes the field, the caret or the scroll, and holding it can\'t wedge', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-focus-'));
+  const env = { ...process.env, DEVTEAM_HUB_PORT: String(PORTS + 80), DEVTEAM_PORT_BASE: String(PORTS + 81), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
+  for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'TMUX', 'TMUX_PANE']) delete env[k];
+  const root = bareProject(base, 'focus');
+  const ask = (q, ...more) => {
+    const r = spawnSync(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), 'ask', '--question', q, ...more], { cwd: root, env: { ...env, DEVTEAM_ROLE: 'supervisor' }, encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    return r.stdout.trim();
+  };
+  const Q = ask('Which way?', '--choices', '[{"label":"Left"},{"label":"Right"}]');
+  for (let i = 0; i < 12; i++) ask(`Filler ${i}?`); // enough cards that the page scrolls
+  const port = await freePort();
+  const dash = startDashboard(root, env, ['--port', String(port)]);
+  const chrome = await openChrome();
+  const p = await chrome.newPage();
+  try {
+    await until(() => /dashboard on http/.test(dash.out()), 'the dashboard');
+    await p.send('Page.enable');
+    await p.send('Runtime.enable');
+    await p.send('Emulation.setDeviceMetricsOverride', { width: 1100, height: 600, deviceScaleFactor: 1, mobile: false });
+    await p.send('Page.addScriptToEvaluateOnNewDocument', { source: POLL_FAST });
+    await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#questions` });
+    const box = `textarea[data-q="${Q}"]`;
+    const soon = async (expr, what) => { for (let i = 0; i < 300; i++) { const v = await p.ev(expr); if (v) return v; await new Promise((r) => setTimeout(r, 50)); } assert.fail(`timed out: ${what}`); };
+    await soon(`!!document.querySelector('${box}')`, 'the question card');
+    // Answered by polls actually arriving, however long /api/data takes.
+    const polls = async (n = 2) => { const at = await p.ev('window.__polls'); await soon(`window.__polls >= ${at + n}`, `${n} polls`); };
+    // jumped: a space on the page scrolls most of a screen; a pixel or two is a caret coming into view
+    const state = (y) => p.ev(`(() => { const a = document.activeElement, t = document.querySelector('${box}'); return { value: t.value, focus: a === t, start: t.selectionStart, end: t.selectionEnd, jumped: Math.abs(window.scrollY - ${y ?? 'window.scrollY'}) > 20 }; })()`);
+    const wrote = (v) => ({ value: v, focus: true, start: v.length, end: v.length, jumped: false });
+    // A new question lands in the log: the tab title says so at once, the cards wait.
+    const newQuestion = async (q) => {
+      const n = await p.ev(`Number((document.title.match(/\\((\\d+)\\)/) || [])[1])`);
+      ask(q);
+      await soon(`document.title.startsWith('(${n + 1})')`, `the title to count ${q}`);
+    };
+
+    await t.test('a refresh already in flight when you click in and type', async () => {
+      await p.ev('void (window.__gate = new Promise((r) => { window.__open = r; }))'); // void: evaluating a promise would wait for it
+      await polls(1);
+      await p.click(box);
+      const y = await p.ev('window.scrollY');
+      assert.ok(y > 0, 'the fixture page scrolls');
+      await p.type('hello');
+      await p.ev('window.__open(); window.__gate = null; window.__t = document.querySelector(\'' + box + '\')');
+      await polls();
+      assert.deepEqual(await state(y), wrote('hello'), 'still in the field after the refresh lands');
+      assert.equal(await p.ev('window.__t.isConnected'), true, 'the same field, not a redrawn one');
+      await p.type(' world');
+      assert.deepEqual(await state(y), wrote('hello world'), 'space typed, not scrolled');
+    });
+
+    await t.test('the caret and a selection stay where they were', async () => {
+      const y = await p.ev('window.scrollY');
+      for (let i = 0; i < 5; i++) await p.key('ArrowLeft');
+      await p.type('X');
+      await polls();
+      assert.deepEqual(await state(y), { value: 'hello Xworld', focus: true, start: 7, end: 7, jumped: false });
+      await p.key('ArrowRight', 8);
+      await p.key('ArrowRight', 8);
+      await polls();
+      assert.deepEqual(await state(y), { value: 'hello Xworld', focus: true, start: 7, end: 9, jumped: false });
+      for (let i = 0; i < 5; i++) await p.key('ArrowRight');
+    });
+
+    await t.test('while typing the title and the Inbox count stay fresh, the cards wait; focus leaving draws them', async () => {
+      const q = 'Arrived while you typed?';
+      await newQuestion(q);
+      assert.equal(await p.ev(`document.querySelector('#questions').textContent.includes(${JSON.stringify(q)})`), false, 'not drawn under the typing');
+      assert.equal(await p.ev(`document.getElementById('n-questions').textContent === document.title.match(/\\((\\d+)\\)/)[1]`), true, 'the Inbox count');
+      await p.key('Tab');
+      await soon(`document.querySelector('#questions').textContent.includes(${JSON.stringify(q)})`, 'the held data, once focus left');
+      assert.equal(await p.ev(`document.querySelector('${box}').value`), 'hello Xworld', 'the draft survives the redraw');
+      assert.notEqual(await p.ev('document.activeElement.tagName'), 'BODY', 'Tab lands on a control, and the redraw leaves it there');
+    });
+
+    await t.test('held for a long time: a hint, and clicking it draws without losing the field or the caret', async () => {
+      const y = await p.click(box).then(() => p.ev('window.scrollY'));
+      const q = 'Urgent while you were idle?';
+      await newQuestion(q);
+      assert.equal(await p.ev(`getComputedStyle($('held')).display`), 'none', 'no hint while typing normally');
+      await p.ev('(() => { const n = Date.now; Date.now = () => n() + 300000; })()');
+      await soon(`!$('held').hidden`, 'the hint');
+      await p.click('#held');
+      await soon(`document.querySelector('#questions').textContent.includes(${JSON.stringify(q)})`, 'the held data after the hint');
+      assert.equal(await p.ev(`$('held').hidden`), true, 'the hint goes once drawn');
+      const s = await state();
+      assert.equal(s.value, 'hello Xworld');
+      assert.equal(s.focus, true, 'still in the field');
+      assert.equal(s.start, 12, 'caret kept');
+      await p.type('Z');
+      assert.equal((await state()).value, 'hello XworldZ');
+      assert.equal((await state(y)).jumped, false, 'and the page stayed put');
+    });
+
+    await t.test('an IME composition is not drawn over', async () => {
+      await p.send('Input.imeSetComposition', { text: 'かな', selectionStart: 2, selectionEnd: 2 });
+      await newQuestion('Mid composition?');
+      await polls();
+      const v = await p.ev(`document.querySelector('${box}').value`);
+      assert.match(v, /かな$/, 'the composition is still there');
+      await p.send('Input.insertText', { text: 'かな' });
+      assert.match(await p.ev(`document.querySelector('${box}').value`), /Zかな$/);
+      assert.equal(await p.ev('document.activeElement.tagName'), 'TEXTAREA');
+    });
+
+    await t.test('a radio in the card still picks with a draft and held data, and a space after it doesn\'t scroll', async () => {
+      await newQuestion('Before the radio?');
+      await p.click(`input[data-pick="${Q}"][value="Right"]`);
+      await soon(`document.querySelector('#questions').textContent.includes('Before the radio?')`, 'the redraw after the click');
+      assert.equal(await p.ev(`document.querySelector('input[data-pick="${Q}"][value="Right"]').checked`), true, 'the pick took');
+      assert.equal(await p.ev(`document.activeElement.dataset.pick`), Q, 'focus is back on the radio, not on the page');
+      const y = await p.ev('window.scrollY');
+      await p.key(' ');
+      await new Promise((r) => setTimeout(r, 300));
+      assert.equal((await state(y)).jumped, false, 'space on the radio does not scroll');
+      assert.match(await p.ev(`document.querySelector('${box}').value`), /Zかな$/, 'draft intact');
+    });
+
+    await t.test('a control that keeps focus without typing doesn\'t stop the page refreshing', async () => {
+      await p.click('#left-only');
+      const q = 'After the checkbox?';
+      ask(q);
+      await soon(`document.querySelector('#questions').textContent.includes(${JSON.stringify(q)})`, 'a redraw with a checkbox focused');
+      await p.click('#left-only'); // leave the setting as it was
+      await p.ev(`document.activeElement.blur()`);
+    });
+
+    await t.test('an open select is left alone, and a list closed without a choice can\'t stop the refreshing', async () => {
+      await p.ev(`window.__o = $('view').options[0]`);
+      await p.click('#view');
+      await polls();
+      assert.equal(await p.ev(`window.__o.isConnected`), true, 'its options are not redrawn');
+      await p.key('Escape');
+      await p.ev('(() => { const n = Date.now; Date.now = () => n() + 120000; })()');
+      await soon(`!window.__o.isConnected`, 'the page drawing again, no change event to say so');
+      await p.ev(`document.activeElement.blur()`);
+    });
+
+    await t.test('Answer still works with a draft and held data, and isn\'t redrawn while it posts', async () => {
+      await p.click(box);
+      await newQuestion('Before the answer?');
+      await p.ev('window.__answerDelay = 900');
+      await p.click(`button[data-answer="${Q}"]`);
+      await soon(`document.querySelector('button[data-answer="${Q}"]')?.textContent === 'Posting…'`, 'the button posting');
+      await polls();
+      assert.equal(await p.ev(`document.querySelector('button[data-answer="${Q}"]')?.getAttribute('aria-busy')`), 'true', 'not redrawn mid-post');
+      await soon(`!document.querySelector('${box}')`, 'the card answered and gone');
+      const listed = spawnSync(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), 'questions', '--all', '--json'], { cwd: root, env, encoding: 'utf8' });
+      assert.equal(JSON.parse(listed.stdout).find((x) => x.id === Q)?.status, 'answered', listed.stderr);
+    });
+  } finally {
+    p.close();
+    await chrome.close();
+    await dash.stop();
+    fs.rmSync(base, { recursive: true, force: true });
+  }
 });

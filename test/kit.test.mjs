@@ -19,6 +19,8 @@ import { testDir } from './lib/kit.mjs';
 // some see other values than they would in line: a listing without another fork's lines.
 const FORKS = [
   ['goal measures:'],
+  ['sensor credentials:'],
+  ['sensors: what a probe prints stays in its frame'],
   ['review-worktree:'],
   ['an answer the owner gave in the supervisor chat'],
   ['questions carry choices'],

@@ -173,7 +173,19 @@ if [ -n "$status" ]; then
   trend=
   [ -z "$was_free" ] || [ "$(( (free - was_free) / 1048576 ))" -eq 0 ] || trend=" ($(awk -v f="$free" -v w="$was_free" 'BEGIN { d = (f - w) / 1048576; printf "%+.0fG", d }') in $(( (now - ${was_at:-$now}) / 60 ))m)"
   low=; if [ "$free" -lt 20971520 ] || [ $((free * 100 / (total + 1))) -lt 15 ]; then low=' LOW'; fi
-  echo "box: disk $(gb "$free") free of $(gb "$total")$low$trend; memory $(awk '/MemAvailable/ { a = $2 } /MemTotal/ { t = $2 } END { printf "%.1f GB free of %.1f GB", a / 1048576, t / 1048576 }' /proc/meminfo 2>/dev/null); load $(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)"
+  # The box's own caps, not the host's: a platform caps CPU and memory in the cgroup, while
+  # /proc/meminfo and nproc say what the whole machine has (a 4-CPU, 16 GB box reads 32 CPUs, 123 GB).
+  cg=${DEVTEAM_CGROUP:-/sys/fs/cgroup}
+  if [ -r "$cg/memory.max" ] && [ "$(cat "$cg/memory.max")" != max ]; then
+    # in use: what the kernel can't drop (the page cache it can), against the cap
+    mem=$(awk -v max="$(cat "$cg/memory.max")" -v cur="$(cat "$cg/memory.current" 2>/dev/null || echo 0)" '$1 == "file" { f = $2 } END { u = cur - f; if (u < 0) u = 0; printf "%.1f GB in use of %.1f GB", u / 1073741824, max / 1073741824 }' "$cg/memory.stat" 2>/dev/null)
+  else
+    mem=$(awk '/MemAvailable/ { a = $2 } /MemTotal/ { t = $2 } END { printf "%.1f GB free of %.1f GB", a / 1048576, t / 1048576 }' /proc/meminfo 2>/dev/null)
+  fi
+  # the CPUs it may use, and how much of the last minute every task stood waiting for one
+  cpus=$(awk '$1 != "max" && $2 > 0 { printf "%g", $1 / $2 }' "$cg/cpu.max" 2>/dev/null); [ -n "$cpus" ] || cpus=$(nproc 2>/dev/null || echo '?')
+  stall=$(awk '/^full/ { for (i = 2; i <= NF; i++) if ($i ~ /^avg60=/) { sub(/avg60=/, "", $i); printf "%.0f", $i } }' "$cg/cpu.pressure" 2>/dev/null)
+  echo "box: disk $(gb "$free") free of $(gb "$total")$low$trend; memory $mem; cpus $cpus${stall:+ (all waiting ${stall}% of the last minute)}; load $(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)"
   # the freshest of each repo's record of its accounts (accounts-tick writes it each minute); read, cswap itself is never run here
   acc=$(while read -r r; do jq -r 'select(.at) | [.at, (if .cswap then "cswap" else "no-cswap" end), (.active // "?"), (.exhausted // false), (.active_no_room // false), ((.needs_login // []) | join(","))] | @tsv' "$r/docs/devteam/run/accounts.json" 2>/dev/null; done < "$tmp/adopted" | sort -r | head -1)
   if [ -n "$acc" ]; then
