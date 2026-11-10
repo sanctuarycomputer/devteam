@@ -2048,3 +2048,96 @@ test('a preview that is down, ambiguous or unknown answers 503, a page only to a
     await new Promise((res) => hub.srv.listen(HUB, '127.0.0.1', res));
   } finally { await gw.close(); await new Promise((res) => hub.srv.close(res)); dev.close(); }
 });
+
+// A WebSocket by hand: the handshake with the headers a browser sends, then masked text frames.
+function wsClient(gwPort, host, { origin, cookie, path: route = '/hmr?token=abc', key = 'dGhlIHNhbXBsZSBub25jZQ==' } = {}) {
+  return new Promise((resolve) => {
+    const sock = net.connect(gwPort, '127.0.0.1');
+    let buf = Buffer.alloc(0);
+    let handshaken = false;
+    const frames = [];
+    const waiters = [];
+    sock.on('connect', () => sock.write(`GET ${route} HTTP/1.1\r\nhost: ${host}\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-version: 13\r\nsec-websocket-key: ${key}\r\n${origin ? `origin: ${origin}\r\n` : ''}${cookie ? `cookie: ${cookie}\r\n` : ''}\r\n`));
+    const parse = () => {
+      while (buf.length >= 2) {
+        const len = buf[1] & 127;
+        if (buf.length < 2 + len) return;
+        frames.push(buf.subarray(2, 2 + len).toString());
+        buf = buf.subarray(2 + len);
+        for (const w of waiters.splice(0)) w();
+      }
+    };
+    sock.on('data', (d) => {
+      buf = Buffer.concat([buf, d]);
+      if (!handshaken) {
+        const i = buf.indexOf('\r\n\r\n');
+        if (i < 0) return;
+        const head = buf.subarray(0, i).toString();
+        buf = buf.subarray(i + 4);
+        handshaken = true;
+        resolve({ status: Number(/HTTP\/1\.1 (\d+)/.exec(head)[1]), head, sock, frames, send, next, close: () => sock.destroy() });
+      }
+      parse();
+    });
+    const send = (text) => { const mask = Buffer.from([1, 2, 3, 4]); const body = Buffer.from(text).map((b, i) => b ^ mask[i % 4]); sock.write(Buffer.concat([Buffer.from([0x81, 0x80 | body.length]), mask, body])); };
+    const next = () => new Promise((r) => { if (frames.length) return r(frames.shift()); waiters.push(() => r(frames.shift())); });
+    sock.on('error', () => {});
+    sock.on('close', () => { if (!handshaken) resolve({ status: 0 }); });
+  });
+}
+
+test('a preview\'s WebSocket is relayed, with the link\'s Origin mapped, and capped', async () => {
+  const S = await previewSetup('preview-ws');
+  const { gw, hub, instance, origin, on } = S;
+  const seen = [];
+  let upstreamClosed = 0;
+  const devPort = await freePort();
+  const dev = http.createServer((q, s) => s.end('page'));
+  dev.on('upgrade', (q, sock) => {
+    seen.push({ url: q.url, h: q.headers });
+    const accept = crypto.createHash('sha1').update(`${q.headers['sec-websocket-key']}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
+    sock.write(`HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-accept: ${accept}\r\n\r\n`);
+    sock.on('error', () => {});
+    sock.on('end', () => sock.end()); // an http server's socket is half-open until told
+    sock.on('close', () => { upstreamClosed++; });
+    sock.on('data', (d) => {
+      // a masked client frame back unmasked
+      const len = d[1] & 127;
+      const mask = d.subarray(2, 6);
+      const body = Buffer.from(d.subarray(6, 6 + len)).map((b, i) => b ^ mask[i % 4]);
+      sock.write(Buffer.concat([Buffer.from([0x81, len]), body]));
+    });
+  });
+  await new Promise((r) => dev.listen(devPort, '127.0.0.1', r));
+  const site = origin('cool-tiger');
+  const sockets = [];
+  try {
+    hub.list = [instance('/srv/alpha', P, [previewRow('cool-tiger', devPort)])];
+    await gw.g.pollPush();
+    let c = await wsClient(gw.port, on('cool-tiger'), { origin: site, cookie: gw.jar() });
+    assert.equal(c.status, 101);
+    assert.equal(seen.at(-1).url, '/hmr?token=abc', 'the query passes untouched');
+    assert.equal(seen.at(-1).h.host, `localhost:${devPort}`);
+    assert.equal(seen.at(-1).h.origin, `http://localhost:${devPort}`);
+    assert.doesNotMatch(String(seen.at(-1).h.cookie ?? ''), /devteam_session/);
+    c.send('hello socket');
+    assert.equal(await c.next(), 'hello socket', 'a frame comes back through the relay');
+    const count = upstreamClosed;
+    c.close();
+    await until(() => upstreamClosed > count, 'the upstream socket to close when the client goes');
+    assert.equal((await wsClient(gw.port, on('cool-tiger'), { origin: site })).status, 401, 'no session');
+    assert.equal((await wsClient(gw.port, on('cool-tiger'), { origin: 'https://other.example', cookie: gw.jar() })).status, 403, 'another Origin');
+    assert.equal((await wsClient(gw.port, on('never-heard'), { origin: origin('never-heard'), cookie: gw.jar() })).status, 503, 'no refresh on an upgrade: unknown is unknown');
+    // the cap: 32 open, the 33rd refused, and none of the others closed
+    for (let i = 0; i < 32; i++) { const w = await wsClient(gw.port, on('cool-tiger'), { origin: site, cookie: gw.jar() }); assert.equal(w.status, 101, `socket ${i}`); sockets.push(w); }
+    assert.equal((await wsClient(gw.port, on('cool-tiger'), { origin: site, cookie: gw.jar() })).status, 429, 'the 33rd is refused');
+    sockets[0].send('still here');
+    assert.equal(await sockets[0].next(), 'still here');
+    // two instances claim it: neither is relayed
+    hub.list = [instance('/srv/alpha', P, [previewRow('cool-tiger', devPort)]), instance('/srv/beta', P + 1, [previewRow('cool-tiger', devPort)])];
+    await gw.g.pollPush();
+    assert.equal((await wsClient(gw.port, on('cool-tiger'), { origin: site, cookie: gw.jar() })).status, 503, 'ambiguous');
+    // the terminal's socket is unchanged
+    assert.equal((await wsClient(gw.port, `term.${S.box}`, { origin: gw.term, path: '/nope', cookie: gw.jar() })).status, 404);
+  } finally { for (const w of sockets) w.close?.(); await S.close(); dev.closeAllConnections?.(); dev.close(); }
+});

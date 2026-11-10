@@ -1656,9 +1656,51 @@ export function createGateway(opts = {}) {
     socket.end(`HTTP/1.1 431 Request Header Fields Too Large\r\nclear-site-data: "cookies"\r\ncontent-type: text/plain\r\nconnection: close\r\ncontent-length: ${body.length}\r\n\r\n${body}`);
   });
 
-  // The terminal's WebSocket, the one upgrade there is: the terminal's name, its Origin, a session.
+  // A preview's sockets (HMR, mostly): the checks an instance's request gets, a cap per name so a
+  // client's reconnect loop can't exhaust the gateway, and the terminal's raw relay. No hub refresh on
+  // a miss: the page that opened the socket already made one.
+  const PREVIEW_SOCKETS = 32;
+  const previewSockets = new Map();
+  const previewUpgrade = async (req, socket, head, name, refuse) => {
+    const own = previewOrigin(name);
+    if (req.headers.origin !== own) return refuse(403, 'Forbidden');
+    try { if (!store.load().passkeys.length || !sessionOf(req)) return refuse(401, 'Unauthorized'); } catch { return refuse(503, 'Service Unavailable'); }
+    if (!req.url.startsWith('/') || req.url.startsWith('//')) return refuse(400, 'Bad Request');
+    const link = previews.get(name);
+    if (!link || link.ambiguous) return refuse(503, 'Service Unavailable');
+    const open = previewSockets.get(name) ?? new Set();
+    if (open.size >= PREVIEW_SOCKETS) return refuse(429, 'Too Many Requests');
+    const host = await previewHost(link.port);
+    if (socket.destroyed) return undefined;
+    if (!host) return refuse(503, 'Service Unavailable');
+    if (open.size >= PREVIEW_SOCKETS) return refuse(429, 'Too Many Requests');
+    previewSockets.set(name, open);
+    open.add(socket);
+    const drop = () => { open.delete(socket); if (!open.size && previewSockets.get(name) === open) previewSockets.delete(name); };
+    socket.once('close', drop);
+    const up = net.connect(link.port, host);
+    up.on('error', () => socket.destroy());
+    socket.on('error', () => up.destroy());
+    socket.on('close', () => up.destroy());
+    up.on('connect', () => {
+      if (socket.destroyed) return up.destroy();
+      const h = upstreamHeaders(req, link.port, own, { loopbackHost: 'localhost' });
+      h.connection = 'Upgrade';
+      h.upgrade = req.headers.upgrade;
+      const lines = [`GET ${req.url} HTTP/1.1`, ...Object.entries(h).map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : v}`)];
+      up.write(`${lines.join('\r\n')}\r\n\r\n`);
+      if (head?.length) up.write(head);
+      pipeline(up, socket, () => {});
+      pipeline(socket, up, () => {});
+      return undefined;
+    });
+    return undefined;
+  };
+  // The terminal's WebSocket, on the terminal's name, its Origin, a session; and any preview's.
   server.on('upgrade', (req, socket, head) => {
     const refuse = (code, msg) => { socket.end(`HTTP/1.1 ${code} ${msg}\r\nconnection: close\r\ncontent-length: 0\r\n\r\n`); };
+    const pv = previewOf(req.headers.host);
+    if (pv) return previewUpgrade(req, socket, head, pv, refuse).catch(() => socket.destroy());
     if (req.headers.host !== termHost) return refuse(421, 'Misdirected Request');
     if (req.headers.origin !== TERM) return refuse(403, 'Forbidden');
     try { if (!store.load().passkeys.length || !sessionOf(req)) return refuse(401, 'Unauthorized'); } catch { return refuse(503, 'Service Unavailable'); }
