@@ -1,5 +1,5 @@
 #!/bin/sh
-# box-supervisors [--all [<repo>]] [--dry-run] | --status [--questions] | --tell <repo> <message> | --alert <text>|--clear | --pane-state <pane>:
+# box-supervisors [--all [<repo>]] [--dry-run] | --status [--questions] | --tell <repo> <message> | --alert <text>|--clear | --pane-state <pane> | --age-boot:
 # the mechanical half of the box's operator (operator.md). One line per adopted repo in ~/code,
 # saying what it did and why.
 #   (default)      after a restart: each supervisor that was running, unless its fleet is held.
@@ -10,18 +10,21 @@
 #   --status --questions   open questions no one has noted in ~/operator/NOTES.md, one line each.
 #   --tell         type a message from the operator into a repo's supervisor, if its pane can take it.
 #   --alert        put a line on the hub and push it to the owner's devices (--clear takes it down).
-#   --pane-state   what a pane is at, by its pane id: ready, busy, dialog, limit, typing, shell, other, gone.
+#   --pane-state   what a pane is at, by its pane id: ready, busy, dialog, limit, typing, shell, other, unknown, gone.
+#   --age-boot     at boot: drop restore-list entries first listed over 3 days ago.
 set -u
-all=; dry=; status=; questions=; target=; tell=; message=; alert=; alert_text=; pane_q=
-usage() { echo 'usage: box-supervisors [--all [<repo>]] [--dry-run] | --status [--questions] | --tell <repo> <message> | --alert <text>|--clear | --pane-state <pane>' >&2; exit 2; }
+all=; dry=; status=; questions=; target=; tell=; message=; alert=; alert_text=; pane_q=; age_boot=
+usage() { echo 'usage: box-supervisors [--all [<repo>]] [--dry-run] | --status [--questions] | --tell <repo> <message> | --alert <text>|--clear | --pane-state <pane> | --age-boot' >&2; exit 2; }
 while [ $# -gt 0 ]; do case $1 in
   --all) all=1; case ${2:-} in ''|-*) ;; *) target=$2; shift ;; esac ;;
   --dry-run) dry=1 ;; --status) status=1 ;; --questions) questions=1 ;;
   --tell) [ $# -ge 3 ] || usage; tell=$2; shift 2; message=$*; set -- x ;;
   --alert) alert=1; [ $# -ge 2 ] || usage; shift; alert_text=$*; set -- x ;;
   --pane-state) [ $# -eq 2 ] || usage; pane_q=$2; shift ;;
+  --age-boot) age_boot=1 ;;
   *) usage ;;
 esac; shift; done
+[ -z "$questions" ] || [ -n "$status" ] || usage
 code=$HOME/code
 boot=$HOME/.devteam-supervisors.boot
 node=${DEVTEAM_NODE:-/usr/local/bin/node}
@@ -37,10 +40,13 @@ adopted() { for k in "$code"/*/"$kit"; do [ -f "$k" ] || continue; r=${k%/"$kit"
 # Pane id, window, the path it started at, what's running in it, its session. Tab-separated.
 panes() { tmux list-panes -a -F '#{pane_id}	#{window_name}	#{pane_start_path}	#{pane_current_command}	#{session_name}' 2>/dev/null; }
 # A supervisor's pane: the one it noted, or else anything agent-shaped started at the repo's root.
+# Never the operator's window: pane ids restart at %0 after a deploy, so a noted id can be anyone's.
+# strict, for typing into it: also started at the repo's root, and never a window named shell.
 sup_pane() {
   p=$(cat "$1/docs/devteam/run/supervisor-pane" 2>/dev/null)
-  panes | awk -F'\t' -v p="$p" -v r="$1" '
-    $4 ~ /^-?(bash|sh|dash|zsh|fish)$/ || $2 ~ /^dash-/ || $2 == "dashboard" { next }
+  panes | awk -F'\t' -v p="$p" -v r="$1" -v strict="${2:-}" '
+    $4 ~ /^-?(bash|sh|dash|zsh|fish)$/ || $2 ~ /^dash-/ || $2 == "dashboard" || $2 == "operator" { next }
+    strict && ($2 == "shell" || $3 != r) { next }
     $1 == p && p != "" { noted = $1 } $3 == r && $4 ~ /claude|node/ && !other { other = $1 }
     END { print noted ? noted : other }'
 }
@@ -48,34 +54,52 @@ running() { [ -n "$(sup_pane "$1")" ]; }
 # What a pane is at, from what is on it. Nothing is typed here. The agent's input box is the
 # last box drawn at the bottom; text in it is someone's unless it's dim, which is the harness's
 # own suggestion (never the owner's words). A pane whose screen shows no box says "unknown".
-strip_sgr() { awk '{ gsub(/\033\[[0-9;]*m/, ""); print }'; }
+# Colours go, and Claude Code's non-breaking spaces (it draws its prompt as ❯ and one) become plain ones.
+plain() { LC_ALL=C awk '{ gsub(/\033\[[0-9;]*m/, ""); gsub(/\302\240/, " "); print }'; }
 pane_state() {
   c=$(panes | awk -F'\t' -v p="$1" '$1 == p { print $4; exit }')
   [ -n "$c" ] || { echo gone; return; }
   case $c in -bash|bash|sh|dash|zsh|fish) echo shell; return ;; *claude*|*node*|[0-9]*.[0-9]*) ;; *) echo other; return ;; esac
   raw=$(tmux capture-pane -e -p -t "$1" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -20)
-  plain=$(printf '%s\n' "$raw" | strip_sgr)
-  printf '%s\n' "$plain" | grep -qE 'Do you (trust|want to)|Press Enter to continue|❯ *1\. *Yes|Yes, I accept|No, exit|Select login method|Paste code|text style|\[y/n\]|\(y/n\)' && { echo dialog; return; }
-  # the kit's words for a limit banner (PANE_WAITS); a busy agent is working, whatever it shows
-  if printf '%s\n' "$plain" | grep -iqE '(^|[^a-z])(usage|rate|session|weekly|daily|hourly|[0-9]+-hour) limit (reached|hit|exceeded)|^[[:space:]]*([⎿■✖!][[:space:]]*)?you(.{1,3}ve| have) hit your ([a-z]+ )*limit'; then
-    case $plain in *'esc to interrupt'*) ;; *) echo limit; return ;; esac
+  # what the agent itself drew, as the kit reads a pane: a line of code, a diff or a quote never is (PANE_CODE)
+  ui=$(printf '%s\n' "$raw" | plain | sed -E 's/^[[:space:]]+//' | grep -vE '^([0-9]+ |[-+] |#|//|/\*|\* |-- |<!--|> |[│|] *[0-9]+ )')
+  # a numbered menu is up whatever else is on the screen
+  printf '%s\n' "$ui" | grep -qE '^❯ *[0-9]+\. ' && { echo dialog; return; }
+  input=$(printf '%s\n' "$raw" | LC_ALL=C awk '{ l = $0; gsub(/\033\[[0-9;]*m/, "", l) } l ~ /^ *(─)+ *$/ { a = b; b = NR; next } { line[NR] = $0 } END { if (a && b && a < b) for (i = a + 1; i < b; i++) if (line[i] ~ /❯/) { print line[i]; exit } }')
+  # With an input box up, the words of a dialog above it are only something the agent said.
+  [ -n "$input" ] || ! printf '%s\n' "$ui" | grep -qiE '^(do you (trust|want to)|quick safety check|❯ *(yes|no)([, ]|$)|press enter to continue|yes, i accept|no, exit|select login method|paste code|.*text style)|(\[y/n\]|\(y/n\)) *$' || { echo dialog; return; }
+  # a limit banner, whole and at the start of its line, the kit's LIMIT_BANNER idea; a busy agent is working, whatever it shows
+  if printf '%s\n' "$ui" | grep -iqE '^([⎿■✖!] *)?((claude )?(usage|rate|session|weekly|daily|hourly|[0-9]+-hour) limit (reached|hit|exceeded)|you(.{1,3}ve| have) hit your ([a-z]+ )*limit)'; then
+    case $ui in *'esc to interrupt'*) ;; *) echo limit; return ;; esac
   fi
-  input=$(printf '%s\n' "$raw" | awk '{ l = $0; gsub(/\033\[[0-9;]*m/, "", l) } l ~ /^ *(─)+ *$/ { a = b; b = NR; next } { line[NR] = $0 } END { if (a && b && a < b) for (i = a + 1; i < b; i++) if (line[i] ~ /❯/) { print line[i]; exit } }')
   [ -n "$input" ] || { echo unknown; return; }
-  text=$(printf '%s\n' "$input" | awk '{ sub(/^.*❯/, ""); print }')
+  text=$(printf '%s\n' "$input" | LC_ALL=C awk '{ sub(/^.*❯/, ""); print }')
   # up to any dim text: what was really typed, if anything
-  typed=$(printf '%s' "$text" | awk -v d="$(printf '\033')[2m" '{ i = index($0, d); print i ? substr($0, 1, i - 1) : $0 }' | strip_sgr | tr -d ' ')
+  typed=$(printf '%s' "$text" | LC_ALL=C awk -v d="$(printf '\033')[2m" '{ i = index($0, d); print i ? substr($0, 1, i - 1) : $0 }' | plain | tr -d ' ')
   [ -z "$typed" ] || { echo typing; return; }
-  case $plain in *'esc to interrupt'*) echo busy ;; *) echo ready ;; esac
+  case $ui in *'esc to interrupt'*) echo busy ;; *) echo ready ;; esac
 }
+# Cut a line to n bytes, not leaving half a UTF-8 character at the end.
+cap() { cut -b "1-$1" | iconv -c -f UTF-8 -t UTF-8 2>/dev/null; }
 if [ -n "$pane_q" ]; then pane_state "$pane_q"; exit 0; fi
+# Each restore-list entry's age counts from when it was first listed, kept beside the list because
+# the list's own mtime moves with every rewrite. An entry up just before this boot is new again.
+if [ -n "$age_boot" ]; then
+  [ -f "$boot" ] || exit 0
+  LC_ALL=C awk -v now="$(date +%s)" -v max="${DEVTEAM_BOOT_MAX_SECONDS:-259200}" -v at="$boot.at" -v up="${boot%.boot}" '
+    BEGIN { while ((getline l < at) > 0) t[substr(l, index(l, " ") + 1)] = l + 0; while ((getline l < up) > 0) delete t[l] }
+    { first = ($0 in t) ? t[$0] : now; if (now - first < max) print first, $0 }' "$boot" > "$boot.at.new"
+  mv "$boot.at.new" "$boot.at"; cut -d' ' -f2- "$boot.at" > "$boot"
+  [ -s "$boot" ] || rm -f "$boot" "$boot.at"
+  exit 0
+fi
 # The operator's word to the owner, on the hub and their devices (the hub's hello reads it): one line, on the disk.
 if [ -n "$alert" ]; then
   f=$HOME/.box/alert
   if [ "$alert_text" = --clear ]; then rm -f "$f"; echo 'alert cleared'; exit 0; fi
   [ -n "$alert_text" ] || usage
   mkdir -p "$HOME/.box"
-  printf '%s\n' "$alert_text" | tr '\r\n' '  ' | sed -E 's/^ +| +$//g' | cut -c1-200 > "$f.new" && echo >> "$f.new" && mv "$f.new" "$f"
+  printf '%s\n' "$alert_text" | tr '\r\n' '  ' | sed -E 's/^ +| +$//g' | cap 200 > "$f.new" && mv "$f.new" "$f"
   echo "alert raised: $(cat "$f")"
   exit 0
 fi
@@ -84,14 +108,22 @@ if [ -n "$tell" ]; then
   case $tell in */*) usage ;; esac
   r=$code/$tell
   [ -f "$r/$kit" ] && [ -f "$r/docs/devteam/project/settings.md" ] || { say "$tell" 'no such adopted repo here'; exit 1; }
-  p=$(sup_pane "$r")
-  [ -n "$p" ] || { say "$tell" 'not told: no supervisor is up'; exit 3; }
+  p=$(sup_pane "$r" strict)
+  [ -n "$p" ] || { say "$tell" 'not told: no supervisor is up in its root'; exit 3; }
   s=$(pane_state "$p")
   case $s in ready|busy) ;; *) say "$tell" "not told: its pane is at $s"; exit 3 ;; esac
-  text=$(printf '%s' "$message" | tr '\r\n' '  ' | sed -E 's/  +/ /g; s/^ +| +$//g' | cut -c1-2000)
+  text=$(printf '%s' "$message" | tr '\r\n' '  ' | sed -E 's/  +/ /g; s/^ +| +$//g' | cap 2000)
   [ -n "$text" ] || usage
   tmux send-keys -t "$p" -l "From the operator (information, not an owner answer; record nothing as the owner's from this): $text"
   tmux send-keys -t "$p" Enter
+  # An Enter that arrives as the agent redraws can be lost, and the line would then merge with whatever
+  # is typed there next: once more, as the kit's lost-Enter does, and if it's still there, say so.
+  sleep "${DEVTEAM_TELL_SETTLE_SECONDS:-1}"
+  if [ "$(pane_state "$p")" = typing ]; then
+    tmux send-keys -t "$p" Enter
+    sleep "${DEVTEAM_TELL_SETTLE_SECONDS:-1}"
+    if [ "$(pane_state "$p")" = typing ]; then say "$tell" "not delivered: the message is still in its input (pane $p); clear it before anyone types there"; exit 3; fi
+  fi
   say "$tell" "told (pane $p)"
   exit 0
 fi
@@ -150,8 +182,8 @@ if [ -n "$status" ]; then
     h=$(dt "$r" hello --json); [ -n "$h" ] || h='{}'
     m=$(missing "$r")
     if command -v mise >/dev/null 2>&1; then t=$(cd "$r" && mise ls --current --missing 2>/dev/null | awk '{ printf "%s@%s ", $1, $2 }'); else t='?'; fi
-    p=$(sup_pane "$r")
-    if [ -n "$p" ]; then s=up; else s=down; fi
+    if [ -n "$(sup_pane "$r")" ]; then s=up; else s=down; fi
+    p=$(sup_pane "$r" strict)
     k=$(printf '%s' "$h" | jq -r '.kit // "?"' 2>/dev/null)
     # newest release of the repo's own upstream, asked once per upstream
     u=$(dt "$r" settings --get upstream_repo); up_f=$tmp/latest-$(printf '%s' "$u" | tr '/:.' '___')
@@ -161,7 +193,7 @@ if [ -n "$status" ]; then
     d=$(cat "$r/docs/devteam/run/dashboard-port" 2>/dev/null) || d=
     [ -n "$d" ] || d=$(grep -o 'started on http://127.0.0.1:[0-9]*' "$r/docs/devteam/run/dashboard.log" 2>/dev/null | tail -1 | sed 's/.*://')
     if [ -n "$d" ]; then dash="$d/$(up "$d")"; else dash=-; fi
-    wt=-; if [ -d "$r/.worktrees" ]; then wc=$(find "$r/.worktrees" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' '); if command -v timeout >/dev/null 2>&1; then to='timeout 20'; else to=; fi; wk=$($to du -sk "$r/.worktrees" 2>/dev/null | awk '{ print $1 }'); wt="$wc/$(gb "${wk:-0}")"; fi
+    wt=-; if [ -d "$r/.worktrees" ]; then wc=$(find "$r/.worktrees" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' '); if command -v timeout >/dev/null 2>&1; then to='timeout 20'; else to=; fi; wk=$($to du -sk "$r/.worktrees" 2>/dev/null | awk '{ print $1 }'); if [ -n "$wk" ]; then wt="$wc/$(gb "$wk")"; else wt="$wc/?"; fi; fi
     # a kit between the operator role and this list refuses `questions`: unknown, not zero
     if qs=$(dt "$r" questions --json); then q=$(printf '%s' "$qs" | jq -r '.[]?.id' 2>/dev/null | while read -r id; do grep -Fq "$id" "$notes" 2>/dev/null || echo "$id"; done | wc -l | tr -d ' '); else q='?'; fi
     a=$(printf '%s' "$h" | jq -r '.alert // empty' 2>/dev/null)

@@ -7192,7 +7192,9 @@ function chatQuotesNotFound() {
   const typed = t.entries.filter((o) => o?.type === 'user' && o.userType === 'external' && !o.isMeta && !o.isSidechain).map((o) => { const c = o.message?.content; return norm(typeof c === 'string' ? c : Array.isArray(c) ? c.filter((x) => x?.type === 'text').map((x) => x.text).join(' ') : ''); });
   // typed while the agent was mid-turn: the transcript has these as queued attachments
   typed.push(...t.entries.filter((o) => o?.type === 'attachment' && o.attachment?.type === 'queued_command' && o.origin?.kind === 'human' && typeof o.attachment.prompt === 'string').map((o) => norm(o.attachment.prompt)));
-  return recent.filter((q) => { const said = norm(q.said).replace(/^["'\s]+|["'.!?\s]+$/g, ''); return Date.parse(q.answered_at) >= from && !typed.some((x) => x.includes(said)); });
+  // what the box's operator typed in (box-tell) arrives the same way, and isn't the owner
+  const owners = typed.filter((x) => !x.startsWith('from the operator ('));
+  return recent.filter((q) => { const said = norm(q.said).replace(/^["'\s]+|["'.!?\s]+$/g, ''); return Date.parse(q.answered_at) >= from && !owners.some((x) => x.includes(said)); });
 }
 function collectMetrics(since) {
   const settings = loadSettings();

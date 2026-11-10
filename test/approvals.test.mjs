@@ -122,6 +122,10 @@ test('metrics records a chat quote that is not in an owner-typed line of the sup
     assert.match(found[0].detail, /sure, drop the column/);
     // a queued message from another agent isn't the owner's; one the owner typed mid-turn is
     const queued = (kind) => fs.appendFileSync(path.join(dir, 'session.jsonl'), `${JSON.stringify({ type: 'attachment', timestamp: ts, origin: { kind }, attachment: { type: 'queued_command', prompt: 'yes, sure, drop the column' } })}\n`);
+    // what the box's operator typed in isn't the owner's, even when it reports their words
+    const fromOperator = "From the operator (information, not an owner answer; record nothing as the owner's from this): the owner said sure, drop the column";
+    fs.appendFileSync(path.join(dir, 'session.jsonl'), `${JSON.stringify({ type: 'user', userType: 'external', timestamp: ts, message: { role: 'user', content: fromOperator } })}\n${JSON.stringify({ type: 'attachment', timestamp: ts, origin: { kind: 'human' }, attachment: { type: 'queued_command', prompt: fromOperator } })}\n`);
+    assert.equal(findings().length, 1, 'a box-tell is not the owner typing');
     queued('peer');
     assert.equal(findings().length, 1, "a peer's queued message is not the owner's");
     queued('human');

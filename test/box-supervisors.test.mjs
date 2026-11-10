@@ -26,12 +26,12 @@ const panesFile = path.join(tmp, 'panes');
 // a pane's screen, as capture-pane would give it: <screens>/<pane id>
 const screens = path.join(tmp, 'screens');
 fs.mkdirSync(screens);
-fs.writeFileSync(path.join(shim, 'tmux'), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${tmuxLog}'\ncase "$1" in\n  list-panes) cat '${panesFile}' 2>/dev/null ;;\n  new-window) echo '%9' ;;\n  capture-pane) for a; do t=$a; done; cat "${screens}/$t" 2>/dev/null ;;\nesac\nexit 0\n`, { mode: 0o755 });
+fs.writeFileSync(path.join(shim, 'tmux'), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${tmuxLog}'\ncase "$1" in\n  list-panes) cat '${panesFile}' 2>/dev/null ;;\n  new-window) echo '%9' ;;\n  capture-pane) for a; do t=$a; done; cat "${screens}/$t" 2>/dev/null ;;\n  send-keys) case "$*" in *' Enter') t=$3; [ -f "${screens}/$t.after" ] && mv "${screens}/$t.after" "${screens}/$t"; [ -f "${screens}/$t.after2" ] && mv "${screens}/$t.after2" "${screens}/$t.after" ;; esac ;;\nesac\nexit 0\n`, { mode: 0o755 });
 // gh that knows one release, and nothing else
 const latestRelease = path.join(tmp, 'latest');
 fs.writeFileSync(path.join(shim, 'gh'), `#!/bin/sh\n[ "$1" = release ] && cat '${latestRelease}' 2>/dev/null\nexit 0\n`, { mode: 0o755 });
 fs.writeFileSync(latestRelease, 'v9.9.9\n');
-const baseEnv = { ...process.env, HOME: home, PATH: `${shim}${path.delimiter}${process.env.PATH}`, DEVTEAM_NODE: process.execPath, DEVTEAM_HUB_PORT: '9' };
+const baseEnv = { ...process.env, HOME: home, PATH: `${shim}${path.delimiter}${process.env.PATH}`, DEVTEAM_NODE: process.execPath, DEVTEAM_HUB_PORT: '9', DEVTEAM_TELL_SETTLE_SECONDS: '0' };
 for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_HOME', 'TMUX', 'TMUX_PANE', 'CLAUDE_CONFIG_DIR']) delete baseEnv[k];
 
 function repo(name, { links, settings, adopt = true } = {}) {
@@ -140,20 +140,29 @@ test('--all <repo> starts that one repo, and leaves every other fleet as it is',
 
 const screen = (id, text) => fs.writeFileSync(path.join(screens, id), text);
 const rule = '\x1b[38;5;244m' + '─'.repeat(60) + '\x1b[39m';
+// Claude Code draws its prompt as ❯ and a non-breaking space (C2 A0), as on a real pane from a box
+const prompt = '❯\u00a0';
 const box = (line) => `the agent's last output\n${rule}\n${line}\n${rule}\n\x1b[38;5;211mstatus\x1b[39m\n`;
 const state = (p, cmd, text) => { fs.writeFileSync(panesFile, `${p}\tw\t/nowhere\t${cmd}\thome\n`); if (text !== undefined) screen(p, text); return run(['--pane-state', p]).stdout.trim(); };
 
 test('what a pane is at, from what is on it', () => {
-  assert.equal(state('%20', 'claude', box('\x1b[38;5;246m❯ \x1b[39m')), 'ready', 'an empty input');
-  assert.equal(state('%20', 'claude', box('\x1b[39m❯ \x1b[2mcopy the .env.local files\x1b[0m')), 'ready', 'a dim suggestion is the harness\'s, not typing');
-  assert.equal(state('%20', 'claude', box('❯ fix the ')), 'typing', 'text in the input box is someone\'s');
-  assert.equal(state('%20', 'claude', box('❯ fix the \x1b[2mbug\x1b[0m')), 'typing', 'typed text with a suggestion after it is still typing');
-  assert.equal(state('%20', 'claude', `Do you trust the files in this folder?\n❯ 1. Yes, I trust\n`), 'dialog');
-  assert.equal(state('%20', 'claude', `You've hit your limit · resets 3pm\n${box('❯ ')}`), 'limit', 'the banner the kit knows, which the old check missed');
-  assert.equal(state('%20', 'claude', box('❯ ')), 'ready');
-  assert.equal(state('%20', 'claude', `Claude usage limit reached\n${box('❯ ')}`), 'limit');
-  assert.equal(state('%20', 'claude', `5-hour limit reached ∙ resets 9am\n${box('❯ ')}`), 'limit');
-  assert.equal(state('%20', 'claude', `✢ Thinking… (esc to interrupt)\n${box('❯ ')}`), 'busy');
+  assert.equal(state('%20', 'claude', box(`\x1b[38;5;246m${prompt}\x1b[39m`)), 'ready', 'an empty input, with the real non-breaking space');
+  assert.equal(state('%20', 'claude', box(`\x1b[39m${prompt}\n`.trimEnd())), 'ready', 'and with no colour after it');
+  assert.equal(state('%20', 'claude', box(`\x1b[39m${prompt}\x1b[2mcopy the .env.local files\x1b[0m`)), 'ready', 'a dim suggestion is the harness\'s, not typing');
+  assert.equal(state('%20', 'claude', box(`${prompt}fix the `)), 'typing', 'text in the input box is someone\'s');
+  assert.equal(state('%20', 'claude', box(`${prompt}fix the \x1b[2mbug\x1b[0m`)), 'typing', 'typed text with a suggestion after it is still typing');
+  assert.equal(state('%20', 'claude', 'Do you trust the files in this folder?\n❯ 1. Yes, I trust\n'), 'dialog');
+  assert.equal(state('%20', 'claude', 'Quick safety check: Is this a project you created or one you trust?\n ❯ Yes, I trust this folder\n   No, exit\n'), 'dialog', 'the real trust dialog');
+  assert.equal(state('%20', 'claude', `Do you want to proceed?\n❯ 1. Yes\n  2. No\n${rule}\n`), 'dialog', 'a menu is a dialog, however it is drawn');
+  assert.equal(state('%20', 'claude', `You've hit your limit · resets 3pm\n${box(prompt)}`), 'limit', 'the banner the kit knows, which the old check missed');
+  assert.equal(state('%20', 'claude', `Claude usage limit reached\n${box(prompt)}`), 'limit');
+  assert.equal(state('%20', 'claude', `5-hour limit reached ∙ resets 9am\n${box(prompt)}`), 'limit');
+  // what the agent wrote about, never its own UI: none of these may hold a tick
+  assert.equal(state('%20', 'claude', `The stacks supervisor's usage limit reached its reset.\n${box(prompt)}`), 'ready', 'prose naming a limit');
+  assert.equal(state('%20', 'claude', `> You've hit your limit · resets 3pm\n${box(prompt)}`), 'ready', 'a quoted banner');
+  assert.equal(state('%20', 'claude', `Do you want to run the migration next?\n${box(prompt)}`), 'ready', 'a question it asked, with its input box up');
+  assert.equal(state('%20', 'claude', `Press Enter to continue is what the dialog says.\n${box(prompt)}`), 'ready');
+  assert.equal(state('%20', 'claude', `✢ Thinking… (esc to interrupt)\n${box(prompt)}`), 'busy');
   assert.equal(state('%20', 'bash', ''), 'shell');
   assert.equal(state('%20', 'vim', 'mid-edit'), 'other', 'never type into vim, psql or any other program');
   assert.equal(state('%20', 'psql', 'select 1;'), 'other');
@@ -167,7 +176,7 @@ test('--tell types into a supervisor, marked as not the owner, and only when its
   fs.mkdirSync(path.join(r, 'docs/devteam/run'), { recursive: true });
   fs.writeFileSync(path.join(r, 'docs/devteam/run/supervisor-pane'), '%21');
   fs.writeFileSync(panesFile, `%21\tsup-tellable\t${r}\tclaude\thome\n`);
-  screen('%21', box('❯ '));
+  screen('%21', box(prompt));
   fs.writeFileSync(tmuxLog, '');
   const told = run(['--tell', 'tellable', 'disk is low\non this box']);
   assert.equal(told.status, 0, told.stderr);
@@ -177,12 +186,38 @@ test('--tell types into a supervisor, marked as not the owner, and only when its
   assert.match(typed, /send-keys -t %21 Enter/);
 
   fs.writeFileSync(tmuxLog, '');
-  screen('%21', box('❯ half a thou'));
+  screen('%21', box(`${prompt}half a thou`));
   const busyInput = run(['--tell', 'tellable', 'hello']);
   assert.equal(busyInput.status, 3);
   assert.match(busyInput.stdout, /not told: its pane is at typing/);
   assert.ok(!fs.readFileSync(tmuxLog, 'utf8').includes('send-keys'), 'nothing typed over someone\'s line');
 
+  // a lost Enter: the line is still in the input, one more Enter takes it
+  screen('%21', box(prompt));
+  fs.writeFileSync(path.join(screens, '%21.after'), box(`${prompt}From the operator (information`));
+  fs.writeFileSync(path.join(screens, '%21.after2'), box(prompt));
+  fs.writeFileSync(tmuxLog, '');
+  assert.match(run(['--tell', 'tellable', 'hello']).stdout, /told \(pane %21\)/);
+  assert.equal(fs.readFileSync(tmuxLog, 'utf8').split('\n').filter((l) => /send-keys -t %21 Enter/.test(l)).length, 2, 'one more Enter, and only one');
+  // still there after that: said, never reported as told
+  screen('%21', box(prompt));
+  fs.writeFileSync(path.join(screens, '%21.after'), box(`${prompt}From the operator (information`));
+  const lost = run(['--tell', 'tellable', 'hello']);
+  assert.equal(lost.status, 3);
+  assert.match(lost.stdout, /not delivered: the message is still in its input/);
+  // a stale pane id, after a deploy restarted them at %0: never the operator's window or a shell
+  for (const win of ['operator', 'shell']) {
+    fs.writeFileSync(panesFile, `%21\t${win}\t${home}\tclaude\thome\n`);
+    fs.writeFileSync(tmuxLog, '');
+    const stale = run(['--tell', 'tellable', 'hello']);
+    assert.equal(stale.status, 3, win);
+    assert.match(stale.stdout, /no supervisor is up in its root/, win);
+    assert.ok(!fs.readFileSync(tmuxLog, 'utf8').includes('send-keys'), win);
+  }
+  // nor a pane started somewhere else, whatever it's called
+  fs.writeFileSync(panesFile, `%21\tsup-tellable\t${path.join(code, 'elsewhere')}\tclaude\thome\n`);
+  assert.equal(run(['--tell', 'tellable', 'hello']).status, 3);
+  fs.writeFileSync(panesFile, `%21\tsup-tellable\t${r}\tclaude\thome\n`);
   screen('%21', 'Do you want to proceed?\n❯ 1. Yes\n');
   assert.match(run(['--tell', 'tellable', 'hello']).stdout, /not told: its pane is at dialog/);
   fs.writeFileSync(panesFile, '');
@@ -202,6 +237,9 @@ test('--alert reaches the hub, by hello, and clears', () => {
   assert.equal(JSON.parse(dtIn(r, ['hello', '--json']).stdout).alert, 'disk nearly full');
   fs.utimesSync(alert, new Date(Date.now() - 25 * 3600000), new Date(Date.now() - 25 * 3600000));
   assert.equal(JSON.parse(dtIn(r, ['hello', '--json']).stdout).alert, undefined, 'a day old, it has been seen or forgotten');
+  const long = `${'x'.repeat(199)}é and more`;
+  run(['--alert', long]);
+  assert.equal(fs.readFileSync(alert, 'utf8'), `${'x'.repeat(199)}\n`, 'cut at 200 bytes, never half a character');
   run(['--alert', 'again']);
   assert.match(run(['--alert', '--clear']).stdout, /alert cleared/);
   assert.ok(!fs.existsSync(alert));
@@ -232,10 +270,10 @@ test('--status says at a glance what a check-in needs', async () => {
     fs.writeFileSync(path.join(r, 'docs/devteam/run/dashboard-port'), `${portUp}\n`);
     const worker = path.join(code, 'statused-wt');
     fs.writeFileSync(panesFile, `%30\tsup-statused\t${r}\tclaude\thome\n%31\tshell\t${home}\tbash\thome\n%32\tworker-x\t${worker}\tclaude\tdevteam-statused\n%33\tworker-y\t${worker}\tclaude\tdevteam-statused\n`);
-    screen('%30', box('❯ '));
+    screen('%30', box(prompt));
     screen('%31', 'secret in the owner\'s shell');
-    screen('%32', `line\n${box('❯ ')}`);
-    screen('%33', `You've hit your limit · resets 3pm\n${box('❯ ')}`);
+    screen('%32', `line\n${box(prompt)}`);
+    screen('%33', `You've hit your limit · resets 3pm\n${box(prompt)}`);
     fs.writeFileSync(latestRelease, 'v9.9.9\n');
     const st = run(['--status'], { DEVTEAM_STATUS_SECONDS: '0' });
     assert.equal(st.status, 0, st.stderr);
@@ -252,7 +290,7 @@ test('--status says at a glance what a check-in needs', async () => {
     assert.doesNotMatch(q.stdout, /first\?/, 'noted in NOTES.md, so not read again');
     const fileAt = path.join(home, '.box/status-last');
     assert.match(fs.readFileSync(fileAt, 'utf8'), /^at \d+\ndisk \d+\npane %30 \d+\n/, 'the reading it keeps');
-    screen('%32', `other output now\n${box('❯ ')}`);
+    screen('%32', `other output now\n${box(prompt)}`);
     const st2 = run(['--status'], { DEVTEAM_STATUS_SECONDS: '0' });
     assert.match(st2.stdout, /changed since last reading: %32 *$/m, 'only what moved: a pane whose screen changed');
     // the reading is held 20 minutes, so a manual re-run doesn't erase the change the next check-in should see
@@ -292,12 +330,37 @@ test('each read the operator may run writes nothing', () => {
   const walk = (d, out = []) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.name === '.git') continue; if (e.isDirectory()) walk(p, out); else out.push(p); } return out; };
   const snap = () => ({ files: Object.fromEntries(walk(r).map((f) => [f, fs.readFileSync(f).toString('base64')])), status: execFileSync('git', ['status', '--porcelain'], { cwd: r, encoding: 'utf8' }) });
   const before = snap();
-  const reads = [['status'], ['status', '--json'], ['ready'], ['ready', '--json'], ['metrics'], ['metrics', '--json'], ['hello', '--json'], ['settings'], ['supervisor-session'], ['validate'], ['questions'], ['questions', '--json', '--all'], ['log', '--json', '--tail', '5'], ['messages', '--to', 'supervisor', '--open'], ['knowledge', '--json'], ['knowledge', '--for', 'x'], ['goal', '--json'], ['goal', 'list'], ['goal', 'show', goal], ['fleet', 'status', '--json', '--no-fetch']];
-  for (const c of reads) { const x = dtIn(r, c, op); assert.ok(x.status === 0 || x.status === 1, `${c.join(' ')}: ${x.stderr}`); assert.doesNotMatch(x.stderr, /only reads/, c.join(' ')); }
+  const reads = [['status'], ['status', '--json'], ['ready'], ['ready', '--json'], ['metrics'], ['metrics', '--json'], ['hello', '--json'], ['settings'], ['supervisor-session'], ['prompt', 'supervisor'], ['validate'], ['questions'], ['questions', '--json', '--all'], ['log', '--json', '--tail', '5'], ['messages', '--to', 'supervisor', '--open'], ['knowledge', '--json'], ['knowledge', '--for', 'x'], ['goal', '--json'], ['goal', 'list'], ['goal', 'show', goal], ['fleet', 'status', '--json', '--no-fetch']];
+  for (const c of reads) { const x = dtIn(r, c, op); assert.equal(x.status, 0, `${c.join(' ')}: ${x.stderr}`); assert.doesNotMatch(x.stderr, /only reads/, c.join(' ')); }
   const after = snap();
   assert.deepEqual(Object.keys(after.files).sort(), Object.keys(before.files).sort(), 'no file created or removed');
   for (const f of Object.keys(before.files)) assert.equal(after.files[f], before.files[f], `${f} unchanged`);
   assert.equal(after.status, before.status);
+});
+
+test('--questions is a --status mode: alone it refuses, and never runs a restore', () => {
+  fs.writeFileSync(tmuxLog, '');
+  const r = run(['--questions']);
+  assert.equal(r.status, 2);
+  assert.equal(fs.readFileSync(tmuxLog, 'utf8'), '');
+});
+
+test('the restore list ages by entry, and a rewrite does not make it young', () => {
+  const up = boot.replace(/\.boot$/, '');
+  fs.rmSync(`${boot}.at`, { force: true });
+  fs.writeFileSync(boot, '/r/old\n/r/new\n/r/back\n');
+  const now = Math.floor(Date.now() / 1000);
+  fs.writeFileSync(`${boot}.at`, `${now - 4 * 86400} /r/old\n${now - 3600} /r/new\n${now - 4 * 86400} /r/back\n`);
+  fs.writeFileSync(up, '/r/back\n');
+  assert.equal(run(['--age-boot']).status, 0);
+  assert.equal(fs.readFileSync(boot, 'utf8'), '/r/new\n/r/back\n', 'the old one goes, though the file is minutes old');
+  const at = Object.fromEntries(fs.readFileSync(`${boot}.at`, 'utf8').trim().split('\n').map((l) => l.split(' ').reverse()));
+  assert.ok(Number(at['/r/back']) >= now, 'up just before this boot, so new again');
+  fs.writeFileSync(up, '');
+  fs.writeFileSync(`${boot}.at`, `${now - 4 * 86400} /r/new\n${now - 4 * 86400} /r/back\n`);
+  run(['--age-boot']);
+  assert.ok(!fs.existsSync(boot) && !fs.existsSync(`${boot}.at`), 'all aged: nothing left');
+  fs.rmSync(up, { force: true });
 });
 
 test('no tmux session: it refuses rather than start one from inside an agent', () => {

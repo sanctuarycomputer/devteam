@@ -292,9 +292,10 @@ fi
 # a boot that never got as far as bringing them back must not lose them to the next.
 up="$HOME/.devteam-supervisors"
 # Added to what is there: a supervisor the last restore could not start stays listed.
-if [ -s "$up" ]; then cat "$up" >> "$up.boot"; sort -u -o "$up.boot" "$up.boot"; rm -f "$up"; fi
-# A list no restore has read for days is out of date: whoever it held has been stopped or restarted since.
-find "$up.boot" -mtime +3 -delete 2>/dev/null
+if [ -s "$up" ]; then cat "$up" >> "$up.boot"; sort -u -o "$up.boot" "$up.boot"; fi
+# An entry no restore has used for days is out of date: whoever it held has been stopped or restarted since.
+box-supervisors --age-boot
+rm -f "$up"
 # Window 0 is the operator (operator.md): the first thing the Terminal shows, and what restores the fleet.
 mkdir -p operator
 if ! tmux has-session -t home 2>/dev/null; then
@@ -309,9 +310,12 @@ fi
 # The operator's tick: typed into its window every 30 minutes. Never over someone's half-typed line, a
 # dialog (Enter would answer it), a usage limit, or into whatever else has the pane (a shell, vim, psql:
 # box-supervisors --pane-state says which). Held back, it tries again each minute for 10 minutes, then
-# waits for the next one. Claude Code queues what's typed during a turn, so a busy operator just gets it after.
+# waits for the next one, and after three in a row it raises an alert (one, however long it lasts), so a held
+# operator can't go quiet.
+# Claude Code queues what's typed during a turn, so a busy operator just gets it after.
 tick='Check on the box and your supervisors.'
-( while :; do
+( held=0; raised=
+  while :; do
     sleep "${DEVTEAM_OPERATOR_TICK_SECONDS:-1800}"
     n=0; s=
     while [ "$n" -lt "${DEVTEAM_OPERATOR_TICK_RETRIES:-10}" ]; do
@@ -320,7 +324,18 @@ tick='Check on the box and your supervisors.'
       n=$((n + 1))
       sleep "${DEVTEAM_OPERATOR_TICK_RETRY_SECONDS:-60}"
     done
-    [ -z "$s" ] || note "the operator's check-in was held back: its pane is at $s"
+    if [ -z "$s" ]; then
+      # only what this loop raised: the operator's own alert is the operator's to clear
+      if [ -n "$raised" ] && [ "$(cat "$HOME/.box/alert" 2>/dev/null)" = "$raised" ]; then box-supervisors --alert --clear >/dev/null; fi
+      held=0; raised=
+    else
+      held=$((held + 1))
+      note "the operator's check-in was held back: its pane is at $s ($held in a row)"
+      if [ "$held" -ge "${DEVTEAM_OPERATOR_TICK_ALERT_AFTER:-3}" ]; then
+        raised="The operator's check-ins are being held back: its pane is at $s. Look at window 0 of the terminal."
+        box-supervisors --alert "$raised" >/dev/null
+      fi
+    fi
   done ) &
 # The box's global tools, on the disk: edit the file to change them, and they come back each boot.
 mkdir -p .box .config/mise
