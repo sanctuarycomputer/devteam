@@ -2141,3 +2141,44 @@ test('a preview\'s WebSocket is relayed, with the link\'s Origin mapped, and cap
     assert.equal((await wsClient(gw.port, `term.${S.box}`, { origin: gw.term, path: '/nope', cookie: gw.jar() })).status, 404);
   } finally { for (const w of sockets) w.close?.(); await S.close(); dev.closeAllConnections?.(); dev.close(); }
 });
+
+test('/dev/ lists every preview on the box with its state, for the owner only, as a document', async () => {
+  const S = await previewSetup('preview-list');
+  const { gw, hub, instance } = S;
+  const devPort = await freePort();
+  const dev = http.createServer((q, s) => s.end('app'));
+  await new Promise((r) => dev.listen(devPort, '127.0.0.1', r));
+  const down = await freePort();
+  try {
+    assert.match((await gw.req('GET', '/box.json')).json.previews, /\/dev\/$/, 'box.json names the page');
+    hub.list = [
+      instance('/srv/alpha', P, [previewRow('cool-tiger', devPort, { label: '<b>evil</b>', project: 'alpha', session: 'api-01-x' }), previewRow('calm-otter', down, { project: 'alpha', session: 'api-02-y', label: '' }), previewRow('shared-name', devPort, { project: 'alpha' })]),
+      instance('/srv/beta', P + 1, [previewRow('shared-name', devPort, { project: 'beta' })]),
+    ];
+    assert.match((await gw.req('GET', '/dev/', { cookie: '', headers: NAV })).headers.location, /\/auth\/login\?next=/, 'no session, sign-in');
+    assert.equal((await gw.req('GET', '/dev/', { cookie: '', headers: { 'sec-fetch-mode': 'cors' } })).status, 401);
+    const r = await gw.req('GET', '/dev/', { headers: NAV });
+    assert.equal(r.status, 200);
+    assert.match(r.headers['content-security-policy'], /default-src 'none'/);
+    const body = r.body;
+    for (const t of ['/srv/alpha', '/srv/beta', 'cool-tiger', 'calm-otter', 'api-01-x', 'api-02-y']) assert.ok(body.includes(t), t);
+    assert.match(body, /&#60;b&#62;evil/, 'a label is escaped');
+    assert.doesNotMatch(body, /<b>evil/);
+    assert.ok(body.includes(`href="${S.origin('cool-tiger')}/"`), 'Open goes to the preview\'s own name');
+    assert.match(body, /answers/);
+    assert.match(body, /not answering/);
+    assert.match(body, /ambiguous \(two instances\)/);
+    assert.doesNotMatch(body, new RegExp(`href="${S.origin('shared-name')}`.replace(/\./g, '\\.')), 'nothing to open for an ambiguous name');
+    assert.equal((await gw.req('GET', '/dev/', { headers: { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'navigate' } })).status, 403, 'never in a frame');
+    assert.equal((await gw.req('GET', '/dev', { headers: NAV })).status, 200);
+    hub.list = [];
+    await gw.g.pollPush();
+    assert.match((await gw.req('GET', '/dev/', { headers: NAV })).body, /Nothing/);
+  } finally { await S.close(); dev.close(); }
+});
+
+test('the hub links the box\'s previews beside Passkeys', () => {
+  const hub = fs.readFileSync(path.join(kit, 'dashboard', 'hub.html'), 'utf8');
+  assert.match(hub, /typeof b\.previews === 'string' && secure\(b\.previews\)/, 'only a URL the page would trust');
+  assert.match(hub, /a\.textContent = 'Previews'/);
+});

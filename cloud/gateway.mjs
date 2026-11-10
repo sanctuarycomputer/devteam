@@ -1543,7 +1543,7 @@ export function createGateway(opts = {}) {
       }
       // The box's own name: the gateway's copy of the hub page, what it needs to know, and the list.
       if (req.method === 'GET' && (p === '/' || p === '/index.html')) return send(res, 200, 'text/html; charset=utf-8', hubPage, { 'content-security-policy': HUB_CSP, 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer' });
-      if (req.method === 'GET' && p === '/box.json') return json(res, 200, { box: 1, terminal: `${TERM}/`, instance: `${pubUrl.protocol}//{port}.${NAME}${SUFFIX}/`, passkeys: `${PUB}/auth/passkeys`, push: vapid().publicKey });
+      if (req.method === 'GET' && p === '/box.json') return json(res, 200, { box: 1, terminal: `${TERM}/`, instance: `${pubUrl.protocol}//{port}.${NAME}${SUFFIX}/`, passkeys: `${PUB}/auth/passkeys`, previews: `${PUB}/dev/`, push: vapid().publicKey });
       if (req.method === 'GET' && p === '/instances.json') return instances(req, res);
       if (req.method === 'POST' && p === '/push/subscribe') {
         const sub = pushSubscription(await readJson(req));
@@ -1565,6 +1565,16 @@ export function createGateway(opts = {}) {
       // that page showed (only from this page: the Origin rule above refuses any other).
       // Its pages open as a page only: another site's frame navigated here carries the cookie, and
       // would have the gateway ask an instance for up to 50 manifests each time.
+      // Every preview on the box, the phone's way in: one tap from the hub, this one document only.
+      if (req.method === 'GET' && (p === '/dev' || p === '/dev/')) {
+        if (req.headers['sec-fetch-dest'] !== undefined && req.headers['sec-fetch-dest'] !== 'document') return send(res, 403, 'text/plain; charset=utf-8', 'open this page on its own, not in a frame');
+        await refreshPreviews();
+        const rows = (await Promise.all([...previews].map(async ([name, l]) => {
+          if (l.ambiguous) return l.ambiguous.map((c) => ({ name, project: c.project, root: c.root, port: c.port, session: '', label: '', state: 'ambiguous (two instances)' }));
+          return [{ name, project: l.project, root: l.root, port: l.port, session: l.session, label: l.label, state: (await previewHost(l.port)) ? 'answers' : 'not answering', link: `${previewOrigin(name)}/` }];
+        }))).flat().sort((a, b) => a.root.localeCompare(b.root) || a.name.localeCompare(b.name));
+        return page(res, PAGES.previewList(rows));
+      }
       if (req.method === 'GET' && (p === '/public' || p.startsWith('/public/')) && req.headers['sec-fetch-dest'] !== undefined && req.headers['sec-fetch-dest'] !== 'document') return send(res, 403, 'text/plain; charset=utf-8', 'open this page on its own, not in a frame');
       if (req.method === 'GET' && p === '/public/publish') {
         const port = Number(url.searchParams.get('port'));
@@ -1807,6 +1817,8 @@ const publishNote = (r) => {
 const doc = (title, body) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title>${STYLE}</head><body><main>${body}</main>${CLIENT}`;
 const PREVIEW_REFRESH = '<meta http-equiv="refresh" content="5">';
 const PAGES = {
+  // Every preview on the box, by instance. Each value came through the hub's list and is shown as text.
+  previewList: (rows) => doc('Previews', `<h1>Previews on this box</h1><p>Only you can open these, signed in. Each is a running server a session offered.</p>${rows.length ? Object.entries(rows.reduce((g, r) => { (g[r.root] ??= []).push(r); return g; }, Object.create(null))).map(([root, rs]) => `<h2 style="font-size:15px;margin:16px 0 4px">${esc(rs[0].project)} <small>${esc(root)}</small></h2><ul>${rs.map((r) => `<li class="pub"><span><b>${esc(r.name)}</b> <small>${[r.session && esc(r.session), r.label && esc(r.label), `port ${esc(r.port)}`, esc(r.state)].filter(Boolean).join(' · ')}</small></span>${r.link ? `<a href="${esc(r.link)}">Open</a>` : ''}</li>`).join('')}</ul>`).join('') : '<p>Nothing is offered right now.</p>'}`),
   previewDown: (name, l) => `${doc('Preview', `${PREVIEW_REFRESH}<h1>Preview ${esc(l.label || name)} isn't answering</h1><p>Offered by ${esc(l.session)} of ${esc(l.project)}, instance ${esc(l.root)}: nothing answers on port ${esc(l.port)}. Its server may be starting, or stopped. This page retries every 5 s.</p>`)}`,
   previewAmbiguous: (name, cs) => `${doc('Preview', `${PREVIEW_REFRESH}<h1>Two instances offer a preview named ${esc(name)}</h1><p>${cs.map((c) => `${esc(c.project)} at ${esc(c.root)} (port ${esc(c.port)})`).join(' and ')}. The box serves neither until one stops; run <code>devteam.mjs preview stop ${esc(name)}</code> in the one that shouldn't. This page retries every 5 s.</p>`)}`,
   // A preview command can be a second behind the link: the page retries for a few minutes, not forever.
