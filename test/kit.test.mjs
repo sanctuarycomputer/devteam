@@ -20,6 +20,7 @@ import { testDir } from './lib/kit.mjs';
 const FORKS = [
   ['goal measures:'],
   ['sensor credentials:'],
+  ['sensors: what a probe prints stays in its frame'],
   ['review-worktree:'],
   ['an answer the owner gave in the supervisor chat'],
   ['questions carry choices'],

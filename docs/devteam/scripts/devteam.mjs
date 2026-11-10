@@ -3378,6 +3378,13 @@ function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('hom
     const [a, b] = [settingsAt(base0, { orNull: true }), settingsAt(sha, { orNull: true })];
     if (a && b && ['sensors', 'sensor_defaults'].some((k) => canonical(a[k]) !== canonical(b[k]))) fails.push(...sensorProblems(b).map((e) => `settings at landing: ${e}`));
   }
+  // sensors are the supervisor's: no owner answer, and no ticket or plan either (a chore PR)
+  if (R.name === 'home' && base0 && /^(ticket|plan)\//.test(branch)) {
+    const [a, b] = [settingsAt(base0, { orNull: true }), settingsAt(sha, { orNull: true })];
+    const keys = a && b ? ['sensors', 'sensor_defaults', 'sensor_scrub'].filter((k) => canonical(a[k]) !== canonical(b[k])) : [];
+    const files = (changedFiles(base0, sha) ?? []).filter((f) => f.startsWith(`${projectRel}/sensors/`));
+    if (keys.length || files.length) fails.push(`${branch} changes ${[...keys, ...files].slice(0, 4).join(', ')}: sensors are the supervisor's, so they land in a chore PR (chore start …), not a ticket or plan`);
+  }
   if (branch.startsWith('ticket/')) return [...fails, ...checkTicket(branch.slice('ticket/'.length), { sha, title, body, approvals: !forge }), ...depsFails(branch.slice('ticket/'.length), R)];
   if (branch.startsWith('plan/')) {
     const feature = branch.slice('plan/'.length);
@@ -4240,6 +4247,8 @@ function cmdAsk() {
     if (!recommendation) recommendation = `move ${cls} to rung ${r + 1} (${RUNG[r + 1]})`;
   }
   const scope = flagStr('scope') ?? null;
+  // the owner said not to use this sensor: nothing asks about it again until they reverse that
+  if (flagStr('sensor') && declinedSensors().has(flagStr('sensor'))) die(`the owner said not to use the sensor ${flagStr('sensor')}: it isn't asked about again until sensor reconsider ${flagStr('sensor')}`);
   const secrets = jsonFlag('secrets');
   if (secrets !== undefined) {
     if (kind !== 'owner-action') die('--secrets belongs on an owner-action question: the owner posts values, the supervisor never holds them');
@@ -9840,8 +9849,10 @@ function sensorProblems(s) {
     if (Object.hasOwn(defs, 'name')) errors.push('settings sensor_defaults: no "name" field (a sensor\'s name is its key)');
     if (Object.hasOwn(defs, 'url')) errors.push('settings sensor_defaults: no "url" field (each sensor names its own)');
   }
+  const declined = declinedSensors();
   for (const [name, m] of Object.entries(ms)) {
     const at = `settings sensors.${name}`;
+    if (declined.has(name)) errors.push(`${at}: the owner said not to use this sensor (sensor reconsider ${name} to lift it)`);
     if (!SENSOR_NAME.test(name)) { errors.push(`${at}: a name is letters, digits, dot, dash or underscore (at most 64)`); continue; }
     if (!isObj(m)) { errors.push(`${at}: an object { kind: "http", url, … }`); continue; }
     if (Object.hasOwn(m, 'name')) errors.push(`${at}: no "name" field (its name is its key)`);
@@ -10312,10 +10323,12 @@ function probeSource(m, { working = false } = {}) {
   throw new Error(`${projectRel}/${rel} is not on ${main ?? 'main'} yet: a probe runs from main, once its chore PR lands`);
 }
 // The probe's environment: the owner's, its params and window, and its credentials by name.
+// A probe gets only this, and what it declares: no agent's or owner's tokens (GH_TOKEN and the
+// like), and nothing that changes how node starts (NODE_OPTIONS).
+const PROBE_ENV_KEYS = ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'TEMP', 'TMP', 'LANG', 'TZ', 'TERM', 'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy', 'NODE_USE_ENV_PROXY', 'NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'SSL_CERT_DIR'];
 function probeEnv(m, since, { credentials = true } = {}) {
   const values = [];
-  const env = ownerProcessEnv();
-  for (const k of Object.keys(env)) if (/^DEVTEAM_/.test(k)) delete env[k];
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => PROBE_ENV_KEYS.includes(k) || /^LC_/.test(k)));
   Object.assign(env, { DEVTEAM_SENSOR: m.name, DEVTEAM_SINCE: since ?? '', DEVTEAM_PARAMS: JSON.stringify(m.params ?? {}) });
   for (const [name, source] of Object.entries(m.credentials ?? {})) {
     if (!/^[A-Z_][A-Z0-9_]*$/.test(name)) throw new Error(`credential ${name}: the name is an environment variable (SENTRY_TOKEN)`);
@@ -10352,6 +10365,10 @@ function spawnCapped(cmd, args, { cwd, env, timeoutMs, maxBytes }) {
 const isStr = (x) => typeof x === 'string' && x.length > 0;
 const isNum = (x) => typeof x === 'number' && Number.isFinite(x);
 const EVENT_NEEDS = { exception: ['fingerprint', 'class', 'level'], log: ['fingerprint', 'level', 'template'], platform: ['code'], metric: ['name', 'value'], deploy: ['release'] };
+// Free text a probe may print: it stays in an untrusted frame wherever it's shown. Everything else
+// in an event is checked for control characters, and the identifiers for shape (eventInvalid).
+const EVENT_FREE_TEXT = ['title', 'message', 'sample'];
+const CONTROL_CHARS = /[\x00-\x1f\x7f]/;
 function eventInvalid(e) {
   // the reason never quotes the event: it is stored and shown unscrubbed
   const need = typeof e.kind === 'string' && Object.hasOwn(EVENT_NEEDS, e.kind) ? EVENT_NEEDS[e.kind] : null;
@@ -10361,7 +10378,21 @@ function eventInvalid(e) {
   for (const k of ['count', 'users']) if (e[k] != null && !(isNum(e[k]) && e[k] >= 0)) return `${k} is a number`;
   for (const k of ['first_seen', 'last_seen', 'at']) if (e[k] != null && (typeof e[k] !== 'string' || Number.isNaN(Date.parse(e[k])))) return `${k} is a date`;
   if (e.frames != null && !Array.isArray(e.frames)) return 'frames is a list';
-  if (isStr(e.fingerprint) && e.fingerprint.length > 200) return 'fingerprint is at most 200 characters';
+  // identifiers that reach the ALERT line and the log outside any frame: control characters are
+  // refused everywhere, and these keep to shapes that can't carry a sentence
+  const bad = (k, re) => e[k] != null && !(typeof e[k] === 'string' && re.test(e[k]));
+  for (const [k, v] of Object.entries(e)) if (typeof v === 'string' && CONTROL_CHARS.test(v) && !EVENT_FREE_TEXT.includes(k)) return `${k} has a control character`;
+  if (bad('class', /^[A-Za-z_][\w.:$<>#*/[\]-]{0,199}$/)) return 'class is an exception class name';
+  if (bad('fingerprint', /^[\w.:/@#+=-]{1,200}$/)) return 'fingerprint is at most 200 characters of letters, digits and .:/@#+=-';
+  if (bad('release', /^[\w.@+:/-]{1,100}$/)) return 'release is a version name';
+  if (bad('url', /^https?:\/\/\S{1,2000}$/i)) return 'url is an http(s) URL';
+  if (bad('commit', /^[\w.:-]{1,100}$/)) return 'commit is a commit id';
+  if (bad('name', /^[\w.:/-]{1,100}$/)) return 'name is a metric name';
+  for (const fr of e.frames ?? []) {
+    if (!fr || typeof fr !== 'object' || Array.isArray(fr)) return 'a frame is an object';
+    if (fr.file != null && !(typeof fr.file === 'string' && /^[\w./@:+~()$[\]-]{1,400}$/.test(fr.file))) return 'a frame\'s file is a path';
+    if (fr.fn != null && !(typeof fr.fn === 'string' && fr.fn.length <= 200 && !CONTROL_CHARS.test(fr.fn))) return 'a frame\'s fn has a control character';
+  }
   if (e.kind === 'platform' && !/^[A-Z]\d{1,3}$/.test(e.code)) return 'code is a platform error code (H12, R14)';
   return null;
 }
@@ -10376,7 +10407,7 @@ function parseProbeLine(line) {
 }
 // A probe's whole output: its events (redacted, then scrubbed), the cursor, and the invalid lines.
 function probeOutput(text, redact) {
-  const clean = (s) => scrubText(redact(s));
+  const clean = (s) => scrubText(redact(s)).replace(/[\x00-\x1f\x7f]+/g, ' ');
   const events = [], invalid = [];
   let cursor = null, truncated = false;
   for (const raw of text.split('\n')) {
@@ -10593,8 +10624,11 @@ function ingestEvents(m, events, st, at = nowIso()) {
     if (!f.observed && levelRank(level) >= levelRank(tri.min_level) && f.total >= tri.min_count && f.users >= tri.min_users) {
       const sev = LEVEL_SEV[level] ?? 1;
       const where = f.frames?.length ? ` at ${f.frames.map(frameWords).join(', ')}` : '';
-      const what = e.kind === 'exception' ? `${f.class}${f.title ? `: ${f.title}` : ''}${where}` : e.kind === 'platform' ? `${e.code} ${PLATFORM_WORDS[e.code] ?? 'platform error'}` : `${level} ${f.template}${isStr(e.sample) ? ` (e.g. "${e.sample.slice(0, 200)}")` : ''}`;
-      const o = sensorObserveOnce(m, { kind: e.kind === 'exception' ? 'exception' : e.kind === 'platform' ? 'platform-error' : 'log-error', detail: `${m.name}: ${what}${f.release ? ` (release ${f.release})` : ''}; ${f.total} event(s)${f.users ? `, ${f.users} user(s)` : ''}`.slice(0, 900), severity: sev, valence: -1, measure: { value: f.total, unit: 'events' }, source_key: `sensor:${m.name}:${fp}`, ...(isStr(f.url) ? { source_ref: f.url } : {}) });
+      // the class and code are checked identifiers; the rest is production text, framed in the log
+      const what = e.kind === 'exception' ? f.class : e.kind === 'platform' ? `${e.code} ${PLATFORM_WORDS[e.code] ?? 'platform error'}` : `a ${level} log line`;
+      const free = e.kind === 'exception' ? `${f.title ?? ''}${where}` : e.kind === 'log' ? `${f.template}${isStr(e.sample) ? ` (e.g. "${e.sample.slice(0, 200)}")` : ''}` : '';
+      const framed = free.trim() ? `\n${untrusted('the message', free.slice(0, 500))}` : '';
+      const o = sensorObserveOnce(m, { kind: e.kind === 'exception' ? 'exception' : e.kind === 'platform' ? 'platform-error' : 'log-error', detail: `${m.name}: ${what}${f.release ? ` (release ${f.release})` : ''}; ${f.total} event(s)${f.users ? `, ${f.users} user(s)` : ''}${framed}`.slice(0, 1200), severity: sev, valence: -1, measure: { value: f.total, unit: 'events' }, source_key: `sensor:${m.name}:${fp}`, ...(isStr(f.url) ? { source_ref: f.url } : {}) });
       f.observed = o?.id ?? true;
       day.qualified++;
       // the wake-up line names the class or code and the observation; the text is for sensor show
@@ -10616,7 +10650,7 @@ function ingestEvents(m, events, st, at = nowIso()) {
     if (c >= Math.max(spike.min, spike.factor * median)) {
       if (f.spike_hour !== hour && f.spike_hour !== prev) {
         const sev = Math.min(4, (LEVEL_SEV[f.level] ?? 1) + 1);
-        const o = sensorObserveOnce(m, { kind: 'spike', detail: `${m.name}: ${f.class ?? f.template ?? f.code ?? fp} is spiking: ${c} this hour against a median of ${median} an hour over the last ${Math.round(hours.length / 24)} day(s)`.slice(0, 900), severity: sev, valence: -1, measure: { value: c, unit: 'events/h' }, source_key: `sensor:${m.name}:spike:${fp}:${hour}`, refs: typeof f.observed === 'string' ? [f.observed] : [] });
+        const o = sensorObserveOnce(m, { kind: 'spike', detail: `${m.name}: ${f.class ?? f.code ?? 'a log line'} is spiking: ${c} this hour against a median of ${median} an hour over the last ${Math.round(hours.length / 24)} day(s)`.slice(0, 900), severity: sev, valence: -1, measure: { value: c, unit: 'events/h' }, source_key: `sensor:${m.name}:spike:${fp}:${hour}`, refs: typeof f.observed === 'string' ? [f.observed] : [] });
         if (o && sev >= 4) alerts.push(`${m.name}: a ${f.kind} is spiking (${o.id}; sensor show ${fp})`);
       }
       f.spike_hour = hour;
@@ -10669,19 +10703,23 @@ function sensorSecret(tracker) {
   return { name, sink: `file:.devteam-secrets/${tracker}-token` };
 }
 // The credential question a sensor had, from the log alone (so it survives restarts and moves):
-// none, open, posted, or declined. Any answer but Posted is the owner's no, and it stands until
-// sensor reconsider, which only the owner's word (or chat, recorded) can write.
+// none, open, posted, reconsidered or declined. Posted is by what was posted (secrets_posted), never
+// the answer's words; only "Don't use this sensor" is a no, which stands until sensor reconsider;
+// any other answer leaves it open (not a no, and not asked again).
 function sensorCredentialState(name) {
   const latest = (rows) => rows.sort(byTime).at(-1) ?? null;
   const q = latest(logObjects('question').filter((x) => x.sensor === name));
   if (!q) return { status: 'none', question: null };
   const v = questionView(q);
-  if (v.status === 'open') return { status: 'open', question: v };
   if (['withdrawn', 'superseded'].includes(v.status)) return { status: 'none', question: v };
-  if (String(v.answer ?? '').startsWith('Posted')) return { status: 'posted', question: v };
+  const posted = (v.secrets ?? []).length && (v.secrets ?? []).every((x) => (v.secrets_posted ?? []).some((p) => p.name === x.name));
+  if (posted) return { status: 'posted', question: v };
+  if (v.status === 'open') return { status: 'open', question: v };
   const back = latest(logObjects('observation').filter((o) => o.detector === 'sensor' && ['supervisor', 'owner'].includes(writerClass(o.created_by)) && o.kind === 'sensor-reconsidered' && o.subject === sensorSubject(name)));
-  return back && back.created_at > (v.answered_at ?? v.asked_at) ? { status: 'reconsidered', question: v } : { status: 'declined', question: v };
+  if (back && back.created_at > (v.answered_at ?? v.asked_at)) return { status: 'reconsidered', question: v };
+  return /^don['’]?t use this sensor\b/i.test(String(v.answer ?? '').trim()) ? { status: 'declined', question: v } : { status: 'open', answered: true, question: v };
 }
+const declinedSensors = () => new Set(logObjects('question').filter((q) => q.sensor).map((q) => q.sensor).filter((n) => sensorCredentialState(n).status === 'declined'));
 // Open the credential question for each sensor the code implies and nothing here can read, unless
 // the log already has one. The kit's secret-question pattern: the value goes straight to the sink.
 function askSensorCredentials(missing) {
@@ -10814,6 +10852,7 @@ async function cmdSensor() {
   }
   if (sub === 'series') return json(sensorSeries(name ?? die('usage: sensor series <name> [--range 24h|7d]'), flagStr('range')));
   if (sub === 'test') {
+    supervisorOnly('sensor test');
     const { m, fromHere } = sensorHere(name ?? die('usage: sensor test <name> [--since <time>] [--json]'));
     if (m.kind === 'http') {
       const r = await httpCheck(m);
@@ -10868,7 +10907,7 @@ async function cmdSensor() {
     const by = said ? 'supervisor' : ownerWriter().by;
     if (!name) die('usage: sensor reconsider <name> [--from-chat --said "<the owner\'s words>"]');
     const state = sensorCredentialState(name);
-    if (state.status !== 'declined') die(`${name} was not declined (${state.status})`);
+    if (state.status !== 'declined' && !state.answered) die(`${name} was not declined (${state.status})`);
     const o = appendLog({ type: 'observation', source: name, subject: sensorSubject(name), detector: 'sensor', kind: 'sensor-reconsidered', detail: said ? `the owner said to ask about ${name} again: "${said}"` : `the owner said to ask about ${name} again`, severity: 0, valence: 0, source_key: `sensor:${name}:reconsider:${nowIso()}` }, by);
     return out(`${o.id}: the next discovery asks about ${name} again`);
   }
