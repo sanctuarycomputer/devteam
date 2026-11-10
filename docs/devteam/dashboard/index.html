@@ -3390,6 +3390,102 @@ function showFailure(message) {
   b.hidden = false;
 }
 
+/* threads-core start */
+// The thread layer's rules, apart from the page: what the pointer is on, what a subject records and
+// how big it is, where a card opens and what its state line says, the pins and the dock's words.
+// The kit's test loads this block by itself.
+// What the page can point at: the kit's SUBJECT_TYPES (a test holds the two lists equal).
+const T_TYPES = ['goal', 'observation', 'question', 'ticket', 'planner', 'decision', 'lesson', 'problem', 'act', 'preview', 'artifact'];
+// The kit's SUBJECT_REF, the same way (a test holds the two equal): the page never sends a ref the log refuses.
+const T_REF = new RegExp(`^(${T_TYPES.join('|')}):[a-z0-9][a-z0-9-]{0,110}$`);
+// Where each kind of item lives: an item drawn in two places (an observation also in the Sensors
+// feed, a question in a Decide row) is pinned in its home section.
+const T_HOME = { goal: 'goals', question: 'inbox', ticket: 'board', planner: 'board', observation: 'loop', problem: 'loop', lesson: 'loop', decision: 'loop', act: 'loop', preview: 'library', artifact: 'library' };
+// The sections' names, as the sidebar shows them.
+const T_SECTIONS = { overview: 'Overview', goals: 'Goals', inbox: 'Inbox', progress: 'Progress', board: 'Board', library: 'Library', loop: 'Loop', trust: 'Trust Ladder', retros: 'Retros', health: 'Health', monitoring: 'Sensors' };
+// T_ENCODED_MAX: a turn as the log line holds it, JSON-escaped (a quotation mark is two bytes there,
+// a control character six), so a line of 4,096 bytes always has room for it.
+const T_TURN_MAX = 2000, T_ENCODED_MAX = 3800, T_SUBJECT_MAX = 2500, T_TITLE_MAX = 120, T_WAIT_MS = 10 * 60000;
+const T_ENC = new TextEncoder();
+// Sizes are the log's, in bytes of UTF-8: a CJK character is three, an emoji four.
+const tBytes = (s) => T_ENC.encode(String(s ?? '')).length;
+const tCut = (s, n) => { let o = '', b = 0; for (const c of String(s ?? '')) { const k = T_ENC.encode(c).length; if (b + k > n) break; o += c; b += k; } return o; };
+// One line of plain text, at most n UTF-16 units (what the log's schema counts), never half a pair.
+const tLine = (s, n) => { const x = String(s ?? '').replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g, ' ').replace(/\s+/g, ' ').trim(); const c = x.slice(0, n); return /[\ud800-\udbff]$/.test(c) ? c.slice(0, -1) : c; };
+// What a point is on: the nearest item the dashboard drew (data-subject, a ref the log takes), else
+// a spot in its section, as fractions of the section's box. sec(el) gives the section: { el, view,
+// box, heading }. An item's quote is its name and its heading, not every word in it (the buttons'
+// labels are no part of what the owner pointed at); its whole text only when it has neither.
+function tSubjectAt(el, x, y, sec) {
+  const item = el?.closest?.('[data-subject]');
+  if (item && T_REF.test(item.dataset.subject ?? '')) {
+    const title = tLine(item.dataset.title, T_TITLE_MAX);
+    const head = tLine(item.querySelector?.('h4, .t, b')?.textContent, 300);
+    const said = [title, head && head !== title ? head : ''].filter(Boolean).join(' · ') || tLine(item.innerText ?? item.textContent, 2000);
+    return { subject: { kind: 'item', ref: item.dataset.subject, quote: tCut(said, 300) }, title: title || item.dataset.subject, el: item };
+  }
+  const s = sec(el);
+  if (!s) return null;
+  const f = (n, a, w) => (w ? Math.min(1, Math.max(0, Math.round(((n - a) / w) * 1000) / 1000)) : 0);
+  return { subject: { kind: 'page', view: s.view, at: { x: f(x, s.box.left, s.box.width), y: f(y, s.box.top, s.box.height) }, quote: tCut(tLine(s.heading, 300), 300) }, title: tLine(`the dashboard · ${s.heading || s.view}`, T_TITLE_MAX), el: s.el };
+}
+// A subject cut to the log's cap before it is sent: an element's HTML first, then console errors,
+// then the quote (the dashboard's own subjects are small; a later kit's lenses capture more).
+function tFit(s) {
+  const x = JSON.parse(JSON.stringify(s));
+  const size = () => tBytes(JSON.stringify(x));
+  for (let i = 0; i < 50 && size() > T_SUBJECT_MAX; i++) {
+    const over = size() - T_SUBJECT_MAX;
+    if (x.anchor?.html) x.anchor.html = tCut(x.anchor.html, Math.max(0, tBytes(x.anchor.html) - over));
+    else if (x.errors?.length) x.errors.pop();
+    else if (x.quote) x.quote = tCut(x.quote, Math.max(0, tBytes(x.quote) - over));
+    else if (x.route) x.route = tCut(x.route, Math.max(0, tBytes(x.route) - over));
+    else break;
+  }
+  return x;
+}
+// The line under the turns: nothing once the supervisor has the last word (its reply is the state).
+// Else: "Sent." when the POST that sent it said a pane took it; "will read it when it next checks"
+// when none did, or nobody knows (a reload); after 10 minutes with the supervisor running (a pane, as
+// /api/threads says), that it hasn't replied.
+function tCardState(t, now, typed, pane) {
+  const last = t.turns[t.turns.length - 1];
+  if (!last || last.by !== 'owner') return null;
+  if (now - Date.parse(last.at) > T_WAIT_MS) return pane ? "The supervisor hasn't replied yet." : 'Sent; the supervisor will read it when it next checks.';
+  return typed === true ? 'Sent.' : 'Sent; the supervisor will read it when it next checks.';
+}
+// Where a card opens: beside its pin (r, the pin's or subject's box), on whichever side keeps it on
+// screen, its top kept inside the window; a bottom sheet under 640 px.
+function tPlace(r, w, h, vw, vh) {
+  if (vw < 640) return { sheet: true };
+  const gap = 10;
+  const left = r.right + gap + w <= vw - 8 ? r.right + gap : Math.max(8, r.left - gap - w);
+  const top = Math.min(Math.max(8, r.top), Math.max(8, vh - h - 8));
+  return { sheet: false, left: Math.round(left), top: Math.round(top) };
+}
+const T_WHERE = { goal: 'Goals', question: 'Inbox', ticket: 'Board', planner: 'Board', observation: 'Loop, Observe', problem: 'Loop, Orient', lesson: 'Loop, Orient', decision: 'Loop, Decide', act: 'Loop, Act', preview: 'Library', artifact: 'Library' };
+// Where a thread's subject is, in the dock's words.
+function tWhere(s) {
+  if (!s) return 'no subject';
+  if (s.kind === 'item') return T_WHERE[String(s.ref).split(':')[0]] || 'the dashboard';
+  if (s.kind === 'page') { const [sec, tab] = String(s.view).slice(1).split('/'); return T_SECTIONS[sec] ? `${T_SECTIONS[sec]}${tab ? `, ${tab.charAt(0).toUpperCase()}${tab.slice(1)}` : ''}` : 'the dashboard'; }
+  if (s.kind === 'artifact') return s.slug;
+  if (s.kind === 'preview') return `${s.name}${s.route ? ` ${s.route}` : ''}`;
+  return 'no subject';
+}
+const tKey = (s) => (!s ? null : s.kind === 'item' ? `item:${s.ref}` : s.kind === 'page' ? `page:${s.view}:${s.at?.x}:${s.at?.y}` : null);
+// One pin per subject, for open threads: numbered as the dock numbers them (by when each began), with
+// every thread on it, oldest first.
+function tPins(threads) {
+  const open = threads.filter((t) => t.status === 'open').sort((a, b) => a.created_at.localeCompare(b.created_at));
+  const by = new Map();
+  open.forEach((t, i) => { const k = tKey(t.subject); if (!k) return; const g = by.get(k) ?? { key: k, subject: t.subject, n: i + 1, ids: [] }; g.ids.push(t.id); by.set(k, g); });
+  return [...by.values()];
+}
+// A dot in the dock: the supervisor spoke after the owner last looked at the thread (this browser).
+const tUnread = (t, seenAt) => t.turns.some((u) => u.by === 'supervisor' && (!seenAt || u.at > seenAt));
+/* threads-core end */
+
 // Not under someone mid-action: a redraw replaces the controls it draws, so typing, an IME
 // composition, an open select or file picker, a press not yet released (the click would land on
 // nothing) or an answer on its way would be lost. The data still comes in: the tab title and the

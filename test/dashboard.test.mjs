@@ -627,3 +627,86 @@ test('every item the dashboard draws says what it is; a question asked in a thre
   assert.deepEqual(await p.ev(`(() => { const a = document.querySelector('#q-${Q} .from-thread a'); return a && [a.getAttribute('href'), a.textContent]; })()`), [`#talk/${T}`, 'Launch checkout']);
   assert.match(await p.ev(`document.querySelector('#answered [data-subject="question:${Qa}"]').textContent`), /You said: “yes, keep the US for later”[\s\S]*answered in a thread/);
 });
+
+test("the thread layer's rules: what the pointer is on, a subject that fits, where a card opens, its state, the pins and the dock's words", () => {
+  const html = fs.readFileSync(path.join(kit, 'dashboard/index.html'), 'utf8');
+  const src = html.slice(html.indexOf('/* threads-core start */'), html.indexOf('/* threads-core end */'));
+  assert.ok(src.length > 500, 'the threads-core block is marked in index.html');
+  const ctx = vm.createContext({ TextEncoder });
+  vm.runInContext(`${src}\n;globalThis.api = { T_TYPES, T_REF, T_HOME, tBytes, tCut, tLine, tSubjectAt, tFit, tCardState, tPlace, tWhere, tPins, tUnread };`, ctx);
+  const A = ctx.api;
+  const plain = (x) => JSON.parse(JSON.stringify(x));
+  // the page and the kit name the same things, and the page sends no ref the log refuses
+  const kitSrc = fs.readFileSync(path.join(kit, 'scripts/devteam.mjs'), 'utf8');
+  const kitLog = vm.runInContext(`${/^const SUBJECT_TYPES = .*$/m.exec(kitSrc)[0]}\n${/^const SUBJECT_REF = .*$/m.exec(kitSrc)[0]}\n;({ types: SUBJECT_TYPES, ref: SUBJECT_REF })`, vm.createContext({}));
+  assert.deepEqual(plain(A.T_TYPES), plain(kitLog.types));
+  assert.equal(A.T_REF.source, kitLog.ref.source);
+  assert.deepEqual(Object.keys(A.T_HOME).sort(), [...plain(A.T_TYPES)].sort(), 'every kind of item has a home section');
+  // sizes in bytes; one line; never half a surrogate pair
+  assert.equal(A.tBytes('héllo'), 6);
+  assert.equal(A.tCut('日本語', 7), '日本');
+  assert.equal(A.tLine('a\n b‮ c', 120), 'a b c');
+  assert.equal(A.tLine('x'.repeat(130), 120).length, 120);
+  assert.equal(A.tLine(`${'x'.repeat(119)}😀`, 120).length, 119);
+  // an item under the pointer, a spot in a section, nothing
+  const G = 'g-20261110-101500123-supervisor';
+  const on = (item) => ({ closest: (s) => (s === '[data-subject]' ? item : null) });
+  const item = { dataset: { subject: `goal:${G}`, title: 'Launch checkout' }, innerText: 'Launch checkout\n  admins pay alone\nRun Drain Park Let go', querySelector: () => ({ textContent: 'Launch checkout' }) };
+  const hit = A.tSubjectAt(on(item), 10, 10, () => null);
+  assert.deepEqual(plain(hit.subject), { kind: 'item', ref: `goal:${G}`, quote: 'Launch checkout' }, "its name, not its buttons' labels");
+  assert.equal(hit.title, 'Launch checkout');
+  const card = { dataset: { subject: 'question:q-20261110-101500123-supervisor', title: 'Narrow it?' }, innerText: 'x', querySelector: () => ({ textContent: 'Narrow the goal to EU orders?' }) };
+  assert.equal(A.tSubjectAt(on(card), 0, 0, () => null).subject.quote, 'Narrow it? · Narrow the goal to EU orders?');
+  assert.equal(A.tSubjectAt(on({ dataset: { subject: `goal:${G}` }, innerText: 'Only\ntext', querySelector: () => null }), 0, 0, () => null).subject.quote, 'Only text', 'its text only when it has no name or heading');
+  assert.equal(A.tSubjectAt(on({ dataset: { subject: 'secret:x', title: 'x' }, innerText: 'x' }), 0, 0, () => null), null, 'a ref the log would refuse is no item');
+  const sec = { el: {}, view: '#loop/observe', box: { left: 100, top: 200, width: 400, height: 100 }, heading: 'Loop' };
+  const spot = A.tSubjectAt({ closest: () => null }, 200, 250, () => sec);
+  assert.deepEqual(plain(spot.subject), { kind: 'page', view: '#loop/observe', at: { x: 0.25, y: 0.5 }, quote: 'Loop' });
+  assert.equal(spot.title, 'the dashboard · Loop');
+  assert.equal(A.tSubjectAt({ closest: () => null }, 0, 0, () => null), null);
+  // fitting the log's 2,500 bytes: the HTML first, then the errors, then the quote
+  const big = { kind: 'preview', name: 'cool-tiger', route: '/checkout', anchor: { tag: 'button', html: 'h'.repeat(1024), selector: 's'.repeat(200) }, errors: ['"'.repeat(200), '"'.repeat(200), '"'.repeat(200)] };
+  const fit = A.tFit(big);
+  assert.ok(A.tBytes(JSON.stringify(fit)) <= 2500);
+  assert.equal(fit.errors.length, 3, 'the errors kept while the HTML can give');
+  assert.ok(fit.anchor.html.length < 1024);
+  const noHtml = A.tFit({ ...big, anchor: { tag: 'button' }, errors: ['\u0001'.repeat(200), '\u0001'.repeat(200), '\u0001'.repeat(200)] });
+  assert.ok(A.tBytes(JSON.stringify(noHtml)) <= 2500 && noHtml.errors.length < 3);
+  assert.ok(A.tBytes(JSON.stringify(A.tFit({ kind: 'item', ref: `goal:${G}`, quote: '"'.repeat(1500) }))) <= 2500);
+  assert.deepEqual(plain(A.tFit(hit.subject)), plain(hit.subject), 'a small subject is left alone');
+  // the card's state line
+  const now = Date.parse('2026-11-10T12:00:00Z');
+  const th = (...turns) => ({ turns: turns.map(([by, min]) => ({ by, at: new Date(now - min * 60000).toISOString() })) });
+  const later = 'Sent; the supervisor will read it when it next checks.';
+  assert.equal(A.tCardState(th(['owner', 5], ['supervisor', 1]), now, true, true), null, 'the reply is the state');
+  assert.equal(A.tCardState(th(['owner', 1]), now, true, true), 'Sent.');
+  assert.equal(A.tCardState(th(['owner', 1]), now, false, false), later);
+  assert.equal(A.tCardState(th(['owner', 1]), now, undefined, true), later, 'after a reload nobody knows: when it next checks');
+  assert.equal(A.tCardState(th(['owner', 11]), now, true, true), "The supervisor hasn't replied yet.");
+  assert.equal(A.tCardState(th(['owner', 11]), now, true, false), later, 'not running: it will read it later');
+  assert.equal(A.tCardState(th(), now, true, true), null);
+  // where a card opens: beside the pin, flipped to stay on screen; a sheet on a narrow screen
+  assert.deepEqual(plain(A.tPlace({ left: 100, right: 300, top: 100, bottom: 150 }, 360, 400, 1200, 800)), { sheet: false, left: 310, top: 100 });
+  assert.deepEqual(plain(A.tPlace({ left: 800, right: 1000, top: 700, bottom: 750 }, 360, 400, 1200, 800)), { sheet: false, left: 430, top: 392 });
+  assert.deepEqual(plain(A.tPlace({ left: 10, right: 20, top: 10, bottom: 20 }, 360, 400, 600, 800)), { sheet: true });
+  // the dock's words for where a subject is
+  assert.equal(A.tWhere({ kind: 'item', ref: `goal:${G}` }), 'Goals');
+  assert.equal(A.tWhere({ kind: 'item', ref: 'ticket:checkout-04' }), 'Board');
+  assert.equal(A.tWhere({ kind: 'page', view: '#loop/observe' }), 'Loop, Observe');
+  assert.equal(A.tWhere({ kind: 'page', view: '#goals' }), 'Goals');
+  assert.equal(A.tWhere({ kind: 'page', view: '#nowhere' }), 'the dashboard', 'no hash route in what the owner reads');
+  assert.equal(A.tWhere({ kind: 'artifact', slug: 'pricing-mock' }), 'pricing-mock');
+  assert.equal(A.tWhere({ kind: 'preview', name: 'cool-tiger', route: '/checkout' }), 'cool-tiger /checkout');
+  assert.equal(A.tWhere(null), 'no subject');
+  // one pin per subject, numbered by when its first open thread began; resolved and no-subject threads get none
+  const onGoal = { kind: 'item', ref: `goal:${G}` };
+  const t = (id, created, subject, status = 'open') => ({ id, created_at: created, subject, status, turns: [] });
+  const pins = A.tPins([t('a', '1', onGoal), t('c', '2', { kind: 'page', view: '#goals', at: { x: 0.1, y: 0.2 } }), t('b', '3', onGoal), t('d', '0', onGoal, 'resolved'), t('e', '4', null)]);
+  assert.deepEqual(plain(pins).map((g) => [g.n, g.ids]), [[1, ['a', 'b']], [2, ['c']]]);
+  // a dot when the supervisor spoke after the owner last looked
+  const reply = { turns: [{ by: 'owner', at: '2026-11-10T10:00:00.000Z' }, { by: 'supervisor', at: '2026-11-10T10:05:00.000Z' }] };
+  assert.equal(A.tUnread(reply, '2026-11-10T10:01:00.000Z'), true);
+  assert.equal(A.tUnread(reply, '2026-11-10T10:05:00.000Z'), false);
+  assert.equal(A.tUnread(reply, null), true);
+  assert.equal(A.tUnread({ turns: [{ by: 'owner', at: '2026-11-10T10:00:00.000Z' }] }, null), false);
+});
