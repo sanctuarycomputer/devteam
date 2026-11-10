@@ -10676,7 +10676,7 @@ function sensorCredentialState(name) {
   if (v.status === 'open') return { status: 'open', question: v };
   if (['withdrawn', 'superseded'].includes(v.status)) return { status: 'none', question: v };
   if (String(v.answer ?? '').startsWith('Posted')) return { status: 'posted', question: v };
-  const back = latest(logObjects('observation').filter((o) => fromSensor(o) && o.kind === 'sensor-reconsidered' && o.subject === sensorSubject(name)));
+  const back = latest(logObjects('observation').filter((o) => o.detector === 'sensor' && ['supervisor', 'owner'].includes(writerClass(o.created_by)) && o.kind === 'sensor-reconsidered' && o.subject === sensorSubject(name)));
   return back && back.created_at > (v.answered_at ?? v.asked_at) ? { status: 'reconsidered', question: v } : { status: 'declined', question: v };
 }
 // Open the credential question for each sensor the code implies and nothing here can read, unless
