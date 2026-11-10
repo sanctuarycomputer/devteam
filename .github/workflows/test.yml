@@ -5,17 +5,29 @@ on:
     branches: [main]
 jobs:
   kit:
-    # Projects run the kit on whatever Node they pin, so test every supported major.
+    # Projects run the kit on whatever Node they pin, so test every supported major. Each major
+    # runs in two jobs side by side: the "devteam kit" chain (and the forks it starts), and every
+    # other test file.
     strategy:
       fail-fast: false
       matrix:
         node: [18, 20, 22, 24]
+        part: [chain, rest]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ matrix.node }}
-      # the kit drives workers through tmux; the test checks pane detection on its own tmux server
+      # the kit drives workers through tmux; the tests run it on servers of their own, through a shim
+      # that refuses the machine's default server (test/lib/kit.mjs)
       - run: command -v tmux || (sudo apt-get update -q && sudo apt-get install -yq tmux)
-      - run: node --test
+      # test files are *.test.mjs directly under test/; test/lib holds helpers, which node --test's
+      # own discovery would also pick up
+      - if: matrix.part == 'chain'
+        run: node --test --test-concurrency=8 test/kit.test.mjs
+      # bounds.test.mjs times the kit's code against a bound: alone, so nothing else's load counts
+      - if: matrix.part == 'rest'
+        run: node --test test/bounds.test.mjs
+      - if: matrix.part == 'rest'
+        run: node --test --test-concurrency=8 $(ls test/*.test.mjs | grep -v '/\(kit\|bounds\)\.test\.mjs$')
