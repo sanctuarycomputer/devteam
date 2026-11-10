@@ -413,7 +413,9 @@ test('behind the gateway the kit runs as on a laptop: hub, dashboard, owner acti
 
     // the terminal, on its own name: the gateway's copy of the page, framed only by the hub
     const tp = await gw.req('GET', '/', { on: 'term' });
-    assert.equal(tp.body, 'the gateway\'s copy of ttyd');
+    assert.ok(tp.body.startsWith('the gateway\'s copy of ttyd'), tp.body.slice(0, 80));
+    assert.match(tp.body, /registerOscHandler\(52,/, 'and copying in tmux reaches the browser\'s clipboard');
+    assert.match(tp.body, /b64 !== '\?' && Date\.now\(\) - at < 3000/, 'write only, and only just after the owner clicked or typed');
     assert.ok(tp.headers['content-security-policy'].split('; ').includes(`frame-ancestors ${gw.publicUrl}`), tp.headers['content-security-policy']);
     assert.deepEqual((await gw.req('GET', '/token', { on: 'term' })).json, { token: '' });
     assert.equal((await gw.req('GET', '/term/')).status, 404, 'the box\'s name has no terminal');

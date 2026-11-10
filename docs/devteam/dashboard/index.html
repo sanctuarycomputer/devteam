@@ -68,13 +68,15 @@
   main { max-width: 1120px; width: 100%; margin: 0 auto; padding: 24px 32px 80px; }
   @media (max-width: 900px) {
     /* minmax(0, …): the board's columns must scroll inside it, not widen the page */
-    .app { grid-template-columns: minmax(0, 1fr); }
+    /* the second row takes the spare height: with no content yet, the nav would get half of it */
+    .app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; }
     .side { height: auto; flex-direction: row; align-items: center; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 8px 12px; gap: 4px; z-index: 5; }
     .side .brand { padding: 0 8px 0 0; }
     .side .nav { display: flex; gap: 2px; }
     .side .foot { display: none; }
     .nav a { white-space: nowrap; }
-    main { padding: 16px 16px 64px; }
+    /* a long URL or id wraps; it doesn't widen the page */
+    main { padding: 16px 16px 64px; overflow-wrap: anywhere; }
   }
 
   /* sections */
@@ -90,7 +92,7 @@
   .card { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; margin-bottom: 8px; box-shadow: var(--shadow); }
   .card.small { padding: 10px 12px; }
   .card p { margin: 6px 0; }
-  .two { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+  .two { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); }
 
   /* badges: a tint of the status colour; the word is always in the badge, never colour alone */
   .badge { display: inline-flex; align-items: center; font-size: 11px; font-weight: 500; line-height: 18px; padding: 0 7px; border-radius: 999px; margin-right: 6px; vertical-align: middle; white-space: nowrap;
@@ -134,8 +136,10 @@
 
   /* progress */
   .filters { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-bottom: 10px; font-size: 12px; color: var(--fg-2); }
+  /* a select is as wide as its longest option, unless its label can shrink too */
+  .filters label { max-width: 100%; min-width: 0; } .filters select { min-width: 0; }
   .progress-layout { display: grid; gap: 12px; align-items: start; grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr); }
-  @media (max-width: 860px) { .progress-layout { grid-template-columns: 1fr; } }
+  @media (max-width: 860px) { .progress-layout { grid-template-columns: minmax(0, 1fr); } }
   .chart { position: relative; }
   .chart svg { width: 100%; height: auto; display: block; }
   .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: var(--fg-2); margin-bottom: 6px; }
@@ -176,7 +180,7 @@
   .why { font-size: 12px; color: var(--fg-2); margin: 4px 0 8px; padding: 4px 10px; border-left: 2px solid var(--line-2); }
   .feed .card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; align-items: start; }
   .feed .card.corrected { border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
-  .goal { display: grid; gap: 6px; }
+  .goal { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
   .goal .gaps { font-size: 12px; color: var(--fg-2); margin: 0; padding-left: 18px; }
   .qcard { border-left: 2px solid var(--amber); }
   .qcard.door { border-left-color: var(--red); }

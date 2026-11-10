@@ -41,7 +41,7 @@ jobs:
           # git answers 1 for "not on main" and 128 for "can't tell": either refuses
           git merge-base --is-ancestor "$SHA" origin/main || { echo "refusing $SHA: it isn't on main"; exit 1; }
           # What the image is built from: cloud/Dockerfile's COPY sources, and the Dockerfile itself.
-          inputs=(cloud docs/devteam/dashboard/hub.html)
+          inputs=(cloud docs/devteam/dashboard/hub.html docs/devteam/process/operator.md)
           # The release before this one, of those this gate would have let through: one off main
           # never deployed, so it can't stand for what the box is running.
           tags=$(gh release list --exclude-drafts --exclude-pre-releases -L 100 --json tagName,publishedAt \
