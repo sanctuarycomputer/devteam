@@ -41,7 +41,7 @@ Some owner decisions can be handed to the supervisor a step at a time, as eviden
     "release-scope": { "ceiling": 3, "start": 1, "about": "move a story to a later release to ship the rest on time" },
     "upstream-pr": { "ceiling": 3, "start": 1, "about": "open a PR on upstream devteam with a general improvement" },
     "release-production": { "ceiling": 3, "start": 1, "about": "ship a tagged release to production, with every gate passing at the tagged commit" },
-    },
+    "production-migration": { "ceiling": 3, "start": 1, "about": "run a rollback-safe migration against production data" },
     "incident-fix": { "ceiling": 3, "start": 2, "about": "open and run a ticket that fixes a production incident the sensors found" }
   },
   "constitutional": ["merge-word", "approve-feature-plan", "merge-chore", "worker-slots", "replan-within-feature", "add-ticket", "approve-spec", "approve-plan", "approve-design-change", "contract-ruling", "improvement-trial", "release-staging", "goal-readiness", "apply-default", "withdraw-question", "recovery", "carry-answer", "drain", "undrain", "goal-hold", "fleet-drain", "fleet-park", "fleet-undrain", "fleet-unpark", "registry-edit"],
