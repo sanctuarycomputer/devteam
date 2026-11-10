@@ -93,6 +93,9 @@ test('which supervisors come back, and which are left alone', () => {
   assert.match(up['home-repo'], /already running/);
   assert.match(up.lone, /^would start fresh/, 'a dashboard is not a supervisor');
   assert.match(up.parked, /^would start fresh/, 'nor is one in its own session, where the kit keeps it');
+  // a preview's server at the repo's root, running node, is not its supervisor
+  fs.writeFileSync(panesFile, `%4\tdev~cool-tiger\t${h}\tnode\n`);
+  assert.match(lines(run(['--all', '--dry-run']))['home-repo'], /^would (start|resume)/, 'a dev~ window is a preview');
   fs.rmSync(panesFile);
 
   // a real restore: the window, the noted pane, the first message, the list used up
@@ -384,7 +387,7 @@ test('status says the box\'s own CPU and memory caps, not the host\'s', () => {
   // no caps (a laptop, or a cgroup that says max): the machine's own numbers
   fs.writeFileSync(path.join(cg, 'cpu.max'), 'max 100000\n');
   fs.writeFileSync(path.join(cg, 'memory.max'), 'max\n');
-  assert.match(run(['--status'], { DEVTEAM_CGROUP: cg }).stdout, /^box: disk .*; memory [\d.]+ GB free of [\d.]+ GB; cpus \d+ /m);
+  if (fs.existsSync('/proc/meminfo')) assert.match(run(['--status'], { DEVTEAM_CGROUP: cg }).stdout, /^box: disk .*; memory [\d.]+ GB free of [\d.]+ GB; cpus \d+ /m); // the numbers are /proc's: not on a Mac
 });
 
 test('no tmux session: it refuses rather than start one from inside an agent', () => {

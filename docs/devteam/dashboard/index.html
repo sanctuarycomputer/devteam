@@ -558,6 +558,7 @@
 
   <section id="library">
     <h2>Library <span class="sub">pages the fleet drew to show an idea, and the links it works from</span></h2>
+    <div class="lib-list" id="previews"></div>
     <h3>Artifacts</h3>
     <div class="lib-list" id="artifacts"></div>
     <h3>Links</h3>
@@ -685,6 +686,8 @@ let PAGE_VERSION = null;
 // What the cloud box serves to the public (x-devteam-public, set only by its gateway): { project:
 // { port, root, artifacts: { slug: tree } } }. null on a laptop.
 let PUBLIC = null;
+// Whether this box's gateway serves previews (x-devteam-previews, set only by the release that does).
+let PREVIEWS = false;
 let VIEW = 'all';
 try { VIEW = localStorage.getItem('devteam.view') || 'all'; } catch {}
 let LEFT_ONLY = false;
@@ -1170,7 +1173,7 @@ const artLinkOf = (l, inline = false) => {
   if (!href) return `<span>${esc(l.title)} <span class="muted">(no longer available)</span></span>`;
   return `<a href="${esc(href)}" data-av-note="${l.changed ? AV_CHANGED : ''}"${l.changed ? ` title="${AV_CHANGED}"` : ''}>${esc(l.title)}</a>${l.changed && !inline ? ' <span class="badge high">changed since asked</span>' : ''}`;
 };
-const linkOf = (l) => (l.artifact ? artLinkOf(l) : l.url ? `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.title)}</a>` : l.path ? `<a href="${esc(fileHref(l))}">${esc(l.title)}</a>` : `<span>${esc(l.title)}${l.remote ? ` <span class="muted">(${esc(l.remote)})</span>` : ''}</span>`);
+const linkOf = (l) => (l.preview ? previewLinkHtml(l, previewHere(location, PREVIEWS), esc) : l.artifact ? artLinkOf(l) : l.url ? `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.title)}</a>` : l.path ? `<a href="${esc(fileHref(l))}">${esc(l.title)}</a>` : `<span>${esc(l.title)}${l.remote ? ` <span class="muted">(${esc(l.remote)})</span>` : ''}</span>`);
 // A question's text with each [[name]] drawn in place as that link (every link is still listed under
 // the question). The rest is linkified as before; a [[name]] that names no link stays as written.
 const NAME_REF = /\[\[([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\]\]/;
@@ -3092,6 +3095,29 @@ function markAnswered(id, text) {
   if (card) { card.classList.add('done'); card.innerHTML = `<div class="answered-note"><i class="icon-circle-check" aria-hidden="true"></i> Answered: <b>${esc(text)}</b></div>`; }
 }
 
+/* preview-cards start */
+// A preview's link for where this page is. Through the gateway the dashboard is on <port>.<box>
+// and the preview on <name>.<box>; elsewhere it is 127.0.0.1:<port>, the owner's own machine.
+function previewHere(loc, served) {
+  const m = served ? /^(\d{1,5})\.([a-z0-9.-]*[a-z][a-z0-9.-]*(?::\d+)?)$/i.exec(loc?.host || '') : null;
+  return m ? { proto: loc.protocol, box: m[2] } : null;
+}
+const previewUrl = (me, p) => (me ? `${me.proto}//${p.name}.${me.box}/` : `http://127.0.0.1:${p.port}/`);
+// The Library card: what the state is and what the owner can do about it.
+function previewState(p, now) {
+  if (!(Date.parse(p.expires) > now)) return { state: 'expired', actions: ['stop'], since: null };
+  if (p.up === null || p.up === undefined) return { state: 'checking', actions: ['open', 'copy', 'stop'], since: null };
+  if (p.up) return { state: 'live', actions: ['open', 'copy', 'stop'], since: null };
+  return p.run ? { state: 'not-running', actions: ['start', 'open', 'stop'], since: null } : { state: 'not-answering', actions: ['open', 'stop'], since: p.down_since || null };
+}
+// A question's link to a preview, with what the kit knows of it now. The question names only the
+// preview, so the link is built here for this page's address.
+function previewLinkHtml(l, me, esc) {
+  if (l.state === 'gone') return `<span>${esc(l.title)} <span class="muted">(no longer offered)</span></span>`;
+  const state = { live: 'live', down: 'not answering', checking: 'checking' }[l.state] ?? 'checking';
+  return `<a href="${esc(previewUrl(me, { name: l.preview, port: l.port }))}" target="_blank" rel="noopener noreferrer">${esc(l.title)}</a> <span class="small muted">${state}</span>`;
+}
+/* preview-cards end */
 /* public-states start */
 // Publishing, as a landed card shows it. The log's newest artifact-publish line (a.published) says
 // what the owner asked for, or what something wrote for them; the gateway's header says what the
@@ -3127,7 +3153,31 @@ const publicLinks = (me) => ({
 function renderLibrary(lib) {
   const arts = lib?.artifacts ?? [];
   const links = lib?.links ?? [];
-  $('n-library').textContent = arts.length || '';
+  const previews = lib?.previews ?? [];
+  $('n-library').textContent = arts.length + previews.length || '';
+  const pvHere = previewHere(location, PREVIEWS);
+  const onBoxWithout = !PREVIEWS && /^\d{1,5}\.[a-z]/i.test(location.host);
+  // the running servers offered to the owner: what's live now, for this page's address
+  const pvBadge = { live: '<span class="badge good">live</span>', checking: '<span class="badge">checking</span>', 'not-running': '<span class="badge medium">not running</span>', 'not-answering': '<span class="badge medium">not answering</span>', expired: '<span class="badge">expired</span>' };
+  const pvCard = (p) => {
+    const s = previewState(p, Date.now());
+    const url = previewUrl(pvHere, p);
+    const act = {
+      open: () => `<a class="ghost" href="${esc(url)}" target="_blank" rel="noopener noreferrer">Open</a>`,
+      copy: () => `<button class="ghost" data-copy="${esc(url)}">Copy link</button>`,
+      start: () => `<button class="ghost" data-preview-start="${esc(p.name)}">Start</button>`,
+      stop: () => `<button class="ghost" data-preview-stop="${esc(p.name)}"${p.run ? '' : ' title="Unregisters the link; the server stays up until its session stops it"'}>Stop</button>`,
+    };
+    const meta = [esc(p.project), linkify(p.session), p.label ? esc(p.label) : '', p.at ? `offered ${esc(when(p.at))}` : '', s.since ? `down since ${esc(when(s.since))}` : ''].filter(Boolean).join(' · ');
+    return `<div class="card small art-card" data-preview="${esc(p.name)}">
+      <div class="art-t"><b>${esc(p.label || p.name)}</b><code class="small">${esc(p.name)}</code>${pvBadge[s.state]}</div>
+      <div class="meta">${meta}</div>
+      <div class="pub">${s.actions.map((a) => act[a]()).join('')}<span class="err" id="e-preview-${esc(p.name)}"></span></div>
+    </div>`;
+  };
+  $('previews').innerHTML = previews.length
+    ? `<h3>Previews <span class="dim">running servers, from a session</span></h3>${onBoxWithout ? '<p class="small muted lib-pub">This box\'s gateway doesn\'t serve previews yet; Open goes to the server on this machine.</p>' : ''}${previews.map(pvCard).join('')}`
+    : '';
   const me = PUBLIC ? publicHere(location, lib) : null;
   const L = me ? publicLinks(me) : null;
   // the gateway's pages open in a new tab this page can't later redirect
@@ -3396,6 +3446,7 @@ async function loadNow() {
     // what the cloud box serves; absent on a laptop, and a header that doesn't parse counts as absent
     PUBLIC = null;
     try { if (r.headers.get('x-devteam-public')) PUBLIC = JSON.parse(r.headers.get('x-devteam-public')); } catch {}
+    PREVIEWS = r.headers.get('x-devteam-previews') === '1';
     const body = await r.text();
     try { d = JSON.parse(body); } catch { throw new Error(r.ok ? 'the server sent something that is not JSON' : `${r.status} ${body.slice(0, 400)}`); }
     if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
@@ -3466,6 +3517,15 @@ document.addEventListener('click', async (ev) => {
   }
   const pl = ev.target.closest('[data-planner]');
   if (pl) { location.hash = `planner/${pl.dataset.planner}`; return; }
+  // Stop and Start on a preview: the kit's own actions, as an owner action
+  const pvb = ev.target.closest('[data-preview-stop],[data-preview-start]');
+  if (pvb) {
+    const stop = pvb.dataset.previewStop !== undefined;
+    const name = stop ? pvb.dataset.previewStop : pvb.dataset.previewStart;
+    pvb.disabled = true;
+    if (!(await post(stop ? 'preview-stop' : 'preview-start', { name }, `preview-${name}`))) pvb.disabled = false;
+    return;
+  }
   const cp = ev.target.closest('[data-copy]');
   if (cp) { try { await navigator.clipboard.writeText(cp.dataset.copy); cp.textContent = 'Copied'; } catch { cp.textContent = 'Select and copy'; } return; }
   // Forget: record an unpublish through the kit's own action, for a publish line the owner won't
