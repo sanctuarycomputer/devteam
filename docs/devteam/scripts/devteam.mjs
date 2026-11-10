@@ -2593,7 +2593,9 @@ const parkRulingSent = (name, marker) => logObjects('message').some((m) => m.to 
 function liveSessions() { return memo('liveSessions', liveSessionsNow); }
 function liveSessionsNow() {
   const names = new Set();
-  for (const t of tickets().values()) if (activeWorker(t.id) || (workerState(t.id)?.phase === 'parked' && !mergeShaFor(t.id) && isActive(t))) names.add(t.id);
+  // a superseded ticket is a session only while something still runs in its window
+  const windowUp = (id) => !/^no tmux (session|window)/.test(resolvePane(tmuxTarget(id)).problem ?? '');
+  for (const t of tickets().values()) if ((activeWorker(t.id) && (isActive(t) || windowUp(t.id))) || (workerState(t.id)?.phase === 'parked' && !mergeShaFor(t.id) && isActive(t))) names.add(t.id);
   for (const p of planners()) names.add(`plan-${p.feature}`);
   return [...names].sort().map(sessionOf);
 }
