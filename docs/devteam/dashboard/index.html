@@ -3530,7 +3530,7 @@ const tUnread = (t, seenAt) => t.turns.some((u) => u.by === 'supervisor' && (!se
 // about it. It lives in #tl, outside <main>, which the 10 s refresh rebuilds, so a card, its draft and
 // the dock keep their state. Its window listeners in the capture phase are registered here, before
 // the page's own (PRESSED below), so a click it takes reaches nothing else.
-const TL = { threads: [], pane: false, open: null, draft: null, hit: null, pin: false, via: null, swallowUntil: 0, typed: {}, sig: '', polling: null, busy: false, resolving: false, readyKey: '', pill: '' };
+const TL = { threads: [], pane: false, open: null, draft: null, hit: null, pin: false, via: null, swallowUntil: 0, typed: {}, sig: '', polling: null, seq: 0, have: 0, openAt: -1, latest: null, busy: false, resolving: false, readyKey: '', pill: '' };
 const tlEl = (id) => document.getElementById(id);
 const tlOwn = (el) => !!el?.closest?.('#tl');
 const tlShowing = () => !tlEl('tl-cursor').hidden;
@@ -3577,7 +3577,7 @@ function tlPinMode(on) {
 }
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && (tlShowing() || TL.pin)) { e.stopImmediatePropagation(); tlHide(); if (TL.pin) tlPinMode(false); }
-  else if (e.key === 'Escape' && tlOwn(document.activeElement) && !tlEl('tl-card').hidden) { e.stopImmediatePropagation(); TL.open = null; TL.draft = null; tlDraw(); }
+  else if (e.key === 'Escape' && tlOwn(document.activeElement) && !tlEl('tl-card').hidden) { e.stopImmediatePropagation(); tlClose(); }
 }, true);
 window.addEventListener('keyup', (e) => { if (e.key === 'Shift' && !TL.pin) tlHide(); }, true);
 window.addEventListener('blur', () => { if (!TL.pin) tlHide(); });
@@ -3623,7 +3623,8 @@ function tlStart(hit) {
 function tlHome(s) {
   if (s?.kind !== 'item') return null;
   const sel = `[data-subject="${CSS.escape(s.ref)}"]`;
-  return document.querySelector(`main #${T_HOME[s.ref.split(':')[0]] || 'overview'} ${sel}`) ?? document.querySelector(`main ${sel}`);
+  const k = s.ref.split(':')[0];
+  return document.querySelector(`main #${Object.hasOwn(T_HOME, k) ? T_HOME[k] : 'overview'} ${sel}`) ?? document.querySelector(`main ${sel}`);
 }
 const tlVisible = (el) => !!el && el.getClientRects().length > 0;
 function tlTargetRect(s) {
@@ -3663,7 +3664,9 @@ function tlCtx(s, title, note) {
 function tlRef(r) {
   const i = r.indexOf(':');
   const k = r.slice(0, i), id = r.slice(i + 1);
-  const a = { goal: () => glink(id), ticket: () => tlink(id), question: () => qlink(id), decision: () => dlink(id), act: () => `<a class="linkish" href="#act/${encodeURIComponent(id)}">open it</a>`, problem: () => `<a class="linkish" href="#problem/${encodeURIComponent(id)}">open it</a>`, lesson: () => `<a class="linkish" href="#lesson/${encodeURIComponent(id)}">open it</a>`, artifact: () => `<a class="linkish" href="#artifact/main/${encodeURIComponent(id)}">${esc(id)}</a>` }[k];
+  const links = { goal: () => glink(id), ticket: () => tlink(id), question: () => qlink(id), decision: () => dlink(id), act: () => `<a class="linkish" href="#act/${encodeURIComponent(id)}">open it</a>`, problem: () => `<a class="linkish" href="#problem/${encodeURIComponent(id)}">open it</a>`, lesson: () => `<a class="linkish" href="#lesson/${encodeURIComponent(id)}">open it</a>`, artifact: () => `<a class="linkish" href="#artifact/main/${encodeURIComponent(id)}">${esc(id)}</a>` };
+  // a ref's kind is the log's: own keys only, so "constructor:x" is just shown, not called
+  const a = Object.hasOwn(links, k) ? links[k] : null;
   return `<span class="tl-ref"><span class="muted">${esc(words(k))}</span> ${a ? a() : `<code>${esc(id)}</code>`}</span>`;
 }
 // A turn's words.
@@ -3712,9 +3715,13 @@ function tlBytes() { const n = tBytes(tlEl('tl-c-text').value.trim()); const el 
 function tlCard() {
   const card = tlEl('tl-card');
   const t = TL.open ? TL.threads.find((x) => x.id === TL.open) : null;
-  if (TL.open && !t) TL.open = null;
-  if (!t && !TL.draft) { card.hidden = true; card.dataset.key = ''; clearInterval(TL.polling); TL.polling = null; return; }
-  const key = t ? t.id : 'new';
+  // a thread just started isn't in threads read before it was written: keep the card as it is until
+  // a read begun after the send says it isn't there
+  if (TL.open && !t) { if (TL.have <= TL.openAt) return; TL.open = null; }
+  if (!t) { clearInterval(TL.polling); TL.polling = null; }
+  if (!t && !TL.draft) { card.hidden = true; card.dataset.key = ''; return; }
+  // an unsent draft is kept per subject, so words left on one goal don't appear on another
+  const key = t ? t.id : `new:${tKey(TL.draft.subject) ?? 'none'}`;
   if (card.dataset.key !== key) {
     // the first words make the draft a thread, and the card its own: the composer keeps the focus
     const writing = document.activeElement?.id === 'tl-c-text';
@@ -3732,14 +3739,32 @@ function tlCard() {
   if (t && !TL.polling) TL.polling = setInterval(() => { if (document.visibilityState === 'visible' && TL.open) tlRefresh(); }, 2000);
 }
 function tlDraw() { tlCard(); }
+// Only the newest read is applied: a poll begun before a send can land after it, and would put back
+// the threads as they were. A caller whose read was overtaken waits for the newest one.
 async function tlRefresh() {
-  try {
-    const r = await fetch('/api/threads');
-    if (!r.ok) return;
-    const j = await r.json();
-    TL.threads = j.threads || [];
-    TL.pane = !!j.supervisor?.pane;
-  } catch { return; }
+  const n = ++TL.seq;
+  let run = (async () => {
+    try {
+      const r = await fetch('/api/threads');
+      if (!r.ok || n !== TL.seq) return;
+      const j = await r.json();
+      if (n !== TL.seq) return;
+      TL.threads = j.threads || [];
+      TL.pane = !!j.supervisor?.pane;
+      TL.have = n;
+    } catch { return; }
+    tlDraw();
+  })();
+  TL.latest = run;
+  await run;
+  while (TL.latest !== run) { run = TL.latest; await run; }
+}
+// Closed: and a #talk/ link that opened it is let go, so the same link opens it again.
+function tlClose() {
+  TL.open = null;
+  TL.draft = null;
+  TL.resolving = false;
+  if (location.hash.startsWith('#talk/')) history.replaceState(null, '', location.pathname + location.search);
   tlDraw();
 }
 async function tlOpen(id, go = true) {
@@ -3748,6 +3773,7 @@ async function tlOpen(id, go = true) {
   if (!t) return;
   TL.draft = null;
   TL.open = id;
+  TL.openAt = -1;
   TL.resolving = false;
   if (go) tlGoTo(t.subject);
   tlDraw();
@@ -3776,14 +3802,14 @@ async function tlSend() {
     lsDel(tlDraftKey(key));
     ta.value = '';
     tlBytes();
-    if (action === 'thread-new') { TL.draft = null; TL.open = id; }
+    if (action === 'thread-new') { TL.draft = null; TL.open = id; TL.openAt = TL.seq; }
     await tlRefresh();
   } catch (e2) { err.textContent = `Could not send: ${e2.message}`; } finally { TL.busy = false; }
 }
 document.addEventListener('input', (e) => { if (e.target.id !== 'tl-c-text') return; lsSet(tlDraftKey(tlEl('tl-card').dataset.key), e.target.value); tlBytes(); });
 document.addEventListener('keydown', (e) => { if (e.target.id === 'tl-c-text' && e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); tlSend(); } });
 document.addEventListener('click', (e) => {
-  if (e.target.closest('[data-tl-close]')) { TL.open = null; TL.draft = null; TL.resolving = false; return void tlDraw(); }
+  if (e.target.closest('[data-tl-close]')) return void tlClose();
   if (e.target.closest('[data-tl-send]')) return void tlSend();
 });
 addEventListener('resize', () => tlDraw());

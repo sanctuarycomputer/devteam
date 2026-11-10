@@ -311,6 +311,8 @@ const POLL_FAST = `(() => {
   window.fetch = async (u, o) => {
     if (String(u).startsWith('/api/data')) { window.__polls++; if (window.__gate) await window.__gate; return rf(u, o); }
     if (String(u).startsWith('/api/answer') && window.__answerHold) await window.__answerHold;
+    // a test can let the next /api/threads read through but hold its answer back: read now, landing later
+    if (String(u).startsWith('/api/threads') && window.__threadsHold) { const h = window.__threadsHold; window.__threadsHold = null; const r = await rf(u, o); window.__threadsRead = true; await h; setTimeout(() => { window.__threadsLanded = true; }, 0); return r; }
     return rf(u, o);
   };
 })()`;
@@ -802,11 +804,38 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     assert.equal(threads().length, 0);
   });
 
+  await t.test("a draft left on one subject stays with it: another subject's card starts empty; Escape closes the card", async () => {
+    const shiftClick = async (sel) => { const at = await p.at(sel); await p.hold('Shift', true); await p.move(at.x, at.y, 8); await soon(shown('tl-cursor'), 'the pin'); await p.clickAt(at.x, at.y, 8); await p.hold('Shift', false); };
+    await p.type('draft for the goal');
+    await p.key('Escape');
+    await soon(`document.getElementById('tl-card').hidden`, 'Escape closed the card');
+    await shiftClick('#goals h2');
+    await soon(`${shown('tl-card')} && TL.draft?.subject?.kind === 'page'`, 'a card on a spot in Goals');
+    assert.equal(await p.ev(`document.getElementById('tl-c-text').value`), '', "the goal's draft isn't here");
+    await p.key('Escape');
+    await soon(`document.getElementById('tl-card').hidden`, 'closed');
+    await shiftClick(`${goalSel} h4`);
+    await soon(`${shown('tl-card')} && TL.draft?.subject?.ref === 'goal:${F.goal}'`, 'the goal again');
+    assert.equal(await p.ev(`document.getElementById('tl-c-text').value`), 'draft for the goal', 'its draft kept');
+    assert.equal(await p.ev(`document.activeElement.id`), 'tl-c-text');
+    await p.ev(`(() => { const ta = document.getElementById('tl-c-text'); ta.value = ''; ta.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+    assert.equal(threads().length, 0);
+  });
+
   await t.test('Enter sends the first words: a thread on the goal, its turn in the card, the draft cleared', async () => {
     await p.type('Narrow this to the EU launch');
+    // a read of the threads begun before the send, answering after it: the card must stay the thread's
+    await p.ev(`window.__threadsRead = false; window.__threadsLanded = false; window.__threadsHold = new Promise((r) => { window.__threadsLet = r; }); tlRefresh(); void 0`);
+    await soon('window.__threadsRead', 'a read begun before the send');
     await p.key('Enter');
     const th = await until(() => threads().find((x) => x.turns[0]?.text === 'Narrow this to the EU launch'), 'the thread in the log');
     T = th.id;
+    await soon(`document.getElementById('tl-card').dataset.key === '${T}'`, 'the card the thread');
+    await p.ev('window.__threadsLet()');
+    await soon('window.__threadsLanded', 'the old read landing');
+    const polls = await p.ev('window.__polls');
+    await soon(`window.__polls >= ${polls + 2}`, 'two page refreshes since');
+    assert.equal(await p.ev(`${shown('tl-card')} && document.getElementById('tl-card').dataset.key === '${T}'`), true, "the old read didn't close the new thread's card");
     assert.deepEqual([th.subject.kind, th.subject.ref, th.title], ['item', `goal:${F.goal}`, 'Launch checkout']);
     await soon(`document.querySelector('#tl-c-turns .tl-turn.owner')?.textContent.includes('Narrow this to the EU launch')`, 'the turn in the card');
     assert.equal(await p.ev(`document.getElementById('tl-c-text').value`), '');
@@ -847,5 +876,16 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await soon(`document.getElementById('tl-card').hidden`, 'closed');
     await p.ev(`location.hash = '#talk/${T}'`);
     await soon(`${shown('tl-card')} && document.getElementById('tl-card').dataset.key === '${T}'`, 'the card from the link');
+    // closed either way, the same link opens it again
+    await p.click('[data-tl-close]');
+    await soon(`document.getElementById('tl-card').hidden && !location.hash.startsWith('#talk/')`, 'closed, the link let go');
+    await p.ev(`location.hash = '#talk/${T}'`);
+    await soon(`${shown('tl-card')} && document.getElementById('tl-card').dataset.key === '${T}'`, 'the same link again');
+    await p.click('#tl-c-text');
+    await p.key('Escape');
+    await soon(`document.getElementById('tl-card').hidden && !location.hash.startsWith('#talk/')`, 'Escape closed it');
+    await soon('TL.polling === null', 'no poll with no thread open');
+    await p.ev(`location.hash = '#talk/${T}'`);
+    await soon(`${shown('tl-card')} && document.getElementById('tl-card').dataset.key === '${T}'`, 'and again after Escape');
   });
 });
