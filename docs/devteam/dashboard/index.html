@@ -450,6 +450,9 @@
   .art-card .meta { margin-top: 4px; }
   .art-card .meta a, .lib-link .meta a { color: var(--fg-2); text-decoration: underline; text-underline-offset: 2px; }
   .art-card.draft { margin-left: 20px; background: var(--well); box-shadow: none; }
+  .art-card .pub { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 6px; }
+  .art-card .pub a.ghost, .lib-pub a.ghost { display: inline-block; padding: 2px 10px; border: 1px solid var(--line-2); border-radius: 6px; background: var(--surface); color: var(--fg); font-size: 12px; text-decoration: none; }
+  .art-card .pub a.ghost:hover, .lib-pub a.ghost:hover { background: var(--hover); }
   .art-wt { font-size: 12px; color: var(--fg-2); margin: 10px 0 6px; }
   .lib-link .links { margin: 0; }
   .lib-link .loc { font-family: var(--mono); font-size: 11.5px; overflow-wrap: anywhere; }
@@ -667,6 +670,9 @@ const pct = (a, b) => (b ? Math.round((100 * a) / b) : 0);
 let DATA = null;
 // The dashboard page this tab loaded, by the server's own fingerprint of it (x-devteam-page).
 let PAGE_VERSION = null;
+// What the cloud box serves to the public (x-devteam-public, set only by its gateway): { project:
+// { port, root, artifacts: { slug: tree } } }. null on a laptop.
+let PUBLIC = null;
 let VIEW = 'all';
 try { VIEW = localStorage.getItem('devteam.view') || 'all'; } catch {}
 let LEFT_ONLY = false;
@@ -3029,6 +3035,35 @@ function markAnswered(id, text) {
   if (card) { card.classList.add('done'); card.innerHTML = `<div class="answered-note"><i class="icon-circle-check" aria-hidden="true"></i> Answered: <b>${esc(text)}</b></div>`; }
 }
 
+/* public-states start */
+// Publishing, as a landed card shows it. The log's newest artifact-publish line (a.published) says
+// what the owner asked for, or what something wrote for them; the gateway's header says what the
+// box serves, and that is the truth. A forged line can only make a card ask, and drift says when
+// the line's tree isn't main's. Through the gateway this page is on <port>.<box>.
+function publicHere(loc, lib) {
+  const m = /^(\d{1,5})\.([a-z0-9.-]*[a-z][a-z0-9.-]*(?::\d+)?)$/i.exec(loc?.host || '');
+  return m ? { proto: loc.protocol, port: Number(m[1]), box: m[2], project: lib?.public?.project ?? null, root: lib?.public?.root ?? null } : null;
+}
+function publicState(a, pub, me) {
+  const rec = a.published || null;
+  // main has changed since the recorded publish: what would go up is not what the record names
+  const drift = !!rec && rec.tree !== a.tree;
+  if (!pub || !me) return { state: rec ? 'published' : 'none', rec, drift, from: null, actions: [] };
+  const e = me.project && Object.hasOwn(pub, me.project) ? pub[me.project] : null;
+  // the box's copy is this project's only when it came from this checkout (a port can change)
+  const ours = !!e && e.root === me.root;
+  const served = ours && e.artifacts && Object.hasOwn(e.artifacts, a.slug) ? e.artifacts[a.slug] : null;
+  if (served) return { state: 'public', rec, drift, from: e.port !== me.port ? e.port : null, actions: [...(rec && served !== a.tree ? ['update'] : []), ...(rec ? ['copy'] : []), 'unpublish'] };
+  if (rec) return { state: 'not-live', rec, drift, from: null, actions: [drift ? 'review' : 'restore', 'forget'] };
+  return { state: 'none', rec, drift, from: null, actions: me.project ? ['publish'] : [] };
+}
+// The gateway's own pages, on the box's name; the public link, on public.<box>.
+const publicLinks = (me) => ({
+  publish: (slugs) => `${me.proto}//${me.box}/public/publish?port=${me.port}${slugs.map((s) => `&slug=${encodeURIComponent(s)}`).join('')}`,
+  unpublish: (slug) => `${me.proto}//${me.box}/public/unpublish?port=${me.port}&project=${encodeURIComponent(me.project)}&slug=${encodeURIComponent(slug)}`,
+  page: (slug) => `${me.proto}//public.${me.box}/${encodeURIComponent(me.project)}/${encodeURIComponent(slug)}/`,
+});
+/* public-states end */
 // The Library: each landed artifact with its drafts beneath it, then drafts of slugs that haven't
 // landed (by worktree), then the link registry. A manifest that broke the rules shows its slug and
 // the error, never its title.
@@ -3036,6 +3071,25 @@ function renderLibrary(lib) {
   const arts = lib?.artifacts ?? [];
   const links = lib?.links ?? [];
   $('n-library').textContent = arts.length || '';
+  const me = PUBLIC ? publicHere(location, lib) : null;
+  const L = me ? publicLinks(me) : null;
+  // the gateway's pages open in a new tab this page can't later redirect
+  const tab = (href, label) => `<a class="ghost" href="${esc(href)}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+  // a landed card's publish state, the record's date and channel beside it (a forged line can look the same)
+  const pubLine = (a) => {
+    const s = publicState(a, PUBLIC, me);
+    const badge = s.state === 'public' ? `<span class="badge good">public</span>${s.from ? `<span class="small muted">from instance ${esc(s.from)}</span>` : ''}`
+      : s.state === 'not-live' ? '<span class="badge medium">not live on this box</span>' : s.state === 'published' ? '<span class="badge">published</span>' : '';
+    const said = s.rec ? `<span class="small muted">recorded ${esc(when(s.rec.at))} from the ${s.rec.channel === 'dashboard' ? 'dashboard' : 'terminal'}</span>` : '';
+    const moved = !s.drift ? '' : `<span class="small err">${s.state === 'not-live' ? 'Changed on main since it was published: what goes up now is main\'s version, not the one recorded.' : s.state === 'public' ? 'Changed on main since it was published; the public still sees the published version.' : 'Changed on main since it was published.'}</span>`;
+    const act = {
+      publish: () => tab(L.publish([a.slug]), 'Publish'), update: () => tab(L.publish([a.slug]), 'Update'), restore: () => tab(L.publish([a.slug]), 'Restore'), review: () => tab(L.publish([a.slug]), 'Review main\'s version'),
+      unpublish: () => tab(L.unpublish(a.slug), 'Unpublish'), copy: () => `<button class="ghost" data-copy="${esc(L.page(a.slug))}">Copy link</button>`,
+      forget: () => `<button class="ghost" data-forget="${esc(a.slug)}">Forget</button>`,
+    };
+    const parts = [badge, said, moved, ...s.actions.map((x) => act[x]())].filter(Boolean);
+    return parts.length ? `<div class="pub">${parts.join('')}<span class="err" id="e-pub-${esc(a.slug)}"></span></div>` : '';
+  };
   const card = (a, draft) => {
     const name = a.error ? a.slug : a.title || a.slug;
     const meta = [a.by ? `drawn by ${esc(who(a.by))}` : '', a.for?.length ? `for ${a.for.map((f) => linkify(f)).join(', ')}` : '', a.updated_at ? esc(when(a.updated_at)) : ''].filter(Boolean).join(' · ');
@@ -3043,6 +3097,7 @@ function renderLibrary(lib) {
       <div class="art-t">${a.error ? `<b>${esc(name)}</b>` : `<a href="${esc(artHref(a.slug, a.at))}">${esc(name)}</a>`}${a.at === 'main' ? '' : `<span class="badge medium">draft</span><span class="small muted">in ${linkify(a.at)}</span>`}${a.error ? '<span class="badge high">broken</span>' : ''}</div>
       ${a.error ? `<div class="err">${esc(a.error)}</div>` : a.summary ? `<div class="art-s">${esc(a.summary)}</div>` : ''}
       ${meta ? `<div class="meta">${meta}</div>` : ''}
+      ${a.at === 'main' && !a.error ? pubLine(a) : ''}
     </div>`;
   };
   const landed = arts.filter((a) => a.at === 'main');
@@ -3050,8 +3105,15 @@ function renderLibrary(lib) {
   const fresh = drafts.filter((d) => !landed.some((l) => l.slug === d.slug));
   const byWt = new Map();
   for (const d of fresh) byWt.set(d.at, [...(byWt.get(d.at) || []), d]);
+  // above the list: where publishing happens, or one confirm for everything not live on this box
+  const notLive = me ? landed.filter((a) => !a.error && publicState(a, PUBLIC, me).state === 'not-live').map((a) => a.slug) : [];
+  const drifted = me ? landed.filter((a) => !a.error && publicState(a, PUBLIC, me).state === 'not-live' && publicState(a, PUBLIC, me).drift).length : 0;
+  const pubHead = !landed.length ? ''
+    : !PUBLIC ? '<p class="small muted lib-pub">Publishing happens on the cloud box: there, the Library can make a landed artifact readable by anyone.</p>'
+    : !me?.project ? '<p class="small muted lib-pub">To publish from here, set <code>project</code> in settings.md: it is part of every public link.</p>'
+    : notLive.length ? `<p class="small lib-pub">${notLive.length} published artifact${notLive.length === 1 ? ' is' : 's are'} not live on this box.${drifted ? ` ${drifted} changed on main since: what goes up is main's version, not the one recorded.` : ''} ${tab(L.publish(notLive.slice(0, 50)), drifted ? 'Review all' : 'Restore all')}</p>` : '';
   $('artifacts').innerHTML = arts.length
-    ? landed.map((a) => card(a) + drafts.filter((d) => d.slug === a.slug).map((d) => card(d, true)).join('')).join('') +
+    ? pubHead + landed.map((a) => card(a) + drafts.filter((d) => d.slug === a.slug).map((d) => card(d, true)).join('')).join('') +
       (byWt.size ? `<h3>Drafts <span class="dim">not landed yet</span></h3>${[...byWt].map(([wt, ds]) => `<div class="art-wt">In ${linkify(wt)}</div>${ds.map((d) => card(d)).join('')}`).join('')}` : '')
     : empty('No artifacts yet. Ask the supervisor to draw one (“draw me a mock of …”); it shows here as a draft, then lands.');
   const loc = (l) => esc(l.url || (l.remote ? `${l.remote}${l.path ? `:${l.path}` : ''}` : l.path || ''));
@@ -3213,6 +3275,9 @@ async function loadNow({ force = false } = {}) {
     const r = await fetch('/api/data');
     const pv = r.headers.get('x-devteam-page');
     if (pv) { if (!PAGE_VERSION) PAGE_VERSION = pv; else if (pv !== PAGE_VERSION) $('updated').hidden = false; }
+    // what the cloud box serves; absent on a laptop, and a header that doesn't parse counts as absent
+    PUBLIC = null;
+    try { if (r.headers.get('x-devteam-public')) PUBLIC = JSON.parse(r.headers.get('x-devteam-public')); } catch {}
     const body = await r.text();
     try { d = JSON.parse(body); } catch { throw new Error(r.ok ? 'the server sent something that is not JSON' : `${r.status} ${body.slice(0, 400)}`); }
     if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
@@ -3289,6 +3354,16 @@ document.addEventListener('click', async (ev) => {
   if (pl) { location.hash = `planner/${pl.dataset.planner}`; return; }
   const cp = ev.target.closest('[data-copy]');
   if (cp) { try { await navigator.clipboard.writeText(cp.dataset.copy); cp.textContent = 'Copied'; } catch { cp.textContent = 'Select and copy'; } return; }
+  // Forget: record an unpublish through the kit's own action, for a publish line the owner won't
+  // restore (the page is already not live; nothing on the box changes). Twice, as Let go is.
+  const fg = ev.target.closest('[data-forget]');
+  if (fg) {
+    const slug = fg.dataset.forget;
+    if (!fg.classList.contains('confirm')) { fg.classList.add('confirm'); fg.textContent = 'Confirm forget'; setTimeout(() => { fg.classList.remove('confirm'); fg.textContent = 'Forget'; }, 6000); return; }
+    fg.disabled = true;
+    if (!(await post('artifact-publish', { op: 'unpublish', slug }, `pub-${slug}`))) fg.disabled = false;
+    return;
+  }
   const tcard = ev.target.closest('[data-ticket]');
   if (tcard) { location.hash = `ticket/${tcard.dataset.ticket}`; return; }
   const pick = ev.target.closest('input[data-pick]');
