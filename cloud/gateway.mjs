@@ -824,7 +824,8 @@ export function createGateway(opts = {}) {
     res.on('close', () => { if (!res.writableFinished) current?.destroy(); });
     const attempt = (hosts) => {
       let connected = false;
-      const up = http.request({ host: hosts[0], port: link.port, method: req.method, path: req.url, headers: upstreamHeaders(req, link.port, own, { loopbackHost: 'localhost' }) }, (ur) => {
+      // agent: false, a fresh connection each time: a kept-alive one to a server since stopped would read as a 502, not as down
+      const up = http.request({ host: hosts[0], agent: false, port: link.port, method: req.method, path: req.url, headers: upstreamHeaders(req, link.port, own, { loopbackHost: 'localhost' }) }, (ur) => {
         res.writeHead(ur.statusCode, { ...downstreamHeaders(ur.headers, null, own, link.port), 'cache-control': 'no-store' });
         pipeline(ur, res, () => {});
       });
