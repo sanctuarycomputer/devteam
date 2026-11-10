@@ -964,7 +964,7 @@
         ]
       },
       "problem": {
-        "description": "Something wrong (realized) or that could go wrong (a risk), with a lifecycle. An incident is a problem the monitors found: it holds their fingerprints, and its severity is computed from their observations.",
+        "description": "Something wrong (realized) or that could go wrong (a risk), with a lifecycle. An incident is a problem the sensors found: it holds their fingerprints, and its severity is computed from their observations.",
         "type": "object",
         "properties": {
           "title": {
@@ -1014,14 +1014,14 @@
             }
           },
           "fingerprints": {
-            "description": "An incident's fingerprints: <monitor>:<kind>:<fingerprint>, as monitor triage lists them.",
+            "description": "An incident's fingerprints: <sensor>:<kind>:<fingerprint>, as sensor triage lists them.",
             "type": "array",
             "items": {
               "type": "string"
             }
           },
-          "monitor": {
-            "description": "The monitor whose fingerprints an incident holds first.",
+          "sensor": {
+            "description": "The sensor whose fingerprints an incident holds first.",
             "type": "string"
           },
           "verify": {
@@ -2116,7 +2116,7 @@
           "threatens",
           "fingerprints",
           "refs",
-          "monitor",
+          "sensor",
           "verify"
         ],
         "owner": [

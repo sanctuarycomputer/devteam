@@ -92,13 +92,13 @@ A plan review for a ticket whose one-way door the owner answered at goal level (
 
 `check-ticket` fails when no final review was made at the head, the latest final review in any track says `CHANGES`, fewer named reviewers approved than the risk needs, or any Critical or Important finding lacks a disposition. `validate` fails a landed feature whose latest graph or design review is missing or not `APPROVE`.
 
-**A probe** (`project/monitors/<name>.mjs`, `supervisor.md` Monitoring) gets these on top:
+**A probe** (`project/sensors/<name>.mjs`, `supervisor.md` Monitoring) gets these on top:
 
 - **Reads only.** Every call it makes reads; a production write belongs in a remediation, on its own ladder class.
 - **No credential output.** It never prints, logs or echoes a credential, and doesn't pass one in argv to a CLI. The kit redacts what it knows, but a transformed value (reversed, split, hashed) gets past it.
 - **Fingerprints that group.** Fingerprints and templates leave out ids, numbers, emails and timestamps, so one cause is one fingerprint; the provider's own fingerprint where it has one.
 - **Bounded.** It reads from `DEVTEAM_SINCE`, pages within the 2 MB and 5,000-event caps, and prints a cursor last.
-- **Tested.** Its verification has a `monitor test <name>` run with no invalid lines; a revision's has the old and new probes against the same window (`--since`).
+- **Tested.** Its verification has a `sensor test <name>` run with no invalid lines; a revision's has the old and new probes against the same window (`--since`).
 
 **A remediation script** (`project/remediations/<name>.mjs`) gets the probe's checks, except the first: it writes, so it does exactly its one action (a restart, a scale, a rollback to `DEVTEAM_PARAMS.to`), prints what it did, exits non-zero when it didn't, and has an undo named in settings or says why it can't. It reads its target from params, never from production text.
 
