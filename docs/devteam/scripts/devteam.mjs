@@ -347,7 +347,7 @@ const SETTINGS_DEFAULTS = {
   // kit verbatim from that tag without asking the owner (init writes it for every new project);
   // "ask" asks the owner per release, unless they gave a standing rule scoped chore:devteam-sync.
   // The default is "ask" so a project adopted before this setting keeps asking. The owner's.
-  upstream_sync: 'ask',
+  upstream_sync: 'adopt',
   upstream_check_hours: 24,
   retro_every_days: 7,
   research_every_days: 7,
@@ -3611,9 +3611,12 @@ function adoptProblem({ tag, sha, mb, main, changed, src }) {
   if (missing.length || extra.length) return `its kit files aren't exactly what upstream changed from ${base} to ${tag}${missing.length ? `; missing ${some(missing)}` : ''}${extra.length ? `; extra ${some(extra)}` : ''}`;
   return null;
 }
-// settings.upstream_sync as given, failing closed: anything but the two values is "ask", with a warning.
+// settings.upstream_sync as given, "adopt" where it's absent. Unreadable settings, or anything but the
+// two values, fail closed to "ask" (the latter with a warning).
 function upstreamSyncMode(s) {
-  if (!s || s.upstream_sync === 'ask' || s.upstream_sync === 'adopt') return s?.upstream_sync ?? 'ask';
+  if (!s) return 'ask';
+  if (s.upstream_sync === undefined) return 'adopt';
+  if (s.upstream_sync === 'ask' || s.upstream_sync === 'adopt') return s.upstream_sync;
   warn(`settings.upstream_sync is ${JSON.stringify(s.upstream_sync)}; only "ask" and "adopt" are valid, so it is read as "ask"`);
   return 'ask';
 }
