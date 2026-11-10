@@ -384,7 +384,7 @@ test('status says the box\'s own CPU and memory caps, not the host\'s', () => {
   // no caps (a laptop, or a cgroup that says max): the machine's own numbers
   fs.writeFileSync(path.join(cg, 'cpu.max'), 'max 100000\n');
   fs.writeFileSync(path.join(cg, 'memory.max'), 'max\n');
-  assert.match(run(['--status'], { DEVTEAM_CGROUP: cg }).stdout, /^box: disk .*; memory [\d.]+ GB free of [\d.]+ GB; cpus \d+ /m);
+  if (fs.existsSync('/proc/meminfo')) assert.match(run(['--status'], { DEVTEAM_CGROUP: cg }).stdout, /^box: disk .*; memory [\d.]+ GB free of [\d.]+ GB; cpus \d+ /m); // the numbers are /proc's: not on a Mac
 });
 
 test('no tmux session: it refuses rather than start one from inside an agent', () => {

@@ -308,8 +308,10 @@ const POLL_FAST = `(() => {
   };
 })()`;
 
-test('typing in the dashboard: a refresh never takes the field, the caret or the scroll, and holding it can\'t wedge', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket' }, async (t) => {
+test('typing in the dashboard: a refresh never takes the field, the caret or the scroll, and holding it can\'t wedge', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-focus-'));
+  // in t.after, each as it starts: they run on a failure and a timeout, where a finally may never be reached
+  t.after(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
   const env = { ...process.env, DEVTEAM_HUB_PORT: String(PORTS + 80), DEVTEAM_PORT_BASE: String(PORTS + 81), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
   for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'TMUX', 'TMUX_PANE']) delete env[k];
   const root = bareProject(base, 'focus');
@@ -322,9 +324,12 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
   for (let i = 0; i < 12; i++) ask(`Filler ${i}?`); // enough cards that the page scrolls
   const port = await freePort();
   const dash = startDashboard(root, env, ['--port', String(port)]);
+  t.after(() => dash.stop());
   const chrome = await openChrome();
+  t.after(() => chrome.close());
   const p = await chrome.newPage();
-  try {
+  t.after(() => p.close());
+  {
     await until(() => /dashboard on http/.test(dash.out()), 'the dashboard');
     await p.send('Page.enable');
     await p.send('Runtime.enable');
@@ -460,17 +465,14 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
       const listed = spawnSync(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), 'questions', '--all', '--json'], { cwd: root, env, encoding: 'utf8' });
       assert.equal(JSON.parse(listed.stdout).find((x) => x.id === Q)?.status, 'answered', listed.stderr);
     });
-  } finally {
-    p.close();
-    await chrome.close();
-    await dash.stop();
-    fs.rmSync(base, { recursive: true, force: true });
   }
 });
 
-test('the dashboard page parses: one stray quote and no tab shows anything at all', () => {
-  const html = fs.readFileSync(path.join(kit, 'dashboard/index.html'), 'utf8');
-  const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
-  assert.ok(scripts.length >= 1);
-  for (const s of scripts) new vm.Script(s, { filename: 'index.html' });
+test('the dashboard and hub pages parse: one stray quote and nothing shows at all', () => {
+  for (const page of ['index.html', 'hub.html']) {
+    const html = fs.readFileSync(path.join(kit, 'dashboard', page), 'utf8');
+    const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+    assert.ok(scripts.length >= 1, page);
+    for (const s of scripts) new vm.Script(s, { filename: page });
+  }
 });
