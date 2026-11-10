@@ -77,7 +77,9 @@ async function gateway(name, extra = {}) {
   const logs = [];
   const dir = path.join(tmp, name);
   const ttydPort = await freePort();
-  const g = G.createGateway({ publicUrl, dir, ttydPort, ttydPage, log: (m) => logs.push(m), ...extra });
+  const uploadsDir = path.join(tmp, `${name}-uploads`);
+  fs.mkdirSync(uploadsDir, { recursive: true, mode: 0o750 });
+  const g = G.createGateway({ publicUrl, dir, ttydPort, ttydPage, uploadsDir, log: (m) => logs.push(m), ...extra });
   await new Promise((r) => g.server.listen(port, '127.0.0.1', r));
   const token = /claim#([A-Za-z0-9_-]+)/.exec(logs.join('\n'))?.[1];
   let jar = '';
@@ -109,7 +111,7 @@ async function gateway(name, extra = {}) {
     const o = await req('POST', '/auth/login/options', { on: 'auth', body: {}, cookie: '' });
     return req('POST', '/auth/login/verify', { on: 'auth', body: a.get(o.json, auth, how), cookie: '' });
   };
-  return { g, port, publicUrl, inst, auth, term, ttydPort, logs, token, req, claim, login, jar: () => jar, setJar: (v) => { jar = v; }, dir, close: () => new Promise((r) => g.server.close(r)) };
+  return { g, port, publicUrl, inst, auth, term, ttydPort, logs, token, req, claim, login, jar: () => jar, setJar: (v) => { jar = v; }, dir, uploadsDir, close: () => new Promise((r) => g.server.close(r)) };
 }
 
 test('cbor and cose: what WebAuthn needs, nothing more', () => {
@@ -820,4 +822,287 @@ test('a passkey made for another name says how to get back in', async () => {
   const logs = [];
   G.createGateway({ publicUrl: 'http://box.localhost:1', dir, log: (m) => logs.push(m) });
   assert.match(logs.join('\n'), /devteam-reclaim/);
+});
+
+// --- files dropped on the terminal --------------------------------------------------------------
+// As the terminal's page sends one: chunks given are sent chunked, with no length declared.
+const upload = (gw, name, body, { origin = gw.term, cookie = gw.jar(), chunks = null } = {}) => new Promise((resolve, reject) => {
+  const headers = { host: new URL(gw.term).host, 'content-type': 'application/octet-stream', ...(origin ? { origin } : {}), ...(cookie ? { cookie } : {}), ...(chunks ? {} : { 'content-length': body.length }) };
+  const r = http.request({ host: '127.0.0.1', port: gw.port, method: 'POST', path: `/upload?name=${encodeURIComponent(name)}`, headers }, (res) => {
+    let b = '';
+    res.on('data', (c) => { b += c; });
+    res.on('end', () => { let json = null; try { json = JSON.parse(b); } catch {} resolve({ status: res.statusCode, headers: res.headers, body: b, json }); });
+  });
+  r.on('error', reject);
+  if (chunks) { for (const c of chunks) r.write(c); r.end(); } else r.end(body);
+});
+const signedIn = async (name, extra) => { const gw = await gateway(name, extra); await gw.claim(authenticator()); return gw; };
+const folders = (gw) => fs.readdirSync(gw.uploadsDir);
+
+test('a dropped file: stored with a session and the terminal\'s Origin, readable, and named plainly', async () => {
+  const gw = await signedIn('up-ok');
+  try {
+    const bytes = crypto.randomBytes(70000);
+    const r = await upload(gw, 'Holiday Photo (1).PNG', bytes);
+    assert.equal(r.status, 200, r.body);
+    assert.equal(r.headers['cache-control'], 'no-store');
+    assert.match(r.json.path, /\/\d{4}-\d{2}-\d{2}-[0-9a-f]{24}\/Holiday-Photo-1\.png$/);
+    assert.equal(path.dirname(path.dirname(r.json.path)), gw.uploadsDir);
+    assert.equal(r.json.size, bytes.length);
+    assert.deepEqual(fs.readFileSync(r.json.path), bytes);
+    assert.equal(fs.statSync(r.json.path).mode & 0o777, 0o640, 'readable by the group, written by nobody else');
+    assert.equal(fs.statSync(path.dirname(r.json.path)).mode & 0o777, 0o750);
+    assert.deepEqual(fs.readdirSync(path.dirname(r.json.path)), ['Holiday-Photo-1.png'], 'no temporary name left');
+    assert.equal(G.dropPaste([r.json.path]), r.json.path, 'its path needs no quoting');
+    const empty = await upload(gw, 'empty.txt', Buffer.alloc(0));
+    assert.equal(empty.status, 200, empty.body);
+    assert.equal(fs.statSync(empty.json.path).size, 0);
+  } finally { await gw.close(); }
+});
+
+test('a dropped file: refused without a session, and from any page but the terminal\'s', async () => {
+  const gw = await signedIn('up-auth');
+  try {
+    const bytes = Buffer.from('nope');
+    assert.equal((await upload(gw, 'a.txt', bytes, { cookie: '' })).status, 401, 'no session');
+    assert.equal((await upload(gw, 'a.txt', bytes, { cookie: 'devteam_session=AAAA' })).status, 401, 'a made-up session');
+    assert.equal((await upload(gw, 'a.txt', bytes, { origin: gw.inst(P) })).status, 403, 'an agent\'s page on an instance name, with the owner\'s cookie');
+    assert.equal((await upload(gw, 'a.txt', bytes, { origin: gw.publicUrl })).status, 403, 'the box\'s own name is not the terminal');
+    assert.equal((await upload(gw, 'a.txt', bytes, { origin: 'https://evil.example' })).status, 403);
+    assert.equal((await upload(gw, 'a.txt', bytes, { origin: null })).status, 403, 'no Origin at all');
+    assert.deepEqual(folders(gw), [], 'nothing was stored');
+    const get = await gw.req('GET', '/upload', { on: 'term' });
+    assert.equal(get.status, 404, 'and nothing reads one back');
+  } finally { await gw.close(); }
+});
+
+test('a dropped file: a hostile name stays in its folder and comes out plain', async () => {
+  const cases = {
+    '../../etc/passwd': 'passwd', '..\\..\\windows\\system.ini': 'system.ini', '..': 'file', '.': 'file', '': 'file', '.bashrc': 'bashrc', '/': 'file',
+    'a\u0000b\n\r\u001b[31m.PNG': 'ab-31m.png', '$(rm -rf ~).txt': 'rm--rf.txt', '`id`;x\'y".pdf': 'id-x-y.pdf', '--help.txt': 'help.txt',
+    'café ‮evil.JPG': 'cafe-evil.jpg', '日本語.png': 'file.png', 'archive.tar.GZ': 'archive.tar.gz', 'no-extension': 'no-extension', 'dots....': 'dots', 'x.has spaces in ext': 'x.has-spaces-in-ext',
+  };
+  for (const [raw, want] of Object.entries(cases)) assert.equal(G.safeUploadName(raw), want, JSON.stringify(raw));
+  const long = G.safeUploadName(`${'a'.repeat(5000)}.png`);
+  assert.ok(long.length <= 204 && long.endsWith('.png'), long);
+  for (const raw of [...Object.keys(cases), '\ud800.png']) assert.match(G.safeUploadName(raw), /^[A-Za-z0-9][A-Za-z0-9._-]*$/, JSON.stringify(raw));
+  const gw = await signedIn('up-name');
+  try {
+    for (const raw of ['../../../../tmp/owned', '..%2f..%2fowned', '/etc/cron.d/x']) {
+      const r = await upload(gw, raw, Buffer.from('x'));
+      assert.equal(r.status, 200, r.body);
+      assert.equal(path.dirname(path.dirname(r.json.path)), gw.uploadsDir, r.json.path);
+      assert.equal(path.resolve(r.json.path), r.json.path);
+    }
+    assert.ok(folders(gw).every((f) => /^\d{4}-\d{2}-\d{2}-[0-9a-f]{24}$/.test(f)), folders(gw).join());
+  } finally { await gw.close(); }
+});
+
+test('a dropped file: over a limit is refused, with nothing left behind', async () => {
+  const gw = await signedIn('up-cap', { uploadMax: 1024 });
+  try {
+    const declared = await upload(gw, 'big.bin', Buffer.alloc(2048));
+    assert.equal(declared.status, 413, 'a declared length over the limit');
+    assert.deepEqual(folders(gw), []);
+    const streamed = await upload(gw, 'big.bin', null, { chunks: [Buffer.alloc(800), Buffer.alloc(800)] });
+    assert.equal(streamed.status, 413, 'a body that goes over it with no length declared');
+    assert.equal(streamed.headers.connection, 'close');
+    assert.deepEqual(folders(gw), [], 'the partial file is gone');
+    const atLimit = await upload(gw, 'ok.bin', Buffer.alloc(1024));
+    assert.equal(atLimit.status, 200, atLimit.body);
+  } finally { await gw.close(); }
+  const full = await signedIn('up-total', { uploadTotal: 100 });
+  try {
+    assert.equal((await upload(full, 'a.bin', Buffer.alloc(80))).status, 200);
+    assert.equal((await upload(full, 'b.bin', Buffer.alloc(30))).status, 507, 'over the total kept');
+    assert.equal(folders(full).length, 1);
+  } finally { await full.close(); }
+  const disk = await signedIn('up-disk', { uploadFree: Number.MAX_SAFE_INTEGER });
+  try {
+    assert.equal((await upload(disk, 'a.bin', Buffer.alloc(10))).status, 507, 'not enough free disk');
+    assert.deepEqual(folders(disk), []);
+  } finally { await disk.close(); }
+});
+
+test('a dropped file: one cut off midway leaves nothing, and a stalled one is cut off', async () => {
+  const gone = async (gw) => { for (let i = 0; i < 100 && folders(gw).length; i++) await new Promise((r) => setTimeout(r, 20)); assert.deepEqual(folders(gw), []); };
+  const start = (gw) => new Promise((resolve) => {
+    const r = http.request({ host: '127.0.0.1', port: gw.port, method: 'POST', path: '/upload?name=a.bin', headers: { host: new URL(gw.term).host, origin: gw.term, cookie: gw.jar(), 'content-length': 1000 } });
+    r.on('error', () => {});
+    r.on('close', () => resolve({ closed: true }));
+    r.write(Buffer.alloc(100));
+    // it has begun when its folder shows, so what's checked after is the clean-up
+    const seen = setInterval(() => { if (folders(gw).length) { clearInterval(seen); resolve({ r }); } }, 5);
+  });
+  const cut = await signedIn('up-abort');
+  try {
+    const { r } = await start(cut);
+    r.destroy();
+    await gone(cut);
+  } finally { await cut.close(); }
+  const stalled = await signedIn('up-stall', { uploadStallMs: 50 });
+  try {
+    await start(stalled);
+    await gone(stalled);
+  } finally { await stalled.close(); }
+});
+
+test('dropped files: the root must be the gateway\'s own; old ones go, and only ours', async () => {
+  const real = path.join(tmp, 'up-real');
+  fs.mkdirSync(real);
+  const link = path.join(tmp, 'up-link');
+  fs.symlinkSync(real, link);
+  const linked = await signedIn('up-symlink', { uploadsDir: link });
+  try {
+    assert.equal((await upload(linked, 'a.txt', Buffer.from('x'))).status, 503, 'a symlink in the root\'s place is not followed');
+    assert.deepEqual(fs.readdirSync(real), []);
+  } finally { await linked.close(); }
+  const open = path.join(tmp, 'up-open');
+  fs.mkdirSync(open);
+  fs.chmodSync(open, 0o777);
+  const loose = await signedIn('up-loose', { uploadsDir: open });
+  try { assert.equal((await upload(loose, 'a.txt', Buffer.from('x'))).status, 503, 'nor a root others can write'); } finally { await loose.close(); }
+
+  const gw = await signedIn('up-sweep');
+  try {
+    // what a restart cut off, an empty one, and things that aren't ours to remove
+    const dead = path.join(gw.uploadsDir, '2020-01-01-aaaaaaaaaaaaaaaaaaaaaaaa');
+    fs.mkdirSync(dead);
+    fs.writeFileSync(path.join(dead, '.part'), 'half');
+    const empty = path.join(gw.uploadsDir, '2020-01-02-bbbbbbbbbbbbbbbbbbbbbbbb');
+    fs.mkdirSync(empty);
+    const victim = path.join(tmp, 'up-victim');
+    fs.mkdirSync(victim);
+    fs.writeFileSync(path.join(victim, 'keep'), 'keep');
+    fs.symlinkSync(victim, path.join(gw.uploadsDir, '2020-01-03-cccccccccccccccccccccccc'));
+    fs.mkdirSync(path.join(gw.uploadsDir, 'lost+found'));
+    const r = await upload(gw, 'a.txt', Buffer.from('x'));
+    assert.equal(r.status, 200, r.body);
+    assert.ok(!fs.existsSync(dead) && !fs.existsSync(empty), 'what a restart cut off is cleared');
+    await gw.g.sweepUploads();
+    assert.ok(fs.existsSync(r.json.path), 'a recent one stays');
+    await gw.g.sweepUploads(Date.now() + 8 * 24 * 3600 * 1000);
+    assert.ok(!fs.existsSync(r.json.path), 'an old one goes');
+    assert.deepEqual(folders(gw).sort(), ['2020-01-03-cccccccccccccccccccccccc', 'lost+found'], 'and nothing that isn\'t one of ours');
+    assert.ok(fs.existsSync(path.join(victim, 'keep')));
+    assert.equal((await upload(gw, 'b.txt', Buffer.from('y'))).status, 200, 'what it freed counts');
+  } finally { await gw.close(); }
+});
+
+test('the terminal\'s page takes a drop, and pastes what a shell reads back unchanged', async () => {
+  const hostile = ['/data/uploads/d/plain-name_1.png', '/a b/c', 'it\'s', '$(id)', '`id`', 'a"b', 'back\\slash', '-x', 'é'];
+  for (const s of hostile) assert.equal(execFileSync('sh', ['-c', `printf %s ${G.shellQuote(s)}`], { encoding: 'utf8' }), s);
+  assert.equal(G.shellQuote('/data/uploads/2026-11-09-abc/report.pdf'), '/data/uploads/2026-11-09-abc/report.pdf', 'a stored path is left as it is');
+  assert.equal(G.dropPaste(['/x/a.png', '/x/b.pdf']), '/x/a.png /x/b.pdf');
+  assert.equal(G.dropSpace(['/x/a.png', '/x/b.JPEG']), false, 'images alone become attachments: nothing to separate');
+  assert.equal(G.dropSpace(['/x/a.png', '/x/b.pdf']), true);
+  const gw = await signedIn('up-page');
+  try {
+    const tp = await gw.req('GET', '/', { on: 'term' });
+    assert.equal(tp.status, 200);
+    for (const piece of ["addEventListener('dragover'", "addEventListener('drop'", 'devteam-drop-veil', 'upload.onprogress', "x.open('POST', '/upload?name='", 'window.term.paste(dropPaste(paths))', 'readyState === 1', 'terminal not connected: stored at ', 'createImageBitmap', G.shellQuote.toString(), G.dropPaste.toString(), G.dropSpace.toString(), G.isDropImage.toString(), G.dropNote.toString()]) assert.ok(tp.body.includes(piece), piece);
+    assert.ok(!/\.send\(.*(?:\\r|Enter)/.test(tp.body), 'it never presses Enter');
+    const script = tp.body.slice(tp.body.lastIndexOf('<script>') + 8, tp.body.lastIndexOf('</script>'));
+    assert.doesNotThrow(() => new Function(script), 'and what it serves parses');
+    assert.ok(!tp.body.includes('devteamTermSocket = live'), 'a page with no <head> is left as it is');
+    // ttyd's own page opens its socket from its bundle: the watcher has to be there first
+    fs.writeFileSync(path.join(tmp, 'up-page-ttyd.html'), '<!DOCTYPE html><html><head><title>t</title></head><body><script>BUNDLE</script></body></html>');
+    const real = (await gw.req('GET', '/', { on: 'term' })).body;
+    assert.ok(real.startsWith('<!DOCTYPE html><html><head><script>'), real.slice(0, 60));
+    assert.ok(real.indexOf('devteamTermSocket = live') < real.indexOf('BUNDLE'));
+    const made = [];
+    class Fake { constructor(url) { this.url = url; this.readyState = 0; made.push(this); } addEventListener(ev, f) { this.onopen = f; } }
+    const win = { WebSocket: Fake };
+    new Function('window', real.slice(real.indexOf('<script>') + 8, real.indexOf('</script>')))(win);
+    const sock = new win.WebSocket('ws://x');
+    assert.ok(sock instanceof Fake, 'ttyd still gets a real socket');
+    assert.equal(win.devteamTermSocket.socket, sock);
+    assert.equal(win.devteamTermSocket.at, 0, 'not live until it opens');
+    sock.onopen();
+    assert.ok(win.devteamTermSocket.at > 0);
+  } finally { await gw.close(); }
+});
+
+test('the note after a drop says how each kind arrives, and always names the paths', () => {
+  const png = '/data/uploads/d/a.png';
+  const pdf = '/data/uploads/d/b.pdf';
+  assert.match(G.dropNote([png]), /images arrive as attachments\.\n\/data\/uploads\/d\/a\.png$/);
+  assert.match(G.dropNote([pdf]), /PDFs and other files arrive as a path\.\n\/data\/uploads\/d\/b\.pdf$/);
+  const both = G.dropNote([png, pdf]);
+  assert.match(both, /images arrive as attachments, PDFs and other files as a path/);
+  assert.ok(both.includes(png) && both.includes(pdf));
+  assert.equal(G.isDropImage('/x/a.heic'), false, 'a HEIC that stayed one arrives as a path');
+});
+
+test('dropped files: a folder the scan can\'t handle costs only itself, and a sweep can\'t refuse a drop', async (t) => {
+  const gw = await signedIn('up-scan');
+  const f = (n) => path.join(gw.uploadsDir, `2020-02-0${n}-${String(n).repeat(24)}`);
+  try {
+    // not this user's, and left half-written: it must neither be removed nor stop the drop
+    fs.mkdirSync(f(1));
+    fs.writeFileSync(path.join(f(1), '.part'), 'theirs');
+    // one that can't be read
+    fs.mkdirSync(f(2));
+    fs.writeFileSync(path.join(f(2), 'x'), 'x');
+    fs.chmodSync(f(2), 0);
+    // one that can't be removed
+    fs.mkdirSync(f(3));
+    fs.writeFileSync(path.join(f(3), '.part'), 'stuck');
+    const lstat = fs.promises.lstat;
+    const rm = fs.promises.rm;
+    t.mock.method(fs.promises, 'lstat', async (p, ...a) => {
+      const st = await lstat(p, ...a);
+      if (p === f(1)) st.uid += 1;
+      return st;
+    });
+    t.mock.method(fs.promises, 'rm', async (p, ...a) => {
+      if (p === f(3)) throw Object.assign(new Error('EACCES: stuck'), { code: 'EACCES' });
+      return rm(p, ...a);
+    });
+    const r = await upload(gw, 'a.txt', Buffer.from('x'));
+    assert.equal(r.status, 200, r.body);
+    assert.ok(fs.existsSync(path.join(f(1), '.part')), 'another user\'s folder is left alone');
+    assert.ok(fs.existsSync(f(3)));
+    assert.ok(gw.logs.some((m) => m.includes('skipping')), gw.logs.join('|'));
+    // and a sweep that fails outright is housekeeping, not a refusal
+    t.mock.method(fs.promises, 'readdir', async () => { throw new Error('EIO'); });
+    const gw2 = await signedIn('up-scan2');
+    try {
+      const r2 = await upload(gw2, 'b.txt', Buffer.from('y'));
+      assert.equal(r2.status, 200, r2.body);
+      assert.ok(gw2.logs.some((m) => m.includes('EIO')), gw2.logs.join('|'));
+    } finally { await gw2.close(); }
+  } finally { t.mock.restoreAll(); fs.chmodSync(f(2), 0o750); await gw.close(); }
+});
+
+test('a body is bounded to its five minutes unless it is an upload that has passed its checks', async () => {
+  const gw = await signedIn('up-body', { bodyMs: 60 });
+  // sends the head and part of a body, then nothing: what happens to the connection?
+  const hang = (route, headers, on = gw.term) => new Promise((resolve) => {
+    let status = 0;
+    const r = http.request({ host: '127.0.0.1', port: gw.port, method: 'POST', path: route, headers: { host: new URL(on).host, origin: on, 'content-length': 1000, ...headers } }, (res) => { status = res.statusCode; res.resume(); });
+    const started = Date.now();
+    r.on('error', () => {});
+    r.on('close', () => resolve({ status, ms: Date.now() - started }));
+    r.write('x');
+  });
+  try {
+    // answered without reading the body, and read in full: both cut off
+    const answered = await hang('/auth/login/options', {}, gw.auth);
+    assert.ok(answered.ms < 3000, `${answered.ms} ms`);
+    const reading = await hang('/auth/claim/options', {}, gw.auth);
+    assert.ok(reading.ms < 3000, `${reading.ms} ms`);
+    const noSession = await hang('/upload?name=a.txt', {});
+    assert.equal(noSession.status, 401);
+    assert.ok(noSession.ms < 3000, 'no session, no long limit');
+    // the owner's slow upload outlasts the bound, and arrives
+    const slow = await new Promise((resolve, reject) => {
+      const r = http.request({ host: '127.0.0.1', port: gw.port, method: 'POST', path: '/upload?name=slow.txt', headers: { host: new URL(gw.term).host, origin: gw.term, cookie: gw.jar(), 'content-length': 2 } }, (res) => { let b = ''; res.on('data', (c) => { b += c; }); res.on('end', () => resolve({ status: res.statusCode, body: b })); });
+      r.on('error', reject);
+      r.write('a');
+      setTimeout(() => r.end('b'), 300);
+    });
+    assert.equal(slow.status, 200, slow.body);
+    assert.equal(fs.readFileSync(JSON.parse(slow.body).path, 'utf8'), 'ab');
+  } finally { await gw.close(); }
 });
