@@ -240,3 +240,33 @@ test('the Library shows each landed artifact\'s publish state, from the log and 
   assert.match(html, /Changed on main since it was published/);
   assert.match(html, /Publishing happens on the cloud box/);
 });
+
+test('the Library lists previews with the link for where the page is', () => {
+  const html = fs.readFileSync(path.join(kit, 'dashboard/index.html'), 'utf8');
+  const src = html.slice(html.indexOf('/* preview-cards start */'), html.indexOf('/* preview-cards end */'));
+  assert.ok(src.length > 200, 'the preview-cards block is marked in index.html');
+  const ctx = vm.createContext({});
+  vm.runInContext(`${src}\n;globalThis.api = { previewHere, previewUrl, previewState };`, ctx);
+  const { previewHere, previewUrl, previewState } = ctx.api;
+  const box = { protocol: 'https:', host: '4321.box.example.com' };
+  const me = previewHere(box, true);
+  assert.deepEqual({ ...me }, { proto: 'https:', box: 'box.example.com' });
+  assert.equal(previewHere({ protocol: 'http:', host: '127.0.0.1:4321' }, true), null, 'a laptop');
+  assert.equal(previewHere(box, false), null, 'a box whose gateway has no previews header');
+  assert.equal(previewHere({ protocol: 'https:', host: 'box.example.com' }, true), null, 'not an instance name');
+  assert.equal(previewUrl(me, { name: 'cool-tiger', port: 5173 }), 'https://cool-tiger.box.example.com/');
+  assert.equal(previewUrl(null, { name: 'cool-tiger', port: 5173 }), 'http://127.0.0.1:5173/');
+  assert.equal(previewUrl(previewHere({ protocol: 'http:', host: '4321.box.localhost:8123' }, true), { name: 'cool-tiger', port: 5173 }), 'http://cool-tiger.box.localhost:8123/', 'a local gateway keeps its port');
+  const now = Date.parse('2026-11-10T12:00:00Z');
+  const future = '2026-11-12T00:00:00Z';
+  const S = (p) => { const r = previewState({ expires: future, ...p }, now); return [r.state, [...r.actions]]; };
+  // the spec's table, row by row
+  assert.deepEqual(S({ up: null }), ['checking', ['open', 'copy', 'stop']]);
+  assert.deepEqual(S({ up: true }), ['live', ['open', 'copy', 'stop']]);
+  assert.deepEqual(S({ up: true, run: true }), ['live', ['open', 'copy', 'stop']]);
+  assert.deepEqual(S({ up: false, run: true }), ['not-running', ['start', 'open', 'stop']]);
+  assert.deepEqual(S({ up: false, run: false }), ['not-answering', ['open', 'stop']]);
+  assert.equal(previewState({ up: false, run: false, expires: future, down_since: '2026-11-10T11:00:00Z' }, now).since, '2026-11-10T11:00:00Z');
+  assert.deepEqual(S({ up: true, expires: '2026-11-01T00:00:00Z' }), ['expired', ['stop']]);
+  assert.deepEqual(S({ up: false, run: true, expires: '2026-11-01T00:00:00Z' }), ['expired', ['stop']]);
+});
