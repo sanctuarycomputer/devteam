@@ -329,13 +329,13 @@ export const publicCsp = (self) => {
     "frame-ancestors 'none'", 'sandbox allow-scripts allow-forms allow-modals allow-pointer-lock',
   ].join('; ');
 };
-const LINK_ID = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
+export const LINK_ID = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
 // a project's name, as the kit requires it for publishing: part of every public URL
-const PROJECT = /^[a-z0-9][a-z0-9._-]{0,62}$/;
-const TREE = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
-const FILE_MAX = 8 * 1024 * 1024;
-const ARTIFACT_MAX = 25 * 1024 * 1024;
-const MANIFEST_KEYS = ['public', 'project', 'slug', 'title', 'summary', 'root', 'tree', 'files'];
+export const PROJECT = /^[a-z0-9][a-z0-9._-]{0,62}$/;
+export const TREE = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
+export const FILE_MAX = 8 * 1024 * 1024;
+export const ARTIFACT_MAX = 25 * 1024 * 1024;
+const MANIFEST_KEYS = ['public', 'project', 'slug', 'title', 'summary', 'root', 'tree', 'files', 'recorded'];
 const hex256 = (b) => crypto.createHash('sha256').update(b).digest('hex');
 // at most n of fn at a time, the answers in the items' order
 async function mapPool(items, n, fn) { const out = new Array(items.length); let i = 0; await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => { while (i < items.length) { const k = i++; out[k] = await fn(items[k], k); } })); return out; }
@@ -351,6 +351,8 @@ export function manifestProblem(m, slug) {
   if (typeof m.root !== 'string' || !m.root.startsWith('/') || m.root.length > 1024 || /[\u0000-\u001f\u007f]/.test(m.root)) return 'root is not an absolute path';
   if (m.slug !== slug) return `the manifest is for ${String(m.slug).slice(0, 80)}, not ${slug}`;
   if (typeof m.tree !== 'string' || !TREE.test(m.tree)) return 'tree is not a git tree id';
+  // what the instance's log says was last published: shown as that, and never relied on
+  if (m.recorded !== undefined && (!m.recorded || typeof m.recorded !== 'object' || Array.isArray(m.recorded) || typeof m.recorded.tree !== 'string' || !TREE.test(m.recorded.tree) || typeof m.recorded.at !== 'string' || m.recorded.at.length > 40)) return 'recorded is not a tree and a date';
   if (typeof m.title !== 'string' || m.title.length > 120 || typeof m.summary !== 'string' || m.summary.length > 500) return 'title or summary is not the kit\'s one line of text';
   const files = m.files && typeof m.files === 'object' && !Array.isArray(m.files) ? Object.entries(m.files) : [];
   if (!files.length || files.length > 2000) return 'a manifest lists 1 to 2000 files';
@@ -1400,8 +1402,10 @@ export function createGateway(opts = {}) {
             const bound = Object.hasOwn(pub, m.project) ? pub[m.project] : null;
             const now = bound && Object.hasOwn(bound.artifacts ?? {}, slug) ? bound.artifacts[slug] : null;
             const moving = bound && bound.root !== m.root;
+            // what the owner approved earlier, if this box still holds it: the only copy to compare with
+            const held = now && !moving ? now : null;
             // a move takes down every other page of the old checkout: the page names them
-            return { slug, m, hash: manifestHash(m), url: `${PUBLIC}/${m.project}/${slug}/`, state: !now || moving ? 'new on this box' : now.tree === m.tree ? 'already public at this version' : 'an update', movedFrom: moving ? bound.root : null, others: moving ? Object.keys(bound.artifacts ?? {}).filter((x) => x !== slug).sort() : [] };
+            return { slug, m, hash: manifestHash(m), url: `${PUBLIC}/${m.project}/${slug}/`, held: !!held, changes: held && held.tree !== m.tree ? fileChanges(held.files, m.files) : null, state: !held ? 'not on this box' : held.tree === m.tree ? 'already public at this version' : 'an update', movedFrom: moving ? bound.root : null, others: moving ? Object.keys(bound.artifacts ?? {}).filter((x) => x !== slug).sort() : [] };
           } catch (e) { return { slug, error: e.message }; }
         });
         return page(res, PAGES.publish(port, rows));
@@ -1518,6 +1522,7 @@ button{font:inherit;padding:8px 14px;border-radius:8px;border:1px solid var(--bt
 button.quiet{background:none;color:var(--fg);border-color:var(--line)}input{font:inherit;padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:none;color:var(--fg);width:100%;box-sizing:border-box;margin:8px 0}
 #err{color:var(--red)}li{margin:6px 0;display:flex;gap:8px;align-items:center;justify-content:space-between}ul{padding:0;list-style:none}a{color:inherit}
 li.pub{display:block;padding:8px 0;border-bottom:1px solid var(--line)}li.pub small,li.pub code,li.pub span{display:block;color:var(--fg2);overflow-wrap:anywhere}
+.files{max-height:14em;overflow:auto;margin:4px 0;font:12px/1.5 ui-monospace,monospace;color:var(--fg2);overflow-wrap:anywhere}li.pub .files small{display:inline}
 </style>`;
 // The browser half of a ceremony: base64url in JSON both ways.
 const CLIENT = `<script>
@@ -1550,6 +1555,37 @@ const jsonIn = (x) => JSON.stringify(x).replace(/</g, '\\u003c');
 const fmtSize = (n) => (n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`);
 // JSON as a header value: a header carries only Latin-1, so everything past ~ is escaped.
 const asciiJson = (v) => JSON.stringify(v).replace(/[\u007f-\uffff]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+// What a new version changes against the copy the box serves: each file added or changed, by name, and those removed.
+const fileChanges = (old, files) => {
+  const before = old ?? {};
+  const marks = new Map();
+  for (const [rel, f] of Object.entries(files)) {
+    if (!Object.hasOwn(before, rel)) marks.set(rel, 'new');
+    else if (before[rel].sha256 !== f.sha256) marks.set(rel, 'changed');
+  }
+  return { marks, removed: Object.keys(before).filter((rel) => !Object.hasOwn(files, rel)).sort() };
+};
+const treeShort = (t) => String(t).slice(0, 12);
+// The files going up, by name: a title can say one thing while the folder holds another.
+const publishFiles = (r) => {
+  const line = (rel, mark, size) => `<div>${mark ? `<b>${mark}</b> ` : ''}${esc(rel)}${size === null ? '' : ` <small>${esc(fmtSize(size))}</small>`}</div>`;
+  return `<div class="files">${Object.entries(r.m.files).map(([rel, f]) => line(rel, r.changes?.marks.get(rel), f.size)).join('')}${(r.changes?.removed ?? []).map((rel) => line(rel, 'removed', null)).join('')}</div>`;
+};
+// Why an item is ticked or not, in words that claim only what the gateway knows. The log is the
+// instance's to report and can be forged, so it is quoted, never relied on.
+const publishNote = (r) => {
+  if (r.changes) {
+    const marks = [...r.changes.marks.values()];
+    return `This replaces the copy this box serves: ${marks.filter((x) => x === 'changed').length} changed, ${marks.filter((x) => x === 'new').length} new, ${r.changes.removed.length} removed.`;
+  }
+  if (r.held) return '';
+  const said = r.m.recorded;
+  const day = said && esc(said.at.slice(0, 10));
+  const why = !said ? 'This instance\'s log records no publish of it.'
+    : said.tree === r.m.tree ? `This instance's log says it was published on ${day} at this same version; a log can be forged, so check the files.`
+      : `This instance's log says it was published on ${day} at tree ${esc(treeShort(said.tree))}. This is tree ${esc(treeShort(r.m.tree))}, what main holds now, so it is not that version, and the box can't show what changed.`;
+  return `Not ticked, because ${r.movedFrom ? 'this box\'s copy of it came from another checkout' : 'this box holds no copy of it'}. ${why} Tick it to make this version public.`;
+};
 const doc = (title, body) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title>${STYLE}</head><body><main>${body}</main>${CLIENT}`;
 const PAGES = {
   claim: (box) => `${doc('Claim this box', `<h1>Claim this devteam box</h1><p>Make a passkey for this box. Your password manager (1Password, iCloud Keychain…) saves it; from then on only a passkey made here opens the box.</p><input id="name" placeholder="Name this passkey (optional)" maxlength="60"><p><button id="go">Create passkey and claim</button></p><p id="err"></p>`)}
@@ -1569,8 +1605,9 @@ document.getElementById('out').onclick = run(async () => { await post('/auth/log
 for (const x of document.querySelectorAll('button[data-id]')) x.onclick = run(async () => { if (confirm('Remove this passkey?')) { await post('/auth/passkeys/remove', { id: x.dataset.id }); location.reload(); } });
 </script></body></html>`,
   // Each item from the manifest the gateway fetched itself, escaped; its state from the gateway's
-  // own copy; ticked by default, except "move it". The POST binds each item to the manifest shown.
-  publish: (port, rows) => `${doc('Publish', `<h1>Publish to anyone</h1><p>Anyone with a link below can read that page, with no sign-in. The box keeps its own copy of exactly what is listed here; a later change on main reaches the public only when you publish again. From instance ${esc(port)}.</p><ul>${rows.map((r) => (r.error ? `<li class="pub"><b>${esc(r.slug)}</b><span>${esc(r.error)}</span></li>` : `<li class="pub"><label><input type="checkbox" data-slug="${esc(r.slug)}" data-manifest="${esc(r.hash)}" checked> <b>${esc(r.m.title)}</b></label><small>${esc(r.m.project)} · ${esc(r.slug)} · ${esc(Object.keys(r.m.files).length)} files, ${esc(fmtSize(Object.values(r.m.files).reduce((n, f) => n + f.size, 0)))} · ${esc(r.state)}</small><code>${esc(r.url)}</code>${r.movedFrom ? `<span>${esc(r.m.project)} is published from ${esc(r.movedFrom)}; this instance is ${esc(r.m.root)}. <label><input type="checkbox" data-move="${esc(r.slug)}" data-moved-from="${esc(r.movedFrom)}"> move it${r.others.length ? ` (its ${r.others.length} other page${r.others.length === 1 ? '' : 's'} from ${esc(r.movedFrom)} come${r.others.length === 1 ? 's' : ''} down: ${r.others.map(esc).join(', ')})` : ''}</label></span>` : ''}</li>`)).join('')}</ul>${rows.some((r) => !r.error) ? '<p><button id="go">Publish</button></p>' : ''}<p id="err"></p><ul id="out"></ul>`)}
+  // own copy; ticked only when the box already holds a copy of what the owner approved, never
+  // "move it". The POST binds each item to the manifest shown.
+  publish: (port, rows) => `${doc('Publish', `<h1>Publish to anyone</h1><p>Anyone with a link below can read that page, with no sign-in. The box keeps its own copy of exactly what is listed here, which is what main holds now; a later change on main reaches the public only when you publish again. From instance ${esc(port)}: the project, checkout and log below are as that instance reports them. An item this box doesn't already serve starts unticked.</p><ul>${rows.map((r) => (r.error ? `<li class="pub"><b>${esc(r.slug)}</b><span>${esc(r.error)}</span></li>` : `<li class="pub"><label><input type="checkbox" data-slug="${esc(r.slug)}" data-manifest="${esc(r.hash)}"${r.held ? ' checked' : ''}> <b>${esc(r.m.title)}</b></label><small>${esc(r.m.project)} · ${esc(r.slug)} · ${esc(Object.keys(r.m.files).length)} files, ${esc(fmtSize(Object.values(r.m.files).reduce((n, f) => n + f.size, 0)))} · ${esc(r.state)}</small><small>from the checkout ${esc(r.m.root)}, as this instance reports it</small><code>${esc(r.url)}</code>${publishNote(r) ? `<span>${publishNote(r)}</span>` : ''}${publishFiles(r)}${r.movedFrom ? `<span>${esc(r.m.project)} is published from ${esc(r.movedFrom)}; this instance is ${esc(r.m.root)}. <label><input type="checkbox" data-move="${esc(r.slug)}" data-moved-from="${esc(r.movedFrom)}"> move it${r.others.length ? ` (its ${r.others.length} other page${r.others.length === 1 ? '' : 's'} from ${esc(r.movedFrom)} come${r.others.length === 1 ? 's' : ''} down: ${r.others.map(esc).join(', ')})` : ''}</label></span>` : ''}</li>`)).join('')}</ul>${rows.some((r) => !r.error) ? '<p><button id="go">Publish</button></p>' : ''}<p id="err"></p><ul id="out"></ul>`)}
 <script>
 const PORT = ${jsonIn(port)};
 const go = document.getElementById('go');
@@ -1592,7 +1629,7 @@ if (go) go.onclick = run(async () => {
   } finally { go.disabled = false; }
 });
 </script></body></html>`,
-  unpublish: (x) => `${doc('Unpublish', `<h1>Take this page down</h1><p><b>${esc(x.title)}</b> (${esc(x.project)} · ${esc(x.slug)}) stops answering at once, for everyone:</p><p><code>${esc(x.url)}</code></p><p><button id="go">Unpublish</button></p><p id="err"></p><p id="out"></p>`)}
+  unpublish: (x) => `${doc('Unpublish', `<h1>Take this page down</h1><p><b>${esc(x.title)}</b> (${esc(x.project)} · ${esc(x.slug)}) comes down within a minute, for everyone:</p><p><code>${esc(x.url)}</code></p><p><button id="go">Unpublish</button></p><p id="err"></p><p id="out"></p>`)}
 <script>
 const ITEM = ${jsonIn({ project: x.project, slug: x.slug, ...(x.port ? { port: x.port } : {}) })};
 const go = document.getElementById('go');

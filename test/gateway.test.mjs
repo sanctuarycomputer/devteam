@@ -910,6 +910,11 @@ test('public.<box> serves artifacts with the kit\'s own type map, CDN list and p
   const gwCsp = G.publicCsp(self).split('; ');
   assert.deepEqual(gwCsp.filter((d) => !d.startsWith('frame-ancestors ')), kitCsp.filter((d) => !d.startsWith('frame-ancestors ')), 'the same policy');
   assert.ok(gwCsp.includes("frame-ancestors 'none'"), 'framed by nothing');
+  // the names and limits a manifest is checked against
+  const kitOf = (name) => vm.runInContext(`(${one(name)})`, vm.createContext({}));
+  for (const [gw, name] of [['LINK_ID', 'LINK_ID'], ['TREE', 'TREE_ID'], ['PROJECT', 'PUBLIC_PROJECT']]) assert.equal(String(G[gw]), String(kitOf(name)), name);
+  assert.equal(G.FILE_MAX, kitOf('ARTIFACT_FILE_MAX'), 'the size of a file');
+  assert.equal(G.ARTIFACT_MAX, kitOf('ARTIFACT_MAX'), 'the size of an artifact');
   const pathOk = /^const artifactPathOk = (.+);$/m.exec(src)[1];
   const kitOk = vm.runInContext(`(${pathOk})`, vm.createContext({}));
   for (const p of ['index.html', 'a/b.js', '.env', 'a/.git/x', 'a//b', 'a/../b', 'a%2eb', 'é.png', '__proto__']) assert.equal(G.publicPathOk(p), kitOk(p), p);
@@ -1033,6 +1038,7 @@ async function confirmAndPublish(gw, port, slugs, { move = false, before = async
   assert.equal(r.status, 200, r.body);
   return { page, results: r.json.results };
 }
+const esc = (x) => String(x).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 const blobsOf = (gw) => { try { return fs.readdirSync(path.join(gw.dir, 'public', 'blobs')).sort(); } catch { return []; } };
 // A project with artifacts landed on its main, as merge would leave them, and its dashboard.
 function landedProject(base, name, artifacts) {
@@ -1074,7 +1080,11 @@ test('public artifacts: the owner confirms on the box\'s own page, and anyone re
     assert.ok(conf.body.includes('A &#60;b&#62;mock&#60;/b&#62; &#38; more'), 'the title, escaped');
     assert.ok(!conf.body.includes('<b>mock</b>'));
     assert.ok(conf.body.includes(`${gw.site}/alpha/hello/`), 'the link it will have');
-    assert.match(conf.body, /new on this box/);
+    assert.match(conf.body, /not on this box/);
+    assert.match(conf.body, /Not ticked, because this box holds no copy of it\. This instance's log records no publish of it/);
+    assert.doesNotMatch(conf.body, /data-manifest="[0-9a-f]{64}" checked/, 'what the box has no copy of starts unticked');
+    assert.ok(conf.body.includes(`from the checkout ${esc(fs.realpathSync(A))}, as this instance reports it`), 'the root, as reported');
+    for (const f of ['index.html', 's.css', 'artifact.json']) assert.match(conf.body, new RegExp(`<div>${f.replace('.', '\\.')} <small>`), `${f} is named`);
     assert.doesNotMatch(conf.body, /autofocus/, 'the Publish button never has focus waiting');
     const items = [...conf.body.matchAll(/data-slug="([^"]+)" data-manifest="([0-9a-f]{64})"/g)].map(([, slug, manifest]) => ({ slug, manifest }));
     assert.equal(items.length, 1);
@@ -1157,6 +1167,9 @@ test('public artifacts: a publish is refused unless every byte, the tree and the
     S.arts.b['index.html'] = '<p>b2';
     again = await confirmAndPublish(gw, P + 10, ['b']);
     assert.match(again.page.body, /an update/);
+    assert.match(again.page.body, /data-manifest="[0-9a-f]{64}" checked/, 'the box holds what the owner approved');
+    assert.match(again.page.body, /1 changed, 0 new, 0 removed/);
+    assert.match(again.page.body, /<b>changed<\/b> index\.html/);
     assert.equal(again.results[0].update, true);
     assert.equal((await pubGet('/beta/b/')).body, '<p>b2');
     assert.equal(blobsOf(gw).length, 3, 'the old version\'s blob is swept');
@@ -1221,7 +1234,62 @@ test('public artifacts: a move keeps only the slug moved; the old checkout\'s ot
   } finally { await one.close(); await two.close(); await gw.close(); }
 });
 
-test('public artifacts: unpublish takes a page down at once, and records it only where that project is', async () => {
+// The review's repro: the owner publishes hello at T1, main moves on, and something on the box has
+// the kit write a publish line for an artifact the owner never published. The route can't tell who
+// is asking (a dashboard's owner actions never could), so the line lands; what matters is what it
+// leads to on a new box, where the gateway holds no copy of anything.
+test('public artifacts: on a new box a forged record leads to an unticked, explained item, never a silent publish', async () => {
+  const WEEKLY = { 'index.html': '<p>weekly', 'raw-export.json': '{"secret":1}', 'artifact.json': JSON.stringify({ v: 1, title: 'Weekly', summary: 'Numbers', by: 'supervisor' }) };
+  const A = landedProject(fs.mkdtempSync(path.join(tmp, 'pub-')), 'alpha', { hello: HELLO, weekly: WEEKLY });
+  const treeOf = (slug) => execFileSync('git', ['rev-parse', `main:docs/devteam/project/artifacts/${slug}`], { cwd: A, encoding: 'utf8' }).trim();
+  const kitA = startKit(A, P + 24);
+  const first = await gateway('public-repro-first');
+  let box = null;
+  try {
+    await kitUp(P + 24);
+    assert.equal((await first.claim(authenticator())).status, 200);
+    const T1 = treeOf('hello');
+    assert.ok((await confirmAndPublish(first, P + 24, ['hello'])).results[0].ok);
+    // main moves on: the box that holds T1 can say what changed, and ticks it
+    fs.writeFileSync(path.join(A, 'docs/devteam/project/artifacts/hello/index.html'), '<p>changed');
+    fs.writeFileSync(path.join(A, 'docs/devteam/project/artifacts/hello/extra.txt'), 'more');
+    execFileSync('git', ['add', '-A'], { cwd: A });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'main moves on'], { cwd: A });
+    const T2 = treeOf('hello');
+    assert.notEqual(T2, T1);
+    const held = await first.req('GET', `/public/publish?port=${P + 24}&slug=hello`);
+    assert.match(held.body, /an update/);
+    assert.match(held.body, /data-slug="hello" data-manifest="[0-9a-f]{64}" checked/);
+    assert.match(held.body, /1 changed, 1 new, 0 removed/);
+    assert.match(held.body, /<b>changed<\/b> index\.html/);
+    assert.match(held.body, /<b>new<\/b> extra\.txt/);
+    await first.close();
+    // a local process, as a worker could be: no Origin, no sec-fetch-*, the same as the gateway's own call
+    const forged = await fetch(`http://127.0.0.1:${P + 24}/api/artifact-publish`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ op: 'publish', slug: 'weekly', tree: treeOf('weekly') }) });
+    assert.equal(forged.status, 200, 'what the route can\'t refuse');
+    // a new box: the log moved, the gateway's copy didn't
+    box = await gateway('public-repro-new');
+    assert.equal((await box.claim(authenticator())).status, 200);
+    const page = await box.req('GET', `/public/publish?port=${P + 24}&slug=hello&slug=weekly`);
+    assert.equal(page.status, 200, page.body);
+    assert.equal([...page.body.matchAll(/data-slug="[^"]+" data-manifest="[0-9a-f]{64}"/g)].length, 2);
+    assert.doesNotMatch(page.body, /data-manifest="[0-9a-f]{64}" checked/, 'nothing goes up without a tick');
+    assert.doesNotMatch(page.body, /restore/i, 'what goes up is main\'s version, so it is not a restore');
+    assert.ok(page.body.includes(`at tree ${T1.slice(0, 12)}. This is tree ${T2.slice(0, 12)}, what main holds now, so it is not that version`), 'hello says it is not what was published');
+    assert.match(page.body, /published on \d{4}-\d{2}-\d{2} at this same version; a log can be forged/, 'a record that matches isn\'t taken as proof');
+    assert.match(page.body, /<div>raw-export\.json <small>/, 'the file nobody meant to publish is named');
+    assert.ok(page.body.includes(`from the checkout ${esc(fs.realpathSync(A))}, as this instance reports it`));
+    for (const s of ['hello', 'weekly']) assert.equal((await box.req('GET', `/alpha/${s}/`, { on: 'public', cookie: '' })).status, 404, `${s} isn't public until the owner ticks it`);
+    // the Library has the two trees to compare
+    const env = { ...process.env };
+    delete env.DEVTEAM_ROLE;
+    const lib = JSON.parse(execFileSync(process.execPath, [path.join(A, 'docs/devteam/scripts/devteam.mjs'), 'dashboard-data'], { cwd: A, env, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })).library;
+    const row = lib.artifacts.find((a) => a.slug === 'hello' && a.at === 'main');
+    assert.deepEqual([row.published.tree, row.tree], [T1, T2]);
+  } finally { await kitA.stop(); await first.close().catch(() => {}); await box?.close(); }
+});
+
+test('public artifacts: unpublish takes a page down, and records it only where that project is', async () => {
   const gw = await gateway('public-down');
   const S = standIn(P + 15, { a: { 'index.html': '<p>a' }, b: { 'index.html': '<p>b' }, c: { 'index.html': '<p>c' } });
   const other = standIn(P + 16, {}, { root: '/srv/elsewhere' });

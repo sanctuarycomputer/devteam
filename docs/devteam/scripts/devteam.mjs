@@ -358,12 +358,12 @@ const SETTINGS_DEFAULTS = {
 // commands and what every gate checkout is seeded with decide what "passes"; the agent command
 // and deny rules decide what workers may do; upstream_repo is what a standing sync approval trusts,
 // upstream_sync whether syncs need the owner at all;
-// release is how a tag reaches production.
+// release is how a tag reaches production; project names every public link and the gateway's binding.
 const OWNER_SETTINGS = {
   gates: 'gate-change', worktree_setup: 'gate-change', worktree_files: 'gate-change',
   autonomy_ceilings: 'governance-edit', agent_command: 'governance-edit', resume_command: 'governance-edit', worker_denied_commands: 'governance-edit',
   forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', upstream_repo: 'governance-edit', upstream_sync: 'governance-edit',
-  release: 'governance-edit', secret_commands: 'governance-edit', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit',
+  release: 'governance-edit', secret_commands: 'governance-edit', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit', project: 'governance-edit',
 };
 // The classes whose owner answer approves a chore that changes real kit files (isKitFile).
 const KIT_CLASSES = ['governance-edit', 'process-edit', 'gate-change'];
@@ -4670,10 +4670,13 @@ function publicManifest(slug) {
     }));
     try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(files)); } catch {}
   }
-  return { public: 1, project: a.project, slug, title: a.manifest.title, summary: a.manifest.summary, root: fs.realpathSync(mainRoot), tree: a.tree, files };
+  // the log's last word on it, for the confirm page to quote: main may have moved on since
+  const said = publishedView(publishRecords().get(slug));
+  return { public: 1, project: a.project, slug, title: a.manifest.title, summary: a.manifest.summary, root: fs.realpathSync(mainRoot), tree: a.tree, files, ...(said ? { recorded: { tree: said.tree, at: said.at } } : {}) };
 }
-// A slug's recorded state as the Library shows it: published at a tree (with the line's date and
-// channel, so a line the owner never wrote is visible), or null.
+// A slug's recorded state as the Library shows it: published at a tree, with the line's date and
+// channel, or null. A forged line can look exactly like a real one (the dashboard's route writes
+// it for anything that reaches it), so none of this is proof the owner published.
 const publishedView = (a) => (a?.what === 'publish' ? { tree: a.tree, at: a.created_at, channel: a.channel ?? null } : null);
 // artifact new <slug> --title --summary [--for '[…]']: scaffold a page in this worktree.
 // artifact check [<slug>…]: the checks merge runs, on this checkout's artifacts.
@@ -8429,6 +8432,8 @@ async function cmdDashboard() {
     ack: (b) => (/^[a-z][a-z-]*$/.test(b.kind ?? '') && text(b.subject, 200) && text(b.reason, 600) ? ['ack', b.kind, b.subject, '--reason', b.reason.trim(), '--owner'] : null),
     // Only the cloud gateway calls it, after the owner confirmed on its own page (and the Library's
     // Forget, for a record the owner doesn't want restored); the Library has no button that publishes.
+    // Like every owner action here it can't tell who asks: anything on the box can reach it, so a
+    // line it writes is a claim, and the gateway's confirm page never takes it for the owner's click.
     'artifact-publish': (b) => (LINK_ID.test(b.slug ?? '') && (b.op === 'unpublish' || (b.op === 'publish' && TREE_ID.test(b.tree ?? ''))) ? ['artifact', b.op, b.slug, '--owner', ...(b.op === 'publish' ? ['--tree', b.tree] : [])] : null),
   };
   // An action whose caller has a deadline of its own: the gateway gives the whole answer 15 s.

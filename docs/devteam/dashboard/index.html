@@ -2868,22 +2868,25 @@ function markAnswered(id, text) {
 
 /* public-states start */
 // Publishing, as a landed card shows it. The log's newest artifact-publish line (a.published) says
-// what the owner asked for; the gateway's header says what the box serves, and that is the truth:
-// a forged line can only make a card ask. Through the gateway this page is on <port>.<box>.
+// what the owner asked for, or what something wrote for them; the gateway's header says what the
+// box serves, and that is the truth. A forged line can only make a card ask, and drift says when
+// the line's tree isn't main's. Through the gateway this page is on <port>.<box>.
 function publicHere(loc, lib) {
   const m = /^(\d{1,5})\.([a-z0-9.-]*[a-z][a-z0-9.-]*(?::\d+)?)$/i.exec(loc?.host || '');
   return m ? { proto: loc.protocol, port: Number(m[1]), box: m[2], project: lib?.public?.project ?? null, root: lib?.public?.root ?? null } : null;
 }
 function publicState(a, pub, me) {
   const rec = a.published || null;
-  if (!pub || !me) return { state: rec ? 'published' : 'none', rec, from: null, actions: [] };
+  // main has changed since the recorded publish: what would go up is not what the record names
+  const drift = !!rec && rec.tree !== a.tree;
+  if (!pub || !me) return { state: rec ? 'published' : 'none', rec, drift, from: null, actions: [] };
   const e = me.project && Object.hasOwn(pub, me.project) ? pub[me.project] : null;
   // the box's copy is this project's only when it came from this checkout (a port can change)
   const ours = !!e && e.root === me.root;
   const served = ours && e.artifacts && Object.hasOwn(e.artifacts, a.slug) ? e.artifacts[a.slug] : null;
-  if (served) return { state: 'public', rec, from: e.port !== me.port ? e.port : null, actions: [...(rec && served !== a.tree ? ['update'] : []), ...(rec ? ['copy'] : []), 'unpublish'] };
-  if (rec) return { state: 'not-live', rec, from: null, actions: ['restore', 'forget'] };
-  return { state: 'none', rec, from: null, actions: me.project ? ['publish'] : [] };
+  if (served) return { state: 'public', rec, drift, from: e.port !== me.port ? e.port : null, actions: [...(rec && served !== a.tree ? ['update'] : []), ...(rec ? ['copy'] : []), 'unpublish'] };
+  if (rec) return { state: 'not-live', rec, drift, from: null, actions: [drift ? 'review' : 'restore', 'forget'] };
+  return { state: 'none', rec, drift, from: null, actions: me.project ? ['publish'] : [] };
 }
 // The gateway's own pages, on the box's name; the public link, on public.<box>.
 const publicLinks = (me) => ({
@@ -2903,18 +2906,19 @@ function renderLibrary(lib) {
   const L = me ? publicLinks(me) : null;
   // the gateway's pages open in a new tab this page can't later redirect
   const tab = (href, label) => `<a class="ghost" href="${esc(href)}" target="_blank" rel="noopener noreferrer">${label}</a>`;
-  // a landed card's publish state, with the record's date and channel, so a line the owner never wrote shows
+  // a landed card's publish state, the record's date and channel beside it (a forged line can look the same)
   const pubLine = (a) => {
     const s = publicState(a, PUBLIC, me);
     const badge = s.state === 'public' ? `<span class="badge good">public</span>${s.from ? `<span class="small muted">from instance ${esc(s.from)}</span>` : ''}`
       : s.state === 'not-live' ? '<span class="badge medium">not live on this box</span>' : s.state === 'published' ? '<span class="badge">published</span>' : '';
     const said = s.rec ? `<span class="small muted">recorded ${esc(when(s.rec.at))} from the ${s.rec.channel === 'dashboard' ? 'dashboard' : 'terminal'}</span>` : '';
+    const moved = !s.drift ? '' : `<span class="small err">${s.state === 'not-live' ? 'Changed on main since it was published: what goes up now is main\'s version, not the one recorded.' : s.state === 'public' ? 'Changed on main since it was published; the public still sees the published version.' : 'Changed on main since it was published.'}</span>`;
     const act = {
-      publish: () => tab(L.publish([a.slug]), 'Publish'), update: () => tab(L.publish([a.slug]), 'Update'), restore: () => tab(L.publish([a.slug]), 'Restore'),
+      publish: () => tab(L.publish([a.slug]), 'Publish'), update: () => tab(L.publish([a.slug]), 'Update'), restore: () => tab(L.publish([a.slug]), 'Restore'), review: () => tab(L.publish([a.slug]), 'Review main\'s version'),
       unpublish: () => tab(L.unpublish(a.slug), 'Unpublish'), copy: () => `<button class="ghost" data-copy="${esc(L.page(a.slug))}">Copy link</button>`,
       forget: () => `<button class="ghost" data-forget="${esc(a.slug)}">Forget</button>`,
     };
-    const parts = [badge, said, ...s.actions.map((x) => act[x]())].filter(Boolean);
+    const parts = [badge, said, moved, ...s.actions.map((x) => act[x]())].filter(Boolean);
     return parts.length ? `<div class="pub">${parts.join('')}<span class="err" id="e-pub-${esc(a.slug)}"></span></div>` : '';
   };
   const card = (a, draft) => {
@@ -2934,10 +2938,11 @@ function renderLibrary(lib) {
   for (const d of fresh) byWt.set(d.at, [...(byWt.get(d.at) || []), d]);
   // above the list: where publishing happens, or one confirm for everything not live on this box
   const notLive = me ? landed.filter((a) => !a.error && publicState(a, PUBLIC, me).state === 'not-live').map((a) => a.slug) : [];
+  const drifted = me ? landed.filter((a) => !a.error && publicState(a, PUBLIC, me).state === 'not-live' && publicState(a, PUBLIC, me).drift).length : 0;
   const pubHead = !landed.length ? ''
     : !PUBLIC ? '<p class="small muted lib-pub">Publishing happens on the cloud box: there, the Library can make a landed artifact readable by anyone.</p>'
     : !me?.project ? '<p class="small muted lib-pub">To publish from here, set <code>project</code> in settings.md: it is part of every public link.</p>'
-    : notLive.length ? `<p class="small lib-pub">${notLive.length} published artifact${notLive.length === 1 ? ' is' : 's are'} not live on this box. ${tab(L.publish(notLive.slice(0, 50)), 'Restore all')}</p>` : '';
+    : notLive.length ? `<p class="small lib-pub">${notLive.length} published artifact${notLive.length === 1 ? ' is' : 's are'} not live on this box.${drifted ? ` ${drifted} changed on main since: what goes up is main's version, not the one recorded.` : ''} ${tab(L.publish(notLive.slice(0, 50)), drifted ? 'Review all' : 'Restore all')}</p>` : '';
   $('artifacts').innerHTML = arts.length
     ? pubHead + landed.map((a) => card(a) + drafts.filter((d) => d.slug === a.slug).map((d) => card(d, true)).join('')).join('') +
       (byWt.size ? `<h3>Drafts <span class="dim">not landed yet</span></h3>${[...byWt].map(([wt, ds]) => `<div class="art-wt">In ${linkify(wt)}</div>${ds.map((d) => card(d)).join('')}`).join('')}` : '')

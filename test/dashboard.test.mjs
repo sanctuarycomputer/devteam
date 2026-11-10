@@ -219,6 +219,14 @@ test('the Library shows each landed artifact\'s publish state, from the log and 
   assert.deepEqual(S(art(null), null, null), ['none', [], null]);
   assert.deepEqual(S(art(null), serving(null), { ...me, project: null }), ['none', [], null], 'no project name, no publishing');
   assert.equal(publicState(art(rec), serving(null), me).rec.channel, 'dashboard', 'the card shows the line\'s channel');
+  // main has moved since the record: never offered as a Restore, and the card says so
+  const moved = (published) => ({ slug: 'hello', tree: U, published });
+  assert.deepEqual(S(moved(rec), serving(null)), ['not-live', ['review', 'forget'], null]);
+  assert.equal(publicState(moved(rec), serving(null), me).drift, true);
+  assert.equal(publicState(art(rec), serving(null), me).drift, false);
+  assert.equal(publicState(moved(rec), null, null).drift, true, 'a laptop can say it too');
+  assert.equal(publicState(moved(rec), serving(T), me).drift, true, 'public, and main has moved on');
+  assert.equal(publicState(moved(null), serving(null), me).drift, false, 'no record, nothing to differ from');
   const L = publicLinks(me);
   assert.equal(L.publish(['a', 'b']), 'https://box.example.com/public/publish?port=4321&slug=a&slug=b');
   assert.equal(L.unpublish('a'), 'https://box.example.com/public/unpublish?port=4321&project=alpha&slug=a');
@@ -228,5 +236,7 @@ test('the Library shows each landed artifact\'s publish state, from the log and 
   assert.match(html, /target="_blank" rel="noopener noreferrer">\$\{label\}<\/a>/);
   assert.match(html, /post\('artifact-publish', \{ op: 'unpublish', slug \}/);
   assert.match(html, /Restore all/);
+  assert.match(html, /Review all/);
+  assert.match(html, /Changed on main since it was published/);
   assert.match(html, /Publishing happens on the cloud box/);
 });

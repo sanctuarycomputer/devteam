@@ -11,7 +11,7 @@ https://public.<box>/<project>/<slug>/
 ```
 
 - **Immediate.** Publishing is a click in the Library and a confirm on the gateway's own page. No PR, no merge.
-- **Durable.** Each publish and unpublish is an owner line in the log, so the record moves with the fleet. On a new box, the Library shows what was published and isn't live there yet, and one confirm restores all of it.
+- **Durable.** Each publish and unpublish is an owner line in the log, so the record moves with the fleet. On a new box, the Library shows what was published and isn't live there yet, and one confirm page lists all of it, each item for the owner to tick.
 - **Pinned.** The public sees exactly the bytes the owner confirmed. A later change to the artifact on main reaches the public only when the owner publishes again ("Update").
 - **Only the owner, only through the gateway's own page.** Every process on the box runs as the owner's user: it can write log lines, take a dashboard port, and run script on that port's origin with the owner's session cookie. So nothing on an instance's name can publish. Publishing happens only on a page the gateway serves itself on the box's name, from bytes it holds, after the owner confirms what they are publishing.
 
@@ -30,8 +30,8 @@ https://public.<box>/<project>/<slug>/
 When the gateway completes a publish, it has the kit write one owner line:
 
 ```json
-{ "type": "act", "class": "artifact-publish", "what": "publish", "refs": ["artifact:index-greenpoint"],
-  "artifact": "index-greenpoint", "tree": "<git tree id of the artifact's folder that was published>", "by": "owner", "channel": "dashboard" }
+{ "type": "act", "class": "artifact-publish", "what": "publish", "refs": ["artifact:pricing-mock"],
+  "artifact": "pricing-mock", "tree": "<git tree id of the artifact's folder that was published>", "by": "owner", "channel": "dashboard" }
 ```
 
 Unpublishing writes the same with `"what": "unpublish"` and no `tree`. For each slug the newest line (fold order: `at`, file, line) is its recorded state.
@@ -49,22 +49,26 @@ Schema and authority:
 
 **`artifact publish <slug> --owner --tree <t>` / `artifact unpublish <slug> --owner`.** Write the line above. Both use `ownerWriter()`, so they die under any `DEVTEAM_ROLE`. `publish` refuses unless `--tree` equals the tree of `<slug>` on `mainRef()` and that tree passes `artifactProblems`; it does not fetch (the gateway's call must return quickly, and the manifest it confirmed was read from the same `mainRef()`). `unpublish` refuses a slug whose recorded state isn't `publish`. Run by hand on the box, they record intent only and say so: the gateway's confirm page is what makes a page public.
 
-**Dashboard action.** `ACTIONS['artifact-publish'] = (b) => LINK_ID.test(b.slug ?? '') && (b.op === 'unpublish' || (b.op === 'publish' && TREE.test(b.tree ?? ''))) ? ['artifact', b.op, b.slug, '--owner', ...(b.op === 'publish' ? ['--tree', b.tree] : [])] : null`, under the same host, origin and content-type checks as `goal-hold`. Only the gateway calls it on a cloud box (§3); the Library has no button that calls it directly.
+**Dashboard action.** `ACTIONS['artifact-publish'] = (b) => LINK_ID.test(b.slug ?? '') && (b.op === 'unpublish' || (b.op === 'publish' && TREE.test(b.tree ?? ''))) ? ['artifact', b.op, b.slug, '--owner', ...(b.op === 'publish' ? ['--tree', b.tree] : [])] : null`, under the same host, origin and content-type checks as `goal-hold`. Only the gateway calls it on a cloud box (§3), and the Library's Forget; the Library has no button that publishes.
+
+Those checks stop another site's page. They don't stop a process on the box: the route has no way to see who is asking, and a request with no `Origin` and no `sec-fetch-*` is exactly what the gateway's own loopback call looks like. That holds for every owner route (`answer`, `goal-hold`, `fleet` and the rest), which is why agents can only be kept out of a publish by what the gateway checks, not by this route. A line written this way is identical to a real one, `channel: "dashboard"` included, so nothing downstream may treat a record as proof the owner published. It can make the Library ask, and never makes the gateway serve anything (§ Why this closes the port risk).
 
 **`GET /public-manifest/<slug>`.** `okHost`, and refused when `sec-fetch-site` is present and not `same-origin` (the gateway's loopback request sends none). For a slug landed on `mainRef()` whose tree passes `artifactProblems`:
 
 ```json
-{ "public": 1, "project": "stacksbot", "slug": "index-greenpoint", "title": "…", "summary": "…",
-  "root": "/srv/stacksbot", "tree": "<tree id>",
-  "files": { "index.html": { "sha256": "…", "size": 51234, "mode": "100644" } } }
+{ "public": 1, "project": "acme-site", "slug": "pricing-mock", "title": "…", "summary": "…",
+  "root": "/srv/acme-site", "tree": "<tree id>",
+  "files": { "index.html": { "sha256": "…", "size": 51234, "mode": "100644" } },
+  "recorded": { "tree": "<tree id>", "at": "…" } }
 ```
 
 - `files` comes from `git ls-tree -r -l <tree>` and `git cat-file blob` of each, hashed with sha256, cached by tree id under `run/cache/`. Each file carries its git `mode`, `100644` or `100755` (the gateway recomputes the tree id, and a mode is part of it); any other mode is refused. A tree holding a submodule is refused ("a submodule isn't served").
 - `project` is `settings.project`. Publishing needs it set explicitly (the folder-name fallback `helloBody()` uses would change every public URL on a re-clone): the kit refuses with 409 and the fix ("set project in settings.md") when it is unset or doesn't match `^[a-z0-9][a-z0-9._-]{0,62}$`.
 - `root` is the main checkout's realpath, the same value the hub lists; the gateway binds a project to it.
+- `recorded`, present when the log's newest line for the slug is a publish, is that line's `tree` and date. It is part of the manifest the owner confirms and is never relied on.
 - 404 for a draft, an unknown slug or a broken artifact (with the reason).
 
-**Library.** Each landed row gains `tree` (from `landedArtifacts`' `ls-tree`). Publish state is computed where the Library rows are assembled (`dashboardData`), never inside `describeArtifact` or its tree-keyed cache: `published: { tree, at, channel } | null` from the newest owner `artifact-publish` line. The card shows the line's date and channel beside its state, so a line the owner never wrote is visible.
+**Library.** Each landed row gains `tree` (from `landedArtifacts`' `ls-tree`). Publish state is computed where the Library rows are assembled (`dashboardData`), never inside `describeArtifact` or its tree-keyed cache: `published: { tree, at, channel } | null` from the newest owner `artifact-publish` line. The card shows the line's date and channel beside its state; neither tells a real line from a forged one (§2). When `tree` differs from main's, the card warns that main has changed since it was published, and a Not live card offers **Review main's version** in place of **Restore**.
 
 The page also reads `x-devteam-public` from the `/api/data` response: the gateway's whole public map, `{ "<project>": { "port", "root", "artifacts": { "<slug>": "<tree>" } } }`, set by the gateway (§3). It is absent on a laptop. The Library matches on its own project and root (it knows both), so a port change doesn't confuse it, and it shows "Public from instance <port>" when another port last published it. For a landed card:
 
@@ -73,11 +77,12 @@ The page also reads `x-devteam-public` from the `/api/data` response: the gatewa
 | not published | — | **Publish** |
 | published | same tree as main | **Public** · Copy link · Unpublish |
 | published | a different tree than main | **Public** · **Update** · Copy link · Unpublish |
-| published | nothing | **Not live on this box** · Restore · Forget |
+| published, same tree as main | nothing | **Not live on this box** · Restore · Forget |
+| published, tree differs from main | nothing | **Not live on this box**, with a warning · Review main's version · Forget |
 | not published | something | **Public** (the gateway is the truth) · Unpublish |
 
 - On a laptop (no header), cards say **Published** or nothing, and a note says publishing happens on the cloud box.
-- **Publish**, **Update** and **Restore** open `https://<box>/public/publish?port=<p>&slug=<s>` in a new tab (`rel="noopener noreferrer"`, so the opener can't later redirect that tab). **Restore all** (shown above the list when any card is "Not live") opens the same page with every such slug (`&slug=a&slug=b`). **Unpublish** opens `https://<box>/public/unpublish?port=<p>&slug=<s>`.
+- **Publish**, **Update** and **Restore** open `https://<box>/public/publish?port=<p>&slug=<s>` in a new tab (`rel="noopener noreferrer"`, so the opener can't later redirect that tab). **Restore all** (shown above the list when any card is "Not live"; **Review all**, with a warning, when any of them differs from main) opens the same page with every such slug (`&slug=a&slug=b`). **Unpublish** opens `https://<box>/public/unpublish?port=<p>&slug=<s>`.
 - **Forget** records `unpublish` through the kit's own action (no gateway change; the page is already not live), for a line the owner doesn't want to restore.
 - The page derives `<box>` and `<p>` from its own address: through the gateway, `location.hostname` is `<p>.<box>`.
 
@@ -88,7 +93,7 @@ The page also reads `x-devteam-public` from the `/api/data` response: the gatewa
 **The store.** Published bytes live under the gateway's own directory, content-addressed: `<dir>/public/blobs/<sha256>`. `state.json` gains:
 
 ```json
-"public": { "<project>": { "root": "/home/box/stacksbot", "port": 4322, "artifacts": { "<slug>": { "tree": "…", "title": "…", "at": "…", "files": { "<rel>": { "sha256": "…", "size": 51234 } } } } } }
+"public": { "<project>": { "root": "/home/box/acme-site", "port": 4322, "artifacts": { "<slug>": { "tree": "…", "title": "…", "at": "…", "files": { "<rel>": { "sha256": "…", "size": 51234 } } } } } }
 ```
 
 - A project is bound to its instance's `root`; `port` is where it was last seen.
@@ -99,7 +104,8 @@ The page also reads `x-devteam-public` from the `/api/data` response: the gatewa
 
 - `<p>` must be in the instance block, each slug `LINK_ID`, at most 50 slugs.
 - The gateway fetches `http://127.0.0.1:<p>/public-manifest/<slug>` as a loopback request with no `origin` or `sec-fetch-*` headers (as `hubList` does), with a 15 s deadline for the whole response, and validates it: size cap 2 MB, `project` pattern, `root` an absolute path, slug equal to the one asked, `tree` 40 or 64 hex, at most 2000 files, each rel passing the kit's `artifactPathOk`, `sha256` 64 hex, sizes within the artifact limits (8 MB a file, 25 MB an artifact).
-- It renders, per slug: a checkbox (checked), the project, the slug, the title, the file count and total size, the public URL it will have, and whether it is **new on this box** or an **update** (the gateway serves this slug with another tree). Labels come only from the gateway's own state, never from the query string. Every value is HTML-escaped. The Publish button has no autofocus.
+- It renders, per slug: a checkbox, the project, the slug, the title, the file count and total size, the root as the instance reports it, every file by name, the public URL it will have, and one of **not on this box**, **already public at this version** or **an update** (the gateway serves this slug with another tree). An update says what changed against the gateway's copy, file by file. These labels come only from the gateway's own state, never from the query string.
+- **The tick follows the gateway's copy.** An item is ticked only when the gateway holds a copy for this project and root. **Not on this box** is unticked, whether or not the log claims it was published, and its page says so. The gateway can't tell a restore from a first publish, since both reach it from a link on an instance, so it uses neither word for what it can't check. The manifest may carry `recorded: { tree, at }`, the log's newest publish of that slug: the page quotes it as what the instance's log says ("published on <date> at tree <t>; this is tree <u>, what main holds now"), never as proof. It can't show what changed from a tree it holds no copy of, and says that too. Every value is HTML-escaped. The Publish button has no autofocus.
 - **Project binding.** When the project is bound to a different `root`, the page says so ("<project> is published from <old root>; this instance is <root>") and the item carries an explicit "move it" checkbox, unchecked. Without it, that item is refused. A different port with the same `root` is not a move; the gateway just updates `port`.
 - A "move it" names the other pages of the old checkout that come down with it ("move it (its 1 other page from /srv/one comes down: m2)"), and carries the old root it showed as `movedFrom`; the POST refuses a move when the project is now bound to any other root ("this project moved since you looked; reload the page"). A move's result is never an update.
 - Each item carries `manifest: <sha256 of the canonical JSON of the manifest it rendered>`. The Publish button posts the checked items, `{ port, items: [{ slug, manifest, move, movedFrom }] }`, with `fetch` (the page's own script; `form-action 'none'` stays).
@@ -137,15 +143,15 @@ The response lists each item's result and public URL; the page shows them.
 ## Why this closes the port risk
 
 - **Pages on an instance's name can't publish.** The only publish path is a POST whose `Origin` is the box's own name, from a page whose bytes the gateway holds. Script on an instance's origin, the owner's cookie or not, can't make one.
-- **The owner sees what they confirm.** The confirm page shows the project, slug, title, size and destination URL, and the POST is bound to the sha256 of the exact manifest shown, so nothing about it can change in between. The tree id is recomputed from the bytes.
-- **A project can't be taken over by another instance** without the owner's explicit "move it", which is unchecked by default.
-- **Forged log lines can only make the Library ask.** A forged publish line can make a card say "Not live · Restore"; the card shows the line's date and channel, the confirm page labels every item from the gateway's own state, and each item is a checkbox.
+- **The owner sees what they confirm.** The confirm page shows the project, slug, title, size, destination URL and every file by name, and the POST is bound to the sha256 of the exact manifest shown, so nothing about it can change in between. The tree id is recomputed from the bytes.
+- **A project is bound to a checkout, as the instance reports it.** Another instance that reports a different `root` needs the owner's explicit "move it", which is unchecked by default. `root` is self-reported: whatever holds the port can claim the bound root and publish as that project if the owner confirms, which is why every item shows the root it reports.
+- **Forged log lines can only make the Library ask.** A forged publish line can make a card say "Not live", and it looks just like a real one. The confirm page labels every item from the gateway's own state, leaves unticked what it holds no copy of, and names every file, so a line the owner never wrote can't get a page public without the owner reading and ticking it.
 - **After a publish nothing on the box is trusted again.** The public is served from the gateway's own verified copy. Taking the port, rewriting main or forging log lines changes nothing that is served.
-- **Remaining trust:** at the moment of the confirm, the owner trusts the instance they clicked from to be the project it says it is. That is the trust the owner already gives the dashboard they are using, and the confirm page names the project and port so a surprise is visible.
+- **Remaining trust:** at the moment of the confirm, the owner trusts the instance they clicked from to be the project it says it is. That is the trust the owner already gives the dashboard they are using, and the confirm page names the project, port and reported root so a surprise is visible.
 
 ## Box moves
 
-The record moves with the log, as every owner line does: `log-sync` and `merge --chore log` land it before the move, and `fleet unpark` rebuilds it. The gateway's directory doesn't move. On the new box the Library shows each published artifact as **Not live on this box**, with **Restore all** above them: one confirm republishes every one from main. If main has moved on since, the confirm page says which ones are updates. Republishing from the old tree instead isn't offered: the old bytes are reachable only through history and would bypass the "landed on main now" rule.
+The record moves with the log, as every owner line does: `log-sync` and `merge --chore log` land it before the move, and `fleet unpark` rebuilds it. The gateway's directory doesn't move. On the new box the Library shows each published artifact as **Not live on this box**, with **Restore all** above them (or **Review all** when any differs from main). The confirm page lists every one, unticked, since the new box holds no copy of what was published; what goes up is what main holds now. The Library and the page each say when that differs from the tree on record. Neither can show what changed: the box has no copy of the old version. Republishing from the old tree instead isn't offered: the old bytes are reachable only through history and would bypass the "landed on main now" rule.
 
 ## Delivery
 
@@ -160,7 +166,8 @@ One PR, in two commit groups: the kit (schema, `integrity`, commands, `/public-m
   - Library data carries `published` and changes after publish and unpublish with the artifact's bytes unchanged (the cache doesn't hide it).
   - `act --class artifact-publish` by the supervisor is refused; an owner act of another class is refused by `integrity()`; owner acts are absent from `calls()`, `decisionRecords()` and the dashboard acts view; `correct` refuses one.
 - **Gateway (`test/gateway.test.mjs`)**, against a real kit dashboard with a landed artifact:
-  - The confirm page needs a session; it shows the project, slug and URL, escaped.
+  - The confirm page needs a session; it shows the project, slug, root, file names and URL, escaped.
+  - The review's repro: an owner publishes at T1, main changes, and a local `POST /api/artifact-publish` writes a line for an artifact the owner never published. On a new box both items are unticked, explained, name their files and never say "restore"; nothing is public until the owner ticks one.
   - A POST from an instance origin is refused (403), and so is one without a session.
   - After a confirm, `public.<box>/<project>/<slug>/` answers anonymously with the bytes, the gateway's CSP, an etag, and no `set-cookie`. HEAD works, 304 on `if-none-match`, POST 405, the cookie isn't forwarded.
   - The kit has an owner act for it.

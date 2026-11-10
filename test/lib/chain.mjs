@@ -3290,12 +3290,17 @@ const step = (name, fn) => { steps.push({ name, fn }); };
       const keep = fs.readFileSync(sf, 'utf8');
       const bad = keep.replace(/"project":\s*"demo"/, '"project": "Demo Project"');
       assert.notEqual(bad, keep);
+      // an owner setting: an edit in the checkout changes nothing until it lands on main
       fs.writeFileSync(sf, bad);
+      try { assert.equal((await fetch(`${base}/public-manifest/landed-mock`)).status, 200, 'main\'s name still counts'); } finally { fs.writeFileSync(sf, keep); }
+      // this checkout is behind main here: steps before this one land through worktrees
+      git(['pull', '-q', '--ff-only', 'origin', 'main']);
+      landSettings(() => bad);
       try {
         const r9 = await fetch(`${base}/public-manifest/landed-mock`);
         assert.equal(r9.status, 409);
         assert.match((await r9.json()).error, /set "project" in settings\.md/);
-      } finally { fs.writeFileSync(sf, keep); }
+      } finally { landSettings(() => keep); }
     } finally { srv.kill(); }
   });
 
