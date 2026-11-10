@@ -7182,7 +7182,8 @@ function usageCache() {
   const file = path.join(runDir, 'cache', 'usage.json');
   let data = {};
   try { data = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
-  return { data, save: () => { try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(data)); } catch {} } };
+  // the box's operator only reads, so it parses again next time rather than write a cache
+  return { data, save: () => { if (process.env.DEVTEAM_ROLE === 'operator') return; try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(data)); } catch {} } };
 }
 const USAGE_PARSE_V = 2;
 function cachedParse(cache, f, parse) {
@@ -7381,7 +7382,9 @@ function chatQuotesNotFound() {
   const typed = t.entries.filter((o) => o?.type === 'user' && o.userType === 'external' && !o.isMeta && !o.isSidechain).map((o) => { const c = o.message?.content; return norm(typeof c === 'string' ? c : Array.isArray(c) ? c.filter((x) => x?.type === 'text').map((x) => x.text).join(' ') : ''); });
   // typed while the agent was mid-turn: the transcript has these as queued attachments
   typed.push(...t.entries.filter((o) => o?.type === 'attachment' && o.attachment?.type === 'queued_command' && o.origin?.kind === 'human' && typeof o.attachment.prompt === 'string').map((o) => norm(o.attachment.prompt)));
-  return recent.filter((q) => { const said = norm(q.said).replace(/^["'\s]+|["'.!?\s]+$/g, ''); return Date.parse(q.answered_at) >= from && !typed.some((x) => x.includes(said)); });
+  // what the box's operator typed in (box-tell) arrives the same way, and isn't the owner
+  const owners = typed.filter((x) => !x.startsWith('from the operator ('));
+  return recent.filter((q) => { const said = norm(q.said).replace(/^["'\s]+|["'.!?\s]+$/g, ''); return Date.parse(q.answered_at) >= from && !owners.some((x) => x.includes(said)); });
 }
 function collectMetrics(since) {
   const settings = loadSettings();
@@ -11752,12 +11755,24 @@ function cmdWait() {
 // hello: who this instance is, for the hub. A fold of the log and one tmux call (no metrics, no git
 // per session), so the dashboard can run it every 30 s; --no-kit skips the kit's file check, which
 // the dashboard does once. The hub reads it from /api/hello.
+// The hub's "!" on a tab, and what the gateway pushes: the supervisor stopped at a limit, or what the
+// box's operator wants the owner to see now (box-alert, process/operator.md). Its one line is
+// written by the box's dev user, read here as text; a day old and it has been seen or forgotten.
+const BOX_ALERT_MAX_MS = 24 * 3600000;
+function boxAlert() {
+  try {
+    const f = path.join(os.homedir(), '.box', 'alert');
+    if (Date.now() - fs.statSync(f).mtimeMs >= BOX_ALERT_MAX_MS) return null;
+    return readText(f)?.trim().slice(0, 200) || null;
+  } catch { return null; }
+}
+const helloAlert = () => [accountsState()?.supervisor_limit ? 'The supervisor stopped at a usage limit: type "continue" in its terminal' : null, boxAlert()].filter(Boolean).join(' · ') || null;
 function cmdHello() {
   const s = loadSettings();
   // the Inbox as the dashboard counts it: open questions and lessons waiting to be kept
   const inbox = questions().filter((q) => q.status === 'open' && q.goal_hold !== 'let-go').length + logObjects('knowledge').filter((k) => k.status === 'candidate').length;
   const workers = ourWindows(tmuxSession()).length;
-  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, fleet: { mode: fleetMode() ?? 'run', workers }, ...(accountsState()?.supervisor_limit ? { alert: 'The supervisor stopped at a usage limit: type "continue" in its terminal' } : {}) };
+  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, fleet: { mode: fleetMode() ?? 'run', workers }, ...(helloAlert() ? { alert: helloAlert() } : {}) };
   return flags.json ? json(r) : out(`${r.name} at ${r.root}: kit ${r.kit}, ${inbox} open question(s), fleet ${r.fleet.mode}, ${workers} session(s)`);
 }
 // The kit's release (settings.upstream_base), +local when the kit that is running differs from the
@@ -12476,7 +12491,10 @@ Dashboard and releases
   dashboard [--port p] [--host h] | dashboard-data | notes <from-tag> [<to>] [--repo <link>]
 `;
 
-const OPERATOR_READS = new Set(['status', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'fleet status']);
+// What the box's operator may run: reads only (a test runs each and diffs the log and git status). A
+// command that also writes is listed by its read forms, so `knowledge add` is refused like any write.
+const OPERATOR_READS = new Set(['status', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'log', 'messages', 'knowledge', 'goal', 'goal list', 'goal show', 'fleet status']);
+const OPERATOR_SUBCOMMANDED = new Set(['fleet', 'goal', 'knowledge']);
 const COMMANDS = {
   init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), whoami: cmdWhoami, hello: cmdHello, settings: cmdSettings,
   feature: cmdFeature, ticket: cmdTicket, components: cmdComponents, link: cmdLink, links: cmdLinks, artifact: cmdArtifact, artifacts: cmdArtifacts, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, roadmap: cmdRoadmap,
@@ -12493,7 +12511,7 @@ if (!command || command === 'help' || command === '--help') out(HELP);
 else if (!COMMANDS[command]) die(`unknown command "${command}"\n${HELP}`);
 // A cloud box's operator (process/operator.md) looks after the machine and reads every repo. Any other
 // role the kit doesn't know reads as the supervisor, so this one may only look.
-else if (process.env.DEVTEAM_ROLE === 'operator' && !OPERATOR_READS.has(command === 'fleet' ? `fleet ${positional[0]}` : command)) die(`${command}: the operator only reads; this is for the repo's supervisor or its owner`);
+else if (process.env.DEVTEAM_ROLE === 'operator' && !OPERATOR_READS.has(OPERATOR_SUBCOMMANDED.has(command) && positional[0] ? `${command} ${positional[0]}` : command)) die(`${command}: the operator only reads; this is for the repo's supervisor or its owner`);
 else {
   // --decision names the decision a command's act carries out; check it before the command does anything.
   if (flags.decision !== undefined) {

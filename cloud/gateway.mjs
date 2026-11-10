@@ -208,11 +208,9 @@ export function pushSubscription(b) {
 // cut can make one out of an emoji, so this goes after the cut). With u, \p{Cs} only matches an
 // unpaired half; Node 18, which the tests still run on, has no toWellFormed.
 const wellFormed = (s) => s.replace(/\p{Cs}/gu, '\ufffd');
-// What the hub page would notify about, from two reads of the list: an Inbox that went up (an
-// instance not seen before counts from nothing). Whatever holds the hub's port wrote this list, so
-// it is checked as the page checks it, and kept short.
-export function inboxNews(seen, instances, ports, resting = new Set()) {
-  // one entry a port, so whatever the list's length, what follows is bounded by the block
+// One entry per root, from what the hub's list says; whatever holds the hub's port wrote it, so each
+// field is checked before it is used, and the list's length can't reach beyond the port block.
+function listedByRoot(instances, ports) {
   const perPort = new Map();
   for (const x of instances) {
     try {
@@ -223,7 +221,34 @@ export function inboxNews(seen, instances, ports, resting = new Set()) {
   }
   const perRoot = new Map();
   for (const x of perPort.values()) if (!perRoot.has(x.root) || Number(x.port) < Number(perRoot.get(x.root).port)) perRoot.set(x.root, x);
-  const list = [...perRoot.values()];
+  return [...perRoot.values()];
+}
+// What the hub page marks with "!" (a supervisor at a usage limit, the operator's box-alert), pushed
+// when it turns up or changes, so it needs no page open. The list is checked as the Inbox counts are,
+// and capped; one alert on every repo's tab is one push.
+const ALERT_MAX = 200;
+export function alertNews(seen, instances, ports, resting = new Set()) {
+  const list = listedByRoot(instances, ports);
+  const next = {};
+  const fresh = new Map();
+  for (const x of list) {
+    if (typeof x.alert !== 'string' || !x.alert) continue;
+    const text = wellFormed(x.alert.trim().slice(0, ALERT_MAX));
+    if (!text) continue;
+    next[x.root] = text;
+    if (seen[x.root] !== text && !resting.has(`alert:${text}`)) (fresh.get(text) ?? fresh.set(text, []).get(text)).push(wellFormed(String(x.name ?? x.root).slice(0, 80)));
+  }
+  let messages = [...fresh.entries()].map(([text, names]) => ({ title: `Box alert (${names.join(', ').slice(0, 80)})`, body: text, tag: wellFormed(`devteam-alert-${crypto.createHash('sha1').update(text).digest('hex').slice(0, 12)}`), url: '/' }));
+  const keys = [...fresh.keys()].map((t) => `alert:${t}`);
+  if (messages.length > PUSH_BURST) messages = [{ title: `${messages.length} alerts on this box`, body: [...fresh.keys()].join(' · ').slice(0, ALERT_MAX), tag: 'devteam-alerts', url: '/' }];
+  return { seen: next, messages, keys };
+}
+
+// What the hub page would notify about, from two reads of the list: an Inbox that went up (an
+// instance not seen before counts from nothing). Whatever holds the hub's port wrote this list, so
+// it is checked as the page checks it, and kept short.
+export function inboxNews(seen, instances, ports, resting = new Set()) {
+  const list = listedByRoot(instances, ports);
   const named = new Map();
   for (const x of list) named.set(x.name, (named.get(x.name) ?? 0) + 1);
   const next = { ...seen };
@@ -782,9 +807,11 @@ export function createGateway(opts = {}) {
       const before = store.load();
       const now = Date.now();
       for (const [r, t] of lastSent) if (now - t >= PUSH_REST_MS) lastSent.delete(r);
-      const { seen, messages, roots } = inboxNews(before.pushSeen ?? {}, list, BLOCK, new Set(lastSent.keys()));
-      if (before.pushSubs?.length) for (const r of roots) lastSent.set(r, now);
-      if (JSON.stringify(seen) !== JSON.stringify(before.pushSeen ?? {})) store.save({ ...before, pushSeen: seen });
+      const { seen, messages: inboxMessages, roots } = inboxNews(before.pushSeen ?? {}, list, BLOCK, new Set(lastSent.keys()));
+      const alerts = alertNews(before.pushAlerts ?? {}, list, BLOCK, new Set(lastSent.keys()));
+      const messages = [...inboxMessages, ...alerts.messages];
+      if (before.pushSubs?.length) for (const r of [...roots, ...alerts.keys]) lastSent.set(r, now);
+      if (JSON.stringify(seen) !== JSON.stringify(before.pushSeen ?? {}) || JSON.stringify(alerts.seen) !== JSON.stringify(before.pushAlerts ?? {})) store.save({ ...before, pushSeen: seen, pushAlerts: alerts.seen });
       const subs = before.pushSubs ?? [];
       const dead = new Set();
       const jobs = subs.flatMap((sub) => messages.map((message) => ({ sub, message })));
@@ -857,18 +884,58 @@ export function createGateway(opts = {}) {
 })();</script>`);
   // ttyd's page drops what's typed or pasted while its socket is down, and gives no sign. So this
   // goes in ahead of its bundle, to note the socket it opens; a paste then waits for a live one.
-  const TERM_SOCKET = Buffer.from(`<script>(() => {
+  // ttyd reconnects without loading the page again, so a tab left open through a deploy keeps the
+  // old page, and whatever a new one adds never reaches it. So when its socket closes or comes back
+  // this asks which page is current and, if it has changed, loads it: tmux redraws the screen, as it
+  // does on a reconnect. It keeps asking while the box is away: ttyd tries once, then waits for Enter.
+  // Not while a dropped file is on its way or waiting to paste, once per page (one that still comes
+  // back old can't loop), and past ttyd's "leave site?" prompt, which is for the owner's own leaving.
+  const TERM_SOCKET = `<script>(() => {
+  const BUILD = '@@BUILD@@';
+  let opens = 0;
+  let reloading = false;
+  addEventListener('beforeunload', (e) => { if (reloading) e.stopImmediatePropagation(); }, true);
+  const reload = () => {
+    if (window.devteamDropBusy && window.devteamDropBusy()) return void setTimeout(reload, 1000);
+    reloading = true;
+    location.reload();
+  };
+  const checkBuild = async () => {
+    const r = await fetch('/build', { cache: 'no-store' });
+    if (r.status >= 500) throw new Error('the box is away');
+    const build = r.ok ? (await r.json()).build : null;
+    if (!build || build === BUILD) return;
+    try {
+      if (sessionStorage.getItem('devteam-term-reloaded') === build) return;
+      sessionStorage.setItem('devteam-term-reloaded', build);
+    } catch { return; }
+    reload();
+  };
+  let asking = false;
+  const watchBuild = async () => {
+    if (asking) return;
+    asking = true;
+    for (let i = 0; i < 200; i++) {
+      try { await checkBuild(); break; } catch {}
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+    asking = false;
+  };
   window.WebSocket = new Proxy(window.WebSocket, { construct(T, args, nt) {
     const socket = Reflect.construct(T, args, nt);
     const live = { socket, at: 0 };
     window.devteamTermSocket = live;
-    socket.addEventListener('open', () => { live.at = Date.now(); });
+    socket.addEventListener('open', () => {
+      live.at = Date.now();
+      if (++opens > 1) watchBuild();
+    });
+    socket.addEventListener('close', () => { watchBuild(); });
     return socket;
   } });
-})();</script>`);
-  const withSocketWatch = (html) => {
+})();</script>`;
+  const withSocketWatch = (html, watch) => {
     const at = html.indexOf('<head>');
-    return at < 0 ? html : Buffer.concat([html.subarray(0, at + 6), TERM_SOCKET, html.subarray(at + 6)]);
+    return at < 0 ? html : Buffer.concat([html.subarray(0, at + 6), watch, html.subarray(at + 6)]);
   };
   // A native terminal pastes the path of a file dropped on it, and Claude Code picks it up from
   // there. So does this: each file goes to the box first, and then its path goes in by term.paste,
@@ -926,6 +993,8 @@ export function createGateway(opts = {}) {
   // Stored but not yet pasted. Tried again until the terminal is back, and on screen until then.
   let waiting = [];
   let trouble = [];
+  let active = 0;
+  window.devteamDropBusy = () => active > 0 || waiting.length > 0;
   const ready = () => {
     const live = window.devteamTermSocket;
     return Boolean(window.term && window.term.paste && live && live.socket.readyState === 1 && live.at && Date.now() - live.at >= SETTLE_MS);
@@ -980,10 +1049,17 @@ export function createGateway(opts = {}) {
     veil.style.display = 'none';
     // only while the event lasts: the list is empty afterwards
     const picks = Array.from(e.dataTransfer.items).filter((i) => i.kind === 'file').map((i) => { const entry = i.webkitGetAsEntry && i.webkitGetAsEntry(); return { file: i.getAsFile(), dir: Boolean(entry && entry.isDirectory) }; });
-    queue = queue.then(() => take(picks)).catch((err) => say(String(err && err.message || err), true));
+    active++;
+    queue = queue.then(() => take(picks)).catch((err) => say(String(err && err.message || err), true)).finally(() => { active--; });
   }, true);
 })();</script>`);
   const TERM_CSP = `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; font-src data:; img-src data:; connect-src 'self' ${TERM.replace(/^http/, 'ws')}; frame-ancestors ${PUB}; base-uri 'none'; form-action 'none'`;
+  // The page the terminal is served, and a name for it that changes only when its bytes do.
+  const termPage = () => {
+    const html = ttydPage();
+    const build = b64u(sha256(Buffer.concat([html, Buffer.from(TERM_SOCKET), TERM_CLIPBOARD, TERM_DROP]))).slice(0, 22);
+    return { build, body: Buffer.concat([withSocketWatch(html, Buffer.from(TERM_SOCKET.replace('@@BUILD@@', build))), TERM_CLIPBOARD, TERM_DROP]) };
+  };
   const loginAt = (next) => `${PUB}/auth/login${next ? `?next=${encodeURIComponent(next)}` : ''}`;
 
   // A published artifact, from the gateway's own copy alone: reads only, the raw path matched
@@ -1328,10 +1404,11 @@ export function createGateway(opts = {}) {
       if (isTerm) {
         if (req.method === 'GET' && p === '/') {
           let body;
-          try { body = Buffer.concat([withSocketWatch(ttydPage()), TERM_CLIPBOARD, TERM_DROP]); } catch { return send(res, 502, 'text/plain; charset=utf-8', 'This image has no terminal page.'); }
+          try { body = termPage().body; } catch { return send(res, 502, 'text/plain; charset=utf-8', 'This image has no terminal page.'); }
           return send(res, 200, 'text/html; charset=utf-8', body, { 'content-security-policy': TERM_CSP, 'referrer-policy': 'no-referrer' });
         }
         if (req.method === 'GET' && p === '/token') return json(res, 200, { token: '' });
+        if (req.method === 'GET' && p === '/build') { try { return json(res, 200, { build: termPage().build }); } catch { return send(res, 502, 'text/plain; charset=utf-8', 'This image has no terminal page.'); } }
         // a session, and (like every POST, above) this page's own Origin: an agent's page has neither
         if (req.method === 'POST' && p === '/upload') { clearTimeout(bodyTimer); return await receiveUpload(req, res, url.searchParams.get('name')); }
         return send(res, 404, 'text/plain', 'not found');

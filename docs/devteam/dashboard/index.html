@@ -46,6 +46,7 @@
   .banner { border: 1px solid color-mix(in srgb, var(--red) 45%, var(--line)); background: color-mix(in srgb, var(--red) 7%, var(--surface)); border-radius: 8px; padding: 10px 14px; margin-bottom: 20px; font-size: 12px; }
   .banner.updated { border-color: color-mix(in srgb, var(--blue-fg, var(--fg-2)) 45%, var(--line)); background: color-mix(in srgb, var(--blue-fg, var(--fg-2)) 7%, var(--surface)); }
   .banner.updated button { margin: 0 0 0 8px; }
+  .held { position: fixed; right: 16px; bottom: 16px; z-index: 30; margin: 0; box-shadow: var(--shadow); }
   .banner b { color: var(--red-fg); }
   .banner pre { margin: 6px 0 0; max-height: 9em; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.5 var(--mono); color: var(--fg-2); }
   .banner.stale { border-color: color-mix(in srgb, var(--amber) 45%, var(--line)); background: color-mix(in srgb, var(--amber) 7%, var(--surface)); }
@@ -497,6 +498,7 @@
 <main class="waiting">
   <div class="banner" id="banner" role="alert" hidden></div>
   <div class="banner updated" id="updated" role="status" hidden>The dashboard was updated since this tab opened, so some of what you see may be out of date. <button id="reload-page">Reload</button></div>
+  <button class="held" id="held" type="button" tabindex="-1" hidden>New data. Click to refresh</button>
   <p class="loading" id="loading">Loading…</p>
   <section id="overview">
     <div id="fleet-strip" class="fleet-strip"></div>
@@ -1807,7 +1809,7 @@ async function loadFleet(fetchToo = false) {
   FLEET.prevReady = !!FLEET.data?.ready;
   if ($('fleet-strip')) $('fleet-strip').innerHTML = fleetStrip();
   // the goal cards say parking or parked by the fleet's readiness: redraw them when it changes
-  if (DATA && wasReady !== FLEET.prevReady && typeof render === 'function') render(DATA);
+  if (DATA && wasReady !== FLEET.prevReady && typeof render === 'function') drawOrHold(HELD ?? DATA);
 }
 function goalCard(g, R, openQs, week) {
   const s = goalState(g, R, openQs);
@@ -2145,10 +2147,25 @@ function busyDrawer() {
 function redraw() { if (DRAWER.kind && !$('drawer').hidden && !busyDrawer()) OPENERS()[DRAWER.kind]?.(DRAWER.arg ?? DRAWER.id); }
 // Where focus was, as a selector that finds the same control after a redraw.
 function focusKey(el) {
-  if (!el || !$('drawer-body').contains(el)) return null;
+  if (!el) return null;
   if (el.id) return `#${CSS.escape(el.id)}`;
-  for (const a of ['href', 'data-ticket', 'data-hold-id', 'data-mdview', 'aria-describedby']) if (el.getAttribute(a)) return `${el.tagName.toLowerCase()}[${a}="${CSS.escape(el.getAttribute(a))}"]`;
-  return null;
+  const named = [...el.attributes].filter((a) => a.value && /^(data-.*|href|name|value|aria-describedby)$/.test(a.name));
+  return named.length ? el.tagName.toLowerCase() + named.map((a) => `[${a.name}="${CSS.escape(a.value)}"]`).join('') : null;
+}
+// Note where focus is before a redraw, and put it back after: the same control (the nth, if a link
+// is on the page twice), its caret and selection, and the page's scroll.
+function focusMark() {
+  const el = document.activeElement;
+  const key = el && el !== document.body ? focusKey(el) : null;
+  return { el, key, nth: key ? [...document.querySelectorAll(key)].indexOf(el) : -1, y: window.scrollY, sel: typingIn(el) && el.selectionStart != null ? [el.selectionStart, el.selectionEnd, el.selectionDirection] : null, top: el?.scrollTop };
+}
+function focusBack(m) {
+  if (m.key && !m.el.isConnected) {
+    const el = document.querySelectorAll(m.key)[m.nth];
+    el?.focus({ preventScroll: true });
+    if (el && m.sel) { el.setSelectionRange(...m.sel); el.scrollTop = m.top; }
+  }
+  if (window.scrollY !== m.y) window.scrollTo(0, m.y);
 }
 // Draw the drawer; the same HTML again leaves it as it is (charts, diagrams, scroll and focus kept).
 function showDrawer(html) {
@@ -2157,7 +2174,7 @@ function showDrawer(html) {
   const opening = $('drawer').hidden;
   if (!opening && html === LAST_HTML) return;
   const fresh = opening || LAST_HTML === '';
-  const keep = fresh ? null : focusKey(document.activeElement);
+  const keep = !fresh && $('drawer-body').contains(document.activeElement) ? focusKey(document.activeElement) : null;
   LAST_HTML = html;
   if (opening) lastFocus = document.activeElement;
   $('drawer-body').innerHTML = html;
@@ -3019,7 +3036,7 @@ showTab(TAB);
 async function post(action, body, errId) {
   // An answer names the question as this page showed it; a question changed since is refused.
   if (action === 'answer' && body.seen === undefined) body = { ...body, seen: (DATA.questions || []).find((x) => x.id === body.id)?.hash };
-  const r = await fetch(`/api/${action}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const r = await sending(() => fetch(`/api/${action}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }));
   const out = await r.json();
   if (!r.ok) {
     if (errId && $(`e-${errId}`)) $(`e-${errId}`).textContent = out.error || 'failed';
@@ -3132,6 +3149,7 @@ function renderLibrary(lib) {
 
 function render(d) {
   DATA = d;
+  const focus = focusMark();
   const m = d.metrics, p = d.progress, now = Date.parse(p.now);
   $('title').textContent = d.project && !String(d.project).startsWith('<') ? String(d.project) : 'devteam';
   const kit = $('kit'), local = /\+local$/.test(d.kit ?? '');
@@ -3249,6 +3267,7 @@ function render(d) {
   for (const [sel, v] of kept) { const el = document.querySelector(sel); if (el) el.value = v; }
   for (const sel of keptChecks) { const el = document.querySelector(sel); if (el) el.checked = true; }
   restoreSecretDrafts();
+  focusBack(focus);
 }
 
 // A failed load is said at the top of the page, never only in the sidebar: before the first good
@@ -3267,17 +3286,70 @@ function showFailure(message) {
   b.hidden = false;
 }
 
+// Not under someone mid-action: a redraw replaces the controls it draws, so typing, an IME
+// composition, an open select or file picker, a press not yet released (the click would land on
+// nothing) or an answer on its way would be lost. The data still comes in: the tab title and the
+// Inbox count stay fresh, and the page draws the latest as soon as nothing holds it.
+const NOT_TYPED = ['button', 'checkbox', 'color', 'file', 'hidden', 'image', 'radio', 'range', 'reset', 'submit'];
+const typingIn = (el) => !!el && (el.tagName === 'TEXTAREA' || el.isContentEditable || (el.tagName === 'INPUT' && !NOT_TYPED.includes(el.type)));
+// Nothing says a select's list closed without a choice, so a pick holds for this long at most.
+const PICK_HOLD = 60000, PRESS_HOLD = 3000;
+const HINT_AFTER = 30000;
+let HELD = null, HELD_SINCE = 0, COMPOSING = false, PRESSED = 0, PICKING = 0, SENDING = 0;
+function holding() {
+  const ae = document.activeElement;
+  return COMPOSING || SENDING > 0 || typingIn(ae) || Date.now() - PRESSED < PRESS_HOLD
+    || (!!ae?.matches?.('select, input[type=file]') && Date.now() - PICKING < PICK_HOLD);
+}
+async function sending(f) { SENDING++; try { return await f(); } finally { SENDING--; } }
+const drawHeld = () => { if (HELD && !holding()) drawOrHold(HELD); };
+const letGo = () => setTimeout(drawHeld, 0); // once the browser has finished moving focus
+const picker = (e) => e.target.matches?.('select, input[type=file]');
+window.addEventListener('pointerdown', (e) => { PRESSED = Date.now(); if (picker(e)) PICKING = Date.now(); }, true);
+// after the click this release makes, so the click still lands on what was pressed
+for (const up of ['pointerup', 'pointercancel']) window.addEventListener(up, () => setTimeout(() => { PRESSED = 0; drawHeld(); }, 0), true);
+document.addEventListener('keydown', (e) => { if (picker(e)) PICKING = Date.now(); }, true);
+document.addEventListener('change', () => { PICKING = 0; letGo(); }, true);
+document.addEventListener('focusout', letGo, true);
+document.addEventListener('compositionstart', () => { COMPOSING = true; }, true);
+document.addEventListener('compositionend', () => { COMPOSING = false; letGo(); }, true);
+// Held long enough that it could matter (a field left focused): say so, one click from fresh. The
+// press doesn't take focus, so the field and its caret stay.
+$('held').addEventListener('mousedown', (e) => e.preventDefault());
+$('held').addEventListener('click', () => { if (HELD) drawOrHold(HELD, true); });
+function drawOrHold(d, force = false) {
+  const first = !DATA;
+  try {
+    if (!first && !force && holding()) {
+      HELD = d;
+      HELD_SINCE ||= Date.now();
+      inboxTitle(d);
+      if (Date.now() - HELD_SINCE > HINT_AFTER) $('held').hidden = false;
+      return;
+    }
+    HELD = null;
+    HELD_SINCE = 0;
+    $('held').hidden = true;
+    render(d);
+    if (first) route();
+    inboxTitle(d);
+  } catch (e) {
+    $('err').textContent = 'could not draw (see the top of the page)';
+    const b = $('banner');
+    b.className = 'banner';
+    b.innerHTML = `<b>The data loaded but the page failed to draw it.</b> Some sections may be blank or out of date. Please report this upstream with the error below.<pre>${esc(e.stack || e.message || e)}</pre>`;
+    b.hidden = false;
+  }
+}
+
 let loading = null;
 async function load({ force = false } = {}) {
   // one refresh at a time; a forced one waits for the one in flight, then runs
   if (loading) { if (!force) return; await loading.catch(() => {}); }
-  loading = loadNow({ force });
+  loading = loadNow();
   try { return await loading; } finally { loading = null; }
 }
-async function loadNow({ force = false } = {}) {
-  // Don't redraw under someone who is typing or choosing (radio choices keep their pick anyway).
-  const ae = document.activeElement;
-  if (!force && DATA && ae && (['TEXTAREA', 'SELECT'].includes(ae.tagName) || (ae.tagName === 'INPUT' && ae.type !== 'radio')) && ae.id !== 'view') return;
+async function loadNow() {
   let d;
   try {
     const r = await fetch('/api/data');
@@ -3297,20 +3369,16 @@ async function loadNow({ force = false } = {}) {
   $('banner').hidden = true;
   $('loading').hidden = true;
   document.querySelector('main').classList.remove('waiting');
-  const first = !DATA;
-  try { render(d); if (first) route(); inboxTitle(d); } catch (e) {
-    $('err').textContent = 'could not draw (see the top of the page)';
-    const b = $('banner');
-    b.className = 'banner';
-    b.innerHTML = `<b>The data loaded but the page failed to draw it.</b> Some sections may be blank or out of date. Please report this upstream with the error below.<pre>${esc(e.stack || e.message || e)}</pre>`;
-    b.hidden = false;
-  }
+  drawOrHold(d);
 }
 
 // The tab title carries the Inbox count. Notifications are the hub's, for every instance.
 function inboxTitle(d) {
   const n = d.questions.length + (d.ooda?.knowledge ?? []).filter((k) => k.status === 'candidate').length;
   document.title = n ? `(${n}) devteam · ${d.project}` : `devteam · ${d.project}`;
+  const c = $('n-questions');
+  c.textContent = n || '';
+  c.classList.toggle('hot', n > 0);
 }
 
 document.addEventListener('click', (e) => {
@@ -3397,7 +3465,7 @@ document.addEventListener('click', async (ev) => {
     ps.disabled = true; ps.textContent = 'Posting…';
     let r, out;
     try {
-      r = await fetch('/api/secret', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, values }) });
+      r = await sending(() => fetch('/api/secret', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, values }) }));
       out = await r.json();
     } catch (e2) { out = { error: `Could not send: ${e2.message}` }; }
     for (const k of Object.keys(values)) { SECRET_DRAFTS.delete(`${id}:${k}`); delete values[k]; }

@@ -566,6 +566,31 @@ test('a push is encrypted as RFC 8291 says, and signed so a push service believe
   assert.ok(crypto.verify('sha256', Buffer.from(`${head}.${claims}`), { key: publicKey, dsaEncoding: 'ieee-p1363' }, Buffer.from(sig, 'base64url')));
 });
 
+test('an alert on the hub is pushed once, when it turns up or changes', () => {
+  const ports = [P, P + 1];
+  const r = (root, name, port, alert) => ({ root, name, port, ...(alert === undefined ? {} : { alert }) });
+  assert.deepEqual(G.alertNews({}, [r('/a', 'a', P)], ports).messages, [], 'no alert, no news');
+  const one = G.alertNews({}, [r('/a', 'a', P, 'disk is full')], ports);
+  assert.equal(one.messages.length, 1);
+  assert.equal(one.messages[0].title, 'Box alert (a)');
+  assert.equal(one.messages[0].body, 'disk is full');
+  assert.deepEqual(one.seen, { '/a': 'disk is full' });
+  assert.deepEqual(G.alertNews(one.seen, [r('/a', 'a', P, 'disk is full')], ports).messages, [], 'the same alert is not news twice');
+  assert.equal(G.alertNews(one.seen, [r('/a', 'a', P)], ports).seen['/a'], undefined, 'gone, it is forgotten and can come back');
+  assert.equal(G.alertNews({}, [r('/a', 'a', P, 'x')], [P + 5]).messages.length, 0, 'a port outside the block is ignored');
+  // one box-wide alert across every repo's tab is one push, however many tabs carry it
+  const both = G.alertNews({}, [r('/a', 'a', P, 'same'), r('/b', 'b', P + 1, 'same')], ports);
+  assert.equal(both.messages.length, 1);
+  assert.equal(both.messages[0].title, 'Box alert (a, b)');
+  assert.deepEqual(both.keys, ['alert:same'], 'resting is by text');
+  assert.equal(G.alertNews({}, [r('/a', 'a', P, 'same')], ports, new Set(['alert:same'])).messages.length, 0, 'at rest it waits');
+  const long = G.alertNews({}, [r('/a', 'a', P, 'x'.repeat(500))], ports);
+  assert.equal(long.messages[0].body.length, 200);
+  assert.equal(G.alertNews({}, [r('/a', 'a', P, 42)], ports).messages.length, 0, 'whatever holds the hub\'s port wrote the list: only a string counts');
+  const many = G.alertNews({}, [r('/1', 'a', P, 'one'), r('/2', 'b', P + 1, 'two')], ports);
+  assert.equal(many.messages.length, 2, 'distinct alerts each get a push');
+});
+
 test('what counts as news is what the hub page notifies about', () => {
   const ports = [P, P + 1];
   const at = (inbox, extra = {}) => ({ root: '/r/a', name: 'a', port: P, inbox, ...extra });
@@ -1638,9 +1663,9 @@ test('the terminal\'s page takes a drop, and pastes what a shell reads back unch
     assert.ok(real.startsWith('<!DOCTYPE html><html><head><script>'), real.slice(0, 60));
     assert.ok(real.indexOf('devteamTermSocket = live') < real.indexOf('BUNDLE'));
     const made = [];
-    class Fake { constructor(url) { this.url = url; this.readyState = 0; made.push(this); } addEventListener(ev, f) { this.onopen = f; } }
+    class Fake { constructor(url) { this.url = url; this.readyState = 0; made.push(this); } addEventListener(ev, f) { this[`on${ev}`] = f; } }
     const win = { WebSocket: Fake };
-    new Function('window', real.slice(real.indexOf('<script>') + 8, real.indexOf('</script>')))(win);
+    new Function('window', 'addEventListener', real.slice(real.indexOf('<script>') + 8, real.indexOf('</script>')))(win, () => {});
     const sock = new win.WebSocket('ws://x');
     assert.ok(sock instanceof Fake, 'ttyd still gets a real socket');
     assert.equal(win.devteamTermSocket.socket, sock);
@@ -1648,6 +1673,89 @@ test('the terminal\'s page takes a drop, and pastes what a shell reads back unch
     sock.onopen();
     assert.ok(win.devteamTermSocket.at > 0);
   } finally { await gw.close(); }
+});
+
+test('an open terminal tab takes the new page after a deploy, and the page is never cached', async () => {
+  const gw = await signedIn('up-build');
+  try {
+    const ttyd = path.join(tmp, 'up-build-ttyd.html');
+    fs.writeFileSync(ttyd, '<!DOCTYPE html><html><head><title>t</title></head><body>one</body></html>');
+    const page = await gw.req('GET', '/', { on: 'term' });
+    assert.equal(page.headers['cache-control'], 'no-store');
+    assert.ok(!page.body.includes('@@BUILD@@'));
+    const first = (await gw.req('GET', '/build', { on: 'term' })).json.build;
+    assert.ok(page.body.includes(`const BUILD = '${first}'`), 'the page knows which it is');
+    assert.equal((await gw.req('GET', '/build', { on: 'term' })).json.build, first, 'the same page is the same build');
+    assert.equal((await gw.req('GET', '/build', { on: 'term', cookie: '' })).status, 401, 'and asking takes a session');
+    fs.writeFileSync(ttyd, '<!DOCTYPE html><html><head><title>t</title></head><body>two</body></html>');
+    assert.notEqual((await gw.req('GET', '/build', { on: 'term' })).json.build, first, 'a new page is a new build');
+    const body = page.body;
+    const source = body.slice(body.indexOf('<script>') + 8, body.indexOf('</script>'));
+    const tick = () => new Promise((r) => setImmediate(r));
+    const tab = (answer) => {
+      class Sock { addEventListener(ev, f) { this[`on${ev}`] = f; } }
+      const store = new Map();
+      const unload = [];
+      const t = { asked: 0, reloads: 0, answer, unload, win: { WebSocket: Sock } };
+      const fetchBuild = async () => { t.asked++; return t.answer(); };
+      const later = (f) => { t.retry = f; };
+      new Function('window', 'addEventListener', 'fetch', 'sessionStorage', 'location', 'setTimeout', source)(t.win, (ev, f) => { if (ev === 'beforeunload') unload.push(f); }, fetchBuild, { getItem: (k) => store.get(k) ?? null, setItem: (k, v) => store.set(k, v) }, { reload: () => { t.reloads++; } }, later);
+      t.sock = new t.win.WebSocket('ws://x');
+      return t;
+    };
+    const says = (build) => () => ({ ok: true, status: 200, json: async () => ({ build }) });
+    const fresh = tab(says('other'));
+    fresh.sock.onopen();
+    await tick();
+    assert.equal(fresh.asked, 0, 'a page just loaded has nothing to check');
+    fresh.sock.onopen();
+    await tick();
+    assert.equal(fresh.reloads, 1, 'a reconnect to a new build loads it');
+    const stopped = { stopped: 0, stopImmediatePropagation() { this.stopped++; } };
+    fresh.unload[0](stopped);
+    assert.equal(stopped.stopped, 1, 'without ttyd\'s leave-site prompt');
+    fresh.sock.onopen();
+    await tick();
+    assert.equal(fresh.reloads, 1, 'and only once for a build: one that comes back old can\'t loop');
+    const same = tab(says(first));
+    same.sock.onopen(); same.sock.onopen();
+    await tick();
+    assert.equal(same.asked, 1);
+    assert.equal(same.reloads, 0, 'the same build stays as it is');
+    const leaving = { stopped: 0, stopImmediatePropagation() { this.stopped++; } };
+    same.unload[0](leaving);
+    assert.equal(leaving.stopped, 0, 'and the owner leaving is still asked');
+    const out = tab(() => ({ ok: false, status: 401 }));
+    out.sock.onclose();
+    await tick();
+    assert.equal(out.reloads, 0, 'signed out: nothing to load');
+    let up = false;
+    const away = tab(() => { if (!up) throw new Error('refused'); return says('other')(); });
+    away.sock.onclose();
+    await tick();
+    assert.equal(away.reloads, 0, 'the box away: the socket closed and nothing answers');
+    up = true;
+    away.retry();
+    await tick(); await tick();
+    assert.equal(away.reloads, 1, 'it keeps asking, as ttyd stops at "press Enter"');
+    const busy = tab(says('other'));
+    let held = true;
+    busy.win.devteamDropBusy = () => held;
+    busy.sock.onclose();
+    await tick();
+    assert.equal(busy.reloads, 0, 'a file on its way or waiting to paste holds it back');
+    held = false;
+    busy.retry();
+    assert.equal(busy.reloads, 1);
+  } finally { await gw.close(); }
+});
+
+test('the hub refuses a drop on itself, keeps the terminal\'s sandbox, and says where to drop', () => {
+  const hub = fs.readFileSync(path.join(kit, 'dashboard', 'hub.html'), 'utf8');
+  for (const piece of ["window.addEventListener('dragover'", "window.addEventListener('drop'", "dropEffect = 'none'", 'Drop onto the Terminal tab']) assert.ok(hub.includes(piece), piece);
+  const guard = hub.slice(hub.indexOf("window.addEventListener('dragover'"), hub.indexOf('// The hub on a laptop'));
+  assert.equal((guard.match(/e\.preventDefault\(\)/g) ?? []).length, 2, 'both events, or the browser opens the file');
+  assert.ok(hub.includes(`term.frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals allow-pointer-lock');`), 'the terminal\'s frame is as tight as it was');
 });
 
 test('the note after a drop says how each kind arrives, and always names the paths', () => {
