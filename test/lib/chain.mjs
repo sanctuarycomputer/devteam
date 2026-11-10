@@ -4088,6 +4088,10 @@ http.createServer((req, res) => {
       assert.match(r.err, why);
     }
     assert.match(pv(['preview', '65000'], { DEVTEAM_PUBLIC_URL: 'https://box.example.com', PORT: '65000' }).err, /gateway's own/, "on a box the platform's PORT is the gateway's");
+    assert.match(pv(['preview', '7700'], { DEVTEAM_TTYD_PORT: '7700' }).err, /terminal/, 'the terminal\'s real port');
+    assert.equal(pv(['preview', '7681'], { DEVTEAM_TTYD_PORT: '7700', DEVTEAM_PUBLIC_URL: 'https://box.example.com', DEVTEAM_PREVIEWS: '1' }).status, 0, '7681 is free when the terminal is elsewhere');
+    pvClear();
+    pvOk(['preview', '65000']);
     assert.match(pv(['preview', '65000', '--label', 'two\nlines']).err, /one line/);
     assert.match(pv(['preview', '65000', '--label', 'x'.repeat(41)]).err, /at most 40/);
     for (let i = 0; pvFiles().length < 20; i++) pvOk(['preview', String(64000 + i), '--label', `l${i}`]);
@@ -4420,6 +4424,38 @@ http.createServer((req, res) => {
       assert.equal(json(must(['dashboard-data'])).questions.find((x) => x.id === id).links.find((x) => x.name === 'demo').state, 'gone', 'dashboard-data on its own: no tick, same record');
     } finally { await d.stop(); }
     must(['withdraw', id, '--reason', 'done with it'], { role: 'sup' });
+  });
+
+  step('previews: a record nobody wrote through the kit can break nothing', async () => {
+    pvClear();
+    pvMake('bad-port', { port: 99999 });
+    pvMake('neg-port', { port: -1 });
+    pvMake('hub-port', { port: Number(process.env.DEVTEAM_HUB_PORT) });
+    pvMake('run-string', { run: 'x' });
+    pvMake('run-badcmd', { run: { cmd: 5, window: null } });
+    pvMake('run-badwin', { run: { cmd: 'x', window: 7 } });
+    pvMake('down-num', { down_since: 5 });
+    pvMake('good-one', { port: 65040 });
+    assert.deepEqual(JSON.parse(pvOk(['preview', 'list', '--json'])).map((r) => r.name), ['good-one'], 'preview list survives them, and they are not previews');
+    // the tick goes on working past them
+    let d = await pvDashboard();
+    try {
+      await until(async () => (await pvHello(d.base)).find((p) => p.name === 'good-one')?.up === false, 'the tick to probe the one good record');
+      await until(() => pvRec('good-one').down_since, 'the tick to get as far as writing');
+    } finally { await d.stop(); }
+    pvClear();
+    // however many are planted, 20 are read: the list in hello, and what the dashboard hands its child
+    const letters = (i) => `${String.fromCharCode(97 + (i % 26))}${String.fromCharCode(97 + Math.floor(i / 26))}x`;
+    for (let i = 0; i < 400; i++) pvMake(`aaa-${letters(i)}`, { port: 62000 + i });
+    assert.equal(JSON.parse(pvOk(['preview', 'list', '--json'])).length, 20);
+    d = await pvDashboard();
+    try {
+      await until(async () => (await pvHello(d.base)).length === 20 && (await pvHello(d.base)).some((p) => p.up === false), 'hello and a tick');
+      const r = await fetch(`${d.base}/api/data`);
+      assert.equal(r.status, 200, 'the child starts: its environment stays small');
+      assert.equal((await r.json()).library.previews.length, 20);
+    } finally { await d.stop(); }
+    pvClear();
   });
 
 // Forks. A fork is a copy of the fixture as it stands between two steps, made by the run in
