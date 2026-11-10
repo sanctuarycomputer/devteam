@@ -191,6 +191,13 @@
   .qcard.trust { border-left-color: var(--green); }
   .qid { font-family: var(--mono); font-size: 11px; color: var(--muted); }
   .qcard.done { border-left-color: var(--green); opacity: .85; }
+  /* the Inbox is in the kit's order: the first card is the next best step, and each says why it is where it is */
+  .qcard.top { border-left-width: 4px; }
+  .top-why { font-size: 13px; margin: 0 0 8px; }
+  .why { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 8px; }
+  .why span { font-size: 11px; line-height: 18px; padding: 0 7px; border-radius: 999px; border: 1px solid var(--line-2); color: var(--fg-2); }
+  .why span.muted { color: var(--muted); border-style: dashed; }
+  .choice .closes { font-size: 12px; color: var(--fg-2); margin-top: 2px; }
   .answered-note { color: var(--green-fg); }
 
   /* reading width: a line of prose stays near 1.5 alphabets (both cases), about 78 characters */
@@ -507,13 +514,13 @@
   </section>
 
   <section id="goals">
-    <h2>Goals <span class="sub" id="retro"></span></h2>
+    <h2>Goals <span class="sub"><a class="linkish" id="strategy-link" href="#file?path=docs%2Fdevteam%2Fproject%2Fstrategy.md&amp;title=Strategy" title="Why the project exists, who it serves and how it wins. Goals are judged against it; only you change it.">Strategy</a></span> <span class="sub" id="retro"></span></h2>
     <div id="goals-list"></div>
     <div id="unassigned" class="small dim"></div>
   </section>
 
   <section id="inbox">
-    <h2>Inbox <span class="sub">decisions only you can make, most urgent first</span></h2>
+    <h2>Inbox <span class="sub">decisions only you can make, the most valuable first</span></h2>
     <div id="questions"></div>
     <details class="answered" id="answered-wrap"><summary id="answered-sum">Answered</summary><div id="answered"></div></details>
   </section>
@@ -1094,6 +1101,19 @@ const toB64 = async (file) => { const bytes = new Uint8Array(await file.arrayBuf
 // Next time: only for a kind of decision on the trust ladder; the current rung is marked, nothing
 // changes unless the owner picks another. The supervisor never infers this from the note.
 const nextTime = (q, cls, attr = 'data-auto') => (cls ? `<fieldset class="next"><legend>Next time, for decisions like this (${esc(cls.about || words(q.class))}), the supervisor…</legend>${[1, 2, 3].filter((r) => r <= cls.ceiling).map((r) => `<label class="seg"><input type="radio" name="${attr === 'data-auto' ? '' : 'rv-'}auto-${esc(q.id)}" value="${r === cls.rung ? '' : r}" ${attr}="${esc(q.id)}" ${r === cls.rung ? 'checked' : ''}>${esc(RUNG_WORDS[r])}${r === cls.rung ? ' <span class="muted">(now)</span>' : ''}</label>`).join('')}</fieldset>` : '');
+// Why a question is where it is in the Inbox. The server orders and words it (rank, from the
+// supervisor's ratings and what the kit counts); the page only shows it. The top card says the
+// whole reason; the others their first three parts.
+function rankWhy(q) {
+  const r = q.rank;
+  if (!r) return '';
+  const by = (r.parts.settled_by || []).map((id) => `<span>may be settled by ${qlink(id)}</span>`).join('');
+  if (r.top) return `<p class="top-why"><b>Next best step.</b>${r.chips.length ? ` ${esc(cap(r.chips.join('; ')))}.` : ''}</p>${by ? `<div class="why">${by}</div>` : ''}`;
+  const chips = r.chips.slice(0, 3).map((c) => `<span>${esc(c)}</span>`).join('') + by + (r.parts.rated ? '' : '<span class="muted" title="The supervisor has not rated this question, so it is ordered as a middling one.">not rated</span>');
+  return chips ? `<div class="why">${chips}</div>` : '';
+}
+// The ⋯ menu's row: the arithmetic, with each judged number in words, so a wrong rating shows.
+const rankRow = (q) => (q.rank ? [['Order', esc(`${q.rank.position} of ${q.rank.of}. ${cap(q.rank.sum)}`)]] : []);
 function questionCard(q, o, reasonText) {
   if (q.kind === 'review') return reviewCard(q, o, reasonText);
   const cls = q.class && o.classes[q.class];
@@ -1101,10 +1121,12 @@ function questionCard(q, o, reasonText) {
   const list = choicesOf(q);
   const name = `pick-${q.id}`;
   const sure = q.confidence != null ? ` · ${Math.round(q.confidence * 100)}% sure` : '';
+  // the answer the supervisor said would settle other open questions: say which, on that choice
+  const closes = (q.rank?.parts.settles || []).length ? `<div class="closes">Closes ${q.rank.parts.settles.length} other question${q.rank.parts.settles.length > 1 ? 's' : ''}: ${q.rank.parts.settles.map((id) => qlink(id)).join('; ')}</div>` : '';
   const choiceHtml = list.map((c) => `
       <label class="choice${c.rec ? ' rec' : ''}${picks[q.id] === c.label ? ' picked' : ''}">
         <input type="radio" name="${esc(name)}" value="${esc(c.label)}" data-pick="${esc(q.id)}" ${picks[q.id] === c.label ? 'checked' : ''}>
-        <span><b>${esc(c.label)}</b>${c.rec ? `<span class="tag">Recommended${sure}</span>` : ''}${c.detail ? `<div class="d">${linkify(c.detail)}</div>` : ''}${c.effect ? `<div class="e">${linkify(c.effect)}</div>` : ''}${c.then ? `<div class="d">${esc(c.then)}</div>` : ''}</span>
+        <span><b>${esc(c.label)}</b>${c.rec ? `<span class="tag">Recommended${sure}</span>` : ''}${c.detail ? `<div class="d">${linkify(c.detail)}</div>` : ''}${c.effect ? `<div class="e">${linkify(c.effect)}</div>` : ''}${c.then ? `<div class="d">${esc(c.then)}</div>` : ''}${closes && c.label === q.settles_if ? closes : ''}</span>
       </label>`).join('') + (list.length && !['owner-action', 'goal-approval'].includes(q.kind) ? `
       <label class="choice${picks[q.id] === '__other' ? ' picked' : ''}"><input type="radio" name="${esc(name)}" value="__other" data-pick="${esc(q.id)}" ${picks[q.id] === '__other' ? 'checked' : ''}><span><b>Something else</b><div class="d">Write your own answer in the box below.</div></span></label>` : '');
   const why = q.why_asked?.reasons?.length ? `Why you: ${q.why_asked.reasons.map((r) => esc(reasonText[r] || r)).join('; ')}.` : '';
@@ -1112,8 +1134,9 @@ function questionCard(q, o, reasonText) {
   const goalAsk = q.kind === 'goal-approval';
   const notePh = goalAsk ? 'Notes for the planner: taken into account whatever you choose (needed to refine)' : list.length ? 'Add a note (optional), or your own answer' : 'Your answer';
   return `
-    <div class="card qcard ${kindCls}" id="q-${esc(q.id)}">
-      ${cardHead(KIND_ICON[q.kind] || 'circle-help', `<span class="badge ${q.kind === 'one-way-door' ? 'high' : q.kind === 'trust' ? 'good' : q.kind === 'owner-action' ? 'low' : 'medium'}">${esc(KIND_WORDS[q.kind] || words(q.kind))}</span>${q.goal_hold === 'park' ? '<span class="badge">its goal is parked</span>' : ''}`, { extra: (q.blocks || []).length ? `${q.class === 'incident-fix' ? 'about the incident' : 'holds up'} ${q.blocks.map((b) => (/^p-/.test(b) ? linkify(b) : tlink(b))).join(', ')}` : q.ticket ? `about ${tlink(q.ticket)}` : '', id: q.id, rows: [['Asked', esc(when(q.asked_at))], ...(q.class ? [['Kind', esc(q.class)]] : [])] })}
+    <div class="card qcard ${kindCls}${q.rank?.top ? ' top' : ''}" id="q-${esc(q.id)}">
+      ${cardHead(KIND_ICON[q.kind] || 'circle-help', `<span class="badge ${q.kind === 'one-way-door' ? 'high' : q.kind === 'trust' ? 'good' : q.kind === 'owner-action' ? 'low' : 'medium'}">${esc(KIND_WORDS[q.kind] || words(q.kind))}</span>${q.goal_hold === 'park' ? '<span class="badge">its goal is parked</span>' : ''}`, { extra: (q.blocks || []).length ? `${q.class === 'incident-fix' ? 'about the incident' : 'holds up'} ${q.blocks.map((b) => (/^p-/.test(b) ? linkify(b) : tlink(b))).join(', ')}` : q.ticket ? `about ${tlink(q.ticket)}` : '', id: q.id, rows: [['Asked', esc(when(q.asked_at))], ...(q.class ? [['Kind', esc(q.class)]] : []), ...rankRow(q)] })}
+      ${rankWhy(q)}
       ${q.rewritten ? '<p class="rewritten">This question changed after you answered it, so that answer no longer counts. Read it again before you answer: the supervisor\'s log was rewritten, which it should never do.</p>' : ''}
       <h4>${qtext(q.question, q.links)}</h4>
       ${q.context ? `<p class="ctx">${qtext(q.context, q.links)}</p>` : ''}
@@ -1274,8 +1297,9 @@ function reviewCard(q, o, reasonText) {
   const why = q.why_asked?.reasons?.length ? `Why you: ${q.why_asked.reasons.map((r) => esc(reasonText[r] || r)).join('; ')}.` : '';
   const declineOpen = !!drafts[q.id];
   return `
-    <div class="card qcard review" id="q-${esc(q.id)}">
-      ${cardHead(KIND_ICON.review, '<span class="badge low">Review</span>', { extra: (q.blocks || []).length ? `holds up ${q.blocks.map(tlink).join(', ')}` : q.ticket ? `about ${tlink(q.ticket)}` : '', id: q.id, rows: [['Asked', esc(when(q.asked_at))], ...(q.class ? [['Kind', esc(q.class)]] : [])] })}
+    <div class="card qcard review${q.rank?.top ? ' top' : ''}" id="q-${esc(q.id)}">
+      ${cardHead(KIND_ICON.review, '<span class="badge low">Review</span>', { extra: (q.blocks || []).length ? `holds up ${q.blocks.map(tlink).join(', ')}` : q.ticket ? `about ${tlink(q.ticket)}` : '', id: q.id, rows: [['Asked', esc(when(q.asked_at))], ...(q.class ? [['Kind', esc(q.class)]] : []), ...rankRow(q)] })}
+      ${rankWhy(q)}
       ${q.rewritten ? '<p class="rewritten">This question changed after you answered it, so that answer no longer counts. Read it again before you answer: the supervisor\'s log was rewritten, which it should never do.</p>' : ''}
       <h4>${qtext(q.question, q.links)}</h4>
       ${q.context ? `<p class="ctx">${qtext(q.context, q.links)}</p>` : ''}
@@ -1816,7 +1840,7 @@ function goalCard(g, R, openQs, week) {
   const design = s.ask?.links?.[0] ?? (['ready', 'met'].includes(g.status) && g.check.design ? { title: 'The design', path: `docs/devteam/${g.check.design}` } : null);
   const steps = goalSteps(g, s, R);
   return `<div class="card goal goal-${s.key}">
-    ${cardHead('target', `<span class="badge ${s.tone}">${esc(s.label)}</span>`, { extra: g.priority ? `priority ${esc(g.priority)}` : '', id: g.id, rows: [['Opened', esc(when(g.created_at))]] })}
+    ${cardHead('target', `<span class="badge ${s.tone}">${esc(s.label)}</span>`, { extra: [g.priority ? `priority ${esc(g.priority)}` : '', g.impact ? esc(g.impact.words) : ''].filter(Boolean).join(' · '), id: g.id, rows: [['Opened', esc(when(g.created_at))]] })}
     <h4><a class="title-link" href="#goal/${encodeURIComponent(g.id)}">${esc(g.title)}</a></h4>
     ${g.outcome ? `<p class="ctx">${esc(g.outcome)}</p>` : ''}
     ${steps}
@@ -2533,6 +2557,18 @@ async function openTicket(id) {
     ${near.length > 1 ? `<h3>Dependencies</h3>${depGraph(near, { focus: id })}` : ''}
     ${historySection(p, id)}`);
 }
+// A goal's impact: the words, why, who said so, and the owner's way to give it another value (a
+// correction of the goal-impact decision that carries the impact the owner gives; it stands).
+const IMPACT_LEVELS = { 4: 'the project depends on it', 3: 'moves a number the project watches', 2: 'worth having', 1: 'housekeeping' };
+function impactBlock(g) {
+  const i = g.impact;
+  if (!i) return ['ready', 'draft'].includes(g.status) ? '<span class="muted">Not judged yet. Its questions are ordered as if it were worth having.</span>' : '';
+  const key = `imp:${i.decision}`;
+  return `<b>${esc(cap(i.words))}</b> <span class="muted">(${esc(i.level)} of 4)</span>${i.rationale ? `<div>${linkify(i.rationale)}</div>` : ''}
+    <div class="muted">${i.by === 'owner' ? 'You set it' : 'Judged by the supervisor'} ${esc(when(i.at))} · ${dlink(i.decision, 'the decision')} · <a class="linkish" href="#file?path=docs%2Fdevteam%2Fproject%2Fstrategy.md&amp;title=Strategy">the strategy</a>${i.rejudge ? ` · corrected (${esc(i.correction)}); the supervisor is judging it again` : ''}</div>
+    <button class="ghost" data-correct="${esc(key)}">${i.by === 'owner' ? 'Change it' : 'Wrong?'}</button>
+    <div class="row-inline" hidden data-correct-form="${esc(key)}"><select data-impact="${esc(key)}" aria-label="What it is">${[4, 3, 2, 1].map((n) => `<option value="${n}"${n === i.level ? ' selected' : ''}>${n}: ${esc(IMPACT_LEVELS[n])}</option>`).join('')}</select><input type="text" data-reason="${esc(key)}" placeholder="Why (the supervisor keeps it as a lesson)"><button class="ghost" data-correct-send="${esc(key)}">Send</button><span class="err" id="e-${esc(key)}"></span></div>`;
+}
 function openGoal(id) {
   drawerFor('goal', id);
   const g = (DATA.ooda.goals || []).find((x) => x.id === id);
@@ -2557,6 +2593,7 @@ function openGoal(id) {
   showDrawer(`<h2 id="drawer-title">${esc(g.title)}</h2>
     ${attrs({ id, peek: p, type: 'goal', ctx: { unplanned: g.status === 'ready' ? (r?.unplanned || []).map((u) => u.n) : [] }, computed: [
       ['State', `<span class="badge ${s.tone}">${esc(s.label)}</span>`, 'Where the goal is: defining, waiting for your approval, planning, building, measuring, met, held or let go.'],
+      ['Why it matters', impactBlock(g), 'How much the goal matters to the project, 1 to 4, judged by the supervisor against the strategy. It orders your Inbox, never the work: the goal\'s priority does that. If it is wrong, say what it is: your value stands.'],
       ['Design', design ? `<a href="${esc(fileHref({ ...design, title: design.title || 'The design' }))}">${esc(design.title || 'The design')}</a>` : '', 'The design document its features implement.'],
       ['Forecast', (g.forecast?.milestones || []).length ? `<ol>${g.forecast.milestones.map((m) => `<li>${mlink(g.id, m.n, m.title)}: ${esc(m.target)}${unitOf(g.measure?.unit)}${m.by ? ` by ${esc(m.by)}` : ''} <span class="badge ${m.status === 'met' ? 'good' : m.late ? 'high' : m.status === 'current' ? 'low' : 'medium'}">${esc(m.status === 'met' ? 'met' : m.late ? 'late' : m.status)}</span><br><span class="muted">${m.status === 'met' ? 'reached' : `${m.features.length ? `${esc(m.points_left)} points left` : `about ${esc(m.estimate_tickets)} tickets, not planned yet`}${m.eta ? ` · ETA ${esc(m.eta)}` : ''}`}</span></li>`).join('')}</ol>${g.forecast.past_horizon ? '<span class="badge high">forecast after the horizon</span>' : ''}${g.forecast.rate_points_per_day > 0 ? '' : '<div class="muted">No measured rate yet: sizes only, dates once tickets merge.</div>'}` : '', 'Each milestone: points left and an ETA at the recent rate.'],
       ['Features', feats.length ? `<ul>${feats.map((v) => `<li>${flink(v.feature)}: ${v.points_total - v.points_left} of ${v.points_total} points${v.done ? ', done' : ''}</li>`).join('')}</ul>` : '', 'The features planned for it, and how far each is.'],
@@ -3218,7 +3255,8 @@ function render(d) {
     </div>`).join('');
   for (const qid of [...ANSWERED.keys()]) if (!d.questions.some((q) => q.id === qid)) ANSWERED.delete(qid);
   d = { ...d, questions: d.questions.filter((q) => !ANSWERED.has(q.id)) };
-  $('questions').innerHTML = goalCards + (d.questions.length ? d.questions.map((q) => questionCard(q, o, reasonText)).join('') : cands.length ? '' : empty('Nothing needs you right now. Decisions and actions only you can take show here.'));
+  // questions first, in the kit's order (the first is the next best step); lessons to keep after them
+  $('questions').innerHTML = (d.questions.length ? d.questions.map((q) => questionCard(q, o, reasonText)).join('') : cands.length ? '' : empty('Nothing needs you right now. Decisions and actions only you can take show here.')) + goalCards;
   $('answered-sum').textContent = `Answered (${o.answered.length})`;
   $('answered').innerHTML = o.answered.length ? o.answered.map(answeredCard).join('') : empty('Nothing answered yet.');
 
@@ -3582,7 +3620,9 @@ document.addEventListener('click', async (ev) => {
     const id = send.dataset.correctSend;
     const reason = document.querySelector(`input[data-reason="${id}"]`).value;
     // the Decide feed's forms are keyed dec:<id>, so a call listed in both feeds has two
-    return void post('correct', { id: id.replace(/^dec:/, ''), reason }, id);
+    // a goal's impact (keyed imp:<id>) goes with the value the owner gives it
+    const level = document.querySelector(`select[data-impact="${id}"]`)?.value;
+    return void post('correct', { id: id.replace(/^(dec|imp):/, ''), reason, ...(level ? { impact: Number(level) } : {}) }, id);
   }
 });
 
