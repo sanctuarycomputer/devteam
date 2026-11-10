@@ -185,6 +185,7 @@ An artifact is a page you or a session draws to show the owner something instead
 - **The owner asks for one** ("make me a mock docs site"): `chore start artifact-<slug>`, then in that worktree `artifact new <slug> --title "…" --summary "…" [--for '["goal:<g>"]']`, draw it, `artifact check`, and tell the owner it is in the Library. Iterate on what they say; land it with `chore pr artifact-<slug>` and `merge --chore artifact-<slug>`.
 - **What it may load.** Its own folder, and libraries from cdnjs, jsdelivr and unpkg at an exact version (`three@0.160.0`). It runs sandboxed with no other network and no reach into the dashboard. Never put owner data, secrets or log contents in one: a page can send what it holds to a CDN's logs.
 - **Rules.** `artifact check` (and `check-pr`, `merge`) refuse a missing `index.html` or manifest, a symlink, a dotfile, a file over 8 MB or an artifact over 25 MB. The manifest's `title` and `summary` are one line of plain text, like a link's. Drawing an artifact is not production code. `artifacts` lists what has landed and what is being drawn where.
+- **Publishing is the owner's.** On a cloud box the owner can make a landed artifact readable by anyone at `public.<box>/<project>/<slug>/`, from the Library and the gateway's own confirm page. You can't publish one, change what is published or take it down, and an `artifact-publish` act is never yours to write (`log-check` refuses it). So never put anything in an artifact that you wouldn't want public: once it lands, it is one click from anyone.
 
 ## 10. Retros
 

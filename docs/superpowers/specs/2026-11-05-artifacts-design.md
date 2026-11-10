@@ -13,7 +13,7 @@ Artifacts show things and nothing more. They send nothing back. When a session n
 - **No bridge back.** No `postMessage` protocol, no results, no drafts. Review pages (`review` questions) stay the only HTML that answers anything, and they don't change.
 - **Not registry entries.** Artifacts are files in the repo, found by reading folders. They are not `settings.md` links and are not edited through `link add`. They borrow the registry's scope language and one-line rules.
 - **No reach into the owner's data.** An artifact loads its own files and libraries from a few public CDNs, and nothing else. The CDNs serve arbitrary code (`cdn.jsdelivr.net/gh/<any>/…`), and source matching ignores query strings, so a page *can* send what it holds to a CDN's logs. That is acceptable only because an artifact holds nothing it didn't commit to the repo: artifacts never embed owner data, secrets or log contents, and the process docs say so.
-- **No hosted sharing.** Artifacts are seen through the owner's local dashboard.
+- **No hosted sharing.** Artifacts are seen through the owner's local dashboard. (Replaced in part by `2026-11-09-public-artifacts-design.md`: on a cloud box the owner can publish a landed artifact to anyone.)
 
 ## Design
 

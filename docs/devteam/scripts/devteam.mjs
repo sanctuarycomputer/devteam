@@ -9996,6 +9996,8 @@ Decide and act (supervisor.md, constitution.md)
   link land [<chore slug>]   supervisor: copy only the links entries changed in this checkout's settings.md into .worktrees/chore-<slug> (default registry), leaving every other key as the chore has it
   artifact new <slug> --title t --summary s [--for '["goal:g"]']   draw an artifact (a page that shows an idea) in this worktree, under project/artifacts/<slug>/
   artifact check [<slug>…]        the checks merge runs, on this checkout's artifacts
+  artifact manifest <slug> [--json]   what publishing a landed artifact would put up: main's tree, each file's sha256 (the cloud gateway's confirm page reads it)
+  artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner   the owner's record that a landed artifact went public or came down (the gateway's confirm page runs these; by hand they record intent only)
   artifacts [--json]              landed artifacts, and drafts in session worktrees
   ask --question q [--kind k] [--class c] [--reasons r…] [--recommendation r] [--confidence 0-1] [--default d] [--choices '[{"label","detail","effect"}…]'] [--rule-scope s] [--goal g-… (goal-approval)] [--links '[{"title","path","ref"}|{"title","url"}|{"title","link"}…]' (link: a registry id)] [--blocks ids] [--evidence ids] [--ticket id] [--re m-…] [--note path] [--secrets '[{"name","kind":"string|file","sink"}…]' (owner-action)]
   secret post <qid> [--file NAME=path] [--json]                          owner: post a question's secrets straight to their sinks; never logged (secret sinks lists them)
