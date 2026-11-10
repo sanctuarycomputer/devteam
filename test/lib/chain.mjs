@@ -3149,6 +3149,44 @@ const step = (name, fn) => { steps.push({ name, fn }); };
       assert.equal((await act({ op: 'unpublish', slug: 'landed-tk' })).status, 200);
     } finally { srv.kill(); }
   });
+  step('public artifacts: /public-manifest says what publishing would put up, byte for byte', async () => {
+    const port = await freePort();
+    const base = `http://127.0.0.1:${port}`;
+    const srv = spawn(process.execPath, [DT, 'dashboard', '--port', String(port)], { cwd: repo, env: { ...process.env, DEVTEAM_ROLE: '' }, stdio: 'ignore' });
+    try {
+      await serverUp(`${base}/`);
+      const r = await fetch(`${base}/public-manifest/landed-mock`);
+      assert.equal(r.status, 200);
+      const m = await r.json();
+      const T = git(['rev-parse', 'origin/main:docs/devteam/project/artifacts/landed-mock']);
+      assert.deepEqual([m.public, m.project, m.slug, m.title, m.summary, m.root, m.tree], [1, 'demo', 'landed-mock', 'Landed mock', 'The card form', fs.realpathSync(repo), T]);
+      assert.deepEqual(Object.keys(m).sort(), ['files', 'project', 'public', 'root', 'slug', 'summary', 'title', 'tree']);
+      assert.deepEqual(Object.keys(m.files).sort(), ['artifact.json', 'index.html', 'style.css']);
+      for (const [rel, f] of Object.entries(m.files)) {
+        const bytes = Buffer.from(await (await fetch(`${base}/artifact/main/landed-mock/${rel}`)).arrayBuffer());
+        assert.deepEqual([f.sha256, f.size, f.mode], [crypto.createHash('sha256').update(bytes).digest('hex'), bytes.length, '100644'], rel);
+      }
+      assert.ok(fs.existsSync(path.join(repo, 'docs/devteam/run/cache/public-manifests', `${T}.json`)), 'kept by tree id');
+      assert.deepEqual(json(must(['artifact', 'manifest', 'landed-mock', '--json'])), m, 'the command says the same');
+      for (const s of ['mock-one', 'no-such', 'landed-broken', 'Bad_Slug']) assert.equal((await fetch(`${base}/public-manifest/${s}`)).status, 404, s);
+      assert.match((await (await fetch(`${base}/public-manifest/mock-one`)).json()).error, /a draft is never public/);
+      assert.equal((await fetch(`${base}/public-manifest/landed-mock`, { headers: { 'sec-fetch-site': 'cross-site' } })).status, 403);
+      assert.equal((await fetch(`${base}/public-manifest/landed-mock`, { headers: { 'sec-fetch-site': 'same-site' } })).status, 403);
+      assert.equal((await fetch(`${base}/public-manifest/landed-mock`, { headers: { 'sec-fetch-site': 'same-origin' } })).status, 200);
+      assert.equal(await statusWithHost(port, '/public-manifest/landed-mock', `rebound.example:${port}`), 403, 'its own Host only');
+      // the project's name is in every public link, so it is set, and link-shaped
+      const sf = path.join(repo, 'docs/devteam/project/settings.md');
+      const keep = fs.readFileSync(sf, 'utf8');
+      const bad = keep.replace(/"project":\s*"demo"/, '"project": "Demo Project"');
+      assert.notEqual(bad, keep);
+      fs.writeFileSync(sf, bad);
+      try {
+        const r9 = await fetch(`${base}/public-manifest/landed-mock`);
+        assert.equal(r9.status, 409);
+        assert.match((await r9.json()).error, /set "project" in settings\.md/);
+      } finally { fs.writeFileSync(sf, keep); }
+    } finally { srv.kill(); }
+  });
 
 // Forks. A fork is a copy of the fixture as it stands between two steps, made by the run in
 // kit.test.mjs; a child process (fork.mjs) runs the steps given to it there. Those steps see

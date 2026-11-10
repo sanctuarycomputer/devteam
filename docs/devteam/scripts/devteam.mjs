@@ -4568,6 +4568,24 @@ function publishRecords() {
   for (const a of logObjects('act')) if (a.created_by === 'owner' && a.class === 'artifact-publish' && typeof a.artifact === 'string') m.set(a.artifact, a);
   return m;
 }
+// What publishing <slug> would put up, for the gateway to show the owner and then check byte for
+// byte: main's tree, each file's sha256, size and mode (the gateway recomputes the tree id from the
+// bytes, and a mode is part of it). Hashes are kept in run/cache by tree id: a tree never changes,
+// so a kept one is never stale.
+function publicManifest(slug) {
+  const a = publicArtifact(slug);
+  const file = path.join(runDir, 'cache', 'public-manifests', `${a.tree}.json`);
+  let files = null;
+  try { files = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
+  if (!isObj(files)) {
+    files = Object.fromEntries(a.entries.map((e) => {
+      const buf = e.read() ?? die(`${slug}/${e.path}: git can't read it`);
+      return [e.path, { sha256: sha256(buf), size: buf.length, mode: e.mode }];
+    }));
+    try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(files)); } catch {}
+  }
+  return { public: 1, project: a.project, slug, title: a.manifest.title, summary: a.manifest.summary, root: fs.realpathSync(mainRoot), tree: a.tree, files };
+}
 // artifact new <slug> --title --summary [--for '[…]']: scaffold a page in this worktree.
 // artifact check [<slug>…]: the checks merge runs, on this checkout's artifacts.
 function cmdArtifact() {
@@ -4602,6 +4620,13 @@ function cmdArtifact() {
     if (bad) process.exit(1);
     return out(`${slugs.length} artifact${slugs.length === 1 ? '' : 's'} pass`);
   }
+  // artifact manifest <slug>: what the gateway's confirm page would show for it
+  if (sub === 'manifest') {
+    const m = publicManifest(args[0] ?? die('usage: artifact manifest <slug> [--json]'));
+    if (flags.json) return out(JSON.stringify(m));
+    const bytes = Object.values(m.files).reduce((n, f) => n + f.size, 0);
+    return out(`${m.project}/${m.slug} at tree ${m.tree.slice(0, 12)}: ${Object.keys(m.files).length} files, ${bytes} bytes; published, it is https://public.<box>/${m.project}/${m.slug}/`);
+  }
   // artifact publish|unpublish: the owner's record of what the gateway made public. The gateway's
   // confirm page runs them through the dashboard; by hand they record intent only.
   if (sub === 'publish' || sub === 'unpublish') {
@@ -4619,7 +4644,7 @@ function cmdArtifact() {
     }
     return out(`recorded: ${slugName} ${sub}ed${ownerChannel() === 'dashboard' ? '' : '. This records intent only: a page goes public, or comes down, only on the cloud gateway\'s confirm page (https://<box>/public/)'}`);
   }
-  die('usage: artifact new <slug> --title t --summary s [--for json] | artifact check [<slug>…] | artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner');
+  die('usage: artifact new <slug> --title t --summary s [--for json] | artifact check [<slug>…] | artifact manifest <slug> [--json] | artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner');
 }
 function cmdArtifacts() {
   gitReadCache = new Map();
@@ -8119,6 +8144,16 @@ async function cmdDashboard() {
     // raw path, before URL parsing folds ../ and %2e%2e into something that looks fine. Any
     // sec-fetch-site: under its sandbox the page is an opaque origin, so its own loads say cross-site.
     const rawPath = req.url.split('?')[0];
+    // What publishing an artifact would put up, for the cloud gateway's confirm page. Its loopback
+    // request sends no sec-fetch-site; a browser's must come from this page's own origin.
+    if (req.method === 'GET' && rawPath.startsWith('/public-manifest/')) {
+      const site = req.headers['sec-fetch-site'];
+      if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: 'not for another site\'s page' }));
+      const slug = rawPath.slice('/public-manifest/'.length);
+      if (!LINK_ID.test(slug)) return send(res, 404, 'application/json', JSON.stringify({ error: 'not an artifact slug' }));
+      const r = await run(['artifact', 'manifest', slug, '--json'], { timeout: 12000 });
+      return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, r.code === 2 ? 409 : 404, 'application/json', JSON.stringify({ error: r.stderr.trim().replace(/^devteam: /, '') }));
+    }
     if (req.method === 'GET' && rawPath.startsWith('/artifact/')) {
       const am = /^\/artifact\/(?:main|wt\/([^/]+))\/([^/]+)(\/.*)?$/.exec(rawPath);
       const at = am ? am[1] ?? 'main' : null;
