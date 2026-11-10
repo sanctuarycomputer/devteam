@@ -3331,6 +3331,19 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     const r = runNode(DT, args, { cwd, env: e });
     return { status: r.status, out: r.stdout.trim(), err: r.stderr.trim() };
   };
+  // runNode blocks this process, so a call that a server in this process must answer is spawned
+  const pvAsync = (args, env = {}, { cwd = repo, role = 'sup' } = {}) => new Promise((resolve) => {
+    const e = { ...process.env, ...ROLE[role], ...env };
+    for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE']) if (!(k in ROLE[role]) && !(k in env)) delete e[k];
+    if (!('DEVTEAM_PUBLIC_URL' in env)) delete e.DEVTEAM_PUBLIC_URL;
+    if (!('DEVTEAM_PREVIEWS' in env)) delete e.DEVTEAM_PREVIEWS;
+    const c = spawn(process.execPath, [DT, ...args], { cwd, env: e, stdio: ['ignore', 'pipe', 'pipe'] });
+    let o = ''; let er = '';
+    c.stdout.on('data', (b) => { o += b; });
+    c.stderr.on('data', (b) => { er += b; });
+    c.on('close', (status) => resolve({ status, out: o.trim(), err: er.trim() }));
+  });
+  const pvAsyncOk = async (...a) => { const r = await pvAsync(...a); assert.equal(r.status, 0, `preview ${a[0].join(' ')}: ${r.err || r.out}`); return r.out; };
   const pvOk = (...a) => { const r = pv(...a); assert.equal(r.status, 0, `preview ${a[0].join(' ')}: ${r.err || r.out}`); return r.out; };
   const PV_DIR = () => path.join(repo, 'docs/devteam/run/previews');
   const PV_SHAPE = /^[a-z]{3,7}-[a-z]{3,7}(?:-[1-9]\d?)?$/;
@@ -3338,6 +3351,8 @@ const step = (name, fn) => { steps.push({ name, fn }); };
   const pvRec = (name) => JSON.parse(fs.readFileSync(path.join(PV_DIR(), `${name}.json`), 'utf8'));
   const pvName = (out) => /preview (\S+) /.exec(out)[1];
   const pvClear = () => fs.rmSync(PV_DIR(), { recursive: true, force: true });
+  const previewOtherRecord = (name) => ({ v: 1, name, project: 'demo', session: 'someone-else', label: '', port: 3000, cwd: repo, at: new Date().toISOString(), expires: new Date(Date.now() + 864e5).toISOString() });
+  const writeHeld = (r) => write(path.join(PV_DIR(), `${r.name}.json`), JSON.stringify(r));
 
   step('previews: a derived name, the record, the port rules', () => {
     pvClear();
@@ -3375,6 +3390,86 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     for (let i = 0; pvFiles().length < 20; i++) pvOk(['preview', String(64000 + i), '--label', `l${i}`]);
     assert.match(pv(['preview', '65000', '--label', 'one more']).err, /at most 20 previews/);
     assert.equal(pvName(pvOk(['preview', '65000'])), name, 'the cap counts new links only: a known one is still renewed');
+    pvClear();
+  });
+
+  // a listener on a port a test chose
+  const pvListen = (port) => new Promise((resolve, reject) => { const v = net.createServer((c) => c.destroy()); v.once('error', reject); v.listen(port, '127.0.0.1', () => resolve(v)); });
+  const pvClose = (v) => new Promise((r) => v.close(r));
+  // a hub that lists what it is told, or never answers
+  const pvHub = async (instances) => {
+    const port = await freePort();
+    const srv = http.createServer((q, s) => { if (instances === 'hang') return; s.setHeader('content-type', 'application/json'); s.end(JSON.stringify({ hub: 1, instances })); });
+    await new Promise((r) => srv.listen(port, '127.0.0.1', r));
+    return { port, close: () => { srv.closeAllConnections?.(); return new Promise((r) => srv.close(r)); } };
+  };
+
+  step("previews: the link for here, list, url, stop, a clash with another instance, and a box that doesn't serve previews yet", async () => {
+    pvClear();
+    const P = await freePort();
+    const laptop = pvOk(['preview', String(P)]);
+    const name = pvName(laptop);
+    assert.match(laptop, new RegExp(`preview ${name} is at http://127\\.0\\.0\\.1:${P} \\(open it on this machine; there is no gateway here\\)`));
+    assert.match(laptop, new RegExp(`nothing answers on port ${P}`, 'i'));
+    assert.match(laptop, new RegExp(`preview stop ${name}`));
+    const old = pvOk(['preview', String(P)], { DEVTEAM_PUBLIC_URL: 'https://box.example.com' });
+    assert.match(old, new RegExp(`is at http://127\\.0\\.0\\.1:${P}`), "an image that predates the gateway's release gets the laptop line");
+    assert.match(old, /this box's gateway doesn't serve previews yet: it needs the release that does/);
+    assert.doesNotMatch(old, /box\.example\.com/, 'and never a link that would answer 421');
+    const BOX = { DEVTEAM_PUBLIC_URL: 'https://box.example.com', DEVTEAM_PREVIEWS: '1' };
+    assert.match(pvOk(['preview', String(P)], BOX), new RegExp(`preview ${name} is live at https://${name}\\.box\\.example\\.com \\(nothing answers on port ${P} yet; the link works once it does\\)`));
+    const lst = await pvListen(P);
+    const live = pvOk(['preview', String(P)], BOX);
+    assert.match(live, new RegExp(`preview ${name} is live at https://${name}\\.box\\.example\\.com \\(port ${P} answers\\)`));
+    assert.match(live, /Only the signed-in owner can open it/);
+    assert.equal(pvOk(['preview', 'url'], BOX), `https://${name}.box.example.com`);
+    assert.equal(pvOk(['preview', 'url', name]), `http://127.0.0.1:${P}`);
+    let rows = JSON.parse(pvOk(['preview', 'list', '--json']));
+    assert.equal(rows.length, 1);
+    assert.deepEqual([rows[0].name, rows[0].port, rows[0].up], [name, P, true], 'list probes for itself: a command has no tick to ask');
+    assert.match(pvOk(['preview', 'list']), new RegExp(`${name}.*${P}.*answers`));
+    await pvClose(lst);
+    assert.equal(JSON.parse(pvOk(['preview', 'list', '--json']))[0].up, false);
+    assert.match(pv(['preview', 'stop', 'no-such']).err, /no preview/);
+    assert.match(pv(['preview', 'url', 'no-such']).err, /no preview/);
+    pvOk(['preview', 'stop', name]);
+    assert.deepEqual(JSON.parse(pvOk(['preview', 'list', '--json'])), []);
+    assert.equal(pvFiles().length, 0);
+    assert.match(pvOk(['preview', 'list']), /no previews/);
+    // --all is the asker's own previews
+    pvOk(['preview', String(P), '--label', 'a']);
+    pvOk(['preview', String(P), '--label', 'b']);
+    pvOk(['preview', String(P), '--label', 'c'], {}, { role: 'worker' });
+    pvOk(['preview', 'stop', '--all']);
+    assert.equal(pvFiles().length, 1, 'stop --all leaves another session\'s preview');
+    pvClear();
+    // the kit picks a clear name against the hub's list, and keeps it
+    const other = (names) => [{ devteam: 1, root: '/elsewhere', port: 4999, previews: names.map((n) => ({ name: n, port: 3000 })) }];
+    let hub = await pvHub(other([name]));
+    assert.equal(pvName(await pvAsyncOk(['preview', String(P)], { DEVTEAM_HUB_PORT: String(hub.port) })), `${name}-2`, 'another instance already lists the name');
+    assert.equal(pvRec(`${name}-2`).name, `${name}-2`);
+    await hub.close();
+    assert.equal(pvName(pvOk(['preview', String(P)])), `${name}-2`, 'the suffix comes from this instance\'s own record, never derived again');
+    pvClear();
+    hub = await pvHub(other([name, `${name}-2`]));
+    assert.equal(pvName(await pvAsyncOk(['preview', String(P)], { DEVTEAM_HUB_PORT: String(hub.port) })), `${name}-3`);
+    await hub.close();
+    pvClear();
+    hub = await pvHub([{ devteam: 1, root: fs.realpathSync(repo), port: 4999, previews: [{ name, port: 3000 }] }]);
+    assert.equal(pvName(await pvAsyncOk(['preview', String(P)], { DEVTEAM_HUB_PORT: String(hub.port) })), name, 'this instance listing the name is not a clash');
+    await hub.close();
+    pvClear();
+    hub = await pvHub('hang');
+    const t0 = Date.now();
+    assert.equal(pvName(await pvAsyncOk(['preview', String(P)], { DEVTEAM_HUB_PORT: String(hub.port) })), name, 'a hub that does not answer is skipped');
+    assert.ok(Date.now() - t0 < 10000, 'within its budget');
+    await hub.close();
+    // a record of the same name for someone else, on this instance: the later one gets a number
+    pvClear();
+    const held = previewOtherRecord(name);
+    writeHeld(held);
+    const clash = pvName(pvOk(['preview', String(P)]));
+    assert.equal(clash, `${name}-2`);
     pvClear();
   });
 

@@ -4537,28 +4537,105 @@ function previewPort(v) {
   if (ok !== true) die(`preview: ${v}: ${ok}`);
   return port;
 }
-// The name this (project, session, label) goes by here, and the record it already has.
-function previewClaim(session, label) {
+// What other instances on this machine list, from the hub (one agent-written list among others,
+// used only to pick a clear name). Two seconds at most: no hub, or a slow one, means no clash.
+function previewNamesElsewhere() {
+  return new Promise((resolve) => {
+    const none = new Set();
+    let root;
+    try { root = fs.realpathSync(mainRoot); } catch { return resolve(none); }
+    const req = http.get({ host: '127.0.0.1', port: HUB_PORT, path: '/instances.json', timeout: 2000, headers: { host: `127.0.0.1:${HUB_PORT}`, 'sec-fetch-site': 'same-origin' } }, (res) => {
+      let b = '';
+      res.on('data', (c) => { b += c; if (b.length > 1024 * 1024) req.destroy(); });
+      res.on('end', () => {
+        try {
+          const names = new Set();
+          for (const i of JSON.parse(b)?.instances ?? []) if (i?.root !== root && Array.isArray(i?.previews)) for (const p of i.previews) if (typeof p?.name === 'string' && p.name.length <= 63) names.add(p.name);
+          resolve(names);
+        } catch { resolve(none); }
+      });
+    });
+    const budget = setTimeout(() => { req.destroy(); resolve(none); }, 2000);
+    req.on('timeout', () => { req.destroy(); resolve(none); });
+    req.on('error', () => resolve(none));
+    req.on('close', () => clearTimeout(budget));
+  });
+}
+// The name this (project, session, label) goes by here, and the record it already has. A clash
+// with another instance, or with another session's record here, takes the lowest free number; the
+// suffix is the one thing about a name that is remembered, and only in the record that needs it.
+async function previewClaim(session, label) {
   const project = previewProject();
   const recs = readPreviews();
   const base = previewName(project, session, label);
   const mine = recs.find((r) => r.project === project && r.session === session && r.label === label && (r.name === base || r.name.startsWith(`${base}-`)));
-  if (mine) return { name: mine.name, had: mine, recs };
+  if (mine) return { name: mine.name, had: mine };
   if (recs.length >= PREVIEW_MAX) die(`preview: at most ${PREVIEW_MAX} previews on an instance; stop one first (devteam.mjs preview list)`);
-  return { name: base, had: null, recs };
+  const taken = new Set([...recs.map((r) => r.name), ...await previewNamesElsewhere()]);
+  if (!taken.has(base)) return { name: base, had: null };
+  for (let n = 2; n < 100; n++) if (!taken.has(`${base}-${n}`)) return { name: `${base}-${n}`, had: null };
+  die(`preview: ${base} and every numbered name after it are taken on this box`);
 }
-function cmdPreview() {
-  const [sub] = positional;
-  if (/^\d|^[a-z]+$/i.test(sub ?? '') && !['list', 'url', 'stop', 'start'].includes(sub)) {
+const probePort = async (port) => (await answers(port, '127.0.0.1')) || (await answers(port, '::1'));
+// The box's address when this machine has one, and whether its gateway serves previews: only the
+// release that does sets DEVTEAM_PREVIEWS, so the kit never prints a link that would answer 421.
+function previewBox() {
+  try { return process.env.DEVTEAM_PUBLIC_URL ? new URL(process.env.DEVTEAM_PUBLIC_URL) : null; } catch { return null; }
+}
+const previewServed = () => !!previewBox() && process.env.DEVTEAM_PREVIEWS === '1';
+const previewLink = (r) => { const b = previewBox(); return previewServed() ? `${b.protocol}//${r.name}.${b.host}` : `http://127.0.0.1:${r.port}`; };
+function previewSay(r, up) {
+  if (previewServed()) {
+    out(`preview ${r.name} is live at ${previewLink(r)} (${up ? `port ${r.port} answers` : `nothing answers on port ${r.port} yet; the link works once it does`})`);
+    out('Only the signed-in owner can open it. Name it in your review request; it is in the owner\'s Library too.');
+  } else {
+    out(`preview ${r.name} is at ${previewLink(r)} (open it on this machine; there is no gateway here)`);
+    if (previewBox()) out('this box\'s gateway doesn\'t serve previews yet: it needs the release that does');
+    if (!up) out(`Nothing answers on port ${r.port} yet; the link works once it does.`);
+    out('Name it in your review request; it is in the owner\'s Library too.');
+  }
+  out(`Stop it: devteam.mjs preview stop ${r.name}`);
+}
+const previewNamed = (name) => readPreviews().find((r) => r.name === name) ?? die(`no preview "${name}" on this instance (devteam.mjs preview list)`);
+const previewFresh = (rec) => { const at = nowIso(); return { ...rec, at, expires: new Date(Date.parse(at) + PREVIEW_TTL).toISOString() }; };
+async function cmdPreview() {
+  const [sub, arg] = positional;
+  if (sub === 'list') {
+    const recs = readPreviews();
+    const rows = await Promise.all(recs.map(async ({ mtimeMs, ...r }) => ({ ...r, up: await probePort(r.port) })));
+    if (flags.json) return json(rows);
+    if (!rows.length) return out('no previews');
+    for (const r of rows) out(`${r.name}  port ${r.port}  ${r.up ? 'answers' : 'not answering'}  ${r.session}${r.label ? ` (${r.label})` : ''}  ${previewLink(r)}`);
+    return undefined;
+  }
+  if (sub === 'url') {
+    if (arg) return out(previewLink(previewNamed(arg)));
+    const session = logWriter();
+    const mine = readPreviews().filter((r) => r.session === session);
+    if (mine.length !== 1) die(mine.length ? `preview url: you have ${mine.length} previews; name one (${mine.map((r) => r.name).join(', ')})` : 'preview url: you have no preview here (devteam.mjs preview <port>)');
+    return out(previewLink(mine[0]));
+  }
+  if (sub === 'stop') {
+    if (flags.all) {
+      const session = logWriter();
+      const mine = readPreviews().filter((r) => r.session === session);
+      for (const r of mine) removePreview(r.name);
+      return out(`stopped ${mine.length} preview${mine.length === 1 ? '' : 's'}`);
+    }
+    const r = previewNamed(arg ?? die('usage: preview stop <name> | --all'));
+    removePreview(r.name);
+    return out(`preview ${r.name} stopped`);
+  }
+  if (sub !== undefined && sub !== 'start') {
     const port = previewPort(sub);
     const session = logWriter();
     const label = previewLabel();
-    const { name } = previewClaim(session, label);
-    const at = nowIso();
-    writePreview({ v: 1, name, project: previewProject(), session, label, port, cwd: process.cwd(), at, expires: new Date(Date.parse(at) + PREVIEW_TTL).toISOString() });
-    return out(`preview ${name} on port ${port}`);
+    const { name, had } = await previewClaim(session, label);
+    const r = previewFresh({ v: 1, name, project: previewProject(), session, label, port, cwd: process.cwd() });
+    writePreview(r);
+    return previewSay(r, await probePort(port));
   }
-  die('usage: preview <port> [--label "<one line>"]');
+  die('usage: preview <port> [--label "<one line>"] | preview list [--json] | preview url [<name>] | preview stop <name> | --all');
 }
 
 // ===== artifacts: pages a session draws to show an idea (a mock, a flow, a model) =====
