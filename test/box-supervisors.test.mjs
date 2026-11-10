@@ -369,6 +369,24 @@ test('the restore list ages by entry, and a rewrite does not make it young', () 
   fs.rmSync(up, { force: true });
 });
 
+test('status says the box\'s own CPU and memory caps, not the host\'s', () => {
+  // a 2-CPU, 8 GiB container: 6 GiB charged, 2 GiB of it page cache the kernel can drop
+  const cg = fs.mkdtempSync(path.join(tmp, 'cgroup-'));
+  const G = 1024 ** 3;
+  fs.writeFileSync(path.join(cg, 'cpu.max'), '200000 100000\n');
+  fs.writeFileSync(path.join(cg, 'cpu.pressure'), 'some avg10=20.00 avg60=15.00 avg300=10.00 total=1\nfull avg10=14.00 avg60=12.60 avg300=9.00 total=1\n');
+  fs.writeFileSync(path.join(cg, 'memory.max'), `${8 * G}\n`);
+  fs.writeFileSync(path.join(cg, 'memory.current'), `${6 * G}\n`);
+  fs.writeFileSync(path.join(cg, 'memory.stat'), `anon ${3 * G}\nfile ${2 * G}\n`);
+  const r = run(['--status'], { DEVTEAM_CGROUP: cg });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^box: disk .*; memory 4\.0 GB in use of 8\.0 GB; cpus 2 \(all waiting 13% of the last minute\); load /m);
+  // no caps (a laptop, or a cgroup that says max): the machine's own numbers
+  fs.writeFileSync(path.join(cg, 'cpu.max'), 'max 100000\n');
+  fs.writeFileSync(path.join(cg, 'memory.max'), 'max\n');
+  assert.match(run(['--status'], { DEVTEAM_CGROUP: cg }).stdout, /^box: disk .*; memory [\d.]+ GB free of [\d.]+ GB; cpus \d+ /m);
+});
+
 test('no tmux session: it refuses rather than start one from inside an agent', () => {
   const noTmux = path.join(tmp, 'bin2');
   fs.mkdirSync(noTmux);
