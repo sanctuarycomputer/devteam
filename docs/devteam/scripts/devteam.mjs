@@ -153,6 +153,9 @@ function sh(cmd, args, opts = {}) {
 // (-c), so a window is ours when it started under this checkout's .worktrees/, whatever its name;
 // another project's window named like one of our tickets never counts.
 function ourWindows(session) {
+  // list-panes -s answers for another session when this one doesn't exist, so a project with no
+  // legacy `devteam` session (a new box) would find its own windows there and take that name.
+  if (sh('tmux', ['has-session', '-t', `=${session}`]) === null) return [];
   // Compared resolved: tmux keeps the path as it was given (on macOS /var is /private/var).
   const roots = [`${path.join(fs.realpathSync(mainRoot), '.worktrees')}${path.sep}`];
   // Every pane, not only the active one: a worker window the owner split keeps counting.
@@ -318,11 +321,12 @@ const SETTINGS_DEFAULTS = {
   // How a release reaches production: 'tag' (deploys from the tag), { branch: 'production' }, or
   // 'merge' (production deploys whenever main changes, e.g. Heroku's automatic deploys; also
   // { on: 'merge', paths: ['app/**'] } when only some paths deploy). With 'merge', a merge that
-  // changes what deploys is a release (release-production).
+  // changes what deploys is a release (release-production). Root build manifests (Procfile,
+  // package.json, Dockerfile, …) deploy even outside paths (deployingFiles).
   release: 'tag',
   // Production monitors (process/supervisor.md, Monitoring): { name: { kind: 'http', url, expect:
-  // { status, contains }, slo: { uptime, p95_ms }, every_minutes, down_after, timeout_s } }; owner
-  // settings, class monitor-change. monitor_defaults overrides the built-in defaults for all of them.
+  // { status, contains }, slo: { uptime, p95_ms }, every_minutes, down_after, timeout_s } }; the
+  // supervisor's own, like caps and timings. monitor_defaults overrides the built-in defaults for all of them.
   monitors: {},
   monitor_defaults: {},
   // Commands a stdin: secret sink may run (prefixes, e.g. "gh secret set"); they run as the owner.
@@ -346,6 +350,11 @@ const SETTINGS_DEFAULTS = {
   dashboard_port: null,
   upstream_repo: KIT_UPSTREAM,
   upstream_base: null,
+  // How a release reaches this project: "adopt" merges a chore-devteam-sync-<tag> PR that copies the
+  // kit verbatim from that tag without asking the owner (init writes it for every new project);
+  // "ask" asks the owner per release, unless they gave a standing rule scoped chore:devteam-sync.
+  // The default is "ask" so a project adopted before this setting keeps asking. The owner's.
+  upstream_sync: 'ask',
   upstream_check_hours: 24,
   retro_every_days: 7,
   research_every_days: 7,
@@ -354,16 +363,15 @@ const SETTINGS_DEFAULTS = {
 // Settings that are the owner's to change (constitution.md, owner_only): a PR of any kind that
 // changes one merges only with --approved naming an answered question of that class. Gate
 // commands and what every gate checkout is seeded with decide what "passes"; the agent command
-// and deny rules decide what workers may do; upstream_repo is what a standing sync approval trusts;
+// and deny rules decide what workers may do; upstream_repo is what a standing sync approval trusts,
+// upstream_sync whether syncs need the owner at all;
 // release is how a tag reaches production.
 const OWNER_SETTINGS = {
   gates: 'gate-change', worktree_setup: 'gate-change', worktree_files: 'gate-change',
   autonomy_ceilings: 'governance-edit', agent_command: 'governance-edit', resume_command: 'governance-edit', worker_denied_commands: 'governance-edit',
-  forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', upstream_repo: 'governance-edit',
-  release: 'governance-edit', secret_commands: 'governance-edit', monitors: 'monitor-change', monitor_defaults: 'monitor-change', monitor_scrub: 'monitor-change', incident_slots: 'governance-edit', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit',
+  forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', upstream_repo: 'governance-edit', upstream_sync: 'governance-edit',
+  release: 'governance-edit', secret_commands: 'governance-edit', incident_slots: 'governance-edit', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit',
 };
-// The classes whose owner answer approves a chore that changes the kit (files outside project/).
-const KIT_CLASSES = ['governance-edit', 'process-edit', 'gate-change'];
 const canonical = (v) => (Array.isArray(v) ? `[${v.map(canonical).join(',')}]` : v && typeof v === 'object' ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(',')}}` : JSON.stringify(v));
 function settingsAt(ref, { orNull = false } = {}) {
   const text = git(['show', `${ref}:${projectRel}/settings.md`]);
@@ -377,37 +385,7 @@ function settingsAt(ref, { orNull = false } = {}) {
 function ownerSettingsChanged(base, head) {
   const a = settingsAt(base), b = settingsAt(head);
   if (!a || !b) return null;
-  const whole = Object.entries(OWNER_SETTINGS).filter(([k]) => !MONITOR_SETTING_KEYS.includes(k) && canonical(a[k]) !== canonical(b[k])).map(([key, cls]) => ({ key, cls }));
-  // a probe's file runs with production credentials: changing one is the owner's, like the kit
-  const probes = (changedFiles(base, head) ?? []).filter((f) => f.startsWith(`${projectRel}/monitors/`)).map((key) => ({ key, cls: 'governance-edit' }));
-  return [...whole, ...monitorOwnerChanges(a, b), ...probes, ...linkOwnerChanges(a.links, b.links)];
-}
-// Monitors are monitor-change (a ladder class), except what makes one run code: a probe or stream's
-// kind, file, credentials and the CLIs it uses. Turning one on or changing those is governance-edit
-// (owner_only, never from chat), per monitor; the rest (URL checks, thresholds) stays monitor-change.
-const MONITOR_SETTING_KEYS = ['monitors', 'monitor_defaults'];
-const MONITOR_CODE = ['kind', 'probe', 'credentials', 'uses'];
-function monitorOwnerChanges(a, b) {
-  const defs = (s) => (isObj(s.monitor_defaults) ? s.monitor_defaults : {});
-  const mons = (s) => (isObj(s.monitors) ? s.monitors : {});
-  const code = (s, n) => {
-    const m = mons(s)[n];
-    if (!isObj(m)) return null;
-    const kind = m.kind ?? defs(s).kind ?? 'http';
-    return kind === 'http' ? { kind } : Object.fromEntries(MONITOR_CODE.map((k) => [k, m[k] ?? defs(s)[k] ?? null]));
-  };
-  const runsCode = (c) => !!c && c.kind !== 'http';
-  const out = [];
-  for (const n of new Set([...Object.keys(mons(a)), ...Object.keys(mons(b))])) {
-    const [ca, cb] = [code(a, n), code(b, n)];
-    if ((runsCode(ca) || runsCode(cb)) && canonical(ca) !== canonical(cb)) out.push({ key: `monitors.${n}`, cls: 'governance-edit' });
-  }
-  // everything else about monitors, code fields aside
-  const strip = (o) => (isObj(o) ? Object.fromEntries(Object.entries(o).filter(([k]) => !MONITOR_CODE.includes(k))) : o);
-  const rest = (s) => ({ monitors: isObj(s.monitors) ? Object.fromEntries(Object.entries(s.monitors).map(([n, m]) => [n, strip(m)])) : s.monitors, monitor_defaults: strip(s.monitor_defaults) });
-  const [ra, rb] = [rest(a), rest(b)];
-  for (const k of MONITOR_SETTING_KEYS) if (canonical(ra[k]) !== canonical(rb[k])) out.push({ key: k, cls: OWNER_SETTINGS[k] });
-  return out;
+  return [...Object.entries(OWNER_SETTINGS).filter(([k]) => canonical(a[k]) !== canonical(b[k])).map(([key, cls]) => ({ key, cls })), ...linkOwnerChanges(a.links, b.links)];
 }
 // A link is classified by both sides: an owner's kind (LINK_KINDS[k].ownedByOwner: repo) on
 // either side makes every change to it the owner's; an add, a removal or a kind flip is
@@ -1109,7 +1087,7 @@ const supervisorOnly = (what) => {
 const supervisorPaneFile = () => path.join(runDir, 'supervisor-pane');
 function rememberSupervisorPane() {
   const pane = process.env.TMUX_PANE;
-  if (!pane || !process.env.TMUX) return;
+  if (!pane || !process.env.TMUX || (process.env.DEVTEAM_ROLE && process.env.DEVTEAM_ROLE !== 'supervisor')) return;
   if (readText(supervisorPaneFile()) === pane) return;
   fs.mkdirSync(runDir, { recursive: true });
   fs.writeFileSync(supervisorPaneFile(), pane);
@@ -1125,7 +1103,8 @@ function withLock(file, fn) {
     } catch (e) {
       if (e.code !== 'EEXIST') throw e;
       const age = Date.now() - (fs.statSync(lock, { throwIfNoEntry: false })?.mtimeMs ?? Date.now());
-      if (age > 10000) {
+      // either way: a lock dated in the future (the clock moved back) must not hold forever
+      if (Math.abs(age) > 10000) {
         fs.rmSync(lock, { recursive: true, force: true });
         continue;
       }
@@ -1307,6 +1286,9 @@ const logObjects = (type) => [...readLog().objects.values()].filter((o) => o.typ
 const upkeepGoal = () => [...readLog().objects.values()].find((o) => o.type === 'goal' && o.kind === 'upkeep') ?? null;
 const logGet = (id) => readLog().objects.get(id) ?? null;
 const byTime = (a, b) => a.created_at.localeCompare(b.created_at);
+// A message is handled when a reply cites it (--re), or when the supervisor routed it to the owner
+// as a question that cites it (ask --re): then it waits on the owner, which the question shows.
+const handledMessages = () => new Set([...logObjects('message'), ...logObjects('question')].map((x) => x.re).filter(Boolean));
 
 // What the owner saw: the question with every field it was asked with (later lines may only add
 // the supervisor's status and reason, and the owner's own fields). The owner's answer records this
@@ -1371,6 +1353,18 @@ function artifactLinkNow(l) {
   const fp = src ? fingerprint(src.entries) : landed ? fingerprint(landed.entries) : null;
   const href = at === 'main' ? `#artifact/main/${l.artifact}` : at ? `#artifact/wt/${at}/${l.artifact}` : null;
   return { ...l, href, changed: !!at && !!l.sha256 && fp !== l.sha256, gone: !at };
+}
+// Why an answer to q can't bind to the artifacts it links (null when it can): a page that changed
+// since it was asked, or that is no longer there, is not what the owner was asked about, so the
+// owner's answer would approve something they didn't see. Checked when the owner answers and again
+// when an answer is used to approve something.
+function artifactLinksMoved(v) {
+  const now = (v.links ?? []).filter((l) => isObj(l) && l.artifact !== undefined && l.sha256).map(artifactLinkNow);
+  const changed = now.filter((l) => l.changed).map((l) => l.artifact);
+  const gone = now.filter((l) => l.gone).map((l) => l.artifact);
+  if (changed.length) return `${v.id} links the artifact ${changed.join(', ')}, which changed since it was asked; ask again about the page as it is now`;
+  if (gone.length) return `${v.id} links the artifact ${gone.join(', ')}, which is no longer available; ask again`;
+  return null;
 }
 const questions = () => logObjects('question').map((q) => { const v = questionView(q); return { ...v, links: resolveQuestionLinks(v.links, v.status === 'open'), goal_hold: questionHold(q) }; });
 
@@ -1518,14 +1512,6 @@ const LOG_BRANCH = 'chore-log';
 
 // Mirror run/log into project/log on branch chore-log, in its own worktree, and open or update the
 // log-only PR. Run it every tick (it pushes); merge it daily with `merge --chore log`.
-function logPrOpen(wt, main) {
-  if (loadSettings().forge !== 'git') {
-    const open = repo('home').gh(['pr', 'list', '--head', LOG_BRANCH, '--state', 'open', '--json', 'number', '--jq', 'length'], { cwd: wt });
-    if (open !== null) return Number(open) > 0;
-  }
-  // forge git (merge lands a --no-ff merge) or no gh: open means not yet on main
-  return git(['merge-base', '--is-ancestor', `origin/${LOG_BRANCH}`, resolveCommit(`origin/${main}`) ? `origin/${main}` : main], wt) === null;
-}
 function cmdLogSync() {
   supervisorOnly('log-sync');
   if (!commonDir || !projectInRepo) die('log-sync needs a git checkout with the project folder inside it');
@@ -1534,14 +1520,15 @@ function cmdLogSync() {
   const files = fs.existsSync(live) ? fs.readdirSync(live).filter((f) => f.endsWith('.jsonl') && !isPlanFile(f)).sort() : [];
   if (!files.length) return out('nothing in run/log to sync');
   const wt = choreWorktree('log', { reset: true });
-  // A sync whose PR is still open is extended, not rebuilt, so every push fast-forwards: forges
-  // that refuse non-fast-forward pushes (branch rulesets, protected branches) accept it. The
-  // extended branch takes main in by a merge (still a fast-forward for the branch), so its PR is
-  // never behind. Whether the PR is open comes from the forge: after a squash or rebase merge the
-  // branch is never an ancestor of main, and a stale origin/chore-log outlives a deleted branch.
+  // An existing chore-log is extended, never rebuilt, so every push fast-forwards: forges that
+  // refuse non-fast-forward pushes or branch deletion (branch rulesets, protected branches) accept
+  // it, whether its PR is still open or was squash-merged and the branch kept. The extended branch
+  // takes main in by a merge (still a fast-forward for the branch), so its PR is never behind and
+  // carries only lines main doesn't have. A branch deleted on the forge leaves a stale
+  // origin/chore-log, dropped here, and the sync starts from main.
   const main = loadSettings().main_branch;
   if (!flags['dry-run'] && git(['fetch', '--quiet', 'origin', `+refs/heads/${LOG_BRANCH}:refs/remotes/origin/${LOG_BRANCH}`], wt) === null) git(['update-ref', '-d', `refs/remotes/origin/${LOG_BRANCH}`], wt);
-  if (resolveCommit(`origin/${LOG_BRANCH}`) && logPrOpen(wt, main)) {
+  if (resolveCommit(`origin/${LOG_BRANCH}`)) {
     gitOrDie(['checkout', '--quiet', '-B', LOG_BRANCH, `origin/${LOG_BRANCH}`], wt);
     const base = resolveCommit(`origin/${main}`) ? `origin/${main}` : main;
     if (git(['merge', '--quiet', '--no-edit', '-m', `chore-log: merge ${main}`, base], wt) === null) {
@@ -1601,6 +1588,40 @@ function questionRewrites() {
   for (const q of logObjects('question')) if (questionView(q).rewritten) errors.push(`${q.id}: the question changed after the owner answered it, so that answer no longer counts and it is open again`);
   for (const i of readLog().ignored) if (i.line.type === 'question' && i.why === 'duplicate id') warnings.push(`${i.line.id}: a second question line with this id (${i.line.__file}:${i.line.__line}); a question is asked once`);
   return { errors, warnings };
+}
+// Fill a finding's Disposition cell in a review record, keeping the row the header's width: the
+// author's way to answer a finding without hand-editing the table (a hand-added cell makes a row a
+// reviewer reads as malformed). Only a cell that holds no disposition yet can be filled, as
+// fillInOnly allows, so a filled record still holds the verdicts after it.
+function cmdDispose() {
+  const [id, file, fid, ...rest] = positional;
+  const text = rest.join(' ').trim();
+  if (!id || !file || !FINDING_ID.test(fid ?? '') || !text) die('usage: dispose <ticket> <record.md> <finding id, e.g. F1, R2 or F4-1> "fixed | wont-fix <reason> | wrong <reason>"');
+  if (!disposed(text)) die(`"${text}" isn't a disposition: start it with fixed, wont-fix <reason> or wrong <reason>`);
+  if (/[|\n]/.test(text)) die('a disposition is one line with no "|"');
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(id) || !/^[a-z0-9][a-z0-9-]*\.md$/.test(file)) die('dispose <ticket> <record.md>: a ticket id and a record file name');
+  const rel = path.join(projectRel, 'tickets', id, 'reviews', file);
+  const abs = path.join(repoRoot, rel);
+  const before = readText(abs);
+  if (before === null) die(`no review record ${rel} in this checkout`);
+  const lines = before.split('\n');
+  let disp = -1, width = 0, done = false;
+  for (let k = 0; k < lines.length; k++) {
+    if (!lines[k].trim().startsWith('|')) continue;
+    const cells = tableCells(lines[k]);
+    const lower = cells.map((c) => c.toLowerCase());
+    if (lower.includes('disposition')) { disp = lower.indexOf('disposition'); width = cells.length; continue; }
+    if (cells[0] !== fid || disp < 0) continue;
+    const cur = cells.length > width ? (cells.slice(disp).find((c) => c) ?? '') : (cells[disp] ?? '');
+    if (disposed(cur)) die(`${file} ${fid} already has a disposition ("${cur}"); a disposition given doesn't change`);
+    const row = Array.from({ length: width }, (_, j) => (j === disp ? text : (cells[j] ?? '')));
+    lines[k] = `| ${row.map((c) => c.replace(/\|/g, '\\|')).join(' | ')} |`;
+    done = true;
+    break;
+  }
+  if (!done) die(`${file} has no finding ${fid} under a table with a Disposition column`);
+  fs.writeFileSync(abs, lines.join('\n'));
+  out(`${rel} ${fid}: ${text}`);
 }
 function cmdLogCheck() {
   const names = new Set();
@@ -2066,11 +2087,12 @@ const activeWorker = (id) => { const w = workerState(id); return !!w && w.phase 
 // What a worker's pane is stuck on, if anything: a question the agent CLI put up (a permission or
 // trust prompt, a y/n) or a usage-limit banner. The log can't show these (the worker is frozen
 // mid-phase, so it isn't stale yet); the pane can. Only the bottom of the visible pane is read and
-// nothing is typed: clearing it is the supervisor's call (supervisor.md §11). Once per process.
+// nothing is typed here: clearing it is the supervisor's call (supervisor.md §11), and accounts-tick's
+// for a limit stop. Once per process.
 const PANE_WAITS = [
   // a banner says the limit was reached or when it resets; "rate limit" on its own is too common in
   // code and prose the pane may be showing (see PANE_CODE)
-  ['limit', /\b(usage|rate|session|weekly|daily|hourly|\d+-hour) limit (reached|hit|exceeded)\b|\bhit (your|the) (usage |rate )?limit\b|\blimit (will )?resets?\b|\bresets? (at|in) \d|^approaching (your )?usage limit/i],
+  ['limit', /\b(usage|rate|session|weekly|daily|hourly|\d+-hour) limit (reached|hit|exceeded)\b|^(?:[⎿■✖!]\s*)?you(?:['’]ve| have) hit your (\w+ )*limit\b|\bresets? (at|in) \d|^approaching (your )?usage limit/i],
   ['prompt', /Do you want to (proceed|make this edit|create|allow|run)|Do you trust the files|\[y\/n\]|\(y\/n\)|Press Enter to continue|❯\s*1\.\s*Yes/i],
 ];
 // A pane line that is content the agent is showing, not the agent's own UI: numbered source or diff
@@ -2118,7 +2140,7 @@ function paneWaitingIn(window) {
 // Enter once and log it. The text is never retyped; the record is claimed (deleted) before the key,
 // so a delivery gets at most one Enter however many passes or processes look.
 const LOST_ENTER_SECONDS = 30;
-const PANE_BUSY = /esc to (interrupt|cancel)|ctrl\+c to (interrupt|cancel)|press esc to stop/i;
+const PANE_BUSY = /esc to interrupt|(?<!Enter to confirm · )esc to cancel|ctrl\+c to (interrupt|cancel)|press esc to stop/i;
 const sentFile = (key) => path.join(runDir, 'sent', `${encodeURIComponent(key)}.json`);
 // Agent-agnostic: no prompt glyphs. Whitespace (wrapping, padding) and box-drawing borders drop out.
 const squash = (t) => t.replace(/[\s\u2500-\u257f]+/g, '');
@@ -2137,7 +2159,7 @@ function resendLostEnter(key, target, lines) {
   const bottom = lines.slice(-8);
   const claim = () => { try { fs.unlinkSync(file); return true; } catch { return false; } };
   if (!squash(bottom.join('')).includes(tail)) return void claim(); // submitted: nothing left to press
-  if (bottom.some((l) => PANE_BUSY.test(l))) return;
+  if (bottom.some((l) => PANE_BUSY.test(l) || /Enter to confirm/i.test(l))) return; // a menu takes that Enter as its answer
   if (!claim() || !tmux(['send-keys', '-t', target, 'Enter'])) return;
   const hash = crypto.createHash('sha1').update(rec.text).digest('hex').slice(0, 12);
   appendLog({ type: 'observation', source: 'pane', kind: 'resent-enter', subject: key.slice(key.indexOf(':') + 1), detail: `pressed Enter once: text typed ${Math.round(age)}s ago was still unsubmitted in an idle pane ("${rec.text.slice(0, 60)}${rec.text.length > 60 ? '…' : ''}", sha1 ${hash})`, detector: 'pane', source_key: `resent-enter ${key} ${hash} ${rec.at}`, measure: { value: Math.round(age), unit: 's' } });
@@ -2158,6 +2180,11 @@ function plannersNow() {
     const by = `plan-${feature}`;
     // landed once its plan file is on main (a fresh planner's branch sits at main's tip, uncommitted)
     if (main && git(['cat-file', '-e', `${main}:${projectRel}/log/${by}.jsonl`]) !== null) return null;
+    // or once its branch came into main by a merge (its tip in main, off main's own first-parent
+    // line): a design-change planner that wrote into another plan's file and merged through it.
+    // A fresh planner's branch sits on a first-parent commit of main, so it still shows.
+    const tip = git(['rev-parse', b]);
+    if (main && tip && git(['merge-base', '--is-ancestor', tip, main]) !== null && !mainLog().some((c) => c.sha === tip)) return null;
     const wt = path.join(mainRoot, '.worktrees', by);
     const planFile = path.join(wt, projectRel, 'log', `${by}.jsonl`);
     const graph = readText(planFile) ?? git(['show', `${b}:${projectRel}/log/${by}.jsonl`]) ?? '';
@@ -2170,7 +2197,7 @@ function plannersNow() {
     const last = stamps.filter(Boolean).map((x) => new Date(x).toISOString()).sort().pop() ?? null;
     const { target, problem } = resolvePane(tmuxTarget(by));
     const msgs = lines.filter((l) => l.type === 'message');
-    const replied = new Set(msgs.map((m) => m.re).filter(Boolean));
+    const replied = handledMessages();
     const asking = msgs.filter((m) => m.by === by && !['info', 'ruling', 'answer'].includes(m.kind) && !replied.has(m.id));
     // Before its feature line exists (while designing), a planner's goal is the one its questions
     // name: a question whose links point at this plan branch.
@@ -2275,7 +2302,7 @@ function cmdValidate() {
     if (isActive(t) && ['chore', 'spike', 'fix'].includes(t.kind) && !(t.serves ?? []).length && !t.notes) err(id, `${t.kind} ticket serving no story must say why in notes (D6)`);
     if (isActive(t) && !['chore', 'spike', 'fix'].includes(t.kind) && !(t.serves ?? []).length) err(id, 'must serve at least one story (D6)');
     if (t.kind === 'contract' && !(t.contracts?.provides ?? []).length) err(id, 'contract ticket must list contracts.provides (D2)');
-    if (t.feature !== CHORES && !fs_.has(t.feature)) err(id, `feature "${t.feature}" is not in the log (devteam.mjs feature add)`);
+    if (isActive(t) && t.feature !== CHORES && !fs_.has(t.feature)) err(id, `feature "${t.feature}" is not in the log (devteam.mjs feature add)`);
   }
   // On a plan branch, the feature's tickets number from its reserved block (a planner made before
   // blocks has none and is not checked).
@@ -2315,7 +2342,9 @@ function cmdValidate() {
     }
     // A feature that has reached this checkout is landed (or being planned here): its design and
     // graph reviews must say APPROVE. On a plan/<feature> branch that is a warning until review.
-    {
+    // A feature all of whose tickets are superseded has no work left for a review to approve.
+    const own = [...ts.values()].filter((t) => t.feature === fid);
+    if (!own.length || own.some(isActive)) {
       const sink = onPlanBranch() && !flags.strict ? warnings : errors;
       const reviews = featureReviews(fid);
       const designSlug = f.design ? path.basename(f.design, '.md') : null;
@@ -2390,6 +2419,7 @@ function cmdValidate() {
     warnings.push(...reg.warnings);
     // With lines, check-pr and merge judge the tree a PR would land, which takes git 2.38; say so
     // here, in the words merge refuses with, before the first PR meets it.
+    if (!['ask', 'adopt'].includes(s.upstream_sync)) warnings.push(`settings.upstream_sync is ${JSON.stringify(s.upstream_sync)}; only "ask" and "adopt" are valid, so it is read as "ask"`);
     if (linesDeclared(s) && gitTooOld()) warnings.push(`components: ${gitTooOld()}; coverage fails closed until it can`);
     // A reserved slug as a component prefix: the one G1 exception, only for a project already using it.
     // Only live tickets: a superseded or merged one is history, so the prescribed fix clears it.
@@ -2446,6 +2476,12 @@ function cmdValidate() {
   for (const [c, v] of Object.entries(loadSettings().autonomy_ceilings ?? {})) {
     if (raw[c] === undefined) errors.push(`settings autonomy_ceilings: "${c}" is not a ladder class in constitution.md`);
     else if (v > raw[c]) errors.push(`settings autonomy_ceilings: ${c} ${v} is above the constitution's ceiling ${raw[c]}; a project may only lower it`);
+  }
+  {
+    const s = loadSettings();
+    // one that could mean deploy-on-merge is an error (merge fails closed on it); any other a warning
+    const rs = [[s.release, 'settings release'], ...Object.entries(s.links ?? {}).filter(([, l]) => isObj(l) && l.release !== undefined).map(([lid, l]) => [l.release, `settings links.${lid}.release`])];
+    for (const [r, at] of rs) { const bad = releaseProblem(r, at); if (bad) (releaseMayBeOnMerge(r) ? errors : warnings).push(releaseMayBeOnMerge(r) ? bad : `${bad}; read as not deploying on merge`); }
   }
   const td = path.join(projectDir, 'tickets');
   if (fs.existsSync(td)) for (const f of fs.readdirSync(td)) if (!f.startsWith('.') && !ts.has(f)) errors.push(`project/tickets/${f}/ has no ticket`);
@@ -2573,7 +2609,9 @@ const parkRulingSent = (name, marker) => logObjects('message').some((m) => m.to 
 function liveSessions() { return memo('liveSessions', liveSessionsNow); }
 function liveSessionsNow() {
   const names = new Set();
-  for (const t of tickets().values()) if (activeWorker(t.id) || (workerState(t.id)?.phase === 'parked' && !mergeShaFor(t.id) && isActive(t))) names.add(t.id);
+  // a superseded ticket is a session only while something still runs in its window
+  const windowUp = (id) => !/^no tmux (session|window)/.test(resolvePane(tmuxTarget(id)).problem ?? '');
+  for (const t of tickets().values()) if ((activeWorker(t.id) && (isActive(t) || windowUp(t.id))) || (workerState(t.id)?.phase === 'parked' && !mergeShaFor(t.id) && isActive(t))) names.add(t.id);
   for (const p of planners()) names.add(`plan-${p.feature}`);
   return [...names].sort().map(sessionOf);
 }
@@ -2760,6 +2798,8 @@ function graphEdit(type, idRe) {
   if (sub === 'set' && logGet(id)?.type !== type) die(`no ${type} ${id}`);
   // home and devteam name the repo that holds the kit and the kit's own line
   if (type === 'ticket' && RESERVED_LINKS.includes(body.component)) die(`component "${body.component}" is reserved (reserved: ${RESERVED_LINKS.join(', ')}): home is the repo that holds the kit, devteam the kit's own files; plan the ticket under another component`);
+  // a mistyped feature can't be corrected afterwards (a ticket's feature is fixed), so it's caught here
+  if (type === 'ticket' && sub === 'add' && by === 'supervisor' && body.feature !== CHORES && logGet(body.feature)?.type !== 'feature') die(`no feature "${body.feature}" (devteam.mjs feature add, or the feature's id as the log has it)`);
   const line = appendLog({ ...body, type, id, op: sub === 'add' ? 'new' : 'set' }, by);
   if (by === 'supervisor') appendLog({ type: 'act', decision: citing(), class: sub === 'add' ? 'add-ticket' : 'replan-within-feature', what: `${sub === 'add' ? 'added' : 'changed'} ${type} ${id}${sub === 'set' ? ` (${Object.keys(body).join(', ')})` : ''}`, refs: [id], reversible: true }, 'supervisor');
   out(`${sub === 'add' ? 'added' : 'updated'} ${line.id}`);
@@ -2771,7 +2811,8 @@ function graphEdit(type, idRe) {
 const tableCells = (row) => row.trim().replace(/^\|/, '').replace(/(?<!\\)\|$/, '').split(/(?<!\\)\|/).map((c) => c.trim().replace(/\\\|/g, '|'));
 
 // A record is <stage>-<pass>[<track>].md with "- Reviewer: <name>" and a last line
-// "Verdict: APPROVE|CHANGES <full sha>"; findings are table rows F<n> with a Disposition column.
+// "Verdict: APPROVE|CHANGES <full sha>"; findings are table rows whose id is a capital prefix and a
+// number (F1, R2, CR3) under a header with a Disposition column.
 function parseReview(file, text) {
   const m = file.match(/^([a-z]+)-(\d+)([a-z]?)\.md$/);
   const verdict = [...text.matchAll(/^Verdict:[ \t]*(APPROVE|CHANGES)[ \t]+(\S+)[ \t]*$/gm)].pop();
@@ -2790,7 +2831,7 @@ function parseReview(file, text) {
     // A row wider than its header (a stray empty cell before the disposition) still has its
     // disposition: the first non-empty cell from the Disposition column on.
     const disposition = dispIdx < 0 ? '' : cells.length > width ? (cells.slice(dispIdx).find((c) => c) ?? '') : (cells[dispIdx] ?? '');
-    if (/^F\d+$/.test(cells[0] ?? '')) findings.push({ id: cells[0], severity: cells[sevIdx] ?? '', disposition });
+    if (FINDING_ID.test(cells[0] ?? '')) findings.push({ id: cells[0], severity: cells[sevIdx] ?? '', disposition, ...(width && cells.length !== width ? { cells: cells.length, width } : {}) });
   }
   return {
     file, stage: m ? m[1] : file.replace(/\.md$/, ''), pass: m ? Number(m[2]) : 0, variant: m ? m[3] : '',
@@ -2807,6 +2848,8 @@ function latestPerTrack(records, stage) {
   for (const r of records.filter((x) => x.stage === stage)) { const p = latest.get(r.variant); if (!p || r.pass > p.pass) latest.set(r.variant, r); }
   return [...latest.values()];
 }
+// A finding's id: a short capital prefix and a number (F1, R2, CR3, S1b): reviewers prefix by kind.
+const FINDING_ID = /^[A-Z]{1,4}\d+(?:-\d+)?[a-z]?$/;
 const blocking = (sev) => /^(critical|important)$/i.test(sev);
 const disposed = (d) => /^(fixed|wrong|wont-fix\b|won't-fix\b)/i.test(d ?? '');
 
@@ -2854,8 +2897,9 @@ function oneWayDoorsSection(body) {
 // each merge is exactly git's own merge of its parents. A conflict fix that touched the work
 // changes both, so it voids the verdict; a clean merge of main does not.
 // A record edit that only fills in what the record lacked: a "- Reviewer:" line where there was
-// none, and Disposition cells that were empty. Verdicts, findings and dispositions already given
-// can't change this way, so a dissent still can't be edited away.
+// none, and Disposition cells that were empty or held no disposition yet, each given a disposition.
+// Verdicts, findings and dispositions already given can't change this way, so a dissent still
+// can't be edited away.
 function fillInOnly(before, after) {
   if (before === null || after === null) return false;
   // blank lines carry nothing in a record, so they're left out of the comparison
@@ -2873,7 +2917,8 @@ function fillInOnly(before, after) {
     if (a[k] === b[k]) continue;
     if (disp < 0 || !a[k].trim().startsWith('|') || !b[k].trim().startsWith('|')) return false;
     const x = tableCells(a[k]), y = tableCells(b[k]);
-    if (x.length !== y.length || x.some((c, j) => j !== disp && c !== y[j]) || x[disp] !== '' || !y[disp]) return false;
+    // an empty cell, or one that isn't a disposition yet (a reviewer's "Accepted; …"), may become one
+    if (x.length !== y.length || x.some((c, j) => j !== disp && c !== y[j]) || !(x[disp] === '' ? y[disp] : !disposed(x[disp]) && disposed(y[disp]))) return false;
   }
   return true;
 }
@@ -2886,7 +2931,8 @@ function verdictHolds(v, head, dir, R = repo('home')) {
   // Each adds a review record, or fills one in mechanically (fillInOnly): an empty Disposition cell
   // filled, a missing "- Reviewer:" line added. Nothing else in a record may change.
   let commit = null;
-  const isRecord = (file) => file?.startsWith(dir) && /^(?:[a-z0-9-]+\/)?[a-z]+-\d+[a-z]?\.md$/.test(file.slice(dir.length));
+  // <stage>-<pass>[<track>].md, or a task's later pass, task-<n>-<pass>[<track>].md
+  const isRecord = (file) => file?.startsWith(dir) && /^(?:[a-z0-9-]+\/)?[a-z]+-\d+(?:-\d+)?[a-z]?\.md$/.test(file.slice(dir.length));
   const onlyRecords = (R.git(['log', '--no-merges', '--no-renames', '--format=@%H', '--name-status', `${v}..${head}`, ...(main ? [`^${main}`] : [])]) ?? 'x').split('\n').filter(Boolean).every((l) => {
     if (l.startsWith('@')) { commit = l.slice(1); return true; }
     const [st, file] = l.split('\t');
@@ -3097,7 +3143,9 @@ function checkTicket(id, { sha: shaArg, title, body, approvals = true }) {
   const approvers = new Set(latest.filter((r) => r.verdict === 'APPROVE' && holdsAt(r.sha) && r.reviewer).map((r) => r.reviewer));
   const need = t.risk === 'high' ? 2 : 1;
   if (approvers.size < need) fails.push(`needs ${need} final APPROVE review(s) at this head from different named reviewers; found ${approvers.size}`);
-  for (const r of reviews) for (const f of r.findings) if (blocking(f.severity) && !disposed(f.disposition)) fails.push(`${r.file} ${f.id} (${f.severity}) has no disposition`);
+  for (const r of reviews) for (const f of r.findings) if (blocking(f.severity) && !disposed(f.disposition)) fails.push(`${r.file} ${f.id} (${f.severity}) has no disposition${f.disposition ? ` ("${f.disposition.slice(0, 40)}" isn't one)` : ''}: the author starts its Disposition cell with fixed, wont-fix <reason> or wrong <reason>`);
+  // a row whose cell count differs from its header reads fine here, but not to a reviewer: say how to fill one
+  for (const r of reviews) for (const f of r.findings) if (f.cells) warn(`${r.file} ${f.id}: its row has ${f.cells} cells and the header ${f.width}; fill a Disposition with devteam.mjs dispose ${'<ticket>'} ${r.file} ${f.id} "fixed", which keeps the row's shape`);
   const base = R.mainRef() && sha ? R.git(['merge-base', R.mainRef(), sha]) : null;
   if (R.commonDir && !base) fails.push(`cannot resolve main branch "${R.settings.main_branch}"${R.name === 'home' ? '' : ` in ${R.name}`}; footprint not checked`);
   if (base) {
@@ -3151,6 +3199,12 @@ function cmdCheckTicket() {
     if (!pr) die('gh pr view failed');
     const p = JSON.parse(pr);
     title ??= p.title; body ??= p.body; sha ??= p.headRefOid;
+  }
+  // Run anywhere but on the ticket's own branch (the supervisor's main checkout), with no head
+  // named: the ticket's branch is what's judged, not whatever this checkout has checked out.
+  if (!sha && R.commonDir && (cwdRepo() !== R || cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']) !== `ticket/${id}`)) {
+    sha = R.resolveCommit(`ticket/${id}`) ?? R.resolveCommit(`origin/ticket/${id}`) ?? undefined;
+    if (sha) out(`checking ticket/${id} at ${sha.slice(0, 12)} (no --sha given, and this checkout isn't on it)`);
   }
   report(checkTicket(id, { sha, title, body }), `${id} meets the definition of done at ${(headIn(R, sha) ?? '').slice(0, 12)}`);
 }
@@ -3334,8 +3388,10 @@ function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('hom
   if (branch.startsWith('plan/')) {
     const feature = branch.slice('plan/'.length);
     if (title !== undefined && !title.startsWith(`plan-${feature}: `)) fails.push(`PR title must start with "plan-${feature}: "`);
-    // validate --strict at the exact head, in a detached worktree of that head.
-    const wt = detachedWorktree(sha, `check-${feature}`);
+    // validate --strict at the exact head, in a detached worktree of that head. It only reads the
+    // plan and the log, so the checkout is not seeded: no worktree_files, no worktree_setup (a CI
+    // runner has neither the project's untracked files nor its toolchain).
+    const wt = detachedWorktree(sha, `check-${feature}`, repo('home'), { seed: false });
     try {
       execFileSync(process.execPath, [path.join(wt, 'docs', 'devteam', 'scripts', 'devteam.mjs'), 'validate', '--strict'], { cwd: wt, stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (e) {
@@ -3434,7 +3490,7 @@ function seedWorktree(wt, { setup = true, repo: R = repo('home') } = {}) {
 // Another repo's lives in the OS temp folder (where secret post already makes its own), never under
 // home's tree: a gate there would otherwise pass on home's node_modules, .tool-versions and lint or
 // ts configs, found by walking up the directories. Home's stays under home's .worktrees, as before.
-function detachedWorktree(sha, name, R = repo('home')) {
+function detachedWorktree(sha, name, R = repo('home'), { seed = true } = {}) {
   const holder = R.name === 'home' ? null : fs.mkdtempSync(path.join(os.tmpdir(), `devteam-${R.name}-`));
   const wt = holder ? path.join(holder, `tmp-${name}`) : path.join(mainRoot, '.worktrees', `tmp-${name}-${process.pid}`);
   R.gitOrDie(['worktree', 'add', '--quiet', '--detach', wt, sha], R.root);
@@ -3443,7 +3499,7 @@ function detachedWorktree(sha, name, R = repo('home')) {
     // the empty holder only (rmdir refuses anything with files left in it)
     if (holder) try { fs.rmdirSync(holder); } catch {}
   });
-  seedWorktree(wt, { repo: R });
+  if (seed) seedWorktree(wt, { repo: R });
   return wt;
 }
 // The repo a worktree belongs to, computed from git, never recorded: null for a
@@ -3506,16 +3562,29 @@ function cmdCheckPr() {
 // (`answer <qid> "…" --rule "<rule>" --rule-scope chore:devteam-sync`) approves a
 // chore-devteam-sync-<tag> merge in place of a fresh answer, but only when every file the chore
 // changes outside project/ is inside the kit and byte-identical to that tag upstream. Anything the
-// supervisor wrote itself still needs the owner's answer.
+// supervisor wrote itself still needs the owner's answer. Either way the tag must be on upstream's
+// default branch, so a tag pushed off to the side isn't a release. settings.upstream_sync "adopt"
+// (what init writes) is the same approval from the moment devteam is adopted, read from main's tip
+// so a PR can't grant it to itself and a branch cut before the owner went back to "ask" doesn't keep
+// it. Nobody chose the release it adopts, so it also needs adoptProblem to find nothing.
+// What the check fetched from upstream goes when it's done: a ref left here is foreign history
+// in the host repo, for anything that walks every ref (a secrets scan with --all).
 function upstreamSyncApproval(chore, sha, changed) {
-  const rule = logObjects('knowledge').filter((k) => k.created_by === 'owner' && k.scope === 'chore:devteam-sync' && k.status === 'accepted').sort(byTime).pop();
-  if (!rule) return {};
+  try { return upstreamSyncCheck(chore, sha, changed); } finally {
+    for (const r of (git(['for-each-ref', '--format=%(refname)', 'refs/devteam-upstream', 'refs/devteam-upstream-default'], mainRoot) ?? '').split('\n').filter(Boolean)) git(['update-ref', '-d', r], mainRoot);
+  }
+}
+function upstreamSyncCheck(chore, sha, changed) {
+  const rule = logObjects('knowledge').filter((k) => k.created_by === 'owner' && k.scope === 'chore:devteam-sync' && k.status === 'accepted').sort(byTime).pop() ?? null;
+  const main = mainRef();
+  const mb = main ? git(['merge-base', main, sha]) : null;
+  const policy = !rule && !!mb && upstreamSyncMode(settingsAt(main)) === 'adopt';
+  if (!rule && !policy) return {};
   const s = loadSettings();
   const src = /^[\w.-]+\/[\w.-]+$/.test(s.upstream_repo ?? '') ? `https://github.com/${s.upstream_repo}.git` : s.upstream_repo;
   // The release the PR adopts: the upstream_base it sets in settings.md (so a sync PR that folded in
   // a later release is checked against that one), else the tag in its slug. Either way the files
   // are compared with that tag fetched from upstream_repo as it is on main.
-  const mb = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
   const setBase = settingsAt(sha)?.upstream_base;
   const raw = setBase && setBase !== (mb ? settingsAt(mb)?.upstream_base : null) ? setBase : chore.slice('devteam-sync-'.length);
   let tag = null;
@@ -3523,6 +3592,15 @@ function upstreamSyncApproval(chore, sha, changed) {
     if (git(['fetch', '--quiet', '--no-tags', src, `+refs/tags/${t}:refs/devteam-upstream/${t}`], mainRoot) !== null) { tag = t; break; }
   }
   if (!tag) return { problem: `standing approval for upstream syncs: no tag "${raw}" at ${redactUrl(s.upstream_repo)}` };
+  // The default branch as upstream has it now: forced, like the tag, since only this run's view counts.
+  const tagSha = git(['rev-parse', '--verify', '--quiet', `refs/devteam-upstream/${tag}^{commit}`], mainRoot);
+  const onDefault = tagSha && git(['fetch', '--quiet', '--no-tags', src, '+HEAD:refs/devteam-upstream-default/HEAD'], mainRoot) !== null
+    && git(['merge-base', '--is-ancestor', tagSha, 'refs/devteam-upstream-default/HEAD'], mainRoot) !== null;
+  if (!onDefault) return { problem: `standing approval for upstream syncs: tag "${tag}" is not on the default branch of ${redactUrl(s.upstream_repo)}, or that can't be confirmed. The owner's answer is needed: --approved <qid>` };
+  if (policy) {
+    const problem = adoptProblem({ tag, sha, mb, main, changed, src });
+    if (problem) return { problem: `settings.upstream_sync "adopt" covers only a whole newer release: ${problem}. The owner's answer is needed: --approved <qid>` };
+  }
   const blob = (ref, f) => git(['rev-parse', '--verify', '--quiet', `${ref}:${f}`], mainRoot);
   const differ = [];
   for (const f of changed) {
@@ -3530,8 +3608,40 @@ function upstreamSyncApproval(chore, sha, changed) {
     if (blob(sha, f) !== blob(`refs/devteam-upstream/${tag}`, `docs/devteam/${f.slice(kitRel.length + 1)}`)) differ.push(f);
   }
   if (differ.length) return { problem: `standing approval covers only files copied verbatim from upstream ${tag}; these differ: ${differ.slice(0, 6).join(', ')}${differ.length > 6 ? ', …' : ''}. The owner's answer is needed: --approved <qid>` };
-  return { rule, tag };
+  return { rule, policy, tag, tagSha };
 }
+// What "adopt" needs beyond the standing rule; the reason it isn't met, else null. The PR starts at
+// main's tip, or the merge's 3-way result needn't be the files compared here. The tag is strictly
+// newer than main's upstream_base, so the kit never goes back. The PR sets upstream_base to the tag,
+// or a later sync would measure from a release main no longer has. The kit files it changes are
+// exactly those upstream changed between the two, so no release lands in part. Only for "adopt": an
+// owner's standing rule has always covered a PR that leaves upstream_base alone or takes part of a
+// release, and a project on one can rely on that.
+function adoptProblem({ tag, sha, mb, main, changed, src }) {
+  if (mb !== resolveCommit(main)) return `the PR is behind ${main}; merge it in and ask again`;
+  const base = settingsAt(main)?.upstream_base;
+  const from = releaseParts(base), to = releaseParts(tag);
+  if (!from) return `main's upstream_base (${JSON.stringify(base ?? null)}) isn't a release to compare with`;
+  if (!to) return `"${tag}" isn't a release version (vX.Y.Z)`;
+  if (!(compareRelease(to, from) > 0)) return `${tag} is not newer than main's upstream_base ${base}`;
+  const set = settingsAt(sha)?.upstream_base;
+  if (set !== tag) return `the PR sets upstream_base to ${JSON.stringify(set ?? null)}, not ${tag}`;
+  if (git(['fetch', '--quiet', '--no-tags', src, `+refs/tags/${base}:refs/devteam-upstream/${base}`], mainRoot) === null) return `can't fetch main's upstream_base ${base} from upstream`;
+  const released = changedFiles(`refs/devteam-upstream/${base}`, `refs/devteam-upstream/${tag}`).filter((f) => f.startsWith('docs/devteam/') && !/^docs\/devteam\/(project|run)\//.test(f)).map((f) => `${kitRel}/${f.slice('docs/devteam/'.length)}`);
+  const unlike = (a, b) => a.filter((f) => !b.includes(f));
+  const missing = unlike(released, changed), extra = unlike(changed, released);
+  const some = (l) => `${l.slice(0, 6).join(', ')}${l.length > 6 ? ', …' : ''}`;
+  if (missing.length || extra.length) return `its kit files aren't exactly what upstream changed from ${base} to ${tag}${missing.length ? `; missing ${some(missing)}` : ''}${extra.length ? `; extra ${some(extra)}` : ''}`;
+  return null;
+}
+// settings.upstream_sync as given, failing closed: anything but the two values is "ask", with a warning.
+function upstreamSyncMode(s) {
+  if (!s || s.upstream_sync === 'ask' || s.upstream_sync === 'adopt') return s?.upstream_sync ?? 'ask';
+  warn(`settings.upstream_sync is ${JSON.stringify(s.upstream_sync)}; only "ask" and "adopt" are valid, so it is read as "ask"`);
+  return 'ask';
+}
+const releaseParts = (t) => /^v(\d+)\.(\d+)\.(\d+)$/.exec(String(t ?? ''))?.slice(1).map(Number) ?? null;
+const compareRelease = (a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
 // A standing approval for CI fixes: an accepted owner rule scoped chore:ci-fix (or
 // chore:devteam-workflow, as Stacks' owner first gave it) lets the supervisor merge a ci-fix-* chore
 // without asking, when it changes only workflow files, deletes none, and keeps every job each had
@@ -3573,6 +3683,7 @@ function ownerAnswer(qid, what) {
   const v = q?.type === 'question' ? questionView(q) : null;
   if (!v || v.status !== 'answered') die(`${what}: ${qid} is not a question the owner answered`);
   reviewApproves(v, what);
+  { const moved = artifactLinksMoved(v); if (moved) die(`${what}: ${moved}`); }
   // An answer approves what it said yes to: the owner's answer must be the question's
   // recommendation (a review, its verified result). Answered any other way, the owner declined or
   // changed it, and the supervisor asks again; a secrets question approves by what was posted.
@@ -3586,17 +3697,61 @@ function reviewApproves(v, what) {
   if (v.result_status !== 'verified') die(`${what}: ${v.id} is a review whose result is ${v.result_status}; it approves nothing until it verifies (review show ${v.id})`);
 }
 
-// On a project that deploys when main changes, the files of a PR that deploy: those outside the kit
-// (or matching release.paths). Empty when merging deploys nothing.
-function deployingFiles(base, sha) {
-  const s = loadSettings();
-  const r = s.release;
-  if (!releasesOnMerge() || !base) return [];
-  const kitRel = path.relative(repoRoot, devteamDir).split(path.sep).join('/');
-  const files = changedFiles(base, sha) ?? [];
-  return Array.isArray(r?.paths) && r.paths.length ? files.filter((f) => r.paths.some((g) => pathMatches(g, f))) : files.filter((f) => !f.startsWith(`${kitRel}/`));
+// settings release (home's, or a repo link's): 'tag', 'merge', { branch: '<name>' }, or
+// { on: 'merge', paths: [globs] }. Anything else is a problem. One that could mean deploy-on-merge
+// ("merge", or an object with on: "merge") fails closed at merge, since a misread shape would let a
+// release through unchecked; any other is a warning (it never meant merging deploys).
+const releaseMayBeOnMerge = (r) => r === 'merge' || (isObj(r) && r.on === 'merge');
+function releaseProblem(r, at = 'release') {
+  if (r === undefined || r === 'tag' || r === 'merge') return null;
+  const shapes = `"tag", "merge", { "branch": "<name>" } or { "on": "merge", "paths": ["<glob>", …] }`;
+  if (!isObj(r)) return `${at}: ${shapes}`;
+  const keys = Object.keys(r);
+  if (keys.includes('branch') && !keys.includes('on')) return keys.length === 1 && typeof r.branch === 'string' && r.branch ? null : `${at}: { "branch": "<name>" } takes nothing else (${shapes})`;
+  if (r.on !== 'merge') return `${at}: ${keys.includes('paths') ? 'paths needs "on": "merge" (without it nothing is checked as a release)' : `"on" is "merge"`}; ${shapes}`;
+  const extra = keys.filter((k) => !['on', 'paths'].includes(k));
+  if (extra.length) return `${at}: ${extra.join(', ')} is not a release field (on, paths)`;
+  if (r.paths !== undefined && !(Array.isArray(r.paths) && r.paths.length && r.paths.every((g) => typeof g === 'string' && g && !g.startsWith('!')))) return `${at}.paths: a non-empty list of globs, no negations (leave paths out when every merge deploys)`;
+  return null;
+}
+// Files that deploy whatever paths says: a platform rebuilds the app when its build setup changes.
+// A list with gaps by nature: the owner lists anything else that deploys in paths (quality.md §5).
+const DEPLOY_MANIFESTS = ['Procfile', 'app.json', 'heroku.yml', 'Aptfile', '.slugignore', '.buildpacks', '.profile.d/**', 'bin/pre_compile', 'bin/post_compile', 'Dockerfile', 'Dockerfile.*', '.dockerignore', 'docker-compose.yml', 'fly.toml', 'render.yaml', 'vercel.json', 'netlify.toml', 'nixpacks.toml', 'railway.json', 'package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', '.yarnrc', '.yarnrc.yml', '.yarn/**', '.npmrc', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'bun.lockb', 'bun.lock', 'tsconfig.json', 'next.config.*', 'vite.config.*', 'Gemfile', 'Gemfile.lock', 'requirements.txt', 'Pipfile', 'Pipfile.lock', 'pyproject.toml', 'poetry.lock', 'uv.lock', 'go.mod', 'go.sum', 'Cargo.toml', 'Cargo.lock', 'composer.json', 'composer.lock', 'runtime.txt', '.node-version', '.nvmrc', '.ruby-version', '.python-version', '.tool-versions'];
+// On a repo that deploys when main changes, the files of a PR that deploy: those outside the kit's
+// line, or with release.paths those matching it plus the build files above (never the kit's line:
+// the log and records don't deploy). { files: [] } when merging deploys nothing; { problem } when
+// it can't be told (fail closed); { warning } beside either.
+function deployingFiles(R, base, sha) {
+  const S = R.settings;
+  const r = S.release;
+  const bad = releaseProblem(r, R.name === 'home' ? 'settings release' : `links.${R.name}.release`);
+  if (bad && releaseMayBeOnMerge(r)) return { problem: `${bad}; merge can't tell what deploys` };
+  const warning = bad ? `${bad}; read as not deploying on merge` : undefined;
+  const onMerge = !bad && (r === 'merge' || r?.on === 'merge' || (r?.branch && r.branch === S.main_branch));
+  if (!onMerge) return { files: [], warning };
+  const where = R.name === 'home' ? '' : ` in ${R.name}`;
+  if (!base) return { problem: `release is on merge and there is no merge base with ${S.main_branch}${where}; merge can't tell what deploys` };
+  // the diff itself, not changedFiles (which reads a failed diff as no files)
+  const diff = R.git(['diff', '-z', '--name-only', '--no-renames', base, sha]);
+  if (diff === null) return { problem: `release is on merge and the diff ${base.slice(0, 12)}..${sha.slice(0, 12)}${where} failed; merge can't tell what deploys` };
+  const kit = R.devteamLine();
+  const files = diff.split('\0').filter(Boolean).filter((f) => !kit.some((g) => pathMatches(g, f)));
+  if (Array.isArray(r?.paths)) return { files: files.filter((f) => DEPLOY_MANIFESTS.some((g) => pathMatches(g, f)) || r.paths.some((g) => pathMatches(g, f))) };
+  return { files };
 }
 
+// A release decision made on the owner's answer (or a default) releases only what that question
+// named: its ticket, or the targets it approves (a batch: ask --approves). A question naming
+// neither releases nothing, so one yes can't be spread over tickets the owner never saw.
+function releaseAnswerGap(d, targets) {
+  if (!['answer', 'default'].includes(d.authority)) return null;
+  const q = d.approved_by?.startsWith('q-') ? logGet(d.approved_by) : null;
+  const v = q?.type === 'question' ? questionView(q) : null;
+  if (!v) return `rests on ${d.approved_by ?? 'no question'}, which is not a question`;
+  const named = [v.ticket, ...(v.approves ?? [])].filter(Boolean);
+  if (!named.length) return `rests on ${v.id}, which names no ticket or target (ask --ticket <id>, or --approves <ids> for a batch); a release answer releases only what it named`;
+  return targets.some((t) => named.includes(t)) ? null : `rests on ${v.id}, which was about ${named.join(', ')}, not ${targets[0]}; ask about this one`;
+}
 // The merge word, as a command: verify everything at the PR's exact head, run the project's gates
 // there, then merge refusing a moved head, then log the act. Only the supervisor runs it.
 // --dry-run runs every check and gate and stops; without a PR it checks the branch's local head.
@@ -3606,7 +3761,7 @@ function cmdMerge() {
   const plan = flagStr('plan');
   const chore = flagStr('chore') !== undefined ? choreSlug(flagStr('chore')) : undefined;
   const dry = !!flags['dry-run'];
-  const branch = plan ? `plan/${plan}` : chore ? `chore-${chore}` : id ? `ticket/${id}` : die('usage: merge <ticket-id> | merge --plan <feature> | merge --chore <slug>   [--approved <qid> [<qid> …]] [--no-gates] [--dry-run [--title t] [--body-file f]]');
+  const branch = plan ? `plan/${plan}` : chore ? `chore-${chore}` : id ? `ticket/${id}` : die('usage: merge <ticket-id> | merge --plan <feature> | merge --chore <slug>   [--approved <qid>] [--no-gates] [--dry-run [--title t] [--body-file f]]');
   // A ticket merges in its own repo: its PR, gates, forge and merge method; plans and
   // chores are always home's. For home R is today's functions and settings.
   const R = id && tickets().has(id) ? repoOfTicket(tickets().get(id)) : repo('home');
@@ -3676,20 +3831,8 @@ function cmdMerge() {
   }
   // A chore PR that touches the kit, the agent config or the forge config carries an owner answer
   // (classes governance-edit, process-edit, gate-change); project/ files are the supervisor's.
-  // --approved takes one answer or several (--approved q1 q2): one owner answer covers a settings
-  // bundle, and a ladder class's answer can sit beside it.
-  const approvedIds = [...new Set(asList(flags.approved).flatMap((x) => String(x).split(',')).map((x) => x.trim()).filter(Boolean))];
-  const approved = approvedIds[0] ?? null;
-  const answers = approvedIds.map((q) => ownerAnswer(q, 'merge --approved'));
+  let approved = flagStr('approved') ?? null;
   let standing = null;
-  let settingsActs = null;
-  const target = id ?? (chore ? `chore-${chore}` : plan);
-  // A decision this merge carries out is carried out once: an act already under it (a merge on
-  // another branch, an earlier landing) means it was used; decide again for this one.
-  if (flagStr('decision')) {
-    const used = logObjects('act').find((a) => a.decision === flagStr('decision'));
-    if (used) fails.push(`${flagStr('decision')} was already carried out (${used.id}: ${String(used.what ?? '').slice(0, 80)}); a decision is carried out once, so decide again for ${target}`);
-  }
   // Owner-only settings, on every kind of PR (a ticket, a plan or a chore) in home, where
   // settings.md is: another repo's PR can't change it.
   if (R.name === 'home') {
@@ -3699,89 +3842,76 @@ function cmdMerge() {
     fails.push(...registryActFails(base, sha));
     if (changed === null) fails.push(`${projectRel}/settings.md: the json devteam block is not valid JSON at the head`);
     else if (changed.length) {
-      const L = ladder();
       const classes = [...new Set(changed.map((c) => c.cls))];
       const what = changed.map((c) => `${c.key} (${c.cls})`).join(', ');
-      // One owner answer covers the bundle (the owner's ruling): the owner's own answer, never one
-      // relayed from chat, in any one of the owner_only classes the PR changes, approves every owner
-      // setting it changes, of any class; or, where owner_rules allows, the owner's standing rules
-      // when every changed owner_only class has one. A ladder class's answer (monitor-change), a
-      // decision in it naming this PR, or its rung 3 covers only that ladder class's keys, never an
-      // owner_only key.
-      const d = flagStr('decision') ? decisionFor(flagStr('decision')) : null;
-      const covers = (cls) => d?.class === cls && (d.refs ?? []).some((r) => [target, `plan-${plan}`].includes(r));
-      const ownerOnly = (cls) => (L.owner_only ?? []).includes(cls) || !L.classes[cls];
-      const ownerClasses = classes.filter(ownerOnly);
-      const settled = new Map(); // class -> { answer } | { rule } | { decision } | { rung }
-      let bundle = null;
-      if (ownerClasses.length) {
-        const inBundle = answers.filter((v) => ownerClasses.includes(v.class));
-        const own = inBundle.find((v) => v.channel !== 'chat');
-        if (own) bundle = { answer: own.id };
-        else if (inBundle.length) fails.push(`${inBundle[0].id} was answered in chat; owner settings (${ownerClasses.join(', ')}) need the owner's own answer, from the dashboard or their terminal`);
-        else if (!approvedIds.length && ownerClasses.every((c) => (L.owner_rules ?? []).includes(c) && ownerRuleFor(c))) bundle = { rule: ownerRuleFor(ownerClasses[0]), rules: ownerClasses.map((c) => ownerRuleFor(c)) };
-        if (bundle) for (const c of ownerClasses) settled.set(c, bundle.answer ? { answer: bundle.answer } : { rule: ownerRuleFor(c) });
+      // A standing rule the owner gave themselves settles a class in owner_rules (constitution.md):
+      // only when every changed setting is of such a class, and only the owner's own accepted rule.
+      const ruled = !approved && classes.every((c) => (ladder().owner_rules ?? []).includes(c)) && classes.map((c) => ownerRuleFor(c)).every(Boolean);
+      if (ruled) { const rs = classes.map((c) => ownerRuleFor(c)); standing = { rule: rs[0] }; out(`changes owner settings: ${what}; approved by the owner's standing rule${rs.length > 1 ? 's' : ''} ${rs.map((r) => `${r.id} ("${r.statement}")`).join(', ')}`); }
+      else if (!approved) fails.push(`changes owner settings: ${what}; the owner's answer is needed: --approved <qid> of class ${classes.join(' or ')}`);
+      else {
+        const q = ownerAnswer(approved, 'merge --approved');
+        if (!classes.includes(q.class)) fails.push(`${approved} is a ${q.class ?? 'classless'} question; changing ${what} needs an answered ${classes.join(' or ')} question`);
+        fails.push(...ownerLinkActFails(changed, sha, approved));
       }
-      for (const cls of classes.filter((c) => !ownerOnly(c))) {
-        const inClass = answers.find((v) => v.class === cls);
-        if (inClass) settled.set(cls, { answer: inClass.id });
-        else if (bundle?.answer) settled.set(cls, { answer: bundle.answer });
-        else if (covers(cls)) settled.set(cls, { decision: d.id });
-        else if (rungFor(cls) >= 3) settled.set(cls, { rung: rungFor(cls) });
-      }
-      const open = classes.filter((cls) => !settled.has(cls));
-      if (open.length) {
-        const keys = changed.filter((c) => open.includes(c.cls)).map((c) => `${c.key} (${c.cls})`).join(', ');
-        const ownerOpen = open.filter(ownerOnly);
-        const ladderOpen = open.filter((c) => !ownerOnly(c));
-        const given = approvedIds.length ? ` (${approvedIds.map((q, i) => `${q} is ${answers[i].class ?? 'classless'}${answers[i].channel === 'chat' ? ', answered in chat' : ''}`).join(', ')}${ownerOpen.length && answers.some((v) => !ownerOnly(v.class ?? '')) ? '; a ladder class\'s answer never covers an owner setting' : ''})` : '';
-        fails.push(`changes owner settings: ${keys}; the owner's answer is needed: --approved <qid>${ownerOpen.length ? ` of class ${ownerOpen.join(' or ')}` : ` of class ${ladderOpen.join(' or ')}`}${given}${ladderOpen.length ? ` (or, for ${ladderOpen.join(', ')}, a decision in that class: merge --decision <d-id>)` : ''}`);
-      }
-      if (bundle?.rule && !open.length) { standing = { rule: bundle.rule }; out(`changes owner settings: ${what}; approved by the owner's standing rule${bundle.rules.length > 1 ? 's' : ''} ${bundle.rules.map((r) => `${r.id} ("${r.statement}")`).join(', ')}`); }
-      // Each repo link entry lands only as the bundle's answer showed it.
-      if (bundle?.answer) fails.push(...ownerLinkActFails(changed.filter((c) => ownerOnly(c.cls)), sha, bundle.answer));
-      // Every settled class is logged as an act of that class, with what settled it.
-      settingsActs = classes.filter((c) => settled.has(c)).map((c) => ({ cls: c, ...settled.get(c), keys: changed.filter((x) => x.cls === c).map((x) => x.key) }));
     }
   }
   // Deploys on merge: merging this is releasing it, so it needs release-production's authority: the
   // class on rung 3, or a release-production decision this merge carries out (--decision).
+  // In the ticket's own repo, under that repo's release setting (a link inherits home's).
   let release = null;
+  // the decision is checked like an act's (decisionFor: not corrected, not lapsed, its recorded
+  // authority holds against the log, its owner answer not used for anything else)
+  const decided = flagStr('decision') ? decisionFor(flagStr('decision')) : null;
+  const releaseDecision = decided?.class === 'release-production' ? decided : null;
+  // A decision is carried out once per target: an act already under it for this PR (a merge on
+  // another branch, an earlier landing) means it was used, so decide again. One decision naming
+  // several targets (a batch) carries out each once; a release decision has its own check below.
+  const targetsNow = [id ?? (chore ? `chore-${chore}` : plan), plan ? `plan-${plan}` : null].filter(Boolean);
+  const carriedOut = decided && !releaseDecision ? logObjects('act').find((a) => a.decision === decided.id && (!(a.refs ?? []).length || a.refs.some((r) => targetsNow.includes(r)))) : null;
+  if (carriedOut) fails.push(`${decided.id} was already carried out for ${targetsNow[0]} (${carriedOut.id}: ${String(carriedOut.what ?? '').slice(0, 80)}); a decision is carried out once per target, so decide again for this one`);
   {
-    const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
-    const deploys = deployingFiles(base, sha);
-    if (deploys.length) {
-      const target = id ?? (chore ? `chore-${chore}` : plan);
-      // the decision is checked like an act's: not corrected, not lapsed, and naming this target
-      const d = flagStr('decision') ? decisionFor(flagStr('decision')) : null;
+    const base = R.mainRef() ? R.git(['merge-base', R.mainRef(), sha]) : null;
+    const dep = deployingFiles(R, base, sha);
+    const deploys = dep.files ?? [];
+    const target = id ?? (chore ? `chore-${chore}` : plan);
+    const targets = [target, plan ? `plan-${plan}` : null].filter(Boolean);
+    if (dep.warning) warn(dep.warning);
+    if (dep.problem) fails.push(dep.problem);
+    else if (deploys.length) {
+      const d = releaseDecision;
       const rung = rungFor('release-production');
-      if (d?.class === 'release-production' && !(d.refs ?? []).some((r) => [target, `plan-${plan}`].includes(r))) fails.push(`${d.id} releases ${(d.refs ?? []).join(', ') || 'nothing named'}, not ${target}; decide again for this one`);
-      else if (d?.class === 'release-production') release = { decision: d.id, target };
+      // One release decision is carried out once per target: a second merge of the same chore slug
+      // (or the same decision cited again) decides again.
+      const done = d && logObjects('act').find((a) => a.decision === d.id && a.class === 'release-production' && (a.refs ?? []).some((r) => targets.includes(r)));
+      const unbound = d && releaseAnswerGap(d, targets);
+      if (d && !(d.refs ?? []).some((r) => targets.includes(r))) fails.push(`${d.id} releases ${(d.refs ?? []).join(', ') || 'nothing named'}, not ${target}; decide again for this one`);
+      else if (unbound) fails.push(`${d.id} ${unbound}`);
+      else if (done) fails.push(`${d.id} was already carried out for ${target} (${done.id}); a release decision releases once: decide again for this one`);
+      else if (d) release = { decision: d.id, target };
       else if (rung >= 3) release = { rung, target };
-      else fails.push(`merging deploys to production (release: merge; it changes ${deploys.slice(0, 3).join(', ')}${deploys.length > 3 ? ', …' : ''}), and release-production is on rung ${rung} (${RUNG[rung]}): decide --class release-production --refs ${target} [--approved <qid>] -- "release …", then merge --decision <d-id>`);
-      if (release) out(`merging deploys to production: a release-production act will be logged (${release.decision ? `under ${release.decision}` : `rung ${rung}`})`);
-    }
+      else fails.push(`merging deploys to production${inR} (release: merge; it changes ${deploys.slice(0, 3).join(', ')}${deploys.length > 3 ? ', …' : ''}), and release-production is on rung ${rung} (${RUNG[rung]}): ask --class release-production --ticket ${target} …, then decide --class release-production --refs ${target} --approved <qid> -- "release …", then merge --decision <d-id>`);
+      if (release) out(`merging deploys to production${inR}: a release-production act will be logged (${release.decision ? `under ${release.decision}` : `rung ${rung}`})`);
+    } else if (releaseDecision) out(`${releaseDecision.id} is a release-production decision, and this merge deploys nothing; it is not carried out`);
   }
-  let kitAnswer = null;
   if (chore) {
     const base = mainRef() ? git(['merge-base', mainRef(), sha]) : null;
     const kit = base ? changedFiles(base, sha).filter((f) => !f.startsWith(`${projectRel}/`)) : [];
+    // Only these two standing rules approve kit files: an owner's rule that settles owner settings
+    // (a gate-change rule, owner_rules) says nothing about the kit's files.
+    let kitRule = null;
     if (kit.length && !approved && chore.startsWith('devteam-sync-')) {
       const r = upstreamSyncApproval(chore, sha, kit);
-      if (r.rule) { standing = r; out(`kit files match upstream ${r.tag} exactly; approved by the owner's standing rule ${r.rule.id}`); } else if (r.problem) fails.push(r.problem);
+      if (r.rule || r.policy) { kitRule = standing = r; out(`kit files match upstream ${r.tag} exactly; approved by ${r.rule ? `the owner's standing rule ${r.rule.id}` : 'settings.upstream_sync "adopt"'}; ${r.tag} is ${r.tagSha}`); } else if (r.problem) fails.push(r.problem);
     }
-    if (kit.length && !approved && !standing && base) {
+    if (kit.length && !approved && !kitRule && base) {
       const r = ciFixApproval(chore, sha, base, kit);
-      if (r.rule) { standing = r; out(`changes only workflow files and keeps every job; approved by the owner's standing rule ${r.rule.id} ("${r.rule.statement}")`); } else if (r.problem) fails.push(r.problem);
+      if (r.rule) { kitRule = standing = r; out(`changes only workflow files and keeps every job; approved by the owner's standing rule ${r.rule.id} ("${r.rule.statement}")`); } else if (r.problem) fails.push(r.problem);
     }
-    if (kit.length && !approved && !standing) fails.push(`touches files outside project/ (${kit.slice(0, 6).join(', ')}${kit.length > 6 ? ', …' : ''}); the owner's answer is needed: merge --chore ${chore} --approved <qid>`);
-    // The kit is the owner's: only their own answer in a kit class approves it, never a ladder
-    // class's answer (monitor-change, say) or one relayed from chat.
-    else if (kit.length && approved && !answers.some((v) => KIT_CLASSES.includes(v.class) && v.channel !== 'chat')) fails.push(`touches files outside project/ (${kit.slice(0, 6).join(', ')}${kit.length > 6 ? ', …' : ''}); that needs the owner's own answer of class ${KIT_CLASSES.join(', ')} (${approvedIds.map((q, i) => `${q} is ${answers[i].class ?? 'classless'}${answers[i].channel === 'chat' ? ', answered in chat' : ''}`).join('; ')})`);
-    if (kit.length) kitAnswer = answers.find((v) => KIT_CLASSES.includes(v.class) && v.channel !== 'chat')?.id ?? null;
+    if (kit.length && !approved && !kitRule) fails.push(`touches files outside project/ (${kit.slice(0, 6).join(', ')}${kit.length > 6 ? ', …' : ''}); the owner's answer is needed: merge --chore ${chore} --approved <qid>`);
   }
-  for (const av of answers) {
-    const approved = av.id;
+  if (approved) {
+    const av = ownerAnswer(approved, 'merge --approved');
     // A secrets question approves landing only the stores it posted, and only once posted.
     if (av.secrets.length && (!chore?.startsWith('secret-') || !av.answer?.startsWith('Posted'))) fails.push(`${approved} asked for secrets; it approves only its own chore-secret PR, once the owner posted them (its answer: ${av.answer})`);
     // One answer approves one thing. The exception: one act of the answer's class that recorded the
@@ -3797,9 +3927,7 @@ function cmdMerge() {
     const prior = [...logObjects('decision'), ...logObjects('act')].filter((a) => a.approved_by === approved && mine(a) && a.id !== flagStr('decision'));
     // a bundle's link acts (one per entry its question showed) are one landing too
     const linkAct = (a) => Object.hasOwn(a, 'entry_hash') && (a.refs ?? []).some((r) => r.startsWith('link:'));
-    // an act a merge already logged (a settings class's act names the merge act) is that landing, done
-    const byMerge = (a) => (a.refs ?? []).some((r) => /^a-/.test(r) && ['merge-word', 'merge-chore', 'approve-feature-plan'].includes(logGet(r)?.class));
-    const landing = prior.length >= 1 && (prior.length === 1 || prior.every(linkAct)) && prior.every((a) => a.class === av.class && (a.refs ?? []).includes(target) && !byMerge(a));
+    const landing = prior.length >= 1 && (prior.length === 1 || prior.every(linkAct)) && prior.every((a) => a.class === av.class && (a.refs ?? []).includes(target));
     if (prior.length && !landing) fails.push(`${approved} already approved ${declared.length ? `an act for ${target}` : 'an act'}; ask again for this one`);
   }
   // Gates: the repo's own commands (never inherited), at the exact head, in a detached
@@ -3867,15 +3995,11 @@ function cmdMerge() {
   // home resets exactly what it reset before (G1); another repo resets all of its own caches
   if (R.name === 'home') { mainLogCache = undefined; mergeShaCache.clear(); } else R.resetCaches();
   const cls = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
-  // a release or settings-class decision is carried out by its own act below, not by the merge's
-  const own = release?.decision || (settingsActs ?? []).some((x) => x.decision);
-  const act = appendLog({ type: 'act', decision: own ? undefined : citing(), class: cls, what: `merged ${branch} at ${sha}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag}, verbatim)` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [], reversible: false, approved_by: kitAnswer ?? approved ?? standing?.rule.id ?? undefined, ...onR }, 'supervisor');
-  // each owner setting class the merge changes is an act of that class, with what settled it: the
-  // owner's answer in it, their standing rule, a decision in it, or its rung
-  for (const x of settingsActs ?? []) appendLog({ type: 'act', class: x.cls, decision: x.decision, approved_by: x.answer ?? x.rule?.id, rung: x.rung, what: `changed ${x.keys.join(', ')} in settings by merging ${branch} at ${sha}`, refs: [target, act.id], reversible: true }, 'supervisor');
+  // A release-production decision is carried out by the release act, never by the merge act.
+  const act = appendLog({ type: 'act', decision: releaseDecision ? undefined : citing(), class: cls, what: `merged ${branch} at ${sha}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag} at ${standing.tagSha}, verbatim${standing.policy ? ', under settings.upstream_sync "adopt"' : ''})` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [`chore-${chore}`], reversible: false, approved_by: approved ?? standing?.rule?.id ?? undefined, ...onR }, 'supervisor');
   if (release) {
-    const rel = appendLog({ type: 'act', class: 'release-production', decision: release.decision, rung: release.rung, what: `released ${release.target} to production by merging ${branch} at ${sha} (release: merge)`, refs: [release.target, act.id], reversible: false }, 'supervisor');
-    out(`released ${release.target} to production (${rel.id})`);
+    const rel = appendLog({ type: 'act', class: 'release-production', decision: release.decision, rung: release.rung, what: `released ${release.target}${inR} to production by merging ${branch} at ${sha} (release: merge)`, refs: [release.target, act.id], reversible: false, ...onR }, 'supervisor');
+    out(`released ${release.target}${inR} to production (${rel.id})`);
   }
   out(`merged ${branch} at ${sha.slice(0, 12)}${inR} (${act.id})`);
 }
@@ -3897,8 +4021,9 @@ function rungFor(cls, scope = null) {
   let r = def.start;
   for (const e of rungHistory(cls, scope)) r = e.rung;
   r = Math.min(r, def.ceiling);
-  // where merging releases, merging a fix deploys it: incident-fix never runs above release-production
-  const cap = cls === 'incident-fix' && releasesOnMerge() ? rungFor('release-production') : null;
+  // where merging releases, merging a fix deploys it: rung 3 (decide and tell) only with
+  // release-production at 3. Rung 2 stays, so a fix can still go ahead at its default.
+  const cap = cls === 'incident-fix' && releasesOnMerge() ? Math.max(2, rungFor('release-production')) : null;
   if (cap != null) r = Math.min(r, cap);
   return r;
 }
@@ -4227,6 +4352,7 @@ function cmdAnswer() {
   const { by } = fromChat ? { by: 'owner' } : ownerWriter();
   const v = openQuestion(id, ['open', 'defaulted']);
   if (flagStr('seen') && flagStr('seen') !== v.hash) die(`${id} changed since you saw it; reload and read it again before you answer`);
+  { const moved = artifactLinksMoved(v); if (moved) die(moved); }
   if (v.kind === 'goal-approval') die(`${id} approves a goal on its design: the owner answers it with goal decide ${v.goal} approve|refine|let-go [--notes "…"] (or on the dashboard)`);
   // A review is answered by the owner's own process with its result, or sent back with a reason;
   // never in free text, never from chat (a chat can't carry rows, and the supervisor must not
@@ -5448,7 +5574,15 @@ function decisionAuthorityGap(d) {
   if (ownerOnly && !(d.authority === 'standing-rule' && (L.owner_rules ?? []).includes(d.class))) return v && inClass && v.status === 'answered' ? answerUseGap(d, v) : `${d.class} is the owner's and needs the owner's answer in that class`;
   switch (d.authority) {
     case 'answer': return v && inClass && v.status === 'answered' ? answerUseGap(d, v) : `no answered ${d.class} question ${d.approved_by ?? ''}`.trim();
-    case 'default': return v && inClass && v.status === 'defaulted' ? null : `no defaulted ${d.class} question ${d.approved_by ?? ''}`.trim();
+    // A default stands in for the owner only where the owner put the class on rung 2 (ask with a
+    // default), only once the question's deadline passed with no answer, and once, as decide
+    // enforces: a decision line written by hand gets the same rule.
+    case 'default': {
+      if (!(v && inClass && v.status === 'defaulted' && v.default)) return `no defaulted ${d.class} question ${d.approved_by ?? ''}`.trim();
+      if (!L.classes[d.class] || rungFor(d.class, d.scope ?? null) < 2) return `${d.class} is not on rung 2 or above${d.scope ? ` for ${d.scope}` : ''}, so a default is not approval there`;
+      if (v.deadline && v.answered_at && v.answered_at < v.deadline) return `${v.id} was defaulted before its deadline (${v.deadline})`;
+      return answerUseGap(d, v);
+    }
     case 'standing-rule': { const k = logGet(d.approved_by ?? ''); return k?.type === 'knowledge' && writerClass(k.created_by) === 'owner' && k.status === 'accepted' && k.scope === `class:${d.class}` ? null : `no accepted owner rule scoped class:${d.class}`; }
     case 'rung': return L.classes[d.class] && rungFor(d.class, d.scope ?? null) >= 3 ? null : `${d.class} is not on rung 3`;
     case 'constitution': return (L.constitutional ?? []).includes(d.class) || !L.classes[d.class] ? null : `${d.class} is on the ladder, not constitutional`;
@@ -6752,19 +6886,22 @@ function gateStats(runs) {
   for (const [g, rs] of byGate) {
     const bySha = new Map();
     for (const r of rs.filter((x) => !x.dirty)) (bySha.get(r.sha) ?? bySha.set(r.sha, []).get(r.sha)).push(r);
-    const flaky = [...bySha.values()].filter((x) => x.some((r) => r.ok) && x.some((r) => !r.ok)).length;
-    if (flaky) flakyGates.push({ gate: g, commits: flaky });
+    const flips = [...bySha.values()].filter((x) => x.some((r) => r.ok) && x.some((r) => !r.ok));
+    if (flips.length) flakyGates.push({ gate: g, commits: flips.length, last_flip: flips.flat().map((r) => r.created_at).sort().pop() ?? null });
     gates.push({ gate: g, runs: rs.length, fail_rate: +(rs.filter((r) => !r.ok && !r.preexisting).length / rs.length).toFixed(2), preexisting_fails: rs.filter((r) => r.preexisting).length, median_seconds: +(median(rs.map((r) => r.ms)) / 1000).toFixed(1), max_seconds: +(Math.max(...rs.map((r) => r.ms)) / 1000).toFixed(1) });
   }
   const flakyTests = new Map();
   const testMs = new Map();
   for (const r of runs) for (const t of r.tests ?? []) {
     if (!t.failed) (testMs.get(t.name) ?? testMs.set(t.name, []).get(t.name)).push(t.ms);
-    if (t.failed && !r.dirty && runs.some((o) => o !== r && !o.dirty && o.gate === r.gate && o.sha === r.sha && o.ok && o.created_at >= r.created_at)) flakyTests.set(t.name, (flakyTests.get(t.name) ?? 0) + 1);
+    if (t.failed && !r.dirty && runs.some((o) => o !== r && !o.dirty && o.gate === r.gate && o.sha === r.sha && o.ok && o.created_at >= r.created_at)) {
+      const p = flakyTests.get(t.name) ?? { times: 0, last: '' };
+      flakyTests.set(t.name, { times: p.times + 1, last: r.created_at > p.last ? r.created_at : p.last });
+    }
   }
   return {
     gates: gates.sort((a, b) => b.median_seconds - a.median_seconds), flaky_gates: flakyGates,
-    flaky_tests: [...flakyTests.entries()].sort((a, b) => b[1] - a[1]).map(([name, times]) => ({ name, times })),
+    flaky_tests: [...flakyTests.entries()].sort((a, b) => b[1].times - a[1].times).map(([name, x]) => ({ name, times: x.times, last_flip: x.last || null })),
     slowest_tests: [...testMs.entries()].map(([name, xs]) => ({ name, median_seconds: +(median(xs) / 1000).toFixed(1) })).sort((a, b) => b.median_seconds - a.median_seconds).slice(0, 10),
   };
 }
@@ -7086,7 +7223,7 @@ function collectMetrics(since) {
 
   const msgs = logObjects('message').filter((m) => Date.parse(m.created_at) >= since).sort(byTime);
   const replies = new Map();
-  for (const m of msgs) if (m.re && !replies.has(m.re)) replies.set(m.re, Date.parse(m.created_at));
+  for (const m of [...msgs, ...logObjects('question')].sort(byTime)) if (m.re && !replies.has(m.re)) replies.set(m.re, Date.parse(m.created_at));
   const expecting = msgs.filter((m) => !['info', 'ruling', 'answer'].includes(m.kind));
   const openMsgs = expecting.filter((m) => !replies.has(m.id) && !settledByLanding(m));
   const msgWaits = expecting.filter((m) => replies.has(m.id)).map((m) => replies.get(m.id) - Date.parse(m.created_at));
@@ -7153,15 +7290,19 @@ function collectMetrics(since) {
   }
   if (monitorList().length || logObjects('observation').some((o) => o.kind === 'discovery')) {
     const last = logObjects('observation').filter((o) => o.kind === 'discovery' && o.subject === 'monitors').sort(byTime).pop();
-    if (!last || Date.now() - Date.parse(last.created_at) > 7 * 86400000) add('low', 'monitor-discovery-due', 'monitors', last ? `production was last looked over on ${dateOnly(last.created_at)}` : 'production has not been looked over yet', 'monitor discover --record, then propose what it found (supervisor.md, Monitoring)');
+    const changed = last?.source_ref && last.source_ref !== discoveryKey();
+    if (!last || changed || Date.now() - Date.parse(last.created_at) > 7 * 86400000) add('low', 'monitor-discovery-due', 'monitors', changed ? `the project has changed since production was last looked over (${dateOnly(last.created_at)}): its host, dependencies or deploy config` : last ? `production was last looked over on ${dateOnly(last.created_at)}` : 'production has not been looked over yet', 'monitor discover --record, then start a sensor for what it found (supervisor.md, Monitoring)');
   }
   for (const m of monitorStatus().filter((x) => x.kind === 'http')) {
     if (m.state === 'down') add('medium', 'monitor-down', `monitor:${m.name}`, `${m.url} down since ${m.since}: ${m.last?.error ?? 'failing'}`, 'find why (the last deploy, the app logs), tell the owner, fix forward through a ticket (supervisor.md, Monitoring)');
     if (m.tls_days != null && m.tls_days <= m.tls_warn_days) add(m.tls_days <= 3 ? 'high' : 'medium', 'cert-expiring', `monitor:${m.name}`, `the certificate for ${m.url} expires in ${m.tls_days} day(s)`, 'renew it, or check the auto-renewal; ask the owner if it needs their account');
     if (m.slo?.uptime && m.uptime_7d != null && m.uptime_7d < 100 * m.slo.uptime) add('medium', 'slo-breach-week', `monitor:${m.name}`, `up ${m.uptime_7d}% over 7 days, under the ${100 * m.slo.uptime}% target`, 'read the down observations for a cause; a fix is a ticket, a target that is wrong is the owner\'s to change');
   }
-  for (const g of gates.flaky_gates) add('high', 'flaky-gate', g.gate, `failed then passed at the same commit ${g.commits} time(s)`, 'find the flaky tests (run with --junit) and fix or quarantine them');
-  for (const t of gates.flaky_tests.slice(0, 10)) add('high', 'flaky-test', t.name, `failed then passed at the same commit ${t.times} time(s)`, 'make it deterministic (time, order, shared state, network) or quarantine it with a ticket');
+  // A flake is a finding while it's recent: one that hasn't flipped for a week was fixed or
+  // explained, and its history stays in gates.flaky_gates without raising it again every day.
+  const flakyRecent = (at) => !!at && now - Date.parse(at) < 7 * 24 * 3600000;
+  for (const g of gates.flaky_gates.filter((x) => flakyRecent(x.last_flip))) add('high', 'flaky-gate', g.gate, `failed then passed at the same commit ${g.commits} time(s), last ${g.last_flip.slice(0, 10)}`, 'find the flaky tests (run with --junit) and fix or quarantine them');
+  for (const t of gates.flaky_tests.filter((x) => flakyRecent(x.last_flip)).slice(0, 10)) add('high', 'flaky-test', t.name, `failed then passed at the same commit ${t.times} time(s)`, 'make it deterministic (time, order, shared state, network) or quarantine it with a ticket');
   for (const g of gates.gates.filter((x) => x.median_seconds >= settings.slow_gate_minutes * 60)) add('medium', 'slow-gate', g.gate, `median ${(g.median_seconds / 60).toFixed(1)} min over ${g.runs} run(s)`, 'shard it, cache dependencies, or split fast checks from slow ones');
   for (const t of gates.slowest_tests.slice(0, 5).filter((x) => x.median_seconds >= 10)) add('low', 'slow-test', t.name, `median ${t.median_seconds}s`, 'mock the slow dependency or move it to an integration suite');
   // A share of almost nothing is noise: hotspots wait for a few hours of ticket time or a few dollars.
@@ -7268,6 +7409,11 @@ function collectMetrics(since) {
   // A key that decrypts production, copied into every worktree, is readable by every agent
   // (code-style.md §10): production decrypts its own file, or the default one when it has none.
   const prodKey = fs.existsSync(path.join(mainRoot, 'config/credentials/production.yml.enc')) ? 'config/credentials/production.key' : fs.existsSync(path.join(mainRoot, 'config/credentials.yml.enc')) ? 'config/master.key' : null;
+  const accounts = accountsState();
+  if (accounts?.exhausted) add('high', 'accounts-exhausted', 'cswap', 'every cswap account is at a usage limit', 'wait for a reset or add an account (cswap add)');
+  for (const a of accounts?.needs_login ?? []) add('medium', 'account-needs-login', a, 'cswap can no longer refresh this account', 'log in with it in Claude Code, then cswap add');
+  for (const a of accounts?.restart_gave_up ?? []) add('high', 'restart-gave-up', a, `this session keeps stopping at a usage limit: restarted ${RESTART_MAX} times in 6 hours, so it is left alone until those attempts age out`, `look at why: tmux capture-pane -p -t '${tmuxTarget(a)}', its account's usage (cswap list) and what it was doing. It is retried by itself once an attempt is 6 hours old`);
+  if (accounts?.supervisor_limit) add('high', 'supervisor-at-limit', 'supervisor', `the supervisor stopped at a usage limit: "${accounts.supervisor_limit.text}"`, 'once an account has room, exit it and resume its session (Claude Code: /exit, then claude --resume): a running session keeps the limit even after the login changes');
   if (prodKey && (settings.worktree_files ?? []).includes(prodKey)) add('high', 'production-key-in-worktrees', prodKey, `settings.worktree_files copies ${prodKey}, which decrypts production's credentials, into every worker's worktree`, `the owner's change (settings, gate-change): give agents only development and test keys. ${prodKey === 'config/master.key' ? 'Move production secrets to config/credentials/production.yml.enc with its own production.key, kept only on the platform and in the owner\'s shell, then' : 'Then'} drop ${prodKey} from worktree_files (code-style.md §10)`);
   // Spend, for the improvement loop (supervisor.md §9): what costs more than it should.
   if (m.cost.source === 'measured') {
@@ -7465,7 +7611,8 @@ function collectOoda() {
     retro: retroDue(),
     observations: recent(logObjects('observation').filter((o) => !['reading', 'retro', 'finding-ack'].includes(o.kind)), 40),
     clusters: orientClusters(),
-    knowledge: recent(logObjects('knowledge').filter((k) => k.status !== 'retired'), 60),
+    // every lesson waiting on the owner is in the Inbox, however many: only the rest are the recent 60
+    knowledge: [...recent(logObjects('knowledge').filter((k) => k.status === 'candidate'), Infinity), ...recent(logObjects('knowledge').filter((k) => !['retired', 'candidate'].includes(k.status)), 60)],
     problems: logObjects('problem').filter((p) => p.status !== 'resolved').map((p) => (isIncident(p) ? { ...p, severity: incidentSeverity(p) } : p)).sort((a, b) => b.severity - a.severity),
     acts: recent(acts, 60),
     decisions: decisionRecords().slice(0, 200),
@@ -7482,7 +7629,7 @@ function dashboardData() {
   const settings = loadSettings();
   const sub = activeTickets();
   const msgs = logObjects('message');
-  const replied = new Set(msgs.map((m) => m.re).filter(Boolean));
+  const replied = handledMessages();
   return {
     generated_at: nowIso(), project: settings.project,
     caps: { max_active_tickets: settings.max_active_tickets },
@@ -7658,9 +7805,385 @@ function startHub(log) {
       if ((await holder()) !== 'other') setTimeout(tryListen, retry).unref();
       else log(`hub: port ${HUB_PORT} is held by something that isn't a devteam hub; this dashboard won't serve the hub`);
     });
-    keepAlive(hub).listen(HUB_PORT, '127.0.0.1', () => log(`hub on http://127.0.0.1:${HUB_PORT}`));
+    keepAlive(hub).listen(HUB_PORT, '127.0.0.1', () => { log(`hub on http://127.0.0.1:${HUB_PORT}`); });
   };
   tryListen();
+}
+
+// ===== account rotation: cswap (claude-swap), when it's installed =====
+// A machine has one active Claude account, so one dashboard a minute drives the switch: whichever
+// takes the machine-wide claim first (claimRotation). The hub plays no part, so a dashboard on an
+// older kit, or a dead one, can't stop it. Each dashboard then looks after its own instance's panes.
+// Every dashboard runs this as the supervisor, never as the owner (a cswap found on a path an agent
+// can write gets no owner identity), and only the supervisor acts on a pane, as everywhere else
+// (supervisor.md §11).
+const ACCOUNTS_FILE = runPath('accounts.json');
+const ACCOUNTS_RESUMED = runPath('accounts-resumed.json');
+const ACCOUNTS_FRESH_MS = 10 * 60000;
+// A session that keeps stopping is left alone and reported (restart_gave_up): at most one restart
+// per 10 minutes and 3 in any 6 hours. Older attempts expire, so it recovers without a person.
+const RESTART_EVERY_MS = 10 * 60000;
+const RESTART_SPAN_MS = 6 * 3600000;
+const RESTART_MAX = 3;
+// Under the dashboard's 120 s SIGKILL of a tick, whatever cswap took before it: one relaunch a tick.
+const RESTART_CHILD_MS = 100000;
+const RESTART_TICK_MS = 110000;
+const RESTART_MIN_MS = 30000;
+// The last moment a tick may start a cswap switch (its 45 s timeout, inside RESTART_TICK_MS).
+const SWITCH_LATEST_MS = RESTART_TICK_MS - 45000;
+// Claude Code's limit menu and banner, anchored: an agent's prose can quote either, and cswap only
+// rotates Claude accounts, so another harness's limit stop is not ours to restart. No key ever goes
+// to the menu: its third item spends money.
+const LIMIT_MENU = /^(?:❯\s*)?\d+\.\s*Stop and wait for limit to reset$/;
+// Read untrimmed: bare only at column 0, or with its ⎿ at any indent. An indented continuation of the
+// agent's own prose can start with the same words.
+const LIMIT_BANNER = /^(?:\s*⎿\s*)?You['’]ve hit your (?:\w+ )*limit · resets\b/;
+function findCswap() {
+  const v = process.env.DEVTEAM_CSWAP;
+  if (v === 'off') return null;
+  if (v?.includes('/')) return fs.existsSync(v) ? v : null;
+  // a fixture dashboard on its own hub port never finds the machine's real accounts
+  if (!v && HUB_PORT !== 4320) return null;
+  for (const d of [...(process.env.PATH ?? '').split(path.delimiter).filter(Boolean), path.join(os.homedir(), '.local', 'bin')]) {
+    const f = path.join(d, v || 'cswap');
+    try { fs.accessSync(f, fs.constants.X_OK); if (fs.statSync(f).isFile()) return f; } catch {}
+  }
+  return null;
+}
+const runCswap = (bin, args) => spawnSync(bin, args, { cwd: os.homedir(), encoding: 'utf8', timeout: 45000, killSignal: 'SIGKILL', maxBuffer: 4 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
+// One pass of cswap's own engine. It exits 2 (nothing to do) and 3 (no viable account) as a matter
+// of course, so what it said is read whatever the exit code.
+function rotateAccounts(bin) {
+  const r = runCswap(bin, ['auto', '--once', '--json']);
+  const events = (r.stdout ?? '').split('\n').flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } }).filter((e) => typeof e?.event === 'string');
+  const said = events.find((e) => e.event === 'error')?.message ?? r.stderr ?? '';
+  return { ok: [0, 2, 3].includes(r.status), failure: `cswap auto: ${r.error?.message ?? `exit ${r.status}: ${String(said).trim().slice(0, 200)}`}`, switched: events.filter((e) => e.event === 'switch'), exhausted: events.some((e) => e.event === 'all-exhausted') };
+}
+const accountsEveryMs = () => { const n = Number(process.env.DEVTEAM_ACCOUNTS_MS ?? 60000); return n > 0 ? n : 60000; };
+// In the home directory, not the tmp dir: dashboards started from different shells can have different
+// TMPDIRs, and cswap's accounts are the user's. Named for the hub port, so a fixture has its own.
+const rotateClaimFile = () => path.join(os.homedir(), '.devteam', `accounts-rotate-${HUB_PORT}.json`);
+// Whose claim it is, if it's still good. It goes stale just under a tick so the dashboard that took it
+// can take it again on its next one, and a crash holds it for less than a minute. Dated in the
+// future (the clock moved back) or unreadable, it holds nothing.
+function rotateClaim(file) {
+  try {
+    const c = JSON.parse(readText(file));
+    const age = Date.now() - c.at;
+    return age >= 0 && age < accountsEveryMs() * 0.9 ? c : null;
+  } catch { return null; }
+}
+const writeRotateClaim = (file) => { fs.rmSync(file, { recursive: true, force: true }); fs.writeFileSync(file, JSON.stringify({ at: Date.now(), by: process.pid })); };
+// One dashboard per interval runs cswap's engine. withLock makes the look and the write one step,
+// and its own lock goes stale too. Failing to take it means no rotation this tick, said out loud.
+function claimRotation() {
+  try {
+    const file = rotateClaimFile();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    return withLock(file, () => {
+      if (rotateClaim(file)) return false;
+      writeRotateClaim(file);
+      return true;
+    });
+  } catch (e) { out(`cswap rotation claim: ${e.message}`); return false; }
+}
+// Before a switch, which can start a long way into the claim: still ours, or another dashboard has
+// taken over and this one leaves the accounts alone. Keeping it covers the switch's own 45 s.
+function renewRotation() {
+  try {
+    const file = rotateClaimFile();
+    return withLock(file, () => {
+      let c = null;
+      try { c = JSON.parse(readText(file)); } catch {}
+      if (c?.by !== process.pid) return false;
+      writeRotateClaim(file);
+      return true;
+    });
+  } catch { return false; }
+}
+function cswapAccounts(bin) {
+  const r = runCswap(bin, ['list', '--json']);
+  try { const a = JSON.parse(r.stdout).accounts; return Array.isArray(a) ? a : null; } catch { return null; }
+}
+const mainWindows = (a) => [a?.usage?.fiveHour, a?.usage?.sevenDay].filter(Boolean);
+// Room to work: its usage reads ok, both windows it has are measured and under 100, and no per-model
+// window is full (a session stopped on one would only stop again).
+function accountHasRoom(a) {
+  const w = mainWindows(a);
+  const scoped = Array.isArray(a?.usage?.scoped) ? a.usage.scoped : [];
+  return a?.usageStatus === 'ok' && w.length > 0 && w.every((x) => typeof x.pct === 'number' && x.pct < 100) && !scoped.some((x) => x?.pct >= 100);
+}
+// Known to be full. An account whose usage can't be read right now (a 429, a timeout, an API key) isn't.
+const accountAtLimit = (a) => a?.usageStatus === 'ok' && mainWindows(a).some((x) => x.pct >= 100);
+// How long a full window can last, for a reading with no reset time on it.
+const WINDOW_MS = { fiveHour: 5 * 3600000, sevenDay: 7 * 86400000 };
+// An expired token hides an account's usage, but cswap keeps the last reading. Full counts while that
+// window can't have reset: by its reset time, or failing that by the reading's age. With neither it
+// isn't known, and neither is an account whose usage just can't be read.
+function lastReadingFull(a) {
+  if (a?.usageStatus !== 'token_expired') return false;
+  const age = typeof a.lastGoodAgeSeconds === 'number' ? a.lastGoodAgeSeconds * 1000 : Date.now() - Date.parse(a.lastGoodFetchedAt);
+  return Object.keys(WINDOW_MS).some((k) => {
+    const w = a.lastGoodUsage?.[k];
+    if (!(w?.pct >= 100)) return false;
+    const resets = Date.parse(w.resetsAt);
+    return Number.isFinite(resets) ? resets > Date.now() : age >= 0 && age < WINDOW_MS[k];
+  });
+}
+const accountKnownFull = (a) => accountAtLimit(a) || lastReadingFull(a);
+// One switch, and what it said, whatever the exit code: a switch that stays put is not a failure.
+function switchAccount(bin, args) {
+  const r = runCswap(bin, ['switch', ...args, '--json']);
+  let o = null;
+  try { o = JSON.parse(r.stdout); } catch {}
+  const failed = o?.error || (r.status !== 0 && !o);
+  return { failure: failed ? `cswap switch: ${o?.error?.message ?? r.error?.message ?? `exit ${r.status}: ${String(r.stderr ?? '').trim().slice(0, 200)}`}` : null, moved: !failed && o?.switched !== false, from: o?.from, to: o?.to, reason: o?.reason };
+}
+// Where cswap keeps its files, by its own rule (paths.py): XDG on Linux, its value ignored unless absolute.
+function cswapBackupRoot() {
+  if (process.platform !== 'linux') return path.join(os.homedir(), '.claude-swap-backup');
+  const xdg = (process.env.XDG_DATA_HOME ?? '').replace(/^~(?=\/|$)/, os.homedir());
+  return path.isAbsolute(xdg) ? path.join(xdg, 'claude-swap') : path.join(os.homedir(), '.local', 'share', 'claude-swap');
+}
+// The slots auto has quarantined, which it never activates: its state file is the only place that says
+// (`list --json` doesn't). A map keyed by slot number; a file that can't be read means none.
+function cswapQuarantined() {
+  try {
+    const q = JSON.parse(readText(path.join(cswapBackupRoot(), 'autoswitch_state.json')))?.quarantine;
+    return new Set(q && typeof q === 'object' && !Array.isArray(q) ? Object.keys(q) : []);
+  } catch { return new Set(); }
+}
+// cswap auto is slow to leave a full account whose token expired while idle: it holds for 30 minutes
+// (idleHoldSince is persisted, so --once counts them too), then waits out unhealthy_ticks before it
+// fails over. So switch from here, when auto has stayed on any known-full account and another enabled
+// one has room, which cuts a stall of over 30 minutes to about a minute; only under a claim that's
+// still ours, inside the tick. Always by number: `best` declines on an expired token (it needs the
+// active account's usage), and neither it nor `switch <n>` checks quarantine, so the pick is made here.
+function leaveFullAccount(bin, active, rows, began) {
+  const quarantined = cswapQuarantined();
+  const free = (a) => Math.min(...mainWindows(a).map((x) => 100 - x.pct));
+  const [target] = rows.filter((a) => a !== active && !a.disabled && Number.isInteger(a.number) && !quarantined.has(String(a.number)) && accountHasRoom(a)).sort((a, b) => free(b) - free(a));
+  return target && Date.now() - began < SWITCH_LATEST_MS && renewRotation() ? switchAccount(bin, [String(target.number)]) : null;
+}
+// What a pane's bottom lines say about a limit stop. A banner counts only as the last thing the
+// agent said: nothing of its own after it, just the input box and status lines.
+function limitStop(rawLines) {
+  const lines = rawLines.map((l) => l.trim());
+  const raw = rawLines.filter((l) => !PANE_CODE.test(l.trim()));
+  const own = raw.map((l) => l.trim());
+  const at = own.findIndex((l) => LIMIT_MENU.test(l));
+  const menu = at !== -1 && own.slice(at + 1).some((l) => /^Enter to confirm/.test(l));
+  const banner = raw.findLastIndex((l) => LIMIT_BANNER.test(l));
+  const after = banner === -1 ? [] : own.slice(banner + 1);
+  const [, promptRe] = PANE_WAITS.find(([k]) => k === 'prompt');
+  return { menu, limit: menu || (banner !== -1 && !after.some((l) => /^[⏺●⎿]/.test(l))), otherPrompt: !menu && own.some((l) => promptRe.test(l) || /Enter to confirm/.test(l)), busy: lines.some((l) => PANE_BUSY.test(l)), shells: lines.some((l) => PANE_SHELL.test(l)) };
+}
+// Not sh(): it trims the output, which would put the pane's first line at column 0.
+function paneBottom(target) {
+  let text = '';
+  try { text = execFileSync('tmux', ['capture-pane', '-p', '-t', target], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }); } catch {}
+  return text.split('\n').map((l) => l.trimEnd()).filter((l) => l.trim()).slice(-15);
+}
+// A window that is one pane, stopped at a limit with nothing else going on: the tick asks before it
+// starts a relaunch, and makeSession again right before it replaces the process (worktree_setup may
+// have run for a while in between). A split window could lose the wrong pane; a background shell's
+// work would die with the session.
+function paneStoppedAtLimit(target) {
+  if ((sh('tmux', ['list-panes', '-t', target, '-F', '#{pane_id}']) ?? '').split('\n').filter(Boolean).length !== 1) return false;
+  const st = limitStop(paneBottom(target));
+  return st.limit && !st.busy && !st.otherPrompt && !st.shells;
+}
+// Is this window a session the supervisor launched? A name and a banner are not enough: an agent can
+// open a window called anything showing anything, and the relaunch runs as the supervisor. It must
+// have started in that session's own worktree under the main checkout, the supervisor's log must
+// show the launch, and a worker's ticket must have started.
+function launchedByKit(target, name, role) {
+  try {
+    if (fs.realpathSync(sh('tmux', ['display-message', '-p', '-t', target, '#{pane_start_path}'])) !== path.join(fs.realpathSync(mainRoot), '.worktrees', name)) return false;
+  } catch { return false; }
+  if (role === 'worker' && !lastPhaseOf(name)) return false;
+  const said = [`made ${role} ${name} in `, `resumed ${role} ${name} in `];
+  return logObjects('act').some((a) => a.class === 'worker-slots' && a.created_by === 'supervisor' && said.some((p) => String(a.what).startsWith(p)));
+}
+// Each session's restart times still in force. The file is untrusted: any shape reads as nothing,
+// a lone number is the old form, and a time in the future is ignored.
+function restartTimes(now) {
+  let o;
+  try { o = JSON.parse(readText(ACCOUNTS_RESUMED) ?? '{}'); } catch { return {}; }
+  if (!o || typeof o !== 'object' || Array.isArray(o)) return {};
+  const live = {};
+  for (const [k, v] of Object.entries(o)) {
+    const t = (Array.isArray(v) ? v : [v]).map(Number).filter((x) => Number.isFinite(x) && x <= now && now - x < RESTART_SPAN_MS).sort((a, b) => a - b).slice(-RESTART_MAX);
+    if (t.length) live[k] = t;
+  }
+  return live;
+}
+// Restart one session stopped at a limit: 'restarted', 'failed' (tried, and it may not be running),
+// 'gave-up' (stopped again, past the cap), or null when there is nothing to do. A running Claude Code
+// session keeps the limit it hit even after the machine's login moves to an account with room (typing
+// "carry on" into it meets the same banner), so it is relaunched as `worker|planner <id> --resume`
+// would, in a fresh process on the active account, continuing the same conversation. makeSession
+// replaces the old process itself, after everything that can refuse, and no key is sent to it. The
+// attempt is recorded first, under the lock, so a tick killed halfway can't restart it twice and a
+// session that keeps stopping runs into the cap: if it can't be recorded, nothing is done. A budget
+// of 0 only looks: no relaunch, but a session past the cap is still reported.
+function restartPane(name, launch, budget) {
+  const { target, problem } = resolvePane(tmuxTarget(name));
+  if (problem || !target || !paneStoppedAtLimit(target) || !launchedByKit(target, name, launch[0])) return null;
+  const now = Date.now();
+  let verdict;
+  try {
+    fs.mkdirSync(runDir, { recursive: true });
+    // withLock clears a lock older than 10 s, so one left by a crash costs one wait
+    verdict = withLock(ACCOUNTS_RESUMED, () => {
+      const live = restartTimes(now);
+      const times = live[name] ?? [];
+      if (times.length >= RESTART_MAX) return 'gave-up';
+      if (!budget || (times.length && now - times.at(-1) < RESTART_EVERY_MS)) return null;
+      live[name] = [...times, now];
+      fs.writeFileSync(`${ACCOUNTS_RESUMED}.${process.pid}`, JSON.stringify(live));
+      fs.renameSync(`${ACCOUNTS_RESUMED}.${process.pid}`, ACCOUNTS_RESUMED);
+      return 'go';
+    });
+  } catch { return null; }
+  if (verdict !== 'go') return verdict;
+  // as the supervisor, but not from its pane: rememberSupervisorPane needs both markers, and TMUX
+  // stays so the child talks to this tmux server
+  const env = { ...process.env, DEVTEAM_ROLE: 'supervisor' };
+  for (const k of ['TMUX_PANE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE']) delete env[k];
+  const r = spawnSync(process.execPath, [process.argv[1], ...launch, '--resume', '--replace-agent'], { cwd: mainRoot, env, encoding: 'utf8', timeout: budget, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'pipe'] });
+  const ok = r.status === 0;
+  const why = (r.stderr || r.error?.message || `exit ${r.status}`).trim().slice(0, 200);
+  appendLog({ type: 'observation', source: 'pane', kind: 'limit-restarted', subject: name, detail: ok ? 'a session stopped at a usage limit was restarted on the active account, which has room' : `a session stopped at a usage limit could not be restarted: ${why}`, detector: 'pane', source_key: `limit-restarted ${name} ${now}` });
+  if (!ok) out(`could not restart ${name}: ${why}`);
+  return ok ? 'restarted' : 'failed';
+}
+// makeSession --replace-agent: the pane's process becomes a shell in the worktree. respawn-pane -k
+// only sends SIGHUP, so the process and its direct children (the agent, under the pane's shell) are
+// noted first, and any still alive a moment later get a SIGTERM. Only those pids.
+function replacePaneProcess(target, wt) {
+  const pid = Number(sh('tmux', ['display-message', '-p', '-t', target, '#{pane_pid}']));
+  if (!Number.isInteger(pid) || pid <= 1) die(`could not read the process of ${target}: left as it was`);
+  const pids = [pid, ...(sh('pgrep', ['-P', String(pid)]) ?? '').split('\n').map(Number).filter((p) => Number.isInteger(p) && p > 1)];
+  // a login shell, as a new window gets, not the pane's first command (respawn-pane's default), which may be the agent itself
+  const shell = sh('tmux', ['show-options', '-gv', 'default-shell'])?.trim() || process.env.SHELL || '/bin/sh';
+  if (!tmux(['respawn-pane', '-k', '-c', wt, '-t', target, `${shell} -l`])) die(`could not replace the process in ${target}`);
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
+  for (const p of pids) {
+    try { process.kill(p, 0); process.kill(p, 'SIGTERM'); } catch {}
+  }
+}
+// The supervisor's transcript ending on a rate-limit error means it has stopped. It is the owner's
+// session, started their way, so it is reported, never restarted. Which one is the
+// supervisor's: of the newest few in the main checkout, the one the kit started as the supervisor or
+// that ran supervisor commands (a command it ran: reading or quoting the words is not enough).
+// Nothing else is taken for it, and a limit lasts a week at most.
+const SUPERVISOR_COMMAND = /^\s*(?:cd \S+ && )?DEVTEAM_ROLE=supervisor node /;
+const SUPERVISOR_LIMIT_MAX_MS = 7 * 24 * 3600000;
+function supervisorTranscript() {
+  const dir = path.join(process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), '.claude'), 'projects', realOrSelf(mainRoot).replace(/[^a-zA-Z0-9]/g, '-'));
+  let files = [];
+  try { files = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')).map((f) => ({ f: path.join(dir, f), m: fs.statSync(path.join(dir, f)).mtimeMs })).sort((a, b) => b.m - a.m).slice(0, 5); } catch { return null; }
+  const read = (f, tail) => { const fd = fs.openSync(f, 'r'); try { const size = fs.fstatSync(fd).size; const n = Math.min(size, tail ? 1024 * 1024 : 65536); const b = Buffer.alloc(n); return b.toString('utf8', 0, fs.readSync(fd, b, 0, n, tail ? size - n : 0)); } finally { fs.closeSync(fd); } };
+  const lines = (t) => t.split('\n').flatMap((l) => { try { return [JSON.parse(l)]; } catch { return []; } });
+  for (const { f } of files) {
+    try {
+      const end = read(f, true);
+      const first = lines(read(f, false)).find((o) => o?.type === 'user');
+      const ran = lines(end).some((o) => o?.type === 'assistant' && Array.isArray(o.message?.content) && o.message.content.some((c) => c?.type === 'tool_use' && SUPERVISOR_COMMAND.test(String(c.input?.command ?? ''))));
+      if (ran || JSON.stringify(first?.message ?? '').includes('You are the supervisor for this repository')) return { file: f, entries: lines(end) };
+    } catch {}
+  }
+  return null;
+}
+function supervisorLimit() {
+  const last = supervisorTranscript()?.entries.filter((o) => o?.type === 'assistant').pop();
+  if (!last) return null;
+  if (last?.error !== 'rate_limit' || !(Date.now() - Date.parse(last.timestamp) < SUPERVISOR_LIMIT_MAX_MS)) return null;
+  const c = last.message?.content;
+  return { at: last.timestamp, text: String((Array.isArray(c) ? c[0]?.text : c) ?? 'usage limit').slice(0, 200) };
+}
+// supervisor-session: the id of the supervisor's conversation, for resuming it after the machine
+// died: it reads only what's on disk. Claude Code's alone; another harness, or none found, prints
+// nothing, so nobody resumes a guess.
+function cmdSupervisorSession() {
+  if (!/^claude(\s|$)/.test(loadSettings().resume_command)) return;
+  const t = supervisorTranscript();
+  if (t) out(path.basename(t.file, '.jsonl'));
+}
+function accountsState() {
+  try {
+    const s = JSON.parse(readText(ACCOUNTS_FILE));
+    const age = Date.now() - Date.parse(s.at);
+    return age >= 0 && age < ACCOUNTS_FRESH_MS ? { ...s, active_no_room: s.active_no_room === true, needs_login: Array.isArray(s.needs_login) ? s.needs_login.map(String) : [], restart_gave_up: Array.isArray(s.restart_gave_up) ? s.restart_gave_up.map(String) : [] } : null;
+  } catch { return null; }
+}
+// Not supervisorOnly: that records this process's pane as the supervisor's, and this runs under the dashboard.
+function cmdAccountsTick() {
+  const began = Date.now();
+  if (logWriter() !== 'supervisor' || ['worker', 'planner'].includes(process.env.DEVTEAM_ROLE)) die('accounts-tick: the supervisor does this');
+  const bin = findCswap();
+  const before = accountsState();
+  const state = { at: nowIso(), cswap: !!bin, active: null, active_no_room: false, exhausted: false, needs_login: [], restart_gave_up: [], supervisor_limit: null, resumed: [] };
+  let switched = false;
+  if (bin) {
+    const who = (x) => (x && typeof x === 'object' ? x.email ?? x.alias ?? x.number ?? '?' : x ?? '?');
+    const saySwitched = (e) => out(`cswap switched account${e.from || e.to ? `: ${who(e.from)} -> ${who(e.to)}` : ''}`);
+    const claimed = !!flags.rotate && claimRotation();
+    if (claimed) {
+      const r = rotateAccounts(bin);
+      if (!r.ok) out(r.failure);
+      r.switched.forEach(saySwitched);
+      switched = r.switched.length > 0;
+      state.exhausted = r.exhausted;
+    }
+    const rows = cswapAccounts(bin);
+    if (rows) {
+      state.needs_login = rows.filter((a) => a.usageStatus === 'relogin_required').map((a) => String(a.alias ?? a.email ?? a.number));
+      const usable = rows.filter((a) => !a.disabled);
+      if (usable.length && usable.every(accountKnownFull)) state.exhausted = true;
+      const active = rows.find((a) => a.active);
+      state.active = active ? String(active.email ?? active.number) : null;
+      // What a session started now would run into: known full, or stopped on a per-model limit.
+      state.active_no_room = !!active && (accountKnownFull(active) || (active.usageStatus === 'ok' && Array.isArray(active.usage?.scoped) && active.usage.scoped.some((x) => x?.pct >= 100)));
+      if (claimed && !switched && accountKnownFull(active)) {
+        const s = leaveFullAccount(bin, active, rows, began);
+        if (s?.failure) out(s.failure);
+        else if (s?.moved) {
+          saySwitched(s);
+          switched = true;
+          state.exhausted = false;
+          state.active = s.to ? String(s.to.email ?? s.to.number) : null;
+          state.active_no_room = false;
+        } else if (s) out(`cswap stayed on ${who(active)}: ${s.reason ?? 'no reason given'}`);
+      }
+      // A session holds the old login for about 30 s after a switch (macOS), and any dashboard's
+      // rotation can be the one that switched: resume only on an account this project's last tick saw too.
+      if (!switched && state.active && before?.active === state.active && accountHasRoom(active)) {
+        // only the kit's own sessions, and only those it would launch now: a held one stays as it is
+        const launchOf = (name) => (name.startsWith('plan-') ? ['planner', name.slice('plan-'.length)] : tickets().has(name) ? ['worker', name] : null);
+        const held = (name) => ['done', 'parked'].includes(workerState(name)?.phase) || !!mergeShaFor(name) || ['park', 'let-go'].includes(sessionMode(name)) || !!draining();
+        // one relaunch a tick, in what's left of it; the rest still report if they've given up
+        let tried = false;
+        for (const { name } of ourWindows(tmuxSession())) {
+          const launch = launchOf(name);
+          if (!launch || held(name)) continue;
+          const left = RESTART_TICK_MS - (Date.now() - began);
+          const did = restartPane(name, launch, tried || left < RESTART_MIN_MS ? 0 : Math.min(RESTART_CHILD_MS, left));
+          if (did === 'gave-up') state.restart_gave_up.push(name);
+          else if (did) tried = true;
+          if (did === 'restarted') state.resumed.push(name);
+        }
+      }
+      for (const w of state.resumed) out(`restarted ${w}: it had stopped at a usage limit`);
+    }
+  }
+  // in tmux or not, with or without cswap
+  state.supervisor_limit = supervisorLimit();
+  fs.mkdirSync(runDir, { recursive: true });
+  const tmp = `${ACCOUNTS_FILE}.${process.pid}`;
+  fs.writeFileSync(tmp, JSON.stringify(state));
+  fs.renameSync(tmp, ACCOUNTS_FILE);
 }
 
 async function cmdDashboard() {
@@ -7721,7 +8244,24 @@ async function cmdDashboard() {
   };
   refreshHello();
   setInterval(refreshHello, 10000).unref();
-  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, inbox: hello?.inbox ?? null, fleet: hello?.fleet ?? null });
+  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, inbox: hello?.inbox ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}) });
+  // Account rotation and limit stops (accounts-tick), one run at a time, as the supervisor; a line
+  // it prints goes to the log once, however many ticks repeat it. Every dashboard asks to rotate,
+  // and the claim decides which one does.
+  let accountsRunning = false;
+  let accountsSaid = '';
+  const accountsTick = () => {
+    if (accountsRunning) return;
+    accountsRunning = true;
+    const env = { ...process.env, DEVTEAM_ROLE: 'supervisor' };
+    for (const k of ['DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_CHANNEL']) delete env[k];
+    execFile(process.execPath, [self, 'accounts-tick', '--rotate'], { cwd: mainRoot, env, timeout: 120000, killSignal: 'SIGKILL', maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+      accountsRunning = false;
+      const said = `${stdout}${err ? ` ${stderr || err.message}` : ''}`.trim();
+      if (said && said !== accountsSaid) log(`accounts: ${said}`);
+      accountsSaid = said;
+    });
+  };
   // One dashboard-data run at a time, shared by every page waiting on it, given 2 minutes: each
   // refresh used to start its own, and on a slow machine they piled up (one ran for an hour).
   let dataRun = null;
@@ -7991,14 +8531,14 @@ async function cmdDashboard() {
     log(`server error: ${e?.stack ?? e}`); process.stderr.write(`devteam dashboard: ${e.message}\n`); process.exit(1);
   });
   keepAlive(server);
-  server.once('listening', () => { log(`started on http://${host}:${port} (node ${process.version})`); out(`devteam dashboard on http://${host}:${port}`); startHub(log); });
+  server.once('listening', () => { log(`started on http://${host}:${port} (node ${process.version})`); out(`devteam dashboard on http://${host}:${port}`); startHub(log); setInterval(accountsTick, accountsEveryMs()).unref(); });
   server.listen(port, host);
 }
 
 // ===== 11. sessions: workers, planners, messages, phases, gates =====
 
 const PROMPTS = {
-  supervisor: 'You are the supervisor for this repository, running in the owner\'s terminal. Read the devteam section of AGENTS.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for.',
+  supervisor: 'You are the supervisor for this repository, running in the owner\'s terminal. Read the devteam section of AGENTS.md, then docs/devteam/process/supervisor.md, and follow it from the start. You write no production code. The log (devteam.mjs log, questions, status) and the tracked files are the record; chat is not. When you start, and again whenever the project changes, discover every production signal the project already has access to (production URLs, log access such as heroku logs, error trackers such as Sentry or Honeybadger, the CLIs and tokens here) and start a sensor for each, with no question to the owner (supervisor.md, Monitoring). If there are no ready goals, begin at docs/devteam/process/planning.md §1 by asking the owner what the project is for.',
   worker: 'You are the worker for ticket {{ID}}. Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md, and follow it from §1. Your ticket: node docs/devteam/scripts/devteam.mjs ticket show {{ID}}. Use superpowers for every step; devteam says where files go and what must be true before you ask for the merge.',
   planner: 'You are planning feature {{ID}} on branch plan/{{ID}}, in this worktree. Read the devteam section of AGENTS.md, then docs/devteam/process/planning.md, and run the pipeline from §2 for this feature. Your tickets and the feature line go to the log with devteam.mjs feature add / ticket add; commit everything as you go; message the supervisor (devteam.mjs send supervisor) when the graph review passes.',
 };
@@ -8007,8 +8547,12 @@ const repoAbout = (name) => (name === 'home' ? repo('home') : { name, remote: ow
 // A role's opening prompt. A ticket in another repo has no kit of its own in its worktree: it runs
 // home's kit by absolute path and keeps its records in that repo's project folder. The remote and
 // the folder come from settings, so each is shown as one token (a hand edit on main is never validated).
+// What a fix ticket's worker is told about care: back up what a change could destroy, and hold for
+// a human when not confident (process/worker.md, A fix ticket).
+const FIX_CARE = ' This ticket fixes a production incident, so take care. Before anything that can destroy or overwrite data or is hard to undo (a destructive migration, a backfill, a bulk update or delete, a schema change, a config or access change), back up first: for a database or data change, take a snapshot or dump of what it touches (heroku pg:backups:capture or pg_dump, or a copy of the affected rows kept outside the change), restore it once to prove it works, write the undo, keep the change additive and reversible where it can be, and say in verification.md where the backup is and how to restore it. If you are not confident in the fix, or cannot back up what it touches, hold: stop before shipping, devteam.mjs phase blocked, and devteam.mjs send supervisor "<what you are unsure of, and your recommendation>" --kind blocked; the supervisor asks the owner an ordinary Inbox question and you wait for the answer.';
 function promptFor(role, id, R = repo('home')) {
-  const base = PROMPTS[role].replace(/\{\{ID\}\}/g, id);
+  const fixCare = role === 'worker' && tickets().get(id)?.kind === 'fix' ? FIX_CARE : '';
+  const base = `${PROMPTS[role].replace(/\{\{ID\}\}/g, id)}${fixCare}`;
   if (R.name === 'home') return base;
   const kitCmd = `node ${shq(path.join(mainRoot, 'docs', 'devteam', 'scripts', 'devteam.mjs'))}`;
   return `${base.replace(/node docs\/devteam\/scripts\/devteam\.mjs/g, kitCmd).replace('Read the devteam section of AGENTS.md, then docs/devteam/process/worker.md', `Read ${path.join(mainRoot, 'docs', 'devteam', 'process', 'worker.md')}`)} This worktree is a checkout of ${R.name} (${locatorForPrompt(R.remote)}); run every devteam command as ${kitCmd}, and keep this ticket's records under ${locatorForPrompt(R.projectRel)}/tickets/${id}/ in this repo.`;
@@ -8122,7 +8666,7 @@ function settledByLanding(m) {
 function cmdMessages() {
   const me = flagStr('to') ?? myAddress();
   const all = logObjects('message').sort(byTime);
-  const replied = new Set(all.map((m) => m.re).filter(Boolean));
+  const replied = handledMessages();
   let mine = all.filter((m) => m.to === me);
   if (flags.open) mine = mine.filter((m) => !replied.has(m.id) && !['info', 'ruling', 'answer'].includes(m.kind) && !settledByLanding(m));
   mine = mine.slice(-Number(flagStr('tail') ?? 50));
@@ -8160,7 +8704,7 @@ function cmdPhase() {
   // Waiting with nothing asked looks the same as waiting with a request answered: say so.
   if (['awaiting-word', 'blocked'].includes(to)) {
     const msgs = logObjects('message');
-    const replied = new Set(msgs.map((m) => m.re).filter(Boolean));
+    const replied = handledMessages();
     if (!msgs.some((m) => m.created_by === id && m.to === 'supervisor' && !replied.has(m.id) && !['info', 'ruling', 'answer'].includes(m.kind)))
       warn(`${to} with no open request to the supervisor: send one (--kind review-request for approve-spec, approve-plan or the stage word; merge-request at the end; blocked), since info expects no reply`);
   }
@@ -8290,6 +8834,9 @@ function removeWorkerWorktree(id) {
 }
 function makeSession(role) {
   supervisorOnly(role);
+  // accounts-tick's relaunch of a session stopped at a limit: the pane's process is replaced here,
+  // after every refusal and after seedWorktree, so a refusal or a failing setup leaves it running.
+  const replaceAgent = !!flags['replace-agent'] && !!flags.resume;
   const id = positional[0] ?? die(`usage: ${role} <${role === 'worker' ? 'ticket-id' : 'feature'}> [--resume] [--force]`);
   if (repoRoot !== mainRoot) die(`run this from the main checkout (${mainRoot})`);
   if (role === 'worker' && !tickets().has(id)) die(`no ticket ${id} (devteam.mjs ticket show ${id})`);
@@ -8317,6 +8864,9 @@ function makeSession(role) {
   const refused = ['park', 'let-go'].includes(mode) || (mode === 'drain' && !started);
   if (refused && !flags.force) die(legacyDrain ? `the fleet is drained by an old drain (${legacyDrain.id}): fleet unpark first (supervisor.md §12); to start this one anyway, add --force (it is logged)` : `its goal is ${holdWords(mode)}: ${mode === 'drain' ? 'a draining goal finishes what is running and starts nothing new' : 'nothing starts for it'} (planning.md §1, holds). To start it anyway, add --force (it is logged)`);
   if (!sh('tmux', ['-V'])) die('tmux not found');
+  // A warning only: the numbers can be 10 minutes old, and the supervisor may know better. Not for
+  // a relaunch at a limit: the tick starts that once there's room, and this file can lag it.
+  if (!replaceAgent && accountsState()?.active_no_room) warn(`the active Claude account (${String(accountsState().active ?? 'unknown').slice(0, 80)}) has no room left, so this ${role} may stop at its limit: wait for a reset or switch account (cswap)`);
   const s = loadSettings();
   let resume = !!flags.resume;
   const blockSize = flagNum('id-block') ?? ID_BLOCK_DEFAULT;
@@ -8324,6 +8874,7 @@ function makeSession(role) {
   const name = role === 'worker' ? id : `plan-${id}`;
   const branch = role === 'worker' ? `ticket/${id}` : `plan/${id}`;
   const wt = path.join(mainRoot, '.worktrees', name);
+  if (replaceAgent && !fs.existsSync(wt)) die(`--replace-agent: ${name} has no worktree at ${wt}; nothing to resume, and its process is left as it is`);
   fs.mkdirSync(path.join(runDir, 'prompts'), { recursive: true });
   // A planner gets a block of ticket numbers before it numbers anything; one that has a block keeps
   // it, and one that numbered tickets before blocks existed gets none (nothing to check it against).
@@ -8363,6 +8914,7 @@ function makeSession(role) {
   // Workers live in detached tmux windows the owner can attach to; the supervisor is not one of them.
   let fresh = false;
   const session = tmuxSession({ save: true });
+  if (replaceAgent && !(sh('tmux', ['list-windows', '-t', `=${session}`, '-F', '#W']) ?? '').split('\n').includes(name)) die(`--replace-agent: no window ${session}:${name} to restart in`);
   if (!tmux(['has-session', '-t', `=${session}`])) { fresh = tmux(['new-session', '-d', '-s', session, '-n', name, '-c', wt]); if (!fresh) die('could not start tmux'); }
   const windows = (sh('tmux', ['list-windows', '-t', `=${session}`, '-F', '#W']) ?? '').split('\n');
   if (!fresh && windows.includes(name)) { if (!flags.resume) die(`window ${session}:${name} exists (use --resume to relaunch in it)`); }
@@ -8370,7 +8922,14 @@ function makeSession(role) {
   const target = `=${session}:${name}`;
   const shown = `${session}:${name}`;
   const env = `export DEVTEAM_HOME=${shq(mainRoot)} DEVTEAM_RUN='${runDir}' DEVTEAM_ROLE='${role}' ${role === 'worker' ? `DEVTEAM_TICKET='${id}'` : `DEVTEAM_FEATURE='${id}'`}`;
-  typeInto(target, env);
+  if (replaceAgent) {
+    // worktree_setup can take minutes: the owner may have quit the agent and started something since
+    if (resolvePane(target).problem || !paneStoppedAtLimit(target)) die(`--replace-agent: ${shown} no longer shows a limit stop; left as it is`);
+    replacePaneProcess(target, wt);
+  }
+  // Past the replacement nothing is left running there, so a failure has to surface, not log success.
+  const type = (line) => { if (!typeInto(target, line) && replaceAgent) die(`could not type into ${shown}: its old process is gone and the new one did not start; ${role} ${id} --resume starts it`); };
+  type(env);
   // Worker and planner policy travels with the launch, not the repo's agent config (which may be
   // gitignored, and would bind the supervisor too): for Claude Code, a --settings file in run/.
   let cmd = resume ? s.resume_command : s.agent_command;
@@ -8386,7 +8945,7 @@ function makeSession(role) {
   // then saves no transcript, so its spend goes unmeasured). Strip them for the agent, whatever the
   // window's shell is. Only per-session markers: settings an owner may export (CLAUDE_CONFIG_DIR) stay.
   const markers = [...new Set([...Object.keys(process.env), ...(sh('tmux', ['show-environment', '-g']) ?? '').split('\n'), ...(sh('tmux', ['show-environment', '-t', `=${tmuxSession()}`]) ?? '').split('\n')].map((l) => l.replace(/^-/, '').split('=')[0]).filter((k) => SESSION_MARKERS.test(k)))].sort();
-  typeInto(target, `${markers.length ? `env ${markers.map((k) => `-u ${k}`).join(' ')} ` : ''}${cmd} "$(cat '${promptFile}')"`);
+  type(`${markers.length ? `env ${markers.map((k) => `-u ${k}`).join(' ')} ` : ''}${cmd} "$(cat '${promptFile}')"`);
   if (role === 'worker' && !resume) appendLog({ type: 'phase', from: null, to: 'starting', note: `started in ${shown}` }, id);
   // a planner parked by a park is running again
   if (role === 'planner' && lastPhaseOf(name)?.to === 'parked') appendLog({ type: 'phase', from: 'parked', to: 'starting', note: `started in ${shown}` }, name);
@@ -8869,7 +9428,7 @@ function moveChecklist(s, memory = []) {
     ...(memory.length ? [`your agent's own memory for this project (${memory.length} file(s) under ${path.dirname(path.dirname(memory[0].path))}) isn't in the repo; the supervisor folded what the next session needs into knowledge and its handoff, so nothing to copy`] : []),
     `start the supervisor in the repo: open ${agent} there and say "Assume the role of the devteam supervisor and resume the fleet" (or step 9's command: DEVTEAM_ROLE=supervisor ${agent} "$(node docs/devteam/scripts/devteam.mjs prompt supervisor)"); tmux need only be installed: the workers get a tmux session of their own`,
     'the supervisor runs fleet unpark, or fleet undrain for a drained fleet (it rebuilds run/log from the landed log, prints the parity fingerprint, puts every goal back as it was) and restarts each parked session with the command it prints',
-    'in the browser you use there: turn on "Notify me of new Inbox items" again (a browser setting)',
+    'in the browser you use there: open the hub and turn on "Notify me of new Inbox items" again (a browser setting)',
     `restart the dashboard where it outlives the session: tmux new-window -d -t '=${tmuxSession()}' -n dashboard 'node docs/devteam/scripts/devteam.mjs dashboard' (or another terminal), then open the hub, http://127.0.0.1:${HUB_PORT}, which lists every instance on the machine (or the address the dashboard prints)`,
   ];
 }
@@ -8944,12 +9503,14 @@ function drainedPreface() {
     : `This looks like the machine it moved to. Before anything else: ${(() => { const h = pinsHint(); return h ? `(0) ${h}; ` : ''; })()}(1) DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs fleet unpark (it rebuilds run/log from the landed log, prints the parity fingerprint, puts every goal back as it was and prints the restart command for each parked session); (2) run each of those commands; (3) make sure the dashboard is running (supervisor.md §11) and tell the owner its address; then carry on from supervisor.md §1.`}`;
 }
 
-// ===== monitoring: production signals into the loop =====
-// Monitors are owner settings (`monitors`, class monitor-change). A URL check (kind http) runs on
-// every `wait` cycle when due: status, an optional body substring, latency, and TLS expiry. Samples
-// stay local in run/monitors/<name>/ (gitignored, not the record); only meaning reaches the log, as
-// observations on subject monitor:<name>: down and up on the transition, slow once per breach, and a
-// daily rollup (kind reading). `wait` returns once on a new down, never on a standing finding.
+// ===== sensors: production signals into the loop =====
+// A sensor takes samples; samples stay local in run/monitors/<name>/ (gitignored, not the record).
+// A meaningful change becomes an observation in the log on subject monitor:<name>, and the
+// supervisor's OODA loop and the Health section act on those. A sensor is the supervisor's own
+// (settings `monitors`, no owner answer): it only reads. A URL check (kind http) runs on every
+// `wait` cycle when due: status, an optional body substring, latency, and TLS expiry; down and up
+// on the transition, slow once per breach, and a daily rollup (kind reading) reach the log. `wait`
+// returns once on a new down, never on a standing finding.
 const MONITOR_DEFAULTS = { every_minutes: 1, timeout_s: 10, down_after: 2, slow_after: 3, tls_warn_days: 14, sample_days: 30, cache_days: 30, probe_timeout_s: 60 };
 // A probe reads an API every 5 minutes by default; a stream's spool is drained every minute.
 const MONITOR_KIND_DEFAULTS = { probe: { every_minutes: 5 }, stream: { every_minutes: 1 } };
@@ -9795,8 +10356,18 @@ const untrusted = (what, text) => { const n = crypto.randomBytes(4).toString('he
 // runs (a heroku remote, app.json, Procfile, fly.toml, render.yaml, vercel.json, netlify.toml,
 // deploy workflows), error trackers in the dependencies, the CLIs on this machine and whether
 // they're logged in, the production URLs, and health routes. The supervisor turns what it finds
-// into probes (one chore ticket) and one monitor-change question; access is asked for only where
-// a source has no way in. Run in the baseline and weekly (monitor-discovery-due).
+// into sensors (a chore ticket for the probes, no owner question); access is asked for only where
+// a source has no way in. Run at boot, and when what it reads changes or a week passes
+// (monitor-discovery-due).
+const DISCOVERY_FILES = ['app.json', 'Procfile', 'fly.toml', 'render.yaml', 'vercel.json', 'netlify.toml', 'railway.json', 'Gemfile', 'package.json', 'requirements.txt', 'pyproject.toml', 'composer.json', 'go.mod'];
+// A hash of what discovery reads, so a new host, tracker or deploy workflow says to look again.
+function discoveryKey() {
+  const h = crypto.createHash('sha256').update(git(['remote', '-v'], mainRoot) ?? '');
+  const wfDir = path.join(mainRoot, '.github/workflows');
+  const wfs = fs.existsSync(wfDir) ? fs.readdirSync(wfDir).filter((x) => /\.ya?ml$/.test(x)).sort().map((x) => `.github/workflows/${x}`) : [];
+  for (const f of [...DISCOVERY_FILES, ...wfs]) h.update(`\0${f}\0${readText(path.join(mainRoot, f)) ?? ''}`);
+  return h.digest('hex').slice(0, 16);
+}
 function discoverProduction() {
   const at = (f) => path.join(mainRoot, f);
   const read = (f) => readText(at(f)) ?? '';
@@ -10112,7 +10683,7 @@ async function cmdMonitor() {
     if (flags.record) {
       supervisorOnly('monitor discover --record');
       const today = dateOnly(nowIso());
-      appendLog({ type: 'observation', source: 'monitors', subject: 'monitors', kind: 'discovery', detector: 'monitor', detail: `production: ${d.hosts.map((h) => `${h.host}${h.app ? ` ${h.app}` : ''}`).join(', ') || 'no host found'}; trackers: ${d.trackers.map((t) => t.tracker).join(', ') || 'none'}; ${d.monitors.length} monitor(s), ${d.proposals.length} to propose${d.gaps.length ? `; gaps: ${d.gaps.join('; ')}` : ''}`.slice(0, 900), severity: d.gaps.length ? 2 : 0, valence: 0, source_key: `monitors:discovery:${today}` }, 'supervisor');
+      appendLog({ type: 'observation', source: 'monitors', subject: 'monitors', kind: 'discovery', detector: 'monitor', detail: `production: ${d.hosts.map((h) => `${h.host}${h.app ? ` ${h.app}` : ''}`).join(', ') || 'no host found'}; trackers: ${d.trackers.map((t) => t.tracker).join(', ') || 'none'}; ${d.monitors.length} monitor(s), ${d.proposals.length} to start${d.gaps.length ? `; gaps: ${d.gaps.join('; ')}` : ''}`.slice(0, 900), severity: d.gaps.length ? 2 : 0, valence: 0, source_ref: discoveryKey(), source_key: `monitors:discovery:${today}` }, 'supervisor');
     }
     if (flags.json) return json(d);
     out(`where it runs: ${d.hosts.map((h) => `${h.host}${h.app ? ` ${h.app}` : ''} (${h.from})`).join(', ') || 'nothing found'}`);
@@ -10121,7 +10692,7 @@ async function cmdMonitor() {
     out(`CLIs: ${d.clis.map((c) => `${c.cli} ${c.ready ? 'logged in' : `(${c.why})`}`).join(', ') || 'none needed'}`);
     out(`production URLs: ${d.urls.map((u) => `${monitorShown(u.url)} (${u.from})`).join(', ') || 'none found'}; health routes: ${d.health.map((h) => h.path).join(', ') || 'none found'}`);
     out(`monitors now: ${d.monitors.join(', ') || 'none'}`);
-    for (const p of d.proposals) out(`propose ${p.name}: ${p.reads}${p.probe_to_write ? ' (a probe to write)' : ''}${p.needs ? `; needs ${p.needs}` : ''}\n  ${JSON.stringify(p.monitor)}`);
+    for (const p of d.proposals) out(`start ${p.name}: ${p.reads}${p.probe_to_write ? ' (a probe to write)' : ''}${p.needs ? `; needs ${p.needs}` : ''}\n  ${JSON.stringify(p.monitor)}`);
     for (const g of d.gaps) out(`gap: ${g}`);
     return;
   }
@@ -10216,7 +10787,7 @@ function cmdHello() {
   // the Inbox as the dashboard counts it: open questions and lessons waiting to be kept
   const inbox = questions().filter((q) => q.status === 'open' && q.goal_hold !== 'let-go').length + logObjects('knowledge').filter((k) => k.status === 'candidate').length;
   const workers = ourWindows(tmuxSession()).length;
-  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, fleet: { mode: fleetMode() ?? 'run', workers } };
+  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, fleet: { mode: fleetMode() ?? 'run', workers }, ...(accountsState()?.supervisor_limit ? { alert: 'The supervisor stopped at a usage limit: type "continue" in its terminal' } : {}) };
   return flags.json ? json(r) : out(`${r.name} at ${r.root}: kit ${r.kit}, ${inbox} open question(s), fleet ${r.fleet.mode}, ${workers} session(s)`);
 }
 // The kit's release (settings.upstream_base), +local when the kit that is running differs from the
@@ -10817,7 +11388,7 @@ function cmdInit() {
   const remoteHead = git(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'])?.replace(/^origin\//, '')
     ?? (git(['ls-remote', '--symref', 'origin', 'HEAD']) ?? '').match(/^ref: refs\/heads\/(\S+)\s+HEAD/m)?.[1]
     ?? null;
-  const block = { project: flagStr('name') ?? path.basename(root), upstream_base: flagStr('upstream-base') ?? null, ...(remoteHead && remoteHead !== 'main' && remoteHead !== 'HEAD' ? { main_branch: remoteHead } : {}), components: {}, gates: {} };
+  const block = { project: flagStr('name') ?? path.basename(root), upstream_base: flagStr('upstream-base') ?? null, upstream_sync: 'adopt', ...(remoteHead && remoteHead !== 'main' && remoteHead !== 'HEAD' ? { main_branch: remoteHead } : {}), components: {}, gates: {} };
   put(path.join(projectDir, 'settings.md'), `# Project settings\n\nOnly what this project changes; every setting has a default in scripts/devteam.mjs (\`devteam.mjs settings\` shows the result). Below the block, record project-specific answers to the decisions the governance docs leave open (components and stacks, persistence tiers, one-way doors, release tags, how to notify the owner), each with its date.\n\n\`\`\`json devteam\n${JSON.stringify(block, null, 2)}\n\`\`\`\n`);
   put(path.join(projectDir, 'designs', 'architecture.md'), ARCHITECTURE_MD);
   // retros/ and reviews/ hold placeholders; log/ and tickets/ fill as the fleet writes, and merge
@@ -10843,6 +11414,7 @@ const HELP = `devteam <command>   (positionals before flags; flags take the word
 Setup and roles
   init [--name n] [--upstream-base vX]   project folders, settings, .gitignore, the devteam section of AGENTS.md
   prompt supervisor | worker <id> | planner <feature>    the prompt a session starts with
+  supervisor-session                 the id of the supervisor's Claude Code conversation (claude --resume <id>); nothing if there's none, or another harness
   worker <ticket-id> [--resume] [--force] | worker <ticket-id> --remove [--force] | planner <feature> [--goal <g-id>] [--resume] [--force] [--id-block <n>]   supervisor: a worktree, a tmux window and an agent for a ticket or a feature plan (a new planner names its goal and reserves n ticket numbers, default 20); refused while its goal is parked or let go, or draining for a session that hasn't run, unless --force (logged); --resume where no session exists starts fresh with the handoff note; worker --remove, once the ticket is merged and its worker logged phase done (--force before that), removes its worktree through the repo it belongs to and prunes that repo's worktree list (the branch stays)
   whoami | settings [--get key]
   hello [--json]                   who this instance is (root, name, kit, open questions, fleet): what the hub lists
@@ -10931,6 +11503,7 @@ Dashboard and releases
   dashboard [--port p] [--host h] | dashboard-data | notes <from-tag> [<to>] [--repo <link>]
 `;
 
+const OPERATOR_READS = new Set(['status', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'fleet status']);
 const COMMANDS = {
   init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), whoami: cmdWhoami, hello: cmdHello, settings: cmdSettings,
   feature: cmdFeature, ticket: cmdTicket, components: cmdComponents, link: cmdLink, links: cmdLinks, artifact: cmdArtifact, artifacts: cmdArtifacts, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, roadmap: cmdRoadmap,
@@ -10939,12 +11512,15 @@ const COMMANDS = {
   ask: cmdAsk, answer: cmdAnswer, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
   observe: cmdObserve, 'observe-link': cmdObserveLink, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, knowledge: cmdKnowledge, problem: cmdProblem,
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
-  log: cmdLog, record: cmdRecord, peek: cmdPeek, monitor: cmdMonitor, 'log-check': cmdLogCheck, 'log-sync': cmdLogSync, history: cmdHistory,
+  log: cmdLog, record: cmdRecord, peek: cmdPeek, monitor: cmdMonitor, 'log-check': cmdLogCheck, 'accounts-tick': cmdAccountsTick, 'supervisor-session': cmdSupervisorSession, dispose: cmdDispose, 'log-sync': cmdLogSync, history: cmdHistory,
   drain: cmdDrain, undrain: cmdUndrain, fleet: cmdFleet, handoff: cmdHandoff, wait: cmdWait,
   dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes,
 };
 if (!command || command === 'help' || command === '--help') out(HELP);
 else if (!COMMANDS[command]) die(`unknown command "${command}"\n${HELP}`);
+// A cloud box's operator (process/operator.md) looks after the machine and reads every repo. Any other
+// role the kit doesn't know reads as the supervisor, so this one may only look.
+else if (process.env.DEVTEAM_ROLE === 'operator' && !OPERATOR_READS.has(command === 'fleet' ? `fleet ${positional[0]}` : command)) die(`${command}: the operator only reads; this is for the repo's supervisor or its owner`);
 else {
   // --decision names the decision a command's act carries out; check it before the command does anything.
   if (flags.decision !== undefined) {

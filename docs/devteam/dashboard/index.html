@@ -68,13 +68,15 @@
   main { max-width: 1120px; width: 100%; margin: 0 auto; padding: 24px 32px 80px; }
   @media (max-width: 900px) {
     /* minmax(0, …): the board's columns must scroll inside it, not widen the page */
-    .app { grid-template-columns: minmax(0, 1fr); }
+    /* the second row takes the spare height: with no content yet, the nav would get half of it */
+    .app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; }
     .side { height: auto; flex-direction: row; align-items: center; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 8px 12px; gap: 4px; z-index: 5; }
     .side .brand { padding: 0 8px 0 0; }
     .side .nav { display: flex; gap: 2px; }
     .side .foot { display: none; }
     .nav a { white-space: nowrap; }
-    main { padding: 16px 16px 64px; }
+    /* a long URL or id wraps; it doesn't widen the page */
+    main { padding: 16px 16px 64px; overflow-wrap: anywhere; }
   }
 
   /* sections */
@@ -90,7 +92,7 @@
   .card { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; margin-bottom: 8px; box-shadow: var(--shadow); }
   .card.small { padding: 10px 12px; }
   .card p { margin: 6px 0; }
-  .two { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+  .two { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); }
 
   /* badges: a tint of the status colour; the word is always in the badge, never colour alone */
   .badge { display: inline-flex; align-items: center; font-size: 11px; font-weight: 500; line-height: 18px; padding: 0 7px; border-radius: 999px; margin-right: 6px; vertical-align: middle; white-space: nowrap;
@@ -134,8 +136,10 @@
 
   /* progress */
   .filters { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-bottom: 10px; font-size: 12px; color: var(--fg-2); }
+  /* a select is as wide as its longest option, unless its label can shrink too */
+  .filters label { max-width: 100%; min-width: 0; } .filters select { min-width: 0; }
   .progress-layout { display: grid; gap: 12px; align-items: start; grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr); }
-  @media (max-width: 860px) { .progress-layout { grid-template-columns: 1fr; } }
+  @media (max-width: 860px) { .progress-layout { grid-template-columns: minmax(0, 1fr); } }
   .chart { position: relative; }
   .chart svg { width: 100%; height: auto; display: block; }
   .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: var(--fg-2); margin-bottom: 6px; }
@@ -176,7 +180,7 @@
   .why { font-size: 12px; color: var(--fg-2); margin: 4px 0 8px; padding: 4px 10px; border-left: 2px solid var(--line-2); }
   .feed .card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; align-items: start; }
   .feed .card.corrected { border-color: color-mix(in srgb, var(--red) 45%, var(--line)); }
-  .goal { display: grid; gap: 6px; }
+  .goal { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
   .goal .gaps { font-size: 12px; color: var(--fg-2); margin: 0; padding-left: 18px; }
   .qcard { border-left: 2px solid var(--amber); }
   .qcard.door { border-left-color: var(--red); }
@@ -480,9 +484,9 @@
     <a href="#trust"><span class="nl"><i class="icon-shield-check" aria-hidden="true"></i>Trust Ladder</span> <span class="count" id="n-trust"></span></a>
     <a href="#retros"><span class="nl"><i class="icon-history" aria-hidden="true"></i>Retros</span> <span class="count" id="n-retros"></span></a>
     <a href="#health"><span class="nl"><i class="icon-heart-pulse" aria-hidden="true"></i>Health</span> <span class="count" id="n-findings"></span></a>
-    <a href="#monitoring"><span class="nl"><i class="icon-activity" aria-hidden="true"></i>Monitoring</span> <span class="count" id="n-monitors"></span></a>
+    <a href="#monitoring"><span class="nl"><i class="icon-activity" aria-hidden="true"></i>Sensors</span> <span class="count" id="n-monitors"></span></a>
   </nav>
-  <div class="foot"><span id="when"></span><br><span id="logline"></span><br><span class="err" id="err"></span><br><span id="notify"></span></div>
+  <div class="foot"><span id="when"></span><br><span id="logline"></span><br><span class="err" id="err"></span></div>
 </aside>
 <main class="waiting">
   <div class="banner" id="banner" role="alert" hidden></div>
@@ -613,13 +617,13 @@
   </section>
 
   <section id="monitoring">
-    <h2>Monitoring <span class="sub">production, as the supervisor sees it: what's up, how fast, and what it noticed</span></h2>
+    <h2>Sensors <span class="sub">each one takes samples of production, kept here; a meaningful change becomes an observation in the log, for the supervisor's loop and Health to act on</span></h2>
     <div id="monitors"></div>
     <h3 style="margin-top:14px">Incidents</h3>
     <div id="incidents"></div>
     <h3 style="margin-top:14px">Exceptions and errors</h3>
     <div id="monitor-exceptions"></div>
-    <h3 style="margin-top:14px">What the monitors noticed</h3>
+    <h3 style="margin-top:14px">Observations</h3>
     <div class="feed" id="monitor-feed"></div>
   </section>
 
@@ -1144,7 +1148,7 @@ function qtext(text, links) {
     return l ? `<span class="qref">${l.artifact ? artLinkOf(l, true) : linkOf(l)}</span>` : esc(`[[${part}]]`);
   }).join('');
 }
-// the same as plain text, for a title attribute or a notification
+// the same as plain text, for a title attribute
 const qplain = (text, links) => String(text ?? '').replace(new RegExp(NAME_REF.source, 'g'), (all, n) => (links || []).find((x) => x.name === n)?.title ?? all);
 function answeredCard(q) {
   const how = q.status === 'defaulted' ? 'went with the default; you didn’t answer in time' : q.status === 'withdrawn' ? 'withdrawn by the supervisor' : `answered ${CHANNEL_WORDS[q.channel] || ''}`;
@@ -2430,12 +2434,12 @@ function renderMonitoring(d) {
       <div class="mon-stats"><span>24h <b>${esc(pctOr(m.uptime_24h))}</b> up</span><span>7d <b>${esc(pctOr(m.uptime_7d))}</b></span><span>p50 <b>${esc(m.p50_24h == null ? '–' : `${m.p50_24h}ms`)}</b></span><span>p95 <b>${esc(m.p95_24h == null ? '–' : `${m.p95_24h}ms`)}</b></span>${m.tls_days != null ? `<span>certificate <b>${esc(m.tls_days)}d</b></span>` : ''}<span class="muted">checked ${m.last_at ? esc(when(m.last_at)) : 'never'}</span></div>
       <div data-mon-chart="${esc(m.name)}">${MON_SERIES.get(m.name)?.data ? monitorChart(MON_SERIES.get(m.name).data, m, true) : '<p class="muted small">Loading…</p>'}</div>
     </div>`;
-  }).join('')}</div>` : empty('No monitors yet. They live in the owner settings (<code>monitors</code>); the supervisor proposes a URL check when it finds the production URL, and polls it while it runs.');
+  }).join('')}</div>` : empty('No sensors yet. The supervisor starts one for each production URL, log and error tracker it finds (settings <code>monitors</code>), and polls them while it runs.');
   for (const m of ms.filter((x) => x.kind === 'http')) loadMonitorSeries(m.name);
   $('incidents').innerHTML = incidentBoard(d.incidents || []);
   for (const b of $('incidents').querySelectorAll('[data-open]')) b.onclick = () => { location.hash = b.dataset.open; };
   const feed = d.monitor_feed || [];
-  $('monitor-exceptions').innerHTML = feed.length ? `<div class="feed">${feed.map(fpRow).join('')}</div>` : empty(ms.some((m) => m.kind !== 'http') ? 'Nothing read yet. Exceptions, log errors and platform errors the probes read show here, newest first.' : 'No probes yet. Discovery proposes them when it finds an error tracker or a host whose logs the project can already read.');
+  $('monitor-exceptions').innerHTML = feed.length ? `<div class="feed">${feed.map(fpRow).join('')}</div>` : empty(ms.some((m) => m.kind !== 'http') ? 'Nothing read yet. Exceptions, log errors and platform errors the sensors read show here, newest first.' : 'No probes yet. Discovery starts them when it finds an error tracker or a host whose logs the project can already read.');
   const obs = (d.ooda?.observations || []).filter((o) => /^monitor:/.test(o.subject || ''));
   $('monitor-feed').innerHTML = obs.length ? obs.map((o) => `<div class="card small${o.severity >= 3 ? ' corrected' : ''}"><div><div class="act-head">${o.severity != null ? `<span class="badge ${sevBadge(o.severity)}">${esc(words(o.kind))}</span> ` : ''}${linkify(o.detail)}</div><div class="meta">${esc(when(o.created_at))} · ${subjectLink(o.subject)}</div></div></div>`).join('') : empty('Nothing yet. Outages, slow spells and each day\'s rollup show here.');
 }
@@ -2460,9 +2464,9 @@ function openMonitor(name) {
     ${(p?.feed || []).length ? `<div class="feed">${p.feed.map(fpRow).join('')}</div>` : '<p class="muted small">Nothing yet.</p>'}
     ${historySection(p, `monitor:${name}`)}`);
   showDrawer(`<h2 id="drawer-title">${esc(name)}</h2>
-    ${attrs({ id: name, idTip: 'Its name in the owner settings (monitors).', peek: p, noRecord: true, computed: [
+    ${attrs({ id: name, idTip: 'Its name in the settings (monitors).', peek: p, noRecord: true, computed: [
       ['State', `<span class="badge ${tone}">${esc(label)}</span>${m.since ? ` since ${esc(when(m.since))}` : ''}`, 'Up, down (after its failed checks in a row) or slow (p95 over its target), from its checks.'],
-      ['Checks', `<code>${esc(m.url || '')}</code>${m.expect ? ` · expects ${esc(fmtObj(m.expect).replace(/<[^>]+>/g, ''))}` : ''} · every ${esc(m.every_minutes)} min · down after ${esc(m.down_after)} failed`, 'What it requests and what counts as up; owner settings, class monitor-change.'],
+      ['Checks', `<code>${esc(m.url || '')}</code>${m.expect ? ` · expects ${esc(fmtObj(m.expect).replace(/<[^>]+>/g, ''))}` : ''} · every ${esc(m.every_minutes)} min · down after ${esc(m.down_after)} failed`, 'What it requests and what counts as up; the supervisor's settings; it needs no owner answer.'],
       ['Target', m.slo ? `${m.slo.uptime ? `${(100 * m.slo.uptime).toFixed(2)}% up` : ''}${m.slo.uptime && m.slo.p95_ms ? ' · ' : ''}${m.slo.p95_ms ? `p95 under ${esc(m.slo.p95_ms)}ms` : ''}` : '', 'Its service-level target: uptime over a week, and the p95 response time.'],
       ['Uptime', `${esc(pctOr(m.uptime_24h))} over 24h · ${esc(pctOr(m.uptime_7d))} over 7d`, 'The share of checks that passed.'],
       ['Response time', `p50 ${esc(m.p50_24h == null ? '–' : `${m.p50_24h}ms`)} · p95 ${esc(m.p95_24h == null ? '–' : `${m.p95_24h}ms`)} over 24h`, 'From checks that passed.'],
@@ -3218,7 +3222,7 @@ async function loadNow({ force = false } = {}) {
   $('loading').hidden = true;
   document.querySelector('main').classList.remove('waiting');
   const first = !DATA;
-  try { render(d); if (first) route(); inboxNotify(d); } catch (e) {
+  try { render(d); if (first) route(); inboxTitle(d); } catch (e) {
     $('err').textContent = 'could not draw (see the top of the page)';
     const b = $('banner');
     b.className = 'banner';
@@ -3227,41 +3231,10 @@ async function loadNow({ force = false } = {}) {
   }
 }
 
-// System notifications for the Inbox: when something new needs the owner and this page isn't in
-// front of them, the browser shows a notification; clicking it brings them to the card. The tab
-// title carries the Inbox count. The first load only records what is already there, and the
-// browser asks permission once, from the owner's click (it never asks on its own).
-// Inside the hub's frame a page can't ask for notification permission (a cross-origin frame), and
-// the hub notifies for every instance: so a framed dashboard shows no control and sends nothing.
-const NOTIFY_OK = 'Notification' in window && window.isSecureContext && window.top === window;
-let inboxSeen = null;
-function inboxItems(d) {
-  return [
-    ...d.questions.map((q) => ({ id: q.id, text: qplain(q.question, q.links) })),
-    ...(d.ooda?.knowledge ?? []).filter((k) => k.status === 'candidate').map((k) => ({ id: k.id, text: `Keep this lesson? ${k.statement}` })),
-  ];
-}
-function notifyControl() {
-  const el = $('notify');
-  if (!NOTIFY_OK) { el.innerHTML = ''; return; }
-  const p = Notification.permission;
-  el.innerHTML = p === 'granted' ? '<span class="dim small">Notifying you of new Inbox items</span>'
-    : p === 'denied' ? '<span class="dim small">Notifications are blocked for this page in your browser settings</span>'
-    : '<button class="ghost small" id="notify-on">Notify me of new Inbox items</button>';
-  $('notify-on')?.addEventListener('click', async () => { try { await Notification.requestPermission(); } catch {} notifyControl(); });
-}
-function inboxNotify(d) {
-  const items = inboxItems(d);
-  document.title = items.length ? `(${items.length}) devteam · ${d.project}` : `devteam · ${d.project}`;
-  const fresh = inboxSeen ? items.filter((x) => !inboxSeen.has(x.id)) : [];
-  inboxSeen = new Set(items.map((x) => x.id));
-  notifyControl();
-  if (!fresh.length || !NOTIFY_OK || Notification.permission !== 'granted' || (!document.hidden && document.hasFocus())) return;
-  const one = fresh.length === 1;
-  try {
-    const n = new Notification(one ? `${d.project}: new in your Inbox` : `${d.project}: ${fresh.length} new in your Inbox`, { body: one ? fresh[0].text.slice(0, 180) : fresh.map((x) => `• ${x.text.slice(0, 80)}`).slice(0, 4).join('\n'), tag: `devteam-inbox-${fresh[0].id}` });
-    n.onclick = () => { window.focus(); location.hash = '#inbox'; document.getElementById(`q-${fresh[0].id}`)?.scrollIntoView({ block: 'center' }); n.close(); };
-  } catch {}
+// The tab title carries the Inbox count. Notifications are the hub's, for every instance.
+function inboxTitle(d) {
+  const n = d.questions.length + (d.ooda?.knowledge ?? []).filter((k) => k.status === 'candidate').length;
+  document.title = n ? `(${n}) devteam · ${d.project}` : `devteam · ${d.project}`;
 }
 
 document.addEventListener('click', (e) => {
