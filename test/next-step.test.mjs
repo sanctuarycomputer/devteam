@@ -186,6 +186,12 @@ test('a new rating never reopens an answered question, and the hash the owner sa
     const q2 = ask('Still open?', '--goal', G, '--stake', '1', '--urgency', '1');
     fs.appendFileSync(path.join(old, 'docs/devteam/run/log', 'x-01-y.jsonl'), line({ id: q2, type: 'question', op: 'set', at: new Date().toISOString(), by: 'x-01-y', stake: 3 }));
     assert.equal(json(ok(old, ['questions', '--id', q2, '--json']))[0].stake, 1, 'a worker\'s line sets no rating');
+    // a rating outside 1 to 3, or a settles that is no list (written by hand; log-check refuses it), is no
+    // rating: the order never multiplies it, and the Inbox still reads
+    fs.appendFileSync(path.join(old, 'docs/devteam/run/log', `supervisor-${new Date().toISOString().slice(0, 7)}.jsonl`), line({ id: q2, type: 'question', op: 'set', at: new Date().toISOString(), by: 'supervisor', stake: 99, urgency: 99, settles: 5 }));
+    assert.notEqual(F.run(old, ['log-check']).status, 0);
+    const wild = json(ok(old, ['questions', '--json'])).find((q) => q.id === q2);
+    assert.deepEqual([wild.stake, wild.urgency, wild.settles, wild.rank.parts.rated, wild.rank.score], [null, null, [], false, 4], 'counted as not rated: 2 × 2 × 1');
   } finally { F.done(); }
 });
 
