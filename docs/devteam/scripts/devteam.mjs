@@ -322,6 +322,11 @@ const SETTINGS_DEFAULTS = {
   // changes what deploys is a release (release-production). Root build manifests (Procfile,
   // package.json, Dockerfile, …) deploy even outside paths (deployingFiles).
   release: 'tag',
+  // Production sensors (process/supervisor.md, Monitoring): { name: { kind: 'http', url, expect:
+  // { status, contains }, slo: { uptime, p95_ms }, every_minutes, down_after, timeout_s } }; the
+  // supervisor's own, like caps and timings. sensor_defaults overrides the built-in defaults for all of them.
+  sensors: {},
+  sensor_defaults: {},
   // Commands a stdin: secret sink may run (prefixes, e.g. "gh secret set"); they run as the owner.
   secret_commands: [],
   // The forge's checks merge doesn't wait for (names, e.g. a broken optional one); owner-only.
@@ -2420,7 +2425,7 @@ function cmdValidate() {
   {
     const s = loadSettings();
     const reg = registryProblems(s);
-    errors.push(...reg.errors);
+    errors.push(...reg.errors, ...sensorProblems(s));
     warnings.push(...reg.warnings);
     // With lines, check-pr and merge judge the tree a PR would land, which takes git 2.38; say so
     // here, in the words merge refuses with, before the first PR meets it.
@@ -3368,6 +3373,11 @@ function checkPr({ headRef, sha, title, body, forge = false, repo: R = repo('hom
   // validate, so an old graph error can't block a log PR.
   const base0 = R.mainRef() ? R.git(['merge-base', R.mainRef(), sha]) : null;
   fails.push(...coverageFails(base0, sha, R, { ticket: branch.startsWith('ticket/') }), ...registryFails(base0, sha, R));
+  // the sensors that would land: a changed sensors setting is checked as validate checks it
+  if (R.name === 'home' && base0) {
+    const [a, b] = [settingsAt(base0, { orNull: true }), settingsAt(sha, { orNull: true })];
+    if (a && b && ['sensors', 'sensor_defaults'].some((k) => canonical(a[k]) !== canonical(b[k]))) fails.push(...sensorProblems(b).map((e) => `settings at landing: ${e}`));
+  }
   if (branch.startsWith('ticket/')) return [...fails, ...checkTicket(branch.slice('ticket/'.length), { sha, title, body, approvals: !forge }), ...depsFails(branch.slice('ticket/'.length), R)];
   if (branch.startsWith('plan/')) {
     const feature = branch.slice('plan/'.length);
@@ -3851,6 +3861,12 @@ function cmdMerge() {
   // authority holds against the log, its owner answer not used for anything else)
   const decided = flagStr('decision') ? decisionFor(flagStr('decision')) : null;
   const releaseDecision = decided?.class === 'release-production' ? decided : null;
+  // A decision is carried out once per target: an act already under it for this PR (a merge on
+  // another branch, an earlier landing) means it was used, so decide again. One decision naming
+  // several targets (a batch) carries out each once; a release decision has its own check below.
+  const targetsNow = [id ?? (chore ? `chore-${chore}` : plan), plan ? `plan-${plan}` : null].filter(Boolean);
+  const carriedOut = decided && !releaseDecision ? logObjects('act').find((a) => a.decision === decided.id && (!(a.refs ?? []).length || a.refs.some((r) => targetsNow.includes(r)))) : null;
+  if (carriedOut) fails.push(`${decided.id} was already carried out for ${targetsNow[0]} (${carriedOut.id}: ${String(carriedOut.what ?? '').slice(0, 80)}); a decision is carried out once per target, so decide again for this one`);
   {
     const base = R.mainRef() ? R.git(['merge-base', R.mainRef(), sha]) : null;
     const dep = deployingFiles(R, base, sha);
@@ -3986,7 +4002,7 @@ function cmdMerge() {
   if (R.name === 'home') { mainLogCache = undefined; mergeShaCache.clear(); } else R.resetCaches();
   const cls = id ? 'merge-word' : plan ? 'approve-feature-plan' : 'merge-chore';
   // A release-production decision is carried out by the release act, never by the merge act.
-  const act = appendLog({ type: 'act', decision: releaseDecision ? undefined : citing(), class: cls, what: `merged ${branch} at ${sha}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag} at ${standing.tagSha}, verbatim${standing.policy ? ', under settings.upstream_sync "adopt"' : ''})` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [], reversible: false, approved_by: approved ?? standing?.rule?.id ?? undefined, ...onR }, 'supervisor');
+  const act = appendLog({ type: 'act', decision: releaseDecision ? undefined : citing(), class: cls, what: `merged ${branch} at ${sha}${['park', 'let-go'].includes(heldBy) ? ` while its goal is ${holdWords(heldBy)}, with --force` : ''}${standing?.tag ? ` (upstream ${standing.tag} at ${standing.tagSha}, verbatim${standing.policy ? ', under settings.upstream_sync "adopt"' : ''})` : standing ? ` (${standing.what}, under the owner's standing rule)` : ''}`, refs: id ? [id] : plan ? [plan] : [`chore-${chore}`], reversible: false, approved_by: approved ?? standing?.rule?.id ?? undefined, ...onR }, 'supervisor');
   if (release) {
     const rel = appendLog({ type: 'act', class: 'release-production', decision: release.decision, rung: release.rung, what: `released ${release.target}${inR} to production by merging ${branch} at ${sha} (release: merge)`, refs: [release.target, act.id], reversible: false, ...onR }, 'supervisor');
     out(`released ${release.target}${inR} to production (${rel.id})`);
@@ -7302,6 +7318,13 @@ function collectMetrics(since) {
   // Findings: blockers and inefficiencies, each with a next step.
   const f = [];
   const add = (severity, kind, subject, detail, suggestion, extra = {}) => f.push({ severity, kind, subject, detail, suggestion, ...extra });
+  // Production sensors: a standing outage is medium (the down observation already woke the
+  // supervisor once), a certificate about to lapse, a week under the uptime target.
+  for (const m of sensorStatus()) {
+    if (m.state === 'down') add('medium', 'sensor-down', `sensor:${m.name}`, `${m.url} down since ${m.since}: ${m.last?.error ?? 'failing'}`, 'find why (the last deploy, the app logs), tell the owner, fix forward through a ticket (supervisor.md, Monitoring)');
+    if (m.tls_days != null && m.tls_days <= m.tls_warn_days) add(m.tls_days <= 3 ? 'high' : 'medium', 'cert-expiring', `sensor:${m.name}`, `the certificate for ${m.url} expires in ${m.tls_days} day(s)`, 'renew it, or check the auto-renewal; ask the owner if it needs their account');
+    if (m.slo?.uptime && m.uptime_7d != null && m.uptime_7d < 100 * m.slo.uptime) add('medium', 'slo-breach-week', `sensor:${m.name}`, `up ${m.uptime_7d}% over 7 days, under the ${100 * m.slo.uptime}% target`, 'read the down observations for a cause; a fix is a ticket, a target that is wrong is the owner\'s to change');
+  }
   // A flake is a finding while it's recent: one that hasn't flipped for a week was fixed or
   // explained, and its history stays in gates.flaky_gates without raising it again every day.
   const flakyRecent = (at) => !!at && now - Date.parse(at) < 7 * 24 * 3600000;
@@ -7653,6 +7676,7 @@ function dashboardData() {
     ooda: collectOoda(),
     // holds: Upkeep's, and the fleet's mode when every goal is held (fleet status gives readiness)
     upkeep: (() => { const u = upkeepOrVirtual(); const chores = deriveStatus().filter((r) => r.feature === CHORES && !r.merge_sha && r.stage !== 'superseded'); return { id: upkeepGoal()?.id ?? null, ...holdView(u), chores: chores.map((r) => ({ id: r.id, title: r.title, stage: r.stage, phase: r.phase })) }; })(),
+    sensors: sensorStatus(),
     fleet: { mode: draining() ? 'park' : fleetMode(), op: fleetOpInForce()?.fleet ?? draining()?.id ?? null, reason: fleetOpInForce()?.reason ?? (draining() ? drainReason(draining()) : null) },
     // the Library: artifacts landed and drafted, and the registry as it reads (locators redacted)
     library: {
@@ -8546,6 +8570,13 @@ async function cmdDashboard() {
       if (prepo && !LINK_ID.test(prepo)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad repo' }));
       if (!/^[a-z]+$/.test(kind) || !id || id.length > 400 || /[\0\n]/.test(id) || id.startsWith('-') || ts.some((x) => !/^[a-z0-9][a-z0-9-]*$/.test(x)) || (rec && !/^[a-z0-9][a-z0-9-]*$/.test(rec))) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad kind, id, rec or tickets' }));
       const r = await run(['peek', kind, id, ...(ts.length ? ['--tickets', JSON.stringify(ts)] : []), ...(rec ? ['--rec', rec] : []), ...(ref ? ['--ref', ref] : []), ...(prepo ? ['--repo', prepo] : []), '--json']);
+      return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 404, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
+    }
+    if (req.method === 'GET' && u.pathname === '/api/sensor') {
+      const name = u.searchParams.get('name') ?? '';
+      const range = u.searchParams.get('range') === '7d' ? '7d' : '24h';
+      if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(name)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad sensor name' }));
+      const r = await run(['sensor', 'series', name, '--range', range]);
       return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 404, 'application/json', JSON.stringify({ error: r.stderr.trim() }));
     }
     if (req.method === 'GET' && u.pathname === '/api/schema') return send(res, 200, 'application/json', JSON.stringify(schemaDocs()));
@@ -9768,6 +9799,285 @@ function drainedPreface() {
     : `This looks like the machine it moved to. Before anything else: ${(() => { const h = pinsHint(); return h ? `(0) ${h}; ` : ''; })()}(1) DEVTEAM_ROLE=supervisor node docs/devteam/scripts/devteam.mjs fleet unpark (it rebuilds run/log from the landed log, prints the parity fingerprint, puts every goal back as it was and prints the restart command for each parked session); (2) run each of those commands; (3) make sure the dashboard is running (supervisor.md §11) and tell the owner its address; then carry on from supervisor.md §1.`}`;
 }
 
+// ===== sensors: production signals into the loop =====
+// A sensor takes samples; samples stay local in run/sensors/<name>/ (gitignored, not the record).
+// A meaningful change becomes an observation in the log on subject sensor:<name>, and the
+// supervisor's OODA loop and the Health section act on those. A sensor is the supervisor's own
+// (settings `sensors`, no owner answer): it only reads. A URL check (kind http) runs on every
+// `wait` cycle when due: status, an optional body substring, latency, and TLS expiry; down and up
+// on the transition, slow once per breach, and a daily rollup (kind reading) reach the log. `wait`
+// returns once on a new down, never on a standing finding.
+const SENSOR_DEFAULTS = { every_minutes: 1, timeout_s: 10, down_after: 2, slow_after: 3, tls_warn_days: 14, sample_days: 30 };
+// A sensor's name is a folder under run/sensors: letters, digits, dot, dash, underscore only.
+const SENSOR_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
+// What is wrong with the sensors in settings, worded for validate and merge. A sensor's name is
+// its key and only its key (a name field could point its folder outside run/); its url is http(s)
+// and carries no credentials (settings.md and the log are shared and permanent).
+function sensorProblems(s) {
+  const errors = [];
+  const ms = s.sensors ?? {};
+  const defs = s.sensor_defaults ?? {};
+  if (!isObj(ms)) return ['settings sensors: an object of { "<name>": { kind: "http", url, … } }'];
+  if (!isObj(defs)) errors.push('settings sensor_defaults: an object');
+  else {
+    if (Object.hasOwn(defs, 'name')) errors.push('settings sensor_defaults: no "name" field (a sensor\'s name is its key)');
+    if (Object.hasOwn(defs, 'url')) errors.push('settings sensor_defaults: no "url" field (each sensor names its own)');
+  }
+  for (const [name, m] of Object.entries(ms)) {
+    const at = `settings sensors.${name}`;
+    if (!SENSOR_NAME.test(name)) { errors.push(`${at}: a name is letters, digits, dot, dash or underscore (at most 64)`); continue; }
+    if (!isObj(m)) { errors.push(`${at}: an object { kind: "http", url, … }`); continue; }
+    if (Object.hasOwn(m, 'name')) errors.push(`${at}: no "name" field (its name is its key)`);
+    if (typeof m.url !== 'string' || !/^https?:\/\/[^\s]+$/i.test(m.url)) errors.push(`${at}: url is an http(s) URL`);
+    else if (hasCredentials(m.url) || /^https?:\/\/[^/?#\s]*@/i.test(m.url)) errors.push(`${at}: its url ${sensorShown(m.url)} carries credentials; ${CREDENTIALS_REFUSED}`);
+  }
+  return errors;
+}
+// A sensor URL, or text that may hold one (a fetch error), as it may be shown or logged: no
+// userinfo and no query or fragment, whose values may be secrets whatever they are named.
+const sensorShown = (text) => redactUrl(text).replace(/\b(https?:\/\/[^\s?#]*)[?#][^\s'"<>)]*/gi, '$1?…');
+const sensorList = () => {
+  const s = loadSettings();
+  const defs = isObj(s.sensor_defaults) ? s.sensor_defaults : {};
+  // the name is set last, from the key, so neither a sensor nor the defaults can rename its folder;
+  // an entry validate refuses (a name field, credentials in its url) is never polled
+  return Object.entries(isObj(s.sensors) ? s.sensors : {}).filter(([name, m]) => {
+    const why = sensorProblems({ sensors: { [name]: m }, sensor_defaults: defs })[0];
+    return !why || (warn(`sensor "${sensorShown(name)}" ignored: ${why}`), false);
+  }).map(([name, m]) => ({ ...SENSOR_DEFAULTS, ...defs, ...m, name, shown_url: sensorShown(m.url) }));
+};
+const sensorOf = (name) => sensorList().find((m) => m.name === name) ?? die(`no sensor ${name} in settings (sensors)`);
+const sensorDir = (name) => path.join(runDir, 'sensors', name);
+const sensorState = (name) => { try { return JSON.parse(fs.readFileSync(path.join(sensorDir(name), 'state.json'), 'utf8')); } catch { return { state: 'unknown', fails: 0 }; } };
+const saveSensorState = (name, st) => { fs.mkdirSync(sensorDir(name), { recursive: true }); fs.writeFileSync(path.join(sensorDir(name), 'state.json'), `${JSON.stringify(st, null, 2)}\n`); };
+// Samples are read once per process (the dashboard and metrics ask several times a refresh).
+const SAMPLES = new Map();
+function sensorSamples(name, sinceMs = 0) {
+  if (!SAMPLES.has(name)) {
+    const all = [];
+    for (const l of (readText(path.join(sensorDir(name), 'samples.jsonl')) ?? '').split('\n')) {
+      if (!l) continue;
+      try { const s = JSON.parse(l); s.t = Date.parse(s.at); all.push(s); } catch {}
+    }
+    SAMPLES.set(name, all);
+  }
+  return SAMPLES.get(name).filter((s) => s.t >= sinceMs);
+}
+// Nearest-rank quantile: the value at rank ceil(q n).
+const quantile = (xs, q) => { if (!xs.length) return null; const s = [...xs].sort((a, b) => a - b); return s[Math.max(0, Math.ceil(q * s.length) - 1)]; };
+const fmtMs = (ms) => (ms == null ? '-' : ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`);
+// One URL check. Never throws: a failure is a sample like any other.
+async function httpCheck(m) {
+  const t0 = performance.now();
+  try {
+    // A redirect is an answer, not up: a health URL that 302s to a login or maintenance page fails
+    // unless the sensor expects that status (or sets follow_redirects).
+    const r = await fetch(m.url, { signal: AbortSignal.timeout(m.timeout_s * 1000), redirect: m.follow_redirects ? 'follow' : 'manual', headers: { 'user-agent': 'devteam-sensor' } });
+    let body = '';
+    if (m.expect?.contains) {
+      // read at most 1 MB of the body, enough for a health page
+      const reader = r.body?.getReader();
+      const dec = new TextDecoder();
+      while (reader && body.length < 1048576) { const { done, value } = await reader.read(); if (done) break; body += dec.decode(value, { stream: true }); }
+      reader?.cancel().catch(() => {});
+    } else await r.body?.cancel().catch(() => {});
+    const ms = Math.round(performance.now() - t0);
+    const want = m.expect?.status;
+    // up is a 2xx (a 3xx is a redirect, not up, unless expected or followed to a 2xx)
+    const statusOk = want ? r.status === want : r.status >= 200 && r.status < 300;
+    const bodyOk = !m.expect?.contains || body.includes(m.expect.contains);
+    return { ok: statusOk && bodyOk, status: r.status, ms, error: statusOk ? (bodyOk ? null : `the body has no "${m.expect.contains}"`) : `HTTP ${r.status}` };
+  } catch (e) {
+    const code = e?.cause?.code;
+    const words = { ECONNREFUSED: 'connection refused', ENOTFOUND: 'no such host', EAI_AGAIN: 'DNS lookup failed', ECONNRESET: 'connection reset', ETIMEDOUT: 'connection timed out', EHOSTUNREACH: 'host unreachable', CERT_HAS_EXPIRED: 'certificate expired', DEPTH_ZERO_SELF_SIGNED_CERT: 'self-signed certificate', ERR_TLS_CERT_ALTNAME_INVALID: 'certificate does not match the host' };
+    // an error's text may quote the URL: never its userinfo or query
+    const err = e?.name === 'TimeoutError' ? `no answer in ${m.timeout_s}s` : words[code] ?? sensorShown(String(code ?? e?.cause?.message ?? e?.message ?? e).split(m.url).join(sensorShown(m.url))).slice(0, 160);
+    return { ok: false, status: null, ms: Math.round(performance.now() - t0), error: err };
+  }
+}
+// Days until the certificate of an https URL expires (null when it isn't https or can't be read).
+async function tlsDaysLeft(url) {
+  let u;
+  try { u = new URL(url); } catch { return null; }
+  if (u.protocol !== 'https:') return null;
+  const tls = await import('node:tls');
+  return new Promise((resolve) => {
+    const host = u.hostname.replace(/^\[|\]$/g, '');
+    // SNI names a host, never an IP address
+    const sock = tls.connect({ host, port: Number(u.port || 443), ...(net.isIP(host) ? {} : { servername: host }), timeout: 10000 }, () => {
+      const c = sock.getPeerCertificate();
+      sock.end();
+      resolve(c?.valid_to ? Math.floor((Date.parse(c.valid_to) - Date.now()) / 86400000) : null);
+    });
+    sock.on('error', () => resolve(null));
+    sock.on('timeout', () => { sock.destroy(); resolve(null); });
+  });
+}
+const sensorSubject = (name) => `sensor:${name}`;
+function sensorObserve(m, fields) {
+  return appendLog({ type: 'observation', source: m.name, subject: sensorSubject(m.name), detector: 'sensor', ...fields }, 'supervisor');
+}
+// A day's rollup from its samples: uptime, latency, outages.
+function sensorRollup(m, day) {
+  const from = Date.parse(`${day}T00:00:00.000Z`);
+  const xs = sensorSamples(m.name, from).filter((s) => s.t < from + 86400000);
+  if (!xs.length) return null;
+  const ok = xs.filter((s) => s.ok);
+  const uptime = +((100 * ok.length) / xs.length).toFixed(3);
+  const p50 = quantile(ok.map((s) => s.ms), 0.5), p95 = quantile(ok.map((s) => s.ms), 0.95);
+  const downs = logObjects('observation').filter((o) => o.subject === sensorSubject(m.name) && o.kind === 'down' && dateOnly(o.created_at) === day).length;
+  return sensorObserve(m, { kind: 'reading', detail: `${day} (UTC): up ${uptime}% of ${xs.length} checks, p50 ${fmtMs(p50)}, p95 ${fmtMs(p95)}${downs ? `, ${downs} outage${downs > 1 ? 's' : ''}` : ''}`, severity: 0, valence: 0, measure: { value: uptime, unit: '%' }, source_key: `sensor:${m.name}:rollup:${day}` });
+}
+// Poll one sensor: check, record the sample, append observations on change. Returns alert lines
+// (a new outage) for wait.
+async function pollSensor(m, opts = {}) {
+  if (m.kind !== 'http') return { skipped: `kind ${m.kind} is not built in yet` };
+  // one poll of a sensor at a time (wait's and a manual one): the other skips it this round
+  fs.mkdirSync(sensorDir(m.name), { recursive: true });
+  const lock = path.join(sensorDir(m.name), 'poll.lock');
+  try { fs.writeFileSync(lock, `${process.pid}\n`, { flag: 'wx' }); } catch {
+    let age = Infinity;
+    try { age = Date.now() - fs.statSync(lock).mtimeMs; } catch {}
+    // a lock whose poll is gone (wait kills one at a minute) is stale at once; a live one after 2 min
+    let alive = false;
+    try { const pid = Number(fs.readFileSync(lock, 'utf8')); alive = pid > 0 && (process.kill(pid, 0), true); } catch (e) { alive = e?.code === 'EPERM'; }
+    if (alive && age < 120000) return { skipped: 'another poll of it is running' };
+    fs.writeFileSync(lock, `${process.pid}\n`);
+  }
+  try { return await pollSensorLocked(m, opts); } finally { fs.rmSync(lock, { force: true }); }
+}
+// What the log says a sensor's state was: its latest down or up (a fresh host, or lost run/).
+function sensorStateFromLog(name) {
+  const last = logObjects('observation').filter((o) => o.subject === sensorSubject(name) && ['down', 'up'].includes(o.kind)).sort(byTime).pop();
+  return last?.kind === 'down' ? { state: 'down', since: last.created_at, down_id: last.id, fails: 0 } : { state: last ? 'up' : 'unknown', fails: 0 };
+}
+async function pollSensorLocked(m, { rollupDay = null } = {}) {
+  // seeded from the log only when there is no state (a fresh host, a lost run/): while a new
+  // sensor is still unknown its failed checks keep counting toward down_after
+  const fresh = !fs.existsSync(path.join(sensorDir(m.name), 'state.json'));
+  let st = sensorState(m.name);
+  if (fresh) st = { ...st, ...sensorStateFromLog(m.name) };
+  const sample = { at: nowIso(), ...(await httpCheck(m)) };
+  fs.appendFileSync(path.join(sensorDir(m.name), 'samples.jsonl'), `${JSON.stringify(sample)}\n`);
+  SAMPLES.delete(m.name);
+  const alerts = [];
+  st.last = sample;
+  st.last_at = sample.at;
+  if (!sample.ok) {
+    st.fails = (st.fails ?? 0) + 1;
+    st.failing_since ??= sample.at;
+    if (st.fails >= m.down_after && st.state !== 'down') {
+      const o = sensorObserve(m, { kind: 'down', detail: `${m.name} is down: ${sample.error} (${st.fails} failed check${st.fails === 1 ? '' : 's'} in a row)`, severity: 4, valence: -2, measure: { value: st.fails, unit: 'checks' }, source_key: `sensor:${m.name}:down:${st.failing_since}` });
+      Object.assign(st, { state: 'down', since: st.failing_since, down_id: o.id });
+      alerts.push(`${m.name} is down: ${sample.error} (${sensorShown(m.url)}; ${o.id})`);
+    }
+  } else {
+    if (st.state === 'down') {
+      const mins = Math.max(1, Math.round((Date.parse(sample.at) - Date.parse(st.since)) / 60000));
+      sensorObserve(m, { kind: 'up', detail: `${m.name} is up again after ${mins} min down`, severity: 0, valence: 1, measure: { value: mins, unit: 'min' }, refs: st.down_id ? [st.down_id] : [], source_key: `sensor:${m.name}:up:${st.since}` });
+    }
+    if (st.state !== 'up') st.since = sample.at;
+    Object.assign(st, { state: 'up', fails: 0, failing_since: null, down_id: null });
+    // slow: the p95 of the last hour's good checks (at least 20 of them) over the target for
+    // slow_after checks in a row, once per breach; one slow answer among fast ones is not slow
+    if (m.slo?.p95_ms) {
+      const recent = sensorSamples(m.name, Date.now() - 3600000).filter((s) => s.ok).map((s) => s.ms);
+      const p95 = recent.length >= 20 ? quantile(recent, 0.95) : null;
+      st.slow_streak = p95 != null && p95 > m.slo.p95_ms ? (st.slow_streak ?? 0) + 1 : 0;
+      if (st.slow_streak >= m.slow_after && !st.slow) {
+        sensorObserve(m, { kind: 'slow', detail: `${m.name} is slow: p95 ${fmtMs(p95)} over the ${fmtMs(m.slo.p95_ms)} target for ${st.slow_streak} checks`, severity: 2, valence: -1, measure: { value: p95, unit: 'ms' }, source_key: `sensor:${m.name}:slow:${sample.at}` });
+        st.slow = true;
+      } else if (!st.slow_streak) st.slow = false;
+    }
+  }
+  // TLS, hourly
+  if (/^https:/i.test(m.url) && (!st.tls_at || Date.now() - Date.parse(st.tls_at) > 3600000)) { st.tls_days = await tlsDaysLeft(m.url); st.tls_at = nowIso(); }
+  // a rollup for each finished UTC day not rolled up yet (up to a week back), or the day asked for
+  const yesterday = dateOnly(new Date(Date.now() - 86400000).toISOString());
+  if (rollupDay || st.rollup_day !== yesterday) {
+    const days = rollupDay ? [rollupDay] : [6, 5, 4, 3, 2, 1].map((n) => dateOnly(new Date(Date.now() - n * 86400000).toISOString())).filter((d) => !st.rollup_day || d > st.rollup_day);
+    const done = new Set(logObjects('observation').filter((o) => o.subject === sensorSubject(m.name) && o.kind === 'reading').map((o) => o.source_key));
+    for (const day of days) if (!done.has(`sensor:${m.name}:rollup:${day}`)) sensorRollup(m, day);
+    if (!rollupDay) st.rollup_day = yesterday;
+  }
+  // samples past sample_days, pruned once a day (written aside, then renamed over)
+  if (st.pruned !== dateOnly(nowIso())) {
+    const keep = sensorSamples(m.name, Date.now() - m.sample_days * 86400000).map(({ t: _, ...s }) => `${JSON.stringify(s)}\n`).join('');
+    const file = path.join(sensorDir(m.name), 'samples.jsonl');
+    fs.writeFileSync(`${file}.tmp`, keep);
+    fs.renameSync(`${file}.tmp`, file);
+    SAMPLES.delete(m.name);
+    st.pruned = dateOnly(nowIso());
+  }
+  saveSensorState(m.name, st);
+  return { sample, alerts };
+}
+const sensorDue = (m, st) => !st.last_at || Date.now() - Date.parse(st.last_at) >= m.every_minutes * 60000 - 5000;
+// What the dashboard and `sensor status` show: state, last check, uptime and latency over 24h and 7d.
+let STATUS_MEMO = null;
+function sensorStatus() {
+  if (STATUS_MEMO) return STATUS_MEMO;
+  return (STATUS_MEMO = sensorList().map((m) => {
+    const st = sensorState(m.name);
+    const week = sensorSamples(m.name, Date.now() - 7 * 86400000);
+    const day = week.filter((s) => s.t >= Date.now() - 86400000);
+    const up = (xs) => (xs.length ? +((100 * xs.filter((s) => s.ok).length) / xs.length).toFixed(2) : null);
+    const lat = (xs, q) => quantile(xs.filter((s) => s.ok).map((s) => s.ms), q);
+    return {
+      name: m.name, kind: m.kind, url: m.shown_url, every_minutes: m.every_minutes, slo: m.slo ?? null, expect: m.expect ?? null, down_after: m.down_after, component: m.component ?? null,
+      state: st.state ?? 'unknown', since: st.since ?? null, last_at: st.last_at ?? null, last: st.last ?? null, fails: st.fails ?? 0, slow: !!st.slow, tls_days: st.tls_days ?? null, tls_warn_days: m.tls_warn_days,
+      uptime_24h: up(day), uptime_7d: up(week), p50_24h: lat(day, 0.5), p95_24h: lat(day, 0.95), p95_7d: lat(week, 0.95), checks_24h: day.length,
+    };
+  }));
+}
+// A sensor's latency and uptime in buckets, for a chart: 24h in 5-minute buckets, 7d in hours.
+function sensorSeries(name, range) {
+  sensorOf(name);
+  const span = range === '7d' ? 7 * 86400000 : 86400000;
+  const step = range === '7d' ? 3600000 : 300000;
+  const from = Date.now() - span;
+  const buckets = new Map();
+  for (const s of sensorSamples(name, from)) {
+    const b = Math.floor(s.t / step) * step;
+    (buckets.get(b) ?? buckets.set(b, []).get(b)).push(s);
+  }
+  return { name, range: range === '7d' ? '7d' : '24h', step_ms: step, buckets: [...buckets].sort((a, b) => a[0] - b[0]).map(([t, xs]) => ({ t, n: xs.length, ok: xs.filter((s) => s.ok).length, p50: quantile(xs.filter((s) => s.ok).map((s) => s.ms), 0.5), p95: quantile(xs.filter((s) => s.ok).map((s) => s.ms), 0.95) })) };
+}
+async function cmdSensor() {
+  const [sub, name] = positional;
+  if (sub === 'status') {
+    const rows = sensorStatus();
+    if (flags.json) return json(rows);
+    if (!rows.length) return out('no sensors (settings: sensors)');
+    for (const r of rows) out(`${r.name.padEnd(16)} ${r.state.padEnd(7)} ${r.url}  last ${r.last_at ? `${r.last_at.slice(0, 16)} ${r.last?.ok ? 'ok' : r.last?.error ?? 'failed'} ${fmtMs(r.last?.ms)}` : 'never'}  24h up ${r.uptime_24h ?? '-'}% p95 ${fmtMs(r.p95_24h)}${r.tls_days != null ? `  tls ${r.tls_days}d` : ''}`);
+    return;
+  }
+  if (sub === 'series') return json(sensorSeries(name ?? die('usage: sensor series <name> [--range 24h|7d]'), flagStr('range')));
+  if (sub === 'test') {
+    const m = sensorOf(name ?? die('usage: sensor test <name>'));
+    if (m.kind !== 'http') die(`kind ${m.kind} is not built in yet`);
+    const r = await httpCheck(m);
+    const tls = await tlsDaysLeft(m.url);
+    out(`${m.name}: ${r.ok ? 'ok' : `FAIL ${r.error}`} (HTTP ${r.status ?? '-'}, ${fmtMs(r.ms)})${tls != null ? `, certificate expires in ${tls} days` : ''}`);
+    if (!r.ok) process.exitCode = 1;
+    return;
+  }
+  if (sub === 'poll') {
+    supervisorOnly('sensor poll');
+    const all = sensorList().filter((m) => !name && !flagStr('name') ? true : m.name === (flagStr('name') ?? name));
+    if ((flagStr('name') ?? name) && !all.length) die(`no sensor ${flagStr('name') ?? name}`);
+    const due = flags.due ? all.filter((m) => sensorDue(m, sensorState(m.name))) : all;
+    const res = await Promise.all(due.map(async (m) => ({ name: m.name, ...(await pollSensor(m, { rollupDay: flagStr('rollup-day') ?? null })) })));
+    const alerts = res.flatMap((r) => r.alerts ?? []);
+    if (flags.json) return json({ polled: res.map((r) => r.name), alerts });
+    if (!res.length) return out(all.length ? 'nothing due' : 'no sensors (settings: sensors)');
+    for (const r of res) out(r.skipped ? `${r.name}: skipped (${r.skipped})` : `${r.name}: ${r.sample.ok ? 'ok' : r.sample.error} ${fmtMs(r.sample.ms)}`);
+    for (const a of alerts) out(`ALERT ${a}`);
+    return;
+  }
+  die('usage: sensor status [--json] | sensor test <name> | sensor poll [--due] [--name n] [--rollup-day yyyy-mm-dd] [--json] | sensor series <name> [--range 24h|7d]');
+}
+
 // wait [--minutes n]: block between ticks until something needs the supervisor, then say what.
 // It wakes on a new open message to the supervisor, any new line from the owner (an answer, a goal
 // decision, an ack, a message), a new high finding (a worker that stopped on an API error sends no
@@ -9786,6 +10096,17 @@ function cmdWait() {
   // leaves open wakes it once, not every time.
   const sinceFile = path.join(runDir, 'wait-since');
   const since = Number(readText(sinceFile)) || null;
+  // Sensors are polled on every cycle when one is due (checked here, before spawning anything); a
+  // new outage wakes the supervisor once. A poll gets a minute; one that fails says so once.
+  let pollWarned = false;
+  const poll = () => {
+    if (!sensorList().some((m) => sensorDue(m, sensorState(m.name)))) return [];
+    const r = spawnSync(process.execPath, [self, 'sensor', 'poll', '--due', '--json'], { cwd: mainRoot, env: { ...process.env, NODE_USE_ENV_PROXY: '1' }, encoding: 'utf8', timeout: 60000, maxBuffer: 8 * 1024 * 1024 });
+    try { if (r.status === 0) return JSON.parse(r.stdout).alerts ?? []; } catch {}
+    if (!pollWarned) process.stderr.write(`devteam: sensor poll ${r.error?.code === 'ETIMEDOUT' ? 'took over a minute' : `failed: ${(r.stderr || '').trim().split('\n').pop()}`}; monitoring didn't run this cycle (sensor status)\n`);
+    pollWarned = true;
+    return [];
+  };
   const snap = () => {
     logCache = null;
     const owner = readLog().lines.filter((l) => l.by === 'owner').map((l) => ({ k: l.id, at: Date.parse(l.at) }));
@@ -9793,10 +10114,12 @@ function cmdWait() {
     const high = (sub(['metrics', '--json'])?.findings ?? []).filter((f) => f.severity === 'high').map((f) => `${f.kind} ${f.subject}: ${f.detail}`);
     return { owner, msgs, high };
   };
+  const firstAlerts = poll();
   const first = snap();
   const late = (xs) => (since ? xs.filter((x) => x.at > since) : []);
   const base = { owner: first.owner.filter((x) => !late(first.owner).includes(x)).map((x) => x.k), msgs: first.msgs.filter((x) => !late(first.msgs).includes(x)).map((x) => x.k), high: first.high };
   const report = (why, lines) => { fs.mkdirSync(runDir, { recursive: true }); fs.writeFileSync(sinceFile, `${Date.now()}\n`); out(why); for (const l of lines) out(`  ${l}`); out('then: the tick (supervisor.md §3), and wait again'); };
+  if (firstAlerts.length) return report('production needs you (sensor status; supervisor.md, Monitoring):', firstAlerts);
   if (base.high.length) return report('high findings are open; act on each, or ack it with a reason (ack <kind> <subject> --reason "…"):', base.high);
   const lateMsgs = late(first.msgs).map((x) => `message ${x.k}`);
   const lateOwner = late(first.owner).map((x) => x.k);
@@ -9805,6 +10128,8 @@ function cmdWait() {
   const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
   while (Date.now() < until) {
     sleep(Math.min(Math.max(2000, (minutes * 60000) / 10), 45000, Math.max(0, until - Date.now())));
+    const alerts = poll();
+    if (alerts.length) return report('production needs you (sensor status; supervisor.md, Monitoring):', alerts);
     const now = snap();
     const keys = { ...now, owner: now.owner.map((x) => x.k), msgs: now.msgs.map((x) => x.k) };
     const fresh = (k) => keys[k].filter((x) => !base[k].includes(x));
@@ -9865,7 +10190,7 @@ function cmdSettings() {
   const s = loadSettings();
   const key = flagStr('get');
   // the registry as shown: a credential that reached settings.md (validate refuses it) isn't echoed
-  const shown = { ...s, links: Object.fromEntries(Object.entries(s.links ?? {}).map(([id, l]) => [id, redactLink(l)])) };
+  const shown = { ...s, links: Object.fromEntries(Object.entries(s.links ?? {}).map(([id, l]) => [id, redactLink(l)])), ...(isObj(s.sensors) ? { sensors: Object.fromEntries(Object.entries(s.sensors).map(([n, m]) => [n, isObj(m) && typeof m.url === 'string' ? { ...m, url: sensorShown(m.url) } : m])) } : {}) };
   if (!key) return json(shown);
   if (key === 'tmux_session') return out(tmuxSession());
   const v = shown[key];
@@ -9984,6 +10309,12 @@ function peekView(kind, id) {
     const prev = all[all.findIndex((x) => x.id === id) - 1];
     const nums = (x) => { try { return JSON.parse((x?.source_ref ? projectFileText(x.source_ref.replace(/^project\//, '')) : '')?.match(RETRO_BLOCK)?.[1] ?? 'null'); } catch { return null; } };
     v.numbers = { now: nums(o), prev: nums(prev), prev_id: prev?.id ?? null };
+  } else if (kind === 'sensor') {
+    sensorOf(id);
+    v.history = historyOf([sensorSubject(id)]);
+    v.status = sensorStatus().find((m) => m.name === id) ?? null;
+    v.series = { '24h': sensorSeries(id, '24h'), '7d': sensorSeries(id, '7d') };
+    v.failures = sensorSamples(id, Date.now() - 7 * 86400000).filter((s) => !s.ok).slice(-20).reverse();
   } else if (kind === 'file') {
     v.history = fileHistory(id, flagStr('ref') ?? null, flagStr('repo') ?? 'home');
   } else if (['story', 'release', 'wave', 'milestone'].includes(kind)) {
@@ -10470,7 +10801,7 @@ The graph (planning.md)
 Checks and merging (quality.md)
   check-ticket <id> [--sha s] [--title t] [--body-file f] [--pr n]   definition of done at an exact head
   check-pr --head-ref r --sha s [--title t] [--body-file f] [--repo <link> [--path <checkout>]]   what the forge's required check runs (optional; no gates, no approval acts); --repo checks a PR in another repo, in its checkout (--path names another one, such as a CI run's)
-  merge <ticket-id> | merge --plan <feature> | merge --chore <slug> [--approved qid] [--no-gates] [--dry-run]   supervisor: verify, run gates at the head, merge, log the act
+  merge <ticket-id> | merge --plan <feature> | merge --chore <slug> [--approved qid [qid …]] [--decision d-id] [--no-gates] [--dry-run]   supervisor: verify, run gates at the head, merge, log the act
   review-worktree <ticket-id> <sha> [--name suffix] | review-worktree --remove <path>   a final reviewer's detached worktree at exactly that sha, seeded like a worker's
 
 Sessions (worker.md)
@@ -10528,6 +10859,7 @@ Goals and retros
 The log
   log [--type t] [--by w] [--id x] [--tail n] [--json] | log-check | log-sync [--dry-run] | history [<ticket-id>]
   record <id> [--json]   one record's stored fields, who created it and who set each field | peek <kind> <id> --json   what a dashboard sidepeek shows beyond the data: history and its kind's details
+  sensor status [--json] | sensor test <name> | sensor poll [--due] [--name n] [--rollup-day d] [--json] (supervisor; wait runs it) | sensor series <name> [--range 24h|7d]   production sensors from settings
 
 Dashboard and releases
   dashboard [--port p] [--host h] | dashboard-data | notes <from-tag> [<to>] [--repo <link>]
@@ -10545,7 +10877,7 @@ const COMMANDS = {
   ask: cmdAsk, answer: cmdAnswer, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
   observe: cmdObserve, 'observe-link': cmdObserveLink, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, knowledge: cmdKnowledge, problem: cmdProblem,
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
-  log: cmdLog, record: cmdRecord, peek: cmdPeek, 'log-check': cmdLogCheck, 'accounts-tick': cmdAccountsTick, 'supervisor-session': cmdSupervisorSession, dispose: cmdDispose, 'log-sync': cmdLogSync, history: cmdHistory,
+  log: cmdLog, record: cmdRecord, peek: cmdPeek, sensor: cmdSensor, 'log-check': cmdLogCheck, 'accounts-tick': cmdAccountsTick, 'supervisor-session': cmdSupervisorSession, dispose: cmdDispose, 'log-sync': cmdLogSync, history: cmdHistory,
   drain: cmdDrain, undrain: cmdUndrain, fleet: cmdFleet, handoff: cmdHandoff, wait: cmdWait,
   dashboard: cmdDashboard, 'dashboard-data': cmdDashboardData, notes: cmdNotes,
 };
