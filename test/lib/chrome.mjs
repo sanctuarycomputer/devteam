@@ -28,7 +28,9 @@ export async function openChrome() {
     proc.on('exit', () => reject(new Error(`chrome exited: ${err.slice(0, 400)}`)));
   });
   const close = () => new Promise((r) => {
-    const done = () => { fs.rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); r(); };
+    // Chrome's helpers can still be writing the profile for a moment after it is gone: a removal
+    // that fails must not throw here (in an event handler, that leaves close() pending for good)
+    const done = () => { try { fs.rmSync(profile, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }); } catch { /* a temp dir: the OS clears it */ } r(); };
     // 'exit', not 'close': Chrome's helpers can hold its stderr open after it is gone
     if (proc.exitCode !== null) return done();
     proc.on('exit', done);
