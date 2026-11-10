@@ -7691,7 +7691,7 @@ function dashboardData() {
   const msgs = logObjects('message');
   const replied = handledMessages();
   return {
-    generated_at: nowIso(), project: settings.project,
+    generated_at: nowIso(), project: settings.project, kit: dashboardKit(),
     caps: { max_active_tickets: settings.max_active_tickets },
     gates_configured: Object.keys(settings.gates ?? {}),
     tickets: deriveStatus(),
@@ -7721,6 +7721,13 @@ function dashboardData() {
       }),
     },
   };
+}
+// The kit's release for the sidebar's pill, as `hello` says it. It hashes every kit file, and the
+// page asks every 10s, so it is worked out at most once a minute.
+let dashboardKitCache = null;
+function dashboardKit() {
+  if (!dashboardKitCache || Date.now() - dashboardKitCache.at > 60000) dashboardKitCache = { at: Date.now(), kit: kitVersion() };
+  return dashboardKitCache.kit;
 }
 const cmdDashboardData = () => { gitReadCache = new Map(); out(JSON.stringify(dashboardData())); };
 
@@ -11731,7 +11738,7 @@ Dashboard and releases
   dashboard [--port p] [--host h] | dashboard-data | notes <from-tag> [<to>] [--repo <link>]
 `;
 
-const OPERATOR_READS = new Set(['status', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'fleet status']);
+const OPERATOR_READS = new Set(['status', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'fleet status']);
 const COMMANDS = {
   init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), whoami: cmdWhoami, hello: cmdHello, settings: cmdSettings,
   feature: cmdFeature, ticket: cmdTicket, components: cmdComponents, link: cmdLink, links: cmdLinks, artifact: cmdArtifact, artifacts: cmdArtifacts, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, roadmap: cmdRoadmap,

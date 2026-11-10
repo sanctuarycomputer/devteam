@@ -60,6 +60,9 @@
   .brand { display: flex; align-items: center; gap: 8px; padding: 6px 8px 14px; }
   .brand .dot { width: 8px; height: 8px; border-radius: 2px; background: var(--fg); flex: none; }
   .brand b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* the kit's release, beside the name: +local in amber when this checkout's kit differs from main */
+  .brand .kit { margin: 0 0 0 auto; flex: none; font-family: var(--mono); font-size: 10.5px; line-height: 16px; padding: 0 6px; }
+  .brand .kit.local { --c: var(--amber-fg); }
   .nav a { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 5px 8px; border-radius: 6px; color: var(--fg-2); }
   .nav a:hover { background: var(--hover); color: var(--fg); }
   .nav .count { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
@@ -471,7 +474,7 @@
 <body>
 <div class="app">
 <aside class="side">
-  <div class="brand"><span class="dot"></span><b id="title">devteam</b></div>
+  <div class="brand"><span class="dot"></span><b id="title">devteam</b><span class="badge kit" id="kit" hidden></span></div>
   <nav class="nav">
     <a href="#overview"><span class="nl"><i class="icon-layout-dashboard" aria-hidden="true"></i>Overview</span></a>
     <a href="#goals"><span class="nl"><i class="icon-target" aria-hidden="true"></i>Goals</span> <span class="count" id="n-goals"></span></a>
@@ -3088,6 +3091,11 @@ function render(d) {
   DATA = d;
   const m = d.metrics, p = d.progress, now = Date.parse(p.now);
   $('title').textContent = d.project && !String(d.project).startsWith('<') ? String(d.project) : 'devteam';
+  const kit = $('kit'), local = /\+local$/.test(d.kit ?? '');
+  kit.hidden = !d.kit;
+  kit.textContent = d.kit ?? '';
+  kit.classList.toggle('local', local);
+  kit.title = d.kit ? `devteam ${d.kit}${local ? ': this checkout\'s kit differs from the one on main' : ''}` : '';
   $('when').textContent = `updated ${new Date(d.generated_at).toLocaleTimeString()}`;
   const o = d.ooda;
   $('logline').textContent = `log ${o.log.lines} lines${o.log.errors || o.log.ignored ? ` · ${o.log.errors} invalid · ${o.log.ignored} ignored` : ''}`;
