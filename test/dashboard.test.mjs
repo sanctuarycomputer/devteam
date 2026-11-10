@@ -183,6 +183,13 @@ test('init: from the main checkout only; main is the remote default branch, neve
     assert.equal(ok.status, 0, ok.stderr);
     assert.match(fs.readFileSync(path.join(r, 'docs/devteam/project/settings.md'), 'utf8'), /"main_branch": "trunk"/, "the remote's default, not feature/adopt-devteam");
     for (const d of ['log', 'tickets']) assert.ok(!fs.existsSync(path.join(r, 'docs/devteam/project', d, '.gitkeep')), `no ${d}/.gitkeep: merge refuses it`);
+    // the strategy's template, for the supervisor to draft with the owner; a second init leaves a written one alone
+    const strategy = path.join(r, 'docs/devteam/project/strategy.md');
+    assert.match(ok.stdout, /docs\/devteam\/project\/strategy\.md/);
+    assert.match(fs.readFileSync(strategy, 'utf8'), /^# Strategy\n[\s\S]*## How it wins, in order\n/);
+    fs.writeFileSync(strategy, '# Strategy\n\nOurs.\n');
+    assert.equal(run(r, ['init', '--name', 'demo']).status, 0);
+    assert.equal(fs.readFileSync(strategy, 'utf8'), '# Strategy\n\nOurs.\n');
     assert.ok(!fs.existsSync(path.join(r, '.github/workflows/devteam.yml')), 'no forge workflow');
   } finally {
     fs.rmSync(base, { recursive: true, force: true });

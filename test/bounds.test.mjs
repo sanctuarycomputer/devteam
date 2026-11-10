@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
-import { coverageFns } from './lib/kit.mjs';
+import { coverageFns, fleetFixture, line } from './lib/kit.mjs';
 
 test('coverage: bounded on a big tree; each glob compiled once, and owner suggestions match each file once', () => {
   const { coverage, ownerSuggestions, ownersOf } = coverageFns();
@@ -32,4 +32,30 @@ test('coverage: bounded on a big tree; each glob compiled once, and owner sugges
   assert.ok(ms2 < 500, `suggestions for 100 unowned folders over 50k paths took ${ms2.toFixed(0)} ms (bound 500)`);
   assert.equal(suggest('app9/m9/stray/'), null, 'no owned path under app9/: nothing to suggest');
   assert.equal(ownerSuggestions(['a/x/1', 'a/y/2'], new Set(['a/y/2']), (p) => (p === 'a/x/1' ? 'api' : null))('a/y/'), 'api', 'the nearest folder above with an owned path');
+});
+
+test('the Inbox order: 200 open questions, twenty of them settling the rest, ranked on every read within a bound', () => {
+  const F = fleetFixture('rank-bound');
+  const { old, ok } = F;
+  try {
+    const SUP = { DEVTEAM_ROLE: 'supervisor' };
+    const G = ok(old, ['goal', 'add', '--title', 'Big', '--outcome', 'x'], SUP);
+    ok(old, ['goal', 'impact', G, '3', '--rationale', 'W1'], SUP);
+    // written straight to the log: 180 details and 20 gates, each gate settling nine details
+    const at = (i) => new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString();
+    const id = (i) => `q-20260101-${String(i).padStart(9, '0')}-supervisor`;
+    const q = (i, extra) => line({ id: id(i), type: 'question', op: 'new', at: at(i), by: 'supervisor', kind: 'owner-decision', question: `Question ${i}?`, goal: G, urgency: 1 + (i % 2), ...extra });
+    let text = '';
+    for (let i = 0; i < 180; i++) text += q(i, { stake: 1 + (i % 2) });
+    for (let j = 0; j < 20; j++) text += q(180 + j, { stake: 3, choices: [{ label: 'Yes' }, { label: 'No' }], settles: Array.from({ length: 9 }, (_, k) => id(j * 9 + k)), settles_if: 'No' });
+    fs.appendFileSync(path.join(old, 'docs/devteam/run/log', `supervisor-${new Date().toISOString().slice(0, 7)}.jsonl`), text);
+    const timed = (args) => Math.min(...[0, 1, 2].map(() => { const t0 = process.hrtime.bigint(); ok(old, args); return Number(process.hrtime.bigint() - t0) / 1e6; }));
+    const qs = JSON.parse(ok(old, ['questions', '--json']));
+    assert.equal(qs.length, 200);
+    assert.ok(qs.slice(0, 20).every((x) => x.rank.parts.settles.length === 9), 'the twenty that settle others are first');
+    // against the same log with nothing to rank, so a slow machine's start-up doesn't count
+    const base = timed(['goal', 'list']);
+    const ms = timed(['questions', '--json']);
+    assert.ok(ms < base + 1500, `ranking 200 questions took ${ms.toFixed(0)} ms, ${(ms - base).toFixed(0)} over reading the log (bound 1500 over)`);
+  } finally { F.done(); }
 });

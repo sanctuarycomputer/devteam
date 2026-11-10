@@ -1019,6 +1019,8 @@ function fold(all) {
     for (const [k, val] of Object.entries(l)) {
       if (ENVELOPE.includes(k) || k.startsWith('__') || k === 'hold') continue;
       if ((obj.__rank[k] ?? -1) > rank) continue;
+      // a question's rating as first asked, so its history can show what a later rate replaced
+      if (obj.type === 'question' && QUESTION_RATING.includes(k) && !(k in (obj.__asked ??= {}))) obj.__asked[k] = obj[k];
       obj[k] = val;
       obj.__rank[k] = rank;
       changed[k] = val;
@@ -1305,11 +1307,26 @@ const byTime = (a, b) => a.created_at.localeCompare(b.created_at);
 const handledMessages = () => new Set([...logObjects('message'), ...logObjects('question')].map((x) => x.re).filter(Boolean));
 
 // What the owner saw: the question with every field it was asked with (later lines may only add
-// the supervisor's status and reason, and the owner's own fields). The owner's answer records this
+// the supervisor's status, reason and rating, and the owner's own fields). The rating (stake,
+// urgency, settles, settles_if) orders the Inbox and is no part of what the owner decides, so the
+// supervisor may rate again without reopening an answered question. The owner's answer records this
 // hash, and an answer whose question no longer hashes the same answers nothing: the question was
 // rewritten after the owner answered it (its line edited, or a backdated duplicate taking its
 // place), so it is open again, and the owner answers what it says now.
-const QUESTION_LATER = ['status', 'reason', 'answer', 'said', 'autonomy', 'standing_rule', 'secrets_posted', 'result', 'declined', 'question_hash'];
+const QUESTION_RATING = ['stake', 'urgency', 'settles', 'settles_if'];
+// A rating as the views and the order count it: 1, 2 or 3, else not rated. The log is checked in
+// full only on write and in log-check, so a line written by hand could carry any number here, and
+// the order multiplies what it reads: a stake of 99 would take the top of the Inbox.
+const ratingOf = (x) => ([1, 2, 3].includes(x) ? x : null);
+// Every rating the question has carried: as asked, then each later rate. The fold keeps only the
+// latest, and a rate can lower a question, so the card's ⋯ menu shows the trail.
+function ratingHistory(q) {
+  const asked = Object.fromEntries(QUESTION_RATING.slice(0, 3).map((k) => [k, q.__asked && k in q.__asked ? q.__asked[k] : q[k]]));
+  const entry = (at, by, r) => ({ at, by, ...(ratingOf(r.stake) ? { stake: r.stake } : {}), ...(ratingOf(r.urgency) ? { urgency: r.urgency } : {}), ...(Array.isArray(r.settles) ? { settles: r.settles.length } : {}) });
+  const has = (e) => e.stake || e.urgency || e.settles !== undefined;
+  return [{ ...entry(q.created_at, q.created_by, asked), asked: true }, ...q.updates.map((u) => entry(u.at, u.by, u))].filter(has);
+}
+const QUESTION_LATER = ['status', 'reason', ...QUESTION_RATING, 'answer', 'said', 'autonomy', 'standing_rule', 'secrets_posted', 'result', 'declined', 'question_hash'];
 const questionHash = (q) => crypto.createHash('sha256').update(canonical(Object.fromEntries(Object.entries(q).filter(([k]) => !k.startsWith('__') && !['updates', 'created_at', 'created_by', 'channel', ...QUESTION_LATER].includes(k))))).digest('hex').slice(0, 16);
 
 // Folded questions in the shape the inbox uses.
@@ -1346,7 +1363,7 @@ function questionView(q) {
   return {
     id: q.id, kind: q.kind, class: q.class ?? null, scope: q.scope ?? null, ticket: q.ticket ?? null, re: q.re ?? null, sensor: q.sensor ?? null, asked_at: q.created_at,
     question: q.question, context: q.context ?? '', options: q.options ?? [], choices: q.choices ?? [], links: q.links ?? [], goal: q.goal ?? null, change: q.change ?? null, rule_scope: q.rule_scope ?? null, recommendation: q.recommendation ?? '', confidence: q.confidence ?? null,
-    default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], approves: q.approves ?? [], evidence: q.evidence ?? [], note: q.note ?? null, why_asked: q.why_asked ?? null,
+    default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], stake: ratingOf(q.stake), urgency: ratingOf(q.urgency), settles: Array.isArray(q.settles) ? q.settles.filter((x) => typeof x === 'string') : [], settles_if: typeof q.settles_if === 'string' ? q.settles_if : null, settles_label: [...(q.choices ?? []).map((c) => c?.label), ...(q.options ?? [])].find((l) => sameAnswer(l, q.settles_if)) ?? null, rating_history: ratingHistory(q), approves: q.approves ?? [], evidence: q.evidence ?? [], note: q.note ?? null, why_asked: q.why_asked ?? null,
     secrets: (q.secrets ?? []).map((x) => ({ ...x, to: sinkWords(x.sink), sink_type: SINK_RE.exec(x.sink ?? '')?.[1] ?? null, warning: sinkWarning(x.sink) })), secrets_posted: q.updates.filter((u) => u.secrets_posted !== undefined && writerClass(u.by) === 'owner').pop()?.secrets_posted ?? [],
     status, answer, answered_by: answeredBy, answered_at: answeredAt, matched, hash, rewritten,
     autonomy: ans ? (q.autonomy ?? null) : null, standing_rule: ans ? (q.standing_rule ?? null) : null, channel: ans?.channel ?? null, said: ans?.said ?? null,
@@ -1424,6 +1441,29 @@ const correctionOf = (a) => {
   const u = a.updates.filter((x) => x.corrected !== undefined).pop();
   return u ? { ...u.corrected, by: u.by, at: u.at, repaired: a.repaired ?? null } : null;
 };
+// How much a goal matters to the project, 1 to 4: the supervisor's judgment against
+// project/strategy.md (a goal-impact decision whose first ref is the goal; the latest one), or the
+// value the owner gave when correcting one, which stands until the owner gives another. Computed
+// here, never stored on the goal. A decision corrected with no value (a retro's) keeps its level
+// until the supervisor judges again: a correction never drops a goal back to the unjudged 2.
+const IMPACT_WORDS = { 4: 'the project depends on it', 3: 'moves a number the project watches', 2: 'worth having', 1: 'housekeeping' };
+// 1 to 4, else no impact: a line written by hand could carry any value, and "constructor" is a key of every object.
+const impactOf = (x) => ([1, 2, 3, 4].includes(x) ? x : null);
+const goalImpacts = () => memo('goalImpacts', () => {
+  const by = new Map();
+  for (const d of logObjects('decision').filter((x) => x.class === 'goal-impact' && impactOf(x.impact) && x.refs?.[0]).sort(byTime)) (by.get(d.refs[0]) ?? by.set(d.refs[0], []).get(d.refs[0])).push(d);
+  const res = new Map();
+  for (const [goal, ds] of by) {
+    const o = ds.map((d) => ({ d, c: correctionOf(d) })).filter((x) => x.c && writerClass(x.c.by) === 'owner' && impactOf(x.c.impact)).sort((a, b) => a.c.at.localeCompare(b.c.at)).pop();
+    const last = ds[ds.length - 1];
+    const c = correctionOf(last);
+    res.set(goal, o
+      ? { level: o.c.impact, words: IMPACT_WORDS[o.c.impact], by: 'owner', rationale: o.c.reason, decision: o.d.id, at: o.c.at, rejudge: false }
+      : { level: last.impact, words: IMPACT_WORDS[last.impact], by: 'supervisor', rationale: last.rationale ?? null, decision: last.id, at: last.created_at, rejudge: !!c, ...(c ? { correction: c.reason } : {}) });
+  }
+  return res;
+});
+const goalImpact = (id) => goalImpacts().get(id) ?? null;
 
 // --- the log rule for a PR: which log files it may touch, and only by appending valid lines ---
 // base..sha may change project/log/<X>.jsonl only if X is the branch's own planner file (plan/<f>)
@@ -3710,6 +3750,38 @@ function ciFixApproval(chore, sha, base, changed) {
   }
   return { rule, what: 'CI fix' };
 }
+// project/strategy.md, the owner's. As main has it: missing, the template init wrote (by a marker
+// line it carries, so a later edit of the kit's template doesn't make an untouched file read as
+// written), or written.
+const strategyRel = `${projectRel}/strategy.md`;
+function strategyState() {
+  const text = projectInRepo && mainRef() ? git(['show', `${mainRef()}:${strategyRel}`]) : readText(path.join(projectDir, 'strategy.md'));
+  return text === null ? 'missing' : text.includes(STRATEGY_TEMPLATE_MARK) ? 'template' : 'written';
+}
+// A PR that changes the strategy (any PR: a chore, a plan, a ticket) lands only under the owner's
+// answered strategy-change question. The one change that needs none is init's untouched template
+// arriving where main has no strategy file: once a file is there, emptying it, resetting it to the
+// template or deleting it is a change like any other.
+function strategyFails(base, sha, approved) {
+  if (!base || !projectInRepo) return [];
+  // by the file's blob at each end, never a diff (a failed diff reads as no files)
+  const before = git(['rev-parse', '--verify', '--quiet', `${base}:${strategyRel}`]);
+  const after = git(['rev-parse', '--verify', '--quiet', `${sha}:${strategyRel}`]);
+  // A second file whose path differs from the strategy's only by case: on a disk that ignores case
+  // (macOS, Windows) the two are one file, and a checkout may leave this one where the strategy is read.
+  const twins = (git(['ls-tree', '-r', '-z', '--name-only', sha]) ?? '').split('\0').filter((f) => f !== strategyRel && f.toLowerCase() === strategyRel.toLowerCase() && git(['rev-parse', '--verify', '--quiet', `${base}:${f}`]) === null);
+  if (twins.length) return [`adds ${twins.join(', ')}, which a disk that ignores case can't tell from ${strategyRel}: the strategy is one file, and the owner's; remove it`];
+  if (before === after) return [];
+  if (before === null && (git(['show', `${sha}:${strategyRel}`]) ?? '').trim() === STRATEGY_MD.trim()) return [];
+  if (!approved) return [`changes ${strategyRel}: the strategy is the owner's, so the owner's answer is needed: ask --class strategy-change --reasons owner-only --recommendation "…" with a link to the draft, then --approved <qid>`];
+  const q = ownerAnswer(approved, 'merge --approved');
+  if (q.class !== 'strategy-change') return [`${approved} is a ${q.class ?? 'classless'} question; changing ${strategyRel} needs an answered strategy-change question`];
+  // The answer approves the text the question pinned when asked, and no other: a branch amended
+  // since lands words the owner never saw. The pin must also be what its link shows.
+  const pin = (q.links ?? []).find((l) => isObj(l) && l.path === strategyRel && l.blob);
+  if (!pin || git(['rev-parse', '--verify', '--quiet', `${pin.ref}:${strategyRel}`]) !== pin.blob) return [`${approved} pins no draft of ${strategyRel} that this repo can show: ask again with a link to the draft on its branch`];
+  return after === pin.blob ? [] : [`${strategyRel} at the head is not the text ${approved} asked the owner about (${after ? after.slice(0, 12) : 'no file'}, not ${pin.blob.slice(0, 12)}); ask again about the text as it is now`];
+}
 function ownerAnswer(qid, what) {
   const q = logGet(qid);
   const v = q?.type === 'question' ? questionView(q) : null;
@@ -3872,6 +3944,7 @@ function cmdMerge() {
     const classed = base ? ownerSettingsChanged(base, sha) : [];
     const changed = classed?.filter((c) => !SUPERVISOR_LINK_CLASSES.includes(c.cls)) ?? null;
     fails.push(...registryActFails(base, sha));
+    fails.push(...strategyFails(base, sha, approved));
     if (changed === null) fails.push(`${projectRel}/settings.md: the json devteam block is not valid JSON at the head`);
     else if (changed.length) {
       const classes = [...new Set(changed.map((c) => c.cls))];
@@ -4197,6 +4270,45 @@ function goalChangeFlag(cls) {
   if (!Object.keys(c).length || bad.length) die(`--change sets goal fields (${GOAL_CHANGE_FIELDS.join(', ')})${bad.length ? `; not ${bad.join(', ')}` : ''}`);
   return c;
 }
+// --stake and --urgency on ask and rate: 1, 2 or 3 each; undefined when not given.
+function ratingFlags() {
+  const r = {};
+  for (const k of ['stake', 'urgency']) {
+    if (flags[k] === undefined) continue;
+    r[k] = flagNum(k);
+    if (![1, 2, 3].includes(r[k])) die(`--${k} is 1, 2 or 3 (supervisor.md §6)`);
+  }
+  return r;
+}
+const idsFlag = (k) => [...new Set(asList(flags[k]).flatMap((x) => String(x).split(',')).map((x) => x.trim()).filter(Boolean))];
+// What ask and rate check before a question says it settles others. settles is the whole list it
+// would carry, added the ids new on this line, self the question's own id (null when new).
+function settleChecks({ self, kind, stake, settles, added, settlesIf, choices, about }) {
+  if (!settles.length) return;
+  if (['review', 'owner-action', 'goal-approval', 'trust'].includes(kind)) die(`a ${kind} question settles no others: --settles is for a decision whose answer makes other questions unnecessary`);
+  if (stake !== 3) die('a question that settles others is one the work turns on: --stake 3 (supervisor.md §6)');
+  if (!settlesIf) die('--settles needs --settles-if "<the answer that settles them>"');
+  if ((choices ?? []).length && !choices.some((c) => sameAnswer(c.label, settlesIf))) die(`--settles-if "${settlesIf}" is none of the choices (${choices.map((c) => c.label).join(', ')})`);
+  if (settles.length > 20) die('--settles names at most 20 questions');
+  const all = new Map(logObjects('question').map((x) => [x.id, x]));
+  for (const id of added) {
+    if (id === self) die(`--settles ${id}: a question can't settle itself`);
+    const x = all.get(id);
+    if (!x) die(`--settles ${id}: no such question`);
+    const v = questionView(x);
+    if (v.status !== 'open') die(`--settles ${id}: it is already ${v.status}`);
+    if (!sharesWork(about, questionAbout(v))) die(`--settles ${id}: it is about another goal or feature; a question settles only questions about its own (name the goal on both with --goal, or the ticket)`);
+    // a cycle: the question it would settle already settles this one, directly or through others
+    const seen = new Set();
+    const reaches = (y) => y === self || (!seen.has(y) && (seen.add(y), (all.get(y)?.settles ?? []).some(reaches)));
+    if (self && reaches(id)) die(`--settles ${id}: ${id} already settles ${self}; two questions can't settle each other`);
+  }
+}
+// A rating the kit will count for less than it says, or that contradicts the question: said once, on stderr.
+function ratingWarnings({ stake, urgency, blocks, def }) {
+  if (urgency === 3 && !def && !(blocks ?? []).some((b) => activeTickets().has(b) && !mergeShaFor(b)) && !blocksOpenIncident(blocks)) warn('urgency 3 says work is stopped on it now: it counts as 3 only while --blocks names a ticket that is waiting or an open incident, or the question has a default; this one counts as 2');
+  if (stake === 3 && def) warn('a question the work turns on (stake 3) shouldn\'t go ahead by default');
+}
 function cmdAsk() {
   supervisorOnly('ask');
   const q = flagStr('question') ?? die('ask needs --question');
@@ -4343,6 +4455,7 @@ function cmdAsk() {
     // an inline link is logged as given, so a credential in it would be in the log and every view of the question
     if (hasCredentials(l.url)) die(`--links: ${redactUrl(l.url)} carries credentials; ${CREDENTIALS_REFUSED}`);
     if (l.sha256 !== undefined) die('--links: sha256 is written by ask (the artifact as it is now), never given');
+    if (l.blob !== undefined) die('--links: blob is written by ask (the draft as it is now), never given');
     if (l.at !== undefined && l.artifact === undefined) die('--links: at belongs to an artifact link');
     if (l.artifact !== undefined) {
       arts ??= allArtifacts();
@@ -4356,11 +4469,33 @@ function cmdAsk() {
     }
   }
   for (const [, n] of `${q}\n${flagStr('context') ?? ''}`.matchAll(/\[\[([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\]\]/g)) if (!names.has(n)) die(`--links: the text names [[${n}]] but no link has "name": "${n}"`);
+  // A strategy change is asked about one text: the draft's blob and commit are pinned here, in this
+  // one line the question's hash covers. merge lands that blob and no other, and the link shows the
+  // owner that commit's text however the branch moves after.
+  if (cls === 'strategy-change' && projectInRepo) {
+    const l = (links ?? []).find((x) => isObj(x) && x.path === strategyRel);
+    if (!l?.ref) die(`--links: a strategy-change question links the draft it asks about, on its branch: {"title":"The strategy","path":"${strategyRel}","ref":"<the chore's branch>"}`);
+    const commit = /^-/.test(l.ref) ? null : git(['rev-parse', '--verify', '--quiet', `${l.ref}^{commit}`]);
+    const blob = commit && git(['rev-parse', '--verify', '--quiet', `${commit}:${strategyRel}`]);
+    if (!blob) die(`--links: no ${strategyRel} at ${l.ref}; commit the draft to its branch first`);
+    l.ref = commit;
+    l.blob = blob;
+  }
+  // The rating: how much rides on the answer and how soon, and the open questions one answer
+  // would settle. The kit orders the Inbox from it (inboxRanks); it is never part of what the
+  // owner's answer covers.
+  const rating = ratingFlags();
+  const settles = idsFlag('settles');
+  if (flags['settles-if'] !== undefined && !settles.length) die('--settles-if needs --settles <qid>…: the questions that answer settles');
+  settleChecks({ self: null, kind, stake: rating.stake, settles, added: settles, settlesIf: flagStr('settles-if'), choices: jsonFlag('choices'), about: questionAbout({ goal: flagStr('goal'), ticket: flagStr('ticket'), blocks }) });
+  if (rating.stake === undefined || rating.urgency === undefined) warn('rate it: --stake 1-3 --urgency 1-3, so the Inbox can put the most valuable question first (supervisor.md §6)');
+  ratingWarnings({ ...rating, blocks, def });
   const line = appendLog({
     type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), sensor: flagStr('sensor'), question: q, context: kind === 'goal-approval' ? [flagStr('context'), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal')))), registryAttestText(logGet(flagStr('goal')))].filter(Boolean).join('\n\n') : context,
     rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: goalChangeFlag(cls), options: asList(flags.options), choices: jsonFlag('choices'), links, recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined,
     deadline: def ? deadlineAt ?? new Date(Date.now() + loadSettings().question_default_after_hours * 3600000).toISOString() : undefined,
-    blocks, approves: approves.length ? approves : undefined, evidence, note: flagStr('note'), secrets, review,
+    blocks, ...rating, settles: settles.length ? settles : undefined, settles_if: settles.length ? flagStr('settles-if') : undefined,
+    approves: approves.length ? approves : undefined, evidence, note: flagStr('note'), secrets, review,
     why_asked: { rung: onLadder ? rungFor(cls, scope) : undefined, ceiling: onLadder ? L.classes[cls].ceiling : undefined, reasons },
   }, 'supervisor');
   out(line.id);
@@ -4431,8 +4566,12 @@ function cmdAnswer() {
   // rule would apply (ask --rule-scope; the dashboard shows it next to the rule field), else the
   // whole project.
   if (flagStr('rule')) appendLog({ type: 'knowledge', kind: 'preference', statement: flagStr('rule'), scope: flagStr('rule-scope') ?? v.rule_scope ?? 'project', status: 'accepted', confidence: 1, evidence: [id], channel: fromChat ? 'chat' : undefined }, by);
-  if (!fromChat) nudgeSupervisor(`[devteam answer ${id} from owner] read it with: devteam.mjs questions --id ${id}`);
+  // The answer this question said would settle others: the supervisor withdraws each (its own act).
+  const settled = sameAnswer(answer, v.settles_if) ? v.settles.filter((s) => { const x = logGet(s); return x?.type === 'question' && questionView(x).status === 'open'; }) : [];
+  const settledNote = settled.length ? `it settles ${plural(settled.length, 'open question')} (${settled.join(', ')}): withdraw each with withdraw <qid> --reason "settled by the owner's answer to ${id}"` : '';
+  if (!fromChat) nudgeSupervisor(`[devteam answer ${id} from owner] read it with: devteam.mjs questions --id ${id}${settledNote ? `; ${settledNote}` : ''}`);
   out(`${decline ? 'sent back' : 'answered'} ${id}${fromChat ? ' (from chat; listed on the dashboard for the owner to check)' : reviewFields.result ? `: ${reviewFields.answer} (result sha256 ${reviewFields.result.sha256.slice(0, 12)})` : ''}`);
+  if (settledNote && fromChat) out(settledNote);
 }
 function cmdWithdraw() {
   const [id] = positional;
@@ -4442,6 +4581,32 @@ function cmdWithdraw() {
   appendLog({ type: 'question', op: 'set', id, status: 'withdrawn', reason: flagStr('reason') }, 'supervisor');
   appendLog({ type: 'act', decision: citing(), class: 'withdraw-question', what: `withdrew ${id}${flagStr('reason') ? `: ${flagStr('reason')}` : ''}`, refs: [id], reversible: true }, 'supervisor');
   out(`withdrew ${id}`);
+}
+// rate: the supervisor rates an open question again (its stake, its urgency, what it settles). One
+// set line; the order is computed from it on the next read. --settles adds to what it settles.
+function cmdRate() {
+  const [id] = positional;
+  const usage = 'usage: rate <qid> [--stake 1-3] [--urgency 1-3] [--settles <qid>… | --settles none] [--unsettles <qid>…] [--settles-if "<the answer that settles them>"]';
+  if (!id) die(usage);
+  supervisorOnly('rate');
+  const v = openQuestion(id);
+  const r = ratingFlags();
+  const clear = flagStr('settles') === 'none';
+  const added = clear ? [] : idsFlag('settles').filter((x) => !v.settles.includes(x));
+  const drop = idsFlag('unsettles');
+  if (flags.settles === true || flags.unsettles === true) die(usage);
+  if (r.stake === undefined && r.urgency === undefined && flags.settles === undefined && !drop.length && flags['settles-if'] === undefined) die(usage);
+  for (const d of drop) if (!v.settles.includes(d)) die(`${id} doesn't settle ${d}`);
+  const settles = clear ? [] : [...v.settles, ...added].filter((x) => !drop.includes(x));
+  const stake = r.stake ?? v.stake ?? undefined;
+  const settlesIf = flagStr('settles-if') ?? v.settles_if ?? undefined;
+  if (flags['settles-if'] !== undefined && !settles.length) die('--settles-if needs --settles <qid>…: the questions that answer settles');
+  settleChecks({ self: id, kind: v.kind, stake, settles, added, settlesIf, choices: v.choices, about: questionAbout(v) });
+  const changed = clear || added.length || drop.length;
+  appendLog({ type: 'question', op: 'set', id, ...r, settles: changed ? settles : undefined, settles_if: flagStr('settles-if') }, 'supervisor');
+  ratingWarnings({ stake, urgency: r.urgency, blocks: v.blocks, def: v.default });
+  const rank = inboxRanks(questions().filter((q) => q.status === 'open' && q.goal_hold !== 'let-go')).get(id);
+  out(`rated ${id}${rank ? `: ${rank.position} of ${rank.of} in the Inbox, score ${rank.score}${rank.reason ? ` (${rank.reason})` : ''}` : ''}`);
 }
 
 // ===== review questions: an agent-drawn page the owner answers with a result =====
@@ -6001,17 +6166,130 @@ function questionHold(q) {
   const m = modeOf(goals);
   return ['park', 'let-go'].includes(m) ? m : null;
 }
-function rankQuestions(qs) {
+// ---- the order of the Inbox: computed on every read, never stored ----
+// The supervisor rates: each goal's impact (1 to 4, against the strategy), and on every question
+// its stake and urgency (1 to 3 each) and the open questions one of its answers would settle. The
+// kit counts what it can (tickets held up, tickets behind them, a default) and orders:
+//   own   = impact × stake × urgency + unblock        unblock = min(12, 2 per ticket held up on
+//           the critical path + 1 per ticket held up off it + 1 per ticket behind them)
+//   own   = ceil(own / 2) when the question has a default (the fleet goes on at the deadline),
+//           unless that default fires within DEFAULT_SOON_HOURS
+//   score = own + the own of every open question it settles, through other settling questions too
+// Unrated counts as stake 2 and urgency 2 with blocks, else 1; no goal or an unjudged one as
+// impact 2. Urgency 3 counts as 3 only while the question holds up a waiting ticket, is about an
+// open incident, or has a default, else as 2. settles counts only for a stake-3 question that shares a goal or feature
+// with what it settles. A parked goal's question: urgency 1, no unblock.
+// The order is by score within two bands. Above the rest, however they are rated (a low score
+// must not bury them): one-way doors, what only the owner can do, goal approvals, a question
+// holding up a waiting ticket or an open incident, a default about to fire, and a question that
+// would settle any of those. Not while the question's goal is parked. Ties: more settled, then
+// older, then id.
+const STAKE_WORDS = { 3: 'decides whether the work goes ahead', 2: 'changes the design or the plan', 1: 'a detail' };
+const STAKE_ACTION_WORDS = { 3: 'a goal or milestone waits on it', 2: 'a feature waits on it', 1: 'one ticket waits on it' };
+const FLOOR_KINDS = { 'one-way-door': 'a one-way door', 'owner-action': 'only you can do it', 'goal-approval': 'a goal waits on your approval' };
+const DEFAULT_SOON_HOURS = 4;
+const URGENCY_WORDS = { 3: 'work is stopped on it now', 2: 'work will stop on it before this milestone is done', 1: 'nothing waits on it yet' };
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+// An answer is a choice when it is that label, with or without a note after " — ".
+const sameAnswer = (answer, label) => { const norm = (x) => String(x ?? '').trim().toLowerCase(); return !!label && [norm(answer), norm(String(answer ?? '').split(' — ')[0])].includes(norm(label)); };
+// The goals and features a question is about: its goal, else its tickets' (the one it is about and
+// those it blocks). Upkeep is no goal here: nobody judges its impact.
+function questionAbout(q) {
+  const ts = tickets();
+  const about = [...new Set([q.ticket, ...(q.blocks ?? [])].filter((id) => ts.has(id)))];
+  const goals = (q.goal ? [logGet(q.goal)] : about.flatMap((id) => ticketGoals(ts.get(id)))).filter((g) => g?.type === 'goal' && !isUpkeep(g));
+  return { goals: [...new Map(goals.map((g) => [g.id, g])).values()], features: [...new Set(about.map((id) => ts.get(id).feature).filter((f) => f && f !== CHORES))] };
+}
+// An incident-fix question's blocks names its incident (p-…): one still open backs an urgency of 3
+// as a waiting ticket does.
+const blocksOpenIncident = (blocks) => (blocks ?? []).some((b) => { const p = logGet(b); return isIncident(p) && p.status !== 'resolved'; });
+const sharesWork = (a, b) => a.goals.some((g) => b.goals.some((h) => h.id === g.id)) || a.features.some((f) => b.features.includes(f));
+// The rank of every question in the Inbox (the open ones whose goal is not let go: a question
+// outside that list adds nothing to another's score), by id.
+function inboxRanks(inbox) {
   const sub = activeTickets();
   const crit = findCycle(sub) ? new Set() : new Set(criticalPath(sub).path);
-  const score = (q) => (['one-way-door', 'owner-decision', 'goal-approval', 'owner-action'].includes(q.kind) ? 1000 : 0) + q.blocks.reduce((s, id) => s + (crit.has(id) ? 3 : 1), 0) * 10;
-  return [...qs].sort((a, b) => score(b) - score(a) || a.asked_at.localeCompare(b.asked_at));
+  const waiting = (id) => sub.has(id) && !mergeShaFor(id);
+  const dependents = new Map();
+  for (const [id, t] of sub) for (const d of t.depends_on ?? []) (dependents.get(d) ?? dependents.set(d, []).get(d)).push(id);
+  const byId = new Map(inbox.map((q) => [q.id, q]));
+  const about = new Map(inbox.map((q) => [q.id, questionAbout(q)]));
+  const now = Date.now();
+  const facts = new Map();
+  for (const q of inbox) {
+    const a = about.get(q.id);
+    const judged = a.goals.map((g) => ({ g, i: goalImpact(g.id) })).filter((x) => x.i).sort((x, y) => y.i.level - x.i.level)[0] ?? null;
+    const goal = judged?.g ?? a.goals[0] ?? null;
+    const parked = q.goal_hold === 'park';
+    const held = [...new Set(q.blocks)].filter(waiting);
+    const onPath = held.filter((id) => crit.has(id)).length;
+    const after = new Set();
+    const walk = (id) => { for (const d of dependents.get(id) ?? []) if (!after.has(d)) { after.add(d); walk(d); } };
+    held.forEach(walk);
+    const behind = [...after].filter((id) => waiting(id) && !held.includes(id)).length;
+    const given = q.urgency ?? (q.blocks.length ? 2 : 1);
+    const incident = blocksOpenIncident(q.blocks);
+    const clamped = given === 3 && !parked && !held.length && !q.default && !incident;
+    const soon = !!q.default && Date.parse(q.deadline) - now <= DEFAULT_SOON_HOURS * 3600000;
+    const floor = parked ? null : soon ? 'its default is about to fire' : FLOOR_KINDS[q.kind] ?? (held.length ? 'work is waiting on it' : incident ? 'an open incident waits on it' : null);
+    const parts = {
+      goal: goal?.id ?? null, goal_title: goal?.title ?? null, goal_impact: judged?.i.level ?? 2, judged: !!judged, impact_by: judged?.i.by ?? null,
+      stake: q.stake ?? 2, urgency: parked ? 1 : clamped ? 2 : given, urgency_given: q.urgency ?? null, rated: q.stake != null || q.urgency != null,
+      held_up: held.length, on_path: onPath, behind, unblock: parked ? 0 : Math.min(12, 2 * onPath + (held.length - onPath) + behind),
+      default: !!q.default, default_soon: soon, parked, floor, age_days: Math.floor((now - Date.parse(q.asked_at)) / DAY),
+      settles: q.stake === 3 ? [...new Set(q.settles)].filter((id) => id !== q.id && byId.has(id) && sharesWork(a, about.get(id))) : [], settled_by: [],
+    };
+    const full = parts.goal_impact * parts.stake * parts.urgency + parts.unblock;
+    facts.set(q.id, { q, parts, own: parts.default && !soon ? Math.ceil(full / 2) : full });
+  }
+  for (const [id, f] of facts) for (const m of f.parts.settles) facts.get(m).parts.settled_by.push(id);
+  for (const [id, f] of facts) {
+    const seen = new Set([id]);
+    const walk = (x) => { for (const m of facts.get(x).parts.settles) if (!seen.has(m)) { seen.add(m); walk(m); } };
+    walk(id);
+    seen.delete(id);
+    f.all = [...seen];
+    f.score = f.own + f.all.reduce((s, m) => s + facts.get(m).own, 0);
+    // keeps "a question ranks above everything it settles" true across the bands
+    f.floor = f.parts.floor ?? (!f.parts.parked && f.all.some((m) => facts.get(m).parts.floor) ? 'it would settle one that is' : null);
+  }
+  const order = [...facts.values()].sort((x, y) => (y.floor ? 1 : 0) - (x.floor ? 1 : 0) || y.score - x.score || y.all.length - x.all.length || x.q.asked_at.localeCompare(y.q.asked_at) || x.q.id.localeCompare(y.q.id));
+  const ranks = new Map();
+  order.forEach((f, i) => {
+    const { q, parts: p } = f;
+    const chips = [];
+    if (f.all.length) chips.push(`would settle ${f.all.length} other question${f.all.length > 1 ? 's' : ''}`);
+    if (p.held_up) chips.push(`holds up ${plural(p.held_up, 'ticket')}${p.on_path ? `, ${p.on_path} on the critical path` : ''}${p.behind ? `, ${p.behind} more behind ${p.held_up > 1 ? 'them' : 'it'}` : ''}`);
+    if (p.default) chips.push(`goes ahead with the default${q.deadline ? ` at ${q.deadline.slice(0, 16).replace('T', ' ')} UTC` : ''}`);
+    // what the supervisor judged says so: the owner reads a rating as a rating, not a fact
+    if (p.goal) chips.push(p.judged ? `for ${p.goal_title} (${p.impact_by === 'owner' ? 'your rating' : 'the supervisor\'s rating'}): ${IMPACT_WORDS[p.goal_impact]}` : `for ${p.goal_title}: its impact is not judged yet`);
+    if (q.stake != null) { const w = q.kind === 'owner-action' ? (q.stake > 1 ? STAKE_ACTION_WORDS[q.stake] : null) : q.stake !== 2 ? STAKE_WORDS[q.stake] : null; if (w) chips.push(`the supervisor's rating: ${w}`); }
+    if (p.urgency === 3 && p.held_up) chips.push(URGENCY_WORDS[3]);
+    if (p.parked) chips.push('its goal is parked');
+    if (p.age_days >= 3) chips.push(`waiting ${p.age_days} days`);
+    const sum = [
+      `impact ${p.goal_impact} (${p.judged ? IMPACT_WORDS[p.goal_impact] : p.goal ? 'not judged yet, counted as 2' : 'no goal, counted as 2'})`,
+      `× stake ${p.stake} (${q.stake != null ? (q.kind === 'owner-action' ? STAKE_ACTION_WORDS : STAKE_WORDS)[p.stake] : 'not rated, counted as 2'})`,
+      `× urgency ${p.urgency} (${p.parked ? 'its goal is parked' : p.urgency_given === 3 && p.urgency === 2 ? 'rated 3, counted as 2: it holds up no waiting ticket or open incident and has no default' : p.urgency === 3 && !p.held_up ? `rated 3, backed by ${p.default ? 'its default' : 'an open incident'}` : p.urgency_given != null ? URGENCY_WORDS[p.urgency] : `not rated, counted as ${p.urgency}`})`,
+      ...(p.unblock ? [`+ ${p.unblock} for the tickets it holds up`] : []), ...(p.default && !p.default_soon ? ['halved for its default'] : []),
+      ...(f.all.length ? [`+ ${f.score - f.own} from the ${plural(f.all.length, 'question')} it would settle`] : []),
+    ].join(' ');
+    ranks.set(q.id, { score: f.score, own: f.own, position: i + 1, of: order.length, top: i === 0 && q.stake != null && q.urgency != null, floor: f.floor, chips, reason: [...chips, ...(p.settled_by.length ? [`may be settled by ${p.settled_by.join(', ')}`] : [])].join('; '), sum: `score ${f.score}: ${sum}`, parts: { ...p, settles: f.all } });
+  });
+  return ranks;
+}
+// Questions in Inbox order, each with its rank (null for one outside the Inbox: closed, or its
+// goal let go; those follow, oldest first).
+function rankQuestions(qs, inbox = qs) {
+  const ranks = inboxRanks(inbox);
+  return qs.map((q) => ({ ...q, rank: ranks.get(q.id) ?? null })).sort((a, b) => (a.rank?.position ?? Infinity) - (b.rank?.position ?? Infinity) || a.asked_at.localeCompare(b.asked_at));
 }
 function cmdQuestions() {
   let qs = questions();
+  const inbox = qs.filter((q) => q.status === 'open' && q.goal_hold !== 'let-go');
   if (flagStr('id')) qs = qs.filter((q) => q.id === flagStr('id'));
-  else if (!flags.all) qs = qs.filter((q) => q.status === 'open' && q.goal_hold !== 'let-go');
-  qs = rankQuestions(qs);
+  else if (!flags.all) qs = inbox;
+  qs = rankQuestions(qs, inbox);
   if (flags.json) return json(qs);
   if (!qs.length) return out('no questions');
   for (const q of qs) {
@@ -6024,7 +6302,24 @@ function cmdQuestions() {
     if (q.answer) out(`  answer (${q.answered_by}): ${q.answer}`);
     if (q.autonomy) out(`  next time: ${q.autonomy.class} at rung ${q.autonomy.rung} (${RUNG[q.autonomy.rung]})${q.autonomy.scope ? ` for ${q.autonomy.scope}` : ''}`);
     if (q.standing_rule) out(`  standing rule: ${q.standing_rule}`);
+    if (q.settles.length && q.status === 'open') out(`  settles, if answered "${q.settles_if}": ${q.settles.join(', ')}`);
+    // only a rated question prints its rank: an unrated one prints as it always did
+    if (q.rank?.parts.rated) out(`  rank: ${q.rank.score}${q.rank.reason ? ` (${q.rank.reason})` : ''}`);
   }
+}
+// next: the owner's next best step, the top of the Inbox, and why it is there. (What the fleet
+// starts next is still `ready`, in the owner's priority order.)
+function cmdNext() {
+  const qs = rankQuestions(questions().filter((q) => q.status === 'open' && q.goal_hold !== 'let-go'));
+  const [top, ...then] = qs;
+  const owner = top ? { id: top.id, kind: top.kind, question: top.question, rank: top.rank, then: then.map((q) => ({ id: q.id, question: q.question, score: q.rank.score })) } : null;
+  if (flags.json) return json({ owner });
+  if (!owner) return out('you    nothing: the Inbox is empty');
+  out(`you    ${top.id}  ${top.question}`);
+  if (top.rank.reason) out(`       ${top.rank.reason}`);
+  if (top.rank.floor) out(`       above the ordinary questions: ${top.rank.floor}`);
+  out(`       ${top.rank.sum}`);
+  if (then.length) out(`       then: ${then.slice(0, 3).map((q) => `${q.id} (score ${q.rank.score})`).join(', ')}${then.length > 3 ? `, ${then.length - 3} more` : ''}`);
 }
 
 // An act: a decision the supervisor made. For a ladder class it checks the rung first and refuses
@@ -6288,14 +6583,23 @@ function tldrGap(text) {
 // act went wrong, that is a problem (or an escaped defect), not a trust drop (constitution.md §2).
 function cmdCorrect() {
   const [actId] = positional;
-  if (!actId) die('usage: correct <decision-or-act-id> --reason r [--severity 0-4]   (owner; the supervisor at a retro adds --retro)');
+  if (!actId) die('usage: correct <decision-or-act-id> --reason r [--severity 0-4] [--impact 1-4 (a goal-impact decision: the impact you give the goal)]   (owner; the supervisor at a retro adds --retro)');
   const by = flags.retro ? (supervisorOnly('correct --retro'), 'supervisor') : ownerWriter().by;
   const act = logGet(actId);
   if (!['act', 'decision'].includes(act?.type)) die(`no decision or act ${actId}`);
   if (act.type === 'act' && act.created_by === 'owner') die(`${actId} is the owner's own record (${act.class}), not a call; nothing to correct`);
   if (act.type === 'act' && act.decision) die(`${actId} carried out ${act.decision}. If the decision was wrong: correct ${act.decision} --reason "…". If it was sound and the act went wrong: problem add --title "…" --severity 0-4 --refs ${actId}${by === 'owner' ? ' --owner' : ''} (a problem, not a trust drop; constitution.md §2)`);
-  if (correctionOf(act)) die(`${actId} is already corrected`);
-  appendLog({ type: act.type, op: 'set', id: actId, corrected: { reason: flagStr('reason') ?? die('correct needs --reason'), severity: flagNum('severity') } }, by);
+  // On a goal-impact decision the owner gives the goal's impact themselves (--impact): it stands,
+  // and they may give another later, so one already corrected takes a new value.
+  const impact = flags.impact !== undefined ? flagNum('impact') : undefined;
+  if (impact !== undefined) {
+    if (act.type !== 'decision' || act.class !== 'goal-impact') die('--impact goes with the correction of a goal-impact decision');
+    if (by !== 'owner') die('--impact is the owner\'s: only the owner sets a goal\'s impact when correcting it');
+    if (!impactOf(impact)) die('--impact is 1 (housekeeping), 2 (worth having), 3 (moves a number the project watches) or 4 (the project depends on it)');
+  }
+  if (correctionOf(act) && impact === undefined) die(`${actId} is already corrected`);
+  appendLog({ type: act.type, op: 'set', id: actId, corrected: { reason: flagStr('reason') ?? die('correct needs --reason'), severity: flagNum('severity'), impact } }, by);
+  if (impact !== undefined) out(`${logGet(act.refs?.[0])?.title ?? act.refs?.[0]}: impact ${impact} (${IMPACT_WORDS[impact]}), set by the owner; it stands until the owner changes it`);
   if (ladder().classes[act.class]) out(`${act.class} drops to rung 1 (ask)`);
   if (by === 'owner') nudgeSupervisor(`[devteam correction from owner] on ${actId}; read it with: devteam.mjs log --id ${actId}`);
   out(`corrected ${actId}`);
@@ -6920,7 +7224,7 @@ function goalView(g) {
   const mode = goalMode(g);
   const still = ['park', 'let-go'].includes(mode);
   const forecast = goalForecast(g);
-  return { ...g, ...(g.measure ? { measure: measureOf(g) } : {}), status: g.status ?? 'draft', readings: readings.map((r) => ({ at: r.created_at, value: r.measure.value, source: r.source, ...(r.sha ? { sha: r.sha } : {}), ...(r.approved ? { approved: r.approved } : {}) })), track: still ? null : track, check: goalCheck(g), forecast: forecast && still ? { ...forecast, eta: null, past_horizon: false } : forecast, hold_view: holdView(g), registry_attest: registryAttestView(g) };
+  return { ...g, ...(g.measure ? { measure: measureOf(g) } : {}), status: g.status ?? 'draft', readings: readings.map((r) => ({ at: r.created_at, value: r.measure.value, source: r.source, ...(r.sha ? { sha: r.sha } : {}), ...(r.approved ? { approved: r.approved } : {}) })), track: still ? null : track, check: goalCheck(g), forecast: forecast && still ? { ...forecast, eta: null, past_horizon: false } : forecast, hold_view: holdView(g), registry_attest: registryAttestView(g), impact: goalImpact(g.id) };
 }
 function cmdGoal() {
   const [sub, id] = positional;
@@ -7078,6 +7382,26 @@ function cmdGoal() {
     return out(f ? forecastText(g, f) : `${id} has no milestones yet`);
   }
   if (sub === 'show') { const g = goalArg(id) ?? die(`no goal ${id}`); return json(isUpkeep(g) ? { ...g, hold_view: holdView(g) } : goalView(g)); }
+  // goal impact: the supervisor's judgment of how much a goal matters to the project, against
+  // project/strategy.md. A constitutional decision (no rung, no --approved): the owner sees it on
+  // the goal and corrects it with the value they give (correct <d-id> --impact n), which stands.
+  if (sub === 'impact') {
+    const usage = 'usage: goal impact <g-id> <1-4> --rationale "<why, citing the strategy>" [--confidence 0-1]   (4 the project depends on it, 3 moves a number the project watches, 2 worth having, 1 housekeeping)';
+    supervisorOnly('goal impact');
+    const g = logGet(id ?? '');
+    const level = Number(positional[2]);
+    if (g?.type !== 'goal' || isUpkeep(g) || !impactOf(level)) die(usage);
+    if (['met', 'abandoned'].includes(g.status)) die(`${id} is ${g.status === 'met' ? 'met' : 'let go'}; its impact orders nothing now`);
+    const rationale = flagStr('rationale')?.trim() || die(`goal impact needs --rationale: why, against the strategy (${strategyRel})`);
+    const confidence = flagNum('confidence');
+    if (confidence !== undefined && !(confidence >= 0 && confidence <= 1)) die('--confidence is a number from 0 to 1');
+    const now = goalImpact(id);
+    if (now?.by === 'owner') die(`the owner set ${id}'s impact to ${now.level} (${now.words}) when correcting ${now.decision}, and that stands. If you think it is wrong now, ask them; they change it with: correct ${now.decision} --impact <1-4> --reason "…"`);
+    if (strategyState() !== 'written') warn(`${strategyRel} is ${strategyState() === 'missing' ? 'not on main yet' : 'still the template'}: an impact is judged against the strategy, so draft it and ask the owner to approve it (supervisor.md §1)`);
+    const a = authorise('goal-impact', null, null, [id], 'goal impact');
+    const line = appendLog({ type: 'decision', class: 'goal-impact', what: `${g.title}: ${IMPACT_WORDS[level]} (impact ${level} of 4)`, rationale, confidence, refs: [id], impact: level, reversible: true, rung: a.rung, ceiling: a.ceiling, authority: a.authority }, 'supervisor');
+    return out(line.id);
+  }
   if (sub === 'reading') {
     if (!id || logGet(id)?.type !== 'goal') die('usage: goal reading <g-id> --run | --approved <goal-met qid> | --value n [--source s] [--detail d]');
     const by = flags.owner ? ownerWriter().by : (supervisorOnly('goal reading'), 'supervisor');
@@ -7130,7 +7454,7 @@ function cmdGoal() {
   if (!gs.length) return out('no goals (the owner states them; planning.md §1)');
   for (const g of gs) {
     const last = g.readings[g.readings.length - 1];
-    out(`${g.id} [${g.status}${g.priority ? `, p${g.priority}` : ''}${g.hold_view.mode !== 'run' ? `, ${g.hold_view.state}` : ''}] ${g.title}\n  ${g.measure?.description ?? '-'}: ${last ? last.value : '?'} -> ${g.measure?.target ?? '?'} ${g.measure?.unit ?? ''} by ${g.horizon ?? '?'}${g.track ? ` (${g.track})` : ''}; features: ${g.check.features.join(', ') || 'none'}`);
+    out(`${g.id} [${g.status}${g.priority ? `, p${g.priority}` : ''}${g.impact ? `, impact ${g.impact.level}` : ''}${g.hold_view.mode !== 'run' ? `, ${g.hold_view.state}` : ''}] ${g.title}\n  ${g.measure?.description ?? '-'}: ${last ? last.value : '?'} -> ${g.measure?.target ?? '?'} ${g.measure?.unit ?? ''} by ${g.horizon ?? '?'}${g.track ? ` (${g.track})` : ''}; features: ${g.check.features.join(', ') || 'none'}`);
   }
 }
 
@@ -7953,6 +8277,32 @@ function collectMetrics(since) {
   const drained = !!draining();
   const ready = [...ts.values()].filter((t) => isActive(t) && !isHeld(t) && !mergeShaFor(t.id) && !activeWorker(t.id) && (t.depends_on ?? []).every((d) => mergeShaFor(d)) && !notSchedulable(t) && ticketMode(t) === 'run');
   holdFindings(add, settings);
+  // What matters most: the strategy, each goal's impact, and the ratings the Inbox is ordered by.
+  {
+    const goals = logObjects('goal');
+    const live = goals.filter((g) => g.status === 'ready');
+    const sState = strategyState();
+    if (live.length && sState !== 'written') add('medium', 'strategy-unwritten', strategyRel, sState === 'missing' ? `${plural(live.length, 'goal')} running and no strategy on ${settings.main_branch}` : `${plural(live.length, 'goal')} running and the strategy is still the template`, `draft it in a chore from what you can read, then ask the owner to approve it (ask --class strategy-change; supervisor.md §1)${sState === 'missing' ? '; init writes the template' : ''}`);
+    const all = questions();
+    const open = all.filter((q) => q.status === 'open' && q.goal_hold !== 'let-go');
+    for (const g of goals.filter((x) => x.status === 'ready' || ((x.status ?? 'draft') === 'draft' && open.some((q) => q.goal === x.id)))) {
+      const i = goalImpact(g.id);
+      if (!i) add('medium', 'goal-unjudged', g.id, `"${g.title}" has no impact, so its questions are ordered as if it were worth having (2)`, `judge it against the strategy: goal impact ${g.id} <1-4> --rationale "…" (planning.md §1)`);
+      else if (i.rejudge) add('medium', 'goal-unjudged', g.id, `the impact of "${g.title}" (${i.level}) was corrected: ${i.correction}`, `judge it again, saying what the correction changed: goal impact ${g.id} <1-4> --rationale "…"`);
+    }
+    // only once the supervisor has rated one: a project that hasn't taken up the rating sees nothing
+    const firstRated = all.filter((q) => q.stake != null || q.urgency != null).map((q) => q.asked_at).sort()[0];
+    if (firstRated) for (const q of open.filter((x) => (x.stake == null || x.urgency == null) && x.asked_at > firstRated)) add('medium', 'question-unrated', q.id, q.question.slice(0, 120), `rate it: rate ${q.id} --stake 1-3 --urgency 1-3 (supervisor.md §6)`);
+    const rated = open.filter((q) => q.stake != null && q.urgency != null);
+    for (const k of ['stake', 'urgency']) {
+      const top = rated.filter((q) => q[k] === 3).length;
+      if (rated.length >= 5 && top * 2 > rated.length) add('medium', 'rating-inflated', k, `${top} of ${rated.length} open questions are ${k} 3`, `a rating that is always 3 orders nothing: read the ${k} test again (supervisor.md §6) and rate the ones that aren't 3 (rate <qid> --${k} n)`);
+    }
+    for (const q of all.filter((x) => x.status === 'answered' && x.settles.length && sameAnswer(x.answer, x.settles_if))) {
+      const left = q.settles.filter((s) => open.some((o) => o.id === s));
+      if (left.length) add('medium', 'settled-not-withdrawn', q.id, `the owner answered "${String(q.answer).slice(0, 60)}", which settles ${left.join(', ')}; ${left.length > 1 ? 'they are' : 'it is'} still in the Inbox`, `withdraw ${left.length > 1 ? 'each' : 'it'}: withdraw <qid> --reason "settled by the owner's answer to ${q.id}"`);
+    }
+  }
   const active = [...ts.keys()].filter(activeWorker).length;
   // Goals that need planning with nobody planning them: a fully defined draft goal with no design up
   // for approval, or a ready goal whose current milestone has unplanned preconditions, and no
@@ -8200,6 +8550,7 @@ function collectOoda() {
     decisions: decisionRecords().slice(0, 200),
     trust: trustTable(),
     classes: Object.fromEntries(Object.entries(L.classes).map(([k, v]) => [k, { ...v, rung: rungFor(k) }])),
+    impact_words: IMPACT_WORDS,
     reasons: L.reasons,
     // every settled question, newest first, wherever it was answered (dashboard, terminal, chat) or
     // whether it was defaulted or withdrawn; defaulted ones can still be overruled
@@ -9013,7 +9364,7 @@ async function cmdDashboard() {
       if (text(b.rule, 600)) args.push('--rule', b.rule.trim());
       return args;
     },
-    correct: (b) => (ID.test(b.id ?? '') && text(b.reason, 600) ? ['correct', b.id, '--reason', b.reason.trim()] : null),
+    correct: (b) => (ID.test(b.id ?? '') && text(b.reason, 600) && (b.impact === undefined || [1, 2, 3, 4].includes(b.impact)) ? ['correct', b.id, '--reason', b.reason.trim(), ...(b.impact !== undefined ? ['--impact', String(b.impact)] : [])] : null),
     'goal-hold': (b) => ((ID.test(b.id ?? '') || b.id === 'upkeep') && ['run', 'drain', 'park'].includes(b.mode) && (b.reason === undefined || b.reason === '' || text(b.reason, 300)) ? ['goal', 'hold', b.id, b.mode, '--owner', ...(b.reason ? ['--reason', b.reason.trim()] : [])] : null),
     fleet: (b) => (['drain', 'park', 'undrain', 'unpark', 'resume'].includes(b.op) && (b.reason === undefined || b.reason === '' || text(b.reason, 300)) ? ['fleet', b.op, '--owner', ...(b.reason && ['drain', 'park'].includes(b.op) ? ['--reason', b.reason.trim()] : [])] : null),
     'goal-decide': (b) => (ID.test(b.id ?? '') && ['approve', 'refine', 'let-go', 'restore'].includes(b.verdict) && (b.notes === undefined || text(b.notes, 4000)) ? ['goal', 'decide', b.id, b.verdict, ...(b.notes ? ['--notes', b.notes.trim()] : [])] : null),
@@ -11323,7 +11674,7 @@ function askSensorCredentials(missing) {
       fs.mkdirSync(path.dirname(exclude), { recursive: true });
       if (!(readText(exclude) ?? '').split('\n').includes('.devteam-secrets/')) fs.appendFileSync(exclude, '.devteam-secrets/\n');
     }
-    const r = spawnSync(process.execPath, [self, 'ask', '--kind', 'owner-action', '--sensor', m.name, '--question', `Post a read-only ${m.name} token so a sensor can watch it`, '--context', `${m.name} is set up in this code, but the project has no way to read it. With a token I can start a sensor that watches ${m.reads}. Create ${m.scope}; read-only is preferred. It goes straight to ${sinkWords(m.secret.sink)} and never through chat or the log. Or answer "Don't use this sensor": I won't ask again unless you say so.`, '--secrets', JSON.stringify([m.secret])], { cwd: mainRoot, env: { ...process.env, DEVTEAM_ROLE: 'supervisor' }, encoding: 'utf8' });
+    const r = spawnSync(process.execPath, [self, 'ask', '--kind', 'owner-action', '--sensor', m.name, '--question', `Post a read-only ${m.name} token so a sensor can watch it`, '--context', `${m.name} is set up in this code, but the project has no way to read it. With a token I can start a sensor that watches ${m.reads}. Create ${m.scope}; read-only is preferred. It goes straight to ${sinkWords(m.secret.sink)} and never through chat or the log. Or answer "Don't use this sensor": I won't ask again unless you say so.`, '--secrets', JSON.stringify([m.secret]), '--stake', '1', '--urgency', '1'], { cwd: mainRoot, env: { ...process.env, DEVTEAM_ROLE: 'supervisor' }, encoding: 'utf8' }); // rated 1 and 1: a sensor only reads, and no work waits on one
     if (r.status === 0) asked.push({ name: m.name, question: r.stdout.trim() });
     else warn(`could not ask for the ${m.name} token: ${(r.stderr || '').trim().split('\n').pop()}`);
   }
@@ -11707,7 +12058,7 @@ function verifyIncidents() {
         type: 'question', kind: 'owner-decision', question: `The fix for "${p.title}" didn't hold (${t.id}). Was deciding it a wrong call, or a sound call whose fix failed?`,
         context: `${recurred.join(', ')} recurred after the deploy. A wrong call is a correction you make (correct ${dec?.id ?? '<decision>'} --reason "…"), and incident-fix drops to rung 1. A sound call that failed is a problem (${prob.id}) and changes no trust. Recurrence has innocent causes: stale dynos, cached client bundles, replayed jobs, a second cause sharing the frame.`,
         recommendation: 'Sound call, failed fix', choices: [{ label: 'Sound call, failed fix', detail: `keep ${prob.id} open, fix forward`, effect: 'no trust change' }, { label: 'Wrong call', detail: `correct ${dec?.id ?? 'the decision'} yourself`, effect: 'incident-fix drops to rung 1' }],
-        blocks: [p.id], evidence: [o.id, prob.id], why_asked: { reasons: ['owner-only'] },
+        blocks: [p.id], stake: 1, urgency: 2, evidence: [o.id, prob.id], why_asked: { reasons: ['owner-only'] },
       }, 'supervisor');
       setIncident(p, { status: 'open', verify: { commit: v.commit, regressed: [...(v.regressed ?? []), v.commit] } });
       alerts.push(`the fix for ${p.id} didn't hold (${o.id}; question ${q.id})`);
@@ -12445,7 +12796,7 @@ function linkByOwner(sub, id, field, vals, kind) {
   if (!approved) {
     const open = questions().find((q) => q.status === 'open' && q.class === cls && (q.context ?? '').includes(draft));
     if (open) return out(`${open.id}: already asked the owner about this exact change; once answered: ${again(open.id)}`);
-    const q = appendLog({ type: 'question', kind: 'owner-decision', class: cls, question: `${sub === 'add' ? 'Add' : sub === 'rm' ? 'Remove' : 'Change'} the ${kind} link ${id}${sub === 'set' ? ` (${field})` : ''}?`, context: `The settings diff this answer approves${bundleIds.length > 1 ? ` (this change and ${bundleIds.length - 1} other repo link change(s) waiting in settings.md to land with it)` : ''}, each links entry main has and what would land:\n${diff}\n\nThe registry entries, as they would be in settings.md links (merge lands exactly these under this answer, and no other):\n${draft}`, recommendation: 'yes', why_asked: { reasons: ['owner-only'] } }, 'supervisor');
+    const q = appendLog({ type: 'question', kind: 'owner-decision', class: cls, question: `${sub === 'add' ? 'Add' : sub === 'rm' ? 'Remove' : 'Change'} the ${kind} link ${id}${sub === 'set' ? ` (${field})` : ''}?`, context: `The settings diff this answer approves${bundleIds.length > 1 ? ` (this change and ${bundleIds.length - 1} other repo link change(s) waiting in settings.md to land with it)` : ''}, each links entry main has and what would land:\n${diff}\n\nThe registry entries, as they would be in settings.md links (merge lands exactly these under this answer, and no other):\n${draft}`, recommendation: 'yes', stake: 1, urgency: 2, why_asked: { reasons: ['owner-only'] } }, 'supervisor');
     return out(`${q.id}: asked the owner (${cls}); nothing is written until it is answered. Then: ${again(q.id)}`);
   }
   const v = ownerAnswer(approved, 'link --approved');
@@ -12544,6 +12895,40 @@ The whole system as planned now: the sum of every design so far. Written at boot
 |---|---|---|---|
 `;
 
+// project/strategy.md as init makes it: why the project exists and how it wins, the owner's. The
+// supervisor drafts it at adoption and judges each goal's impact against it; the kit never parses
+// it (it only knows missing, this template, or written).
+const STRATEGY_TEMPLATE_MARK = 'devteam:strategy-template';
+const STRATEGY_MD = `# Strategy
+
+<!-- ${STRATEGY_TEMPLATE_MARK}: delete this line when you write the strategy -->
+
+Why this project exists and how it wins. The supervisor drafts it; only the owner approves a change (class strategy-change).
+Goals are judged against it (planning.md §1). Keep it to one page.
+
+## Why it exists
+<two or three sentences: the problem, and what is true in the world if this works>
+
+## Who it serves
+<the people who use it and the people who pay, and the job each hires it for>
+
+## How it wins, in order
+<two to four lines, ranked: when two pull apart, the higher one wins>
+- **W1** <e.g. People adopt it without help> : <how this project moves it, and the number that shows it>
+- **W2** <e.g. It earns money> : <how, and the number>
+
+## Values
+<at most seven; each a rule and a yes/no check a reviewer can answer from a design or a spec>
+- **V1** <rule>. Check: <question>
+
+## Refusals
+<what we won't do whatever it pays; each one checkable>
+- **R1** <refusal>. Check: <question>
+
+## Not known yet
+<what the supervisor could not work out; each becomes a question to the owner>
+`;
+
 // init [--name project] [--upstream-base vX.Y.Z]: the project folders,
 // settings, .gitignore entries, the AGENTS.md pointer; optionally the GitHub check and agent config.
 // The section init adds to the project's AGENTS.md: every agent reads this first, then its doc.
@@ -12581,6 +12966,7 @@ function cmdInit() {
   const block = { project: flagStr('name') ?? path.basename(root), upstream_base: flagStr('upstream-base') ?? null, upstream_sync: 'adopt', ...(remoteHead && remoteHead !== 'main' && remoteHead !== 'HEAD' ? { main_branch: remoteHead } : {}), components: {}, gates: {} };
   put(path.join(projectDir, 'settings.md'), `# Project settings\n\nOnly what this project changes; every setting has a default in scripts/devteam.mjs (\`devteam.mjs settings\` shows the result). Below the block, record project-specific answers to the decisions the governance docs leave open (components and stacks, persistence tiers, one-way doors, release tags, how to notify the owner), each with its date.\n\n\`\`\`json devteam\n${JSON.stringify(block, null, 2)}\n\`\`\`\n`);
   put(path.join(projectDir, 'designs', 'architecture.md'), ARCHITECTURE_MD);
+  put(path.join(projectDir, 'strategy.md'), STRATEGY_MD);
   // retros/ and reviews/ hold placeholders; log/ and tickets/ fill as the fleet writes, and merge
   // refuses anything in them that isn't the fleet's (a .gitkeep included).
   for (const d of ['retros', 'reviews']) put(path.join(projectDir, d, '.gitkeep'), '');
@@ -12596,7 +12982,7 @@ function cmdInit() {
   const claude = path.join(root, 'CLAUDE.md');
   if (fs.existsSync(claude) && !/@AGENTS\.md\b/.test(readText(claude))) { fs.appendFileSync(claude, `\n## devteam\n\n@AGENTS.md\n`); made.push('CLAUDE.md'); }
   out(made.length ? `created:\n${made.map((m) => `  ${m}`).join('\n')}` : 'nothing to create');
-  out('next: fill settings (components and their owns, links to sibling repos and design files, agent_command, gates, worktree_files), write designs/architecture.md from the code, then start the supervisor (the upstream README, Setup)');
+  out('next: fill settings (components and their owns, links to sibling repos and design files, agent_command, gates, worktree_files), write designs/architecture.md from the code, then start the supervisor: it drafts strategy.md with you before the first goal (the upstream README, Setup)');
 }
 
 const HELP = `devteam <command>   (positionals before flags; flags take the words after them)
@@ -12665,12 +13051,16 @@ Decide and act (supervisor.md, constitution.md)
   review draft <qid> [<file|->]   owner: save partial progress; without a file, print it (a draft is never an answer)
   answer <qid> --review-result <file|-> | answer <qid> "<why>" --decline   (owner) a review: validate and hash its result, or send it back
   answer <qid> "<text>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> "<text>" --from-chat --said "<owner's words>" [--autonomy n] [--rule "…"] | answer <qid> --defaulted   (supervisor)
-  withdraw <qid> [--reason r] | questions [--all] [--id q] [--json]
+  withdraw <qid> [--reason r] | questions [--all] [--id q] [--json]   questions print in Inbox order: the most valuable first
+  ask … --stake 1-3 --urgency 1-3 [--settles <qid>… --settles-if "<answer>"]   rate every question: how much of what the fleet does next rides on the answer, how soon waiting costs, and the open questions one answer would settle (stake 3, same goal or feature)
+  rate <qid> [--stake 1-3] [--urgency 1-3] [--settles <qid>… | --settles none] [--unsettles <qid>…] [--settles-if "<answer>"]   supervisor: rate an open question again; --settles adds to what it settles
+  next [--json]   the owner's next best step: the top of the Inbox, and why it is there
   decide --class c [--scope s] [--approved qid|kid] [--options a b] [--rationale r] [--confidence 0-1] [--refs ids] [--irreversible] -- "<what>"   a judgment call and the trust it rests on; prints d-…
   act --decision d-… -- "<what>"   carry out a decision (merge, ticket, withdraw, goal hold, worker, planner, fleet and link take --decision too)
   act --class c [--scope s] [--approved qid|kid] [--refs ids] [--irreversible] [--repo <link>] -- "<what>"   an act that is its own decision; --repo names the repo a release, staging or production act was in
   decisions [--who owner|supervisor] [--class c] [--corrected] [--tail n] [--json]   every call, who made it and under what
   correct <decision-or-act-id> --reason r [--severity n]   (owner; --retro for the supervisor) | repair <id> --how undo|fix-ticket|none
+  correct <goal-impact d-id> --reason r --impact 1-4   (owner) give the goal's impact yourself; it stands until you give another
   trust [--json]                  the ladder: rung, ceiling, agreement, corrections per class
 
 Observe and orient
@@ -12684,7 +13074,8 @@ Observe and orient
   problem [--all] | problem add --title t --severity n [--risk] [--threatens g…] | problem set <id> …
 
 Goals and retros
-  goal [list|check|show|forecast|add|set|decide|approve|status|reading|hold|park-sessions] …
+  goal [list|check|show|forecast|add|set|decide|approve|status|reading|hold|park-sessions|impact] …
+  goal impact <g-id> <1-4> --rationale "…" [--confidence 0-1]   supervisor: how much the goal matters to the project, judged against project/strategy.md (4 the project depends on it, 3 moves a number the project watches, 2 worth having, 1 housekeeping); orders the Inbox, never the work
   goal set <g-id> --approved <qid> …   supervisor: apply an answered goal-change question to a goal past draft (one set per answer)
   goal reading <g-id> --run | --approved <qid> | --value n   a reading by the measure's source: --run runs a repo check on main or a prod check; --approved records an owner goal's yes from its answered goal-met question; --value only for a goal with no source, or the owner's own (--owner)
   retro [--due | --print | close <date> --summary s --refs ids]
@@ -12703,14 +13094,14 @@ Dashboard and releases
 
 // What the box's operator may run: reads only (a test runs each and diffs the log and git status). A
 // command that also writes is listed by its read forms, so `knowledge add` is refused like any write.
-const OPERATOR_READS = new Set(['status', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'log', 'messages', 'knowledge', 'goal', 'goal list', 'goal show', 'fleet status']);
+const OPERATOR_READS = new Set(['status', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'next', 'log', 'messages', 'knowledge', 'goal', 'goal list', 'goal show', 'fleet status']);
 const OPERATOR_SUBCOMMANDED = new Set(['fleet', 'goal', 'knowledge']);
 const COMMANDS = {
   init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), whoami: cmdWhoami, hello: cmdHello, settings: cmdSettings,
   feature: cmdFeature, ticket: cmdTicket, components: cmdComponents, link: cmdLink, links: cmdLinks, artifact: cmdArtifact, artifacts: cmdArtifacts, preview: cmdPreview, validate: cmdValidate, waves: cmdWaves, ready: cmdReady, status: cmdStatus, roadmap: cmdRoadmap,
   'check-ticket': cmdCheckTicket, 'check-pr': cmdCheckPr, merge: cmdMerge, 'review-worktree': cmdReviewWorktree,
   phase: cmdPhase, gate: cmdGate, send: cmdSend, messages: cmdMessages, 'stop-ok': cmdStopOk,
-  ask: cmdAsk, answer: cmdAnswer, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
+  ask: cmdAsk, answer: cmdAnswer, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, rate: cmdRate, next: cmdNext, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
   observe: cmdObserve, 'observe-link': cmdObserveLink, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, knowledge: cmdKnowledge, problem: cmdProblem,
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
   log: cmdLog, record: cmdRecord, peek: cmdPeek, sensor: cmdSensor, 'log-check': cmdLogCheck, 'accounts-tick': cmdAccountsTick, 'supervisor-session': cmdSupervisorSession, dispose: cmdDispose, 'log-sync': cmdLogSync, history: cmdHistory,

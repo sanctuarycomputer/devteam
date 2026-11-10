@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "devteam/log.schema.json",
   "title": "devteam log line",
-  "description": "One line of the log (process/supervisor.md): planners write project/log/plan-<feature>.jsonl in their worktree (it lands with the plan PR); everyone else writes run/log/<writer>.jsonl live and the supervisor mirrors those into project/log with the chore-log PR. Every line is an envelope plus a body. The envelope is validated by this schema's top level; the body (everything but the envelope keys) by $defs.types[type]: x-required-new lists what a new line must carry, x-set-only what may only be set later. x-authority says which writer class may create which types and set which fields; x-id how ids are formed. scripts/devteam.mjs enforces all of it on write and in log-check, and the cheap part (by matches the file, id names its writer, the authority table, a planner stays inside its own feature) on every read, so a line never grants more than its file's writer has. Three state rules live in the fold because a schema can't state them: a set applies only if no higher-ranked writer set that field; a question is defaulted only if it has a default; the supervisor edits a goal only while it is a draft, or with approved naming an owner-answered goal-change question for that goal not used before.",
+  "description": "One line of the log (process/supervisor.md): planners write project/log/plan-<feature>.jsonl in their worktree (it lands with the plan PR); everyone else writes run/log/<writer>.jsonl live and the supervisor mirrors those into project/log with the chore-log PR. Every line is an envelope plus a body. The envelope is validated by this schema's top level; the body (everything but the envelope keys) by $defs.types[type]: a question's later lines add only its status and reason, the supervisor's rating (stake, urgency, settles, settles_if) and the owner's own fields; x-required-new lists what a new line must carry, x-set-only what may only be set later. x-authority says which writer class may create which types and set which fields; x-id how ids are formed. scripts/devteam.mjs enforces all of it on write and in log-check, and the cheap part (by matches the file, id names its writer, the authority table, a planner stays inside its own feature) on every read, so a line never grants more than its file's writer has. Three state rules live in the fold because a schema can't state them: a set applies only if no higher-ranked writer set that field; a question is defaulted only if it has a default; the supervisor edits a goal only while it is a draft, or with approved naming an owner-answered goal-change question for that goal not used before.",
   "type": "object",
   "required": [
     "v",
@@ -1072,7 +1072,7 @@
         ]
       },
       "question": {
-        "description": "The supervisor asking the owner. why_asked says the class, its rung and ceiling, and the reasons. The owner's answer (a set) may carry an autonomy direction and a standing rule; an answer equal to the recommendation counts as agreement.",
+        "description": "The supervisor asking the owner. why_asked says the class, its rung and ceiling, and the reasons. The owner's answer (a set) may carry an autonomy direction and a standing rule; an answer equal to the recommendation counts as agreement. stake, urgency, settles and settles_if are the supervisor's rating: it may set them again while the question is open, and they are left out of the hash the owner's answer records, so a new rating never reopens an answered question.",
         "type": "object",
         "properties": {
           "kind": {
@@ -1241,6 +1241,11 @@
                   "pattern": "^[0-9a-f]{64}$",
                   "description": "The artifact's fingerprint when asked, written by ask; the dashboard says when it has changed since."
                 },
+                "blob": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{40,64}$",
+                  "description": "On a strategy-change question's link to project/strategy.md: the git blob of the draft when asked, written by ask (which also resolves ref to that commit). merge lands exactly this text under the owner's answer."
+                },
                 "name": {
                   "type": "string",
                   "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
@@ -1294,6 +1299,36 @@
             "items": {
               "type": "string"
             }
+          },
+          "stake": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3,
+            "description": "How much of what the fleet does next changes with the answer: 3 one answer stops or redirects a goal, a milestone or a feature; 2 the answers lead to different designs or plans; 1 a detail. For something only the owner can do (owner-action): what can't go ahead without it, 3 a goal or milestone, 2 a feature, 1 one ticket. The supervisor rates it; the kit orders the Inbox from it and never stores the order.",
+            "x-tip": "How much rides on your answer: 3 the work itself, 2 its design, 1 a detail."
+          },
+          "urgency": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3,
+            "description": "How soon waiting costs: 3 work is stopped on it now; 2 work will stop on it before the current milestone is done; 1 nothing waits yet. A 3 counts as 3 only while blocks names a ticket that is waiting or an open incident, or the question has a default; otherwise it counts as 2.",
+            "x-tip": "How soon it matters: 3 work is stopped now, 2 soon, 1 nothing waits yet."
+          },
+          "settles": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "string",
+              "pattern": "^q-"
+            },
+            "description": "Open questions one answer to this one (settles_if) would make unnecessary. Counted only while this question is stake 3 and shares a goal or feature with each. It is ordered above them; the supervisor withdraws them when the owner gives that answer.",
+            "x-tip": "Questions that one of these answers would close."
+          },
+          "settles_if": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The answer that settles them: a choice's label where there are choices.",
+            "x-tip": "The answer that closes them."
           },
           "approves": {
             "description": "The acts this question approves, named when asked (ask --approves): ticket ids, chore-<slug> or plan-<feature>. The answer approves each once and nothing else.",
@@ -1617,6 +1652,13 @@
             "minimum": 0,
             "maximum": 1
           },
+          "impact": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4,
+            "description": "On a goal-impact decision: how much the goal (refs[0]) matters to the project, judged against project/strategy.md: 4 the project depends on it, 3 moves a number the project watches, 2 worth having, 1 housekeeping.",
+            "x-tip": "How much the goal matters: 4 the project depends on it, 3 moves a number it watches, 2 worth having, 1 housekeeping."
+          },
           "refs": {
             "description": "What it is about; acts under it stay within these.",
             "type": "array",
@@ -1657,7 +1699,7 @@
             "pattern": "^[qk]-"
           },
           "corrected": {
-            "description": "Your correction, if the call was wrong; it drops the class to rung 1.",
+            "description": "Your correction, if the call was wrong; it drops the class to rung 1. On a goal-impact decision (constitutional, so no rung drops) it may carry the impact you give the goal instead.",
             "type": "object",
             "properties": {
               "reason": {
@@ -1667,6 +1709,12 @@
                 "type": "integer",
                 "minimum": 0,
                 "maximum": 4
+              },
+              "impact": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4,
+                "description": "On the owner's correction of a goal-impact decision: the impact the owner gives the goal. It stands until the owner changes it."
               }
             },
             "required": [
@@ -2100,7 +2148,11 @@
       "question": {
         "supervisor": [
           "status",
-          "reason"
+          "reason",
+          "stake",
+          "urgency",
+          "settles",
+          "settles_if"
         ],
         "owner": [
           "answer",

@@ -59,7 +59,7 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     git(['remote', 'add', 'origin', origin]);
     fs.cpSync(kit, path.join(repo, 'docs', 'devteam'), { recursive: true, filter: (p) => !/[\\/](project|run)([\\/]|$)/.test(p.slice(kit.length)) });
     must(['init', '--name', 'demo', '--upstream-base', 'v0.2.0']);
-    for (const f of ['docs/devteam/project/settings.md', 'docs/devteam/project/designs/architecture.md']) assert.ok(fs.existsSync(path.join(repo, f)), f);
+    for (const f of ['docs/devteam/project/settings.md', 'docs/devteam/project/designs/architecture.md', 'docs/devteam/project/strategy.md']) assert.ok(fs.existsSync(path.join(repo, f)), f);
     assert.ok(!fs.existsSync(path.join(repo, '.github/workflows/devteam.yml')), 'the kit installs no forge workflow');
     assert.match(fs.readFileSync(path.join(repo, '.gitignore'), 'utf8'), /docs\/devteam\/run\//);
     assert.match(fs.readFileSync(path.join(repo, 'AGENTS.md'), 'utf8'), /process\/supervisor\.md/, 'AGENTS.md routes agents to their doc');
