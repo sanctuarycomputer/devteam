@@ -270,3 +270,23 @@ test('the Library lists previews with the link for where the page is', () => {
   assert.deepEqual(S({ up: true, expires: '2026-11-01T00:00:00Z' }), ['expired', ['stop']]);
   assert.deepEqual(S({ up: false, run: true, expires: '2026-11-01T00:00:00Z' }), ['expired', ['stop']]);
 });
+
+test('a question links a preview: the link for this page, with its state, and nothing to open when it is gone', () => {
+  const html = fs.readFileSync(path.join(kit, 'dashboard/index.html'), 'utf8');
+  const src = html.slice(html.indexOf('/* preview-cards start */'), html.indexOf('/* preview-cards end */'));
+  const ctx = vm.createContext({});
+  vm.runInContext(`${src}\n;globalThis.api = { previewHere, previewLinkHtml };`, ctx);
+  const { previewHere, previewLinkHtml } = ctx.api;
+  const esc = (x) => String(x).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const me = previewHere({ protocol: 'https:', host: '4321.box.example.com' }, true);
+  const row = (state, port = 5173) => ({ preview: 'cool-tiger', title: 'The <b>flow</b>', port, state });
+  const live = previewLinkHtml(row('live'), me, esc);
+  assert.match(live, /<a href="https:\/\/cool-tiger\.box\.example\.com\/" target="_blank" rel="noopener noreferrer">The &lt;b&gt;flow&lt;\/b&gt;<\/a>/);
+  assert.match(live, /live/);
+  assert.match(previewLinkHtml(row('live'), null, esc), /href="http:\/\/127\.0\.0\.1:5173\/"/);
+  assert.match(previewLinkHtml(row('down'), me, esc), /not answering/);
+  assert.match(previewLinkHtml(row('checking'), me, esc), /checking/);
+  const gone = previewLinkHtml(row('gone', null), me, esc);
+  assert.doesNotMatch(gone, /<a /);
+  assert.match(gone, /no longer offered/);
+});

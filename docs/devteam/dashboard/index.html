@@ -1119,7 +1119,7 @@ const artLinkOf = (l, inline = false) => {
   if (!href) return `<span>${esc(l.title)} <span class="muted">(no longer available)</span></span>`;
   return `<a href="${esc(href)}" data-av-note="${l.changed ? AV_CHANGED : ''}"${l.changed ? ` title="${AV_CHANGED}"` : ''}>${esc(l.title)}</a>${l.changed && !inline ? ' <span class="badge high">changed since asked</span>' : ''}`;
 };
-const linkOf = (l) => (l.artifact ? artLinkOf(l) : l.url ? `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.title)}</a>` : l.path ? `<a href="${esc(fileHref(l))}">${esc(l.title)}</a>` : `<span>${esc(l.title)}${l.remote ? ` <span class="muted">(${esc(l.remote)})</span>` : ''}</span>`);
+const linkOf = (l) => (l.preview ? previewLinkHtml(l, previewHere(location, PREVIEWS), esc) : l.artifact ? artLinkOf(l) : l.url ? `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.title)}</a>` : l.path ? `<a href="${esc(fileHref(l))}">${esc(l.title)}</a>` : `<span>${esc(l.title)}${l.remote ? ` <span class="muted">(${esc(l.remote)})</span>` : ''}</span>`);
 // A question's text with each [[name]] drawn in place as that link (every link is still listed under
 // the question). The rest is linkified as before; a [[name]] that names no link stays as written.
 const NAME_REF = /\[\[([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\]\]/;
@@ -2886,6 +2886,13 @@ function previewState(p, now) {
   if (p.up === null || p.up === undefined) return { state: 'checking', actions: ['open', 'copy', 'stop'], since: null };
   if (p.up) return { state: 'live', actions: ['open', 'copy', 'stop'], since: null };
   return p.run ? { state: 'not-running', actions: ['start', 'open', 'stop'], since: null } : { state: 'not-answering', actions: ['open', 'stop'], since: p.down_since || null };
+}
+// A question's link to a preview, with what the kit knows of it now. The question names only the
+// preview, so the link is built here for this page's address.
+function previewLinkHtml(l, me, esc) {
+  if (l.state === 'gone') return `<span>${esc(l.title)} <span class="muted">(no longer offered)</span></span>`;
+  const state = { live: 'live', down: 'not answering', checking: 'checking' }[l.state] ?? 'checking';
+  return `<a href="${esc(previewUrl(me, { name: l.preview, port: l.port }))}" target="_blank" rel="noopener noreferrer">${esc(l.title)}</a> <span class="small muted">${state}</span>`;
 }
 /* preview-cards end */
 /* public-states start */

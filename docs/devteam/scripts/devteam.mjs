@@ -1350,7 +1350,14 @@ function questionView(q) {
 // A link item that names a registry link shows its kind's locator: a url link's url, a repo link's remote.
 // An artifact link says where it opens now (an open question's only: each costs reads). Always on
 // a copy, never the folded question's own link: its hash covers the links as asked.
-const resolveQuestionLinks = (ls, open = false) => { const reg = loadSettings().links ?? {}; return (ls ?? []).map((l) => { if (isObj(l) && l.artifact !== undefined) return open ? artifactLinkNow(l) : { ...l, href: null, changed: false, gone: false }; const r = l?.link ? ownEntry(reg, l.link) : null; const K = r ? LINK_KINDS[r.kind] : null; if (!K) return redactLink(l); const { text, ...where } = K.locator(r, l.link); return redactLink({ ...l, ...where }); }); };
+const resolveQuestionLinks = (ls, open = false) => { const reg = loadSettings().links ?? {}; return (ls ?? []).map((l) => { if (isObj(l) && l.preview !== undefined) return previewLinkNow(l); if (isObj(l) && l.artifact !== undefined) return open ? artifactLinkNow(l) : { ...l, href: null, changed: false, gone: false }; const r = l?.link ? ownEntry(reg, l.link) : null; const K = r ? LINK_KINDS[r.kind] : null; if (!K) return redactLink(l); const { text, ...where } = K.locator(r, l.link); return redactLink({ ...l, ...where }); }); };
+// A preview link as this machine has it now: its port and state, never stored in the question.
+function previewLinkNow(l) {
+  const r = readPreviews().find((x) => x.name === l.preview);
+  if (!r) return { ...l, port: null, state: 'gone' };
+  const up = previewUpHere()[r.name] ?? null;
+  return { ...l, port: r.port, state: up === null ? 'checking' : up ? 'live' : 'down' };
+}
 // Where it was asked, while that source is there; else main, once it landed (with no notice if it
 // landed as asked); else gone. changed: its files no longer hash to what the owner was asked about.
 function artifactLinkNow(l) {
@@ -4248,7 +4255,7 @@ function cmdAsk() {
   // nothing is added to them later.
   const links = jsonFlag('links');
   if (links !== undefined && !Array.isArray(links)) die('--links is a JSON array of objects');
-  const LINK_WAYS = ['path', 'url', 'link', 'artifact'];
+  const LINK_WAYS = ['path', 'url', 'link', 'artifact', 'preview'];
   const names = new Set();
   let arts = null;
   for (const l of links ?? []) {
@@ -4261,6 +4268,8 @@ function cmdAsk() {
       names.add(l.name);
     }
     if (l.link !== undefined && !ownEntry(loadSettings().links, l.link)) die(`--links: link "${l.link}" is not in settings links (devteam.mjs links)`);
+    // a preview is named, never addressed: the question reads right on a laptop and on the box
+    if (l.preview !== undefined && !(typeof l.preview === 'string' && PREVIEW_NAME.test(l.preview) && readPreviews().some((r) => r.name === l.preview))) die(`--links: no preview "${l.preview}" on this instance (devteam.mjs preview list)`);
     // an inline link is logged as given, so a credential in it would be in the log and every view of the question
     if (hasCredentials(l.url)) die(`--links: ${redactUrl(l.url)} carries credentials; ${CREDENTIALS_REFUSED}`);
     if (l.sha256 !== undefined) die('--links: sha256 is written by ask (the artifact as it is now), never given');

@@ -3013,7 +3013,7 @@ const step = (name, fn) => { steps.push({ name, fn }); };
   step('artifacts: a question links one by name, inline, pinned to where it was and what it held', () => {
     const A = path.join(wt('bill-01-card'), 'docs/devteam/project/artifacts');
     const ask = (links, q = 'Which layout? See [[flow]].', more = []) => dt(['ask', '--question', q, '--links', JSON.stringify(links), ...more], { role: 'sup' });
-    assert.match(ask([{ title: 'x', url: 'https://example.com', path: 'a.md' }]).err, /exactly one of path, url, link, artifact \(it has path, url\)/);
+    assert.match(ask([{ title: 'x', url: 'https://example.com', path: 'a.md' }]).err, /exactly one of path, url, link, artifact, preview \(it has path, url\)/);
     assert.match(ask([{ title: 'x' }]).err, /it has none/);
     assert.match(ask([{ name: 'flow', title: 'a', url: 'https://example.com' }, { name: 'flow', title: 'b', url: 'https://example.org' }]).err, /"flow" is used twice/);
     assert.match(ask([{ name: 'other', title: 'a', url: 'https://example.com' }]).err, /names \[\[flow\]\] but no link has "name": "flow"/);
@@ -3677,6 +3677,46 @@ const step = (name, fn) => { steps.push({ name, fn }); };
       assert.ok(!pvWindows().some((w) => w.name === 'dev~start-mine'), 'Stop on a kit-started server closes its window');
     } finally { await d.stop(); for (const w of pvWindows().filter((x) => x.name.startsWith('dev~'))) spawnSync('tmux', ['kill-window', '-t', w.id]); pvClear(); }
     assert.ok(stale);
+  });
+
+  step('previews: a question cites one by name, and the dashboard resolves it here', async () => {
+    pvClear();
+    const name = 'cool-tiger';
+    const P = await freePort();
+    pvMake(name, { port: P });
+    const links = (over) => JSON.stringify([{ name: 'demo', title: 'The new flow', ...over }]);
+    const ask = (l) => pv(['ask', '--question', 'Look at [[demo]]', '--links', l]);
+    const r = ask(links({ preview: name }));
+    assert.equal(r.status, 0, r.err);
+    const id = r.out.trim();
+    const q = json(must(['questions', '--id', id, '--json']))[0];
+    const stored = q.links.find((l) => l.name === 'demo');
+    assert.equal(stored.preview, name, 'the link names the preview');
+    assert.equal(stored.url, undefined, 'never an address');
+    const rawLine = fs.readdirSync(path.join(repo, 'docs/devteam/run/log')).map((f) => fs.readFileSync(path.join(repo, 'docs/devteam/run/log', f), 'utf8')).join('').split('\n').find((l) => l.includes(`"id":"${id}"`));
+    assert.doesNotMatch(rawLine, new RegExp(String(P)), 'the log records no port');
+    assert.match(ask(links({ preview: 'no-such' })).err, /--links: no preview "no-such" on this instance \(devteam\.mjs preview list\)/);
+    assert.match(ask(links({ preview: 'NOT A NAME' })).err, /--links:/);
+    assert.match(ask(links({ preview: name, url: 'https://x.example' })).err, /exactly one of/);
+    // resolved for here, on a copy: state from the tick's cache, never a URL
+    const d = await pvDashboard();
+    try {
+      const ofData = async () => (await (await fetch(`${d.base}/api/data`)).json()).questions.find((x) => x.id === id).links.find((l) => l.name === 'demo');
+      const lst = await pvListen(P);
+      await until(async () => (await pvHello(d.base))[0]?.up === true, 'the tick');
+      let l = await ofData();
+      assert.deepEqual([l.preview, l.port, l.state, l.url], [name, P, 'live', undefined]);
+      await pvClose(lst);
+      await until(async () => (await pvHello(d.base))[0]?.up === false, 'the tick to see it down');
+      assert.equal((await ofData()).state, 'down');
+      pvClear();
+      await until(async () => (await pvHello(d.base)).length === 0, 'the record to go');
+      l = await ofData();
+      assert.deepEqual([l.state, l.port], ['gone', null], 'a preview nobody offers any more');
+      assert.equal(json(must(['questions', '--id', id, '--json']))[0].status, 'open', 'the question stands either way');
+      assert.equal(json(must(['dashboard-data'])).questions.find((x) => x.id === id).links.find((x) => x.name === 'demo').state, 'gone', 'dashboard-data on its own: no tick, same record');
+    } finally { await d.stop(); }
+    must(['withdraw', id, '--reason', 'done with it'], { role: 'sup' });
   });
 
 // Forks. A fork is a copy of the fixture as it stands between two steps, made by the run in
