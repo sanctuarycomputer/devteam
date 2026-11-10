@@ -3,7 +3,7 @@
 name: box-image
 on:
   pull_request:
-    paths: ['cloud/**', 'docs/devteam/dashboard/hub.html', '.github/workflows/box-image.yml']
+    paths: ['cloud/**', 'docs/devteam/dashboard/hub.html', 'docs/devteam/process/operator.md', '.github/workflows/box-image.yml']
 permissions:
   contents: read
 jobs:

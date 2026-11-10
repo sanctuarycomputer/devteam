@@ -191,7 +191,7 @@ EOF
 # box-pg [major]: this box's `brew services start postgresql@N`. One server per major version, on
 # the disk, trusting whoever is on the box: 17 on the default port (so postgres:/// just works),
 # the others on 5400 + major (5416, 5414). Safe to run again.
-COPY --chmod=644 cloud/operator.md cloud/operator-settings.json /opt/devteam/
+COPY --chmod=644 docs/devteam/process/operator.md /opt/devteam/
 COPY --chmod=755 cloud/box-supervisors /usr/local/bin/box-supervisors
 COPY --chmod=755 <<'EOF' /usr/local/bin/box-status
 #!/bin/sh
@@ -282,7 +282,7 @@ if ! tmux has-session -t home 2>/dev/null; then
   ask='You are the sanctuarycomputer/devteam operator for this box. Ensure your supervisors are all up and running.'
   if ls .claude/projects/-data-home-operator/*.jsonl >/dev/null 2>&1; then c='--continue'; ask="The box restarted. $ask"; else c=''; fi
   # its job is in its system prompt, so what it's told, and what the owner tells it, stays plain English
-  tmux send-keys -t home:operator -l "export DEVTEAM_ROLE=operator; claude $c --dangerously-skip-permissions --settings /opt/devteam/operator-settings.json --append-system-prompt \"\$(cat /opt/devteam/operator.md)\" '$ask'"
+  tmux send-keys -t home:operator -l "export DEVTEAM_ROLE=operator; claude $c --dangerously-skip-permissions --append-system-prompt \"\$(cat /opt/devteam/operator.md)\" '$ask'"
   tmux send-keys -t home:operator Enter
 fi
 # The operator's tick: typed into its window every 30 minutes, unless a dialog is up (Enter would answer it).

@@ -10065,7 +10065,7 @@ const COMMANDS = {
 };
 if (!command || command === 'help' || command === '--help') out(HELP);
 else if (!COMMANDS[command]) die(`unknown command "${command}"\n${HELP}`);
-// A cloud box's operator (cloud/operator.md) looks after the machine and reads every repo. Any other
+// A cloud box's operator (process/operator.md) looks after the machine and reads every repo. Any other
 // role the kit doesn't know reads as the supervisor, so this one may only look.
 else if (process.env.DEVTEAM_ROLE === 'operator' && !OPERATOR_READS.has(command === 'fleet' ? `fleet ${positional[0]}` : command)) die(`${command}: the operator only reads; this is for the repo's supervisor or its owner`);
 else {
