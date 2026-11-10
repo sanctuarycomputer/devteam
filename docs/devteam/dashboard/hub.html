@@ -49,6 +49,7 @@
   iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: var(--bg); }
   iframe[hidden] { display: none; }
   @media (max-width: 640px) { header { flex-wrap: wrap; } nav { order: 3; flex-basis: 100%; } }
+  #drop-hint { position: fixed; left: 50%; top: 52px; transform: translateX(-50%); z-index: 10; padding: 8px 14px; border-radius: 6px; background: var(--fg); color: var(--bg); font-size: 13px; pointer-events: none; }
   #empty { margin: 48px auto; max-width: 520px; padding: 0 16px; color: var(--fg-2); text-align: center; }
 </style>
 </head>
@@ -59,6 +60,7 @@
   <span id="box-links" hidden></span>
 </header>
 <main id="frames"><p id="empty">Looking for devteam dashboards on this machine…</p></main>
+<div id="drop-hint" hidden></div>
 <script>
 // The hub's page: a tab per devteam instance on the machine (its name, and a badge when its Inbox
 // has something), and that instance's own dashboard in a frame under it, on the instance's own
@@ -319,6 +321,22 @@ tabsEl.addEventListener('keydown', (e) => {
   const next = roots[(i + (e.key === 'ArrowRight' ? 1 : roots.length - 1)) % roots.length];
   if (next) { select(next); (next === TERM ? term : items.get(next)).tab.focus(); }
 });
+// Left alone, a browser opens whatever is dropped on a page in a new tab. A drop on the terminal
+// goes to the terminal's own page, in its frame; this is for everywhere the hub itself is under
+// the pointer (the tab bar, the margins), where nothing can take it. Refused, with a word why.
+{
+  const hint = $('drop-hint');
+  let hide = 0;
+  const say = () => {
+    if (term) hint.textContent = selected === TERM ? 'Drop onto the terminal, below the tabs' : 'Drop onto the Terminal tab';
+    else hint.textContent = 'This page doesn\'t take files';
+    hint.hidden = false;
+    clearTimeout(hide);
+    hide = setTimeout(() => { hint.hidden = true; }, 1500);
+  };
+  window.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'none'; say(); });
+  window.addEventListener('drop', (e) => { e.preventDefault(); say(); });
+}
 // The hub on a laptop has no box.json (404); a devteam gateway answers it.
 async function findBox() {
   try {

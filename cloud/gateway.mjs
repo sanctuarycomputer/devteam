@@ -857,18 +857,58 @@ export function createGateway(opts = {}) {
 })();</script>`);
   // ttyd's page drops what's typed or pasted while its socket is down, and gives no sign. So this
   // goes in ahead of its bundle, to note the socket it opens; a paste then waits for a live one.
-  const TERM_SOCKET = Buffer.from(`<script>(() => {
+  // ttyd reconnects without loading the page again, so a tab left open through a deploy keeps the
+  // old page, and whatever a new one adds never reaches it. So when its socket closes or comes back
+  // this asks which page is current and, if it has changed, loads it: tmux redraws the screen, as it
+  // does on a reconnect. It keeps asking while the box is away: ttyd tries once, then waits for Enter.
+  // Not while a dropped file is on its way or waiting to paste, once per page (one that still comes
+  // back old can't loop), and past ttyd's "leave site?" prompt, which is for the owner's own leaving.
+  const TERM_SOCKET = `<script>(() => {
+  const BUILD = '@@BUILD@@';
+  let opens = 0;
+  let reloading = false;
+  addEventListener('beforeunload', (e) => { if (reloading) e.stopImmediatePropagation(); }, true);
+  const reload = () => {
+    if (window.devteamDropBusy && window.devteamDropBusy()) return void setTimeout(reload, 1000);
+    reloading = true;
+    location.reload();
+  };
+  const checkBuild = async () => {
+    const r = await fetch('/build', { cache: 'no-store' });
+    if (r.status >= 500) throw new Error('the box is away');
+    const build = r.ok ? (await r.json()).build : null;
+    if (!build || build === BUILD) return;
+    try {
+      if (sessionStorage.getItem('devteam-term-reloaded') === build) return;
+      sessionStorage.setItem('devteam-term-reloaded', build);
+    } catch { return; }
+    reload();
+  };
+  let asking = false;
+  const watchBuild = async () => {
+    if (asking) return;
+    asking = true;
+    for (let i = 0; i < 200; i++) {
+      try { await checkBuild(); break; } catch {}
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+    asking = false;
+  };
   window.WebSocket = new Proxy(window.WebSocket, { construct(T, args, nt) {
     const socket = Reflect.construct(T, args, nt);
     const live = { socket, at: 0 };
     window.devteamTermSocket = live;
-    socket.addEventListener('open', () => { live.at = Date.now(); });
+    socket.addEventListener('open', () => {
+      live.at = Date.now();
+      if (++opens > 1) watchBuild();
+    });
+    socket.addEventListener('close', () => { watchBuild(); });
     return socket;
   } });
-})();</script>`);
-  const withSocketWatch = (html) => {
+})();</script>`;
+  const withSocketWatch = (html, watch) => {
     const at = html.indexOf('<head>');
-    return at < 0 ? html : Buffer.concat([html.subarray(0, at + 6), TERM_SOCKET, html.subarray(at + 6)]);
+    return at < 0 ? html : Buffer.concat([html.subarray(0, at + 6), watch, html.subarray(at + 6)]);
   };
   // A native terminal pastes the path of a file dropped on it, and Claude Code picks it up from
   // there. So does this: each file goes to the box first, and then its path goes in by term.paste,
@@ -926,6 +966,8 @@ export function createGateway(opts = {}) {
   // Stored but not yet pasted. Tried again until the terminal is back, and on screen until then.
   let waiting = [];
   let trouble = [];
+  let active = 0;
+  window.devteamDropBusy = () => active > 0 || waiting.length > 0;
   const ready = () => {
     const live = window.devteamTermSocket;
     return Boolean(window.term && window.term.paste && live && live.socket.readyState === 1 && live.at && Date.now() - live.at >= SETTLE_MS);
@@ -980,10 +1022,17 @@ export function createGateway(opts = {}) {
     veil.style.display = 'none';
     // only while the event lasts: the list is empty afterwards
     const picks = Array.from(e.dataTransfer.items).filter((i) => i.kind === 'file').map((i) => { const entry = i.webkitGetAsEntry && i.webkitGetAsEntry(); return { file: i.getAsFile(), dir: Boolean(entry && entry.isDirectory) }; });
-    queue = queue.then(() => take(picks)).catch((err) => say(String(err && err.message || err), true));
+    active++;
+    queue = queue.then(() => take(picks)).catch((err) => say(String(err && err.message || err), true)).finally(() => { active--; });
   }, true);
 })();</script>`);
   const TERM_CSP = `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; font-src data:; img-src data:; connect-src 'self' ${TERM.replace(/^http/, 'ws')}; frame-ancestors ${PUB}; base-uri 'none'; form-action 'none'`;
+  // The page the terminal is served, and a name for it that changes only when its bytes do.
+  const termPage = () => {
+    const html = ttydPage();
+    const build = b64u(sha256(Buffer.concat([html, Buffer.from(TERM_SOCKET), TERM_CLIPBOARD, TERM_DROP]))).slice(0, 22);
+    return { build, body: Buffer.concat([withSocketWatch(html, Buffer.from(TERM_SOCKET.replace('@@BUILD@@', build))), TERM_CLIPBOARD, TERM_DROP]) };
+  };
   const loginAt = (next) => `${PUB}/auth/login${next ? `?next=${encodeURIComponent(next)}` : ''}`;
 
   // A published artifact, from the gateway's own copy alone: reads only, the raw path matched
@@ -1328,10 +1377,11 @@ export function createGateway(opts = {}) {
       if (isTerm) {
         if (req.method === 'GET' && p === '/') {
           let body;
-          try { body = Buffer.concat([withSocketWatch(ttydPage()), TERM_CLIPBOARD, TERM_DROP]); } catch { return send(res, 502, 'text/plain; charset=utf-8', 'This image has no terminal page.'); }
+          try { body = termPage().body; } catch { return send(res, 502, 'text/plain; charset=utf-8', 'This image has no terminal page.'); }
           return send(res, 200, 'text/html; charset=utf-8', body, { 'content-security-policy': TERM_CSP, 'referrer-policy': 'no-referrer' });
         }
         if (req.method === 'GET' && p === '/token') return json(res, 200, { token: '' });
+        if (req.method === 'GET' && p === '/build') { try { return json(res, 200, { build: termPage().build }); } catch { return send(res, 502, 'text/plain; charset=utf-8', 'This image has no terminal page.'); } }
         // a session, and (like every POST, above) this page's own Origin: an agent's page has neither
         if (req.method === 'POST' && p === '/upload') { clearTimeout(bodyTimer); return await receiveUpload(req, res, url.searchParams.get('name')); }
         return send(res, 404, 'text/plain', 'not found');
