@@ -674,6 +674,11 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+// Every item the dashboard draws says what it is (data-subject="<type>:<id>") and what it is called
+// (data-title), so the thread layer can point at it, name it, and find it again after a redraw.
+const subj = (type, id, title) => ` data-subject="${esc(`${type}:${id}`)}" data-title="${esc(String(title ?? '').replace(/\s+/g, ' ').trim().slice(0, 120))}"`;
+// The Decide feed's rows are calls of several kinds; each points at its own record.
+const decSubject = (r) => ({ decision: 'decision', act: 'act', answer: 'question', goal: 'goal', rule: 'lesson' }[r.kind] ?? (String(r.id).startsWith('d-') ? 'decision' : 'act'));
 const drafts = {};
 const DAY = 864e5;
 const dur = (s) => (s < 60 ? `${s}s` : `${(s / 60).toFixed(1)} min`);
@@ -907,7 +912,7 @@ function boardCols(items, crit, { only = false, inert = false } = {}) {
     // finished columns show the most recent few; the rest are counted
     if (['Merged', 'Released'].includes(name)) cards = cards.sort((a, b) => (b.merged_at || '').localeCompare(a.merged_at || '')).slice(0, 5);
     return `<div class="col${total ? '' : ' none'}"><h3><span>${name}</span><span>${total}</span></h3>${cards.map((t) => `
-      <${inert ? 'div' : 'button type="button"'} class="tcard${inert ? ' inert' : ''} ${t.phase === 'blocked' || t.waiting ? 'blocked' : ''}" ${inert ? '' : `data-ticket="${esc(t.id)}" aria-label="Open ${esc(t.title)}"`}>
+      <${inert ? 'div' : 'button type="button"'} class="tcard${inert ? ' inert' : ''} ${t.phase === 'blocked' || t.waiting ? 'blocked' : ''}"${subj('ticket', t.id, t.title)} ${inert ? '' : `data-ticket="${esc(t.id)}" aria-label="Open ${esc(t.title)}"`}>
         <div class="t"><b>${crit.has(t.id) ? '<i class="icon-flag" title="on the critical path" aria-label="on the critical path"></i> ' : ''}${esc(t.title)}</b></div>
         <div class="muted">${esc(t.component)} · ${esc(t.size)}</div>
         ${(() => { const ps = ticketPills(t); return ps.length ? `<div class="pills">${ps.map(([label, tone, tip]) => `<span class="badge pill ${tone}" title="${esc(tip || label)}">${esc(label)}</span>`).join('')}</div>` : ''; })()}
@@ -942,7 +947,7 @@ const words = (x) => cap(String(x ?? '').replace(/[-_]+/g, ' '));
 const PHASE_WORDS = { starting: 'starting', spec: 'writing the spec', plan: 'planning', contract: 'agreeing contracts', build: 'building', verify: 'verifying', 'final-review': 'final review', 'awaiting-word': 'waiting for the go-ahead', merging: 'merging', blocked: 'blocked', parked: 'parked', done: 'done' };
 const RUNG_WORDS = { 1: 'asks you first', 2: 'asks, with a default', 3: 'decides, then tells you' };
 const KIND_WORDS = { 'owner-decision': 'Decision', 'one-way-door': 'Hard to undo', clarification: 'Clarification', proposal: 'Proposal', trust: 'More trust?', 'goal-definition': 'Defining a goal', 'owner-action': 'Needs you to do something', review: 'Review' };
-const CHANNEL_WORDS = { dashboard: 'on the dashboard', cli: 'in your terminal', chat: 'to the supervisor in chat' };
+const CHANNEL_WORDS = { dashboard: 'on the dashboard', cli: 'in your terminal', chat: 'to the supervisor in chat', thread: 'in a thread' };
 const ticketMap = () => new Map((DATA?.tickets || []).map((t) => [t.id, t]));
 const allQuestions = () => [...(DATA?.questions || []), ...(DATA?.ooda?.answered || [])];
 const who = (w) => (w === 'owner' ? 'you' : w === 'supervisor' ? 'the supervisor' : ticketMap().has(w) ? `the agent on ${ticketMap().get(w).title}` : w?.startsWith('plan-') ? `the planner for ${w.slice(5)}` : w || '');
@@ -959,12 +964,12 @@ const glink = (gid) => { const g = goalOf(gid); return g ? `<a class="linkish" h
 const mlink = (gid, n, title) => `<a class="linkish" href="#milestone/${encodeURIComponent(`${gid}:${n}`)}">${esc(title ?? milestonesOf(goalOf(gid)).find((m) => m.n === Number(n))?.title ?? `milestone ${n}`)}</a>`;
 // An id in text links to its panel: goals, lessons, acts, problems, messages (threads), observations.
 function idLink(k, id) {
-  const href = { g: 'goal', k: 'lesson', a: 'act', d: 'decision', p: 'problem', m: 'thread' }[k];
+  const href = { g: 'goal', k: 'lesson', a: 'act', d: 'decision', p: 'problem', m: 'thread', t: 'talk' }[k];
   if (!href) return `<code>${esc(id.slice(0, 22))}…</code>`;
   if (k === 'g' && goalOf(id)) return glink(id);
   return `<a class="linkish" href="#${href}/${encodeURIComponent(id)}"><code>${esc(id.slice(0, 22))}…</code></a>`;
 }
-const subjectLink = (subj) => (ticketMap().has(subj) ? tlink(subj) : /^[a-z]-\d{8}-\d{9}-/.test(subj ?? '') || /^plan-/.test(subj ?? '') || /^sensor:/.test(subj ?? '') ? linkify(subj) : subj ? `<code>${esc(subj)}</code>` : '');
+const subjectLink = (subj) => (/^thread:t-/.test(subj ?? '') ? linkify(subj.slice(7)) : ticketMap().has(subj) ? tlink(subj) : /^[a-z]-\d{8}-\d{9}-/.test(subj ?? '') || /^plan-/.test(subj ?? '') || /^sensor:/.test(subj ?? '') ? linkify(subj) : subj ? `<code>${esc(subj)}</code>` : '');
 const scopeWords = (sc) => (!sc || sc === 'project' ? 'the whole project' : sc.replace(/^component:/, 'component ').replace(/^feature:/, 'feature ').replace(/^class:/, 'decisions of kind ').replace(/^chore:devteam-sync/, 'devteam upgrades').replace(/^chore:/, 'chore '));
 // What a call rested on, in words: the supervisor's trust, your answer or a default, a standing rule.
 function authorityWords(u) {
@@ -996,7 +1001,7 @@ function linkify(text) {
   const ids = [...ticketMap().keys()].sort((a, b) => b.length - a.length);
   const parts = [
     String.raw`\bq-\d{8}-\d{9}-[a-z0-9-]+`,
-    String.raw`\b[gkapmod]-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*`,
+    String.raw`\b[gkapmodt]-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*`,
     ...(ids.length ? [String.raw`\b(?:${ids.map((x) => x.replace(/[-]/g, '\\-')).join('|')})\b`] : []),
     String.raw`\bsensor:[A-Za-z0-9][A-Za-z0-9_.-]*`,
     String.raw`\bplan-[a-z0-9]+(?:-[a-z0-9]+)*\b`,
@@ -1005,7 +1010,7 @@ function linkify(text) {
   ];
   return h.replace(new RegExp(parts.join('|'), 'g'), (m) => {
     if (/^q-\d{8}-\d{9}-/.test(m)) return qlink(m);
-    if (/^[gkapmod]-\d{8}-\d{9}-/.test(m)) return idLink(m[0], m);
+    if (/^[gkapmodt]-\d{8}-\d{9}-/.test(m)) return idLink(m[0], m);
     if (ticketMap().has(m)) return tlink(m);
     if (m.startsWith('sensor:')) { const n = m.slice('sensor:'.length); return (DATA?.sensors || []).some((x) => x.name === n) ? `<a class="linkish" href="#sensor/${encodeURIComponent(n)}">${esc(n)}</a>` : m; }
     if (m.startsWith('plan-')) { const f = m.slice('plan-'.length); return (DATA?.planners || []).some((x) => x.feature === f) ? `<a class="linkish" href="#planner/${encodeURIComponent(f)}">${m}</a>` : m; }
@@ -1103,7 +1108,7 @@ function restoreSecretDrafts() {
 const toB64 = async (file) => { const bytes = new Uint8Array(await file.arrayBuffer()); let bin = ''; for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000)); return btoa(bin); };
 // Next time: only for a kind of decision on the trust ladder; the current rung is marked, nothing
 // changes unless the owner picks another. The supervisor never infers this from the note.
-const nextTime = (q, cls, attr = 'data-auto') => (cls ? `<fieldset class="next"><legend>Next time, for decisions like this (${esc(cls.about || words(q.class))}), the supervisor…</legend>${[1, 2, 3].filter((r) => r <= cls.ceiling).map((r) => `<label class="seg"><input type="radio" name="${attr === 'data-auto' ? '' : 'rv-'}auto-${esc(q.id)}" value="${r === cls.rung ? '' : r}" ${attr}="${esc(q.id)}" ${r === cls.rung ? 'checked' : ''}>${esc(RUNG_WORDS[r])}${r === cls.rung ? ' <span class="muted">(now)</span>' : ''}</label>`).join('')}</fieldset>` : '');
+const nextTime = (q, cls, attr = 'data-auto', pre = '') => (cls ? `<fieldset class="next"><legend>Next time, for decisions like this (${esc(cls.about || words(q.class))}), the supervisor…</legend>${[1, 2, 3].filter((r) => r <= cls.ceiling).map((r) => `<label class="seg"><input type="radio" name="${pre}${attr === 'data-auto' ? '' : 'rv-'}auto-${esc(q.id)}" value="${r === cls.rung ? '' : r}" ${attr}="${esc(q.id)}" ${r === cls.rung ? 'checked' : ''}>${esc(RUNG_WORDS[r])}${r === cls.rung ? ' <span class="muted">(now)</span>' : ''}</label>`).join('')}</fieldset>` : '');
 // Why a question is where it is in the Inbox. The server orders and words it (rank, from the
 // supervisor's ratings and what the kit counts); the page only shows it. The top card says the
 // whole reason; the others their first three parts.
@@ -1121,12 +1126,15 @@ const rankRow = (q) => [
   // every rating it has carried, so a question quietly rated down leaves a trail
   ...((q.rating_history || []).length ? [['Rated', q.rating_history.map((h) => esc(`${h.asked ? 'When asked' : `${when(h.at)}, ${who(h.by)}`}: ${[h.stake ? `stake ${h.stake}` : '', h.urgency ? `urgency ${h.urgency}` : '', h.settles !== undefined ? `settles ${h.settles}` : ''].filter(Boolean).join(', ')}`)).join('<br>')]] : []),
 ];
-function questionCard(q, o, reasonText) {
+function questionCard(q, o, reasonText, copy = false) {
   if (q.kind === 'review') return reviewCard(q, o, reasonText);
+  // copy: the same card in a thread (t-q-<id>): its own radio groups and error line, so the Inbox's
+  // and the thread's never answer for each other; the controls find their card from themselves.
+  const pre = copy ? 't-' : '';
   const cls = q.class && o.classes[q.class];
   const kindCls = q.kind === 'one-way-door' ? 'door' : q.kind === 'trust' ? 'trust' : '';
   const list = choicesOf(q);
-  const name = `pick-${q.id}`;
+  const name = `${pre}pick-${q.id}`;
   const sure = q.confidence != null ? ` · ${Math.round(q.confidence * 100)}% sure` : '';
   // the answer the supervisor said would settle other open questions: say which, on that choice
   const closes = (q.rank?.parts.settles || []).length ? `<div class="closes">Would close ${q.rank.parts.settles.length} other question${q.rank.parts.settles.length > 1 ? 's' : ''}: ${q.rank.parts.settles.map((id) => qlink(id)).join('; ')}</div>` : '';
@@ -1137,13 +1145,14 @@ function questionCard(q, o, reasonText) {
       </label>`).join('') + (list.length && !['owner-action', 'goal-approval'].includes(q.kind) ? `
       <label class="choice${picks[q.id] === '__other' ? ' picked' : ''}"><input type="radio" name="${esc(name)}" value="__other" data-pick="${esc(q.id)}" ${picks[q.id] === '__other' ? 'checked' : ''}><span><b>Something else</b><div class="d">Write your own answer in the box below.</div></span></label>` : '');
   const why = q.why_asked?.reasons?.length ? `Why you: ${q.why_asked.reasons.map((r) => esc(reasonText[r] || r)).join('; ')}.` : '';
-  const next = nextTime(q, cls);
+  const next = nextTime(q, cls, 'data-auto', pre);
   const goalAsk = q.kind === 'goal-approval';
   const notePh = goalAsk ? 'Notes for the planner: taken into account whatever you choose (needed to refine)' : list.length ? 'Add a note (optional), or your own answer' : 'Your answer';
   return `
-    <div class="card qcard ${kindCls}${q.rank?.top ? ' top' : ''}" id="q-${esc(q.id)}">
+    <div class="card qcard ${kindCls}${q.rank?.top ? ' top' : ''}" id="${pre}q-${esc(q.id)}" data-qcard="${esc(q.id)}"${copy ? '' : subj('question', q.id, qplain(q.question, q.links))}>
       ${cardHead(KIND_ICON[q.kind] || 'circle-help', `<span class="badge ${q.kind === 'one-way-door' ? 'high' : q.kind === 'trust' ? 'good' : q.kind === 'owner-action' ? 'low' : 'medium'}">${esc(KIND_WORDS[q.kind] || words(q.kind))}</span>${q.goal_hold === 'park' ? '<span class="badge">its goal is parked</span>' : ''}`, { extra: (q.blocks || []).length ? `${q.class === 'incident-fix' ? 'about the incident' : 'holds up'} ${q.blocks.map((b) => (/^p-/.test(b) ? linkify(b) : tlink(b))).join(', ')}` : q.ticket ? `about ${tlink(q.ticket)}` : '', id: q.id, rows: [['Asked', esc(when(q.asked_at))], ...(q.class ? [['Kind', esc(q.class)]] : []), ...rankRow(q)] })}
       ${rankWhy(q)}
+      ${q.thread && !copy ? `<div class="meta from-thread">From a thread: <a class="linkish" href="#talk/${encodeURIComponent(q.thread)}">${esc(q.thread_title || 'a conversation with the supervisor')}</a></div>` : ''}
       ${q.rewritten ? '<p class="rewritten">This question changed after you answered it, so that answer no longer counts. Read it again before you answer: the supervisor\'s log was rewritten, which it should never do.</p>' : ''}
       <h4>${qtext(q.question, q.links)}</h4>
       ${q.context ? `<p class="ctx">${qtext(q.context, q.links)}</p>` : ''}
@@ -1157,7 +1166,7 @@ function questionCard(q, o, reasonText) {
       ${goalAsk || ['owner-action', 'goal-definition'].includes(q.kind) ? '' : `<label class="rulebox"><input type="checkbox" data-rulebox="${esc(q.id)}"> Keep this answer as a standing rule for ${esc(scopeWords(q.rule_scope))}</label>`}
       ${next}
       ${q.default ? `<p class="meta">If you don’t answer${q.deadline ? ` by ${when(q.deadline)}` : ''}, the supervisor goes with: <b>${esc(q.default)}</b></p>` : ''}
-      <div class="row-inline">${(q.secrets || []).length ? `<button data-post-secrets="${esc(q.id)}">Post</button>${q.sensor ? `<button class="ghost" data-dontuse="${esc(q.id)}">Don’t use this sensor</button>` : `<button class="ghost" data-reply="${esc(q.id)}">Reply</button><button class="ghost" data-cant="${esc(q.id)}">Can’t right now</button>`}` : `<button data-answer="${esc(q.id)}" ${goalAsk ? `data-goal-ask="${esc(q.goal)}"` : ''}>${q.kind === 'owner-action' || goalAsk ? 'Send' : 'Answer'}</button>`}<span class="err" id="e-${esc(q.id)}"></span></div>
+      <div class="row-inline">${(q.secrets || []).length ? `<button data-post-secrets="${esc(q.id)}">Post</button>${q.sensor ? `<button class="ghost" data-dontuse="${esc(q.id)}">Don’t use this sensor</button>` : `<button class="ghost" data-reply="${esc(q.id)}">Reply</button><button class="ghost" data-cant="${esc(q.id)}">Can’t right now</button>`}` : `<button data-answer="${esc(q.id)}" ${goalAsk ? `data-goal-ask="${esc(q.goal)}"` : ''}>${q.kind === 'owner-action' || goalAsk ? 'Send' : 'Answer'}</button>`}<span class="err" id="e-${pre}${esc(q.id)}"></span></div>
       ${why ? `<div class="meta">${why}</div>` : ''}
     </div>`;
 }
@@ -1193,7 +1202,7 @@ function qtext(text, links) {
 const qplain = (text, links) => String(text ?? '').replace(new RegExp(NAME_REF.source, 'g'), (all, n) => (links || []).find((x) => x.name === n)?.title ?? all);
 function answeredCard(q) {
   const how = q.status === 'defaulted' ? 'went with the default; you didn’t answer in time' : q.status === 'withdrawn' ? 'withdrawn by the supervisor' : `answered ${CHANNEL_WORDS[q.channel] || ''}`;
-  return `<div class="card small">
+  return `<div class="card small"${subj('question', q.id, qplain(q.question, q.links))}>
     <div>${qlink(q.id, q.question)}</div>
     ${q.answer ? `<div><b>${esc(q.answer)}</b></div>` : ''}
     ${q.said ? `<div class="muted">You said: “${esc(q.said)}”</div>` : ''}
@@ -1304,9 +1313,10 @@ function reviewCard(q, o, reasonText) {
   const why = q.why_asked?.reasons?.length ? `Why you: ${q.why_asked.reasons.map((r) => esc(reasonText[r] || r)).join('; ')}.` : '';
   const declineOpen = !!drafts[q.id];
   return `
-    <div class="card qcard review${q.rank?.top ? ' top' : ''}" id="q-${esc(q.id)}">
+    <div class="card qcard review${q.rank?.top ? ' top' : ''}" id="q-${esc(q.id)}" data-qcard="${esc(q.id)}"${subj('question', q.id, qplain(q.question, q.links))}>
       ${cardHead(KIND_ICON.review, '<span class="badge low">Review</span>', { extra: (q.blocks || []).length ? `holds up ${q.blocks.map(tlink).join(', ')}` : q.ticket ? `about ${tlink(q.ticket)}` : '', id: q.id, rows: [['Asked', esc(when(q.asked_at))], ...(q.class ? [['Kind', esc(q.class)]] : []), ...rankRow(q)] })}
       ${rankWhy(q)}
+      ${q.thread ? `<div class="meta from-thread">From a thread: <a class="linkish" href="#talk/${encodeURIComponent(q.thread)}">${esc(q.thread_title || 'a conversation with the supervisor')}</a></div>` : ''}
       ${q.rewritten ? '<p class="rewritten">This question changed after you answered it, so that answer no longer counts. Read it again before you answer: the supervisor\'s log was rewritten, which it should never do.</p>' : ''}
       <h4>${qtext(q.question, q.links)}</h4>
       ${q.context ? `<p class="ctx">${qtext(q.context, q.links)}</p>` : ''}
@@ -1807,7 +1817,7 @@ function holdControl(id, h, { letGo = true, status = null } = {}) {
 function upkeepCard(u) {
   const words = HOLD_STATE_WORDS[holdState(u)] || u.state;
   const chores = u.chores || [];
-  return `<div class="card goal upkeep">
+  return `<div class="card goal upkeep"${subj('goal', 'upkeep', 'Upkeep')}>
     ${cardHead('wrench', `<span class="badge ${u.mode === 'run' ? 'good' : u.mode === 'park' ? 'high' : 'medium'}">${esc(words)}</span>`, { extra: 'always on: observing and keeping the record' })}
     <h4>Upkeep</h4>
     <p class="ctx">Chores, CI fixes, research, retros, kit syncs and the improvement loop's trials and proposals.${chores.length ? ` In flight: ${chores.slice(0, 6).map((c) => `<a class="linkish" href="#ticket/${encodeURIComponent(c.id)}">${esc(c.id)}</a>`).join(', ')}${chores.length > 6 ? '…' : ''}.` : ''}${u.reason ? ` <span class="muted">(${esc(u.reason)})</span>` : ''}</p>
@@ -1846,7 +1856,7 @@ function goalCard(g, R, openQs, week) {
   const s = goalState(g, R, openQs);
   const design = s.ask?.links?.[0] ?? (['ready', 'met'].includes(g.status) && g.check.design ? { title: 'The design', path: `docs/devteam/${g.check.design}` } : null);
   const steps = goalSteps(g, s, R);
-  return `<div class="card goal goal-${s.key}">
+  return `<div class="card goal goal-${s.key}"${subj('goal', g.id, g.title)}>
     ${cardHead('target', `<span class="badge ${s.tone}">${esc(s.label)}</span>`, { extra: [g.priority ? `priority ${esc(g.priority)}` : '', g.impact ? esc(g.impact.words) : ''].filter(Boolean).join(' · '), id: g.id, rows: [['Opened', esc(when(g.created_at))]] })}
     <h4><a class="title-link" href="#goal/${encodeURIComponent(g.id)}">${esc(g.title)}</a></h4>
     ${g.outcome ? `<p class="ctx">${esc(g.outcome)}</p>` : ''}
@@ -1862,7 +1872,7 @@ const registryAttestLine = (g) => { const r = g.registry_attest; return r ? `<di
 const planningFor = (g) => (DATA?.planners || []).filter((p) => p.goals.includes(g.id));
 const ago = (m) => (m == null ? 'no activity yet' : m < 1 ? 'active just now' : m < 60 ? `active ${m} min ago` : `active ${Math.round(m / 60)} h ago`);
 function plannerCards(ps) {
-  return ps.map((p) => `<button type="button" class="plcard${p.waiting || !p.window ? ' stuck' : ''}" data-planner="${esc(p.feature)}">
+  return ps.map((p) => `<button type="button" class="plcard${p.waiting || !p.window ? ' stuck' : ''}" data-planner="${esc(p.feature)}"${subj('planner', p.feature, `Planning ${p.title}`)}>
     <div><i class="icon-bot" aria-hidden="true"></i> <b>Planning ${esc(p.title)}</b></div>
     <div class="muted">${p.goals.length ? `for ${p.goals.map((gid) => esc((DATA.ooda.goals.find((g) => g.id === gid) || {}).title || gid)).join(', ')} · ` : ''}${p.tickets ? `${p.tickets} ticket${p.tickets > 1 ? 's' : ''} so far · ` : ''}${esc(ago(p.minutes_silent))}</div>
     <div>${p.waiting ? `<span class="badge high">${p.waiting.kind === 'limit' ? 'usage limit' : 'waiting on a prompt'}</span>` : ''}${!p.window ? '<span class="badge medium">window gone</span>' : ''}${p.waiting_on_supervisor.length ? '<span class="badge low">waiting for the supervisor</span>' : ''}${(p.waiting_on_owner || []).length ? `<span class="badge medium">waiting for ${p.waiting_on_owner.length} answer${p.waiting_on_owner.length > 1 ? 's' : ''} from you</span>` : ''}</div>
@@ -1897,18 +1907,18 @@ function renderOoda(o) {
 
   // Observe
   $('observations').innerHTML = o.observations.length ? o.observations.slice(0, 40).map((x) => `
-    <div class="card small"><span class="badge ${sevBadge(x.severity ?? 0)}">${esc(words(x.kind))}</span>${subjectLink(x.subject)}
+    <div class="card small"${subj('observation', x.id, `${words(x.kind)}: ${x.detail}`)}><span class="badge ${sevBadge(x.severity ?? 0)}">${esc(words(x.kind))}</span>${subjectLink(x.subject)}
       <div>${linkify(x.detail)}</div><div class="meta">${esc(who(x.created_by))}, ${when(x.created_at)}</div></div>`).join('') : empty('None yet. What workers and the supervisor notice shows here.');
 
   // Orient
   $('clusters').innerHTML = o.clusters.length ? o.clusters.map((c) => `
     <div class="card small"><b>${esc(words(c.key.split(':')[0]))}</b> ${subjectLink(c.key.split(':').slice(1).join(':'))} <span class="muted">· seen ${esc(c.count)} times</span><div>${linkify(c.latest)}</div></div>`).join('') : empty('None. Something noticed more than once shows here.');
   $('problems').innerHTML = o.problems.length ? o.problems.map((p) => `
-    <div class="card small"><span class="badge ${sevBadge(p.severity)}">sev ${esc(p.severity)}</span><span class="badge">${p.realized ? 'issue' : 'risk'}</span><a class="linkish" href="#problem/${encodeURIComponent(p.id)}"><b>${esc(p.title)}</b></a> <span class="muted">· ${esc(p.status)}${p.assigned_to ? `, ${esc(p.assigned_to)}` : ''}${(p.threatens || []).length ? ` · threatens ${p.threatens.map(esc).join(', ')}` : ''}</span>${p.detail ? `<div class="muted">${esc(p.detail)}</div>` : ''}</div>`).join('') : empty('None open.');
+    <div class="card small"${subj('problem', p.id, p.title)}><span class="badge ${sevBadge(p.severity)}">sev ${esc(p.severity)}</span><span class="badge">${p.realized ? 'issue' : 'risk'}</span><a class="linkish" href="#problem/${encodeURIComponent(p.id)}"><b>${esc(p.title)}</b></a> <span class="muted">· ${esc(p.status)}${p.assigned_to ? `, ${esc(p.assigned_to)}` : ''}${(p.threatens || []).length ? ` · threatens ${p.threatens.map(esc).join(', ')}` : ''}</span>${p.detail ? `<div class="muted">${esc(p.detail)}</div>` : ''}</div>`).join('') : empty('None open.');
   const cand = o.knowledge.filter((k) => k.status === 'candidate');
   const acc = o.knowledge.filter((k) => k.status === 'accepted');
   $('knowledge').innerHTML = (cand.length ? `<p class="small">${cand.length} proposed lesson${cand.length > 1 ? 's are' : ' is'} waiting for you in the <a class="linkish" href="#inbox">Inbox</a>.</p>` : '') +
-    (acc.length ? acc.map((k) => `<div class="card small"><a class="linkish" href="#lesson/${encodeURIComponent(k.id)}"><span class="badge good">${esc(k.kind)}</span></a>${linkify(k.statement)}${k.valence < 0 ? ' <span class="muted">(avoid)</span>' : ''} <span class="muted">· applies to ${esc(scopeWords(k.scope))}${k.created_by === 'owner' ? ' · from you' : ''}</span></div>`).join('') : '') ||
+    (acc.length ? acc.map((k) => `<div class="card small"${subj('lesson', k.id, k.statement)}><a class="linkish" href="#lesson/${encodeURIComponent(k.id)}"><span class="badge good">${esc(k.kind)}</span></a>${linkify(k.statement)}${k.valence < 0 ? ' <span class="muted">(avoid)</span>' : ''} <span class="muted">· applies to ${esc(scopeWords(k.scope))}${k.created_by === 'owner' ? ' · from you' : ''}</span></div>`).join('') : '') ||
     empty('None yet. Things noticed more than once become proposed lessons, which you keep or retire in the Inbox.');
 
   // Trust Ladder
@@ -1925,7 +1935,7 @@ function renderOoda(o) {
   // Act
   const feed = o.acts;
   $('acts-feed').innerHTML = feed.length ? feed.map((a) => { const v = actView(a); return `
-    <div class="card small ${a.correction ? 'corrected' : ''}">
+    <div class="card small ${a.correction ? 'corrected' : ''}"${subj('act', a.id, a.what)}>
       <div><div class="act-head">${v.head}</div>${v.detail ? `<div class="act-detail">${v.detail}</div>` : ''}
         <div class="meta"><a class="linkish" href="#act/${encodeURIComponent(a.id)}">${when(a.created_at)}</a> · ${actUnder(a)}${a.reversible === false ? ' · can’t be undone' : ''}</div>
         ${a.correction ? `<div class="err">Corrected by ${esc(who(a.correction.by))}: ${esc(a.correction.reason)}${a.correction.repaired ? ` · ${esc(a.correction.repaired)}` : ''}</div>` : ''}
@@ -1938,7 +1948,7 @@ const DEC_KIND = { decision: 'Decided', act: 'Did, as its own call', answer: 'Yo
 function decisionUnder(r) {
   if (r.who === 'supervisor' && ['decision', 'act'].includes(r.kind)) return authorityWords(r.under);
   const u = r.under || {};
-  if (r.kind === 'answer') return [u.recommendation ? (u.matched ? 'went with its recommendation' : `its recommendation was “${esc(u.recommendation)}”`) : '', u.autonomy ? `moved ${esc(words(u.autonomy.class))} to ${esc(RUNG_WORDS[u.autonomy.rung])}` : '', u.standing_rule ? `and gave a standing rule: “${esc(u.standing_rule)}”` : '', u.channel === 'chat' ? 'said in the supervisor chat' : ''].filter(Boolean).join(' · ');
+  if (r.kind === 'answer') return [u.recommendation ? (u.matched ? 'went with its recommendation' : `its recommendation was “${esc(u.recommendation)}”`) : '', u.autonomy ? `moved ${esc(words(u.autonomy.class))} to ${esc(RUNG_WORDS[u.autonomy.rung])}` : '', u.standing_rule ? `and gave a standing rule: “${esc(u.standing_rule)}”` : '', u.channel === 'chat' ? 'said in the supervisor chat' : u.channel === 'thread' ? 'said in a thread' : ''].filter(Boolean).join(' · ');
   if (r.kind === 'correction') return [u.severity != null ? `severity ${esc(u.severity)}` : '', u.repaired ? `repaired: ${esc(u.repaired)}` : 'not repaired yet'].filter(Boolean).join(' · ');
   if (r.kind === 'rule') return u.status === 'accepted' ? '' : esc(u.status);
   return '';
@@ -1963,7 +1973,7 @@ function renderDecisions(o) {
     const under = decisionUnder(r);
     const evidence = (r.refs || []).length ? `about ${r.refs.slice(0, 4).map((x) => (ticketMap().has(x) ? tlink(x) : linkify(x))).join(', ')}` : '';
     return `
-    <div class="card small ${r.correction ? 'corrected' : ''}" data-dec="${esc(key(r))}">
+    <div class="card small ${r.correction ? 'corrected' : ''}" data-dec="${esc(key(r))}"${subj(decSubject(r), r.id, r.what)}>
       <div><div class="act-head"><span class="badge ${r.kind === 'correction' ? 'high' : r.who === 'owner' ? 'good' : 'medium'}">${esc(DEC_KIND[r.kind] || r.kind)}</span> ${linkify(r.what)}</div>
         ${r.rationale ? `<div class="act-detail">${linkify(r.rationale)}${r.options?.length > 1 ? ` <span class="muted">(weighed: ${r.options.map(esc).join(' / ')})</span>` : ''}${r.confidence != null ? ` <span class="muted">· ${Math.round(r.confidence * 100)}% sure</span>` : ''}</div>` : ''}
         <div class="meta"><a class="linkish" href="${open}">${esc(when(r.at))}</a> · ${esc(r.who === 'owner' ? 'you' : who(r.who))}${r.class ? ` · ${esc(words(r.class))}` : ''}${under ? ` · ${under}` : ''}${evidence ? ` · ${evidence}` : ''}${r.kind === 'decision' && r.acts.length ? ` · carried out by ${r.acts.length} act${r.acts.length > 1 ? 's' : ''}` : r.kind === 'decision' ? ' · not acted on yet' : ''}${r.reversible === false ? ' · can’t be undone' : ''}</div>
@@ -2463,7 +2473,7 @@ function incidentBoard(incs) {
     let cards = incs.filter((x) => x.stage === k);
     const total = cards.length;
     if (k === 'resolved') cards = cards.slice(-5);
-    return `<div class="col${total ? '' : ' none'}"><h3><span>${label}</span><span>${total}</span></h3>${cards.map((x) => `<button type="button" class="tcard${x.question?.status === 'open' || x.stage === 'regressed' ? ' blocked' : ''}" data-open="problem/${esc(x.id)}" aria-label="Open ${esc(x.title)}">
+    return `<div class="col${total ? '' : ' none'}"><h3><span>${label}</span><span>${total}</span></h3>${cards.map((x) => `<button type="button" class="tcard${x.question?.status === 'open' || x.stage === 'regressed' ? ' blocked' : ''}"${subj('problem', x.id, x.title)} data-open="problem/${esc(x.id)}" aria-label="Open ${esc(x.title)}">
       <div class="t"><b>${esc(x.title)}</b></div>
       <div class="muted">severity ${esc(x.severity)} · ${esc(x.events)} event(s)${x.component ? ` · ${esc(x.component)}` : ''}</div>
       ${x.waiting ? `<div class="pills"><span class="badge pill ${x.question?.status === 'open' ? 'medium' : ''}">${esc(x.waiting.replace(/ at (\S+)$/, (_, at) => ` ${when(at)}`))}</span></div>` : ''}
@@ -2499,7 +2509,7 @@ function renderMonitoring(d) {
   const feed = d.sensor_feed || [];
   $('sensor-exceptions').innerHTML = feed.length ? `<div class="feed">${feed.map(fpRow).join('')}</div>` : empty(ms.some((m) => m.kind !== 'http') ? 'Nothing read yet. Exceptions, log errors and platform errors the sensors read show here, newest first.' : 'No probes yet. Discovery starts them when it finds an error tracker or a host whose logs the project can already read.');
   const obs = (d.ooda?.observations || []).filter((o) => /^sensor:/.test(o.subject || ''));
-  $('sensor-feed').innerHTML = obs.length ? obs.map((o) => `<div class="card small${o.severity >= 3 ? ' corrected' : ''}"><div><div class="act-head">${o.severity != null ? `<span class="badge ${sevBadge(o.severity)}">${esc(words(o.kind))}</span> ` : ''}${linkify(o.detail)}</div><div class="meta">${esc(when(o.created_at))} · ${subjectLink(o.subject)}</div></div></div>`).join('') : empty('Nothing yet. Outages, slow spells and each day\'s rollup show here.');
+  $('sensor-feed').innerHTML = obs.length ? obs.map((o) => `<div class="card small${o.severity >= 3 ? ' corrected' : ''}"${subj('observation', o.id, o.detail)}><div><div class="act-head">${o.severity != null ? `<span class="badge ${sevBadge(o.severity)}">${esc(words(o.kind))}</span> ` : ''}${linkify(o.detail)}</div><div class="meta">${esc(when(o.created_at))} · ${subjectLink(o.subject)}</div></div></div>`).join('') : empty('Nothing yet. Outages, slow spells and each day\'s rollup show here.');
 }
 function openSensor(name) {
   drawerFor('sensor', name);
@@ -3092,10 +3102,13 @@ async function post(action, body, errId) {
 }
 // Once an answer is saved the card says so at once; the next refresh removes it.
 const ANSWERED = new Map();
+// The card a control is on, and its error line: the Inbox's copy of a question (q-<id>) or a thread
+// card's (t-q-<id>), found from the control itself, so the two copies never answer for each other.
+const qcardOf = (el) => { const card = el.closest('[data-qcard]'); return { card, errId: `${card?.id.startsWith('t-') ? 't-' : ''}${card?.dataset.qcard ?? ''}` }; };
 function markAnswered(id, text) {
   ANSWERED.set(id, text);
-  const card = document.getElementById(`q-${id}`);
-  if (card) { card.classList.add('done'); card.innerHTML = `<div class="answered-note"><i class="icon-circle-check" aria-hidden="true"></i> Answered: <b>${esc(text)}</b></div>`; }
+  // both copies: the Inbox's and a thread card's
+  for (const card of document.querySelectorAll(`[data-qcard="${CSS.escape(id)}"]`)) { card.classList.add('done'); card.innerHTML = `<div class="answered-note"><i class="icon-circle-check" aria-hidden="true"></i> Answered: <b>${esc(text)}</b></div>`; }
 }
 
 /* preview-cards start */
@@ -3172,7 +3185,7 @@ function renderLibrary(lib) {
       stop: () => `<button class="ghost" data-preview-stop="${esc(p.name)}"${p.run ? '' : ' title="Unregisters the link; the server stays up until its session stops it"'}>Stop</button>`,
     };
     const meta = [esc(p.project), linkify(p.session), p.label ? esc(p.label) : '', p.at ? `offered ${esc(when(p.at))}` : '', s.since ? `down since ${esc(when(s.since))}` : ''].filter(Boolean).join(' · ');
-    return `<div class="card small art-card" data-preview="${esc(p.name)}">
+    return `<div class="card small art-card" data-preview="${esc(p.name)}"${subj('preview', p.name, p.label || p.name)}>
       <div class="art-t"><b>${esc(p.label || p.name)}</b><code class="small">${esc(p.name)}</code>${pvBadge[s.state]}</div>
       <div class="meta">${meta}</div>
       <div class="pub">${s.actions.map((a) => act[a]()).join('')}<span class="err" id="e-preview-${esc(p.name)}"></span></div>
@@ -3203,7 +3216,7 @@ function renderLibrary(lib) {
   const card = (a, draft) => {
     const name = a.error ? a.slug : a.title || a.slug;
     const meta = [a.by ? `drawn by ${esc(who(a.by))}` : '', a.for?.length ? `for ${a.for.map((f) => linkify(f)).join(', ')}` : '', a.updated_at ? esc(when(a.updated_at)) : ''].filter(Boolean).join(' · ');
-    return `<div class="card small art-card${draft ? ' draft' : ''}">
+    return `<div class="card small art-card${draft ? ' draft' : ''}"${subj('artifact', a.slug, a.title || a.slug)}>
       <div class="art-t">${a.error ? `<b>${esc(name)}</b>` : `<a href="${esc(artHref(a.slug, a.at))}">${esc(name)}</a>`}${a.at === 'main' ? '' : `<span class="badge medium">draft</span><span class="small muted">in ${linkify(a.at)}</span>`}${a.error ? '<span class="badge high">broken</span>' : ''}</div>
       ${a.error ? `<div class="err">${esc(a.error)}</div>` : a.summary ? `<div class="art-s">${esc(a.summary)}</div>` : ''}
       ${meta ? `<div class="meta">${meta}</div>` : ''}
@@ -3290,16 +3303,16 @@ function render(d) {
   $('stats').innerHTML = stats.map(([k, v]) => `<div class="stat"><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join('');
 
   // Keep anything half-typed or half-open across refreshes.
-  document.querySelectorAll('textarea[data-q]').forEach((t) => { drafts[t.dataset.q] = t.value; });
+  document.querySelectorAll('textarea[data-q]').forEach((t) => { if (!t.closest('#tl')) drafts[t.dataset.q] = t.value; });
   document.querySelectorAll('textarea[data-know-note]').forEach((t) => { drafts[`know:${t.dataset.knowNote}`] = t.value; });
   keepSecretDrafts();
-  const kept = [...document.querySelectorAll('input[data-reason], input[data-overrule]')].map((el) => [el.dataset.reason ? `input[data-reason="${el.dataset.reason}"]` : `input[data-overrule="${el.dataset.overrule}"]`, el.value]);
-  const keptChecks = [...document.querySelectorAll('input[data-rulebox]:checked, input[data-auto]:checked')].map((el) => el.dataset.rulebox ? `input[data-rulebox="${el.dataset.rulebox}"]` : `input[data-auto="${el.dataset.auto}"][value="${el.value}"]`);
+  const kept = [...document.querySelectorAll('input[data-reason], input[data-overrule]')].filter((el) => !el.closest('#tl')).map((el) => [el.dataset.reason ? `input[data-reason="${el.dataset.reason}"]` : `input[data-overrule="${el.dataset.overrule}"]`, el.value]);
+  const keptChecks = [...document.querySelectorAll('input[data-rulebox]:checked, input[data-auto]:checked')].filter((el) => !el.closest('#tl')).map((el) => el.dataset.rulebox ? `input[data-rulebox="${el.dataset.rulebox}"]` : `input[data-auto="${el.dataset.auto}"][value="${el.value}"]`);
   const openForms = [...document.querySelectorAll('[data-correct-form]')].filter((f) => !f.hidden).map((f) => f.dataset.correctForm);
   const reasonText = Object.fromEntries((o.reasons || []).map((r) => [r.id, r.means]));
   const cands = o.knowledge.filter((k) => k.status === 'candidate');
   const goalCards = cands.map((k) => `
-    <div class="card qcard trust">
+    <div class="card qcard trust"${subj('lesson', k.id, k.statement)}>
       ${cardHead('lightbulb', '<span class="badge good">Lesson to keep?</span>', { extra: `applies to ${esc(scopeWords(k.scope))}`, id: k.id, rows: [['Proposed', esc(when(k.created_at))], ['By', esc(who(k.created_by))]] })}
       <h4>${linkify(k.statement)}</h4>
       <p class="ctx">${esc(cap(who(k.created_by)))} proposes this as a ${esc(k.kind)}${k.confidence != null ? `, ${Math.round(k.confidence * 100)}% sure` : ''}, ${(k.evidence || []).length ? `based on ${k.evidence.map((e) => linkify(e)).join(', ')}` : 'with no evidence recorded'}. Accepted lessons go into the instructions of every agent they apply to.</p>
@@ -3547,7 +3560,7 @@ document.addEventListener('click', async (ev) => {
   if (pick) {
     picks[pick.dataset.pick] = pick.value;
     pick.closest('.choices').querySelectorAll('.choice').forEach((c) => c.classList.toggle('picked', c.contains(pick)));
-    if (pick.value === '__other') document.querySelector(`textarea[data-q="${pick.dataset.pick}"]`)?.focus();
+    if (pick.value === '__other') pick.closest('[data-qcard]')?.querySelector('textarea[data-q]')?.focus();
     return;
   }
   const ps = ev.target.closest('[data-post-secrets]');
@@ -3616,28 +3629,30 @@ document.addEventListener('click', async (ev) => {
   const cant = ev.target.closest('[data-cant], [data-reply], [data-dontuse]');
   if (cant) {
     const id = cant.dataset.cant ?? cant.dataset.reply ?? cant.dataset.dontuse;
-    const note = (document.querySelector(`textarea[data-q="${CSS.escape(id)}"]`)?.value ?? '').trim();
-    if (cant.dataset.reply !== undefined && !note) { const e = $(`e-${id}`); if (e) e.textContent = 'Write the note first.'; return; }
+    const { card, errId } = qcardOf(cant);
+    const note = (card?.querySelector('textarea[data-q]')?.value ?? '').trim();
+    if (cant.dataset.reply !== undefined && !note) { const e = $(`e-${errId}`); if (e) e.textContent = 'Write the note first.'; return; }
     const answer = cant.dataset.dontuse !== undefined ? "Don't use this sensor" : cant.dataset.reply !== undefined ? note : note ? `Can’t right now: ${note}` : 'Can’t right now';
     cant.disabled = true;
-    if (await post('answer', { id, answer }, id)) { [...SECRET_DRAFTS.keys()].filter((k) => k.startsWith(`${id}:`)).forEach((k) => SECRET_DRAFTS.delete(k)); delete drafts[id]; markAnswered(id, answer); }
+    if (await post('answer', { id, answer }, errId)) { [...SECRET_DRAFTS.keys()].filter((k) => k.startsWith(`${id}:`)).forEach((k) => SECRET_DRAFTS.delete(k)); delete drafts[id]; markAnswered(id, answer); }
     else cant.disabled = false;
     return;
   }
   const btn = ev.target.closest('[data-answer]');
   if (btn) {
     const id = btn.dataset.answer;
-    const note = document.querySelector(`textarea[data-q="${id}"]`).value.trim();
+    const { card, errId } = qcardOf(btn);
+    const note = (card?.querySelector('textarea[data-q]')?.value ?? '').trim();
     const picked = picks[id] && picks[id] !== '__other' ? picks[id] : '';
     const answer = picked ? (note ? `${picked} — ${note}` : picked) : note;
-    const err = $(`e-${id}`);
+    const err = $(`e-${errId}`);
     if (!answer) { if (err) err.textContent = 'Pick a choice or write an answer.'; return; }
     if (err) err.textContent = '';
     const goalId = btn.dataset.goalAsk;
     if (goalId && !picked) { if (err) err.textContent = 'Choose Approve, Refine or Let go.'; return; }
     if (goalId && picked === 'Refine' && !note) { if (err) err.textContent = 'Say in the notes what should change.'; return; }
-    const auto = document.querySelector(`input[data-auto="${id}"]:checked`)?.value;
-    const asRule = document.querySelector(`input[data-rulebox="${id}"]`)?.checked;
+    const auto = card?.querySelector('input[data-auto]:checked')?.value;
+    const asRule = card?.querySelector('input[data-rulebox]')?.checked;
     if (asRule && !note && !picked) { if (err) err.textContent = 'Pick an answer or write the rule in the note to keep it as a standing rule.'; return; }
     // the note is the rule's wording; without one, the chosen answer is the standing answer to questions like this
     const qText = DATA.questions.find((x) => x.id === id)?.question || '';
@@ -3647,8 +3662,8 @@ document.addEventListener('click', async (ev) => {
     let ok = false;
     try {
       ok = goalId
-        ? await post('goal-decide', { id: goalId, verdict: { Approve: 'approve', Refine: 'refine', 'Let go': 'let-go' }[picked], notes: note || undefined }, id)
-        : await post('answer', { id, answer, autonomy: auto ? Number(auto) : undefined, rule: rule || undefined }, id);
+        ? await post('goal-decide', { id: goalId, verdict: { Approve: 'approve', Refine: 'refine', 'Let go': 'let-go' }[picked], notes: note || undefined }, errId)
+        : await post('answer', { id, answer, autonomy: auto ? Number(auto) : undefined, rule: rule || undefined }, errId);
     }
     catch (e2) { if (err) err.textContent = `Could not send: ${e2.message}`; }
     if (ok) { delete drafts[id]; delete picks[id]; markAnswered(id, goalId ? picked + (note ? ` — ${note}` : '') : answer); }

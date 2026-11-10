@@ -591,3 +591,39 @@ test("threads on the dashboard's server: owner actions checked before anything r
   fs.rmSync(path.join(F.logDir, ownerFile));
   try { assert.ok((await list()).some((x) => x.id === T), 'read from project/log'); } finally { fs.writeFileSync(path.join(F.logDir, ownerFile), kept); fs.rmSync(path.join(durable, ownerFile)); }
 });
+
+test('every item the dashboard draws says what it is; a question asked in a thread links to it; an answer from a thread says so', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
+  const html = fs.readFileSync(path.join(kit, 'dashboard/index.html'), 'utf8');
+  for (const type of ['goal', 'question', 'ticket', 'planner', 'observation', 'problem', 'lesson', 'act', 'preview', 'artifact']) assert.match(html, new RegExp(`subj\\('${type}'`), `the ${type} renderer marks its item`);
+  assert.match(html, /subj\(decSubject\(r\)/, 'and the Decide feed, by kind');
+  const F = threadsFixture('threads-items');
+  t.after(() => F.done());
+  const T = F.owner(['thread', 'new', 'Narrow this to the EU launch', '--title', 'Launch checkout', '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}` })]).split('\n')[0];
+  const Q = F.sup(['thread', 'ask', T, '--question', 'Narrow the goal to EU orders?', '--goal', F.goal, '--stake', '2', '--urgency', '1']);
+  const Qa = F.sup(['thread', 'ask', T, '--question', 'Keep the US for later?', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
+  const U = F.owner(['thread', 'say', T, 'yes, keep the US for later']).split('\n')[0];
+  F.sup(['answer', Qa, 'yes', '--from-turn', U]);
+  const O = F.sup(['observe', '--subject', F.goal, '--kind', 'slow-test', '--detail', 'the checkout test is slow']);
+  const port = await freePort();
+  const dash = startDashboard(F.old, F.env({}), ['--port', String(port)]);
+  t.after(() => dash.stop());
+  const chrome = await openChrome();
+  t.after(() => chrome.close());
+  const p = await chrome.newPage();
+  t.after(() => p.close());
+  await until(() => /dashboard on http/.test(dash.out()), 'the dashboard');
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#inbox` });
+  const soon = async (expr, what) => { for (let i = 0; i < 400; i++) { const v = await p.ev(expr); if (v) return v; await new Promise((r) => setTimeout(r, 50)); } assert.fail(`timed out: ${what}`); };
+  await soon(`!!document.querySelector('#questions [data-subject="question:${Q}"]')`, 'the Inbox card');
+  const titleOf = (sel) => p.ev(`document.querySelector(${JSON.stringify(sel)})?.dataset.title ?? null`);
+  assert.equal(await titleOf(`#goals-list [data-subject="goal:${F.goal}"]`), 'Launch checkout');
+  assert.equal(await titleOf(`#questions [data-subject="question:${Q}"]`), 'Narrow the goal to EU orders?');
+  assert.equal(await titleOf(`#answered [data-subject="question:${Qa}"]`), 'Keep the US for later?');
+  assert.ok(await titleOf(`#observations [data-subject="observation:${O}"]`));
+  assert.equal(await p.ev(`document.querySelector('#questions [data-subject="question:${Q}"]').id`), `q-${Q}`, 'the Inbox copy keeps its id');
+  assert.equal(await p.ev(`document.querySelector('#q-${Q}').dataset.qcard`), Q);
+  assert.deepEqual(await p.ev(`(() => { const a = document.querySelector('#q-${Q} .from-thread a'); return a && [a.getAttribute('href'), a.textContent]; })()`), [`#talk/${T}`, 'Launch checkout']);
+  assert.match(await p.ev(`document.querySelector('#answered [data-subject="question:${Qa}"]').textContent`), /You said: “yes, keep the US for later”[\s\S]*answered in a thread/);
+});
