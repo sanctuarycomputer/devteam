@@ -1223,7 +1223,7 @@ out({ cursor: 'x' });
       assert.equal(json(must(['dashboard-data'])).incidents.find((x) => x.id === pid).question.id, q);
       assert.match(dt(['answer', q, '--defaulted'], sup).err, /default fires at/, 'not before its deadline');
       assert.match(dt(['ask', '--class', 'incident-fix', '--blocks', pid, '--question', 'q', '--recommendation', 'fix it', '--default', 'fix it', '--deadline', '1m'], sup).err, /at least 15 minutes/);
-      assert.match(dt(['ask', '--class', 'priority-change', '--question', 'q', '--recommendation', 'yes', '--default', 'yes', '--deadline', '15m'], sup).err, /--deadline is for an incident-fix question/, 'a short default is for an incident fix only');
+      assert.match(dt(['ask', '--class', 'priority-change', '--question', 'q', '--recommendation', 'yes', '--default', 'yes', '--deadline', '15m'], sup).err, /--deadline is for an incident-fix or production-remediation question/, 'a short default is for an incident fix only');
       must(['answer', q, 'fix it']);
       assert.match(dt(['decide', '--class', 'incident-fix', '--approved', q, '--refs', low, 'bill-01-y', '--', 'x'], sup).err, /was asked about p-/, 'an answer approves only its own incident');
       const d = must(['decide', '--class', 'incident-fix', '--approved', q, '--refs', pid, tid, '--', 'fix OutOfMemory in checkout'], sup);
@@ -1351,6 +1351,198 @@ out({ cursor: 'x' });
       }
       fs.rmSync(path.join(projDir, 'sensors'), { recursive: true, force: true });
       fs.rmSync(runMon, { recursive: true, force: true });
+    }
+  });
+
+  step('remediation: a listed, pinned script runs once per decision on the ladder, from main, redacted; the answer names it; a rollback across a migration needs the owner\'s own one-way-door answer', async () => {
+    const supKeptObs = (file, id) => fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).find((l) => l.id === id);
+    const sup = { role: 'sup' };
+    const settingsBefore = fs.readFileSync(path.join(repo, 'docs/devteam/project/settings.md'), 'utf8');
+    const excludeBefore = fs.readFileSync(path.join(repo, '.git/info/exclude'), 'utf8');
+    const projDir = path.join(repo, 'docs/devteam/project');
+    const outFile = path.join(tmp, 'rem-out');
+    const TOK = 'rem-Kq3vW8xY2pL5';
+    fs.appendFileSync(path.join(repo, '.git/info/exclude'), '\n/rem-token\n');
+    fs.writeFileSync(path.join(repo, 'rem-token'), `${TOK}\n`);
+    const script = (word, code = 0) => `import fs from 'node:fs';
+const p = JSON.parse(process.env.DEVTEAM_PARAMS);
+fs.writeFileSync(p.out, '${word} ' + (p.to ?? '-') + ' ' + (process.env.TOK ? 'tok' : 'none'));
+console.log('${word} web with ' + process.env.TOK);
+process.exit(${code});
+`;
+    write(path.join(projDir, 'remediations/restart.mjs'), script('restarted'));
+    write(path.join(projDir, 'remediations/rollback.mjs'), script('rolled back'));
+    write(path.join(projDir, 'remediations/broken.mjs'), script('tried', 2));
+    git(['add', 'docs/devteam/project/remediations']);
+    git(['commit', '-qm', 'remediations']);
+    git(['push', '-q', 'origin', 'HEAD:main']);
+    const sha = (f) => git(['rev-parse', `HEAD:docs/devteam/project/remediations/${f}`]);
+    landSettings((txt) => txt.replace('"gates": {', `"remediations": { "restart-web": { "kind": "restart", "script": "project/remediations/restart.mjs", "sha": "${sha('restart.mjs')}", "credentials": { "TOK": "file:rem-token" }, "params": { "out": ${JSON.stringify(outFile)} }, "undo": null }, "rollback-web": { "kind": "rollback", "script": "project/remediations/rollback.mjs", "sha": "${sha('rollback.mjs')}", "params": { "out": ${JSON.stringify(outFile)} } }, "broken": { "kind": "restart", "script": "project/remediations/broken.mjs", "sha": "${sha('broken.mjs')}", "params": { "out": ${JSON.stringify(outFile)} } } }, "gates": {`));
+    const ask = (blocks, { kind = null, def = null, rec = 'do it' } = {}) => must(['ask', ...(kind ? ['--kind', kind] : []), '--class', 'production-remediation', '--blocks', ...blocks, '--question', `Run ${blocks.join(' ')}?`, '--recommendation', rec, ...(def ? ['--default', def] : []), '--reasons', 'below-rung'], sup);
+    const decide = (q, refs) => dt(['decide', '--class', 'production-remediation', '--approved', q, '--refs', ...refs, '--', `run ${refs.join(' ')}`], sup);
+    try {
+      assert.match(dt(['remediate', 'restart-web'], sup).err, /needs --decision/);
+      assert.match(dt(['act', '--class', 'production-remediation', '--refs', 'remediation:restart-web', '--', 'restarted'], sup).err, /run by remediate/);
+      assert.equal(dt(['decide', '--class', 'production-remediation', '--refs', 'remediation:restart-web', '--', 'restart web'], sup).status, 3, 'rung 1: ask first');
+      assert.match(dt(['decide', '--class', 'production-remediation', '--refs', 'remediation:nope', '--', 'x'], sup).err, /no remediation nope/);
+      assert.match(dt(['decide', '--class', 'production-remediation', '--refs', 'remediation:restart-web', 'remediation:rollback-web', '--', 'x'], sup).err, /exactly one remediation/);
+      assert.match(dt(['ask', '--class', 'production-remediation', '--question', 'restart?', '--recommendation', 'yes'], sup).err, /names its remediation in --blocks/);
+      assert.match(dt(['ask', '--class', 'production-remediation', '--blocks', 'remediation:restart-web', '--question', 'restart?', '--recommendation', 'restart it', '--default', 'leave it'], sup).err, /default is its recommendation/, 'silence never runs anything else');
+      assert.match(dt(['observe', '--subject', 'production', '--kind', 'deploy', '--detector', 'sensor', '--source', 'web', '--key', 'sensor:web:deploy:v9', '--detail', 'web: release v9'], sup).err, /come from the kit itself/, 'a deploy line can\'t be written by hand');
+      // the answer is about this remediation, and is the recommendation
+      const q = ask(['remediation:restart-web'], { rec: 'restart it' });
+      must(['answer', q, 'restart it']);
+      assert.match(decide(q, ['remediation:rollback-web', 'release:v1']).err, /was asked about remediation:restart-web, not remediation:rollback-web/);
+      const qn = ask(['remediation:restart-web'], { rec: 'restart it' });
+      must(['answer', qn, 'no, leave it alone']);
+      assert.match(decide(qn, ['remediation:restart-web']).err, /runs only on a yes/);
+      // after the no, not again for this outage unless the owner says otherwise
+      assert.match(dt(['ask', '--class', 'production-remediation', '--blocks', 'remediation:restart-web', '--question', 'again?', '--recommendation', 'restart it'], sup).err, /said no to restart-web/);
+      // a default needs rung 2; at rung 1 it could never fire
+      assert.match(dt(['ask', '--class', 'production-remediation', '--blocks', 'remediation:broken', '--question', 'x?', '--recommendation', 'do it', '--default', 'do it', '--deadline', '15m'], sup).err, /no --default until it's on rung 2/);
+      // parked Upkeep holds a production write, and --force doesn't reach it
+      must(['goal', 'hold', 'upkeep', 'park', '--owner']);
+      assert.match(dt(['ask', '--class', 'production-remediation', '--blocks', 'remediation:broken', '--question', 'x?', '--recommendation', 'do it', '--force'], sup).err, /does not reach a production write/);
+      must(['goal', 'hold', 'upkeep', 'run', '--owner']);
+      // a yes before a later no: the latest answer wins, so the earlier yes doesn't decide
+      assert.match(decide(q, ['remediation:restart-web']).err, /said no to restart-web/);
+      assert.match(dt(['ask', '--class', 'production-remediation', '--blocks', 'remediation:restart-web', '--question', 'x?', '--recommendation', 'restart it', '--owner-said', '   '], sup).err, /can't be blank/);
+      const qyes = must(['ask', '--class', 'production-remediation', '--blocks', 'remediation:restart-web', '--question', 'Restart it after all?', '--recommendation', 'restart it', '--reasons', 'below-rung', '--owner-said', 'ok, restart it after all'], sup);
+      must(['answer', qyes, 'restart it']);
+      const d = decide(qyes, ['remediation:restart-web']).out;
+      assert.match(dt(['remediate', 'restart-web', '--decision', d, '--to', 'v1'], sup).err, /takes no --to/);
+      const ran = must(['remediate', 'restart-web', '--decision', d], sup);
+      assert.match(ran, /a-\S+: restart-web ok/);
+      assert.ok(!ran.includes(TOK) && ran.includes('[secret:TOK]'), 'what it printed is redacted');
+      assert.equal(fs.readFileSync(outFile, 'utf8'), 'restarted - tok', 'it ran with its params and its credential');
+      const act = json(must(['log', '--type', 'act', '--json'])).filter((a) => a.class === 'production-remediation').pop();
+      assert.ok(act.decision === d && act.reversible === false);
+      assert.ok(json(must(['log', '--type', 'observation', '--json'])).some((o) => o.kind === 'remediation' && o.subject === 'remediation:restart-web' && !o.detail.includes(TOK)));
+      assert.match(dt(['remediate', 'restart-web', '--decision', d], sup).err, /carried out already/);
+      // a decision written by hand on the owner's "no" runs nothing: remediate binds it to the question
+      const logDir = path.join(repo, 'docs/devteam/run/log');
+      const supFile = path.join(logDir, fs.readdirSync(logDir).find((f) => f.startsWith('supervisor-')));
+      const supKept = fs.readFileSync(supFile, 'utf8');
+      const dLine = supKept.split('\n').filter(Boolean).map((l) => JSON.parse(l)).find((l) => l.id === d);
+      const forged = d.replace(/-(\d{9})-/, (x, n) => `-${String(Number(n) + 1).padStart(9, '0')}-`);
+      fs.appendFileSync(supFile, line({ ...dLine, id: forged, at: new Date().toISOString(), approved_by: qn }));
+      assert.match(dt(['remediate', 'restart-web', '--decision', forged], sup).err, /not its recommendation/, "the owner's no approves nothing");
+      fs.writeFileSync(supFile, supKept);
+      assert.match(dt(['remediate', 'rollback-web', '--decision', d], sup).err, /is about remediation:restart-web; this remediate is about remediation:rollback-web/);
+      // a failing script is a failed act and a remediation-failed observation
+      const qb = ask(['remediation:broken']);
+      must(['answer', qb, 'do it']);
+      const bad = dt(['remediate', 'broken', '--decision', decide(qb, ['remediation:broken']).out], sup);
+      assert.ok(bad.status === 1 && /broken failed \(exited 2\)/.test(bad.out), bad.out);
+      assert.ok(json(must(['log', '--type', 'observation', '--json'])).some((o) => o.kind === 'remediation-failed' && o.subject === 'remediation:broken'));
+      // a changed script on main is not the reviewed one
+      write(path.join(projDir, 'remediations/restart.mjs'), script('restarted twice'));
+      git(['commit', '-qam', 'restart changed']);
+      git(['push', '-q', 'origin', 'HEAD:main']);
+      const qc = must(['ask', '--class', 'production-remediation', '--blocks', 'remediation:restart-web', '--question', 'Run restart again?', '--recommendation', 'do it', '--reasons', 'below-rung', '--owner-said', 'yes, restart it after the deploy'], sup);
+      must(['answer', qc, 'do it']);
+      assert.match(dt(['remediate', 'restart-web', '--decision', decide(qc, ['remediation:restart-web']).out], sup).err, /is not the reviewed one/);
+      assert.equal(json(must(['log', '--type', 'question', '--json'])).find((x) => x.id === qc).owner_said, 'yes, restart it after the deploy', 'the owner\'s words are recorded');
+      // --owner-said never brings a default back after a no
+      assert.match(dt(['ask', '--class', 'production-remediation', '--blocks', 'remediation:restart-web', '--question', 'x?', '--recommendation', 'do it', '--default', 'do it', '--owner-said', 'sure'], sup).err, /--owner-said goes without --default/);
+      // after the question was asked, the entry changed on main: the answer no longer covers it
+      const q4 = must(['ask', '--class', 'production-remediation', '--blocks', 'remediation:restart-web', '--question', 'Restart once more?', '--recommendation', 'do it', '--reasons', 'below-rung', '--owner-said', 'yes again'], sup);
+      assert.match(json(must(['questions', '--json'])).find((x) => x.id === q4).context, /script blob [0-9a-f]{40}/, 'the owner sees which script');
+      must(['answer', q4, 'do it']);
+      const d4 = decide(q4, ['remediation:restart-web']).out;
+      const pinned = fs.readFileSync(path.join(repo, 'docs/devteam/project/settings.md'), 'utf8');
+      landSettings((txt) => txt.replace(/("restart-web": \{[^}]*?"sha": ")[0-9a-f]{40}/, `$1${'b'.repeat(40)}`));
+      assert.match(dt(['remediate', 'restart-web', '--decision', d4], sup).err, /changed since/);
+      landSettings(() => pinned);
+      // a rollback to a release the sensors saw, across a production migration since it
+      const rel = json(must(['log', '--type', 'observation', '--json'])).filter((o) => o.kind === 'deploy' && /^sensor:[^:]+:deploy:/.test(o.source_key ?? '')).map((o) => /: release (\S+)/.exec(o.detail)?.[1]).find(Boolean);
+      assert.ok(rel, 'an earlier test observed a deploy');
+      const qm = must(['ask', '--class', 'production-migration', '--question', 'Run the migration?', '--recommendation', 'yes', '--reasons', 'below-rung'], sup);
+      must(['answer', qm, 'yes']);
+      must(['act', '--class', 'production-migration', '--approved', qm, '--refs', 'migration-1', '--', 'ran migration 1'], sup);
+      const rb = (release, opts) => { const qq = ask(['remediation:rollback-web', `release:${release}`], { rec: 'roll back', ...opts }); must(['answer', qq, 'roll back']); return decide(qq, ['remediation:rollback-web', `release:${release}`]).out; };
+      assert.match(dt(['ask', '--class', 'production-remediation', '--blocks', 'remediation:rollback-web', '--question', 'roll back?', '--recommendation', 'yes'], sup).err, /names its target in --blocks release:/);
+      assert.match(dt(['remediate', 'rollback-web', '--decision', rb(rel)], sup).err, /names its target/);
+      assert.match(dt(['remediate', 'rollback-web', '--decision', rb(rel), '--to', 'v-other'], sup).err, /decided a rollback to .*, not v-other/);
+      assert.match(dt(['ask', '--class', 'production-remediation', '--blocks', 'remediation:rollback-web', 'release:v-never', '--question', 'roll back?', '--recommendation', 'roll back'], sup).err, /no deploy of v-never was observed/, 'the owner is never asked about a rollback the kit would refuse');
+      assert.match(dt(['remediate', 'rollback-web', '--decision', rb(rel), '--to', rel], sup).err, /crosses a-\S+.*\(production-migration\): a one-way door/, 'an ordinary question is not enough');
+      // the same one-way-door question, answered in chat, counts like the Inbox: remediate adds no chat refusal
+      const qchat = ask(['remediation:rollback-web', `release:${rel}`], { kind: 'one-way-door', rec: 'roll back' });
+      must(['answer', qchat, 'roll back', '--from-chat', '--said', 'roll back'], sup);
+      assert.match(must(['remediate', 'rollback-web', '--decision', decide(qchat, ['remediation:rollback-web', `release:${rel}`]).out, '--to', rel], sup), /rollback-web ok/);
+      assert.equal(fs.readFileSync(outFile, 'utf8'), `rolled back ${rel} none`);
+      // a default can't run past the owner's later no, at any of the steps after it
+      const qr = ask(['remediation:broken']);
+      must(['answer', qr, 'do it', '--autonomy', '2']);
+      assert.equal(json(must(['trust', '--json'])).find((r) => r.class === 'production-remediation').rung, 2);
+      const q0 = must(['ask', '--class', 'production-remediation', '--blocks', 'remediation:broken', '--question', 'Default?', '--recommendation', 'do it', '--default', 'do it', '--deadline', '15m', '--reasons', 'below-rung'], sup);
+      const q1 = ask(['remediation:broken']);
+      must(['answer', q1, 'no, leave it']);
+      assert.match(dt(['ask', '--class', 'production-remediation', '--blocks', 'remediation:broken', '--question', 'again?', '--recommendation', 'do it'], sup).err, /said no to broken/, 'asking again is held');
+      const logDir3 = path.join(repo, 'docs/devteam/run/log');
+      const supFile3 = path.join(logDir3, fs.readdirSync(logDir3).find((f) => f.startsWith('supervisor-')));
+      const ownFile3 = path.join(logDir3, fs.readdirSync(logDir3).find((f) => f.startsWith('owner-')));
+      const [supKept3, ownKept3] = [fs.readFileSync(supFile3, 'utf8'), fs.readFileSync(ownFile3, 'utf8')];
+      // (a) the no is old, past valid_minutes, and its question's text was edited (its hash is broken):
+      // asking again is allowed, but the earlier default still never runs past it
+      const at = (ms) => new Date(Date.now() - ms).toISOString();
+      fs.writeFileSync(supFile3, supKept3.split('\n').map((l) => { if (l.includes(`"id":"${q0}"`) && l.includes('"deadline"')) return JSON.stringify({ ...JSON.parse(l), at: at(3 * 3600000), deadline: at(60000) }); if (l.includes(`"id":"${q1}"`) && l.includes('"question"')) return JSON.stringify({ ...JSON.parse(l), question: 'edited after the fact' }); return l; }).join('\n'));
+      fs.writeFileSync(ownFile3, ownKept3.split('\n').map((l) => (l.includes(`"id":"${q1}"`) && l.includes('"answer"') ? JSON.stringify({ ...JSON.parse(l), at: at(2 * 3600000) }) : l)).join('\n'));
+      assert.equal(dt(['ask', '--class', 'production-remediation', '--blocks', 'remediation:broken', '--question', 'x?', '--recommendation', 'do it', '--reasons', 'below-rung'], sup).status, 0, 'only re-asking is time-limited');
+      assert.match(dt(['answer', q0, '--defaulted'], sup).err, /said no to broken/, 'the default is held for good');
+      // a defaulted line written by hand decides nothing, and a decision written by hand runs nothing
+      fs.appendFileSync(supFile3, line({ id: q0, type: 'question', op: 'set', at: new Date().toISOString(), by: 'supervisor', status: 'defaulted' }));
+      assert.match(decide(q0, ['remediation:broken']).err, /said no to broken/, 'decide holds it');
+      const dForge = supKeptObs(supFile, d);
+      const forgeDecision = (qid, refs, n) => { const id = d.replace(/-(\d{9})-/, (x, g) => `-${String(Number(g) + n).padStart(9, '0')}-`); fs.appendFileSync(supFile3, line({ ...dForge, id, at: new Date().toISOString(), approved_by: qid, refs, authority: 'default' })); return id; };
+      assert.match(dt(['remediate', 'broken', '--decision', forgeDecision(q0, ['remediation:broken'], 2)], sup).err, /said no to broken/, 'remediate holds it');
+      // (b) with an incident on both: once it resolves, the older default still doesn't count
+      const pOf = (title) => { const pid = must(['problem', 'add', '--title', title, '--severity', '1', '--detail', 'x'], sup).split(/[\s:]/)[0]; fs.appendFileSync(supFile3, line({ id: pid, type: 'problem', op: 'set', at: new Date().toISOString(), by: 'supervisor', fingerprints: ['x:exception:X'] })); return pid; };
+      const pb = pOf('b');
+      const qb0 = must(['ask', '--class', 'production-remediation', '--blocks', 'remediation:broken', pb, '--question', 'B default?', '--recommendation', 'do it', '--default', 'do it', '--deadline', '15m', '--reasons', 'below-rung'], sup).trim();
+      const qb1 = must(['ask', '--class', 'production-remediation', '--blocks', 'remediation:broken', pb, '--question', 'B?', '--recommendation', 'do it', '--reasons', 'below-rung'], sup);
+      must(['answer', qb1, 'no, leave it']);
+      must(['problem', 'set', pb, '--status', 'resolved'], sup);
+      fs.writeFileSync(supFile3, fs.readFileSync(supFile3, 'utf8').split('\n').map((l) => (l.includes(`"id":"${qb0}"`) && l.includes('"deadline"') ? JSON.stringify({ ...JSON.parse(l), deadline: at(60000) }) : l)).join('\n'));
+      assert.match(dt(['answer', qb0, '--defaulted'], sup).err, /said no to broken/, 'the incident resolving doesn\'t bring it back');
+      // (c) Y said yes, then N said no; after N's incident resolves Y still doesn't count
+      const pc = pOf('c');
+      const qy = must(['ask', '--class', 'production-remediation', '--blocks', 'remediation:restart-web', '--question', 'Y?', '--recommendation', 'do it', '--reasons', 'below-rung', '--owner-said', 'yes'], sup);
+      must(['answer', qy, 'do it']);
+      const dy = decide(qy, ['remediation:restart-web']).out;
+      const qn2 = must(['ask', '--class', 'production-remediation', '--blocks', 'remediation:restart-web', pc, '--question', 'N?', '--recommendation', 'do it', '--reasons', 'below-rung', '--owner-said', 'asked'], sup);
+      must(['answer', qn2, 'no']);
+      must(['problem', 'set', pc, '--status', 'resolved'], sup);
+      assert.match(decide(qy, ['remediation:restart-web']).err, /said no to restart-web/, 'the earlier yes doesn\'t decide');
+      assert.match(dt(['remediate', 'restart-web', '--decision', dy], sup).err, /said no to restart-web/, 'nor run');
+      // "leave it" is a no, whatever was recommended: it approves nothing and doesn't lift the hold
+      const qli = must(['ask', '--class', 'production-remediation', '--blocks', 'remediation:restart-web', '--question', 'Leave it?', '--recommendation', 'leave it', '--reasons', 'below-rung', '--owner-said', 'leave it for now'], sup);
+      must(['answer', qli, 'leave it']);
+      assert.match(decide(qli, ['remediation:restart-web']).err, /isn't a yes to running it/);
+      assert.match(dt(['ask', '--class', 'production-remediation', '--blocks', 'remediation:restart-web', '--question', 'again?', '--recommendation', 'do it'], sup).err, /said no to restart-web/, 'leave it doesn\'t lift the hold');
+      fs.writeFileSync(supFile3, supKept3);
+      fs.writeFileSync(ownFile3, ownKept3);
+      // a migration a release phase ran is in no act: the release's range in git makes it a one-way door too
+      const headBefore = git(['rev-parse', 'HEAD']);
+      write(path.join(repo, 'db/migrate/20260101_add.rb'), 'class Add; end\n');
+      git(['add', 'db/migrate/20260101_add.rb']);
+      git(['commit', '-qm', 'a migration']);
+      git(['push', '-q', 'origin', 'HEAD:main']);
+      const tmplObs = json(must(['log', '--type', 'observation', '--json'])).find((o) => o.kind === 'deploy' && o.source_key === `sensor:${o.source}:deploy:${rel}`);
+      const logDir2 = path.join(repo, 'docs/devteam/run/log');
+      const supFile2 = path.join(logDir2, fs.readdirSync(logDir2).find((f) => f.startsWith('supervisor-')));
+      const deployLine = (release, detail, n) => line({ ...supKeptObs(supFile2, tmplObs.id), id: tmplObs.id.replace(/-(\d{9})-/, (x, d) => `-${String(Number(d) + n).padStart(9, '0')}-`), at: new Date().toISOString(), detail, source_key: `sensor:${tmplObs.source}:deploy:${release}` });
+      fs.appendFileSync(supFile2, deployLine('v-mig', `${tmplObs.source}: release v-mig (commit ${headBefore})`, 1));
+      assert.match(dt(['remediate', 'rollback-web', '--decision', rb('v-mig'), '--to', 'v-mig'], sup).err, /migration file\(s\) since [^:]*: a one-way door/, 'a migration file in the range counts');
+      // a release with no commit to read fails closed
+      fs.appendFileSync(supFile2, deployLine('v-blind', `${tmplObs.source}: release v-blind`, 2));
+      assert.match(dt(['remediate', 'rollback-web', '--decision', rb('v-blind'), '--to', 'v-blind'], sup).err, /commit is unknown/, 'no commit: fails closed');
+    } finally {
+      landSettings(() => settingsBefore);
+      if (git(['ls-files', 'docs/devteam/project/remediations'])) { git(['rm', '-rqf', 'docs/devteam/project/remediations']); git(['commit', '-qm', 'no remediations']); git(['push', '-q', 'origin', 'HEAD:main']); }
+      fs.rmSync(path.join(projDir, 'remediations'), { recursive: true, force: true });
+      fs.rmSync(path.join(repo, 'rem-token'), { force: true });
+      fs.writeFileSync(path.join(repo, '.git/info/exclude'), excludeBefore);
     }
   });
 
@@ -1848,6 +2040,27 @@ http.createServer((req, res) => {
     const probeOut = must(margs, { role: 'sup' });
     assert.match(probeOut, /would merge/, 'no owner answer for a sensor, even one with credentials');
     assert.doesNotMatch(probeOut, /owner settings/);
+    // a remediation is a production write: unlike a sensor, adding one is the owner's
+    git(['reset', '-q', '--hard', 'origin/main'], wt('mon'));
+    setTo(wt('mon'), (j) => { j.remediations = { 'restart-web': { kind: 'restart', script: 'project/remediations/restart-web.mjs', sha: 'a'.repeat(40) } }; });
+    git(['commit', '-qam', 'a remediation'], wt('mon'));
+    git(['push', '-q', '-f', 'origin', 'chore-mon'], wt('mon'));
+    const rem = dt(margs, { role: 'sup' });
+    assert.notEqual(rem.status, 0, 'a remediation lands only with the owner\'s answer');
+    assert.match(rem.out + rem.err, /changes owner settings: remediations \(governance-edit\)/);
+    // the answer must name the entry: an unrelated question approves nothing here
+    const Qother = must(['ask', '--class', 'governance-edit', '--ticket', 'chore-other', '--reasons', 'owner-only', '--question', 'Set merge_method to squash?', '--recommendation', 'yes'], { role: 'sup' });
+    must(['answer', Qother, 'yes']);
+    assert.match(dt([...margs, '--approved', Qother], { role: 'sup' }).out, /doesn't name the remediations this changes \(restart-web at a{12}\)/);
+    const entry = { kind: 'restart', script: 'project/remediations/restart-web.mjs', sha: 'a'.repeat(40) };
+    const Qright = must(['ask', '--class', 'governance-edit', '--reasons', 'owner-only', '--remediations', JSON.stringify({ 'restart-web': entry }), '--question', 'Add restart-web at aaaa?', '--recommendation', 'yes'], { role: 'sup' });
+    assert.match(json(must(['questions', '--all', '--json'])).find((x) => x.id === Qright).context, /restart-web \(project\/remediations\/restart-web\.mjs at blob a{40}\)/, 'the owner sees the entry and its sha');
+    must(['answer', Qright, 'yes']);
+    assert.match(must([...margs, '--approved', Qright], { role: 'sup' }), /would merge/, 'the question naming this entry approves it');
+    // a question that named a different script for it doesn't
+    const Qold = must(['ask', '--class', 'governance-edit', '--reasons', 'owner-only', '--remediations', JSON.stringify({ 'restart-web': { ...entry, sha: 'c'.repeat(40) } }), '--question', 'Add restart-web at cccc?', '--recommendation', 'yes'], { role: 'sup' });
+    must(['answer', Qold, 'yes']);
+    assert.match(dt([...margs, '--approved', Qold], { role: 'sup' }).out, /isn't what q-\S+ showed the owner/);
     git(['worktree', 'remove', '--force', wt('mon')]);
   });
 

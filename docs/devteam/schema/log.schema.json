@@ -814,6 +814,10 @@
             "description": "Groups repeats of the same signal together.",
             "type": "string"
           },
+          "release": {
+            "type": "string",
+            "description": "An exception's release, as its sensor validated it."
+          },
           "source_ref": {
             "description": "The file or record it came from.",
             "type": "string"
@@ -1430,6 +1434,18 @@
           "sensor": {
             "type": "string",
             "description": "the sensor this owner-action question asks a credential for, so discovery asks once"
+          },
+          "remediation": {
+            "type": "object",
+            "description": "The remediation a production-remediation question was asked about, pinned when asked: its name, sha and entry_hash. remediate refuses if the entry has changed."
+          },
+          "remediation_entries": {
+            "type": "array",
+            "description": "The remediation entries a governance-edit question would approve (name, script, sha, entry_hash; ask --remediations). merge lands a change only if it is one of these, exactly."
+          },
+          "owner_said": {
+            "type": "string",
+            "description": "The owner's words, verbatim, when a question asks again after their no. Checked against the transcript like a chat answer's said."
           },
           "re": {
             "type": "string",
