@@ -4559,7 +4559,7 @@ const PREVIEW_NAME = /^[a-z]{3,7}-[a-z]{3,7}(?:-[1-9]\d?)?$/;
 const PREVIEW_MAX = 20;
 const PREVIEW_LABEL_MAX = 40;
 const PREVIEW_TTL = 7 * DAY;
-const TTYD_PORT = 7681;
+const TTYD_PORT = Number(process.env.DEVTEAM_TTYD_PORT ?? 7681);
 function previewName(project, session, label) {
   const h = crypto.createHash('sha256').update(`${project}\0${session}\0${label}`).digest();
   return `${PREVIEW_ADJECTIVES[h[0]]}-${PREVIEW_NOUNS[h[1]]}`;
@@ -4581,19 +4581,24 @@ const previewsDir = () => path.join(runDir, 'previews');
 const previewFile = (name) => path.join(previewsDir(), `${name}.json`);
 // Told once per file by the dashboard's log; anywhere else a bad file is simply not a preview.
 let previewBad = null;
-// Every record on disk that holds together, by name, each with its file's mtime (the tick compares
-// it before writing). Anything else in the folder is skipped: a file an agent can write is data.
+// Every record on disk that holds together, by name, at most 20 of them, each with its file's mtime
+// (the tick compares it before writing). Anything else in the folder is skipped: a file an agent can
+// write is data, and however many are planted the reads, the probes and the environment handed to
+// dashboard-data stay small.
 function readPreviews() {
   let files;
   try { files = fs.readdirSync(previewsDir()); } catch { return []; }
   const recs = [];
-  for (const f of files.filter((x) => x.endsWith('.json')).sort()) {
+  for (const f of files.filter((x) => x.endsWith('.json')).sort().slice(0, 256)) {
+    if (recs.length >= PREVIEW_MAX) break;
     const stem = f.slice(0, -'.json'.length);
     try {
       const st = fs.lstatSync(path.join(previewsDir(), f));
       if (!st.isFile() || st.size > 65536) throw new Error('not a small file');
       const r = JSON.parse(fs.readFileSync(path.join(previewsDir(), f), 'utf8'));
-      if (!isObj(r) || r.name !== stem || !PREVIEW_NAME.test(stem) || !Number.isInteger(r.port) || !['project', 'session', 'label', 'cwd', 'at', 'expires'].every((k) => typeof r[k] === 'string')) throw new Error('not a preview');
+      if (!isObj(r) || r.name !== stem || !PREVIEW_NAME.test(stem) || previewPortOk(r.port) !== true || !['project', 'session', 'label', 'cwd', 'at', 'expires'].every((k) => typeof r[k] === 'string')) throw new Error('not a preview');
+      if (r.run !== undefined && !(isObj(r.run) && typeof r.run.cmd === 'string' && (r.run.window === null || typeof r.run.window === 'string'))) throw new Error('not a preview: its run');
+      if (r.down_since !== undefined && typeof r.down_since !== 'string') throw new Error('not a preview: its down_since');
       recs.push({ ...r, mtimeMs: st.mtimeMs });
     } catch (e) { previewBad?.(f, e); }
   }
@@ -4660,7 +4665,8 @@ async function previewClaim(session, label) {
   for (let n = 2; n < 100; n++) if (!taken.has(`${base}-${n}`)) return { name: `${base}-${n}`, had: null };
   die(`preview: ${base} and every numbered name after it are taken on this box`);
 }
-const probePort = async (port) => (await answers(port, '127.0.0.1')) || (await answers(port, '::1'));
+// Never rejects: a port net.connect won't take (a record planted by hand) is just nobody answering.
+const probePort = async (port) => { try { return (await answers(port, '127.0.0.1')) || (await answers(port, '::1')); } catch { return false; } };
 // The box's address when this machine has one, and whether its gateway serves previews: only the
 // release that does sets DEVTEAM_PREVIEWS, so the kit never prints a link that would answer 421.
 function previewBox() {
@@ -9956,7 +9962,9 @@ function cmdHandoff() {
   const branch = cwdGit(['rev-parse', '--abbrev-ref', 'HEAD']);
   if (branch !== sess.branch) die(`handoff: you are on ${branch}, not ${sess.branch}`);
   // what was running, for the session that picks this up (phase parked stops it next)
-  const running = readPreviews().filter((r) => r.session === name).map(({ mtimeMs, ...r }) => r);
+  const listed = spawnSync(process.execPath, [fileURLToPath(import.meta.url), 'preview', 'list', '--json'], { cwd: process.cwd(), encoding: 'utf8' });
+  let running = [];
+  try { running = JSON.parse(listed.stdout).filter((r) => r.session === name); } catch {}
   const previews = running.length ? `\n\n## Previews running\n\n${JSON.stringify(running, null, 2)}` : '';
   withScratch((dir) => {
     const f = path.join(dir, 'msg');
@@ -12644,7 +12652,7 @@ Decide and act (supervisor.md, constitution.md)
   preview --run "<command>" [--port <p>] [--label …]   the kit runs it in a tmux window beside yours; PORT is set, {port} in the command is filled in, a free port in 4400-4499 is picked without --port
   preview list [--json]           this instance's previews, with whether each answers
   preview url [<name>]            the link, as the owner will open it
-  preview stop <name> | --all     unregister (--all: your own); stops the server if the kit started it
+  preview stop <name> | --all     unregister (--all: your own; a name is any session's, there is no ownership check); stops the server if the kit started it
   preview start <name>            run a kit-started preview again, on its name and port
   ask --question q [--kind k] [--class c] [--reasons r…] [--recommendation r] [--confidence 0-1] [--default d [--deadline 15m|2h|<time> (incident-fix)]] [--choices '[{"label","detail","effect"}…]'] [--rule-scope s] [--goal g-… (goal-approval)] [--links '[{"title","path","ref"}|{"title","url"}|{"title","link"}…]' (link: a registry id)] [--blocks ids] [--evidence ids] [--ticket id] [--re m-…] [--note path] [--secrets '[{"name","kind":"string|file","sink"}…]' (owner-action)]
   secret post <qid> [--file NAME=path] [--json]                          owner: post a question's secrets straight to their sinks; never logged (secret sinks lists them)

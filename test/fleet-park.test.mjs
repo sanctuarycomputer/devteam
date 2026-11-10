@@ -252,6 +252,7 @@ test('a preview is gone with the worktree, stopped but kept on park, listed in t
     const msg = g(['log', '-1', '--format=%B'], ww);
     assert.match(msg, /## Previews running/);
     assert.ok(msg.includes(`"name": "${mine}"`) && !msg.includes(`"name": "${theirs}"`), 'only this session\'s');
+    assert.match(msg, /"up": true/, 'as preview list --json says it, whether each answers');
     assert.ok(up(mine), 'handoff stops nothing');
 
     // parked: this worker's kit-started window stops, the records stay, another writer's is left

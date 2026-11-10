@@ -277,7 +277,16 @@ export function startDashboard(root, env, args = []) {
   let o = '';
   p.stdout.on('data', (b) => { o += b; });
   p.stderr.on('data', (b) => { o += b; });
-  return { p, out: () => o, stop: () => new Promise((r) => { if (p.exitCode !== null) return r(); p.on('close', r); p.kill(); }) };
+  return { p, out: () => o, stop: () => new Promise((r) => {
+    if (p.exitCode !== null || p.signalCode !== null) return r();
+    // its children can hold the pipes open after it has gone: 'close' can wait forever, so not past a moment after 'exit'
+    p.once('exit', () => setTimeout(() => { p.stdout.destroy(); p.stderr.destroy(); r(); }, 500).unref());
+    p.on('close', r);
+    const hard = setTimeout(() => p.kill('SIGKILL'), 10000);
+    hard.unref();
+    p.once('exit', () => clearTimeout(hard));
+    p.kill();
+  }) };
 }
 // Up to 2 min: a dashboard's first background run (hello hashes every kit file) takes that long on
 // a loaded machine; a healthy one returns at once.
