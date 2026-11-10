@@ -348,7 +348,7 @@ test('findings: no strategy, an unrated question once rating has begun, ratings 
     assert.deepEqual(findings('strategy-unwritten'), [], 'no running goal: nothing yet');
     const G = goal('Team billing', 1);
     assert.match(findings('strategy-unwritten')[0].detail, /still the template/);
-    assert.equal(findings('strategy-unwritten')[0].severity, 'high', 'goals running and no strategy: the supervisor stops for it');
+    assert.equal(findings('strategy-unwritten')[0].severity, 'high', 'goals running and no strategy: wait keeps raising it');
     // the marker, not the kit's current words: a project on an older wording of the template is still the template
     write(path.join(old, REL_STRATEGY), fs.readFileSync(path.join(old, REL_STRATEGY), 'utf8').replace('Keep it to one page.', 'One page, please.'));
     g(['add', '-A'], old);
