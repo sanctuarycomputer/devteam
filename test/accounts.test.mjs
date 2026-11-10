@@ -331,7 +331,7 @@ test('a stopped supervisor: reported, in tmux or not, with or without cswap, and
     fs.appendFileSync(file, `${JSON.stringify({ type: 'assistant', timestamp: ago(1), message: { content: [{ type: 'text', text: 'carrying on' }] } })}\n`);
     F.tick();
     assert.equal(F.state().supervisor_limit, null);
-    // in tmux, with room: still only reported (it is the owner's session, started their way)
+    // in tmux, with room, but its resume_command isn't Claude Code's: reported, not restarted (recovery.test.mjs has the restart)
     const s = F.agent('sup-pane', MENU, F.root);
     await until(() => s.shows().includes('Esc to cancel'), 'the menu');
     write(path.join(F.root, 'docs/devteam/run/supervisor-pane'), `=${F.session}:sup-pane`);
@@ -648,6 +648,8 @@ test('starting a session: a warning on a full active account, never a refusal, a
   const F = fixture('prelaunch');
   try {
     F.worker('x-01-a', ['> ']);
+    // its agent has exited, so the window is back at a shell and --resume starts it
+    execFileSync('tmux', ['respawn-pane', '-k', '-t', `=${F.session}:x-01-a`, 'sh']);
     const accounts = path.join(F.root, 'docs/devteam/run/accounts.json');
     const start = () => F.run(['worker', 'x-01-a', '--resume']);
     F.set(FULL);
