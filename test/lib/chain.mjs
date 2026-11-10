@@ -1119,6 +1119,7 @@ out({ cursor: 'c-' + mode });
     landSettings((txt) => txt.replace('"gates": {', `"sensors": { "honeybadger": ${JSON.stringify(p.sensor)} }, "gates": {`));
     assert.match(must(['sensor', 'poll', '--name', 'honeybadger'], sup), /honeybadger: ok/);
     assert.ok(!json(must(['metrics', '--json'])).findings.some((f) => f.kind === 'sensor-credential-ready'), 'started: the finding clears');
+  });
 
   step('incidents: triage lists what changed, ignores hold, an incident computes its severity, a fix is decided on the ladder, scoped by it, capped by releases, and scheduled first', async () => {
     const sup = { role: 'sup' };
