@@ -997,4 +997,97 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await p.key('Escape');
     await soon(`document.getElementById('drawer').hidden`, 'the drawer closed');
   });
+
+  await t.test("a question asked in the thread: the Inbox's card in the card (t-q-), one pick in both, answered there once, answered in the Inbox too", async () => {
+    await p.click(`[data-tl-pin="${T}"]`);
+    await soon(`document.getElementById('tl-card').dataset.key === '${T}'`, 'its card');
+    const Q = F.sup(['thread', 'ask', T, '--question', 'Narrow the goal to EU orders?', '--choices', '[{"label":"Yes"},{"label":"Not yet"}]', '--recommendation', 'Yes', '--goal', F.goal, '--stake', '2', '--urgency', '1']);
+    await soon(`!!document.getElementById('t-q-${Q}') && !!document.getElementById('q-${Q}')`, 'both copies');
+    assert.equal(await p.ev(`document.getElementById('t-q-${Q}').querySelector('input[data-pick]').name`), `t-pick-${Q}`, 'its own radio group');
+    // the Inbox is another section: its copy is clicked as a script would
+    await p.ev(`document.querySelector('#q-${Q} input[data-pick="${Q}"][value="Not yet"]').click()`);
+    assert.ok(await p.ev(`document.querySelector('#t-q-${Q} input[value="Not yet"]').checked && document.querySelector('#t-q-${Q} input[value="Not yet"]').closest('.choice').classList.contains('picked')`), "the Inbox's pick shows in the thread's");
+    await p.click(`#t-q-${Q} input[data-pick="${Q}"][value="Yes"]`);
+    assert.deepEqual(await p.ev(`[document.querySelector('#q-${Q} input[value="Yes"]').checked, document.querySelector('#q-${Q} input[value="Not yet"]').checked, document.querySelectorAll('#q-${Q} .choice.picked').length]`), [true, false, 1], "the thread's pick shows in the Inbox's");
+    await p.click(`#t-q-${Q} button[data-answer="${Q}"]`);
+    const q = await until(() => { const x = JSON.parse(F.owner(['questions', '--id', Q, '--json']))[0]; return x.status === 'answered' && x; }, 'the answer');
+    assert.deepEqual([q.answer, q.channel], ['Yes', 'dashboard']);
+    await soon(`!document.getElementById('q-${Q}') || document.getElementById('q-${Q}').classList.contains('done')`, 'the Inbox copy answered');
+    await soon(`document.querySelector('#tl-c-turns .tl-q.done, #tl-c-turns .qcard.done')?.textContent.includes('Yes')`, 'the thread copy answered');
+  });
+
+  await t.test("answered in the Inbox, it shows answered in the thread; a hostile question and thread title are only text", async () => {
+    const H = '<img src=x onerror="window.__xss=1">';
+    const Q = F.sup(['thread', 'ask', T, '--question', `${H} Ship it?`, '--goal', F.goal, '--stake', '1', '--urgency', '1']);
+    await soon(`!!document.getElementById('t-q-${Q}') && !!document.getElementById('q-${Q}')`, 'both copies');
+    assert.ok(await p.ev(`document.getElementById('t-q-${Q}').textContent.includes(${JSON.stringify(H)})`), 'the words as written');
+    assert.equal(await p.ev(`!!document.querySelector('#tl img') || !!document.querySelector('#q-${Q} img') || !!window.__xss`), false, 'no element made from them');
+    await p.ev(`(() => { const c = document.getElementById('q-${Q}'); c.querySelector('textarea[data-q]').value = 'ship it'; c.querySelector('button[data-answer="${Q}"]').click(); })()`);
+    await until(() => JSON.parse(F.owner(['questions', '--id', Q, '--json']))[0].status === 'answered', 'the answer');
+    await soon(`!document.getElementById('t-q-${Q}')?.querySelector('textarea, button[data-answer]') && /ship it/.test(document.getElementById('tl-c-turns').textContent)`, 'answered in the thread too');
+    const X = F.owner(['thread', 'new', 'hello', '--title', `${H} hello`]).split('\n')[0];
+    await p.ev(`tlOpen('${X}')`);
+    await soon(`document.getElementById('tl-c-title').textContent === ${JSON.stringify(`${H} hello`)}`, 'the title as written');
+    assert.equal(await p.ev(`!!document.querySelector('#tl img') || !!window.__xss`), false, 'no element made from the title');
+    await p.click('[data-tl-close]');
+    F.owner(['thread', 'resolve', X]);
+    await p.ev('tlRefresh()');
+    await p.click(`[data-tl-pin="${T}"]`);
+    await soon(`document.getElementById('tl-card').dataset.key === '${T}'`, 'its card again');
+  });
+
+  await t.test('a secrets question in the thread is a link to the Inbox, never a second form', async () => {
+    const Q = F.sup(['thread', 'ask', T, '--kind', 'owner-action', '--question', 'Post the API key', '--secrets', JSON.stringify([{ name: 'KEY', sink: 'file:secrets/key.txt' }]), '--goal', F.goal, '--stake', '1', '--urgency', '1']);
+    await soon(`!!document.querySelector('#q-${Q} [data-secret]') && /Post the API key/.test(document.getElementById('tl-c-turns').textContent)`, 'the Inbox form, the thread turn');
+    assert.equal(await p.ev(`document.querySelectorAll('#tl [data-secret], #tl [data-post-secrets], #t-q-${Q}').length`), 0, 'no form in the thread');
+    assert.equal(await p.ev(`document.querySelector('#tl-c-turns a[href="#q/${Q}"]')?.textContent`), 'Answer it in the Inbox');
+    F.owner(['answer', Q, 'Can’t right now']);
+    await soon(`!document.querySelector('#tl-c-turns a[href="#q/${Q}"]')`, 'answered, the link gone');
+  });
+
+  await t.test('Ready to resolve: it warns of an open question, Not yet clears it, Resolve takes the proposal, unpins it and moves it to Resolved', async () => {
+    const Q2 = F.sup(['thread', 'ask', T, '--question', 'Tell the US team?', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
+    F.sup(['thread', 'ready', T, '--outcome', 'Goal narrowed to EU orders']);
+    await soon(`document.querySelector('#tl-c-ready .tl-ready')?.textContent.includes('Goal narrowed to EU orders')`, 'the banner');
+    assert.match(await p.ev(`document.querySelector('#tl-c-ready .tl-ready').textContent`), /1 question asked here is still open; it stays in the Inbox/);
+    await p.click('[data-tl-notyet]');
+    await until(() => threads().find((x) => x.id === T).ready === null, "cleared by the owner's Not yet");
+    const th = threads().find((x) => x.id === T);
+    assert.deepEqual([th.turns[th.turns.length - 1].by, th.turns[th.turns.length - 1].text], ['owner', 'Not yet']);
+    await soon(`!document.querySelector('#tl-c-ready .tl-ready')`, 'the banner gone');
+    F.sup(['thread', 'ready', T, '--outcome', 'EU only']);
+    await soon(`document.querySelector('#tl-c-ready .tl-ready')?.textContent.includes('EU only')`, 'proposed again');
+    await p.click('[data-tl-accept]');
+    await until(() => threads().find((x) => x.id === T).status === 'resolved', 'resolved');
+    await soon(`!document.querySelector('[data-tl-pin="${T}"]') && document.getElementById('tl-card').hidden`, 'unpinned, the card closed');
+    if (await p.ev(`document.getElementById('tl-panel').hidden`)) await p.click('#tl-pill');
+    await soon(`!!document.querySelector('.tl-resolved [data-tl-open="${T}"]')`, 'listed under Resolved');
+    assert.ok(JSON.parse(F.owner(['log', '--type', 'observation', '--json'])).some((o) => o.kind === 'thread-resolved' && o.subject === `thread:${T}` && o.detail === 'EU only'));
+    assert.equal(JSON.parse(F.owner(['questions', '--id', Q2, '--json']))[0].status, 'open', 'its question stays in the Inbox');
+  });
+
+  await t.test('a resolved thread reopens from its card', async () => {
+    await p.ev(`document.querySelector('.tl-resolved').open = true`);
+    await p.click(`.tl-resolved [data-tl-open="${T}"]`);
+    await soon(`!!document.querySelector('[data-tl-reopen]')`, 'Reopen in its header');
+    await p.click('[data-tl-reopen]');
+    await until(() => threads().find((x) => x.id === T).status === 'open', 'reopened');
+    await soon(`!!document.querySelector('[data-tl-pin="${T}"]')`, 'its pin back');
+  });
+
+  await t.test("Resolve in the card's header: a line for how it ended, the open question's warning, Cancel keeps it open", async () => {
+    await soon(`!!document.querySelector('[data-tl-resolve]')`, 'Resolve in its header');
+    await p.click('[data-tl-resolve]');
+    await soon(`!!document.getElementById('tl-outcome')`, 'the form');
+    assert.match(await p.ev(`document.querySelector('#tl-c-ready .tl-ready').textContent`), /1 question asked here is still open; it stays in the Inbox/);
+    await p.click('[data-tl-resolve-cancel]');
+    await soon(`!document.getElementById('tl-outcome')`, 'the form gone');
+    assert.equal(threads().find((x) => x.id === T).status, 'open');
+    await p.click('[data-tl-resolve]');
+    await soon(`!!document.getElementById('tl-outcome')`, 'the form again');
+    await p.ev(`document.getElementById('tl-outcome').value = 'Kept to the EU'`);
+    await p.click('[data-tl-resolve-go]');
+    const r = await until(() => { const x = threads().find((y) => y.id === T); return x.status === 'resolved' && x; }, 'resolved');
+    assert.equal(r.outcome, 'Kept to the EU');
+  });
 });
