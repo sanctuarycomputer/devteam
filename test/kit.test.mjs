@@ -117,6 +117,8 @@ test('threads: records, commands, delivery, the Inbox and the loop', async (t) =
     refused(/supervisor may not create thread lines/, ['supervisor', { type: 'thread', title: 'x' }]);
     refused(/ticket may not create turn lines/, ['demo-01-x', { type: 'turn', thread: T, text: 'x' }, 'demo-01-x.jsonl']);
     refused(/owner may not set thread\.ready/, thread, ['owner', { type: 'thread', op: 'set', id: T, ready: { outcome: 'x', at: '2026-11-10T10:30:00.000Z' } }]);
+    // threadView compares ready.at with the owner's lines as text, so it is the log's own stamp
+    refused(/ready\.at is an ISO timestamp/, thread, ['supervisor', { type: 'thread', op: 'set', id: T, ready: { outcome: 'x', at: 'yesterday' } }]);
     refused(/supervisor may not set thread\.status/, thread, ['supervisor', { type: 'thread', op: 'set', id: T, status: 'resolved' }]);
     refused(/may not change turn lines/, thread, ['owner', { type: 'turn', op: 'set', id: 'u-20261110-100000000-owner', text: 'edited' }]);
     refused(/refs and question are on the supervisor's turns/, ['owner', { type: 'turn', thread: T, text: 'x', refs: ['goal:x'] }]);
@@ -257,5 +259,57 @@ test('threads: records, commands, delivery, the Inbox and the loop', async (t) =
     assert.equal(show(T).turns.length, turns);
     assert.match(F.fails(['thread', 'ask', 't-20990101-000000000-owner', ...ask], F.SUP), /no thread/);
     F.sup(['withdraw', Q2, '--reason', 'asked twice in a test']);
+  });
+
+  await t.test('ready, Not yet, ready again, accept: the supervisor proposes, only the owner closes, and the loop gets an observation', () => {
+    const T = F.owner(['thread', 'new', 'Narrow this to the EU launch', '--title', 'Launch checkout', '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}` })]).split('\n')[0];
+    F.sup(['thread', 'say', T, 'Done: the goal says EU orders now.', '--refs', `goal:${F.goal}`]);
+    assert.match(F.sup(['thread', 'ready', T, '--outcome', 'Goal narrowed to EU orders']), /proposed resolving/);
+    assert.equal(show(T).ready.outcome, 'Goal narrowed to EU orders');
+    F.sup(['thread', 'ready', T, '--outcome', 'Goal narrowed to EU orders, the US later']);
+    assert.equal(show(T).ready.outcome, 'Goal narrowed to EU orders, the US later', 'a new proposal replaces the standing one');
+    assert.match(F.fails(['thread', 'ready', T, '--outcome', 'x'], { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'demo-01-x' }), /the supervisor does this/);
+    assert.match(F.fails(['thread', 'ready', T], F.SUP), /needs --outcome/);
+    // with no role, in the main checkout, a supervisor command is the supervisor's (as ask is)
+    const R = F.owner(['thread', 'new', 'A quick one']).split('\n')[0];
+    F.owner(['thread', 'ready', R, '--outcome', 'done']);
+    assert.deepEqual([show(R).ready.outcome, JSON.parse(F.owner(['log', '--id', R, '--json']))[0].updates.pop().by], ['done', 'supervisor']);
+    F.owner(['thread', 'resolve', R, '--accept']);
+    assert.match(F.fails(['thread', 'resolve', T], F.SUP), /owner commands don't run in an agent session/);
+    F.owner(['thread', 'say', T, 'Not yet']);
+    assert.equal(show(T).ready, null, "the owner's newer turn clears it");
+    F.sup(['thread', 'ready', T, '--outcome', 'EU only, US next quarter']);
+    const Q = F.sup(['thread', 'ask', T, '--question', 'Tell the US team?', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
+    const said = F.owner(['thread', 'resolve', T, '--accept']);
+    assert.match(said, new RegExp(`^resolved ${T}: EU only, US next quarter`));
+    assert.match(said, new RegExp(`1 question asked in it is still open in the Inbox: ${Q}`));
+    let v = show(T);
+    assert.deepEqual([v.status, v.outcome, v.ready], ['resolved', 'EU only, US next quarter', null]);
+    const obs = () => JSON.parse(F.owner(['log', '--type', 'observation', '--json'])).filter((o) => o.kind === 'thread-resolved' && o.subject === `thread:${T}`);
+    assert.deepEqual(obs().map((o) => [o.created_by, o.source, o.detail, o.refs]), [['owner', 'owner', 'EU only, US next quarter', [T, F.goal]]]);
+    assert.equal(JSON.parse(F.owner(['questions', '--id', Q, '--json']))[0].status, 'open', 'its question stays in the Inbox');
+    // a resolved thread takes no turns: the owner reopens it first
+    assert.match(F.fails(['thread', 'say', T, 'x'], F.SUP), /resolved: the owner closed it/);
+    assert.match(F.fails(['thread', 'say', T, 'x']), /reopen it first/);
+    assert.match(F.fails(['thread', 'ready', T, '--outcome', 'x'], F.SUP), /resolved/);
+    assert.match(F.fails(['thread', 'resolve', T]), /resolved; reopen it first/);
+    // reopened with words, then resolved with none: no outcome carried over from the first time
+    F.owner(['thread', 'reopen', T, 'One more thing']);
+    v = show(T);
+    assert.deepEqual([v.status, v.outcome, v.turns[v.turns.length - 1].text], ['open', null, 'One more thing']);
+    F.owner(['thread', 'resolve', T]);
+    assert.deepEqual([show(T).status, show(T).outcome], ['resolved', null]);
+    assert.deepEqual(obs().map((o) => o.detail), ['EU only, US next quarter', 'resolved']);
+    F.owner(['thread', 'reopen', T]);
+    assert.equal(show(T).status, 'open');
+    assert.match(F.fails(['thread', 'reopen', T]), /is open/);
+    assert.match(F.fails(['thread', 'resolve', T, '--accept']), /no proposal from the supervisor to accept/);
+    F.owner(['thread', 'resolve', T, '--outcome', 'done for now']);
+    assert.match(F.fails(['thread', 'resolve', 't-20990101-000000000-owner']), /no thread/);
+    // a resolved thread takes no question either
+    const R2 = F.owner(['thread', 'new', 'Another']).split('\n')[0];
+    F.owner(['thread', 'resolve', R2]);
+    assert.match(F.fails(['thread', 'ask', R2, '--question', 'Still there?', '--goal', F.goal, '--stake', '1', '--urgency', '1'], F.SUP), /resolved: the owner closed it/);
+    F.sup(['withdraw', Q, '--reason', 'test']);
   });
 });

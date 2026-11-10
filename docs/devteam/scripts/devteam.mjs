@@ -4768,7 +4768,10 @@ function threadLineProblems(o) {
     if (typeof o.title === 'string' && UNSAFE_TEXT.test(o.title)) errs.push('thread.title is one line of plain text');
     if (o.subject !== undefined) { const p = subjectProblem(o.subject); if (p) errs.push(`thread.subject: ${p}`); }
     over('outcome', o.outcome, OUTCOME_MAX);
-    if (isObj(o.ready)) over('ready.outcome', o.ready.outcome, OUTCOME_MAX);
+    if (isObj(o.ready)) {
+      over('ready.outcome', o.ready.outcome, OUTCOME_MAX);
+      if (typeof o.ready.at === 'string' && !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(o.ready.at)) errs.push('thread.ready.at is an ISO timestamp (2026-11-10T10:30:00.000Z)');
+    }
   } else {
     over('text', o.text, TURN_MAX);
     if (typeof o.text === 'string' && encodedBytes(o.text) > TURN_ENCODED_MAX) errs.push(`turn.text is ${encodedBytes(o.text)} bytes as the log holds it; at most ${TURN_ENCODED_MAX}`);
@@ -4921,6 +4924,53 @@ function cmdThread() {
     const q = askLine({ thread: t.id });
     appendLog({ type: 'turn', thread: t.id, text: capBytes(q.question, TURN_MAX), question: q.id }, 'supervisor');
     return out(q.id);
+  }
+  // The supervisor's proposal, for a one-click accept; the owner's next turn, resolve or reopen clears
+  // it. With no DEVTEAM_ROLE this checkout's commands are the supervisor's (logWriter), as ask's are.
+  if (sub === 'ready') {
+    supervisorOnly('thread ready');
+    const t = threadOpen(id, 'supervisor');
+    const outcome = (flagStr('outcome') ?? '').replace(UNSAFE_TEXT_ALL, ' ').replace(/\s+/g, ' ').trim();
+    if (!outcome) die('thread ready needs --outcome "<one line: how it ended>"');
+    if (Buffer.byteLength(outcome) > OUTCOME_MAX) die(`--outcome is at most ${OUTCOME_MAX} bytes`);
+    // a new proposal replaces a standing one: the newest ready line is the one the card shows
+    appendLog({ type: 'thread', op: 'set', id: t.id, ready: { outcome, at: nowIso() } }, 'supervisor');
+    return out(`proposed resolving ${t.id}: ${outcome}`);
+  }
+  // Resolving is the owner's: their status and outcome (always written, null for none, so a reopened
+  // thread resolved again keeps no old outcome), and an observation the loop reads with the rest.
+  if (sub === 'resolve') {
+    const { by } = ownerWriter();
+    const t = threadOpen(id, 'owner');
+    const v = threadViewOf(t.id);
+    let outcome = flags.outcome !== undefined ? (flagStr('outcome') ?? '').replace(/\s+/g, ' ').trim() : '';
+    if (flags.accept) {
+      if (!v.ready) die(`${t.id} has no proposal from the supervisor to accept; resolve it with your own --outcome`);
+      outcome = v.ready.outcome;
+    }
+    if (UNSAFE_TEXT.test(outcome)) die('--outcome is one line of plain text');
+    if (Buffer.byteLength(outcome) > OUTCOME_MAX) die(`--outcome is at most ${OUTCOME_MAX} bytes`);
+    appendLog({ type: 'thread', op: 'set', id: t.id, status: 'resolved', outcome: outcome || null }, by);
+    appendLog({ type: 'observation', source: 'owner', subject: `thread:${t.id}`, kind: 'thread-resolved', detail: outcome || 'resolved', refs: [t.id, ...subjectIds(t.subject)] }, by);
+    out(`resolved ${t.id}${outcome ? `: ${outcome}` : ''}`);
+    const open = v.questions.filter((q) => q.status === 'open');
+    if (open.length) out(`${plural(open.length, 'question')} asked in it ${open.length === 1 ? 'is' : 'are'} still open in the Inbox: ${open.map((q) => q.id).join(', ')}`);
+    return nudgeSupervisor(`[devteam thread ${t.id} resolved by owner] devteam.mjs thread show ${t.id}`);
+  }
+  if (sub === 'reopen') {
+    const { by } = ownerWriter();
+    const t = logGet(id ?? '');
+    if (t?.type !== 'thread') die(`no thread ${id ?? '(none given)'}`);
+    if (t.status !== 'resolved') die(`${t.id} is open`);
+    const words = wordsFrom(2);
+    if (words) turnText(words);
+    const n = openThreadCount();
+    if (n >= THREAD_OPEN_MAX) die(`${n} threads are open, the most a project keeps: resolve some first (thread list --open)`);
+    appendLog({ type: 'thread', op: 'set', id: t.id, status: 'open' }, by);
+    if (words) appendLog({ type: 'turn', thread: t.id, text: words }, by);
+    out(`reopened ${t.id}`);
+    if (words) return out(deliveredWords(deliverOwnerTurn(t, words)));
+    return nudgeSupervisor(`[devteam thread ${t.id} reopened by owner] devteam.mjs thread show ${t.id}`);
   }
   if (sub === 'show') {
     const t = logGet(id ?? '');
