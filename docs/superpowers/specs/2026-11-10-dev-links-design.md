@@ -1,5 +1,7 @@
 # Dev links: a session shows the owner a running app
 
+Built: kit in #172, gateway in #173.
+
 Date: 2026-11-10. Builds on `2026-11-05-artifacts-design.md` (artifacts and the Library), `2026-11-09-public-artifacts-design.md` (the gateway's names and its stance on agent content), `2026-11-04-devteam-hub-design.md` (the hub's list) and the cloud gateway (`cloud/gateway.mjs`). Approved by the owner on 2026-11-10 with the decisions in "Decisions"; the plan is `docs/superpowers/plans/2026-11-10-dev-links.md`.
 
 ## Goal

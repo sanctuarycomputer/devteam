@@ -43,6 +43,7 @@
   #notify { flex: 0 0 auto; padding-bottom: 7px; color: var(--muted); font-size: 12px; }
   #box-links { flex: 0 0 auto; padding-bottom: 7px; font-size: 12px; }
   #box-links a { color: var(--fg-2); }
+  #box-links a + a { margin-left: 10px; }
   #notify button { font: inherit; color: var(--fg-2); background: none; border: 1px solid var(--line-2); border-radius: 6px; padding: 2px 8px; cursor: pointer; }
   #notify button.plain { color: inherit; border: 0; padding: 0; }
   main { flex: 1 1 auto; position: relative; }
@@ -342,9 +343,17 @@ async function findBox() {
   try {
     const r = await fetch('box.json', { cache: 'no-store' });
     const b = r.ok ? await r.json() : null;
-    const secure = (u) => { try { return new URL(u.replace('{port}', '1')).protocol === 'https:'; } catch { return false; } };
+    // https, or a local gateway on http://*.localhost (a laptop testing the box chain end to end)
+    const secure = (u) => { try { const x = new URL(u.replace('{port}', '1')); return x.protocol === 'https:' || (location.protocol === 'http:' && x.protocol === 'http:' && x.hostname.endsWith('.localhost')); } catch { return false; } };
     if (b?.box !== 1 || typeof b.terminal !== 'string' || !secure(b.terminal) || typeof b.instance !== 'string' || !b.instance.includes('{port}') || !secure(b.instance)) return;
     box = { terminal: b.terminal, instance: b.instance, push: typeof b.push === 'string' ? b.push : null };
+    if (typeof b.previews === 'string' && secure(b.previews)) {
+      const a = document.createElement('a');
+      a.href = b.previews;
+      a.textContent = 'Previews';
+      $('box-links').append(a);
+      $('box-links').hidden = false;
+    }
     // signing in and passkeys are on the gateway's own name, never in the hub's
     if (typeof b.passkeys === 'string' && secure(b.passkeys)) {
       const a = document.createElement('a');

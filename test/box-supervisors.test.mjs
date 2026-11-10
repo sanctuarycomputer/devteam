@@ -93,6 +93,9 @@ test('which supervisors come back, and which are left alone', () => {
   assert.match(up['home-repo'], /already running/);
   assert.match(up.lone, /^would start fresh/, 'a dashboard is not a supervisor');
   assert.match(up.parked, /^would start fresh/, 'nor is one in its own session, where the kit keeps it');
+  // a preview's server at the repo's root, running node, is not its supervisor
+  fs.writeFileSync(panesFile, `%4\tdev~cool-tiger\t${h}\tnode\n`);
+  assert.match(lines(run(['--all', '--dry-run']))['home-repo'], /^would (start|resume)/, 'a dev~ window is a preview');
   fs.rmSync(panesFile);
 
   // a real restore: the window, the noted pane, the first message, the list used up
