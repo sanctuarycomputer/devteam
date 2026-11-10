@@ -187,3 +187,46 @@ test('init: from the main checkout only; main is the remote default branch, neve
     fs.rmSync(base, { recursive: true, force: true });
   }
 });
+
+test('the Library shows each landed artifact\'s publish state, from the log and the gateway\'s header', () => {
+  const html = fs.readFileSync(path.join(kit, 'dashboard/index.html'), 'utf8');
+  const src = html.slice(html.indexOf('/* public-states start */'), html.indexOf('/* public-states end */'));
+  assert.ok(src.length > 200, 'the publish-state block is marked in index.html');
+  const ctx = vm.createContext({});
+  vm.runInContext(`${src}\n;globalThis.api = { publicHere, publicState, publicLinks };`, ctx);
+  const { publicHere, publicState, publicLinks } = ctx.api;
+  const lib = { public: { project: 'alpha', root: '/srv/alpha' } };
+  const me = publicHere({ protocol: 'https:', host: '4321.box.example.com' }, lib);
+  assert.deepEqual({ ...me }, { proto: 'https:', port: 4321, box: 'box.example.com', project: 'alpha', root: '/srv/alpha' });
+  assert.equal(publicHere({ protocol: 'http:', host: '127.0.0.1:4321' }, lib), null, 'a laptop');
+  assert.equal(publicHere({ protocol: 'http:', host: 'localhost:4321' }, lib), null);
+  const T = 'a'.repeat(40);
+  const U = 'b'.repeat(40);
+  const rec = { tree: T, at: '2026-11-09T10:00:00.000Z', channel: 'dashboard' };
+  const art = (published) => ({ slug: 'hello', tree: T, published });
+  const serving = (tree, port = 4321, root = '/srv/alpha') => ({ alpha: { port, root, artifacts: tree ? { hello: tree } : {} } });
+  const S = (a, pub, at = me) => { const s = publicState(a, pub, at); return [s.state, [...s.actions], s.from]; };
+  // the spec's table, row by row
+  assert.deepEqual(S(art(null), serving(null)), ['none', ['publish'], null]);
+  assert.deepEqual(S(art(rec), serving(T)), ['public', ['copy', 'unpublish'], null]);
+  assert.deepEqual(S(art(rec), serving(U)), ['public', ['update', 'copy', 'unpublish'], null]);
+  assert.deepEqual(S(art(rec), serving(null)), ['not-live', ['restore', 'forget'], null]);
+  assert.deepEqual(S(art(null), serving(T)), ['public', ['unpublish'], null], 'the gateway is the truth');
+  assert.deepEqual(S(art(rec), serving(T, 4322)), ['public', ['copy', 'unpublish'], 4322], 'public from another instance');
+  assert.deepEqual(S(art(rec), serving(T, 4321, '/srv/other')), ['not-live', ['restore', 'forget'], null], 'another checkout of the name is not this one');
+  assert.deepEqual(S(art(rec), {}), ['not-live', ['restore', 'forget'], null]);
+  assert.deepEqual(S(art(rec), null, null), ['published', [], null], 'a laptop says what the log says, and offers nothing');
+  assert.deepEqual(S(art(null), null, null), ['none', [], null]);
+  assert.deepEqual(S(art(null), serving(null), { ...me, project: null }), ['none', [], null], 'no project name, no publishing');
+  assert.equal(publicState(art(rec), serving(null), me).rec.channel, 'dashboard', 'the card shows the line\'s channel');
+  const L = publicLinks(me);
+  assert.equal(L.publish(['a', 'b']), 'https://box.example.com/public/publish?port=4321&slug=a&slug=b');
+  assert.equal(L.unpublish('a'), 'https://box.example.com/public/unpublish?port=4321&project=alpha&slug=a');
+  assert.equal(L.page('a'), 'https://public.box.example.com/alpha/a/');
+  // the page reads the header, opens the gateway's pages in a tab it can't steer, and Forget records through the kit
+  assert.match(html, /PUBLIC = JSON\.parse\(r\.headers\.get\('x-devteam-public'\)/);
+  assert.match(html, /target="_blank" rel="noopener noreferrer">\$\{label\}<\/a>/);
+  assert.match(html, /post\('artifact-publish', \{ op: 'unpublish', slug \}/);
+  assert.match(html, /Restore all/);
+  assert.match(html, /Publishing happens on the cloud box/);
+});
