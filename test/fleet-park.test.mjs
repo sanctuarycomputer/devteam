@@ -26,7 +26,11 @@ test('fleet park: every session stops with a handoff, and a clone elsewhere pick
     g(['worktree', 'add', '-q', '-b', 'plan/beta', pw, 'origin/main'], old);
     assert.match(run(pw, ['phase', 'build'], { DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: 'beta' }).err, /a planner logs only phase parked/);
     ok(pw, ['phase', 'parked', '--note', 'parked'], { DEVTEAM_ROLE: 'planner', DEVTEAM_FEATURE: 'beta' });
-    assert.equal(json(ok(old, ['dashboard-data'])).planners.find((p) => p.feature === 'beta').parked, true);
+    const dash = json(ok(old, ['dashboard-data']));
+    assert.equal(dash.planners.find((p) => p.feature === 'beta').parked, true);
+    // the sidebar's pill: the kit's release, as hello reports it to the hub
+    assert.ok(dash.kit, 'the dashboard says which kit it runs');
+    assert.equal(dash.kit, json(ok(old, ['hello', '--json'])).kit);
     g(['worktree', 'remove', '--force', pw], old);
     g(['branch', '-q', '-D', 'plan/beta'], old);
 
