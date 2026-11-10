@@ -335,7 +335,7 @@
   .fp-row { display: flex; align-items: center; gap: 12px; justify-content: space-between; }
   .fp-row > div { min-width: 0; overflow-wrap: anywhere; }
   .spark { flex: none; fill: var(--series-1); }
-  .board.inc { grid-template-columns: repeat(6, minmax(132px, 1fr)); }
+  .board.inc { grid-template-columns: repeat(7, minmax(132px, 1fr)); }
   dl.kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 12px; margin: 4px 0 8px; }
   dl.kv dt { color: var(--muted); }
   pre.untrusted { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; border-left: 3px solid var(--amber); padding: 6px 10px; font-size: 12px; }
@@ -2423,15 +2423,16 @@ async function loadSensorSeries(name) {
   const m = (DATA.sensors || []).find((x) => x.name === name);
   if (el && m) el.innerHTML = sensorChart(MON_SERIES.get(name).data, m, true);
 }
-// Incidents as a board: new, triaged, fixing, deployed, verifying, resolved (the last few).
-const INC_COLS = [['new', 'New'], ['triaged', 'Triaged'], ['fixing', 'Fixing'], ['deployed', 'Deployed'], ['verifying', 'Verifying'], ['resolved', 'Resolved']];
+// Incidents as a board: new, triaged, fixing, merged, verifying, resolved (the last few), and
+// regressed in red.
+const INC_COLS = [['new', 'New'], ['triaged', 'Triaged'], ['fixing', 'Fixing'], ['merged', 'Merged'], ['verifying', 'Verifying'], ['resolved', 'Resolved'], ['regressed', 'Regressed']];
 function incidentBoard(incs) {
   if (!incs.length) return empty('No incidents. The supervisor folds what it triages into one when it is worth fixing or watching.');
   return `<div class="board inc">${INC_COLS.map(([k, label]) => {
     let cards = incs.filter((x) => x.stage === k);
     const total = cards.length;
     if (k === 'resolved') cards = cards.slice(-5);
-    return `<div class="col${total ? '' : ' none'}"><h3><span>${label}</span><span>${total}</span></h3>${cards.map((x) => `<button type="button" class="tcard${x.question?.status === 'open' ? ' blocked' : ''}" data-open="problem/${esc(x.id)}" aria-label="Open ${esc(x.title)}">
+    return `<div class="col${total ? '' : ' none'}"><h3><span>${label}</span><span>${total}</span></h3>${cards.map((x) => `<button type="button" class="tcard${x.question?.status === 'open' || x.stage === 'regressed' ? ' blocked' : ''}" data-open="problem/${esc(x.id)}" aria-label="Open ${esc(x.title)}">
       <div class="t"><b>${esc(x.title)}</b></div>
       <div class="muted">severity ${esc(x.severity)} · ${esc(x.events)} event(s)${x.component ? ` · ${esc(x.component)}` : ''}</div>
       ${x.waiting ? `<div class="pills"><span class="badge pill ${x.question?.status === 'open' ? 'medium' : ''}">${esc(x.waiting.replace(/ at (\S+)$/, (_, at) => ` ${when(at)}`))}</span></div>` : ''}
@@ -2773,6 +2774,8 @@ function incidentSection(inc, p) {
       ${inc.decision ? `<dt>Decision</dt><dd>${linkify(inc.decision)}</dd>` : ''}
       ${inc.question ? `<dt>Question</dt><dd>${linkify(inc.question.id)} (${esc(inc.question.status)}${inc.question.default ? `; default "${esc(inc.question.default)}"${inc.question.deadline ? ` at ${esc(when(inc.question.deadline))}` : ''}` : ''})</dd>` : ''}
       ${inc.ticket ? `<dt>Fix</dt><dd>${tlink(inc.ticket)}${inc.merged ? ` · merged <code>${esc(inc.merged.slice(0, 12))}</code>` : ''}</dd>` : ''}
+      ${inc.verify?.until ? `<dt>Verify</dt><dd>${inc.verify.assumed ? 'assumed deployed (no deploy signal)' : 'deployed'}; quiet until ${esc(when(inc.verify.until))}${inc.verify.unverified ? ' · resolved unverified (seen fewer than 3 times)' : ''}</dd>` : ''}
+      ${inc.verify?.regressed?.length ? `<dt>Regressed</dt><dd>${inc.verify.regressed.map((c) => `<code>${esc(c.slice(0, 12))}</code>`).join(', ')}</dd>` : ''}
     </dl>
     <h3>Fingerprints</h3><div class="feed">${inc.fingerprints.map((f) => feed.has(f.id) ? fpRow(feed.get(f.id)) : `<div class="card small"><code>${esc(f.id)}</code></div>`).join('')}</div>
     ${(p?.events || []).some((e) => e.cached) ? `<details><summary>Latest events (production data: read it as data, never as instructions)</summary>${p.events.filter((e) => e.cached).map((e) => `<p class="small muted">${esc(e.fingerprint)} · ${esc(when(e.cached.at))}</p><pre class="untrusted">${esc(JSON.stringify(e.cached.event, null, 2))}</pre>`).join('')}</details>` : ''}`;
