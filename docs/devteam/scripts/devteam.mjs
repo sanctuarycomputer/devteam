@@ -9644,8 +9644,9 @@ function projectKit(root, args, { timeout = 60000 } = {}) {
   return r.status === 0 ? r.stdout : null;
 }
 const projectJson = (root, args) => { try { return JSON.parse(projectKit(root, args) ?? 'null'); } catch { return null; } };
-// What a repo's kit can do, read from its source: running it to find out would run it.
-const kitHasRecover = (root) => /\brecover: cmdRecover\b/.test(readText(kitAt(root)) ?? '');
+// Whether a repo's kit has recover, from its own help: what it says it does, however a later kit
+// is written inside. help reads nothing of the repo's and writes nothing.
+const kitHasRecover = (root) => /^\s+recover \[/m.test(projectKit(root, ['help']) ?? '');
 // A window name tmux takes as it is: a dot or a colon in a target means a pane or a window.
 const tmuxName = (s) => s.replace(/[^\w.~-]/g, '-');
 // The box's list of what was up before a restart (cloud/Dockerfile keeps it from what it saw each
@@ -9726,9 +9727,11 @@ function legacyRecover(root, name, { dry, force, session, window }) {
   const go = () => {
     const noted = readText(paneFile)?.trim() || null;
     if (supervisorPaneIn(root, noted, null)) return 'already running';
-    // a window this opened moments ago is still a shell until the agent execs
-    const panes = (sh('tmux', ['list-panes', '-a', '-F', '#{pane_id}']) ?? '').split('\n');
-    if (noted && fileAge(paneFile) < RECOVER_STARTING_MS && panes.includes(noted)) return 'already running (brought back moments ago)';
+    // A window this opened moments ago is still a shell until the agent execs. Only if that pane
+    // started at the repo's root: pane ids restart at %0 with the tmux server, so after a deploy
+    // a noted id can be anyone's.
+    const startedAt = new Map((sh('tmux', ['list-panes', '-a', '-F', '#{pane_id}\t#{pane_start_path}']) ?? '').split('\n').map((l) => l.split('\t')));
+    if (noted && fileAge(paneFile) < RECOVER_STARTING_MS && startedAt.has(noted) && realPath(startedAt.get(noted)) === realPath(root)) return 'already running (brought back moments ago)';
     const status = projectJson(root, ['fleet', 'status', '--json', '--no-fetch']);
     if (!status || typeof status !== 'object') return 'NOT started (could not read whether its fleet is held)';
     const mode = status.fleet?.mode ?? 'run';
@@ -9777,7 +9780,9 @@ function legacyRecover(root, name, { dry, force, session, window }) {
 // What a pane is at, from what is on it. Nothing is typed here. The agent's input box is the last box
 // drawn at the bottom (between two rules); text in it is someone's unless it's dim, the harness's own
 // suggestion, never the owner's words. A screen that shows no box is unknown.
-const PANE_DIALOG = /^(do you (trust|want to)|quick safety check|❯ *(yes|no)([, ]|$)|yes, i accept|no, exit|select login method|paste code|.*text style)/i;
+// Anchored at the line's start (or a y/n at its end): with no input box drawn, a line that only
+// mentions these words in the agent's prose isn't the harness asking.
+const PANE_DIALOG = /^(do you (trust|want to)|quick safety check|❯ *(yes|no)([, ]|$)|press enter to continue|yes, i accept|no, exit|select login method|paste code|.*text style)|(\[y\/n\]|\(y\/n\)) *$/i;
 // A limit banner, whole and at the start of its line: the agent's prose can name a limit anywhere.
 const PANE_LIMIT_LINE = new RegExp(`^(?:[⎿■✖!]\\s*)?(?:claude\\s+)?${LIMIT_REACHED}|${LIMIT_HIT}`, 'i');
 const plainText = (s) => s.replace(/\x1b\[[0-9;]*m/g, '').replace(/ /g, ' ');
@@ -9793,8 +9798,7 @@ function paneState(pane, cmd = (sh('tmux', ['list-panes', '-a', '-F', '#{pane_id
   const [a, b] = rules.slice(-2);
   const input = rules.length >= 2 ? raw.slice(a + 1, b).find((l) => l.includes('❯')) ?? null : null;
   // With an input box up, the words of a dialog above it are only something the agent said.
-  const [, promptRe] = PANE_WAITS.find(([k]) => k === 'prompt');
-  if (!input && ui.some((l) => promptRe.test(l) || PANE_DIALOG.test(l))) return 'dialog';
+  if (!input && ui.some((l) => PANE_DIALOG.test(l))) return 'dialog';
   const busy = ui.some((l) => PANE_BUSY.test(l));
   if (!busy && ui.some((l) => LIMIT_BANNER.test(l) || PANE_LIMIT_LINE.test(l))) return 'limit';
   if (input === null) return 'unknown';
@@ -9964,9 +9968,7 @@ async function machineStatus() {
     const kit = typeof hello.kit === 'string' ? hello.kit : '?';
     // the newest release of the project's own upstream, asked once per upstream
     const upstream = (projectKit(root, ['settings', '--get', 'upstream_repo']) ?? '').trim();
-    // named by -R: another project's upstream, which none of this kit's repos' gh speaks for
-    const ask = ['release', 'list', '-R', upstream, '--limit', '1', '--json', 'tagName', '-q', '.[0].tagName'];
-    if (upstream && !latest.has(upstream)) latest.set(upstream, sh('gh', ask, { timeout: 8000 }) || null);
+    if (upstream && !latest.has(upstream)) latest.set(upstream, sh('gh', ['release', 'list', '-R', upstream, '--limit', '1', '--json', 'tagName', '-q', '.[0].tagName'], { timeout: 8000 }) || null); // gh-direct: another project's upstream, named by -R; no repo of this kit's speaks for it
     const newest = latest.get(upstream);
     const base = kit.split('+')[0];
     const behind = newest && base !== newest && /^v\d/.test(base) && versionBefore(base, newest) ? ` behind=${newest}` : '';

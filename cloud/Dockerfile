@@ -113,11 +113,12 @@ RUN usermod -l dev -d /data/home node && groupmod -n dev node \
 RUN install -d -m 755 /opt/devteam
 COPY --chmod=644 cloud/gateway.mjs /opt/devteam/gateway.mjs
 COPY --chmod=644 docs/devteam/dashboard/hub.html /opt/devteam/hub.html
-# The kit as this image's release has it, whole (it reads its schema beside it): the box's own
-# commands (box-status, box-tell, box-alert, box-recover) run it, against every repo whatever its
-# kit's version. What a repo says about itself comes from that repo's own kit; this one only reads
-# tmux and the plain files a kit leaves, and brings back a repo on a kit older than recover the way
-# the box always did (recover --machine).
+# The kit, whole (it reads its schema beside it), as of the last release that changed this image:
+# box-deploy.yml deploys only then, so a repo's kit can be newer than this one, or older. The box's
+# own commands (box-status, box-tell, box-alert, box-recover) run it against every repo, and need it
+# to be neither: what a repo says about itself comes from that repo's own kit (its help, hello,
+# questions, settings, recover), and this one only reads tmux and the plain files a kit leaves. A
+# repo on a kit older than recover comes back the way the box always brought it back.
 COPY docs/devteam /opt/devteam/kit
 RUN ttyd -d 0 -i lo -p 17681 true & p=$!; sleep 1; curl -fsS --compressed -o /opt/devteam/ttyd.html http://127.0.0.1:17681/; r=$?; kill $p; [ $r = 0 ] && grep -q xterm /opt/devteam/ttyd.html \
  && rm -rf /opt/devteam/kit/project /opt/devteam/kit/run \
@@ -308,8 +309,10 @@ fi
 # What was up before this boot, for the operator's box-recover. Only a list with something in it:
 # a boot that never got as far as bringing them back must not lose them to the next.
 up="$HOME/.devteam-supervisors"
-# An older image's ages, kept beside the list: they are the list's own lines now.
-if [ -f "$up.boot.at" ]; then cat "$up.boot.at" >> "$up.boot"; rm -f "$up.boot.at"; fi
+# An older image's ages, kept beside the list: they are the list's own lines now, for the roots
+# still on it. That file was rewritten at every boot and never pruned, so it also names
+# supervisors stopped since: those stay stopped.
+if [ -f "$up.boot.at" ]; then [ -f "$up.boot" ] && awk 'NR == FNR { r = $0; sub(/^[0-9]+ /, "", r); b[r]; next } { r = $0; sub(/^[0-9]+ /, "", r) } (r in b)' "$up.boot" "$up.boot.at" > "$up.boot.was"; [ -s "$up.boot.was" ] && cat "$up.boot.was" >> "$up.boot"; rm -f "$up.boot.at" "$up.boot.was"; fi
 # Added to what is there, each with when it was listed: a supervisor the last restore could not
 # start stays listed, and one up just before this boot is new again. An entry no restore has used
 # for 3 days is out of date (whoever it held has been stopped or restarted since): the kit's

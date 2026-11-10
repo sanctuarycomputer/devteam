@@ -133,6 +133,11 @@ test('what a pane is at, from what is on it', { skip: !hasTmux }, async () => {
   await at(`Press Enter to continue is what the dialog says.\n${box(prompt)}`, 'ready');
   await at(`✢ Thinking… (esc to interrupt)\n${box(prompt)}`, 'busy');
   await at('a screen with no input box', 'unknown');
+  // with no input box drawn, a dialog's words count only where the harness puts them
+  await at('I asked whether do you want to keep it is right', 'unknown', 'prose mid-line is not a dialog');
+  await at('the [y/n] prompts are in the docs', 'unknown', 'nor a y/n that isn\'t at the end');
+  await at('Overwrite config/master.key? [y/n] ', 'dialog');
+  await at('Press Enter to continue…', 'dialog');
   const sh = tmuxSh(['new-window', '-dP', '-F', '#{pane_id}', '-t', '=keep:', '-n', 'a-shell']).stdout.trim();
   await until(() => paneState(sh) === 'shell', 'a shell');
   const other = tmuxSh(['new-window', '-dP', '-F', '#{pane_id}', '-t', '=keep:', '-n', 'other', 'exec sleep 3600']).stdout.trim();
@@ -517,6 +522,22 @@ test('--force skips a sibling whichever sorts first, and never on the list\'s wo
 test('the box\'s boot keeps the list in the form recover reads', () => {
   const df = fs.readFileSync(path.join(REPO, 'cloud', 'Dockerfile'), 'utf8');
   const add = df.split('\n').find((l) => l.startsWith('if [ -s "$up" ]; then now=$(date +%s)'));
+  const fold = df.split('\n').find((l) => l.startsWith('if [ -f "$up.boot.at" ]; then'));
+  assert.ok(fold, 'the fold of an older image\'s ages');
+  {
+    // an older image's .boot.at names every root any boot listed, the stopped ones too
+    const d0 = fs.mkdtempSync(path.join(tmp, 'fold-'));
+    const up0 = path.join(d0, 'up');
+    fs.writeFileSync(`${up0}.boot`, '/r/a\n100 /r/b\n');
+    fs.writeFileSync(`${up0}.boot.at`, '50 /r/a\n60 /r/stopped\n70 /r/b\n');
+    execFileSync('sh', ['-c', `up=${up0}\n${fold}`]);
+    assert.equal(fs.readFileSync(`${up0}.boot`, 'utf8'), '/r/a\n100 /r/b\n50 /r/a\n70 /r/b\n', 'only the roots still listed, bare or timed');
+    assert.ok(!fs.existsSync(`${up0}.boot.at`) && !fs.existsSync(`${up0}.boot.was`));
+    fs.writeFileSync(`${up0}.boot.at`, '60 /r/stopped\n');
+    fs.rmSync(`${up0}.boot`);
+    execFileSync('sh', ['-c', `up=${up0}\n${fold}`]);
+    assert.ok(!fs.existsSync(`${up0}.boot`), 'no list: nothing to fold into, and nothing comes back');
+  }
   const settle = df.split('\n').find((l) => l.includes("awk 'NR == FNR { u[$0]; next }"));
   assert.ok(add && settle, 'the boot\'s lines');
   assert.ok(!df.includes('box-supervisors'), 'nothing calls the old script');
@@ -529,4 +550,42 @@ test('the box\'s boot keeps the list in the form recover reads', () => {
   fs.writeFileSync(up, '/r/b\n');
   execFileSync('sh', ['-c', `up=${up}\n[ -s "$up" ] && [ -f "$up.boot" ] && {\n${settle}\n  mv "$up.left" "$up.boot"; }`]);
   assert.match(fs.readFileSync(`${up}.boot`, 'utf8'), /^100 \/r\/a\n\/r\/old\n\d{10} \/r\/a\n$/, 'b is back up: off the list');
+});
+
+test('after the first deploy, a supervisor only an older image\'s ages still named stays stopped', { skip: !hasTmux || skipOld() }, () => {
+  const dir = path.join(tmp, 'box-code-fold');
+  const kept = repo('fold-kept', { tag: 'v0.25.0', dir });
+  const stopped = repo('fold-stopped', { tag: 'v0.25.0', dir });
+  for (const r of [kept, stopped]) conversation(r);
+  const fold = fs.readFileSync(path.join(REPO, 'cloud', 'Dockerfile'), 'utf8').split('\n').find((l) => l.startsWith('if [ -f "$up.boot.at" ]; then'));
+  const up = upList.replace(/\.boot$/, '');
+  fs.writeFileSync(upList, `${kept}\n`);
+  fs.writeFileSync(`${upList}.at`, `${Math.floor(Date.now() / 1000) - 3600} ${kept}\n${Math.floor(Date.now() / 1000) - 7200} ${stopped}\n`);
+  try {
+    execFileSync('sh', ['-c', `up=${up}\n${fold}`]);
+    const said = lines(machine(['recover', '--machine', '--in', dir, '--session', 'home', '--was-up', upList, '--dry-run'], { DEVTEAM_ROLE: 'operator' }));
+    assert.match(said['fold-kept'], new RegExp(`^would resume session ${SID}`));
+    assert.match(said['fold-stopped'], /^left stopped \(not running before the restart/, 'the owner stopped it since: it stays stopped');
+  } finally { fs.rmSync(upList, { force: true }); fs.rmSync(`${upList}.at`, { force: true }); }
+});
+
+test('a pane noted moments ago counts as the supervisor starting only if it started at the repo\'s root', { skip: !hasTmux || skipOld() }, async () => {
+  const dir = path.join(tmp, 'box-code-grace');
+  const r = repo('grace', { tag: 'v0.28.0', dir });
+  conversation(r);
+  const paneFile = path.join(r, 'docs/devteam/run/supervisor-pane');
+  fs.mkdirSync(path.dirname(paneFile), { recursive: true });
+  const dry = () => lines(machine(['recover', '--machine', '--in', dir, '--session', 'home', '--force', '--only', 'grace', '--dry-run'], { DEVTEAM_ROLE: 'operator' })).grace;
+  // after a deploy, ids start again at %0: the noted one is now someone else's shell, elsewhere
+  const elsewhere = tmuxSh(['new-window', '-dP', '-F', '#{pane_id}', '-t', '=keep:', '-n', 'someone', '-c', nowhere]).stdout.trim();
+  const atRoot = tmuxSh(['new-window', '-dP', '-F', '#{pane_id}', '-t', '=keep:', '-n', 'sup-grace', '-c', r]).stdout.trim();
+  try {
+    fs.writeFileSync(paneFile, elsewhere);
+    assert.match(dry(), new RegExp(`^would resume session ${SID}`), 'a pane started elsewhere is not its window');
+    fs.writeFileSync(paneFile, atRoot);
+    assert.match(dry(), /^already running \(brought back moments ago\)/, 'its window, still a shell until the agent execs');
+    const old = new Date(Date.now() - 10 * 60000);
+    fs.utimesSync(paneFile, old, old);
+    assert.match(dry(), new RegExp(`^would resume session ${SID}`), 'and only for a few minutes');
+  } finally { tmuxSh(['kill-pane', '-t', elsewhere]); tmuxSh(['kill-pane', '-t', atRoot]); }
 });
