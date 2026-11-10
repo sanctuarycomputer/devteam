@@ -484,7 +484,7 @@
     <a href="#trust"><span class="nl"><i class="icon-shield-check" aria-hidden="true"></i>Trust Ladder</span> <span class="count" id="n-trust"></span></a>
     <a href="#retros"><span class="nl"><i class="icon-history" aria-hidden="true"></i>Retros</span> <span class="count" id="n-retros"></span></a>
     <a href="#health"><span class="nl"><i class="icon-heart-pulse" aria-hidden="true"></i>Health</span> <span class="count" id="n-findings"></span></a>
-    <a href="#monitoring"><span class="nl"><i class="icon-activity" aria-hidden="true"></i>Sensors</span> <span class="count" id="n-monitors"></span></a>
+    <a href="#monitoring"><span class="nl"><i class="icon-activity" aria-hidden="true"></i>Sensors</span> <span class="count" id="n-sensors"></span></a>
   </nav>
   <div class="foot"><span id="when"></span><br><span id="logline"></span><br><span class="err" id="err"></span></div>
 </aside>
@@ -618,13 +618,13 @@
 
   <section id="monitoring">
     <h2>Sensors <span class="sub">each one takes samples of production, kept here; a meaningful change becomes an observation in the log, for the supervisor's loop and Health to act on</span></h2>
-    <div id="monitors"></div>
+    <div id="sensors"></div>
     <h3 style="margin-top:14px">Incidents</h3>
     <div id="incidents"></div>
     <h3 style="margin-top:14px">Exceptions and errors</h3>
-    <div id="monitor-exceptions"></div>
+    <div id="sensor-exceptions"></div>
     <h3 style="margin-top:14px">Observations</h3>
-    <div class="feed" id="monitor-feed"></div>
+    <div class="feed" id="sensor-feed"></div>
   </section>
 
   <section id="review-view" hidden>
@@ -943,7 +943,7 @@ function idLink(k, id) {
   if (k === 'g' && goalOf(id)) return glink(id);
   return `<a class="linkish" href="#${href}/${encodeURIComponent(id)}"><code>${esc(id.slice(0, 22))}…</code></a>`;
 }
-const subjectLink = (subj) => (ticketMap().has(subj) ? tlink(subj) : /^[a-z]-\d{8}-\d{9}-/.test(subj ?? '') || /^plan-/.test(subj ?? '') || /^monitor:/.test(subj ?? '') ? linkify(subj) : subj ? `<code>${esc(subj)}</code>` : '');
+const subjectLink = (subj) => (ticketMap().has(subj) ? tlink(subj) : /^[a-z]-\d{8}-\d{9}-/.test(subj ?? '') || /^plan-/.test(subj ?? '') || /^sensor:/.test(subj ?? '') ? linkify(subj) : subj ? `<code>${esc(subj)}</code>` : '');
 const scopeWords = (sc) => (!sc || sc === 'project' ? 'the whole project' : sc.replace(/^component:/, 'component ').replace(/^feature:/, 'feature ').replace(/^class:/, 'decisions of kind ').replace(/^chore:devteam-sync/, 'devteam upgrades').replace(/^chore:/, 'chore '));
 // What a call rested on, in words: the supervisor's trust, your answer or a default, a standing rule.
 function authorityWords(u) {
@@ -977,7 +977,7 @@ function linkify(text) {
     String.raw`\bq-\d{8}-\d{9}-[a-z0-9-]+`,
     String.raw`\b[gkapmod]-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*`,
     ...(ids.length ? [String.raw`\b(?:${ids.map((x) => x.replace(/[-]/g, '\\-')).join('|')})\b`] : []),
-    String.raw`\bmonitor:[A-Za-z0-9][A-Za-z0-9_.-]*`,
+    String.raw`\bsensor:[A-Za-z0-9][A-Za-z0-9_.-]*`,
     String.raw`\bplan-[a-z0-9]+(?:-[a-z0-9]+)*\b`,
     String.raw`\b[0-9a-f]{40}\b`,
     String.raw`\bsanctuarycomputer\/devteam#\d+`,
@@ -986,7 +986,7 @@ function linkify(text) {
     if (/^q-\d{8}-\d{9}-/.test(m)) return qlink(m);
     if (/^[gkapmod]-\d{8}-\d{9}-/.test(m)) return idLink(m[0], m);
     if (ticketMap().has(m)) return tlink(m);
-    if (m.startsWith('monitor:')) { const n = m.slice('monitor:'.length); return (DATA?.monitors || []).some((x) => x.name === n) ? `<a class="linkish" href="#monitor/${encodeURIComponent(n)}">${esc(n)}</a>` : m; }
+    if (m.startsWith('sensor:')) { const n = m.slice('sensor:'.length); return (DATA?.sensors || []).some((x) => x.name === n) ? `<a class="linkish" href="#sensor/${encodeURIComponent(n)}">${esc(n)}</a>` : m; }
     if (m.startsWith('plan-')) { const f = m.slice('plan-'.length); return (DATA?.planners || []).some((x) => x.feature === f) ? `<a class="linkish" href="#planner/${encodeURIComponent(f)}">${m}</a>` : m; }
     if (/^[0-9a-f]{40}$/.test(m)) return `<code>${m.slice(0, 12)}</code>`;
     const pr = m.split('#')[1];
@@ -1946,7 +1946,7 @@ const TYPE_META = {
   ticket: ['ticket', 'Ticket'], goal: ['target', 'Goal'], feature: ['layers', 'Feature'], story: ['book-open', 'Story'], release: ['tag', 'Release'],
   wave: ['waves', 'Wave'], milestone: ['milestone', 'Milestone'], act: ['zap', 'Act'], decision: ['scale', 'Decision'], retro: ['history', 'Retro'],
   lesson: ['lightbulb', 'Knowledge'], problem: ['triangle-alert', 'Problem'], thread: ['messages-square', 'Message'], planner: ['map', 'Planner'],
-  q: ['circle-help', 'Question'], file: ['file-text', 'File'], monitor: ['activity', 'Monitor'],
+  q: ['circle-help', 'Question'], file: ['file-text', 'File'], sensor: ['activity', 'Sensor'],
 };
 let SCHEMA_DOCS = null;
 async function loadSchemaDocs() {
@@ -2125,7 +2125,7 @@ let DRAWER = { kind: null, id: null };
 let lastFocus = null;
 let LAST_HTML = '';
 let AFTER = [];
-const OPENERS = () => ({ ticket: openTicket, goal: openGoal, feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, planner: openPlanner, q: openQuestion, file: openFile, monitor: openMonitor });
+const OPENERS = () => ({ ticket: openTicket, goal: openGoal, feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, planner: openPlanner, q: openQuestion, file: openFile, sensor: openSensor });
 // Not under someone mid-action: typing or choosing in the drawer, a confirm step showing, a request
 // in flight. The next refresh draws it.
 function busyDrawer() {
@@ -2266,7 +2266,7 @@ function designBlock(d, label = 'Design') {
 }
 const reviewList = (rs) => (rs?.length ? `<ul>${rs.map((r) => `<li>${esc(words(r.stage))} review, pass ${esc(r.pass)}: <b>${r.verdict === 'APPROVE' ? 'approved' : r.verdict === 'CHANGES' ? 'changes asked' : esc(r.verdict || 'not done')}</b>${r.reviewer ? ` by ${esc(r.reviewer)}` : ''}</li>`).join('')}</ul>` : '');
 // A small time chart: one line per series over time, optional horizontal marks (targets).
-// span: [from, to] in ms to fix the x axis (a monitor's last 24h); width: the drawing's own width,
+// span: [from, to] in ms to fix the x axis (a sensor's last 24h); width: the drawing's own width,
 // so a narrow card draws a narrow chart with readable text; a series may name its color.
 function lineChart(series, { marks = [], unit = '', height = 160, yMin = 0, span = null, width = 640 } = {}) {
   const pts = series.flatMap((s) => s.points);
@@ -2372,11 +2372,11 @@ const LEVEL_TONE = { fatal: 'high', error: 'high', warning: 'medium', info: '', 
 const fpWhat = (f) => f.kind === 'exception' ? `${f.class || 'exception'}${f.title ? `: ${f.title}` : ''}` : f.kind === 'platform' ? `${f.code || ''} platform error` : f.template || f.title || f.key;
 // One fingerprint in the exception feed: level, what, where, counts, release, links.
 const fpRow = (f) => `<div class="card small fp-row"><div><div class="act-head"><span class="badge ${LEVEL_TONE[f.level] ?? ''}">${esc(f.level || '')}</span> ${esc(String(fpWhat(f)).slice(0, 200))}</div>
-  <div class="meta">${f.frames?.[0] ? `<code>${esc(`${f.frames[0].file}${f.frames[0].line != null ? `:${f.frames[0].line}` : ''}`)}</code> · ` : ''}${esc(f.last_24h)} in 24h · ${esc(f.total)} seen${f.users ? ` · ${esc(f.users)} user(s)` : ''}${f.release ? ` · release <code>${esc(String(f.release).slice(0, 12))}</code>` : ''} · last ${esc(when(f.last_seen))} · <a class="linkish" href="#monitor/${encodeURIComponent(f.monitor)}">${esc(f.monitor)}</a>${f.observed ? ` · ${linkify(f.observed)}` : ''}${/^https:\/\//.test(f.url || '') ? ` · <a href="${esc(f.url)}" target="_blank" rel="noopener noreferrer">provider</a>` : ''}</div></div>
+  <div class="meta">${f.frames?.[0] ? `<code>${esc(`${f.frames[0].file}${f.frames[0].line != null ? `:${f.frames[0].line}` : ''}`)}</code> · ` : ''}${esc(f.last_24h)} in 24h · ${esc(f.total)} seen${f.users ? ` · ${esc(f.users)} user(s)` : ''}${f.release ? ` · release <code>${esc(String(f.release).slice(0, 12))}</code>` : ''} · last ${esc(when(f.last_seen))} · <a class="linkish" href="#sensor/${encodeURIComponent(f.sensor)}">${esc(f.sensor)}</a>${f.observed ? ` · ${linkify(f.observed)}` : ''}${/^https:\/\//.test(f.url || '') ? ` · <a href="${esc(f.url)}" target="_blank" rel="noopener noreferrer">provider</a>` : ''}</div></div>
   ${sparkBars(f.spark || [], `${f.last_24h} in the last 24 hours, by hour`)}</div>`;
 const pctOr = (x) => (x == null ? '–' : `${x}%`);
-// A monitor's latency over a range, from its bucketed samples: p50 and p95, against its target.
-function monitorChart(series, m, compact = false) {
+// A sensor's latency over a range, from its bucketed samples: p50 and p95, against its target.
+function sensorChart(series, m, compact = false) {
   const bs = series?.buckets || [];
   if (!bs.length) return '<p class="muted small">No checks in this range yet.</p>';
   const p50 = bs.filter((b) => b.p50 != null).map((b) => [b.t, b.p50]);
@@ -2385,17 +2385,17 @@ function monitorChart(series, m, compact = false) {
   const span = [Date.now() - (series.range === '7d' ? 7 : 1) * DAY, Date.now()];
   return `${lineChart([{ name: 'p50', points: p50, color: 'var(--series-1)' }, { name: 'p95', points: p95, color: 'var(--amber)' }], { unit: 'ms', height: 140, span, width: compact ? 360 : 640, marks: m.slo?.p95_ms ? [{ value: m.slo.p95_ms, label: `target p95 ${m.slo.p95_ms}ms`, strong: true }] : [] })}${down ? `<p class="small muted">${down} of ${bs.length} ${series.range === '7d' ? 'hours' : '5-minute spans'} had a failed check.</p>` : ''}`;
 }
-// Charts on the Monitoring section: each monitor's 24h series, fetched at most once a minute.
+// Charts on the Monitoring section: each sensor's 24h series, fetched at most once a minute.
 const MON_SERIES = new Map();
-async function loadMonitorSeries(name) {
+async function loadSensorSeries(name) {
   const c = MON_SERIES.get(name);
   if (c && (c.pending || Date.now() - c.at < 60000)) return;
   MON_SERIES.set(name, { ...(c || {}), pending: true });
-  try { const r = await fetch(`/api/monitor?${new URLSearchParams({ name, range: '24h' })}`); if (r.ok) MON_SERIES.set(name, { at: Date.now(), data: await r.json() }); else MON_SERIES.set(name, { at: Date.now(), data: null }); }
+  try { const r = await fetch(`/api/sensor?${new URLSearchParams({ name, range: '24h' })}`); if (r.ok) MON_SERIES.set(name, { at: Date.now(), data: await r.json() }); else MON_SERIES.set(name, { at: Date.now(), data: null }); }
   catch { MON_SERIES.set(name, { at: Date.now(), data: c?.data ?? null }); }
   const el = document.querySelector(`[data-mon-chart="${CSS.escape(name)}"]`);
-  const m = (DATA.monitors || []).find((x) => x.name === name);
-  if (el && m) el.innerHTML = monitorChart(MON_SERIES.get(name).data, m, true);
+  const m = (DATA.sensors || []).find((x) => x.name === name);
+  if (el && m) el.innerHTML = sensorChart(MON_SERIES.get(name).data, m, true);
 }
 // Incidents as a board: new, triaged, fixing, deployed, verifying, resolved (the last few).
 const INC_COLS = [['new', 'New'], ['triaged', 'Triaged'], ['fixing', 'Fixing'], ['deployed', 'Deployed'], ['verifying', 'Verifying'], ['resolved', 'Resolved']];
@@ -2413,45 +2413,45 @@ function incidentBoard(incs) {
   }).join('')}</div>`;
 }
 function renderMonitoring(d) {
-  const ms = d.monitors || [];
+  const ms = d.sensors || [];
   const down = ms.filter((m) => m.state === 'down');
-  $('n-monitors').textContent = down.length ? `${down.length} down` : '';
-  $('n-monitors').classList.toggle('hot', down.length > 0);
-  const banner = down.length ? `<i class="icon-triangle-alert" aria-hidden="true"></i> ${down.map((m) => `<a href="#monitor/${encodeURIComponent(m.name)}">${esc(m.name)}</a> is down since ${esc(when(m.since))}${m.last?.error ? ` (${esc(m.last.error)})` : ''}`).join('; ')}` : '';
+  $('n-sensors').textContent = down.length ? `${down.length} down` : '';
+  $('n-sensors').classList.toggle('hot', down.length > 0);
+  const banner = down.length ? `<i class="icon-triangle-alert" aria-hidden="true"></i> ${down.map((m) => `<a href="#sensor/${encodeURIComponent(m.name)}">${esc(m.name)}</a> is down since ${esc(when(m.since))}${m.last?.error ? ` (${esc(m.last.error)})` : ''}`).join('; ')}` : '';
   // only when it changes, so a screen reader announces an outage once
   if ($('down-banner').innerHTML !== banner) { $('down-banner').innerHTML = banner; $('down-banner').hidden = !down.length; }
-  $('monitors').innerHTML = ms.length ? `<div class="mon-grid">${ms.map((m) => {
+  $('sensors').innerHTML = ms.length ? `<div class="mon-grid">${ms.map((m) => {
     const [tone, label] = monState(m);
     if (m.kind !== 'http') return `<div class="card mon-card">
-      <h4><a class="title-link" href="#monitor/${encodeURIComponent(m.name)}">${esc(m.name)}</a><span class="badge ${tone}">${esc(label)}</span></h4>
+      <h4><a class="title-link" href="#sensor/${encodeURIComponent(m.name)}">${esc(m.name)}</a><span class="badge ${tone}">${esc(label)}</span></h4>
       <div class="mon-url">${esc(m.kind)} · ${esc(m.probe || '')}${m.uses?.length ? ` · uses ${esc(m.uses.join(', '))}` : ''}</div>
       <div class="mon-stats"><span>today <b>${esc(m.today.events)}</b> event(s)</span><span><b>${esc(m.today.qualified)}</b> new for triage</span><span><b>${esc(m.fingerprints)}</b> fingerprint(s)</span>${m.today.mean_ms != null ? `<span>run <b>${esc(m.today.mean_ms < 1000 ? `${m.today.mean_ms}ms` : `${(m.today.mean_ms / 1000).toFixed(1)}s`)}</b></span>` : ''}<span class="muted">${m.last_at ? `ran ${esc(when(m.last_at))}` : 'never run'}</span></div>
       ${m.last && !m.last.ok ? `<p class="small">${esc(m.last_error || m.last.error || 'failed')}${m.backoff_minutes ? ` · trying again in ${esc(m.backoff_minutes)} min` : ''}</p>` : ''}
     </div>`;
     return `<div class="card mon-card">
-      <h4><a class="title-link" href="#monitor/${encodeURIComponent(m.name)}">${esc(m.name)}</a><span class="badge ${tone}">${esc(label)}</span></h4>
+      <h4><a class="title-link" href="#sensor/${encodeURIComponent(m.name)}">${esc(m.name)}</a><span class="badge ${tone}">${esc(label)}</span></h4>
       <div class="mon-url">${esc(m.url || '')}</div>
       <div class="mon-stats"><span>24h <b>${esc(pctOr(m.uptime_24h))}</b> up</span><span>7d <b>${esc(pctOr(m.uptime_7d))}</b></span><span>p50 <b>${esc(m.p50_24h == null ? '–' : `${m.p50_24h}ms`)}</b></span><span>p95 <b>${esc(m.p95_24h == null ? '–' : `${m.p95_24h}ms`)}</b></span>${m.tls_days != null ? `<span>certificate <b>${esc(m.tls_days)}d</b></span>` : ''}<span class="muted">checked ${m.last_at ? esc(when(m.last_at)) : 'never'}</span></div>
-      <div data-mon-chart="${esc(m.name)}">${MON_SERIES.get(m.name)?.data ? monitorChart(MON_SERIES.get(m.name).data, m, true) : '<p class="muted small">Loading…</p>'}</div>
+      <div data-mon-chart="${esc(m.name)}">${MON_SERIES.get(m.name)?.data ? sensorChart(MON_SERIES.get(m.name).data, m, true) : '<p class="muted small">Loading…</p>'}</div>
     </div>`;
-  }).join('')}</div>` : empty('No sensors yet. The supervisor starts one for each production URL, log and error tracker it finds (settings <code>monitors</code>), and polls them while it runs.');
-  for (const m of ms.filter((x) => x.kind === 'http')) loadMonitorSeries(m.name);
+  }).join('')}</div>` : empty('No sensors yet. The supervisor starts one for each production URL, log and error tracker it finds (settings <code>sensors</code>), and polls them while it runs.');
+  for (const m of ms.filter((x) => x.kind === 'http')) loadSensorSeries(m.name);
   $('incidents').innerHTML = incidentBoard(d.incidents || []);
   for (const b of $('incidents').querySelectorAll('[data-open]')) b.onclick = () => { location.hash = b.dataset.open; };
-  const feed = d.monitor_feed || [];
-  $('monitor-exceptions').innerHTML = feed.length ? `<div class="feed">${feed.map(fpRow).join('')}</div>` : empty(ms.some((m) => m.kind !== 'http') ? 'Nothing read yet. Exceptions, log errors and platform errors the sensors read show here, newest first.' : 'No probes yet. Discovery starts them when it finds an error tracker or a host whose logs the project can already read.');
-  const obs = (d.ooda?.observations || []).filter((o) => /^monitor:/.test(o.subject || ''));
-  $('monitor-feed').innerHTML = obs.length ? obs.map((o) => `<div class="card small${o.severity >= 3 ? ' corrected' : ''}"><div><div class="act-head">${o.severity != null ? `<span class="badge ${sevBadge(o.severity)}">${esc(words(o.kind))}</span> ` : ''}${linkify(o.detail)}</div><div class="meta">${esc(when(o.created_at))} · ${subjectLink(o.subject)}</div></div></div>`).join('') : empty('Nothing yet. Outages, slow spells and each day\'s rollup show here.');
+  const feed = d.sensor_feed || [];
+  $('sensor-exceptions').innerHTML = feed.length ? `<div class="feed">${feed.map(fpRow).join('')}</div>` : empty(ms.some((m) => m.kind !== 'http') ? 'Nothing read yet. Exceptions, log errors and platform errors the sensors read show here, newest first.' : 'No probes yet. Discovery starts them when it finds an error tracker or a host whose logs the project can already read.');
+  const obs = (d.ooda?.observations || []).filter((o) => /^sensor:/.test(o.subject || ''));
+  $('sensor-feed').innerHTML = obs.length ? obs.map((o) => `<div class="card small${o.severity >= 3 ? ' corrected' : ''}"><div><div class="act-head">${o.severity != null ? `<span class="badge ${sevBadge(o.severity)}">${esc(words(o.kind))}</span> ` : ''}${linkify(o.detail)}</div><div class="meta">${esc(when(o.created_at))} · ${subjectLink(o.subject)}</div></div></div>`).join('') : empty('Nothing yet. Outages, slow spells and each day\'s rollup show here.');
 }
-function openMonitor(name) {
-  drawerFor('monitor', name);
-  const p = peekOf('monitor', name);
-  const m = (DATA.monitors || []).find((x) => x.name === name) || p?.status;
-  if (!m) return notFound('monitor', name, p, 'No monitor by that name in the settings.', { noRecord: true });
+function openSensor(name) {
+  drawerFor('sensor', name);
+  const p = peekOf('sensor', name);
+  const m = (DATA.sensors || []).find((x) => x.name === name) || p?.status;
+  if (!m) return notFound('sensor', name, p, 'No sensor by that name in the settings.', { noRecord: true });
   const [tone, label] = monState(m);
   const fails = p?.failures || [];
   if (m.kind !== 'http') return showDrawer(`<h2 id="drawer-title">${esc(name)}</h2>
-    ${attrs({ id: name, idTip: 'Its name in the owner settings (monitors).', peek: p, noRecord: true, computed: [
+    ${attrs({ id: name, idTip: 'Its name in the owner settings (sensors).', peek: p, noRecord: true, computed: [
       ['State', `<span class="badge ${tone}">${esc(label)}</span>`, 'Reading (its last run was clean), failing (three failed runs in a row; it backs off, doubling up to an hour), or not run yet. A stream is listening while its collector runs alongside the supervisor.'],
       ['Reads', `${esc(m.kind)} <code>${esc(m.probe || '')}</code>${m.uses?.length ? ` · uses ${esc(m.uses.join(', '))}` : ''}${m.credentials?.length ? ` · credentials ${m.credentials.map((c) => `<code>${esc(c)}</code>`).join(', ')}` : ''} · every ${esc(m.every_minutes)} min`, 'A probe the supervisor wrote and a reviewer read, run from main. Credentials by name only: the values are decrypted for the probe and never shown.'],
       ['Triage', m.triage ? esc(fmtObj(m.triage).replace(/<[^>]+>/g, '')) : 'error and above, from the first event', 'When a fingerprint is first observed: its level, its count and its users at these thresholds.'],
@@ -2459,12 +2459,12 @@ function openMonitor(name) {
       ['Today', `${esc(m.today.events)} event(s), ${esc(m.today.qualified)} new for triage, ${esc(m.today.runs)} run(s), ${esc(m.today.fails)} failed, ${esc(m.today.invalid)} invalid line(s)`, 'How the probe itself is doing: the day\'s rollup observes the same.'],
       ['Invalid lines', m.invalid ? esc(m.invalid.lines.map((l) => l.why).join('; ')) : '', 'Lines its last run printed that are not events: the provider may have changed its API (probe-drift).'],
     ] })}
-    ${(p?.ignores || []).length ? `<h3>Ignored</h3><ul>${p.ignores.map((x) => `<li><code>${esc(x.fingerprint)}</code>: ${esc(x.reason)} <span class="muted">(${esc(who(x.by))}, ${esc(when(x.at))}; lift with <code>monitor unignore ${esc(x.fingerprint)} --owner</code>)</span></li>`).join('')}</ul>` : ''}
+    ${(p?.ignores || []).length ? `<h3>Ignored</h3><ul>${p.ignores.map((x) => `<li><code>${esc(x.fingerprint)}</code>: ${esc(x.reason)} <span class="muted">(${esc(who(x.by))}, ${esc(when(x.at))}; lift with <code>sensor unignore ${esc(x.fingerprint)} --owner</code>)</span></li>`).join('')}</ul>` : ''}
     <h3>What it read</h3>
     ${(p?.feed || []).length ? `<div class="feed">${p.feed.map(fpRow).join('')}</div>` : '<p class="muted small">Nothing yet.</p>'}
-    ${historySection(p, `monitor:${name}`)}`);
+    ${historySection(p, `sensor:${name}`)}`);
   showDrawer(`<h2 id="drawer-title">${esc(name)}</h2>
-    ${attrs({ id: name, idTip: 'Its name in the settings (monitors).', peek: p, noRecord: true, computed: [
+    ${attrs({ id: name, idTip: 'Its name in the settings (sensors).', peek: p, noRecord: true, computed: [
       ['State', `<span class="badge ${tone}">${esc(label)}</span>${m.since ? ` since ${esc(when(m.since))}` : ''}`, 'Up, down (after its failed checks in a row) or slow (p95 over its target), from its checks.'],
       ['Checks', `<code>${esc(m.url || '')}</code>${m.expect ? ` · expects ${esc(fmtObj(m.expect).replace(/<[^>]+>/g, ''))}` : ''} · every ${esc(m.every_minutes)} min · down after ${esc(m.down_after)} failed`, 'What it requests and what counts as up; the supervisor's settings; it needs no owner answer.'],
       ['Target', m.slo ? `${m.slo.uptime ? `${(100 * m.slo.uptime).toFixed(2)}% up` : ''}${m.slo.uptime && m.slo.p95_ms ? ' · ' : ''}${m.slo.p95_ms ? `p95 under ${esc(m.slo.p95_ms)}ms` : ''}` : '', 'Its service-level target: uptime over a week, and the p95 response time.'],
@@ -2473,9 +2473,9 @@ function openMonitor(name) {
       ['Last check', m.last_at ? `${esc(when(m.last_at))}: ${m.last?.ok ? 'ok' : esc(m.last?.error || 'failed')}${m.last?.ms != null ? `, ${esc(m.last.ms)}ms` : ''}` : 'never', 'The supervisor checks it while it runs (wait polls it when due).'],
       ['Certificate', m.tls_days != null ? `expires in ${esc(m.tls_days)} days` : '', 'Days until the site\'s TLS certificate expires, checked hourly.'],
     ] })}
-    ${p?.series ? `<h3>Last 24 hours</h3>${monitorChart(p.series['24h'], m)}<h3>Last 7 days</h3>${monitorChart(p.series['7d'], m)}` : '<p class="loading">Loading…</p>'}
+    ${p?.series ? `<h3>Last 24 hours</h3>${sensorChart(p.series['24h'], m)}<h3>Last 7 days</h3>${sensorChart(p.series['7d'], m)}` : '<p class="loading">Loading…</p>'}
     ${fails.length ? `<h3>Failed checks</h3><ul>${fails.map((s) => `<li>${esc(when(s.at))}: ${esc(s.error || 'failed')}${s.ms != null ? ` <span class="muted">(${esc(s.ms)}ms)</span>` : ''}</li>`).join('')}</ul>` : ''}
-    ${historySection(p, `monitor:${name}`)}`);
+    ${historySection(p, `sensor:${name}`)}`);
 }
 
 // ---- the openers ----
@@ -2740,7 +2740,7 @@ function openLesson(id) {
 // ticket, and (folded, framed as untrusted) the latest event of each fingerprint.
 function incidentSection(inc, p) {
   if (!inc) return '';
-  const feed = new Map((DATA.monitor_feed || []).map((f) => [`${f.monitor}:${f.key}`, f]));
+  const feed = new Map((DATA.sensor_feed || []).map((f) => [`${f.sensor}:${f.key}`, f]));
   return `<h3>Incident</h3><dl class="kv">
       <dt>Stage</dt><dd><span class="badge">${esc(inc.stage)}</span>${inc.waiting ? ` · ${esc(inc.waiting)}` : ''}</dd>
       <dt>Severity</dt><dd>${esc(inc.severity)} (${esc(inc.scope)}), computed from what its fingerprints raised</dd>
@@ -2972,7 +2972,7 @@ function route() {
   if (h.startsWith('q/')) return void openQuestion(h.slice(2));
   if (h.startsWith('goal/')) return void openGoal(h.slice(5));
   if (h.startsWith('planner/')) return void openPlanner(h.slice(8));
-  const PEEKS = { feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, monitor: openMonitor };
+  const PEEKS = { feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, sensor: openSensor };
   const [kind, ...rest] = h.split('/');
   if (PEEKS[kind] && rest.length) return void PEEKS[kind](rest.join('/'));
   if (h.startsWith('file?')) return void openFile(new URLSearchParams(location.hash.slice(6)));

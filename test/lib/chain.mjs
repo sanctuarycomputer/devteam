@@ -835,50 +835,50 @@ http.createServer((req, res) => { const m = fs.readFileSync(${JSON.stringify(mod
     const srv = spawn(process.execPath, [srvFile], { stdio: 'ignore' });
     try {
       await serverUp(`http://127.0.0.1:${port}/`);
-      landSettings((txt) => txt.replace('"gates": {', `"monitors": { "web": { "kind": "http", "url": "http://127.0.0.1:${port}/up", "expect": { "status": 200, "contains": "ok" }, "down_after": 2, "slo": { "uptime": 0.999, "p95_ms": 100 } } }, "gates": {`));
-      assert.notEqual(dt(['monitor', 'poll'], { role: 'worker' }).status, 0, 'a worker never polls production');
-      assert.match(must(['monitor', 'test', 'web']), /web: ok \(HTTP 200/);
-      must(['monitor', 'poll', '--name', 'web'], sup);
-      const status = () => json(must(['monitor', 'status', '--json'])).find((m) => m.name === 'web');
+      landSettings((txt) => txt.replace('"gates": {', `"sensors": { "web": { "kind": "http", "url": "http://127.0.0.1:${port}/up", "expect": { "status": 200, "contains": "ok" }, "down_after": 2, "slo": { "uptime": 0.999, "p95_ms": 100 } } }, "gates": {`));
+      assert.notEqual(dt(['sensor', 'poll'], { role: 'worker' }).status, 0, 'a worker never polls production');
+      assert.match(must(['sensor', 'test', 'web']), /web: ok \(HTTP 200/);
+      must(['sensor', 'poll', '--name', 'web'], sup);
+      const status = () => json(must(['sensor', 'status', '--json'])).find((m) => m.name === 'web');
       assert.equal(status().state, 'up');
-      const obs = () => json(must(['log', '--type', 'observation', '--json'])).filter((o) => o.subject === 'monitor:web');
+      const obs = () => json(must(['log', '--type', 'observation', '--json'])).filter((o) => o.subject === 'sensor:web');
       fs.writeFileSync(mode, 'fail');
-      assert.deepEqual(json(must(['monitor', 'poll', '--name', 'web', '--json'], sup)).alerts, [], 'one failed check is not an outage');
-      assert.match(json(must(['monitor', 'poll', '--name', 'web', '--json'], sup)).alerts[0] ?? '', /web is down: HTTP 500/, 'down_after failed checks are');
+      assert.deepEqual(json(must(['sensor', 'poll', '--name', 'web', '--json'], sup)).alerts, [], 'one failed check is not an outage');
+      assert.match(json(must(['sensor', 'poll', '--name', 'web', '--json'], sup)).alerts[0] ?? '', /web is down: HTTP 500/, 'down_after failed checks are');
       const down = obs().find((o) => o.kind === 'down');
-      assert.ok(down && down.severity === 4 && down.detector === 'monitor');
-      must(['monitor', 'poll', '--name', 'web'], sup);
+      assert.ok(down && down.severity === 4 && down.detector === 'sensor');
+      must(['sensor', 'poll', '--name', 'web'], sup);
       assert.equal(obs().filter((o) => o.kind === 'down').length, 1, 'an outage is observed once');
-      assert.ok(json(must(['metrics', '--json'])).findings.some((x) => x.kind === 'monitor-down' && x.severity === 'medium'), 'a standing outage is a medium finding, so wait does not loop on it');
+      assert.ok(json(must(['metrics', '--json'])).findings.some((x) => x.kind === 'sensor-down' && x.severity === 'medium'), 'a standing outage is a medium finding, so wait does not loop on it');
       fs.writeFileSync(mode, 'ok');
-      must(['monitor', 'poll', '--name', 'web'], sup);
+      must(['sensor', 'poll', '--name', 'web'], sup);
       assert.deepEqual(obs().find((o) => o.kind === 'up')?.refs, [down.id], 'up refers to the outage it ends');
       assert.equal(status().state, 'up');
-      for (let i = 0; i < 20; i++) must(['monitor', 'poll', '--name', 'web'], sup);
+      for (let i = 0; i < 20; i++) must(['sensor', 'poll', '--name', 'web'], sup);
       fs.writeFileSync(mode, 'slow');
-      for (let i = 0; i < 3; i++) must(['monitor', 'poll', '--name', 'web'], sup);
+      for (let i = 0; i < 3; i++) must(['sensor', 'poll', '--name', 'web'], sup);
       assert.equal(obs().filter((o) => o.kind === 'slow').length, 0, 'a few slow answers among fast ones are not slow');
-      for (let i = 0; i < 24; i++) must(['monitor', 'poll', '--name', 'web'], sup);
+      for (let i = 0; i < 24; i++) must(['sensor', 'poll', '--name', 'web'], sup);
       assert.equal(obs().filter((o) => o.kind === 'slow').length, 1, 'slow once per breach');
-      must(['monitor', 'poll', '--name', 'web', '--rollup-day', new Date().toISOString().slice(0, 10)], sup);
+      must(['sensor', 'poll', '--name', 'web', '--rollup-day', new Date().toISOString().slice(0, 10)], sup);
       const roll = obs().find((o) => o.kind === 'reading');
       assert.ok(roll && roll.measure.unit === '%' && roll.measure.value < 100, 'the rollup counts the failed checks');
-      assert.deepEqual(json(must(['monitor', 'poll', '--due', '--json'], sup)).polled, [], 'just polled: nothing due');
-      const series = json(must(['monitor', 'series', 'web']));
+      assert.deepEqual(json(must(['sensor', 'poll', '--due', '--json'], sup)).polled, [], 'just polled: nothing due');
+      const series = json(must(['sensor', 'series', 'web']));
       assert.ok(series.buckets.some((b) => b.ok < b.n), 'the series shows the failed checks');
-      assert.ok(json(must(['dashboard-data'])).monitors.some((m) => m.name === 'web' && m.uptime_24h < 100));
-      const pk = json(must(['peek', 'monitor', 'web', '--json']));
+      assert.ok(json(must(['dashboard-data'])).sensors.some((m) => m.name === 'web' && m.uptime_24h < 100));
+      const pk = json(must(['peek', 'sensor', 'web', '--json']));
       assert.ok(pk.history.some((l) => l.kind === 'down') && pk.series['24h'].buckets.length && pk.failures.length);
       // wait polls what is due and wakes once on a new outage
       fs.writeFileSync(mode, 'fail');
-      landSettings((txt) => txt.replace('"monitors": { ', `"monitors": { "api": { "kind": "http", "url": "http://127.0.0.1:${port}/api", "down_after": 1 }, `));
+      landSettings((txt) => txt.replace('"sensors": { ', `"sensors": { "api": { "kind": "http", "url": "http://127.0.0.1:${port}/api", "down_after": 1 }, `));
       assert.match(must(['wait', '--minutes', '1'], sup), /production needs you[\s\S]*api is down/);
     } finally {
       srv.kill();
-      landSettings((txt) => txt.replace(/"monitors": \{[\s\S]*?\} \} \}, /, '').replace(/"monitors": \{ "api": [^\n]*?\} \}, /, ''));
-      fs.rmSync(path.join(repo, 'docs/devteam/run/monitors'), { recursive: true, force: true });
+      landSettings((txt) => txt.replace(/"sensors": \{[\s\S]*?\} \} \}, /, '').replace(/"sensors": \{ "api": [^\n]*?\} \}, /, ''));
+      fs.rmSync(path.join(repo, 'docs/devteam/run/sensors'), { recursive: true, force: true });
     }
-    assert.ok(!json(must(['monitor', 'status', '--json'])).length, 'cleaned up');
+    assert.ok(!json(must(['sensor', 'status', '--json'])).length, 'cleaned up');
   });
 
   step('the scrubber takes personal data and secrets out of production text and keeps the rest readable', () => {
@@ -903,12 +903,12 @@ http.createServer((req, res) => { const m = fs.readFileSync(${JSON.stringify(mod
       ['at 2026-11-05T12:34:56.789Z (12:30:00) v1.2.3 order 12345678 req 9f86d081-884c-4d63-a0e3-37b3f1d5e6a2', null],
       ['sha 3f2a9c1e5b7d4f6a8c0e2b4d6f8a1c3e5b7d9f0a on web.1 at=error code=H12 desc="Request timeout" service=30001ms status=503', null],
     ];
-    const outLines = must(['monitor', 'scrub'], { input: corpus.map(([a]) => a).join('\n') }).split('\n');
+    const outLines = must(['sensor', 'scrub'], { input: corpus.map(([a]) => a).join('\n') }).split('\n');
     corpus.forEach(([input, want], i) => assert.equal(outLines[i], want ?? input, input));
     // linear on a long line, and a line past 16 KB is cut there
     const long = `${'a'.repeat(300000)} jane@example.com`;
     const t0 = Date.now();
-    const scrubbed = must(['monitor', 'scrub'], { input: `${long}\n${'b'.repeat(64000)}@x` });
+    const scrubbed = must(['sensor', 'scrub'], { input: `${long}\n${'b'.repeat(64000)}@x` });
     assert.ok(Date.now() - t0 < 5000, `scrubbing 360 KB took ${Date.now() - t0}ms`);
     assert.match(scrubbed.split('\n')[0], /^a{16384} …\[cut at 16 KB\]$/);
   });
@@ -917,7 +917,7 @@ http.createServer((req, res) => { const m = fs.readFileSync(${JSON.stringify(mod
     const sup = { role: 'sup' };
     const settingsBefore = fs.readFileSync(path.join(repo, 'docs/devteam/project/settings.md'), 'utf8');
     const projDir = path.join(repo, 'docs/devteam/project');
-    const runMon = path.join(repo, 'docs/devteam/run/monitors');
+    const runMon = path.join(repo, 'docs/devteam/run/sensors');
     const mode = path.join(tmp, 'probe-mode');
     const sinceOut = path.join(tmp, 'probe-since');
     const TOKEN = 'tok-Zq8vW3xY9kP2mN7r';
@@ -940,33 +940,33 @@ out({ kind: 'deploy', release: 'v42', commit: '0123456789abcdef0123456789abcdef0
 if (mode === 'invalid') out({ kind: 'nope' });
 out({ cursor: 'c-' + mode });
 `;
-    write(path.join(projDir, 'monitors/fake.mjs'), probe);
-    landSettings((txt) => txt.replace('"gates": {', `"monitors": { "fake": { "kind": "probe", "probe": "project/monitors/fake.mjs", "every_minutes": 5, "credentials": { "FAKE_TOKEN": "file:probe-token" }, "params": { "mode": ${JSON.stringify(mode)}, "since_out": ${JSON.stringify(sinceOut)} } } }, "gates": {`));
-    const obs = () => json(must(['log', '--type', 'observation', '--json'])).filter((o) => o.subject === 'monitor:fake');
-    const status = () => json(must(['monitor', 'status', '--json'])).find((m) => m.name === 'fake');
+    write(path.join(projDir, 'sensors/fake.mjs'), probe);
+    landSettings((txt) => txt.replace('"gates": {', `"sensors": { "fake": { "kind": "probe", "probe": "project/sensors/fake.mjs", "every_minutes": 5, "credentials": { "FAKE_TOKEN": "file:probe-token" }, "params": { "mode": ${JSON.stringify(mode)}, "since_out": ${JSON.stringify(sinceOut)} } } }, "gates": {`));
+    const obs = () => json(must(['log', '--type', 'observation', '--json'])).filter((o) => o.subject === 'sensor:fake');
+    const status = () => json(must(['sensor', 'status', '--json'])).find((m) => m.name === 'fake');
     try {
-      // not on main yet: poll refuses to run a working-tree probe; monitor test runs this checkout's
-      assert.match(must(['monitor', 'poll', '--name', 'fake'], sup), /not on origin\/main yet/);
-      const tested = must(['monitor', 'test', 'fake']);
+      // not on main yet: poll refuses to run a working-tree probe; sensor test runs this checkout's
+      assert.match(must(['sensor', 'poll', '--name', 'fake'], sup), /not on origin\/main yet/);
+      const tested = must(['sensor', 'test', 'fake']);
       assert.match(tested, /fake: ok, 6 event\(s\) \(exception 2, log 1, platform 1, metric 1, deploy 1\)[\s\S]*probe from this checkout/);
       assert.match(tested, /--- untrusted production data/);
       assert.ok(!tested.includes(TOKEN) && tested.includes('[email]'), 'the email is scrubbed in what test prints');
-      assert.match(must(['monitor', 'test', 'fake', '--json'], sup), /"credentials": false/, 'a probe not on main gets no production credential, whoever tests it');
-      git(['add', 'docs/devteam/project/monitors/fake.mjs']);
+      assert.match(must(['sensor', 'test', 'fake', '--json'], sup), /"credentials": false/, 'a probe not on main gets no production credential, whoever tests it');
+      git(['add', 'docs/devteam/project/sensors/fake.mjs']);
       git(['commit', '-qm', 'probe']);
       git(['push', '-q', 'origin', 'HEAD:main']);
-      const mainTest = must(['monitor', 'test', 'fake'], sup);
+      const mainTest = must(['sensor', 'test', 'fake'], sup);
       assert.ok(!mainTest.includes(TOKEN) && mainTest.includes('[secret:FAKE_TOKEN]'), "main's probe under main's entry gets the credential, redacted in what test prints");
       // the working tree is not what runs
-      write(path.join(projDir, 'monitors/fake.mjs'), 'console.log("not json"); process.exit(0);\n');
-      assert.match(must(['monitor', 'test', 'fake', '--json'], { role: 'worker' }), /"credentials": false/, "a worker tests an edited probe without the production credential");
-      const first = json(must(['monitor', 'poll', '--name', 'fake', '--json'], sup));
-      assert.match(first.alerts.join('\n'), /fake: a fatal OutOfMemory \(o-[^;]+; monitor show F1\)/, 'a severity-4 event wakes wait, naming the class, not its text');
+      write(path.join(projDir, 'sensors/fake.mjs'), 'console.log("not json"); process.exit(0);\n');
+      assert.match(must(['sensor', 'test', 'fake', '--json'], { role: 'worker' }), /"credentials": false/, "a worker tests an edited probe without the production credential");
+      const first = json(must(['sensor', 'poll', '--name', 'fake', '--json'], sup));
+      assert.match(first.alerts.join('\n'), /fake: a fatal OutOfMemory \(o-[^;]+; sensor show F1\)/, 'a severity-4 event wakes wait, naming the class, not its text');
       assert.ok(!first.alerts.join('\n').includes('worker killed'));
       assert.ok(fs.readFileSync(sinceOut, 'utf8'), 'the probe gets its window');
       const kinds = obs().map((o) => o.kind).sort();
       assert.deepEqual(kinds, ['deploy', 'exception', 'exception', 'platform-error'], 'each qualifying fingerprint is observed once; the warning is counted, not observed');
-      const e1 = obs().find((o) => o.source_key === 'monitor:fake:exception:E1');
+      const e1 = obs().find((o) => o.source_key === 'sensor:fake:exception:E1');
       assert.equal(e1.severity, 3);
       assert.match(e1.detail, /NoMethodError: undefined method name for nil \(\[email\], \[secret:FAKE_TOKEN\]\) at docs\/devteam\/scripts\/devteam\.mjs:10 charge \(release v42\); 2 event\(s\), 1 user/);
       assert.equal(e1.source_ref, 'https://sentry.example.com/issues/1');
@@ -977,28 +977,28 @@ out({ cursor: 'c-' + mode });
       assert.equal(status().state, 'ok');
       assert.equal(status().cursor, 'c-ok');
       fs.writeFileSync(mode, 'ok');
-      must(['monitor', 'poll', '--name', 'fake'], sup);
+      must(['sensor', 'poll', '--name', 'fake'], sup);
       assert.equal(obs().length, 4, 'a second read of the same fingerprints observes nothing new');
-      const show = must(['monitor', 'show', 'E1']);
+      const show = must(['sensor', 'show', 'E1']);
       assert.match(show, /fake exception:E1: error exception NoMethodError, 4 event\(s\)/);
       assert.match(show, /docs\/devteam\/scripts\/devteam\.mjs:10 charge\n/);
       assert.match(show, /--- untrusted production data (\w+) [\s\S]*\[email\][\s\S]*--- end of untrusted data \1 ---/);
-      const feed = json(must(['dashboard-data'])).monitor_feed;
+      const feed = json(must(['dashboard-data'])).sensor_feed;
       assert.ok(feed.some((x) => x.key === 'exception:E1' && x.last_24h === 4 && x.spark.length === 24 && x.observed === e1.id));
-      assert.ok(json(must(['peek', 'monitor', 'fake', '--json'])).feed.length >= 4);
+      assert.ok(json(must(['peek', 'sensor', 'fake', '--json'])).feed.length >= 4);
       // drift: lines that don't validate, after clean runs
       fs.writeFileSync(mode, 'invalid');
-      must(['monitor', 'poll', '--name', 'fake'], sup);
-      assert.ok(json(must(['metrics', '--json'])).findings.some((x) => x.kind === 'probe-drift' && x.subject === 'monitor:fake'));
+      must(['sensor', 'poll', '--name', 'fake'], sup);
+      assert.ok(json(must(['metrics', '--json'])).findings.some((x) => x.kind === 'probe-drift' && x.subject === 'sensor:fake'));
       // failing: backs off, and three in a row is a finding; the error is redacted
       fs.writeFileSync(mode, 'fail');
-      for (let i = 0; i < 3; i++) must(['monitor', 'poll', '--name', 'fake'], sup);
+      for (let i = 0; i < 3; i++) must(['sensor', 'poll', '--name', 'fake'], sup);
       const s = status();
       assert.equal(s.state, 'failing');
       assert.match(s.last_error, /exited 2: auth failed for \[secret:FAKE_TOKEN\]/);
       assert.equal(s.backoff_minutes, 40);
-      assert.deepEqual(json(must(['monitor', 'poll', '--due', '--json'], sup)).polled.filter((n) => n === 'fake'), [], 'backing off: not due');
-      assert.ok(json(must(['metrics', '--json'])).findings.some((x) => x.kind === 'monitor-failing' && x.subject === 'monitor:fake'));
+      assert.deepEqual(json(must(['sensor', 'poll', '--due', '--json'], sup)).polled.filter((n) => n === 'fake'), [], 'backing off: not due');
+      assert.ok(json(must(['metrics', '--json'])).findings.some((x) => x.kind === 'sensor-failing' && x.subject === 'sensor:fake'));
       // a spike: a known fingerprint well over its hourly median
       const fpsFile = path.join(runMon, 'fake/fingerprints.json');
       const fps = json(fs.readFileSync(fpsFile, 'utf8'));
@@ -1008,77 +1008,77 @@ out({ cursor: 'c-' + mode });
       counts['log:S1'] = Object.fromEntries([...Array(40)].map((_, i) => [new Date(Date.now() - (i + 1) * 3600000).toISOString().slice(0, 13), 1]));
       fs.writeFileSync(path.join(runMon, 'fake/counts.json'), JSON.stringify(counts));
       fs.writeFileSync(mode, 'spike');
-      must(['monitor', 'poll', '--name', 'fake'], sup);
+      must(['sensor', 'poll', '--name', 'fake'], sup);
       const spike = obs().find((o) => o.kind === 'spike');
       assert.ok(spike && spike.severity === 4 && /payment gateway timeout after <n>ms is spiking: 50 this hour/.test(spike.detail), JSON.stringify(spike));
-      must(['monitor', 'poll', '--name', 'fake'], sup);
+      must(['sensor', 'poll', '--name', 'fake'], sup);
       assert.equal(obs().filter((o) => o.kind === 'spike').length, 1, 'once per window');
       assert.equal(status().state, 'ok', 'a clean run ends the failing');
       // the day's rollup: what it read by level, the warnings as templates, how the probe did
-      must(['monitor', 'poll', '--name', 'fake', '--rollup-day', new Date().toISOString().slice(0, 10)], sup);
+      must(['sensor', 'poll', '--name', 'fake', '--rollup-day', new Date().toISOString().slice(0, 10)], sup);
       const roll = obs().find((o) => o.kind === 'reading');
       assert.match(roll.detail, /event\(s\) \(fatal \d+, error \d+, warning 9\), 3 new for triage; 10 run\(s\), 4 failed, 1 invalid line\(s\)[\s\S]*warnings: slow query took <n>ms ×9/);
       // a stream: its collector spools what it reads; poll drains the spool
-      write(path.join(projDir, 'monitors/tail.mjs'), `console.log(JSON.stringify({ kind: 'log', fingerprint: 'T1', level: 'error', template: 'boom at <id>', sample: 'boom at 42 for bob@example.com' }));\nconsole.log('garbage');\nsetTimeout(() => {}, 60000);\n`);
-      git(['add', 'docs/devteam/project/monitors/tail.mjs']);
+      write(path.join(projDir, 'sensors/tail.mjs'), `console.log(JSON.stringify({ kind: 'log', fingerprint: 'T1', level: 'error', template: 'boom at <id>', sample: 'boom at 42 for bob@example.com' }));\nconsole.log('garbage');\nsetTimeout(() => {}, 60000);\n`);
+      git(['add', 'docs/devteam/project/sensors/tail.mjs']);
       git(['commit', '-qm', 'stream probe']);
       git(['push', '-q', 'origin', 'HEAD:main']);
-      landSettings((txt) => txt.replace('"monitors": { ', '"monitors": { "tail": { "kind": "stream", "probe": "project/monitors/tail.mjs" }, '));
+      landSettings((txt) => txt.replace('"sensors": { ', '"sensors": { "tail": { "kind": "stream", "probe": "project/sensors/tail.mjs" }, '));
       fs.mkdirSync(runMon, { recursive: true });
       fs.writeFileSync(path.join(runMon, '.wait-alive'), new Date().toISOString());
-      const col = spawn(process.execPath, [DT, 'monitor', 'stream', 'tail'], { cwd: repo, env: { ...process.env, ...ROLE.sup }, stdio: 'ignore' });
+      const col = spawn(process.execPath, [DT, 'sensor', 'stream', 'tail'], { cwd: repo, env: { ...process.env, ...ROLE.sup }, stdio: 'ignore' });
       try {
         for (let i = 0; i < 100 && !(readOr(path.join(runMon, 'tail/stream.jsonl')) ?? '').includes('garbage'); i++) await new Promise((r) => setTimeout(r, 100));
-        must(['monitor', 'poll', '--name', 'tail'], sup);
-        const tailObs = json(must(['log', '--type', 'observation', '--json'])).filter((o) => o.subject === 'monitor:tail');
+        must(['sensor', 'poll', '--name', 'tail'], sup);
+        const tailObs = json(must(['log', '--type', 'observation', '--json'])).filter((o) => o.subject === 'sensor:tail');
         assert.ok(tailObs.some((o) => o.kind === 'log-error' && /boom at <id> \(e\.g\. "boom at 42 for \[email\]"\)/.test(o.detail)), JSON.stringify(tailObs));
-        const ts = json(must(['monitor', 'status', '--json'])).find((m) => m.name === 'tail');
+        const ts = json(must(['sensor', 'status', '--json'])).find((m) => m.name === 'tail');
         assert.ok(ts.listening && ts.state === 'ok' && ts.today.invalid === 1, JSON.stringify(ts));
       } finally { col.kill(); }
       for (let i = 0; i < 50 && fs.existsSync(path.join(runMon, 'tail/stream.pid')); i++) await new Promise((r) => setTimeout(r, 100));
-      assert.match(must(['monitor', 'poll', '--name', 'tail'], sup), /tail: its collector is not running/);
+      assert.match(must(['sensor', 'poll', '--name', 'tail'], sup), /tail: its collector is not running/);
       // discovery: where it runs, the tracker, the health route; it proposes what isn't watched
       write(path.join(repo, 'Procfile'), 'web: bin/rails server\n');
       write(path.join(repo, 'Gemfile'), "source 'https://rubygems.org'\ngem 'sentry-ruby'\n");
       write(path.join(repo, 'config/routes.rb'), 'Rails.application.routes.draw do\n  get "up" => "rails/health#show", as: :rails_health_check\nend\n');
       git(['remote', 'add', 'heroku', 'https://git.heroku.com/demo-app.git']);
       try {
-        const d = json(must(['monitor', 'discover', '--json']));
+        const d = json(must(['sensor', 'discover', '--json']));
         assert.ok(d.hosts.some((h) => h.host === 'heroku' && h.app === 'demo-app'), JSON.stringify(d.hosts));
         assert.ok(d.trackers.some((x) => x.tracker === 'sentry') && d.health.some((h) => h.path === '/up'));
         assert.ok(d.proposals.some((p) => p.name === 'sentry' && p.probe_to_write));
         assert.ok(d.notes.some((n) => /Procfile/.test(n)));
-        assert.ok(json(must(['metrics', '--json'])).findings.some((x) => x.kind === 'monitor-discovery-due'));
-        assert.notEqual(dt(['monitor', 'discover', '--record'], { role: 'worker' }).status, 0, 'only the supervisor records a discovery');
-        must(['monitor', 'discover', '--record'], sup);
-        assert.ok(json(must(['log', '--type', 'observation', '--json'])).some((o) => o.kind === 'discovery' && o.subject === 'monitors' && /heroku demo-app/.test(o.detail)));
-        assert.ok(!json(must(['metrics', '--json'])).findings.some((x) => x.kind === 'monitor-discovery-due'), 'looked over this week');
+        assert.ok(json(must(['metrics', '--json'])).findings.some((x) => x.kind === 'sensor-discovery-due'));
+        assert.notEqual(dt(['sensor', 'discover', '--record'], { role: 'worker' }).status, 0, 'only the supervisor records a discovery');
+        must(['sensor', 'discover', '--record'], sup);
+        assert.ok(json(must(['log', '--type', 'observation', '--json'])).some((o) => o.kind === 'discovery' && o.subject === 'sensors' && /heroku demo-app/.test(o.detail)));
+        assert.ok(!json(must(['metrics', '--json'])).findings.some((x) => x.kind === 'sensor-discovery-due'), 'looked over this week');
       } finally {
         git(['remote', 'remove', 'heroku']);
         for (const f of ['Procfile', 'Gemfile', 'config/routes.rb']) fs.rmSync(path.join(repo, f), { force: true });
       }
     } finally {
       landSettings(() => settingsBefore);
-      if (git(['ls-files', 'docs/devteam/project/monitors'])) {
-        git(['rm', '-rqf', 'docs/devteam/project/monitors']);
+      if (git(['ls-files', 'docs/devteam/project/sensors'])) {
+        git(['rm', '-rqf', 'docs/devteam/project/sensors']);
         git(['commit', '-qm', 'no probes']);
         git(['push', '-q', 'origin', 'HEAD:main']);
       }
-      fs.rmSync(path.join(projDir, 'monitors'), { recursive: true, force: true });
+      fs.rmSync(path.join(projDir, 'sensors'), { recursive: true, force: true });
       fs.rmSync(runMon, { recursive: true, force: true });
       fs.rmSync(path.join(repo, 'probe-token'), { force: true });
     }
-    assert.ok(!json(must(['monitor', 'status', '--json'])).length, 'cleaned up');
+    assert.ok(!json(must(['sensor', 'status', '--json'])).length, 'cleaned up');
   });
 
   step('incidents: triage lists what changed, ignores hold, an incident computes its severity, a fix is decided on the ladder, scoped by it, capped by releases, and scheduled first', async () => {
     const sup = { role: 'sup' };
     const settingsBefore = fs.readFileSync(path.join(repo, 'docs/devteam/project/settings.md'), 'utf8');
     const projDir = path.join(repo, 'docs/devteam/project');
-    const runMon = path.join(repo, 'docs/devteam/run/monitors');
+    const runMon = path.join(repo, 'docs/devteam/run/sensors');
     const mode = path.join(tmp, 'inc-mode');
     fs.writeFileSync(mode, 'a');
-    write(path.join(projDir, 'monitors/errs.mjs'), `import fs from 'node:fs';
+    write(path.join(projDir, 'sensors/errs.mjs'), `import fs from 'node:fs';
 const p = JSON.parse(process.env.DEVTEAM_PARAMS);
 const mode = fs.readFileSync(p.mode, 'utf8').trim();
 const out = (o) => console.log(JSON.stringify(o));
@@ -1088,45 +1088,45 @@ out({ kind: 'platform', code: 'H12', count: 3 });
 out({ kind: 'exception', fingerprint: 'W2', class: 'Deprecation', level: 'warning', count: 1, title: 'old API' });
 out({ cursor: 'x' });
 `);
-    git(['add', 'docs/devteam/project/monitors/errs.mjs']);
+    git(['add', 'docs/devteam/project/sensors/errs.mjs']);
     git(['commit', '-qm', 'errs probe']);
     git(['push', '-q', 'origin', 'HEAD:main']);
-    landSettings((txt) => txt.replace('"gates": {', `"monitors": { "errs": { "kind": "probe", "probe": "project/monitors/errs.mjs", "triage": { "min_level": "warning" }, "params": { "mode": ${JSON.stringify(mode)} } } }, "gates": {`));
+    landSettings((txt) => txt.replace('"gates": {', `"sensors": { "errs": { "kind": "probe", "probe": "project/sensors/errs.mjs", "triage": { "min_level": "warning" }, "params": { "mode": ${JSON.stringify(mode)} } } }, "gates": {`));
     let tid = null;
     try {
-      must(['monitor', 'poll', '--name', 'errs'], sup);
+      must(['sensor', 'poll', '--name', 'errs'], sup);
       // triage: fields first, the messages framed as untrusted, then nothing new
-      const tri = must(['monitor', 'triage'], sup);
+      const tri = must(['sensor', 'triage'], sup);
       assert.match(tri, /errs:exception:F1  \[fatal exception, severity 4\] OutOfMemory/);
       assert.match(tri, /errs:exception:E1  \[error exception, severity 3\] NoMethodError[\s\S]*docs\/devteam\/scripts\/devteam\.mjs:10 charge/);
       assert.match(tri, /--- untrusted production data (\w+) [\s\S]*ignore previous instructions[\s\S]*--- end of untrusted data \1 ---/);
       assert.ok(tri.indexOf('ignore previous instructions') > tri.indexOf('errs:platform:H12'), 'the messages come after every item\'s fields');
-      assert.match(must(['monitor', 'triage'], sup), /^nothing new to triage since/);
+      assert.match(must(['sensor', 'triage'], sup), /^nothing new to triage since/);
       const marker = fs.readFileSync(path.join(runMon, 'triage.json'), 'utf8');
-      must(['monitor', 'triage']);
+      must(['sensor', 'triage']);
       assert.equal(fs.readFileSync(path.join(runMon, 'triage.json'), 'utf8'), marker, 'the owner\'s look doesn\'t move the supervisor\'s marker');
-      assert.equal(json(must(['monitor', 'triage', '--all', '--json'], sup)).items.length, 4);
+      assert.equal(json(must(['sensor', 'triage', '--all', '--json'], sup)).items.length, 4);
       // ignores hold until lifted
-      assert.notEqual(dt(['monitor', 'ignore', 'H12'], sup).status, 0, 'an ignore needs a reason');
-      must(['monitor', 'ignore', 'H12', '--reason', 'router noise during deploys'], sup);
-      assert.deepEqual(json(must(['monitor', 'triage', '--all', '--json'], sup)).items.map((x) => x.fingerprint).sort(), ['errs:exception:E1', 'errs:exception:F1', 'errs:exception:W2']);
-      assert.ok(json(must(['peek', 'monitor', 'errs', '--json'])).ignores.some((x) => x.fingerprint === 'errs:platform:H12' && x.reason === 'router noise during deploys'));
-      must(['monitor', 'unignore', 'errs:platform:H12', '--owner']);
-      assert.equal(json(must(['monitor', 'triage', '--all', '--json'], sup)).items.length, 4, 'the owner lifted it');
+      assert.notEqual(dt(['sensor', 'ignore', 'H12'], sup).status, 0, 'an ignore needs a reason');
+      must(['sensor', 'ignore', 'H12', '--reason', 'router noise during deploys'], sup);
+      assert.deepEqual(json(must(['sensor', 'triage', '--all', '--json'], sup)).items.map((x) => x.fingerprint).sort(), ['errs:exception:E1', 'errs:exception:F1', 'errs:exception:W2']);
+      assert.ok(json(must(['peek', 'sensor', 'errs', '--json'])).ignores.some((x) => x.fingerprint === 'errs:platform:H12' && x.reason === 'router noise during deploys'));
+      must(['sensor', 'unignore', 'errs:platform:H12', '--owner']);
+      assert.equal(json(must(['sensor', 'triage', '--all', '--json'], sup)).items.length, 4, 'the owner lifted it');
       // an incident: severity computed, never set; a fingerprint in one open incident
-      const pid = must(['monitor', 'incident', 'E1', '--title', 'checkout failing'], sup).split(':')[0];
+      const pid = must(['sensor', 'incident', 'E1', '--title', 'checkout failing'], sup).split(':')[0];
       assert.equal(json(must(['dashboard-data'])).incidents.find((x) => x.id === pid).severity, 3);
-      must(['monitor', 'incident', pid, '--add', 'F1'], sup);
-      const low = must(['monitor', 'incident', 'W2', '--title', 'old API calls'], sup).split(':')[0];
+      must(['sensor', 'incident', pid, '--add', 'F1'], sup);
+      const low = must(['sensor', 'incident', 'W2', '--title', 'old API calls'], sup).split(':')[0];
       assert.equal(json(must(['dashboard-data'])).incidents.find((x) => x.id === low).scope, 'sev:low');
       assert.match(dt(['decide', '--class', 'incident-fix', '--refs', low, pid, 'bill-01-x', '--', 'x'], sup).err, /exactly one incident/, 'a low incident can\'t carry a high one');
       // a trust question for the class needs no incident
       assert.match(dt(['ask', '--kind', 'trust', '--class', 'incident-fix', '--question', 'Let low-severity fixes go ahead?', '--recommendation', 'yes', '--reasons', 'below-rung'], sup).err, /the owner agreed with the recommendation/, 'a trust question is refused for want of evidence, not for want of an incident');
       assert.match(dt(['act', '--class', 'incident-fix', '--scope', 'sev:low', '--refs', pid, 'bill-01-z', '--', 'x'], sup).err, /carries out a decision/, 'no incident fix without a decision');
       assert.equal(json(must(['dashboard-data'])).incidents.find((x) => x.id === pid).severity, 4);
-      assert.match(dt(['monitor', 'incident', 'E1', '--title', 'again'], sup).err, /is in p-.* already/);
+      assert.match(dt(['sensor', 'incident', 'E1', '--title', 'again'], sup).err, /is in p-.* already/);
       assert.match(dt(['problem', 'set', pid, '--severity', '1'], sup).err, /its severity is computed/);
-      assert.equal(json(must(['monitor', 'triage', '--all', '--json'], sup)).items.find((x) => x.fingerprint === 'errs:exception:E1').incident.id, pid);
+      assert.equal(json(must(['sensor', 'triage', '--all', '--json'], sup)).items.find((x) => x.fingerprint === 'errs:exception:E1').incident.id, pid);
       // deciding a fix: rung 2, scoped by the incident, so it asks with a default and a deadline
       tid = 'bill-01-checkout-oom';
       const dec = dt(['decide', '--class', 'incident-fix', '--refs', pid, tid, '--', 'fix OutOfMemory'], sup);
@@ -1162,8 +1162,8 @@ out({ cursor: 'x' });
       assert.ok(pk.incident.ticket === tid && pk.events.some((e) => e.cached?.event?.class === 'OutOfMemory') && pk.related.length >= 2);
       // merged: a fingerprint holding another class is too coarse
       fs.writeFileSync(mode, 'b');
-      must(['monitor', 'poll', '--name', 'errs'], sup);
-      assert.ok(json(must(['metrics', '--json'])).findings.some((x) => x.kind === 'probe-merged' && x.subject === 'monitor:errs'));
+      must(['sensor', 'poll', '--name', 'errs'], sup);
+      assert.ok(json(must(['metrics', '--json'])).findings.some((x) => x.kind === 'probe-merged' && x.subject === 'sensor:errs'));
       // where merging releases, incident-fix never runs above release-production
       landSettings((txt) => txt.replace('"gates": {', '"release": "merge", "gates": {'));
       assert.equal(json(must(['trust', '--json'])).find((r) => r.class === 'incident-fix').rung, 2, 'rung 2 stays, so a fix still goes ahead at its default');
@@ -1173,17 +1173,17 @@ out({ cursor: 'x' });
     } finally {
       if (tid && dt(['ticket', 'show', tid]).status === 0) must(['ticket', 'set', tid, '--json', JSON.stringify({ superseded_by: 'bill-01-card' })], sup);
       landSettings(() => settingsBefore);
-      if (git(['ls-files', 'docs/devteam/project/monitors'])) {
-        git(['rm', '-rqf', 'docs/devteam/project/monitors']);
+      if (git(['ls-files', 'docs/devteam/project/sensors'])) {
+        git(['rm', '-rqf', 'docs/devteam/project/sensors']);
         git(['commit', '-qm', 'no probes']);
         git(['push', '-q', 'origin', 'HEAD:main']);
       }
-      fs.rmSync(path.join(projDir, 'monitors'), { recursive: true, force: true });
+      fs.rmSync(path.join(projDir, 'sensors'), { recursive: true, force: true });
       fs.rmSync(runMon, { recursive: true, force: true });
     }
   });
 
-  step('monitors: a redirect is not up, a new monitor already down goes down, a name stays in run/, and a URL\'s secrets are never shown', async () => {
+  step('sensors: a redirect is not up, a new sensor already down goes down, a name stays in run/, and a URL\'s secrets are never shown', async () => {
     const sup = { role: 'sup' };
     const port = await freePort();
     const srvFile = path.join(tmp, 'mon2-server.mjs');
@@ -1205,44 +1205,44 @@ http.createServer((req, res) => {
         creds: { kind: 'http', url: `http://user:hunter2@127.0.0.1:${port}/login` },
         tokened: { kind: 'http', url: `${base}/login?token=abc123` },
       };
-      landSettings((txt) => txt.replace('"gates": {', `"monitors": ${JSON.stringify(mons)}, "monitor_defaults": { "name": "../../ESCAPED-MON" }, "gates": {`));
-      // validate refuses a name field and credentials in a url, and the monitor is never polled
+      landSettings((txt) => txt.replace('"gates": {', `"sensors": ${JSON.stringify(mons)}, "sensor_defaults": { "name": "../../ESCAPED-MON" }, "gates": {`));
+      // validate refuses a name field and credentials in a url, and the sensor is never polled
       const v = dt(['validate']);
-      assert.match(v.out + v.err, /monitors\.evil: no "name" field/);
-      assert.match(v.out + v.err, /monitor_defaults: no "name" field/);
-      assert.match(v.out + v.err, /monitors\.creds: its url http:\/\/127\.0\.0\.1:\d+\/login carries credentials/);
-      assert.match(v.out + v.err, /monitors\.tokened: its url [^\n]* carries credentials/);
+      assert.match(v.out + v.err, /sensors\.evil: no "name" field/);
+      assert.match(v.out + v.err, /sensor_defaults: no "name" field/);
+      assert.match(v.out + v.err, /sensors\.creds: its url http:\/\/127\.0\.0\.1:\d+\/login carries credentials/);
+      assert.match(v.out + v.err, /sensors\.tokened: its url [^\n]* carries credentials/);
       assert.doesNotMatch(v.out + v.err, /hunter2|abc123/);
-      // the defaults' name field fails every monitor closed: put a clean default back
-      landSettings((txt) => txt.replace('"monitor_defaults": { "name": "../../ESCAPED-MON" }', '"monitor_defaults": {}'));
-      const names = json(must(['monitor', 'status', '--json'])).map((m) => m.name).sort();
-      assert.deepEqual(names, ['fresh', 'redir'], 'a monitor with a name field or credentials is ignored');
-      must(['monitor', 'poll'], sup);
-      assert.ok(!fs.existsSync(escaped), 'a poll never writes outside run/monitors');
+      // the defaults' name field fails every sensor closed: put a clean default back
+      landSettings((txt) => txt.replace('"sensor_defaults": { "name": "../../ESCAPED-MON" }', '"sensor_defaults": {}'));
+      const names = json(must(['sensor', 'status', '--json'])).map((m) => m.name).sort();
+      assert.deepEqual(names, ['fresh', 'redir'], 'a sensor with a name field or credentials is ignored');
+      must(['sensor', 'poll'], sup);
+      assert.ok(!fs.existsSync(escaped), 'a poll never writes outside run/sensors');
       // a 302 is not up (supervisor.md: a redirect to a login page is not "up")
-      const st = () => Object.fromEntries(json(must(['monitor', 'status', '--json'])).map((m) => [m.name, m]));
+      const st = () => Object.fromEntries(json(must(['sensor', 'status', '--json'])).map((m) => [m.name, m]));
       assert.equal(st().redir.last.ok, false);
       assert.match(st().redir.last.error, /HTTP 302/);
-      // a new monitor whose site is already down still counts its failures while unknown
-      const r2 = json(must(['monitor', 'poll', '--name', 'fresh', '--json'], sup));
+      // a new sensor whose site is already down still counts its failures while unknown
+      const r2 = json(must(['sensor', 'poll', '--name', 'fresh', '--json'], sup));
       assert.match(r2.alerts.join('\n'), /fresh is down: HTTP 500/, 'down after down_after failed checks, from the first');
       // the query never reaches the alert, the status, the observation or the finding
       assert.doesNotMatch(r2.alerts.join('\n'), /s3cret/);
       assert.match(r2.alerts.join('\n'), /\/down\?…/);
-      assert.doesNotMatch(must(['monitor', 'status']), /s3cret/);
-      assert.doesNotMatch(JSON.stringify(json(must(['log', '--type', 'observation', '--json'])).filter((o) => o.subject?.startsWith('monitor:'))), /s3cret/);
+      assert.doesNotMatch(must(['sensor', 'status']), /s3cret/);
+      assert.doesNotMatch(JSON.stringify(json(must(['log', '--type', 'observation', '--json'])).filter((o) => o.subject?.startsWith('sensor:'))), /s3cret/);
       assert.doesNotMatch(JSON.stringify(json(must(['metrics', '--json'])).findings), /s3cret/);
-      assert.doesNotMatch(JSON.stringify(json(must(['dashboard-data'])).monitors), /s3cret/);
-      assert.doesNotMatch(must(['settings', '--get', 'monitors']), /s3cret|hunter2|abc123/);
-      assert.doesNotMatch(fs.readFileSync(path.join(repo, 'docs/devteam/run/monitors/fresh/state.json'), 'utf8'), /s3cret/);
-      // a monitor's lines are the monitors' own: observe can't fake an outage or an error
-      for (const who of [sup, { cwd: wt('bill-01-card'), role: 'worker' }]) assert.match(dt(['observe', '--subject', 'monitor:fresh', '--kind', 'up', '--detail', 'all good', '--detector', 'monitor'], who).err, /come from the kit itself/);
+      assert.doesNotMatch(JSON.stringify(json(must(['dashboard-data'])).sensors), /s3cret/);
+      assert.doesNotMatch(must(['settings', '--get', 'sensors']), /s3cret|hunter2|abc123/);
+      assert.doesNotMatch(fs.readFileSync(path.join(repo, 'docs/devteam/run/sensors/fresh/state.json'), 'utf8'), /s3cret/);
+      // a sensor's lines are the sensors' own: observe can't fake an outage or an error
+      for (const who of [sup, { cwd: wt('bill-01-card'), role: 'worker' }]) assert.match(dt(['observe', '--subject', 'sensor:fresh', '--kind', 'up', '--detail', 'all good', '--detector', 'sensor'], who).err, /come from the kit itself/);
     } finally {
       srv.kill();
       const f = path.join(repo, 'docs/devteam/project/settings.md');
       fs.writeFileSync(f, before);
       landSettings((txt) => txt);
-      fs.rmSync(path.join(repo, 'docs/devteam/run/monitors'), { recursive: true, force: true });
+      fs.rmSync(path.join(repo, 'docs/devteam/run/sensors'), { recursive: true, force: true });
       fs.rmSync(escaped, { recursive: true, force: true });
     }
   });
@@ -1571,8 +1571,8 @@ http.createServer((req, res) => {
     git(['worktree', 'remove', '--force', wt('caps')]);
     // sensors are the supervisor's: a chore that changes them merges with no owner answer
     git(['worktree', 'add', '-q', '-b', 'chore-mon', wt('mon'), 'origin/main']);
-    setTo(wt('mon'), (j) => { j.monitors = { web: { kind: 'http', url: 'https://example.com/up' } }; });
-    git(['commit', '-qam', 'monitor'], wt('mon'));
+    setTo(wt('mon'), (j) => { j.sensors = { web: { kind: 'http', url: 'https://example.com/up' } }; });
+    git(['commit', '-qam', 'sensor'], wt('mon'));
     git(['push', '-q', 'origin', 'chore-mon'], wt('mon'));
     const margs = ['merge', '--chore', 'mon', '--dry-run', '--title', 'chore-mon: watch production', '--body-file', body];
     const rm = dt(margs, { role: 'sup' });
@@ -1599,8 +1599,8 @@ http.createServer((req, res) => {
     assert.match(dt([...margs, '--decision', Dm], { role: 'sup' }).out, /was already carried out for chore-mon/, 'an act for this target does');
     // a sensor that reads with a production credential needs no owner answer either, nor its file
     git(['reset', '-q', '--hard', 'origin/main'], wt('mon'));
-    setTo(wt('mon'), (j) => { j.monitors = { errs: { kind: 'probe', probe: 'project/monitors/errs.mjs', credentials: { ERR_TOKEN: 'file:err-token' } } }; });
-    write(path.join(wt('mon'), 'docs/devteam/project/monitors/errs.mjs'), 'console.log(JSON.stringify({ cursor: "x" }));\n');
+    setTo(wt('mon'), (j) => { j.sensors = { errs: { kind: 'probe', probe: 'project/sensors/errs.mjs', credentials: { ERR_TOKEN: 'file:err-token' } } }; });
+    write(path.join(wt('mon'), 'docs/devteam/project/sensors/errs.mjs'), 'console.log(JSON.stringify({ cursor: "x" }));\n');
     git(['add', '-A'], wt('mon'));
     git(['commit', '-qm', 'a probe'], wt('mon'));
     git(['push', '-q', '-f', 'origin', 'chore-mon'], wt('mon'));
