@@ -61,7 +61,7 @@ function fixture(name, { resume = null } = {}) {
     write(keys, '');
     write(prog, `const fs=require('fs');console.log(${JSON.stringify(shown)}.join('\\n'));process.stdin.setRawMode(true);process.stdin.on('data',(d)=>fs.appendFileSync(${JSON.stringify(keys)},d));setInterval(()=>{},1000);`);
     ensureSession();
-    execFileSync('tmux', ['new-window', '-d', '-t', `=${session}:`, '-n', window, '-c', wt, `${process.execPath} ${prog}`]);
+    execFileSync('tmux', ['new-window', '-d', '-t', `=${session}:`, '-n', window, '-c', wt, `exec ${process.execPath} ${prog}`]); // exec: Linux's dash can stay as the parent otherwise, and the pane would read as a shell
     return { keys: () => fs.readFileSync(keys, 'utf8'), shows: () => spawnSync('tmux', ['capture-pane', '-p', '-t', `=${session}:${window}`], { encoding: 'utf8' }).stdout };
   };
   let lines = 0;
