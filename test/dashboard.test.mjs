@@ -1392,5 +1392,5 @@ test("a goal at its target: the card's Mark met is an owner action, same-origin 
   assert.deepEqual([g.status, u?.by, u?.channel], ['met', 'owner', 'dashboard'], "the owner's, from the dashboard");
   const html = fs.readFileSync(path.join(kit, 'dashboard', 'index.html'), 'utf8');
   assert.match(html, /g\.status === 'ready' && g\.at_target \? `<div class="holdbar"><button type="button" data-met-id=/, 'the card draws Mark met for a running goal at its target');
-  assert.match(html, /await post\('goal-met', \{ id \}, `met-\$\{id\}`\)/);
+  assert.match(html, /build: \(\) => \(\{ action: 'goal-met', body: \{ id \} \}\)/);
 });
