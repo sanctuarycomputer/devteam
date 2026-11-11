@@ -385,7 +385,7 @@ async function threads({ DASH, pane }) {
   const typed = await until(() => pane.typed().includes(T) && pane.typed(), "the turn in the supervisor's pane");
   assert.ok(typed.includes(`[devteam thread ${T} from owner on goal ${G}] Narrow this to the EU launch — devteam.mjs thread show ${T}`), typed);
   stepOk(`the turn reached the supervisor's pane as one line: ${typed.trim().split('\n').pop()}`);
-  dt(['thread', 'say', T, 'That drops the measure to EU orders; want me to propose the change?'], SUP);
+  dt(['thread', 'reply', T, 'That drops the measure to EU orders; want me to propose the change?'], SUP);
   const t0 = Date.now();
   await until(() => browser.evalIn(dash, `document.querySelector('#tl-c-turns .tl-turn.supervisor')?.textContent.includes('drops the measure')`), 'the reply in the card', 10000);
   const ms = Date.now() - t0;

@@ -1270,7 +1270,7 @@ function answeredCard(q) {
     ${q.autonomy ? `<div class="muted">From then on, for ${esc(words(q.autonomy.class))}: the supervisor ${esc(RUNG_WORDS[q.autonomy.rung])}.</div>` : ''}
     ${q.standing_rule ? `<div class="muted">Standing rule: ${esc(q.standing_rule)}</div>` : ''}
     ${q.kind === 'review' ? `<div class="meta"><a class="linkish" href="#review/${encodeURIComponent(q.id)}">See the review as you answered it</a>${q.result_status && !['verified', 'declined'].includes(q.result_status) ? ` <span class="badge high">${esc(q.result_status)}</span>` : ''}</div>` : ''}
-    <div class="meta">${esc(how)}${q.answered_at ? ` · ${when(q.answered_at)}` : ''}</div>
+    <div class="meta${q.channel === 'thread' && q.turn_thread ? ' from-thread' : ''}">${esc(how)}${q.channel === 'thread' && q.turn_thread ? `: <a class="linkish" href="#talk/${encodeURIComponent(q.turn_thread)}">${esc(q.turn_thread_title || 'a conversation with the supervisor')}</a>` : ''}${q.answered_at ? ` · ${when(q.answered_at)}` : ''}</div>
     ${q.status === 'defaulted' ? `<div class="row-inline"><input type="text" data-overrule="${esc(q.id)}" placeholder="Your answer instead"><button class="ghost" data-overrule-send="${esc(q.id)}">Overrule</button><span class="err" id="e-${esc(q.id)}"></span></div>` : ''}
   </div>`;
 }

@@ -2057,7 +2057,7 @@
         "x-set-only": ["status", "outcome", "ready"]
       },
       "turn": {
-        "description": "One message in a thread: the owner's words to the supervisor, which carry the weight of the owner's words in its session and are already verbatim here, or the supervisor's reply. Never changed. A turn on a thread that doesn't exist or is resolved is refused by thread say.",
+        "description": "One message in a thread: the owner's words to the supervisor, which carry the weight of the owner's words in its session and are already verbatim here, or the supervisor's reply. Never changed. A turn on a thread that doesn't exist or is resolved is refused by thread say (the owner's) and thread reply (the supervisor's).",
         "type": "object",
         "properties": {
           "thread": {
@@ -2074,7 +2074,7 @@
             "x-tip": "The words."
           },
           "refs": {
-            "description": "On a supervisor turn: what it did or is about, as <type>:<id> (goal:g-…, ticket:checkout-04, act:a-…), at most 8 of 120 bytes.",
+            "description": "On a supervisor turn: what it did or is about, as <type>:<id> (goal:g-…, ticket:checkout-04, act:a-…), at most 8 of 120 bytes. question:<qid> names an Inbox question asked in this thread, so the owner's next turn may settle it (answer --from-turn).",
             "type": "array",
             "maxItems": 8,
             "items": { "type": "string", "pattern": "^[a-z]+:[A-Za-z0-9][A-Za-z0-9._/-]*$", "maxLength": 120 },

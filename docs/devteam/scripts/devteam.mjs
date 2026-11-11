@@ -1095,9 +1095,14 @@ function logWriter() {
   return 'supervisor';
 }
 // Owner commands run from the owner's terminal or the dashboard, never an agent session. A
-// visibility measure, not a wall: appendLog stamps every owner line with its channel.
-function ownerWriter() {
+// visibility measure, not a wall: appendLog stamps every owner line with its channel. The supervisor
+// with no DEVTEAM_ROLE set is caught by its pane: the one its own commands recorded (rememberSupervisorPane),
+// or the one DEVTEAM_SUPERVISOR names. The dashboard's children run with no TMUX_PANE, wherever it
+// was started. hint: what the supervisor does instead, for the command at hand.
+function ownerWriter(hint) {
   if (process.env.DEVTEAM_ROLE) die(`owner commands don't run in an agent session (DEVTEAM_ROLE=${process.env.DEVTEAM_ROLE})`);
+  const pane = process.env.TMUX_PANE;
+  if (pane && process.env.TMUX && [process.env.DEVTEAM_SUPERVISOR, readText(supervisorPaneFile())?.trim()].includes(pane)) die(`this is the supervisor's session${hint ? `: ${hint}` : ''}; the owner's commands run in their own terminal or on the dashboard`);
   return { by: 'owner' };
 }
 const ownerChannel = () => (process.env.DEVTEAM_CHANNEL === 'dashboard' ? 'dashboard' : 'cli');
@@ -1417,7 +1422,14 @@ function artifactLinksMoved(v) {
   if (gone.length) return `${v.id} links the artifact ${gone.join(', ')}, which is no longer available; ask again`;
   return null;
 }
-const questions = () => logObjects('question').map((q) => { const v = questionView(q); return { ...v, links: resolveQuestionLinks(v.links, v.status === 'open'), goal_hold: questionHold(q), ...(v.thread ? { thread_title: logGet(v.thread)?.title ?? null } : {}) }; });
+const questions = () => logObjects('question').map((q) => { const v = questionView(q); return { ...v, links: resolveQuestionLinks(v.links, v.status === 'open'), goal_hold: questionHold(q), ...(v.thread ? { thread_title: logGet(v.thread)?.title ?? null } : {}), ...turnThread(v.turn) }; });
+// Where an answer from a thread was said: the cited turn's thread, which for an Inbox question is
+// none of its own, so the answered card can link the owner to the words it used.
+function turnThread(uid) {
+  const u = typeof uid === 'string' ? logGet(uid) : null;
+  if (u?.type !== 'turn' || typeof u.thread !== 'string') return {};
+  return { turn_thread: u.thread, turn_thread_title: logGet(u.thread)?.title ?? null };
+}
 
 // Why question q does not authorise the supervisor to change goal goalId (null when it does): it
 // is a goal-change question about that goal, answered by the owner with its recommendation (an
@@ -4601,10 +4613,15 @@ function chatAnswer(what) {
   if (!flagStr('said')?.trim()) die(`${what} --from-chat needs --said "<the owner's words, verbatim>"`);
   return flagStr('said').trim();
 }
+// An Inbox question in a thread: the supervisor's turn there, before the owner's, that names it (thread
+// ask's question, or a reply's --refs question:<qid>). Without one, a yes in that thread may have been
+// to anything, another question in it included.
+const questionNamed = (objects, thread, qid, before) => [...objects.values()].some((o) => o.type === 'turn' && o.thread === thread && o.created_by === 'supervisor' && o.created_at < before && (o.question === qid || (Array.isArray(o.refs) && o.refs.includes(`question:${qid}`))));
 // --from-turn: the owner said it in a thread, in a turn already verbatim in the log, and the supervisor
 // records the decision it settles, as from chat but with the turn in place of a quote, so no
 // transcript check is needed. One turn settles one question, and only one it is bound to: asked in
-// the turn's own thread before it, or asked with no thread (in the Inbox) before it.
+// the turn's own thread before it, or asked with no thread (in the Inbox) before it and named in the
+// turn's thread by the supervisor before the turn (questionNamed), so the words were said to it.
 function turnAnswer(what, v) {
   if (process.env.DEVTEAM_ROLE !== 'supervisor' || logWriter() !== 'supervisor') die(`${what} --from-turn: the supervisor records what the owner said in a thread; in your own terminal, answer directly`);
   if (flags['from-chat']) die(`${what}: --from-turn or --from-chat, not both`);
@@ -4617,6 +4634,7 @@ function turnAnswer(what, v) {
   if (used) die(`--from-turn ${uid}: that turn already settled ${used.id}; one turn settles one question (the owner answers the other in the card, or says it again)`);
   if (v.thread && u.thread !== v.thread) die(`--from-turn ${uid}: ${v.id} was asked in ${v.thread}, and that turn is in ${u.thread}`);
   if (u.created_at <= v.asked_at) die(`--from-turn ${uid}: the turn is older than ${v.id}; words said before the question was asked don't answer it`);
+  if (!v.thread && !questionNamed(readLog().objects, u.thread, v.id, u.created_at)) die(`--from-turn ${uid}: ${v.id} was asked in the Inbox, and no reply of yours in ${u.thread} named it before that turn; reply there first, quoting it, with --refs question:${v.id}, and record the owner's answer to that`);
   return { said: String(u.text), turn: uid };
 }
 // The owner answers (terminal, dashboard or, through the supervisor, chat). The supervisor may only
@@ -4878,13 +4896,13 @@ function threadView(t, ts, qs) {
 }
 const threadViewOf = (id) => threadViews(readLog().objects).find((x) => x.id === id) ?? null;
 // How a pane line names a subject: its kind and stable id, never its title or capture, which may be
-// page-written; a preview's route is quoted, as data.
+// page-written; a preview's route is page-written too, and the supervisor reads it in thread show.
 function subjectWords(s) {
   if (!isObj(s)) return '';
   if (s.kind === 'item' && SUBJECT_REF.test(s.ref ?? '')) { const i = s.ref.indexOf(':'); return ` on ${s.ref.slice(0, i)} ${s.ref.slice(i + 1)}`; }
   if (s.kind === 'page') return ' on the dashboard';
   if (s.kind === 'artifact' && LINK_ID.test(s.slug ?? '')) return ` on artifact ${s.slug}`;
-  if (s.kind === 'preview' && PREVIEW_NAME.test(s.name ?? '')) return ` on preview ${s.name}${typeof s.route === 'string' ? ` ${quoteData(capBytes(s.route, 300))}` : ''}`;
+  if (s.kind === 'preview' && PREVIEW_NAME.test(s.name ?? '')) return ` on preview ${s.name}`;
   return '';
 }
 // The bare ids a subject names, as observation refs are elsewhere.
@@ -4918,8 +4936,8 @@ const turnText = (words) => {
   if (encodedBytes(words) > TURN_ENCODED_MAX) die('this has too many quotation marks, backslashes or control characters to keep in one log line; say it with fewer');
   return words;
 };
-// Who is speaking: the supervisor in its own session, else the owner (ownerWriter refuses any other role).
-const threadSpeaker = (what) => (process.env.DEVTEAM_ROLE === 'supervisor' ? (supervisorOnly(what), 'supervisor') : ownerWriter().by);
+// The owner's thread verbs, refused in the supervisor's own pane with what it does instead.
+const threadOwner = () => ownerWriter('reply with thread reply');
 function threadOpen(id, by) {
   const t = logGet(id ?? '');
   if (t?.type !== 'thread') die(`no thread ${id ?? '(none given)'} (devteam.mjs thread list)`);
@@ -4932,7 +4950,7 @@ const openThreadCount = () => threadViews(readLog().objects).filter((x) => x.sta
 function cmdThread() {
   const [sub, id] = positional;
   if (sub === 'new') {
-    const { by } = ownerWriter();
+    const { by } = threadOwner();
     const words = turnText(wordsFrom(1));
     let subject;
     if (flags.subject !== undefined) {
@@ -4952,14 +4970,16 @@ function cmdThread() {
     out(t.id);
     return out(deliveredWords(deliverOwnerTurn(t, words)));
   }
-  if (sub === 'say') {
-    const by = threadSpeaker('thread say');
+  // say is the owner's and reply the supervisor's, never one falling through to the other: a reply
+  // with no DEVTEAM_ROLE is still the supervisor's (as ask is), so it never lands in the owner's file.
+  if (sub === 'say' || sub === 'reply') {
+    const by = sub === 'say' ? threadOwner().by : (supervisorOnly('thread reply'), 'supervisor');
     const t = threadOpen(id, by);
     const words = turnText(wordsFrom(2));
     const refs = flags.refs !== undefined ? listFlag('refs') : [];
     if (refs.length && by !== 'supervisor') die("--refs are on the supervisor's turns: what it did, as <type>:<id>");
     if (refs.length > 8) die('--refs names at most 8 things');
-    for (const r of refs) if (!TURN_REF.test(r) || Buffer.byteLength(r) > 120) die(`--refs ${r}: each is <type>:<id> (goal:g-…, ticket:checkout-04, act:a-…), at most 120 bytes`);
+    for (const r of refs) if (!TURN_REF.test(r) || Buffer.byteLength(r) > 120) die(`--refs ${r}: each is <type>:<id> (goal:g-…, ticket:checkout-04, act:a-…, question:q-…), at most 120 bytes`);
     // words at the encoded cap fit a line alone, not always with eight links: the supervisor's line
     // as appendLog will build it, checked here so the refusal says what to do about a reply
     const line = { v: 1, id: `u-00000000-000000000-${by}`, type: 'turn', op: 'new', at: nowIso(), by, thread: t.id, text: words, refs };
@@ -4997,7 +5017,7 @@ function cmdThread() {
   // Resolving is the owner's: their status and outcome (always written, null for none, so a reopened
   // thread resolved again keeps no old outcome), and an observation the loop reads with the rest.
   if (sub === 'resolve') {
-    const { by } = ownerWriter();
+    const { by } = threadOwner();
     const t = threadOpen(id, 'owner');
     const v = threadViewOf(t.id);
     let outcome = flags.outcome !== undefined ? (flagStr('outcome') ?? '').replace(/\s+/g, ' ').trim() : '';
@@ -5017,7 +5037,7 @@ function cmdThread() {
     return nudgeSupervisor(`[devteam thread ${t.id} resolved by owner] devteam.mjs thread show ${t.id}`);
   }
   if (sub === 'reopen') {
-    const { by } = ownerWriter();
+    const { by } = threadOwner();
     const t = logGet(id ?? '');
     if (t?.type !== 'thread') die(`no thread ${id ?? '(none given)'}`);
     if (t.status !== 'resolved') die(`${t.id} is open`);
@@ -5058,7 +5078,7 @@ function cmdThread() {
     for (const x of vs) out(`${x.id} [${x.status}${x.status === 'open' ? `, ${x.waiting === 'supervisor' ? 'waiting on the supervisor' : "the owner's move"}` : ''}] ${quoteData(x.title)}${x.subject ? ` (${(subjectWords(x.subject) || ` a ${x.subject.kind}`).trim()})` : ''} · ${plural(x.turns.length, 'turn')}${x.ready ? ' · proposed for resolving' : ''}`);
     return;
   }
-  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\']   |   thread say <t-id> "<words>"   (the owner\'s; with DEVTEAM_ROLE=supervisor the supervisor\'s, which may add --refs <type>:<id>…)   |   thread ask <t-id> --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread show <t-id> [--json]   |   thread list [--waiting | --open | --all] [--json]   (words may also follow --)');
+  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\']   |   thread say <t-id> "<words>"   (the owner\'s)   |   thread reply <t-id> "<words>" [--refs <type>:<id>…]   (the supervisor\'s)   |   thread ask <t-id> --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread show <t-id> [--json]   |   thread list [--waiting | --open | --all] [--json]   (words may also follow --)');
 }
 
 // ===== review questions: an agent-drawn page the owner answers with a result =====
@@ -8516,9 +8536,11 @@ function chatQuotesNotFound() {
 // A thread answer (answer --from-turn) cites the owner's turn it was recorded from. checkLine only
 // checks its shape, so this checks the binding turnAnswer enforced, for lines written some other
 // way: the turn is the owner's, its words are what the line says, it is in the question's thread,
-// it is newer than the question, and no other question line cites it. One reason per answer.
+// it is newer than the question, an Inbox question was named in the turn's thread before it
+// (questionNamed), and no other question line cites it. One reason per answer.
 function threadAnswersUnbound() {
-  const lines = readLog().lines.filter((l) => l.type === 'question' && l.op === 'set' && l.channel === 'thread').sort((a, b) => String(a.at).localeCompare(String(b.at)));
+  const { objects, lines: all } = readLog();
+  const lines = all.filter((l) => l.type === 'question' && l.op === 'set' && l.channel === 'thread').sort((a, b) => String(a.at).localeCompare(String(b.at)));
   const first = new Map();
   return lines.map((l) => {
     const u = typeof l.turn === 'string' ? logGet(l.turn) : null;
@@ -8530,6 +8552,7 @@ function threadAnswersUnbound() {
       : l.said !== u.text ? "gives words that aren't what the turn says"
       : q?.thread && u.thread !== q.thread ? 'cites a turn from another thread than the one the question was asked in'
       : q && u.created_at <= q.created_at ? 'cites a turn from before the question was asked'
+      : q && !q.thread && !questionNamed(objects, u.thread, q.id, u.created_at) ? "cites a turn in a thread where the supervisor hadn't named the question before it"
       : firstId ? `cites a turn that already settled ${firstId}` : null;
     return why ? { id: l.id, why } : null;
   }).filter(Boolean);
@@ -8848,7 +8871,7 @@ function collectMetrics(since) {
   // or the supervisor busier than it said. By id only: a subject's title may be page-written.
   for (const x of threadsNow.filter((y) => y.status === 'open' && y.waiting === 'supervisor')) {
     const ago = now - Date.parse(x.turns[x.turns.length - 1].at);
-    if (ago > THREAD_WAIT_MS) add('medium', 'thread-waiting', x.id, `the owner wrote in this thread ${Math.round(ago / 60000)} min ago and has no reply`, `thread list --waiting, then thread show ${x.id} and reply with thread say (first, when the work takes more than a turn)`);
+    if (ago > THREAD_WAIT_MS) add('medium', 'thread-waiting', x.id, `the owner wrote in this thread ${Math.round(ago / 60000)} min ago and has no reply`, `thread list --waiting, then thread show ${x.id} and reply with thread reply (first, when the work takes more than a turn)`);
   }
   // A harness's runtime file committed by accident: it churns in every worktree and means nothing elsewhere.
   const trackedRuntime = (git(['ls-files'], mainRoot) ?? '').split('\n').filter((f) => f && isHarnessRuntime(f));
@@ -10525,6 +10548,9 @@ async function cmdDashboard() {
   const page = path.join(kitDir, 'dashboard', 'index.html');
   const self = fileURLToPath(import.meta.url);
   const ownerEnv = { ...process.env, DEVTEAM_CHANNEL: 'dashboard' };
+  // TMUX_PANE too: a dashboard started in the supervisor's pane would have ownerWriter refuse every
+  // action as the supervisor's (TMUX stays, so the children's tmux finds the same server)
+  delete ownerEnv.TMUX_PANE;
   delete ownerEnv.DEVTEAM_ROLE;
   delete ownerEnv.DEVTEAM_TICKET;
   delete ownerEnv.DEVTEAM_FEATURE;
@@ -14461,8 +14487,8 @@ Decide and act (supervisor.md, constitution.md)
   review draft <qid> [<file|->]   owner: save partial progress; without a file, print it (a draft is never an answer)
   answer <qid> --review-result <file|-> | answer <qid> "<why>" --decline   (owner) a review: validate and hash its result, or send it back
   answer <qid> "<text>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> "<text>" --from-chat --said "<owner's words>" [--autonomy n] [--rule "…"] | answer <qid> "<text>" --from-turn <u-id> [--autonomy n] [--rule "…"] | answer <qid> --defaulted   (supervisor)
-  thread new "<first words>" [--title "<line>"] [--subject '<json>'] | thread say <t-id> "<words>" | thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]] | thread reopen <t-id> ["<words>"]   (owner; the dashboard's Shift+click)   a thread with the supervisor about one thing; words may follow --; say is the owner's unless DEVTEAM_ROLE=supervisor
-  thread say <t-id> "<words>" [--refs <type>:<id>…] | thread ask <t-id> --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>"   (supervisor)   reply, ask an Inbox question in it, propose resolving it
+  thread new "<first words>" [--title "<line>"] [--subject '<json>'] | thread say <t-id> "<words>" | thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]] | thread reopen <t-id> ["<words>"]   (owner; the dashboard's Shift+click)   a thread with the supervisor about one thing; words may follow --; refused in the supervisor's own pane
+  thread reply <t-id> "<words>" [--refs <type>:<id>…] | thread ask <t-id> --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>"   (supervisor)   reply, ask an Inbox question in it, propose resolving it
   thread show <t-id> [--json] | thread list [--waiting | --open | --all] [--json]   the thread, its subject framed as data; --waiting: open threads where the supervisor owes a reply
   withdraw <qid> [--reason r] | questions [--all] [--id q] [--json]   questions print in Inbox order: the most valuable first
   ask … --stake 1-3 --urgency 1-3 [--settles <qid>… --settles-if "<answer>"]   rate every question: how much of what the fleet does next rides on the answer, how soon waiting costs, and the open questions one answer would settle (stake 3, same goal or feature)

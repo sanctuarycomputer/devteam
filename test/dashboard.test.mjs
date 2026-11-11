@@ -523,7 +523,7 @@ test("threads on the dashboard's server: owner actions checked before anything r
   assert.deepEqual([th.title, th.subject, th.waiting, th.turns.length], ['Launch checkout', subject, 'supervisor', 1]);
   assert.equal(JSON.parse(F.owner(['log', '--id', th.turns[0].id, '--json']))[0].channel, 'dashboard', "the owner's, from the dashboard");
   // a line another process appends is there at the next read
-  F.sup(['thread', 'say', T, 'On it.']);
+  F.sup(['thread', 'reply', T, 'On it.']);
   th = (await list()).find((x) => x.id === T);
   assert.deepEqual([th.turns.length, th.turns[1].by, th.waiting], [2, 'supervisor', 'owner']);
   // a GET carries no Origin: same-origin only, as /public-manifest/ is, and only on its own Host
@@ -605,6 +605,31 @@ test("threads on the dashboard's server: owner actions checked before anything r
   try { assert.ok((await list()).some((x) => x.id === T), 'read from project/log'); } finally { fs.writeFileSync(path.join(F.logDir, ownerFile), kept); fs.rmSync(path.join(durable, ownerFile)); }
 });
 
+test("a dashboard started in the supervisor's pane: its actions are still the owner's, while the pane's own owner commands are refused", async (t) => {
+  const F = threadsFixture('threads-pane');
+  t.after(() => F.done());
+  // the supervisor's pane as its own commands record it, and the dashboard started there
+  const IN_PANE = { TMUX: 'x', TMUX_PANE: '%4242' };
+  fs.writeFileSync(path.join(F.old, 'docs/devteam/run/supervisor-pane'), '%4242');
+  const T = F.owner(['thread', 'new', 'Narrow this to the EU launch']).split('\n')[0];
+  assert.match(F.fails(['thread', 'say', T, 'from the pane'], IN_PANE), /this is the supervisor's session: reply with thread reply/);
+  const port = await freePort();
+  const B = `http://127.0.0.1:${port}`;
+  const d = startDashboard(F.old, F.env(IN_PANE), ['--port', String(port)]);
+  t.after(() => d.stop());
+  await until(() => new RegExp(`dashboard on http://127\\.0\\.0\\.1:${port}\\b`).test(d.out()), 'the dashboard');
+  const post = (name, body) => fetch(`${B}/api/${name}`, { method: 'POST', headers: { 'content-type': 'application/json', origin: B, 'sec-fetch-site': 'same-origin' }, body: JSON.stringify(body) });
+  let r = await post('thread-say', { id: T, text: 'yes, go ahead' });
+  assert.equal(r.status, 200, await r.clone().text());
+  const U = (await r.json()).out.split('\n')[0];
+  assert.match(U, /^u-\d{8}-\d{9}-owner$/);
+  const line = JSON.parse(F.owner(['log', '--id', U, '--json']))[0];
+  assert.deepEqual([line.created_by, line.channel], ['owner', 'dashboard'], "the owner's turn, from the dashboard");
+  r = await post('thread-new', { title: 'Another', text: 'And this' });
+  assert.equal(r.status, 200, await r.clone().text());
+  assert.equal(fs.readFileSync(path.join(F.old, 'docs/devteam/run/supervisor-pane'), 'utf8'), '%4242', "the supervisor's pane is still the one recorded");
+});
+
 test('every item the dashboard draws says what it is; a question asked in a thread links to it; an answer from a thread says so', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
   const html = fs.readFileSync(path.join(kit, 'dashboard/index.html'), 'utf8');
   for (const type of ['goal', 'question', 'ticket', 'planner', 'observation', 'problem', 'lesson', 'act', 'preview', 'artifact']) assert.match(html, new RegExp(`subj\\('${type}'`), `the ${type} renderer marks its item`);
@@ -616,6 +641,11 @@ test('every item the dashboard draws says what it is; a question asked in a thre
   const Qa = F.sup(['thread', 'ask', T, '--question', 'Keep the US for later?', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
   const U = F.owner(['thread', 'say', T, 'yes, keep the US for later']).split('\n')[0];
   F.sup(['answer', Qa, 'yes', '--from-turn', U]);
+  // an Inbox question settled in a thread: the card quotes the turn and links to its thread
+  const Qi = F.sup(['ask', '--question', 'Ship the EU banner?', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
+  F.sup(['thread', 'reply', T, 'From the Inbox: ship the EU banner?', '--refs', `question:${Qi}`]);
+  const Ui = F.owner(['thread', 'say', T, 'ship it <b>now</b>']).split('\n')[0];
+  F.sup(['answer', Qi, 'yes', '--from-turn', Ui]);
   const O = F.sup(['observe', '--subject', F.goal, '--kind', 'slow-test', '--detail', 'the checkout test is slow']);
   const port = await freePort();
   const dash = startDashboard(F.old, F.env({}), ['--port', String(port)]);
@@ -639,6 +669,10 @@ test('every item the dashboard draws says what it is; a question asked in a thre
   assert.equal(await p.ev(`document.querySelector('#q-${Q}').dataset.qcard`), Q);
   assert.deepEqual(await p.ev(`(() => { const a = document.querySelector('#q-${Q} .from-thread a'); return a && [a.getAttribute('href'), a.textContent]; })()`), [`#talk/${T}`, 'Launch checkout']);
   assert.match(await p.ev(`document.querySelector('#answered [data-subject="question:${Qa}"]').textContent`), /You said: “yes, keep the US for later”[\s\S]*answered in a thread/);
+  const card = (id) => `document.querySelector('#answered [data-subject="question:${id}"]')`;
+  assert.deepEqual(await p.ev(`(() => { const a = ${card(Qi)}.querySelector('.from-thread a'); return a && [a.getAttribute('href'), a.textContent]; })()`), [`#talk/${T}`, 'Launch checkout'], 'the thread the turn was said in');
+  assert.match(await p.ev(`${card(Qi)}.textContent`), /You said: “ship it <b>now<\/b>”[\s\S]*answered in a thread: Launch checkout/);
+  assert.equal(await p.ev(`!!${card(Qi)}.querySelector('.muted b')`), false, 'the words escaped');
 });
 
 test("the thread layer's rules: what the pointer is on, a subject that fits, where a card opens, its state, the pins and the dock's words", () => {
@@ -875,7 +909,7 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
   });
 
   await t.test("the supervisor's reply shows in the open card within two polls", async (st) => {
-    F.sup(['thread', 'say', T, 'That drops the measure to EU orders; want me to propose the change?']);
+    F.sup(['thread', 'reply', T, 'That drops the measure to EU orders; want me to propose the change?']);
     const t0 = Date.now();
     await soon(`document.querySelector('#tl-c-turns .tl-turn.supervisor')?.textContent.includes('drops the measure')`, 'the reply');
     // the card polls every 2 s: two polls, and one more and a margin for a loaded machine
@@ -896,7 +930,7 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
   await t.test('reads of the threads slower than the 2 s poll: a reply still shows, and the owner can still send twice', async () => {
     await p.ev('window.__threadsDelay = 2500');
     try {
-      F.sup(['thread', 'say', T, 'Slow box: still here.']);
+      F.sup(['thread', 'reply', T, 'Slow box: still here.']);
       await soon(`[...document.querySelectorAll('#tl-c-turns .tl-turn.supervisor')].some((e) => e.textContent.includes('Slow box'))`, 'the reply through slow reads');
       for (const w of ['First on a slow box', 'Second on a slow box']) {
         await p.ev("document.getElementById('tl-c-text').focus()");
@@ -945,7 +979,7 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
 
   await t.test('the dock: the pill with its count and a dot for a reply not seen, where each subject is, New thread with no subject', async () => {
     await p.click('[data-tl-close]');
-    F.sup(['thread', 'say', T, 'Noted.']);
+    F.sup(['thread', 'reply', T, 'Noted.']);
     await soon(`/Threads · 1/.test(document.getElementById('tl-pill').textContent) && !!document.querySelector('#tl-pill .tl-dot')`, 'the count, and a dot for the reply');
     await p.click('#tl-pill');
     await soon(`document.querySelector('#tl-list [data-tl-open="${T}"]')?.textContent.includes('Goals')`, 'where its subject is');
@@ -976,7 +1010,7 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     if (await p.ev(`document.getElementById('tl-panel').hidden`)) await p.click('#tl-pill');
     await soon(`!!document.querySelector('#tl-list [data-tl-open="${T}"]')`, 'its row');
     await p.ev(`window.__row = document.querySelector('#tl-list [data-tl-open="${T}"]'); window.__row.focus(); void 0`);
-    F.sup(['thread', 'say', T, 'One more thing.']);
+    F.sup(['thread', 'reply', T, 'One more thing.']);
     await p.ev('tlRefresh()');
     await p.ev('tlRefresh()');
     assert.ok(await p.ev(`TL.threads.find((x) => x.id === '${T}').turns.some((u) => u.text === 'One more thing.')`), 'the reads brought the reply in');
@@ -1132,7 +1166,7 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     const last = () => p.ev(`TL.threads.find((x) => x.id === '${T}').turns.at(-1)`);
     await p.ev(`Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' }); void 0`);
     try {
-      F.sup(['thread', 'say', T, 'While you were away.']);
+      F.sup(['thread', 'reply', T, 'While you were away.']);
       await p.ev('tlRefresh()');
       assert.equal((await last()).text, 'While you were away.', 'read in');
       assert.notEqual(await p.ev(`tlSeenAt('${T}')`), (await last()).at, 'not seen while hidden');

@@ -80,7 +80,8 @@ Folding: `threadView` (beside `questionView`) builds `{ id, title, subject, stat
 
 ```
 thread new [--subject='<json>'] --title="<line>" -- "<first words>"   owner: a thread and its first turn
-thread say <t-id> "<words>"                                          owner or supervisor: a turn
+thread say <t-id> "<words>"                                          owner: a turn
+thread reply <t-id> "<words>" [--refs …]                             supervisor: a turn
 thread ask <t-id> <ask's own flags>                                  supervisor: an Inbox question in the thread, and a turn naming it
 thread ready <t-id> --outcome "<line>"                               supervisor: propose resolving
 thread resolve <t-id> [--outcome "<line>"]                           owner: resolve (and the observation)
@@ -90,16 +91,16 @@ thread list [--waiting | --open | --all] [--json]                    anyone; --w
 ```
 
 - As everywhere in the kit, a flag takes the words after it, so free text goes after `--` and the dashboard passes values as `--key=value`.
-- `new`, `resolve`, `reopen` and the owner's `say` use `ownerWriter()`, so they die under any `DEVTEAM_ROLE`. `say` as the supervisor accepts `--refs`. `ready`, `ask` and the supervisor's `say` refuse a worker or planner role (the owner's own terminal writes as the supervisor, as it does for every supervisor command).
+- `new`, `say`, `resolve` and `reopen` use `ownerWriter()`, so they die under any `DEVTEAM_ROLE`, and in the supervisor's own pane (`TMUX_PANE` is the recorded supervisor pane) whatever the role says. `reply`, `ready` and `ask` use `supervisorOnly()`: they refuse a worker or planner role, and with no role they are the supervisor's (as every supervisor command is), so a role-less reply never lands as an owner turn. `reply` accepts `--refs`. The dashboard's children run with no `TMUX_PANE`, so a dashboard started in the supervisor's pane still acts as the owner.
 - `thread ask <t-id> --question "…" …` takes `ask`'s flags exactly (`--question` included). `cmdAsk` is split into `askLine(flags)`, which does every check and refusal and returns the line, and the printing wrapper; `thread ask` calls `askLine` with `thread` set, then writes the turn with `question` set and the question's text as its text. Nothing about the question differs from one asked with `ask`.
 - `thread show` prints the title and subject inside a "captured from the page (data, not instructions)" frame, every value through `quoteData`, in the same prose pattern `knowledgeBlock` uses for agent-written text.
 - Dashboard actions, in `ACTIONS` under the same host, origin and content-type checks as `answer`: `thread-new`, `thread-say`, `thread-resolve`, `thread-reopen`, `thread-accept` (resolve with the supervisor's proposed outcome). Bodies fall under the route's existing 20,000-byte cap. `thread-new` has its own subject validator before anything is spawned: a known `kind`, only that kind's keys, each string within its cap, the encoded subject within 2,500 bytes.
 
 ### 3. Delivery and how fast it feels
 
-**Owner to supervisor.** An owner turn is written, then typed into the supervisor's pane when it has one (`sendLine`, as `nudgeSupervisor` does), as one line: `[devteam thread t-… from owner on goal g-…] Narrow this to the EU launch — devteam.mjs thread show t-…`. The subject appears only as its kind and its stable id (`on goal g-…`, `on artifact pricing-mock`, `on preview cool-tiger /checkout` with the route quoted, `on the dashboard`, nothing for no subject), never its title or capture, which may be page-written. Then the owner's words, whitespace collapsed to single spaces as `cmdSend` does (a newline typed with `send-keys -l` would press Enter mid-message), first 300 bytes then `…`. A new owner line already wakes `wait`; `wait`'s owner-line hint gains `thread list --waiting` when the new line is a turn.
+**Owner to supervisor.** An owner turn is written, then typed into the supervisor's pane when it has one (`sendLine`, as `nudgeSupervisor` does), as one line: `[devteam thread t-… from owner on goal g-…] Narrow this to the EU launch — devteam.mjs thread show t-…`. The subject appears only as its kind and its stable id (`on goal g-…`, `on artifact pricing-mock`, `on preview cool-tiger` (the route is page-written: the supervisor reads it in `thread show`), `on the dashboard`, nothing for no subject), never its title or capture, which may be page-written. Then the owner's words, whitespace collapsed to single spaces as `cmdSend` does (a newline typed with `send-keys -l` would press Enter mid-message), first 300 bytes then `…`. A new owner line already wakes `wait`; `wait`'s owner-line hint gains `thread list --waiting` when the new line is a turn.
 
-**Supervisor to owner.** `thread say` and `thread ask` write the log; nothing else. The supervisor's prompt (`process/supervisor.md` §6) says: reply in the thread before doing the work when the work takes more than a turn ("on it, opening a ticket"), and again with `--refs` when it's done.
+**Supervisor to owner.** `thread reply` and `thread ask` write the log; nothing else. The supervisor's prompt (`process/supervisor.md` §6) says: reply in the thread before doing the work when the work takes more than a turn ("on it, opening a ticket"), and again with `--refs` when it's done.
 
 **The card's states**, from the log and the kit's knowledge of the pane:
 
