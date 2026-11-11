@@ -370,3 +370,23 @@ Branch `ooda-learning` off `ooda-knowledge`. **Adds two observation fields** (`f
 
 ### Task 3: docs and PR
 - [ ] `supervisor.md` §3: the weekly record and how to read it; `operator.md` mention for the daily review (coordinate with the upstream loop's follow-up to #190). Merge, full suite, push, PR (base `ooda-knowledge`).
+
+### PR 4 and 5 review fixes (Fable, folded in; these win over the tasks above)
+
+1. **Replaying the log at a cut:** `withLogAt(cut, fn)` swaps `logCache` for a fold of the lines with `at <= cut`, resets every log-derived global that isn't keyed on the `readLog()` object (grep `^let .* = null;`: `SENSOR_KEYS`, and any memo not built on `memo()`), runs `fn`, and restores them in `finally`. `fold` is one pass; no checkpoints. `mergedAt` reads git commit dates, which replay as they are.
+2. **Adoption gate, operational:** PR 4's and PR 5's bodies list every instance from the hub's `/instances.json` with its `upstream_base`, and say they merge only when each is at or past PR 1's release. Workers never write `decision` or `worker-slots` lines, so a stale worktree doesn't matter; only a whole instance on an older kit does.
+3. **`decide --on`:** a separate field from `approved_by`; `authorise` never reads it. Paste the reviewed check (each id resolves to knowledge or a problem; knowledge must be accepted; an id in both `--refs` and `--on` is refused); `knowledge: on.length ? on : undefined`. Test: `--on <owner standing rule>` leaves `authority` unchanged.
+4. **`worker-slots.knowledge` only on a fresh start** (the final `resume` value false): a resumed session never reads the new prompt. `knowledgeFor(id)` sorted by `created_at` desc, first 60 ids.
+5. **Figures, exactly** (ISO weeks, UTC; "in W" = the named time falls in W):
+   - `informed.knowledge`: knowledge with `status === 'accepted'` at the cut.
+   - `informed.signals_formed` / `signals_explained`: `signalGroups()` groups of 3+ at the cut before the explained exclusion; explained = any member cited by `knowledge.evidence`, `problem.refs` or a live decision's `refs`.
+   - `informed.starts` / `starts_given`: `worker-slots` acts created in W whose `what` starts `made `; given = `knowledge?.length > 0`.
+   - `autonomous.ladder_calls`: `calls()` created in W whose class is in `ladder().classes`; `trusted_calls`: of those, authority `rung` or `standing-rule` (a defaulted question counts as asked).
+   - `autonomous.questions`: questions created in W of kinds `owner-decision`, `one-way-door`, `proposal`, `trust`, `clarification` (not `owner-action`, `review`, `goal-definition`, `goal-approval`); check the schema's question `kind` enum and use exactly its decision kinds.
+   - `autonomous.merged`: tickets whose `mergedAt` falls in W.
+   - `trusted.answered` / `agreed`: answered questions with `answered_at` in W and a `recommendation` (`trustEvidence`'s filter); agreed = `matched`.
+   - `trusted.calls`: `calls()` created in W; `corrections`: `correctionOf(c).at` in W.
+   - Hollow when the line's denominator is under 5: `ladder_calls`, `questions`, `answered`, `calls`, `signals_formed`, `starts`.
+6. **`lineChart`:** extend compatibly. A point may be `[ts, v, { hollow, href, title }]` (hollow: `fill="none"` with a stroke; href: wrapped in `<a>`), and a new option `xmarks: [{ at, label }]` draws vertical dashed lines. Don't mix a count and a share on one chart: six small charts, two per column (Informed: accepted knowledge; share of signals explained. Autonomous: share of ladder calls on trust; questions per merged ticket. Trusted: agreement; corrections per 100 calls).
+7. **Incident debt:** an outcome citing it = `refs.includes(p.id)`; resolution time = the last `updates` entry setting `status: 'resolved'`; exclude an incident whose status the owner set (`ownerHolds(p, 'status')`); 30 days from resolution; a live noise decision clears it, so a corrected one re-lists it.
+8. Backfill starts at the week of the log's earliest `at` and skips the current week; the `source_key` check scans all observations. `detail` is cut to 300 characters. There are no `decide` commands in `orient`'s output today: the `--on` hint goes in the debt line's suggested `knowledge add` and in the decision sidepeek. Hand-written test lines go in time order. Keep CLI assertions on `ooda.learning`'s shape and the under-three tile rule, since CI has no Chrome.
