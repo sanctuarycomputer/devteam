@@ -5432,9 +5432,16 @@ const ARTIFACT_LENS = String.raw`(() => {
   const onBlur = () => { if (heard && shiftDown) { shiftDown = false; tell({ type: 'key', key: 'Shift', shift: false }); } };
 
   // --- the viewer's questions ------------------------------------------------------------------------
+  // the page's path from its artifact segment on: what is before it (a box's capability) is gone, and
+  // the prefix to the slug kept whole, before the cap, so the cap is the page's own path's
+  const pathOf = () => {
+    const p = unCap(location.pathname);
+    const m = /\/artifact\/(?:main|wt\/[^\/]+|tree\/[0-9a-f]+)\/[^\/]+\//.exec(p);
+    return m ? m[0] + cap(p.slice(m.index + m[0].length), CAPS.path) : cap(p, CAPS.path);
+  };
   let last = { x: 0, y: 0 };
   const ORDERS = {
-    hello: () => { heard = true; tell({ type: 'ready', path: cap(unCap(location.pathname), CAPS.path), title: cap(oneLine(unCap(document.title)), CAPS.text), viewport: { w: window.innerWidth, h: window.innerHeight } }); },
+    hello: () => { heard = true; tell({ type: 'ready', path: pathOf(), title: cap(oneLine(unCap(document.title)), CAPS.text), viewport: { w: window.innerWidth, h: window.innerHeight } }); },
     hit: (m) => {
       if (!idOk(m.id) || !num(m.x) || !num(m.y)) return;
       let el = document.elementFromPoint(m.x, m.y);

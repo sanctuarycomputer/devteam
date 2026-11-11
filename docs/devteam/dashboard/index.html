@@ -3099,19 +3099,19 @@ const artViewer = (slug, at) => `/view/artifact/${encodeURIComponent(slug)}${at 
 // The stage's lens state (spec §4, §6): what is on the stage, where its lens's messages may go (an
 // artifact's opaque origin takes '*'), the ids minted for real pointer events, the last reply, and
 // where the lens says each pinned anchor is now (keyed by a thread's id).
-const TS = { kind: null, slug: null, at: null, fp: null, mainFp: null, path: null, target: '*', ready: false, raised: false, seq: 0, minted: new Map(), hit: null, waiters: new Map(), rects: new Map(), keyOf: new Map(), watching: new Set(), watch: '', last: null, rafPending: false, via: null, waitMs: 150, drawPending: false };
-// What the lens was asked and has not answered, let go: a waiting click hears null (its point alone),
-// and no reply to a question from before is taken.
+const TS = { kind: null, slug: null, at: null, fp: null, mainFp: null, path: null, target: '*', ready: false, raised: false, seq: 0, minted: new Map(), hit: null, waiters: new Map(), rects: new Map(), keyOf: new Map(), watching: new Set(), watch: '', last: null, rafPending: false, via: null, waitMs: 150, drawPending: false, pinsPending: false };
+// What the lens was asked and has not answered, let go: a waiting click hears it is gone (the page it
+// pointed at is no longer there, so it starts nothing), and no reply to a question from before is taken.
 function tsForget() {
-  for (const f of [...TS.waiters.values()]) f(null);
+  for (const f of [...TS.waiters.values()]) f({ gone: true });
   TS.waiters.clear();
   TS.minted.clear();
   TS.hit = null;
 }
 function tsSet(kind, info = {}) {
   tsForget();
-  Object.assign(TS, { kind, slug: null, at: null, fp: null, mainFp: null, path: null, target: '*', ready: false, hit: null, watch: '', last: null }, info);
-  for (const m of [TS.minted, TS.waiters, TS.rects, TS.keyOf, TS.watching]) m.clear();
+  Object.assign(TS, { kind, slug: null, at: null, fp: null, mainFp: null, path: null, target: '*', ready: false, watch: '', last: null }, info);
+  for (const m of [TS.rects, TS.keyOf, TS.watching]) m.clear();
 }
 // The stage, in the dashboard or as a viewer tab: the page in its frame, the bar, and the lens's
 // state for it. title: the viewer's (from /api/view); the dashboard's comes from its data.
@@ -3148,6 +3148,7 @@ function closeArtifact() {
   if (!AV) return false;
   AV = null;
   tsSet(null);
+  tsPins();
   $('artifact-view').hidden = true;
   $('av-frame').removeAttribute('src');
   // a drawer or a review it was opened over stays, with its scrim
@@ -3584,7 +3585,7 @@ const T_WHOLE = ['ref', 'view', 'slug', 'at', 'fp', 'name'];
 const T_SHRINK = [['anchor', 'html'], ['errors'], ['quote'], ['route'], ['path'], ['anchor', 'selector'], ['anchor', 'text'], ['anchor', 'name'], ['anchor', 'role'], ['anchor', 'tag']];
 // A box of numbers (a rect, a point, a viewport), only when every one is a finite number, in whole
 // pixels unless it is a page's fractions; else null.
-const tBox = (v, keys, round = true) => (v && typeof v === 'object' && keys.every((k) => typeof v[k] === 'number' && Number.isFinite(v[k])) ? Object.fromEntries(keys.map((k) => [k, round ? Math.round(v[k]) : v[k]])) : null);
+const tBox = (v, keys, round = true) => (v && typeof v === 'object' && keys.every((k) => typeof v[k] === 'number' && Number.isFinite(v[k]) && ((k !== 'w' && k !== 'h') || v[k] >= 0)) ? Object.fromEntries(keys.map((k) => [k, round ? Math.round(v[k]) : v[k]])) : null);
 // An anchor as a lens described it: the kit's keys only, each cut to its cap, its rect and point
 // only when whole; null when there is nothing of one.
 function tAnchor(a) {
@@ -3689,7 +3690,8 @@ function tLensMessage(e, frameWin, minted) {
     const anchor = tAnchor(m.anchor);
     return { type: 'hit-reply', id: m.id, anchor, rect: anchor?.rect ?? tBox(m.rect, ['x', 'y', 'w', 'h']), route: str(m.route, T_CAPS.route) };
   }
-  if (m.type === 'rects') return { type: 'rects', rects: (Array.isArray(m.rects) ? m.rects.slice(0, 200) : []).filter((r) => r && typeof r.key === 'string').map((r) => ({ key: r.key, rect: tBox(r.rect, ['x', 'y', 'w', 'h']), changed: r.changed === true })) };
+  // where watched anchors are now: null is "not found there"; a rect that is no box says nothing
+  if (m.type === 'rects') return { type: 'rects', rects: (Array.isArray(m.rects) ? m.rects.slice(0, 200) : []).filter((r) => r && typeof r.key === 'string').flatMap((r) => { const rect = r.rect === null ? null : tBox(r.rect, ['x', 'y', 'w', 'h']); return r.rect === null || rect ? [{ key: r.key, rect, changed: r.changed === true }] : []; }) };
   if (m.type === 'key') return { type: 'key', key: m.key === 'Escape' ? 'Escape' : 'Shift', shift: m.shift === true };
   if (m.type === 'ready') return { type: 'ready', path: str(m.path, T_CAPS.path + 400), route: str(m.route, T_CAPS.route), title: typeof m.title === 'string' ? tLine(tUncap(m.title), 80) : '', viewport: tBox(m.viewport, ['w', 'h']) };
   if (m.type === 'route') return { type: 'route', route: str(m.route, T_CAPS.route) };
@@ -3791,6 +3793,9 @@ window.addEventListener('blur', () => { if (!TL.pin) { tlHide(); tsRaise(false);
 // Shift shows the pin only once the pointer moves, and never over a field being typed in, so a
 // capital typed in a field doesn't summon it.
 window.addEventListener('pointermove', (e) => {
+  // the parent's own pointer, anywhere, without Shift: an overlay a page's message raised goes,
+  // though the pointer never crossed it
+  if (e.isTrusted && TS.raised && !e.shiftKey && !TL.pin) tsRaise(false);
   // over the stage's overlay the stage's own listeners point, in the frame's coordinates
   if (e.target?.closest?.('#av-over')) return;
   if (!(e.shiftKey || TL.pin) || (e.pointerType === 'touch' && !TL.pin)) { if (tlShowing() && !TL.pin) tlHide(); return; }
@@ -3838,6 +3843,7 @@ function tlHome(s) {
 }
 const tlVisible = (el) => !!el && el.getClientRects().length > 0;
 function tlTargetRect(s) {
+  if (s?.kind === 'artifact' || s?.kind === 'preview') return tsRect(s);
   if (s?.kind === 'item') { const el = tlHome(s); return tlVisible(el) ? el.getBoundingClientRect() : null; }
   if (s?.kind === 'page') {
     const sec = document.getElementById(String(s.view).slice(1).split('/')[0]);
@@ -3850,6 +3856,13 @@ function tlTargetRect(s) {
 }
 // Bring a subject into view: the Loop's tab it is on, the <details> it is in, then scroll to it.
 function tlGoTo(s) {
+  // a spot on an artifact: the stage on it (a published tree's thread opens main's), in the dashboard
+  if (s?.kind === 'artifact') {
+    if (VIEWER) return;
+    const h = artHref(s.slug, String(s.at).startsWith('tree:') ? 'main' : s.at);
+    if (location.hash !== h) location.hash = h;
+    return;
+  }
   if (s?.kind === 'item') {
     const el = tlHome(s);
     if (!el) return;
@@ -3859,6 +3872,58 @@ function tlGoTo(s) {
     if (det && !det.open) det.open = true;
     el.scrollIntoView({ block: 'center' });
   } else if (s?.kind === 'page') document.getElementById(String(s.view).slice(1).split('/')[0])?.scrollIntoView();
+}
+// Where a frame subject's pin is now, on the screen and in the frame (fx, fy): at its anchor's
+// point inside the rect the lens last gave (clamped to it), or at its point alone; null when the
+// stage doesn't show its page, the lens hasn't found it, or it is scrolled out of the frame.
+function tsRect(s) {
+  if (!tsOn() || !tFrameOn(s, TS)) return null;
+  let x, y;
+  if (s.anchor) {
+    const id = TS.keyOf.get(tKey(s));
+    const r = id ? TS.rects.get(id)?.rect : null;
+    if (!r) return null;
+    x = r.x + Math.min(Math.max(0, s.anchor.point?.x ?? r.w), r.w);
+    y = r.y + Math.min(Math.max(0, s.anchor.point?.y ?? 0), r.h);
+  } else if (s.point) ({ x, y } = s.point);
+  else return null;
+  const fr = tsFrame().getBoundingClientRect();
+  if (x < 0 || y < 0 || x > fr.width || y > fr.height) return null;
+  const cx = fr.left + x, cy = fr.top + y;
+  return { left: cx - 12, right: cx + 12, top: cy - 12, bottom: cy + 12, width: 24, height: 24, fx: x, fy: y };
+}
+// Ask the lens to watch every open thread's anchor on the page the stage shows, named by the thread's
+// id (decision 7), whenever that set changes; it answers with rects, and sends them again as they
+// move. Only ids and what the lens finds an anchor by (its own words for it) go: never a title, a
+// turn or an outcome.
+function tsWatch() {
+  if (!tsOn() || !TS.ready) return;
+  const groups = tPins(TL.threads).filter((g) => tFrameOn(g.subject, TS) && typeof g.subject.anchor?.selector === 'string');
+  TS.keyOf = new Map(groups.map((g) => [tKey(g.subject), g.ids[0]]));
+  const anchors = groups.map((g) => { const { selector, tag, text, rect } = g.subject.anchor; return { key: g.ids[0], anchor: { selector, tag, text, rect } }; });
+  const sig = anchors.map((a) => a.key).join(' ');
+  if (sig === TS.watch) return;
+  TS.watch = sig;
+  TS.watching = new Set(anchors.map((a) => a.key));
+  tsPost({ type: 'resolve', id: `r${++TS.seq}`, anchors });
+}
+// The stage's pins, in the frame's coordinates over it: one per subject on the page it shows.
+function tsPins() {
+  const pins = !tsOn() ? [] : tPins(TL.threads).filter((g) => tFrameOn(g.subject, TS)).map((g) => {
+    const r = tsRect(g.subject);
+    return r && { id: g.ids[g.ids.length - 1], cls: `tl-pin${g.ids.includes(TL.open) ? ' on' : ''}`, left: `${Math.round(r.fx - 11)}px`, top: `${Math.round(r.fy - 11)}px`, label: `Thread ${g.n}${g.ids.length > 1 ? `, and ${g.ids.length - 1} more on this` : ''}`, html: `${g.n}${g.ids.length > 1 ? `<sup>${g.ids.length}</sup>` : ''}` };
+  }).filter(Boolean);
+  // a stage pin pressed or focused is kept through a redraw as a page pin is (tlHeld): the press is
+  // recorded for it too (the layer's pointerdown), though it sits on the stage, outside #tl
+  tlPinsInto($('av-pins'), pins, tlHeld);
+}
+// An artifact subject's fingerprint now, for "changed since": the stage's when it shows that version,
+// else the dashboard's Library; for a published tree, main's (a tree never changes, so "changed
+// since" means main has moved on from it, spec §5).
+function tArtFpNow(s) {
+  const tree = String(s.at).startsWith('tree:');
+  if (TS.kind === 'artifact' && TS.slug === s.slug && (TS.at === s.at || (tree && TS.mainFp))) return tree ? TS.mainFp : TS.fp;
+  return (DATA?.library?.artifacts ?? []).find((a) => a.slug === s.slug && a.at === (tree ? 'main' : s.at))?.fp ?? null;
 }
 const tlCardFrame = () => `<div class="tl-head"><span class="tl-title" id="tl-c-title"></span><span class="grow"></span><span id="tl-c-acts"></span><button type="button" class="ghost" data-tl-close aria-label="Close">×</button></div>
   <div id="tl-c-ready"></div><div id="tl-c-ctx"></div><div class="tl-turns" id="tl-c-turns"></div><div class="small muted" id="tl-c-state"></div>
@@ -3917,7 +3982,7 @@ function tlCardBody(t) {
     TL.sig = sig;
     const now = t ? tlHome(s) : null;
     // the names as the dock shows them, so a title the log cut at 120 isn't "changed"
-    const note = !t ? '' : s?.kind === 'item' && !now ? 'not on the page now' : now && tLine(now.dataset.title, T_TITLE_MAX) !== tLine(t.title, T_TITLE_MAX) ? 'changed since' : '';
+    const note = !t ? '' : s?.kind === 'item' && !now ? 'not on the page now' : now && tLine(now.dataset.title, T_TITLE_MAX) !== tLine(t.title, T_TITLE_MAX) ? 'changed since' : s?.kind === 'artifact' && s.fp && tArtFpNow(s) && tArtFpNow(s) !== s.fp ? 'changed since' : '';
     const was = tlEl('tl-c-ctx').querySelector('details')?.open;
     tlEl('tl-c-ctx').innerHTML = tlCtx(s, title, note);
     if (was) tlEl('tl-c-ctx').querySelector('details').open = true;
@@ -4080,10 +4145,10 @@ const TL_DOT = '<span class="tl-dot" role="img" aria-label="a reply you haven&#3
 // The dock's list is rewritten, and a pin taken away, only when nothing in it is focused or pressed:
 // a rewrite would drop the focus, or the click a press is half of.
 const tlHeld = (el) => el.contains(document.activeElement) || (!!TL.pressed && el.contains(TL.pressed));
-window.addEventListener('pointerdown', (e) => { TL.pressed = tlOwn(e.target) ? e.target : null; }, true);
+window.addEventListener('pointerdown', (e) => { TL.pressed = tlOwn(e.target) || e.target?.closest?.('#av-pins') ? e.target : null; }, true);
 // after the click this release makes; then what the press held back is drawn
 for (const up of ['pointerup', 'pointercancel']) window.addEventListener(up, () => setTimeout(() => { if (!TL.pressed) return; TL.pressed = null; tlDock(); tlPins(); }, 0), true);
-document.addEventListener('focusout', (e) => { if (tlOwn(e.target)) setTimeout(() => { tlDock(); tlPins(); }, 0); }, true);
+document.addEventListener('focusout', (e) => { if (tlOwn(e.target) || e.target?.closest?.('#av-pins')) setTimeout(() => { tlDock(); tlPins(); }, 0); }, true);
 // When the owner last looked at each thread, in this browser only: the dock's dot is a reply since.
 const TL_SEEN = 'devteam.thread.seen';
 const tlSeenAt = (id) => (lsGet(TL_SEEN) || {})[id] || null;
@@ -4094,15 +4159,22 @@ function tlSeen(t) { const m = lsGet(TL_SEEN) || {}; const last = t.turns[t.turn
 function tlPins() {
   const box = tlEl('tl-pins');
   const pins = tPins(TL.threads).map((g) => {
+    // a spot in a framed page is the stage's to pin (tsPins), in the frame's own coordinates
+    if (g.subject.kind === 'artifact' || g.subject.kind === 'preview') return null;
     const r = tlTargetRect(g.subject);
     if (!r) return null;
     const x = (g.subject.kind === 'item' ? r.right - 10 : r.left + 1) + scrollX, y = (g.subject.kind === 'item' ? r.top - 10 : r.top + 1) + scrollY;
     return { id: g.ids[g.ids.length - 1], cls: `tl-pin${g.ids.includes(TL.open) ? ' on' : ''}`, left: `${Math.round(x)}px`, top: `${Math.round(y)}px`, label: `Thread ${g.n}${g.ids.length > 1 ? `, and ${g.ids.length - 1} more on this` : ''}`, html: `${g.n}${g.ids.length > 1 ? `<sup>${g.ids.length}</sup>` : ''}` };
   }).filter(Boolean);
-  // each pin kept by its thread and changed in place, never taken out and put back, so a press or the
-  // focus on one survives; one gone stays while it is pressed or focused (the next draw takes it)
+  tlPinsInto(box, pins, tlHeld);
+  tsWatch();
+  tsPins();
+}
+// Each pin kept by its thread and changed in place, never taken out and put back, so a press or the
+// focus on one survives; one gone stays while held says so (pressed or focused: the next draw takes it).
+function tlPinsInto(box, pins, held) {
   const have = new Map([...box.children].map((b) => [b.dataset.tlPin, b]));
-  for (const [id, b] of have) if (!pins.some((x) => x.id === id) && !tlHeld(b)) b.remove();
+  for (const [id, b] of have) if (!pins.some((x) => x.id === id) && !held(b)) b.remove();
   for (const x of pins) {
     let b = have.get(x.id);
     if (!b) { b = document.createElement('button'); b.type = 'button'; b.dataset.tlPin = x.id; box.append(b); }
@@ -4183,7 +4255,8 @@ function tsSubject(anchor, x, y) {
 }
 // An anchor the lens gave for a point, only when its box holds that point (a few pixels' slack for
 // rounding): the page says where its element is, and a page that names something elsewhere is not
-// believed about what is under the owner's pointer.
+// believed about what is under the owner's pointer. An anchor without a rect is never held: the
+// lens always gives one, so one without is a page's say-so about nowhere.
 const tsHolds = (a, at) => !!(a?.rect && at) && at.x >= a.rect.x - 4 && at.x <= a.rect.x + a.rect.w + 4 && at.y >= a.rect.y - 4 && at.y <= a.rect.y + a.rect.h + 4;
 // One redraw of it a frame, however many answers or moves come in it.
 function tsRedraw() {
@@ -4219,6 +4292,8 @@ async function tsPick(e) {
     const timer = setTimeout(() => { TS.waiters.delete(id); resolve(null); }, TS.waitMs);
     TS.waiters.set(id, (v) => { clearTimeout(timer); TS.waiters.delete(id); resolve(v); });
   });
+  // the page it pointed at went (a load, another artifact) before the answer came: nothing starts
+  if (reply?.gone) return;
   const s = tsSubject(reply?.anchor ?? null, at.x, at.y);
   tsRaise(TL.pin);
   tlHide();
@@ -4245,13 +4320,24 @@ tsOver.addEventListener('click', (e) => { if (TS.via === 'mouse') tsPick(e); els
 // in pin mode (and with Shift held) the wheel scrolls the framed page, under the pointer
 tsOver.addEventListener('wheel', (e) => { e.preventDefault(); const at = tsAt(e); tsPost({ type: 'scroll-by', dx: e.deltaX, dy: e.deltaY, x: at.x, y: at.y }); }, { passive: false });
 // Each page the frame loads is asked what it is: its lens answers ready.
-tsFrame().addEventListener('load', () => { tsForget(); TS.ready = false; TS.path = null; TS.watch = ''; TS.rects.clear(); tsPost({ type: 'hello' }); });
+tsFrame().addEventListener('load', () => { tsForget(); TS.ready = false; TS.path = null; TS.watch = ''; TS.rects.clear(); tsPins(); tsPost({ type: 'hello' }); });
 window.addEventListener('message', (e) => {
   if (!TS.kind) return;
   const m = tLensMessage(e, tsFrame()?.contentWindow, TS.minted);
   if (!m) return;
   // the page as its lens names it (ready.path), never the frame's src: a link in it goes elsewhere
-  if (m.type === 'ready') { TS.ready = true; if (TS.kind === 'artifact') TS.path = tArtPath(m.path, TS.slug); return; }
+  // and once it has, what it watches for the pins is asked of it afresh
+  if (m.type === 'ready') { TS.ready = true; if (TS.kind === 'artifact') TS.path = tArtPath(m.path, TS.slug); TS.watch = ''; tlDraw(); return; }
+  // where each watched anchor is now, for only the anchors asked about (a Set: no key a page makes
+  // up, constructor or __proto__ among them, is one); the pins, and an open card beside its pin,
+  // follow, drawn once a frame however many come
+  if (m.type === 'rects') {
+    for (const r of m.rects) if (TS.watching.has(r.key)) TS.rects.set(r.key, r);
+    if (TS.pinsPending) return;
+    TS.pinsPending = true;
+    requestAnimationFrame(() => { TS.pinsPending = false; tlDraw(); });
+    return;
+  }
   // a key only while the frame has the keyboard (decision 20), and only ever to raise: the page's own
   // scripts can say the same at any time, so a "Shift up" or an Esc from it lowers nothing while the
   // owner may be holding Shift. The overlay goes on the parent's own evidence: its pointer moving

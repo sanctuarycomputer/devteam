@@ -864,6 +864,12 @@ test('the artifact lens: plain ASCII, the kit\'s caps, and it answers only the p
   assert.equal(L.posted[0].m.path, '/artifact/main/viewer-mock/index.html', 'the path from its artifact segment on');
   assert.equal(L.posted[0].m.title, 'Share http://box.example/artifact/main/viewer-mock/');
   assert.ok(L.posted.every((x) => !JSON.stringify(x.m).includes('/c/')), 'no message carries the capability');
+  // the cap is the page's own: neither the capability nor the artifact's prefix takes any of it
+  const longPage = `${'p/'.repeat(149)}x`;
+  const longAt = `/artifact/tree/${'a'.repeat(40)}/${'s'.repeat(63)}/`;
+  L = artLensRun({ pathname: `/c/1767225600000.abcdefghijklmnop.abcdefghijklmnopqrstuv${longAt}${longPage}${'q'.repeat(50)}` });
+  L.hear({ lens: 1, type: 'hello' });
+  assert.equal(L.posted[0].m.path, `${longAt}${longPage}${'q'.repeat(300 - longPage.length)}`, 'the prefix whole, the page cut to 300 bytes');
   // the page's own token, cut wherever its text holds it, in whatever encoding: no /artifact/ after it needed
   for (const [title, want] of [
     ['Share http%3A%2F%2Fbox.example%2Fc%2F1.abc.def%2Fartifact%2Fmain%2F', 'Share http%3A%2F%2Fbox.example%2Fartifact%2Fmain%2F'],
@@ -1162,6 +1168,9 @@ test("the thread layer's rules: what the pointer is on, a subject that fits, whe
   assert.equal(A.tFit({ kind: 'lens' }), null, 'no subject of a kind the log has none of');
   assert.equal(A.tAnchor('#buy'), null);
   assert.equal(A.tBox({ x: 1 }, ['x', 'y']), null);
+  assert.equal(A.tBox({ x: 1, y: 2, w: -1, h: 4 }, ['x', 'y', 'w', 'h']), null, 'no box of a negative width');
+  assert.equal(A.tBox({ w: 3, h: -0.5 }, ['w', 'h']), null, 'nor height');
+  assert.deepEqual(plain(A.tBox({ x: -5, y: -6, w: 0, h: 0 }, ['x', 'y', 'w', 'h'])), { x: -5, y: -6, w: 0, h: 0 }, 'a box above or left of the frame, or empty, is one');
   // the card's state line
   const now = Date.parse('2026-11-10T12:00:00Z');
   const th = (...turns) => ({ turns: turns.map(([by, min]) => ({ by, at: new Date(now - min * 60000).toISOString() })) });
@@ -1223,6 +1232,10 @@ test("the thread layer's rules: what the pointer is on, a subject that fits, whe
   assert.deepEqual([capped.path, capped.title, capped.route], ['[link removed]/artifact/main/x/', 'see [link removed]', '[link removed]/r']);
   assert.equal(plain(msg({ lens: 1, type: 'hit-reply', id: 'h1', anchor: { selector: '#a', text: `go ${cap}` } })).anchor.text, 'go [link removed]');
   assert.deepEqual(plain(msg({ lens: 1, type: 'rects', rects: [{ key: 't-1', rect: { x: 1, y: 2, w: 3, h: 4 }, changed: 'yes' }, { key: 7 }, null] })), { type: 'rects', rects: [{ key: 't-1', rect: { x: 1, y: 2, w: 3, h: 4 }, changed: false }] }, 'a position update, its keys strings');
+  // null is "not found"; a rect that is no box (a number that isn't one, a negative size, none) is no word at all
+  const bad = [{ x: 1, y: 2, w: -3, h: 4 }, { x: 1, y: 2, w: 3, h: Infinity }, { x: '1', y: 2, w: 3, h: 4 }, undefined, 'x'];
+  assert.deepEqual(plain(msg({ lens: 1, type: 'rects', rects: [{ key: 't-2', rect: null }, ...bad.map((rect) => ({ key: 't-3', rect }))] })).rects, [{ key: 't-2', rect: null, changed: false }]);
+  assert.equal(msg({ lens: 1, type: 'rects', rects: Array.from({ length: 5000 }, (_, i) => ({ key: `t-${i}`, rect: null })) }).rects.length, 200, 'at most 200');
   assert.deepEqual(plain(msg({ lens: 1, type: 'key', key: 'Delete', shift: 1 })), { type: 'key', key: 'Shift', shift: false });
   assert.deepEqual(plain(msg({ lens: 1, type: 'errors', errors: ['a', 'b', 'c', 'd'.repeat(300), 5] })).errors.map((e) => A.tBytes(e)), [1, 1, 200], 'the last three, each cut');
   // the page inside an artifact, under any of its prefixes
@@ -1460,7 +1473,7 @@ test('the viewer: one artifact on a stage the size of the tab, the threads and h
     assert.deepEqual(await p.ev(`[document.getElementById('artifact-view').hidden, location.pathname, location.hash, window.__esc]`), [false, '/view/artifact/viewer-mock', '', true]);
   });
 });
-test('Shift over an artifact: the overlay, what the lens says is under the pointer, a thread on that spot', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 240000 }, async (t) => {
+test('Shift over an artifact: the overlay, what the lens says is under the pointer, a thread on that spot', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 360000 }, async (t) => {
   const undo = [];
   t.after(async () => { let err = null; for (const f of undo.reverse()) { try { await f(); } catch (e) { err ??= e; } } if (err) throw err; });
   const F = threadsFixture('stage-pins');
@@ -1556,6 +1569,19 @@ test('Shift over an artifact: the overlay, what the lens says is under the point
     await keysHere();
   });
 
+  await t.test('raised by a page, the overlay goes when the pointer moves anywhere without Shift, off the stage too', async () => {
+    const blank = await frameAt(600, 500);
+    await p.clickAt(blank.x, blank.y);
+    await soon(`document.activeElement === document.getElementById('av-frame')`, 'the frame has the keyboard');
+    // the pointer off the stage first: from here it moves on the dashboard around it, never over the overlay
+    await p.move(5, 5);
+    await tell({ own: 'forge', say: [{ lens: 1, type: 'key', key: 'Shift', shift: true }] }, 'forged');
+    await soon('TS.raised', 'its say-so, believed while it has the keyboard');
+    await p.move(12, 12);
+    await soon(`document.getElementById('av-over').hidden && !TS.raised`, 'gone, though the pointer never crossed the overlay');
+    await keysHere();
+  });
+
   await t.test("a page's \"Shift up\" or Esc while the owner holds Shift lowers nothing: the click is a pin, never the page's", async () => {
     await patient(2000);
     const blank = await frameAt(600, 500);
@@ -1616,6 +1642,25 @@ test('Shift over an artifact: the overlay, what the lens says is under the point
     await keysHere();
   });
 
+  await t.test('a click still waiting on its answer when the page changes starts nothing', async () => {
+    await patient(10000);
+    await p.ev(`TS.target = 'http://nowhere.invalid'`);
+    const at = await frameAt(100, 140);
+    await p.hold('Shift', true);
+    await soon(`!document.getElementById('av-over').hidden`, 'the overlay');
+    await p.clickAt(at.x, at.y, 8);
+    await p.hold('Shift', false);
+    await soon('TS.waiters.size === 1', 'the click, waiting on the lens');
+    await p.ev(`(() => { TS.target = '*'; document.getElementById('av-frame').src = '/artifact/main/pin-mock/more/page.html'; return true; })()`);
+    await soon(`TS.ready && TS.path === 'more/page.html' && TS.waiters.size === 0`, 'the next page, and the question let go of');
+    await p.ev('new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))');
+    assert.equal(await p.ev('TL.draft'), null, 'no thread about to start, on either page');
+    await p.ev(`document.getElementById('av-frame').src = '/artifact/main/pin-mock/'; true`);
+    await soon(`TS.ready && TS.path === 'index.html'`, 'back on the index');
+    await patient(150);
+    await keysHere();
+  });
+
   await t.test("an answer about somewhere else isn't believed: the point alone", async () => {
     await patient(2000);
     await tell({ own: 'mode', mode: 'far' }, 'moded');
@@ -1659,8 +1704,8 @@ test('Shift over an artifact: the overlay, what the lens says is under the point
     assert.ok(heard.some((m) => m.type === 'hello'), 'it heard hello');
     assert.ok(heard.some((m) => m.type === 'hit'), 'it heard the hits');
     // every question's id is a string the page minted, and nothing of the owner's words is in any
-    assert.deepEqual(heard.filter((m) => m.id !== undefined && !(typeof m.id === 'string' && /^h\d+$/.test(m.id))), [], 'string ids only');
-    assert.deepEqual([...new Set(heard.map((m) => m.type))].filter((k) => !['hello', 'hit', 'scroll-by'].includes(k)), [], 'only questions');
+    assert.deepEqual(heard.filter((m) => m.id !== undefined && !(typeof m.id === 'string' && /^[hr]\d+$/.test(m.id))), [], 'string ids only');
+    assert.deepEqual([...new Set(heard.map((m) => m.type))].filter((k) => !['hello', 'hit', 'resolve', 'scroll-by'].includes(k)), [], 'only questions');
     assert.ok(heard.every((m) => !JSON.stringify(m).includes('Make it green')), 'never the owner\'s words');
   });
 
@@ -1704,6 +1749,128 @@ test('Shift over an artifact: the overlay, what the lens says is under the point
     const th = await until(() => threads().find((x) => x.subject?.slug === 'liar-mock'), 'the thread');
     assert.doesNotMatch(JSON.stringify(th), /1767225600000/, 'nothing written carries it');
     assert.equal(th.subject.anchor.text, 'Pay at [link removed] now');
+  });
+
+  const pinAt = () => p.ev(`(() => { const b = document.querySelector('#av-pins .tl-pin'); return b ? [parseInt(b.style.left, 10), parseInt(b.style.top, 10)] : null; })()`);
+  // nothing the owner wrote (a turn, a title, an outcome) in anything posted to a lens, and every
+  // anchor it is asked to watch named by an open thread's id
+  const toLensClean = async () => {
+    const heard = await p.ev(`window.__own.filter((m) => m.own === 'heard').map((m) => m.data)`);
+    const all = threads();
+    const words = all.flatMap((x) => [...x.turns.filter((u) => u.by === 'owner').map((u) => u.text), x.outcome].filter(Boolean));
+    assert.ok(words.length >= 2, `the owner's words to look for: ${JSON.stringify(words)}`);
+    for (const w of words) assert.ok(heard.every((m) => !JSON.stringify(m).includes(w)), `never the owner's words: ${w}`);
+    const resolves = heard.filter((m) => m.type === 'resolve');
+    assert.ok(resolves.length, 'it was asked to watch');
+    const ids = new Set(all.map((x) => x.id));
+    for (const r of resolves) for (const a of r.anchors) {
+      assert.match(a.key, /^t-\d{8}-\d{9}-owner$/);
+      assert.ok(ids.has(a.key), `a thread's id: ${a.key}`);
+      assert.deepEqual(Object.keys(a).sort(), ['anchor', 'key'], 'a key and an anchor, nothing else');
+      assert.deepEqual(Object.keys(a.anchor).filter((k) => a.anchor[k] !== undefined).sort(), ['rect', 'selector', 'tag', 'text'], 'what the lens finds it by');
+    }
+    return heard;
+  };
+
+  await t.test('a numbered pin on the button, where it was clicked, inside the frame', async () => {
+    await p.ev(`location.hash = '#artifact/main/pin-mock'`);
+    await soon(`TS.slug === 'pin-mock' && TS.ready && TS.path === 'index.html'`, 'the pin mock on the stage');
+    await soon(`!!document.querySelector('#av-pins .tl-pin')`, 'the pin');
+    assert.deepEqual(await pinAt(), [100 - 11, 140 - 11], 'the button at 40,120 and the click 60,20 inside it');
+    assert.equal(await p.ev(`document.querySelectorAll('#tl-pins .tl-pin').length`), 0, 'none of it in the page\'s own pins');
+    const heard = await p.ev(`window.__own.filter((m) => m.own === 'heard' && m.data.type === 'resolve').map((m) => m.data.anchors.map((a) => a.key))`);
+    assert.ok(heard.length && heard.at(-1).every((k) => /^t-\d{8}-\d{9}-owner$/.test(k)), `the lens is asked by thread ids: ${JSON.stringify(heard)}`);
+  });
+
+  await t.test("a page's word on where things are moves only the pins it was asked about, and a flood is one redraw a frame", async () => {
+    const key = await p.ev('[...TS.watching][0]');
+    await p.ev(`(() => { window.__draws = 0; window.__draw = tlDraw; window.tlDraw = () => { window.__draws++; window.__draw(); }; return true; })()`);
+    const to = { x: 240, y: 300, w: 120, h: 40 };
+    const flood = Array.from({ length: 5000 }, () => ({ lens: 1, type: 'rects', rects: [{ key, rect: to }] }));
+    const odd = { lens: 1, type: 'rects', rects: [{ key: 'constructor', rect: to }, { key: '__proto__', rect: to }, { key: 'hasOwnProperty', rect: to }, { key: 't-20260101-000000000-owner', rect: to }, { key, rect: { x: 1, y: 1, w: -5, h: 4 } }, { key, rect: { x: 1, y: 1, w: 5, h: 'tall' } }] };
+    await tell({ own: 'forge', say: [...flood, odd] }, 'forged');
+    await soon(`(() => { const b = document.querySelector('#av-pins .tl-pin'); return b && b.style.left === '289px' && b.style.top === '309px'; })()`, 'the pin where the page says');
+    await p.ev('new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))');
+    const draws = await p.ev('window.__draws');
+    assert.ok(draws < 100, `5,000 moves drawn ${draws} times`);
+    assert.deepEqual(await p.ev('[...TS.rects.keys()]'), [key], 'only what it was asked about');
+    assert.deepEqual(await pinAt(), [289, 309], 'a rect that is no box moves nothing');
+    await p.ev(`(() => { window.tlDraw = window.__draw; TS.watch = ''; tsWatch(); return true; })()`);
+    await soon(`(() => { const b = document.querySelector('#av-pins .tl-pin'); return b && b.style.left === '89px' && b.style.top === '129px'; })()`, 'back where the lens says');
+  });
+
+  await t.test('a stage pin pressed or focused stays through a redraw that drops it; let go, it goes', async () => {
+    await p.ev(`document.querySelector('#av-pins .tl-pin').focus()`);
+    await p.ev('TS.rects.clear(); tsPins(); true');
+    assert.equal(await p.ev(`document.activeElement === document.querySelector('#av-pins .tl-pin')`), true, 'kept, with the focus');
+    await keysHere();
+    await soon(`!document.querySelector('#av-pins .tl-pin')`, 'gone once the focus is');
+    await p.ev(`TS.watch = ''; tsWatch(); true`);
+    await soon(`!!document.querySelector('#av-pins .tl-pin')`, 'the pin again');
+    const at = await p.ev(`(() => { const r = document.querySelector('#av-pins .tl-pin').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
+    await p.move(at.x, at.y);
+    await p.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...at, button: 'left', buttons: 1, clickCount: 1 });
+    // the press alone: Chrome gives a pressed button the focus, which would hold it too
+    await p.ev('document.activeElement?.blur(); TS.rects.clear(); tsPins(); true');
+    assert.equal(await p.ev(`!!document.querySelector('#av-pins .tl-pin') && document.activeElement === document.body`), true, 'kept under the press');
+    await p.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...at, button: 'left', buttons: 0, clickCount: 1 });
+    await soon('!!TL.open', 'the click landed on it');
+    await p.ev('tlClose()');
+    await keysHere();
+    await soon(`!document.querySelector('#av-pins .tl-pin')`, 'then it went');
+    await p.ev(`TS.watch = ''; tsWatch(); true`);
+    await soon(`!!document.querySelector('#av-pins .tl-pin')`, 'the pin again');
+  });
+
+  await t.test('in pin mode the wheel scrolls the artifact, and the pin follows', async () => {
+    await p.ev('document.activeElement?.blur()');
+    if (await p.ev(`document.getElementById('tl-panel').hidden`)) await p.click('#tl-pill');
+    await p.click('#tl-pinbtn');
+    await soon(`!document.getElementById('av-over').hidden`, 'the overlay in pin mode');
+    const at = await frameAt(300, 300);
+    await p.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: at.x, y: at.y, deltaX: 0, deltaY: 100 });
+    await soon(`(() => { const b = document.querySelector('#av-pins .tl-pin'); return b && parseInt(b.style.top, 10) === 140 - 100 - 11; })()`, 'the pin, 100 px up');
+    await p.key('Escape');
+    await soon(`document.getElementById('av-over').hidden && document.getElementById('tl-pinbtn').getAttribute('aria-pressed') === 'false'`, 'out of pin mode');
+  });
+
+  await t.test('the pin opens its card beside it, and the card says when the artifact changed since', async () => {
+    await p.ev('TL.open = null; TL.draft = null; tlDraw()');
+    await p.click('#av-pins .tl-pin');
+    await soon(`!document.getElementById('tl-card').hidden && document.getElementById('tl-c-title').textContent === 'button "Buy now"'`, 'its card');
+    assert.equal(await p.ev(`document.getElementById('tl-card').classList.contains('in-dock')`), false, 'beside the pin, not in the dock');
+    const beside = await p.ev(`(() => { const c = document.getElementById('tl-card').getBoundingClientRect(), b = document.querySelector('#av-pins .tl-pin').getBoundingClientRect(); return Math.round(c.left - b.right); })()`);
+    assert.ok(beside > 0 && beside < 30, `just right of the pin: ${beside} px`);
+    assert.doesNotMatch(await p.ev(`document.getElementById('tl-c-ctx').textContent`), /changed since/);
+    await p.ev(`TS.fp = 'f'.repeat(64); TL.sig = ''; tlDraw()`);
+    await soon(`/changed since/.test(document.getElementById('tl-c-ctx').textContent)`, 'changed since');
+    await p.ev(`TS.fp = TS.mainFp; TL.sig = ''; tlDraw()`);
+  });
+
+  await t.test('from the dock, a thread on the artifact opens the stage on it; the stage closed, its pins go', async () => {
+    const T = threads().find((x) => x.subject?.kind === 'artifact' && x.subject.slug === 'pin-mock' && x.subject.anchor).id;
+    await p.ev('tlClose()');
+    await p.key('Escape'); // the stage: back to the Library
+    await soon(`document.getElementById('artifact-view').hidden && !document.querySelector('#av-pins .tl-pin')`, 'closed, no pins');
+    await p.ev(`location.hash = '#talk/${T}'`);
+    await soon(`!document.getElementById('artifact-view').hidden && !!document.querySelector('#av-pins .tl-pin')`, 'the stage, its pin');
+    await soon(`TL.open === ${JSON.stringify(T)} && !document.getElementById('tl-card').hidden && !document.getElementById('tl-card').classList.contains('in-dock')`, 'its card, beside its pin');
+  });
+
+  await t.test("nothing the owner wrote is ever posted to a lens, and it is asked about anchors by threads' ids", async () => {
+    F.owner(['thread', 'say', threads().find((x) => x.subject?.slug === 'pin-mock').id, 'Owner words zq9 for the record']);
+    F.owner(['thread', 'resolve', threads().find((x) => x.subject?.slug === 'liar-mock').id, '--outcome', 'Outcome zq9 as the owner put it']);
+    await soon(`TL.threads.some((x) => x.turns.some((u) => u.text === 'Owner words zq9 for the record')) && TL.threads.some((x) => x.outcome === 'Outcome zq9 as the owner put it')`, 'the new turn and the outcome on the page');
+    await p.ev(`TS.watch = ''; tsWatch(); true`);
+    await soon(`window.__own.filter((m) => m.own === 'heard' && m.data.type === 'resolve').length >= 2`, 'asked again');
+    await toLensClean();
+  });
+
+  await t.test('in a viewer tab, the same pin on the same spot', async () => {
+    await p.send('Page.navigate', { url: `${B}/view/artifact/pin-mock` });
+    await soon(`!!document.querySelector('#av-pins .tl-pin')`, 'the pin in the viewer');
+    assert.deepEqual(await pinAt(), [89, 129]);
+    await toLensClean();
   });
 });
 // The thread layer in Chrome, on a project of its own: aiming (this task), the card (Task 11), the
