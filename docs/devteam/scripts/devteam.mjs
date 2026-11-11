@@ -239,8 +239,9 @@ function factSet(k, v) {
   factStore[k] = v;
   if (!factsAdded) {
     factsAdded = {};
-    // read again and add ours: another process may have written since; a race loses an addition only
-    process.on('exit', () => { try { writeJson(factsFile(), { v: 1, e: { ...factsIn(), ...factsAdded } }); } catch {} });
+    // read again and add ours: another process may have written since; a race loses an addition only.
+    // The box operator only reads, so its facts last only as long as its process.
+    if (process.env.DEVTEAM_ROLE !== 'operator') process.on('exit', () => { try { writeJson(factsFile(), { v: 1, e: { ...factsIn(), ...factsAdded } }); } catch {} });
   }
   factsAdded[k] = v;
 }

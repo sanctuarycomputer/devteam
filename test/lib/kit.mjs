@@ -291,7 +291,7 @@ export function gitFactFns(cwd, runDir) {
   const ctx = vm.createContext({ execFileSync, spawnSync, Buffer, fs, path, runDir, writeJson,
     readJson: (p) => JSON.parse(fs.readFileSync(p, 'utf8')), isObj: (x) => !!x && typeof x === 'object' && !Array.isArray(x),
     sha256: (b) => crypto.createHash('sha256').update(b).digest('hex'),
-    process: { cwd: () => cwd, on: (ev, f) => { if (ev === 'exit') exits.push(f); } } });
+    process: { cwd: () => cwd, env: {}, on: (ev, f) => { if (ev === 'exit') exits.push(f); } } });
   const fns = vm.runInContext(`${cut('/* git reads start */', '/* git reads end */')}\n${cut('/* git facts start */', '/* git facts end */')}\nHOME_CWD = ${JSON.stringify(cwd)};\n;({ commitDateOf, ancestorOf, releasedInAt, factGet })`, ctx);
   return { ...fns, exit: () => { for (const f of exits.splice(0)) f(); } };
 }
