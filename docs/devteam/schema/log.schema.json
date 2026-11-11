@@ -779,7 +779,7 @@
         ]
       },
       "observation": {
-        "description": "Something noticed: a metrics finding, a slow test, a goal reading (kind reading), a trial's outcome (kind outcome), an escaped defect, a retro (kind retro, source_ref = its file). Deduped on source_key.",
+        "description": "Something noticed: a metrics finding, a slow test, a goal reading (kind reading), a trial's outcome (kind outcome), an escaped defect, a retro (kind retro, source_ref = its file), a week's learning record (kind learning: its week and figures). Deduped on source_key.",
         "type": "object",
         "properties": {
           "source": {
@@ -836,6 +836,61 @@
           "fix_hint": {
             "description": "A suggested fix.",
             "type": "string"
+          },
+          "week": {
+            "description": "On a learning record (kind learning): the ISO week it counts, in UTC, as yyyy-Www. Its at is when it was written, which for a back-filled week is later.",
+            "x-tip": "The week these figures count.",
+            "type": "string",
+            "pattern": "^\\d{4}-W\\d{2}$"
+          },
+          "figures": {
+            "description": "On a learning record (kind learning): the week's counts, from the log as it stood at the week's end. Counts, never shares: the views divide.",
+            "x-tip": "What the week counted: informed, autonomous, trusted.",
+            "type": "object",
+            "properties": {
+              "informed": {
+              "description": "Informed: what the loop knew at the week's end.",
+              "x-tip": "Whether the agents work from what the loop has learned.",
+              "type": "object",
+              "properties": {
+                "knowledge": { "type": "integer", "minimum": 0, "description": "Accepted knowledge in force at the week's end." },
+                "signals_formed": { "type": "integer", "minimum": 0, "description": "Recurring signals formed by the week's end (three or more on one key, from two writers or on two days)." },
+                "signals_explained": { "type": "integer", "minimum": 0, "description": "Of those, the ones a lesson, a problem, an incident or a live decision explains." },
+                "starts": { "type": "integer", "minimum": 0, "description": "Workers and planners started fresh in the week." },
+                "starts_given": { "type": "integer", "minimum": 0, "description": "Of those, the ones whose prompt carried at least one lesson." }
+              },
+              "required": ["knowledge", "signals_formed", "signals_explained", "starts", "starts_given"],
+              "additionalProperties": false
+            },
+              "autonomous": {
+              "description": "Autonomous: how much the supervisor did alone.",
+              "x-tip": "Whether the supervisor needs to ask less.",
+              "type": "object",
+              "properties": {
+                "ladder_calls": { "type": "integer", "minimum": 0, "description": "Calls in a trust-ladder class made in the week." },
+                "trusted_calls": { "type": "integer", "minimum": 0, "description": "Of those, the ones made on trust (its rung, or a standing rule) rather than asked." },
+                "questions": { "type": "integer", "minimum": 0, "description": "Decisions put to the owner in the week (decisions, one-way doors, proposals, trust, clarifications)." },
+                "merged": { "type": "integer", "minimum": 0, "description": "Tickets merged in the week." }
+              },
+              "required": ["ladder_calls", "trusted_calls", "questions", "merged"],
+              "additionalProperties": false
+            },
+              "trusted": {
+              "description": "Trusted: how often the owner agreed, and corrected.",
+              "x-tip": "Whether the owner agrees with the supervisor's calls.",
+              "type": "object",
+              "properties": {
+                "answered": { "type": "integer", "minimum": 0, "description": "Questions the owner answered in the week that carried a recommendation." },
+                "agreed": { "type": "integer", "minimum": 0, "description": "Of those, the ones answered with the recommendation." },
+                "calls": { "type": "integer", "minimum": 0, "description": "The supervisor's calls made in the week." },
+                "corrections": { "type": "integer", "minimum": 0, "description": "Corrections the owner made in the week." }
+              },
+              "required": ["answered", "agreed", "calls", "corrections"],
+              "additionalProperties": false
+            }
+            },
+            "required": ["informed", "autonomous", "trusted"],
+            "additionalProperties": false
           },
           "sha": {
             "description": "A reading of a repo measure: the commit on main its check ran on.",

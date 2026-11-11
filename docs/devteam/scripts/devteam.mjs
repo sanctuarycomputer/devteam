@@ -7584,7 +7584,8 @@ async function cmdObserveMetrics() {
   const unfetched = await fetchLinkMains(end);
   const { skipped } = await probeLinks(end);
   const s = observeSpend();
-  out(`recorded ${s} spend line(s) and ${observeFindings(collectMetrics(0))} new observation(s)${unfetched.length ? `; ${unfetched.length} repo link(s) not fetched this tick (time budget): ${unfetched.join(', ')}` : ''}${skipped.length ? `; ${skipped.length} link(s) not probed this tick (time budget): ${skipped.join(', ')}` : ''}`);
+  const learned = writeLearning();
+  out(`recorded ${s} spend line(s) and ${observeFindings(collectMetrics(0))} new observation(s)${learned ? `; ${learned} weekly learning record(s)` : ''}${unfetched.length ? `; ${unfetched.length} repo link(s) not fetched this tick (time budget): ${unfetched.join(', ')}` : ''}${skipped.length ? `; ${skipped.length} link(s) not probed this tick (time budget): ${skipped.join(', ')}` : ''}`);
 }
 // The tick's fetch of each repo link's main (home's is the tick's own git fetch), four at a time
 // inside the tick's budget, so status, metrics and the dashboard read every repo's main as its
@@ -8068,7 +8069,7 @@ function signalGroups() {
   const groups = new Map();
   const add = (key, item) => (groups.get(key) ?? groups.set(key, { key, items: [] }).get(key)).items.push(item);
   for (const o of logObjects('observation')) {
-    if (linked.has(o.id) || ['reading', 'retro', 'outcome', 'link'].includes(o.kind)) continue;
+    if (linked.has(o.id) || ['reading', 'retro', 'outcome', 'link', 'learning'].includes(o.kind)) continue;
     const key = signalKeyOf(o);
     if (covered(keys, key, o.created_at)) continue;
     add(key, { id: o.id, at: o.created_at, who: o.created_by, valence: o.valence ?? 0, detail: o.detail });
@@ -8115,6 +8116,99 @@ function incidentDebt() {
     const cite = [p.id, ...(d ? [d] : []), outcome.id].map(shq).join(' ');
     return [{ id: p.id, title: p.title, resolved_at: at, outcome: outcome.id, decision: d, days: Math.floor((now - Date.parse(at)) / DAY), explain: [`knowledge add --kind lesson --scope ${shq(t?.component ? `component:${t.component}` : 'project')} --statement '<what it teaches>' --evidence ${cite}`, `decide --class orient-noise --refs ${shq(p.id)} -- 'nothing to keep'`] }];
   }).sort((a, b) => a.resolved_at.localeCompare(b.resolved_at));
+}
+// ===== the weekly learning record (the OODA spec §6) =====
+
+// ISO weeks, in UTC: Monday 00:00 of the week ms falls in, the week's name, and back.
+const WEEK = 7 * DAY;
+const mondayOf = (ms) => { const d = new Date(ms); return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - ((d.getUTCDay() + 6) % 7) * DAY; };
+const isoWeekOf = (ms) => { const m = mondayOf(ms); const y = new Date(m + 3 * DAY).getUTCFullYear(); return `${y}-W${String(1 + Math.round((m - mondayOf(Date.UTC(y, 0, 4))) / WEEK)).padStart(2, '0')}`; };
+const weekStartOf = (week) => { const [y, w] = String(week).split('-W').map(Number); return mondayOf(Date.UTC(y, 0, 4)) + (w - 1) * WEEK; };
+// Run fn against the log as it stood at cut: a fold of only the lines with at <= cut, every memo
+// built on readLog() following it, and the log-derived globals that aren't (SENSOR_KEYS and the
+// process-wide memos) reset for fn and put back after. Git facts (mergedAt) replay as they are.
+function withLogAt(cut, fn) {
+  const full = readLog();
+  const saved = { logCache, SENSOR_KEYS, roadmapMemo, STATUS_MEMO, spendMemo, spendItemsMemo, spendWhoMemo, SIGNALS, FP_OBS, LINKS, PLACE_CTX };
+  try {
+    const lines = full.lines.filter((l) => l.at <= cut);
+    const { objects, ignored } = fold(lines);
+    const byType = new Map();
+    for (const o of objects.values()) { if (!byType.has(o.type)) byType.set(o.type, []); byType.get(o.type).push(o); }
+    logCache = { lines, objects, errors: full.errors, ignored, unknown: full.unknown, byType };
+    SENSOR_KEYS = roadmapMemo = STATUS_MEMO = spendMemo = spendItemsMemo = spendWhoMemo = SIGNALS = FP_OBS = LINKS = PLACE_CTX = null;
+    return fn();
+  } finally {
+    ({ logCache, SENSOR_KEYS, roadmapMemo, STATUS_MEMO, spendMemo, spendItemsMemo, spendWhoMemo, SIGNALS, FP_OBS, LINKS, PLACE_CTX } = saved);
+  }
+}
+// The questions that put a decision to the owner (the schema's kinds, less an action only the owner
+// can do, a review, and defining or approving a goal).
+const DECISION_KINDS = ['owner-decision', 'one-way-door', 'proposal', 'trust', 'clarification'];
+const authorityOfCall = (c) => (c.type === 'decision' ? c.authority : actAuthority(c));
+// One week's figures (counts, never shares) and the records each counts, from the log as it stood
+// at the week's end. "In the week" is the named time falling in it.
+function learningFigures(week, merges = mergeTimes()) {
+  const from = weekStartOf(week);
+  const fromIso = new Date(from).toISOString(), cut = new Date(from + WEEK - 1).toISOString();
+  const inW = (at) => typeof at === 'string' && at >= fromIso && at <= cut;
+  return withLogAt(cut, () => {
+    const L = ladder();
+    const knowledge = logObjects('knowledge').filter((k) => k.status === 'accepted').sort(byTime).map((k) => k.id);
+    // recurring signals as Orient forms them, before what explains them is taken out
+    const { ids, keys } = explained();
+    const groups = new Map();
+    const add = (key, item) => (groups.get(key) ?? groups.set(key, { key, items: [] }).get(key)).items.push(item);
+    for (const o of logObjects('observation')) if (!['reading', 'retro', 'outcome', 'link', 'learning'].includes(o.kind)) add(signalKeyOf(o), { id: o.id, at: o.created_at, who: o.created_by });
+    for (const a of calls()) { const c = correctionOf(a); if (c) add(`correction:${a.class}:${a.scope ?? 'any'}`, { id: a.id, at: c.at, who: c.by }); }
+    const signals = [...groups.values()].filter((g) => g.items.length >= 3 && (new Set(g.items.map((i) => i.who)).size >= 2 || new Set(g.items.map((i) => dateOnly(i.at))).size >= 2))
+      .map((g) => { const by = g.items.filter((i) => ids.has(i.id) || covered(keys, g.key, i.at)).map((i) => i.id); return { key: g.key, ids: g.items.map((i) => i.id), explained: by.length > 0, by }; });
+    const starts = logObjects('act').filter((a) => a.class === 'worker-slots' && inW(a.created_at) && String(a.what).startsWith('made ')).sort(byTime).map((a) => ({ id: a.id, given: Array.isArray(a.knowledge) ? a.knowledge : [] }));
+    const all = calls().sort(byTime);
+    const weekCalls = all.filter((c) => inW(c.created_at));
+    const ladderCalls = weekCalls.filter((c) => L.classes[c.class]).map((c) => ({ id: c.id, class: c.class, authority: authorityOfCall(c) }));
+    const qs = questions();
+    const asked = qs.filter((q) => inW(q.asked_at) && DECISION_KINDS.includes(q.kind)).map((q) => q.id);
+    // trustEvidence's filter: answered by the owner, with a recommendation (a review's proposals)
+    const answered = qs.filter((q) => q.status === 'answered' && inW(q.answered_at) && (q.recommendation || (q.kind === 'review' && (q.review?.data?.proposals ?? 0) > 0))).sort((a, b) => a.answered_at.localeCompare(b.answered_at)).map((q) => ({ id: q.id, matched: !!q.matched }));
+    const corrections = all.filter((c) => inW(correctionOf(c)?.at)).map((c) => c.id);
+    const merged = merges.filter(([, at]) => at >= from && at < from + WEEK).map(([id]) => id);
+    const figures = {
+      informed: { knowledge: knowledge.length, signals_explained: signals.filter((s) => s.explained).length, signals_formed: signals.length, starts_given: starts.filter((s) => s.given.length).length, starts: starts.length },
+      autonomous: { trusted_calls: ladderCalls.filter((c) => ['rung', 'standing-rule'].includes(c.authority)).length, ladder_calls: ladderCalls.length, questions: asked.length, merged: merged.length },
+      trusted: { agreed: answered.filter((q) => q.matched).length, answered: answered.length, corrections: corrections.length, calls: weekCalls.length },
+    };
+    return { week, from: fromIso, cut, figures, lists: { knowledge, signals, starts, ladder_calls: ladderCalls, questions: asked, merged, answered, calls: weekCalls.map((c) => c.id), corrections } };
+  });
+}
+// When each ticket merged (ms), from git, once per read of the whole log: a back-fill asks every week.
+const mergeTimes = () => memo('mergeTimes', () => [...tickets().keys()].map((id) => [id, mergedAt(id)]).filter(([, at]) => at));
+// The record's line: its counts, one sentence of them, and refs to what it counted (at most 60:
+// the corrections first, then the explained signals, then the knowledge in force).
+function learningLine(r) {
+  const { informed: I, autonomous: A, trusted: T } = r.figures;
+  const n = (k, one, many = `${one}s`) => `${k} ${k === 1 ? one : many}`;
+  const detail = `Week ${r.week}: ${n(I.knowledge, 'lesson')} in force, ${I.signals_explained} of ${n(I.signals_formed, 'recurring signal')} explained, ${I.starts_given} of ${n(I.starts, 'start')} given a lesson; ${A.trusted_calls} of ${n(A.ladder_calls, 'ladder call')} made on trust, ${n(A.questions, 'question')} to the owner for ${n(A.merged, 'merged ticket')}; ${T.agreed} of ${n(T.answered, 'recommendation')} agreed, ${n(T.corrections, 'correction')} in ${n(T.calls, 'call')}.`;
+  const refs = [...new Set([...r.lists.corrections, ...r.lists.signals.filter((s) => s.explained).map((s) => s.by[0]), ...r.lists.knowledge])].slice(0, KNOWLEDGE_IDS_MAX);
+  return { type: 'observation', source: 'metrics', detector: 'metrics', subject: 'project', kind: 'learning', week: r.week, figures: r.figures, detail: detail.slice(0, 300), source_key: `learning:${r.week}`, refs };
+}
+// The metrics pass (supervisor only): one learning record for each ISO week since the log's
+// earliest line that has ended and has none yet (any observation with its source_key). A
+// back-filled week's record is stamped now (records can't be back-dated) and names its week.
+// Every week is counted before any is written, so each count folds the log once.
+function writeLearning() {
+  const log = readLog();
+  const first = log.lines.reduce((m, l) => (l.at < m ? l.at : m), log.lines[0]?.at ?? '');
+  const start = Date.parse(first);
+  if (!Number.isFinite(start)) return 0;
+  const have = new Set(logObjects('observation').map((o) => o.source_key).filter((k) => k?.startsWith('learning:')));
+  const weeks = [];
+  for (let t = mondayOf(start), cur = mondayOf(Date.now()); t < cur; t += WEEK) if (!have.has(`learning:${isoWeekOf(t)}`)) weeks.push(isoWeekOf(t));
+  if (!weeks.length) return 0;
+  const merges = mergeTimes();
+  const lines = weeks.map((w) => learningLine(learningFigures(w, merges)));
+  for (const l of lines) appendLog(l, 'supervisor');
+  return lines.length;
 }
 // One value as a POSIX shell word: single-quoted, each ' written '\''. Every value orient puts in a
 // command it proposes goes through this, since observation text is anyone's to write and the
@@ -9973,7 +10067,7 @@ function collectOoda() {
     roadmap: collectRoadmap(),
     retro: retroDue(),
     // each with where it sits in the loop, so its card can say so without the whole index
-    observations: recent(logObjects('observation').filter((o) => !['reading', 'retro', 'finding-ack'].includes(o.kind)), 40).map((o) => ({ ...withOoda(o), place: placeOf(o) })),
+    observations: recent(logObjects('observation').filter((o) => !['reading', 'retro', 'finding-ack', 'learning'].includes(o.kind)), 40).map((o) => ({ ...withOoda(o), place: placeOf(o) })),
     clusters: orientClusters(),
     // orientation debt: recurring signals nothing has explained for more than a day, and resolved
     // incidents nobody learned from, each oldest first
@@ -9990,6 +10084,8 @@ function collectOoda() {
     // every settled question, newest first, wherever it was answered (dashboard, terminal, chat) or
     // whether it was defaulted or withdrawn; defaulted ones can still be overruled
     answered: questions().filter((q) => q.status !== 'open').sort((a, b) => b.answered_at.localeCompare(a.answered_at)).slice(0, 80),
+    // the weekly learning records, oldest first: read, never written here (observe-metrics writes them)
+    learning: logObjects('observation').filter((o) => o.kind === 'learning' && o.week && o.figures && o.created_by === 'supervisor').sort((a, b) => a.week.localeCompare(b.week) || byTime(a, b)).map((o) => ({ id: o.id, week: o.week, at: o.created_at, from: new Date(weekStartOf(o.week)).toISOString(), figures: o.figures, detail: o.detail })),
     log: { lines: log.lines.length, errors: log.errors.length, ignored: log.ignored.length, unknown: log.unknown.length },
   };
 }
