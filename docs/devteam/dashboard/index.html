@@ -3384,7 +3384,8 @@ function render(d) {
       <textarea data-know-note="${esc(k.id)}" rows="1" maxlength="600" placeholder="Add a note to refine it (optional): it goes with the lesson into every prompt">${esc(drafts[`know:${k.id}`] || '')}</textarea>
       <div class="row-inline"><button data-know="${esc(k.id)}" data-status="accepted">Keep it</button><button class="ghost" data-know="${esc(k.id)}" data-status="retired">Retire it</button><span class="err" id="e-${esc(k.id)}"></span></div>
     </div>`).join('');
-  for (const qid of [...ANSWERED.keys()]) if (!d.questions.some((q) => q.id === qid)) ANSWERED.delete(qid);
+  // kept while a thread's copy still says open: a read of the threads begun before the answer can land after this
+  for (const qid of [...ANSWERED.keys()]) if (!d.questions.some((q) => q.id === qid) && !TL.threads.some((t) => t.questions?.some((q) => q.id === qid && q.status === 'open'))) ANSWERED.delete(qid);
   d = { ...d, questions: d.questions.filter((q) => !ANSWERED.has(q.id)) };
   // questions first, in the kit's order (the first is the next best step); lessons to keep after them
   $('questions').innerHTML = (d.questions.length ? d.questions.map((q) => questionCard(q, o, reasonText)).join('') : cands.length ? '' : empty('Nothing needs you right now. Decisions and actions only you can take show here.')) + goalCards;

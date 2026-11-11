@@ -314,6 +314,8 @@ const POLL_FAST = `(() => {
     // a test can let the next /api/threads read through but hold its answer back: read now, landing later
     // and can slow every /api/threads answer, as a loaded box would
     if (String(u).startsWith('/api/threads') && window.__threadsDelay) await new Promise((r) => setTimeout(r, window.__threadsDelay));
+    // or hold back every /api/threads answer, read now, until the test lets each go
+    if (String(u).startsWith('/api/threads') && window.__threadsQueue) { const r = await rf(u, o); await new Promise((go) => window.__threadsQueue.push(go)); return r; }
     if (String(u).startsWith('/api/threads') && window.__threadsHold) { const h = window.__threadsHold; window.__threadsHold = null; const r = await rf(u, o); window.__threadsRead = true; await h; setTimeout(() => { window.__threadsLanded = true; }, 0); return r; }
     return rf(u, o);
   };
@@ -1091,7 +1093,12 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     assert.ok(await p.ev(`document.querySelector('#t-q-${Q} input[value="Not yet"]').checked && document.querySelector('#t-q-${Q} input[value="Not yet"]').closest('.choice').classList.contains('picked')`), "the Inbox's pick shows in the thread's");
     await click(`#t-q-${Q} input[data-pick="${Q}"][value="Yes"]`);
     assert.deepEqual(await p.ev(`[document.querySelector('#q-${Q} input[value="Yes"]').checked, document.querySelector('#q-${Q} input[value="Not yet"]').checked, document.querySelectorAll('#q-${Q} .choice.picked').length]`), [true, false, 1], "the thread's pick shows in the Inbox's");
-    await click(`#t-q-${Q} button[data-answer="${Q}"]`);
+    // held still from the press until both copies say so: answered at once, before any read lands
+    await still(async () => {
+      await p.click(`#t-q-${Q} button[data-answer="${Q}"]`);
+      await soon(`document.getElementById('t-q-${Q}')?.classList.contains('done') && document.getElementById('t-q-${Q}').textContent.includes('Yes')`, 'the thread copy marked answered at once');
+      await soon(`document.getElementById('q-${Q}')?.classList.contains('done') && document.getElementById('q-${Q}').textContent.includes('Yes')`, 'the Inbox copy marked answered at once');
+    });
     const q = await until(() => { const x = JSON.parse(F.owner(['questions', '--id', Q, '--json']))[0]; return x.status === 'answered' && x; }, 'the answer');
     assert.deepEqual([q.answer, q.channel], ['Yes', 'dashboard']);
     await soon(`!document.getElementById('q-${Q}') || document.getElementById('q-${Q}').classList.contains('done')`, 'the Inbox copy answered');
@@ -1122,6 +1129,30 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await p.ev('tlRefresh()');
     await click(`[data-tl-pin="${T}"]`);
     await soon(`document.getElementById('tl-card').dataset.key === '${T}'`, 'its card again');
+  });
+
+  await t.test("a read of the threads begun before an answer, landing after the page has dropped the question, doesn't show it unanswered", async () => {
+    const Q = F.sup(['thread', 'ask', T, '--question', 'Ship to the EU first?', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
+    await soon(`!!document.getElementById('t-q-${Q}') && !!document.getElementById('q-${Q}') && document.getElementById('tl-card').dataset.key === '${T}'`, 'both copies');
+    // every read of the threads from here held back once read; any Inbox link for the question drawn in the card noted
+    await p.ev(`window.__threadsQueue = []; window.__inboxLink = false; window.__obs = new MutationObserver(() => { if (document.querySelector('#tl-c-turns a[href="#q/${Q}"]')) window.__inboxLink = true; }); window.__obs.observe(document.getElementById('tl-card'), { childList: true, subtree: true }); tlRefresh(); void 0`);
+    await soon('window.__threadsQueue.length > 0', 'a read saying the question is open, held');
+    // the reads held so far were all read before the answer: they say it is open
+    await p.ev(`(() => { window.__stale = window.__threadsQueue.length; const c = document.getElementById('q-${Q}'); c.querySelector('textarea[data-q]').value = 'EU first'; c.querySelector('button[data-answer="${Q}"]').click(); })()`);
+    try {
+      await until(() => JSON.parse(F.owner(['questions', '--id', Q, '--json']))[0].status === 'answered', 'the answer');
+      await soon(`!document.getElementById('q-${Q}')`, 'the page redrawn without the question');
+      // the stale reads land, the newest of them drawn, and nothing newer yet
+      await p.ev('window.__threadsQueue.splice(0, window.__stale).forEach((go) => go())');
+      await p.ev('window.__still()');
+      await p.ev('window.__stir()');
+      assert.equal(await p.ev(`TL.threads.find((x) => x.id === '${T}').questions.find((x) => x.id === '${Q}').status`), 'open', 'the card drew a read from before the answer');
+      assert.equal(await p.ev('window.__inboxLink'), false, 'never "Answer it in the Inbox" for an answered question');
+      assert.ok(await p.ev(`/Answered: EU first/.test(document.getElementById('tl-c-turns').textContent)`), 'still answered in the card');
+    } finally { await p.ev('(() => { const q = window.__threadsQueue || []; window.__threadsQueue = null; q.forEach((go) => go()); })()'); }
+    await soon(`TL.threads.find((x) => x.id === '${T}').questions.find((x) => x.id === '${Q}').status === 'answered' && /EU first/.test(document.getElementById('tl-c-turns').textContent)`, 'the answer as the log has it');
+    assert.equal(await p.ev('window.__inboxLink'), false, 'nor once the threads are read again');
+    await p.ev('window.__obs.disconnect(); void 0');
   });
 
   await t.test('a secrets question in the thread is a link to the Inbox, never a second form', async () => {
@@ -1170,8 +1201,9 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
 
   await t.test('a press on Resolve across a read still opens the form', async () => {
     await soon(`!!document.querySelector('[data-tl-resolve]')`, 'Resolve in its header');
-    // the page held still from finding the button to pressing it, so only the redraw under the press is
-    // tested: a read landing between would move the card, and the press would miss
+    // held still from finding the button to pressing it, so the press lands on it; a read then lands
+    // under the press (the button itself isn't redrawn by it, so this shows the press survives a read,
+    // not that a redraw of the header is held)
     const at = await still(async () => {
       const xy = await p.at('[data-tl-resolve]');
       await p.ev(`window.__rb = document.querySelector('[data-tl-resolve]'); void 0`);
