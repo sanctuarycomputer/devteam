@@ -189,12 +189,18 @@ test('threads: records, commands, delivery, the Inbox and the loop', async (t) =
     const R = F.owner(['thread', 'reply', T, 'A reply with no role set']);
     assert.match(R, /^u-\d{8}-\d{9}-supervisor$/);
     assert.deepEqual([show(T).turns.at(-1).id, show(T).turns.at(-1).by], [R, 'supervisor']);
-    // in the supervisor's own pane (recorded by its last command there), the owner's verbs are refused
+    // in the supervisor's own pane (recorded by its last command there, as the supervisor), the owner's verbs are refused
     const paneFile = path.join(F.old, 'docs/devteam/run/supervisor-pane');
     const IN_PANE = { TMUX: 'x', TMUX_PANE: '%4242' };
+    const OWN = { TMUX: 'x', TMUX_PANE: '%7' };
     try {
-      F.owner(['thread', 'reply', T, 'From my pane'], IN_PANE);
-      assert.equal(fs.readFileSync(paneFile, 'utf8'), '%4242', "the reply recorded its pane as the supervisor's");
+      // a role-less command is the supervisor's, but it claims no pane: the owner's own terminal is role-less too
+      F.owner(['thread', 'reply', T, 'Role-less, in a pane'], OWN);
+      assert.ok(!fs.existsSync(paneFile), 'a role-less command records no pane');
+      F.owner(['thread', 'say', T, 'still my own terminal'], OWN);
+      assert.equal(show(T).turns.at(-1).by, 'owner', "and the owner's commands there still work");
+      F.sup(['thread', 'reply', T, 'From my pane'], IN_PANE);
+      assert.equal(fs.readFileSync(paneFile, 'utf8'), '%4242', "the supervisor's reply, by its role, recorded its pane");
       const n = show(T).turns.length;
       for (const args of [['thread', 'say', T, 'x'], ['thread', 'new', 'x'], ['thread', 'resolve', T], ['thread', 'reopen', T]]) assert.match(F.fails(args, IN_PANE), /this is the supervisor's session: reply with thread reply/, args.join(' '));
       // every owner command, not only a thread's: the supervisor never writes as the owner from its pane
@@ -202,8 +208,11 @@ test('threads: records, commands, delivery, the Inbox and the loop', async (t) =
       assert.equal(show(T).turns.length, n, 'nothing written');
       assert.equal(show(T).status, 'open');
       // the owner's own terminal, in another pane, is the owner's
-      F.owner(['thread', 'say', T, 'from my own terminal'], { TMUX: 'x', TMUX_PANE: '%7' });
+      F.owner(['thread', 'say', T, 'from my own terminal'], OWN);
       assert.equal(show(T).turns.at(-1).by, 'owner');
+      // and a role-less command there afterwards doesn't take the pane from the supervisor
+      F.owner(['thread', 'reply', T, 'Role-less again'], OWN);
+      assert.equal(fs.readFileSync(paneFile, 'utf8'), '%4242');
     } finally { fs.rmSync(paneFile, { force: true }); }
     // a reply at the encoded cap fits alone; with eight long links its line would not, and is refused in words
     const longRefs = Array.from({ length: 8 }, (_, i) => `act:a-${i}${'x'.repeat(110)}`);

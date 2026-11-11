@@ -1141,9 +1141,10 @@ function logWriter() {
 }
 // Owner commands run from the owner's terminal or the dashboard, never an agent session. A
 // visibility measure, not a wall: appendLog stamps every owner line with its channel. The supervisor
-// with no DEVTEAM_ROLE set is caught by its pane: the one its own commands recorded (rememberSupervisorPane),
-// or the one DEVTEAM_SUPERVISOR names. The dashboard's children run with no TMUX_PANE, wherever it
-// was started. hint: what the supervisor does instead, for the command at hand.
+// with no DEVTEAM_ROLE set on a command is caught by its pane: the one its own commands as the
+// supervisor recorded (rememberSupervisorPane), or the one DEVTEAM_SUPERVISOR names. The dashboard's
+// children run with no TMUX_PANE, wherever it was started. hint: what the supervisor does instead,
+// for the command at hand.
 function ownerWriter(hint) {
   if (process.env.DEVTEAM_ROLE) die(`owner commands don't run in an agent session (DEVTEAM_ROLE=${process.env.DEVTEAM_ROLE})`);
   const pane = process.env.TMUX_PANE;
@@ -1160,9 +1161,12 @@ const supervisorOnly = (what) => {
 // recorded so workers' messages and the owner's answers can be typed into it; otherwise they wait
 // in the log for its next tick.
 const supervisorPaneFile = () => path.join(runDir, 'supervisor-pane');
+// Only a command run as the supervisor (DEVTEAM_ROLE=supervisor, as recover and the README start it)
+// records its pane. A role-less command is the supervisor's too (supervisorOnly), but the owner's own
+// terminal runs role-less, and taking its pane would have ownerWriter refuse the owner there.
 function rememberSupervisorPane() {
   const pane = process.env.TMUX_PANE;
-  if (!pane || !process.env.TMUX || (process.env.DEVTEAM_ROLE && process.env.DEVTEAM_ROLE !== 'supervisor')) return;
+  if (!pane || !process.env.TMUX || process.env.DEVTEAM_ROLE !== 'supervisor') return;
   if (readText(supervisorPaneFile()) === pane) return;
   fs.mkdirSync(runDir, { recursive: true });
   fs.writeFileSync(supervisorPaneFile(), pane);
