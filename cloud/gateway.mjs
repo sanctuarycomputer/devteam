@@ -277,7 +277,7 @@ export function previewLinks(list, ports, ownPort, ttydPort = 7681) {
 // source is in devteam.mjs too, and a test holds the two equal. It is a String.raw, so its regular
 // expressions read as written, and so it may hold no backtick and no dollar sign before a brace.
 export const PREVIEW_LENS = String.raw`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Preview</title><style>html,body{margin:0;height:100%;overflow:hidden;background:#fff}iframe{display:block;border:0;width:100%;height:100%}</style></head>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><title>Preview</title><style>html{touch-action:manipulation}html,body{margin:0;height:100%;overflow:hidden;background:#fff}iframe{display:block;border:0;width:100%;height:100%}</style></head>
 <body><!-- The sandbox is advisory: the same-origin app can lift it. frame-src 'self' is what keeps the app's frame on its own origin. -->
 <iframe id="app" title="The app" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-pointer-lock allow-downloads"></iframe><script>
 (() => {
@@ -2288,8 +2288,8 @@ go.onclick = run(async () => {
   // The owner's view of a public page: the instance's viewer, framed full size under one line, and
   // no script of its own. The frame may not navigate this tab, nor open a window outside its
   // sandbox (an artifact viewer needs none); its sandbox keeps its origin.
-  ownerWrapper: ({ project, slug, title, frame }) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><style>
-:root{color-scheme:light dark;--bg:#fafafa;--fg:#171717;--fg2:#666;--line:#e5e5e5}@media (prefers-color-scheme:dark){:root{--bg:#000;--fg:#ededed;--fg2:#a1a1a1;--line:#2e2e2e}}
+  ownerWrapper: ({ project, slug, title, frame }) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><title>${esc(title)}</title><style>
+html{touch-action:manipulation}:root{color-scheme:light dark;--bg:#fafafa;--fg:#171717;--fg2:#666;--line:#e5e5e5}@media (prefers-color-scheme:dark){:root{--bg:#000;--fg:#ededed;--fg2:#a1a1a1;--line:#2e2e2e}}
 html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:13px/1.4 ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif}body{display:flex;flex-direction:column}
 header{padding:6px 12px;border-bottom:1px solid var(--line);color:var(--fg2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}a{color:var(--fg)}iframe{flex:1;border:0;width:100%}
 </style></head><body><header>Public · ${esc(project)}/${esc(slug)} · <a href="?plain">Open it as the public sees it</a></header><iframe src="${esc(frame)}" title="${esc(title)}" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads"></iframe></body></html>`,

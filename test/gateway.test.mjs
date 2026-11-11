@@ -2420,6 +2420,8 @@ test('the preview lens: one script and one style, a policy of their hashes, and 
   assert.doesNotMatch(L.replace(script, '').replace(style, ''), /\son[a-z]+\s*=|\sstyle\s*=|\ssrc\s*=|\shref\s*=/i, 'no handler, style, src or link in the markup: the policy admits the two hashes and nothing else');
   assert.doesNotMatch(L, /[^\x20-\x7e\n]/, 'plain ASCII, so the kit\'s copy compares byte for byte');
   assert.doesNotMatch(L, /`|\$\{/, 'no backtick and no ${ in it: it is a String.raw template in both files');
+  assert.ok(L.includes('<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">'), 'the viewport every gateway page has (iOS: a tap does not zoom)');
+  assert.ok(style.startsWith('html{touch-action:manipulation}'), style);
   assert.doesNotThrow(() => new vm.Script(script), 'the script parses');
   const h = (t) => `'sha256-${crypto.createHash('sha256').update(t).digest('base64')}'`;
   assert.equal(G.previewLensCsp('http://a http://b'), `default-src 'none'; script-src ${h(script)}; style-src ${h(style)}; frame-src 'self'; frame-ancestors http://a http://b; base-uri 'none'; form-action 'none'`);
@@ -2552,6 +2554,12 @@ test('public.<box>: the signed-in owner\'s own visit gets the viewer at the publ
     assert.match(r.body, /Public · alpha\/hello/);
     assert.ok(r.body.includes('A &#60;b&#62;mock') && !r.body.includes('<b>mock'), 'the title is escaped');
     assert.doesNotMatch(r.body, /<script/i, 'no script of its own');
+    // iOS: the same viewport as every page of the gateway's, so a tap in the bar or the frame doesn't zoom it
+    const meta = (html) => /<meta name="viewport" content="([^"]*)">/.exec(html)?.[1];
+    const login = await gw.req('GET', '/auth/login', { cookie: '', headers: NAV });
+    assert.ok(meta(login.body), login.body);
+    assert.equal(meta(r.body), meta(login.body), 'the viewport doc() gives');
+    assert.match(r.body, /html\{touch-action:manipulation\}/, 'and its touch-action');
     const asked = K.seen.filter((x) => x.url === '/api/hello');
     assert.equal(asked.length, 1, 'the wrapper asked the bound instance who it is');
     assert.deepEqual([asked[0].h.host, asked[0].h.cookie, asked[0].h['sec-fetch-site'], asked[0].h.origin], [`127.0.0.1:${P + 20}`, undefined, undefined, undefined], 'as a loopback client: nothing of the owner\'s goes with it');
