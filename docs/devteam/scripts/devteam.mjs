@@ -7899,7 +7899,8 @@ function cmdOrient() {
   const cl = orientClusters();
   const inc = incidentDebt();
   const lk = orientLinks();
-  if (flags.json) return json([...cl, ...inc.map((x) => ({ key: `incident:${x.id}`, debt: 'incident', ...x })), ...lk]);
+  // --json stays the signals and the link proposals its readers count; incident debt is dashboard-data's ooda.debt.incidents
+  if (flags.json) return json([...cl, ...lk]);
   if (!cl.length && !inc.length && !lk.length) return out('nothing recurring that is unexplained');
   for (const c of cl) out(`${c.key}  x${c.count}  valence ${c.valence}\n  latest: ${c.latest}\n  evidence: ${c.ids.join(' ')}`);
   for (const x of inc) out(`${x.id} was fixed and verified (${x.title}): what did it teach? ${x.explain[0]} or ${x.explain[1]}`);
