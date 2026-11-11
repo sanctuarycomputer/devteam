@@ -3215,9 +3215,11 @@ function press(key, { build, apply, overlay, undo, restore, errId, onOk }) {
       const { action, body } = build();
       const r = await sending(() => fetch(`/api/${action}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }));
       try { out = await r.json(); } catch { out = null; }
-      if (!r.ok || !out) error = out?.error || `the server answered ${r.status}`;
+      if (!r.ok || !out) error = [out?.error || `the server answered ${r.status}`, out?.out].filter(Boolean).join(' · ');
     } catch (e) { error = `could not send: ${e.message || e}`; }
     if (error) {
+      // what the server did before it refused (a partly posted set of secrets) shows on the next read
+      load({ force: true });
       if (ov && OVERLAYS.get(key) === ov) OVERLAYS.delete(key);
       try { undo?.(); } catch (e) { console.error(e); }
       redrawNow();
@@ -3234,8 +3236,6 @@ function press(key, { build, apply, overlay, undo, restore, errId, onOk }) {
   PRESSES.set(key, run);
   return run;
 }
-// A press with nothing drawn at once: a refusal shows where the owner pressed.
-const post = (action, body, errId) => press(`post:${action}:${body.id ?? body.name ?? body.slug ?? ''}`, { build: () => ({ action, body }), errId });
 // What the owner had in a question card (the note, the pick, the trust and rule boxes), to put back
 // if the server refuses the answer.
 function cardFields(id, card) {
@@ -3263,13 +3263,14 @@ function holdOverlay(id, mode) {
     const state = m === 'drain' ? 'draining' : m === 'park' ? 'parking' : m === 'let-go' ? 'let go' : 'running';
     return { ...(h || {}), mode: m, state, by: 'owner', since: now, reason: m === 'run' ? null : h?.reason ?? null };
   };
-  const goalHold = mode === 'restore' ? 'park' : mode === 'let-go' ? 'let-go' : mode;
+  // as questionHold has it: parked, or nothing (a let-go goal's questions leave the Inbox)
+  const goalHold = mode === 'park' || mode === 'restore' ? 'park' : null;
   const status = mode === 'let-go' ? 'abandoned' : null;
   return {
     data: (d) => {
       // restore's status is the goal's own from before it was let go, which the server works out
       const ooda = { ...d.ooda, goals: (d.ooda?.goals || []).map((g) => (g.id !== id ? g : { ...g, hold_view: view(g.hold_view), ...(status ? { status } : mode === 'restore' ? { restoring: true } : {}) })) };
-      const questions = d.questions.map((q) => (q.goal === id ? { ...q, goal_hold: goalHold === 'run' ? null : goalHold } : q));
+      const questions = mode === 'let-go' ? d.questions.filter((q) => q.goal !== id) : d.questions.map((q) => (q.goal === id ? { ...q, goal_hold: goalHold } : q));
       return { ...d, ooda, questions, ...(id === 'upkeep' && d.upkeep ? { upkeep: view(d.upkeep) } : {}) };
     },
     agrees: (raw) => {
@@ -3929,8 +3930,8 @@ const tlDraftGet = (key) => { const d = lsGet(tlDraftKey(key)); return typeof d 
 const tlDraftSet = (key, text) => (text ? lsSet(tlDraftKey(key), { text, at: Date.now() }) : lsDel(tlDraftKey(key)));
 function tlDraftPrune() {
   try {
-    const pre = tlDraftKey('new:');
-    for (const k of Object.keys(localStorage)) if (k.startsWith(pre) && !(Date.now() - (lsGet(k)?.at ?? 0) < 7 * 86400000)) lsDel(k);
+    const pre = [tlDraftKey('new:'), tlDraftKey('pending-')];
+    for (const k of Object.keys(localStorage)) if (pre.some((x) => k.startsWith(x)) && !(Date.now() - (lsGet(k)?.at ?? 0) < 7 * 86400000)) lsDel(k);
   } catch {}
 }
 function tlBytes() { const n = tBytes(tlEl('tl-c-text').value.trim()); const el = tlEl('tl-c-bytes'); el.textContent = n > T_TURN_MAX * 0.8 ? `${n} / ${T_TURN_MAX} bytes` : ''; el.classList.toggle('err', n > T_TURN_MAX); }
@@ -4015,6 +4016,9 @@ async function tlOpen(id, go = true) {
 // Send: the first words start the thread (its title what the layer showed, or the words themselves
 // from the dock), a word on a resolved thread reopens it, anything else is a turn.
 let tlFresh = 0;
+// How many of the owner's turns with these words the thread will have before this one: those the
+// server shows, and those still on their way.
+const tHad = (t, text) => t.turns.filter((u) => u.by === 'owner' && u.text === text && !u.pending).length + TL.pend.filter((x) => !x.confirmed && x.turn?.text === text && tPendId(x) === t.id).length;
 function tlSend() {
   const ta = tlEl('tl-c-text');
   const text = ta.value.trim();
@@ -4027,12 +4031,17 @@ function tlSend() {
   const draft = TL.draft;
   // the turn is in the card at once; a new thread opens with it, under an id of the page's own until
   // the server names it. A second Send waits for the first, and by then knows that name.
-  const p = { thread: t ? t.id : `pending-${++tlFresh}`, real: t && !t.pending ? t.id : null, turn: tPendingTurn(text, new Date().toISOString()), had: t ? t.turns.filter((u) => u.by === 'owner' && u.text === text && !u.pending).length : 0, fresh: t ? null : { title: draft?.title || tLine(text, T_TITLE_MAX), subject: draft?.subject || null }, confirmed: false };
-  if (t?.pending) { const first = TL.pend.find((x) => x.thread === t.id && x.fresh); p.fresh = null; p.firstOf = first; }
+  // a thread the server has named is real, though the threads read may not show it yet; one still
+  // being started is the first Send's, and this one says into it once that one has its name
+  const named = t && !String(t.id).startsWith('pending-');
+  const p = { thread: t ? t.id : `pending-${++tlFresh}`, real: named ? t.id : null, turn: tPendingTurn(text, new Date().toISOString()), had: t ? tHad(t, text) : 0, fresh: t ? null : { title: draft?.title || tLine(text, T_TITLE_MAX), subject: draft?.subject || null }, confirmed: false };
+  if (t && !named) p.firstOf = TL.pend.find((x) => x.fresh && tPendId(x) === t.id);
   const resolved = t?.status === 'resolved';
   press(`tl:${p.thread}`, {
     build: () => {
       const id = p.real ?? p.firstOf?.real ?? null;
+      // the first words were refused, so there is no thread to say this into
+      if (!id && p.firstOf) throw new Error("the thread wasn't started (its first words weren't saved), so this wasn't sent either");
       if (id) { p.real = id; return { action: resolved ? 'thread-reopen' : 'thread-say', body: { id, text } }; }
       return { action: 'thread-new', body: { title: p.fresh.title, subject: p.fresh.subject || undefined, text } };
     },
@@ -4052,7 +4061,8 @@ function tlSend() {
       tlRelay();
       tlDraw();
       const box = tlEl('tl-c-text');
-      if (box) { box.value = text; tlDraftSet(tlEl('tl-card').dataset.key, text); tlBytes(); }
+      // after the words an earlier refusal put back, never over them
+      if (box) { box.value = box.value.trim() ? `${box.value}\n${text}` : text; tlDraftSet(tlEl('tl-card').dataset.key, box.value); tlBytes(); }
     },
     // the first line of a thread command's output is the id; the second says whether a pane took it
     onOk: (out) => {
@@ -4159,8 +4169,10 @@ function tlAct(action, body) {
   const t = TL.threads.find((x) => x.id === body.id);
   // Not yet is a turn like any other; resolve, accept and reopen change the thread's status
   const status = { 'thread-resolve': 'resolved', 'thread-accept': 'resolved', 'thread-reopen': 'open' }[action] ?? null;
-  const p = status ? { thread: body.id, real: body.id, status, confirmed: false } : { thread: body.id, real: body.id, turn: tPendingTurn(body.text, new Date().toISOString()), had: t ? t.turns.filter((u) => u.by === 'owner' && u.text === body.text && !u.pending).length : 0, confirmed: false };
+  const p = status ? { thread: body.id, real: body.id, status, confirmed: false } : { thread: body.id, real: body.id, turn: tPendingTurn(body.text, new Date().toISOString()), had: t ? tHad(t, body.text) : 0, confirmed: false };
   const wasOpen = TL.open;
+  // a thread still being started has no name to act on yet
+  if (!t || String(t.id).startsWith('pending-')) return Promise.resolve(false);
   // a second click on the same act while the first is on its way is the same act
   if (TL.pend.some((x) => !x.confirmed && x.thread === body.id && (status ? x.status === status : x.act && x.turn.text === body.text))) return Promise.resolve(false);
   if (!status) p.act = true;
@@ -4220,16 +4232,17 @@ function drawOrHold(d, force = false) {
     if (!first && !force && holding()) {
       HELD = d;
       HELD_SINCE ||= Date.now();
-      inboxTitle(d);
+      inboxTitle(overlaid(d));
       if (Date.now() - HELD_SINCE > HINT_AFTER) $('held').hidden = false;
       return;
     }
     HELD = null;
     HELD_SINCE = 0;
     $('held').hidden = true;
-    render(overlaid(d));
+    const shown = overlaid(d);
+    render(shown);
     if (first) route();
-    inboxTitle(d);
+    inboxTitle(shown);
     // the thread layer, which the redraw doesn't touch: its pins on what was just drawn, then its threads again
     tlPins();
     tlRefresh();
@@ -4526,11 +4539,13 @@ document.addEventListener('click', async (ev) => {
     const id = over.dataset.overruleSend;
     const field = document.querySelector(`input[data-overrule="${CSS.escape(id)}"]`);
     const answer = field?.value ?? '';
+    // bound to the question as this page showed it, like every answer
+    const seen = (DATA?.ooda?.answered || []).find((x) => x.id === id)?.hash ?? seenHash(id);
     const row = over.closest('.row-inline');
     const was = row?.innerHTML;
     // the answered card keeps its place; the row says what was sent, and comes back if refused
     press(`q:${id}`, {
-      build: () => ({ action: 'answer', body: { id, answer } }),
+      build: () => ({ action: 'answer', body: { id, answer, ...(seen ? { seen } : {}) } }),
       apply: () => { if (row) row.innerHTML = `<span class="answered-note"><i class="icon-circle-check" aria-hidden="true"></i> Overruled: <b>${esc(answer)}</b></span><span class="err" id="e-${esc(id)}"></span>`; },
       restore: () => { const f = document.querySelector(`input[data-overrule="${CSS.escape(id)}"]`); if (f) f.value = answer; else if (row && was) row.innerHTML = was; },
       errId: id,

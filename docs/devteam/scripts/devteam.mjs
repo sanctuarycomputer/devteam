@@ -226,27 +226,54 @@ function showAt(sha, p, cwd = HOME_CWD) {
 // whether the clone is shallow; for releases the pattern and the tag list), and only a definite
 // answer is kept: an error (an object not fetched yet) is asked again next time. A cache of what git
 // computes, never a record (constitution: compute state, don't record it); deleting it costs time.
+// The file is the machine user's, like the rest of run/: anything running as that user could
+// write a wrong answer into it, as it could into the repository itself.
 const factsFile = () => path.join(runDir, 'cache', 'git-facts.json');
+// Answers against main move with main (every refresh asks about main's newest commit), so the store
+// keeps the most recently used, oldest dropped first.
+const FACTS_MAX = 20000;
 const factsIn = () => { try { const j = readJson(factsFile()); return j?.v === 1 && isObj(j.e) ? j.e : {}; } catch { return {}; } };
 let factStore = null;
-let factsAdded = null;
+let factsAdded = {};
+const factsUsed = new Set();
+let factsSaving = false;
+// Written at exit, once: when this process added an answer, or used some while the store is near its
+// cap (then what was used must move to the end, or the cap would drop it). Read again first and
+// ours added: another process may have written since; a race loses an addition only. What this
+// process used goes to the end, so the cap drops what nobody has asked for longest. The box
+// operator only reads, so its facts last only as long as its process.
+function factsSaveAtExit() {
+  if (factsSaving || process.env.DEVTEAM_ROLE === 'operator') return;
+  factsSaving = true;
+  process.on('exit', () => {
+    try {
+      const e = factsIn();
+      for (const k of factsUsed) { const val = Object.hasOwn(factsAdded, k) ? factsAdded[k] : Object.hasOwn(e, k) ? e[k] : factStore[k]; delete e[k]; if (val !== undefined) e[k] = val; }
+      const keys = Object.keys(e);
+      for (const k of keys.slice(0, Math.max(0, keys.length - FACTS_MAX))) delete e[k];
+      writeJson(factsFile(), { v: 1, e });
+    } catch {}
+  });
+}
+let factsCount = 0;
 function factGet(k) {
-  factStore ??= factsIn();
-  return Object.hasOwn(factStore, k) ? factStore[k] : undefined;
+  if (!factStore) { factStore = factsIn(); factsCount = Object.keys(factStore).length; }
+  if (!Object.hasOwn(factStore, k)) return undefined;
+  factsUsed.add(k);
+  if (factsCount > FACTS_MAX * 0.8) factsSaveAtExit();
+  return factStore[k];
 }
 function factSet(k, v) {
   factGet(k);
   factStore[k] = v;
-  if (!factsAdded) {
-    factsAdded = {};
-    // read again and add ours: another process may have written since; a race loses an addition only.
-    // The box operator only reads, so its facts last only as long as its process.
-    if (process.env.DEVTEAM_ROLE !== 'operator') process.on('exit', () => { try { writeJson(factsFile(), { v: 1, e: { ...factsIn(), ...factsAdded } }); } catch {} });
-  }
+  factsUsed.add(k);
   factsAdded[k] = v;
+  factsSaveAtExit();
 }
 const perRepo = (fn) => { const m = new Map(); return (cwd) => { const k = gitCommonDirOf(cwd); if (!m.has(k)) m.set(k, fn(cwd)); return m.get(k); }; };
-const shallowOf = perRepo((cwd) => git(['rev-parse', '--is-shallow-repository'], cwd) === 'true');
+// a clone's cut, as git keeps it (the commits at its edge): empty for a whole clone, and different
+// after every deepen, so an answer from before a deepen is asked again
+const shallowOf = perRepo((cwd) => { try { return sha256(fs.readFileSync(path.join(gitCommonDirOf(cwd), 'shallow'))).slice(0, 16); } catch { return ''; } });
 const tagPrintOf = perRepo((cwd) => sha256(git(['for-each-ref', '--format=%(refname)%00%(objectname)', 'refs/tags'], cwd) ?? ''));
 const fullShaOf = (x, cwd) => (FULL_SHA.test(x ?? '') ? x : x ? git(['rev-parse', '--verify', '--quiet', `${x}^{commit}`], cwd) : null);
 // A commit's date in ms, or NaN.
@@ -1973,7 +2000,7 @@ function upgradeAt(token) {
   const file = `${kitRel ? `${kitRel}/` : ''}scripts/devteam.mjs`;
   // fixed for main's commit, so kept across processes (a search of main's whole history)
   const sha = ref && !kitRel.startsWith('..') ? mainSha() : null;
-  const k = sha ? `u\0${gitCommonDirOf()}\0${sha}\0${file}\0${token}` : null;
+  const k = sha ? `u\0${gitCommonDirOf()}\0${shallowOf()}\0${sha}\0${file}\0${token}` : null;
   let at = k ? factGet(k) : null;
   if (k && at === undefined) {
     const r = gitStatus(['log', '--reverse', '--format=%ct', `-S${token}`, sha, '--', file]);
@@ -10902,7 +10929,7 @@ async function cmdDashboard() {
       if (!rp.includes('\n')) return;
       let o = null;
       try { o = JSON.parse(rp.slice(0, rp.indexOf('\n'))); } catch {}
-      if (o && typeof o.out === 'string') finish({ ok: true, code: 0, stdout: o.out, stderr: '' });
+      if (o && typeof o.out === 'string') { if (timer) clearTimeout(timer); finish({ ok: true, code: 0, stdout: o.out, stderr: '' }); }
     });
     child.stdio[3].on('error', () => {});
     child.on('error', (e) => finish({ ok: false, code: 1, stdout: so, stderr: `devteam: ${e.message}` }));
@@ -14079,7 +14106,9 @@ function cmdWait() {
     return [];
   };
   const snap = () => {
+    // main's copy of the log as it is now: a wait can outlast many moves of main
     logCache = null;
+    mainRefCache = undefined;
     const owner = readLog().lines.filter((l) => l.by === 'owner').map((l) => ({ k: l.id, at: Date.parse(l.at) }));
     const msgs = (sub(['messages', '--open', '--to', 'supervisor', '--json']) ?? []).map((m) => ({ k: `${m.id} [${m.kind}] from ${m.created_by}: ${String(m.text).slice(0, 160)}`, at: Date.parse(m.created_at) }));
     const high = (sub(['metrics', '--json'])?.findings ?? []).filter((f) => f.severity === 'high').map((f) => `${f.kind} ${f.subject}: ${f.detail}`);
@@ -14939,5 +14968,6 @@ else {
   }
   const r = COMMANDS[command]();
   // done: the dashboard has its answer, then the supervisor is told
-  Promise.resolve(r).then(() => { replyNow(); deliverNudges(); }, (e) => die(e?.message ?? String(e)));
+  // a command that set a failing exit code (preview start when the app died) answers from its exit
+  Promise.resolve(r).then(() => { if (!process.exitCode) replyNow(); deliverNudges(); }, (e) => die(e?.message ?? String(e)));
 }

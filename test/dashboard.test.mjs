@@ -311,8 +311,8 @@ const POLL_FAST = `(() => {
   const inner = async (u, o) => {
     if (String(u).startsWith('/api/data')) { window.__polls++; if (window.__gate) await window.__gate; return rf(u, o); }
     if (String(u).startsWith('/api/answer') && window.__answerHold) await window.__answerHold;
-    // every owner action held on the wire, as a slow server would hold it
-    if (o?.method === 'POST' && String(u).startsWith('/api/') && window.__postHold) await window.__postHold;
+    // every owner action recorded as sent, and held on the wire, as a slow server would hold it
+    if (o?.method === 'POST' && String(u).startsWith('/api/')) { (window.__posts ??= []).push({ url: String(u), body: o.body }); if (window.__postHold) await window.__postHold; }
     // a test can let the next /api/threads read through but hold its answer back: read now, landing later
     // and can slow every /api/threads answer, as a loaded box would
     if (String(u).startsWith('/api/threads') && window.__threadsDelay) await new Promise((r) => setTimeout(r, window.__threadsDelay));
@@ -359,6 +359,8 @@ test('presses: the page answers before the server, and a refusal puts it back', 
   const Q1 = dt(['ask', '--question', 'Which way?', '--choices', '[{"label":"Left"},{"label":"Right"}]'], SUP);
   const Q2 = dt(['ask', '--question', 'Ship it?', '--choices', '[{"label":"Yes"},{"label":"No"}]'], SUP);
   const K = dt(['knowledge', 'add', '--kind', 'fact', '--statement', 'The build uses make'], SUP);
+  const Q3 = dt(['ask', '--question', 'Which port?', '--default', '8080'], SUP);
+  dt(['answer', Q3, '--defaulted'], SUP);
   const port = await freePort();
   const dash = startDashboard(root, env, ['--port', String(port)]);
   t.after(() => dash.stop());
@@ -424,6 +426,16 @@ test('presses: the page answers before the server, and a refusal puts it back', 
     assert.equal(await p.ev(`!!${lesson}`), false, 'still gone after refreshes, the post still held');
     await letGo();
     await until(() => /accepted/.test(dt(['knowledge', '--status', 'accepted'])), 'kept on the server');
+  });
+
+  await t.test('an overrule is bound to the question as the page showed it, like every answer', async () => {
+    await p.ev(`document.getElementById('answered-wrap').open = true; void 0`);
+    await soon(`!!document.querySelector('input[data-overrule="${Q3}"]')`, 'the overrule field');
+    await p.ev(`(() => { const f = document.querySelector('input[data-overrule="${Q3}"]'); f.value = '9090'; window.__posts = []; document.querySelector('[data-overrule-send="${Q3}"]').click(); })()`);
+    const sent = JSON.parse(await p.ev(`JSON.stringify(window.__posts.find((x) => x.url === '/api/answer'))`));
+    const hash = JSON.parse(dt(['questions', '--all', '--json'])).find((x) => x.id === Q3).hash;
+    assert.equal(JSON.parse(sent.body).seen, hash, 'the hash the owner saw goes with the overrule');
+    await until(() => JSON.parse(dt(['questions', '--all', '--json'])).find((x) => x.id === Q3).answer === '9090', 'overruled on the server');
   });
 
   await t.test('a new thread: the turn is in the card at once, and two quick Sends make one thread', async () => {
