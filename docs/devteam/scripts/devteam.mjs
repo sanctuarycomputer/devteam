@@ -301,6 +301,10 @@ const SETTINGS_DEFAULTS = {
   resume_command: 'claude --continue --dangerously-skip-permissions',
   main_branch: 'main',
   merge_method: 'merge',
+  // true adds --admin to gh pr merge, for a main whose ruleset requires a review the PR's author
+  // (often the owner's own gh login, which opens every fleet PR) can't give; merge's own checks still run first.
+  // Home only: a repo link doesn't inherit it.
+  merge_admin: false,
   // Where PRs live: 'github' (gh pr view / gh pr merge --match-head-commit) or 'git' (no forge CLI:
   // merge takes --title and --body-file, merges the exact head on main and pushes; a moved main
   // makes the push fail, which is the same check).
@@ -375,7 +379,7 @@ const SETTINGS_DEFAULTS = {
 const OWNER_SETTINGS = {
   gates: 'gate-change', worktree_setup: 'gate-change', worktree_files: 'gate-change',
   autonomy_ceilings: 'governance-edit', agent_command: 'governance-edit', resume_command: 'governance-edit', worker_denied_commands: 'governance-edit',
-  forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', upstream_repo: 'governance-edit', upstream_sync: 'governance-edit',
+  forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', merge_admin: 'governance-edit', upstream_repo: 'governance-edit', upstream_sync: 'governance-edit',
   release: 'governance-edit', secret_commands: 'governance-edit', incident_slots: 'governance-edit', remediations: 'governance-edit', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit', project: 'governance-edit',
 };
 // The classes whose owner answer approves a chore that changes real kit files (isKitFile).
@@ -2263,6 +2267,17 @@ function resendLostEnter(key, target, lines) {
   if (!claim() || !tmux(['send-keys', '-t', target, 'Enter'])) return;
   const hash = crypto.createHash('sha1').update(rec.text).digest('hex').slice(0, 12);
   appendLog({ type: 'observation', source: 'pane', kind: 'resent-enter', subject: key.slice(key.indexOf(':') + 1), detail: `pressed Enter once: text typed ${Math.round(age)}s ago was still unsubmitted in an idle pane ("${rec.text.slice(0, 60)}${rec.text.length > 60 ? '…' : ''}", sha1 ${hash})`, detector: 'pane', source_key: `resent-enter ${key} ${hash} ${rec.at}`, measure: { value: Math.round(age), unit: 's' } });
+}
+// The supervisor's own pane: answers, threads and workers' messages are typed into it too, and its
+// tick only looks at the windows it runs, so an Enter lost there waited for the owner to press it.
+// accounts-tick (the dashboard's, as the supervisor) covers it, with the same rules as a worker's.
+function resendSupervisorLostEnter() {
+  const { target } = resolvePane(supervisorTarget());
+  const key = target ? sh('tmux', ['display-message', '-p', '-t', target, '#S:#W']) : null;
+  if (!key) return;
+  const lines = (sh('tmux', ['capture-pane', '-p', '-t', target]) ?? '').split('\n').map((l) => l.trim()).filter(Boolean).slice(-15);
+  if (lines.some((l) => !PANE_CODE.test(l) && PANE_WAITS.some(([, re]) => re.test(l)))) return;
+  resendLostEnter(key, target, lines);
 }
 const paneWaiting = (id) => (activeWorker(id) ? paneWaitingIn(id) : null);
 
@@ -4172,7 +4187,7 @@ function cmdMerge() {
       R.git(['worktree', 'remove', '--force', wt], R.root);
     }
   } else {
-    const merged = R.gh(['pr', 'merge', String(pr.number), `--${S.merge_method}`, '--match-head-commit', sha]);
+    const merged = R.gh(['pr', 'merge', String(pr.number), `--${S.merge_method}`, ...(S.merge_admin === true ? ['--admin'] : []), '--match-head-commit', sha]);
     if (merged === null) die(`gh pr merge refused (did the head move?); verify from the start`);
   }
   R.git(['fetch', '--quiet', 'origin', mainBranch]);
@@ -10589,6 +10604,7 @@ function cmdAccountsTick() {
   // in tmux or not, with or without cswap; just restarted, it hasn't stopped
   state.supervisor_limit = supervisorRestarted ? null : supervisorLimit();
   if (state.supervisor_limit && supervisorRefused) state.supervisor_limit.refused = supervisorRefused;
+  resendSupervisorLostEnter();
   fs.mkdirSync(runDir, { recursive: true });
   const tmp = `${ACCOUNTS_FILE}.${process.pid}`;
   fs.writeFileSync(tmp, JSON.stringify(state));
