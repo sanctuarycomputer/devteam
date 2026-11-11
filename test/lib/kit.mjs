@@ -344,8 +344,8 @@ export function monoFixture(name) {
     fs.writeFileSync(f, txt.replace(m[1], () => JSON.stringify(j, null, 2)));
   };
   const lines = (components, extra = {}) => { edit((j) => { j.components = components; Object.assign(j, extra); }); g(['commit', '-qam', 'lines'], old); g(['push', '-q', 'origin', 'main'], old); };
-  // every path init and fleetFixture track: AGENTS.md and .gitignore from init; config/dev.key is gitignored
-  const STD = { api: { owns: ['api/**'] }, web: { owns: ['web/**'] }, ops: { owns: ['ops/**', '.github/**', 'README.md', '.gitignore', 'AGENTS.md'] } };
+  // every path init and fleetFixture track: AGENTS.md, .gitignore and .gitleaks.toml from init; config/dev.key is gitignored
+  const STD = { api: { owns: ['api/**'] }, web: { owns: ['web/**'] }, ops: { owns: ['ops/**', '.github/**', 'README.md', '.gitignore', '.gitleaks.toml', 'AGENTS.md'] } };
   return { ...F, settingsFile, edit, lines, STD };
 }
 

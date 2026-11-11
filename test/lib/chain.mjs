@@ -64,6 +64,7 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     assert.match(fs.readFileSync(path.join(repo, '.gitignore'), 'utf8'), /docs\/devteam\/run\//);
     assert.match(fs.readFileSync(path.join(repo, 'AGENTS.md'), 'utf8'), /process\/supervisor\.md/, 'AGENTS.md routes agents to their doc');
     assert.match(fs.readFileSync(path.join(repo, 'CLAUDE.md'), 'utf8'), /@AGENTS\.md/, 'CLAUDE.md imports AGENTS.md');
+    assert.match(fs.readFileSync(path.join(repo, '.gitleaks.toml'), 'utf8'), /^\[extend\]\npath = "docs\/devteam\/gitleaks\.toml"$/m, "a project with no gitleaks config gets one that extends the kit's");
     assert.equal(json(must(['settings'])).upstream_sync, 'adopt', 'a new project adopts verbatim upstream releases without asking, from the start');
     git(['add', '-A']);
     git(['commit', '-qm', 'init']);
@@ -2169,6 +2170,26 @@ http.createServer((req, res) => {
     // "adopt": a whole release, strictly newer than main's upstream_base, upstream_base set to it
     const genuine = must(syncPr('whole', 'v0.3.0', whole, 'v0.3.0'), { role: 'sup' });
     assert.match(genuine, /match upstream v0\.3\.0 exactly; approved by settings\.upstream_sync "adopt"; v0\.3\.0 is [0-9a-f]{40}/, 'a full, genuine sync merges without asking');
+    // the .gitleaks.toml init writes may ride along where main has none, exactly as init writes it
+    const leaksStub = fs.readFileSync(path.join(repo, '.gitleaks.toml'), 'utf8');
+    git(['rm', '-q', '.gitleaks.toml']);
+    git(['commit', '-qm', 'no gitleaks config']);
+    git(['push', '-q', 'origin', 'HEAD:main']);
+    const withLeaks = (slug, text) => {
+      const a = syncPr(slug, 'v0.3.0', whole, 'v0.3.0');
+      const w = wt(`sync-${slug}`);
+      fs.writeFileSync(path.join(w, '.gitleaks.toml'), text);
+      git(['add', '.gitleaks.toml'], w);
+      git(['commit', '-qm', 'gitleaks config'], w);
+      git(['push', '-q', 'origin', `chore-devteam-sync-${slug}`], w);
+      return a;
+    };
+    assert.match(must(withLeaks('leaks', leaksStub), { role: 'sup' }), /match upstream v0\.3\.0 exactly, and \.gitleaks\.toml only extends the kit's gitleaks\.toml; approved by settings\.upstream_sync "adopt"/, "a sync adds the kit's gitleaks config where main has none");
+    assert.match(refused(withLeaks('leaks-more', `${leaksStub}[[allowlists]]\nregexes = ['''.*''']\n`)), /extra \.gitleaks\.toml|\.gitleaks\.toml \(outside the kit\)/, 'one with an allowlist of its own needs the owner');
+    git(['checkout', '-q', 'HEAD~1', '--', '.gitleaks.toml']);
+    git(['commit', '-qm', 'gitleaks config back']);
+    git(['push', '-q', 'origin', 'HEAD:main']);
+    assert.match(refused(withLeaks('leaks-again', `${leaksStub}# a comment\n`)), /extra \.gitleaks\.toml|\.gitleaks\.toml \(outside the kit\)/, "where main has one, it is the project's");
     // an answer outside the kit classes doesn't get in the way of a sync "adopt" covers
     const Qsync = must(['ask', '--question', 'Adopt v0.3.0?', '--recommendation', 'yes'], { role: 'sup' });
     must(['answer', Qsync, 'yes']);
