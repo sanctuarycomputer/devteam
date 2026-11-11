@@ -4730,6 +4730,8 @@ const THREAD_TITLE_MAX = 120; // characters
 const THREAD_WAIT_MS = 10 * 60000;
 const THREAD_ID = /^t-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
 const TURN_ID = /^u-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
+// When a proposal was made, as the log stamps it: what the owner's accept names to bind to it.
+const READY_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 // What the dashboard can point at (data-subject="<type>:<id>"); index.html's T_TYPES is the same list.
 const SUBJECT_TYPES = ['goal', 'observation', 'question', 'ticket', 'planner', 'decision', 'lesson', 'problem', 'act', 'preview', 'artifact'];
 const SUBJECT_REF = new RegExp(`^(${SUBJECT_TYPES.join('|')}):[a-z0-9][a-z0-9-]{0,110}$`);
@@ -4795,7 +4797,7 @@ function threadLineProblems(o) {
     over('outcome', o.outcome, OUTCOME_MAX);
     if (isObj(o.ready)) {
       over('ready.outcome', o.ready.outcome, OUTCOME_MAX);
-      if (typeof o.ready.at === 'string' && !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(o.ready.at)) errs.push('thread.ready.at is an ISO timestamp (2026-11-10T10:30:00.000Z)');
+      if (typeof o.ready.at === 'string' && !READY_AT.test(o.ready.at)) errs.push('thread.ready.at is an ISO timestamp (2026-11-10T10:30:00.000Z)');
     }
   } else {
     over('text', o.text, TURN_MAX);
@@ -4936,6 +4938,10 @@ function cmdThread() {
     if (refs.length && by !== 'supervisor') die("--refs are on the supervisor's turns: what it did, as <type>:<id>");
     if (refs.length > 8) die('--refs names at most 8 things');
     for (const r of refs) if (!TURN_REF.test(r) || Buffer.byteLength(r) > 120) die(`--refs ${r}: each is <type>:<id> (goal:g-…, ticket:checkout-04, act:a-…), at most 120 bytes`);
+    // words at the encoded cap fit a line alone, not always with eight links: the supervisor's line
+    // as appendLog will build it, checked here so the refusal says what to do about a reply
+    const line = { v: 1, id: `u-00000000-000000000-${by}`, type: 'turn', op: 'new', at: nowIso(), by, thread: t.id, text: words, refs };
+    if (refs.length && Buffer.byteLength(`${JSON.stringify(line)}\n`) > LINE_MAX) die('That reply is too long with its links; shorten it.');
     const u = appendLog({ type: 'turn', thread: t.id, text: words, refs: refs.length ? refs : undefined }, by);
     out(u.id);
     if (by === 'owner') out(deliveredWords(deliverOwnerTurn(t, words)));
@@ -4946,6 +4952,10 @@ function cmdThread() {
   if (sub === 'ask') {
     supervisorOnly('thread ask');
     const t = threadOpen(id, 'supervisor');
+    // The question is written first (the turn names its id), so the turn's words are checked before
+    // it: a question the log took and a turn it then refused would leave a question no turn shows.
+    // askLine writes the question as given, so its first TURN_MAX bytes are the turn's words.
+    if (encodedBytes(capBytes(flagStr('question') ?? '', TURN_MAX)) > TURN_ENCODED_MAX) die('this question has too many quotation marks, backslashes or control characters to keep in one log line; ask it with fewer');
     const q = askLine({ thread: t.id });
     appendLog({ type: 'turn', thread: t.id, text: capBytes(q.question, TURN_MAX), question: q.id }, 'supervisor');
     return out(q.id);
@@ -4971,6 +4981,8 @@ function cmdThread() {
     let outcome = flags.outcome !== undefined ? (flagStr('outcome') ?? '').replace(/\s+/g, ' ').trim() : '';
     if (flags.accept) {
       if (!v.ready) die(`${t.id} has no proposal from the supervisor to accept; resolve it with your own --outcome`);
+      // --at names the proposal the owner saw (the dashboard always sends it), as answer's --seen does
+      if (flags.at !== undefined && flagStr('at') !== v.ready.at) die('The supervisor changed its proposal; read it again.');
       outcome = v.ready.outcome;
     }
     if (UNSAFE_TEXT.test(outcome)) die('--outcome is one line of plain text');
@@ -5024,7 +5036,7 @@ function cmdThread() {
     for (const x of vs) out(`${x.id} [${x.status}${x.status === 'open' ? `, ${x.waiting === 'supervisor' ? 'waiting on the supervisor' : "the owner's move"}` : ''}] ${quoteData(x.title)}${x.subject ? ` (${(subjectWords(x.subject) || ` a ${x.subject.kind}`).trim()})` : ''} · ${plural(x.turns.length, 'turn')}${x.ready ? ' · proposed for resolving' : ''}`);
     return;
   }
-  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\']   |   thread say <t-id> "<words>"   (the owner\'s; with DEVTEAM_ROLE=supervisor the supervisor\'s, which may add --refs <type>:<id>…)   |   thread ask <t-id> --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept]   |   thread reopen <t-id> ["<words>"]   |   thread show <t-id> [--json]   |   thread list [--waiting | --open | --all] [--json]   (words may also follow --)');
+  die('usage: thread new "<first words>" [--title "<line>"] [--subject \'<json>\']   |   thread say <t-id> "<words>"   (the owner\'s; with DEVTEAM_ROLE=supervisor the supervisor\'s, which may add --refs <type>:<id>…)   |   thread ask <t-id> --question "…" <ask\'s flags>   |   thread ready <t-id> --outcome "<line>"   |   thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]]   |   thread reopen <t-id> ["<words>"]   |   thread show <t-id> [--json]   |   thread list [--waiting | --open | --all] [--json]   (words may also follow --)');
 }
 
 // ===== review questions: an agent-drawn page the owner answers with a result =====
@@ -10171,7 +10183,8 @@ async function cmdDashboard() {
     'thread-say': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && turnOk(b.text) ? ['thread', 'say', b.id, '--', b.text.trim()] : null),
     'thread-resolve': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && (b.outcome === undefined || b.outcome === '' || lineOk(b.outcome, OUTCOME_MAX, true)) ? ['thread', 'resolve', b.id, ...(b.outcome?.trim() ? [`--outcome=${b.outcome.trim()}`] : [])] : null),
     'thread-reopen': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && (b.text === undefined || b.text === '' || turnOk(b.text)) ? ['thread', 'reopen', b.id, ...(b.text?.trim() ? ['--', b.text.trim()] : [])] : null),
-    'thread-accept': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) ? ['thread', 'resolve', b.id, '--accept'] : null),
+    // bound to the proposal the card showed: a newer one is refused, so the owner reads it first
+    'thread-accept': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && typeof b.at === 'string' && READY_AT.test(b.at) ? ['thread', 'resolve', b.id, '--accept', `--at=${b.at}`] : null),
   };
   // An action whose caller has a deadline of its own: the gateway gives the whole answer 15 s.
   const ACTION_MS = { 'artifact-publish': 12000 };
@@ -14062,7 +14075,7 @@ Decide and act (supervisor.md, constitution.md)
   review draft <qid> [<file|->]   owner: save partial progress; without a file, print it (a draft is never an answer)
   answer <qid> --review-result <file|-> | answer <qid> "<why>" --decline   (owner) a review: validate and hash its result, or send it back
   answer <qid> "<text>" [--autonomy 1|2|3 [--scope s]] [--rule "<standing rule>"]   (owner)   |   answer <qid> "<text>" --from-chat --said "<owner's words>" [--autonomy n] [--rule "…"] | answer <qid> "<text>" --from-turn <u-id> [--autonomy n] [--rule "…"] | answer <qid> --defaulted   (supervisor)
-  thread new "<first words>" [--title "<line>"] [--subject '<json>'] | thread say <t-id> "<words>" | thread resolve <t-id> [--outcome "<line>" | --accept] | thread reopen <t-id> ["<words>"]   (owner; the dashboard's Shift+click)   a thread with the supervisor about one thing; words may follow --; say is the owner's unless DEVTEAM_ROLE=supervisor
+  thread new "<first words>" [--title "<line>"] [--subject '<json>'] | thread say <t-id> "<words>" | thread resolve <t-id> [--outcome "<line>" | --accept [--at <when it was proposed>]] | thread reopen <t-id> ["<words>"]   (owner; the dashboard's Shift+click)   a thread with the supervisor about one thing; words may follow --; say is the owner's unless DEVTEAM_ROLE=supervisor
   thread say <t-id> "<words>" [--refs <type>:<id>…] | thread ask <t-id> --question "…" <ask's flags> | thread ready <t-id> --outcome "<line>"   (supervisor)   reply, ask an Inbox question in it, propose resolving it
   thread show <t-id> [--json] | thread list [--waiting | --open | --all] [--json]   the thread, its subject framed as data; --waiting: open threads where the supervisor owes a reply
   withdraw <qid> [--reason r] | questions [--all] [--id q] [--json]   questions print in Inbox order: the most valuable first

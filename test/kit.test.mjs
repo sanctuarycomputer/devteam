@@ -182,6 +182,11 @@ test('threads: records, commands, delivery, the Inbox and the loop', async (t) =
     assert.match(F.fails(['thread', 'say', T, 'x'], { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'demo-01-x' }), /owner commands don't run in an agent session/);
     assert.match(F.fails(['thread', 'say', T, 'x', '--refs', 'goal:x']), /--refs are on the supervisor's turns/);
     assert.match(F.fails(['thread', 'say', T, 'x', '--refs', 'not a ref'], F.SUP), /each is <type>:<id>/);
+    // a reply at the encoded cap fits alone; with eight long links its line would not, and is refused in words
+    const longRefs = Array.from({ length: 8 }, (_, i) => `act:a-${i}${'x'.repeat(110)}`);
+    const before7 = show(T).turns.length;
+    assert.match(F.fails(['thread', 'say', T, '"'.repeat(1900), '--refs', JSON.stringify(longRefs)], F.SUP), /That reply is too long with its links; shorten it\./);
+    assert.equal(show(T).turns.length, before7, 'nothing written');
     assert.match(F.fails(['thread', 'say', 't-20990101-000000000-owner', 'x']), /no thread t-20990101-000000000-owner/);
     assert.match(F.fails(['thread', 'say', T]), /say something/);
     // sizes: bytes, not characters
@@ -255,6 +260,11 @@ test('threads: records, commands, delivery, the Inbox and the loop', async (t) =
     // ask's refusals are thread ask's, and a refused question leaves no turn
     const turns = v.turns.length;
     assert.match(F.fails(['thread', 'ask', T, '--choices', '[]'], F.SUP), /ask needs --question/);
+    // a question whose turn the log could not hold is refused before the question is written
+    const qs = () => JSON.parse(F.owner(['questions', '--all', '--json'])).length;
+    const nq = qs();
+    assert.match(F.fails(['thread', 'ask', T, ...ask.slice(2), '--question', `${'\\'.repeat(1950)}?`], F.SUP), /too many quotation marks, backslashes or control characters/);
+    assert.deepEqual([qs(), show(T).turns.length], [nq, turns], 'no question and no turn');
     assert.match(F.fails(['thread', 'ask', T, ...ask], { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'demo-01-x' }), /the supervisor does this/);
     assert.equal(show(T).turns.length, turns);
     assert.match(F.fails(['thread', 'ask', 't-20990101-000000000-owner', ...ask], F.SUP), /no thread/);
@@ -266,6 +276,7 @@ test('threads: records, commands, delivery, the Inbox and the loop', async (t) =
     F.sup(['thread', 'say', T, 'Done: the goal says EU orders now.', '--refs', `goal:${F.goal}`]);
     assert.match(F.sup(['thread', 'ready', T, '--outcome', 'Goal narrowed to EU orders']), /proposed resolving/);
     assert.equal(show(T).ready.outcome, 'Goal narrowed to EU orders');
+    const firstAt = show(T).ready.at;
     F.sup(['thread', 'ready', T, '--outcome', 'Goal narrowed to EU orders, the US later']);
     assert.equal(show(T).ready.outcome, 'Goal narrowed to EU orders, the US later', 'a new proposal replaces the standing one');
     assert.match(F.fails(['thread', 'ready', T, '--outcome', 'x'], { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'demo-01-x' }), /the supervisor does this/);
@@ -280,7 +291,11 @@ test('threads: records, commands, delivery, the Inbox and the loop', async (t) =
     assert.equal(show(T).ready, null, "the owner's newer turn clears it");
     F.sup(['thread', 'ready', T, '--outcome', 'EU only, US next quarter']);
     const Q = F.sup(['thread', 'ask', T, '--question', 'Tell the US team?', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
-    const said = F.owner(['thread', 'resolve', T, '--accept']);
+    // accepting the proposal the owner saw: an older one is refused, the one standing is taken
+    assert.notEqual(show(T).ready.at, firstAt);
+    assert.match(F.fails(['thread', 'resolve', T, '--accept', '--at', firstAt]), /The supervisor changed its proposal; read it again\./);
+    assert.equal(show(T).status, 'open', 'not resolved');
+    const said = F.owner(['thread', 'resolve', T, '--accept', '--at', show(T).ready.at]);
     assert.match(said, new RegExp(`^resolved ${T}: EU only, US next quarter`));
     assert.match(said, new RegExp(`1 question asked in it is still open in the Inbox: ${Q}`));
     let v = show(T);

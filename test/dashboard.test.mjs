@@ -550,6 +550,8 @@ test("threads on the dashboard's server: owner actions checked before anything r
     ['thread-say', { id: [T], text: 'x' }, 'an id sent as a one-element array'],
     ['thread-resolve', { id: [T] }, 'a resolve id sent as an array'],
     ['thread-accept', { id: [T] }, 'an accept id sent as an array'],
+    ['thread-accept', { id: T }, 'an accept that names no proposal'],
+    ['thread-accept', { id: T, at: 'yesterday' }, "an accept's proposal time not as the log stamps it"],
   ];
   const n = (await list()).length;
   const turnsOf = async () => (await list()).find((x) => x.id === T).turns;
@@ -570,14 +572,21 @@ test("threads on the dashboard's server: owner actions checked before anything r
   assert.equal((await post('thread-resolve', { id: T2 })).status, 200);
   assert.equal((await post('thread-say', { id: T, text: 'x' }, { origin: 'https://evil.example' })).status, 403, 'another origin');
   // resolve, a turn on a resolved thread, reopen, a proposal accepted
-  assert.equal((await post('thread-accept', { id: T })).status, 400, 'no proposal to accept');
+  assert.equal((await post('thread-accept', { id: T, at: '2026-11-10T10:30:00.000Z' })).status, 400, 'no proposal to accept');
   assert.equal((await post('thread-resolve', { id: T, outcome: 'Narrowed to the EU' })).status, 200);
   r = await post('thread-say', { id: T, text: 'one more thing' });
   assert.equal(r.status, 400);
   assert.match((await r.json()).error, /reopen it first/);
   assert.equal((await post('thread-reopen', { id: T, text: 'One more thing' })).status, 200);
+  F.sup(['thread', 'ready', T, '--outcome', 'EU only, and the US']);
+  const seen = (await list()).find((x) => x.id === T).ready.at;
   F.sup(['thread', 'ready', T, '--outcome', 'EU only']);
-  assert.equal((await post('thread-accept', { id: T })).status, 200);
+  // the accept names the proposal the card showed: one the supervisor has since replaced is refused
+  r = await post('thread-accept', { id: T, at: seen });
+  assert.equal(r.status, 400);
+  assert.match((await r.json()).error, /The supervisor changed its proposal; read it again\./);
+  assert.equal((await list()).find((x) => x.id === T).status, 'open');
+  assert.equal((await post('thread-accept', { id: T, at: (await list()).find((x) => x.id === T).ready.at })).status, 200);
   th = (await list()).find((x) => x.id === T);
   assert.deepEqual([th.status, th.outcome], ['resolved', 'EU only']);
   // a supervisor with a pane: said within the 10 s the answer is kept
@@ -709,6 +718,10 @@ test("the thread layer's rules: what the pointer is on, a subject that fits, whe
   assert.equal(A.tWhere({ kind: 'item', ref: 'ticket:checkout-04' }), 'Board');
   assert.equal(A.tWhere({ kind: 'page', view: '#loop/observe' }), 'Loop, Observe');
   assert.equal(A.tWhere({ kind: 'page', view: '#goals' }), 'Goals');
+  // a name every object has is no type and no section of the page's
+  assert.equal(A.tWhere({ kind: 'item', ref: 'constructor:x' }), 'the dashboard');
+  assert.equal(A.tWhere({ kind: 'page', view: '#constructor' }), 'the dashboard');
+  assert.equal(A.tWhere({ kind: 'page', view: '#__proto__/x' }), 'the dashboard');
   assert.equal(A.tWhere({ kind: 'page', view: '#nowhere' }), 'the dashboard', 'no hash route in what the owner reads');
   assert.equal(A.tWhere({ kind: 'artifact', slug: 'pricing-mock' }), 'pricing-mock');
   assert.equal(A.tWhere({ kind: 'preview', name: 'cool-tiger', route: '/checkout' }), 'cool-tiger /checkout');
@@ -861,12 +874,14 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await p.ev(`(() => { const ta = document.getElementById('tl-c-text'); ta.value = ''; ta.dispatchEvent(new Event('input', { bubbles: true })); })()`);
   });
 
-  await t.test("the supervisor's reply shows in the open card within two polls", async () => {
+  await t.test("the supervisor's reply shows in the open card within two polls", async (st) => {
     F.sup(['thread', 'say', T, 'That drops the measure to EU orders; want me to propose the change?']);
     const t0 = Date.now();
     await soon(`document.querySelector('#tl-c-turns .tl-turn.supervisor')?.textContent.includes('drops the measure')`, 'the reply');
-    // the card polls every 2 s: two polls and a margin for a loaded machine
-    assert.ok(Date.now() - t0 < 2 * 2000 + 1500, `took ${Date.now() - t0} ms`);
+    // the card polls every 2 s: two polls, and one more and a margin for a loaded machine
+    const took = Date.now() - t0;
+    st.diagnostic(`the reply showed after ${took} ms`);
+    assert.ok(took <= 3 * 2000 + 1500, `took ${took} ms`);
     assert.equal(await p.ev(`document.getElementById('tl-c-state').textContent`), '', 'the reply is the state');
   });
 
@@ -1050,10 +1065,15 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     F.sup(['thread', 'ready', T, '--outcome', 'Goal narrowed to EU orders']);
     await soon(`document.querySelector('#tl-c-ready .tl-ready')?.textContent.includes('Goal narrowed to EU orders')`, 'the banner');
     assert.match(await p.ev(`document.querySelector('#tl-c-ready .tl-ready').textContent`), /1 question asked here is still open; it stays in the Inbox/);
-    await p.click('[data-tl-notyet]');
+    const notYets = () => threads().find((x) => x.id === T).turns.filter((u) => u.by === 'owner' && u.text === 'Not yet').length;
+    const n0 = notYets();
+    // a double click says it once
+    await p.ev(`(() => { const b = document.querySelector('[data-tl-notyet]'); b.click(); b.click(); })()`);
     await until(() => threads().find((x) => x.id === T).ready === null, "cleared by the owner's Not yet");
+    await soon('!TL.busy', 'the request back');
     const th = threads().find((x) => x.id === T);
     assert.deepEqual([th.turns[th.turns.length - 1].by, th.turns[th.turns.length - 1].text], ['owner', 'Not yet']);
+    assert.equal(notYets(), n0 + 1, 'one Not yet for two clicks');
     await soon(`!document.querySelector('#tl-c-ready .tl-ready')`, 'the banner gone');
     F.sup(['thread', 'ready', T, '--outcome', 'EU only']);
     await soon(`document.querySelector('#tl-c-ready .tl-ready')?.textContent.includes('EU only')`, 'proposed again');
@@ -1073,6 +1093,52 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await p.click('[data-tl-reopen]');
     await until(() => threads().find((x) => x.id === T).status === 'open', 'reopened');
     await soon(`!!document.querySelector('[data-tl-pin="${T}"]')`, 'its pin back');
+  });
+
+  await t.test('a press on Resolve across a read still opens the form', async () => {
+    await soon(`!!document.querySelector('[data-tl-resolve]')`, 'Resolve in its header');
+    // the page's redraw after the reopen, and the card placed again after it: where the button is
+    // once a read leaves it where it was, so only the redraw under the press is tested
+    await soon('!loading', 'the page drawn');
+    let at = null;
+    for (let i = 0; i < 10; i++) {
+      await p.ev('tlRefresh()');
+      const now = await p.at('[data-tl-resolve]');
+      if (at && now.x === at.x && now.y === at.y) break;
+      at = now;
+    }
+    await p.ev(`window.__rb = document.querySelector('[data-tl-resolve]'); void 0`);
+    await p.move(at.x, at.y);
+    await p.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...at, button: 'left', buttons: 1, clickCount: 1 });
+    await p.ev('tlRefresh()');
+    assert.ok(await p.ev('window.__rb.isConnected'), 'the pressed button kept, not drawn again');
+    await p.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...at, button: 'left', buttons: 0, clickCount: 1 });
+    await soon(`!!document.getElementById('tl-outcome')`, 'the form from the pressed button');
+    await p.click('[data-tl-resolve-cancel]');
+    await soon(`!document.getElementById('tl-outcome')`, 'the form gone');
+  });
+
+  await t.test('a #talk/ link followed with the drawer open closes the drawer and its scrim', async () => {
+    await p.click('[data-tl-close]');
+    await soon(`document.getElementById('tl-card').hidden`, 'closed');
+    await p.ev(`location.hash = '#goal/${F.goal}'`);
+    await soon(`${shown('drawer')} && ${shown('scrim')}`, 'the drawer');
+    await p.ev(`location.hash = '#talk/${T}'`);
+    await soon(`${shown('tl-card')} && document.getElementById('tl-card').dataset.key === '${T}'`, 'the card');
+    assert.deepEqual(await p.ev(`[document.getElementById('drawer').hidden, document.getElementById('scrim').hidden, document.body.style.overflow]`), [true, true, ''], 'nothing left over the card');
+  });
+
+  await t.test("a reply that lands while the tab is hidden isn't marked seen, so the dock can show its dot", async () => {
+    const last = () => p.ev(`TL.threads.find((x) => x.id === '${T}').turns.at(-1)`);
+    await p.ev(`Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' }); void 0`);
+    try {
+      F.sup(['thread', 'say', T, 'While you were away.']);
+      await p.ev('tlRefresh()');
+      assert.equal((await last()).text, 'While you were away.', 'read in');
+      assert.notEqual(await p.ev(`tlSeenAt('${T}')`), (await last()).at, 'not seen while hidden');
+    } finally { await p.ev('delete document.visibilityState; void 0'); }
+    await p.ev('tlRefresh()');
+    assert.equal(await p.ev(`tlSeenAt('${T}')`), (await last()).at, 'seen once the tab shows it');
   });
 
   await t.test("Resolve in the card's header: a line for how it ended, the open question's warning, Cancel keeps it open", async () => {

@@ -3116,13 +3116,15 @@ function route() {
   if (h.startsWith('goal/')) return void openGoal(h.slice(5));
   if (h.startsWith('planner/')) return void openPlanner(h.slice(8));
   // a thread: its card, beside its subject (#thread/ is a message's thread, in the sidepeek)
-  if (h.startsWith('talk/')) return void tlOpen(h.slice(5));
+  // over nothing: a drawer it was followed from (or open under it) closes, as for any other link
+  if (h.startsWith('talk/')) { hideDrawer(); return void tlOpen(h.slice(5)); }
   const PEEKS = { feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, sensor: openSensor };
   const [kind, ...rest] = h.split('/');
   if (PEEKS[kind] && rest.length) return void PEEKS[kind](rest.join('/'));
   if (h.startsWith('file?')) return void openFile(new URLSearchParams(location.hash.slice(6)));
-  if (!$('drawer').hidden) { $('drawer').hidden = true; $('scrim').hidden = true; document.body.style.overflow = ''; DRAWER = { kind: null, id: null }; }
+  hideDrawer();
 }
+function hideDrawer() { if (!$('drawer').hidden) { $('drawer').hidden = true; $('scrim').hidden = true; document.body.style.overflow = ''; DRAWER = { kind: null, id: null }; } }
 window.addEventListener('hashchange', () => { if (DATA) route(); });
 $('drawer-close').addEventListener('click', closeDrawer);
 $('scrim').addEventListener('click', () => (AV ? leaveArtifact() : RV ? leaveReview() : closeDrawer()));
@@ -3534,8 +3536,9 @@ const T_WHERE = { goal: 'Goals', question: 'Inbox', ticket: 'Board', planner: 'B
 // Where a thread's subject is, in the dock's words.
 function tWhere(s) {
   if (!s) return 'no subject';
-  if (s.kind === 'item') return T_WHERE[String(s.ref).split(':')[0]] || 'the dashboard';
-  if (s.kind === 'page') { const [sec, tab] = String(s.view).slice(1).split('/'); return T_SECTIONS[sec] ? `${T_SECTIONS[sec]}${tab ? `, ${tab.charAt(0).toUpperCase()}${tab.slice(1)}` : ''}` : 'the dashboard'; }
+  // own keys only: a subject's ref or view is page-written, and "constructor" is on every object
+  if (s.kind === 'item') { const k = String(s.ref).split(':')[0]; return Object.hasOwn(T_WHERE, k) ? T_WHERE[k] : 'the dashboard'; }
+  if (s.kind === 'page') { const [sec, tab] = String(s.view).slice(1).split('/'); return Object.hasOwn(T_SECTIONS, sec) ? `${T_SECTIONS[sec]}${tab ? `, ${tab.charAt(0).toUpperCase()}${tab.slice(1)}` : ''}` : 'the dashboard'; }
   if (s.kind === 'artifact') return s.slug;
   if (s.kind === 'preview') return `${s.name}${s.route ? ` ${s.route}` : ''}`;
   return 'no subject';
@@ -3558,7 +3561,7 @@ const tUnread = (t, seenAt) => t.turns.some((u) => u.by === 'supervisor' && (!se
 // about it. It lives in #tl, outside <main>, which the 10 s refresh rebuilds, so a card, its draft and
 // the dock keep their state. Its window listeners in the capture phase are registered here, before
 // the page's own (PRESSED below), so a click it takes reaches nothing else.
-const TL = { threads: [], pane: false, open: null, draft: null, hit: null, pin: false, via: null, swallowUntil: 0, typed: {}, sig: '', polling: null, seq: 0, have: 0, openAt: -1, polled: false, busy: false, resolving: false, readyKey: '', pill: '', list: '', pressed: null };
+const TL = { threads: [], pane: false, open: null, draft: null, hit: null, pin: false, via: null, swallowUntil: 0, typed: {}, sig: '', polling: null, seq: 0, have: 0, openAt: -1, polled: false, busy: false, resolving: false, readyKey: '', acts: '', pill: '', list: '', pressed: null };
 const tlEl = (id) => document.getElementById(id);
 const tlOwn = (el) => !!el?.closest?.('#tl');
 const tlShowing = () => !tlEl('tl-cursor').hidden;
@@ -3722,11 +3725,14 @@ function tlCardBody(t) {
   const s = t ? t.subject : TL.draft.subject;
   const title = t ? t.title : TL.draft.title || 'A new thread';
   tlEl('tl-c-title').textContent = title;
-  tlEl('tl-c-acts').innerHTML = t ? (t.status === 'resolved' ? '<button type="button" class="ghost" data-tl-reopen>Reopen</button>' : '<button type="button" class="ghost" data-tl-resolve>Resolve</button>') : '';
+  // Resolve or Reopen, drawn only when it changes: a press held across a poll still lands its click
+  const acts = t ? (t.status === 'resolved' ? '<button type="button" class="ghost" data-tl-reopen>Reopen</button>' : '<button type="button" class="ghost" data-tl-resolve>Resolve</button>') : '';
+  if (acts !== TL.acts) { TL.acts = acts; tlEl('tl-c-acts').innerHTML = acts; }
   // the banner or the resolve form, redrawn only when it changes, so a half-typed outcome stays
   const rk = !t ? '' : TL.resolving ? `form:${t.id}:${t.questions.filter((q) => q.status === 'open').length}` : t.ready ? `ready:${t.id}:${t.ready.at}:${t.questions.filter((q) => q.status === 'open').length}` : '';
   if (rk !== TL.readyKey) { TL.readyKey = rk; tlEl('tl-c-ready').innerHTML = !rk ? '' : TL.resolving ? tlResolveForm(t) : tlReady(t); }
-  if (t) tlSeen(t);
+  // seen only when the owner can see it: a reply landing in a hidden tab still gets its dot
+  if (t && document.visibilityState === 'visible') tlSeen(t);
   const turns = tlEl('tl-c-turns');
   const sig = JSON.stringify([t, s, title, (t?.questions || []).map((q) => [q.id, (DATA?.questions || []).some((x) => x.id === q.id), ANSWERED.has(q.id)])]);
   if (sig !== TL.sig && !turns.contains(document.activeElement)) {
@@ -3788,6 +3794,7 @@ function tlCard() {
     tlBytes();
     TL.sig = '';
     TL.readyKey = '';
+    TL.acts = '';
     if (writing) tlEl('tl-c-text').focus();
   }
   card.hidden = false;
@@ -3874,7 +3881,7 @@ document.addEventListener('click', (e) => {
   if (e.target.closest('[data-tl-resolve]')) { TL.resolving = true; return void tlDraw(); }
   if (e.target.closest('[data-tl-resolve-cancel]')) { TL.resolving = false; return void tlDraw(); }
   if (t && e.target.closest('[data-tl-resolve-go]')) return void tlAct('thread-resolve', { id: t.id, outcome: tlEl('tl-outcome')?.value.trim() || undefined });
-  if (t && e.target.closest('[data-tl-accept]')) return void tlAct('thread-accept', { id: t.id });
+  if (t && e.target.closest('[data-tl-accept]')) return void tlAct('thread-accept', { id: t.id, at: t.ready?.at });
   if (t && e.target.closest('[data-tl-notyet]')) return void tlAct('thread-say', { id: t.id, text: 'Not yet' });
   if (t && e.target.closest('[data-tl-reopen]')) return void tlAct('thread-reopen', { id: t.id });
   const pin = e.target.closest('[data-tl-pin]');
@@ -3954,13 +3961,17 @@ const tlOpenWarn = (t) => { const n = t.questions.filter((q) => q.status === 'op
 const tlReady = (t) => `<div class="tl-ready">Ready to resolve: <b>${esc(t.ready.outcome)}</b>${tlOpenWarn(t)}<div class="row-inline"><button type="button" data-tl-accept>Resolve</button><button type="button" class="ghost" data-tl-notyet>Not yet</button></div></div>`;
 // Resolving: an optional line for how it ended.
 const tlResolveForm = (t) => `<div class="tl-ready"><input type="text" id="tl-outcome" maxlength="300" placeholder="How it ended, in a line (optional)">${tlOpenWarn(t)}<div class="row-inline"><button type="button" data-tl-resolve-go>Resolve</button><button type="button" class="ghost" data-tl-resolve-cancel>Cancel</button></div></div>`;
+// One request at a time, as a send is: a double click resolves (or says Not yet) once.
 async function tlAct(action, body) {
+  if (TL.busy) return false;
   const err = tlEl('e-tl');
+  TL.busy = true;
   try {
     const r = await sending(() => fetch(`/api/${action}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }));
     const out = await r.json();
     if (!r.ok) { if (err) err.textContent = out.error || 'failed'; return false; }
-  } catch (e2) { if (err) err.textContent = `Could not send: ${e2.message}`; return false; }
+  } catch (e2) { if (err) err.textContent = `Could not send: ${e2.message}`; return false; } finally { TL.busy = false; }
+  if (err) err.textContent = '';
   TL.resolving = false;
   if (['thread-resolve', 'thread-accept'].includes(action)) TL.open = null;
   await tlRefresh();
