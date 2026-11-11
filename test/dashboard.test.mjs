@@ -308,7 +308,7 @@ const POLL_FAST = `(() => {
   window.__polls = 0;
   window.__gate = null;
   window.__answerHold = null;
-  window.fetch = async (u, o) => {
+  const inner = async (u, o) => {
     if (String(u).startsWith('/api/data')) { window.__polls++; if (window.__gate) await window.__gate; return rf(u, o); }
     if (String(u).startsWith('/api/answer') && window.__answerHold) await window.__answerHold;
     // every owner action held on the wire, as a slow server would hold it
@@ -316,8 +316,32 @@ const POLL_FAST = `(() => {
     // a test can let the next /api/threads read through but hold its answer back: read now, landing later
     // and can slow every /api/threads answer, as a loaded box would
     if (String(u).startsWith('/api/threads') && window.__threadsDelay) await new Promise((r) => setTimeout(r, window.__threadsDelay));
+    // or hold back every /api/threads answer, read now, until the test lets each go
+    if (String(u).startsWith('/api/threads') && window.__threadsQueue) { const r = await rf(u, o); await new Promise((go) => window.__threadsQueue.push(go)); return r; }
     if (String(u).startsWith('/api/threads') && window.__threadsHold) { const h = window.__threadsHold; window.__threadsHold = null; const r = await rf(u, o); window.__threadsRead = true; await h; setTimeout(() => { window.__threadsLanded = true; }, 0); return r; }
     return rf(u, o);
+  };
+  // A test can hold the page still for a step (finding a button and pressing it): while __still() holds,
+  // no answer to the page's poll or the card's lands, and it resolves once any answer already handed
+  // back has been drawn (a read draws as soon as its body is in, before the next task). __stir() lets
+  // the held answers land.
+  window.__landing = 0;
+  window.__hush = null;
+  window.__still = async () => {
+    if (!window.__hush) { let go; window.__hush = new Promise((r) => { go = r; }); window.__hush.go = go; }
+    while (window.__landing) await new Promise((r) => setTimeout(r, 10));
+  };
+  window.__stir = () => { const h = window.__hush; window.__hush = null; h?.go(); };
+  window.fetch = async (u, o) => {
+    const r = await inner(u, o);
+    if (!['/api/data', '/api/threads'].some((x) => String(u).startsWith(x))) return r;
+    while (window.__hush) await window.__hush;
+    window.__landing++;
+    let done = false;
+    const settle = () => { if (!done) { done = true; setTimeout(() => { window.__landing--; }, 0); } };
+    for (const m of ['json', 'text']) { const f = r[m].bind(r); r[m] = () => f().finally(settle); }
+    if (!r.ok) settle(); // the card's read gives up on an error without reading the body
+    return r;
   };
 })()`;
 
@@ -896,7 +920,12 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
   await p.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
   await p.send('Page.addScriptToEvaluateOnNewDocument', { source: POLL_FAST });
   await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#goals` });
-  const soon = async (expr, what) => { for (let i = 0; i < 300; i++) { const v = await p.ev(expr); if (v) return v; await new Promise((r) => setTimeout(r, 50)); } assert.fail(`timed out: ${what}`); };
+  // 30 s, however long each look takes: a loaded runner's page answers slowly
+  const soon = async (expr, what) => { const end = Date.now() + 30000; for (;;) { const v = await p.ev(expr); if (v) return v; if (Date.now() > end) assert.fail(`timed out: ${what}`); await new Promise((r) => setTimeout(r, 50)); } };
+  // A step no poll may move: the page held still from finding what to press until it is pressed, so a
+  // redraw (the Inbox growing above the goal, the card placed again as it grows) can't move it between.
+  const still = async (f) => { await p.ev('window.__still()'); try { return await f(); } finally { await p.ev('window.__stir()'); } };
+  const click = (sel) => still(() => p.click(sel));
   const goalSel = `#goals-list [data-subject="goal:${F.goal}"]`;
   const shown = (id) => `!document.getElementById('${id}').hidden`;
   await soon(`!!document.querySelector('${goalSel}')`, 'the goal card');
@@ -904,27 +933,28 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
   let T;
 
   await t.test('Shift and point: the pin cursor, the goal outlined, a chip naming it; Shift up, the cursor back', async () => {
-    const at = await p.at(`${goalSel} h4`);
-    await p.hold('Shift', true);
-    await p.move(at.x, at.y, 8);
-    await soon(`${shown('tl-cursor')} && ${shown('tl-hl')}`, 'the pin and the highlight');
-    assert.equal(await p.ev(`document.getElementById('tl-chip').textContent`), 'Launch checkout');
-    assert.equal(await p.ev(`document.documentElement.classList.contains('tl-aiming')`), true);
+    await still(async () => {
+      const at = await p.at(`${goalSel} h4`);
+      await p.hold('Shift', true);
+      await p.move(at.x, at.y, 8);
+      await soon(`${shown('tl-cursor')} && ${shown('tl-hl')}`, 'the pin and the highlight');
+      assert.equal(await p.ev(`document.getElementById('tl-chip').textContent`), 'Launch checkout');
+      assert.equal(await p.ev(`document.documentElement.classList.contains('tl-aiming')`), true);
+    });
     await p.hold('Shift', false);
     await soon(`document.getElementById('tl-cursor').hidden && !document.documentElement.classList.contains('tl-aiming')`, 'the normal cursor back');
   });
 
   await t.test('Shift held while typing in a field shows nothing until the pointer leaves the field', async () => {
     const box = `textarea[data-q="${Q0}"]`;
-    await p.click(box);
+    await click(box);
     await p.hold('Shift', true);
     await p.key('A', 8);
     assert.equal(await p.ev(`document.getElementById('tl-cursor').hidden`), true, 'a capital is just a capital');
     const over = await p.at(box);
     await p.move(over.x, over.y, 8);
     assert.equal(await p.ev(`document.getElementById('tl-cursor').hidden`), true, 'not over the field');
-    const g = await p.at(`${goalSel} h4`);
-    await p.move(g.x, g.y, 8);
+    await still(async () => { const g = await p.at(`${goalSel} h4`); await p.move(g.x, g.y, 8); });
     await soon(shown('tl-cursor'), 'the pin once outside it');
     await p.hold('Shift', false);
     assert.match(await p.ev(`document.querySelector('${box}').value`), /A$/);
@@ -932,12 +962,14 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
   });
 
   await t.test("a Shift+click is the layer's alone: it starts a thread on the goal, and the title link under it isn't followed", async () => {
-    const at = await p.at(`${goalSel} a.title-link`);
     const pages = async () => (await p.send('Target.getTargets')).targetInfos.filter((x) => x.type === 'page').length;
     const before = await pages();
-    await p.hold('Shift', true);
-    await p.clickAt(at.x, at.y, 8);
-    await p.hold('Shift', false);
+    await still(async () => {
+      const at = await p.at(`${goalSel} a.title-link`);
+      await p.hold('Shift', true);
+      await p.clickAt(at.x, at.y, 8);
+      await p.hold('Shift', false);
+    });
     await soon(`TL.draft?.subject?.ref === 'goal:${F.goal}'`, 'a thread about to start, on the goal');
     assert.equal(await p.ev('PRESSED'), 0, 'the press that holds a redraw never saw it');
     assert.equal(await pages(), before, "no new window: the browser's own Shift+click never ran");
@@ -955,7 +987,7 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
   });
 
   await t.test("a draft left on one subject stays with it: another subject's card starts empty; Escape closes the card", async () => {
-    const shiftClick = async (sel) => { const at = await p.at(sel); await p.hold('Shift', true); await p.move(at.x, at.y, 8); await soon(shown('tl-cursor'), 'the pin'); await p.clickAt(at.x, at.y, 8); await p.hold('Shift', false); };
+    const shiftClick = (sel) => still(async () => { const at = await p.at(sel); await p.hold('Shift', true); await p.move(at.x, at.y, 8); await soon(shown('tl-cursor'), 'the pin'); await p.clickAt(at.x, at.y, 8); await p.hold('Shift', false); });
     await p.type('draft for the goal');
     // an unsent draft is let go after 7 days; one of a day ago stays
     const old = (days, at = Date.now() - days * 86400000) => JSON.stringify(JSON.stringify({ text: 'x', at }));
@@ -1045,12 +1077,12 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
   });
 
   await t.test('#talk/<id> opens the thread beside its subject', async () => {
-    await p.click('[data-tl-close]');
+    await click('[data-tl-close]');
     await soon(`document.getElementById('tl-card').hidden`, 'closed');
     await p.ev(`location.hash = '#talk/${T}'`);
     await soon(`${shown('tl-card')} && document.getElementById('tl-card').dataset.key === '${T}'`, 'the card from the link');
     // closed either way, the same link opens it again
-    await p.click('[data-tl-close]');
+    await click('[data-tl-close]');
     await soon(`document.getElementById('tl-card').hidden && location.hash === '#goals'`, 'closed, the link let go for its subject\'s section');
     await p.ev(`location.hash = '#talk/${T}'`);
     await soon(`${shown('tl-card')} && document.getElementById('tl-card').dataset.key === '${T}'`, 'the same link again');
@@ -1072,19 +1104,19 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await p.ev(`window.__g = document.querySelector('${goalSel}'); void 0`);
     await soon('!window.__g.isConnected', 'the goal card redrawn');
     assert.deepEqual(await pin(), before, 'placed again after the rebuild');
-    await p.click('[data-tl-close]');
+    await click('[data-tl-close]');
     await soon(`document.getElementById('tl-card').hidden`, 'closed');
-    await p.click('.tl-pin');
+    await click('.tl-pin');
     await soon(`${shown('tl-card')} && document.getElementById('tl-card').dataset.key === '${T}'`, 'the card from its pin');
   });
 
   await t.test('the dock: the pill with its count and a dot for a reply not seen, where each subject is, New thread with no subject', async () => {
-    await p.click('[data-tl-close]');
+    await click('[data-tl-close]');
     F.sup(['thread', 'reply', T, 'Noted.']);
     await soon(`/Threads · 1/.test(document.getElementById('tl-pill').textContent) && !!document.querySelector('#tl-pill .tl-dot')`, 'the count, and a dot for the reply');
-    await p.click('#tl-pill');
+    await click('#tl-pill');
     await soon(`document.querySelector('#tl-list [data-tl-open="${T}"]')?.textContent.includes('Goals')`, 'where its subject is');
-    await p.click('[data-tl-new]');
+    await click('[data-tl-new]');
     await soon(`${shown('tl-card')} && document.getElementById('tl-card').classList.contains('in-dock')`, 'a card in the dock');
     await p.ev("document.getElementById('tl-c-text').focus()");
     await p.type('What about onboarding?');
@@ -1093,48 +1125,51 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     assert.equal(n.subject, null);
     await soon(`/Threads · 2/.test(document.getElementById('tl-pill').textContent)`, 'two open');
     await p.ev('document.activeElement?.blur()');
-    await p.click('[data-tl-close]');
+    await click('[data-tl-close]');
   });
 
   await t.test('the pin button: pointing without Shift, until Esc', async () => {
-    if (await p.ev(`document.getElementById('tl-panel').hidden`)) await p.click('#tl-pill');
-    await p.click('#tl-pinbtn');
+    if (await p.ev(`document.getElementById('tl-panel').hidden`)) await click('#tl-pill');
+    await click('#tl-pinbtn');
     assert.equal(await p.ev(`document.getElementById('tl-pinbtn').getAttribute('aria-pressed')`), 'true');
-    const at = await p.at(`${goalSel} h4`);
-    await p.move(at.x, at.y, 0);
+    await still(async () => { const at = await p.at(`${goalSel} h4`); await p.move(at.x, at.y, 0); });
     await soon(shown('tl-cursor'), 'the pin without Shift');
     await p.key('Escape');
     await soon(`document.getElementById('tl-cursor').hidden && document.getElementById('tl-pinbtn').getAttribute('aria-pressed') === 'false'`, 'out of pin mode');
   });
 
   await t.test("a dock row keeps the keyboard's focus through reads that change the list", async () => {
-    if (await p.ev(`document.getElementById('tl-panel').hidden`)) await p.click('#tl-pill');
+    if (await p.ev(`document.getElementById('tl-panel').hidden`)) await click('#tl-pill');
     await soon(`!!document.querySelector('#tl-list [data-tl-open="${T}"]')`, 'its row');
     await p.ev(`window.__row = document.querySelector('#tl-list [data-tl-open="${T}"]'); window.__row.focus(); void 0`);
     F.sup(['thread', 'reply', T, 'One more thing.']);
+    // a read begun now, and the polls beside it: waited on until one has brought the reply in
     await p.ev('tlRefresh()');
-    await p.ev('tlRefresh()');
-    assert.ok(await p.ev(`TL.threads.find((x) => x.id === '${T}').turns.some((u) => u.text === 'One more thing.')`), 'the reads brought the reply in');
+    await soon(`TL.threads.find((x) => x.id === '${T}').turns.some((u) => u.text === 'One more thing.')`, 'the reads brought the reply in');
     assert.ok(await p.ev('document.activeElement === window.__row && window.__row.isConnected'), 'focus still on the same row');
     await p.ev('window.__row.blur()');
     await p.ev('tlRefresh()');
-    assert.ok(await p.ev(`!!document.querySelector('#tl-list [data-tl-open="${T}"] .tl-dot[role="img"][aria-label]')`), 'drawn once focus left, its dot named');
+    await soon(`!!document.querySelector('#tl-list [data-tl-open="${T}"] .tl-dot[role="img"][aria-label]')`, 'drawn once focus left, its dot named');
   });
 
   await t.test('a press on a pin across a read that adds a pin still opens its card', async () => {
-    await p.click('#tl-pill');
+    await click('#tl-pill');
     await soon(`document.getElementById('tl-panel').hidden`, 'the panel closed');
-    const at = await p.at('.tl-pin');
-    await p.ev(`window.__pin = document.querySelector('.tl-pin'); void 0`);
-    await p.move(at.x, at.y);
-    await p.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...at, button: 'left', buttons: 1, clickCount: 1 });
+    // still from finding the pin to pressing it; the reads then land under the press
+    const at = await still(async () => {
+      const xy = await p.at('.tl-pin');
+      await p.ev(`window.__pin = document.querySelector('.tl-pin'); void 0`);
+      await p.move(xy.x, xy.y);
+      await p.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...xy, button: 'left', buttons: 1, clickCount: 1 });
+      return xy;
+    });
     F.owner(['thread', 'new', 'About this spot', '--subject', JSON.stringify({ kind: 'page', view: '#goals', at: { x: 0.5, y: 0.9 } })]);
     await p.ev('tlRefresh()');
-    assert.equal(await p.ev(`document.querySelectorAll('.tl-pin').length`), 2, 'the new pin drawn');
+    await soon(`document.querySelectorAll('.tl-pin').length === 2`, 'the new pin drawn');
     assert.ok(await p.ev('window.__pin.isConnected'), 'the pressed pin kept, not drawn again');
     await p.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...at, button: 'left', buttons: 0, clickCount: 1 });
     await soon(`${shown('tl-card')} && document.getElementById('tl-card').dataset.key === '${T}'`, 'the card from the pressed pin');
-    await p.click('[data-tl-close]');
+    await click('[data-tl-close]');
   });
 
   await t.test('pins stay under the drawer and its scrim', async () => {
@@ -1149,7 +1184,7 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
   });
 
   await t.test("a question asked in the thread: the Inbox's card in the card (t-q-), one pick in both, answered there once, answered in the Inbox too", async () => {
-    await p.click(`[data-tl-pin="${T}"]`);
+    await click(`[data-tl-pin="${T}"]`);
     await soon(`document.getElementById('tl-card').dataset.key === '${T}'`, 'its card');
     const Q = F.sup(['thread', 'ask', T, '--question', 'Narrow the goal to EU orders?', '--choices', '[{"label":"Yes"},{"label":"Not yet"}]', '--recommendation', 'Yes', '--goal', F.goal, '--stake', '2', '--urgency', '1']);
     await soon(`!!document.getElementById('t-q-${Q}') && !!document.getElementById('q-${Q}')`, 'both copies');
@@ -1157,13 +1192,24 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     // the Inbox is another section: its copy is clicked as a script would
     await p.ev(`document.querySelector('#q-${Q} input[data-pick="${Q}"][value="Not yet"]').click()`);
     assert.ok(await p.ev(`document.querySelector('#t-q-${Q} input[value="Not yet"]').checked && document.querySelector('#t-q-${Q} input[value="Not yet"]').closest('.choice').classList.contains('picked')`), "the Inbox's pick shows in the thread's");
-    await p.click(`#t-q-${Q} input[data-pick="${Q}"][value="Yes"]`);
+    await click(`#t-q-${Q} input[data-pick="${Q}"][value="Yes"]`);
     assert.deepEqual(await p.ev(`[document.querySelector('#q-${Q} input[value="Yes"]').checked, document.querySelector('#q-${Q} input[value="Not yet"]').checked, document.querySelectorAll('#q-${Q} .choice.picked').length]`), [true, false, 1], "the thread's pick shows in the Inbox's");
-    await p.click(`#t-q-${Q} button[data-answer="${Q}"]`);
+    // held still from the press until both copies say so: answered at once, before any read lands
+    await still(async () => {
+      await p.click(`#t-q-${Q} button[data-answer="${Q}"]`);
+      await soon(`document.getElementById('t-q-${Q}')?.classList.contains('done') && document.getElementById('t-q-${Q}').textContent.includes('Yes')`, 'the thread copy marked answered at once');
+      await soon(`document.getElementById('q-${Q}')?.classList.contains('done') && document.getElementById('q-${Q}').textContent.includes('Yes')`, 'the Inbox copy marked answered at once');
+    });
     const q = await until(() => { const x = JSON.parse(F.owner(['questions', '--id', Q, '--json']))[0]; return x.status === 'answered' && x; }, 'the answer');
     assert.deepEqual([q.answer, q.channel], ['Yes', 'dashboard']);
     await soon(`!document.getElementById('q-${Q}') || document.getElementById('q-${Q}').classList.contains('done')`, 'the Inbox copy answered');
-    await soon(`document.querySelector('#tl-c-turns .tl-q.done, #tl-c-turns .qcard.done')?.textContent.includes('Yes')`, 'the thread copy answered');
+    // answered at once in the card (its copy marked done) and, once the threads are read again, as the
+    // log has it (the question, its answer, where from): either way no form and no Inbox link left
+    await soon(`(() => {
+      const turns = document.getElementById('tl-c-turns'), live = document.getElementById('t-q-${Q}');
+      if ((live && !live.classList.contains('done')) || turns.querySelector('[data-answer="${Q}"], a[href="#q/${Q}"]')) return false;
+      return [...turns.querySelectorAll('.tl-q, .qcard.done')].some((c) => /answered/i.test(c.textContent) && /\\bYes\\b/.test(c.textContent));
+    })()`, 'the thread copy answered');
   });
 
   await t.test("answered in the Inbox, it shows answered in the thread; a hostile question and thread title are only text", async () => {
@@ -1179,11 +1225,35 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await p.ev(`tlOpen('${X}')`);
     await soon(`document.getElementById('tl-c-title').textContent === ${JSON.stringify(`${H} hello`)}`, 'the title as written');
     assert.equal(await p.ev(`!!document.querySelector('#tl img') || !!window.__xss`), false, 'no element made from the title');
-    await p.click('[data-tl-close]');
+    await click('[data-tl-close]');
     F.owner(['thread', 'resolve', X]);
     await p.ev('tlRefresh()');
-    await p.click(`[data-tl-pin="${T}"]`);
+    await click(`[data-tl-pin="${T}"]`);
     await soon(`document.getElementById('tl-card').dataset.key === '${T}'`, 'its card again');
+  });
+
+  await t.test("a read of the threads begun before an answer, landing after the page has dropped the question, doesn't show it unanswered", async () => {
+    const Q = F.sup(['thread', 'ask', T, '--question', 'Ship to the EU first?', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
+    await soon(`!!document.getElementById('t-q-${Q}') && !!document.getElementById('q-${Q}') && document.getElementById('tl-card').dataset.key === '${T}'`, 'both copies');
+    // every read of the threads from here held back once read; any Inbox link for the question drawn in the card noted
+    await p.ev(`window.__threadsQueue = []; window.__inboxLink = false; window.__obs = new MutationObserver(() => { if (document.querySelector('#tl-c-turns a[href="#q/${Q}"]')) window.__inboxLink = true; }); window.__obs.observe(document.getElementById('tl-card'), { childList: true, subtree: true }); tlRefresh(); void 0`);
+    await soon('window.__threadsQueue.length > 0', 'a read saying the question is open, held');
+    // the reads held so far were all read before the answer: they say it is open
+    await p.ev(`(() => { window.__stale = window.__threadsQueue.length; const c = document.getElementById('q-${Q}'); c.querySelector('textarea[data-q]').value = 'EU first'; c.querySelector('button[data-answer="${Q}"]').click(); })()`);
+    try {
+      await until(() => JSON.parse(F.owner(['questions', '--id', Q, '--json']))[0].status === 'answered', 'the answer');
+      await soon(`!document.getElementById('q-${Q}')`, 'the page redrawn without the question');
+      // the stale reads land, the newest of them drawn, and nothing newer yet
+      await p.ev('window.__threadsQueue.splice(0, window.__stale).forEach((go) => go())');
+      await p.ev('window.__still()');
+      await p.ev('window.__stir()');
+      assert.equal(await p.ev(`TL.threads.find((x) => x.id === '${T}').questions.find((x) => x.id === '${Q}').status`), 'open', 'the card drew a read from before the answer');
+      assert.equal(await p.ev('window.__inboxLink'), false, 'never "Answer it in the Inbox" for an answered question');
+      assert.ok(await p.ev(`/Answered: EU first/.test(document.getElementById('tl-c-turns').textContent)`), 'still answered in the card');
+    } finally { await p.ev('(() => { const q = window.__threadsQueue || []; window.__threadsQueue = null; q.forEach((go) => go()); })()'); }
+    await soon(`TL.threads.find((x) => x.id === '${T}').questions.find((x) => x.id === '${Q}').status === 'answered' && /EU first/.test(document.getElementById('tl-c-turns').textContent)`, 'the answer as the log has it');
+    assert.equal(await p.ev('window.__inboxLink'), false, 'nor once the threads are read again');
+    await p.ev('window.__obs.disconnect(); void 0');
   });
 
   await t.test('a secrets question in the thread is a link to the Inbox, never a second form', async () => {
@@ -1212,10 +1282,10 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await soon(`!document.querySelector('#tl-c-ready .tl-ready')`, 'the banner gone');
     F.sup(['thread', 'ready', T, '--outcome', 'EU only']);
     await soon(`document.querySelector('#tl-c-ready .tl-ready')?.textContent.includes('EU only')`, 'proposed again');
-    await p.click('[data-tl-accept]');
+    await click('[data-tl-accept]');
     await until(() => threads().find((x) => x.id === T).status === 'resolved', 'resolved');
     await soon(`!document.querySelector('[data-tl-pin="${T}"]') && document.getElementById('tl-card').hidden`, 'unpinned, the card closed');
-    if (await p.ev(`document.getElementById('tl-panel').hidden`)) await p.click('#tl-pill');
+    if (await p.ev(`document.getElementById('tl-panel').hidden`)) await click('#tl-pill');
     await soon(`!!document.querySelector('.tl-resolved [data-tl-open="${T}"]')`, 'listed under Resolved');
     assert.ok(JSON.parse(F.owner(['log', '--type', 'observation', '--json'])).some((o) => o.kind === 'thread-resolved' && o.subject === `thread:${T}` && o.detail === 'EU only'));
     assert.equal(JSON.parse(F.owner(['questions', '--id', Q2, '--json']))[0].status, 'open', 'its question stays in the Inbox');
@@ -1223,38 +1293,35 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
 
   await t.test('a resolved thread reopens from its card', async () => {
     await p.ev(`document.querySelector('.tl-resolved').open = true`);
-    await p.click(`.tl-resolved [data-tl-open="${T}"]`);
+    await click(`.tl-resolved [data-tl-open="${T}"]`);
     await soon(`!!document.querySelector('[data-tl-reopen]')`, 'Reopen in its header');
-    await p.click('[data-tl-reopen]');
+    await click('[data-tl-reopen]');
     await until(() => threads().find((x) => x.id === T).status === 'open', 'reopened');
     await soon(`!!document.querySelector('[data-tl-pin="${T}"]')`, 'its pin back');
   });
 
   await t.test('a press on Resolve across a read still opens the form', async () => {
     await soon(`!!document.querySelector('[data-tl-resolve]')`, 'Resolve in its header');
-    // the page's redraw after the reopen, and the card placed again after it: where the button is
-    // once a read leaves it where it was, so only the redraw under the press is tested
-    await soon('!loading', 'the page drawn');
-    let at = null;
-    for (let i = 0; i < 10; i++) {
-      await p.ev('tlRefresh()');
-      const now = await p.at('[data-tl-resolve]');
-      if (at && now.x === at.x && now.y === at.y) break;
-      at = now;
-    }
-    await p.ev(`window.__rb = document.querySelector('[data-tl-resolve]'); void 0`);
-    await p.move(at.x, at.y);
-    await p.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...at, button: 'left', buttons: 1, clickCount: 1 });
+    // held still from finding the button to pressing it, so the press lands on it; a read then lands
+    // under the press (the button itself isn't redrawn by it, so this shows the press survives a read,
+    // not that a redraw of the header is held)
+    const at = await still(async () => {
+      const xy = await p.at('[data-tl-resolve]');
+      await p.ev(`window.__rb = document.querySelector('[data-tl-resolve]'); void 0`);
+      await p.move(xy.x, xy.y);
+      await p.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...xy, button: 'left', buttons: 1, clickCount: 1 });
+      return xy;
+    });
     await p.ev('tlRefresh()');
     assert.ok(await p.ev('window.__rb.isConnected'), 'the pressed button kept, not drawn again');
     await p.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...at, button: 'left', buttons: 0, clickCount: 1 });
     await soon(`!!document.getElementById('tl-outcome')`, 'the form from the pressed button');
-    await p.click('[data-tl-resolve-cancel]');
+    await click('[data-tl-resolve-cancel]');
     await soon(`!document.getElementById('tl-outcome')`, 'the form gone');
   });
 
   await t.test('a #talk/ link followed with the drawer open closes the drawer and its scrim', async () => {
-    await p.click('[data-tl-close]');
+    await click('[data-tl-close]');
     await soon(`document.getElementById('tl-card').hidden`, 'closed');
     await p.ev(`location.hash = '#goal/${F.goal}'`);
     await soon(`${shown('drawer')} && ${shown('scrim')}`, 'the drawer');
@@ -1269,26 +1336,61 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     try {
       F.sup(['thread', 'reply', T, 'While you were away.']);
       await p.ev('tlRefresh()');
-      assert.equal((await last()).text, 'While you were away.', 'read in');
+      await soon(`TL.threads.find((x) => x.id === '${T}').turns.at(-1).text === 'While you were away.'`, 'read in');
       assert.notEqual(await p.ev(`tlSeenAt('${T}')`), (await last()).at, 'not seen while hidden');
     } finally { await p.ev('delete document.visibilityState; void 0'); }
     await p.ev('tlRefresh()');
-    assert.equal(await p.ev(`tlSeenAt('${T}')`), (await last()).at, 'seen once the tab shows it');
+    const at = (await last()).at;
+    await soon(`tlSeenAt('${T}') === ${JSON.stringify(at)}`, 'seen once the tab shows it');
   });
 
   await t.test("Resolve in the card's header: a line for how it ended, the open question's warning, Cancel keeps it open", async () => {
     await soon(`!!document.querySelector('[data-tl-resolve]')`, 'Resolve in its header');
-    await p.click('[data-tl-resolve]');
+    await click('[data-tl-resolve]');
     await soon(`!!document.getElementById('tl-outcome')`, 'the form');
     assert.match(await p.ev(`document.querySelector('#tl-c-ready .tl-ready').textContent`), /1 question asked here is still open; it stays in the Inbox/);
-    await p.click('[data-tl-resolve-cancel]');
+    await click('[data-tl-resolve-cancel]');
     await soon(`!document.getElementById('tl-outcome')`, 'the form gone');
     assert.equal(threads().find((x) => x.id === T).status, 'open');
-    await p.click('[data-tl-resolve]');
+    await click('[data-tl-resolve]');
     await soon(`!!document.getElementById('tl-outcome')`, 'the form again');
     await p.ev(`document.getElementById('tl-outcome').value = 'Kept to the EU'`);
-    await p.click('[data-tl-resolve-go]');
+    await click('[data-tl-resolve-go]');
     const r = await until(() => { const x = threads().find((y) => y.id === T); return x.status === 'resolved' && x; }, 'resolved');
     assert.equal(r.outcome, 'Kept to the EU');
   });
+});
+
+test("a goal at its target: the card's Mark met is an owner action, same-origin only, and reads the check again", async (t) => {
+  const F = fleetFixture('mark-met');
+  t.after(() => F.done());
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  write(path.join(F.old, 'prod.txt'), '12\n');
+  const G = F.ok(F.old, ['goal', 'add', '--title', 'Read MCP', '--outcome', 'clients read production', '--measure', 'core resources served', '--target', '12', '--unit', 'resources', '--direction', 'up', '--source', 'prod', '--check', 'cat prod.txt', '--non-goals', 'none', '--preconditions', 'a'], SUP);
+  F.ok(F.old, ['goal', 'decide', G, 'approve', '--force']);
+  F.ok(F.old, ['goal', 'reading', G, '--run'], SUP);
+  const port = await freePort();
+  const B = `http://127.0.0.1:${port}`;
+  const d = startDashboard(F.old, F.env({}), ['--port', String(port)]);
+  t.after(() => d.stop());
+  await until(() => new RegExp(`dashboard on http://127\\.0\\.0\\.1:${port}\\b`).test(d.out()), 'the dashboard');
+  await until(async () => (await fetch(`${B}/api/data`)).ok, 'a first dashboard-data');
+  const goalNow = async () => (await (await fetch(`${B}/api/data?force=1`)).json()).ooda.goals.find((g) => g.id === G);
+  assert.equal((await goalNow()).at_target?.value, 12, 'the card is told it reached its target');
+  const post = (body, headers = {}) => fetch(`${B}/api/goal-met`, { method: 'POST', headers: { 'content-type': 'application/json', origin: B, 'sec-fetch-site': 'same-origin', ...headers }, body: JSON.stringify(body) });
+  assert.equal((await post({ id: G }, { origin: 'https://evil.example' })).status, 403, 'another origin');
+  assert.equal((await post({ id: '--force' })).status, 400, 'an id, nothing else');
+  write(path.join(F.old, 'prod.txt'), '11\n');
+  let r = await post({ id: G });
+  assert.equal(r.status, 400);
+  assert.match((await r.json()).error, /check reads 11 from production, not its target 12/, 'the check runs again');
+  write(path.join(F.old, 'prod.txt'), '12\n');
+  r = await post({ id: G });
+  assert.equal(r.status, 200, await r.clone().text());
+  const g = json(F.ok(F.old, ['goal', 'show', G]));
+  const u = g.updates.filter((x) => x.status === 'met').pop();
+  assert.deepEqual([g.status, u?.by, u?.channel], ['met', 'owner', 'dashboard'], "the owner's, from the dashboard");
+  const html = fs.readFileSync(path.join(kit, 'dashboard', 'index.html'), 'utf8');
+  assert.match(html, /g\.status === 'ready' && g\.at_target \? `<div class="holdbar"><button type="button" data-met-id=/, 'the card draws Mark met for a running goal at its target');
+  assert.match(html, /await post\('goal-met', \{ id \}, `met-\$\{id\}`\)/);
 });

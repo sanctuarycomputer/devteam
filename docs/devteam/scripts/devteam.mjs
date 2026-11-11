@@ -1546,7 +1546,7 @@ function questionView(q) {
   }
   return {
     id: q.id, kind: q.kind, class: q.class ?? null, scope: q.scope ?? null, ticket: q.ticket ?? null, re: q.re ?? null, sensor: q.sensor ?? null, thread: q.thread ?? null, asked_at: q.created_at,
-    question: q.question, context: q.context ?? '', options: q.options ?? [], choices: q.choices ?? [], links: q.links ?? [], goal: q.goal ?? null, change: q.change ?? null, rule_scope: q.rule_scope ?? null, recommendation: q.recommendation ?? '', confidence: q.confidence ?? null,
+    question: q.question, context: q.context ?? '', options: q.options ?? [], choices: q.choices ?? [], links: q.links ?? [], goal: q.goal ?? null, change: q.change ?? null, met: q.met ?? null, rule_scope: q.rule_scope ?? null, recommendation: q.recommendation ?? '', confidence: q.confidence ?? null,
     default: q.default ?? null, deadline: q.deadline ?? null, blocks: q.blocks ?? [], stake: ratingOf(q.stake), urgency: ratingOf(q.urgency), settles: Array.isArray(q.settles) ? q.settles.filter((x) => typeof x === 'string') : [], settles_if: typeof q.settles_if === 'string' ? q.settles_if : null, settles_label: [...(q.choices ?? []).map((c) => c?.label), ...(q.options ?? [])].find((l) => sameAnswer(l, q.settles_if)) ?? null, rating_history: ratingHistory(q), approves: q.approves ?? [], evidence: q.evidence ?? [], note: q.note ?? null, why_asked: q.why_asked ?? null,
     secrets: (q.secrets ?? []).map((x) => ({ ...x, to: sinkWords(x.sink), sink_type: SINK_RE.exec(x.sink ?? '')?.[1] ?? null, warning: sinkWarning(x.sink) })), secrets_posted: q.updates.filter((u) => u.secrets_posted !== undefined && writerClass(u.by) === 'owner').pop()?.secrets_posted ?? [],
     status, answer, answered_by: answeredBy, answered_at: answeredAt, matched, hash, rewritten,
@@ -4463,11 +4463,11 @@ function decisionRecords() {
     for (const u of g.updates ?? []) {
       if (writerClass(u.by) !== 'owner') continue;
       const said = [
-        u.decision ? `${u.decision.verdict}${u.decision.notes ? ` (${u.decision.notes})` : ''}` : null,
+        u.decision ? `${u.decision.verdict}${u.decision.notes ? ` (${u.decision.notes})` : ''}${u.decision.question ? ` (${u.decision.question})` : ''}` : null,
         u.status !== undefined && !u.decision ? `status ${u.status}` : null,
         u.hold !== undefined ? (u.hold ? `${u.hold.mode}${u.hold.reason ? ` (${u.hold.reason})` : ''}` : 'run') : null,
       ].filter(Boolean);
-      if (said.length) rows.push({ id: g.id, at: u.at, who: 'owner', kind: 'goal', class: u.hold !== undefined ? 'goal-hold' : 'goal-approval', scope: null, what: `${title}: ${said.join('; ')}`, refs: [g.id], under: null, acts: [], correction: null });
+      if (said.length) rows.push({ id: g.id, at: u.at, who: 'owner', kind: 'goal', class: u.hold !== undefined ? 'goal-hold' : u.decision?.verdict === 'met' ? 'goal-met' : 'goal-approval', scope: null, what: `${title}: ${said.join('; ')}`, refs: [g.id], under: null, acts: [], correction: null });
     }
   }
   for (const k of logObjects('knowledge')) {
@@ -4572,7 +4572,8 @@ function cmdAsk() { out(askLine().id); }
 // question is asked in; nothing else about the question differs.
 function askLine({ thread } = {}) {
   supervisorOnly('ask');
-  const q = flagStr('question') ?? die('ask needs --question');
+  // a goal-met question's words are the kit's (below)
+  let q = flagStr('question') ?? (flagStr('class') === 'goal-met' ? null : die('ask needs --question'));
   const kind = flagStr('kind') ?? 'owner-decision';
   if (['proposal', 'trust'].includes(kind)) upkeepAllows(`a ${kind} question`);
   const cls = flagStr('class') ?? null;
@@ -4593,14 +4594,36 @@ function askLine({ thread } = {}) {
     if (cls) die('a goal-approval question has no --class: approving a goal is never delegated');
   }
   if (kind === 'goal-definition' && cls) die('a goal-definition question has no --class: defining a goal is never delegated (reason goal-ambiguity)');
-  // goal-met: the owner's yes that an owner-read goal is met (planning.md §1). Never defaulted.
+  // goal-met: the owner's yes that a running goal is met (planning.md §1), for every source. Owner
+  // only and never defaulted. The kit writes the words and the choices, and the question carries the
+  // goal as asked (met.basis) and the reading it shows, so the owner's yes applies to that goal as it
+  // was and nothing else (answer, goalMetApply).
+  let goalMet;
   if (cls === 'goal-met') {
     const g = logGet(flagStr('goal') ?? '');
-    if (g?.type !== 'goal') die('a goal-met question needs --goal <g-id>');
-    if (measureOf(g).source !== 'owner') die(`${g.id} is read ${g.measure?.source ? `from ${g.measure.source}: goal reading ${g.id} --run` : 'by hand: give it a measure source first (a goal-change)'}; a goal-met question is for an owner-read goal`);
+    if (g?.type !== 'goal' || g.kind === 'upkeep') die('a goal-met question needs --goal <g-id>');
+    if (g.status !== 'ready') die(`${g.id} is ${g.status ?? 'draft'}; a goal-met question is for a running (ready) goal`);
+    const m = measureOf(g);
+    if (!MEASURE_SOURCES.includes(m.source)) die(`${g.id} is read by hand: give it a measure source first (a goal-change), then ask`);
+    if (m.source === 'owner' ? !m.question : !m.check) die(`${g.id} has no ${m.source === 'owner' ? 'measure.question' : 'measure.check'} to ask about (goal check)`);
+    if (m.source === 'owner' && (m.target !== 1 || m.direction !== 'up')) die(`${g.id} is owner-read, so its target is 1, up (a yes); it says ${m.target} ${m.direction}: a goal-change first`);
     if (!['owner-decision', 'one-way-door'].includes(kind)) die('a goal-met question is an owner-decision');
-    if (!flagStr('recommendation')) die('a goal-met question recommends the answer that meets it (--recommendation yes)');
+    if (flagStr('recommendation')?.trim().toLowerCase() !== 'yes') die('a goal-met question recommends yes (--recommendation yes): the owner says no when it is not met');
     if (flagStr('default') !== undefined) die('a goal-met question has no --default: only the owner says a goal is met');
+    if (flags.choices !== undefined || flags.options !== undefined) die('a goal-met question\'s choices are the kit\'s (Yes and No)');
+    if (questions().some((x) => x.class === 'goal-met' && x.goal === g.id && x.status === 'open')) die(`a goal-met question for ${g.id} is already open; withdraw it first`);
+    let reading = null;
+    if (m.source !== 'owner') {
+      const r = goalAtTarget(g);
+      const last = goalReadings(g.id).pop();
+      if (!r) die(`${g.id}'s latest reading ${last ? `is ${last.measure.value}${m.unit ? ` ${m.unit}` : ''} (${last.created_at.slice(0, 10)})` : 'is missing'}, not at its target ${m.target}${(g.milestones ?? []).length ? ' on its last milestone' : ''}: take one (goal reading ${g.id} --run), and ask once it reaches it`);
+      reading = { id: r.id, value: r.measure.value, ...(m.unit ? { unit: m.unit } : {}), at: r.created_at, ...(r.sha ? { sha: r.sha } : {}) };
+    }
+    const words = goalMetWording(g, reading);
+    if (q !== null && q.trim() !== String(words).trim()) die(`a goal-met question asks in the kit's words; leave out --question (it asks: ${words})`);
+    q = words;
+    const said = m.source === 'owner' ? goalReadings(g.id).filter((x) => x.measure.value >= 1).pop() : null;
+    goalMet = { basis: goalMetBasis(g), reading, words: reading ? goalMetReadingWords(g, reading) : `About "${g.title}".${said ? ` You said yes${said.approved ? ` to ${said.approved}` : ''} on ${said.created_at.slice(0, 10)}, but the goal was never marked met; this marks it.` : ''} If you say yes, the goal is marked met and its work stops.` };
   }
   // registry-attest: the owner's yes that the registry lists every repo, design file and doc the
   // project depends on (planning.md §7). Owner-only, like goal-met: never defaulted.
@@ -4688,6 +4711,8 @@ function askLine({ thread } = {}) {
   let context = flagStr('context');
   if (remediationPin) context = [context, `This runs ${remediationPin.name} at script blob ${remediationPin.sha}.`].filter(Boolean).join('\n\n');
   if (ownerSaid) context = [context, `The owner said: ${ownerSaid}`].filter(Boolean).join('\n\n');
+  if (goalMet) context = [context, goalMet.words].filter(Boolean).join('\n\n');
+  if (goalMet) recommendation = GOAL_MET_CHOICES[0].label;
   if (cls === 'incident-fix' && !['trust', 'proposal'].includes(kind)) {
     upkeepAllows('an incident fix');
     const incs = blocks.map((b) => logGet(b)).filter(isIncident);
@@ -4797,7 +4822,7 @@ function askLine({ thread } = {}) {
   ratingWarnings({ ...rating, blocks, def });
   return appendLog({
     type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), sensor: flagStr('sensor'), remediation: remediationPin ?? undefined, remediation_entries: remediationEntries, owner_said: ownerSaid ?? undefined, question: q, context: kind === 'goal-approval' ? [flagStr('context'), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal')))), registryAttestText(logGet(flagStr('goal')))].filter(Boolean).join('\n\n') : context,
-    rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: goalChangeFlag(cls), options: asList(flags.options), choices: jsonFlag('choices'), links, recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined,
+    rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: goalChangeFlag(cls), options: asList(flags.options), choices: goalMet ? GOAL_MET_CHOICES : jsonFlag('choices'), met: goalMet ? { basis: goalMet.basis, reading: goalMet.reading } : undefined, links, recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined,
     deadline: def ? deadlineAt ?? new Date(Date.now() + loadSettings().question_default_after_hours * 3600000).toISOString() : undefined,
     blocks, ...rating, settles: settles.length ? settles : undefined, settles_if: settles.length ? flagStr('settles-if') : undefined,
     approves: approves.length ? approves : undefined, evidence, note: flagStr('note'), secrets, review, thread,
@@ -4898,7 +4923,12 @@ function cmdAnswer() {
     autonomy = { class: v.class, rung, scope: flagStr('scope') ?? null };
   }
   const reviewFields = reviewResult ? acceptReviewResult(v, reviewResult, fromChat ? 'chat' : ownerChannel()) : decline ? { answer: `Sent back: ${answer}`, declined: true } : {};
+  // a goal-met question is answered Yes or No, so a near-yes can't pass for a no
+  if (v.class === 'goal-met' && v.met && !GOAL_MET_CHOICES.some((c) => sameAnswer(answer, c.label))) die(`${id} is answered Yes or No (a note may follow " — ")`);
+  // a goal-met yes reads a repo or prod check again first: a failed check writes nothing
+  const metPlan = v.class === 'goal-met' ? goalMetPlan(v, answer) : null;
   appendLog({ type: 'question', op: 'set', id, answer, autonomy, standing_rule: flagStr('rule'), ...reviewFields, ...(fromChat ? { channel: 'chat', said: flagStr('said').trim() } : turn ? { channel: 'thread', said: turn.said, turn: turn.turn } : {}) }, by);
+  const metNote = metPlan ? goalMetApply(v, metPlan, by, fromChat ? { channel: 'chat' } : turn ? { channel: 'thread' } : {}) : null;
   if (v.kind === 'review') fs.rmSync(reviewDraftFile(id), { force: true });
   // A standing rule applies where the owner says (--rule-scope), else where the question says its
   // rule would apply (ask --rule-scope; the dashboard shows it next to the rule field), else the
@@ -4907,8 +4937,9 @@ function cmdAnswer() {
   // The answer this question said would settle others: the supervisor withdraws each (its own act).
   const settled = sameAnswer(answer, v.settles_if) ? v.settles.filter((s) => { const x = logGet(s); return x?.type === 'question' && questionView(x).status === 'open'; }) : [];
   const settledNote = settled.length ? `it settles ${plural(settled.length, 'open question')} (${settled.join(', ')}): withdraw each with withdraw <qid> --reason "settled by the owner's answer to ${id}"` : '';
-  if (!fromChat && !turn) nudgeSupervisor(`[devteam answer ${id} from owner] read it with: devteam.mjs questions --id ${id}${settledNote ? `; ${settledNote}` : ''}`);
+  if (!fromChat && !turn) nudgeSupervisor(`[devteam answer ${id} from owner] read it with: devteam.mjs questions --id ${id}${metNote ? `; ${metNote}` : ''}${settledNote ? `; ${settledNote}` : ''}`);
   out(`${decline ? 'sent back' : 'answered'} ${id}${fromChat ? ' (from chat; listed on the dashboard for the owner to check)' : turn ? ` (from ${turn.turn}; listed on the dashboard for the owner to check)` : reviewFields.result ? `: ${reviewFields.answer} (result sha256 ${reviewFields.result.sha256.slice(0, 12)})` : ''}`);
+  if (metNote) out(metNote);
   if (settledNote && (fromChat || turn)) out(settledNote);
 }
 function cmdWithdraw() {
@@ -7654,7 +7685,79 @@ function goalMetProblem(q, goalId, qid, at = null) {
   if (v.status !== 'answered') return `${v.id} is not answered by the owner (${v.status})`;
   if (!v.matched) return `${v.id} was answered "${v.answer}", not its recommendation${v.recommendation ? ` ("${v.recommendation}")` : ''}`;
   if (at && at < v.answered_at) return `the reading was written before ${v.id} was answered`;
+  // asked of the goal as it was (planning.md §1): a yes to an earlier measure is not a yes to this one
+  if (v.met && logGet(goalId)?.status !== 'met' && v.met.basis !== goalMetBasis(logGet(goalId))) return `${v.id} was asked before ${goalId}'s title, measure or milestones changed`;
   return null;
+}
+// What a goal-met question is asked about, so the owner's yes applies only to the goal as it was
+// asked: its title, outcome, measure, preconditions (which milestones number) and milestones.
+// Status is checked when the answer comes (still ready).
+const goalMetBasis = (g) => crypto.createHash('sha256').update(canonical(Object.fromEntries(['title', 'outcome', 'measure', 'preconditions', 'milestones'].map((k) => [k, g?.[k] ?? null])))).digest('hex').slice(0, 16);
+// The answers a goal-met question offers; the kit writes them, and the owner's yes is the first.
+const GOAL_MET_CHOICES = [{ label: 'Yes', detail: 'It is met: mark the goal met, and its work stops.' }, { label: 'No', detail: 'Not yet: the goal keeps running.' }];
+// A ready goal whose latest reading that counts (goalReadings) reaches its target, with its
+// milestones all reached or only the last left (or none): the reading, else null.
+function goalAtTarget(g) {
+  if (g?.type !== 'goal' || g.status !== 'ready' || g.kind === 'upkeep') return null;
+  const m = measureOf(g);
+  if (!MEASURE_SOURCES.includes(m.source) || typeof m.target !== 'number') return null;
+  const last = goalReadings(g.id).pop();
+  const v = last?.measure?.value;
+  if (typeof v !== 'number' || !reached(g, m.target, v)) return null;
+  const ms = (g.milestones ?? []).filter((x) => typeof x?.target === 'number');
+  const left = ms.findIndex((x) => !reached(g, x.target, v));
+  return left < 0 || left === ms.length - 1 ? last : null;
+}
+// The words of a goal-met question, the kit's own: an owner goal's is its measure.question; a repo
+// or prod goal's says the reading and the target.
+function goalMetWording(g, reading) {
+  const m = measureOf(g);
+  if (m.source === 'owner') return m.question;
+  const u = m.unit ? ` ${m.unit}` : '';
+  return `Is "${g.title}" met? ${m.description ?? 'Its measure'} reads ${reading.value}${u}, and its target is ${m.target}${u}.`;
+}
+// What the owner's answer to goal-met question v does (answer): it sets the goal met only when it
+// is yes (the recommendation), the goal is still running and as it was asked (met.basis), and the
+// question is in the kit's words and choices for it, so a hand-written question can't stand in for
+// one. A repo or prod goal's check runs again here, before anything is written (runMeasureCheck
+// dies on a failed check, and the owner can answer again); the new reading decides. why says what
+// happened when it sets nothing (null for a no).
+function goalMetPlan(v, answer) {
+  if (!v.met) return { why: `${v.id} was asked before goal-met questions carried the goal they are about, so it sets nothing: the supervisor asks again, or the owner marks it met on its card` };
+  if (!sameAnswer(answer, GOAL_MET_CHOICES[0].label)) return { why: null };
+  const g = logGet(v.goal ?? '');
+  if (g?.type !== 'goal') return { why: `${v.id} is about ${v.goal ?? 'no goal'}, which is not a goal; nothing changes` };
+  if (g.status !== 'ready') return { why: `${g.id} is ${g.status ?? 'draft'}, not running; nothing changes` };
+  if (goalMetBasis(g) !== v.met.basis) return { why: `${g.id}'s title, measure or milestones changed after ${v.id} was asked, so this yes doesn't mark it met: the supervisor asks again` };
+  const m = measureOf(g);
+  const ours = String(v.recommendation).trim().toLowerCase() === 'yes' && canonical(v.choices) === canonical(GOAL_MET_CHOICES) && (m.source === 'owner' ? !v.met.reading : !!v.met.reading) && v.question === goalMetWording(g, v.met.reading);
+  if (!ours) return { why: `${v.id} is not the kit's goal-met question for ${g.id}, so it sets nothing` };
+  if (m.source === 'owner') return { g, m, r: null };
+  const r = runMeasureCheck(g);
+  // the check can take minutes: the goal and the question must still be as they were when it started
+  logCache = null;
+  const now = logGet(g.id);
+  if (now?.status !== 'ready' || goalMetBasis(now) !== v.met.basis) die(`${g.id} changed while its check ran; nothing was answered: read ${v.id} again`);
+  if (questionView(logGet(v.id)).status !== 'open') die(`${v.id} is no longer open (it changed while ${g.id}'s check ran); nothing was written`);
+  return { g: now, m: measureOf(now), r };
+}
+function goalMetApply(v, plan, by, chan) {
+  if (!plan.g) return plan.why;
+  const { g, m, r } = plan;
+  const unit = m.unit;
+  // the reading is the supervisor's, as goal reading writes it: the check's number, or the owner's yes
+  if (r) appendLog({ type: 'observation', source: m.source, subject: g.id, kind: 'reading', detail: m.source === 'repo' ? `reading ${r.value}${unit ? ` ${unit}` : ''} on ${r.on} at ${r.sha.slice(0, 12)}, read again for ${v.id}` : `reading ${r.value}${unit ? ` ${unit}` : ''} from ${m.check}, read again for ${v.id}: ${r.out.slice(-300)}`, measure: { value: r.value, unit }, ...(r.sha ? { sha: r.sha } : {}), refs: [g.id, v.id] }, 'supervisor');
+  else appendLog({ type: 'observation', source: 'owner', subject: g.id, kind: 'reading', detail: `the owner said yes to ${v.id}`, measure: { value: 1, unit }, approved: v.id, refs: [g.id, v.id] }, 'supervisor');
+  if (r && !reached(g, m.target, r.value)) return `${g.id} keeps running: its check reads ${r.value}${unit ? ` ${unit}` : ''} now${r.sha ? ` (${r.on} at ${r.sha.slice(0, 12)})` : ''}, not its target ${m.target}`;
+  appendLog({ type: 'goal', op: 'set', id: g.id, status: 'met', decision: { verdict: 'met', question: v.id }, ...chan }, by);
+  return `${g.id} is met${r ? ` (its check reads ${r.value}${unit ? ` ${unit}` : ''}${r.sha ? ` on ${r.on} at ${r.sha.slice(0, 12)}` : ''})` : ''}`;
+}
+// How a goal-met reading reads in the question's context: the value, when, and where it came from.
+function goalMetReadingWords(g, r) {
+  const m = measureOf(g);
+  const when = `${r.at.slice(0, 10)} at ${r.at.slice(11, 16)} UTC`;
+  const where = m.source === 'repo' ? `on ${m.link && m.link !== 'home' ? `${m.link}'s ` : ''}main at ${String(r.sha ?? '').slice(0, 12)}` : 'from its production check';
+  return `The latest reading is ${r.value}${m.unit ? ` ${m.unit}` : ''}, taken ${when} ${where}. If you say yes, the kit reads it again ${m.source === 'repo' ? 'on main' : 'from production'} and marks the goal met only if it still reaches ${m.target}.`;
 }
 // The registry is complete (planning.md §7), the precondition the Baseline carries: its count half
 // is components check --count, with the gates; its other half is the owner's yes to a
@@ -7730,7 +7833,7 @@ function goalReadings(gid) {
   return all.filter((o) => {
     if (src === 'repo') return o.source === 'repo' && typeof o.sha === 'string' && onMain(o.sha);
     if (src === 'prod') return o.source === 'prod';
-    if (o.created_by === 'owner') return true;
+    if (o.created_by === 'owner') { if (!o.approved) return true; if (used.has(o.approved)) return false; used.add(o.approved); return true; }
     if (!o.approved || used.has(o.approved) || o.measure.value !== 1 || goalMetProblem(logGet(o.approved), gid, o.approved, o.created_at)) return false;
     used.add(o.approved);
     return true;
@@ -7920,7 +8023,14 @@ function goalView(g) {
   const mode = goalMode(g);
   const still = ['park', 'let-go'].includes(mode);
   const forecast = goalForecast(g);
-  return { ...g, ...(g.measure ? { measure: measureOf(g) } : {}), status: g.status ?? 'draft', readings: readings.map((r) => ({ at: r.created_at, value: r.measure.value, source: r.source, ...(r.sha ? { sha: r.sha } : {}), ...(r.approved ? { approved: r.approved } : {}) })), track: still ? null : track, check: goalCheck(g), forecast: forecast && still ? { ...forecast, eta: null, past_horizon: false } : forecast, hold_view: holdView(g), registry_attest: registryAttestView(g), impact: goalImpact(g.id) };
+  return { ...g, ...(g.measure ? { measure: measureOf(g) } : {}), status: g.status ?? 'draft', readings: readings.map((r) => ({ at: r.created_at, value: r.measure.value, source: r.source, ...(r.sha ? { sha: r.sha } : {}), ...(r.approved ? { approved: r.approved } : {}) })), track: still ? null : track, check: goalCheck(g), forecast: forecast && still ? { ...forecast, eta: null, past_horizon: false } : forecast, hold_view: holdView(g), registry_attest: registryAttestView(g), impact: goalImpact(g.id), at_target: atTargetView(g) };
+}
+// A running goal at its target, as its card shows it: the reading, and the open goal-met question.
+function atTargetView(g) {
+  const r = goalAtTarget(g);
+  if (!r) return null;
+  const q = questions().find((x) => x.class === 'goal-met' && x.goal === g.id && x.status === 'open');
+  return { value: r.measure.value, at: r.created_at, source: r.source ?? null, ...(r.sha ? { sha: r.sha } : {}), question: q?.id ?? null };
 }
 function cmdGoal() {
   const [sub, id] = positional;
@@ -8063,16 +8173,19 @@ function cmdGoal() {
     const to = positional[2];
     if (!['draft', 'ready', 'met', 'abandoned'].includes(to)) die('status is draft, ready, met or abandoned');
     if (to === 'ready') die(`a goal becomes ready through its design: goal decide ${id} approve`);
-    // Met means the measure says so: a repo goal's is read now, on main; an owner goal's is the
-    // owner's yes. --force sets it anyway (the owner's call).
+    // Met means the measure says so: a repo goal's is read now, on main, and a prod goal's from
+    // production; an owner goal's is the owner's yes. --force sets it anyway (the owner's call).
     const m = measureOf(g);
-    if (to === 'met' && !flags.force && m.source === 'repo' && m.check) {
+    if (to === 'met' && !flags.force && ['repo', 'prod'].includes(m.source) && m.check) {
       const r = runMeasureCheck(g);
-      if (!reached(g, m.target, r.value)) die(`${id}'s check reads ${r.value} on ${r.on} (${r.sha.slice(0, 12)}), not its target ${m.target}; --force to set it met anyway`);
+      if (!reached(g, m.target, r.value)) die(`${id}'s check reads ${r.value}${r.sha ? ` on ${r.on} (${r.sha.slice(0, 12)})` : ' from production'}, not its target ${m.target}${ownerChannel() === 'dashboard' ? '; the goal keeps running' : '; --force to set it met anyway'}`);
     }
     if (to === 'met' && !flags.force && m.source === 'owner' && !goalReadings(id).some((x) => x.measure.value >= 1)) die(`${id} is met when the owner says so: answer its goal-met question, or record it with goal reading ${id} --value 1 --owner; --force to set it met anyway`);
-    appendLog({ type: 'goal', op: 'set', id, status: to }, by);
-    return out(`${id} is ${to}`);
+    // marking it met answers its open goal-met question (Yes), as goal decide answers an approval
+    const ask = to === 'met' ? questions().find((q) => q.class === 'goal-met' && q.goal === id && q.status === 'open') : null;
+    appendLog({ type: 'goal', op: 'set', id, status: to, ...(to === 'met' ? { decision: { verdict: 'met', ...(ask ? { question: ask.id } : {}) } } : {}) }, by);
+    if (ask) appendLog({ type: 'question', op: 'set', id: ask.id, answer: GOAL_MET_CHOICES[0].label }, by);
+    return out(`${id} is ${to}${ask ? ` (and ${ask.id} is answered Yes)` : ''}`);
   }
   if (sub === 'forecast') {
     const g = logGet(id)?.type === 'goal' ? logGet(id) : die('usage: goal forecast <g-id>');
@@ -8123,7 +8236,7 @@ function cmdGoal() {
       return out(`recorded 1 for ${id} (${approved})`);
     }
     if (['repo', 'prod'].includes(m.source)) die(`${id} is read from ${m.source}: the kit runs its check (goal reading ${id} --run), nobody types the number`);
-    if (m.source === 'owner' && by !== 'owner') die(`${id} is the owner's yes: ask a goal-met question (ask --class goal-met --goal ${id} --question "${m.question}" --recommendation yes), then goal reading ${id} --approved <qid>`);
+    if (m.source === 'owner' && by !== 'owner') die(`${id} is the owner's yes: ask a goal-met question (ask --class goal-met --goal ${id} --recommendation yes); the owner's yes records the reading and marks it met`);
     const v = flagNum('value');
     if (v === undefined || Number.isNaN(v)) die('goal reading needs --value <number>');
     appendLog({ type: 'observation', source: flagStr('source') ?? by, subject: id, kind: 'reading', detail: flagStr('detail') ?? `reading ${v}${unit ? ` ${unit}` : ''}`, measure: { value: v, unit }, refs: [id] }, by);
@@ -9023,6 +9136,18 @@ function collectMetrics(since) {
       const i = goalImpact(g.id);
       if (!i) add('medium', 'goal-unjudged', g.id, `"${g.title}" has no impact, so its questions are ordered as if it were worth having (2)`, `judge it against the strategy: goal impact ${g.id} <1-4> --rationale "…" (planning.md §1)`);
       else if (i.rejudge) add('medium', 'goal-unjudged', g.id, `the impact of "${g.title}" (${i.level}) was corrected: ${i.correction}`, `judge it again, saying what the correction changed: goal impact ${g.id} <1-4> --rationale "…"`);
+    }
+    // A running goal at its target closes only on the owner's word, so ask it in the Inbox. Medium:
+    // the tick reads it and wait doesn't loop on it. Quiet while a goal-met question about it is open,
+    // or once the owner answered one asked after this reading, until a newer reading.
+    for (const g of live) {
+      const r = goalAtTarget(g);
+      if (!r) continue;
+      // a No about this same value stands until the value moves or the goal changes
+      const basis = goalMetBasis(g);
+      if (all.some((q) => q.class === 'goal-met' && q.goal === g.id && (q.status === 'open' || (q.status === 'answered' && (q.asked_at > r.created_at || (q.met?.basis === basis && q.met?.reading?.value === r.measure.value && !sameAnswer(q.answer, GOAL_MET_CHOICES[0].label))))))) continue;
+      const m = measureOf(g);
+      add('medium', 'goal-at-target', g.id, `"${g.title}" reads ${r.measure.value}${m.unit ? ` ${m.unit}` : ''} (${r.created_at.slice(0, 10)}), its target ${m.target}, and is still running: only the owner marks it met`, `ask the owner in the Inbox, never only in chat: ask --class goal-met --goal ${g.id} --recommendation yes (the kit writes the question; planning.md §1)`);
     }
     // only once the supervisor has rated one: a project that hasn't taken up the rating sees nothing
     const firstRated = all.filter((q) => q.stake != null || q.urgency != null).map((q) => q.asked_at).sort()[0];
@@ -10806,6 +10931,8 @@ async function cmdDashboard() {
     correct: (b) => (ID.test(b.id ?? '') && text(b.reason, 600) && (b.impact === undefined || [1, 2, 3, 4].includes(b.impact)) ? ['correct', b.id, '--reason', b.reason.trim(), ...(b.impact !== undefined ? ['--impact', String(b.impact)] : [])] : null),
     'goal-hold': (b) => ((ID.test(b.id ?? '') || b.id === 'upkeep') && ['run', 'drain', 'park'].includes(b.mode) && (b.reason === undefined || b.reason === '' || text(b.reason, 300)) ? ['goal', 'hold', b.id, b.mode, '--owner', ...(b.reason ? ['--reason', b.reason.trim()] : [])] : null),
     fleet: (b) => (['drain', 'park', 'undrain', 'unpark', 'resume'].includes(b.op) && (b.reason === undefined || b.reason === '' || text(b.reason, 300)) ? ['fleet', b.op, '--owner', ...(b.reason && ['drain', 'park'].includes(b.op) ? ['--reason', b.reason.trim()] : [])] : null),
+    // the card's Mark met: goal status met, which reads a repo or prod check again first
+    'goal-met': (b) => (ID.test(b.id ?? '') ? ['goal', 'status', b.id, 'met'] : null),
     'goal-decide': (b) => (ID.test(b.id ?? '') && ['approve', 'refine', 'let-go', 'restore'].includes(b.verdict) && (b.notes === undefined || text(b.notes, 4000)) ? ['goal', 'decide', b.id, b.verdict, ...(b.notes ? ['--notes', b.notes.trim()] : [])] : null),
     knowledge: (b) => (ID.test(b.id ?? '') && ['accepted', 'retired', 'stale'].includes(b.status) && (b.note === undefined || b.note === '' || (text(b.note, 600) && !/[\r\n]/.test(b.note))) ? ['knowledge', 'set', b.id, '--status', b.status, ...(b.note?.trim() ? ['--note', b.note.trim()] : []), '--owner'] : null),
     ack: (b) => (/^[a-z][a-z-]*$/.test(b.kind ?? '') && text(b.subject, 200) && text(b.reason, 600) ? ['ack', b.kind, b.subject, '--reason', b.reason.trim(), '--owner'] : null),
@@ -14719,7 +14846,7 @@ Decide and act (supervisor.md, constitution.md)
   preview url [<name>]            the link, as the owner will open it
   preview stop <name> | --all     unregister (--all: your own; a name is any session's, there is no ownership check); stops the server if the kit started it
   preview start <name>            run a kit-started preview again, on its name and port
-  ask --question q [--kind k] [--class c] [--reasons r…] [--recommendation r] [--confidence 0-1] [--default d [--deadline 15m|2h|<time> (incident-fix)]] [--choices '[{"label","detail","effect"}…]'] [--rule-scope s] [--goal g-… (goal-approval)] [--links '[{"title","path","ref"}|{"title","url"}|{"title","link"}…]' (link: a registry id)] [--blocks ids] [--evidence ids] [--ticket id] [--re m-…] [--note path] [--secrets '[{"name","kind":"string|file","sink"}…]' (owner-action)]
+  ask --question q [--kind k] [--class c] [--reasons r…] [--recommendation r] [--confidence 0-1] [--default d [--deadline 15m|2h|<time> (incident-fix)]] [--choices '[{"label","detail","effect"}…]'] [--rule-scope s] [--goal g-… (goal-approval, goal-met: the kit writes a goal-met question)] [--links '[{"title","path","ref"}|{"title","url"}|{"title","link"}…]' (link: a registry id)] [--blocks ids] [--evidence ids] [--ticket id] [--re m-…] [--note path] [--secrets '[{"name","kind":"string|file","sink"}…]' (owner-action)]
   secret post <qid> [--file NAME=path] [--json]                          owner: post a question's secrets straight to their sinks; never logged (secret sinks lists them)
   ask --kind review --page <repo path> --ref <branch|sha> [--data <repo path>] [--result-schema <repo path>] [--allow-partial] --question q [--context c] [--class c] [--reasons r…] [--ticket id] [--blocks ids] [--re m-…]
                                   supervisor: an agent-drawn page for rows the owner decides; pins page, data and result schema to a commit and their sha256s
