@@ -2524,7 +2524,8 @@ test('/.devteam/lens on a preview\'s name: the gateway\'s own page, for the owne
 });
 
 test('public.<box>: the signed-in owner\'s own visit gets the viewer at the published version; anyone else, and any doubt, the plain bytes', async () => {
-  const gw = await gateway('public-wrap', { wrapperHelloMs: 400 });
+  const helloMs = 400;
+  const gw = await gateway('public-wrap', { wrapperHelloMs: helloMs });
   const K = fakeKit(P + 20);
   await K.up();
   const page = '<!doctype html><p>hi';
@@ -2582,6 +2583,10 @@ test('public.<box>: the signed-in owner\'s own visit gets the viewer at the publ
     r = await get('/alpha/hello/app.js');
     assert.deepEqual([r.body, r.headers.vary, r.headers['cross-origin-opener-policy']], ['x()', undefined, undefined], 'a file is never wrapped, and its headers are as they were');
     assert.equal((await get('/alpha/nope/')).status, 404, 'nothing published there: still 404');
+    // a revalidation by the signed-in owner, the instance answering: the wrapper wins, never a 304 of the plain bytes
+    const etag = `"${crypto.createHash('sha256').update(page).digest('hex')}"`;
+    r = await get('/alpha/hello/', { ...NAV, 'if-none-match': etag });
+    assert.deepEqual([r.status, r.headers['cache-control'], r.body.includes('<iframe')], [200, 'no-store, private', true], 'If-None-Match: the wrapper');
     // the instance decides whether threads can be had: a kit with viewers, at the bound checkout, now
     K.hello = { devteam: 1, name: 'alpha', root: '/srv/alpha', port: P + 20 };
     plain(await get('/alpha/hello/'), 'a kit without viewers');
@@ -2602,11 +2607,11 @@ test('public.<box>: the signed-in owner\'s own visit gets the viewer at the publ
     K.hello = 'slow';
     const t0 = Date.now();
     plain(await get('/alpha/hello/'), 'a hello that never comes');
-    assert.ok(Date.now() - t0 < 2000, `a slow instance costs at most its deadline (${Date.now() - t0} ms)`);
+    assert.ok(Date.now() - t0 < helloMs + 1500, `a slow instance costs at most its deadline (${Date.now() - t0} ms)`);
     await K.close();
     plain(await get('/alpha/hello/'), 'nothing on the port');
-    // a revalidation by the signed-in owner: still the plain path here, and it varies on the cookie
-    r = await get('/alpha/hello/', { ...NAV, 'if-none-match': `"${crypto.createHash('sha256').update(page).digest('hex')}"` });
+    // the same revalidation now the instance is closed (above): the plain path, so a 304, and it varies on the cookie
+    r = await get('/alpha/hello/', { ...NAV, 'if-none-match': etag });
     assert.deepEqual([r.status, r.headers.vary, r.headers['cross-origin-opener-policy']], [304, 'cookie, sec-fetch-dest', 'same-origin'], 'a 304 for the document has the index\'s headers too');
     seedPublic(gw.dir, 'beta', 'x', { 'index.html': page }, { root: '/srv/alpha', port: 1 });
     plain(await get('/beta/x/'), 'a binding outside the block');
