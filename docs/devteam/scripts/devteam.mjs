@@ -5814,6 +5814,16 @@ function artifactSource(at, slug) {
   if (!fs.existsSync(path.join(dir, 'artifact.json')) && !fs.existsSync(path.join(dir, 'index.html'))) return null;
   return { entries: diskEntries(dir), dir };
 }
+// Is this id an artifact folder's tree? A commit's id, or the root tree's, would let <id>:<path> name
+// any committed file, so it must be a tree with an artifact.json at its top (decision 12; its slug
+// can't be checked: a folder's tree doesn't know its name, and artifact.json doesn't say it).
+// Remembered once true: a tree id never changes.
+const artifactTrees = new Set();
+const artifactTreeOk = (id) => (artifactTrees.has(id) ? Promise.resolve(true) : new Promise((resolve) => execFile('git', ['cat-file', '-t', id], { cwd: mainRoot, encoding: 'utf8' }, (e1, type) => {
+  if (e1 || type.trim() !== 'tree') return resolve(false);
+  return execFile('git', ['cat-file', '-e', `${id}:artifact.json`], { cwd: mainRoot }, (e2) => { if (!e2) artifactTrees.add(id); resolve(!e2); });
+})));
+const artifactTreeOkSync = (id) => artifactTrees.has(id) || (git(['cat-file', '-t', id], mainRoot) === 'tree' && git(['cat-file', '-e', `${id}:artifact.json`], mainRoot) !== null && !!artifactTrees.add(id));
 // A broken manifest is listed by its slug and error, never its unvalidated title.
 function describeArtifact(slug, at, src) {
   const p = artifactProblems(slug, src.entries);
@@ -11084,8 +11094,9 @@ async function cmdDashboard() {
       const r = await run(['review', 'show', id, '--json', '--contents']);
       return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 404, 'application/json', JSON.stringify({ error: r.stderr.trim().replace(/^devteam: /, '') }));
     }
-    // An artifact's files: landed from main's tree, a draft off its worktree's disk. Matched on the
-    // raw path, before URL parsing folds ../ and %2e%2e into something that looks fine. Any
+    // An artifact's files: landed from main's tree, a published version from its tree by id (what the
+    // gateway's owner wrapper frames, spec §8), a draft off its worktree's disk. Matched on the raw
+    // path, before URL parsing folds ../ and %2e%2e into something that looks fine. Any
     // sec-fetch-site: under its sandbox the page is an opaque origin, so its own loads say cross-site.
     const rawPath = req.url.split('?')[0];
     // What publishing an artifact would put up, for the cloud gateway's confirm page. Its loopback
@@ -11099,28 +11110,36 @@ async function cmdDashboard() {
       return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, r.code === 2 ? 409 : 404, 'application/json', JSON.stringify({ error: r.stderr.trim().replace(/^devteam: /, '') }));
     }
     if (req.method === 'GET' && rawPath.startsWith('/artifact/')) {
-      const am = /^\/artifact\/(?:main|wt\/([^/]+))\/([^/]+)(\/.*)?$/.exec(rawPath);
-      const at = am ? am[1] ?? 'main' : null;
-      if (!am || (at !== 'main' && !draftWorktree(at)) || !LINK_ID.test(am[2])) return send(res, 404, 'text/plain', 'not found');
-      if (am[3] === undefined) { res.writeHead(301, { location: `${rawPath}/`, 'cache-control': 'no-store' }); return res.end(); }
-      const rel = am[3] === '/' ? 'index.html' : am[3].slice(1);
+      const am = /^\/artifact\/(?:main|wt\/([^/]+)|tree\/([0-9a-f]{40}(?:[0-9a-f]{24})?))\/([^/]+)(\/.*)?$/.exec(rawPath);
+      const at = am ? (am[2] ? `tree:${am[2]}` : am[1] ?? 'main') : null;
+      if (!am || (at !== 'main' && !am[2] && !draftWorktree(at)) || !LINK_ID.test(am[3])) return send(res, 404, 'text/plain', 'not found');
+      if (am[4] === undefined) { res.writeHead(301, { location: `${rawPath}/`, 'cache-control': 'no-store' }); return res.end(); }
+      const rel = am[4] === '/' ? 'index.html' : am[4].slice(1);
       if (!artifactPathOk(rel)) return send(res, 404, 'text/plain', 'not found');
+      const blobAt = (spec) => new Promise((resolve) => execFile('git', ['cat-file', 'blob', spec], { cwd: mainRoot, encoding: 'buffer', maxBuffer: 16 * 1024 * 1024 }, (err, so) => resolve(err ? null : so)));
       let bytes = null;
       if (at === 'main') {
         const ref = mainRef();
-        if (ref) bytes = await new Promise((resolve) => execFile('git', ['cat-file', 'blob', `${ref}:${ARTIFACTS_REL}/${am[2]}/${rel}`], { cwd: mainRoot, encoding: 'buffer', maxBuffer: 16 * 1024 * 1024 }, (err, so) => resolve(err ? null : so)));
+        if (ref) bytes = await blobAt(`${ref}:${ARTIFACTS_REL}/${am[3]}/${rel}`);
+      } else if (am[2]) {
+        // an artifact folder's tree by its id, and nothing else (decision 12): <id>:<path> resolves
+        // against a commit or the root tree as well, which would serve any committed file. A tree
+        // never changes: what was published is what is shown.
+        if (await artifactTreeOk(am[2])) bytes = await blobAt(`${am[2]}:${rel}`);
       } else {
         // the real path stays inside the artifact's folder: a symlink out of it is not found
         try {
           const root = draftWorktree(at);
-          const dir = path.join(root, ARTIFACTS_REL, am[2]);
-          const real = draftDirOk(root, am[2]) ? fs.realpathSync(path.join(dir, rel)) : null;
+          const dir = path.join(root, ARTIFACTS_REL, am[3]);
+          const real = draftDirOk(root, am[3]) ? fs.realpathSync(path.join(dir, rel)) : null;
           if (real && real.startsWith(dir + path.sep) && fs.statSync(real).isFile()) bytes = fs.readFileSync(real);
         } catch {}
       }
       if (!bytes) return send(res, 404, 'text/plain', 'not found');
       const base = `http://${req.headers.host}`;
-      res.writeHead(200, { 'content-type': ARTIFACT_TYPES[rel.split('.').pop().toLowerCase()] ?? 'application/octet-stream', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': artifactCsp(base, `${base}${rawPath.slice(0, rawPath.length - am[3].length)}/`) });
+      // frame-ancestors by policy alone, never X-Frame-Options: on a box the gateway adds the public
+      // name to this list for a published tree, and an X-Frame-Options would still refuse it
+      res.writeHead(200, { 'content-type': ARTIFACT_TYPES[rel.split('.').pop().toLowerCase()] ?? 'application/octet-stream', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': artifactCsp(base, `${base}${rawPath.slice(0, rawPath.length - am[4].length)}/`) });
       return res.end(bytes);
     }
     // A review page: the agent's bytes, verbatim, only into the dashboard's own sandboxed frame,

@@ -344,6 +344,21 @@ const POLL_FAST = `(() => {
   };
 })()`;
 
+// An artifact landed on main in a threads fixture, as a merged PR puts it there: its tree id.
+function landArtifact(F, slug, files) {
+  const dir = path.join(F.old, 'docs/devteam/project/artifacts', slug);
+  for (const [rel, text] of Object.entries(files)) write(path.join(dir, rel), text);
+  F.g(['add', '-A', dir], F.old);
+  F.g(['commit', '-qm', `artifact: ${slug}`], F.old);
+  F.g(['push', '-q', 'origin', 'main'], F.old);
+  return F.g(['rev-parse', `HEAD:docs/devteam/project/artifacts/${slug}`], F.old);
+}
+const VIEWER_MOCK = {
+  'artifact.json': JSON.stringify({ v: 1, title: 'Viewer mock', summary: 'A page to point at', by: 'supervisor', for: [] }),
+  'index.html': '<!doctype html><html><head><link rel="stylesheet" href="style.css"></head><body><p id="art">the mock</p></body></html>',
+  'style.css': '#art { color: rgb(1, 2, 3) }',
+};
+
 test('typing in the dashboard: a refresh never takes the field, the caret or the scroll, and holding it can\'t wedge', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-focus-'));
   // in t.after, each as it starts: they run on a failure and a timeout, where a finally may never be reached
@@ -708,6 +723,42 @@ test('/api/threads asks tmux nothing on a read: a tmux that logs every call sees
   assert.deepEqual(own().slice(before), [], 'not one tmux call from the dashboard\'s own process across 30 reads');
   // the hello child is what asks, in a process of its own
   await until(() => fs.existsSync(calls) && fs.readFileSync(calls, 'utf8').split('\n').some((l) => l && !l.startsWith(`${d.p.pid} `)), 'the hello child asking');
+});
+
+test('an artifact at a published tree: served from git by its tree id, under the artifact policy, with frame-ancestors and no X-Frame-Options', async (t) => {
+  const F = threadsFixture('artifact-tree');
+  t.after(() => F.done());
+  const T = landArtifact(F, 'viewer-mock', VIEWER_MOCK);
+  const port = await freePort();
+  const B = `http://127.0.0.1:${port}`;
+  const d = startDashboard(F.old, F.env({}), ['--port', String(port)]);
+  t.after(() => d.stop());
+  await until(() => new RegExp(`dashboard on http://127\\.0\\.0\\.1:${port}\\b`).test(d.out()), 'the dashboard');
+  const dir = `/artifact/tree/${T}/viewer-mock/`;
+  let r = await fetch(`${B}${dir}`);
+  assert.equal(r.status, 200);
+  assert.equal(await r.text(), VIEWER_MOCK['index.html']);
+  const csp = r.headers.get('content-security-policy');
+  assert.ok(csp.includes(`script-src 'unsafe-inline' 'unsafe-eval' ${B}${dir} `), 'its own folder is self');
+  assert.match(csp, new RegExp(`frame-ancestors ${B} http://127\\.0\\.0\\.1:${PORTS};`), 'framed by this dashboard and the hub: the gateway adds the public name to this list');
+  assert.match(csp, /sandbox allow-scripts/);
+  assert.equal(r.headers.get('x-frame-options'), null, 'none: the gateway only extends frame-ancestors');
+  r = await fetch(`${B}${dir}style.css`);
+  assert.deepEqual([r.status, r.headers.get('content-type'), await r.text()], [200, 'text/css; charset=utf-8', VIEWER_MOCK['style.css']]);
+  r = await fetch(`${B}/artifact/tree/${T}/viewer-mock`, { redirect: 'manual' });
+  assert.deepEqual([r.status, r.headers.get('location')], [301, `/artifact/tree/${T}/viewer-mock/`]);
+  // a commit, the repository's root tree, a folder that is no artifact's: <id>:<path> would name
+  // any committed file through them, so none is an artifact's tree (decision 12)
+  const commit = F.g(['rev-parse', 'HEAD'], F.old);
+  const root = F.g(['rev-parse', 'HEAD^{tree}'], F.old);
+  const project = F.g(['rev-parse', 'HEAD:docs/devteam/project'], F.old);
+  for (const bad of [`/artifact/tree/${commit}/viewer-mock/docs/devteam/project/settings.md`, `/artifact/tree/${root}/viewer-mock/docs/devteam/project/settings.md`, `/artifact/tree/${project}/viewer-mock/settings.md`, `/artifact/tree/${commit}/viewer-mock/`]) assert.equal((await fetch(`${B}${bad}`)).status, 404, bad);
+  // a tree the repository doesn't have, a short id, a path out of it: none is served
+  for (const bad of [`/artifact/tree/${'0'.repeat(40)}/viewer-mock/`, `/artifact/tree/${T.slice(0, 12)}/viewer-mock/`, `${dir}nope.css`, `${dir}%2e%2e/artifact.json`, `${dir}../index.html`, `/artifact/tree/${T}/Bad_Slug/`]) assert.equal((await fetch(`${B}${bad}`)).status, 404, bad);
+  // and as a raw request sends it, before any client folds ../ away: out of the tree, up to the repo's root
+  const raw = (p) => new Promise((resolve, reject) => http.get({ host: '127.0.0.1', port, path: p }, (res) => { res.resume(); resolve(res.statusCode); }).on('error', reject));
+  for (const bad of [`${dir}../viewer-mock/index.html`, `${dir}../../../../docs/devteam/project/settings.md`, `${dir}x/../index.html`, `${dir}./index.html`, `${dir}%2e%2e/%2e%2e/settings.md`, `${dir}..%2fartifact.json`, `${dir}.hidden`, `${dir}a//b.css`, `/artifact/tree/${T}/../${T}/viewer-mock/`, `/artifact/tree/${T}%2f..%2f/viewer-mock/`, `/artifact/tree/${T.toUpperCase()}/viewer-mock/`, `/artifact/tree/${T}0/viewer-mock/`]) assert.equal(await raw(bad), 404, bad);
+  assert.equal(await raw(`${dir}index.html`), 200, 'while the page itself, asked the same way, is served');
 });
 
 test('every item the dashboard draws says what it is; a question asked in a thread links to it; an answer from a thread says so', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
