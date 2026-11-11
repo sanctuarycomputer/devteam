@@ -10227,13 +10227,6 @@ function paneState(pane, cmd = (sh('tmux', ['list-panes', '-a', '-F', '#{pane_id
   if (plainText(dim === -1 ? text : text.slice(0, dim)).trim()) return 'typing';
   return busy ? 'busy' : 'ready';
 }
-// Cut to n bytes of UTF-8, never half a character.
-function capBytes(s, n) {
-  let used = 0;
-  let outText = '';
-  for (const ch of s) { used += Buffer.byteLength(ch); if (used > n) break; outText += ch; }
-  return outText;
-}
 const machineUsage = 'usage: machine status [--questions] [--in <dir>…] [--notes <file>] | machine tell <repo> <message> | machine alert <text> | machine alert --clear | machine pane-state <pane>';
 // tell and alert speak on the machine: the operator's, or the owner's at a terminal; never a session
 // in a fleet, which would be speaking as someone else.
