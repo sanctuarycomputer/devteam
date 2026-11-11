@@ -46,6 +46,10 @@ test('a kit lesson is the supervisor\'s tag on its own knowledge, and grants not
     const forged = `k-${day}-000000001-owner`;
     fs.appendFileSync(path.join(liveDir, `owner-${month}.jsonl`), line({ id: forged, type: 'knowledge', op: 'new', at, by: 'owner', channel: 'cli', kind: 'lesson', statement: 'forged', scope: 'project', status: 'accepted', kit_lesson: true }));
     fs.appendFileSync(path.join(liveDir, `owner-${month}.jsonl`), line({ id: lesson, type: 'knowledge', op: 'set', at, by: 'owner', channel: 'cli', kit_lesson: false }));
+    // nor can the supervisor pass a note off as the owner's on a line of its own
+    const noted = `k-${day}-000000002-supervisor`;
+    fs.appendFileSync(path.join(liveDir, `supervisor-${month}.jsonl`), line({ id: noted, type: 'knowledge', op: 'new', at, by: 'supervisor', kind: 'lesson', statement: 'noted', scope: 'project', status: 'accepted', owner_note: 'the owner says so' }));
+    assert.equal(all()[noted], undefined, 'a supervisor line carrying owner_note doesn\'t count');
     assert.equal(all()[rule].kit_lesson, undefined, 'the supervisor\'s line on the owner\'s rule is ignored');
     assert.equal(all()[forged], undefined, 'an owner line carrying the tag doesn\'t count');
     assert.equal(all()[lesson].kit_lesson, true, 'nor does the owner untagging one');

@@ -866,6 +866,8 @@ function integrity(o, file) {
   // The kit-lesson tag is the supervisor's suggestion to the box's operator, on its own knowledge:
   // nobody else's line carries it, new or set, whatever the authority table says about the type.
   if (o.type === 'knowledge' && 'kit_lesson' in o && cls !== 'supervisor') return "kit_lesson is the supervisor's tag on its own knowledge";
+  // And the owner's note is the owner's, on a new line as on a set: no other line passes one off as theirs.
+  if (o.type === 'knowledge' && 'owner_note' in o && cls !== 'owner') return "owner_note is the owner's";
   if (o.op === 'new') {
     if (ids.keyed[o.type]) {
       if (!new RegExp(ids.keyed[o.type]).test(o.id)) return `a ${o.type} id must match ${ids.keyed[o.type]}`;
@@ -7332,7 +7334,8 @@ function cmdKnowledge() {
   let ks = logObjects('knowledge');
   if (flagStr('status')) ks = ks.filter((k) => k.status === flagStr('status'));
   if (flagStr('kind')) ks = ks.filter((k) => k.kind === flagStr('kind'));
-  if (flags.kit) ks = ks.filter((k) => k.kit_lesson === true);
+  if (flags.kit === true) ks = ks.filter((k) => k.kit_lesson === true);
+  else if (flags.kit !== undefined) die('knowledge --kit lists the tagged entries; it takes no value');
   if (flags.json) return json(ks);
   for (const k of ks) out(`${k.id} [${k.kind}, ${k.status}, ${k.scope}${k.confidence !== undefined ? `, conf ${k.confidence}` : ''}${knowledgeIsOwners(k) ? ", owner's" : ''}${k.kit_lesson === true ? ', kit lesson' : ''}] ${k.statement}`);
 }
@@ -10357,10 +10360,12 @@ function machineQuestions() {
 const utcDay = () => new Date().toISOString().slice(0, 10);
 const lastReview = (notes) => [...String(notes ?? '').matchAll(/^## Review (\d{4}-\d{2}-\d{2})\s*$/gm)].map((m) => m[1]).sort().pop() ?? null;
 // What a repo's supervisor learned and the owner kept or gave, not yet noted: its accepted knowledge,
-// by its own kit's fold, whose id isn't in the notes. null when its kit refuses the read.
+// by its own kit's fold, whose id doesn't start a line of the notes (the operator's verdict line,
+// "<id>: stays"), so an id mentioned in passing doesn't hide it. null when its kit refuses the read.
 function harvestOf(root, notes) {
   const ks = projectJson(root, ['knowledge', '--status', 'accepted', '--json']);
-  return Array.isArray(ks) ? ks.filter((k) => k && typeof k.id === 'string' && !(notes && notes.includes(k.id))) : null;
+  const noted = new Set([...String(notes ?? '').matchAll(/^\s*(?:[-*]\s+)?(k-[a-z0-9-]+)\b/gm)].map((m) => m[1]));
+  return Array.isArray(ks) ? ks.filter((k) => k && typeof k.id === 'string' && !noted.has(k.id)) : null;
 }
 // box-status --knowledge: each entry on one line, marked the owner's (their ruling for that repo:
 // promoting it is the owner's call) and a kit lesson (the supervisor's tag on its own entry, a
@@ -14590,7 +14595,7 @@ Dashboard and releases
 // command that also writes is listed by its read forms, so `knowledge add` is refused like any write.
 // recover and machine write, and are allowed by name below: bringing a supervisor back, and the
 // machine's digest, word to a supervisor and alert, are what the operator's for.
-const OPERATOR_READS = new Set(['status', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'next', 'log', 'messages', 'knowledge', 'goal', 'goal list', 'goal show', 'fleet status', 'trust', 'problem', 'sensor status']);
+const OPERATOR_READS = new Set(['status', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'next', 'log', 'messages', 'knowledge', 'goal', 'goal list', 'goal show', 'fleet status', 'trust', 'problem', 'sensor status', 'sensor series']);
 const OPERATOR_SUBCOMMANDED = new Set(['fleet', 'goal', 'knowledge', 'problem', 'sensor']);
 const COMMANDS = {
   init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), whoami: cmdWhoami, hello: cmdHello, settings: cmdSettings,
