@@ -4669,7 +4669,7 @@ function askLikeWarnings({ text, cls, kind }) {
     if (cls && writerClass(k.created_by) === 'owner' && k.scope === `class:${cls}`) warn(`a standing rule may settle this: ${k.id} ${line(k.statement)}. If it does, withdraw this question and cite it (--approved ${k.id})`);
     else warn(`an accepted rule may bear on this: ${k.id} ${line(k.statement)}. It approves nothing here; use it in your recommendation`);
   }
-  for (const c of close.filter((x) => x.d.q).slice(0, 3)) warn(`the owner answered a similar question before; read it for your recommendation. It approves nothing here: ${c.d.q.id} ${line(c.d.q.question)} (answer: ${line(c.d.q.answer)})`);
+  for (const c of close.filter((x) => x.d.q).slice(0, 3)) warn(`the owner answered a similar question before: ${c.d.q.id} ${line(c.d.q.question)} (answer: ${line(c.d.q.answer)}). If it was this very call and that answer is unused, withdraw this and cite it (--approved ${c.d.q.id}); otherwise it approves nothing here, so use it in your recommendation`);
 }
 function askLine({ thread } = {}) {
   supervisorOnly('ask');
@@ -7694,11 +7694,12 @@ function searchRank(ix, q, { limit = 10 } = {}) {
   const hits = [];
   for (const [i, m] of matched) {
     const d = ix.docs[i];
-    hits.push({ doc: d, score: score[i] * (d.prior ?? 1), matched: m, phrase: false });
+    hits.push({ doc: d, score: score[i] * (d.prior ?? 1), matched: m, phrase: false, own: (d.terms ?? []).some((t) => terms.has(t)) });
   }
-  hits.sort((a, b) => (b.score - a.score) || String(b.doc.date ?? '').localeCompare(String(a.doc.date ?? '')));
+  // a search for an id finds that object first, above everything that mentions it
+  hits.sort((a, b) => (b.own - a.own) || (b.score - a.score) || String(b.doc.date ?? '').localeCompare(String(a.doc.date ?? '')));
   // phrases are checked on the best few hundred only: a phrase's words are in the documents that score
-  if (phrases.length) { const top = hits.slice(0, Math.max(limit * 20, 200)); for (const h of top) h.phrase = phrases.every((p) => hasPhrase(h.doc, p)); top.sort((a, b) => (b.phrase - a.phrase) || (b.score - a.score) || String(b.doc.date ?? '').localeCompare(String(a.doc.date ?? ''))); return top.slice(0, limit); }
+  if (phrases.length) { const top = hits.slice(0, Math.max(limit * 20, 200)); for (const h of top) h.phrase = phrases.every((p) => hasPhrase(h.doc, p)); top.sort((a, b) => (b.own - a.own) || (b.phrase - a.phrase) || (b.score - a.score) || String(b.doc.date ?? '').localeCompare(String(a.doc.date ?? ''))); return top.slice(0, limit); }
   return hits.slice(0, limit);
 }
 // How alike a text and an indexed document are, on any corpus: the document's score for the text
@@ -7778,7 +7779,7 @@ function mdSections(text) {
 function searchFileDocs() {
   const main = projectInRepo ? mainSha() : null;
   if (!main) return [];
-  const listAt = (sha, dirs) => (git(['ls-tree', '-r', '-z', sha, '--', ...dirs.map((d) => `${projectRel}/${d}`)]) ?? '').split('\0').filter(Boolean).map((l) => { const tab = l.indexOf('\t'); const [, type, oid] = l.slice(0, tab).split(' '); return { type, oid, p: l.slice(tab + 1).slice(projectRel.length + 1) }; }).filter((e) => e.type === 'blob' && SEARCH_FILES.test(e.p));
+  const listAt = (sha, dirs) => (git(['ls-tree', '-r', '-z', sha, '--', ...dirs.map((d) => `${projectRel}/${d}`)]) ?? '').split('\0').filter(Boolean).map((l) => { const tab = l.indexOf('\t'); const [, type, oid] = l.slice(0, tab).split(' '); return { type, oid, p: l.slice(tab + 1).slice(projectRel.length + 1) }; }).filter((e) => e.type === 'blob' && SEARCH_FILES.test(e.p) && !UNSAFE_TEXT.test(e.p) && e.p.length <= 300);
   const mainFiles = listAt(main, ['']);
   const mainOid = new Map(mainFiles.map((e) => [e.p, e.oid]));
   const reads = mainFiles.map((e) => ({ ...e, sha: main, ref: 'main' }));
@@ -7799,6 +7800,7 @@ function searchFileDocs() {
   if (!got) return [];
   // dates from the fold: a ticket's merge, else its last phase; a retro's name; a design's feature
   const designed = new Map();
+  for (const g of readLog().byType.get('goal') ?? []) designed.set(`designs/${slug(g.title ?? g.id)}.md`, g.created_at);
   for (const f of readLog().byType.get('feature') ?? []) if (typeof f.design === 'string') designed.set(f.design.replace(/^.*?designs\//, 'designs/'), f.created_at);
   const dateOf = (p) => {
     const t = /^tickets\/([^/]+)\//.exec(p)?.[1];

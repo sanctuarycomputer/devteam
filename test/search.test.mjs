@@ -92,8 +92,10 @@ test('search on a project: what it reads, what it never shows, and how it prints
     assert.equal(esc.split('\n').filter((l) => /^Search results/.test(l)).length, 1);
     assert.ok(!J('not one either').results.some((r) => /#not one either/.test(r.id)), 'a longer fence holds a shorter one');
     // a log id in text is found by its id, and printed whole
-    const idHit = ok(old, ['search', q]);
-    assert.ok(idHit.includes(q), idHit);
+    ok(old, ['act', '--class', 'note', '--refs', q, '--', `asked ${q} again`], SUP);
+    ok(old, ['act', '--class', 'note', '--refs', q, '--', `${q} still open`], SUP);
+    assert.equal(J(q).results[0].id, q, 'its own object first, above the acts that name it');
+    assert.ok(ok(old, ['search', q]).includes(q), 'printed whole');
     const lesson = J('build uses make').results[0];
     assert.equal(lesson.proposed_by, 'supervisor', 'a lesson not kept says who proposed it');
     const text = ok(old, ['search', 'build uses make']);
@@ -151,7 +153,7 @@ test("ask: rules and earlier answers that look like the question, as warnings th
     assert.equal(near.status, 0, near.err);
     assert.match(near.out.trim(), /^q-\S+$/, 'stdout is still the id alone');
     assert.match(near.err, /a standing rule may settle this: k-\S+ "Always adopt/, near.err);
-    assert.match(near.err, new RegExp(`answered a similar question before; read it for your recommendation\\. It approves nothing here: ${q1}`));
+    assert.match(near.err, new RegExp(`answered a similar question before: ${q1} .*otherwise it approves nothing here`));
     const far = run(old, ['ask', '--question', 'Which colour should the login button be?'], SUP);
     assert.doesNotMatch(far.err, /standing rule|answered a similar|may bear/, far.err);
     const other = run(old, ['ask', '--question', 'Adopt the new devteam releases without asking each time?', '--class', 'design'], SUP);
