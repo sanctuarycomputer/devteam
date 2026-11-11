@@ -105,7 +105,7 @@ test('every path init writes is in the devteam line or one of the project files 
     const named = /`init` writes into these files outside `docs\/devteam\/`, and they stay the project's:([^\n]*)/.exec(readme);
     assert.ok(named, 'the README names the project files init writes into');
     for (const p of outside) assert.ok(named[1].includes(`\`${p}\``), `${p}: init writes it outside the devteam line, so the README names it as the project's`);
-    assert.deepEqual(outside, ['.gitignore', 'AGENTS.md', 'CLAUDE.md']);
+    assert.deepEqual(outside, ['.gitignore', '.gitleaks.toml', 'AGENTS.md', 'CLAUDE.md']);
     // and the README's example lines never claim one of them as a component's own kind of file
     assert.doesNotMatch(readme.match(/"ops": \{[^\n]*/)?.[0] ?? '', /AGENTS\.md|devteam\.yml/);
   } finally { fs.rmSync(base, { recursive: true, force: true }); }

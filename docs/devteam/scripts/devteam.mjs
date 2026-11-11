@@ -97,15 +97,30 @@ const flagNum = (k) => (flagStr(k) === undefined ? undefined : Number(flagStr(k)
 
 function die(msg, code = 1) {
   process.stderr.write(`devteam: ${msg}\n`);
+  // a line already logged is still announced: a partly posted set of secrets dies after its nudge
+  deliverNudges();
   process.exit(code);
 }
 const warn = (msg) => process.stderr.write(`devteam: warning: ${msg}\n`);
 const out = (s) => process.stdout.write(`${s}\n`);
+// An owner action the dashboard runs replies on a pipe of its own (DEVTEAM_REPLY_FD) as soon as
+// the command is done, with what it printed, and only then types into the supervisor's pane: a
+// slow tmux never holds the owner's press. Read once and taken out of the environment, so nothing
+// this process starts (a secret's sink) can write to the pipe.
+const REPLY_FD = (() => { const v = process.env.DEVTEAM_REPLY_FD; delete process.env.DEVTEAM_REPLY_FD; return /^[3-9]$/.test(v ?? '') ? Number(v) : null; })();
+let printed = '';
+if (REPLY_FD !== null) { const write = process.stdout.write.bind(process.stdout); process.stdout.write = (c, ...rest) => { printed += String(c); return write(c, ...rest); }; }
+const queuedNudges = [];
+function replyNow() {
+  if (REPLY_FD === null) return;
+  try { fs.writeSync(REPLY_FD, `${JSON.stringify({ out: printed })}\n`); fs.closeSync(REPLY_FD); } catch {}
+}
 const json = (x) => out(JSON.stringify(x, null, 2));
 const nowIso = () => new Date().toISOString();
 const dateOnly = (iso) => iso.slice(0, 10);
 const DAY = 864e5;
 
+/* git reads start */
 // A read-only command (dashboard-data, timeline) caches identical git reads for the rest of the
 // process: one refresh asked git the same questions hundreds of times. Commands that write never
 // turn this on, so they always read live.
@@ -137,6 +152,169 @@ function gitOrDie(args, cwd = HOME_CWD) {
 // worktree records its own head, while every other read goes to home (HOME_CWD).
 const cwdGit = (args) => git(args, process.cwd());
 const cwdGitOrDie = (args) => gitOrDie(args, process.cwd());
+// git's exit status and its bytes: the one runner that tells "no" (an ancestor check's 1) from an
+// error (128, an object not here yet), which git() folds into one null.
+function gitStatus(args, cwd = HOME_CWD) {
+  const r = spawnSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+  return { status: r.error ? null : r.status, stdout: r.stdout ?? Buffer.alloc(0) };
+}
+// What `git cat-file --batch` printed, as a Map of each spec to { type, oid, bytes }, or null for a
+// spec git called missing or ambiguous. Sizes are in bytes, so the output is read as bytes; output
+// cut short leaves the rest null, never a slice of the next object.
+function parseBatch(buf, specs) {
+  const res = new Map(specs.map((s) => [s, null]));
+  let at = 0;
+  for (const spec of specs) {
+    const nl = buf.indexOf(10, at);
+    if (nl === -1) break;
+    const head = buf.toString('latin1', at, nl).split(' ');
+    at = nl + 1;
+    if (head.length !== 3 || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(head[0])) continue; // "<spec> missing"
+    const size = Number(head[2]);
+    if (!Number.isSafeInteger(size) || at + size + 1 > buf.length) break;
+    res.set(spec, { oid: head[0], type: head[1], bytes: buf.subarray(at, at + size) });
+    at += size + 1;
+  }
+  return res;
+}
+// Many objects in one git call (each spec <sha>:<path> or an oid). A spec with a newline is never
+// sent (it would be two specs). A failed call returns null: the caller asks one at a time.
+function gitBatch(specs, cwd = HOME_CWD) {
+  const ok = specs.filter((s) => !/[\n\r]/.test(s));
+  let buf = Buffer.alloc(0);
+  if (ok.length) {
+    try { buf = execFileSync('git', ['cat-file', '--batch'], { cwd, input: `${ok.join('\n')}\n`, stdio: ['pipe', 'pipe', 'ignore'], maxBuffer: 256 * 1024 * 1024 }); } catch { return null; }
+  }
+  const got = parseBatch(buf, ok);
+  return new Map(specs.map((s) => [s, got.get(s) ?? null]));
+}
+// Reads at a commit, kept for the whole process in every command: a sha names the same bytes
+// forever, so even a command that writes can't read them stale. Keyed by the repository (its
+// common git dir, so its worktrees share), the sha and the path. Text comes back as git() gives it:
+// one trailing newline taken off.
+const FULL_SHA = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
+const commonDirs = new Map();
+function gitCommonDirOf(cwd = HOME_CWD) {
+  const k = cwd ?? process.cwd();
+  if (!commonDirs.has(k)) commonDirs.set(k, git(['rev-parse', '--path-format=absolute', '--git-common-dir'], cwd) ?? k);
+  return commonDirs.get(k);
+}
+const atCommit = new Map();
+const atKey = (sha, p, cwd) => `${gitCommonDirOf(cwd)}\0${sha}\0${p}`;
+const asGitText = (o) => (o ? o.bytes.toString('utf8').replace(/\n$/, '') : null);
+function prefetchAt(sha, paths, cwd = HOME_CWD) {
+  if (!FULL_SHA.test(sha ?? '')) return;
+  const need = [...new Set(paths)].filter((p) => !/[\n\r]/.test(p) && !atCommit.has(atKey(sha, p, cwd)));
+  if (!need.length) return;
+  const got = gitBatch(need.map((p) => `${sha}:${p}`), cwd);
+  if (!got) return;
+  for (const p of need) { const o = got.get(`${sha}:${p}`); atCommit.set(atKey(sha, p, cwd), o && o.type === 'blob' ? o : null); }
+}
+// A file at a commit, as `git show <sha>:<path>` gives it through git(). Not a full sha: asked live.
+function showAt(sha, p, cwd = HOME_CWD) {
+  if (!FULL_SHA.test(sha ?? '')) return git(['show', `${sha}:${p}`], cwd);
+  const k = atKey(sha, p, cwd);
+  if (!atCommit.has(k)) prefetchAt(sha, [p], cwd);
+  return atCommit.has(k) ? asGitText(atCommit.get(k)) : git(['show', `${sha}:${p}`], cwd);
+}
+/* git reads end */
+
+/* git facts start */
+// Git's answers that never change, kept across processes in run/cache/git-facts.json: a commit's
+// date, whether one commit is an ancestor of another, the first release that holds a commit. Each
+// is keyed by everything it depends on (the repository, full shas, and for ancestry and releases
+// whether the clone is shallow; for releases the pattern and the tag list), and only a definite
+// answer is kept: an error (an object not fetched yet) is asked again next time. A cache of what git
+// computes, never a record (constitution: compute state, don't record it); deleting it costs time.
+// The file is the machine user's, like the rest of run/: anything running as that user could
+// write a wrong answer into it, as it could into the repository itself.
+const factsFile = () => path.join(runDir, 'cache', 'git-facts.json');
+// Answers against main move with main (every refresh asks about main's newest commit), so the store
+// keeps the most recently used, oldest dropped first.
+const FACTS_MAX = 20000;
+const factsIn = () => { try { const j = readJson(factsFile()); return j?.v === 1 && isObj(j.e) ? j.e : {}; } catch { return {}; } };
+let factStore = null;
+let factsAdded = {};
+const factsUsed = new Set();
+let factsSaving = false;
+// Written at exit, once: when this process added an answer, or used some while the store is near its
+// cap (then what was used must move to the end, or the cap would drop it). Read again first and
+// ours added: another process may have written since; a race loses an addition only. What this
+// process used goes to the end, so the cap drops what nobody has asked for longest. The box
+// operator only reads, so its facts last only as long as its process.
+function factsSaveAtExit() {
+  if (factsSaving || process.env.DEVTEAM_ROLE === 'operator') return;
+  factsSaving = true;
+  process.on('exit', () => {
+    try {
+      const e = factsIn();
+      for (const k of factsUsed) { const val = Object.hasOwn(factsAdded, k) ? factsAdded[k] : Object.hasOwn(e, k) ? e[k] : factStore[k]; delete e[k]; if (val !== undefined) e[k] = val; }
+      const keys = Object.keys(e);
+      for (const k of keys.slice(0, Math.max(0, keys.length - FACTS_MAX))) delete e[k];
+      writeJson(factsFile(), { v: 1, e });
+    } catch {}
+  });
+}
+let factsCount = 0;
+function factGet(k) {
+  if (!factStore) { factStore = factsIn(); factsCount = Object.keys(factStore).length; }
+  if (!Object.hasOwn(factStore, k)) return undefined;
+  factsUsed.add(k);
+  if (factsCount > FACTS_MAX * 0.8) factsSaveAtExit();
+  return factStore[k];
+}
+function factSet(k, v) {
+  factGet(k);
+  factStore[k] = v;
+  factsUsed.add(k);
+  factsAdded[k] = v;
+  factsSaveAtExit();
+}
+const perRepo = (fn) => { const m = new Map(); return (cwd) => { const k = gitCommonDirOf(cwd); if (!m.has(k)) m.set(k, fn(cwd)); return m.get(k); }; };
+// a clone's cut, as git keeps it (the commits at its edge): empty for a whole clone, and different
+// after every deepen, so an answer from before a deepen is asked again
+const shallowOf = perRepo((cwd) => { try { return sha256(fs.readFileSync(path.join(gitCommonDirOf(cwd), 'shallow'))).slice(0, 16); } catch { return ''; } });
+const tagPrintOf = perRepo((cwd) => sha256(git(['for-each-ref', '--format=%(refname)%00%(objectname)', 'refs/tags'], cwd) ?? ''));
+const fullShaOf = (x, cwd) => (FULL_SHA.test(x ?? '') ? x : x ? git(['rev-parse', '--verify', '--quiet', `${x}^{commit}`], cwd) : null);
+// A commit's date in ms, or NaN.
+function commitDateOf(sha, cwd = HOME_CWD) {
+  const full = fullShaOf(sha, cwd);
+  if (!full) return NaN;
+  const k = `d\0${gitCommonDirOf(cwd)}\0${full}`;
+  const kept = factGet(k);
+  if (kept !== undefined) return kept;
+  const r = gitStatus(['show', '-s', '--format=%cI', full], cwd);
+  const t = r.status === 0 ? Date.parse(r.stdout.toString('utf8').trim()) : NaN;
+  if (!Number.isNaN(t)) factSet(k, t);
+  return t;
+}
+// Whether a is an ancestor of b (or is b): true, false, or null when git couldn't say.
+function ancestorOf(a, b, cwd = HOME_CWD) {
+  const A = fullShaOf(a, cwd);
+  const B = fullShaOf(b, cwd);
+  if (!A || !B) return null;
+  const k = `a\0${gitCommonDirOf(cwd)}\0${shallowOf(cwd)}\0${A}\0${B}`;
+  const kept = factGet(k);
+  if (kept !== undefined) return kept;
+  const { status } = gitStatus(['merge-base', '--is-ancestor', A, B], cwd);
+  if (status !== 0 && status !== 1) return null;
+  factSet(k, status === 0);
+  return status === 0;
+}
+// The first tag matching pattern (default v*), not a release candidate, that contains sha.
+function releasedInAt(sha, pattern = 'v*', cwd = HOME_CWD) {
+  const full = fullShaOf(sha, cwd);
+  if (!full) return null;
+  const k = `r\0${gitCommonDirOf(cwd)}\0${shallowOf(cwd)}\0${tagPrintOf(cwd)}\0${pattern}\0${full}`;
+  const kept = factGet(k);
+  if (kept !== undefined) return kept;
+  const r = gitStatus(['tag', '--contains', full, '--list', pattern, '--sort=creatordate'], cwd);
+  if (r.status !== 0) return null;
+  const tag = r.stdout.toString('utf8').split('\n').find((t) => t && !/-rc/.test(t)) ?? null;
+  factSet(k, tag);
+  return tag;
+}
+/* git facts end */
 // tmux gets a time limit unless the caller set one: a tmux call that never returns (send-keys has hung
 // for hours on a box) would otherwise wedge whatever called it, a dashboard's tick included.
 const TMUX_TIMEOUT_MS = 30000;
@@ -271,6 +449,8 @@ const mainRoot = commonDir ? path.dirname(commonDir) : repoRoot;
 // Whether this command runs in one of home's checkouts (its main checkout or a worktree of it).
 const cwdIsHome = !!cwdCommon && !!commonDir && realPath(cwdCommon) === realPath(commonDir);
 HOME_CWD = cwdIsHome || !commonDir ? undefined : mainRoot;
+// home's common dir is known already: reads at a commit key on it without asking git again
+if (commonDir) for (const k of [HOME_CWD ?? process.cwd(), mainRoot]) commonDirs.set(k, commonDir);
 // The kit folder of the checkout you are in when it is home's (a worktree has its own copy): its
 // project/ is the branch's tickets and plans. Elsewhere, home's main checkout's, so mainRoot and
 // projectDir both follow home (never the cwd's repo).
@@ -684,6 +864,19 @@ const componentsOn = (s, link = 'home') => (linesDeclared(s) ? Object.entries(s.
 // the project (home's, from a sibling's worktree), like projectRel.
 const kitRel = path.relative(projectRoot, devteamDir).split(path.sep).join('/');
 const devteamLine = () => [...(kitRel && !kitRel.startsWith('..') ? [`${kitRel}/**`] : []), ...(projectInRepo ? [`${projectRel}/**`] : [])];
+// The project's .gitleaks.toml as init writes it: it only extends the kit's gitleaks.toml (gitleaks'
+// default rules, plus the allowlist for the log's source_key). gitleaks reads an extend path from the
+// folder it runs in, the repository root. isGitleaksStub: a file that does only that, comments and
+// blank lines aside, so a sync PR may add it where main has none (upstreamSyncCheck).
+const GITLEAKS_FILE = '.gitleaks.toml';
+const KIT_GITLEAKS = `${kitRel ? `${kitRel}/` : ''}gitleaks.toml`;
+const gitleaksExtend = () => `[extend]\npath = "${KIT_GITLEAKS}"`;
+const gitleaksStub = () => `# gitleaks reads this file. It extends devteam's config: gitleaks' default rules, plus an allowlist
+# for one field of the kit's own log (${KIT_GITLEAKS} says which, and why). Add this project's
+# own rules and allowlists below it (governance/quality.md, Secrets).
+${gitleaksExtend()}
+`;
+const isGitleaksStub = (text) => typeof text === 'string' && text.split('\n').map((l) => l.replace(/#.*/, '').trim()).filter(Boolean).join('\n') === gitleaksExtend();
 // A real kit file: under the kit's own path, other than project/ and run/ (a project's own files, and
 // its machine state). Everything else a chore changes is the project's.
 const isKitFile = (f) => { if (kitRel.startsWith('..')) return false; const rel = kitRel ? (f.startsWith(`${kitRel}/`) ? f.slice(kitRel.length + 1) : null) : f; return rel !== null && !/^(project|run)\//.test(rel); };
@@ -1219,12 +1412,16 @@ function withLock(file, fn, { staleMs = 10000, waitMs = 15000 } = {}) {
 }
 
 let mainRefCache;
+let mainShaCache;
 function mainRef() {
   if (mainRefCache !== undefined) return mainRefCache;
   const b = loadSettings().main_branch;
-  for (const r of [`origin/${b}`, b]) if (resolveCommit(r)) return (mainRefCache = r);
+  for (const r of [`origin/${b}`, b]) { const sha = resolveCommit(r); if (sha) { mainShaCache = sha; return (mainRefCache = r); } }
+  mainShaCache = null;
   return (mainRefCache = null);
 }
+// The commit mainRef() named when it was resolved: found with it, and dropped whenever it is.
+const mainSha = () => (mainRef(), mainShaCache);
 // Before judging a PR (check-pr, merge): main as origin has it now, and nothing read from the old
 // one kept. A push to main from another clone since this checkout last fetched would otherwise be
 // left out of the landing tree, the settings in force and the registry acts.
@@ -1284,7 +1481,7 @@ function resolveCommit(ref) {
 // other (this checkout may not have pulled yet, or may be a plan branch that is ahead).
 function durableText(file) {
   const local = readText(path.join(durableLogDir(), file));
-  const shown = projectInRepo && mainRef() ? git(['show', `${mainRef()}:${projectRel}/log/${file}`]) : null;
+  const shown = projectInRepo && mainRef() ? showAt(mainSha(), `${projectRel}/log/${file}`) : null;
   const main = shown === null ? null : `${shown}\n`;
   if (main === null) return local;
   if (local === null || main.startsWith(local)) return main;
@@ -1377,6 +1574,8 @@ function readLog() {
   const lines = [];
   const errors = [];
   const unknown = [];
+  // main's copy of every file in one git call, not one each
+  if (projectInRepo && mainRef()) prefetchAt(mainSha(), [...names].map((f) => `${projectRel}/log/${f}`));
   for (const f of [...names].sort()) {
     const r = parseLines(logFileText(f), f, { validate: false });
     lines.push(...r.lines);
@@ -1384,11 +1583,14 @@ function readLog() {
     unknown.push(...r.unknown);
   }
   const { objects, ignored } = fold(lines);
-  return (logCache = { lines, objects, errors, ignored, unknown });
+  // each type's objects in the fold's order, so a lookup by type doesn't scan every object
+  const byType = new Map();
+  for (const o of objects.values()) { if (!byType.has(o.type)) byType.set(o.type, []); byType.get(o.type).push(o); }
+  return (logCache = { lines, objects, errors, ignored, unknown, byType });
 }
-const logObjects = (type) => [...readLog().objects.values()].filter((o) => o.type === type && !(type === 'goal' && o.kind === 'upkeep'));
+const logObjects = (type) => (readLog().byType.get(type) ?? []).filter((o) => !(type === 'goal' && o.kind === 'upkeep'));
 // The built-in Upkeep goal (planning.md §7), or null while it has no line yet (then it runs).
-const upkeepGoal = () => [...readLog().objects.values()].find((o) => o.type === 'goal' && o.kind === 'upkeep') ?? null;
+const upkeepGoal = () => (readLog().byType.get('goal') ?? []).find((o) => o.kind === 'upkeep') ?? null;
 const logGet = (id) => readLog().objects.get(id) ?? null;
 const byTime = (a, b) => a.created_at.localeCompare(b.created_at);
 // A message is handled when a reply cites it (--re), or when the supervisor routed it to the owner
@@ -1493,7 +1695,10 @@ function artifactLinksMoved(v) {
   if (gone.length) return `${v.id} links the artifact ${gone.join(', ')}, which is no longer available; ask again`;
   return null;
 }
-const questions = () => logObjects('question').map((q) => { const v = questionView(q); return { ...v, links: resolveQuestionLinks(v.links, v.status === 'open'), goal_hold: questionHold(q), ...(v.thread ? { thread_title: logGet(v.thread)?.title ?? null } : {}), ...turnThread(v.turn) }; });
+// Once per read of the log (memo): a refresh asked for every question's view dozens of times. A new
+// array each call, so a caller's sort never reorders another's.
+const questions = () => [...memo('questions', () => questionsNow())];
+const questionsNow = () => logObjects('question').map((q) => { const v = questionView(q); return { ...v, links: resolveQuestionLinks(v.links, v.status === 'open'), goal_hold: questionHold(q), ...(v.thread ? { thread_title: logGet(v.thread)?.title ?? null } : {}), ...turnThread(v.turn) }; });
 // Where an answer from a thread was said: the cited turn's thread, which for an Inbox question is
 // none of its own, so the answered card can link the owner to the words it used.
 function turnThread(uid) {
@@ -1831,22 +2036,21 @@ const parseMainLog = (o) => (o ? o.split('\n') : []).filter(Boolean).map((l) => 
 const parseParents = (o) => (o ? o.split('\n') : []).filter(Boolean).map((l) => l.split(' '));
 // The commit on main that landed a ticket, for any repo: a merge from ticket/<id>, a squash titled
 // "<id>: …", or a merge whose second parent contains the branch tip and whose first parent does not.
-function findMergeSha(id, { log, parents, resolve, gitFn, ref }) {
+function findMergeSha(id, { log, parents, resolve, ancestor, ref }) {
   const esc = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const fromBranch = new RegExp(`from \\S*ticket/${esc}$`);
   for (const { sha, subject } of log()) if (fromBranch.test(subject) || subject.startsWith(`${id}:`)) return sha;
   if (!ref) return null;
+  const refSha = resolve(ref);
   for (const r of [`refs/heads/ticket/${id}`, `refs/remotes/origin/ticket/${id}`]) {
     const tip = resolve(r);
-    if (!tip || gitFn(['merge-base', '--is-ancestor', tip, ref]) === null) continue;
+    if (!tip || ancestor(tip, refSha) !== true) continue;
     for (const [sha, p1, p2] of parents()) {
-      if (p2 && gitFn(['merge-base', '--is-ancestor', tip, p2]) !== null && gitFn(['merge-base', '--is-ancestor', tip, p1]) === null) return sha;
+      if (p2 && ancestor(tip, p2) === true && ancestor(tip, p1) !== true) return sha;
     }
   }
   return null;
 }
-// The first tag matching pattern (default v*), not a release candidate, that contains sha.
-const releasedInWith = (gitFn, sha, pattern = 'v*') => (gitFn(['tag', '--contains', sha, '--list', pattern, '--sort=creatordate']) ?? '').split('\n').find((t) => t && !/-rc/.test(t)) ?? null;
 
 let mainLogCache;
 function mainLog() {
@@ -1868,7 +2072,7 @@ function homeTicketBranchRef(id) {
 const mergeShaCache = new Map();
 function homeMergeShaFor(id) {
   if (mergeShaCache.has(id)) return mergeShaCache.get(id);
-  const v = findMergeSha(id, { log: mainLog, parents: mergeParents, resolve: resolveCommit, gitFn: (a) => git(a), ref: mainRef() });
+  const v = findMergeSha(id, { log: mainLog, parents: mergeParents, resolve: resolveCommit, ancestor: (a, b) => ancestorOf(a, b), ref: mainRef() });
   mergeShaCache.set(id, v);
   return v;
 }
@@ -1881,8 +2085,17 @@ function upgradeAt(token) {
   if (upgradeAtCache.has(token)) return upgradeAtCache.get(token);
   const ref = mainRef();
   const file = `${kitRel ? `${kitRel}/` : ''}scripts/devteam.mjs`;
-  const rows = ref && !kitRel.startsWith('..') ? (git(['log', '--reverse', '--format=%ct', `-S${token}`, ref, '--', file]) ?? '').split('\n').filter(Boolean) : [];
-  const at = rows.length ? Number(rows[0]) * 1000 : null;
+  // fixed for main's commit, so kept across processes (a search of main's whole history)
+  const sha = ref && !kitRel.startsWith('..') ? mainSha() : null;
+  const k = sha ? `u\0${gitCommonDirOf()}\0${shallowOf()}\0${sha}\0${file}\0${token}` : null;
+  let at = k ? factGet(k) : null;
+  if (k && at === undefined) {
+    const r = gitStatus(['log', '--reverse', '--format=%ct', `-S${token}`, sha, '--', file]);
+    const rows = r.status === 0 ? r.stdout.toString('utf8').split('\n').filter(Boolean) : null;
+    at = rows?.length ? Number(rows[0]) * 1000 : null;
+    if (rows) factSet(k, at);
+  }
+  at ??= null;
   upgradeAtCache.set(token, at);
   return at;
 }
@@ -1890,21 +2103,32 @@ const mergedAtCache = new Map();
 function homeMergedAt(id) {
   if (!mergedAtCache.has(id)) {
     const sha = homeMergeShaFor(id);
-    const t = sha ? Date.parse(git(['show', '-s', '--format=%cI', sha]) ?? '') : NaN;
+    const t = sha ? commitDateOf(sha) : NaN;
     mergedAtCache.set(id, Number.isNaN(t) ? null : t);
   }
   return mergedAtCache.get(id);
 }
-const homeReleasedIn = (sha, pattern) => releasedInWith((a) => git(a), sha, pattern);
+const homeReleasedIn = (sha, pattern) => releasedInAt(sha, pattern);
 // Read a project file from a git ref (a ticket's branch, an exact head) or the working tree.
 function srcRead(src, rel) {
   if (src.repo && src.repo.name !== 'home') return src.repo.srcRead(src.ref ?? null, rel);
-  if (src.ref && projectInRepo) return git(['show', `${src.ref}:${projectRel}/${rel}`]);
+  if (src.ref && projectInRepo) { const sha = refAt(src.ref); return sha ? showAt(sha, `${projectRel}/${rel}`) : git(['show', `${src.ref}:${projectRel}/${rel}`]); }
   return readText(path.join(projectDir, rel));
+}
+// A ref as the commit it names, where that costs no git call of its own: a read-only command's ref
+// listing, or a ref that is already a full sha. Else null, and the caller asks by name, as before.
+const refAt = (ref, resolve = resolveCommit) => (FULL_SHA.test(ref) ? ref : gitReadCache && ref.startsWith('refs/') ? resolve(ref) : null);
+// A folder listed at a ref: its files are read at once, all in one git call, at the commit the ref
+// named (a dashboard refresh read each ticket branch's review files one call each).
+function listAndPrefetch(ref, dirPath, gitFn, cwd, resolve) {
+  const names = (gitFn(['ls-tree', '--name-only', `${ref}:${dirPath}`]) ?? '').split('\n').filter(Boolean);
+  const sha = refAt(ref, resolve);
+  if (sha && names.length) prefetchAt(sha, names.map((n) => `${dirPath}/${n}`), cwd);
+  return names;
 }
 function srcList(src, relDir) {
   if (src.repo && src.repo.name !== 'home') return src.repo.srcList(src.ref ?? null, relDir);
-  if (src.ref && projectInRepo) return (git(['ls-tree', '--name-only', `${src.ref}:${projectRel}/${relDir}`]) ?? '').split('\n').filter(Boolean);
+  if (src.ref && projectInRepo) return listAndPrefetch(src.ref, `${projectRel}/${relDir}`, (a) => git(a), HOME_CWD, resolveCommit);
   const p = path.join(projectDir, relDir);
   return fs.existsSync(p) ? fs.readdirSync(p) : [];
 }
@@ -1971,12 +2195,12 @@ function linkRepo(id) {
     ...gitFacts(g, (args) => gitRun(args, root)),
     git: g, gitOrDie: (args, cwd = root) => gitOrDie(args, cwd),
     gh: (args, opts = {}) => { const spec = ghSpec(l.remote); return sh('gh', [...args, ...(spec ? ['-R', spec] : [])], { cwd: root, ...opts }); },
-    mergeShaFor: (tid) => { if (!c.mergeSha.has(tid)) c.mergeSha.set(tid, findMergeSha(tid, { log, parents, resolve, gitFn: g, ref: mainRefR() })); return c.mergeSha.get(tid); },
-    mergedAt: (tid) => { if (!c.mergedAt.has(tid)) { const sha = R.mergeShaFor(tid); const t = sha ? Date.parse(g(['show', '-s', '--format=%cI', sha]) ?? '') : NaN; c.mergedAt.set(tid, Number.isNaN(t) ? null : t); } return c.mergedAt.get(tid); },
+    mergeShaFor: (tid) => { if (!c.mergeSha.has(tid)) c.mergeSha.set(tid, findMergeSha(tid, { log, parents, resolve, ancestor: (a, b) => ancestorOf(a, b, root), ref: mainRefR() })); return c.mergeSha.get(tid); },
+    mergedAt: (tid) => { if (!c.mergedAt.has(tid)) { const sha = R.mergeShaFor(tid); const t = sha ? commitDateOf(sha, root) : NaN; c.mergedAt.set(tid, Number.isNaN(t) ? null : t); } return c.mergedAt.get(tid); },
     ticketBranchRef: (tid) => [`refs/heads/ticket/${tid}`, `refs/remotes/origin/ticket/${tid}`].find((r) => resolve(r)) ?? null,
-    releasedIn: (sha, pattern) => releasedInWith(g, sha, pattern),
-    srcRead: (ref, relPath) => (ref ?? mainRefR() ? g(['show', `${ref ?? mainRefR()}:${rel}/${relPath}`]) : null),
-    srcList: (ref, relDir) => (ref ?? mainRefR() ? (g(['ls-tree', '--name-only', `${ref ?? mainRefR()}:${rel}/${relDir}`]) ?? '').split('\n').filter(Boolean) : []),
+    releasedIn: (sha, pattern) => releasedInAt(sha, pattern, root),
+    srcRead: (ref, relPath) => { const at = ref ?? mainRefR(); if (!at) return null; const sha = refAt(at, resolve); return sha ? showAt(sha, `${rel}/${relPath}`, root) : g(['show', `${at}:${rel}/${relPath}`]); },
+    srcList: (ref, relDir) => (ref ?? mainRefR() ? listAndPrefetch(ref ?? mainRefR(), `${rel}/${relDir}`, g, root, resolve) : []),
     resetCaches: () => { c.mainRef = undefined; c.log = null; c.parents = null; c.mergeSha.clear(); c.mergedAt.clear(); },
     // in another repo the kit's line is only its project folder, where tickets keep their records
     devteamLine: () => [`${rel}/**`],
@@ -3814,18 +4038,23 @@ function upstreamSyncCheck(chore, sha, changed) {
   const onDefault = tagSha && git(['fetch', '--quiet', '--no-tags', src, '+HEAD:refs/devteam-upstream-default/HEAD'], mainRoot) !== null
     && git(['merge-base', '--is-ancestor', tagSha, 'refs/devteam-upstream-default/HEAD'], mainRoot) !== null;
   if (!onDefault) return { problem: `standing approval for upstream syncs: tag "${tag}" is not on the default branch of ${redactUrl(s.upstream_repo)}, or that can't be confirmed. The owner's answer is needed: --approved <qid>` };
+  // The one file outside the kit a sync may carry: the .gitleaks.toml init writes, where main has
+  // none and the release ships the kit's gitleaks.toml it extends. Exactly that (isGitleaksStub), so
+  // the PR can't bring an allowlist of its own in with it.
+  const blob = (ref, f) => git(['rev-parse', '--verify', '--quiet', `${ref}:${f}`], mainRoot);
+  const stub = changed.includes(GITLEAKS_FILE) && mb && !blob(mb, GITLEAKS_FILE) && blob(sha, KIT_GITLEAKS) && isGitleaksStub(git(['show', `${sha}:${GITLEAKS_FILE}`], mainRoot));
+  if (stub) changed = changed.filter((f) => f !== GITLEAKS_FILE);
   if (policy) {
     const problem = adoptProblem({ tag, sha, mb, main, changed, src });
     if (problem) return { problem: `settings.upstream_sync "adopt" covers only a whole newer release: ${problem}. The owner's answer is needed: --approved <qid>` };
   }
-  const blob = (ref, f) => git(['rev-parse', '--verify', '--quiet', `${ref}:${f}`], mainRoot);
   const differ = [];
   for (const f of changed) {
     if (!f.startsWith(`${kitRel}/`)) { differ.push(`${f} (outside the kit)`); continue; }
     if (blob(sha, f) !== blob(`refs/devteam-upstream/${tag}`, `docs/devteam/${f.slice(kitRel.length + 1)}`)) differ.push(f);
   }
   if (differ.length) return { problem: `standing approval covers only files copied verbatim from upstream ${tag}; these differ: ${differ.slice(0, 6).join(', ')}${differ.length > 6 ? ', …' : ''}. The owner's answer is needed: --approved <qid>` };
-  return { rule, policy, tag, tagSha };
+  return { rule, policy, tag, tagSha, stub: !!stub };
 }
 // What "adopt" needs beyond the standing rule; the reason it isn't met, else null. The PR starts at
 // main's tip, or the merge's 3-way result needn't be the files compared here. The tag is strictly
@@ -4164,7 +4393,7 @@ function cmdMerge() {
     let kitRule = null;
     if (outside.length && (!approved || !kitApproved) && chore.startsWith('devteam-sync-')) {
       const r = upstreamSyncApproval(chore, sha, outside);
-      if (r.rule || r.policy) { kitRule = standing = r; out(`kit files match upstream ${r.tag} exactly; approved by ${r.rule ? `the owner's standing rule ${r.rule.id}` : 'settings.upstream_sync "adopt"'}; ${r.tag} is ${r.tagSha}`); } else if (r.problem && !approved) fails.push(r.problem);
+      if (r.rule || r.policy) { kitRule = standing = r; out(`kit files match upstream ${r.tag} exactly${r.stub ? `, and ${GITLEAKS_FILE} only extends the kit's gitleaks.toml` : ''}; approved by ${r.rule ? `the owner's standing rule ${r.rule.id}` : 'settings.upstream_sync "adopt"'}; ${r.tag} is ${r.tagSha}`); } else if (r.problem && !approved) fails.push(r.problem);
     }
     if (outside.length && !approved && !kitRule && base) {
       const r = ciFixApproval(chore, sha, base, outside);
@@ -4461,6 +4690,29 @@ function ratingWarnings({ stake, urgency, blocks, def }) {
 function cmdAsk() { out(askLine().id); }
 // Every check and refusal ask makes, and the line it writes. thread ask calls it with the thread the
 // question is asked in; nothing else about the question differs.
+// Before a question goes to the owner: standing rules and earlier answers that look like it, on
+// stderr. Alike means the rule or question has 60% of this one's words, and a third of the score
+// this one would get against itself (on a small project, words only this one has weigh most). A
+// rule the owner gave for this class settles it (decide --approved k-…); any other rule,
+// and every earlier answer, is for the recommendation and approves nothing. The kit's own wordings
+// (goal-met, registry attestations, reviews, goal approvals) are alike by design and skipped.
+const KIT_WORDED = (cls, kind) => ['goal-met', 'registry-attest'].includes(cls) || ['review', 'goal-approval'].includes(kind);
+function askLikeWarnings({ text, cls, kind }) {
+  if (!text.trim() || KIT_WORDED(cls, kind)) return;
+  const rules = logObjects('knowledge').filter((k) => k.status === 'accepted' && k.kind === 'preference');
+  const answered = questions().filter((x) => x.status === 'answered' && x.answer && !KIT_WORDED(x.class, x.kind));
+  const docs = [...rules.map((k) => ({ id: k.id, rule: k, fields: [{ text: k.statement }] })), ...answered.map((x) => ({ id: x.id, q: x, fields: [{ text: textOf(x.question, x.context, x.recommendation, (x.choices ?? []).map((c) => c?.label)) }] }))];
+  if (!docs.length) return;
+  const ix = searchIndex(docs);
+  const close = ix.docs.map((d) => ({ d, ...searchSimilar(ix, text, d) })).filter((c) => c.coverage >= 0.6 && c.ratio >= 0.3).sort((a, b) => b.ratio - a.ratio);
+  const line = (s) => quoteData(capBytes300(s));
+  for (const c of close.filter((x) => x.d.rule).slice(0, 3)) {
+    const k = c.d.rule;
+    if (cls && writerClass(k.created_by) === 'owner' && k.scope === `class:${cls}`) warn(`a standing rule may settle this: ${k.id} ${line(k.statement)}. If it does, withdraw this question and cite it (--approved ${k.id})`);
+    else warn(`an accepted rule may bear on this: ${k.id} ${line(k.statement)}. It approves nothing here; use it in your recommendation`);
+  }
+  for (const c of close.filter((x) => x.d.q).slice(0, 3)) warn(`the owner answered a similar question before: ${c.d.q.id} ${line(c.d.q.question)} (answer: ${line(c.d.q.answer)}). If it was this very call and that answer is unused, withdraw this and cite it (--approved ${c.d.q.id}); otherwise it approves nothing here, so use it in your recommendation`);
+}
 function askLine({ thread } = {}) {
   supervisorOnly('ask');
   // a goal-met question's words are the kit's (below)
@@ -4711,6 +4963,8 @@ function askLine({ thread } = {}) {
   settleChecks({ self: null, kind, stake: rating.stake, settles, added: settles, settlesIf: flagStr('settles-if'), choices: jsonFlag('choices'), about: questionAbout({ goal: flagStr('goal'), ticket: flagStr('ticket'), blocks }) });
   if (rating.stake === undefined || rating.urgency === undefined) warn('rate it: --stake 1-3 --urgency 1-3, so the Inbox can put the most valuable question first (supervisor.md §6)');
   ratingWarnings({ ...rating, blocks, def });
+  // what the owner may already have said about it: never in the way of asking
+  try { askLikeWarnings({ text: textOf(q, flagStr('context'), flagStr('recommendation'), [].concat(jsonFlag('choices') ?? []).map((c) => c?.label)), cls, kind }); } catch (e) { warn(`the check for earlier answers failed (${e.message}); the question is asked anyway`); }
   return appendLog({
     type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), sensor: flagStr('sensor'), remediation: remediationPin ?? undefined, remediation_entries: remediationEntries, owner_said: ownerSaid ?? undefined, question: q, context: kind === 'goal-approval' ? [flagStr('context'), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal')))), registryAttestText(logGet(flagStr('goal')))].filter(Boolean).join('\n\n') : context,
     rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: goalChangeFlag(cls), options: asList(flags.options), choices: goalMet ? GOAL_MET_CHOICES : jsonFlag('choices'), met: goalMet ? { basis: goalMet.basis, reading: goalMet.reading } : undefined, links, recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined,
@@ -7682,6 +7936,273 @@ const knowledgeBlock = (target) => {
   const ks = knowledgeFor(target);
   return ks.length ? `What this project has learned that applies here (accepted knowledge):\n${ks.map((k) => { const n = ownerNote(k.id); return `- [${k.kind}${k.valence < 0 ? ', avoid' : ''}] ${k.statement}${n ? ` The owner adds: ${n}` : ''} (${k.id})`; }).join('\n')}` : '';
 };
+/* search start */
+// Ranked keyword search (BM25) over what the project has written. Words, not meanings: a word of
+// five letters or more also counts by its first letters (five, or one fewer than the word), so
+// merged meets merges and flaky meets flake; ids, paths and other compounds count whole and by
+// their parts. A quoted phrase must appear as written, and ranks first.
+const SEARCH_STOP = new Set('a an and are as at be been but by can could did do does for from had has have how i if in into is it its may might no not of on or our out over should so such than that the their them then there these they this those to too up us was we were what when where which while who why will with would you your'.split(' '));
+const SEARCH_K1 = 1.2;
+const SEARCH_B = 0.75;
+// Each token: { t, pos, kind } where kind is 'word', 'whole' (a compound as written) or 'prefix'.
+const LETTERS = /^[a-z]+$/;
+const ALL_LETTERS = /^\p{L}+$/u;
+const isWordish = (w) => LETTERS.test(w) || ALL_LETTERS.test(w);
+const prefixOf = (w) => (w.length >= 5 && isWordish(w) ? w.slice(0, Math.min(5, w.length - 1)) : null);
+const ASCII = /^[\x00-\x7f]*$/;
+const ASCII_RUN = /[A-Za-z0-9](?:[A-Za-z0-9]|[._/-](?=[A-Za-z0-9]))*/g;
+const ANY_RUN = /[\p{L}\p{N}](?:[\p{L}\p{N}]|[._/-](?=[\p{L}\p{N}]))*/gu;
+function searchTokens(text) {
+  const out = [];
+  let pos = 0;
+  const str = String(text ?? '');
+  for (const raw of str.match(ASCII.test(str) ? ASCII_RUN : ANY_RUN) ?? []) {
+    const low = raw.toLowerCase();
+    // most words are one plain word; only compounds and camelCase are split
+    const parts = /[._/-]/.test(raw) || low !== raw ? raw.replace(/([\p{Ll}\p{N}])(\p{Lu})/gu, '$1 $2').toLowerCase().split(/[\s._/-]+/).filter(Boolean) : [low];
+    if (parts.length > 1 || low !== parts[0]) out.push({ t: low, pos, kind: 'whole' });
+    for (const w of parts) {
+      // a compound's all-digit part (a date in an id, a version's 1) is no word of its own
+      if (SEARCH_STOP.has(w) || (w.length < 2 && !/\d/.test(w)) || (parts.length > 1 && /^\d+$/.test(w))) { pos++; continue; }
+      out.push({ t: w, pos, kind: 'word' });
+      const pre = prefixOf(w);
+      if (pre) out.push({ t: pre, pos, kind: 'prefix' });
+      pos++;
+    }
+  }
+  return out;
+}
+// A document's terms, weighted by field, and its length in words (never prefixes or compounds).
+function searchTerms(d) {
+  const tf = new Map((d.terms ?? []).map((t) => [t, 1]));
+  let len = 0;
+  for (const f of d.fields ?? []) {
+    const w = f.w ?? 1;
+    for (const k of searchTokens(f.text)) { tf.set(k.t, (tf.get(k.t) ?? 0) + w); if (k.kind === 'word') len++; }
+  }
+  return { tf, len };
+}
+// docs: [{ id, date?, prior?, fields: [{ text, w }] }]. Postings: each term's documents and weights.
+function searchIndex(docs) {
+  const post = new Map();
+  const lens = new Float64Array(docs.length);
+  docs.forEach((d, i) => {
+    const { tf, len } = searchTerms(d);
+    lens[i] = len;
+    for (const [t, n] of tf) { let p = post.get(t); if (!p) post.set(t, (p = [])); p.push(i, n); }
+  });
+  let sum = 0;
+  for (const x of lens) sum += x;
+  return { docs, post, lens, n: docs.length, avg: docs.length ? sum / docs.length : 0 };
+}
+const searchIdf = (ix, t) => { const df = (ix.post.get(t)?.length ?? 0) / 2; return Math.log(1 + (ix.n - df + 0.5) / (df + 0.5)); };
+// A query's terms: each word at weight 1, its prefix at a half (an exact word ranks first), each
+// compound whole at 1; its phrases (quoted) as word sequences.
+function searchQuery(q) {
+  // a phrase's words with their places in it, stop words counted, as the documents count them
+  const phrases = [...String(q).matchAll(/"([^"]+)"/g)].map((m) => { const ws = searchTokens(m[1]).filter((k) => k.kind === 'word'); return ws.map((k) => ({ t: k.t, d: k.pos - ws[0].pos })); }).filter((p) => p.length > 1);
+  const terms = new Map();
+  for (const k of searchTokens(String(q).replace(/"/g, ' '))) terms.set(k.t, Math.max(terms.get(k.t) ?? 0, k.kind === 'prefix' ? 0.5 : 1));
+  return { terms, phrases };
+}
+const bm25 = (ix, tf, len, idf, qw) => qw * idf * (tf * (SEARCH_K1 + 1)) / (tf + SEARCH_K1 * (1 - SEARCH_B + SEARCH_B * (ix.avg ? len / ix.avg : 1)));
+// Whether a document has a phrase: its words adjacent in one field, as written.
+function hasPhrase(d, p) {
+  for (const f of d.fields ?? []) {
+    const at = new Map(searchTokens(f.text).filter((k) => k.kind === 'word').map((k) => [k.pos, k.t]));
+    for (const [pos, t] of at) if (t === p[0].t && p.every((x) => at.get(pos + x.d) === x.t)) return true;
+  }
+  return false;
+}
+// The best documents for a query, best first: a phrase match above any without; then the score
+// (times the document's prior); then the newer.
+function searchRank(ix, q, { limit = 10 } = {}) {
+  const { terms, phrases } = searchQuery(q);
+  if (!terms.size) return [];
+  const score = new Float64Array(ix.n);
+  const matched = new Map();
+  for (const [t, qw] of terms) {
+    const p = ix.post.get(t);
+    if (!p) continue;
+    const idf = searchIdf(ix, t);
+    for (let j = 0; j < p.length; j += 2) {
+      const i = p[j];
+      score[i] += bm25(ix, p[j + 1], ix.lens[i], idf, qw);
+      (matched.get(i) ?? matched.set(i, []).get(i)).push(t);
+    }
+  }
+  const hits = [];
+  for (const [i, m] of matched) {
+    const d = ix.docs[i];
+    hits.push({ doc: d, score: score[i] * (d.prior ?? 1), matched: m, phrase: false, own: (d.terms ?? []).some((t) => terms.has(t)) });
+  }
+  // a search for an id finds that object first, above everything that mentions it
+  hits.sort((a, b) => (b.own - a.own) || (b.score - a.score) || String(b.doc.date ?? '').localeCompare(String(a.doc.date ?? '')));
+  // phrases are checked on the best few hundred only: a phrase's words are in the documents that score
+  if (phrases.length) { const top = hits.slice(0, Math.max(limit * 20, 200)); for (const h of top) h.phrase = phrases.every((p) => hasPhrase(h.doc, p)); top.sort((a, b) => (b.own - a.own) || (b.phrase - a.phrase) || (b.score - a.score) || String(b.doc.date ?? '').localeCompare(String(a.doc.date ?? ''))); return top.slice(0, limit); }
+  return hits.slice(0, limit);
+}
+// How alike a text and an indexed document are, on any corpus: the document's score for the text
+// against the score the text would get against itself, and the share of the text's words the
+// document has (a word counts as had when the document has it or its prefix).
+function searchSimilar(ix, text, d) {
+  const { terms } = searchQuery(text);
+  const self = searchTerms({ fields: [{ text }] });
+  const row = searchTerms(d);
+  let selfScore = 0;
+  let score = 0;
+  for (const [t, qw] of terms) {
+    const idf = searchIdf(ix, t);
+    selfScore += bm25({ avg: ix.avg || self.len }, self.tf.get(t) ?? 0, self.len, idf, qw);
+    const tf = row.tf.get(t);
+    if (tf) score += bm25(ix, tf, row.len, idf, qw);
+  }
+  const words = [...new Set(searchTokens(text).filter((k) => k.kind === 'word').map((k) => k.t))];
+  const has = (w) => row.tf.has(w) || (prefixOf(w) !== null && row.tf.has(prefixOf(w)));
+  return { ratio: selfScore ? score / selfScore : 0, coverage: words.length ? words.filter(has).length / words.length : 0 };
+}
+/* search end */
+// What search reads, as documents. Log objects as the kit reads them: a question's answer from
+// questionView (the owner's own lines; nothing once the question was rewritten), a lesson's note
+// from the owner's lines only. Never a sha, a hash or a secret's name and sink. Gates, spends,
+// phases and turns are left out unless asked for (--type); a turn is read in its thread.
+const SEARCH_QUIET = ['gate', 'spend', 'phase', 'turn'];
+const SEARCH_TYPES = ['goal', 'feature', 'ticket', 'observation', 'knowledge', 'problem', 'question', 'decision', 'act', 'message', 'thread', ...SEARCH_QUIET, 'doc'];
+// a sha or hash: hex with a digit and a letter in it, so a word like "defaced", a number and a log
+// id's date stay
+const noShas = (x) => String(x ?? '').replace(/\b(?=[0-9a-f]*\d)(?=[0-9a-f]*[a-f])[0-9a-f]{7,64}\b/g, '…');
+const textOf = (...xs) => xs.flat(Infinity).filter((x) => typeof x === 'string' && x).join('\n');
+function searchLogDocs(want) {
+  const docs = [];
+  // an object's own id is a term of it, whole, so a search for the id finds it
+  const add = (o, type, title, body, extra = {}) => docs.push({ id: o.id, type, date: o.created_at ?? o.asked_at ?? null, title: noShas(title), body: noShas(body), terms: [String(o.id).toLowerCase()], fields: [{ text: noShas(title), w: 2 }, { text: noShas(body), w: 1 }], open: `devteam.mjs record ${o.id}`, ...extra });
+  const by = readLog().byType;
+  const each = (t) => (want(t) ? by.get(t) ?? [] : []);
+  for (const g of each('goal')) add(g, 'goal', g.title, textOf(g.outcome, g.non_goals, g.preconditions, g.measure?.description, g.measure?.question, (g.milestones ?? []).map((m) => m?.title)), { status: g.status ?? null });
+  for (const f of each('feature')) add(f, 'feature', f.title, textOf(f.notes, (f.stories ?? []).map((x) => x?.text)));
+  for (const t of each('ticket')) add(t, 'ticket', t.title, textOf(t.notes, t.done_when), { kind: t.kind ?? null });
+  for (const o of each('observation')) add(o, 'observation', [o.subject, o.kind].filter((x) => typeof x === 'string' && x).join(' · '), textOf(o.detail, o.fix_hint), { kind: o.kind ?? null });
+  const notes = new Map();
+  if (want('knowledge')) for (const l of readLog().lines) if (l.by === 'owner' && typeof l.owner_note === 'string') notes.set(l.id, l.owner_note);
+  for (const k of each('knowledge')) add(k, 'knowledge', k.statement, textOf(notes.get(k.id)), { kind: k.kind ?? null, status: k.status ?? null, proposed_by: k.status === 'candidate' ? k.created_by : undefined });
+  for (const x of each('problem')) add(x, 'problem', x.title, textOf(x.detail), { status: x.status ?? null });
+  if (want('question')) for (const q of questions()) add(q, 'question', q.question, textOf(q.context, q.recommendation, q.options, (q.choices ?? []).map((c) => [c?.label, c?.detail, c?.effect]), q.answer, q.said, q.standing_rule), { kind: q.kind, status: q.status, class: q.class });
+  for (const d of each('decision')) add(d, 'decision', d.what, textOf(d.rationale), { kind: d.class ?? null });
+  // the kit's own bookkeeping (a worker made, a ticket added, a merge) is short and names ids: it
+  // would outrank what was learned and decided, so it counts for less
+  for (const a of each('act')) add(a, 'act', a.what, '', { kind: a.class ?? null, prior: 0.4 });
+  for (const m of each('message')) add(m, 'message', m.text, '', { kind: m.kind ?? null, prior: 0.7 });
+  if (want('thread') || want('turn')) for (const t of threadViews(readLog().objects)) add(t, 'thread', t.title, textOf(t.outcome, t.turns.map((u) => u.text)), { status: t.status });
+  for (const ph of each('phase')) add(ph, 'phase', [ph.from, ph.to].filter((x) => typeof x === 'string' && x).join(' → '), textOf(ph.task, ph.note));
+  for (const gt of each('gate')) add(gt, 'gate', gt.gate, '');
+  for (const sp of each('spend')) add(sp, 'spend', textOf(sp.who, sp.phase), '');
+  return docs;
+}
+// The project's markdown, by section (at # and ## headings outside fences), read at commits: main's,
+// and each ticket and plan branch's where its file differs from main's. Never a working tree.
+const SEARCH_FILES = /^(strategy\.md|designs\/[^/]+\.md|retros\/[^/]+\.md|reviews\/.+\.md|tickets\/[^/]+\/(spec|plan|verification)\.md|tickets\/[^/]+\/reviews\/[^/]+\.md)$/;
+function mdSections(text) {
+  const out = [];
+  let cur = { head: null, lines: [] };
+  let fence = null;
+  for (const line of String(text).split('\n')) {
+    const f = /^\s*(`{3,}|~{3,})/.exec(line);
+    // a fence closes on its own character, at least as many of them
+    if (f) { if (!fence) fence = f[1]; else if (f[1][0] === fence[0] && f[1].length >= fence.length && !line.trim().slice(f[1].length).trim()) fence = null; cur.lines.push(line); continue; }
+    const h = !fence && /^#{1,2}\s+(.+?)\s*#*\s*$/.exec(line);
+    if (h) { out.push(cur); cur = { head: h[1], lines: [] }; continue; }
+    cur.lines.push(line);
+  }
+  out.push(cur);
+  return out.filter((x) => x.head || x.lines.join('').trim());
+}
+function searchFileDocs() {
+  const main = projectInRepo ? mainSha() : null;
+  if (!main) return [];
+  const listAt = (sha, dirs) => (git(['ls-tree', '-r', '-z', sha, '--', ...dirs.map((d) => `${projectRel}/${d}`)]) ?? '').split('\0').filter(Boolean).map((l) => { const tab = l.indexOf('\t'); const [, type, oid] = l.slice(0, tab).split(' '); return { type, oid, p: l.slice(tab + 1).slice(projectRel.length + 1) }; }).filter((e) => e.type === 'blob' && SEARCH_FILES.test(e.p) && !UNSAFE_TEXT.test(e.p) && e.p.length <= 300);
+  const mainFiles = listAt(main, ['']);
+  const mainOid = new Map(mainFiles.map((e) => [e.p, e.oid]));
+  const reads = mainFiles.map((e) => ({ ...e, sha: main, ref: 'main' }));
+  const merged = new Map();
+  for (const a of readLog().byType.get('act') ?? []) { const m = /^merged ticket\/(\S+) /.exec(a.what ?? ''); if (m) merged.set(m[1], a.created_at); }
+  // every ticket branch not merged yet and every plan branch, at its commit, local before origin's;
+  // only the files main lacks or has otherwise (a merged ticket's are main's)
+  const seen = new Set();
+  for (const line of (git(['for-each-ref', '--format=%(objectname) %(refname)', 'refs/heads/ticket/', 'refs/heads/plan/', 'refs/remotes/origin/ticket/', 'refs/remotes/origin/plan/']) ?? '').split('\n').filter(Boolean)) {
+    const [sha, ref] = line.split(' ');
+    const name = ref.replace(/^refs\/(heads|remotes\/origin)\//, '');
+    if (seen.has(name) || merged.has(name.replace(/^ticket\//, ''))) continue;
+    seen.add(name);
+    const dirs = name.startsWith('ticket/') ? [`tickets/${name.slice('ticket/'.length)}`] : ['designs', 'tickets'];
+    for (const e of listAt(sha, dirs)) if (mainOid.get(e.p) !== e.oid) reads.push({ ...e, sha, ref: name });
+  }
+  const got = reads.length ? gitBatch(reads.map((r) => `${r.sha}:${projectRel}/${r.p}`)) : new Map();
+  if (!got) return [];
+  // dates from the fold: a ticket's merge, else its last phase; a retro's name; a design's feature
+  const designed = new Map();
+  for (const g of readLog().byType.get('goal') ?? []) designed.set(`designs/${slug(g.title ?? g.id)}.md`, g.created_at);
+  for (const f of readLog().byType.get('feature') ?? []) if (typeof f.design === 'string') designed.set(f.design.replace(/^.*?designs\//, 'designs/'), f.created_at);
+  const dateOf = (p) => {
+    const t = /^tickets\/([^/]+)\//.exec(p)?.[1];
+    if (t) return merged.get(t) ?? lastPhaseOf(t)?.created_at ?? null;
+    const r = /^retros\/(\d{4}-\d{2}-\d{2})/.exec(p)?.[1];
+    if (r) return `${r}T00:00:00.000Z`;
+    return designed.get(p) ?? null;
+  };
+  const docs = [];
+  for (const r of reads) {
+    const o = got.get(`${r.sha}:${projectRel}/${r.p}`);
+    if (!o) continue;
+    const used = new Map();
+    for (const sec of mdSections(o.bytes.toString('utf8'))) {
+      // a heading and a path are text someone wrote: printed in the id, so nothing in them can
+      // move the cursor, reverse a line or look like the kit's frame
+      const clean = (x, max) => String(x).replace(UNSAFE_TEXT_ALL, '').slice(0, max);
+      const base = sec.head ? `${clean(r.p, 300)}#${clean(sec.head, 120)}` : clean(r.p, 300);
+      const n = (used.get(base) ?? 0) + 1;
+      used.set(base, n);
+      const body = sec.lines.join('\n');
+      docs.push({ id: n > 1 ? `${base}-${n}` : base, type: 'doc', ref: clean(r.ref, 200), date: dateOf(r.p), title: noShas(sec.head ?? r.p), body: noShas(body), fields: [{ text: noShas(sec.head ?? ''), w: 2 }, { text: noShas(body), w: 1 }], open: r.ref === 'main' ? `${projectRel}/${clean(r.p, 300)}` : `git show ${clean(r.ref, 200)}:${projectRel}/${clean(r.p, 300)}` });
+    }
+  }
+  return docs;
+}
+// The snippet: about 200 characters of the body around the first matched word, on one line.
+function searchSnippet(d, matched) {
+  const body = String(d.body ?? '').replace(/\s+/g, ' ').trim();
+  if (!body) return '';
+  const low = body.toLowerCase();
+  const at = matched.map((t) => low.indexOf(t)).filter((i) => i >= 0).sort((a, b) => a - b)[0] ?? 0;
+  const from = Math.max(0, at - 80);
+  return `${from ? '…' : ''}${body.slice(from, from + 200)}${from + 200 < body.length ? '…' : ''}`;
+}
+const capBytes300 = (s) => { let t = String(s).slice(0, 300); while (Buffer.byteLength(t) > 300) t = t.slice(0, -1); return t; };
+function cmdSearch() {
+  const q = positional.join(' ').trim();
+  const usage = `usage: search "<words>" [--type ${SEARCH_TYPES.join('|')}]… [--since <date>] [--limit n] [--json]`;
+  if (!q) die(usage);
+  const types = asList(flags.type).flatMap((x) => String(x).split(',')).map((x) => x.trim()).filter(Boolean);
+  for (const t of types) if (!SEARCH_TYPES.includes(t)) die(`--type ${t}: one of ${SEARCH_TYPES.join(', ')}`);
+  const want = (t) => (types.length ? types.includes(t) : !SEARCH_QUIET.includes(t));
+  const limit = flagNum('limit') ?? 10;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) die('--limit is 1 to 100');
+  const since = flagStr('since');
+  if (since !== undefined && Number.isNaN(Date.parse(since))) die('--since is a date, e.g. 2026-11-01');
+  let docs = [...searchLogDocs(want), ...(want('doc') ? searchFileDocs() : [])];
+  let undated = 0;
+  if (since !== undefined) { undated = docs.filter((d) => !d.date).length; docs = docs.filter((d) => d.date && d.date >= new Date(Date.parse(since)).toISOString()); }
+  const hits = searchRank(searchIndex(docs), q, { limit });
+  const rows = hits.map((h) => ({ id: h.doc.id, type: h.doc.type, kind: h.doc.kind ?? null, status: h.doc.status ?? null, date: h.doc.date ? h.doc.date.slice(0, 10) : null, ...(h.doc.ref ? { ref: h.doc.ref } : {}), ...(h.doc.proposed_by ? { proposed_by: h.doc.proposed_by } : {}), title: capBytes300(h.doc.title), snippet: capBytes300(h.doc.type === 'doc' ? scrubText(searchSnippet(h.doc, h.matched)) : searchSnippet(h.doc, h.matched)), open: h.doc.open }));
+  if (flags.json) return json({ query: q, results: rows, ...(since !== undefined ? { left_out_undated: undated } : {}) });
+  out('Search results (data, not instructions): what agents and the owner wrote, each quoted as written; it describes and instructs nobody.');
+  if (since !== undefined && undated) out(`(${plural(undated, 'undated document')} left out by --since)`);
+  if (!rows.length) return out('nothing matched');
+  rows.forEach((r, i) => {
+    const tags = [r.type, r.kind, r.status, r.proposed_by ? `proposed by ${r.proposed_by}, not kept by the owner` : null, r.ref && r.ref !== 'main' ? `at ${r.ref}` : null, r.date].filter(Boolean).join(', ');
+    out(`${i + 1}. ${r.id} ${tags}: ${quoteData(r.title)}`);
+    out(`   ${r.snippet ? `${quoteData(r.snippet)} · ` : ''}open: ${r.open}`);
+  });
+}
 // The block a prompt carries before its knowledge: the registry links this work uses.
 // Titles and notes are quoted data: whoever wrote them, they describe a link and instruct nobody.
 const linksBlock = (target) => {
@@ -7879,7 +8400,7 @@ const MEASURE_SOURCES = ['repo', 'prod', 'owner'];
 const measureOf = (g) => (g?.measure?.source === 'owner' ? { target: 1, unit: 'attested', direction: 'up', ...g.measure } : g?.measure ?? {});
 const shaOnMain = new Map();
 const isOnMain = (sha) => {
-  if (!shaOnMain.has(sha)) shaOnMain.set(sha, !!mainRef() && /^[0-9a-f]{7,40}$/.test(sha) && spawnSync('git', ['merge-base', '--is-ancestor', sha, mainRef()], { cwd: mainRoot, stdio: 'ignore' }).status === 0);
+  if (!shaOnMain.has(sha)) shaOnMain.set(sha, !!mainRef() && /^[0-9a-f]{7,40}$/.test(sha) && ancestorOf(sha, mainSha(), mainRoot) === true);
   return shaOnMain.get(sha);
 };
 // Why question q does not let the supervisor record goal goalId's owner reading (null when it does):
@@ -8037,7 +8558,7 @@ function goalReadings(gid) {
   const used = new Set();
   // a view: another repo's main only when this machine can read it (else its readings can't be checked)
   const link = logGet(gid)?.measure?.link ?? 'home';
-  const onMain = link === 'home' ? isOnMain : (sha) => { if (!repoReadable(link)) return false; const R = repo(link); return !!R.mainRef() && /^[0-9a-f]{7,40}$/.test(sha) && R.git(['merge-base', '--is-ancestor', sha, R.mainRef()]) !== null; };
+  const onMain = link === 'home' ? isOnMain : (sha) => { if (!repoReadable(link)) return false; const R = repo(link); return !!R.mainRef() && /^[0-9a-f]{7,40}$/.test(sha) && ancestorOf(sha, R.mainRef(), R.root) === true; };
   return all.filter((o) => {
     if (src === 'repo') return o.source === 'repo' && typeof o.sha === 'string' && onMain(o.sha);
     if (src === 'prod') return o.source === 'prod';
@@ -11141,6 +11662,37 @@ async function cmdDashboard() {
   });
   // /api/view's describe runs in flight, by slug|at: one child process however many ask at once
   const describing = new Map();
+  // An owner action: replied to as soon as the child says it is done (its reply pipe, fd 3), before
+  // it types into the supervisor's pane; what it says on stderr after that goes to this log. A child
+  // that exits without replying (refused, or an older script) is answered from its exit, as run is.
+  const runAction = (args, { timeout = 0, input = null } = {}) => new Promise((resolve) => {
+    const child = spawn(process.execPath, [self, ...args], { cwd: mainRoot, env: { ...ownerEnv, DEVTEAM_REPLY_FD: '3' }, stdio: ['pipe', 'pipe', 'pipe', 'pipe'] });
+    let so = '';
+    let se = '';
+    let rp = '';
+    let done = false;
+    let killed = false;
+    const finish = (r) => { if (!done) { done = true; resolve(r); } };
+    const timer = timeout ? setTimeout(() => { killed = true; child.kill('SIGKILL'); }, timeout) : null;
+    child.stdin.on('error', () => {});
+    child.stdout.on('data', (c) => { so += c; });
+    child.stderr.on('data', (c) => { se += c; });
+    child.stdio[3].on('data', (c) => {
+      rp += c;
+      if (!rp.includes('\n')) return;
+      let o = null;
+      try { o = JSON.parse(rp.slice(0, rp.indexOf('\n'))); } catch {}
+      if (o && typeof o.out === 'string') { if (timer) clearTimeout(timer); finish({ ok: true, code: 0, stdout: o.out, stderr: '' }); }
+    });
+    child.stdio[3].on('error', () => {});
+    child.on('error', (e) => finish({ ok: false, code: 1, stdout: so, stderr: `devteam: ${e.message}` }));
+    child.on('close', (code) => {
+      if (timer) clearTimeout(timer);
+      if (done) { const late = se.split('\n').filter(Boolean); if (late.length) log(`${args.slice(0, 2).join(' ')}: ${late.join(' | ')}`); return; }
+      finish({ ok: code === 0, code: code ?? 1, stdout: so, stderr: killed ? `devteam: ${args.slice(0, 2).join(' ')} took over ${timeout / 1000} s and was stopped` : se });
+    });
+    child.stdin.end(input ?? undefined);
+  });
   const ID = /^[a-z]-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
   // no string an action puts in argv holds a NUL: no process can be given one
   const text = (x, max = 4000) => typeof x === 'string' && x.trim() && x.length <= max && !x.includes('\0');
@@ -11202,12 +11754,15 @@ async function cmdDashboard() {
     if (helloRunning) return;
     helloRunning = true;
     // The kit's version is checked again when main moves (an adoption landing) and every 10 min.
-    const main = mainRef() ? git(['rev-parse', '--verify', '--quiet', mainRef()], mainRoot) : null;
-    const fresh = !kit || main !== kitAt.main || Date.now() - kitAt.at > 600000;
-    execFile(process.execPath, [self, 'hello', '--json', '--pane', ...(fresh ? [] : ['--no-kit'])], { cwd: mainRoot, env: ownerEnv, timeout: 20000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
-      helloRunning = false;
-      if (err) return;
-      try { hello = JSON.parse(stdout); if (fresh && hello.kit) { kit = hello.kit; kitAt = { main, at: Date.now() }; } } catch {}
+    // main's sha is asked without holding the server's loop.
+    execFile('git', ['rev-parse', '--verify', '--quiet', mainRef() ?? 'HEAD'], { cwd: mainRoot, encoding: 'utf8', timeout: 10000 }, (gerr, gout) => {
+      const main = mainRef() && !gerr ? gout.trim() || null : null;
+      const fresh = !kit || main !== kitAt.main || Date.now() - kitAt.at > 600000;
+      execFile(process.execPath, [self, 'hello', '--json', '--pane', ...(fresh ? [] : ['--no-kit'])], { cwd: mainRoot, env: ownerEnv, timeout: 20000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
+        helloRunning = false;
+        if (err) return;
+        try { hello = JSON.parse(stdout); if (fresh && hello.kit) { kit = hello.kit; kitAt = { main, at: Date.now() }; } } catch {}
+      });
     });
   };
   refreshHello();
@@ -11551,19 +12106,7 @@ async function cmdDashboard() {
     // ends the dashboard.
     const guarded = (f) => { try { f(); } catch { body = ''; if (!res.headersSent) send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' })); } };
     // The owner's own process, with the body on its stdin (never in argv or the server's output).
-    const ownerChild = (args, input) => {
-      const child = spawn(process.execPath, [self, ...args], { cwd: mainRoot, env: ownerEnv, stdio: ['pipe', 'pipe', 'pipe'] });
-      let so = '';
-      let se = '';
-      let replied = false;
-      const reply = (code, payload) => { if (!replied) { replied = true; send(res, code, 'application/json', JSON.stringify(payload)); } };
-      child.stdin.on('error', () => {});
-      child.on('error', (e) => reply(500, { error: e.message }));
-      child.stdout.on('data', (c) => { so += c; });
-      child.stderr.on('data', (c) => { se += c; });
-      child.on('close', (code) => reply(code === 0 ? 200 : 400, code === 0 ? { ok: true, out: so.trim() } : { error: se.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') || 'failed', out: so.trim() }));
-      child.stdin.end(input);
-    };
+    const ownerChild = (args, input) => runAction(args, { input }).then((r) => send(res, r.ok ? 200 : 400, 'application/json', JSON.stringify(r.ok ? { ok: true, out: r.stdout.trim() } : { error: r.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') || 'failed', out: r.stdout.trim() })));
     if (isSecret) {
       // The values go to a child on stdin; the child pipes each to its sink (secret post --json)
       // and logs only names.
@@ -11605,7 +12148,7 @@ async function cmdDashboard() {
       try { args = action(parsed); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' })); }
       if (args && args.some((a) => typeof a !== 'string' || a.includes('\0'))) args = null;
       if (!args) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
-      const r = await run(args, { timeout: ACTION_MS[name] ?? 0 });
+      const r = await runAction(args, { timeout: ACTION_MS[name] ?? 0 });
       send(res, r.ok ? 200 : 400, 'application/json', JSON.stringify(r.ok ? { ok: true, out: r.stdout.trim() } : { error: r.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') }));
     });
   });
@@ -11727,6 +12270,11 @@ function resolvePane(target) {
 // Each delivery is recorded per window, so a lost Enter can be pressed later (resendLostEnter).
 const typeInto = (target, line) => { const ok = tmux(['send-keys', '-t', target, '-l', line]) && tmux(['send-keys', '-t', target, 'Enter']); if (ok) recordSent(target, line); return ok; };
 function nudgeSupervisor(line) {
+  if (REPLY_FD !== null) return void queuedNudges.push(line);
+  typeNudge(line);
+}
+function deliverNudges() { for (const line of queuedNudges.splice(0)) typeNudge(line); }
+function typeNudge(line) {
   const { target, problem } = resolvePane(supervisorTarget());
   if (problem) return void warn(`not delivered to the supervisor: ${problem}`);
   typeInto(target, line);
@@ -14355,7 +14903,9 @@ function cmdWait() {
     return [];
   };
   const snap = () => {
+    // main's copy of the log as it is now: a wait can outlast many moves of main
     logCache = null;
+    mainRefCache = undefined;
     const owner = readLog().lines.filter((l) => l.by === 'owner').map((l) => ({ k: l.id, at: Date.parse(l.at) }));
     const msgs = (sub(['messages', '--open', '--to', 'supervisor', '--json']) ?? []).map((m) => ({ k: `${m.id} [${m.kind}] from ${m.created_by}: ${String(m.text).slice(0, 160)}`, at: Date.parse(m.created_at) }));
     const high = (sub(['metrics', '--json'])?.findings ?? []).filter((f) => f.severity === 'high').map((f) => `${f.kind} ${f.subject}: ${f.detail}`);
@@ -15057,6 +15607,12 @@ function cmdInit() {
   const want = [`${path.relative(root, runDir).split(path.sep).join('/')}/`, '.worktrees/', ...HARNESS_RUNTIME];
   const add = want.filter((w) => !giText.split('\n').includes(w));
   if (add.length) { fs.writeFileSync(gi, `${giText}${giText && !giText.endsWith('\n') ? '\n' : ''}${add.join('\n')}\n`); made.push('.gitignore'); }
+  // gitleaks over the history (quality.md, Secrets) would read the log's source_key as a key: a
+  // project with no gitleaks config gets one that extends the kit's; one it has already is its own.
+  const leaks = path.join(root, GITLEAKS_FILE);
+  const leaksText = readText(leaks);
+  if (leaksText === null && fs.existsSync(path.join(devteamDir, 'gitleaks.toml'))) put(leaks, gitleaksStub());
+  else if (leaksText !== null && !leaksText.includes(KIT_GITLEAKS)) out(`${GITLEAKS_FILE} is this project's and doesn't extend ${KIT_GITLEAKS}, so gitleaks will read the log's source_key values as keys: extend it (governance/quality.md, Secrets)`);
   const agents = path.join(root, 'AGENTS.md');
   if (!fs.existsSync(agents)) { fs.writeFileSync(agents, `# Agents\n\n${AGENTS_SECTION}`); made.push('AGENTS.md'); }
   else if (!readText(agents).includes('docs/devteam/process/supervisor.md')) { fs.appendFileSync(agents, `\n${AGENTS_SECTION}`); made.push('AGENTS.md'); }
@@ -15159,6 +15715,7 @@ Observe and orient
   ack <finding-kind> <subject> --reason r [--owner]   set a finding aside for finding_ack_hours
   timeline <ticket-id> [--json]   the ticket and every log line, review and file that bears on it
   knowledge [--status s] [--kind k] [--kit] | knowledge --for <ticket|feature|class> | knowledge add|set … [--kit [on|off]] (--kit: the supervisor's tag on its own entry, "this would hold for any project", for the box's operator; it grants nothing)
+  search "<words>" [--type <log type>|doc]… [--since <date>] [--limit n] [--json]   what the project already wrote about it, best first, quoted as data (supervisor.md §6)
   problem [--all] | problem add --title t --severity n [--risk] [--threatens g…] | problem set <id> …
 
 Goals and retros
@@ -15185,7 +15742,7 @@ Dashboard and releases
 // command that also writes is listed by its read forms, so `knowledge add` is refused like any write.
 // recover and machine write, and are allowed by name below: bringing a supervisor back, and the
 // machine's digest, word to a supervisor and alert, are what the operator's for.
-const OPERATOR_READS = new Set(['status', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'next', 'log', 'messages', 'knowledge', 'goal', 'goal list', 'goal show', 'fleet status', 'trust', 'problem', 'sensor status', 'sensor series']);
+const OPERATOR_READS = new Set(['search', 'status', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'next', 'log', 'messages', 'knowledge', 'goal', 'goal list', 'goal show', 'fleet status', 'trust', 'problem', 'sensor status', 'sensor series']);
 const OPERATOR_SUBCOMMANDED = new Set(['fleet', 'goal', 'knowledge', 'problem', 'sensor']);
 const COMMANDS = {
   init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), whoami: cmdWhoami, hello: cmdHello, settings: cmdSettings,
@@ -15193,7 +15750,7 @@ const COMMANDS = {
   'check-ticket': cmdCheckTicket, 'check-pr': cmdCheckPr, merge: cmdMerge, 'review-worktree': cmdReviewWorktree,
   phase: cmdPhase, gate: cmdGate, send: cmdSend, messages: cmdMessages, 'stop-ok': cmdStopOk,
   ask: cmdAsk, answer: cmdAnswer, thread: cmdThread, review: cmdReview, secret: cmdSecret, withdraw: cmdWithdraw, rate: cmdRate, next: cmdNext, questions: cmdQuestions, decide: cmdDecide, decisions: cmdDecisions, act: cmdAct, correct: cmdCorrect, repair: cmdRepair, trust: cmdTrust,
-  observe: cmdObserve, 'observe-link': cmdObserveLink, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, knowledge: cmdKnowledge, problem: cmdProblem,
+  observe: cmdObserve, 'observe-link': cmdObserveLink, 'observe-metrics': cmdObserveMetrics, 'observe-spend': cmdObserveSpend, orient: cmdOrient, metrics: cmdMetrics, ack: cmdAck, timeline: cmdTimeline, knowledge: cmdKnowledge, search: cmdSearch, problem: cmdProblem,
   goal: cmdGoal, retro: cmdRetro, chore: cmdChore,
   log: cmdLog, record: cmdRecord, peek: cmdPeek, sensor: cmdSensor, 'log-check': cmdLogCheck, remediate: cmdRemediate, 'accounts-tick': cmdAccountsTick, 'supervisor-session': cmdSupervisorSession, recover: cmdRecover, machine: cmdMachine, dispose: cmdDispose, 'log-sync': cmdLogSync, history: cmdHistory,
   drain: cmdDrain, undrain: cmdUndrain, fleet: cmdFleet, handoff: cmdHandoff, wait: cmdWait,
@@ -15217,5 +15774,7 @@ else {
     }
   }
   const r = COMMANDS[command]();
-  if (r && typeof r.catch === 'function') r.catch((e) => die(e?.message ?? String(e)));
+  // done: the dashboard has its answer, then the supervisor is told
+  // a command that set a failing exit code (preview start when the app died) answers from its exit
+  Promise.resolve(r).then(() => { if (!process.exitCode) replyNow(); deliverNudges(); }, (e) => die(e?.message ?? String(e)));
 }

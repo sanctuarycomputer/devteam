@@ -223,6 +223,24 @@ export function g1Outputs(F) {
   for (const i of [1, 2]) ok(old, ['observe', '--subject', 'g1', '--kind', 'slow-test', '--key', 'slow:g1', '--detail', `slow ${i}`, '--valence', '-1'], SUP);
   ok(old, ['observe', '--subject', 'g1', '--kind', 'slow-test', '--key', 'slow:g1', '--detail', 'slow 3', '--valence', '-1', '--owner']);
   ok(old, ['ask', '--question', 'Ship g1 behind a flag?', '--ticket', 'g1-01-a', '--recommendation', 'yes', '--choices', JSON.stringify([{ label: 'yes', detail: 'behind a flag' }, { label: 'no' }]), '--links', JSON.stringify([{ title: 'The spec', path: 'docs/devteam/project/tickets/g1-01-a/spec.md', ref: 'ticket/g1-01-a' }])], SUP);
+  // the log as main has it, read back through git: text beyond ASCII, and one file whose last line
+  // has no newline (each must read back from main exactly as it does from the disk)
+  ok(old, ['observe', '--subject', 'g1', '--kind', 'note', '--key', 'note:g1', '--detail', 'naïve — em dash ✓', '--owner']);
+  F.land();
+  // a ticket merged on main and released: its merge commit, its date and the tag that holds it
+  g(['checkout', '-q', '-b', 'ticket/g1-02-b'], old);
+  write(path.join(old, 'src/b/b.js'), 'b\n');
+  g(['add', '-A', 'src'], old);
+  g(['commit', '-qm', 'g1-02-b: work'], old);
+  g(['checkout', '-q', 'main'], old);
+  g(['merge', '-q', '--no-ff', '-m', 'Merge pull request #2 from t/ticket/g1-02-b', 'ticket/g1-02-b'], old);
+  g(['tag', 'v1.0.0'], old);
+  g(['push', '-q', 'origin', 'main', 'v1.0.0'], old);
+  const durable = path.join(old, 'docs/devteam/project/log');
+  const owners = fs.readdirSync(durable).filter((f) => f.startsWith('owner-'));
+  for (const f of owners) fs.writeFileSync(path.join(durable, f), fs.readFileSync(path.join(durable, f), 'utf8').replace(/\n$/, ''));
+  g(['commit', '-qam', 'chore-log: the owner file without its last newline'], old);
+  g(['push', '-q', 'origin', 'main'], old);
   const both = (r) => `exit ${r.status}\n--- stdout\n${r.out}\n--- stderr\n${r.err}\n`;
   // metrics and fleet status carry clocks and durations; everything else in them must not move
   const TIMEY = /(^since$|_at$|^at$|^now$|hours|minutes|seconds|_ms$|^ms$|^until$|^parity$)/;
@@ -240,6 +258,8 @@ export function g1Outputs(F) {
     knowledge: both(run(old, ['knowledge', '--for', 'g1-01-a'])),
     orient: both(run(old, ['orient'])),
     questions: both(run(old, ['questions'])),
+    'dashboard-data': jsonOut(run(old, ['dashboard-data'])),
+    'peek-ticket': jsonOut(run(old, ['peek', 'ticket', 'g1-01-a'])),
   };
   return Object.fromEntries(Object.entries(outs).map(([k, v]) => [k, g1Norm(v, F.base)]));
 }
@@ -251,6 +271,54 @@ export function coverageFns() {
   const cut = (a, b) => { const i = src.indexOf(a), j = src.indexOf(b); assert.ok(i >= 0 && j > i, `${a} … ${b} marks a block in devteam.mjs`); return src.slice(i, j); };
   const ctx = vm.createContext({});
   return vm.runInContext(`${cut('/* globs start */', '/* globs end */')}\n${cut('/* coverage start */', '/* coverage end */')}\n;({ coverage, caseCollisions, prefixOwners, ownersOf, pathMatches, ownerSuggestions })`, ctx);
+}
+// The script's git readers, loaded by themselves and run against cwd: git(), the batched reader,
+// reads at a commit.
+export function gitReadFns(cwd) {
+  const src = fs.readFileSync(path.join(kit, 'scripts', 'devteam.mjs'), 'utf8');
+  const i = src.indexOf('/* git reads start */'), j = src.indexOf('/* git reads end */');
+  assert.ok(i >= 0 && j > i, 'the git reads block in devteam.mjs');
+  const ctx = vm.createContext({ execFileSync, spawnSync, Buffer, process: { cwd: () => cwd } });
+  return vm.runInContext(`${src.slice(i, j)}\nHOME_CWD = ${JSON.stringify(cwd)};\n;({ git, gitStatus, parseBatch, gitBatch, prefetchAt, showAt, atCommit })`, ctx);
+}
+// The same readers with the store of git facts, its file under runDir; onExit stands for the
+// process ending (the store writes then).
+export function gitFactFns(cwd, runDir) {
+  const src = fs.readFileSync(path.join(kit, 'scripts', 'devteam.mjs'), 'utf8');
+  const cut = (a, b) => { const i = src.indexOf(a), j = src.indexOf(b); assert.ok(i >= 0 && j > i, `${a} … ${b}`); return src.slice(i, j); };
+  const exits = [];
+  const writeJson = (p, obj) => { fs.mkdirSync(path.dirname(p), { recursive: true }); const tmp = `${p}.${process.pid}.tmp`; fs.writeFileSync(tmp, `${JSON.stringify(obj, null, 2)}\n`); fs.renameSync(tmp, p); };
+  const ctx = vm.createContext({ execFileSync, spawnSync, Buffer, fs, path, runDir, writeJson,
+    readJson: (p) => JSON.parse(fs.readFileSync(p, 'utf8')), isObj: (x) => !!x && typeof x === 'object' && !Array.isArray(x),
+    sha256: (b) => crypto.createHash('sha256').update(b).digest('hex'),
+    process: { cwd: () => cwd, env: {}, on: (ev, f) => { if (ev === 'exit') exits.push(f); } } });
+  const fns = vm.runInContext(`${cut('/* git reads start */', '/* git reads end */')}\n${cut('/* git facts start */', '/* git facts end */')}\nHOME_CWD = ${JSON.stringify(cwd)};\n;({ commitDateOf, ancestorOf, releasedInAt, factGet })`, ctx);
+  return { ...fns, exit: () => { for (const f of exits.splice(0)) f(); } };
+}
+// The script's ranked keyword search, loaded by itself.
+export function searchFns() {
+  const src = fs.readFileSync(path.join(kit, 'scripts', 'devteam.mjs'), 'utf8');
+  const i = src.indexOf('/* search start */'), j = src.indexOf('/* search end */');
+  assert.ok(i >= 0 && j > i, 'the search block in devteam.mjs');
+  return vm.runInContext(`${src.slice(i, j)}\n;({ searchTokens, searchIndex, searchRank, searchSimilar })`, vm.createContext({}));
+}
+// A project's writing, generated the same way every time (seeded): questions, each about a topic of
+// its own and with a context that shares some of its words, observations and lessons, from a few
+// thousand made-up words. Sized by the count of each.
+export function searchCorpus({ questions = 130, observations = 300, lessons = 30, words = 60 } = {}) {
+  // mulberry32: 32-bit integer arithmetic, so it never loses precision and cycles
+  let seed = 7;
+  const rnd = () => { seed = (seed + 0x6d2b79f5) | 0; let x = Math.imul(seed ^ (seed >>> 15), 1 | seed); x = (x + Math.imul(x ^ (x >>> 7), 61 | x)) ^ x; return ((x ^ (x >>> 14)) >>> 0) / 4294967296; };
+  const syl = ['ka', 'lo', 'mi', 'ne', 'ru', 'sa', 'to', 'vi', 'zo', 'pe', 'qu', 'da', 'fi', 'gu', 'ho', 'ja'];
+  const vocab = Array.from({ length: 3000 }, () => Array.from({ length: 2 + Math.floor(rnd() * 3) }, () => syl[Math.floor(rnd() * syl.length)]).join(''));
+  const pick = (n) => Array.from({ length: n }, () => vocab[Math.floor(rnd() * vocab.length)]);
+  const say = (n, topic = []) => [...topic, ...pick(n)].sort(() => rnd() - 0.5).join(' ');
+  const qs = Array.from({ length: questions }, (_, i) => { const topic = pick(5); return { id: `q-${i}`, question: `${say(8, topic)}?`, context: say(words, topic.slice(0, 3)) }; });
+  const obs = Array.from({ length: observations }, (_, i) => ({ id: `o-${i}`, subject: pick(1)[0], detail: say(words) }));
+  const ks = Array.from({ length: lessons }, (_, i) => ({ id: `k-${i}`, statement: say(15) }));
+  assert.equal(new Set(qs.map((q) => q.context)).size, qs.length, 'every context its own');
+  assert.equal(new Set(obs.map((o) => o.detail)).size, obs.length, 'every detail its own');
+  return { questions: qs, observations: obs, lessons: ks };
 }
 // A clean partition: nothing unowned, contested, empty or colliding (the script has no caller for it).
 export function coverageClean(r) {
@@ -276,8 +344,8 @@ export function monoFixture(name) {
     fs.writeFileSync(f, txt.replace(m[1], () => JSON.stringify(j, null, 2)));
   };
   const lines = (components, extra = {}) => { edit((j) => { j.components = components; Object.assign(j, extra); }); g(['commit', '-qam', 'lines'], old); g(['push', '-q', 'origin', 'main'], old); };
-  // every path init and fleetFixture track: AGENTS.md and .gitignore from init; config/dev.key is gitignored
-  const STD = { api: { owns: ['api/**'] }, web: { owns: ['web/**'] }, ops: { owns: ['ops/**', '.github/**', 'README.md', '.gitignore', 'AGENTS.md'] } };
+  // every path init and fleetFixture track: AGENTS.md, .gitignore and .gitleaks.toml from init; config/dev.key is gitignored
+  const STD = { api: { owns: ['api/**'] }, web: { owns: ['web/**'] }, ops: { owns: ['ops/**', '.github/**', 'README.md', '.gitignore', '.gitleaks.toml', 'AGENTS.md'] } };
   return { ...F, settingsFile, edit, lines, STD };
 }
 

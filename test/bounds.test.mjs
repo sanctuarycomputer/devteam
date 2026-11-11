@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
-import { coverageFns, fleetFixture, line } from './lib/kit.mjs';
+import { coverageFns, fleetFixture, line, searchCorpus } from './lib/kit.mjs';
 
 test('coverage: bounded on a big tree; each glob compiled once, and owner suggestions match each file once', () => {
   const { coverage, ownerSuggestions, ownersOf } = coverageFns();
@@ -57,5 +57,27 @@ test('the Inbox order: 200 open questions, twenty of them settling the rest, ran
     const base = timed(['goal', 'list']);
     const ms = timed(['questions', '--json']);
     assert.ok(ms < base + 1500, `ranking 200 questions took ${ms.toFixed(0)} ms, ${(ms - base).toFixed(0)} over reading the log (bound 1500 over)`);
+  } finally { F.done(); }
+});
+
+test('search: a project of about six million characters is searched within a second of reading its log', () => {
+  const F = fleetFixture('search-bound');
+  const { old, ok } = F;
+  try {
+    const C = searchCorpus({ questions: 1500, observations: 12000, lessons: 500, words: 70 });
+    const at = (i) => new Date(Date.UTC(2026, 0, 1, 0, 0, 0, i)).toISOString();
+    let text = '';
+    let i = 0;
+    for (const q of C.questions) text += line({ id: `q-20260101-${String(i).padStart(9, '0')}-supervisor`, type: 'question', op: 'new', at: at(i++), by: 'supervisor', kind: 'owner-decision', question: q.question, context: q.context });
+    for (const o of C.observations) text += line({ id: `o-20260101-${String(i).padStart(9, '0')}-supervisor`, type: 'observation', op: 'new', at: at(i++), by: 'supervisor', source: 'repo', subject: o.subject, kind: 'note', detail: o.detail });
+    for (const k of C.lessons) text += line({ id: `k-20260101-${String(i).padStart(9, '0')}-supervisor`, type: 'knowledge', op: 'new', at: at(i++), by: 'supervisor', kind: 'fact', statement: k.statement, scope: 'project', status: 'candidate' });
+    assert.ok(text.length > 5e6, `${text.length} characters`);
+    fs.mkdirSync(path.join(old, 'docs/devteam/run/log'), { recursive: true });
+    fs.appendFileSync(path.join(old, 'docs/devteam/run/log', `supervisor-${new Date().toISOString().slice(0, 7)}.jsonl`), text);
+    const timed = (args) => Math.min(...[0, 1, 2].map(() => { const t0 = process.hrtime.bigint(); ok(old, args); return Number(process.hrtime.bigint() - t0) / 1e6; }));
+    // against the same log read without a search, so a slow machine's start-up doesn't count
+    const base = timed(['knowledge', '--status', 'accepted']);
+    const ms = timed(['search', C.questions[7].context]);
+    assert.ok(ms < base + 1000, `search took ${ms.toFixed(0)} ms, ${(ms - base).toFixed(0)} over reading the log (bound 1000 over)`);
   } finally { F.done(); }
 });
