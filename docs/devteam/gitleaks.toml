@@ -1,0 +1,33 @@
+# devteam's gitleaks config: gitleaks' default rules, plus one allowlist for a field the kit's own
+# log writes. A project's .gitleaks.toml extends it (init writes one where there is none):
+#
+#   [extend]
+#   path = "docs/devteam/gitleaks.toml"
+#
+# gitleaks resolves that path from the folder it runs in, so run it from the repository root.
+# Extend a .gitleaks.toml you already have the same way (governance/quality.md, Secrets).
+#
+# What it allowlists, and only that. The log (project/log/*.jsonl) writes "source_key", the key that
+# groups repeats of one signal ("anthropic-spend-spike-nov9-10", "slow:auth-suite"). gitleaks'
+# generic-api-key rule reads a name with "key" in it, followed by a value with digits in it, as a
+# secret. So the allowlist covers one rule, generic-api-key, and one shape of finding: the JSON key
+# source_key, then a slug value (letters and digits in runs of at most 20, joined by . _ or -). Any
+# other field on that log line, the line's free text ("detail", a sensor's "sample") included, is
+# scanned as before, and so is a source_key whose value isn't a slug: base64 (+ / =), or a run of
+# more than 20 letters and digits. Every other rule (AWS, GitHub, Stripe, Slack, private keys, ...)
+# still sees source_key's value.
+#
+# Tested with gitleaks 8.30.1, which merges a rule's [[rules.allowlists]] into the default rule of
+# the same id; test/gitleaks.test.mjs runs both sides of it through gitleaks itself.
+
+[extend]
+useDefault = true
+
+# On the rule, not as a top-level [[allowlists]] with targetRules: gitleaks drops a targeted
+# allowlist that sits in an extended config, as this one is from a project's .gitleaks.toml.
+[[rules]]
+id = "generic-api-key"
+[[rules.allowlists]]
+description = "devteam log: a source_key slug (the key that groups repeats of one signal)"
+regexTarget = "match"
+regexes = ['''^source_key"[ \t]*:[ \t]*"[A-Za-z0-9]{1,20}(?:[._-][A-Za-z0-9]{1,20})*[" \t]$''']

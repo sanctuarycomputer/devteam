@@ -864,6 +864,19 @@ const componentsOn = (s, link = 'home') => (linesDeclared(s) ? Object.entries(s.
 // the project (home's, from a sibling's worktree), like projectRel.
 const kitRel = path.relative(projectRoot, devteamDir).split(path.sep).join('/');
 const devteamLine = () => [...(kitRel && !kitRel.startsWith('..') ? [`${kitRel}/**`] : []), ...(projectInRepo ? [`${projectRel}/**`] : [])];
+// The project's .gitleaks.toml as init writes it: it only extends the kit's gitleaks.toml (gitleaks'
+// default rules, plus the allowlist for the log's source_key). gitleaks reads an extend path from the
+// folder it runs in, the repository root. isGitleaksStub: a file that does only that, comments and
+// blank lines aside, so a sync PR may add it where main has none (upstreamSyncCheck).
+const GITLEAKS_FILE = '.gitleaks.toml';
+const KIT_GITLEAKS = `${kitRel ? `${kitRel}/` : ''}gitleaks.toml`;
+const gitleaksExtend = () => `[extend]\npath = "${KIT_GITLEAKS}"`;
+const gitleaksStub = () => `# gitleaks reads this file. It extends devteam's config: gitleaks' default rules, plus an allowlist
+# for one field of the kit's own log (${KIT_GITLEAKS} says which, and why). Add this project's
+# own rules and allowlists below it (governance/quality.md, Secrets).
+${gitleaksExtend()}
+`;
+const isGitleaksStub = (text) => typeof text === 'string' && text.split('\n').map((l) => l.replace(/#.*/, '').trim()).filter(Boolean).join('\n') === gitleaksExtend();
 // A real kit file: under the kit's own path, other than project/ and run/ (a project's own files, and
 // its machine state). Everything else a chore changes is the project's.
 const isKitFile = (f) => { if (kitRel.startsWith('..')) return false; const rel = kitRel ? (f.startsWith(`${kitRel}/`) ? f.slice(kitRel.length + 1) : null) : f; return rel !== null && !/^(project|run)\//.test(rel); };
@@ -4001,18 +4014,23 @@ function upstreamSyncCheck(chore, sha, changed) {
   const onDefault = tagSha && git(['fetch', '--quiet', '--no-tags', src, '+HEAD:refs/devteam-upstream-default/HEAD'], mainRoot) !== null
     && git(['merge-base', '--is-ancestor', tagSha, 'refs/devteam-upstream-default/HEAD'], mainRoot) !== null;
   if (!onDefault) return { problem: `standing approval for upstream syncs: tag "${tag}" is not on the default branch of ${redactUrl(s.upstream_repo)}, or that can't be confirmed. The owner's answer is needed: --approved <qid>` };
+  // The one file outside the kit a sync may carry: the .gitleaks.toml init writes, where main has
+  // none and the release ships the kit's gitleaks.toml it extends. Exactly that (isGitleaksStub), so
+  // the PR can't bring an allowlist of its own in with it.
+  const blob = (ref, f) => git(['rev-parse', '--verify', '--quiet', `${ref}:${f}`], mainRoot);
+  const stub = changed.includes(GITLEAKS_FILE) && mb && !blob(mb, GITLEAKS_FILE) && blob(sha, KIT_GITLEAKS) && isGitleaksStub(git(['show', `${sha}:${GITLEAKS_FILE}`], mainRoot));
+  if (stub) changed = changed.filter((f) => f !== GITLEAKS_FILE);
   if (policy) {
     const problem = adoptProblem({ tag, sha, mb, main, changed, src });
     if (problem) return { problem: `settings.upstream_sync "adopt" covers only a whole newer release: ${problem}. The owner's answer is needed: --approved <qid>` };
   }
-  const blob = (ref, f) => git(['rev-parse', '--verify', '--quiet', `${ref}:${f}`], mainRoot);
   const differ = [];
   for (const f of changed) {
     if (!f.startsWith(`${kitRel}/`)) { differ.push(`${f} (outside the kit)`); continue; }
     if (blob(sha, f) !== blob(`refs/devteam-upstream/${tag}`, `docs/devteam/${f.slice(kitRel.length + 1)}`)) differ.push(f);
   }
   if (differ.length) return { problem: `standing approval covers only files copied verbatim from upstream ${tag}; these differ: ${differ.slice(0, 6).join(', ')}${differ.length > 6 ? ', …' : ''}. The owner's answer is needed: --approved <qid>` };
-  return { rule, policy, tag, tagSha };
+  return { rule, policy, tag, tagSha, stub: !!stub };
 }
 // What "adopt" needs beyond the standing rule; the reason it isn't met, else null. The PR starts at
 // main's tip, or the merge's 3-way result needn't be the files compared here. The tag is strictly
@@ -4351,7 +4369,7 @@ function cmdMerge() {
     let kitRule = null;
     if (outside.length && (!approved || !kitApproved) && chore.startsWith('devteam-sync-')) {
       const r = upstreamSyncApproval(chore, sha, outside);
-      if (r.rule || r.policy) { kitRule = standing = r; out(`kit files match upstream ${r.tag} exactly; approved by ${r.rule ? `the owner's standing rule ${r.rule.id}` : 'settings.upstream_sync "adopt"'}; ${r.tag} is ${r.tagSha}`); } else if (r.problem && !approved) fails.push(r.problem);
+      if (r.rule || r.policy) { kitRule = standing = r; out(`kit files match upstream ${r.tag} exactly${r.stub ? `, and ${GITLEAKS_FILE} only extends the kit's gitleaks.toml` : ''}; approved by ${r.rule ? `the owner's standing rule ${r.rule.id}` : 'settings.upstream_sync "adopt"'}; ${r.tag} is ${r.tagSha}`); } else if (r.problem && !approved) fails.push(r.problem);
     }
     if (outside.length && !approved && !kitRule && base) {
       const r = ciFixApproval(chore, sha, base, outside);
@@ -14907,6 +14925,12 @@ function cmdInit() {
   const want = [`${path.relative(root, runDir).split(path.sep).join('/')}/`, '.worktrees/', ...HARNESS_RUNTIME];
   const add = want.filter((w) => !giText.split('\n').includes(w));
   if (add.length) { fs.writeFileSync(gi, `${giText}${giText && !giText.endsWith('\n') ? '\n' : ''}${add.join('\n')}\n`); made.push('.gitignore'); }
+  // gitleaks over the history (quality.md, Secrets) would read the log's source_key as a key: a
+  // project with no gitleaks config gets one that extends the kit's; one it has already is its own.
+  const leaks = path.join(root, GITLEAKS_FILE);
+  const leaksText = readText(leaks);
+  if (leaksText === null && fs.existsSync(path.join(devteamDir, 'gitleaks.toml'))) put(leaks, gitleaksStub());
+  else if (leaksText !== null && !leaksText.includes(KIT_GITLEAKS)) out(`${GITLEAKS_FILE} is this project's and doesn't extend ${KIT_GITLEAKS}, so gitleaks will read the log's source_key values as keys: extend it (governance/quality.md, Secrets)`);
   const agents = path.join(root, 'AGENTS.md');
   if (!fs.existsSync(agents)) { fs.writeFileSync(agents, `# Agents\n\n${AGENTS_SECTION}`); made.push('AGENTS.md'); }
   else if (!readText(agents).includes('docs/devteam/process/supervisor.md')) { fs.appendFileSync(agents, `\n${AGENTS_SECTION}`); made.push('AGENTS.md'); }
