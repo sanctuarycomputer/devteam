@@ -1971,12 +1971,23 @@ const homeReleasedIn = (sha, pattern) => releasedInAt(sha, pattern);
 // Read a project file from a git ref (a ticket's branch, an exact head) or the working tree.
 function srcRead(src, rel) {
   if (src.repo && src.repo.name !== 'home') return src.repo.srcRead(src.ref ?? null, rel);
-  if (src.ref && projectInRepo) return git(['show', `${src.ref}:${projectRel}/${rel}`]);
+  if (src.ref && projectInRepo) { const sha = refAt(src.ref); return sha ? showAt(sha, `${projectRel}/${rel}`) : git(['show', `${src.ref}:${projectRel}/${rel}`]); }
   return readText(path.join(projectDir, rel));
+}
+// A ref as the commit it names, where that costs no git call of its own: a read-only command's ref
+// listing, or a ref that is already a full sha. Else null, and the caller asks by name, as before.
+const refAt = (ref, resolve = resolveCommit) => (FULL_SHA.test(ref) ? ref : gitReadCache && ref.startsWith('refs/') ? resolve(ref) : null);
+// A folder listed at a ref: its files are read at once, all in one git call, at the commit the ref
+// named (a dashboard refresh read each ticket branch's review files one call each).
+function listAndPrefetch(ref, dirPath, gitFn, cwd, resolve) {
+  const names = (gitFn(['ls-tree', '--name-only', `${ref}:${dirPath}`]) ?? '').split('\n').filter(Boolean);
+  const sha = refAt(ref, resolve);
+  if (sha && names.length) prefetchAt(sha, names.map((n) => `${dirPath}/${n}`), cwd);
+  return names;
 }
 function srcList(src, relDir) {
   if (src.repo && src.repo.name !== 'home') return src.repo.srcList(src.ref ?? null, relDir);
-  if (src.ref && projectInRepo) return (git(['ls-tree', '--name-only', `${src.ref}:${projectRel}/${relDir}`]) ?? '').split('\n').filter(Boolean);
+  if (src.ref && projectInRepo) return listAndPrefetch(src.ref, `${projectRel}/${relDir}`, (a) => git(a), HOME_CWD, resolveCommit);
   const p = path.join(projectDir, relDir);
   return fs.existsSync(p) ? fs.readdirSync(p) : [];
 }
@@ -2047,8 +2058,8 @@ function linkRepo(id) {
     mergedAt: (tid) => { if (!c.mergedAt.has(tid)) { const sha = R.mergeShaFor(tid); const t = sha ? commitDateOf(sha, root) : NaN; c.mergedAt.set(tid, Number.isNaN(t) ? null : t); } return c.mergedAt.get(tid); },
     ticketBranchRef: (tid) => [`refs/heads/ticket/${tid}`, `refs/remotes/origin/ticket/${tid}`].find((r) => resolve(r)) ?? null,
     releasedIn: (sha, pattern) => releasedInAt(sha, pattern, root),
-    srcRead: (ref, relPath) => (ref ?? mainRefR() ? g(['show', `${ref ?? mainRefR()}:${rel}/${relPath}`]) : null),
-    srcList: (ref, relDir) => (ref ?? mainRefR() ? (g(['ls-tree', '--name-only', `${ref ?? mainRefR()}:${rel}/${relDir}`]) ?? '').split('\n').filter(Boolean) : []),
+    srcRead: (ref, relPath) => { const at = ref ?? mainRefR(); if (!at) return null; const sha = refAt(at, resolve); return sha ? showAt(sha, `${rel}/${relPath}`, root) : g(['show', `${at}:${rel}/${relPath}`]); },
+    srcList: (ref, relDir) => (ref ?? mainRefR() ? listAndPrefetch(ref ?? mainRefR(), `${rel}/${relDir}`, g, root, resolve) : []),
     resetCaches: () => { c.mainRef = undefined; c.log = null; c.parents = null; c.mergeSha.clear(); c.mergedAt.clear(); },
     // in another repo the kit's line is only its project folder, where tickets keep their records
     devteamLine: () => [`${rel}/**`],
