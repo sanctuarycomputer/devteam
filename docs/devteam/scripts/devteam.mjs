@@ -1761,7 +1761,8 @@ function cmdLog() {
   if (flagStr('id')) objs = objs.filter((o) => o.id === flagStr('id'));
   objs.sort(byTime);
   objs = objs.slice(-Number(flagStr('tail') ?? 50));
-  if (flags.json) return json(objs);
+  // each record's stage in the loop, and an observation's provenance (computed: x-ooda)
+  if (flags.json) return json(objs.map(withOoda));
   for (const o of objs) {
     const what = o.question ?? o.statement ?? o.title ?? o.what ?? o.detail ?? o.text ?? (o.type === 'phase' ? `${o.from ?? '-'} -> ${o.to}` : o.type === 'gate' ? `${o.gate} ${o.ok ? 'ok' : 'FAIL'} ${o.ms}ms` : '');
     out(`${o.created_at} ${o.id} [${o.type}${o.kind ? ` ${o.kind}` : ''}${o.status ? ` ${o.status}` : ''}] ${String(what).slice(0, 160)}`);
@@ -7183,6 +7184,46 @@ function cmdRepair() {
 
 // --- observe and orient ---
 
+// Where a record sits in the loop and where an observation came from (schema x-ooda), computed
+// when it is read and never stored: `source` and `detector` already mean things every kit reads (a
+// sensor's name, repo or prod on a goal reading, detector sensor on the kit's own lines), so a
+// rewrite would have an older kit on a mixed fleet misread a newer kit's lines.
+const OODA = SCHEMA['x-ooda'];
+// observe, learn, decide, act, orient, measurement or inbox; null for the work graph and conversation.
+// An act is always Act, whether or not a decision stands behind it.
+const stageOf = (o) => { const s = OODA.stages[o?.type]; return !s ? null : typeof s === 'string' ? s : s.kind[o.kind] ?? s.kind['*']; };
+// The sources each writer may name for itself (observe --source); sensor, metrics and spend are the
+// kit's own, read off its own lines, never given. The supervisor records what the owner said (an
+// answer, a thread, the chat), but never speaks as the owner.
+const SOURCE_FOR = { ticket: ['worker'], planner: ['planner'], supervisor: OODA.sources.filter((s) => !['sensor', 'metrics', 'spend', 'owner'].includes(s)), owner: ['owner', 'owner-answer', 'owner-thread', 'owner-chat'] };
+// { from, ref }: from in x-ooda.sources, ref which one within it (a sensor's name, a finding's kind,
+// a question, a thread, a retro's file). First match wins.
+function provenanceOf(o) {
+  if (o?.type !== 'observation') return null;
+  const cls = writerClass(o.created_by);
+  const ref = o.source_ref ?? null;
+  // a set-aside (an ack, a triage ignore) is the call of whoever made it, not the check it sets
+  // aside: it falls to its writer below, though an ignore carries detector sensor
+  const setAside = ['finding-ack', 'sensor-ignored', 'sensor-unignored', 'sensor-reconsidered'].includes(o.kind);
+  // the kit's own lines, as the readers already trust them: a sensor's from the supervisor's process
+  // (fromSensor, which also takes a supervisor's hand line, as it always has), the findings pass's
+  // and the pane check's from the supervisor alone
+  if (!setAside && fromSensor(o)) return { from: 'sensor', ref: o.source ?? null };
+  if (!setAside && o.detector === 'metrics' && cls === 'supervisor') return { from: o.kind === 'cost-hotspot' ? 'spend' : 'metrics', ref: o.kind };
+  if (o.detector === 'pane' && cls === 'supervisor') return { from: 'metrics', ref: 'pane' };
+  // a goal reading (goal reading, by the supervisor or the owner): a repo or prod measure is read like a
+  // sensor's; an owner measure is the owner's yes to a goal-met question
+  const reading = o.kind === 'reading' && ['owner', 'supervisor'].includes(cls);
+  if (reading && ['repo', 'prod'].includes(o.source)) return { from: 'sensor', ref: 'goal-measure' };
+  if (reading && o.source === 'owner' && o.approved) return { from: 'owner-answer', ref: o.approved };
+  if (o.kind === 'thread-resolved' && ['owner', 'supervisor'].includes(cls)) return { from: 'owner-thread', ref: o.refs?.[0] ?? null };
+  if (o.kind === 'retro' && cls === 'supervisor') return { from: 'retro', ref };
+  if (!setAside && (SOURCE_FOR[cls] ?? []).includes(o.source)) return { from: o.source, ref };
+  if (cls === 'owner') return { from: o.channel === 'chat' ? 'owner-chat' : o.channel === 'thread' ? 'owner-thread' : 'owner', ref };
+  return { from: cls === 'ticket' ? 'worker' : cls, ref };
+}
+// A record as the views show it: its stage, and an observation's provenance.
+const withOoda = (o) => (o?.type === 'observation' ? { ...o, stage: stageOf(o), provenance: provenanceOf(o) } : { ...o, stage: stageOf(o) });
 function cmdObserve() {
   const by = flags.owner ? ownerWriter().by : logWriter();
   // the sensors write their own lines; a hand-made one could fake an outage or hide an error
@@ -7190,6 +7231,12 @@ function cmdObserve() {
   const subject = flagStr('subject') ?? die('observe needs --subject (a ticket, component, feature, gate, goal, class or act id)');
   // the kit's own detectors write their own lines: a hand-written one could pass for a poll's
   if (['sensor', 'metrics', 'pane'].includes(flagStr('detector'))) die(`observe --detector ${flagStr('detector')}: those lines come from the kit itself (sensor poll, observe-metrics, the pane check); use another detector name`);
+  // --source in the loop's words is the writer's own; older free text is still written as given,
+  // and reads as its writer's (provenanceOf)
+  const src = flagStr('source');
+  if (['sensor', 'metrics', 'spend'].includes(src)) die(`observe --source ${src}: those lines come from the kit itself (sensor poll, observe-metrics, observe-spend)`);
+  const mine = SOURCE_FOR[writerClass(by)];
+  if (OODA.sources.includes(src) && !mine.includes(src)) die(`observe --source ${src}: a ${{ ticket: 'worker', planner: 'planner', supervisor: 'supervisor', owner: 'owner' }[writerClass(by)]}'s observation is from ${mine.join(', ')}`);
   const line = appendLog({
     type: 'observation', source: flagStr('source') ?? writerClass(by), subject, kind: flagStr('kind') ?? die('observe needs --kind (a slug)'),
     detail: flagStr('detail') ?? die('observe needs --detail'), detector: flagStr('detector'), severity: flagNum('severity'), valence: flagNum('valence'),
@@ -9248,7 +9295,7 @@ function collectOoda() {
     goals: logObjects('goal').map(goalView).sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99)),
     roadmap: collectRoadmap(),
     retro: retroDue(),
-    observations: recent(logObjects('observation').filter((o) => !['reading', 'retro', 'finding-ack'].includes(o.kind)), 40),
+    observations: recent(logObjects('observation').filter((o) => !['reading', 'retro', 'finding-ack'].includes(o.kind)), 40).map(withOoda),
     clusters: orientClusters(),
     // every lesson waiting on the owner is in the Inbox, however many: only the rest are the recent 60
     knowledge: [...recent(logObjects('knowledge').filter((k) => k.status === 'candidate'), Infinity), ...recent(logObjects('knowledge').filter((k) => !['retired', 'candidate'].includes(k.status)), 60)],
@@ -14036,6 +14083,8 @@ const fileHistoryIn = (R, rel, ref) => (!R ? '' : R.git(['log', '-n', '60', '--f
 function peekView(kind, id) {
   // the stored record this object is, or lives in (a story in its feature, a milestone in its goal)
   const v = { kind, id, record: recordView(flagStr('rec') ?? (kind === 'planner' ? '' : id)) };
+  // where a record sits in the loop, and where an observation came from
+  if (v.record) { const o = logGet(v.record.id); v.stage = stageOf(o); if (o.type === 'observation') v.provenance = provenanceOf(o); }
   const cited = (refs) => Object.fromEntries([...new Set(refs ?? [])].map((r) => [r, logGet(r)]).filter(([, o]) => o).map(([r, o]) => [r, { type: o.type, created_at: o.created_at, created_by: o.created_by, kind: o.kind ?? null, text: o.detail ?? o.statement ?? o.what ?? o.title ?? o.question ?? o.text ?? null }]));
   if (kind === 'ticket') {
     gitReadCache = new Map();
@@ -14670,7 +14719,7 @@ Decide and act (supervisor.md, constitution.md)
   trust [--json]                  the ladder: rung, ceiling, agreement, corrections per class
 
 Observe and orient
-  observe --subject s --kind k --detail d [--severity 0-4] [--valence -2..2] [--key k] [--refs ids] [--fix f] [--value n --unit u]
+  observe --subject s --kind k --detail d [--source owner-chat|owner-answer|owner-thread|retro|…] [--severity 0-4] [--valence -2..2] [--key k] [--refs ids] [--fix f] [--value n --unit u]
   observe-link --url u | --path p --title t [--for scope…] [--notes n] [--owner]   a resource the work uses; orient proposes it for the registry
   wait [--minutes n]   supervisor, between ticks: blocks until a new message to you, a new owner line, a new high finding, or the tick is due (tick_minutes, default 15); an open high finding returns at once until acted on or acked
   observe-metrics | observe-spend | orient [--json] | metrics [--since date] [--json]   (observe-metrics records spend lines too)

@@ -783,7 +783,7 @@
         "type": "object",
         "properties": {
           "source": {
-            "description": "Who or what noticed it.",
+            "description": "Who or what noticed it, as its writer gave it: a sensor's name on a sensor's line, repo, prod or owner on a goal reading, one of x-ooda.sources from observe --source, or older free text. Free text stays valid; where it came from, in x-ooda.sources words, is computed when it is read (provenance).",
             "type": "string"
           },
           "subject": {
@@ -799,7 +799,7 @@
             "type": "string"
           },
           "detector": {
-            "description": "The check that found it.",
+            "description": "The check that found it: sensor and metrics mark the kit's own lines (every kit reads them so), pane the kit's pane check; anything else is free text.",
             "type": "string"
           },
           "severity": {
@@ -2408,6 +2408,59 @@
           "corrected"
         ]
       }
+    }
+  },
+  "x-ooda": {
+    "description": "Where each record sits in the loop (Observe, Orient, Decide, Act, Learn), and the words for where an observation came from. The views compute both when they read a record (stageOf, provenanceOf in scripts/devteam.mjs); nothing stores them, so a line an older kit wrote reads the same. A measurement (a reading, spend, a gate) is outside the loop: it is never a signal Orient groups. inbox: a question, drawn in Decide as the owner's call once answered. A type not listed (the work graph, conversation) has no stage.",
+    "x-tip": "The five stages of the loop: what was noticed, what is known, what was decided, what was done, and what was learned.",
+    "stages": {
+      "observation": {
+        "kind": {
+          "reading": "measurement",
+          "learning": "learn",
+          "outcome": "learn",
+          "fix-deployed": "learn",
+          "fix-regressed": "learn",
+          "recurred": "learn",
+          "finding-ack": "decide",
+          "sensor-ignored": "decide",
+          "sensor-unignored": "decide",
+          "*": "observe"
+        }
+      },
+      "knowledge": "orient",
+      "problem": "orient",
+      "decision": "decide",
+      "act": "act",
+      "question": "inbox",
+      "spend": "measurement",
+      "gate": "measurement"
+    },
+    "sources": [
+      "sensor",
+      "metrics",
+      "spend",
+      "owner",
+      "owner-answer",
+      "owner-thread",
+      "owner-chat",
+      "retro",
+      "worker",
+      "planner",
+      "supervisor"
+    ],
+    "x-source-words": {
+      "sensor": "a production sensor, or a goal's measure",
+      "metrics": "the kit's own checks",
+      "spend": "the spend meter",
+      "owner": "you",
+      "owner-answer": "your answer to a question",
+      "owner-thread": "a thread with you",
+      "owner-chat": "what you said in the supervisor's chat",
+      "retro": "a retro",
+      "worker": "a ticket's worker",
+      "planner": "a planner",
+      "supervisor": "the supervisor"
     }
   }
 }
