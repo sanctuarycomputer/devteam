@@ -224,3 +224,32 @@ test('the page\'s words for where an observation sits and where it came from', a
   assert.equal(fromWords({ from: 'worker', ref: null }, { created_by: 'w-01-a' }), 'From the agent on checkout');
   assert.equal(fromWords({ from: 'metrics', ref: 'stale-worker' }), "From the kit's own checks (stale worker)");
 });
+
+test('the lineage as the page draws it: n<i> is the i-th node, in its stage\'s subgraph; the list fallback links every node', async () => {
+  const F = fleetFixture('ooda-lineage-draw');
+  try {
+    const C = incidentChain(F);
+    const p = peek(F, 'decision', C.d);
+    const M = p.lineage_mermaid;
+    assert.equal(M, F.ok(F.old, ['peek', 'decision', C.d, '--mermaid']), 'the peek carries what --mermaid prints');
+    // each subgraph holds exactly the nodes of its stage, by their index
+    const blocks = Object.fromEntries([...M.matchAll(/^subgraph s_(\w+)\["\w+"\]\n([\s\S]*?)\nend$/gm)].map(([, s, body]) => [s, [...body.matchAll(/^n(\d+)[[(]/gm)].map((m) => Number(m[1]))]));
+    const want = {};
+    p.lineage.nodes.forEach((n, i) => { if (n.stage && n.stage !== 'measurement' && n.stage !== 'inbox') (want[n.stage] ??= []).push(i); });
+    assert.deepEqual(blocks, want);
+    for (const [i, n] of p.lineage.nodes.entries()) assert.match(M, new RegExp(`^n${i}\\[\\(?"?\\[?"${n.label.replace(/[^A-Za-z0-9 .,:!?()'/+-]/g, '').replace(/\s+/g, ' ').trim().slice(0, 60).replace(/[()+?.]/g, '\\$&')}"`, 'm'), `n${i} is ${n.id}`);
+    // the page's list fallback: by stage in order, every node that opens a sidepeek a link
+    const vm = await import('node:vm');
+    const html = fs.readFileSync(path.join(F_KIT, 'dashboard/index.html'), 'utf8');
+    const src = html.slice(html.indexOf('/* loop-place start */'), html.indexOf('/* loop-place end */'));
+    const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const ctx = vm.createContext({ esc, linkify: esc, qlink: esc, who: esc, words: (x) => String(x).replace(/-/g, ' '), when: () => '', DATA: {} });
+    vm.runInContext(`${src}\n;globalThis.api = { lineageList };`, ctx);
+    const list = ctx.api.lineageList(p.lineage);
+    const heads = [...list.matchAll(/<h4>([^<]+)<\/h4>/g)].map((m) => m[1]);
+    assert.deepEqual(heads, ['Observe', 'Orient', 'Decide', 'Act', 'Learn', 'What it is about']);
+    const hrefs = [...list.matchAll(/<a class="linkish" href="([^"]+)"/g)].map((m) => m[1]);
+    assert.deepEqual(hrefs.sort(), p.lineage.nodes.map((n) => n.href).filter(Boolean).map(esc).sort());
+    assert.match(list, new RegExp(`href="#decision/${C.d}" aria-current="page"`), 'the opened record is marked');
+  } finally { F.done(); }
+});

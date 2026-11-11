@@ -1305,6 +1305,10 @@ test('the Loop: a card opens its sidepeek; an observation says where it came fro
   const SUP = { DEVTEAM_ROLE: 'supervisor' };
   const O1 = F.ok(F.old, ['observe', '--subject', 'app', '--kind', 'slow-test', '--detail', 'the checkout test is slow'], SUP);
   const O2 = F.ok(F.old, ['observe', '--subject', 'app', '--kind', 'slow-test', '--detail', `slower than ${O1}`], SUP);
+  // two more that became a lesson: each has a lineage to draw
+  const O3 = F.ok(F.old, ['observe', '--subject', 'pay', '--kind', 'timeout', '--detail', 'payments timed out'], SUP);
+  const O4 = F.ok(F.old, ['observe', '--subject', 'pay', '--kind', 'timeout', '--detail', 'payments timed out again'], SUP);
+  const K = F.ok(F.old, ['knowledge', 'add', '--kind', 'lesson', '--scope', 'project', '--statement', 'payments time out under load', '--evidence', O3, O4], SUP).match(/k-\S+/)[0];
   // a finding whose subject holds a /, three times on two days: a recurring signal
   const logDir = path.join(F.old, 'docs/devteam/run/log');
   const stamp = (d) => `${d.toISOString().slice(0, 10).replace(/-/g, '')}-${d.toISOString().slice(11, 23).replace(/[:.]/g, '')}`;
@@ -1348,4 +1352,22 @@ test('the Loop: a card opens its sidepeek; an observation says where it came fro
   await soon(`document.querySelectorAll('#drawer-body h3 + ul a[href^="#observation/"]').length === 3`, 'its three observations');
   assert.match(await p.ev(`document.getElementById('drawer-bar-title').textContent`), /Recurring signal/);
   assert.equal(await attr('Unexplained for'), '30 hours');
+  // the lineage: Mermaid blocked, the list stands in, every record in it a link
+  await p.ev(`document.getElementById('drawer-close').click(); void (MERMAID = Promise.reject(new Error('blocked')))`);
+  await p.ev(`location.hash = '#observation/${O3}'`);
+  await soon(`document.querySelectorAll('#drawer-body .lineage-list a[href]').length === 2`, 'the lineage as a list');
+  assert.deepEqual(await p.ev(`[...document.querySelectorAll('#drawer-body .lineage-list a[href]')].map((a) => a.getAttribute('href'))`), [`#observation/${O3}`, `#lesson/${K}`]);
+  assert.equal(await p.ev(`document.querySelector('#drawer-body .lineage-list [aria-current]').getAttribute('href')`), `#observation/${O3}`);
+  assert.equal(await p.ev(`/flowchart/.test(document.getElementById('drawer-body').textContent)`), false, 'never the Mermaid source');
+  // Mermaid available (it loads from its CDN, so a machine offline keeps the list): each node opens its sidepeek
+  await p.ev(`document.getElementById('drawer-close').click(); MERMAID = null`);
+  await p.ev(`location.hash = '#observation/${O4}'`);
+  await soon(`!!document.querySelector('#drawer-body .lineage-list, #drawer-body .lineage svg')`, 'the lineage');
+  let drawn = false;
+  for (let i = 0; i < 300 && !drawn; i++) { drawn = await p.ev(`!!document.querySelector('#drawer-body .lineage svg a.lineage-node')`); if (!drawn) await new Promise((r) => setTimeout(r, 100)); }
+  if (!drawn) return t.diagnostic('Mermaid did not load (offline?): the graph and its links were not checked');
+  assert.equal(await p.ev(`document.querySelector('#drawer-body .lineage svg a[aria-current]').getAttribute('href')`), `#observation/${O4}`);
+  assert.equal(await p.ev(`document.querySelectorAll('#drawer-body .lineage svg a.lineage-node title').length`), 2, 'each node titled');
+  await p.click('#drawer-body .lineage svg a.lineage-node:not([aria-current])');
+  await soon(`location.hash === '#lesson/${K}'`, 'a node opens its sidepeek');
 });
