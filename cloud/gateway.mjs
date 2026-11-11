@@ -15,6 +15,11 @@
 // A session's running dev server gets a name of its own too (cool-tiger.box.example.com), behind the
 // owner's session like an instance, from the hub's list; the gateway holds nothing about them, never
 // picks between two claimants of one name, and box.example.com/dev/ lists them.
+// The kit's viewers (for threads) lean on it twice. A preview's name answers /.devteam/lens, the
+// gateway's own page that frames the app, and the app's own framing headers give way for that one
+// frame. On public.box.example.com, the signed-in owner's own visit to a published page gets a page
+// of the gateway's framing that project's viewer at the published version; everyone else, and any
+// doubt, gets the published bytes. The public name reads the cookie for that choice alone.
 // Node only, no dependencies. Usage: node gateway.mjs [serve | reclaim]
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -240,10 +245,14 @@ const previewCap = (v, n) => (typeof v === 'string' ? v.slice(0, n) : '');
 // entry is checked and capped, and a port outside the allowed set is dropped (a link must never
 // put a dashboard, the hub, the terminal or the gateway behind a second name). A name two ports
 // list is ambiguous: the gateway never picks, or one hostile hello could repoint the owner's link.
-// Every port counts, whatever root each claims: a root is agent-written too.
+// Every port counts, whatever root each claims: a root is agent-written too. So does a dev server's
+// port: the instance that lists it is the one whose page may hold the app (spec §7), and one listing
+// another's port under a name of its own would be that, so a port two instances list is no one's.
+// That denies nothing new (a copied name already breaks a link). A port only one lists is its.
 export function previewLinks(list, ports, ownPort, ttydPort = 7681) {
   const links = new Map();
   if (!Array.isArray(list)) return links;
+  const byDevPort = new Map(); // dev port -> instance port -> its first claimant
   for (const x of listedByPort(list, ports).values()) {
     if (!Array.isArray(x.previews)) continue;
     const seen = new Set();
@@ -254,7 +263,9 @@ export function previewLinks(list, ports, ownPort, ttydPort = 7681) {
         if (!Number.isInteger(port) || port < 1024 || port > 65535 || port === HUB_PORT || ports.includes(port) || port === ttydPort || port === ownPort) continue;
         if (typeof p.label === 'string' && p.label.length > PREVIEW_CAPS.label) continue;
         seen.add(p.name);
-        const row = { port, root: x.root, project: previewCap(p.project, PREVIEW_CAPS.project), session: previewCap(p.session, PREVIEW_CAPS.session), label: previewCap(p.label, PREVIEW_CAPS.label), run: p.run === true };
+        const row = { port, instance: Number(x.port), root: x.root, project: previewCap(p.project, PREVIEW_CAPS.project), session: previewCap(p.session, PREVIEW_CAPS.session), label: previewCap(p.label, PREVIEW_CAPS.label), run: p.run === true };
+        const listers = byDevPort.get(port) ?? byDevPort.set(port, new Map()).get(port);
+        if (!listers.has(row.instance)) listers.set(row.instance, { root: row.root, project: row.project, port });
         const had = links.get(p.name);
         if (!had) links.set(p.name, row);
         else {
@@ -264,8 +275,268 @@ export function previewLinks(list, ports, ownPort, ttydPort = 7681) {
       } catch {}
     }
   }
+  for (const [n, link] of links) {
+    const listers = link.ambiguous ? null : byDevPort.get(link.port);
+    if (listers && listers.size > 1) links.set(n, { ambiguous: [...listers.values()].sort((a, b) => a.root.localeCompare(b.root) || a.port - b.port) });
+  }
   return links;
 }
+// --- the preview lens: the gateway's own page on a preview's name, framing the app -------------
+// The kit's viewer frames it at /.devteam/lens. On the app's own origin, it reads the app's page for
+// the viewer over postMessage (spec §7). The kit's laptop relay serves the same bytes, so its
+// source is in devteam.mjs too, and a test holds the two equal. It is a String.raw, so its regular
+// expressions read as written, and so it may hold no backtick and no dollar sign before a brace.
+export const PREVIEW_LENS = String.raw`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><title>Preview</title><style>html{touch-action:manipulation}html,body{margin:0;height:100%;overflow:hidden;background:#fff}iframe{display:block;border:0;width:100%;height:100%}</style></head>
+<body><!-- The sandbox is advisory: the same-origin app can lift it. frame-src 'self' is what keeps the app's frame on its own origin. -->
+<iframe id="app" title="The app" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-pointer-lock allow-downloads"></iframe><script>
+(() => {
+  'use strict';
+  // devteam's preview lens. It is on the app's own origin, so it can read the app's page. It frames
+  // the app, and answers the viewer that frames it, over postMessage, about what is where. It takes
+  // only the viewer's questions (hello, hit, resolve, scroll-by, scroll-to, go), tells it only about
+  // the app (ready, route, hit-reply, rects, key, errors), and holds nothing of the owner's.
+  const CAPS = { selector: 200, tag: 40, role: 40, text: 80, name: 80, html: 1024, route: 300, error: 200, errors: 3 };
+  const WATCH_MAX = 200;
+  const KEY_MAX = 120;
+  const frame = document.getElementById('app');
+  const enc = new TextEncoder();
+  const size = (s) => enc.encode(s).length;
+  // at most n bytes of UTF-8, never half a character
+  const cap = (s, n) => {
+    const str = String(s == null ? '' : s);
+    if (size(str) <= n) return str;
+    let out = '';
+    let b = 0;
+    for (const c of str) { const k = size(c); if (b + k > n) break; out += c; b += k; }
+    return out;
+  };
+  const capDots = (s, n) => (size(s) <= n ? s : cap(s, n - 3) + '\u2026');
+  const oneLine = (s) => String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
+  const num = (v) => typeof v === 'number' && isFinite(v);
+  const idOk = (id) => (typeof id === 'string' && id.length > 0 && id.length <= 64) || (Number.isInteger(id) && id >= 0);
+
+  // --- the viewer: the page that frames this one, and only it ----------------------------------
+  // This page's frame-ancestors says who that may be. Here: a message must come from that frame
+  // (never the app, which shares this origin), and from the origin first heard.
+  let viewer = null;
+  const tell = (m) => { if (viewer) parent.postMessage(Object.assign({ lens: 1 }, m), viewer); };
+
+  // --- the app ----------------------------------------------------------------------------------
+  const appWindow = () => { try { const w = frame.contentWindow; return w && w.document && w.location.href !== 'about:blank' ? w : null; } catch (e) { return null; } };
+  const routeOf = (w) => { try { return w.location.origin === location.origin ? cap(w.location.pathname + w.location.search + w.location.hash, CAPS.route) : null; } catch (e) { return null; } };
+  // a path on this origin, and never the lens's own
+  const safeRoute = (r) => {
+    if (typeof r !== 'string' || r[0] !== '/' || r[1] === '/' || r.indexOf('\\') >= 0 || size(r) > 2048) return null;
+    try { const u = new URL(r, location.origin); return u.origin === location.origin && u.pathname.indexOf('/.devteam/') !== 0 ? u.pathname + u.search + u.hash : null; } catch (e) { return null; }
+  };
+
+  // --- what is where ------------------------------------------------------------------------------
+  // an id or a class a person wrote, not one a build made (digit runs, hashes, React's :r1:)
+  const plain = (s) => /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(s) && !/[0-9]{3,}/.test(s) && !s.split(/[-_]/).some((p) => p.length >= 5 && /[0-9]/.test(p) && /[A-Za-z]/.test(p));
+  const only = (doc, sel) => { try { return doc.querySelectorAll(sel).length === 1; } catch (e) { return false; } };
+  const quoted = (v) => '"' + String(v).replace(/["\\]/g, '\\$&') + '"';
+  const selectorOf = (el, doc) => {
+    const tag = el.localName;
+    if (el.id && plain(el.id) && only(doc, '#' + CSS.escape(el.id))) return '#' + CSS.escape(el.id);
+    for (const [n, ok] of [['data-testid', true], ['name', /^(input|select|textarea|button|form)$/.test(tag)], ['aria-label', true]]) {
+      const v = el.getAttribute(n);
+      const sel = v ? tag + '[' + n + '=' + quoted(v) + ']' : '';
+      if (ok && v && size(sel) <= CAPS.selector && only(doc, sel)) return sel;
+    }
+    const steps = [];
+    for (let e = el; e && e.nodeType === 1 && e !== doc.documentElement && steps.length < 6; e = e.parentElement) {
+      if (e !== el && e.id && plain(e.id) && only(doc, '#' + CSS.escape(e.id))) { steps.unshift('#' + CSS.escape(e.id)); break; }
+      let n = 1;
+      for (let s = e.previousElementSibling; s; s = s.previousElementSibling) if (s.localName === e.localName) n += 1;
+      steps.unshift(e.localName + Array.prototype.filter.call(e.classList, plain).slice(0, 2).map((c) => '.' + CSS.escape(c)).join('') + ':nth-of-type(' + n + ')');
+    }
+    while (steps.length > 1 && size(steps.join(' > ')) > CAPS.selector) steps.shift();
+    return cap(steps.join(' > '), CAPS.selector);
+  };
+  const ROLES = { button: 'button', select: 'combobox', textarea: 'textbox', img: 'img', nav: 'navigation', main: 'main', header: 'banner', footer: 'contentinfo', form: 'form', table: 'table', ul: 'list', ol: 'list', li: 'listitem', dialog: 'dialog', aside: 'complementary', section: 'region', option: 'option', summary: 'button' };
+  const INPUTS = { checkbox: 'checkbox', radio: 'radio', button: 'button', submit: 'button', reset: 'button', image: 'button', range: 'slider', search: 'searchbox' };
+  const roleOf = (el) => {
+    const r = el.getAttribute('role');
+    if (r) return r;
+    const t = el.localName;
+    if (t === 'a') return el.hasAttribute('href') ? 'link' : '';
+    if (t === 'input') return INPUTS[(el.getAttribute('type') || 'text').toLowerCase()] || 'textbox';
+    if (/^h[1-6]$/.test(t)) return 'heading';
+    return ROLES[t] || '';
+  };
+  const nameOf = (el, doc) => {
+    const label = el.getAttribute('aria-label');
+    if (label) return label;
+    const by = el.getAttribute('aria-labelledby');
+    const named = by ? by.split(/\s+/).map((id) => { const x = doc.getElementById(id); return x ? x.textContent : ''; }).join(' ') : '';
+    if (oneLine(named)) return named;
+    if (el.labels && el.labels.length) return el.labels[0].textContent;
+    for (const n of ['alt', 'title', 'placeholder']) { const v = el.getAttribute(n); if (v) return v; }
+    return el.textContent;
+  };
+  // the element with its own children, each child's contents collapsed to an ellipsis
+  const htmlOf = (el) => {
+    const top = el.cloneNode(false);
+    let k = 0;
+    for (const c of el.childNodes) {
+      if (++k > 50) { top.appendChild(el.ownerDocument.createTextNode('\u2026')); break; }
+      if (c.nodeType === 3) top.appendChild(c.cloneNode(false));
+      else if (c.nodeType === 1) { const d = c.cloneNode(false); if (c.firstChild) d.textContent = '\u2026'; top.appendChild(d); }
+    }
+    return capDots(top.outerHTML, CAPS.html);
+  };
+  const rectOf = (el) => { const r = el.getBoundingClientRect(); return { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) }; };
+  const textOf = (el) => cap(oneLine(el.textContent), CAPS.text);
+  const anchorOf = (el, doc, x, y) => {
+    const rect = rectOf(el);
+    return { selector: selectorOf(el, doc), tag: cap(el.localName, CAPS.tag), role: cap(roleOf(el), CAPS.role), text: textOf(el), name: cap(oneLine(nameOf(el, doc)), CAPS.name), html: htmlOf(el), rect, point: { x: Math.round(x - rect.x), y: Math.round(y - rect.y) } };
+  };
+  // Where an anchor is now: by its selector (changed: with other text now), else an element of its
+  // tag with its text, the nearest to where it was.
+  const find = (doc, a) => {
+    let el = null;
+    try { el = doc.querySelector(a.selector); } catch (e) { el = null; }
+    if (el) { const t = textOf(el); return { el, changed: typeof a.text === 'string' && t !== a.text, text: t }; }
+    if (typeof a.text !== 'string' || !a.text || typeof a.tag !== 'string' || !/^[a-z][a-z0-9-]*$/.test(a.tag)) return null;
+    const was = a.rect && num(a.rect.x) && num(a.rect.y) ? a.rect : { x: 0, y: 0 };
+    const all = doc.getElementsByTagName(a.tag);
+    let best = null;
+    let far = Infinity;
+    for (let i = 0; i < all.length && i < 5000; i++) {
+      if (textOf(all[i]) !== a.text) continue;
+      const r = all[i].getBoundingClientRect();
+      const d = Math.hypot(r.left - was.x, r.top - was.y);
+      if (d < far) { far = d; best = all[i]; }
+    }
+    return best ? { el: best, changed: false, text: a.text } : null;
+  };
+
+  // --- what the viewer watches: sent when it moves --------------------------------------------
+  let watched = [];
+  let sent = '';
+  const sendRects = (id) => {
+    const w = appWindow();
+    const rects = watched.map((x) => { const f = w ? find(w.document, x.anchor) : null; return f ? { key: x.key, rect: rectOf(f.el), changed: f.changed, text: f.text } : { key: x.key, rect: null }; });
+    const now = JSON.stringify(rects);
+    if (id === undefined && now === sent) return;
+    sent = now;
+    tell(id === undefined ? { type: 'rects', rects } : { type: 'rects', id, rects });
+  };
+  let framePending = false;
+  const soon = () => { if (framePending || !watched.length) return; framePending = true; requestAnimationFrame(() => { framePending = false; sendRects(); }); };
+  let settle = 0;
+  const later = () => { if (!watched.length) return; clearTimeout(settle); settle = setTimeout(() => sendRects(), 100); };
+
+  // --- what the app does: its route, its keys, its errors ----------------------------------------
+  let route = null;
+  const checkRoute = () => { const w = appWindow(); const r = w ? routeOf(w) : null; if (r === route) return; route = r; tell({ type: 'route', route: r }); soon(); };
+  let errors = [];
+  const describe = (x) => { try { return x && typeof x === 'object' && 'message' in x ? String(x.message) : String(x); } catch (e) { return 'an error'; } };
+  const noteError = (text) => { const one = cap(oneLine(text), CAPS.error); if (!one) return; errors = errors.concat(one).slice(-CAPS.errors); tell({ type: 'errors', errors }); };
+  let shiftDown = false;
+  const onKey = (e) => {
+    if (e.key !== 'Shift' && e.key !== 'Escape') return;
+    shiftDown = e.type === 'keydown' ? e.key === 'Shift' || e.shiftKey : e.key !== 'Shift' && e.shiftKey;
+    tell({ type: 'key', key: e.key, shift: shiftDown });
+  };
+  const onBlur = () => { if (shiftDown) { shiftDown = false; tell({ type: 'key', key: 'Shift', shift: false }); } };
+  const readyOf = (w) => (w ? { type: 'ready', route: routeOf(w), title: cap(oneLine(w.document.title), CAPS.text), viewport: { w: w.innerWidth, h: w.innerHeight } } : { type: 'ready', route: null, title: '', viewport: null });
+  // Each page the app loads is a new window: listen on it, in the capture phase so the app can't stop
+  // a key reaching here, and note the errors it logs from then on.
+  let attached = null;
+  const attach = () => {
+    const w = appWindow();
+    if (!w || w.document === attached) return;
+    attached = w.document;
+    errors = [];
+    try {
+      w.addEventListener('keydown', onKey, true);
+      w.addEventListener('keyup', onKey, true);
+      w.addEventListener('blur', onBlur);
+      w.addEventListener('error', (e) => { if (e && e.message) noteError(e.message); }, true);
+      w.addEventListener('unhandledrejection', (e) => noteError('Unhandled rejection: ' + describe(e.reason)));
+      const own = w.console && w.console.error;
+      if (typeof own === 'function') w.console.error = function () { noteError(Array.prototype.map.call(arguments, describe).join(' ')); return own.apply(this, arguments); };
+      w.addEventListener('scroll', soon, true);
+      w.addEventListener('resize', soon);
+      w.addEventListener('popstate', checkRoute);
+      w.addEventListener('hashchange', checkRoute);
+      new w.MutationObserver(later).observe(w.document, { subtree: true, childList: true, attributes: true, characterData: true });
+    } catch (e) { /* a page that can't be watched is still framed */ }
+    route = routeOf(w);
+    tell(readyOf(w));
+    sendRects();
+  };
+
+  // --- the viewer's questions ----------------------------------------------------------------------
+  let last = { x: 0, y: 0 };
+  const ORDERS = {
+    hello: () => { tell(readyOf(appWindow())); if (errors.length) tell({ type: 'errors', errors }); },
+    hit: (m) => {
+      if (!idOk(m.id) || !num(m.x) || !num(m.y)) return;
+      const w = appWindow();
+      const doc = w && w.document;
+      let el = doc ? doc.elementFromPoint(m.x, m.y) : null;
+      // the page itself is no thing to point at: the viewer pins the point instead
+      if (el && (el === doc.documentElement || el === doc.body)) el = null;
+      last = { x: m.x, y: m.y };
+      const anchor = el ? anchorOf(el, doc, m.x, m.y) : null;
+      tell({ type: 'hit-reply', id: m.id, anchor, rect: anchor ? anchor.rect : null, route: w ? routeOf(w) : null });
+    },
+    resolve: (m) => {
+      if (!idOk(m.id) || !Array.isArray(m.anchors)) return;
+      watched = m.anchors.slice(0, WATCH_MAX).filter((x) => x && typeof x.key === 'string' && size(x.key) <= KEY_MAX && x.anchor && typeof x.anchor === 'object' && typeof x.anchor.selector === 'string' && size(x.anchor.selector) <= CAPS.selector).map((x) => ({ key: x.key, anchor: x.anchor }));
+      sendRects(m.id);
+    },
+    'scroll-by': (m) => {
+      const w = appWindow();
+      if (!w) return;
+      const step = (v) => (num(v) ? Math.max(-10000, Math.min(10000, v)) : 0);
+      const at = num(m.x) && num(m.y) ? { x: m.x, y: m.y } : last;
+      // the box under the pointer that scrolls, else the page
+      for (let el = w.document.elementFromPoint(at.x, at.y); el && el !== w.document.body && el !== w.document.documentElement; el = el.parentElement) {
+        const s = w.getComputedStyle(el);
+        if (/(auto|scroll|overlay)/.test(s.overflowY + ' ' + s.overflowX) && (el.scrollHeight > el.clientHeight || el.scrollWidth > el.clientWidth)) { el.scrollBy(step(m.dx), step(m.dy)); return; }
+      }
+      w.scrollBy(step(m.dx), step(m.dy));
+    },
+    'scroll-to': (m) => {
+      const w = appWindow();
+      const a = m.anchor;
+      if (!w || !a || typeof a !== 'object' || typeof a.selector !== 'string' || size(a.selector) > CAPS.selector) return;
+      const f = find(w.document, a);
+      if (f) f.el.scrollIntoView({ block: 'center', inline: 'nearest' });
+    },
+    go: (m) => { const r = safeRoute(m.route); if (r) frame.src = r; },
+  };
+  addEventListener('message', (e) => {
+    if (!e.isTrusted) return;
+    if (e.source !== parent || parent === window) return;
+    if (e.origin === location.origin || e.origin === 'null') return;
+    const ancestors = location.ancestorOrigins;
+    if (ancestors && ancestors.length && ancestors[0] !== e.origin) return;
+    if (viewer && e.origin !== viewer) return;
+    const m = e.data;
+    if (!m || typeof m !== 'object' || m.lens !== 1 || typeof m.type !== 'string' || !Object.prototype.hasOwnProperty.call(ORDERS, m.type)) return;
+    viewer = e.origin;
+    try { ORDERS[m.type](m); } catch (err) { /* one bad question costs only itself */ }
+  });
+  addEventListener('keydown', onKey, true);
+  addEventListener('keyup', onKey, true);
+  // the poll can find a page mid-parse (no title yet): its load says ready again, whatever attach did
+  frame.addEventListener('load', () => { attach(); const w = appWindow(); if (w) tell(readyOf(w)); checkRoute(); });
+  // an SPA's pushState can't be seen without touching its code: the route is polled
+  setInterval(() => { attach(); checkRoute(); }, 250);
+  setInterval(() => { if (watched.length) sendRects(); }, 1000);
+  frame.src = safeRoute(new URLSearchParams(location.search).get('route')) || '/';
+})();
+</script></body></html>
+`;
+// The lens's policy: its one script and its one style by hash, its own origin to frame, and who may hold it.
+const lensPart = (tag) => new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`).exec(PREVIEW_LENS)[1];
+const lensHash = (tag) => `'sha256-${crypto.createHash('sha256').update(lensPart(tag)).digest('base64')}'`;
+export const previewLensCsp = (ancestors) => `default-src 'none'; script-src ${lensHash('script')}; style-src ${lensHash('style')}; frame-src 'self'; frame-ancestors ${ancestors}; base-uri 'none'; form-action 'none'`;
 // What the hub page marks with "!" (a supervisor at a usage limit, the operator's box-alert), pushed
 // when it turns up or changes, so it needs no page open. The list is checked as the Inbox counts are,
 // and capped; one alert on every repo's tab is one push.
@@ -389,6 +660,9 @@ export const PUBLIC_CDNS = ['https://cdnjs.cloudflare.com', 'https://cdn.jsdeliv
 export const publicPathOk = (p) => /^[A-Za-z0-9._/-]+$/.test(p) && p.split('/').every((s) => s && !s.startsWith('.'));
 // The kit's artifact policy, its own folder as self, framed by nothing. The sandbox (no
 // allow-same-origin) makes the page an opaque origin, so it can't read or write the box's cookies.
+// frame-src 'none' is load-bearing too: an instance's viewer and published trees accept the public
+// name as a frame ancestor (viewerGranted, treeGranted), and frame-ancestors matches by URL, not
+// origin, so a published page that could frame would satisfy it, sandbox or not. A test pins both.
 export const publicCsp = (self) => {
   const cdns = PUBLIC_CDNS.join(' ');
   return [
@@ -397,6 +671,14 @@ export const publicCsp = (self) => {
     "frame-ancestors 'none'", 'sandbox allow-scripts allow-forms allow-modals allow-pointer-lock',
   ].join('; ');
 };
+// The frame-ancestors directive of each policy in a header (several arrive joined by ", "), with
+// what precedes it and the list it names.
+const FRAME_ANCESTORS = /(^|[;,])(\s*)frame-ancestors(?=[\s;,]|$)([^;,]*)/gi;
+// One more origin that may frame the page, in every policy that names who may. A page that says no
+// one, or says nothing, is left as it is: adding a directive where there was none would narrow it.
+export const addFrameAncestor = (csp, origin) => csp.replace(FRAME_ANCESTORS, (all, sep, sp, list) => (!list.trim() || /^\s*'none'\s*$/i.test(list) ? all : `${sep}${sp}frame-ancestors ${list.trim()} ${origin}${/\s$/.test(list) ? ' ' : ''}`));
+// Who may frame the page, replaced in every policy that says. A policy that doesn't say gets nothing.
+export const replaceFrameAncestors = (csp, sources) => csp.replace(FRAME_ANCESTORS, (all, sep, sp, list) => `${sep}${sp}frame-ancestors ${sources}${/\s$/.test(list) ? ' ' : ''}`);
 export const LINK_ID = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
 // a project's name, as the kit requires it for publishing: part of every public URL
 export const PROJECT = /^[a-z0-9][a-z0-9._-]{0,62}$/;
@@ -561,6 +843,12 @@ export function createGateway(opts = {}) {
     return m && m[2] === `${NAME}${SUFFIX}` && PREVIEW_NAME.test(m[1]) ? m[1] : null;
   };
   const previewOrigin = (name) => `${pubUrl.protocol}//${name}.${NAME}${SUFFIX}`;
+  // Who may hold a preview's lens: frame-ancestors is checked against every ancestor, so the hub
+  // (which frames a dashboard) as well as each instance (whose viewer frames the lens). The lens is
+  // the same bytes and policy on every preview's name, as the kit's relay serves it, and neither can
+  // know which instance a name is for. The app inside it can: its own policy (downstreamHeaders)
+  // names only the instance that lists the preview, so a lens held by any other gets an empty frame.
+  const LENS_CSP = previewLensCsp([PUB, ...BLOCK.map(instanceOrigin)].join(' '));
   // Passkeys belong to the box's name. A page on an instance's subdomain may ask for one, but its
   // answer names that page's origin, and only an answer from the box's own origin is accepted.
   const RP_ID = NAME;
@@ -773,7 +1061,10 @@ export function createGateway(opts = {}) {
   // A preview's own headers: only this link's port, http and ws forms, to its own origin.
   const PREVIEW_LOOP = /\b(http|ws):\/\/(?:127\.0\.0\.1|localhost):(\d+)/g;
   const mapPreview = (s, port, own) => s.replace(PREVIEW_LOOP, (all, scheme, p) => (Number(p) !== port ? all : scheme === 'ws' ? own.replace(/^http/, 'ws') : own));
-  const downstreamHeaders = (h, cap, own, previewPort = null) => {
+  // lensOf: for a preview's page framed from its own origin, which is how its lens holds it (spec §7),
+  // the instance that lists the preview. For that load alone the app's own framing headers give way,
+  // to the lens, the hub and that one instance's dashboard: no other instance's page may hold the app.
+  const downstreamHeaders = (h, cap, own, previewPort = null, lensOf = null) => {
     const out = {};
     for (const [k, v] of Object.entries(h)) {
       // x-devteam-public is the gateway's to say (what the box serves); an upstream's copy never passes
@@ -784,13 +1075,25 @@ export function createGateway(opts = {}) {
     }
     // an artifact under its capability: its policy stays under it too
     if (cap && out['content-security-policy']) out['content-security-policy'] = out['content-security-policy'].split(`${own}/artifact/`).join(`${own}${cap}/artifact/`);
+    // a port off the block is no instance's: then nothing gives way
+    if (previewPort && BLOCK.includes(lensOf)) {
+      const ancestors = `'self' ${PUB} ${instanceOrigin(lensOf)}`;
+      delete out['x-frame-options'];
+      const csp = out['content-security-policy'] ? String(out['content-security-policy']) : '';
+      if (csp.search(FRAME_ANCESTORS) >= 0) out['content-security-policy'] = replaceFrameAncestors(csp, ancestors);
+      // The app said nothing of frames by policy: by X-Frame-Options alone, or not at all (a dev
+      // server's default). Either way a policy of its own keeps every other instance's page out.
+      else out['content-security-policy'] = `${csp ? `${csp}, ` : ''}frame-ancestors ${ancestors}`;
+    }
     return { ...out, ...hsts };
   };
-  const proxy = (req, res, { port, path: p, publicOrigin, cap, extra = null }) => {
+  const proxy = (req, res, { port, path: p, publicOrigin, cap, extra = null, publicFrame = false }) => {
     const up = http.request({ host: '127.0.0.1', port, method: req.method, path: p, headers: upstreamHeaders(req, port, publicOrigin) }, (ur) => {
       // Never kept: a page an agent served once on this name must not come back from the browser's
       // cache after a real dashboard has taken its port.
-      res.writeHead(ur.statusCode, { ...downstreamHeaders(ur.headers, cap, publicOrigin), 'cache-control': 'no-store', ...(extra ?? {}) });
+      const head = downstreamHeaders(ur.headers, cap, publicOrigin);
+      if (publicFrame && head['content-security-policy']) head['content-security-policy'] = addFrameAncestor(String(head['content-security-policy']), PUBLIC);
+      res.writeHead(ur.statusCode, { ...head, 'cache-control': 'no-store', ...(extra ?? {}) });
       // an upstream cut off mid-body cuts the browser's response too, rather than leaving it open
       pipeline(ur, res, () => {});
     });
@@ -819,6 +1122,7 @@ export function createGateway(opts = {}) {
     : send(res, 503, 'text/plain; charset=utf-8', 'this preview is not available right now', { 'retry-after': '5' }));
   // The server is tried on 127.0.0.1, then ::1 when that's refused. The body starts only once a
   // connection is up, so a refused attempt has taken none of it and the retry sends all of it.
+  // Only a link the map holds unambiguously gets here (servePreview), with the one instance listing it.
   const proxyPreview = (req, res, name, link, own) => {
     let current = null;
     res.on('close', () => { if (!res.writableFinished) current?.destroy(); });
@@ -826,7 +1130,7 @@ export function createGateway(opts = {}) {
       let connected = false;
       // agent: false, a fresh connection each time: a kept-alive one to a server since stopped would read as a 502, not as down
       const up = http.request({ host: hosts[0], agent: false, port: link.port, method: req.method, path: req.url, headers: upstreamHeaders(req, link.port, own, { loopbackHost: 'localhost' }) }, (ur) => {
-        res.writeHead(ur.statusCode, { ...downstreamHeaders(ur.headers, null, own, link.port), 'cache-control': 'no-store' });
+        res.writeHead(ur.statusCode, { ...downstreamHeaders(ur.headers, null, own, link.port, req.headers['sec-fetch-dest'] === 'iframe' && req.headers['sec-fetch-site'] === 'same-origin' ? link.instance : null), 'cache-control': 'no-store' });
         pipeline(ur, res, () => {});
       });
       current = up;
@@ -878,7 +1182,16 @@ export function createGateway(opts = {}) {
   // hub once more, with every waiter sharing one read, so no anonymous request can make it poll.
   const ownPort = opts.port ?? null;
   let previews = new Map();
-  const takePreviews = (body) => { let list = null; try { list = JSON.parse(body).instances; } catch {} previews = previewLinks(Array.isArray(list) ? list : [], BLOCK, ownPort, ttydPort); };
+  // Each instance's root and whether its kit has viewers, as the hub's list last said (every poll,
+  // PUSH_POLL_MS): the owner wrapper's choice is a lookup in it, so no visit asks anything (spec §8).
+  let listed = new Map();
+  const takePreviews = (body) => {
+    let list = null;
+    try { list = JSON.parse(body).instances; } catch {}
+    const ok = Array.isArray(list) ? list : [];
+    previews = previewLinks(ok, BLOCK, ownPort, ttydPort);
+    listed = new Map([...listedByPort(ok, BLOCK)].map(([port, x]) => [port, { root: x.root, viewer: x.viewer === 1 }]));
+  };
   let previewRefresh = null;
   const refreshPreviews = () => (previewRefresh ??= hubList().then(takePreviews).finally(() => { previewRefresh = null; }));
 
@@ -960,7 +1273,32 @@ export function createGateway(opts = {}) {
   // A sandboxed artifact can't be told from another site's page by its headers, and its bytes use
   // relative URLs. So the frame's first load (same-origin, with the session) is redirected under
   // /c/<expiry>.<session>.<mac>/, good for that one artifact folder, and its files need no cookie.
-  const ARTIFACT = /^\/artifact\/(?:main|wt\/[^/]+)\/[^/]+\//;
+  // The folder is main's, a worktree's, or a published tree's (the owner's wrapper shows exactly the
+  // version the public sees: spec §8).
+  const ARTIFACT = /^\/artifact\/(?:main|wt\/[^/]+|tree\/[0-9a-f]{40}(?:[0-9a-f]{24})?)\/[^/]+\//;
+  // An instance's viewer, and an artifact at a published tree, may also be framed by the owner's
+  // wrapper on the public name (spec §8). frame-ancestors is checked against every ancestor, and the
+  // wrapper is one. Nothing else of an instance's is opened to it. The raw path, as the kit reads it.
+  // The viewer, which holds the owner's actions, only under the grant the wrapper put in its frame's
+  // URL: this port, this page, this version, for a few minutes, MACed with this process's secret.
+  const WRAP_GRANT_MS = 5 * 60 * 1000;
+  const wrapMac = (port, slug, at, exp) => b64u(mac('wrap', port, `/view/artifact/${slug}`, at, exp));
+  const wrapGrant = (port, slug, at, exp = Date.now() + WRAP_GRANT_MS) => `${exp}.${wrapMac(port, slug, at, exp)}`;
+  const viewerGranted = (port, raw, url) => {
+    const m = /^\/view\/artifact\/([^/]+)$/.exec(raw);
+    if (!m || !LINK_ID.test(m[1]) || url.searchParams.getAll('at').length !== 1 || url.searchParams.getAll('w').length !== 1) return false;
+    const w = /^(\d{1,15})\.([\w-]{22})$/.exec(url.searchParams.get('w'));
+    const exp = w ? Number(w[1]) : 0;
+    if (!w || exp < Date.now() || exp > Date.now() + WRAP_GRANT_MS) return false;
+    return sameBytes(Buffer.from(w[2]), Buffer.from(wrapMac(port, m[1], url.searchParams.get('at'), exp)));
+  };
+  // An artifact's frame inside that viewer, only at a tree this port's binding published for that
+  // very page: what it shows is public already, so it needs no grant, and the kit passes none along.
+  const treeGranted = (port, raw) => {
+    const m = /^\/artifact\/tree\/([0-9a-f]{40}(?:[0-9a-f]{24})?)\/([^/]+)\//.exec(raw);
+    if (!m || /\.\.|%2e|%5c|\\/i.test(raw)) return false;
+    try { return Object.values(store.load().public ?? {}).some((b) => b?.port === port && Object.hasOwn(b.artifacts ?? {}, m[2]) && b.artifacts[m[2]]?.tree === m[1]); } catch { return false; }
+  };
   const capMac = (port, prefix, exp, sid) => b64u(mac('artifact', port, prefix, exp, sid));
   const capFor = (port, prefix, session) => {
     const exp = Date.now() + CAPABILITY_MS;
@@ -1177,6 +1515,12 @@ export function createGateway(opts = {}) {
   // A published artifact, from the gateway's own copy alone: reads only, the raw path matched
   // before any decoding, the gateway's own headers. Nothing here reads the cookie, sets one, or
   // talks to an instance, so taking a port, rewriting main or forging log lines changes nothing.
+  // (The owner's wrapper, tried before this, reads the cookie to choose itself, and only that.)
+  // The bytes are the public's, whoever asks. A page's index also varies on the cookie and
+  // sec-fetch-dest, which can make it the wrapper, and has the wrapper's opener policy: without it
+  // on both, a site that opens the page in a popup could tell from the window (its frame count, or
+  // whether it can still see it) whether the visitor is the signed-in owner. The page's sandbox
+  // has no allow-popups, so it opens no window that the policy could cut off.
   const servePublic = (req, res) => {
     if (!['GET', 'HEAD'].includes(req.method)) return send(res, 405, 'text/plain; charset=utf-8', 'GET or HEAD only', { allow: 'GET, HEAD' });
     if (req.headers['service-worker'] || req.headers['sec-fetch-dest'] === 'serviceworker') return send(res, 403, 'text/plain; charset=utf-8', 'no service workers on this box');
@@ -1192,12 +1536,12 @@ export function createGateway(opts = {}) {
     const f = publicPathOk(rel) && Object.hasOwn(art.files ?? {}, rel) ? art.files[rel] : null;
     if (!f || !/^[0-9a-f]{64}$/.test(f.sha256 ?? '')) return notFound();
     const tag = `"${f.sha256}"`;
-    const head = { etag: tag, 'cache-control': 'public, max-age=60', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': publicCsp(`${PUBLIC}/${m[1]}/${m[2]}/`), ...hsts };
+    const head = { etag: tag, 'cache-control': 'public, max-age=60', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': publicCsp(`${PUBLIC}/${m[1]}/${m[2]}/`), ...(rel === 'index.html' ? { vary: 'cookie, sec-fetch-dest', 'cross-origin-opener-policy': 'same-origin' } : {}), ...hsts };
     const asked = String(req.headers['if-none-match'] ?? '').split(',').map((t) => t.trim());
     if (asked.includes('*') || asked.includes(tag)) { res.writeHead(304, head); return res.end(); }
     // no range requests, as in the kit: the whole file or its headers
     const all = { ...head, 'content-type': PUBLIC_TYPES[rel.split('.').pop().toLowerCase()] ?? 'application/octet-stream', 'content-length': f.size };
-    // a stat, never a read, so a HEAD says what a GET would
+    // a stat, never a read, so a HEAD says what a plain GET would (a HEAD is never the wrapper)
     const file = path.join(dir, 'public', 'blobs', f.sha256);
     const st = fs.statSync(file, { throwIfNoEntry: false });
     if (!st || st.size !== f.size) return send(res, 500, 'text/plain; charset=utf-8', 'the box has lost its copy of this page: publish it again');
@@ -1333,6 +1677,35 @@ export function createGateway(opts = {}) {
     return text.length <= 32 * 1024 ? text : asciiJson(Object.fromEntries(Object.entries(all).filter(([, x]) => x.port === port)));
   };
 
+  // The owner's page on the public name (spec §8): the project's viewer at the published version,
+  // with threads. Only for a top-level visit (sec-fetch-dest: document; navigate also matches frames)
+  // to a published page's index, by the signed-in owner, whose bound instance the hub's list (as last
+  // polled) shows as that checkout with a kit that has viewers. Anything in doubt is null: a session
+  // that isn't one, a store that can't be read, no binding, an instance not listed so, another
+  // checkout or an older kit. Then the public's bytes are served, as before. It reads the cookie, and
+  // nothing else of the owner's, and it is synchronous: nothing is asked on the request path, not even
+  // on a miss, so its timing says nothing of who is visiting. The list can be up to a poll stale.
+  // The root check is for consistency, against another real checkout on that port, not for
+  // authenticity: that rests on the port binding, as it does for the dashboard on that name.
+  // The wrapper's own policy: styles and one frame, the bound instance's; no script, nothing to fetch.
+  const WRAP_CSP = (inst) => `default-src 'none'; style-src 'unsafe-inline'; frame-src ${inst}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
+  const ownerWrapper = (req, url) => {
+    try {
+      if (req.method !== 'GET' || req.headers['sec-fetch-dest'] !== 'document' || url.searchParams.has('plain')) return null;
+      const m = /^\/([^/]+)\/([^/]+)\/(?:index\.html)?$/.exec(req.url.split('?')[0]);
+      if (!m || !PROJECT.test(m[1]) || !LINK_ID.test(m[2])) return null;
+      const s = store.load();
+      if (!s.passkeys.length || !sessionOf(req)) return null;
+      const bound = Object.hasOwn(s.public ?? {}, m[1]) ? s.public[m[1]] : null;
+      const art = bound && Object.hasOwn(bound.artifacts ?? {}, m[2]) ? bound.artifacts[m[2]] : null;
+      if (!art || !BLOCK.includes(bound.port) || typeof bound.root !== 'string' || typeof art.tree !== 'string' || !TREE.test(art.tree)) return null;
+      const x = listed.get(bound.port);
+      if (!x?.viewer || x.root !== bound.root) return null;
+      const at = `tree:${art.tree}`;
+      return { port: bound.port, html: PAGES.ownerWrapper({ project: m[1], slug: m[2], title: typeof art.title === 'string' && art.title ? art.title : m[2], frame: `${instanceOrigin(bound.port)}/view/artifact/${m[2]}?at=${at}&w=${wrapGrant(bound.port, m[2], at)}` }) };
+    } catch { return null; }
+  };
+
   // --- a file dropped on the terminal: streamed to a folder of its own, never read back or run ---
   // The root is made at boot, by root, for gw to write and dev to read. It is checked here, not
   // assumed, so the gateway never writes through something an agent could have put in its place.
@@ -1450,8 +1823,12 @@ export function createGateway(opts = {}) {
     const pv = previewOf(req.headers.host);
     const port = isBox || isTerm || isPublic || pv ? null : instanceOf(req.headers.host);
     if (!isBox && !isTerm && !isPublic && !port && !pv) return send(res, 421, 'text/plain; charset=utf-8', `this box answers only on its own names: open ${PUB}/`);
-    // Anyone's, so before every check that is about the owner (Origin, cookie, session).
+    // Anyone's, so before every check that is about the owner (Origin, cookie, session). The one
+    // exception reads the cookie to choose a page, never to refuse one: the owner's own visit gets
+    // the wrapper, and whatever that can't settle gets the public's bytes, exactly as before.
     if (isPublic) {
+      const wrap = ownerWrapper(req, url);
+      if (wrap) return send(res, 200, 'text/html; charset=utf-8', wrap.html, { 'content-security-policy': WRAP_CSP(instanceOrigin(wrap.port)), 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer', 'cache-control': 'no-store, private', vary: 'cookie, sec-fetch-dest', 'cross-origin-opener-policy': 'same-origin' });
       try { return servePublic(req, res); } catch (e) { return send(res, e?.unreadable ? 503 : 500, 'text/plain; charset=utf-8', 'this page can\'t be served just now'); }
     }
     const own = isBox ? PUB : isTerm ? TERM : pv ? previewOrigin(pv) : instanceOrigin(port);
@@ -1466,7 +1843,7 @@ export function createGateway(opts = {}) {
       const cm = port ? /^\/c\/(\d+)\.([\w-]+)\.([\w-]+)(\/artifact\/.*)$/.exec(rawPath) : null;
       if (cm) {
         if (!['GET', 'HEAD'].includes(req.method) || !capOk(port, cm[4], cm[1], cm[2], cm[3])) return send(res, 403, 'text/plain; charset=utf-8', 'that artifact link has expired: open it again from the dashboard');
-        return proxy(req, res, { port, path: cm[4] + url.search, publicOrigin: own, cap: `/c/${cm[1]}.${cm[2]}.${cm[3]}` });
+        return proxy(req, res, { port, path: cm[4] + url.search, publicOrigin: own, cap: `/c/${cm[1]}.${cm[2]}.${cm[3]}`, publicFrame: treeGranted(port, cm[4]) });
       }
       // A preview may be framed only by a page of this box (the dashboard's viewer, in time), so no
       // other site can lay it under its own page with the owner's session in it.
@@ -1508,15 +1885,20 @@ export function createGateway(opts = {}) {
       if (installed) return send(res, 200, installed.type, installed.body());
       const session = claimed ? sessionOf(req) : null;
       if (!session) {
-        if (navigating(req)) return redirect(res, claimed ? loginAt(`${own}${req.url}`) : loginAt());
+        // a lens open in a tab of its own is no use after sign-in: the preview itself is
+        const back = pv && p === '/.devteam/lens' ? `${own}/` : `${own}${req.url}`;
+        if (navigating(req)) return redirect(res, claimed ? loginAt(back) : loginAt());
         return send(res, claimed ? 401 : 403, 'text/plain; charset=utf-8', claimed ? 'sign in with your passkey' : 'this box is unclaimed');
       }
+      // A preview's lens: the gateway's own page, after the session check, never the app's (spec §7).
+      // Static, so it asks the hub nothing; any other method or path there is the app's, as before.
+      if (pv && req.method === 'GET' && p === '/.devteam/lens') return send(res, 200, 'text/html; charset=utf-8', PREVIEW_LENS, { 'content-security-policy': LENS_CSP, 'referrer-policy': 'no-referrer' });
       if (pv) return servePreview(req, res, pv, own);
       // An instance's dashboard, on its own subdomain: the request exactly as the browser sent it.
       if (port) {
         const prefix = req.method === 'GET' && ['iframe', 'document'].includes(req.headers['sec-fetch-dest']) && ['same-origin', 'none'].includes(req.headers['sec-fetch-site']) ? ARTIFACT.exec(rawPath)?.[0] : null;
         if (prefix) return redirect(res, `${capFor(port, prefix, session)}${req.url}`);
-        return proxy(req, res, { port, path: req.url, publicOrigin: own, extra: req.method === 'GET' && p === '/api/data' ? { 'x-devteam-public': publicMap(port), 'x-devteam-previews': '1' } : null });
+        return proxy(req, res, { port, path: req.url, publicOrigin: own, publicFrame: viewerGranted(port, rawPath, url) || treeGranted(port, rawPath), extra: req.method === 'GET' && p === '/api/data' ? { 'x-devteam-public': publicMap(port), 'x-devteam-previews': '1' } : null });
       }
       // The terminal: the gateway's copy of ttyd's page. Only its socket reaches ttyd (see upgrade).
       if (isTerm) {
@@ -1798,7 +2180,7 @@ export function createGateway(opts = {}) {
   server.keepAliveTimeout = 65000;
   server.headersTimeout = 66000;
   server.requestTimeout = REQUEST_MS;
-  return { server, publicUrl: PUB, pollPush, sweepUploads, previewOf, safeNext };
+  return { server, publicUrl: PUB, pollPush, sweepUploads, previewOf, safeNext, wrapGrant };
 }
 
 // --- the gateway's own pages -------------------------------------------------------------------
@@ -1940,6 +2322,14 @@ go.onclick = run(async () => {
     const rows = Object.entries(pub).flatMap(([n, x]) => Object.entries(x.artifacts ?? {}).map(([s, a]) => ({ n, s, a, root: x.root, link: `${site}/${n}/${s}/` })));
     return `${doc('Public', `<h1>Public on this box</h1><p>Anyone can read these, with no sign-in. Each is the box's own copy of what you published.</p>${rows.length ? `<ul>${rows.map((r) => `<li class="pub"><b>${esc(r.a.title)}</b><small>${esc(r.n)} · ${esc(r.s)} · published ${esc(String(r.a.at).slice(0, 10))} from ${esc(r.root)}</small><code><a href="${esc(r.link)}" target="_blank" rel="noopener noreferrer">${esc(r.link)}</a></code><a href="${esc(`/public/unpublish?project=${r.n}&slug=${r.s}`)}">Unpublish</a></li>`).join('')}</ul>` : '<p>Nothing is public.</p>'}`)}</body></html>`;
   },
+  // The owner's view of a public page: the instance's viewer, framed full size under one line, and
+  // no script of its own. The frame may not navigate this tab, nor open a window outside its
+  // sandbox (an artifact viewer needs none); its sandbox keeps its origin.
+  ownerWrapper: ({ project, slug, title, frame }) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><title>${esc(title)}</title><style>
+html{touch-action:manipulation}:root{color-scheme:light dark;--bg:#fafafa;--fg:#171717;--fg2:#666;--line:#e5e5e5}@media (prefers-color-scheme:dark){:root{--bg:#000;--fg:#ededed;--fg2:#a1a1a1;--line:#2e2e2e}}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:13px/1.4 ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif}body{display:flex;flex-direction:column}
+header{padding:6px 12px;border-bottom:1px solid var(--line);color:var(--fg2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}a{color:var(--fg)}iframe{flex:1;border:0;width:100%}
+</style></head><body><header>Public · ${esc(project)}/${esc(slug)} · <a href="?plain">Open it as the public sees it</a></header><iframe src="${esc(frame)}" title="${esc(title)}" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads"></iframe></body></html>`,
 };
 
 // --- command line ------------------------------------------------------------------------------
