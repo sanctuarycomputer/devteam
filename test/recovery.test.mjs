@@ -651,14 +651,24 @@ test("the tick after an upgrade: a bare pane record whose agent runs as the supe
     await seenUp(F);
     assert.equal(upRecord(F).up, true);
     // an older kit's record: the bare file only, and the supervisor hasn't run a command since the upgrade
+    const bare = fs.readFileSync(path.join(run, 'supervisor-pane'), 'utf8').trim();
+    write(path.join(run, 'supervisor-pane'), `${bare}\n`);
     fs.rmSync(path.join(run, 'supervisor-pane-role'));
     F.tick({ ...OFF, DEVTEAM_MACHINE_EPOCH: 'boot1' });
-    assert.equal(fs.readFileSync(path.join(run, 'supervisor-pane-role'), 'utf8'), fs.readFileSync(path.join(run, 'supervisor-pane'), 'utf8'), "marked by the tick: the pane's agent is the supervisor's");
+    assert.equal(fs.readFileSync(path.join(run, 'supervisor-pane-role'), 'utf8'), bare, "marked by the tick: the pane's agent is the supervisor's");
+    assert.equal(fs.readFileSync(path.join(run, 'supervisor-pane'), 'utf8'), `${bare}\n`, 'the bare record as the older kit wrote it: only the mark is written');
     assert.equal(upRecord(F).up, true, 'still up, so a restart in this window brings it back');
+    // an agent running as the supervisor but started in another directory, recorded bare: not this repo's
+    F.agent('elsewhere', ['ELSEWHERE'], path.join(F.base, 'elsewhere'), { prefix: 'DEVTEAM_ROLE=supervisor ', shell: true });
+    write(path.join(run, 'supervisor-pane'), `=${F.session}:elsewhere`);
+    fs.rmSync(path.join(run, 'supervisor-pane-role'));
+    await until(() => /ELSEWHERE/.test(spawnSync('tmux', ['capture-pane', '-p', '-t', `=${F.session}:elsewhere`], { encoding: 'utf8' }).stdout), 'the agent in another directory');
+    F.tick({ ...OFF, DEVTEAM_MACHINE_EPOCH: 'boot1' });
+    assert.equal(fs.existsSync(path.join(run, 'supervisor-pane-role')), false, 'not marked: its pane started outside the repo');
     // an agent not running as the supervisor (the owner's own, say), recorded bare by an older kit
     F.agent('own-pane', ['OWN'], F.root, { prefix: '', shell: true });
     write(path.join(run, 'supervisor-pane'), `=${F.session}:own-pane`);
-    fs.rmSync(path.join(run, 'supervisor-pane-role'));
+    await until(() => /OWN/.test(spawnSync('tmux', ['capture-pane', '-p', '-t', `=${F.session}:own-pane`], { encoding: 'utf8' }).stdout), 'the agent at the root');
     F.tick({ ...OFF, DEVTEAM_MACHINE_EPOCH: 'boot1' });
     assert.equal(fs.existsSync(path.join(run, 'supervisor-pane-role')), false, 'not marked');
   } finally { F.done(); }

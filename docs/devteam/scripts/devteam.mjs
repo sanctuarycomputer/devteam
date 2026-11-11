@@ -10124,11 +10124,12 @@ function supervisorRunningNow(rec) {
 // Just after an upgrade, a running supervisor's pane is still recorded bare, as its older kit wrote it,
 // until its next command with the role. Read as no pane, the tick would write it stopped, and a
 // restart in that window would leave it down. A bare pane started at the root whose agent runs as the
-// supervisor is its pane, whoever recorded it: marked here, it counts from this tick on.
+// supervisor is its pane, whoever recorded it: marked here, it counts from this tick on. Only the
+// mark is written: the bare record is the one just read, and rewriting it could race a newer one.
 function markUpgradedPane() {
   if (markedPane(runDir)) return;
   const bare = readText(supervisorPaneFile(runDir))?.trim();
-  if (bare && paneStartedIn(bare, realPath(mainRoot)) && isSupervisorProcess(paneAgentProcess(bare))) recordSupervisorPane(runDir, bare);
+  if (bare && paneStartedIn(bare, realPath(mainRoot)) && isSupervisorProcess(paneAgentProcess(bare))) fs.writeFileSync(supervisorPaneMark(runDir), bare);
 }
 // From the dashboard's minute tick. It doesn't touch a record once the machine or the tmux server has
 // changed under it, so a dashboard that comes up after a restart, before recover has run, can't erase
