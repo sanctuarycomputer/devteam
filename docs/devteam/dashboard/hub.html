@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>devteam</title>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon-180.png">
@@ -30,6 +30,7 @@
   :root { --sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; --mono: ui-monospace, SFMono-Regular, Menlo, monospace; }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
+  html { touch-action: manipulation; }
   body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.5 var(--sans); -webkit-font-smoothing: antialiased; display: flex; flex-direction: column; }
   header { display: flex; align-items: flex-end; gap: 12px; padding: 6px 12px 0; background: var(--surface); border-bottom: 1px solid var(--line); flex: 0 0 auto; }
   nav { display: flex; gap: 2px; overflow-x: auto; flex: 1 1 auto; scrollbar-width: none; }
@@ -63,6 +64,8 @@
 <main id="frames"><p id="empty">Looking for devteam dashboards on this machine…</p></main>
 <div id="drop-hint" hidden></div>
 <script>
+// An app, not a page: iOS ignores user-scalable=no for pinches, so its gesture events are cancelled.
+for (const t of ['gesturestart', 'gesturechange']) document.addEventListener(t, (e) => e.preventDefault(), { passive: false });
 // The hub's page: a tab per devteam instance on the machine (its name, and a badge when its Inbox
 // has something), and that instance's own dashboard in a frame under it, on the instance's own
 // address. The list comes from the hub's own server (instances.json); text goes in as text.
