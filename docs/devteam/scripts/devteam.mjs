@@ -8194,6 +8194,26 @@ function learningLine(r) {
   const refs = [...new Set([...r.lists.corrections, ...r.lists.signals.filter((s) => s.explained).map((s) => s.by[0]), ...r.lists.knowledge])].slice(0, KNOWLEDGE_IDS_MAX);
   return { type: 'observation', source: 'metrics', detector: 'metrics', subject: 'project', kind: 'learning', week: r.week, figures: r.figures, detail: detail.slice(0, 300), source_key: `learning:${r.week}`, refs };
 }
+// Lesson efficacy, as the log stood at cut: for each lesson a start's prompt carried, the
+// observations on the keys of its evidence in the four weeks before it was first given and since.
+// Lists and counts, never a score: the numbers are small, and the owner should see which.
+function lessonEfficacy(cut) {
+  return withLogAt(cut, () => {
+    const first = new Map();
+    for (const a of logObjects('act').filter((x) => x.class === 'worker-slots' && Array.isArray(x.knowledge)).sort(byTime)) for (const k of a.knowledge) if (!first.has(k)) first.set(k, a.created_at);
+    const byKey = new Map();
+    for (const o of logObjects('observation').sort(byTime)) { if (['reading', 'retro', 'outcome', 'link', 'learning'].includes(o.kind)) continue; const k = signalKeyOf(o); (byKey.get(k) ?? byKey.set(k, []).get(k)).push(o); }
+    return [...first].map(([id, at]) => {
+      const k = logGet(id);
+      const keys = [...new Set((k?.evidence ?? []).map(logGet).filter((o) => o?.type === 'observation').map(signalKeyOf))];
+      const obs = keys.flatMap((key) => byKey.get(key) ?? []);
+      const t = Date.parse(at);
+      const before = obs.filter((o) => Date.parse(o.created_at) >= t - 4 * WEEK && o.created_at < at).map((o) => o.id);
+      const since = obs.filter((o) => o.created_at >= at).map((o) => o.id);
+      return { id, statement: k?.statement ?? null, status: k?.status ?? null, first_given: at, keys, before: { count: before.length, ids: before.slice(-40) }, since: { count: since.length, ids: since.slice(-40) } };
+    });
+  });
+}
 // The metrics pass (supervisor only): one learning record for each ISO week since the log's
 // earliest line that has ended and has none yet (any observation with its source_key). A
 // back-filled week's record is stamped now (records can't be back-dated) and names its week.
@@ -10064,6 +10084,7 @@ function collectOoda() {
     const d = a.decision ? logGet(a.decision) : null;
     return { ...a, correction: correctionOf(a), ladder: !!L.classes[a.class], change: changeOf(a), under: a.decision ? { decision: a.decision, what: d?.what ?? null, authority: d?.authority ?? null, corrected: d ? !!correctionOf(d) : false } : { authority: actAuthority(a), approved_by: a.approved_by ?? null, own: true } };
   });
+  const trust = trustTable();
   return {
     goals: logObjects('goal').map(goalView).sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99)),
     roadmap: collectRoadmap(),
@@ -10079,7 +10100,7 @@ function collectOoda() {
     problems: logObjects('problem').filter((p) => p.status !== 'resolved').map((p) => (isIncident(p) ? { ...p, severity: incidentSeverity(p) } : p)).sort((a, b) => b.severity - a.severity),
     acts: recent(acts, 60),
     decisions: decisionRecords().slice(0, 200),
-    trust: trustTable(),
+    trust,
     classes: Object.fromEntries(Object.entries(L.classes).map(([k, v]) => [k, { ...v, rung: rungFor(k) }])),
     impact_words: IMPACT_WORDS,
     reasons: L.reasons,
@@ -10087,6 +10108,10 @@ function collectOoda() {
     // whether it was defaulted or withdrawn; defaulted ones can still be overruled
     answered: questions().filter((q) => q.status !== 'open').sort((a, b) => b.answered_at.localeCompare(a.answered_at)).slice(0, 80),
     // the weekly learning records, oldest first: read, never written here (observe-metrics writes them)
+    // under three records the Loop shows these since the log began instead of lines; retros and rung
+    // changes mark the chart, so cause sits next to effect
+    learning_totals: { since: log.lines.reduce((m, l) => (l.at < m ? l.at : m), log.lines[0]?.at ?? '') || null, calls: calls().length, lessons: logObjects('knowledge').filter((k) => k.status === 'accepted').length, corrections: calls().filter(correctionOf).length },
+    learning_marks: [...logObjects('observation').filter((x) => x.kind === 'retro' && x.created_by === 'supervisor').map((x) => ({ at: x.created_at, kind: 'retro', label: 'retro', href: `#retro/${encodeURIComponent(x.id)}` })), ...trust.flatMap((t) => t.history.map((e) => ({ at: e.at, kind: 'rung', label: `${t.class} to rung ${e.rung}`, href: hrefOf(logGet(e.id)) })))].filter((m) => m.at).sort((a, b) => a.at.localeCompare(b.at)),
     learning: logObjects('observation').filter((o) => o.kind === 'learning' && o.week && o.figures && o.created_by === 'supervisor').sort((a, b) => a.week.localeCompare(b.week) || byTime(a, b)).map((o) => ({ id: o.id, week: o.week, at: o.created_at, from: new Date(weekStartOf(o.week)).toISOString(), figures: o.figures, detail: o.detail })),
     log: { lines: log.lines.length, errors: log.errors.length, ignored: log.ignored.length, unknown: log.unknown.length },
   };
@@ -15238,6 +15263,9 @@ function peekView(kind, id) {
     const o = logGet(id) ?? die(`no record ${id}`);
     v.history = historyOf([id]);
     v.cited = cited([...(o.refs ?? []), ...(o.evidence ?? []), ...(o.approved_by ? [o.approved_by] : []), ...(Array.isArray(o.knowledge) ? o.knowledge : [])]);
+    // a week's learning record: its figures recomputed from the log as it stood at the week's end,
+    // every record each counts (the line's refs are capped), and what each lesson given did since
+    if (o.type === 'observation' && o.kind === 'learning' && /^\d{4}-W\d{2}$/.test(o.week ?? '')) { const r = learningFigures(o.week); v.learning = { week: r.week, from: r.from, cut: r.cut, figures: r.figures, lists: r.lists, efficacy: lessonEfficacy(r.cut) }; }
     if (o.type === 'problem' || o.type === 'knowledge') v.related = logObjects('observation').filter((x) => (x.refs ?? []).includes(id) || x.subject === id || (o.evidence ?? []).includes(x.id)).sort(byTime).map((x) => ({ id: x.id, at: x.created_at, by: x.created_by, kind: x.kind, detail: x.detail, severity: x.severity ?? null }));
     // an incident: its view, what its fingerprints raised, and the latest event of each
     // (production data, scrubbed; the drawer frames it as untrusted)

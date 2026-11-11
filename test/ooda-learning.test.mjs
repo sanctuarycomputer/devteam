@@ -5,7 +5,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fleetFixture, json, line } from './lib/kit.mjs';
+import vm from 'node:vm';
+import { fleetFixture, json, line, kit } from './lib/kit.mjs';
 
 const SUP = { DEVTEAM_ROLE: 'supervisor' };
 const DAY = 86400000;
@@ -111,4 +112,82 @@ test('observe-metrics back-fills one learning record per ended week, idempotentl
     assert.ok(D.ooda.learning.every((r) => r.id && r.at && r.detail));
     assert.equal(learnings(F).length, 3);
   } finally { F.done(); }
+});
+
+test("a learning record's peek lists what it counted and what each lesson given did; the Loop gets totals and marks", () => {
+  const F = fleetFixture('ooda-learning-peek');
+  const { old, ok } = F;
+  try {
+    const X = threeWeeks(F);
+    // a young instance: no records yet, so the Loop shows totals since the log began
+    let D = json(ok(old, ['dashboard-data']));
+    assert.deepEqual(D.ooda.learning, []);
+    assert.equal(D.ooda.learning_totals.since, new Date(X.A + HOUR).toISOString(), 'since the earliest line');
+    assert.equal(D.ooda.learning_totals.lessons, 0, 'the one lesson was retired');
+    assert.equal(D.ooda.learning_totals.corrections, 1);
+    assert.ok(D.ooda.learning_totals.calls >= 6, JSON.stringify(D.ooda.learning_totals));
+    // the correction moved priority-change's rung: a mark, linking the corrected call
+    assert.ok(D.ooda.learning_marks.some((m) => m.kind === 'rung' && m.label === 'priority-change to rung 1' && m.href === `#decision/${encodeURIComponent(X.d1)}`), JSON.stringify(D.ooda.learning_marks));
+
+    ok(old, ['observe-metrics'], SUP);
+    D = json(ok(old, ['dashboard-data']));
+    const [a, b] = D.ooda.learning;
+    const pa = json(ok(old, ['peek', 'learning', a.id, '--json']));
+    const pb = json(ok(old, ['peek', 'learning', b.id, '--json']));
+    assert.equal(pb.learning.week, X.weeks[1]);
+    assert.deepEqual(pb.learning.figures, b.figures, 'the peek recomputes what the record stored');
+    assert.deepEqual(pb.learning.lists.corrections, [X.d1]);
+    assert.deepEqual(pb.learning.lists.questions, [X.q1], 'an owner-action is not a decision put to the owner');
+    assert.deepEqual(pb.learning.lists.answered, [{ id: X.q1, matched: true }]);
+    assert.deepEqual(pb.learning.lists.starts, [{ id: X.a2, given: [] }], 'a resume is not a start');
+    assert.deepEqual(pb.learning.lists.calls, [X.a2, X.a3]);
+    assert.deepEqual(pa.learning.lists.ladder_calls.map((c) => [c.id, c.authority]), [[X.d1, 'rung'], [X.d2, 'default']]);
+    assert.deepEqual(pa.learning.lists.signals.map((s) => [s.key, s.explained, s.by]), [['note:app', true, [X.o1]]]);
+    // efficacy: the lesson given in week A, against the observations on its evidence's key
+    const ea = pa.learning.efficacy.find((e) => e.id === X.k1);
+    assert.deepEqual([ea.keys, ea.before, ea.since], [['note:app'], { count: 3, ids: [X.o1, X.o2, X.o3] }, { count: 0, ids: [] }]);
+    const eb = pb.learning.efficacy.find((e) => e.id === X.k1);
+    assert.equal(eb.first_given, new Date(X.A + 4 * DAY).toISOString());
+    assert.deepEqual(eb.since, { count: 1, ids: [X.o4] }, 'it recurred once after the lesson was given');
+    // the learning records stay off the Observe feed and out of Orient's signals
+    assert.ok(!D.ooda.observations.some((o) => o.kind === 'learning'));
+    assert.ok(!D.ooda.clusters.some((c) => c.key.startsWith('learning:')));
+  } finally { F.done(); }
+});
+
+// The chart's own code, loaded by itself (CI has no Chrome): under three records, tiles; then six
+// small charts, a hollow point where its denominator is under five, every point opening its week.
+test('the Loop draws tiles for a young instance, then six charts with hollow points and marks', () => {
+  const html = fs.readFileSync(path.join(kit, 'dashboard/index.html'), 'utf8');
+  const src = html.slice(html.indexOf('/* learning start */'), html.indexOf('/* learning end */'));
+  assert.ok(src.length > 1000, 'the learning block is marked in index.html');
+  const ctx = vm.createContext({});
+  vm.runInContext(`const DAY = 864e5; const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); const fmtDate = (ms) => new Date(ms).toISOString().slice(0, 10);\n${src}\n;globalThis.api = { learningSection, lineChart };`, ctx);
+  const { learningSection, lineChart } = ctx.api;
+  const figs = (n) => ({ informed: { knowledge: 2, signals_explained: 1, signals_formed: n, starts_given: 3, starts: 6 }, autonomous: { trusted_calls: 4, ladder_calls: 8, questions: 6, merged: 4 }, trusted: { agreed: 9, answered: 10, corrections: 1, calls: 50 } });
+  const rec = (i, n) => ({ id: `o-2026110${i}-000000000-supervisor`, week: `2026-W4${i}`, from: new Date(Date.UTC(2026, 9, 5 + 7 * i)).toISOString(), at: '2026-11-11T00:00:00.000Z', figures: figs(n), detail: 'x' });
+  const totals = { since: '2026-10-20T01:00:00.000Z', calls: 7, lessons: 1, corrections: 2 };
+
+  for (const learning of [[], [rec(1, 6)], [rec(1, 6), rec(2, 6)]]) {
+    const h = learningSection({ learning, learning_totals: totals, learning_marks: [] });
+    assert.match(h, /data-learn="young"/);
+    assert.match(h, /Since 2026-10-20: 7 calls, 1 lesson kept, 2 corrections\. The loop needs a few weeks of calls, answers and lessons before trends mean anything\./);
+    assert.doesNotMatch(h, /<svg/);
+  }
+  const recs = [rec(1, 6), rec(2, 2), rec(3, 6)];
+  const h = learningSection({ learning: recs, learning_totals: totals, learning_marks: [{ at: recs[1].from, label: 'priority-change to rung 1', href: '#decision/d-x' }, { at: '2020-01-01T00:00:00.000Z', label: 'long ago', href: '#retro/o-y' }] });
+  assert.match(h, /data-learn="charts"/);
+  assert.equal((h.match(/<svg/g) || []).length, 6, 'six small charts');
+  for (const col of ['Informed', 'Autonomous', 'Trusted']) assert.match(h, new RegExp(`<h3>${col}</h3>`));
+  // one hollow point: week 2's signals explained, formed only twice
+  assert.equal((h.match(/data-hollow/g) || []).length, 1);
+  assert.match(h, /signals explained, week 2026-W42: too few to say \(n = 2\)/);
+  for (const r of recs) assert.ok(h.includes(`href="#learning/${encodeURIComponent(r.id)}"`), 'each point opens its week');
+  // the rung change marks every chart; one outside the span marks none
+  assert.equal((h.match(/href="#decision\/d-x"/g) || []).length, 6);
+  assert.doesNotMatch(h, /#retro\/o-y/);
+  // lineChart's old callers are unchanged: a plain [ts, v] point is a filled dot with its own title
+  const plain = lineChart([{ name: 'p50', points: [[Date.UTC(2026, 0, 1), 3], [Date.UTC(2026, 0, 3), 4]] }], { unit: 'ms' });
+  assert.match(plain, /<circle [^>]*fill="var\(--series-1, var\(--blue\)\)"><title>p50: 3ms/);
+  assert.doesNotMatch(plain, /<a |data-hollow|xmark/);
 });
