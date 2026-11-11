@@ -395,20 +395,23 @@ test('presses: the page answers before the server, and a refusal puts it back', 
   });
 
   await t.test('refused: the card comes back with the pick and the note, and says why', async () => {
-    await p.click(`#questions [data-qcard="${Q2}"] input[data-pick][value="No"]`);
-    await p.click(`#questions [data-qcard="${Q2}"] textarea[data-q]`);
-    await p.type('not this week');
-    // the server's data held, so the page keeps the question while the supervisor withdraws it
+    // the server's data held first, so no refresh redraws the card under the test, and the page
+    // keeps the question while the supervisor withdraws it
     await p.ev('void (window.__gate = new Promise((r) => { window.__open = r; }))');
-    await hold();
-    await p.click(`#questions [data-qcard="${Q2}"] [data-answer]`);
-    assert.match(await p.ev(`${card(Q2)}.textContent`), /Answered: No — not this week/);
-    dt(['withdraw', Q2, '--reason', 'moot'], SUP);
-    await letGo();
-    await soon(`/Not saved:/.test(document.getElementById('e-${Q2}')?.textContent ?? '')`, 'the refusal, on the card');
-    assert.equal(await p.ev(`document.querySelector('#questions [data-qcard="${Q2}"] textarea[data-q]').value`), 'not this week', 'the note back');
-    assert.equal(await p.ev(`document.querySelector('#questions [data-qcard="${Q2}"] input[data-pick][value="No"]').checked`), true, 'the pick back');
-    await p.ev('window.__open(); window.__gate = null; void 0');
+    try {
+      await p.click(`#questions [data-qcard="${Q2}"] input[data-pick][value="No"]`);
+      await p.click(`#questions [data-qcard="${Q2}"] textarea[data-q]`);
+      await p.type('not this week');
+      await soon(`document.querySelector('#questions [data-qcard="${Q2}"] textarea[data-q]')?.value === 'not this week'`, 'the note typed');
+      await hold();
+      await p.click(`#questions [data-qcard="${Q2}"] [data-answer]`);
+      assert.match(await p.ev(`${card(Q2)}.textContent`), /Answered: No — not this week/);
+      dt(['withdraw', Q2, '--reason', 'moot'], SUP);
+      await letGo();
+      await soon(`/Not saved:/.test(document.getElementById('e-${Q2}')?.textContent ?? '')`, 'the refusal, on the card');
+      assert.equal(await p.ev(`document.querySelector('#questions [data-qcard="${Q2}"] textarea[data-q]').value`), 'not this week', 'the note back');
+      assert.equal(await p.ev(`document.querySelector('#questions [data-qcard="${Q2}"] input[data-pick][value="No"]').checked`), true, 'the pick back');
+    } finally { await p.ev('window.__open?.(); window.__gate = null; window.__let?.(); window.__postHold = null; void 0'); }
   });
 
   await t.test('a lesson kept: it leaves at once and stays gone across refreshes', async () => {
