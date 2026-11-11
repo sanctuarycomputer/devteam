@@ -2194,7 +2194,7 @@ const ATTR = {
     fmt: { why_asked: (w) => `${w.rung ? `${esc(RUNG_WORDS[w.rung])}` : ''}${w.ceiling ? `, at most ${esc(RUNG_WORDS[w.ceiling])}` : ''}${(w.reasons || []).length ? ` · ${esc(w.reasons.map(words).join(', '))}` : ''}`, autonomy: (a) => `${esc(words(a.class))}: ${esc(RUNG_WORDS[a.rung])}${a.scope ? ` (${esc(a.scope)})` : ''}`, goal: (v) => glink(v), re: (v) => linkify(v) },
   },
   decision: { order: ['what', 'class', 'scope', 'authority', 'approved_by', 'knowledge', 'rung', 'ceiling', 'options', 'rationale', 'confidence', 'refs', 'reversible'], label: { knowledge: 'Rests on' }, fmt: { authority: (v) => esc(AUTHORITY_LABEL[v] || v), knowledge: linkList } },
-  act: { order: ['what', 'class', 'scope', 'decision', 'approved_by', 'rung', 'refs', 'reversible'], fmt: { id_block: (b) => `${esc(b.feature)}: ${esc(b.from)} to ${esc(b.to)}` } },
+  act: { order: ['what', 'class', 'scope', 'decision', 'approved_by', 'rung', 'refs', 'knowledge', 'reversible'], label: { knowledge: 'Given' }, fmt: { id_block: (b) => `${esc(b.feature)}: ${esc(b.from)} to ${esc(b.to)}`, knowledge: linkList } },
   knowledge: { order: ['statement', 'kind', 'status', 'scope', 'confidence', 'valence', 'evidence'], fmt: { valence: (v) => (v < 0 ? `${esc(v)} (something to avoid)` : esc(v)) } },
   problem: { order: ['title', 'status', 'severity', 'realized', 'threatens', 'assigned_to', 'detail', 'refs'], fmt: { realized: (v) => (v ? 'yes: an issue' : 'no: a risk'), assigned_to: (v) => linkify(v), severity: (v) => `<span class="badge ${sevBadge(v)}">${esc(v)}</span>` } },
   message: { fmt: { to: (v) => esc(who(v)), re: (v) => linkify(v) } },
@@ -2824,6 +2824,7 @@ function openAct(id) {
     ] })}
     ${v.detail ? `<p class="ctx measure">${v.detail}</p>` : ''}
     ${lineageBlock(p)}
+    ${knowledgeCited(p, 'What its instructions carried')}
     ${d ? `<h3>The decision it carried out</h3><div class="card small"><div>${dlink(d.id, d.what)}</div>${d.rationale ? `<div class="act-detail">${linkify(d.rationale)}</div>` : ''}<div class="meta">${authorityWords(d.under)} · ${esc(when(d.at))}${d.correction ? ` · <span class="badge high">corrected</span> ${esc(d.correction.reason)}` : ''}</div></div>` : ''}
     ${citedBlock(p, a)}
     ${a.correction ? '' : a.decision ? '<p class="small muted">It carried out a decision: correct the decision if the call was wrong (Loop → Decide). If the call was sound and the act went wrong, that is a problem, not a trust drop.</p>' : '<p class="small muted">To correct it, use Correct on it in Loop → Act.</p>'}

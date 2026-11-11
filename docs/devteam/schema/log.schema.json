@@ -1876,6 +1876,15 @@
             "pattern": "^d-",
             "x-tip": "The decision it carried out."
           },
+          "knowledge": {
+            "description": "On a worker-slots act that started a worker or planner fresh: the accepted knowledge its prompt carried (the knowledge that applies to its ticket or feature), newest first, at most 60. Never in what, which the kit parses. A resumed session reads no new prompt, so its act carries none.",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^k-"
+            },
+            "x-tip": "The lessons and facts its instructions carried when it started."
+          },
           "corrected": {
             "description": "Your correction, if it was its own call and wrong.",
             "type": "object",

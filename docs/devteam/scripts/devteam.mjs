@@ -12025,6 +12025,10 @@ function makeSession(role) {
   seedWorktree(wt, { repo: R });
   const promptFile = path.join(runDir, 'prompts', `${name}.txt`);
   const knowledge = knowledgeBlock(id);
+  // What the prompt's knowledge block carries, for the start's act (a lesson's effect is measured
+  // from it): only on a fresh start, since a resumed session never reads the new prompt; the newest
+  // first, as many as fit a line.
+  const given = resume ? [] : knowledgeFor(id).sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, KNOWLEDGE_IDS_MAX).map((k) => k.id);
   const links = linksBlock(id);
   const arts = artifactsBlock(id);
   const held = block ?? (role === 'planner' ? idBlockFor(id) : null);
@@ -12086,7 +12090,7 @@ function makeSession(role) {
     if (role === 'worker' && !resume) appendLog({ type: 'phase', from: null, to: 'starting', note: `started in ${shown}` }, id);
     // a planner parked by a park is running again
     if (role === 'planner' && lastPhaseOf(name)?.to === 'parked') appendLog({ type: 'phase', from: 'parked', to: 'starting', note: `started in ${shown}` }, name);
-    appendLog({ type: 'act', decision: citing(), class: 'worker-slots', what: `${resume ? 'resumed' : 'made'} ${role} ${name} in ${shown}${block ? `, ticket numbers ${padNN(block.from)}-${padNN(block.to)}` : ''}${refused ? ` while its goal is ${holdWords(mode)}, with --force` : ''}`, refs: role === 'worker' ? [id] : goalIds, reversible: true, id_block: block ?? undefined }, 'supervisor');
+    appendLog({ type: 'act', decision: citing(), class: 'worker-slots', what: `${resume ? 'resumed' : 'made'} ${role} ${name} in ${shown}${block ? `, ticket numbers ${padNN(block.from)}-${padNN(block.to)}` : ''}${refused ? ` while its goal is ${holdWords(mode)}, with --force` : ''}`, refs: role === 'worker' ? [id] : goalIds, reversible: true, id_block: block ?? undefined, knowledge: given.length ? given : undefined }, 'supervisor');
     out(`${resume ? 'resumed' : 'made'} ${role} ${name} in ${shown} at ${wt}${block ? `; ticket numbers ${padNN(block.from)}-${padNN(block.to)} reserved` : ''}`);
     });
   } catch (e) {
