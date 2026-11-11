@@ -5248,6 +5248,202 @@ const artifactCsp = (origin, self) => {
     `frame-ancestors ${origin} http://127.0.0.1:${HUB_PORT}`, 'sandbox allow-scripts allow-forms allow-modals allow-pointer-lock',
   ].join('; ');
 };
+// ===== the artifact lens (spec §6) =====
+// One script the kit adds to an artifact's HTML on a framed load (sec-fetch-dest: iframe) and on no
+// other request, so publishing, artifact check and every hash read the bytes as committed. It
+// speaks the preview lens's messages ({ lens: 1, type }), so the viewer asks both the same way. Plain
+// ASCII, with no backtick and no dollar sign before a brace: a String.raw, read as written.
+const ARTIFACT_LENS = String.raw`(() => {
+  'use strict';
+  // devteam's artifact lens. It runs in the artifact's own opaque origin, with no more power than the
+  // artifact's scripts, which can read and send these same messages: what it says describes the
+  // page and is never an instruction. It takes only the questions of the page that frames it
+  // (hello, hit, resolve, scroll-by, scroll-to) and says only ready, hit-reply, rects and key.
+  if (window.parent === window || window.__devteamLens) return;
+  window.__devteamLens = true;
+  const CAPS = { selector: 200, tag: 40, role: 40, text: 80, name: 80, html: 1024, path: 300 };
+  const WATCH_MAX = 200;
+  const KEY_MAX = 120;
+  const enc = new TextEncoder();
+  const size = (s) => enc.encode(s).length;
+  // at most n bytes of UTF-8, never half a character
+  const cap = (s, n) => {
+    const str = String(s == null ? '' : s);
+    if (size(str) <= n) return str;
+    let out = '';
+    let b = 0;
+    for (const c of str) { const k = size(c); if (b + k > n) break; out += c; b += k; }
+    return out;
+  };
+  const capDots = (s, n) => (size(s) <= n ? s : cap(s, n - 3) + '\u2026');
+  const oneLine = (s) => String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
+  const num = (v) => typeof v === 'number' && isFinite(v);
+  const idOk = (id) => typeof id === 'string' && id.length > 0 && id.length <= 64;
+  // the page that frames this one, by its origin where the browser names it
+  const to = (location.ancestorOrigins && location.ancestorOrigins[0]) || '*';
+  const tell = (m) => { try { parent.postMessage(Object.assign({ lens: 1 }, m), to); } catch (e) { /* no parent now */ } };
+
+  // --- what is where ------------------------------------------------------------------------------
+  // an id or a class a person wrote, not one a build made (digit runs, hashes, React's :r1:)
+  const plain = (s) => /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(s) && !/[0-9]{3,}/.test(s) && !s.split(/[-_]/).some((p) => p.length >= 5 && /[0-9]/.test(p) && /[A-Za-z]/.test(p));
+  const only = (sel) => { try { return document.querySelectorAll(sel).length === 1; } catch (e) { return false; } };
+  const quoted = (v) => '"' + String(v).replace(/["\\]/g, '\\$&') + '"';
+  const selectorOf = (el) => {
+    const tag = el.localName;
+    if (el.id && plain(el.id) && only('#' + CSS.escape(el.id))) return '#' + CSS.escape(el.id);
+    for (const [n, ok] of [['data-testid', true], ['name', /^(input|select|textarea|button|form)$/.test(tag)], ['aria-label', true]]) {
+      const v = el.getAttribute(n);
+      const sel = v ? tag + '[' + n + '=' + quoted(v) + ']' : '';
+      if (ok && v && size(sel) <= CAPS.selector && only(sel)) return sel;
+    }
+    const steps = [];
+    for (let e = el; e && e.nodeType === 1 && e !== document.documentElement && steps.length < 6; e = e.parentElement) {
+      if (e !== el && e.id && plain(e.id) && only('#' + CSS.escape(e.id))) { steps.unshift('#' + CSS.escape(e.id)); break; }
+      let n = 1;
+      for (let s = e.previousElementSibling; s; s = s.previousElementSibling) if (s.localName === e.localName) n += 1;
+      steps.unshift(e.localName + Array.prototype.filter.call(e.classList, plain).slice(0, 2).map((c) => '.' + CSS.escape(c)).join('') + ':nth-of-type(' + n + ')');
+    }
+    while (steps.length > 1 && size(steps.join(' > ')) > CAPS.selector) steps.shift();
+    return cap(steps.join(' > '), CAPS.selector);
+  };
+  const ROLES = { button: 'button', select: 'combobox', textarea: 'textbox', img: 'img', nav: 'navigation', main: 'main', header: 'banner', footer: 'contentinfo', form: 'form', table: 'table', ul: 'list', ol: 'list', li: 'listitem', dialog: 'dialog', aside: 'complementary', section: 'region', option: 'option', summary: 'button' };
+  const INPUTS = { checkbox: 'checkbox', radio: 'radio', button: 'button', submit: 'button', reset: 'button', image: 'button', range: 'slider', search: 'searchbox' };
+  const roleOf = (el) => {
+    const r = el.getAttribute('role');
+    if (r) return r;
+    const t = el.localName;
+    if (t === 'a') return el.hasAttribute('href') ? 'link' : '';
+    if (t === 'input') return INPUTS[(el.getAttribute('type') || 'text').toLowerCase()] || 'textbox';
+    if (/^h[1-6]$/.test(t)) return 'heading';
+    return ROLES[t] || '';
+  };
+  const nameOf = (el) => {
+    const label = el.getAttribute('aria-label');
+    if (label) return label;
+    const by = el.getAttribute('aria-labelledby');
+    const named = by ? by.split(/\s+/).map((id) => { const x = document.getElementById(id); return x ? x.textContent : ''; }).join(' ') : '';
+    if (oneLine(named)) return named;
+    if (el.labels && el.labels.length) return el.labels[0].textContent;
+    for (const n of ['alt', 'title', 'placeholder']) { const v = el.getAttribute(n); if (v) return v; }
+    return el.textContent;
+  };
+  // the element with its own children, each child's contents collapsed to an ellipsis
+  const htmlOf = (el) => {
+    const top = el.cloneNode(false);
+    let k = 0;
+    for (const c of el.childNodes) {
+      if (++k > 50) { top.appendChild(document.createTextNode('\u2026')); break; }
+      if (c.nodeType === 3) top.appendChild(c.cloneNode(false));
+      else if (c.nodeType === 1) { const d = c.cloneNode(false); if (c.firstChild) d.textContent = '\u2026'; top.appendChild(d); }
+    }
+    return capDots(top.outerHTML, CAPS.html);
+  };
+  const rectOf = (el) => { const r = el.getBoundingClientRect(); return { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) }; };
+  const textOf = (el) => cap(oneLine(el.textContent), CAPS.text);
+  const anchorOf = (el, x, y) => {
+    const rect = rectOf(el);
+    return { selector: selectorOf(el), tag: cap(el.localName, CAPS.tag), role: cap(roleOf(el), CAPS.role), text: textOf(el), name: cap(oneLine(nameOf(el)), CAPS.name), html: htmlOf(el), rect, point: { x: Math.round(x - rect.x), y: Math.round(y - rect.y) } };
+  };
+  // where an anchor is now: by its selector (changed: with other text now), else an element of its
+  // tag with its text, the nearest to where it was
+  const find = (a) => {
+    let el = null;
+    try { el = document.querySelector(a.selector); } catch (e) { el = null; }
+    if (el) { const t = textOf(el); return { el, changed: typeof a.text === 'string' && t !== a.text, text: t }; }
+    if (typeof a.text !== 'string' || !a.text || typeof a.tag !== 'string' || !/^[a-z][a-z0-9-]*$/.test(a.tag)) return null;
+    const was = a.rect && num(a.rect.x) && num(a.rect.y) ? a.rect : { x: 0, y: 0 };
+    const all = document.getElementsByTagName(a.tag);
+    let best = null;
+    let far = Infinity;
+    for (let i = 0; i < all.length && i < 5000; i++) {
+      if (textOf(all[i]) !== a.text) continue;
+      const r = all[i].getBoundingClientRect();
+      const d = Math.hypot(r.left - was.x, r.top - was.y);
+      if (d < far) { far = d; best = all[i]; }
+    }
+    return best ? { el: best, changed: false, text: a.text } : null;
+  };
+
+  // --- what the viewer watches: sent when it moves -------------------------------------------------
+  let watched = [];
+  let sent = '';
+  const sendRects = (id) => {
+    const rects = watched.map((x) => { const f = find(x.anchor); return f ? { key: x.key, rect: rectOf(f.el), changed: f.changed, text: f.text } : { key: x.key, rect: null }; });
+    const now = JSON.stringify(rects);
+    if (id === undefined && now === sent) return;
+    sent = now;
+    tell(id === undefined ? { type: 'rects', rects } : { type: 'rects', id, rects });
+  };
+  let framePending = false;
+  const soon = () => { if (framePending || !watched.length) return; framePending = true; requestAnimationFrame(() => { framePending = false; sendRects(); }); };
+  let settle = 0;
+  const later = () => { if (!watched.length) return; clearTimeout(settle); settle = setTimeout(() => sendRects(), 100); };
+
+  // --- Shift and Escape, seen with the focus in the page ---------------------------------------------
+  let shiftDown = false;
+  const onKey = (e) => {
+    if (e.key !== 'Shift' && e.key !== 'Escape') return;
+    shiftDown = e.type === 'keydown' ? e.key === 'Shift' || e.shiftKey : e.key !== 'Shift' && e.shiftKey;
+    tell({ type: 'key', key: e.key, shift: shiftDown });
+  };
+  const onBlur = () => { if (shiftDown) { shiftDown = false; tell({ type: 'key', key: 'Shift', shift: false }); } };
+
+  // --- the viewer's questions ------------------------------------------------------------------------
+  let last = { x: 0, y: 0 };
+  const ORDERS = {
+    hello: () => tell({ type: 'ready', path: cap(location.pathname, CAPS.path), title: cap(oneLine(document.title), CAPS.text), viewport: { w: window.innerWidth, h: window.innerHeight } }),
+    hit: (m) => {
+      if (!idOk(m.id) || !num(m.x) || !num(m.y)) return;
+      let el = document.elementFromPoint(m.x, m.y);
+      // the page itself is no thing to point at: the viewer pins the point instead
+      if (el && (el === document.documentElement || el === document.body)) el = null;
+      last = { x: m.x, y: m.y };
+      const anchor = el ? anchorOf(el, m.x, m.y) : null;
+      tell({ type: 'hit-reply', id: m.id, anchor, rect: anchor ? anchor.rect : null });
+    },
+    resolve: (m) => {
+      if (!idOk(m.id) || !Array.isArray(m.anchors)) return;
+      watched = m.anchors.slice(0, WATCH_MAX).filter((x) => x && typeof x.key === 'string' && size(x.key) <= KEY_MAX && x.anchor && typeof x.anchor === 'object' && typeof x.anchor.selector === 'string' && size(x.anchor.selector) <= CAPS.selector).map((x) => ({ key: x.key, anchor: x.anchor }));
+      sendRects(m.id);
+    },
+    'scroll-by': (m) => {
+      const step = (v) => (num(v) ? Math.max(-10000, Math.min(10000, v)) : 0);
+      const at = num(m.x) && num(m.y) ? { x: m.x, y: m.y } : last;
+      // the box under the pointer that scrolls, else the page
+      for (let el = document.elementFromPoint(at.x, at.y); el && el !== document.body && el !== document.documentElement; el = el.parentElement) {
+        const s = window.getComputedStyle(el);
+        if (/(auto|scroll|overlay)/.test(s.overflowY + ' ' + s.overflowX) && (el.scrollHeight > el.clientHeight || el.scrollWidth > el.clientWidth)) { el.scrollBy(step(m.dx), step(m.dy)); return; }
+      }
+      window.scrollBy(step(m.dx), step(m.dy));
+    },
+    'scroll-to': (m) => {
+      const a = m.anchor;
+      if (!a || typeof a !== 'object' || typeof a.selector !== 'string' || size(a.selector) > CAPS.selector) return;
+      const f = find(a);
+      if (f) f.el.scrollIntoView({ block: 'center', inline: 'nearest' });
+    },
+  };
+  addEventListener('message', (e) => {
+    if (!e.isTrusted || e.source !== parent) return;
+    const m = e.data;
+    if (!m || typeof m !== 'object' || m.lens !== 1 || typeof m.type !== 'string' || !Object.prototype.hasOwnProperty.call(ORDERS, m.type)) return;
+    try { ORDERS[m.type](m); } catch (err) { /* one bad question costs only itself */ }
+  });
+  addEventListener('keydown', onKey, true);
+  addEventListener('keyup', onKey, true);
+  addEventListener('blur', onBlur);
+  addEventListener('scroll', soon, true);
+  addEventListener('resize', soon);
+  try { new MutationObserver(later).observe(document, { subtree: true, childList: true, attributes: true, characterData: true }); } catch (e) { /* a page that can't be watched is still pointed at */ }
+  setInterval(() => { if (watched.length) sendRects(); }, 1000);
+})();`;
+// The page with the lens after it, at the very end: the parser takes a script there into the body
+// and runs it, and every byte before it is the committed one. A page that ends inside an unclosed
+// <script>, <style>, <textarea>, <title> or comment swallows it as text: then no lens answers, and
+// the viewer pins the point alone (decision 3). Its policy needs nothing more: the
+// artifact policy's script-src already has 'unsafe-inline', and a hash there would turn that off
+// for the artifact's own inline scripts.
+const withArtifactLens = (bytes) => Buffer.concat([bytes, Buffer.from(`<script>${ARTIFACT_LENS}</script>`)]);
 const reviewResultFile = (qid) => path.join(reviewDir(qid), 'result.json');
 const reviewDraftFile = (qid) => path.join(reviewDir(qid), 'draft.json');
 // The permanent copy of the owner's result, in the PR that asked: project/questions/<qid>/, or
@@ -11140,8 +11336,11 @@ async function cmdDashboard() {
       const base = `http://${req.headers.host}`;
       // frame-ancestors by policy alone, never X-Frame-Options: on a box the gateway adds the public
       // name to this list for a published tree, and an X-Frame-Options would still refuse it
+      // the lens (spec §6): a framed load of a page only, so a top-level load, curl and the gateway's
+      // loopback fetch for a publish get the bytes as committed
+      const framed = req.headers['sec-fetch-dest'] === 'iframe' && rel.toLowerCase().endsWith('.html');
       res.writeHead(200, { 'content-type': ARTIFACT_TYPES[rel.split('.').pop().toLowerCase()] ?? 'application/octet-stream', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': artifactCsp(base, `${base}${rawPath.slice(0, rawPath.length - am[4].length)}/`) });
-      return res.end(bytes);
+      return res.end(framed ? withArtifactLens(bytes) : bytes);
     }
     // A review page: the agent's bytes, verbatim, only into the dashboard's own sandboxed frame,
     // under a policy that allows no network (reviewPageCsp). Under a question's path the server

@@ -358,6 +358,26 @@ const VIEWER_MOCK = {
   'index.html': '<!doctype html><html><head><link rel="stylesheet" href="style.css"></head><body><p id="art">the mock</p></body></html>',
   'style.css': '#art { color: rgb(1, 2, 3) }',
 };
+// The artifact lens's script, run in vm against a stand-in page: what it says to its parent, and to whom.
+function artLensRun({ ancestor = 'http://127.0.0.1:4321', title = 'A mock' } = {}) {
+  const src = fs.readFileSync(path.join(kit, 'scripts/devteam.mjs'), 'utf8');
+  const script = /const ARTIFACT_LENS = String\.raw`([^`]*)`;/.exec(src)[1];
+  const listeners = {};
+  const posted = [];
+  const parent = { postMessage: (m, o) => posted.push({ m: JSON.parse(JSON.stringify(m)), o }) };
+  const doc = { title, documentElement: {}, body: {}, elementFromPoint: () => null, querySelectorAll: () => [], querySelector: () => null, getElementsByTagName: () => [], getElementById: () => null };
+  const win = {
+    document: doc, parent, innerWidth: 800, innerHeight: 600,
+    location: { pathname: '/artifact/main/viewer-mock/index.html', ancestorOrigins: ancestor ? [ancestor] : undefined },
+    addEventListener: (type, f) => { (listeners[type] ??= []).push(f); },
+    setInterval: () => 0, setTimeout: () => 0, clearTimeout: () => {}, requestAnimationFrame: () => 0,
+    MutationObserver: class { observe() {} }, TextEncoder, CSS: { escape: (s) => s },
+  };
+  win.window = win;
+  vm.runInNewContext(script, win);
+  const hear = (data, { source = parent, isTrusted = true } = {}) => { for (const f of listeners.message ?? []) f({ data, source, isTrusted }); };
+  return { script, posted, hear, win };
+}
 
 test('typing in the dashboard: a refresh never takes the field, the caret or the scroll, and holding it can\'t wedge', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-focus-'));
@@ -759,6 +779,110 @@ test('an artifact at a published tree: served from git by its tree id, under the
   const raw = (p) => new Promise((resolve, reject) => http.get({ host: '127.0.0.1', port, path: p }, (res) => { res.resume(); resolve(res.statusCode); }).on('error', reject));
   for (const bad of [`${dir}../viewer-mock/index.html`, `${dir}../../../../docs/devteam/project/settings.md`, `${dir}x/../index.html`, `${dir}./index.html`, `${dir}%2e%2e/%2e%2e/settings.md`, `${dir}..%2fartifact.json`, `${dir}.hidden`, `${dir}a//b.css`, `/artifact/tree/${T}/../${T}/viewer-mock/`, `/artifact/tree/${T}%2f..%2f/viewer-mock/`, `/artifact/tree/${T.toUpperCase()}/viewer-mock/`, `/artifact/tree/${T}0/viewer-mock/`]) assert.equal(await raw(bad), 404, bad);
   assert.equal(await raw(`${dir}index.html`), 200, 'while the page itself, asked the same way, is served');
+});
+
+test('the artifact lens: plain ASCII, the kit\'s caps, and it answers only the page that frames it', () => {
+  const { script } = artLensRun();
+  assert.doesNotMatch(script, /[^\x20-\x7e\n]/, 'plain ASCII');
+  assert.doesNotMatch(script, /`|\$\{|<\/script/i, 'a String.raw that closes no script tag');
+  assert.doesNotThrow(() => new vm.Script(script));
+  const src = fs.readFileSync(path.join(kit, 'scripts', 'devteam.mjs'), 'utf8');
+  const kitCaps = (name) => vm.runInNewContext(`(${new RegExp(`^const ${name} = (\\{.*\\});$`, 'm').exec(src)[1]})`);
+  const caps = vm.runInNewContext(`(${/const CAPS = (\{[^}]*\});/.exec(script)[1]})`);
+  for (const [k, v] of Object.entries(kitCaps('ANCHOR_CAPS'))) assert.equal(caps[k], v, `anchor.${k}`);
+  assert.equal(caps.path, kitCaps('SUBJECT_CAPS').path);
+  let L = artLensRun();
+  L.hear({ lens: 1, type: 'hello' });
+  assert.deepEqual(L.posted, [{ m: { lens: 1, type: 'ready', path: '/artifact/main/viewer-mock/index.html', title: 'A mock', viewport: { w: 800, h: 600 } }, o: 'http://127.0.0.1:4321' }], 'hello: ready, to the parent\'s origin alone');
+  L.hear({ lens: 1, type: 'hit', id: 'h1', x: 5, y: 5 });
+  assert.deepEqual(L.posted[1].m, { lens: 1, type: 'hit-reply', id: 'h1', anchor: null, rect: null }, 'the page itself is nothing to point at');
+  const n = L.posted.length;
+  L.hear({ lens: 1, type: 'hello' }, { source: {} });
+  L.hear({ lens: 1, type: 'hello' }, { isTrusted: false });
+  L.hear({ type: 'hello' });
+  L.hear({ lens: 1, type: 'go', route: '/x' });
+  L.hear({ lens: 1, type: 'hit', id: { not: 'an id' }, x: 1, y: 1 });
+  L.hear({ lens: 1, type: 'hit', id: 'h2', x: 'one', y: 1 });
+  L.hear('{"lens":1,"type":"hello"}');
+  assert.equal(L.posted.length, n, 'nothing from another window, a made-up event, another kind, a bad id or point, or text');
+  L = artLensRun({ ancestor: null });
+  L.hear({ lens: 1, type: 'hello' });
+  assert.equal(L.posted[0].o, '*', 'where the browser names no ancestor, its opaque parent by *');
+});
+
+test('the artifact lens is added to a framed HTML load and nothing else: the policy unchanged, publishing\'s bytes untouched', async (t) => {
+  const F = threadsFixture('artifact-lens');
+  t.after(() => F.done());
+  const T = landArtifact(F, 'viewer-mock', VIEWER_MOCK);
+  const port = await freePort();
+  const B = `http://127.0.0.1:${port}`;
+  const d = startDashboard(F.old, F.env({}), ['--port', String(port)]);
+  t.after(() => d.stop());
+  await until(() => new RegExp(`dashboard on http://127\\.0\\.0\\.1:${port}\\b`).test(d.out()), 'the dashboard');
+  const src = fs.readFileSync(path.join(kit, 'scripts/devteam.mjs'), 'utf8');
+  const lens = /const ARTIFACT_LENS = String\.raw`([^`]*)`;/.exec(src)[1];
+  const iframe = { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-origin' };
+  for (const dir of ['/artifact/main/viewer-mock/', `/artifact/tree/${T}/viewer-mock/`]) {
+    const plain = await fetch(`${B}${dir}`, { headers: { 'sec-fetch-dest': 'document', 'sec-fetch-site': 'none' } });
+    const framed = await fetch(`${B}${dir}`, { headers: iframe });
+    assert.equal(await plain.text(), VIEWER_MOCK['index.html'], `${dir}: a top-level load gets the bytes as committed`);
+    assert.equal(await framed.text(), `${VIEWER_MOCK['index.html']}<script>${lens}</script>`, `${dir}: a framed load, the lens after them`);
+    assert.equal(framed.headers.get('content-security-policy'), plain.headers.get('content-security-policy'), 'the policy unchanged: its unsafe-inline admits the lens, and a hash would turn that off');
+    assert.equal(await (await fetch(`${B}${dir}`)).text(), VIEWER_MOCK['index.html'], 'no fetch metadata (curl, the gateway\'s loopback fetch for a publish): the bytes');
+    assert.equal(await (await fetch(`${B}${dir}style.css`, { headers: iframe })).text(), VIEWER_MOCK['style.css'], 'only HTML');
+  }
+  // what publishing would put up hashes the committed bytes, and the gateway's loopback fetch for a
+  // publish (its own Host, no sec-fetch-*) reads exactly those bytes for every file
+  const m = await (await fetch(`${B}/public-manifest/viewer-mock`)).json();
+  assert.equal(m.files['index.html'].sha256, crypto.createHash('sha256').update(VIEWER_MOCK['index.html']).digest('hex'));
+  const loopback = (p) => new Promise((resolve, reject) => http.get({ host: '127.0.0.1', port, path: p, headers: { host: `127.0.0.1:${port}` } }, (res) => { const c = []; res.on('data', (b) => c.push(b)); res.on('end', () => resolve(Buffer.concat(c))); }).on('error', reject));
+  for (const [rel, f] of Object.entries(m.files)) {
+    const body = await loopback(`/artifact/main/viewer-mock/${rel}`);
+    assert.deepEqual([crypto.createHash('sha256').update(body).digest('hex'), body.length], [f.sha256, f.size], `${rel}: as the manifest says`);
+  }
+});
+
+test('the artifact lens in Chrome: a framed artifact\'s own inline scripts run beside it, under the policy as it was', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
+  const undo = [];
+  t.after(async () => { let err = null; for (const f of undo.reverse()) { try { await f(); } catch (e) { err ??= e; } } if (err) throw err; });
+  const F = threadsFixture('artifact-lens-chrome');
+  undo.push(() => F.done());
+  // its own inline scripts, in the head and the body, and one that answers its parent itself
+  landArtifact(F, 'inline-mock', {
+    'artifact.json': JSON.stringify({ v: 1, title: 'Inline mock', summary: 'A page with its own scripts', by: 'supervisor', for: [] }),
+    'index.html': '<!doctype html><html><head><title>Inline mock</title><script>window.blocked = []; addEventListener("securitypolicyviolation", (e) => { window.blocked.push(e.violatedDirective); }); document.title = "Retitled by its own script";</script></head>'
+      + '<body style="margin:0"><p id="art" style="margin:0;padding:20px">the mock</p><script>document.getElementById("art").dataset.ran = "yes"; addEventListener("message", (e) => { if (e.data && e.data.ask === "own") parent.postMessage({ own: 1, ran: document.getElementById("art").dataset.ran, blocked: window.blocked }, "*"); });</script></body></html>',
+  });
+  const port = await freePort();
+  const B = `http://127.0.0.1:${port}`;
+  const dash = startDashboard(F.old, F.env({}), ['--port', String(port)]);
+  undo.push(() => dash.stop());
+  const chrome = await openChrome();
+  undo.push(() => chrome.close());
+  const p = await chrome.newPage();
+  undo.push(() => p.close());
+  await until(() => new RegExp(`dashboard on http://127\\.0\\.0\\.1:${port}\\b`).test(dash.out()), 'the dashboard');
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  await p.send('Page.navigate', { url: `${B}/` });
+  const soon = async (expr, what) => { const end = Date.now() + 30000; for (;;) { const v = await p.ev(expr); if (v) return v; if (Date.now() > end) assert.fail(`timed out: ${what}`); await new Promise((r) => setTimeout(r, 50)); } };
+  await soon(`document.readyState === 'complete'`, 'the dashboard page');
+  // the dashboard frames the artifact as a viewer would: a real framed load, sec-fetch-dest: iframe
+  await p.ev(`new Promise((resolve) => { window.__heard = []; const f = document.createElement('iframe'); f.id = 'art-frame'; f.style.cssText = 'position:fixed;left:0;top:0;width:800px;height:600px;border:0;z-index:99999'; addEventListener('message', (e) => { if (e.source === f.contentWindow) window.__heard.push({ data: e.data, origin: e.origin }); }); f.onload = () => resolve(true); f.src = '/artifact/main/inline-mock/'; document.body.appendChild(f); })`);
+  const ask = (m) => p.ev(`(document.getElementById('art-frame').contentWindow.postMessage(${JSON.stringify(m)}, '*'), true)`);
+  await ask({ ask: 'own' });
+  await ask({ lens: 1, type: 'hello' });
+  await ask({ lens: 1, type: 'hit', id: 'h1', x: 30, y: 30 });
+  await soon(`window.__heard.length >= 3`, 'its own script and the lens, answering');
+  const heard = await p.ev('window.__heard');
+  const own = heard.filter((h) => h.data && h.data.own === 1);
+  const lens = heard.filter((h) => h.data && h.data.lens === 1);
+  assert.deepEqual(own.map((h) => h.data), [{ own: 1, ran: 'yes', blocked: [] }], 'its own inline scripts ran, and the policy blocked nothing on the page');
+  assert.deepEqual(lens.map((h) => h.data.type), ['ready', 'hit-reply'], 'the lens answered, and said nothing unasked');
+  assert.deepEqual(lens[0].data, { lens: 1, type: 'ready', path: '/artifact/main/inline-mock/', title: 'Retitled by its own script', viewport: { w: 800, h: 600 } }, 'the page as its own script left it: only what the page says of itself');
+  assert.equal(lens[1].data.anchor.selector, '#art');
+  assert.equal(lens[1].data.anchor.text, 'the mock');
+  assert.ok(heard.every((h) => h.origin === 'null'), 'from the artifact\'s opaque origin: the sandbox holds');
 });
 
 test('every item the dashboard draws says what it is; a question asked in a thread links to it; an answer from a thread says so', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
