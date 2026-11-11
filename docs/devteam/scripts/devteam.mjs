@@ -15106,7 +15106,7 @@ Dashboard and releases
 // command that also writes is listed by its read forms, so `knowledge add` is refused like any write.
 // recover and machine write, and are allowed by name below: bringing a supervisor back, and the
 // machine's digest, word to a supervisor and alert, are what the operator's for.
-const OPERATOR_READS = new Set(['status', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'next', 'log', 'messages', 'knowledge', 'goal', 'goal list', 'goal show', 'fleet status', 'trust', 'problem', 'sensor status', 'sensor series']);
+const OPERATOR_READS = new Set(['status', 'ready', 'metrics', 'hello', 'settings', 'supervisor-session', 'prompt', 'validate', 'questions', 'next', 'log', 'messages', 'knowledge', 'goal', 'goal list', 'goal show', 'fleet status', 'trust', 'problem', 'sensor status', 'sensor series', 'peek']);
 const OPERATOR_SUBCOMMANDED = new Set(['fleet', 'goal', 'knowledge', 'problem', 'sensor']);
 const COMMANDS = {
   init: cmdInit, prompt: cmdPrompt, worker: () => makeSession('worker'), planner: () => makeSession('planner'), whoami: cmdWhoami, hello: cmdHello, settings: cmdSettings,

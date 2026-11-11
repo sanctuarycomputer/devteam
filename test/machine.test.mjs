@@ -375,16 +375,18 @@ test('each read the operator may run writes nothing', () => {
   assert.equal(dtIn(r, ['goal', 'add', '--title', 'a goal', '--outcome', 'x'], sup).status, 0);
   const goal = dtIn(r, ['goal'], sup).stdout.match(/g-\S+/)?.[0];
   assert.ok(goal);
-  assert.equal(dtIn(r, ['knowledge', 'add', '--kind', 'fact', '--statement', 's'], sup).status, 0);
+  const k = dtIn(r, ['knowledge', 'add', '--kind', 'fact', '--statement', 's'], sup).stdout.match(/k-\S+/)?.[0];
+  assert.ok(k);
   assert.equal(dtIn(r, ['ask', '--question', 'q?', '--kind', 'owner-decision', '--class', 'design', '--reasons', 'x'], sup).status, 0);
   assert.equal(dtIn(r, ['send', 'supervisor', 'hello'], sup).status, 0);
-  assert.equal(dtIn(r, ['problem', 'add', '--title', 'a problem', '--severity', '2'], sup).status, 0);
+  const p = dtIn(r, ['problem', 'add', '--title', 'a problem', '--severity', '2'], sup).stdout.trim();
+  assert.match(p, /^p-/);
   conversation(r);
   const op = { DEVTEAM_ROLE: 'operator', TMUX: 'x', TMUX_PANE: '%7' };
   const walk = (d, out = []) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.name === '.git') continue; if (e.isDirectory()) walk(p, out); else out.push(p); } return out; };
   const snap = () => ({ files: Object.fromEntries(walk(r).map((f) => [f, fs.readFileSync(f).toString('base64')])), status: execFileSync('git', ['status', '--porcelain'], { cwd: r, encoding: 'utf8' }) });
   const before = snap();
-  const reads = [['status'], ['status', '--json'], ['ready'], ['ready', '--json'], ['metrics'], ['metrics', '--json'], ['hello', '--json'], ['settings'], ['supervisor-session'], ['prompt', 'supervisor'], ['validate'], ['questions'], ['questions', '--json', '--all'], ['log', '--json', '--tail', '5'], ['messages', '--to', 'supervisor', '--open'], ['knowledge', '--json'], ['knowledge', '--for', 'x'], ['goal', '--json'], ['goal', 'list'], ['goal', 'show', goal], ['fleet', 'status', '--json', '--no-fetch'], ['trust'], ['trust', '--json'], ['problem'], ['problem', '--json', '--all'], ['sensor', 'status'], ['sensor', 'status', '--json'], ['sensor', 'series', 'web', '--range', '7d'], ['knowledge', '--kit'], ['machine', 'pane-state', '%7']];
+  const reads = [['status'], ['status', '--json'], ['ready'], ['ready', '--json'], ['metrics'], ['metrics', '--json'], ['hello', '--json'], ['settings'], ['supervisor-session'], ['prompt', 'supervisor'], ['validate'], ['questions'], ['questions', '--json', '--all'], ['log', '--json', '--tail', '5'], ['messages', '--to', 'supervisor', '--open'], ['knowledge', '--json'], ['knowledge', '--for', 'x'], ['goal', '--json'], ['goal', 'list'], ['goal', 'show', goal], ['fleet', 'status', '--json', '--no-fetch'], ['trust'], ['trust', '--json'], ['problem'], ['problem', '--json', '--all'], ['sensor', 'status'], ['sensor', 'status', '--json'], ['sensor', 'series', 'web', '--range', '7d'], ['knowledge', '--kit'], ['machine', 'pane-state', '%7'], ['peek', 'lesson', k, '--json'], ['peek', 'lesson', k, '--mermaid'], ['peek', 'problem', p, '--json'], ['peek', 'goal', goal, '--json'], ['peek', 'sensor', 'web', '--json']];
   for (const c of reads) { const x = dtIn(r, c, op); assert.equal(x.status, 0, `${c.join(' ')}: ${x.stderr}`); assert.doesNotMatch(x.stderr, /only reads/, c.join(' ')); }
   // and the machine's digest, run from inside the project, reads it the same way
   assert.equal(dtIn(r, ['machine', 'status', '--in', code], op).status, 0);
