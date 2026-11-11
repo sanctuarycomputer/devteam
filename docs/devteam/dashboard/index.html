@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>devteam</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -32,7 +32,7 @@
   } }
   /* devteam-ui tokens end */
   * { box-sizing: border-box; }
-  html { -webkit-text-size-adjust: 100%; background: var(--bg); }
+  html { -webkit-text-size-adjust: 100%; background: var(--bg); touch-action: manipulation; }
   body { margin: 0; background: var(--bg); color: var(--fg); font: 13px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
   a { color: inherit; text-decoration: none; }
   code { font-family: var(--mono); font-size: 12px; }
@@ -527,8 +527,6 @@
   .tl-ready { margin: 6px 0; padding: 6px 8px; border-radius: 6px; border: 1px solid color-mix(in srgb, var(--green) 45%, var(--line)); background: color-mix(in srgb, var(--green) 8%, var(--surface)); font-size: 12px; }
   .tl-ready input { width: 100%; padding: 4px 8px; margin-top: 4px; }
   @media (pointer: coarse) { #tl-pinbtn { height: 36px; padding: 0 14px; } }
-  /* iOS zooms into a focused field whose text is under 16px, so on touch screens every field is 16px. */
-  @media (pointer: coarse) { input:not([type=checkbox]):not([type=radio]):not([type=range]), textarea, select { font-size: 16px !important; } }
 </style>
 </head>
 <body>
@@ -735,6 +733,8 @@
   </div>
 </div>
 <script>
+// An app, not a page: iOS ignores user-scalable=no for pinches, so its gesture events are cancelled.
+for (const t of ['gesturestart', 'gesturechange']) document.addEventListener(t, (e) => e.preventDefault(), { passive: false });
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 // Every item the dashboard draws says what it is (data-subject="<type>:<id>") and what it is called
