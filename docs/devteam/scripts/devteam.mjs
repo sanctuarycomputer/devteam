@@ -6230,7 +6230,8 @@ function cmdArtifact() {
     const slugName = args[0] ?? die('usage: artifact describe <slug> [--at main|<worktree>|tree:<id>] [--json]');
     const at = flagStr('at') ?? 'main';
     if (!LINK_ID.test(slugName) || !ARTIFACT_AT.test(at)) die('artifact describe: a slug, and --at main, a worktree name or tree:<id>');
-    const src = artifactAt(at, slugName) ?? die(`${slugName}: no artifact at ${at}`);
+    // exit 3: nothing there, which /api/view tells apart from describe failing
+    const src = artifactAt(at, slugName) ?? die(`${slugName}: no artifact at ${at}`, 3);
     const d = describeArtifact(slugName, at, src);
     const main = at === 'main' ? src : artifactAt('main', slugName);
     const ref = mainRef();
@@ -11078,6 +11079,8 @@ async function cmdDashboard() {
   process.on('unhandledRejection', (e) => { log(`crashed (unhandled rejection): ${e?.stack ?? e}`); process.stderr.write(`devteam dashboard crashed: ${e?.stack ?? e}\n`); process.exit(1); });
   for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(sig, () => { log(`stopped by ${sig}`); process.exit(0); });
   const page = path.join(kitDir, 'dashboard', 'index.html');
+  // The page's policy, at / and at /view/: its frames are its own pages, and only it and the hub frame it.
+  const PAGE_CSP = `frame-src 'self'; frame-ancestors 'self' http://127.0.0.1:${HUB_PORT}`;
   const self = fileURLToPath(import.meta.url);
   const ownerEnv = { ...process.env, DEVTEAM_CHANNEL: 'dashboard' };
   // TMUX_PANE too: a dashboard started in the supervisor's pane would have ownerWriter refuse every
@@ -11089,6 +11092,8 @@ async function cmdDashboard() {
   // A child run as the owner. timeout (ms) is for a caller that can't wait (the gateway's 15 s);
   // code is the exit code, so a route can tell "not there" from "fix a setting" (2).
   const run = (args, { timeout = 0 } = {}) => new Promise((resolve) => execFile(process.execPath, [self, ...args], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: ownerEnv, timeout, killSignal: 'SIGKILL' }, (err, stdout, stderr) => resolve({ ok: !err, code: err ? (typeof err.code === 'number' ? err.code : 1) : 0, stdout, stderr: err?.killed ? `devteam: ${args.slice(0, 2).join(' ')} took over ${timeout / 1000} s and was stopped` : stderr })));
+  // /api/view's describe runs in flight, by slug|at: one child process however many ask at once
+  const describing = new Map();
   const ID = /^[a-z]-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
   const text = (x, max = 4000) => typeof x === 'string' && x.trim() && x.length <= max;
   const autonomyArgs = (b) => ([1, 2, 3].includes(b.autonomy) ? ['--autonomy', String(b.autonomy), ...(text(b.scope, 100) ? ['--scope', b.scope.trim()] : [])] : []);
@@ -11239,7 +11244,7 @@ async function cmdDashboard() {
     if (req.method === 'GET' && (req.url === '/' || req.url === '/index.html')) {
       // frame-ancestors: only this dashboard and the machine's hub may frame it, so another site
       // can't lay it under its own page and steer a click onto an owner action.
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': `frame-src 'self'; frame-ancestors 'self' http://127.0.0.1:${HUB_PORT}` });
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': PAGE_CSP });
       return res.end(fs.readFileSync(page));
     }
     if (req.method === 'GET' && req.url.startsWith('/api/data')) {
@@ -11261,20 +11266,26 @@ async function cmdDashboard() {
     const vw = req.method === 'GET' ? /^\/view\/artifact\/([^/]+)$/.exec(u.pathname) : null;
     if (vw) {
       if (!LINK_ID.test(vw[1]) || !ARTIFACT_AT.test(u.searchParams.get('at') || 'main')) return send(res, 404, 'text/plain; charset=utf-8', 'not found');
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'content-security-policy': `frame-src 'self'; frame-ancestors 'self' http://127.0.0.1:${HUB_PORT}` });
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'content-security-policy': PAGE_CSP });
       return res.end(fs.readFileSync(page));
     }
     // What the viewer's bar and its "changed since" read of what it shows (artifact describe), so a
     // viewer never waits on /api/data. Asked once per viewer load (a fallback to main asks once more),
-    // never polled: a child process per ask. A GET carries no Origin: same-origin only, as /api/threads.
+    // never polled: a child process per ask, shared by asks for the same one while it runs. A GET
+    // carries no Origin: same-origin only, as /api/threads. 404 only when describe says nothing is
+    // there (the viewer then shows main); a timeout or a crash is a 500, never mistaken for that.
     if (req.method === 'GET' && u.pathname === '/api/view') {
       const site = req.headers['sec-fetch-site'];
       if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: "not for another site's page" }));
       const slug = u.searchParams.get('slug') ?? '';
       const at = u.searchParams.get('at') || 'main';
       if (u.searchParams.get('kind') !== 'artifact' || !LINK_ID.test(slug) || !ARTIFACT_AT.test(at)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad kind, slug or at' }));
-      const r = await run(['artifact', 'describe', slug, `--at=${at}`, '--json'], { timeout: 12000 });
-      return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 404, 'application/json', JSON.stringify({ error: r.stderr.trim().replace(/^devteam: /, '') }));
+      const key = `${slug}|${at}`;
+      let job = describing.get(key);
+      if (!job) { job = run(['artifact', 'describe', slug, `--at=${at}`, '--json'], { timeout: 12000 }).finally(() => describing.delete(key)); describing.set(key, job); }
+      const r = await job;
+      if (r.ok) return send(res, 200, 'application/json', r.stdout);
+      return r.code === 3 ? send(res, 404, 'application/json', JSON.stringify({ error: `no artifact ${slug} at ${at}` })) : send(res, 500, 'application/json', JSON.stringify({ error: 'the artifact could not be read' }));
     }
     // Threads for the layer: a GET carries no Origin, so like /public-manifest/ it is refused when the
     // browser says another site's page asks.
