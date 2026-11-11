@@ -22,11 +22,21 @@ test('a newer kit\'s field or type is reported, not refused; known fields still 
     fs.appendFileSync(file, line({ id: `l-${id.slice(2)}`, type: 'learning', op: 'new', at: at(), by: 'supervisor', kind: 'outcome' }));
     const r = run(old, ['log-check']);
     assert.equal(r.status, 0, r.err || r.out);
-    assert.match(r.out, /written by a newer kit: upgrade.*figures/);
-    assert.match(r.out, /written by a newer kit: upgrade.*type "learning"/);
+    assert.match(r.out, /a newer kit's line, or a mistyped name: upgrade, or check .*figures/);
+    assert.match(r.out, /a newer kit's line, or a mistyped name: upgrade, or check .*type "learning"/);
     const o = json(ok(old, ['log', '--id', id, '--json']))[0];
     assert.equal(o.status, 'owned', 'the known field on the same line still applies');
     assert.equal(o.figures, undefined, 'an unknown field is never read');
+    // a line set aside still has its envelope checked: a writer that isn't its file's, an owner's
+    // channel missing, no v
+    fs.appendFileSync(file, line({ id: `l-${id.slice(2)}x`, type: 'learning', op: 'new', at: at(), by: 'owner', channel: 'cli', kind: 'outcome' }));
+    const bad = run(old, ['log-check']);
+    assert.notEqual(bad.status, 0);
+    assert.match(bad.out + bad.err, /does not match the file's writer/);
+    fs.writeFileSync(file, fs.readFileSync(file, 'utf8').split('\n').filter((l) => !l.includes(`l-${id.slice(2)}x`)).join('\n'));
+    fs.appendFileSync(file, `${JSON.stringify({ id, type: 'problem', op: 'set', at: at(), by: 'supervisor', figures: 1 })}\n`);
+    assert.match(run(old, ['log-check']).out + run(old, ['log-check']).err, /v is required|v must be/);
+    fs.writeFileSync(file, fs.readFileSync(file, 'utf8').split('\n').filter((l) => !(l.includes('"figures":1') && !l.includes('"v"'))).join('\n'));
     // a known field the writer may not set is still an error: tolerance is for unknown names only
     fs.appendFileSync(file, line({ id, type: 'problem', op: 'set', at: at(), by: 'supervisor', title: 'renamed' }));
     assert.notEqual(run(old, ['log-check']).status, 0);
@@ -59,6 +69,13 @@ test('log-sync lands a file whose lines carry a field this kit doesn\'t know', (
     const late = F.run(old, ['check-pr', '--head-ref', 'chore-log', '--sha', F.g(['rev-parse', 'HEAD'], wt), '--title', 'chore-log: log', '--body-file', body]);
     assert.notEqual(late.status, 0);
     assert.match(late.out + late.err, /is not in|after the commit time/);
+    // and one whose writer isn't its file's fails it too, though its type is unknown here
+    F.g(['reset', '-q', '--hard', 'HEAD~1'], wt);
+    fs.appendFileSync(path.join(wt, `docs/devteam/project/log/supervisor-${month()}.jsonl`), line({ id: 'l-y', type: 'learning', op: 'new', at: new Date().toISOString(), by: 'owner', channel: 'cli' }));
+    F.g(['commit', '-qam', 'a line by the wrong writer'], wt);
+    const forged = F.run(old, ['check-pr', '--head-ref', 'chore-log', '--sha', F.g(['rev-parse', 'HEAD'], wt), '--title', 'chore-log: log', '--body-file', body]);
+    assert.notEqual(forged.status, 0);
+    assert.match(forged.out + forged.err, /does not match the file's writer/);
   } finally { F.done(); }
 });
 

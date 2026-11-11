@@ -896,6 +896,17 @@ function integrity(o, file) {
 
 // Validate one parsed line in full: envelope, body against its type, required and set-only fields,
 // then the integrity checks above.
+// The envelope on its own, for a line parseLines sets aside (a newer kit's): its fields, the
+// channel rule, and that its writer is its file's, so nothing admitted there fails these later in a
+// kit that knows the rest. checkLine and integrity hold every other line to the same.
+function envelopeErrors(o, file) {
+  const envelope = Object.fromEntries(ENVELOPE.filter((k) => k in o).map((k) => [k, o[k]]));
+  const errs = schemaErrors({ ...SCHEMA, $defs: undefined, properties: { ...SCHEMA.properties, type: { type: 'string' } } }, envelope, 'line').map((e) => e.replace(/^line\./, ''));
+  if (errs.length) return errs;
+  if ((o.channel !== undefined) !== (o.by === 'owner')) errs.push('channel is on every owner line and no other');
+  if (file && writerOfFile(file) !== o.by) errs.push(`by "${o.by}" does not match the file's writer "${writerOfFile(file) ?? '(not a log file)'}"`);
+  return errs;
+}
 function checkLine(o, file) {
   if (!o || typeof o !== 'object' || Array.isArray(o)) return ['not a JSON object'];
   const envelope = Object.fromEntries(ENVELOPE.filter((k) => k in o).map((k) => [k, o[k]]));
@@ -940,21 +951,26 @@ function parseLines(text, file, { firstLine = 1, validate = true } = {}) {
       return void errors.push(`${file}:${n}: not valid JSON`);
     }
     if (!o || typeof o !== 'object' || Array.isArray(o) || typeof o.type !== 'string' || !['new', 'set'].includes(o.op) || typeof o.id !== 'string' || typeof o.at !== 'string' || typeof o.by !== 'string') return void errors.push(`${file}:${n}: not a log line`);
-    if (!TYPES.includes(o.type)) return void unknown.push(`${file}:${n}: type "${o.type}"`);
+    // a line this kit sets aside still has the envelope every kit checks (its writer is its file's,
+    // v, at, channel), so nothing admitted here fails later in a kit that knows the rest
+    const aside = (what) => { const e = envelopeErrors(o, file); if (e.length) errors.push(`${file}:${n}: ${e.join('; ')}`); else unknown.push(`${file}:${n}: ${what}`); };
+    if (!TYPES.includes(o.type)) return void aside(`type "${o.type}"`);
     const props = SCHEMA.$defs.types[o.type].properties ?? {};
     const extra = Object.keys(o).filter((k) => !ENVELOPE.includes(k) && !Object.hasOwn(props, k));
     if (extra.length) {
-      unknown.push(`${file}:${n}: ${o.type}.${extra.join(', ')}`);
       for (const k of extra) delete o[k];
       // a set line that carried only fields this kit doesn't know changes nothing it knows
-      if (o.op === 'set' && !Object.keys(o).some((k) => !ENVELOPE.includes(k))) return;
+      if (o.op === 'set' && !Object.keys(o).some((k) => !ENVELOPE.includes(k))) return void aside(`${o.type}.${extra.join(', ')}`);
+      unknown.push(`${file}:${n}: ${o.type}.${extra.join(', ')}`);
     }
     const errs = validate ? checkLine(o, file) : [integrity(o, file)].filter(Boolean);
     if (errs.length) errors.push(`${file}:${n}: ${errs.join('; ')}`);
     else lines.push({ ...o, __file: file, __line: n });
   });
-  // The cost: a field mistyped in a hand-written line is dropped here rather than refused; log-check
-  // still names it.
+  // The cost: a field mistyped in a hand-written line is dropped here rather than refused (log-check
+  // still names it), and a hand-written set like {status, foo} lands with foo set aside; a later kit
+  // where foo is a field another writer owns refuses the whole line, so the fold of that record can
+  // differ between kits.
   return { lines, errors, unknown };
 }
 
@@ -1746,7 +1762,7 @@ function cmdLogCheck() {
     newer.push(...r.unknown);
     n += r.lines.length;
   }
-  for (const u of newer) out(`written by a newer kit: upgrade (${u})`);
+  for (const u of newer) out(`a newer kit's line, or a mistyped name: upgrade, or check ${u}`);
   for (const i of readLog().ignored) out(`ignored: ${i.line.__file}:${i.line.__line} ${i.line.id}: ${i.why}`);
   const rw = questionRewrites();
   for (const w of rw.warnings) out(`warn: ${w}`);
@@ -2597,7 +2613,7 @@ function cmdValidate() {
   }
 
   for (const e of readLog().errors) warnings.push(`log ${e}`);
-  for (const u of readLog().unknown) warnings.push(`log written by a newer kit (upgrade): ${u}`);
+  for (const u of readLog().unknown) warnings.push(`log: a newer kit's line, or a mistyped name: upgrade, or check ${u}`);
   { const r = questionRewrites(); errors.push(...r.errors); warnings.push(...r.warnings); }
   for (const i of readLog().ignored) if (['ticket', 'feature'].includes(i.line.type) && i.why === 'duplicate id') errors.push(`${i.line.id}: a second ${i.line.type} line with this id (${i.line.__file}:${i.line.__line}) was ignored; use ${i.line.type} set`);
   const raw = ladder().raw_ceilings;
