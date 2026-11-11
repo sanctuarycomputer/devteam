@@ -8929,6 +8929,27 @@ function collectMetrics(since) {
     const sev = incidentSeverity(p);
     if (sev >= 3 && !incidentDecisions(p.id).length) add('medium', 'incident-unowned', p.id, `severity ${sev}, open since ${p.created_at}, no incident-fix decision`, 'decide a fix (decide --class incident-fix --refs <p-id> <ticket-id> …), or watch it with a reason');
   }
+  // a sensor's escalation of severity 3 or more nobody has triaged, triage_overdue_hours (default 2)
+  // after the first, while the supervisor runs: no incident holds it (once one does, incident-unowned
+  // above takes over), it isn't ignored, and no live noise ruling cites it. Per fingerprint, over
+  // the last 7 days, so an upgrade doesn't raise every escalation the log ever held.
+  if (supervisorRunning) {
+    const overdue = (Number(loadSettings().sensor_defaults?.triage_overdue_hours) || 2) * 3600000;
+    const sensorsNow = new Set(sensorList().map((x) => x.name));
+    const handled = new Set([...incidentList().flatMap((p) => p.refs ?? []), ...logObjects('decision').filter((d) => d.class === 'orient-noise' && liveDecision(d)).flatMap((d) => d.refs ?? [])]);
+    const byFp = new Map();
+    for (const o of logObjects('observation')) {
+      if (!fromSensor(o) || !TRIAGE_KINDS.includes(o.kind) || handled.has(o.id) || now - Date.parse(o.created_at) > 7 * 86400000) continue;
+      const id = fpIdOfObservation(o);
+      if (!id || !sensorsNow.has(splitFpId(id).sensor) || ignoredNow.has(id) || openIncidentOf(id)) continue;
+      (byFp.get(id) ?? byFp.set(id, []).get(id)).push(o);
+    }
+    for (const [id, obs] of byFp) {
+      const sev = Math.max(...obs.map((o) => o.severity ?? 0));
+      const first = obs.map((o) => o.created_at).sort()[0];
+      if (sev >= 3 && now - Date.parse(first) > overdue) add('medium', 'sensor-untriaged', id, `severity ${sev}, ${obs.length} observation(s) since ${first} (${obs.slice(-3).map((o) => o.id).join(', ')}), not triaged`, 'triage it: fold it into an incident, ignore it, or rule it noise (sensor incident, sensor ignore, decide --class orient-noise)');
+    }
+  }
   if (sensorList().length || logObjects('observation').some((o) => o.kind === 'discovery')) {
     const last = logObjects('observation').filter((o) => o.kind === 'discovery' && o.subject === 'sensors').sort(byTime).pop();
     const changed = last?.source_ref && last.source_ref !== discoveryKey();

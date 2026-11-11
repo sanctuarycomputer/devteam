@@ -192,3 +192,38 @@ test('set-asides cite what they set aside: an ack its finding\'s observations, a
     assert.equal(ig.stage, 'decide');
   } finally { F.done(); }
 });
+
+test('sensor-untriaged: a sensor\'s escalation nobody folded, ignored or ruled noise, while the supervisor runs', () => {
+  const F = fleetFixture('ooda-untriaged');
+  const { old, ok } = F;
+  const hand = handFor(F);
+  try {
+    const s = sensorFixture(F);
+    const H = 3600000;
+    const esc = (fp, severity, ago, sensor = 'fake') => hand('supervisor', { type: 'observation', source: sensor, detector: 'sensor', subject: `sensor:${sensor}`, kind: 'log-error', detail: `${sensor}: a error log line`, severity, valence: -1, source_key: `sensor:${sensor}:log:${fp}` }, ago);
+    const u1 = esc('U1', 3, 3 * H);
+    esc('U2', 2, 3 * H + 1000); // under severity 3
+    esc('U3', 3, H); // not overdue yet
+    esc('U4', 3, 3 * H + 2000, 'gone'); // a sensor no longer in the settings
+    esc('U5', 3, 3 * H + 3000);
+    const u6 = esc('U6', 3, 3 * H + 4000);
+    const fps = s.read('fingerprints.json');
+    fps['log:U5'] = { kind: 'log', first_seen: new Date().toISOString(), total: 1, users: 0, level: 'error', template: 'boom' };
+    s.put('fingerprints.json', fps);
+    ok(old, ['sensor', 'ignore', 'fake:log:U5', '--reason', 'bots'], SUP);
+    ok(old, ['decide', '--class', 'orient-noise', '--refs', 'fake:log:U6', u6, '--', 'a health check, by design'], SUP);
+    const findings = () => json(ok(old, ['metrics', '--json'])).findings.filter((x) => ['sensor-untriaged', 'incident-unowned'].includes(x.kind));
+    assert.deepEqual(findings(), [], 'nothing while the supervisor is not running');
+    // the supervisor's wait is alive
+    fs.writeFileSync(path.join(old, 'docs/devteam/run/sensors/.wait-alive'), '');
+    const [f, ...rest] = findings();
+    assert.deepEqual(rest, [], JSON.stringify(rest));
+    assert.equal(f.kind, 'sensor-untriaged');
+    assert.equal(f.subject, 'fake:log:U1');
+    assert.match(f.detail, /severity 3/);
+    assert.match(f.suggestion, /fold it into an incident, ignore it, or rule it noise/);
+    // an incident takes it: untriaged stops, and incident-unowned takes over after its hour
+    hand('supervisor', { type: 'problem', title: 'payment errors', severity: 3, realized: true, status: 'open', threatens: [], refs: [u1], fingerprints: ['fake:log:U1'], sensor: 'fake' }, 2 * H);
+    assert.deepEqual(findings().map((x) => x.kind), ['incident-unowned']);
+  } finally { F.done(); }
+});
