@@ -2193,7 +2193,7 @@ const ATTR = {
     hide: ['review', 'result', 'secrets', 'secrets_posted', 'choices', 'status'],
     fmt: { why_asked: (w) => `${w.rung ? `${esc(RUNG_WORDS[w.rung])}` : ''}${w.ceiling ? `, at most ${esc(RUNG_WORDS[w.ceiling])}` : ''}${(w.reasons || []).length ? ` · ${esc(w.reasons.map(words).join(', '))}` : ''}`, autonomy: (a) => `${esc(words(a.class))}: ${esc(RUNG_WORDS[a.rung])}${a.scope ? ` (${esc(a.scope)})` : ''}`, goal: (v) => glink(v), re: (v) => linkify(v) },
   },
-  decision: { order: ['what', 'class', 'scope', 'authority', 'approved_by', 'rung', 'ceiling', 'options', 'rationale', 'confidence', 'refs', 'reversible'], fmt: { authority: (v) => esc(AUTHORITY_LABEL[v] || v) } },
+  decision: { order: ['what', 'class', 'scope', 'authority', 'approved_by', 'knowledge', 'rung', 'ceiling', 'options', 'rationale', 'confidence', 'refs', 'reversible'], label: { knowledge: 'Rests on' }, fmt: { authority: (v) => esc(AUTHORITY_LABEL[v] || v), knowledge: linkList } },
   act: { order: ['what', 'class', 'scope', 'decision', 'approved_by', 'rung', 'refs', 'reversible'], fmt: { id_block: (b) => `${esc(b.feature)}: ${esc(b.from)} to ${esc(b.to)}` } },
   knowledge: { order: ['statement', 'kind', 'status', 'scope', 'confidence', 'valence', 'evidence'], fmt: { valence: (v) => (v < 0 ? `${esc(v)} (something to avoid)` : esc(v)) } },
   problem: { order: ['title', 'status', 'severity', 'realized', 'threatens', 'assigned_to', 'detail', 'refs'], fmt: { realized: (v) => (v ? 'yes: an issue' : 'no: a risk'), assigned_to: (v) => linkify(v), severity: (v) => `<span class="badge ${sevBadge(v)}">${esc(v)}</span>` } },
@@ -2836,9 +2836,16 @@ function restsOn(approvedBy) {
   const k = (DATA.ooda.knowledge || []).find((x) => x.id === approvedBy);
   return k ? `<h3>The standing rule it rests on</h3><div class="card small"><a class="linkish" href="#lesson/${encodeURIComponent(k.id)}">${esc(k.statement)}</a> <span class="muted">· ${esc(scopeWords(k.scope))}</span></div>` : '';
 }
-// Records an object cites, in their own words (from its peek).
+// The knowledge a decision rests on (decide --on), or a start's prompt carried, in its own words
+// (from its peek): what the call or the session had to go on.
+function knowledgeCited(p, title) {
+  const ks = p?.record?.fields?.knowledge || [];
+  return ks.length ? `<h3>${esc(title)}</h3><ul>${ks.map((id) => { const x = p.cited?.[id]; return `<li>${linkify(id)}${x ? ` <span class="muted">${esc(words(x.kind ?? x.type))}</span>${x.text ? `: ${linkify(String(x.text).slice(0, 160))}` : ''}` : ''}</li>`; }).join('')}</ul>` : '';
+}
+// Records an object cites, in their own words (from its peek); what it rests on or was given has its own list.
 function citedBlock(p, o) {
-  const c = Object.entries(p?.cited || {}).filter(([id]) => !id.startsWith('q-') || !o?.approved_by || id !== o.approved_by);
+  const given = new Set(p?.record?.fields?.knowledge || []);
+  const c = Object.entries(p?.cited || {}).filter(([id]) => (!id.startsWith('q-') || !o?.approved_by || id !== o.approved_by) && !given.has(id));
   return c.length ? `<h3>What it cites</h3><ul>${c.map(([id, x]) => `<li>${linkify(id)} <span class="muted">${esc(words(x.type))}${x.kind ? ` (${esc(words(x.kind))})` : ''}</span>${x.text ? `: ${linkify(String(x.text).slice(0, 160))}` : ''}</li>`).join('')}</ul>` : '';
 }
 function openDecision(id) {
@@ -2855,6 +2862,7 @@ function openDecision(id) {
     ] })}
     ${lineageBlock(p)}
     ${restsOn(r.under?.approved_by)}
+    ${knowledgeCited(p, 'What it rests on')}
     ${r.kind === 'decision' ? `<h3>Carried out by</h3>${acts.length ? `<ol class="tl">${acts.map((a) => `<li class="act"><time>${a.created_at ? esc(when(a.created_at)) : ''}</time><a class="linkish" href="#act/${encodeURIComponent(a.id)}">${a.what ? actView(a).head : esc(a.id)}</a></li>`).join('')}</ol>` : '<p class="muted">Nothing yet.</p>'}` : ''}
     ${r.correction ? '' : '<p class="small muted">To correct it, use Correct on it in Loop → Decide.</p>'}
     ${historySection(p, id)}`);

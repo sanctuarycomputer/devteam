@@ -1780,6 +1780,15 @@
             "type": "string",
             "pattern": "^[qk]-"
           },
+          "knowledge": {
+            "description": "The knowledge or problems this decision rests on (decide --on); never copied into refs, and never its authority (approved_by is).",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^(k|p)-"
+            },
+            "x-tip": "The lessons, facts or problems the call rests on."
+          },
           "corrected": {
             "description": "Your correction, if the call was wrong; it drops the class to rung 1. On a goal-impact decision (constitutional, so no rung drops) it may carry the impact you give the goal instead.",
             "type": "object",

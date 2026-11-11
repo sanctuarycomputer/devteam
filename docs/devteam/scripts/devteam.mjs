@@ -985,6 +985,9 @@ const RUNG = { 1: 'ask', 2: 'ask with a default', 3: 'act and report' };
 const SCHEMA = readJson(path.join(kitDir, 'schema', 'log.schema.json'));
 const ENVELOPE = ['v', 'id', 'type', 'op', 'at', 'by', 'channel'];
 const LINE_MAX = 4096;
+// The most knowledge ids a decision (--on) or a start (the lessons its prompt carried) records, so its
+// line stays under LINE_MAX.
+const KNOWLEDGE_IDS_MAX = 60;
 const TYPES = Object.keys(SCHEMA.$defs.types);
 const RANK = SCHEMA['x-authority'].rank;
 
@@ -7242,12 +7245,24 @@ const citing = () => flagStr('decision') ?? undefined;
 function cmdDecide() {
   const what = rest ? rest.join(' ') : flagStr('what');
   const cls = flagStr('class');
-  if (!cls || !what) die('usage: decide --class c [--scope s] [--approved qid|kid] [--options "a" "b"] [--rationale "…"] [--confidence 0-1] [--refs ids] [--irreversible] -- "<what you decided>"');
+  if (!cls || !what) die('usage: decide --class c [--scope s] [--approved qid|kid] [--options "a" "b"] [--rationale "…"] [--confidence 0-1] [--refs ids] [--on k-…|p-…] [--irreversible] -- "<what you decided>"');
   supervisorOnly('decide');
   if (cls === 'improvement-trial') upkeepAllows('a new trial');
   let scope = flagStr('scope') ?? null;
   const approved = flagStr('approved') ?? null;
   const refs = asList(flags.refs);
+  // --on: the knowledge or problems the call rests on, a link for the lineage and the learning
+  // record, apart from refs (an act stays within refs) and from approved_by (authorise reads only
+  // that). Knowledge must be accepted: a candidate isn't the project's yet, and a retired one no
+  // longer is. An id in both would read as what the call is about and what it rests on at once.
+  const on = flags.on === true ? die('--on names the knowledge or problems the decision rests on: --on <k-…|p-…>…') : asList(flags.on);
+  if (on.length > KNOWLEDGE_IDS_MAX) die(`--on takes at most ${KNOWLEDGE_IDS_MAX} ids (a log line is at most ${LINE_MAX} bytes): cite the ones the call turns on`);
+  for (const k of on) {
+    const o = logGet(k) ?? die(`--on ${k}: no such knowledge or problem`);
+    if (!['knowledge', 'problem'].includes(o.type)) die(`--on ${k} is ${o.type === 'observation' ? 'an' : 'a'} ${o.type}: a decision rests on knowledge or a problem (cite what it is about in --refs)`);
+    if (o.type === 'knowledge' && o.status !== 'accepted') die(`${k} is ${o.status}: a decision rests only on accepted knowledge`);
+    if (refs.includes(k)) die(`${k} is in both --refs and --on: --refs is what the decision is about, --on what it rests on`);
+  }
   // a remediation decision names the remediation it runs
   if (cls === 'production-remediation') {
     upkeepAllows('a remediation', { noForce: true });
@@ -7295,7 +7310,7 @@ function cmdDecide() {
   if (a.doorCited && a.approval.ticket !== refs[0] && !(features().get(tickets().get(refs[0])?.feature)?.goals ?? []).includes(a.approval.goal)) die(`${approved} answered a one-way door for ${a.approval.ticket ?? a.approval.goal ?? 'something else'}, not for ${refs[0]} or a goal its feature serves`);
   const line = appendLog({
     type: 'decision', class: cls, scope: scope ?? undefined, what, rationale: flagStr('rationale'), options: flags.options !== undefined ? listFlag('options') : undefined,
-    confidence, refs, reversible: !flags.irreversible, rung: a.rung, ceiling: a.ceiling, authority: a.authority, approved_by: approved ?? undefined,
+    confidence, refs, reversible: !flags.irreversible, rung: a.rung, ceiling: a.ceiling, authority: a.authority, approved_by: approved ?? undefined, knowledge: on.length ? [...new Set(on)] : undefined,
   }, 'supervisor');
   out(line.id);
 }
@@ -14779,7 +14794,7 @@ function peekView(kind, id) {
   } else {
     const o = logGet(id) ?? die(`no record ${id}`);
     v.history = historyOf([id]);
-    v.cited = cited([...(o.refs ?? []), ...(o.evidence ?? []), ...(o.approved_by ? [o.approved_by] : [])]);
+    v.cited = cited([...(o.refs ?? []), ...(o.evidence ?? []), ...(o.approved_by ? [o.approved_by] : []), ...(Array.isArray(o.knowledge) ? o.knowledge : [])]);
     if (o.type === 'problem' || o.type === 'knowledge') v.related = logObjects('observation').filter((x) => (x.refs ?? []).includes(id) || x.subject === id || (o.evidence ?? []).includes(x.id)).sort(byTime).map((x) => ({ id: x.id, at: x.created_at, by: x.created_by, kind: x.kind, detail: x.detail, severity: x.severity ?? null }));
     // an incident: its view, what its fingerprints raised, and the latest event of each
     // (production data, scrubbed; the drawer frames it as untrusted)
