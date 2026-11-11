@@ -1223,12 +1223,16 @@ function withLock(file, fn, { staleMs = 10000, waitMs = 15000 } = {}) {
 }
 
 let mainRefCache;
+let mainShaCache;
 function mainRef() {
   if (mainRefCache !== undefined) return mainRefCache;
   const b = loadSettings().main_branch;
-  for (const r of [`origin/${b}`, b]) if (resolveCommit(r)) return (mainRefCache = r);
+  for (const r of [`origin/${b}`, b]) { const sha = resolveCommit(r); if (sha) { mainShaCache = sha; return (mainRefCache = r); } }
+  mainShaCache = null;
   return (mainRefCache = null);
 }
+// The commit mainRef() named when it was resolved: found with it, and dropped whenever it is.
+const mainSha = () => (mainRef(), mainShaCache);
 // Before judging a PR (check-pr, merge): main as origin has it now, and nothing read from the old
 // one kept. A push to main from another clone since this checkout last fetched would otherwise be
 // left out of the landing tree, the settings in force and the registry acts.
@@ -1288,7 +1292,7 @@ function resolveCommit(ref) {
 // other (this checkout may not have pulled yet, or may be a plan branch that is ahead).
 function durableText(file) {
   const local = readText(path.join(durableLogDir(), file));
-  const shown = projectInRepo && mainRef() ? git(['show', `${mainRef()}:${projectRel}/log/${file}`]) : null;
+  const shown = projectInRepo && mainRef() ? showAt(mainSha(), `${projectRel}/log/${file}`) : null;
   const main = shown === null ? null : `${shown}\n`;
   if (main === null) return local;
   if (local === null || main.startsWith(local)) return main;
@@ -1380,6 +1384,8 @@ function readLog() {
   for (const d of [liveLogDir(), durableLogDir()]) if (fs.existsSync(d)) for (const f of fs.readdirSync(d)) if (f.endsWith('.jsonl')) names.add(f);
   const lines = [];
   const errors = [];
+  // main's copy of every file in one git call, not one each
+  if (projectInRepo && mainRef()) prefetchAt(mainSha(), [...names].map((f) => `${projectRel}/log/${f}`));
   for (const f of [...names].sort()) {
     const r = parseLines(logFileText(f), f, { validate: false });
     lines.push(...r.lines);
