@@ -3752,6 +3752,8 @@ function tlCardBody(t) {
 // on the page (or it has none); a bottom sheet on a narrow screen.
 function tlPlaceCard(t) {
   const card = tlEl('tl-card');
+  // Not under a press: a card that grows near the bottom moves up, and the release would land elsewhere. The next draw places it.
+  if (TL.pressed && card.contains(TL.pressed)) return;
   let r = null;
   if (t) r = tlTargetRect(t.subject);
   else if (TL.draft.el?.isConnected) r = TL.draft.el.getBoundingClientRect();
