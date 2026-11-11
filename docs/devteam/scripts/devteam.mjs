@@ -7051,6 +7051,8 @@ function cmdDecide() {
   if (confidence !== undefined && !(confidence >= 0 && confidence <= 1)) die('--confidence is a number from 0 to 1');
   if (['approve-spec', 'approve-plan'].includes(cls) && !tickets().has(refs[0])) die(`${cls} names the ticket first: --refs <ticket-id> [other ids]`);
   if (cls === 'goal-readiness') readinessGoal(refs);
+  // a noise ruling explains observations by citing them (orientClusters); one that cites none explains nothing
+  if (cls === 'orient-noise' && !refs.some((r) => logGet(r)?.type === 'observation')) die('a noise ruling names the observations it explains: --refs <signal key> <o-…>…');
   const a = authorise(cls, scope, approved, refs, 'decide');
   if (a.doorCited && a.approval.ticket !== refs[0] && !(features().get(tickets().get(refs[0])?.feature)?.goals ?? []).includes(a.approval.goal)) die(`${approved} answered a one-way door for ${a.approval.ticket ?? a.approval.goal ?? 'something else'}, not for ${refs[0]} or a goal its feature serves`);
   const line = appendLog({
@@ -7263,6 +7265,9 @@ function cmdObserveLink() {
   out(line.id);
 }
 const SEV = { low: 1, medium: 2, high: 3 };
+// The most observations a set-aside (an ack, a triage ignore) cites: 40 ids keep its line well under
+// LINE_MAX; the finding's key or the fingerprint, in source_ref, joins the rest.
+const SET_ASIDE_REFS = 40;
 // Each metrics finding becomes an observation, once a day per finding (deduped on source_key).
 function observeFindings(m) {
   const recent = new Map();
@@ -7445,16 +7450,24 @@ function cmdProblem() {
   if (flags.json) return json(ps);
   for (const p of ps) out(`${p.id} [sev ${p.severity}, ${p.realized ? 'issue' : 'risk'}, ${p.status}${p.assigned_to ? `, ${p.assigned_to}` : ''}] ${p.title}${(p.threatens ?? []).length ? ` (threatens ${p.threatens.join(', ')})` : ''}`);
 }
-// Recurring signals no knowledge or problem explains yet: three or more observations (or
-// corrections) on one key, from at least two writers or on at least two days.
+// The key an observation recurs on: a sensor's escalation its fingerprint's id, so each qualify and
+// spike on one fingerprint is one signal (a spike's source_key carries its hour, and would never
+// recur); anything else its source_key (a finding's metrics:<kind>:<subject>), else kind:subject.
+// A fix-regressed or recurred line keeps its own key: it already cites its incident.
+const signalKeyOf = (o) => (fromSensor(o) && TRIAGE_KINDS.includes(o.kind) ? fpIdOfObservation(o) : null) ?? o.source_key ?? `${o.kind}:${o.subject}`;
+// Recurring signals no knowledge, problem or ruling explains yet: three or more observations (or
+// corrections) on one key, from at least two writers or on at least two days. A live decision
+// that cites an observation explains it (an orient-noise ruling); a corrected one explains nothing,
+// so the owner's correction of a ruling brings its signal back.
 function orientClusters() {
   const linked = new Set();
   for (const o of [...logObjects('knowledge'), ...logObjects('problem')]) for (const r of [...(o.evidence ?? []), ...(o.refs ?? [])]) linked.add(r);
+  for (const d of logObjects('decision')) if ((d.refs ?? []).some((r) => String(r).startsWith('o-')) && liveDecision(d)) for (const r of d.refs) linked.add(r);
   const groups = new Map();
   const add = (key, item) => (groups.get(key) ?? groups.set(key, []).get(key)).push(item);
   for (const o of logObjects('observation')) {
     if (linked.has(o.id) || ['reading', 'retro', 'outcome', 'link'].includes(o.kind)) continue;
-    add(o.source_key ?? `${o.kind}:${o.subject}`, { id: o.id, at: o.created_at, who: o.created_by, valence: o.valence ?? 0, detail: o.detail });
+    add(signalKeyOf(o), { id: o.id, at: o.created_at, who: o.created_by, valence: o.valence ?? 0, detail: o.detail });
   }
   for (const a of calls()) {
     const c = correctionOf(a);
@@ -7546,6 +7559,7 @@ function cmdOrient() {
   if (flags.json) return json([...cl, ...lk]);
   if (!cl.length && !lk.length) return out('nothing recurring that is unexplained');
   for (const c of cl) out(`${c.key}  x${c.count}  valence ${c.valence}\n  latest: ${c.latest}\n  evidence: ${c.ids.join(' ')}`);
+  if (cl.length) out('  (explain one: knowledge add … --evidence <ids>, a problem citing them, or rule it noise: decide --class orient-noise --refs <key> <ids> -- "<why>")');
   if (lk.length) { out('link proposals:'); for (const p of lk) out(p.note ? `  ${p.note}` : `  ${p.proposal} (${p.observation})${p.proposed_by ? `, proposed by ${p.proposed_by}; check before adding` : ''}: ${p.command}`); out('  (dismiss one: decide --class registry-edit --refs <observation> -- "<why the registry stays as it is>")'); }
 }
 
@@ -9224,7 +9238,11 @@ function cmdAck() {
   const live = collectMetrics(0).findings.find((x) => x.kind === kind && x.subject === subject);
   if (!live) die(`no current finding ${kind} "${subject}" (devteam.mjs metrics lists them)`);
   const by = flags.owner ? ownerWriter().by : (supervisorOnly('ack'), 'supervisor');
-  const line = appendLog({ type: 'observation', source: 'ack', kind: 'finding-ack', subject: `${kind} ${subject}`, detail: reason, refs: [] }, by);
+  // it cites what it sets aside: the finding's observations (observeFindings'), the newest 40 so the
+  // line stays under LINE_MAX; the finding's key, in source_ref, joins the rest
+  const key = `metrics:${kind}:${subject}`;
+  const refs = logObjects('observation').filter((o) => o.source_key === key && o.detector === 'metrics' && o.created_by === 'supervisor').sort(byTime).slice(-SET_ASIDE_REFS).map((o) => o.id);
+  const line = appendLog({ type: 'observation', source: 'ack', kind: 'finding-ack', subject: `${kind} ${subject}`, detail: reason, refs, source_ref: key }, by);
   out(`${line.id}: ${kind} ${subject} set aside for ${loadSettings().finding_ack_hours}h`);
 }
 
@@ -13418,7 +13436,9 @@ function cmdSensorIgnore(sub) {
   if (sub === 'ignore') {
     if (ignored) die(`${fp.id} is already ignored`);
     const reason = flagStr('reason') ?? die('sensor ignore needs --reason "…" (why it isn\'t worth fixing)');
-    const o = appendLog({ type: 'observation', source: fp.sensor, subject: sensorSubject(fp.sensor), detector: 'sensor', kind: 'sensor-ignored', detail: `ignored ${fp.id}: ${reason}`, severity: 0, valence: 0, source_ref: fp.id, source_key: `sensor:${fp.sensor}:ignore:${fp.key}:${nowIso()}` }, by);
+    // it cites what it sets aside: the fingerprint's observations, the newest 40 (source_ref joins the rest)
+    const refs = [...fpObservations(fp.id)].sort(byTime).slice(-SET_ASIDE_REFS).map((x) => x.id);
+    const o = appendLog({ type: 'observation', source: fp.sensor, subject: sensorSubject(fp.sensor), detector: 'sensor', kind: 'sensor-ignored', detail: `ignored ${fp.id}: ${reason}`, severity: 0, valence: 0, source_ref: fp.id, source_key: `sensor:${fp.sensor}:ignore:${fp.key}:${nowIso()}`, refs }, by);
     return out(`${o.id}: ignored ${fp.id}; triage skips it until sensor unignore`);
   }
   if (!ignored) die(`${fp.id} is not ignored`);

@@ -132,3 +132,63 @@ test('spikes: a median over the hours the sensor heard, naming the line', () => 
     assert.equal(spikes().length, 1, 'once');
   } finally { F.done(); }
 });
+
+// A sensor's lines on one fingerprint, written as the sensors write them: its first qualify, then
+// spikes in hours on two days (Orient wants a signal on two days or from two writers).
+function fingerprintLines(hand, sensor, fp, spikes, ago = 3 * 86400000) {
+  const ids = [hand('supervisor', { type: 'observation', source: sensor, detector: 'sensor', subject: `sensor:${sensor}`, kind: 'log-error', detail: `${sensor}: a error log line`, severity: 3, valence: -1, source_key: `sensor:${sensor}:${fp}` }, ago)];
+  for (let i = 0; i < spikes; i++) {
+    const at = ago - (i + 1) * 3 * 3600000;
+    const hour = new Date(Date.now() - at).toISOString().slice(0, 13);
+    ids.push(hand('supervisor', { type: 'observation', source: sensor, detector: 'sensor', subject: `sensor:${sensor}`, kind: 'spike', detail: `${sensor}: a log line is spiking`, severity: 4, valence: -1, source_key: `sensor:${sensor}:spike:${fp}:${hour}` }, at));
+  }
+  return ids;
+}
+
+test('orient: one signal per fingerprint; a noise ruling clears it until it is corrected', () => {
+  const F = fleetFixture('ooda-orient');
+  const { old, ok, run } = F;
+  const hand = handFor(F);
+  try {
+    const ids = fingerprintLines(hand, 'web', 'log:L1', 4);
+    const signals = () => json(ok(old, ['orient', '--json'])).filter((c) => c.count);
+    const [sig, ...more] = signals();
+    assert.deepEqual(more, [], 'one signal');
+    assert.equal(sig.key, 'web:log:L1', 'keyed on the fingerprint, not each spike\'s hour');
+    assert.deepEqual([...sig.ids].sort(), [...ids].sort());
+    assert.match(ok(old, ['orient']), /^web:log:L1 {2}x5/m);
+    // a noise ruling names the observations it explains
+    assert.match(run(old, ['decide', '--class', 'orient-noise', '--refs', 'web:log:L1', '--', 'bots'], SUP).err, /a noise ruling names the observations it explains/);
+    const d = ok(old, ['decide', '--class', 'orient-noise', '--refs', 'web:log:L1', ...ids, '--', 'bots crawling an old route'], SUP).trim();
+    assert.deepEqual(signals(), [], 'the ruling explains it');
+    assert.equal(one(F, d).stage, 'decide');
+    // the owner corrects it: the signal is unexplained again
+    ok(old, ['correct', d, '--reason', 'not bots: real customers']);
+    assert.equal(signals()[0]?.key, 'web:log:L1', 'a corrected ruling explains nothing');
+  } finally { F.done(); }
+});
+
+test('set-asides cite what they set aside: an ack its finding\'s observations, an ignore its fingerprint\'s, newest 40', () => {
+  const F = fleetFixture('ooda-setaside');
+  const { old, ok } = F;
+  const hand = handFor(F);
+  try {
+    const s = sensorFixture(F);
+    // a sensor and no discovery yet: sensor-discovery-due is live; 41 days of it observed
+    const found = [...Array(41)].map((_, i) => hand('supervisor', { type: 'observation', source: 'metrics', detector: 'metrics', subject: 'sensors', kind: 'sensor-discovery-due', detail: 'production has not been looked over yet', severity: 1, valence: -1, source_key: 'metrics:sensor-discovery-due:sensors' }, (41 - i) * 86400000));
+    const a = one(F, ok(old, ['ack', 'sensor-discovery-due', 'sensors', '--reason', 'next week'], SUP).split(':')[0]);
+    assert.equal(a.refs.length, 40, 'at most 40');
+    assert.deepEqual([...a.refs].sort(), found.slice(1).sort(), 'the newest 40');
+    assert.equal(a.source_ref, 'metrics:sensor-discovery-due:sensors', 'the finding\'s key, for the rest');
+    // an ignore: the fingerprint's observations
+    const fps = s.read('fingerprints.json');
+    fps['log:L1'] = { kind: 'log', first_seen: new Date().toISOString(), total: 1, users: 0, level: 'error', template: 'boom' };
+    s.put('fingerprints.json', fps);
+    const obs = fingerprintLines(hand, 'fake', 'log:L1', 40, 30 * 86400000);
+    const ig = one(F, ok(old, ['sensor', 'ignore', 'fake:log:L1', '--reason', 'bots'], SUP).split(':')[0]);
+    assert.equal(ig.refs.length, 40);
+    assert.deepEqual([...ig.refs].sort(), obs.slice(1).sort(), 'the newest 40');
+    assert.equal(ig.source_ref, 'fake:log:L1');
+    assert.equal(ig.stage, 'decide');
+  } finally { F.done(); }
+});
