@@ -23,17 +23,18 @@
 
 These settle what the spec leaves open, or what the code makes impossible as written. Each is applied in the tasks below.
 
-1. **The lens's `frame-ancestors` are the hub and every instance** (`LENS_ANCESTORS = [PUB, ...BLOCK.map(instanceOrigin)]`), not the instances alone. A browser checks `frame-ancestors` against every ancestor, and the in-page viewer sits in hub → dashboard → lens.
+1. **The lens's `frame-ancestors` are the hub and every instance name** (`LENS_ANCESTORS = [PUB, ...BLOCK.map(instanceOrigin)]`), not the instances alone. A browser checks `frame-ancestors` against every ancestor, and the in-page viewer sits in hub → dashboard → lens. An instance name is a port in the block, and an agent's page can sit on an unused one. Such a page can frame the lens and read what the lens reads: the dev app's text, HTML, routes and errors, with the owner's cookies for that app. The README says so (Task 7).
 2. **The relaxed app header is `frame-ancestors 'self' <LENS_ANCESTORS>`.** The app framed by its lens has the lens, the viewer and maybe the hub above it, so `'self'` alone would block it.
    - It applies only to `sec-fetch-dest: iframe` with `sec-fetch-site: same-origin`. `frame`, `object` and `embed` keep the app's headers.
    - `x-frame-options` is dropped. Every policy in the header that has a `frame-ancestors` directive gets the new value.
    - A response with no policy gets none added. `content-security-policy-report-only` blocks nothing and is left alone.
 3. **The public name is appended to a `frame-ancestors` list that names sources** (`addFrameAncestor`). `'none'`, an empty list and a policy with no directive are left as they are, because adding a directive where there was none would narrow who may frame the page. `x-frame-options` on `/view/` and `/artifact/tree/` is not touched, so PR 3 should send none there.
-4. **`/view/` and `/artifact/tree/` are matched on the raw path** (`publicFramed`). A path with `..`, `%2e`, `%5c` or a backslash never qualifies. An artifact under its capability qualifies by its inner path (`cm[4]`).
+4. **`/view/` and `/artifact/tree/<tree id>/` are matched on the raw path** (`publicFramed`). `tree/` qualifies only with a real tree id, as `ARTIFACT` takes it. A path with `..`, `%2e`, `%5c` or a backslash never qualifies. An artifact under its capability qualifies by its inner path (`cm[4]`).
 5. **The lens's messages are `{ lens: 1, type, … }` both ways.**
    - From the viewer: `hello`, `hit {id, x, y}`, `resolve {id, anchors: [{key, anchor}]}`, `scroll-by {dx, dy, x?, y?}`, `scroll-to {anchor}` and `go {route}`.
    - From the lens: `ready {route, title, viewport}`, `route {route}`, `hit-reply {id, anchor, rect, route}`, `rects {id?, rects: [{key, rect, changed, text}]}`, `key {key, shift}` (Shift and Escape, from inside the app, and Shift up again when the app loses focus) and `errors {errors}`.
    - The lens says nothing until the viewer's first message. `hello` answers with `ready`, and with `errors` if there are any.
+   - `ready` goes out when the lens first attaches to a page (the 250 ms poll can find it mid-parse) and again on that page's `load`, unconditionally. So a viewer waiting for a page's title, as Task 8's `go` step does, always gets a `ready` with the loaded page's.
    - `resolve` sets the watched anchors (the draft's `watch` folded in) and answers with its `id`. After that, `rects` without an `id` follow each change: a scroll or resize at most once per animation frame, a DOM change debounced by 100 ms, and every second as a backstop. Each is sent only when something moved.
    - `scroll-by` scrolls the box under `(x, y)` (or the last hit) that scrolls, else the page, by at most 10,000 px a step.
 6. **The lens checks that a message came from its parent, never what that parent's origin is.** The lens is one string shared with the laptop's relay (PR 3), so it can't name the box's origins. It accepts a message only when all of these hold:
@@ -48,8 +49,8 @@ These settle what the spec leaves open, or what the code makes impossible as wri
    - Strings are capped in bytes as spec §5 and the kit's `ANCHOR_CAPS` say: selector 200, tag 40, role 40, text 80, name 80, html 1,024. A route is capped at 300, and errors at three of 200 bytes each. A test holds the lens's `CAPS` to the kit's.
    - `html` is the element with its own children, each child's contents collapsed to `…` (at most 50 children), cut to 1,024 bytes ending in `…`.
    - A hit on `<html>` or `<body>` has `anchor: null`, so the viewer pins the point instead.
-8. **The lens frames the app in a sandbox of its own, without top navigation**, as well as the viewer's sandbox around the lens (PR 3). A lens opened on its own still keeps the app from navigating the tab.
-9. **`GET /.devteam/lens` is served for any preview-shaped name after the session check, whether or not the map has it.** It is a static page, and serving it asks the hub nothing. Only `GET` on exactly that path (any query) is the lens. `HEAD`, `POST` and `/.devteam/lens/…` stay the app's.
+8. **The lens frames the app in a sandbox of its own, without top navigation**, as well as the viewer's sandbox around the lens (PR 3). A lens opened on its own still keeps the app from navigating the tab. That sandbox keeps `allow-popups-to-escape-sandbox`: dev apps need real windows (OAuth popups, external links). So the framed app can open an unsandboxed window from the owner's click, as it could when opened plain.
+9. **`GET /.devteam/lens` is served for any preview-shaped name after the session check, whether or not the map has it.** It is a static page, and serving it asks the hub nothing. Only `GET` on exactly that path (any query) is the lens. `HEAD`, `POST` and `/.devteam/lens/…` stay the app's. Without a session, the sign-in sends the owner back to the preview's own `/`, not to the lens: a lens open in a tab of its own is no use.
 10. **The lens is a `String.raw` template in plain ASCII**, with no backtick and no `${` in it, so its regular expressions read as written and the kit's copy compares as the same bytes. PR 3's equality test compares `PREVIEW_LENS` only. `previewLensCsp` hashes its one script and one style.
 11. **The lens's DOM behaviour is checked in Chrome**: anchors, caps, rects, scrolling, keys and errors (Task 8). CI checks its markup, its policy, its caps against the kit's, its message gate and its route rules, by running its script in `vm` against a stand-in page (Task 4).
 12. **Only a published page's index is wrapped** (`/<project>/<slug>/` and `/<project>/<slug>/index.html`). The viewer's URL in spec §8 has no page path, so a direct visit to any other page gets the plain bytes.
@@ -64,13 +65,20 @@ These settle what the spec leaves open, or what the code makes impossible as wri
 16. **The wrapper has no script.**
     - It is a one-line bar ("Public · <project>/<slug> · Open it as the public sees it", linking `?plain`) and the viewer in a frame.
     - That frame is sandboxed without top navigation.
-    - It sends `PAGE_CSP` plus `frame-src <the bound instance>`, `x-frame-options: DENY`, `referrer-policy: no-referrer`, `cache-control: no-store, private` and `vary: cookie`.
+    - It sends a policy of its own, `WRAP_CSP(<the bound instance>)`: `default-src 'none'; style-src 'unsafe-inline'; frame-src <inst>; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`. `PAGE_CSP` would admit inline script and `connect-src 'self'`, which the wrapper doesn't need. It also sends `x-frame-options: DENY`, `referrer-policy: no-referrer`, `cache-control: no-store, private` and `vary: cookie`.
+    - Its frame's sandbox has no `allow-popups-to-escape-sandbox`: an artifact viewer opens no window that needs to escape it (unlike the lens's app frame, decision 8).
     - Its title is the published title, escaped.
-17. **The Chrome check of wrapper → viewer → artifact uses a stand-in instance.** PR 2's kit has no `/view/` and no `/artifact/tree/`. The stand-in answers with `viewer: 1` and the kit's kinds of policy in its loopback origin, so the gateway maps them as it will the kit's. PR 3 runs the chain again against the real kit.
+17. **The wrapper is served for a signed-in cross-site top-level navigation too** (a link from mail or another site). That is safe:
+    - Nothing in it is readable: no script, `frame-ancestors 'none'`, and another site can't read a top-level page it opened.
+    - Its frame is sandboxed without top navigation.
+    - The request's query is ignored: the frame's URL is built from the binding alone, so a link can't steer what is framed.
+18. **The Chrome check of wrapper → viewer → artifact uses a stand-in instance.** PR 2's kit has no `/view/` and no `/artifact/tree/`. The stand-in answers with `viewer: 1` and the kit's kinds of policy in its loopback origin, so the gateway maps them as it will the kit's. PR 3 runs the chain again against the real kit.
 
 ## Spec problems found while planning
 
 - **§7 and §12: "the lens's `frame-ancestors` from the instance origins"** misses the hub, which frames the dashboard that frames the lens (decision 1). The spec also doesn't say what the app's replaced `frame-ancestors` becomes, and `'self'` alone would block the app in its own lens (decision 2).
+- **§11 says "the lens framable only by instance origins"**, which conflicts with decision 1 the same way. The spec is corrected in this branch to "by the hub and the box's instance names".
+- **Who can frame the lens.** An agent's page on an unused block port is an "instance name" too, so it can frame the lens and read the dev app through it. Narrowing that needs the gateway to know which ports are real dashboards, which it doesn't today (the hub's list is agent-written). That is left for later, and the README says what such a page can read.
 - **§8's fourth bullet** (a message when the instance doesn't answer or has an older kit) contradicts §12, the Testing list and "Scope and sequence" (plain bytes). Plain is used (decision 14).
 - **§8: "a session store read failure … serve[s] the plain bytes"** can't happen as written. `servePublic` reads the same `state.json` for the published map, so a store that can't be read answers 503 to everyone, as it does today. The wrapper's attempt adds nothing to that: Task 6 tests that the owner and the public get the same 503.
 - **The draft lens "accepts only `parent` and an instance origin"**, but a lens that must be byte-identical in `devteam.mjs` (laptop, `http://127.0.0.1:<port>` viewers) can't list the box's origins. The browser enforces the parent through `frame-ancestors`, and the lens checks `source` (decision 6).
@@ -82,7 +90,7 @@ These settle what the spec leaves open, or what the code makes impossible as wri
 ## Global Constraints
 
 - **Node 18+ built-ins only** in the gateway: no dependencies, no API newer than Node 18 (`server.closeAllConnections()` in tests is 18.2+, which CI's 18 has). CI runs the matrix in `.github/workflows/test.yml`: Node 18, 20, 22 and 24. `test/gateway.test.mjs` is in the `rest` job. Locally, run with Node 24 (`~/.asdf/installs/nodejs/24.21.0/bin/node`) and let CI cover the rest. The browser script may use Node 22+'s global `WebSocket` and `fetch`.
-- **No new source files.** The lens is a string in `cloud/gateway.mjs`: no `lens.html`. Change only `cloud/gateway.mjs`, `test/gateway.test.mjs`, `test/browser/dev-links.mjs` and `README.md`. Nothing in `docs/devteam/scripts/devteam.mjs` or `docs/devteam/dashboard/index.html`: the kit's viewer, relay, artifact lens and `/artifact/tree/` serving are PR 3.
+- **No new source files.** The lens is a string in `cloud/gateway.mjs`: no `lens.html`. Change only `cloud/gateway.mjs`, `test/gateway.test.mjs`, `test/browser/dev-links.mjs` and `README.md` (and the spec's corrections, already on this branch). Nothing in `docs/devteam/scripts/devteam.mjs` or `docs/devteam/dashboard/index.html`: the kit's viewer, relay, artifact lens and `/artifact/tree/` serving are PR 3.
 - **Plain English on the owner's pages**: the wrapper's bar and title. No ids, flags or paths beyond the page's own `<project>/<slug>`.
 - **The lens is data's source, never authority.** It reports what the page holds; it can start, write or answer nothing, and nothing it says is acted on by the gateway.
 - **Tests first** in every task: write the failing test, run it to see it fail for the expected reason, implement, run it green, then run the whole file.
@@ -236,7 +244,7 @@ test('frame-ancestors gains the public name on an instance\'s viewer and publish
     // nothing else of an instance's
     const mainCap = /^(\/c\/[^/]+)\//.exec((await gw.req('GET', '/artifact/main/mock/', { on: P + 20, headers: framed })).headers.location)[1];
     assert.equal(fa(await gw.req('GET', `${mainCap}/artifact/main/mock/s.css`, { on: P + 20, cookie: '', headers: opaque })), `frame-ancestors ${inst} ${gw.publicUrl}`, 'main\'s artifacts');
-    for (const other of ['/', '/api/data', '/viewer/x', '/view', '/view/../api/data', '/view/%2e%2e/api/data', '/x/view/a'])
+    for (const other of ['/', '/api/data', '/viewer/x', '/view', '/view/../api/data', '/view/%2e%2e/api/data', '/x/view/a', '/artifact/tree/notasha/mock/'])
       assert.equal(fa(await gw.req('GET', other, { on: P + 20 })), `frame-ancestors 'self' ${gw.publicUrl}`, other);
   } finally { await K.close(); await gw.close(); }
 });
@@ -259,8 +267,9 @@ export const addFrameAncestor = (csp, origin) => csp.replace(FRAME_ANCESTORS, (a
 ```js
   // An instance's viewer, and an artifact at a published tree, may also be framed by the owner's
   // wrapper on the public name (spec §8). frame-ancestors is checked against every ancestor, and the
-  // wrapper is one. Nothing else of an instance's is opened to it. The raw path, as the kit reads it.
-  const PUBLIC_FRAMED = /^\/(?:view|artifact\/tree)\//;
+  // wrapper is one. Nothing else of an instance's is opened to it: a tree only by a real tree id, as
+  // ARTIFACT takes it. The raw path, as the kit reads it.
+  const PUBLIC_FRAMED = /^\/(?:view\/|artifact\/tree\/[0-9a-f]{40}(?:[0-9a-f]{24})?\/)/;
   const publicFramed = (raw) => PUBLIC_FRAMED.test(raw) && !/\.\.|%2e|%5c|\\/i.test(raw);
 ```
 
@@ -304,6 +313,7 @@ test('a preview framed from its own name (its lens) gets past the app\'s framing
   assert.equal(G.replaceFrameAncestors("default-src 'self'; frame-ancestors 'none'", "'self' https://a"), "default-src 'self'; frame-ancestors 'self' https://a");
   assert.equal(G.replaceFrameAncestors("frame-ancestors 'none', frame-ancestors https://x; img-src y", 'https://a'), 'frame-ancestors https://a, frame-ancestors https://a; img-src y');
   assert.equal(G.replaceFrameAncestors("default-src 'self'", 'https://a'), "default-src 'self'", 'none is added');
+  assert.equal(G.replaceFrameAncestors("frame-ancestors 'none' ; img-src y", 'https://a'), 'frame-ancestors https://a ; img-src y', 'the space before the next directive is kept');
   const S = await previewSetup('preview-framing');
   const { gw, hub, instance, req, origin } = S;
   const devPort = await freePort();
@@ -313,7 +323,16 @@ test('a preview framed from its own name (its lens) gets past the app\'s framing
     else s.writeHead(200, { 'x-frame-options': 'DENY', 'content-security-policy': `default-src 'self' http://127.0.0.1:${devPort}; frame-ancestors 'none'`, 'content-security-policy-report-only': "frame-ancestors 'none'" });
     s.end('app');
   });
+  // a WebSocket's answer carries a policy too: a socket is no frame, so it stays as sent
+  dev.on('upgrade', (q, sock) => {
+    const accept = crypto.createHash('sha1').update(`${q.headers['sec-websocket-key']}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
+    sock.on('error', () => {});
+    sock.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\nContent-Security-Policy: frame-ancestors 'none'\r\nX-Frame-Options: DENY\r\n\r\n`);
+  });
   await new Promise((r) => dev.listen(devPort, '127.0.0.1', r));
+  // an instance's page that refuses frames: the relaxation is a preview's alone
+  const inst = http.createServer((q, s) => { s.writeHead(200, { 'x-frame-options': 'DENY', 'content-security-policy': "default-src 'self'; frame-ancestors 'none'" }); s.end('dashboard'); });
+  await new Promise((r) => inst.listen(P + 21, '127.0.0.1', r));
   const site = origin('cool-tiger');
   const lens = `'self' ${gw.publicUrl} ${Array.from({ length: 25 }, (_, i) => gw.inst(P + i)).join(' ')}`;
   const as = (dest, from) => ({ 'sec-fetch-dest': dest, 'sec-fetch-site': from, 'sec-fetch-mode': 'navigate' });
@@ -333,7 +352,17 @@ test('a preview framed from its own name (its lens) gets past the app\'s framing
     assert.deepEqual([r.headers['x-frame-options'], r.headers['content-security-policy']], [undefined, undefined], 'no policy: none is added');
     r = await req('cool-tiger', 'GET', '/two', { headers: as('iframe', 'same-origin') });
     assert.equal(r.headers['content-security-policy'], `frame-ancestors ${lens}, script-src 'self'; frame-ancestors ${lens}`, 'every policy in the header');
-  } finally { await S.close(); dev.close(); }
+    // confined to previews: an instance's page framed from its own name keeps its headers
+    r = await gw.req('GET', '/x', { on: P + 21, headers: as('iframe', 'same-origin') });
+    assert.deepEqual([r.status, r.headers['x-frame-options'], r.headers['content-security-policy']], [200, 'DENY', "default-src 'self'; frame-ancestors 'none'"], 'an instance\'s page');
+    // and a socket's handshake is passed on as sent
+    await gw.g.pollPush();
+    const c = await wsClient(gw.port, S.on('cool-tiger'), { origin: site, cookie: gw.jar() });
+    assert.equal(c.status, 101);
+    assert.match(c.head, /content-security-policy: frame-ancestors 'none'/i, 'a WebSocket\'s policy is unchanged');
+    assert.match(c.head, /x-frame-options: DENY/i);
+    c.close();
+  } finally { await S.close(); dev.close(); inst.close(); }
 });
 ```
 
@@ -394,6 +423,8 @@ Replace `proxyPreview`'s `writeHead` (line 829):
 ```js
 // The lens's script on its own, with a stand-in for its page and its parent: what it hears, and what
 // it says back. Nothing is loaded in its frame (contentWindow is null), as before the app answers.
+// Its timers are stubs: the rect pushes (animation frames, the 100 ms debounce, the 1 s backstop)
+// are checked only in Chrome (test/browser/dev-links.mjs).
 function lensRun({ search = '', ancestor = 'http://4321.box.example' } = {}) {
   const script = /<script>([\s\S]*?)<\/script>/.exec(G.PREVIEW_LENS)[1];
   const listeners = {};
@@ -420,6 +451,7 @@ test('the preview lens: one script and one style, a policy of their hashes, and 
   assert.deepEqual([L.match(/<script\b/g).length, L.match(/<style\b/g).length], [1, 1]);
   assert.doesNotMatch(L.replace(script, '').replace(style, ''), /\son[a-z]+\s*=|\sstyle\s*=|\ssrc\s*=|\shref\s*=/i, 'no handler, style, src or link in the markup: the policy admits the two hashes and nothing else');
   assert.doesNotMatch(L, /[^\x20-\x7e\n]/, 'plain ASCII, so the kit\'s copy compares byte for byte');
+  assert.doesNotMatch(L, /`|\$\{/, 'no backtick and no ${ in it: it is a String.raw template in both files');
   assert.doesNotThrow(() => new vm.Script(script), 'the script parses');
   const h = (t) => `'sha256-${crypto.createHash('sha256').update(t).digest('base64')}'`;
   assert.equal(G.previewLensCsp('http://a http://b'), `default-src 'none'; script-src ${h(script)}; style-src ${h(style)}; frame-src 'self'; frame-ancestors http://a http://b; base-uri 'none'; form-action 'none'`);
@@ -450,6 +482,13 @@ test('the preview lens answers only the page that frames it, and takes the app o
   L.hear({ lens: 1, type: 'hit', id: 'h2', x: 'a', y: 1 });
   L.hear('hello');
   assert.equal(L.posted.length, n, 'not its parent, the app\'s own origin, an opaque one, not the parent the browser names, not a lens message, not an order, a bad id or point: each ignored');
+  // a first message from an origin the browser doesn't name as the parent binds nothing and gets nothing
+  L = lensRun();
+  L.hear({ lens: 1, type: 'hello' }, { origin: 'http://4322.box.example' });
+  L.hear({ lens: 1, type: 'hit', id: 'h1', x: 1, y: 1 }, { origin: 'http://4322.box.example' });
+  assert.deepEqual(L.posted, [], 'nothing to a page that is not the parent');
+  L.hear({ lens: 1, type: 'hello' });
+  assert.deepEqual(L.posted.map((x) => x.o), ['http://4321.box.example'], 'and the real parent is still answered');
   // where the browser doesn't name the parent's origin, the first one heard is the only one
   L = lensRun({ ancestor: null });
   L.hear({ lens: 1, type: 'hello' }, { origin: 'http://4321.box.example' });
@@ -712,7 +751,8 @@ export const PREVIEW_LENS = String.raw`<!doctype html>
   });
   addEventListener('keydown', onKey, true);
   addEventListener('keyup', onKey, true);
-  frame.addEventListener('load', () => { attach(); checkRoute(); });
+  // the poll can find a page mid-parse (no title yet): its load says ready again, whatever attach did
+  frame.addEventListener('load', () => { attach(); const w = appWindow(); if (w) tell(readyOf(w)); checkRoute(); });
   // an SPA's pushState can't be seen without touching its code: the route is polled
   setInterval(() => { attach(); checkRoute(); }, 250);
   setInterval(() => { if (watched.length) sendRects(); }, 1000);
@@ -732,7 +772,7 @@ export const previewLensCsp = (ancestors) => `default-src 'none'; script-src ${l
 ### Task 5: `GET /.devteam/lens` on a preview's name
 
 **Files:**
-- Modify: `cloud/gateway.mjs` (in `createGateway` after `LENS_ANCESTORS`: `LENS_CSP`; the handler, before `if (pv) return servePreview(…)` at line 1514)
+- Modify: `cloud/gateway.mjs` (in `createGateway` after `LENS_ANCESTORS`: `LENS_CSP`; the handler's no-session branch at 1509-1513, and before `if (pv) return servePreview(…)` at line 1514)
 - Test: `test/gateway.test.mjs` (appended)
 
 - [ ] **Step 1: The test.** Append:
@@ -751,7 +791,7 @@ test('/.devteam/lens on a preview\'s name: the gateway\'s own page, for the owne
     hub.list = [instance('/srv/alpha', P, [previewRow('cool-tiger', devPort)])];
     let r = await req('cool-tiger', 'GET', '/.devteam/lens', { cookie: '', headers: NAV });
     assert.equal(r.status, 302);
-    assert.match(r.headers.location, /\/auth\/login\?next=.*%2F\.devteam%2Flens/, 'no session: sign-in, back to the lens');
+    assert.equal(r.headers.location, `${gw.auth}/auth/login?next=${encodeURIComponent(`${S.origin('cool-tiger')}/`)}`, 'no session: sign-in, then back to the preview itself, not to a lens on its own');
     assert.equal((await req('cool-tiger', 'GET', '/.devteam/lens', { cookie: '', headers: { 'sec-fetch-mode': 'cors' } })).status, 401);
     r = await req('cool-tiger', 'GET', '/.devteam/lens?route=%2Fcheckout', { headers: framed });
     assert.equal(r.status, 200, r.body);
@@ -772,14 +812,26 @@ test('/.devteam/lens on a preview\'s name: the gateway\'s own page, for the owne
 });
 ```
 
-- [ ] **Step 2: Run it.** `$NODE --test --test-name-pattern "devteam/lens on a preview" test/gateway.test.mjs`. Expect a failure at `r.body`: the request was proxied and the app answered `app`.
+- [ ] **Step 2: Run it.** `$NODE --test --test-name-pattern "devteam/lens on a preview" test/gateway.test.mjs`. Expect a failure at the sign-in's `location`: today's `next` is the lens URL.
 - [ ] **Step 3: Implement.** After `LENS_ANCESTORS` (Task 3), add:
 
 ```js
   const LENS_CSP = previewLensCsp(LENS_ANCESTORS);
 ```
 
-In the handler, replace the `if (pv) return servePreview(req, res, pv, own);` line (1514):
+In the handler's no-session branch (lines 1509-1513), send a signed-out lens back to the preview itself:
+
+```js
+      const session = claimed ? sessionOf(req) : null;
+      if (!session) {
+        // a lens open in a tab of its own is no use after sign-in: the preview itself is
+        const back = pv && p === '/.devteam/lens' ? `${own}/` : `${own}${req.url}`;
+        if (navigating(req)) return redirect(res, claimed ? loginAt(back) : loginAt());
+        return send(res, claimed ? 401 : 403, 'text/plain; charset=utf-8', claimed ? 'sign in with your passkey' : 'this box is unclaimed');
+      }
+```
+
+Then replace the `if (pv) return servePreview(req, res, pv, own);` line (1514):
 
 ```js
       // A preview's lens: the gateway's own page, after the session check, never the app's (spec §7).
@@ -794,7 +846,7 @@ In the handler, replace the `if (pv) return servePreview(req, res, pv, own);` li
 ### Task 6: The owner wrapper on the public name
 
 **Files:**
-- Modify: `cloud/gateway.mjs` (`servePublic`'s comment at 1177-1179 and `head` at 1195; `ownerWrapper` after `publicMap` at 1334; the `isPublic` branch at 1453-1456; `PAGES.ownerWrapper` after `publicList` at 1938-1941)
+- Modify: `cloud/gateway.mjs` (`servePublic`'s comment at 1177-1179 and `head` at 1195; `WRAP_MS`, `WRAP_CSP` and `ownerWrapper` after `publicMap` at 1334; the `isPublic` branch at 1453-1456; `PAGES.ownerWrapper` after `publicList` at 1938-1941)
 - Test: `test/gateway.test.mjs` (the comment at line 910 in the public test; a new test, appended)
 
 - [ ] **Step 1: The test.** Append:
@@ -823,7 +875,9 @@ test('public.<box>: the signed-in owner\'s own visit gets the viewer at the publ
     assert.equal(r.status, 200);
     assert.notEqual(r.body, page, 'the wrapper, not the bytes');
     assert.deepEqual([r.headers['cache-control'], r.headers.vary, r.headers['x-frame-options'], r.headers['referrer-policy'], r.headers['set-cookie']], ['no-store, private', 'cookie', 'DENY', 'no-referrer', undefined]);
-    assert.equal(r.headers['content-security-policy'], `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; frame-src ${gw.inst(P + 20)}`);
+    assert.equal(r.headers['content-security-policy'], `default-src 'none'; style-src 'unsafe-inline'; frame-src ${gw.inst(P + 20)}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`, 'a policy of its own: no script, nothing to connect to');
+    assert.match(r.body, /sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads"/);
+    assert.doesNotMatch(r.body, /allow-popups-to-escape-sandbox|allow-top-navigation/, 'its frame can neither navigate this tab nor open a window outside its sandbox');
     assert.ok(r.body.includes(`<iframe src="${gw.inst(P + 20)}/view/artifact/hello?at=tree:${tree}"`), r.body);
     assert.match(r.body, /<a href="\?plain">Open it as the public sees it<\/a>/);
     assert.match(r.body, /Public · alpha\/hello/);
@@ -837,8 +891,15 @@ test('public.<box>: the signed-in owner\'s own visit gets the viewer at the publ
     plain(await get('/alpha/hello/?plain'), '?plain');
     plain(await get('/alpha/hello/', { ...NAV, 'sec-fetch-dest': 'iframe' }), 'a frame load');
     plain(await get('/alpha/hello/', { accept: 'text/html' }), 'no fetch metadata: an old browser');
+    const hellos = () => K.seen.filter((x) => x.url === '/api/hello').length;
+    const before = hellos();
     plain(await get('/alpha/hello/', NAV, ''), 'no cookie');
     plain(await get('/alpha/hello/', NAV, `devteam_session=${'A'.repeat(43)}`), 'a cookie that is no session');
+    assert.equal(hellos(), before, 'without a session the instance is never asked: no anonymous visit reaches it');
+    // a signed-in owner arriving from a link elsewhere gets it too: nothing in it is readable to
+    // that site, its frame is sandboxed, and the frame's URL comes from the binding, not the query
+    r = await get('/alpha/hello/?at=main&slug=other', { ...NAV, 'sec-fetch-site': 'cross-site' });
+    assert.ok(r.body.includes(`<iframe src="${gw.inst(P + 20)}/view/artifact/hello?at=tree:${tree}"`), 'a cross-site visit: the wrapper, framing the published tree whatever the query says');
     r = await gw.req('HEAD', '/alpha/hello/', { on: 'public', headers: NAV });
     assert.deepEqual([r.status, r.body, r.headers.vary, r.headers['cache-control']], [200, '', 'cookie', 'public, max-age=60'], 'HEAD');
     r = await get('/alpha/hello/app.js');
@@ -857,6 +918,9 @@ test('public.<box>: the signed-in owner\'s own visit gets the viewer at the publ
     assert.ok(Date.now() - t0 < 2000, `a slow instance costs at most its deadline (${Date.now() - t0} ms)`);
     await K.close();
     plain(await get('/alpha/hello/'), 'nothing on the port');
+    // a revalidation by the signed-in owner: still the plain path here, and it varies on the cookie
+    r = await get('/alpha/hello/', { ...NAV, 'if-none-match': `"${crypto.createHash('sha256').update(page).digest('hex')}"` });
+    assert.deepEqual([r.status, r.headers.vary], [304, 'cookie'], 'a 304 for the document varies on the cookie too');
     seedPublic(gw.dir, 'beta', 'x', { 'index.html': page }, { root: '/srv/alpha', port: 1 });
     plain(await get('/beta/x/'), 'a binding outside the block');
     // a state file that can't be read: the owner gets what anyone gets
@@ -902,6 +966,8 @@ And its `head` (line 1195): a page's index varies on the cookie, which is what c
   // older kit. Then the public's bytes are served, as before. It reads the cookie, and nothing else
   // of the owner's: it never proxies, and the instance is asked as a loopback client.
   const WRAP_MS = opts.wrapperHelloMs ?? 1500;
+  // The wrapper's own policy: styles and one frame, the bound instance's; no script, nothing to fetch.
+  const WRAP_CSP = (inst) => `default-src 'none'; style-src 'unsafe-inline'; frame-src ${inst}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
   const ownerWrapper = async (req, url) => {
     try {
       if (req.method !== 'GET' || req.headers['sec-fetch-dest'] !== 'document' || url.searchParams.has('plain')) return null;
@@ -929,7 +995,7 @@ Replace the `isPublic` branch (lines 1453-1456):
     // the wrapper, and whatever that can't settle gets the public's bytes, exactly as before.
     if (isPublic) {
       const wrap = await ownerWrapper(req, url);
-      if (wrap) return send(res, 200, 'text/html; charset=utf-8', wrap.html, { 'content-security-policy': `${PAGE_CSP}; frame-src ${instanceOrigin(wrap.port)}`, 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer', 'cache-control': 'no-store, private', vary: 'cookie' });
+      if (wrap) return send(res, 200, 'text/html; charset=utf-8', wrap.html, { 'content-security-policy': WRAP_CSP(instanceOrigin(wrap.port)), 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer', 'cache-control': 'no-store, private', vary: 'cookie' });
       try { return servePublic(req, res); } catch (e) { return send(res, e?.unreadable ? 503 : 500, 'text/plain; charset=utf-8', 'this page can\'t be served just now'); }
     }
 ```
@@ -938,12 +1004,13 @@ Replace the `isPublic` branch (lines 1453-1456):
 
 ```js
   // The owner's view of a public page: the instance's viewer, framed full size under one line, and
-  // no script of its own. The frame may not navigate this tab; its sandbox keeps its origin.
+  // no script of its own. The frame may not navigate this tab, nor open a window outside its
+  // sandbox (an artifact viewer needs none); its sandbox keeps its origin.
   ownerWrapper: ({ project, slug, title, frame }) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><style>
 :root{color-scheme:light dark;--bg:#fafafa;--fg:#171717;--fg2:#666;--line:#e5e5e5}@media (prefers-color-scheme:dark){:root{--bg:#000;--fg:#ededed;--fg2:#a1a1a1;--line:#2e2e2e}}
 html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:13px/1.4 ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif}body{display:flex;flex-direction:column}
 header{padding:6px 12px;border-bottom:1px solid var(--line);color:var(--fg2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}a{color:var(--fg)}iframe{flex:1;border:0;width:100%}
-</style></head><body><header>Public · ${esc(project)}/${esc(slug)} · <a href="?plain">Open it as the public sees it</a></header><iframe src="${esc(frame)}" title="${esc(title)}" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads"></iframe></body></html>`,
+</style></head><body><header>Public · ${esc(project)}/${esc(slug)} · <a href="?plain">Open it as the public sees it</a></header><iframe src="${esc(frame)}" title="${esc(title)}" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads"></iframe></body></html>`,
 ```
 
 - [ ] **Step 6: Run it, then the file.** Expect green, the existing public tests included: none of them sends `sec-fetch-dest: document` with a session.
@@ -986,7 +1053,7 @@ A preview's name also answers `/.devteam/lens`, a page of the gateway's own that
 - [ ] **Step 3: The threat model.** After the **Passkey prompts from an agent's page** bullet (line 175), add two bullets:
 
 ```
-- **A preview's framing headers give way once.** The gateway drops an app's `X-Frame-Options` and replaces its `frame-ancestors` for one kind of load only: the app framed from its own name, which is how its lens holds it. The lens can be framed only by the hub and the box's dashboards. A top-level load and every other frame get the app's own headers, and another site's frame is still refused. The lens shares the app's origin, so the app can rewrite it, or lie through it about what is on the page: what reaches the supervisor from there is a description of the page, given to it as data, and it can't start, write or answer a thread.
+- **A preview's framing headers give way once.** The gateway drops an app's `X-Frame-Options` and replaces its `frame-ancestors` for one kind of load only: the app framed from its own name, which is how its lens holds it. The lens can be framed only by the hub and the box's instance names, where an agent's page can also sit (on an unused port). Such a page could frame a lens and read what the lens reads: the dev app's text, HTML, routes and console errors, as the app shows them to you with your cookies for that app. Keep secrets out of dev apps on the box, as for anything an agent can reach. A top-level load and every other frame get the app's own headers, and another site's frame is still refused. The framed app can still open a window of its own from your click (an OAuth popup, a link), unsandboxed, as it could when opened plain. The lens shares the app's origin, so the app can rewrite it, or lie through it about what is on the page: what reaches the supervisor from there is a description of the page, given to it as data, and it can't start, write or answer a thread.
 - **The public name reads the session cookie** to choose the owner's own view of a page, and for nothing else. It never forwards the cookie or sets one, that view is never cached (`no-store, private`), and the plain page says `Vary: Cookie`, so a cache in between can at worst hand the owner the plain page, and never hands that view to anyone else. An instance's viewer and published-version pages accept the public name as a frame ancestor, which is safe because that name serves only the gateway's own page and sandboxed artifacts with no origin of their own.
 ```
 
@@ -1028,7 +1095,8 @@ async function gatewayViewers({ G, HUB, SP, tab, app }) {
   const inst = `http://${SP}.box.localhost:${G}`;
   const self = `http://127.0.0.1:${SP}`;
   const T = 'e'.repeat(40);
-  // an app that refuses every frame, as many do: only its lens's own load may hold it
+  // an app that refuses every frame, as many do: only its lens's own load may hold it. Its console
+  // error comes 1.5 s after load, so the lens has attached by then (its poll is 250 ms): don't shorten it.
   const appPage = (title) => `<!doctype html><title>${title}</title><body style="margin:0;height:3000px"><button id="buy">Buy now</button><div id="card" style="padding:24px"><span>one</span><span><b>deep</b> two</span></div><p id="long">${'é'.repeat(600)}</p><button id="forge" onclick="parent.postMessage({ lens: 1, type: 'go', route: '/second' }, '*')">forge</button><script>setTimeout(() => console.error('boom from the app'), 1500)</script></body>`;
   const appSrv = http.createServer((q, s) => {
     s.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'x-frame-options': 'DENY', 'content-security-policy': "default-src 'self' 'unsafe-inline'; frame-ancestors 'none'" });
@@ -1045,7 +1113,8 @@ async function gatewayViewers({ G, HUB, SP, tab, app }) {
   await until(async () => (await (await fetch(`http://127.0.0.1:${HUB}/instances.json`)).json()).instances.some((x) => (x.previews ?? []).some((p) => p.name === name)), 'the hub to list the framed app');
 
   // the stand-in instance: a viewer page that frames what it's given and keeps what it hears in #got,
-  // posting whatever the test puts in data-send
+  // posting whatever the test puts in data-send. Its hello says devteam: 1, so the hub (the real
+  // dashboard's) shows it as a tab of its own, "standin"; nothing here looks at the hub's tabs again.
   const viewerPage = (src, sandbox) => `<!doctype html><title>Stand-in viewer</title><iframe id="f" src="${src}" ${sandbox} style="width:800px;height:600px;border:0"></iframe><pre id="got"></pre><script>
 const f = document.getElementById('f');
 const got = document.getElementById('got');
@@ -1100,6 +1169,9 @@ new MutationObserver(() => { const m = document.body.dataset.send; if (!m) retur
   await tell({ type: 'scroll-by', dx: 0, dy: 300, x: 5, y: 5 });
   await hear((d) => d.type === 'rects' && d.id === undefined && d.rects[0].rect && d.rects[0].rect.y === buy.rect.y - 300, 'the rect to move with a scroll');
   stepOk('scroll-by scrolls the app, and the watched rect follows, unasked');
+  // newPage turned on focus emulation, so a headless tab holds focus. If a Chrome still keeps the key
+  // out of the frame, click the button first with a real mouse event (mouseAt at the iframe's offset
+  // plus the button's centre) and dispatch Shift after that.
   await inApp(`(d.getElementById('buy').focus(), true)`);
   await browser.shift(tab, true);
   await hear((d) => d.type === 'key' && d.key === 'Shift' && d.shift === true, 'Shift, seen inside the app');
@@ -1173,7 +1245,7 @@ $NODE --test test/bounds.test.mjs && $NODE --test --test-concurrency=8 $(ls test
 Expect every file green. Nothing outside `cloud/gateway.mjs`, `test/gateway.test.mjs`, `test/browser/dev-links.mjs` and `README.md` changed, so a failure in the kit's files is the machine's load: run that file again on its own before suspecting the branch.
 
 - [ ] **Step 2: The browser script.** `$NODE test/browser/dev-links.mjs`. Expect `all steps passed`, and keep its output for the PR body.
-- [ ] **Step 3: Check the scope.** `git diff --stat origin/main...HEAD` lists only the four files above and this plan. `git grep -n "PREVIEW_LENS" -- docs/devteam` finds nothing (the kit's copy is PR 3's).
+- [ ] **Step 3: Check the scope.** `git diff --stat origin/main...HEAD` lists only the four files above, this plan, and the spec (`docs/superpowers/specs/2026-11-10-supervisor-threads-design.md`: commit `27050ec`, gateway corrections from planning, and the §11 lens-ancestors line). `git grep -n "PREVIEW_LENS" -- docs/devteam` finds nothing (the kit's copy is PR 3's).
 - [ ] **Step 4: Open the PR.** `git push -u origin threads-gateway`, then `gh pr create --base main --head threads-gateway --title "Threads, PR 2: the gateway (preview lens, framing, the owner's view of a public page)" --body-file <file>`. The body has these parts:
   - **What:** the lens at `/.devteam/lens` (`PREVIEW_LENS`, which PR 3 copies byte for byte), the one framing relaxation, `ARTIFACT` with `tree/`, `frame-ancestors` for `/view/` and `/artifact/tree/`, the owner's wrapper with its plain fallback, and `vary: cookie`.
   - **Dormant:** nothing changes for anyone until a kit says `viewer: 1` in its hello (PR 3). Until then the wrapper serves the plain bytes, and the lens is reachable but nothing frames it.
@@ -1204,17 +1276,17 @@ Expect every file green. Nothing outside `cloud/gateway.mjs`, `test/gateway.test
   - §11 bullets for the lens, framing, the wrapper and the viewer's ancestors: Tasks 2, 3, 5, 6 and 7.
   - Testing, gateway list:
     - session and never proxied: Task 5;
-    - `iframe` with `same-origin` only: Task 3;
+    - `iframe` with `same-origin` only, and only for previews (an instance's page and a WebSocket's 101 keep their headers): Task 3;
     - `tree/` capability: Task 1;
     - public ancestor and nowhere else: Task 2;
-    - wrapper vs plain for `?plain`, a frame load, a bad cookie, no `viewer: 1` and down, never cached: Task 6;
+    - wrapper vs plain for `?plain`, a frame load, a bad cookie, no `viewer: 1` and down, never cached, its own policy, the instance never asked without a session, a cross-site visit, a 304 that varies: Task 6;
     - `publicCsp`'s sandbox: Task 6;
     - the three-level chain in Chrome: Task 8 (stand-in, decision 17).
   - Docs: the README's cloud and threat-model bullets, and the gateway's header: Task 7.
 - **Placeholders.** None: every task names its files with line anchors as of `dfc84a6`, gives its test and code in full, and its command. `<file>` in Task 9 is the PR body the implementer writes from the listed parts.
 - **Names.**
   - Gateway, module level: `PREVIEW_LENS`, `lensPart`, `lensHash`, `previewLensCsp`, `FRAME_ANCESTORS`, `addFrameAncestor`, `replaceFrameAncestors`.
-  - Gateway, in `createGateway`: `LENS_ANCESTORS`, `LENS_CSP`, `ARTIFACT`, `PUBLIC_FRAMED`, `publicFramed`, `proxy`'s `publicFrame`, `downstreamHeaders`'s `framedBySelf`, `WRAP_MS`, `ownerWrapper`, `PAGES.ownerWrapper`, `opts.wrapperHelloMs`.
+  - Gateway, in `createGateway`: `LENS_ANCESTORS`, `LENS_CSP`, `ARTIFACT`, `PUBLIC_FRAMED`, `publicFramed`, `proxy`'s `publicFrame`, `downstreamHeaders`'s `framedBySelf`, `WRAP_MS`, `WRAP_CSP`, `ownerWrapper`, `PAGES.ownerWrapper`, `opts.wrapperHelloMs`.
   - Tests: `fakeKit` (`K.hello`, `K.seen`, `K.up`, `K.close`), `lensRun`. Browser script: `gatewayViewers`.
   - The lens's own names: `CAPS`, `ORDERS`, `tell`, `appWindow`, `safeRoute`, `anchorOf`, `find`, `sendRects`, `attach`.
   - Each is defined in the task that first uses it and used with the same name after.
