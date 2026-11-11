@@ -2,14 +2,14 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A thread can point at an element in a running dev app. The viewer gets previews: `/view/preview/<name>` in a tab of its own, and the same stage in the dashboard at `#preview/<name>`. Both frame the preview lens (PR 2's, served here byte for byte), which frames the app and tells the viewer what is under the pointer, so Shift+click, pins and the card work on a preview as they do on an artifact. On a box the gateway serves the lens on the preview's own name. On a laptop the kit opens a **relay**: a loopback listener per preview (ports 4500-4599) that serves the lens and forwards to the app as the gateway does. The supervisor relays a dev-link thread to the session that offered the preview.
+**Goal:** A thread can point at an element in a running dev app. The viewer gets previews: `/view/preview/<name>` in a tab of its own, and the same stage in the dashboard at `#preview/<name>`. Both frame the preview lens (PR 2's, served here byte for byte), which frames the app and tells the viewer what is under the pointer, so Shift+click, pins and the card work on a preview as they do on an artifact. On a box the gateway serves the lens on the preview's own name. On a laptop the kit opens a **relay**: a loopback listener per preview (ports 4800-4899) that serves the lens and forwards to the app as the gateway does. The supervisor relays a dev-link thread to the session that offered the preview.
 
 **Order.** Second of two PRs for spec PR 3. It needs **PR 3a** (`docs/superpowers/plans/2026-11-11-supervisor-threads-viewers.md`) merged first: it extends 3a's stage (`TS`, `tsFrame`, `tsSubject`, the lens client, the frame pins) and viewer mode. Branch `threads-previews` from `main` once 3a has merged. If 3a hasn't merged when this starts, branch from `threads-viewers`, open the PR against it, and merge `main` in once 3a lands. Never rebase.
 
 **Architecture:**
 - `docs/devteam/scripts/devteam.mjs`:
   - `PREVIEW_LENS` (copied from `cloud/gateway.mjs` by a command, never by hand), `previewLensCsp`, `FRAME_ANCESTORS` and `replaceFrameAncestors` (the gateway's, the same text), near `previewHelloRow`.
-  - `RELAY_PORTS`, and `previewPortOk` refusing them.
+  - `RELAY_PORTS` (4800-4899), and `previewPort` refusing them for a new registration only.
   - In `cmdDashboard`: the relay (`relays`, `relayFor`, `relayClose`, `relayUpHeaders`, `relayDownHeaders`, the request and upgrade handlers), closed from the preview tick.
   - `previewStage(rec) → origin | null`, `GET /view/preview/<name>`, `/api/view?kind=preview`, and the dashboard page's `frame-src` widened to where previews are served.
 - `docs/devteam/dashboard/index.html`:
@@ -34,21 +34,25 @@
    - A WebSocket is relayed raw after its handshake, with the same `Host` and `Origin` rewrite, only from the relay's own `Origin`, at most 32 a preview.
    - What it doesn't mirror, and why: no session check (the relay listens on 127.0.0.1 only, like the dev server, and holds nothing more), no cookie filtering (no session cookie to protect, and the app's cookies are already `127.0.0.1`'s), and no `Strict-Transport-Security`.
 2. **The relay answers only on its own `Host`** (`127.0.0.1:<relay>` or `localhost:<relay>`), as the dashboard does, so a page that rebinds a name to 127.0.0.1 gets nothing.
-3. **One relay per preview, its port picked by trying to bind** each of 4500-4599 in turn. Instances on one laptop share the range and never collide. It opens on the first `/view/preview/<name>` or `/api/view?kind=preview` and closes when the record goes or its port changes, from the preview tick. `previewPortOk` refuses 4500-4599 as a dev port, so a relay never sits where an app does.
-4. **The lens's policy on a laptop** is `previewLensCsp` with the hub and every instance origin (`http://127.0.0.1:<port>` across the block), the same shape as the gateway's `LENS_CSP`. A test compares the relay's header with `G.previewLensCsp` for those origins, so the two policies can't drift.
-5. **`frame-src` names exactly where the lens is.** The viewer's names `https://<name>.<box>` itself on a box (`previewLink`: the gateway's `mapLoop` rewrites no dev port), or the relay's `http://127.0.0.1:<relay>` on a laptop. The dashboard's own page frames whichever preview the owner opens, so its `frame-src` names `https://*.<box>` on a box, every name the owner's gateway answers, or the hundred relay origins on a laptop. Both keep a frame's navigations on the owner's own names, as `'self'` did.
-6. **A box whose gateway doesn't serve previews** (`DEVTEAM_PUBLIC_URL` without `DEVTEAM_PREVIEWS=1`) has no lens to frame, and its loopback is out of the browser's reach. The viewer says so in its bar and frames nothing.
-7. **The preview's stage frame is `#pv-frame`, a second iframe on the stage**, sandboxed `allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-pointer-lock allow-downloads`, with no top navigation (PR 2's review: the app is same-origin with the lens and could otherwise navigate the lens's frame, the top included). The lens needs its own origin to read the app, so `allow-same-origin` stays. The artifact's frame keeps its opaque sandbox. A sandbox can't change on a live frame, which is why there are two frames.
-8. **A preview lens's messages are checked by origin too.** It has a real origin, unlike an artifact, so the client takes a message only from `#pv-frame`'s window and from the lens's origin, and posts to that origin, never `'*'`.
-9. **`go` carries a route from the log** (a thread's subject, written by the page earlier) and nothing of the owner's. The lens takes the app only to its own paths (`safeRoute`).
-10. **The Library's preview card**: its title opens the stage here (`#preview/<name>`), **Open** opens the viewer in a new tab, and **Copy link** still copies the preview's own link, for a phone or another browser. A question's link list keeps the preview's own link. Its `[[name]]` opens the viewer.
-11. **`supervisor.md` §7 gains "Threads on a preview"**: read the thread, `send <offering session> "<what to change>" --kind answer` citing the thread and the anchor, reply with what was sent, and report back with `--refs` when it lands. A preview whose session is gone keeps its threads, and they become a follow-up ticket.
+3. **One relay per preview, on 4800-4899** (the spec's 4500-4599 moved: see below). Its port is the first in the range that nothing answers on (`portFree`, on 127.0.0.1 and `::1`), that no preview record here holds, and that it can bind. Instances on one laptop share the range and never collide. It opens only from `/api/view?kind=preview` (same-origin, the page's own first ask), never from a GET of `/view/preview/`, which any page can make (a navigation carries no `sec-fetch-site` check). It closes when the record goes or its port changes, from the preview tick. If no port is free, nothing is kept for it, so the next ask tries again.
+    - **The range is new, so old records survive it.** A new `preview <port>` or `preview --run --port` is refused a relay port (`previewPort`), but `previewPortOk`, which `readPreviews` checks every record with, is left alone: a record made before this kit, on 4800-4899, stays a preview. The range moved from the spec's 4500-4599 to 4800-4899, away from the kit's own 4400-4499 picks and the ports dev servers commonly default to, which makes such an old record unlikely; a relay then simply skips that port.
+4. **The lens's policy on a laptop** is `previewLensCsp` with the hub, every instance origin across the block (`http://127.0.0.1:<port>`) and this dashboard's own origin, which a dashboard pinned with `--port` outside the block needs (each once), the same shape as the gateway's `LENS_CSP`. A test compares the relay's header with `G.previewLensCsp` for those origins, so the two policies can't drift.
+5. **`frame-src` names exactly where the lenses are, computed per request**, never a wildcard (not `https://*.<box>`: that would cover every instance name an agent can answer on). A box whose gateway serves previews names each preview record's own link (`readPreviews().map(previewLink)`, at most 20: the gateway's `mapLoop` rewrites no dev port). A laptop names only the relays open now. `/view/preview/<name>` names that one preview's. `/` names all of them, for the in-page stage. With no preview and no relay, both are `frame-src 'self'` as before, so the existing exact assertions (`test/lib/chain.mjs`'s review step, `test/gateway.test.mjs`'s dashboard-through-the-gateway check) hold unchanged.
+6. **A page whose policy predates the preview it shows reloads, or says so.** A page's policy is fixed when it loads, and on a laptop the relay opens only on the page's own first `/api/view` (decision 3), so that answer says `opened: true` when it opened the relay just now. A viewer tab for a preview then reloads itself once (a preview's viewer carries no grant to keep, unlike an artifact's inside the owner wrapper), and its second load names the relay. The dashboard's in-page stage doesn't reload the dashboard: it says "Reload to view this preview". The same note shows on a `securitypolicyviolation` from the stage's frame (a preview offered on a box after the page loaded).
+7. **A box whose gateway doesn't serve previews** (`DEVTEAM_PUBLIC_URL` without `DEVTEAM_PREVIEWS=1`) has no lens to frame, and its loopback is out of the browser's reach. The viewer says so in its bar and frames nothing.
+8. **The preview's stage frame is `#pv-frame`, a second iframe on the stage**, sandboxed `allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-pointer-lock allow-downloads`, with no top navigation (PR 2's review: the app is same-origin with the lens and could otherwise navigate the lens's frame, the top included). The lens needs its own origin to read the app, so `allow-same-origin` stays. The artifact's frame keeps its opaque sandbox. A sandbox can't change on a live frame, which is why there are two frames.
+9. **A preview lens's messages are checked by origin too.** It has a real origin, unlike an artifact, so the client takes a message only from `#pv-frame`'s window and from the lens's origin, and posts to that origin, never `'*'`.
+10. **`go` carries a route from the log** (a thread's subject, written by the page earlier) and nothing of the owner's. The lens takes the app only to its own paths (`safeRoute`).
+11. **The Library's preview card**: its title opens the stage here (`#preview/<name>`), **Open** opens the viewer in a new tab, and **Copy link** still copies the preview's own link, for a phone or another browser. A question's link list keeps the preview's own link. Its `[[name]]` opens the viewer.
+12. **`supervisor.md` §7 gains "Threads on a preview"**: read the thread, `send <offering session> "<what to change>" --kind answer` citing the thread and the anchor, reply with what was sent, and report back with `--refs` when it lands. A preview whose session is gone keeps its threads, and they become a follow-up ticket.
 
 ## Spec problems found while planning
 
 - **§7: "the relay forwards to the app with `Host: localhost:<port>`"** says nothing of `Origin`, `Location`, sockets or the lens's methods. Decision 1 mirrors the gateway's handling of each.
 - **§7: "In the dashboard, the viewer shows previews in the in-page stage too"** needs the dashboard page's own `frame-src` widened, which the spec's header list doesn't mention (decision 5).
-- **§7 doesn't say what the viewer does on a box without the preview gateway** (decision 6).
+- **§7 doesn't say what the viewer does on a box without the preview gateway** (decision 7).
+- **§7's relay ports, 4500-4599**, move to 4800-4899, and the relay opens on the page's own `/api/view` rather than "when its viewer is first requested" (a GET any page can make). Decision 3.
+- **§7's viewer headers** are fixed at load, but a laptop's relay opens after; the page reloads or says to (decision 6).
 
 ## Global Constraints
 
@@ -70,7 +74,7 @@
 
 | File | Responsibility | Tasks |
 |---|---|---|
-| `docs/devteam/scripts/devteam.mjs` | Imports (14-21): `pipeline` from `node:stream`. `previewPortOk` (around 5262). `PREVIEW_LENS`, `previewLensCsp`, `FRAME_ANCESTORS`, `replaceFrameAncestors`, `RELAY_PORTS` after `previewHelloRow` (around 5468). In `cmdDashboard`: the relay after `runPreviewTick` (around 10836), its closing in that tick's `finally`, `previewStage`, the `/` route's policy (around 10910), `/view/preview/` and `/api/view`'s preview branch beside 3a's | 1-4 |
+| `docs/devteam/scripts/devteam.mjs` | Imports (14-21): `pipeline` from `node:stream`. `previewPort` (around 5320). `PREVIEW_LENS`, `previewLensCsp`, `FRAME_ANCESTORS`, `replaceFrameAncestors`, `RELAY_PORTS` after `previewHelloRow` (around 5468). In `cmdDashboard`: the relay after `runPreviewTick` (around 10836), its closing in that tick's `finally`, `previewStage`, the `/` route's policy (around 10910), `/view/preview/` and `/api/view`'s preview branch beside 3a's | 1-4 |
 | `docs/devteam/dashboard/index.html` | `#av-stage`'s second frame and its CSS; `VIEWER`'s pattern; `tsFrame`, `tsSubject`, the frame load listeners and the lens client; `showArtifact`/`showPreview`/`openPreview`; `route()`; `tlGoTo`; `viewerBoot`; `qtext`; `renderLibrary`'s `pvCard` | 5-6 |
 | `docs/devteam/process/supervisor.md` | §7: threads on a preview | 7 |
 | `README.md` | **On an artifact** (3a) gains previews; Dev links (173); the framing bullet (176) | 7 |
@@ -87,7 +91,7 @@
 - Test: `test/gateway.test.mjs` (after the type-map and CDN-list test, around 931)
 
 **Interfaces:**
-- Produces: `PREVIEW_LENS` (the same text as `G.PREVIEW_LENS`), `previewLensCsp(ancestors)`, `FRAME_ANCESTORS`, `replaceFrameAncestors(csp, sources)` and `RELAY_PORTS` (4500-4599).
+- Produces: `PREVIEW_LENS` (the same text as `G.PREVIEW_LENS`), `previewLensCsp(ancestors)`, `FRAME_ANCESTORS`, `replaceFrameAncestors(csp, sources)` and `RELAY_PORTS` (4800-4899).
 
 - [ ] **Step 1: The failing test.** In `test/gateway.test.mjs`, after the test that compares the type map and the CDN list:
 
@@ -132,10 +136,10 @@ const previewLensCsp = (ancestors) => `default-src 'none'; script-src ${previewL
 const FRAME_ANCESTORS = /(^|[;,])(\s*)frame-ancestors(?=[\s;,]|$)([^;,]*)/gi;
 const replaceFrameAncestors = (csp, sources) => csp.replace(FRAME_ANCESTORS, (all, sep, sp, list) => `${sep}${sp}frame-ancestors ${sources}${/\s$/.test(list) ? ' ' : ''}`);
 // Where the laptop's relays listen: one port each, the first of these free (decision 3).
-const RELAY_PORTS = Array.from({ length: 100 }, (_, i) => 4500 + i);
+const RELAY_PORTS = Array.from({ length: 100 }, (_, i) => 4800 + i);
 ```
 
-The `FRAME_ANCESTORS` and `replaceFrameAncestors` lines must match `cloud/gateway.mjs` 673 and 678 exactly, minus `export `. Copy them from there if this plan and the gateway differ.
+The `FRAME_ANCESTORS` and `replaceFrameAncestors` lines must match `cloud/gateway.mjs`'s (its lines 676 and 681 at `71b918a`) exactly, minus `export `. Copy them from there if this plan and the gateway differ.
 
 - [ ] **Step 4: Copy the lens's bytes from the gateway.**
 
@@ -175,12 +179,12 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 2: The laptop's relay: the lens, the app, its framing given way once
 
 **Files:**
-- Modify: `docs/devteam/scripts/devteam.mjs` (imports; `previewPortOk`; in `cmdDashboard` after `runPreviewTick`: the relay; that tick's `finally`)
+- Modify: `docs/devteam/scripts/devteam.mjs` (imports; `previewPort`; in `cmdDashboard` after `runPreviewTick`: the relay; that tick's `finally`)
 - Test: `test/dashboard.test.mjs` (`fakeApp`, a new test)
 
 **Interfaces:**
 - Consumes: `PREVIEW_LENS`, `previewLensCsp`, `FRAME_ANCESTORS`, `replaceFrameAncestors`, `RELAY_PORTS` (Task 1).
-- Produces: `relayFor(rec) → Promise<port | null>`, `relayClose(name)` and `relays: Map<name, { name, app, port, own, server, sockets }>`. Task 4 opens a relay through `/view/preview/`. This task's test opens one through `/api/view?kind=preview&name=`, whose full answer is Task 4's: here it opens the relay and returns `{ origin }`.
+- Produces: `relayFor(rec) → Promise<port | null>`, `relayClose(name)` and `relays: Map<name, { name, app, port, own, server, sockets }>`. `previewStage(rec, { open }) → { origin, opened }`. A relay opens only through `/api/view?kind=preview&name=` (decision 3), whose full answer is Task 4's: here it opens the relay and returns `{ origin, opened }`.
 
 - [ ] **Step 1: The fake app.** In `test/dashboard.test.mjs`, after `OWN_MESSAGES` (3a):
 
@@ -234,16 +238,20 @@ test("the laptop's relay: the lens on GET alone, the app with localhost as its H
   t.after(() => d.stop());
   await until(() => new RegExp(`dashboard on http://127\\.0\\.0\\.1:${port}\\b`).test(d.out()), 'the dashboard');
   const v = await (await fetch(`${B}/api/view?kind=preview&name=${name}`)).json();
+  assert.equal(v.opened, true, 'this ask opened it');
+  assert.equal((await (await fetch(`${B}/api/view?kind=preview&name=${name}`)).json()).opened, false, 'the next finds it open');
+  assert.equal((await fetch(`${B}/api/view?kind=preview&name=${name}`, { headers: { 'sec-fetch-site': 'cross-site' } })).status, 403, 'another site\'s page can\'t open one');
   const R = Number(/^http:\/\/127\.0\.0\.1:(\d+)$/.exec(v.origin)?.[1]);
-  assert.ok(R >= 4500 && R <= 4599, `a relay in 4500-4599: ${v.origin}`);
+  assert.ok(R >= 4800 && R <= 4899, `a relay in 4800-4899: ${v.origin}`);
   const rel = `http://127.0.0.1:${R}`;
   // the lens, as the gateway serves it, under a policy for the hub and every instance here
   let r = await fetch(`${rel}/.devteam/lens?route=%2F`);
   assert.equal(r.status, 200);
   const G = await import('../cloud/gateway.mjs');
   assert.equal(await r.text(), G.PREVIEW_LENS);
+  // the hub, every instance in the block, and this dashboard itself (pinned here outside the block), each once
   const instances = Array.from({ length: 25 }, (_, i) => `http://127.0.0.1:${PORTS + 1 + i}`);
-  assert.equal(r.headers.get('content-security-policy'), G.previewLensCsp([`http://127.0.0.1:${PORTS}`, ...instances].join(' ')));
+  assert.equal(r.headers.get('content-security-policy'), G.previewLensCsp([...new Set([`http://127.0.0.1:${PORTS}`, ...instances, `http://127.0.0.1:${port}`])].join(' ')));
   assert.equal(app.seen.length, 0, 'the lens never asks the app');
   // any other method or path there is the app's
   for (const [method, p] of [['HEAD', '/.devteam/lens'], ['POST', '/.devteam/lens'], ['GET', '/.devteam/lens/x']]) {
@@ -277,7 +285,12 @@ test("the laptop's relay: the lens on GET alone, the app with localhost as its H
   // only on its own address
   assert.equal(await statusWithHost(R, '/', `rebound.example:${R}`), 421);
   // a dev server can't take a relay's port
-  assert.match(F.fails(['preview', '4501'], F.SUP), /4501 is where the dashboard's preview relays listen \(4500-4599\)/);
+  assert.match(F.fails(['preview', '4801'], F.SUP), /4801 is where the dashboard's preview relays listen \(4800-4899\)/);
+  // a record from before the range stays a preview: only a new registration is refused
+  const old = path.join(F.old, 'docs/devteam/run/previews', 'quiet-otter.json');
+  write(old, JSON.stringify({ v: 1, name: 'quiet-otter', project: 'relay-http', session: 'supervisor', label: 'old', port: 4802, cwd: F.old, at: new Date().toISOString(), expires: new Date(Date.now() + 86400000).toISOString() }));
+  assert.ok(JSON.parse(F.sup(['preview', 'list', '--json'])).some((x) => x.name === 'quiet-otter' && x.port === 4802), 'still listed');
+  fs.rmSync(old);
   // the record gone, the relay closes
   F.sup(['preview', 'stop', name]);
   await until(async () => { try { await fetch(`${rel}/`); return false; } catch { return true; } }, 'the relay closed with its record');
@@ -289,13 +302,22 @@ test("the laptop's relay: the lens on GET alone, the app with localhost as its H
 Run: `$NODE --test --test-name-pattern "the laptop's relay: the lens on GET alone" test/dashboard.test.mjs`
 Expected: FAIL: `/api/view` answers 400 for `kind=preview`.
 
-- [ ] **Step 4: No dev server on a relay's port.** Add `import { pipeline } from 'node:stream';` after the `node:path` import. In `previewPortOk`, after the `TTYD_PORT` line, add:
+- [ ] **Step 4: No new dev server on a relay's port.** Add `import { pipeline } from 'node:stream';` after the `node:path` import. Replace `previewPort` with:
 
 ```js
-  if (RELAY_PORTS.includes(port)) return `${port} is where the dashboard's preview relays listen (${RELAY_PORTS[0]}-${RELAY_PORTS.at(-1)})`;
+// A port for a new registration: previewPortOk's rules, and none of the relays' range. That rule is
+// for new ones only: readPreviews checks every record with previewPortOk, so one made before the
+// range existed stays a preview (decision 3).
+function previewPort(v) {
+  const port = /^\d+$/.test(String(v)) ? Number(v) : NaN;
+  const ok = previewPortOk(port);
+  if (ok !== true) die(`preview: ${v}: ${ok}`);
+  if (RELAY_PORTS.includes(port)) die(`preview: ${v}: ${port} is where the dashboard's preview relays listen (${RELAY_PORTS[0]}-${RELAY_PORTS.at(-1)})`);
+  return port;
+}
 ```
 
-`RELAY_PORTS` is declared after `previewPortOk` is defined, and read only when it is called, so the order is fine.
+`RELAY_PORTS` is declared later in the file and read only when `previewPort` runs, so the order is fine.
 
 - [ ] **Step 5: The relay.** In `cmdDashboard`, after `runPreviewTick` and its `setInterval` (around 10838), add:
 
@@ -308,7 +330,9 @@ Expected: FAIL: `/api/view` answers 400 for `kind=preview`.
   // holds it. No session (it is loopback, like the dev server) and no cookie rules (no cookie of the
   // owner's to protect): decision 1.
   const relays = new Map();
-  const RELAY_LENS_CSP = previewLensCsp([`http://127.0.0.1:${HUB_PORT}`, ...PORT_RANGE.map((p) => `http://127.0.0.1:${p}`)].join(' '));
+  // who may hold the lens here: the hub, every instance in the block, and this dashboard (its port may
+  // be pinned outside the block, and may change once at start), each once (decision 4)
+  const relayLensCsp = () => previewLensCsp([...new Set([`http://127.0.0.1:${HUB_PORT}`, ...PORT_RANGE.map((p) => `http://127.0.0.1:${p}`), `http://127.0.0.1:${port}`])].join(' '));
   const RELAY_SOCKETS = 32;
   const RELAY_HOP = new Set(['connection', 'keep-alive', 'proxy-connection', 'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'referer', 'forwarded']);
   const RELAY_LOOP = /\b(http|ws):\/\/(?:127\.0\.0\.1|localhost):(\d+)/g;
@@ -339,7 +363,7 @@ Expected: FAIL: `/api/view` answers 400 for `kind=preview`.
   const relayRequest = (R) => (req, res) => {
     if (!relayOwnHost(R, req)) { res.writeHead(421, { 'content-type': 'text/plain; charset=utf-8' }); return res.end('this relay answers only on its own address'); }
     if (req.method === 'GET' && req.url.split('?')[0] === '/.devteam/lens') {
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': RELAY_LENS_CSP, 'referrer-policy': 'no-referrer' });
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': relayLensCsp(), 'referrer-policy': 'no-referrer' });
       return res.end(PREVIEW_LENS);
     }
     if (!req.url.startsWith('/') || req.url.startsWith('//')) { res.writeHead(400); return res.end(); }
@@ -364,14 +388,17 @@ Expected: FAIL: `/api/view` answers 400 for `kind=preview`.
     };
     return attempt(['127.0.0.1', '::1']);
   };
-  // A relay for this preview, on the first port of the range it can bind; null when none is free.
+  // A relay for this preview, on the first port of the range nothing holds; null when none is free.
   const relayFor = (rec) => {
     const had = relays.get(rec.name);
     if (had?.app === rec.port) return had.ready;
     if (had) relayClose(rec.name);
     const R = { name: rec.name, app: rec.port, port: null, own: null, server: null, sockets: new Set() };
     R.ready = (async () => {
+      const held = new Set(readPreviews().map((r) => r.port));
       for (const p of RELAY_PORTS) {
+        // nothing answering there on either family (a dev server on ::1 would take localhost), and no record's
+        if (held.has(p) || [...relays.values()].some((x) => x !== R && x.port === p) || !(await portFree(p))) continue;
         const srv = http.createServer();
         if (!(await new Promise((resolve) => { srv.once('error', () => resolve(false)); srv.listen(p, '127.0.0.1', () => resolve(true)); }))) continue;
         Object.assign(R, { port: p, own: `http://127.0.0.1:${p}`, server: srv });
@@ -382,6 +409,8 @@ Expected: FAIL: `/api/view` answers 400 for `kind=preview`.
         if (relays.get(rec.name) !== R) { relayCloseOne(R); return null; }
         return p;
       }
+      // none free: nothing kept, so the next ask tries again
+      if (relays.get(rec.name) === R) relays.delete(rec.name);
       return null;
     })();
     relays.set(rec.name, R);
@@ -403,8 +432,9 @@ In `runPreviewTick`, change `.finally(() => { previewTicking = false; })` to `.f
       if (u.searchParams.get('kind') === 'preview') {
         const rec = readPreviews().find((r) => r.name === u.searchParams.get('name') && PREVIEW_NAME.test(r.name));
         if (!rec) return send(res, 404, 'application/json', JSON.stringify({ error: 'no such preview here' }));
-        const origin = await previewStage(rec);
-        return send(res, 200, 'application/json', JSON.stringify({ origin }));
+        // the one place a relay opens: this same-origin ask, never a GET of /view/preview/ (decision 3)
+        const { origin, opened } = await previewStage(rec, { open: true });
+        return send(res, 200, 'application/json', JSON.stringify({ origin, opened }));
       }
 ```
 
@@ -412,13 +442,18 @@ and, after `relayFor` and the relay helpers, add:
 
 ```js
   // Where a preview's lens is, for its viewer (spec §7): its own name through the box's gateway, which
-  // serves the lens there; else this laptop's relay; null on a box whose gateway doesn't serve
-  // previews, where the loopback is out of the browser's reach (decision 6).
-  const previewStage = async (rec) => {
-    if (previewServed()) return previewLink(rec);
-    if (previewBox()) return null;
+  // serves the lens there; else this laptop's relay, opened only when open is set (/api/view's ask);
+  // null on a box whose gateway doesn't serve previews, where the loopback is out of the browser's
+  // reach (decision 7). opened: this ask opened the relay, so a page loaded before it lacks it in its
+  // policy (decision 6).
+  const previewStage = async (rec, { open = false } = {}) => {
+    if (previewServed()) return { origin: previewLink(rec), opened: false };
+    if (previewBox()) return { origin: null, opened: false };
+    const had = relays.get(rec.name);
+    if (had?.app === rec.port && had.port) return { origin: had.own, opened: false };
+    if (!open) return { origin: null, opened: false };
     const p = await relayFor(rec);
-    return p ? `http://127.0.0.1:${p}` : null;
+    return p ? { origin: `http://127.0.0.1:${p}`, opened: true } : { origin: null, opened: false };
   };
 ```
 
@@ -427,7 +462,7 @@ and, after `relayFor` and the relay helpers, add:
 Run: `$NODE --test --test-name-pattern "the laptop's relay: the lens on GET alone" test/dashboard.test.mjs`
 Expected: PASS.
 Run: `$NODE --test test/dashboard.test.mjs && $NODE --test --test-name-pattern "previews" test/kit.test.mjs`
-Expected: PASS. No existing preview uses 4500-4599 (`PREVIEW_PICK` is 4400-4499).
+Expected: PASS. No existing preview uses 4800-4899 (`PREVIEW_PICK` is 4400-4499).
 
 - [ ] **Step 8: Commit.**
 
@@ -541,12 +576,13 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 **Files:**
 - Modify: `docs/devteam/scripts/devteam.mjs` (`/view/preview/` beside 3a's `/view/artifact/`; `/api/view`'s preview branch from Task 2; the `/` route's policy)
 - Test: `test/dashboard.test.mjs` (a new test)
+- Unchanged, and run: `test/lib/chain.mjs` (the review step's exact `/` policy, around 3480) and `test/gateway.test.mjs` (the dashboard through the gateway, around 363). With no preview and no relay the `/` policy is `frame-src 'self'` as before (decision 5), so their exact assertions hold as they are.
 
 **Interfaces:**
 - Produces:
   - `GET /view/preview/<name>` → index.html with `content-security-policy: frame-src 'self' <origin>; frame-ancestors 'self' http://127.0.0.1:<hub>`, `referrer-policy: no-referrer` and no `x-frame-options`. Unknown name → 404.
-  - `/api/view?kind=preview&name=` → `{ name, label, session, project, up, origin, lens, served }`.
-  - The `/` page's `frame-src 'self' <where previews are>` (decision 5).
+  - `/api/view?kind=preview&name=` → `{ name, label, session, project, up, origin, opened, lens, served }`; the only route that opens a relay.
+  - The `/` page's `frame-src 'self' <each preview's lens origin now>` (decision 5).
 
 - [ ] **Step 1: The failing test.** Append:
 
@@ -565,26 +601,32 @@ test("a preview's viewer: its route, frame-src naming exactly where its lens is,
     return d;
   };
   let d = await start({});
+  const csp = async (p) => (await fetch(`${B}${p}`)).headers.get('content-security-policy');
+  const tail = `frame-ancestors 'self' http://127.0.0.1:${PORTS}`;
+  // before any relay: a GET of the viewer opens none, and every page frames only itself, as before
   let r = await fetch(`${B}/view/preview/${name}`);
   assert.equal(r.status, 200);
   assert.equal(await r.text(), fs.readFileSync(path.join(kit, 'dashboard/index.html'), 'utf8'));
-  const relay = /^frame-src 'self' (http:\/\/127\.0\.0\.1:45\d\d); frame-ancestors 'self' http:\/\/127\.0\.0\.1:(\d+)$/.exec(r.headers.get('content-security-policy'));
-  assert.ok(relay && Number(relay[2]) === PORTS, r.headers.get('content-security-policy'));
+  assert.equal(r.headers.get('content-security-policy'), `frame-src 'self'; ${tail}`, 'a navigation opens no relay');
   assert.deepEqual([r.headers.get('x-frame-options'), r.headers.get('referrer-policy')], [null, 'no-referrer']);
+  assert.equal(await csp('/'), `frame-src 'self'; ${tail}`);
+  // the page's own ask opens it, and says so: a page loaded before it reloads (the viewer) or says to (the stage)
   const v = await (await fetch(`${B}/api/view?kind=preview&name=${name}`)).json();
-  assert.deepEqual([v.name, v.label, v.origin, v.lens, v.served], [name, 'Checkout', relay[1], `${relay[1]}/.devteam/lens`, false]);
+  const relay = /^http:\/\/127\.0\.0\.1:48\d\d$/.exec(v.origin)?.[0];
+  assert.ok(relay, v.origin);
+  assert.deepEqual([v.name, v.label, v.lens, v.served, v.opened], [name, 'Checkout', `${relay}/.devteam/lens`, false, true]);
+  // from then on both name that relay, and nothing else
+  assert.equal(await csp(`/view/preview/${name}`), `frame-src 'self' ${relay}; ${tail}`);
+  assert.equal(await csp('/'), `frame-src 'self' ${relay}; ${tail}`);
   for (const bad of ['/view/preview/no-such', '/view/preview/Not_A_Name', `/view/preview/${name}/x`]) assert.equal((await fetch(`${B}${bad}`)).status, 404, bad);
   assert.equal((await fetch(`${B}/api/view?kind=preview&name=no-such`)).status, 404);
-  // the dashboard's own page may frame any relay here, and nothing else outside itself
-  const relays = Array.from({ length: 100 }, (_, i) => `http://127.0.0.1:${4500 + i}`).join(' ');
-  assert.equal((await fetch(`${B}/`)).headers.get('content-security-policy'), `frame-src 'self' ${relays}; frame-ancestors 'self' http://127.0.0.1:${PORTS}`);
   await d.stop();
   // on a box whose gateway serves previews: the preview's own name, which the gateway leaves as it is
   d = await start({ DEVTEAM_PUBLIC_URL: 'https://box.example.com', DEVTEAM_PREVIEWS: '1' });
   r = await fetch(`${B}/view/preview/${name}`);
   assert.equal(r.headers.get('content-security-policy'), `frame-src 'self' https://${name}.box.example.com; frame-ancestors 'self' http://127.0.0.1:${PORTS}`);
-  assert.equal((await fetch(`${B}/`)).headers.get('content-security-policy'), `frame-src 'self' https://*.box.example.com; frame-ancestors 'self' http://127.0.0.1:${PORTS}`);
-  assert.deepEqual((({ origin, served }) => [origin, served])(await (await fetch(`${B}/api/view?kind=preview&name=${name}`)).json()), [`https://${name}.box.example.com`, true]);
+  assert.equal((await fetch(`${B}/`)).headers.get('content-security-policy'), `frame-src 'self' https://${name}.box.example.com; frame-ancestors 'self' http://127.0.0.1:${PORTS}`, 'each preview\'s own name, never a wildcard');
+  assert.deepEqual((({ origin, served, opened }) => [origin, served, opened])(await (await fetch(`${B}/api/view?kind=preview&name=${name}`)).json()), [`https://${name}.box.example.com`, true, false]);
   await d.stop();
   // a box whose gateway doesn't: nothing to frame, and the viewer says so
   d = await start({ DEVTEAM_PUBLIC_URL: 'https://box.example.com' });
@@ -609,7 +651,8 @@ Expected: FAIL: `404 !== 200`.
     if (vp) {
       const rec = PREVIEW_NAME.test(vp[1]) ? readPreviews().find((r) => r.name === vp[1]) : null;
       if (!rec) return send(res, 404, 'text/plain; charset=utf-8', 'not found');
-      const origin = await previewStage(rec);
+      // never opens a relay: any page can navigate here (decision 3); the page's own /api/view does
+      const { origin } = await previewStage(rec);
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'content-security-policy': `frame-src 'self'${origin ? ` ${origin}` : ''}; frame-ancestors 'self' http://127.0.0.1:${HUB_PORT}` });
       return res.end(fs.readFileSync(page));
     }
@@ -618,16 +661,17 @@ Expected: FAIL: `404 !== 200`.
 Replace Task 2's `/api/view` preview branch's last two lines with:
 
 ```js
-        const origin = await previewStage(rec);
-        return send(res, 200, 'application/json', JSON.stringify({ name: rec.name, label: rec.label, session: rec.session, project: rec.project, up: previewUp.get(rec.name) ?? null, origin, lens: origin ? `${origin}/.devteam/lens` : null, served: previewServed() }));
+        const { origin, opened } = await previewStage(rec, { open: true });
+        return send(res, 200, 'application/json', JSON.stringify({ name: rec.name, label: rec.label, session: rec.session, project: rec.project, up: previewUp.get(rec.name) ?? null, origin, opened, lens: origin ? `${origin}/.devteam/lens` : null, served: previewServed() }));
 ```
 
 Before the `/` route, add:
 
 ```js
-  // Where the dashboard's own stage may frame a preview's lens (decision 5): every name the box's
-  // gateway answers, or this laptop's relays. Like 'self', it keeps a frame's navigations on the owner's own names.
-  const stageFrames = () => { const b = previewBox(); return previewServed() ? `${b.protocol}//*.${b.host}` : b ? '' : RELAY_PORTS.map((p) => `http://127.0.0.1:${p}`).join(' '); };
+  // Where the dashboard's own stage may frame a preview's lens, as of this request (decision 5): each
+  // preview's own name through the box's gateway (at most 20), or this laptop's relays open now. Never a
+  // wildcard: an agent can answer on any instance name. With none, 'self' alone, as before.
+  const stageFrames = () => (previewServed() ? readPreviews().map(previewLink) : previewBox() ? [] : [...relays.values()].filter((R) => R.port).map((R) => R.own)).join(' ');
 ```
 
 and, in the `/` route, change the policy to:
@@ -640,8 +684,8 @@ and, in the `/` route, change the policy to:
 
 - [ ] **Step 4: Run it green, then the file.**
 
-Run: `$NODE --test --test-name-pattern "a preview's viewer: its route" test/dashboard.test.mjs && $NODE --test test/dashboard.test.mjs`
-Expected: PASS.
+Run: `$NODE --test --test-name-pattern "a preview's viewer: its route" test/dashboard.test.mjs && $NODE --test test/dashboard.test.mjs test/gateway.test.mjs && $NODE --test --test-name-pattern "review" test/kit.test.mjs`
+Expected: PASS, the chain's and the gateway's exact `/` policies included.
 
 - [ ] **Step 5: Commit.**
 
@@ -693,13 +737,20 @@ test('Shift over a preview, through the relay: what the app has under the pointe
   const frameAt = async (x, y) => { const r = await p.ev(`(() => { const r = document.getElementById('pv-frame').getBoundingClientRect(); return { x: r.left, y: r.top }; })()`); return { x: r.x + x, y: r.y + y }; };
   const threads = () => JSON.parse(F.owner(['thread', 'list', '--all', '--json']));
 
-  await t.test('the stage here frames the lens on the relay, sandboxed with no top navigation, and the lens frames the app', async () => {
+  await t.test('the first look opens the relay, which the page loaded without: the stage says to reload', async () => {
     await p.send('Page.navigate', { url: `${B}/#preview/${name}` });
+    await soon(`document.getElementById('av-note').textContent === 'Reload to view this preview' && !document.getElementById('av-note').hidden`, 'the note');
+    assert.equal(await p.ev('TS.ready'), false, 'the lens is outside this page\'s policy');
+  });
+
+  await t.test('the stage here frames the lens on the relay, sandboxed with no top navigation, and the lens frames the app', async () => {
+    await p.send('Page.reload');
     await soon(`TS.kind === 'preview' && TS.ready && TS.route === '/'`, 'the lens to say ready');
+    assert.equal(await p.ev(`document.getElementById('av-note').hidden`), true, 'no note once the page names the relay');
     const f = await p.ev(`(() => { const f = document.getElementById('pv-frame'); return [f.hidden, f.getAttribute('sandbox'), new URL(f.src).pathname, document.getElementById('av-frame').hidden]; })()`);
     assert.deepEqual(f, [false, 'allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-pointer-lock allow-downloads', '/.devteam/lens', true]);
     assert.doesNotMatch(f[1], /top-navigation/);
-    assert.match(await p.ev(`TS.origin`), /^http:\/\/127\.0\.0\.1:45\d\d$/);
+    assert.match(await p.ev(`TS.origin`), /^http:\/\/127\.0\.0\.1:48\d\d$/);
     assert.equal(await p.ev(`document.getElementById('av-title').textContent`), 'Checkout');
   });
 
@@ -752,7 +803,7 @@ Expected: FAIL: `TS.kind === 'preview'` times out.
 - [ ] **Step 3: The second frame.** In `#av-stage` (3a), after `#av-frame`, add:
 
 ```html
-    <!-- a preview's lens: its own origin, so it can read the app it frames; no top navigation (decision 7) -->
+    <!-- a preview's lens: its own origin, so it can read the app it frames; no top navigation (decision 8) -->
     <iframe id="pv-frame" title="Preview" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-pointer-lock allow-downloads" referrerpolicy="no-referrer" hidden></iframe>
 ```
 
@@ -822,10 +873,16 @@ function tsBar() {
 }
 // The stage on a preview: the lens where it is served (info: /api/view's), framing the app at its root.
 function showPreview(name, info) {
+  // A relay this page's own ask just opened is missing from the policy the page loaded with (decision
+  // 6): a viewer tab loads again, once (a preview's viewer has no grant in its address to keep); the
+  // stage here says to reload rather than reloading the whole dashboard.
+  const seen = `devteam.preview.reloaded.${name}`;
+  if (info?.opened && VIEWER) { try { if (!sessionStorage.getItem(seen)) { sessionStorage.setItem(seen, '1'); location.reload(); return; } } catch {} }
+  else { try { sessionStorage.removeItem(seen); } catch {} }
   AV = { preview: name };
   $('av-title').textContent = info?.label || name;
   $('av-tab').href = pvViewer(name);
-  const note = !info ? 'This preview is not offered here now' : !info.lens ? "This box's gateway doesn't show previews in a viewer yet; open its link instead" : null;
+  const note = !info ? 'This preview is not offered here now' : !info.lens ? "This box's gateway doesn't show previews in a viewer yet; open its link instead" : info.opened ? 'Reload to view this preview' : null;
   $('av-note').hidden = !note;
   $('av-note').textContent = note ?? '';
   if (TS.kind !== 'preview' || TS.name !== name) tsSet('preview', { name, route: '/', target: info?.origin ?? '*', origin: info?.origin ?? null, session: info?.session ?? null, up: info?.up ?? null, viewport: null, errors: [] });
@@ -838,6 +895,12 @@ function showPreview(name, info) {
   if (src && f.getAttribute('src') !== src) f.src = src;
   $('artifact-view').hidden = false;
 }
+// a preview offered after this page loaded is outside its policy: the frame is refused, and the bar says what to do
+document.addEventListener('securitypolicyviolation', (e) => {
+  if (TS.kind !== 'preview' || !String(e.violatedDirective).startsWith('frame-src')) return;
+  $('av-note').hidden = false;
+  $('av-note').textContent = 'Reload to view this preview';
+});
 const previewInfo = async (name) => { try { const r = await fetch(`/api/view?${new URLSearchParams({ kind: 'preview', name })}`); return r.ok ? await r.json() : null; } catch { return null; } };
 // #preview/<name>: the stage here, over the scrim, as an artifact's
 async function openPreview(raw) {
@@ -1011,7 +1074,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - [ ] **Step 2: The README.** Rename 3a's **On an artifact.** paragraph to **On an artifact or a preview.**, and after its first sentence add:
 
 ```markdown
-A session's running preview works the same way: its card's title opens it here, its **Open** in a tab of its own (`/view/preview/<name>`), and the pin stays on the element as the app reloads. On a laptop the dashboard reaches the app through a relay of its own (`127.0.0.1:4500`-`4599`, one per preview, opened when you first look and closed when the preview goes), which forwards to the dev server as the box's gateway does.
+A session's running preview works the same way: its card's title opens it here, its **Open** in a tab of its own (`/view/preview/<name>`), and the pin stays on the element as the app reloads. On a laptop the dashboard reaches the app through a relay of its own (`127.0.0.1:4800`-`4899`, one per preview, opened when you first look and closed when the preview goes), which forwards to the dev server as the box's gateway does.
 ```
 
 In Dev links (173), after the sentence ending `… (other methods there still go to the app).`, add:
@@ -1069,10 +1132,10 @@ async function previewThreads({ DASH, name, app }) {
   const tab = await browser.newPage(viewer);
   await until(() => browser.evalIn(viewer, `TS.ready && TS.route === '/'`), 'the lens through the relay');
   const lensUrl = await browser.evalIn(viewer, `document.getElementById('pv-frame').src`);
-  assert.match(lensUrl, /^http:\/\/127\.0\.0\.1:45\d\d\/\.devteam\/lens\?route=%2F$/);
+  assert.match(lensUrl, /^http:\/\/127\.0\.0\.1:48\d\d\/\.devteam\/lens\?route=%2F$/);
   await until(() => browser.evalIn(lensUrl, `(() => { const d = document.getElementById('app').contentDocument; return d && d.getElementById('app') && d.getElementById('app').textContent; })()`), 'the Vite page inside the lens');
   stepOk(`the viewer frames the lens on the relay (${new URL(lensUrl).origin}), and the lens the Vite app`);
-  const hmr = await until(() => tab.sockets.find((w) => /^ws:\/\/127\.0\.0\.1:45\d\d\//.test(w.url) && w.status === 101), 'the HMR socket through the relay');
+  const hmr = await until(() => tab.sockets.find((w) => /^ws:\/\/127\.0\.0\.1:48\d\d\//.test(w.url) && w.status === 101), 'the HMR socket through the relay');
   stepOk(`the app's HMR socket opened through the relay: ${hmr.url.split('?')[0]} (101)`);
   const f = await browser.evalIn(viewer, `(() => { const r = document.getElementById('pv-frame').getBoundingClientRect(); return { x: r.left, y: r.top }; })()`);
   const el = await browser.evalIn(lensUrl, `(() => { const r = document.getElementById('app').contentDocument.getElementById('app').getBoundingClientRect(); return { x: r.left + 10, y: r.top + r.height / 2 }; })()`);
@@ -1143,7 +1206,7 @@ gh pr create --base main --title "Kit: viewers, part 2: threads on previews, the
 Spec: docs/superpowers/specs/2026-11-10-supervisor-threads-design.md (PR 3, second half). Plan: docs/superpowers/plans/2026-11-11-supervisor-threads-previews.md. Builds on part 1 (the viewer and artifacts).
 
 - The preview lens, the gateway's bytes (a test holds them equal), with its policy and the framing rules.
-- The laptop's relay (127.0.0.1:4500-4599, one per preview): the lens on GET, the app with localhost as Host and Origin, its framing given way only to its lens, the hub and this dashboard, header-less apps included, and its WebSockets.
+- The laptop's relay (127.0.0.1:4800-4899, one per preview): the lens on GET, the app with localhost as Host and Origin, its framing given way only to its lens, the hub and this dashboard, header-less apps included, and its WebSockets.
 - `/view/preview/<name>`, framing exactly where the lens is: the preview's own name on a box, the relay on a laptop.
 - The stage shows a preview here (`#preview/<name>`) and in a viewer tab: Shift+click on the app, pins on its routes, go, its frame sandboxed with no top navigation, and its messages taken from the lens's own origin only.
 - The Library card's Open and a question's [[name]] open the viewer; Copy link still copies the preview's own link.
@@ -1165,7 +1228,7 @@ EOF
 | What | Task |
 |---|---|
 | The preview lens, a byte-identical copy as a string, with a test | 1 |
-| The laptop relay, ports 4500-4599 | 2, 3 |
+| The laptop relay (on 4800-4899: decision 3) | 2, 3 |
 | `/view/preview/<name>` | 4 |
 | The in-page preview stage beside artifacts | 5 |
 | Preview subjects fitted and accepted (3a's `tFit`, action) and produced | 5 |
@@ -1177,6 +1240,13 @@ EOF
 | PR 2 req. 4: `frame-src` names `https://<name>.<box>` itself | 4 |
 | PR 2 req. 9: the relay rewrites Host and Origin, narrows the relaxation (header-less apps too), serves the lens on GET only, and relays sockets | 2, 3 |
 | The pin follows hot reload (spec Testing, browser) | 8 |
+| Review C3: the relay lens's policy names this dashboard too, each origin once | 2 |
+| Review I2: the chain's and the gateway's exact `/` policies, unchanged with no previews | 4 (run, and decision 5) |
+| Review I3: `frame-src` per request from the records and the open relays, never a wildcard; a page whose policy predates its preview reloads or says so | 4, 5 |
+| Review I4: the relays on 4800-4899, refused only to a new registration, old records kept; occupied ports skipped | 2 |
+| Review I8: no free port, nothing kept | 2 |
+| Review I9: a relay opens only from `/api/view`, never a GET of `/view/preview/` | 2, 4 |
+| Review M10: the gateway's lines cited at `71b918a` | 1 |
 
 **Placeholders:** none. Task 2's `relayUpgrade` stand-in is a real 501 answer that Task 3 replaces, and Task 2's test doesn't open a socket.
 

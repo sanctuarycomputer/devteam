@@ -28,7 +28,7 @@
 
 1. **Split in two.** All of spec PR 3 is about 24 right-sized tasks. 3a (this plan, 15 tasks) is the viewer, artifacts, `/artifact/tree/` and the follow-ups. 3b (9 tasks) is previews: the lens copy, the relay and its sockets, `/view/preview/`, the in-page preview stage and `supervisor.md` §7. 3b's stage is 3a's with a second frame.
 2. **The artifact lens speaks the preview lens's protocol.** Messages are `{ lens: 1, type, … }`. From the viewer: `hello`, `hit {id, x, y}`, `resolve {id, anchors: [{key, anchor}]}`, `scroll-by {dx, dy, x, y}` and `scroll-to {anchor}`. From the lens: `ready {path, title, viewport}`, `hit-reply {id, anchor, rect}`, `rects {id?, rects}` and `key {key, shift}`. After a `resolve`, the lens sends `rects` itself whenever something moves (a scroll, a resize, a DOM change, and a 1 s backstop). That replaces spec §6's `scroll {x, y}`, which a scroll inside a box couldn't describe. One client in the page then serves both lenses.
-3. **The lens is appended at the very end of the document**, after `</html>` if there is one. The HTML parser puts a script there into the body and runs it. Searching the bytes for `</body>` could match one inside a script's string. The bytes before it are the committed ones.
+3. **The lens is appended at the very end of the document**, after `</html>` if there is one. The HTML parser puts a script there into the body and runs it. Searching the bytes for `</body>` could match one inside a script's string. The bytes before it are the committed ones. The fallback when that fails: a page that ends inside an unclosed raw-text element (`<script>`, `<style>`, `<textarea>`, `<title>`) or an unclosed comment swallows the lens as text. It then never answers, and the viewer falls back to the point alone after 150 ms (spec §4 step 3), as for a page with no lens. Nothing is parsed to prevent it: a page that broken shows broken anyway.
 4. **The lens replies to `location.ancestorOrigins[0]`** where the browser gives it (Chrome, Safari), else `'*'`. The parent posts to the lens with `'*'` (an opaque origin, spec §6).
 5. **The viewer gets an artifact's title and fingerprints from `GET /api/view?kind=artifact&slug=&at=`**, which runs `artifact describe` as a child (as every slow read here is), and reads nothing of `/api/data`. `describe` says the shown version's `fp`, main's `main_fp` and `main_tree`. "Changed since" on a `tree:` subject compares with main (spec §5).
 6. **One stage.** The dashboard's artifact viewer (`#artifact-view`) is the stage, and viewer mode shows that same element full-window. There is one overlay, one set of frame pins and one lens client (`TS`).
@@ -42,13 +42,17 @@
 9. **The supervisor's pane is recorded only under `DEVTEAM_ROLE=supervisor`** (the follow-up's first option). A role-less command can come from the owner's own terminal, and nothing about it says otherwise. The second option, recording only when the pane runs the supervisor's agent (`agentAncestor()`), can't tell the owner's own ad-hoc agent from the supervisor, and it costs `ps` calls on every command. The supervisor always runs with the role: `recover` exports it, the README's start line sets it, and `supervisor.md` §1 says to prefix every command with it where the shell forgets. A role-less command is still the supervisor's (`supervisorOnly`, unchanged). It just doesn't claim the pane.
 10. **`/api/threads` reads the pane state from the 10 s hello child** (`hello --json --pane` adds `supervisor_pane`), so the server never calls tmux for it, not even on a timer. Only the dashboard passes `--pane`, so `machine status` and the hub's probes don't pay for it.
 11. **ETag/304 on `/api/threads`**, keyed by the log files' sizes and mtimes and the pane state, with `cache-control: private, no-cache` so the browser revalidates. On a box the gateway forces `no-store` on every instance response, so there the 304 only saves the kit's work, never the transfer. That is still worth the three lines.
-12. **`/artifact/tree/<id>/` serves any tree the repository has**, under any slug in the path. It doesn't check that the tree was ever that slug's: that would mean walking history. It is served under the same opaque sandbox as every artifact, so a tree an agent made up is no more than a draft it could serve anyway.
+12. **`/artifact/tree/<id>/` serves only an artifact's own folder tree.** `<id>:<path>` resolves against a commit or the repository's root tree as readily as against a folder's tree, so `/artifact/tree/<commit>/x/docs/…` would serve any committed file. Before reading a blob the kit requires `git cat-file -t <id>` to say `tree` and `<id>:artifact.json` to exist, and answers 404 otherwise; `artifactAt` (the viewer's `describe`) checks the same. A tree passing once is remembered for the process, since a tree id never changes. The slug in the path can't be checked against the tree: `artifact.json` names a title, a summary and an author, never its slug, and a folder's tree doesn't know its own name. What still holds: the bytes are an artifact folder's (one the repository has, under the same opaque sandbox as every artifact), and on a box the gateway lets the public name frame `/artifact/tree/` only at a tree published for that very slug from that port (PR 2's `treeGranted`).
 13. **A subject's `at` takes a 64-hex tree id** as `TREE_ID` does (SHA-256 repositories). `subjectProblem` took only 40.
 14. **Nothing to point at, no pin.** Shift over something the layer can't name (the drawer, the sidebar, a bar) shows no pin cursor, so the click is the page's own. This fixes the drawer, and anything else outside the sections.
 15. **The viewer never closes and never routes.** Escape does nothing there. A link into the dashboard from the card (a ref, "Answer it in the Inbox") opens the dashboard in a new tab. A dock row for another subject opens its card in the dock.
-16. **Shift over the stage needs the keyboard in the viewer or in the artifact.** Inside the gateway's wrapper the top page has the focus until the owner clicks, and neither the viewer nor the lens sees a key pressed there. The first click in the viewer or the artifact fixes it. This is accepted, and the browser script clicks first.
+16. **Shift over the stage needs the keyboard in the viewer or in the artifact.** Inside the gateway's wrapper the top page would otherwise have the focus, and neither the viewer nor the lens sees a key pressed there. Two things fix it:
+    - the wrapper's frame gets `autofocus` (`PAGES.ownerWrapper` in `cloud/gateway.mjs`, Task 8, with a gateway test), so the viewer has the keyboard from the start;
+    - a framed viewer whose document doesn't have the focus (`window.parent !== window && !document.hasFocus()`) says "Click the page, then hold Shift" in its bar, until a `focus` event.
+
+    The browser script still clicks first, so it holds whatever a browser does with `autofocus` in a frame.
 17. **The stage's "Open in new tab" opens the viewer** (spec §7's Pop out), not the bare artifact, so the tab has threads. The Library card keeps its title link to the in-page stage and gains **Open** for the viewer. A question's `[[name]]` opens the viewer. The link list under the question keeps the in-page stage, which shows "Changed since this question was asked".
-18. **Nothing relies on `window.opener`.** The wrapper's `cross-origin-opener-policy: same-origin` severs it for a popup the viewer opens. Every `target="_blank"` here has `rel="noopener noreferrer"` and every `window.open` passes `noopener`, so no popup gets one anyway. A test holds that.
+18. **Nothing relies on `window.opener`.** The wrapper's `cross-origin-opener-policy: same-origin` severs it for a popup the viewer opens. Every `target="_blank"` here gets `rel="noopener noreferrer"` (four of the page's existing links had `noopener` alone, and Task 11 fixes them) and every `window.open` passes `noopener`, so no popup gets one anyway. A test holds that.
 19. **The wrapper's grant, `w=<expiry>.<mac>`, is the gateway's alone** (PR 2's last fix, `71b918a`: the gateway adds the public name to the viewer's `frame-ancestors` only when that MAC verifies). The kit's viewer:
     - accepts `w` (any query parameter but `at`) and ignores it, never as an error;
     - keeps it in its own URL. Nothing in viewer mode navigates, reloads to another URL, or calls `history.replaceState`/`pushState`: a fallback to main is shown in place, a link into the dashboard opens a new tab, and the layer's one `replaceState` (`tlClose`, for a `#talk/` hash) keeps `location.search`. So a reload inside the wrapper still carries the grant;
@@ -56,12 +60,17 @@
 
     The gateway now chooses the wrapper from the hub's polled list, which carries each instance's hello as it answered, so `viewer: 1` and `root` in `helloBody` are what turn it on. Task 6 tests that the hub lists both.
 
+20. **A `key` message is honoured only while the stage's frame has the focus** (`document.activeElement === tsFrame()`). The lens says Shift only when the framed page has the keyboard, and the artifact's own scripts can post the same message at any time. Gated this way, a page can't raise the overlay over itself while the owner is typing elsewhere; when the frame has the focus it could already intercept the owner's keys anyway.
+21. **`thread show` says when an artifact changed since the thread began.** It compares the subject's `fp` with the artifact's fingerprint at that `at` now (for a `tree:` subject, main's: a tree never changes), through `artifactAt`, beside the data frame. `artifactLinkNow` is for question links (`at` is main or a worktree, `sha256` the field); a thread's subject has its own shape, so a small `artifactSubjectNow` serves it instead.
+22. **`#talk/<id>` works in a viewer tab.** The dashboard routes it from `route()`, which runs only once `/api/data` has loaded. A viewer never loads that, so `viewerBoot` opens a `#talk/` hash after its first threads read, and a hashchange listener of its own handles `#talk/` and nothing else.
+
 ## Spec problems found while planning
 
 - **§1's turn example has `"question": null`.** The schema's `turn.question` is a string, so that line would be refused. A turn that asks nothing leaves `question` out. Fixed in the spec (Task 13).
 - **§6's message set** (`ready {path, size}`, `scroll {x, y}`) differs from the preview lens's, which PR 2 built. Decision 2 uses the preview lens's for both.
 - **§6: "appends one `<script>` to the body"**: appending at the end of the document does that without parsing the artifact (decision 3).
 - **§5: `subjectProblem`'s `tree:` takes 40 hex only** (decision 13).
+- **§4: "outside any [`data-subject`], to a page subject"** is narrowed. A page subject is a spot inside one of the dashboard's sections; outside the sections (the drawer, the sidebar, the stage's bar) there is nothing to point at, and the click is the page's (decision 14). Task 13 corrects §4.
 - **§7 says the viewer polls `/api/threads`** but not how often when no card is open. It polls every 5 s while the tab is visible, plus the open card's 2 s poll.
 - **§8's wrapper grant** (`w=`, added by PR 2's `71b918a`) says "a `history.replaceState` that drops it is harmless, a reload after one isn't". The viewer never rewrites its URL at all (decision 19), so neither can happen.
 - **§7: "the Library's Open … open[s] it in a new tab"**, but the Library's artifact link already opens the in-page viewer. Both are kept (decision 17).
@@ -69,7 +78,7 @@
 ## Global Constraints
 
 - **Node 18+ built-ins only**: no dependencies, no API newer than Node 18. CI runs `.github/workflows/test.yml` on Node 18, 20, 22 and 24. `test/kit.test.mjs` is the `kit` job, the rest (`test/dashboard.test.mjs` among them) the `rest` job. Locally, run with Node 24 and let CI cover the rest. Chrome tests skip without Chrome or a Node with `WebSocket` (`canDrive`).
-- **No new source files.** Change only `docs/devteam/scripts/devteam.mjs`, `docs/devteam/dashboard/index.html`, `test/dashboard.test.mjs`, `test/kit.test.mjs`, `test/browser/dev-links.mjs`, `README.md` and the spec. The lens is a string in `devteam.mjs`.
+- **No new source files.** Change only `docs/devteam/scripts/devteam.mjs`, `docs/devteam/dashboard/index.html`, `docs/devteam/process/supervisor.md`, `cloud/gateway.mjs` (one attribute: `autofocus` on the owner wrapper's frame, decision 16), `test/dashboard.test.mjs`, `test/kit.test.mjs`, `test/gateway.test.mjs`, `test/browser/dev-links.mjs`, `README.md` and the spec. The lens is a string in `devteam.mjs`.
 - **Plain English on the owner's pages**: the viewer's bar and notes, the chip, the titles. No ids, flags or paths beyond an artifact's own name and page.
 - **A capture is data.** Everything a lens says is the framed page's. It is shown escaped, cut to the kit's caps, given to the supervisor only inside `thread show`'s data frame, and never typed into a pane.
 - **Tests first** in every task: write the failing test, run it and see it fail for the expected reason, implement, run it green, then run the whole file.
@@ -92,12 +101,15 @@
 | File | Responsibility | Tasks |
 |---|---|---|
 | `docs/devteam/scripts/devteam.mjs` | `ownerWriter`'s comment and `rememberSupervisorPane` (1112-1139). `subjectProblem`'s `at` (4858). `thread show` (5111-5125). `ARTIFACT_LENS` and `withArtifactLens` after `artifactCsp` (5178-5186). `ARTIFACT_AT` after `ARTIFACTS_REL` (5620). `artifactAt` after `artifactSource` (5738-5751). `artifact describe` before `cmdArtifact`'s usage `die` (5922). In `cmdDashboard`: `thread-new` (10795) and its comment (10790-10794), `refreshHello`'s args (10818), `helloBody` (10827), `threadsRead`'s returns, `supervisorPane` (10895-10898), `/view/artifact/` and `/api/view` after `const u` (10923), `/api/threads` (10927-10934), the `/artifact/` route (11021-11043). `cmdHello` (13962) | 1-7 |
-| `docs/devteam/dashboard/index.html` | CSS after the artifact viewer's (483). `#artifact-view` markup (710-720). `VIEWER` after `let DATA` (752). `artLinkOf`/`qtext` (1248-1264). threads-core: `tFit` (3513-3527), `tKey` (3558), new helpers before `/* threads-core end */`. The layer: `tlShow` (3608-3623), the key, blur and pointer listeners (3632-3666), `tlPinMode`, `tlGoTo` (3678-3689), `tlTargetRect` (3674-3685), `tlQuestion` (3719), `tlCardBody`'s ready block and note (3741-3755), `tlPins` (3929-3949), `tlAct` (3993), the stage's lens client before `/* threads-layer end */`. The artifact viewer (3064-3108). `renderLibrary`'s card (3292-3300). The boot (4331-4333) | 7-12 |
+| `docs/devteam/dashboard/index.html` | CSS after the artifact viewer's (483). `#artifact-view` markup (710-720). `VIEWER` after `let DATA` (752). `artLinkOf`/`qtext` (1248-1264). threads-core: `tFit` (3513-3527), `tKey` (3558), new helpers before `/* threads-core end */`. The layer: `tlShow` (3608-3623), the key, blur and pointer listeners (3632-3666), `tlPinMode`, `tlGoTo` (3678-3689), `tlTargetRect` (3674-3685), `tlQuestion` (3719), `tlCardBody`'s ready block and note (3741-3755), `tlPins` (3929-3949), `tlAct` (3993), the stage's lens client before `/* threads-layer end */`. The artifact viewer (3064-3108). `renderLibrary`'s card (3292-3300). The boot (4331-4333). The four `rel="noopener"` links (1083, 1253, 1621, 3018) | 7-12 |
 | `test/dashboard.test.mjs` | `landArtifact`, `VIEWER_MOCK`, `PIN_MOCK`, `artLensRun` after `POLL_FAST` (304). New server tests after the pane test (633-656). The layer-rules test (703-801). New Chrome tests after the page test (802-1264), and new subtests at its end | 1, 4-12 |
 | `test/kit.test.mjs` | The threads test: the pane block (191-207) and a new last subtest before 487 | 2, 3 |
-| `test/browser/dev-links.mjs` | `kitViewers` after `gatewayViewers` (385-549), called at `viaGateway`'s end (306) | 14 |
+| `test/browser/dev-links.mjs` | `kitViewers` after `gatewayViewers` (it ends just before `async function main()`), called at `viaGateway`'s end, after `await gatewayViewers(…)` | 14 |
+| `cloud/gateway.mjs` | `PAGES.ownerWrapper`'s `<iframe>`: `autofocus` | 8 |
+| `test/gateway.test.mjs` | The test `public.<box>: the signed-in owner's own visit gets the viewer …`: its sandbox assertion | 8 |
+| `docs/devteam/process/supervisor.md` | §1, item 1: the pane is recorded only under the role | 3 |
 | `README.md` | **Threads** (49-50), Public artifacts (172), the threat-model bullet on the public name (177) | 13 |
-| `docs/superpowers/specs/2026-11-10-supervisor-threads-design.md` | §1's turn example (57-59) | 13 |
+| `docs/superpowers/specs/2026-11-10-supervisor-threads-design.md` | §1's turn example (57-59), §4's "Stable identity" (139), §6 (158-161), §8's `/artifact/tree/` bullet | 13 |
 
 ---
 
@@ -105,12 +117,12 @@
 
 **Files:**
 - Modify: `docs/devteam/scripts/devteam.mjs` (`cmdHello` at 13962; in `cmdDashboard`: `refreshHello` at 10818, `threadsRead`'s two returns, `supervisorPane` at 10895-10898, `/api/threads` at 10927-10934)
-- Test: `test/dashboard.test.mjs` (new test after the one ending at 656)
+- Test: `test/dashboard.test.mjs` (two new tests after `a dashboard started in the supervisor's pane …`)
 
 **Interfaces:**
 - Produces: `hello --json --pane` adds `supervisor_pane: boolean`. `threadsRead()` returns `{ body, cached, key }`. `/api/threads` sends `etag` and `cache-control: private, no-cache`, and answers 304 to a matching `if-none-match`.
 
-- [ ] **Step 1: The failing test.** Append after the test that ends at line 656 (`a dashboard started in the supervisor's pane …`):
+- [ ] **Step 1: The failing tests.** Append after the test `a dashboard started in the supervisor's pane …`:
 
 ```js
 test("/api/threads: the supervisor's pane as the 10 s hello found it, never asked of tmux on a read; nothing changed is a 304", { skip: hasTmux ? false : 'no tmux' }, async (t) => {
@@ -126,11 +138,6 @@ test("/api/threads: the supervisor's pane as the 10 s hello found it, never aske
   t.after(() => d.stop());
   await until(() => new RegExp(`dashboard on http://127\\.0\\.0\\.1:${port}\\b`).test(d.out()), 'the dashboard');
   await until(async () => (await (await fetch(`${B}/api/threads`)).json()).supervisor.pane === true, 'the pane, from the hello child');
-  // the read itself asks tmux nothing
-  const src = fs.readFileSync(path.join(kit, 'scripts/devteam.mjs'), 'utf8');
-  const handler = src.slice(src.indexOf("u.pathname === '/api/threads'"), src.indexOf('// Whether the fleet can move now'));
-  assert.ok(handler.length > 200, 'the handler is where it was');
-  assert.doesNotMatch(handler, /resolvePane|tmux/);
   // a read with nothing changed since the page's last is a 304, with no body
   let r = await fetch(`${B}/api/threads`);
   const tag = r.headers.get('etag');
@@ -147,12 +154,37 @@ test("/api/threads: the supervisor's pane as the 10 s hello found it, never aske
   // same-origin only, whatever it carries
   assert.equal((await fetch(`${B}/api/threads`, { headers: { 'if-none-match': tag, 'sec-fetch-site': 'cross-site' } })).status, 403);
 });
+
+test('/api/threads asks tmux nothing on a read: a tmux that logs every call sees none from the dashboard itself', async (t) => {
+  const F = threadsFixture('threads-no-tmux');
+  t.after(() => F.done());
+  // a tmux first on PATH that writes down who called it (its parent's pid) and fails
+  const bin = fs.mkdtempSync(path.join(F.base, 'bin-'));
+  const calls = path.join(bin, 'calls.txt');
+  write(path.join(bin, 'tmux'), `#!/bin/sh\necho "$PPID $*" >> ${JSON.stringify(calls)}\nexit 1\n`);
+  fs.chmodSync(path.join(bin, 'tmux'), 0o755);
+  const port = await freePort();
+  const B = `http://127.0.0.1:${port}`;
+  // a named supervisor pane, so an older kit's read would look it up; the preview tick kept quiet
+  const d = startDashboard(F.old, F.env({ PATH: `${bin}${path.delimiter}${process.env.PATH}`, DEVTEAM_SUPERVISOR: 'sup:main', DEVTEAM_PREVIEW_TICK_MS: '600000' }), ['--port', String(port)]);
+  t.after(() => d.stop());
+  await until(() => new RegExp(`dashboard on http://127\\.0\\.0\\.1:${port}\\b`).test(d.out()), 'the dashboard');
+  const own = () => (fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8') : '').split('\n').filter((l) => l.startsWith(`${d.p.pid} `));
+  assert.equal((await fetch(`${B}/api/threads`)).status, 200);
+  // past the 10 s an older kit kept its own tmux answer for
+  await new Promise((r) => setTimeout(r, 11000));
+  const before = own().length;
+  for (let i = 0; i < 30; i++) assert.equal((await fetch(`${B}/api/threads`)).status, 200);
+  assert.deepEqual(own().slice(before), [], 'not one tmux call from the dashboard\'s own process across 30 reads');
+  // the hello child is what asks, in a process of its own
+  await until(() => fs.existsSync(calls) && fs.readFileSync(calls, 'utf8').split('\n').some((l) => l && !l.startsWith(`${d.p.pid} `)), 'the hello child asking');
+});
 ```
 
-- [ ] **Step 2: Run it and see it fail.**
+- [ ] **Step 2: Run them and see them fail.**
 
-Run: `$NODE --test --test-name-pattern "never asked of tmux on a read" test/dashboard.test.mjs`
-Expected: FAIL at the first assertion (`undefined !== true`: hello has no `supervisor_pane`).
+Run: `$NODE --test --test-name-pattern "never asked of tmux on a read|asks tmux nothing on a read" test/dashboard.test.mjs`
+Expected: FAIL. The first at its first assertion (`undefined !== true`: hello has no `supervisor_pane`). The second at its `deepEqual`: the read after 10 s looks the pane up itself (`list-panes` from the dashboard's pid).
 
 - [ ] **Step 3: hello says whether the supervisor has a pane, when asked.** In `cmdHello` (13962), replace the `const r = …` line with:
 
@@ -207,7 +239,7 @@ Replace the `/api/threads` handler's last three lines (from `let r;` to the `ret
 
 - [ ] **Step 5: Run it green, then the file.**
 
-Run: `$NODE --test --test-name-pattern "never asked of tmux on a read" test/dashboard.test.mjs`
+Run: `$NODE --test --test-name-pattern "never asked of tmux on a read|asks tmux nothing on a read" test/dashboard.test.mjs`
 Expected: PASS.
 Run: `$NODE --test test/dashboard.test.mjs`
 Expected: PASS. The `threads on the dashboard's server` test still sees `{ pane: false }` with no pane, and `cached` on repeat reads.
@@ -247,7 +279,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 Run: `$NODE --test --test-name-pattern "without a control character a terminal would act on" test/kit.test.mjs`
 Expected: FAIL: the escape is printed.
 
-- [ ] **Step 3: Strip them.** In `thread show`, replace the line `out(u.text.split('\n').map((l) => \`  ${l}\`).join('\n'));` with:
+- [ ] **Step 3: Strip them.** In `thread show`, replace the line ``out(u.text.split('\n').map((l) => `  ${l}`).join('\n'));`` with:
 
 ```js
       // its own line breaks, and nothing else a terminal acts on (an escape, a bidi override, a CR)
@@ -274,6 +306,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 **Files:**
 - Modify: `docs/devteam/scripts/devteam.mjs` (`ownerWriter`'s comment at 1112-1116, `rememberSupervisorPane` at 1133-1139)
+- Modify: `docs/devteam/process/supervisor.md` (§1, item 1)
 - Test: `test/kit.test.mjs` (the pane block at 191-207)
 
 - [ ] **Step 1: The failing test.** Replace lines 191-207 (from `// in the supervisor's own pane` to the `} finally { fs.rmSync(paneFile, { force: true }); }`) with:
@@ -337,6 +370,12 @@ function rememberSupervisorPane() {
 }
 ```
 
+In `docs/devteam/process/supervisor.md` §1, item 1, after the sentence "If your agent CLI doesn't keep shell state between commands, prefix every devteam command with `DEVTEAM_ROLE=supervisor`.", add:
+
+```markdown
+Only a command run with that role records your tmux pane, the one the owner's answers and thread turns are typed into; a command without it still acts as you, but leaves the pane unrecorded, since the owner's own terminal runs without a role too.
+```
+
 - [ ] **Step 4: Run it green, then every file that touches the pane.**
 
 Run: `$NODE --test --test-name-pattern "threads: records, commands" test/kit.test.mjs`
@@ -347,7 +386,7 @@ Expected: PASS. Their pane files are written by `recover` or by hand, never by a
 - [ ] **Step 5: Commit.**
 
 ```bash
-git add docs/devteam/scripts/devteam.mjs test/kit.test.mjs
+git add docs/devteam/scripts/devteam.mjs docs/devteam/process/supervisor.md test/kit.test.mjs
 git commit -m "kit: only a command run as the supervisor records its pane, so the owner's own pane is never taken for it
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
@@ -358,10 +397,11 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 4: `/artifact/tree/<tree>/<slug>/…`, from git
 
 **Files:**
-- Modify: `docs/devteam/scripts/devteam.mjs` (the `/artifact/` route, 11021-11043, and its comment at 11003-11005)
+- Modify: `docs/devteam/scripts/devteam.mjs` (`artifactTrees`, `artifactTreeOk`, `artifactTreeOkSync` after `artifactSource` at 5751; the `/artifact/` route, 11021-11043, and its comment at 11003-11005)
 - Test: `test/dashboard.test.mjs` (helpers after `POLL_FAST`, a new server test)
 
 **Interfaces:**
+- Produces: `artifactTreeOk(id) → Promise<boolean>` and `artifactTreeOkSync(id) → boolean` (used by Task 6's `artifactAt`).
 - Produces (test helpers, used by Tasks 5-12): `landArtifact(F, slug, files) → tree id`, `VIEWER_MOCK` (a three-file artifact: `artifact.json` titled "Viewer mock", `index.html` with `<p id="art">`, `style.css`). The route serves `GET /artifact/tree/<40 or 64 hex>/<slug>/<rel>` with the artifact policy, which has a `frame-ancestors` and no `x-frame-options`.
 
 - [ ] **Step 1: The helpers.** In `test/dashboard.test.mjs`, insert after the `POLL_FAST` constant (it ends a few lines after 304):
@@ -408,6 +448,12 @@ test('an artifact at a published tree: served from git by its tree id, under the
   assert.deepEqual([r.status, r.headers.get('content-type'), await r.text()], [200, 'text/css; charset=utf-8', VIEWER_MOCK['style.css']]);
   r = await fetch(`${B}/artifact/tree/${T}/viewer-mock`, { redirect: 'manual' });
   assert.deepEqual([r.status, r.headers.get('location')], [301, `/artifact/tree/${T}/viewer-mock/`]);
+  // a commit, the repository's root tree, a folder that is no artifact's: <id>:<path> would name
+  // any committed file through them, so none is an artifact's tree (decision 12)
+  const commit = F.g(['rev-parse', 'HEAD'], F.old);
+  const root = F.g(['rev-parse', 'HEAD^{tree}'], F.old);
+  const project = F.g(['rev-parse', 'HEAD:docs/devteam/project'], F.old);
+  for (const bad of [`/artifact/tree/${commit}/viewer-mock/docs/devteam/project/settings.md`, `/artifact/tree/${root}/viewer-mock/docs/devteam/project/settings.md`, `/artifact/tree/${project}/viewer-mock/settings.md`, `/artifact/tree/${commit}/viewer-mock/`]) assert.equal((await fetch(`${B}${bad}`)).status, 404, bad);
   // a tree the repository doesn't have, a short id, a path out of it: none is served
   for (const bad of [`/artifact/tree/${'0'.repeat(40)}/viewer-mock/`, `/artifact/tree/${T.slice(0, 12)}/viewer-mock/`, `${dir}nope.css`, `${dir}%2e%2e/artifact.json`, `${dir}../index.html`, `/artifact/tree/${T}/Bad_Slug/`]) assert.equal((await fetch(`${B}${bad}`)).status, 404, bad);
 });
@@ -418,7 +464,22 @@ test('an artifact at a published tree: served from git by its tree id, under the
 Run: `$NODE --test --test-name-pattern "an artifact at a published tree" test/dashboard.test.mjs`
 Expected: FAIL: `404 !== 200`.
 
-- [ ] **Step 4: The route.** Replace the comment at 11003-11005 (`// An artifact's files: landed from main's tree, …`) with:
+- [ ] **Step 4: Which trees are an artifact's.** After `artifactSource` (it ends at 5751), add:
+
+```js
+// Is this id an artifact folder's tree? A commit's id, or the root tree's, would let <id>:<path> name
+// any committed file, so it must be a tree with an artifact.json at its top (decision 12; its slug
+// can't be checked: a folder's tree doesn't know its name, and artifact.json doesn't say it).
+// Remembered once true: a tree id never changes.
+const artifactTrees = new Set();
+const artifactTreeOk = (id) => (artifactTrees.has(id) ? Promise.resolve(true) : new Promise((resolve) => execFile('git', ['cat-file', '-t', id], { cwd: mainRoot, encoding: 'utf8' }, (e1, type) => {
+  if (e1 || type.trim() !== 'tree') return resolve(false);
+  return execFile('git', ['cat-file', '-e', `${id}:artifact.json`], { cwd: mainRoot }, (e2) => { if (!e2) artifactTrees.add(id); resolve(!e2); });
+})));
+const artifactTreeOkSync = (id) => artifactTrees.has(id) || (git(['cat-file', '-t', id], mainRoot) === 'tree' && git(['cat-file', '-e', `${id}:artifact.json`], mainRoot) !== null && !!artifactTrees.add(id));
+```
+
+- [ ] **Step 5: The route.** Replace the comment at 11003-11005 (`// An artifact's files: landed from main's tree, …`) with:
 
 ```js
     // An artifact's files: landed from main's tree, a published version from its tree by id (what the
@@ -443,9 +504,10 @@ Replace the `/artifact/` route (11021-11043) with:
         const ref = mainRef();
         if (ref) bytes = await blobAt(`${ref}:${ARTIFACTS_REL}/${am[3]}/${rel}`);
       } else if (am[2]) {
-        // a tree by its id never changes: what was published is what is shown. Any tree here is
-        // served under the slug the path gives, in the same opaque sandbox as every artifact.
-        bytes = await blobAt(`${am[2]}:${rel}`);
+        // an artifact folder's tree by its id, and nothing else (decision 12): <id>:<path> resolves
+        // against a commit or the root tree as well, which would serve any committed file. A tree
+        // never changes: what was published is what is shown.
+        if (await artifactTreeOk(am[2])) bytes = await blobAt(`${am[2]}:${rel}`);
       } else {
         // the real path stays inside the artifact's folder: a symlink out of it is not found
         try {
@@ -464,14 +526,14 @@ Replace the `/artifact/` route (11021-11043) with:
     }
 ```
 
-- [ ] **Step 5: Run it green, then the file and the chain's artifact steps.**
+- [ ] **Step 6: Run it green, then the file and the chain's artifact steps.**
 
 Run: `$NODE --test --test-name-pattern "an artifact at a published tree" test/dashboard.test.mjs`
 Expected: PASS.
 Run: `$NODE --test test/dashboard.test.mjs && $NODE --test --test-name-pattern "artifact" test/kit.test.mjs`
 Expected: PASS. The `main` and `wt/` forms are as before.
 
-- [ ] **Step 6: Commit.**
+- [ ] **Step 7: Commit.**
 
 ```bash
 git add docs/devteam/scripts/devteam.mjs test/dashboard.test.mjs
@@ -773,7 +835,9 @@ const ARTIFACT_LENS = String.raw`(() => {
   setInterval(() => { if (watched.length) sendRects(); }, 1000);
 })();`;
 // The page with the lens after it, at the very end: the parser takes a script there into the body
-// and runs it, and every byte before it is the committed one. Its policy needs nothing more: the
+// and runs it, and every byte before it is the committed one. A page that ends inside an unclosed
+// <script>, <style>, <textarea>, <title> or comment swallows it as text: then no lens answers, and
+// the viewer pins the point alone (decision 3). Its policy needs nothing more: the
 // artifact policy's script-src already has 'unsafe-inline', and a hash there would turn that off
 // for the artifact's own inline scripts.
 const withArtifactLens = (bytes) => Buffer.concat([bytes, Buffer.from(`<script>${ARTIFACT_LENS}</script>`)]);
@@ -810,7 +874,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 6: The viewer's route, `/api/view`, `artifact describe`, and `viewer: 1`
 
 **Files:**
-- Modify: `docs/devteam/scripts/devteam.mjs` (`ARTIFACT_AT` after `ARTIFACTS_REL` at 5620; `artifactAt` after `artifactSource`; `artifact describe` in `cmdArtifact`; `helloBody`; the `/view/artifact/` and `/api/view` routes after `const u` at 10923)
+- Modify: `docs/devteam/scripts/devteam.mjs` (`ARTIFACT_AT` after `ARTIFACTS_REL` at 5620; `artifactAt` after `artifactSource`; `artifactSubjectNow` before `cmdArtifact` and its line in `thread show` (5111-5125); `artifact describe` in `cmdArtifact`; `helloBody`; the `/view/artifact/` and `/api/view` routes after `const u` at 10923)
 - Test: `test/dashboard.test.mjs` (a new server test)
 
 **Interfaces:**
@@ -865,6 +929,12 @@ test('the viewer: its route and headers, what /api/view says of an artifact, and
   assert.equal((await fetch(`${B}/api/view?kind=lens&slug=viewer-mock`)).status, 400);
   assert.equal((await view({ slug: 'viewer-mock', at: 'main' }, { 'sec-fetch-site': 'cross-site' })).status, 403);
   assert.match(F.owner(['artifact', 'describe', 'viewer-mock']), /^viewer-mock at main: "Viewer mock", fingerprint [0-9a-f]{12}/);
+  // thread show says when the artifact a thread is about has changed since (decision 21)
+  const on = (s) => F.owner(['thread', 'new', 'About it', '--subject', JSON.stringify({ kind: 'artifact', slug: 'viewer-mock', path: 'index.html', point: { x: 1, y: 2 }, ...s })]).split('\n')[0];
+  assert.doesNotMatch(F.sup(['thread', 'show', on({ at: 'main', fp: lib.fp })]), /changed since/, 'as it was');
+  assert.match(F.sup(['thread', 'show', on({ at: 'main', fp: 'a'.repeat(64) })]), /^the artifact viewer-mock has changed since this thread began$/m);
+  assert.doesNotMatch(F.sup(['thread', 'show', on({ at: `tree:${T}`, fp: lib.fp })]), /changed since/, 'a published tree main still has');
+  assert.match(F.sup(['thread', 'show', on({ at: `tree:${T}`, fp: 'b'.repeat(64) })]), /^main has changed viewer-mock since this published version$/m);
 });
 ```
 
@@ -884,12 +954,12 @@ const ARTIFACT_AT = /^(main|tree:[0-9a-f]{40}(?:[0-9a-f]{24})?|[A-Za-z0-9][A-Za-
 After `artifactSource` (it ends at 5751), add:
 
 ```js
-// An artifact's files where a viewer shows it: as artifactSource has them, or a tree by its id (a
-// published version, which never changes). A tree id the repository has no tree for is nothing.
+// An artifact's files where a viewer shows it: as artifactSource has them, or an artifact folder's
+// tree by its id (a published version, which never changes). Any other id is nothing (decision 12).
 function artifactAt(at, slug) {
   if (!String(at).startsWith('tree:')) return artifactSource(at, slug);
   const tree = at.slice(5);
-  if (!LINK_ID.test(slug ?? '') || !TREE_ID.test(tree) || git(['cat-file', '-t', tree], mainRoot) !== 'tree') return null;
+  if (!LINK_ID.test(slug ?? '') || !TREE_ID.test(tree) || !artifactTreeOkSync(tree)) return null;
   const entries = treeIdEntries(tree);
   return entries.length ? { entries } : null;
 }
@@ -917,6 +987,29 @@ In `cmdArtifact`, before the final usage `die` (5922), add:
 
 Add `artifact describe <slug> [--at <where>] [--json]` to that usage `die`'s list, after `artifact manifest <slug> [--json]`.
 
+Before `cmdArtifact`, add:
+
+```js
+// What a thread's artifact subject is now, for thread show (decision 21): null when its fingerprint
+// is still the one the thread began on (or it recorded none); else a line saying so. A published
+// tree never changes, so for one, "changed since" means main has moved on from it (spec §5).
+function artifactSubjectNow(s) {
+  if (!isObj(s) || !LINK_ID.test(s.slug ?? '') || typeof s.fp !== 'string') return null;
+  const tree = String(s.at).startsWith('tree:');
+  const src = artifactAt(tree ? 'main' : s.at, s.slug);
+  if (!src) return `the artifact ${s.slug} is no longer ${tree ? 'on main' : `at ${quoteData(s.at)}`}`;
+  if (fingerprint(src.entries) === s.fp) return null;
+  return tree ? `main has changed ${s.slug} since this published version` : `the artifact ${s.slug} has changed since this thread began`;
+}
+```
+
+In `thread show`, after `out(threadDataFrame(v));`, add:
+
+```js
+    const moved = v.subject?.kind === 'artifact' ? artifactSubjectNow(v.subject) : null;
+    if (moved) out(moved);
+```
+
 - [ ] **Step 4: hello says it has viewers.** In `helloBody` (10827), add `viewer: 1` after `kit`:
 
 ```js
@@ -939,7 +1032,8 @@ Above `let hello = null;`, add one comment line: `// viewer: 1 says this kit has
       return res.end(fs.readFileSync(page));
     }
     // What the viewer's bar and its "changed since" read of what it shows (artifact describe), so a
-    // viewer never waits on /api/data. A GET carries no Origin: same-origin only, as /api/threads.
+    // viewer never waits on /api/data. Asked once per viewer load (a fallback to main asks once more),
+    // never polled: a child process per ask. A GET carries no Origin: same-origin only, as /api/threads.
     if (req.method === 'GET' && u.pathname === '/api/view') {
       const site = req.headers['sec-fetch-site'];
       if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: "not for another site's page" }));
@@ -1154,8 +1248,9 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 8: Viewer mode: one artifact in a tab of its own
 
 **Files:**
-- Modify: `docs/devteam/dashboard/index.html` (CSS after 483; `#artifact-view` markup at 710-720; `VIEWER` after `let DATA = null;` at 752; the artifact viewer at 3064-3108; `tlQuestion`'s Inbox link; `tlAct`'s `load`; the boot at 4331-4333)
-- Test: `test/dashboard.test.mjs` (a new Chrome test)
+- Modify: `docs/devteam/dashboard/index.html` (CSS after 483; `#artifact-view` markup at 710-720; `VIEWER` after `let DATA = null;` at 752; the artifact viewer at 3064-3108; `tlAct`'s `load`; the boot at 4331-4333)
+- Modify: `cloud/gateway.mjs` (`PAGES.ownerWrapper`'s `<iframe>`: `autofocus`)
+- Test: `test/dashboard.test.mjs` (a new Chrome test), `test/gateway.test.mjs` (the owner-wrapper test)
 
 **Interfaces:**
 - Consumes: `/view/artifact/<slug>`, `/api/view` (Task 6).
@@ -1164,7 +1259,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
   - `artSrc(slug, at)` (`/artifact/main|wt/<w>|tree/<id>/<slug>/`) and `artViewer(slug, at)` (`/view/artifact/<slug>[?at=…]`).
   - `showArtifact(slug, at, { title, note, fp, mainFp })`, the stage for both modes.
   - `TS`, the stage's lens state: `{ kind, slug, at, fp, mainFp, path, target, ready, raised, seq, minted: Map, hit, waiters: Map, rects: Map, keyOf: Map, watching: Set, watch, last, rafPending, via }`, set by `tsSet(kind, info)`.
-  - Markup: `#av-stage` wrapping `#av-frame`, `#av-pins` and `#av-over` (hidden), and `#av-project` in the bar.
+  - Markup: `#av-stage` wrapping `#av-frame`, `#av-pins` and `#av-over` (hidden), and `#av-project` and `#av-hint` in the bar.
+  - `viewerTalk()`: a `#talk/<id>` hash opens its card in a viewer.
 
 - [ ] **Step 1: The failing test.** Append after the Task 7 pane test:
 
@@ -1237,7 +1333,31 @@ test('the viewer: one artifact on a stage the size of the tab, the threads and h
     assert.doesNotMatch(boot, /location\.(href|search|assign|replace|reload)\s*[=(]|history\./, 'viewerBoot never navigates');
   });
 
+  await t.test('a #talk/ link opens its card in a viewer tab, on load and by a hash change', async () => {
+    const th = F.owner(['thread', 'new', 'On the viewer']).split('\n')[0];
+    await p.send('Page.navigate', { url: `${B}/view/artifact/viewer-mock#talk/${th}` });
+    await soon(`!document.getElementById('tl-card').hidden && TL.open === '${th}'`, 'its card, on load');
+    await p.ev('tlClose()');
+    assert.equal(await p.ev('location.pathname + location.search + location.hash'), '/view/artifact/viewer-mock', 'closing it drops the hash only');
+    await p.ev(`location.hash = '#talk/${th}'`);
+    await soon(`!document.getElementById('tl-card').hidden`, 'its card, by a hash change');
+    await p.ev('tlClose()');
+  });
+
+  await t.test('framed without the keyboard, the viewer says to click it first; with it, nothing', async () => {
+    await p.send('Page.navigate', { url: `${B}/api/hello` });
+    await soon(`document.readyState === 'complete'`, 'a page of the same origin');
+    await p.ev(`(() => { const f = document.createElement('iframe'); f.id = 'v'; f.style.cssText = 'width:900px;height:600px'; f.src = '/view/artifact/viewer-mock'; document.body.append(f); return true; })()`);
+    await soon(`document.getElementById('v').contentDocument?.getElementById('av-title')?.textContent === 'Viewer mock'`, 'the framed viewer');
+    await p.ev('document.body.focus(); window.focus(); true');
+    await soon(`!document.getElementById('v').contentDocument.getElementById('av-hint').hidden`, 'the hint, the top page having the keyboard');
+    await p.ev(`document.getElementById('v').contentWindow.focus(); true`);
+    await soon(`document.getElementById('v').contentDocument.getElementById('av-hint').hidden`, 'gone once the viewer has it');
+  });
+
   await t.test('Escape leaves it where it is: a viewer has nothing to go back to', async () => {
+    await p.send('Page.navigate', { url: `${B}/view/artifact/viewer-mock` });
+    await soon(`document.getElementById('av-title').textContent === 'Viewer mock'`, 'the viewer');
     await p.key('Escape');
     await new Promise((r) => setTimeout(r, 300));
     assert.deepEqual(await p.ev(`[document.getElementById('artifact-view').hidden, location.pathname, location.hash]`), [false, '/view/artifact/viewer-mock', '']);
@@ -1256,7 +1376,7 @@ Expected: FAIL: timed out on the bar (the page loads as the dashboard).
 <div id="artifact-view" role="dialog" aria-modal="true" aria-labelledby="av-title" hidden>
   <div class="av-bar">
     <i class="icon-library" aria-hidden="true"></i>
-    <div class="av-head"><b id="av-title"></b><span id="av-where" class="muted"></span><span id="av-project" class="muted"></span><span id="av-note" class="badge high" hidden></span></div>
+    <div class="av-head"><b id="av-title"></b><span id="av-where" class="muted"></span><span id="av-project" class="muted"></span><span id="av-note" class="badge high" hidden></span><span id="av-hint" class="muted" hidden>Click the page, then hold Shift to point at something</span></div>
     <button class="ghost" id="av-reload" title="Load the page again" aria-label="Reload"><i class="icon-rotate-cw" aria-hidden="true"></i><span class="av-label">Reload</span></button>
     <a class="av-btn" id="av-tab" target="_blank" rel="noopener noreferrer" title="Open in a tab of its own, with its threads" aria-label="Open in new tab"><i class="icon-external-link" aria-hidden="true"></i><span class="av-label">Open in new tab</span></a>
     <button class="ghost icon-btn" id="av-close" aria-label="Close"><i class="icon-x" aria-hidden="true"></i></button>
@@ -1371,15 +1491,32 @@ async function viewerBoot() {
   const hello = async () => { try { const r = await fetch('/api/hello'); if (r.ok) $('av-project').textContent = (await r.json()).name ?? ''; } catch {} };
   hello();
   setInterval(hello, 30000);
-  tlRefresh();
+  // framed (the owner wrapper) without the keyboard, Shift reaches nobody here: say so until it comes (decision 16)
+  const hint = () => { $('av-hint').hidden = window.parent === window || document.hasFocus(); };
+  hint();
+  addEventListener('focus', hint);
+  addEventListener('blur', hint);
+  await tlRefresh();
+  // a #talk/<id> link opens its card here: route() never runs in a viewer (decision 22)
+  viewerTalk();
+  addEventListener('hashchange', viewerTalk);
   setInterval(() => { if (document.visibilityState === 'visible') tlRefresh(); }, 5000);
 }
-// In a viewer tab, a link into the dashboard (a ref in a turn, the Inbox) opens the dashboard in a tab of its own.
+// #talk/<id> in a viewer tab, and nothing else of the dashboard's routes.
+function viewerTalk() {
+  if (!location.hash.startsWith('#talk/')) return;
+  let id = '';
+  try { id = decodeURIComponent(location.hash.slice(6)); } catch {}
+  if (/^t-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/.test(id)) tlOpen(id);
+}
+// In a viewer tab, a link into the dashboard (a ref in a turn, the Inbox) opens the dashboard in a tab
+// of its own; a thread's own link (#talk/) opens its card here.
 document.addEventListener('click', (e) => {
-  const a = VIEWER && e.target.closest?.('a[href^="#"]');
+  const a = VIEWER && e.target.closest?.('a[href^="#"]:not([href^="#talk/"])');
   if (!a) return;
   e.preventDefault();
-  window.open(`/${a.getAttribute('href')}`, '_blank', 'noopener,noreferrer');
+  const h = a.getAttribute('href');
+  window.open(`/${h}`, '_blank', 'noopener,noreferrer');
 });
 if (VIEWER) viewerBoot();
 else { loadSchemaDocs(); load(); setInterval(load, 10000); }
@@ -1387,18 +1524,35 @@ else { loadSchemaDocs(); load(); setInterval(load, 10000); }
 
 - [ ] **Step 7: The layer never asks for `/api/data` in a viewer.** In `tlAct`, replace `load({ force: true });` with `if (!VIEWER) load({ force: true });`.
 
-- [ ] **Step 8: Run it green, then the file.**
+- [ ] **Step 8: The owner wrapper gives its viewer the keyboard (decision 16).** In `test/gateway.test.mjs`, in the test `public.<box>: the signed-in owner's own visit gets the viewer at the published version; …`, after the line `assert.match(r.body, /sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads"/);`, add:
+
+```js
+    assert.match(r.body, /<iframe [^>]*\bautofocus\b/, 'the viewer has the keyboard from the start, so Shift reaches it');
+```
+
+Run: `$NODE --test --test-name-pattern "the signed-in owner's own visit" test/gateway.test.mjs`
+Expected: FAIL: no `autofocus`.
+
+In `cloud/gateway.mjs`, in `PAGES.ownerWrapper`, change the frame's opening tag to:
+
+```html
+<iframe src="${esc(frame)}" title="${esc(title)}" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads" autofocus>
+```
+
+Run it again: PASS. Then `$NODE --test test/gateway.test.mjs`: PASS. This one attribute is all of `cloud/gateway.mjs` this PR changes; it deploys with the box's next image, and until then the viewer's hint covers it.
+
+- [ ] **Step 9: Run it green, then the file.**
 
 Run: `$NODE --test --test-name-pattern "the viewer: one artifact on a stage" test/dashboard.test.mjs`
 Expected: PASS.
 Run: `$NODE --test test/dashboard.test.mjs`
 Expected: PASS. The dashboard's own page tests are unchanged: `VIEWER` is null there.
 
-- [ ] **Step 9: Commit.**
+- [ ] **Step 10: Commit.**
 
 ```bash
-git add docs/devteam/dashboard/index.html test/dashboard.test.mjs
-git commit -m "dashboard: viewer mode, one artifact on a stage the size of the tab, its threads and hello polled and nothing else
+git add docs/devteam/dashboard/index.html test/dashboard.test.mjs cloud/gateway.mjs test/gateway.test.mjs
+git commit -m "dashboard: viewer mode, one artifact on a stage the size of the tab, its threads and hello polled and nothing else; the wrapper gives it the keyboard
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
@@ -1468,6 +1622,7 @@ const PIN_MOCK = {
 parent.postMessage({ own: 'ran' }, '*');
 addEventListener('message', (e) => { if (e.source === parent) parent.postMessage({ own: 'heard', data: e.data }, '*'); });
 parent.postMessage({ lens: 1, type: 'hit-reply', id: 'zz-forged', anchor: { selector: '#forged', text: 'FORGED' }, rect: { x: 0, y: 0, w: 10, h: 10 } }, '*');
+setTimeout(() => parent.postMessage({ lens: 1, type: 'key', key: 'Shift', shift: true }, '*'), 500);
 fetch('/api/thread-new', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: 'forged', text: 'from the artifact' }) }).then((r) => parent.postMessage({ own: 'wrote', status: r.status }, '*'), () => parent.postMessage({ own: 'wrote', status: 'refused' }, '*'));
 </script></body></html>`,
 };
@@ -1527,6 +1682,7 @@ test('Shift over an artifact: the overlay, what the lens says is under the point
     await p.hold('Shift', true);
     await soon(`!document.getElementById('av-over').hidden`, 'the overlay');
     await p.move(at.x, at.y, 8);
+    await soon(`TS.hit?.anchor?.selector === '#buy'`, 'the lens\'s answer for the hover');
     await p.clickAt(at.x, at.y, 8);
     await p.hold('Shift', false);
     await soon(`TL.draft?.subject?.kind === 'artifact'`, 'a thread about to start');
@@ -1558,6 +1714,7 @@ test('Shift over an artifact: the overlay, what the lens says is under the point
     assert.equal(await p.ev(`window.__own.find((m) => m.own === 'wrote').status`), 'refused', 'its own fetch to an owner route never left the sandbox');
     assert.equal(threads().filter((x) => x.title === 'forged').length, 0);
     assert.equal(await p.ev(`TS.hit?.anchor?.text === 'FORGED'`), false, 'a hit-reply to an id the page never minted is dropped');
+    assert.equal(await p.ev(`document.getElementById('av-over').hidden`), true, 'its made-up Shift, with the keyboard elsewhere, raised nothing');
     const heard = await p.ev(`window.__own.filter((m) => m.own === 'heard').map((m) => JSON.stringify(m.data))`);
     assert.ok(heard.some((m) => /"type":"hit"/.test(m)), 'it heard the hits');
     assert.ok(heard.every((m) => !m.includes('Make it green')), 'never the owner\'s words');
@@ -1764,7 +1921,8 @@ window.addEventListener('message', (e) => {
   const m = tLensMessage(e, tsFrame()?.contentWindow, TS.minted);
   if (!m) return;
   if (m.type === 'ready') { TS.ready = true; if (TS.kind === 'artifact') TS.path = tArtPath(m.path, TS.slug); return; }
-  if (m.type === 'key') { if (m.key === 'Escape') { tsRaise(false); if (TL.pin) tlPinMode(false); } else tsRaise(m.shift || TL.pin); return; }
+  // a key only while the frame has the keyboard (decision 20): the page's own scripts can say the same at any time
+  if (m.type === 'key') { if (document.activeElement !== tsFrame()) return; if (m.key === 'Escape') { tsRaise(false); if (TL.pin) tlPinMode(false); } else tsRaise(m.shift || TL.pin); return; }
   if (m.type === 'hit-reply') {
     // the newest question's answer only: a slow reply to an older point never replaces it
     const n = Number(m.id.slice(1));
@@ -1902,8 +2060,11 @@ function tsPins() {
     const r = tsRect(g.subject);
     return r && { id: g.ids[g.ids.length - 1], cls: `tl-pin${g.ids.includes(TL.open) ? ' on' : ''}`, left: `${Math.round(r.fx - 11)}px`, top: `${Math.round(r.fy - 11)}px`, label: `Thread ${g.n}${g.ids.length > 1 ? `, and ${g.ids.length - 1} more on this` : ''}`, html: `${g.n}${g.ids.length > 1 ? `<sup>${g.ids.length}</sup>` : ''}` };
   }).filter(Boolean);
-  tlPinsInto($('av-pins'), pins);
+  tlPinsInto($('av-pins'), pins, tsHeld);
 }
+// A stage pin pressed or focused is kept through a redraw, as a page pin is: the press is recorded for
+// it too (the layer's pointerdown, below), though it sits on the stage, outside #tl.
+const tsHeld = (el) => el.contains(document.activeElement) || (!!TL.pressed && el.contains(TL.pressed));
 // An artifact subject's fingerprint now, for "changed since": the stage's when it shows that version,
 // else the dashboard's Library; for a published tree, main's (a tree never changes, so "changed
 // since" means main has moved on from it, spec §5).
@@ -1913,6 +2074,14 @@ function tArtFpNow(s) {
   return (DATA?.library?.artifacts ?? []).find((a) => a.slug === s.slug && a.at === (tree ? 'main' : s.at))?.fp ?? null;
 }
 ```
+
+Make the layer's press record cover the stage's pins. Replace `window.addEventListener('pointerdown', (e) => { TL.pressed = tlOwn(e.target) ? e.target : null; }, true);` with:
+
+```js
+window.addEventListener('pointerdown', (e) => { TL.pressed = tlOwn(e.target) || e.target?.closest?.('#av-pins') ? e.target : null; }, true);
+```
+
+The `pointerup`/`pointercancel` listener after it already calls `tlPins()`, which now redraws the stage's pins too.
 
 In `tlTargetRect`, add as its first line:
 
@@ -1951,9 +2120,9 @@ function tlPins() {
 }
 // Each pin kept by its thread and changed in place, never taken out and put back, so a press or the
 // focus on one survives; one gone stays while it is pressed or focused (the next draw takes it).
-function tlPinsInto(box, pins) {
+function tlPinsInto(box, pins, held = tlHeld) {
   const have = new Map([...box.children].map((b) => [b.dataset.tlPin, b]));
-  for (const [id, b] of have) if (!pins.some((x) => x.id === id) && !tlHeld(b)) b.remove();
+  for (const [id, b] of have) if (!pins.some((x) => x.id === id) && !held(b)) b.remove();
   for (const x of pins) {
     let b = have.get(x.id);
     if (!b) { b = document.createElement('button'); b.type = 'button'; b.dataset.tlPin = x.id; box.append(b); }
@@ -2010,7 +2179,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 11: The Library's Open and a question's `[[name]]` open the viewer; nothing needs an opener
 
 **Files:**
-- Modify: `docs/devteam/dashboard/index.html` (`qtext` at 1257-1264; `renderLibrary`'s artifact card at 3292-3300)
+- Modify: `docs/devteam/dashboard/index.html` (`qtext` at 1257-1264; `renderLibrary`'s artifact card at 3292-3300; the four `rel="noopener"` links at 1083, 1253, 1621 and 3018)
 - Test: `test/dashboard.test.mjs` (a static test, and a new Chrome test)
 
 **Interfaces:**
@@ -2064,9 +2233,24 @@ test('the Library\'s Open and a question\'s [[name]] open the artifact\'s viewer
 - [ ] **Step 2: Run them and see them fail.**
 
 Run: `$NODE --test --test-name-pattern "never needs window.opener|the Library's Open and a question" test/dashboard.test.mjs`
-Expected: the static test passes already. That is fine: it holds the line from here on. The Chrome test FAILS: no `a.av-open`.
+Expected: both FAIL. The static test names four links with `rel="noopener"` alone (lines 1083, 1253, 1621 and 3018: the PR link, a question's URL link, the review's TSV link and a file's "open in a new tab"). The Chrome test finds no `a.av-open`.
 
-- [ ] **Step 3: `[[name]]` to the viewer.** Before `qtext` (1257), add:
+- [ ] **Step 3: Every new tab without a referrer as well.** Run:
+
+```bash
+$NODE -e '
+const fs = require("fs");
+const f = "docs/devteam/dashboard/index.html";
+const t = fs.readFileSync(f, "utf8");
+const n = t.split(`target="_blank" rel="noopener">`).length - 1;
+if (n !== 4) throw new Error(`expected the four links, found ${n}`);
+fs.writeFileSync(f, t.split(`target="_blank" rel="noopener">`).join(`target="_blank" rel="noopener noreferrer">`));
+'
+```
+
+Expected: no output. `git diff` shows exactly those four lines changed.
+
+- [ ] **Step 4: `[[name]]` to the viewer.** Before `qtext` (1257), add:
 
 ```js
 // A question's [[name]] for an artifact opens its viewer in a tab of its own (spec §7), where a thread
@@ -2081,24 +2265,24 @@ function artNameLink(l) {
 
 In `qtext`, replace `l.artifact ? artLinkOf(l, true) : linkOf(l)` with `l.artifact ? artNameLink(l) : linkOf(l)`.
 
-- [ ] **Step 4: The Library's Open.** In `renderLibrary`'s `card`, replace the `art-t` line with:
+- [ ] **Step 5: The Library's Open.** In `renderLibrary`'s `card`, replace the `art-t` line with:
 
 ```js
       <div class="art-t">${a.error ? `<b>${esc(name)}</b>` : `<a href="${esc(artHref(a.slug, a.at))}">${esc(name)}</a>`}${a.at === 'main' ? '' : `<span class="badge medium">draft</span><span class="small muted">in ${linkify(a.at)}</span>`}${a.error ? '<span class="badge high">broken</span>' : `<a class="av-open small" href="${esc(artViewer(a.slug, a.at))}" target="_blank" rel="noopener noreferrer" title="Open it in a tab of its own, with its threads">Open</a>`}</div>
 ```
 
-- [ ] **Step 5: Run them green, then the file.**
+- [ ] **Step 6: Run them green, then the file.**
 
 Run: `$NODE --test --test-name-pattern "never needs window.opener|the Library's Open and a question" test/dashboard.test.mjs`
 Expected: PASS.
 Run: `$NODE --test test/dashboard.test.mjs`
 Expected: PASS.
 
-- [ ] **Step 6: Commit.**
+- [ ] **Step 7: Commit.**
 
 ```bash
 git add docs/devteam/dashboard/index.html test/dashboard.test.mjs
-git commit -m "dashboard: the Library's Open and a question's [[name]] open an artifact's viewer in a tab of its own
+git commit -m "dashboard: the Library's Open and a question's [[name]] open an artifact's viewer in a tab of its own; every new tab without opener or referrer
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
@@ -2219,7 +2403,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 **Files:**
 - Modify: `README.md` (**Threads**, 49-50; Public artifacts, 172; the public-name threat-model bullet, 177)
-- Modify: `docs/superpowers/specs/2026-11-10-supervisor-threads-design.md` (§1's turn example, 57-59)
+- Modify: `docs/superpowers/specs/2026-11-10-supervisor-threads-design.md` (§1's turn example, 57-59; §4's "Stable identity", 139; §6's first, second and fourth bullets, 158-161; §8's `/artifact/tree/` bullet)
 
 - [ ] **Step 1: The README's Threads.** Replace lines 49-50 with:
 
@@ -2235,10 +2419,10 @@ Update the kit in every checkout of the project before you use threads: an older
 Signed in, the owner opening a public link gets a page of the gateway's instead: the project's viewer, showing exactly the published version (served by the kit from git by its tree id), so a thread can be started on it, under a one-line bar whose **Open it as the public sees it** shows the plain page. That needs the project's dashboard running on the box, with a kit that has viewers; otherwise, or whenever anything about it is in doubt, the owner sees the plain page too. A version the box's checkout doesn't have shows main's, and says so.
 ```
 
-- [ ] **Step 3: The public name's bullet.** In line 177, replace the last sentence (`An instance's viewer and published-version pages accept the public name as a frame ancestor, …`) with:
+- [ ] **Step 3: The public name's bullet.** In line 177 (`- **The public name reads the session cookie** …`), after its sentence that ends `… and the owner's view frames only your own instance.`, add:
 
 ```markdown
-An instance's viewer and published-version pages accept the public name as a frame ancestor, which is safe because that name serves only the gateway's own page and sandboxed artifacts with no origin of their own; the kit says who may frame them by policy only, never `X-Frame-Options`, so the gateway's addition is all it takes. A window the viewer opens from there gets no handle on it: the gateway's opener policy cuts it, and the dashboard opens every new tab without one anyway.
+The kit says who may frame its viewer and its published versions by policy only, never `X-Frame-Options`, so the gateway's addition is all it takes; the viewer keeps the owner's view's link in its own address and passes nothing of it on. A window the viewer opens from there gets no handle on it: the gateway's opener policy cuts it, and the dashboard opens every new tab without one anyway.
 ```
 
 - [ ] **Step 4: The spec's turn example.** In §1, replace the second turn line of the example (58-59) with:
@@ -2254,16 +2438,38 @@ and change the `question` bullet (64) to:
 - `question` (supervisor turns): the id of a question this turn asks (§9). A turn that asks nothing leaves it out; it is never `null`.
 ```
 
-- [ ] **Step 5: Check the docs' wording and the suite's docs checks.**
+- [ ] **Step 5: The spec's §6, as built (decisions 2-4, 8, 12, 20).** In §6, replace the second bullet (`- The lens takes four messages from the parent: …`) with:
+
+```markdown
+- The lens speaks the preview lens's protocol (§7), `{ lens: 1, type, … }` both ways. From the parent: `hello`, `hit {id, x, y}`, `resolve {id, anchors: [{key, anchor}]}` (each key a thread's id, never words), `scroll-by {dx, dy, x, y}` (wheel events from the overlay in pin mode) and `scroll-to {anchor}`. From the lens: `ready {path, title, viewport}`, `hit-reply {id, anchor, rect}` (anchor as for previews, `elementFromPoint` on its own document), `rects {id?, rects}` (after a `resolve`, sent again by itself whenever a watched anchor moves: a scroll, a resize, a DOM change, and once a second as a backstop) and `key {key, shift}` (Shift or Escape seen with the focus inside the artifact). It sends nothing else and acts on nothing else. It replies to `location.ancestorOrigins[0]` where the browser gives it, else `'*'`.
+```
+
+In its first bullet, replace ``it appends one `<script>` (the **artifact lens**) to the body.`` with:
+
+```markdown
+it appends one `<script>` (the **artifact lens**) at the very end of the document, after `</html>` if there is one, where the parser takes it into the body; nothing of the artifact is parsed for it, and a page that ends inside an unclosed `<script>`, `<style>`, `<textarea>`, `<title>` or comment swallows it, so its pins fall back to points.
+```
+
+In its fourth bullet (`- The viewer accepts a message only when …`), add at its end: ``A `key` is taken only while the frame has the keyboard.``
+
+In §8's bullet that starts ``- **The kit serves `/artifact/tree/<tree>/<slug>/<rel>` from git**``, after its first sentence, add: ``Only an artifact folder's tree is served (a tree with an `artifact.json` at its top); a commit's or the root tree's id would name any committed file.``
+
+- [ ] **Step 6: The spec's §4, narrowed (decision 14).** In §4's **Stable identity in the DOM** paragraph, replace ``A click resolves to the nearest `[data-subject]` ancestor; outside any, to a **page** subject (§5).`` with:
+
+```markdown
+A click resolves to the nearest `[data-subject]` ancestor; outside any but inside one of the dashboard's sections, to a **page** subject (§5); outside the sections (the drawer, the sidebar, a bar) to nothing: no pin shows, and the click is the page's own.
+```
+
+- [ ] **Step 7: Check the docs' wording and the suite's docs checks.**
 
 Run: `$NODE --test test/kit-lessons.test.mjs test/bounds.test.mjs`
 Expected: PASS.
 
-- [ ] **Step 6: Commit.**
+- [ ] **Step 8: Commit.**
 
 ```bash
 git add README.md docs/superpowers/specs/2026-11-10-supervisor-threads-design.md
-git commit -m "docs: threads on an artifact, the viewer, the published version from git; a turn that asks nothing has no question
+git commit -m "docs: threads on an artifact, the viewer, the published version from git; the spec's lens as built; a turn that asks nothing has no question
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
@@ -2273,12 +2479,12 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ### Task 14: The browser script: wrapper → viewer → artifact, against the real kit
 
 **Files:**
-- Modify: `test/browser/dev-links.mjs` (header comment at 1-5; `kitViewers` after `gatewayViewers`, which ends at 549; its call at `viaGateway`'s end, 306)
+- Modify: `test/browser/dev-links.mjs` (header comment at 1-5; `kitViewers` after `gatewayViewers`, which ends just before `async function main()`; its call at the end of `viaGateway`, after `await gatewayViewers({ G, HUB, SP, tab, app });`)
 
 **Interfaces:**
 - Consumes: the real dashboard on `DASH` (started in `main`), the gateway and the signed-in tab from `viaGateway`, and `browser.evalIn`, `browser.frameWhere`, `browser.mouseAt`, `browser.shift`, `browser.typeIn`, `browser.enter`, `dt` and `git`.
 
-- [ ] **Step 1: The steps.** After `gatewayViewers` (after line 549), add:
+- [ ] **Step 1: The steps.** After `gatewayViewers` (its closing `}`, just before `async function main()`), add:
 
 ```js
 // ===== the same chain against the real kit (PR 3): the owner's view of a public page frames the
@@ -2317,8 +2523,9 @@ async function kitViewers({ G, DASH, tab }) {
   const inner = await browser.evalIn(viewer, `(() => { const r = document.getElementById('av-frame').getBoundingClientRect(); return { x: r.left, y: r.top }; })()`);
   const x = off.x + inner.x + 60;
   const y = off.y + inner.y + 30;
-  // the keyboard in the viewer first: the wrapper's own page can't pass a key down (decision 16)
+  // the keyboard in the viewer: the wrapper's frame has autofocus, and a click makes sure of it (decision 16)
   await browser.mouseAt(tab, off.x + 20, off.y + 12, 0, true);
+  await until(() => browser.evalIn(viewer, `document.getElementById('av-hint').hidden`), 'no "click the page" hint once the viewer has the keyboard');
   await browser.shift(tab, true);
   await until(() => browser.evalIn(viewer, `!document.getElementById('av-over').hidden`), 'the overlay, Shift held');
   await browser.mouseAt(tab, x, y, 8);
@@ -2341,7 +2548,7 @@ async function kitViewers({ G, DASH, tab }) {
 }
 ```
 
-At the end of `viaGateway` (line 306), after `await gatewayViewers({ G, HUB, SP, tab, app });`, add:
+At the end of `viaGateway`, after `await gatewayViewers({ G, HUB, SP, tab, app });`, add:
 
 ```js
   await kitViewers({ G, DASH, tab });
@@ -2439,6 +2646,20 @@ EOF
 | Cheap: ETag/304; a Loop tab's spot; a half-typed resolution | 1, 12, 12 |
 | PR 2's `71b918a`: the viewer accepts and ignores `w`, keeps it in its URL, never navigates without it, passes nothing to `/artifact/tree/` | 6 (accepted), 8 (kept, not passed on, nothing navigates), 14 (a reload inside the wrapper) |
 | The wrapper chosen from the hub's list: `viewer` and `root` there | 6 |
+| Review C1: `/artifact/tree/` serves only an artifact folder's tree; a commit and the root tree 404; `artifactAt` the same | 4, 6 |
+| Review C2: `#talk/` opens in a viewer tab | 8 |
+| Review I1: the four `noopener`-only links; the `window.open` regex | 11 |
+| Review I5: a `key` only while the frame has the keyboard; a forged one raises nothing | 9 |
+| Review I6: the wrapper's frame `autofocus` (gateway test); the viewer's "click the page" hint | 8, 14 |
+| Review I7, M7: spec §6 as built, §8's tree rule, §4 narrowed | 13 |
+| Review I10: function boundaries in the browser script | 14 |
+| Review M1: `supervisor.md` §1 | 3 |
+| Review M3: `/api/view` asked once per load, never polled | 6 |
+| Review M4: no tmux on a read, by a logging tmux | 1 |
+| Review M5: the unclosed-tag fallback | 5 (decision 3) |
+| Review M6: the hover's `TS.hit` before the click | 9 |
+| Review M8: stage pins held through a redraw | 10 |
+| Review M9: `thread show` says "changed since" for an artifact subject | 6 |
 
 PR 2's requirements 2, 4 and 9 (the preview frame's sandbox, `frame-src` naming `https://<name>.<box>`, the relay) and `supervisor.md` §7 are previews, in 3b.
 
@@ -2449,4 +2670,5 @@ PR 2's requirements 2, 4 and 9 (the preview frame's sandbox, `frame-src` naming 
 - `TS`, `tsSet`, `showArtifact`, `artSrc` and `artViewer` (Task 8) are used by Tasks 9-11.
 - Task 9 makes `tsFrame`, `tsOn`, `tsPost`, `tsMint`, `tsRaise`, `tsSubject`, `tsShowHit`, `tsPick`, `tlCursor`, `tlMark`, `tLensMessage`, `tArtPath`, `tFrameTitle` and `tFrameOn`. Tasks 10 and 12 use them, and 3b extends `tsFrame`, `tsSubject` and the message listener.
 - Task 10 makes `tsWatch`, `tsRect`, `tsPins`, `tlPinsInto` and `tArtFpNow`.
-- The kit: `ARTIFACT_AT`, `artifactAt`, `artifact describe` (Task 6), `ARTIFACT_LENS`, `withArtifactLens` (Task 5).
+- The kit: `artifactTrees`, `artifactTreeOk`, `artifactTreeOkSync` (Task 4), `ARTIFACT_LENS`, `withArtifactLens` (Task 5), `ARTIFACT_AT`, `artifactAt`, `artifactSubjectNow`, `artifact describe` (Task 6).
+- Task 8 also makes `viewerTalk` and `#av-hint`; Task 10 makes `tsHeld`.
