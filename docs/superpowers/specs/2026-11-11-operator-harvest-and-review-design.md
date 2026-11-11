@@ -128,3 +128,5 @@ Plus the tag sentence in **Share upstream** (§1 above), and one line in the ori
 ## Review record
 
 Fable reviewed this spec. Main findings and what changed: the draft-PR guardrail was self-restraint on a shared GitHub login (now the owner's yes is an Inbox question in the source repo, cited in the PR, and the merger checks it); `source` is free text (now `created_by` plus `detector`); `owner_note` had the same new-line hole as the tag (now refused in `integrity` too); noted-by-substring hid ids mentioned in passing (now line-start); "for a day" wasn't computable from findings with no age (now "two reviews running", or `last_at`); `sensor series` added; spec, plan and tree agree on the new test file.
+
+Fable then reviewed the plan (a `governance-edit` question would have left a reusable owner approval in the source repo, so the question carries no class; review headings may carry trailing text; only accepted entries count, filtered client-side) and the PR (the merger checks `answered_by` owner, not just the channel; the prompt-identity test now asserts the lesson is in the block; wording on scope, detectors and question-id matching).

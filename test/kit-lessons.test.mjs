@@ -60,6 +60,7 @@ test('a kit lesson is the supervisor\'s tag on its own knowledge, and grants not
     ok(old, ['knowledge', 'set', lesson, '--status', 'accepted'], SUP);
     ok(old, ['knowledge', 'set', plain, '--status', 'accepted'], SUP);
     const tagged = ok(old, ['knowledge', '--for', 'project']);
+    assert.match(tagged, /Run the sync step before the merge/, 'the tagged lesson is in the block, so the comparison means something');
     ok(old, ['knowledge', 'set', lesson, '--kit', 'off'], SUP);
     assert.equal(ok(old, ['knowledge', '--for', 'project']), tagged);
     assert.doesNotMatch(tagged, /kit/i);

@@ -7284,7 +7284,7 @@ function knowledgeFor(target) {
 // make another project's (operator.md, The daily review). Read from a folded object's creator and
 // updates, so it works on what any kit's knowledge --json returns.
 const knowledgeIsOwners = (k) => k?.created_by === 'owner' || (Array.isArray(k?.updates) && k.updates.some((u) => u?.by === 'owner' && ['statement', 'scope', 'owner_note'].some((f) => u[f] !== undefined)));
-const ownerNote = (id) =>readLog().lines.filter((l) => l.id === id && l.by === 'owner' && typeof l.owner_note === 'string').pop()?.owner_note ?? null;
+const ownerNote = (id) => readLog().lines.filter((l) => l.id === id && l.by === 'owner' && typeof l.owner_note === 'string').pop()?.owner_note ?? null;
 const knowledgeBlock = (target) => {
   const ks = knowledgeFor(target);
   return ks.length ? `What this project has learned that applies here (accepted knowledge):\n${ks.map((k) => { const n = ownerNote(k.id); return `- [${k.kind}${k.valence < 0 ? ', avoid' : ''}] ${k.statement}${n ? ` The owner adds: ${n}` : ''} (${k.id})`; }).join('\n')}` : '';
@@ -10397,7 +10397,7 @@ function machineKnowledge() {
     }
   }
 }
-const vParts = (v) =>v.replace(/^v/, '').split(/[.-]/).map((x) => (/^\d+$/.test(x) ? Number(x) : x));
+const vParts = (v) => v.replace(/^v/, '').split(/[.-]/).map((x) => (/^\d+$/.test(x) ? Number(x) : x));
 function versionBefore(a, b) {
   const [x, y] = [vParts(a), vParts(b)];
   for (let i = 0; i < Math.max(x.length, y.length); i++) {
