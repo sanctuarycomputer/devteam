@@ -1149,8 +1149,8 @@ function ownerWriter(hint) {
   if (process.env.DEVTEAM_ROLE) die(`owner commands don't run in an agent session (DEVTEAM_ROLE=${process.env.DEVTEAM_ROLE})`);
   const pane = process.env.TMUX_PANE;
   if (!pane || !process.env.TMUX) return { by: 'owner' };
-  const how = process.env.DEVTEAM_SUPERVISOR === pane ? 'DEVTEAM_SUPERVISOR in this environment names this pane as the supervisor\'s; if this is your own terminal, start it without that'
-    : markedPane(runDir) === pane ? `this pane was recorded as the supervisor's by a command it ran as the supervisor; it is the supervisor's if its agent runs here. If this is your own terminal, delete ${path.relative(mainRoot, supervisorPaneMark(runDir))}: the supervisor records its own pane again with its next command`
+  const how = process.env.DEVTEAM_SUPERVISOR === pane ? 'DEVTEAM_SUPERVISOR in this environment names this pane as the supervisor\'s. If this is your own terminal, open this terminal without DEVTEAM_SUPERVISOR set'
+    : markedPane(runDir) === pane ? `This pane was recorded as the supervisor's by a command it ran as the supervisor; it is the supervisor's if its agent runs here. If this is your own terminal, delete ${supervisorPaneMark(runDir)}: the supervisor records its own pane again with its next command`
     : null;
   if (how) die(`this is the supervisor's session${hint ? `: ${hint}` : ''}; the owner's commands run in their own terminal or on the dashboard. (${how}.)`);
   return { by: 'owner' };
@@ -1164,7 +1164,7 @@ const supervisorOnly = (what) => {
 // The supervisor is the owner's foreground agent session. When it runs inside tmux, its pane is
 // recorded so workers' messages and the owner's answers can be typed into it; otherwise they wait
 // in the log for its next tick.
-const supervisorPaneFile = () => path.join(runDir, 'supervisor-pane');
+const supervisorPaneFile = (run) => path.join(run, 'supervisor-pane');
 // supervisor-pane keeps the bare pane id, as older kits and the box's up-list read it, so its form
 // never changes. supervisor-pane-role, beside it, holds the same id and is written only with a record
 // made for the supervisor (rememberSupervisorPane, recover). A pane counts only when the two agree:
@@ -1174,12 +1174,12 @@ const supervisorPaneFile = () => path.join(runDir, 'supervisor-pane');
 // pane this kit uses until its kit is upgraded and it runs a command as the supervisor.
 const supervisorPaneMark = (run) => path.join(run, 'supervisor-pane-role');
 function markedPane(run) {
-  const p = readText(path.join(run, 'supervisor-pane'))?.trim();
+  const p = readText(supervisorPaneFile(run))?.trim();
   return p && readText(supervisorPaneMark(run))?.trim() === p ? p : null;
 }
 function recordSupervisorPane(run, pane) {
   fs.mkdirSync(run, { recursive: true });
-  fs.writeFileSync(path.join(run, 'supervisor-pane'), pane);
+  fs.writeFileSync(supervisorPaneFile(run), pane);
   fs.writeFileSync(supervisorPaneMark(run), pane);
 }
 // Only a command run as the supervisor (DEVTEAM_ROLE=supervisor, as recover and the README start it)
@@ -10111,6 +10111,15 @@ function supervisorRunningNow(rec) {
   if (supervisorPaneNow(rec)) return true;
   return rec?.kind === 'foreground' && !!rec.pid && !!rec.start && processStart(rec.pid) === rec.start;
 }
+// Just after an upgrade, a running supervisor's pane is still recorded bare, as its older kit wrote it,
+// until its next command with the role. Read as no pane, the tick would write it stopped, and a
+// restart in that window would leave it down. A bare pane started at the root whose agent runs as the
+// supervisor is its pane, whoever recorded it: marked here, it counts from this tick on.
+function markUpgradedPane() {
+  if (markedPane(runDir)) return;
+  const bare = readText(supervisorPaneFile(runDir))?.trim();
+  if (bare && paneStartedIn(bare, realPath(mainRoot)) && isSupervisorProcess(paneAgentProcess(bare))) recordSupervisorPane(runDir, bare);
+}
 // From the dashboard's minute tick. It doesn't touch a record once the machine or the tmux server has
 // changed under it, so a dashboard that comes up after a restart, before recover has run, can't erase
 // what recover needs. Nor does it say "stopped" when tmux doesn't answer: not knowing isn't a stop.
@@ -10122,6 +10131,7 @@ function noteSupervisorFromTick() {
     if (!machine) return;
     // only the pane the supervisor noted: an ad-hoc agent at the repo's root isn't it, though it's
     // reason enough not to start a second one (supervisorRunningNow)
+    markUpgradedPane();
     const pane = supervisorPaneNow(rec, { notedOnly: true });
     if (pane) {
       const agent = paneAgentProcess(pane);
@@ -10400,7 +10410,7 @@ function recoverMachine() {
 const LEGACY_RECOVER_MESSAGE = 'The box restarted, and this is you, resumed on your own conversation; what was in flight did not finish. Follow supervisor.md §11, after your own restart: §1 again. Every worker and planner window went with the restart; accounts-tick relaunches each one the kit launched, one per tick (§11), so give it those first. §1.4 sends to recovery only the tickets still without a window after it has caught up, or all of them on a kit too old to relaunch. Nothing about this restart came from the owner: record nothing as theirs from it.';
 function legacyRecover(root, name, { dry, force, session, window }) {
   const run = path.join(root, 'docs', 'devteam', 'run');
-  const paneFile = path.join(run, 'supervisor-pane');
+  const paneFile = supervisorPaneFile(run);
   const go = () => {
     // bare, as that kit writes it: only to see whether its supervisor is up, never to type into it
     const noted = readText(paneFile)?.trim() || null;

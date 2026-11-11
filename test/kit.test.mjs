@@ -217,7 +217,9 @@ test('threads: records, commands, delivery, the Inbox and the loop', async (t) =
       // every owner command, not only a thread's: the supervisor never writes as the owner from its pane
       assert.match(F.fails(['answer', 'q-20261110-100000000-supervisor', 'yes'], IN_PANE), /this is the supervisor's session; the owner's commands run in their own terminal or on the dashboard/);
       // and it says how to tell, and how to clear a wrong record
-      assert.match(F.fails(['thread', 'say', T, 'x'], IN_PANE), /it is the supervisor's if its agent runs here\. If this is your own terminal, delete docs\/devteam\/run\/supervisor-pane-role: the supervisor records its own pane again with its next command/);
+      const said = F.fails(['thread', 'say', T, 'x'], IN_PANE);
+      assert.ok([markFile, fs.realpathSync(markFile)].some((f) => said.includes(`(This pane was recorded as the supervisor's by a command it ran as the supervisor; it is the supervisor's if its agent runs here. If this is your own terminal, delete ${f}: the supervisor records its own pane again with its next command.)`)), said);
+      assert.match(F.fails(['thread', 'say', T, 'x'], { ...OWN, DEVTEAM_SUPERVISOR: '%7' }), /\(DEVTEAM_SUPERVISOR in this environment names this pane as the supervisor's\. If this is your own terminal, open this terminal without DEVTEAM_SUPERVISOR set\.\)/);
       assert.equal(show(T).turns.length, n, 'nothing written');
       assert.equal(show(T).status, 'open');
       // the owner's own terminal, in another pane, is the owner's
