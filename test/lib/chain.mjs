@@ -4601,11 +4601,11 @@ http.createServer((req, res) => {
       assert.equal((await pvGet(PS)), String(PS));
       assert.equal((await post('preview-stop', { name: 'start-mine' })).status, 200);
       // an app that dies at once: Start is refused, with why, though the command ends normally
-      pvMake('dies-at-once', { port: await freePort(), run: { cmd: 'exit 3', window: null } });
-      const died = await post('preview-start', { name: 'dies-at-once' });
+      pvMake('dying-app', { port: await freePort(), run: { cmd: 'exit 3', window: null } });
+      const died = await post('preview-start', { name: 'dying-app' });
       assert.equal(died.status, 400, 'a failed start never reads as saved');
       assert.match((await died.json()).error, /exited before port/);
-      fs.rmSync(path.join(PV_DIR(), 'dies-at-once.json'), { force: true });
+      fs.rmSync(path.join(PV_DIR(), 'dying-app.json'), { force: true });
       assert.ok(!pvWindows().some((w) => w.name === 'dev~start-mine'), 'Stop on a kit-started server closes its window');
     } finally { await d.stop(); for (const w of pvWindows().filter((x) => x.name.startsWith('dev~'))) spawnSync('tmux', ['kill-window', '-t', w.id]); pvClear(); }
     assert.ok(stale);
