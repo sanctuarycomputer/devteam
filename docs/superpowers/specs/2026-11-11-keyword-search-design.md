@@ -139,5 +139,5 @@ Questions get to the Inbox and to the owner's phone as soon as they are logged. 
 - **No false authority.** A supervisor `set` line carrying `answer` on a question never shows as the owner's answer. A rewritten question's old answer doesn't show. Neither does a non-owner line's `owner_note`.
 - **What it reads.** A section on a ticket branch is found, labelled with its branch. A dirty working tree's edit is not found.
 - **Quoting.** A snippet with control characters and a fake framing line comes out quoted on one line. No hash, sha or field outside the read list appears in either output.
-- **`ask` on a generated corpus the size of Stacks.** Each question's own context finds the question in its top 3. The two warnings print with their own wording when they should, and stay quiet when nothing is close.
+- **`ask` on a generated corpus the size of Stacks.** Each question's own context finds the question in its top 3, for all but 2% of them (the generated contexts share only three of five topic words, so a few collide by chance). The two warnings print with their own wording when they should, and stay quiet when nothing is close.
 - **Bounds.** In `test/bounds.test.mjs`'s pattern (best of three, relative to a baseline command on the same fixture), `search` finishes within the baseline plus 1,000 ms.

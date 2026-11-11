@@ -302,6 +302,21 @@ export function searchFns() {
   assert.ok(i >= 0 && j > i, 'the search block in devteam.mjs');
   return vm.runInContext(`${src.slice(i, j)}\n;({ searchTokens, searchIndex, searchRank, searchSimilar })`, vm.createContext({}));
 }
+// A project's writing, generated the same way every time (seeded): questions, each about a topic of
+// its own and with a context that shares some of its words, observations and lessons, from a few
+// thousand made-up words. Sized by the count of each.
+export function searchCorpus({ questions = 130, observations = 300, lessons = 30, words = 60 } = {}) {
+  let seed = 7;
+  const rnd = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+  const syl = ['ka', 'lo', 'mi', 'ne', 'ru', 'sa', 'to', 'vi', 'zo', 'pe', 'qu', 'da', 'fi', 'gu', 'ho', 'ja'];
+  const vocab = Array.from({ length: 3000 }, () => Array.from({ length: 2 + Math.floor(rnd() * 3) }, () => syl[Math.floor(rnd() * syl.length)]).join(''));
+  const pick = (n) => Array.from({ length: n }, () => vocab[Math.floor(rnd() * vocab.length)]);
+  const say = (n, topic = []) => [...topic, ...pick(n)].sort(() => rnd() - 0.5).join(' ');
+  const qs = Array.from({ length: questions }, (_, i) => { const topic = pick(5); return { id: `q-${i}`, question: `${say(8, topic)}?`, context: say(words, topic.slice(0, 3)) }; });
+  const obs = Array.from({ length: observations }, (_, i) => ({ id: `o-${i}`, subject: pick(1)[0], detail: say(words) }));
+  const ks = Array.from({ length: lessons }, (_, i) => ({ id: `k-${i}`, statement: say(15) }));
+  return { questions: qs, observations: obs, lessons: ks };
+}
 // A clean partition: nothing unowned, contested, empty or colliding (the script has no caller for it).
 export function coverageClean(r) {
   return !r.unowned.length && !r.contested.length && !r.empty.length && !r.case_collisions.length;

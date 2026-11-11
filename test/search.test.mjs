@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { searchFns, fleetFixture, write } from './lib/kit.mjs';
+import { searchFns, fleetFixture, write, searchCorpus } from './lib/kit.mjs';
 
 const S = searchFns();
 const doc = (id, title, body = '', date = '2026-11-01') => ({ id, date, fields: [{ text: title, w: 2 }, { text: body, w: 1 }] });
@@ -33,7 +33,7 @@ test('ranking: a title beats a mention, a phrase beats scattered words, words me
 test('similar: relative to the text itself, so it holds on any corpus', () => {
   const docs = [doc('q1', 'Always adopt new devteam releases without asking'), doc('q2', 'Which colour should the button be?'), ...Array.from({ length: 50 }, (_, i) => doc(`f${i}`, `filler ${i} about sensors and dashboards`))];
   const ix = S.searchIndex(docs);
-  const row = (id) => ix.rows.find((r) => r.doc.id === id);
+  const row = (id) => ix.docs.find((d) => d.id === id);
   const same = S.searchSimilar(ix, 'Always adopt new devteam releases without asking', row('q1'));
   assert.ok(same.ratio > 0.9 && same.coverage === 1, JSON.stringify(same));
   const near = S.searchSimilar(ix, 'Should we adopt devteam releases without asking each time?', row('q1'));
@@ -109,4 +109,14 @@ test("ask: rules and earlier answers that look like the question, as warnings th
     const other = run(old, ['ask', '--question', 'Adopt the new devteam releases without asking each time?', '--class', 'design'], SUP);
     assert.match(other.err, /an accepted rule may bear on this: k-\S+ .*It approves nothing here/, 'a rule for another class only bears on it');
   } finally { F.done(); }
+});
+
+test('on a corpus the size of a real project, a question is found by its own context: all but 2% in the top 3', () => {
+  const C = searchCorpus();
+  const docs = [...C.questions.map((q) => ({ id: q.id, fields: [{ text: q.question, w: 2 }, { text: q.context, w: 1 }] })), ...C.observations.map((o) => ({ id: o.id, fields: [{ text: o.subject, w: 2 }, { text: o.detail, w: 1 }] })), ...C.lessons.map((k) => ({ id: k.id, fields: [{ text: k.statement, w: 2 }] }))];
+  const ix = S.searchIndex(docs);
+  const missed = C.questions.filter((q) => !ids(S.searchRank(ix, q.context, { limit: 3 })).includes(q.id));
+  // a context shares three of its question's five topic words among sixty random ones, so a few
+  // collide with another question's topic by chance
+  assert.ok(missed.length <= C.questions.length * 0.02, `not in the top 3 for their own context: ${missed.map((q) => q.id).join(', ')}`);
 });
