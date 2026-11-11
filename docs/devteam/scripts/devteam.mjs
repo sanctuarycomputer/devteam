@@ -4903,6 +4903,10 @@ const SUBJECT_KEYS = { item: ['ref', 'quote'], page: ['view', 'at', 'quote'], ar
 const SUBJECT_NEEDS = { item: ['ref'], page: ['view'], artifact: ['slug', 'at'], preview: ['name'] };
 const SUBJECT_CAPS = { ref: 120, quote: 300, view: 200, slug: 63, fp: 64, path: 300, name: 63, route: 300 };
 const ANCHOR_CAPS = { selector: 200, tag: 40, role: 40, text: 80, name: 80, html: 1024 };
+// a preview's console errors, the last few and each cut; an artifact's at, as text
+const SUBJECT_ERRORS = 3;
+const SUBJECT_ERROR_MAX = 200;
+const SUBJECT_AT_MAX = 100;
 // A box's capability, as the gateway mints it (capFor in cloud/gateway.mjs): /c/<expiry>.<session>.<mac>,
 // the expiry in milliseconds, the session 16 base64url characters and the MAC 22. It is a live bearer
 // token for the owner's session, and an artifact framed on a box has it in its own address. The lens
@@ -4911,14 +4915,22 @@ const ANCHOR_CAPS = { selector: 200, tag: 40, role: 40, text: 80, name: 80, html
 // \u-escaped, or as HTML entities. Only the whole form is cut, so no ordinary text is touched. A
 // marker in its place, not a refusal: the owner's words still save, and a page can't stop its own
 // thread by holding one. A page can still spell it some other way; this is the backstop, not the wall.
-const CAP_SLASH = String.raw`(?:\\*\/|%(?:25)*2f|\\*u002f|&#(?:x0*2f|0*47);)`;
-const CAP_DOT = String.raw`(?:\.|%(?:25)*2e|\\*u002e|&#(?:x0*2e|0*46);)`;
+// Each repeat is bounded, so a page's run of backslashes or 25s costs a line, never its square. A
+// token cut short at a string's end (a cap fell inside it) is cut too: /c/<expiry>. and what follows.
+// index.html's T_CAP_SLASH, T_CAP_DOT and T_BOX_CAPABILITY(_TAIL) are the same (a test holds them).
+const CAP_SLASH = String.raw`(?:\\{0,8}\/|%(?:25){0,4}2f|\\{0,8}u002f|&#(?:x0{0,4}2f|0{0,4}47);)`;
+const CAP_DOT = String.raw`(?:\.|%(?:25){0,4}2e|\\{0,8}u002e|&#(?:x0{0,4}2e|0{0,4}46);)`;
 const BOX_CAPABILITY = new RegExp(`${CAP_SLASH}c${CAP_SLASH}\\d{1,15}${CAP_DOT}[\\w-]{16}${CAP_DOT}[\\w-]{22}`, 'gi');
-const uncapped = (v) => (typeof v === 'string' ? v.replace(BOX_CAPABILITY, '[link removed]') : Array.isArray(v) ? v.map(uncapped) : isObj(v) ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, uncapped(x)])) : v);
+const BOX_CAPABILITY_TAIL = new RegExp(`${CAP_SLASH}c${CAP_SLASH}\\d{1,15}${CAP_DOT}(?:[\\w-]{0,15}|[\\w-]{16}(?:${CAP_DOT}[\\w-]{0,21})?)…?$`, 'i');
+// A subject's strings are at most two deep (subject.anchor.text, subject.errors[0]); nothing deeper
+// is walked, so a body of thousands of nested objects is refused by its shape, not the stack.
+const SUBJECT_DEPTH = 3;
+const uncapped = (v, depth = 0) => (typeof v === 'string' ? v.replace(BOX_CAPABILITY, '[link removed]').replace(BOX_CAPABILITY_TAIL, '[link removed]') : depth >= SUBJECT_DEPTH ? v : Array.isArray(v) ? v.map((x) => uncapped(x, depth + 1)) : isObj(v) ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, uncapped(x, depth + 1)])) : v);
 // Why a subject can't be recorded (null when it can): the size first, so a refusal says how big.
 function subjectProblem(s) {
   if (!isObj(s)) return 'a subject is a JSON object with a kind';
-  const keys = SUBJECT_KEYS[s.kind];
+  // own keys only: a kind of constructor or __proto__ is no kind
+  const keys = typeof s.kind === 'string' && Object.hasOwn(SUBJECT_KEYS, s.kind) ? SUBJECT_KEYS[s.kind] : null;
   if (!keys) return `a subject's kind is one of ${Object.keys(SUBJECT_KEYS).join(', ')}`;
   const bytes = Buffer.byteLength(JSON.stringify(s));
   if (bytes > SUBJECT_MAX) return `the subject is ${bytes} bytes encoded; at most ${SUBJECT_MAX}`;
@@ -4931,10 +4943,10 @@ function subjectProblem(s) {
   for (const [k, v] of Object.entries(s)) {
     if (k === 'kind') continue;
     let p;
-    if (k === 'at') p = s.kind === 'page' ? box('at', v, ['x', 'y'], true) : text('at', v, 100) ?? (ARTIFACT_AT.test(v) ? null : 'at is main, a worktree name, or tree:<id>');
+    if (k === 'at') p = s.kind === 'page' ? box('at', v, ['x', 'y'], true) : text('at', v, SUBJECT_AT_MAX) ?? (ARTIFACT_AT.test(v) ? null : 'at is main, a worktree name, or tree:<id>');
     else if (k === 'point') p = box('point', v, ['x', 'y']);
     else if (k === 'viewport') p = box('viewport', v, ['w', 'h']);
-    else if (k === 'errors') p = !Array.isArray(v) || v.length > 3 ? 'errors is a list of at most 3' : v.map((e, i) => text(`errors[${i}]`, e, 200)).find(Boolean) ?? null;
+    else if (k === 'errors') p = !Array.isArray(v) || v.length > SUBJECT_ERRORS ? `errors is a list of at most ${SUBJECT_ERRORS}` : v.map((e, i) => text(`errors[${i}]`, e, SUBJECT_ERROR_MAX)).find(Boolean) ?? null;
     else if (k === 'anchor') p = anchorProblem(v);
     else p = text(k, v, SUBJECT_CAPS[k]);
     if (!p && k === 'ref' && !SUBJECT_REF.test(v)) p = `ref is <type>:<id>, the type one of ${SUBJECT_TYPES.join(', ')}`;
@@ -4953,7 +4965,7 @@ function anchorProblem(a) {
       if (!(isObj(v) && Object.keys(v).length === names.length && names.every((n) => Number.isFinite(v[n])))) return `anchor.${k} is {${names.join(', ')}}`;
       continue;
     }
-    if (!ANCHOR_CAPS[k]) return `anchor has no ${k}`;
+    if (!Object.hasOwn(ANCHOR_CAPS, k)) return `anchor has no ${k}`;
     if (typeof v !== 'string') return `anchor.${k} is text`;
     if (Buffer.byteLength(v) > ANCHOR_CAPS[k]) return `anchor.${k} is ${Buffer.byteLength(v)} bytes; at most ${ANCHOR_CAPS[k]}`;
   }
@@ -5304,8 +5316,8 @@ const ARTIFACT_LENS = String.raw`(() => {
   // (percent-encoded, JSON- or \u-escaped, as entities), with the /c/ before it when there is one.
   const TOKEN = /\/c\/[^\/\s"'<>]+(?=\/artifact\/)/g;
   const OWN = (/^\/c\/([^/]+)\/artifact\//.exec(location.pathname) || [])[1];
-  const SLASH = '(?:\\\\*\\/|%(?:25)*2f|\\\\*u002f|&#(?:x0*2f|0*47);)';
-  const DOT = '(?:\\.|%(?:25)*2e|\\\\*u002e|&#(?:x0*2e|0*46);)';
+  const SLASH = '(?:\\\\{0,8}\\/|%(?:25){0,4}2f|\\\\{0,8}u002f|&#(?:x0{0,4}2f|0{0,4}47);)';
+  const DOT = '(?:\\.|%(?:25){0,4}2e|\\\\{0,8}u002e|&#(?:x0{0,4}2e|0{0,4}46);)';
   const OWN_RE = OWN ? new RegExp('(?:' + SLASH + 'c' + SLASH + ')?' + OWN.split('.').map((p) => p.replace(/[^\w-]/g, (c) => '\\' + c)).join(DOT), 'gi') : null;
   const unCap = (s) => { const t = String(s == null ? '' : s).replace(TOKEN, ''); return OWN_RE ? t.replace(OWN_RE, '') : t; };
 
@@ -11566,7 +11578,10 @@ async function cmdDashboard() {
     req.on('end', async () => {
       let parsed;
       try { parsed = JSON.parse(body || '{}'); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'bad json' })); }
-      const args = action(parsed);
+      // a body no check foresaw (one nested thousands deep) is a bad request, never a crash: a throw
+      // here is an unhandled rejection, and that ends the dashboard
+      let args;
+      try { args = action(parsed); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' })); }
       if (!args) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
       const r = await run(args, { timeout: ACTION_MS[name] ?? 0 });
       send(res, r.ok ? 200 : 400, 'application/json', JSON.stringify(r.ok ? { ok: true, out: r.stdout.trim() } : { error: r.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') }));

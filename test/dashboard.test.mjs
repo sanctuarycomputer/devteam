@@ -606,6 +606,11 @@ test("threads on the dashboard's server: owner actions checked before anything r
     ['thread-new', { title: 't', text: 'x', subject: { kind: 'artifact', slug: 'pricing-mock', at: `tree:${'a'.repeat(41)}` } }, 'an at that is no tree id'],
     ['thread-new', { title: 't', text: 'x', subject: { kind: 'artifact', slug: 'pricing-mock', at: '../main' } }, 'an at that is no worktree name'],
     ['thread-new', { title: 't', text: 'x', subject: { kind: 'lens' } }, 'an unknown kind'],
+    ...['constructor', '__proto__', 'toString', 'hasOwnProperty'].map((kind) => ['thread-new', { title: 't', text: 'x', subject: { kind } }, `a kind of ${kind}: no name every object has`]),
+    ['thread-new', { title: 't', text: 'x', subject: { kind: ['item'], ref: `goal:${F.goal}` } }, 'a kind that is no text'],
+    ['thread-new', { title: 't', text: 'x', subject: { kind: 'artifact', slug: 'pricing-mock', at: 'main', anchor: { constructor: 'x' } } }, 'an anchor key every object has'],
+    ['thread-new', { title: 't', text: 'x', subject: JSON.parse(`${'{"a":'.repeat(2900)}{}${'}'.repeat(2900)}`) }, 'a subject nested 2,900 deep'],
+    ['thread-new', { title: 't', text: 'x', subject: { kind: 'preview', name: 'cool-tiger', errors: JSON.parse(`${'['.repeat(2900)}${']'.repeat(2900)}`) } }, 'errors nested 2,900 deep'],
     ['thread-new', { title: 't', text: 'x', subject: { ...subject, view: '#goals' } }, "another kind's key"],
     ['thread-new', { title: 't', text: 'x', subject: { kind: 'item', ref: `goal:${F.goal}`, quote: 'q'.repeat(2600) } }, 'a subject over 2,500 bytes'],
     ['thread-new', { title: 't', text: 'x', subject: { kind: 'item', ref: 'secret:x' } }, 'a ref of no known type'],
@@ -622,7 +627,10 @@ test("threads on the dashboard's server: owner actions checked before anything r
   const n = (await list()).length;
   const turnsOf = async () => (await list()).find((x) => x.id === T).turns;
   const before = (await turnsOf()).length;
-  for (const [name, body, why] of bad) assert.equal((await post(name, body)).status, 400, why);
+  for (const [name, body, why] of bad) {
+    assert.equal((await post(name, body)).status, 400, why);
+    assert.equal((await get()).status, 200, `the dashboard still answers after ${why}`);
+  }
   assert.equal((await list()).length, n, 'nothing was written');
   assert.equal((await turnsOf()).length, before, 'no stray turn was written to the thread');
   // an artifact and a preview, as a viewer's lens captures them, and a published tree in a SHA-256 repository
@@ -1058,18 +1066,20 @@ test("the thread layer's rules: what the pointer is on, a subject that fits, whe
   const src = html.slice(html.indexOf('/* threads-core start */'), html.indexOf('/* threads-core end */'));
   assert.ok(src.length > 500, 'the threads-core block is marked in index.html');
   const ctx = vm.createContext({ TextEncoder });
-  vm.runInContext(`${src}\n;globalThis.api = { T_CAPS, T_ANCHOR_CAPS, T_SUBJECT_KEYS, tBox, tAnchor, T_TYPES, T_REF, T_REF_MAX, T_KIND, T_HOME, T_WAIT_MS, T_TURN_MAX, T_ENCODED_MAX, T_SUBJECT_MAX, T_TITLE_MAX, tBytes, tCut, tLine, tSubjectAt, tFit, tCardState, tPlace, tWhere, tPins, tUnread };`, ctx);
+  vm.runInContext(`${src}\n;globalThis.api = { T_CAPS, T_ANCHOR_CAPS, T_SUBJECT_KEYS, T_ERRORS, T_ERROR_MAX, T_AT_MAX, T_BOX_CAPABILITY, T_BOX_CAPABILITY_TAIL, tUncap, tBox, tAnchor, T_TYPES, T_REF, T_REF_MAX, T_KIND, T_HOME, T_WAIT_MS, T_TURN_MAX, T_ENCODED_MAX, T_SUBJECT_MAX, T_TITLE_MAX, tBytes, tCut, tLine, tSubjectAt, tFit, tCardState, tPlace, tWhere, tPins, tUnread };`, ctx);
   const A = ctx.api;
   const plain = (x) => JSON.parse(JSON.stringify(x));
   // the page and the kit name the same things, and the page sends no ref the log refuses
   const kitSrc = fs.readFileSync(path.join(kit, 'scripts/devteam.mjs'), 'utf8');
   const kitLine = (name) => new RegExp(`^const ${name} = .*$`, 'm').exec(kitSrc)[0];
-  const kitNames = ['SUBJECT_TYPES', 'SUBJECT_REF', 'SUBJECT_CAPS', 'ANCHOR_CAPS', 'SUBJECT_KEYS', 'THREAD_WAIT_MS', 'TURN_MAX', 'TURN_ENCODED_MAX', 'SUBJECT_MAX', 'THREAD_TITLE_MAX'];
+  const kitNames = ['SUBJECT_TYPES', 'SUBJECT_REF', 'SUBJECT_CAPS', 'ANCHOR_CAPS', 'SUBJECT_KEYS', 'SUBJECT_ERRORS', 'SUBJECT_ERROR_MAX', 'SUBJECT_AT_MAX', 'CAP_SLASH', 'CAP_DOT', 'BOX_CAPABILITY', 'BOX_CAPABILITY_TAIL', 'THREAD_WAIT_MS', 'TURN_MAX', 'TURN_ENCODED_MAX', 'SUBJECT_MAX', 'THREAD_TITLE_MAX'];
   const kitLog = vm.runInContext(`${kitNames.map(kitLine).join('\n')}\n;({ ${kitNames.join(', ')} })`, vm.createContext({}));
   assert.deepEqual(plain(A.T_TYPES), plain(kitLog.SUBJECT_TYPES));
   assert.equal(A.T_REF.source, kitLog.SUBJECT_REF.source);
   assert.deepEqual([A.T_REF_MAX, A.T_WAIT_MS, A.T_TURN_MAX, A.T_ENCODED_MAX, A.T_SUBJECT_MAX, A.T_TITLE_MAX], [kitLog.SUBJECT_CAPS.ref, kitLog.THREAD_WAIT_MS, kitLog.TURN_MAX, kitLog.TURN_ENCODED_MAX, kitLog.SUBJECT_MAX, kitLog.THREAD_TITLE_MAX], "the page's caps are the kit's");
   assert.deepEqual([plain(A.T_CAPS), plain(A.T_ANCHOR_CAPS), plain(A.T_SUBJECT_KEYS)], [plain(kitLog.SUBJECT_CAPS), plain(kitLog.ANCHOR_CAPS), plain(kitLog.SUBJECT_KEYS)], "a capture's caps and keys are the kit's");
+  assert.deepEqual([A.T_ERRORS, A.T_ERROR_MAX, A.T_AT_MAX], [kitLog.SUBJECT_ERRORS, kitLog.SUBJECT_ERROR_MAX, kitLog.SUBJECT_AT_MAX]);
+  assert.deepEqual([A.T_BOX_CAPABILITY.source, A.T_BOX_CAPABILITY.flags, A.T_BOX_CAPABILITY_TAIL.source, A.T_BOX_CAPABILITY_TAIL.flags], [kitLog.BOX_CAPABILITY.source, kitLog.BOX_CAPABILITY.flags, kitLog.BOX_CAPABILITY_TAIL.source, kitLog.BOX_CAPABILITY_TAIL.flags], "the page cuts a capability as the kit does");
   assert.deepEqual(Object.keys(A.T_KIND).sort(), [...plain(A.T_TYPES)].sort(), 'every kind of item has a name the owner reads');
   assert.deepEqual(Object.keys(A.T_HOME).sort(), [...plain(A.T_TYPES)].sort(), 'every kind of item has a home section');
   // sizes in bytes; one line; never half a surrogate pair
@@ -1113,7 +1123,22 @@ test("the thread layer's rules: what the pointer is on, a subject that fits, whe
   assert.deepEqual(plain(A.tFit(hit.subject)), plain(hit.subject), 'a small subject is left alone');
   // every field to its own cap, whatever the total: what a lens says is the framed page's, never trusted
   const cut = A.tFit({ kind: 'artifact', slug: 's'.repeat(80), at: 'main', fp: 'f'.repeat(70), path: 'p'.repeat(400), route: '/not-an-artifact-key', anchor: { selector: 'x'.repeat(300), tag: 't'.repeat(50), role: 'r'.repeat(50), text: 'é'.repeat(100), name: 'n'.repeat(90), html: 'h'.repeat(10), onclick: 'alert(1)', rect: { x: 1.4, y: 2, w: 3, h: NaN }, point: { x: 7.6, y: 8 } } });
-  assert.deepEqual([cut.slug.length, cut.fp.length, cut.path.length, A.tBytes(cut.anchor.selector), A.tBytes(cut.anchor.tag), A.tBytes(cut.anchor.role), A.tBytes(cut.anchor.text), A.tBytes(cut.anchor.name)], [63, 64, 300, 200, 40, 40, 80, 80]);
+  assert.deepEqual([cut.path.length, A.tBytes(cut.anchor.selector), A.tBytes(cut.anchor.tag), A.tBytes(cut.anchor.role), A.tBytes(cut.anchor.text), A.tBytes(cut.anchor.name)], [300, 200, 40, 40, 80, 80]);
+  assert.deepEqual([cut.slug, cut.fp], [undefined, undefined], 'a name over its cap dropped, never cut into another: the kit refuses the subject');
+  const whole = { kind: 'artifact', slug: 's'.repeat(63), at: `tree:${'b'.repeat(64)}`, fp: 'f'.repeat(64) };
+  assert.deepEqual(plain(A.tFit(whole)), whole, 'names at their caps kept whole');
+  assert.equal(A.tFit({ ...whole, at: 'w'.repeat(101) }).at, undefined, 'an at over its cap dropped');
+  // escape-heavy fields (each control character six bytes encoded) and no HTML: the path, then the anchor's words give
+  const C = '\u0001';
+  const heavy = A.tFit({ kind: 'artifact', slug: 'pricing-mock', at: 'main', fp: 'a'.repeat(64), path: C.repeat(300), anchor: { selector: C.repeat(200), tag: C.repeat(40), role: C.repeat(40), text: C.repeat(80), name: C.repeat(80), rect: { x: 1, y: 2, w: 3, h: 4 } }, point: { x: 1, y: 2 } });
+  assert.ok(A.tBytes(JSON.stringify(heavy)) <= 2500, `${A.tBytes(JSON.stringify(heavy))} bytes`);
+  assert.deepEqual([heavy.slug, heavy.at, heavy.fp, plain(heavy.anchor.rect)], ['pricing-mock', 'main', 'a'.repeat(64), { x: 1, y: 2, w: 3, h: 4 }], 'what names the place is kept');
+  // a capability is cut before a cap is, so no cap leaves half of one
+  const token = '/c/1762900000000.AbCdEfGh_jKl-nOp.abcdefghijklmnopqrstuv';
+  const tok = A.tFit({ kind: 'artifact', slug: 'pricing-mock', at: 'main', path: `x${encodeURIComponent(token)}`, anchor: { text: `${'x'.repeat(60)}${token}`, html: `<a href="${token}">` } });
+  assert.deepEqual([tok.path, tok.anchor.text, tok.anchor.html], ['x[link removed]', `${'x'.repeat(60)}[link removed]`, '<a href="[link removed]">']);
+  assert.equal(A.tUncap('Share /c/1762900000000.AbCdEf\u2026'), 'Share [link removed]', 'one a cap cut short too');
+  assert.equal(A.tUncap('A/C units, /c/123.abc.def and 3/c/4'), 'A/C units, /c/123.abc.def and 3/c/4');
   assert.equal(cut.route, undefined, 'only its kind\'s keys');
   assert.equal(cut.anchor.onclick, undefined, 'only the kit\'s anchor keys');
   assert.equal(cut.anchor.rect, undefined, 'a rect with a number that isn\'t one is no rect');

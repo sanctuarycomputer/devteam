@@ -268,7 +268,8 @@ test('threads: records, commands, delivery, the Inbox and the loop', async (t) =
     const esc = lit.replaceAll('/', '\\/');
     const uni = lit.replaceAll('/', '\\u002f');
     const ent = lit.replaceAll('/', '&#x2F;');
-    const forms = [lit, pct, pctDots, twice, esc, uni, ent];
+    const dec = lit.replaceAll('/', '&#47;').replaceAll('.', '&#46;');
+    const forms = [lit, pct, pctDots, twice, esc, uni, ent, dec];
     const forged = (f) => ({
       kind: 'artifact', slug: 'pricing-mock', at: 'main', path: `share${f}.html`,
       anchor: { selector: `a[href="${f}"]`, tag: 'a', role: 'link', text: `Share http://box.example${f}/artifact/main/x/`, name: `{"u":"${f}"}`, html: `<a href="http://box.example${f}/artifact/">${f}</a>` },
@@ -286,6 +287,12 @@ test('threads: records, commands, delivery, the Inbox and the loop', async (t) =
     const [V] = F.owner(['thread', 'new', 'x', '--subject', JSON.stringify({ kind: 'preview', name: 'cool-tiger', route: `/x?back=${pct}`, errors: [`fetch ${esc} failed`] })]).split('\n');
     assert.deepEqual([show(V).subject.route, show(V).subject.errors], ['/x?back=[link removed]', ['fetch [link removed] failed']]);
     F.owner(['thread', 'resolve', V]);
+    // one a cap cut short at the end of a string, the page's ellipsis after it
+    const [S] = F.owner(['thread', 'new', 'x', '--title', `Share http://box.example${lit.slice(0, 26)}`, '--subject', JSON.stringify({ kind: 'artifact', slug: 'pricing-mock', at: 'main', anchor: { text: `Share ${pct.slice(0, 30)}\u2026` } })]).split('\n');
+    assert.deepEqual([show(S).title, show(S).subject.anchor.text], ['Share http://box.example[link removed]', 'Share [link removed]']);
+    F.owner(['thread', 'resolve', S]);
+    // a run of backslashes or 25s costs a line, not its square: this returns (the title is refused for its length)
+    assert.match(F.fails(['thread', 'new', 'x', '--title', `${'\\'.repeat(19000)}${'%25'.repeat(3000)}`]), /--title is at most 120 characters/);
     // ordinary text is never taken for one: nothing short of the gateway's whole form
     const plainText = 'A/C units, see /c/docs, /c/123.abc.def, 3/c/4 and /c/1762900000000.AbCdEfGh.abcdefghijklmnopqrstuv';
     const [P] = F.owner(['thread', 'new', 'x', '--title', plainText.slice(0, 100), '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}`, quote: plainText })]).split('\n');

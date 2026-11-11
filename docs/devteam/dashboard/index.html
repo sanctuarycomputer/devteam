@@ -3516,6 +3516,18 @@ const T_CAPS = { ref: 120, quote: 300, view: 200, slug: 63, fp: 64, path: 300, n
 const T_ANCHOR_CAPS = { selector: 200, tag: 40, role: 40, text: 80, name: 80, html: 1024 };
 const T_SUBJECT_KEYS = { item: ['ref', 'quote'], page: ['view', 'at', 'quote'], artifact: ['slug', 'at', 'fp', 'path', 'anchor', 'point'], preview: ['name', 'route', 'viewport', 'anchor', 'point', 'errors'] };
 const T_ERRORS = 3, T_ERROR_MAX = 200, T_AT_MAX = 100;
+// A box's capability (the kit's BOX_CAPABILITY and its _TAIL, held equal by a test), cut from every
+// string before a cap is, so a cap never leaves half of one that the kit could no longer tell.
+const T_CAP_SLASH = String.raw`(?:\\{0,8}\/|%(?:25){0,4}2f|\\{0,8}u002f|&#(?:x0{0,4}2f|0{0,4}47);)`;
+const T_CAP_DOT = String.raw`(?:\.|%(?:25){0,4}2e|\\{0,8}u002e|&#(?:x0{0,4}2e|0{0,4}46);)`;
+const T_BOX_CAPABILITY = new RegExp(`${T_CAP_SLASH}c${T_CAP_SLASH}\\d{1,15}${T_CAP_DOT}[\\w-]{16}${T_CAP_DOT}[\\w-]{22}`, 'gi');
+const T_BOX_CAPABILITY_TAIL = new RegExp(`${T_CAP_SLASH}c${T_CAP_SLASH}\\d{1,15}${T_CAP_DOT}(?:[\\w-]{0,15}|[\\w-]{16}(?:${T_CAP_DOT}[\\w-]{0,21})?)…?$`, 'i');
+const tUncap = (v) => String(v).replace(T_BOX_CAPABILITY, '[link removed]').replace(T_BOX_CAPABILITY_TAIL, '[link removed]');
+// Names the log matches whole (a ref, a section, a slug, a version, a fingerprint, a preview): one
+// over its cap is dropped, not cut, so the kit refuses the subject rather than point somewhere else.
+const T_WHOLE = ['ref', 'view', 'slug', 'at', 'fp', 'name'];
+// What gives, in order, while a subject is over the log's 2,500 bytes encoded.
+const T_SHRINK = [['anchor', 'html'], ['errors'], ['quote'], ['route'], ['path'], ['anchor', 'selector'], ['anchor', 'text'], ['anchor', 'name'], ['anchor', 'role'], ['anchor', 'tag']];
 // A box of numbers (a rect, a point, a viewport), only when every one is a finite number, in whole
 // pixels unless it is a page's fractions; else null.
 const tBox = (v, keys, round = true) => (v && typeof v === 'object' && keys.every((k) => typeof v[k] === 'number' && Number.isFinite(v[k])) ? Object.fromEntries(keys.map((k) => [k, round ? Math.round(v[k]) : v[k]])) : null);
@@ -3524,16 +3536,17 @@ const tBox = (v, keys, round = true) => (v && typeof v === 'object' && keys.ever
 function tAnchor(a) {
   if (!a || typeof a !== 'object' || Array.isArray(a)) return null;
   const x = {};
-  for (const k of Object.keys(T_ANCHOR_CAPS)) if (typeof a[k] === 'string') x[k] = tCut(a[k], T_ANCHOR_CAPS[k]);
+  for (const k of Object.keys(T_ANCHOR_CAPS)) if (typeof a[k] === 'string') x[k] = tCut(tUncap(a[k]), T_ANCHOR_CAPS[k]);
   const rect = tBox(a.rect, ['x', 'y', 'w', 'h']);
   if (rect) x.rect = rect;
   const point = tBox(a.point, ['x', 'y']);
   if (point) x.point = point;
   return Object.keys(x).length ? x : null;
 }
-// A subject as the log takes it, before it is sent: only its kind's keys, each field cut to its own
-// cap (a lens's capture is the framed page's, so nothing in it is trusted to be small), then the whole
-// to the log's 2,500 bytes: an element's HTML first, then console errors, then the quote, the route.
+// A subject as the log takes it, before it is sent: only its kind's keys, each field cut of any
+// capability and to its own cap (a lens's capture is the framed page's, so nothing in it is trusted
+// to be small), then the whole to the log's 2,500 bytes, T_SHRINK's fields giving in turn: an
+// element's HTML first, then console errors, the quote, the route, the path, the anchor's words.
 function tFit(s) {
   const keys = s && Object.hasOwn(T_SUBJECT_KEYS, s.kind) ? T_SUBJECT_KEYS[s.kind] : null;
   if (!keys) return null;
@@ -3545,18 +3558,22 @@ function tFit(s) {
     else if (k === 'point') { const p = tBox(v, ['x', 'y']); if (p) x.point = p; }
     else if (k === 'viewport') { const p = tBox(v, ['w', 'h']); if (p) x.viewport = p; }
     else if (k === 'at' && s.kind === 'page') { const p = tBox(v, ['x', 'y'], false); if (p) x.at = p; }
-    else if (k === 'errors') { if (Array.isArray(v)) x.errors = v.filter((e) => typeof e === 'string').slice(-T_ERRORS).map((e) => tCut(e, T_ERROR_MAX)); }
-    else if (typeof v === 'string') x[k] = tCut(v, k === 'at' ? T_AT_MAX : T_CAPS[k]);
+    else if (k === 'errors') { if (Array.isArray(v)) x.errors = v.filter((e) => typeof e === 'string').slice(-T_ERRORS).map((e) => tCut(tUncap(e), T_ERROR_MAX)); }
+    else if (typeof v !== 'string') continue;
+    else if (T_WHOLE.includes(k)) { if (tBytes(v) <= (k === 'at' ? T_AT_MAX : T_CAPS[k])) x[k] = v; }
+    else x[k] = tCut(tUncap(v), T_CAPS[k]);
   }
   const size = () => tBytes(JSON.stringify(x));
-  for (let i = 0; i < 50 && size() > T_SUBJECT_MAX; i++) {
+  for (let i = 0; i < 100 && size() > T_SUBJECT_MAX; i++) {
     const over = size() - T_SUBJECT_MAX;
-    if (x.anchor?.html) x.anchor.html = tCut(x.anchor.html, Math.max(0, tBytes(x.anchor.html) - over));
-    else if (x.errors?.length) x.errors.pop();
-    else if (x.quote) x.quote = tCut(x.quote, Math.max(0, tBytes(x.quote) - over));
-    else if (x.route) x.route = tCut(x.route, Math.max(0, tBytes(x.route) - over));
-    else break;
+    const f = T_SHRINK.find(([a, b]) => (b ? x[a]?.[b] : x[a]?.length));
+    if (!f) break;
+    if (f[0] === 'errors') { x.errors.pop(); continue; }
+    const [o, k] = f[1] ? [x[f[0]], f[1]] : [x, f[0]];
+    o[k] = tCut(o[k], Math.max(0, tBytes(o[k]) - over));
+    if (!o[k]) delete o[k];
   }
+  if (x.anchor && !Object.keys(x.anchor).length) delete x.anchor;
   return x;
 }
 // The line under the turns: nothing once the supervisor has the last word (its reply is the state).
