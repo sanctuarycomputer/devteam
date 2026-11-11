@@ -7,7 +7,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { gitReadFns, gitFactFns } from './lib/kit.mjs';
+import { gitReadFns, gitFactFns, bareProject, startDashboard, freePort, until, write } from './lib/kit.mjs';
 
 const tmpRepo = (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-speed-'));
@@ -140,4 +140,33 @@ test('git facts: a shallow clone deepened gets new ancestry answers', (t) => {
   execFileSync('git', ['fetch', '-q', '--unshallow'], { cwd: clone });
   f = gitFactFns(clone, run);
   assert.equal(f.ancestorOf(first, 'HEAD'), true, 'deepened: asked again');
+});
+
+test('an answer from the dashboard: the reply comes before the supervisor is typed to', { timeout: 120000 }, async (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-reply-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const root = bareProject(base, 'reply');
+  // a stand-in tmux: the supervisor's pane runs an agent, and typing into it waits for a release file
+  const fake = path.join(base, 'fake-tmux');
+  const calls = path.join(base, 'tmux-calls.log');
+  const release = path.join(base, 'release');
+  write(path.join(fake, 'tmux'), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${calls}"\ncase "$1" in\n  send-keys) while [ ! -f "${release}" ]; do sleep 0.1; done ;;\n  display-message) echo "0 claude" ;;\nesac\nexit 0\n`);
+  fs.chmodSync(path.join(fake, 'tmux'), 0o755);
+  write(path.join(root, 'docs/devteam/run/supervisor-pane'), '%1');
+  const env = { ...process.env, PATH: `${fake}${path.delimiter}${process.env.PATH}`, CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
+  for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_SUPERVISOR', 'TMUX', 'TMUX_PANE']) delete env[k];
+  const dt = (args, role = {}) => execFileSync(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), ...args], { cwd: root, env: { ...env, ...role }, encoding: 'utf8' }).trim();
+  const qid = dt(['ask', '--question', 'Left or right?'], { DEVTEAM_ROLE: 'supervisor' });
+  const port = await freePort();
+  const dash = startDashboard(root, env, ['--port', String(port)]);
+  t.after(() => { fs.mkdirSync(base, { recursive: true }); fs.writeFileSync(release, ''); return dash.stop(); });
+  await until(() => /dashboard on http/.test(dash.out()), 'the dashboard');
+  const r = await fetch(`http://127.0.0.1:${port}/api/answer`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: qid, answer: 'Left' }), signal: AbortSignal.timeout(60000) });
+  const body = await r.json();
+  assert.equal(r.status, 200, JSON.stringify(body));
+  assert.match(body.out, new RegExp(`answered ${qid}`));
+  assert.equal(fs.existsSync(release), false, 'replied while typing into the pane was still held');
+  assert.match(dt(['questions', '--id', qid]), /answered/, 'the answer is in the log');
+  fs.writeFileSync(release, '');
+  await until(() => fs.existsSync(calls) && fs.readFileSync(calls, 'utf8').includes(`[devteam answer ${qid} from owner]`), 'the supervisor told, after the reply');
 });

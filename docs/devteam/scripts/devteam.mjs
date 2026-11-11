@@ -97,10 +97,24 @@ const flagNum = (k) => (flagStr(k) === undefined ? undefined : Number(flagStr(k)
 
 function die(msg, code = 1) {
   process.stderr.write(`devteam: ${msg}\n`);
+  // a line already logged is still announced: a partly posted set of secrets dies after its nudge
+  deliverNudges();
   process.exit(code);
 }
 const warn = (msg) => process.stderr.write(`devteam: warning: ${msg}\n`);
 const out = (s) => process.stdout.write(`${s}\n`);
+// An owner action the dashboard runs replies on a pipe of its own (DEVTEAM_REPLY_FD) as soon as
+// the command is done, with what it printed, and only then types into the supervisor's pane: a
+// slow tmux never holds the owner's press. Read once and taken out of the environment, so nothing
+// this process starts (a secret's sink) can write to the pipe.
+const REPLY_FD = (() => { const v = process.env.DEVTEAM_REPLY_FD; delete process.env.DEVTEAM_REPLY_FD; return /^[3-9]$/.test(v ?? '') ? Number(v) : null; })();
+let printed = '';
+if (REPLY_FD !== null) { const write = process.stdout.write.bind(process.stdout); process.stdout.write = (c, ...rest) => { printed += String(c); return write(c, ...rest); }; }
+const queuedNudges = [];
+function replyNow() {
+  if (REPLY_FD === null) return;
+  try { fs.writeSync(REPLY_FD, `${JSON.stringify({ out: printed })}\n`); fs.closeSync(REPLY_FD); } catch {}
+}
 const json = (x) => out(JSON.stringify(x, null, 2));
 const nowIso = () => new Date().toISOString();
 const dateOnly = (iso) => iso.slice(0, 10);
@@ -10730,6 +10744,37 @@ async function cmdDashboard() {
   // A child run as the owner. timeout (ms) is for a caller that can't wait (the gateway's 15 s);
   // code is the exit code, so a route can tell "not there" from "fix a setting" (2).
   const run = (args, { timeout = 0 } = {}) => new Promise((resolve) => execFile(process.execPath, [self, ...args], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: ownerEnv, timeout, killSignal: 'SIGKILL' }, (err, stdout, stderr) => resolve({ ok: !err, code: err ? (typeof err.code === 'number' ? err.code : 1) : 0, stdout, stderr: err?.killed ? `devteam: ${args.slice(0, 2).join(' ')} took over ${timeout / 1000} s and was stopped` : stderr })));
+  // An owner action: replied to as soon as the child says it is done (its reply pipe, fd 3), before
+  // it types into the supervisor's pane; what it says on stderr after that goes to this log. A child
+  // that exits without replying (refused, or an older script) is answered from its exit, as run is.
+  const runAction = (args, { timeout = 0, input = null } = {}) => new Promise((resolve) => {
+    const child = spawn(process.execPath, [self, ...args], { cwd: mainRoot, env: { ...ownerEnv, DEVTEAM_REPLY_FD: '3' }, stdio: ['pipe', 'pipe', 'pipe', 'pipe'] });
+    let so = '';
+    let se = '';
+    let rp = '';
+    let done = false;
+    let killed = false;
+    const finish = (r) => { if (!done) { done = true; resolve(r); } };
+    const timer = timeout ? setTimeout(() => { killed = true; child.kill('SIGKILL'); }, timeout) : null;
+    child.stdin.on('error', () => {});
+    child.stdout.on('data', (c) => { so += c; });
+    child.stderr.on('data', (c) => { se += c; });
+    child.stdio[3].on('data', (c) => {
+      rp += c;
+      if (!rp.includes('\n')) return;
+      let o = null;
+      try { o = JSON.parse(rp.slice(0, rp.indexOf('\n'))); } catch {}
+      if (o && typeof o.out === 'string') finish({ ok: true, code: 0, stdout: o.out, stderr: '' });
+    });
+    child.stdio[3].on('error', () => {});
+    child.on('error', (e) => finish({ ok: false, code: 1, stdout: so, stderr: `devteam: ${e.message}` }));
+    child.on('close', (code) => {
+      if (timer) clearTimeout(timer);
+      if (done) { const late = se.split('\n').filter(Boolean); if (late.length) log(`${args.slice(0, 2).join(' ')}: ${late.join(' | ')}`); return; }
+      finish({ ok: code === 0, code: code ?? 1, stdout: so, stderr: killed ? `devteam: ${args.slice(0, 2).join(' ')} took over ${timeout / 1000} s and was stopped` : se });
+    });
+    child.stdin.end(input ?? undefined);
+  });
   const ID = /^[a-z]-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
   const text = (x, max = 4000) => typeof x === 'string' && x.trim() && x.length <= max;
   const autonomyArgs = (b) => ([1, 2, 3].includes(b.autonomy) ? ['--autonomy', String(b.autonomy), ...(text(b.scope, 100) ? ['--scope', b.scope.trim()] : [])] : []);
@@ -10784,12 +10829,15 @@ async function cmdDashboard() {
     if (helloRunning) return;
     helloRunning = true;
     // The kit's version is checked again when main moves (an adoption landing) and every 10 min.
-    const main = mainRef() ? git(['rev-parse', '--verify', '--quiet', mainRef()], mainRoot) : null;
-    const fresh = !kit || main !== kitAt.main || Date.now() - kitAt.at > 600000;
-    execFile(process.execPath, [self, 'hello', '--json', ...(fresh ? [] : ['--no-kit'])], { cwd: mainRoot, env: ownerEnv, timeout: 20000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
-      helloRunning = false;
-      if (err) return;
-      try { hello = JSON.parse(stdout); if (fresh && hello.kit) { kit = hello.kit; kitAt = { main, at: Date.now() }; } } catch {}
+    // main's sha is asked without holding the server's loop.
+    execFile('git', ['rev-parse', '--verify', '--quiet', mainRef() ?? 'HEAD'], { cwd: mainRoot, encoding: 'utf8', timeout: 10000 }, (gerr, gout) => {
+      const main = mainRef() && !gerr ? gout.trim() || null : null;
+      const fresh = !kit || main !== kitAt.main || Date.now() - kitAt.at > 600000;
+      execFile(process.execPath, [self, 'hello', '--json', ...(fresh ? [] : ['--no-kit'])], { cwd: mainRoot, env: ownerEnv, timeout: 20000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
+        helloRunning = false;
+        if (err) return;
+        try { hello = JSON.parse(stdout); if (fresh && hello.kit) { kit = hello.kit; kitAt = { main, at: Date.now() }; } } catch {}
+      });
     });
   };
   refreshHello();
@@ -10863,10 +10911,26 @@ async function cmdDashboard() {
     threadsMemo = { key, body };
     return { body, cached: false };
   };
-  // Whether the supervisor has a pane the kit can type into, for the card's "hasn't replied yet": asked
-  // of tmux at most every 10 s (resolvePane's calls are synchronous), never on every poll.
+  // Whether the supervisor has a pane the kit can type into, for the card's "hasn't replied yet".
+  // Checked in the background, at most every 10 s, and served from the last check: a sync tmux call
+  // here held every request the server had while tmux answered. One display-message resolves the
+  // window by name or index, as resolvePane does, and says whether an agent (not a shell) runs there.
   let paneSeen = { at: 0, pane: false };
-  const supervisorPane = () => { if (Date.now() - paneSeen.at > 10000) paneSeen = { at: Date.now(), pane: !resolvePane(supervisorTarget()).problem }; return paneSeen.pane; };
+  let paneChecking = false;
+  const checkPane = async () => {
+    const target = supervisorTarget();
+    const info = target ? await tmuxAsync(['display-message', '-p', '-t', target, '#{pane_dead} #{pane_current_command}']) : null;
+    const [dead, cmd = ''] = (info ?? '').trim().split(' ');
+    return info !== null && dead !== '1' && !!cmd && !SHELLS.has(cmd.replace(/^-/, ''));
+  };
+  const supervisorPane = () => {
+    if (Date.now() - paneSeen.at > 10000 && !paneChecking) {
+      paneChecking = true;
+      checkPane().then((pane) => { paneSeen = { at: Date.now(), pane }; }, () => {}).finally(() => { paneChecking = false; });
+    }
+    return paneSeen.pane;
+  };
+  supervisorPane();
   const server = http.createServer(async (req, res) => {
     // Every route answers only on the dashboard's own address: a page elsewhere that points its own
     // name at 127.0.0.1 (DNS rebinding) sends its own Host, and gets nothing, not even a read.
@@ -11082,19 +11146,7 @@ async function cmdDashboard() {
     });
     req.on('end', () => { const buf = Buffer.concat(chunks); body = buf.toString('utf8'); buf.fill(0); chunks.length = 0; });
     // The owner's own process, with the body on its stdin (never in argv or the server's output).
-    const ownerChild = (args, input) => {
-      const child = spawn(process.execPath, [self, ...args], { cwd: mainRoot, env: ownerEnv, stdio: ['pipe', 'pipe', 'pipe'] });
-      let so = '';
-      let se = '';
-      let replied = false;
-      const reply = (code, payload) => { if (!replied) { replied = true; send(res, code, 'application/json', JSON.stringify(payload)); } };
-      child.stdin.on('error', () => {});
-      child.on('error', (e) => reply(500, { error: e.message }));
-      child.stdout.on('data', (c) => { so += c; });
-      child.stderr.on('data', (c) => { se += c; });
-      child.on('close', (code) => reply(code === 0 ? 200 : 400, code === 0 ? { ok: true, out: so.trim() } : { error: se.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') || 'failed', out: so.trim() }));
-      child.stdin.end(input);
-    };
+    const ownerChild = (args, input) => runAction(args, { input }).then((r) => send(res, r.ok ? 200 : 400, 'application/json', JSON.stringify(r.ok ? { ok: true, out: r.stdout.trim() } : { error: r.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') || 'failed', out: r.stdout.trim() })));
     if (isSecret) {
       // The values go to a child on stdin; the child pipes each to its sink (secret post --json)
       // and logs only names.
@@ -11132,7 +11184,7 @@ async function cmdDashboard() {
       try { parsed = JSON.parse(body || '{}'); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'bad json' })); }
       const args = action(parsed);
       if (!args) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
-      const r = await run(args, { timeout: ACTION_MS[name] ?? 0 });
+      const r = await runAction(args, { timeout: ACTION_MS[name] ?? 0 });
       send(res, r.ok ? 200 : 400, 'application/json', JSON.stringify(r.ok ? { ok: true, out: r.stdout.trim() } : { error: r.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') }));
     });
   });
@@ -11254,6 +11306,11 @@ function resolvePane(target) {
 // Each delivery is recorded per window, so a lost Enter can be pressed later (resendLostEnter).
 const typeInto = (target, line) => { const ok = tmux(['send-keys', '-t', target, '-l', line]) && tmux(['send-keys', '-t', target, 'Enter']); if (ok) recordSent(target, line); return ok; };
 function nudgeSupervisor(line) {
+  if (REPLY_FD !== null) return void queuedNudges.push(line);
+  typeNudge(line);
+}
+function deliverNudges() { for (const line of queuedNudges.splice(0)) typeNudge(line); }
+function typeNudge(line) {
   const { target, problem } = resolvePane(supervisorTarget());
   if (problem) return void warn(`not delivered to the supervisor: ${problem}`);
   typeInto(target, line);
@@ -14741,5 +14798,6 @@ else {
     }
   }
   const r = COMMANDS[command]();
-  if (r && typeof r.catch === 'function') r.catch((e) => die(e?.message ?? String(e)));
+  // done: the dashboard has its answer, then the supervisor is told
+  Promise.resolve(r).then(() => { replyNow(); deliverNudges(); }, (e) => die(e?.message ?? String(e)));
 }
