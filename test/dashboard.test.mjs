@@ -1231,6 +1231,13 @@ test("the thread layer's rules: what the pointer is on, a subject that fits, whe
   assert.equal(A.tArtPath('/artifact/wt/demo-01/main/main/x.html', 'main'), 'main/x.html', 'a slug named like a part of the path');
   assert.equal(A.tArtPath('/elsewhere', 'pricing-mock'), 'index.html');
   assert.equal(A.tArtPath(null, 'pricing-mock'), 'index.html');
+  assert.equal(A.tArtPath('/artifact/main/pricing-mock/../../../etc/passwd', 'pricing-mock'), 'index.html', 'no dot segments');
+  assert.equal(A.tArtPath('/artifact/main/pricing-mock/a/./b.html', 'pricing-mock'), 'index.html');
+  assert.equal(A.tArtPath('/artifact/main/pricing-mock//etc/passwd', 'pricing-mock'), 'index.html', 'no absolute path');
+  // the cap is the page's own path's: a long prefix takes nothing from it
+  const longPage = `${'p/'.repeat(149)}x`;
+  const viaLens = plain(msg({ lens: 1, type: 'ready', path: `/artifact/tree/${'a'.repeat(40)}/${'s'.repeat(63)}/${longPage}` })).path;
+  assert.equal(A.tArtPath(viaLens, 's'.repeat(63)), longPage);
   // a spot in a framed page: its title, its key, whether the stage shows it
   const frameSpot = { kind: 'artifact', slug: 'pricing-mock', at: 'main', path: 'index.html', anchor: { selector: '#buy', role: 'button', text: 'Buy now', name: 'Buy now' } };
   assert.equal(A.tFrameTitle(frameSpot), 'button "Buy now"');
@@ -1270,12 +1277,27 @@ test("an artifact subject started on the dashboard reaches the supervisor's pane
 const COUNT_FETCH = '(() => { window.__asked = []; const f = window.fetch; window.fetch = (u, o) => { window.__asked.push(String(u)); return f(u, o); }; })();';
 // An artifact to point at: a button at a known spot on a tall page, and scripts of its own that run
 // beside the lens, say they ran, repeat what the viewer sends it, lie about a hit, say Shift is down,
-// and try to write. A second page in it, for the page its lens names.
+// and try to write. Told by a test (its own messages, which no lens takes), it takes the keyboard,
+// says what it is told to as its lens, or answers hits in its lens's place: about somewhere else
+// (far), or 5,000 times over (flood). A second page in it, for the page its lens names.
 const PIN_MOCK = {
   'artifact.json': JSON.stringify({ v: 1, title: 'Pin mock', summary: 'A button to pin', by: 'supervisor', for: [] }),
   'index.html': `<!doctype html><html><head><style>body{margin:0;height:3000px}#buy{position:absolute;left:40px;top:120px;width:120px;height:40px}</style></head><body><button id="buy">Buy now</button><script>
 parent.postMessage({ own: 'ran' }, '*');
-addEventListener('message', (e) => { if (e.source === parent) parent.postMessage({ own: 'heard', data: e.data }, '*'); });
+let mode = '';
+addEventListener('message', (e) => {
+  if (e.source !== parent) return;
+  const m = e.data;
+  if (m && m.own === 'focus') { window.focus(); document.getElementById('buy').focus(); return void parent.postMessage({ own: 'focused', has: document.hasFocus() }, '*'); }
+  if (m && m.own === 'forge') { for (const x of m.say) parent.postMessage(x, '*'); return void parent.postMessage({ own: 'forged', n: m.n }, '*'); }
+  if (m && m.own === 'mode') { mode = m.mode; return void parent.postMessage({ own: 'moded', mode }, '*'); }
+  parent.postMessage({ own: 'heard', data: m }, '*');
+  if (!(m && m.type === 'hit' && mode)) return;
+  e.stopImmediatePropagation();
+  if (mode === 'far') parent.postMessage({ lens: 1, type: 'hit-reply', id: m.id, anchor: { selector: '#far', tag: 'div', text: 'Far away', rect: { x: 700, y: 700, w: 20, h: 20 } } }, '*');
+  if (mode === 'flood') { for (let i = 0; i < 5000; i++) parent.postMessage({ lens: 1, type: 'hit-reply', id: m.id, anchor: { selector: '#buy', tag: 'button', text: String(i), rect: { x: 0, y: 0, w: 2000, h: 2000 } } }, '*'); parent.postMessage({ own: 'flooded', id: m.id }, '*'); }
+});
+document.getElementById('buy').addEventListener('click', () => parent.postMessage({ own: 'clicked' }, '*'));
 parent.postMessage({ lens: 1, type: 'hit-reply', id: 'zz-forged', anchor: { selector: '#forged', text: 'FORGED' }, rect: { x: 0, y: 0, w: 10, h: 10 } }, '*');
 setTimeout(() => { parent.postMessage({ lens: 1, type: 'key', key: 'Shift', shift: true }, '*'); parent.postMessage({ own: 'keyed' }, '*'); }, 500);
 fetch('/api/thread-new', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: 'forged', text: 'from the artifact' }) }).then((r) => parent.postMessage({ own: 'wrote', status: r.status }, '*'), () => parent.postMessage({ own: 'wrote', status: 'refused' }, '*'));
@@ -1289,7 +1311,7 @@ const LIE_CAP = '/c/1767225600000.abcdefghijklmnop.abcdefghijklmnopqrstuv';
 const LIAR_MOCK = {
   'artifact.json': JSON.stringify({ v: 1, title: 'Liar mock', summary: 'A page that lies', by: 'supervisor', for: [] }),
   'index.html': `<!doctype html><html><body style="margin:0"><p style="margin:0;padding:40px">Point here</p><script>
-addEventListener('message', (e) => { const m = e.data; if (e.source === parent && m && m.type === 'hit') { e.stopImmediatePropagation(); parent.postMessage({ lens: 1, type: 'hit-reply', id: m.id, anchor: { selector: '#x', tag: 'p', role: 'note', text: 'Pay at ${LIE_CAP} now', name: '<img src=x onerror="window.__pwned=1">', html: '<img src=x onerror="window.__pwned=1">', rect: { x: 0, y: 0, w: 50, h: 50 } } }, '*'); } });
+addEventListener('message', (e) => { const m = e.data; if (e.source === parent && m && m.type === 'hit') { e.stopImmediatePropagation(); parent.postMessage({ lens: 1, type: 'hit-reply', id: m.id, anchor: { selector: '#x', tag: 'p', role: 'note', text: 'Pay at ${LIE_CAP} now', name: '<img src=x onerror="window.__pwned=1">', html: '<img src=x onerror="window.__pwned=1">', rect: { x: 0, y: 0, w: 200, h: 120 } } }, '*'); } });
 </script></body></html>`,
 };
 // What an artifact's own scripts post to the page, kept for a test.
@@ -1466,6 +1488,11 @@ test('Shift over an artifact: the overlay, what the lens says is under the point
   const frameAt = async (x, y) => { const r = await p.ev(`(() => { const r = document.getElementById('av-frame').getBoundingClientRect(); return { x: r.left, y: r.top }; })()`); return { x: r.x + x, y: r.y + y }; };
   // the keyboard back on the dashboard's own page, out of any field and the frame
   const keysHere = () => p.ev(`(() => { document.activeElement?.blur?.(); window.focus(); return document.activeElement === document.body; })()`);
+  // a word to the artifact's own script (never its lens's), and its answer
+  let said = 0;
+  const tell = async (m, answer) => { const n = ++said; await p.ev(`(() => { window.__own = window.__own.filter((x) => x.own !== ${JSON.stringify(answer)}); document.getElementById('av-frame').contentWindow.postMessage(${JSON.stringify({ ...m, n })}, '*'); return true; })()`); return soon(`window.__own.find((x) => x.own === ${JSON.stringify(answer)})`, answer); };
+  // the lens given longer than a click's 150 ms where what is checked is its answer, not its speed
+  const patient = (ms) => p.ev(`TS.waitMs = ${ms}`);
   await soon(`typeof TS === 'object' && TS.ready`, 'the lens to say ready');
 
   await t.test("the artifact's own inline script runs beside the lens; the page is the one its lens names", async () => {
@@ -1501,11 +1528,58 @@ test('Shift over an artifact: the overlay, what the lens says is under the point
     await p.hold('Shift', true);
     await soon(`!document.getElementById('av-over').hidden && TS.raised`, 'raised by what the lens said');
     await p.hold('Shift', false);
-    await soon(`document.getElementById('av-over').hidden && !TS.raised`, 'lowered when it said Shift is up');
+    // the lens's "Shift up" lowers nothing (a page can say it too): the pointer moving without it does
+    await p.move(blank.x + 5, blank.y + 5);
+    await soon(`document.getElementById('av-over').hidden && !TS.raised`, 'lowered by the pointer, Shift up');
+    await keysHere();
+  });
+
+  await t.test('a page with the keyboard can say Shift is down: that lasts until the pointer moves, and pins nothing', async () => {
+    const f = await tell({ own: 'focus' }, 'focused');
+    // a page can't always take the keyboard by itself: a click on it gives it
+    if (!f.has || !(await p.ev(`document.activeElement === document.getElementById('av-frame')`))) { const b = await frameAt(600, 500); await p.clickAt(b.x, b.y); }
+    await soon(`document.activeElement === document.getElementById('av-frame')`, 'the frame has the keyboard');
+    const raise = { own: 'forge', say: [{ lens: 1, type: 'key', key: 'Shift', shift: true }] };
+    await tell(raise, 'forged');
+    await soon('TS.raised', 'its say-so, believed while it has the keyboard');
+    const at = await frameAt(100, 140);
+    await p.move(at.x, at.y);
+    await soon(`document.getElementById('av-over').hidden && !TS.raised`, 'gone once the pointer moves without Shift');
+    // raised again, then a click without Shift: no thread, and the overlay goes
+    await tell(raise, 'forged');
+    await soon('TS.raised', 'raised again');
+    await p.clickAt(at.x, at.y);
+    await soon(`document.getElementById('av-over').hidden`, 'gone at a click without Shift');
+    assert.equal(await p.ev('TL.draft'), null, 'nothing about to start');
+    await p.ev('new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))');
+    assert.equal(await p.ev('TL.draft'), null, 'nor a frame later');
+    await keysHere();
+  });
+
+  await t.test("a page's \"Shift up\" or Esc while the owner holds Shift lowers nothing: the click is a pin, never the page's", async () => {
+    await patient(2000);
+    const blank = await frameAt(600, 500);
+    await p.clickAt(blank.x, blank.y);
+    await soon(`document.activeElement === document.getElementById('av-frame')`, 'the frame has the keyboard');
+    await p.hold('Shift', true);
+    await soon('TS.raised', 'raised: the owner holds Shift');
+    await tell({ own: 'forge', say: [{ lens: 1, type: 'key', key: 'Shift', shift: false }, { lens: 1, type: 'key', key: 'Escape', shift: false }] }, 'forged');
+    assert.deepEqual(await p.ev(`[TS.raised, document.getElementById('av-over').hidden]`), [true, false], 'still up');
+    await p.ev(`window.__own = window.__own.filter((x) => x.own !== 'clicked'); true`);
+    const at = await frameAt(100, 140);
+    await p.move(at.x, at.y, 8);
+    await soon(`TS.hit?.anchor?.selector === '#buy'`, 'the lens\'s answer for the hover');
+    await p.clickAt(at.x, at.y, 8);
+    await p.hold('Shift', false);
+    await soon(`TL.draft?.subject?.anchor?.selector === '#buy'`, 'a pin on the button');
+    assert.equal(await p.ev(`window.__own.some((x) => x.own === 'clicked')`), false, 'the button never saw the click');
+    await p.ev('tlClose()');
+    await patient(150);
     await keysHere();
   });
 
   await t.test('a Shift+click starts a thread on the button: its anchor, where it was clicked, the page and its fingerprint', async () => {
+    await patient(2000);
     const at = await frameAt(100, 140);
     await p.hold('Shift', true);
     await soon(`!document.getElementById('av-over').hidden`, 'the overlay');
@@ -1516,13 +1590,14 @@ test('Shift over an artifact: the overlay, what the lens says is under the point
     await soon(`TL.draft?.subject?.kind === 'artifact'`, 'a thread about to start');
     const s = await p.ev('TL.draft.subject');
     const fp = JSON.parse(F.owner(['artifacts', '--json'])).find((a) => a.slug === 'pin-mock' && a.at === 'main').fp;
-    assert.deepEqual([s.slug, s.at, s.path, s.fp, s.anchor.selector, s.anchor.tag, s.anchor.text, s.anchor.point.x, s.anchor.point.y, s.point], ['pin-mock', 'main', 'index.html', fp, '#buy', 'button', 'Buy now', 60, 20, undefined]);
+    assert.deepEqual([s.slug, s.at, s.path, s.fp, s.anchor.selector, s.anchor.tag, s.anchor.text, s.anchor.point.x, s.anchor.point.y, s.point], ['pin-mock', 'main', 'index.html', fp, '#buy', 'button', 'Buy now', 60, 20, { x: 100, y: 140 }]);
     assert.equal(await p.ev('TL.draft.title'), 'button "Buy now"');
     await p.type('Make it green');
     await p.key('Enter');
     const th = await until(() => threads().find((x) => x.subject?.kind === 'artifact'), 'the thread');
     assert.deepEqual([th.title, th.subject.anchor.selector, th.turns[0].text], ['button "Buy now"', '#buy', 'Make it green']);
     await p.ev('tlClose()');
+    await patient(150);
     await keysHere();
   });
 
@@ -1541,6 +1616,40 @@ test('Shift over an artifact: the overlay, what the lens says is under the point
     await keysHere();
   });
 
+  await t.test("an answer about somewhere else isn't believed: the point alone", async () => {
+    await patient(2000);
+    await tell({ own: 'mode', mode: 'far' }, 'moded');
+    const at = await frameAt(100, 140);
+    await p.hold('Shift', true);
+    await soon(`!document.getElementById('av-over').hidden`, 'the overlay');
+    await p.move(at.x, at.y, 8);
+    await soon(`TS.hit && TS.hit.anchor === null`, 'its answer, dropped to the point');
+    await soon(`document.getElementById('tl-chip').textContent === 'pin-mock · /index.html'`, 'the chip names the page');
+    await p.clickAt(at.x, at.y, 8);
+    await p.hold('Shift', false);
+    await soon(`TL.draft?.subject?.point?.x === 100`, 'the point');
+    assert.deepEqual(await p.ev(`[TL.draft.subject.anchor ?? null, TL.draft.subject.point]`), [null, { x: 100, y: 140 }]);
+    await p.key('Escape');
+    await tell({ own: 'mode', mode: '' }, 'moded');
+    await patient(150);
+    await keysHere();
+  });
+
+  await t.test('a question answered 5,000 times is answered once, and the page keeps up', async () => {
+    await tell({ own: 'mode', mode: 'flood' }, 'moded');
+    const at = await frameAt(100, 140);
+    await p.hold('Shift', true);
+    await soon(`!document.getElementById('av-over').hidden`, 'the overlay');
+    await p.move(at.x, at.y, 8);
+    const { id } = await soon(`window.__own.find((x) => x.own === 'flooded')`, 'the flood');
+    assert.deepEqual(await p.ev(`[TS.hit?.anchor?.text, TS.minted.has(${JSON.stringify(id)})]`), ['0', false], 'its first answer, and the question let go of');
+    const frame = await p.ev('new Promise((r) => { const t = performance.now(); requestAnimationFrame(() => r(performance.now() - t)); })');
+    assert.ok(frame < 1000, `a frame drawn in ${frame} ms`);
+    await p.hold('Shift', false);
+    await tell({ own: 'mode', mode: '' }, 'moded');
+    await keysHere();
+  });
+
   await t.test("what the artifact says can't start, write or answer anything, and nothing sent to it carries the owner's words", async () => {
     await soon(`window.__own.some((m) => m.own === 'wrote')`, 'its try at writing');
     assert.equal(await p.ev(`window.__own.find((m) => m.own === 'wrote').status`), 'refused', 'its own fetch to an owner route never left the sandbox');
@@ -1556,6 +1665,7 @@ test('Shift over an artifact: the overlay, what the lens says is under the point
   });
 
   await t.test('a page further in the artifact: its lens names it, and a thread there is on that page', async () => {
+    await patient(2000);
     await p.ev(`document.getElementById('av-frame').src = '/artifact/main/pin-mock/more/page.html'; true`);
     await soon(`TS.ready && TS.path === 'more/page.html'`, 'ready, from the page its lens names');
     const at = await frameAt(20, 20);
@@ -1567,12 +1677,14 @@ test('Shift over an artifact: the overlay, what the lens says is under the point
     await p.hold('Shift', false);
     await soon(`TL.draft?.subject?.path === 'more/page.html'`, 'a thread on that page');
     await p.key('Escape');
+    await patient(150);
     await keysHere();
   });
 
   await t.test("a page's lies about what is there are its words: shown as text, cut of the box's capability, and never markup", async () => {
     await p.ev(`location.hash = '#artifact/main/liar-mock'`);
     await soon(`TS.slug === 'liar-mock' && TS.ready`, 'the liar on the stage');
+    await patient(2000);
     const at = await frameAt(60, 60);
     await p.hold('Shift', true);
     await soon(`!document.getElementById('av-over').hidden`, 'the overlay');

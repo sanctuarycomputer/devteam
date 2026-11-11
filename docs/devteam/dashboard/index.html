@@ -3099,8 +3099,17 @@ const artViewer = (slug, at) => `/view/artifact/${encodeURIComponent(slug)}${at 
 // The stage's lens state (spec §4, §6): what is on the stage, where its lens's messages may go (an
 // artifact's opaque origin takes '*'), the ids minted for real pointer events, the last reply, and
 // where the lens says each pinned anchor is now (keyed by a thread's id).
-const TS = { kind: null, slug: null, at: null, fp: null, mainFp: null, path: null, target: '*', ready: false, raised: false, seq: 0, minted: new Map(), hit: null, waiters: new Map(), rects: new Map(), keyOf: new Map(), watching: new Set(), watch: '', last: null, rafPending: false, via: null };
+const TS = { kind: null, slug: null, at: null, fp: null, mainFp: null, path: null, target: '*', ready: false, raised: false, seq: 0, minted: new Map(), hit: null, waiters: new Map(), rects: new Map(), keyOf: new Map(), watching: new Set(), watch: '', last: null, rafPending: false, via: null, waitMs: 150, drawPending: false };
+// What the lens was asked and has not answered, let go: a waiting click hears null (its point alone),
+// and no reply to a question from before is taken.
+function tsForget() {
+  for (const f of [...TS.waiters.values()]) f(null);
+  TS.waiters.clear();
+  TS.minted.clear();
+  TS.hit = null;
+}
 function tsSet(kind, info = {}) {
+  tsForget();
   Object.assign(TS, { kind, slug: null, at: null, fp: null, mainFp: null, path: null, target: '*', ready: false, hit: null, watch: '', last: null }, info);
   for (const m of [TS.minted, TS.waiters, TS.rects, TS.keyOf, TS.watching]) m.clear();
 }
@@ -3682,15 +3691,18 @@ function tLensMessage(e, frameWin, minted) {
   }
   if (m.type === 'rects') return { type: 'rects', rects: (Array.isArray(m.rects) ? m.rects.slice(0, 200) : []).filter((r) => r && typeof r.key === 'string').map((r) => ({ key: r.key, rect: tBox(r.rect, ['x', 'y', 'w', 'h']), changed: r.changed === true })) };
   if (m.type === 'key') return { type: 'key', key: m.key === 'Escape' ? 'Escape' : 'Shift', shift: m.shift === true };
-  if (m.type === 'ready') return { type: 'ready', path: str(m.path, T_CAPS.path), route: str(m.route, T_CAPS.route), title: typeof m.title === 'string' ? tLine(tUncap(m.title), 80) : '', viewport: tBox(m.viewport, ['w', 'h']) };
+  if (m.type === 'ready') return { type: 'ready', path: str(m.path, T_CAPS.path + 400), route: str(m.route, T_CAPS.route), title: typeof m.title === 'string' ? tLine(tUncap(m.title), 80) : '', viewport: tBox(m.viewport, ['w', 'h']) };
   if (m.type === 'route') return { type: 'route', route: str(m.route, T_CAPS.route) };
   return { type: 'errors', errors: (Array.isArray(m.errors) ? m.errors : []).filter((x) => typeof x === 'string').slice(-T_ERRORS).map((x) => tCut(tUncap(x), T_ERROR_MAX)) };
 }
 // The page inside an artifact, from the path its lens reports: whatever the prefix (main, a draft's
-// worktree, a published tree, the gateway's capability before it), what follows <slug>/.
+// worktree, a published tree, the gateway's capability before it), what follows <slug>/, cut to the
+// kit's cap only once the prefix is gone (tLensMessage keeps room for it).
+// A page that is no page in it (a dot segment, an absolute path) is its index.
 function tArtPath(p, slug) {
   const m = /\/artifact\/(?:main|wt\/[^/]+|tree\/[0-9a-f]+)\/([^/]+)\/(.*)$/.exec(String(p ?? ''));
-  return m && m[1] === slug ? tCut(m[2] || 'index.html', T_CAPS.path) : 'index.html';
+  if (!m || m[1] !== slug || m[2].startsWith('/') || m[2].split('/').some((x) => x === '..' || x === '.')) return 'index.html';
+  return tCut(m[2], T_CAPS.path) || 'index.html';
 }
 // A thread's title for a spot in a framed page: what is there as the page names it (button "Buy
 // now"), or the page itself. Page-written, so data like the rest of the capture (spec §1).
@@ -4162,11 +4174,22 @@ function tsRaise(on) {
   $('av-over').hidden = !TS.raised;
   if (!TS.raised) { TS.hit = null; TS.last = null; if (!TL.pin) tlHide(); }
 }
-// A thread's subject for a spot on the stage: the lens's anchor there, else the point alone (no
-// lens, an older kit, a page that ignores it), which the pin draws where it was (spec §4 step 3).
+// A thread's subject for a spot on the stage: where the owner pointed, and the lens's anchor there
+// when it has one (none: no lens, an older kit, a page that ignores it, or an answer about somewhere
+// else), so the pin can be drawn at the point either way (spec §4 step 3).
 function tsSubject(anchor, x, y) {
   if (TS.kind !== 'artifact') return null;
-  return { kind: 'artifact', slug: TS.slug, at: TS.at, ...(TS.fp ? { fp: TS.fp } : {}), path: TS.path || 'index.html', ...(anchor ? { anchor } : { point: { x: Math.round(x), y: Math.round(y) } }) };
+  return { kind: 'artifact', slug: TS.slug, at: TS.at, ...(TS.fp ? { fp: TS.fp } : {}), path: TS.path || 'index.html', ...(anchor ? { anchor } : {}), point: { x: Math.round(x), y: Math.round(y) } };
+}
+// An anchor the lens gave for a point, only when its box holds that point (a few pixels' slack for
+// rounding): the page says where its element is, and a page that names something elsewhere is not
+// believed about what is under the owner's pointer.
+const tsHolds = (a, at) => !!(a?.rect && at) && at.x >= a.rect.x - 4 && at.x <= a.rect.x + a.rect.w + 4 && at.y >= a.rect.y - 4 && at.y <= a.rect.y + a.rect.h + 4;
+// One redraw of it a frame, however many answers or moves come in it.
+function tsRedraw() {
+  if (TS.drawPending) return;
+  TS.drawPending = true;
+  requestAnimationFrame(() => { TS.drawPending = false; if (TS.raised) tsShowHit(); });
 }
 // The outline and chip for the lens's latest answer, at the pointer.
 function tsShowHit() {
@@ -4181,17 +4204,19 @@ function tsShowHit() {
 // Where a pointer event is, in the frame's coordinates and the window's.
 const tsAt = (e) => { const fr = tsFrame().getBoundingClientRect(); return { x: e.clientX - fr.left, y: e.clientY - fr.top, cx: e.clientX, cy: e.clientY }; };
 // A click (a mouse) or a lift (a finger, a pen) starts a thread on what the lens says is there, given
-// 150 ms to answer this event's own question, else on the point; nothing is written until the owner
+// 150 ms (TS.waitMs) to answer this event's own question, else on the point; nothing is written until the owner
 // writes, and then only through tFit.
 async function tsPick(e) {
   if (!e.isTrusted) return;
   e.preventDefault();
   e.stopPropagation();
+  // the parent's own event says whether Shift is down: an overlay a page raised is no pin
+  if (!e.shiftKey && !TL.pin) { tsRaise(false); return; }
   const at = tsAt(e);
   const id = tsMint(at.x, at.y);
   tsPost({ type: 'hit', id, x: at.x, y: at.y });
   const reply = await new Promise((resolve) => {
-    const timer = setTimeout(() => { TS.waiters.delete(id); resolve(null); }, 150);
+    const timer = setTimeout(() => { TS.waiters.delete(id); resolve(null); }, TS.waitMs);
     TS.waiters.set(id, (v) => { clearTimeout(timer); TS.waiters.delete(id); resolve(v); });
   });
   const s = tsSubject(reply?.anchor ?? null, at.x, at.y);
@@ -4203,37 +4228,47 @@ const tsOver = $('av-over');
 // One question a frame: the newest point, at most once per animation frame (spec §4 step 2).
 tsOver.addEventListener('pointermove', (e) => {
   if (!e.isTrusted) return;
+  // the parent's own pointer events carry Shift as it is: an overlay a page's message raised (or
+  // left up) goes as soon as the pointer moves without it
+  if (!e.shiftKey && !TL.pin) { tsRaise(false); return; }
   TS.last = tsAt(e);
   tlCursor(e.clientX, e.clientY);
-  tsShowHit();
+  tsRedraw();
   if (TS.rafPending) return;
   TS.rafPending = true;
   requestAnimationFrame(() => { TS.rafPending = false; const l = TS.last; if (l && TS.raised) tsPost({ type: 'hit', id: tsMint(l.x, l.y), x: l.x, y: l.y }); });
 });
 tsOver.addEventListener('pointerleave', () => { TS.last = null; TS.hit = null; tlHide(); });
-tsOver.addEventListener('pointerdown', (e) => { TS.via = e.pointerType; e.preventDefault(); });
+tsOver.addEventListener('pointerdown', (e) => { TS.via = e.pointerType; e.preventDefault(); if (!e.shiftKey && !TL.pin) tsRaise(false); });
 tsOver.addEventListener('pointerup', (e) => { if (e.pointerType !== 'mouse') tsPick(e); });
 tsOver.addEventListener('click', (e) => { if (TS.via === 'mouse') tsPick(e); else e.preventDefault(); });
 // in pin mode (and with Shift held) the wheel scrolls the framed page, under the pointer
 tsOver.addEventListener('wheel', (e) => { e.preventDefault(); const at = tsAt(e); tsPost({ type: 'scroll-by', dx: e.deltaX, dy: e.deltaY, x: at.x, y: at.y }); }, { passive: false });
 // Each page the frame loads is asked what it is: its lens answers ready.
-tsFrame().addEventListener('load', () => { TS.ready = false; TS.path = null; TS.watch = ''; TS.rects.clear(); tsPost({ type: 'hello' }); });
+tsFrame().addEventListener('load', () => { tsForget(); TS.ready = false; TS.path = null; TS.watch = ''; TS.rects.clear(); tsPost({ type: 'hello' }); });
 window.addEventListener('message', (e) => {
   if (!TS.kind) return;
   const m = tLensMessage(e, tsFrame()?.contentWindow, TS.minted);
   if (!m) return;
   // the page as its lens names it (ready.path), never the frame's src: a link in it goes elsewhere
   if (m.type === 'ready') { TS.ready = true; if (TS.kind === 'artifact') TS.path = tArtPath(m.path, TS.slug); return; }
-  // a key only while the frame has the keyboard (decision 20): the page's own scripts can say the same at any time
-  if (m.type === 'key') { if (document.activeElement !== tsFrame()) return; if (m.key === 'Escape') { tsRaise(false); if (TL.pin) tlPinMode(false); } else tsRaise(m.shift || TL.pin); return; }
+  // a key only while the frame has the keyboard (decision 20), and only ever to raise: the page's own
+  // scripts can say the same at any time, so a "Shift up" or an Esc from it lowers nothing while the
+  // owner may be holding Shift. The overlay goes on the parent's own evidence: its pointer moving
+  // or pressed without Shift, its own keyup, blur or Esc. An Esc from the frame ends pin mode only.
+  if (m.type === 'key') { if (document.activeElement !== tsFrame()) return; if (m.key === 'Escape') { if (TL.pin) tlPinMode(false); } else if (m.shift) tsRaise(true); return; }
   if (m.type === 'hit-reply') {
+    // one answer a question: its id let go of as it is taken, so a page that answers it again is
+    // dropped by tLensMessage and costs nothing more
+    const at = TS.minted.get(m.id);
+    TS.minted.delete(m.id);
+    const hit = { anchor: tsHolds(m.anchor, at) ? m.anchor : null, n: Number(m.id.slice(1)) };
     // a click's own question is answered first; then the newest question's answer only, so a slow
     // reply to an older point never replaces it
-    TS.waiters.get(m.id)?.(m);
-    const n = Number(m.id.slice(1));
-    if (TS.hit && TS.hit.n > n) return;
-    TS.hit = { ...m, n };
-    if (TS.raised) tsShowHit();
+    TS.waiters.get(m.id)?.(hit);
+    if (TS.hit && TS.hit.n >= hit.n) return;
+    TS.hit = hit;
+    tsRedraw();
   }
 });
 /* threads-layer end */
