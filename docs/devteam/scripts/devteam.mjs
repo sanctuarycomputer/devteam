@@ -1392,9 +1392,12 @@ function readLog() {
     errors.push(...r.errors);
   }
   const { objects, ignored } = fold(lines);
-  return (logCache = { lines, objects, errors, ignored });
+  // each type's objects in the fold's order, so a lookup by type doesn't scan every object
+  const byType = new Map();
+  for (const o of objects.values()) { if (!byType.has(o.type)) byType.set(o.type, []); byType.get(o.type).push(o); }
+  return (logCache = { lines, objects, errors, ignored, byType });
 }
-const logObjects = (type) => [...readLog().objects.values()].filter((o) => o.type === type && !(type === 'goal' && o.kind === 'upkeep'));
+const logObjects = (type) => (readLog().byType.get(type) ?? []).filter((o) => !(type === 'goal' && o.kind === 'upkeep'));
 // The built-in Upkeep goal (planning.md §7), or null while it has no line yet (then it runs).
 const upkeepGoal = () => [...readLog().objects.values()].find((o) => o.type === 'goal' && o.kind === 'upkeep') ?? null;
 const logGet = (id) => readLog().objects.get(id) ?? null;
