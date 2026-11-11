@@ -1938,6 +1938,7 @@ test('a popup the dashboard or a viewer opens never needs window.opener: the wra
   assert.doesNotMatch(html, /\bwindow\.opener\b|[^.\w]opener\s*[.=]/, 'nothing reads or sets an opener');
   const tags = html.match(/<a\b[^>]*target="_blank"[^>]*>/g) ?? [];
   assert.ok(tags.length >= 10, `the page's new-tab links: ${tags.length}`);
+  assert.equal(tags.length, (html.match(/target="_blank"/g) ?? []).length, 'every target="_blank" in the file is in a tag the check matched');
   for (const a of tags) assert.match(a, /rel="noopener noreferrer"/, a);
   // to the end of the statement, not the first ")": an argument with a call in it (a URL built by one)
   // must not cut the options off from the check
@@ -1972,6 +1973,8 @@ test('the Library\'s Open and a question\'s [[name]] open the artifact\'s viewer
   await p.ev(`location.hash = '#inbox'`);
   await soon(`!!document.querySelector('.qref a')`, 'the question\'s [[mock]]');
   assert.deepEqual(await link('.qref a'), ['/view/artifact/viewer-mock', '_blank', 'noopener noreferrer', 'The mock']);
+  // a malformed escape in a link's href falls back to the plain stage link, not a throw
+  assert.match(await p.ev(`artNameLink({ title: 'Bad', artifact: 'x', href: '#artifact/wt/%E0%A4%A/x' })`), /^<a href="#artifact\/wt\/%E0%A4%A\/x"/);
   await p.ev(`location.hash = '#artifact/main/viewer-mock'`);
   await soon(`!document.getElementById('artifact-view').hidden`, 'the stage');
   assert.deepEqual(await link('#av-tab'), ['/view/artifact/viewer-mock', '_blank', 'noopener noreferrer', 'Open in new tab']);
@@ -2439,6 +2442,46 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await click('[data-tl-resolve-go]');
     const r = await until(() => { const x = threads().find((y) => y.id === T); return x.status === 'resolved' && x; }, 'resolved');
     assert.equal(r.outcome, 'Kept to the EU');
+  });
+
+  await t.test('Shift held over the drawer shows no pin, and its click is the drawer\'s', async () => {
+    await p.ev(`location.hash = '#goal/${F.goal}'`);
+    await soon(shown('drawer'), 'the drawer');
+    const at = await p.at('#drawer-close');
+    await p.hold('Shift', true);
+    await p.move(at.x, at.y, 8);
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal(await p.ev(`document.getElementById('tl-cursor').hidden`), true, 'nothing there to point at');
+    await p.clickAt(at.x, at.y, 8);
+    await p.hold('Shift', false);
+    await soon(`document.getElementById('drawer').hidden`, 'the drawer closed by its own button');
+  });
+
+  await t.test('a thread on a spot in a Loop tab opens on that tab', async () => {
+    const [P] = F.owner(['thread', 'new', 'This decision', '--title', 'the dashboard · Loop', '--subject', JSON.stringify({ kind: 'page', view: '#loop/decide', at: { x: 0.5, y: 0.1 }, quote: 'Loop' })]).split('\n');
+    await p.ev(`showTab('observe')`);
+    await p.ev(`location.hash = '#talk/${P}'`);
+    await soon(`TAB === 'decide' && !document.getElementById('tl-card').hidden`, 'the Decide tab, and the card');
+    await p.ev(`showTab('observe'); tlPins()`);
+    assert.equal(await p.ev(`[...document.querySelectorAll('#tl-pins .tl-pin')].some((b) => b.dataset.tlPin === '${P}')`), false, 'no pin on a tab that isn\'t shown');
+    await p.key('Escape');
+  });
+
+  await t.test('a half-typed resolution stays when a question in the thread is answered meanwhile', async () => {
+    const [R] = F.owner(['thread', 'new', 'Keep my note']).split('\n');
+    const Q = F.sup(['thread', 'ask', R, '--question', 'Ship it?', '--choices', '[{"label":"Yes"},{"label":"No"}]', '--stake', '1', '--urgency', '1']);
+    await p.ev(`location.hash = '#talk/${R}'`);
+    await soon(`!!document.querySelector('[data-tl-resolve]')`, 'its card');
+    await click('[data-tl-resolve]');
+    await soon(`!!document.getElementById('tl-outcome')`, 'the form');
+    await p.ev(`document.getElementById('tl-outcome').focus()`);
+    await p.type('Half typed');
+    // the ask lands with the next read; typing before it does is the point of the test, so wait for it
+    await soon(`/1 question asked here is still open/.test(document.querySelector('#tl-c-ready .tl-ready')?.textContent ?? '')`, 'the warning');
+    assert.deepEqual(await p.ev(`[document.getElementById('tl-outcome').value, document.activeElement?.id]`), ['Half typed', 'tl-outcome'], 'the words stay when the warning appears');
+    F.owner(['answer', Q, 'Yes']);
+    await soon(`!/still open/.test(document.querySelector('#tl-c-ready .tl-ready')?.textContent ?? 'still open')`, 'the warning gone');
+    assert.deepEqual(await p.ev(`[document.getElementById('tl-outcome').value, document.activeElement?.id]`), ['Half typed', 'tl-outcome'], 'the words and the caret stay');
   });
 });
 

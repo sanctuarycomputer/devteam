@@ -1280,7 +1280,9 @@ function artNameLink(l) {
   const h = l.href ?? (l.gone || !l.at ? null : artHref(l.artifact, l.at));
   const m = h && /^#artifact\/(?:main|wt\/([^/]+))\/([^/]+)$/.exec(h);
   if (!m) return artLinkOf(l, true);
-  return `<a href="${esc(artViewer(decodeURIComponent(m[2]), m[1] ? decodeURIComponent(m[1]) : 'main'))}" target="_blank" rel="noopener noreferrer"${l.changed ? ` title="${AV_CHANGED}"` : ''}>${esc(l.title)}</a>`;
+  let v;
+  try { v = artViewer(decodeURIComponent(m[2]), m[1] ? decodeURIComponent(m[1]) : 'main'); } catch { return artLinkOf(l, true); }
+  return `<a href="${esc(v)}" target="_blank" rel="noopener noreferrer"${l.changed ? ` title="${AV_CHANGED}"` : ''}>${esc(l.title)}</a>`;
 }
 function qtext(text, links) {
   return String(text ?? '').split(new RegExp(NAME_REF.source, 'g')).map((part, i) => {
@@ -3769,8 +3771,9 @@ function tlMark(r, spot, title, x, y) {
 function tlShow(x, y) {
   const hit = tlHitAt(x, y);
   TL.hit = hit ? { ...hit, x, y } : null;
+  // nothing the layer can name here (the drawer, the sidebar, a bar): no pin, and the click is the page's
+  if (!hit) { tlHide(); return; }
   tlCursor(x, y);
-  if (!hit) { tlEl('tl-hl').hidden = true; tlEl('tl-chip').hidden = true; return; }
   const r = hit.subject.kind === 'item' ? hit.el.getBoundingClientRect() : { left: x - 12, top: y - 12, width: 24, height: 24 };
   tlMark(r, hit.subject.kind !== 'item', hit.title, x, y);
 }
@@ -3856,6 +3859,9 @@ function tlTargetRect(s) {
   if (s?.kind === 'page') {
     const sec = document.getElementById(String(s.view).slice(1).split('/')[0]);
     if (!tlVisible(sec)) return null;
+    // a spot on a Loop tab is on that tab: none while another is shown
+    const tab = String(s.view).slice(1).split('/')[1];
+    if (sec?.id === 'loop' && tab && tab !== TAB) return null;
     const b = sec.getBoundingClientRect();
     const x = b.left + (s.at?.x ?? 0) * b.width, y = b.top + (s.at?.y ?? 0) * b.height;
     return { left: x - 12, right: x + 12, top: y - 12, bottom: y + 12, width: 24, height: 24 };
@@ -3879,7 +3885,11 @@ function tlGoTo(s) {
     const det = el.closest('details');
     if (det && !det.open) det.open = true;
     el.scrollIntoView({ block: 'center' });
-  } else if (s?.kind === 'page') document.getElementById(String(s.view).slice(1).split('/')[0])?.scrollIntoView();
+  } else if (s?.kind === 'page') {
+    const [sec, tab] = String(s.view).slice(1).split('/');
+    if (sec === 'loop' && tab && document.querySelector(`#loop-tabs [data-tab="${CSS.escape(tab)}"]`)) showTab(tab);
+    document.getElementById(sec)?.scrollIntoView();
+  }
 }
 // Where a frame subject's pin is now, on the screen and in the frame (fx, fy): at its anchor's
 // point inside the rect the lens last gave (clamped to it), or at its point alone; null when the
@@ -3987,7 +3997,14 @@ function tlCardBody(t) {
   if (acts !== TL.acts) { TL.acts = acts; tlEl('tl-c-acts').innerHTML = acts; }
   // the banner or the resolve form, redrawn only when it changes, so a half-typed outcome stays
   const rk = !t ? '' : TL.resolving ? `form:${t.id}:${t.questions.filter((q) => q.status === 'open').length}` : t.ready ? `ready:${t.id}:${t.ready.at}:${t.questions.filter((q) => q.status === 'open').length}` : '';
-  if (rk !== TL.readyKey) { TL.readyKey = rk; tlEl('tl-c-ready').innerHTML = !rk ? '' : TL.resolving ? tlResolveForm(t) : tlReady(t); }
+  if (rk !== TL.readyKey) {
+    // a question answered meanwhile changes the warning, never the words being typed or the caret
+    const was = tlEl('tl-outcome'), kept = was?.value ?? '', focused = document.activeElement === was, caret = was?.selectionStart ?? 0;
+    TL.readyKey = rk;
+    tlEl('tl-c-ready').innerHTML = !rk ? '' : TL.resolving ? tlResolveForm(t) : tlReady(t);
+    const now = tlEl('tl-outcome');
+    if (now && kept) { now.value = kept; if (focused) { now.focus(); now.setSelectionRange(caret, caret); } }
+  }
   // seen only when the owner can see it: a reply landing in a hidden tab still gets its dot
   if (t && document.visibilityState === 'visible') tlSeen(t);
   const turns = tlEl('tl-c-turns');
