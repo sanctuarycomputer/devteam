@@ -1,0 +1,910 @@
+exit 0
+--- stdout
+{
+  "project": "g1",
+  "kit": "unreleased",
+  "caps": {
+    "max_active_tickets": 5
+  },
+  "gates_configured": [],
+  "tickets": [
+    {
+      "id": "g1-01-a",
+      "title": "g1-01-a",
+      "feature": "g1-work",
+      "component": "g1",
+      "kind": "build",
+      "size": "S",
+      "risk": "normal",
+      "serves": [
+        "G1-S1"
+      ],
+      "depends_on": [],
+      "stage": "in-review",
+      "merge_sha": null,
+      "branch": "refs/heads/ticket/g1-01-a",
+      "deps_merged": true,
+      "held": null,
+      "phase": null,
+      "task": null,
+      "note": null,
+      "usd": null,
+      "waiting": null
+    },
+    {
+      "id": "g1-02-b",
+      "title": "g1-02-b",
+      "feature": "g1-work",
+      "component": "g1",
+      "kind": "build",
+      "size": "S",
+      "risk": "normal",
+      "serves": [
+        "G1-S1"
+      ],
+      "depends_on": [
+        "g1-01-a",
+        "g1-99-missing"
+      ],
+      "stage": "released",
+      "merge_sha": "<sha>",
+      "branch": "refs/heads/ticket/g1-02-b",
+      "deps_merged": false,
+      "held": null,
+      "phase": null,
+      "task": null,
+      "note": null,
+      "usd": null,
+      "waiting": null
+    }
+  ],
+  "critical_path": [
+    "g1-01-a",
+    "g1-02-b"
+  ],
+  "questions": [
+    {
+      "id": "q-<sha>-<sha>-supervisor",
+      "kind": "owner-decision",
+      "class": null,
+      "scope": null,
+      "ticket": "g1-01-a",
+      "re": null,
+      "sensor": null,
+      "thread": null,
+      "question": "Ship g1 behind a flag?",
+      "context": "",
+      "options": [],
+      "choices": [
+        {
+          "label": "yes",
+          "detail": "behind a flag"
+        },
+        {
+          "label": "no"
+        }
+      ],
+      "links": [
+        {
+          "title": "The spec",
+          "path": "docs/devteam/project/tickets/g1-01-a/spec.md",
+          "ref": "ticket/g1-01-a"
+        }
+      ],
+      "goal": null,
+      "change": null,
+      "rule_scope": null,
+      "recommendation": "yes",
+      "confidence": null,
+      "default": null,
+      "deadline": null,
+      "blocks": [],
+      "stake": null,
+      "urgency": null,
+      "settles": [],
+      "settles_if": null,
+      "settles_label": null,
+      "rating_history": [],
+      "approves": [],
+      "evidence": [],
+      "note": null,
+      "why_asked": {
+        "reasons": []
+      },
+      "secrets": [],
+      "secrets_posted": [],
+      "status": "open",
+      "answer": null,
+      "answered_by": null,
+      "matched": null,
+      "hash": "<sha>",
+      "rewritten": false,
+      "autonomy": null,
+      "standing_rule": null,
+      "channel": null,
+      "said": null,
+      "turn": null,
+      "review": null,
+      "result": null,
+      "declined": null,
+      "allow_partial": null,
+      "result_status": null,
+      "goal_hold": null,
+      "rank": {
+        "score": 4,
+        "own": 4,
+        "position": 1,
+        "of": 1,
+        "top": false,
+        "floor": null,
+        "chips": [],
+        "reason": "",
+        "sum": "score 4: impact 2 (no goal, counted as 2) × stake 2 (not rated, counted as 2) × urgency 1 (not rated, counted as 1)",
+        "parts": {
+          "goal": null,
+          "goal_title": null,
+          "goal_impact": 2,
+          "judged": false,
+          "impact_by": null,
+          "stake": 2,
+          "urgency": 1,
+          "urgency_given": null,
+          "rated": false,
+          "held_up": 0,
+          "on_path": 0,
+          "behind": 0,
+          "unblock": 0,
+          "default": false,
+          "default_soon": false,
+          "parked": false,
+          "floor": null,
+          "age_days": 0,
+          "settles": [],
+          "settled_by": []
+        }
+      }
+    }
+  ],
+  "open_messages": [],
+  "metrics": {
+    "tickets_merged": 0,
+    "phase_usd": {},
+    "cost": {
+      "source": "reported",
+      "usd_all": 0,
+      "tokens": {
+        "input": 0,
+        "output": 0,
+        "cache_read": 0,
+        "cache_write": 0
+      },
+      "by_model": {},
+      "unpriced_models": {},
+      "per_point": null,
+      "per_point_this_week": null,
+      "per_point_last_week": null,
+      "usd_total": 0,
+      "usd_per_merged_ticket": null,
+      "by_ticket": {}
+    },
+    "reviews": {
+      "by_stage": {
+        "final": {
+          "first_passes": 1,
+          "rejected": 0,
+          "rejection_rate": 0
+        }
+      },
+      "findings": 0,
+      "false_positive_rate": null
+    },
+    "gates": {
+      "gates": [],
+      "flaky_gates": [],
+      "flaky_tests": [],
+      "slowest_tests": []
+    },
+    "messages": {
+      "expecting_reply": 0,
+      "still_open": 0
+    },
+    "owner_questions": {
+      "asked": 1,
+      "open": 1,
+      "answer_rate_14d": null
+    },
+    "escaped_defects": 0,
+    "findings": [
+      {
+        "severity": "high",
+        "kind": "merged-out-of-order",
+        "subject": "g1-02-b",
+        "detail": "g1-02-b reached main before g1-01-a, which it depends on",
+        "suggestion": "check that g1-02-b works without it, and merge g1-01-a next; a revert is a ticket of its own",
+        "sev": 3
+      },
+      {
+        "severity": "high",
+        "kind": "merged-without-merge",
+        "subject": "g1-02-b",
+        "detail": "g1-02-b reached main at <sha> with no merge act: no gates, reviews or checks ran on it",
+        "suggestion": "check it now (check-pr at that sha, its records, its gates); a revert is a ticket of its own; then find how it landed (a push to main, the forge's button) and close that path",
+        "sev": 3
+      }
+    ],
+    "acknowledged": []
+  },
+  "progress": {
+    "features": [
+      "g1-work"
+    ],
+    "stories": {
+      "G1-S1": {
+        "feature": "g1-work",
+        "text": "it still works",
+        "release": "v1.0.0"
+      }
+    },
+    "tickets": [
+      {
+        "id": "g1-01-a",
+        "title": "g1-01-a",
+        "feature": "g1-work",
+        "component": "g1",
+        "kind": "build",
+        "size": "S",
+        "risk": "normal",
+        "weight": 1,
+        "serves": [
+          "G1-S1"
+        ],
+        "depends_on": [],
+        "wave": 1,
+        "released_in": null,
+        "target_release": "v1.0.0",
+        "stage": "in-review",
+        "phase": null,
+        "task": null,
+        "held": null,
+        "waiting": null
+      },
+      {
+        "id": "g1-02-b",
+        "title": "g1-02-b",
+        "feature": "g1-work",
+        "component": "g1",
+        "kind": "build",
+        "size": "S",
+        "risk": "normal",
+        "weight": 1,
+        "serves": [
+          "G1-S1"
+        ],
+        "depends_on": [
+          "g1-01-a",
+          "g1-99-missing"
+        ],
+        "wave": 2,
+        "released_in": "v1.0.0",
+        "target_release": "v1.0.0",
+        "stage": "released",
+        "phase": null,
+        "task": null,
+        "held": null,
+        "waiting": null
+      }
+    ]
+  },
+  "planners": [],
+  "ooda": {
+    "goals": [],
+    "roadmap": {
+      "rate_points_per_day": 1,
+      "median_cycle_days": null,
+      "goals": [],
+      "features": {
+        "g1-work": {
+          "feature": "g1-work",
+          "title": "G1",
+          "status": "in progress",
+          "goals": [
+            "g-<sha>-<sha>-supervisor"
+          ],
+          "points_total": 2,
+          "points_left": 1,
+          "stories": {
+            "done": 0,
+            "total": 1
+          },
+          "waves_left": 1,
+          "releases": [
+            "v1.0.0"
+          ],
+          "blocked_by_questions": []
+        }
+      },
+      "unassigned": [
+        "g1-work"
+      ],
+      "note": "Estimates assume goal-priority order at the current rate; a feature finishes no sooner than its remaining waves times the median cycle time. A goal with milestones is dated by its forecast (unplanned milestones by their size); one without, and with unplanned preconditions, has no date."
+    },
+    "retro": {
+      "due": false,
+      "reasons": [],
+      "due_since": null,
+      "last": null,
+      "all": []
+    },
+    "observations": [
+      {
+        "id": "o-<sha>-<sha>-owner",
+        "type": "observation",
+        "channel": "cli",
+        "source": "owner",
+        "subject": "g1",
+        "kind": "note",
+        "detail": "naïve — em dash ✓",
+        "source_key": "note:g1",
+        "refs": [],
+        "created_by": "owner",
+        "updates": []
+      },
+      {
+        "id": "o-<sha>-<sha>-owner",
+        "type": "observation",
+        "channel": "cli",
+        "source": "owner",
+        "subject": "g1",
+        "kind": "slow-test",
+        "detail": "slow 3",
+        "valence": -1,
+        "source_key": "slow:g1",
+        "refs": [],
+        "created_by": "owner",
+        "updates": []
+      },
+      {
+        "id": "o-<sha>-<sha>-supervisor",
+        "type": "observation",
+        "source": "supervisor",
+        "subject": "g1",
+        "kind": "slow-test",
+        "detail": "slow 2",
+        "valence": -1,
+        "source_key": "slow:g1",
+        "refs": [],
+        "created_by": "supervisor",
+        "updates": []
+      },
+      {
+        "id": "o-<sha>-<sha>-supervisor",
+        "type": "observation",
+        "source": "supervisor",
+        "subject": "g1",
+        "kind": "slow-test",
+        "detail": "slow 1",
+        "valence": -1,
+        "source_key": "slow:g1",
+        "refs": [],
+        "created_by": "supervisor",
+        "updates": []
+      }
+    ],
+    "clusters": [
+      {
+        "key": "slow:g1",
+        "count": 3,
+        "valence": -1,
+        "ids": [
+          "o-<sha>-<sha>-supervisor",
+          "o-<sha>-<sha>-supervisor",
+          "o-<sha>-<sha>-owner"
+        ],
+        "latest": "slow 3"
+      }
+    ],
+    "knowledge": [
+      {
+        "id": "k-<sha>-<sha>-owner",
+        "type": "knowledge",
+        "channel": "cli",
+        "kind": "fact",
+        "statement": "g1 builds with make",
+        "scope": "component:g1",
+        "status": "accepted",
+        "evidence": [],
+        "created_by": "owner",
+        "updates": []
+      }
+    ],
+    "problems": [],
+    "acts": [
+      {
+        "id": "a-<sha>-<sha>-supervisor",
+        "type": "act",
+        "class": "approve-plan",
+        "what": "plan ok",
+        "refs": [
+          "g1-01-a"
+        ],
+        "reversible": true,
+        "created_by": "supervisor",
+        "updates": [],
+        "correction": null,
+        "ladder": false,
+        "under": {
+          "authority": "constitution",
+          "approved_by": null,
+          "own": true
+        }
+      },
+      {
+        "id": "a-<sha>-<sha>-supervisor",
+        "type": "act",
+        "class": "approve-spec",
+        "what": "spec ok",
+        "refs": [
+          "g1-01-a"
+        ],
+        "reversible": true,
+        "created_by": "supervisor",
+        "updates": [],
+        "correction": null,
+        "ladder": false,
+        "under": {
+          "authority": "constitution",
+          "approved_by": null,
+          "own": true
+        }
+      },
+      {
+        "id": "a-<sha>-<sha>-supervisor",
+        "type": "act",
+        "class": "add-ticket",
+        "what": "added ticket g1-02-b",
+        "refs": [
+          "g1-02-b"
+        ],
+        "reversible": true,
+        "created_by": "supervisor",
+        "updates": [],
+        "correction": null,
+        "ladder": false,
+        "under": {
+          "authority": "constitution",
+          "approved_by": null,
+          "own": true
+        }
+      },
+      {
+        "id": "a-<sha>-<sha>-supervisor",
+        "type": "act",
+        "class": "add-ticket",
+        "what": "added ticket g1-01-a",
+        "refs": [
+          "g1-01-a"
+        ],
+        "reversible": true,
+        "created_by": "supervisor",
+        "updates": [],
+        "correction": null,
+        "ladder": false,
+        "under": {
+          "authority": "constitution",
+          "approved_by": null,
+          "own": true
+        }
+      },
+      {
+        "id": "a-<sha>-<sha>-supervisor",
+        "type": "act",
+        "class": "add-ticket",
+        "what": "added feature g1-work",
+        "refs": [
+          "g1-work"
+        ],
+        "reversible": true,
+        "created_by": "supervisor",
+        "updates": [],
+        "correction": null,
+        "ladder": false,
+        "under": {
+          "authority": "constitution",
+          "approved_by": null,
+          "own": true
+        }
+      }
+    ],
+    "decisions": [
+      {
+        "id": "k-<sha>-<sha>-owner",
+        "who": "owner",
+        "kind": "rule",
+        "class": null,
+        "scope": "component:g1",
+        "what": "g1 builds with make",
+        "refs": [],
+        "under": {
+          "status": "accepted"
+        },
+        "acts": [],
+        "correction": null
+      },
+      {
+        "id": "a-<sha>-<sha>-supervisor",
+        "who": "supervisor",
+        "kind": "act",
+        "class": "approve-plan",
+        "scope": null,
+        "what": "plan ok",
+        "rationale": null,
+        "options": [],
+        "confidence": null,
+        "refs": [
+          "g1-01-a"
+        ],
+        "reversible": true,
+        "under": {
+          "authority": "constitution",
+          "rung": null,
+          "ceiling": null,
+          "approved_by": null
+        },
+        "acts": [],
+        "correction": null
+      },
+      {
+        "id": "a-<sha>-<sha>-supervisor",
+        "who": "supervisor",
+        "kind": "act",
+        "class": "approve-spec",
+        "scope": null,
+        "what": "spec ok",
+        "rationale": null,
+        "options": [],
+        "confidence": null,
+        "refs": [
+          "g1-01-a"
+        ],
+        "reversible": true,
+        "under": {
+          "authority": "constitution",
+          "rung": null,
+          "ceiling": null,
+          "approved_by": null
+        },
+        "acts": [],
+        "correction": null
+      },
+      {
+        "id": "a-<sha>-<sha>-supervisor",
+        "who": "supervisor",
+        "kind": "act",
+        "class": "add-ticket",
+        "scope": null,
+        "what": "added ticket g1-02-b",
+        "rationale": null,
+        "options": [],
+        "confidence": null,
+        "refs": [
+          "g1-02-b"
+        ],
+        "reversible": true,
+        "under": {
+          "authority": "constitution",
+          "rung": null,
+          "ceiling": null,
+          "approved_by": null
+        },
+        "acts": [],
+        "correction": null
+      },
+      {
+        "id": "a-<sha>-<sha>-supervisor",
+        "who": "supervisor",
+        "kind": "act",
+        "class": "add-ticket",
+        "scope": null,
+        "what": "added ticket g1-01-a",
+        "rationale": null,
+        "options": [],
+        "confidence": null,
+        "refs": [
+          "g1-01-a"
+        ],
+        "reversible": true,
+        "under": {
+          "authority": "constitution",
+          "rung": null,
+          "ceiling": null,
+          "approved_by": null
+        },
+        "acts": [],
+        "correction": null
+      },
+      {
+        "id": "a-<sha>-<sha>-supervisor",
+        "who": "supervisor",
+        "kind": "act",
+        "class": "add-ticket",
+        "scope": null,
+        "what": "added feature g1-work",
+        "rationale": null,
+        "options": [],
+        "confidence": null,
+        "refs": [
+          "g1-work"
+        ],
+        "reversible": true,
+        "under": {
+          "authority": "constitution",
+          "rung": null,
+          "ceiling": null,
+          "approved_by": null
+        },
+        "acts": [],
+        "correction": null
+      }
+    ],
+    "trust": [
+      {
+        "class": "new-feature",
+        "about": "start planning a feature the owner hasn't asked for",
+        "rung": 1,
+        "rung_name": "ask",
+        "ceiling": 2,
+        "start": 1,
+        "acts_since_drop": 0,
+        "uncorrected_acts": [],
+        "corrections": 0,
+        "agreement": null,
+        "agreement_questions": [],
+        "meets_agreement": false,
+        "can_ask": false,
+        "history": []
+      },
+      {
+        "class": "priority-change",
+        "about": "reorder goals' work or move a feature between releases",
+        "rung": 1,
+        "rung_name": "ask",
+        "ceiling": 3,
+        "start": 1,
+        "acts_since_drop": 0,
+        "uncorrected_acts": [],
+        "corrections": 0,
+        "agreement": null,
+        "agreement_questions": [],
+        "meets_agreement": false,
+        "can_ask": false,
+        "history": []
+      },
+      {
+        "class": "release-scope",
+        "about": "move a story to a later release to ship the rest on time",
+        "rung": 1,
+        "rung_name": "ask",
+        "ceiling": 3,
+        "start": 1,
+        "acts_since_drop": 0,
+        "uncorrected_acts": [],
+        "corrections": 0,
+        "agreement": null,
+        "agreement_questions": [],
+        "meets_agreement": false,
+        "can_ask": false,
+        "history": []
+      },
+      {
+        "class": "upstream-pr",
+        "about": "open a PR on upstream devteam with a general improvement",
+        "rung": 1,
+        "rung_name": "ask",
+        "ceiling": 3,
+        "start": 1,
+        "acts_since_drop": 0,
+        "uncorrected_acts": [],
+        "corrections": 0,
+        "agreement": null,
+        "agreement_questions": [],
+        "meets_agreement": false,
+        "can_ask": false,
+        "history": []
+      },
+      {
+        "class": "release-production",
+        "about": "ship a tagged release to production, with every gate passing at the tagged commit",
+        "rung": 1,
+        "rung_name": "ask",
+        "ceiling": 3,
+        "start": 1,
+        "acts_since_drop": 0,
+        "uncorrected_acts": [],
+        "corrections": 0,
+        "agreement": null,
+        "agreement_questions": [],
+        "meets_agreement": false,
+        "can_ask": false,
+        "history": []
+      },
+      {
+        "class": "production-migration",
+        "about": "run a rollback-safe migration against production data",
+        "rung": 1,
+        "rung_name": "ask",
+        "ceiling": 3,
+        "start": 1,
+        "acts_since_drop": 0,
+        "uncorrected_acts": [],
+        "corrections": 0,
+        "agreement": null,
+        "agreement_questions": [],
+        "meets_agreement": false,
+        "can_ask": false,
+        "history": []
+      },
+      {
+        "class": "incident-fix",
+        "about": "open and run a ticket that fixes a production incident the sensors found",
+        "rung": 2,
+        "rung_name": "ask with a default",
+        "ceiling": 3,
+        "start": 2,
+        "acts_since_drop": 0,
+        "uncorrected_acts": [],
+        "corrections": 0,
+        "agreement": null,
+        "agreement_questions": [],
+        "meets_agreement": false,
+        "can_ask": false,
+        "history": []
+      },
+      {
+        "class": "production-remediation",
+        "about": "restart, scale or roll back production with a reviewed remediation script",
+        "rung": 1,
+        "rung_name": "ask",
+        "ceiling": 2,
+        "start": 1,
+        "acts_since_drop": 0,
+        "uncorrected_acts": [],
+        "corrections": 0,
+        "agreement": null,
+        "agreement_questions": [],
+        "meets_agreement": false,
+        "can_ask": false,
+        "history": []
+      }
+    ],
+    "classes": {
+      "new-feature": {
+        "ceiling": 2,
+        "start": 1,
+        "about": "start planning a feature the owner hasn't asked for",
+        "rung": 1
+      },
+      "priority-change": {
+        "ceiling": 3,
+        "start": 1,
+        "about": "reorder goals' work or move a feature between releases",
+        "rung": 1
+      },
+      "release-scope": {
+        "ceiling": 3,
+        "start": 1,
+        "about": "move a story to a later release to ship the rest on time",
+        "rung": 1
+      },
+      "upstream-pr": {
+        "ceiling": 3,
+        "start": 1,
+        "about": "open a PR on upstream devteam with a general improvement",
+        "rung": 1
+      },
+      "release-production": {
+        "ceiling": 3,
+        "start": 1,
+        "about": "ship a tagged release to production, with every gate passing at the tagged commit",
+        "rung": 1
+      },
+      "production-migration": {
+        "ceiling": 3,
+        "start": 1,
+        "about": "run a rollback-safe migration against production data",
+        "rung": 1
+      },
+      "incident-fix": {
+        "ceiling": 3,
+        "start": 2,
+        "about": "open and run a ticket that fixes a production incident the sensors found",
+        "rung": 2
+      },
+      "production-remediation": {
+        "ceiling": 2,
+        "start": 1,
+        "about": "restart, scale or roll back production with a reviewed remediation script",
+        "rung": 1
+      }
+    },
+    "impact_words": {
+      "1": "housekeeping",
+      "2": "worth having",
+      "3": "moves a number the project watches",
+      "4": "the project depends on it"
+    },
+    "reasons": [
+      {
+        "id": "below-rung",
+        "means": "the class is on the ladder and the supervisor isn't trusted to act alone yet"
+      },
+      {
+        "id": "owner-only",
+        "means": "the constitution reserves this to the owner"
+      },
+      {
+        "id": "one-way-door",
+        "means": "it can't be undone cheaply (§4)"
+      },
+      {
+        "id": "low-confidence",
+        "means": "the supervisor could decide but isn't sure enough of its recommendation"
+      },
+      {
+        "id": "goals-conflict",
+        "means": "two goals pull in different directions and only the owner can rank them"
+      },
+      {
+        "id": "missing-info",
+        "means": "it needs a fact only the owner has"
+      },
+      {
+        "id": "goal-ambiguity",
+        "means": "a goal isn't defined well enough to plan from"
+      },
+      {
+        "id": "escalated",
+        "means": "a worker asked, and it is the owner's call"
+      },
+      {
+        "id": "trust-evidence",
+        "means": "the owner keeps agreeing with the supervisor's recommendation in this class"
+      }
+    ],
+    "answered": [],
+    "log": {
+      "lines": 14,
+      "errors": 0,
+      "ignored": 0
+    }
+  },
+  "upkeep": {
+    "id": null,
+    "mode": "run",
+    "state": "running",
+    "running": [],
+    "reason": null,
+    "by": null,
+    "fleet": null,
+    "chores": []
+  },
+  "sensors": [],
+  "sensor_feed": [],
+  "incidents": [],
+  "sensor_ignores": [],
+  "fleet": {
+    "mode": null,
+    "op": null,
+    "reason": null
+  },
+  "library": {
+    "artifacts": [],
+    "previews": [],
+    "public": {
+      "project": "g1",
+      "root": "<tmp>/old"
+    },
+    "links": []
+  }
+}
+--- stderr
+
