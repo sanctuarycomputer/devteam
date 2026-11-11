@@ -336,14 +336,16 @@ fi
 # waits for the next one, and after three in a row it raises an alert (one, however long it lasts), so a held
 # operator can't go quiet.
 # Claude Code queues what's typed during a turn, so a busy operator just gets it after.
+# Every tmux call here has a time limit: a send-keys that never returned once wedged this loop for
+# hours, with no check-in and no alert. One that times out counts as held back.
 tick='Check on the box and your supervisors.'
 ( held=0; raised=
   while :; do
     sleep "${DEVTEAM_OPERATOR_TICK_SECONDS:-1800}"
     n=0; s=
     while [ "$n" -lt "${DEVTEAM_OPERATOR_TICK_RETRIES:-10}" ]; do
-      p=$(tmux display-message -p -t home:operator '#{pane_id}' 2>/dev/null) && s=$(/usr/local/bin/node /opt/devteam/kit/scripts/devteam.mjs machine pane-state "$p" 2>/dev/null) || s=gone
-      case $s in ready|busy) tmux send-keys -t "$p" -l "$tick"; tmux send-keys -t "$p" Enter; s=; break ;; esac
+      p=$(timeout 20 tmux display-message -p -t home:operator '#{pane_id}' 2>/dev/null) && s=$(timeout 60 /usr/local/bin/node /opt/devteam/kit/scripts/devteam.mjs machine pane-state "$p" 2>/dev/null) || s=gone
+      case $s in ready|busy) if timeout 20 tmux send-keys -t "$p" -l "$tick" && timeout 20 tmux send-keys -t "$p" Enter; then s=; break; fi; s=stuck ;; esac
       n=$((n + 1))
       sleep "${DEVTEAM_OPERATOR_TICK_RETRY_SECONDS:-60}"
     done
@@ -434,7 +436,7 @@ mkdir -p "$HOME/.box"; ( /usr/local/bin/box-recover > "$HOME/.box/recover.log" 2
 # tmux not answering (the box stopping) leaves the list as it was.
 while :; do
   sleep 60
-  panes=$(tmux list-panes -a -F '#{pane_id} #{pane_current_command}' 2>/dev/null) || continue
+  panes=$(timeout 20 tmux list-panes -a -F '#{pane_id} #{pane_current_command}' 2>/dev/null) || continue
   for k in "$HOME"/code/*/docs/devteam/scripts/devteam.mjs; do
     r=${k%/docs/devteam/scripts/devteam.mjs}
     p=$(cat "$r/docs/devteam/run/supervisor-pane" 2>/dev/null) || continue

@@ -137,9 +137,12 @@ function gitOrDie(args, cwd = HOME_CWD) {
 // worktree records its own head, while every other read goes to home (HOME_CWD).
 const cwdGit = (args) => git(args, process.cwd());
 const cwdGitOrDie = (args) => gitOrDie(args, process.cwd());
+// tmux gets a time limit unless the caller set one: a tmux call that never returns (send-keys has hung
+// for hours on a box) would otherwise wedge whatever called it, a dashboard's tick included.
+const TMUX_TIMEOUT_MS = 30000;
 function sh(cmd, args, opts = {}) {
   try {
-    return execFileSync(cmd, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], ...opts }).trim();
+    return execFileSync(cmd, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], ...(cmd === 'tmux' ? { timeout: TMUX_TIMEOUT_MS } : {}), ...opts }).trim();
   } catch {
     return null;
   }
@@ -9048,7 +9051,7 @@ function limitStop(rawLines) {
 // Not sh(): it trims the output, which would put the pane's first line at column 0.
 function paneBottom(target) {
   let text = '';
-  try { text = execFileSync('tmux', ['capture-pane', '-p', '-t', target], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }); } catch {}
+  try { text = execFileSync('tmux', ['capture-pane', '-p', '-t', target], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: TMUX_TIMEOUT_MS }); } catch {}
   return text.split('\n').map((l) => l.trimEnd()).filter((l) => l.trim()).slice(-15);
 }
 // A window that is one pane, stopped at a limit with nothing else going on: the tick asks before it
