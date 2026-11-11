@@ -281,6 +281,20 @@ export function gitReadFns(cwd) {
   const ctx = vm.createContext({ execFileSync, spawnSync, Buffer, process: { cwd: () => cwd } });
   return vm.runInContext(`${src.slice(i, j)}\nHOME_CWD = ${JSON.stringify(cwd)};\n;({ git, gitStatus, parseBatch, gitBatch, prefetchAt, showAt, atCommit })`, ctx);
 }
+// The same readers with the store of git facts, its file under runDir; onExit stands for the
+// process ending (the store writes then).
+export function gitFactFns(cwd, runDir) {
+  const src = fs.readFileSync(path.join(kit, 'scripts', 'devteam.mjs'), 'utf8');
+  const cut = (a, b) => { const i = src.indexOf(a), j = src.indexOf(b); assert.ok(i >= 0 && j > i, `${a} … ${b}`); return src.slice(i, j); };
+  const exits = [];
+  const writeJson = (p, obj) => { fs.mkdirSync(path.dirname(p), { recursive: true }); const tmp = `${p}.${process.pid}.tmp`; fs.writeFileSync(tmp, `${JSON.stringify(obj, null, 2)}\n`); fs.renameSync(tmp, p); };
+  const ctx = vm.createContext({ execFileSync, spawnSync, Buffer, fs, path, runDir, writeJson,
+    readJson: (p) => JSON.parse(fs.readFileSync(p, 'utf8')), isObj: (x) => !!x && typeof x === 'object' && !Array.isArray(x),
+    sha256: (b) => crypto.createHash('sha256').update(b).digest('hex'),
+    process: { cwd: () => cwd, on: (ev, f) => { if (ev === 'exit') exits.push(f); } } });
+  const fns = vm.runInContext(`${cut('/* git reads start */', '/* git reads end */')}\n${cut('/* git facts start */', '/* git facts end */')}\nHOME_CWD = ${JSON.stringify(cwd)};\n;({ commitDateOf, ancestorOf, releasedInAt, factGet })`, ctx);
+  return { ...fns, exit: () => { for (const f of exits.splice(0)) f(); } };
+}
 // A clean partition: nothing unowned, contested, empty or colliding (the script has no caller for it).
 export function coverageClean(r) {
   return !r.unowned.length && !r.contested.length && !r.empty.length && !r.case_collisions.length;

@@ -7,7 +7,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { gitReadFns } from './lib/kit.mjs';
+import { gitReadFns, gitFactFns } from './lib/kit.mjs';
 
 const tmpRepo = (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-speed-'));
@@ -62,4 +62,82 @@ test('the batched reader: output cut short leaves the rest missing, never a slic
   }
   const whole = R.parseBatch(full, specs);
   assert.equal(whole.get(specs[1]).bytes.toString(), 'bbbb\n');
+});
+
+test('git facts: kept only when definite, and asked again when what they depend on moves', (t) => {
+  const { dir, g } = tmpRepo(t);
+  const run = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-facts-'));
+  t.after(() => fs.rmSync(run, { recursive: true, force: true }));
+  const commit = (f) => { fs.writeFileSync(path.join(dir, f), f); g(['add', '-A']); g(['commit', '-qm', f]); return g(['rev-parse', 'HEAD']); };
+  const a = commit('a');
+  const b = commit('b');
+  const F = () => gitFactFns(dir, run);
+  const store = () => JSON.parse(fs.readFileSync(path.join(run, 'cache', 'git-facts.json'), 'utf8')).e;
+
+  // a commit's date, and ancestry both ways, are kept and read back without git
+  let f = F();
+  assert.equal(f.commitDateOf(a), Date.parse(g(['show', '-s', '--format=%cI', a])));
+  assert.equal(f.ancestorOf(a, b), true);
+  assert.equal(f.ancestorOf(b, a), false);
+  f.exit();
+  assert.equal(Object.keys(store()).length, 3, 'a date and two ancestry answers');
+
+  // releases: none yet, then a tag, then a release candidate beside it, then the tag deleted
+  f = F();
+  assert.equal(f.releasedInAt(a), null);
+  f.exit();
+  g(['tag', 'v2.0.0', b]);
+  assert.equal(F().releasedInAt(a), 'v2.0.0', 'a new tag changes the tag list, so the answer is asked again');
+  g(['tag', 'v1.9.0-rc1', b]);
+  assert.equal(F().releasedInAt(a), 'v2.0.0', 'a release candidate never counts');
+  g(['tag', '-d', 'v2.0.0']);
+  assert.equal(F().releasedInAt(a), null, 'a deleted tag is noticed');
+
+  // an object that isn't here: no answer, nothing kept; once it arrives, the real one
+  const other = tmpRepo(t);
+  fs.writeFileSync(path.join(other.dir, 'x'), 'x');
+  other.g(['add', '-A']);
+  other.g(['commit', '-qm', 'x']);
+  const x = other.g(['rev-parse', 'HEAD']);
+  f = F();
+  assert.equal(f.ancestorOf(x, b), null);
+  assert.ok(Number.isNaN(f.commitDateOf(x)));
+  f.exit();
+  assert.equal(Object.keys(store()).some((k) => k.includes(x)), false, 'an error is never kept');
+  g(['fetch', '-q', other.dir, 'main:refs/heads/other']);
+  assert.equal(F().ancestorOf(x, 'refs/heads/other'), true);
+
+  // a store that doesn't parse is ignored and written fresh
+  fs.writeFileSync(path.join(run, 'cache', 'git-facts.json'), '{ not json');
+  f = F();
+  assert.equal(f.ancestorOf(a, b), true);
+  f.exit();
+  assert.equal(store()[Object.keys(store())[0]] !== undefined, true);
+
+  // two processes writing at once: the file parses and holds what each added
+  const p1 = F();
+  const p2 = F();
+  p1.commitDateOf(a);
+  p2.commitDateOf(b);
+  p1.exit();
+  p2.exit();
+  const keys = Object.keys(store());
+  assert.ok(keys.some((k) => k.endsWith(a)) && keys.some((k) => k.endsWith(b)), 'the second writer reads the first one\'s additions');
+});
+
+test('git facts: a shallow clone deepened gets new ancestry answers', (t) => {
+  const { dir, g } = tmpRepo(t);
+  const run = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-facts-'));
+  t.after(() => fs.rmSync(run, { recursive: true, force: true }));
+  for (const f of ['a', 'b', 'c']) { fs.writeFileSync(path.join(dir, f), f); g(['add', '-A']); g(['commit', '-qm', f]); }
+  const first = g(['rev-list', '--max-parents=0', 'HEAD']);
+  const clone = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-shallow-'));
+  t.after(() => fs.rmSync(clone, { recursive: true, force: true }));
+  execFileSync('git', ['clone', '-q', '--depth', '1', `file://${dir}`, clone]);
+  let f = gitFactFns(clone, run);
+  assert.notEqual(f.ancestorOf(first, 'HEAD'), true, 'not provable in a shallow clone');
+  f.exit();
+  execFileSync('git', ['fetch', '-q', '--unshallow'], { cwd: clone });
+  f = gitFactFns(clone, run);
+  assert.equal(f.ancestorOf(first, 'HEAD'), true, 'deepened: asked again');
 });

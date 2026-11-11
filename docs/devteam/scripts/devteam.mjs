@@ -204,6 +204,75 @@ function showAt(sha, p, cwd = HOME_CWD) {
   return atCommit.has(k) ? asGitText(atCommit.get(k)) : git(['show', `${sha}:${p}`], cwd);
 }
 /* git reads end */
+
+/* git facts start */
+// Git's answers that never change, kept across processes in run/cache/git-facts.json: a commit's
+// date, whether one commit is an ancestor of another, the first release that holds a commit. Each
+// is keyed by everything it depends on (the repository, full shas, and for ancestry and releases
+// whether the clone is shallow; for releases the pattern and the tag list), and only a definite
+// answer is kept: an error (an object not fetched yet) is asked again next time. A cache of what git
+// computes, never a record (constitution: compute state, don't record it); deleting it costs time.
+const factsFile = () => path.join(runDir, 'cache', 'git-facts.json');
+const factsIn = () => { try { const j = readJson(factsFile()); return j?.v === 1 && isObj(j.e) ? j.e : {}; } catch { return {}; } };
+let factStore = null;
+let factsAdded = null;
+function factGet(k) {
+  factStore ??= factsIn();
+  return Object.hasOwn(factStore, k) ? factStore[k] : undefined;
+}
+function factSet(k, v) {
+  factGet(k);
+  factStore[k] = v;
+  if (!factsAdded) {
+    factsAdded = {};
+    // read again and add ours: another process may have written since; a race loses an addition only
+    process.on('exit', () => { try { writeJson(factsFile(), { v: 1, e: { ...factsIn(), ...factsAdded } }); } catch {} });
+  }
+  factsAdded[k] = v;
+}
+const perRepo = (fn) => { const m = new Map(); return (cwd) => { const k = gitCommonDirOf(cwd); if (!m.has(k)) m.set(k, fn(cwd)); return m.get(k); }; };
+const shallowOf = perRepo((cwd) => git(['rev-parse', '--is-shallow-repository'], cwd) === 'true');
+const tagPrintOf = perRepo((cwd) => sha256(git(['for-each-ref', '--format=%(refname)%00%(objectname)', 'refs/tags'], cwd) ?? ''));
+const fullShaOf = (x, cwd) => (FULL_SHA.test(x ?? '') ? x : x ? git(['rev-parse', '--verify', '--quiet', `${x}^{commit}`], cwd) : null);
+// A commit's date in ms, or NaN.
+function commitDateOf(sha, cwd = HOME_CWD) {
+  const full = fullShaOf(sha, cwd);
+  if (!full) return NaN;
+  const k = `d\0${gitCommonDirOf(cwd)}\0${full}`;
+  const kept = factGet(k);
+  if (kept !== undefined) return kept;
+  const r = gitStatus(['show', '-s', '--format=%cI', full], cwd);
+  const t = r.status === 0 ? Date.parse(r.stdout.toString('utf8').trim()) : NaN;
+  if (!Number.isNaN(t)) factSet(k, t);
+  return t;
+}
+// Whether a is an ancestor of b (or is b): true, false, or null when git couldn't say.
+function ancestorOf(a, b, cwd = HOME_CWD) {
+  const A = fullShaOf(a, cwd);
+  const B = fullShaOf(b, cwd);
+  if (!A || !B) return null;
+  const k = `a\0${gitCommonDirOf(cwd)}\0${shallowOf(cwd)}\0${A}\0${B}`;
+  const kept = factGet(k);
+  if (kept !== undefined) return kept;
+  const { status } = gitStatus(['merge-base', '--is-ancestor', A, B], cwd);
+  if (status !== 0 && status !== 1) return null;
+  factSet(k, status === 0);
+  return status === 0;
+}
+// The first tag matching pattern (default v*), not a release candidate, that contains sha.
+function releasedInAt(sha, pattern = 'v*', cwd = HOME_CWD) {
+  const full = fullShaOf(sha, cwd);
+  if (!full) return null;
+  const k = `r\0${gitCommonDirOf(cwd)}\0${shallowOf(cwd)}\0${tagPrintOf(cwd)}\0${pattern}\0${full}`;
+  const kept = factGet(k);
+  if (kept !== undefined) return kept;
+  const r = gitStatus(['tag', '--contains', full, '--list', pattern, '--sort=creatordate'], cwd);
+  if (r.status !== 0) return null;
+  const tag = r.stdout.toString('utf8').split('\n').find((t) => t && !/-rc/.test(t)) ?? null;
+  factSet(k, tag);
+  return tag;
+}
+/* git facts end */
 // tmux gets a time limit unless the caller set one: a tmux call that never returns (send-keys has hung
 // for hours on a box) would otherwise wedge whatever called it, a dashboard's tick included.
 const TMUX_TIMEOUT_MS = 30000;
@@ -339,7 +408,7 @@ const mainRoot = commonDir ? path.dirname(commonDir) : repoRoot;
 const cwdIsHome = !!cwdCommon && !!commonDir && realPath(cwdCommon) === realPath(commonDir);
 HOME_CWD = cwdIsHome || !commonDir ? undefined : mainRoot;
 // home's common dir is known already: reads at a commit key on it without asking git again
-if (commonDir) commonDirs.set(HOME_CWD ?? process.cwd(), commonDir);
+if (commonDir) for (const k of [HOME_CWD ?? process.cwd(), mainRoot]) commonDirs.set(k, commonDir);
 // The kit folder of the checkout you are in when it is home's (a worktree has its own copy): its
 // project/ is the branch's tickets and plans. Elsewhere, home's main checkout's, so mainRoot and
 // projectDir both follow home (never the cwd's repo).
@@ -1835,22 +1904,21 @@ const parseMainLog = (o) => (o ? o.split('\n') : []).filter(Boolean).map((l) => 
 const parseParents = (o) => (o ? o.split('\n') : []).filter(Boolean).map((l) => l.split(' '));
 // The commit on main that landed a ticket, for any repo: a merge from ticket/<id>, a squash titled
 // "<id>: …", or a merge whose second parent contains the branch tip and whose first parent does not.
-function findMergeSha(id, { log, parents, resolve, gitFn, ref }) {
+function findMergeSha(id, { log, parents, resolve, ancestor, ref }) {
   const esc = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const fromBranch = new RegExp(`from \\S*ticket/${esc}$`);
   for (const { sha, subject } of log()) if (fromBranch.test(subject) || subject.startsWith(`${id}:`)) return sha;
   if (!ref) return null;
+  const refSha = resolve(ref);
   for (const r of [`refs/heads/ticket/${id}`, `refs/remotes/origin/ticket/${id}`]) {
     const tip = resolve(r);
-    if (!tip || gitFn(['merge-base', '--is-ancestor', tip, ref]) === null) continue;
+    if (!tip || ancestor(tip, refSha) !== true) continue;
     for (const [sha, p1, p2] of parents()) {
-      if (p2 && gitFn(['merge-base', '--is-ancestor', tip, p2]) !== null && gitFn(['merge-base', '--is-ancestor', tip, p1]) === null) return sha;
+      if (p2 && ancestor(tip, p2) === true && ancestor(tip, p1) !== true) return sha;
     }
   }
   return null;
 }
-// The first tag matching pattern (default v*), not a release candidate, that contains sha.
-const releasedInWith = (gitFn, sha, pattern = 'v*') => (gitFn(['tag', '--contains', sha, '--list', pattern, '--sort=creatordate']) ?? '').split('\n').find((t) => t && !/-rc/.test(t)) ?? null;
 
 let mainLogCache;
 function mainLog() {
@@ -1872,7 +1940,7 @@ function homeTicketBranchRef(id) {
 const mergeShaCache = new Map();
 function homeMergeShaFor(id) {
   if (mergeShaCache.has(id)) return mergeShaCache.get(id);
-  const v = findMergeSha(id, { log: mainLog, parents: mergeParents, resolve: resolveCommit, gitFn: (a) => git(a), ref: mainRef() });
+  const v = findMergeSha(id, { log: mainLog, parents: mergeParents, resolve: resolveCommit, ancestor: (a, b) => ancestorOf(a, b), ref: mainRef() });
   mergeShaCache.set(id, v);
   return v;
 }
@@ -1894,12 +1962,12 @@ const mergedAtCache = new Map();
 function homeMergedAt(id) {
   if (!mergedAtCache.has(id)) {
     const sha = homeMergeShaFor(id);
-    const t = sha ? Date.parse(git(['show', '-s', '--format=%cI', sha]) ?? '') : NaN;
+    const t = sha ? commitDateOf(sha) : NaN;
     mergedAtCache.set(id, Number.isNaN(t) ? null : t);
   }
   return mergedAtCache.get(id);
 }
-const homeReleasedIn = (sha, pattern) => releasedInWith((a) => git(a), sha, pattern);
+const homeReleasedIn = (sha, pattern) => releasedInAt(sha, pattern);
 // Read a project file from a git ref (a ticket's branch, an exact head) or the working tree.
 function srcRead(src, rel) {
   if (src.repo && src.repo.name !== 'home') return src.repo.srcRead(src.ref ?? null, rel);
@@ -1975,10 +2043,10 @@ function linkRepo(id) {
     ...gitFacts(g, (args) => gitRun(args, root)),
     git: g, gitOrDie: (args, cwd = root) => gitOrDie(args, cwd),
     gh: (args, opts = {}) => { const spec = ghSpec(l.remote); return sh('gh', [...args, ...(spec ? ['-R', spec] : [])], { cwd: root, ...opts }); },
-    mergeShaFor: (tid) => { if (!c.mergeSha.has(tid)) c.mergeSha.set(tid, findMergeSha(tid, { log, parents, resolve, gitFn: g, ref: mainRefR() })); return c.mergeSha.get(tid); },
-    mergedAt: (tid) => { if (!c.mergedAt.has(tid)) { const sha = R.mergeShaFor(tid); const t = sha ? Date.parse(g(['show', '-s', '--format=%cI', sha]) ?? '') : NaN; c.mergedAt.set(tid, Number.isNaN(t) ? null : t); } return c.mergedAt.get(tid); },
+    mergeShaFor: (tid) => { if (!c.mergeSha.has(tid)) c.mergeSha.set(tid, findMergeSha(tid, { log, parents, resolve, ancestor: (a, b) => ancestorOf(a, b, root), ref: mainRefR() })); return c.mergeSha.get(tid); },
+    mergedAt: (tid) => { if (!c.mergedAt.has(tid)) { const sha = R.mergeShaFor(tid); const t = sha ? commitDateOf(sha, root) : NaN; c.mergedAt.set(tid, Number.isNaN(t) ? null : t); } return c.mergedAt.get(tid); },
     ticketBranchRef: (tid) => [`refs/heads/ticket/${tid}`, `refs/remotes/origin/ticket/${tid}`].find((r) => resolve(r)) ?? null,
-    releasedIn: (sha, pattern) => releasedInWith(g, sha, pattern),
+    releasedIn: (sha, pattern) => releasedInAt(sha, pattern, root),
     srcRead: (ref, relPath) => (ref ?? mainRefR() ? g(['show', `${ref ?? mainRefR()}:${rel}/${relPath}`]) : null),
     srcList: (ref, relDir) => (ref ?? mainRefR() ? (g(['ls-tree', '--name-only', `${ref ?? mainRefR()}:${rel}/${relDir}`]) ?? '').split('\n').filter(Boolean) : []),
     resetCaches: () => { c.mainRef = undefined; c.log = null; c.parents = null; c.mergeSha.clear(); c.mergedAt.clear(); },
@@ -7534,7 +7602,7 @@ const MEASURE_SOURCES = ['repo', 'prod', 'owner'];
 const measureOf = (g) => (g?.measure?.source === 'owner' ? { target: 1, unit: 'attested', direction: 'up', ...g.measure } : g?.measure ?? {});
 const shaOnMain = new Map();
 const isOnMain = (sha) => {
-  if (!shaOnMain.has(sha)) shaOnMain.set(sha, !!mainRef() && /^[0-9a-f]{7,40}$/.test(sha) && spawnSync('git', ['merge-base', '--is-ancestor', sha, mainRef()], { cwd: mainRoot, stdio: 'ignore' }).status === 0);
+  if (!shaOnMain.has(sha)) shaOnMain.set(sha, !!mainRef() && /^[0-9a-f]{7,40}$/.test(sha) && ancestorOf(sha, mainSha(), mainRoot) === true);
   return shaOnMain.get(sha);
 };
 // Why question q does not let the supervisor record goal goalId's owner reading (null when it does):
@@ -7620,7 +7688,7 @@ function goalReadings(gid) {
   const used = new Set();
   // a view: another repo's main only when this machine can read it (else its readings can't be checked)
   const link = logGet(gid)?.measure?.link ?? 'home';
-  const onMain = link === 'home' ? isOnMain : (sha) => { if (!repoReadable(link)) return false; const R = repo(link); return !!R.mainRef() && /^[0-9a-f]{7,40}$/.test(sha) && R.git(['merge-base', '--is-ancestor', sha, R.mainRef()]) !== null; };
+  const onMain = link === 'home' ? isOnMain : (sha) => { if (!repoReadable(link)) return false; const R = repo(link); return !!R.mainRef() && /^[0-9a-f]{7,40}$/.test(sha) && ancestorOf(sha, R.mainRef(), R.root) === true; };
   return all.filter((o) => {
     if (src === 'repo') return o.source === 'repo' && typeof o.sha === 'string' && onMain(o.sha);
     if (src === 'prod') return o.source === 'prod';
