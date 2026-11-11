@@ -249,6 +249,50 @@ test('threads: records, commands, delivery, the Inbox and the loop', async (t) =
     assert.match(F.fails(['thread', 'new', 'x', '--title', 'two\nlines']), /--title is one line/);
   });
 
+  await t.test("an artifact subject's at is one of the viewer's forms: main, a worktree name, a published tree", () => {
+    const art = (at) => JSON.stringify({ kind: 'artifact', slug: 'pricing-mock', at });
+    for (const at of ['main', 'Feature-X', 'ticket-04', `tree:${'a'.repeat(40)}`, `tree:${'b'.repeat(64)}`]) {
+      const [T] = F.owner(['thread', 'new', 'x', '--subject', art(at)]).split('\n');
+      assert.equal(show(T).subject.at, at);
+      F.owner(['thread', 'resolve', T]);
+    }
+    for (const at of [`tree:${'a'.repeat(41)}`, 'tree:abc', '../main', 'a/b', '-x', '.x', 'x'.repeat(101), '']) assert.match(F.fails(['thread', 'new', 'x', '--subject', art(at)]), /--subject: at is main, a worktree name, or tree:<id>|at is \d+ bytes/, JSON.stringify(at));
+  });
+
+  await t.test("a subject never keeps a box's capability, in whatever encoding the page wrote it: a marker in its place", () => {
+    // the gateway's /c/<expiry>.<session>.<mac>: digits, 16 and 22 base64url characters
+    const lit = '/c/1762900000000.AbCdEfGh_jKl-nOp.abcdefghijklmnopqrstuv';
+    const pct = encodeURIComponent(lit);
+    const pctDots = lit.replaceAll('/', '%2f').replaceAll('.', '%2E');
+    const twice = encodeURIComponent(pct);
+    const esc = lit.replaceAll('/', '\\/');
+    const uni = lit.replaceAll('/', '\\u002f');
+    const ent = lit.replaceAll('/', '&#x2F;');
+    const forms = [lit, pct, pctDots, twice, esc, uni, ent];
+    const forged = (f) => ({
+      kind: 'artifact', slug: 'pricing-mock', at: 'main', path: `share${f}.html`,
+      anchor: { selector: `a[href="${f}"]`, tag: 'a', role: 'link', text: `Share http://box.example${f}/artifact/main/x/`, name: `{"u":"${f}"}`, html: `<a href="http://box.example${f}/artifact/">${f}</a>` },
+    });
+    const removed = (f) => JSON.parse(JSON.stringify(forged(f)).replaceAll(JSON.stringify(f).slice(1, -1), '[link removed]'));
+    for (const f of forms) {
+      const [T] = F.owner(['thread', 'new', 'Make it green', '--title', `Share ${f}`, '--subject', JSON.stringify(forged(f))]).split('\n');
+      const v = show(T);
+      assert.deepEqual(v.subject, removed(f), f);
+      assert.equal(v.title, 'Share [link removed]', `the title too: ${f}`);
+      assert.doesNotMatch(JSON.stringify(v), /AbCdEfGh_jKl-nOp|abcdefghijklmnopqrstuv/, f);
+      F.owner(['thread', 'resolve', T]);
+    }
+    // a preview's route and errors, which its page wrote
+    const [V] = F.owner(['thread', 'new', 'x', '--subject', JSON.stringify({ kind: 'preview', name: 'cool-tiger', route: `/x?back=${pct}`, errors: [`fetch ${esc} failed`] })]).split('\n');
+    assert.deepEqual([show(V).subject.route, show(V).subject.errors], ['/x?back=[link removed]', ['fetch [link removed] failed']]);
+    F.owner(['thread', 'resolve', V]);
+    // ordinary text is never taken for one: nothing short of the gateway's whole form
+    const plainText = 'A/C units, see /c/docs, /c/123.abc.def, 3/c/4 and /c/1762900000000.AbCdEfGh.abcdefghijklmnopqrstuv';
+    const [P] = F.owner(['thread', 'new', 'x', '--title', plainText.slice(0, 100), '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}`, quote: plainText })]).split('\n');
+    assert.deepEqual([show(P).title, show(P).subject.quote], [plainText.slice(0, 100), plainText]);
+    F.owner(['thread', 'resolve', P]);
+  });
+
   await t.test('a 201st open thread is refused: resolve some first', () => {
     const snap = F.snapLog();
     try {

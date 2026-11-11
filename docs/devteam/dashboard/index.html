@@ -3510,10 +3510,44 @@ function tSubjectAt(el, x, y, sec) {
   const f = (n, a, w) => (w ? Math.min(1, Math.max(0, Math.round(((n - a) / w) * 1000) / 1000)) : 0);
   return { subject: { kind: 'page', view: s.view, at: { x: f(x, s.box.left, s.box.width), y: f(y, s.box.top, s.box.height) }, quote: tCut(tLine(s.heading, 300), 300) }, title: tLine(`the dashboard · ${s.heading || s.view}`, T_TITLE_MAX), el: s.el };
 }
-// A subject cut to the log's cap before it is sent: an element's HTML first, then console errors,
-// then the quote (the dashboard's own subjects are small; a later kit's lenses capture more).
+// What the log takes of a capture: each kind's keys (the kit's SUBJECT_KEYS) and each string's cap in
+// bytes (SUBJECT_CAPS, ANCHOR_CAPS: a test holds the three equal to the kit's).
+const T_CAPS = { ref: 120, quote: 300, view: 200, slug: 63, fp: 64, path: 300, name: 63, route: 300 };
+const T_ANCHOR_CAPS = { selector: 200, tag: 40, role: 40, text: 80, name: 80, html: 1024 };
+const T_SUBJECT_KEYS = { item: ['ref', 'quote'], page: ['view', 'at', 'quote'], artifact: ['slug', 'at', 'fp', 'path', 'anchor', 'point'], preview: ['name', 'route', 'viewport', 'anchor', 'point', 'errors'] };
+const T_ERRORS = 3, T_ERROR_MAX = 200, T_AT_MAX = 100;
+// A box of numbers (a rect, a point, a viewport), only when every one is a finite number, in whole
+// pixels unless it is a page's fractions; else null.
+const tBox = (v, keys, round = true) => (v && typeof v === 'object' && keys.every((k) => typeof v[k] === 'number' && Number.isFinite(v[k])) ? Object.fromEntries(keys.map((k) => [k, round ? Math.round(v[k]) : v[k]])) : null);
+// An anchor as a lens described it: the kit's keys only, each cut to its cap, its rect and point
+// only when whole; null when there is nothing of one.
+function tAnchor(a) {
+  if (!a || typeof a !== 'object' || Array.isArray(a)) return null;
+  const x = {};
+  for (const k of Object.keys(T_ANCHOR_CAPS)) if (typeof a[k] === 'string') x[k] = tCut(a[k], T_ANCHOR_CAPS[k]);
+  const rect = tBox(a.rect, ['x', 'y', 'w', 'h']);
+  if (rect) x.rect = rect;
+  const point = tBox(a.point, ['x', 'y']);
+  if (point) x.point = point;
+  return Object.keys(x).length ? x : null;
+}
+// A subject as the log takes it, before it is sent: only its kind's keys, each field cut to its own
+// cap (a lens's capture is the framed page's, so nothing in it is trusted to be small), then the whole
+// to the log's 2,500 bytes: an element's HTML first, then console errors, then the quote, the route.
 function tFit(s) {
-  const x = JSON.parse(JSON.stringify(s));
+  const keys = s && Object.hasOwn(T_SUBJECT_KEYS, s.kind) ? T_SUBJECT_KEYS[s.kind] : null;
+  if (!keys) return null;
+  const x = { kind: s.kind };
+  for (const k of keys) {
+    const v = s[k];
+    if (v === undefined || v === null) continue;
+    if (k === 'anchor') { const a = tAnchor(v); if (a) x.anchor = a; }
+    else if (k === 'point') { const p = tBox(v, ['x', 'y']); if (p) x.point = p; }
+    else if (k === 'viewport') { const p = tBox(v, ['w', 'h']); if (p) x.viewport = p; }
+    else if (k === 'at' && s.kind === 'page') { const p = tBox(v, ['x', 'y'], false); if (p) x.at = p; }
+    else if (k === 'errors') { if (Array.isArray(v)) x.errors = v.filter((e) => typeof e === 'string').slice(-T_ERRORS).map((e) => tCut(e, T_ERROR_MAX)); }
+    else if (typeof v === 'string') x[k] = tCut(v, k === 'at' ? T_AT_MAX : T_CAPS[k]);
+  }
   const size = () => tBytes(JSON.stringify(x));
   for (let i = 0; i < 50 && size() > T_SUBJECT_MAX; i++) {
     const over = size() - T_SUBJECT_MAX;

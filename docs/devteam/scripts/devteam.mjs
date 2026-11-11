@@ -4903,6 +4903,18 @@ const SUBJECT_KEYS = { item: ['ref', 'quote'], page: ['view', 'at', 'quote'], ar
 const SUBJECT_NEEDS = { item: ['ref'], page: ['view'], artifact: ['slug', 'at'], preview: ['name'] };
 const SUBJECT_CAPS = { ref: 120, quote: 300, view: 200, slug: 63, fp: 64, path: 300, name: 63, route: 300 };
 const ANCHOR_CAPS = { selector: 200, tag: 40, role: 40, text: 80, name: 80, html: 1024 };
+// A box's capability, as the gateway mints it (capFor in cloud/gateway.mjs): /c/<expiry>.<session>.<mac>,
+// the expiry in milliseconds, the session 16 base64url characters and the MAC 22. It is a live bearer
+// token for the owner's session, and an artifact framed on a box has it in its own address. The lens
+// never tells it, but a hostile artifact can speak as its lens, so whatever a subject or a title holds
+// is cut of it here, as it is written: as written, percent-encoded (once or more), JSON- or
+// \u-escaped, or as HTML entities. Only the whole form is cut, so no ordinary text is touched. A
+// marker in its place, not a refusal: the owner's words still save, and a page can't stop its own
+// thread by holding one. A page can still spell it some other way; this is the backstop, not the wall.
+const CAP_SLASH = String.raw`(?:\\*\/|%(?:25)*2f|\\*u002f|&#(?:x0*2f|0*47);)`;
+const CAP_DOT = String.raw`(?:\.|%(?:25)*2e|\\*u002e|&#(?:x0*2e|0*46);)`;
+const BOX_CAPABILITY = new RegExp(`${CAP_SLASH}c${CAP_SLASH}\\d{1,15}${CAP_DOT}[\\w-]{16}${CAP_DOT}[\\w-]{22}`, 'gi');
+const uncapped = (v) => (typeof v === 'string' ? v.replace(BOX_CAPABILITY, '[link removed]') : Array.isArray(v) ? v.map(uncapped) : isObj(v) ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, uncapped(x)])) : v);
 // Why a subject can't be recorded (null when it can): the size first, so a refusal says how big.
 function subjectProblem(s) {
   if (!isObj(s)) return 'a subject is a JSON object with a kind';
@@ -4919,7 +4931,7 @@ function subjectProblem(s) {
   for (const [k, v] of Object.entries(s)) {
     if (k === 'kind') continue;
     let p;
-    if (k === 'at') p = s.kind === 'page' ? box('at', v, ['x', 'y'], true) : text('at', v, 100) ?? (/^(main|tree:[0-9a-f]{40}|[a-z0-9][a-z0-9._-]*)$/.test(v) ? null : 'at is main, a worktree name, or tree:<id>');
+    if (k === 'at') p = s.kind === 'page' ? box('at', v, ['x', 'y'], true) : text('at', v, 100) ?? (ARTIFACT_AT.test(v) ? null : 'at is main, a worktree name, or tree:<id>');
     else if (k === 'point') p = box('point', v, ['x', 'y']);
     else if (k === 'viewport') p = box('viewport', v, ['w', 'h']);
     else if (k === 'errors') p = !Array.isArray(v) || v.length > 3 ? 'errors is a list of at most 3' : v.map((e, i) => text(`errors[${i}]`, e, 200)).find(Boolean) ?? null;
@@ -5075,11 +5087,12 @@ function cmdThread() {
     const words = turnText(wordsFrom(1));
     let subject;
     if (flags.subject !== undefined) {
-      try { subject = JSON.parse(flagStr('subject')); } catch { die('--subject is JSON: {"kind":"item","ref":"goal:g-…","quote":"…"}'); }
+      try { subject = uncapped(JSON.parse(flagStr('subject'))); } catch { die('--subject is JSON: {"kind":"item","ref":"goal:g-…","quote":"…"}'); }
       const p = subjectProblem(subject);
       if (p) die(`--subject: ${p}`);
     }
-    const given = flagStr('title');
+    // a viewer names a thread from its capture (button "Buy now"), so a title is cut of a capability too
+    const given = uncapped(flagStr('title'));
     if (given !== undefined && given.length > THREAD_TITLE_MAX) die(`--title is at most ${THREAD_TITLE_MAX} characters`);
     if (given !== undefined && UNSAFE_TEXT.test(given)) die('--title is one line of plain text');
     const title = threadTitle(given ?? words);
@@ -5286,9 +5299,15 @@ const ARTIFACT_LENS = String.raw`(() => {
   const tell = (m) => { try { parent.postMessage(Object.assign({ lens: 1 }, m), to); } catch (e) { /* no parent now */ } };
   // On a box the frame is served under /c/<capability>/artifact/..., and that capability is a live
   // bearer token for the owner's session: nothing the lens says carries it. The path is told from its
-  // artifact segment on, and the token is cut from any text of the page that holds its own address.
+  // artifact segment on, and the token is cut from any text of the page that holds its own address:
+  // as a path before /artifact/, and the page's own token wherever it is, however the page encoded it
+  // (percent-encoded, JSON- or \u-escaped, as entities), with the /c/ before it when there is one.
   const TOKEN = /\/c\/[^\/\s"'<>]+(?=\/artifact\/)/g;
-  const unCap = (s) => String(s == null ? '' : s).replace(TOKEN, '');
+  const OWN = (/^\/c\/([^/]+)\/artifact\//.exec(location.pathname) || [])[1];
+  const SLASH = '(?:\\\\*\\/|%(?:25)*2f|\\\\*u002f|&#(?:x0*2f|0*47);)';
+  const DOT = '(?:\\.|%(?:25)*2e|\\\\*u002e|&#(?:x0*2e|0*46);)';
+  const OWN_RE = OWN ? new RegExp('(?:' + SLASH + 'c' + SLASH + ')?' + OWN.split('.').map((p) => p.replace(/[^\w-]/g, (c) => '\\' + c)).join(DOT), 'gi') : null;
+  const unCap = (s) => { const t = String(s == null ? '' : s).replace(TOKEN, ''); return OWN_RE ? t.replace(OWN_RE, '') : t; };
 
   // --- what is where ------------------------------------------------------------------------------
   // an id or a class a person wrote, not one a build made (digit runs, hashes, React's :r1:)
@@ -11126,10 +11145,13 @@ async function cmdDashboard() {
     'preview-start': (b) => (typeof b.name === 'string' && PREVIEW_NAME.test(b.name) ? ['preview', 'start', b.name] : null),
     // Threads, from the layer. The owner's words always go after --, so words that start with -- stay
     // words; the title, subject and outcome as --key=value, kept whole whatever they hold. A subject
-    // is checked here before anything is spawned, and thread new checks it again. The dashboard
-    // points at items and spots on its own pages only; a later kit's viewers add artifact and preview
-    // subjects here (the log takes all four already).
-    'thread-new': (b) => (lineOk(b.title, THREAD_TITLE_MAX) && turnOk(b.text) && (b.subject == null || (['item', 'page'].includes(b.subject?.kind) && !subjectProblem(b.subject))) ? ['thread', 'new', `--title=${b.title.trim()}`, ...(b.subject ? [`--subject=${JSON.stringify(b.subject)}`] : []), '--', b.text.trim()] : null),
+    // is checked here before anything is spawned (any kind the log takes: an item or a spot on the
+    // dashboard, a spot on an artifact or a preview from a viewer), and thread new checks it again.
+    // A capability is cut from the title and subject first, so not even the argv holds one.
+    'thread-new': (b) => {
+      const [title, subject] = [uncapped(b.title), uncapped(b.subject)];
+      return lineOk(title, THREAD_TITLE_MAX) && turnOk(b.text) && (subject == null || !subjectProblem(subject)) ? ['thread', 'new', `--title=${title.trim()}`, ...(subject ? [`--subject=${JSON.stringify(subject)}`] : []), '--', b.text.trim()] : null;
+    },
     'thread-say': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && turnOk(b.text) ? ['thread', 'say', b.id, '--', b.text.trim()] : null),
     'thread-resolve': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && (b.outcome === undefined || b.outcome === '' || lineOk(b.outcome, OUTCOME_MAX, true)) ? ['thread', 'resolve', b.id, ...(b.outcome?.trim() ? [`--outcome=${b.outcome.trim()}`] : [])] : null),
     'thread-reopen': (b) => ((typeof b.id === 'string' && THREAD_ID.test(b.id)) && (b.text === undefined || b.text === '' || turnOk(b.text)) ? ['thread', 'reopen', b.id, ...(b.text?.trim() ? ['--', b.text.trim()] : [])] : null),
