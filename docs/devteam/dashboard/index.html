@@ -3651,7 +3651,9 @@ function tWhere(s) {
   if (s.kind === 'preview') return `${s.name}${s.route ? ` ${s.route}` : ''}`;
   return 'no subject';
 }
-const tKey = (s) => (!s ? null : s.kind === 'item' ? `item:${s.ref}` : s.kind === 'page' ? `page:${s.view}:${s.at?.x}:${s.at?.y}` : null);
+// A spot in a framed page, for its key: its anchor as the lens named it, else the point.
+const tFrameSpot = (s) => (s.anchor ? `${s.anchor.selector ?? ''}|${s.anchor.text ?? ''}` : `${s.point?.x},${s.point?.y}`);
+const tKey = (s) => (!s ? null : s.kind === 'item' ? `item:${s.ref}` : s.kind === 'page' ? `page:${s.view}:${s.at?.x}:${s.at?.y}` : s.kind === 'artifact' ? `artifact:${s.slug}:${s.path ?? 'index.html'}:${tFrameSpot(s)}` : s.kind === 'preview' ? `preview:${s.name}:${s.route ?? ''}:${tFrameSpot(s)}` : null);
 // One pin per subject, for open threads: numbered as the dock numbers them (by when each began), with
 // every thread on it, oldest first.
 function tPins(threads) {
@@ -3662,6 +3664,45 @@ function tPins(threads) {
 }
 // A dot in the dock: the supervisor spoke after the owner last looked at the thread (this browser).
 const tUnread = (t, seenAt) => t.turns.some((u) => u.by === 'supervisor' && (!seenAt || u.at > seenAt));
+// What a lens says (the artifact lens, the preview lens: spec §6, §7). Every message is the framed
+// page's, so its code's, and trusted for nothing: kept only from the frame the page posted to
+// (source), of a kind a lens says, a hit-reply only to an id this page minted for a real pointer
+// event (minted), and rebuilt from that kind's fields, every string cut of a box's capability and
+// to the kit's cap. It is shown as text and starts nothing until the owner writes.
+const T_LENS_SAYS = ['ready', 'route', 'hit-reply', 'rects', 'key', 'errors'];
+function tLensMessage(e, frameWin, minted) {
+  if (!frameWin || e.source !== frameWin) return null;
+  const m = e.data;
+  if (!m || typeof m !== 'object' || m.lens !== 1 || !T_LENS_SAYS.includes(m.type)) return null;
+  const str = (v, n) => (typeof v === 'string' ? tCut(tUncap(v), n) : null);
+  if (m.type === 'hit-reply') {
+    if (typeof m.id !== 'string' || !minted.has(m.id)) return null;
+    const anchor = tAnchor(m.anchor);
+    return { type: 'hit-reply', id: m.id, anchor, rect: anchor?.rect ?? tBox(m.rect, ['x', 'y', 'w', 'h']), route: str(m.route, T_CAPS.route) };
+  }
+  if (m.type === 'rects') return { type: 'rects', rects: (Array.isArray(m.rects) ? m.rects.slice(0, 200) : []).filter((r) => r && typeof r.key === 'string').map((r) => ({ key: r.key, rect: tBox(r.rect, ['x', 'y', 'w', 'h']), changed: r.changed === true })) };
+  if (m.type === 'key') return { type: 'key', key: m.key === 'Escape' ? 'Escape' : 'Shift', shift: m.shift === true };
+  if (m.type === 'ready') return { type: 'ready', path: str(m.path, T_CAPS.path), route: str(m.route, T_CAPS.route), title: typeof m.title === 'string' ? tLine(tUncap(m.title), 80) : '', viewport: tBox(m.viewport, ['w', 'h']) };
+  if (m.type === 'route') return { type: 'route', route: str(m.route, T_CAPS.route) };
+  return { type: 'errors', errors: (Array.isArray(m.errors) ? m.errors : []).filter((x) => typeof x === 'string').slice(-T_ERRORS).map((x) => tCut(tUncap(x), T_ERROR_MAX)) };
+}
+// The page inside an artifact, from the path its lens reports: whatever the prefix (main, a draft's
+// worktree, a published tree, the gateway's capability before it), what follows <slug>/.
+function tArtPath(p, slug) {
+  const m = /\/artifact\/(?:main|wt\/[^/]+|tree\/[0-9a-f]+)\/([^/]+)\/(.*)$/.exec(String(p ?? ''));
+  return m && m[1] === slug ? tCut(m[2] || 'index.html', T_CAPS.path) : 'index.html';
+}
+// A thread's title for a spot in a framed page: what is there as the page names it (button "Buy
+// now"), or the page itself. Page-written, so data like the rest of the capture (spec §1).
+function tFrameTitle(s) {
+  const where = s.kind === 'artifact' ? `${s.slug} · /${s.path || 'index.html'}` : `${s.name}${s.route ? ` · ${s.route}` : ''}`;
+  const a = s.anchor;
+  if (!a) return tLine(where, T_TITLE_MAX);
+  const named = tLine(a.name || a.text, 60);
+  return tLine(`${a.role || a.tag || 'element'}${named ? ` "${named}"` : ''}`, T_TITLE_MAX) || tLine(where, T_TITLE_MAX);
+}
+// Whether the stage shows a subject's page now: the same artifact and page, or the same preview and route.
+const tFrameOn = (s, stage) => !!s && s.kind === stage?.kind && (s.kind === 'artifact' ? s.slug === stage.slug && (s.path || 'index.html') === (stage.path || 'index.html') : s.kind === 'preview' && s.name === stage.name && (s.route ?? '') === (stage.route ?? ''));
 /* threads-core end */
 
 /* threads-layer start */
@@ -3684,22 +3725,32 @@ function tlHitAt(x, y) {
   const el = document.elementsFromPoint(x, y).find((e) => !tlOwn(e));
   return el ? tSubjectAt(el, x, y, tlSection) : null;
 }
+// The pin cursor at a point.
+function tlCursor(x, y) {
+  document.documentElement.classList.add('tl-aiming');
+  const cur = tlEl('tl-cursor');
+  cur.hidden = false;
+  cur.style.transform = `translate(${Math.round(x - 14)}px, ${Math.round(y - 35)}px)`;
+}
+// What is under it outlined (r: its box on the screen; spot: a point, not a thing), with a chip
+// naming it: as text, since on the stage the name is the framed page's.
+function tlMark(r, spot, title, x, y) {
+  const hl = tlEl('tl-hl'), chip = tlEl('tl-chip');
+  Object.assign(hl.style, { left: `${r.left - 3}px`, top: `${r.top - 3}px`, width: `${r.width + 6}px`, height: `${r.height + 6}px` });
+  hl.classList.toggle('spot', spot);
+  hl.hidden = false;
+  chip.textContent = title;
+  Object.assign(chip.style, { left: `${Math.round(Math.max(8, Math.min(x + 18, innerWidth - 270)))}px`, top: `${Math.round(Math.max(8, y - 36))}px` });
+  chip.hidden = false;
+}
 // The pin cursor at the point, what is under it outlined, and a chip with its name.
 function tlShow(x, y) {
   const hit = tlHitAt(x, y);
   TL.hit = hit ? { ...hit, x, y } : null;
-  document.documentElement.classList.add('tl-aiming');
-  const cur = tlEl('tl-cursor'), hl = tlEl('tl-hl'), chip = tlEl('tl-chip');
-  cur.hidden = false;
-  cur.style.transform = `translate(${Math.round(x - 14)}px, ${Math.round(y - 35)}px)`;
-  if (!hit) { hl.hidden = true; chip.hidden = true; return; }
+  tlCursor(x, y);
+  if (!hit) { tlEl('tl-hl').hidden = true; tlEl('tl-chip').hidden = true; return; }
   const r = hit.subject.kind === 'item' ? hit.el.getBoundingClientRect() : { left: x - 12, top: y - 12, width: 24, height: 24 };
-  Object.assign(hl.style, { left: `${r.left - 3}px`, top: `${r.top - 3}px`, width: `${r.width + 6}px`, height: `${r.height + 6}px` });
-  hl.classList.toggle('spot', hit.subject.kind !== 'item');
-  hl.hidden = false;
-  chip.textContent = hit.title;
-  Object.assign(chip.style, { left: `${Math.round(Math.max(8, Math.min(x + 18, innerWidth - 270)))}px`, top: `${Math.round(Math.max(8, y - 36))}px` });
-  chip.hidden = false;
+  tlMark(r, hit.subject.kind !== 'item', hit.title, x, y);
 }
 function tlHide() {
   TL.hit = null;
@@ -3713,16 +3764,23 @@ function tlPinMode(on) {
   tlEl('tl-pinbtn')?.setAttribute('aria-pressed', String(on));
   document.documentElement.classList.toggle('tl-pinning', on);
   if (!on) tlHide();
+  // over a frame, pin mode keeps the overlay up (and a wheel there scrolls the page in the frame)
+  tsRaise(on);
 }
 window.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && (tlShowing() || TL.pin)) { e.stopImmediatePropagation(); tlHide(); if (TL.pin) tlPinMode(false); }
+  if (e.key === 'Escape' && (tlShowing() || TL.pin || TS.raised)) { e.stopImmediatePropagation(); tlHide(); tsRaise(false); if (TL.pin) tlPinMode(false); }
   else if (e.key === 'Escape' && tlOwn(document.activeElement) && !tlEl('tl-card').hidden) { e.stopImmediatePropagation(); tlClose(); }
+  // Shift over a frame (spec §4): the parent sees the key while it has the focus, and raises the
+  // overlay, so the pointer over the frame is the layer's. The lens tells it when the frame has it.
+  else if (e.key === 'Shift' && tsOn() && !typingIn(document.activeElement)) tsRaise(true);
 }, true);
-window.addEventListener('keyup', (e) => { if (e.key === 'Shift' && !TL.pin) tlHide(); }, true);
-window.addEventListener('blur', () => { if (!TL.pin) tlHide(); });
+window.addEventListener('keyup', (e) => { if (e.key === 'Shift' && !TL.pin) { tlHide(); tsRaise(false); } }, true);
+window.addEventListener('blur', () => { if (!TL.pin) { tlHide(); tsRaise(false); } });
 // Shift shows the pin only once the pointer moves, and never over a field being typed in, so a
 // capital typed in a field doesn't summon it.
 window.addEventListener('pointermove', (e) => {
+  // over the stage's overlay the stage's own listeners point, in the frame's coordinates
+  if (e.target?.closest?.('#av-over')) return;
   if (!(e.shiftKey || TL.pin) || (e.pointerType === 'touch' && !TL.pin)) { if (tlShowing() && !TL.pin) tlHide(); return; }
   const over = document.elementFromPoint(e.clientX, e.clientY);
   if (tlOwn(over) || typingIn(over)) { tlHide(); return; }
@@ -3733,7 +3791,7 @@ window.addEventListener('pointermove', (e) => {
 // redraw among them) see it. A mouse starts on its click; a finger or a pen on lifting, and the
 // click the browser makes of that lift is swallowed.
 for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click', 'auxclick', 'dblclick', 'contextmenu']) window.addEventListener(type, (e) => {
-  if (tlOwn(e.target)) return;
+  if (tlOwn(e.target) || e.target?.closest?.('#av-over')) return;
   if (type === 'pointerdown') { TL.via = e.pointerType; if (TL.pin && e.pointerType !== 'mouse') tlShow(e.clientX, e.clientY); }
   const swallow = Date.now() < TL.swallowUntil && type !== 'pointerdown' && type !== 'pointerup';
   if (!tlShowing() && !swallow) return;
@@ -4089,6 +4147,95 @@ async function tlAct(action, body) {
   if (!VIEWER) load({ force: true });
   return true;
 }
+// ---- the stage's lens (spec §4, §6): what is where in the framed page ----
+const tsFrame = () => $('av-frame');
+const tsOn = () => !!TS.kind && !$('artifact-view').hidden;
+// To the lens on the stage. An artifact's frame has an opaque origin, so '*', and the artifact's own
+// scripts see these too: string ids, points and anchors from the log, never the owner's words (decision 7).
+function tsPost(m) { const w = tsFrame()?.contentWindow; if (!w || !TS.kind) return; try { w.postMessage({ lens: 1, ...m }, TS.target); } catch {} }
+// An id for one real pointer event, the newest 20 kept: only a reply to one of these is a hit.
+function tsMint(x, y) { const id = `h${++TS.seq}`; TS.minted.set(id, { x, y }); if (TS.minted.size > 20) TS.minted.delete(TS.minted.keys().next().value); return id; }
+// The overlay up (Shift, from either side, or pin mode) or down (Shift up, Esc): while it is up the
+// pointer over the frame is the layer's, and the frame gets its clicks back when it goes.
+function tsRaise(on) {
+  TS.raised = !!on && tsOn();
+  $('av-over').hidden = !TS.raised;
+  if (!TS.raised) { TS.hit = null; TS.last = null; if (!TL.pin) tlHide(); }
+}
+// A thread's subject for a spot on the stage: the lens's anchor there, else the point alone (no
+// lens, an older kit, a page that ignores it), which the pin draws where it was (spec §4 step 3).
+function tsSubject(anchor, x, y) {
+  if (TS.kind !== 'artifact') return null;
+  return { kind: 'artifact', slug: TS.slug, at: TS.at, ...(TS.fp ? { fp: TS.fp } : {}), path: TS.path || 'index.html', ...(anchor ? { anchor } : { point: { x: Math.round(x), y: Math.round(y) } }) };
+}
+// The outline and chip for the lens's latest answer, at the pointer.
+function tsShowHit() {
+  const l = TS.last;
+  const a = TS.hit?.anchor;
+  const s = l && tsSubject(a, l.x, l.y);
+  if (!s) return;
+  const fr = tsFrame().getBoundingClientRect();
+  const r = a?.rect ? { left: fr.left + a.rect.x, top: fr.top + a.rect.y, width: a.rect.w, height: a.rect.h } : { left: l.cx - 12, top: l.cy - 12, width: 24, height: 24 };
+  tlMark(r, !a?.rect, tFrameTitle(s), l.cx, l.cy);
+}
+// Where a pointer event is, in the frame's coordinates and the window's.
+const tsAt = (e) => { const fr = tsFrame().getBoundingClientRect(); return { x: e.clientX - fr.left, y: e.clientY - fr.top, cx: e.clientX, cy: e.clientY }; };
+// A click (a mouse) or a lift (a finger, a pen) starts a thread on what the lens says is there, given
+// 150 ms to answer this event's own question, else on the point; nothing is written until the owner
+// writes, and then only through tFit.
+async function tsPick(e) {
+  if (!e.isTrusted) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const at = tsAt(e);
+  const id = tsMint(at.x, at.y);
+  tsPost({ type: 'hit', id, x: at.x, y: at.y });
+  const reply = await new Promise((resolve) => {
+    const timer = setTimeout(() => { TS.waiters.delete(id); resolve(null); }, 150);
+    TS.waiters.set(id, (v) => { clearTimeout(timer); TS.waiters.delete(id); resolve(v); });
+  });
+  const s = tsSubject(reply?.anchor ?? null, at.x, at.y);
+  tsRaise(TL.pin);
+  tlHide();
+  if (s) tlStart({ subject: s, title: tFrameTitle(s), x: at.cx, y: at.cy });
+}
+const tsOver = $('av-over');
+// One question a frame: the newest point, at most once per animation frame (spec §4 step 2).
+tsOver.addEventListener('pointermove', (e) => {
+  if (!e.isTrusted) return;
+  TS.last = tsAt(e);
+  tlCursor(e.clientX, e.clientY);
+  tsShowHit();
+  if (TS.rafPending) return;
+  TS.rafPending = true;
+  requestAnimationFrame(() => { TS.rafPending = false; const l = TS.last; if (l && TS.raised) tsPost({ type: 'hit', id: tsMint(l.x, l.y), x: l.x, y: l.y }); });
+});
+tsOver.addEventListener('pointerleave', () => { TS.last = null; TS.hit = null; tlHide(); });
+tsOver.addEventListener('pointerdown', (e) => { TS.via = e.pointerType; e.preventDefault(); });
+tsOver.addEventListener('pointerup', (e) => { if (e.pointerType !== 'mouse') tsPick(e); });
+tsOver.addEventListener('click', (e) => { if (TS.via === 'mouse') tsPick(e); else e.preventDefault(); });
+// in pin mode (and with Shift held) the wheel scrolls the framed page, under the pointer
+tsOver.addEventListener('wheel', (e) => { e.preventDefault(); const at = tsAt(e); tsPost({ type: 'scroll-by', dx: e.deltaX, dy: e.deltaY, x: at.x, y: at.y }); }, { passive: false });
+// Each page the frame loads is asked what it is: its lens answers ready.
+tsFrame().addEventListener('load', () => { TS.ready = false; TS.path = null; TS.watch = ''; TS.rects.clear(); tsPost({ type: 'hello' }); });
+window.addEventListener('message', (e) => {
+  if (!TS.kind) return;
+  const m = tLensMessage(e, tsFrame()?.contentWindow, TS.minted);
+  if (!m) return;
+  // the page as its lens names it (ready.path), never the frame's src: a link in it goes elsewhere
+  if (m.type === 'ready') { TS.ready = true; if (TS.kind === 'artifact') TS.path = tArtPath(m.path, TS.slug); return; }
+  // a key only while the frame has the keyboard (decision 20): the page's own scripts can say the same at any time
+  if (m.type === 'key') { if (document.activeElement !== tsFrame()) return; if (m.key === 'Escape') { tsRaise(false); if (TL.pin) tlPinMode(false); } else tsRaise(m.shift || TL.pin); return; }
+  if (m.type === 'hit-reply') {
+    // a click's own question is answered first; then the newest question's answer only, so a slow
+    // reply to an older point never replaces it
+    TS.waiters.get(m.id)?.(m);
+    const n = Number(m.id.slice(1));
+    if (TS.hit && TS.hit.n > n) return;
+    TS.hit = { ...m, n };
+    if (TS.raised) tsShowHit();
+  }
+});
 /* threads-layer end */
 
 // Not under someone mid-action: a redraw replaces the controls it draws, so typing, an IME
@@ -4426,24 +4573,34 @@ document.addEventListener('click', async (ev) => {
 // instance's hello (its name) every 30 s. Nothing else: a dozen viewer tabs cost a dozen cheap reads.
 async function viewerBoot() {
   document.documentElement.classList.add('viewer');
-  const info = async (slug, at) => { try { const r = await fetch(`/api/view?${new URLSearchParams({ kind: 'artifact', slug, at })}`); return r.ok ? await r.json() : null; } catch { return null; } };
+  // what /api/view said: the artifact there, or its status (404: nothing there; else 0 for no answer)
+  const info = async (slug, at) => { try { const r = await fetch(`/api/view?${new URLSearchParams({ kind: 'artifact', slug, at })}`); return { status: r.status, d: r.ok ? await r.json() : null }; } catch { return { status: 0, d: null }; } };
   let at = VIEWER.at;
-  let d = await info(VIEWER.name, at);
+  let got = await info(VIEWER.name, at);
   let note = null;
-  // a published tree this checkout lacks, or a draft gone: main's, said so (spec §8), shown in place.
+  // a published tree this checkout lacks, or a draft gone (a 404, and only that): main's, said so
+  // (spec §8), shown in place. A describe that failed says so, and shows the version asked for.
   // Nothing here navigates or rewrites the URL: inside the owner wrapper it carries the gateway's
   // grant (w=), which a reload needs, and which nothing passes on to the frame.
-  if (!d && at !== 'main') { note = String(at).startsWith('tree:') ? 'Not the published version: this is the one on main' : 'Not the draft: this is the one on main'; at = 'main'; d = await info(VIEWER.name, at); }
-  showArtifact(VIEWER.name, at, { title: d?.title || VIEWER.name, note: d ? note : 'This artifact is not here', fp: d?.fp ?? null, mainFp: d?.main_fp ?? null });
+  if (got.status === 404 && at !== 'main') { note = String(at).startsWith('tree:') ? 'Not the published version: this is the one on main' : 'Not the draft: this is the one on main'; at = 'main'; got = await info(VIEWER.name, at); }
+  const d = got.d;
+  showArtifact(VIEWER.name, at, { title: d?.title || VIEWER.name, note: d ? note : got.status === 404 ? 'This artifact is not here' : 'This artifact could not be read', fp: d?.fp ?? null, mainFp: d?.main_fp ?? null });
   document.title = `${$('av-title').textContent} · devteam`;
   const hello = async () => { try { const r = await fetch('/api/hello'); if (r.ok) $('av-project').textContent = (await r.json()).name ?? ''; } catch {} };
   hello();
   setInterval(hello, 30000);
   // framed (the owner wrapper) without the keyboard, Shift reaches nobody here: say so until it comes (decision 16)
   const hint = () => { $('av-hint').hidden = window.parent === window || document.hasFocus(); };
+  // again whenever the keyboard may have moved: into this page or a frame in it (focusin), the tab
+  // shown again, and a tick after a blur, once the focus has landed wherever it went
   hint();
   addEventListener('focus', hint);
-  addEventListener('blur', hint);
+  addEventListener('focusin', hint);
+  document.addEventListener('visibilitychange', hint);
+  addEventListener('blur', () => setTimeout(hint, 0));
+  // and twice a second: a click straight into the artifact from the page around this one moves the
+  // keyboard into this page's frame without an event here (Chrome sends none), and hasFocus is cheap
+  setInterval(hint, 500);
   await tlRefresh();
   // a #talk/<id> link opens its card here: route() never runs in a viewer (decision 22)
   viewerTalk();

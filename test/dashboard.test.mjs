@@ -1074,7 +1074,7 @@ test("the thread layer's rules: what the pointer is on, a subject that fits, whe
   const src = html.slice(html.indexOf('/* threads-core start */'), html.indexOf('/* threads-core end */'));
   assert.ok(src.length > 500, 'the threads-core block is marked in index.html');
   const ctx = vm.createContext({ TextEncoder });
-  vm.runInContext(`${src}\n;globalThis.api = { T_CAPS, T_ANCHOR_CAPS, T_SUBJECT_KEYS, T_ERRORS, T_ERROR_MAX, T_AT_MAX, T_BOX_CAPABILITY, T_BOX_CAPABILITY_TAIL, tUncap, tBox, tAnchor, T_TYPES, T_REF, T_REF_MAX, T_KIND, T_HOME, T_WAIT_MS, T_TURN_MAX, T_ENCODED_MAX, T_SUBJECT_MAX, T_TITLE_MAX, tBytes, tCut, tLine, tSubjectAt, tFit, tCardState, tPlace, tWhere, tPins, tUnread };`, ctx);
+  vm.runInContext(`${src}\n;globalThis.api = { T_CAPS, T_ANCHOR_CAPS, T_SUBJECT_KEYS, T_ERRORS, T_ERROR_MAX, T_AT_MAX, T_BOX_CAPABILITY, T_BOX_CAPABILITY_TAIL, tUncap, tBox, tAnchor, T_TYPES, T_REF, T_REF_MAX, T_KIND, T_HOME, T_WAIT_MS, T_TURN_MAX, T_ENCODED_MAX, T_SUBJECT_MAX, T_TITLE_MAX, tBytes, tCut, tLine, tSubjectAt, tFit, tCardState, tPlace, tWhere, tPins, tUnread, T_LENS_SAYS, tLensMessage, tArtPath, tFrameTitle, tFrameOn, tKey };`, ctx);
   const A = ctx.api;
   const plain = (x) => JSON.parse(JSON.stringify(x));
   // the page and the kit name the same things, and the page sends no ref the log refuses
@@ -1201,6 +1201,49 @@ test("the thread layer's rules: what the pointer is on, a subject that fits, whe
   assert.equal(A.tUnread(reply, '2026-11-10T10:05:00.000Z'), false);
   assert.equal(A.tUnread(reply, null), true);
   assert.equal(A.tUnread({ turns: [{ by: 'owner', at: '2026-11-10T10:00:00.000Z' }] }, null), false);
+  // a lens's message: the framed page's, so only from that frame, a kind a lens says, a reply only to
+  // an id the page minted, and rebuilt from its kind's fields
+  const win = {};
+  const minted = new Map([['h1', { x: 1, y: 2 }]]);
+  const msg = (data, source = win) => A.tLensMessage({ data, source }, win, minted);
+  const anchor = { selector: '#buy', tag: 'button', text: 'Buy now', rect: { x: 1, y: 2, w: 3, h: 4 }, point: { x: 1, y: 1 }, onclick: 'x' };
+  assert.deepEqual(plain(msg({ lens: 1, type: 'hit-reply', id: 'h1', anchor, extra: 'x' })), { type: 'hit-reply', id: 'h1', anchor: { selector: '#buy', tag: 'button', text: 'Buy now', rect: { x: 1, y: 2, w: 3, h: 4 }, point: { x: 1, y: 1 } }, rect: { x: 1, y: 2, w: 3, h: 4 }, route: null });
+  assert.equal(msg({ lens: 1, type: 'hit-reply', id: 'h2', anchor }), null, 'an id the page never minted');
+  assert.equal(msg({ lens: 1, type: 'hit-reply', id: 1, anchor }), null, 'an id that is no string');
+  assert.equal(msg({ lens: 1, type: 'hit-reply', id: 'h1', anchor }, {}), null, 'another window');
+  assert.equal(msg({ lens: 1, type: 'go', route: '/' }), null, 'a kind a lens never says');
+  assert.equal(msg({ lens: 1, type: 'constructor' }), null, 'nor one every object has');
+  assert.equal(msg({ type: 'ready' }), null);
+  assert.equal(msg('{"lens":1}'), null);
+  assert.equal(A.tLensMessage({ data: { lens: 1, type: 'ready' }, source: null }, null, minted), null, 'no frame, nothing');
+  assert.deepEqual(plain(msg({ lens: 1, type: 'ready', path: '/artifact/main/x/', title: 'T‮itle', viewport: { w: 800, h: 600 } })), { type: 'ready', path: '/artifact/main/x/', route: null, title: 'T itle', viewport: { w: 800, h: 600 } });
+  // a page that speaks as its lens can say a box's capability: it is cut before anything keeps it
+  const cap = '/c/1767225600000.abcdefghijklmnop.abcdefghijklmnopqrstuv';
+  const capped = plain(msg({ lens: 1, type: 'ready', path: `${cap}/artifact/main/x/`, title: `see ${cap}`, route: `${cap}/r` }));
+  assert.deepEqual([capped.path, capped.title, capped.route], ['[link removed]/artifact/main/x/', 'see [link removed]', '[link removed]/r']);
+  assert.equal(plain(msg({ lens: 1, type: 'hit-reply', id: 'h1', anchor: { selector: '#a', text: `go ${cap}` } })).anchor.text, 'go [link removed]');
+  assert.deepEqual(plain(msg({ lens: 1, type: 'rects', rects: [{ key: 't-1', rect: { x: 1, y: 2, w: 3, h: 4 }, changed: 'yes' }, { key: 7 }, null] })), { type: 'rects', rects: [{ key: 't-1', rect: { x: 1, y: 2, w: 3, h: 4 }, changed: false }] }, 'a position update, its keys strings');
+  assert.deepEqual(plain(msg({ lens: 1, type: 'key', key: 'Delete', shift: 1 })), { type: 'key', key: 'Shift', shift: false });
+  assert.deepEqual(plain(msg({ lens: 1, type: 'errors', errors: ['a', 'b', 'c', 'd'.repeat(300), 5] })).errors.map((e) => A.tBytes(e)), [1, 1, 200], 'the last three, each cut');
+  // the page inside an artifact, under any of its prefixes
+  assert.equal(A.tArtPath('/artifact/main/pricing-mock/', 'pricing-mock'), 'index.html');
+  assert.equal(A.tArtPath('/c/a.b.c/artifact/tree/abc123/pricing-mock/sub/p.html', 'pricing-mock'), 'sub/p.html');
+  assert.equal(A.tArtPath('/artifact/wt/demo-01/main/main/x.html', 'main'), 'main/x.html', 'a slug named like a part of the path');
+  assert.equal(A.tArtPath('/elsewhere', 'pricing-mock'), 'index.html');
+  assert.equal(A.tArtPath(null, 'pricing-mock'), 'index.html');
+  // a spot in a framed page: its title, its key, whether the stage shows it
+  const frameSpot = { kind: 'artifact', slug: 'pricing-mock', at: 'main', path: 'index.html', anchor: { selector: '#buy', role: 'button', text: 'Buy now', name: 'Buy now' } };
+  assert.equal(A.tFrameTitle(frameSpot), 'button "Buy now"');
+  assert.equal(A.tFrameTitle({ ...frameSpot, anchor: undefined, point: { x: 1, y: 2 } }), 'pricing-mock · /index.html');
+  assert.equal(A.tFrameTitle({ kind: 'preview', name: 'cool-tiger', route: '/checkout', point: { x: 1, y: 2 } }), 'cool-tiger · /checkout');
+  assert.equal(A.tFrameTitle({ ...frameSpot, anchor: { tag: 'div', text: 'x\u0007'.repeat(80) } }).length <= 120, true);
+  assert.equal(A.tKey(frameSpot), 'artifact:pricing-mock:index.html:#buy|Buy now');
+  assert.equal(A.tKey({ ...frameSpot, anchor: undefined, point: { x: 1, y: 2 } }), 'artifact:pricing-mock:index.html:1,2');
+  assert.equal(A.tFrameOn(frameSpot, { kind: 'artifact', slug: 'pricing-mock', path: 'index.html' }), true);
+  assert.equal(A.tFrameOn(frameSpot, { kind: 'artifact', slug: 'pricing-mock', path: 'other.html' }), false);
+  assert.equal(A.tFrameOn(frameSpot, { kind: 'artifact', slug: 'other', path: 'index.html' }), false);
+  assert.equal(A.tFrameOn({ kind: 'item', ref: 'goal:g' }, { kind: 'artifact' }), false);
+  assert.equal(A.T_LENS_SAYS.includes('go'), false);
 });
 test("an artifact subject started on the dashboard reaches the supervisor's pane as its kind and slug: no title, no capture", { skip: hasTmux ? false : 'no tmux' }, async (t) => {
   const F = threadsFixture('threads-art-pane');
@@ -1225,6 +1268,32 @@ test("an artifact subject started on the dashboard reaches the supervisor's pane
 });
 // Every fetch the page makes, in order, for a test to read (the viewer polls nothing else).
 const COUNT_FETCH = '(() => { window.__asked = []; const f = window.fetch; window.fetch = (u, o) => { window.__asked.push(String(u)); return f(u, o); }; })();';
+// An artifact to point at: a button at a known spot on a tall page, and scripts of its own that run
+// beside the lens, say they ran, repeat what the viewer sends it, lie about a hit, say Shift is down,
+// and try to write. A second page in it, for the page its lens names.
+const PIN_MOCK = {
+  'artifact.json': JSON.stringify({ v: 1, title: 'Pin mock', summary: 'A button to pin', by: 'supervisor', for: [] }),
+  'index.html': `<!doctype html><html><head><style>body{margin:0;height:3000px}#buy{position:absolute;left:40px;top:120px;width:120px;height:40px}</style></head><body><button id="buy">Buy now</button><script>
+parent.postMessage({ own: 'ran' }, '*');
+addEventListener('message', (e) => { if (e.source === parent) parent.postMessage({ own: 'heard', data: e.data }, '*'); });
+parent.postMessage({ lens: 1, type: 'hit-reply', id: 'zz-forged', anchor: { selector: '#forged', text: 'FORGED' }, rect: { x: 0, y: 0, w: 10, h: 10 } }, '*');
+setTimeout(() => { parent.postMessage({ lens: 1, type: 'key', key: 'Shift', shift: true }, '*'); parent.postMessage({ own: 'keyed' }, '*'); }, 500);
+fetch('/api/thread-new', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: 'forged', text: 'from the artifact' }) }).then((r) => parent.postMessage({ own: 'wrote', status: r.status }, '*'), () => parent.postMessage({ own: 'wrote', status: 'refused' }, '*'));
+</script></body></html>`,
+  'more/page.html': '<!doctype html><html><body><p id="more">another page</p></body></html>',
+};
+// An artifact whose own script answers every hit in its lens's place (its listener, first, keeps the
+// question from the lens), with words a page might use to get into the dashboard: markup, and the
+// box's capability.
+const LIE_CAP = '/c/1767225600000.abcdefghijklmnop.abcdefghijklmnopqrstuv';
+const LIAR_MOCK = {
+  'artifact.json': JSON.stringify({ v: 1, title: 'Liar mock', summary: 'A page that lies', by: 'supervisor', for: [] }),
+  'index.html': `<!doctype html><html><body style="margin:0"><p style="margin:0;padding:40px">Point here</p><script>
+addEventListener('message', (e) => { const m = e.data; if (e.source === parent && m && m.type === 'hit') { e.stopImmediatePropagation(); parent.postMessage({ lens: 1, type: 'hit-reply', id: m.id, anchor: { selector: '#x', tag: 'p', role: 'note', text: 'Pay at ${LIE_CAP} now', name: '<img src=x onerror="window.__pwned=1">', html: '<img src=x onerror="window.__pwned=1">', rect: { x: 0, y: 0, w: 50, h: 50 } } }, '*'); } });
+</script></body></html>`,
+};
+// What an artifact's own scripts post to the page, kept for a test.
+const OWN_MESSAGES = "(() => { window.__own = []; addEventListener('message', (e) => { if (e.data && e.data.own) window.__own.push(e.data); }); })();";
 test('the viewer: one artifact on a stage the size of the tab, the threads and hello polled, never /api/data', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
   const undo = [];
   t.after(async () => { let err = null; for (const f of undo.reverse()) { try { await f(); } catch (e) { err ??= e; } } if (err) throw err; });
@@ -1294,11 +1363,12 @@ test('the viewer: one artifact on a stage the size of the tab, the threads and h
     assert.doesNotMatch(boot, /location\.(href|search|assign|replace|reload)\s*[=(]|history\./, 'viewerBoot never navigates');
   });
 
-  await t.test('nothing goes to the frame, nothing is taken from it, and nothing needs an opener', async () => {
-    // the lens speaks only once its framing page has (Task 5), and this page says nothing to it yet:
-    // the stage's lens state holds nothing a frame could have written
-    assert.deepEqual(await p.ev('[TS.ready, TS.path, TS.minted.size, TS.rects.size, TS.keyOf.size, TS.last, TS.hit]'), [false, null, 0, 0, 0, null, null]);
-    assert.doesNotMatch(boot, /postMessage|contentWindow|addEventListener\('message'/, 'the viewer sends the frame nothing and hears nothing from it');
+  await t.test('the frame is asked only what it is, and nothing needs an opener', async () => {
+    // the stage's lens says hello on each load and keeps the page its lens names; with no pointer
+    // over it, no question is minted and nothing else is kept from it
+    await soon('TS.ready', 'the lens to say ready');
+    assert.deepEqual(await p.ev('[TS.path, TS.minted.size, TS.rects.size, TS.keyOf.size, TS.last, TS.hit]'), ['index.html', 0, 0, 0, null, null]);
+    assert.doesNotMatch(boot, /postMessage|contentWindow|addEventListener\('message'/, "the viewer's own start talks to no frame: the stage's lens does");
     assert.doesNotMatch(boot, /\bopener\b/, 'nothing reads or sets an opener');
     for (const w of boot.match(/window\.open\([^)]*\)/g) ?? []) assert.match(w, /'noopener,noreferrer'/, w);
     assert.match(html, /<a class="av-btn" id="av-tab" target="_blank" rel="noopener noreferrer"/);
@@ -1332,6 +1402,28 @@ test('the viewer: one artifact on a stage the size of the tab, the threads and h
     const bar = await p.ev(`(() => { const r = document.getElementById('v').getBoundingClientRect(); return { x: r.left + 450, y: r.top + 20 }; })()`);
     await p.clickAt(bar.x, bar.y);
     await soon(`document.getElementById('v').contentDocument.getElementById('av-hint').hidden`, 'gone once the viewer has it');
+    // a click on the top page, outside the viewer, takes the keyboard back: the hint again
+    await p.clickAt(1100, 700);
+    await soon(`!document.getElementById('v').contentDocument.getElementById('av-hint').hidden`, 'the hint, the keyboard gone');
+    // a click on the artifact itself, in the viewer's own frame, gives it to the viewer's page
+    const art = await p.ev(`(() => { const v = document.getElementById('v').getBoundingClientRect(), f = document.getElementById('v').contentDocument.getElementById('av-frame').getBoundingClientRect(); return { x: v.left + f.left + 200, y: v.top + f.top + 200 }; })()`);
+    await p.clickAt(art.x, art.y);
+    await soon(`document.getElementById('v').contentDocument.activeElement === document.getElementById('v').contentDocument.getElementById('av-frame')`, 'the artifact has the keyboard');
+    await soon(`document.getElementById('v').contentDocument.getElementById('av-hint').hidden`, 'gone once the artifact has it');
+  });
+
+  await t.test("an artifact /api/view can't read says so, and shows the version asked for: only nothing there falls back to main", async () => {
+    // the viewer's /api/view answered with a failure: a 500, then no answer at all
+    for (const [fault, what] of [['new Response(\'{}\', { status: 500 })', 'a 500'], ['Promise.reject(new TypeError(\'Failed to fetch\'))', 'a network error']]) {
+      const { identifier } = await p.send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => { const f = window.fetch; window.fetch = (u, o) => (String(u).startsWith('/api/view') ? ${fault} : f(u, o)); })();` });
+      await p.send('Page.navigate', { url: `${B}/view/artifact/viewer-mock?at=tree:${T}` });
+      await soon(`document.getElementById('av-note').textContent === 'This artifact could not be read'`, `the note, for ${what}`);
+      assert.deepEqual(await p.ev(`[document.getElementById('av-note').hidden, document.getElementById('av-frame').getAttribute('src'), TS.at]`), [false, `/artifact/tree/${T}/viewer-mock/`, `tree:${T}`], `${what}: the version asked for, not main`);
+      await p.send('Page.removeScriptToEvaluateOnNewDocument', { identifier });
+    }
+    // an artifact not there at all, even on main
+    await p.send('Page.navigate', { url: `${B}/view/artifact/no-such-mock` });
+    await soon(`document.getElementById('av-note').textContent === 'This artifact is not here'`, 'the note, for nothing there');
   });
 
   await t.test('Escape leaves it where it is: a viewer has nothing to go back to', async () => {
@@ -1344,6 +1436,162 @@ test('the viewer: one artifact on a stage the size of the tab, the threads and h
     // and a frame later, nothing it might have queued has moved the page either
     await p.ev('new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))');
     assert.deepEqual(await p.ev(`[document.getElementById('artifact-view').hidden, location.pathname, location.hash, window.__esc]`), [false, '/view/artifact/viewer-mock', '', true]);
+  });
+});
+test('Shift over an artifact: the overlay, what the lens says is under the pointer, a thread on that spot', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 240000 }, async (t) => {
+  const undo = [];
+  t.after(async () => { let err = null; for (const f of undo.reverse()) { try { await f(); } catch (e) { err ??= e; } } if (err) throw err; });
+  const F = threadsFixture('stage-pins');
+  undo.push(() => F.done());
+  landArtifact(F, 'pin-mock', PIN_MOCK);
+  landArtifact(F, 'liar-mock', LIAR_MOCK);
+  const port = await freePort();
+  const B = `http://127.0.0.1:${port}`;
+  const dash = startDashboard(F.old, F.env({}), ['--port', String(port)]);
+  undo.push(() => dash.stop());
+  const chrome = await openChrome();
+  undo.push(() => chrome.close());
+  const p = await chrome.newPage();
+  undo.push(() => p.close());
+  await until(() => /dashboard on http/.test(dash.out()), 'the dashboard');
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  await p.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
+  await p.send('Page.addScriptToEvaluateOnNewDocument', { source: POLL_FAST });
+  await p.send('Page.addScriptToEvaluateOnNewDocument', { source: OWN_MESSAGES });
+  await p.send('Page.navigate', { url: `${B}/#artifact/main/pin-mock` });
+  const soon = async (expr, what) => { const end = Date.now() + 30000; for (;;) { const v = await p.ev(expr); if (v) return v; if (Date.now() > end) assert.fail(`timed out: ${what}`); await new Promise((r) => setTimeout(r, 50)); } };
+  const threads = () => JSON.parse(F.owner(['thread', 'list', '--all', '--json']));
+  // the frame's own spot on the page, and a point inside it
+  const frameAt = async (x, y) => { const r = await p.ev(`(() => { const r = document.getElementById('av-frame').getBoundingClientRect(); return { x: r.left, y: r.top }; })()`); return { x: r.x + x, y: r.y + y }; };
+  // the keyboard back on the dashboard's own page, out of any field and the frame
+  const keysHere = () => p.ev(`(() => { document.activeElement?.blur?.(); window.focus(); return document.activeElement === document.body; })()`);
+  await soon(`typeof TS === 'object' && TS.ready`, 'the lens to say ready');
+
+  await t.test("the artifact's own inline script runs beside the lens; the page is the one its lens names", async () => {
+    await soon(`window.__own.some((m) => m.own === 'ran')`, 'its own script');
+    assert.equal(await p.ev(`[TS.kind, TS.slug, TS.at, TS.path].join()`), 'artifact,pin-mock,main,index.html');
+  });
+
+  await t.test("the artifact's own made-up Shift, with the keyboard on the dashboard, raises nothing", async () => {
+    await soon(`window.__own.some((m) => m.own === 'keyed')`, 'its made-up key');
+    assert.notEqual(await p.ev(`document.activeElement === document.getElementById('av-frame')`), true, 'the frame never had the keyboard');
+    assert.deepEqual(await p.ev(`[document.getElementById('av-over').hidden, TS.raised]`), [true, false]);
+    // and its made-up reply, said before it, to an id the page never minted, was kept nowhere
+    assert.equal(await p.ev('TS.hit'), null, 'no hit from a reply nobody asked for');
+  });
+
+  await t.test('Shift raises the overlay; over the button the lens names it, and the layer outlines it', async () => {
+    const at = await frameAt(100, 140);
+    await p.hold('Shift', true);
+    await soon(`!document.getElementById('av-over').hidden`, 'the overlay');
+    await p.move(at.x, at.y, 8);
+    await soon(`document.getElementById('tl-chip').textContent === 'button "Buy now"' && !document.getElementById('tl-hl').hidden`, 'the chip and the outline');
+    const hl = await p.ev(`(() => { const a = document.getElementById('tl-hl').getBoundingClientRect(), f = document.getElementById('av-frame').getBoundingClientRect(); return [Math.round(a.left - f.left), Math.round(a.top - f.top)]; })()`);
+    assert.deepEqual(hl, [37, 117], 'around the button, in the frame');
+    await p.hold('Shift', false);
+    await soon(`document.getElementById('av-over').hidden && document.getElementById('tl-cursor').hidden`, 'Shift up: lowered');
+  });
+
+  await t.test('with the keyboard in the frame, its lens tells Shift, and that raises the overlay', async () => {
+    // a real click on the page in the frame gives it the keyboard
+    const blank = await frameAt(600, 500);
+    await p.clickAt(blank.x, blank.y);
+    await soon(`document.activeElement === document.getElementById('av-frame')`, 'the frame has the keyboard');
+    await p.hold('Shift', true);
+    await soon(`!document.getElementById('av-over').hidden && TS.raised`, 'raised by what the lens said');
+    await p.hold('Shift', false);
+    await soon(`document.getElementById('av-over').hidden && !TS.raised`, 'lowered when it said Shift is up');
+    await keysHere();
+  });
+
+  await t.test('a Shift+click starts a thread on the button: its anchor, where it was clicked, the page and its fingerprint', async () => {
+    const at = await frameAt(100, 140);
+    await p.hold('Shift', true);
+    await soon(`!document.getElementById('av-over').hidden`, 'the overlay');
+    await p.move(at.x, at.y, 8);
+    await soon(`TS.hit?.anchor?.selector === '#buy'`, 'the lens\'s answer for the hover');
+    await p.clickAt(at.x, at.y, 8);
+    await p.hold('Shift', false);
+    await soon(`TL.draft?.subject?.kind === 'artifact'`, 'a thread about to start');
+    const s = await p.ev('TL.draft.subject');
+    const fp = JSON.parse(F.owner(['artifacts', '--json'])).find((a) => a.slug === 'pin-mock' && a.at === 'main').fp;
+    assert.deepEqual([s.slug, s.at, s.path, s.fp, s.anchor.selector, s.anchor.tag, s.anchor.text, s.anchor.point.x, s.anchor.point.y, s.point], ['pin-mock', 'main', 'index.html', fp, '#buy', 'button', 'Buy now', 60, 20, undefined]);
+    assert.equal(await p.ev('TL.draft.title'), 'button "Buy now"');
+    await p.type('Make it green');
+    await p.key('Enter');
+    const th = await until(() => threads().find((x) => x.subject?.kind === 'artifact'), 'the thread');
+    assert.deepEqual([th.title, th.subject.anchor.selector, th.turns[0].text], ['button "Buy now"', '#buy', 'Make it green']);
+    await p.ev('tlClose()');
+    await keysHere();
+  });
+
+  await t.test('a click on the page with no answer from a lens in time starts a thread on the point alone', async () => {
+    await p.ev(`TS.target = 'http://nowhere.invalid'`); // nothing the lens can hear: no reply comes
+    const at = await frameAt(500, 400);
+    await p.hold('Shift', true);
+    await soon(`!document.getElementById('av-over').hidden`, 'the overlay');
+    await p.clickAt(at.x, at.y, 8);
+    await p.hold('Shift', false);
+    await soon(`TL.draft?.subject?.point?.x === 500`, 'the point');
+    assert.equal(await p.ev('JSON.stringify(TL.draft.subject.anchor)'), undefined);
+    assert.equal(await p.ev('TL.draft.title'), 'pin-mock · /index.html');
+    await p.ev(`TS.target = '*'`);
+    await p.key('Escape');
+    await keysHere();
+  });
+
+  await t.test("what the artifact says can't start, write or answer anything, and nothing sent to it carries the owner's words", async () => {
+    await soon(`window.__own.some((m) => m.own === 'wrote')`, 'its try at writing');
+    assert.equal(await p.ev(`window.__own.find((m) => m.own === 'wrote').status`), 'refused', 'its own fetch to an owner route never left the sandbox');
+    assert.equal(threads().filter((x) => x.title === 'forged').length, 0);
+    assert.equal(await p.ev(`TS.hit?.anchor?.text === 'FORGED'`), false, 'a hit-reply to an id the page never minted is dropped');
+    const heard = await p.ev(`window.__own.filter((m) => m.own === 'heard').map((m) => m.data)`);
+    assert.ok(heard.some((m) => m.type === 'hello'), 'it heard hello');
+    assert.ok(heard.some((m) => m.type === 'hit'), 'it heard the hits');
+    // every question's id is a string the page minted, and nothing of the owner's words is in any
+    assert.deepEqual(heard.filter((m) => m.id !== undefined && !(typeof m.id === 'string' && /^h\d+$/.test(m.id))), [], 'string ids only');
+    assert.deepEqual([...new Set(heard.map((m) => m.type))].filter((k) => !['hello', 'hit', 'scroll-by'].includes(k)), [], 'only questions');
+    assert.ok(heard.every((m) => !JSON.stringify(m).includes('Make it green')), 'never the owner\'s words');
+  });
+
+  await t.test('a page further in the artifact: its lens names it, and a thread there is on that page', async () => {
+    await p.ev(`document.getElementById('av-frame').src = '/artifact/main/pin-mock/more/page.html'; true`);
+    await soon(`TS.ready && TS.path === 'more/page.html'`, 'ready, from the page its lens names');
+    const at = await frameAt(20, 20);
+    await p.hold('Shift', true);
+    await soon(`!document.getElementById('av-over').hidden`, 'the overlay');
+    await p.move(at.x, at.y, 8);
+    await soon(`TS.hit?.anchor?.selector === '#more'`, 'its lens\'s answer');
+    await p.clickAt(at.x, at.y, 8);
+    await p.hold('Shift', false);
+    await soon(`TL.draft?.subject?.path === 'more/page.html'`, 'a thread on that page');
+    await p.key('Escape');
+    await keysHere();
+  });
+
+  await t.test("a page's lies about what is there are its words: shown as text, cut of the box's capability, and never markup", async () => {
+    await p.ev(`location.hash = '#artifact/main/liar-mock'`);
+    await soon(`TS.slug === 'liar-mock' && TS.ready`, 'the liar on the stage');
+    const at = await frameAt(60, 60);
+    await p.hold('Shift', true);
+    await soon(`!document.getElementById('av-over').hidden`, 'the overlay');
+    await p.move(at.x, at.y, 8);
+    await soon(`TS.hit?.anchor?.role === 'note'`, 'its answer');
+    assert.equal(await p.ev(`document.getElementById('tl-chip').textContent`), 'note "<img src=x onerror="window.__pwned=1">"', 'the chip shows its words as text');
+    await p.clickAt(at.x, at.y, 8);
+    await p.hold('Shift', false);
+    await soon(`TL.draft?.subject?.slug === 'liar-mock'`, 'a thread about to start');
+    const s = await p.ev('TL.draft.subject');
+    assert.equal(s.anchor.text, 'Pay at [link removed] now');
+    assert.doesNotMatch(JSON.stringify(s), /1767225600000/, 'no capability in the subject');
+    await p.ev(`document.querySelector('#tl-card details')?.setAttribute('open', ''); true`);
+    assert.deepEqual(await p.ev(`[document.querySelectorAll('#tl img').length, window.__pwned ?? null]`), [0, null], 'its markup never became the page\'s');
+    await p.type('Who wrote this');
+    await p.key('Enter');
+    const th = await until(() => threads().find((x) => x.subject?.slug === 'liar-mock'), 'the thread');
+    assert.doesNotMatch(JSON.stringify(th), /1767225600000/, 'nothing written carries it');
+    assert.equal(th.subject.anchor.text, 'Pay at [link removed] now');
   });
 });
 // The thread layer in Chrome, on a project of its own: aiming (this task), the card (Task 11), the
