@@ -2462,8 +2462,11 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     await p.ev(`showTab('observe')`);
     await p.ev(`location.hash = '#talk/${P}'`);
     await soon(`TAB === 'decide' && !document.getElementById('tl-card').hidden`, 'the Decide tab, and the card');
+    const pinned = () => p.ev(`[...document.querySelectorAll('#tl-pins .tl-pin')].some((b) => b.dataset.tlPin === '${P}')`);
+    await p.ev(`tlPins()`);
+    assert.equal(await pinned(), true, 'its pin is on the Decide tab');
     await p.ev(`showTab('observe'); tlPins()`);
-    assert.equal(await p.ev(`[...document.querySelectorAll('#tl-pins .tl-pin')].some((b) => b.dataset.tlPin === '${P}')`), false, 'no pin on a tab that isn\'t shown');
+    assert.equal(await pinned(), false, 'no pin on a tab that isn\'t shown');
     await p.key('Escape');
   });
 
