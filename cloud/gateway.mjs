@@ -266,6 +266,260 @@ export function previewLinks(list, ports, ownPort, ttydPort = 7681) {
   }
   return links;
 }
+// --- the preview lens: the gateway's own page on a preview's name, framing the app -------------
+// The kit's viewer frames it at /.devteam/lens. On the app's own origin, it reads the app's page for
+// the viewer over postMessage (spec §7). The kit's laptop relay serves the same bytes, so its
+// source is in devteam.mjs too, and a test holds the two equal. It is a String.raw, so its regular
+// expressions read as written, and so it may hold no backtick and no dollar sign before a brace.
+export const PREVIEW_LENS = String.raw`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Preview</title><style>html,body{margin:0;height:100%;overflow:hidden;background:#fff}iframe{display:block;border:0;width:100%;height:100%}</style></head>
+<body><iframe id="app" title="The app" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-pointer-lock allow-downloads"></iframe><script>
+(() => {
+  'use strict';
+  // devteam's preview lens. It is on the app's own origin, so it can read the app's page. It frames
+  // the app, and answers the viewer that frames it, over postMessage, about what is where. It takes
+  // only the viewer's questions (hello, hit, resolve, scroll-by, scroll-to, go), tells it only about
+  // the app (ready, route, hit-reply, rects, key, errors), and holds nothing of the owner's.
+  const CAPS = { selector: 200, tag: 40, role: 40, text: 80, name: 80, html: 1024, route: 300, error: 200, errors: 3 };
+  const WATCH_MAX = 200;
+  const KEY_MAX = 120;
+  const frame = document.getElementById('app');
+  const enc = new TextEncoder();
+  const size = (s) => enc.encode(s).length;
+  // at most n bytes of UTF-8, never half a character
+  const cap = (s, n) => {
+    const str = String(s == null ? '' : s);
+    if (size(str) <= n) return str;
+    let out = '';
+    let b = 0;
+    for (const c of str) { const k = size(c); if (b + k > n) break; out += c; b += k; }
+    return out;
+  };
+  const capDots = (s, n) => (size(s) <= n ? s : cap(s, n - 3) + '\u2026');
+  const oneLine = (s) => String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
+  const num = (v) => typeof v === 'number' && isFinite(v);
+  const idOk = (id) => (typeof id === 'string' && id.length > 0 && id.length <= 64) || (Number.isInteger(id) && id >= 0);
+
+  // --- the viewer: the page that frames this one, and only it ----------------------------------
+  // This page's frame-ancestors says who that may be. Here: a message must come from that frame
+  // (never the app, which shares this origin), and from the origin first heard.
+  let viewer = null;
+  const tell = (m) => { if (viewer) parent.postMessage(Object.assign({ lens: 1 }, m), viewer); };
+
+  // --- the app ----------------------------------------------------------------------------------
+  const appWindow = () => { try { const w = frame.contentWindow; return w && w.document && w.location.href !== 'about:blank' ? w : null; } catch (e) { return null; } };
+  const routeOf = (w) => { try { return w.location.origin === location.origin ? cap(w.location.pathname + w.location.search + w.location.hash, CAPS.route) : null; } catch (e) { return null; } };
+  // a path on this origin, and never the lens's own
+  const safeRoute = (r) => {
+    if (typeof r !== 'string' || r[0] !== '/' || r[1] === '/' || r.indexOf('\\') >= 0 || size(r) > 2048) return null;
+    try { const u = new URL(r, location.origin); return u.origin === location.origin && u.pathname.indexOf('/.devteam/') !== 0 ? u.pathname + u.search + u.hash : null; } catch (e) { return null; }
+  };
+
+  // --- what is where ------------------------------------------------------------------------------
+  // an id or a class a person wrote, not one a build made (digit runs, hashes, React's :r1:)
+  const plain = (s) => /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(s) && !/[0-9]{3,}/.test(s) && !s.split(/[-_]/).some((p) => p.length >= 5 && /[0-9]/.test(p) && /[A-Za-z]/.test(p));
+  const only = (doc, sel) => { try { return doc.querySelectorAll(sel).length === 1; } catch (e) { return false; } };
+  const quoted = (v) => '"' + String(v).replace(/["\\]/g, '\\$&') + '"';
+  const selectorOf = (el, doc) => {
+    const tag = el.localName;
+    if (el.id && plain(el.id) && only(doc, '#' + CSS.escape(el.id))) return '#' + CSS.escape(el.id);
+    for (const [n, ok] of [['data-testid', true], ['name', /^(input|select|textarea|button|form)$/.test(tag)], ['aria-label', true]]) {
+      const v = el.getAttribute(n);
+      const sel = v ? tag + '[' + n + '=' + quoted(v) + ']' : '';
+      if (ok && v && size(v) <= 100 && only(doc, sel)) return sel;
+    }
+    const steps = [];
+    for (let e = el; e && e.nodeType === 1 && e !== doc.documentElement && steps.length < 6; e = e.parentElement) {
+      if (e !== el && e.id && plain(e.id) && only(doc, '#' + CSS.escape(e.id))) { steps.unshift('#' + CSS.escape(e.id)); break; }
+      let n = 1;
+      for (let s = e.previousElementSibling; s; s = s.previousElementSibling) if (s.localName === e.localName) n += 1;
+      steps.unshift(e.localName + Array.prototype.filter.call(e.classList, plain).slice(0, 2).map((c) => '.' + CSS.escape(c)).join('') + ':nth-of-type(' + n + ')');
+    }
+    while (steps.length > 1 && size(steps.join(' > ')) > CAPS.selector) steps.shift();
+    return cap(steps.join(' > '), CAPS.selector);
+  };
+  const ROLES = { button: 'button', select: 'combobox', textarea: 'textbox', img: 'img', nav: 'navigation', main: 'main', header: 'banner', footer: 'contentinfo', form: 'form', table: 'table', ul: 'list', ol: 'list', li: 'listitem', dialog: 'dialog', aside: 'complementary', section: 'region', option: 'option', summary: 'button' };
+  const INPUTS = { checkbox: 'checkbox', radio: 'radio', button: 'button', submit: 'button', reset: 'button', image: 'button', range: 'slider', search: 'searchbox' };
+  const roleOf = (el) => {
+    const r = el.getAttribute('role');
+    if (r) return r;
+    const t = el.localName;
+    if (t === 'a') return el.hasAttribute('href') ? 'link' : '';
+    if (t === 'input') return INPUTS[(el.getAttribute('type') || 'text').toLowerCase()] || 'textbox';
+    if (/^h[1-6]$/.test(t)) return 'heading';
+    return ROLES[t] || '';
+  };
+  const nameOf = (el, doc) => {
+    const label = el.getAttribute('aria-label');
+    if (label) return label;
+    const by = el.getAttribute('aria-labelledby');
+    const named = by ? by.split(/\s+/).map((id) => { const x = doc.getElementById(id); return x ? x.textContent : ''; }).join(' ') : '';
+    if (oneLine(named)) return named;
+    if (el.labels && el.labels.length) return el.labels[0].textContent;
+    for (const n of ['alt', 'title', 'placeholder']) { const v = el.getAttribute(n); if (v) return v; }
+    return el.textContent;
+  };
+  // the element with its own children, each child's contents collapsed to an ellipsis
+  const htmlOf = (el) => {
+    const top = el.cloneNode(false);
+    let k = 0;
+    for (const c of el.childNodes) {
+      if (++k > 50) { top.appendChild(el.ownerDocument.createTextNode('\u2026')); break; }
+      if (c.nodeType === 3) top.appendChild(c.cloneNode(false));
+      else if (c.nodeType === 1) { const d = c.cloneNode(false); if (c.firstChild) d.textContent = '\u2026'; top.appendChild(d); }
+    }
+    return capDots(top.outerHTML, CAPS.html);
+  };
+  const rectOf = (el) => { const r = el.getBoundingClientRect(); return { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) }; };
+  const textOf = (el) => cap(oneLine(el.textContent), CAPS.text);
+  const anchorOf = (el, doc, x, y) => {
+    const rect = rectOf(el);
+    return { selector: selectorOf(el, doc), tag: cap(el.localName, CAPS.tag), role: cap(roleOf(el), CAPS.role), text: textOf(el), name: cap(oneLine(nameOf(el, doc)), CAPS.name), html: htmlOf(el), rect, point: { x: Math.round(x - rect.x), y: Math.round(y - rect.y) } };
+  };
+  // Where an anchor is now: by its selector (changed: with other text now), else an element of its
+  // tag with its text, the nearest to where it was.
+  const find = (doc, a) => {
+    let el = null;
+    try { el = doc.querySelector(a.selector); } catch (e) { el = null; }
+    if (el) { const t = textOf(el); return { el, changed: typeof a.text === 'string' && t !== a.text, text: t }; }
+    if (typeof a.text !== 'string' || !a.text || typeof a.tag !== 'string' || !/^[a-z][a-z0-9-]*$/.test(a.tag)) return null;
+    const was = a.rect && num(a.rect.x) && num(a.rect.y) ? a.rect : { x: 0, y: 0 };
+    const all = doc.getElementsByTagName(a.tag);
+    let best = null;
+    let far = Infinity;
+    for (let i = 0; i < all.length && i < 5000; i++) {
+      if (textOf(all[i]) !== a.text) continue;
+      const r = all[i].getBoundingClientRect();
+      const d = Math.hypot(r.left - was.x, r.top - was.y);
+      if (d < far) { far = d; best = all[i]; }
+    }
+    return best ? { el: best, changed: false, text: a.text } : null;
+  };
+
+  // --- what the viewer watches: sent when it moves --------------------------------------------
+  let watched = [];
+  let sent = '';
+  const sendRects = (id) => {
+    const w = appWindow();
+    const rects = watched.map((x) => { const f = w ? find(w.document, x.anchor) : null; return f ? { key: x.key, rect: rectOf(f.el), changed: f.changed, text: f.text } : { key: x.key, rect: null }; });
+    const now = JSON.stringify(rects);
+    if (id === undefined && now === sent) return;
+    sent = now;
+    tell(id === undefined ? { type: 'rects', rects } : { type: 'rects', id, rects });
+  };
+  let framePending = false;
+  const soon = () => { if (framePending || !watched.length) return; framePending = true; requestAnimationFrame(() => { framePending = false; sendRects(); }); };
+  let settle = 0;
+  const later = () => { if (!watched.length) return; clearTimeout(settle); settle = setTimeout(() => sendRects(), 100); };
+
+  // --- what the app does: its route, its keys, its errors ----------------------------------------
+  let route = null;
+  const checkRoute = () => { const w = appWindow(); const r = w ? routeOf(w) : null; if (r === route) return; route = r; tell({ type: 'route', route: r }); soon(); };
+  let errors = [];
+  const describe = (x) => { try { return x && typeof x === 'object' && 'message' in x ? String(x.message) : String(x); } catch (e) { return 'an error'; } };
+  const noteError = (text) => { const one = cap(oneLine(text), CAPS.error); if (!one) return; errors = errors.concat(one).slice(-CAPS.errors); tell({ type: 'errors', errors }); };
+  let shiftDown = false;
+  const onKey = (e) => {
+    if (e.key !== 'Shift' && e.key !== 'Escape') return;
+    shiftDown = e.type === 'keydown' ? e.key === 'Shift' || e.shiftKey : e.key !== 'Shift' && e.shiftKey;
+    tell({ type: 'key', key: e.key, shift: shiftDown });
+  };
+  const onBlur = () => { if (shiftDown) { shiftDown = false; tell({ type: 'key', key: 'Shift', shift: false }); } };
+  const readyOf = (w) => (w ? { type: 'ready', route: routeOf(w), title: cap(oneLine(w.document.title), CAPS.text), viewport: { w: w.innerWidth, h: w.innerHeight } } : { type: 'ready', route: null, title: '', viewport: null });
+  // Each page the app loads is a new window: listen on it, in the capture phase so the app can't stop
+  // a key reaching here, and note the errors it logs from then on.
+  let attached = null;
+  const attach = () => {
+    const w = appWindow();
+    if (!w || w.document === attached) return;
+    attached = w.document;
+    errors = [];
+    try {
+      w.addEventListener('keydown', onKey, true);
+      w.addEventListener('keyup', onKey, true);
+      w.addEventListener('blur', onBlur);
+      w.addEventListener('error', (e) => { if (e && e.message) noteError(e.message); }, true);
+      w.addEventListener('unhandledrejection', (e) => noteError('Unhandled rejection: ' + describe(e.reason)));
+      const own = w.console && w.console.error;
+      if (typeof own === 'function') w.console.error = function () { noteError(Array.prototype.map.call(arguments, describe).join(' ')); return own.apply(this, arguments); };
+      w.addEventListener('scroll', soon, true);
+      w.addEventListener('resize', soon);
+      w.addEventListener('popstate', checkRoute);
+      w.addEventListener('hashchange', checkRoute);
+      new w.MutationObserver(later).observe(w.document, { subtree: true, childList: true, attributes: true, characterData: true });
+    } catch (e) { /* a page that can't be watched is still framed */ }
+    route = routeOf(w);
+    tell(readyOf(w));
+    sendRects();
+  };
+
+  // --- the viewer's questions ----------------------------------------------------------------------
+  let last = { x: 0, y: 0 };
+  const ORDERS = {
+    hello: () => { tell(readyOf(appWindow())); if (errors.length) tell({ type: 'errors', errors }); },
+    hit: (m) => {
+      if (!idOk(m.id) || !num(m.x) || !num(m.y)) return;
+      const w = appWindow();
+      const doc = w && w.document;
+      let el = doc ? doc.elementFromPoint(m.x, m.y) : null;
+      // the page itself is no thing to point at: the viewer pins the point instead
+      if (el && (el === doc.documentElement || el === doc.body)) el = null;
+      last = { x: m.x, y: m.y };
+      const anchor = el ? anchorOf(el, doc, m.x, m.y) : null;
+      tell({ type: 'hit-reply', id: m.id, anchor, rect: anchor ? anchor.rect : null, route: w ? routeOf(w) : null });
+    },
+    resolve: (m) => {
+      if (!idOk(m.id) || !Array.isArray(m.anchors)) return;
+      watched = m.anchors.slice(0, WATCH_MAX).filter((x) => x && typeof x.key === 'string' && size(x.key) <= KEY_MAX && x.anchor && typeof x.anchor === 'object' && typeof x.anchor.selector === 'string' && size(x.anchor.selector) <= CAPS.selector).map((x) => ({ key: x.key, anchor: x.anchor }));
+      sendRects(m.id);
+    },
+    'scroll-by': (m) => {
+      const w = appWindow();
+      if (!w) return;
+      const step = (v) => (num(v) ? Math.max(-10000, Math.min(10000, v)) : 0);
+      const at = num(m.x) && num(m.y) ? { x: m.x, y: m.y } : last;
+      // the box under the pointer that scrolls, else the page
+      for (let el = w.document.elementFromPoint(at.x, at.y); el && el !== w.document.body && el !== w.document.documentElement; el = el.parentElement) {
+        const s = w.getComputedStyle(el);
+        if (/(auto|scroll|overlay)/.test(s.overflowY + ' ' + s.overflowX) && (el.scrollHeight > el.clientHeight || el.scrollWidth > el.clientWidth)) { el.scrollBy(step(m.dx), step(m.dy)); return; }
+      }
+      w.scrollBy(step(m.dx), step(m.dy));
+    },
+    'scroll-to': (m) => {
+      const w = appWindow();
+      const a = m.anchor;
+      if (!w || !a || typeof a !== 'object' || typeof a.selector !== 'string' || size(a.selector) > CAPS.selector) return;
+      const f = find(w.document, a);
+      if (f) f.el.scrollIntoView({ block: 'center', inline: 'nearest' });
+    },
+    go: (m) => { const r = safeRoute(m.route); if (r) frame.src = r; },
+  };
+  addEventListener('message', (e) => {
+    if (e.source !== parent || parent === window) return;
+    if (e.origin === location.origin || e.origin === 'null') return;
+    const ancestors = location.ancestorOrigins;
+    if (ancestors && ancestors.length && ancestors[0] !== e.origin) return;
+    if (viewer && e.origin !== viewer) return;
+    const m = e.data;
+    if (!m || typeof m !== 'object' || m.lens !== 1 || typeof m.type !== 'string' || !Object.prototype.hasOwnProperty.call(ORDERS, m.type)) return;
+    viewer = e.origin;
+    try { ORDERS[m.type](m); } catch (err) { /* one bad question costs only itself */ }
+  });
+  addEventListener('keydown', onKey, true);
+  addEventListener('keyup', onKey, true);
+  // the poll can find a page mid-parse (no title yet): its load says ready again, whatever attach did
+  frame.addEventListener('load', () => { attach(); const w = appWindow(); if (w) tell(readyOf(w)); checkRoute(); });
+  // an SPA's pushState can't be seen without touching its code: the route is polled
+  setInterval(() => { attach(); checkRoute(); }, 250);
+  setInterval(() => { if (watched.length) sendRects(); }, 1000);
+  frame.src = safeRoute(new URLSearchParams(location.search).get('route')) || '/';
+})();
+</script></body></html>
+`;
+// The lens's policy: its one script and its one style by hash, its own origin to frame, and who may hold it.
+const lensPart = (tag) => new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`).exec(PREVIEW_LENS)[1];
+const lensHash = (tag) => `'sha256-${crypto.createHash('sha256').update(lensPart(tag)).digest('base64')}'`;
+export const previewLensCsp = (ancestors) => `default-src 'none'; script-src ${lensHash('script')}; style-src ${lensHash('style')}; frame-src 'self'; frame-ancestors ${ancestors}; base-uri 'none'; form-action 'none'`;
 // What the hub page marks with "!" (a supervisor at a usage limit, the operator's box-alert), pushed
 // when it turns up or changes, so it needs no page open. The list is checked as the Inbox counts are,
 // and capped; one alert on every repo's tab is one push.
@@ -798,8 +1052,12 @@ export function createGateway(opts = {}) {
     // an artifact under its capability: its policy stays under it too
     if (cap && out['content-security-policy']) out['content-security-policy'] = out['content-security-policy'].split(`${own}/artifact/`).join(`${own}${cap}/artifact/`);
     if (previewPort && framedBySelf) {
+      const xfo = 'x-frame-options' in out;
       delete out['x-frame-options'];
-      if (out['content-security-policy']) out['content-security-policy'] = replaceFrameAncestors(String(out['content-security-policy']), `'self' ${LENS_ANCESTORS}`);
+      const csp = out['content-security-policy'] ? String(out['content-security-policy']) : '';
+      if (csp.search(FRAME_ANCESTORS) >= 0) out['content-security-policy'] = replaceFrameAncestors(csp, `'self' ${LENS_ANCESTORS}`);
+      // the app refused frames by X-Frame-Options alone: a policy of its own keeps that for every other page
+      else if (xfo) out['content-security-policy'] = `${csp ? `${csp}, ` : ''}frame-ancestors 'self' ${LENS_ANCESTORS}`;
     }
     return { ...out, ...hsts };
   };

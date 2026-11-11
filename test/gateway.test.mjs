@@ -2071,14 +2071,14 @@ test('a preview that is down, ambiguous or unknown answers 503, a page only to a
 });
 
 // A WebSocket by hand: the handshake with the headers a browser sends, then masked text frames.
-function wsClient(gwPort, host, { origin, cookie, path: route = '/hmr?token=abc', key = 'dGhlIHNhbXBsZSBub25jZQ==' } = {}) {
+function wsClient(gwPort, host, { origin, cookie, path: route = '/hmr?token=abc', key = 'dGhlIHNhbXBsZSBub25jZQ==', headers = {} } = {}) {
   return new Promise((resolve) => {
     const sock = net.connect(gwPort, '127.0.0.1');
     let buf = Buffer.alloc(0);
     let handshaken = false;
     const frames = [];
     const waiters = [];
-    sock.on('connect', () => sock.write(`GET ${route} HTTP/1.1\r\nhost: ${host}\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-version: 13\r\nsec-websocket-key: ${key}\r\n${origin ? `origin: ${origin}\r\n` : ''}${cookie ? `cookie: ${cookie}\r\n` : ''}\r\n`));
+    sock.on('connect', () => sock.write(`GET ${route} HTTP/1.1\r\nhost: ${host}\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-version: 13\r\nsec-websocket-key: ${key}\r\n${origin ? `origin: ${origin}\r\n` : ''}${cookie ? `cookie: ${cookie}\r\n` : ''}${Object.entries(headers).map(([k, v]) => `${k}: ${v}\r\n`).join('')}\r\n`));
     const parse = () => {
       while (buf.length >= 2) {
         const len = buf[1] & 127;
@@ -2318,6 +2318,8 @@ test('a preview framed from its own name (its lens) gets past the app\'s framing
   const devPort = await freePort();
   const dev = http.createServer((q, s) => {
     if (q.url === '/nocsp') s.writeHead(200, { 'x-frame-options': 'SAMEORIGIN' });
+    else if (q.url === '/nofa') s.writeHead(200, { 'x-frame-options': 'DENY', 'content-security-policy': "img-src 'self'" });
+    else if (q.url === '/open') s.writeHead(200, {});
     else if (q.url === '/two') s.writeHead(200, { 'content-security-policy': ["frame-ancestors 'none'", "script-src 'self'; frame-ancestors http://elsewhere.example"] });
     else s.writeHead(200, { 'x-frame-options': 'DENY', 'content-security-policy': `default-src 'self' http://127.0.0.1:${devPort}; frame-ancestors 'none'`, 'content-security-policy-report-only': "frame-ancestors 'none'" });
     s.end('app');
@@ -2350,7 +2352,11 @@ test('a preview framed from its own name (its lens) gets past the app\'s framing
     }
     assert.equal((await req('cool-tiger', 'GET', '/', { headers: as('iframe', 'cross-site') })).status, 403, 'another site\'s frame is still refused');
     r = await req('cool-tiger', 'GET', '/nocsp', { headers: as('iframe', 'same-origin') });
-    assert.deepEqual([r.headers['x-frame-options'], r.headers['content-security-policy']], [undefined, undefined], 'no policy: none is added');
+    assert.deepEqual([r.headers['x-frame-options'], r.headers['content-security-policy']], [undefined, `frame-ancestors ${lens}`], 'X-Frame-Options alone: a policy takes its place, so no other page may frame it');
+    r = await req('cool-tiger', 'GET', '/nofa', { headers: as('iframe', 'same-origin') });
+    assert.deepEqual([r.headers['x-frame-options'], r.headers['content-security-policy']], [undefined, `img-src 'self', frame-ancestors ${lens}`], 'a policy that doesn\'t say who may frame: one more policy says it');
+    r = await req('cool-tiger', 'GET', '/open', { headers: as('iframe', 'same-origin') });
+    assert.deepEqual([r.headers['x-frame-options'], r.headers['content-security-policy']], [undefined, undefined], 'an app that refused no frames: nothing is added');
     r = await req('cool-tiger', 'GET', '/two', { headers: as('iframe', 'same-origin') });
     assert.equal(r.headers['content-security-policy'], `frame-ancestors ${lens}, script-src 'self'; frame-ancestors ${lens}`, 'every policy in the header');
     // confined to previews: an instance's page framed from its own name keeps its headers
@@ -2358,10 +2364,94 @@ test('a preview framed from its own name (its lens) gets past the app\'s framing
     assert.deepEqual([r.status, r.headers['x-frame-options'], r.headers['content-security-policy']], [200, 'DENY', "default-src 'self'; frame-ancestors 'none'"], 'an instance\'s page');
     // and a socket's handshake is passed on as sent
     await gw.g.pollPush();
-    const c = await wsClient(gw.port, S.on('cool-tiger'), { origin: site, cookie: gw.jar() });
+    const c = await wsClient(gw.port, S.on('cool-tiger'), { origin: site, cookie: gw.jar(), headers: { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-origin' } });
     assert.equal(c.status, 101);
     assert.match(c.head, /content-security-policy: frame-ancestors 'none'/i, 'a WebSocket\'s policy is unchanged');
     assert.match(c.head, /x-frame-options: DENY/i);
     c.close();
   } finally { for (const s of sockets) s.destroy(); await S.close(); dev.close(); inst.close(); }
+});
+
+// The lens's script on its own, with a stand-in for its page and its parent: what it hears, and what
+// it says back. Nothing is loaded in its frame (contentWindow is null), as before the app answers.
+// Its timers are stubs: the rect pushes (animation frames, the 100 ms debounce, the 1 s backstop)
+// are checked only in Chrome (test/browser/dev-links.mjs).
+function lensRun({ search = '', ancestor = 'http://4321.box.example' } = {}) {
+  const script = /<script>([\s\S]*?)<\/script>/.exec(G.PREVIEW_LENS)[1];
+  const listeners = {};
+  const posted = [];
+  const frame = { src: '', contentWindow: null, addEventListener() {} };
+  const parent = { postMessage: (m, o) => posted.push({ m: JSON.parse(JSON.stringify(m)), o }) };
+  const win = {
+    document: { getElementById: (id) => (id === 'app' ? frame : null) },
+    location: { search, origin: 'http://cool-tiger.box.example', ancestorOrigins: ancestor ? [ancestor] : undefined },
+    parent, addEventListener: (t, f) => { (listeners[t] ??= []).push(f); },
+    setInterval: () => 0, setTimeout: () => 0, clearTimeout: () => {}, requestAnimationFrame: () => 0,
+    TextEncoder, URL, URLSearchParams, CSS: { escape: (s) => s },
+  };
+  win.window = win;
+  vm.runInNewContext(script, win);
+  const hear = (data, { origin = ancestor ?? 'http://4321.box.example', source = parent } = {}) => { for (const f of listeners.message ?? []) f({ data, origin, source }); };
+  return { frame, posted, hear };
+}
+
+test('the preview lens: one script and one style, a policy of their hashes, and the kit\'s caps', () => {
+  const L = G.PREVIEW_LENS;
+  const script = /<script>([\s\S]*?)<\/script>/.exec(L)[1];
+  const style = /<style>([\s\S]*?)<\/style>/.exec(L)[1];
+  assert.deepEqual([L.match(/<script\b/g).length, L.match(/<style\b/g).length], [1, 1]);
+  assert.doesNotMatch(L.replace(script, '').replace(style, ''), /\son[a-z]+\s*=|\sstyle\s*=|\ssrc\s*=|\shref\s*=/i, 'no handler, style, src or link in the markup: the policy admits the two hashes and nothing else');
+  assert.doesNotMatch(L, /[^\x20-\x7e\n]/, 'plain ASCII, so the kit\'s copy compares byte for byte');
+  assert.doesNotMatch(L, /`|\$\{/, 'no backtick and no ${ in it: it is a String.raw template in both files');
+  assert.doesNotThrow(() => new vm.Script(script), 'the script parses');
+  const h = (t) => `'sha256-${crypto.createHash('sha256').update(t).digest('base64')}'`;
+  assert.equal(G.previewLensCsp('http://a http://b'), `default-src 'none'; script-src ${h(script)}; style-src ${h(style)}; frame-src 'self'; frame-ancestors http://a http://b; base-uri 'none'; form-action 'none'`);
+  // spec §5's caps, as the kit records an anchor and a preview subject
+  const caps = vm.runInNewContext(`(${/const CAPS = (\{[^}]*\});/.exec(script)[1]})`);
+  const src = fs.readFileSync(path.join(kit, 'scripts', 'devteam.mjs'), 'utf8');
+  const kitCaps = (name) => vm.runInNewContext(`(${new RegExp(`^const ${name} = (\\{.*\\});$`, 'm').exec(src)[1]})`);
+  for (const [k, v] of Object.entries(kitCaps('ANCHOR_CAPS'))) assert.equal(caps[k], v, `anchor.${k}`);
+  assert.equal(caps.route, kitCaps('SUBJECT_CAPS').route);
+  assert.deepEqual([caps.errors, caps.error], [3, 200], 'three errors of 200 bytes');
+});
+
+test('the preview lens answers only the page that frames it, and takes the app only to its own paths', () => {
+  let L = lensRun();
+  assert.equal(L.frame.src, '/', 'the app, at its root');
+  L.hear({ lens: 1, type: 'hello' });
+  assert.deepEqual(L.posted, [{ m: { lens: 1, type: 'ready', route: null, title: '', viewport: null }, o: 'http://4321.box.example' }], 'hello: what is framed now, to that origin alone');
+  L.hear({ lens: 1, type: 'hit', id: 'h1', x: 10, y: 20 });
+  assert.deepEqual(L.posted.at(-1).m, { lens: 1, type: 'hit-reply', id: 'h1', anchor: null, rect: null, route: null }, 'nothing loaded: nothing under the point');
+  const n = L.posted.length;
+  L.hear({ lens: 1, type: 'hello' }, { source: {} });
+  L.hear({ lens: 1, type: 'hello' }, { origin: 'http://cool-tiger.box.example' });
+  L.hear({ lens: 1, type: 'hello' }, { origin: 'null' });
+  L.hear({ lens: 1, type: 'hello' }, { origin: 'http://4322.box.example' });
+  L.hear({ type: 'hello' });
+  L.hear({ lens: 1, type: 'toString' });
+  L.hear({ lens: 1, type: 'hit', id: { no: 1 }, x: 1, y: 1 });
+  L.hear({ lens: 1, type: 'hit', id: 'h2', x: 'a', y: 1 });
+  L.hear('hello');
+  assert.equal(L.posted.length, n, 'not its parent, the app\'s own origin, an opaque one, not the parent the browser names, not a lens message, not an order, a bad id or point: each ignored');
+  // a first message from an origin the browser doesn't name as the parent binds nothing and gets nothing
+  L = lensRun();
+  L.hear({ lens: 1, type: 'hello' }, { origin: 'http://4322.box.example' });
+  L.hear({ lens: 1, type: 'hit', id: 'h1', x: 1, y: 1 }, { origin: 'http://4322.box.example' });
+  assert.deepEqual(L.posted, [], 'nothing to a page that is not the parent');
+  L.hear({ lens: 1, type: 'hello' });
+  assert.deepEqual(L.posted.map((x) => x.o), ['http://4321.box.example'], 'and the real parent is still answered');
+  // where the browser doesn't name the parent's origin, the first one heard is the only one
+  L = lensRun({ ancestor: null });
+  L.hear({ lens: 1, type: 'hello' }, { origin: 'http://4321.box.example' });
+  L.hear({ lens: 1, type: 'hello' }, { origin: 'http://4322.box.example' });
+  assert.deepEqual(L.posted.map((x) => x.o), ['http://4321.box.example']);
+  // go, and the first route: this origin's paths only, never the lens's own
+  L.hear({ lens: 1, type: 'go', route: '/checkout?step=2#pay' }, { origin: 'http://4321.box.example' });
+  assert.equal(L.frame.src, '/checkout?step=2#pay');
+  for (const bad of ['//evil.example/x', 'https://evil.example/', 'checkout', '/\\evil.example', '/.devteam/lens', '', 5]) {
+    L.hear({ lens: 1, type: 'go', route: bad }, { origin: 'http://4321.box.example' });
+    assert.equal(L.frame.src, '/checkout?step=2#pay', `go ${bad}`);
+  }
+  assert.equal(lensRun({ search: '?route=%2Fadmin%3Fx%3D1' }).frame.src, '/admin?x=1');
+  for (const bad of ['?route=%2F%2Fevil.example', '?route=https%3A%2F%2Fevil.example', '?route=%2F.devteam%2Flens']) assert.equal(lensRun({ search: bad }).frame.src, '/', bad);
 });
