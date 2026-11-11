@@ -1100,7 +1100,7 @@ function linkify(text) {
     if (m.startsWith('plan-')) { const f = m.slice('plan-'.length); return (DATA?.planners || []).some((x) => x.feature === f) ? `<a class="linkish" href="#planner/${encodeURIComponent(f)}">${m}</a>` : m; }
     if (/^[0-9a-f]{40}$/.test(m)) return `<code>${m.slice(0, 12)}</code>`;
     const pr = m.split('#')[1];
-    return `<a class="linkish" href="https://github.com/sanctuarycomputer/devteam/pull/${pr}" target="_blank" rel="noopener">devteam #${pr}</a>`;
+    return `<a class="linkish" href="https://github.com/sanctuarycomputer/devteam/pull/${pr}" target="_blank" rel="noopener noreferrer">devteam #${pr}</a>`;
   });
 }
 const FIELD_WORDS = { depends_on: 'what it waits on', touches: 'which files it may change', done_when: 'what “done” means', title: 'its title', held: 'whether it is on hold', superseded_by: 'what replaces it', serves: 'which stories it serves', risk: 'its risk', size: 'its size', kind: 'its kind', contracts: 'its contracts', one_way_doors: 'its hard-to-undo parts', notes: 'its notes' };
@@ -1270,16 +1270,24 @@ const artLinkOf = (l, inline = false) => {
   if (!href) return `<span>${esc(l.title)} <span class="muted">(no longer available)</span></span>`;
   return `<a href="${esc(href)}" data-av-note="${l.changed ? AV_CHANGED : ''}"${l.changed ? ` title="${AV_CHANGED}"` : ''}>${esc(l.title)}</a>${l.changed && !inline ? ' <span class="badge high">changed since asked</span>' : ''}`;
 };
-const linkOf = (l) => (l.preview ? previewLinkHtml(l, previewHere(location, PREVIEWS), esc) : l.artifact ? artLinkOf(l) : l.url ? `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.title)}</a>` : l.path ? `<a href="${esc(fileHref(l))}">${esc(l.title)}</a>` : `<span>${esc(l.title)}${l.remote ? ` <span class="muted">(${esc(l.remote)})</span>` : ''}</span>`);
+const linkOf = (l) => (l.preview ? previewLinkHtml(l, previewHere(location, PREVIEWS), esc) : l.artifact ? artLinkOf(l) : l.url ? `<a href="${esc(l.url)}" target="_blank" rel="noopener noreferrer">${esc(l.title)}</a>` : l.path ? `<a href="${esc(fileHref(l))}">${esc(l.title)}</a>` : `<span>${esc(l.title)}${l.remote ? ` <span class="muted">(${esc(l.remote)})</span>` : ''}</span>`);
 // A question's text with each [[name]] drawn in place as that link (every link is still listed under
 // the question). The rest is linkified as before; a [[name]] that names no link stays as written.
 const NAME_REF = /\[\[([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\]\]/;
+// A question's [[name]] for an artifact opens its viewer in a tab of its own (spec §7), where a thread
+// can start on it; the list under the question keeps the stage here, which says when it changed since.
+function artNameLink(l) {
+  const h = l.href ?? (l.gone || !l.at ? null : artHref(l.artifact, l.at));
+  const m = h && /^#artifact\/(?:main|wt\/([^/]+))\/([^/]+)$/.exec(h);
+  if (!m) return artLinkOf(l, true);
+  return `<a href="${esc(artViewer(decodeURIComponent(m[2]), m[1] ? decodeURIComponent(m[1]) : 'main'))}" target="_blank" rel="noopener noreferrer"${l.changed ? ` title="${AV_CHANGED}"` : ''}>${esc(l.title)}</a>`;
+}
 function qtext(text, links) {
   return String(text ?? '').split(new RegExp(NAME_REF.source, 'g')).map((part, i) => {
     if (i % 2 === 0) return linkify(part);
     const l = (links || []).find((x) => x.name === part);
     // in the sentence the link alone; a changed artifact is flagged in the list below
-    return l ? `<span class="qref">${l.artifact ? artLinkOf(l, true) : linkOf(l)}</span>` : esc(`[[${part}]]`);
+    return l ? `<span class="qref">${l.artifact ? artNameLink(l) : linkOf(l)}</span>` : esc(`[[${part}]]`);
   }).join('');
 }
 // the same as plain text, for a title attribute
@@ -1638,7 +1646,7 @@ function answeredActions(info) {
   return `<div class="small"><b>${esc(how)}</b>${info.answered_at ? ` · ${esc(when(info.answered_at))}` : ''}</div>
     ${info.answer ? `<div>${esc(info.answer)}</div>` : ''}
     ${res ? `<div class="small muted">Recorded result: ${esc(res.bytes)} bytes, sha256 <code>${esc(res.sha256.slice(0, 12))}</code> ${info.result_status === 'verified' ? '<span class="badge good">verified</span>' : `<span class="badge high">${esc(info.result_status)}</span>`}</div>` : ''}
-    ${res && info.result_status === 'verified' && Array.isArray(info.result_doc?.rows) ? `<a class="linkish small" href="/api/review?${new URLSearchParams({ id: info.id, format: 'tsv' })}" target="_blank" rel="noopener">The result as TSV</a>` : ''}
+    ${res && info.result_status === 'verified' && Array.isArray(info.result_doc?.rows) ? `<a class="linkish small" href="/api/review?${new URLSearchParams({ id: info.id, format: 'tsv' })}" target="_blank" rel="noopener noreferrer">The result as TSV</a>` : ''}
     <p class="meta">The page above is read-only: it shows the answer as recorded.</p>`;
 }
 function updateAnswerButton() {
@@ -3035,7 +3043,7 @@ function openFile(params) {
   const head = `<h2 id="drawer-title">${esc(title)}</h2>${attrs({ id: path, idTip: 'Its path in the repository.', peek: p, noRecord: true, computed: [['Version', `<code>${esc(ref || 'main')}</code>`, 'The branch or commit it is read from; committed content only.'], ['Commits', p?.history?.length ? esc(p.history.length) : '', 'Commits that changed it (the latest 60).']] })}`;
   const tail = historySection(p, path);
   if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext)) return showDrawer(`${head}<div class="viewer"><img src="${esc(url)}" alt="${esc(title)}"></div>${tail}`);
-  if (['html', 'pdf'].includes(ext)) return showDrawer(`${head}<div class="viewer"><iframe sandbox src="${esc(url)}" title="${esc(title)}"></iframe></div><p class="meta"><a href="${esc(url)}" target="_blank" rel="noopener">Open in a new tab</a></p>${tail}`);
+  if (['html', 'pdf'].includes(ext)) return showDrawer(`${head}<div class="viewer"><iframe sandbox src="${esc(url)}" title="${esc(title)}"></iframe></div><p class="meta"><a href="${esc(url)}" target="_blank" rel="noopener noreferrer">Open in a new tab</a></p>${tail}`);
   const txt = FILES.get(url);
   if (txt === undefined) { refetchFile(url); return showDrawer(`${head}<p class="loading">Loading…</p>${tail}`); }
   if (typeof txt !== 'string') return showDrawer(`${head}<p class="err">${esc(txt.error)}</p>${tail}`);
@@ -3348,7 +3356,7 @@ function renderLibrary(lib) {
     const name = a.error ? a.slug : a.title || a.slug;
     const meta = [a.by ? `drawn by ${esc(who(a.by))}` : '', a.for?.length ? `for ${a.for.map((f) => linkify(f)).join(', ')}` : '', a.updated_at ? esc(when(a.updated_at)) : ''].filter(Boolean).join(' · ');
     return `<div class="card small art-card${draft ? ' draft' : ''}"${subj('artifact', a.slug, a.title || a.slug)}>
-      <div class="art-t">${a.error ? `<b>${esc(name)}</b>` : `<a href="${esc(artHref(a.slug, a.at))}">${esc(name)}</a>`}${a.at === 'main' ? '' : `<span class="badge medium">draft</span><span class="small muted">in ${linkify(a.at)}</span>`}${a.error ? '<span class="badge high">broken</span>' : ''}</div>
+      <div class="art-t">${a.error ? `<b>${esc(name)}</b>` : `<a href="${esc(artHref(a.slug, a.at))}">${esc(name)}</a>`}${a.at === 'main' ? '' : `<span class="badge medium">draft</span><span class="small muted">in ${linkify(a.at)}</span>`}${a.error ? '<span class="badge high">broken</span>' : `<a class="av-open small" href="${esc(artViewer(a.slug, a.at))}" target="_blank" rel="noopener noreferrer" title="Open it in a tab of its own, with its threads">Open</a>`}</div>
       ${a.error ? `<div class="err">${esc(a.error)}</div>` : a.summary ? `<div class="art-s">${esc(a.summary)}</div>` : ''}
       ${meta ? `<div class="meta">${meta}</div>` : ''}
       ${a.at === 'main' && !a.error ? pubLine(a) : ''}
@@ -3881,10 +3889,14 @@ function tsRect(s) {
   let x, y;
   if (s.anchor) {
     const id = TS.keyOf.get(tKey(s));
-    const r = id ? TS.rects.get(id)?.rect : null;
-    if (!r) return null;
-    x = r.x + Math.min(Math.max(0, s.anchor.point?.x ?? r.w), r.w);
-    y = r.y + Math.min(Math.max(0, s.anchor.point?.y ?? 0), r.h);
+    if (id) {
+      // the lens watches it: its rect, or none while it hasn't found it (or says it can't)
+      const r = TS.rects.get(id)?.rect;
+      if (!r) return null;
+      x = r.x + Math.min(Math.max(0, s.anchor.point?.x ?? r.w), r.w);
+      y = r.y + Math.min(Math.max(0, s.anchor.point?.y ?? 0), r.h);
+    } else if (s.point) ({ x, y } = s.point); // an anchor with no selector to find it by: where it was clicked
+    else return null;
   } else if (s.point) ({ x, y } = s.point);
   else return null;
   const fr = tsFrame().getBoundingClientRect();
@@ -3905,11 +3917,13 @@ function tsWatch() {
   if (sig === TS.watch) return;
   TS.watch = sig;
   TS.watching = new Set(anchors.map((a) => a.key));
+  for (const k of TS.rects.keys()) if (!TS.watching.has(k)) TS.rects.delete(k); // a rect of a thread no longer watched
   tsPost({ type: 'resolve', id: `r${++TS.seq}`, anchors });
 }
 // The stage's pins, in the frame's coordinates over it: one per subject on the page it shows.
 function tsPins() {
-  const pins = !tsOn() ? [] : tPins(TL.threads).filter((g) => tFrameOn(g.subject, TS)).map((g) => {
+  // none until this page's lens is ready: a point is only where the last page's pin was
+  const pins = !tsOn() || !TS.ready ? [] : tPins(TL.threads).filter((g) => tFrameOn(g.subject, TS)).map((g) => {
     const r = tsRect(g.subject);
     return r && { id: g.ids[g.ids.length - 1], cls: `tl-pin${g.ids.includes(TL.open) ? ' on' : ''}`, left: `${Math.round(r.fx - 11)}px`, top: `${Math.round(r.fy - 11)}px`, label: `Thread ${g.n}${g.ids.length > 1 ? `, and ${g.ids.length - 1} more on this` : ''}`, html: `${g.n}${g.ids.length > 1 ? `<sup>${g.ids.length}</sup>` : ''}` };
   }).filter(Boolean);

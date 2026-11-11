@@ -1473,7 +1473,7 @@ test('the viewer: one artifact on a stage the size of the tab, the threads and h
     assert.deepEqual(await p.ev(`[document.getElementById('artifact-view').hidden, location.pathname, location.hash, window.__esc]`), [false, '/view/artifact/viewer-mock', '', true]);
   });
 });
-test('Shift over an artifact: the overlay, what the lens says is under the pointer, a thread on that spot', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 360000 }, async (t) => {
+test('Shift over an artifact: the overlay, what the lens says is under the pointer, a thread on that spot', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 240000 }, async (t) => {
   const undo = [];
   t.after(async () => { let err = null; for (const f of undo.reverse()) { try { await f(); } catch (e) { err ??= e; } } if (err) throw err; });
   const F = threadsFixture('stage-pins');
@@ -1750,6 +1750,45 @@ test('Shift over an artifact: the overlay, what the lens says is under the point
     assert.doesNotMatch(JSON.stringify(th), /1767225600000/, 'nothing written carries it');
     assert.equal(th.subject.anchor.text, 'Pay at [link removed] now');
   });
+});
+test('pins on an artifact: where its lens says, following its scroll, the card beside them, and nothing of the owner\'s to a lens', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 240000 }, async (t) => {
+  const undo = [];
+  t.after(async () => { let err = null; for (const f of undo.reverse()) { try { await f(); } catch (e) { err ??= e; } } if (err) throw err; });
+  const F = threadsFixture('stage-pins-only');
+  undo.push(() => F.done());
+  landArtifact(F, 'pin-mock', PIN_MOCK);
+  landArtifact(F, 'liar-mock', LIAR_MOCK);
+  const port = await freePort();
+  const B = `http://127.0.0.1:${port}`;
+  const dash = startDashboard(F.old, F.env({}), ['--port', String(port)]);
+  undo.push(() => dash.stop());
+  await until(() => /dashboard on http/.test(dash.out()), 'the dashboard');
+  const threads = () => JSON.parse(F.owner(['thread', 'list', '--all', '--json']));
+  // two threads as the Shift test starts them: one on the button (where it was clicked, inside it), one
+  // on the liar's page to be resolved with an outcome
+  const fps = Object.fromEntries(JSON.parse(F.owner(['artifacts', '--json'])).map((a) => [a.slug, a.fp]));
+  const start = async (title, subject, text) => {
+    const r = await fetch(`${B}/api/thread-new`, { method: 'POST', headers: { 'content-type': 'application/json', origin: B, 'sec-fetch-site': 'same-origin' }, body: JSON.stringify({ title, subject, text }) });
+    assert.equal(r.status, 200, await r.clone().text());
+  };
+  await start('button "Buy now"', { kind: 'artifact', slug: 'pin-mock', at: 'main', path: 'index.html', fp: fps['pin-mock'], anchor: { selector: '#buy', tag: 'button', text: 'Buy now', point: { x: 60, y: 20 }, rect: { x: 40, y: 120, w: 120, h: 40 } }, point: { x: 100, y: 140 } }, 'Make it green');
+  await start('note', { kind: 'artifact', slug: 'liar-mock', at: 'main', path: 'index.html', fp: fps['liar-mock'], point: { x: 60, y: 60 } }, 'Who wrote this');
+  const chrome = await openChrome();
+  undo.push(() => chrome.close());
+  const p = await chrome.newPage();
+  undo.push(() => p.close());
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  await p.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
+  await p.send('Page.addScriptToEvaluateOnNewDocument', { source: POLL_FAST });
+  await p.send('Page.addScriptToEvaluateOnNewDocument', { source: OWN_MESSAGES });
+  await p.send('Page.navigate', { url: `${B}/#artifact/main/pin-mock` });
+  const soon = async (expr, what) => { const end = Date.now() + 30000; for (;;) { const v = await p.ev(expr); if (v) return v; if (Date.now() > end) assert.fail(`timed out: ${what}`); await new Promise((r) => setTimeout(r, 50)); } };
+  const frameAt = async (x, y) => { const r = await p.ev(`(() => { const r = document.getElementById('av-frame').getBoundingClientRect(); return { x: r.left, y: r.top }; })()`); return { x: r.x + x, y: r.y + y }; };
+  const keysHere = () => p.ev(`(() => { document.activeElement?.blur?.(); window.focus(); return document.activeElement === document.body; })()`);
+  let said = 0;
+  const tell = async (m, answer) => { const n = ++said; await p.ev(`(() => { window.__own = window.__own.filter((x) => x.own !== ${JSON.stringify(answer)}); document.getElementById('av-frame').contentWindow.postMessage(${JSON.stringify({ ...m, n })}, '*'); return true; })()`); return soon(`window.__own.find((x) => x.own === ${JSON.stringify(answer)})`, answer); };
+  await soon(`typeof TS === 'object' && TS.ready`, 'the lens to say ready');
 
   const pinAt = () => p.ev(`(() => { const b = document.querySelector('#av-pins .tl-pin'); return b ? [parseInt(b.style.left, 10), parseInt(b.style.top, 10)] : null; })()`);
   // nothing the owner wrote (a turn, a title, an outcome) in anything posted to a lens, and every
@@ -1872,6 +1911,70 @@ test('Shift over an artifact: the overlay, what the lens says is under the point
     assert.deepEqual(await pinAt(), [89, 129]);
     await toLensClean();
   });
+  await t.test('an anchor with no selector pins where it was clicked; one the lens says is gone pins nowhere; no point pins before the page is ready', async () => {
+    await p.ev(`location.hash = '#artifact/main/pin-mock'`);
+    await soon(`TS.slug === 'pin-mock' && TS.ready && !!document.querySelector('#av-pins .tl-pin')`, 'the pin');
+    const sub = { kind: 'artifact', slug: 'pin-mock', at: 'main', path: 'index.html', anchor: { tag: 'p', text: 'no selector', point: { x: 5, y: 5 } }, point: { x: 300, y: 400 } };
+    assert.deepEqual(await p.ev(`(() => { const r = tsRect(${JSON.stringify(sub)}); return r && [r.fx, r.fy]; })()`), [300, 400], 'its click, with no selector for the lens to find it by');
+    assert.equal(await p.ev(`tsRect(${JSON.stringify({ ...sub, point: undefined })})`), null, 'and nothing at all with no point either');
+    const key = await p.ev('[...TS.watching][0]');
+    await p.ev(`TS.rects.set(${JSON.stringify(key)}, { key: ${JSON.stringify(key)}, rect: null }); tlDraw(); true`);
+    await soon(`!document.querySelector('#av-pins .tl-pin')`, 'the pin gone, the lens saying it is not found');
+    await p.ev(`TS.watch = ''; TS.rects.clear(); tsWatch(); true`);
+    await soon(`!!document.querySelector('#av-pins .tl-pin')`, 'the pin again');
+    // a page whose lens isn't ready: nothing, not the last page's points
+    assert.equal(await p.ev(`(() => { TS.ready = false; tsPins(); const n = document.querySelectorAll('#av-pins .tl-pin').length; TS.ready = true; return n; })()`), 0, 'none while it is not ready');
+    await soon(`(() => { tlDraw(); return !!document.querySelector('#av-pins .tl-pin'); })()`, 'back when it is');
+  });
+
+  await t.test("a rect of a thread no longer watched is dropped when the watch changes", async () => {
+    const key = await p.ev('[...TS.watching][0]');
+    await p.ev(`(() => { TS.rects.set('t-20260101-000000000-owner', { key: 't-20260101-000000000-owner', rect: { x: 1, y: 1, w: 2, h: 2 } }); TS.watch = ''; tsWatch(); return true; })()`);
+    assert.deepEqual(await p.ev('[...TS.rects.keys()]'), [key], 'only what is watched is kept');
+  });
+});
+test('a popup the dashboard or a viewer opens never needs window.opener: the wrapper\'s opener policy severs it', () => {
+  const html = fs.readFileSync(path.join(kit, 'dashboard/index.html'), 'utf8');
+  assert.doesNotMatch(html, /\bwindow\.opener\b|[^.\w]opener\s*[.=]/, 'nothing reads or sets an opener');
+  const tags = html.match(/<a\b[^>]*target="_blank"[^>]*>/g) ?? [];
+  assert.ok(tags.length >= 10, `the page's new-tab links: ${tags.length}`);
+  for (const a of tags) assert.match(a, /rel="noopener noreferrer"/, a);
+  // to the end of the statement, not the first ")": an argument with a call in it (a URL built by one)
+  // must not cut the options off from the check
+  const opens = html.match(/window\.open\([^;\n]*/g) ?? [];
+  assert.ok(opens.length >= 2, `the page's window.open calls: ${opens.length}`);
+  for (const w of opens) assert.match(w, /noopener/, w);
+});
+
+test('the Library\'s Open and a question\'s [[name]] open the artifact\'s viewer in a tab of its own', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
+  const undo = [];
+  t.after(async () => { let err = null; for (const f of undo.reverse()) { try { await f(); } catch (e) { err ??= e; } } if (err) throw err; });
+  const F = threadsFixture('viewer-links');
+  undo.push(() => F.done());
+  landArtifact(F, 'viewer-mock', VIEWER_MOCK);
+  F.sup(['ask', '--question', 'Does [[mock]] read right?', '--choices', '[{"label":"Yes"},{"label":"No"}]', '--links', JSON.stringify([{ name: 'mock', title: 'The mock', artifact: 'viewer-mock' }]), '--stake', '1', '--urgency', '1']);
+  const port = await freePort();
+  const dash = startDashboard(F.old, F.env({}), ['--port', String(port)]);
+  undo.push(() => dash.stop());
+  const chrome = await openChrome();
+  undo.push(() => chrome.close());
+  const p = await chrome.newPage();
+  undo.push(() => p.close());
+  await until(() => /dashboard on http/.test(dash.out()), 'the dashboard');
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#library` });
+  const soon = async (expr, what) => { const end = Date.now() + 30000; for (;;) { const v = await p.ev(expr); if (v) return v; if (Date.now() > end) assert.fail(`timed out: ${what}`); await new Promise((r) => setTimeout(r, 50)); } };
+  const link = (sel) => p.ev(`(() => { const a = document.querySelector(${JSON.stringify(sel)}); return a && [a.getAttribute('href'), a.target, a.rel, a.textContent]; })()`);
+  await soon(`!!document.querySelector('[data-subject="artifact:viewer-mock"] a.av-open')`, 'the card\'s Open');
+  assert.deepEqual(await link('[data-subject="artifact:viewer-mock"] a.av-open'), ['/view/artifact/viewer-mock', '_blank', 'noopener noreferrer', 'Open']);
+  assert.match((await link('[data-subject="artifact:viewer-mock"] .art-t > a'))[0], /^#artifact\/main\/viewer-mock$/, 'its title still opens the stage here');
+  await p.ev(`location.hash = '#inbox'`);
+  await soon(`!!document.querySelector('.qref a')`, 'the question\'s [[mock]]');
+  assert.deepEqual(await link('.qref a'), ['/view/artifact/viewer-mock', '_blank', 'noopener noreferrer', 'The mock']);
+  await p.ev(`location.hash = '#artifact/main/viewer-mock'`);
+  await soon(`!document.getElementById('artifact-view').hidden`, 'the stage');
+  assert.deepEqual(await link('#av-tab'), ['/view/artifact/viewer-mock', '_blank', 'noopener noreferrer', 'Open in new tab']);
 });
 // The thread layer in Chrome, on a project of its own: aiming (this task), the card (Task 11), the
 // pins and the dock (Task 12), questions and resolving (Task 13). One page; the subtests run in order.
