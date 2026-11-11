@@ -458,7 +458,12 @@ async function gatewayViewers({ G, HUB, SP, tab, app }) {
     s.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'x-frame-options': 'DENY', 'content-security-policy': "default-src 'self' 'unsafe-inline'; frame-ancestors 'none'" });
     s.end(appPage(q.url.startsWith('/second') ? 'Second' : 'First'));
   });
-  // The stand-in instance lists it, not the repo's dashboard: the app's relaxed policy names only the
+  // and one that sends no framing headers at all, as dev servers (Vite, Next) do by default
+  const plainPort = await freePort();
+  await serve(plainPort, (q, s) => { s.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); s.end(appPage('Plain')); });
+  const plainName = 'plain-app';
+  const plainLens = `http://${plainName}.box.localhost:${G}/.devteam/lens`;
+  // The stand-in instance lists both, not the repo's dashboard: the app's relaxed policy names only the
   // instance that lists a preview, so only that instance's viewer may hold the app (spec §7).
   const name = 'framed-app';
   const lensUrl = `http://${name}.box.localhost:${G}/.devteam/lens`;
@@ -478,7 +483,8 @@ new MutationObserver(() => { const m = document.body.dataset.send; if (!m) retur
   const artPolicy = `default-src 'none'; style-src 'unsafe-inline' ${dir}; frame-ancestors ${self} http://127.0.0.1:${HUB}; sandbox allow-scripts`;
   await serve(SP, (q, s) => {
     const send = (type, csp, body) => { s.writeHead(200, { 'content-type': type, 'content-security-policy': csp }); s.end(body); };
-    if (q.url === '/api/hello') return send('application/json', "default-src 'none'", JSON.stringify({ devteam: 1, name: 'standin', root: '/srv/standin', port: SP, viewer: 1, inbox: 0, previews: [{ name, port: appPort, project: 'standin', session: 'standin-01-x', label: 'framed', at: new Date().toISOString(), up: true, run: false }] }));
+    if (q.url === '/api/hello') return send('application/json', "default-src 'none'", JSON.stringify({ devteam: 1, name: 'standin', root: '/srv/standin', port: SP, viewer: 1, inbox: 0, previews: [{ name, port: appPort, project: 'standin', session: 'standin-01-x', label: 'framed', at: new Date().toISOString(), up: true, run: false }, { name: plainName, port: plainPort, project: 'standin', session: 'standin-01-x', label: 'plain', at: new Date().toISOString(), up: true, run: false }] }));
+    if (q.url.startsWith(`/view/preview/${plainName}`)) return send('text/html; charset=utf-8', policy(`frame-src http://${plainName}.box.localhost:${G}`), viewerPage(`${plainLens}?route=%2F`, 'sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"'));
     if (q.url.startsWith(`/view/preview/${name}`)) return send('text/html; charset=utf-8', policy(`frame-src http://${name}.box.localhost:${G}`), viewerPage(`${lensUrl}?route=%2F`, 'sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"'));
     // its tab in the hub: the same viewer, so the whole chain is hub, this instance, the lens, the app
     if (q.url === '/' || q.url.startsWith('/?')) return send('text/html; charset=utf-8', policy(`frame-src http://${name}.box.localhost:${G}`), viewerPage(hubLens, 'sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"'));
@@ -494,11 +500,12 @@ new MutationObserver(() => { const m = document.body.dataset.send; if (!m) retur
     const send = (type, csp, body) => { s.writeHead(200, { 'content-type': type, 'content-security-policy': csp }); s.end(body); };
     if (q.url === '/api/hello') return send('application/json', "default-src 'none'", JSON.stringify({ devteam: 1, name: 'other', root: '/srv/other', port: SP + 1, viewer: 1, inbox: 0, previews: [] }));
     if (q.url.startsWith(`/view/preview/${name}`)) return send('text/html; charset=utf-8', policy(`frame-src http://${name}.box.localhost:${G}`), viewerPage(otherLens, 'sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"'));
+    if (q.url.startsWith(`/view/preview/${plainName}`)) return send('text/html; charset=utf-8', policy(`frame-src http://${plainName}.box.localhost:${G}`), viewerPage(`${plainLens}?route=%2F&from=other`, 'sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"'));
     s.writeHead(404);
     return s.end();
   });
   // listed by the hub before the lens asks the gateway for the app
-  await until(async () => (await (await fetch(`http://127.0.0.1:${HUB}/instances.json`)).json()).instances.some((x) => x.port === SP && (x.previews ?? []).some((p) => p.name === name)), 'the hub to list the framed app');
+  await until(async () => (await (await fetch(`http://127.0.0.1:${HUB}/instances.json`)).json()).instances.some((x) => x.port === SP && (x.previews ?? []).some((p) => p.name === name) && (x.previews ?? []).some((p) => p.name === plainName)), 'the hub to list the framed apps');
 
   // --- the lens ---
   const viewer = `${inst}/view/preview/${name}`;
@@ -559,14 +566,23 @@ new MutationObserver(() => { const m = document.body.dataset.send; if (!m) retur
   await browser.evalIn(`${pub}/`, `[...document.querySelectorAll('[role=tab]')].find((t) => t.textContent.includes('standin')).click()`);
   await until(() => browser.evalIn(hubLens, `(() => { const d = document.getElementById('app').contentDocument; return d && d.getElementById('buy') && d.getElementById('buy').textContent; })()`), 'the app in the lens in the owning instance in the hub');
   stepOk('in the hub, the owning instance\'s viewer holds the lens and the app in it');
+  // the app that sends no framing headers, in its owner's viewer: the policy the lens's load gets lets it in
+  await browser.navigate(tab, `${inst}/view/preview/${plainName}`);
+  await until(() => browser.evalIn(`${plainLens}?route=%2F`, `(() => { const d = document.getElementById('app').contentDocument; return d && d.getElementById('buy') && d.getElementById('buy').textContent; })()`), 'the header-less app in its owner\'s viewer');
+  stepOk('an app that sends no framing headers shows in the lens in the owning instance\'s viewer');
   // Another instance's viewer may hold the lens (its policy is the same on every preview's name), but
   // the app's policy names only the instance that lists it: the lens shows an empty frame. Its own
-  // script runs, which is what says the refusal is the app's.
+  // script runs, which is what says the refusal is the app's. A refused frame is Chrome's error
+  // page, an opaque origin, so the lens loses its document: that, not a pause, is the refusal seen.
+  const refused = async (lens, what) => {
+    await until(() => browser.evalIn(lens, `(() => { const f = document.getElementById('app'); return !!f && f.contentDocument === null; })()`), `the app's frame to be refused (${what})`, 15000);
+    assert.equal(await browser.evalIn(lens, `(() => { try { return !!frames[0].document; } catch (e) { return 'cross-origin'; } })()`), 'cross-origin', `${what}: not the app's origin`);
+  };
   await browser.navigate(tab, `http://${SP + 1}.box.localhost:${G}/view/preview/${name}`);
-  await until(() => browser.evalIn(otherLens, `!!document.getElementById('app')`), 'the lens in the other instance\'s viewer');
-  await sleep(2000);
-  assert.equal(await browser.evalIn(otherLens, `(() => { try { const d = document.getElementById('app').contentDocument; return !!(d && d.getElementById('buy')); } catch (e) { return false; } })()`), false, 'the app is refused');
-  stepOk('another instance\'s viewer holds the lens, but the app inside it is refused: its policy names only the instance that lists the preview');
+  await refused(otherLens, 'X-Frame-Options and frame-ancestors \'none\'');
+  await browser.navigate(tab, `http://${SP + 1}.box.localhost:${G}/view/preview/${plainName}`);
+  await refused(`${plainLens}?route=%2F&from=other`, 'no framing headers');
+  stepOk('another instance\'s viewer holds the lens, but the app inside it is refused, with framing headers or none: its policy names only the instance that lists the preview');
 
   // --- the owner's view of a public page: what the box serves for standin/mock, bound to the stand-in ---
   const gwDir = path.join(base, 'gateway');
@@ -625,7 +641,8 @@ async function cleanUp(code) {
   const tenv = { ...process.env, TMUX_TMPDIR: tmuxDir }; delete tenv.TMUX; delete tenv.TMUX_PANE;
   spawnSync('tmux', ['kill-server'], { env: tenv });
   await sleep(500);
-  if (!process.env.DEVTEAM_TEST_KEEP) { fs.rmSync(base, { recursive: true, force: true }); fs.rmSync(tmuxDir, { recursive: true, force: true }); } else console.log(`kept ${base}`);
+  // a process still writing under base can make the removal throw (ENOTEMPTY): that must not lose the exit code below
+  if (!process.env.DEVTEAM_TEST_KEEP) { try { fs.rmSync(base, { recursive: true, force: true, maxRetries: 3 }); fs.rmSync(tmuxDir, { recursive: true, force: true }); } catch (e) { console.log(`left ${base}: ${e.code ?? e.message}`); } } else console.log(`kept ${base}`);
   process.exit(exitCode || code);
 }
 // A failure reported while a passing run is cleaning up (an unhandled rejection) still sets the exit code, so output and code agree.

@@ -245,10 +245,14 @@ const previewCap = (v, n) => (typeof v === 'string' ? v.slice(0, n) : '');
 // entry is checked and capped, and a port outside the allowed set is dropped (a link must never
 // put a dashboard, the hub, the terminal or the gateway behind a second name). A name two ports
 // list is ambiguous: the gateway never picks, or one hostile hello could repoint the owner's link.
-// Every port counts, whatever root each claims: a root is agent-written too.
+// Every port counts, whatever root each claims: a root is agent-written too. So does a dev server's
+// port: the instance that lists it is the one whose page may hold the app (spec §7), and one listing
+// another's port under a name of its own would be that, so a port two instances list is no one's.
+// That denies nothing new (a copied name already breaks a link). A port only one lists is its.
 export function previewLinks(list, ports, ownPort, ttydPort = 7681) {
   const links = new Map();
   if (!Array.isArray(list)) return links;
+  const byDevPort = new Map(); // dev port -> instance port -> its first claimant
   for (const x of listedByPort(list, ports).values()) {
     if (!Array.isArray(x.previews)) continue;
     const seen = new Set();
@@ -260,6 +264,8 @@ export function previewLinks(list, ports, ownPort, ttydPort = 7681) {
         if (typeof p.label === 'string' && p.label.length > PREVIEW_CAPS.label) continue;
         seen.add(p.name);
         const row = { port, instance: Number(x.port), root: x.root, project: previewCap(p.project, PREVIEW_CAPS.project), session: previewCap(p.session, PREVIEW_CAPS.session), label: previewCap(p.label, PREVIEW_CAPS.label), run: p.run === true };
+        const listers = byDevPort.get(port) ?? byDevPort.set(port, new Map()).get(port);
+        if (!listers.has(row.instance)) listers.set(row.instance, { root: row.root, project: row.project, port });
         const had = links.get(p.name);
         if (!had) links.set(p.name, row);
         else {
@@ -268,6 +274,10 @@ export function previewLinks(list, ports, ownPort, ttydPort = 7681) {
         }
       } catch {}
     }
+  }
+  for (const [n, link] of links) {
+    const listers = link.ambiguous ? null : byDevPort.get(link.port);
+    if (listers && listers.size > 1) links.set(n, { ambiguous: [...listers.values()].sort((a, b) => a.root.localeCompare(b.root) || a.port - b.port) });
   }
   return links;
 }
@@ -1065,12 +1075,12 @@ export function createGateway(opts = {}) {
     // a port off the block is no instance's: then nothing gives way
     if (previewPort && BLOCK.includes(lensOf)) {
       const ancestors = `'self' ${PUB} ${instanceOrigin(lensOf)}`;
-      const xfo = 'x-frame-options' in out;
       delete out['x-frame-options'];
       const csp = out['content-security-policy'] ? String(out['content-security-policy']) : '';
       if (csp.search(FRAME_ANCESTORS) >= 0) out['content-security-policy'] = replaceFrameAncestors(csp, ancestors);
-      // the app refused frames by X-Frame-Options alone: a policy of its own keeps that for every other page
-      else if (xfo) out['content-security-policy'] = `${csp ? `${csp}, ` : ''}frame-ancestors ${ancestors}`;
+      // The app said nothing of frames by policy: by X-Frame-Options alone, or not at all (a dev
+      // server's default). Either way a policy of its own keeps every other instance's page out.
+      else out['content-security-policy'] = `${csp ? `${csp}, ` : ''}frame-ancestors ${ancestors}`;
     }
     return { ...out, ...hsts };
   };
