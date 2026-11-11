@@ -93,6 +93,7 @@ exit 0
       ],
       "goal": null,
       "change": null,
+      "met": null,
       "rule_scope": null,
       "recommendation": "yes",
       "confidence": null,
