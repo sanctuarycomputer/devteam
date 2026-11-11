@@ -295,6 +295,13 @@ export function gitFactFns(cwd, runDir) {
   const fns = vm.runInContext(`${cut('/* git reads start */', '/* git reads end */')}\n${cut('/* git facts start */', '/* git facts end */')}\nHOME_CWD = ${JSON.stringify(cwd)};\n;({ commitDateOf, ancestorOf, releasedInAt, factGet })`, ctx);
   return { ...fns, exit: () => { for (const f of exits.splice(0)) f(); } };
 }
+// The script's ranked keyword search, loaded by itself.
+export function searchFns() {
+  const src = fs.readFileSync(path.join(kit, 'scripts', 'devteam.mjs'), 'utf8');
+  const i = src.indexOf('/* search start */'), j = src.indexOf('/* search end */');
+  assert.ok(i >= 0 && j > i, 'the search block in devteam.mjs');
+  return vm.runInContext(`${src.slice(i, j)}\n;({ searchTokens, searchIndex, searchRank, searchSimilar })`, vm.createContext({}));
+}
 // A clean partition: nothing unowned, contested, empty or colliding (the script has no caller for it).
 export function coverageClean(r) {
   return !r.unowned.length && !r.contested.length && !r.empty.length && !r.case_collisions.length;

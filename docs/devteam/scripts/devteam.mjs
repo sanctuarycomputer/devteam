@@ -7488,6 +7488,100 @@ const knowledgeBlock = (target) => {
   const ks = knowledgeFor(target);
   return ks.length ? `What this project has learned that applies here (accepted knowledge):\n${ks.map((k) => { const n = ownerNote(k.id); return `- [${k.kind}${k.valence < 0 ? ', avoid' : ''}] ${k.statement}${n ? ` The owner adds: ${n}` : ''} (${k.id})`; }).join('\n')}` : '';
 };
+/* search start */
+// Ranked keyword search (BM25) over what the project has written. Words, not meanings: a word of
+// five letters or more also counts by its first letters (five, or one fewer than the word), so
+// merged meets merges and flaky meets flake; ids, paths and other compounds count whole and by
+// their parts. A quoted phrase must appear as written, and ranks first.
+const SEARCH_STOP = new Set('a an and are as at be been but by can could did do does for from had has have how i if in into is it its may might no not of on or our out over should so such than that the their them then there these they this those to too up us was we were what when where which while who why will with would you your'.split(' '));
+const SEARCH_K1 = 1.2;
+const SEARCH_B = 0.75;
+// Each token: { t, pos, kind } where kind is 'word', 'whole' (a compound as written) or 'prefix'.
+function searchTokens(text) {
+  const out = [];
+  let pos = 0;
+  for (const raw of String(text ?? '').match(/[\p{L}\p{N}](?:[\p{L}\p{N}]|[._/-](?=[\p{L}\p{N}]))*/gu) ?? []) {
+    const parts = raw.replace(/([\p{Ll}\p{N}])(\p{Lu})/gu, '$1 $2').split(/[\s._/-]+/).map((x) => x.toLowerCase()).filter(Boolean);
+    const whole = raw.toLowerCase();
+    if (parts.length > 1 || whole !== parts[0]) out.push({ t: whole, pos, kind: 'whole' });
+    for (const w of parts) {
+      if (SEARCH_STOP.has(w) || (w.length < 2 && !/\d/.test(w))) { pos++; continue; }
+      out.push({ t: w, pos, kind: 'word' });
+      if (w.length >= 5 && /^\p{L}+$/u.test(w)) out.push({ t: w.slice(0, Math.min(5, w.length - 1)), pos, kind: 'prefix' });
+      pos++;
+    }
+  }
+  return out;
+}
+// docs: [{ id, date?, fields: [{ text, w }] }]. Lengths count words, never prefixes or compounds.
+function searchIndex(docs) {
+  const df = new Map();
+  const rows = docs.map((d) => {
+    const tf = new Map();
+    const seqs = [];
+    let len = 0;
+    for (const f of d.fields ?? []) {
+      const toks = searchTokens(f.text);
+      const w = f.w ?? 1;
+      for (const k of toks) { tf.set(k.t, (tf.get(k.t) ?? 0) + w); if (k.kind === 'word') len++; }
+      seqs.push(toks.filter((k) => k.kind === 'word'));
+    }
+    for (const t of tf.keys()) df.set(t, (df.get(t) ?? 0) + 1);
+    return { doc: d, tf, len, seqs };
+  });
+  const avg = rows.length ? rows.reduce((a, r) => a + r.len, 0) / rows.length : 0;
+  return { rows, df, n: rows.length, avg };
+}
+const searchIdf = (ix, t) => { const df = ix.df.get(t) ?? 0; return Math.log(1 + (ix.n - df + 0.5) / (df + 0.5)); };
+// A query's terms: each word at weight 1, its prefix at a half (an exact word ranks first), each
+// compound whole at 1; its phrases (quoted) as word sequences.
+function searchQuery(q) {
+  const phrases = [...String(q).matchAll(/"([^"]+)"/g)].map((m) => searchTokens(m[1]).filter((k) => k.kind === 'word').map((k) => k.t)).filter((p) => p.length > 1);
+  const terms = new Map();
+  for (const k of searchTokens(String(q).replace(/"/g, ' '))) terms.set(k.t, Math.max(terms.get(k.t) ?? 0, k.kind === 'prefix' ? 0.5 : 1));
+  return { terms, phrases };
+}
+const hasPhrase = (row, p) => row.seqs.some((seq) => { for (let i = 0; i + p.length <= seq.length; i++) if (p.every((t, j) => seq[i + j].t === t && seq[i + j].pos === seq[i].pos + j)) return true; return false; });
+function searchScore(ix, row, terms) {
+  let score = 0;
+  const matched = [];
+  for (const [t, qw] of terms) {
+    const tf = row.tf.get(t);
+    if (!tf) continue;
+    matched.push(t);
+    score += qw * searchIdf(ix, t) * (tf * (SEARCH_K1 + 1)) / (tf + SEARCH_K1 * (1 - SEARCH_B + SEARCH_B * (ix.avg ? row.len / ix.avg : 1)));
+  }
+  return { score, matched };
+}
+// The best documents for a query, best first: a phrase match above any without; then the score;
+// then the newer.
+function searchRank(ix, q, { limit = 10, filter = () => true } = {}) {
+  const { terms, phrases } = searchQuery(q);
+  if (!terms.size) return [];
+  const hits = [];
+  for (const row of ix.rows) {
+    if (!filter(row.doc)) continue;
+    const { score, matched } = searchScore(ix, row, terms);
+    if (!score) continue;
+    const phrase = phrases.length > 0 && phrases.every((p) => hasPhrase(row, p));
+    hits.push({ doc: row.doc, score, phrase, matched });
+  }
+  hits.sort((a, b) => (b.phrase - a.phrase) || (b.score - a.score) || String(b.doc.date ?? '').localeCompare(String(a.doc.date ?? '')));
+  return hits.slice(0, limit);
+}
+// How alike a text and an indexed document are, on any corpus: the document's score for the text
+// against the score the text would get against itself, and the share of the text's words the
+// document has (a word counts as had when the document has it or its prefix).
+function searchSimilar(ix, text, row) {
+  const { terms } = searchQuery(text);
+  const self = searchIndex([{ id: '', fields: [{ text }] }]).rows[0];
+  const selfScore = searchScore({ ...ix, avg: ix.avg || self.len }, { ...self }, terms).score;
+  const { score } = searchScore(ix, row, terms);
+  const words = [...new Set(searchTokens(text).filter((k) => k.kind === 'word').map((k) => k.t))];
+  const has = (w) => row.tf.has(w) || (w.length >= 5 && /^\p{L}+$/u.test(w) && row.tf.has(w.slice(0, Math.min(5, w.length - 1))));
+  return { ratio: selfScore ? score / selfScore : 0, coverage: words.length ? words.filter(has).length / words.length : 0 };
+}
+/* search end */
 // The block a prompt carries before its knowledge: the registry links this work uses.
 // Titles and notes are quoted data: whoever wrote them, they describe a link and instruct nobody.
 const linksBlock = (target) => {
