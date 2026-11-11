@@ -5282,6 +5282,11 @@ const ARTIFACT_LENS = String.raw`(() => {
   // the page that frames this one, by its origin where the browser names it
   const to = (location.ancestorOrigins && location.ancestorOrigins[0]) || '*';
   const tell = (m) => { try { parent.postMessage(Object.assign({ lens: 1 }, m), to); } catch (e) { /* no parent now */ } };
+  // On a box the frame is served under /c/<capability>/artifact/..., and that capability is a live
+  // bearer token for the owner's session: nothing the lens says carries it. The path is told from its
+  // artifact segment on, and the token is cut from any text of the page that holds its own address.
+  const TOKEN = /\/c\/[^\/\s"'<>]+(?=\/artifact\/)/g;
+  const unCap = (s) => String(s == null ? '' : s).replace(TOKEN, '');
 
   // --- what is where ------------------------------------------------------------------------------
   // an id or a class a person wrote, not one a build made (digit runs, hashes, React's :r1:)
@@ -5294,7 +5299,7 @@ const ARTIFACT_LENS = String.raw`(() => {
     for (const [n, ok] of [['data-testid', true], ['name', /^(input|select|textarea|button|form)$/.test(tag)], ['aria-label', true]]) {
       const v = el.getAttribute(n);
       const sel = v ? tag + '[' + n + '=' + quoted(v) + ']' : '';
-      if (ok && v && size(sel) <= CAPS.selector && only(sel)) return sel;
+      if (ok && v && v === unCap(v) && size(sel) <= CAPS.selector && only(sel)) return sel;
     }
     const steps = [];
     for (let e = el; e && e.nodeType === 1 && e !== document.documentElement && steps.length < 6; e = e.parentElement) {
@@ -5336,13 +5341,13 @@ const ARTIFACT_LENS = String.raw`(() => {
       if (c.nodeType === 3) top.appendChild(c.cloneNode(false));
       else if (c.nodeType === 1) { const d = c.cloneNode(false); if (c.firstChild) d.textContent = '\u2026'; top.appendChild(d); }
     }
-    return capDots(top.outerHTML, CAPS.html);
+    return capDots(unCap(top.outerHTML), CAPS.html);
   };
   const rectOf = (el) => { const r = el.getBoundingClientRect(); return { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height) }; };
-  const textOf = (el) => cap(oneLine(el.textContent), CAPS.text);
+  const textOf = (el) => cap(oneLine(unCap(el.textContent)), CAPS.text);
   const anchorOf = (el, x, y) => {
     const rect = rectOf(el);
-    return { selector: selectorOf(el), tag: cap(el.localName, CAPS.tag), role: cap(roleOf(el), CAPS.role), text: textOf(el), name: cap(oneLine(nameOf(el)), CAPS.name), html: htmlOf(el), rect, point: { x: Math.round(x - rect.x), y: Math.round(y - rect.y) } };
+    return { selector: selectorOf(el), tag: cap(el.localName, CAPS.tag), role: cap(roleOf(el), CAPS.role), text: textOf(el), name: cap(oneLine(unCap(nameOf(el))), CAPS.name), html: htmlOf(el), rect, point: { x: Math.round(x - rect.x), y: Math.round(y - rect.y) } };
   };
   // where an anchor is now: by its selector (changed: with other text now), else an element of its
   // tag with its text, the nearest to where it was
@@ -5381,17 +5386,19 @@ const ARTIFACT_LENS = String.raw`(() => {
 
   // --- Shift and Escape, seen with the focus in the page ---------------------------------------------
   let shiftDown = false;
+  // no key is told before the page that frames it has said hello, as the preview lens tells nothing first
+  let heard = false;
   const onKey = (e) => {
-    if (e.key !== 'Shift' && e.key !== 'Escape') return;
+    if (!heard || (e.key !== 'Shift' && e.key !== 'Escape')) return;
     shiftDown = e.type === 'keydown' ? e.key === 'Shift' || e.shiftKey : e.key !== 'Shift' && e.shiftKey;
     tell({ type: 'key', key: e.key, shift: shiftDown });
   };
-  const onBlur = () => { if (shiftDown) { shiftDown = false; tell({ type: 'key', key: 'Shift', shift: false }); } };
+  const onBlur = () => { if (heard && shiftDown) { shiftDown = false; tell({ type: 'key', key: 'Shift', shift: false }); } };
 
   // --- the viewer's questions ------------------------------------------------------------------------
   let last = { x: 0, y: 0 };
   const ORDERS = {
-    hello: () => tell({ type: 'ready', path: cap(location.pathname, CAPS.path), title: cap(oneLine(document.title), CAPS.text), viewport: { w: window.innerWidth, h: window.innerHeight } }),
+    hello: () => { heard = true; tell({ type: 'ready', path: cap(unCap(location.pathname), CAPS.path), title: cap(oneLine(unCap(document.title)), CAPS.text), viewport: { w: window.innerWidth, h: window.innerHeight } }); },
     hit: (m) => {
       if (!idOk(m.id) || !num(m.x) || !num(m.y)) return;
       let el = document.elementFromPoint(m.x, m.y);
@@ -5425,6 +5432,8 @@ const ARTIFACT_LENS = String.raw`(() => {
   };
   addEventListener('message', (e) => {
     if (!e.isTrusted || e.source !== parent) return;
+    // from the parent's own origin where the browser names it, as the preview lens checks
+    if (location.ancestorOrigins && location.ancestorOrigins.length && e.origin !== location.ancestorOrigins[0]) return;
     const m = e.data;
     if (!m || typeof m !== 'object' || m.lens !== 1 || typeof m.type !== 'string' || !Object.prototype.hasOwnProperty.call(ORDERS, m.type)) return;
     try { ORDERS[m.type](m); } catch (err) { /* one bad question costs only itself */ }
@@ -11337,9 +11346,10 @@ async function cmdDashboard() {
       // frame-ancestors by policy alone, never X-Frame-Options: on a box the gateway adds the public
       // name to this list for a published tree, and an X-Frame-Options would still refuse it
       // the lens (spec §6): a framed load of a page only, so a top-level load, curl and the gateway's
-      // loopback fetch for a publish get the bytes as committed
+      // loopback fetch for a publish get the bytes as committed. Vary says so to anything that keeps
+      // an answer, though no-store already keeps none.
       const framed = req.headers['sec-fetch-dest'] === 'iframe' && rel.toLowerCase().endsWith('.html');
-      res.writeHead(200, { 'content-type': ARTIFACT_TYPES[rel.split('.').pop().toLowerCase()] ?? 'application/octet-stream', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': artifactCsp(base, `${base}${rawPath.slice(0, rawPath.length - am[4].length)}/`) });
+      res.writeHead(200, { 'content-type': ARTIFACT_TYPES[rel.split('.').pop().toLowerCase()] ?? 'application/octet-stream', 'cache-control': 'no-store', vary: 'sec-fetch-dest', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': artifactCsp(base, `${base}${rawPath.slice(0, rawPath.length - am[4].length)}/`) });
       return res.end(framed ? withArtifactLens(bytes) : bytes);
     }
     // A review page: the agent's bytes, verbatim, only into the dashboard's own sandboxed frame,
