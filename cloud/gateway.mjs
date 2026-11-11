@@ -397,6 +397,12 @@ export const publicCsp = (self) => {
     "frame-ancestors 'none'", 'sandbox allow-scripts allow-forms allow-modals allow-pointer-lock',
   ].join('; ');
 };
+// The frame-ancestors directive of each policy in a header (several arrive joined by ", "), with
+// what precedes it and the list it names.
+const FRAME_ANCESTORS = /(^|[;,])(\s*)frame-ancestors(?=[\s;,]|$)([^;,]*)/gi;
+// One more origin that may frame the page, in every policy that names who may. A page that says no
+// one, or says nothing, is left as it is: adding a directive where there was none would narrow it.
+export const addFrameAncestor = (csp, origin) => csp.replace(FRAME_ANCESTORS, (all, sep, sp, list) => (!list.trim() || /^\s*'none'\s*$/i.test(list) ? all : `${sep}${sp}frame-ancestors ${list.trim()} ${origin}${/\s$/.test(list) ? ' ' : ''}`));
 export const LINK_ID = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
 // a project's name, as the kit requires it for publishing: part of every public URL
 export const PROJECT = /^[a-z0-9][a-z0-9._-]{0,62}$/;
@@ -786,11 +792,13 @@ export function createGateway(opts = {}) {
     if (cap && out['content-security-policy']) out['content-security-policy'] = out['content-security-policy'].split(`${own}/artifact/`).join(`${own}${cap}/artifact/`);
     return { ...out, ...hsts };
   };
-  const proxy = (req, res, { port, path: p, publicOrigin, cap, extra = null }) => {
+  const proxy = (req, res, { port, path: p, publicOrigin, cap, extra = null, publicFrame = false }) => {
     const up = http.request({ host: '127.0.0.1', port, method: req.method, path: p, headers: upstreamHeaders(req, port, publicOrigin) }, (ur) => {
       // Never kept: a page an agent served once on this name must not come back from the browser's
       // cache after a real dashboard has taken its port.
-      res.writeHead(ur.statusCode, { ...downstreamHeaders(ur.headers, cap, publicOrigin), 'cache-control': 'no-store', ...(extra ?? {}) });
+      const head = downstreamHeaders(ur.headers, cap, publicOrigin);
+      if (publicFrame && head['content-security-policy']) head['content-security-policy'] = addFrameAncestor(String(head['content-security-policy']), PUBLIC);
+      res.writeHead(ur.statusCode, { ...head, 'cache-control': 'no-store', ...(extra ?? {}) });
       // an upstream cut off mid-body cuts the browser's response too, rather than leaving it open
       pipeline(ur, res, () => {});
     });
@@ -963,6 +971,12 @@ export function createGateway(opts = {}) {
   // The folder is main's, a worktree's, or a published tree's (the owner's wrapper shows exactly the
   // version the public sees: spec §8).
   const ARTIFACT = /^\/artifact\/(?:main|wt\/[^/]+|tree\/[0-9a-f]{40}(?:[0-9a-f]{24})?)\/[^/]+\//;
+  // An instance's viewer, and an artifact at a published tree, may also be framed by the owner's
+  // wrapper on the public name (spec §8). frame-ancestors is checked against every ancestor, and the
+  // wrapper is one. Nothing else of an instance's is opened to it: a tree only by a real tree id, as
+  // ARTIFACT takes it. The raw path, as the kit reads it.
+  const PUBLIC_FRAMED = /^\/(?:view\/|artifact\/tree\/[0-9a-f]{40}(?:[0-9a-f]{24})?\/)/;
+  const publicFramed = (raw) => PUBLIC_FRAMED.test(raw) && !/\.\.|%2e|%5c|\\/i.test(raw);
   const capMac = (port, prefix, exp, sid) => b64u(mac('artifact', port, prefix, exp, sid));
   const capFor = (port, prefix, session) => {
     const exp = Date.now() + CAPABILITY_MS;
@@ -1468,7 +1482,7 @@ export function createGateway(opts = {}) {
       const cm = port ? /^\/c\/(\d+)\.([\w-]+)\.([\w-]+)(\/artifact\/.*)$/.exec(rawPath) : null;
       if (cm) {
         if (!['GET', 'HEAD'].includes(req.method) || !capOk(port, cm[4], cm[1], cm[2], cm[3])) return send(res, 403, 'text/plain; charset=utf-8', 'that artifact link has expired: open it again from the dashboard');
-        return proxy(req, res, { port, path: cm[4] + url.search, publicOrigin: own, cap: `/c/${cm[1]}.${cm[2]}.${cm[3]}` });
+        return proxy(req, res, { port, path: cm[4] + url.search, publicOrigin: own, cap: `/c/${cm[1]}.${cm[2]}.${cm[3]}`, publicFrame: publicFramed(cm[4]) });
       }
       // A preview may be framed only by a page of this box (the dashboard's viewer, in time), so no
       // other site can lay it under its own page with the owner's session in it.
@@ -1518,7 +1532,7 @@ export function createGateway(opts = {}) {
       if (port) {
         const prefix = req.method === 'GET' && ['iframe', 'document'].includes(req.headers['sec-fetch-dest']) && ['same-origin', 'none'].includes(req.headers['sec-fetch-site']) ? ARTIFACT.exec(rawPath)?.[0] : null;
         if (prefix) return redirect(res, `${capFor(port, prefix, session)}${req.url}`);
-        return proxy(req, res, { port, path: req.url, publicOrigin: own, extra: req.method === 'GET' && p === '/api/data' ? { 'x-devteam-public': publicMap(port), 'x-devteam-previews': '1' } : null });
+        return proxy(req, res, { port, path: req.url, publicOrigin: own, publicFrame: publicFramed(rawPath), extra: req.method === 'GET' && p === '/api/data' ? { 'x-devteam-public': publicMap(port), 'x-devteam-previews': '1' } : null });
       }
       // The terminal: the gateway's copy of ttyd's page. Only its socket reaches ttyd (see upgrade).
       if (isTerm) {

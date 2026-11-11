@@ -2266,3 +2266,37 @@ test('an artifact at a published tree goes under a capability, as main and a wor
     }
   } finally { await K.close(); await gw.close(); }
 });
+
+test('frame-ancestors gains the public name on an instance\'s viewer and published trees, and nowhere else', async () => {
+  // the pure edit: one more source wherever a policy names who may frame it
+  assert.equal(G.addFrameAncestor("default-src 'none'; frame-ancestors 'self' https://a", 'https://p'), "default-src 'none'; frame-ancestors 'self' https://a https://p");
+  assert.equal(G.addFrameAncestor("frame-ancestors https://a ; img-src x", 'https://p'), 'frame-ancestors https://a https://p ; img-src x');
+  assert.equal(G.addFrameAncestor("frame-ancestors https://a, script-src 'self'; frame-ancestors https://b", 'https://p'), "frame-ancestors https://a https://p, script-src 'self'; frame-ancestors https://b https://p", 'every policy in the header');
+  assert.equal(G.addFrameAncestor("frame-ancestors 'none'", 'https://p'), "frame-ancestors 'none'", "'none' stays no one");
+  assert.equal(G.addFrameAncestor('frame-ancestors;', 'https://p'), 'frame-ancestors;', 'an empty list is no one too');
+  assert.equal(G.addFrameAncestor("default-src 'self'", 'https://p'), "default-src 'self'", 'no directive: none is added, which would narrow it');
+  assert.equal(G.addFrameAncestor("default-src 'self'; x-frame-ancestors a", 'https://p'), "default-src 'self'; x-frame-ancestors a", 'only the directive itself');
+  const gw = await gateway('public-ancestor');
+  const K = fakeKit(P + 20);
+  await K.up();
+  const T = 'b'.repeat(40);
+  const fa = (r) => r.headers['content-security-policy'].split(/;\s*/).find((d) => d.startsWith('frame-ancestors'));
+  const fromPublic = { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-site', 'sec-fetch-mode': 'navigate' };
+  const framed = { 'sec-fetch-site': 'same-origin', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'iframe' };
+  const opaque = { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'no-cors', 'sec-fetch-dest': 'style' };
+  const inst = gw.inst(P + 20);
+  try {
+    assert.equal((await gw.claim(authenticator())).status, 200);
+    for (const v of [`/view/artifact/mock?at=tree:${T}`, '/view/preview/cool-tiger'])
+      assert.equal(fa(await gw.req('GET', v, { on: P + 20, headers: fromPublic })), `frame-ancestors 'self' ${gw.publicUrl} ${gw.site}`, v);
+    // a published tree, under its capability and without
+    const cap = /^(\/c\/[^/]+)\//.exec((await gw.req('GET', `/artifact/tree/${T}/mock/`, { on: P + 20, headers: framed })).headers.location)[1];
+    assert.equal(fa(await gw.req('GET', `${cap}/artifact/tree/${T}/mock/s.css`, { on: P + 20, cookie: '', headers: opaque })), `frame-ancestors ${inst} ${gw.publicUrl} ${gw.site}`);
+    assert.equal(fa(await gw.req('GET', `/artifact/tree/${T}/mock/s.css`, { on: P + 20 })), `frame-ancestors ${inst} ${gw.publicUrl} ${gw.site}`);
+    // nothing else of an instance's
+    const mainCap = /^(\/c\/[^/]+)\//.exec((await gw.req('GET', '/artifact/main/mock/', { on: P + 20, headers: framed })).headers.location)[1];
+    assert.equal(fa(await gw.req('GET', `${mainCap}/artifact/main/mock/s.css`, { on: P + 20, cookie: '', headers: opaque })), `frame-ancestors ${inst} ${gw.publicUrl}`, 'main\'s artifacts');
+    for (const other of ['/', '/api/data', '/viewer/x', '/view', '/view/../api/data', '/view/%2e%2e/api/data', '/x/view/a', '/artifact/tree/notasha/mock/'])
+      assert.equal(fa(await gw.req('GET', other, { on: P + 20 })), `frame-ancestors 'self' ${gw.publicUrl}`, other);
+  } finally { await K.close(); await gw.close(); }
+});
