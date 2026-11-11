@@ -339,21 +339,36 @@ export function bareProject(base, name) {
   assert.equal(i.status, 0, i.stderr);
   return r;
 }
+// The dashboard in a process group of its own: what it runs (hello, dashboard-data, an owner's command)
+// is in that group and can outlive it, still writing into the fixture, so stop() ends the group too and
+// waits until nothing in it is left: a fixture removed after stop() has nobody writing into it.
 export function startDashboard(root, env, args = []) {
-  const p = spawn(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), 'dashboard', ...args], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const p = spawn(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), 'dashboard', ...args], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+  const group = (sig) => { try { process.kill(-p.pid, sig); return true; } catch { return false; } };
+  // a test process that exits without stop() leaves none of it running
+  const atExit = () => group('SIGKILL');
+  process.once('exit', atExit);
   let o = '';
   p.stdout.on('data', (b) => { o += b; });
   p.stderr.on('data', (b) => { o += b; });
-  return { p, out: () => o, stop: () => new Promise((r) => {
-    if (p.exitCode !== null || p.signalCode !== null) return r();
-    // its children can hold the pipes open after it has gone: 'close' can wait forever, so not past a moment after 'exit'
-    p.once('exit', () => setTimeout(() => { p.stdout.destroy(); p.stderr.destroy(); r(); }, 500).unref());
-    p.on('close', r);
+  let stopping = null;
+  const stop = () => (stopping ??= new Promise((r) => {
+    // the dashboard gone: whatever it started is killed, and waited for (up to 10 s, then left)
+    const rest = async () => {
+      for (let i = 0; i < 200 && group('SIGKILL'); i++) await new Promise((w) => setTimeout(w, 50));
+      p.stdout.destroy();
+      p.stderr.destroy();
+      process.off('exit', atExit);
+      r();
+    };
+    if (p.exitCode !== null || p.signalCode !== null) return void rest();
+    p.once('exit', () => void rest());
     const hard = setTimeout(() => p.kill('SIGKILL'), 10000);
     hard.unref();
     p.once('exit', () => clearTimeout(hard));
     p.kill();
-  }) };
+  }));
+  return { p, out: () => o, stop };
 }
 // Up to 2 min: a dashboard's first background run (hello hashes every kit file) takes that long on
 // a loaded machine; a healthy one returns at once.
