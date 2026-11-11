@@ -660,6 +660,9 @@ export const PUBLIC_CDNS = ['https://cdnjs.cloudflare.com', 'https://cdn.jsdeliv
 export const publicPathOk = (p) => /^[A-Za-z0-9._/-]+$/.test(p) && p.split('/').every((s) => s && !s.startsWith('.'));
 // The kit's artifact policy, its own folder as self, framed by nothing. The sandbox (no
 // allow-same-origin) makes the page an opaque origin, so it can't read or write the box's cookies.
+// frame-src 'none' is load-bearing too: an instance's viewer and published trees accept the public
+// name as a frame ancestor (viewerGranted, treeGranted), and frame-ancestors matches by URL, not
+// origin, so a published page that could frame would satisfy it, sandbox or not. A test pins both.
 export const publicCsp = (self) => {
   const cdns = PUBLIC_CDNS.join(' ');
   return [
@@ -1179,7 +1182,16 @@ export function createGateway(opts = {}) {
   // hub once more, with every waiter sharing one read, so no anonymous request can make it poll.
   const ownPort = opts.port ?? null;
   let previews = new Map();
-  const takePreviews = (body) => { let list = null; try { list = JSON.parse(body).instances; } catch {} previews = previewLinks(Array.isArray(list) ? list : [], BLOCK, ownPort, ttydPort); };
+  // Each instance's root and whether its kit has viewers, as the hub's list last said (every poll,
+  // PUSH_POLL_MS): the owner wrapper's choice is a lookup in it, so no visit asks anything (spec §8).
+  let listed = new Map();
+  const takePreviews = (body) => {
+    let list = null;
+    try { list = JSON.parse(body).instances; } catch {}
+    const ok = Array.isArray(list) ? list : [];
+    previews = previewLinks(ok, BLOCK, ownPort, ttydPort);
+    listed = new Map([...listedByPort(ok, BLOCK)].map(([port, x]) => [port, { root: x.root, viewer: x.viewer === 1 }]));
+  };
   let previewRefresh = null;
   const refreshPreviews = () => (previewRefresh ??= hubList().then(takePreviews).finally(() => { previewRefresh = null; }));
 
@@ -1266,10 +1278,27 @@ export function createGateway(opts = {}) {
   const ARTIFACT = /^\/artifact\/(?:main|wt\/[^/]+|tree\/[0-9a-f]{40}(?:[0-9a-f]{24})?)\/[^/]+\//;
   // An instance's viewer, and an artifact at a published tree, may also be framed by the owner's
   // wrapper on the public name (spec §8). frame-ancestors is checked against every ancestor, and the
-  // wrapper is one. Nothing else of an instance's is opened to it: a tree only by a real tree id, as
-  // ARTIFACT takes it. The raw path, as the kit reads it.
-  const PUBLIC_FRAMED = /^\/(?:view\/|artifact\/tree\/[0-9a-f]{40}(?:[0-9a-f]{24})?\/)/;
-  const publicFramed = (raw) => PUBLIC_FRAMED.test(raw) && !/\.\.|%2e|%5c|\\/i.test(raw);
+  // wrapper is one. Nothing else of an instance's is opened to it. The raw path, as the kit reads it.
+  // The viewer, which holds the owner's actions, only under the grant the wrapper put in its frame's
+  // URL: this port, this page, this version, for a few minutes, MACed with this process's secret.
+  const WRAP_GRANT_MS = 5 * 60 * 1000;
+  const wrapMac = (port, slug, at, exp) => b64u(mac('wrap', port, `/view/artifact/${slug}`, at, exp));
+  const wrapGrant = (port, slug, at, exp = Date.now() + WRAP_GRANT_MS) => `${exp}.${wrapMac(port, slug, at, exp)}`;
+  const viewerGranted = (port, raw, url) => {
+    const m = /^\/view\/artifact\/([^/]+)$/.exec(raw);
+    if (!m || !LINK_ID.test(m[1]) || url.searchParams.getAll('at').length !== 1 || url.searchParams.getAll('w').length !== 1) return false;
+    const w = /^(\d{1,15})\.([\w-]{22})$/.exec(url.searchParams.get('w'));
+    const exp = w ? Number(w[1]) : 0;
+    if (!w || exp < Date.now() || exp > Date.now() + WRAP_GRANT_MS) return false;
+    return sameBytes(Buffer.from(w[2]), Buffer.from(wrapMac(port, m[1], url.searchParams.get('at'), exp)));
+  };
+  // An artifact's frame inside that viewer, only at a tree this port's binding published for that
+  // very page: what it shows is public already, so it needs no grant, and the kit passes none along.
+  const treeGranted = (port, raw) => {
+    const m = /^\/artifact\/tree\/([0-9a-f]{40}(?:[0-9a-f]{24})?)\/([^/]+)\//.exec(raw);
+    if (!m || /\.\.|%2e|%5c|\\/i.test(raw)) return false;
+    try { return Object.values(store.load().public ?? {}).some((b) => b?.port === port && Object.hasOwn(b.artifacts ?? {}, m[2]) && b.artifacts[m[2]]?.tree === m[1]); } catch { return false; }
+  };
   const capMac = (port, prefix, exp, sid) => b64u(mac('artifact', port, prefix, exp, sid));
   const capFor = (port, prefix, session) => {
     const exp = Date.now() + CAPABILITY_MS;
@@ -1650,18 +1679,17 @@ export function createGateway(opts = {}) {
 
   // The owner's page on the public name (spec §8): the project's viewer at the published version,
   // with threads. Only for a top-level visit (sec-fetch-dest: document; navigate also matches frames)
-  // to a published page's index, by the signed-in owner, whose bound instance answers now as that
-  // checkout with a kit that has viewers. Anything in doubt is null: a session that isn't one, a
-  // store that can't be read, no binding, an instance that is down, slow, another checkout or an
-  // older kit. Then the public's bytes are served, as before. It reads the cookie, and nothing else
-  // of the owner's: it never proxies, and the instance is asked as a loopback client. The root
-  // check is for consistency, against another real checkout on that port, not for authenticity:
-  // that rests on the port binding, as it does for the dashboard on that name, so a name check
-  // would add nothing.
-  const WRAP_MS = opts.wrapperHelloMs ?? 1500;
+  // to a published page's index, by the signed-in owner, whose bound instance the hub's list (as last
+  // polled) shows as that checkout with a kit that has viewers. Anything in doubt is null: a session
+  // that isn't one, a store that can't be read, no binding, an instance not listed so, another
+  // checkout or an older kit. Then the public's bytes are served, as before. It reads the cookie, and
+  // nothing else of the owner's, and it is synchronous: nothing is asked on the request path, not even
+  // on a miss, so its timing says nothing of who is visiting. The list can be up to a poll stale.
+  // The root check is for consistency, against another real checkout on that port, not for
+  // authenticity: that rests on the port binding, as it does for the dashboard on that name.
   // The wrapper's own policy: styles and one frame, the bound instance's; no script, nothing to fetch.
   const WRAP_CSP = (inst) => `default-src 'none'; style-src 'unsafe-inline'; frame-src ${inst}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
-  const ownerWrapper = async (req, url) => {
+  const ownerWrapper = (req, url) => {
     try {
       if (req.method !== 'GET' || req.headers['sec-fetch-dest'] !== 'document' || url.searchParams.has('plain')) return null;
       const m = /^\/([^/]+)\/([^/]+)\/(?:index\.html)?$/.exec(req.url.split('?')[0]);
@@ -1671,11 +1699,10 @@ export function createGateway(opts = {}) {
       const bound = Object.hasOwn(s.public ?? {}, m[1]) ? s.public[m[1]] : null;
       const art = bound && Object.hasOwn(bound.artifacts ?? {}, m[2]) ? bound.artifacts[m[2]] : null;
       if (!art || !BLOCK.includes(bound.port) || typeof bound.root !== 'string' || typeof art.tree !== 'string' || !TREE.test(art.tree)) return null;
-      const r = await loopback(bound.port, 'GET', '/api/hello', { cap: 256 * 1024, ms: WRAP_MS });
-      if (r.status !== 200) return null;
-      const hello = JSON.parse(r.body.toString('utf8'));
-      if (hello?.viewer !== 1 || hello.root !== bound.root) return null;
-      return { port: bound.port, html: PAGES.ownerWrapper({ project: m[1], slug: m[2], title: typeof art.title === 'string' && art.title ? art.title : m[2], frame: `${instanceOrigin(bound.port)}/view/artifact/${m[2]}?at=tree:${art.tree}` }) };
+      const x = listed.get(bound.port);
+      if (!x?.viewer || x.root !== bound.root) return null;
+      const at = `tree:${art.tree}`;
+      return { port: bound.port, html: PAGES.ownerWrapper({ project: m[1], slug: m[2], title: typeof art.title === 'string' && art.title ? art.title : m[2], frame: `${instanceOrigin(bound.port)}/view/artifact/${m[2]}?at=${at}&w=${wrapGrant(bound.port, m[2], at)}` }) };
     } catch { return null; }
   };
 
@@ -1800,7 +1827,7 @@ export function createGateway(opts = {}) {
     // exception reads the cookie to choose a page, never to refuse one: the owner's own visit gets
     // the wrapper, and whatever that can't settle gets the public's bytes, exactly as before.
     if (isPublic) {
-      const wrap = await ownerWrapper(req, url);
+      const wrap = ownerWrapper(req, url);
       if (wrap) return send(res, 200, 'text/html; charset=utf-8', wrap.html, { 'content-security-policy': WRAP_CSP(instanceOrigin(wrap.port)), 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer', 'cache-control': 'no-store, private', vary: 'cookie, sec-fetch-dest', 'cross-origin-opener-policy': 'same-origin' });
       try { return servePublic(req, res); } catch (e) { return send(res, e?.unreadable ? 503 : 500, 'text/plain; charset=utf-8', 'this page can\'t be served just now'); }
     }
@@ -1816,7 +1843,7 @@ export function createGateway(opts = {}) {
       const cm = port ? /^\/c\/(\d+)\.([\w-]+)\.([\w-]+)(\/artifact\/.*)$/.exec(rawPath) : null;
       if (cm) {
         if (!['GET', 'HEAD'].includes(req.method) || !capOk(port, cm[4], cm[1], cm[2], cm[3])) return send(res, 403, 'text/plain; charset=utf-8', 'that artifact link has expired: open it again from the dashboard');
-        return proxy(req, res, { port, path: cm[4] + url.search, publicOrigin: own, cap: `/c/${cm[1]}.${cm[2]}.${cm[3]}`, publicFrame: publicFramed(cm[4]) });
+        return proxy(req, res, { port, path: cm[4] + url.search, publicOrigin: own, cap: `/c/${cm[1]}.${cm[2]}.${cm[3]}`, publicFrame: treeGranted(port, cm[4]) });
       }
       // A preview may be framed only by a page of this box (the dashboard's viewer, in time), so no
       // other site can lay it under its own page with the owner's session in it.
@@ -1871,7 +1898,7 @@ export function createGateway(opts = {}) {
       if (port) {
         const prefix = req.method === 'GET' && ['iframe', 'document'].includes(req.headers['sec-fetch-dest']) && ['same-origin', 'none'].includes(req.headers['sec-fetch-site']) ? ARTIFACT.exec(rawPath)?.[0] : null;
         if (prefix) return redirect(res, `${capFor(port, prefix, session)}${req.url}`);
-        return proxy(req, res, { port, path: req.url, publicOrigin: own, publicFrame: publicFramed(rawPath), extra: req.method === 'GET' && p === '/api/data' ? { 'x-devteam-public': publicMap(port), 'x-devteam-previews': '1' } : null });
+        return proxy(req, res, { port, path: req.url, publicOrigin: own, publicFrame: viewerGranted(port, rawPath, url) || treeGranted(port, rawPath), extra: req.method === 'GET' && p === '/api/data' ? { 'x-devteam-public': publicMap(port), 'x-devteam-previews': '1' } : null });
       }
       // The terminal: the gateway's copy of ttyd's page. Only its socket reaches ttyd (see upgrade).
       if (isTerm) {
@@ -2153,7 +2180,7 @@ export function createGateway(opts = {}) {
   server.keepAliveTimeout = 65000;
   server.headersTimeout = 66000;
   server.requestTimeout = REQUEST_MS;
-  return { server, publicUrl: PUB, pollPush, sweepUploads, previewOf, safeNext };
+  return { server, publicUrl: PUB, pollPush, sweepUploads, previewOf, safeNext, wrapGrant };
 }
 
 // --- the gateway's own pages -------------------------------------------------------------------
