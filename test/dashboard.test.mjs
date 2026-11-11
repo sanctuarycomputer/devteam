@@ -616,6 +616,9 @@ test("threads on the dashboard's server: owner actions checked before anything r
     ['thread-new', { title: 't', text: 'x', subject: { kind: 'item', ref: 'secret:x' } }, 'a ref of no known type'],
     ['thread-say', { id: 'nope', text: 'x' }, 'not a thread id'],
     ['thread-say', { id: T }, 'no words'],
+    ['thread-say', { id: T, text: 'hi\u0000' }, 'a NUL in the words: no process takes one in its argv'],
+    ['thread-new', { title: 't', text: 'hi\u0000' }, 'a NUL in the first words'],
+    ['thread-new', { title: 't\u0000', text: 'x' }, 'a NUL in the title'],
     ['thread-resolve', { id: T, outcome: 'two\nlines' }, 'an outcome of two lines'],
     ['thread-accept', { id: 'q-20261110-101500123-supervisor' }, 'a question id'],
     ['thread-say', { id: [T], text: 'x' }, 'an id sent as a one-element array'],
@@ -631,6 +634,11 @@ test("threads on the dashboard's server: owner actions checked before anything r
     assert.equal((await post(name, body)).status, 400, why);
     assert.equal((await get()).status, 200, `the dashboard still answers after ${why}`);
   }
+  // a review answer whose result is nested past what JSON.stringify can walk: refused, and the dashboard answers on
+  // (the body written out as text: this process can't JSON.stringify it either)
+  r = await fetch(`${B}/api/review-answer`, { method: 'POST', headers: { 'content-type': 'application/json', origin: B, 'sec-fetch-site': 'same-origin' }, body: `{"id":"q-20261110-101500123-supervisor","sha256":"${'a'.repeat(64)}","result":${'{"a":'.repeat(10000)}{}${'}'.repeat(10000)}}` });
+  assert.equal(r.status, 400, await r.clone().text());
+  assert.equal((await get()).status, 200, 'the dashboard still answers after a review result nested 10,000 deep');
   assert.equal((await list()).length, n, 'nothing was written');
   assert.equal((await turnsOf()).length, before, 'no stray turn was written to the thread');
   // an artifact and a preview, as a viewer's lens captures them, and a published tree in a SHA-256 repository
@@ -1079,6 +1087,10 @@ test("the thread layer's rules: what the pointer is on, a subject that fits, whe
   assert.deepEqual([A.T_REF_MAX, A.T_WAIT_MS, A.T_TURN_MAX, A.T_ENCODED_MAX, A.T_SUBJECT_MAX, A.T_TITLE_MAX], [kitLog.SUBJECT_CAPS.ref, kitLog.THREAD_WAIT_MS, kitLog.TURN_MAX, kitLog.TURN_ENCODED_MAX, kitLog.SUBJECT_MAX, kitLog.THREAD_TITLE_MAX], "the page's caps are the kit's");
   assert.deepEqual([plain(A.T_CAPS), plain(A.T_ANCHOR_CAPS), plain(A.T_SUBJECT_KEYS)], [plain(kitLog.SUBJECT_CAPS), plain(kitLog.ANCHOR_CAPS), plain(kitLog.SUBJECT_KEYS)], "a capture's caps and keys are the kit's");
   assert.deepEqual([A.T_ERRORS, A.T_ERROR_MAX, A.T_AT_MAX], [kitLog.SUBJECT_ERRORS, kitLog.SUBJECT_ERROR_MAX, kitLog.SUBJECT_AT_MAX]);
+  // and the artifact lens, which cuts its own page's token, reads an encoded slash and dot as both do
+  const lensLine = (name) => new RegExp(`^ {2}const ${name} = .*$`, 'm').exec(/const ARTIFACT_LENS = String\.raw`([^`]*)`;/.exec(kitSrc)[1])[0];
+  const lensRe = vm.runInContext(`${lensLine('SLASH')}\n${lensLine('DOT')}\n;({ SLASH, DOT })`, vm.createContext({}));
+  assert.deepEqual([lensRe.SLASH, lensRe.DOT], [kitLog.CAP_SLASH, kitLog.CAP_DOT], "the lens's encodings are the kit's");
   assert.deepEqual([A.T_BOX_CAPABILITY.source, A.T_BOX_CAPABILITY.flags, A.T_BOX_CAPABILITY_TAIL.source, A.T_BOX_CAPABILITY_TAIL.flags], [kitLog.BOX_CAPABILITY.source, kitLog.BOX_CAPABILITY.flags, kitLog.BOX_CAPABILITY_TAIL.source, kitLog.BOX_CAPABILITY_TAIL.flags], "the page cuts a capability as the kit does");
   assert.deepEqual(Object.keys(A.T_KIND).sort(), [...plain(A.T_TYPES)].sort(), 'every kind of item has a name the owner reads');
   assert.deepEqual(Object.keys(A.T_HOME).sort(), [...plain(A.T_TYPES)].sort(), 'every kind of item has a home section');
@@ -1139,6 +1151,7 @@ test("the thread layer's rules: what the pointer is on, a subject that fits, whe
   assert.deepEqual([tok.path, tok.anchor.text, tok.anchor.html], ['x[link removed]', `${'x'.repeat(60)}[link removed]`, '<a href="[link removed]">']);
   assert.equal(A.tUncap('Share /c/1762900000000.AbCdEf\u2026'), 'Share [link removed]', 'one a cap cut short too');
   assert.equal(A.tUncap('A/C units, /c/123.abc.def and 3/c/4'), 'A/C units, /c/123.abc.def and 3/c/4');
+  for (const ok of ['/blog/c/2.html', '/docs/c/1.md', '/products/c/12.json', 'Fix /c/3.0']) assert.equal(A.tUncap(ok), ok, 'a path that ends in /c/<n>.<ext> is no expiry');
   assert.equal(cut.route, undefined, 'only its kind\'s keys');
   assert.equal(cut.anchor.onclick, undefined, 'only the kit\'s anchor keys');
   assert.equal(cut.anchor.rect, undefined, 'a rect with a number that isn\'t one is no rect');

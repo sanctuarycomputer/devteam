@@ -4921,10 +4921,12 @@ const SUBJECT_AT_MAX = 100;
 const CAP_SLASH = String.raw`(?:\\{0,8}\/|%(?:25){0,4}2f|\\{0,8}u002f|&#(?:x0{0,4}2f|0{0,4}47);)`;
 const CAP_DOT = String.raw`(?:\.|%(?:25){0,4}2e|\\{0,8}u002e|&#(?:x0{0,4}2e|0{0,4}46);)`;
 const BOX_CAPABILITY = new RegExp(`${CAP_SLASH}c${CAP_SLASH}\\d{1,15}${CAP_DOT}[\\w-]{16}${CAP_DOT}[\\w-]{22}`, 'gi');
-const BOX_CAPABILITY_TAIL = new RegExp(`${CAP_SLASH}c${CAP_SLASH}\\d{1,15}${CAP_DOT}(?:[\\w-]{0,15}|[\\w-]{16}(?:${CAP_DOT}[\\w-]{0,21})?)…?$`, 'i');
-// A subject's strings are at most two deep (subject.anchor.text, subject.errors[0]); nothing deeper
-// is walked, so a body of thousands of nested objects is refused by its shape, not the stack.
+const BOX_CAPABILITY_TAIL = new RegExp(`${CAP_SLASH}c${CAP_SLASH}\\d{13,15}${CAP_DOT}(?:[\\w-]{0,15}|[\\w-]{16}(?:${CAP_DOT}[\\w-]{0,21})?)\u2026?$`, 'i');
+// A subject's strings are at most two deep (subject.anchor.text, subject.errors[0]), its objects and
+// lists too (subject.anchor.rect): subjectProblem refuses one nested deeper before anything else,
+// and uncapped walks no deeper, so a body of thousands of nested objects never reaches the stack.
 const SUBJECT_DEPTH = 3;
+const nestedPast = (v, depth = 0) => !!v && typeof v === 'object' && (depth >= SUBJECT_DEPTH || Object.values(v).some((x) => nestedPast(x, depth + 1)));
 const uncapped = (v, depth = 0) => (typeof v === 'string' ? v.replace(BOX_CAPABILITY, '[link removed]').replace(BOX_CAPABILITY_TAIL, '[link removed]') : depth >= SUBJECT_DEPTH ? v : Array.isArray(v) ? v.map((x) => uncapped(x, depth + 1)) : isObj(v) ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, uncapped(x, depth + 1)])) : v);
 // Why a subject can't be recorded (null when it can): the size first, so a refusal says how big.
 function subjectProblem(s) {
@@ -4932,6 +4934,7 @@ function subjectProblem(s) {
   // own keys only: a kind of constructor or __proto__ is no kind
   const keys = typeof s.kind === 'string' && Object.hasOwn(SUBJECT_KEYS, s.kind) ? SUBJECT_KEYS[s.kind] : null;
   if (!keys) return `a subject's kind is one of ${Object.keys(SUBJECT_KEYS).join(', ')}`;
+  if (nestedPast(s)) return `a subject nests at most ${SUBJECT_DEPTH - 1} deep (subject.anchor.rect)`;
   const bytes = Buffer.byteLength(JSON.stringify(s));
   if (bytes > SUBJECT_MAX) return `the subject is ${bytes} bytes encoded; at most ${SUBJECT_MAX}`;
   const extra = Object.keys(s).filter((k) => k !== 'kind' && !keys.includes(k));
@@ -11122,13 +11125,20 @@ async function cmdDashboard() {
   delete ownerEnv.DEVTEAM_FEATURE;
   // A child run as the owner. timeout (ms) is for a caller that can't wait (the gateway's 15 s);
   // code is the exit code, so a route can tell "not there" from "fix a setting" (2).
-  const run = (args, { timeout = 0 } = {}) => new Promise((resolve) => execFile(process.execPath, [self, ...args], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: ownerEnv, timeout, killSignal: 'SIGKILL' }, (err, stdout, stderr) => resolve({ ok: !err, code: err ? (typeof err.code === 'number' ? err.code : 1) : 0, stdout, stderr: err?.killed ? `devteam: ${args.slice(0, 2).join(' ')} took over ${timeout / 1000} s and was stopped` : stderr })));
+  // An argument execFile refuses (a NUL in it) throws as it is called, not to the callback: that is a
+  // failed run too, never a rejection, which would end the dashboard.
+  const run = (args, { timeout = 0 } = {}) => new Promise((resolve) => {
+    try {
+      execFile(process.execPath, [self, ...args], { cwd: mainRoot, maxBuffer: 64 * 1024 * 1024, env: ownerEnv, timeout, killSignal: 'SIGKILL' }, (err, stdout, stderr) => resolve({ ok: !err, code: err ? (typeof err.code === 'number' ? err.code : 1) : 0, stdout, stderr: err?.killed ? `devteam: ${args.slice(0, 2).join(' ')} took over ${timeout / 1000} s and was stopped` : stderr }));
+    } catch (e) { resolve({ ok: false, code: 1, stdout: '', stderr: `devteam: ${args.slice(0, 2).join(' ')} could not start: ${e.code ?? e.message}` }); }
+  });
   // /api/view's describe runs in flight, by slug|at: one child process however many ask at once
   const describing = new Map();
   const ID = /^[a-z]-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/;
-  const text = (x, max = 4000) => typeof x === 'string' && x.trim() && x.length <= max;
+  // no string an action puts in argv holds a NUL: no process can be given one
+  const text = (x, max = 4000) => typeof x === 'string' && x.trim() && x.length <= max && !x.includes('\0');
   const autonomyArgs = (b) => ([1, 2, 3].includes(b.autonomy) ? ['--autonomy', String(b.autonomy), ...(text(b.scope, 100) ? ['--scope', b.scope.trim()] : [])] : []);
-  const turnOk = (x) => typeof x === 'string' && !!x.trim() && Buffer.byteLength(x.trim()) <= TURN_MAX && encodedBytes(x.trim()) <= TURN_ENCODED_MAX;
+  const turnOk = (x) => typeof x === 'string' && !!x.trim() && !x.includes('\0') && Buffer.byteLength(x.trim()) <= TURN_MAX && encodedBytes(x.trim()) <= TURN_ENCODED_MAX;
   const lineOk = (x, max, bytes = false) => typeof x === 'string' && !!x.trim() && !UNSAFE_TEXT.test(x) && (bytes ? Buffer.byteLength(x.trim()) : x.trim().length) <= max;
   const ACTIONS = {
     answer: (b) => {
@@ -11529,6 +11539,10 @@ async function cmdDashboard() {
       if (!isReview || size > 4 * cap) req.destroy();
     });
     req.on('end', () => { const buf = Buffer.concat(chunks); body = buf.toString('utf8'); buf.fill(0); chunks.length = 0; });
+    // A body no check foresaw (a result nested thousands deep, which JSON.stringify can't walk) is
+    // a bad request, never a crash: a throw from an end handler is an uncaught exception, and that
+    // ends the dashboard.
+    const guarded = (f) => { try { f(); } catch { body = ''; if (!res.headersSent) send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' })); } };
     // The owner's own process, with the body on its stdin (never in argv or the server's output).
     const ownerChild = (args, input) => {
       const child = spawn(process.execPath, [self, ...args], { cwd: mainRoot, env: ownerEnv, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -11546,17 +11560,17 @@ async function cmdDashboard() {
     if (isSecret) {
       // The values go to a child on stdin; the child pipes each to its sink (secret post --json)
       // and logs only names.
-      return req.on('end', () => {
+      return req.on('end', () => guarded(() => {
         let parsed;
         try { parsed = JSON.parse(body || '{}'); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'bad json' })); }
         body = '';
         if (!ID.test(parsed.id ?? '') || typeof parsed.values !== 'object' || !parsed.values) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
         ownerChild(['secret', 'post', parsed.id, '--json'], JSON.stringify(parsed.values));
         parsed = null;
-      });
+      }));
     }
     if (isReview) {
-      return req.on('end', () => {
+      return req.on('end', () => guarded(() => {
         if (over) return send(res, 400, 'application/json', JSON.stringify({ error: `the body is over ${cap} bytes; a review result or draft is at most ${REVIEW_MAX} (4 MB)` }));
         let parsed;
         try { parsed = JSON.parse(body || '{}'); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'bad json' })); }
@@ -11573,7 +11587,7 @@ async function cmdDashboard() {
         const textOut = JSON.stringify(parsed.result);
         if (sha256(Buffer.from(textOut)) !== parsed.sha256) return send(res, 400, 'application/json', JSON.stringify({ error: 'the result is not the one the preview showed (its sha256 differs); nothing was answered' }));
         ownerChild(['answer', parsed.id, '--review-result', '-', ...autonomyArgs(parsed)], textOut);
-      });
+      }));
     }
     req.on('end', async () => {
       let parsed;
@@ -11582,6 +11596,7 @@ async function cmdDashboard() {
       // here is an unhandled rejection, and that ends the dashboard
       let args;
       try { args = action(parsed); } catch { return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' })); }
+      if (args && args.some((a) => typeof a !== 'string' || a.includes('\0'))) args = null;
       if (!args) return send(res, 400, 'application/json', JSON.stringify({ error: 'missing or invalid fields' }));
       const r = await run(args, { timeout: ACTION_MS[name] ?? 0 });
       send(res, r.ok ? 200 : 400, 'application/json', JSON.stringify(r.ok ? { ok: true, out: r.stdout.trim() } : { error: r.stderr.split('\n').filter((l) => l && !l.startsWith('devteam: warning:')).join(' ').replace(/^devteam: /, '') }));

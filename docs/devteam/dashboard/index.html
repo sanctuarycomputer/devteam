@@ -3521,7 +3521,7 @@ const T_ERRORS = 3, T_ERROR_MAX = 200, T_AT_MAX = 100;
 const T_CAP_SLASH = String.raw`(?:\\{0,8}\/|%(?:25){0,4}2f|\\{0,8}u002f|&#(?:x0{0,4}2f|0{0,4}47);)`;
 const T_CAP_DOT = String.raw`(?:\.|%(?:25){0,4}2e|\\{0,8}u002e|&#(?:x0{0,4}2e|0{0,4}46);)`;
 const T_BOX_CAPABILITY = new RegExp(`${T_CAP_SLASH}c${T_CAP_SLASH}\\d{1,15}${T_CAP_DOT}[\\w-]{16}${T_CAP_DOT}[\\w-]{22}`, 'gi');
-const T_BOX_CAPABILITY_TAIL = new RegExp(`${T_CAP_SLASH}c${T_CAP_SLASH}\\d{1,15}${T_CAP_DOT}(?:[\\w-]{0,15}|[\\w-]{16}(?:${T_CAP_DOT}[\\w-]{0,21})?)…?$`, 'i');
+const T_BOX_CAPABILITY_TAIL = new RegExp(`${T_CAP_SLASH}c${T_CAP_SLASH}\\d{13,15}${T_CAP_DOT}(?:[\\w-]{0,15}|[\\w-]{16}(?:${T_CAP_DOT}[\\w-]{0,21})?)\u2026?$`, 'i');
 const tUncap = (v) => String(v).replace(T_BOX_CAPABILITY, '[link removed]').replace(T_BOX_CAPABILITY_TAIL, '[link removed]');
 // Names the log matches whole (a ref, a section, a slug, a version, a fingerprint, a preview): one
 // over its cap is dropped, not cut, so the kit refuses the subject rather than point somewhere else.

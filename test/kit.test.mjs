@@ -256,6 +256,7 @@ test('threads: records, commands, delivery, the Inbox and the loop', async (t) =
       assert.equal(show(T).subject.at, at);
       F.owner(['thread', 'resolve', T]);
     }
+    assert.match(F.fails(['thread', 'new', 'x', '--subject', JSON.stringify({ kind: 'artifact', slug: 'pricing-mock', at: 'main', anchor: { rect: { x: { y: 1 }, y: 0, w: 0, h: 0 } } })]), /--subject: a subject nests at most 2 deep/, 'nothing deeper than a rect');
     for (const at of [`tree:${'a'.repeat(41)}`, 'tree:abc', '../main', 'a/b', '-x', '.x', 'x'.repeat(101), '']) assert.match(F.fails(['thread', 'new', 'x', '--subject', art(at)]), /--subject: at is main, a worktree name, or tree:<id>|at is \d+ bytes/, JSON.stringify(at));
   });
 
@@ -295,6 +296,12 @@ test('threads: records, commands, delivery, the Inbox and the loop', async (t) =
     assert.match(F.fails(['thread', 'new', 'x', '--title', `${'\\'.repeat(19000)}${'%25'.repeat(3000)}`]), /--title is at most 120 characters/);
     // ordinary text is never taken for one: nothing short of the gateway's whole form
     const plainText = 'A/C units, see /c/docs, /c/123.abc.def, 3/c/4 and /c/1762900000000.AbCdEfGh.abcdefghijklmnopqrstuv';
+    // nor a path or version that ends in /c/<n>.<more>: the gateway's expiry is 13 digits of milliseconds
+    for (const ok of ['/blog/c/2.html', '/docs/c/1.md', '/products/c/12.json', 'Fix /c/3.0']) {
+      const [O] = F.owner(['thread', 'new', 'x', '--title', ok, '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}`, quote: ok })]).split('\n');
+      assert.deepEqual([show(O).title, show(O).subject.quote], [ok, ok]);
+      F.owner(['thread', 'resolve', O]);
+    }
     const [P] = F.owner(['thread', 'new', 'x', '--title', plainText.slice(0, 100), '--subject', JSON.stringify({ kind: 'item', ref: `goal:${F.goal}`, quote: plainText })]).split('\n');
     assert.deepEqual([show(P).title, show(P).subject.quote], [plainText.slice(0, 100), plainText]);
     F.owner(['thread', 'resolve', P]);
