@@ -2429,7 +2429,7 @@
           "recurred": "learn",
           "finding-ack": "decide",
           "sensor-ignored": "decide",
-          "sensor-unignored": "decide",
+          "sensor-unignored": "decide", "sensor-reconsidered": "decide",
           "*": "observe"
         }
       },

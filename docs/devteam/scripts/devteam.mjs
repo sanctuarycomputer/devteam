@@ -7264,6 +7264,8 @@ function cmdObserve() {
   // and reads as its writer's (provenanceOf)
   const src = flagStr('source');
   if (['sensor', 'metrics', 'spend'].includes(src)) die(`observe --source ${src}: those lines come from the kit itself (sensor poll, observe-metrics, observe-spend)`);
+  // a goal's reading (source repo, prod or owner) is the kit's, from goal check or an answer
+  if (flagStr('kind') === 'reading' && ['repo', 'prod', 'owner'].includes(src)) die(`observe --kind reading --source ${src}: a goal's readings come from the kit itself (goal check, the owner's answer)`);
   const mine = SOURCE_FOR[writerClass(by)];
   if (OODA.sources.includes(src) && !mine.includes(src)) die(`observe --source ${src}: a ${{ ticket: 'worker', planner: 'planner', supervisor: 'supervisor', owner: 'owner' }[writerClass(by)]}'s observation is from ${mine.join(', ')}`);
   const line = appendLog({
@@ -7501,19 +7503,34 @@ function cmdProblem() {
 // recur); anything else its source_key (a finding's metrics:<kind>:<subject>), else kind:subject.
 // A fix-regressed or recurred line keeps its own key: it already cites its incident.
 const signalKeyOf = (o) => (fromSensor(o) && TRIAGE_KINDS.includes(o.kind) ? fpIdOfObservation(o) : null) ?? o.source_key ?? `${o.kind}:${o.subject}`;
-// Recurring signals no knowledge, problem or ruling explains yet: three or more observations (or
-// corrections) on one key, from at least two writers or on at least two days. A live decision
-// that cites an observation explains it (an orient-noise ruling); a corrected one explains nothing,
-// so the owner's correction of a ruling brings its signal back.
+// What explains an observation, one definition for Orient and for sensor-untriaged. ids: what
+// knowledge's evidence, a problem's refs, or a live decision's refs cite (any class: a decision
+// that cites an observation took it into account). keys: whole signals, those a live orient-noise
+// ruling names by key (a ruling covers the signal, later observations on it too) and the
+// fingerprints an open incident holds (in hand while it is worked). A corrected ruling explains
+// nothing, so the owner's correction brings its signal back.
+function explained() {
+  const ids = new Set();
+  const keys = new Set();
+  for (const o of [...logObjects('knowledge'), ...logObjects('problem')]) for (const r of [...(o.evidence ?? []), ...(o.refs ?? [])]) ids.add(r);
+  for (const d of logObjects('decision')) {
+    if (!(d.refs ?? []).some((r) => String(r).startsWith('o-')) || !liveDecision(d)) continue;
+    for (const r of d.refs) { ids.add(r); if (d.class === 'orient-noise' && !logGet(r)) keys.add(r); }
+  }
+  for (const p of incidentList()) if (p.status !== 'resolved') for (const f of p.fingerprints ?? []) keys.add(f);
+  return { ids, keys };
+}
+// Recurring signals nothing explains yet (explained, above): three or more observations (or
+// corrections) on one key, from at least two writers or on at least two days.
 function orientClusters() {
-  const linked = new Set();
-  for (const o of [...logObjects('knowledge'), ...logObjects('problem')]) for (const r of [...(o.evidence ?? []), ...(o.refs ?? [])]) linked.add(r);
-  for (const d of logObjects('decision')) if ((d.refs ?? []).some((r) => String(r).startsWith('o-')) && liveDecision(d)) for (const r of d.refs) linked.add(r);
+  const { ids: linked, keys } = explained();
   const groups = new Map();
   const add = (key, item) => (groups.get(key) ?? groups.set(key, []).get(key)).push(item);
   for (const o of logObjects('observation')) {
     if (linked.has(o.id) || ['reading', 'retro', 'outcome', 'link'].includes(o.kind)) continue;
-    add(signalKeyOf(o), { id: o.id, at: o.created_at, who: o.created_by, valence: o.valence ?? 0, detail: o.detail });
+    const key = signalKeyOf(o);
+    if (keys.has(key)) continue;
+    add(key, { id: o.id, at: o.created_at, who: o.created_by, valence: o.valence ?? 0, detail: o.detail });
   }
   for (const a of calls()) {
     const c = correctionOf(a);
@@ -8981,12 +8998,12 @@ function collectMetrics(since) {
   if (supervisorRunning) {
     const overdue = (Number(loadSettings().sensor_defaults?.triage_overdue_hours) || 2) * 3600000;
     const sensorsNow = new Set(sensorList().map((x) => x.name));
-    const handled = new Set([...incidentList().flatMap((p) => p.refs ?? []), ...logObjects('decision').filter((d) => d.class === 'orient-noise' && liveDecision(d)).flatMap((d) => d.refs ?? [])]);
+    const { ids: handled, keys: heldKeys } = explained();
     const byFp = new Map();
     for (const o of logObjects('observation')) {
       if (!fromSensor(o) || !TRIAGE_KINDS.includes(o.kind) || handled.has(o.id) || now - Date.parse(o.created_at) > 7 * 86400000) continue;
       const id = fpIdOfObservation(o);
-      if (!id || !sensorsNow.has(splitFpId(id).sensor) || ignoredNow.has(id) || openIncidentOf(id)) continue;
+      if (!id || !sensorsNow.has(splitFpId(id).sensor) || ignoredNow.has(id) || heldKeys.has(id) || openIncidentOf(id)) continue;
       (byFp.get(id) ?? byFp.set(id, []).get(id)).push(o);
     }
     for (const [id, obs] of byFp) {

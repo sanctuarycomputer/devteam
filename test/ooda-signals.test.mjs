@@ -135,10 +135,10 @@ test('spikes: a median over the hours the sensor heard, naming the line', () => 
 
 // A sensor's lines on one fingerprint, written as the sensors write them: its first qualify, then
 // spikes in hours on two days (Orient wants a signal on two days or from two writers).
-function fingerprintLines(hand, sensor, fp, spikes, ago = 3 * 86400000) {
+function fingerprintLines(hand, sensor, fp, spikes, ago = 3 * 86400000, stepMs = 3 * 3600000) {
   const ids = [hand('supervisor', { type: 'observation', source: sensor, detector: 'sensor', subject: `sensor:${sensor}`, kind: 'log-error', detail: `${sensor}: a error log line`, severity: 3, valence: -1, source_key: `sensor:${sensor}:${fp}` }, ago)];
   for (let i = 0; i < spikes; i++) {
-    const at = ago - (i + 1) * 3 * 3600000;
+    const at = ago - (i + 1) * stepMs;
     const hour = new Date(Date.now() - at).toISOString().slice(0, 13);
     ids.push(hand('supervisor', { type: 'observation', source: sensor, detector: 'sensor', subject: `sensor:${sensor}`, kind: 'spike', detail: `${sensor}: a log line is spiking`, severity: 4, valence: -1, source_key: `sensor:${sensor}:spike:${fp}:${hour}` }, at));
   }
@@ -150,7 +150,7 @@ test('orient: one signal per fingerprint; a noise ruling clears it until it is c
   const { old, ok, run } = F;
   const hand = handFor(F);
   try {
-    const ids = fingerprintLines(hand, 'web', 'log:L1', 4);
+    const ids = fingerprintLines(hand, 'web', 'log:L1', 4, 6 * 86400000, 86400000); // five days, so the signal forms whatever the hour
     const signals = () => json(ok(old, ['orient', '--json'])).filter((c) => c.count);
     const [sig, ...more] = signals();
     assert.deepEqual(more, [], 'one signal');
@@ -239,5 +239,29 @@ test('a kit lesson keeps its tag through Orient: stage orient, listed by knowled
     assert.ok(listed.some((x) => x.id === k), 'still a kit lesson');
     const rec = json(ok(old, ['log', '--id', k, '--json']))[0];
     assert.equal(rec.stage, 'orient');
+  } finally { F.done(); }
+});
+
+test('an open incident holds its fingerprint; a noise ruling by key covers later observations; a hand reading is refused', () => {
+  const F = fleetFixture('ooda-held');
+  const { old, ok, run } = F;
+  try {
+    const hand = handFor(F);
+    const signals = () => json(ok(old, ['orient', '--json'], SUP)).clusters ?? json(ok(old, ['orient', '--json'], SUP));
+    const ids = fingerprintLines(hand, 'web', 'log:L1', 4, 6 * 86400000, 86400000);
+    const key = 'web:log:L1';
+    // an open incident that cites only the first observation still holds the whole fingerprint
+    hand('supervisor', { type: 'problem', title: 'web errors', severity: 3, realized: true, status: 'open', refs: [ids[0]], fingerprints: [key], sensor: 'web' }, 1000);
+    assert.ok(!JSON.stringify(signals()).includes(key), 'held by its open incident');
+    // a ruling naming the key covers spikes after it
+    const F2 = fleetFixture('ooda-ruled');
+    try {
+      const h2 = handFor(F2);
+      const first = fingerprintLines(h2, 'web', 'log:L1', 3, 6 * 86400000, 86400000);
+      F2.ok(F2.old, ['decide', '--class', 'orient-noise', '--refs', key, ...first, '--', 'bots'], SUP);
+      fingerprintLines(h2, 'web', 'log:L1', 3, 2 * 86400000, 12 * 3600000).slice(1);
+      assert.ok(!JSON.stringify(json(F2.ok(F2.old, ['orient', '--json'], SUP))).includes(key), 'the ruling covers the signal, later spikes too');
+    } finally { F2.done(); }
+    assert.match(run(old, ['observe', '--subject', 'g-x', '--kind', 'reading', '--source', 'repo', '--detail', '5'], SUP).err, /goal's readings come from the kit/);
   } finally { F.done(); }
 });
