@@ -246,3 +246,65 @@ Branch `ooda-signals` off `ooda-loop-inspectable` (PR 1); GitHub base `ooda-loop
 6. **signalKeyOf** stays TRIAGE_KINDS-only; `fix-regressed`/`recurred` keep their own keys (they already ref the incident). Edit the spec's "every spike, qualify and regression" to "every qualify and spike".
 7. **Tests:** for `sensor ignore`, write a `settings.sensors` probe entry and `run/sensors/<name>/fingerprints.json` by hand (or reuse chain's probe fixture). For `ack`, hand-write two observations with `source_key: metrics:<kind>:<subject>` for a finding the fixture reliably has live, then `ack`. Test the 41 → 40 cut.
 8. `stageOf(act)` is always `act`, with or without `decision`.
+
+---
+
+## PR 3: lineage and a sidepeek for every stage
+
+Branch `ooda-lineage` off `ooda-signals` (PR 2); base `ooda-signals` until it merges. Consumes PR 2's `SCHEMA['x-ooda']`, `stageOf(o)`, `provenanceOf(o)`, `signalKeyOf(o)`, `orientClusters()` (with `ids` and `key`), `liveDecision`.
+
+### Task 1: `lineage(id)` in the kit
+
+**Files:** `docs/devteam/scripts/devteam.mjs` (new `linkIndex()` and `lineage()` near `historyOf`; `peekView` adds `v.lineage`; `cmdPeek` takes `--mermaid`), `test/ooda-lineage.test.mjs` (new).
+
+**Interfaces — produces:**
+- `linkIndex()` → `{ out: Map<id, [{to, why}]>, in: Map<id, [{from, why}]> }`, built once per `readLog()` (cache keyed on the `readLog()` object, as `FP_OBS` does). Edges, each `from` the earlier step `to` the later one, `why` a short word:
+  - observation → knowledge: `knowledge.evidence` contains it (`why: 'evidence'`)
+  - observation → problem: `problem.refs` contains it (`'refs'`)
+  - observation → decision: `decision.refs` contains it (`'refs'`; noise rulings)
+  - observation → set-aside/ignore observation: its `refs` contain it (`'set aside'`)
+  - observation → question: `question.evidence` (`'evidence'`)
+  - knowledge|problem → decision: `decision.knowledge` (PR 4; read it if present) or `decision.refs` (`'rests on'`)
+  - knowledge|problem → question: `question.evidence`/`blocks` (`'asks about'`)
+  - knowledge → act: `act.knowledge` (PR 4; read if present) (`'given'`)
+  - question → decision|act: `approved_by` (`'approved'`)
+  - decision → act: `act.decision` (`'carried out'`)
+  - act → observation: an outcome-kind observation (`stageOf === 'learn'`) whose `refs` contain the act or its decision (`'outcome'`)
+  - act → ticket: `act.class === 'add-ticket'` refs (`'made'`)
+  - observation → signal: `signal:<signalKeyOf(o)>` pseudo-node, for observations in an `orientClusters()` group (`'recurs'`)
+  - decision|act with `corrected` → pseudo-node `correction:<id>` (`'corrected'`), stage `learn`
+- `lineage(id, { up = 6, down = 4, max = 120 } = {})` → `{ nodes: [{ id, stage, type, kind, label, at, href }], edges: [{ from, to, why }], truncated }`. BFS up over `in`, down over `out`, both bounded; then collapse: siblings of one `type`+`kind` sharing one neighbour, more than 5, become one node `{ id: 'group:<neighbour>:<type>:<kind>', label: '<n> <kind> observations', members: [ids] }`. `label`: the record's short text (`what`, `statement`, `title`, `detail`), plain text, newlines to spaces, cut to 60 characters. `href`: the sidepeek hash (`#observation/<id>`, `#lesson/<id>`, `#problem/<id>`, `#decision/<id>`, `#act/<id>`, `#q/<id>`, `#signal/<key>`, `#ticket/<id>`, `#learning/<id>`), null for a correction (its call's href instead).
+- `lineageMermaid(L)` → Mermaid text: `flowchart LR`, a `subgraph` per stage in order Observe, Orient, Decide, Act, Learn (empty ones left out; work-graph nodes in a final unlabelled group), node ids `n0…`, labels as `n3["<label>"]` with `"` → `#quot;`, and characters outside `[A-Za-z0-9 .,:;!?()'/+-]` dropped; `classDef` per stage; `class nK current` for the opened record.
+- `peekView(...)` adds `v.lineage = lineage(id)` for any kind whose id is a log id or a signal key; `peek <kind> <id> --mermaid` prints `lineageMermaid(lineage(id))`.
+
+- [ ] Tests first (fixture log by commands and hand lines): an incident chain — three spikes on one fingerprint (hand lines, `detector: 'sensor'`), `sensor incident` (or a hand `problem` with `refs`), `decide --class incident-fix --refs <p> <ticket>`, `ticket add --decision`, a hand `fix-deployed` and `outcome` observation citing the decision. From the first spike: down reaches the incident, decision, act, ticket and outcome. From the outcome: up reaches the spikes. From the decision: both. A noise ruling: observation → decision. Six observations on one signal collapse to one group node with 6 members; `max: 5` sets `truncated`. A label holding `"]; click x call alert(1) %%` comes out without `]`, `;`, `%`. `--mermaid` output starts `flowchart LR` and has one `subgraph` per non-empty stage.
+- [ ] Implement; commit "Lineage: every OODA record's chain, both ways, bounded; Mermaid text".
+
+### Task 2: sidepeeks for observation, signal and learning; every Loop card opens one
+
+**Files:** `docs/devteam/dashboard/index.html` — `TYPE_META` (~2060: add `observation: ['eye', 'Observation']`, `signal: ['repeat', 'Recurring signal']`, `learning: ['trending-up', 'Learning']`), the route's sidepeek map (~3123), new `openObservation`, `openSignal`, `openLearning` (beside `openLesson` ~2876, same shape: `drawerFor`, `peekOf`, `attrs`, sections, `historySection`), `idLink` (~1030: `o-` → `#observation/`, `q-` → `#q/`), the Loop renderers (~1972-2000: `subj(...)` plus `data-open="<href>"` on every card, and one delegated click handler: a click on a card outside a link, button or input sets `location.hash`); `devteam.mjs` `peekView` for `signal` (its cluster: key, count, ids, first and latest, age, the `orient` command that would explain it) and `learning` (the record; PR 5 fills its figures).
+
+- [ ] **Where an observation sits:** a function `loopPlace(o, data)` in index.html returning one line, from the peek's lineage (in the sidepeek) or from `DATA.ooda` (on the card): "not oriented yet" / "part of a recurring signal (n of 3)" / "explained: became a lesson|problem|incident" / "ruled noise: <why>" / "ignored at triage: <reason>" / "set aside until <time>: <reason>" / "carried on: <furthest stage reached>". The card shows it under the detail; the server adds what the card needs to `collectOoda.observations[*]` as `place: { state, ref, why }` so the card doesn't need the full index.
+- [ ] Each new sidepeek: bar, attributes (an observation's provenance first: "From the g3d-stacks-logs sensor", "From your answer to …"), the place line, the lineage (Task 3), history.
+- [ ] Tests (`test/dashboard.test.mjs`'s harness, which drives Chrome when `canDrive()`; follow its existing sidepeek tests): an observation card click opens `#observation/<id>` with its provenance and place; a signal opens `#signal/<key>` with a key holding `/`; `o-` ids in text are links.
+- [ ] Commit "Sidepeeks for observations, recurring signals and learning; every Loop card opens".
+
+### Task 3: draw the lineage with Mermaid, clickable, with a list fallback
+
+**Files:** `index.html` — factor `renderMermaid`'s initialize/render/sanitize into `drawMermaid(src)` returning the sanitized SVG string (or throwing); `renderMermaid` calls it; new `lineageBlock(peek, selfId)` used by every OODA sidepeek (observation, signal, lesson, problem, decision, act, learning) after the attributes.
+
+- [ ] `lineageBlock`: `<h3>How it came about, and what came of it</h3>`, then a container. Async: `drawMermaid(peek.lineage_mermaid)` (the server sends the text as `v.lineage_mermaid`), insert the SVG, then for each node in `peek.lineage.nodes` (index i ↔ `n<i>`), find `g.node[data-id="n<i>"]` and wrap it in `<a href="<node.href>">` with `<title>` = its label and `tabindex`; the current node gets `aria-current`. On any failure (Mermaid didn't load, render threw): the list fallback, grouped by stage in order, each item `<a href>` with its label and kind. Never show the Mermaid source. A collapsed group lists its members under it in the sidepeek.
+- [ ] Redraw rule: the drawer redraws on refresh only when the lineage's node ids changed (compare a joined id string), so the graph doesn't flicker every refresh.
+- [ ] Tests: with Mermaid stubbed to fail (block the CDN in the test page, as the existing Mermaid test does if any; else override `MERMAID = Promise.reject()` before opening), the fallback lists every node as a link; with it available (`canDrive()` + network), a node click opens its sidepeek.
+- [ ] Commit "Lineage in every OODA sidepeek: Mermaid, clickable, with a list fallback".
+
+### Task 4: Orientation debt (signals part)
+
+**Files:** `devteam.mjs` `collectOoda` adds `debt: { signals: [...clusters older than a day, oldest first] }` (PR 4 adds resolved incidents); `index.html` Orient tab section "Orientation debt" above Recurring signals: each item a card that opens its signal; empty state "Nothing waiting: every recurring signal is explained or under a day old."
+
+- [ ] Test: a cluster whose oldest item is 25 hours old (hand lines with past `at`) is in `debt.signals`; a 2-hour-old one isn't.
+- [ ] Commit "Orient: orientation debt".
+
+### Task 5: docs and PR
+
+- [ ] `supervisor.md` §3: one paragraph on the lineage (`peek <kind> <id> --mermaid` for retros and PR bodies) and orientation debt. Merge `ooda-signals` (and main) in, full suite, push, PR with base `ooda-signals`; body says what the operator's review can read (`peek … --json`'s `lineage`, `dashboard-data`'s `ooda.debt`).
