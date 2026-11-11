@@ -1812,7 +1812,8 @@ function goalStateOf(g, R, openQs) {
     // the measure is at its target: only you mark it met, here or by answering the supervisor's question
     const a = g.at_target;
     const unit = g.measure?.unit ? ` ${g.measure.unit}` : '';
-    return { key: 'at-target', label: 'Reached its target', tone: 'good', step: 4, next: `The measure reads ${esc(a.value)}${esc(unit)} (${esc(when(a.at))}), its target. ${a.question ? `<b>Waiting on you:</b> ${qlink(a.question, 'say whether it is met')}, or mark it met below.` : 'Mark it met below if you agree; the supervisor asks you in the Inbox too.'}` };
+    const said = g.measure?.source === 'owner' ? `You said it is met (${esc(when(a.at))}), but it was never marked met.` : `The measure reads ${esc(a.value)}${esc(unit)} (${esc(when(a.at))}), its target.`;
+    return { key: 'at-target', label: 'Reached its target', tone: 'good', step: 4, next: `${said} ${a.question ? `<b>Waiting on you:</b> ${qlink(a.question, 'say whether it is met')}, or mark it met below.` : 'Mark it met below if you agree; the supervisor asks you in the Inbox too.'}` };
   }
   if (g.status === 'ready') {
     const r = R.goals.find((x) => x.id === g.id);

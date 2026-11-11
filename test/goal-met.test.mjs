@@ -59,6 +59,8 @@ test('a repo goal at its target: the finding, the kit-worded question, and the y
 
     // a stale page can't answer it, and the hash covers met
     assert.match(run(old, ['answer', Q, 'Yes', '--seen', '0000000000000000']).err, /changed since you saw it/);
+    assert.match(run(old, ['answer', Q, 'Yes please']).err, /is answered Yes or No/, 'a near-yes is neither');
+    assert.equal(question(F, Q).status, 'open');
     const out = ok(old, ['answer', Q, 'Yes']);
     assert.match(out, new RegExp(`${G} is met \\(its check reads 0 gaps on main at [0-9a-f]{12}\\)`));
     const g = goal(F, G);
@@ -109,9 +111,20 @@ test('a prod goal: the yes runs the production check again; goal status met does
     write(path.join(old, 'prod.txt'), '11\n');
     assert.match(run(old, ['goal', 'status', G, 'met']).err, /check reads 11 from production, not its target 12/, 'goal status reads prod again');
     write(path.join(old, 'prod.txt'), '12\n');
+    const No = ok(old, ['ask', '--class', 'goal-met', '--goal', G, '--recommendation', 'yes'], SUP);
+    assert.match(question(F, No).context, /from its production check/);
+    ok(old, ['answer', No, 'No — not on every tenant']);
+    ok(old, ['goal', 'reading', G, '--run'], SUP);
+    assert.deepEqual(findings(F), [], 'a No about the same value stands while the value does');
+    write(path.join(old, 'prod.txt'), '13\n');
+    ok(old, ['goal', 'reading', G, '--run'], SUP);
+    assert.equal(findings(F).length, 1, 'a new value asks again');
     const Q = ok(old, ['ask', '--class', 'goal-met', '--goal', G, '--recommendation', 'yes'], SUP);
-    assert.match(question(F, Q).context, /from its production check/);
-    assert.match(ok(old, ['answer', Q, 'Yes — checked']), new RegExp(`${G} is met`));
+    // Mark met (goal status met) while the question is open answers it Yes
+    assert.match(ok(old, ['goal', 'status', G, 'met']), new RegExp(`${G} is met \\(and ${Q} is answered Yes\\)`));
+    const q = question(F, Q);
+    assert.deepEqual([q.status, q.answer], ['answered', 'Yes']);
+    assert.deepEqual(goal(F, G).decision, { verdict: 'met', question: Q });
     assert.equal(goal(F, G).status, 'met');
     ok(old, ['log-check']);
   } finally { F.done(); }

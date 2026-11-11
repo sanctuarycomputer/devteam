@@ -4407,6 +4407,7 @@ function askLine({ thread } = {}) {
     const m = measureOf(g);
     if (!MEASURE_SOURCES.includes(m.source)) die(`${g.id} is read by hand: give it a measure source first (a goal-change), then ask`);
     if (m.source === 'owner' ? !m.question : !m.check) die(`${g.id} has no ${m.source === 'owner' ? 'measure.question' : 'measure.check'} to ask about (goal check)`);
+    if (m.source === 'owner' && (m.target !== 1 || m.direction !== 'up')) die(`${g.id} is owner-read, so its target is 1, up (a yes); it says ${m.target} ${m.direction}: a goal-change first`);
     if (!['owner-decision', 'one-way-door'].includes(kind)) die('a goal-met question is an owner-decision');
     if (flagStr('recommendation')?.trim().toLowerCase() !== 'yes') die('a goal-met question recommends yes (--recommendation yes): the owner says no when it is not met');
     if (flagStr('default') !== undefined) die('a goal-met question has no --default: only the owner says a goal is met');
@@ -4420,7 +4421,7 @@ function askLine({ thread } = {}) {
       reading = { id: r.id, value: r.measure.value, ...(m.unit ? { unit: m.unit } : {}), at: r.created_at, ...(r.sha ? { sha: r.sha } : {}) };
     }
     const words = goalMetWording(g, reading);
-    if (q !== null && q.trim() !== words) die(`a goal-met question asks in the kit's words; leave out --question (it asks: ${words})`);
+    if (q !== null && q.trim() !== String(words).trim()) die(`a goal-met question asks in the kit's words; leave out --question (it asks: ${words})`);
     q = words;
     const said = m.source === 'owner' ? goalReadings(g.id).filter((x) => x.measure.value >= 1).pop() : null;
     goalMet = { basis: goalMetBasis(g), reading, words: reading ? goalMetReadingWords(g, reading) : `About "${g.title}".${said ? ` You said yes${said.approved ? ` to ${said.approved}` : ''} on ${said.created_at.slice(0, 10)}, but the goal was never marked met; this marks it.` : ''} If you say yes, the goal is marked met and its work stops.` };
@@ -4723,6 +4724,8 @@ function cmdAnswer() {
     autonomy = { class: v.class, rung, scope: flagStr('scope') ?? null };
   }
   const reviewFields = reviewResult ? acceptReviewResult(v, reviewResult, fromChat ? 'chat' : ownerChannel()) : decline ? { answer: `Sent back: ${answer}`, declined: true } : {};
+  // a goal-met question is answered Yes or No, so a near-yes can't pass for a no
+  if (v.class === 'goal-met' && v.met && !GOAL_MET_CHOICES.some((c) => sameAnswer(answer, c.label))) die(`${id} is answered Yes or No (a note may follow " — ")`);
   // a goal-met yes reads a repo or prod check again first: a failed check writes nothing
   const metPlan = v.class === 'goal-met' ? goalMetPlan(v, answer) : null;
   appendLog({ type: 'question', op: 'set', id, answer, autonomy, standing_rule: flagStr('rule'), ...reviewFields, ...(fromChat ? { channel: 'chat', said: flagStr('said').trim() } : turn ? { channel: 'thread', said: turn.said, turn: turn.turn } : {}) }, by);
@@ -7484,7 +7487,7 @@ function goalMetProblem(q, goalId, qid, at = null) {
   if (!v.matched) return `${v.id} was answered "${v.answer}", not its recommendation${v.recommendation ? ` ("${v.recommendation}")` : ''}`;
   if (at && at < v.answered_at) return `the reading was written before ${v.id} was answered`;
   // asked of the goal as it was (planning.md §1): a yes to an earlier measure is not a yes to this one
-  if (v.met && v.met.basis !== goalMetBasis(logGet(goalId))) return `${v.id} was asked before ${goalId}'s title, measure or milestones changed`;
+  if (v.met && logGet(goalId)?.status !== 'met' && v.met.basis !== goalMetBasis(logGet(goalId))) return `${v.id} was asked before ${goalId}'s title, measure or milestones changed`;
   return null;
 }
 // What a goal-met question is asked about, so the owner's yes applies only to the goal as it was
@@ -7522,7 +7525,7 @@ function goalMetWording(g, reading) {
 // happened when it sets nothing (null for a no).
 function goalMetPlan(v, answer) {
   if (!v.met) return { why: `${v.id} was asked before goal-met questions carried the goal they are about, so it sets nothing: the supervisor asks again, or the owner marks it met on its card` };
-  if (answer.trim().toLowerCase().split(' — ')[0].trim() !== 'yes') return { why: null };
+  if (!sameAnswer(answer, GOAL_MET_CHOICES[0].label)) return { why: null };
   const g = logGet(v.goal ?? '');
   if (g?.type !== 'goal') return { why: `${v.id} is about ${v.goal ?? 'no goal'}, which is not a goal; nothing changes` };
   if (g.status !== 'ready') return { why: `${g.id} is ${g.status ?? 'draft'}, not running; nothing changes` };
@@ -7536,7 +7539,7 @@ function goalMetPlan(v, answer) {
   logCache = null;
   const now = logGet(g.id);
   if (now?.status !== 'ready' || goalMetBasis(now) !== v.met.basis) die(`${g.id} changed while its check ran; nothing was answered: read ${v.id} again`);
-  if (questionView(logGet(v.id)).status !== 'open') die(`${v.id} was answered while ${g.id}'s check ran; nothing more was written`);
+  if (questionView(logGet(v.id)).status !== 'open') die(`${v.id} is no longer open (it changed while ${g.id}'s check ran); nothing was written`);
   return { g: now, m: measureOf(now), r };
 }
 function goalMetApply(v, plan, by, chan) {
@@ -7976,11 +7979,14 @@ function cmdGoal() {
     const m = measureOf(g);
     if (to === 'met' && !flags.force && ['repo', 'prod'].includes(m.source) && m.check) {
       const r = runMeasureCheck(g);
-      if (!reached(g, m.target, r.value)) die(`${id}'s check reads ${r.value}${r.sha ? ` on ${r.on} (${r.sha.slice(0, 12)})` : ' from production'}, not its target ${m.target}; --force to set it met anyway`);
+      if (!reached(g, m.target, r.value)) die(`${id}'s check reads ${r.value}${r.sha ? ` on ${r.on} (${r.sha.slice(0, 12)})` : ' from production'}, not its target ${m.target}${ownerChannel() === 'dashboard' ? '; the goal keeps running' : '; --force to set it met anyway'}`);
     }
     if (to === 'met' && !flags.force && m.source === 'owner' && !goalReadings(id).some((x) => x.measure.value >= 1)) die(`${id} is met when the owner says so: answer its goal-met question, or record it with goal reading ${id} --value 1 --owner; --force to set it met anyway`);
-    appendLog({ type: 'goal', op: 'set', id, status: to }, by);
-    return out(`${id} is ${to}`);
+    // marking it met answers its open goal-met question (Yes), as goal decide answers an approval
+    const ask = to === 'met' ? questions().find((q) => q.class === 'goal-met' && q.goal === id && q.status === 'open') : null;
+    appendLog({ type: 'goal', op: 'set', id, status: to, ...(to === 'met' ? { decision: { verdict: 'met', ...(ask ? { question: ask.id } : {}) } } : {}) }, by);
+    if (ask) appendLog({ type: 'question', op: 'set', id: ask.id, answer: GOAL_MET_CHOICES[0].label }, by);
+    return out(`${id} is ${to}${ask ? ` (and ${ask.id} is answered Yes)` : ''}`);
   }
   if (sub === 'forecast') {
     const g = logGet(id)?.type === 'goal' ? logGet(id) : die('usage: goal forecast <g-id>');
@@ -8938,7 +8944,9 @@ function collectMetrics(since) {
     for (const g of live) {
       const r = goalAtTarget(g);
       if (!r) continue;
-      if (all.some((q) => q.class === 'goal-met' && q.goal === g.id && (q.status === 'open' || (q.status === 'answered' && q.asked_at > r.created_at)))) continue;
+      // a No about this same value stands until the value moves or the goal changes
+      const basis = goalMetBasis(g);
+      if (all.some((q) => q.class === 'goal-met' && q.goal === g.id && (q.status === 'open' || (q.status === 'answered' && (q.asked_at > r.created_at || (q.met?.basis === basis && q.met?.reading?.value === r.measure.value && !sameAnswer(q.answer, GOAL_MET_CHOICES[0].label))))))) continue;
       const m = measureOf(g);
       add('medium', 'goal-at-target', g.id, `"${g.title}" reads ${r.measure.value}${m.unit ? ` ${m.unit}` : ''} (${r.created_at.slice(0, 10)}), its target ${m.target}, and is still running: only the owner marks it met`, `ask the owner in the Inbox, never only in chat: ask --class goal-met --goal ${g.id} --recommendation yes (the kit writes the question; planning.md §1)`);
     }
