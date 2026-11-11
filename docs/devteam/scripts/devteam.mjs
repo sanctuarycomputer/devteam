@@ -7693,7 +7693,7 @@ function searchLogDocs(want) {
   for (const g of each('goal')) add(g, 'goal', g.title, textOf(g.outcome, g.non_goals, g.preconditions, g.measure?.description, g.measure?.question, (g.milestones ?? []).map((m) => m?.title)), { status: g.status ?? null });
   for (const f of each('feature')) add(f, 'feature', f.title, textOf(f.notes, (f.stories ?? []).map((x) => x?.text)));
   for (const t of each('ticket')) add(t, 'ticket', t.title, textOf(t.notes, t.done_when), { kind: t.kind ?? null });
-  for (const o of each('observation')) add(o, 'observation', textOf(o.subject, o.kind), textOf(o.detail, o.fix_hint), { kind: o.kind ?? null });
+  for (const o of each('observation')) add(o, 'observation', [o.subject, o.kind].filter((x) => typeof x === 'string' && x).join(' · '), textOf(o.detail, o.fix_hint), { kind: o.kind ?? null });
   for (const k of each('knowledge')) add(k, 'knowledge', k.statement, textOf(ownerNote(k.id)), { kind: k.kind ?? null, status: k.status ?? null, proposed_by: k.status === 'candidate' ? k.created_by : undefined });
   for (const x of each('problem')) add(x, 'problem', x.title, textOf(x.detail), { status: x.status ?? null });
   if (want('question')) for (const q of questions()) add(q, 'question', q.question, textOf(q.context, q.recommendation, q.options, (q.choices ?? []).map((c) => [c?.label, c?.detail, c?.effect]), q.answer, q.said, q.standing_rule), { kind: q.kind, status: q.status, class: q.class });
@@ -7703,7 +7703,7 @@ function searchLogDocs(want) {
   for (const a of each('act')) add(a, 'act', a.what, '', { kind: a.class ?? null, prior: 0.4 });
   for (const m of each('message')) add(m, 'message', m.text, '', { kind: m.kind ?? null, prior: 0.7 });
   if (want('thread') || want('turn')) for (const t of threadViews(readLog().objects)) add(t, 'thread', t.title, textOf(t.outcome, t.turns.map((u) => u.text)), { status: t.status });
-  for (const ph of each('phase')) add(ph, 'phase', textOf(ph.from, ph.to), textOf(ph.task, ph.note));
+  for (const ph of each('phase')) add(ph, 'phase', [ph.from, ph.to].filter((x) => typeof x === 'string' && x).join(' → '), textOf(ph.task, ph.note));
   for (const gt of each('gate')) add(gt, 'gate', gt.gate, '');
   for (const sp of each('spend')) add(sp, 'spend', textOf(sp.who, sp.phase), '');
   return docs;
