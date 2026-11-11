@@ -7224,7 +7224,18 @@ const stageOf = (o) => { const s = Object.hasOwn(OODA.stages, o?.type ?? '') ? O
 // The sources each writer may name for itself (observe --source); sensor, metrics and spend are the
 // kit's own, read off its own lines, never given. The supervisor records what the owner said (an
 // answer, a thread, the chat), but never speaks as the owner.
-const SOURCE_FOR = { ticket: ['worker'], planner: ['planner'], supervisor: OODA.sources.filter((s) => !['sensor', 'metrics', 'spend', 'owner'].includes(s)), owner: ['owner', 'owner-answer', 'owner-thread', 'owner-chat'] };
+const SOURCE_FOR = { ticket: ['worker'], planner: ['planner'], supervisor: OODA.sources.filter((s) => !['sensor', 'metrics', 'spend', 'owner', 'worker', 'planner'].includes(s)), owner: ['owner', 'owner-answer', 'owner-thread', 'owner-chat'] };
+// An owner-* source on a line someone else wrote is a claim about the owner's words, so it counts
+// only when its ref is the record that holds them: an answered question (the owner's answer) for
+// owner-answer, the owner's turn or thread for owner-thread, either for owner-chat. A ref that
+// doesn't check out reads as its writer's (provenanceOf); observe refuses it.
+function ownerRefHolds(from, ref) {
+  const o = ref ? logGet(ref) : null;
+  if (!o) return false;
+  const answered = o.type === 'question' && questionView(o).status === 'answered';
+  const spoke = (o.type === 'turn' && o.created_by === 'owner') || o.type === 'thread';
+  return from === 'owner-answer' ? answered : from === 'owner-thread' ? spoke : from === 'owner-chat' ? answered || spoke : true;
+}
 // { from, ref }: from in x-ooda.sources, ref which one within it (a sensor's name, a finding's kind,
 // a question, a thread, a retro's file). First match wins.
 function provenanceOf(o) {
@@ -7244,10 +7255,10 @@ function provenanceOf(o) {
   // sensor's; an owner measure is the owner's yes to a goal-met question
   const reading = o.kind === 'reading' && ['owner', 'supervisor'].includes(cls);
   if (reading && ['repo', 'prod'].includes(o.source)) return { from: 'sensor', ref: 'goal-measure' };
-  if (reading && o.source === 'owner' && o.approved) return { from: 'owner-answer', ref: o.approved };
-  if (o.kind === 'thread-resolved' && ['owner', 'supervisor'].includes(cls)) return { from: 'owner-thread', ref: o.refs?.[0] ?? null };
+  if (reading && o.source === 'owner' && ownerRefHolds('owner-answer', o.approved)) return { from: 'owner-answer', ref: o.approved };
+  if (o.kind === 'thread-resolved' && cls === 'owner') return { from: 'owner-thread', ref: o.refs?.[0] ?? null };
   if (o.kind === 'retro' && cls === 'supervisor') return { from: 'retro', ref };
-  if (!setAside && (SOURCE_FOR[cls] ?? []).includes(o.source)) return { from: o.source, ref };
+  if (!setAside && (SOURCE_FOR[cls] ?? []).includes(o.source) && (cls === 'owner' || !o.source.startsWith('owner-') || ownerRefHolds(o.source, ref))) return { from: o.source, ref };
   if (cls === 'owner') return { from: o.channel === 'chat' ? 'owner-chat' : o.channel === 'thread' ? 'owner-thread' : 'owner', ref };
   return { from: cls === 'ticket' ? 'worker' : cls, ref };
 }
@@ -7268,10 +7279,11 @@ function cmdObserve() {
   if (flagStr('kind') === 'reading' && ['repo', 'prod', 'owner'].includes(src)) die(`observe --kind reading --source ${src}: a goal's readings come from the kit itself (goal check, the owner's answer)`);
   const mine = SOURCE_FOR[writerClass(by)];
   if (OODA.sources.includes(src) && !mine.includes(src)) die(`observe --source ${src}: a ${{ ticket: 'worker', planner: 'planner', supervisor: 'supervisor', owner: 'owner' }[writerClass(by)]}'s observation is from ${mine.join(', ')}`);
+  if (writerClass(by) !== 'owner' && String(src).startsWith('owner-') && !ownerRefHolds(src, flagStr('ref'))) die(`observe --source ${src} needs --ref <id> naming where the owner said it: ${src === 'owner-answer' ? 'a question they answered' : src === 'owner-thread' ? 'their turn or the thread' : 'a question they answered, or their turn'}`);
   const line = appendLog({
     type: 'observation', source: flagStr('source') ?? writerClass(by), subject, kind: flagStr('kind') ?? die('observe needs --kind (a slug)'),
     detail: flagStr('detail') ?? die('observe needs --detail'), detector: flagStr('detector'), severity: flagNum('severity'), valence: flagNum('valence'),
-    source_key: flagStr('key'), refs: asList(flags.refs), fix_hint: flagStr('fix'),
+    source_key: flagStr('key'), source_ref: flagStr('ref'), refs: asList(flags.refs), fix_hint: flagStr('fix'),
     measure: flagStr('value') !== undefined ? { value: Number(flagStr('value')), unit: flagStr('unit') } : undefined,
   }, by);
   out(line.id);
@@ -7297,6 +7309,9 @@ const SEV = { low: 1, medium: 2, high: 3 };
 // The most observations a set-aside (an ack, a triage ignore) cites: 40 ids keep its line well under
 // LINE_MAX; the finding's key or the fingerprint, in source_ref, joins the rest.
 const SET_ASIDE_REFS = 40;
+// A set-aside's refs, the newest kept, trimmed so its line (with the envelope's ~250 bytes) fits LINE_MAX:
+// a long reason costs refs, never the line.
+const fitRefs = (fields, refs) => { const r = [...refs]; while (r.length && JSON.stringify({ ...fields, refs: r }).length + 250 > LINE_MAX) r.shift(); return r; };
 // Each metrics finding becomes an observation, once a day per finding (deduped on source_key).
 function observeFindings(m) {
   const recent = new Map();
@@ -9325,7 +9340,8 @@ function cmdAck() {
   // line stays under LINE_MAX; the finding's key, in source_ref, joins the rest
   const key = `metrics:${kind}:${subject}`;
   const refs = logObjects('observation').filter((o) => o.source_key === key && o.detector === 'metrics' && o.created_by === 'supervisor').sort(byTime).slice(-SET_ASIDE_REFS).map((o) => o.id);
-  const line = appendLog({ type: 'observation', source: 'ack', kind: 'finding-ack', subject: `${kind} ${subject}`, detail: reason, refs, source_ref: key }, by);
+  const fields = { type: 'observation', source: 'ack', kind: 'finding-ack', subject: `${kind} ${subject}`, detail: reason, source_ref: key };
+  const line = appendLog({ ...fields, refs: fitRefs(fields, refs) }, by);
   out(`${line.id}: ${kind} ${subject} set aside for ${loadSettings().finding_ack_hours}h`);
 }
 
@@ -13550,7 +13566,8 @@ function cmdSensorIgnore(sub) {
     const reason = flagStr('reason') ?? die('sensor ignore needs --reason "…" (why it isn\'t worth fixing)');
     // it cites what it sets aside: the fingerprint's observations, the newest 40 (source_ref joins the rest)
     const refs = [...fpObservations(fp.id)].sort(byTime).slice(-SET_ASIDE_REFS).map((x) => x.id);
-    const o = appendLog({ type: 'observation', source: fp.sensor, subject: sensorSubject(fp.sensor), detector: 'sensor', kind: 'sensor-ignored', detail: `ignored ${fp.id}: ${reason}`, severity: 0, valence: 0, source_ref: fp.id, source_key: `sensor:${fp.sensor}:ignore:${fp.key}:${nowIso()}`, refs }, by);
+    const fields = { type: 'observation', source: fp.sensor, subject: sensorSubject(fp.sensor), detector: 'sensor', kind: 'sensor-ignored', detail: `ignored ${fp.id}: ${reason}`, severity: 0, valence: 0, source_ref: fp.id, source_key: `sensor:${fp.sensor}:ignore:${fp.key}:${nowIso()}` };
+    const o = appendLog({ ...fields, refs: fitRefs(fields, refs) }, by);
     return out(`${o.id}: ignored ${fp.id}; triage skips it until sensor unignore`);
   }
   if (!ignored) die(`${fp.id} is not ignored`);
