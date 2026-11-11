@@ -227,3 +227,17 @@ test('sensor-untriaged: a sensor\'s escalation nobody folded, ignored or ruled n
     assert.deepEqual(findings().map((x) => x.kind), ['incident-unowned']);
   } finally { F.done(); }
 });
+
+test('a kit lesson keeps its tag through Orient: stage orient, listed by knowledge --kit, untouched by a noise ruling', () => {
+  const F = fleetFixture('ooda-kit-lesson');
+  const { old, ok } = F;
+  try {
+    const o1 = ok(old, ['observe', '--subject', 'app', '--kind', 'friction', '--detail', 'the kit made me retype it'], SUP).trim();
+    const k = ok(old, ['knowledge', 'add', '--kind', 'lesson', '--scope', 'project', '--statement', 'the kit should remember the last value', '--evidence', o1, '--kit'], SUP).match(/k-\S+/)[0];
+    ok(old, ['decide', '--class', 'orient-noise', '--refs', `note:app`, o1, '--', 'one-off'], SUP);
+    const listed = json(ok(old, ['knowledge', '--kit', '--json']));
+    assert.ok(listed.some((x) => x.id === k), 'still a kit lesson');
+    const rec = json(ok(old, ['log', '--id', k, '--json']))[0];
+    assert.equal(rec.stage, 'orient');
+  } finally { F.done(); }
+});
