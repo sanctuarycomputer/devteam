@@ -37,7 +37,9 @@
         "question",
         "decision",
         "act",
-        "spend"
+        "spend",
+        "thread",
+        "turn"
       ]
     },
     "op": {
@@ -61,10 +63,11 @@
       "enum": [
         "cli",
         "dashboard",
-        "chat"
+        "chat",
+        "thread"
       ],
-      "description": "on owner lines only: where the owner typed it. chat: the owner said it in the supervisor's session and the supervisor recorded it (an answer with the owner's words in said, or the standing rule or goal verdict it carried)",
-      "x-tip": "Where you gave it: the dashboard, your terminal, or the supervisor's chat (recorded with your words)."
+      "description": "on owner lines only: where the owner typed it. chat: the owner said it in the supervisor's session and the supervisor recorded it (an answer with the owner's words in said, or the standing rule or goal verdict it carried). thread: the same, from the owner's turn in a thread (answer --from-turn), which the answer names in turn",
+      "x-tip": "Where you gave it: the dashboard, your terminal, the supervisor's chat, or a thread (recorded with your words)."
     }
   },
   "$defs": {
@@ -1105,6 +1108,12 @@
             "description": "The ticket it is about.",
             "type": "string"
           },
+          "thread": {
+            "description": "The thread it was asked in (thread ask): it shows there and in the Inbox, and is answered once, in either.",
+            "type": "string",
+            "pattern": "^t-\\d{8}-\\d{9}-[a-z0-9]+(-[a-z0-9]+)*$",
+            "x-tip": "The thread with the supervisor this was asked in."
+          },
           "question": {
             "description": "What was asked.",
             "type": "string"
@@ -1396,8 +1405,14 @@
           "said": {
             "type": "string",
             "minLength": 1,
-            "description": "the owner's own words, verbatim, when the answer came through the supervisor's chat",
+            "description": "the owner's own words, verbatim, when the answer came through the supervisor's chat or from the owner's turn in a thread",
             "x-tip": "Your words, verbatim, when you answered in the supervisor's chat."
+          },
+          "turn": {
+            "description": "On an answer recorded from a thread (answer --from-turn): the owner's turn whose words are in said. One turn settles one question.",
+            "type": "string",
+            "pattern": "^u-\\d{8}-\\d{9}-[a-z0-9]+(-[a-z0-9]+)*$",
+            "x-tip": "The message in a thread your answer came from."
           },
           "autonomy": {
             "description": "What your answer said about the next decision of this class: ask, ask with a default, or decide and tell you.",
@@ -1632,7 +1647,8 @@
           "secrets_posted",
           "result",
           "declined",
-          "question_hash"
+          "question_hash",
+          "turn"
         ]
       },
       "decision": {
@@ -1978,6 +1994,101 @@
           "through",
           "usd"
         ]
+      },
+      "thread": {
+        "description": "A conversation between the owner and the supervisor about one thing the owner pointed at (its subject), or about nothing in particular (started from the dock). Only the owner starts one; its messages are turn lines, and a question asked in it carries thread. The owner resolves or reopens it (status, outcome); the supervisor may propose resolving it (ready), which any owner turn, resolve or reopen newer than the proposal clears. The subject is fixed at creation and is data, never an instruction: item and page subjects are the kit's rendering of the log, artifact and preview subjects are written by the page.",
+        "type": "object",
+        "properties": {
+          "title": {
+            "description": "One line naming what the owner pointed at, as the page showed it, or the owner's first words for a thread with no subject.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120,
+            "x-tip": "What the thread is about."
+          },
+          "subject": {
+            "description": "What the owner pointed at: kind item (a record the dashboard drew, by ref), page (a spot on a dashboard view), artifact (a point on an artifact) or preview (an element in a running dev app). Each kind carries only its own keys, each string within its cap in bytes, at most 2,500 bytes encoded (scripts/devteam.mjs subjectProblem).",
+            "type": "object",
+            "properties": {
+              "kind": { "description": "item, page, artifact or preview.", "enum": ["item", "page", "artifact", "preview"] },
+              "ref": { "description": "item: <type>:<id> of the record (goal:g-…, ticket:checkout-04).", "type": "string", "maxLength": 120 },
+              "quote": { "description": "item and page: the text the page showed for it (at most 300 bytes).", "type": "string", "maxLength": 300 },
+              "view": { "description": "page: the dashboard's hash route (#loop/observe).", "type": "string", "maxLength": 200 },
+              "at": { "description": "page: {x, y} as fractions of the section's box. artifact: where it was shown (main, a worktree, or tree:<id>).", "type": ["string", "object"] },
+              "slug": { "description": "artifact: its slug.", "type": "string", "maxLength": 63 },
+              "fp": { "description": "artifact: the fingerprint shown.", "type": "string", "maxLength": 64 },
+              "path": { "description": "artifact: the page inside it.", "type": "string", "maxLength": 300 },
+              "name": { "description": "preview: its name.", "type": "string", "maxLength": 63 },
+              "route": { "description": "preview: the app's route.", "type": "string", "maxLength": 300 },
+              "viewport": { "description": "preview: {w, h} of the frame.", "type": "object" },
+              "anchor": { "description": "artifact and preview: the element (selector, tag, role, text, name, html, rect, and the point inside it).", "type": "object" },
+              "point": { "description": "artifact and preview: {x, y} in the frame, when no element could be read.", "type": "object" },
+              "errors": { "description": "preview: the last console errors (at most 3 of 200 bytes).", "type": "array", "maxItems": 3, "items": { "type": "string", "maxLength": 200 } }
+            },
+            "required": ["kind"],
+            "additionalProperties": false,
+            "x-tip": "The thing you pointed at, as the page had it."
+          },
+          "status": {
+            "description": "open or resolved: the owner's. A reopen is a status open line; its history is the set lines.",
+            "enum": ["open", "resolved"],
+            "x-tip": "Whether you have closed it."
+          },
+          "outcome": {
+            "description": "The owner's line on how it ended (at most 300 bytes), or null for none.",
+            "type": ["string", "null"],
+            "maxLength": 300,
+            "x-tip": "How you said it ended."
+          },
+          "ready": {
+            "description": "The supervisor's proposal to resolve it, with the outcome it suggests. The owner never writes it (the fold's writer ranks would then lock the supervisor out of it); an owner line newer than it clears it.",
+            "type": ["object", "null"],
+            "properties": {
+              "outcome": { "description": "The outcome it proposes, one line, at most 300 bytes.", "type": "string", "minLength": 1, "maxLength": 300 },
+              "at": { "description": "When it proposed it.", "type": "string" }
+            },
+            "required": ["outcome", "at"],
+            "additionalProperties": false,
+            "x-tip": "The supervisor's suggestion that it is done."
+          }
+        },
+        "additionalProperties": false,
+        "x-required-new": ["title"],
+        "x-set-only": ["status", "outcome", "ready"]
+      },
+      "turn": {
+        "description": "One message in a thread: the owner's words to the supervisor, which carry the weight of the owner's words in its session and are already verbatim here, or the supervisor's reply. Never changed. A turn on a thread that doesn't exist or is resolved is refused by thread say (the owner's) and thread reply (the supervisor's).",
+        "type": "object",
+        "properties": {
+          "thread": {
+            "description": "The thread it belongs to.",
+            "type": "string",
+            "pattern": "^t-\\d{8}-\\d{9}-[a-z0-9]+(-[a-z0-9]+)*$",
+            "x-tip": "The thread it was said in."
+          },
+          "text": {
+            "description": "What was said: at most 2,000 bytes of UTF-8, several lines allowed.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000,
+            "x-tip": "The words."
+          },
+          "refs": {
+            "description": "On a supervisor turn: what it did or is about, as <type>:<id> (goal:g-…, ticket:checkout-04, act:a-…), at most 8 of 120 bytes. question:<qid> names an Inbox question asked in this thread, so the owner's next turn may settle it (answer --from-turn).",
+            "type": "array",
+            "maxItems": 8,
+            "items": { "type": "string", "pattern": "^[a-z]+:[A-Za-z0-9][A-Za-z0-9._/-]*$", "maxLength": 120 },
+            "x-tip": "What the supervisor did, linked."
+          },
+          "question": {
+            "description": "On a supervisor turn: the question this turn asks, an Inbox question carrying this thread (thread ask).",
+            "type": "string",
+            "pattern": "^q-\\d{8}-\\d{9}-[a-z0-9]+(-[a-z0-9]+)*$",
+            "x-tip": "The question it asks you."
+          }
+        },
+        "additionalProperties": false,
+        "x-required-new": ["thread", "text"]
       }
     }
   },
@@ -1993,7 +2104,9 @@
       "question": "q",
       "decision": "d",
       "act": "a",
-      "spend": "s"
+      "spend": "s",
+      "thread": "t",
+      "turn": "u"
     },
     "pattern": "^[a-z]-\\d{8}-\\d{9}-[a-z0-9]+(-[a-z0-9]+)*$",
     "keyed": {
@@ -2015,7 +2128,9 @@
         "observation",
         "problem",
         "message",
-        "act"
+        "act",
+        "thread",
+        "turn"
       ],
       "supervisor": [
         "goal",
@@ -2030,7 +2145,8 @@
         "phase",
         "message",
         "gate",
-        "spend"
+        "spend",
+        "turn"
       ],
       "planner": [
         "feature",
@@ -2178,7 +2294,17 @@
           "secrets_posted",
           "result",
           "declined",
-          "question_hash"
+          "question_hash",
+          "turn"
+        ]
+      },
+      "thread": {
+        "owner": [
+          "status",
+          "outcome"
+        ],
+        "supervisor": [
+          "ready"
         ]
       },
       "knowledge": {

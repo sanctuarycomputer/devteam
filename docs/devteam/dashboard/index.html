@@ -46,7 +46,7 @@
   .banner { border: 1px solid color-mix(in srgb, var(--red) 45%, var(--line)); background: color-mix(in srgb, var(--red) 7%, var(--surface)); border-radius: 8px; padding: 10px 14px; margin-bottom: 20px; font-size: 12px; }
   .banner.updated { border-color: color-mix(in srgb, var(--blue-fg, var(--fg-2)) 45%, var(--line)); background: color-mix(in srgb, var(--blue-fg, var(--fg-2)) 7%, var(--surface)); }
   .banner.updated button { margin: 0 0 0 8px; }
-  .held { position: fixed; right: 16px; bottom: 16px; z-index: 30; margin: 0; box-shadow: var(--shadow); }
+  .held { position: fixed; right: 16px; bottom: 64px; z-index: 30; margin: 0; box-shadow: var(--shadow); }
   .banner b { color: var(--red-fg); }
   .banner pre { margin: 6px 0 0; max-height: 9em; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.5 var(--mono); color: var(--fg-2); }
   .banner.stale { border-color: color-mix(in srgb, var(--amber) 45%, var(--line)); background: color-mix(in srgb, var(--amber) 7%, var(--surface)); }
@@ -481,6 +481,52 @@
   #av-frame { flex: 1 1 auto; min-height: 0; width: 100%; border: 0; background: #fff; display: block; }
   @media (max-width: 900px) { #artifact-view:not([hidden]) { inset: 8px; } }
   @media (max-width: 600px) { .av-bar .av-label { display: none; } .av-bar button:not(.icon-btn), .av-bar a.av-btn { padding: 0 8px; } }
+  /* threads: the layer over the page (Shift and point at anything), outside <main> */
+  .tl-aiming, .tl-aiming * { cursor: none !important; }
+  .tl-pinning { touch-action: none; }
+  .tl-cursor { position: fixed; left: 0; top: 0; z-index: 60; pointer-events: none; filter: drop-shadow(0 1px 2px rgba(0,0,0,.35)); }
+  .tl-cursor path { fill: var(--blue); stroke: #fff; stroke-width: 2; }
+  .tl-cursor circle { fill: #fff; }
+  .tl-hl { position: fixed; z-index: 58; pointer-events: none; border: 2px solid var(--blue); border-radius: 8px; background: color-mix(in srgb, var(--blue) 8%, transparent); }
+  .tl-hl.spot { border-radius: 50%; }
+  .tl-chip { position: fixed; z-index: 59; pointer-events: none; max-width: 260px; padding: 2px 8px; border-radius: 6px; background: var(--fg); color: var(--bg); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tl-card { position: absolute; z-index: 50; width: 360px; max-height: min(560px, 80vh); display: flex; flex-direction: column; background: var(--raised); border: 1px solid var(--line-2); border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,.18); padding: 10px 12px; }
+  .tl-card.in-dock { position: fixed; right: 16px; bottom: 64px; }
+  .tl-card.sheet { position: fixed; left: 0; right: 0; bottom: 0; width: auto; max-height: 75vh; border-radius: 12px 12px 0 0; }
+  .tl-head { display: flex; align-items: center; gap: 6px; }
+  .tl-head .tl-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tl-head button { margin-top: 0; }
+  .tl-ctx { margin: 6px 0; border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; background: var(--well); font-size: 12px; }
+  .tl-ctx summary { display: flex; gap: 6px; align-items: center; cursor: pointer; list-style: none; }
+  .tl-ctx summary b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+  .tl-ctx .kv code { overflow-wrap: anywhere; }
+  .tl-turns { overflow-y: auto; flex: 1; min-height: 60px; display: flex; flex-direction: column; gap: 8px; padding: 4px 0; }
+  .tl-turn .tl-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .tl-turn.owner { align-self: flex-end; max-width: 88%; background: color-mix(in srgb, var(--blue) 10%, var(--surface)); border-radius: 8px; padding: 6px 8px; }
+  .tl-refs { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 2px; font-size: 12px; }
+  .tl-compose textarea { margin-top: 6px; }
+  .tl-compose .row-inline { align-items: center; }
+  @media (max-width: 640px) { .tl-card:not(.sheet) { width: calc(100vw - 32px); } }
+  /* under the scrim (20) and what opens over it (the drawer, a review, an artifact), over the page's own (at most 6) */
+  .tl-pins { position: absolute; left: 0; top: 0; width: 0; height: 0; z-index: 10; }
+  .tl-pin { position: absolute; width: 22px; height: 22px; padding: 0; margin: 0; border-radius: 50%; border: 2px solid #fff; background: var(--blue); color: #fff; font: 600 11px/18px var(--sans); text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,.3); }
+  .tl-pin.on { outline: 2px solid var(--blue); outline-offset: 2px; }
+  .tl-pin sup { font-size: 9px; margin-left: 1px; }
+  .tl-dock { position: fixed; right: 16px; bottom: 16px; z-index: 45; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+  .tl-pill { border-radius: 999px; box-shadow: 0 2px 8px rgba(0,0,0,.12); }
+  .tl-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--blue); vertical-align: middle; }
+  .tl-panel { width: 320px; max-height: 60vh; overflow-y: auto; background: var(--raised); border: 1px solid var(--line-2); border-radius: 10px; padding: 8px; box-shadow: 0 8px 28px rgba(0,0,0,.18); }
+  .tl-dock-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+  .tl-dock-head button { margin-top: 0; }
+  button.tl-row { display: flex; align-items: center; gap: 8px; width: 100%; height: auto; margin: 0; text-align: left; background: none; border: 0; border-radius: 6px; padding: 6px; color: var(--fg); font-weight: 400; }
+  button.tl-row:hover { background: var(--hover); opacity: 1; }
+  .tl-row .tl-r { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+  .tl-row .tl-r b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+  .tl-n { flex: none; width: 20px; height: 20px; border-radius: 50%; background: var(--blue); color: #fff; font-size: 11px; line-height: 20px; text-align: center; }
+  .tl-resolved summary { cursor: pointer; font-size: 12px; color: var(--fg-2); padding: 6px; }
+  .tl-ready { margin: 6px 0; padding: 6px 8px; border-radius: 6px; border: 1px solid color-mix(in srgb, var(--green) 45%, var(--line)); background: color-mix(in srgb, var(--green) 8%, var(--surface)); font-size: 12px; }
+  .tl-ready input { width: 100%; padding: 4px 8px; margin-top: 4px; }
+  @media (pointer: coarse) { #tl-pinbtn { height: 36px; padding: 0 14px; } }
 </style>
 </head>
 <body>
@@ -671,9 +717,29 @@
   <!-- the server's policy for these pages holds whatever the frame's attributes say; the frame never shares this origin -->
   <iframe id="av-frame" title="Artifact" sandbox="allow-scripts allow-forms allow-modals allow-pointer-lock" allow="fullscreen" referrerpolicy="no-referrer"></iframe>
 </div>
+<!-- the thread layer: outside <main>, which the 10 s refresh rebuilds -->
+<div id="tl">
+  <div id="tl-pins" class="tl-pins"></div>
+  <div id="tl-hl" class="tl-hl" hidden></div>
+  <div id="tl-chip" class="tl-chip" hidden></div>
+  <div id="tl-cursor" class="tl-cursor" hidden aria-hidden="true"><svg viewBox="0 0 28 36" width="28" height="36"><path d="M14 35C14 35 2 21 2 13a12 12 0 0 1 24 0c0 8-12 22-12 22z"/><circle cx="14" cy="13" r="4.5"/></svg></div>
+  <div id="tl-card" class="tl-card" role="dialog" aria-label="A thread with the supervisor" hidden></div>
+  <div id="tl-dock" class="tl-dock">
+    <div id="tl-panel" class="tl-panel" hidden>
+      <div class="tl-dock-head"><b>Threads</b><span class="grow"></span><button type="button" class="ghost" id="tl-pinbtn" aria-pressed="false" title="Point at something to start a thread: for a phone, or for a long look around">Pin</button><button type="button" class="ghost" data-tl-new>New thread</button></div>
+      <div id="tl-list"></div>
+    </div>
+    <button type="button" id="tl-pill" class="ghost tl-pill" aria-expanded="false"><i class="icon-messages-square" aria-hidden="true"></i> Threads</button>
+  </div>
+</div>
 <script>
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+// Every item the dashboard draws says what it is (data-subject="<type>:<id>") and what it is called
+// (data-title), so the thread layer can point at it, name it, and find it again after a redraw.
+const subj = (type, id, title) => ` data-subject="${esc(`${type}:${id}`)}" data-title="${esc(String(title ?? '').replace(/\s+/g, ' ').trim().slice(0, 120))}"`;
+// The Decide feed's rows are calls of several kinds; each points at its own record.
+const decSubject = (r) => ({ decision: 'decision', act: 'act', answer: 'question', goal: 'goal', rule: 'lesson' }[r.kind] ?? (String(r.id).startsWith('d-') ? 'decision' : 'act'));
 const drafts = {};
 const DAY = 864e5;
 const dur = (s) => (s < 60 ? `${s}s` : `${(s / 60).toFixed(1)} min`);
@@ -907,7 +973,7 @@ function boardCols(items, crit, { only = false, inert = false } = {}) {
     // finished columns show the most recent few; the rest are counted
     if (['Merged', 'Released'].includes(name)) cards = cards.sort((a, b) => (b.merged_at || '').localeCompare(a.merged_at || '')).slice(0, 5);
     return `<div class="col${total ? '' : ' none'}"><h3><span>${name}</span><span>${total}</span></h3>${cards.map((t) => `
-      <${inert ? 'div' : 'button type="button"'} class="tcard${inert ? ' inert' : ''} ${t.phase === 'blocked' || t.waiting ? 'blocked' : ''}" ${inert ? '' : `data-ticket="${esc(t.id)}" aria-label="Open ${esc(t.title)}"`}>
+      <${inert ? 'div' : 'button type="button"'} class="tcard${inert ? ' inert' : ''} ${t.phase === 'blocked' || t.waiting ? 'blocked' : ''}"${subj('ticket', t.id, t.title)} ${inert ? '' : `data-ticket="${esc(t.id)}" aria-label="Open ${esc(t.title)}"`}>
         <div class="t"><b>${crit.has(t.id) ? '<i class="icon-flag" title="on the critical path" aria-label="on the critical path"></i> ' : ''}${esc(t.title)}</b></div>
         <div class="muted">${esc(t.component)} · ${esc(t.size)}</div>
         ${(() => { const ps = ticketPills(t); return ps.length ? `<div class="pills">${ps.map(([label, tone, tip]) => `<span class="badge pill ${tone}" title="${esc(tip || label)}">${esc(label)}</span>`).join('')}</div>` : ''; })()}
@@ -942,7 +1008,7 @@ const words = (x) => cap(String(x ?? '').replace(/[-_]+/g, ' '));
 const PHASE_WORDS = { starting: 'starting', spec: 'writing the spec', plan: 'planning', contract: 'agreeing contracts', build: 'building', verify: 'verifying', 'final-review': 'final review', 'awaiting-word': 'waiting for the go-ahead', merging: 'merging', blocked: 'blocked', parked: 'parked', done: 'done' };
 const RUNG_WORDS = { 1: 'asks you first', 2: 'asks, with a default', 3: 'decides, then tells you' };
 const KIND_WORDS = { 'owner-decision': 'Decision', 'one-way-door': 'Hard to undo', clarification: 'Clarification', proposal: 'Proposal', trust: 'More trust?', 'goal-definition': 'Defining a goal', 'owner-action': 'Needs you to do something', review: 'Review' };
-const CHANNEL_WORDS = { dashboard: 'on the dashboard', cli: 'in your terminal', chat: 'to the supervisor in chat' };
+const CHANNEL_WORDS = { dashboard: 'on the dashboard', cli: 'in your terminal', chat: 'to the supervisor in chat', thread: 'in a thread' };
 const ticketMap = () => new Map((DATA?.tickets || []).map((t) => [t.id, t]));
 const allQuestions = () => [...(DATA?.questions || []), ...(DATA?.ooda?.answered || [])];
 const who = (w) => (w === 'owner' ? 'you' : w === 'supervisor' ? 'the supervisor' : ticketMap().has(w) ? `the agent on ${ticketMap().get(w).title}` : w?.startsWith('plan-') ? `the planner for ${w.slice(5)}` : w || '');
@@ -959,12 +1025,12 @@ const glink = (gid) => { const g = goalOf(gid); return g ? `<a class="linkish" h
 const mlink = (gid, n, title) => `<a class="linkish" href="#milestone/${encodeURIComponent(`${gid}:${n}`)}">${esc(title ?? milestonesOf(goalOf(gid)).find((m) => m.n === Number(n))?.title ?? `milestone ${n}`)}</a>`;
 // An id in text links to its panel: goals, lessons, acts, problems, messages (threads), observations.
 function idLink(k, id) {
-  const href = { g: 'goal', k: 'lesson', a: 'act', d: 'decision', p: 'problem', m: 'thread' }[k];
+  const href = { g: 'goal', k: 'lesson', a: 'act', d: 'decision', p: 'problem', m: 'thread', t: 'talk' }[k];
   if (!href) return `<code>${esc(id.slice(0, 22))}…</code>`;
   if (k === 'g' && goalOf(id)) return glink(id);
   return `<a class="linkish" href="#${href}/${encodeURIComponent(id)}"><code>${esc(id.slice(0, 22))}…</code></a>`;
 }
-const subjectLink = (subj) => (ticketMap().has(subj) ? tlink(subj) : /^[a-z]-\d{8}-\d{9}-/.test(subj ?? '') || /^plan-/.test(subj ?? '') || /^sensor:/.test(subj ?? '') ? linkify(subj) : subj ? `<code>${esc(subj)}</code>` : '');
+const subjectLink = (subj) => (/^thread:t-/.test(subj ?? '') ? linkify(subj.slice(7)) : ticketMap().has(subj) ? tlink(subj) : /^[a-z]-\d{8}-\d{9}-/.test(subj ?? '') || /^plan-/.test(subj ?? '') || /^sensor:/.test(subj ?? '') ? linkify(subj) : subj ? `<code>${esc(subj)}</code>` : '');
 const scopeWords = (sc) => (!sc || sc === 'project' ? 'the whole project' : sc.replace(/^component:/, 'component ').replace(/^feature:/, 'feature ').replace(/^class:/, 'decisions of kind ').replace(/^chore:devteam-sync/, 'devteam upgrades').replace(/^chore:/, 'chore '));
 // What a call rested on, in words: the supervisor's trust, your answer or a default, a standing rule.
 function authorityWords(u) {
@@ -996,7 +1062,7 @@ function linkify(text) {
   const ids = [...ticketMap().keys()].sort((a, b) => b.length - a.length);
   const parts = [
     String.raw`\bq-\d{8}-\d{9}-[a-z0-9-]+`,
-    String.raw`\b[gkapmod]-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*`,
+    String.raw`\b[gkapmodt]-\d{8}-\d{9}-[a-z0-9]+(?:-[a-z0-9]+)*`,
     ...(ids.length ? [String.raw`\b(?:${ids.map((x) => x.replace(/[-]/g, '\\-')).join('|')})\b`] : []),
     String.raw`\bsensor:[A-Za-z0-9][A-Za-z0-9_.-]*`,
     String.raw`\bplan-[a-z0-9]+(?:-[a-z0-9]+)*\b`,
@@ -1005,7 +1071,7 @@ function linkify(text) {
   ];
   return h.replace(new RegExp(parts.join('|'), 'g'), (m) => {
     if (/^q-\d{8}-\d{9}-/.test(m)) return qlink(m);
-    if (/^[gkapmod]-\d{8}-\d{9}-/.test(m)) return idLink(m[0], m);
+    if (/^[gkapmodt]-\d{8}-\d{9}-/.test(m)) return idLink(m[0], m);
     if (ticketMap().has(m)) return tlink(m);
     if (m.startsWith('sensor:')) { const n = m.slice('sensor:'.length); return (DATA?.sensors || []).some((x) => x.name === n) ? `<a class="linkish" href="#sensor/${encodeURIComponent(n)}">${esc(n)}</a>` : m; }
     if (m.startsWith('plan-')) { const f = m.slice('plan-'.length); return (DATA?.planners || []).some((x) => x.feature === f) ? `<a class="linkish" href="#planner/${encodeURIComponent(f)}">${m}</a>` : m; }
@@ -1103,7 +1169,7 @@ function restoreSecretDrafts() {
 const toB64 = async (file) => { const bytes = new Uint8Array(await file.arrayBuffer()); let bin = ''; for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000)); return btoa(bin); };
 // Next time: only for a kind of decision on the trust ladder; the current rung is marked, nothing
 // changes unless the owner picks another. The supervisor never infers this from the note.
-const nextTime = (q, cls, attr = 'data-auto') => (cls ? `<fieldset class="next"><legend>Next time, for decisions like this (${esc(cls.about || words(q.class))}), the supervisor…</legend>${[1, 2, 3].filter((r) => r <= cls.ceiling).map((r) => `<label class="seg"><input type="radio" name="${attr === 'data-auto' ? '' : 'rv-'}auto-${esc(q.id)}" value="${r === cls.rung ? '' : r}" ${attr}="${esc(q.id)}" ${r === cls.rung ? 'checked' : ''}>${esc(RUNG_WORDS[r])}${r === cls.rung ? ' <span class="muted">(now)</span>' : ''}</label>`).join('')}</fieldset>` : '');
+const nextTime = (q, cls, attr = 'data-auto', pre = '') => (cls ? `<fieldset class="next"><legend>Next time, for decisions like this (${esc(cls.about || words(q.class))}), the supervisor…</legend>${[1, 2, 3].filter((r) => r <= cls.ceiling).map((r) => `<label class="seg"><input type="radio" name="${pre}${attr === 'data-auto' ? '' : 'rv-'}auto-${esc(q.id)}" value="${r === cls.rung ? '' : r}" ${attr}="${esc(q.id)}" ${r === cls.rung ? 'checked' : ''}>${esc(RUNG_WORDS[r])}${r === cls.rung ? ' <span class="muted">(now)</span>' : ''}</label>`).join('')}</fieldset>` : '');
 // Why a question is where it is in the Inbox. The server orders and words it (rank, from the
 // supervisor's ratings and what the kit counts); the page only shows it. The top card says the
 // whole reason; the others their first three parts.
@@ -1121,12 +1187,15 @@ const rankRow = (q) => [
   // every rating it has carried, so a question quietly rated down leaves a trail
   ...((q.rating_history || []).length ? [['Rated', q.rating_history.map((h) => esc(`${h.asked ? 'When asked' : `${when(h.at)}, ${who(h.by)}`}: ${[h.stake ? `stake ${h.stake}` : '', h.urgency ? `urgency ${h.urgency}` : '', h.settles !== undefined ? `settles ${h.settles}` : ''].filter(Boolean).join(', ')}`)).join('<br>')]] : []),
 ];
-function questionCard(q, o, reasonText) {
+function questionCard(q, o, reasonText, copy = false) {
   if (q.kind === 'review') return reviewCard(q, o, reasonText);
+  // copy: the same card in a thread (t-q-<id>): its own radio groups and error line, so the Inbox's
+  // and the thread's never answer for each other; the controls find their card from themselves.
+  const pre = copy ? 't-' : '';
   const cls = q.class && o.classes[q.class];
   const kindCls = q.kind === 'one-way-door' ? 'door' : q.kind === 'trust' ? 'trust' : '';
   const list = choicesOf(q);
-  const name = `pick-${q.id}`;
+  const name = `${pre}pick-${q.id}`;
   const sure = q.confidence != null ? ` · ${Math.round(q.confidence * 100)}% sure` : '';
   // the answer the supervisor said would settle other open questions: say which, on that choice
   const closes = (q.rank?.parts.settles || []).length ? `<div class="closes">Would close ${q.rank.parts.settles.length} other question${q.rank.parts.settles.length > 1 ? 's' : ''}: ${q.rank.parts.settles.map((id) => qlink(id)).join('; ')}</div>` : '';
@@ -1137,13 +1206,14 @@ function questionCard(q, o, reasonText) {
       </label>`).join('') + (list.length && !['owner-action', 'goal-approval'].includes(q.kind) ? `
       <label class="choice${picks[q.id] === '__other' ? ' picked' : ''}"><input type="radio" name="${esc(name)}" value="__other" data-pick="${esc(q.id)}" ${picks[q.id] === '__other' ? 'checked' : ''}><span><b>Something else</b><div class="d">Write your own answer in the box below.</div></span></label>` : '');
   const why = q.why_asked?.reasons?.length ? `Why you: ${q.why_asked.reasons.map((r) => esc(reasonText[r] || r)).join('; ')}.` : '';
-  const next = nextTime(q, cls);
+  const next = nextTime(q, cls, 'data-auto', pre);
   const goalAsk = q.kind === 'goal-approval';
   const notePh = goalAsk ? 'Notes for the planner: taken into account whatever you choose (needed to refine)' : list.length ? 'Add a note (optional), or your own answer' : 'Your answer';
   return `
-    <div class="card qcard ${kindCls}${q.rank?.top ? ' top' : ''}" id="q-${esc(q.id)}">
+    <div class="card qcard ${kindCls}${q.rank?.top ? ' top' : ''}" id="${pre}q-${esc(q.id)}" data-qcard="${esc(q.id)}"${copy ? '' : subj('question', q.id, qplain(q.question, q.links))}>
       ${cardHead(KIND_ICON[q.kind] || 'circle-help', `<span class="badge ${q.kind === 'one-way-door' ? 'high' : q.kind === 'trust' ? 'good' : q.kind === 'owner-action' ? 'low' : 'medium'}">${esc(KIND_WORDS[q.kind] || words(q.kind))}</span>${q.goal_hold === 'park' ? '<span class="badge">its goal is parked</span>' : ''}`, { extra: (q.blocks || []).length ? `${q.class === 'incident-fix' ? 'about the incident' : 'holds up'} ${q.blocks.map((b) => (/^p-/.test(b) ? linkify(b) : tlink(b))).join(', ')}` : q.ticket ? `about ${tlink(q.ticket)}` : '', id: q.id, rows: [['Asked', esc(when(q.asked_at))], ...(q.class ? [['Kind', esc(q.class)]] : []), ...rankRow(q)] })}
       ${rankWhy(q)}
+      ${q.thread && !copy ? `<div class="meta from-thread">From a thread: <a class="linkish" href="#talk/${encodeURIComponent(q.thread)}">${esc(q.thread_title || 'a conversation with the supervisor')}</a></div>` : ''}
       ${q.rewritten ? '<p class="rewritten">This question changed after you answered it, so that answer no longer counts. Read it again before you answer: the supervisor\'s log was rewritten, which it should never do.</p>' : ''}
       <h4>${qtext(q.question, q.links)}</h4>
       ${q.context ? `<p class="ctx">${qtext(q.context, q.links)}</p>` : ''}
@@ -1157,7 +1227,7 @@ function questionCard(q, o, reasonText) {
       ${goalAsk || ['owner-action', 'goal-definition'].includes(q.kind) ? '' : `<label class="rulebox"><input type="checkbox" data-rulebox="${esc(q.id)}"> Keep this answer as a standing rule for ${esc(scopeWords(q.rule_scope))}</label>`}
       ${next}
       ${q.default ? `<p class="meta">If you don’t answer${q.deadline ? ` by ${when(q.deadline)}` : ''}, the supervisor goes with: <b>${esc(q.default)}</b></p>` : ''}
-      <div class="row-inline">${(q.secrets || []).length ? `<button data-post-secrets="${esc(q.id)}">Post</button>${q.sensor ? `<button class="ghost" data-dontuse="${esc(q.id)}">Don’t use this sensor</button>` : `<button class="ghost" data-reply="${esc(q.id)}">Reply</button><button class="ghost" data-cant="${esc(q.id)}">Can’t right now</button>`}` : `<button data-answer="${esc(q.id)}" ${goalAsk ? `data-goal-ask="${esc(q.goal)}"` : ''}>${q.kind === 'owner-action' || goalAsk ? 'Send' : 'Answer'}</button>`}<span class="err" id="e-${esc(q.id)}"></span></div>
+      <div class="row-inline">${(q.secrets || []).length ? `<button data-post-secrets="${esc(q.id)}">Post</button>${q.sensor ? `<button class="ghost" data-dontuse="${esc(q.id)}">Don’t use this sensor</button>` : `<button class="ghost" data-reply="${esc(q.id)}">Reply</button><button class="ghost" data-cant="${esc(q.id)}">Can’t right now</button>`}` : `<button data-answer="${esc(q.id)}" ${goalAsk ? `data-goal-ask="${esc(q.goal)}"` : ''}>${q.kind === 'owner-action' || goalAsk ? 'Send' : 'Answer'}</button>`}<span class="err" id="e-${pre}${esc(q.id)}"></span></div>
       ${why ? `<div class="meta">${why}</div>` : ''}
     </div>`;
 }
@@ -1193,14 +1263,14 @@ function qtext(text, links) {
 const qplain = (text, links) => String(text ?? '').replace(new RegExp(NAME_REF.source, 'g'), (all, n) => (links || []).find((x) => x.name === n)?.title ?? all);
 function answeredCard(q) {
   const how = q.status === 'defaulted' ? 'went with the default; you didn’t answer in time' : q.status === 'withdrawn' ? 'withdrawn by the supervisor' : `answered ${CHANNEL_WORDS[q.channel] || ''}`;
-  return `<div class="card small">
+  return `<div class="card small"${subj('question', q.id, qplain(q.question, q.links))}>
     <div>${qlink(q.id, q.question)}</div>
     ${q.answer ? `<div><b>${esc(q.answer)}</b></div>` : ''}
     ${q.said ? `<div class="muted">You said: “${esc(q.said)}”</div>` : ''}
     ${q.autonomy ? `<div class="muted">From then on, for ${esc(words(q.autonomy.class))}: the supervisor ${esc(RUNG_WORDS[q.autonomy.rung])}.</div>` : ''}
     ${q.standing_rule ? `<div class="muted">Standing rule: ${esc(q.standing_rule)}</div>` : ''}
     ${q.kind === 'review' ? `<div class="meta"><a class="linkish" href="#review/${encodeURIComponent(q.id)}">See the review as you answered it</a>${q.result_status && !['verified', 'declined'].includes(q.result_status) ? ` <span class="badge high">${esc(q.result_status)}</span>` : ''}</div>` : ''}
-    <div class="meta">${esc(how)}${q.answered_at ? ` · ${when(q.answered_at)}` : ''}</div>
+    <div class="meta${q.channel === 'thread' && q.turn_thread ? ' from-thread' : ''}">${esc(how)}${q.channel === 'thread' && q.turn_thread ? `: <a class="linkish" href="#talk/${encodeURIComponent(q.turn_thread)}">${esc(q.turn_thread_title || 'a conversation with the supervisor')}</a>` : ''}${q.answered_at ? ` · ${when(q.answered_at)}` : ''}</div>
     ${q.status === 'defaulted' ? `<div class="row-inline"><input type="text" data-overrule="${esc(q.id)}" placeholder="Your answer instead"><button class="ghost" data-overrule-send="${esc(q.id)}">Overrule</button><span class="err" id="e-${esc(q.id)}"></span></div>` : ''}
   </div>`;
 }
@@ -1304,9 +1374,10 @@ function reviewCard(q, o, reasonText) {
   const why = q.why_asked?.reasons?.length ? `Why you: ${q.why_asked.reasons.map((r) => esc(reasonText[r] || r)).join('; ')}.` : '';
   const declineOpen = !!drafts[q.id];
   return `
-    <div class="card qcard review${q.rank?.top ? ' top' : ''}" id="q-${esc(q.id)}">
+    <div class="card qcard review${q.rank?.top ? ' top' : ''}" id="q-${esc(q.id)}" data-qcard="${esc(q.id)}"${subj('question', q.id, qplain(q.question, q.links))}>
       ${cardHead(KIND_ICON.review, '<span class="badge low">Review</span>', { extra: (q.blocks || []).length ? `holds up ${q.blocks.map(tlink).join(', ')}` : q.ticket ? `about ${tlink(q.ticket)}` : '', id: q.id, rows: [['Asked', esc(when(q.asked_at))], ...(q.class ? [['Kind', esc(q.class)]] : []), ...rankRow(q)] })}
       ${rankWhy(q)}
+      ${q.thread ? `<div class="meta from-thread">From a thread: <a class="linkish" href="#talk/${encodeURIComponent(q.thread)}">${esc(q.thread_title || 'a conversation with the supervisor')}</a></div>` : ''}
       ${q.rewritten ? '<p class="rewritten">This question changed after you answered it, so that answer no longer counts. Read it again before you answer: the supervisor\'s log was rewritten, which it should never do.</p>' : ''}
       <h4>${qtext(q.question, q.links)}</h4>
       ${q.context ? `<p class="ctx">${qtext(q.context, q.links)}</p>` : ''}
@@ -1807,7 +1878,7 @@ function holdControl(id, h, { letGo = true, status = null } = {}) {
 function upkeepCard(u) {
   const words = HOLD_STATE_WORDS[holdState(u)] || u.state;
   const chores = u.chores || [];
-  return `<div class="card goal upkeep">
+  return `<div class="card goal upkeep"${subj('goal', 'upkeep', 'Upkeep')}>
     ${cardHead('wrench', `<span class="badge ${u.mode === 'run' ? 'good' : u.mode === 'park' ? 'high' : 'medium'}">${esc(words)}</span>`, { extra: 'always on: observing and keeping the record' })}
     <h4>Upkeep</h4>
     <p class="ctx">Chores, CI fixes, research, retros, kit syncs and the improvement loop's trials and proposals.${chores.length ? ` In flight: ${chores.slice(0, 6).map((c) => `<a class="linkish" href="#ticket/${encodeURIComponent(c.id)}">${esc(c.id)}</a>`).join(', ')}${chores.length > 6 ? '…' : ''}.` : ''}${u.reason ? ` <span class="muted">(${esc(u.reason)})</span>` : ''}</p>
@@ -1846,7 +1917,7 @@ function goalCard(g, R, openQs, week) {
   const s = goalState(g, R, openQs);
   const design = s.ask?.links?.[0] ?? (['ready', 'met'].includes(g.status) && g.check.design ? { title: 'The design', path: `docs/devteam/${g.check.design}` } : null);
   const steps = goalSteps(g, s, R);
-  return `<div class="card goal goal-${s.key}">
+  return `<div class="card goal goal-${s.key}"${subj('goal', g.id, g.title)}>
     ${cardHead('target', `<span class="badge ${s.tone}">${esc(s.label)}</span>`, { extra: [g.priority ? `priority ${esc(g.priority)}` : '', g.impact ? esc(g.impact.words) : ''].filter(Boolean).join(' · '), id: g.id, rows: [['Opened', esc(when(g.created_at))]] })}
     <h4><a class="title-link" href="#goal/${encodeURIComponent(g.id)}">${esc(g.title)}</a></h4>
     ${g.outcome ? `<p class="ctx">${esc(g.outcome)}</p>` : ''}
@@ -1862,7 +1933,7 @@ const registryAttestLine = (g) => { const r = g.registry_attest; return r ? `<di
 const planningFor = (g) => (DATA?.planners || []).filter((p) => p.goals.includes(g.id));
 const ago = (m) => (m == null ? 'no activity yet' : m < 1 ? 'active just now' : m < 60 ? `active ${m} min ago` : `active ${Math.round(m / 60)} h ago`);
 function plannerCards(ps) {
-  return ps.map((p) => `<button type="button" class="plcard${p.waiting || !p.window ? ' stuck' : ''}" data-planner="${esc(p.feature)}">
+  return ps.map((p) => `<button type="button" class="plcard${p.waiting || !p.window ? ' stuck' : ''}" data-planner="${esc(p.feature)}"${subj('planner', p.feature, `Planning ${p.title}`)}>
     <div><i class="icon-bot" aria-hidden="true"></i> <b>Planning ${esc(p.title)}</b></div>
     <div class="muted">${p.goals.length ? `for ${p.goals.map((gid) => esc((DATA.ooda.goals.find((g) => g.id === gid) || {}).title || gid)).join(', ')} · ` : ''}${p.tickets ? `${p.tickets} ticket${p.tickets > 1 ? 's' : ''} so far · ` : ''}${esc(ago(p.minutes_silent))}</div>
     <div>${p.waiting ? `<span class="badge high">${p.waiting.kind === 'limit' ? 'usage limit' : 'waiting on a prompt'}</span>` : ''}${!p.window ? '<span class="badge medium">window gone</span>' : ''}${p.waiting_on_supervisor.length ? '<span class="badge low">waiting for the supervisor</span>' : ''}${(p.waiting_on_owner || []).length ? `<span class="badge medium">waiting for ${p.waiting_on_owner.length} answer${p.waiting_on_owner.length > 1 ? 's' : ''} from you</span>` : ''}</div>
@@ -1897,18 +1968,18 @@ function renderOoda(o) {
 
   // Observe
   $('observations').innerHTML = o.observations.length ? o.observations.slice(0, 40).map((x) => `
-    <div class="card small"><span class="badge ${sevBadge(x.severity ?? 0)}">${esc(words(x.kind))}</span>${subjectLink(x.subject)}
+    <div class="card small"${subj('observation', x.id, `${words(x.kind)}: ${x.detail}`)}><span class="badge ${sevBadge(x.severity ?? 0)}">${esc(words(x.kind))}</span>${subjectLink(x.subject)}
       <div>${linkify(x.detail)}</div><div class="meta">${esc(who(x.created_by))}, ${when(x.created_at)}</div></div>`).join('') : empty('None yet. What workers and the supervisor notice shows here.');
 
   // Orient
   $('clusters').innerHTML = o.clusters.length ? o.clusters.map((c) => `
     <div class="card small"><b>${esc(words(c.key.split(':')[0]))}</b> ${subjectLink(c.key.split(':').slice(1).join(':'))} <span class="muted">· seen ${esc(c.count)} times</span><div>${linkify(c.latest)}</div></div>`).join('') : empty('None. Something noticed more than once shows here.');
   $('problems').innerHTML = o.problems.length ? o.problems.map((p) => `
-    <div class="card small"><span class="badge ${sevBadge(p.severity)}">sev ${esc(p.severity)}</span><span class="badge">${p.realized ? 'issue' : 'risk'}</span><a class="linkish" href="#problem/${encodeURIComponent(p.id)}"><b>${esc(p.title)}</b></a> <span class="muted">· ${esc(p.status)}${p.assigned_to ? `, ${esc(p.assigned_to)}` : ''}${(p.threatens || []).length ? ` · threatens ${p.threatens.map(esc).join(', ')}` : ''}</span>${p.detail ? `<div class="muted">${esc(p.detail)}</div>` : ''}</div>`).join('') : empty('None open.');
+    <div class="card small"${subj('problem', p.id, p.title)}><span class="badge ${sevBadge(p.severity)}">sev ${esc(p.severity)}</span><span class="badge">${p.realized ? 'issue' : 'risk'}</span><a class="linkish" href="#problem/${encodeURIComponent(p.id)}"><b>${esc(p.title)}</b></a> <span class="muted">· ${esc(p.status)}${p.assigned_to ? `, ${esc(p.assigned_to)}` : ''}${(p.threatens || []).length ? ` · threatens ${p.threatens.map(esc).join(', ')}` : ''}</span>${p.detail ? `<div class="muted">${esc(p.detail)}</div>` : ''}</div>`).join('') : empty('None open.');
   const cand = o.knowledge.filter((k) => k.status === 'candidate');
   const acc = o.knowledge.filter((k) => k.status === 'accepted');
   $('knowledge').innerHTML = (cand.length ? `<p class="small">${cand.length} proposed lesson${cand.length > 1 ? 's are' : ' is'} waiting for you in the <a class="linkish" href="#inbox">Inbox</a>.</p>` : '') +
-    (acc.length ? acc.map((k) => `<div class="card small"><a class="linkish" href="#lesson/${encodeURIComponent(k.id)}"><span class="badge good">${esc(k.kind)}</span></a>${linkify(k.statement)}${k.valence < 0 ? ' <span class="muted">(avoid)</span>' : ''} <span class="muted">· applies to ${esc(scopeWords(k.scope))}${k.created_by === 'owner' ? ' · from you' : ''}</span></div>`).join('') : '') ||
+    (acc.length ? acc.map((k) => `<div class="card small"${subj('lesson', k.id, k.statement)}><a class="linkish" href="#lesson/${encodeURIComponent(k.id)}"><span class="badge good">${esc(k.kind)}</span></a>${linkify(k.statement)}${k.valence < 0 ? ' <span class="muted">(avoid)</span>' : ''} <span class="muted">· applies to ${esc(scopeWords(k.scope))}${k.created_by === 'owner' ? ' · from you' : ''}</span></div>`).join('') : '') ||
     empty('None yet. Things noticed more than once become proposed lessons, which you keep or retire in the Inbox.');
 
   // Trust Ladder
@@ -1925,7 +1996,7 @@ function renderOoda(o) {
   // Act
   const feed = o.acts;
   $('acts-feed').innerHTML = feed.length ? feed.map((a) => { const v = actView(a); return `
-    <div class="card small ${a.correction ? 'corrected' : ''}">
+    <div class="card small ${a.correction ? 'corrected' : ''}"${subj('act', a.id, a.what)}>
       <div><div class="act-head">${v.head}</div>${v.detail ? `<div class="act-detail">${v.detail}</div>` : ''}
         <div class="meta"><a class="linkish" href="#act/${encodeURIComponent(a.id)}">${when(a.created_at)}</a> · ${actUnder(a)}${a.reversible === false ? ' · can’t be undone' : ''}</div>
         ${a.correction ? `<div class="err">Corrected by ${esc(who(a.correction.by))}: ${esc(a.correction.reason)}${a.correction.repaired ? ` · ${esc(a.correction.repaired)}` : ''}</div>` : ''}
@@ -1938,7 +2009,7 @@ const DEC_KIND = { decision: 'Decided', act: 'Did, as its own call', answer: 'Yo
 function decisionUnder(r) {
   if (r.who === 'supervisor' && ['decision', 'act'].includes(r.kind)) return authorityWords(r.under);
   const u = r.under || {};
-  if (r.kind === 'answer') return [u.recommendation ? (u.matched ? 'went with its recommendation' : `its recommendation was “${esc(u.recommendation)}”`) : '', u.autonomy ? `moved ${esc(words(u.autonomy.class))} to ${esc(RUNG_WORDS[u.autonomy.rung])}` : '', u.standing_rule ? `and gave a standing rule: “${esc(u.standing_rule)}”` : '', u.channel === 'chat' ? 'said in the supervisor chat' : ''].filter(Boolean).join(' · ');
+  if (r.kind === 'answer') return [u.recommendation ? (u.matched ? 'went with its recommendation' : `its recommendation was “${esc(u.recommendation)}”`) : '', u.autonomy ? `moved ${esc(words(u.autonomy.class))} to ${esc(RUNG_WORDS[u.autonomy.rung])}` : '', u.standing_rule ? `and gave a standing rule: “${esc(u.standing_rule)}”` : '', u.channel === 'chat' ? 'said in the supervisor chat' : u.channel === 'thread' ? 'said in a thread' : ''].filter(Boolean).join(' · ');
   if (r.kind === 'correction') return [u.severity != null ? `severity ${esc(u.severity)}` : '', u.repaired ? `repaired: ${esc(u.repaired)}` : 'not repaired yet'].filter(Boolean).join(' · ');
   if (r.kind === 'rule') return u.status === 'accepted' ? '' : esc(u.status);
   return '';
@@ -1963,7 +2034,7 @@ function renderDecisions(o) {
     const under = decisionUnder(r);
     const evidence = (r.refs || []).length ? `about ${r.refs.slice(0, 4).map((x) => (ticketMap().has(x) ? tlink(x) : linkify(x))).join(', ')}` : '';
     return `
-    <div class="card small ${r.correction ? 'corrected' : ''}" data-dec="${esc(key(r))}">
+    <div class="card small ${r.correction ? 'corrected' : ''}" data-dec="${esc(key(r))}"${subj(decSubject(r), r.id, r.what)}>
       <div><div class="act-head"><span class="badge ${r.kind === 'correction' ? 'high' : r.who === 'owner' ? 'good' : 'medium'}">${esc(DEC_KIND[r.kind] || r.kind)}</span> ${linkify(r.what)}</div>
         ${r.rationale ? `<div class="act-detail">${linkify(r.rationale)}${r.options?.length > 1 ? ` <span class="muted">(weighed: ${r.options.map(esc).join(' / ')})</span>` : ''}${r.confidence != null ? ` <span class="muted">· ${Math.round(r.confidence * 100)}% sure</span>` : ''}</div>` : ''}
         <div class="meta"><a class="linkish" href="${open}">${esc(when(r.at))}</a> · ${esc(r.who === 'owner' ? 'you' : who(r.who))}${r.class ? ` · ${esc(words(r.class))}` : ''}${under ? ` · ${under}` : ''}${evidence ? ` · ${evidence}` : ''}${r.kind === 'decision' && r.acts.length ? ` · carried out by ${r.acts.length} act${r.acts.length > 1 ? 's' : ''}` : r.kind === 'decision' ? ' · not acted on yet' : ''}${r.reversible === false ? ' · can’t be undone' : ''}</div>
@@ -2463,7 +2534,7 @@ function incidentBoard(incs) {
     let cards = incs.filter((x) => x.stage === k);
     const total = cards.length;
     if (k === 'resolved') cards = cards.slice(-5);
-    return `<div class="col${total ? '' : ' none'}"><h3><span>${label}</span><span>${total}</span></h3>${cards.map((x) => `<button type="button" class="tcard${x.question?.status === 'open' || x.stage === 'regressed' ? ' blocked' : ''}" data-open="problem/${esc(x.id)}" aria-label="Open ${esc(x.title)}">
+    return `<div class="col${total ? '' : ' none'}"><h3><span>${label}</span><span>${total}</span></h3>${cards.map((x) => `<button type="button" class="tcard${x.question?.status === 'open' || x.stage === 'regressed' ? ' blocked' : ''}"${subj('problem', x.id, x.title)} data-open="problem/${esc(x.id)}" aria-label="Open ${esc(x.title)}">
       <div class="t"><b>${esc(x.title)}</b></div>
       <div class="muted">severity ${esc(x.severity)} · ${esc(x.events)} event(s)${x.component ? ` · ${esc(x.component)}` : ''}</div>
       ${x.waiting ? `<div class="pills"><span class="badge pill ${x.question?.status === 'open' ? 'medium' : ''}">${esc(x.waiting.replace(/ at (\S+)$/, (_, at) => ` ${when(at)}`))}</span></div>` : ''}
@@ -2499,7 +2570,7 @@ function renderMonitoring(d) {
   const feed = d.sensor_feed || [];
   $('sensor-exceptions').innerHTML = feed.length ? `<div class="feed">${feed.map(fpRow).join('')}</div>` : empty(ms.some((m) => m.kind !== 'http') ? 'Nothing read yet. Exceptions, log errors and platform errors the sensors read show here, newest first.' : 'No probes yet. Discovery starts them when it finds an error tracker or a host whose logs the project can already read.');
   const obs = (d.ooda?.observations || []).filter((o) => /^sensor:/.test(o.subject || ''));
-  $('sensor-feed').innerHTML = obs.length ? obs.map((o) => `<div class="card small${o.severity >= 3 ? ' corrected' : ''}"><div><div class="act-head">${o.severity != null ? `<span class="badge ${sevBadge(o.severity)}">${esc(words(o.kind))}</span> ` : ''}${linkify(o.detail)}</div><div class="meta">${esc(when(o.created_at))} · ${subjectLink(o.subject)}</div></div></div>`).join('') : empty('Nothing yet. Outages, slow spells and each day\'s rollup show here.');
+  $('sensor-feed').innerHTML = obs.length ? obs.map((o) => `<div class="card small${o.severity >= 3 ? ' corrected' : ''}"${subj('observation', o.id, o.detail)}><div><div class="act-head">${o.severity != null ? `<span class="badge ${sevBadge(o.severity)}">${esc(words(o.kind))}</span> ` : ''}${linkify(o.detail)}</div><div class="meta">${esc(when(o.created_at))} · ${subjectLink(o.subject)}</div></div></div>`).join('') : empty('Nothing yet. Outages, slow spells and each day\'s rollup show here.');
 }
 function openSensor(name) {
   drawerFor('sensor', name);
@@ -3044,12 +3115,16 @@ function route() {
   if (h.startsWith('q/')) return void openQuestion(h.slice(2));
   if (h.startsWith('goal/')) return void openGoal(h.slice(5));
   if (h.startsWith('planner/')) return void openPlanner(h.slice(8));
+  // a thread: its card, beside its subject (#thread/ is a message's thread, in the sidepeek)
+  // over nothing: a drawer it was followed from (or open under it) closes, as for any other link
+  if (h.startsWith('talk/')) { hideDrawer(); return void tlOpen(h.slice(5)); }
   const PEEKS = { feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, sensor: openSensor };
   const [kind, ...rest] = h.split('/');
   if (PEEKS[kind] && rest.length) return void PEEKS[kind](rest.join('/'));
   if (h.startsWith('file?')) return void openFile(new URLSearchParams(location.hash.slice(6)));
-  if (!$('drawer').hidden) { $('drawer').hidden = true; $('scrim').hidden = true; document.body.style.overflow = ''; DRAWER = { kind: null, id: null }; }
+  hideDrawer();
 }
+function hideDrawer() { if (!$('drawer').hidden) { $('drawer').hidden = true; $('scrim').hidden = true; document.body.style.overflow = ''; DRAWER = { kind: null, id: null }; } }
 window.addEventListener('hashchange', () => { if (DATA) route(); });
 $('drawer-close').addEventListener('click', closeDrawer);
 $('scrim').addEventListener('click', () => (AV ? leaveArtifact() : RV ? leaveReview() : closeDrawer()));
@@ -3092,10 +3167,13 @@ async function post(action, body, errId) {
 }
 // Once an answer is saved the card says so at once; the next refresh removes it.
 const ANSWERED = new Map();
+// The card a control is on, and its error line: the Inbox's copy of a question (q-<id>) or a thread
+// card's (t-q-<id>), found from the control itself, so the two copies never answer for each other.
+const qcardOf = (el) => { const card = el.closest('[data-qcard]'); return { card, errId: `${card?.id.startsWith('t-') ? 't-' : ''}${card?.dataset.qcard ?? ''}` }; };
 function markAnswered(id, text) {
   ANSWERED.set(id, text);
-  const card = document.getElementById(`q-${id}`);
-  if (card) { card.classList.add('done'); card.innerHTML = `<div class="answered-note"><i class="icon-circle-check" aria-hidden="true"></i> Answered: <b>${esc(text)}</b></div>`; }
+  // both copies: the Inbox's and a thread card's
+  for (const card of document.querySelectorAll(`[data-qcard="${CSS.escape(id)}"]`)) { card.classList.add('done'); card.innerHTML = `<div class="answered-note"><i class="icon-circle-check" aria-hidden="true"></i> Answered: <b>${esc(text)}</b></div>`; }
 }
 
 /* preview-cards start */
@@ -3172,7 +3250,7 @@ function renderLibrary(lib) {
       stop: () => `<button class="ghost" data-preview-stop="${esc(p.name)}"${p.run ? '' : ' title="Unregisters the link; the server stays up until its session stops it"'}>Stop</button>`,
     };
     const meta = [esc(p.project), linkify(p.session), p.label ? esc(p.label) : '', p.at ? `offered ${esc(when(p.at))}` : '', s.since ? `down since ${esc(when(s.since))}` : ''].filter(Boolean).join(' · ');
-    return `<div class="card small art-card" data-preview="${esc(p.name)}">
+    return `<div class="card small art-card" data-preview="${esc(p.name)}"${subj('preview', p.name, p.label || p.name)}>
       <div class="art-t"><b>${esc(p.label || p.name)}</b><code class="small">${esc(p.name)}</code>${pvBadge[s.state]}</div>
       <div class="meta">${meta}</div>
       <div class="pub">${s.actions.map((a) => act[a]()).join('')}<span class="err" id="e-preview-${esc(p.name)}"></span></div>
@@ -3203,7 +3281,7 @@ function renderLibrary(lib) {
   const card = (a, draft) => {
     const name = a.error ? a.slug : a.title || a.slug;
     const meta = [a.by ? `drawn by ${esc(who(a.by))}` : '', a.for?.length ? `for ${a.for.map((f) => linkify(f)).join(', ')}` : '', a.updated_at ? esc(when(a.updated_at)) : ''].filter(Boolean).join(' · ');
-    return `<div class="card small art-card${draft ? ' draft' : ''}">
+    return `<div class="card small art-card${draft ? ' draft' : ''}"${subj('artifact', a.slug, a.title || a.slug)}>
       <div class="art-t">${a.error ? `<b>${esc(name)}</b>` : `<a href="${esc(artHref(a.slug, a.at))}">${esc(name)}</a>`}${a.at === 'main' ? '' : `<span class="badge medium">draft</span><span class="small muted">in ${linkify(a.at)}</span>`}${a.error ? '<span class="badge high">broken</span>' : ''}</div>
       ${a.error ? `<div class="err">${esc(a.error)}</div>` : a.summary ? `<div class="art-s">${esc(a.summary)}</div>` : ''}
       ${meta ? `<div class="meta">${meta}</div>` : ''}
@@ -3290,16 +3368,16 @@ function render(d) {
   $('stats').innerHTML = stats.map(([k, v]) => `<div class="stat"><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join('');
 
   // Keep anything half-typed or half-open across refreshes.
-  document.querySelectorAll('textarea[data-q]').forEach((t) => { drafts[t.dataset.q] = t.value; });
+  document.querySelectorAll('textarea[data-q]').forEach((t) => { if (!t.closest('#tl')) drafts[t.dataset.q] = t.value; });
   document.querySelectorAll('textarea[data-know-note]').forEach((t) => { drafts[`know:${t.dataset.knowNote}`] = t.value; });
   keepSecretDrafts();
-  const kept = [...document.querySelectorAll('input[data-reason], input[data-overrule]')].map((el) => [el.dataset.reason ? `input[data-reason="${el.dataset.reason}"]` : `input[data-overrule="${el.dataset.overrule}"]`, el.value]);
-  const keptChecks = [...document.querySelectorAll('input[data-rulebox]:checked, input[data-auto]:checked')].map((el) => el.dataset.rulebox ? `input[data-rulebox="${el.dataset.rulebox}"]` : `input[data-auto="${el.dataset.auto}"][value="${el.value}"]`);
+  const kept = [...document.querySelectorAll('input[data-reason], input[data-overrule]')].filter((el) => !el.closest('#tl')).map((el) => [el.dataset.reason ? `input[data-reason="${el.dataset.reason}"]` : `input[data-overrule="${el.dataset.overrule}"]`, el.value]);
+  const keptChecks = [...document.querySelectorAll('input[data-rulebox]:checked, input[data-auto]:checked')].filter((el) => !el.closest('#tl')).map((el) => el.dataset.rulebox ? `input[data-rulebox="${el.dataset.rulebox}"]` : `input[data-auto="${el.dataset.auto}"][value="${el.value}"]`);
   const openForms = [...document.querySelectorAll('[data-correct-form]')].filter((f) => !f.hidden).map((f) => f.dataset.correctForm);
   const reasonText = Object.fromEntries((o.reasons || []).map((r) => [r.id, r.means]));
   const cands = o.knowledge.filter((k) => k.status === 'candidate');
   const goalCards = cands.map((k) => `
-    <div class="card qcard trust">
+    <div class="card qcard trust"${subj('lesson', k.id, k.statement)}>
       ${cardHead('lightbulb', '<span class="badge good">Lesson to keep?</span>', { extra: `applies to ${esc(scopeWords(k.scope))}`, id: k.id, rows: [['Proposed', esc(when(k.created_at))], ['By', esc(who(k.created_by))]] })}
       <h4>${linkify(k.statement)}</h4>
       <p class="ctx">${esc(cap(who(k.created_by)))} proposes this as a ${esc(k.kind)}${k.confidence != null ? `, ${Math.round(k.confidence * 100)}% sure` : ''}, ${(k.evidence || []).length ? `based on ${k.evidence.map((e) => linkify(e)).join(', ')}` : 'with no evidence recorded'}. Accepted lessons go into the instructions of every agent they apply to.</p>
@@ -3377,6 +3455,534 @@ function showFailure(message) {
   b.hidden = false;
 }
 
+/* threads-core start */
+// The thread layer's rules, apart from the page: what the pointer is on, what a subject records and
+// how big it is, where a card opens and what its state line says, the pins and the dock's words.
+// The kit's test loads this block by itself.
+// What the page can point at: the kit's SUBJECT_TYPES (a test holds the two lists equal).
+const T_TYPES = ['goal', 'observation', 'question', 'ticket', 'planner', 'decision', 'lesson', 'problem', 'act', 'preview', 'artifact'];
+// The kit's SUBJECT_REF, the same way (a test holds the two equal): the page never sends a ref the log refuses.
+// T_REF_MAX: the kit's SUBJECT_CAPS.ref, in bytes; the pattern alone lets a long kind's ref past it.
+const T_REF = new RegExp(`^(${T_TYPES.join('|')}):[a-z0-9][a-z0-9-]{0,110}$`), T_REF_MAX = 120;
+// What each kind is called where an item has no name of its own (the owner never reads a ref).
+const T_KIND = { goal: 'a goal', observation: 'an observation', question: 'a question', ticket: 'a ticket', planner: 'a planning session', decision: 'a decision', lesson: 'a lesson', problem: 'a problem', act: 'an action', preview: 'a preview', artifact: 'an artifact' };
+// Where each kind of item lives: an item drawn in two places (an observation also in the Sensors
+// feed, a question in a Decide row) is pinned in its home section.
+const T_HOME = { goal: 'goals', question: 'inbox', ticket: 'board', planner: 'board', observation: 'loop', problem: 'loop', lesson: 'loop', decision: 'loop', act: 'loop', preview: 'library', artifact: 'library' };
+// The sections' names, as the sidebar shows them.
+const T_SECTIONS = { overview: 'Overview', goals: 'Goals', inbox: 'Inbox', progress: 'Progress', board: 'Board', library: 'Library', loop: 'Loop', trust: 'Trust Ladder', retros: 'Retros', health: 'Health', monitoring: 'Sensors' };
+// T_ENCODED_MAX: a turn as the log line holds it, JSON-escaped (a quotation mark is two bytes there,
+// a control character six), so a line of 4,096 bytes always has room for it.
+const T_TURN_MAX = 2000, T_ENCODED_MAX = 3800, T_SUBJECT_MAX = 2500, T_TITLE_MAX = 120, T_WAIT_MS = 10 * 60000;
+const T_ENC = new TextEncoder();
+// Sizes are the log's, in bytes of UTF-8: a CJK character is three, an emoji four.
+const tBytes = (s) => T_ENC.encode(String(s ?? '')).length;
+const tCut = (s, n) => { let o = '', b = 0; for (const c of String(s ?? '')) { const k = T_ENC.encode(c).length; if (b + k > n) break; o += c; b += k; } return o; };
+// One line of plain text, at most n UTF-16 units (what the log's schema counts), never half a pair.
+const tLine = (s, n) => { const x = String(s ?? '').replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g, ' ').replace(/\s+/g, ' ').trim(); const c = x.slice(0, n); return /[\ud800-\udbff]$/.test(c) ? c.slice(0, -1) : c; };
+// What a point is on: the nearest item the dashboard drew (data-subject, a ref the log takes), else
+// a spot in its section, as fractions of the section's box. sec(el) gives the section: { el, view,
+// box, heading }. An item's quote is its name and its heading, not every word in it (the buttons'
+// labels are no part of what the owner pointed at); its whole text only when it has neither.
+function tSubjectAt(el, x, y, sec) {
+  const item = el?.closest?.('[data-subject]');
+  const ref = item?.dataset?.subject ?? '';
+  if (item && T_REF.test(ref) && tBytes(ref) <= T_REF_MAX) {
+    const title = tLine(item.dataset.title, T_TITLE_MAX);
+    const head = tLine(item.querySelector?.('h4, .t, b')?.textContent, 300);
+    const said = [title, head && head !== title ? head : ''].filter(Boolean).join(' · ') || tLine(item.innerText ?? item.textContent, 2000);
+    return { subject: { kind: 'item', ref, quote: tCut(said, 300) }, title: title || T_KIND[ref.split(':')[0]], el: item };
+  }
+  const s = sec(el);
+  if (!s) return null;
+  const f = (n, a, w) => (w ? Math.min(1, Math.max(0, Math.round(((n - a) / w) * 1000) / 1000)) : 0);
+  return { subject: { kind: 'page', view: s.view, at: { x: f(x, s.box.left, s.box.width), y: f(y, s.box.top, s.box.height) }, quote: tCut(tLine(s.heading, 300), 300) }, title: tLine(`the dashboard · ${s.heading || s.view}`, T_TITLE_MAX), el: s.el };
+}
+// A subject cut to the log's cap before it is sent: an element's HTML first, then console errors,
+// then the quote (the dashboard's own subjects are small; a later kit's lenses capture more).
+function tFit(s) {
+  const x = JSON.parse(JSON.stringify(s));
+  const size = () => tBytes(JSON.stringify(x));
+  for (let i = 0; i < 50 && size() > T_SUBJECT_MAX; i++) {
+    const over = size() - T_SUBJECT_MAX;
+    if (x.anchor?.html) x.anchor.html = tCut(x.anchor.html, Math.max(0, tBytes(x.anchor.html) - over));
+    else if (x.errors?.length) x.errors.pop();
+    else if (x.quote) x.quote = tCut(x.quote, Math.max(0, tBytes(x.quote) - over));
+    else if (x.route) x.route = tCut(x.route, Math.max(0, tBytes(x.route) - over));
+    else break;
+  }
+  return x;
+}
+// The line under the turns: nothing once the supervisor has the last word (its reply is the state).
+// Else: "Sent." when the POST that sent it said a pane took it; "will read it when it next checks"
+// when none did, or nobody knows (a reload); after 10 minutes with the supervisor running (a pane, as
+// /api/threads says), that it hasn't replied.
+function tCardState(t, now, typed, pane) {
+  const last = t.turns[t.turns.length - 1];
+  if (!last || last.by !== 'owner') return null;
+  if (now - Date.parse(last.at) > T_WAIT_MS) return pane ? "The supervisor hasn't replied yet." : 'Sent; the supervisor will read it when it next checks.';
+  return typed === true ? 'Sent.' : 'Sent; the supervisor will read it when it next checks.';
+}
+// Where a card opens: beside its pin (r, the pin's or subject's box), on whichever side keeps it on
+// screen, its top kept inside the window; a bottom sheet under 640 px.
+function tPlace(r, w, h, vw, vh) {
+  if (vw < 640) return { sheet: true };
+  const gap = 10;
+  const left = r.right + gap + w <= vw - 8 ? r.right + gap : Math.max(8, r.left - gap - w);
+  const top = Math.min(Math.max(8, r.top), Math.max(8, vh - h - 8));
+  return { sheet: false, left: Math.round(left), top: Math.round(top) };
+}
+const T_WHERE = { goal: 'Goals', question: 'Inbox', ticket: 'Board', planner: 'Board', observation: 'Loop, Observe', problem: 'Loop, Orient', lesson: 'Loop, Orient', decision: 'Loop, Decide', act: 'Loop, Act', preview: 'Library', artifact: 'Library' };
+// Where a thread's subject is, in the dock's words.
+function tWhere(s) {
+  if (!s) return 'no subject';
+  // own keys only: a subject's ref or view is page-written, and "constructor" is on every object
+  if (s.kind === 'item') { const k = String(s.ref).split(':')[0]; return Object.hasOwn(T_WHERE, k) ? T_WHERE[k] : 'the dashboard'; }
+  if (s.kind === 'page') { const [sec, tab] = String(s.view).slice(1).split('/'); return Object.hasOwn(T_SECTIONS, sec) ? `${T_SECTIONS[sec]}${tab ? `, ${tab.charAt(0).toUpperCase()}${tab.slice(1)}` : ''}` : 'the dashboard'; }
+  if (s.kind === 'artifact') return s.slug;
+  if (s.kind === 'preview') return `${s.name}${s.route ? ` ${s.route}` : ''}`;
+  return 'no subject';
+}
+const tKey = (s) => (!s ? null : s.kind === 'item' ? `item:${s.ref}` : s.kind === 'page' ? `page:${s.view}:${s.at?.x}:${s.at?.y}` : null);
+// One pin per subject, for open threads: numbered as the dock numbers them (by when each began), with
+// every thread on it, oldest first.
+function tPins(threads) {
+  const open = threads.filter((t) => t.status === 'open').sort((a, b) => a.created_at.localeCompare(b.created_at));
+  const by = new Map();
+  open.forEach((t, i) => { const k = tKey(t.subject); if (!k) return; const g = by.get(k) ?? { key: k, subject: t.subject, n: i + 1, ids: [] }; g.ids.push(t.id); by.set(k, g); });
+  return [...by.values()];
+}
+// A dot in the dock: the supervisor spoke after the owner last looked at the thread (this browser).
+const tUnread = (t, seenAt) => t.turns.some((u) => u.by === 'supervisor' && (!seenAt || u.at > seenAt));
+/* threads-core end */
+
+/* threads-layer start */
+// The thread layer: hold Shift and point at anything on the dashboard to talk to the supervisor
+// about it. It lives in #tl, outside <main>, which the 10 s refresh rebuilds, so a card, its draft and
+// the dock keep their state. Its window listeners in the capture phase are registered here, before
+// the page's own (PRESSED below), so a click it takes reaches nothing else.
+const TL = { threads: [], pane: false, open: null, draft: null, hit: null, pin: false, via: null, swallowUntil: 0, typed: {}, sig: '', polling: null, seq: 0, have: 0, openAt: -1, polled: false, busy: false, resolving: false, readyKey: '', acts: '', pill: '', list: '', pressed: null };
+const tlEl = (id) => document.getElementById(id);
+const tlOwn = (el) => !!el?.closest?.('#tl');
+const tlShowing = () => !tlEl('tl-cursor').hidden;
+// The section a point is in: its hash route (the Loop's with its tab), its box and its heading.
+function tlSection(el) {
+  const sec = el?.closest?.('main > section[id]');
+  if (!sec) return null;
+  const h = sec.querySelector('h2');
+  return { el: sec, view: `#${sec.id}${sec.id === 'loop' ? `/${TAB}` : ''}`, box: sec.getBoundingClientRect(), heading: (h?.firstChild?.textContent || h?.textContent || T_SECTIONS[sec.id] || '').trim() };
+}
+function tlHitAt(x, y) {
+  const el = document.elementsFromPoint(x, y).find((e) => !tlOwn(e));
+  return el ? tSubjectAt(el, x, y, tlSection) : null;
+}
+// The pin cursor at the point, what is under it outlined, and a chip with its name.
+function tlShow(x, y) {
+  const hit = tlHitAt(x, y);
+  TL.hit = hit ? { ...hit, x, y } : null;
+  document.documentElement.classList.add('tl-aiming');
+  const cur = tlEl('tl-cursor'), hl = tlEl('tl-hl'), chip = tlEl('tl-chip');
+  cur.hidden = false;
+  cur.style.transform = `translate(${Math.round(x - 14)}px, ${Math.round(y - 35)}px)`;
+  if (!hit) { hl.hidden = true; chip.hidden = true; return; }
+  const r = hit.subject.kind === 'item' ? hit.el.getBoundingClientRect() : { left: x - 12, top: y - 12, width: 24, height: 24 };
+  Object.assign(hl.style, { left: `${r.left - 3}px`, top: `${r.top - 3}px`, width: `${r.width + 6}px`, height: `${r.height + 6}px` });
+  hl.classList.toggle('spot', hit.subject.kind !== 'item');
+  hl.hidden = false;
+  chip.textContent = hit.title;
+  Object.assign(chip.style, { left: `${Math.round(Math.max(8, Math.min(x + 18, innerWidth - 270)))}px`, top: `${Math.round(Math.max(8, y - 36))}px` });
+  chip.hidden = false;
+}
+function tlHide() {
+  TL.hit = null;
+  document.documentElement.classList.remove('tl-aiming');
+  for (const id of ['tl-cursor', 'tl-hl', 'tl-chip']) tlEl(id).hidden = true;
+}
+// Pin mode: pointing without Shift, for a finger or a long look around, until Esc or the dock's Pin
+// button again.
+function tlPinMode(on) {
+  TL.pin = on;
+  tlEl('tl-pinbtn')?.setAttribute('aria-pressed', String(on));
+  document.documentElement.classList.toggle('tl-pinning', on);
+  if (!on) tlHide();
+}
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && (tlShowing() || TL.pin)) { e.stopImmediatePropagation(); tlHide(); if (TL.pin) tlPinMode(false); }
+  else if (e.key === 'Escape' && tlOwn(document.activeElement) && !tlEl('tl-card').hidden) { e.stopImmediatePropagation(); tlClose(); }
+}, true);
+window.addEventListener('keyup', (e) => { if (e.key === 'Shift' && !TL.pin) tlHide(); }, true);
+window.addEventListener('blur', () => { if (!TL.pin) tlHide(); });
+// Shift shows the pin only once the pointer moves, and never over a field being typed in, so a
+// capital typed in a field doesn't summon it.
+window.addEventListener('pointermove', (e) => {
+  if (!(e.shiftKey || TL.pin) || (e.pointerType === 'touch' && !TL.pin)) { if (tlShowing() && !TL.pin) tlHide(); return; }
+  const over = document.elementFromPoint(e.clientX, e.clientY);
+  if (tlOwn(over) || typingIn(over)) { tlHide(); return; }
+  tlShow(e.clientX, e.clientY);
+}, true);
+// A click while the pin shows starts a thread and is the layer's alone: neither the browser's own
+// Shift+click (a new window, a longer selection) nor the page's handlers (the press that holds a
+// redraw among them) see it. A mouse starts on its click; a finger or a pen on lifting, and the
+// click the browser makes of that lift is swallowed.
+for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click', 'auxclick', 'dblclick', 'contextmenu']) window.addEventListener(type, (e) => {
+  if (tlOwn(e.target)) return;
+  if (type === 'pointerdown') { TL.via = e.pointerType; if (TL.pin && e.pointerType !== 'mouse') tlShow(e.clientX, e.clientY); }
+  const swallow = Date.now() < TL.swallowUntil && type !== 'pointerdown' && type !== 'pointerup';
+  if (!tlShowing() && !swallow) return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  if (!tlShowing()) return;
+  const lift = type === 'pointerup' && e.pointerType !== 'mouse';
+  if (!lift && !(type === 'click' && TL.via === 'mouse')) return;
+  const at = tlHitAt(e.clientX, e.clientY);
+  const hit = TL.hit ?? (at && { ...at, x: e.clientX, y: e.clientY });
+  if (lift) TL.swallowUntil = Date.now() + 700;
+  tlHide();
+  if (hit) tlStart(hit);
+}, true);
+// A card for a thread about to start: its subject fitted to the log's cap; nothing is written until
+// the owner sends the first words.
+function tlStart(hit) {
+  TL.open = null;
+  TL.resolving = false;
+  TL.draft = { subject: tFit(hit.subject), title: hit.title, el: hit.subject.kind === 'item' ? hit.el : null, px: hit.x + scrollX, py: hit.y + scrollY };
+  tlDraftPrune();
+  tlDraw();
+  tlEl('tl-c-text')?.focus();
+}
+// The one element a subject's pin and card follow: the one in its home section (an observation is
+// also in the Sensors feed, a question in a Decide row), else wherever it is drawn.
+function tlHome(s) {
+  if (s?.kind !== 'item') return null;
+  const sel = `[data-subject="${CSS.escape(s.ref)}"]`;
+  const k = s.ref.split(':')[0];
+  return document.querySelector(`main #${Object.hasOwn(T_HOME, k) ? T_HOME[k] : 'overview'} ${sel}`) ?? document.querySelector(`main ${sel}`);
+}
+const tlVisible = (el) => !!el && el.getClientRects().length > 0;
+function tlTargetRect(s) {
+  if (s?.kind === 'item') { const el = tlHome(s); return tlVisible(el) ? el.getBoundingClientRect() : null; }
+  if (s?.kind === 'page') {
+    const sec = document.getElementById(String(s.view).slice(1).split('/')[0]);
+    if (!tlVisible(sec)) return null;
+    const b = sec.getBoundingClientRect();
+    const x = b.left + (s.at?.x ?? 0) * b.width, y = b.top + (s.at?.y ?? 0) * b.height;
+    return { left: x - 12, right: x + 12, top: y - 12, bottom: y + 12, width: 24, height: 24 };
+  }
+  return null;
+}
+// Bring a subject into view: the Loop's tab it is on, the <details> it is in, then scroll to it.
+function tlGoTo(s) {
+  if (s?.kind === 'item') {
+    const el = tlHome(s);
+    if (!el) return;
+    const panel = el.closest('.loop-panel');
+    if (panel?.hidden) showTab(panel.dataset.panel);
+    const det = el.closest('details');
+    if (det && !det.open) det.open = true;
+    el.scrollIntoView({ block: 'center' });
+  } else if (s?.kind === 'page') document.getElementById(String(s.view).slice(1).split('/')[0])?.scrollIntoView();
+}
+const tlCardFrame = () => `<div class="tl-head"><span class="tl-title" id="tl-c-title"></span><span class="grow"></span><span id="tl-c-acts"></span><button type="button" class="ghost" data-tl-close aria-label="Close">×</button></div>
+  <div id="tl-c-ready"></div><div id="tl-c-ctx"></div><div class="tl-turns" id="tl-c-turns"></div><div class="small muted" id="tl-c-state"></div>
+  <div class="tl-compose"><textarea id="tl-c-text" rows="2" placeholder="Write to the supervisor. Enter sends; Shift+Enter is a new line."></textarea><div class="row-inline"><span class="small dim" id="tl-c-bytes"></span><span class="grow"></span><span class="err" id="e-tl"></span><button type="button" data-tl-send>Send</button></div></div>`;
+// The subject as one tight line (an icon, its name, where it is), opening to what was captured.
+// Every value escaped: a subject's text is data, the log's (or, in a later kit's viewers, the page's).
+function tlCtx(s, title, note) {
+  const icon = !s ? 'message-circle' : s.kind === 'item' ? 'mouse-pointer-click' : 'map-pin';
+  const rows = s ? Object.entries(s).filter(([k]) => k !== 'kind').map(([k, v]) => `<span>${esc(words(k))}</span><code>${esc(typeof v === 'string' ? v : JSON.stringify(v))}</code>`).join('') : '';
+  return `<details class="tl-ctx"><summary><i class="icon-${icon}" aria-hidden="true"></i><b>${esc(title)}</b><span class="muted small">${esc(tWhere(s))}${note ? ` · ${esc(note)}` : ''}</span></summary>${rows ? `<div class="kv">${rows}</div>` : '<p class="small muted">Started from the dock, about nothing on the page.</p>'}</details>`;
+}
+// What a supervisor turn did, as links: "Goal Launch checkout", "Ticket …", "Act open it".
+function tlRef(r) {
+  const i = r.indexOf(':');
+  const k = r.slice(0, i), id = r.slice(i + 1);
+  const links = { goal: () => glink(id), ticket: () => tlink(id), question: () => qlink(id), decision: () => dlink(id), act: () => `<a class="linkish" href="#act/${encodeURIComponent(id)}">open it</a>`, problem: () => `<a class="linkish" href="#problem/${encodeURIComponent(id)}">open it</a>`, lesson: () => `<a class="linkish" href="#lesson/${encodeURIComponent(id)}">open it</a>`, artifact: () => `<a class="linkish" href="#artifact/main/${encodeURIComponent(id)}">${esc(id)}</a>` };
+  // a ref's kind is the log's: own keys only, so "constructor:x" is just shown, not called
+  const a = Object.hasOwn(links, k) ? links[k] : null;
+  return `<span class="tl-ref"><span class="muted">${esc(words(k))}</span> ${a ? a() : `<code>${esc(id)}</code>`}</span>`;
+}
+// A question asked in the thread: the Inbox's own card while it is open there (from /api/data),
+// answered from either place once; once it isn't open, its answer. A review or a secret is answered
+// in the Inbox, where its page or its form is: two forms that post values is one too many.
+function tlQuestion(q, reasonText) {
+  if (ANSWERED.has(q.id)) return `<div class="card small tl-q done"><div class="answered-note"><i class="icon-circle-check" aria-hidden="true"></i> Answered: <b>${esc(ANSWERED.get(q.id))}</b></div></div>`;
+  const open = (DATA?.questions || []).find((x) => x.id === q.id);
+  if (q.status === 'open' && open && open.kind !== 'review' && !(open.secrets || []).length) return questionCard(open, DATA.ooda, reasonText, true);
+  if (q.status === 'open') return `<div class="card small tl-q"><b>${esc(q.question)}</b><div class="meta"><a class="linkish" href="#q/${encodeURIComponent(q.id)}">Answer it in the Inbox</a></div></div>`;
+  return `<div class="card small tl-q"><div>${esc(q.question)}</div>${q.answer ? `<div><b>${esc(q.answer)}</b></div>` : ''}<div class="meta">${esc(q.status === 'answered' ? `answered ${CHANNEL_WORDS[q.channel] || ''}` : q.status)}</div></div>`;
+}
+// A turn's words, or the question it asks.
+function tlTurnBody(u, t) {
+  const q = u.question ? t.questions.find((x) => x.id === u.question) : null;
+  return q ? tlQuestion(q, Object.fromEntries((DATA?.ooda?.reasons || []).map((r) => [r.id, r.means]))) : `<div class="tl-text">${linkify(u.text)}</div>`;
+}
+function tlTurns(t) {
+  return t.turns.map((u) => `<div class="tl-turn ${u.by}"><div class="meta">${u.by === 'owner' ? 'You' : 'The supervisor'} · ${esc(when(u.at))}</div>${tlTurnBody(u, t)}${u.refs.length ? `<div class="tl-refs">${u.refs.map(tlRef).join('')}</div>` : ''}</div>`).join('');
+}
+// The card's body, redrawn only when what it shows changed and never under the owner's hands (a
+// focused control in its turns, a question card mid-answer), so a pick or a note survives a poll.
+function tlCardBody(t) {
+  const s = t ? t.subject : TL.draft.subject;
+  const title = t ? t.title : TL.draft.title || 'A new thread';
+  tlEl('tl-c-title').textContent = title;
+  // Resolve or Reopen, drawn only when it changes: a press held across a poll still lands its click
+  const acts = t ? (t.status === 'resolved' ? '<button type="button" class="ghost" data-tl-reopen>Reopen</button>' : '<button type="button" class="ghost" data-tl-resolve>Resolve</button>') : '';
+  if (acts !== TL.acts) { TL.acts = acts; tlEl('tl-c-acts').innerHTML = acts; }
+  // the banner or the resolve form, redrawn only when it changes, so a half-typed outcome stays
+  const rk = !t ? '' : TL.resolving ? `form:${t.id}:${t.questions.filter((q) => q.status === 'open').length}` : t.ready ? `ready:${t.id}:${t.ready.at}:${t.questions.filter((q) => q.status === 'open').length}` : '';
+  if (rk !== TL.readyKey) { TL.readyKey = rk; tlEl('tl-c-ready').innerHTML = !rk ? '' : TL.resolving ? tlResolveForm(t) : tlReady(t); }
+  // seen only when the owner can see it: a reply landing in a hidden tab still gets its dot
+  if (t && document.visibilityState === 'visible') tlSeen(t);
+  const turns = tlEl('tl-c-turns');
+  const sig = JSON.stringify([t, s, title, (t?.questions || []).map((q) => [q.id, (DATA?.questions || []).some((x) => x.id === q.id), ANSWERED.has(q.id)])]);
+  if (sig !== TL.sig && !turns.contains(document.activeElement)) {
+    TL.sig = sig;
+    const now = t ? tlHome(s) : null;
+    // the names as the dock shows them, so a title the log cut at 120 isn't "changed"
+    const note = !t ? '' : s?.kind === 'item' && !now ? 'not on the page now' : now && tLine(now.dataset.title, T_TITLE_MAX) !== tLine(t.title, T_TITLE_MAX) ? 'changed since' : '';
+    const was = tlEl('tl-c-ctx').querySelector('details')?.open;
+    tlEl('tl-c-ctx').innerHTML = tlCtx(s, title, note);
+    if (was) tlEl('tl-c-ctx').querySelector('details').open = true;
+    turns.innerHTML = t ? tlTurns(t) : '<p class="small muted">Say what you want done about it. Nothing is sent until you do.</p>';
+    turns.scrollTop = turns.scrollHeight;
+  }
+  tlEl('tl-c-state').textContent = !t ? '' : t.status === 'resolved' ? `Resolved${t.outcome ? `: ${t.outcome}` : ''}. Writing reopens it.` : tCardState(t, Date.now(), TL.typed[t.id], TL.pane) ?? '';
+}
+// Beside its pin, in page coordinates so it scrolls with the page; in the dock when its subject isn't
+// on the page (or it has none); a bottom sheet on a narrow screen.
+function tlPlaceCard(t) {
+  const card = tlEl('tl-card');
+  // Not under a press: a card that grows near the bottom moves up, and the release would land elsewhere. The next draw places it.
+  if (TL.pressed && card.contains(TL.pressed)) return;
+  let r = null;
+  if (t) r = tlTargetRect(t.subject);
+  else if (TL.draft.el?.isConnected) r = TL.draft.el.getBoundingClientRect();
+  else if (TL.draft.subject) { const x = TL.draft.px - scrollX, y = TL.draft.py - scrollY; r = { left: x - 12, right: x + 12, top: y - 12, bottom: y + 12 }; }
+  const p = r ? tPlace(r, card.offsetWidth || 360, card.offsetHeight || 420, innerWidth, innerHeight) : { sheet: innerWidth < 640, dock: true };
+  card.classList.toggle('sheet', !!p.sheet);
+  card.classList.toggle('in-dock', !p.sheet && !!p.dock);
+  card.style.left = p.sheet || p.dock ? '' : `${p.left + scrollX}px`;
+  card.style.top = p.sheet || p.dock ? '' : `${p.top + scrollY}px`;
+}
+// The draft is kept in this browser, as review drafts are, so a reload or another card keeps it: per
+// thread, and for a thread not yet started per subject, let go after 7 days.
+const tlDraftKey = (key) => `devteam.thread.draft.${key}`;
+// Each draft with when it was last written; one for a thread never started is let go after 7 days.
+const tlDraftGet = (key) => { const d = lsGet(tlDraftKey(key)); return typeof d === 'string' ? d : typeof d?.text === 'string' ? d.text : ''; };
+const tlDraftSet = (key, text) => (text ? lsSet(tlDraftKey(key), { text, at: Date.now() }) : lsDel(tlDraftKey(key)));
+function tlDraftPrune() {
+  try {
+    const pre = tlDraftKey('new:');
+    for (const k of Object.keys(localStorage)) if (k.startsWith(pre) && !(Date.now() - (lsGet(k)?.at ?? 0) < 7 * 86400000)) lsDel(k);
+  } catch {}
+}
+function tlBytes() { const n = tBytes(tlEl('tl-c-text').value.trim()); const el = tlEl('tl-c-bytes'); el.textContent = n > T_TURN_MAX * 0.8 ? `${n} / ${T_TURN_MAX} bytes` : ''; el.classList.toggle('err', n > T_TURN_MAX); }
+function tlCard() {
+  const card = tlEl('tl-card');
+  const t = TL.open ? TL.threads.find((x) => x.id === TL.open) : null;
+  // a thread just started isn't in threads read before it was written: keep the card as it is until
+  // a read begun after the send says it isn't there
+  if (TL.open && !t) { if (TL.have <= TL.openAt) return; TL.open = null; }
+  if (!t) { clearInterval(TL.polling); TL.polling = null; }
+  if (!t && !TL.draft) { card.hidden = true; card.dataset.key = ''; return; }
+  // an unsent draft is kept per subject, so words left on one goal don't appear on another
+  const key = t ? t.id : `new:${tKey(TL.draft.subject) ?? 'none'}`;
+  if (card.dataset.key !== key) {
+    // the first words make the draft a thread, and the card its own: the composer keeps the focus
+    const writing = document.activeElement?.id === 'tl-c-text';
+    card.dataset.key = key;
+    card.innerHTML = tlCardFrame();
+    tlEl('tl-c-text').value = tlDraftGet(key);
+    tlBytes();
+    TL.sig = '';
+    TL.readyKey = '';
+    TL.acts = '';
+    if (writing) tlEl('tl-c-text').focus();
+  }
+  card.hidden = false;
+  tlCardBody(t);
+  tlPlaceCard(t);
+  // one card poll at a time: reads slower than 2 s don't pile up
+  if (t && !TL.polling) TL.polling = setInterval(() => { if (document.visibilityState !== 'visible' || !TL.open || TL.polled) return; TL.polled = true; tlRefresh().finally(() => { TL.polled = false; }); }, 2000);
+}
+function tlDraw() { tlCard(); tlDock(); tlPins(); }
+// A read lands only if none begun after it has landed already: a poll begun before a send can
+// answer after the send's own read, and would put back the threads as they were. Any newer answer
+// lands, so reads slower than the polls still bring the threads in.
+async function tlRefresh() {
+  const n = ++TL.seq;
+  try {
+    // a request that hangs gives up, so the card's poll (one at a time) isn't stopped for good
+    const r = await fetch('/api/threads', { signal: AbortSignal.timeout(10000) });
+    if (!r.ok) return;
+    const j = await r.json();
+    if (n <= TL.have) return;
+    TL.threads = j.threads || [];
+    TL.pane = !!j.supervisor?.pane;
+    TL.have = n;
+  } catch { return; }
+  tlDraw();
+}
+// Closed: and a #talk/ link that opened it is let go (back to its subject's section, when it has one),
+// so the same link opens it again.
+function tlClose() {
+  const s = TL.open ? TL.threads.find((x) => x.id === TL.open)?.subject : null;
+  TL.open = null;
+  TL.draft = null;
+  TL.resolving = false;
+  if (location.hash.startsWith('#talk/')) {
+    const k = s?.kind === 'item' ? String(s.ref).split(':')[0] : null;
+    const sec = k ? (Object.hasOwn(T_HOME, k) ? T_HOME[k] : null) : s?.kind === 'page' ? String(s.view).slice(1).split('/')[0] : null;
+    history.replaceState(null, '', `${location.pathname}${location.search}${sec && Object.hasOwn(T_SECTIONS, sec) ? `#${sec}` : ''}`);
+  }
+  tlDraw();
+}
+async function tlOpen(id, go = true) {
+  if (!TL.threads.some((x) => x.id === id)) await tlRefresh();
+  const t = TL.threads.find((x) => x.id === id);
+  if (!t) return;
+  TL.draft = null;
+  TL.open = id;
+  TL.openAt = -1;
+  TL.resolving = false;
+  if (go) tlGoTo(t.subject);
+  tlDraw();
+}
+// Send: the first words start the thread (its title what the layer showed, or the words themselves
+// from the dock), a word on a resolved thread reopens it, anything else is a turn.
+async function tlSend() {
+  const ta = tlEl('tl-c-text');
+  const text = ta.value.trim();
+  const err = tlEl('e-tl');
+  if (!text || TL.busy) return;
+  if (tBytes(text) > T_TURN_MAX) { err.textContent = `At most ${T_TURN_MAX} bytes; this is ${tBytes(text)}. Characters outside plain English take two to four each.`; return; }
+  if (tBytes(JSON.stringify(text)) - 2 > T_ENCODED_MAX) { err.textContent = 'This has too many quotation marks, backslashes or control characters to keep; shorten it.'; return; }
+  const key = tlEl('tl-card').dataset.key;
+  const t = TL.open ? TL.threads.find((x) => x.id === TL.open) : null;
+  const [action, body] = !t ? ['thread-new', { title: TL.draft.title || tLine(text, T_TITLE_MAX), subject: TL.draft.subject || undefined, text }] : t.status === 'resolved' ? ['thread-reopen', { id: t.id, text }] : ['thread-say', { id: t.id, text }];
+  TL.busy = true;
+  err.textContent = '';
+  try {
+    const r = await sending(() => fetch(`/api/${action}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }));
+    const out = await r.json();
+    if (!r.ok) { err.textContent = out.error || 'failed'; return; }
+    // the first line of a thread command's output is the id; the second says whether a pane took it
+    const id = action === 'thread-new' ? String(out.out || '').split('\n')[0].trim() : t.id;
+    TL.typed[id] = /supervisor's pane/.test(out.out || '');
+    lsDel(tlDraftKey(key));
+    ta.value = '';
+    tlBytes();
+    if (action === 'thread-new') { TL.draft = null; TL.open = id; TL.openAt = TL.seq; }
+    await tlRefresh();
+  } catch (e2) { err.textContent = `Could not send: ${e2.message}`; } finally { TL.busy = false; }
+}
+document.addEventListener('input', (e) => { if (e.target.id !== 'tl-c-text') return; tlDraftSet(tlEl('tl-card').dataset.key, e.target.value); tlBytes(); });
+document.addEventListener('keydown', (e) => { if (e.target.id === 'tl-c-text' && e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); tlSend(); } });
+document.addEventListener('click', (e) => {
+  const t = TL.open ? TL.threads.find((x) => x.id === TL.open) : null;
+  if (e.target.closest('[data-tl-resolve]')) { TL.resolving = true; return void tlDraw(); }
+  if (e.target.closest('[data-tl-resolve-cancel]')) { TL.resolving = false; return void tlDraw(); }
+  if (t && e.target.closest('[data-tl-resolve-go]')) return void tlAct('thread-resolve', { id: t.id, outcome: tlEl('tl-outcome')?.value.trim() || undefined });
+  if (t && e.target.closest('[data-tl-accept]')) return void tlAct('thread-accept', { id: t.id, at: t.ready?.at });
+  if (t && e.target.closest('[data-tl-notyet]')) return void tlAct('thread-say', { id: t.id, text: 'Not yet' });
+  if (t && e.target.closest('[data-tl-reopen]')) return void tlAct('thread-reopen', { id: t.id });
+  const pin = e.target.closest('[data-tl-pin]');
+  if (pin) return void tlOpen(pin.dataset.tlPin, false);
+  const row = e.target.closest('[data-tl-open]');
+  if (row) { tlEl('tl-panel').hidden = true; tlEl('tl-pill').setAttribute('aria-expanded', 'false'); return void tlOpen(row.dataset.tlOpen); }
+  if (e.target.closest('#tl-pill')) { const panel = tlEl('tl-panel'); panel.hidden = !panel.hidden; tlEl('tl-pill').setAttribute('aria-expanded', String(!panel.hidden)); return void tlDock(); }
+  if (e.target.closest('[data-tl-new]')) { tlEl('tl-panel').hidden = true; TL.open = null; TL.draft = { subject: null, title: '', el: null }; tlDraw(); return void tlEl('tl-c-text')?.focus(); }
+  if (e.target.closest('#tl-pinbtn')) return void tlPinMode(!TL.pin);
+  if (e.target.closest('[data-tl-close]')) return void tlClose();
+  if (e.target.closest('[data-tl-send]')) return void tlSend();
+});
+addEventListener('resize', () => tlDraw());
+// A dot for a reply not seen, named for a screen reader.
+const TL_DOT = '<span class="tl-dot" role="img" aria-label="a reply you haven&#39;t seen"></span>';
+// The dock's list is rewritten, and a pin taken away, only when nothing in it is focused or pressed:
+// a rewrite would drop the focus, or the click a press is half of.
+const tlHeld = (el) => el.contains(document.activeElement) || (!!TL.pressed && el.contains(TL.pressed));
+window.addEventListener('pointerdown', (e) => { TL.pressed = tlOwn(e.target) ? e.target : null; }, true);
+// after the click this release makes; then what the press held back is drawn
+for (const up of ['pointerup', 'pointercancel']) window.addEventListener(up, () => setTimeout(() => { if (!TL.pressed) return; TL.pressed = null; tlDock(); tlPins(); }, 0), true);
+document.addEventListener('focusout', (e) => { if (tlOwn(e.target)) setTimeout(() => { tlDock(); tlPins(); }, 0); }, true);
+// When the owner last looked at each thread, in this browser only: the dock's dot is a reply since.
+const TL_SEEN = 'devteam.thread.seen';
+const tlSeenAt = (id) => (lsGet(TL_SEEN) || {})[id] || null;
+function tlSeen(t) { const m = lsGet(TL_SEEN) || {}; const last = t.turns[t.turns.length - 1]?.at; if (last && m[t.id] !== last) { m[t.id] = last; lsSet(TL_SEEN, m); } }
+// The pins: one numbered disc per subject on the page, at an item's top right corner or at the spot
+// on its section, for open threads only, in page coordinates. Placed again after every redraw, when
+// the threads change and on a resize; a subject that isn't drawn gets none (the dock still lists it).
+function tlPins() {
+  const box = tlEl('tl-pins');
+  const pins = tPins(TL.threads).map((g) => {
+    const r = tlTargetRect(g.subject);
+    if (!r) return null;
+    const x = (g.subject.kind === 'item' ? r.right - 10 : r.left + 1) + scrollX, y = (g.subject.kind === 'item' ? r.top - 10 : r.top + 1) + scrollY;
+    return { id: g.ids[g.ids.length - 1], cls: `tl-pin${g.ids.includes(TL.open) ? ' on' : ''}`, left: `${Math.round(x)}px`, top: `${Math.round(y)}px`, label: `Thread ${g.n}${g.ids.length > 1 ? `, and ${g.ids.length - 1} more on this` : ''}`, html: `${g.n}${g.ids.length > 1 ? `<sup>${g.ids.length}</sup>` : ''}` };
+  }).filter(Boolean);
+  // each pin kept by its thread and changed in place, never taken out and put back, so a press or the
+  // focus on one survives; one gone stays while it is pressed or focused (the next draw takes it)
+  const have = new Map([...box.children].map((b) => [b.dataset.tlPin, b]));
+  for (const [id, b] of have) if (!pins.some((x) => x.id === id) && !tlHeld(b)) b.remove();
+  for (const x of pins) {
+    let b = have.get(x.id);
+    if (!b) { b = document.createElement('button'); b.type = 'button'; b.dataset.tlPin = x.id; box.append(b); }
+    if (b.className !== x.cls) b.className = x.cls;
+    if (b.style.left !== x.left) b.style.left = x.left;
+    if (b.style.top !== x.top) b.style.top = x.top;
+    if (b.getAttribute('aria-label') !== x.label) b.setAttribute('aria-label', x.label);
+    if (b.innerHTML !== x.html) b.innerHTML = x.html;
+  }
+}
+// The dock: a pill with the open threads' count and a dot for a reply not seen; opened, every open
+// thread, newest activity first, numbered as its pin, with where its subject is; then the last 50
+// resolved, each reopenable from its card.
+function tlDock() {
+  const open = TL.threads.filter((t) => t.status === 'open');
+  const nums = new Map([...open].sort((a, b) => a.created_at.localeCompare(b.created_at)).map((t, i) => [t.id, i + 1]));
+  const unread = open.some((t) => tUnread(t, tlSeenAt(t.id)));
+  // set only when it changed: a pill rewritten on every poll would drop a press on it
+  const pill = `<i class="icon-messages-square" aria-hidden="true"></i> Threads${open.length ? ` · ${open.length}` : ''}${unread ? ` ${TL_DOT}` : ''}`;
+  if (pill !== TL.pill) { TL.pill = pill; tlEl('tl-pill').innerHTML = pill; }
+  if (tlEl('tl-panel').hidden) return;
+  const gone = (t) => t.subject?.kind === 'item' && !tlHome(t.subject);
+  const row = (t) => `<button type="button" class="tl-row" data-tl-open="${esc(t.id)}">${t.status === 'open' ? `<span class="tl-n">${nums.get(t.id)}</span>` : ''}<span class="tl-r"><b>${esc(t.title)}</b><span class="small muted">${esc(tWhere(t.subject))}${gone(t) ? ' · subject gone' : ''}</span></span>${t.status === 'open' && tUnread(t, tlSeenAt(t.id)) ? TL_DOT : ''}${t.ready ? '<span class="badge good">ready</span>' : ''}</button>`;
+  const resolved = TL.threads.filter((t) => t.status === 'resolved').sort((a, b) => (b.resolved_at || '').localeCompare(a.resolved_at || '')).slice(0, 50);
+  const list = (open.length ? [...open].sort((a, b) => b.activity_at.localeCompare(a.activity_at)).map(row).join('') : '<p class="empty">No open threads. Hold Shift and click anything on the page, or start one here.</p>')
+    + (resolved.length ? `<details class="tl-resolved"${tlEl('tl-list').querySelector('.tl-resolved')?.open ? ' open' : ''}><summary>Resolved (${resolved.length})</summary>${resolved.map(row).join('')}</details>` : '');
+  // only when it changed, and not under a press or the focus on a row (the next draw does it)
+  if (list !== TL.list && !tlHeld(tlEl('tl-list'))) { TL.list = list; tlEl('tl-list').innerHTML = list; }
+}
+// a section opened or closed, or the Loop's tab changed, moves what the pins sit on
+document.addEventListener('toggle', () => tlPins(), true);
+$('loop-tabs').addEventListener('click', () => setTimeout(tlPins, 0));
+// Before resolving, by either button: a question asked in the thread and still open stays in the Inbox (§10).
+const tlOpenWarn = (t) => { const n = t.questions.filter((q) => q.status === 'open').length; return n ? `<div class="small err">${n} question${n > 1 ? 's' : ''} asked here ${n > 1 ? 'are' : 'is'} still open; ${n > 1 ? 'they stay' : 'it stays'} in the Inbox.</div>` : ''; };
+// The supervisor's proposal: one click accepts it; Not yet is a turn, which clears it.
+const tlReady = (t) => `<div class="tl-ready">Ready to resolve: <b>${esc(t.ready.outcome)}</b>${tlOpenWarn(t)}<div class="row-inline"><button type="button" data-tl-accept>Resolve</button><button type="button" class="ghost" data-tl-notyet>Not yet</button></div></div>`;
+// Resolving: an optional line for how it ended.
+const tlResolveForm = (t) => `<div class="tl-ready"><input type="text" id="tl-outcome" maxlength="300" placeholder="How it ended, in a line (optional)">${tlOpenWarn(t)}<div class="row-inline"><button type="button" data-tl-resolve-go>Resolve</button><button type="button" class="ghost" data-tl-resolve-cancel>Cancel</button></div></div>`;
+// One request at a time, as a send is: a double click resolves (or says Not yet) once.
+async function tlAct(action, body) {
+  if (TL.busy) return false;
+  const err = tlEl('e-tl');
+  TL.busy = true;
+  try {
+    const r = await sending(() => fetch(`/api/${action}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }));
+    const out = await r.json();
+    if (!r.ok) { if (err) err.textContent = out.error || 'failed'; return false; }
+  } catch (e2) { if (err) err.textContent = `Could not send: ${e2.message}`; return false; } finally { TL.busy = false; }
+  if (err) err.textContent = '';
+  TL.resolving = false;
+  if (['thread-resolve', 'thread-accept'].includes(action)) TL.open = null;
+  await tlRefresh();
+  // the resolution's observation, and the Inbox
+  load({ force: true });
+  return true;
+}
+/* threads-layer end */
+
 // Not under someone mid-action: a redraw replaces the controls it draws, so typing, an IME
 // composition, an open select or file picker, a press not yet released (the click would land on
 // nothing) or an answer on its way would be lost. The data still comes in: the tab title and the
@@ -3387,9 +3993,10 @@ const typingIn = (el) => !!el && (el.tagName === 'TEXTAREA' || el.isContentEdita
 const PICK_HOLD = 60000, PRESS_HOLD = 3000;
 const HINT_AFTER = 30000;
 let HELD = null, HELD_SINCE = 0, COMPOSING = false, PRESSED = 0, PICKING = 0, SENDING = 0;
+// A field in the thread layer holds nothing: the layer is outside what a redraw rebuilds, so the page refreshes under a half-written turn.
 function holding() {
   const ae = document.activeElement;
-  return COMPOSING || SENDING > 0 || typingIn(ae) || Date.now() - PRESSED < PRESS_HOLD
+  return COMPOSING || SENDING > 0 || (typingIn(ae) && !ae.closest('#tl')) || Date.now() - PRESSED < PRESS_HOLD
     || (!!ae?.matches?.('select, input[type=file]') && Date.now() - PICKING < PICK_HOLD);
 }
 async function sending(f) { SENDING++; try { return await f(); } finally { SENDING--; } }
@@ -3424,6 +4031,9 @@ function drawOrHold(d, force = false) {
     render(d);
     if (first) route();
     inboxTitle(d);
+    // the thread layer, which the redraw doesn't touch: its pins on what was just drawn, then its threads again
+    tlPins();
+    tlRefresh();
   } catch (e) {
     $('err').textContent = 'could not draw (see the top of the page)';
     const b = $('banner');
@@ -3546,8 +4156,9 @@ document.addEventListener('click', async (ev) => {
   const pick = ev.target.closest('input[data-pick]');
   if (pick) {
     picks[pick.dataset.pick] = pick.value;
-    pick.closest('.choices').querySelectorAll('.choice').forEach((c) => c.classList.toggle('picked', c.contains(pick)));
-    if (pick.value === '__other') document.querySelector(`textarea[data-q="${pick.dataset.pick}"]`)?.focus();
+    // one pick per question, made in whichever copy: the Inbox's card and the thread's show it alike
+    for (const el of document.querySelectorAll(`input[data-pick="${CSS.escape(pick.dataset.pick)}"]`)) { el.checked = el.value === pick.value; el.closest('.choice')?.classList.toggle('picked', el.checked); }
+    if (pick.value === '__other') pick.closest('[data-qcard]')?.querySelector('textarea[data-q]')?.focus();
     return;
   }
   const ps = ev.target.closest('[data-post-secrets]');
@@ -3616,28 +4227,30 @@ document.addEventListener('click', async (ev) => {
   const cant = ev.target.closest('[data-cant], [data-reply], [data-dontuse]');
   if (cant) {
     const id = cant.dataset.cant ?? cant.dataset.reply ?? cant.dataset.dontuse;
-    const note = (document.querySelector(`textarea[data-q="${CSS.escape(id)}"]`)?.value ?? '').trim();
-    if (cant.dataset.reply !== undefined && !note) { const e = $(`e-${id}`); if (e) e.textContent = 'Write the note first.'; return; }
+    const { card, errId } = qcardOf(cant);
+    const note = (card?.querySelector('textarea[data-q]')?.value ?? '').trim();
+    if (cant.dataset.reply !== undefined && !note) { const e = $(`e-${errId}`); if (e) e.textContent = 'Write the note first.'; return; }
     const answer = cant.dataset.dontuse !== undefined ? "Don't use this sensor" : cant.dataset.reply !== undefined ? note : note ? `Can’t right now: ${note}` : 'Can’t right now';
     cant.disabled = true;
-    if (await post('answer', { id, answer }, id)) { [...SECRET_DRAFTS.keys()].filter((k) => k.startsWith(`${id}:`)).forEach((k) => SECRET_DRAFTS.delete(k)); delete drafts[id]; markAnswered(id, answer); }
+    if (await post('answer', { id, answer }, errId)) { [...SECRET_DRAFTS.keys()].filter((k) => k.startsWith(`${id}:`)).forEach((k) => SECRET_DRAFTS.delete(k)); delete drafts[id]; markAnswered(id, answer); }
     else cant.disabled = false;
     return;
   }
   const btn = ev.target.closest('[data-answer]');
   if (btn) {
     const id = btn.dataset.answer;
-    const note = document.querySelector(`textarea[data-q="${id}"]`).value.trim();
+    const { card, errId } = qcardOf(btn);
+    const note = (card?.querySelector('textarea[data-q]')?.value ?? '').trim();
     const picked = picks[id] && picks[id] !== '__other' ? picks[id] : '';
     const answer = picked ? (note ? `${picked} — ${note}` : picked) : note;
-    const err = $(`e-${id}`);
+    const err = $(`e-${errId}`);
     if (!answer) { if (err) err.textContent = 'Pick a choice or write an answer.'; return; }
     if (err) err.textContent = '';
     const goalId = btn.dataset.goalAsk;
     if (goalId && !picked) { if (err) err.textContent = 'Choose Approve, Refine or Let go.'; return; }
     if (goalId && picked === 'Refine' && !note) { if (err) err.textContent = 'Say in the notes what should change.'; return; }
-    const auto = document.querySelector(`input[data-auto="${id}"]:checked`)?.value;
-    const asRule = document.querySelector(`input[data-rulebox="${id}"]`)?.checked;
+    const auto = card?.querySelector('input[data-auto]:checked')?.value;
+    const asRule = card?.querySelector('input[data-rulebox]')?.checked;
     if (asRule && !note && !picked) { if (err) err.textContent = 'Pick an answer or write the rule in the note to keep it as a standing rule.'; return; }
     // the note is the rule's wording; without one, the chosen answer is the standing answer to questions like this
     const qText = DATA.questions.find((x) => x.id === id)?.question || '';
@@ -3647,8 +4260,8 @@ document.addEventListener('click', async (ev) => {
     let ok = false;
     try {
       ok = goalId
-        ? await post('goal-decide', { id: goalId, verdict: { Approve: 'approve', Refine: 'refine', 'Let go': 'let-go' }[picked], notes: note || undefined }, id)
-        : await post('answer', { id, answer, autonomy: auto ? Number(auto) : undefined, rule: rule || undefined }, id);
+        ? await post('goal-decide', { id: goalId, verdict: { Approve: 'approve', Refine: 'refine', 'Let go': 'let-go' }[picked], notes: note || undefined }, errId)
+        : await post('answer', { id, answer, autonomy: auto ? Number(auto) : undefined, rule: rule || undefined }, errId);
     }
     catch (e2) { if (err) err.textContent = `Could not send: ${e2.message}`; }
     if (ok) { delete drafts[id]; delete picks[id]; markAnswered(id, goalId ? picked + (note ? ` — ${note}` : '') : answer); }

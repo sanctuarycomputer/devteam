@@ -87,7 +87,17 @@ export async function openChrome() {
       await send('Input.dispatchMouseEvent', { type: 'mousePressed', ...at, button: 'left', clickCount: 1 });
       await send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...at, button: 'left', clickCount: 1 });
     };
-    return { send, ev, key, type, click, close: () => ws.close() };
+    // A key held down or let go (Shift: modifiers 8), the middle of what a selector finds, and the
+    // mouse there with modifiers: a Shift+click is a press and release with modifiers 8.
+    const hold = (k, down) => send('Input.dispatchKeyEvent', { type: down ? 'rawKeyDown' : 'keyUp', key: k, code: `${k}Left`, windowsVirtualKeyCode: { Shift: 16, Alt: 18, Control: 17 }[k], modifiers: down ? { Shift: 8, Alt: 1, Control: 2 }[k] : 0 });
+    const at = (selector) => ev(`(() => { const e = document.querySelector(${JSON.stringify(selector)}); e.scrollIntoView({ block: 'center' }); const r = e.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
+    const move = (x, y, modifiers = 0) => send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, modifiers });
+    const clickAt = async (x, y, modifiers = 0) => {
+      await move(x, y, modifiers);
+      await send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, modifiers, button: 'left', buttons: 1, clickCount: 1 });
+      await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, modifiers, button: 'left', buttons: 0, clickCount: 1 });
+    };
+    return { send, ev, key, type, click, hold, at, move, clickAt, close: () => ws.close() };
   };
   return { newPage, close };
 }

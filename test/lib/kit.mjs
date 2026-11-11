@@ -108,8 +108,73 @@ export function fleetFixture(name) {
     g(['commit', '-qm', 'chore-log: log through now'], old);
     g(['push', '-q', 'origin', 'main'], old);
   };
-  const done = () => { spawnSync('tmux', ['kill-server'], { env: { ...process.env, TMUX_TMPDIR: tmuxDir } }); fs.rmSync(tmuxDir, { recursive: true, force: true }); if (!process.env.DEVTEAM_TEST_KEEP) fs.rmSync(base, { recursive: true, force: true }); else console.log(`${name} fixture kept at ${base}`); };
+  // retried: a dashboard's child can still be writing its cache (run/cache) a moment after it stopped
+  const done = () => { spawnSync('tmux', ['kill-server'], { env: { ...process.env, TMUX_TMPDIR: tmuxDir } }); fs.rmSync(tmuxDir, { recursive: true, force: true }); if (!process.env.DEVTEAM_TEST_KEEP) fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); else console.log(`${name} fixture kept at ${base}`); };
   return { base, org, old, neu, home, env, run, ok, g, land, done };
+}
+
+// Threads, on a project of their own: the chain's log runs its clock into 2100 (lines written by
+// hand dated there), and a thread's rules compare when the owner and the supervisor last spoke. A
+// goal to point at, the owner's and the supervisor's commands, a stand-in supervisor pane that logs
+// what is typed into it, and lines written by hand at a time the test picks.
+export function threadsFixture(name = 'threads') {
+  const F = fleetFixture(name);
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const DT = path.join(F.old, 'docs/devteam/scripts/devteam.mjs');
+  // The supervisor's pane is only ever the one a test names: a DEVTEAM_SUPERVISOR from the session
+  // running the tests would have the fixture type into a real supervisor.
+  const env = (role = {}) => { const e = F.env(role); if (!('DEVTEAM_SUPERVISOR' in role)) delete e.DEVTEAM_SUPERVISOR; return e; };
+  const run = (args, role = {}) => { const r = runNode(DT, args, { cwd: F.old, env: env(role) }); return { status: r.status, out: r.stdout.trim(), err: r.stderr.trim() }; };
+  const ok = (args, role = {}) => { const r = run(args, role); assert.equal(r.status, 0, `${args.join(' ')}: ${r.err || r.out}`); return r.out; };
+  const owner = (args, extra = {}) => ok(args, extra);
+  const sup = (args, extra = {}) => ok(args, { ...SUP, ...extra });
+  const fails = (args, role = {}) => { const r = run(args, role); assert.notEqual(r.status, 0, `${args.join(' ')} should fail: ${r.out}`); return `${r.err}\n${r.out}`; };
+  const goalArgs = (title, priority) => ['goal', 'add', '--title', title, '--outcome', 'admins pay alone', '--measure', 'self-serve share', '--target', '80', '--unit', '%', '--direction', 'up', '--source', 'prod', '--check', 'echo 5', '--horizon', '2027-03-31', '--non-goals', 'enterprise invoicing', '--preconditions', 'cards work', 'prices defined', '--priority', String(priority)];
+  const goal = sup(goalArgs('Launch checkout', 1));
+  const logDir = path.join(F.old, 'docs/devteam/run/log');
+  const stamp = (d) => `${d.toISOString().slice(0, 10).replace(/-/g, '')}-${d.toISOString().slice(11, 23).replace(/[:.]/g, '')}`;
+  // a line as the kit would have written it agoMs ago (owner lines carry their channel); file
+  // overrides the writer's file, for a writer the authority table refuses
+  const hand = (by, o, agoMs, file = null) => {
+    const d = new Date(Date.now() - agoMs);
+    const id = o.id ?? `${{ thread: 't', turn: 'u', question: 'q', observation: 'o' }[o.type]}-${stamp(d)}-${by}`;
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.appendFileSync(path.join(logDir, file ?? `${by}-${d.toISOString().slice(0, 7)}.jsonl`), line({ op: 'new', ...(by === 'owner' ? { channel: 'cli' } : {}), ...o, id, at: d.toISOString(), by }));
+    return id;
+  };
+  // the live log as it is, and put back: a hand-written line must not outlive its case
+  const snapLog = () => new Map(fs.readdirSync(logDir).map((f) => [f, fs.readFileSync(path.join(logDir, f))]));
+  const restoreLog = (snap) => { for (const f of fs.readdirSync(logDir)) if (snap.has(f)) fs.writeFileSync(path.join(logDir, f), snap.get(f)); else fs.rmSync(path.join(logDir, f), { force: true }); };
+  // log-check on the log with these lines in it, which are then taken out again
+  const checkWith = (...lines) => {
+    const snap = snapLog();
+    try { lines.forEach(([by, o, file], i) => hand(by, o, 60000 - i, file)); const r = run(['log-check']); return { status: r.status, said: `${r.out}\n${r.err}` }; } finally { restoreLog(snap); }
+  };
+  // A stand-in for the supervisor's agent (not a shell, which the kit never types into): it draws a
+  // line and logs what it is sent, so a test reads exactly what the kit typed. A pty takes at most
+  // MAX_INPUT bytes of one unfinished line (1,024 on macOS); the kit's pane line stays under it, its
+  // words cut at 300 bytes and the rest kind, ids and the show command.
+  const standIn = () => {
+    const dir = fs.mkdtempSync(path.join(F.base, 'pane-'));
+    const agent = path.join(dir, 'agent.mjs');
+    const keys = path.join(dir, 'keys.txt');
+    write(agent, "import fs from 'node:fs';\nprocess.stdout.write('stand-in supervisor\\n');\nprocess.stdin.on('data', (d) => fs.appendFileSync(process.argv[2], String(d)));\n");
+    const s = `sup-${path.basename(dir).slice(5)}`;
+    const e = env();
+    spawnSync('tmux', ['new-session', '-d', '-x', '220', '-y', '50', '-s', s, '-n', 'main', `${process.execPath} ${agent} ${keys}`], { env: e });
+    for (let i = 0; i < 300 && !/stand-in/.test(spawnSync('tmux', ['capture-pane', '-p', '-t', `=${s}:main`], { env: e, encoding: 'utf8' }).stdout ?? ''); i++) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+    return { target: `${s}:main`, typed: () => (fs.existsSync(keys) ? fs.readFileSync(keys, 'utf8') : '') };
+  };
+  // A goal up for approval: fully defined, read, its milestones set, a design linked (planning.md §1).
+  const approval = () => {
+    const g = sup(goalArgs('Self-serve billing', 2));
+    sup(['goal', 'reading', g, '--run']);
+    sup(['goal', 'set', g, '--milestones', JSON.stringify([{ title: 'Cards on file', target: 40, by: '2027-01-31', preconditions: [1], tickets: 4 }, { title: 'Self-serve prices', target: 80, preconditions: [2], tickets: 6 }])]);
+    const q = sup(['ask', '--kind', 'goal-approval', '--goal', g, '--question', 'Approve self-serve billing, built as the design describes?', '--links', JSON.stringify([{ title: 'The approach', path: 'docs/devteam/project/designs/self-serve-billing.md', ref: 'main' }])]);
+    return { goal: g, question: q };
+  };
+  // env replaces fleetFixture's, so a dashboard a test starts (startDashboard(F.old, F.env({}))) gets the same
+  return { ...F, env, SUP, owner, sup, fails, goal, hand, snapLog, restoreLog, checkWith, standIn, approval, logDir };
 }
 
 // G1: a single-repo project with no new settings prints exactly what it printed before
