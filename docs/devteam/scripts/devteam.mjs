@@ -14575,13 +14575,17 @@ const LINK_FIELDS = { evidence: 'evidence', refs: 'about', blocks: 'asks about',
 let LINKS = null;
 function linkIndex() {
   if (LINKS?.log === readLog()) return LINKS;
-  const out = new Map(), inn = new Map(), seen = new Set();
+  const out = new Map(), inn = new Map(), seen = new Map();
+  // one edge a pair: a second field citing the same pair adds its why to it ("evidence, about")
   const edge = (from, to, why) => {
     const k = `${from}\0${to}`;
-    if (from === to || seen.has(k)) return;
-    seen.add(k);
-    (out.get(from) ?? out.set(from, []).get(from)).push({ to, why });
-    (inn.get(to) ?? inn.set(to, []).get(to)).push({ from, why });
+    if (from === to) return;
+    const had = seen.get(k);
+    if (had) { if (!had[0].why.split(', ').includes(why)) for (const e of had) e.why = `${e.why}, ${why}`; return; }
+    const pair = [{ to, why }, { from, why }];
+    seen.set(k, pair);
+    (out.get(from) ?? out.set(from, []).get(from)).push(pair[0]);
+    (inn.get(to) ?? inn.set(to, []).get(to)).push(pair[1]);
   };
   const known = (t) => typeof t === 'string' && readLog().objects.has(t);
   for (const o of readLog().objects.values()) {
@@ -14592,6 +14596,13 @@ function linkIndex() {
     }
     if (known(o.approved_by)) edge(o.approved_by, o.id, 'approved');
     if (known(o.decision)) edge(o.decision, o.id, 'carried out');
+  }
+  // An incident holds what its fingerprints raise while it is open, not only what it cited when it
+  // opened (sensor incident snapshots its refs): each observation on one of them from its opening to
+  // its resolution (the last update that resolved it; open-ended while it isn't resolved).
+  for (const p of incidentList()) {
+    const end = p.status === 'resolved' ? [...(p.updates ?? [])].reverse().find((u) => u.status === 'resolved')?.at ?? null : null;
+    for (const f of p.fingerprints) for (const o of fpObservations(f)) if (o.created_at >= p.created_at && (!end || o.created_at <= end)) edge(o.id, p.id, 'held');
   }
   for (const c of orientClusters()) for (const id of c.ids) edge(id, `signal:${c.key}`, 'recurs');
   for (const a of calls()) if (correctionOf(a)) edge(a.id, `correction:${a.id}`, 'corrected');
@@ -14681,8 +14692,9 @@ function lineage(id, { up = 6, down = 4, max = 120 } = {}) {
 // The lineage as Mermaid text: a subgraph per stage in the loop's order, what is outside the loop
 // after them, generated node ids (n0 is the opened record, n<i> the i-th node), and labels stripped
 // to plain words, so no record's text or id reaches Mermaid's syntax.
-const LINEAGE_STAGES = [['observe', 'Observe'], ['orient', 'Orient'], ['decide', 'Decide'], ['act', 'Act'], ['learn', 'Learn']];
-const LINEAGE_CLASS = { observe: 'stroke:#4f8bd6', orient: 'stroke:#8a63d2', decide: 'stroke:#d29b2a', act: 'stroke:#3a9e6f', learn: 'stroke:#d0566a' };
+// A question still the Inbox's and a reading are drawn in their own groups, not with the work graph.
+const LINEAGE_STAGES = [['observe', 'Observe'], ['orient', 'Orient'], ['decide', 'Decide'], ['act', 'Act'], ['learn', 'Learn'], ['inbox', 'Asked you'], ['measurement', 'Measured']];
+const LINEAGE_CLASS = { observe: 'stroke:#4f8bd6', orient: 'stroke:#8a63d2', decide: 'stroke:#d29b2a', act: 'stroke:#3a9e6f', learn: 'stroke:#d0566a', inbox: 'stroke:#c2672f', measurement: 'stroke:#2f9bb0' };
 const mermaidText = (s) => String(s ?? '').replace(/[^A-Za-z0-9\s.,:!?()'/+-]/g, '').replace(/\s+/g, ' ').trim().slice(0, 60);
 function lineageMermaid(L) {
   const n = new Map(L.nodes.map((x, i) => [x.id, `n${i}`]));
@@ -14843,6 +14855,8 @@ function peekView(kind, id) {
 function cmdPeek() {
   const [kind, id] = positional;
   if (!kind || !id) die('usage: peek <ticket|goal|feature|planner|retro|file|story|release|wave|milestone|act|decision|lesson|problem|q|thread|observation|signal|learning> <id> [--tickets ids] --json | --mermaid');
+  // a signal no observation is on is no signal, for --mermaid as for --json (lineageNode draws any key)
+  if (kind === 'signal' && !signalGroups().has(id) && !logObjects('observation').some((o) => signalKeyOf(o) === id)) die(`no signal ${id}`);
   // its lineage as Mermaid text, for a retro, a PR body or the supervisor's own reading
   if (flags.mermaid) return out(lineageMermaid(lineage(kind === 'signal' ? `signal:${id}` : id) ?? die(`no record ${id}`)));
   json(peekView(kind, id));

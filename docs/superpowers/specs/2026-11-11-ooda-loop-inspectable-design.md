@@ -100,8 +100,8 @@ Additive fields and refs, so a lineage walk finds every step:
 
 The kit computes it, the dashboard draws it.
 
-- `lineage(id)` in `devteam.mjs`, over one reverse index of the folded log (replacing the ad-hoc ones in `orientClusters`, `orientLinks` and `historyOf`). An explicit edge list per type, never a generic string walk:
-  - observation ← cited by: knowledge `evidence`, problem `refs`, decision `refs` (noise), a set-aside or ignore `refs`, question `evidence`; joined to a recurring signal by its key
+- `lineage(id)` in `devteam.mjs`, over one reverse index of the folded log (the ad-hoc indexes in `orientClusters`, `orientLinks` and `historyOf` stay as they are for now). An explicit edge list per type, never a generic string walk:
+  - observation ← cited by: knowledge `evidence`, problem `refs`, decision `refs` (noise), a set-aside or ignore `refs`, question `evidence`; held by an incident on its fingerprint from its opening to its resolution; joined to a recurring signal by its key
   - knowledge and problem → decision `knowledge` and `refs`, question `evidence` and `blocks`, `worker-slots` act `knowledge`
   - decision → its acts (`act.decision`), the question it rests on (`approved_by`, that one question only), its correction
   - act → the outcome observations that cite it, the ticket it made (a work-graph node)
