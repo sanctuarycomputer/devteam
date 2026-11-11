@@ -265,7 +265,14 @@ test('status says at a glance what a check-in needs, and reads no pane it needn\
   const q1 = dtIn(r, ['ask', '--question', 'first?', '--kind', 'owner-decision', '--class', 'design', '--reasons', 'x'], sup);
   assert.equal(q1.status, 0, q1.stderr + q1.stdout);
   assert.equal(dtIn(r, ['ask', '--question', 'second?', '--kind', 'owner-decision', '--class', 'design', '--reasons', 'x'], sup).status, 0);
-  fs.writeFileSync(notes, `read ${q1.stdout.trim()}\n`);
+  // knowledge to harvest: the owner's rule, a lesson the supervisor tagged for the kit, one already noted, one still a candidate
+  const rule = dtIn(r, ['knowledge', 'add', '--kind', 'preference', '--statement', 'Ship banners without asking', '--owner']).stdout.trim();
+  const ob = dtIn(r, ['observe', '--subject', 'kit', '--kind', 'friction', '--detail', 'd', '--severity', '1', '--valence', '-1'], sup).stdout.trim();
+  const kitL = dtIn(r, ['knowledge', 'add', '--kind', 'lesson', '--statement', 'Fetch before the merge', '--evidence', ob, '--kit'], sup).stdout.trim();
+  const seenL = dtIn(r, ['knowledge', 'add', '--kind', 'fact', '--statement', 'Seen already', '--evidence', ob], sup).stdout.trim();
+  dtIn(r, ['knowledge', 'add', '--kind', 'fact', '--statement', 'Still a candidate'], sup);
+  for (const k of [kitL, seenL]) assert.equal(dtIn(r, ['knowledge', 'set', k, '--status', 'accepted'], sup).status, 0);
+  fs.writeFileSync(notes, `read ${q1.stdout.trim()}\n- ${seenL}: stays\nfriction: same as ${kitL}, in passing\n`);
   fs.mkdirSync(path.join(r, '.worktrees/a/node_modules'), { recursive: true });
   fs.writeFileSync(path.join(r, '.worktrees/a/node_modules/big'), Buffer.alloc(4096 * 256));
   fs.writeFileSync(path.join(r, 'docs/devteam/run/accounts.json'), JSON.stringify({ at: new Date().toISOString(), cswap: true, active: 'a@b', active_no_room: false, exhausted: false, needs_login: ['c@d'], restart_gave_up: [], supervisor_limit: null }));
@@ -292,7 +299,20 @@ test('status says at a glance what a check-in needs, and reads no pane it needn\
     assert.match(st.stdout, /^machine: disk \S+ free of \S+.*; memory .*; cpus \S+.*; load [\d.]+ [\d.]+ [\d.]+$/m);
     assert.match(st.stdout, /^machine: accounts cswap active=a@b exhausted=false no-room=false needs-login=c@d as of /m);
     assert.match(st.stdout, new RegExp(`^machine: hub ${process.env.DEVTEAM_HUB_PORT} DOWN$`, 'm'));
-    assert.match(st.stdout, new RegExp(`^statused sup=up fleet=run kit=v0\\.1\\.0\\S* inbox=\\d+ missing=config/master\\.key tools=ok behind=v9\\.9\\.9 pane=${a.pane} state=ready dash=${portUp}/up wt=1/\\S+ new-questions=1$`, 'm'));
+    assert.match(st.stdout, new RegExp(`^statused sup=up fleet=run kit=v0\\.1\\.0\\S* inbox=\\d+ missing=config/master\\.key tools=ok behind=v9\\.9\\.9 pane=${a.pane} state=ready dash=${portUp}/up wt=1/\\S+ new-questions=1 new-knowledge=2$`, 'm'));
+    assert.match(st.stdout, /^machine: daily review due \(last never\)$/m);
+    const kn = status(['--knowledge']);
+    assert.equal(kn.status, 0, kn.stderr);
+    assert.match(kn.stdout, new RegExp(`^statused ${rule} \\[preference, project, owner's\\] Ship banners without asking$`, 'm'));
+    assert.match(kn.stdout, new RegExp(`^statused ${kitL} \\[lesson, project, kit lesson\\] Fetch before the merge$`, 'm'));
+    assert.doesNotMatch(kn.stdout, /Seen already|Still a candidate/, 'noted, or not accepted: not listed');
+    // the review is done for the day once the notes have today's heading; an older one leaves it due
+    fs.appendFileSync(notes, '\n## Review 2026-01-02\n');
+    assert.match(status().stdout, /^machine: daily review due \(last 2026-01-02\)$/m);
+    const today = new Date().toISOString().slice(0, 10);
+    fs.appendFileSync(notes, `\n## Review ${today} (UTC)\n1. **${rule}**: the owner's ruling, stays\n`);
+    assert.match(status().stdout, new RegExp(`^machine: daily review done ${today}$`, 'm'));
+    assert.match(status().stdout, /^statused .* new-knowledge=1$/m);
     assert.match(st.stdout, /^a-sib sup=down .* sibling-of=the-home$/m);
     assert.match(st.stdout, new RegExp(`^attention: ${y.pane} keep:worker-y limit$`, 'm'));
     assert.doesNotMatch(st.stdout, new RegExp(`${shell.pane}\\b`), 'never the owner\'s shell');
@@ -350,7 +370,7 @@ test('status says the machine\'s own CPU and memory caps, not the host\'s', () =
 // Every read the operator is allowed, against a repo with something in it: the log, git status and
 // the files on disk are byte-for-byte what they were. That's the point of the list.
 test('each read the operator may run writes nothing', () => {
-  const r = repo('read-only', { settings: { upstream_base: 'v0.2.0' } });
+  const r = repo('read-only', { settings: { upstream_base: 'v0.2.0', sensors: { web: { kind: 'http', url: 'https://app.example.test/up' } } } });
   const sup = { DEVTEAM_ROLE: 'supervisor', DEVTEAM_SUPERVISOR_UP: 'off' };
   assert.equal(dtIn(r, ['goal', 'add', '--title', 'a goal', '--outcome', 'x'], sup).status, 0);
   const goal = dtIn(r, ['goal'], sup).stdout.match(/g-\S+/)?.[0];
@@ -358,12 +378,13 @@ test('each read the operator may run writes nothing', () => {
   assert.equal(dtIn(r, ['knowledge', 'add', '--kind', 'fact', '--statement', 's'], sup).status, 0);
   assert.equal(dtIn(r, ['ask', '--question', 'q?', '--kind', 'owner-decision', '--class', 'design', '--reasons', 'x'], sup).status, 0);
   assert.equal(dtIn(r, ['send', 'supervisor', 'hello'], sup).status, 0);
+  assert.equal(dtIn(r, ['problem', 'add', '--title', 'a problem', '--severity', '2'], sup).status, 0);
   conversation(r);
   const op = { DEVTEAM_ROLE: 'operator', TMUX: 'x', TMUX_PANE: '%7' };
   const walk = (d, out = []) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.name === '.git') continue; if (e.isDirectory()) walk(p, out); else out.push(p); } return out; };
   const snap = () => ({ files: Object.fromEntries(walk(r).map((f) => [f, fs.readFileSync(f).toString('base64')])), status: execFileSync('git', ['status', '--porcelain'], { cwd: r, encoding: 'utf8' }) });
   const before = snap();
-  const reads = [['search', 'goal'], ['status'], ['status', '--json'], ['ready'], ['ready', '--json'], ['metrics'], ['metrics', '--json'], ['hello', '--json'], ['settings'], ['supervisor-session'], ['prompt', 'supervisor'], ['validate'], ['questions'], ['questions', '--json', '--all'], ['log', '--json', '--tail', '5'], ['messages', '--to', 'supervisor', '--open'], ['knowledge', '--json'], ['knowledge', '--for', 'x'], ['goal', '--json'], ['goal', 'list'], ['goal', 'show', goal], ['fleet', 'status', '--json', '--no-fetch'], ['machine', 'pane-state', '%7']];
+  const reads = [['search', 'goal'], ['status'], ['status', '--json'], ['ready'], ['ready', '--json'], ['metrics'], ['metrics', '--json'], ['hello', '--json'], ['settings'], ['supervisor-session'], ['prompt', 'supervisor'], ['validate'], ['questions'], ['questions', '--json', '--all'], ['log', '--json', '--tail', '5'], ['messages', '--to', 'supervisor', '--open'], ['knowledge', '--json'], ['knowledge', '--for', 'x'], ['goal', '--json'], ['goal', 'list'], ['goal', 'show', goal], ['fleet', 'status', '--json', '--no-fetch'], ['trust'], ['trust', '--json'], ['problem'], ['problem', '--json', '--all'], ['sensor', 'status'], ['sensor', 'status', '--json'], ['sensor', 'series', 'web', '--range', '7d'], ['knowledge', '--kit'], ['machine', 'pane-state', '%7']];
   for (const c of reads) { const x = dtIn(r, c, op); assert.equal(x.status, 0, `${c.join(' ')}: ${x.stderr}`); assert.doesNotMatch(x.stderr, /only reads/, c.join(' ')); }
   // and the machine's digest, run from inside the project, reads it the same way
   assert.equal(dtIn(r, ['machine', 'status', '--in', code], op).status, 0);
@@ -377,7 +398,7 @@ test('the kit lets a box operator look, and nothing else', () => {
   const r = repo('guarded');
   const op = { DEVTEAM_ROLE: 'operator', TMUX: 'x', TMUX_PANE: '%7' };
   for (const c of [['status'], ['fleet', 'status', '--json', '--no-fetch'], ['settings', '--get', 'main_branch'], ['supervisor-session'], ['questions', '--json'], ['log', '--json'], ['messages', '--to', 'supervisor', '--open'], ['knowledge'], ['knowledge', '--kind', 'fact'], ['goal'], ['goal', 'list']]) assert.equal(dtIn(r, c, op).status, 0, c.join(' '));
-  for (const c of [['merge', 't-1'], ['fleet', 'park', '--reason', 'x'], ['fleet', 'unpark'], ['answer', 'q', 'yes'], ['send', 'supervisor', 'hi'], ['knowledge', 'add', '--kind', 'fact', '--statement', 'x'], ['knowledge', 'set', 'k-1'], ['goal', 'add', '--title', 'x'], ['goal', 'set', 'g-1'], ['goal', 'status', 'g-1', 'met'], ['goal', 'hold', 'g-1', 'park'], ['goal', 'reading', 'g-1', '--run'], ['ticket', 'show', 't-1'], ['dashboard-data'], ['ask', '--question', 'q', '--kind', 'x']]) { const x = dtIn(r, c, op); assert.notEqual(x.status, 0, c.join(' ')); assert.match(x.stderr, /only reads|owner commands/, c.join(' ')); }
+  for (const c of [['merge', 't-1'], ['fleet', 'park', '--reason', 'x'], ['fleet', 'unpark'], ['answer', 'q', 'yes'], ['send', 'supervisor', 'hi'], ['knowledge', 'add', '--kind', 'fact', '--statement', 'x'], ['knowledge', 'set', 'k-1'], ['goal', 'add', '--title', 'x'], ['goal', 'set', 'g-1'], ['goal', 'status', 'g-1', 'met'], ['goal', 'hold', 'g-1', 'park'], ['goal', 'reading', 'g-1', '--run'], ['ticket', 'show', 't-1'], ['dashboard-data'], ['ask', '--question', 'q', '--kind', 'x'], ['problem', 'add', '--title', 'x', '--severity', '1'], ['problem', 'set', 'p-1', '--status', 'resolved'], ['sensor', 'poll'], ['sensor', 'test', 'web'], ['sensor', 'ignore', 'f-1', '--reason', 'x'], ['sensor', 'discover'], ['knowledge', 'set', 'k-1', '--kit']]) { const x = dtIn(r, c, op); assert.notEqual(x.status, 0, c.join(' ')); assert.match(x.stderr, /only reads|owner commands/, c.join(' ')); }
   assert.ok(!fs.existsSync(path.join(r, 'docs/devteam/run/supervisor-pane')), 'and it is never taken for the supervisor\'s pane');
   // the one write the operator has: bringing a supervisor back (operator.md)
   const dry = dtIn(r, ['recover', '--dry-run'], op);

@@ -142,6 +142,25 @@ test('git facts: a shallow clone deepened gets new ancestry answers', (t) => {
   assert.equal(f.ancestorOf(first, 'HEAD'), true, 'deepened: asked again');
 });
 
+test('git facts: a "no" the clone\'s cut gave is asked again after a deepen that leaves it shallow', (t) => {
+  const { dir, g } = tmpRepo(t);
+  const run = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-facts-'));
+  t.after(() => fs.rmSync(run, { recursive: true, force: true }));
+  for (let i = 0; i < 10; i++) { fs.writeFileSync(path.join(dir, `f${i}`), `${i}`); g(['add', '-A']); g(['commit', '-qm', `c${i}`]); }
+  g(['branch', 'old', 'HEAD~4']);
+  const clone = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-shallow-'));
+  t.after(() => fs.rmSync(clone, { recursive: true, force: true }));
+  execFileSync('git', ['clone', '-q', '--depth', '1', `file://${dir}`, clone]);
+  execFileSync('git', ['fetch', '-q', '--depth', '1', 'origin', 'old:refs/heads/old'], { cwd: clone });
+  let f = gitFactFns(clone, run);
+  assert.equal(f.ancestorOf('refs/heads/old', 'HEAD'), false, 'both commits here, the history between them cut');
+  f.exit();
+  execFileSync('git', ['fetch', '-q', '--deepen', '5', 'origin', 'main'], { cwd: clone });
+  assert.equal(execFileSync('git', ['rev-parse', '--is-shallow-repository'], { cwd: clone, encoding: 'utf8' }).trim(), 'true', 'still shallow');
+  f = gitFactFns(clone, run);
+  assert.equal(f.ancestorOf('refs/heads/old', 'HEAD'), true, 'deepened: the cut moved, so it is asked again');
+});
+
 test('an answer from the dashboard: the reply comes before the supervisor is typed to', { timeout: 120000 }, async (t) => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-reply-'));
   t.after(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
@@ -161,8 +180,11 @@ test('an answer from the dashboard: the reply comes before the supervisor is typ
   const dash = startDashboard(root, env, ['--port', String(port)]);
   t.after(() => { fs.mkdirSync(base, { recursive: true }); fs.writeFileSync(release, ''); return dash.stop(); });
   await until(() => /dashboard on http/.test(dash.out()), 'the dashboard');
+  const t0 = Date.now();
   const r = await fetch(`http://127.0.0.1:${port}/api/answer`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: qid, answer: 'Left' }), signal: AbortSignal.timeout(60000) });
   const body = await r.json();
+  // well inside tmux's own 30 s limit, which would release a reply that waited for the typing
+  assert.ok(Date.now() - t0 < 15000, `replied after ${Date.now() - t0} ms`);
   assert.equal(r.status, 200, JSON.stringify(body));
   assert.match(body.out, new RegExp(`answered ${qid}`));
   assert.equal(fs.existsSync(release), false, 'replied while typing into the pane was still held');
@@ -216,4 +238,26 @@ test('git processes: a refresh and an answer start as many with 24 tickets as wi
     assert.equal(a[0], a[1], `answer: ${a.join(' then ')} git processes`);
     assert.ok(a[0] <= 12, `answer: ${a[0]} git processes`);
   } finally { small.F.done(); big.F.done(); }
+});
+
+test('git facts: at the cap, what nobody asked for longest goes first', (t) => {
+  const { dir, g } = tmpRepo(t);
+  const run = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-facts-'));
+  t.after(() => fs.rmSync(run, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(dir, 'a'), 'a'); g(['add', '-A']); g(['commit', '-qm', 'a']);
+  const a = g(['rev-parse', 'HEAD']);
+  const file = path.join(run, 'cache', 'git-facts.json');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  // a full store: 20,000 answers about commits nobody asks about
+  const e = Object.fromEntries(Array.from({ length: 20000 }, (_, i) => [`d\0x\0${String(i).padStart(40, '0')}`, i]));
+  fs.writeFileSync(file, JSON.stringify({ v: 1, e }));
+  const f = gitFactFns(dir, run);
+  assert.equal(f.factGet(`d\0x\0${'1'.padStart(40, '0')}`), 1, 'one old answer used again');
+  f.commitDateOf(a);
+  f.exit();
+  const after = JSON.parse(fs.readFileSync(file, 'utf8')).e;
+  assert.equal(Object.keys(after).length, 20000, 'held at the cap');
+  assert.equal(Object.hasOwn(after, `d\0x\0${'0'.padStart(40, '0')}`), false, 'the least recently used dropped');
+  assert.equal(after[`d\0x\0${'1'.padStart(40, '0')}`], 1, 'the one used again kept');
+  assert.ok(Object.keys(after).some((k) => k.endsWith(a)), 'the new answer kept');
 });

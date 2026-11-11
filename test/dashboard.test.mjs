@@ -311,13 +311,14 @@ const POLL_FAST = `(() => {
   const inner = async (u, o) => {
     if (String(u).startsWith('/api/data')) { window.__polls++; if (window.__gate) await window.__gate; return rf(u, o); }
     if (String(u).startsWith('/api/answer') && window.__answerHold) await window.__answerHold;
-    // every owner action held on the wire, as a slow server would hold it
-    if (o?.method === 'POST' && String(u).startsWith('/api/') && window.__postHold) await window.__postHold;
+    // every owner action recorded as sent, and held on the wire, as a slow server would hold it
+    if (o?.method === 'POST' && String(u).startsWith('/api/')) { (window.__posts ??= []).push({ url: String(u), body: o.body }); if (window.__postHold) await window.__postHold; }
     // a test can let the next /api/threads read through but hold its answer back: read now, landing later
     // and can slow every /api/threads answer, as a loaded box would
     if (String(u).startsWith('/api/threads') && window.__threadsDelay) await new Promise((r) => setTimeout(r, window.__threadsDelay));
-    // or hold back every /api/threads answer, read now, until the test lets each go
-    if (String(u).startsWith('/api/threads') && window.__threadsQueue) { const r = await rf(u, o); await new Promise((go) => window.__threadsQueue.push(go)); return r; }
+    // or hold back every /api/threads answer, read now, until the test lets each go (the page's own
+    // timeout let go of, so a held read can't be given up while it waits)
+    if (String(u).startsWith('/api/threads') && window.__threadsQueue) { const r = await rf(u, { ...o, signal: undefined }); await new Promise((go) => window.__threadsQueue.push(go)); return r; }
     if (String(u).startsWith('/api/threads') && window.__threadsHold) { const h = window.__threadsHold; window.__threadsHold = null; const r = await rf(u, o); window.__threadsRead = true; await h; setTimeout(() => { window.__threadsLanded = true; }, 0); return r; }
     return rf(u, o);
   };
@@ -359,6 +360,8 @@ test('presses: the page answers before the server, and a refusal puts it back', 
   const Q1 = dt(['ask', '--question', 'Which way?', '--choices', '[{"label":"Left"},{"label":"Right"}]'], SUP);
   const Q2 = dt(['ask', '--question', 'Ship it?', '--choices', '[{"label":"Yes"},{"label":"No"}]'], SUP);
   const K = dt(['knowledge', 'add', '--kind', 'fact', '--statement', 'The build uses make'], SUP);
+  const Q3 = dt(['ask', '--question', 'Which port?', '--default', '8080'], SUP);
+  dt(['answer', Q3, '--defaulted'], SUP);
   const port = await freePort();
   const dash = startDashboard(root, env, ['--port', String(port)]);
   t.after(() => dash.stop());
@@ -424,6 +427,16 @@ test('presses: the page answers before the server, and a refusal puts it back', 
     assert.equal(await p.ev(`!!${lesson}`), false, 'still gone after refreshes, the post still held');
     await letGo();
     await until(() => /accepted/.test(dt(['knowledge', '--status', 'accepted'])), 'kept on the server');
+  });
+
+  await t.test('an overrule is bound to the question as the page showed it, like every answer', async () => {
+    await p.ev(`document.getElementById('answered-wrap').open = true; void 0`);
+    await soon(`!!document.querySelector('input[data-overrule="${Q3}"]')`, 'the overrule field');
+    await p.ev(`(() => { const f = document.querySelector('input[data-overrule="${Q3}"]'); f.value = '9090'; window.__posts = []; document.querySelector('[data-overrule-send="${Q3}"]').click(); })()`);
+    const sent = JSON.parse(await p.ev(`JSON.stringify(window.__posts.find((x) => x.url === '/api/answer'))`));
+    const hash = JSON.parse(dt(['questions', '--all', '--json'])).find((x) => x.id === Q3).hash;
+    assert.equal(JSON.parse(sent.body).seen, hash, 'the hash the owner saw goes with the overrule');
+    await until(() => JSON.parse(dt(['questions', '--all', '--json'])).find((x) => x.id === Q3).answer === '9090', 'overruled on the server');
   });
 
   await t.test('a new thread: the turn is in the card at once, and two quick Sends make one thread', async () => {
@@ -1239,17 +1252,19 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     const Q = F.sup(['thread', 'ask', T, '--question', 'Ship to the EU first?', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
     await soon(`!!document.getElementById('t-q-${Q}') && !!document.getElementById('q-${Q}') && document.getElementById('tl-card').dataset.key === '${T}'`, 'both copies');
     // every read of the threads from here held back once read; any Inbox link for the question drawn in the card noted
-    await p.ev(`window.__threadsQueue = []; window.__inboxLink = false; window.__obs = new MutationObserver(() => { if (document.querySelector('#tl-c-turns a[href="#q/${Q}"]')) window.__inboxLink = true; }); window.__obs.observe(document.getElementById('tl-card'), { childList: true, subtree: true }); tlRefresh(); void 0`);
+    await p.ev(`window.__threadsQueue = []; window.__inboxLink = false; window.__obs = new MutationObserver((records) => { const link = 'a[href="#q/${Q}"]'; if (records.some((m) => [...m.addedNodes].some((n) => n.nodeType === 1 && (n.matches(link) || !!n.querySelector(link)))) || document.querySelector('#tl-c-turns ' + link)) window.__inboxLink = true; }); window.__obs.observe(document.getElementById('tl-card'), { childList: true, subtree: true }); tlRefresh(); void 0`);
     await soon('window.__threadsQueue.length > 0', 'a read saying the question is open, held');
     // the reads held so far were all read before the answer: they say it is open
     await p.ev(`(() => { window.__stale = window.__threadsQueue.length; const c = document.getElementById('q-${Q}'); c.querySelector('textarea[data-q]').value = 'EU first'; c.querySelector('button[data-answer="${Q}"]').click(); })()`);
     try {
       await until(() => JSON.parse(F.owner(['questions', '--id', Q, '--json']))[0].status === 'answered', 'the answer');
-      await soon(`!document.getElementById('q-${Q}')`, 'the page redrawn without the question');
+      await soon(`!DATA.questions.some((x) => x.id === '${Q}') && !document.getElementById('q-${Q}')`, 'the page redrawn without the question');
       // the stale reads land, the newest of them drawn, and nothing newer yet
+      const have = await p.ev('TL.have');
       await p.ev('window.__threadsQueue.splice(0, window.__stale).forEach((go) => go())');
       await p.ev('window.__still()');
       await p.ev('window.__stir()');
+      assert.ok(await p.ev('TL.have') > have, 'the stale read landed');
       assert.equal(await p.ev(`TL.threads.find((x) => x.id === '${T}').questions.find((x) => x.id === '${Q}').status`), 'open', 'the card drew a read from before the answer');
       assert.equal(await p.ev('window.__inboxLink'), false, 'never "Answer it in the Inbox" for an answered question');
       assert.ok(await p.ev(`/Answered: EU first/.test(document.getElementById('tl-c-turns').textContent)`), 'still answered in the card');
