@@ -7,7 +7,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { gitReadFns, gitFactFns, bareProject, startDashboard, freePort, until, write } from './lib/kit.mjs';
+import { gitReadFns, gitFactFns, bareProject, startDashboard, freePort, until, write, fleetFixture, gitShim } from './lib/kit.mjs';
 
 const tmpRepo = (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-speed-'));
@@ -169,4 +169,51 @@ test('an answer from the dashboard: the reply comes before the supervisor is typ
   assert.match(dt(['questions', '--id', qid]), /answered/, 'the answer is in the log');
   fs.writeFileSync(release, '');
   await until(() => fs.existsSync(calls) && fs.readFileSync(calls, 'utf8').includes(`[devteam answer ${qid} from owner]`), 'the supervisor told, after the reply');
+});
+
+// A project with n tickets, each with a log file of its own, b of them on a branch with two review
+// files; then how many git processes a refresh and an answer start.
+function spawnFixture(n, b) {
+  const F = fleetFixture(`spawns-${n}`);
+  const { old, ok, g } = F;
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  for (let i = 0; i < n; i++) {
+    const id = `sp-${String(i).padStart(2, '0')}-t`;
+    ok(old, ['ticket', 'add', id, '--json', JSON.stringify({ title: id, feature: 'chores', component: 'sp', kind: 'chore', size: 'S', risk: 'normal', serves: [], depends_on: [], touches: [`sp/${i}/**`], done_when: ["the chore check passes"], notes: "a chore" })], SUP);
+    ok(old, ['phase', 'build', '--task', 'T1'], { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: id });
+    if (i < b) {
+      const w = path.join(old, '.worktrees', id);
+      g(['worktree', 'add', '-q', '-b', `ticket/${id}`, w, 'origin/main'], old);
+      for (const f of ['spec-1.md', 'plan-1.md']) write(path.join(w, `docs/devteam/project/tickets/${id}/reviews/${f}`), `- Reviewer: r\n\nVerdict: APPROVE ${'0'.repeat(40)}\n`);
+      g(['add', '-A'], w);
+      g(['commit', '-qm', `${id}: reviews`], w);
+    }
+  }
+  const q = ok(old, ['ask', '--question', 'Which way?'], SUP).trim();
+  F.land();
+  return { F, q };
+}
+const spawns = (F, args, env = {}) => {
+  const spy = gitShim(F);
+  F.ok(F.old, args, { ...spy.env, ...env });
+  spy.reset();
+  F.ok(F.old, args, { ...spy.env, ...env });
+  return spy.calls().split('\n').filter(Boolean).length;
+};
+
+test('git processes: a refresh and an answer start as many with 24 tickets as with 12, plus two per ticket branch', { timeout: 600000 }, () => {
+  const small = spawnFixture(12, 4);
+  const big = spawnFixture(24, 8);
+  try {
+    const refresh = [spawns(small.F, ['dashboard-data']), spawns(big.F, ['dashboard-data'])];
+    assert.ok(refresh[1] - refresh[0] <= 2 * 4, `dashboard-data: ${refresh.join(' then ')} git processes; at most two more per added ticket branch`);
+    const peek = [spawns(small.F, ['peek', 'ticket', 'sp-00-t']), spawns(big.F, ['peek', 'ticket', 'sp-00-t'])];
+    // peek works out every ticket's stage, so it reads each ticket branch's reviews too
+    assert.ok(peek[1] - peek[0] <= 2 * 4, `peek ticket: ${peek.join(' then ')} git processes; at most two more per added ticket branch`);
+    // an answer reads the whole log: one git call for every log file on main, however many there are
+    const answer = (x) => { const spy = gitShim(x.F); spy.reset(); x.F.ok(x.F.old, ['answer', x.q, 'Left'], spy.env); return spy.calls().split('\n').filter(Boolean).length; };
+    const a = [answer(small), answer(big)];
+    assert.equal(a[0], a[1], `answer: ${a.join(' then ')} git processes`);
+    assert.ok(a[0] <= 12, `answer: ${a[0]} git processes`);
+  } finally { small.F.done(); big.F.done(); }
 });
