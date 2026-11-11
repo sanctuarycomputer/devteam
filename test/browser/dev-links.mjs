@@ -458,16 +458,15 @@ async function gatewayViewers({ G, HUB, SP, tab, app }) {
     s.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'x-frame-options': 'DENY', 'content-security-policy': "default-src 'self' 'unsafe-inline'; frame-ancestors 'none'" });
     s.end(appPage(q.url.startsWith('/second') ? 'Second' : 'First'));
   });
-  const said = dt(['preview', String(appPort), '--label', 'framed'], { ...WORKER, DEVTEAM_PUBLIC_URL: pub, DEVTEAM_PREVIEWS: '1' }, app);
-  const name = /preview (\S+) is live/.exec(said)?.[1];
-  assert.ok(name, said);
+  // The stand-in instance lists it, not the repo's dashboard: the app's relaxed policy names only the
+  // instance that lists a preview, so only that instance's viewer may hold the app (spec §7).
+  const name = 'framed-app';
   const lensUrl = `http://${name}.box.localhost:${G}/.devteam/lens`;
-  // listed by the hub before the lens asks the gateway for the app
-  await until(async () => (await (await fetch(`http://127.0.0.1:${HUB}/instances.json`)).json()).instances.some((x) => (x.previews ?? []).some((p) => p.name === name)), 'the hub to list the framed app');
 
   // the stand-in instance: a viewer page that frames what it's given and keeps what it hears in #got,
   // posting whatever the test puts in data-send. Its hello says devteam: 1, so the hub (the real
   // dashboard's) shows it as a tab of its own, "standin"; nothing here looks at the hub's tabs again.
+  // A second, "other", on the next port, frames the same lens and lists nothing.
   const viewerPage = (src, sandbox) => `<!doctype html><title>Stand-in viewer</title><iframe id="f" src="${src}" ${sandbox} style="width:800px;height:600px;border:0"></iframe><pre id="got"></pre><script>
 const f = document.getElementById('f');
 const got = document.getElementById('got');
@@ -479,14 +478,27 @@ new MutationObserver(() => { const m = document.body.dataset.send; if (!m) retur
   const artPolicy = `default-src 'none'; style-src 'unsafe-inline' ${dir}; frame-ancestors ${self} http://127.0.0.1:${HUB}; sandbox allow-scripts`;
   await serve(SP, (q, s) => {
     const send = (type, csp, body) => { s.writeHead(200, { 'content-type': type, 'content-security-policy': csp }); s.end(body); };
-    if (q.url === '/api/hello') return send('application/json', "default-src 'none'", JSON.stringify({ devteam: 1, name: 'standin', root: '/srv/standin', port: SP, viewer: 1, inbox: 0, previews: [] }));
+    if (q.url === '/api/hello') return send('application/json', "default-src 'none'", JSON.stringify({ devteam: 1, name: 'standin', root: '/srv/standin', port: SP, viewer: 1, inbox: 0, previews: [{ name, port: appPort, project: 'standin', session: 'standin-01-x', label: 'framed', at: new Date().toISOString(), up: true, run: false }] }));
     if (q.url.startsWith(`/view/preview/${name}`)) return send('text/html; charset=utf-8', policy(`frame-src http://${name}.box.localhost:${G}`), viewerPage(`${lensUrl}?route=%2F`, 'sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"'));
+    // its tab in the hub: the same viewer, so the whole chain is hub, this instance, the lens, the app
+    if (q.url === '/' || q.url.startsWith('/?')) return send('text/html; charset=utf-8', policy(`frame-src http://${name}.box.localhost:${G}`), viewerPage(hubLens, 'sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"'));
     if (q.url.startsWith('/view/artifact/mock')) return send('text/html; charset=utf-8', policy("frame-src 'self'"), viewerPage(`/artifact/tree/${T}/mock/index.html`, ''));
     if (q.url === `/artifact/tree/${T}/mock/index.html`) return send('text/html; charset=utf-8', artPolicy, '<!doctype html><link rel="stylesheet" href="s.css"><p id="art">the instance at the published tree</p>');
     if (q.url === `/artifact/tree/${T}/mock/s.css`) return send('text/css; charset=utf-8', artPolicy, '#art { color: rgb(1, 2, 3) }');
     s.writeHead(404);
     return s.end();
   });
+  const otherLens = `${lensUrl}?route=%2F&from=other`;
+  const hubLens = `${lensUrl}?route=%2F&from=hub`;
+  await serve(SP + 1, (q, s) => {
+    const send = (type, csp, body) => { s.writeHead(200, { 'content-type': type, 'content-security-policy': csp }); s.end(body); };
+    if (q.url === '/api/hello') return send('application/json', "default-src 'none'", JSON.stringify({ devteam: 1, name: 'other', root: '/srv/other', port: SP + 1, viewer: 1, inbox: 0, previews: [] }));
+    if (q.url.startsWith(`/view/preview/${name}`)) return send('text/html; charset=utf-8', policy(`frame-src http://${name}.box.localhost:${G}`), viewerPage(otherLens, 'sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"'));
+    s.writeHead(404);
+    return s.end();
+  });
+  // listed by the hub before the lens asks the gateway for the app
+  await until(async () => (await (await fetch(`http://127.0.0.1:${HUB}/instances.json`)).json()).instances.some((x) => x.port === SP && (x.previews ?? []).some((p) => p.name === name)), 'the hub to list the framed app');
 
   // --- the lens ---
   const viewer = `${inst}/view/preview/${name}`;
@@ -541,6 +553,20 @@ new MutationObserver(() => { const m = document.body.dataset.send; if (!m) retur
   await tell({ type: 'go', route: '/second' });
   await hear((d) => d.type === 'ready' && d.route === '/second' && d.title === 'Second', 'the app at /second');
   stepOk('go takes the app to its own path; the same go posted by the app, or dispatched as a made-up event claiming the viewer, moved nothing');
+  // the hub frames the owning instance, which frames the lens, which frames the app: every ancestor is allowed
+  await browser.navigate(tab, `${pub}/`);
+  await until(() => browser.evalIn(`${pub}/`, `[...document.querySelectorAll('[role=tab]')].some((t) => t.textContent.includes('standin'))`), 'the stand-in\'s tab in the hub');
+  await browser.evalIn(`${pub}/`, `[...document.querySelectorAll('[role=tab]')].find((t) => t.textContent.includes('standin')).click()`);
+  await until(() => browser.evalIn(hubLens, `(() => { const d = document.getElementById('app').contentDocument; return d && d.getElementById('buy') && d.getElementById('buy').textContent; })()`), 'the app in the lens in the owning instance in the hub');
+  stepOk('in the hub, the owning instance\'s viewer holds the lens and the app in it');
+  // Another instance's viewer may hold the lens (its policy is the same on every preview's name), but
+  // the app's policy names only the instance that lists it: the lens shows an empty frame. Its own
+  // script runs, which is what says the refusal is the app's.
+  await browser.navigate(tab, `http://${SP + 1}.box.localhost:${G}/view/preview/${name}`);
+  await until(() => browser.evalIn(otherLens, `!!document.getElementById('app')`), 'the lens in the other instance\'s viewer');
+  await sleep(2000);
+  assert.equal(await browser.evalIn(otherLens, `(() => { try { const d = document.getElementById('app').contentDocument; return !!(d && d.getElementById('buy')); } catch (e) { return false; } })()`), false, 'the app is refused');
+  stepOk('another instance\'s viewer holds the lens, but the app inside it is refused: its policy names only the instance that lists the preview');
 
   // --- the owner's view of a public page: what the box serves for standin/mock, bound to the stand-in ---
   const gwDir = path.join(base, 'gateway');

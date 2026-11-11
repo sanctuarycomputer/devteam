@@ -1868,7 +1868,9 @@ test('previewLinks: names from the hub\'s list, checked, ambiguous when two inst
   list[0].previews.push(row('both-have', 30006, { project: 'a' }));
   const many = [inst('/many', P, Array.from({ length: 25 }, (_, i) => row(`many-${String.fromCharCode(97 + i)}${String.fromCharCode(97 + i)}x`, 31000 + i)))];
   const m = G.previewLinks(list, ports, own);
-  assert.deepEqual({ ...m.get('cool-tiger') }, { port: 30001, root: '/a', project: 'p', session: 's', label: 'l', run: false });
+  assert.deepEqual({ ...m.get('cool-tiger') }, { port: 30001, instance: P, root: '/a', project: 'p', session: 's', label: 'l', run: false }, 'with the port of the instance that lists it: only its dashboard may hold the lens (spec §7)');
+  assert.equal(m.get('other-only').instance, P + 1);
+  assert.equal(G.previewLinks([{ ...inst('/a', String(P), [row('str-port', 30001)]) }], ports, own).get('str-port').instance, P, 'a number, whatever the list wrote');
   assert.equal(m.get('cool-tiger-2').port, 30002, 'name and name-2 are two names');
   for (const bad of ['NOT-valid', 'blocked-port', 'hub-port', 'term-port', 'own-port', 'string-port', 'label-long', 'low-port']) assert.equal(m.has(bad), false, `${bad} is dropped`);
   assert.deepEqual(m.get('both-have').ambiguous.map((c) => ({ ...c })), [{ root: '/a', project: 'a', port: 30006 }, { root: '/b', project: 'b', port: 30004 }]);
@@ -2338,14 +2340,16 @@ test('a preview framed from its own name (its lens) gets past the app\'s framing
   const inst = http.createServer((q, s) => { s.writeHead(200, { 'x-frame-options': 'DENY', 'content-security-policy': "default-src 'self'; frame-ancestors 'none'" }); s.end('dashboard'); });
   await new Promise((r) => inst.listen(P + 21, '127.0.0.1', r));
   const site = origin('cool-tiger');
-  const lens = `'self' ${gw.publicUrl} ${Array.from({ length: 25 }, (_, i) => gw.inst(P + i)).join(' ')}`;
+  // the lens, the hub and the one instance that lists the preview: no other instance's page may hold the app
+  const lens = `'self' ${gw.publicUrl} ${gw.inst(P)}`;
   const as = (dest, from) => ({ 'sec-fetch-dest': dest, 'sec-fetch-site': from, 'sec-fetch-mode': 'navigate' });
   try {
-    hub.list = [instance('/srv/alpha', P, [previewRow('cool-tiger', devPort)])];
+    hub.list = [instance('/srv/alpha', P, [previewRow('cool-tiger', devPort)]), instance('/srv/beta', P + 1, [])];
     let r = await req('cool-tiger', 'GET', '/', { headers: as('iframe', 'same-origin') });
     assert.equal(r.status, 200, r.body);
+    assert.ok(!r.headers['content-security-policy'].includes(gw.inst(P + 1)), 'another instance on the box is not named');
     assert.equal(r.headers['x-frame-options'], undefined, 'X-Frame-Options goes');
-    assert.equal(r.headers['content-security-policy'], `default-src 'self' ${site}; frame-ancestors ${lens}`, 'frame-ancestors names the lens and what may hold it; the rest is kept');
+    assert.equal(r.headers['content-security-policy'], `default-src 'self' ${site}; frame-ancestors ${lens}`, 'frame-ancestors names the lens, the hub and the owning instance; the rest is kept');
     assert.equal(r.headers['content-security-policy-report-only'], "frame-ancestors 'none'", 'a report-only policy blocks nothing, and is left');
     for (const [dest, from] of [['document', 'none'], ['iframe', 'same-site'], ['frame', 'same-origin'], ['object', 'same-origin'], ['embed', 'same-origin']]) {
       r = await req('cool-tiger', 'GET', '/', { headers: as(dest, from) });
@@ -2360,6 +2364,18 @@ test('a preview framed from its own name (its lens) gets past the app\'s framing
     assert.deepEqual([r.headers['x-frame-options'], r.headers['content-security-policy']], [undefined, undefined], 'an app that refused no frames: nothing is added');
     r = await req('cool-tiger', 'GET', '/two', { headers: as('iframe', 'same-origin') });
     assert.equal(r.headers['content-security-policy'], `frame-ancestors ${lens}, script-src 'self'; frame-ancestors ${lens}`, 'every policy in the header');
+    // a name two instances list is never served, so it can't reach the relaxation: the owner sees which is which
+    hub.list = [instance('/srv/alpha', P, [previewRow('cool-tiger', devPort)]), instance('/srv/beta', P + 1, [previewRow('cool-tiger', devPort)])];
+    await gw.g.pollPush();
+    r = await req('cool-tiger', 'GET', '/', { headers: as('iframe', 'same-origin') });
+    assert.deepEqual([r.status, r.headers['x-frame-options']], [503, 'DENY'], 'ambiguous: the gateway\'s own page, framed by no one');
+    assert.ok(r.headers['content-security-policy'].includes("frame-ancestors 'none'"));
+    // and a name the hub doesn't list
+    r = await req('lost-name', 'GET', '/', { headers: as('iframe', 'same-origin') });
+    assert.deepEqual([r.status, r.headers['x-frame-options']], [503, 'DENY'], 'unknown: the same');
+    assert.ok(r.headers['content-security-policy'].includes("frame-ancestors 'none'"));
+    hub.list = [instance('/srv/alpha', P, [previewRow('cool-tiger', devPort)])];
+    await gw.g.pollPush();
     // confined to previews: an instance's page framed from its own name keeps its headers
     r = await gw.req('GET', '/x', { on: P + 21, headers: as('iframe', 'same-origin') });
     assert.deepEqual([r.status, r.headers['x-frame-options'], r.headers['content-security-policy']], [200, 'DENY', "default-src 'self'; frame-ancestors 'none'"], 'an instance\'s page');

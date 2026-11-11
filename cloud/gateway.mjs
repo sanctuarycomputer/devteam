@@ -259,7 +259,7 @@ export function previewLinks(list, ports, ownPort, ttydPort = 7681) {
         if (!Number.isInteger(port) || port < 1024 || port > 65535 || port === HUB_PORT || ports.includes(port) || port === ttydPort || port === ownPort) continue;
         if (typeof p.label === 'string' && p.label.length > PREVIEW_CAPS.label) continue;
         seen.add(p.name);
-        const row = { port, root: x.root, project: previewCap(p.project, PREVIEW_CAPS.project), session: previewCap(p.session, PREVIEW_CAPS.session), label: previewCap(p.label, PREVIEW_CAPS.label), run: p.run === true };
+        const row = { port, instance: Number(x.port), root: x.root, project: previewCap(p.project, PREVIEW_CAPS.project), session: previewCap(p.session, PREVIEW_CAPS.session), label: previewCap(p.label, PREVIEW_CAPS.label), run: p.run === true };
         const had = links.get(p.name);
         if (!had) links.set(p.name, row);
         else {
@@ -830,10 +830,12 @@ export function createGateway(opts = {}) {
     return m && m[2] === `${NAME}${SUFFIX}` && PREVIEW_NAME.test(m[1]) ? m[1] : null;
   };
   const previewOrigin = (name) => `${pubUrl.protocol}//${name}.${NAME}${SUFFIX}`;
-  // Who may hold a preview's lens, and so the app inside it: frame-ancestors is checked against every
-  // ancestor, so the hub (which frames a dashboard) as well as each instance (whose viewer frames the lens).
-  const LENS_ANCESTORS = [PUB, ...BLOCK.map(instanceOrigin)].join(' ');
-  const LENS_CSP = previewLensCsp(LENS_ANCESTORS);
+  // Who may hold a preview's lens: frame-ancestors is checked against every ancestor, so the hub
+  // (which frames a dashboard) as well as each instance (whose viewer frames the lens). The lens is
+  // the same bytes and policy on every preview's name, as the kit's relay serves it, and neither can
+  // know which instance a name is for. The app inside it can: its own policy (downstreamHeaders)
+  // names only the instance that lists the preview, so a lens held by any other gets an empty frame.
+  const LENS_CSP = previewLensCsp([PUB, ...BLOCK.map(instanceOrigin)].join(' '));
   // Passkeys belong to the box's name. A page on an instance's subdomain may ask for one, but its
   // answer names that page's origin, and only an answer from the box's own origin is accepted.
   const RP_ID = NAME;
@@ -1046,9 +1048,10 @@ export function createGateway(opts = {}) {
   // A preview's own headers: only this link's port, http and ws forms, to its own origin.
   const PREVIEW_LOOP = /\b(http|ws):\/\/(?:127\.0\.0\.1|localhost):(\d+)/g;
   const mapPreview = (s, port, own) => s.replace(PREVIEW_LOOP, (all, scheme, p) => (Number(p) !== port ? all : scheme === 'ws' ? own.replace(/^http/, 'ws') : own));
-  // framedBySelf: a preview's page framed from its own origin, which is how its lens holds it (spec
-  // §7). For that load alone the app's own framing headers give way, to the lens and what may hold it.
-  const downstreamHeaders = (h, cap, own, previewPort = null, framedBySelf = false) => {
+  // lensOf: for a preview's page framed from its own origin, which is how its lens holds it (spec §7),
+  // the instance that lists the preview. For that load alone the app's own framing headers give way,
+  // to the lens, the hub and that one instance's dashboard: no other instance's page may hold the app.
+  const downstreamHeaders = (h, cap, own, previewPort = null, lensOf = null) => {
     const out = {};
     for (const [k, v] of Object.entries(h)) {
       // x-devteam-public is the gateway's to say (what the box serves); an upstream's copy never passes
@@ -1059,13 +1062,15 @@ export function createGateway(opts = {}) {
     }
     // an artifact under its capability: its policy stays under it too
     if (cap && out['content-security-policy']) out['content-security-policy'] = out['content-security-policy'].split(`${own}/artifact/`).join(`${own}${cap}/artifact/`);
-    if (previewPort && framedBySelf) {
+    // a port off the block is no instance's: then nothing gives way
+    if (previewPort && BLOCK.includes(lensOf)) {
+      const ancestors = `'self' ${PUB} ${instanceOrigin(lensOf)}`;
       const xfo = 'x-frame-options' in out;
       delete out['x-frame-options'];
       const csp = out['content-security-policy'] ? String(out['content-security-policy']) : '';
-      if (csp.search(FRAME_ANCESTORS) >= 0) out['content-security-policy'] = replaceFrameAncestors(csp, `'self' ${LENS_ANCESTORS}`);
+      if (csp.search(FRAME_ANCESTORS) >= 0) out['content-security-policy'] = replaceFrameAncestors(csp, ancestors);
       // the app refused frames by X-Frame-Options alone: a policy of its own keeps that for every other page
-      else if (xfo) out['content-security-policy'] = `${csp ? `${csp}, ` : ''}frame-ancestors 'self' ${LENS_ANCESTORS}`;
+      else if (xfo) out['content-security-policy'] = `${csp ? `${csp}, ` : ''}frame-ancestors ${ancestors}`;
     }
     return { ...out, ...hsts };
   };
@@ -1104,6 +1109,7 @@ export function createGateway(opts = {}) {
     : send(res, 503, 'text/plain; charset=utf-8', 'this preview is not available right now', { 'retry-after': '5' }));
   // The server is tried on 127.0.0.1, then ::1 when that's refused. The body starts only once a
   // connection is up, so a refused attempt has taken none of it and the retry sends all of it.
+  // Only a link the map holds unambiguously gets here (servePreview), with the one instance listing it.
   const proxyPreview = (req, res, name, link, own) => {
     let current = null;
     res.on('close', () => { if (!res.writableFinished) current?.destroy(); });
@@ -1111,7 +1117,7 @@ export function createGateway(opts = {}) {
       let connected = false;
       // agent: false, a fresh connection each time: a kept-alive one to a server since stopped would read as a 502, not as down
       const up = http.request({ host: hosts[0], agent: false, port: link.port, method: req.method, path: req.url, headers: upstreamHeaders(req, link.port, own, { loopbackHost: 'localhost' }) }, (ur) => {
-        res.writeHead(ur.statusCode, { ...downstreamHeaders(ur.headers, null, own, link.port, req.headers['sec-fetch-dest'] === 'iframe' && req.headers['sec-fetch-site'] === 'same-origin'), 'cache-control': 'no-store' });
+        res.writeHead(ur.statusCode, { ...downstreamHeaders(ur.headers, null, own, link.port, req.headers['sec-fetch-dest'] === 'iframe' && req.headers['sec-fetch-site'] === 'same-origin' ? link.instance : null), 'cache-control': 'no-store' });
         pipeline(ur, res, () => {});
       });
       current = up;
