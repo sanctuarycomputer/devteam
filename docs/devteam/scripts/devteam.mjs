@@ -4570,6 +4570,29 @@ function ratingWarnings({ stake, urgency, blocks, def }) {
 function cmdAsk() { out(askLine().id); }
 // Every check and refusal ask makes, and the line it writes. thread ask calls it with the thread the
 // question is asked in; nothing else about the question differs.
+// Before a question goes to the owner: standing rules and earlier answers that look like it, on
+// stderr. Alike means the rule or question has 60% of this one's words, and a third of the score
+// this one would get against itself (on a small project, words only this one has weigh most). A
+// rule the owner gave for this class settles it (decide --approved k-…); any other rule,
+// and every earlier answer, is for the recommendation and approves nothing. The kit's own wordings
+// (goal-met, registry attestations, reviews, goal approvals) are alike by design and skipped.
+const KIT_WORDED = (cls, kind) => ['goal-met', 'registry-attest'].includes(cls) || ['review', 'goal-approval'].includes(kind);
+function askLikeWarnings({ text, cls, kind }) {
+  if (!text.trim() || KIT_WORDED(cls, kind)) return;
+  const rules = logObjects('knowledge').filter((k) => k.status === 'accepted' && k.kind === 'preference');
+  const answered = questions().filter((x) => x.status === 'answered' && x.answer && !KIT_WORDED(x.class, x.kind));
+  const docs = [...rules.map((k) => ({ id: k.id, rule: k, fields: [{ text: k.statement }] })), ...answered.map((x) => ({ id: x.id, q: x, fields: [{ text: textOf(x.question, x.context) }] }))];
+  if (!docs.length) return;
+  const ix = searchIndex(docs);
+  const close = ix.rows.map((row) => ({ d: row.doc, ...searchSimilar(ix, text, row) })).filter((c) => c.coverage >= 0.6 && c.ratio >= 0.3).sort((a, b) => b.ratio - a.ratio);
+  const line = (s) => quoteData(capBytes300(s));
+  for (const c of close.filter((x) => x.d.rule).slice(0, 3)) {
+    const k = c.d.rule;
+    if (cls && writerClass(k.created_by) === 'owner' && k.scope === `class:${cls}`) warn(`a standing rule settles this: ${k.id} ${line(k.statement)}. If it does, withdraw this question and cite it (--approved ${k.id})`);
+    else warn(`an accepted rule may bear on this: ${k.id} ${line(k.statement)}. It approves nothing here; use it in your recommendation`);
+  }
+  for (const c of close.filter((x) => x.d.q).slice(0, 3)) warn(`the owner answered a similar question before; read it for your recommendation. It approves nothing here: ${c.d.q.id} ${line(c.d.q.question)} (answer: ${line(c.d.q.answer)})`);
+}
 function askLine({ thread } = {}) {
   supervisorOnly('ask');
   // a goal-met question's words are the kit's (below)
@@ -4820,6 +4843,8 @@ function askLine({ thread } = {}) {
   settleChecks({ self: null, kind, stake: rating.stake, settles, added: settles, settlesIf: flagStr('settles-if'), choices: jsonFlag('choices'), about: questionAbout({ goal: flagStr('goal'), ticket: flagStr('ticket'), blocks }) });
   if (rating.stake === undefined || rating.urgency === undefined) warn('rate it: --stake 1-3 --urgency 1-3, so the Inbox can put the most valuable question first (supervisor.md §6)');
   ratingWarnings({ ...rating, blocks, def });
+  // what the owner may already have said about it: never in the way of asking
+  try { askLikeWarnings({ text: textOf(q, flagStr('context')), cls, kind }); } catch {}
   return appendLog({
     type: 'question', kind, class: cls ?? undefined, scope: scope ?? undefined, ticket: flagStr('ticket'), re: flagStr('re'), sensor: flagStr('sensor'), remediation: remediationPin ?? undefined, remediation_entries: remediationEntries, owner_said: ownerSaid ?? undefined, question: q, context: kind === 'goal-approval' ? [flagStr('context'), forecastText(logGet(flagStr('goal')), goalForecast(logGet(flagStr('goal')))), registryAttestText(logGet(flagStr('goal')))].filter(Boolean).join('\n\n') : context,
     rule_scope: flagStr('rule-scope'), goal: flagStr('goal'), change: goalChangeFlag(cls), options: asList(flags.options), choices: goalMet ? GOAL_MET_CHOICES : jsonFlag('choices'), met: goalMet ? { basis: goalMet.basis, reading: goalMet.reading } : undefined, links, recommendation: recommendation || undefined, confidence: flagNum('confidence'), default: def ?? undefined,
