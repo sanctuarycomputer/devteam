@@ -527,6 +527,8 @@
   .tl-ready { margin: 6px 0; padding: 6px 8px; border-radius: 6px; border: 1px solid color-mix(in srgb, var(--green) 45%, var(--line)); background: color-mix(in srgb, var(--green) 8%, var(--surface)); font-size: 12px; }
   .tl-ready input { width: 100%; padding: 4px 8px; margin-top: 4px; }
   @media (pointer: coarse) { #tl-pinbtn { height: 36px; padding: 0 14px; } }
+  /* iOS zooms into a focused field whose text is under 16px, so on touch screens every field is 16px. */
+  @media (pointer: coarse) { input:not([type=checkbox]):not([type=radio]):not([type=range]), textarea, select { font-size: 16px !important; } }
 </style>
 </head>
 <body>

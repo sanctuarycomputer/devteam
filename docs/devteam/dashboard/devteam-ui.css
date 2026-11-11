@@ -123,3 +123,5 @@
   .more { margin-top: 8px; }
   .page-error { border: 1px solid color-mix(in srgb, var(--red) 45%, var(--line)); background: color-mix(in srgb, var(--red) 7%, var(--surface)); border-radius: 8px; padding: 8px 12px; margin-bottom: 10px; font-size: 12px; color: var(--red-fg); white-space: pre-wrap; }
   @media (max-width: 640px) { body { padding: 10px; } .grow-field { grid-template-columns: 1fr; } .grow-field .help { grid-column: 1; } .grow-field > span:first-child { padding-top: 0; } }
+  /* iOS zooms into a focused field whose text is under 16px, so on touch screens every field is 16px. */
+  @media (pointer: coarse) { input:not([type=checkbox]):not([type=radio]):not([type=range]), textarea, select { font-size: 16px !important; } }
