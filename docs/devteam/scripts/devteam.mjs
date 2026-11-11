@@ -301,6 +301,10 @@ const SETTINGS_DEFAULTS = {
   resume_command: 'claude --continue --dangerously-skip-permissions',
   main_branch: 'main',
   merge_method: 'merge',
+  // true adds --admin to gh pr merge, for a main whose ruleset requires a review the PR's author
+  // (often the owner's own gh login, which opens every fleet PR) can't give; merge's own checks still run first.
+  // Home only: a repo link doesn't inherit it.
+  merge_admin: false,
   // Where PRs live: 'github' (gh pr view / gh pr merge --match-head-commit) or 'git' (no forge CLI:
   // merge takes --title and --body-file, merges the exact head on main and pushes; a moved main
   // makes the push fail, which is the same check).
@@ -375,7 +379,7 @@ const SETTINGS_DEFAULTS = {
 const OWNER_SETTINGS = {
   gates: 'gate-change', worktree_setup: 'gate-change', worktree_files: 'gate-change',
   autonomy_ceilings: 'governance-edit', agent_command: 'governance-edit', resume_command: 'governance-edit', worker_denied_commands: 'governance-edit',
-  forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', upstream_repo: 'governance-edit', upstream_sync: 'governance-edit',
+  forge: 'governance-edit', main_branch: 'governance-edit', merge_method: 'governance-edit', merge_admin: 'governance-edit', upstream_repo: 'governance-edit', upstream_sync: 'governance-edit',
   release: 'governance-edit', secret_commands: 'governance-edit', incident_slots: 'governance-edit', remediations: 'governance-edit', ignored_checks: 'gate-change', usage_sources: 'governance-edit', usage_command: 'governance-edit', model_prices: 'governance-edit', project: 'governance-edit',
 };
 // The classes whose owner answer approves a chore that changes real kit files (isKitFile).
@@ -4161,7 +4165,7 @@ function cmdMerge() {
       R.git(['worktree', 'remove', '--force', wt], R.root);
     }
   } else {
-    const merged = R.gh(['pr', 'merge', String(pr.number), `--${S.merge_method}`, '--match-head-commit', sha]);
+    const merged = R.gh(['pr', 'merge', String(pr.number), `--${S.merge_method}`, ...(S.merge_admin === true ? ['--admin'] : []), '--match-head-commit', sha]);
     if (merged === null) die(`gh pr merge refused (did the head move?); verify from the start`);
   }
   R.git(['fetch', '--quiet', 'origin', mainBranch]);
