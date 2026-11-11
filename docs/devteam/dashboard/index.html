@@ -2010,9 +2010,9 @@ function renderOoda(o) {
   // Orient
   const debt = o.debt?.signals || [];
   $('debt').innerHTML = debt.length ? debt.map((x) => `
-    <div class="card small" data-open="signal/${esc(encodeURIComponent(x.key))}"><b>${esc(signalTitle(x.key))}</b> <span class="muted">· seen ${esc(x.count)} times · unexplained for ${esc(hoursWords(x.hours))}</span><div>${linkify(x.latest)}</div></div>`).join('') : empty('Nothing waiting: every recurring signal is explained or under a day old.');
+    <div class="card small" data-open="signal/${esc(encodeURIComponent(x.key))}"><a class="linkish" href="#signal/${encodeURIComponent(x.key)}"><b>${esc(signalTitle(x.key))}</b></a> <span class="muted">· seen ${esc(x.count)} times · unexplained for ${esc(hoursWords(x.hours))}</span><div>${linkify(x.latest)}</div></div>`).join('') : empty('Nothing waiting: every recurring signal is explained or under a day old.');
   $('clusters').innerHTML = o.clusters.length ? o.clusters.map((c) => `
-    <div class="card small" data-open="signal/${esc(encodeURIComponent(c.key))}"><b>${esc(words(c.key.split(':')[0]))}</b> ${subjectLink(c.key.split(':').slice(1).join(':'))} <span class="muted">· seen ${esc(c.count)} times</span><div>${linkify(c.latest)}</div></div>`).join('') : empty('None. Something noticed more than once shows here.');
+    <div class="card small" data-open="signal/${esc(encodeURIComponent(c.key))}"><a class="linkish" href="#signal/${encodeURIComponent(c.key)}"><b>${esc(words(c.key.split(':')[0]))}</b></a> ${subjectLink(c.key.split(':').slice(1).join(':'))} <span class="muted">· seen ${esc(c.count)} times</span><div>${linkify(c.latest)}</div></div>`).join('') : empty('None. Something noticed more than once shows here.');
   $('problems').innerHTML = o.problems.length ? o.problems.map((p) => `
     <div class="card small"${subj('problem', p.id, p.title)} data-open="problem/${esc(encodeURIComponent(p.id))}"><span class="badge ${sevBadge(p.severity)}">sev ${esc(p.severity)}</span><span class="badge">${p.realized ? 'issue' : 'risk'}</span><a class="linkish" href="#problem/${encodeURIComponent(p.id)}"><b>${esc(p.title)}</b></a> <span class="muted">· ${esc(p.status)}${p.assigned_to ? `, ${esc(p.assigned_to)}` : ''}${(p.threatens || []).length ? ` · threatens ${p.threatens.map(esc).join(', ')}` : ''}</span>${p.detail ? `<div class="muted">${esc(p.detail)}</div>` : ''}</div>`).join('') : empty('None open.');
   const cand = o.knowledge.filter((k) => k.status === 'candidate');
@@ -2342,7 +2342,8 @@ function closeDrawer() {
 }
 // Each opener names the object (and how to draw it again), then draws it.
 const drawerFor = (kind, id, arg) => {
-  if (DRAWER.kind !== kind || DRAWER.id !== id) { LAST_HTML = ''; const k = peekKey(kind, id); for (const f of [...PEEK_FAIL.keys()]) if (f === k || f.startsWith(`${k}\0`)) PEEK_FAIL.delete(f); }
+  // another drawer: what failed to load (a peek, a lineage graph) is tried again
+  if (DRAWER.kind !== kind || DRAWER.id !== id) { LAST_HTML = ''; const k = peekKey(kind, id); for (const f of [...PEEK_FAIL.keys()]) if (f === k || f.startsWith(`${k}\0`)) PEEK_FAIL.delete(f); for (const [g, svg] of [...LINEAGE_SVG]) if (svg === false) LINEAGE_SVG.delete(g); }
   const same = DRAWER.kind === kind && DRAWER.id === id;
   DRAWER = { kind, id, arg, q: same ? DRAWER.q : undefined, deps: same ? DRAWER.deps : undefined, url: same ? DRAWER.url : undefined };
 };
@@ -2961,7 +2962,7 @@ function loopPlace(pl) {
 }
 // The lineage as a list, when its graph can't be drawn (Mermaid didn't load, or failed): by stage
 // in the loop's order, then what it is about; every record that has a sidepeek a link to it.
-const LINEAGE_STAGES = [['observe', 'Observe'], ['orient', 'Orient'], ['decide', 'Decide'], ['act', 'Act'], ['learn', 'Learn'], [null, 'What it is about']];
+const LINEAGE_STAGES = [['observe', 'Observe'], ['orient', 'Orient'], ['decide', 'Decide'], ['act', 'Act'], ['learn', 'Learn'], ['inbox', 'Asked you'], ['measurement', 'Measured'], [null, 'What it is about']];
 function lineageList(L) {
   const inLoop = LINEAGE_STAGES.map(([s]) => s).filter(Boolean);
   const item = (n) => `<li>${n.href ? `<a class="linkish" href="${esc(n.href)}"${n === L.nodes[0] ? ' aria-current="page"' : ''}>${esc(n.label)}</a>` : esc(n.label)} <span class="muted">${esc(words(n.kind ?? n.type))}</span></li>`;
@@ -2969,12 +2970,13 @@ function lineageList(L) {
 }
 /* loop-place end */
 // What a record came from and what came of it (the kit's lineage, peek's lineage and
-// lineage_mermaid). The list is the first paint; the graph, once drawn, is kept by its nodes' ids, so
-// a refresh that changes none of them draws the same HTML and the drawer stays as it is. Each node of
+// lineage_mermaid). The list is the first paint; the graph, once drawn, is kept by its nodes' ids,
+// stages and labels, so a refresh that changes none of them draws the same HTML and the drawer stays
+// as it is, and one that relabels or moves a node draws it again. Each node of
 // the graph (the i-th node is n<i>: its group's data-id, or, as 11.4.1 draws it once sanitized, its
 // id flowchart-n<i>-<counter>) is wrapped in a link to its sidepeek; Mermaid's own click is off in
-// strict mode. When Mermaid can't load or render, the list
-// stays. A collapsed group lists its members under it.
+// strict mode. When Mermaid can't load or render, the list stays while the drawer is open, and the
+// next open tries again (the CDN may be back). A collapsed group lists its members under it.
 const LINEAGE_SVG = new Map();
 const LINEAGE_FLIGHT = new Set();
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -3006,12 +3008,12 @@ function drawLineage(key, peek) {
 function lineageBlock(peek) {
   const L = peek?.lineage;
   if (!L?.nodes?.length || L.nodes.length < 2) return '';
-  const key = L.nodes.map((n) => n.id).join(' ');
+  const key = L.nodes.map((n) => `${n.id}\t${n.stage}\t${n.label}`).join('\n');
   const svg = LINEAGE_SVG.get(key);
   if (svg === undefined && peek.lineage_mermaid) drawLineage(key, peek);
   const groups = L.nodes.filter((n) => n.members?.length);
   return `<h3>How it came about, and what came of it</h3>
-    <div class="lineage" data-lineage="${esc(key)}">${svg ? `<figure class="diagram">${svg}</figure>` : lineageList(L)}</div>
+    <div class="lineage" data-lineage="${esc(L.nodes.map((n) => n.id).join(' '))}">${svg ? `<figure class="diagram">${svg}</figure>` : lineageList(L)}</div>
     ${groups.map((g) => `<details><summary>${esc(g.label)}</summary><ul>${g.members.map((m) => `<li>${linkify(m)}</li>`).join('')}</ul></details>`).join('')}
     ${L.truncated ? '<p class="small muted">Only the nearest steps are shown: it goes on further.</p>' : ''}`;
 }
@@ -3048,7 +3050,7 @@ function openSignal(key) {
   showDrawer(`<h2 id="drawer-title">${esc(signalTitle(key))}</h2>
     ${attrs({ id: key, idTip: 'The key its observations recur on: a fingerprint, a finding, or a kind and a subject.', peek: p, type: 'signal', noRecord: true, computed: [
       ['Seen', esc(s?.count ?? c?.count), 'How many observations on this key nothing explains yet.'],
-      ['Recurring', !s || s.recurring ? 'yes' : 'not yet: a signal is three or more, from two writers or on two days', 'Whether Orient lists it as a recurring signal.'],
+      ['Recurring', s ? (s.recurring ? 'yes' : 'not yet: a signal is three or more, from two writers or on two days') : p === undefined ? '' : c ? 'yes' : '', 'Whether Orient lists it as a recurring signal (nothing while its peek loads).'],
       ['First seen', s?.first_at ? esc(when(s.first_at)) : '', 'The oldest observation nothing explains yet.'],
       ['Latest', s?.latest_at ? esc(when(s.latest_at)) : '', 'The newest one.'],
       ['Unexplained for', s?.unexplained_hours != null ? esc(hoursWords(s.unexplained_hours)) : '', 'How long since the oldest of them: over a day is orientation debt.'],

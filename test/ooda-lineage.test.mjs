@@ -118,6 +118,73 @@ test('lineage: six observations on one signal collapse into one node; the bound 
     assert.match(M, /^class n0 current$/m, 'the opened record is marked');
     assert.doesNotMatch(M, /\b[kod]-\d{8}-/, 'no record id reaches Mermaid');
     assert.match(M, /^n1 -->\|evidence\| n0$/m);
+    // a reading is drawn in its own group, with its own stroke, not with what the record is about
+    const reading = hand('supervisor', { type: 'observation', source: 'supervisor', subject: 'app', kind: 'reading', detail: 'checkout p95 at 2.1s' }, H / 4);
+    const kr = hand('supervisor', { type: 'knowledge', kind: 'lesson', scope: 'project', status: 'accepted', statement: 'it is slow', evidence: [reading] }, H / 8);
+    const MR = ok(old, ['peek', 'lesson', kr, '--mermaid']);
+    assert.match(MR, /^subgraph s_measurement\["Measured"\]\nn1\["checkout p95 at 2.1s"\]\nend$/m, MR);
+    assert.match(MR, /^classDef st_measurement stroke:#[0-9a-f]{6},stroke-width:1.5px$/m);
+    assert.match(MR, /^class n1 st_measurement$/m);
+    // an unknown signal dies for --mermaid as for --json
+    assert.match(F.run(old, ['peek', 'signal', 'nothing:here', '--mermaid']).err, /no signal nothing:here/);
+  } finally { F.done(); }
+});
+
+test('lineage: an incident holds what its fingerprints raise after it opened, until it was resolved', () => {
+  const F = fleetFixture('ooda-lineage-held');
+  try {
+    const C = incidentChain(F);
+    // a spike after the incident opened, cited by nothing: the incident holds it
+    const later = spike(C.hand, 'log:L1', 3 * H + 7000);
+    const inc = peek(F, 'problem', C.p).lineage;
+    assert.ok(inc.edges.some((e) => e.from === later && e.to === C.p && e.why === 'held'), JSON.stringify(inc.edges));
+    assert.ok(!inc.edges.some((e) => C.spikes.includes(e.from) && e.why.includes('held')), 'what it cited when it opened is about it, not held');
+    // the spike's own sidepeek says the same: it has a lineage, and its place follows the incident on
+    const o = peek(F, 'observation', later);
+    assert.ok(ids(o.lineage).includes(C.p), JSON.stringify(o.lineage));
+    assert.ok([C.p, ...ids(o.lineage)].includes(o.place.ref), JSON.stringify(o.place));
+    assert.ok(['explained', 'carried'].includes(o.place.state));
+    // resolved: what comes after isn't held
+    C.hand('supervisor', { type: 'problem', op: 'set', id: C.p, status: 'resolved' }, H);
+    const after = spike(C.hand, 'log:L1', H / 2);
+    const res = peek(F, 'problem', C.p).lineage;
+    assert.ok(res.edges.some((e) => e.from === later && e.why === 'held'), 'held while it was open');
+    assert.ok(!ids(res).includes(after), 'not after it was resolved');
+  } finally { F.done(); }
+});
+
+test('lineage: the hop bound truncates; two fields on one pair join their whys; a group takes every edge of its members', () => {
+  const F = fleetFixture('ooda-lineage-bounds');
+  try {
+    const hand = handFor(F);
+    // eight lessons, each with the one before as its evidence: from the last, six steps back and no more
+    const ks = [];
+    for (let i = 0; i < 8; i++) ks.push(hand('supervisor', { type: 'knowledge', kind: 'lesson', scope: 'project', status: 'accepted', statement: `step ${i}`, ...(i ? { evidence: [ks[i - 1]] } : {}) }, (100 - i) * 60000));
+    const top = peek(F, 'lesson', ks[7]).lineage;
+    assert.equal(top.truncated, true);
+    assert.deepEqual(ids(top).sort(), ks.slice(1).sort(), 'six steps back from the last');
+    assert.equal(peek(F, 'lesson', ks[3]).lineage.truncated, false, 'three back and four on: within the bounds');
+    const bottom = peek(F, 'lesson', ks[0]).lineage;
+    assert.equal(bottom.truncated, true, 'four steps on, and more beyond');
+    assert.deepEqual(ids(bottom).sort(), ks.slice(0, 5).sort());
+    // an incident a question cites as evidence and as what it asks about: one edge, both whys
+    const inc = hand('supervisor', { type: 'problem', title: 'cited twice', severity: 1, realized: true, status: 'open', threatens: [] }, 50 * 60000);
+    const q = hand('supervisor', { id: `q-${stamp(new Date(Date.now() - 49 * 60000))}-supervisor`, type: 'question', kind: 'incident-fix', question: 'fix it?', status: 'open', evidence: [inc], blocks: [inc] }, 49 * 60000);
+    assert.deepEqual(peek(F, 'problem', inc).lineage.edges, [{ from: inc, to: q, why: 'evidence, asks about' }]);
+    // six notes, each evidence for a lesson and about a problem, under one decision on both: one
+    // group, and it carries the edges to both
+    const six = [...Array(6)].map((_, i) => hand('supervisor', { type: 'observation', source: 'supervisor', subject: 'app', kind: 'note', detail: `six ${i}` }, (40 - i) * 60000));
+    const kl = hand('supervisor', { type: 'knowledge', kind: 'lesson', scope: 'project', status: 'accepted', statement: 'six of them', evidence: six }, 30 * 60000);
+    const p = hand('supervisor', { type: 'problem', title: 'the six', severity: 1, realized: true, status: 'open', threatens: [], refs: six }, 29 * 60000);
+    const d = hand('supervisor', { type: 'decision', class: 'orient-noise', what: 'on both', authority: 'rung', refs: [p, kl] }, 28 * 60000);
+    const L = peek(F, 'decision', d).lineage;
+    const groups = L.nodes.filter((x) => x.members);
+    assert.equal(groups.length, 1, JSON.stringify(L.nodes));
+    assert.deepEqual([...groups[0].members].sort(), [...six].sort());
+    const g = groups[0].id;
+    assert.ok(L.edges.some((e) => e.from === g && e.to === kl && e.why === 'evidence'), JSON.stringify(L.edges));
+    assert.ok(L.edges.some((e) => e.from === g && e.to === p && e.why === 'about'), JSON.stringify(L.edges));
+    assert.ok(!L.edges.some((e) => six.includes(e.from) || six.includes(e.to)), 'no member is drawn on its own');
   } finally { F.done(); }
 });
 
@@ -164,7 +231,9 @@ test('where an observation sits: on its card (dashboard-data) and in its peek; a
     const botAgain = ok(old, ['observe', '--subject', 'app', '--kind', 'note', '--detail', 'the bot again', '--key', 'note:bot'], SUP).trim();
     const d = json(ok(old, ['dashboard-data']));
     const place = (id) => d.ooda.observations.find((o) => o.id === id)?.place;
-    assert.deepEqual(place(later), { state: 'explained', ref: C.p, why: 'incident' });
+    // a later one the incident holds goes on with it, as its lineage shows
+    assert.equal(place(later).state, 'carried');
+    assert.match(place(later).why, /^incident → decision → act → (outcome|fix deployed)$/);
     assert.equal(place(botBefore).state, 'noise');
     assert.equal(place(botBefore).why, 'a health check');
     assert.deepEqual(place(botAgain), { state: 'new', ref: null }, 'after the ruling: a fresh look');
@@ -238,7 +307,7 @@ test('the lineage as the page draws it: n<i> is the i-th node, in its stage\'s s
     // each subgraph holds exactly the nodes of its stage, by their index
     const blocks = Object.fromEntries([...M.matchAll(/^subgraph s_(\w+)\["\w+"\]\n([\s\S]*?)\nend$/gm)].map(([, s, body]) => [s, [...body.matchAll(/^n(\d+)[[(]/gm)].map((m) => Number(m[1]))]));
     const want = {};
-    p.lineage.nodes.forEach((n, i) => { if (n.stage && n.stage !== 'measurement' && n.stage !== 'inbox') (want[n.stage] ??= []).push(i); });
+    p.lineage.nodes.forEach((n, i) => { if (n.stage) (want[n.stage] ??= []).push(i); });
     assert.deepEqual(blocks, want);
     for (const [i, n] of p.lineage.nodes.entries()) assert.match(M, new RegExp(`^n${i}\\[\\(?"?\\[?"${n.label.replace(/[^A-Za-z0-9 .,:!?()'/+-]/g, '').replace(/\s+/g, ' ').trim().slice(0, 60).replace(/[()+?.]/g, '\\$&')}"`, 'm'), `n${i} is ${n.id}`);
     // the page's list fallback: by stage in order, every node that opens a sidepeek a link
