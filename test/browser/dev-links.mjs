@@ -1,13 +1,16 @@
 #!/usr/bin/env node
 // The dev links chain in a real browser: Chrome over the DevTools protocol against a real dashboard,
 // a real Vite app, (between them) the thread layer, and (the second half) a real gateway on
-// *.localhost, by hand (needs Chrome and npm's network once; not in CI). Node 22+.
+// *.localhost, with its preview lens and the owner's view of a public page. Run by hand (needs Chrome
+// and npm's network once; not in CI). Node 22+.
 //   node test/browser/dev-links.mjs [--only threads]
 // A synthetic test can't show what a popup, the hub's sandboxed frame, a clipboard or an HMR socket
 // does: this drives them with real input events.
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -274,7 +277,7 @@ async function laptop({ HUB, DASH, app }) {
 }
 
 // ===== the gateway half: a real gateway on box.localhost, a real passkey (a virtual authenticator) =====
-async function viaGateway({ DASH, HUB, app, G }) {
+async function viaGateway({ DASH, HUB, app, G, SP }) {
   const pub = `http://box.localhost:${G}`;
   const hubUrl = `${pub}/`;
   const dashUrl = `http://${DASH}.box.localhost:${G}/`;
@@ -348,6 +351,8 @@ async function viaGateway({ DASH, HUB, app, G }) {
   const viaGw = await loadTwice(previewUrl);
   const straight = await loadTwice(direct);
   say(`measure  no-store: second load through the gateway ${viaGw.bytes} bytes in ${viaGw.ms} ms; straight to the server ${straight.bytes} bytes in ${straight.ms} ms`);
+  // the session from the sign-in above carries on into the gateway's half of viewers
+  await gatewayViewers({ G, HUB, SP, tab, app });
 }
 
 // ===== threads: Shift and point on the dashboard, a turn typed into a stand-in supervisor's pane =====
@@ -416,6 +421,140 @@ async function threads({ DASH, pane }) {
   stepOk('accepting the proposal resolved it: the pin went, and the dock lists it under Resolved');
 }
 
+// ===== the gateway's half of viewers: the lens on a preview's name, the owner's view on the public
+// name. The kit's own viewer comes in a later PR, so a stand-in instance plays it: its hello says
+// viewer: 1, and its pages carry the kit's kinds of policy in its loopback origin, as the kit's do. =====
+// A server of the test's own on 127.0.0.1, closed (its open connections too) with everything else.
+async function serve(port, handler) {
+  const srv = http.createServer(handler);
+  await new Promise((resolve, reject) => { srv.once('error', reject); srv.listen(port, '127.0.0.1', resolve); });
+  procs.push({ kill: () => { srv.closeAllConnections(); srv.close(); } });
+  return srv;
+}
+async function gatewayViewers({ G, HUB, SP, tab, app }) {
+  const pub = `http://box.localhost:${G}`;
+  const inst = `http://${SP}.box.localhost:${G}`;
+  const self = `http://127.0.0.1:${SP}`;
+  const T = 'e'.repeat(40);
+  // an app that refuses every frame, as many do: only its lens's own load may hold it. Its console
+  // error comes 1.5 s after load, so the lens has attached by then (its poll is 250 ms): don't shorten it.
+  // Two buttons try to move it as the viewer would: a real postMessage to the lens (from the app, so
+  // not the viewer's), and a made-up message event dispatched on the lens's window, claiming the
+  // viewer as its source and origin, which only isTrusted tells apart.
+  const goSecond = "{ lens: 1, type: 'go', route: '/second' }";
+  const appPage = (title) => `<!doctype html><title>${title}</title><body style="margin:0;height:3000px"><button id="buy">Buy now</button><div id="card" style="padding:24px"><span>one</span><span><b>deep</b> two</span></div><p id="long">${'é'.repeat(600)}</p><button id="forge" onclick="parent.postMessage(${goSecond}, '*')">forge</button><button id="synth" onclick="parent.dispatchEvent(new MessageEvent('message', { data: ${goSecond}, origin: parent.location.ancestorOrigins[0], source: parent.parent }))">synth</button><script>setTimeout(() => console.error('boom from the app'), 1500)</script></body>`;
+  const appPort = await freePort();
+  await serve(appPort, (q, s) => {
+    s.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'x-frame-options': 'DENY', 'content-security-policy': "default-src 'self' 'unsafe-inline'; frame-ancestors 'none'" });
+    s.end(appPage(q.url.startsWith('/second') ? 'Second' : 'First'));
+  });
+  const said = dt(['preview', String(appPort), '--label', 'framed'], { ...WORKER, DEVTEAM_PUBLIC_URL: pub, DEVTEAM_PREVIEWS: '1' }, app);
+  const name = /preview (\S+) is live/.exec(said)?.[1];
+  assert.ok(name, said);
+  const lensUrl = `http://${name}.box.localhost:${G}/.devteam/lens`;
+  // listed by the hub before the lens asks the gateway for the app
+  await until(async () => (await (await fetch(`http://127.0.0.1:${HUB}/instances.json`)).json()).instances.some((x) => (x.previews ?? []).some((p) => p.name === name)), 'the hub to list the framed app');
+
+  // the stand-in instance: a viewer page that frames what it's given and keeps what it hears in #got,
+  // posting whatever the test puts in data-send. Its hello says devteam: 1, so the hub (the real
+  // dashboard's) shows it as a tab of its own, "standin"; nothing here looks at the hub's tabs again.
+  const viewerPage = (src, sandbox) => `<!doctype html><title>Stand-in viewer</title><iframe id="f" src="${src}" ${sandbox} style="width:800px;height:600px;border:0"></iframe><pre id="got"></pre><script>
+const f = document.getElementById('f');
+const got = document.getElementById('got');
+addEventListener('message', (e) => { if (e.source === f.contentWindow) got.textContent += JSON.stringify({ origin: e.origin, data: e.data }) + '\\n'; });
+new MutationObserver(() => { const m = document.body.dataset.send; if (!m) return; delete document.body.dataset.send; f.contentWindow.postMessage(JSON.parse(m), new URL(f.src, location.href).origin); }).observe(document.body, { attributes: true });
+</script>`;
+  const policy = (extra) => `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; ${extra}; frame-ancestors 'self' http://127.0.0.1:${HUB}`;
+  const dir = `${self}/artifact/tree/${T}/mock/`;
+  const artPolicy = `default-src 'none'; style-src 'unsafe-inline' ${dir}; frame-ancestors ${self} http://127.0.0.1:${HUB}; sandbox allow-scripts`;
+  await serve(SP, (q, s) => {
+    const send = (type, csp, body) => { s.writeHead(200, { 'content-type': type, 'content-security-policy': csp }); s.end(body); };
+    if (q.url === '/api/hello') return send('application/json', "default-src 'none'", JSON.stringify({ devteam: 1, name: 'standin', root: '/srv/standin', port: SP, viewer: 1, inbox: 0, previews: [] }));
+    if (q.url.startsWith(`/view/preview/${name}`)) return send('text/html; charset=utf-8', policy(`frame-src http://${name}.box.localhost:${G}`), viewerPage(`${lensUrl}?route=%2F`, 'sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"'));
+    if (q.url.startsWith('/view/artifact/mock')) return send('text/html; charset=utf-8', policy("frame-src 'self'"), viewerPage(`/artifact/tree/${T}/mock/index.html`, ''));
+    if (q.url === `/artifact/tree/${T}/mock/index.html`) return send('text/html; charset=utf-8', artPolicy, '<!doctype html><link rel="stylesheet" href="s.css"><p id="art">the instance at the published tree</p>');
+    if (q.url === `/artifact/tree/${T}/mock/s.css`) return send('text/css; charset=utf-8', artPolicy, '#art { color: rgb(1, 2, 3) }');
+    s.writeHead(404);
+    return s.end();
+  });
+
+  // --- the lens ---
+  const viewer = `${inst}/view/preview/${name}`;
+  await browser.navigate(tab, viewer);
+  await browser.cdp.send('Page.bringToFront', {}, tab.sessionId).catch(() => {});
+  const inApp = (expr) => browser.evalIn(lensUrl, `(() => { const d = document.getElementById('app').contentDocument; return ${expr}; })()`);
+  await until(() => inApp(`d && d.getElementById('buy') && d.getElementById('buy').textContent`), 'the app inside the lens');
+  stepOk('the lens on the preview\'s name frames an app that sends X-Frame-Options: DENY and frame-ancestors \'none\'');
+  const tell = (m) => browser.evalIn(viewer, `document.body.dataset.send = ${JSON.stringify(JSON.stringify({ lens: 1, ...m }))}`);
+  const heard = async () => (await browser.evalIn(viewer, 'document.getElementById(\'got\').textContent')).split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  const hear = (pred, what) => until(async () => (await heard()).find((x) => pred(x.data)), what, 10000);
+  await tell({ type: 'hello' });
+  const ready = await hear((d) => d.type === 'ready' && d.route === '/', 'ready');
+  assert.equal(ready.origin, `http://${name}.box.localhost:${G}`, 'from the preview\'s own origin');
+  const centre = (id) => inApp(`(() => { const r = d.getElementById('${id}').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
+  await tell({ type: 'hit', id: 'h1', ...(await centre('buy')) });
+  const buy = (await hear((d) => d.type === 'hit-reply' && d.id === 'h1', 'the hit on the button')).data.anchor;
+  assert.deepEqual([buy.selector, buy.tag, buy.role, buy.text, buy.name, buy.html], ['#buy', 'button', 'button', 'Buy now', 'Buy now', '<button id="buy">Buy now</button>']);
+  assert.ok(buy.rect.w > 0 && buy.rect.h > 0 && Math.abs(buy.point.x - buy.rect.w / 2) <= 1, JSON.stringify(buy));
+  const corner = await inApp(`(() => { const r = d.getElementById('card').getBoundingClientRect(); return { x: r.left + 4, y: r.top + 4 }; })()`);
+  await tell({ type: 'hit', id: 'h2', ...corner });
+  const card = (await hear((d) => d.type === 'hit-reply' && d.id === 'h2', 'the hit on the card')).data.anchor;
+  assert.equal(card.html, '<div id="card" style="padding:24px"><span>…</span><span>…</span></div>', 'its children kept, their contents collapsed');
+  await tell({ type: 'hit', id: 'h3', ...(await centre('long')) });
+  const long = (await hear((d) => d.type === 'hit-reply' && d.id === 'h3', 'the hit on the long text')).data.anchor;
+  assert.ok(long.text.length === 40 && Buffer.byteLength(long.name) <= 80 && Buffer.byteLength(long.html) <= 1024 && long.html.endsWith('…'), JSON.stringify(long));
+  await tell({ type: 'resolve', id: 'r1', anchors: [{ key: 'buy', anchor: buy }, { key: 'gone', anchor: { selector: '#gone', tag: 'p', text: 'nothing like it' } }] });
+  const r1 = (await hear((d) => d.type === 'rects' && d.id === 'r1', 'rects')).data.rects;
+  assert.deepEqual(r1.map((x) => [x.key, x.rect && x.rect.y]), [['buy', buy.rect.y], ['gone', null]]);
+  stepOk('the lens names what is under a point (selector, role, text, the HTML with its children collapsed, within spec §5\'s caps) and finds it again');
+  await tell({ type: 'scroll-by', dx: 0, dy: 300, x: 5, y: 5 });
+  await hear((d) => d.type === 'rects' && d.id === undefined && d.rects[0].rect && d.rects[0].rect.y === buy.rect.y - 300, 'the rect to move with a scroll');
+  stepOk('scroll-by scrolls the app, and the watched rect follows, unasked');
+  // newPage turned on focus emulation, so a headless tab holds focus. If a Chrome still keeps the key
+  // out of the frame, click the button first with a real mouse event (mouseAt at the iframe's offset
+  // plus the button's centre) and dispatch Shift after that.
+  await inApp(`(d.getElementById('buy').focus(), true)`);
+  await browser.shift(tab, true);
+  await hear((d) => d.type === 'key' && d.key === 'Shift' && d.shift === true, 'Shift, seen inside the app');
+  await browser.shift(tab, false);
+  await hear((d) => d.type === 'key' && d.key === 'Shift' && d.shift === false, 'Shift up');
+  stepOk('Shift held with the app focused reaches the viewer as key {shift}');
+  await hear((d) => d.type === 'errors' && d.errors.some((e) => e.includes('boom from the app')), 'the app\'s console error');
+  stepOk('a console error in the app reaches the viewer');
+  // Both tries are in the lens's queue (the made-up one ran at once, inside the click) before the
+  // viewer's resolve below is sent, so its answer means they were weighed: a go taken would have set
+  // the frame's src at once.
+  await inApp(`(d.getElementById('forge').click(), d.getElementById('synth').click(), true)`);
+  await tell({ type: 'resolve', id: 'r2', anchors: [] });
+  await hear((d) => d.type === 'rects' && d.id === 'r2', 'the lens to answer after the app\'s tries');
+  assert.deepEqual(await browser.evalIn(lensUrl, `[document.getElementById('app').getAttribute('src'), document.getElementById('app').contentDocument.location.pathname]`), ['/', '/'], 'neither the app\'s message nor a made-up event took the lens anywhere');
+  await tell({ type: 'go', route: '/second' });
+  await hear((d) => d.type === 'ready' && d.route === '/second' && d.title === 'Second', 'the app at /second');
+  stepOk('go takes the app to its own path; the same go posted by the app, or dispatched as a made-up event claiming the viewer, moved nothing');
+
+  // --- the owner's view of a public page: what the box serves for standin/mock, bound to the stand-in ---
+  const gwDir = path.join(base, 'gateway');
+  const copy = '<!doctype html><p id="art">the box\'s own copy</p>';
+  const sha = crypto.createHash('sha256').update(copy).digest('hex');
+  fs.mkdirSync(path.join(gwDir, 'public', 'blobs'), { recursive: true });
+  fs.writeFileSync(path.join(gwDir, 'public', 'blobs', sha), copy);
+  const sf = path.join(gwDir, 'state.json');
+  const st = JSON.parse(fs.readFileSync(sf, 'utf8'));
+  st.public = { ...(st.public ?? {}), standin: { root: '/srv/standin', port: SP, artifacts: { mock: { tree: T, title: 'Mock', at: new Date().toISOString(), files: { 'index.html': { sha256: sha, size: Buffer.byteLength(copy) } } } } } };
+  fs.writeFileSync(sf, JSON.stringify(st, null, 2));
+  const page = `http://public.box.localhost:${G}/standin/mock/`;
+  await browser.navigate(tab, page);
+  await until(() => browser.frameWhere(`${inst}/view/artifact/mock?at=tree:${T}`), 'the viewer in the owner\'s view');
+  const shown = await until(() => browser.evalIn(`${inst}/c/`, `(() => { const p = document.getElementById('art'); return p && p.textContent + '|' + getComputedStyle(p).color; })()`), 'the artifact in the viewer in the owner\'s view');
+  assert.equal(shown, 'the instance at the published tree|rgb(1, 2, 3)');
+  assert.match(await browser.evalIn(page, 'document.querySelector(\'header\').textContent'), /Public · standin\/mock/);
+  stepOk('signed in, the public link is the owner\'s view: the viewer at the published tree, the artifact under its capability, each frame allowed by every ancestor');
+  await browser.click(page, page, 'header a');
+  await until(() => (tab.url ?? '').endsWith('/standin/mock/?plain'), 'the plain link');
+  assert.equal(await browser.evalIn(`${page}?plain`, 'document.getElementById(\'art\').textContent + \'|\' + document.querySelectorAll(\'iframe\').length'), 'the box\'s own copy|0');
+  stepOk('"Open it as the public sees it" is the box\'s own copy, plain');
+}
+
 async function main() {
   // --only threads: the thread layer alone (no Vite, no npm, no gateway)
   const only = process.argv.includes('--only') ? process.argv[process.argv.indexOf('--only') + 1] : null;
@@ -434,15 +573,26 @@ async function main() {
   // the laptop half leaves the hub open, framing this same dashboard: closed, so a step here reads the thread tab's page
   if (!only) { const lap = await laptop({ HUB, DASH, app }); await browser.cdp.send('Target.closeTarget', { targetId: lap.hub.targetId }); }
   await threads({ DASH, pane });
-  if (!only) await viaGateway({ HUB, DASH, app, G: block + 30 });
+  if (!only) await viaGateway({ HUB, DASH, app, G: block + 30, SP: block + 20 });
   say('all steps passed');
 }
 
+// Chrome, the servers, the gateway and tmux go however the run ends: a failure, a pass, Ctrl-C, or
+// a throw outside the steps (stdout closed under it, by a pipe into head, is one).
+let cleaned = false;
+async function cleanUp(code) {
+  if (cleaned) return;
+  cleaned = true;
+  try { await browser?.kill(); } catch {}
+  for (const p of procs) { try { p.kill(); } catch {} }
+  spawnSync('tmux', ['kill-server'], { env: { ...process.env, TMUX_TMPDIR: tmuxDir } });
+  await sleep(500);
+  if (!process.env.DEVTEAM_TEST_KEEP) { fs.rmSync(base, { recursive: true, force: true }); fs.rmSync(tmuxDir, { recursive: true, force: true }); } else console.log(`kept ${base}`);
+  process.exit(code);
+}
+const stop = (why) => { try { console.error(`FAIL ${why}`); } catch {} cleanUp(1); };
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => stop(`stopped by ${sig}`));
+for (const ev of ['uncaughtException', 'unhandledRejection']) process.on(ev, (e) => stop(e?.stack ?? e));
 let failed = false;
 try { await main(); } catch (e) { failed = true; console.error(`FAIL ${e.stack ?? e}`); }
-try { await browser?.kill(); } catch {}
-for (const p of procs) { try { p.kill(); } catch {} }
-spawnSync('tmux', ['kill-server'], { env: { ...process.env, TMUX_TMPDIR: tmuxDir } });
-await sleep(500);
-if (!process.env.DEVTEAM_TEST_KEEP) { fs.rmSync(base, { recursive: true, force: true }); fs.rmSync(tmuxDir, { recursive: true, force: true }); } else console.log(`kept ${base}`);
-process.exit(failed ? 1 : 0);
+await cleanUp(failed ? 1 : 0);
