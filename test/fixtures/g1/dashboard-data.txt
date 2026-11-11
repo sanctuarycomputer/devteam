@@ -348,7 +348,16 @@ exit 0
         "source_key": "note:g1",
         "refs": [],
         "created_by": "owner",
-        "updates": []
+        "updates": [],
+        "stage": "observe",
+        "provenance": {
+          "from": "owner",
+          "ref": null
+        },
+        "place": {
+          "state": "new",
+          "ref": null
+        }
       },
       {
         "id": "o-<sha>-<sha>-owner",
@@ -362,7 +371,18 @@ exit 0
         "source_key": "slow:g1",
         "refs": [],
         "created_by": "owner",
-        "updates": []
+        "updates": [],
+        "stage": "observe",
+        "provenance": {
+          "from": "owner",
+          "ref": null
+        },
+        "place": {
+          "state": "signal",
+          "ref": "slow:g1",
+          "n": 3,
+          "recurring": true
+        }
       },
       {
         "id": "o-<sha>-<sha>-supervisor",
@@ -375,7 +395,18 @@ exit 0
         "source_key": "slow:g1",
         "refs": [],
         "created_by": "supervisor",
-        "updates": []
+        "updates": [],
+        "stage": "observe",
+        "provenance": {
+          "from": "supervisor",
+          "ref": null
+        },
+        "place": {
+          "state": "signal",
+          "ref": "slow:g1",
+          "n": 3,
+          "recurring": true
+        }
       },
       {
         "id": "o-<sha>-<sha>-supervisor",
@@ -388,7 +419,18 @@ exit 0
         "source_key": "slow:g1",
         "refs": [],
         "created_by": "supervisor",
-        "updates": []
+        "updates": [],
+        "stage": "observe",
+        "provenance": {
+          "from": "supervisor",
+          "ref": null
+        },
+        "place": {
+          "state": "signal",
+          "ref": "slow:g1",
+          "n": 3,
+          "recurring": true
+        }
       }
     ],
     "clusters": [
@@ -404,6 +446,9 @@ exit 0
         "latest": "slow 3"
       }
     ],
+    "debt": {
+      "signals": []
+    },
     "knowledge": [
       {
         "id": "k-<sha>-<sha>-owner",
