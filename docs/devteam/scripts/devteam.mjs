@@ -7280,7 +7280,7 @@ function cmdDecide() {
   // record, apart from refs (an act stays within refs) and from approved_by (authorise reads only
   // that). Knowledge must be accepted: a candidate isn't the project's yet, and a retired one no
   // longer is. An id in both would read as what the call is about and what it rests on at once.
-  const on = flags.on === true ? die('--on names the knowledge or problems the decision rests on: --on <k-…|p-…>…') : asList(flags.on);
+  const on = flags.on === true ? die('--on names the knowledge or problems the decision rests on: --on <k-…|p-…>…') : [...new Set(asList(flags.on))];
   if (on.length > KNOWLEDGE_IDS_MAX) die(`--on takes at most ${KNOWLEDGE_IDS_MAX} ids (a log line is at most ${LINE_MAX} bytes): cite the ones the call turns on`);
   for (const k of on) {
     const o = logGet(k) ?? die(`--on ${k}: no such knowledge or problem`);
@@ -14986,6 +14986,7 @@ function historyOf(ids, { types = null, limit = 300 } = {}) {
 // authority checks out (decisionAuthorityGap), an act carrying one out, or an act of its own resting
 // on an owner's accepted rule or an answered question. Anything else only cites it: a supervisor's
 // lesson is never the owner approving.
+const restsOnHolds = (x) => x?.type === 'problem' || (x?.type === 'knowledge' && x.status === 'accepted');
 function approvalHolds(o) {
   if (o.type === 'decision') return !decisionAuthorityGap(o);
   if (o.type !== 'act') return false;
@@ -15019,7 +15020,10 @@ function linkIndex() {
     for (const [k, why] of Object.entries(LINK_FIELDS)) for (const t of Array.isArray(o[k]) ? o[k] : []) {
       if (!known(t)) continue;
       if (o.type === 'act' && o.class === 'add-ticket' && k === 'refs' && logGet(t).type === 'ticket') edge(o.id, t, 'made');
-      else edge(t, o.id, o.type === 'act' && k === 'knowledge' ? 'given' : why);
+      // a start's knowledge was what its prompt carried, whatever became of it since; what a decision
+      // rests on is only what decide --on would take, a problem or accepted knowledge (a hand-written
+      // line citing anything else only cites it)
+      else edge(t, o.id, k !== 'knowledge' ? why : o.type === 'act' ? 'given' : restsOnHolds(logGet(t)) ? why : 'cites');
     }
     if (known(o.approved_by)) edge(o.approved_by, o.id, approvalHolds(o) ? 'approved' : 'cites');
     if (known(o.decision)) edge(o.decision, o.id, 'carried out');
@@ -15180,7 +15184,7 @@ function peekView(kind, id) {
   const v = { kind, id, record: recordView(flagStr('rec') ?? (kind === 'planner' ? '' : id)) };
   // where a record sits in the loop, and where an observation came from
   if (v.record) { const o = logGet(v.record.id); v.stage = stageOf(o); if (o.type === 'observation') v.provenance = provenanceOf(o); }
-  const cited = (refs) => Object.fromEntries([...new Set(refs ?? [])].map((r) => [r, logGet(r)]).filter(([, o]) => o).map(([r, o]) => [r, { type: o.type, created_at: o.created_at, created_by: o.created_by, kind: o.kind ?? null, text: o.detail ?? o.statement ?? o.what ?? o.title ?? o.question ?? o.text ?? null }]));
+  const cited = (refs) => Object.fromEntries([...new Set(refs ?? [])].map((r) => [r, logGet(r)]).filter(([, o]) => o).map(([r, o]) => [r, { type: o.type, created_at: o.created_at, created_by: o.created_by, kind: o.kind ?? null, status: o.status ?? null, text: o.detail ?? o.statement ?? o.what ?? o.title ?? o.question ?? o.text ?? null }]));
   if (kind === 'ticket') {
     gitReadCache = new Map();
     const t = tickets().get(id) ?? die(`no ticket ${id}`);

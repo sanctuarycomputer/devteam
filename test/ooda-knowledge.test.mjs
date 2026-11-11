@@ -164,3 +164,19 @@ test('orientation debt: an incident fixed and verified owes a lesson or a ruling
     assert.match(F.run(old, ['decide', '--class', 'orient-noise', '--refs', open, '--', 'x'], SUP).err, /a noise ruling names the observations it explains/);
   } finally { F.done(); }
 });
+
+test('a hand-written decision citing knowledge that isn\'t accepted only cites it, and its status shows', () => {
+  const F = fleetFixture('ooda-rests-read');
+  const { old, ok } = F;
+  const hand = handFor(F);
+  try {
+    const retired = hand('supervisor', { type: 'knowledge', kind: 'lesson', statement: 'an old idea', scope: 'project', status: 'retired', evidence: [] }, 9 * H);
+    const good = hand('supervisor', { type: 'knowledge', kind: 'lesson', statement: 'a kept idea', scope: 'project', status: 'accepted', evidence: [] }, 8 * H);
+    const d = hand('supervisor', { type: 'decision', class: 'registry-edit', what: 'leave it', authority: 'constitution', refs: [], knowledge: [retired, good] }, 7 * H);
+    const p = json(ok(old, ['peek', 'decision', d, '--json']));
+    const why = (from) => p.lineage.edges.find((e) => e.from === from && e.to === d)?.why;
+    assert.equal(why(retired), 'cites');
+    assert.equal(why(good), 'rests on');
+    assert.equal(p.cited[retired].status, 'retired');
+  } finally { F.done(); }
+});

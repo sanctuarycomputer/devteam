@@ -2916,7 +2916,7 @@ function restsOn(approvedBy) {
 // (from its peek): what the call or the session had to go on.
 function knowledgeCited(p, title) {
   const ks = p?.record?.fields?.knowledge || [];
-  return ks.length ? `<h3>${esc(title)}</h3><ul>${ks.map((id) => { const x = p.cited?.[id]; return `<li>${linkify(id)}${x ? ` <span class="muted">${esc(words(x.kind ?? x.type))}</span>${x.text ? `: ${linkify(String(x.text).slice(0, 160))}` : ''}` : ''}</li>`; }).join('')}</ul>` : '';
+  return ks.length ? `<h3>${esc(title)}</h3><ul>${ks.map((id) => { const x = p.cited?.[id]; return `<li>${linkify(id)}${x ? ` <span class="muted">${esc(words(x.kind ?? x.type))}${x.type === 'knowledge' && x.status && x.status !== 'accepted' ? `, ${esc(x.status)}` : ''}</span>${x.text ? `: ${linkify(String(x.text).slice(0, 160))}` : ''}` : ''}</li>`; }).join('')}</ul>` : '';
 }
 // Records an object cites, in their own words (from its peek); what it rests on or was given has its own list.
 function citedBlock(p, o) {
@@ -2938,7 +2938,7 @@ function openDecision(id) {
     ] })}
     ${lineageBlock(p)}
     ${restsOn(r.under?.approved_by)}
-    ${knowledgeCited(p, 'What it rests on')}
+    ${knowledgeCited(p, 'What it drew on (not its authority)')}
     ${r.kind === 'decision' ? `<h3>Carried out by</h3>${acts.length ? `<ol class="tl">${acts.map((a) => `<li class="act"><time>${a.created_at ? esc(when(a.created_at)) : ''}</time><a class="linkish" href="#act/${encodeURIComponent(a.id)}">${a.what ? actView(a).head : esc(a.id)}</a></li>`).join('')}</ol>` : '<p class="muted">Nothing yet.</p>'}` : ''}
     ${r.correction ? '' : '<p class="small muted">To correct it, use Correct on it in Loop → Decide.</p>'}
     ${historySection(p, id)}`);
