@@ -106,6 +106,7 @@ const nowIso = () => new Date().toISOString();
 const dateOnly = (iso) => iso.slice(0, 10);
 const DAY = 864e5;
 
+/* git reads start */
 // A read-only command (dashboard-data, timeline) caches identical git reads for the rest of the
 // process: one refresh asked git the same questions hundreds of times. Commands that write never
 // turn this on, so they always read live.
@@ -137,6 +138,72 @@ function gitOrDie(args, cwd = HOME_CWD) {
 // worktree records its own head, while every other read goes to home (HOME_CWD).
 const cwdGit = (args) => git(args, process.cwd());
 const cwdGitOrDie = (args) => gitOrDie(args, process.cwd());
+// git's exit status and its bytes: the one runner that tells "no" (an ancestor check's 1) from an
+// error (128, an object not here yet), which git() folds into one null.
+function gitStatus(args, cwd = HOME_CWD) {
+  const r = spawnSync('git', args, { cwd, stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+  return { status: r.error ? null : r.status, stdout: r.stdout ?? Buffer.alloc(0) };
+}
+// What `git cat-file --batch` printed, as a Map of each spec to { type, oid, bytes }, or null for a
+// spec git called missing or ambiguous. Sizes are in bytes, so the output is read as bytes; output
+// cut short leaves the rest null, never a slice of the next object.
+function parseBatch(buf, specs) {
+  const res = new Map(specs.map((s) => [s, null]));
+  let at = 0;
+  for (const spec of specs) {
+    const nl = buf.indexOf(10, at);
+    if (nl === -1) break;
+    const head = buf.toString('latin1', at, nl).split(' ');
+    at = nl + 1;
+    if (head.length !== 3 || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(head[0])) continue; // "<spec> missing"
+    const size = Number(head[2]);
+    if (!Number.isSafeInteger(size) || at + size + 1 > buf.length) break;
+    res.set(spec, { oid: head[0], type: head[1], bytes: buf.subarray(at, at + size) });
+    at += size + 1;
+  }
+  return res;
+}
+// Many objects in one git call (each spec <sha>:<path> or an oid). A spec with a newline is never
+// sent (it would be two specs). A failed call returns null: the caller asks one at a time.
+function gitBatch(specs, cwd = HOME_CWD) {
+  const ok = specs.filter((s) => !/[\n\r]/.test(s));
+  let buf = Buffer.alloc(0);
+  if (ok.length) {
+    try { buf = execFileSync('git', ['cat-file', '--batch'], { cwd, input: `${ok.join('\n')}\n`, stdio: ['pipe', 'pipe', 'ignore'], maxBuffer: 256 * 1024 * 1024 }); } catch { return null; }
+  }
+  const got = parseBatch(buf, ok);
+  return new Map(specs.map((s) => [s, got.get(s) ?? null]));
+}
+// Reads at a commit, kept for the whole process in every command: a sha names the same bytes
+// forever, so even a command that writes can't read them stale. Keyed by the repository (its
+// common git dir, so its worktrees share), the sha and the path. Text comes back as git() gives it:
+// one trailing newline taken off.
+const FULL_SHA = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
+const commonDirs = new Map();
+function commonDir(cwd = HOME_CWD) {
+  const k = cwd ?? process.cwd();
+  if (!commonDirs.has(k)) commonDirs.set(k, git(['rev-parse', '--path-format=absolute', '--git-common-dir'], cwd) ?? k);
+  return commonDirs.get(k);
+}
+const atCommit = new Map();
+const atKey = (sha, p, cwd) => `${commonDir(cwd)}\0${sha}\0${p}`;
+const asGitText = (o) => (o ? o.bytes.toString('utf8').replace(/\n$/, '') : null);
+function prefetchAt(sha, paths, cwd = HOME_CWD) {
+  if (!FULL_SHA.test(sha ?? '')) return;
+  const need = [...new Set(paths)].filter((p) => !/[\n\r]/.test(p) && !atCommit.has(atKey(sha, p, cwd)));
+  if (!need.length) return;
+  const got = gitBatch(need.map((p) => `${sha}:${p}`), cwd);
+  if (!got) return;
+  for (const p of need) { const o = got.get(`${sha}:${p}`); atCommit.set(atKey(sha, p, cwd), o && o.type === 'blob' ? o : null); }
+}
+// A file at a commit, as `git show <sha>:<path>` gives it through git(). Not a full sha: asked live.
+function showAt(sha, p, cwd = HOME_CWD) {
+  if (!FULL_SHA.test(sha ?? '')) return git(['show', `${sha}:${p}`], cwd);
+  const k = atKey(sha, p, cwd);
+  if (!atCommit.has(k)) prefetchAt(sha, [p], cwd);
+  return atCommit.has(k) ? asGitText(atCommit.get(k)) : git(['show', `${sha}:${p}`], cwd);
+}
+/* git reads end */
 // tmux gets a time limit unless the caller set one: a tmux call that never returns (send-keys has hung
 // for hours on a box) would otherwise wedge whatever called it, a dashboard's tick included.
 const TMUX_TIMEOUT_MS = 30000;

@@ -272,6 +272,15 @@ export function coverageFns() {
   const ctx = vm.createContext({});
   return vm.runInContext(`${cut('/* globs start */', '/* globs end */')}\n${cut('/* coverage start */', '/* coverage end */')}\n;({ coverage, caseCollisions, prefixOwners, ownersOf, pathMatches, ownerSuggestions })`, ctx);
 }
+// The script's git readers, loaded by themselves and run against cwd: git(), the batched reader,
+// reads at a commit.
+export function gitReadFns(cwd) {
+  const src = fs.readFileSync(path.join(kit, 'scripts', 'devteam.mjs'), 'utf8');
+  const i = src.indexOf('/* git reads start */'), j = src.indexOf('/* git reads end */');
+  assert.ok(i >= 0 && j > i, 'the git reads block in devteam.mjs');
+  const ctx = vm.createContext({ execFileSync, spawnSync, Buffer, process: { cwd: () => cwd } });
+  return vm.runInContext(`${src.slice(i, j)}\nHOME_CWD = ${JSON.stringify(cwd)};\n;({ git, gitStatus, parseBatch, gitBatch, prefetchAt, showAt, atCommit })`, ctx);
+}
 // A clean partition: nothing unowned, contested, empty or colliding (the script has no caller for it).
 export function coverageClean(r) {
   return !r.unowned.length && !r.contested.length && !r.empty.length && !r.case_collisions.length;
