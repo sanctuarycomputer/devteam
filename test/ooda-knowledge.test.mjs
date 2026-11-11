@@ -113,3 +113,46 @@ test('a start records the accepted knowledge its prompt carried: fresh starts on
     assert.ok(L.edges.some((e) => e.from === lesson && e.to === a.id && e.why === 'rests on'), JSON.stringify(L.edges));
   } finally { F.done(); }
 });
+
+const H = 3600000;
+test('orientation debt: an incident fixed and verified owes a lesson or a ruling that there is nothing to keep', () => {
+  const F = fleetFixture('ooda-taught');
+  const { old, ok } = F;
+  const hand = handFor(F);
+  // an incident, its fix decided and resolved ago hours ago, and (verified) the outcome citing it
+  const incident = (n, ago, { outcome = true, owner = false } = {}) => {
+    const p = hand('supervisor', { type: 'problem', title: `incident ${n}`, severity: 3, realized: true, status: 'open', threatens: [], refs: [], fingerprints: [`web:log:L${n}`], sensor: 'web' }, ago);
+    const d = hand('supervisor', { type: 'decision', class: 'incident-fix', scope: 'sev:high', what: `fix incident ${n}`, authority: 'rung', refs: [p, `fx-0${n}-fix`] }, ago - 1000);
+    hand(owner ? 'owner' : 'supervisor', { type: 'problem', op: 'set', id: p, status: 'resolved' }, ago - 2000);
+    const o = outcome ? hand('supervisor', { type: 'observation', source: 'web', detector: 'sensor', subject: p, kind: 'outcome', detail: `${p} resolved: quiet since the fix`, severity: 0, valence: 1, refs: [d, `fx-0${n}-fix`, p], source_key: `sensor:verified:${p}:abc` }, ago - 3000) : null;
+    return { p, d, o };
+  };
+  const debt = () => json(ok(old, ['dashboard-data'])).ooda.debt.incidents;
+  try {
+    const stale = incident(1, 31 * 24 * H);
+    const taught = incident(2, 50 * H);
+    const ruled = incident(3, 40 * H);
+    const quiet = incident(4, 30 * H, { outcome: false });
+    const owners = incident(5, 20 * H, { owner: true });
+    assert.deepEqual(debt().map((x) => x.id), [taught.p, ruled.p], 'verified in the last 30 days, oldest first; not unverified, not one the owner resolved, not one over 30 days ago');
+    const x = debt()[0];
+    assert.equal(x.title, 'incident 2');
+    assert.equal(x.outcome, taught.o);
+    assert.equal(x.decision, taught.d);
+    const said = ok(old, ['orient'], SUP);
+    assert.ok(said.includes(`${taught.p} was fixed and verified (incident 2): what did it teach?`), said);
+    assert.ok(said.includes(`knowledge add --kind lesson --scope 'project' --statement '<what it teaches>' --evidence '${taught.p}' '${taught.d}' '${taught.o}'`), said);
+    assert.ok(said.includes(`decide --class orient-noise --refs '${taught.p}' -- 'nothing to keep'`), said);
+    assert.ok(!said.includes(quiet.p) && !said.includes(owners.p) && !said.includes(stale.p));
+
+    // a lesson citing it clears it
+    ok(old, ['knowledge', 'add', '--kind', 'lesson', '--scope', 'project', '--statement', 'timeouts need a retry budget', '--evidence', taught.p, taught.d, taught.o], SUP);
+    assert.deepEqual(debt().map((y) => y.id), [ruled.p]);
+    // a noise ruling naming the problem clears it; corrected, it owes again
+    const n = ok(old, ['decide', '--class', 'orient-noise', '--refs', ruled.p, '--', 'nothing to keep'], SUP).trim();
+    assert.deepEqual(debt(), []);
+    assert.equal(ok(old, ['orient'], SUP), 'nothing recurring that is unexplained');
+    ok(old, ['correct', n, '--reason', 'there was a lesson in it']);
+    assert.deepEqual(debt().map((y) => y.id), [ruled.p]);
+  } finally { F.done(); }
+});

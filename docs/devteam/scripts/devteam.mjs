@@ -7305,7 +7305,8 @@ function cmdDecide() {
   if (['approve-spec', 'approve-plan'].includes(cls) && !tickets().has(refs[0])) die(`${cls} names the ticket first: --refs <ticket-id> [other ids]`);
   if (cls === 'goal-readiness') readinessGoal(refs);
   // a noise ruling explains observations by citing them (orientClusters); one that cites none explains nothing
-  if (cls === 'orient-noise' && !refs.some((r) => logGet(r)?.type === 'observation')) die('a noise ruling names the observations it explains: --refs <signal key> <o-…>…');
+  // (or the fixed incident it rules there is nothing to learn from: incidentDebt)
+  if (cls === 'orient-noise' && !refs.some((r) => ['observation', 'problem'].includes(logGet(r)?.type))) die('a noise ruling names the observations it explains: --refs <signal key> <o-…>… (or a fixed incident with nothing to keep: --refs <p-…>)');
   const a = authorise(cls, scope, approved, refs, 'decide');
   if (a.doorCited && a.approval.ticket !== refs[0] && !(features().get(tickets().get(refs[0])?.feature)?.goals ?? []).includes(a.approval.goal)) die(`${approved} answered a one-way door for ${a.approval.ticket ?? a.approval.goal ?? 'something else'}, not for ${refs[0]} or a goal its feature serves`);
   const line = appendLog({
@@ -7803,6 +7804,26 @@ function orientationDebt() {
   return orientClusters().map((c) => { const first = signalGroups().get(c.key).items.map((i) => i.at).sort()[0]; return { key: c.key, count: c.count, latest: c.latest, first_at: first, hours: Math.floor((now - Date.parse(first)) / 3600000) }; })
     .filter((x) => x.hours >= 24).sort((a, b) => a.first_at.localeCompare(b.first_at));
 }
+// Resolved incidents nobody learned from, oldest first: fixed and verified (an outcome cites the
+// incident) in the last 30 days, with no knowledge citing it in its evidence and no live noise
+// ruling naming it, so a fast fix still turns into a lesson, or a ruling that there is nothing to
+// keep (a corrected ruling owes it again). Resolved when the last change setting its status said so.
+// One whose status the owner set is the owner's call, and owes nothing.
+function incidentDebt() {
+  const now = Date.now();
+  const taught = new Set(logObjects('knowledge').flatMap((k) => k.evidence ?? []));
+  for (const d of logObjects('decision')) if (d.class === 'orient-noise' && liveDecision(d)) for (const r of d.refs ?? []) taught.add(r);
+  const outcomes = logObjects('observation').filter((o) => o.kind === 'outcome').sort(byTime);
+  return incidentList().filter((p) => p.status === 'resolved' && !taught.has(p.id) && !ownerHolds(p, 'status')).flatMap((p) => {
+    const at = (p.updates ?? []).filter((u) => u.status === 'resolved').pop()?.at ?? p.created_at;
+    const outcome = outcomes.filter((o) => (o.refs ?? []).includes(p.id)).pop();
+    if (!outcome || now - Date.parse(at) > 30 * DAY) return [];
+    const d = (outcome.refs ?? []).find((r) => logGet(r)?.type === 'decision') ?? incidentDecisions(p.id).pop()?.id ?? null;
+    const t = (outcome.refs ?? []).map((r) => tickets().get(r)).find(Boolean);
+    const cite = [p.id, ...(d ? [d] : []), outcome.id].map(shq).join(' ');
+    return [{ id: p.id, title: p.title, resolved_at: at, outcome: outcome.id, decision: d, days: Math.floor((now - Date.parse(at)) / DAY), explain: [`knowledge add --kind lesson --scope ${shq(t?.component ? `component:${t.component}` : 'project')} --statement '<what it teaches>' --evidence ${cite}`, `decide --class orient-noise --refs ${shq(p.id)} -- 'nothing to keep'`] }];
+  }).sort((a, b) => a.resolved_at.localeCompare(b.resolved_at));
+}
 // One value as a POSIX shell word: single-quoted, each ' written '\''. Every value orient puts in a
 // command it proposes goes through this, since observation text is anyone's to write and the
 // supervisor runs what it pastes (L-SEC-5).
@@ -7876,10 +7897,13 @@ function orientLinks() {
 }
 function cmdOrient() {
   const cl = orientClusters();
+  const inc = incidentDebt();
   const lk = orientLinks();
-  if (flags.json) return json([...cl, ...lk]);
-  if (!cl.length && !lk.length) return out('nothing recurring that is unexplained');
+  if (flags.json) return json([...cl, ...inc.map((x) => ({ key: `incident:${x.id}`, debt: 'incident', ...x })), ...lk]);
+  if (!cl.length && !inc.length && !lk.length) return out('nothing recurring that is unexplained');
   for (const c of cl) out(`${c.key}  x${c.count}  valence ${c.valence}\n  latest: ${c.latest}\n  evidence: ${c.ids.join(' ')}`);
+  for (const x of inc) out(`${x.id} was fixed and verified (${x.title}): what did it teach? ${x.explain[0]} or ${x.explain[1]}`);
+  if (inc.length) out('  (once a lesson is accepted, a decision it informs cites it: decide … --on <k-…>)');
   if (lk.length) { out('link proposals:'); for (const p of lk) out(p.note ? `  ${p.note}` : `  ${p.proposal} (${p.observation})${p.proposed_by ? `, proposed by ${p.proposed_by}; check before adding` : ''}: ${p.command}`); out('  (dismiss one: decide --class registry-edit --refs <observation> -- "<why the registry stays as it is>")'); }
 }
 
@@ -9658,9 +9682,9 @@ function collectOoda() {
     // each with where it sits in the loop, so its card can say so without the whole index
     observations: recent(logObjects('observation').filter((o) => !['reading', 'retro', 'finding-ack'].includes(o.kind)), 40).map((o) => ({ ...withOoda(o), place: placeOf(o) })),
     clusters: orientClusters(),
-    // orientation debt: recurring signals nothing has explained for more than a day, oldest first
-    // (resolved incidents nobody learned from join it in PR 4)
-    debt: { signals: orientationDebt() },
+    // orientation debt: recurring signals nothing has explained for more than a day, and resolved
+    // incidents nobody learned from, each oldest first
+    debt: { signals: orientationDebt(), incidents: incidentDebt() },
     // every lesson waiting on the owner is in the Inbox, however many: only the rest are the recent 60
     knowledge: [...recent(logObjects('knowledge').filter((k) => k.status === 'candidate'), Infinity), ...recent(logObjects('knowledge').filter((k) => !['retired', 'candidate'].includes(k.status)), 60)],
     problems: logObjects('problem').filter((p) => p.status !== 'resolved').map((p) => (isIncident(p) ? { ...p, severity: incidentSeverity(p) } : p)).sort((a, b) => b.severity - a.severity),

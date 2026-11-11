@@ -635,7 +635,7 @@
     <div class="loop-panel" data-panel="orient" hidden>
       <p class="loop-intro">What the signal adds up to. Things noticed more than once become recurring signals; real or likely trouble becomes a problem; lessons, facts and your preferences become knowledge, which goes into every agent's instructions once accepted.</p>
       <h3>Orientation debt</h3>
-      <p class="small muted">Recurring signals nothing has explained for more than a day: each wants a lesson, a problem, or a ruling that it is noise.</p>
+      <p class="small muted">Recurring signals nothing has explained for more than a day: each wants a lesson, a problem, or a ruling that it is noise. Then incidents fixed and verified in the last 30 days that nobody has learned from: each wants a lesson, or a ruling that there is nothing to keep.</p>
       <div id="debt"></div>
       <div class="two">
         <div><h3>Recurring signals</h3><div id="clusters"></div></div>
@@ -2009,8 +2009,10 @@ function renderOoda(o) {
 
   // Orient
   const debt = o.debt?.signals || [];
-  $('debt').innerHTML = debt.length ? debt.map((x) => `
-    <div class="card small" data-open="signal/${esc(encodeURIComponent(x.key))}"><b>${esc(signalTitle(x.key))}</b> <span class="muted">· seen ${esc(x.count)} times · unexplained for ${esc(hoursWords(x.hours))}</span><div>${linkify(x.latest)}</div></div>`).join('') : empty('Nothing waiting: every recurring signal is explained or under a day old.');
+  const taught = o.debt?.incidents || [];
+  $('debt').innerHTML = debt.length || taught.length ? debt.map((x) => `
+    <div class="card small" data-open="signal/${esc(encodeURIComponent(x.key))}"><b>${esc(signalTitle(x.key))}</b> <span class="muted">· seen ${esc(x.count)} times · unexplained for ${esc(hoursWords(x.hours))}</span><div>${linkify(x.latest)}</div></div>`).join('') + taught.map((x) => `
+    <div class="card small"${subj('problem', x.id, x.title)} data-open="problem/${esc(encodeURIComponent(x.id))}"><span class="badge">incident</span><a class="linkish" href="#problem/${encodeURIComponent(x.id)}"><b>${esc(x.title)}</b></a> <span class="muted">· fixed and verified ${x.days ? `${esc(x.days)} day${x.days > 1 ? 's' : ''} ago` : 'today'}</span><div>What did it teach? A lesson, or a ruling that there is nothing to keep. <span class="muted">${x.decision ? `The fix: ${linkify(x.decision)} · ` : ''}what came of it: ${linkify(x.outcome)}</span></div></div>`).join('') : empty('Nothing waiting: every recurring signal is explained or under a day old, and every fixed incident has been learned from.');
   $('clusters').innerHTML = o.clusters.length ? o.clusters.map((c) => `
     <div class="card small" data-open="signal/${esc(encodeURIComponent(c.key))}"><b>${esc(words(c.key.split(':')[0]))}</b> ${subjectLink(c.key.split(':').slice(1).join(':'))} <span class="muted">· seen ${esc(c.count)} times</span><div>${linkify(c.latest)}</div></div>`).join('') : empty('None. Something noticed more than once shows here.');
   $('problems').innerHTML = o.problems.length ? o.problems.map((p) => `
