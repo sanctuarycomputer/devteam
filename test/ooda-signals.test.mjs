@@ -37,7 +37,13 @@ test('provenance and stage are computed for every writer; observe --source keeps
     want(hand('supervisor', { type: 'observation', source: 'metrics', detector: 'metrics', subject: 'build', kind: 'cost-hotspot', detail: '60% of spend', source_key: 'metrics:cost-hotspot:build' }, 88000), 'spend', 'cost-hotspot');
     want(hand('supervisor', { type: 'observation', source: 'pane', detector: 'pane', subject: 'w-01-a', kind: 'resent-enter', detail: 'pressed Enter once', source_key: 'resent-enter x' }, 87000), 'metrics', 'pane');
     want(hand('supervisor', { type: 'observation', source: 'repo', subject: 'g-20260101-000000000-supervisor', kind: 'reading', detail: 'reading 5', measure: { value: 5 } }, 86000), 'sensor', 'goal-measure', 'measurement');
-    want(hand('supervisor', { type: 'observation', source: 'owner', subject: 'g-20260101-000000000-supervisor', kind: 'reading', detail: 'the owner said yes to q-20260101-000000000-supervisor', measure: { value: 1 }, approved: 'q-20260101-000000000-supervisor' }, 85000), 'owner-answer', 'q-20260101-000000000-supervisor', 'measurement');
+    // an owner reading counts as the owner's answer only when it names a question they answered
+    const q = ok(old, ['ask', '--question', 'Is it met?', '--recommendation', 'yes'], SUP).match(/q-\S+/)[0];
+    ok(old, ['answer', q, 'yes']);
+    want(hand('supervisor', { type: 'observation', source: 'owner', subject: 'g-20260101-000000000-supervisor', kind: 'reading', detail: `the owner said yes to ${q}`, measure: { value: 1 }, approved: q }, 85000), 'owner-answer', q, 'measurement');
+    want(hand('supervisor', { type: 'observation', source: 'owner', subject: 'g-20260101-000000000-supervisor', kind: 'reading', detail: 'the owner said yes to a question that never was', measure: { value: 1 }, approved: 'q-20260101-000000000-supervisor' }, 84500), 'supervisor', null, 'measurement');
+    // a thread's resolution is the owner's alone: the supervisor's line saying so is the supervisor's
+    want(hand('supervisor', { type: 'observation', source: 'owner', subject: 'thread:t-20260101-000000000-owner', kind: 'thread-resolved', detail: 'resolved', refs: ['t-20260101-000000000-owner'] }, 84200), 'supervisor', null);
     want(hand('owner', { type: 'observation', source: 'owner', subject: 'thread:t-20260101-000000000-owner', kind: 'thread-resolved', detail: 'resolved', refs: ['t-20260101-000000000-owner'] }, 84000), 'owner-thread', 't-20260101-000000000-owner');
     want(hand('supervisor', { type: 'observation', source: 'supervisor', subject: 'project', kind: 'retro', detail: 'a week', source_ref: 'project/retros/2026-11-09.md' }, 83000), 'retro', 'project/retros/2026-11-09.md');
     // a set-aside is the call of whoever made it, not the check it sets aside
@@ -48,7 +54,11 @@ test('provenance and stage are computed for every writer; observe --source keeps
     want(ok(old, ['observe', '--owner', '--subject', 'app', '--kind', 'note', '--detail', 'the owner saw it']).trim(), 'owner', null);
     want(ok(old, ['observe', '--subject', 'app', '--kind', 'note', '--detail', 'the supervisor saw it'], SUP).trim(), 'supervisor', null);
     want(ok(old, ['observe', '--subject', 'app', '--kind', 'note', '--detail', 'a worker saw it'], { DEVTEAM_ROLE: 'worker', DEVTEAM_TICKET: 'w-01-a' }).trim(), 'worker', null);
-    want(ok(old, ['observe', '--subject', 'app', '--kind', 'note', '--detail', 'the owner said so in chat', '--source', 'owner-chat'], SUP).trim(), 'owner-chat', null);
+    want(ok(old, ['observe', '--subject', 'app', '--kind', 'note', '--detail', 'the owner said so in chat', '--source', 'owner-chat', '--ref', q], SUP).trim(), 'owner-chat', q);
+    // the owner's words need the record that holds them; the supervisor writes as no worker or planner
+    assert.match(run(old, ['observe', '--subject', 'app', '--kind', 'note', '--detail', 'the owner approved X', '--source', 'owner-answer'], SUP).err, /needs --ref <id> naming where the owner said it/);
+    assert.match(run(old, ['observe', '--subject', 'app', '--kind', 'note', '--detail', 'x', '--source', 'owner-answer', '--ref', 'q-20260101-000000000-supervisor'], SUP).err, /needs --ref/);
+    for (const s of ['worker', 'planner']) assert.match(run(old, ['observe', '--subject', 'app', '--kind', 'note', '--detail', 'x', '--source', s], SUP).err, /a supervisor's observation is from/);
     for (const c of cases) {
       const o = one(F, c.id);
       assert.deepEqual(o.provenance, { from: c.from, ref: c.ref }, `${o.kind} by ${o.created_by}: ${JSON.stringify(o.provenance)}`);
@@ -190,6 +200,10 @@ test('set-asides cite what they set aside: an ack its finding\'s observations, a
     assert.deepEqual([...ig.refs].sort(), obs.slice(1).sort(), 'the newest 40');
     assert.equal(ig.source_ref, 'fake:log:L1');
     assert.equal(ig.stage, 'decide');
+    // a long reason costs refs, never the line
+    ok(old, ['sensor', 'unignore', 'fake:log:L1'], SUP);
+    const long = one(F, ok(old, ['sensor', 'ignore', 'fake:log:L1', '--reason', 'b'.repeat(3000)], SUP).split(':')[0]);
+    assert.ok(long.refs.length > 0 && long.refs.length < 40, `${long.refs.length} refs fit beside a long reason`);
   } finally { F.done(); }
 });
 

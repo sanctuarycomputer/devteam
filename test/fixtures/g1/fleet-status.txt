@@ -5,17 +5,8 @@ exit 0
   "fleet": null,
   "sessions": [],
   "log": {
-    "landed": false,
-    "unlanded": [
-      {
-        "file": "owner-<month>.jsonl",
-        "lines": 2
-      },
-      {
-        "file": "supervisor-<month>.jsonl",
-        "lines": 11
-      }
-    ],
+    "landed": true,
+    "unlanded": [],
     "left_behind": 0
   },
   "spend": {
@@ -39,8 +30,7 @@ exit 0
     }
   ],
   "blockers": [
-    "the fleet is neither parked nor drained (Upkeep still running): run fleet park or fleet drain first",
-    "the live log is not on main yet (owner-<month>.jsonl: 2 line(s), supervisor-<month>.jsonl: 11 line(s)): run log-sync, then merge --chore log"
+    "the fleet is neither parked nor drained (Upkeep still running): run fleet park or fleet drain first"
   ],
   "warnings": [
     "forge is git: the PR text for ticket/g1-01-a is only in run/pr here; copy run/pr/ to the new machine"
