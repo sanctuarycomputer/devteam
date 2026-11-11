@@ -10358,14 +10358,14 @@ function machineQuestions() {
 // The operator's daily review (operator.md): its last date is the newest "## Review <yyyy-mm-dd>"
 // heading in the notes, and a day is a UTC day, the same wherever the box runs.
 const utcDay = () => new Date().toISOString().slice(0, 10);
-const lastReview = (notes) => [...String(notes ?? '').matchAll(/^## Review (\d{4}-\d{2}-\d{2})\s*$/gm)].map((m) => m[1]).sort().pop() ?? null;
+const lastReview = (notes) => [...String(notes ?? '').matchAll(/^## Review (\d{4}-\d{2}-\d{2})\b.*$/gm)].map((m) => m[1]).sort().pop() ?? null;
 // What a repo's supervisor learned and the owner kept or gave, not yet noted: its accepted knowledge,
 // by its own kit's fold, whose id doesn't start a line of the notes (the operator's verdict line,
 // "<id>: stays"), so an id mentioned in passing doesn't hide it. null when its kit refuses the read.
 function harvestOf(root, notes) {
   const ks = projectJson(root, ['knowledge', '--status', 'accepted', '--json']);
-  const noted = new Set([...String(notes ?? '').matchAll(/^\s*(?:[-*]\s+)?(k-[a-z0-9-]+)\b/gm)].map((m) => m[1]));
-  return Array.isArray(ks) ? ks.filter((k) => k && typeof k.id === 'string' && !noted.has(k.id)) : null;
+  const noted = new Set([...String(notes ?? '').matchAll(/^\s*(?:[-*]\s+|\d+\.\s+)?[*`]*(k-[a-z0-9-]+)\b/gm)].map((m) => m[1]));
+  return Array.isArray(ks) ? ks.filter((k) => k && typeof k.id === 'string' && k.status === 'accepted' && !noted.has(k.id)) : null;
 }
 // box-status --knowledge: each entry on one line, marked the owner's (their ruling for that repo:
 // promoting it is the owner's call) and a kit lesson (the supervisor's tag on its own entry, a

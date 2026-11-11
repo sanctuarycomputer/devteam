@@ -310,7 +310,7 @@ test('status says at a glance what a check-in needs, and reads no pane it needn\
     fs.appendFileSync(notes, '\n## Review 2026-01-02\n');
     assert.match(status().stdout, /^machine: daily review due \(last 2026-01-02\)$/m);
     const today = new Date().toISOString().slice(0, 10);
-    fs.appendFileSync(notes, `\n## Review ${today}\n${rule}: the owner's ruling, stays\n`);
+    fs.appendFileSync(notes, `\n## Review ${today} (UTC)\n1. **${rule}**: the owner's ruling, stays\n`);
     assert.match(status().stdout, new RegExp(`^machine: daily review done ${today}$`, 'm'));
     assert.match(status().stdout, /^statused .* new-knowledge=1$/m);
     assert.match(st.stdout, /^a-sib sup=down .* sibling-of=the-home$/m);

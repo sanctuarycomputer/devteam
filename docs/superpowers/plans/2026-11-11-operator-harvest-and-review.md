@@ -59,7 +59,7 @@
 1. `integrity` refuses `owner_note` on any line but the owner's (test: a hand-written supervisor `new` line carrying one doesn't count).
 2. Harvest's "noted" is an id at the start of a line (test: an id mentioned in passing is still listed).
 3. `knowledge --kit` as a list takes no value; `sensor series` joins `OPERATOR_READS` (test runs it).
-4. operator.md: the owner's-ruling PR cites an Inbox question the source repo's supervisor raises for the owner; "its own" observations by `created_by` and `detector`; "for a day" as two reviews running or `last_at`; verdict lines start with the id; candidates aren't listed.
+4. operator.md: the owner's-ruling PR cites an Inbox question (no class, so it approves nothing) the source repo's supervisor raises for the owner; "its own" observations by `created_by` and `detector`; "for a day" as two reviews running or `last_at`; verdict lines start with the id; candidates aren't listed.
 
 ### 5. PR
 
