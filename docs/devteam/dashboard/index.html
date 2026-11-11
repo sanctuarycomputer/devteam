@@ -95,6 +95,9 @@
   .stat b { display: block; font-size: 20px; font-weight: 600; letter-spacing: -.02em; margin-top: 2px; font-variant-numeric: tabular-nums; }
   .card { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; margin-bottom: 8px; box-shadow: var(--shadow); }
   .card.small { padding: 10px 12px; }
+  .card[data-open] { cursor: pointer; }
+  .card[data-open]:hover { background: var(--hover); }
+  .place { font-size: 12px; color: var(--fg-2); margin-top: 3px; }
   .card p { margin: 6px 0; }
   .two { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); }
 
@@ -1028,7 +1031,7 @@ const glink = (gid) => { const g = goalOf(gid); return g ? `<a class="linkish" h
 const mlink = (gid, n, title) => `<a class="linkish" href="#milestone/${encodeURIComponent(`${gid}:${n}`)}">${esc(title ?? milestonesOf(goalOf(gid)).find((m) => m.n === Number(n))?.title ?? `milestone ${n}`)}</a>`;
 // An id in text links to its panel: goals, lessons, acts, problems, messages (threads), observations.
 function idLink(k, id) {
-  const href = { g: 'goal', k: 'lesson', a: 'act', d: 'decision', p: 'problem', m: 'thread', t: 'talk' }[k];
+  const href = { g: 'goal', k: 'lesson', a: 'act', d: 'decision', p: 'problem', m: 'thread', t: 'talk', o: 'observation', q: 'q' }[k];
   if (!href) return `<code>${esc(id.slice(0, 22))}…</code>`;
   if (k === 'g' && goalOf(id)) return glink(id);
   return `<a class="linkish" href="#${href}/${encodeURIComponent(id)}"><code>${esc(id.slice(0, 22))}…</code></a>`;
@@ -1979,18 +1982,18 @@ function renderOoda(o) {
 
   // Observe
   $('observations').innerHTML = o.observations.length ? o.observations.slice(0, 40).map((x) => `
-    <div class="card small"${subj('observation', x.id, `${words(x.kind)}: ${x.detail}`)}><span class="badge ${sevBadge(x.severity ?? 0)}">${esc(words(x.kind))}</span>${subjectLink(x.subject)}
-      <div>${linkify(x.detail)}</div><div class="meta">${esc(who(x.created_by))}, ${when(x.created_at)}</div></div>`).join('') : empty('None yet. What workers and the supervisor notice shows here.');
+    <div class="card small"${subj('observation', x.id, `${words(x.kind)}: ${x.detail}`)} data-open="observation/${esc(encodeURIComponent(x.id))}"><span class="badge ${sevBadge(x.severity ?? 0)}">${esc(words(x.kind))}</span>${subjectLink(x.subject)}
+      <div>${linkify(x.detail)}</div>${x.place ? `<div class="place">${loopPlace(x.place)}</div>` : ''}<div class="meta">${esc(who(x.created_by))}, <a class="linkish" href="#observation/${encodeURIComponent(x.id)}">${when(x.created_at)}</a></div></div>`).join('') : empty('None yet. What workers and the supervisor notice shows here.');
 
   // Orient
   $('clusters').innerHTML = o.clusters.length ? o.clusters.map((c) => `
-    <div class="card small"><b>${esc(words(c.key.split(':')[0]))}</b> ${subjectLink(c.key.split(':').slice(1).join(':'))} <span class="muted">· seen ${esc(c.count)} times</span><div>${linkify(c.latest)}</div></div>`).join('') : empty('None. Something noticed more than once shows here.');
+    <div class="card small" data-open="signal/${esc(encodeURIComponent(c.key))}"><b>${esc(words(c.key.split(':')[0]))}</b> ${subjectLink(c.key.split(':').slice(1).join(':'))} <span class="muted">· seen ${esc(c.count)} times</span><div>${linkify(c.latest)}</div></div>`).join('') : empty('None. Something noticed more than once shows here.');
   $('problems').innerHTML = o.problems.length ? o.problems.map((p) => `
-    <div class="card small"${subj('problem', p.id, p.title)}><span class="badge ${sevBadge(p.severity)}">sev ${esc(p.severity)}</span><span class="badge">${p.realized ? 'issue' : 'risk'}</span><a class="linkish" href="#problem/${encodeURIComponent(p.id)}"><b>${esc(p.title)}</b></a> <span class="muted">· ${esc(p.status)}${p.assigned_to ? `, ${esc(p.assigned_to)}` : ''}${(p.threatens || []).length ? ` · threatens ${p.threatens.map(esc).join(', ')}` : ''}</span>${p.detail ? `<div class="muted">${esc(p.detail)}</div>` : ''}</div>`).join('') : empty('None open.');
+    <div class="card small"${subj('problem', p.id, p.title)} data-open="problem/${esc(encodeURIComponent(p.id))}"><span class="badge ${sevBadge(p.severity)}">sev ${esc(p.severity)}</span><span class="badge">${p.realized ? 'issue' : 'risk'}</span><a class="linkish" href="#problem/${encodeURIComponent(p.id)}"><b>${esc(p.title)}</b></a> <span class="muted">· ${esc(p.status)}${p.assigned_to ? `, ${esc(p.assigned_to)}` : ''}${(p.threatens || []).length ? ` · threatens ${p.threatens.map(esc).join(', ')}` : ''}</span>${p.detail ? `<div class="muted">${esc(p.detail)}</div>` : ''}</div>`).join('') : empty('None open.');
   const cand = o.knowledge.filter((k) => k.status === 'candidate');
   const acc = o.knowledge.filter((k) => k.status === 'accepted');
   $('knowledge').innerHTML = (cand.length ? `<p class="small">${cand.length} proposed lesson${cand.length > 1 ? 's are' : ' is'} waiting for you in the <a class="linkish" href="#inbox">Inbox</a>.</p>` : '') +
-    (acc.length ? acc.map((k) => `<div class="card small"${subj('lesson', k.id, k.statement)}><a class="linkish" href="#lesson/${encodeURIComponent(k.id)}"><span class="badge good">${esc(k.kind)}</span></a>${linkify(k.statement)}${k.valence < 0 ? ' <span class="muted">(avoid)</span>' : ''} <span class="muted">· applies to ${esc(scopeWords(k.scope))}${k.created_by === 'owner' ? ' · from you' : ''}</span></div>`).join('') : '') ||
+    (acc.length ? acc.map((k) => `<div class="card small"${subj('lesson', k.id, k.statement)} data-open="lesson/${esc(encodeURIComponent(k.id))}"><a class="linkish" href="#lesson/${encodeURIComponent(k.id)}"><span class="badge good">${esc(k.kind)}</span></a>${linkify(k.statement)}${k.valence < 0 ? ' <span class="muted">(avoid)</span>' : ''} <span class="muted">· applies to ${esc(scopeWords(k.scope))}${k.created_by === 'owner' ? ' · from you' : ''}</span></div>`).join('') : '') ||
     empty('None yet. Things noticed more than once become proposed lessons, which you keep or retire in the Inbox.');
 
   // Trust Ladder
@@ -2007,7 +2010,7 @@ function renderOoda(o) {
   // Act
   const feed = o.acts;
   $('acts-feed').innerHTML = feed.length ? feed.map((a) => { const v = actView(a); return `
-    <div class="card small ${a.correction ? 'corrected' : ''}"${subj('act', a.id, a.what)}>
+    <div class="card small ${a.correction ? 'corrected' : ''}"${subj('act', a.id, a.what)} data-open="act/${esc(encodeURIComponent(a.id))}">
       <div><div class="act-head">${v.head}</div>${v.detail ? `<div class="act-detail">${v.detail}</div>` : ''}
         <div class="meta"><a class="linkish" href="#act/${encodeURIComponent(a.id)}">${when(a.created_at)}</a> · ${actUnder(a)}${a.reversible === false ? ' · can’t be undone' : ''}</div>
         ${a.correction ? `<div class="err">Corrected by ${esc(who(a.correction.by))}: ${esc(a.correction.reason)}${a.correction.repaired ? ` · ${esc(a.correction.repaired)}` : ''}</div>` : ''}
@@ -2047,7 +2050,7 @@ function renderDecisions(o) {
     const under = decisionUnder(r);
     const evidence = (r.refs || []).length ? `about ${r.refs.slice(0, 4).map((x) => (ticketMap().has(x) ? tlink(x) : linkify(x))).join(', ')}` : '';
     return `
-    <div class="card small ${r.correction ? 'corrected' : ''}" data-dec="${esc(key(r))}"${subj(decSubject(r), r.id, r.what)}>
+    <div class="card small ${r.correction ? 'corrected' : ''}" data-dec="${esc(key(r))}"${subj(decSubject(r), r.id, r.what)} data-open="${esc(open.slice(1))}">
       <div><div class="act-head"><span class="badge ${r.kind === 'correction' ? 'high' : r.who === 'owner' ? 'good' : 'medium'}">${esc(DEC_KIND[r.kind] || r.kind)}</span> ${linkify(r.what)}</div>
         ${r.rationale ? `<div class="act-detail">${linkify(r.rationale)}${r.options?.length > 1 ? ` <span class="muted">(weighed: ${r.options.map(esc).join(' / ')})</span>` : ''}${r.confidence != null ? ` <span class="muted">· ${Math.round(r.confidence * 100)}% sure</span>` : ''}</div>` : ''}
         <div class="meta"><a class="linkish" href="${open}">${esc(when(r.at))}</a> · ${esc(r.who === 'owner' ? 'you' : who(r.who))}${r.class ? ` · ${esc(words(r.class))}` : ''}${under ? ` · ${under}` : ''}${evidence ? ` · ${evidence}` : ''}${r.kind === 'decision' && r.acts.length ? ` · carried out by ${r.acts.length} act${r.acts.length > 1 ? 's' : ''}` : r.kind === 'decision' && !NO_ACT_CLASSES.includes(r.class) ? ' · not acted on yet' : ''}${r.reversible === false ? ' · can’t be undone' : ''}</div>
@@ -2073,6 +2076,7 @@ const TYPE_META = {
   wave: ['waves', 'Wave'], milestone: ['milestone', 'Milestone'], act: ['zap', 'Act'], decision: ['scale', 'Decision'], retro: ['history', 'Retro'],
   lesson: ['lightbulb', 'Knowledge'], problem: ['triangle-alert', 'Problem'], thread: ['messages-square', 'Message'], planner: ['map', 'Planner'],
   q: ['circle-help', 'Question'], file: ['file-text', 'File'], sensor: ['activity', 'Sensor'],
+  observation: ['eye', 'Observation'], signal: ['repeat', 'Recurring signal'], learning: ['trending-up', 'Learning'],
 };
 let SCHEMA_DOCS = null;
 async function loadSchemaDocs() {
@@ -2251,7 +2255,7 @@ let DRAWER = { kind: null, id: null };
 let lastFocus = null;
 let LAST_HTML = '';
 let AFTER = [];
-const OPENERS = () => ({ ticket: openTicket, goal: openGoal, feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, planner: openPlanner, q: openQuestion, file: openFile, sensor: openSensor });
+const OPENERS = () => ({ ticket: openTicket, goal: openGoal, feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, planner: openPlanner, q: openQuestion, file: openFile, sensor: openSensor, observation: openObservation, signal: openSignal, learning: openLearning });
 // Not under someone mid-action: typing or choosing in the drawer, a confirm step showing, a request
 // in flight. The next refresh draws it.
 function busyDrawer() {
@@ -2579,11 +2583,10 @@ function renderMonitoring(d) {
   }).join('')}</div>` : empty('No sensors yet. The supervisor starts one for each production URL, log and error tracker it finds (settings <code>sensors</code>), and polls them while it runs.');
   for (const m of ms.filter((x) => x.kind === 'http')) loadSensorSeries(m.name);
   $('incidents').innerHTML = incidentBoard(d.incidents || []);
-  for (const b of $('incidents').querySelectorAll('[data-open]')) b.onclick = () => { location.hash = b.dataset.open; };
   const feed = d.sensor_feed || [];
   $('sensor-exceptions').innerHTML = feed.length ? `<div class="feed">${feed.map(fpRow).join('')}</div>` : empty(ms.some((m) => m.kind !== 'http') ? 'Nothing read yet. Exceptions, log errors and platform errors the sensors read show here, newest first.' : 'No probes yet. Discovery starts them when it finds an error tracker or a host whose logs the project can already read.');
   const obs = (d.ooda?.observations || []).filter((o) => /^sensor:/.test(o.subject || ''));
-  $('sensor-feed').innerHTML = obs.length ? obs.map((o) => `<div class="card small${o.severity >= 3 ? ' corrected' : ''}"${subj('observation', o.id, o.detail)}><div><div class="act-head">${o.severity != null ? `<span class="badge ${sevBadge(o.severity)}">${esc(words(o.kind))}</span> ` : ''}${linkify(o.detail)}</div><div class="meta">${esc(when(o.created_at))} · ${subjectLink(o.subject)}</div></div></div>`).join('') : empty('Nothing yet. Outages, slow spells and each day\'s rollup show here.');
+  $('sensor-feed').innerHTML = obs.length ? obs.map((o) => `<div class="card small${o.severity >= 3 ? ' corrected' : ''}"${subj('observation', o.id, o.detail)} data-open="observation/${esc(encodeURIComponent(o.id))}"><div><div class="act-head">${o.severity != null ? `<span class="badge ${sevBadge(o.severity)}">${esc(words(o.kind))}</span> ` : ''}${linkify(o.detail)}</div><div class="meta">${esc(when(o.created_at))} · ${subjectLink(o.subject)}</div></div></div>`).join('') : empty('Nothing yet. Outages, slow spells and each day\'s rollup show here.');
 }
 function openSensor(name) {
   drawerFor('sensor', name);
@@ -2890,6 +2893,99 @@ function openLesson(id) {
     ${citedBlock(p, k)}
     ${historySection(p, id)}`);
 }
+/* loop-place start */
+// Where an observation came from, in your words (its provenance, which the kit computes).
+function fromWords(pv, o) {
+  const r = pv?.ref;
+  switch (pv?.from) {
+    case 'sensor': return r === 'goal-measure' ? 'From a goal\'s measure, read by the kit' : `From the ${(DATA?.sensors || []).some((x) => x.name === r) ? `<a class="linkish" href="#sensor/${encodeURIComponent(r)}">${esc(r)}</a>` : esc(r ?? 'kit\'s')} sensor`;
+    case 'metrics': return r === 'pane' ? 'From the kit\'s check on the agents\' panes' : `From the kit's own checks (${esc(words(r ?? 'a finding').toLowerCase())})`;
+    case 'spend': return 'From the spend meter';
+    case 'owner': return 'From you';
+    case 'owner-answer': return r ? `From your answer to ${qlink(r)}` : 'From your answer';
+    case 'owner-thread': return r ? `From a thread with you (${linkify(r)})` : 'From a thread with you';
+    case 'owner-chat': return 'From what you said in the supervisor chat';
+    case 'retro': return 'From a retro';
+    case 'worker': case 'planner': return `From ${esc(who(o?.created_by))}`;
+    case 'supervisor': return 'From the supervisor';
+    default: return pv?.from ? `From ${esc(pv.from)}` : '';
+  }
+}
+// A record's sidepeek, from its id (a correction opens the call it corrects).
+const recordHref = (id) => { const x = String(id ?? '').replace(/^correction:/, ''); const k = { k: 'lesson', p: 'problem', d: 'decision', a: 'act', o: 'observation', q: 'q' }[x[0]]; return k && x[1] === '-' ? `#${k}/${encodeURIComponent(x)}` : null; };
+const aWord = (w) => `${/^[aeiou]/i.test(w) ? 'an' : 'a'} ${w}`;
+// Where an observation sits in the loop, one line: the kit's place for it (collectOoda, peek).
+function loopPlace(pl) {
+  if (!pl) return '';
+  const to = (h, t) => (h ? `<a class="linkish" href="${esc(h)}">${t}</a>` : t);
+  const sig = (t) => to(`#signal/${encodeURIComponent(pl.ref ?? '')}`, t);
+  const why = pl.why ? `: ${linkify(pl.why)}` : '';
+  switch (pl.state) {
+    case 'new': return 'Not oriented yet';
+    case 'signal': return pl.recurring ? `Part of a ${sig('recurring signal')} (seen ${esc(pl.n)} times)` : pl.n >= 3 ? `Seen ${esc(pl.n)} times, by one writer on one day: ${sig('not a recurring signal yet')}` : `Part of a ${sig('recurring signal')} (${esc(pl.n)} of 3)`;
+    case 'explained': return `Explained: became ${to(recordHref(pl.ref), esc(aWord(pl.why || 'lesson')))}`;
+    case 'noise': return `Ruled ${to(recordHref(pl.ref), 'noise')}${why}`;
+    case 'ignored': return `${to(recordHref(pl.ref), 'Ignored at triage')}${why}`;
+    case 'set-aside': return `${to(recordHref(pl.ref), 'Set aside')} until ${esc(when(pl.until))}${why}`;
+    case 'carried': return `Carried on: ${esc(pl.why)} ${to(recordHref(pl.ref), '(the furthest step)')}`;
+    default: return '';
+  }
+}
+/* loop-place end */
+const clip = (x, n) => { const t = String(x ?? ''); return t.length > n ? `${t.slice(0, n)}…` : t; };
+const hoursWords = (h) => (h < 48 ? `${h} hour${h === 1 ? '' : 's'}` : `${Math.floor(h / 24)} days`);
+function openObservation(id) {
+  drawerFor('observation', id);
+  const p = peekOf('observation', id);
+  const card = (DATA.ooda.observations || []).find((x) => x.id === id);
+  const o = card || (p?.record ? { ...p.record.fields, id, created_by: p.record.created_by, created_at: p.record.created_at } : null);
+  if (!o) return notFound('observation', id, p, p?.error ? 'No such observation.' : '');
+  const pv = card?.provenance ?? p?.provenance;
+  const place = p && p.place !== undefined ? p.place : card?.place;
+  showDrawer(`<h2 id="drawer-title">${esc(words(o.kind))}: ${esc(clip(o.detail, 80))}</h2>
+    ${pv ? `<p class="ctx" data-from>${fromWords(pv, o)}</p>` : ''}
+    ${attrs({ id, peek: p, type: 'observation', computed: [
+      ['Where it sits', loopPlace(place), 'Where it is in the loop: not oriented yet, part of a recurring signal, explained, ruled noise, set aside, or carried on to a decision, an act or an outcome.'],
+      ['Stage', esc(words(card?.stage ?? p?.stage ?? '')), 'Which stage of the loop it is in: observe, orient, decide, act or learn.'],
+    ] })}
+    <p class="ctx measure">${linkify(o.detail)}</p>
+    ${citedBlock(p, o)}
+    ${historySection(p, id)}`);
+}
+// A recurring signal is computed, not stored: what nothing explains yet on one key.
+const signalTitle = (key) => `${words(key.split(':')[0])} ${key.split(':').slice(1).join(':')}`.trim();
+function openSignal(key) {
+  drawerFor('signal', key);
+  const p = peekOf('signal', key);
+  const c = (DATA.ooda.clusters || []).find((x) => x.key === key);
+  const s = p?.signal;
+  if (!s && !c) return notFound('signal', key, p, p?.error ? 'Nothing recurs on this key now: it was explained, or never recurred.' : '', { noRecord: true });
+  const items = s?.items ?? [];
+  showDrawer(`<h2 id="drawer-title">${esc(signalTitle(key))}</h2>
+    ${attrs({ id: key, idTip: 'The key its observations recur on: a fingerprint, a finding, or a kind and a subject.', peek: p, type: 'signal', noRecord: true, computed: [
+      ['Seen', esc(s?.count ?? c?.count), 'How many observations on this key nothing explains yet.'],
+      ['Recurring', !s || s.recurring ? 'yes' : 'not yet: a signal is three or more, from two writers or on two days', 'Whether Orient lists it as a recurring signal.'],
+      ['First seen', s?.first_at ? esc(when(s.first_at)) : '', 'The oldest observation nothing explains yet.'],
+      ['Latest', s?.latest_at ? esc(when(s.latest_at)) : '', 'The newest one.'],
+      ['Unexplained for', s?.unexplained_hours != null ? esc(hoursWords(s.unexplained_hours)) : '', 'How long since the oldest of them: over a day is orientation debt.'],
+      ['Explained already', s?.explained?.length ? `${esc(s.explained.length)} earlier observation${s.explained.length > 1 ? 's' : ''} on this key` : '', 'Ones a lesson, a problem or a ruling already explains.'],
+    ] })}
+    ${c?.latest ? `<p class="ctx measure">${linkify(c.latest)}</p>` : ''}
+    <h3>Its observations</h3>${items.length ? `<ul>${items.map((i) => `<li><a class="linkish" href="#observation/${encodeURIComponent(i.id)}">${esc(when(i.at))}</a> ${linkify(clip(i.detail, 160))} <span class="muted">· ${esc(who(i.by))}</span></li>`).join('')}</ul>` : p === undefined ? '<p class="loading">Loading…</p>' : empty('None unexplained.')}
+    ${s?.explain?.length ? `<details><summary>How the supervisor explains it</summary><p class="small muted">With what it teaches, or a ruling that it is noise; you can correct either.</p>${s.explain.map((x) => `<pre>${esc(x)}</pre>`).join('')}</details>` : ''}
+    ${historySection(p, key)}`);
+}
+// The weekly learning record (PR 5 adds its figures).
+function openLearning(id) {
+  drawerFor('learning', id);
+  const p = peekOf('learning', id);
+  const f = p?.record?.fields;
+  if (!f) return notFound('learning', id, p, p?.error ? 'No such learning record.' : '');
+  showDrawer(`<h2 id="drawer-title">${esc(clip(f.detail || 'Learning', 80))}</h2>
+    ${attrs({ id, peek: p, type: 'observation' })}
+    ${f.detail ? `<p class="ctx measure">${linkify(f.detail)}</p>` : ''}
+    ${historySection(p, id)}`);
+}
 // An incident's part of the problem drawer: its stage and authority, its fingerprints, the fix
 // ticket, and (folded, framed as untrusted) the latest event of each fingerprint.
 function incidentSection(inc, p) {
@@ -3110,6 +3206,17 @@ $('av-reload').addEventListener('click', () => { const f = $('av-frame'), src = 
 // a question's link to a changed artifact says so in the viewer's header
 document.addEventListener('click', (e) => { const a = e.target.closest?.('a[data-av-note]'); if (a) AV_NOTE = a.dataset.avNote || null; });
 
+// A Loop card opens its sidepeek when clicked anywhere on it. A link, a control or the correct form
+// inside it keeps its own click; a Shift, Ctrl, Meta or Alt click, a pinned thread layer and a text
+// being selected are the owner's own.
+document.addEventListener('click', (e) => {
+  const card = e.target.closest?.('[data-open]');
+  if (!card || e.button !== 0 || e.shiftKey || e.metaKey || e.ctrlKey || e.altKey || TL.pin) return;
+  const inner = e.target.closest('a, button, input, select, textarea, label, [data-correct-form], .untrusted');
+  if (inner && inner !== card && card.contains(inner)) return;
+  if (String(window.getSelection?.() ?? '')) return;
+  location.hash = card.dataset.open;
+});
 let ROUTED = false;
 function route() {
   const raw = location.hash.slice(1);
@@ -3131,7 +3238,7 @@ function route() {
   // a thread: its card, beside its subject (#thread/ is a message's thread, in the sidepeek)
   // over nothing: a drawer it was followed from (or open under it) closes, as for any other link
   if (h.startsWith('talk/')) { hideDrawer(); return void tlOpen(h.slice(5)); }
-  const PEEKS = { feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, sensor: openSensor };
+  const PEEKS = { feature: openFeature, story: openStory, release: openRelease, wave: openWave, milestone: openMilestone, act: openAct, decision: openDecision, retro: openRetro, lesson: openLesson, problem: openProblem, thread: openThread, sensor: openSensor, observation: openObservation, signal: openSignal, learning: openLearning };
   const [kind, ...rest] = h.split('/');
   if (PEEKS[kind] && rest.length) return void PEEKS[kind](rest.join('/'));
   if (h.startsWith('file?')) return void openFile(new URLSearchParams(location.hash.slice(6)));

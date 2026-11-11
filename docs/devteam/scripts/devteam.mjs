@@ -9386,7 +9386,8 @@ function collectOoda() {
     goals: logObjects('goal').map(goalView).sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99)),
     roadmap: collectRoadmap(),
     retro: retroDue(),
-    observations: recent(logObjects('observation').filter((o) => !['reading', 'retro', 'finding-ack'].includes(o.kind)), 40).map(withOoda),
+    // each with where it sits in the loop, so its card can say so without the whole index
+    observations: recent(logObjects('observation').filter((o) => !['reading', 'retro', 'finding-ack'].includes(o.kind)), 40).map((o) => ({ ...withOoda(o), place: placeOf(o) })),
     clusters: orientClusters(),
     // every lesson waiting on the owner is in the Inbox, however many: only the rest are the recent 60
     knowledge: [...recent(logObjects('knowledge').filter((k) => k.status === 'candidate'), Infinity), ...recent(logObjects('knowledge').filter((k) => !['retired', 'candidate'].includes(k.status)), 60)],
@@ -14347,6 +14348,36 @@ function lineageMermaid(L) {
   if (L.nodes.length) lines.push('classDef current stroke-width:3.5px', 'class n0 current');
   return lines.join('\n');
 }
+// Where an observation sits in the loop, for its card and its sidepeek: ruled noise, ignored at
+// triage, set aside, carried on (the furthest stage it reached), explained (it became knowledge, a
+// problem or an incident), part of a signal (n of the 3 that make one), or not oriented yet. Null
+// for what isn't an observation for Orient (a reading, an outcome, a set-aside itself).
+const SET_ASIDE_KINDS = ['finding-ack', 'sensor-ignored', 'sensor-unignored', 'sensor-reconsidered'];
+let PLACE_CTX = null;
+function placeOf(o) {
+  if (o?.type !== 'observation' || stageOf(o) !== 'observe' || SET_ASIDE_KINDS.includes(o.kind)) return null;
+  if (PLACE_CTX?.log !== readLog()) PLACE_CTX = { log: readLog(), ignores: sensorIgnores(), ackHours: loadSettings().finding_ack_hours ?? 24, acks: new Map(logObjects('observation').filter((x) => x.kind === 'finding-ack').sort(byTime).map((x) => [x.source_ref, x])) };
+  const C = PLACE_CTX;
+  const after = (linkIndex().out.get(o.id) ?? []).map((e) => logGet(e.to)).filter(Boolean);
+  const noise = after.find((x) => x.type === 'decision' && x.class === 'orient-noise' && liveDecision(x));
+  if (noise) return { state: 'noise', ref: noise.id, why: noise.what ?? null };
+  const fp = fromSensor(o) && TRIAGE_KINDS.includes(o.kind) ? fpIdOfObservation(o) : null;
+  const ig = fp ? C.ignores.get(fp) : null;
+  if (ig) return { state: 'ignored', ref: ig.id, why: ig.reason };
+  const ack = o.source_key ? C.acks.get(o.source_key) : null;
+  const until = ack ? new Date(Date.parse(ack.created_at) + C.ackHours * 3600000).toISOString() : null;
+  if (ack && until > nowIso()) return { state: 'set-aside', ref: ack.id, why: ack.detail, until };
+  // what came of it, step by step: the first record it reached at each stage
+  const ORDER = ['orient', 'decide', 'act', 'learn'];
+  const reached = (lineage(o.id, { up: 0, down: 4, max: 60 })?.nodes ?? []).slice(1).filter((n) => ORDER.includes(n.stage) && n.type !== 'signal' && !SET_ASIDE_KINDS.includes(n.kind));
+  const firstAt = ORDER.map((s) => reached.find((n) => n.stage === s)).filter(Boolean);
+  const word = (n) => (n.type === 'knowledge' ? n.kind ?? 'lesson' : n.type === 'problem' ? (isIncident(logGet(n.id)) ? 'incident' : 'problem') : n.type === 'question' ? 'your answer' : n.type === 'observation' ? String(n.kind ?? 'outcome').replace(/-/g, ' ') : n.type);
+  if (firstAt.length === 1 && firstAt[0].stage === 'orient') return { state: 'explained', ref: firstAt[0].id, why: word(firstAt[0]) };
+  if (firstAt.length) return { state: 'carried', ref: firstAt.at(-1).id, why: firstAt.map(word).join(' → ') };
+  const g = signalGroups().get(signalKeyOf(o));
+  if (g && g.items.length > 1) return { state: 'signal', ref: g.key, n: g.items.length, recurring: g.items.length >= 3 && g.spread };
+  return { state: 'new', ref: null };
+}
 // A file's commits, from the git of the repo it is in: another repo's (read on its main by default)
 // only when this machine can read it, else none (a view never fails on a missing checkout).
 const fileHistory = (rel, ref = null, name = 'home') => { const R = name === 'home' ? repo('home') : repoReadable(name) ? repo(name) : null; return fileHistoryIn(R, rel, ref ?? (name === 'home' ? null : R?.mainRef())); };
@@ -14421,7 +14452,20 @@ function peekView(kind, id) {
       v.last_merge = last ? { id: last.id, at: last.created_at, ticket: (last.refs ?? []).find((r) => ts.includes(r)) ?? null, sha } : null;
     }
   } else if (kind === 'signal') {
+    // computed, never stored: what nothing explains yet on its key, and the commands that would explain it
     v.record = null;
+    const g = signalGroups().get(id);
+    const items = [...(g?.items ?? [])].sort((a, b) => a.at.localeCompare(b.at));
+    const explained = logObjects('observation').filter((o) => signalKeyOf(o) === id && !items.some((i) => i.id === o.id)).map((o) => o.id);
+    if (!items.length && !explained.length) die(`no signal ${id}`);
+    const cite = items.slice(-SET_ASIDE_REFS).map((i) => shq(i.id)).join(' ');
+    v.signal = {
+      key: id, count: items.length, spread: !!g?.spread, recurring: items.length >= 3 && !!g?.spread, explained,
+      items: items.map((i) => ({ id: i.id, at: i.at, by: i.who, detail: i.detail })), first_at: items[0]?.at ?? null, latest_at: items.at(-1)?.at ?? null,
+      unexplained_hours: items.length ? Math.floor((Date.now() - Date.parse(items[0].at)) / 3600000) : null,
+      explain: items.length ? [`knowledge add --kind lesson --scope project --statement '<what it teaches>' --evidence ${cite}`, `decide --class orient-noise --refs ${shq(id)} ${cite} -- '<why it is noise>'`] : [],
+    };
+    v.history = historyOf(items.map((i) => i.id), { limit: 100 });
   } else {
     const o = logGet(id) ?? die(`no record ${id}`);
     v.history = historyOf([id]);
@@ -14439,6 +14483,7 @@ function peekView(kind, id) {
   // what a record in the loop, or a recurring signal, came from and what came of it
   const root = kind === 'signal' ? `signal:${id}` : v.record && stageOf(logGet(v.record.id)) !== null ? v.record.id : null;
   if (root) { v.lineage = lineage(root); v.lineage_mermaid = v.lineage ? lineageMermaid(v.lineage) : null; }
+  if (v.record?.type === 'observation') v.place = placeOf(logGet(v.record.id));
   return v;
 }
 function cmdPeek() {

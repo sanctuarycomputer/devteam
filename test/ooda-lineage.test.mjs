@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fleetFixture, json, line } from './lib/kit.mjs';
+import { fleetFixture, json, line, kit as F_KIT } from './lib/kit.mjs';
 
 const SUP = { DEVTEAM_ROLE: 'supervisor' };
 const stamp = (d) => `${d.toISOString().slice(0, 10).replace(/-/g, '')}-${d.toISOString().slice(11, 23).replace(/[:.]/g, '')}`;
@@ -135,4 +135,85 @@ test('lineage: at most 120 nodes, and it says when it stopped', () => {
     const small = hand('supervisor', { type: 'knowledge', kind: 'lesson', scope: 'project', status: 'accepted', statement: 'y', evidence: many.slice(0, 2) }, 500);
     assert.equal(peek(F, 'lesson', small).lineage.truncated, false);
   } finally { F.done(); }
+});
+
+test('where an observation sits: on its card (dashboard-data) and in its peek; a signal peeks by its key, / and all', () => {
+  const F = fleetFixture('ooda-place');
+  const { old, ok } = F;
+  try {
+    const C = incidentChain(F);
+    const hand = C.hand;
+    const note = (detail, ago, key) => hand('supervisor', { type: 'observation', source: 'supervisor', subject: 'app', kind: 'note', detail, ...(key ? { source_key: key } : {}) }, ago);
+    const fresh = note('alone', 5 * H, 'note:alone');
+    const twice = [note('twice', 6 * H, 'note:twice'), note('twice again', 7 * H, 'note:twice')];
+    const taught = note('it taught something', 8 * H, 'note:taught');
+    hand('supervisor', { type: 'knowledge', kind: 'lesson', scope: 'project', status: 'accepted', statement: 'it taught this', evidence: [taught] }, 4 * H);
+    const ruled = ok(old, ['observe', '--subject', 'app', '--kind', 'note', '--detail', 'a bot', '--key', 'note:bot'], SUP).trim();
+    ok(old, ['decide', '--class', 'orient-noise', '--refs', 'note:bot', ruled, '--', 'a health check'], SUP);
+    const quiet = hand('supervisor', { type: 'observation', source: 'web', detector: 'sensor', subject: 'sensor:web', kind: 'log-error', detail: 'web: a error log line', severity: 3, source_key: 'sensor:web:log:Q1' }, 9 * H);
+    hand('supervisor', { type: 'observation', source: 'web', detector: 'sensor', subject: 'sensor:web', kind: 'sensor-ignored', detail: 'ignored web:log:Q1: bots', source_ref: 'web:log:Q1', source_key: 'sensor:web:ignore:log:Q1:x', refs: [quiet] }, 3 * H);
+    const waits = hand('supervisor', { type: 'observation', source: 'metrics', detector: 'metrics', subject: 'w-01-a', kind: 'stale-worker', detail: 'quiet', source_key: 'metrics:stale-worker:w-01-a' }, 11 * H);
+    hand('supervisor', { type: 'observation', source: 'ack', kind: 'finding-ack', subject: 'stale-worker w-01-a', detail: 'it is thinking', source_ref: 'metrics:stale-worker:w-01-a', refs: [waits] }, 1 * H);
+    // a finding whose subject holds a /: three of it on two days, a recurring signal
+    const slash = [26, 25, 1].map((h) => hand('supervisor', { type: 'observation', source: 'metrics', detector: 'metrics', subject: 'web/e2e', kind: 'flaky-gate', detail: 'web/e2e failed then passed', source_key: 'metrics:flaky-gate:web/e2e' }, h * H + 500));
+    const d = json(ok(old, ['dashboard-data']));
+    const place = (id) => d.ooda.observations.find((o) => o.id === id)?.place;
+    assert.deepEqual(place(fresh), { state: 'new', ref: null });
+    assert.deepEqual(place(twice[0]), { state: 'signal', ref: 'note:twice', n: 2, recurring: false });
+    assert.equal(place(taught).state, 'explained');
+    assert.equal(place(taught).why, 'lesson');
+    assert.equal(place(ruled).state, 'noise');
+    assert.equal(place(ruled).why, 'a health check');
+    assert.deepEqual(place(quiet), { state: 'ignored', ref: place(quiet).ref, why: 'bots' });
+    assert.equal(place(waits).state, 'set-aside');
+    assert.equal(place(waits).why, 'it is thinking');
+    assert.ok(place(waits).until > new Date().toISOString());
+    assert.equal(place(C.spikes[0]).state, 'carried');
+    assert.match(place(C.spikes[0]).why, /^incident → decision → act → (outcome|fix deployed)$/);
+    assert.deepEqual(place(slash[0]), { state: 'signal', ref: 'metrics:flaky-gate:web/e2e', n: 3, recurring: true });
+    assert.equal(place(C.outcome), null, 'an outcome is Learn, not an observation for Orient');
+    // the peek says the same, with the provenance first
+    const p = peek(F, 'observation', quiet);
+    assert.equal(p.place.state, 'ignored');
+    assert.deepEqual(p.provenance, { from: 'sensor', ref: 'web' });
+    // a signal: its observations, how long it has waited, and what would explain it
+    const s = peek(F, 'signal', 'metrics:flaky-gate:web/e2e');
+    assert.equal(s.record, null);
+    assert.equal(s.signal.key, 'metrics:flaky-gate:web/e2e');
+    assert.equal(s.signal.recurring, true);
+    assert.deepEqual(s.signal.items.map((i) => i.id), slash);
+    assert.equal(s.signal.unexplained_hours, 26);
+    assert.match(s.signal.explain[1], /^decide --class orient-noise --refs 'metrics:flaky-gate:web\/e2e' 'o-/);
+    assert.equal(s.lineage.nodes[0].id, 'signal:metrics:flaky-gate:web/e2e');
+    assert.match(F.run(old, ['peek', 'signal', 'nothing:here', '--json']).err, /no signal nothing:here/);
+  } finally { F.done(); }
+});
+
+test('the page\'s words for where an observation sits and where it came from', async () => {
+  const vm = await import('node:vm');
+  const html = fs.readFileSync(path.join(F_KIT, 'dashboard/index.html'), 'utf8');
+  const src = html.slice(html.indexOf('/* loop-place start */'), html.indexOf('/* loop-place end */'));
+  assert.ok(src.length > 500, 'the loop-place block is marked in index.html');
+  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const ctx = vm.createContext({ esc, linkify: esc, qlink: (id) => `<q>${id}</q>`, who: (w) => (w === 'w-01-a' ? 'the agent on checkout' : w), words: (x) => String(x).replace(/-/g, ' '), when: () => 'Nov 11', DATA: { sensors: [{ name: 'web' }] } });
+  vm.runInContext(`${src}\n;globalThis.api = { loopPlace, fromWords, recordHref };`, ctx);
+  const { loopPlace, fromWords, recordHref } = ctx.api;
+  const text = (h) => h.replace(/<[^>]+>/g, '');
+  assert.equal(loopPlace({ state: 'new', ref: null }), 'Not oriented yet');
+  assert.equal(text(loopPlace({ state: 'signal', ref: 'note:a/b', n: 2, recurring: false })), 'Part of a recurring signal (2 of 3)');
+  assert.match(loopPlace({ state: 'signal', ref: 'note:a/b', n: 2 }), /href="#signal\/note%3Aa%2Fb"/);
+  assert.equal(text(loopPlace({ state: 'signal', ref: 'k', n: 4, recurring: true })), 'Part of a recurring signal (seen 4 times)');
+  assert.equal(text(loopPlace({ state: 'explained', ref: 'p-20261111-000000000-supervisor', why: 'incident' })), 'Explained: became an incident');
+  assert.equal(text(loopPlace({ state: 'noise', ref: 'd-20261111-000000000-supervisor', why: 'a health check' })), 'Ruled noise: a health check');
+  assert.equal(text(loopPlace({ state: 'ignored', ref: 'o-20261111-000000000-supervisor', why: 'bots' })), 'Ignored at triage: bots');
+  assert.equal(text(loopPlace({ state: 'set-aside', ref: 'o-x', why: 'later', until: '2026-11-12T00:00:00Z' })), 'Set aside until Nov 11: later');
+  assert.equal(text(loopPlace({ state: 'carried', ref: 'correction:d-20261111-000000000-supervisor', why: 'lesson → decision → correction' })), 'Carried on: lesson → decision → correction (the furthest step)');
+  assert.equal(recordHref('correction:d-20261111-000000000-supervisor'), '#decision/d-20261111-000000000-supervisor');
+  assert.equal(loopPlace({ state: 'noise', ref: 'd-1', why: '<b>x</b>' }).includes('<b>'), false, 'the reason escaped');
+  assert.equal(text(fromWords({ from: 'sensor', ref: 'web' })), 'From the web sensor');
+  assert.match(fromWords({ from: 'sensor', ref: 'web' }), /href="#sensor\/web"/);
+  assert.equal(fromWords({ from: 'sensor', ref: 'goal-measure' }), "From a goal's measure, read by the kit");
+  assert.equal(text(fromWords({ from: 'owner-answer', ref: 'q-1' })), 'From your answer to q-1');
+  assert.equal(fromWords({ from: 'worker', ref: null }, { created_by: 'w-01-a' }), 'From the agent on checkout');
+  assert.equal(fromWords({ from: 'metrics', ref: 'stale-worker' }), "From the kit's own checks (stale worker)");
 });
