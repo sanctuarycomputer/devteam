@@ -547,7 +547,7 @@
     <a href="#health"><span class="nl"><i class="icon-heart-pulse" aria-hidden="true"></i>Health</span> <span class="count" id="n-findings"></span></a>
     <a href="#monitoring"><span class="nl"><i class="icon-activity" aria-hidden="true"></i>Sensors</span> <span class="count" id="n-sensors"></span></a>
   </nav>
-  <div class="foot"><span id="when"></span><br><span id="logline"></span><br><span class="err" id="err"></span></div>
+  <div class="foot"><span id="when"></span> <span id="saving" class="muted" role="status" hidden>· saving…</span><br><span id="logline"></span><br><span class="err" id="err"></span></div>
 </aside>
 <main class="waiting">
   <div class="banner" id="banner" role="alert" hidden></div>
@@ -1758,31 +1758,44 @@ async function reviewAnswer(btn) {
   const err = $('e-rv');
   err.textContent = '';
   const auto = document.querySelector('#rv-actions input[data-rv-auto]:checked')?.value;
-  btn.classList.add('busy'); btn.disabled = true;
-  let r, out;
-  try {
-    r = await fetch('/api/review-answer', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: me.qid, result: p.obj, sha256: p.sha256, autonomy: auto ? Number(auto) : undefined }) });
-    out = await r.json();
-  } catch (e) { out = { error: `Could not send: ${e.message}` }; }
-  if (!r?.ok) { btn.classList.remove('busy'); btn.disabled = false; err.textContent = out.error || 'failed'; return; }
-  clearTimeout(me.saveTimer);
-  me.pending = null;
-  lsDel(rvKey(me.qid, me.info.review.page.sha256));
-  markAnswered(me.qid, String(out.out || '').replace(/^answered \S+: /, '') || 'Answered');
-  load({ force: true });
-  // the record: the same page, read-only, with the result as stored
-  if (RV === me) { RV = null; openReview(location.hash.slice(1)); }
+  const body = { id: me.qid, result: p.obj, sha256: p.sha256, autonomy: auto ? Number(auto) : undefined };
+  const card = document.querySelector(`[data-qcard="${CSS.escape(me.qid)}"]`);
+  const f = cardFields(me.qid, card);
+  await press(`q:${me.qid}`, {
+    build: () => ({ action: 'review-answer', body }),
+    // at once: the panel says it is answered and takes no second press; the Inbox card likewise
+    apply: () => { $('rv-actions').innerHTML = '<div class="small"><b>Answered</b> · saving…</div><span class="err" id="e-rv"></span>'; markAnswered(me.qid, 'Answered'); },
+    undo: () => putBackCard(me.qid, f),
+    restore: () => { if (RV === me) renderReviewActions(); },
+    onOk: (out) => {
+      clearTimeout(me.saveTimer);
+      me.pending = null;
+      lsDel(rvKey(me.qid, me.info.review.page.sha256));
+      markAnswered(me.qid, String(out.out || '').replace(/^answered \S+: /, '') || 'Answered');
+      // the record: the same page, read-only, with the result as stored
+      if (RV === me) { RV = null; openReview(location.hash.slice(1)); }
+    },
+    errId: 'rv',
+  });
 }
 async function reviewDecline(id, note, errId, btn) {
   if (!note) { const e = $(`e-${errId}`); if (e) e.textContent = 'Say what should change, so the supervisor can redraw it.'; return; }
   const auto = document.querySelector(errId === 'rv' ? '#rv-actions input[data-rv-auto]:checked' : `input[data-auto="${CSS.escape(id)}"]:checked`)?.value;
-  if (btn) { btn.classList.add('busy'); btn.disabled = true; }
-  const ok = await post('answer', { id, answer: note, decline: true, autonomy: auto ? Number(auto) : undefined }, errId).catch((e) => { const el = $(`e-${errId}`); if (el) el.textContent = `Could not send: ${e.message}`; return false; });
-  if (btn) { btn.classList.remove('busy'); btn.disabled = false; }
-  if (!ok) return;
-  delete drafts[id];
-  markAnswered(id, `Sent back: ${note}`);
-  if (RV && RV.qid === id) { const me = RV; clearTimeout(me.saveTimer); me.pending = null; RV = null; openReview(location.hash.slice(1)); }
+  const seen = seenHash(id);
+  const me = errId === 'rv' && RV?.qid === id ? RV : null;
+  // in the panel, at once: it says it was sent back and takes no second press
+  if (me) $('rv-actions').innerHTML = '<div class="small"><b>Sent back</b> · saving…</div><span class="err" id="e-rv"></span>';
+  const ok = await answerPress(id, document.querySelector(`[data-qcard="${CSS.escape(id)}"]`), errId, `Sent back: ${note}`, () => ({ action: 'answer', body: { id, answer: note, decline: true, autonomy: auto ? Number(auto) : undefined, seen } }));
+  if (!me || RV !== me) return;
+  if (!ok) {
+    const e = $('e-rv')?.textContent;
+    renderReviewActions();
+    $('rv-decline-form').hidden = false;
+    $('rv-decline-note').value = note;
+    if (e) $('e-rv').textContent = e;
+    return;
+  }
+  clearTimeout(me.saveTimer); me.pending = null; RV = null; openReview(location.hash.slice(1));
 }
 
 const GOAL_STEPS = ['Defined', 'Designed', 'Approved', 'Built', 'Met'];
@@ -1877,8 +1890,9 @@ function goalSteps(g, s, R) {
   }).join('')}</ol>`;
 }
 // The toggle: Run, Drain, Park, and Let go (Restore once let go). Let go asks to confirm in place.
-function holdControl(id, h, { letGo = true, status = null } = {}) {
+function holdControl(id, h, { letGo = true, status = null, restoring = false } = {}) {
   if (status === 'met') return '';
+  if (restoring) return `<div class="holdbar"><span class="muted small">Restoring: it comes back parked…</span><span class="err" id="e-hold-${esc(id)}"></span></div>`;
   if (status === 'abandoned') return `<div class="holdbar"><span class="seg2" role="group" aria-label="Hold"><button type="button" data-hold-id="${esc(id)}" data-mode="restore">Restore (parked)</button></span><span class="err" id="e-hold-${esc(id)}"></span></div>`;
   const cur = h?.mode || 'run';
   const fleet = DATA?.fleet?.mode ? '<span class="muted small">set for the whole fleet: use the strip at the top to resume it</span>' : '';
@@ -1921,7 +1935,7 @@ async function loadFleet(fetchToo = false) {
   FLEET.prevReady = !!FLEET.data?.ready;
   if ($('fleet-strip')) $('fleet-strip').innerHTML = fleetStrip();
   // the goal cards say parking or parked by the fleet's readiness: redraw them when it changes
-  if (DATA && wasReady !== FLEET.prevReady && typeof render === 'function') drawOrHold(HELD ?? DATA);
+  if (DATA && wasReady !== FLEET.prevReady && typeof render === 'function') drawOrHold(HELD ?? RAW);
 }
 function goalCard(g, R, openQs, week) {
   const s = goalState(g, R, openQs);
@@ -1934,7 +1948,7 @@ function goalCard(g, R, openQs, week) {
     ${steps}
     ${s.next ? `<p class="goal-next">${s.next}</p>` : ''}
     ${registryAttestLine(g)}
-    ${holdControl(g.id, g.hold_view, { status: g.status })}
+    ${holdControl(g.id, g.hold_view, { status: g.status, restoring: g.restoring })}
     ${g.status === 'ready' && g.at_target ? `<div class="holdbar"><button type="button" data-met-id="${esc(g.id)}">Mark met</button><span class="muted small">${['repo', 'prod'].includes(g.measure?.source) ? 'its check runs again first' : 'your yes marks it met'}</span><span class="err" id="e-met-${esc(g.id)}"></span></div>` : ''}
     <div class="meta"><a href="#goal/${encodeURIComponent(g.id)}">Open</a>${design ? ` · <a href="${esc(fileHref({ ...design, title: design.title || 'The design' }))}">Read the design</a>` : ''}${planningFor(g).length ? ` · ${planningFor(g).map((p) => `<a href="#planner/${encodeURIComponent(p.feature)}">planner on ${esc(p.title)}</a>${p.waiting ? ' <span class="badge high">stuck on a prompt</span>' : ''}`).join(', ')}` : ''}</div>
   </div>`;
@@ -2693,7 +2707,7 @@ function openGoal(id) {
     ] })}
     ${goalSteps(g, s, R)}
     ${s.next ? `<p class="goal-next measure">${s.next}</p>` : ''}
-    ${holdControl(g.id, g.hold_view, { status: g.status })}
+    ${holdControl(g.id, g.hold_view, { status: g.status, restoring: g.restoring })}
     <h3>Readings</h3>${readings.length ? lineChart([{ name: g.measure?.description || 'the measure', points: readings }], { marks, unit }) : '<p class="muted">No readings yet. The supervisor reads the measure on its tick (devteam.mjs goal reading).</p>'}
     ${designBlock(p?.design)}
     ${problems.length ? `<h3>Problems that threaten it</h3>${problems.map((x) => `<div class="card small"><span class="badge ${sevBadge(x.severity)}">sev ${esc(x.severity)}</span> <a class="linkish" href="#problem/${encodeURIComponent(x.id)}">${esc(x.title)}</a> <span class="muted">· ${esc(x.status)}${x.realized ? '' : ' · a risk'}</span></div>`).join('')}` : ''}
@@ -3164,20 +3178,125 @@ function showTab(tab) {
 $('loop-tabs').addEventListener('click', (e) => { const b = e.target.closest('[data-tab]'); if (b) showTab(b.dataset.tab); });
 showTab(TAB);
 
-async function post(action, body, errId) {
-  // An answer names the question as this page showed it; a question changed since is refused.
-  if (action === 'answer' && body.seen === undefined) body = { ...body, seen: (DATA.questions || []).find((x) => x.id === body.id)?.hash };
-  const r = await sending(() => fetch(`/api/${action}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }));
-  const out = await r.json();
-  if (!r.ok) {
-    if (errId && $(`e-${errId}`)) $(`e-${errId}`).textContent = out.error || 'failed';
-    return false;
+// ---- presses: the page answers at once, the server catches up ----
+// A press draws its result before anything is sent (apply) and registers an overlay: the data as
+// it will be once the server has the press, laid over every refresh until the data agrees, so a
+// refresh landing mid-press never shows the old state. A refusal or any failure takes the overlay
+// away, puts back what the owner had typed or picked (undo before the redraw, restore after it) and
+// says why where they pressed: nothing shows as saved that the server refused. Presses on one key
+// go in order, each building its request when its turn comes (a thread's second Send knows the id
+// its first one got).
+let RAW = null; // the last data, as the server sent it; DATA is RAW with the overlays laid over it
+let STALE = false;
+const OVERLAYS = new Map();
+const PRESSES = new Map();
+let SAVING = 0;
+function overlaid(raw) {
+  let d = raw;
+  for (const [k, o] of [...OVERLAYS]) {
+    // confirmed and either agreed with, or the data (fresh, not a stale copy) is the record by now
+    if (o.confirmedAt && (o.agrees?.(raw) || (!STALE && Date.now() - o.confirmedAt > 120000))) { OVERLAYS.delete(k); continue; }
+    try { d = o.data(d); } catch (e) { console.error(e); }
   }
-  // The owner's action is saved; refresh in the background rather than holding the button until the
-  // whole page has reloaded.
-  load({ force: true });
-  return true;
+  return d;
 }
+const redrawNow = () => { if (RAW) drawOrHold(HELD ?? RAW, true); };
+const savingNote = () => { const el = $('saving'); if (el) el.hidden = SAVING === 0; };
+addEventListener('beforeunload', (e) => { if (SAVING) { e.preventDefault(); e.returnValue = ''; } });
+function press(key, { build, apply, overlay, undo, restore, errId, onOk }) {
+  SAVING++;
+  savingNote();
+  const ov = overlay ? { ...overlay, confirmedAt: 0 } : null;
+  if (ov) OVERLAYS.set(key, ov);
+  try { apply?.(); } catch (e) { console.error(e); }
+  const prev = PRESSES.get(key) ?? Promise.resolve();
+  const run = prev.then(async () => {
+    let out = null;
+    let error = null;
+    try {
+      const { action, body } = build();
+      const r = await sending(() => fetch(`/api/${action}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }));
+      try { out = await r.json(); } catch { out = null; }
+      if (!r.ok || !out) error = [out?.error || `the server answered ${r.status}`, out?.out].filter(Boolean).join(' · ');
+    } catch (e) { error = `could not send: ${e.message || e}`; }
+    if (error) {
+      // what the server did before it refused (a partly posted set of secrets) shows on the next read
+      load({ force: true });
+      if (ov && OVERLAYS.get(key) === ov) OVERLAYS.delete(key);
+      try { undo?.(); } catch (e) { console.error(e); }
+      redrawNow();
+      try { restore?.(); } catch (e) { console.error(e); }
+      const el = errId && $(`e-${errId}`);
+      if (el) el.textContent = `Not saved: ${error}`;
+      return false;
+    }
+    if (ov) ov.confirmedAt = Date.now();
+    try { onOk?.(out); } catch (e) { console.error(e); }
+    load({ force: true });
+    return true;
+  }).finally(() => { SAVING--; savingNote(); if (PRESSES.get(key) === run) PRESSES.delete(key); });
+  PRESSES.set(key, run);
+  return run;
+}
+// What the owner had in a question card (the note, the pick, the trust and rule boxes), to put back
+// if the server refuses the answer.
+function cardFields(id, card) {
+  return { note: card?.querySelector('textarea[data-q]')?.value ?? drafts[id], pick: picks[id], auto: card?.querySelector('input[data-auto]:checked')?.value ?? null, rule: !!card?.querySelector('input[data-rulebox]')?.checked };
+}
+function putBackCard(id, f) {
+  ANSWERED.delete(id);
+  if (f.note !== undefined) drafts[id] = f.note;
+  if (f.pick !== undefined) picks[id] = f.pick;
+}
+function putBackBoxes(id, f) {
+  for (const card of document.querySelectorAll(`[data-qcard="${CSS.escape(id)}"]`)) {
+    if (f.auto) { const r = card.querySelector(`input[data-auto][value="${CSS.escape(f.auto)}"]`); if (r) r.checked = true; }
+    const rb = card.querySelector('input[data-rulebox]');
+    if (rb) rb.checked = f.rule;
+  }
+}
+// A goal's hold as the server will show it right after the press: a drain or park is a transition
+// (draining…, parking…) until the server says it has finished; never shown done ahead of it. Let go
+// and restore change the goal's status; restore brings it back parked.
+function holdOverlay(id, mode) {
+  const now = new Date().toISOString();
+  const view = (h) => {
+    const m = mode === 'let-go' ? 'let-go' : mode === 'restore' ? 'park' : mode;
+    const state = m === 'drain' ? 'draining' : m === 'park' ? 'parking' : m === 'let-go' ? 'let go' : 'running';
+    return { ...(h || {}), mode: m, state, by: 'owner', since: now, reason: m === 'run' ? null : h?.reason ?? null };
+  };
+  // as questionHold has it: parked, or nothing (a let-go goal's questions leave the Inbox)
+  const goalHold = mode === 'park' || mode === 'restore' ? 'park' : null;
+  const status = mode === 'let-go' ? 'abandoned' : null;
+  return {
+    data: (d) => {
+      // restore's status is the goal's own from before it was let go, which the server works out
+      const ooda = { ...d.ooda, goals: (d.ooda?.goals || []).map((g) => (g.id !== id ? g : { ...g, hold_view: view(g.hold_view), ...(status ? { status } : mode === 'restore' ? { restoring: true } : {}) })) };
+      const questions = mode === 'let-go' ? d.questions.filter((q) => q.goal !== id) : d.questions.map((q) => (q.goal === id ? { ...q, goal_hold: goalHold } : q));
+      return { ...d, ooda, questions, ...(id === 'upkeep' && d.upkeep ? { upkeep: view(d.upkeep) } : {}) };
+    },
+    agrees: (raw) => {
+      const h = id === 'upkeep' ? raw.upkeep : (raw.ooda?.goals || []).find((g) => g.id === id)?.hold_view;
+      if (mode === 'let-go') return (raw.ooda?.goals || []).find((g) => g.id === id)?.status === 'abandoned';
+      if (mode === 'restore') return (raw.ooda?.goals || []).find((g) => g.id === id)?.status !== 'abandoned';
+      return (h?.mode ?? 'run') === mode;
+    },
+  };
+}
+// An answer, at once: the card says so, and the server is told. The answer names the question as
+// this page showed it; one changed since is refused, and the card comes back.
+function answerPress(id, card, errId, text, build) {
+  const f = cardFields(id, card);
+  return press(`q:${id}`, {
+    build,
+    apply: () => markAnswered(id, text),
+    undo: () => putBackCard(id, f),
+    restore: () => putBackBoxes(id, f),
+    onOk: () => { delete drafts[id]; delete picks[id]; [...SECRET_DRAFTS.keys()].filter((k) => k.startsWith(`${id}:`)).forEach((k) => SECRET_DRAFTS.delete(k)); },
+    errId,
+  });
+}
+const seenHash = (id) => (DATA?.questions || []).find((x) => x.id === id)?.hash;
 // Once an answer is saved the card says so at once; the next refresh removes it.
 const ANSWERED = new Map();
 // The card a control is on, and its error line: the Inbox's copy of a question (q-<id>) or a thread
@@ -3534,6 +3653,7 @@ function tFit(s) {
 function tCardState(t, now, typed, pane) {
   const last = t.turns[t.turns.length - 1];
   if (!last || last.by !== 'owner') return null;
+  if (last.pending) return 'Sending…';
   if (now - Date.parse(last.at) > T_WAIT_MS) return pane ? "The supervisor hasn't replied yet." : 'Sent; the supervisor will read it when it next checks.';
   return typed === true ? 'Sent.' : 'Sent; the supervisor will read it when it next checks.';
 }
@@ -3566,6 +3686,32 @@ function tPins(threads) {
   open.forEach((t, i) => { const k = tKey(t.subject); if (!k) return; const g = by.get(k) ?? { key: k, subject: t.subject, n: i + 1, ids: [] }; g.ids.push(t.id); by.set(k, g); });
   return [...by.values()];
 }
+// The owner's turn, shown before the server has it, shaped as threadView gives one; a thread the
+// owner is starting likewise. Neither counts as seen or unread: a pending turn's clock is the page's.
+const tPendingTurn = (text, at) => ({ id: null, by: 'owner', at, text, refs: [], question: null, pending: true });
+const tPendingThread = (id, title, subject, turn) => ({ id, title, subject: subject || null, status: 'open', outcome: null, ready: null, turns: [turn], questions: [], waiting: 'supervisor', created_at: turn.at, resolved_at: null, activity_at: turn.at, first_reply_ms: null, pending: true });
+// The threads as the owner's presses will leave them: each pending send's turn on its thread (or
+// its new thread), and a thread resolved or reopened, until the server's threads show it.
+function tOverlay(raw, pend) {
+  let threads = raw.map((t) => ({ ...t, turns: [...t.turns] }));
+  for (const p of pend) {
+    const id = tPendId(p);
+    const t = threads.find((x) => x.id === id);
+    // whatever the owner says, resolves or reopens clears a standing proposal, as threadView has it
+    if (p.status) { if (t) Object.assign(t, { status: p.status, ready: null }); continue; }
+    if (t) { if (t.turns.filter((u) => u.by === 'owner' && u.text === p.turn.text).length <= p.had) { t.turns.push(p.turn); t.ready = null; t.waiting = 'supervisor'; } }
+    else if (p.fresh) threads.push(tPendingThread(id, p.fresh.title, p.fresh.subject, p.turn));
+  }
+  return threads;
+}
+// Whether the server's threads show a press: its turn, one more than the thread had, or its status.
+// a second Send on a thread still being started goes where the first one's went
+const tPendId = (p) => p.real ?? p.firstOf?.real ?? p.thread;
+function tLanded(raw, p) {
+  const t = raw.find((x) => x.id === tPendId(p));
+  if (!t) return false;
+  return p.status ? t.status === p.status : t.turns.filter((u) => u.by === 'owner' && u.text === p.turn.text).length > p.had;
+}
 // A dot in the dock: the supervisor spoke after the owner last looked at the thread (this browser).
 const tUnread = (t, seenAt) => t.turns.some((u) => u.by === 'supervisor' && (!seenAt || u.at > seenAt));
 /* threads-core end */
@@ -3575,7 +3721,7 @@ const tUnread = (t, seenAt) => t.turns.some((u) => u.by === 'supervisor' && (!se
 // about it. It lives in #tl, outside <main>, which the 10 s refresh rebuilds, so a card, its draft and
 // the dock keep their state. Its window listeners in the capture phase are registered here, before
 // the page's own (PRESSED below), so a click it takes reaches nothing else.
-const TL = { threads: [], pane: false, open: null, draft: null, hit: null, pin: false, via: null, swallowUntil: 0, typed: {}, sig: '', polling: null, seq: 0, have: 0, openAt: -1, polled: false, busy: false, resolving: false, readyKey: '', acts: '', pill: '', list: '', pressed: null };
+const TL = { threads: [], raw: [], pend: [], pane: false, open: null, draft: null, hit: null, pin: false, via: null, swallowUntil: 0, typed: {}, sig: '', polling: null, seq: 0, have: 0, openAt: -1, polled: false, busy: false, resolving: false, readyKey: '', acts: '', pill: '', list: '', pressed: null };
 const tlEl = (id) => document.getElementById(id);
 const tlOwn = (el) => !!el?.closest?.('#tl');
 const tlShowing = () => !tlEl('tl-cursor').hidden;
@@ -3786,8 +3932,8 @@ const tlDraftGet = (key) => { const d = lsGet(tlDraftKey(key)); return typeof d 
 const tlDraftSet = (key, text) => (text ? lsSet(tlDraftKey(key), { text, at: Date.now() }) : lsDel(tlDraftKey(key)));
 function tlDraftPrune() {
   try {
-    const pre = tlDraftKey('new:');
-    for (const k of Object.keys(localStorage)) if (k.startsWith(pre) && !(Date.now() - (lsGet(k)?.at ?? 0) < 7 * 86400000)) lsDel(k);
+    const pre = [tlDraftKey('new:'), tlDraftKey('pending-')];
+    for (const k of Object.keys(localStorage)) if (pre.some((x) => k.startsWith(x)) && !(Date.now() - (lsGet(k)?.at ?? 0) < 7 * 86400000)) lsDel(k);
   } catch {}
 }
 function tlBytes() { const n = tBytes(tlEl('tl-c-text').value.trim()); const el = tlEl('tl-c-bytes'); el.textContent = n > T_TURN_MAX * 0.8 ? `${n} / ${T_TURN_MAX} bytes` : ''; el.classList.toggle('err', n > T_TURN_MAX); }
@@ -3831,11 +3977,18 @@ async function tlRefresh() {
     if (!r.ok) return;
     const j = await r.json();
     if (n <= TL.have) return;
-    TL.threads = j.threads || [];
+    TL.raw = j.threads || [];
+    tlRelay();
     TL.pane = !!j.supervisor?.pane;
     TL.have = n;
   } catch { return; }
   tlDraw();
+}
+// The threads drawn: the server's, with the owner's pending presses laid over them; a press the
+// server's threads show is dropped.
+function tlRelay() {
+  TL.pend = TL.pend.filter((p) => !(p.confirmed && tLanded(TL.raw, p)));
+  TL.threads = tOverlay(TL.raw, TL.pend);
 }
 // Closed: and a #talk/ link that opened it is let go (back to its subject's section, when it has one),
 // so the same link opens it again.
@@ -3864,31 +4017,66 @@ async function tlOpen(id, go = true) {
 }
 // Send: the first words start the thread (its title what the layer showed, or the words themselves
 // from the dock), a word on a resolved thread reopens it, anything else is a turn.
-async function tlSend() {
+let tlFresh = 0;
+// How many of the owner's turns with these words the thread will have before this one: those the
+// server shows, and those still on their way.
+const tHad = (t, text) => t.turns.filter((u) => u.by === 'owner' && u.text === text && !u.pending).length + TL.pend.filter((x) => !x.confirmed && x.turn?.text === text && tPendId(x) === t.id).length;
+function tlSend() {
   const ta = tlEl('tl-c-text');
   const text = ta.value.trim();
   const err = tlEl('e-tl');
-  if (!text || TL.busy) return;
+  if (!text) return;
   if (tBytes(text) > T_TURN_MAX) { err.textContent = `At most ${T_TURN_MAX} bytes; this is ${tBytes(text)}. Characters outside plain English take two to four each.`; return; }
   if (tBytes(JSON.stringify(text)) - 2 > T_ENCODED_MAX) { err.textContent = 'This has too many quotation marks, backslashes or control characters to keep; shorten it.'; return; }
   const key = tlEl('tl-card').dataset.key;
   const t = TL.open ? TL.threads.find((x) => x.id === TL.open) : null;
-  const [action, body] = !t ? ['thread-new', { title: TL.draft.title || tLine(text, T_TITLE_MAX), subject: TL.draft.subject || undefined, text }] : t.status === 'resolved' ? ['thread-reopen', { id: t.id, text }] : ['thread-say', { id: t.id, text }];
-  TL.busy = true;
-  err.textContent = '';
-  try {
-    const r = await sending(() => fetch(`/api/${action}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }));
-    const out = await r.json();
-    if (!r.ok) { err.textContent = out.error || 'failed'; return; }
+  const draft = TL.draft;
+  // the turn is in the card at once; a new thread opens with it, under an id of the page's own until
+  // the server names it. A second Send waits for the first, and by then knows that name.
+  // a thread the server has named is real, though the threads read may not show it yet; one still
+  // being started is the first Send's, and this one says into it once that one has its name
+  const named = t && !String(t.id).startsWith('pending-');
+  const p = { thread: t ? t.id : `pending-${++tlFresh}`, real: named ? t.id : null, turn: tPendingTurn(text, new Date().toISOString()), had: t ? tHad(t, text) : 0, fresh: t ? null : { title: draft?.title || tLine(text, T_TITLE_MAX), subject: draft?.subject || null }, confirmed: false };
+  if (t && !named) p.firstOf = TL.pend.find((x) => x.fresh && tPendId(x) === t.id);
+  const resolved = t?.status === 'resolved';
+  press(`tl:${p.thread}`, {
+    build: () => {
+      const id = p.real ?? p.firstOf?.real ?? null;
+      // the first words were refused, so there is no thread to say this into
+      if (!id && p.firstOf) throw new Error("the thread wasn't started (its first words weren't saved), so this wasn't sent either");
+      if (id) { p.real = id; return { action: resolved ? 'thread-reopen' : 'thread-say', body: { id, text } }; }
+      return { action: 'thread-new', body: { title: p.fresh.title, subject: p.fresh.subject || undefined, text } };
+    },
+    apply: () => {
+      TL.pend.push(p);
+      err.textContent = '';
+      lsDel(tlDraftKey(key));
+      ta.value = '';
+      tlBytes();
+      if (!t) { TL.draft = null; TL.open = p.thread; TL.openAt = TL.seq; }
+      tlRelay();
+      tlDraw();
+    },
+    undo: () => {
+      TL.pend = TL.pend.filter((x) => x !== p);
+      if (!t && TL.open === p.thread) { TL.open = null; TL.draft = draft; }
+      tlRelay();
+      tlDraw();
+      const box = tlEl('tl-c-text');
+      // after the words an earlier refusal put back, never over them
+      if (box) { box.value = box.value.trim() ? `${box.value}\n${text}` : text; tlDraftSet(tlEl('tl-card').dataset.key, box.value); tlBytes(); }
+    },
     // the first line of a thread command's output is the id; the second says whether a pane took it
-    const id = action === 'thread-new' ? String(out.out || '').split('\n')[0].trim() : t.id;
-    TL.typed[id] = /supervisor's pane/.test(out.out || '');
-    lsDel(tlDraftKey(key));
-    ta.value = '';
-    tlBytes();
-    if (action === 'thread-new') { TL.draft = null; TL.open = id; TL.openAt = TL.seq; }
-    await tlRefresh();
-  } catch (e2) { err.textContent = `Could not send: ${e2.message}`; } finally { TL.busy = false; }
+    onOk: (out) => {
+      p.confirmed = true;
+      if (!p.real) p.real = String(out.out || '').split('\n')[0].trim();
+      TL.typed[p.real] = /supervisor's pane/.test(out.out || '');
+      if (TL.open === p.thread && p.real !== p.thread) TL.open = p.real;
+      tlRelay();
+      tlRefresh();
+    },
+    errId: 'tl',
+  });
 }
 document.addEventListener('input', (e) => { if (e.target.id !== 'tl-c-text') return; tlDraftSet(tlEl('tl-card').dataset.key, e.target.value); tlBytes(); });
 document.addEventListener('keydown', (e) => { if (e.target.id === 'tl-c-text' && e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); tlSend(); } });
@@ -3923,7 +4111,7 @@ document.addEventListener('focusout', (e) => { if (tlOwn(e.target)) setTimeout((
 // When the owner last looked at each thread, in this browser only: the dock's dot is a reply since.
 const TL_SEEN = 'devteam.thread.seen';
 const tlSeenAt = (id) => (lsGet(TL_SEEN) || {})[id] || null;
-function tlSeen(t) { const m = lsGet(TL_SEEN) || {}; const last = t.turns[t.turns.length - 1]?.at; if (last && m[t.id] !== last) { m[t.id] = last; lsSet(TL_SEEN, m); } }
+function tlSeen(t) { const m = lsGet(TL_SEEN) || {}; const last = t.turns.filter((u) => !u.pending).pop()?.at; if (last && m[t.id] !== last) { m[t.id] = last; lsSet(TL_SEEN, m); } }
 // The pins: one numbered disc per subject on the page, at an item's top right corner or at the spot
 // on its section, for open threads only, in page coordinates. Placed again after every redraw, when
 // the threads change and on a resize; a subject that isn't drawn gets none (the dock still lists it).
@@ -3978,22 +4166,32 @@ const tlReady = (t) => `<div class="tl-ready">Ready to resolve: <b>${esc(t.ready
 // Resolving: an optional line for how it ended.
 const tlResolveForm = (t) => `<div class="tl-ready"><input type="text" id="tl-outcome" maxlength="300" placeholder="How it ended, in a line (optional)">${tlOpenWarn(t)}<div class="row-inline"><button type="button" data-tl-resolve-go>Resolve</button><button type="button" class="ghost" data-tl-resolve-cancel>Cancel</button></div></div>`;
 // One request at a time, as a send is: a double click resolves (or says Not yet) once.
-async function tlAct(action, body) {
-  if (TL.busy) return false;
+function tlAct(action, body) {
   const err = tlEl('e-tl');
-  TL.busy = true;
-  try {
-    const r = await sending(() => fetch(`/api/${action}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }));
-    const out = await r.json();
-    if (!r.ok) { if (err) err.textContent = out.error || 'failed'; return false; }
-  } catch (e2) { if (err) err.textContent = `Could not send: ${e2.message}`; return false; } finally { TL.busy = false; }
-  if (err) err.textContent = '';
-  TL.resolving = false;
-  if (['thread-resolve', 'thread-accept'].includes(action)) TL.open = null;
-  await tlRefresh();
-  // the resolution's observation, and the Inbox
-  load({ force: true });
-  return true;
+  const t = TL.threads.find((x) => x.id === body.id);
+  // Not yet is a turn like any other; resolve, accept and reopen change the thread's status
+  const status = { 'thread-resolve': 'resolved', 'thread-accept': 'resolved', 'thread-reopen': 'open' }[action] ?? null;
+  const p = status ? { thread: body.id, real: body.id, status, confirmed: false } : { thread: body.id, real: body.id, turn: tPendingTurn(body.text, new Date().toISOString()), had: t ? tHad(t, body.text) : 0, confirmed: false };
+  const wasOpen = TL.open;
+  // a thread still being started has no name to act on yet
+  if (!t || String(t.id).startsWith('pending-')) return Promise.resolve(false);
+  // a second click on the same act while the first is on its way is the same act
+  if (TL.pend.some((x) => !x.confirmed && x.thread === body.id && (status ? x.status === status : x.act && x.turn.text === body.text))) return Promise.resolve(false);
+  if (!status) p.act = true;
+  return press(`tl:${body.id}`, {
+    build: () => ({ action, body }),
+    apply: () => {
+      if (err) err.textContent = '';
+      TL.pend.push(p);
+      TL.resolving = false;
+      if (status === 'resolved') TL.open = null;
+      tlRelay();
+      tlDraw();
+    },
+    undo: () => { TL.pend = TL.pend.filter((x) => x !== p); if (status === 'resolved') TL.open = wasOpen; tlRelay(); tlDraw(); },
+    onOk: () => { p.confirmed = true; tlRefresh(); },
+    errId: 'tl',
+  });
 }
 /* threads-layer end */
 
@@ -4031,20 +4229,22 @@ $('held').addEventListener('mousedown', (e) => e.preventDefault());
 $('held').addEventListener('click', () => { if (HELD) drawOrHold(HELD, true); });
 function drawOrHold(d, force = false) {
   const first = !DATA;
+  RAW = d;
   try {
     if (!first && !force && holding()) {
       HELD = d;
       HELD_SINCE ||= Date.now();
-      inboxTitle(d);
+      inboxTitle(overlaid(d));
       if (Date.now() - HELD_SINCE > HINT_AFTER) $('held').hidden = false;
       return;
     }
     HELD = null;
     HELD_SINCE = 0;
     $('held').hidden = true;
-    render(d);
+    const shown = overlaid(d);
+    render(shown);
     if (first) route();
-    inboxTitle(d);
+    inboxTitle(shown);
     // the thread layer, which the redraw doesn't touch: its pins on what was just drawn, then its threads again
     tlPins();
     tlRefresh();
@@ -4074,6 +4274,7 @@ async function loadNow() {
     PUBLIC = null;
     try { if (r.headers.get('x-devteam-public')) PUBLIC = JSON.parse(r.headers.get('x-devteam-public')); } catch {}
     PREVIEWS = r.headers.get('x-devteam-previews') === '1';
+    STALE = r.headers.get('x-devteam-stale') === 'true';
     const body = await r.text();
     try { d = JSON.parse(body); } catch { throw new Error(r.ok ? 'the server sent something that is not JSON' : `${r.status} ${body.slice(0, 400)}`); }
     if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
@@ -4116,11 +4317,14 @@ document.addEventListener('click', async (ev) => {
     const id = hb.dataset.holdId, mode = hb.dataset.mode;
     const errId = `hold-${id}`;
     if (mode === 'let-go' && !hb.classList.contains('confirm')) { hb.classList.add('confirm'); hb.textContent = 'Confirm let go'; setTimeout(() => { hb.classList.remove('confirm'); hb.textContent = 'Let go'; }, 6000); return; }
-    hb.disabled = true; hb.setAttribute('aria-busy', 'true');
-    const ok = mode === 'let-go' ? await post('goal-decide', { id, verdict: 'let-go' }, errId) : mode === 'restore' ? await post('goal-decide', { id, verdict: 'restore' }, errId) : await post('goal-hold', { id, mode }, errId);
-    hb.removeAttribute('aria-busy');
-    if (!ok) hb.disabled = false;
-    else { loadFleet(); redraw(); }
+    hb.classList.remove('confirm');
+    press(`g:${id}`, {
+      build: () => (['let-go', 'restore'].includes(mode) ? { action: 'goal-decide', body: { id, verdict: mode } } : { action: 'goal-hold', body: { id, mode } }),
+      overlay: holdOverlay(id, mode),
+      apply: () => { redrawNow(); redraw(); },
+      onOk: () => { loadFleet(); },
+      errId,
+    });
     return;
   }
   // Mark met: confirm in place, then goal status met (a repo or prod check runs again first)
@@ -4128,11 +4332,15 @@ document.addEventListener('click', async (ev) => {
   if (mb) {
     const id = mb.dataset.metId;
     if (!mb.classList.contains('confirm')) { mb.classList.add('confirm'); mb.textContent = 'Confirm: mark it met'; setTimeout(() => { mb.classList.remove('confirm'); mb.textContent = 'Mark met'; }, 6000); return; }
-    mb.disabled = true; mb.setAttribute('aria-busy', 'true');
-    const ok = await post('goal-met', { id }, `met-${id}`);
-    mb.removeAttribute('aria-busy');
-    if (!ok) mb.disabled = false;
-    else redraw();
+    mb.classList.remove('confirm');
+    // the button says so at once; the goal shows met only once the server has checked it and agreed
+    press(`g:${id}`, {
+      build: () => ({ action: 'goal-met', body: { id } }),
+      apply: () => { mb.disabled = true; mb.textContent = 'Marking met…'; },
+      restore: () => { const b = document.querySelector(`[data-met-id="${CSS.escape(id)}"]`); if (b) { b.disabled = false; b.textContent = 'Mark met'; } },
+      onOk: () => { redraw(); },
+      errId: `met-${id}`,
+    });
     return;
   }
   const fb = ev.target.closest('[data-fleet]');
@@ -4140,10 +4348,16 @@ document.addEventListener('click', async (ev) => {
     const op = fb.dataset.fleet;
     if (op === 'check') { fb.disabled = true; await loadFleet(true); return; }
     if (op === 'park' && !fb.classList.contains('confirm')) { fb.classList.add('confirm'); fb.textContent = 'Confirm: park every session'; setTimeout(() => { fb.classList.remove('confirm'); fb.textContent = 'Park all'; }, 6000); return; }
-    fb.disabled = true;
-    const ok = await post('fleet', { op }, 'fleet');
-    if (!ok) fb.disabled = false;
-    else loadFleet();
+    // the strip is redrawn only without a pending confirm on it: this press is that confirm
+    fb.classList.remove('confirm');
+    const fleetNow = { drain: { mode: 'drain' }, park: { mode: 'park' }, resume: { mode: null, op: null }, undrain: { mode: null }, unpark: { mode: null } }[op] ?? {};
+    press('fleet', {
+      build: () => ({ action: 'fleet', body: { op } }),
+      overlay: { data: (d) => ({ ...d, fleet: { ...(d.fleet || {}), ...fleetNow, reason: fleetNow.mode ? d.fleet?.reason ?? null : null } }), agrees: (raw) => (raw.fleet?.mode ?? null) === (fleetNow.mode ?? null) },
+      apply: () => { FLEET = { ...FLEET, data: null, at: 0 }; redrawNow(); },
+      onOk: () => { loadFleet(); },
+      errId: 'fleet',
+    });
     return;
   }
   const mv = ev.target.closest('[data-mdview]');
@@ -4161,8 +4375,14 @@ document.addEventListener('click', async (ev) => {
   if (pvb) {
     const stop = pvb.dataset.previewStop !== undefined;
     const name = stop ? pvb.dataset.previewStop : pvb.dataset.previewStart;
-    pvb.disabled = true;
-    if (!(await post(stop ? 'preview-stop' : 'preview-start', { name }, `preview-${name}`))) pvb.disabled = false;
+    const label = pvb.textContent;
+    // the row says so at once; the next refresh draws it as the server has it
+    press(`preview:${name}`, {
+      build: () => ({ action: stop ? 'preview-stop' : 'preview-start', body: { name } }),
+      apply: () => { pvb.disabled = true; pvb.textContent = stop ? 'Stopping…' : 'Starting…'; },
+      restore: () => { const b = document.querySelector(`[data-preview-${stop ? 'stop' : 'start'}="${CSS.escape(name)}"]`); if (b) { b.disabled = false; b.textContent = label; } },
+      errId: `preview-${name}`,
+    });
     return;
   }
   const cp = ev.target.closest('[data-copy]');
@@ -4173,8 +4393,13 @@ document.addEventListener('click', async (ev) => {
   if (fg) {
     const slug = fg.dataset.forget;
     if (!fg.classList.contains('confirm')) { fg.classList.add('confirm'); fg.textContent = 'Confirm forget'; setTimeout(() => { fg.classList.remove('confirm'); fg.textContent = 'Forget'; }, 6000); return; }
-    fg.disabled = true;
-    if (!(await post('artifact-publish', { op: 'unpublish', slug }, `pub-${slug}`))) fg.disabled = false;
+    fg.classList.remove('confirm');
+    press(`pub:${slug}`, {
+      build: () => ({ action: 'artifact-publish', body: { op: 'unpublish', slug } }),
+      apply: () => { fg.disabled = true; fg.textContent = 'Forgotten'; },
+      restore: () => { const b = document.querySelector(`[data-forget="${CSS.escape(slug)}"]`); if (b) { b.disabled = false; b.textContent = 'Forget'; } },
+      errId: `pub-${slug}`,
+    });
     return;
   }
   const tcard = ev.target.closest('[data-ticket]');
@@ -4200,16 +4425,17 @@ document.addEventListener('click', async (ev) => {
     }
     if (!Object.keys(values).length) { if (err) err.textContent = 'Paste a value or choose a file first.'; return; }
     if (err) err.textContent = '';
+    // at once: the card says it is posting and takes no second press. It stays in the Inbox until the
+    // server says the question is answered (every secret posted). The values never stay in the page:
+    // wiped from the fields now, and from memory once the post returns, whatever it says.
     ps.disabled = true; ps.textContent = 'Posting…';
-    let r, out;
-    try {
-      r = await sending(() => fetch('/api/secret', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id, values }) }));
-      out = await r.json();
-    } catch (e2) { out = { error: `Could not send: ${e2.message}` }; }
-    for (const k of Object.keys(values)) { SECRET_DRAFTS.delete(`${id}:${k}`); delete values[k]; }
     inputs.forEach((el) => { el.value = ''; });
-    if (r?.ok) { if (/is answered/.test(out.out || '')) markAnswered(id, 'Posted'); load({ force: true }); }
-    else { ps.disabled = false; ps.textContent = 'Post'; if (err) err.textContent = out.error || 'failed'; load({ force: true }); }
+    press(`q:${id}`, {
+      build: () => ({ action: 'secret', body: { id, values } }),
+      onOk: (out) => { if (/is answered/.test(out.out || '')) markAnswered(id, 'Posted'); },
+      restore: () => { const b = document.querySelector(`[data-post-secrets="${CSS.escape(id)}"]`); if (b) { b.disabled = false; b.textContent = 'Post'; } },
+      errId: id,
+    }).finally(() => { for (const k of Object.keys(values)) { SECRET_DRAFTS.delete(`${id}:${k}`); delete values[k]; } });
     return;
   }
   const orv = ev.target.closest('[data-open-review]');
@@ -4257,9 +4483,8 @@ document.addEventListener('click', async (ev) => {
     const note = (card?.querySelector('textarea[data-q]')?.value ?? '').trim();
     if (cant.dataset.reply !== undefined && !note) { const e = $(`e-${errId}`); if (e) e.textContent = 'Write the note first.'; return; }
     const answer = cant.dataset.dontuse !== undefined ? "Don't use this sensor" : cant.dataset.reply !== undefined ? note : note ? `Can’t right now: ${note}` : 'Can’t right now';
-    cant.disabled = true;
-    if (await post('answer', { id, answer }, errId)) { [...SECRET_DRAFTS.keys()].filter((k) => k.startsWith(`${id}:`)).forEach((k) => SECRET_DRAFTS.delete(k)); delete drafts[id]; markAnswered(id, answer); }
-    else cant.disabled = false;
+    const seen = seenHash(id);
+    answerPress(id, card, errId, answer, () => ({ action: 'answer', body: { id, answer, seen } }));
     return;
   }
   const btn = ev.target.closest('[data-answer]');
@@ -4281,28 +4506,27 @@ document.addEventListener('click', async (ev) => {
     // the note is the rule's wording; without one, the chosen answer is the standing answer to questions like this
     const qText = DATA.questions.find((x) => x.id === id)?.question || '';
     const rule = asRule ? (note || `${picked}: the standing answer to questions like “${qText}”`) : undefined;
-    btn.classList.add('busy'); btn.disabled = true; btn.setAttribute('aria-busy', 'true');
-    const label = btn.textContent; btn.dataset.label = label; btn.textContent = 'Posting…';
-    let ok = false;
-    try {
-      ok = goalId
-        ? await post('goal-decide', { id: goalId, verdict: { Approve: 'approve', Refine: 'refine', 'Let go': 'let-go' }[picked], notes: note || undefined }, errId)
-        : await post('answer', { id, answer, autonomy: auto ? Number(auto) : undefined, rule: rule || undefined }, errId);
-    }
-    catch (e2) { if (err) err.textContent = `Could not send: ${e2.message}`; }
-    if (ok) { delete drafts[id]; delete picks[id]; markAnswered(id, goalId ? picked + (note ? ` — ${note}` : '') : answer); }
-    else { btn.classList.remove('busy'); btn.disabled = false; btn.removeAttribute('aria-busy'); btn.textContent = label; }
+    const seen = seenHash(id);
+    answerPress(id, card, errId, goalId ? picked + (note ? ` — ${note}` : '') : answer, () => (goalId
+      ? { action: 'goal-decide', body: { id: goalId, verdict: { Approve: 'approve', Refine: 'refine', 'Let go': 'let-go' }[picked], notes: note || undefined } }
+      : { action: 'answer', body: { id, answer, autonomy: auto ? Number(auto) : undefined, rule: rule || undefined, seen } }));
     return;
   }
   const know = ev.target.closest('[data-know]');
   if (know) {
-    const row = know.closest('.row-inline');
-    row?.querySelectorAll('button').forEach((b) => { b.disabled = true; });
-    know.classList.add('busy');
-    const noteEl = document.querySelector(`textarea[data-know-note="${CSS.escape(know.dataset.know)}"]`);
-    const note = know.dataset.status === 'accepted' ? (noteEl?.value ?? '').replace(/\s+/g, ' ').trim() : '';
-    if (await post('knowledge', { id: know.dataset.know, status: know.dataset.status, ...(note ? { note } : {}) }, know.dataset.know)) { delete drafts[`know:${know.dataset.know}`]; know.closest('.card')?.remove(); }
-    else { know.classList.remove('busy'); row?.querySelectorAll('button').forEach((b) => { b.disabled = false; }); }
+    const kid = know.dataset.know, status = know.dataset.status;
+    const noteEl = document.querySelector(`textarea[data-know-note="${CSS.escape(kid)}"]`);
+    const typed = noteEl?.value ?? '';
+    const note = status === 'accepted' ? typed.replace(/\s+/g, ' ').trim() : '';
+    // the lesson leaves the Inbox at once, and stays out until the data says it is kept or retired
+    const pending = (k) => k.id === kid && k.status === 'candidate';
+    press(`k:${kid}`, {
+      build: () => ({ action: 'knowledge', body: { id: kid, status, ...(note ? { note } : {}) } }),
+      overlay: { data: (d) => ({ ...d, ooda: { ...d.ooda, knowledge: d.ooda.knowledge.filter((k) => !pending(k)) } }), agrees: (raw) => !raw.ooda.knowledge.some(pending) },
+      apply: () => { drafts[`know:${kid}`] = typed; know.closest('.card')?.remove(); },
+      onOk: () => { delete drafts[`know:${kid}`]; },
+      errId: kid,
+    });
     return;
   }
   const corr = ev.target.closest('[data-correct]');
@@ -4315,7 +4539,20 @@ document.addEventListener('click', async (ev) => {
   const over = ev.target.closest('[data-overrule-send]');
   if (over) {
     const id = over.dataset.overruleSend;
-    return void post('answer', { id, answer: document.querySelector(`input[data-overrule="${id}"]`).value }, id);
+    const field = document.querySelector(`input[data-overrule="${CSS.escape(id)}"]`);
+    const answer = field?.value ?? '';
+    // bound to the question as this page showed it, like every answer
+    const seen = (DATA?.ooda?.answered || []).find((x) => x.id === id)?.hash ?? seenHash(id);
+    const row = over.closest('.row-inline');
+    const was = row?.innerHTML;
+    // the answered card keeps its place; the row says what was sent, and comes back if refused
+    press(`q:${id}`, {
+      build: () => ({ action: 'answer', body: { id, answer, ...(seen ? { seen } : {}) } }),
+      apply: () => { if (row) row.innerHTML = `<span class="answered-note"><i class="icon-circle-check" aria-hidden="true"></i> Overruled: <b>${esc(answer)}</b></span><span class="err" id="e-${esc(id)}"></span>`; },
+      restore: () => { const f = document.querySelector(`input[data-overrule="${CSS.escape(id)}"]`); if (f) f.value = answer; else if (row && was) row.innerHTML = was; },
+      errId: id,
+    });
+    return;
   }
   const send = ev.target.closest('[data-correct-send]');
   if (send) {
@@ -4324,7 +4561,18 @@ document.addEventListener('click', async (ev) => {
     // the Decide feed's forms are keyed dec:<id>, so a call listed in both feeds has two
     // a goal's impact (keyed imp:<id>) goes with the value the owner gives it
     const level = document.querySelector(`select[data-impact="${id}"]`)?.value;
-    return void post('correct', { id: id.replace(/^(dec|imp):/, ''), reason, ...(level ? { impact: Number(level) } : {}) }, id);
+    const form = send.closest(`[data-correct-form]`) ?? document.querySelector(`[data-correct-form="${CSS.escape(id)}"]`);
+    press(`correct:${id}`, {
+      build: () => ({ action: 'correct', body: { id: id.replace(/^(dec|imp):/, ''), reason, ...(level ? { impact: Number(level) } : {}) } }),
+      apply: () => { if (form) { form.hidden = true; form.insertAdjacentHTML('afterend', `<p class="small answered-note" data-correct-sent="${esc(id)}"><i class="icon-circle-check" aria-hidden="true"></i> Correction sent</p>`); } },
+      restore: () => {
+        document.querySelectorAll(`[data-correct-sent="${CSS.escape(id)}"]`).forEach((el) => el.remove());
+        const f = document.querySelector(`[data-correct-form="${CSS.escape(id)}"]`);
+        if (f) { f.hidden = false; const r = f.querySelector(`input[data-reason="${CSS.escape(id)}"]`); if (r) r.value = reason; }
+      },
+      errId: id,
+    });
+    return;
   }
 });
 
