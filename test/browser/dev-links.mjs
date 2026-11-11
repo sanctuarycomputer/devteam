@@ -177,7 +177,17 @@ class Browser {
   async shift(page, down) { await this.cdp.send('Input.dispatchKeyEvent', { type: down ? 'rawKeyDown' : 'keyUp', key: 'Shift', code: 'ShiftLeft', windowsVirtualKeyCode: 16, modifiers: down ? 8 : 0 }, page.sessionId); }
   async typeIn(page, text) { await this.cdp.send('Input.insertText', { text }, page.sessionId); }
   async enter(page) { for (const type of ['keyDown', 'keyUp']) await this.cdp.send('Input.dispatchKeyEvent', { type, key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, ...(type === 'keyDown' ? { text: '\r' } : {}) }, page.sessionId); }
-  async kill() { try { this.proc?.kill('SIGKILL'); } catch {} }
+  // Ask Chrome to quit, wait up to 5 s for it, then SIGKILL: a Chrome that ignores SIGTERM can't hang the cleanup.
+  async kill() {
+    const p = this.proc;
+    if (!p || p.exitCode !== null || p.signalCode) return;
+    const gone = new Promise((r) => p.once('exit', r));
+    try { p.kill('SIGTERM'); } catch {}
+    let t;
+    await Promise.race([gone, new Promise((r) => { t = setTimeout(r, 5000); })]);
+    clearTimeout(t);
+    if (p.exitCode === null && !p.signalCode) { try { p.kill('SIGKILL'); } catch {} }
+  }
 }
 
 // ===== the throwaway project =====
@@ -585,12 +595,16 @@ async function cleanUp(code) {
   cleaned = true;
   try { await browser?.kill(); } catch {}
   for (const p of procs) { try { p.kill(); } catch {} }
-  spawnSync('tmux', ['kill-server'], { env: { ...process.env, TMUX_TMPDIR: tmuxDir } });
+  // $TMUX, set when this runs inside a tmux pane, wins over TMUX_TMPDIR: without deleting it this kills the developer's own server.
+  const tenv = { ...process.env, TMUX_TMPDIR: tmuxDir }; delete tenv.TMUX; delete tenv.TMUX_PANE;
+  spawnSync('tmux', ['kill-server'], { env: tenv });
   await sleep(500);
   if (!process.env.DEVTEAM_TEST_KEEP) { fs.rmSync(base, { recursive: true, force: true }); fs.rmSync(tmuxDir, { recursive: true, force: true }); } else console.log(`kept ${base}`);
-  process.exit(code);
+  process.exit(exitCode || code);
 }
-const stop = (why) => { try { console.error(`FAIL ${why}`); } catch {} cleanUp(1); };
+// A failure reported while a passing run is cleaning up (an unhandled rejection) still sets the exit code, so output and code agree.
+let exitCode = 0;
+const stop = (why) => { exitCode = 1; try { console.error(`FAIL ${why}`); } catch {} cleanUp(1); };
 for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => stop(`stopped by ${sig}`));
 for (const ev of ['uncaughtException', 'unhandledRejection']) process.on(ev, (e) => stop(e?.stack ?? e));
 let failed = false;
