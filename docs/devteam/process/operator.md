@@ -67,6 +67,8 @@ Start by writing `## Review <today, yyyy-mm-dd, UTC>` in `~/operator/NOTES.md`; 
 | Is it climbing the trust ladder, or asking what it could decide? | `trust`, `questions --all --json` (`class`, `why_asked`) | `trust` says the evidence supports a trust question and the last retro asked none; a question in a class the constitution makes the supervisor's own, or at rung 3 where it could act and report; most of its questions resting on `low-confidence` alone |
 | Do kit frictions recur? | your own notes, retros' "Why" lines, observations about the kit | the same friction in two repos, or twice in one (What could work better) |
 
+Each repo's weekly counts help with the first three: `log --type observation --json` holds one record of kind `learning` per ended week, with its `week` and `figures` (informed, autonomous, trusted). Compare the last few weeks rather than one; a count under five says little.
+
 **Signals.** Some of what you see is a symptom, and relaying it is the failure this review exists to catch. Each of these gets a "why?" answered before anything goes in `NOTES.md`, at the review and at any check-in that sees one:
 - a supervisor asking the owner in chat instead of with an Inbox question;
 - a goal whose latest reading is at or past its target but whose status isn't `met` (`goal --json`: `status`, and the last of `readings` against `measure.target` in the way `measure.direction` says);
