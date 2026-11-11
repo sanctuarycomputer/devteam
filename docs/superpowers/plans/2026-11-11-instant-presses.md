@@ -220,3 +220,23 @@ Owner actions run from the dashboard reply over a pipe before they nudge the sup
 - [ ] Write `docs/superpowers/plans/2026-11-11-instant-presses.verification.md`: each spec target, measured; the spawn counts; the diff result; what is left (threadsRead's sync fold, measured).
 - [ ] Push the branch and open a PR. Its body: what, why, measurements, risks, the attribution line.
 - [ ] Fable adversarial review of the PR diff. Fix what it finds, re-run the suite, push. Read `gh pr view --comments`; CI green. Stop at merge-ready.
+
+## Revisions after the plan's review (2026-11-11)
+
+Tasks 1, 2, 3 and the `logObjects` half of Task 5 are done (commits `5f5f055`…`dfba561`); the goldens pass on each. Don't record the goldens again. The rest of the plan is amended:
+
+1. **Names.** `gitFacts` and `commonDir` exist already. The store is `factStore`; the common dir helper is `gitCommonDirOf` (landed).
+2. **Task 4.** Drop the 20,000-entry cap and the `t` stamp: entries are a few per merged ticket. Keep union + `writeJson` (already tmp + rename). `gitStatus` returns a Buffer: trim before `Date.parse` and before splitting. `isOnMain`'s short shas are resolved to full before the store (or not stored if they don't resolve). The link repos' inline `onMain` (~7608) goes through `isAncestor` too.
+3. **Task 5, reviews.** No binary tree parse. Each ticket branch's `reviews/` is listed with one `ls-tree` at its sha (memoized by sha and dir, so quoting and entry types stay exactly ls-tree's), then every review file of every branch in one `gitBatch`. The count is one per ticket branch, not one per review file.
+4. **Task 6.**
+   - The dispatcher calls `Promise.resolve(COMMANDS[command]()).then(flushReply, …)`, because `cmdPreview` is async.
+   - `die()` in reply mode types the queued nudges before it exits: every nudge follows an `appendLog`, and `cmdSecret` nudges then dies on a partial post.
+   - `DEVTEAM_REPLY_FD` is deleted from `process.env` once read (secret sinks run under `sh -c`).
+   - `supervisorPane` uses one `tmuxAsync(['display-message', '-p', '-t', target, '#{pane_dead} #{pane_current_command}'])`, which resolves window names itself, plus the shell check. There is no port of `resolvePane`.
+   - The test uses a tmux shim (`tmuxShim`, kit.mjs) whose `send-keys` blocks on a release file: the HTTP reply arrives while it is blocked, then release and assert the keys and the log line.
+5. **Task 7.**
+   - **Raw and overlaid data stay apart.** `RAW` is the last server body. `DATA = applyOverlays('data', RAW)` is computed in one place, as are `TL.threads` from `TL.raw` and `FLEET.data` from its raw. `render`, drawers, `fleetStrip` and `redraw()` read the overlaid copies. `agrees()` reads raw. An undo deletes the overlay, recomputes and redraws.
+   - **`apply()` captures every field it is about to replace** (text, pick, checkboxes, the overrule and correct fields) into the press's closure, before it touches the DOM. `undo()` writes them back into `drafts`/`picks` (or the fields) before the redraw.
+   - **The fleet overlay is a `data` overlay** (`DATA.fleet` mode, op, reason). The pressed button's `.confirm` class is dropped first, since `render` skips the strip while one exists.
+   - **Threads.** `tOptimistic()` builds a whole thread or turn shaped like `threadView`'s (`refs: []`, `question: null`, …). `tCardState` gets a `pending` branch ("Sending…"). `TL.busy` stops dropping a second Send: `press()`'s per-key chain orders them, and the key for a new thread is the card's draft key.
+6. **Task 8.** The spawn-count fixture is 12 against 24 tickets (4 against 8 branches), reusing `gitShim` (`GIT_SPY_LOG`). The assertion: the same count at both sizes, plus one per ticket branch.
