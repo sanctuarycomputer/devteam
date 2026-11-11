@@ -922,10 +922,13 @@ function checkLine(o, file) {
 }
 
 // Parse a file's lines. Full validation is on by default (log-check, merge); readers skip the
-// schema walk for speed but never the integrity checks.
+// schema walk for speed but never the integrity checks. A type or a field a newer kit wrote goes to
+// unknown instead (log-check says upgrade), never to errors: it grants nothing, since nothing here
+// reads it. Writers stay strict: appendLog runs checkLine on the line as given.
 function parseLines(text, file, { firstLine = 1, validate = true } = {}) {
   const lines = [];
   const errors = [];
+  const unknown = [];
   (text ?? '').split('\n').forEach((raw, i) => {
     if (!raw.trim()) return;
     const n = i + firstLine;
@@ -936,12 +939,23 @@ function parseLines(text, file, { firstLine = 1, validate = true } = {}) {
     } catch {
       return void errors.push(`${file}:${n}: not valid JSON`);
     }
-    const shape = !o || typeof o !== 'object' || Array.isArray(o) || !TYPES.includes(o.type) || !['new', 'set'].includes(o.op) || typeof o.id !== 'string' || typeof o.at !== 'string' || typeof o.by !== 'string';
-    const errs = shape ? ['not a log line'] : validate ? checkLine(o, file) : [integrity(o, file)].filter(Boolean);
+    if (!o || typeof o !== 'object' || Array.isArray(o) || typeof o.type !== 'string' || !['new', 'set'].includes(o.op) || typeof o.id !== 'string' || typeof o.at !== 'string' || typeof o.by !== 'string') return void errors.push(`${file}:${n}: not a log line`);
+    if (!TYPES.includes(o.type)) return void unknown.push(`${file}:${n}: type "${o.type}"`);
+    const props = SCHEMA.$defs.types[o.type].properties ?? {};
+    const extra = Object.keys(o).filter((k) => !ENVELOPE.includes(k) && !Object.hasOwn(props, k));
+    if (extra.length) {
+      unknown.push(`${file}:${n}: ${o.type}.${extra.join(', ')}`);
+      for (const k of extra) delete o[k];
+      // a set line that carried only fields this kit doesn't know changes nothing it knows
+      if (o.op === 'set' && !Object.keys(o).some((k) => !ENVELOPE.includes(k))) return;
+    }
+    const errs = validate ? checkLine(o, file) : [integrity(o, file)].filter(Boolean);
     if (errs.length) errors.push(`${file}:${n}: ${errs.join('; ')}`);
     else lines.push({ ...o, __file: file, __line: n });
   });
-  return { lines, errors };
+  // The cost: a field mistyped in a hand-written line is dropped here rather than refused; log-check
+  // still names it.
+  return { lines, errors, unknown };
 }
 
 // Build current state from every line. A `new` creates an object (a repeated id is ignored); a
@@ -1311,13 +1325,15 @@ function readLog() {
   for (const d of [liveLogDir(), durableLogDir()]) if (fs.existsSync(d)) for (const f of fs.readdirSync(d)) if (f.endsWith('.jsonl')) names.add(f);
   const lines = [];
   const errors = [];
+  const unknown = [];
   for (const f of [...names].sort()) {
     const r = parseLines(logFileText(f), f, { validate: false });
     lines.push(...r.lines);
     errors.push(...r.errors);
+    unknown.push(...r.unknown);
   }
   const { objects, ignored } = fold(lines);
-  return (logCache = { lines, objects, errors, ignored });
+  return (logCache = { lines, objects, errors, ignored, unknown });
 }
 const logObjects = (type) => [...readLog().objects.values()].filter((o) => o.type === type && !(type === 'goal' && o.kind === 'upkeep'));
 // The built-in Upkeep goal (planning.md §7), or null while it has no line yet (then it runs).
@@ -1718,12 +1734,15 @@ function cmdLogCheck() {
   const names = new Set();
   for (const d of [liveLogDir(), durableLogDir()]) if (fs.existsSync(d)) for (const f of fs.readdirSync(d)) if (f.endsWith('.jsonl')) names.add(f);
   const fails = [];
+  const newer = [];
   let n = 0;
   for (const f of [...names].sort()) {
     const r = parseLines(logFileText(f), f);
     fails.push(...r.errors);
+    newer.push(...r.unknown);
     n += r.lines.length;
   }
+  for (const u of newer) out(`written by a newer kit: upgrade (${u})`);
   for (const i of readLog().ignored) out(`ignored: ${i.line.__file}:${i.line.__line} ${i.line.id}: ${i.why}`);
   const rw = questionRewrites();
   for (const w of rw.warnings) out(`warn: ${w}`);
@@ -9113,7 +9132,7 @@ function collectOoda() {
     // every settled question, newest first, wherever it was answered (dashboard, terminal, chat) or
     // whether it was defaulted or withdrawn; defaulted ones can still be overruled
     answered: questions().filter((q) => q.status !== 'open').sort((a, b) => b.answered_at.localeCompare(a.answered_at)).slice(0, 80),
-    log: { lines: log.lines.length, errors: log.errors.length, ignored: log.ignored.length },
+    log: { lines: log.lines.length, errors: log.errors.length, ignored: log.ignored.length, unknown: log.unknown.length },
   };
 }
 function dashboardData() {
