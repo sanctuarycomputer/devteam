@@ -1013,10 +1013,13 @@ out({ cursor: 'c-' + mode });
       const counts = json(fs.readFileSync(path.join(runMon, 'fake/counts.json'), 'utf8'));
       counts['log:S1'] = Object.fromEntries([...Array(40)].map((_, i) => [new Date(Date.now() - (i + 1) * 3600000).toISOString().slice(0, 13), 1]));
       fs.writeFileSync(path.join(runMon, 'fake/counts.json'), JSON.stringify(counts));
+      // the median is over the hours the sensor heard: it heard those 40
+      const heardFile = path.join(runMon, 'fake/listened.json');
+      fs.writeFileSync(heardFile, JSON.stringify({ ...(fs.existsSync(heardFile) ? json(fs.readFileSync(heardFile, 'utf8')) : {}), ...Object.fromEntries(Object.keys(counts['log:S1']).map((h) => [h, true])) }));
       fs.writeFileSync(mode, 'spike');
       must(['sensor', 'poll', '--name', 'fake'], sup);
       const spike = obs().find((o) => o.kind === 'spike');
-      assert.ok(spike && spike.severity === 4 && /a log line is spiking: 50 this hour/.test(spike.detail), JSON.stringify(spike));
+      assert.ok(spike && spike.severity === 4 && /a log line \(fake:log:S1\) is spiking: 50 this hour against a median of 1 an hour over the last 1 day\(s\)\n--- untrusted production data (\w+) \(the line\)[^\n]*\npayment gateway timeout after <n>ms\n--- end of untrusted data \1 ---$/.test(spike.detail), JSON.stringify(spike));
       must(['sensor', 'poll', '--name', 'fake'], sup);
       assert.equal(obs().filter((o) => o.kind === 'spike').length, 1, 'once per window');
       assert.equal(status().state, 'ok', 'a clean run ends the failing');

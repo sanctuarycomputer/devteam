@@ -12419,6 +12419,8 @@ async function pollSensorLocked(m, { rollupDay = null } = {}) {
   let st = sensorState(m.name);
   if (m.kind === 'http' && fresh) st = { ...st, ...sensorStateFromLog(m.name) };
   const r = m.kind === 'http' ? await pollHttp(m, st) : await pollProbe(m, st);
+  // a check that ran is an hour the sensor heard, events or not (a quiet hour counts toward a median)
+  if (r.sample?.ok) markListened(m.name);
   // a rollup for each finished UTC day not rolled up yet (up to a week back), or the day asked for
   const yesterday = dateOnly(new Date(Date.now() - 86400000).toISOString());
   if (rollupDay || st.rollup_day !== yesterday) {
@@ -12445,11 +12447,14 @@ async function pollSensorLocked(m, { rollupDay = null } = {}) {
       if (live.length !== Object.keys(fps).length) writeJsonAtomic(fpsPath, Object.fromEntries(live));
     }
     const counts = jsonOr(path.join(sensorDir(m.name), 'counts.json'), null);
+    const cut = new Date(Date.now() - 14 * 86400000).toISOString().slice(0, 13);
     if (counts) {
-      const cut = new Date(Date.now() - 14 * 86400000).toISOString().slice(0, 13);
       for (const fp of Object.keys(counts)) { for (const h of Object.keys(counts[fp])) if (h < cut) delete counts[fp][h]; if (!Object.keys(counts[fp]).length) delete counts[fp]; }
       writeJsonAtomic(path.join(sensorDir(m.name), 'counts.json'), counts);
     }
+    // the hours it heard, with the counts they are a median of
+    const heard = jsonOr(listenedFile(m.name), null);
+    if (heard) writeJsonAtomic(listenedFile(m.name), Object.fromEntries(Object.entries(heard).filter(([h]) => h >= cut)));
     if (st.days) for (const d of Object.keys(st.days)) if (d < dateOnly(new Date(Date.now() - 8 * 86400000).toISOString())) delete st.days[d];
     st.pruned = dateOnly(nowIso());
   }
@@ -12999,12 +13004,23 @@ function repoPath(file) {
   return null;
 }
 const frameWords = (fr) => `${fr.file}${fr.line != null ? `:${fr.line}` : ''}${fr.fn ? ` ${fr.fn}` : ''}`;
+// The hours a sensor heard: a check that ran, or events that arrived (listened.json, { "<yyyy-mm-ddThh>":
+// true }, beside counts.json, whose keys are fingerprints). A spike's median is over these alone,
+// so hours a box was down (nobody listening) never read as quiet ones.
+const listenedFile = (name) => path.join(sensorDir(name), 'listened.json');
+function markListened(name, hour = nowIso().slice(0, 13)) {
+  const l = jsonOr(listenedFile(name), {});
+  if (!l[hour]) { l[hour] = true; fs.mkdirSync(sensorDir(name), { recursive: true }); writeJsonAtomic(listenedFile(name), l); }
+  return l;
+}
 function ingestEvents(m, events, st, at = nowIso()) {
   if (!events.length) return [];
   const dir = sensorDir(m.name);
   const fps = jsonOr(path.join(dir, 'fingerprints.json'), {});
   const counts = jsonOr(path.join(dir, 'counts.json'), {});
   const hour = at.slice(0, 13);
+  // events arrived: it heard this hour
+  const listened = markListened(m.name, hour);
   const day = dayStats(st, at.slice(0, 10));
   const tri = { min_level: 'error', min_count: 1, min_users: 0, ...(m.triage ?? {}) };
   const spike = { factor: 5, min: 20, ...(m.spike ?? {}) };
@@ -13059,21 +13075,25 @@ function ingestEvents(m, events, st, at = nowIso()) {
     }
   }
   // spikes: a known fingerprint (a day of the kit's own counts, not the provider's first_seen,
-  // which can be months back with nothing counted) this hour against its 7-day hourly median
+  // which can be months back with nothing counted) this hour against its 7-day hourly median, over
+  // the hours the sensor heard (a sensor just upgraded has none yet: a day of them before a spike)
   for (const fp of touched) {
     const f = fps[fp];
     if (levelRank(f.level) < levelRank('warning')) continue;
     const c = counts[fp][hour];
     const start = Math.max(Date.parse(f.seen_at) || Date.now(), Date.now() - 7 * 86400000);
     const hours = [];
-    for (let t = Math.floor(start / 3600000) * 3600000; t < Date.parse(`${hour}:00:00.000Z`); t += 3600000) hours.push(counts[fp][new Date(t).toISOString().slice(0, 13)] ?? 0);
+    for (let t = Math.floor(start / 3600000) * 3600000; t < Date.parse(`${hour}:00:00.000Z`); t += 3600000) { const h = new Date(t).toISOString().slice(0, 13); if (listened[h]) hours.push(counts[fp][h] ?? 0); }
     if (hours.length < 24) continue;
     const median = quantile(hours, 0.5);
     const prev = new Date(Date.parse(`${hour}:00:00.000Z`) - 3600000).toISOString().slice(0, 13);
     if (c >= Math.max(spike.min, spike.factor * median)) {
       if (f.spike_hour !== hour && f.spike_hour !== prev) {
         const sev = Math.min(4, (LEVEL_SEV[f.level] ?? 1) + 1);
-        const o = sensorObserveOnce(m, { kind: 'spike', detail: `${m.name}: ${f.class ?? f.code ?? 'a log line'} is spiking: ${c} this hour against a median of ${median} an hour over the last ${Math.round(hours.length / 24)} day(s)`.slice(0, 900), severity: sev, valence: -1, measure: { value: c, unit: 'events/h' }, source_key: `sensor:${m.name}:spike:${fp}:${hour}`, refs: typeof f.observed === 'string' ? [f.observed] : [] });
+        // which line: its class or code and its id; a log line's template is production text, framed
+        // (the head is cut first, so the cut never reaches the frame's end marker)
+        const tpl = f.kind === 'log' && isStr(f.template) ? `\n${untrusted('the line', f.template.slice(0, 300))}` : '';
+        const o = sensorObserveOnce(m, { kind: 'spike', detail: `${`${m.name}: ${f.class ?? f.code ?? 'a log line'} (${fpIdOf(m.name, fp)}) is spiking: ${c} this hour against a median of ${median} an hour over the last ${Math.floor(hours.length / 24)} day(s)`.slice(0, 400)}${tpl}`, severity: sev, valence: -1, measure: { value: c, unit: 'events/h' }, source_key: `sensor:${m.name}:spike:${fp}:${hour}`, refs: typeof f.observed === 'string' ? [f.observed] : [] });
         if (o && sev >= 4) alerts.push(`${m.name}: a ${f.kind} is spiking (${o.id}; sensor show ${fp})`);
       }
       f.spike_hour = hour;

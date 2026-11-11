@@ -71,3 +71,64 @@ test('provenance and stage are computed for every writer; observe --source keeps
     assert.equal(p.stage, 'observe');
   } finally { F.done(); }
 });
+
+// A probe sensor on main, "fake", that prints what its mode file says: the chain's probe, cut down.
+function sensorFixture(F) {
+  const mode = path.join(F.base, 'probe-mode');
+  fs.writeFileSync(mode, '');
+  const probe = `import fs from 'node:fs';
+const p = JSON.parse(process.env.DEVTEAM_PARAMS);
+for (const l of fs.readFileSync(p.mode, 'utf8').split('\\n').filter(Boolean)) console.log(l);
+`;
+  fs.mkdirSync(path.join(F.old, 'docs/devteam/project/sensors'), { recursive: true });
+  fs.writeFileSync(path.join(F.old, 'docs/devteam/project/sensors/fake.mjs'), probe);
+  const sf = path.join(F.old, 'docs/devteam/project/settings.md');
+  fs.writeFileSync(sf, fs.readFileSync(sf, 'utf8').replace('"gates": {}', `"sensors": { "fake": { "kind": "probe", "probe": "project/sensors/fake.mjs", "every_minutes": 5, "params": { "mode": ${JSON.stringify(mode)} } } }, "gates": {}`));
+  F.g(['add', '-A'], F.old);
+  F.g(['commit', '-qm', 'a sensor'], F.old);
+  F.g(['push', '-q', 'origin', 'main'], F.old);
+  const dir = path.join(F.old, 'docs/devteam/run/sensors/fake');
+  const emit = (...events) => fs.writeFileSync(mode, events.map((e) => JSON.stringify(e)).join('\n'));
+  const poll = () => F.ok(F.old, ['sensor', 'poll', '--name', 'fake'], SUP);
+  const file = (f) => path.join(dir, f);
+  const read = (f, d = {}) => (fs.existsSync(file(f)) ? json(fs.readFileSync(file(f), 'utf8')) : d);
+  const put = (f, v) => { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(file(f), JSON.stringify(v)); };
+  return { mode, dir, emit, poll, read, put };
+}
+const hourAgo = (n) => new Date(Date.now() - n * 3600000).toISOString().slice(0, 13);
+
+test('spikes: a median over the hours the sensor heard, naming the line', () => {
+  const F = fleetFixture('ooda-spike');
+  try {
+    const s = sensorFixture(F);
+    // a first poll makes the sensor's files; nothing in it qualifies
+    s.emit({ kind: 'log', fingerprint: 'W0', level: 'warning', template: 'warm up', count: 1 });
+    s.poll();
+    assert.ok(s.read('listened.json')[hourAgo(0)], 'a poll that ran marks its hour heard');
+    // two lines the kit has known for three days, ten an hour in the 30 hours it heard; the box was
+    // down for the 42 hours between, which nobody heard (the Stacks case)
+    const heard = [...Array(30)].map((_, i) => hourAgo(i < 20 ? i + 1 : i + 33));
+    const fps = s.read('fingerprints.json');
+    const counts = s.read('counts.json');
+    for (const k of ['S1', 'S2']) {
+      fps[`log:${k}`] = { kind: 'log', first_seen: new Date(Date.now() - 3 * 86400000).toISOString(), seen_at: new Date(Date.now() - 3 * 86400000).toISOString(), total: 300, users: 0, level: 'error', observed: true, template: 'payment gateway timeout after <n>ms' };
+      counts[`log:${k}`] = Object.fromEntries(heard.map((h) => [h, 10]));
+    }
+    s.put('fingerprints.json', fps);
+    s.put('counts.json', counts);
+    s.put('listened.json', { ...s.read('listened.json'), ...Object.fromEntries(heard.map((h) => [h, true])) });
+    const spikes = () => json(F.ok(F.old, ['log', '--type', 'observation', '--json'])).filter((o) => o.kind === 'spike');
+    // a normal hour after the gap: 25 against a median of 10 over what it heard (the unheard hours
+    // would have made the median 0)
+    s.emit({ kind: 'log', fingerprint: 'S1', level: 'error', template: 'payment gateway timeout after <n>ms', count: 25 });
+    s.poll();
+    assert.deepEqual(spikes(), [], 'no spike from hours nobody heard');
+    // a real one: five times the median
+    s.emit({ kind: 'log', fingerprint: 'S2', level: 'error', template: 'payment gateway timeout after <n>ms', count: 60 });
+    s.poll();
+    const [sp] = spikes();
+    assert.ok(sp, 'one spike');
+    assert.match(sp.detail, /^fake: a log line \(fake:log:S2\) is spiking: 60 this hour against a median of 10 an hour over the last 1 day\(s\)\n--- untrusted production data (\w+) \(the line\)[^\n]*\npayment gateway timeout after <n>ms\n--- end of untrusted data \1 ---$/);
+    assert.equal(spikes().length, 1, 'once');
+  } finally { F.done(); }
+});
