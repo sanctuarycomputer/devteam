@@ -2639,7 +2639,7 @@ function cmdValidate() {
     for (const [r, at] of rs) { const bad = releaseProblem(r, at); if (bad) (releaseMayBeOnMerge(r) ? errors : warnings).push(releaseMayBeOnMerge(r) ? bad : `${bad}; read as not deploying on merge`); }
   }
   const td = path.join(projectDir, 'tickets');
-  if (fs.existsSync(td)) for (const f of fs.readdirSync(td)) if (!f.startsWith('.') && !ts.has(f)) errors.push(`project/tickets/${f}/ has no ticket`);
+  if (fs.existsSync(td)) for (const f of fs.readdirSync(td)) if (!f.startsWith('.') && !ts.has(f)) errors.push(`project/tickets/${f}/ has no ticket; if the supervisor added it since the log last landed, land the log first (log-sync, then merge --chore log) and run the check again`);
   // Checking one ticket, another ticket's own errors (D3 and the rest, written "<id>: …") come
   // from the live graph, not this branch: e.g. a dependency on a plan that reached main after the
   // branch did. They warn; the supervisor's own validate still fails on them.
