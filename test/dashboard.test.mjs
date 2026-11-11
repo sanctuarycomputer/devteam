@@ -1135,17 +1135,19 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     const Q = F.sup(['thread', 'ask', T, '--question', 'Ship to the EU first?', '--goal', F.goal, '--stake', '1', '--urgency', '1']);
     await soon(`!!document.getElementById('t-q-${Q}') && !!document.getElementById('q-${Q}') && document.getElementById('tl-card').dataset.key === '${T}'`, 'both copies');
     // every read of the threads from here held back once read; any Inbox link for the question drawn in the card noted
-    await p.ev(`window.__threadsQueue = []; window.__inboxLink = false; window.__obs = new MutationObserver(() => { if (document.querySelector('#tl-c-turns a[href="#q/${Q}"]')) window.__inboxLink = true; }); window.__obs.observe(document.getElementById('tl-card'), { childList: true, subtree: true }); tlRefresh(); void 0`);
+    await p.ev(`window.__threadsQueue = []; window.__inboxLink = false; window.__obs = new MutationObserver((records) => { const link = 'a[href="#q/${Q}"]'; if (records.some((m) => [...m.addedNodes].some((n) => n.nodeType === 1 && (n.matches(link) || !!n.querySelector(link)))) || document.querySelector('#tl-c-turns ' + link)) window.__inboxLink = true; }); window.__obs.observe(document.getElementById('tl-card'), { childList: true, subtree: true }); tlRefresh(); void 0`);
     await soon('window.__threadsQueue.length > 0', 'a read saying the question is open, held');
     // the reads held so far were all read before the answer: they say it is open
     await p.ev(`(() => { window.__stale = window.__threadsQueue.length; const c = document.getElementById('q-${Q}'); c.querySelector('textarea[data-q]').value = 'EU first'; c.querySelector('button[data-answer="${Q}"]').click(); })()`);
     try {
       await until(() => JSON.parse(F.owner(['questions', '--id', Q, '--json']))[0].status === 'answered', 'the answer');
-      await soon(`!document.getElementById('q-${Q}')`, 'the page redrawn without the question');
+      await soon(`!DATA.questions.some((x) => x.id === '${Q}') && !document.getElementById('q-${Q}')`, 'the page redrawn without the question');
       // the stale reads land, the newest of them drawn, and nothing newer yet
+      const have = await p.ev('TL.have');
       await p.ev('window.__threadsQueue.splice(0, window.__stale).forEach((go) => go())');
       await p.ev('window.__still()');
       await p.ev('window.__stir()');
+      assert.ok(await p.ev('TL.have') > have, 'the stale read landed');
       assert.equal(await p.ev(`TL.threads.find((x) => x.id === '${T}').questions.find((x) => x.id === '${Q}').status`), 'open', 'the card drew a read from before the answer');
       assert.equal(await p.ev('window.__inboxLink'), false, 'never "Answer it in the Inbox" for an answered question');
       assert.ok(await p.ev(`/Answered: EU first/.test(document.getElementById('tl-c-turns').textContent)`), 'still answered in the card');

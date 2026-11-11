@@ -342,12 +342,26 @@ export function bareProject(base, name) {
 // The dashboard in a process group of its own: what it runs (hello, dashboard-data, an owner's command)
 // is in that group and can outlive it, still writing into the fixture, so stop() ends the group too and
 // waits until nothing in it is left: a fixture removed after stop() has nobody writing into it.
+// A test process that exits without stop() leaves none of the groups running; and as they are out of
+// the terminal's reach (a Ctrl-C reaches only its own group, and Node's default for a signal skips
+// 'exit'), a SIGINT or SIGTERM is made an exit. One hook for every dashboard alive, gone with the last.
+// A test process killed outright (node --test kills a file's process at once on Ctrl-C when it is in
+// a synchronous wait, as the CLI helpers are) runs no hook: a watcher of its own, out of both groups,
+// ends the dashboard's group once the test process is gone, and itself once the group is.
+const DASH_WATCH = `const [t, g] = process.argv.slice(1).map(Number); const alive = (p) => { try { process.kill(p, 0); return true; } catch { return false; } };
+setInterval(() => { if (!alive(-g)) process.exit(0); if (!alive(t)) { try { process.kill(-g, 'SIGKILL'); } catch {} process.exit(0); } }, 200);`;
+const DASH_GROUPS = new Set();
+const killDashGroups = () => { for (const g of DASH_GROUPS) { try { process.kill(-g, 'SIGKILL'); } catch {} } };
+const onDashSig = (s) => process.exit(128 + (s === 'SIGINT' ? 2 : 15));
+const dashHooks = (on) => { const f = on ? 'on' : 'off'; process[f]('exit', killDashGroups); for (const s of ['SIGINT', 'SIGTERM']) process[f](s, onDashSig); };
 export function startDashboard(root, env, args = []) {
   const p = spawn(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), 'dashboard', ...args], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
   const group = (sig) => { try { process.kill(-p.pid, sig); return true; } catch { return false; } };
-  // a test process that exits without stop() leaves none of it running
-  const atExit = () => group('SIGKILL');
-  process.once('exit', atExit);
+  if (p.pid) {
+    if (!DASH_GROUPS.size) dashHooks(true);
+    DASH_GROUPS.add(p.pid);
+    spawn(process.execPath, ['-e', DASH_WATCH, String(process.pid), String(p.pid)], { detached: true, stdio: 'ignore' }).unref();
+  }
   let o = '';
   p.stdout.on('data', (b) => { o += b; });
   p.stderr.on('data', (b) => { o += b; });
@@ -358,7 +372,7 @@ export function startDashboard(root, env, args = []) {
       for (let i = 0; i < 200 && group('SIGKILL'); i++) await new Promise((w) => setTimeout(w, 50));
       p.stdout.destroy();
       p.stderr.destroy();
-      process.off('exit', atExit);
+      if (DASH_GROUPS.delete(p.pid) && !DASH_GROUPS.size) dashHooks(false);
       r();
     };
     if (p.exitCode !== null || p.signalCode !== null) return void rest();
