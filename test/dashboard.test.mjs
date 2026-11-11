@@ -314,8 +314,9 @@ const POLL_FAST = `(() => {
     // a test can let the next /api/threads read through but hold its answer back: read now, landing later
     // and can slow every /api/threads answer, as a loaded box would
     if (String(u).startsWith('/api/threads') && window.__threadsDelay) await new Promise((r) => setTimeout(r, window.__threadsDelay));
-    // or hold back every /api/threads answer, read now, until the test lets each go
-    if (String(u).startsWith('/api/threads') && window.__threadsQueue) { const r = await rf(u, o); await new Promise((go) => window.__threadsQueue.push(go)); return r; }
+    // or hold back every /api/threads answer, read now, until the test lets each go (the page's own
+    // timeout let go of, so a held read can't be given up while it waits)
+    if (String(u).startsWith('/api/threads') && window.__threadsQueue) { const r = await rf(u, { ...o, signal: undefined }); await new Promise((go) => window.__threadsQueue.push(go)); return r; }
     if (String(u).startsWith('/api/threads') && window.__threadsHold) { const h = window.__threadsHold; window.__threadsHold = null; const r = await rf(u, o); window.__threadsRead = true; await h; setTimeout(() => { window.__threadsLanded = true; }, 0); return r; }
     return rf(u, o);
   };

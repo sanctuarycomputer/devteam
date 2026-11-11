@@ -346,21 +346,31 @@ export function bareProject(base, name) {
 // the terminal's reach (a Ctrl-C reaches only its own group, and Node's default for a signal skips
 // 'exit'), a SIGINT or SIGTERM is made an exit. One hook for every dashboard alive, gone with the last.
 // A test process killed outright (node --test kills a file's process at once on Ctrl-C when it is in
-// a synchronous wait, as the CLI helpers are) runs no hook: a watcher of its own, out of both groups,
-// ends the dashboard's group once the test process is gone, and itself once the group is.
-const DASH_WATCH = `const [t, g] = process.argv.slice(1).map(Number); const alive = (p) => { try { process.kill(p, 0); return true; } catch { return false; } };
-setInterval(() => { if (!alive(-g)) process.exit(0); if (!alive(t)) { try { process.kill(-g, 'SIGKILL'); } catch {} process.exit(0); } }, 200);`;
-const DASH_GROUPS = new Set();
-const killDashGroups = () => { for (const g of DASH_GROUPS) { try { process.kill(-g, 'SIGKILL'); } catch {} } };
+// a synchronous wait, as the CLI helpers are) runs no hook: each dashboard has a watcher, out of both
+// groups, holding the read end of a pipe from the test process. The kernel closes the write end on any
+// death of the test process, SIGKILL too (and Node opens it close-on-exec, so nothing the test process
+// starts holds it), and the watcher then ends the dashboard's group. stop() and the exit hook end the
+// watcher first, so it outlives its dashboard only when the test process died some other way.
+const DASH_WATCH = `const g = Number(process.argv[1]); const end = () => { try { process.kill(-g, 'SIGKILL'); } catch {} process.exit(0); };
+process.stdin.on('end', end); process.stdin.on('close', end); process.stdin.on('error', end); process.stdin.resume();`;
+const DASH_GROUPS = new Map(); // the dashboard's pid (its group), its watcher
+const killDashGroups = () => { for (const [g, w] of DASH_GROUPS) { try { w.kill('SIGKILL'); } catch {} try { process.kill(-g, 'SIGKILL'); } catch {} } };
 const onDashSig = (s) => process.exit(128 + (s === 'SIGINT' ? 2 : 15));
-const dashHooks = (on) => { const f = on ? 'on' : 'off'; process[f]('exit', killDashGroups); for (const s of ['SIGINT', 'SIGTERM']) process[f](s, onDashSig); };
+// the groups killed before any other exit hook (the fixtures' removal among them)
+const dashHooks = (on) => { if (on) process.prependListener('exit', killDashGroups); else process.off('exit', killDashGroups); for (const s of ['SIGINT', 'SIGTERM']) process[on ? 'on' : 'off'](s, onDashSig); };
 export function startDashboard(root, env, args = []) {
   const p = spawn(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), 'dashboard', ...args], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+  p.on('error', () => {});
   const group = (sig) => { try { process.kill(-p.pid, sig); return true; } catch { return false; } };
+  let watcher = null;
   if (p.pid) {
+    watcher = spawn(process.execPath, ['-e', DASH_WATCH, String(p.pid)], { detached: true, stdio: ['pipe', 'ignore', 'ignore'] });
+    watcher.on('error', () => {});
+    watcher.stdin.on('error', () => {});
+    watcher.unref();
+    watcher.stdin.unref();
     if (!DASH_GROUPS.size) dashHooks(true);
-    DASH_GROUPS.add(p.pid);
-    spawn(process.execPath, ['-e', DASH_WATCH, String(process.pid), String(p.pid)], { detached: true, stdio: 'ignore' }).unref();
+    DASH_GROUPS.set(p.pid, watcher);
   }
   let o = '';
   p.stdout.on('data', (b) => { o += b; });
@@ -369,6 +379,8 @@ export function startDashboard(root, env, args = []) {
   const stop = () => (stopping ??= new Promise((r) => {
     // the dashboard gone: whatever it started is killed, and waited for (up to 10 s, then left)
     const rest = async () => {
+      try { watcher?.kill('SIGKILL'); } catch {}
+      watcher?.stdin.destroy();
       for (let i = 0; i < 200 && group('SIGKILL'); i++) await new Promise((w) => setTimeout(w, 50));
       p.stdout.destroy();
       p.stderr.destroy();
