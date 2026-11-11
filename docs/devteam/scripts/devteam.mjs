@@ -180,13 +180,13 @@ function gitBatch(specs, cwd = HOME_CWD) {
 // one trailing newline taken off.
 const FULL_SHA = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 const commonDirs = new Map();
-function commonDir(cwd = HOME_CWD) {
+function gitCommonDirOf(cwd = HOME_CWD) {
   const k = cwd ?? process.cwd();
   if (!commonDirs.has(k)) commonDirs.set(k, git(['rev-parse', '--path-format=absolute', '--git-common-dir'], cwd) ?? k);
   return commonDirs.get(k);
 }
 const atCommit = new Map();
-const atKey = (sha, p, cwd) => `${commonDir(cwd)}\0${sha}\0${p}`;
+const atKey = (sha, p, cwd) => `${gitCommonDirOf(cwd)}\0${sha}\0${p}`;
 const asGitText = (o) => (o ? o.bytes.toString('utf8').replace(/\n$/, '') : null);
 function prefetchAt(sha, paths, cwd = HOME_CWD) {
   if (!FULL_SHA.test(sha ?? '')) return;
@@ -338,6 +338,8 @@ const mainRoot = commonDir ? path.dirname(commonDir) : repoRoot;
 // Whether this command runs in one of home's checkouts (its main checkout or a worktree of it).
 const cwdIsHome = !!cwdCommon && !!commonDir && realPath(cwdCommon) === realPath(commonDir);
 HOME_CWD = cwdIsHome || !commonDir ? undefined : mainRoot;
+// home's common dir is known already: reads at a commit key on it without asking git again
+if (commonDir) commonDirs.set(HOME_CWD ?? process.cwd(), commonDir);
 // The kit folder of the checkout you are in when it is home's (a worktree has its own copy): its
 // project/ is the branch's tickets and plans. Elsewhere, home's main checkout's, so mainRoot and
 // projectDir both follow home (never the cwd's repo).
