@@ -14368,15 +14368,18 @@ function lineageMermaid(L) {
 // Where an observation sits in the loop, for its card and its sidepeek: ruled noise, ignored at
 // triage, set aside, carried on (the furthest stage it reached), explained (it became knowledge, a
 // problem or an incident), part of a signal (n of the 3 that make one), or not oriented yet. Null
-// for what isn't an observation for Orient (a reading, an outcome, a set-aside itself).
+// for what isn't an observation for Orient (a reading, an outcome, a set-aside itself). What
+// explains a whole signal (explained().keys: a ruling that names its key, the open incident that
+// holds its fingerprint) explains a later observation on it as well.
 const SET_ASIDE_KINDS = ['finding-ack', 'sensor-ignored', 'sensor-unignored', 'sensor-reconsidered'];
 let PLACE_CTX = null;
 function placeOf(o) {
   if (o?.type !== 'observation' || stageOf(o) !== 'observe' || SET_ASIDE_KINDS.includes(o.kind)) return null;
-  if (PLACE_CTX?.log !== readLog()) PLACE_CTX = { log: readLog(), ignores: sensorIgnores(), ackHours: loadSettings().finding_ack_hours ?? 24, acks: new Map(logObjects('observation').filter((x) => x.kind === 'finding-ack').sort(byTime).map((x) => [x.source_ref, x])) };
+  if (PLACE_CTX?.log !== readLog()) PLACE_CTX = { log: readLog(), keys: explained().keys, rulings: new Map(logObjects('decision').filter((d) => d.class === 'orient-noise' && liveDecision(d)).sort(byTime).flatMap((d) => (d.refs ?? []).filter((r) => !logGet(r)).map((r) => [r, d]))), ignores: sensorIgnores(), ackHours: loadSettings().finding_ack_hours ?? 24, acks: new Map(logObjects('observation').filter((x) => x.kind === 'finding-ack').sort(byTime).map((x) => [x.source_ref, x])) };
   const C = PLACE_CTX;
   const after = (linkIndex().out.get(o.id) ?? []).map((e) => logGet(e.to)).filter(Boolean);
-  const noise = after.find((x) => x.type === 'decision' && x.class === 'orient-noise' && liveDecision(x));
+  const key = signalKeyOf(o);
+  const noise = after.find((x) => x.type === 'decision' && x.class === 'orient-noise' && liveDecision(x)) ?? (C.keys.has(key) ? C.rulings.get(key) : null);
   if (noise) return { state: 'noise', ref: noise.id, why: noise.what ?? null };
   const fp = fromSensor(o) && TRIAGE_KINDS.includes(o.kind) ? fpIdOfObservation(o) : null;
   const ig = fp ? C.ignores.get(fp) : null;
@@ -14391,7 +14394,9 @@ function placeOf(o) {
   const word = (n) => (n.type === 'knowledge' ? n.kind ?? 'lesson' : n.type === 'problem' ? (isIncident(logGet(n.id)) ? 'incident' : 'problem') : n.type === 'question' ? 'your answer' : n.type === 'observation' ? String(n.kind ?? 'outcome').replace(/-/g, ' ') : n.type);
   if (firstAt.length === 1 && firstAt[0].stage === 'orient') return { state: 'explained', ref: firstAt[0].id, why: word(firstAt[0]) };
   if (firstAt.length) return { state: 'carried', ref: firstAt.at(-1).id, why: firstAt.map(word).join(' → ') };
-  const g = signalGroups().get(signalKeyOf(o));
+  const held = C.keys.has(key) ? openIncidentOf(key) : null;
+  if (held) return { state: 'explained', ref: held.id, why: 'incident' };
+  const g = signalGroups().get(key);
   if (g && g.items.length > 1) return { state: 'signal', ref: g.key, n: g.items.length, recurring: g.items.length >= 3 && g.spread };
   return { state: 'new', ref: null };
 }
