@@ -7501,16 +7501,19 @@ function cmdProblem() {
 // recur); anything else its source_key (a finding's metrics:<kind>:<subject>), else kind:subject.
 // A fix-regressed or recurred line keeps its own key: it already cites its incident.
 const signalKeyOf = (o) => (fromSensor(o) && TRIAGE_KINDS.includes(o.kind) ? fpIdOfObservation(o) : null) ?? o.source_key ?? `${o.kind}:${o.subject}`;
-// Recurring signals no knowledge, problem or ruling explains yet: three or more observations (or
-// corrections) on one key, from at least two writers or on at least two days. A live decision
-// that cites an observation explains it (an orient-noise ruling); a corrected one explains nothing,
-// so the owner's correction of a ruling brings its signal back.
-function orientClusters() {
+// The observations (and corrections) nothing explains yet, grouped on the key they recur on, each
+// group with whether it spreads (two writers or two days): every group, however small, so a card
+// can say how near a signal one is; computed once per read of the log. A live decision that cites
+// an observation explains it (an orient-noise ruling); a corrected one explains nothing, so the
+// owner's correction of a ruling brings its signal back.
+let SIGNALS = null;
+function signalGroups() {
+  if (SIGNALS?.log === readLog()) return SIGNALS.groups;
   const linked = new Set();
   for (const o of [...logObjects('knowledge'), ...logObjects('problem')]) for (const r of [...(o.evidence ?? []), ...(o.refs ?? [])]) linked.add(r);
   for (const d of logObjects('decision')) if ((d.refs ?? []).some((r) => String(r).startsWith('o-')) && liveDecision(d)) for (const r of d.refs) linked.add(r);
   const groups = new Map();
-  const add = (key, item) => (groups.get(key) ?? groups.set(key, []).get(key)).push(item);
+  const add = (key, item) => (groups.get(key) ?? groups.set(key, { key, items: [] }).get(key)).items.push(item);
   for (const o of logObjects('observation')) {
     if (linked.has(o.id) || ['reading', 'retro', 'outcome', 'link'].includes(o.kind)) continue;
     add(signalKeyOf(o), { id: o.id, at: o.created_at, who: o.created_by, valence: o.valence ?? 0, detail: o.detail });
@@ -7519,9 +7522,13 @@ function orientClusters() {
     const c = correctionOf(a);
     if (c && !linked.has(a.id)) add(`correction:${a.class}:${a.scope ?? 'any'}`, { id: a.id, at: c.at, who: c.by, valence: -2, detail: c.reason });
   }
+  for (const g of groups.values()) g.spread = new Set(g.items.map((i) => i.who)).size >= 2 || new Set(g.items.map((i) => dateOnly(i.at))).size >= 2;
+  return (SIGNALS = { log: readLog(), groups }).groups;
+}
+// Recurring signals: three or more of one group that spreads.
+function orientClusters() {
   const res = [];
-  for (const [key, items] of groups) {
-    const spread = new Set(items.map((i) => i.who)).size >= 2 || new Set(items.map((i) => dateOnly(i.at))).size >= 2;
+  for (const { key, items, spread } of signalGroups().values()) {
     if (items.length < 3 || !spread) continue;
     const v = items.reduce((s, i) => s + i.valence, 0) / items.length;
     res.push({ key, count: items.length, valence: +v.toFixed(1), ids: items.map((i) => i.id), latest: items.map((i) => i.detail).pop() });
@@ -14211,6 +14218,135 @@ function historyOf(ids, { types = null, limit = 300 } = {}) {
   }
   return res.slice(-limit);
 }
+// ---- lineage: what a record in the loop came from and what came of it ----
+// One index of the links between records, built once per read of the log: an edge from each record
+// a field cites to the record citing it (cited before citing, for every field), read off the fields
+// that cite, never a walk over strings. The ticket an add-ticket act made comes after the act. Then
+// the computed steps: an observation recurs in its signal, and a correction follows the call.
+const LINK_FIELDS = { evidence: 'evidence', refs: 'about', blocks: 'asks about', knowledge: 'rests on' };
+let LINKS = null;
+function linkIndex() {
+  if (LINKS?.log === readLog()) return LINKS;
+  const out = new Map(), inn = new Map(), seen = new Set();
+  const edge = (from, to, why) => {
+    const k = `${from}\0${to}`;
+    if (from === to || seen.has(k)) return;
+    seen.add(k);
+    (out.get(from) ?? out.set(from, []).get(from)).push({ to, why });
+    (inn.get(to) ?? inn.set(to, []).get(to)).push({ from, why });
+  };
+  const known = (t) => typeof t === 'string' && readLog().objects.has(t);
+  for (const o of readLog().objects.values()) {
+    for (const [k, why] of Object.entries(LINK_FIELDS)) for (const t of Array.isArray(o[k]) ? o[k] : []) {
+      if (!known(t)) continue;
+      if (o.type === 'act' && o.class === 'add-ticket' && k === 'refs' && logGet(t).type === 'ticket') edge(o.id, t, 'made');
+      else edge(t, o.id, why);
+    }
+    if (known(o.approved_by)) edge(o.approved_by, o.id, 'approved');
+    if (known(o.decision)) edge(o.decision, o.id, 'carried out');
+  }
+  for (const c of orientClusters()) for (const id of c.ids) edge(id, `signal:${c.key}`, 'recurs');
+  for (const a of calls()) if (correctionOf(a)) edge(a.id, `correction:${a.id}`, 'corrected');
+  return (LINKS = { log: readLog(), out, in: inn });
+}
+// Where each record opens on the dashboard: its sidepeek's address.
+const PEEK_HASH = { observation: 'observation', knowledge: 'lesson', problem: 'problem', decision: 'decision', act: 'act', question: 'q', ticket: 'ticket', goal: 'goal', feature: 'feature', message: 'thread', thread: 'talk' };
+const hrefOf = (o) => { const k = o?.type === 'observation' ? { retro: 'retro', learning: 'learning' }[o.kind] ?? 'observation' : PEEK_HASH[o?.type]; return k ? `#${k}/${encodeURIComponent(o.id)}` : null; };
+const plainLabel = (s) => String(s ?? '').replace(/\s+/g, ' ').trim().slice(0, 60);
+// A question is the Inbox's; one answered in a ladder class is the owner's call, drawn in Decide.
+const lineageStage = (o) => { const s = stageOf(o); return s === 'inbox' && questionView(o).status === 'answered' && ladder().classes[o.class] ? 'decide' : s; };
+function lineageNode(id) {
+  if (id.startsWith('signal:')) {
+    const key = id.slice('signal:'.length);
+    const g = signalGroups().get(key);
+    return { id, stage: 'orient', type: 'signal', kind: null, label: plainLabel(`recurring: ${key}`), at: g?.items.at(-1)?.at ?? null, href: `#signal/${encodeURIComponent(key)}` };
+  }
+  if (id.startsWith('correction:')) {
+    const a = logGet(id.slice('correction:'.length));
+    const c = correctionOf(a);
+    return c ? { id, stage: 'learn', type: 'correction', kind: a.class ?? null, label: plainLabel(`corrected: ${c.reason}`), at: c.at, href: hrefOf(a) } : null;
+  }
+  const o = logGet(id);
+  if (!o) return null;
+  return { id, stage: lineageStage(o), type: o.type, kind: o.kind ?? o.class ?? null, label: plainLabel(o.what ?? o.statement ?? o.title ?? o.question ?? o.detail ?? o.text) || id, at: o.created_at, href: hrefOf(o) };
+}
+// lineage(id): the records it came from (up to 6 steps back) and what came of it (4 steps on), at
+// most max in all. The work graph and conversation are what a record is about: drawn, never followed
+// further. More than five siblings of one type and kind on one side of one neighbour become one node
+// that lists them. The opened record is always the first node.
+function lineage(id, { up = 6, down = 4, max = 120 } = {}) {
+  const L = linkIndex();
+  const root = lineageNode(id);
+  if (!root) return null;
+  const nodes = new Map([[id, root]]);
+  let truncated = false;
+  const walk = (side, hops) => {
+    let front = [id];
+    for (let h = 0; front.length; h++) {
+      const next = [];
+      for (const x of front) {
+        if (x !== id && nodes.get(x).stage === null) continue;
+        for (const e of (side === 'up' ? L.in : L.out).get(x) ?? []) {
+          const y = side === 'up' ? e.from : e.to;
+          if (nodes.has(y)) continue;
+          if (h >= hops || nodes.size >= max) { truncated = true; return; }
+          const n = lineageNode(y);
+          if (n) { nodes.set(y, n); next.push(y); }
+        }
+      }
+      front = next;
+    }
+  };
+  walk('up', up);
+  walk('down', down);
+  let edges = [];
+  for (const x of nodes.keys()) for (const e of L.out.get(x) ?? []) if (nodes.has(e.to)) edges.push({ from: x, to: e.to, why: e.why });
+  // siblings: one type and kind, on one side of one neighbour
+  const sibs = new Map();
+  for (const e of edges) for (const [m, nb, side] of [[e.from, e.to, 'up'], [e.to, e.from, 'down']]) {
+    const n = nodes.get(m);
+    if (m === id || ['signal', 'correction'].includes(n.type)) continue;
+    const k = JSON.stringify([nb, side, n.type, n.kind]);
+    (sibs.get(k) ?? sibs.set(k, new Set()).get(k)).add(m);
+  }
+  const into = new Map();
+  const groups = [];
+  for (const [k, ms] of [...sibs].sort((a, b) => b[1].size - a[1].size)) {
+    const free = [...ms].filter((m) => !into.has(m));
+    if (free.length <= 5) continue;
+    const [nb, , type, kind] = JSON.parse(k);
+    let gid = `group:${nb}:${type}:${kind}`;
+    while (nodes.has(gid) || groups.some((g) => g.id === gid)) gid += '+';
+    const first = nodes.get(free[0]);
+    groups.push({ id: gid, stage: first.stage, type, kind, label: `${free.length} ${kind ? `${kind} ` : ''}${type}s`, at: free.map((m) => nodes.get(m).at).sort().pop() ?? null, href: null, members: free, first: free[0] });
+    for (const m of free) into.set(m, gid);
+  }
+  const list = [];
+  for (const [x, n] of nodes) {
+    if (!into.has(x)) list.push(n);
+    else { const g = groups.find((y) => y.first === x); if (g) { const { first, ...rest } = g; list.push(rest); } }
+  }
+  const seen = new Set();
+  edges = edges.map((e) => ({ from: into.get(e.from) ?? e.from, to: into.get(e.to) ?? e.to, why: e.why })).filter((e) => { const k = `${e.from}\0${e.to}\0${e.why}`; if (e.from === e.to || seen.has(k)) return false; seen.add(k); return true; });
+  return { nodes: list, edges, truncated };
+}
+// The lineage as Mermaid text: a subgraph per stage in the loop's order, what is outside the loop
+// after them, generated node ids (n0 is the opened record, n<i> the i-th node), and labels stripped
+// to plain words, so no record's text or id reaches Mermaid's syntax.
+const LINEAGE_STAGES = [['observe', 'Observe'], ['orient', 'Orient'], ['decide', 'Decide'], ['act', 'Act'], ['learn', 'Learn']];
+const LINEAGE_CLASS = { observe: 'stroke:#4f8bd6', orient: 'stroke:#8a63d2', decide: 'stroke:#d29b2a', act: 'stroke:#3a9e6f', learn: 'stroke:#d0566a' };
+const mermaidText = (s) => String(s ?? '').replace(/[^A-Za-z0-9\s.,:!?()'/+-]/g, '').replace(/\s+/g, ' ').trim().slice(0, 60);
+function lineageMermaid(L) {
+  const n = new Map(L.nodes.map((x, i) => [x.id, `n${i}`]));
+  const node = (x) => { const t = mermaidText(x.label) || mermaidText(x.id) || 'a record'; return x.type === 'signal' || x.members ? `${n.get(x.id)}(["${t}"])` : `${n.get(x.id)}["${t}"]`; };
+  const lines = ['flowchart LR'];
+  for (const [s, title] of LINEAGE_STAGES) { const xs = L.nodes.filter((x) => x.stage === s); if (xs.length) lines.push(`subgraph s_${s}["${title}"]`, ...xs.map(node), 'end'); }
+  lines.push(...L.nodes.filter((x) => !LINEAGE_STAGES.some(([s]) => s === x.stage)).map(node));
+  for (const e of L.edges) lines.push(`${n.get(e.from)} -->|${mermaidText(e.why)}| ${n.get(e.to)}`);
+  for (const [s, css] of Object.entries(LINEAGE_CLASS)) { const xs = L.nodes.filter((x) => x.stage === s); if (xs.length) lines.push(`classDef st_${s} ${css},stroke-width:1.5px`, `class ${xs.map((x) => n.get(x.id)).join(',')} st_${s}`); }
+  if (L.nodes.length) lines.push('classDef current stroke-width:3.5px', 'class n0 current');
+  return lines.join('\n');
+}
 // A file's commits, from the git of the repo it is in: another repo's (read on its main by default)
 // only when this machine can read it, else none (a view never fails on a missing checkout).
 const fileHistory = (rel, ref = null, name = 'home') => { const R = name === 'home' ? repo('home') : repoReadable(name) ? repo(name) : null; return fileHistoryIn(R, rel, ref ?? (name === 'home' ? null : R?.mainRef())); };
@@ -14284,6 +14420,8 @@ function peekView(kind, id) {
       v.gates = Object.values(Object.fromEntries(runs.map((l) => [l.gate, { gate: l.gate, ok: l.ok, sha: l.sha ?? null, at: l.at }])));
       v.last_merge = last ? { id: last.id, at: last.created_at, ticket: (last.refs ?? []).find((r) => ts.includes(r)) ?? null, sha } : null;
     }
+  } else if (kind === 'signal') {
+    v.record = null;
   } else {
     const o = logGet(id) ?? die(`no record ${id}`);
     v.history = historyOf([id]);
@@ -14298,11 +14436,16 @@ function peekView(kind, id) {
       v.events = o.fingerprints.map((f) => { const { sensor, key } = splitFpId(f); return { fingerprint: f, cached: jsonOr(path.join(sensorDir(sensor), 'events', fpFile(key)), null) }; });
     }
   }
+  // what a record in the loop, or a recurring signal, came from and what came of it
+  const root = kind === 'signal' ? `signal:${id}` : v.record && stageOf(logGet(v.record.id)) !== null ? v.record.id : null;
+  if (root) { v.lineage = lineage(root); v.lineage_mermaid = v.lineage ? lineageMermaid(v.lineage) : null; }
   return v;
 }
 function cmdPeek() {
   const [kind, id] = positional;
-  if (!kind || !id) die('usage: peek <ticket|goal|feature|planner|retro|file|story|release|wave|milestone|act|decision|lesson|problem|q|thread> <id> [--tickets ids] --json');
+  if (!kind || !id) die('usage: peek <ticket|goal|feature|planner|retro|file|story|release|wave|milestone|act|decision|lesson|problem|q|thread|observation|signal|learning> <id> [--tickets ids] --json | --mermaid');
+  // its lineage as Mermaid text, for a retro, a PR body or the supervisor's own reading
+  if (flags.mermaid) return out(lineageMermaid(lineage(kind === 'signal' ? `signal:${id}` : id) ?? die(`no record ${id}`)));
   json(peekView(kind, id));
 }
 
