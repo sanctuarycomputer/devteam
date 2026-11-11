@@ -1465,6 +1465,7 @@ export function createGateway(opts = {}) {
   // A published artifact, from the gateway's own copy alone: reads only, the raw path matched
   // before any decoding, the gateway's own headers. Nothing here reads the cookie, sets one, or
   // talks to an instance, so taking a port, rewriting main or forging log lines changes nothing.
+  // (The owner's wrapper, tried before this, reads the cookie to choose itself, and only that.)
   const servePublic = (req, res) => {
     if (!['GET', 'HEAD'].includes(req.method)) return send(res, 405, 'text/plain; charset=utf-8', 'GET or HEAD only', { allow: 'GET, HEAD' });
     if (req.headers['service-worker'] || req.headers['sec-fetch-dest'] === 'serviceworker') return send(res, 403, 'text/plain; charset=utf-8', 'no service workers on this box');
@@ -1480,7 +1481,7 @@ export function createGateway(opts = {}) {
     const f = publicPathOk(rel) && Object.hasOwn(art.files ?? {}, rel) ? art.files[rel] : null;
     if (!f || !/^[0-9a-f]{64}$/.test(f.sha256 ?? '')) return notFound();
     const tag = `"${f.sha256}"`;
-    const head = { etag: tag, 'cache-control': 'public, max-age=60', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': publicCsp(`${PUBLIC}/${m[1]}/${m[2]}/`), ...hsts };
+    const head = { etag: tag, 'cache-control': 'public, max-age=60', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': publicCsp(`${PUBLIC}/${m[1]}/${m[2]}/`), ...(rel === 'index.html' ? { vary: 'cookie' } : {}), ...hsts };
     const asked = String(req.headers['if-none-match'] ?? '').split(',').map((t) => t.trim());
     if (asked.includes('*') || asked.includes(tag)) { res.writeHead(304, head); return res.end(); }
     // no range requests, as in the kit: the whole file or its headers
@@ -1621,6 +1622,34 @@ export function createGateway(opts = {}) {
     return text.length <= 32 * 1024 ? text : asciiJson(Object.fromEntries(Object.entries(all).filter(([, x]) => x.port === port)));
   };
 
+  // The owner's page on the public name (spec §8): the project's viewer at the published version,
+  // with threads. Only for a top-level visit (sec-fetch-dest: document; navigate also matches frames)
+  // to a published page's index, by the signed-in owner, whose bound instance answers now as that
+  // checkout with a kit that has viewers. Anything in doubt is null: a session that isn't one, a
+  // store that can't be read, no binding, an instance that is down, slow, another checkout or an
+  // older kit. Then the public's bytes are served, as before. It reads the cookie, and nothing else
+  // of the owner's: it never proxies, and the instance is asked as a loopback client.
+  const WRAP_MS = opts.wrapperHelloMs ?? 1500;
+  // The wrapper's own policy: styles and one frame, the bound instance's; no script, nothing to fetch.
+  const WRAP_CSP = (inst) => `default-src 'none'; style-src 'unsafe-inline'; frame-src ${inst}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
+  const ownerWrapper = async (req, url) => {
+    try {
+      if (req.method !== 'GET' || req.headers['sec-fetch-dest'] !== 'document' || url.searchParams.has('plain')) return null;
+      const m = /^\/([^/]+)\/([^/]+)\/(?:index\.html)?$/.exec(req.url.split('?')[0]);
+      if (!m || !PROJECT.test(m[1]) || !LINK_ID.test(m[2])) return null;
+      const s = store.load();
+      if (!s.passkeys.length || !sessionOf(req)) return null;
+      const bound = Object.hasOwn(s.public ?? {}, m[1]) ? s.public[m[1]] : null;
+      const art = bound && Object.hasOwn(bound.artifacts ?? {}, m[2]) ? bound.artifacts[m[2]] : null;
+      if (!art || !BLOCK.includes(bound.port) || typeof art.tree !== 'string' || !TREE.test(art.tree)) return null;
+      const r = await loopback(bound.port, 'GET', '/api/hello', { cap: 256 * 1024, ms: WRAP_MS });
+      if (r.status !== 200) return null;
+      const hello = JSON.parse(r.body.toString('utf8'));
+      if (hello?.viewer !== 1 || hello.root !== bound.root) return null;
+      return { port: bound.port, html: PAGES.ownerWrapper({ project: m[1], slug: m[2], title: typeof art.title === 'string' && art.title ? art.title : m[2], frame: `${instanceOrigin(bound.port)}/view/artifact/${m[2]}?at=tree:${art.tree}` }) };
+    } catch { return null; }
+  };
+
   // --- a file dropped on the terminal: streamed to a folder of its own, never read back or run ---
   // The root is made at boot, by root, for gw to write and dev to read. It is checked here, not
   // assumed, so the gateway never writes through something an agent could have put in its place.
@@ -1738,8 +1767,12 @@ export function createGateway(opts = {}) {
     const pv = previewOf(req.headers.host);
     const port = isBox || isTerm || isPublic || pv ? null : instanceOf(req.headers.host);
     if (!isBox && !isTerm && !isPublic && !port && !pv) return send(res, 421, 'text/plain; charset=utf-8', `this box answers only on its own names: open ${PUB}/`);
-    // Anyone's, so before every check that is about the owner (Origin, cookie, session).
+    // Anyone's, so before every check that is about the owner (Origin, cookie, session). The one
+    // exception reads the cookie to choose a page, never to refuse one: the owner's own visit gets
+    // the wrapper, and whatever that can't settle gets the public's bytes, exactly as before.
     if (isPublic) {
+      const wrap = await ownerWrapper(req, url);
+      if (wrap) return send(res, 200, 'text/html; charset=utf-8', wrap.html, { 'content-security-policy': WRAP_CSP(instanceOrigin(wrap.port)), 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer', 'cache-control': 'no-store, private', vary: 'cookie' });
       try { return servePublic(req, res); } catch (e) { return send(res, e?.unreadable ? 503 : 500, 'text/plain; charset=utf-8', 'this page can\'t be served just now'); }
     }
     const own = isBox ? PUB : isTerm ? TERM : pv ? previewOrigin(pv) : instanceOrigin(port);
@@ -2232,6 +2265,14 @@ go.onclick = run(async () => {
     const rows = Object.entries(pub).flatMap(([n, x]) => Object.entries(x.artifacts ?? {}).map(([s, a]) => ({ n, s, a, root: x.root, link: `${site}/${n}/${s}/` })));
     return `${doc('Public', `<h1>Public on this box</h1><p>Anyone can read these, with no sign-in. Each is the box's own copy of what you published.</p>${rows.length ? `<ul>${rows.map((r) => `<li class="pub"><b>${esc(r.a.title)}</b><small>${esc(r.n)} · ${esc(r.s)} · published ${esc(String(r.a.at).slice(0, 10))} from ${esc(r.root)}</small><code><a href="${esc(r.link)}" target="_blank" rel="noopener noreferrer">${esc(r.link)}</a></code><a href="${esc(`/public/unpublish?project=${r.n}&slug=${r.s}`)}">Unpublish</a></li>`).join('')}</ul>` : '<p>Nothing is public.</p>'}`)}</body></html>`;
   },
+  // The owner's view of a public page: the instance's viewer, framed full size under one line, and
+  // no script of its own. The frame may not navigate this tab, nor open a window outside its
+  // sandbox (an artifact viewer needs none); its sandbox keeps its origin.
+  ownerWrapper: ({ project, slug, title, frame }) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><style>
+:root{color-scheme:light dark;--bg:#fafafa;--fg:#171717;--fg2:#666;--line:#e5e5e5}@media (prefers-color-scheme:dark){:root{--bg:#000;--fg:#ededed;--fg2:#a1a1a1;--line:#2e2e2e}}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:13px/1.4 ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif}body{display:flex;flex-direction:column}
+header{padding:6px 12px;border-bottom:1px solid var(--line);color:var(--fg2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}a{color:var(--fg)}iframe{flex:1;border:0;width:100%}
+</style></head><body><header>Public · ${esc(project)}/${esc(slug)} · <a href="?plain">Open it as the public sees it</a></header><iframe src="${esc(frame)}" title="${esc(title)}" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads"></iframe></body></html>`,
 };
 
 // --- command line ------------------------------------------------------------------------------

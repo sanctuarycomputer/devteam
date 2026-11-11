@@ -907,7 +907,8 @@ test('public.<box>: anyone reads a published artifact, from the gateway\'s own c
     assert.deepEqual([r.status, r.headers.allow], [405, 'GET, HEAD']);
     assert.equal((await get('/alpha/hello/app.js', { 'service-worker': 'script' })).status, 403);
     assert.equal((await get('/alpha/hello/app.js', { 'sec-fetch-dest': 'serviceworker' })).status, 403);
-    // signed in or not, the same answer: the cookie is never read on this name, and none is set
+    // signed in or not, without fetch metadata the same answer: the cookie only ever chooses the
+    // owner's wrapper (a top-level visit), and none is set
     r = await gw.req('GET', '/alpha/hello/', { on: 'public' });
     assert.deepEqual([r.status, r.body, r.headers['set-cookie']], [200, page, undefined]);
     // nothing is listed, nothing unpublished is there, and the raw path is matched before decoding
@@ -2502,4 +2503,83 @@ test('/.devteam/lens on a preview\'s name: the gateway\'s own page, for the owne
     await req('cool-tiger', 'HEAD', '/.devteam/lens');
     assert.deepEqual(seen, ['POST /.devteam/lens', 'GET /.devteam/lens/x', 'GET /.devteam/lensx', 'HEAD /.devteam/lens']);
   } finally { await S.close(); dev.close(); }
+});
+
+test('public.<box>: the signed-in owner\'s own visit gets the viewer at the published version; anyone else, and any doubt, the plain bytes', async () => {
+  const gw = await gateway('public-wrap', { wrapperHelloMs: 400 });
+  const K = fakeKit(P + 20);
+  await K.up();
+  const page = '<!doctype html><p>hi';
+  const tree = 'a'.repeat(40);
+  const state = path.join(gw.dir, 'state.json');
+  try {
+    assert.equal((await gw.claim(authenticator())).status, 200);
+    seedPublic(gw.dir, 'alpha', 'hello', { 'index.html': page, 'app.js': 'x()' }, { root: '/srv/alpha', port: P + 20 });
+    const s = JSON.parse(fs.readFileSync(state, 'utf8'));
+    s.public.alpha.artifacts.hello.title = 'A <b>mock</b>';
+    fs.writeFileSync(state, JSON.stringify(s));
+    const get = (route, headers = NAV, cookie = gw.jar()) => gw.req('GET', route, { on: 'public', cookie, headers });
+    const plain = (r, why) => {
+      assert.deepEqual([r.status, r.body, r.headers['cache-control'], r.headers.vary], [200, page, 'public, max-age=60', 'cookie'], why);
+      assert.match(r.headers['content-security-policy'], /; sandbox allow-scripts allow-forms allow-modals allow-pointer-lock$/, why);
+      assert.doesNotMatch(r.headers['content-security-policy'], /allow-same-origin/, why);
+    };
+    let r = await get('/alpha/hello/');
+    assert.equal(r.status, 200);
+    assert.notEqual(r.body, page, 'the wrapper, not the bytes');
+    assert.deepEqual([r.headers['cache-control'], r.headers.vary, r.headers['x-frame-options'], r.headers['referrer-policy'], r.headers['set-cookie']], ['no-store, private', 'cookie', 'DENY', 'no-referrer', undefined]);
+    assert.equal(r.headers['content-security-policy'], `default-src 'none'; style-src 'unsafe-inline'; frame-src ${gw.inst(P + 20)}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`, 'a policy of its own: no script, nothing to connect to');
+    assert.match(r.body, /sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads"/);
+    assert.doesNotMatch(r.body, /allow-popups-to-escape-sandbox|allow-top-navigation/, 'its frame can neither navigate this tab nor open a window outside its sandbox');
+    assert.ok(r.body.includes(`<iframe src="${gw.inst(P + 20)}/view/artifact/hello?at=tree:${tree}"`), r.body);
+    assert.match(r.body, /<a href="\?plain">Open it as the public sees it<\/a>/);
+    assert.match(r.body, /Public · alpha\/hello/);
+    assert.ok(r.body.includes('A &#60;b&#62;mock') && !r.body.includes('<b>mock'), 'the title is escaped');
+    assert.doesNotMatch(r.body, /<script/i, 'no script of its own');
+    const asked = K.seen.filter((x) => x.url === '/api/hello');
+    assert.equal(asked.length, 1, 'the wrapper asked the bound instance who it is');
+    assert.deepEqual([asked[0].h.host, asked[0].h.cookie, asked[0].h['sec-fetch-site'], asked[0].h.origin], [`127.0.0.1:${P + 20}`, undefined, undefined, undefined], 'as a loopback client: nothing of the owner\'s goes with it');
+    assert.ok((await get('/alpha/hello/index.html')).body.includes('<iframe'), 'its index by name too');
+    // the plain bytes, with vary: cookie on the document
+    plain(await get('/alpha/hello/?plain'), '?plain');
+    plain(await get('/alpha/hello/', { ...NAV, 'sec-fetch-dest': 'iframe' }), 'a frame load');
+    plain(await get('/alpha/hello/', { accept: 'text/html' }), 'no fetch metadata: an old browser');
+    const hellos = () => K.seen.filter((x) => x.url === '/api/hello').length;
+    const before = hellos();
+    plain(await get('/alpha/hello/', NAV, ''), 'no cookie');
+    plain(await get('/alpha/hello/', NAV, `devteam_session=${'A'.repeat(43)}`), 'a cookie that is no session');
+    assert.equal(hellos(), before, 'without a session the instance is never asked: no anonymous visit reaches it');
+    // a signed-in owner arriving from a link elsewhere gets it too: nothing in it is readable to
+    // that site, its frame is sandboxed, and the frame's URL comes from the binding, not the query
+    r = await get('/alpha/hello/?at=main&slug=other', { ...NAV, 'sec-fetch-site': 'cross-site' });
+    assert.ok(r.body.includes(`<iframe src="${gw.inst(P + 20)}/view/artifact/hello?at=tree:${tree}"`), 'a cross-site visit: the wrapper, framing the published tree whatever the query says');
+    r = await gw.req('HEAD', '/alpha/hello/', { on: 'public', headers: NAV });
+    assert.deepEqual([r.status, r.body, r.headers.vary, r.headers['cache-control']], [200, '', 'cookie', 'public, max-age=60'], 'HEAD');
+    r = await get('/alpha/hello/app.js');
+    assert.deepEqual([r.body, r.headers.vary], ['x()', undefined], 'a file is never wrapped, and doesn\'t vary');
+    assert.equal((await get('/alpha/nope/')).status, 404, 'nothing published there: still 404');
+    // the instance decides whether threads can be had: a kit with viewers, at the bound checkout, now
+    K.hello = { devteam: 1, name: 'alpha', root: '/srv/alpha', port: P + 20 };
+    plain(await get('/alpha/hello/'), 'a kit without viewers');
+    K.hello = { devteam: 1, name: 'alpha', root: '/srv/other', port: P + 20, viewer: 1 };
+    plain(await get('/alpha/hello/'), 'another checkout on that port');
+    K.hello = null;
+    plain(await get('/alpha/hello/'), 'a hello cut off');
+    K.hello = 'slow';
+    const t0 = Date.now();
+    plain(await get('/alpha/hello/'), 'a hello that never comes');
+    assert.ok(Date.now() - t0 < 2000, `a slow instance costs at most its deadline (${Date.now() - t0} ms)`);
+    await K.close();
+    plain(await get('/alpha/hello/'), 'nothing on the port');
+    // a revalidation by the signed-in owner: still the plain path here, and it varies on the cookie
+    r = await get('/alpha/hello/', { ...NAV, 'if-none-match': `"${crypto.createHash('sha256').update(page).digest('hex')}"` });
+    assert.deepEqual([r.status, r.headers.vary], [304, 'cookie'], 'a 304 for the document varies on the cookie too');
+    seedPublic(gw.dir, 'beta', 'x', { 'index.html': page }, { root: '/srv/alpha', port: 1 });
+    plain(await get('/beta/x/'), 'a binding outside the block');
+    // a state file that can't be read: the owner gets what anyone gets
+    const kept = fs.readFileSync(state);
+    fs.writeFileSync(state, '{');
+    assert.deepEqual([(await get('/alpha/hello/')).status, (await get('/alpha/hello/', NAV, '')).status], [503, 503]);
+    fs.writeFileSync(state, kept);
+  } finally { await K.close().catch(() => {}); await gw.close(); }
 });
