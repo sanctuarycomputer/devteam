@@ -94,7 +94,8 @@ class Browser {
     if (m.method === 'Network.webSocketCreated') s.sockets.push({ url: m.params.url, requestId: m.params.requestId, status: null, frames: [] });
     if (m.method === 'Network.webSocketHandshakeResponseReceived') { const w = s.sockets.find((x) => x.requestId === m.params.requestId); if (w) w.status = m.params.response.status; }
     if (m.method === 'Network.webSocketFrameReceived') { const w = s.sockets.find((x) => x.requestId === m.params.requestId); if (w) w.frames.push(m.params.response.payloadData); }
-    if (m.method === 'Network.requestWillBeSent') s.requests.push(m.params.request.url);
+    if (m.method === 'Network.requestWillBeSent') { s.requests.push(m.params.request.url); s.urls.set(m.params.requestId, m.params.request.url); }
+    if (m.method === 'Network.loadingFailed') s.failed.push({ url: s.urls.get(m.params.requestId), blockedReason: m.params.blockedReason ?? null, errorText: m.params.errorText });
     if (m.method === 'Network.loadingFinished') s.bytes += m.params.encodedDataLength;
     if (m.method === 'Page.frameNavigated' && !m.params.frame.parentId) { s.url = m.params.frame.url; s.navigations += 1; }
     // each frame's page's own world, for evalMain
@@ -104,7 +105,7 @@ class Browser {
     return undefined;
   }
   async attached({ sessionId, targetInfo, waitingForDebugger }) {
-    const s = { sessionId, targetId: targetInfo.targetId, type: targetInfo.type, url: targetInfo.url, sockets: [], requests: [], navigations: 0, bytes: 0, worlds: new Map() };
+    const s = { sessionId, targetId: targetInfo.targetId, type: targetInfo.type, url: targetInfo.url, sockets: [], requests: [], urls: new Map(), failed: [], navigations: 0, bytes: 0, worlds: new Map() };
     this.sessions.set(sessionId, s);
     const c = this.cdp;
     if (['page', 'iframe'].includes(targetInfo.type)) {
@@ -174,7 +175,8 @@ class Browser {
       const tree = await this.treeOf(s);
       if (!tree) continue;
       const f = walk(tree.frameTree, []).find((x) => x.unreachableUrl && pred(x.unreachableUrl));
-      if (f) return f;
+      // why it failed: only a CSP / frame-ancestors block counts as a refusal, not any load failure
+      if (f) { const why = s.failed.find((x) => x.url === f.unreachableUrl); return why && why.blockedReason !== 'csp' && !/frame-ancestors/i.test(why.blockedReason ?? '') ? null : f; }
     }
     return null;
   }
@@ -765,7 +767,7 @@ async function kitViewers({ G, DASH, tab, goal }) {
     const before = new Set(browser.pages().map((s) => s.targetId));
     const handle = await open();
     const p = await until(() => browser.pages().find((s) => !before.has(s.targetId) && (s.url ?? '').startsWith(`${inst}/`)), `the new tab (${what})`);
-    const opener = await until(async () => { const r = await browser.evalFrame({ session: p, frameId: (await browser.cdp.send('Page.getFrameTree', {}, p.sessionId)).frameTree.frame.id }, `document.readyState !== 'loading' && String(window.opener === null)`); return r || null; }, `the new tab to load (${what})`);
+    const opener = await until(async () => { const tree = await browser.treeOf(p); if (!tree) return null; const r = await browser.evalFrame({ session: p, frameId: tree.frameTree.frame.id }, `document.readyState !== 'loading' && String(window.opener === null)`); return r || null; }, `the new tab to load (${what})`);
     await browser.cdp.send('Target.closeTarget', { targetId: p.targetId });
     await browser.cdp.send('Page.bringToFront', {}, tab.sessionId).catch(() => {});
     assert.equal(opener, 'true', `${what}: window.opener in the new tab`);
