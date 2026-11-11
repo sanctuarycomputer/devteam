@@ -273,7 +273,8 @@ export function previewLinks(list, ports, ownPort, ttydPort = 7681) {
 // expressions read as written, and so it may hold no backtick and no dollar sign before a brace.
 export const PREVIEW_LENS = String.raw`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Preview</title><style>html,body{margin:0;height:100%;overflow:hidden;background:#fff}iframe{display:block;border:0;width:100%;height:100%}</style></head>
-<body><iframe id="app" title="The app" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-pointer-lock allow-downloads"></iframe><script>
+<body><!-- The sandbox is advisory: the same-origin app can lift it. frame-src 'self' is what keeps the app's frame on its own origin. -->
+<iframe id="app" title="The app" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-pointer-lock allow-downloads"></iframe><script>
 (() => {
   'use strict';
   // devteam's preview lens. It is on the app's own origin, so it can read the app's page. It frames
@@ -326,7 +327,7 @@ export const PREVIEW_LENS = String.raw`<!doctype html>
     for (const [n, ok] of [['data-testid', true], ['name', /^(input|select|textarea|button|form)$/.test(tag)], ['aria-label', true]]) {
       const v = el.getAttribute(n);
       const sel = v ? tag + '[' + n + '=' + quoted(v) + ']' : '';
-      if (ok && v && size(v) <= 100 && only(doc, sel)) return sel;
+      if (ok && v && size(sel) <= CAPS.selector && only(doc, sel)) return sel;
     }
     const steps = [];
     for (let e = el; e && e.nodeType === 1 && e !== doc.documentElement && steps.length < 6; e = e.parentElement) {
@@ -495,6 +496,7 @@ export const PREVIEW_LENS = String.raw`<!doctype html>
     go: (m) => { const r = safeRoute(m.route); if (r) frame.src = r; },
   };
   addEventListener('message', (e) => {
+    if (!e.isTrusted) return;
     if (e.source !== parent || parent === window) return;
     if (e.origin === location.origin || e.origin === 'null') return;
     const ancestors = location.ancestorOrigins;
@@ -826,6 +828,7 @@ export function createGateway(opts = {}) {
   // Who may hold a preview's lens, and so the app inside it: frame-ancestors is checked against every
   // ancestor, so the hub (which frames a dashboard) as well as each instance (whose viewer frames the lens).
   const LENS_ANCESTORS = [PUB, ...BLOCK.map(instanceOrigin)].join(' ');
+  const LENS_CSP = previewLensCsp(LENS_ANCESTORS);
   // Passkeys belong to the box's name. A page on an instance's subdomain may ask for one, but its
   // answer names that page's origin, and only an answer from the box's own origin is accepted.
   const RP_ID = NAME;
@@ -1793,9 +1796,14 @@ export function createGateway(opts = {}) {
       if (installed) return send(res, 200, installed.type, installed.body());
       const session = claimed ? sessionOf(req) : null;
       if (!session) {
-        if (navigating(req)) return redirect(res, claimed ? loginAt(`${own}${req.url}`) : loginAt());
+        // a lens open in a tab of its own is no use after sign-in: the preview itself is
+        const back = pv && p === '/.devteam/lens' ? `${own}/` : `${own}${req.url}`;
+        if (navigating(req)) return redirect(res, claimed ? loginAt(back) : loginAt());
         return send(res, claimed ? 401 : 403, 'text/plain; charset=utf-8', claimed ? 'sign in with your passkey' : 'this box is unclaimed');
       }
+      // A preview's lens: the gateway's own page, after the session check, never the app's (spec §7).
+      // Static, so it asks the hub nothing; any other method or path there is the app's, as before.
+      if (pv && req.method === 'GET' && p === '/.devteam/lens') return send(res, 200, 'text/html; charset=utf-8', PREVIEW_LENS, { 'content-security-policy': LENS_CSP, 'referrer-policy': 'no-referrer' });
       if (pv) return servePreview(req, res, pv, own);
       // An instance's dashboard, on its own subdomain: the request exactly as the browser sent it.
       if (port) {

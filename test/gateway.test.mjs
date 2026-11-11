@@ -2391,8 +2391,8 @@ function lensRun({ search = '', ancestor = 'http://4321.box.example' } = {}) {
   };
   win.window = win;
   vm.runInNewContext(script, win);
-  const hear = (data, { origin = ancestor ?? 'http://4321.box.example', source = parent } = {}) => { for (const f of listeners.message ?? []) f({ data, origin, source }); };
-  return { frame, posted, hear };
+  const hear = (data, { origin = ancestor ?? 'http://4321.box.example', source = parent, isTrusted = true } = {}) => { for (const f of listeners.message ?? []) f({ data, origin, source, isTrusted }); };
+  return { frame, posted, hear, win };
 }
 
 test('the preview lens: one script and one style, a policy of their hashes, and the kit\'s caps', () => {
@@ -2432,7 +2432,8 @@ test('the preview lens answers only the page that frames it, and takes the app o
   L.hear({ lens: 1, type: 'hit', id: { no: 1 }, x: 1, y: 1 });
   L.hear({ lens: 1, type: 'hit', id: 'h2', x: 'a', y: 1 });
   L.hear('hello');
-  assert.equal(L.posted.length, n, 'not its parent, the app\'s own origin, an opaque one, not the parent the browser names, not a lens message, not an order, a bad id or point: each ignored');
+  L.hear({ lens: 1, type: 'hello' }, { isTrusted: false });
+  assert.equal(L.posted.length, n, 'not its parent, the app\'s own origin, an opaque one, not the parent the browser names, not a lens message, not an order, a bad id or point, not an event a script made: each ignored');
   // a first message from an origin the browser doesn't name as the parent binds nothing and gets nothing
   L = lensRun();
   L.hear({ lens: 1, type: 'hello' }, { origin: 'http://4322.box.example' });
@@ -2454,4 +2455,51 @@ test('the preview lens answers only the page that frames it, and takes the app o
   }
   assert.equal(lensRun({ search: '?route=%2Fadmin%3Fx%3D1' }).frame.src, '/admin?x=1');
   for (const bad of ['?route=%2F%2Fevil.example', '?route=https%3A%2F%2Fevil.example', '?route=%2F.devteam%2Flens']) assert.equal(lensRun({ search: bad }).frame.src, '/', bad);
+});
+
+test('the preview lens names an element by an attribute only if the whole selector fits the cap', () => {
+  const L = lensRun();
+  const el = (tag, attrs) => ({ localName: tag, id: '', nodeType: 1, classList: [], parentElement: null, previousElementSibling: null, textContent: '', labels: [], getAttribute: (n) => attrs[n] ?? null, hasAttribute: (n) => n in attrs, getBoundingClientRect: () => ({ left: 0, top: 0, width: 1, height: 1 }), cloneNode() { return { appendChild() {}, outerHTML: `<${tag}>` }; }, childNodes: [] });
+  let target;
+  const doc = { documentElement: {}, body: {}, elementFromPoint: () => target, querySelectorAll: () => [1], getElementById: () => null };
+  L.frame.contentWindow = { document: doc, location: { href: 'http://cool-tiger.box.example/', origin: 'http://cool-tiger.box.example', pathname: '/', search: '', hash: '' } };
+  const pick = (tag, value) => { target = el(tag, { 'data-testid': value }); L.hear({ lens: 1, type: 'hit', id: 'h', x: 1, y: 1 }); return L.posted.at(-1).m.anchor.selector; };
+  assert.equal(pick('button', 'x'.repeat(100)), `button[data-testid="${'x'.repeat(100)}"]`, 'a short tag and a 100-byte value fit');
+  const long = 'x-' + 'a'.repeat(100);
+  const sel = pick(long, 'x'.repeat(100));
+  assert.doesNotMatch(sel, /data-testid/, 'a long custom tag with a 100-byte value is over the cap: the path, not the attribute');
+  assert.ok(Buffer.byteLength(sel) <= 200);
+});
+
+test('/.devteam/lens on a preview\'s name: the gateway\'s own page, for the owner only, never the app\'s', async () => {
+  const S = await previewSetup('preview-lens');
+  const { gw, hub, instance, req } = S;
+  const seen = [];
+  const devPort = await freePort();
+  const dev = http.createServer((q, s) => { seen.push(`${q.method} ${q.url}`); s.end('app'); });
+  await new Promise((r) => dev.listen(devPort, '127.0.0.1', r));
+  const ancestors = [gw.publicUrl, ...Array.from({ length: 25 }, (_, i) => gw.inst(P + i))].join(' ');
+  const framed = { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-site', 'sec-fetch-mode': 'navigate' };
+  try {
+    hub.list = [instance('/srv/alpha', P, [previewRow('cool-tiger', devPort)])];
+    let r = await req('cool-tiger', 'GET', '/.devteam/lens', { cookie: '', headers: NAV });
+    assert.equal(r.status, 302);
+    assert.equal(r.headers.location, `${gw.auth}/auth/login?next=${encodeURIComponent(`${S.origin('cool-tiger')}/`)}`, 'no session: sign-in, then back to the preview itself, not to a lens on its own');
+    assert.equal((await req('cool-tiger', 'GET', '/.devteam/lens', { cookie: '', headers: { 'sec-fetch-mode': 'cors' } })).status, 401);
+    r = await req('cool-tiger', 'GET', '/.devteam/lens?route=%2Fcheckout', { headers: framed });
+    assert.equal(r.status, 200, r.body);
+    assert.equal(r.body, G.PREVIEW_LENS);
+    assert.deepEqual([r.headers['content-type'], r.headers['content-security-policy'], r.headers['cache-control'], r.headers['referrer-policy'], r.headers['x-frame-options']], ['text/html; charset=utf-8', G.previewLensCsp(ancestors), 'no-store', 'no-referrer', undefined]);
+    assert.equal((await req('cool-tiger', 'GET', '/.devteam/lens', { headers: { ...framed, 'sec-fetch-site': 'cross-site' } })).status, 403, 'another site\'s frame is refused, as the app\'s would be');
+    const hits = hub.hits;
+    assert.equal((await req('calm-otter', 'GET', '/.devteam/lens', { headers: framed })).body, G.PREVIEW_LENS, 'the same page on any preview\'s name');
+    assert.equal(hub.hits, hits, 'and serving it asks the hub nothing');
+    assert.deepEqual(seen, [], 'the app saw none of it');
+    // anything else at that path is the app's, as before
+    await req('cool-tiger', 'POST', '/.devteam/lens', { headers: { origin: S.origin('cool-tiger') }, body: {} });
+    await req('cool-tiger', 'GET', '/.devteam/lens/x');
+    await req('cool-tiger', 'GET', '/.devteam/lensx');
+    await req('cool-tiger', 'HEAD', '/.devteam/lens');
+    assert.deepEqual(seen, ['POST /.devteam/lens', 'GET /.devteam/lens/x', 'GET /.devteam/lensx', 'HEAD /.devteam/lens']);
+  } finally { await S.close(); dev.close(); }
 });
