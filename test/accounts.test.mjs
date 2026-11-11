@@ -334,7 +334,7 @@ test('a stopped supervisor: reported, in tmux or not, with or without cswap, and
     // in tmux, with room, but its resume_command isn't Claude Code's: reported, not restarted (recovery.test.mjs has the restart)
     const s = F.agent('sup-pane', MENU, F.root);
     await until(() => s.shows().includes('Esc to cancel'), 'the menu');
-    write(path.join(F.root, 'docs/devteam/run/supervisor-pane'), `=${F.session}:sup-pane`);
+    for (const n of ['supervisor-pane', 'supervisor-pane-role']) write(path.join(F.root, 'docs/devteam/run', n), `=${F.session}:sup-pane`);
     fs.appendFileSync(file, `${JSON.stringify(rl)}\n`);
     F.tick();
     F.tick();
@@ -707,7 +707,7 @@ test("the supervisor's own pane: a lost Enter is pressed once, never into a prom
     const pane = (shown) => {
       spawnSync('tmux', ['kill-window', '-t', `=${F.session}:sup-enter`]);
       const s = F.agent('sup-enter', shown, F.root);
-      write(path.join(F.root, 'docs/devteam/run/supervisor-pane'), `=${F.session}:sup-enter`);
+      for (const n of ['supervisor-pane', 'supervisor-pane-role']) write(path.join(F.root, 'docs/devteam/run', n), `=${F.session}:sup-enter`);
       return s;
     };
     // the incident: compacted while idle, an owner's answer typed in and its Enter lost

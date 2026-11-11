@@ -283,7 +283,7 @@ const runDir = path.resolve(process.env.DEVTEAM_RUN ?? path.join(mainRoot, 'docs
 // What run/ holds that the kit made and rebuilds (or that is this machine's alone by nature);
 // anything else in it was put there by hand and doesn't move. A writer names its file through
 // runPath where it defines the path, so the list can't fall behind the files.
-const RUN_KNOWN = new Set(['log', 'prompts', 'questions', 'sent', 'cache', 'agent', 'pr', 'supervisor-pane', 'wait-since', 'tmux-session', 'dashboard-port', 'dashboard.log', 'supervisor-prompt.txt', 'previews', '.DS_Store']);
+const RUN_KNOWN = new Set(['log', 'prompts', 'questions', 'sent', 'cache', 'agent', 'pr', 'supervisor-pane', 'supervisor-pane-role', 'wait-since', 'tmux-session', 'dashboard-port', 'dashboard.log', 'supervisor-prompt.txt', 'previews', '.DS_Store']);
 const runPath = (name) => { RUN_KNOWN.add(name); return path.join(runDir, name); };
 // Where this machine's checkouts of repo links are, when not where settings say.
 const LINKS_LOCAL = runPath('links.local.json');
@@ -1148,7 +1148,11 @@ function logWriter() {
 function ownerWriter(hint) {
   if (process.env.DEVTEAM_ROLE) die(`owner commands don't run in an agent session (DEVTEAM_ROLE=${process.env.DEVTEAM_ROLE})`);
   const pane = process.env.TMUX_PANE;
-  if (pane && process.env.TMUX && [process.env.DEVTEAM_SUPERVISOR, readText(supervisorPaneFile())?.trim()].includes(pane)) die(`this is the supervisor's session${hint ? `: ${hint}` : ''}; the owner's commands run in their own terminal or on the dashboard`);
+  if (!pane || !process.env.TMUX) return { by: 'owner' };
+  const how = process.env.DEVTEAM_SUPERVISOR === pane ? 'DEVTEAM_SUPERVISOR in this environment names this pane as the supervisor\'s; if this is your own terminal, start it without that'
+    : markedPane(runDir) === pane ? `this pane was recorded as the supervisor's by a command it ran as the supervisor; it is the supervisor's if its agent runs here. If this is your own terminal, delete ${path.relative(mainRoot, supervisorPaneMark(runDir))}: the supervisor records its own pane again with its next command`
+    : null;
+  if (how) die(`this is the supervisor's session${hint ? `: ${hint}` : ''}; the owner's commands run in their own terminal or on the dashboard. (${how}.)`);
   return { by: 'owner' };
 }
 const ownerChannel = () => (process.env.DEVTEAM_CHANNEL === 'dashboard' ? 'dashboard' : 'cli');
@@ -1161,15 +1165,31 @@ const supervisorOnly = (what) => {
 // recorded so workers' messages and the owner's answers can be typed into it; otherwise they wait
 // in the log for its next tick.
 const supervisorPaneFile = () => path.join(runDir, 'supervisor-pane');
+// supervisor-pane keeps the bare pane id, as older kits and the box's up-list read it, so its form
+// never changes. supervisor-pane-role, beside it, holds the same id and is written only with a record
+// made for the supervisor (rememberSupervisorPane, recover). A pane counts only when the two agree:
+// an older kit took a role-less command's pane, perhaps the owner's own, and that bare record reads
+// as no pane here, in this repo and in any other (machine status and tell), so nothing is typed into
+// it and ownerWriter doesn't refuse the owner there. The cost: a supervisor on an older kit has no
+// pane this kit uses until its kit is upgraded and it runs a command as the supervisor.
+const supervisorPaneMark = (run) => path.join(run, 'supervisor-pane-role');
+function markedPane(run) {
+  const p = readText(path.join(run, 'supervisor-pane'))?.trim();
+  return p && readText(supervisorPaneMark(run))?.trim() === p ? p : null;
+}
+function recordSupervisorPane(run, pane) {
+  fs.mkdirSync(run, { recursive: true });
+  fs.writeFileSync(path.join(run, 'supervisor-pane'), pane);
+  fs.writeFileSync(supervisorPaneMark(run), pane);
+}
 // Only a command run as the supervisor (DEVTEAM_ROLE=supervisor, as recover and the README start it)
 // records its pane. A role-less command is the supervisor's too (supervisorOnly), but the owner's own
 // terminal runs role-less, and taking its pane would have ownerWriter refuse the owner there.
 function rememberSupervisorPane() {
   const pane = process.env.TMUX_PANE;
   if (!pane || !process.env.TMUX || process.env.DEVTEAM_ROLE !== 'supervisor') return;
-  if (readText(supervisorPaneFile()) === pane) return;
-  fs.mkdirSync(runDir, { recursive: true });
-  fs.writeFileSync(supervisorPaneFile(), pane);
+  if (markedPane(runDir) === pane) return;
+  recordSupervisorPane(runDir, pane);
 }
 
 function withLock(file, fn, { staleMs = 10000, waitMs = 15000 } = {}) {
@@ -10062,7 +10082,7 @@ const tmuxServerPid = () => sh('tmux', ['list-sessions', '-F', '#{pid}'])?.split
 const SUPERVISOR_NOT_WINDOW = /^(dev~|dash-|dashboard$|operator$)/;
 // What an agent's process is called in tmux: Claude Code shows as its version (2.1.307).
 const AGENT_PANE_CMD = /claude|node|codex|opencode|bun|^\d+\.\d+/;
-function supervisorPaneNow(rec = supervisorUpRecord(), opts = {}) { return supervisorPaneIn(mainRoot, readText(supervisorPaneFile())?.trim() || null, rec, opts); }
+function supervisorPaneNow(rec = supervisorUpRecord(), opts = {}) { return supervisorPaneIn(mainRoot, markedPane(runDir), rec, opts); }
 // Any repo's, for the machine's commands: its root, the pane it noted, its supervisor-up record.
 // strict, for typing into it: started at the root whatever the record says, and never a window
 // named shell (the owner's).
@@ -10229,7 +10249,7 @@ function recoverOne() {
   else if (sessionFlag) return notStarted(`NOT started (no tmux session ${sessionFlag})`);
   else pane = sh('tmux', ['new-session', '-d', '-P', '-F', '#{pane_id}', '-s', session, '-n', window, '-c', mainRoot], { env: tmuxServerEnv() });
   if (!pane) return notStarted('NOT started (tmux would not open its window)');
-  fs.writeFileSync(supervisorPaneFile(), pane);
+  recordSupervisorPane(runDir, pane);
   if (!typeInto(pane, line)) return notStarted(`NOT started (its window opened but could not be typed into: pane ${pane})`);
   writeSupervisorUp({ up: true, kind: 'tmux', pane, server: tmuxServerPid(), machine, skip: !dropFlag && cmd.includes(SKIP_PERMISSIONS), starting: Date.now() });
   return { say: `${didHow}${rec?.kind === 'foreground' ? ' in tmux, where it ran in a terminal before' : ''}${tail}` };
@@ -10382,6 +10402,7 @@ function legacyRecover(root, name, { dry, force, session, window }) {
   const run = path.join(root, 'docs', 'devteam', 'run');
   const paneFile = path.join(run, 'supervisor-pane');
   const go = () => {
+    // bare, as that kit writes it: only to see whether its supervisor is up, never to type into it
     const noted = readText(paneFile)?.trim() || null;
     if (supervisorPaneIn(root, noted, null)) return 'already running';
     // A window this opened moments ago is still a shell until the agent execs. Only if that pane
@@ -10417,7 +10438,7 @@ function legacyRecover(root, name, { dry, force, session, window }) {
     fs.writeFileSync(promptFile, `${msg}\n`);
     const pane = sh('tmux', ['new-window', '-dP', '-F', '#{pane_id}', '-t', `=${session}:`, '-n', window, '-c', root]);
     if (!pane) return 'NOT started (tmux would not open its window)';
-    fs.writeFileSync(paneFile, pane);
+    recordSupervisorPane(run, pane);
     // by pane id: a dot in a window name reads as a pane to tmux
     if (!tmux(['send-keys', '-t', pane, '-l', `export DEVTEAM_ROLE=supervisor; ${sessionMarkerPrefix(session)}${cmd} "$(cat '${promptFile}')"`]) || !tmux(['send-keys', '-t', pane, 'Enter'])) return `NOT started (its window opened but could not be typed into: pane ${pane})`;
     return `${id ? `resumed session ${id}` : 'started fresh'}${missing.length ? ` (asked to get: ${missing.join(' ')})` : ''}`;
@@ -10511,7 +10532,7 @@ function machineTell(words) {
   if (!text) die(machineUsage, 2);
   let rec = null;
   try { rec = readJson(path.join(root, 'docs', 'devteam', 'run', 'supervisor-up.json')); } catch {}
-  const p = supervisorPaneIn(root, readText(path.join(root, 'docs', 'devteam', 'run', 'supervisor-pane'))?.trim() || null, rec && typeof rec === 'object' ? rec : null, { strict: true });
+  const p = supervisorPaneIn(root, markedPane(path.join(root, 'docs', 'devteam', 'run')), rec && typeof rec === 'object' ? rec : null, { strict: true });
   if (!p || p === process.env.TMUX_PANE) return say('not told: no supervisor is up in its root', 3);
   const s = paneState(p);
   if (!['ready', 'busy'].includes(s)) return say(`not told: its pane is at ${s}`, 3);
@@ -10640,7 +10661,7 @@ async function machineStatus() {
     let rec = null;
     try { rec = readJson(runAt('supervisor-up.json')); } catch {}
     if (!rec || typeof rec !== 'object') rec = null;
-    const noted = readText(runAt('supervisor-pane'))?.trim() || null;
+    const noted = markedPane(runAt(''));
     const sup = supervisorPaneIn(root, noted, rec) ? 'up' : 'down';
     const p = supervisorPaneIn(root, noted, rec, { strict: true });
     const kit = typeof hello.kit === 'string' ? hello.kit : '?';
@@ -11290,7 +11311,7 @@ function tmuxServerEnv() {
 }
 // The session:window running this command. TMUX_PANE pins it to our own pane.
 const tmuxHere = () => (process.env.TMUX && process.env.TMUX_PANE ? sh('tmux', ['display-message', '-p', '-t', process.env.TMUX_PANE, '#S:#W']) : null);
-const supervisorTarget = () => process.env.DEVTEAM_SUPERVISOR ?? readText(supervisorPaneFile())?.trim() ?? null;
+const supervisorTarget = () => process.env.DEVTEAM_SUPERVISOR ?? markedPane(runDir);
 const SHELLS = new Set(['bash', 'zsh', 'sh', 'fish', 'dash', 'ksh', 'tcsh', 'csh', 'login']);
 // Resolve a session:window exactly and check an agent, not a bare shell, is running there (typing
 // into a shell would execute the text).

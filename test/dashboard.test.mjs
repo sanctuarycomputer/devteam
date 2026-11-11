@@ -617,7 +617,7 @@ test("threads on the dashboard's server: owner actions checked before anything r
   // a supervisor with a pane: said within the 10 s the answer is kept
   if (hasTmux) {
     const pane = F.standIn();
-    fs.writeFileSync(path.join(F.old, 'docs/devteam/run/supervisor-pane'), pane.target);
+    for (const n of ['supervisor-pane', 'supervisor-pane-role']) fs.writeFileSync(path.join(F.old, 'docs/devteam/run', n), pane.target);
     await until(async () => (await (await get()).json()).supervisor.pane === true, 'the pane seen');
   }
   // after a move run/log is empty until each file's next write: the checkout's project/log copy counts
@@ -635,7 +635,7 @@ test("a dashboard started in the supervisor's pane: its actions are still the ow
   t.after(() => F.done());
   // the supervisor's pane as its own commands record it, and the dashboard started there
   const IN_PANE = { TMUX: 'x', TMUX_PANE: '%4242' };
-  fs.writeFileSync(path.join(F.old, 'docs/devteam/run/supervisor-pane'), '%4242');
+  for (const n of ['supervisor-pane', 'supervisor-pane-role']) fs.writeFileSync(path.join(F.old, 'docs/devteam/run', n), '%4242');
   const T = F.owner(['thread', 'new', 'Narrow this to the EU launch']).split('\n')[0];
   assert.match(F.fails(['thread', 'say', T, 'from the pane'], IN_PANE), /this is the supervisor's session: reply with thread reply/);
   const port = await freePort();

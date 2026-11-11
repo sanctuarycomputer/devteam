@@ -453,6 +453,7 @@ test('a repo on a kit from before recover comes back from the box\'s list, the w
       assert.match(claudeCalls(r)[0], new RegExp(`^supervisor\\|--resume ${SID} --dangerously-skip-permissions The box restarted`), 'its own resume_command, on its own conversation, as the supervisor');
       assert.match(claudeCalls(r)[0], /Nothing about this restart came from the owner/);
       assert.match(fs.readFileSync(path.join(r, 'docs/devteam/run/supervisor-pane'), 'utf8'), /^%\d+$/);
+      assert.equal(fs.readFileSync(path.join(r, 'docs/devteam/run/supervisor-pane-role'), 'utf8'), fs.readFileSync(path.join(r, 'docs/devteam/run/supervisor-pane'), 'utf8'), 'marked as made for the supervisor, for this kit; its own kit reads the bare one');
     }
     assert.match(fs.readFileSync(path.join(old['v0.25.0'], 'docs/devteam/run/supervisor-prompt.txt'), 'utf8'), /missing: config\/master\.key.*Inbox.*--secrets.*file:<path>/s);
     assert.match(claudeCalls(fresh)[0], /^supervisor\|--dangerously-skip-permissions .*supervisor/, 'its agent_command, with its own kit\'s prompt');

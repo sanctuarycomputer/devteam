@@ -193,18 +193,31 @@ test('threads: records, commands, delivery, the Inbox and the loop', async (t) =
     const paneFile = path.join(F.old, 'docs/devteam/run/supervisor-pane');
     const IN_PANE = { TMUX: 'x', TMUX_PANE: '%4242' };
     const OWN = { TMUX: 'x', TMUX_PANE: '%7' };
+    const markFile = path.join(F.old, 'docs/devteam/run/supervisor-pane-role');
+    const noted = (file = paneFile) => (fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null);
+    const target = (env) => F.owner(['whoami'], env).match(/^DEVTEAM_SUPERVISOR=(.*)$/m)[1];
     try {
       // a role-less command is the supervisor's, but it claims no pane: the owner's own terminal is role-less too
       F.owner(['thread', 'reply', T, 'Role-less, in a pane'], OWN);
-      assert.ok(!fs.existsSync(paneFile), 'a role-less command records no pane');
+      assert.notEqual(noted(), '%7', 'a role-less command records no pane');
       F.owner(['thread', 'say', T, 'still my own terminal'], OWN);
       assert.equal(show(T).turns.at(-1).by, 'owner', "and the owner's commands there still work");
+      // an older kit's record, made the old way by a role-less command in the owner's own pane, is no pane:
+      // the owner isn't refused there, and nothing is typed into it
+      fs.writeFileSync(paneFile, '%7');
+      assert.equal(target(OWN), '', 'no nudge or owner turn goes to the bare record');
+      F.owner(['thread', 'say', T, 'mine, in a pane an older kit took'], OWN);
+      assert.equal(show(T).turns.at(-1).by, 'owner', "written, as the owner's");
+      assert.equal(noted(), '%7', 'and the owner left it as it was');
       F.sup(['thread', 'reply', T, 'From my pane'], IN_PANE);
-      assert.equal(fs.readFileSync(paneFile, 'utf8'), '%4242', "the supervisor's reply, by its role, recorded its pane");
+      assert.deepEqual([noted(), noted(markFile)], ['%4242', '%4242'], "the supervisor's reply, by its role, recorded its pane, marked as made for it");
+      assert.equal(target(OWN), '%4242', 'where nudges and owner turns now go');
       const n = show(T).turns.length;
       for (const args of [['thread', 'say', T, 'x'], ['thread', 'new', 'x'], ['thread', 'resolve', T], ['thread', 'reopen', T]]) assert.match(F.fails(args, IN_PANE), /this is the supervisor's session: reply with thread reply/, args.join(' '));
       // every owner command, not only a thread's: the supervisor never writes as the owner from its pane
       assert.match(F.fails(['answer', 'q-20261110-100000000-supervisor', 'yes'], IN_PANE), /this is the supervisor's session; the owner's commands run in their own terminal or on the dashboard/);
+      // and it says how to tell, and how to clear a wrong record
+      assert.match(F.fails(['thread', 'say', T, 'x'], IN_PANE), /it is the supervisor's if its agent runs here\. If this is your own terminal, delete docs\/devteam\/run\/supervisor-pane-role: the supervisor records its own pane again with its next command/);
       assert.equal(show(T).turns.length, n, 'nothing written');
       assert.equal(show(T).status, 'open');
       // the owner's own terminal, in another pane, is the owner's
@@ -212,8 +225,8 @@ test('threads: records, commands, delivery, the Inbox and the loop', async (t) =
       assert.equal(show(T).turns.at(-1).by, 'owner');
       // and a role-less command there afterwards doesn't take the pane from the supervisor
       F.owner(['thread', 'reply', T, 'Role-less again'], OWN);
-      assert.equal(fs.readFileSync(paneFile, 'utf8'), '%4242');
-    } finally { fs.rmSync(paneFile, { force: true }); }
+      assert.deepEqual([noted(), noted(markFile)], ['%4242', '%4242']);
+    } finally { fs.rmSync(paneFile, { force: true }); fs.rmSync(markFile, { force: true }); }
     // a reply at the encoded cap fits alone; with eight long links its line would not, and is refused in words
     const longRefs = Array.from({ length: 8 }, (_, i) => `act:a-${i}${'x'.repeat(110)}`);
     const before7 = show(T).turns.length;

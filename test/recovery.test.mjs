@@ -306,7 +306,7 @@ const AS_SUPERVISOR = 'env DEVTEAM_ROLE=supervisor ';
 const SKIP = ' --dangerously-skip-permissions';
 const supervisorPane = (F, shown = MENU, { cwd = F.root, prefix = AS_SUPERVISOR, args = '', shell = false } = {}) => {
   const pane = F.agent('sup-pane', shown, cwd, { prefix, args, shell });
-  write(path.join(F.root, 'docs/devteam/run/supervisor-pane'), `=${F.session}:sup-pane`);
+  for (const n of ['supervisor-pane', 'supervisor-pane-role']) write(path.join(F.root, 'docs/devteam/run', n), `=${F.session}:sup-pane`);
   return pane;
 };
 const withCswap = (F) => ({ DEVTEAM_CSWAP: F.cswap });
@@ -626,6 +626,9 @@ test('recover: a dead machine with no tmux server brings the supervisor back on 
     const did = recover(F, [], server.env);
     assert.equal(did.status, 0, did.stderr);
     assert.match(did.stdout, new RegExp(`^resumed session ${SID}`));
+    const noted = ['supervisor-pane', 'supervisor-pane-role'].map((n) => fs.readFileSync(path.join(F.root, 'docs/devteam/run', n), 'utf8'));
+    assert.match(noted[0], /^%\d+$/);
+    assert.equal(noted[1], noted[0], 'recorded for the supervisor, marked as made for it');
     await until(() => F.claudeCalls().length === 1, 'the stand-in claude ran');
     assert.ok(F.claudeCalls()[0].startsWith(`supervisor|--resume ${SID} --dangerously-skip-permissions This machine restarted`), F.claudeCalls()[0]);
     assert.match(F.claudeCalls()[0], /Nothing about this restart came from the owner/, 'it carries no owner authority');
