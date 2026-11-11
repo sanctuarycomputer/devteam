@@ -7193,7 +7193,7 @@ function cmdRepair() {
 const OODA = SCHEMA['x-ooda'];
 // observe, learn, decide, act, orient, measurement or inbox; null for the work graph and conversation.
 // An act is always Act, whether or not a decision stands behind it.
-const stageOf = (o) => { const s = OODA.stages[o?.type]; return !s ? null : typeof s === 'string' ? s : s.kind[o.kind] ?? s.kind['*']; };
+const stageOf = (o) => { const s = Object.hasOwn(OODA.stages, o?.type ?? '') ? OODA.stages[o.type] : null; return !s ? null : typeof s === 'string' ? s : Object.hasOwn(s.kind, o.kind ?? '') ? s.kind[o.kind] : s.kind['*']; };
 // The sources each writer may name for itself (observe --source); sensor, metrics and spend are the
 // kit's own, read off its own lines, never given. The supervisor records what the owner said (an
 // answer, a thread, the chat), but never speaks as the owner.
@@ -7559,7 +7559,6 @@ function cmdOrient() {
   if (flags.json) return json([...cl, ...lk]);
   if (!cl.length && !lk.length) return out('nothing recurring that is unexplained');
   for (const c of cl) out(`${c.key}  x${c.count}  valence ${c.valence}\n  latest: ${c.latest}\n  evidence: ${c.ids.join(' ')}`);
-  if (cl.length) out('  (explain one: knowledge add … --evidence <ids>, a problem citing them, or rule it noise: decide --class orient-noise --refs <key> <ids> -- "<why>")');
   if (lk.length) { out('link proposals:'); for (const p of lk) out(p.note ? `  ${p.note}` : `  ${p.proposal} (${p.observation})${p.proposed_by ? `, proposed by ${p.proposed_by}; check before adding` : ''}: ${p.command}`); out('  (dismiss one: decide --class registry-edit --refs <observation> -- "<why the registry stays as it is>")'); }
 }
 
