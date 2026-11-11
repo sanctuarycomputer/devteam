@@ -311,6 +311,8 @@ const POLL_FAST = `(() => {
   window.fetch = async (u, o) => {
     if (String(u).startsWith('/api/data')) { window.__polls++; if (window.__gate) await window.__gate; return rf(u, o); }
     if (String(u).startsWith('/api/answer') && window.__answerHold) await window.__answerHold;
+    // every owner action held on the wire, as a slow server would hold it
+    if (o?.method === 'POST' && String(u).startsWith('/api/') && window.__postHold) await window.__postHold;
     // a test can let the next /api/threads read through but hold its answer back: read now, landing later
     // and can slow every /api/threads answer, as a loaded box would
     if (String(u).startsWith('/api/threads') && window.__threadsDelay) await new Promise((r) => setTimeout(r, window.__threadsDelay));
@@ -318,6 +320,105 @@ const POLL_FAST = `(() => {
     return rf(u, o);
   };
 })()`;
+
+// Every press draws its result before the server has it, and a refusal puts back what was there.
+// The posts are held on the wire (__postHold), so each check is of what the page drew while the
+// server hadn't answered, never a stopwatch.
+test('presses: the page answers before the server, and a refusal puts it back', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-press-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }));
+  const env = { ...process.env, DEVTEAM_HUB_PORT: String(PORTS + 90), DEVTEAM_PORT_BASE: String(PORTS + 91), CLAUDE_CONFIG_DIR: path.join(base, 'claude'), CODEX_HOME: path.join(base, 'codex') };
+  for (const k of ['DEVTEAM_ROLE', 'DEVTEAM_TICKET', 'DEVTEAM_FEATURE', 'DEVTEAM_RUN', 'DEVTEAM_SUPERVISOR', 'TMUX', 'TMUX_PANE']) delete env[k];
+  const root = bareProject(base, 'press');
+  const dt = (args, role = {}) => { const r = spawnSync(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), ...args], { cwd: root, env: { ...env, ...role }, encoding: 'utf8' }); assert.equal(r.status, 0, r.stderr); return r.stdout.trim(); };
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  const Q1 = dt(['ask', '--question', 'Which way?', '--choices', '[{"label":"Left"},{"label":"Right"}]'], SUP);
+  const Q2 = dt(['ask', '--question', 'Ship it?', '--choices', '[{"label":"Yes"},{"label":"No"}]'], SUP);
+  const K = dt(['knowledge', 'add', '--kind', 'fact', '--statement', 'The build uses make'], SUP);
+  const port = await freePort();
+  const dash = startDashboard(root, env, ['--port', String(port)]);
+  t.after(() => dash.stop());
+  const chrome = await openChrome();
+  t.after(() => chrome.close());
+  const p = await chrome.newPage();
+  t.after(() => p.close());
+  await until(() => /dashboard on http/.test(dash.out()), 'the dashboard');
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  await p.send('Emulation.setDeviceMetricsOverride', { width: 1100, height: 800, deviceScaleFactor: 1, mobile: false });
+  await p.send('Page.addScriptToEvaluateOnNewDocument', { source: POLL_FAST });
+  await p.send('Page.navigate', { url: `http://127.0.0.1:${port}/#questions` });
+  const soon = async (expr, what) => { for (let i = 0; i < 300; i++) { const v = await p.ev(expr); if (v) return v; await new Promise((r) => setTimeout(r, 50)); } assert.fail(`timed out: ${what}`); };
+  const polls = async (n = 2) => { const at = await p.ev('window.__polls'); await soon(`window.__polls >= ${at + n}`, `${n} polls`); };
+  const hold = () => p.ev('void (window.__postHold = new Promise((r) => { window.__let = r; }))');
+  const letGo = () => p.ev('window.__let(); window.__postHold = null; void 0');
+  const card = (q) => `document.querySelector('#questions [data-qcard="${q}"]')`;
+  const answeredOnServer = (q) => /answered/.test(dt(['questions', '--id', q]).split('\n')[0]);
+  await soon(`!!${card(Q1)} && !!${card(Q2)}`, 'the question cards');
+
+  await t.test('an answer: the card says so at once; the server has it once the post goes through', async () => {
+    await hold();
+    await p.click(`${'#questions'} [data-qcard="${Q1}"] input[data-pick][value="Left"]`);
+    await p.click(`#questions [data-qcard="${Q1}"] [data-answer]`);
+    assert.match(await p.ev(`${card(Q1)}.textContent`), /Answered: Left/, 'drawn while the post is held');
+    assert.equal(await p.ev(`$('saving').hidden`), false, 'the page says it is saving');
+    assert.equal(answeredOnServer(Q1), false, 'and the server has not got it yet');
+    await polls(2);
+    assert.match(await p.ev(`${card(Q1)}?.textContent ?? 'gone'`), /Answered: Left|gone/, 'a refresh mid-press keeps it answered');
+    await letGo();
+    await until(() => answeredOnServer(Q1), 'the answer in the log');
+    await soon(`$('saving').hidden`, 'saving done');
+  });
+
+  await t.test('refused: the card comes back with the pick and the note, and says why', async () => {
+    await p.click(`#questions [data-qcard="${Q2}"] input[data-pick][value="No"]`);
+    await p.click(`#questions [data-qcard="${Q2}"] textarea[data-q]`);
+    await p.type('not this week');
+    // the server's data held, so the page keeps the question while the supervisor withdraws it
+    await p.ev('void (window.__gate = new Promise((r) => { window.__open = r; }))');
+    await hold();
+    await p.click(`#questions [data-qcard="${Q2}"] [data-answer]`);
+    assert.match(await p.ev(`${card(Q2)}.textContent`), /Answered: No — not this week/);
+    dt(['withdraw', Q2, '--reason', 'moot'], SUP);
+    await letGo();
+    await soon(`/Not saved:/.test(document.getElementById('e-${Q2}')?.textContent ?? '')`, 'the refusal, on the card');
+    assert.equal(await p.ev(`document.querySelector('#questions [data-qcard="${Q2}"] textarea[data-q]').value`), 'not this week', 'the note back');
+    assert.equal(await p.ev(`document.querySelector('#questions [data-qcard="${Q2}"] input[data-pick][value="No"]').checked`), true, 'the pick back');
+    await p.ev('window.__open(); window.__gate = null; void 0');
+  });
+
+  await t.test('a lesson kept: it leaves at once and stays gone across refreshes', async () => {
+    const lesson = `document.querySelector('[data-know="${K}"]')`;
+    await soon(`!!${lesson}`, 'the lesson card');
+    await hold();
+    await p.click(`[data-know="${K}"][data-status="accepted"]`);
+    assert.equal(await p.ev(`!!${lesson}`), false, 'gone at once');
+    await polls(2);
+    assert.equal(await p.ev(`!!${lesson}`), false, 'still gone after refreshes, the post still held');
+    await letGo();
+    await until(() => /accepted/.test(dt(['knowledge', '--status', 'accepted'])), 'kept on the server');
+  });
+
+  await t.test('a new thread: the turn is in the card at once, and two quick Sends make one thread', async () => {
+    await p.ev(`document.querySelector('[data-tl-new]')?.click() ?? (document.getElementById('tl-pill').click(), document.querySelector('[data-tl-new]').click()); void 0`);
+    await soon(`document.activeElement?.id === 'tl-c-text'`, 'the composer');
+    await hold();
+    await p.type('first words');
+    await p.key('Enter');
+    assert.match(await p.ev(`document.getElementById('tl-c-turns').textContent`), /first words/, 'drawn while held');
+    assert.equal(await p.ev(`document.getElementById('tl-c-state').textContent`), 'Sending…');
+    await p.type('second words');
+    await p.key('Enter');
+    assert.match(await p.ev(`document.getElementById('tl-c-turns').textContent`), /second words/);
+    await letGo();
+    const threads = () => JSON.parse(dt(['thread', 'list', '--json']));
+    await until(() => threads().some((x) => x.turns?.length === 2) || threads().length > 1, 'both sends landed');
+    const all = threads();
+    assert.equal(all.length, 1, 'one thread');
+    assert.deepEqual(all[0].turns.map((u) => u.text), ['first words', 'second words']);
+    await soon(`!document.getElementById('tl-c-turns').textContent.includes('Sending')`, 'the card from the server');
+  });
+});
 
 test('typing in the dashboard: a refresh never takes the field, the caret or the scroll, and holding it can\'t wedge', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'devteam-focus-'));
