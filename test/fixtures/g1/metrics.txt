@@ -48,7 +48,24 @@ exit 0
     "answer_rate_14d": null
   },
   "escaped_defects": 0,
-  "findings": [],
+  "findings": [
+    {
+      "severity": "high",
+      "kind": "merged-out-of-order",
+      "subject": "g1-02-b",
+      "detail": "g1-02-b reached main before g1-01-a, which it depends on",
+      "suggestion": "check that g1-02-b works without it, and merge g1-01-a next; a revert is a ticket of its own",
+      "sev": 3
+    },
+    {
+      "severity": "high",
+      "kind": "merged-without-merge",
+      "subject": "g1-02-b",
+      "detail": "g1-02-b reached main at <sha> with no merge act: no gates, reviews or checks ran on it",
+      "suggestion": "check it now (check-pr at that sha, its records, its gates); a revert is a ticket of its own; then find how it landed (a push to main, the forge's button) and close that path",
+      "sev": 3
+    }
+  ],
   "acknowledged": []
 }
 --- stderr
