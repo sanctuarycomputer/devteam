@@ -7331,7 +7331,7 @@ function cmdDecide() {
   if (cls === 'goal-readiness') readinessGoal(refs);
   // a noise ruling explains observations by citing them (orientClusters); one that cites none explains nothing
   // (or the fixed incident it rules there is nothing to learn from: incidentDebt)
-  if (cls === 'orient-noise' && !refs.some((r) => ['observation', 'problem'].includes(logGet(r)?.type))) die('a noise ruling names the observations it explains: --refs <signal key> <o-…>… (or a fixed incident with nothing to keep: --refs <p-…>)');
+  if (cls === 'orient-noise' && !refs.some((r) => { const x = logGet(r); return x?.type === 'observation' || (x?.type === 'problem' && isIncident(x) && x.status === 'resolved'); })) die('a noise ruling names the observations it explains: --refs <signal key> <o-…>… (or a fixed incident with nothing to keep: --refs <p-…>)');
   const a = authorise(cls, scope, approved, refs, 'decide');
   if (a.doorCited && a.approval.ticket !== refs[0] && !(features().get(tickets().get(refs[0])?.feature)?.goals ?? []).includes(a.approval.goal)) die(`${approved} answered a one-way door for ${a.approval.ticket ?? a.approval.goal ?? 'something else'}, not for ${refs[0]} or a goal its feature serves`);
   const line = appendLog({
@@ -8104,12 +8104,14 @@ function orientationDebt() {
 // One whose status the owner set is the owner's call, and owes nothing.
 function incidentDebt() {
   const now = Date.now();
-  const taught = new Set(logObjects('knowledge').flatMap((k) => k.evidence ?? []));
+  // a lesson the owner retired taught nothing, so the incident is owed one again
+  const taught = new Set(logObjects('knowledge').filter((k) => k.status !== 'retired').flatMap((k) => k.evidence ?? []));
   for (const d of logObjects('decision')) if (d.class === 'orient-noise' && liveDecision(d)) for (const r of d.refs ?? []) taught.add(r);
   const outcomes = logObjects('observation').filter((o) => o.kind === 'outcome').sort(byTime);
   return incidentList().filter((p) => p.status === 'resolved' && !taught.has(p.id) && !ownerHolds(p, 'status')).flatMap((p) => {
     const at = (p.updates ?? []).filter((u) => u.status === 'resolved').pop()?.at ?? p.created_at;
-    const outcome = outcomes.filter((o) => (o.refs ?? []).includes(p.id)).pop();
+    // verified only: an unverified resolution (valence 0, seen too few times) proved nothing to learn from
+    const outcome = outcomes.filter((o) => (o.refs ?? []).includes(p.id) && (o.valence ?? 0) > 0).pop();
     if (!outcome || now - Date.parse(at) > 30 * DAY) return [];
     const d = (outcome.refs ?? []).find((r) => logGet(r)?.type === 'decision') ?? incidentDecisions(p.id).pop()?.id ?? null;
     const t = (outcome.refs ?? []).map((r) => tickets().get(r)).find(Boolean);
@@ -14992,7 +14994,7 @@ function linkIndex() {
     for (const [k, why] of Object.entries(LINK_FIELDS)) for (const t of Array.isArray(o[k]) ? o[k] : []) {
       if (!known(t)) continue;
       if (o.type === 'act' && o.class === 'add-ticket' && k === 'refs' && logGet(t).type === 'ticket') edge(o.id, t, 'made');
-      else edge(t, o.id, why);
+      else edge(t, o.id, o.type === 'act' && k === 'knowledge' ? 'given' : why);
     }
     if (known(o.approved_by)) edge(o.approved_by, o.id, approvalHolds(o) ? 'approved' : 'cites');
     if (known(o.decision)) edge(o.decision, o.id, 'carried out');
