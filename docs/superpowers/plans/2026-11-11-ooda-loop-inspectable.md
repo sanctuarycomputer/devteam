@@ -319,3 +319,54 @@ Branch `ooda-lineage` off `ooda-signals` (PR 2); base `ooda-signals` until it me
 6. **Whole-card click:** one delegated handler on `[data-open]` that ignores Shift/Meta/Ctrl, non-primary buttons, `TL.pin`, clicks inside `a, button, input, select, textarea, label, [data-correct-form], .untrusted`, and a text selection; remove the incidents' per-element `onclick` (~2580) so nothing double-fires.
 7. **`loopPlace` data:** `signalGroups()` returns every group (under three too) with its spread flag; `orientClusters()` is built on it. `collectOoda.observations[*].place` is computed for the 40 shown only, from `signalGroups()` and `linkIndex()`.
 8. `peekView` for `signal` sets `record: null` (no `recordView` die). `linkIndex` caches on the `readLog()` object.
+
+---
+
+## PR 4: knowledge in decisions and prompts; what resolved incidents taught
+
+Branch `ooda-knowledge` off `ooda-lineage`. **Adds two log fields** (`decision.knowledge`, `act.knowledge`), so it must not merge until PR 1 is released and adopted by every instance (the operator's adoption report says so; the PR body must say it too).
+
+### Task 1: a decision cites the knowledge it rests on
+
+**Files:** `schema/log.schema.json` (`decision.properties.knowledge`: `{ "type": "array", "items": { "type": "string", "pattern": "^(k|p)-" }, "description": "The knowledge or problems this decision rests on (decide --on); never copied into refs." }`), `devteam.mjs` `cmdDecide` (`--on <ids…>`: each must resolve to knowledge or a problem; a knowledge one must be `accepted` (a candidate or retired one is refused: "k-… is <status>: a decision rests only on accepted knowledge"); stored as `knowledge`, never added to `refs`), `orient`'s proposed `decide` commands include `--on` for the lesson or problem they came from, `index.html` decision sidepeek shows "Rests on" with links, `test/ooda-knowledge.test.mjs` (new).
+
+- [ ] Tests: `decide --on <accepted k> --class … -- "x"` stores `knowledge`; refs unchanged; `act --decision` refs-within-decision check unaffected; a candidate, a retired lesson and an observation id are refused; lineage (PR 3) draws k → decision.
+- [ ] Commit "Decisions cite the knowledge they rest on (decide --on)".
+
+### Task 2: a start records the lessons it was given
+
+**Files:** schema `act.properties.knowledge` (same shape, pattern `^k-`, "The accepted knowledge a worker-slots start put in the session's prompt."), `devteam.mjs` worker/planner start (~11455: `knowledge: knowledgeFor(target).map((k) => k.id)`, the same target `knowledgeBlock` used, omitted when empty), `index.html` act sidepeek "Given" list.
+
+- [ ] Tests: a worker started with one accepted lesson in its scope logs a `worker-slots` act with `knowledge: [k]`; with none, no field; a planner's act too; `LAUNCH_ACT` parsing of `what` unchanged (the existing worker tests pass); the line stays under 4,096 bytes with 60 lessons (cap at 60 ids, newest accepted first).
+- [ ] Commit "Starts record the knowledge they were given".
+
+### Task 3: resolved incidents nobody learned from are orientation debt
+
+**Files:** `devteam.mjs` `collectOoda.debt.incidents`: incidents (`isIncident`) with status `resolved` and an `outcome` observation citing them, not cited by any knowledge's `evidence` nor by a live `orient-noise` decision's refs, resolved in the last 30 days; `cmdOrient` prints them after the clusters: "<p-id> was fixed and verified (<title>): what did it teach? `knowledge add --kind lesson --scope … --evidence <p> <d> <outcome>` or `decide --class orient-noise --refs <p> -- \"nothing to keep\"`" (values through `shq`); the orient-noise check in `cmdDecide` also accepts a problem id; `index.html` Orientation debt lists them under the signals.
+- [ ] Tests: a resolved incident with an outcome appears; a lesson with it in evidence clears it; a noise ruling citing it clears it; an unverified resolution (no outcome) doesn't appear.
+- [ ] Commit "Orientation debt: what fixed incidents taught".
+
+### Task 4: docs and PR
+- [ ] `supervisor.md` §3 Decide: cite what a decision rests on with `--on`; Orient: clear incident debt. Merge, full suite, push, PR (base `ooda-lineage`), body: the adoption gate, and that the operator's review can read `decision.knowledge`, `act.knowledge` and `ooda.debt`.
+
+---
+
+## PR 5: the learning record and the chart
+
+Branch `ooda-learning` off `ooda-knowledge`. **Adds two observation fields** (`figures`, `week`); same adoption gate as PR 4.
+
+### Task 1: `learningFigures(cut)` and the weekly record
+
+**Files:** schema `observation.properties.figures` (object: `informed: { knowledge, signals_explained, signals_formed, starts_given, starts }`, `autonomous: { trusted_calls, ladder_calls, questions, merged }`, `trusted: { agreed, answered, corrections, calls }`, all integers; `additionalProperties: false`) and `observation.properties.week` (`"^\\d{4}-W\\d{2}$"`); `devteam.mjs`: `logAt(cut)` (fold only lines with `at <= cut`, reusing `fold`; cached per cut), `learningFigures(cut)` computing every count from `logAt(cut)` and the week before it, `writeLearning()` called from `cmdObserveMetrics` (supervisor only): for each ISO week since the log's first line that has ended and has no observation with `source_key: learning:<week>` (checked over all observations), append `{ type: 'observation', source: 'metrics', detector: 'metrics', subject: 'project', kind: 'learning', week, figures, detail: '<one sentence of the numbers>', source_key: 'learning:<week>', refs: <≤60 ids: the corrections, accepted lessons and explained signals counted> }`. Counts, not percentages, are stored; shares are computed in the view.
+- [ ] Tests: a fixture log spanning three weeks (hand lines with past `at`) gets three learning records on the first `observe-metrics`, none on the second (idempotent), each with `week` and today's `at`; figures match hand-counted values for a small fixture; `dashboard-data` never writes one.
+- [ ] Commit "The weekly learning record".
+
+### Task 2: the chart at the top of the Loop, and the learning sidepeek
+
+**Files:** `index.html` — a section above the Loop tabs: three `lineChart` charts (Informed: accepted knowledge, share of signals explained; Autonomous: share of ladder calls on trust, questions per merged ticket; Trusted: agreement, corrections per 100 calls), weekly points from `DATA.ooda.learning` (the records, oldest first), hollow when the denominator is under 5 (title "too few to say (n = …)"), marks for retros and rung changes, each point an `<a href="#learning/<id>">`. Under three records: tiles "since <date>: n calls, n lessons kept, n corrections" and "The loop needs a few weeks of calls, answers and lessons before trends mean anything." `openLearning` (PR 3's) shows the figures as a table, the counted records (recomputed by the peek: `peekView('learning')` returns the full lists from `learningFigures`), and lesson efficacy: for each lesson in `act.knowledge` of starts, the observations on the keys of its evidence in the four weeks before it was first given and since (ids and counts).
+- [ ] Extend `lineChart` only if it can't take hollow points or link circles; keep its signature.
+- [ ] Tests: CLI — `dashboard-data` has `ooda.learning`; peek of a learning record has the lists and efficacy rows. Chrome (when available) — the chart renders three charts; with one record, tiles.
+- [ ] Commit "The Loop's learning chart, and what each week counted".
+
+### Task 3: docs and PR
+- [ ] `supervisor.md` §3: the weekly record and how to read it; `operator.md` mention for the daily review (coordinate with the upstream loop's follow-up to #190). Merge, full suite, push, PR (base `ooda-knowledge`).
