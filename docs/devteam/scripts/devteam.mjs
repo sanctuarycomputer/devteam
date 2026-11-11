@@ -5179,6 +5179,8 @@ function cmdThread() {
     if (flags.json) return json(v);
     out(`${v.id} · ${v.status}${v.status === 'open' ? ` · ${v.waiting === 'supervisor' ? 'waiting on the supervisor' : "the owner's move"}` : ''}`);
     out(threadDataFrame(v));
+    const moved = v.subject?.kind === 'artifact' ? artifactSubjectNow(v.subject) : null;
+    if (moved) out(moved);
     // the owner's words are theirs, as in your session; your own turns are yours
     for (const u of v.turns) {
       out(`${u.at} ${u.by} (${u.id})${u.question ? `, asking ${u.question}` : ''}:`);
@@ -5888,6 +5890,9 @@ async function cmdPreview() {
 // it). Landed is what main has, read from git; a draft is a session worktree's copy under
 // .worktrees/, read off disk as it is, so the owner sees it while it's drawn.
 const ARTIFACTS_REL = `${projectRel}/artifacts`;
+// Where a viewer may show an artifact: main, a draft's worktree (by name; draftWorktree says whether
+// it is one), or a published version by its tree id. The same forms a thread's artifact subject records.
+const ARTIFACT_AT = /^(main|tree:[0-9a-f]{40}(?:[0-9a-f]{24})?|[A-Za-z0-9][A-Za-z0-9._-]{0,99})$/;
 const ARTIFACT_FILE_MAX = 8 * 1024 * 1024;
 const ARTIFACT_MAX = 25 * 1024 * 1024;
 const ARTIFACT_KEYS = ['v', 'title', 'summary', 'by', 'for'];
@@ -6019,6 +6024,15 @@ function artifactSource(at, slug) {
   if (!fs.existsSync(path.join(dir, 'artifact.json')) && !fs.existsSync(path.join(dir, 'index.html'))) return null;
   return { entries: diskEntries(dir), dir };
 }
+// An artifact's files where a viewer shows it: as artifactSource has them, or an artifact folder's
+// tree by its id (a published version, which never changes). Any other id is nothing (decision 12).
+function artifactAt(at, slug) {
+  if (!String(at).startsWith('tree:')) return artifactSource(at, slug);
+  const tree = at.slice(5);
+  if (!LINK_ID.test(slug ?? '') || !TREE_ID.test(tree) || !artifactTreeOkSync(tree)) return null;
+  const entries = treeIdEntries(tree);
+  return entries.length ? { entries } : null;
+}
 // Is this id an artifact folder's tree? A commit's id, or the root tree's, would let <id>:<path> name
 // any committed file, so it must be a tree with an artifact.json at its top (decision 12; its slug
 // can't be checked: a folder's tree doesn't know its name, and artifact.json doesn't say it).
@@ -6141,6 +6155,17 @@ function publicManifest(slug) {
 // channel, or null. A forged line can look exactly like a real one (the dashboard's route writes
 // it for anything that reaches it), so none of this is proof the owner published.
 const publishedView = (a) => (a?.what === 'publish' ? { tree: a.tree, at: a.created_at, channel: a.channel ?? null } : null);
+// What a thread's artifact subject is now, for thread show (decision 21): null when its fingerprint
+// is still the one the thread began on (or it recorded none); else a line saying so. A published
+// tree never changes, so for one, "changed since" means main has moved on from it (spec §5).
+function artifactSubjectNow(s) {
+  if (!isObj(s) || !LINK_ID.test(s.slug ?? '') || typeof s.fp !== 'string') return null;
+  const tree = String(s.at).startsWith('tree:');
+  const src = artifactAt(tree ? 'main' : s.at, s.slug);
+  if (!src) return `the artifact ${s.slug} is no longer ${tree ? 'on main' : `at ${quoteData(s.at)}`}`;
+  if (fingerprint(src.entries) === s.fp) return null;
+  return tree ? `main has changed ${s.slug} since this published version` : `the artifact ${s.slug} has changed since this thread began`;
+}
 // artifact new <slug> --title --summary [--for '[…]']: scaffold a page in this worktree.
 // artifact check [<slug>…]: the checks merge runs, on this checkout's artifacts.
 function cmdArtifact() {
@@ -6199,7 +6224,22 @@ function cmdArtifact() {
     }
     return out(`recorded: ${slugName} ${sub}ed${ownerChannel() === 'dashboard' ? '' : '. This records intent only: a page goes public, or comes down, only on the cloud gateway\'s confirm page (https://<box>/public/)'}`);
   }
-  die('usage: artifact new <slug> --title t --summary s [--for json] | artifact check [<slug>…] | artifact manifest <slug> [--json] | artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner');
+  // artifact describe <slug> [--at main|<worktree>|tree:<id>]: what a viewer shows of it (its title,
+  // its fingerprint) and main's, for "changed since"; the dashboard's /api/view runs it
+  if (sub === 'describe') {
+    const slugName = args[0] ?? die('usage: artifact describe <slug> [--at main|<worktree>|tree:<id>] [--json]');
+    const at = flagStr('at') ?? 'main';
+    if (!LINK_ID.test(slugName) || !ARTIFACT_AT.test(at)) die('artifact describe: a slug, and --at main, a worktree name or tree:<id>');
+    const src = artifactAt(at, slugName) ?? die(`${slugName}: no artifact at ${at}`);
+    const d = describeArtifact(slugName, at, src);
+    const main = at === 'main' ? src : artifactAt('main', slugName);
+    const ref = mainRef();
+    const mainTree = ref ? /^040000 tree ([0-9a-f]+)\t/.exec(git(['ls-tree', ref, '--', `${ARTIFACTS_REL}/${slugName}`], mainRoot) ?? '')?.[1] ?? null : null;
+    const r = { slug: slugName, at, title: d.error ? null : d.title, summary: d.error ? null : d.summary, error: d.error, fp: d.fp, main_fp: main ? fingerprint(main.entries) : null, main_tree: mainTree };
+    if (flags.json) return json(r);
+    return out(`${slugName} at ${at}: ${r.error ? `broken (${r.error})` : quoteData(r.title)}, fingerprint ${r.fp.slice(0, 12)}${r.main_fp && r.main_fp !== r.fp ? `; main has another (${r.main_fp.slice(0, 12)})` : ''}`);
+  }
+  die('usage: artifact new <slug> --title t --summary s [--for json] | artifact check [<slug>…] | artifact manifest <slug> [--json] | artifact describe <slug> [--at <where>] [--json] | artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner');
 }
 function cmdArtifacts() {
   gitReadCache = new Map();
@@ -11097,6 +11137,7 @@ async function cmdDashboard() {
   // /api/hello answers at once from the last `hello` run, which the dashboard refreshes every 30 s
   // in the background: the hub probes every port with a 300 ms budget, and /api/data takes far longer.
   // One run at a time, each given 20 s; the kit's version is read once, on the first run.
+  // viewer: 1 says this kit has /view/ and /artifact/tree/: the gateway's owner wrapper waits for it (spec §8).
   let hello = null;
   let kit = null;
   let kitAt = { main: null, at: 0 };
@@ -11115,7 +11156,7 @@ async function cmdDashboard() {
   };
   refreshHello();
   setInterval(refreshHello, 10000).unref();
-  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, inbox: hello?.inbox ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}), previews: readPreviews().slice(0, PREVIEW_MAX).map((r) => previewHelloRow(r, previewUp.get(r.name) ?? null)) });
+  const helloBody = () => JSON.stringify({ devteam: 1, root: fs.realpathSync(mainRoot), name: loadSettings().project ?? path.basename(mainRoot), port, kit, viewer: 1, inbox: hello?.inbox ?? null, fleet: hello?.fleet ?? null, ...(hello?.alert ? { alert: hello.alert } : {}), previews: readPreviews().slice(0, PREVIEW_MAX).map((r) => previewHelloRow(r, previewUp.get(r.name) ?? null)) });
   // Previews: the tick's probes feed hello and the Library, one run at a time so a tmux that has
   // stalled never stacks them up. A file in run/previews that isn't a preview is named once.
   const previewsNamedBad = new Set();
@@ -11213,6 +11254,28 @@ async function cmdDashboard() {
       return res.end(r.ok ? r.stdout : lastData);
     }
     const u = new URL(req.url, 'http://x');
+    // The viewer (spec §7): this page in viewer mode, one artifact on its stage. Its frames are this
+    // dashboard's own pages. It may be framed by itself and the machine's hub, by policy alone and
+    // never X-Frame-Options: on a box the gateway adds the public name to frame-ancestors for its
+    // owner wrapper, and leaves every other header as it is.
+    const vw = req.method === 'GET' ? /^\/view\/artifact\/([^/]+)$/.exec(u.pathname) : null;
+    if (vw) {
+      if (!LINK_ID.test(vw[1]) || !ARTIFACT_AT.test(u.searchParams.get('at') || 'main')) return send(res, 404, 'text/plain; charset=utf-8', 'not found');
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'content-security-policy': `frame-src 'self'; frame-ancestors 'self' http://127.0.0.1:${HUB_PORT}` });
+      return res.end(fs.readFileSync(page));
+    }
+    // What the viewer's bar and its "changed since" read of what it shows (artifact describe), so a
+    // viewer never waits on /api/data. Asked once per viewer load (a fallback to main asks once more),
+    // never polled: a child process per ask. A GET carries no Origin: same-origin only, as /api/threads.
+    if (req.method === 'GET' && u.pathname === '/api/view') {
+      const site = req.headers['sec-fetch-site'];
+      if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: "not for another site's page" }));
+      const slug = u.searchParams.get('slug') ?? '';
+      const at = u.searchParams.get('at') || 'main';
+      if (u.searchParams.get('kind') !== 'artifact' || !LINK_ID.test(slug) || !ARTIFACT_AT.test(at)) return send(res, 400, 'application/json', JSON.stringify({ error: 'bad kind, slug or at' }));
+      const r = await run(['artifact', 'describe', slug, `--at=${at}`, '--json'], { timeout: 12000 });
+      return r.ok ? send(res, 200, 'application/json', r.stdout) : send(res, 404, 'application/json', JSON.stringify({ error: r.stderr.trim().replace(/^devteam: /, '') }));
+    }
     // Threads for the layer: a GET carries no Origin, so like /public-manifest/ it is refused when the
     // browser says another site's page asks.
     if (req.method === 'GET' && u.pathname === '/api/threads') {
@@ -14983,6 +15046,7 @@ Decide and act (supervisor.md, constitution.md)
   artifact new <slug> --title t --summary s [--for '["goal:g"]']   draw an artifact (a page that shows an idea) in this worktree, under project/artifacts/<slug>/
   artifact check [<slug>…]        the checks merge runs, on this checkout's artifacts
   artifact manifest <slug> [--json]   what publishing a landed artifact would put up: main's tree, each file's sha256 (the cloud gateway's confirm page reads it)
+  artifact describe <slug> [--at main|<worktree>|tree:<id>] [--json]   what a viewer shows of an artifact there (title, fingerprint) and main's fingerprint (the dashboard's /api/view reads it)
   artifact publish <slug> --owner --tree <t> | artifact unpublish <slug> --owner   the owner's record that a landed artifact went public or came down (the gateway's confirm page runs these; by hand they record intent only)
   artifacts [--json]              landed artifacts, and drafts in session worktrees
   preview <port> [--label "<one line>"]   register a server you are running; prints the link for this machine (a name derived from project, session and label)

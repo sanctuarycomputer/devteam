@@ -912,6 +912,56 @@ test('the artifact lens in Chrome: a framed artifact\'s own inline scripts run b
   assert.ok(heard.every((h) => h.origin === 'null'), 'from the artifact\'s opaque origin: the sandbox holds');
 });
 
+test('the viewer: its route and headers, what /api/view says of an artifact, and viewer: 1 in hello', async (t) => {
+  const F = threadsFixture('viewer-route');
+  t.after(() => F.done());
+  const T = landArtifact(F, 'viewer-mock', VIEWER_MOCK);
+  // a port the dashboard picks in the instance block, since the hub lists only the block
+  const d = startDashboard(F.old, F.env({}));
+  t.after(() => d.stop());
+  const port = Number((await until(() => /dashboard on http:\/\/127\.0\.0\.1:(\d+)\b/.exec(d.out()), 'the dashboard'))[1]);
+  assert.ok(port > PORTS && port <= PORTS + 25, 'in the block');
+  const B = `http://127.0.0.1:${port}`;
+  assert.equal((await (await fetch(`${B}/api/hello`)).json()).viewer, 1, 'the gateway wraps a public page only for a kit that says so');
+  // and it reads that from the hub's list, which carries each instance's hello as it answered, inside
+  // the probe's 300 ms budget (a slower hello is no instance in the list)
+  const listedHere = async () => ((await (await fetch(`http://127.0.0.1:${PORTS}/instances.json`)).json()).instances ?? []).find((i) => i.port === port);
+  const inHub = await until(listedHere, 'this dashboard in the hub\'s list');
+  assert.deepEqual([inHub.viewer, inHub.root], [1, fs.realpathSync(F.old)]);
+  const page = fs.readFileSync(path.join(kit, 'dashboard/index.html'), 'utf8');
+  // the wrapper's grant rides along as w=<expiry>.<mac>: the gateway's to check, the kit's to ignore
+  for (const q of ['', '?at=main', `?at=tree:${T}`, '?at=demo-01-x', `?at=tree:${T}&w=1767225600000.abcdefghijklmnopqrstuv`, '?w=anything&x=1']) {
+    const r = await fetch(`${B}/view/artifact/viewer-mock${q}`);
+    assert.equal(r.status, 200, q);
+    assert.equal(await r.text(), page, 'the dashboard page, in viewer mode by its path');
+    assert.equal(r.headers.get('content-security-policy'), `frame-src 'self'; frame-ancestors 'self' http://127.0.0.1:${PORTS}`, 'its frames are its own; framed by itself and the hub, and by policy alone: the gateway adds the public name');
+    assert.equal(r.headers.get('x-frame-options'), null);
+    assert.deepEqual([r.headers.get('referrer-policy'), r.headers.get('cache-control')], ['no-referrer', 'no-store']);
+  }
+  for (const bad of ['/view/artifact/Bad_Slug', '/view/artifact/viewer-mock/x', '/view/artifact/', '/view/artifact/viewer-mock?at=..%2Fx', '/view/artifact/viewer-mock?at=tree:xyz', '/view/preview/cool-tiger']) assert.equal((await fetch(`${B}${bad}`)).status, 404, bad);
+  // what the viewer's bar and "changed since" read, without /api/data
+  const view = (q, headers = {}) => fetch(`${B}/api/view?${new URLSearchParams({ kind: 'artifact', ...q })}`, { headers });
+  const lib = JSON.parse(F.owner(['artifacts', '--json'])).find((a) => a.slug === 'viewer-mock' && a.at === 'main');
+  let r = await view({ slug: 'viewer-mock', at: 'main' });
+  assert.equal(r.status, 200);
+  let v = await r.json();
+  assert.deepEqual([v.slug, v.at, v.title, v.summary, v.error, v.fp, v.main_fp, v.main_tree], ['viewer-mock', 'main', 'Viewer mock', 'A page to point at', null, lib.fp, lib.fp, T]);
+  v = await (await view({ slug: 'viewer-mock', at: `tree:${T}` })).json();
+  assert.deepEqual([v.at, v.fp, v.main_fp], [`tree:${T}`, lib.fp, lib.fp], 'the published tree, as main has it now');
+  assert.equal((await view({ slug: 'viewer-mock', at: `tree:${'0'.repeat(40)}` })).status, 404, 'a tree the repository lacks: the viewer shows main instead');
+  assert.equal((await view({ slug: 'no-such', at: 'main' })).status, 404);
+  assert.equal((await view({ slug: 'viewer-mock', at: '../x' })).status, 400);
+  assert.equal((await fetch(`${B}/api/view?kind=lens&slug=viewer-mock`)).status, 400);
+  assert.equal((await view({ slug: 'viewer-mock', at: 'main' }, { 'sec-fetch-site': 'cross-site' })).status, 403);
+  assert.match(F.owner(['artifact', 'describe', 'viewer-mock']), /^viewer-mock at main: "Viewer mock", fingerprint [0-9a-f]{12}/);
+  // thread show says when the artifact a thread is about has changed since (decision 21)
+  const on = (s) => F.owner(['thread', 'new', 'About it', '--subject', JSON.stringify({ kind: 'artifact', slug: 'viewer-mock', path: 'index.html', point: { x: 1, y: 2 }, ...s })]).split('\n')[0];
+  assert.doesNotMatch(F.sup(['thread', 'show', on({ at: 'main', fp: lib.fp })]), /changed since/, 'as it was');
+  assert.match(F.sup(['thread', 'show', on({ at: 'main', fp: 'a'.repeat(64) })]), /^the artifact viewer-mock has changed since this thread began$/m);
+  assert.doesNotMatch(F.sup(['thread', 'show', on({ at: `tree:${T}`, fp: lib.fp })]), /changed since/, 'a published tree main still has');
+  assert.match(F.sup(['thread', 'show', on({ at: `tree:${T}`, fp: 'b'.repeat(64) })]), /^main has changed viewer-mock since this published version$/m);
+});
+
 test('every item the dashboard draws says what it is; a question asked in a thread links to it; an answer from a thread says so', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
   const html = fs.readFileSync(path.join(kit, 'dashboard/index.html'), 'utf8');
   for (const type of ['goal', 'question', 'ticket', 'planner', 'observation', 'problem', 'lesson', 'act', 'preview', 'artifact']) assert.match(html, new RegExp(`subj\\('${type}'`), `the ${type} renderer marks its item`);
