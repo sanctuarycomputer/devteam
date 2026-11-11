@@ -960,6 +960,10 @@
           "owner_note": {
             "description": "The owner's refinement of the lesson, given when they keep it: prompts show it with the statement. Only the owner's own lines carry it.",
             "type": "string"
+          },
+          "kit_lesson": {
+            "description": "The supervisor's own tag on knowledge it wrote: this looks like it would hold for any project on the kit, so the box's operator reads it first when it looks for an upstream change. It grants nothing: no prompt, status, approval or trust reads it. Only the supervisor's lines carry it, and only on its own entries.",
+            "type": "boolean"
           }
         },
         "additionalProperties": false,
@@ -2312,7 +2316,8 @@
           "status",
           "confidence",
           "statement",
-          "scope"
+          "scope",
+          "kit_lesson"
         ],
         "owner": [
           "status",
