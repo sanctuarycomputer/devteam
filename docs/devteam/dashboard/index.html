@@ -363,6 +363,7 @@
   .holdbar .seg2 button[data-mode="drain"][aria-pressed="true"] { background: color-mix(in srgb, var(--amber, #c98a00) 18%, var(--surface)); }
   .holdbar .seg2 button[data-mode="park"][aria-pressed="true"], .holdbar .seg2 button[data-mode="let-go"][aria-pressed="true"] { background: color-mix(in srgb, var(--red) 14%, var(--surface)); }
   .holdbar .seg2 button.confirm { color: var(--red); }
+  .holdbar button[data-met-id].confirm { color: var(--green-fg); }
   .fleet-strip { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; margin-bottom: 14px; font-size: 12px; background: var(--surface); }
   .fleet-strip .grow { flex: 1 1 auto; }
   .fleet-strip details { width: 100%; }
@@ -1809,6 +1810,13 @@ function goalStateOf(g, R, openQs) {
   const defQ = openQs.find((q) => q.kind === 'goal-definition');
   if (g.status === 'met') return { key: 'met', label: 'Met', tone: 'good', step: 5, next: 'The measure reached its target.' };
   if (g.status === 'abandoned') return { key: 'let-go', label: 'Let go', tone: '', step: 0, next: g.decision?.notes ? `You let it go: ${esc(g.decision.notes)}` : 'You let it go.' };
+  if (g.status === 'ready' && g.at_target) {
+    // the measure is at its target: only you mark it met, here or by answering the supervisor's question
+    const a = g.at_target;
+    const unit = g.measure?.unit ? ` ${g.measure.unit}` : '';
+    const said = g.measure?.source === 'owner' ? `You said it is met (${esc(when(a.at))}), but it was never marked met.` : `The measure reads ${esc(a.value)}${esc(unit)} (${esc(when(a.at))}), its target.`;
+    return { key: 'at-target', label: 'Reached its target', tone: 'good', step: 4, next: `${said} ${a.question ? `<b>Waiting on you:</b> ${qlink(a.question, 'say whether it is met')}, or mark it met below.` : 'Mark it met below if you agree; the supervisor asks you in the Inbox too.'}` };
+  }
   if (g.status === 'ready') {
     const r = R.goals.find((x) => x.id === g.id);
     const feats = (r?.features || []).map((f) => R.features[f]).filter(Boolean);
@@ -1927,6 +1935,7 @@ function goalCard(g, R, openQs, week) {
     ${s.next ? `<p class="goal-next">${s.next}</p>` : ''}
     ${registryAttestLine(g)}
     ${holdControl(g.id, g.hold_view, { status: g.status })}
+    ${g.status === 'ready' && g.at_target ? `<div class="holdbar"><button type="button" data-met-id="${esc(g.id)}">Mark met</button><span class="muted small">${['repo', 'prod'].includes(g.measure?.source) ? 'its check runs again first' : 'your yes marks it met'}</span><span class="err" id="e-met-${esc(g.id)}"></span></div>` : ''}
     <div class="meta"><a href="#goal/${encodeURIComponent(g.id)}">Open</a>${design ? ` · <a href="${esc(fileHref({ ...design, title: design.title || 'The design' }))}">Read the design</a>` : ''}${planningFor(g).length ? ` · ${planningFor(g).map((p) => `<a href="#planner/${encodeURIComponent(p.feature)}">planner on ${esc(p.title)}</a>${p.waiting ? ' <span class="badge high">stuck on a prompt</span>' : ''}`).join(', ')}` : ''}</div>
   </div>`;
 }
@@ -4110,6 +4119,18 @@ document.addEventListener('click', async (ev) => {
     hb.removeAttribute('aria-busy');
     if (!ok) hb.disabled = false;
     else { loadFleet(); redraw(); }
+    return;
+  }
+  // Mark met: confirm in place, then goal status met (a repo or prod check runs again first)
+  const mb = ev.target.closest('[data-met-id]');
+  if (mb) {
+    const id = mb.dataset.metId;
+    if (!mb.classList.contains('confirm')) { mb.classList.add('confirm'); mb.textContent = 'Confirm: mark it met'; setTimeout(() => { mb.classList.remove('confirm'); mb.textContent = 'Mark met'; }, 6000); return; }
+    mb.disabled = true; mb.setAttribute('aria-busy', 'true');
+    const ok = await post('goal-met', { id }, `met-${id}`);
+    mb.removeAttribute('aria-busy');
+    if (!ok) mb.disabled = false;
+    else redraw();
     return;
   }
   const fb = ev.target.closest('[data-fleet]');
