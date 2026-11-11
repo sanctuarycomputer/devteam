@@ -506,6 +506,8 @@ new MutationObserver(() => { const m = document.body.dataset.send; if (!m) retur
   });
   // listed by the hub before the lens asks the gateway for the app
   await until(async () => (await (await fetch(`http://127.0.0.1:${HUB}/instances.json`)).json()).instances.some((x) => x.port === SP && (x.previews ?? []).some((p) => p.name === name) && (x.previews ?? []).some((p) => p.name === plainName)), 'the hub to list the framed apps');
+  // and, as the gateway reads it for the owner's view of a public page (below), with its root and viewers
+  assert.ok((await (await fetch(`http://127.0.0.1:${HUB}/instances.json`)).json()).instances.some((x) => x.port === SP && x.root === '/srv/standin' && x.viewer === 1), 'the hub lists the stand-in with its root and viewer: 1');
 
   // --- the lens ---
   const viewer = `${inst}/view/preview/${name}`;
@@ -596,7 +598,9 @@ new MutationObserver(() => { const m = document.body.dataset.send; if (!m) retur
   fs.writeFileSync(sf, JSON.stringify(st, null, 2));
   const page = `http://public.box.localhost:${G}/standin/mock/`;
   await browser.navigate(tab, page);
-  await until(() => browser.frameWhere(`${inst}/view/artifact/mock?at=tree:${T}`), 'the viewer in the owner\'s view');
+  // the gateway reads the hub's list every 10 s: the stand-in has been listed far longer than that
+  const viewerFrame = await until(() => browser.frameWhere(`${inst}/view/artifact/mock?at=tree:${T}&w=`), 'the viewer in the owner\'s view, under the wrapper\'s grant');
+  assert.match(viewerFrame.url, /&w=\d+\.[\w-]{22}$/, viewerFrame.url);
   const shown = await until(() => browser.evalIn(`${inst}/c/`, `(() => { const p = document.getElementById('art'); return p && p.textContent + '|' + getComputedStyle(p).color; })()`), 'the artifact in the viewer in the owner\'s view');
   assert.equal(shown, 'the instance at the published tree|rgb(1, 2, 3)');
   assert.match(await browser.evalIn(page, 'document.querySelector(\'header\').textContent'), /Public · standin\/mock/);

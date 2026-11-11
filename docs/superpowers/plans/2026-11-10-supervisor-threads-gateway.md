@@ -10,7 +10,7 @@
   - `LENS_ANCESTORS` (the hub and every instance origin) and `LENS_CSP`.
   - `downstreamHeaders` gains `framedBySelf`, and `proxyPreview` passes it for `sec-fetch-dest: iframe` with `sec-fetch-site: same-origin`.
   - `ARTIFACT` gains `tree/<sha>`.
-  - `proxy` gains `publicFrame`, set by `publicFramed(rawPath)` on `/view/` and `/artifact/tree/`.
+  - `proxy` gains `publicFrame`, set by `viewerGranted` (the wrapper's MAC) on `/view/artifact/<slug>` and by `treeGranted` (a published tree) on `/artifact/tree/` (decision 4, as revised after review).
   - The request handler answers `GET /.devteam/lens` after the session check.
   - `ownerWrapper(req, url)` runs ahead of `servePublic`, and `servePublic` sends `vary: cookie` on a page's index. `PAGES.ownerWrapper` is the wrapper's markup.
 - Tests are in `test/gateway.test.mjs`, with a fake kit and the existing fake hub. Real-browser steps are in `test/browser/dev-links.mjs`, with a stand-in instance in the kit viewer's place.
@@ -29,7 +29,12 @@ These settle what the spec leaves open, or what the code makes impossible as wri
    - `x-frame-options` is dropped. Every policy in the header that has a `frame-ancestors` directive gets the new value.
    - A response with no `frame-ancestors` (`X-Frame-Options` alone, or no framing header at all, a dev server's default) gets `frame-ancestors 'self' <PUB> <the owning instance>` as one more policy, on that load only: otherwise any instance's page could hold the app. `content-security-policy-report-only` blocks nothing and is left alone.
 3. **The public name is appended to a `frame-ancestors` list that names sources** (`addFrameAncestor`). `'none'`, an empty list and a policy with no directive are left as they are, because adding a directive where there was none would narrow who may frame the page. `x-frame-options` on `/view/` and `/artifact/tree/` is not touched, so PR 3 should send none there.
-4. **`/view/` and `/artifact/tree/<tree id>/` are matched on the raw path** (`publicFramed`). `tree/` qualifies only with a real tree id, as `ARTIFACT` takes it. A path with `..`, `%2e`, `%5c` or a backslash never qualifies. An artifact under its capability qualifies by its inner path (`cm[4]`).
+4. **The public ancestor is granted, not matched by path** (revised after #194's review; it was `publicFramed`, any `/view/` or `/artifact/tree/` path).
+   - The viewer, `/view/artifact/<slug>` exactly, gets it only with `w=<exp>.<mac>`: `mac('wrap', port, '/view/artifact/<slug>', at, exp)`, with the secret `/c/` capabilities use, valid for five minutes. The wrapper puts it in its frame's URL. One `at` and one `w`, or nothing.
+   - An artifact at `/artifact/tree/<tree>/<slug>/` gets it only when this port's binding published `<slug>` at `<tree>`, under its capability by its inner path (`cm[4]`) or not. That needs no MAC through the viewer: the tree is public content, so the grant adds nothing for an attacker to steal, and PR 3 doesn't have to pass a parameter on.
+   - A path with `..`, `%2e`, `%5c` or a backslash never qualifies.
+   - Why it matters: `frame-ancestors` matches by URL, so a page on the public host that could frame would satisfy it. `publicCsp`'s `frame-src 'none'` is what stops that today, and a test pins it; the grant keeps it so if that ever changes.
+   - PR 3's viewer must accept a `w` query parameter on `/view/artifact/<slug>` and ignore it (never treat it as an error), keep it in its own URL, and never reload or navigate itself to a URL without it (a `history.replaceState` that drops it is harmless, a reload after one isn't). It passes nothing on to its artifact frame: `/artifact/tree/<tree>/<slug>/` needs no parameter.
 5. **The lens's messages are `{ lens: 1, type, … }` both ways.**
    - From the viewer: `hello`, `hit {id, x, y}`, `resolve {id, anchors: [{key, anchor}]}`, `scroll-by {dx, dy, x?, y?}`, `scroll-to {anchor}` and `go {route}`.
    - From the lens: `ready {route, title, viewport}`, `route {route}`, `hit-reply {id, anchor, rect, route}`, `rects {id?, rects: [{key, rect, changed, text}]}`, `key {key, shift}` (Shift and Escape, from inside the app, and Shift up again when the app loses focus) and `errors {errors}`.
@@ -54,12 +59,12 @@ These settle what the spec leaves open, or what the code makes impossible as wri
 10. **The lens is a `String.raw` template in plain ASCII**, with no backtick and no `${` in it, so its regular expressions read as written and the kit's copy compares as the same bytes. PR 3's equality test compares `PREVIEW_LENS` only. `previewLensCsp` hashes its one script and one style.
 11. **The lens's DOM behaviour is checked in Chrome**: anchors, caps, rects, scrolling, keys and errors (Task 8). CI checks its markup, its policy, its caps against the kit's, its message gate and its route rules, by running its script in `vm` against a stand-in page (Task 4).
 12. **Only a published page's index is wrapped** (`/<project>/<slug>/` and `/<project>/<slug>/index.html`). The viewer's URL in spec §8 has no page path, so a direct visit to any other page gets the plain bytes.
-13. **The wrapper asks the bound instance itself.** It reads the binding's port's `/api/hello` by `loopback`, as `recordUnpublish` already does, with a 1.5 s deadline (`opts.wrapperHelloMs`) and a 256 KB cap. It wraps only when all of these hold:
-    - the hello says `viewer: 1` and the binding's `root`;
+13. **The wrapper looks the bound instance up in the hub's list as last polled** (revised after #194's review; it asked the instance's `/api/hello` with a 1.5 s deadline, which let a cross-site popup time the owner's visit and told the instance when the owner opened a page). `takePreviews`, which every poll runs, also keeps each listed instance's `root` and `viewer`. It wraps only when all of these hold:
+    - the binding's port is listed with `viewer: 1` and the binding's `root`;
     - the binding's port is in the block;
     - its tree is a tree id.
 
-    The hub's list carries the same hello, but it is up to 10 s old and doesn't show the instance answering now.
+    The lookup is synchronous and nothing refreshes on a miss, so every visit takes the same path; the list can be up to 10 s stale, which is accepted.
 14. **Every doubt serves the plain bytes, the instance being down included.** Spec §8's fourth bullet says the wrapper shows a "Threads need …" message then, but §12, the Testing list and "Scope and sequence" say plain. Plain is what keeps the wrapper dormant until a kit has viewers.
 15. **`vary: cookie` is on a page's index responses only** (200 and 304), which are the paths that can be wrapped. The wrapper is `no-store, private`, so it doesn't vary on `sec-fetch-dest` as well.
 16. **The wrapper has no script.**

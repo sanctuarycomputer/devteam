@@ -887,6 +887,11 @@ test('public.<box>: anyone reads a published artifact, from the gateway\'s own c
     const self = `${gw.site}/alpha/hello/`;
     const csp = r.headers['content-security-policy'].split('; ');
     for (const d of ["default-src 'none'", `script-src 'unsafe-inline' 'unsafe-eval' ${self} https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://unpkg.com`, `connect-src ${self} https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://unpkg.com`, `img-src ${self} data: blob:`, "form-action 'none'", "frame-ancestors 'none'", 'sandbox allow-scripts allow-forms allow-modals allow-pointer-lock']) assert.ok(csp.includes(d), `the policy has ${d}: ${csp.join('; ')}`);
+    // Pinned: a published page frames nothing and has no origin of its own. An instance's viewer
+    // accepts the public name as a frame ancestor (under the wrapper's grant), and frame-ancestors
+    // matches by URL, so a page on that name that could frame would satisfy it.
+    assert.ok(csp.includes("frame-src 'none'"), csp.join('; '));
+    assert.equal(csp.filter((d) => /^(frame-src|child-src|sandbox)\b/.test(d)).join('; '), "frame-src 'none'; sandbox allow-scripts allow-forms allow-modals allow-pointer-lock", 'no child-src, one frame-src, one sandbox');
     assert.doesNotMatch(r.headers['content-security-policy'], /allow-same-origin|127\.0\.0\.1/);
     assert.equal((await get('/alpha/hello/app.js')).headers['content-type'], 'text/javascript; charset=utf-8');
     assert.equal((await get('/alpha/hello/img/a.png')).headers['content-type'], 'image/png');
@@ -2278,7 +2283,7 @@ test('an artifact at a published tree goes under a capability, as main and a wor
   } finally { await K.close(); await gw.close(); }
 });
 
-test('frame-ancestors gains the public name on an instance\'s viewer and published trees, and nowhere else', async () => {
+test('frame-ancestors gains the public name on an instance\'s viewer under the wrapper\'s grant and on its published trees, and nowhere else', async () => {
   // the pure edit: one more source wherever a policy names who may frame it
   assert.equal(G.addFrameAncestor("default-src 'none'; frame-ancestors 'self' https://a", 'https://p'), "default-src 'none'; frame-ancestors 'self' https://a https://p");
   assert.equal(G.addFrameAncestor("frame-ancestors https://a ; img-src x", 'https://p'), 'frame-ancestors https://a https://p ; img-src x');
@@ -2299,15 +2304,46 @@ test('frame-ancestors gains the public name on an instance\'s viewer and publish
   const inst = gw.inst(P + 20);
   try {
     assert.equal((await gw.claim(authenticator())).status, 200);
-    for (const v of [`/view/artifact/mock?at=tree:${T}`, '/view/preview/cool-tiger'])
-      assert.equal(fa(await gw.req('GET', v, { on: P + 20, headers: fromPublic })), `frame-ancestors 'self' ${gw.publicUrl} ${gw.site}`, v);
-    assert.equal((await gw.req('GET', '/view/artifact/mock', { on: P + 20, headers: fromPublic })).headers['content-security-policy-report-only'], "frame-ancestors 'self'", 'a report-only policy is left as it is');
-    // a 64-hex tree is a tree too
-    assert.equal(fa(await gw.req('GET', `/artifact/tree/${'d'.repeat(64)}/mock/s.css`, { on: P + 20 })), `frame-ancestors ${inst} ${gw.publicUrl} ${gw.site}`, 'sha256 tree');
+    // published from this instance: mock at tree T, and big at a 64-hex tree
+    seedPublic(gw.dir, 'alpha', 'mock', { 'index.html': 'x' }, { root: '/srv/alpha', port: P + 20 });
+    seedPublic(gw.dir, 'beta', 'big', { 'index.html': 'x' }, { root: '/srv/beta', port: P + 20 });
+    const st = JSON.parse(fs.readFileSync(path.join(gw.dir, 'state.json'), 'utf8'));
+    st.public.alpha.artifacts.mock.tree = T;
+    st.public.beta.artifacts.big.tree = 'd'.repeat(64);
+    fs.writeFileSync(path.join(gw.dir, 'state.json'), JSON.stringify(st));
+    // the viewer: only under the wrapper's grant, for that port, page and version, and not yet expired
+    const at = `tree:${T}`;
+    const viewer = (w, extra = '') => `/view/artifact/mock?at=${at}${w === null ? '' : `&w=${w}`}${extra}`;
+    const good = gw.g.wrapGrant(P + 20, 'mock', at);
+    assert.match(good, /^\d+\.[\w-]{22}$/);
+    assert.equal(fa(await gw.req('GET', viewer(good), { on: P + 20, headers: fromPublic })), `frame-ancestors 'self' ${gw.publicUrl} ${gw.site}`, 'a valid grant');
+    assert.equal((await gw.req('GET', viewer(good), { on: P + 20, headers: fromPublic })).headers['content-security-policy-report-only'], "frame-ancestors 'self'", 'a report-only policy is left as it is');
+    const [exp, sig] = good.split('.');
+    const flip = (c) => (c === 'A' ? 'B' : 'A');
+    const refused = {
+      'no grant': viewer(null),
+      'an empty grant': viewer(''),
+      'a forged mac': viewer(`${exp}.${sig.slice(0, -1)}${flip(sig.at(-1))}`),
+      'a moved expiry': viewer(`${Number(exp) + 60000}.${sig}`),
+      'an expired grant': viewer(gw.g.wrapGrant(P + 20, 'mock', at, Date.now() - 1)),
+      'a grant good for a day': viewer(gw.g.wrapGrant(P + 20, 'mock', at, Date.now() + 86400000)),
+      'another port\'s grant': viewer(gw.g.wrapGrant(P + 21, 'mock', at)),
+      'another page\'s grant': viewer(gw.g.wrapGrant(P + 20, 'other', at)),
+      'another version\'s grant': viewer(gw.g.wrapGrant(P + 20, 'mock', 'main')),
+      'a second at': viewer(good, '&at=main'),
+      'a second grant': viewer(good, `&w=${good}`),
+      'a grant on another viewer': `/view/preview/cool-tiger?at=${at}&w=${good}`,
+      'a grant under a longer path': `/view/artifact/mock/x?at=${at}&w=${good}`,
+    };
+    for (const [why, v] of Object.entries(refused)) assert.equal(fa(await gw.req('GET', v, { on: P + 20, headers: fromPublic })), `frame-ancestors 'self' ${gw.publicUrl}`, why);
+    // a tree: only a version published from this instance, under that page's own name
+    assert.equal(fa(await gw.req('GET', `/artifact/tree/${'d'.repeat(64)}/big/s.css`, { on: P + 20 })), `frame-ancestors ${inst} ${gw.publicUrl} ${gw.site}`, 'sha256 tree');
     // a published tree, under its capability and without
     const cap = /^(\/c\/[^/]+)\//.exec((await gw.req('GET', `/artifact/tree/${T}/mock/`, { on: P + 20, headers: framed })).headers.location)[1];
     assert.equal(fa(await gw.req('GET', `${cap}/artifact/tree/${T}/mock/s.css`, { on: P + 20, cookie: '', headers: opaque })), `frame-ancestors ${inst} ${gw.publicUrl} ${gw.site}`);
     assert.equal(fa(await gw.req('GET', `/artifact/tree/${T}/mock/s.css`, { on: P + 20 })), `frame-ancestors ${inst} ${gw.publicUrl} ${gw.site}`);
+    for (const [why, t] of [['a tree published by no one', `/artifact/tree/${'e'.repeat(40)}/mock/s.css`], ['a published tree under another page', `/artifact/tree/${T}/big/s.css`], ['another page\'s tree', `/artifact/tree/${'d'.repeat(64)}/mock/s.css`]])
+      assert.equal(fa(await gw.req('GET', t, { on: P + 20 })), `frame-ancestors ${inst} ${gw.publicUrl}`, why);
     // nothing else of an instance's
     const mainCap = /^(\/c\/[^/]+)\//.exec((await gw.req('GET', '/artifact/main/mock/', { on: P + 20, headers: framed })).headers.location)[1];
     assert.equal(fa(await gw.req('GET', `${mainCap}/artifact/main/mock/s.css`, { on: P + 20, cookie: '', headers: opaque })), `frame-ancestors ${inst} ${gw.publicUrl}`, 'main\'s artifacts');
@@ -2536,8 +2572,13 @@ test('/.devteam/lens on a preview\'s name: the gateway\'s own page, for the owne
 });
 
 test('public.<box>: the signed-in owner\'s own visit gets the viewer at the published version; anyone else, and any doubt, the plain bytes', async () => {
-  const helloMs = 400;
-  const gw = await gateway('public-wrap', { wrapperHelloMs: helloMs });
+  // The choice is a lookup in the hub's list as last polled, the same for every visit: nothing is
+  // asked on the request path, so how long it takes says nothing of who is visiting (spec §11).
+  const hub = { list: [], hits: 0 };
+  hub.srv = http.createServer((q, res) => { hub.hits++; res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ hub: 1, instances: hub.list })); });
+  await new Promise((r) => hub.srv.listen(HUB, '127.0.0.1', r));
+  const listing = (over = {}) => ({ devteam: 1, name: 'alpha', root: '/srv/alpha', port: P + 20, viewer: 1, ...over });
+  const gw = await gateway('public-wrap');
   const K = fakeKit(P + 20);
   await K.up();
   const page = '<!doctype html><p>hi';
@@ -2555,6 +2596,9 @@ test('public.<box>: the signed-in owner\'s own visit gets the viewer at the publ
       assert.match(r.headers['content-security-policy'], /; sandbox allow-scripts allow-forms allow-modals allow-pointer-lock$/, why);
       assert.doesNotMatch(r.headers['content-security-policy'], /allow-same-origin/, why);
     };
+    hub.list = [listing()];
+    plain(await get('/alpha/hello/'), 'before the hub\'s list is first read');
+    await gw.g.pollPush();
     let r = await get('/alpha/hello/');
     assert.equal(r.status, 200);
     assert.notEqual(r.body, page, 'the wrapper, not the bytes');
@@ -2562,7 +2606,14 @@ test('public.<box>: the signed-in owner\'s own visit gets the viewer at the publ
     assert.equal(r.headers['content-security-policy'], `default-src 'none'; style-src 'unsafe-inline'; frame-src ${gw.inst(P + 20)}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`, 'a policy of its own: no script, nothing to connect to');
     assert.match(r.body, /sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads"/);
     assert.doesNotMatch(r.body, /allow-popups-to-escape-sandbox|allow-top-navigation/, 'its frame can neither navigate this tab nor open a window outside its sandbox');
-    assert.ok(r.body.includes(`<iframe src="${gw.inst(P + 20)}/view/artifact/hello?at=tree:${tree}"`), r.body);
+    const src = /<iframe src="([^"]+)"/.exec(r.body)[1].replace(/&#38;|&amp;/g, '&');
+    assert.match(src, new RegExp(`^${gw.inst(P + 20).replace(/\./g, '\\.')}/view/artifact/hello\\?at=tree:${tree}&w=\\d+\\.[\\w-]{22}$`), src);
+    // the frame's grant: with it, and only with it, the viewer may sit under the public name
+    const fa = (x) => x.headers['content-security-policy'].split(/;\s*/).find((d) => d.startsWith('frame-ancestors'));
+    const fromPublic = { 'sec-fetch-dest': 'iframe', 'sec-fetch-site': 'same-site', 'sec-fetch-mode': 'navigate' };
+    const viewerPath = src.slice(gw.inst(P + 20).length);
+    assert.equal(fa(await gw.req('GET', viewerPath, { on: P + 20, headers: fromPublic })), `frame-ancestors 'self' ${gw.publicUrl} ${gw.site}`, 'the wrapper\'s grant lets the public name frame the viewer');
+    assert.equal(fa(await gw.req('GET', viewerPath.replace(/&w=.*/, ''), { on: P + 20, headers: fromPublic })), `frame-ancestors 'self' ${gw.publicUrl}`, 'and without it, no');
     assert.match(r.body, /<a href="\?plain">Open it as the public sees it<\/a>/);
     assert.match(r.body, /Public · alpha\/hello/);
     assert.ok(r.body.includes('A &#60;b&#62;mock') && !r.body.includes('<b>mock'), 'the title is escaped');
@@ -2573,23 +2624,20 @@ test('public.<box>: the signed-in owner\'s own visit gets the viewer at the publ
     assert.ok(meta(login.body), login.body);
     assert.equal(meta(r.body), meta(login.body), 'the viewport doc() gives');
     assert.match(r.body, /html\{touch-action:manipulation\}/, 'and its touch-action');
-    const asked = K.seen.filter((x) => x.url === '/api/hello');
-    assert.equal(asked.length, 1, 'the wrapper asked the bound instance who it is');
-    assert.deepEqual([asked[0].h.host, asked[0].h.cookie, asked[0].h['sec-fetch-site'], asked[0].h.origin], [`127.0.0.1:${P + 20}`, undefined, undefined, undefined], 'as a loopback client: nothing of the owner\'s goes with it');
+    const hellos = () => K.seen.filter((x) => x.url === '/api/hello').length;
+    const hits = hub.hits;
+    assert.equal(hellos(), 0, 'the instance is never asked on the request path');
     assert.ok((await get('/alpha/hello/index.html')).body.includes('<iframe'), 'its index by name too');
     // the plain bytes, with vary: cookie on the document
     plain(await get('/alpha/hello/?plain'), '?plain');
     plain(await get('/alpha/hello/', { ...NAV, 'sec-fetch-dest': 'iframe' }), 'a frame load');
     plain(await get('/alpha/hello/', { accept: 'text/html' }), 'no fetch metadata: an old browser');
-    const hellos = () => K.seen.filter((x) => x.url === '/api/hello').length;
-    const before = hellos();
     plain(await get('/alpha/hello/', NAV, ''), 'no cookie');
     plain(await get('/alpha/hello/', NAV, `devteam_session=${'A'.repeat(43)}`), 'a cookie that is no session');
-    assert.equal(hellos(), before, 'without a session the instance is never asked: no anonymous visit reaches it');
     // a signed-in owner arriving from a link elsewhere gets it too: nothing in it is readable to
     // that site, its frame is sandboxed, and the frame's URL comes from the binding, not the query
     r = await get('/alpha/hello/?at=main&slug=other', { ...NAV, 'sec-fetch-site': 'cross-site' });
-    assert.ok(r.body.includes(`<iframe src="${gw.inst(P + 20)}/view/artifact/hello?at=tree:${tree}"`), 'a cross-site visit: the wrapper, framing the published tree whatever the query says');
+    assert.ok(r.body.includes(`<iframe src="${gw.inst(P + 20)}/view/artifact/hello?at=tree:${tree}&#38;w=`), 'a cross-site visit: the wrapper, framing the published tree whatever the query says');
     r = await gw.req('HEAD', '/alpha/hello/', { on: 'public', headers: NAV });
     assert.deepEqual([r.status, r.body, r.headers.vary, r.headers['cache-control']], [200, '', 'cookie, sec-fetch-dest', 'public, max-age=60'], 'HEAD');
     r = await get('/alpha/hello/app.js');
@@ -2599,30 +2647,32 @@ test('public.<box>: the signed-in owner\'s own visit gets the viewer at the publ
     const etag = `"${crypto.createHash('sha256').update(page).digest('hex')}"`;
     r = await get('/alpha/hello/', { ...NAV, 'if-none-match': etag });
     assert.deepEqual([r.status, r.headers['cache-control'], r.body.includes('<iframe')], [200, 'no-store, private', true], 'If-None-Match: the wrapper');
-    // the instance decides whether threads can be had: a kit with viewers, at the bound checkout, now
-    K.hello = { devteam: 1, name: 'alpha', root: '/srv/alpha', port: P + 20 };
-    plain(await get('/alpha/hello/'), 'a kit without viewers');
-    K.hello = { devteam: 1, name: 'alpha', root: '/srv/other', port: P + 20, viewer: 1 };
-    plain(await get('/alpha/hello/'), 'another checkout on that port');
-    // a binding and a hello that both lack a root are no match
-    K.hello = { devteam: 1, name: 'alpha', port: P + 20, viewer: 1 };
+    assert.deepEqual([hellos(), hub.hits], [0, hits], 'no visit, with a session or without, asks the instance or the hub anything');
+    // the list says whether threads can be had: a kit with viewers, at the bound checkout, as last polled
+    const as = async (list, why) => { hub.list = list; await gw.g.pollPush(); plain(await get('/alpha/hello/'), why); };
+    await as([listing({ viewer: undefined })], 'a kit without viewers');
+    await as([listing({ viewer: true })], 'viewer is 1, nothing else');
+    await as([listing({ root: '/srv/other' })], 'another checkout on that port');
+    await as([listing({ port: P + 21 })], 'listed on another port');
+    await as([], 'not listed');
+    // a binding without a root matches no listing (the list's roots are always strings)
+    hub.list = [listing()];
+    await gw.g.pollPush();
     const rooted = fs.readFileSync(state);
     const nr = JSON.parse(rooted);
     delete nr.public.alpha.root;
     fs.writeFileSync(state, JSON.stringify(nr));
-    const askedBefore = K.seen.filter((x) => x.url === '/api/hello').length;
-    plain(await get('/alpha/hello/'), 'no root on either side');
-    assert.equal(K.seen.filter((x) => x.url === '/api/hello').length, askedBefore, 'a root-less binding is rejected before any hello is asked');
+    plain(await get('/alpha/hello/'), 'no root in the binding');
     fs.writeFileSync(state, rooted);
-    K.hello = null;
-    plain(await get('/alpha/hello/'), 'a hello cut off');
-    K.hello = 'slow';
-    const t0 = Date.now();
-    plain(await get('/alpha/hello/'), 'a hello that never comes');
-    assert.ok(Date.now() - t0 < helloMs + 1500, `a slow instance costs at most its deadline (${Date.now() - t0} ms)`);
-    await K.close();
-    plain(await get('/alpha/hello/'), 'nothing on the port');
-    // the same revalidation now the instance is closed (above): the plain path, so a 304, and it varies on the cookie
+    // as last polled, and only then: a change waits for the next poll, and a visit never asks sooner
+    assert.ok((await get('/alpha/hello/')).body.includes('<iframe'), 'listed again');
+    hub.list = [];
+    const before = hub.hits;
+    assert.ok((await get('/alpha/hello/')).body.includes('<iframe'), 'still the list as last polled (up to 10 s stale)');
+    assert.equal(hub.hits, before, 'a visit never refreshes the list');
+    await gw.g.pollPush();
+    plain(await get('/alpha/hello/'), 'gone at the next poll');
+    // the plain path: a revalidation gets a 304, and it varies on the cookie
     r = await get('/alpha/hello/', { ...NAV, 'if-none-match': etag });
     assert.deepEqual([r.status, r.headers.vary, r.headers['cross-origin-opener-policy']], [304, 'cookie, sec-fetch-dest', 'same-origin'], 'a 304 for the document has the index\'s headers too');
     seedPublic(gw.dir, 'beta', 'x', { 'index.html': page }, { root: '/srv/alpha', port: 1 });
@@ -2632,5 +2682,5 @@ test('public.<box>: the signed-in owner\'s own visit gets the viewer at the publ
     fs.writeFileSync(state, '{');
     assert.deepEqual([(await get('/alpha/hello/')).status, (await get('/alpha/hello/', NAV, '')).status], [503, 503]);
     fs.writeFileSync(state, kept);
-  } finally { await K.close().catch(() => {}); await gw.close(); }
+  } finally { await K.close().catch(() => {}); await gw.close(); await new Promise((res) => hub.srv.close(res)); }
 });
