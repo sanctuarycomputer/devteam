@@ -308,3 +308,14 @@ Branch `ooda-lineage` off `ooda-signals` (PR 2); base `ooda-signals` until it me
 ### Task 5: docs and PR
 
 - [ ] `supervisor.md` §3: one paragraph on the lineage (`peek <kind> <id> --mermaid` for retros and PR bodies) and orientation debt. Merge `ooda-signals` (and main) in, full suite, push, PR with base `ooda-signals`; body says what the operator's review can read (`peek … --json`'s `lineage`, `dashboard-data`'s `ooda.debt`).
+
+### PR 3 review fixes (Fable, folded in; these win over the tasks above)
+
+1. **Edges by field, not by source type.** For each object `o`: for `k` of `evidence`, `refs`, `blocks`, `knowledge`: each `t` of `o[k]` that `logGet(t)` resolves is an edge `t → o` (`why` from the field: evidence `'evidence'`, refs `'about'`, blocks `'asks about'`, knowledge `'rests on'`); `o.approved_by` → `o` (`'approved'`); `o.decision` → `o` (`'carried out'`). Cited → citing is earlier → later for every field. Then the pseudo-edges (signal, correction). This covers `fix-deployed`/`recurred` (they ref the incident and ticket), knowledge evidence of any type, problems citing acts, and `worker-slots` → ticket.
+2. **Work-graph and conversation nodes are leaves** (`stageOf === null`, goals included): drawn, never expanded. **Collapse key** is `(neighbour, direction, type, kind)`.
+3. **Async insert vs `showDrawer`:** `LINEAGE_SVG = new Map()` keyed by the joined node ids. `lineageBlock` returns the cached, already-wrapped SVG inline when present; else a `<div data-lineage="<key>">` with the list fallback, and starts `drawMermaid`; on success it wraps the nodes in the string (build in a detached DOM, serialize), stores it, and calls `redraw()`. The list is the first paint.
+4. **Labels:** `label.replace(/\s+/g, ' ').replace(/[^A-Za-z0-9 .,:!?()'/+-]/g, '').slice(0, 60)` (no `"`, `;`, `#`, `%`); empty → the id. Wrapper `<a>` built with `setAttribute('href', …)`, ids `encodeURIComponent`-ed.
+5. **Select** `g.node[data-id="n<i>"]`; `n<i>` order is `lineage.nodes` order. Force the fallback in Chrome with `MERMAID = Promise.reject(new Error('blocked'))` evaluated in the page before opening. CI has no Chrome, so the CLI test also asserts the fallback's data (nodes by stage) and the `n<i>` order.
+6. **Whole-card click:** one delegated handler on `[data-open]` that ignores Shift/Meta/Ctrl, non-primary buttons, `TL.pin`, clicks inside `a, button, input, select, textarea, label, [data-correct-form], .untrusted`, and a text selection; remove the incidents' per-element `onclick` (~2580) so nothing double-fires.
+7. **`loopPlace` data:** `signalGroups()` returns every group (under three too) with its spread flag; `orientClusters()` is built on it. `collectOoda.observations[*].place` is computed for the 40 shown only, from `signalGroups()` and `linkIndex()`.
+8. `peekView` for `signal` sets `record: null` (no `recordView` die). `linkIndex` caches on the `readLog()` object.
