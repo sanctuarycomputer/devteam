@@ -1552,7 +1552,11 @@ function logRule(headRef, sha, R = repo('home')) {
       for (const sib of siblings) prevAt = [prevAt, lastAt(`${git(['show', `${base}:${prefix}${sib}`]) ?? ''}\n`)].sort().pop();
     }
     const committedAt = Date.parse(git(['show', '-s', '--format=%cI', sha]) ?? '');
-    for (const l of added.lines) {
+    // every added line's time, a newer kit's included (parseLines leaves those out of lines): one
+    // in the future would fail every later sync of this append-only file
+    const start = prev.split('\n').filter(Boolean).length + 1;
+    const stamped = next.slice(prev.length).split('\n').filter(Boolean).map((raw, i) => { try { const at = JSON.parse(raw)?.at; return typeof at === 'string' ? { at, __line: start + i } : null; } catch { return null; } }).filter(Boolean);
+    for (const l of stamped) {
       if (month && !l.at.startsWith(month)) fails.push(`project/log/${name}:${l.__line}: ${l.at} is not in ${month}`);
       if (l.at < prevAt) fails.push(`project/log/${name}:${l.__line}: ${l.at} is earlier than the line before it`);
       if (!Number.isNaN(committedAt) && Date.parse(l.at) > committedAt + 5 * 60000) fails.push(`project/log/${name}:${l.__line}: ${l.at} is after the commit time`);
@@ -2593,6 +2597,7 @@ function cmdValidate() {
   }
 
   for (const e of readLog().errors) warnings.push(`log ${e}`);
+  for (const u of readLog().unknown) warnings.push(`log written by a newer kit (upgrade): ${u}`);
   { const r = questionRewrites(); errors.push(...r.errors); warnings.push(...r.warnings); }
   for (const i of readLog().ignored) if (['ticket', 'feature'].includes(i.line.type) && i.why === 'duplicate id') errors.push(`${i.line.id}: a second ${i.line.type} line with this id (${i.line.__file}:${i.line.__line}) was ignored; use ${i.line.type} set`);
   const raw = ladder().raw_ceilings;

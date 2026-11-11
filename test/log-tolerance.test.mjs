@@ -40,6 +40,7 @@ test('log-sync lands a file whose lines carry a field this kit doesn\'t know', (
     const id = ok(old, ['problem', 'add', '--title', 'slow page', '--severity', '1'], SUP).trim();
     const file = path.join(old, 'docs/devteam/run/log', `supervisor-${month()}.jsonl`);
     fs.appendFileSync(file, line({ id, type: 'problem', op: 'set', at: new Date().toISOString(), by: 'supervisor', status: 'owned', figures: { informed: 1 } }));
+    fs.appendFileSync(file, line({ id: `l-${id.slice(2)}`, type: 'learning', op: 'new', at: new Date().toISOString(), by: 'supervisor', kind: 'outcome' }));
     const r = F.run(old, ['log-sync'], SUP);
     assert.equal(r.status, 0, r.err || r.out);
     assert.doesNotMatch(`${r.err}\n${r.out}`, /not synced/);
@@ -50,6 +51,14 @@ test('log-sync lands a file whose lines carry a field this kit doesn\'t know', (
     fs.writeFileSync(body, '## One-way doors\n\nNone.\n');
     const c = F.run(old, ['check-pr', '--head-ref', 'chore-log', '--sha', F.g(['rev-parse', 'chore-log'], old), '--title', 'chore-log: log', '--body-file', body]);
     assert.equal(c.status, 0, c.err || c.out);
+    // a newer kit's line is still held to time order: one dated in the future fails the check
+    const wt = path.join(F.base, 'wt-future');
+    F.g(['worktree', 'add', '-q', '--detach', wt, 'chore-log'], old);
+    fs.appendFileSync(path.join(wt, `docs/devteam/project/log/supervisor-${month()}.jsonl`), line({ id: 'l-x', type: 'learning', op: 'new', at: '2099-01-01T00:00:00.000Z', by: 'supervisor' }));
+    F.g(['commit', '-qam', 'a line from the future'], wt);
+    const late = F.run(old, ['check-pr', '--head-ref', 'chore-log', '--sha', F.g(['rev-parse', 'HEAD'], wt), '--title', 'chore-log: log', '--body-file', body]);
+    assert.notEqual(late.status, 0);
+    assert.match(late.out + late.err, /is not in|after the commit time/);
   } finally { F.done(); }
 });
 
@@ -66,6 +75,7 @@ test('every kind of line takes a newer kit\'s field: new lines, owner lines, pla
     // a set line with only unknown fields changes nothing
     const pid = ok(old, ['problem', 'add', '--title', 'slow page', '--severity', '1'], SUP).trim();
     fs.appendFileSync(sup, line({ id: pid, type: 'problem', op: 'set', at: at(), by: 'supervisor', figures: { n: 2 } }));
+    assert.equal(json(ok(old, ['log', '--id', pid, '--json']))[0].updates?.length ?? 0, 0, 'a set of only unknown fields changes nothing');
     // an owner line with its channel and an unknown field
     const own = path.join(old, 'docs/devteam/run/log', `owner-${month()}.jsonl`);
     fs.appendFileSync(own, line({ id: pid, type: 'problem', op: 'set', at: at(), by: 'owner', channel: 'cli', status: 'owned', figures: { n: 3 } }));
