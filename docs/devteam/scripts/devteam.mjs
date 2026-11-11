@@ -10855,7 +10855,7 @@ async function cmdDashboard() {
     // The kit's version is checked again when main moves (an adoption landing) and every 10 min.
     const main = mainRef() ? git(['rev-parse', '--verify', '--quiet', mainRef()], mainRoot) : null;
     const fresh = !kit || main !== kitAt.main || Date.now() - kitAt.at > 600000;
-    execFile(process.execPath, [self, 'hello', '--json', ...(fresh ? [] : ['--no-kit'])], { cwd: mainRoot, env: ownerEnv, timeout: 20000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
+    execFile(process.execPath, [self, 'hello', '--json', '--pane', ...(fresh ? [] : ['--no-kit'])], { cwd: mainRoot, env: ownerEnv, timeout: 20000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
       helloRunning = false;
       if (err) return;
       try { hello = JSON.parse(stdout); if (fresh && hello.kit) { kit = hello.kit; kitAt = { main, at: Date.now() }; } } catch {}
@@ -10917,7 +10917,7 @@ async function cmdDashboard() {
     const stat = (p) => { try { const s = fs.statSync(p); return `${s.size}:${s.mtimeMs}`; } catch { return '-'; } };
     const keyed = [...names].sort().map((f) => [f, `${stat(path.join(liveLogDir(), f))}/${stat(path.join(durableLogDir(), f))}`]);
     const key = keyed.map(([f, k]) => `${f}=${k}`).join('|');
-    if (threadsMemo.key === key) return { body: threadsMemo.body, cached: true };
+    if (threadsMemo.key === key) return { body: threadsMemo.body, cached: true, key };
     for (const f of [...threadFiles.keys()]) if (!names.has(f)) threadFiles.delete(f);
     for (const [f, k] of keyed) {
       if (threadFiles.get(f)?.k === k) continue;
@@ -10930,12 +10930,11 @@ async function cmdDashboard() {
     const asked = new Set(all.filter((l) => l.type === 'question' && l.op === 'new' && typeof l.thread === 'string').map((l) => l.id));
     const body = JSON.stringify(threadViews(fold(all.filter((l) => l.type !== 'question' || asked.has(l.id))).objects));
     threadsMemo = { key, body };
-    return { body, cached: false };
+    return { body, cached: false, key };
   };
-  // Whether the supervisor has a pane the kit can type into, for the card's "hasn't replied yet": asked
-  // of tmux at most every 10 s (resolvePane's calls are synchronous), never on every poll.
-  let paneSeen = { at: 0, pane: false };
-  const supervisorPane = () => { if (Date.now() - paneSeen.at > 10000) paneSeen = { at: Date.now(), pane: !resolvePane(supervisorTarget()).problem }; return paneSeen.pane; };
+  // Whether the supervisor has a pane the kit can type into, for the card's "hasn't replied yet": what
+  // the 10 s hello child found (hello --pane), so a read never waits on tmux.
+  const supervisorPane = () => hello?.supervisor_pane === true;
   const server = http.createServer(async (req, res) => {
     // Every route answers only on the dashboard's own address: a page elsewhere that points its own
     // name at 127.0.0.1 (DNS rebinding) sends its own Host, and gets nothing, not even a read.
@@ -10969,8 +10968,15 @@ async function cmdDashboard() {
       if (site !== undefined && site !== 'same-origin') return send(res, 403, 'application/json', JSON.stringify({ error: "not for another site's page" }));
       let r;
       try { r = threadsRead(); } catch (e) { return send(res, 500, 'application/json', JSON.stringify({ error: e.message })); }
-      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store', ...(r.cached ? { 'x-devteam-threads': 'cached' } : {}) });
-      return res.end(`{"supervisor":${JSON.stringify({ pane: supervisorPane() })},"threads":${r.body}}`);
+      const pane = supervisorPane();
+      // Nothing changed since the page's last read (no log file, no pane state): a 304, and the browser
+      // keeps its copy (no-cache: it asks every time). Behind the gateway, which says no-store, only
+      // this process's work is saved.
+      const tag = `"${sha256(`${r.key}|${pane}`).slice(0, 20)}"`;
+      const head = { etag: tag, 'cache-control': 'private, no-cache', ...(r.cached ? { 'x-devteam-threads': 'cached' } : {}) };
+      if (req.headers['if-none-match'] === tag) { res.writeHead(304, head); return res.end(); }
+      res.writeHead(200, { 'content-type': 'application/json', ...head });
+      return res.end(`{"supervisor":${JSON.stringify({ pane })},"threads":${r.body}}`);
     }
     // Whether the fleet can move now: fleet status, without fetching (the strip at the top asks).
     if (req.method === 'GET' && u.pathname === '/api/fleet') {
@@ -14004,7 +14010,9 @@ function cmdHello() {
   // the Inbox as the dashboard counts it: open questions and lessons waiting to be kept
   const inbox = questions().filter((q) => q.status === 'open' && q.goal_hold !== 'let-go').length + logObjects('knowledge').filter((k) => k.status === 'candidate').length;
   const workers = ourWindows(tmuxSession()).length;
-  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, fleet: { mode: fleetMode() ?? 'run', workers }, ...(helloAlert() ? { alert: helloAlert() } : {}) };
+  // --pane: whether the supervisor has a pane the kit can type into, for the dashboard's 10 s run of
+  // this (its threads' "hasn't replied yet"), so the dashboard's own process never asks tmux itself
+  const r = { devteam: 1, root: fs.realpathSync(mainRoot), name: s.project ?? path.basename(mainRoot), kit: flags['no-kit'] ? null : kitVersion(), inbox, fleet: { mode: fleetMode() ?? 'run', workers }, ...(helloAlert() ? { alert: helloAlert() } : {}), ...(flags.pane ? { supervisor_pane: !resolvePane(supervisorTarget()).problem } : {}) };
   return flags.json ? json(r) : out(`${r.name} at ${r.root}: kit ${r.kit}, ${inbox} open question(s), fleet ${r.fleet.mode}, ${workers} session(s)`);
 }
 // The kit's release (settings.upstream_base), +local when the kit that is running differs from the

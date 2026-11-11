@@ -655,6 +655,61 @@ test("a dashboard started in the supervisor's pane: its actions are still the ow
   assert.equal(fs.readFileSync(path.join(F.old, 'docs/devteam/run/supervisor-pane'), 'utf8'), '%4242', "the supervisor's pane is still the one recorded");
 });
 
+test("/api/threads: the supervisor's pane as the 10 s hello found it, never asked of tmux on a read; nothing changed is a 304", { skip: hasTmux ? false : 'no tmux' }, async (t) => {
+  const F = threadsFixture('threads-etag');
+  t.after(() => F.done());
+  const pane = F.standIn();
+  // only when asked: machine status and the hub's probes never pay for a tmux look
+  assert.equal(JSON.parse(F.owner(['hello', '--json', '--no-kit', '--pane'], { DEVTEAM_SUPERVISOR: pane.target })).supervisor_pane, true);
+  assert.equal(JSON.parse(F.owner(['hello', '--json', '--no-kit'], { DEVTEAM_SUPERVISOR: pane.target })).supervisor_pane, undefined);
+  const port = await freePort();
+  const B = `http://127.0.0.1:${port}`;
+  const d = startDashboard(F.old, F.env({ DEVTEAM_SUPERVISOR: pane.target }), ['--port', String(port)]);
+  t.after(() => d.stop());
+  await until(() => new RegExp(`dashboard on http://127\\.0\\.0\\.1:${port}\\b`).test(d.out()), 'the dashboard');
+  await until(async () => (await (await fetch(`${B}/api/threads`)).json()).supervisor.pane === true, 'the pane, from the hello child');
+  // a read with nothing changed since the page's last is a 304, with no body
+  let r = await fetch(`${B}/api/threads`);
+  const tag = r.headers.get('etag');
+  assert.match(tag, /^"[0-9a-f]{20}"$/);
+  assert.equal(r.headers.get('cache-control'), 'private, no-cache', 'kept, and asked about each time');
+  r = await fetch(`${B}/api/threads`, { headers: { 'if-none-match': tag } });
+  assert.equal(r.status, 304);
+  assert.equal(await r.text(), '');
+  F.owner(['thread', 'new', 'Anything new']);
+  r = await fetch(`${B}/api/threads`, { headers: { 'if-none-match': tag } });
+  assert.equal(r.status, 200, 'a line written since: the whole answer');
+  assert.notEqual(r.headers.get('etag'), tag);
+  assert.equal((await r.json()).threads.length, 1);
+  // same-origin only, whatever it carries
+  assert.equal((await fetch(`${B}/api/threads`, { headers: { 'if-none-match': tag, 'sec-fetch-site': 'cross-site' } })).status, 403);
+});
+
+test('/api/threads asks tmux nothing on a read: a tmux that logs every call sees none from the dashboard itself', async (t) => {
+  const F = threadsFixture('threads-no-tmux');
+  t.after(() => F.done());
+  // a tmux first on PATH that writes down who called it (its parent's pid) and fails
+  const bin = fs.mkdtempSync(path.join(F.base, 'bin-'));
+  const calls = path.join(bin, 'calls.txt');
+  write(path.join(bin, 'tmux'), `#!/bin/sh\necho "$PPID $*" >> ${JSON.stringify(calls)}\nexit 1\n`);
+  fs.chmodSync(path.join(bin, 'tmux'), 0o755);
+  const port = await freePort();
+  const B = `http://127.0.0.1:${port}`;
+  // a named supervisor pane, so an older kit's read would look it up; the preview tick kept quiet
+  const d = startDashboard(F.old, F.env({ PATH: `${bin}${path.delimiter}${process.env.PATH}`, DEVTEAM_SUPERVISOR: 'sup:main', DEVTEAM_PREVIEW_TICK_MS: '600000' }), ['--port', String(port)]);
+  t.after(() => d.stop());
+  await until(() => new RegExp(`dashboard on http://127\\.0\\.0\\.1:${port}\\b`).test(d.out()), 'the dashboard');
+  const own = () => (fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8') : '').split('\n').filter((l) => l.startsWith(`${d.p.pid} `));
+  assert.equal((await fetch(`${B}/api/threads`)).status, 200);
+  // past the 10 s an older kit kept its own tmux answer for
+  await new Promise((r) => setTimeout(r, 11000));
+  const before = own().length;
+  for (let i = 0; i < 30; i++) assert.equal((await fetch(`${B}/api/threads`)).status, 200);
+  assert.deepEqual(own().slice(before), [], 'not one tmux call from the dashboard\'s own process across 30 reads');
+  // the hello child is what asks, in a process of its own
+  await until(() => fs.existsSync(calls) && fs.readFileSync(calls, 'utf8').split('\n').some((l) => l && !l.startsWith(`${d.p.pid} `)), 'the hello child asking');
+});
+
 test('every item the dashboard draws says what it is; a question asked in a thread links to it; an answer from a thread says so', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
   const html = fs.readFileSync(path.join(kit, 'dashboard/index.html'), 'utf8');
   for (const type of ['goal', 'question', 'ticket', 'planner', 'observation', 'problem', 'lesson', 'act', 'preview', 'artifact']) assert.match(html, new RegExp(`subj\\('${type}'`), `the ${type} renderer marks its item`);
