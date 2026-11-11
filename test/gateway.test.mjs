@@ -2520,14 +2520,14 @@ test('public.<box>: the signed-in owner\'s own visit gets the viewer at the publ
     fs.writeFileSync(state, JSON.stringify(s));
     const get = (route, headers = NAV, cookie = gw.jar()) => gw.req('GET', route, { on: 'public', cookie, headers });
     const plain = (r, why) => {
-      assert.deepEqual([r.status, r.body, r.headers['cache-control'], r.headers.vary], [200, page, 'public, max-age=60', 'cookie'], why);
+      assert.deepEqual([r.status, r.body, r.headers['cache-control'], r.headers.vary, r.headers['cross-origin-opener-policy']], [200, page, 'public, max-age=60', 'cookie, sec-fetch-dest', 'same-origin'], why);
       assert.match(r.headers['content-security-policy'], /; sandbox allow-scripts allow-forms allow-modals allow-pointer-lock$/, why);
       assert.doesNotMatch(r.headers['content-security-policy'], /allow-same-origin/, why);
     };
     let r = await get('/alpha/hello/');
     assert.equal(r.status, 200);
     assert.notEqual(r.body, page, 'the wrapper, not the bytes');
-    assert.deepEqual([r.headers['cache-control'], r.headers.vary, r.headers['x-frame-options'], r.headers['referrer-policy'], r.headers['set-cookie']], ['no-store, private', 'cookie', 'DENY', 'no-referrer', undefined]);
+    assert.deepEqual([r.headers['cache-control'], r.headers.vary, r.headers['x-frame-options'], r.headers['referrer-policy'], r.headers['set-cookie'], r.headers['cross-origin-opener-policy']], ['no-store, private', 'cookie, sec-fetch-dest', 'DENY', 'no-referrer', undefined, 'same-origin'], 'the opener policy on the wrapper and the plain index alike: a popup\'s window says nothing of who is visiting');
     assert.equal(r.headers['content-security-policy'], `default-src 'none'; style-src 'unsafe-inline'; frame-src ${gw.inst(P + 20)}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`, 'a policy of its own: no script, nothing to connect to');
     assert.match(r.body, /sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads"/);
     assert.doesNotMatch(r.body, /allow-popups-to-escape-sandbox|allow-top-navigation/, 'its frame can neither navigate this tab nor open a window outside its sandbox');
@@ -2554,15 +2554,23 @@ test('public.<box>: the signed-in owner\'s own visit gets the viewer at the publ
     r = await get('/alpha/hello/?at=main&slug=other', { ...NAV, 'sec-fetch-site': 'cross-site' });
     assert.ok(r.body.includes(`<iframe src="${gw.inst(P + 20)}/view/artifact/hello?at=tree:${tree}"`), 'a cross-site visit: the wrapper, framing the published tree whatever the query says');
     r = await gw.req('HEAD', '/alpha/hello/', { on: 'public', headers: NAV });
-    assert.deepEqual([r.status, r.body, r.headers.vary, r.headers['cache-control']], [200, '', 'cookie', 'public, max-age=60'], 'HEAD');
+    assert.deepEqual([r.status, r.body, r.headers.vary, r.headers['cache-control']], [200, '', 'cookie, sec-fetch-dest', 'public, max-age=60'], 'HEAD');
     r = await get('/alpha/hello/app.js');
-    assert.deepEqual([r.body, r.headers.vary], ['x()', undefined], 'a file is never wrapped, and doesn\'t vary');
+    assert.deepEqual([r.body, r.headers.vary, r.headers['cross-origin-opener-policy']], ['x()', undefined, undefined], 'a file is never wrapped, and its headers are as they were');
     assert.equal((await get('/alpha/nope/')).status, 404, 'nothing published there: still 404');
     // the instance decides whether threads can be had: a kit with viewers, at the bound checkout, now
     K.hello = { devteam: 1, name: 'alpha', root: '/srv/alpha', port: P + 20 };
     plain(await get('/alpha/hello/'), 'a kit without viewers');
     K.hello = { devteam: 1, name: 'alpha', root: '/srv/other', port: P + 20, viewer: 1 };
     plain(await get('/alpha/hello/'), 'another checkout on that port');
+    // a binding and a hello that both lack a root are no match
+    K.hello = { devteam: 1, name: 'alpha', port: P + 20, viewer: 1 };
+    const rooted = fs.readFileSync(state);
+    const nr = JSON.parse(rooted);
+    delete nr.public.alpha.root;
+    fs.writeFileSync(state, JSON.stringify(nr));
+    plain(await get('/alpha/hello/'), 'no root on either side');
+    fs.writeFileSync(state, rooted);
     K.hello = null;
     plain(await get('/alpha/hello/'), 'a hello cut off');
     K.hello = 'slow';
@@ -2573,7 +2581,7 @@ test('public.<box>: the signed-in owner\'s own visit gets the viewer at the publ
     plain(await get('/alpha/hello/'), 'nothing on the port');
     // a revalidation by the signed-in owner: still the plain path here, and it varies on the cookie
     r = await get('/alpha/hello/', { ...NAV, 'if-none-match': `"${crypto.createHash('sha256').update(page).digest('hex')}"` });
-    assert.deepEqual([r.status, r.headers.vary], [304, 'cookie'], 'a 304 for the document varies on the cookie too');
+    assert.deepEqual([r.status, r.headers.vary, r.headers['cross-origin-opener-policy']], [304, 'cookie, sec-fetch-dest', 'same-origin'], 'a 304 for the document has the index\'s headers too');
     seedPublic(gw.dir, 'beta', 'x', { 'index.html': page }, { root: '/srv/alpha', port: 1 });
     plain(await get('/beta/x/'), 'a binding outside the block');
     // a state file that can't be read: the owner gets what anyone gets

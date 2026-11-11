@@ -1466,6 +1466,11 @@ export function createGateway(opts = {}) {
   // before any decoding, the gateway's own headers. Nothing here reads the cookie, sets one, or
   // talks to an instance, so taking a port, rewriting main or forging log lines changes nothing.
   // (The owner's wrapper, tried before this, reads the cookie to choose itself, and only that.)
+  // The bytes are the public's, whoever asks. A page's index also varies on the cookie and
+  // sec-fetch-dest, which can make it the wrapper, and has the wrapper's opener policy: without it
+  // on both, a site that opens the page in a popup could tell from the window (its frame count, or
+  // whether it can still see it) whether the visitor is the signed-in owner. The page's sandbox
+  // has no allow-popups, so it opens no window that the policy could cut off.
   const servePublic = (req, res) => {
     if (!['GET', 'HEAD'].includes(req.method)) return send(res, 405, 'text/plain; charset=utf-8', 'GET or HEAD only', { allow: 'GET, HEAD' });
     if (req.headers['service-worker'] || req.headers['sec-fetch-dest'] === 'serviceworker') return send(res, 403, 'text/plain; charset=utf-8', 'no service workers on this box');
@@ -1481,12 +1486,12 @@ export function createGateway(opts = {}) {
     const f = publicPathOk(rel) && Object.hasOwn(art.files ?? {}, rel) ? art.files[rel] : null;
     if (!f || !/^[0-9a-f]{64}$/.test(f.sha256 ?? '')) return notFound();
     const tag = `"${f.sha256}"`;
-    const head = { etag: tag, 'cache-control': 'public, max-age=60', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': publicCsp(`${PUBLIC}/${m[1]}/${m[2]}/`), ...(rel === 'index.html' ? { vary: 'cookie' } : {}), ...hsts };
+    const head = { etag: tag, 'cache-control': 'public, max-age=60', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer', 'content-security-policy': publicCsp(`${PUBLIC}/${m[1]}/${m[2]}/`), ...(rel === 'index.html' ? { vary: 'cookie, sec-fetch-dest', 'cross-origin-opener-policy': 'same-origin' } : {}), ...hsts };
     const asked = String(req.headers['if-none-match'] ?? '').split(',').map((t) => t.trim());
     if (asked.includes('*') || asked.includes(tag)) { res.writeHead(304, head); return res.end(); }
     // no range requests, as in the kit: the whole file or its headers
     const all = { ...head, 'content-type': PUBLIC_TYPES[rel.split('.').pop().toLowerCase()] ?? 'application/octet-stream', 'content-length': f.size };
-    // a stat, never a read, so a HEAD says what a GET would
+    // a stat, never a read, so a HEAD says what a plain GET would (a HEAD is never the wrapper)
     const file = path.join(dir, 'public', 'blobs', f.sha256);
     const st = fs.statSync(file, { throwIfNoEntry: false });
     if (!st || st.size !== f.size) return send(res, 500, 'text/plain; charset=utf-8', 'the box has lost its copy of this page: publish it again');
@@ -1628,7 +1633,10 @@ export function createGateway(opts = {}) {
   // checkout with a kit that has viewers. Anything in doubt is null: a session that isn't one, a
   // store that can't be read, no binding, an instance that is down, slow, another checkout or an
   // older kit. Then the public's bytes are served, as before. It reads the cookie, and nothing else
-  // of the owner's: it never proxies, and the instance is asked as a loopback client.
+  // of the owner's: it never proxies, and the instance is asked as a loopback client. The root
+  // check is for consistency, against another real checkout on that port, not for authenticity:
+  // that rests on the port binding, as it does for the dashboard on that name, so a name check
+  // would add nothing.
   const WRAP_MS = opts.wrapperHelloMs ?? 1500;
   // The wrapper's own policy: styles and one frame, the bound instance's; no script, nothing to fetch.
   const WRAP_CSP = (inst) => `default-src 'none'; style-src 'unsafe-inline'; frame-src ${inst}; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`;
@@ -1645,7 +1653,7 @@ export function createGateway(opts = {}) {
       const r = await loopback(bound.port, 'GET', '/api/hello', { cap: 256 * 1024, ms: WRAP_MS });
       if (r.status !== 200) return null;
       const hello = JSON.parse(r.body.toString('utf8'));
-      if (hello?.viewer !== 1 || hello.root !== bound.root) return null;
+      if (hello?.viewer !== 1 || typeof bound.root !== 'string' || hello.root !== bound.root) return null;
       return { port: bound.port, html: PAGES.ownerWrapper({ project: m[1], slug: m[2], title: typeof art.title === 'string' && art.title ? art.title : m[2], frame: `${instanceOrigin(bound.port)}/view/artifact/${m[2]}?at=tree:${art.tree}` }) };
     } catch { return null; }
   };
@@ -1772,7 +1780,7 @@ export function createGateway(opts = {}) {
     // the wrapper, and whatever that can't settle gets the public's bytes, exactly as before.
     if (isPublic) {
       const wrap = await ownerWrapper(req, url);
-      if (wrap) return send(res, 200, 'text/html; charset=utf-8', wrap.html, { 'content-security-policy': WRAP_CSP(instanceOrigin(wrap.port)), 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer', 'cache-control': 'no-store, private', vary: 'cookie' });
+      if (wrap) return send(res, 200, 'text/html; charset=utf-8', wrap.html, { 'content-security-policy': WRAP_CSP(instanceOrigin(wrap.port)), 'x-frame-options': 'DENY', 'referrer-policy': 'no-referrer', 'cache-control': 'no-store, private', vary: 'cookie, sec-fetch-dest', 'cross-origin-opener-policy': 'same-origin' });
       try { return servePublic(req, res); } catch (e) { return send(res, e?.unreadable ? 503 : 500, 'text/plain; charset=utf-8', 'this page can\'t be served just now'); }
     }
     const own = isBox ? PUB : isTerm ? TERM : pv ? previewOrigin(pv) : instanceOrigin(port);
