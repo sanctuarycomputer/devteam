@@ -8185,14 +8185,18 @@ function learningFigures(week, merges = mergeTimes()) {
 }
 // When each ticket merged (ms), from git, once per read of the whole log: a back-fill asks every week.
 const mergeTimes = () => memo('mergeTimes', () => [...tickets().keys()].map((id) => [id, mergedAt(id)]).filter(([, at]) => at));
-// The record's line: its counts, one sentence of them, and refs to what it counted (at most 60:
-// the corrections first, then the explained signals, then the knowledge in force).
+// The record's line: its counts, one sentence of them, and refs to what it counted (at most 60,
+// and fewer when long ids would take the line past LINE_MAX: the corrections first, then the
+// explained signals, then the knowledge in force, so the ones dropped are from the end).
 function learningLine(r) {
   const { informed: I, autonomous: A, trusted: T } = r.figures;
   const n = (k, one, many = `${one}s`) => `${k} ${k === 1 ? one : many}`;
   const detail = `Week ${r.week}: ${n(I.knowledge, 'lesson')} in force, ${I.signals_explained} of ${n(I.signals_formed, 'recurring signal')} explained, ${I.starts_given} of ${n(I.starts, 'start')} given a lesson; ${A.trusted_calls} of ${n(A.ladder_calls, 'ladder call')} made on trust, ${n(A.questions, 'question')} to the owner for ${n(A.merged, 'merged ticket')}; ${T.agreed} of ${n(T.answered, 'recommendation')} agreed, ${n(T.corrections, 'correction')} in ${n(T.calls, 'call')}.`;
+  const base = { type: 'observation', source: 'metrics', detector: 'metrics', subject: 'project', kind: 'learning', week: r.week, figures: r.figures, detail: detail.slice(0, 300), source_key: `learning:${r.week}` };
   const refs = [...new Set([...r.lists.corrections, ...r.lists.signals.filter((s) => s.explained).map((s) => s.by[0]), ...r.lists.knowledge])].slice(0, KNOWLEDGE_IDS_MAX);
-  return { type: 'observation', source: 'metrics', detector: 'metrics', subject: 'project', kind: 'learning', week: r.week, figures: r.figures, detail: detail.slice(0, 300), source_key: `learning:${r.week}`, refs };
+  // 250: what appendLog adds (op, id, at, by)
+  while (refs.length && JSON.stringify({ ...base, refs }).length + 250 > LINE_MAX) refs.pop();
+  return { ...base, refs };
 }
 // Lesson efficacy, as the log stood at cut: for each lesson a start's prompt carried, the
 // observations on the keys of its evidence in the four weeks before it was first given and since.
@@ -8215,22 +8219,39 @@ function lessonEfficacy(cut) {
   });
 }
 // The metrics pass (supervisor only): one learning record for each ISO week since the log's
-// earliest line that has ended and has none yet (any observation with its source_key). A
-// back-filled week's record is stamped now (records can't be back-dated) and names its week.
-// Every week is counted before any is written, so each count folds the log once.
+// earliest line (back to LEARN_BACKFILL_WEEKS at most) that has ended and has no record of the
+// supervisor's yet, as the dashboard counts them: an owner's or hand line with the source_key
+// doesn't stand in for one. A back-filled week's record is stamped now (records can't be
+// back-dated) and names its week. Every week is counted before any is written, so each count
+// folds the log once; under a lock, read afresh, so two passes at once don't both write a week.
+const LEARN_BACKFILL_WEEKS = 104;
+const isLearningRecord = (o) => o.kind === 'learning' && o.created_by === 'supervisor' && o.detector === 'metrics';
+// The records the dashboard draws, oldest week first: one per week, the earliest written (two
+// passes at once could each have written one), and only one whose three columns are objects, so
+// a malformed line is left out, not drawn.
+function learningRecords() {
+  const byWeek = new Map();
+  for (const o of logObjects('observation').filter((x) => isLearningRecord(x) && /^\d{4}-W\d{2}$/.test(x.week ?? '') && ['informed', 'autonomous', 'trusted'].every((k) => x.figures?.[k] && typeof x.figures[k] === 'object')).sort((a, b) => a.week.localeCompare(b.week) || byTime(a, b))) if (!byWeek.has(o.week)) byWeek.set(o.week, o);
+  return [...byWeek.values()];
+}
 function writeLearning() {
-  const log = readLog();
-  const first = log.lines.reduce((m, l) => (l.at < m ? l.at : m), log.lines[0]?.at ?? '');
-  const start = Date.parse(first);
-  if (!Number.isFinite(start)) return 0;
-  const have = new Set(logObjects('observation').map((o) => o.source_key).filter((k) => k?.startsWith('learning:')));
-  const weeks = [];
-  for (let t = mondayOf(start), cur = mondayOf(Date.now()); t < cur; t += WEEK) if (!have.has(`learning:${isoWeekOf(t)}`)) weeks.push(isoWeekOf(t));
-  if (!weeks.length) return 0;
-  const merges = mergeTimes();
-  const lines = weeks.map((w) => learningLine(learningFigures(w, merges)));
-  for (const l of lines) appendLog(l, 'supervisor');
-  return lines.length;
+  fs.mkdirSync(runDir, { recursive: true });
+  return withLock(runPath('learning'), () => {
+    logCache = null;
+    const log = readLog();
+    const first = log.lines.reduce((m, l) => (l.at < m ? l.at : m), log.lines[0]?.at ?? '');
+    const start = Date.parse(first);
+    if (!Number.isFinite(start)) return 0;
+    const have = new Set(logObjects('observation').filter(isLearningRecord).map((o) => o.source_key).filter((k) => k?.startsWith('learning:')));
+    const weeks = [];
+    const cur = mondayOf(Date.now());
+    for (let t = Math.max(mondayOf(start), cur - LEARN_BACKFILL_WEEKS * WEEK); t < cur; t += WEEK) if (!have.has(`learning:${isoWeekOf(t)}`)) weeks.push(isoWeekOf(t));
+    if (!weeks.length) return 0;
+    const merges = mergeTimes();
+    const lines = weeks.map((w) => learningLine(learningFigures(w, merges)));
+    for (const l of lines) appendLog(l, 'supervisor');
+    return lines.length;
+  }, { staleMs: 300000, waitMs: 310000 });
 }
 // One value as a POSIX shell word: single-quoted, each ' written '\''. Every value orient puts in a
 // command it proposes goes through this, since observation text is anyone's to write and the
@@ -10112,7 +10133,7 @@ function collectOoda() {
     // changes mark the chart, so cause sits next to effect
     learning_totals: { since: log.lines.reduce((m, l) => (l.at < m ? l.at : m), log.lines[0]?.at ?? '') || null, calls: calls().length, lessons: logObjects('knowledge').filter((k) => k.status === 'accepted').length, corrections: calls().filter(correctionOf).length },
     learning_marks: [...logObjects('observation').filter((x) => x.kind === 'retro' && x.created_by === 'supervisor').map((x) => ({ at: x.created_at, kind: 'retro', label: 'retro', href: `#retro/${encodeURIComponent(x.id)}` })), ...trust.flatMap((t) => t.history.map((e) => ({ at: e.at, kind: 'rung', label: `${t.class} to rung ${e.rung}`, href: hrefOf(logGet(e.id)) })))].filter((m) => m.at).sort((a, b) => a.at.localeCompare(b.at)),
-    learning: logObjects('observation').filter((o) => o.kind === 'learning' && o.week && o.figures && o.created_by === 'supervisor').sort((a, b) => a.week.localeCompare(b.week) || byTime(a, b)).map((o) => ({ id: o.id, week: o.week, at: o.created_at, from: new Date(weekStartOf(o.week)).toISOString(), figures: o.figures, detail: o.detail })),
+    learning: learningRecords().map((o) => ({ id: o.id, week: o.week, at: o.created_at, from: new Date(weekStartOf(o.week)).toISOString(), figures: o.figures, detail: o.detail })),
     log: { lines: log.lines.length, errors: log.errors.length, ignored: log.ignored.length, unknown: log.unknown.length },
   };
 }

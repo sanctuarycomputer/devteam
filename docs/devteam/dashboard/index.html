@@ -2512,15 +2512,17 @@ const LEARN_CHARTS = [
   ]],
   ['Autonomous', [
     { title: 'Ladder calls made on trust', note: 'of the calls in a trust-ladder class, the ones made on its rung or a standing rule, not asked', unit: '%', series: [{ name: 'on trust', v: (f) => learnShare(f.autonomous.trusted_calls, f.autonomous.ladder_calls), n: (f) => f.autonomous.ladder_calls }] },
-    { title: 'Questions per merged ticket', note: 'decisions put to you, for each ticket merged', series: [{ name: 'questions per merged ticket', v: (f) => +(f.autonomous.questions / Math.max(1, f.autonomous.merged)).toFixed(2), n: (f) => f.autonomous.questions, few: (f) => !f.autonomous.merged }] },
+    { title: 'Questions per merged ticket', note: 'decisions put to you, for each ticket merged', series: [{ name: 'questions per merged ticket', v: (f) => +(f.autonomous.questions / Math.max(1, f.autonomous.merged)).toFixed(2), n: (f) => f.autonomous.merged, none: 'no ticket merged' }] },
   ]],
   ['Trusted', [
     { title: 'Agreement', note: 'your answers that went with the recommendation', unit: '%', series: [{ name: 'agreement', v: (f) => learnShare(f.trusted.agreed, f.trusted.answered), n: (f) => f.trusted.answered }] },
     { title: 'Corrections per 100 calls', note: 'calls you corrected, for every hundred the supervisor made', series: [{ name: 'corrections per 100 calls', v: (f) => +((100 * f.trusted.corrections) / Math.max(1, f.trusted.calls)).toFixed(1), n: (f) => f.trusted.calls }] },
   ]],
 ];
+// a record whose three columns aren't objects (a hand-written line) is left out, not drawn
+const learnable = (r) => !!r && !!r.figures && ['informed', 'autonomous', 'trusted'].every((k) => r.figures[k] && typeof r.figures[k] === 'object');
 function learningSection(o) {
-  const recs = o.learning || [];
+  const recs = (o.learning || []).filter(learnable);
   const T = o.learning_totals || {};
   const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
   if (recs.length < 3) {
@@ -2534,8 +2536,8 @@ function learningSection(o) {
     const series = c.series.map((s, i) => ({ name: s.name, color: i ? 'var(--amber)' : 'var(--series-1)', points: recs.map((r) => {
       const v = s.v(r.figures);
       const n = s.n ? s.n(r.figures) : null;
-      const few = (n !== null && n < LEARN_MIN) || (s.few && s.few(r.figures));
-      return [Date.parse(r.from), v, { hollow: few, href: `#learning/${encodeURIComponent(r.id)}`, title: few ? `${s.name}, week ${r.week}: too few to say (n = ${n})` : `${s.name}, week ${r.week}: ${v}${c.unit || ''}${n !== null ? ` (n = ${n})` : ''}` }];
+      const few = n !== null && n < LEARN_MIN;
+      return [Date.parse(r.from), v, { hollow: few, href: `#learning/${encodeURIComponent(r.id)}`, title: few ? `${s.name}, week ${r.week}: ${n === 0 && s.none ? s.none : `too few to say (n = ${n})`}` : `${s.name}, week ${r.week}: ${v}${c.unit || ''}${n !== null ? ` (n = ${n})` : ''}` }];
     }) }));
     return `<div class="learn-chart" data-chart="${esc(c.title)}"><h4>${esc(c.title)}</h4>${lineChart(series, { unit: c.unit || '', height: 120, width: 360, span, xmarks })}<p class="small muted">${esc(c.note)}</p></div>`;
   };

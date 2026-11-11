@@ -859,8 +859,7 @@
                 "starts": { "type": "integer", "minimum": 0, "description": "Workers and planners started fresh in the week." },
                 "starts_given": { "type": "integer", "minimum": 0, "description": "Of those, the ones whose prompt carried at least one lesson." }
               },
-              "required": ["knowledge", "signals_formed", "signals_explained", "starts", "starts_given"],
-              "additionalProperties": false
+              "required": ["knowledge", "signals_formed", "signals_explained", "starts", "starts_given"]
             },
               "autonomous": {
               "description": "Autonomous: how much the supervisor did alone.",
@@ -872,8 +871,7 @@
                 "questions": { "type": "integer", "minimum": 0, "description": "Decisions put to the owner in the week (decisions, one-way doors, proposals, trust, clarifications)." },
                 "merged": { "type": "integer", "minimum": 0, "description": "Tickets merged in the week." }
               },
-              "required": ["ladder_calls", "trusted_calls", "questions", "merged"],
-              "additionalProperties": false
+              "required": ["ladder_calls", "trusted_calls", "questions", "merged"]
             },
               "trusted": {
               "description": "Trusted: how often the owner agreed, and corrected.",
@@ -885,12 +883,10 @@
                 "calls": { "type": "integer", "minimum": 0, "description": "The supervisor's calls made in the week." },
                 "corrections": { "type": "integer", "minimum": 0, "description": "Corrections the owner made in the week." }
               },
-              "required": ["answered", "agreed", "calls", "corrections"],
-              "additionalProperties": false
+              "required": ["answered", "agreed", "calls", "corrections"]
             }
             },
-            "required": ["informed", "autonomous", "trusted"],
-            "additionalProperties": false
+            "required": ["informed", "autonomous", "trusted"]
           },
           "sha": {
             "description": "A reading of a repo measure: the commit on main its check ran on.",

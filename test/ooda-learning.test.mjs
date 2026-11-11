@@ -32,7 +32,7 @@ function handFor(F) {
     return id;
   };
 }
-const learnings = (F) => json(F.ok(F.old, ['log', '--type', 'observation', '--json'])).filter((o) => o.kind === 'learning').sort((a, b) => a.week.localeCompare(b.week));
+const learnings = (F) => json(F.ok(F.old, ['log', '--type', 'observation', '--tail', '1000', '--json'])).filter((o) => o.kind === 'learning').sort((a, b) => a.week.localeCompare(b.week));
 
 // Three past weeks, A, B and C, with something to count in each; the current week is never counted.
 function threeWeeks(F) {
@@ -164,7 +164,7 @@ test('the Loop draws tiles for a young instance, then six charts with hollow poi
   const ctx = vm.createContext({});
   vm.runInContext(`const DAY = 864e5; const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); const fmtDate = (ms) => new Date(ms).toISOString().slice(0, 10);\n${src}\n;globalThis.api = { learningSection, lineChart };`, ctx);
   const { learningSection, lineChart } = ctx.api;
-  const figs = (n) => ({ informed: { knowledge: 2, signals_explained: 1, signals_formed: n, starts_given: 3, starts: 6 }, autonomous: { trusted_calls: 4, ladder_calls: 8, questions: 6, merged: 4 }, trusted: { agreed: 9, answered: 10, corrections: 1, calls: 50 } });
+  const figs = (n) => ({ informed: { knowledge: 2, signals_explained: 1, signals_formed: n, starts_given: 3, starts: 6 }, autonomous: { trusted_calls: 4, ladder_calls: 8, questions: 6, merged: 6 }, trusted: { agreed: 9, answered: 10, corrections: 1, calls: 50 } });
   const rec = (i, n) => ({ id: `o-2026110${i}-000000000-supervisor`, week: `2026-W4${i}`, from: new Date(Date.UTC(2026, 9, 5 + 7 * i)).toISOString(), at: '2026-11-11T00:00:00.000Z', figures: figs(n), detail: 'x' });
   const totals = { since: '2026-10-20T01:00:00.000Z', calls: 7, lessons: 1, corrections: 2 };
 
@@ -186,8 +186,78 @@ test('the Loop draws tiles for a young instance, then six charts with hollow poi
   // the rung change marks every chart; one outside the span marks none
   assert.equal((h.match(/href="#decision\/d-x"/g) || []).length, 6);
   assert.doesNotMatch(h, /#retro\/o-y/);
+  // questions per merged ticket counts against the merges: a week with none is hollow, and says so
+  const dry = rec(2, 6);
+  dry.figures.autonomous.merged = 0;
+  const hd = learningSection({ learning: [rec(1, 6), dry, rec(3, 6)], learning_totals: totals, learning_marks: [] });
+  assert.equal((hd.match(/data-hollow/g) || []).length, 1);
+  assert.match(hd, /questions per merged ticket, week 2026-W42: no ticket merged/);
+  // a hand-written record without its three columns is left out, never a crash
+  const bad = { ...rec(4, 6), figures: { informed: 1 } };
+  const hb = learningSection({ learning: [...recs, bad, { ...rec(5, 6), figures: null }], learning_totals: totals, learning_marks: [] });
+  assert.equal((hb.match(/<svg/g) || []).length, 6);
+  assert.ok(!hb.includes(encodeURIComponent(bad.id)), 'the malformed record is not drawn');
   // lineChart's old callers are unchanged: a plain [ts, v] point is a filled dot with its own title
   const plain = lineChart([{ name: 'p50', points: [[Date.UTC(2026, 0, 1), 3], [Date.UTC(2026, 0, 3), 4]] }], { unit: 'ms' });
   assert.match(plain, /<circle [^>]*fill="var\(--series-1, var\(--blue\)\)"><title>p50: 3ms/);
   assert.doesNotMatch(plain, /<a |data-hollow|xmark/);
+});
+
+// Review fixes: a line that would be too long, a log from long ago, a week's record only the
+// supervisor's own, and two records for one week.
+test("a learning record's refs are trimmed from the end to fit a log line; the corrections survive", () => {
+  const F = fleetFixture('ooda-learning-long');
+  const { old, ok } = F;
+  try {
+    const hand = handFor(F);
+    const A = mondayOf(Date.now()) - 14 * DAY;
+    const w = `${'t'.repeat(56)}-a`;
+    const d = hand('supervisor', { type: 'decision', class: 'priority-change', what: 'raised the build fix', authority: 'default' }, A + HOUR);
+    hand('owner', { type: 'decision', op: 'set', id: d, corrected: { reason: 'not that one' } }, A + 2 * HOUR);
+    // sixty recurring signals, each on its own key from a ticket with a long name (so each id is
+    // long), each explained by a lesson citing its first observation
+    const firsts = [];
+    for (let i = 0; i < 60; i++) {
+      const os = [0, 1, 2].map((j) => hand(w, { type: 'observation', source: 'repo', subject: `app${i}`, kind: 'note', detail: `slow ${i}.${j}` }, A + 3 * HOUR + j * DAY + i * 1000));
+      firsts.push(os[0]);
+    }
+    for (let i = 0; i < 6; i++) hand('owner', { type: 'knowledge', kind: 'lesson', statement: `Lesson ${i}`, scope: 'project', status: 'accepted', evidence: firsts.slice(10 * i, 10 * i + 10) }, A + 3 * DAY + i * 1000);
+    ok(old, ['observe-metrics'], SUP);
+    const [a] = learnings(F);
+    assert.equal(a.week, isoWeek(A));
+    assert.equal(a.figures.informed.signals_explained, 60);
+    assert.ok(a.refs.length > 0 && a.refs.length < 60, `trimmed: ${a.refs.length}`);
+    assert.equal(a.refs[0], d, 'the correction first, and kept');
+    const raw = fs.readdirSync(path.join(old, 'docs/devteam/run/log')).flatMap((f) => fs.readFileSync(path.join(old, 'docs/devteam/run/log', f), 'utf8').split('\n')).find((l) => l.includes('"kind":"learning"'));
+    assert.ok(Buffer.byteLength(raw) <= 4096, `${Buffer.byteLength(raw)} bytes`);
+  } finally { F.done(); }
+});
+
+test('a log from long ago back-fills two years at most; a hand line with the key holds no week; the dashboard shows one record a week', () => {
+  const F = fleetFixture('ooda-learning-old');
+  const { old, ok } = F;
+  try {
+    const hand = handFor(F);
+    const cur = mondayOf(Date.now());
+    hand('supervisor', { type: 'observation', source: 'repo', subject: 'app', kind: 'note', detail: 'long ago' }, cur - 160 * 7 * DAY);
+    const last = isoWeek(cur - 7 * DAY);
+    const prev = isoWeek(cur - 14 * DAY);
+    // an owner's line with last week's key, and a malformed supervisor one: neither is a record
+    hand('owner', { type: 'observation', source: 'metrics', subject: 'project', kind: 'learning', week: last, source_key: `learning:${last}`, detail: 'mine' }, cur - 2 * DAY);
+    ok(old, ['observe-metrics'], SUP);
+    const rs = learnings(F).filter((r) => r.created_by === 'supervisor');
+    assert.equal(rs.length, 104, 'two years, not three');
+    assert.equal(rs[0].week, isoWeek(cur - 104 * 7 * DAY));
+    assert.ok(rs.some((r) => r.week === last), 'the owner line did not stand in for the week');
+    // a second record for a week (two passes at once), and a malformed one: the dashboard shows the earliest, once
+    hand('supervisor', { type: 'observation', source: 'metrics', detector: 'metrics', subject: 'project', kind: 'learning', week: prev, source_key: `learning:${prev}`, detail: 'again', figures: (({ informed, ...f }) => ({ ...f, informed: { ...informed, lessons_cited: 2 }, later: { n: 1 } }))(rs.find((r) => r.week === prev).figures) }, Date.now() + 1000);
+    // a count a later kit adds is no error (the spec, §8)
+    ok(old, ['log-check']);
+    hand('supervisor', { type: 'observation', source: 'metrics', detector: 'metrics', subject: 'project', kind: 'learning', week: '2020-W01', source_key: 'learning:2020-W01', detail: 'bad', figures: { informed: 1 } }, Date.now() + 2000);
+    const D = json(ok(old, ['dashboard-data']));
+    assert.equal(D.ooda.learning.length, 104);
+    assert.equal(D.ooda.learning.filter((r) => r.week === prev).length, 1);
+    assert.equal(D.ooda.learning.find((r) => r.week === prev).id, rs.find((r) => r.week === prev).id, 'the earliest');
+    assert.ok(!D.ooda.learning.some((r) => r.week === '2020-W01'));
+  } finally { F.done(); }
 });
