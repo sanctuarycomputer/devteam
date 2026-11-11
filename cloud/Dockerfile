@@ -20,8 +20,8 @@
 #   RENDER_DEPLOY_HOOK of the GitHub environment "box", never a repo secret, and that environment
 #   needing the owner's approval; the README's "deploy gate" says why. Agents share the owner's gh
 #   login, so this raises the bar and isn't a hard boundary). A deploy restarts the box; each
-#   supervisor that was running comes back through the operator (window 0), and brings back its
-#   fleet; what couldn't start is in ~/operator/NOTES.md. Disk: mounted at /data. Health check path: /healthz. Environment: DEVTEAM_PUBLIC_URL=https://box.example.com. Custom domains:
+#   supervisor that was running comes back at boot (box-recover, ~/.box/recover.log), and brings back its
+#   fleet; the operator (window 0) checks it, and notes what couldn't start in ~/operator/NOTES.md. Disk: mounted at /data. Health check path: /healthz. Environment: DEVTEAM_PUBLIC_URL=https://box.example.com. Custom domains:
 #   box.example.com and *.box.example.com, with every DNS record Render lists for them (a wildcard
 #   needs its own name pointed at Render too, plus the _acme-challenge and _cf-custom-hostname
 #   CNAMEs; remove any AAAA records). Best on a domain used for nothing else, or if Render won't
@@ -113,8 +113,16 @@ RUN usermod -l dev -d /data/home node && groupmod -n dev node \
 RUN install -d -m 755 /opt/devteam
 COPY --chmod=644 cloud/gateway.mjs /opt/devteam/gateway.mjs
 COPY --chmod=644 docs/devteam/dashboard/hub.html /opt/devteam/hub.html
+# The kit, whole (it reads its schema beside it), as of the last release that changed this image:
+# box-deploy.yml deploys only then, so a repo's kit can be newer than this one, or older. The box's
+# own commands (box-status, box-tell, box-alert, box-recover) run it against every repo, and need it
+# to be neither: what a repo says about itself comes from that repo's own kit (its help, hello,
+# questions, settings, recover), and this one only reads tmux and the plain files a kit leaves. A
+# repo on a kit older than recover comes back the way the box always brought it back.
+COPY docs/devteam /opt/devteam/kit
 RUN ttyd -d 0 -i lo -p 17681 true & p=$!; sleep 1; curl -fsS --compressed -o /opt/devteam/ttyd.html http://127.0.0.1:17681/; r=$?; kill $p; [ $r = 0 ] && grep -q xterm /opt/devteam/ttyd.html \
- && chmod 755 /opt/devteam && chmod 644 /opt/devteam/*
+ && rm -rf /opt/devteam/kit/project /opt/devteam/kit/run \
+ && chown -R root:root /opt/devteam && chmod -R u=rwX,go=rX /opt/devteam
 
 # Under tini, as root only to set up /data, then the gateway, and only once it holds the public
 # port, dev's side: dev's shells read files any agent can write, and nothing of dev's may get the
@@ -203,18 +211,25 @@ EOF
 # the disk, trusting whoever is on the box: 17 on the default port (so postgres:/// just works),
 # the others on 5400 + major (5416, 5414). Safe to run again.
 COPY --chmod=644 docs/devteam/process/operator.md /opt/devteam/
-COPY --chmod=755 cloud/box-supervisors /usr/local/bin/box-supervisors
+# The operator's commands (operator.md): the image's kit, for every repo in ~/code and any other the
+# machine has recorded. box-recover brings back what was up before a restart (the list devteam-dev
+# keeps), each repo by its own kit's recover, in tmux session home as sup-<repo>.
+COPY --chmod=755 <<'EOF' /usr/local/bin/box-recover
+#!/bin/sh
+exec /usr/local/bin/node /opt/devteam/kit/scripts/devteam.mjs recover --machine --in "$HOME/code" --session home --was-up "$HOME/.devteam-supervisors.boot" "$@"
+EOF
 COPY --chmod=755 <<'EOF' /usr/local/bin/box-status
 #!/bin/sh
-exec box-supervisors --status "$@"
+exec /usr/local/bin/node /opt/devteam/kit/scripts/devteam.mjs machine status --in "$HOME/code" --notes "$HOME/operator/NOTES.md" "$@"
 EOF
+# after --, the words are the message, whatever they start with
 COPY --chmod=755 <<'EOF' /usr/local/bin/box-tell
 #!/bin/sh
-exec box-supervisors --tell "$@"
+exec /usr/local/bin/node /opt/devteam/kit/scripts/devteam.mjs machine tell --in "$HOME/code" -- "$@"
 EOF
 COPY --chmod=755 <<'EOF' /usr/local/bin/box-alert
 #!/bin/sh
-exec box-supervisors --alert "$@"
+exec /usr/local/bin/node /opt/devteam/kit/scripts/devteam.mjs machine alert -- "$@"
 EOF
 COPY --chmod=755 <<'EOF' /usr/local/bin/box-pg
 #!/bin/sh
@@ -291,20 +306,25 @@ tmux: C-b s lists every session (each repo's supervisor and its workers); C-b d 
 MOTD
 RC
 fi
-# What was up before this boot, for the operator's box-supervisors. Only a list with something in it:
+# What was up before this boot, for the operator's box-recover. Only a list with something in it:
 # a boot that never got as far as bringing them back must not lose them to the next.
 up="$HOME/.devteam-supervisors"
-# Added to what is there: a supervisor the last restore could not start stays listed.
-if [ -s "$up" ]; then cat "$up" >> "$up.boot"; sort -u -o "$up.boot" "$up.boot"; fi
-# An entry no restore has used for days is out of date: whoever it held has been stopped or restarted since.
-box-supervisors --age-boot
+# An older image's ages, kept beside the list: they are the list's own lines now, for the roots
+# still on it. That file was rewritten at every boot and never pruned, so it also names
+# supervisors stopped since: those stay stopped.
+if [ -f "$up.boot.at" ]; then [ -f "$up.boot" ] && awk 'NR == FNR { r = $0; sub(/^[0-9]+ /, "", r); b[r]; next } { r = $0; sub(/^[0-9]+ /, "", r) } (r in b)' "$up.boot" "$up.boot.at" > "$up.boot.was"; [ -s "$up.boot.was" ] && cat "$up.boot.was" >> "$up.boot"; rm -f "$up.boot.at" "$up.boot.was"; fi
+# Added to what is there, each with when it was listed: a supervisor the last restore could not
+# start stays listed, and one up just before this boot is new again. An entry no restore has used
+# for 3 days is out of date (whoever it held has been stopped or restarted since): the kit's
+# recover --machine leaves it out, and drops it from the list.
+if [ -s "$up" ]; then now=$(date +%s); sed "s/^/$now /" "$up" >> "$up.boot"; fi
 rm -f "$up"
-# Window 0 is the operator (operator.md): the first thing the Terminal shows, and what restores the fleet.
+# Window 0 is the operator (operator.md): the first thing the Terminal shows, and what checks the restore.
 mkdir -p operator
 if ! tmux has-session -t home 2>/dev/null; then
   tmux new-session -d -s home -n operator -c "$HOME/operator"
   tmux new-window -d -t home -n shell -c "$HOME"
-  ask='You are the sanctuarycomputer/devteam operator for this box. Ensure your supervisors are all up and running.'
+  ask='You are the sanctuarycomputer/devteam operator for this box. The boot has run box-recover, and what it printed is in ~/.box/recover.log: read it, sort out anything NOT started, and make sure your supervisors are all up and running.'
   if ls .claude/projects/-data-home-operator/*.jsonl >/dev/null 2>&1; then c='--continue'; ask="The box restarted. $ask"; else c=''; fi
   # its job is in its system prompt, so what it's told, and what the owner tells it, stays plain English
   tmux send-keys -t home:operator -l "export DEVTEAM_ROLE=operator; claude $c --dangerously-skip-permissions --append-system-prompt \"\$(cat /opt/devteam/operator.md)\" '$ask'"
@@ -312,31 +332,33 @@ if ! tmux has-session -t home 2>/dev/null; then
 fi
 # The operator's tick: typed into its window every 30 minutes. Never over someone's half-typed line, a
 # dialog (Enter would answer it), a usage limit, or into whatever else has the pane (a shell, vim, psql:
-# box-supervisors --pane-state says which). Held back, it tries again each minute for 10 minutes, then
+# the kit's machine pane-state says which). Held back, it tries again each minute for 10 minutes, then
 # waits for the next one, and after three in a row it raises an alert (one, however long it lasts), so a held
 # operator can't go quiet.
 # Claude Code queues what's typed during a turn, so a busy operator just gets it after.
+# Every tmux call here has a time limit: a send-keys that never returned once wedged this loop for
+# hours, with no check-in and no alert. One that times out counts as held back.
 tick='Check on the box and your supervisors.'
 ( held=0; raised=
   while :; do
     sleep "${DEVTEAM_OPERATOR_TICK_SECONDS:-1800}"
     n=0; s=
     while [ "$n" -lt "${DEVTEAM_OPERATOR_TICK_RETRIES:-10}" ]; do
-      p=$(tmux display-message -p -t home:operator '#{pane_id}' 2>/dev/null) && s=$(box-supervisors --pane-state "$p" 2>/dev/null) || s=gone
-      case $s in ready|busy) tmux send-keys -t "$p" -l "$tick"; tmux send-keys -t "$p" Enter; s=; break ;; esac
+      p=$(timeout 20 tmux display-message -p -t home:operator '#{pane_id}' 2>/dev/null) && s=$(timeout 60 /usr/local/bin/node /opt/devteam/kit/scripts/devteam.mjs machine pane-state "$p" 2>/dev/null) || s=gone
+      case $s in ready|busy) if timeout 20 tmux send-keys -t "$p" -l "$tick" && timeout 20 tmux send-keys -t "$p" Enter; then s=; break; fi; s=stuck ;; esac
       n=$((n + 1))
       sleep "${DEVTEAM_OPERATOR_TICK_RETRY_SECONDS:-60}"
     done
     if [ -z "$s" ]; then
       # only what this loop raised: the operator's own alert is the operator's to clear
-      if [ -n "$raised" ] && [ "$(cat "$HOME/.box/alert" 2>/dev/null)" = "$raised" ]; then box-supervisors --alert --clear >/dev/null; fi
+      if [ -n "$raised" ] && [ "$(cat "$HOME/.box/alert" 2>/dev/null)" = "$raised" ]; then box-alert --clear >/dev/null; fi
       held=0; raised=
     else
       held=$((held + 1))
       note "the operator's check-in was held back: its pane is at $s ($held in a row)"
       if [ "$held" -ge "${DEVTEAM_OPERATOR_TICK_ALERT_AFTER:-3}" ]; then
         raised="The operator's check-ins are being held back: its pane is at $s. Look at window 0 of the terminal."
-        box-supervisors --alert "$raised" >/dev/null
+        box-alert "$raised" >/dev/null
       fi
     fi
   done ) &
@@ -388,7 +410,7 @@ timeout 120 sh .box/boot.sh >> box.log 2>&1 || note "boot.sh failed (exit $?): s
 for k in "$HOME"/code/*/docs/devteam/scripts/devteam.mjs; do
   [ -f "$k" ] || continue
   r=${k%/docs/devteam/scripts/devteam.mjs}
-  # adopted repos only, as box-supervisors counts them: a checkout of devteam itself has the kit but
+  # adopted repos only, as the kit counts them: a checkout of devteam itself has the kit but
   # no settings, and its dashboard would only fail every 5s in a window of its own
   [ -f "$r/docs/devteam/project/settings.md" ] || continue
   # In the project's own tmux session, as the window named dashboard: where the kit keeps it
@@ -404,13 +426,17 @@ for k in "$HOME"/code/*/docs/devteam/scripts/devteam.mjs; do
     tmux new-session -d -s "$s" -n dashboard -c "$r" "$c"
   fi
 done
-# The operator (window 0) is what brings the supervisors back: box-supervisors reads the list saved above.
+# The restore runs here, after boot.sh and the dashboards, not by the operator's hand: an operator
+# resumed on its old conversation can reach for a command from before the deploy, and every supervisor
+# waits on it. Safe to run again, so the operator running it too changes nothing. In the background:
+# the terminal comes up meanwhile. It reads the list saved above; the loop below keeps it current.
+mkdir -p "$HOME/.box"; ( /usr/local/bin/box-recover > "$HOME/.box/recover.log" 2>&1 ) &
 # Which supervisors are up, kept on the volume each minute: a machine that dies writes nothing at
 # the end, and one the owner stopped (its pane gone, or back at a shell) is off the list by then.
 # tmux not answering (the box stopping) leaves the list as it was.
 while :; do
   sleep 60
-  panes=$(tmux list-panes -a -F '#{pane_id} #{pane_current_command}' 2>/dev/null) || continue
+  panes=$(timeout 20 tmux list-panes -a -F '#{pane_id} #{pane_current_command}' 2>/dev/null) || continue
   for k in "$HOME"/code/*/docs/devteam/scripts/devteam.mjs; do
     r=${k%/docs/devteam/scripts/devteam.mjs}
     p=$(cat "$r/docs/devteam/run/supervisor-pane" 2>/dev/null) || continue
@@ -421,7 +447,7 @@ while :; do
   done > "$up.new" && mv "$up.new" "$up"
   # A supervisor back up is settled: it comes off the restore list, so stopping it later keeps it stopped.
   [ -s "$up" ] && [ -f "$up.boot" ] && {
-    grep -Fxvf "$up" "$up.boot" > "$up.left" 2>/dev/null
+    awk 'NR == FNR { u[$0]; next } { r = $0; sub(/^[0-9]+ /, "", r) } !(r in u)' "$up" "$up.boot" > "$up.left" 2>/dev/null
     if [ -s "$up.left" ]; then mv "$up.left" "$up.boot"; else rm -f "$up.boot" "$up.left"; fi
   }
 done &

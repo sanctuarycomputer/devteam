@@ -497,7 +497,7 @@ test('the restart keeps the permissions the running supervisor had: no flag it w
   } finally { flagged.done(); }
 });
 
-test('a parked or drained fleet\'s supervisor stays stopped, as box-supervisors leaves it', { skip: !hasTmux }, async () => {
+test('a parked or drained fleet\'s supervisor stays stopped, as recover leaves it', { skip: !hasTmux }, async () => {
   const F = fixture('supheld', { resume: CLAUDE_RESUME });
   try {
     F.writeTranscript(SID, [{ type: 'user', message: { content: SUP } }, rateLimit()]);

@@ -632,10 +632,17 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     assert.equal(local.status, 0);
     assert.match(local.err, /owner settings apply as they are on origin\/main/);
     fs.writeFileSync(sf, landed);
+    // what a killed merge left (its exit hook never ran) goes with the next merge; a live one stays
+    const dead = path.join(repo, '.worktrees', 'tmp-merge-ticket-bill-01-card-2147483646');
+    const live = path.join(repo, '.worktrees', `tmp-merge-ticket-bill-01-card-${process.pid}`);
+    for (const w of [dead, live]) git(['worktree', 'add', '-q', '--detach', w, H2]);
     landSettings((txt) => txt.replace('"test": "test -f billing/card.js && test -f config/master.key && test -f .setup-ran"', '"test": "false"'));
     const failed = dt(['merge', 'bill-01-card', '--dry-run', '--title', 'bill-01-card: card capture', '--body-file', body], { role: 'sup' });
     assert.notEqual(failed.status, 0);
     assert.match(failed.out, /gate test failed/);
+    assert.ok(!fs.existsSync(dead), 'a dead process\'s temp worktree is swept');
+    assert.ok(fs.existsSync(live), 'a live one is left alone');
+    git(['worktree', 'remove', '--force', live]);
     assert.ok(!fs.readdirSync(path.join(repo, '.worktrees')).some((d) => d.startsWith('tmp-')), 'no temp worktree left behind');
     landSettings((txt) => txt.replace('"test": "false"', '"test": "test -f billing/card.js && test -f config/master.key && test -f .setup-ran"'));
     must(['phase', 'supervisor', '--usd', '3.5'], { role: 'sup' });
