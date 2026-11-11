@@ -168,34 +168,33 @@ const step = (name, fn) => { steps.push({ name, fn }); };
     assert.deepEqual([ov.measure.target, ov.measure.unit, ov.measure.direction], [1, 'attested', 'up']);
     assert.match(dt(['goal', 'reading', Go, '--value', '1'], { role: 'sup' }).err, /the owner's yes: ask a goal-met question/);
     const metQ = (extra = []) => ['ask', '--class', 'goal-met', '--goal', Go, '--question', 'Have you validated sync on a drifted record in production?', ...extra];
-    assert.match(dt(metQ(), { role: 'sup' }).err, /recommends the answer that meets it/);
+    assert.match(dt(metQ(['--recommendation', 'yes']), { role: 'sup' }).err, /is draft; a goal-met question is for a running \(ready\) goal/);
+    must(['goal', 'decide', Go, 'approve', '--force']);
+    assert.match(dt(metQ(), { role: 'sup' }).err, /recommends yes/);
     assert.match(dt(metQ(['--recommendation', 'yes', '--default', 'yes']), { role: 'sup' }).err, /has no --default/);
-    assert.match(dt(['ask', '--class', 'goal-met', '--goal', Gr, '--question', 'Done?', '--recommendation', 'yes'], { role: 'sup' }).err, /is read from repo/);
+    assert.match(dt(['ask', '--class', 'goal-met', '--goal', Gr, '--question', 'Done?', '--recommendation', 'yes'], { role: 'sup' }).err, /is draft/);
     const Qwrong = must(['ask', '--class', 'release-scope', '--goal', Go, '--question', 'Is it validated?', '--recommendation', 'yes'], { role: 'sup' });
     must(['answer', Qwrong, 'yes']);
     assert.match(dt(['goal', 'reading', Go, '--approved', Qwrong], { role: 'sup' }).err, /class release-scope, not goal-met/);
+    const Qno = must(metQ(['--recommendation', 'yes']), { role: 'sup' });
+    assert.match(dt(['answer', Qno, 'not yet']).err, /is answered Yes or No/);
+    must(['answer', Qno, 'No — not yet']);
+    assert.match(dt(['goal', 'reading', Go, '--approved', Qno], { role: 'sup' }).err, /answered "No — not yet", not its recommendation/);
+    assert.equal(json(must(['goal', 'show', Go, '--json'])).status, 'ready', 'a no leaves it running');
     const Qm = must(metQ(['--recommendation', 'yes']), { role: 'sup' });
     assert.match(dt(['goal', 'reading', Go, '--approved', Qm], { role: 'sup' }).err, /not answered by the owner \(open\)/);
     hand('supervisor', { type: 'observation', source: 'owner', subject: Go, kind: 'reading', detail: 'typed', measure: { value: 1, unit: 'attested' } });
     hand('supervisor', { type: 'observation', source: 'owner', subject: Go, kind: 'reading', detail: 'typed', measure: { value: 1, unit: 'attested' }, approved: Qm });
     assert.deepEqual(readings(Go), [], 'a hand-written reading attests nothing: not alone, not with an unanswered question');
     assert.match(dt(['goal', 'status', Go, 'met']).err, /met when the owner says so/);
-    const Qno = must(metQ(['--recommendation', 'yes']), { role: 'sup' });
-    must(['answer', Qno, 'not yet']);
-    assert.match(dt(['goal', 'reading', Go, '--approved', Qno], { role: 'sup' }).err, /answered "not yet", not its recommendation/);
-    // the hand-written line above cited Qm before the owner answered: it still counts for nothing
-    must(['answer', Qm, 'yes']);
-    assert.deepEqual(readings(Go), [], 'a reading written before the answer never counts');
-    assert.match(must(['goal', 'reading', Go, '--approved', Qm], { role: 'sup' }), new RegExp(`recorded 1 for ${Go} \\(${Qm}\\)`));
+    // the owner's yes is the reading and marks it met; the hand-written line that cited Qm before
+    // the answer still counts for nothing
+    assert.match(must(['answer', Qm, 'Yes']), new RegExp(`${Go} is met`));
+    assert.deepEqual(readings(Go).map((r) => [r.value, r.approved]), [[1, Qm]], 'one reading, from the answer');
+    assert.equal(json(must(['goal', 'show', Go, '--json'])).status, 'met');
     assert.match(dt(['goal', 'reading', Go, '--approved', Qm], { role: 'sup' }).err, /one answer, one reading/);
     hand('supervisor', { type: 'observation', source: 'owner', subject: Go, kind: 'reading', detail: 'again', measure: { value: 1, unit: 'attested' }, approved: Qm });
     assert.deepEqual(readings(Go).map((r) => [r.value, r.approved]), [[1, Qm]], 'each answer authorises one reading');
-    // an answer the owner gave in chat attests like any other
-    const Qchat = must(metQ(['--recommendation', 'yes']), { role: 'sup' });
-    must(['answer', Qchat, 'yes', '--from-chat', '--said', 'yes, validated'], { role: 'sup' });
-    must(['goal', 'reading', Go, '--approved', Qchat], { role: 'sup' });
-    assert.deepEqual(readings(Go).map((r) => [r.value, r.approved]), [[1, Qm], [1, Qchat]], 'a chat answer is an answer');
-    must(['goal', 'status', Go, 'met']);
   });
 
   step('planner writes feature and tickets into its own log file in its worktree', () => {

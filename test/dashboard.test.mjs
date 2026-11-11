@@ -1259,3 +1259,37 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     assert.equal(r.outcome, 'Kept to the EU');
   });
 });
+
+test("a goal at its target: the card's Mark met is an owner action, same-origin only, and reads the check again", async (t) => {
+  const F = fleetFixture('mark-met');
+  t.after(() => F.done());
+  const SUP = { DEVTEAM_ROLE: 'supervisor' };
+  write(path.join(F.old, 'prod.txt'), '12\n');
+  const G = F.ok(F.old, ['goal', 'add', '--title', 'Read MCP', '--outcome', 'clients read production', '--measure', 'core resources served', '--target', '12', '--unit', 'resources', '--direction', 'up', '--source', 'prod', '--check', 'cat prod.txt', '--non-goals', 'none', '--preconditions', 'a'], SUP);
+  F.ok(F.old, ['goal', 'decide', G, 'approve', '--force']);
+  F.ok(F.old, ['goal', 'reading', G, '--run'], SUP);
+  const port = await freePort();
+  const B = `http://127.0.0.1:${port}`;
+  const d = startDashboard(F.old, F.env({}), ['--port', String(port)]);
+  t.after(() => d.stop());
+  await until(() => new RegExp(`dashboard on http://127\\.0\\.0\\.1:${port}\\b`).test(d.out()), 'the dashboard');
+  await until(async () => (await fetch(`${B}/api/data`)).ok, 'a first dashboard-data');
+  const goalNow = async () => (await (await fetch(`${B}/api/data?force=1`)).json()).ooda.goals.find((g) => g.id === G);
+  assert.equal((await goalNow()).at_target?.value, 12, 'the card is told it reached its target');
+  const post = (body, headers = {}) => fetch(`${B}/api/goal-met`, { method: 'POST', headers: { 'content-type': 'application/json', origin: B, 'sec-fetch-site': 'same-origin', ...headers }, body: JSON.stringify(body) });
+  assert.equal((await post({ id: G }, { origin: 'https://evil.example' })).status, 403, 'another origin');
+  assert.equal((await post({ id: '--force' })).status, 400, 'an id, nothing else');
+  write(path.join(F.old, 'prod.txt'), '11\n');
+  let r = await post({ id: G });
+  assert.equal(r.status, 400);
+  assert.match((await r.json()).error, /check reads 11 from production, not its target 12/, 'the check runs again');
+  write(path.join(F.old, 'prod.txt'), '12\n');
+  r = await post({ id: G });
+  assert.equal(r.status, 200, await r.clone().text());
+  const g = json(F.ok(F.old, ['goal', 'show', G]));
+  const u = g.updates.filter((x) => x.status === 'met').pop();
+  assert.deepEqual([g.status, u?.by, u?.channel], ['met', 'owner', 'dashboard'], "the owner's, from the dashboard");
+  const html = fs.readFileSync(path.join(kit, 'dashboard', 'index.html'), 'utf8');
+  assert.match(html, /g\.status === 'ready' && g\.at_target \? `<div class="holdbar"><button type="button" data-met-id=/, 'the card draws Mark met for a running goal at its target');
+  assert.match(html, /await post\('goal-met', \{ id \}, `met-\$\{id\}`\)/);
+});

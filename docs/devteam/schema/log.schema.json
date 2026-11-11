@@ -288,14 +288,15 @@
           },
           "decision": {
             "type": "object",
-            "description": "The owner's latest decision on the goal's design: approve (ready), refine (notes the planner takes into account before asking again), let-go (abandoned), restore (a let-go goal back to the status it had, parked).",
+            "description": "The owner's latest decision on the goal: approve (ready), refine (notes the planner takes into account before asking again), let-go (abandoned), restore (a let-go goal back to the status it had, parked), met (the owner's yes to a goal-met question, named in question, marked it met).",
             "properties": {
               "verdict": {
                 "enum": [
                   "approve",
                   "refine",
                   "let-go",
-                  "restore"
+                  "restore",
+                  "met"
                 ]
               },
               "notes": {
@@ -1466,6 +1467,51 @@
             "type": "string",
             "description": "the worker message this question escalates",
             "x-tip": "The agent's message it escalates."
+          },
+          "met": {
+            "type": "object",
+            "description": "On a goal-met question (ask writes it): the goal as asked, basis (a hash of its title, measure and milestones), and the reading the question shows (null for an owner-read goal, whose yes is the reading). The owner's yes marks the goal met only while its basis is still this, after a repo or prod check reads it again.",
+            "properties": {
+              "basis": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{16}$"
+              },
+              "reading": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "number"
+                  },
+                  "unit": {
+                    "type": "string"
+                  },
+                  "at": {
+                    "type": "string"
+                  },
+                  "sha": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "value",
+                  "at"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "basis",
+              "reading"
+            ],
+            "additionalProperties": false,
+            "x-tip": "The goal as it was when asked, and the reading the question showed."
           },
           "change": {
             "type": "object",
