@@ -2257,6 +2257,17 @@ function resendLostEnter(key, target, lines) {
   const hash = crypto.createHash('sha1').update(rec.text).digest('hex').slice(0, 12);
   appendLog({ type: 'observation', source: 'pane', kind: 'resent-enter', subject: key.slice(key.indexOf(':') + 1), detail: `pressed Enter once: text typed ${Math.round(age)}s ago was still unsubmitted in an idle pane ("${rec.text.slice(0, 60)}${rec.text.length > 60 ? '…' : ''}", sha1 ${hash})`, detector: 'pane', source_key: `resent-enter ${key} ${hash} ${rec.at}`, measure: { value: Math.round(age), unit: 's' } });
 }
+// The supervisor's own pane: answers, threads and workers' messages are typed into it too, and its
+// tick only looks at the windows it runs, so an Enter lost there waited for the owner to press it.
+// accounts-tick (the dashboard's, as the supervisor) covers it, with the same rules as a worker's.
+function resendSupervisorLostEnter() {
+  const { target } = resolvePane(supervisorTarget());
+  const key = target ? sh('tmux', ['display-message', '-p', '-t', target, '#S:#W']) : null;
+  if (!key) return;
+  const lines = (sh('tmux', ['capture-pane', '-p', '-t', target]) ?? '').split('\n').map((l) => l.trim()).filter(Boolean).slice(-15);
+  if (lines.some((l) => !PANE_CODE.test(l) && PANE_WAITS.some(([, re]) => re.test(l)))) return;
+  resendLostEnter(key, target, lines);
+}
 const paneWaiting = (id) => (activeWorker(id) ? paneWaitingIn(id) : null);
 
 // Planners in flight: a plan/<feature> branch whose plan file hasn't landed on main. They write no phase lines, so their
@@ -10534,6 +10545,7 @@ function cmdAccountsTick() {
   // in tmux or not, with or without cswap; just restarted, it hasn't stopped
   state.supervisor_limit = supervisorRestarted ? null : supervisorLimit();
   if (state.supervisor_limit && supervisorRefused) state.supervisor_limit.refused = supervisorRefused;
+  resendSupervisorLostEnter();
   fs.mkdirSync(runDir, { recursive: true });
   const tmp = `${ACCOUNTS_FILE}.${process.pid}`;
   fs.writeFileSync(tmp, JSON.stringify(state));

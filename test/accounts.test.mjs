@@ -697,3 +697,38 @@ test('the dashboard: rotation needs no hub, one dashboard does it per interval, 
     await until(() => autos(B).length > n, 'the other dashboard rotating once the first is gone');
   } finally { await a.stop(); await b?.stop(); await new Promise((r) => { oldHub.close(r); oldHub.closeAllConnections?.(); }); A.done(); B.done(); }
 });
+
+test("the supervisor's own pane: a lost Enter is pressed once, never into a prompt, never while it works", { skip: !hasTmux }, async () => {
+  const F = fixture('sup-enter');
+  try {
+    const text = '[devteam answer q-1 from owner] read it with: devteam.mjs questions --id q-1';
+    const sent = path.join(F.root, 'docs/devteam/run/sent', `${encodeURIComponent(`${F.session}:sup-enter`)}.json`);
+    const deliver = (agoSec) => write(sent, JSON.stringify({ text, at: new Date(Date.now() - agoSec * 1000).toISOString() }));
+    const pane = (shown) => {
+      spawnSync('tmux', ['kill-window', '-t', `=${F.session}:sup-enter`]);
+      const s = F.agent('sup-enter', shown, F.root);
+      write(path.join(F.root, 'docs/devteam/run/supervisor-pane'), `=${F.session}:sup-enter`);
+      return s;
+    };
+    // the incident: compacted while idle, an owner's answer typed in and its Enter lost
+    const stuck = ['⏺ Compacted while idle', '─'.repeat(60), `❯ ${text}`, '─'.repeat(60), '  ⏵⏵ bypass permissions on (shift+tab to cycle)'];
+    let s = pane(stuck);
+    await until(() => s.shows().includes('devteam answer'), 'the stuck input');
+    deliver(5);
+    F.tick();
+    assert.equal(s.keys(), '', 'typed seconds ago: a slow submit is not double-pressed');
+    deliver(3600);
+    F.tick();
+    await until(() => s.keys() === '\r', 'one Enter');
+    assert.ok(!fs.existsSync(sent), 'the delivery is claimed');
+    F.tick();
+    assert.equal(s.keys(), '\r', 'a second tick presses nothing');
+    for (const shown of [[`❯ ${text}`, '✻ Thinking… (esc to interrupt)'], [`❯ ${text}`, 'Do you want to proceed?', '❯ 1. Yes', '  2. No'], [...MENU, `❯ ${text}`]]) {
+      s = pane(shown);
+      await until(() => s.shows().includes('devteam answer'), 'the pane');
+      deliver(3600);
+      F.tick();
+      assert.equal(s.keys(), '', `left alone: ${shown[1]}`);
+    }
+  } finally { F.done(); }
+});
