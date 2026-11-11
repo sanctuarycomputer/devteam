@@ -403,6 +403,8 @@ const FRAME_ANCESTORS = /(^|[;,])(\s*)frame-ancestors(?=[\s;,]|$)([^;,]*)/gi;
 // One more origin that may frame the page, in every policy that names who may. A page that says no
 // one, or says nothing, is left as it is: adding a directive where there was none would narrow it.
 export const addFrameAncestor = (csp, origin) => csp.replace(FRAME_ANCESTORS, (all, sep, sp, list) => (!list.trim() || /^\s*'none'\s*$/i.test(list) ? all : `${sep}${sp}frame-ancestors ${list.trim()} ${origin}${/\s$/.test(list) ? ' ' : ''}`));
+// Who may frame the page, replaced in every policy that says. A policy that doesn't say gets nothing.
+export const replaceFrameAncestors = (csp, sources) => csp.replace(FRAME_ANCESTORS, (all, sep, sp, list) => `${sep}${sp}frame-ancestors ${sources}${/\s$/.test(list) ? ' ' : ''}`);
 export const LINK_ID = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
 // a project's name, as the kit requires it for publishing: part of every public URL
 export const PROJECT = /^[a-z0-9][a-z0-9._-]{0,62}$/;
@@ -567,6 +569,9 @@ export function createGateway(opts = {}) {
     return m && m[2] === `${NAME}${SUFFIX}` && PREVIEW_NAME.test(m[1]) ? m[1] : null;
   };
   const previewOrigin = (name) => `${pubUrl.protocol}//${name}.${NAME}${SUFFIX}`;
+  // Who may hold a preview's lens, and so the app inside it: frame-ancestors is checked against every
+  // ancestor, so the hub (which frames a dashboard) as well as each instance (whose viewer frames the lens).
+  const LENS_ANCESTORS = [PUB, ...BLOCK.map(instanceOrigin)].join(' ');
   // Passkeys belong to the box's name. A page on an instance's subdomain may ask for one, but its
   // answer names that page's origin, and only an answer from the box's own origin is accepted.
   const RP_ID = NAME;
@@ -779,7 +784,9 @@ export function createGateway(opts = {}) {
   // A preview's own headers: only this link's port, http and ws forms, to its own origin.
   const PREVIEW_LOOP = /\b(http|ws):\/\/(?:127\.0\.0\.1|localhost):(\d+)/g;
   const mapPreview = (s, port, own) => s.replace(PREVIEW_LOOP, (all, scheme, p) => (Number(p) !== port ? all : scheme === 'ws' ? own.replace(/^http/, 'ws') : own));
-  const downstreamHeaders = (h, cap, own, previewPort = null) => {
+  // framedBySelf: a preview's page framed from its own origin, which is how its lens holds it (spec
+  // §7). For that load alone the app's own framing headers give way, to the lens and what may hold it.
+  const downstreamHeaders = (h, cap, own, previewPort = null, framedBySelf = false) => {
     const out = {};
     for (const [k, v] of Object.entries(h)) {
       // x-devteam-public is the gateway's to say (what the box serves); an upstream's copy never passes
@@ -790,6 +797,10 @@ export function createGateway(opts = {}) {
     }
     // an artifact under its capability: its policy stays under it too
     if (cap && out['content-security-policy']) out['content-security-policy'] = out['content-security-policy'].split(`${own}/artifact/`).join(`${own}${cap}/artifact/`);
+    if (previewPort && framedBySelf) {
+      delete out['x-frame-options'];
+      if (out['content-security-policy']) out['content-security-policy'] = replaceFrameAncestors(String(out['content-security-policy']), `'self' ${LENS_ANCESTORS}`);
+    }
     return { ...out, ...hsts };
   };
   const proxy = (req, res, { port, path: p, publicOrigin, cap, extra = null, publicFrame = false }) => {
@@ -834,7 +845,7 @@ export function createGateway(opts = {}) {
       let connected = false;
       // agent: false, a fresh connection each time: a kept-alive one to a server since stopped would read as a 502, not as down
       const up = http.request({ host: hosts[0], agent: false, port: link.port, method: req.method, path: req.url, headers: upstreamHeaders(req, link.port, own, { loopbackHost: 'localhost' }) }, (ur) => {
-        res.writeHead(ur.statusCode, { ...downstreamHeaders(ur.headers, null, own, link.port), 'cache-control': 'no-store' });
+        res.writeHead(ur.statusCode, { ...downstreamHeaders(ur.headers, null, own, link.port, req.headers['sec-fetch-dest'] === 'iframe' && req.headers['sec-fetch-site'] === 'same-origin'), 'cache-control': 'no-store' });
         pipeline(ur, res, () => {});
       });
       current = up;

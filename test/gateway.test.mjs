@@ -2218,7 +2218,7 @@ function fakeKit(port) {
   const K = { hello: { devteam: 1, name: 'alpha', root: '/srv/alpha', port, viewer: 1 }, seen: [] };
   K.srv = http.createServer((q, s) => {
     K.seen.push({ url: q.url, h: q.headers });
-    const reply = (type, csp, body) => { s.writeHead(200, { 'content-type': type, 'content-security-policy': csp }); s.end(body); };
+    const reply = (type, csp, body) => { s.writeHead(200, { 'content-type': type, 'content-security-policy': csp, 'content-security-policy-report-only': "frame-ancestors 'self'" }); s.end(body); };
     if (q.url === '/api/hello') {
       if (K.hello === 'slow') return undefined;
       if (K.hello === null) return q.socket.destroy();
@@ -2276,6 +2276,7 @@ test('frame-ancestors gains the public name on an instance\'s viewer and publish
   assert.equal(G.addFrameAncestor('frame-ancestors;', 'https://p'), 'frame-ancestors;', 'an empty list is no one too');
   assert.equal(G.addFrameAncestor("default-src 'self'", 'https://p'), "default-src 'self'", 'no directive: none is added, which would narrow it');
   assert.equal(G.addFrameAncestor("default-src 'self'; x-frame-ancestors a", 'https://p'), "default-src 'self'; x-frame-ancestors a", 'only the directive itself');
+  assert.equal(G.addFrameAncestor("frame-ancestors 'none' https://a", 'https://p'), "frame-ancestors 'none' https://a https://p", "'none' among others is a list like any");
   const gw = await gateway('public-ancestor');
   const K = fakeKit(P + 20);
   await K.up();
@@ -2289,6 +2290,9 @@ test('frame-ancestors gains the public name on an instance\'s viewer and publish
     assert.equal((await gw.claim(authenticator())).status, 200);
     for (const v of [`/view/artifact/mock?at=tree:${T}`, '/view/preview/cool-tiger'])
       assert.equal(fa(await gw.req('GET', v, { on: P + 20, headers: fromPublic })), `frame-ancestors 'self' ${gw.publicUrl} ${gw.site}`, v);
+    assert.equal((await gw.req('GET', '/view/artifact/mock', { on: P + 20, headers: fromPublic })).headers['content-security-policy-report-only'], "frame-ancestors 'self'", 'a report-only policy is left as it is');
+    // a 64-hex tree is a tree too
+    assert.equal(fa(await gw.req('GET', `/artifact/tree/${'d'.repeat(64)}/mock/s.css`, { on: P + 20 })), `frame-ancestors ${inst} ${gw.publicUrl} ${gw.site}`, 'sha256 tree');
     // a published tree, under its capability and without
     const cap = /^(\/c\/[^/]+)\//.exec((await gw.req('GET', `/artifact/tree/${T}/mock/`, { on: P + 20, headers: framed })).headers.location)[1];
     assert.equal(fa(await gw.req('GET', `${cap}/artifact/tree/${T}/mock/s.css`, { on: P + 20, cookie: '', headers: opaque })), `frame-ancestors ${inst} ${gw.publicUrl} ${gw.site}`);
@@ -2296,7 +2300,68 @@ test('frame-ancestors gains the public name on an instance\'s viewer and publish
     // nothing else of an instance's
     const mainCap = /^(\/c\/[^/]+)\//.exec((await gw.req('GET', '/artifact/main/mock/', { on: P + 20, headers: framed })).headers.location)[1];
     assert.equal(fa(await gw.req('GET', `${mainCap}/artifact/main/mock/s.css`, { on: P + 20, cookie: '', headers: opaque })), `frame-ancestors ${inst} ${gw.publicUrl}`, 'main\'s artifacts');
-    for (const other of ['/', '/api/data', '/viewer/x', '/view', '/view/../api/data', '/view/%2e%2e/api/data', '/x/view/a', '/artifact/tree/notasha/mock/'])
+    for (const other of ['/', '/api/data', '/viewer/x', '/view', '/view/../api/data', '/view/%2e%2e/api/data', '/x/view/a', '/artifact/tree/notasha/mock/', '/view/%2E%2E/api/data', '/view/%5c..%5capi/data', '/view/..\\api'])
       assert.equal(fa(await gw.req('GET', other, { on: P + 20 })), `frame-ancestors 'self' ${gw.publicUrl}`, other);
+    // a traversal under a valid tree prefix is no published tree: the instance's own name only
+    for (const bad of [`/artifact/tree/${T}/mock/../../main/mock/s.css`, `/artifact/tree/${T}/mock/%2E%2E/s.css`, `/artifact/tree/${T}/mock/%5c..`, `/artifact/tree/${T}/mock/a\\b`])
+      assert.equal(fa(await gw.req('GET', bad, { on: P + 20 })), `frame-ancestors ${inst} ${gw.publicUrl}`, bad);
   } finally { await K.close(); await gw.close(); }
+});
+
+test('a preview framed from its own name (its lens) gets past the app\'s framing headers, and nothing else does', async () => {
+  assert.equal(G.replaceFrameAncestors("default-src 'self'; frame-ancestors 'none'", "'self' https://a"), "default-src 'self'; frame-ancestors 'self' https://a");
+  assert.equal(G.replaceFrameAncestors("frame-ancestors 'none', frame-ancestors https://x; img-src y", 'https://a'), 'frame-ancestors https://a, frame-ancestors https://a; img-src y');
+  assert.equal(G.replaceFrameAncestors("default-src 'self'", 'https://a'), "default-src 'self'", 'none is added');
+  assert.equal(G.replaceFrameAncestors("frame-ancestors 'none' ; img-src y", 'https://a'), 'frame-ancestors https://a ; img-src y', 'the space before the next directive is kept');
+  const S = await previewSetup('preview-framing');
+  const { gw, hub, instance, req, origin } = S;
+  const devPort = await freePort();
+  const dev = http.createServer((q, s) => {
+    if (q.url === '/nocsp') s.writeHead(200, { 'x-frame-options': 'SAMEORIGIN' });
+    else if (q.url === '/two') s.writeHead(200, { 'content-security-policy': ["frame-ancestors 'none'", "script-src 'self'; frame-ancestors http://elsewhere.example"] });
+    else s.writeHead(200, { 'x-frame-options': 'DENY', 'content-security-policy': `default-src 'self' http://127.0.0.1:${devPort}; frame-ancestors 'none'`, 'content-security-policy-report-only': "frame-ancestors 'none'" });
+    s.end('app');
+  });
+  // a WebSocket's answer carries a policy too: a socket is no frame, so it stays as sent
+  const sockets = [];
+  dev.on('upgrade', (q, sock) => {
+    sockets.push(sock);
+    const accept = crypto.createHash('sha1').update(`${q.headers['sec-websocket-key']}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
+    sock.on('error', () => {});
+    sock.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\nContent-Security-Policy: frame-ancestors 'none'\r\nX-Frame-Options: DENY\r\n\r\n`);
+  });
+  await new Promise((r) => dev.listen(devPort, '127.0.0.1', r));
+  // an instance's page that refuses frames: the relaxation is a preview's alone
+  const inst = http.createServer((q, s) => { s.writeHead(200, { 'x-frame-options': 'DENY', 'content-security-policy': "default-src 'self'; frame-ancestors 'none'" }); s.end('dashboard'); });
+  await new Promise((r) => inst.listen(P + 21, '127.0.0.1', r));
+  const site = origin('cool-tiger');
+  const lens = `'self' ${gw.publicUrl} ${Array.from({ length: 25 }, (_, i) => gw.inst(P + i)).join(' ')}`;
+  const as = (dest, from) => ({ 'sec-fetch-dest': dest, 'sec-fetch-site': from, 'sec-fetch-mode': 'navigate' });
+  try {
+    hub.list = [instance('/srv/alpha', P, [previewRow('cool-tiger', devPort)])];
+    let r = await req('cool-tiger', 'GET', '/', { headers: as('iframe', 'same-origin') });
+    assert.equal(r.status, 200, r.body);
+    assert.equal(r.headers['x-frame-options'], undefined, 'X-Frame-Options goes');
+    assert.equal(r.headers['content-security-policy'], `default-src 'self' ${site}; frame-ancestors ${lens}`, 'frame-ancestors names the lens and what may hold it; the rest is kept');
+    assert.equal(r.headers['content-security-policy-report-only'], "frame-ancestors 'none'", 'a report-only policy blocks nothing, and is left');
+    for (const [dest, from] of [['document', 'none'], ['iframe', 'same-site'], ['frame', 'same-origin'], ['object', 'same-origin'], ['embed', 'same-origin']]) {
+      r = await req('cool-tiger', 'GET', '/', { headers: as(dest, from) });
+      assert.deepEqual([r.status, r.headers['x-frame-options'], r.headers['content-security-policy']], [200, 'DENY', `default-src 'self' ${site}; frame-ancestors 'none'`], `${dest} from ${from}: the app's own headers`);
+    }
+    assert.equal((await req('cool-tiger', 'GET', '/', { headers: as('iframe', 'cross-site') })).status, 403, 'another site\'s frame is still refused');
+    r = await req('cool-tiger', 'GET', '/nocsp', { headers: as('iframe', 'same-origin') });
+    assert.deepEqual([r.headers['x-frame-options'], r.headers['content-security-policy']], [undefined, undefined], 'no policy: none is added');
+    r = await req('cool-tiger', 'GET', '/two', { headers: as('iframe', 'same-origin') });
+    assert.equal(r.headers['content-security-policy'], `frame-ancestors ${lens}, script-src 'self'; frame-ancestors ${lens}`, 'every policy in the header');
+    // confined to previews: an instance's page framed from its own name keeps its headers
+    r = await gw.req('GET', '/x', { on: P + 21, headers: as('iframe', 'same-origin') });
+    assert.deepEqual([r.status, r.headers['x-frame-options'], r.headers['content-security-policy']], [200, 'DENY', "default-src 'self'; frame-ancestors 'none'"], 'an instance\'s page');
+    // and a socket's handshake is passed on as sent
+    await gw.g.pollPush();
+    const c = await wsClient(gw.port, S.on('cool-tiger'), { origin: site, cookie: gw.jar() });
+    assert.equal(c.status, 101);
+    assert.match(c.head, /content-security-policy: frame-ancestors 'none'/i, 'a WebSocket\'s policy is unchanged');
+    assert.match(c.head, /x-frame-options: DENY/i);
+    c.close();
+  } finally { for (const s of sockets) s.destroy(); await S.close(); dev.close(); inst.close(); }
 });
