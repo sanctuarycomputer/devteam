@@ -2569,7 +2569,9 @@ test('public.<box>: the signed-in owner\'s own visit gets the viewer at the publ
     const nr = JSON.parse(rooted);
     delete nr.public.alpha.root;
     fs.writeFileSync(state, JSON.stringify(nr));
+    const askedBefore = K.seen.filter((x) => x.url === '/api/hello').length;
     plain(await get('/alpha/hello/'), 'no root on either side');
+    assert.equal(K.seen.filter((x) => x.url === '/api/hello').length, askedBefore, 'a root-less binding is rejected before any hello is asked');
     fs.writeFileSync(state, rooted);
     K.hello = null;
     plain(await get('/alpha/hello/'), 'a hello cut off');

@@ -15,6 +15,11 @@
 // A session's running dev server gets a name of its own too (cool-tiger.box.example.com), behind the
 // owner's session like an instance, from the hub's list; the gateway holds nothing about them, never
 // picks between two claimants of one name, and box.example.com/dev/ lists them.
+// The kit's viewers (for threads) lean on it twice. A preview's name answers /.devteam/lens, the
+// gateway's own page that frames the app, and the app's own framing headers give way for that one
+// frame. On public.box.example.com, the signed-in owner's own visit to a published page gets a page
+// of the gateway's framing that project's viewer at the published version; everyone else, and any
+// doubt, gets the published bytes. The public name reads the cookie for that choice alone.
 // Node only, no dependencies. Usage: node gateway.mjs [serve | reclaim]
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -1649,11 +1654,11 @@ export function createGateway(opts = {}) {
       if (!s.passkeys.length || !sessionOf(req)) return null;
       const bound = Object.hasOwn(s.public ?? {}, m[1]) ? s.public[m[1]] : null;
       const art = bound && Object.hasOwn(bound.artifacts ?? {}, m[2]) ? bound.artifacts[m[2]] : null;
-      if (!art || !BLOCK.includes(bound.port) || typeof art.tree !== 'string' || !TREE.test(art.tree)) return null;
+      if (!art || !BLOCK.includes(bound.port) || typeof bound.root !== 'string' || typeof art.tree !== 'string' || !TREE.test(art.tree)) return null;
       const r = await loopback(bound.port, 'GET', '/api/hello', { cap: 256 * 1024, ms: WRAP_MS });
       if (r.status !== 200) return null;
       const hello = JSON.parse(r.body.toString('utf8'));
-      if (hello?.viewer !== 1 || typeof bound.root !== 'string' || hello.root !== bound.root) return null;
+      if (hello?.viewer !== 1 || hello.root !== bound.root) return null;
       return { port: bound.port, html: PAGES.ownerWrapper({ project: m[1], slug: m[2], title: typeof art.title === 'string' && art.title ? art.title : m[2], frame: `${instanceOrigin(bound.port)}/view/artifact/${m[2]}?at=tree:${art.tree}` }) };
     } catch { return null; }
   };
