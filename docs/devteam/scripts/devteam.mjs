@@ -1081,6 +1081,17 @@ function integrity(o, file) {
 
 // Validate one parsed line in full: envelope, body against its type, required and set-only fields,
 // then the integrity checks above.
+// The envelope on its own, for a line parseLines sets aside (a newer kit's): its fields, the
+// channel rule, and that its writer is its file's, so nothing admitted there fails these later in a
+// kit that knows the rest. checkLine and integrity hold every other line to the same.
+function envelopeErrors(o, file) {
+  const envelope = Object.fromEntries(ENVELOPE.filter((k) => k in o).map((k) => [k, o[k]]));
+  const errs = schemaErrors({ ...SCHEMA, $defs: undefined, properties: { ...SCHEMA.properties, type: { type: 'string' } } }, envelope, 'line').map((e) => e.replace(/^line\./, ''));
+  if (errs.length) return errs;
+  if ((o.channel !== undefined) !== (o.by === 'owner')) errs.push('channel is on every owner line and no other');
+  if (file && writerOfFile(file) !== o.by) errs.push(`by "${o.by}" does not match the file's writer "${writerOfFile(file) ?? '(not a log file)'}"`);
+  return errs;
+}
 function checkLine(o, file) {
   if (!o || typeof o !== 'object' || Array.isArray(o)) return ['not a JSON object'];
   const envelope = Object.fromEntries(ENVELOPE.filter((k) => k in o).map((k) => [k, o[k]]));
@@ -1107,10 +1118,13 @@ function checkLine(o, file) {
 }
 
 // Parse a file's lines. Full validation is on by default (log-check, merge); readers skip the
-// schema walk for speed but never the integrity checks.
+// schema walk for speed but never the integrity checks. A type or a field a newer kit wrote goes to
+// unknown instead (log-check says upgrade), never to errors: it grants nothing, since nothing here
+// reads it. Writers stay strict: appendLog runs checkLine on the line as given.
 function parseLines(text, file, { firstLine = 1, validate = true } = {}) {
   const lines = [];
   const errors = [];
+  const unknown = [];
   (text ?? '').split('\n').forEach((raw, i) => {
     if (!raw.trim()) return;
     const n = i + firstLine;
@@ -1121,12 +1135,28 @@ function parseLines(text, file, { firstLine = 1, validate = true } = {}) {
     } catch {
       return void errors.push(`${file}:${n}: not valid JSON`);
     }
-    const shape = !o || typeof o !== 'object' || Array.isArray(o) || !TYPES.includes(o.type) || !['new', 'set'].includes(o.op) || typeof o.id !== 'string' || typeof o.at !== 'string' || typeof o.by !== 'string';
-    const errs = shape ? ['not a log line'] : validate ? checkLine(o, file) : [integrity(o, file)].filter(Boolean);
+    if (!o || typeof o !== 'object' || Array.isArray(o) || typeof o.type !== 'string' || !['new', 'set'].includes(o.op) || typeof o.id !== 'string' || typeof o.at !== 'string' || typeof o.by !== 'string') return void errors.push(`${file}:${n}: not a log line`);
+    // a line this kit sets aside still has the envelope every kit checks (its writer is its file's,
+    // v, at, channel), so nothing admitted here fails later in a kit that knows the rest
+    const aside = (what) => { const e = envelopeErrors(o, file); if (e.length) errors.push(`${file}:${n}: ${e.join('; ')}`); else unknown.push(`${file}:${n}: ${what}`); };
+    if (!TYPES.includes(o.type)) return void aside(`type "${o.type}"`);
+    const props = SCHEMA.$defs.types[o.type].properties ?? {};
+    const extra = Object.keys(o).filter((k) => !ENVELOPE.includes(k) && !Object.hasOwn(props, k));
+    if (extra.length) {
+      for (const k of extra) delete o[k];
+      // a set line that carried only fields this kit doesn't know changes nothing it knows
+      if (o.op === 'set' && !Object.keys(o).some((k) => !ENVELOPE.includes(k))) return void aside(`${o.type}.${extra.join(', ')}`);
+      unknown.push(`${file}:${n}: ${o.type}.${extra.join(', ')}`);
+    }
+    const errs = validate ? checkLine(o, file) : [integrity(o, file)].filter(Boolean);
     if (errs.length) errors.push(`${file}:${n}: ${errs.join('; ')}`);
     else lines.push({ ...o, __file: file, __line: n });
   });
-  return { lines, errors };
+  // The cost: a field mistyped in a hand-written line is dropped here rather than refused (log-check
+  // still names it), and a hand-written set like {status, foo} lands with foo set aside; a later kit
+  // where foo is a field another writer owns refuses the whole line, so the fold of that record can
+  // differ between kits.
+  return { lines, errors, unknown };
 }
 
 // Build current state from every line. A `new` creates an object (a repeated id is ignored); a
@@ -1506,18 +1536,20 @@ function readLog() {
   for (const d of [liveLogDir(), durableLogDir()]) if (fs.existsSync(d)) for (const f of fs.readdirSync(d)) if (f.endsWith('.jsonl')) names.add(f);
   const lines = [];
   const errors = [];
+  const unknown = [];
   // main's copy of every file in one git call, not one each
   if (projectInRepo && mainRef()) prefetchAt(mainSha(), [...names].map((f) => `${projectRel}/log/${f}`));
   for (const f of [...names].sort()) {
     const r = parseLines(logFileText(f), f, { validate: false });
     lines.push(...r.lines);
     errors.push(...r.errors);
+    unknown.push(...r.unknown);
   }
   const { objects, ignored } = fold(lines);
   // each type's objects in the fold's order, so a lookup by type doesn't scan every object
   const byType = new Map();
   for (const o of objects.values()) { if (!byType.has(o.type)) byType.set(o.type, []); byType.get(o.type).push(o); }
-  return (logCache = { lines, objects, errors, ignored, byType });
+  return (logCache = { lines, objects, errors, ignored, unknown, byType });
 }
 const logObjects = (type) => (readLog().byType.get(type) ?? []).filter((o) => !(type === 'goal' && o.kind === 'upkeep'));
 // The built-in Upkeep goal (planning.md §7), or null while it has no line yet (then it runs).
@@ -1739,7 +1771,11 @@ function logRule(headRef, sha, R = repo('home')) {
       for (const sib of siblings) prevAt = [prevAt, lastAt(`${git(['show', `${base}:${prefix}${sib}`]) ?? ''}\n`)].sort().pop();
     }
     const committedAt = Date.parse(git(['show', '-s', '--format=%cI', sha]) ?? '');
-    for (const l of added.lines) {
+    // every added line's time, a newer kit's included (parseLines leaves those out of lines): one
+    // in the future would fail every later sync of this append-only file
+    const start = prev.split('\n').filter(Boolean).length + 1;
+    const stamped = next.slice(prev.length).split('\n').filter(Boolean).map((raw, i) => { try { const at = JSON.parse(raw)?.at; return typeof at === 'string' ? { at, __line: start + i } : null; } catch { return null; } }).filter(Boolean);
+    for (const l of stamped) {
       if (month && !l.at.startsWith(month)) fails.push(`project/log/${name}:${l.__line}: ${l.at} is not in ${month}`);
       if (l.at < prevAt) fails.push(`project/log/${name}:${l.__line}: ${l.at} is earlier than the line before it`);
       if (!Number.isNaN(committedAt) && Date.parse(l.at) > committedAt + 5 * 60000) fails.push(`project/log/${name}:${l.__line}: ${l.at} is after the commit time`);
@@ -1921,12 +1957,15 @@ function cmdLogCheck() {
   const names = new Set();
   for (const d of [liveLogDir(), durableLogDir()]) if (fs.existsSync(d)) for (const f of fs.readdirSync(d)) if (f.endsWith('.jsonl')) names.add(f);
   const fails = [];
+  const newer = [];
   let n = 0;
   for (const f of [...names].sort()) {
     const r = parseLines(logFileText(f), f);
     fails.push(...r.errors);
+    newer.push(...r.unknown);
     n += r.lines.length;
   }
+  for (const u of newer) out(`a newer kit's line, or a mistyped name: upgrade, or check ${u}`);
   for (const i of readLog().ignored) out(`ignored: ${i.line.__file}:${i.line.__line} ${i.line.id}: ${i.why}`);
   const rw = questionRewrites();
   for (const w of rw.warnings) out(`warn: ${w}`);
@@ -2796,6 +2835,7 @@ function cmdValidate() {
   }
 
   for (const e of readLog().errors) warnings.push(`log ${e}`);
+  for (const u of readLog().unknown) warnings.push(`log: a newer kit's line, or a mistyped name: upgrade, or check ${u}`);
   { const r = questionRewrites(); errors.push(...r.errors); warnings.push(...r.warnings); }
   for (const i of readLog().ignored) if (['ticket', 'feature'].includes(i.line.type) && i.why === 'duplicate id') errors.push(`${i.line.id}: a second ${i.line.type} line with this id (${i.line.__file}:${i.line.__line}) was ignored; use ${i.line.type} set`);
   const raw = ladder().raw_ceilings;
@@ -2810,7 +2850,7 @@ function cmdValidate() {
     for (const [r, at] of rs) { const bad = releaseProblem(r, at); if (bad) (releaseMayBeOnMerge(r) ? errors : warnings).push(releaseMayBeOnMerge(r) ? bad : `${bad}; read as not deploying on merge`); }
   }
   const td = path.join(projectDir, 'tickets');
-  if (fs.existsSync(td)) for (const f of fs.readdirSync(td)) if (!f.startsWith('.') && !ts.has(f)) errors.push(`project/tickets/${f}/ has no ticket`);
+  if (fs.existsSync(td)) for (const f of fs.readdirSync(td)) if (!f.startsWith('.') && !ts.has(f)) errors.push(`project/tickets/${f}/ has no ticket; if the supervisor added it since the log last landed, land the log first (log-sync, then merge --chore log) and run the check again`);
   // Checking one ticket, another ticket's own errors (D3 and the rest, written "<id>: …") come
   // from the live graph, not this branch: e.g. a dependency on a plan that reached main after the
   // branch did. They warn; the supervisor's own validate still fails on them.
@@ -9769,7 +9809,7 @@ function collectOoda() {
     // every settled question, newest first, wherever it was answered (dashboard, terminal, chat) or
     // whether it was defaulted or withdrawn; defaulted ones can still be overruled
     answered: questions().filter((q) => q.status !== 'open').sort((a, b) => b.answered_at.localeCompare(a.answered_at)).slice(0, 80),
-    log: { lines: log.lines.length, errors: log.errors.length, ignored: log.ignored.length },
+    log: { lines: log.lines.length, errors: log.errors.length, ignored: log.ignored.length, unknown: log.unknown.length },
   };
 }
 function dashboardData() {

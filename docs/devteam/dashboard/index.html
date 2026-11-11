@@ -3457,7 +3457,7 @@ function render(d) {
   kit.title = d.kit ? `devteam ${d.kit}${local ? ': this checkout\'s kit differs from the one on main' : ''}` : '';
   $('when').textContent = `updated ${new Date(d.generated_at).toLocaleTimeString()}`;
   const o = d.ooda;
-  $('logline').textContent = `log ${o.log.lines} lines${o.log.errors || o.log.ignored ? ` · ${o.log.errors} invalid · ${o.log.ignored} ignored` : ''}`;
+  $('logline').textContent = `log ${o.log.lines} lines${o.log.errors || o.log.ignored ? ` · ${o.log.errors} invalid · ${o.log.ignored} ignored` : ''}${o.log.unknown ? ` · ${o.log.unknown} written by a newer kit: upgrade this instance` : ''}`;
   // A worker is active until its ticket merges, as the kit counts slots (activeWorker): a worker
   // that never logged done (it stopped at awaiting-word or final-review) isn't working any more.
   const active = d.tickets.filter((t) => t.phase && !['done', 'parked'].includes(t.phase) && !['merged', 'released'].includes(t.stage)).length;

@@ -875,7 +875,8 @@ exit 0
     "log": {
       "lines": 14,
       "errors": 0,
-      "ignored": 0
+      "ignored": 0,
+      "unknown": 0
     }
   },
   "upkeep": {
