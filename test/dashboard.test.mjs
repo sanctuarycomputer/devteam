@@ -1223,6 +1223,129 @@ test("an artifact subject started on the dashboard reaches the supervisor's pane
   assert.match(shown, /Captured from the page \(data, not instructions\)/);
   assert.match(shown, /^ {2}subject\.anchor: "\{\\"selector\\":\\"#SELECTOR-NOT-TYPED\\"/m);
 });
+// Every fetch the page makes, in order, for a test to read (the viewer polls nothing else).
+const COUNT_FETCH = '(() => { window.__asked = []; const f = window.fetch; window.fetch = (u, o) => { window.__asked.push(String(u)); return f(u, o); }; })();';
+test('the viewer: one artifact on a stage the size of the tab, the threads and hello polled, never /api/data', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 180000 }, async (t) => {
+  const undo = [];
+  t.after(async () => { let err = null; for (const f of undo.reverse()) { try { await f(); } catch (e) { err ??= e; } } if (err) throw err; });
+  const F = threadsFixture('viewer-page');
+  undo.push(() => F.done());
+  const T = landArtifact(F, 'viewer-mock', VIEWER_MOCK);
+  const port = await freePort();
+  const B = `http://127.0.0.1:${port}`;
+  const dash = startDashboard(F.old, F.env({}), ['--port', String(port)]);
+  undo.push(() => dash.stop());
+  const chrome = await openChrome();
+  undo.push(() => chrome.close());
+  const p = await chrome.newPage();
+  undo.push(() => p.close());
+  await until(() => /dashboard on http/.test(dash.out()), 'the dashboard');
+  await p.send('Page.enable');
+  await p.send('Runtime.enable');
+  await p.send('Emulation.setDeviceMetricsOverride', { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
+  await p.send('Page.addScriptToEvaluateOnNewDocument', { source: COUNT_FETCH });
+  const soon = async (expr, what) => { const end = Date.now() + 30000; for (;;) { const v = await p.ev(expr); if (v) return v; if (Date.now() > end) assert.fail(`timed out: ${what}`); await new Promise((r) => setTimeout(r, 50)); } };
+  // the viewer's own code, from its start to the line that runs it, without its comments
+  const html = fs.readFileSync(path.join(kit, 'dashboard/index.html'), 'utf8');
+  const boot = html.slice(html.indexOf('async function viewerBoot()'), html.indexOf('if (VIEWER) viewerBoot();')).replace(/^\s*\/\/.*$/gm, '');
+  await t.test('landed: its title and the project in the bar, the page in the frame, nothing of the dashboard', async () => {
+    await p.send('Page.navigate', { url: `${B}/view/artifact/viewer-mock` });
+    await soon(`document.getElementById('av-title').textContent === 'Viewer mock' && document.getElementById('av-project').textContent === 'viewer-page'`, 'the bar');
+    assert.equal(await p.ev(`document.getElementById('av-frame').getAttribute('src')`), '/artifact/main/viewer-mock/');
+    assert.equal(await p.ev(`document.documentElement.classList.contains('viewer') && getComputedStyle(document.querySelector('.app')).display`), 'none');
+    assert.equal(await p.ev(`(() => { const r = document.getElementById('artifact-view').getBoundingClientRect(); return r.left === 0 && r.top === 0 && r.width === innerWidth && r.height === innerHeight; })()`), true, 'the whole tab');
+    assert.equal(await p.ev(`[TS.kind, TS.slug, TS.at, TS.fp === TS.mainFp, /^[0-9a-f]{64}$/.test(TS.fp)].join()`), 'artifact,viewer-mock,main,true,true');
+    assert.equal(await p.ev(`getComputedStyle(document.getElementById('tl-pill')).display !== 'none'`), true, 'the dock');
+  });
+
+  await t.test('it polls the threads and hello, and never /api/data', async () => {
+    await soon(`window.__asked.filter((u) => u === '/api/threads').length >= 2`, 'two reads of the threads, 5 s apart');
+    const asked = await p.ev('window.__asked');
+    assert.ok(asked.includes('/api/hello'), asked.join(' '));
+    assert.deepEqual(asked.filter((u) => !/^\/api\/(threads|hello|view\?)/.test(u)), [], 'nothing else');
+    // the dashboard's own routing and drawing never run: no data, nothing routed, <main> as served
+    assert.deepEqual(await p.ev('[DATA, ROUTED]'), [null, false]);
+    assert.doesNotMatch(boot, /\b(route|render|load|loadNow|loadSchemaDocs)\(/, 'viewerBoot starts none of the dashboard');
+  });
+
+  await t.test('the published version by its tree; a tree the repository lacks shows main, and says so', async () => {
+    await p.send('Page.navigate', { url: `${B}/view/artifact/viewer-mock?at=tree:${T}` });
+    await soon(`document.getElementById('av-frame').getAttribute('src') === '/artifact/tree/${T}/viewer-mock/'`, 'the tree');
+    assert.deepEqual(await p.ev(`[document.getElementById('av-where').textContent, document.getElementById('av-note').hidden, TS.at]`), ['the published version', true, `tree:${T}`]);
+    await p.send('Page.navigate', { url: `${B}/view/artifact/viewer-mock?at=tree:${'0'.repeat(40)}` });
+    await soon(`document.getElementById('av-frame').getAttribute('src') === '/artifact/main/viewer-mock/'`, 'main instead');
+    assert.deepEqual(await p.ev(`[document.getElementById('av-note').hidden, document.getElementById('av-note').textContent, TS.at]`), [false, 'Not the published version: this is the one on main', 'main']);
+  });
+
+  await t.test("the wrapper's grant stays in the viewer's own URL, and never reaches the artifact's frame", async () => {
+    const w = 'w=1767225600000.abcdefghijklmnopqrstuv';
+    await p.send('Page.navigate', { url: `${B}/view/artifact/viewer-mock?at=tree:${T}&${w}` });
+    await soon(`document.getElementById('av-frame').getAttribute('src') === '/artifact/tree/${T}/viewer-mock/'`, 'the tree, with no query passed on');
+    const th = F.owner(['thread', 'new', 'About the mock', '--subject', JSON.stringify({ kind: 'artifact', slug: 'viewer-mock', at: `tree:${T}`, point: { x: 5, y: 5 } })]).split('\n')[0];
+    await p.ev(`location.hash = '#talk/${th}'`);
+    await soon(`!document.getElementById('tl-card').hidden`, 'its card');
+    await p.ev('tlClose()');
+    assert.equal(await p.ev('location.search'), `?at=tree:${T}&${w}`, 'opening and closing a card keeps it');
+    // the fallback to main is shown in place: the URL, grant and all, stays as the wrapper gave it
+    await p.send('Page.navigate', { url: `${B}/view/artifact/viewer-mock?at=tree:${'0'.repeat(40)}&${w}` });
+    await soon(`document.getElementById('av-frame').getAttribute('src') === '/artifact/main/viewer-mock/'`, 'main instead');
+    assert.equal(await p.ev('location.pathname + location.search'), `/view/artifact/viewer-mock?at=tree:${'0'.repeat(40)}&${w}`);
+    // nothing in viewer mode moves the page to another URL
+    assert.doesNotMatch(boot, /location\.(href|search|assign|replace|reload)\s*[=(]|history\./, 'viewerBoot never navigates');
+  });
+
+  await t.test('nothing goes to the frame, nothing is taken from it, and nothing needs an opener', async () => {
+    // the lens speaks only once its framing page has (Task 5), and this page says nothing to it yet:
+    // the stage's lens state holds nothing a frame could have written
+    assert.deepEqual(await p.ev('[TS.ready, TS.path, TS.minted.size, TS.rects.size, TS.keyOf.size, TS.last, TS.hit]'), [false, null, 0, 0, 0, null, null]);
+    assert.doesNotMatch(boot, /postMessage|contentWindow|addEventListener\('message'/, 'the viewer sends the frame nothing and hears nothing from it');
+    assert.doesNotMatch(boot, /\bopener\b/, 'nothing reads or sets an opener');
+    for (const w of boot.match(/window\.open\([^)]*\)/g) ?? []) assert.match(w, /'noopener,noreferrer'/, w);
+    assert.match(html, /<a class="av-btn" id="av-tab" target="_blank" rel="noopener noreferrer"/);
+    // a link into the dashboard from a viewer opens a tab of its own, with no opener
+    const opened = await p.ev(`(() => { const got = []; const o = window.open; window.open = (...a) => { got.push(a); return null; }; const a = document.createElement('a'); a.href = '#library'; document.body.append(a); a.click(); a.remove(); window.open = o; return got; })()`);
+    assert.deepEqual(opened, [['/#library', '_blank', 'noopener,noreferrer']]);
+    assert.equal(await p.ev('location.hash'), '', 'and this tab stays where it is');
+  });
+
+  await t.test('a #talk/ link opens its card in a viewer tab, on load and by a hash change', async () => {
+    const th = F.owner(['thread', 'new', 'On the viewer']).split('\n')[0];
+    await p.send('Page.navigate', { url: `${B}/view/artifact/viewer-mock#talk/${th}` });
+    await soon(`!document.getElementById('tl-card').hidden && TL.open === '${th}'`, 'its card, on load');
+    await p.ev('tlClose()');
+    assert.equal(await p.ev('location.pathname + location.search + location.hash'), '/view/artifact/viewer-mock', 'closing it drops the hash only');
+    await p.ev(`location.hash = '#talk/${th}'`);
+    await soon(`!document.getElementById('tl-card').hidden`, 'its card, by a hash change');
+    await p.ev('tlClose()');
+    assert.deepEqual(await p.ev('[DATA, ROUTED]'), [null, false], 'a hash change routes nothing of the dashboard');
+  });
+
+  await t.test('framed without the keyboard, the viewer says to click it first; with it, nothing', async () => {
+    await p.send('Page.navigate', { url: `${B}/api/hello` });
+    await soon(`document.readyState === 'complete'`, 'a page of the same origin');
+    await p.ev(`(() => { const f = document.createElement('iframe'); f.id = 'v'; f.style.cssText = 'width:900px;height:600px'; f.src = '/view/artifact/viewer-mock'; document.body.append(f); return true; })()`);
+    await soon(`document.getElementById('v').contentDocument?.getElementById('av-title')?.textContent === 'Viewer mock'`, 'the framed viewer');
+    await p.ev('document.body.focus(); window.focus(); true');
+    await soon(`!document.getElementById('v').contentDocument.getElementById('av-hint').hidden`, 'the hint, the top page having the keyboard');
+    assert.equal(await p.ev(`document.getElementById('v').contentDocument.getElementById('av-hint').textContent`), 'Click the page, then hold Shift to point at something');
+    // a real click on the framed viewer's bar, as the hint says
+    const bar = await p.ev(`(() => { const r = document.getElementById('v').getBoundingClientRect(); return { x: r.left + 450, y: r.top + 20 }; })()`);
+    await p.clickAt(bar.x, bar.y);
+    await soon(`document.getElementById('v').contentDocument.getElementById('av-hint').hidden`, 'gone once the viewer has it');
+  });
+
+  await t.test('Escape leaves it where it is: a viewer has nothing to go back to', async () => {
+    await p.send('Page.navigate', { url: `${B}/view/artifact/viewer-mock` });
+    await soon(`document.getElementById('av-title').textContent === 'Viewer mock'`, 'the viewer');
+    // a listener added after the page's own runs after them: once it has seen the key, so have they
+    await p.ev(`(() => { window.__esc = false; document.addEventListener('keydown', (e) => { if (e.key === 'Escape') window.__esc = true; }); return true; })()`);
+    await p.key('Escape');
+    await soon('window.__esc', 'the key, handled');
+    // and a frame later, nothing it might have queued has moved the page either
+    await p.ev('new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))');
+    assert.deepEqual(await p.ev(`[document.getElementById('artifact-view').hidden, location.pathname, location.hash, window.__esc]`), [false, '/view/artifact/viewer-mock', '', true]);
+  });
+});
 // The thread layer in Chrome, on a project of its own: aiming (this task), the card (Task 11), the
 // pins and the dock (Task 12), questions and resolving (Task 13). One page; the subtests run in order.
 test('threads on the dashboard page: Shift and point, the card, the pins and the dock', { skip: canDrive ? false : 'needs Chrome and a Node with WebSocket', timeout: 300000 }, async (t) => {

@@ -481,6 +481,14 @@
   .av-bar a.av-btn:hover { background: var(--hover); }
   #av-frame { flex: 1 1 auto; min-height: 0; width: 100%; border: 0; background: #fff; display: block; }
   @media (max-width: 900px) { #artifact-view:not([hidden]) { inset: 8px; } }
+  #av-stage { position: relative; flex: 1 1 auto; min-height: 0; display: flex; }
+  /* over the frame, under the layer's cursor and chip: Shift raises it, so a click is the layer's */
+  .av-over { position: absolute; inset: 0; z-index: 2; touch-action: none; }
+  .av-pins { position: absolute; inset: 0; z-index: 1; overflow: hidden; pointer-events: none; }
+  .av-pins .tl-pin { pointer-events: auto; }
+  /* the viewer: the stage is the whole tab, and nothing else of the dashboard shows */
+  .viewer .app, .viewer .scrim, .viewer #av-close, .viewer #av-tab { display: none !important; }
+  .viewer #artifact-view:not([hidden]) { inset: 0; border: 0; border-radius: 0; box-shadow: none; }
   @media (max-width: 600px) { .av-bar .av-label { display: none; } .av-bar button:not(.icon-btn), .av-bar a.av-btn { padding: 0 8px; } }
   /* threads: the layer over the page (Shift and point at anything), outside <main> */
   .tl-aiming, .tl-aiming * { cursor: none !important; }
@@ -710,13 +718,18 @@
 <div id="artifact-view" role="dialog" aria-modal="true" aria-labelledby="av-title" hidden>
   <div class="av-bar">
     <i class="icon-library" aria-hidden="true"></i>
-    <div class="av-head"><b id="av-title"></b><span id="av-where" class="muted"></span><span id="av-note" class="badge high" hidden></span></div>
+    <div class="av-head"><b id="av-title"></b><span id="av-where" class="muted"></span><span id="av-project" class="muted"></span><span id="av-note" class="badge high" hidden></span><span id="av-hint" class="muted" hidden>Click the page, then hold Shift to point at something</span></div>
     <button class="ghost" id="av-reload" title="Load the page again" aria-label="Reload"><i class="icon-rotate-cw" aria-hidden="true"></i><span class="av-label">Reload</span></button>
-    <a class="av-btn" id="av-tab" target="_blank" rel="noopener noreferrer" title="Open in new tab" aria-label="Open in new tab"><i class="icon-external-link" aria-hidden="true"></i><span class="av-label">Open in new tab</span></a>
+    <a class="av-btn" id="av-tab" target="_blank" rel="noopener noreferrer" title="Open in a tab of its own, with its threads" aria-label="Open in new tab"><i class="icon-external-link" aria-hidden="true"></i><span class="av-label">Open in new tab</span></a>
     <button class="ghost icon-btn" id="av-close" aria-label="Close"><i class="icon-x" aria-hidden="true"></i></button>
   </div>
-  <!-- the server's policy for these pages holds whatever the frame's attributes say; the frame never shares this origin -->
-  <iframe id="av-frame" title="Artifact" sandbox="allow-scripts allow-forms allow-modals allow-pointer-lock" allow="fullscreen" referrerpolicy="no-referrer"></iframe>
+  <!-- the stage: the page in its frame, the thread pins on it, and the overlay Shift raises over it (spec §4) -->
+  <div id="av-stage">
+    <!-- the server's policy for these pages holds whatever the frame's attributes say; the frame never shares this origin -->
+    <iframe id="av-frame" title="Artifact" sandbox="allow-scripts allow-forms allow-modals allow-pointer-lock" allow="fullscreen" referrerpolicy="no-referrer"></iframe>
+    <div id="av-pins" class="av-pins"></div>
+    <div id="av-over" class="av-over" hidden></div>
+  </div>
 </div>
 <!-- the thread layer: outside <main>, which the 10 s refresh rebuilds -->
 <div id="tl">
@@ -750,6 +763,13 @@ const fmtDate = (ms) => new Date(ms).toLocaleDateString(undefined, { month: 'sho
 const isDone = (t) => !!t.merged_at;
 const pct = (a, b) => (b ? Math.round((100 * a) / b) : 0);
 let DATA = null;
+// The viewer (spec §7): this page at /view/artifact/<slug>[?at=main|<worktree>|tree:<id>], one
+// artifact on the stage, the thread layer and the dock over it, and nothing else: no sections, no
+// routes, no /api/data.
+const VIEWER = (() => {
+  const m = /^\/view\/(artifact)\/([a-z][a-z0-9]*(?:-[a-z0-9]+)*)$/.exec(location.pathname);
+  return m ? { kind: m[1], name: m[2], at: new URLSearchParams(location.search).get('at') || 'main' } : null;
+})();
 // The dashboard page this tab loaded, by the server's own fingerprint of it (x-devteam-page).
 let PAGE_VERSION = null;
 // What the cloud box serves to the public (x-devteam-public, set only by its gateway): { project:
@@ -3072,6 +3092,35 @@ function avHeader() {
   $('av-title').textContent = a && !a.error && a.title ? a.title : AV.slug;
   $('av-where').innerHTML = AV.at === 'main' ? 'landed' : `draft in ${linkify(AV.at)}`;
 }
+// Where an artifact's page is served: main, a draft's worktree, or a published version by its tree.
+const artSrc = (slug, at) => `/artifact/${at === 'main' ? 'main' : String(at).startsWith('tree:') ? `tree/${String(at).slice(5)}` : `wt/${encodeURIComponent(at)}`}/${slug}/`;
+// Its viewer, in a tab of its own.
+const artViewer = (slug, at) => `/view/artifact/${encodeURIComponent(slug)}${at && at !== 'main' ? `?${new URLSearchParams({ at })}` : ''}`;
+// The stage's lens state (spec §4, §6): what is on the stage, where its lens's messages may go (an
+// artifact's opaque origin takes '*'), the ids minted for real pointer events, the last reply, and
+// where the lens says each pinned anchor is now (keyed by a thread's id).
+const TS = { kind: null, slug: null, at: null, fp: null, mainFp: null, path: null, target: '*', ready: false, raised: false, seq: 0, minted: new Map(), hit: null, waiters: new Map(), rects: new Map(), keyOf: new Map(), watching: new Set(), watch: '', last: null, rafPending: false, via: null };
+function tsSet(kind, info = {}) {
+  Object.assign(TS, { kind, slug: null, at: null, fp: null, mainFp: null, path: null, target: '*', ready: false, hit: null, watch: '', last: null }, info);
+  for (const m of [TS.minted, TS.waiters, TS.rects, TS.keyOf, TS.watching]) m.clear();
+}
+// The stage, in the dashboard or as a viewer tab: the page in its frame, the bar, and the lens's
+// state for it. title: the viewer's (from /api/view); the dashboard's comes from its data.
+function showArtifact(slug, at, { title = null, note = null, fp = null, mainFp = null } = {}) {
+  const src = artSrc(slug, at);
+  AV = { at, slug };
+  if (title) {
+    $('av-title').textContent = title;
+    $('av-where').innerHTML = at === 'main' ? 'landed' : String(at).startsWith('tree:') ? 'the published version' : `draft in ${linkify(at)}`;
+  } else avHeader();
+  $('av-note').hidden = !note;
+  $('av-note').textContent = note ?? '';
+  $('av-tab').href = artViewer(slug, at);
+  if (TS.kind !== 'artifact' || TS.slug !== slug || TS.at !== at) tsSet('artifact', { slug, at, fp, mainFp });
+  else Object.assign(TS, { fp, mainFp });
+  if ($('av-frame').getAttribute('src') !== src) $('av-frame').src = src;
+  $('artifact-view').hidden = false;
+}
 function openArtifact(raw) {
   const m = /^artifact\/(main|wt\/([^/]+))\/([^/]+)$/.exec(raw);
   let at = null, slug = null;
@@ -3079,15 +3128,9 @@ function openArtifact(raw) {
   const note = AV_NOTE;
   AV_NOTE = null;
   if (!at || !/^[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(slug ?? '')) return void (location.hash = '#library');
-  const src = `/artifact/${at === 'main' ? 'main' : `wt/${encodeURIComponent(at)}`}/${slug}/`;
   if (!AV) { AV_FROM = ROUTED; avFocus = document.activeElement; }
-  AV = { at, slug };
-  avHeader();
-  $('av-note').hidden = !note;
-  $('av-note').textContent = note ?? '';
-  $('av-tab').href = src;
-  if ($('av-frame').getAttribute('src') !== src) $('av-frame').src = src;
-  $('artifact-view').hidden = false;
+  const arts = DATA?.library?.artifacts ?? [];
+  showArtifact(slug, at, { note, fp: arts.find((x) => x.slug === slug && x.at === at)?.fp ?? null, mainFp: arts.find((x) => x.slug === slug && x.at === 'main')?.fp ?? null });
   $('scrim').hidden = false;
   document.body.style.overflow = 'hidden';
   $('av-close').focus();
@@ -3095,6 +3138,7 @@ function openArtifact(raw) {
 function closeArtifact() {
   if (!AV) return false;
   AV = null;
+  tsSet(null);
   $('artifact-view').hidden = true;
   $('av-frame').removeAttribute('src');
   // a drawer or a review it was opened over stays, with its scrim
@@ -3102,7 +3146,8 @@ function closeArtifact() {
   avFocus?.focus?.();
   return true;
 }
-function leaveArtifact() { if (AV_FROM) history.back(); else location.hash = '#library'; }
+// a viewer tab has nothing to go back to: it never closes
+function leaveArtifact() { if (VIEWER) return; if (AV_FROM) history.back(); else location.hash = '#library'; }
 $('av-close').addEventListener('click', leaveArtifact);
 $('av-reload').addEventListener('click', () => { const f = $('av-frame'), src = f.getAttribute('src'); if (!src) return; f.removeAttribute('src'); f.src = src; });
 // a question's link to a changed artifact says so in the viewer's header
@@ -4041,7 +4086,7 @@ async function tlAct(action, body) {
   if (['thread-resolve', 'thread-accept'].includes(action)) TL.open = null;
   await tlRefresh();
   // the resolution's observation, and the Inbox
-  load({ force: true });
+  if (!VIEWER) load({ force: true });
   return true;
 }
 /* threads-layer end */
@@ -4377,9 +4422,52 @@ document.addEventListener('click', async (ev) => {
   }
 });
 
-loadSchemaDocs();
-load();
-setInterval(load, 10000);
+// The viewer's own start: the stage, the layer's threads every 5 s while the tab is seen, and the
+// instance's hello (its name) every 30 s. Nothing else: a dozen viewer tabs cost a dozen cheap reads.
+async function viewerBoot() {
+  document.documentElement.classList.add('viewer');
+  const info = async (slug, at) => { try { const r = await fetch(`/api/view?${new URLSearchParams({ kind: 'artifact', slug, at })}`); return r.ok ? await r.json() : null; } catch { return null; } };
+  let at = VIEWER.at;
+  let d = await info(VIEWER.name, at);
+  let note = null;
+  // a published tree this checkout lacks, or a draft gone: main's, said so (spec §8), shown in place.
+  // Nothing here navigates or rewrites the URL: inside the owner wrapper it carries the gateway's
+  // grant (w=), which a reload needs, and which nothing passes on to the frame.
+  if (!d && at !== 'main') { note = String(at).startsWith('tree:') ? 'Not the published version: this is the one on main' : 'Not the draft: this is the one on main'; at = 'main'; d = await info(VIEWER.name, at); }
+  showArtifact(VIEWER.name, at, { title: d?.title || VIEWER.name, note: d ? note : 'This artifact is not here', fp: d?.fp ?? null, mainFp: d?.main_fp ?? null });
+  document.title = `${$('av-title').textContent} · devteam`;
+  const hello = async () => { try { const r = await fetch('/api/hello'); if (r.ok) $('av-project').textContent = (await r.json()).name ?? ''; } catch {} };
+  hello();
+  setInterval(hello, 30000);
+  // framed (the owner wrapper) without the keyboard, Shift reaches nobody here: say so until it comes (decision 16)
+  const hint = () => { $('av-hint').hidden = window.parent === window || document.hasFocus(); };
+  hint();
+  addEventListener('focus', hint);
+  addEventListener('blur', hint);
+  await tlRefresh();
+  // a #talk/<id> link opens its card here: route() never runs in a viewer (decision 22)
+  viewerTalk();
+  addEventListener('hashchange', viewerTalk);
+  setInterval(() => { if (document.visibilityState === 'visible') tlRefresh(); }, 5000);
+}
+// #talk/<id> in a viewer tab, and nothing else of the dashboard's routes.
+function viewerTalk() {
+  if (!location.hash.startsWith('#talk/')) return;
+  let id = '';
+  try { id = decodeURIComponent(location.hash.slice(6)); } catch {}
+  if (/^t-\d{8}-\d{9}-[a-z0-9]+(-[a-z0-9]+)*$/.test(id)) tlOpen(id);
+}
+// In a viewer tab, a link into the dashboard (a ref in a turn, the Inbox) opens the dashboard in a tab
+// of its own; a thread's own link (#talk/) opens its card here.
+document.addEventListener('click', (e) => {
+  const a = VIEWER && e.target.closest?.('a[href^="#"]:not([href^="#talk/"])');
+  if (!a) return;
+  e.preventDefault();
+  const h = a.getAttribute('href');
+  window.open(`/${h}`, '_blank', 'noopener,noreferrer');
+});
+if (VIEWER) viewerBoot();
+else { loadSchemaDocs(); load(); setInterval(load, 10000); }
 </script>
 </body>
 </html>
