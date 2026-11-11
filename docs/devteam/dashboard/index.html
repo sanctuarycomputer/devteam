@@ -3684,8 +3684,9 @@ function tOverlay(raw, pend) {
   for (const p of pend) {
     const id = tPendId(p);
     const t = threads.find((x) => x.id === id);
-    if (p.status) { if (t) t.status = p.status; continue; }
-    if (t) { if (t.turns.filter((u) => u.by === 'owner' && u.text === p.turn.text).length <= p.had) t.turns.push(p.turn); }
+    // whatever the owner says, resolves or reopens clears a standing proposal, as threadView has it
+    if (p.status) { if (t) Object.assign(t, { status: p.status, ready: null }); continue; }
+    if (t) { if (t.turns.filter((u) => u.by === 'owner' && u.text === p.turn.text).length <= p.had) { t.turns.push(p.turn); t.ready = null; t.waiting = 'supervisor'; } }
     else if (p.fresh) threads.push(tPendingThread(id, p.fresh.title, p.fresh.subject, p.turn));
   }
   return threads;
@@ -4150,6 +4151,9 @@ function tlAct(action, body) {
   const status = { 'thread-resolve': 'resolved', 'thread-accept': 'resolved', 'thread-reopen': 'open' }[action] ?? null;
   const p = status ? { thread: body.id, real: body.id, status, confirmed: false } : { thread: body.id, real: body.id, turn: tPendingTurn(body.text, new Date().toISOString()), had: t ? t.turns.filter((u) => u.by === 'owner' && u.text === body.text && !u.pending).length : 0, confirmed: false };
   const wasOpen = TL.open;
+  // a second click on the same act while the first is on its way is the same act
+  if (TL.pend.some((x) => !x.confirmed && x.thread === body.id && (status ? x.status === status : x.act && x.turn.text === body.text))) return Promise.resolve(false);
+  if (!status) p.act = true;
   return press(`tl:${body.id}`, {
     build: () => ({ action, body }),
     apply: () => {

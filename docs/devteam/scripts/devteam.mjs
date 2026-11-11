@@ -1482,7 +1482,7 @@ function readLog() {
 }
 const logObjects = (type) => (readLog().byType.get(type) ?? []).filter((o) => !(type === 'goal' && o.kind === 'upkeep'));
 // The built-in Upkeep goal (planning.md §7), or null while it has no line yet (then it runs).
-const upkeepGoal = () => [...readLog().objects.values()].find((o) => o.type === 'goal' && o.kind === 'upkeep') ?? null;
+const upkeepGoal = () => (readLog().byType.get('goal') ?? []).find((o) => o.kind === 'upkeep') ?? null;
 const logGet = (id) => readLog().objects.get(id) ?? null;
 const byTime = (a, b) => a.created_at.localeCompare(b.created_at);
 // A message is handled when a reply cites it (--re), or when the supervisor routed it to the owner
@@ -1587,7 +1587,10 @@ function artifactLinksMoved(v) {
   if (gone.length) return `${v.id} links the artifact ${gone.join(', ')}, which is no longer available; ask again`;
   return null;
 }
-const questions = () => logObjects('question').map((q) => { const v = questionView(q); return { ...v, links: resolveQuestionLinks(v.links, v.status === 'open'), goal_hold: questionHold(q), ...(v.thread ? { thread_title: logGet(v.thread)?.title ?? null } : {}), ...turnThread(v.turn) }; });
+// Once per read of the log (memo): a refresh asked for every question's view dozens of times. A new
+// array each call, so a caller's sort never reorders another's.
+const questions = () => [...memo('questions', () => questionsNow())];
+const questionsNow = () => logObjects('question').map((q) => { const v = questionView(q); return { ...v, links: resolveQuestionLinks(v.links, v.status === 'open'), goal_hold: questionHold(q), ...(v.thread ? { thread_title: logGet(v.thread)?.title ?? null } : {}), ...turnThread(v.turn) }; });
 // Where an answer from a thread was said: the cited turn's thread, which for an Inbox question is
 // none of its own, so the answered card can link the owner to the words it used.
 function turnThread(uid) {
@@ -1967,8 +1970,17 @@ function upgradeAt(token) {
   if (upgradeAtCache.has(token)) return upgradeAtCache.get(token);
   const ref = mainRef();
   const file = `${kitRel ? `${kitRel}/` : ''}scripts/devteam.mjs`;
-  const rows = ref && !kitRel.startsWith('..') ? (git(['log', '--reverse', '--format=%ct', `-S${token}`, ref, '--', file]) ?? '').split('\n').filter(Boolean) : [];
-  const at = rows.length ? Number(rows[0]) * 1000 : null;
+  // fixed for main's commit, so kept across processes (a search of main's whole history)
+  const sha = ref && !kitRel.startsWith('..') ? mainSha() : null;
+  const k = sha ? `u\0${gitCommonDirOf()}\0${sha}\0${file}\0${token}` : null;
+  let at = k ? factGet(k) : null;
+  if (k && at === undefined) {
+    const r = gitStatus(['log', '--reverse', '--format=%ct', `-S${token}`, sha, '--', file]);
+    const rows = r.status === 0 ? r.stdout.toString('utf8').split('\n').filter(Boolean) : null;
+    at = rows?.length ? Number(rows[0]) * 1000 : null;
+    if (rows) factSet(k, at);
+  }
+  at ??= null;
   upgradeAtCache.set(token, at);
   return at;
 }

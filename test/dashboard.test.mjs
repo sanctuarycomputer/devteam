@@ -242,7 +242,7 @@ test('the Library shows each landed artifact\'s publish state, from the log and 
   // the page reads the header, opens the gateway's pages in a tab it can't steer, and Forget records through the kit
   assert.match(html, /PUBLIC = JSON\.parse\(r\.headers\.get\('x-devteam-public'\)/);
   assert.match(html, /target="_blank" rel="noopener noreferrer">\$\{label\}<\/a>/);
-  assert.match(html, /post\('artifact-publish', \{ op: 'unpublish', slug \}/);
+  assert.match(html, /action: 'artifact-publish', body: \{ op: 'unpublish', slug \}/);
   assert.match(html, /Restore all/);
   assert.match(html, /Review all/);
   assert.match(html, /Changed on main since it was published/);
@@ -565,17 +565,17 @@ test('typing in the dashboard: a refresh never takes the field, the caret or the
       await p.ev(`document.activeElement.blur()`);
     });
 
-    await t.test('Answer still works with a draft and held data, and isn\'t redrawn while it posts', async () => {
+    await t.test('Answer still works with a draft and held data: answered at once, and refreshes while it posts keep it so', async () => {
       await p.click(box);
       await newQuestion('Before the answer?');
       // held by the test, not by a clock: on a loaded runner the polls below can outlast any fixed delay
       await p.ev('window.__answerHold = new Promise((r) => { window.__answerGo = r; }); void 0');
       await p.click(`button[data-answer="${Q}"]`);
-      await soon(`document.querySelector('button[data-answer="${Q}"]')?.textContent === 'Posting…'`, 'the button posting');
+      assert.match(await p.ev(`document.querySelector('[data-qcard="${Q}"]')?.textContent ?? ''`), /Answered: /, 'answered on the click, the post still held');
       await polls();
-      assert.equal(await p.ev(`document.querySelector('button[data-answer="${Q}"]')?.getAttribute('aria-busy')`), 'true', 'not redrawn mid-post');
+      assert.equal(await p.ev(`!!document.querySelector('${box}')`), false, 'a refresh mid-post never brings the card back');
       await p.ev('window.__answerGo(); void 0');
-      await soon(`!document.querySelector('${box}')`, 'the card answered and gone');
+      await soon('SAVING === 0', 'the post through');
       const listed = spawnSync(process.execPath, [path.join(root, 'docs/devteam/scripts/devteam.mjs'), 'questions', '--all', '--json'], { cwd: root, env, encoding: 'utf8' });
       assert.equal(JSON.parse(listed.stdout).find((x) => x.id === Q)?.status, 'answered', listed.stderr);
     });
@@ -1038,7 +1038,7 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
         await p.type(w);
         await p.key('Enter');
         await until(() => threads().find((x) => x.id === T)?.turns.some((u) => u.text === w), `"${w}" in the log`);
-        await soon(`[...document.querySelectorAll('#tl-c-turns .tl-turn.owner')].some((e) => e.textContent.includes(${JSON.stringify(w)})) && document.getElementById('tl-c-text').value === '' && !TL.busy`, `"${w}" in the card, the composer free`);
+        await soon(`[...document.querySelectorAll('#tl-c-turns .tl-turn.owner')].some((e) => e.textContent.includes(${JSON.stringify(w)})) && document.getElementById('tl-c-text').value === '' && !TL.pend.length`, `"${w}" in the card, the composer free`);
       }
     } finally { await p.ev('window.__threadsDelay = 0'); }
     await p.ev('document.activeElement.blur()');
@@ -1205,7 +1205,7 @@ test('threads on the dashboard page: Shift and point, the card, the pins and the
     // a double click says it once
     await p.ev(`(() => { const b = document.querySelector('[data-tl-notyet]'); b.click(); b.click(); })()`);
     await until(() => threads().find((x) => x.id === T).ready === null, "cleared by the owner's Not yet");
-    await soon('!TL.busy', 'the request back');
+    await soon('!TL.pend.length && !SAVING', 'the request back');
     const th = threads().find((x) => x.id === T);
     assert.deepEqual([th.turns[th.turns.length - 1].by, th.turns[th.turns.length - 1].text], ['owner', 'Not yet']);
     assert.equal(notYets(), n0 + 1, 'one Not yet for two clicks');
