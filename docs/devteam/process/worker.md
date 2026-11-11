@@ -15,7 +15,7 @@ Your prompt may carry a **Links** block: the registry links your ticket, its com
 0. If your prompt has a **Handoff from a parked session**, read it first: it is the previous session's own account (what's done, the exact next step, open questions, anything it couldn't commit). Check it against your branch and the log, then carry on from its next step. The handoff is the commit on your branch; it lands with your PR. Once you log your first phase, later prompts leave it out.
 1. `devteam.mjs ticket show <id>`: scope, dependencies, `touches`, done-whens, one-way doors.
 2. `project/tickets/<id>/` if it exists: you may be resuming; its files are what has been done.
-3. `devteam.mjs history <id>`: phases, messages, rulings and owner answers about your ticket and its dependencies. Then `devteam.mjs messages`. Make sure every `ruling` and `answer` is in your spec or plan before researching: someone may already have decided what you are about to investigate.
+3. `devteam.mjs history <id>`: phases, messages, rulings and owner answers about your ticket and its dependencies. Then `devteam.mjs messages`. Make sure every `ruling` and `answer` is in your spec or plan before researching: someone may already have decided what you are about to investigate. Then `devteam.mjs search "<your ticket's title>"`: earlier tickets, lessons and incidents about the same thing.
 4. The design your feature cites (`devteam.mjs feature show <feature>`) and `project/designs/architecture.md`, the parts your ticket touches.
 5. `governance/code-style.md` and the settings, for your component's stack.
 
