@@ -7731,21 +7731,25 @@ function cmdProblem() {
 const signalKeyOf = (o) => (fromSensor(o) && TRIAGE_KINDS.includes(o.kind) ? fpIdOfObservation(o) : null) ?? o.source_key ?? `${o.kind}:${o.subject}`;
 // What explains an observation, one definition for Orient and for sensor-untriaged. ids: what
 // knowledge's evidence, a problem's refs, or a live decision's refs cite (any class: a decision
-// that cites an observation took it into account). keys: whole signals, those a live orient-noise
-// ruling names by key (a ruling covers the signal, later observations on it too) and the
-// fingerprints an open incident holds (in hand while it is worked). A corrected ruling explains
-// nothing, so the owner's correction brings its signal back.
+// that cites an observation took it into account). keys: signal key → until when it is explained.
+// A live orient-noise ruling naming a key covers that signal's observations up to the ruling, so a
+// chatty one needn't list them all, and an escalation after it gets a fresh look (a fingerprint that
+// is always noise is for sensor ignore). An open incident holds its fingerprints for as long as it is
+// open. A corrected ruling explains nothing, so the owner's correction brings its signal back.
+// covered(keys, key, at): whether an observation on key, made at at, is explained by its key.
 function explained() {
   const ids = new Set();
-  const keys = new Set();
+  const keys = new Map();
+  const upTo = (k, at) => { if (!(keys.get(k) >= at)) keys.set(k, at); };
   for (const o of [...logObjects('knowledge'), ...logObjects('problem')]) for (const r of [...(o.evidence ?? []), ...(o.refs ?? [])]) ids.add(r);
   for (const d of logObjects('decision')) {
     if (!(d.refs ?? []).some((r) => String(r).startsWith('o-')) || !liveDecision(d)) continue;
-    for (const r of d.refs) { ids.add(r); if (d.class === 'orient-noise' && !logGet(r)) keys.add(r); }
+    for (const r of d.refs) { ids.add(r); if (d.class === 'orient-noise' && !logGet(r)) upTo(r, d.created_at); }
   }
-  for (const p of incidentList()) if (p.status !== 'resolved') for (const f of p.fingerprints ?? []) keys.add(f);
+  for (const p of incidentList()) if (p.status !== 'resolved') for (const f of p.fingerprints ?? []) upTo(f, '9999');
   return { ids, keys };
 }
+const covered = (keys, key, at) => keys.has(key) && at <= keys.get(key);
 // Recurring signals nothing explains yet (explained, above): three or more observations (or
 // corrections) on one key, from at least two writers or on at least two days.
 function orientClusters() {
@@ -7755,7 +7759,7 @@ function orientClusters() {
   for (const o of logObjects('observation')) {
     if (linked.has(o.id) || ['reading', 'retro', 'outcome', 'link'].includes(o.kind)) continue;
     const key = signalKeyOf(o);
-    if (keys.has(key)) continue;
+    if (covered(keys, key, o.created_at)) continue;
     add(key, { id: o.id, at: o.created_at, who: o.created_by, valence: o.valence ?? 0, detail: o.detail });
   }
   for (const a of calls()) {
@@ -9229,7 +9233,7 @@ function collectMetrics(since) {
     for (const o of logObjects('observation')) {
       if (!fromSensor(o) || !TRIAGE_KINDS.includes(o.kind) || handled.has(o.id) || now - Date.parse(o.created_at) > 7 * 86400000) continue;
       const id = fpIdOfObservation(o);
-      if (!id || !sensorsNow.has(splitFpId(id).sensor) || ignoredNow.has(id) || heldKeys.has(id) || openIncidentOf(id)) continue;
+      if (!id || !sensorsNow.has(splitFpId(id).sensor) || ignoredNow.has(id) || covered(heldKeys, id, o.created_at) || openIncidentOf(id)) continue;
       (byFp.get(id) ?? byFp.set(id, []).get(id)).push(o);
     }
     for (const [id, obs] of byFp) {
